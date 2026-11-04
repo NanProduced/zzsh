@@ -50,7 +50,7 @@ export function DistributionTermsCard({scope,refreshNonce=0}:{scope:string;refre
  const v=state?.scope===scope?state.value:null,error=state?.scope===scope?state.error:'',rates=v?.schema==='distribution-terms.self.v2'?v.rates:v?.level;
  return <section className="account-module-card invitation-terms" aria-labelledby="invitation-terms-heading"><h3 id="invitation-terms-heading">我的佣金规则</h3>
   {error?<p role="alert">{error}</p>:!state||state.scope!==scope?<p>正在读取适用条款…</p>:!v||v.knowledge==='UNKNOWN'?<><strong>佣金规则待确认</strong><p>{TERMS_REASON[v?.reason??'']??'适用条款尚未核定'}。</p></>:<>
-   <strong>{v.rateMode==='UNIFORM'?'统一分佣比例':v.level?`等级 ${v.level.code}`:'暂无适用比例'}</strong>
+   <strong>{v.rateMode==='UNIFORM'?'统一分佣比例':v.level?v.level.name??`等级 ${v.level.code}`:'暂无适用比例'}</strong>
    {v.applicable?null:<p>{TERMS_REASON[v.reason??'']??'当前不适用'}</p>}
    {rates?<dl className="invitation-terms-list"><div><dt>邀请租客下单</dt><dd>{rates.renterPercent}%</dd></div><div><dt>邀请号主出租</dt><dd>{rates.ownerPercent}%</dd></div><div><dt>适用出租方式</dt><dd>{(v.accountModes??[]).map(m=>modeLabel[m]).join('、')}</dd></div><div><dt>结算后转入可用余额</dt><dd>{v.settlementDelayDays} 天</dd></div><div><dt>单笔最低</dt><dd>{v.minimumAccrualCents===null?'未核定':centsText(v.minimumAccrualCents)}</dd></div></dl>:null}
   </>}

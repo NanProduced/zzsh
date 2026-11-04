@@ -67,7 +67,7 @@ test('ordinary BFF list removes user classifications and shows canonical dates, 
   assert.ok(calls.every(call=>call.url.startsWith('/api/bff/admin/')));
   assert.deepEqual([...browser.document.querySelectorAll('th')].map(e=>e.textContent),['用户','账号与实名','会员与礼遇','信用','可用余额','当前业务租入出租上架','注册时间','操作']);
   const text=browser.document.querySelector('.ud-directory').textContent;assert.equal(text.includes('业务关系'),false);assert.equal(text.includes('租客'),false);assert.equal(text.includes('号主'),false);
-  assert.equal(text.includes('业务活动暂未接入'),false,'the list no longer repeats a not-connected notice');
+  assert.equal(text.includes('业务活动暂不可用'),false,'the list no longer repeats an unavailable notice');
   const toolbar=browser.document.querySelector('.ud-directory').textContent;for(const label of ['业务关系','有无订单','有无资源','年龄状态'])assert.equal(toolbar.includes(label),false);
   assert.equal(namedButton('更多筛选'),undefined,'the filter drawer is gone; filters sit inline in the toolbar');
   for(const label of ['账号状态','注册日期','实名状态','会员等级','有效礼遇','信用分','内部标识'])assert.ok(toolbar.includes(label),`inline filter ${label}`);

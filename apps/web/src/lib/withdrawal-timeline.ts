@@ -31,8 +31,7 @@ export function withdrawalTimeMicros(value: string): bigint {
 }
 
 function compare<T extends TimelineItem>(a: T, b: T): number {
-  // The controlled source exposes milliseconds even when its database cursor has microseconds.
-  const at = withdrawalTimeMicros(a.at) / 1000n, bt = withdrawalTimeMicros(b.at) / 1000n;
+  const at = withdrawalTimeMicros(a.at), bt = withdrawalTimeMicros(b.at);
   return at === bt ? a.id === b.id ? 0 : a.id > b.id ? -1 : 1 : at > bt ? -1 : 1;
 }
 
@@ -67,7 +66,7 @@ export async function advanceWithdrawalTimeline<T extends TimelineItem>(
     if (page.items.length > 100) throw new Error("WITHDRAWAL_PAGE_INVALID");
     let last = stream.last;
     for (const item of page.items) {
-      if (item.source !== stream.source || seen.has(item.id) || last && withdrawalTimeMicros(last.at) / 1000n < withdrawalTimeMicros(item.at) / 1000n) throw new Error("WITHDRAWAL_PAGE_INVALID");
+      if (item.source !== stream.source || seen.has(item.id) || last && compare(last, item) >= 0) throw new Error("WITHDRAWAL_PAGE_INVALID");
       withdrawalTimeMicros(item.at); seen.add(item.id); last = item;
     }
     stream.started = true; stream.buffer.push(...page.items); stream.cursor = page.cursor; stream.snapshot = page.snapshot; stream.asOf = page.asOf;
@@ -85,7 +84,7 @@ export async function advanceWithdrawalTimeline<T extends TimelineItem>(
     const candidates = next.streams.filter(stream => stream.buffer.length).sort((a, b) => compare(a.buffer[0]!, b.buffer[0]!));
     if (!candidates.length) break;
     const item = candidates[0]!.buffer.shift()!, prior = next.items.at(-1);
-    if (prior && withdrawalTimeMicros(prior.at) / 1000n === withdrawalTimeMicros(item.at) / 1000n) next.temporalTies = true;
+    if (prior && withdrawalTimeMicros(prior.at) === withdrawalTimeMicros(item.at)) next.temporalTies = true;
     next.items.push(item); emitted++;
   }
   next.partial = next.streams.some(stream => stream.partial);

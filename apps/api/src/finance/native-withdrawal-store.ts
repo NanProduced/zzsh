@@ -127,7 +127,16 @@ export async function reserveNativeWithdrawalInTransaction(c:PoolClient,actor:Na
 export const createNativeWithdrawal=(pool:Pool,actor:NativeWithdrawalActor,body:Record<string,unknown>,key:unknown,o:NativeWithdrawalOptions)=>withTransaction(pool,c=>reserveNativeWithdrawalInTransaction(c,actor,body,key,o));
 /** 本产品固定安装/窄ACL前检；只SELECT目录，缺失不自动安装、GRANT或退回旧受控表。原key/本地读不调用。 */
 export async function assertNativePayoutExecutionReady(c:PoolClient){
- const e=NATIVE_PAYOUT_EXECUTION_SCHEMA,tableNames=e.tables.map(t=>t.name);
+ const expected=NATIVE_PAYOUT_EXECUTION_SCHEMA,tableNames=expected.tables.map(t=>t.name);
+ const e={...expected,triggers:expected.triggers.map(t=>{
+  const quals:Array<string|null>=[t.qual];
+  // These two shared ledger guards have exact forward versions for abnormal, prestart and sandbox refund branches.
+  if(t.table==="zzsh_order.settlement_ledger_entry"&&(t.name==="finance_entry_guard"||t.name==="finance_entry_batch_guard")&&t.qual!==null){
+   const prefix=t.qual.slice(0,-1), formal=prefix+" AND (NOT (new.details ? 'abnormalRefundLiabilityId'::text)) AND (NOT (new.details ? 'prestartTerminationId'::text))";
+   quals.push(formal+")",formal+" AND (NOT (new.details ? 'localRefundIntentId'::text)))");
+  }
+  return {...t,quals};
+ })};
  const inventory=(await c.query(`/* G4 payout execution schema inventory */
   SELECT count(*)=4 AND COALESCE(bool_and(c.oid IS NOT NULL AND c.relkind='r' AND c.relpersistence='p' AND NOT c.relrowsecurity
    AND NOT pg_has_role(r.oid,c.relowner,'MEMBER') AND NOT r.rolsuper AND NOT r.rolbypassrls AND NOT r.rolcreaterole AND NOT r.rolcreatedb AND NOT r.rolreplication
@@ -140,7 +149,7 @@ export async function assertNativePayoutExecutionReady(c:PoolClient){
  const result=(await c.query(`/* G4 payout fixed guards and narrow privileges */
  WITH expected AS(SELECT $1::jsonb AS j),et AS(SELECT * FROM jsonb_to_recordset((SELECT j->'tables' FROM expected)) AS x(name text,columns jsonb,checks integer)),
  ef AS(SELECT * FROM jsonb_to_recordset((SELECT j->'functions' FROM expected)) AS x(signature text,"prosrcSha256" text,language text,"securityDefiner" boolean,volatility text,"searchPath" text)),
- eg AS(SELECT * FROM jsonb_to_recordset((SELECT j->'triggers' FROM expected)) AS x(name text,"table" text,signature text,type integer,deferred boolean,qual text)),
+ eg AS(SELECT * FROM jsonb_to_recordset((SELECT j->'triggers' FROM expected)) AS x(name text,"table" text,signature text,type integer,deferred boolean,quals jsonb)),
  ek AS(SELECT * FROM jsonb_to_recordset((SELECT j->'keys' FROM expected)) AS x("table" text,type text,columns jsonb)),
  eforeign AS(SELECT * FROM jsonb_to_recordset((SELECT j->'fks' FROM expected)) AS x("table" text,columns jsonb,target text,refs jsonb,deferred boolean)),
  ei AS(SELECT * FROM jsonb_to_recordset((SELECT j->'indexes' FROM expected)) AS x(name text,"table" text,columns jsonb,expression text,predicate text))
@@ -166,7 +175,10 @@ export async function assertNativePayoutExecutionReady(c:PoolClient){
  AND NOT EXISTS(SELECT 1 FROM eg LEFT JOIN pg_trigger t ON t.tgrelid=to_regclass(eg."table") AND t.tgname=eg.name AND NOT t.tgisinternal
   WHERE t.oid IS NULL OR t.tgnargs<>0 OR t.tgenabled<>'O' OR t.tgfoid IS DISTINCT FROM to_regprocedure(eg.signature) OR t.tgtype IS DISTINCT FROM eg.type::smallint
    OR t.tgdeferrable IS DISTINCT FROM eg.deferred OR t.tginitdeferred IS DISTINCT FROM eg.deferred
-   OR substring(pg_get_triggerdef(t.oid) FROM ' WHEN \\((.*)\\) EXECUTE FUNCTION ') IS DISTINCT FROM eg.qual)
+   OR substring(pg_get_triggerdef(t.oid) FROM ' WHEN \\((.*)\\) EXECUTE FUNCTION ') IS DISTINCT FROM eg.quals->>(CASE
+    WHEN jsonb_array_length(eg.quals)=1 THEN 0
+    WHEN to_regclass('zzsh_order.local_controlled_refund_evidence') IS NOT NULL THEN 2
+    WHEN to_regclass('zzsh_order.prestart_termination') IS NOT NULL THEN 1 ELSE 0 END))
  AND NOT EXISTS(SELECT 1 FROM ek WHERE NOT EXISTS(SELECT 1 FROM pg_constraint q WHERE q.conrelid=to_regclass(ek."table") AND q.contype::text=ek.type AND q.convalidated
   AND(SELECT jsonb_agg(a.attname ORDER BY u.n) FROM unnest(q.conkey) WITH ORDINALITY u(attnum,n) JOIN pg_attribute a ON a.attrelid=q.conrelid AND a.attnum=u.attnum)=ek.columns))
  AND NOT EXISTS(SELECT 1 FROM eforeign WHERE NOT EXISTS(SELECT 1 FROM pg_constraint q JOIN pg_class target ON target.oid=q.confrelid JOIN pg_namespace n ON n.oid=target.relnamespace

@@ -2080,8 +2080,8 @@ export function MembershipGrowthAdminView({
                 </div>
               )}
               <details className="rounded-lg border border-border bg-muted/20 p-3 text-muted-foreground">
-                <summary className="cursor-pointer text-[11px]">接口说明</summary>
-                <p className="mt-2 text-[11px] leading-relaxed">审批历史、经手人与时间线字段待接口接入（API_DEPENDENCY_PENDING）。本页不补造审批人或结果；当前只展示本页本次提交的申请号与审批中心入口。</p>
+                <summary className="cursor-pointer text-[11px]">审批记录说明</summary>
+                <p className="mt-2 text-[11px] leading-relaxed">本页显示本次提交的申请号。审批历史、经手人和时间线请到审批中心查看。</p>
               </details>
             </div>
           </DialogContent>

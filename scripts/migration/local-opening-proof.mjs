@@ -22,7 +22,7 @@ export function prepareLocalStoredOpening(balance, { modules, logs, orders, with
       observed = preparation.prepareFrozenFinanceObservation(parsed.kind, parsed.row, { userId: balance.userId, legacyUserId: balance.sourceId, identityDigest: balance.sourceDigest });
     } catch { missing = "SOURCE_LOG_INVALID"; break; }
     observations.push(observed.row);
-    const log = parsed.row, options = [];
+    const log = JSON.parse(observed.row.rawSource.canonical), options = [];
     if (log.changeType === 1001) {
       const order = orders.get(String(log.sourceId)), distribution = distributions.get(String(log.sourceId));
       if (order && order.sale_user_id === balance.sourceId && order.order_status === "4" && order.pay_is === "1")

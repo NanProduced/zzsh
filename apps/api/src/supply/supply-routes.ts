@@ -3,6 +3,7 @@ import { hasLegacyReadSnapshots } from "./legacy-listing-read";
 import { lockPublishingAccount, readPublishingAccount, unknownSupplyGate, withPublicListingSnapshot } from "./publishing";
 import { handleFavorites } from "./favorites";
 import { handlePublishingRoute } from "./publishing-routes";
+import { handleLegacyPathMediaRoute } from "./legacy-path-routes";
 import { applyLegacyOrdinaryDraft, authorizeLegacyOrdinaryDraft, type LegacyTradeIntake } from "./legacy-trade-takeover";
 import { handleListingFilters } from "./listing-filter-routes";
 import type { ListingCursorKey } from "./listing-cursor";
@@ -467,6 +468,7 @@ export async function handleSupplyUserRoute(
   const method = (request.method ?? "GET").toUpperCase();
 
   await safely(response, requestId, async () => {
+    if (await handleLegacyPathMediaRoute(request,response,options,requestId,path,query,false)) return;
     if (await handlePublicGunsmithRoute(response, options, requestId, method, path, query)) return;
     if (await handleFavorites(request,response,options,requestId,path,query)) return;
     if (await handleListingFilters(request,response,options,requestId,path,query,false)) return;
@@ -680,6 +682,7 @@ export async function handleSupplyAdminRoute(
 
   await safely(response, requestId, async () => {
     if (!requireOrigin(request, response, options, requestId)) return;
+    if (await handleLegacyPathMediaRoute(request,response,options,requestId,path,query,true)) return;
     if (await handleListingFilters(request,response,options,requestId,path,query,true)) return;
     if (await handlePublishingRoute(request,response,options,requestId,path,query,true)) return;
     const legacyDraft = method === "POST" ? /^\/accounts\/([A-Za-z0-9._:-]+)\/legacy-draft$/.exec(path) : null;

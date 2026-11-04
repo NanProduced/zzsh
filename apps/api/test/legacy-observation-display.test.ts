@@ -13,12 +13,12 @@ const iso = (seconds: number) => new Date(seconds * 1000).toISOString();
 const sha = (value: unknown) => createHash('sha256').update(canonicalize(value)).digest('hex');
 const access: HistoricalRelationAccess = { adminId: 'fixture-admin', isBoss: false, orderRead: true, financeDocumentRead: true };
 
-function rawObservation(kind: 'HISTORICAL_EARNINGS_LOG' | 'HISTORICAL_WITHDRAWAL' | 'HISTORICAL_DISTRIBUTION', raw: Row, originalUserId = legacyUserId): Row {
+function rawObservation(kind: 'HISTORICAL_EARNINGS_LOG' | 'HISTORICAL_WITHDRAWAL' | 'HISTORICAL_DISTRIBUTION' | 'HISTORICAL_PAYMENT' | 'HISTORICAL_REFUND', raw: Row, originalUserId = legacyUserId): Row {
   const prepared = previewFrozenFinanceObservation(kind, raw, { userId, legacyUserId: originalUserId }), snapshot = prepared.row;
   return {
     id: `fixture-${kind}-${raw.id}`, subject_id: userId, subject_name: '测试用户',
     source_kind: kind, source_type: 'LEGACY_MYSQL', source_system: 'legacy_mysql_restore',
-    source_entity: kind === 'HISTORICAL_EARNINGS_LOG' ? 'la_log_earnings' : kind === 'HISTORICAL_WITHDRAWAL' ? 'la_withdraw_apply' : 'la_distribution_order',
+    source_entity: (snapshot.rawSource as {entity:string}).entity,
     source_id: prepared.sourceId, source_digest: prepared.sourceDigest, basis_id: null, included_in_opening: false,
     at: prepared.sourceEventAt, imported_at: '2026-10-22T00:00:00.000Z',
     amount: snapshot.amount, action: snapshot.action === undefined ? null : String(snapshot.action),
@@ -65,6 +65,33 @@ function enrich(row: Row, candidates: Row[] = [], orders: FinanceOrderFact[] = [
   enrichHistoricalObservations([entry], [row, ...candidates], orders, permission);
   return entry;
 }
+
+test('typed order finance edges preserve independent source amounts and deny same-id or wrong-party guesses', () => {
+  const parent=order({id:'32',user_id:'11',return_order_money:'625.00'},{renterId:userId});
+  const refund=(overrides:Row={})=>rawObservation('HISTORICAL_REFUND',{
+    id:'19',user_id:'11',userId:'11',order_type:'order',order_id:'32',order_sn:parent.number,sn:'REFUND-19',
+    order_amount:'685.00',refund_amount:'685.00',refund_status:'1',create_time:String(at),relationship:'VERIFIED',...overrides,
+  });
+  const payment=(orderType:string)=>rawObservation('HISTORICAL_PAYMENT',{
+    id:'19',userId:'11',order_type:orderType,order_id:'32',pay_order_sn:'PAY-19',
+    pay_money:'685.00',pay_is:'1',pay_time:String(at),create_time:String(at),relationship:'VERIFIED',
+  });
+  const positive=enrich(refund(),[],[parent]);
+  assert.equal(positive.historical!.recordedAmountCents,'68500');
+  assert.equal(positive.historical!.association.role,'RENTER');
+  assert.equal(positive.affectsCurrentWallet,false);
+  assert.equal(positive.affectsCurrentLedger,false);
+  assert.equal(positive.evidence.channelArrival,'UNKNOWN');
+  for(const other of [refund({order_sn:'wrong'}),refund({relationship:'UNRESOLVED'}),payment('2')]) {
+    const entry=enrich(other,[],[parent]);assert.equal(entry.historical!.association.state,'UNRESOLVED');assert.deepEqual(entry.related,[]);
+  }
+  assert.equal(enrich(refund(),[],[{...parent,renterId:'other'}]).historical!.association.state,'UNRESOLVED');
+  assert.equal(enrich(refund(),[],[{...parent,objectReadable:false}]).historical!.association.state,'DENIED');
+  const commission=distribution({order_id:'32',status:1,earnings:'3.40'});
+  const links=resolveHistoricalReverseLinks(parent.ref,[refund(),payment('1'),payment('2'),commission],[parent],access);
+  assert.deepEqual(links.related.map(link=>link.ref.split(':')[0]),['HISTORY_REFUND','HISTORY_PAYMENT','HISTORY_DISTRIBUTION']);
+  assert.equal(enrich(commission,[],[parent]).historical!.association.role,'BENEFICIARY');
+});
 
 test('legacy purpose codes keep their business meaning without inferring from sign', () => {
   const codes = ['SETTLEMENT_INCOME', 'WITHDRAWAL_DEBIT', 'WITHDRAWAL_REJECTED_RETURN', 'TRANSFER_FAILED_RETURN',

@@ -2562,7 +2562,7 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, vi
     <nav className="support-directory" aria-label="全部会话">
       <header>{brand}<span className="support-mobile-close">{close}</span></header>{actions}<h2 tabIndex={-1}>全部会话</h2>
       <div className="support-directory-items">
-      {consultations.length===50?<p className="support-directory-limit">咨询目录仅提供最近50条；更早记录待接口支持。</p>:null}
+      {consultations.length===50?<p className="support-directory-limit">当前显示最近 50 条咨询记录。</p>:null}
       {directoryEntries.length ? directoryEntries.map((entry) => {
         const pref = directoryPrefs[entry.key] ?? { pinned: false, muted: false };
         if (entry.kind === "consultation") {

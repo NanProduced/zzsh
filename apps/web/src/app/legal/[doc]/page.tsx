@@ -28,11 +28,7 @@ function PublishedBody({ body }: { body: string }) {
   );
 }
 
-/**
- * Public reading carrier for the two consent links. The formal text and its
- * effective version come from the API; when no sealed version is effective the
- * page states that plainly instead of standing in for a legal document.
- */
+/** Public reading carrier for the two consent links; text and version come from the API. */
 export default async function LegalDocPage({ params, searchParams }: { params: Promise<{ doc: string }>; searchParams?: Promise<{ version?: string }> }) {
   const { doc } = await params;
   if (!isLegalDocId(doc)) notFound();
@@ -54,12 +50,11 @@ export default async function LegalDocPage({ params, searchParams }: { params: P
         {published ? <>
           <p className="legal-doc-meta">版本 {published.id} · 于 {published.effectiveAt} 生效</p>
           <PublishedBody body={published.body} />
-        </> : (
+        </> : reading.state === "UNAVAILABLE" ? (
           <div className="auth-unavailable" role="status">
-            <p>{reading.state === "PENDING" ? entry.note : "协议正文暂时无法读取，请稍后重试。当前页面不是正式协议文本。"}</p>
-            <p>正式文本与版本信息由平台发布后在本页展示；未发布时不提供占位正文，也不以帮助文章代替协议。当前页面不是正式协议文本。</p>
+            <p>协议正文暂时无法读取，请稍后重试。</p>
           </div>
-        )}
+        ) : null}
         <p className="auth-page-links">另一份文件：<Link href={`/legal/${sibling.doc}`}>《{sibling.title}》</Link></p>
       </section>
     </main>

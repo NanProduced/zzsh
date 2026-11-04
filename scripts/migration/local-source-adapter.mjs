@@ -1,4 +1,23 @@
 import { createHash } from "node:crypto";
+import { createReadStream } from "node:fs";
+export function parseSourceCaptureLine(line) {
+    return JSON.parse(/^[0-9A-F]+$/.test(line) ? Buffer.from(line, "hex").toString("utf8") : line);
+}
+export const sourceJsonLine = row => JSON.stringify(row).replaceAll("\u2028", "\\u2028").replaceAll("\u2029", "\\u2029") + "\n";
+/** Source text can contain U+2028/U+2029; readline treats those as record separators. JSONL uses LF. */
+export async function* readSourceRows(file) {
+    const input = createReadStream(file, { encoding: "utf8" }); let pending = "";
+    try {
+        for await (const chunk of input) {
+            pending += chunk; let at;
+            while ((at = pending.indexOf("\n")) >= 0) {
+                const line = pending.slice(0, at); pending = pending.slice(at + 1);
+                if (line.trim()) yield JSON.parse(line);
+            }
+        }
+        if (pending.trim()) yield JSON.parse(pending);
+    } finally { input.destroy(); }
+}
 /** A later, bounded extract may add facts but cannot rewrite any field in its frozen base row. */
 export function assertSourceSupplementFields(original, supplement) {
     if (!original || !supplement || original.id !== supplement.id)
@@ -64,6 +83,40 @@ export function sourceContactPlanningRow(raw, modules, sourceRef) {
 export function sourceUserContactBatch(rawRows, modules, sourceRef) {
     return modules.planner.planLegacyUserContactBatch(rawRows.map(raw => sourceUserPlanningRow(raw, modules, sourceRef)));
 }
+/** Whole-source code ownership is checked before deriving any bounded scenario packets. */
+export function sourceInvitationPlan(rawUsers, qualifications, modules, receipt, receiptSha256, cutoff, selectedUserIds) {
+    const invitation = modules.invitation, hash = invitation.invitationFactHash;
+    const qualificationByUser = new Map();
+    for (const row of qualifications) {
+        if (qualificationByUser.has(row.user_id)) throw new Error("SOURCE_QUALIFICATION_SUBJECT_DUPLICATE");
+        qualificationByUser.set(row.user_id, row);
+    }
+    const fields = ["id", "is_delete", "is_disable", "inviter_id", "first_leader", "second_leader", "third_leader", "create_time", "update_time"];
+    const raw = rawUsers.map(row => ({ legacyId: row.id, userId: modules.migration.legacyOwnerUserId("legacy_mysql_restore", "la_user", row.id),
+        identitySourceDigest: digest(modules.contentHash.canonicalize(row)), userSource: Object.fromEntries(fields.map(field => [field, row[field] ?? null])),
+        codeSource: { id: row.id, code: row.code }, qualificationSource: qualificationByUser.has(row.id) ? Object.fromEntries(["id", "user_id", "level_id", "is_delete", "is_freeze", "is_distribution"].map(field => [field, qualificationByUser.get(row.id)[field] ?? null])) : null }));
+    const byId = new Map(raw.map(row => [row.legacyId, row])), ids = [...byId.keys()].sort();
+    const source = { schema: "legacy-invitation-source.v2", sourceSystem: "legacy_mysql_restore", cutoff: new Date(cutoff).toISOString(), receiptSha256, supplementReceiptSha256: receiptSha256,
+        files: { users: { sha256: receipt.files.users.sha256, rows: rawUsers.length }, qualification: { sha256: receipt.files.distribution.sha256, rows: qualifications.length }, codes: { sha256: receipt.files.users.sha256, rows: rawUsers.length } },
+        subjectSetDigest: hash(ids), codeSetDigest: hash(ids.map(id => [id, byId.get(id).codeSource.code.toUpperCase(), hash(byId.get(id).codeSource)])) };
+    const full = invitation.planLegacyInvitationFacts(source, raw);
+    const prior = new Map(), packets = [];
+    for (const packet of full.packets) {
+        const subjects = packet.subjects.filter(fact => selectedUserIds.has(fact.legacyId));
+        if (!subjects.length) continue;
+        const inPacket = new Set(subjects.map(fact => fact.legacyId)), anchorIds = new Set();
+        for (const fact of subjects) for (const [type, field] of [["INVITER", "inviter_id"], ["DISTRIBUTION_LEADER", "first_leader"]])
+            if (fact.parents[type].knowledge === "KNOWN_PARENT" && !inPacket.has(fact.userSource[field])) anchorIds.add(fact.userSource[field]);
+        const anchors = [...anchorIds].sort().map(id => {
+            const p = prior.get(id); if (!p) throw new Error("SCENARIO_INVITATION_PARENT_NOT_PREPARED");
+            return { fact: p.fact, batchKey: p.key, batchDigest: p.bodyDigest };
+        });
+        const input = { ...packet, subjects, anchors }, prepared = invitation.prepareLegacyInvitationFacts(input, hash(input));
+        packets.push({ input, key: prepared.key, bodyDigest: prepared.bodyDigest, relations: prepared.relations.length });
+        for (const fact of subjects) prior.set(fact.legacyId, { fact, key: prepared.key, bodyDigest: prepared.bodyDigest });
+    }
+    return { packets, summary: { ...full.summary, selectedSubjects: prior.size, selectedPackets: packets.length, policy: null, automaticEligibilityEnabled: false, childCounts: "FULL_SOURCE_PROOF_NOT_CLOSED_ON_PARTIAL_TARGET" } };
+}
 export function sourceAccountPlan(raw, users, modules, sourceRef, games) {
     if (!/^[1-9][0-9]*$/.test(raw.id ?? ""))
         return { ready: false, reason: "ACCOUNT_ID_INVALID" };
@@ -81,7 +134,7 @@ export function sourceAccountPlan(raw, users, modules, sourceRef, games) {
     const snapshot = modules.planner.listingSnapshot(snapshotRow);
     return {
         ready: true, sourceId: raw.id, sourceDigest, ownerLegacyId: raw.user_id, ownerUserId: owner.userId, ownerSourceDigest: owner.sourceDigest,
-        gameCode, sourceStatus: raw.status, sourceDeleted: raw.is_delete === "1", businessNo: raw.no ?? null,
+        gameCode, sourceStatus: raw.status, sourceDeleted: raw.is_delete === "1", businessNo: raw.no === null || raw.no === "" ? null : raw.no,
         evidenceRef: `${sourceRef}:la_rental_accounts:${raw.id}`, snapshot: snapshot.snapshot,
         sourceUpdatedAt: snapshot.sourceUpdatedAt, snapshotMissing: snapshot.missing,
         media: { pathsDigest: digest(raw.img_paths ?? ""), pathsLength: (raw.img_paths ?? "").length, titleDigest: digest(raw.title_img_name ?? ""), state: "UNRESOLVED_BYTES" },
@@ -117,17 +170,17 @@ export function sourceFinanceObservation(domain, raw) {
     if (domain === "earnings")
         return {
             kind: "HISTORICAL_EARNINGS_LOG", sourceId: raw.id, legacyUserId: raw.user_id,
-            row: { id: integer(raw.id), sn: raw.sn, action: integer(raw.action), amount: raw.change_amount, userId: integer(raw.user_id), sourceId: integer(raw.source_id), createdAt: integer(raw.create_time), changeType: integer(raw.change_type), leftAmount: raw.left_amount },
+            row: { id: integer(raw.id), sn: raw.sn, action: integer(raw.action), amount: raw.change_amount, userId: integer(raw.user_id), sourceId: integer(raw.source_id), createdAt: integer(raw.create_time), changeType: integer(raw.change_type), leftAmount: raw.left_amount, ...Object.fromEntries(["source_sn", "remark", "extra", "update_time", "delete_time"].filter(k=>Object.hasOwn(raw,k)).map(k=>[k==="source_sn"?"sourceSn":k,raw[k]])) },
         };
     if (domain === "withdraws")
         return {
             kind: "HISTORICAL_WITHDRAWAL", sourceId: raw.id, legacyUserId: raw.user_id,
-            row: { id: integer(raw.id), sn: raw.sn, type: integer(raw.type), money: raw.money, status: integer(raw.status), userId: integer(raw.user_id), batch_no: raw.batch_no, is_delete: integer(raw.is_delete), left_money: raw.left_money, create_time: integer(raw.create_time), handling_fee: raw.handling_fee, payment_time: integer(raw.payment_time) },
+            row: { id: integer(raw.id), sn: raw.sn, type: integer(raw.type), money: raw.money, status: integer(raw.status), userId: integer(raw.user_id), batch_no: raw.batch_no, is_delete: integer(raw.is_delete), left_money: raw.left_money, create_time: integer(raw.create_time), handling_fee: raw.handling_fee, payment_time: integer(raw.payment_time), ...Object.fromEntries(["update_time", "delete_time", "payment_no", "transfer_time", "global_no"].filter(k=>Object.hasOwn(raw,k)).map(k=>[k,raw[k]])) },
         };
     if (domain === "distributionOrders")
         return {
             kind: "HISTORICAL_DISTRIBUTION", sourceId: raw.id, legacyUserId: raw.user_id,
-            row: Object.fromEntries(["id", "sn", "user_id", "order_type", "order_id", "earnings", "level", "level_id", "ratio", "status", "settle_time", "is_delete", "create_time", "update_time"].map(name => [name, raw[name] ?? null])),
+            row: Object.fromEntries(["id", "sn", "user_id", "order_type", "order_id", "earnings", "level", "level_id", "ratio", "status", "settle_time", "is_delete", "create_time", "update_time", "order_goods_id", "goods_id", "sku_id", "delete_time"].filter(k=>Object.hasOwn(raw,k)).map(name => [name, raw[name] ?? null])),
         };
     throw new Error("SOURCE_DOMAIN_NOT_SUPPORTED");
 }

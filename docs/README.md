@@ -12,8 +12,8 @@
 - [多游戏计价与结算策略抽取（已暂缓）](architecture/game-strategy-extraction-deferred.md)
 - [新旧交易与结算行为对照](architecture/legacy-business-behavior-diff.md)（测试用预期变更、保留行为与证据边界）
 - [旧数据转换与字段映射](architecture/legacy-data-mapping.md)（源字段、目标、接口及双端消费；规则变更对照）
-- [数据库结构导航](architecture/database-navigation.md)（源码152份业务迁移0000–0151，实际执行状态分别核验）
-- [业务数据库新装基线](operations/database-initial.md)（已封存0141基线、canonical增量及后续中文版本）
+- [数据库结构导航](architecture/database-navigation.md)（源码154份业务迁移0000–0153，实际执行状态分别核验）
+- [业务数据库新装基线](operations/database-initial.md)（生产中文目录基线、本地受控测试和已有库增量）
 - [用户供给表单数据契约](architecture/supply-form-contract.md)
 - [租赁会员、个人确认与建单](architecture/personal-confirmation.md)
 - [协议、规则披露与接受](architecture/agreements-acceptance.md)

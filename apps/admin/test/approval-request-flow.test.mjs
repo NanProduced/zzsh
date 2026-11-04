@@ -27,7 +27,7 @@ test("pending request has one candidate gate, two possible outcomes, and no impl
   assert.equal(step(policy, "approved").status, "inactive");
   assert.equal(step(policy, "rejected").statusLabel, "尚无拒绝决定");
   assert.equal(step(policy, "execution").statusLabel, "尚未执行");
-  assert.equal(step(policy, "execution").description, "业务摘要未接入");
+  assert.equal(step(policy, "execution").description, "业务摘要暂不可用");
 });
 
 test("approval is not execution or entitlement activation", () => {
@@ -35,7 +35,7 @@ test("approval is not execution or entitlement activation", () => {
   assert.equal(step(policy, "approved").status, "complete");
   assert.equal(step(policy, "execution").status, "pending");
   assert.equal(step(policy, "execution").statusLabel, "待执行");
-  assert.equal(step(policy, "execution").description, "业务摘要未接入");
+  assert.equal(step(policy, "execution").description, "业务摘要暂不可用");
   assert.equal(step(policy, "review").facts.find(fact => fact.label === "处理说明").value, "已调整期限");
 });
 

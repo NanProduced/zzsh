@@ -20,6 +20,26 @@ test("restored units preserve M, 60-round groups, source zero and historical DAY
   assert.deepEqual(parseLegacyDisplaySnapshot(snapshot),snapshot);
   assert.ok(!JSON.stringify(snapshot).includes('price'));
 });
+test("seasonal boss completion and next-season plans preserve explicit zero, null and old snapshots",()=>{
+  const before=convertLegacyDisplayFields(source());
+  assert.equal(Object.hasOwn(before.attributes,"demulan_unlocked"),false);
+  assert.equal(Object.hasOwn(before.attributes,"next_season_pass"),false);
+  assert.deepEqual(convertLegacyDisplayFields({...source(),is_sayyid:"1"}),before);
+  for(const [raw,expected] of [["0",false],["1",true],[null,null]] as const){
+    const current=convertLegacyDisplayFields({...source(),is_demulan:raw,is_next_season_pass:raw});
+    assert.equal(current.attributes.demulan_unlocked,expected);
+    assert.equal(current.attributes.next_season_pass,expected);
+    assert.deepEqual(parseLegacyDisplaySnapshot(current),current);
+  }
+  const invalid=convertLegacyDisplayFields({...source(),is_demulan:"invalid",is_next_season_pass:"false"});
+  assert.equal(invalid.attributes.demulan_unlocked,null);
+  assert.ok(invalid.issues.includes("is_demulan:UNKNOWN"));
+  assert.throws(()=>parseLegacyDisplaySnapshot({...before,attributes:{...before.attributes,demulan_unlocked:"0"}}));
+  assert.throws(()=>parseLegacyDisplaySnapshot({...before,attributes:{...before.attributes,next_season_pass:0}}));
+  const missing=structuredClone(before);delete missing.attributes.safe_box_code;
+  assert.throws(()=>parseLegacyDisplaySnapshot(missing));
+  assert.deepEqual(parseLegacyDisplaySnapshot(before),before);
+});
 test("missing, out of range, unsafe and ambiguous facts remain unknown; raw private values stay out",()=>{
   const x=convertLegacyDisplayFields({...source(),ratio_type:"future",haff:null,coffee_num:"-1",character_lv:"1954095103",processing_time_start:"8",processing_time_end:"8",province:"微信13800138000",high_risk_owner:null});
   assert.equal(x.rentalMode,null); assert.equal(x.resources[0]!.quantity,null); assert.equal(x.resources[6]!.quantity,null);
@@ -68,6 +88,7 @@ test("shared public projection exposes safe display facts with exact historical 
   assert.equal(result.historicalQuote.haffRent.amount,"2038.00"); assert.equal(result.historicalQuote.goods.amount,"20.00"); assert.equal(result.historicalQuote.deposit.amount,"50.00");
   assert.equal(result.inventory.length,8); assert.equal(result.inventory[0]!.quantity,"30000000"); assert.equal(result.inventory[2]!.quantity,"120");
   assert.equal(result.attributeDisplay.loginMethod?.displayName,"微信扫码");
+  assert.equal(result.attributes.face_is_self,false); assert.equal(result.attributes.ban_record,true);
   assert.doesNotMatch(JSON.stringify(result),/highRiskOwner|banRecord|faceIsSelf|extractSha256|evidenceRef|sourceDigest|displayDigest|ownerUserId/);
   row.display_digest="c".repeat(64); await assert.rejects(()=>readLegacyListing(client as never,"a-1"),e=>(e as {status:number}).status===404);
 });
@@ -97,6 +118,7 @@ test("authorized private projection reuses frozen display facts without public v
   assert.equal(result.display.facts.resources[0]!.quantity, "30000000");
   assert.equal(result.display.facts.resources[3]!.quantity, "0");
   assert.equal(result.display.facts.attributeDisplay.loginMethod?.displayName, "微信扫码");
+  assert.equal(result.display.facts.attributes.face_is_self,false); assert.equal(result.display.facts.attributes.ban_record,true);
   assert.deepEqual(result.historicalQuote, { haffRentYuan: "12.30", goodsYuan: "0.40", depositYuan: "0.00", termDays: "2", dailyHaffBase: "1000000" });
   assert.doesNotMatch(JSON.stringify(result), /highRiskOwner|banRecord|faceIsSelf|ownerRatio|extractSha256|sourceDigest|displayDigest|evidenceRef|phone|contact/);
   assert.doesNotMatch(legacyHistoricalReadSql(), /source_status=3|legacyAdmission|suspended|FOR UPDATE/);

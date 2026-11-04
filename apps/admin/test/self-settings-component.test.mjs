@@ -654,7 +654,7 @@ test("sessions: 撤销信封不合法时按合同异常，不当成成功", asyn
   await click(buttonByText(view, "注销该会话"));
   await confirmRevoke(view);
   await settle(60);
-  assert.ok(byText(view, "revokedSessionCount"), text(view));
+  assert.ok(byText(view, "返回的资料不完整或异常"), text(view));
   assert.ok(!byText(view, "已确认注销"), "合同异常不得显示为成功");
   view.unmount();
 });
@@ -679,7 +679,7 @@ test("sessions: 处理中互斥；未标记当前会话时禁用全部注销；�
 
   const unmarked = mount(SessionsView, sessionProps({ load: async () => ({ sessions: [{ ...SESSIONS_BODY.sessions[1] }] }) }));
   await settle();
-  assert.ok(byText(unmarked, "未标记当前会话"), text(unmarked));
+  assert.ok(byText(unmarked, "无法确认当前会话"), text(unmarked));
   assert.ok(buttons(unmarked).filter((node) => (node.textContent ?? "").includes("注销该会话")).every((node) => node.disabled));
   unmarked.unmount();
 
@@ -692,13 +692,13 @@ test("sessions: 处理中互斥；未标记当前会话时禁用全部注销；�
 test("sessions: 缺少写合同时只读展示并说明；合同异常保留为失败", async () => {
   const offline = mount(SessionsView, { adminUserId: "a", sessionId: "session_fixture_current", accountStatus: "ACTIVE", locked: false, load: async () => structuredClone(SESSIONS_BODY) });
   await settle();
-  assert.ok(byText(offline, "尚未接入"), text(offline));
+  assert.ok(byText(offline, "暂时无法注销设备"), text(offline));
   assert.ok(buttons(offline).filter((node) => (node.textContent ?? "").includes("注销该会话")).every((node) => node.disabled));
   offline.unmount();
 
   const bad = mount(SessionsView, sessionProps({ load: async () => ({ sessions: [{ id: "s-1", userAgent: null }] }) }));
   await settle();
-  assert.ok(byText(bad, "不符合本人设置合同"), text(bad));
+  assert.ok(byText(bad, "返回的资料不完整或异常"), text(bad));
   assert.ok(buttonByText(bad, "重新读取"));
   bad.unmount();
 });
@@ -925,13 +925,13 @@ test("activity: 合同异常与未知枚举都不当成功；原始 details 不�
 
   await click(buttonByText(view, "重新读取"));
   await settle(60);
-  assert.ok(byText(view, "outcome 不是 SUCCESS/FAILURE"), text(view));
+  assert.ok(byText(view, "返回的资料不完整或异常"), text(view));
   assert.equal(rows(view).length, 1, "合同异常按刷新失败处理：保留上一次读到的事实");
   assert.ok(byText(view, "旧数据"));
 
   await click(buttonByText(view, "重新读取"));
   await settle(60);
-  assert.ok(byText(view, "缺少 nextCursor"), "缺游标不能当成已到底");
+  assert.ok(byText(view, "返回的资料不完整或异常"), "缺游标不能当成已到底");
   view.unmount();
 });
 

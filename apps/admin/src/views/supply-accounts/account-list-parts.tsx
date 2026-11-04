@@ -6,7 +6,7 @@ import { Card } from "@/components/ui/card";
 import { Field } from "@/components/ui/field";
 import { ListToolbarEnumSelect } from "@/components/admin-list";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
-import { Badge, InlineStatus } from "@/components/ui/badge";
+import { InlineStatus } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog";
@@ -158,14 +158,11 @@ export function IdLine({ row, onOpenOwner }: { row: SupplyWorkItem; onOpenOwner?
 
 /** 账号固定三层：中性标题、新平台编号（无则明确未分配）、号主入口；旧来源只在详情溯源。 */
 export function AccountIdentity({ row, onOpenOwner }: { row: SupplyWorkItem; onOpenOwner?: (row: SupplyWorkItem) => void }) {
-  const canOpen = row.ownerLink?.state === "READY" && Boolean(onOpenOwner), legacy = row.facts.sources.length > 0 || Boolean(row.facts.historicalRead);
+  const canOpen = row.ownerLink?.state === "READY" && Boolean(onOpenOwner);
   return (
     <div data-account-identity className="space-y-0.5 text-xs text-muted-foreground">
       <div className="break-words text-sm font-semibold tabular-nums text-foreground">{row.displayNo ?? "编号待分配"}</div>
-      <div className="flex flex-wrap items-center gap-1.5">
-        <span>{row.gameName}</span>
-        {legacy ? <Badge variant="outline" className="px-1.5 py-0 text-[10px]">旧平台迁入</Badge> : null}
-      </div>
+      <div>{row.gameName}</div>
       <div>号主：<OwnerHoverCard ownerName={row.ownerName} ownerId={row.ownerId} summary={row.ownerSummary ?? null} canOpen={canOpen} onOpenOwner={canOpen ? () => onOpenOwner?.(row) : undefined} /></div>
     </div>
   );
@@ -203,7 +200,7 @@ export function AccountFees({ row }: { row: SupplyWorkItem }) {
     {hasQuote ? <><div className="flex items-baseline justify-between gap-3"><span className="text-muted-foreground">基础总价</span><strong className="text-base font-semibold text-sky-900 dark:text-sky-300">{fees.total}</strong></div><div className="flex justify-between gap-3 text-muted-foreground"><span>哈夫币租金</span><span>{fees.haff}</span></div><div className="flex justify-between gap-3 text-muted-foreground"><span>物资预付</span><span>{fees.materials}</span></div></> : <p className="font-medium text-muted-foreground">报价待完善</p>}
     <div className="flex justify-between gap-3 pt-1.5 text-muted-foreground"><span>租客基础押金</span><span className="font-medium text-foreground">{fees.deposit}</span></div>
     {fees.resources && fees.resources !== "未提供" && (fees.total === "未提供" || !fees.haff.startsWith("¥") || !fees.materials.startsWith("¥")) ? <div className="flex justify-between gap-3 text-muted-foreground"><span>资源费合计</span><span>{fees.resources}</span></div> : null}
-    {!row.summary && row.facts.historicalRead ? <span className="text-[11px] text-muted-foreground">迁入时记录</span> : null}
+    {(!row.summary || row.summary.displaySource === "LEGACY_SNAPSHOT") && row.facts.historicalRead ? <span className="text-[11px] text-muted-foreground">迁入时记录</span> : null}
   </div>;
 }
 
@@ -300,6 +297,7 @@ export function QuickView({ row, canRead, onClose, onOpenFull }: QuickProps) {
   const publicBasis = facts.publicBasis ?? null, publicDefault = !showDraft && publicBasis && detail?.version && publicBasis.id !== detail.version.id ? publicBasis : null;
   const v = publicDefault ? publicBasisVersion(publicDefault) : detail?.version, viewed = publicDefault ? row : alignedQuickRow(row, detail);
   const historical = detail?.supervision.facts.historicalRead ?? row.facts.historicalRead;
+  const imported = Boolean(v?.origin === "LEGACY_OBSERVATION" && historical?.observationVersionId === v.id);
   const attrs = v ? attributeFacts(v) : [];
   const verdict = facts.newOrders === null ? "新单资格待核" : facts.newOrders ? "可接新单" : "不可接新单";
   const declaredAttribute = v ? Object.values(v.declaration.attributes).some(value => value !== null && value !== undefined && value !== "" && !(Array.isArray(value) && value.length === 0)) : false;
@@ -314,14 +312,14 @@ export function QuickView({ row, canRead, onClose, onOpenFull }: QuickProps) {
   const haffLine = v ? v.declaration.inventory.find(item => item.itemId === "haff" || v.presentation.items?.find(entry => entry.id === item.itemId)?.unit === "HAFF_BASE") : null;
   const haffText = haffLine ? quantityText(haffLine.quantity) : rowHaffText(viewed);
   const titleConfig = v ? {
-    safeBox: v.attributeDisplay?.safeBox?.displayName ?? (typeof v.declaration.attributes.safe_box_code === "string" ? `未确认（代码 ${v.declaration.attributes.safe_box_code}）` : null),
-    grading: v.attributeDisplay?.grading?.displayName ?? (typeof v.declaration.attributes.grading_code === "string" ? `未确认（代码 ${v.declaration.attributes.grading_code}）` : null),
+    safeBox: v.attributeDisplay?.safeBox?.displayName ?? (typeof v.declaration.attributes.safe_box_code === "string" ? "未确认" : null),
+    grading: v.attributeDisplay?.grading?.displayName ?? (typeof v.declaration.attributes.grading_code === "string" ? "未确认" : null),
     gradingDivision: Object.hasOwn(v.declaration.attributes, "grading_division") && v.declaration.attributes.grading_division !== null && v.declaration.attributes.grading_division !== "" ? String(v.declaration.attributes.grading_division) : null,
     characterLevel: v.declaration.attributes.character_level === null || v.declaration.attributes.character_level === undefined ? null : String(v.declaration.attributes.character_level),
   } : row.summary?.config ?? null;
   const quickTitle = rowAccountTitle({
     ...row,
-    summary: v ? { ...(row.summary ?? {}), haff: haffLine ? { itemId: haffLine.itemId, quantity: haffLine.quantity, unit: "HAFF_BASE" } : null, config: titleConfig } : row.summary,
+    summary: v && !imported ? { ...(row.summary ?? {}), haff: haffLine ? { itemId: haffLine.itemId, quantity: haffLine.quantity, unit: "HAFF_BASE" } : null, config: titleConfig } : row.summary,
   } as SupplyWorkItem);
   return <Dialog open onOpenChange={open => { if (!open) onClose(); }}>
   <DialogContent showCloseButton={false} aria-labelledby="qv-title" data-quick-view="" className="max-h-[calc(100dvh-2rem)] w-[calc(100%-2rem)] gap-0 overflow-hidden p-0 sm:max-w-3xl">
@@ -340,7 +338,7 @@ export function QuickView({ row, canRead, onClose, onOpenFull }: QuickProps) {
       {error && <Alert variant="warning" role="status" className="mb-3"><CircleAlert aria-hidden="true" /><AlertTitle>详情未读到</AlertTitle><AlertDescription><p>{error}</p><p>以下仍为列表已读取的事实。</p></AlertDescription></Alert>}
       {!detail && !error ? <p className="mb-3 text-sm text-muted-foreground" aria-busy="true">正在读取当前资料…</p> : null}
 
-      {!v && detail && historical ? <ImportedAccountView read={historical}/> : <>
+      {(!v || imported) && detail && historical ? <ImportedAccountView read={historical}/> : <>
       <section className="border-b border-border pb-4" aria-label="基础报价速览">
         <div className="mb-3 flex flex-wrap items-baseline justify-between gap-3"><h3 className="text-sm font-semibold">基础报价</h3><strong className="text-xl font-semibold tabular-nums text-sky-900 dark:text-sky-300"><span className="mr-2 text-xs font-normal text-muted-foreground">基础总价</span>{fees.total}</strong></div>
         <dl className="grid grid-cols-2 gap-x-5 gap-y-3 text-sm sm:grid-cols-3">
@@ -369,7 +367,7 @@ export function QuickView({ row, canRead, onClose, onOpenFull }: QuickProps) {
 
       {v ? <Collapsible className="mt-4 border-t pt-3"><CollapsibleTrigger className="group flex w-full items-center justify-between rounded-sm text-left text-xs text-muted-foreground outline-none focus-visible:ring-3 focus-visible:ring-ring/50">版本追溯<ChevronDown className="size-3.5"/></CollapsibleTrigger><CollapsibleContent className="pt-2"><dl className="grid gap-2 break-all text-xs text-muted-foreground"><div><dt>资料版本</dt><dd>{v.id}</dd></div><div><dt>内容摘要</dt><dd>{v.contentHash ?? "未提供"}</dd></div><div><dt>规则版本</dt><dd>{releaseId ?? "未提供"}</dd></div></dl></CollapsibleContent></Collapsible> : null}
 
-      {v && historical ? <Collapsible className="mt-4 border-t pt-3">
+      {v && !imported && historical ? <Collapsible className="mt-4 border-t pt-3">
         <CollapsibleTrigger className="group flex w-full items-center justify-between rounded-sm text-left text-sm font-semibold outline-none focus-visible:ring-3 focus-visible:ring-ring/50">迁入前记录<ChevronDown className="size-3.5 transition-transform group-data-[panel-open]:rotate-180"/></CollapsibleTrigger>
         <CollapsibleContent keepMounted data-historical-summary="" className="pt-2 data-[closed]:hidden">
           <p className="text-xs text-muted-foreground">{historicalReadSummary(historical)}</p>

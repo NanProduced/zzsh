@@ -8,6 +8,8 @@ export const OBSERVATION_ENTITIES={
  HISTORICAL_EARNINGS_LOG:'la_log_earnings',
  HISTORICAL_DISTRIBUTION:'la_distribution_order',
  HISTORICAL_WITHDRAWAL:'la_withdraw_apply',
+ HISTORICAL_PAYMENT:'la_pay_order',
+ HISTORICAL_REFUND:'la_refund_record',
 } as const;
 export type ObservationKind=keyof typeof OBSERVATION_ENTITIES;
 type Member={sourceId:string;sourceDigest:string};

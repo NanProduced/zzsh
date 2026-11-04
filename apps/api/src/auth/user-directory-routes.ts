@@ -16,6 +16,7 @@ import { validateIdempotencyKey } from "../contracts/api-v1";
 import { readOrderAccountViews } from "../supply/admin-supervision-read";
 import { unknownSupplyGate } from "../supply/publishing";
 import type { LegacyPublicAdmission, LegacyPublicAdmissionDetailIndex } from "../legacy-load/legacy-public-admission";
+import { readLegacyMarketAccountIds } from "../supply/legacy-listing-read";
 import type { OrderAccountViewReader } from "../order/admin-order-read";
 import { decodeId, requireAdminAccess, safely, type SupplyResponse } from "../supply/supply-routes";
 import { invalid, notFound, forbidden, sendJson, sha256Hex, type SupplyNodeRequest } from "../supply/supply-util";
@@ -33,6 +34,7 @@ import {
   USER_DIRECTORY_ENTITLEMENTS,
   USER_DIRECTORY_CREDIT_STATES,
   USER_DIRECTORY_RISK_STATES,
+  type AdminDirectoryViewer,
   type UserDirectoryStatusFilter,
   type UserDirectoryFilter,
   type UserDirectorySource,
@@ -279,7 +281,7 @@ export async function handleUserDirectoryAdmin(
       requirePermission(access, ADMIN_PERMISSION.userDirectoryRead);
       if (registrationTime === "ORIGINAL") await client.query("SELECT set_config('jit','off',true)");
       const gameScope = await readAdminGameScope(client, context.userId);
-      const viewer = {
+      const viewer: AdminDirectoryViewer = {
         adminId: context.userId,
         isBoss: access.isBoss,
         permissions: access.permissions,
@@ -295,6 +297,9 @@ export async function handleUserDirectoryAdmin(
         legacyRead: false,
       };
       const enableLegacyRead=async()=>{viewer.legacyRead=(await client.query("SELECT to_regclass('zzsh_order.legacy_order_read_snapshot') IS NOT NULL AS present")).rows[0]?.present===true;};
+      const readLegacyMarket=async(userId?:string)=>{
+        if(viewer.legacyRead&&viewer.resourceRead&&viewer.businessScopeUsable) viewer.legacyMarketAccountIds=await readLegacyMarketAccountIds(client,options.legacyPublicAdmission,userId);
+      };
       const cursor = query.get("cursor") ?? undefined;
       if (noteRead || consumptionRead) {
         const userId = decodeId((noteMatch ?? consumptionMatch)![1]!);
@@ -319,6 +324,7 @@ export async function handleUserDirectoryAdmin(
         requirePermission(access, ADMIN_PERMISSION.userDirectoryRead);
         const filter = parseUserDirectoryFilter(query, viewer.phoneLookup);
         await enableLegacyRead();
+        await readLegacyMarket();
         const data = await listUserDirectory(client, viewer, filter);
         dataToSend = data;
         return;
@@ -330,6 +336,7 @@ export async function handleUserDirectoryAdmin(
       if (section === undefined) {
         requirePermission(access, ADMIN_PERMISSION.userDirectoryRead);
         await enableLegacyRead();
+        await readLegacyMarket(userId);
         const detail = await readUserDirectoryDetail(client, viewer, userId, registrationTime ?? undefined);
         if (!detail) throw notFound();
         if (detail.phoneRevealed === true && typeof detail.maskedPhone === "string") disclosedPhoneUserId = userId;
@@ -346,6 +353,7 @@ export async function handleUserDirectoryAdmin(
         const publication = query.get("publication");
         if (publication !== null && publication !== "published") throw invalid("Publication filter is invalid");
         await enableLegacyRead();
+        await readLegacyMarket(userId);
         dataToSend = await listUserRentalAccounts(client, viewer, userId, { limit, ...(cursor !== undefined ? { cursor } : {}), ...(publication !== null ? { publication } : {}) });
         return;
       }

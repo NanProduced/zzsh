@@ -8,6 +8,7 @@ import {readFileSync} from 'node:fs';
 import {fileURLToPath} from 'node:url';
 import path from 'node:path';
 import ts from 'typescript';
+import { contentFixtureDependency } from './content-fixture.mjs';
 
 test('group quantity inputs render a visible conversion hint linked to both bounds',()=>{
   const tree=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'../../..');
@@ -18,7 +19,7 @@ test('group quantity inputs render a visible conversion hint linked to both boun
     if(name==='@/lib/listing-filters')return listingFilters;
     if(name==='@/components/supply/skin-media-thumb')return {};
     if(name.startsWith('@heroui/'))return {};
-    return require(name);
+    return contentFixtureDependency(name) ?? require(name);
   };
   module._compile(ts.transpileModule(readFileSync(file,'utf8'),{compilerOptions:{jsx:ts.JsxEmit.ReactJSX,module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022,esModuleInterop:true}}).outputText,file);
   const filters={game:'delta',q:null,filters:{},sort:'latest',direction:'DESC',limit:20,cursor:null,viewMode:'list'};
@@ -53,7 +54,7 @@ test('actual list and grid render Barrett and piece-count insurance even after t
     if(name==='@/components/favorites/favorite-button')return {FavoriteButton:()=>null};
     if(name==='@/components/ui/tooltip')return Object.fromEntries(['Tooltip','TooltipContent','TooltipTrigger'].map(key=>[key,({children})=>React.createElement(React.Fragment,null,children)]));
     if(name==='@/components/ui/thumbnail-carousel')return {ThumbnailCarousel:()=>null};
-    return require(name);
+    return contentFixtureDependency(name) ?? require(name);
   };
   module._compile(ts.transpileModule(readFileSync(file,'utf8'),{compilerOptions:{jsx:ts.JsxEmit.ReactJSX,module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022,esModuleInterop:true}}).outputText,file);
   const resources=[['level6_armor','护甲','件'],['level6_helmet','头盔','件'],['level6_round','六级子弹','发'],['awm_round','AWM','发'],['df_billable_barrett_bullet','巴雷特子弹','发'],['top_insure_card_piece','顶级保险卡','张'],['df_billable_top_insure_card','旧保险体验卡','天']].map(([code,name,unitLabel])=>({itemId:code,code,name,quantity:'3',quantityLabel:'3',unitLabel,costAmount:null,costLabel:null,unitPriceLabel:null}));

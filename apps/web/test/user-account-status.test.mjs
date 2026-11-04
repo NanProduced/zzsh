@@ -16,11 +16,12 @@ test("identity fixtures expose adult, minor, rejection, and unavailable reasons"
   const rejected = { identityStatus: "REJECTED", ageStatus: "UNKNOWN", eligibleForProtectedTrade: false, provider: "fake" };
   const unavailable = { identityStatus: "UNKNOWN", ageStatus: "UNKNOWN", eligibleForProtectedTrade: false, provider: "none" };
 
-  assert.match(protectedActionReason(adult), /满足服务端身份与年龄门槛/);
+  assert.match(protectedActionReason(adult), /满足身份与年龄要求/);
   assert.match(protectedActionReason(minor), /年龄不满足/);
   assert.match(protectedActionReason(rejected), /实名校验未通过/);
   assert.match(protectedActionReason(unavailable), /实名服务暂时无法确认/);
-  assert.match(providerAvailability(unavailable), /暂未接入/);
+  assert.match(providerAvailability(unavailable), /实名状态暂未确认/);
+  assert.match(providerAvailability(adult), /不代表真实实名通过/);
   assert.equal(identityStatusLabel(adult.identityStatus), "实名已验证");
   assert.equal(ageStatusLabel(adult.ageStatus), "已确认成年人");
 });

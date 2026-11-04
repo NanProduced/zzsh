@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import {test} from 'node:test';
 import {createHash} from 'node:crypto';
+import {DatabaseSync} from 'node:sqlite';
 import {canonicalize} from '../src/supply/content-hash';
 import {prepareOwnerGuaranteeHistory,type LegacyGuaranteeHistoryInput} from '../src/finance/owner-guarantee-history';
 import {mountPersonalFinanceRead} from '../src/finance/personal-finance-routes';
@@ -10,6 +11,14 @@ const raw:LegacyGuaranteeHistoryInput={userId:'owner',legacyUserId:'11',accountI
 const prepared=prepareOwnerGuaranteeHistory(raw);
 const native=(id='p1',kind='PAYMENT_ATTEMPT'):any=>({id:'native:'+(kind==='REQUIREMENT'?'requirement':kind==='REFUND_ATTEMPT'?'refund':'payment')+':'+id,occurredAt:at,recordedAt:at,sortAt:at,sourceCanonical:null,sourceDigest:null,payload:{sourceType:'NATIVE',eventKind:kind,sourceEntity:kind==='REQUIREMENT'?'owner_guarantee_requirement':kind==='REFUND_ATTEMPT'?'owner_guarantee_refund':'owner_guarantee_payment',sourceId:id,requirementId:kind==='REQUIREMENT'?id:'req1',requirementStatus:'COVERED',requiredCents:'500',accountId:'account101',accountNumber:'ORIGINAL-ACCOUNT',amountCents:'500',attemptStatus:kind==='REFUND_ATTEMPT'?'REQUESTED':'REQUESTED',providerState:'NOT_AUTHORIZED',merchantOrderNumber:'NATIVE-PAYMENT',paymentId:'p1',releasePolicyState:'OWNER_DECISION_REQUIRED',financeEventId:null,ledgerEntryRef:null,postedAt:null,postingValid:false,postedAmountCents:'500'}});
 const legacy=(account=false):any=>({id:account?'legacy:account:observation1':'legacy:payment:501',occurredAt:account?null:new Date(1789200000*1000).toISOString().replace('.000Z','.000000Z'),recordedAt:at,sortAt:account?'0001-01-01T00:00:00.000000Z':new Date(1789200000*1000).toISOString().replace('.000Z','.000000Z'),sourceCanonical:prepared.sourceCanonical,sourceDigest:prepared.sourceDigest,payload:{sourceType:'LEGACY_MYSQL',eventKind:account?'ACCOUNT_OBSERVATION':'PAYMENT_OBSERVATION',sourceId:account?'101':'501',observationId:'observation1'}});
+test('an unpaid original guarantee attempt keeps its amount and independent unknown channel',()=>{
+ const input=prepareOwnerGuaranteeHistory({...raw,source:{...raw.source,pay_is:'0',pay_time:'0'},
+  payOrders:[{...raw.payOrders[0]!,pay_is:'0',pay_time:'0'}]});
+ const item=projectUnifiedGuaranteeEvent({...legacy(),sourceCanonical:input.sourceCanonical,sourceDigest:input.sourceDigest,
+  occurredAt:input.payments[0]!.sourceCreatedAt!.replace('.000Z','.000000Z')},raw.userId);
+ assert.equal(item.amountCents,'500');assert.equal(item.paymentAttempt?.status,'SOURCE_UNPAID_RECORD');
+ assert.equal(item.paymentAttempt?.providerState,null);assert.equal(item.channelArrival,'UNKNOWN');
+});
 function fixture(size=3){
  const state={items:[...Array.from({length:size},(_,i)=>native('p'+String(i).padStart(3,'0'))),legacy(),legacy(true)],partial:false,coverage:true,absence:false,fail:null as Error|null};const queries:{sql:string;params:any[]}[]=[];
  const client={query:async(sql:string,params:any[]=[])=>{queries.push({sql,params});
@@ -25,6 +34,21 @@ function fixture(size=3){
  }};return{state,queries,c:client as any};
 }
 test('unified history keeps original payment time, unknown account time and separate native responsibility/payment/refund axes',async()=>{const f=fixture(0);f.state.items.unshift(native('req1','REQUIREMENT'),native(),native('f1','REFUND_ATTEMPT'));const p=await readUnifiedOwnerGuaranteeHistory(f.c,actor,null,key);assert.equal(p.coverage.knowledge,'KNOWN');assert.equal(p.items.length,5);const old=p.items.find(i=>i.source.entity==='la_pay_order')!;assert.equal(old.occurredAt,prepared.payments[0]!.sourcePaidAt!.replace('.000Z','.000000Z'));assert.equal(old.paymentAttempt!.merchantOrderNumber,'ORIGINAL-PAYMENT');assert.equal(old.localPosting,null);assert.equal(p.items.at(-1)!.occurredAt,null);assert.equal(p.items.at(-1)!.amountCents,null);assert.equal(p.items.find(i=>i.eventKind==='REFUND_ATTEMPT')!.refundAttempt!.releasePolicyState,'OWNER_DECISION_REQUIRED');assert(f.queries.filter(q=>q.sql.includes('history page')||q.sql.includes('unified owner')).every(q=>q.params[0]==='owner'));assert(!f.queries.some(q=>/^(INSERT|UPDATE|DELETE|ALTER)/.test(q.sql)));});
+
+test('the actual timeline predicate excludes empty account snapshots while retaining real attempts and nonzero guarantee source observations',async()=>{
+ const f=fixture(0);await readUnifiedOwnerGuaranteeHistory(f.c,actor,null,key);
+ const sql=f.queries.find(q=>q.sql.includes('unified owner guarantee history v2'))!.sql;
+ const condition=/AND (\(jsonb_array_length\(o\.source_canonical[^\n]+)/.exec(sql)?.[1];assert(condition);
+ const db=new DatabaseSync(':memory:');try{
+  db.exec('CREATE TABLE observation(id TEXT,source_canonical TEXT)');const insert=db.prepare('INSERT INTO observation VALUES(?,?)');
+  insert.run('empty',JSON.stringify({source:{pay_money:'0.00',pay_is:'0',return_is:null},payOrders:[]}));
+  insert.run('return-mark-only',JSON.stringify({source:{pay_money:'0.00',pay_is:'0',return_is:'1'},payOrders:[]}));
+  insert.run('attempt',JSON.stringify({source:{pay_money:'0.00'},payOrders:[{id:'1',pay_is:'0'}]}));
+  insert.run('quote-only',JSON.stringify({source:{pay_money:'5.00',pay_is:'0'},payOrders:[]}));
+  insert.run('source-amount',JSON.stringify({source:{pay_money:'5.00',pay_is:'1'},payOrders:[]}));
+  const rows=db.prepare('SELECT id FROM observation o WHERE '+condition.replace("(o.source_canonical::jsonb->'source'->>'pay_money')::numeric","CAST(o.source_canonical->'source'->>'pay_money' AS NUMERIC)").replaceAll('jsonb_array_length','json_array_length').replace(/::jsonb/g,'')+' ORDER BY id').all();assert.deepEqual(rows.map(r=>r.id),['attempt','source-amount']);
+ }finally{db.close();}
+});
 test('all attempts paginate once; subject/session/version domains are bound and source object or mutable status changes invalidate the original snapshot',async()=>{const f=fixture(23),one=await readUnifiedOwnerGuaranteeHistory(f.c,actor,null,key);assert.equal(one.items.length,20);assert(one.nextCursor);const two=await readUnifiedOwnerGuaranteeHistory(f.c,actor,one.nextCursor,key);assert.equal(two.items.length,5);assert.equal(new Set([...one.items,...two.items].map(i=>i.id)).size,25);await assert.rejects(readUnifiedOwnerGuaranteeHistory(f.c,{...actor,sessionId:'different'},one.nextCursor,key),(e:any)=>e.status===409);await assert.rejects(readUnifiedOwnerGuaranteeHistory(f.c,actor,one.nextCursor+'x',key),(e:any)=>e.status===400);f.state.items[0].payload.attemptStatus='PROCESSING';await assert.rejects(readUnifiedOwnerGuaranteeHistory(f.c,actor,one.nextCursor,key),(e:any)=>e.status===409);});
 test('coverage gaps and duplicate source identities stay explicit, never false known empty history',async()=>{const f=fixture(0);f.state.partial=true;assert.equal((await readUnifiedOwnerGuaranteeHistory(f.c,actor,null,key)).coverage.count,null);f.state.coverage=false;f.state.items=[];assert.equal((await readUnifiedOwnerGuaranteeHistory(f.c,actor,null,key)).coverage.knowledge,'UNKNOWN');f.state.absence=true;assert.equal((await readUnifiedOwnerGuaranteeHistory(f.c,actor,null,key)).coverage.count,'0');f.state.items=[native(),native()];await assert.rejects(readUnifiedOwnerGuaranteeHistory(f.c,actor,null,key),(e:any)=>e.status===503);});
 test('native local posting requires both original references and exact valid event/ledger binding; it never proves bank arrival',()=>{const r=native();r.payload.attemptStatus='CONFIRMED';r.payload.providerState='CONFIRMED';Object.assign(r.payload,{financeEventId:'event1',ledgerEntryRef:'line1',postingValid:true,postedAt:at});const x=projectUnifiedGuaranteeEvent(r,'owner');assert.equal(x.localPosting!.amountCents,'500');assert.equal(x.channelArrival,'UNKNOWN');for(const change of [{ledgerEntryRef:null},{postingValid:false}])assert.throws(()=>projectUnifiedGuaranteeEvent({...r,payload:{...r.payload,...change}},'owner'),(e:any)=>e.status===503);});

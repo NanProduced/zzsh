@@ -11,7 +11,7 @@ import { supplyApi } from "@/lib/supply-client";
 import { useUserSession } from "@/components/session/user-session-provider";
 import { useIdentityReset } from "@/components/session/identity-reset";
 import { RentalPriceSummary, type ReferenceFees } from "./rental-price-summary";
-import { moneyText,personalMembershipLabel,personalBenefitSources } from "@/lib/order-display";
+import { moneyText,paymentObservation,personalMembershipLabel,personalBenefitSources } from "@/lib/order-display";
 import { performGuardedWrite, type WriteOutcome } from "@/components/order/order-trade-actions";
 
 type AgreementInfo = { id: string; title: string; body: string; digest: string };
@@ -723,9 +723,7 @@ export function RentalConfirmPanel({
     try {
       const authority = await orderApi.paymentStatus(orderId);
       if (!isCurrent(acting)) return;
-      const observed = authority.payment
-        ? `服务端已有付款记录（${authority.payment.disposition}）`
-        : `当前订单状态 ${authority.order.status}，暂未观察到付款记录`;
+      const observed = paymentObservation(authority.payment);
       setStage({ kind: "pay-unknown", orderId, message: `原支付请求仍未取得确定回执（原申请保留）。${observed}；当前页面状态不能确定这笔申请是否生效，请稍后再次查询或联系客服核对。` });
     } catch {
       if (isCurrent(acting)) setStage({ kind: "pay-unknown", orderId, message: "原支付请求仍未取得确定回执；最新付款记录暂时无法读取。原请求保留，请稍后再次查询。" });

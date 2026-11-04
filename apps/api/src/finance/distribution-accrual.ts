@@ -13,7 +13,8 @@ export function prepareAccrualFromFrozenPayment(basis:PaymentDistributionBasis|n
  const captured=unsigned(f.capturedCents),owner=unsigned(f.ownerNetCents),refund=unsigned(f.renterRefundCents),platform=unsigned(f.platformContributionCents),fee=unsigned(f.compensationFeeCents);
  if(owner+refund+platform!==captured)throw conflict('Final source posting does not conserve captured money');
  if(!['NORMAL','EARLY'].includes(f.classification)||!['SYSTEM','MANUAL'].includes(f.calculationMode)||fee>platform)return{knowledge:'UNKNOWN' as const,reason:'UNKNOWN_BASE_MAPPING',baseCents:null,items:[] as AccruedReferral[]};
- const base=(platform-fee).toString();if(!basis.policyConfig||!basis.policyVersion||basis.roles.some(r=>r.status.startsWith('UNKNOWN')))return{knowledge:'UNKNOWN' as const,reason:'ORIGINAL_PAYMENT_BASIS_NOT_CLOSED',baseCents:base,items:[] as AccruedReferral[]};
+ const legacyRental=basis.policyConfig?.schema==='distribution-policy.v3';
+ const base=(legacyRental?captured-owner-refund:platform-fee).toString();if(!basis.policyConfig||!basis.policyVersion||basis.roles.some(r=>r.status.startsWith('UNKNOWN')))return{knowledge:'UNKNOWN' as const,reason:'ORIGINAL_PAYMENT_BASIS_NOT_CLOSED',baseCents:base,items:[] as AccruedReferral[]};
  const eligible=basis.roles.filter(r=>r.status==='ELIGIBLE'),renter=eligible.find(r=>r.role==='RENTER_REFERRAL'),ownerRole=eligible.find(r=>r.role==='OWNER_REFERRAL');
  // A final known zero remains a recorded result for a role admitted at payment; no later threshold reapplies.
  const pair=allocateFrozenReferralPair(base,renter?.ratio??null,ownerRole?.ratio??null,'0'),items:AccruedReferral[]=eligible.map(r=>{
@@ -21,7 +22,7 @@ export function prepareAccrualFromFrozenPayment(basis:PaymentDistributionBasis|n
   const economicKey=earningEconomicKey({kind:'NATIVE_RENTAL_REFERRAL',type:'NATIVE',system:'zzsh',entity:'rental_order',id:basis.orderId},r.beneficiaryUserId,r.role);
   return{economicKey,beneficiaryUserId:r.beneficiaryUserId,role:r.role,amountCents:(r.role==='RENTER_REFERRAL'?pair.renterCents:pair.ownerCents)??'0',dueAt:dueAt(f.postedAt,basis.policyConfig!.settlementDelayDays),policyVersion:basis.policyVersion!,basisDigest:basis.digest,postingDigest:f.postingDigest,relationDigest:r.relationDigest};
  });
- return{knowledge:'KNOWN' as const,baseDefinition:'FINAL_POSTING_PLATFORM_CONTRIBUTION_MINUS_COMPENSATION_FEE_V1',baseCents:base,items,digest:sha(canonicalize({orderId:basis.orderId,confirmationId:basis.confirmationId,basisDigest:basis.digest,postingId:f.postingId,postingDigest:f.postingDigest,base,items}))};
+ return{knowledge:'KNOWN' as const,baseDefinition:legacyRental?'LEGACY_RENTAL_CAPTURE_MINUS_OWNER_AND_REFUND_V1':'FINAL_POSTING_PLATFORM_CONTRIBUTION_MINUS_COMPENSATION_FEE_V1',baseCents:base,items,digest:sha(canonicalize({orderId:basis.orderId,confirmationId:basis.confirmationId,basisDigest:basis.digest,postingId:f.postingId,postingDigest:f.postingDigest,base,items}))};
 }
 
 

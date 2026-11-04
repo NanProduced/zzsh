@@ -18,7 +18,7 @@ export async function applyOpeningDomain(ctx, directory, manifestSha256) {
   ctx.state.additiveInputs ??= {};
   if (ctx.state.additiveInputs.opening?.manifestSha256 && ctx.state.additiveInputs.opening.manifestSha256 !== manifestSha256) throw new Error("OPENING_CHECKPOINT_INPUT_CHANGED");
   const module = ctx.mod("finance/personal-finance-maintenance"), canonical = ctx.mod("supply/content-hash").canonicalize;
-  const reviewed = ctx.state.additiveInputs.opening ?? { directory: path, manifestSha256, sourceFileSha256: plan.sha256, notBefore: new Date().toISOString(), expiresAt: new Date(Date.now() + 12 * 3600000).toISOString(), candidateCount: plan.stats.candidate, isolatedCount: plan.stats.reviewRequired };
+  const reviewed = ctx.state.additiveInputs.opening ?? { directory: path, manifestSha256, sourceFileSha256: plan.sha256, ...(ctx.state.executionWindow ?? { notBefore: new Date().toISOString(), expiresAt: new Date(Date.now() + 12 * 3600000).toISOString() }), candidateCount: plan.stats.candidate, isolatedCount: plan.stats.reviewRequired };
   ctx.state.additiveInputs.opening = reviewed;
   ctx.save();
   const common = { ref: "CORE_FULL_STORED_OPENING_" + ctx.state.binding.oid, attempt: "opening-" + manifestSha256.slice(0, 16), actor: { userId: ctx.actor.userId, sessionId: ctx.actor.sessionId }, resource: { host: "127.0.0.1", port: 55432, database: "zzsh_test_regression", oid: Number(ctx.state.binding.oid), owner: ctx.state.resource.owner, marker: ctx.state.resource.marker, role: ctx.state.resource.role, roleOid: Number(ctx.state.resource.role_oid) }, notBefore: reviewed.notBefore, expiresAt: reviewed.expiresAt };

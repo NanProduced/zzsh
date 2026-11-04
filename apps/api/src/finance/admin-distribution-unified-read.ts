@@ -15,17 +15,9 @@ export function unifiedDistributionSourceSql(legacy: boolean, duties: boolean, n
     LEFT JOIN zzsh_order.legacy_order_read_snapshot lo ON lo.source_system=p.source_system AND lo.legacy_id=p.snapshot->>'orderId'
       AND p.source_kind='HISTORICAL_DISTRIBUTION' AND p.source_entity='la_distribution_order' AND p.snapshot->>'sourceOrderType'='1'
     WHERE p.source_kind='HISTORICAL_DISTRIBUTION' AND p.source_entity='la_distribution_order' AND (${nativeScope.replaceAll('o.game_id','lo.game_id')})
-  ), legacy_credit_keys AS MATERIALIZED (
-    SELECT DISTINCT p.source_system,p.user_id,p.legacy_user_id,p.source_id,${original}->>'earnings' amount,${original}->>'settle_time' original_at
-    FROM legacy_input p WHERE ${original}->>'id'=p.source_id AND ${original}->>'user_id'=p.legacy_user_id
-      AND ${original}->>'status'='2' AND ${original}->>'is_delete'='0' AND ${original}->>'order_type' IN('1','2')
-      AND ${original}->>'level' IN('1','2','3') AND ${original}->>'sn'=p.snapshot->>'sourceNumber'
-      AND ${original}->>'earnings'=p.snapshot->>'amount'
   ), legacy_log_candidates AS MATERIALIZED (
     SELECT l.source_system,l.user_id,l.legacy_user_id,l.source_id,l.source_entity,l.source_event_at,l.snapshot,l.source_canonical,l.source_digest
     FROM zzsh_order.personal_finance_observation l
-    JOIN legacy_credit_keys k ON k.source_system=l.source_system AND k.user_id=l.user_id AND k.legacy_user_id=l.legacy_user_id
-      AND k.source_id=l.snapshot->>'referenceId' AND k.amount=l.snapshot->>'amount' AND k.original_at=l.snapshot->>'createdAt'
     WHERE l.source_kind='HISTORICAL_EARNINGS_LOG' AND l.source_entity='la_log_earnings'
       AND l.snapshot->>'legacyChangeType'='1001' AND l.snapshot->>'action'='1'
   ), legacy_log_input AS MATERIALIZED (

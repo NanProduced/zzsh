@@ -1,0 +1,17 @@
+{
+  "schema": "catalog-item-media-v1",
+  "gameCode": "delta",
+  "purpose": "ITEM_MEDIA",
+  "ownershipKind": "PLATFORM_CATALOG",
+  "source": "Existing Web publishing-form item artwork, tracked in Git",
+  "items": [
+    { "code": "df_billable_level6_bullet", "unit": "ROUND", "quantityScale": 0, "file": "apps/web/public/art/delta/items/level6-ammo.png", "sha256": "d114c3f4b1cca163c6ecee0c45cda619e6e9d6f8c47f5b4fe4f3644ecaab8de1", "byteSize": 150978, "mime": "image/png", "width": 336, "height": 336 },
+    { "code": "df_billable_level6_armor", "unit": "PIECE", "quantityScale": 0, "file": "apps/web/public/art/delta/items/level6-armor-mas2.png", "sha256": "06eb519086d243ad8c908c9511560dee58f56ada0ee8228e200ec54e11b457f4", "byteSize": 94259, "mime": "image/png", "width": 256, "height": 300 },
+    { "code": "df_billable_level6_helmet", "unit": "PIECE", "quantityScale": 0, "file": "apps/web/public/art/delta/items/level6-helmet-dich9.png", "sha256": "18263b98ce8488b009ccf850b75e2a5383820909098e3f7a2eacf7d7c8660989", "byteSize": 77086, "mime": "image/png", "width": 271, "height": 300 },
+    { "code": "df_billable_awm_bullet", "unit": "ROUND", "quantityScale": 0, "file": "apps/web/public/art/delta/items/awm-ammo.png", "sha256": "09823145752c4ae0dfcd89fa1a572327cbdcd4fb3fe3cba8e46528466e729c52", "byteSize": 106446, "mime": "image/png", "width": 336, "height": 336 },
+    { "code": "df_billable_barrett_bullet", "unit": "ROUND", "quantityScale": 0, "file": "apps/web/public/art/delta/items/barrett-ammo.png", "sha256": "7ef739aef29526eadad50fd78368577d13df119cc3fabc5418d79261ba7ab39c", "byteSize": 189240, "mime": "image/png", "width": 336, "height": 336 },
+    { "code": "df_billable_top_insure_card", "unit": "DAY", "quantityScale": 0, "file": "apps/web/public/art/delta/items/insurance-experience-card-thumb.png", "sha256": "d68d863a4088be280874c347a6708983a76f0aa8f0e294b25b353e552a4f6a1f", "byteSize": 19948, "mime": "image/png", "width": 128, "height": 128 },
+    { "code": "df_billable_coffee", "unit": "PIECE", "quantityScale": 0, "file": "apps/web/public/art/delta/items/coffee-beans.png", "sha256": "010fb9567194a8ac2307d2478cd486104cae81841cde7e32ca4392d98bf398c7", "byteSize": 50360, "mime": "image/png", "width": 160, "height": 232 },
+    { "code": "df_billable_turtle_backpack_45", "unit": "PIECE", "quantityScale": 0, "file": "apps/web/public/art/delta/items/turtle-backpack-45.png", "sha256": "d5a59ce0c2b9670ce2b43b3785dbba162ed9997cb23302d701df16da5e62c396", "byteSize": 81102, "mime": "image/png", "width": 222, "height": 300 }
+  ]
+}

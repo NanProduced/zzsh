@@ -324,7 +324,7 @@ export function accountColumns(row: Record<string, string | null>): string | nul
   const keys = Object.keys(row).sort().join(",");
   const hasPayout = Object.hasOwn(row, "is_full_payout");
   if (keys !== [...(hasPayout ? ACCOUNT_COLUMNS_WITH_PAYOUT : ACCOUNT_COLUMNS)].sort().join(",")) return "ACCOUNT_ROW_UNSUPPORTED";
-  if (ACCOUNT_COLUMNS.some(column => typeof row[column] !== "string")) return "ACCOUNT_COLUMN_MISSING";
+  if (ACCOUNT_COLUMNS.some(column => !(column === "no" && row[column] === null) && typeof row[column] !== "string")) return "ACCOUNT_COLUMN_MISSING";
   // Historical display keeps the old shape; formal takeover separately rejects missing or unverified payout facts.
   if (hasPayout && row.is_full_payout !== null && typeof row.is_full_payout !== "string") return "ACCOUNT_COLUMN_MISSING";
   return null;
@@ -337,7 +337,7 @@ export function listingSnapshot(row: Record<string, string | null>): { snapshot:
     if (typeof value !== "string" || !pattern.test(value)) { missing.push(column); return null; }
     return value;
   };
-  const resourceNo = take("no", /^[A-Za-z0-9_-]{1,64}$/);
+  const resourceNo = row.no === null || row.no === "" ? null : take("no", /^[A-Za-z0-9_-]{1,64}$/);
   const haffRentYuan = take("price_tenant", YUAN);
   const goodsYuan = take("extra_goods_total_price_tenant", YUAN);
   const depositYuan = take("deposit_amount", YUAN);
@@ -345,7 +345,7 @@ export function listingSnapshot(row: Record<string, string | null>): { snapshot:
   const consumeType = take("default_consume_type", /^[1-5]$/);
   const sourceUpdatedAt = legacyEpochTimestamp(row.update_time);
   if (!sourceUpdatedAt || !/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/.test(sourceUpdatedAt)) missing.push("update_time");
-  if (missing.length || !resourceNo || !haffRentYuan || !goodsYuan || !depositYuan || !termDays || !consumeType || !sourceUpdatedAt) return { snapshot: null, sourceUpdatedAt: null, missing };
+  if (missing.length || !haffRentYuan || !goodsYuan || !depositYuan || !termDays || !consumeType || !sourceUpdatedAt) return { snapshot: null, sourceUpdatedAt: null, missing };
   const snapshot = parseLegacyReadSnapshot({ schema: "legacy-listing-read-v1", resourceNo, haffRentYuan, goodsYuan, depositYuan, termDays, dailyHaffBase: (10n * BigInt(consumeType) * 1000000n).toString() });
   return { snapshot, sourceUpdatedAt, missing };
 }

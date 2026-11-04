@@ -192,7 +192,7 @@ export function rowHaffText(row: SupplyWorkItem): string {
   if (row.summary) return "未提供";
   const display = row.facts.historicalRead?.display;
   const historical = display?.state === "KNOWN" && Array.isArray(display.facts?.resources) ? display.facts.resources.find(item => item.unit === "HAFF_BASE") : null;
-  return historical ? "历史 " + historicalResourceText(historical) : "未提供";
+  return historical ? historicalResourceText(historical) : "未提供";
 }
 
 /** 账号第一列中性标题：只用当前展示版本的确定属性，不展示夹带旧号的历史标题。 */
@@ -244,7 +244,7 @@ export function depositYuanFromCents(cents: string): string {
 
 export function rowBaseFeeRows(row: SupplyWorkItem): { haff: string; materials: string; deposit: string; total: string; note: string; resources?: string } {
   const deposit = rowDepositText(row);
-  if (!row.summary) {
+  if (!row.summary || row.summary.displaySource === "LEGACY_SNAPSHOT") {
     const historical = row.facts.historicalRead?.historicalQuote;
     if (historical) return {
       haff: `历史 ¥${formatAmount(historical.haffRentYuan)}`,
@@ -253,14 +253,15 @@ export function rowBaseFeeRows(row: SupplyWorkItem): { haff: string; materials: 
       total: "未提供",
       note: "历史记录，非当前资料",
     };
-    return { haff: "摘要未装配", materials: "摘要未装配", deposit, total: "未提供", note: "资料摘要未装配" };
+    return { haff: "未提供", materials: "未提供", deposit, total: "未提供", note: "资料未提供" };
   }
   return baseFeeRows(row.summary.feeSummary, row.summary.quote?.personalised ? null : row.summary.quote?.resourceTotal, row.summary.baseDeposit?.amountCents);
 }
 
 export function rowDisplaySourceText(row: SupplyWorkItem): string {
+  if (row.summary?.displaySource === "LEGACY_SNAPSHOT") return "迁入时记录";
   if (row.summary?.displaySource === "PUBLIC_VERSION") return "对外版";
-  if (!row.summary) return row.facts.historicalRead ? "历史资料" : "资料未装配";
+  if (!row.summary) return row.facts.historicalRead ? "历史资料" : "资料未提供";
   return row.facts.publicVisible === false ? "当前草稿" : row.facts.publicVisible === true ? "对外版" : "当前资料";
 }
 
@@ -275,7 +276,7 @@ export function rowCoreAssetsText(row: SupplyWorkItem): string {
     const display = row.facts.historicalRead?.display;
     const facts = display?.state === "KNOWN" ? display.facts : null;
     const historicalConfig = [facts?.attributeDisplay?.safeBox?.displayName, facts?.attributeDisplay?.grading?.displayName].filter(Boolean).join(" · ");
-    return `${haff}${historicalConfig ? " · " + historicalConfig : ""} · 物资摘要未装配`;
+    return `${haff}${historicalConfig ? " · " + historicalConfig : ""} · 物资未提供`;
   }
   if (!row.summary.versionId) return `${haff} · 资料版本未提供`;
   const configText = config ? [config.safeBox, config.characterLevel ? config.characterLevel + " 级" : null, config.grading, config.gradingDivision ? "小段位 " + config.gradingDivision : null].filter(Boolean).join(" · ") : "";
@@ -287,13 +288,13 @@ export function rowCoreAssetsText(row: SupplyWorkItem): string {
 
 /** 列表出租条件：租期/日耗、登录方式与包赔申报；保证金要求不属于这里。 */
 export function rowRentalTerms(row: SupplyWorkItem): { term: string; daily: string; login: string; payout: string } {
-  if (!row.summary) return { term: "租期摘要未装配", daily: "日耗摘要未装配", login: "登录摘要未装配", payout: "未提供" };
+  if (!row.summary) return { term: "租期未提供", daily: "日耗未提供", login: "登录未提供", payout: "未提供" };
   if (!row.summary.versionId) return { term: "资料版本未提供", daily: "资料版本未提供", login: "资料版本未提供", payout: "未提供" };
   const term = row.summary.term, login = row.summary.login;
   return {
     term: term?.termSeconds ? formatTermDays(term.termSeconds) : term?.name ?? "租期未提供",
     daily: term?.dailyConsumption ? quantityText(term.dailyConsumption) : "日耗未提供",
-    login: login?.displayName ?? (login?.code ? `未确认（代码 ${login.code}）` : "登录未提供"),
+    login: login?.displayName ?? (login?.code ? "未确认" : "登录未提供"),
     payout: rowFullPayout(row).label,
   };
 }
@@ -301,7 +302,7 @@ export function rowRentalTerms(row: SupplyWorkItem): { term: string; daily: stri
 /** 列表出租条件两行：同版摘要缺失时只说明一次，不把同一占位重复三遍。 */
 export function rowTermsLines(row: SupplyWorkItem): { conditions: string; loginPayout: string } {
   const terms = rowRentalTerms(row);
-  if (!row.summary) return { conditions: "租期与日耗摘要未装配", loginPayout: "登录与包赔摘要未装配" };
+  if (!row.summary) return { conditions: "租期与日耗未提供", loginPayout: "登录与包赔未提供" };
   if (!row.summary.versionId) return { conditions: "资料版本未提供，租期、日耗与登录方式待核对", loginPayout: `包赔 ${terms.payout}` };
   const conditions = [terms.term, terms.daily].filter((value, index, all) => value && all.indexOf(value) === index).join(" · ");
   const login = terms.login.startsWith("登录") ? terms.login : `登录 ${terms.login}`;
@@ -311,9 +312,9 @@ export function rowTermsLines(row: SupplyWorkItem): { conditions: string; loginP
 /** 当前冻结报价优先，历史租金与物资费分开，均不称下单应付。 */
 export function rowQuoteText(row: SupplyWorkItem): { total: string; note: string } {
   const quote = row.summary?.quote;
-  const historical = row.facts.historicalRead?.historicalQuote;
+  const historical = !row.summary || row.summary.displaySource === "LEGACY_SNAPSHOT" ? row.facts.historicalRead?.historicalQuote : null;
   if (!quote?.resourceTotal && historical) return { total: `历史租金 ¥${formatAmount(historical.haffRentYuan)}`, note: `历史物资费 ¥${formatAmount(historical.goodsYuan)} · ${historical.termDays} 天 · 非当前报价` };
-  if (!quote?.resourceTotal) return { total: "未提供", note: row.summary ? "冻结报价未提供" : "列表摘要未装配" };
+  if (!quote?.resourceTotal) return { total: "未提供", note: row.summary ? "冻结报价未提供" : "资料未提供" };
   return { total: `¥${formatAmount(quote.resourceTotal.amount)}`, note: quote.personalised ? "该金额标记为个人化口径" : "资料版本冻结报价 · 非下单应付" };
 }
 
@@ -321,9 +322,9 @@ export function rowQuoteText(row: SupplyWorkItem): { total: string; note: string
 export function rowDepositText(row: QuickViewRow): string {
   const declared = row.summary?.baseDeposit;
   if (declared) return formatFundingCents(declared.amountCents);
-  const historical = row.facts.historicalRead?.historicalQuote;
+  const historical = !row.summary || row.summary.displaySource === "LEGACY_SNAPSHOT" ? row.facts.historicalRead?.historicalQuote : null;
   if (historical) return `历史 ¥${formatAmount(historical.depositYuan)}`;
-  if (!row.summary) return "摘要未装配";
+  if (!row.summary) return "未提供";
   if (row.depositDeclarationUnknown) return "未提供";
   return "未申报";
 }
@@ -336,7 +337,7 @@ export function rowGuaranteeCondensed(row: SupplyWorkItem): string | null {
 
 /** 保证金要求轴：按当前启用机制投影，并带上依据来源；只有权威写明 NOT_REQUIRED 才称“不要求”。 */
 export function rowGuaranteeRequirementText(row: SupplyWorkItem): string {
-  if (!row.summary) return "要求未提供（摘要未装配）";
+  if (!row.summary) return "要求未提供";
   const { requirement, requirementSource } = row.summary.guarantee;
   if (!requirement) return "要求未提供";
   const basis = requirementSource === "CREDIT_GUARANTEE" ? "信用机制" : requirementSource === "FIXED_FUNDING_POLICY" ? "固定政策" : "依据未提供";
@@ -354,7 +355,7 @@ export function rowGuaranteeEligibilityText(row: SupplyWorkItem): string {
 
 /** 保证金凭证记录：只有正式摘要确认没有凭证才说“无凭证记录”；SATISFIED 不等于现金已缴。 */
 export function rowGuaranteeProofText(row: SupplyWorkItem): string {
-  if (!row.summary) return "凭证事实未提供（摘要未装配）";
+  if (!row.summary) return "凭证记录未提供";
   const proof = row.summary.guarantee.recordedProof;
   if (!proof) return "无凭证记录";
   const status = proof.status === "SATISFIED" ? "覆盖达标凭证" : proof.status === "NOT_REQUIRED" ? "不要求凭证" : proof.status === "REVOKED" ? "凭证已撤销" : "状态未识别";
@@ -364,6 +365,7 @@ export function rowGuaranteeProofText(row: SupplyWorkItem): string {
 
 /** 全额包赔三态：选中、未选、缺记录分开，绝不从标题推断。 */
 export function rowFullPayout(row: SupplyWorkItem): { label: string; state: SupplyListSummary["fullPayout"] | "UNASSEMBLED" } {
+  if (row.summary?.displaySource === "LEGACY_SNAPSHOT") return { label: "未提供", state: "UNASSEMBLED" };
   const state = row.summary?.fullPayout;
   if (!state) return { label: "未提供", state: "UNASSEMBLED" };
   return { label: state === "SELECTED" ? "已选" : state === "NOT_SELECTED" ? "未选" : "未申报", state };

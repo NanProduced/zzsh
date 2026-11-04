@@ -21,6 +21,7 @@ import {
   notFound,
   sha256Hex,
   withIdempotency,
+  ensureOnlyFields,
 } from "./supply-util";
 import {
   loadEffectiveAdminAccess,
@@ -36,6 +37,8 @@ import {
   declarableLegacySkinIds,
   type LegacySkinCatalogEntry,
   type LegacySkinTokenRule,
+  type LegacySkinMappingOverlay,
+  parseLegacySkinMappingOverlay,
 } from "../legacy-load/legacy-skin-holdings";
 
 type LegacyInventoryInput = {
@@ -820,7 +823,8 @@ export async function resolveLegacyObservationToDraft(
 }
 
 export type LegacySkinHoldingsSourcePackage = {
-  schema: "legacy-skin-holdings-source-v1";
+  schema: "legacy-skin-holdings-source-v1" | "legacy-skin-holdings-source-v2";
+  mappingOverlay?: { sha256: string; body: LegacySkinMappingOverlay };
   sourceSystem: "legacy_mysql_restore";
   sourceEntity: "la_rental_accounts";
   sourceExtractSha256: string;
@@ -872,13 +876,21 @@ export function prepareLegacySkinHoldingsAdmission(bytes: string | Buffer, appro
   try { value = JSON.parse(text); } catch { throw invalid("Admitted skin source package must be JSON"); }
   if (!recordValue(value)) throw invalid("Admitted skin source package must be an object");
   const source = value as unknown as LegacySkinHoldingsSourcePackage;
-  if (source.schema !== "legacy-skin-holdings-source-v1" || source.sourceSystem !== "legacy_mysql_restore" || source.sourceEntity !== "la_rental_accounts"
+  if (!["legacy-skin-holdings-source-v1", "legacy-skin-holdings-source-v2"].includes(source.schema) || source.sourceSystem !== "legacy_mysql_restore" || source.sourceEntity !== "la_rental_accounts"
     || [source.sourceExtractSha256, source.targetBindingsSha256, source.tokenRulesExtractSha256].some(v => typeof v !== "string" || !SKIN_SOURCE_HEX.test(v))
     || typeof source.sourceCutoff !== "string" || !SKIN_SOURCE_UTC.test(source.sourceCutoff) || !Number.isFinite(Date.parse(source.sourceCutoff))
     || typeof source.tokenRulesVersion !== "string" || !source.tokenRulesVersion.trim() || source.tokenRulesVersion.length > 128
     || !Array.isArray(source.tokenRules) || typeof source.catalogRevision !== "string" || !/^[1-9]\d{0,18}$/.test(source.catalogRevision)
     || !Array.isArray(source.rows) || source.rows.length === 0 || source.rows.length > 500)
     throw invalid("Admitted skin source bindings are incomplete");
+  if (source.schema === "legacy-skin-holdings-source-v2") {
+    if (!recordValue(source.mappingOverlay) || typeof source.mappingOverlay.sha256 !== "string" || !SKIN_SOURCE_HEX.test(source.mappingOverlay.sha256)) throw invalid("Reviewed exact skin overlay required for v2 source");
+    ensureOnlyFields(source.mappingOverlay, ["sha256", "body"]);
+    const overlay = parseLegacySkinMappingOverlay(source.mappingOverlay.body);
+    if (sha256Hex(canonicalize(overlay)) !== source.mappingOverlay.sha256 || overlay.sourceReceiptSha256 !== source.tokenRulesExtractSha256 || overlay.sourceExtractSha256 !== source.sourceExtractSha256 || overlay.catalogRevision !== source.catalogRevision || overlay.gameId !== source.gameId)
+      throw conflict("Reviewed exact skin overlay does not match its admitted source");
+    source.mappingOverlay = { sha256: source.mappingOverlay.sha256, body: overlay };
+  } else if (Object.hasOwn(source, "mappingOverlay")) throw invalid("Historical v1 skin sources cannot carry a v2 mapping overlay");
   if (source.tokenRules.some(rule => !recordValue(rule) || !(LEGACY_SKIN_FIELDS as readonly string[]).includes(rule.field)
     || typeof rule.token !== "string" || !rule.token || !["ALIAS_OF", "INVALID", "HISTORICAL", "PENDING_DECISION", "SOURCE_AMBIGUOUS"].includes(rule.decision)))
     throw invalid("Admitted skin token rules are invalid");
@@ -907,14 +919,14 @@ function admittedSkinRow(admission: LegacySkinHoldingsAdmission, legacyId: strin
   if (!row) throw conflict("Legacy skin source row was not admitted");
   const bindingDigest = sha256Hex(canonicalize({ sourceExtractSha256: source.sourceExtractSha256, sourceCutoff: source.sourceCutoff,
     targetBindingsSha256: source.targetBindingsSha256, tokenRulesVersion: source.tokenRulesVersion, tokenRulesExtractSha256: source.tokenRulesExtractSha256,
-    tokenRulesDigest: source.tokenRulesDigest, gameId: source.gameId, catalogRevision: source.catalogRevision, row }));
+    tokenRulesDigest: source.tokenRulesDigest, gameId: source.gameId, catalogRevision: source.catalogRevision, ...(source.mappingOverlay ? { mappingOverlaySha256: source.mappingOverlay.sha256 } : {}), row }));
   return { source, row, bindingDigest };
 }
 
 /** Root uses the same mapper for the frozen DTO; the writer rechecks the actual catalog and exact map on its transaction client. */
 export function prepareLegacySkinHoldingsInput(admission: LegacySkinHoldingsAdmission, legacyId: string, catalog: readonly LegacySkinCatalogEntry[], evidenceRef: string) {
   const { source, row } = admittedSkinRow(admission, legacyId);
-  const holding = mapLegacySkinHolding({ accountKey: row.legacyId, gameId: source.gameId, columns: row.columns }, buildLegacySkinIndex(catalog, source.tokenRules), source.catalogRevision);
+  const holding = mapLegacySkinHolding({ accountKey: row.legacyId, gameId: source.gameId, columns: row.columns }, buildLegacySkinIndex(catalog, source.tokenRules, source.mappingOverlay?.body), source.catalogRevision);
   const skinIds = declarableLegacySkinIds(holding);
   if (!skinIds) throw invalid("Admitted legacy skin source is not completely declarable");
   return { accountId: row.accountId, input: { observationVersionId: row.observationVersionId, sourceSystem: source.sourceSystem,
@@ -1084,9 +1096,12 @@ export async function recordLegacySkinHoldings(
           namingState: "LEGACY" | "PENDING" | "VERIFIED";
           enabled: boolean;
           formVisible: boolean;
+          sourceNamespace: string | null;
+          name: string;
+          ownerKind: "MELEE_TYPE" | "AGENT" | "FIREARM" | null;
         }>(
           `SELECT id, game_id AS "gameId", source_field AS "sourceField", source_token AS "sourceToken",
-                  naming_state AS "namingState", enabled, form_visible AS "formVisible"
+                  naming_state AS "namingState", enabled, form_visible AS "formVisible", source_namespace AS "sourceNamespace", name, owner_kind AS "ownerKind"
              FROM zzsh_supply.skin
             WHERE game_id=$1`,
           [a.game_id],
@@ -1101,9 +1116,12 @@ export async function recordLegacySkinHoldings(
         namingState: r.namingState,
         enabled: Boolean(r.enabled),
         formVisible: Boolean(r.formVisible),
+        sourceNamespace: r.sourceNamespace,
+        name: r.name,
+        ownerKind: r.ownerKind,
       }));
 
-      const skinIndex = buildLegacySkinIndex(catalogEntries, source.tokenRules);
+      const skinIndex = buildLegacySkinIndex(catalogEntries, source.tokenRules, source.mappingOverlay?.body);
       const holding = mapLegacySkinHolding(
         { accountKey: legacyId, gameId: a.game_id, columns: sealedRow.columns },
         skinIndex,
@@ -1184,7 +1202,7 @@ export async function recordLegacySkinHoldings(
           sourceAdmission: { packageSha256: admission.packageSha256, bindingDigest, sourceExtractSha256: source.sourceExtractSha256,
             sourceCutoff: source.sourceCutoff, sourceUpdatedAtUtc: sealedRow.sourceUpdatedAtUtc, targetBindingsSha256: source.targetBindingsSha256,
             tokenRulesVersion: source.tokenRulesVersion, tokenRulesExtractSha256: source.tokenRulesExtractSha256,
-            tokenRulesDigest: source.tokenRulesDigest, catalogRevision },
+            tokenRulesDigest: source.tokenRulesDigest, catalogRevision, ...(source.mappingOverlay ? { mappingOverlay: { sha256: source.mappingOverlay.sha256, version: source.mappingOverlay.body.version, reviewRef: source.mappingOverlay.body.reviewRef, sourceDictionarySha256: source.mappingOverlay.body.sourceDictionarySha256 } } : {}) },
           result: "SKIN_HOLDINGS_RECORDED",
         },
       });

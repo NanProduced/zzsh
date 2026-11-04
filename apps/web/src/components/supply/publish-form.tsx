@@ -1624,7 +1624,7 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
   const pricingProblem = (): UiProblem | null => {
     if (optionsAvailability !== "ready") return null;
     if (options?.pricingSchema !== "haff-ratio-v2") {
-      if (fastLocked) return { group: "terms", message: "当前规则未开放极速比例合同，不能以极速入口上架；请改用普通出租。" };
+      if (fastLocked) return { group: "terms", message: "当前规则暂不支持极速出租，请改用普通出租。" };
       return null;
     }
     const modes = options.rentalModes;
@@ -2724,19 +2724,19 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
   const safeBoxDisplay = supply?.version?.attributeDisplay?.safeBox;
   const retainedSafeBoxLabel = safeBoxDisplay?.code === currentSafeBox && safeBoxDisplay.displayName
     ? safeBoxDisplay.displayName
-    : `未确认（代码 ${currentSafeBox}）`;
+    : "未确认";
   const safeBoxChoiceOptions = [
     ...(currentSafeBox && !safeBoxKnown ? [{ value: currentSafeBox, label: retainedSafeBoxLabel }] : []),
     ...(options?.safeBoxCodes.map((code) => ({
       value: code,
-      label: safeBoxOptions.find((option) => option.code === code)?.displayName ?? `未确认（代码 ${code}）`,
+      label: safeBoxOptions.find((option) => option.code === code)?.displayName ?? "未确认",
     })) ?? []),
   ];
   const loginChoiceOptions = [
     ...(currentLoginMethod && !loginMethodOptions.some((option) => option.code === currentLoginMethod)
-      ? [{ value: currentLoginMethod, label: `未确认（代码 ${currentLoginMethod}）` }]
+      ? [{ value: currentLoginMethod, label: "未确认" }]
       : []),
-    ...(loginMethodOptions.map((option) => ({ value: option.code, label: option.displayName ?? `未确认（代码 ${option.code}）`, icon: <LoginPlatformIcon code={option.code} /> }))),
+    ...(loginMethodOptions.map((option) => ({ value: option.code, label: option.displayName ?? "未确认", icon: <LoginPlatformIcon code={option.code} /> }))),
   ];
   const vitalityChoiceOptions = numericChoiceOptions(currentVitality, (options?.vitalityLevels ?? []).filter(level => level >= 4 && level <= 7));
   const bearChoiceOptions = numericChoiceOptions(currentBear, (options?.bearLevels ?? []).filter(level => level >= 4 && level <= 7));
@@ -3117,8 +3117,8 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
                       popupClassName="publish-select-popup"
                       options={[
                         { value: "", label: "未申报" },
-                        ...(currentGrading && !gradingOptions.some((option) => option.code === currentGrading) ? [{ value: currentGrading, label: `未确认（代码 ${currentGrading}）` }] : []),
-                        ...(gradingOptions.map((option) => ({ value: option.code, label: option.displayName ?? `未确认（代码 ${option.code}）` }))),
+                        ...(currentGrading && !gradingOptions.some((option) => option.code === currentGrading) ? [{ value: currentGrading, label: "未确认" }] : []),
+                        ...(gradingOptions.map((option) => ({ value: option.code, label: option.displayName ?? "未确认" }))),
                       ]}
                       onChange={(val) => {
                         changeAttribute("grading_code", val || null);
@@ -3445,7 +3445,7 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
                     <small className="publish-calc-note">根据余额、日耗与出租方案自动核算；修改后需重新核对报价。</small>
                   </div>
                 </div>
-                {fastLocked && options && options.pricingSchema !== "haff-ratio-v2" ? <div className="supply-blockers" role="alert"><strong>极速入口当前不可用</strong><p>当前规则未开放极速比例合同，不能以极速入口上架。</p><Link className="button secondary" href={modeHref(false)}>切换到普通出租</Link></div> : null}
+                {fastLocked && options && options.pricingSchema !== "haff-ratio-v2" ? <div className="supply-blockers" role="alert"><strong>极速入口当前不可用</strong><p>当前规则暂不支持极速出租。</p><Link className="button secondary" href={modeHref(false)}>切换到普通出租</Link></div> : null}
                 {fastLocked && optionsAvailability === "ready" && options?.pricingSchema === "haff-ratio-v2" && rentalModes?.fast?.enabled !== true ? <div className="supply-blockers" role="alert"><strong>极速入口当前不可用</strong><p>{rentalModes?.fast ? "当前规则未启用极速比例，不能以极速入口上架。" : "当前规则未提供极速比例范围，不能以极速入口上架。"}</p><Link className="button secondary" href={modeHref(false)}>切换到普通出租</Link></div> : null}
                 <details className="publish-rule-disclosure"><summary><span>日耗、租期与比例怎么选？</span></summary><div className="publish-disclosure-panel"><ManagedNoticeSections contentKey="placement:PUBLISH_TERM" compact /><p>预计租期按哈夫币余额除以每日消耗推算，不足一天按一天计。租期结束后按约定办理结算，不是手动承诺的成交时间。</p><p>普通比例由平台按账号配置和日耗核定；自定义比例仅支持10M/天。每收入1元对应的哈夫币越多，租金就越低，租客也更容易比较。</p><p>具体可选档位与比例以当前页面为准，不承诺几小时或几天内租出。核价后修改余额、日耗或账号配置，需要重新核对报价。</p></div></details>
               </section>

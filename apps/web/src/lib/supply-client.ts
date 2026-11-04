@@ -97,7 +97,7 @@ export function inventoryEditorRows(
     const label = labelById.get(line.itemId);
     rows.push({
       itemId: line.itemId,
-      name: label?.name ?? `未确认（${line.itemId}）`,
+      name: label?.name ?? "名称待确认",
       unit: label?.unit ?? null,
       quantity: line.quantity,
       priced: catalogState === "ready" ? false : null,

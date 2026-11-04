@@ -65,6 +65,9 @@ export function convertLegacyDisplayFields(row: Record<string, unknown>): Legacy
     service_window_start_minute: knownWindow ? startMinute : null, service_window_end_minute: knownWindow ? endMinute : null,
     service_window_timezone: knownWindow ? "Asia/Shanghai" : null, service_window_cross_midnight: knownWindow ? endMinute! < startMinute! : null,
   };
+  // Keep absent fields absent so already frozen v1 snapshots retain their hashes.
+  if (Object.hasOwn(row, "is_demulan")) attributes.demulan_unlocked = flag("is_demulan");
+  if (Object.hasOwn(row, "is_next_season_pass")) attributes.next_season_pass = flag("is_next_season_pass");
   const resources = RESOURCES.map(([field,code,name]) => {
     try {
       const converted=legacyResourceBaseQuantity(field,row[field],"DAY");
@@ -89,7 +92,9 @@ export function parseLegacyDisplaySnapshot(value: unknown): LegacyDisplaySnapsho
     || Object.keys(x.risk).sort().join(",") !== "banRecord,faceIsSelf,highRiskOwner" || Object.values(x.risk).some(v=>v!==null&&typeof v!=="boolean")
     || !Array.isArray(x.issues) || x.issues.some(v=>typeof v!=="string"||!/^\w+:[A-Z_]+$/.test(v)) || !Array.isArray(x.resources) || x.resources.length!==RESOURCES.length) throw invalid("Invalid legacy display facts");
   const allowed = ["safe_box_code","grading_code","login_method_code","vit_level","bear_level","dive_level","character_level","region_province","region_city","secret_kd","service_window_start_minute","service_window_end_minute","service_window_timezone","service_window_cross_midnight"];
-  if (Object.keys(x.attributes).sort().join(",")!==allowed.sort().join(",")) throw invalid("Unexpected legacy display attribute");
+  const optional = ["demulan_unlocked", "next_season_pass"];
+  if (allowed.some(key=>!Object.hasOwn(x.attributes,key)) || Object.keys(x.attributes).some(key=>!allowed.includes(key)&&!optional.includes(key))) throw invalid("Unexpected legacy display attribute");
+  for (const key of optional) if (Object.hasOwn(x.attributes,key) && x.attributes[key]!==null && typeof x.attributes[key]!=="boolean") throw invalid("Invalid display boolean",key);
   for (const [key,v] of Object.entries(x.attributes)) {
     if (v !== null && !["string","number","boolean"].includes(typeof v) || typeof v==="number"&&!Number.isSafeInteger(v)) throw invalid("Invalid display attribute",key);
     if (typeof v==="string" && (v.length>60 || key.startsWith("region_")&&(!/^[\p{L}\d-]{1,60}$/u.test(v)||publicTextPrivacyIssues(v).length))) throw invalid("Unsafe display attribute",key);

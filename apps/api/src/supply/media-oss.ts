@@ -92,7 +92,7 @@ function storageFailure(): MediaStorageError {
   return new MediaStorageError("media storage operation failed");
 }
 
-function defaultCreateClient(options: OssMediaStorageOptions, credentials: OssCredentials): OssObjectClient {
+export function defaultCreateClient(options: OssMediaStorageOptions, credentials: OssCredentials): OssObjectClient {
   const client = new OSS({
     region: options.region,
     bucket: options.bucket,

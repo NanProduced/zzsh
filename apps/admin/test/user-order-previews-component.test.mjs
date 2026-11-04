@@ -157,11 +157,11 @@ test('account title falls back to the ZZ account number, migrated rows only add 
   assert.equal(h.calls.length, 2);
 });
 
-test('migrated rows show the real account data under the account page version rule without a historical split',async t=>{
-  const original={...unknownOrder,accountDisplayNo:'ZZ-SYNTHETIC-2',orderFacts:{termSeconds:null,resources:[{code:'df_billable_haff',quantity:'12.50',unit:null},{code:'df_billable_coffee',quantity:'0',unit:null}]},accountFacts:{source:'ACCOUNT_PUBLIC_VERSION',resources:[{code:'haff_base',name:'哈夫币',quantity:'97000000',unit:'HAFF_BASE'}],loginMethodText:'微信扫码',termDays:'10',safeBoxText:'6格',gradingText:null}};
+for(const source of ['ACCOUNT_PUBLIC_VERSION','LEGACY_ACCOUNT_SNAPSHOT']) test(`migrated rows consume the exact current account source ${source}`,async t=>{
+  const original={...unknownOrder,accountDisplayNo:'ZZ-SYNTHETIC-2',orderFacts:{termSeconds:null,resources:[{code:'df_billable_haff',quantity:'12.50',unit:null},{code:'df_billable_coffee',quantity:'0',unit:null}]},accountFacts:{source,resources:[{code:'haff_base',name:'哈夫币',quantity:'97000000',unit:'HAFF_BASE'}],loginMethodText:'微信扫码',termDays:'10',safeBoxText:'6格',gradingText:null}};
   const native={...knownOrder,orderFacts:{termSeconds:'86401',resources:[]},accountFacts:{source:'ORDER_VERSION',resources:[{code:'haff_base',name:'哈夫币',quantity:'50000000',unit:'HAFF_BASE'}],loginMethodText:'QQ扫码'}};
   const h=await mount(t,{rows:[original,native]}),old=h.host.querySelector('[data-order-id="synthetic-preview-order-2"]').children[1],current=h.host.querySelector('[data-order-id="synthetic-preview-order-1"]').children[1];
-  assert.match(old.textContent,/账号资料：97 M 哈夫币/);assert.doesNotMatch(old.textContent,/历史|原单资源|12\.50 M|咖啡豆 0/);
+  assert.match(old.textContent,source==='LEGACY_ACCOUNT_SNAPSHOT'?/当前账号资料（迁入时记录）：97 M 哈夫币/:/账号资料：97 M 哈夫币/);assert.doesNotMatch(old.textContent,/历史|原单资源|12\.50 M|咖啡豆 0/);
   assert.equal(old.querySelector('[title]').getAttribute('title'),'97 M 哈夫币 · 6格');assert.match(old.textContent,/旧平台迁入/);
   assert.match(old.textContent,/租期：10天/);assert.match(old.textContent,/登录：微信扫码/);
   assert.match(current.textContent,/下单账号资料：50 M 哈夫币/);assert.match(current.textContent,/租期：86401秒/,'fractional hours are never rounded into a false duration');assert.match(current.textContent,/登录：QQ扫码/);

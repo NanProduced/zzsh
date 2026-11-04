@@ -57,6 +57,7 @@ const TABLE_PURPOSE = {
   idempotency_record: '跨订单、资金与会员域复用的作用域键、请求指纹及原回执。',
   legacy_supply_map: '旧来源类型与原账号键到新账号的映射。', legacy_listing_read_snapshot: '旧账号的只读列表与详情快照。',
   legacy_listing_display_snapshot: '旧账号按版本封存的展示字段与资源快照。', legacy_skin_holding: '旧账号皮肤持有的来源摘要与稳定词条集合。',
+  legacy_account_media_paths: '旧账号展示图和私有处罚图的原相对路径，绑定旧观察版本与来源摘要。',
   account_display_no_counter: '按业务日期分配公开账号编号的计数器。', account_guarantee_proof: '发布账号所需保证依据及来源绑定。',
   profile_avatar: '用户或管理员当前头像与待审上传绑定。', profile_avatar_policy: '自定义头像上传审核策略单例，canonical默认须人工审核。',
   rental_order: '每单独立的租赁订单、价格与规则快照。', payment_confirmation: '订单付款结论及受控或渠道来源。',

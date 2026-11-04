@@ -4,6 +4,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { convertLegacyDisplayFields } from "../src/supply/legacy-display-snapshot";
 import { prepareLegacyTradeIntake, prepareLegacyTradeTakeover, takeoverLegacyTrade, finalizeLegacyTradeTakeover, buildLegacyTradeDeclaration, applyLegacyOrdinaryDraft, type LegacyTradeTakeoverInput, type LegacyTradeIntake, type TradeCatalogItem } from "../src/supply/legacy-trade-takeover";
+import { readLegacyPublishedReference } from "../src/supply/legacy-published-reference";
 import { DELTA_LEGACY_RESOURCES } from "../src/supply/legacy-observation";
 import { canonicalize, computeContentHash, normalizeContentPayload, type ContentDeclaration } from "../src/supply/content-hash";
 import { fingerprintRequest, sha256Hex } from "../src/supply/supply-util";
@@ -33,13 +34,17 @@ function catalog(): TradeCatalogItem[] {
   return DELTA_LEGACY_RESOURCES.map(([field, codes], i) => ({ id: "fixture_item_" + i, code: codes[0], unit: field === "haff" ? "HAFF_BASE" : field.includes("bullet") ? "ROUND" : field === "top_insure_card_num" ? "DAY" : "PIECE", quantityScale: 0 }));
 }
 
-function reviewedMaintenanceFixture(t: TestContext, options: { native?: boolean; selected?: boolean; originalTitle?: string; bumpDraft?: boolean } = {}) {
+function reviewedMaintenanceFixture(t: TestContext, options: { native?: boolean; selected?: boolean; originalTitle?: string; bumpDraft?: boolean; legacyReference?: boolean } = {}) {
   const publishing: typeof import("../src/supply/publishing") = require("../src/supply/publishing");
   const legacy: typeof import("../src/supply/legacy-observation") = require("../src/supply/legacy-observation");
   const auth: typeof import("../src/auth/auth-security") = require("../src/auth/auth-security");
   const access: typeof import("../src/auth/admin-authorization") = require("../src/auth/admin-authorization");
   const funding: typeof import("../src/supply/funding-authority") = require("../src/supply/funding-authority");
   const intake = fixture(); intake.title = options.originalTitle ?? "历史资料待核实"; intake.termOptionCode = "daily-10m";
+  if (options.legacyReference) {
+    intake.media = [];
+    Object.assign(intake.display.attributes, { service_window_start_minute: null, service_window_end_minute: null, service_window_timezone: null, service_window_cross_midnight: null });
+  }
   if (options.selected) { intake.isFullPayout = "1"; bindSource(intake); }
   const original = structuredClone(intake), calls: string[] = [], queries: Array<{ sql: string; values: unknown[] }> = [], audits: any[] = [];
   const actor = { id: "fixture_admin", sessionId: "fixture_session", requestId: "req_fixture" };
@@ -48,7 +53,7 @@ function reviewedMaintenanceFixture(t: TestContext, options: { native?: boolean;
   let stored = { ...buildLegacyTradeDeclaration(intake, catalog()).declaration!, mediaBindings: [] } as unknown as ContentDeclaration;
   if (options.native && !intake.title.trim()) stored.title = `历史资料待核实-${intake.accountId.slice(0, 8)}`;
   const version: any = { id: account.current_version_id, origin: options.native ? "NATIVE" : "LEGACY_OBSERVATION", review_state: options.native ? "DRAFT" : "IMPORTED_UNVERIFIED", attributes: stored.attributes, payload: null, content_hash: null, rule_release_id: null };
-  const controls = { priorOrdinary: true, sourceMismatch: false, displayMismatch: false, observationMismatch: false, authorized: true, accepted: false, formalDone: false, reviewPermission: true };
+  const controls = { priorOrdinary: true, sourceMismatch: false, displayMismatch: false, observationMismatch: false, authorized: true, accepted: false, formalDone: false, reviewPermission: true, legacyReference: options.legacyReference, blockedPaths: [] as string[] };
   const receipts = new Map<string, unknown>();
   const sourceUpdatedAt = new Date("2026-10-15T00:00:00Z"), extractSha256 = "e".repeat(64), evidenceRef = "FIXTURE_DISPLAY";
   const displayDigest = legacyDisplayDigest(account.id, { observationVersionId: original.source.expectedObservationVersionId, baseSourceDigest: original.source.sourceDigest, extractSha256, sourceUpdatedAt: sourceUpdatedAt.toISOString(), evidenceRef, snapshot: original.display });
@@ -57,6 +62,16 @@ function reviewedMaintenanceFixture(t: TestContext, options: { native?: boolean;
     if (sql.includes('FROM "zzsh_supply"."idempotency_record"')) { const row = receipts.get(String(values[0])+":"+String(values[1])); return { rows: row ? [row] : [], rowCount: row ? 1 : 0 }; }
     if (sql.includes('INSERT INTO "zzsh_supply"."idempotency_record"')) { receipts.set(String(values[0])+":"+String(values[1]), { requestFingerprint: values[2], responseStatus: values[3], responseBody: JSON.parse(String(values[4])), publishRequired: values[5] }); return { rows: [], rowCount: 1 }; }
     if (sql.includes('INSERT INTO "zzsh_iam"."audit_event"')) { const details = JSON.parse(String(values[10])); audits.push({ action: values[4], details }); if (values[4] === "supply.legacy.trade_takeover") controls.formalDone = true; return { rows: [], rowCount: 1 }; }
+    if (sql.includes("FROM zzsh_supply.legacy_account_media_paths p")) {
+      assert.match(sql, /h.source_status=3/);
+      assert.match(sql, /m.source_digest=p.source_digest/);
+      const rows = controls.legacyReference && values[0] === account.id ? [{
+        ownerUserId: account.owner_user_id, gameId: account.game_id, observationVersionId: original.source.expectedObservationVersionId,
+        sourceDigest: original.source.sourceDigest, legacyId: original.source.legacyId, gradingCode: original.display.attributes.grading_code,
+        displayPaths: ["accountsImage/20261103/source.png"], blockedPaths: controls.blockedPaths,
+      }] : [];
+      return { rows, rowCount: rows.length };
+    }
     if (sql.includes("legacy_listing_display_snapshot")) return { rows: [{ observation_version_id: original.source.expectedObservationVersionId, base_source_digest: original.source.sourceDigest, extract_sha256: extractSha256, source_updated_at: sourceUpdatedAt, evidence_ref: evidenceRef, snapshot: original.display, display_digest: controls.displayMismatch ? "0".repeat(64) : displayDigest }], rowCount: 1 };
     if (sql.includes("SELECT title,description")) return { rows: [{ title: controls.observationMismatch ? "different original" : original.title, description: original.description }], rowCount: 1 };
     if (sql.includes("SELECT id,code,unit")) return { rows: catalog(), rowCount: catalog().length };
@@ -891,4 +906,47 @@ test("submit and review stop on a placeholder title before any publication write
   version.review_state = "SUBMITTED";
   await assert.rejects(() => publishing.reviewListing(client, account, "fixture_admin", { ...token, decision: "APPROVE", reason: "占位标题" }, gate), /TITLE_REVIEW_REQUIRED/);
   assert.deepEqual(writes, []);
+});
+
+test("legacy declaration carries only proven face and penalty declarations without changing the frozen display", () => {
+  for (const value of [true, false, null]) {
+    const intake = fixture();
+    intake.display.risk.faceIsSelf = value; intake.display.risk.banRecord = value;
+    const frozen = canonicalize(intake.display);
+    const plan = buildLegacyTradeDeclaration(intake, catalog());
+    assert.deepEqual(plan.blockers, []);
+    const attributes = plan.declaration!.attributes as Record<string, unknown>;
+    assert.equal(attributes.face_is_self, value); assert.equal(attributes.ban_record, value);
+    assert.equal(canonicalize(intake.display), frozen);
+    assert.equal(Object.hasOwn(attributes, "highRiskOwner"), false);
+    assert.equal(Object.hasOwn(attributes, "high_risk_owner"), false);
+    assert.equal(Object.hasOwn(attributes, "punishment_img_url"), false);
+  }
+});
+
+test("a source-listed reference permits a native takeover with pending image bytes and an unknown service window", async t => {
+  const f = reviewedMaintenanceFixture(t, { legacyReference: true, originalTitle: "已核来源标题" });
+  const reference = await readLegacyPublishedReference(f.client, f.account.id);
+  assert(reference);
+  assert.equal(await readLegacyPublishedReference(f.client, f.account.id, "0".repeat(64)), null);
+  assert.equal(await readLegacyPublishedReference(f.client, "another-account", reference.digest), null);
+  assert(prepareLegacyTradeIntake({ ...f.intake, description: "手机号 13800138000" }, catalog(), reference.digest).reasons.includes("SOURCE_PUBLIC_TEXT_PRIVACY_PENDING"));
+  assert.deepEqual(prepareLegacyTradeIntake(f.intake, catalog()).reasons, ["LEVEL_OR_WINDOW_MISSING", "MEDIA_UNAVAILABLE"]);
+  f.controls.blockedPaths = ["accountsImage/20261103/source.png"];
+  assert.equal(await readLegacyPublishedReference(f.client, f.account.id, reference.digest), null);
+  const input = { batchId: "reference_batch", intake: f.intake };
+  await assert.rejects(takeoverLegacyTrade(f.client, f.actor, input, f.gate), /MEDIA_UNAVAILABLE/);
+  assert.deepEqual(f.calls, []);
+  f.controls.blockedPaths = [];
+  const result = await takeoverLegacyTrade(f.client, f.actor, input, f.gate);
+  assert.equal((result.body as { state: string }).state, "PUBLISHED");
+  assert.deepEqual(f.calls, ["resolve", "save", "quote", "review"]);
+  assert.equal(f.version.payload.declaration.attributes.legacy_published_reference, reference.digest);
+  assert.equal(f.version.payload.declaration.attributes.service_window_start_minute, null);
+  assert.equal(f.version.payload.declaration.attributes.grading_division, null);
+  assert.deepEqual(f.version.payload.declaration.mediaBindings, []);
+  assert(f.queries.some(query => query.sql.includes("'LEGACY_TAKEOVER_AUTHORIZED'")));
+  assert(!f.queries.some(query => /INSERT INTO .*media_asset/i.test(query.sql)));
+  assert.equal((await takeoverLegacyTrade(f.client, f.actor, input, f.gate)).replayed, true);
+  assert.deepEqual(f.calls, ["resolve", "save", "quote", "review"]);
 });

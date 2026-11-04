@@ -9,6 +9,7 @@ type Basis='REVIEW_CONFIRMATION'|'PRESTART_TERMINATION';
 type Pending={scope:string;key:string;reference:string;body:Record<string,string>};
 const ID=/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const invalid=()=>new AdminApiError(502,'ORIGINAL_REFUND_RECEIPT_INVALID');
+const reviewReason=(reason:string|null)=>({ORIGINAL_NOT_REVIEW_REQUIRED:'原付款不处于待复核状态',ORIGINAL_REASON_NOT_SUPPORTED:'原付款原因不支持此操作',ORIGINAL_NOT_FORMAL_JOINPAY:'原付款来源待核',ORIGINAL_REQUEST_MISMATCH:'原请求信息不一致',ORIGINAL_EVIDENCE_MISMATCH:'付款依据不一致',ORIGINAL_ANCHOR_MISMATCH:'付款关联信息不一致',ORIGINAL_APPLIED_SAME_TRX:'该笔付款已有接纳记录',ORIGINAL_ORDER_NO_AMBIGUOUS:'原订单号不明确',ORIGINAL_POSTING_EXISTS:'原付款已有结算记录',ORIGINAL_AMOUNT_INVALID:'原付款金额待核'} as Record<string,string>)[reason??'']??'原付款资料待核';
 export function originalRefundReceipt(value:unknown,basis:Basis,expected:{orderId:string;reference:string}){
  if(!value||typeof value!=='object'||Array.isArray(value))throw invalid();const r=value as Record<string,any>;
  if(r.contractVersion!==(basis==='REVIEW_CONFIRMATION'?'admin-abnormal-native-refund.v1':'admin-prestart-native-refund.v1')
@@ -52,7 +53,7 @@ export function AdminOriginalRefundPanel({orderId,basis,reference,canWrite,bindi
     `/orders/${encodeURIComponent(orderId)}/prestart-termination/${encodeURIComponent(p.reference)}/refund-requests`;
    const value=await adminRequest(path,p.body,'POST',{'idempotency-key':p.key}),result=originalRefundReceipt(value,basis,{orderId,reference:p.reference});
    if(live.current!==captured)return;sessionStorage.removeItem(store);setPending(null);setReviewed(false);
-   setNote(result.review?`未创建退款意图，需复核原款：${result.reason}`:'本地原款退款意图已登记；渠道提交与银行到账未核定。');onRecorded?.();
+   setNote(result.review?`未创建退款意图，需复核原款：${reviewReason(result.reason)}`:'本地原款退款意图已登记；渠道提交与银行到账未核定。');onRecorded?.();
   }catch(error){if(live.current!==captured)return;
    if(!recovering&&error instanceof AdminApiError&&error.status>=400&&error.status<500){sessionStorage.removeItem(store);setPending(null);}
    setNote(`${friendlyError(error)}${!recovering&&error instanceof AdminApiError&&error.status>=400&&error.status<500?' 请重读原款后再操作。':' 原引用、原内容和原键已保留。'}`);
@@ -63,7 +64,7 @@ export function AdminOriginalRefundPanel({orderId,basis,reference,canWrite,bindi
   <p>{basis==='REVIEW_CONFIRMATION'?'异常款仅支持人工复核后的全额原笔退款；同原商户号多流水时保持复核。':'只分配核准的全额原款责任；已有活跃意图时禁止重复分配，明确失败释放后才可新键重提。'}</p>
   {!reference?<label className="block text-xs text-muted-foreground">原付款确认编号<Input aria-label="异常原付款确认编号" value={id} onChange={e=>setId(e.target.value)} disabled={busy||!!pending} maxLength={128} className="h-8 mt-1 text-xs font-mono" /></label>:null}
   {basis==='REVIEW_CONFIRMATION'?<label className="block">复核依据<Textarea aria-label="异常原款复核依据" value={reason} onChange={e=>setReason(e.target.value)} disabled={busy||!!pending} maxLength={150} rows={2} className="min-h-16 text-xs mt-1" /></label>:null}
-  <label className="flex gap-2 items-center cursor-pointer select-none"><Checkbox name="reviewed" checked={reviewed} onCheckedChange={checked=>setReviewed(checked===true)} disabled={busy||!!pending}/><span>{basis==='REVIEW_CONFIRMATION'?'已核实本单重复/迟到原款，只全额原路退回，不改收款人。':'已核对本单核准终止责任与原退款记录；不覆盖原UNKNOWN。'}</span></label>
+  <label className="flex gap-2 items-center cursor-pointer select-none"><Checkbox name="reviewed" checked={reviewed} onCheckedChange={checked=>setReviewed(checked===true)} disabled={busy||!!pending}/><span>{basis==='REVIEW_CONFIRMATION'?'已核实本单重复/迟到原款，只全额原路退回，不改收款人。':'已核对本单核准终止责任与原退款记录；不覆盖结果待确认的原记录。'}</span></label>
   <Button size="sm" disabled={busy||blocked||!pending&&(!reviewed||!ID.test(id)||basis==='REVIEW_CONFIRMATION'&&reason.trim().length<3)} onClick={()=>void submit()}>
    {busy?'正在登记…':pending?'按原键恢复退款登记':'登记全额原路退款意图'}</Button>
   {note?<p role="status">{note}</p>:null}

@@ -10,7 +10,7 @@ type Proof={canonical:string;digest:string};
 type Confirm={id:string;revision:string;createdAt:string;inputEvidenceId:string;resultEvidenceId:string;planFingerprint:string;actor:LegacyContinuationActor};
 export type LegacyGrowthConsumptionInput={binding:LegacyOrderBinding;subjectUserId:string;recordedAt:string;origin:
   | {kind:"CONTINUATION_CONFIRM";command:Confirm;input:LegacyEvidenceRow;result:LegacyEvidenceRow;components?:Proof}
-  | {kind:"LEGACY_COMPLETED"|"LEGACY_CANCELLED_UNCONSUMED";parentSourceSnapshot:Record<string,string|null>;sourceRecord:Proof;components:Proof}};
+  | {kind:"LEGACY_COMPLETED"|"LEGACY_CANCELLED_UNCONSUMED"|"LEGACY_CANCELLED_FULL_REFUND"|"LEGACY_PENDING_UNSETTLED";parentSourceSnapshot:Record<string,string|null>;sourceRecord:Proof;components:Proof}};
 export type LegacyGrowthProjection={sourceKey:string;orderId:string;knowledge:"KNOWN"|"UNKNOWN"|"EXCLUDED";reason:string|null;facts:SettledContributionFact[];
   evidence:{parentSourceDigest:string;basisDigest:string|null;basisRef:string|null;componentDigest:string|null};observedResourceChargeCents:string|null};
 const cents=(x:unknown)=>{if(typeof x!=="string" || !/^(0|[1-9]\d{0,23})$/.test(x))throw new Error("COMPONENT_AMOUNT_INVALID");return BigInt(x);};
@@ -28,7 +28,18 @@ export function projectLegacyGrowthConsumption(input:LegacyGrowthConsumptionInpu
       base.evidence.basisDigest=o.sourceRecord.digest;base.evidence.basisRef=sourceKey(b);return {...base,knowledge:"EXCLUDED",reason:"NOT_PAID",facts:[]};
     }
     if(b.sourcePayStatus!==1 || b.paidCents===null)return unknown("PAID_SOURCE_UNPROVEN");
-    if(input.origin.kind==="LEGACY_CANCELLED_UNCONSUMED"){
+    if(input.origin.kind==="LEGACY_PENDING_UNSETTLED"){
+      const o=input.origin,row=parsedProof(o.sourceRecord),p=parsedProof(o.components);
+      if(![2,3,6,7,8,9].includes(b.sourceOrderStatus) || row.order_status!==String(b.sourceOrderStatus) || row.pay_is!=="1" || row.is_settle!=="0" || b.completedAt!==null || row.confirm_time!==null&&row.confirm_time!=="0"
+        || sha256Hex(canonicalize(o.parentSourceSnapshot))!==b.sourceDigest || Object.keys(o.parentSourceSnapshot).some(k=>row[k]!==o.parentSourceSnapshot[k]) || row.id!==b.legacyId || row.user_id!==b.legacyRenterId || row.accounts_id!==b.legacyAccountId || row.sale_user_id!==b.legacyOwnerId)return unknown("UNSETTLED_SOURCE_BINDING_CONFLICT");
+      if(!receipt || receipt.subjectUserId!==input.subjectUserId || !receipt.expectedSourceKeys.includes(base.sourceKey))return unknown("UNSETTLED_SCOPE_UNPROVEN");
+      if(!admittedComponentDigests?.has(o.components.digest))return unknown("COMPONENT_EVIDENCE_NOT_ADMITTED");
+      if(p.schema!=="legacy-consumption-exclusion.v1" || p.classification!=="PAID_NOT_EFFECTIVELY_SETTLED" || p.parentSourceDigest!==b.sourceDigest || p.basisDigest!==o.sourceRecord.digest || p.legacyOrderId!==b.legacyId || p.subjectUserId!==input.subjectUserId || p.cutoff!==receipt.cutoff || typeof p.oldRuleEvidenceRef!=="string" || !p.oldRuleEvidenceRef || p.oldRuleEvidenceRef.length>512)return unknown("UNSETTLED_EVIDENCE_BINDING_CONFLICT");
+      const paidAt=legacyEpochTimestamp(row.pay_time);if(!paidAt || cents(b.paidCents)!==cents(legacyPlanYuanToCents(row.pay_money as string)) || legacyTimeMicros(paidAt)>legacyTimeMicros(receipt.cutoff) || legacyTimeMicros(paidAt)>legacyTimeMicros(input.recordedAt))return unknown("UNSETTLED_TIME_OR_AMOUNT_CONFLICT");
+      base.evidence.basisDigest=o.sourceRecord.digest;base.evidence.basisRef=base.sourceKey;base.evidence.componentDigest=o.components.digest;
+      return {...base,knowledge:"EXCLUDED",reason:"NOT_EFFECTIVELY_SETTLED",facts:[]};
+    }
+    if(input.origin.kind==="LEGACY_CANCELLED_UNCONSUMED" || input.origin.kind==="LEGACY_CANCELLED_FULL_REFUND"){
       const o=input.origin,row=parsedProof(o.sourceRecord);
       if(b.sourceOrderStatus!==5 || b.completedAt!==null || row.order_status!=="5" || row.pay_is!=="1"
         || sha256Hex(canonicalize(o.parentSourceSnapshot))!==b.sourceDigest || Object.keys(o.parentSourceSnapshot).some(k=>row[k]!==o.parentSourceSnapshot[k])
@@ -36,14 +47,15 @@ export function projectLegacyGrowthConsumption(input:LegacyGrowthConsumptionInpu
       if(!receipt || receipt.subjectUserId!==input.subjectUserId || !receipt.expectedSourceKeys.includes(base.sourceKey) || !Array.isArray(receipt.refundReviewEvidenceRefs))return unknown("CANCELLATION_SCOPE_UNPROVEN");
       if(!admittedComponentDigests?.has(o.components.digest))return unknown("COMPONENT_EVIDENCE_NOT_ADMITTED");
       const p=parsedProof(o.components),listed=(digest:string)=>receipt.refundReviewEvidenceRefs.some(ref=>ref===digest || ref.endsWith(`:${digest}`));
-      if(p.schema!=="legacy-consumption-exclusion.v1" || p.classification!=="PAID_CANCELLED_UNCONSUMED" || p.parentSourceDigest!==b.sourceDigest || p.basisDigest!==o.sourceRecord.digest
+      const fullRefund=o.kind==="LEGACY_CANCELLED_FULL_REFUND";
+      if(p.schema!=="legacy-consumption-exclusion.v1" || p.classification!==(fullRefund?"PAID_CANCELLED_FULL_REFUND":"PAID_CANCELLED_UNCONSUMED") || p.parentSourceDigest!==b.sourceDigest || p.basisDigest!==o.sourceRecord.digest
         || p.legacyOrderId!==b.legacyId || p.subjectUserId!==input.subjectUserId || p.cutoff!==receipt.cutoff || typeof p.oldRuleEvidenceRef!=="string" || !p.oldRuleEvidenceRef || p.oldRuleEvidenceRef.length>512)return unknown("CANCELLATION_EVIDENCE_BINDING_CONFLICT");
       if(!listed(o.components.digest))return unknown("CANCELLATION_NOT_IN_RECEIPT_LINEAGE");
       const money=(v:unknown)=>{if(typeof v!=="string")throw new Error("CANCELLATION_AMOUNT_UNPROVEN");return cents(legacyPlanYuanToCents(v));};
-      // This is an explicit unfulfilled-source class; NULL measurement/return is never converted into a zero amount.
+      // Only the unconsumed class needs absent measurements; the full-refund class proves a financial void below.
       if(row.express_is!=="0" || row.is_settle!=="0" || row.express_time!==null&&row.express_time!=="0" || row.confirm_time!==null&&row.confirm_time!=="0"
-        || row.expend_haff!==null || row.return_order_money!==null
-        || ["awm_bullet_num","level6_bullet_num","level6_helmet_num","level6_armor_num","top_insure_card_num","barrett_bullet_num","coffee_num"].some(field=>row[field]!==null&&row[field]!=="0"))return unknown("CANCELLATION_NOT_UNCONSUMED");
+        || !fullRefund&&(row.expend_haff!==null || row.return_order_money!==null
+        || ["awm_bullet_num","level6_bullet_num","level6_helmet_num","level6_armor_num","top_insure_card_num","barrett_bullet_num","coffee_num"].some(field=>row[field]!==null&&row[field]!=="0")))return unknown("CANCELLATION_NOT_UNCONSUMED");
       // Old addOrder stores the material prepayment before fulfillment; only zero actual usage plus the full typed refund below excludes growth.
       const paid=cents(b.paidCents);if(paid<=0n || money(row.pay_money)!==paid || money(row.need_pay_money)!==paid || money(row.expend_pay_money)>paid)return unknown("CANCELLATION_AMOUNT_CONFLICT");
       const rows:Record<string,unknown>[]=[],digests:string[]=[];
@@ -63,7 +75,8 @@ export function projectLegacyGrowthConsumption(input:LegacyGrowthConsumptionInpu
       const cutoff=legacyTimeMicros(receipt.cutoff),recorded=legacyTimeMicros(input.recordedAt),payAt=instant(row.pay_time),cancelAt=instant(row.cancel_time),times=[payAt,cancelAt,instant(payment.pay_time),instant(refund.create_time),instant(refund.update_time),instant(log.create_time),instant(log.update_time)];
       if(cancelAt<payAt || instant(payment.pay_time)>cancelAt || times.some(t=>t>cutoff || t>recorded || t<payAt) || instant(refund.update_time)<instant(refund.create_time) || instant(log.update_time)<instant(log.create_time))return unknown("CANCELLATION_TIME_CONFLICT");
       base.evidence.basisDigest=o.sourceRecord.digest;base.evidence.basisRef=base.sourceKey;base.evidence.componentDigest=o.components.digest;
-      return {...base,knowledge:"EXCLUDED",reason:"CANCELLED_UNCONSUMED",facts:[]};
+      // A never-confirmed proposal may retain measurements after cancellation; its full typed refund voids its price.
+      return {...base,knowledge:"EXCLUDED",reason:fullRefund?"CANCELLED_FULL_REFUND":"CANCELLED_UNCONSUMED",facts:[]};
     }
     let paid:bigint,returned:bigint,items:bigint|null=null,rental:bigint|null=null,minimum=0n,effectiveAt:string,version:string,revision:number,proof:Proof|undefined;
     if(input.origin.kind==="CONTINUATION_CONFIRM"){

@@ -31,7 +31,7 @@ export type SkinTag = {
   isCollectible?: boolean | null;
   defaultState?: "UNKNOWN" | "DEFAULT" | "NON_DEFAULT";
 };
-export type ListingMedia = { assetId: string; url: string; category?: "SHOWCASE" | "PENALTY" };
+export type ListingMedia = { assetId: string; url: string; category?: "SHOWCASE" | "PENALTY"; legacy?: boolean };
 export type ListingCardData = {
   historicalReadOnly?: boolean;
   canCreateOrder?: boolean;
@@ -170,15 +170,10 @@ function quantityLabel(unit: string, quantity: string, code: string | undefined)
   }
   return quantity;
 }
-function unmapped(label: PublicCodeLabel | null | undefined, raw: unknown): string {
-  const code = label?.code ?? (raw === null || raw === undefined || raw === "" ? "" : String(raw));
-  return code ? `未确认（代码 ${code}）` : "未确认";
-}
 function mappedCodeValue(
   label: PublicCodeLabel | null | undefined,
-  raw: unknown,
 ): string {
-  return label?.displayName ?? unmapped(label, raw);
+  return label?.displayName ?? "未确认";
 }
 function dailyConsumptionLabel(termOption: PublicListing["termOption"]): string | null {
   const quantity = termOption?.dailyConsumption?.quantity;
@@ -195,12 +190,12 @@ export function conditionLines(
     let value: string;
     if (key === "safe_box_code") {
       value = context.attributeDisplay?.safeBox
-        ? mappedCodeValue(context.attributeDisplay.safeBox, raw)
-        : context.safeBox?.displayName ?? unmapped(null, raw);
+        ? mappedCodeValue(context.attributeDisplay.safeBox)
+        : context.safeBox?.displayName ?? "未确认";
     } else if (key === "grading_code") {
-      value = mappedCodeValue(context.attributeDisplay?.grading, raw);
+      value = mappedCodeValue(context.attributeDisplay?.grading);
     } else if (key === "login_method_code") {
-      value = mappedCodeValue(context.attributeDisplay?.loginMethod, raw);
+      value = mappedCodeValue(context.attributeDisplay?.loginMethod);
     } else if (key === "next_season_pass" || key === "demulan_unlocked") {
       value = booleanDeclarationText(key, raw);
     } else if (CONDITION_LEVELS.has(key)) {
@@ -217,7 +212,7 @@ export function conditionLines(
     lines.push({
       key: "term_option",
       label: "租期规则",
-      value: termOption.displayName ?? `未确认（代码 ${termOption.code}）`,
+      value: termOption.displayName ?? "未确认",
     });
     const daily = dailyConsumptionLabel(termOption);
     if (daily) lines.push({ key: "daily_consumption", label: "每日消耗", value: daily });
@@ -297,7 +292,7 @@ export function toListingCard(listing: PublicListing): ListingCardData {
     depositLabel: formatMoneyLabel(listing.quote.tenantDeposit),
     payableTotalLabel: formatMoneyLabel(listing.quote.tenantPayableTotal),
     termLabel: termLabel(listing.quote.termSeconds),
-    termOptionLabel: listing.termOption?.displayName ?? (listing.termOption ? `未确认（代码 ${listing.termOption.code}）` : null),
+    termOptionLabel: listing.termOption?.displayName ?? (listing.termOption ? "未确认" : null),
     conditionLines: conditions,
     loginMethod: listing.attributeDisplay?.loginMethod ?? null,
     ...projectListingSkins(listing),
@@ -307,6 +302,9 @@ export function toListingCard(listing: PublicListing): ListingCardData {
   };
 }
 function projectListingMedia(listing: PublicListing): ListingMedia[] {
+  if (listing.media.length === 0 && Array.isArray(listing.legacyImages)) {
+    return [...listing.legacyImages].sort((a, b) => a.position - b.position).map(({ position, url }) => ({ assetId: `legacy-slot-${position}`, url, legacy: true }));
+  }
   return [...listing.media]
     .sort((a, b) => a.position - b.position)
     .map(({ assetId, url, category }) => ({ assetId, url, ...(category ? { category } : {}) }));

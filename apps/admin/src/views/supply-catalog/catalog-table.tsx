@@ -339,7 +339,7 @@ export function CatalogObjectTable({
     <TableRow>
       <TableCell colSpan={columns.length + 2} className="py-8">
         <div className="space-y-2 text-xs text-muted-foreground">
-          <p className="text-sm font-medium text-foreground">{!contractReady ? "目录合同未接入" : searching ? "没有匹配的条目" : `暂无${OBJECT_LABEL[kind]}`}</p>
+          <p className="text-sm font-medium text-foreground">{!contractReady ? "目录资料暂不可用" : searching ? "没有匹配的条目" : `暂无${OBJECT_LABEL[kind]}`}</p>
           {contractReady ? <p>{searching ? query.trim() ? `已加载内容中无匹配：${query.trim()}。搜索只覆盖当前已加载目录，不代表全库不存在。` : "当前身份筛选下没有匹配条目；筛选仅覆盖已加载目录。" : retiredCategories && kind === "skins" ? "新词条不再选择旧分类；保存草稿后核实实际皮肤类型与身份。" : OBJECT_EMPTY_HINT[kind]}</p> : null}
           {searching ? <Button type="button" size="sm" variant="outline" onClick={onClearQuery}>{filterActive ? "清除筛选" : "清除搜索"}</Button> : (
             createReason ? (

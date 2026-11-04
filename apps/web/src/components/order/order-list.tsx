@@ -95,8 +95,8 @@ function resourceSummary(order: Order, includeHaff = true): string | null {
  * already states once in the footnote, so a row never has to say "see the detail" to look complete.
  */
 function statusHint(order: Order): string | null {
-  if (order.readOnly) return order.status === "PAID" ? "进度以订单记录为准" : null;
   const stage = orderSettlementStageLabel(order);
+  if (order.readOnly) return order.status === "PAID" ? stage ?? "进度待确认" : null;
   if (stage) {
     return order.stage?.viewerActionRequired ? `${stage} · 需要你处理` : stage;
   }

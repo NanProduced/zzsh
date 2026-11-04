@@ -73,21 +73,25 @@ function MembershipSummary({ summary }: { summary: Record<string, unknown> }) {
 /** Policy publish has no entitlement target/user fields; only the frozen draft metadata is available today. */
 function DistributionSummary({ business }: { business: BusinessView }) {
   const change = business.policyChange;
-  if (!change || (change.schema !== "distribution-policy-change.v1" && change.schema !== "distribution-policy-initialize.v1")) return <NotApplicable reason="分销变更快照未提供，不能用当前政策替代本次申请。" />;
- const initial = change.schema === "distribution-policy-initialize.v1";
+  if (!change || !["distribution-policy-change.v1", "distribution-policy-initialize.v1", "distribution-policy-initialize.v2"].includes(change.schema ?? "")) return <NotApplicable reason="分销变更快照未提供，不能用当前政策替代本次申请。" />;
+  const legacy = change.schema === "distribution-policy-initialize.v2";
+  const initial = legacy || change.schema === "distribution-policy-initialize.v1";
   const changes = change.changes && typeof change.changes === "object" && !Array.isArray(change.changes) ? change.changes : {};
+  const legacySource = changes.legacySource as {levelNames?:Record<string,string>} | undefined;
+  const levels = Array.isArray(changes.levels) ? changes.levels : [];
   const changed = (key: string) => Object.prototype.hasOwnProperty.call(changes, key);
   const percent = (key: string) => changed(key) ? text(changes, key) === null ? null : `${text(changes, key)}%` : "本次未变更";
   const version = business.result?.knowledge === "KNOWN" && typeof business.result.policyVersionId === "string" && business.result.policyVersionId.trim() ? business.result.policyVersionId : null;
   return <Section title="分销政策变更快照">
     <FactGrid>
       <Fact label={initial ? "首版计佣状态" : "新增计佣"} value={typeof changes.enabled === "boolean" ? changes.enabled ? "启用" : "暂停" : null} />
-      <Fact label="租客来源佣金比例" value={initial ? (text(changes, "renterPercent") === null ? null : `${text(changes, "renterPercent")}%`) : percent("renterPercent")} />
-      <Fact label="号主来源佣金比例" value={initial ? (text(changes, "ownerPercent") === null ? null : `${text(changes, "ownerPercent")}%`) : percent("ownerPercent")} />
+      {legacy ? null : <Fact label="租客来源佣金比例" value={initial ? (text(changes, "renterPercent") === null ? null : `${text(changes, "renterPercent")}%`) : percent("renterPercent")} />}
+      {legacy ? null : <Fact label="号主来源佣金比例" value={initial ? (text(changes, "ownerPercent") === null ? null : `${text(changes, "ownerPercent")}%`) : percent("ownerPercent")} />}
       {initial ? <Fact label="最低计提 / 结算等待" value={`${text(changes, "minimumAccrualCents") ?? "未知"} 分 / ${text(changes, "settlementDelayDays") ?? "未知"} 天`} /> : null}
       <Fact label="申请理由" value={change.reason} />
     </FactGrid>
-    <p className="text-xs leading-relaxed text-muted-foreground">{initial ? "这是首版完整配置，不沿用任何旧等级或默认比例。" : "仅展示本次申请的改动项；未列项目沿用原政策。"}新开关不清除既有关系或已冻结订单，批准也不代表已执行。</p>
+    {legacy ? <dl className="space-y-2 text-sm">{levels.map(level => <div key={level.code}><dt>{legacySource?.levelNames?.[level.code] ?? level.code}</dt><dd>购买 {level.renterPercent}% · 上架 {level.ownerPercent}%</dd></div>)}</dl> : null}
+    <p className="text-xs leading-relaxed text-muted-foreground">{legacy ? "首版比例来自本次申请冻结的旧平台档位。" : initial ? "这是首版完整配置，不沿用任何旧等级或默认比例。" : "仅展示本次申请的改动项；未列项目沿用原政策。"}新开关不清除既有关系或已冻结订单，批准也不代表已执行。</p>
     <Fact label="本次执行结果版本" value={version} mono />
     <p className="text-xs leading-relaxed text-muted-foreground">{version ? "已读到本次执行的结果引用；当前全局政策是否仍使用该版本需另行核对。" : "尚未读到可核对的执行结果，不按已生效显示。"}</p>
   </Section>;
@@ -295,8 +299,7 @@ export function BusinessSummary({ business, operationCode }: { business: Busines
           <Info aria-hidden="true" />
           <AlertTitle>{BUSINESS_NOT_CONNECTED}</AlertTitle>
           <AlertDescription>
-            这笔申请的受权摘要与领域结果暂未接入，本页不解析载荷猜测含义；请联系管理员确认接入进度。
-            操作标识见页面底部「技术追溯」。
+            暂时无法读取这笔申请的业务摘要和处理结果，请联系管理员核对。
           </AlertDescription>
         </Alert>
       </Section>
@@ -332,7 +335,7 @@ export function BusinessSummary({ business, operationCode }: { business: Busines
 
       {!distributionOperation && business.summaryAvailable !== false && summary ? (
         <Section title="申请时快照">
-          {settlementOperation ? <SettlementSummary summary={summary} /> : policyOperation ? <PolicySummary summary={summary} /> : entitlementOperation ? <MembershipSummary summary={summary} /> : <NotApplicable reason="专用业务摘要尚未接入；保留申请说明，办理资格仍以服务端动作为准。" />}
+          {settlementOperation ? <SettlementSummary summary={summary} /> : policyOperation ? <PolicySummary summary={summary} /> : entitlementOperation ? <MembershipSummary summary={summary} /> : <NotApplicable reason="业务摘要暂不可用；请查看申请说明并按当前办理资格处理。" />}
           <FactGrid>
             {(entitlementOperation || settlementOperation) && business.game ? <Fact label="游戏" value={business.game.name ?? business.game.id} /> : null}
             <Fact label="申请理由" value={text(summary, "reason")} />

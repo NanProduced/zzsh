@@ -4,7 +4,7 @@ import { createHash } from "node:crypto";
 import { canonicalize } from "../src/supply/content-hash";
 import { legacyOwnerUserId } from "../src/supply/legacy-user-migration";
 import { legacyAccountId } from "../src/legacy-load/legacy-account-seam";
-import { accountColumns, binaryFlag, planBatchDigest, planLegacyOrder, planLegacyUser, planLegacyUserBatch, planSourceChain, projectIdentityStatus, publicSourceChain, publicUserPlan } from "../src/legacy-load/user-order-offline-plan";
+import { accountColumns, binaryFlag, listingSnapshot, planBatchDigest, planLegacyOrder, planLegacyUser, planLegacyUserBatch, planSourceChain, projectIdentityStatus, publicSourceChain, publicUserPlan } from "../src/legacy-load/user-order-offline-plan";
 import type { LegacyOrderReadInput } from "../src/order/legacy-order-read";
 
 const digest = "a".repeat(64);
@@ -123,7 +123,7 @@ const party = (legacyId: string, mobile: string) => ({
   nickname: "secret-nick", mobile, sourceCreatedAt: null, sourceUpdatedAt: null,
   status: { realNameBound: false, ageAdult: null, disabled: false, deleted: false }, legacyPassword: null,
 });
-const accountRow = (overrides: Record<string, string> = {}) => ({
+const accountRow = (overrides: Record<string, string | null> = {}) => ({
   id: "10", user_id: "30", game_id: "1", status: "3", is_delete: "0", no: "ACCTNO", price_tenant: "1.00", extra_goods_total_price_tenant: "2.00", deposit_amount: "3.00", rental_days: "1", default_consume_type: "1", update_time: "1", ...overrides,
 });
 test("historical display accepts exact old or payout-extended source shapes without defaulting the new fact", () => {
@@ -136,6 +136,23 @@ test("historical display accepts exact old or payout-extended source shapes with
     assert.equal(extended.is_full_payout, value);
   }
   assert.equal(accountColumns({ ...old, token: "not-an-allowed-source-field" }), "ACCOUNT_ROW_UNSUPPORTED");
+});
+
+test("missing old account numbers preserve historical amounts without inventing an alias", () => {
+  const numbered = listingSnapshot(accountRow());
+  assert.equal(numbered.snapshot?.resourceNo, "ACCTNO");
+  for (const no of [null, ""]) {
+    const row = accountRow({ no });
+    assert.equal(accountColumns(row), null);
+    assert.deepEqual(listingSnapshot(row), { ...numbered, snapshot: { ...numbered.snapshot, resourceNo: null } });
+    assert.equal(row.no, no, "raw source and its digest input stay unchanged");
+    const input = chainInput();
+    const planned = planSourceChain({ ...input, account: { ...input.account, row } });
+    assert.equal(planned.steps.find(item => item.step === "readSnapshot")?.snapshotReady, true);
+    assert.equal(planned.steps.find(item => item.step === "order")?.disposition, "PARAMETER_READY");
+  }
+  for (const no of [" ", "bad/number"]) assert.deepEqual(listingSnapshot(accountRow({ no })).missing, ["no"]);
+  assert.deepEqual(listingSnapshot(accountRow({ no: null, price_tenant: "" })).missing, ["price_tenant"]);
 });
 function chainOrder(row = accountRow()) {
   const sourceRow = { id: "1", order_sn: "legacy-1", accounts_id: row.id, user_id: "20", sale_user_id: row.user_id, order_status: "5", pay_is: "1", need_pay_money: "1.00", pay_money: "1.00", deposit_amount: "0.00", return_order_money: "0.00", pay_time: "0", create_time: "1", cancel_time: "0", confirm_time: "0" };

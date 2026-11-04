@@ -322,7 +322,7 @@ test("five registered businesses render their authorized summaries, restricted v
       assert.ok(text(view).includes("此次申请改变什么"), `${title}: 变更说明区块存在`);
       assert.ok(text(view).includes(business.changeSummary), `${title}: 渲染受权变更摘要`);
       assert.ok(text(view).includes("申请时快照"), `${title}: 冻结快照单独成区`);
-      assert.equal(text(view).includes("业务摘要未接入"), false, `${title}: 有摘要时不得声称未接入`);
+      assert.equal(text(view).includes("业务摘要暂不可用"), false, `${title}: 有摘要时不得声称不可用`);
     } finally {
       await view.cleanup();
     }
@@ -465,8 +465,8 @@ test("missing actions or an old DTO fails closed instead of inferring eligibilit
   delete legacy.candidateAvailability;
   const view = await renderDetail(legacy);
   try {
-    await waitFor(() => text(view).includes("业务摘要未接入"));
-    assert.ok(text(view).includes("受权摘要与领域结果暂未接入"), "缺摘要时明确说未接入而不是渲染空 JSON");
+    await waitFor(() => text(view).includes("业务摘要暂不可用"));
+    assert.ok(text(view).includes("暂时无法读取这笔申请的业务摘要和处理结果"), "缺摘要时明确不可用而不是渲染空 JSON");
     assert.ok(text(view).includes("技术追溯"), "操作标识收进技术追溯");
     assert.ok(text(view).includes("本次操作资格暂未确认"), "缺 actions 明确说明且不给办理入口");
     for (const label of ["批准", "驳回", "执行"]) {
@@ -1175,8 +1175,8 @@ test("the workbench lists registered businesses with real initiation entries and
     assert.ok(text(view).includes("仅测试"), "测试操作被标为仅测试");
     assert.ok(text(view).includes("测试操作在当前环境未开启"), "测试操作不作为运营发起入口");
     assert.equal(view.rootNode.querySelector("form"), null, "工作台不再提供自由文本新建申请表单");
-    assert.ok(text(view).includes("供给规则发布的审批绑定"), "规则发布的后端绑定缺口被显式登记");
-    assert.ok(text(view).includes("本页不提供临时入口或占位按钮绕过"), "不用临时入口绕过");
+    assert.ok(text(view).includes("当前不能在此发起供给规则发布"), "不可用状态清楚展示");
+    assert.ok(!text(view).includes("占位按钮"), "页面不展示开发过程说明");
   } finally {
     await view.cleanup();
   }
@@ -1203,7 +1203,7 @@ test("list rows lead with the business title and expose per-row eligibility from
     assert.ok(buttonByText("查看并处理", rows[0]), "有可办理动作的行给出处理入口");
     assert.ok(buttonByText("查看", rows[1]), "无可办理动作的行只给查看");
     assert.ok(text(view).includes("本页过滤") === false, "未过滤时不谎称已按全集过滤");
-    assert.ok(text(view).includes("按条件查全集与统计暂未接入"), "全集筛选缺口以运营语言明示");
+    assert.ok(text(view).includes("筛选仅覆盖本页"), "筛选范围以运营语言明示");
   } finally {
     await view.cleanup();
   }
@@ -1753,7 +1753,7 @@ test("OPS02: unsupported operation summaries never become member or entitlement 
     try{
       assert.match(text(view),/已取得的申请说明/);
       if(code==='distribution.policy.publish') assert.match(text(view),/分销变更快照未提供/);
-      else assert.match(text(view),/专用业务摘要尚未接入/);
+      else assert.match(text(view),/业务摘要暂不可用/);
       for(const field of ['礼遇类型','目标用户','押金权益','生效开始（快照）'])assert.equal(text(view).includes(field),false,code+': '+field);
       assert.equal(writes.length,0);
     }finally{await view.cleanup();}

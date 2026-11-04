@@ -23,7 +23,10 @@
     "./message-actions.css": "./src/message-actions.css",
     "./message-media": "./src/message-media.tsx",
     "./message-media.css": "./src/message-media.css",
-    "./profile-image": "./src/profile-image.tsx"
+    "./profile-image": "./src/profile-image.tsx",
+    "./account-media-placeholder": "./src/account-media-placeholder.tsx",
+    "./legacy-account-image": "./src/legacy-account-image.tsx",
+    "./legacy-account-media-grid": "./src/legacy-account-media-grid.tsx"
   },
   "dependencies": {
     "@zzsh/content": "0.0.0",
@@ -38,6 +41,6 @@
     "react-dom": "19.2.8"
   },
   "scripts": {
-    "test": "node --experimental-strip-types --test test/content-markdown.test.mjs test/display-labels.test.mjs test/order-team-empty.test.mjs test/avatar-crop.test.mjs test/profile-image.test.mjs"
+    "test": "node --experimental-strip-types --test test/content-markdown.test.mjs test/display-labels.test.mjs test/order-team-empty.test.mjs test/avatar-crop.test.mjs test/profile-image.test.mjs test/account-media-placeholder.test.mjs test/legacy-account-image.test.mjs test/legacy-account-media-grid.test.mjs"
   }
 }

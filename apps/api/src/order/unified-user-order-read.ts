@@ -3,7 +3,7 @@ import { readSettlementStages } from "./settlement-record";
 import type { PoolClient } from "pg";
 import { conflict, invalid, sha256Hex } from "../supply/supply-util";
 import { ORDER_FIELDS, ORDER_FROM, projectOrder, type OrderRow } from "./order";
-import { legacyContinuationReady, LEGACY_ORDER_STATUS_SQL } from "./legacy-order-read";
+import { legacyContinuationReady, legacyOrderLifecycleStage, LEGACY_ORDER_STATUS_SQL } from "./legacy-order-read";
 import { legacyUserOrderFields, legacyUserOrderFrom, projectUserLegacyOrder, type LegacyUserOrderRow } from "./legacy-user-order-read";
 
 type Filter = { party: "renter" | "owner"; status?: string; accountId?: string; orderNo?: string; createdFrom?: string; createdTo?: string; stage?: string; limit: number; cursor?: string };
@@ -90,8 +90,9 @@ export async function listUnifiedUserOrders(client: PoolClient, userId: string, 
     const stages = filter.stage ? await readSettlementStages(client, rows.filter(row => row.origin === "NATIVE").map(row => row.id), userId) : null;
     for (const row of rows) {
       scanned++; lastScanned = row;
-      const stage = row.origin === "NATIVE" ? stages?.get(row.id) : undefined;
-      if (stage) stageById.set(row.id, stage);
+      const legacy = row.record as LegacyUserOrderRow;
+      const stage = row.origin === "NATIVE" ? stages?.get(row.id) : filter.stage ? legacyOrderLifecycleStage(legacy.continuationStage ?? legacy.sourceOrderStatus, legacy.sourcePayStatus, filter.party) : undefined;
+      if (stage && row.origin === "NATIVE") stageById.set(row.id, stage);
       if (filter.stage && (stage?.code ?? "UNKNOWN") === "UNKNOWN") stageUnknown = true;
       if (!filter.stage || (stage?.code ?? "UNKNOWN") === filter.stage) matched.push(row);
       if (matched.length > filter.limit) break;
@@ -104,16 +105,15 @@ export async function listUnifiedUserOrders(client: PoolClient, userId: string, 
   const last = page[page.length - 1];
   const items: Record<string, unknown>[] = page.map(row => row.origin === "NATIVE"
     ? { ...projectOrder(row.record as OrderRow, filter.party), source: { origin: "NATIVE" as const }, readOnly: false }
-    : projectUserLegacyOrder(row.record as LegacyUserOrderRow, userId));
+    : projectUserLegacyOrder(row.record as LegacyUserOrderRow, userId, filter.party));
   // B2: page-batched frozen listing facts (raw rows carry accountId even when the projection hides it).
   const facts = await readOrderUserFacts(client, userId, page.map(row => {
     const r = row.record as { accountId?: string | null; versionId?: string | null; contentHash?: string | null; ownerUserId?: string | null };
     return { origin: row.origin as "NATIVE" | "LEGACY", orderId: row.id, accountId: r.accountId ?? null, versionId: r.versionId ?? null, contentHash: r.contentHash ?? null, ownerUserId: r.ownerUserId ?? null };
   }));
   page.forEach((row, index) => applyOrderUserFacts(items[index]!, facts.get(`${row.origin}:${row.id}`)));
-  // B3: per-page settlement stage; legacy orders have no settlement model -> stage null.
   const stages = filter.stage ? stageById : await readSettlementStages(client, page.filter(row => row.origin === "NATIVE").map(row => row.id), userId);
-  page.forEach((row, index) => { items[index]!.stage = row.origin === "NATIVE" ? stages.get(row.id) ?? null : null; });
+  page.forEach((row, index) => { if (row.origin === "NATIVE") items[index]!.stage = stages.get(row.id) ?? null; });
   const next = matched.length > filter.limit ? last : !exhausted ? lastScanned : undefined;
   return {
     subjectId: userId,

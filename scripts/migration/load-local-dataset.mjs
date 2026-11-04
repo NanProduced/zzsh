@@ -5,11 +5,12 @@ import { createInterface } from "node:readline";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
+import { writeLoadCheckpoint } from "./local-load-checkpoint.mjs";
 const require = createRequire(import.meta.url), { Client, Pool } = require("pg");
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const args = process.argv.slice(2), option = name => { const i = args.indexOf(name); return i < 0 ? undefined : args[i + 1]; };
 if (!args.includes("--execute") && !args.includes("--recover")) {
-    console.log(JSON.stringify({ action: "PLAN", target: "zzsh_test_regression", required: ["--execute", "--dataset", "--dataset-sha", "--oid", "--nonce", "--actor-id", "--session-id", "--credentials", "--out"], connections: 0, credentialReads: 0 }));
+    console.log(JSON.stringify({ action: "PLAN", target: "zzsh_test_regression", required: ["--execute", "--dataset", "--dataset-sha", "--oid", "--nonce", "--actor-id", "--session-id", "--credentials", "--out", "--funds-source", "--funds-source-sha"], connections: 0, credentialReads: 0 }));
     process.exit(0);
 }
 if (process.version !== "v24.20.0")
@@ -22,6 +23,18 @@ const manifestBytes = readFileSync(join(dataset, "manifest.json"));
 if (sha(manifestBytes) !== option("--dataset-sha"))
     throw new Error("DATASET_MANIFEST_SHA_MISMATCH");
 const manifest = JSON.parse(manifestBytes);
+const schemaBinding = option("--schema-binding");
+const expectedSchema = schemaBinding ? JSON.parse(schemaBinding) : null;
+if (expectedSchema && (!Array.isArray(expectedSchema) || !expectedSchema.length || expectedSchema.some(hash => !/^[a-f0-9]{64}$/.test(hash))))
+    throw new Error("ORDERED_SCHEMA_HASHES_REQUIRED");
+const executionWindow = option("--execution-window") ? JSON.parse(option("--execution-window")) : null;
+if (executionWindow && (!Object.keys(executionWindow).every(k => ["notBefore", "expiresAt"].includes(k)) ||
+    ![executionWindow.notBefore, executionWindow.expiresAt].every(time => /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/.test(time)) ||
+    !(Date.parse(executionWindow.expiresAt) > Date.parse(executionWindow.notBefore)))) throw new Error("ROUND_EXECUTION_WINDOW_INVALID");
+function assertRoundWindow() {
+    if (executionWindow && !(Date.now() >= Date.parse(executionWindow.notBefore) && Date.now() < Date.parse(executionWindow.expiresAt)))
+        throw new Error("ROUND_EXECUTION_WINDOW_INACTIVE");
+}
 const contactAppend = args.includes("--contact-append"), numberOnly = args.includes("--legacy-number-only");
 if (contactAppend && numberOnly) throw new Error("ONE_ADDITIVE_PHASE_PER_EXECUTION");
 if (contactAppend || numberOnly) {
@@ -68,14 +81,23 @@ let state = existsSync(statePath) ? JSON.parse(readFileSync(statePath)) : null;
 const binding = { datasetSha256: sha(manifestBytes), database: "zzsh_test_regression", oid: expectedOid, nonce: expectedNonce, actorId: actor.id, sessionId: actor.sessionId };
 if (state && JSON.stringify(state.binding) !== JSON.stringify(binding))
     throw new Error("CHECKPOINT_BINDING_CHANGED");
+if (state && JSON.stringify(state.executionWindow ?? null) !== JSON.stringify(executionWindow))
+    throw new Error("CHECKPOINT_EXECUTION_WINDOW_CHANGED");
+if (state && JSON.stringify(state.schemaHashes ?? null) !== JSON.stringify(expectedSchema))
+    throw new Error("CHECKPOINT_SCHEMA_BINDING_CHANGED");
 if (state?.pending && !args.includes("--recover"))
     throw new Error("PENDING_TRANSACTION_READ_ONLY_RECOVERY_REQUIRED");
 state ??= { schema: "zzsh.local-legacy-load.v1", binding, status: "STARTED", startedAt: new Date().toISOString(), phases: {}, pending: null, queries: 0, quarantine: [], checkpoints: 0 };
+if (executionWindow) state.executionWindow = executionWindow;
+if (expectedSchema) state.schemaHashes = expectedSchema;
 const displayOnly = args.includes("--enrich-display");
 const openingOnly = args.includes("--import-openings");
 const holdingsOnly = args.includes("--enrich-holdings");
-if ([displayOnly, openingOnly, holdingsOnly, contactAppend, numberOnly].filter(Boolean).length > 1) throw new Error("ONE_ADDITIVE_PHASE_PER_EXECUTION");
-if (displayOnly && !args.includes("--recover") && !["LOCAL_DATASET_CORE_AND_FINANCIAL_DOMAINS_COMMITTED_REVIEW_REQUIRED", "LOCAL_DATASET_DISPLAY_ENRICHMENT_COMMITTED_REVIEW_REQUIRED", "LOCAL_DATASET_STORED_OPENINGS_COMMITTED_REVIEW_REQUIRED", "LOCAL_DATASET_SKIN_HOLDINGS_COMMITTED_REVIEW_REQUIRED", "FAILED_STOPPED"].includes(state.status))
+const coreOnly = args.includes("--core-only");
+if (!displayOnly && !openingOnly && !holdingsOnly && !contactAppend && !numberOnly && (!option("--funds-source") || !/^[a-f0-9]{64}$/.test(option("--funds-source-sha") ?? ""))) throw new Error("BOUND_FINANCIAL_SOURCE_SUPPLEMENT_REQUIRED");
+if(!coreOnly&&!displayOnly&&!openingOnly&&!holdingsOnly&&!contactAppend&&!numberOnly&&!args.includes("--recover")&&(!option("--refund-attempts")||!/^[a-f0-9]{64}$/.test(option("--refund-attempts-sha")??"")))throw new Error("BOUND_REFUND_ATTEMPT_SOURCE_REQUIRED");
+if ([displayOnly, openingOnly, holdingsOnly, contactAppend, numberOnly, coreOnly].filter(Boolean).length > 1) throw new Error("ONE_ADDITIVE_PHASE_PER_EXECUTION");
+if (displayOnly && !args.includes("--recover") && !["LOCAL_DATASET_CORE_ONLY_COMMITTED_FINANCE_NOT_RUN", "LOCAL_DATASET_CORE_AND_FINANCIAL_DOMAINS_COMMITTED_REVIEW_REQUIRED", "LOCAL_DATASET_DISPLAY_ENRICHMENT_COMMITTED_REVIEW_REQUIRED", "LOCAL_DATASET_STORED_OPENINGS_COMMITTED_REVIEW_REQUIRED", "LOCAL_DATASET_SKIN_HOLDINGS_COMMITTED_REVIEW_REQUIRED", "FAILED_STOPPED"].includes(state.status))
     throw new Error("CORE_DATASET_KNOWN_CHECKPOINT_REQUIRED");
 if (displayOnly && !["users", "accounts", "orders"].every(domain => state.phases[domain]?.complete === true))
     throw new Error("CORE_SOURCE_PHASES_NOT_COMPLETE");
@@ -83,9 +105,16 @@ if (openingOnly && (!state.phases.users?.complete || !state.phases.financeHistor
     throw new Error("CORE_FINANCE_KNOWN_CHECKPOINT_REQUIRED");
 if (holdingsOnly && (!["users", "accounts", "orders"].every(domain => state.phases[domain]?.complete) || state.status === "RUNNING"))
     throw new Error("CORE_SOURCE_PHASES_NOT_COMPLETE");
+const fundsSourceBinding=option("--funds-source")?{path:resolve(option("--funds-source")),sha256:option("--funds-source-sha")}:null;
+if(fundsSourceBinding){
+ if(!fundsSourceBinding.path.toLowerCase().startsWith("e:\\zzsh-local-state\\restricted\\")||sha(readFileSync(join(fundsSourceBinding.path,"receipt.json")))!==fundsSourceBinding.sha256)throw new Error("FUNDS_SOURCE_BINDING_CHANGED");
+ if(state.fundsSourceBinding&&JSON.stringify(state.fundsSourceBinding)!==JSON.stringify(fundsSourceBinding))throw new Error("CHECKPOINT_FUNDS_SOURCE_CHANGED");
+}
+const refundAttemptsBinding=option("--refund-attempts")?{path:resolve(option("--refund-attempts")),sha256:option("--refund-attempts-sha")}:null;
+if(refundAttemptsBinding){if(!refundAttemptsBinding.path.toLowerCase().startsWith("e:\\zzsh-local-state\\restricted\\")||sha(readFileSync(join(refundAttemptsBinding.path,"receipt.json")))!==refundAttemptsBinding.sha256||state.refundAttemptsBinding&&JSON.stringify(state.refundAttemptsBinding)!==JSON.stringify(refundAttemptsBinding))throw new Error("REFUND_ATTEMPT_CHECKPOINT_BINDING_CHANGED");}
 let checkpointOwned = false;
 function resetRunCleanup() { state.poolClosed=false; state.unlock=false; state.maintenanceClosed=false; state.rollbackConfirmed=false; }
-function save() { if (!checkpointOwned) return; const file = statePath + ".new"; writeFileSync(file, JSON.stringify(state, null, 2) + "\n", { flag: "wx" }); renameSync(file, statePath); }
+function save() { if (checkpointOwned) writeLoadCheckpoint(statePath, state); }
 function event(value) { if (!checkpointOwned) return; appendFileSync(eventsPath, JSON.stringify({ at: new Date().toISOString(), ...value }) + "\n"); }
 const credentialFile = option("--credentials");
 if (!credentialFile)
@@ -100,7 +129,8 @@ const subject = mod("auth/identity-subject"), subjectKey = subject.deriveIdentit
 let client, held = false;
 const gameIds = new Map();
 const domainFile = name => manifest.files[name] ? join(dataset, manifest.files[name].file) : null;
-async function checkpointBatch(domain, batch, start, body) {
+async function checkpointBatch(domain, batch, start, body, beforeBatch) {
+    assertRoundWindow();
     state.pending = { domain, start, end: start + batch.length, sourceIds: batch.map(row => row.sourceId ?? row.parentLegacyOrderId), phaseBodyDigest: sha(canonical(batch)), stage: "BEFORE_BEGIN" };
     save();
     event({ domain, start, end: start + batch.length, event: "INTENT" });
@@ -108,6 +138,7 @@ async function checkpointBatch(domain, batch, start, body) {
     const outcomes = [];
     await client.query("BEGIN");
     try {
+        await beforeBatch?.(batch);
         for (const row of batch) {
             await client.query("SAVEPOINT source_row");
             try {
@@ -115,7 +146,8 @@ async function checkpointBatch(domain, batch, start, body) {
                 await client.query("RELEASE SAVEPOINT source_row");
             }
             catch (error) {
-                if (contactAppend || numberOnly) throw error;
+                // Each item in this phase contains an entire coverage chunk.
+                if (contactAppend || numberOnly || domain === "financeEmptyCoverage") throw error;
                 if (error?.status !== 400 && error?.status !== 409)
                     throw error;
                 await client.query("ROLLBACK TO SAVEPOINT source_row");
@@ -129,8 +161,9 @@ async function checkpointBatch(domain, batch, start, body) {
         await client.query("SET CONSTRAINTS ALL IMMEDIATE");
         state.pending.stage = "COMMIT_INTENT";
         save();
+        assertRoundWindow();
         commitSent = true;
-        await client.query("COMMIT");
+        if ((await client.query("COMMIT")).command !== "COMMIT") throw new Error("ROUND_COMMIT_ACK_NOT_CONFIRMED");
         commitAck = true;
         state.phases[domain].nextIndex = start + batch.length;
         state.phases[domain].created += outcomes.filter(row => row?.replayed === false).length;
@@ -156,7 +189,7 @@ async function checkpointBatch(domain, batch, start, body) {
         }
         else {
             try {
-                await client.query("ROLLBACK");
+                if ((await client.query("ROLLBACK")).command !== "ROLLBACK") throw new Error("ROUND_ROLLBACK_ACK_NOT_CONFIRMED");
                 state.pending = null;
                 state.status = "FAILED_ROLLED_BACK";
                 save();
@@ -170,9 +203,9 @@ async function checkpointBatch(domain, batch, start, body) {
         throw error;
     }
 }
-async function runItems(domain, items, body, batchSize = 100) {
+async function runItems(domain, items, body, batchSize = 100, beforeBatch) {
     state.phases[domain] ??= { nextIndex: 0, created: 0, replayed: 0, quarantined: 0 };
-    const phase = state.phases[domain], started = performance.now(), queriesBefore = state.queries;
+    const phase = state.phases[domain], started = performance.now(), queriesBefore = state.queries, checkpointsBefore = state.checkpoints;
     const segment = { startedAt: new Date().toISOString(), startIndex: phase.nextIndex, queriesBefore, batchSize, concurrency: 1 };
     phase.timingSegments ??= [];
     phase.timingSegments.push(segment);
@@ -183,18 +216,18 @@ async function runItems(domain, items, body, batchSize = 100) {
             if (index++ < phase.nextIndex) continue;
             batch.push(row);
             if (batch.length === batchSize) {
-                await checkpointBatch(domain, batch, index - batch.length, body);
+                await checkpointBatch(domain, batch, index - batch.length, body, beforeBatch);
                 batch = [];
             }
         }
-        if (batch.length) await checkpointBatch(domain, batch, index - batch.length, body);
+        if (batch.length) await checkpointBatch(domain, batch, index - batch.length, body, beforeBatch);
         phase.complete = true;
         save();
-        console.log(JSON.stringify({ status: "PHASE_COMPLETE", domain, ...phase }));
     }
     finally {
-        Object.assign(segment, { finishedAt: new Date().toISOString(), monotonicElapsedMs: performance.now() - started, endIndex: phase.nextIndex, queriesAfter: state.queries, queryDelta: state.queries - queriesBefore, complete: phase.complete === true });
+        Object.assign(segment, { finishedAt: new Date().toISOString(), monotonicElapsedMs: performance.now() - started, endIndex: phase.nextIndex, committedItems: phase.nextIndex - segment.startIndex, committedChunks: state.checkpoints - checkpointsBefore, queriesAfter: state.queries, queryDelta: state.queries - queriesBefore, complete: phase.complete === true });
         save();
+        if (phase.complete) console.log(JSON.stringify({ status: "PHASE_COMPLETE", domain, ...phase }));
     }
 }
 async function runPhase(domain, body, batchSize = 100) { const file = domainFile(domain); if (file)
@@ -229,16 +262,22 @@ try {
     // A previous writer may have finished while this invocation was validating its inputs.
     if (existsSync(statePath)) state=JSON.parse(readFileSync(statePath));
     if (JSON.stringify(state.binding)!==JSON.stringify(binding)) throw new Error("CHECKPOINT_BINDING_CHANGED");
+    if (JSON.stringify(state.executionWindow ?? null) !== JSON.stringify(executionWindow)) throw new Error("CHECKPOINT_EXECUTION_WINDOW_CHANGED");
+    if (JSON.stringify(state.schemaHashes ?? null) !== JSON.stringify(expectedSchema)) throw new Error("CHECKPOINT_SCHEMA_BINDING_CHANGED");
+    if(fundsSourceBinding&&state.fundsSourceBinding&&JSON.stringify(state.fundsSourceBinding)!==JSON.stringify(fundsSourceBinding))throw new Error("CHECKPOINT_FUNDS_SOURCE_CHANGED");
     if (state.pending&&!args.includes("--recover")) throw new Error("PENDING_TRANSACTION_READ_ONLY_RECOVERY_REQUIRED");
     client = await pool.connect();
     const original = client.query.bind(client);
     client.query = (...args) => { state.queries++; return original(...args); };
-    const actual = (await client.query("SELECT d.oid::text,pg_get_userbyid(d.datdba) owner,shobj_description(d.oid,'pg_database') marker,current_user role,r.oid::text role_oid,current_setting('zzsh.regression_run') nonce,r.rolsuper,r.rolcreatedb,r.rolcreaterole,r.rolbypassrls FROM pg_database d JOIN pg_roles r ON r.rolname=current_user WHERE d.datname=current_database()")).rows[0];
+    const actual = (await client.query("SELECT d.oid::text,d.datdba::int AS owner_oid,pg_get_userbyid(d.datdba) owner,shobj_description(d.oid,'pg_database') marker,current_user role,r.oid::text role_oid,current_setting('zzsh.regression_run') nonce,r.rolsuper,r.rolcreatedb,r.rolcreaterole,r.rolbypassrls FROM pg_database d JOIN pg_roles r ON r.rolname=current_user WHERE d.datname=current_database()")).rows[0];
     if (actual.oid !== expectedOid || actual.nonce !== expectedNonce || actual.owner !== "zzsh" || actual.marker !== "zzsh:regression-test:v1" || actual.role !== credentials.migration.name || actual.role_oid !== credentials.migration.oid || actual.rolsuper || actual.rolcreatedb || actual.rolcreaterole || actual.rolbypassrls)
         throw new Error("TARGET_IDENTITY_CHANGED");
     checkpointOwned = true;
     resetRunCleanup();
     state.resource = actual;
+    if(fundsSourceBinding)state.fundsSourceBinding=fundsSourceBinding;
+    if(refundAttemptsBinding&&state.refundAttemptsBinding&&JSON.stringify(state.refundAttemptsBinding)!==JSON.stringify(refundAttemptsBinding))throw new Error("REFUND_ATTEMPT_CHECKPOINT_BINDING_CHANGED");
+    if(refundAttemptsBinding)state.refundAttemptsBinding=refundAttemptsBinding;
     if (args.includes("--recover")) {
         const domains = Object.keys(state.phases), counts = (await client.query("SELECT (SELECT count(*)::text FROM zzsh_iam.user_identity_state WHERE provider='legacy_mysql_restore') legacy_users,(SELECT count(*)::text FROM zzsh_supply.legacy_supply_map WHERE source_system='legacy_mysql_restore') legacy_accounts,(SELECT count(*)::text FROM zzsh_order.legacy_order_read_snapshot) legacy_orders")).rows[0];
         writeFileSync(join(output, "recovery-" + Date.now() + ".json"), JSON.stringify({ mode: "READ_ONLY", binding, pending: state.pending, domains, counts, knowledge: state.pending ? "EXACT_PENDING_KEYS_REQUIRE_INSPECTION" : "NO_PENDING_COMMIT" }, null, 2), { flag: "wx" });
@@ -247,6 +286,20 @@ try {
     else {
         await mod("database/business-migrations").assertBusinessMigrationPrefix(client);
         await client.query("BEGIN READ ONLY");
+        if (expectedSchema) {
+            const actualSchema = (await client.query("SELECT hash FROM zzsh_business_meta.migrations ORDER BY id")).rows.map(row => row.hash);
+            if (JSON.stringify(actualSchema) !== JSON.stringify(expectedSchema)) throw new Error("ROUND_SCHEMA_NOT_EXACT");
+            if (!Object.keys(state.phases).length) {
+                const occupied = (await client.query(`SELECT EXISTS(SELECT FROM zzsh_iam.user_identity_state WHERE provider='legacy_mysql_restore')
+                    OR EXISTS(SELECT FROM zzsh_supply.legacy_supply_map)
+                    OR EXISTS(SELECT FROM zzsh_order.legacy_order_read_snapshot)
+                    OR EXISTS(SELECT FROM zzsh_order.personal_finance_observation)
+                    OR EXISTS(SELECT FROM zzsh_order.personal_finance_observation_coverage)
+                    OR EXISTS(SELECT FROM zzsh_order.finance_opening_basis)
+                    OR EXISTS(SELECT FROM zzsh_order.rental_order) AS occupied`)).rows[0]?.occupied;
+                if (occupied !== false) throw new Error("ROUND_TARGET_NOT_EMPTY");
+            }
+        }
         await mod("finance/personal-finance-maintenance").authorizeFinanceMaintenance(client, actor);
         for (const code of Object.values(manifest.gameBindings)) {
             const game = (await client.query("SELECT id,enabled FROM zzsh_supply.game WHERE code=$1", [code])).rows[0];
@@ -257,10 +310,13 @@ try {
             gameIds.set(code, game.id);
         }
         await client.query("ROLLBACK");
+        assertRoundWindow();
         state.gameBindings = Object.fromEntries(gameIds);
         state.status = "RUNNING";
         const startingResource=JSON.parse(readFileSync(join(dirname(resolve(credentialFile)),"resource.json")));
         if(startingResource.oid!==expectedOid||startingResource.nonce!==expectedNonce)throw new Error("PROTECTED_DATASET_RESOURCE_DRIFT");
+        if (expectedSchema && !contactAppend && !numberOnly && startingResource.protectedDataset
+            && startingResource.protectedDataset.manifestSha256 !== binding.datasetSha256) throw new Error("DIFFERENT_DATASET_ALREADY_PROTECTED");
         protectDataset(startingResource, "BUILDING");
         writeFileSync(join(dirname(resolve(credentialFile)),"resource.json"),JSON.stringify(startingResource,null,2)+"\n");
         save();
@@ -270,13 +326,13 @@ try {
             if (numberOnly) await applyNumberBindings(ctx);
             else {
                 await applyContactAppend(ctx, { applyUsers, applyAccounts, applyOrders, display: { directory: option("--display-plan"), sha256: option("--display-plan-sha") },
-                    holdings: { source: option("--holding-source"), sourceSha256: option("--holding-source-sha"), dictionary: option("--skin-dictionary"), dictionarySha256: option("--skin-dictionary-sha") } });
+                    holdings: { source: option("--holding-source"), sourceSha256: option("--holding-source-sha"), dictionary: option("--skin-dictionary"), dictionarySha256: option("--skin-dictionary-sha"), mappingOverlay: option("--holding-mapping-overlay"), mappingOverlaySha256: option("--holding-mapping-overlay-sha") } });
             }
             state.status = numberOnly ? "LOCAL_DATASET_PUBLIC_NUMBERS_COMMITTED_REVIEW_REQUIRED" : "LOCAL_DATASET_CONTACT_APPEND_COMMITTED_REVIEW_REQUIRED";
         }
         else if (holdingsOnly) {
             const { applyHoldingDomain } = await import("./local-target-holdings.mjs");
-            await applyHoldingDomain({ client, actor, mod, manifest, state, output, domainFile, readRows, runItems, save, event }, { source: option("--holding-source"), sourceSha256: option("--holding-source-sha"), dictionary: option("--skin-dictionary"), dictionarySha256: option("--skin-dictionary-sha") });
+            await applyHoldingDomain({ client, actor, mod, manifest, state, output, domainFile, readRows, runItems, save, event }, { source: option("--holding-source"), sourceSha256: option("--holding-source-sha"), dictionary: option("--skin-dictionary"), dictionarySha256: option("--skin-dictionary-sha"), mappingOverlay: option("--holding-mapping-overlay"), mappingOverlaySha256: option("--holding-mapping-overlay-sha") });
             state.status = "LOCAL_DATASET_SKIN_HOLDINGS_COMMITTED_REVIEW_REQUIRED";
         }
         else if (openingOnly) {
@@ -293,9 +349,14 @@ try {
             await applyUsers();
             await applyAccounts();
             await applyOrders();
-            const { applyFinancialDomains } = await import("./local-target-finance.mjs");
-            await applyFinancialDomains({ client, actor, mod, manifest, state, output, domainFile, readRows, runItems, save, event });
-            state.status = "LOCAL_DATASET_CORE_AND_FINANCIAL_DOMAINS_COMMITTED_REVIEW_REQUIRED";
+            if(coreOnly){
+                if(!["users","accounts","orders"].every(domain=>state.phases[domain]?.complete===true))throw new Error("CORE_SOURCE_PHASES_NOT_COMPLETE");
+                state.status="LOCAL_DATASET_CORE_ONLY_COMMITTED_FINANCE_NOT_RUN";
+            }else{
+                const { applyFinancialDomains } = await import("./local-target-finance.mjs");
+                await applyFinancialDomains({ client, actor, mod, manifest, state, output, domainFile, readRows, runItems, save, event, apiDist:api,fundsSource:fundsSourceBinding,refundAttemptsSource:refundAttemptsBinding });
+                state.status = "LOCAL_DATASET_CORE_AND_FINANCIAL_DOMAINS_COMMITTED_REVIEW_REQUIRED";
+            }
         }
         save();
     }

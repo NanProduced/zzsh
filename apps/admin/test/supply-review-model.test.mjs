@@ -151,7 +151,7 @@ test("supervision views, sources and state labels are explicit", () => {
   assert.equal(reviewStateLabel("PUBLISHED"), "已发布(直发)");
   assert.equal(reviewStateLabel("APPROVED"), "已通过(历史审核)");
   assert.equal(reviewStateLabel("SUBMITTED"), "历史待审");
-  assert.equal(reviewStateLabel("SOMETHING_NEW"), "SOMETHING_NEW");
+  assert.equal(reviewStateLabel("SOMETHING_NEW"), "状态待确认");
   assert.equal(publicationSourceLabel("OWNER_DIRECT"), "号主直发");
   assert.equal(publicationSourceLabel("LEGACY_APPROVED"), "历史审核发布");
   assert.equal(publicationSourceLabel(null), "来源未确认");
@@ -257,7 +257,7 @@ test("attribute facts mirror the API fields and flag unconfirmed codes", () => {
   assert.equal(byLabel["小段位"].value, "未申报");
   assert.equal(byLabel["本人脸声明"].value, "未提供");
   assert.equal(byLabel["封禁记录声明"].value, "未提供");
-  assert.deepEqual(byLabel["安全箱配置"], { label: "安全箱配置", value: "未确认(代码 box-a)", unconfirmed: true });
+  assert.deepEqual(byLabel["安全箱配置"], { label: "安全箱配置", value: "未确认", unconfirmed: true });
   assert.equal(byLabel["段位"].value, "传奇");
   assert.equal(byLabel["每日消耗"].value, "10 M 哈夫币");
   assert.equal(byLabel["上号时间"].unconfirmed, true);

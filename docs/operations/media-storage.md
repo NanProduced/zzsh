@@ -24,6 +24,12 @@ OSS 目标使用 `OSS_BUCKET`、`OSS_REGION`、`OSS_ENDPOINT`、`OSS_OBJECT_PREF
 
 最后在同版本应用上验证目录/账号/内容显示、正式上传与原键重试、私有原图授权与跨身份拒绝、素材撤回后公开 URL 拒绝、重启后读取及所选凭据的持续可用性。对象复制成功、数据库迁移成功和业务页面验收分别记录。
 
+## 三角洲计费物品初始图
+
+仓库内上架页所用的八张物品图及其 code、单位、尺寸、字节数和 SHA256 记录在 `scripts/migration/catalog-item-media-manifest.json`。在仓库根目录运行 `node scripts/migration/check-catalog-item-media.mjs` 可离线校验原图、完整解码和公开衍生图摘要；它不连接数据库或对象存储。衍生图摘要由当前安装的 Sharp 计算，实际结果以目标服务生成及读回为准。
+
+新环境在业务目录初始化后，按清单核对对应游戏、code、单位和精度，再使用现有管理端素材上传、审核和目录维护流程绑定 `ITEM_MEDIA`；哈夫币无需绑定。保存原图及公开图读回的 SHA256、MIME 和对应资产 ID；既有不同素材先核实，不能因同 code 直接覆盖。目录绑定会递增 `catalogRevision`，依赖该版本的发布准入须重新核验。此清单不替代图片使用权、对象存储、权限与真实页面验收。
+
 ## 默认头像对象
 
 四个默认头像是预审、内容寻址的 256×256 WebP 衍生图，清单与对象字节在 `apps/api/assets/profile-avatars/`。它们和其他媒体共用同一个 backend，不需要原图上传：

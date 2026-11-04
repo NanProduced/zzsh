@@ -10,7 +10,13 @@ test('U04 frozen calculation disclosure is preserved while private base, parties
  const r=earningsDetail({...base,projectionVersion:2,item:native},'self',native.id);
  assert.equal(r.item.calculation.percent,'5');assert.equal(r.item.calculation.policyVersion,'frozen-policy');assert.equal(r.item.calculation.orderNumber,null);
  assert.doesNotMatch(JSON.stringify(r),/PRIVATE_BASE|PRIVATE_FEE|PRIVATE_PARTY|PRIVATE_RAW/);
+ const v3=earningsDetail({...base,projectionVersion:2,item:{...native,calculation:{...native.calculation,basis:'LEGACY_RENTAL_CAPTURE_MINUS_OWNER_AND_REFUND',beneficiaryLevelCode:'legacy_2',beneficiaryLevelName:'白银会员',percent:'30'}}},'self',native.id);
+ assert.equal(v3.item.calculation.beneficiaryLevelName,'白银会员');
+ assert.equal(v3.item.calculation.basis,'LEGACY_RENTAL_CAPTURE_MINUS_OWNER_AND_REFUND');
+ assert.doesNotMatch(JSON.stringify(v3),/PRIVATE_BASE|PRIVATE_FEE|PRIVATE_PARTY|PRIVATE_RAW/);
  const history=earningsDetail({...base,projectionVersion:2,item:{...old,calculation:{knowledge:'NOT_RECORDED',reason:'HISTORICAL_CALCULATION_NOT_RECORDED'}}},'self',old.id);
+ const recorded=earningsDetail({...base,projectionVersion:2,item:{...old,calculation:{knowledge:'RECORDED_SOURCE',percent:'20.00',levelId:'3',baseCents:'PRIVATE_BASE'}}},'self',old.id);
+ assert.deepEqual(recorded.item.calculation,{knowledge:'RECORDED_SOURCE',percent:'20.00',levelId:'3'});
  assert.equal(history.item.calculation.knowledge,'NOT_RECORDED');
 });
 test('history remains an observation and source fields are stripped by the shared DTO',()=>{const r=earningsPage({...page,privateSource:'secret',items:[{...old,sourceDigest:'secret',phone:'secret'}]},'self','ALL');assert.equal(r.count,null);assert.equal(r.items[0].includedInOpening,true);assert.equal(r.items[0].dueAt,null);assert(!JSON.stringify(r).includes('secret'));});

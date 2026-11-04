@@ -46,7 +46,7 @@ function CurrentBusiness({adapter,user,refreshNonce,onOpenPath,tab}:Props&{tab:B
           <TableCell className="whitespace-normal align-top"><Button variant="link" className="h-auto max-w-full justify-start whitespace-normal p-0 text-left text-foreground" onClick={()=>onOpenPath(`/supply/accounts/${encodeURIComponent(account.accountId)}?${sourceQuery(user,tab)}`,`账号 ${account.displayNo??''}`)}><span className="break-all">{account.displayNo??'账号编号待核'}</span><ArrowUpRightIcon aria-hidden className="size-3.5 shrink-0"/></Button>
             {account.game?.name?<span className="mt-1 block text-xs text-muted-foreground">{account.game.name}</span>:null}</TableCell>
           <TableCell className="align-top"><div className="flex flex-wrap justify-end gap-1">
-            <Badge variant={account.publication?.currentlyPublished===true?'secondary':'unknown'}>{account.publication?.currentlyPublished===true?'已上架':account.publication?.currentlyPublished===false?'当前未上架':'上架待核'}</Badge>
+            <Badge variant={account.publication?.publiclyListed===true||account.publication?.currentlyPublished===true?'secondary':'unknown'}>{account.publication?.publiclyListed===true?'公开展示':account.publication?.currentlyPublished===true?'已上架':account.publication?.currentlyPublished===false?'当前未上架':'上架待核'}</Badge>
             {account.ownerPaused===true?<Badge variant="warning">号主暂停</Badge>:null}{account.staffRestricted===true?<Badge variant="destructive">运营限制</Badge>:null}
             {typeof account.ownerPaused!=='boolean'||typeof account.staffRestricted!=='boolean'?<Badge variant="unknown">状态待核</Badge>:null}
           </div></TableCell>

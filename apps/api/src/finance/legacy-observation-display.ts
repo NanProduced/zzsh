@@ -1,18 +1,18 @@
 import { createHash } from 'node:crypto';
 import { canonicalize } from '../supply/content-hash';
-import { sourceSignedYuanToCents, sourceYuanToCents } from './personal-finance-read';
+import { sourceSignedYuanToCents, sourceYuanToCents,projectHistoricalRefundAttempts,type HistoricalRefundAttempt } from './personal-finance-read';
 import type { FinanceEntry } from './admin-finance-read';
 import type { FinanceOrderFact } from './admin-finance-order-read';
 
 export type HistoricalFinancePurpose = 'SETTLEMENT_INCOME'|'OWNER_RENTAL_INCOME'|'DISTRIBUTION_INCOME'
   |'WITHDRAWAL_APPLICATION'|'WITHDRAWAL_DEBIT'|'WITHDRAWAL_REJECTED_RETURN'|'TRANSFER_FAILED_RETURN'|'WECHAT_WITHDRAWAL_FAILED_RETURN'
-  |'PLATFORM_CREDIT'|'PLATFORM_DEBIT'|'DEPOSIT_COMPENSATION'|'TASK_SETTLEMENT'|'UNKNOWN';
-export type HistoricalFinanceDisplay = {
+  |'PAYMENT_RECORD'|'REFUND_RECORD'|'PLATFORM_CREDIT'|'PLATFORM_DEBIT'|'DEPOSIT_COMPENSATION'|'TASK_SETTLEMENT'|'UNKNOWN';
+export type HistoricalFinanceDisplay = {refundAttempts?:HistoricalRefundAttempt[];sourceRefundFlags?:string[];
   changeType:string|null; purposeCode:HistoricalFinancePurpose; purposeLabel:string; originalLogNumber:string|null;
   recordedAmountCents:string|null; balanceAfterCents:string|null; feeCents:string|null; netCents:string|null;
   originalStatus:string|null; originalStatusLabel:string|null; channelState:'UNVERIFIED';
   association:{state:'MATCHED'|'UNRESOLVED'|'AMBIGUOUS'|'DENIED';kind:'ORDER'|'WITHDRAWAL'|'DISTRIBUTION'|'TASK'|'UNKNOWN';
-    documentRef:string|null;number:string|null;path:string|null;role:'OWNER'|'BENEFICIARY'|'WITHDRAWER'|null;
+    documentRef:string|null;number:string|null;path:string|null;role:'OWNER'|'RENTER'|'BENEFICIARY'|'WITHDRAWER'|null;
     originalStatus:string|null;originalStatusLabel:string|null};
 };
 export type HistoricalRelationAccess = {adminId:string;isBoss:boolean;orderRead:boolean;financeDocumentRead:boolean;resourceRead?:boolean};
@@ -34,11 +34,12 @@ const snapshot=(row:Raw):Raw=>row.extra_evidence?.snapshot??{};
 export function historicalObservationDisplay(row:Raw):HistoricalFinanceDisplay {
   const source=snapshot(row),changeType=row.source_entity==='la_log_earnings'?code(source.legacyChangeType):null;
   const [purposeCode,purposeLabel]=row.source_entity==='la_withdraw_apply'?['WITHDRAWAL_APPLICATION','提现申请记录'] as const:
-    row.source_entity==='la_distribution_order'?['DISTRIBUTION_INCOME','分销收益记录'] as const:purposes[changeType??'']??['UNKNOWN','用途待核'];
+    row.source_entity==='la_distribution_order'?['DISTRIBUTION_INCOME','分销收益记录'] as const:
+    row.source_entity==='la_pay_order'?['PAYMENT_RECORD','旧平台付款记录'] as const:row.source_entity==='la_refund_record'?['REFUND_RECORD','旧平台退款记录'] as const:purposes[changeType??'']??['UNKNOWN','用途待核'];
   const originalStatus=code(row.source_status);
-  return {changeType,purposeCode,purposeLabel,originalLogNumber:row.source_entity==='la_log_earnings'?text(source.legacyLogNumber):null,
+  return {...(row.source_entity==='la_refund_record'?{refundAttempts:projectHistoricalRefundAttempts(source.sourceAttempts,row.source_id),sourceRefundFlags:source.sourceRefundFlags??[]}:{}),changeType,purposeCode,purposeLabel,originalLogNumber:row.source_entity==='la_log_earnings'?text(source.legacyLogNumber):null,
     recordedAmountCents:money(row.amount),balanceAfterCents:money(row.balance_after,true),feeCents:money(row.fee,true),netCents:money(row.net,true),
-    originalStatus,originalStatusLabel:row.source_entity==='la_withdraw_apply'?withdrawalStates[originalStatus??'']??null:row.source_entity==='la_distribution_order'?distributionStates[originalStatus??'']??null:null,
+    originalStatus,originalStatusLabel:row.source_entity==='la_withdraw_apply'?withdrawalStates[originalStatus??'']??null:row.source_entity==='la_distribution_order'?distributionStates[originalStatus??'']??null:row.source_entity==='la_pay_order'?({'0':'旧平台未付款','1':'旧平台已付款'}[originalStatus??'']??null):row.source_entity==='la_refund_record'&&originalStatus!==null?({'0':'旧平台退款中','1':'旧平台记为退款成功','2':'旧平台记为退款失败'}[originalStatus]??'旧平台退款状态 '+originalStatus):null,
     channelState:'UNVERIFIED',association:emptyAssociation()};
 }
 
@@ -69,12 +70,47 @@ function originalSource(row:Raw):Raw|null {
         ||String(source.sourceStatus)!==String(original.status)||String(source.orderId)!==String(original.order_id)
         ||String(source.sourceOrderType)!==String(original.order_type)||String(source.sourceSettlementTime)!==String(original.settle_time)
         ||source.amount!==row.amount||String(source.sourceStatus)!==String(row.source_status)||epoch(source.sourceUpdatedAt)!==Date.parse(row.at??''))return null;
+    }else if(row.source_entity==='la_pay_order'||row.source_entity==='la_refund_record'){
+      const payment=row.source_entity==='la_pay_order';
+      if(source.amount!==(payment?original.pay_money:original.refund_amount)||source.amount!==row.amount
+        ||String(source.sourceStatus)!==String(payment?original.pay_is:original.refund_status)||String(source.sourceStatus)!==String(row.source_status)
+        ||source.sourceNumber!==(payment?original.pay_order_sn:original.sn)||source.channelArrival!=='UNKNOWN'
+        ||String(source.sourceOrderType)!==String(original.order_type)||!payment&&String(original.user_id)!==String(evidence.legacyUserId))return null;
     }else return null;
     return original;
   }catch{return null;}
 }
 
 type Match={kind:'ORDER'|'WITHDRAWAL'|'DISTRIBUTION';number:string;ref:string;path:string|null;role:'OWNER'|'BENEFICIARY'|'WITHDRAWER';status:string|null;statusLabel:string|null;allowed:boolean;purpose?:[HistoricalFinancePurpose,string];fee?:string|null;net?:string|null};
+const typedHistoryPrefixes: Record<string,string> = {la_pay_order:'HISTORY_PAYMENT',la_refund_record:'HISTORY_REFUND',la_distribution_order:'HISTORY_DISTRIBUTION'};
+const typedOrderKey=(system:unknown,id:unknown)=>[system,id].join('\u0000');
+
+/** The snapshot fields identify candidates. Only checked original bytes close the typed edge. */
+export function typedHistoricalOrderReference(row:Raw):string|null{
+  if(row.source_type!=='LEGACY_MYSQL')return null;
+  const s=snapshot(row);
+  if(row.source_entity==='la_distribution_order'&&s.sourceOrderType==='1')return code(s.orderId);
+  if(s.referenceType!=='LEGACY_ORDER'||s.associationState!=='SOURCE_VERIFIED')return null;
+  if(row.source_entity==='la_pay_order'&&s.sourceOrderType==='1'||row.source_entity==='la_refund_record'&&s.sourceOrderType==='order')return code(s.referenceId);
+  return null;
+}
+
+function typedOrderMatch(row:Raw,original:Raw,order:FinanceOrderFact):'RENTER'|'BENEFICIARY'|null{
+  const parent=order.legacySource,s=snapshot(row),id=typedHistoricalOrderReference(row);
+  if(id===null||id!==String(original.order_id)||order.sourceSystem!==row.source_system||order.sourceId!==id
+    ||order.sourceType!=='LEGACY_MYSQL'||parent?.entity!=='la_order'||!order.sourceDigest)return null;
+  const raw=parent.snapshot;
+  if(sha(canonicalize(raw))!==order.sourceDigest||String(raw.id)!==id||raw.order_sn!==order.number)return null;
+  if(row.source_entity==='la_distribution_order')return String(original.order_type)==='1'?'BENEFICIARY':null;
+  if(row.subject_id!==order.renterId||String(raw.user_id)!==String(row.extra_evidence?.legacyUserId)||row.reference_id!==id)return null;
+  if(row.source_entity==='la_pay_order')return String(original.order_type)==='1'?'RENTER':null;
+  return original.order_type==='order'&&original.order_sn===order.number&&s.referenceSn===order.number&&row.reference_no===order.number?'RENTER':null;
+}
+
+function typedHistoricalLink(row:Raw):FinanceEntry['related'][number]{
+  const ref=typedHistoryPrefixes[row.source_entity]+':'+row.id;
+  return {ref,label:text(snapshot(row).sourceNumber)??String(row.source_id),path:'/finance/documents/'+encodeURIComponent(ref)};
+}
 type RelationEntry=Pick<FinanceEntry,'sourceSystem'|'subjectId'> & {evidence:{originalNumber?:string|null};historical:Pick<HistoricalFinanceDisplay,'recordedAmountCents'>};
 function orderMatch(entry:RelationEntry,log:Raw,source:Raw,order:FinanceOrderFact):Match|null {
   const proof=order.legacySource;
@@ -117,6 +153,7 @@ type ReverseLinks={state:HistoricalFinanceDisplay['association']['state'];relate
 const relationKey=(system:unknown,subject:unknown,reference:unknown)=>[system,subject,reference].join('\u0000');
 function relationIndex(sources:Raw[],orders:FinanceOrderFact[]){
   const rows=new Map<string,Raw>(),references=new Map<string,Raw[]>(),logs=new Map<string,Raw[]>(),orderReferences=new Map<string,FinanceOrderFact[]>();
+  const typedRows=new Map<string,Raw[]>(),typedOrders=new Map<string,FinanceOrderFact[]>();
   for(const row of sources){
     if(rows.has(String(row.id)))continue;rows.set(String(row.id),row);
     const key=relationKey(row.source_system,row.subject_id,row.source_id);
@@ -124,9 +161,14 @@ function relationIndex(sources:Raw[],orders:FinanceOrderFact[]){
     if(row.source_type==='LEGACY_MYSQL'&&row.source_entity==='la_log_earnings'){
       const reference=relationKey(row.source_system,row.subject_id,snapshot(row).referenceId),group=logs.get(reference);if(group)group.push(row);else logs.set(reference,[row]);
     }
+    const typed=typedHistoricalOrderReference(row);
+    if(typed){const k=typedOrderKey(row.source_system,typed),group=typedRows.get(k);if(group)group.push(row);else typedRows.set(k,[row]);}
   }
-  for(const order of orders){const key=relationKey(order.sourceSystem,order.ownerId,order.sourceId),group=orderReferences.get(key);if(group)group.push(order);else orderReferences.set(key,[order]);}
-  return{rows,references,logs,orderReferences,orders};
+  for(const order of orders){
+    const key=relationKey(order.sourceSystem,order.ownerId,order.sourceId),group=orderReferences.get(key);if(group)group.push(order);else orderReferences.set(key,[order]);
+    if(order.legacySource?.entity==='la_order'){const k=typedOrderKey(order.sourceSystem,order.sourceId),group=typedOrders.get(k);if(group)group.push(order);else typedOrders.set(k,[order]);}
+  }
+  return{rows,references,logs,orderReferences,orders,typedRows,typedOrders};
 }
 type RelationIndex=ReturnType<typeof relationIndex>;
 function logEntry(row:Raw):RelationEntry{return{sourceSystem:row.source_system,subjectId:row.subject_id,evidence:{originalNumber:row.reference_no??null},historical:historicalObservationDisplay(row)};}
@@ -146,6 +188,9 @@ function reverseLinks(documentRef:string,index:RelationIndex,access?:HistoricalR
   const root=application?originalSource(application):null;
   if(application&&(application.source_entity!=='la_withdraw_apply'||!root))return result('UNRESOLVED',['HISTORICAL_RELATION_EVIDENCE_UNAVAILABLE']);
   if(order&&order.objectReadable!==true)return result('DENIED');
+  const typed=order?(index.typedRows.get(typedOrderKey(order.sourceSystem,order.sourceId))??[]).filter(row=>{
+    const raw=originalSource(row);return raw&&typedOrderMatch(row,raw,order);
+  }).map(typedHistoricalLink):[];
   const key=application?relationKey(application.source_system,application.subject_id,application.source_id):relationKey(order!.sourceSystem,order!.ownerId,order!.sourceId);
   const candidates=index.logs.get(key)??[],matches:Raw[]=[];let ambiguous=false;
   for(const row of candidates){
@@ -153,9 +198,9 @@ function reverseLinks(documentRef:string,index:RelationIndex,access?:HistoricalR
     const targets=logMatches(row,original,index,access);
     if(targets.some(match=>match.ref===documentRef)){if(targets.length!==1)ambiguous=true;else matches.push(row);}
   }
-  if(ambiguous||matches.length>1)return result('AMBIGUOUS',['ORIGINAL_ORDER_REFERENCE_AMBIGUOUS']);
-  if(matches.length!==1)return result('UNRESOLVED',['ORIGINAL_ORDER_REFERENCE_UNRESOLVED']);
-  const debit=matches[0]!,related=[historyLink(debit)];
+  if(ambiguous||matches.length>1)return {...result(typed.length?'MATCHED':'AMBIGUOUS',['ORIGINAL_ORDER_REFERENCE_AMBIGUOUS']),related:typed};
+  if(matches.length!==1)return typed.length?{...result('MATCHED'),related:typed}:result('UNRESOLVED',['ORIGINAL_ORDER_REFERENCE_UNRESOLVED']);
+  const debit=matches[0]!,related=[historyLink(debit),...typed];
   if(application){
     const returns=candidates.filter(row=>['1003','1004','1005'].includes(String(snapshot(row).legacyChangeType)));
     if(returns.length>1)return result('AMBIGUOUS',['ORIGINAL_ORDER_REFERENCE_AMBIGUOUS']);
@@ -188,6 +233,24 @@ export function enrichHistoricalObservations(entries:FinanceEntry[],sources:Raw[
     if(source.source_entity==='la_withdraw_apply'){
       const result=resolve(entry.documentRef);entry.historical.association={...emptyAssociation(result.state),...(result.state==='MATCHED'?{kind:'WITHDRAWAL' as const,documentRef:result.related[0]!.ref,number:result.related[0]!.label,path:result.related[0]!.path??null,role:'WITHDRAWER' as const}:{})};
       entry.related.push(...result.related);entry.reasonCodes.push(...result.reasonCodes);continue;
+    }
+    if(Object.hasOwn(typedHistoryPrefixes,source.source_entity)){
+      const typed=typedHistoricalOrderReference(source);
+      if(typed===null)continue;
+      const matches=(index.typedOrders.get(typedOrderKey(source.source_system,typed))??[]).flatMap(order=>{
+        const role=typedOrderMatch(source,original,order);return role?[{order,role}]:[];
+      });
+      if(matches.length!==1){
+        entry.historical.association=emptyAssociation(matches.length?'AMBIGUOUS':'UNRESOLVED');
+        entry.reasonCodes.push(matches.length?'ORIGINAL_ORDER_REFERENCE_AMBIGUOUS':'ORIGINAL_ORDER_REFERENCE_UNRESOLVED');
+        continue;
+      }
+      const {order,role}=matches[0]!;
+      if(!order.objectReadable){entry.historical.association=emptyAssociation('DENIED');continue;}
+      const path='/orders/'+encodeURIComponent(order.id);
+      entry.historical.association={state:'MATCHED',kind:'ORDER',documentRef:access?.isBoss||access?.financeDocumentRead?order.ref:null,number:order.number,path,role,originalStatus:order.originalOrderStatus,originalStatusLabel:null};
+      entry.related.push({ref:order.ref,label:order.number,path});
+      continue;
     }
     if(source.source_entity!=='la_log_earnings')continue;
     const type=entry.historical.changeType;

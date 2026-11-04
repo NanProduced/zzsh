@@ -1,6 +1,6 @@
 import { test, type TestContext } from "node:test";
 import assert from "node:assert/strict";
-import { accountManagement, accountBusinessState } from "../src/supply/admin-supervision-read";
+import { accountManagement, accountBusinessState, readOrderAccountViews } from "../src/supply/admin-supervision-read";
 import { parseSupervisionQuery, encodeSupervisionCursor, decodeSupervisionCursor, supervisionQueryBinding, matchesCheapFilters, matchesSupervisionFilters, quoteFeeSummary, FILTER_SCAN_MAX_CANDIDATES, supervisionFacts, listSupervision, readSupervision } from "../src/supply/admin-supervision-read";
 import { readFileSync } from "node:fs";
 import { Pool, type PoolClient } from "pg";
@@ -9,6 +9,7 @@ import { parseMediaReviewBinding, assertMediaReviewBinding } from "../src/supply
 import { computeContentHash, normalizeContentPayload } from "../src/supply/content-hash";
 import { computeQuote } from "../src/supply/pricing";
 import { fundingPolicyFixture } from "./funding-authority-fixtures";
+import { convertLegacyDisplayFields, legacyDisplayDigest } from "../src/supply/legacy-display-snapshot";
 import { handlePublishingRoute } from "../src/supply/publishing-routes";
 
 const publishing = require("../src/supply/publishing");
@@ -630,13 +631,14 @@ function summaryVersion(id: string) {
     const line = (itemId: string, quantity: string, itemUnit: "HAFF_BASE" | "ROUND", buyer: string) => ({ itemId, quantity, unit: itemUnit, unitQuantity: "1", pricingKind: "FIXED_UNIT" as const, buyerUnitAmount: unit(buyer), ownerUnitAmount: unit("0.10000000"), buyerAmount: yuan(buyer), ownerAmount: yuan("1.00"), platformAmount: yuan("0.10") });
     return { id, account_id: id.replace(/^version-/, ""), sequence: "2", origin: "NATIVE", review_state: "PUBLISHED", title: "100M", description: null, attributes: { login_method_code: "login_qq_qr", safe_box_code: "safe_box_3x3", character_level: 60, grading_code: "8", grading_division: "3" }, term_option_code: "daily", pricing_option_code: "standard", rule_release_id: "release-1", content_hash: "hash-1", schema_version: 1, revision: "1", submitted_at: null, presentation: { items: [{ id: "haff-unit-1", name: "哈夫币", unit: "HAFF_BASE" }, { id: "bullets", name: "巴雷特子弹", unit: "ROUND" }] }, payload: { schemaVersion: 1, accountId: id.replace(/^version-/, ""), gameId: "fixture-game", declaration: { title: "100M", description: null, attributes: {}, inventory: [{ itemId: "haff-unit-1", quantity: "12500000" }, { itemId: "bullets", quantity: "120" }], skins: [], entitlements: [], termOptionCode: "daily", pricingOptionCode: "standard", mediaBindings: [] }, ruleRefs: { releaseId: "release-1", priceVersionId: "price-1", termVersionId: "term", agreementVersionId: "ag", agreementDigest: "d".repeat(64), catalogRevision: "9" }, quoteValues: { schemaVersion: 1, currency: "CNY", priceVersionId: "price-1", ruleReleaseId: "release-1", mode: "SPREAD", lines: [line("haff-unit-1", "12500000", "HAFF_BASE", "200.00"), line("bullets", "120", "ROUND", "12.77")], resourceTotal: yuan("212.77"), ownerTotal: yuan("190.00"), platformFullProfit: yuan("22.77"), tenantDeposit: yuan("50.00"), publisherBailRequirement: yuan("300.00"), termSeconds: "86400", expiryDisclosures: [], unitAmountsInformational: true, roundingPolicy: "HALF_UP_CENT_V1", pricingInputs: { haffRatioSchema: null } } } };
 }
-function summaryHarness(viewerPermissions: string[], options: { policy?: unknown | null; proof?: unknown | null; users?: boolean } = {}) {
+function summaryHarness(viewerPermissions: string[], options: { policy?: unknown | null; proof?: unknown | null; users?: boolean; version?: ReturnType<typeof summaryVersion>; historical?: unknown } = {}) {
     const sql: string[] = [], ownerRequests: unknown[][] = [];
     const client = { query: async (text: string, values?: unknown[]) => {
         sql.push(text);
         if (text.startsWith("SELECT a.id,")) return { rows: [summaryRow, { ...summaryRow, id: "a-2", accountId: "a-2", ownerId: "u-2" }] };
         if (text.includes("FROM zzsh_supply.rental_account WHERE id = ANY")) return { rows: [...batchAccounts((values?.[0] ?? []) as string[]).values()] };
-        if (text.includes("FROM zzsh_supply.listing_version WHERE id = ANY")) return { rows: ((values?.[0] ?? []) as string[]).map(summaryVersion) };
+        if (text.includes("FROM zzsh_supply.listing_version WHERE id = ANY")) return { rows: ((values?.[0] ?? []) as string[]).map(id => options.version ? { ...options.version, id, account_id: id.replace(/^version-/, "") } : summaryVersion(id)) };
+        if (text.includes("source_status::int")) return { rows: options.historical ? [options.historical] : [] };
         if (text.includes("FROM zzsh_supply.game WHERE id=$1")) return { rows: [{ id: "fixture-game", code: "delta", name: "三角洲", enabled: true, current_release_id: "release-1", catalog_revision: "9" }] };
         if (text.includes("game_service_operation")) return { rows: [{ id: "svc", gameId: "fixture-game", gameCode: "delta", gameEnabled: true, enabled: true, serviceCode: "ACCOUNT_RENTAL", revision: "1" }] };
         if (text.includes("u.suspended")) return { rows: [{ suspended: false, account_status: "ACTIVE", identity_status: "VERIFIED", age_status: "ADULT" }] };
@@ -659,6 +661,46 @@ function summaryHarness(viewerPermissions: string[], options: { policy?: unknown
     const viewer = { ...queryViewer, access: { ...queryViewer.access, permissions: new Set(viewerPermissions) } };
     return { sql, client, viewer, ownerRequests };
 }
+
+test("bound legacy display supplies real list facts without becoming a native quote or leaking private fields", async t => {
+    t.mock.method(publishing, "readPublicListing", async () => { throw Object.assign(new Error("hidden"), { status: 404 }); });
+    const snapshot = convertLegacyDisplayFields({ haff: "101", awm_bullet_num: "30", level6_bullet_num: null, insure_lv: "2", grading_lv: "5", login_way: "1", character_lv: "60", login_password: "PRIVATE_LOGIN", owner_ratio: "PRIVATE_RATIO" });
+    const binding = { observationVersionId: "version-a-1", baseSourceDigest: "b".repeat(64), extractSha256: "a".repeat(64), sourceUpdatedAt: "2026-09-13T00:00:00.000Z", evidenceRef: `legacy-display-v1:${"a".repeat(64)}:1`, snapshot };
+    const historical = { account_id: "a-1", observation_version_id: binding.observationVersionId, source_status: 4, legacy_id: "1", owner_user_id: "u-1", source_digest: binding.baseSourceDigest, base_updated_at: new Date(binding.sourceUpdatedAt), snapshot: { ...historicalSnapshot, termDays: "11" },
+        display_account_id: "a-1", display_version_id: binding.observationVersionId, base_source_digest: binding.baseSourceDigest, extract_sha256: binding.extractSha256, display_updated_at: new Date(binding.sourceUpdatedAt), display_evidence_ref: binding.evidenceRef, display_snapshot: snapshot, display_digest: legacyDisplayDigest("a-1", binding) };
+    const base = summaryVersion("version-a-1");
+    const imported = { ...base, origin: "LEGACY_OBSERVATION", review_state: "IMPORTED_UNVERIFIED", attributes: {}, payload: null, presentation: null, rule_release_id: null, term_option_code: "" } as unknown as typeof base;
+    const run = async (version: typeof base, source: typeof historical = historical) => {
+        const f = summaryHarness(["supply.review.read"], { version, historical: source });
+        return listSupervision(f.client, f.viewer, parseSupervisionQuery(new URLSearchParams("limit=5")), async () => ({ publisherBail: "UNKNOWN", occupancy: "FREE", reference: null }), queryKey);
+    };
+    const result = await run(imported), row: any = result.items[0], summary = row.summary;
+    assert.equal(summary.displaySource, "LEGACY_SNAPSHOT");
+    assert.equal(summary.sourceUpdatedAt, binding.sourceUpdatedAt);
+    assert.equal(summary.haff.quantity, "101000000");
+    assert.equal(summary.term.termSeconds, "950400"); assert.equal(summary.term.dailyConsumption, "10000000");
+    assert.equal(summary.login.displayName, "QQ账密"); assert.equal(summary.config.safeBox, "基础安全箱(1*2)");
+    assert.equal(summary.materials.find((item: any) => item.code === "awm_round").quantity, "30");
+    assert.equal(summary.materials.find((item: any) => item.code === "level6_round").quantity, null, "unknown is not zero or omitted");
+    assert.equal(summary.quote, null); assert.equal(summary.baseDeposit, null); assert.equal(summary.fullPayout, "NOT_DECLARED");
+    assert.equal(row.facts.historicalRead.canCreateOrder, false); assert.notEqual(row.facts.newOrders, true);
+    assert.equal(JSON.stringify(row).includes("PRIVATE_"), false); assert.equal(row.ownerLink.state, "DENIED");
+    const native: any = (await run(base)).items[0];
+    assert.equal(native.summary.displaySource, "CURRENT_VERSION"); assert.equal(native.summary.haff.quantity, "12500000");
+    assert.equal(native.summary.quote.resourceTotal.amount, "212.77", "native keeps its own frozen values");
+    const unknown: any = (await run({ ...imported, origin: "NATIVE" })).items[0];
+    assert.equal(unknown.summary.haff, null); assert.equal(unknown.summary.login.displayName, null); assert.equal(unknown.summary.quote, null);
+    const wrongVersion: any = (await run(imported, { ...historical, observation_version_id: "other-version", display_version_id: "other-version", display_digest: legacyDisplayDigest("a-1", { ...binding, observationVersionId: "other-version" }) })).items[0];
+    assert.equal(wrongVersion.summary.displaySource, "CURRENT_VERSION", "a different observation never fills this version");
+    const f = summaryHarness(["supply.review.read"], { historical });
+    t.mock.method(publishing, "listingDetail", async () => ({ version: { id: binding.observationVersionId, origin: "LEGACY_OBSERVATION", declaration: { attributes: {}, inventory: [] }, quote: null }, blockers: ["QUOTE_REQUIRED"], available: false }));
+    const associated = await readOrderAccountViews(f.client, ["a-1"], async () => ({ publisherBail: "UNKNOWN", occupancy: "FREE", reference: null }));
+    assert.equal(associated.get("a-1")?.source, "LEGACY_ACCOUNT_SNAPSHOT", "current source facts are not a native public or order-frozen version");
+    assert.equal(associated.get("a-1")?.haff?.quantity, summary.haff.quantity);
+    assert.equal(associated.get("a-1")?.term.termSeconds, summary.term.termSeconds);
+    assert.equal(associated.get("a-1")?.sourceUpdatedAt, summary.sourceUpdatedAt);
+    assert.equal(associated.get("a-1")?.materials.length, 7, "the full current-account view retains all source material types, including zero/unknown");
+});
 
 test("pagination total uses the same SQL filters and scope, excludes cursor and never counts raw eligibility candidates", async t => {
     t.mock.method(publishing, "readPublicListing", async () => { throw Object.assign(new Error("fixture 404"), { status: 404 }); });

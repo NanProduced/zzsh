@@ -16,6 +16,7 @@ import { FavoritesPanel } from "./favorites/favorites-panel";
 import { FavoritesProvider } from "./favorites/favorites-context";
 import { LegacyOrderWorkspace } from "./order/legacy-order-workspace";
 import { OrderWorkspace } from "./order/order-workspace";
+import { orderUrl } from "../lib/order-client";
 import { AccountCenterFrame, AccountMembershipCenter, AccountOverview, accountSectionHref, accountViewTitle, isKnownAccountView, resolveAccountView } from "./account/account-center";
 import { PersonalWallet } from "./account/personal-wallet";
 import { PersonalInvitations } from "./account/personal-invitations";
@@ -134,7 +135,8 @@ function accountTitleFromFacts(row: AccountRow): string | null {
 function accountActiveOrderText(row: AccountRow): string | null {
   const order = row.activeOrder;
   if (!order) return null;
-  if (order.status === "PENDING_PAYMENT") return `订单 ${order.displayNo} 待付款`;
+  if (order.status === "PENDING_PAYMENT") return "待付款";
+  if (order.origin === "LEGACY") return "查看订单进度和租期";
   // shortcut: older readers project payment as opening; show a deadline after confirmed-opening provenance is versioned.
   const amount = order.ownerAmount ? `下单时的出租报价 ${moneyText(order.ownerAmount)}` : "出租报价待确认";
   return [`租客 ${order.renterName ?? "待确认"}`, "开租时间请查看订单", amount].join(" · ");
@@ -1039,6 +1041,7 @@ function MyAccountsPanel({ mode, accountId: accountIdProp, filterParam }: { mode
                   <span className="mra-row-sub">{row.game_name}</span>
                 </Link>
                 <div className="mra-row-state">
+                  {row.activeOrder ? <Link className="mra-row-anchor" href={orderUrl("owner", "", row.id, row.activeOrder.id, row.activeOrder.origin)} scroll={false}>订单 {row.activeOrder.displayNo}</Link> : null}
                   {state ? <span className="mra-badge" data-tone={RENTAL_STATE_TONE[state]}>{state === "DRAFT" ? row.review_state === "WITHDRAWN" ? "已撤回" : row.review_state === "IMPORTED_UNVERIFIED" ? "历史资料待核" : row.review_state === "DRAFT" ? "草稿" : "资料待确认" : RENTAL_STATE_LABELS[state]}</span> : <span className="mra-badge" data-tone={row.review_state ? REVIEW_BADGE_TONE[row.review_state] ?? "unknown" : undefined}>{row.review_state ? stateLabel(row.review_state) : "资料待确认"}</span>}
                   {row.owner_paused && state !== "PAUSED" ? <span className="mra-badge" data-tone="warning">已暂停接单</span> : null}
                   {row.staff_restricted && state !== "RESTRICTED" ? <span className="mra-badge" data-tone="warning">账号受限</span> : null}

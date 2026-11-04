@@ -183,6 +183,7 @@ ID 以 opaque 字符串传输，允许 `A-Za-z0-9` 开头，后续使用 `A-Za-z
 | POST /api/v1/orders | `Idempotency-Key` + `{accountId, versionId, releaseId}`（确认令牌，仅三字段）。服务端按序锁双方 user（单条 `ORDER BY id ... FOR UPDATE`）→ game → account，复核当前版本/release、全量可租 blocker、租客 VERIFIED+ADULT、非号主本人、押金 CONFIGURED，同一事务内原子占用（部分唯一索引兜底）并写审计与幂等记录。返回 RenterOrder（PENDING_PAYMENT、holdUntil、PublicQuote 投影） |
 | POST /api/v1/orders/{id}/cancel | `Idempotency-Key` + 可选 `{reason}`（自由文本仅入审计，订单列只存枚举）。本人待支付单可取消（含已过期未清扫），CAS 单次转换 |
 | GET /api/v1/orders | `party=renter|owner`（默认 renter）、status/accountId/limit/cursor；按 party 投影，游标绑定主体与筛选，不一致 409 |
+| GET /api/v1/orders/unified | 按同一当事人和顺序读取新旧订单；`stage` 筛选使用返回的有效阶段。旧单优先使用当前续办版本，无版本时沿已核原阶段。取消或完成不进入租赁中；旧单完成不表示新平台已过账。 |
 | GET /api/v1/orders/{id} | 按归属投影（renter/owner 否则 404）；会话与活性在事务内复核 |
 | GET /api/v1/admin/orders(/+id) | 要求 `order.read` 动态权限 + 该游戏 `admin_supply_scope`（Boss 豁免 scope）；平台金额仅另有 `supply.quote.internal.read` 时投影 |
 
@@ -199,6 +200,7 @@ ID 以 opaque 字符串传输，允许 `A-Za-z0-9` 开头，后续使用 `A-Za-z
 - 账号详情的 `publicBasis` 只表达同一次公开读取的版本、`releaseId`、资料与报价；当前私有草稿另行选择，不能补进旧对外版本。管理端查看对外版时只读；审核和图片处置须明确切到当前资料，并继续校验服务端原有对象、版本、修订及图片绑定。
 - 管理订单列表和混合详情可带 `prepaymentBreakdown`：哈夫币租金和物资预付只取原单冻结租客行或原历史金额，保留资源合计/押金/总预付原语义。`COMPLETE/PARTIAL/UNKNOWN` 与合法零分开，缺依据不按当前报价、折扣或结算金额补算。可选`prepaymentReconciliation`单独说明核对依据：只有原生冻结报价完成核对才为闭合；旧单字段的算术相等不代表已核对全部历史构成。
 - 管理订单分页查询可选`view=list`，仅缩短冻结账号物资摘要并给出总数和截断标识；默认响应和单单详情保持完整，旧单账号历史参考不冒充本单冻结资料。该参数只改变返回投影，不改变授权、筛选、总数或原订单事实。
+- 管理订单 `paidFrom`/`paidTo` 按 RFC3339（至微秒）左闭右开筛选已有付款时间：原生单要求本站已接纳的 CNY 付款，旧单要求原付款状态已付且有时间。`paymentConfirmedFrom`/`paymentConfirmedTo` 仍只查原生收款确认；两者均不表示渠道到账。
 - 原生订单可带同一只读快照的 `progress`，区分开租、当前结束分类/版本、双方确认、客服复核、有效批准及已过账。按已授权页内窄ID批读，沿现有结算判定，不锁业务行或触发命令；可选关系缺失/无读取权仅在保存点恢复确认后降为未知，恢复失败和其它错误继续失败。旧单沿原来源阶段，不以缺原生记录推断未开租或未支付。
 - 双方基础摘要仅在实际 `user.directory.read` 权限下对本页关联ID去重批读，输出名称、头像和脱敏手机号；订单/对象/游戏及财务字段授权仍独立，不为预览加载用户完整业务资料。
 - 财务凭证的 `platformContribution` 只投影已核原生过账收据中的平台分量，仍需资金凭证读权限和订单对象范围；它不是净利润、渠道到账或当前报价。普通订单读取不据应付减号主价推算该金额，旧单/凭证不符/缺原件保持未知。
@@ -212,7 +214,7 @@ ID 以 opaque 字符串传输，允许 `A-Za-z0-9` 开头，后续使用 `A-Za-z
 | GET /users | `user.directory.read`；`q`匹配稳定ID、旧ID、昵称、用户名/展示用户名；仍支持精确`userId/legacyId`和模糊`identifier`。筛选`accountStatus/source/identityStatus/ageStatus/registeredFrom/registeredTo/limit/cursor`；建档范围和排序均用canonical `user.createdAt`，时间为RFC3339，按(createdAt,id)倒序。cursor模式返回`items/total/nextCursor/limit`，total为同主体可见范围、同过滤的完整数量，不受cursor影响。游标绑定管理员、Boss状态、有效权限/游戏scope签名、全部筛选和limit，不一致409；可选页码模式见下文 |
 | POST /users/lookup | 同一只读查询，另需`user.phone.lookup`。手机号仅放JSON正文，允许与上述非敏感筛选一起提交；不改变数据。GET中的phone或搜索参数中的手机号拒绝400。响应只给脱敏手机号，游标仅含查询摘要及排序键，不含原手机号 |
 | GET /users/{userId} | `user.directory.read`；规范创建/更新时间、来源三态、账号/实名/年龄状态和脱敏联系方式，附与列表同口径的关系、成长礼遇和信用摘要；技术追溯另按`admin.audit.read`裁剪（Boss全量，非Boss仅本人来源操作）。不投影钱包余额/收益，不在读取时补造资格 |
-| GET /users/{userId}/rental-accounts | 另需`supply.rental_account.read`，同时检查owner关联与游戏scope；当前版本、发布记录复用供给发布元组和有效版本判断，发布不等于可租资格 |
+| GET /users/{userId}/rental-accounts | 另需`supply.rental_account.read`，同时检查owner关联与游戏scope；`publication=published` 与目录上架数共同包括当前发布及仍在公开列表的旧资料。旧资料以`publiclyListed`表示；发布和公开展示均不表示可租资格。 |
 | GET /users/{userId}/orders | 另需`order.read` + 游戏/对象范围；`role=renter|owner|any`仅表示该单参与方，另有status/limit/cursor。status支持原单状态及`current`（PENDING_PAYMENT或PAID，属于过滤分组，不是新订单状态）；与目录分角色计数同口径、同新旧来源，过滤先于分页。金额来自冻结订单快照；取消后仍保留paidAt，已付/完成但时间缺失不可推断未付。没有独立供给读取权限时不返回内部accountId/展示号 |
 | GET /users/{userId}/audit-events | 另需既有`admin.audit.read`；按用户对象过滤，Boss全量、非Boss仅本人操作；沿用敏感detail裁剪，不新增用户页专用IAM scope |
 

@@ -188,7 +188,7 @@ function AddCandidateForm({ requestId, busy, blocked, onAppend }: { requestId: s
               )}
               {excluded.length > 0 && eligible.length > 0 ? (
                 <p className="text-xs text-muted-foreground">
-                  另有 {excluded.map(([code, count]) => `${count} 人${reasonLabel(code)}`).join("、")}，按合同不列出身份。
+                  另有 {excluded.map(([code, count]) => `${count} 人${reasonLabel(code)}`).join("、")}。
                   {options.requesterExcluded ? " 原申请人已排除。" : ""}
                 </p>
               ) : null}
@@ -289,7 +289,7 @@ function DecisionDialog({
         <DialogDescription>{consequence}</DialogDescription>
         <div className="space-y-3 text-xs">
           <div className="space-y-1.5 rounded-md border border-border bg-foreground/[0.02] p-3">
-            <p className="text-sm font-medium text-foreground">{detail.business?.businessTitle ?? "业务摘要未接入"}</p>
+            <p className="text-sm font-medium text-foreground">{detail.business?.businessTitle ?? "业务摘要暂不可用"}</p>
             <p className="leading-relaxed break-words text-muted-foreground">{change}</p>
             <p><span className="text-muted-foreground">申请人：</span>{personLabel(detail.requester)}</p>
             <p><span className="text-muted-foreground">申请编号：</span><span className="font-mono break-all">{detail.requestId}</span></p>
@@ -512,7 +512,7 @@ export function RequestDetail({
       <div className="space-y-2">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div className="min-w-0">
-            <h3 className="text-base font-semibold break-words text-foreground">{detail.business?.businessTitle ?? "业务摘要未接入"}</h3>
+            <h3 className="text-base font-semibold break-words text-foreground">{detail.business?.businessTitle ?? "业务摘要暂不可用"}</h3>
             <p className="mt-1 text-sm leading-relaxed break-words text-muted-foreground">{detail.business?.changeSummary || detail.summary}</p>
           </div>
           <div className="flex flex-wrap items-center gap-2"><Badge variant="outline">{executionModeLabel(detail.operation.executionMode ?? detail.business?.executionMode)}</Badge></div>

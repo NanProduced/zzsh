@@ -5,7 +5,7 @@ import { findPhoneClue } from "../workspace/tab-model";
 export const FINANCE_ACCESS_FAILURE_EVENT = "zzsh-admin-finance-access-failure";
 export const bucketLabels: Record<string, string> = { AVAILABLE: "用户可用", RESERVED: "提现预留", GUARANTEE_HELD: "号主上架保证金", REFUND_PAYABLE: "退款应付", PENDING_EARNINGS: "待结算收益", PLATFORM: "平台权益", CLEARING: "支付清算过渡" };
 export const bucketNature: Record<string, string> = { AVAILABLE: "用户负债", RESERVED: "用户负债", GUARANTEE_HELD: "保证金责任", REFUND_PAYABLE: "退款责任", PENDING_EARNINGS: "收益责任", PLATFORM: "平台权益", CLEARING: "清算过渡" };
-export const kindLabels: Record<string, string> = { OPENING: "迁移期初", SETTLEMENT: "订单结算", WITHDRAWAL: "提现", EARNINGS: "历史流水", DISTRIBUTION: "分销", GUARANTEE: "上架保证金" };
+export const kindLabels: Record<string, string> = { OPENING: "迁移期初", SETTLEMENT: "订单结算", PAYMENT: "付款记录", WITHDRAWAL: "提现", EARNINGS: "历史流水", DISTRIBUTION: "分销", GUARANTEE: "上架保证金" };
 kindLabels.REFUND = "退款责任";
 export const stateLabels: Record<string, string> = { POSTED: "已入账", RESERVED: "已预留", SUBMITTING: "提交中", PROCESSING: "处理中", UNKNOWN: "结果未知", SUCCEEDED: "本地成功记录", FAILED: "失败", RECONCILIATION_REQUIRED: "结果冲突待核", HISTORICAL_OBSERVED: "历史观察" };
 Object.assign(stateLabels, { ORDER_RECORDED: "订单记录", HISTORICAL_ORDER_RECORDED: "历史订单记录" });
@@ -55,11 +55,11 @@ export function financeMoney(cents: string | null | undefined): string {
 }
 export function financeTime(value: string | null | undefined): string { return !value || !Number.isFinite(Date.parse(value)) ? "时间未核定" : new Intl.DateTimeFormat("zh-CN", { timeZone: "Asia/Shanghai", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false }).format(new Date(value)); }
 export type HistoricalFinancePurpose = 'SETTLEMENT_INCOME' | 'OWNER_RENTAL_INCOME' | 'DISTRIBUTION_INCOME' | 'WITHDRAWAL_APPLICATION' | 'WITHDRAWAL_DEBIT' | 'WITHDRAWAL_REJECTED_RETURN' | 'TRANSFER_FAILED_RETURN' | 'WECHAT_WITHDRAWAL_FAILED_RETURN' | 'PLATFORM_CREDIT' | 'PLATFORM_DEBIT' | 'DEPOSIT_COMPENSATION' | 'TASK_SETTLEMENT' | 'UNKNOWN';
-export type HistoricalFinanceDisplay = {
+export type HistoricalFinanceDisplay = {refundAttempts?:{source:{type:'LEGACY_MYSQL';entity:'la_refund_log';id:string};originalNumber:string|null;originalStatus:string|null;recordedAmountCents:string|null;occurredAt:string|null;updatedAt:string|null;channelArrival:'UNKNOWN';reasonCodes:string[]}[];sourceRefundFlags?:string[];
   changeType: string | null; purposeCode: HistoricalFinancePurpose; purposeLabel: string; originalLogNumber: string | null;
   recordedAmountCents: string | null; balanceAfterCents: string | null; feeCents: string | null; netCents: string | null;
   originalStatus: string | null; originalStatusLabel: string | null; channelState: 'UNVERIFIED';
-  association: { state: 'MATCHED' | 'UNRESOLVED' | 'AMBIGUOUS' | 'DENIED'; kind: 'ORDER' | 'WITHDRAWAL' | 'DISTRIBUTION' | 'TASK' | 'UNKNOWN'; documentRef: string | null; number: string | null; path: string | null; role: 'OWNER' | 'BENEFICIARY' | 'WITHDRAWER' | null; originalStatus: string | null; originalStatusLabel: string | null };
+  association: { state: 'MATCHED' | 'UNRESOLVED' | 'AMBIGUOUS' | 'DENIED'; kind: 'ORDER' | 'WITHDRAWAL' | 'DISTRIBUTION' | 'TASK' | 'UNKNOWN'; documentRef: string | null; number: string | null; path: string | null; role: 'OWNER' | 'RENTER' | 'BENEFICIARY' | 'WITHDRAWER' | null; originalStatus: string | null; originalStatusLabel: string | null };
 };
 type FinanceRecord = { kind: string; state: string; ref?: string; documentRef?: string; sourceEntity?: string; historical?: HistoricalFinanceDisplay };
 const sourceFamily = (record: FinanceRecord) => (record.ref ?? record.documentRef ?? "").split(":")[0] ?? "";
@@ -120,6 +120,9 @@ export type FinanceResponse = {
   wallet?: { buckets: Record<string, { amountCents: string | null; knowledge: string; scope?: string }>; withdrawable: { amountCents: string | null; reasonCodes: string[] }; coverage: { knowledge: string; origin?: string; cutoff?: string; coverageVersion?: string; reason?: string }; snapshotVersion: string };
   distributionCalculation?: { knowledge: 'KNOWN' | 'UNKNOWN'; policyVersion: string | null; levelCode: string | null; percent: string | null; baseCents: string | null; formula: string | null; reasonCodes: string[] };
   orderSettlement?: OrderSettlementEvidence;
+  legacyOrderObservations?: { documentRef: string; number: string; kind: string; amountCents: string | null; occurredAt: string | null;
+    originalStatus: string | null; originalStatusLabel: string | null; refundAttempts?: HistoricalFinanceDisplay['refundAttempts'];
+    sourceRefundFlags?: string[]; channelArrival: 'UNKNOWN' }[];
   platform?: { postedComponents: { accountCode: string | null; deltaCents: string | null; payer: string | null; feeBase: string | null; feeRate: string | null }[]; beforeDistributionCents: string | null; distributionExpenseCents: string | null; retainedCents: string | null; channelCostCents: string | null; netProfitCents: string | null; reasonCodes: string[] };
   documentCount?: number; subjectCount?: number; entryCount?: number; page?: number; pageSize?: number; hasMore?: boolean; reasonCodes?: string[]; gaps?: string[];
   reconciliation?: { bucket: string; openingBalance: string | null; knownInflows: string; knownOutflows: string; migrationMovement: string; closingBalance: string | null; difference: string | null; ledgerOpeningBalance?: string | null; ledgerClosingBalance?: string | null; ledgerDifference?: string | null; balanceBasis?: { knowledge: 'KNOWN' | 'UNKNOWN'; origin: string | null; sourceCutoff: string | null; openingPostedAt: string | null; reasonCodes: string[] }; knowledge: string; reasonCodes: string[]; unknownCount: number; unknownTimeCount: number; coveredHistoricalCount: number; uncoveredHistoricalCount: number }[];

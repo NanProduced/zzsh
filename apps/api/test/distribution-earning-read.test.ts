@@ -11,6 +11,16 @@ const snapshot={kind:'historicalDistribution',sourceId:1,sourceUserId:11,amount:
 const original=prepareHistoricalObservation(snapshot,{userId:'self',legacyUserId:'11',sourceSystem:'legacy_mysql_restore',basisId:null});
 const legacy={id:'history:one',origin:'LEGACY_MYSQL',state:'SETTLED',role:'RENTER_REFERRAL',source_amount:'12.34',occurred_at:at,due_at:null,funds_disposition:'HISTORICAL_STATUS_ONLY',recovery_required_cents:null,included:true,version:'0',order_id:'71',user_id:'self',legacy_user_id:'11',source_system:original.sourceSystem,source_entity:original.sourceEntity,source_id:original.sourceId,source_digest:original.sourceDigest,source_canonical:original.sourceCanonical,snapshot};
 const native={...legacy,id:'native:two',origin:'NATIVE',state:'RECOVERY_REQUIRED',source_amount:'1234',funds_disposition:'SETTLED',recovery_required_cents:'1234',version:'3',due_at:at,included:false};
+test('own historical calculation reveals the authenticated recorded rate without deriving a current policy or balance',async()=>{
+ const sha=(s:string)=>createHash('sha256').update(s).digest('hex');
+ const canonical=canonicalize({id:'1',user_id:'11',earnings:'12.34',level:'2',level_id:'3',ratio:'20.00'});
+ const snapshot={...legacy.snapshot,sourceRatio:'20.00',rawSource:{entity:'la_distribution_order',canonical,digest:sha(canonical)}};
+ const source=canonicalize(snapshot),row={...legacy,snapshot,source_canonical:source,source_digest:sha(source)};
+ const client={query:async()=>{throw Error('historical rate uses only original record bytes');}} as any;
+ assert.deepEqual(await readEarningCalculation(client,actor,row,true,2),{knowledge:'RECORDED_SOURCE',percent:'20.00',levelId:'3'});
+ assert.equal((await readEarningCalculation(client,actor,row,true,1)).knowledge,'NOT_RECORDED');
+ assert.equal((await readEarningCalculation(client,actor,{...row,snapshot:{...snapshot,sourceRatio:'30.00'}},true,2)).knowledge,'NOT_RECORDED');
+});
 function probe(nativeInstalled:boolean,rows:Record<string,any>[],coverage='RECONCILED_OPENING',historyCoverage?:Record<string,unknown>,earningBasisInstalled=false,legacyFinance?:{responsibility?:Record<string,any>[];finance?:Record<string,any>[];responsibilityVersion?:string;financeVersion?:string}){
  const seen:{sql:string;args:any[]}[]=[],pool={connect:async()=>({release(){},query:async(sql:string,args:any[]=[])=>{seen.push({sql,args});
   if(['BEGIN','COMMIT','ROLLBACK','SET TRANSACTION ISOLATION LEVEL REPEATABLE READ'].includes(sql))return{rows:[]};

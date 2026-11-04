@@ -34,6 +34,23 @@ test('wallet timestamps distinguish authoritative day, explicit unknown and comp
  }finally{globalThis.fetch=previous;}
 });
 
+test('source-only history renders the known occurrence time in both list and detail while postedAt remains null',async()=>{
+ const sourceDetails={associationState:null,associationReason:null,recordedAmountCents:'1234',originalStatus:'1',originalNumber:'ORIGINAL',originalOrderType:null,originalRatio:null,originalLevel:null,sourcePaidAt:null,channelArrival:'UNKNOWN',affectsCurrentWallet:false};
+ for(const sourceKind of ['HISTORICAL_PAYMENT','HISTORICAL_REFUND','HISTORICAL_WITHDRAWAL','HISTORICAL_DISTRIBUTION']){
+  const historical={...entry,id:'history:source_time',kind:'HISTORICAL',sourceKind,deltaCents:'0',postedAt:null,recordedAt:'2026-11-03T07:47:05.000Z',sourceDetails};
+  const p=await probe(async url=>reply(String(url).includes('/entries/')?{...ctx(),entry:historical}:String(url).includes('/entries?')?{...page(),items:[historical]}:wallet()),'wallet=entries');
+  try{
+   await p.render();const record=p.host.querySelector('.wallet-record');assert(record,sourceKind);
+   assert.equal(record.querySelector('time').getAttribute('dateTime'),at);assert.match(record.textContent,/发生时间/);assert.doesNotMatch(record.textContent,/发生时间待确认/);
+   await p.setQuery('wallet=entry&entry=history%3Asource_time');
+   const detail=p.host.querySelector('.wallet-entry-detail');assert(detail,sourceKind);
+   const occurrence=[...detail.querySelectorAll('dl > div')].find(row=>row.querySelector('dt')?.textContent==='发生时间');
+   assert(occurrence,sourceKind);assert.equal(occurrence.querySelector('dd').textContent,require(tree+'/apps/web/src/lib/order-client.ts').formatOrderTime(at,{timeZoneName:false}));
+   assert.equal(historical.postedAt,null);assert.equal(historical.deltaCents,'0');
+  }finally{await p.close();}
+ }
+});
+
 test('wallet list distinguishes exact known empty proof, uncovered zero and actual partial records without POST',async()=>{
  for(const known of [false,true]){
   const empty={...page(),items:[],nextCursor:null,totals:{...page().totals,count:'0',byBucket:[]},...(known?{listCoverage:{knowledge:'KNOWN',count:'0',mappedRecordCount:'0',reason:'SOURCE_COMPLETE_THROUGH_CUTOFF',cutoff:'2026-10-03T00:00:00.000Z',version:'coverage-v1'}}:{})},methods=[];

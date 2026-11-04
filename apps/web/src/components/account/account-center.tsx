@@ -831,7 +831,7 @@ export function OrderSummaryCard({
                       {order.displayNo ? <span>单号 {order.displayNo}</span> : null}
                       {order.createdAt ? <time dateTime={order.createdAt} title={formatOrderTime(order.createdAt)} aria-label={formatOrderTime(order.createdAt)}>{summaryOrderTime(order.createdAt)}</time> : null}
                       <span>{orderTermLabel(order)}</span>
-                      {orderListingSourceLabel(order) === "历史订单" || orderListingSourceLabel(order) === "当前账号资料" ? <span>{orderListingSourceLabel(order)}</span> : null}
+                      {orderListingSourceLabel(order) === "历史订单" || orderListingSourceLabel(order)?.startsWith("当前账号资料") ? <span>{orderListingSourceLabel(order)}</span> : null}
                     </div>
                   </div>
                   <div className="account-order-row-money">

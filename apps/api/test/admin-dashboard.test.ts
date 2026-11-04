@@ -32,6 +32,7 @@ test("dashboard range defaults to 30d and rejects unsupported keys", () => {
 
 test("boss dashboard keeps receipts, quoted spread, settled contribution and paid orders separate", async () => {
   const client = { async query(sql: string) {
+    if (sql.includes("to_regclass('zzsh_order.legacy_continuation_version')")) return { rows: [{ ready: true }] };
     if (sql.includes("WITH clock AS")) return { rows: [{
       observed_at: "2026-11-02T09:00:00.000000Z",
       starts_at: "2026-10-03T16:00:00.000000Z",
@@ -48,7 +49,7 @@ test("boss dashboard keeps receipts, quoted spread, settled contribution and pai
     if (sql.includes("zzsh_iam.im_consultation")) return { rows: [{ waiting: "1", mine: "3" }] };
     if (sql.includes("WITH paid AS")) return { rows: [{ total: "6", known: "6", cents: "321165" }] };
     if (sql.includes("settlement_posting p")) return { rows: [{ cents: "42118" }] };
-    if (sql.includes("LEFT JOIN LATERAL")) return { rows: [{
+    if (sql.includes("WITH recent AS")) return { rows: [{
       id: "order_1", displayNo: "ZZ1", status: "PAID", paidAt: "2026-10-31T00:00:00.000000Z",
       confirmedCents: "100", contributionCents: "10", contributionState: "QUOTED",
     }] };
@@ -105,6 +106,7 @@ function domainProbe(patch: ReadPatch = {}) {
     calls.push({ sql, values });
     const current = values[2] === clock.starts_at, cents = current ? patch.currentCents ?? "1000" : patch.previousCents ?? "900";
     if (sql.includes("WITH clock AS")) return { rows: [clock] };
+    if (sql.includes("to_regclass('zzsh_order.legacy_continuation_version')")) return { rows: [{ ready: true }] };
     if (sql.includes('FROM zzsh_auth_user."user"')) return { rows: [{ total: "20", recent: "2" }] };
     if (sql.includes("LEFT JOIN zzsh_supply.listing_version")) return { rows: [{ total: "8", published: "5" }] };
     if (sql.includes("v.review_state='SUBMITTED'")) return { rows: [{ count: "2", age: "100" }] };
@@ -116,7 +118,7 @@ function domainProbe(patch: ReadPatch = {}) {
         : current && patch.quote ? patch.quote : { total: "6", known: "6", cents }] };
     }
     if (sql.includes("settlement_posting p")) return { rows: [{ cents }] };
-    if (sql.includes("LEFT JOIN LATERAL")) return { rows: [{ id: "order-1", displayNo: "ZZ1", status: "PAID", paidAt: clock.observed_at, confirmedCents: cents,
+    if (sql.includes("WITH recent AS")) return { rows: [{ id: "order-1", displayNo: "ZZ1", status: "PAID", paidAt: clock.observed_at, confirmedCents: sql.includes('NULL::text AS "confirmedCents"') ? null : cents,
       contributionCents: sql.includes('NULL::text AS "contributionCents"') ? null : "95", contributionState: sql.includes("'UNAVAILABLE' AS") ? "UNAVAILABLE" : "QUOTED" }] };
     if (sql.includes("zzsh_iam.im_consultation")) return { rows: [{ waiting: "1", mine: "2", age: "60" }] };
     if (sql.includes("approval_request")) return { rows: [{ count: "1", age: "60" }] };
@@ -150,7 +152,7 @@ test("each missing capability and an empty selected scope keep denied values out
     const metric = (id: string) => result.metrics.find(m => m.id === id)!;
     assert.equal(result.metrics.length, 4);
     if (omitted === ADMIN_PERMISSION.orderRead) { assert.equal(metric("confirmedCents").state, "FORBIDDEN");assert.equal(metric("paidOrders").value, null);assert.equal(result.period.paymentConfirmedTo, null);assert.equal(result.recentOrdersState, "FORBIDDEN");assert.deepEqual(result.recentOrders, []); }
-    if (omitted === ADMIN_PERMISSION.financeRead) { for (const id of ["confirmedCents", "quotedSpread", "settledContribution"]) assert.equal(metric(id).state, "FORBIDDEN");assert.equal(metric("paidOrders").state, "KNOWN");assert.equal(result.recentOrders[0]?.contributionCents, null); }
+    if (omitted === ADMIN_PERMISSION.financeRead) { for (const id of ["confirmedCents", "quotedSpread", "settledContribution"]) assert.equal(metric(id).state, "FORBIDDEN");assert.equal(metric("paidOrders").state, "KNOWN");assert.equal(result.recentOrders[0]?.contributionCents, null);assert.equal(result.recentOrders[0]?.confirmedCents, null); }
     if (omitted === ADMIN_PERMISSION.supplyQuoteInternalRead) { assert.equal(metric("quotedSpread").value, null);assert.equal(metric("quotedSpread").state, "FORBIDDEN");assert.equal(metric("settledContribution").state, "KNOWN"); }
     if (omitted !== ADMIN_PERMISSION.orderRead) assert.ok(!probe.calls.some(q => q.sql.includes("WITH paid AS")), "denied quote facts must not be queried");
   }
@@ -174,7 +176,7 @@ test("payment drilldowns retain the exact exclusive microsecond bound and long c
   assert.equal(result.period.to, clock.observed_at);assert.equal(result.period.paymentConfirmedTo, clock.exclusive_end);assert.equal(result.recentOrdersState, "KNOWN");
   for (const id of ["confirmedCents", "quotedSpread"]) {
     const m = result.metrics.find(m => m.id === id)!;assert.equal(m.value, current);assert.equal(m.delta?.value, "1");
-    const query = new URL(m.drilldown!, "http://admin.local").searchParams;assert.equal(query.get("paymentConfirmedFrom"), clock.starts_at);assert.equal(query.get("paymentConfirmedTo"), clock.exclusive_end);
+    const query = new URL(m.drilldown!, "http://admin.local").searchParams;assert.equal(query.get("paidFrom"), clock.starts_at);assert.equal(query.get("paidTo"), clock.exclusive_end);assert.equal(query.has("origin"), false);
   }
   assert.equal(result.trend[0]?.confirmedCents, current);
   for (const q of probe.calls.filter(q => q.sql.includes("WITH orders AS") || q.sql.includes("WITH paid AS") || q.sql.includes("settlement_posting p"))) assert.ok(q.values[3] === clock.observed_at || q.values[3] === clock.previous_observed_at);

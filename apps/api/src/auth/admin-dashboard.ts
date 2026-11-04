@@ -13,6 +13,9 @@ import {
 import { withDirectoryRead, withDirectoryReadTransaction } from "./user-directory-read";
 import {
   overviewDays,
+  LEGACY_BUSINESS_ORDER_SQL,
+  LEGACY_BUSINESS_PAYMENT_SQL,
+  legacyBusinessOrderHeadSql,
   parseOverviewRange,
   readAdminOverview,
   readOverviewClock,
@@ -22,6 +25,7 @@ import {
   type OverviewRange,
   type OverviewViewer,
 } from "./admin-overview";
+import { legacyContinuationReady, LEGACY_CONTINUATION_COMPLETED_AT_SQL, LEGACY_ORDER_STATUS_SQL } from "../order/legacy-order-read";
 import { ensureApiV1RequestId } from "../contracts/api-v1";
 import { requireAdminAccess, safely, type SupplyResponse } from "../supply/supply-routes";
 import { forbidden, headerValue, notFound, sendJson, type SupplyNodeRequest } from "../supply/supply-util";
@@ -88,10 +92,10 @@ export function parseDashboardRange(query: URLSearchParams): OverviewRange {
 const MONEY = "CNY_CENTS" as const;
 const COUNT = "COUNT" as const;
 const DEFINITIONS = {
-  confirmed: "本期原生订单的 APPLIED/CNY 付款记录；含押金；未扣退款；不代表渠道或银行到账。",
+  confirmed: "按订单付款时间汇总实付金额，含押金，未扣退款。依据本站接受付款和原单已付事实，渠道到账另行核验。",
   quoted: "冻结报价中的 resourceTotal - ownerTotal；仅为报价预估价差，未扣最终消耗、包赔、提前结束补偿或渠道成本。",
-  settled: "结算过账的平台分量；仍未扣分销/通道成本，不是净利润。",
-  paidOrders: "本期原生订单中，存在 APPLIED/CNY 付款记录的订单数。",
+  settled: "按结算时间汇总已核平台分量。缺少同口径分量的旧单按完单时间计入覆盖范围；分销支出、通道成本与净利润单独核算。",
+  paidOrders: "按付款时间统计已付订单，每笔订单计一次。",
 } as const;
 
 function metricById(overview: { metrics: OverviewMetric[] }, id: string): OverviewMetric | undefined {
@@ -125,7 +129,7 @@ function fromOverview(
   const cur = metricById(current, id);
   const prev = metricById(previous, id);
   const state = cur?.state ?? "UNAVAILABLE";
-  if (state !== "KNOWN") {
+  if (state !== "KNOWN" && state !== "PARTIAL") {
     return { id, label, value: null, unit, state, definition, coverage: null, delta: null, sparkline: [], drilldown: null };
   }
   return {
@@ -133,10 +137,10 @@ function fromOverview(
     label,
     value: cur?.value ?? null,
     unit,
-    state: "KNOWN",
+    state,
     definition,
-    coverage: null,
-    delta: ["confirmedCents", "paymentsConfirmed", "usersCreated"].includes(id)
+    coverage: cur?.coverage ?? null,
+    delta: state === "KNOWN" && ["confirmedCents", "paymentsConfirmed", "usersCreated"].includes(id)
       ? deltaOf(cur?.value ?? null, prev?.state === "KNOWN" ? prev.value : null, unit) : null,
     sparkline,
     drilldown: cur?.drilldown ?? null,
@@ -168,7 +172,6 @@ async function readQuotedSpread(
     return { value: null, state: "FORBIDDEN", coverage: null };
   }
   if (scopeIsEmpty(scope, access.isBoss)) return { value: null, state: "NO_GAME_SCOPE", coverage: null };
-  const scopeSql = gameScopeSql("o.game_id", "$1", "$2");
   const row = (await client.query<{ total: string; known: string; cents: string }>(
     `WITH paid AS (
        SELECT o.id, ${quoteCentsSql("o")} AS cents
@@ -176,7 +179,12 @@ async function readQuotedSpread(
        JOIN zzsh_order.payment_confirmation p ON p.id=o.paid_confirmation_id AND p.order_id=o.id
        WHERE p.disposition='APPLIED' AND p.currency='CNY'
          AND o.paid_at >= $3::timestamptz AND o.paid_at <= $4::timestamptz
-         AND ${scopeSql}
+         AND ${gameScopeSql("o.game_id", "$1", "$2")}
+       UNION ALL
+       SELECT l.id, NULL::numeric AS cents FROM zzsh_order.legacy_order_read_snapshot l
+       WHERE ${LEGACY_BUSINESS_PAYMENT_SQL}
+         AND l.source_paid_at >= $3::timestamptz AND l.source_paid_at <= $4::timestamptz
+         AND ${gameScopeSql("l.game_id", "$1", "$2")}
      )
      SELECT count(*)::text AS total,
        count(cents)::text AS known,
@@ -195,18 +203,28 @@ async function readSettledContribution(
   viewer: DashboardViewer,
   startsAt: string,
   observedAt: string,
-): Promise<{ value: string | null; state: DashboardState }> {
+  legacyHeadReady: boolean,
+): Promise<{ value: string | null; state: DashboardState; coverage?: DashboardMetric["coverage"] }> {
   const { access, scope, adminId } = viewer;
   if (!access.permissions.has(ADMIN_PERMISSION.financeRead)) return { value: null, state: "FORBIDDEN" };
   if (scopeIsEmpty(scope, access.isBoss)) return { value: null, state: "NO_GAME_SCOPE" };
-  const row = (await client.query<{ cents: string }>(
-    `SELECT COALESCE(sum(p.platform_contribution_cents),0)::text AS cents
+  const legacyCompletedAt = legacyHeadReady
+    ? `CASE WHEN h.stage=4 THEN ${LEGACY_CONTINUATION_COMPLETED_AT_SQL} ELSE l.source_completed_at END`
+    : "l.source_completed_at";
+  const row = (await client.query<{ cents: string; known: string; unavailable: string }>(
+    `SELECT COALESCE(sum(p.platform_contribution_cents),0)::text AS cents,count(*)::text AS known,
+      (SELECT count(*)::text FROM zzsh_order.legacy_order_read_snapshot l ${legacyBusinessOrderHeadSql(legacyHeadReady)}
+       WHERE ${LEGACY_BUSINESS_PAYMENT_SQL} AND (${LEGACY_ORDER_STATUS_SQL})='COMPLETED'
+         AND (${legacyCompletedAt}) BETWEEN $3::timestamptz AND $4::timestamptz
+         AND ${gameScopeSql("l.game_id", "$1", "$2")}) AS unavailable
        FROM zzsh_order.settlement_posting p
        JOIN zzsh_order.rental_order o ON o.id=p.order_id
       WHERE p.posted_at >= $3::timestamptz AND p.posted_at <= $4::timestamptz
         AND ${gameScopeSql("o.game_id", "$1", "$2")}`,
     [adminId, access.isBoss, startsAt, observedAt],
   )).rows[0]!;
+  if (Number(row.unavailable) > 0) return { value: row.known === "0" ? null : row.cents, state: "PARTIAL",
+    coverage: { knownCount: Number(row.known), totalCount: Number(row.known) + Number(row.unavailable) } };
   return { value: row.cents, state: "KNOWN" };
 }
 
@@ -215,6 +233,7 @@ async function readRecentOrders(
   viewer: DashboardViewer,
   startsAt: string,
   observedAt: string,
+  legacyHeadReady: boolean,
 ): Promise<DashboardRecentOrder[]> {
   const { access, scope, adminId } = viewer;
   if (!access.permissions.has(ADMIN_PERMISSION.orderRead) || scopeIsEmpty(scope, access.isBoss)) return [];
@@ -231,28 +250,34 @@ async function readRecentOrders(
          ELSE 'UNAVAILABLE' END`
     : "'UNAVAILABLE'";
   const rows = (await client.query<{
-    id: string; displayNo: string; status: string; paidAt: string | null; confirmedCents: string;
+    id: string; displayNo: string; status: string; paidAt: string | null; confirmedCents: string | null;
     contributionCents: string | null; contributionState: "SETTLED" | "QUOTED" | "UNAVAILABLE";
   }>(
-    `SELECT o.id,o.display_no AS "displayNo",o.status,
-       to_char(o.paid_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "paidAt",
-       p.amount_cents::text AS "confirmedCents",
+    `WITH recent AS (
+       SELECT o.id,o.display_no AS "displayNo",o.status,o.paid_at,'NATIVE' AS origin,
+       ${finance ? "p.amount_cents::text" : "NULL::text"} AS "confirmedCents",
        ${contributionCents} AS "contributionCents",
        ${contributionState} AS "contributionState"
        FROM zzsh_order.rental_order o
        JOIN zzsh_order.payment_confirmation p ON p.id=o.paid_confirmation_id AND p.order_id=o.id
-       LEFT JOIN LATERAL (
+       ${finance ? `LEFT JOIN LATERAL (
          SELECT id, platform_contribution_cents
          FROM zzsh_order.settlement_posting
          WHERE order_id=o.id
          ORDER BY posted_at DESC, id DESC
          LIMIT 1
-       ) sp ON true
+       ) sp ON true` : ""}
       WHERE p.disposition='APPLIED' AND p.currency='CNY'
         AND o.paid_at >= $3::timestamptz AND o.paid_at <= $4::timestamptz
         AND ${gameScopeSql("o.game_id", "$1", "$2")}
-      ORDER BY o.paid_at DESC, o.id DESC
-      LIMIT 8`,
+       UNION ALL
+       SELECT l.id,l.original_order_no,${LEGACY_ORDER_STATUS_SQL},l.source_paid_at,'LEGACY',
+         ${finance ? "CASE WHEN l.recorded_paid_amount_cents>=0 THEN l.recorded_paid_amount_cents::text END" : "NULL::text"},NULL::text,'UNAVAILABLE'
+       FROM zzsh_order.legacy_order_read_snapshot l ${legacyBusinessOrderHeadSql(legacyHeadReady)}
+       WHERE ${LEGACY_BUSINESS_PAYMENT_SQL} AND ${gameScopeSql("l.game_id", "$1", "$2")}
+         AND l.source_paid_at >= $3::timestamptz AND l.source_paid_at <= $4::timestamptz
+     ) SELECT *,to_char(paid_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "paidAt"
+       FROM recent ORDER BY paid_at DESC, id DESC, origin DESC LIMIT 8`,
     [adminId, access.isBoss, startsAt, observedAt],
   )).rows;
   return rows.map((row) => ({
@@ -279,6 +304,7 @@ async function readQueues(
   viewer: DashboardViewer,
   current: { metrics: OverviewMetric[] },
   preset: DashboardPreset,
+  legacyHeadReady: boolean,
 ): Promise<DashboardQueue[]> {
   const { access, scope, adminId, imAppId } = viewer;
   const permission = (code: string) => access.permissions.has(code);
@@ -286,6 +312,10 @@ async function readQueues(
   const globalScope = access.isBoss || scope.mode === "ALL_GAMES";
   const scopeSql = gameScopeSql("o.game_id", "$1", "$2");
   const result: DashboardQueue[] = [];
+  const paidAwaitingAgeSql = `SELECT EXTRACT(EPOCH FROM (clock_timestamp()-min(paid_at)))::bigint::text AS age
+    FROM (SELECT o.paid_at FROM zzsh_order.rental_order o WHERE o.status='PAID' AND ${scopeSql}
+      UNION ALL SELECT l.source_paid_at FROM zzsh_order.legacy_order_read_snapshot l ${legacyBusinessOrderHeadSql(legacyHeadReady)}
+      WHERE ${LEGACY_BUSINESS_ORDER_SQL} AND ${gameScopeSql("l.game_id", "$1", "$2")} AND (${LEGACY_ORDER_STATUS_SQL})='PAID') paid`;
   // The oldest-age queries are tiny; run them before returning so the response is one snapshot.
   const addAsync = async (id: string, label: string, metricId: string, ageSql: string | null, ageValues: unknown[], severity: DashboardQueue["severity"], drilldown: string | null) => {
     const metric = metricById(current, metricId);
@@ -295,8 +325,8 @@ async function readQueues(
 
   if (preset === "BOSS") {
     await addAsync("paid-awaiting", "已付款待完单", "ordersPaid",
-      emptyScope ? null : `SELECT EXTRACT(EPOCH FROM (clock_timestamp()-min(paid_at)))::bigint::text AS age FROM zzsh_order.rental_order o WHERE status='PAID' AND ${scopeSql}`,
-      [adminId, access.isBoss], "WARN", "/orders?origin=NATIVE&status=PAID");
+      emptyScope ? null : paidAwaitingAgeSql,
+      [adminId, access.isBoss], "WARN", "/orders?status=PAID");
     if (permission(ADMIN_PERMISSION.approvalRequestApprove)) {
       await addAsync("pending-approvals", "待我审批", "pendingApprovals",
         `SELECT EXTRACT(EPOCH FROM (clock_timestamp()-min(r.created_at)))::bigint::text AS age
@@ -312,8 +342,8 @@ async function readQueues(
       emptyScope ? null : `SELECT EXTRACT(EPOCH FROM (clock_timestamp()-min(created_at)))::bigint::text AS age FROM zzsh_order.rental_order o WHERE status='PENDING_PAYMENT' AND hold_until>clock_timestamp() AND ${scopeSql}`,
       [adminId, access.isBoss], "INFO", "/orders?origin=NATIVE&status=PENDING_PAYMENT&paymentOpen=true");
     await addAsync("paid-awaiting", "已付款待完单", "ordersPaid",
-      emptyScope ? null : `SELECT EXTRACT(EPOCH FROM (clock_timestamp()-min(paid_at)))::bigint::text AS age FROM zzsh_order.rental_order o WHERE status='PAID' AND ${scopeSql}`,
-      [adminId, access.isBoss], "WARN", "/orders?origin=NATIVE&status=PAID");
+      emptyScope ? null : paidAwaitingAgeSql,
+      [adminId, access.isBoss], "WARN", "/orders?status=PAID");
     await addAsync("pending-review", "账号待审核", "listingsPendingReview",
       emptyScope ? null : `SELECT EXTRACT(EPOCH FROM (clock_timestamp()-min(v.submitted_at)))::bigint::text AS age
          FROM zzsh_supply.listing_version v JOIN zzsh_supply.rental_account a ON a.id=v.account_id AND a.current_version_id=v.id
@@ -341,8 +371,8 @@ async function readQueues(
     imAppId ? `SELECT EXTRACT(EPOCH FROM (clock_timestamp()-min(created_at)))::bigint::text AS age FROM zzsh_iam.im_consultation WHERE app_id=$1 AND state='ACTIVE' AND assigned_admin_id=$2` : null,
     imAppId ? [imAppId, adminId] : [], "INFO", "/support/mine");
   await addAsync("paid-awaiting", "待完单", "ordersPaid",
-    emptyScope ? null : `SELECT EXTRACT(EPOCH FROM (clock_timestamp()-min(paid_at)))::bigint::text AS age FROM zzsh_order.rental_order o WHERE status='PAID' AND ${scopeSql}`,
-    [adminId, access.isBoss], "WARN", "/orders?origin=NATIVE&status=PAID");
+    emptyScope ? null : paidAwaitingAgeSql,
+    [adminId, access.isBoss], "WARN", "/orders?status=PAID");
   return result;
 }
 
@@ -367,22 +397,26 @@ export async function readAdminDashboard(
 ): Promise<AdminDashboardPayload> {
   const preset = deriveDashboardPreset(viewer.access);
   const clock: OverviewClock = await readOverviewClock(client, overviewDays(range));
-  const current = await readAdminOverview(client, viewer, range, { clock });
+  const legacyHeadReady = (viewer.access.permissions.has(ADMIN_PERMISSION.orderRead) || viewer.access.permissions.has(ADMIN_PERMISSION.financeRead))
+    && !scopeIsEmpty(viewer.scope, viewer.access.isBoss)
+    ? await legacyContinuationReady(client) : false;
+  const current = await readAdminOverview(client, viewer, range, { clock, legacyHeadReady });
   const previousClock: OverviewClock = {
     observed_at: clock.previous_observed_at ?? clock.starts_at,
     starts_at: clock.previous_starts_at ?? clock.starts_at,
     exclusive_end: clock.starts_at,
   };
-  const previous = await readAdminOverview(client, viewer, range, { clock: previousClock, ordersOnly: true });
+  const previous = await readAdminOverview(client, viewer, range, { clock: previousClock, ordersOnly: true, legacyHeadReady });
   const pendingApprovals = await readPendingApprovalMetric(client, viewer.access, viewer.adminId);
   const metricsWithApprovals = { metrics: [...current.metrics, pendingApprovals] };
   const previousWithApprovals = { metrics: [...previous.metrics, { ...pendingApprovals, value: null, state: "FORBIDDEN" as const, drilldown: null }] };
-  const confirmed = fromOverview(current, previous, "confirmedCents", "确认收款（含押金）", DEFINITIONS.confirmed, MONEY, current.trend.map((day) => day.confirmedCents ?? "0"));
+  const confirmed = fromOverview(current, previous, "confirmedCents", "实付金额（含押金）", DEFINITIONS.confirmed, MONEY,
+    current.trend.every(day => day.confirmedCents !== null) ? current.trend.map(day => day.confirmedCents!) : []);
   const paidOrders = { ...fromOverview(current, previous, "paymentsConfirmed", "已付款订单数", DEFINITIONS.paidOrders, COUNT, current.trend.map((day) => day.payments)), id: "paidOrders" };
   const quoted = await readQuotedSpread(client, viewer, clock.starts_at, clock.observed_at);
   const previousQuoted = await readQuotedSpread(client, viewer, previousClock.starts_at, previousClock.observed_at);
-  const settled = await readSettledContribution(client, viewer, clock.starts_at, clock.observed_at);
-  const previousSettled = await readSettledContribution(client, viewer, previousClock.starts_at, previousClock.observed_at);
+  const settled = await readSettledContribution(client, viewer, clock.starts_at, clock.observed_at, legacyHeadReady);
+  const previousSettled = await readSettledContribution(client, viewer, previousClock.starts_at, previousClock.observed_at, legacyHeadReady);
   const quotedMetric: DashboardMetric = {
     id: "quotedSpread",
     label: "报价预估价差",
@@ -394,7 +428,7 @@ export async function readAdminDashboard(
     delta: quoted.state === "KNOWN" && previousQuoted.state === "KNOWN" ? deltaOf(quoted.value, previousQuoted.value, MONEY) : null,
     sparkline: [],
     drilldown: quoted.state === "KNOWN" || quoted.state === "PARTIAL"
-      ? `/orders?origin=NATIVE&paymentConfirmedFrom=${encodeURIComponent(clock.starts_at)}&paymentConfirmedTo=${encodeURIComponent(clock.exclusive_end)}`
+      ? metricById(current, "paymentsConfirmed")?.drilldown ?? null
       : null,
   };
   const settledMetric: DashboardMetric = {
@@ -404,7 +438,7 @@ export async function readAdminDashboard(
     unit: MONEY,
     state: settled.state,
     definition: DEFINITIONS.settled,
-    coverage: null,
+    coverage: settled.coverage ?? null,
     delta: settled.state === "KNOWN" && previousSettled.state === "KNOWN" ? deltaOf(settled.value, previousSettled.value, MONEY) : null,
     sparkline: [],
     drilldown: null,
@@ -417,12 +451,12 @@ export async function readAdminDashboard(
     metrics = [
       fromOverview(metricsWithApprovals, previousWithApprovals, "supportWaiting", "待接入咨询", "当前全站排队中的服务类咨询。", COUNT, []),
       fromOverview(metricsWithApprovals, previousWithApprovals, "supportMine", "我的进行中", "当前分配给你的进行中咨询。", COUNT, []),
-      fromOverview(current, previous, "ordersPaid", "待完单", "当前状态为 PAID 的原生订单。", COUNT, []),
+      fromOverview(current, previous, "ordersPaid", "待完单", "已付款且尚未完单的订单。", COUNT, []),
     ];
   } else metrics = [];
 
-  const recentOrders = await readRecentOrders(client, viewer, clock.starts_at, clock.observed_at);
-  const queues = await readQueues(client, viewer, metricsWithApprovals, preset);
+  const recentOrders = await readRecentOrders(client, viewer, clock.starts_at, clock.observed_at, legacyHeadReady);
+  const queues = await readQueues(client, viewer, metricsWithApprovals, preset, legacyHeadReady);
   return {
     version: "admin.dashboard.v1",
     preset,

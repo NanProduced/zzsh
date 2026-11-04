@@ -13,6 +13,13 @@ const filters = parseAdminFinanceFilters(new URLSearchParams("from=2026-10-03&to
 const line = (overrides: Record<string, unknown> = {}) => projectAdminFinanceLedger({ id: "a", account_code: "WALLET_AVAILABLE", subject_id: "u1", subject_name: "同昵称", delta: "-20000", at: "2026-10-03T00:00:00.000000Z", source_entity: "withdrawal_intent", source_id: "w1", event_kind: "RESERVE", ...overrides });
 const facts = (): FinanceFacts => ({ entries: [line()], subjects: [{ id: "u1", name: "同昵称" }], revisions: [], withdrawalsReady: true, asOf: "2026-10-03T10:00:00.000000Z", version: "a".repeat(64) });
 const actor = { userId: "admin1", sessionId: "session1", authorizationKey: "access1" }, key = { keyId: "read1", secret: "x".repeat(64) };
+test('historical payment/refund documents preserve original business states and remain outside current wallet and period ledger totals',()=>{
+ for(const [entity,kind,purpose]of [['la_pay_order','PAYMENT','旧平台付款记录'],['la_refund_record','REFUND','旧平台退款记录']]){
+  const record=projectAdminFinanceObservation({id:'source-'+kind,subject_id:'u1',subject_name:'fixture',source_type:'LEGACY_MYSQL',source_system:'legacy_mysql_restore',source_entity:entity,source_id:'11',source_digest:'a'.repeat(64),amount:'12.34',source_status:'1',at:facts().asOf,imported_at:facts().asOf,included_in_opening:false,reference_id:null,reference_no:null,extra_evidence:{snapshot:{sourceNumber:'ORIGINAL-'+kind,sourceOrderType:'order',associationState:'UNRESOLVED'}}});
+  assert.equal(record.documentRef,`HISTORY_${kind}:source-${kind}`);assert.equal(record.kind,kind);assert.equal(record.documentNumber,'ORIGINAL-'+kind);assert.equal(record.historical!.purposeLabel,purpose);assert.equal(record.historical!.originalStatus,'1');assert.equal(record.affectsCurrentLedger,false);assert.equal(record.affectsCurrentWallet,false);assert.equal(record.evidence.channelArrival,'UNKNOWN');assert.equal(record.related.length,0);
+ }
+ assert.equal(parseAdminFinanceFilters(new URLSearchParams('kind=PAYMENT')).kind,'PAYMENT');
+});
 
 test('native pending/settled/recovery uses the earning economic root and original state, not a withdrawal or generic settlement',()=>{
  const row=projectAdminFinanceLedger({id:'earning-line',account_code:'WALLET_PENDING_EARNINGS',subject_id:'u1',subject_name:'用户一',delta:'1234',at:facts().asOf,event_kind:'EARNING_PENDING',source_kind:'NATIVE_RENTAL_REFERRAL',source_type:'NATIVE',source_entity:'rental_order',source_id:'native-order',economic_root_id:'earning-root',order_id:'native-order',earning_state:'RECOVERY_REQUIRED',earning_role:'RENTER_REFERRAL',earning_amount:'1234',earning_disposition:'SETTLED',earning_recovery:'1234',earning_version:'3',earning_due_at:facts().asOf});

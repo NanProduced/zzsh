@@ -71,3 +71,11 @@ test('generation requires a fresh nonce before reading any secret or connecting'
   const result = spawnSync(process.execPath, [fileURLToPath(new URL('./build-business-initial.mjs', import.meta.url)), '--execute', '--oid', '1', '--baseline', 'release_nonce_negative', '--source-count', '152'], { env, encoding:'utf8', timeout:5000 });
   assert.notEqual(result.status, 0); assert.match(result.stderr, /REGRESSION_NONCE_REQUIRED/); assert.doesNotMatch(result.stderr, /ENOENT|ECONN/);
 });
+
+test('production export rejects the protected regression database and any unregistered name shape before reading credentials', () => {
+  const env = { ...process.env, DB_PASSWORD_FILE: 'must-not-be-read', ZZSH_REGRESSION_RUN: 'shape_fixture_nonce' };
+  for (const database of ['zzsh_test_regression', 'zzsh_dev_daily']) {
+    const result = spawnSync(process.execPath, [fileURLToPath(new URL('./build-business-initial.mjs', import.meta.url)), '--execute', '--production', '--source-db', database, '--oid', '1', '--baseline', 'release_scratch_negative', '--source-count', '154'], { env, encoding:'utf8', timeout:5000 });
+    assert.notEqual(result.status, 0); assert.match(result.stderr, /PRODUCTION_INITIAL_SCRATCH_REQUIRED/); assert.doesNotMatch(result.stderr, /ENOENT|ECONN/);
+  }
+});

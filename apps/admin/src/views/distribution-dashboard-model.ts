@@ -21,7 +21,7 @@ export type DashboardOverview = {
   recent: DashboardEarning[];
   reasonCodes: string[];
 };
-export type DashboardParticipant = { userId: string; name: string | null; eligibility: string; frozen: boolean; levelCode: string | null; inviter: string; leader: string; sourceType: string; revision: string; leaderChildren: number; inviterChildren: number; settledCents: string; pendingCents: string; recoveryCents: string };
+export type DashboardParticipant = { userId: string; name: string | null; eligibility: string; frozen: boolean; levelCode: string | null; levelName?: string | null; inviter: string; leader: string; sourceType: string; revision: string; leaderChildren: number | null; inviterChildren: number | null; mappedLeaderChildren?: number; mappedInviterChildren?: number; settledCents: string | null; pendingCents: string | null; recoveryCents: string | null; legacyQualification?: { eligibility: string; commissionFrozen: boolean | null; levelId: string | null } | null; recordCount?: string | null; mappedRecordCount?: string; earningsCoverage?: string; needsReviewCount?: string | null; needsReviewCents?: string | null; earningsReasonCodes?: string[] };
 export type DashboardParticipantDetail = { participant: DashboardParticipant; relations: { type: string; parentUserId: string | null; parentName: string | null; sourceType: string | null; policyVersion: string | null }[] };
 
 const dateShift = (date: string, days: number) => new Date(Date.parse(`${date}T00:00:00Z`) + days * 86400_000).toISOString().slice(0, 10);
@@ -71,6 +71,16 @@ export function sourceLabel(source: string) { return source === 'NATIVE' ? '本�
 export function roleLabel(role: string) { return commissionRoleLabel(role); }
 export function stateLabel(state: string) { return state === 'ALL' ? '全部状态' : commissionStateLabel(state); }
 export function eligibilityLabel(value: string) { return value === 'ELIGIBLE' ? '参与中' : value === 'INELIGIBLE' ? '不参与' : '资格待核'; }
+export function participantEligibilityLabel(item: DashboardParticipant) {
+  return item.eligibility === 'UNKNOWN' && item.legacyQualification?.eligibility === 'ELIGIBLE' ? '原资格有效 · 当前计佣待核' : eligibilityLabel(item.eligibility);
+}
+export function participantLevelLabel(item: DashboardParticipant) {
+  if (item.levelName) return item.levelName;
+  return item.legacyQualification?.levelId ? `原分销档位 ID ${item.legacyQualification.levelId}` : item.levelCode ?? (item.sourceType === 'LEGACY_MYSQL' ? '原档位待核' : '无档位记录');
+}
+export function participantChildrenLabel(total: number | null, mapped?: number) {
+  return total !== null ? String(total) : mapped === undefined ? '待核' : `已接入 ${mapped} · 总数待核`;
+}
 
 async function read<T>(path: string, query: URLSearchParams, signal?: AbortSignal): Promise<T> {
   try { return await adminRequest<T>(`/distribution/${path}?${query}`, undefined, 'GET', {}, signal); }

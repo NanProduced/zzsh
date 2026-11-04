@@ -148,9 +148,9 @@ test("catalog row editor: identity, conflicts and fixed request recovery", async
       await mount(); await click("编辑", row("legacy")); await click("详情"); const box = document.querySelector('[role="dialog"] [role="checkbox"]'); await act(async () => box.click()); await fill("来源命名空间", "legacy.sg_zzsh"); assert.equal(field("来源字段").readOnly, true); assert.equal(field("原始来源值").readOnly, true); await review(); await click("保存", document.querySelector('[role="dialog"]')); assert.equal(writes[0].body.sourceToken, " raw legacy "); assert.equal(writes[0].body.sourceField, "agent_skin"); assert.equal(writes[0].body.sourceNamespace, "legacy.sg_zzsh");
     });
     await t.test("missing identity or firearm-owner contract never invents options or writes", async () => {
-      await mount({ missing: true }); assert.match(document.body.textContent, /完整皮肤身份/); const createBtn = byText("新增皮肤"); assert.ok(createBtn === undefined || createBtn.disabled === true); assert.equal(writes.length, 0);
+      await mount({ missing: true }); assert.match(document.body.textContent, /皮肤目录资料暂时无法确认/); const createBtn = byText("新增皮肤"); assert.ok(createBtn === undefined || createBtn.disabled === true); assert.equal(writes.length, 0);
       for (const option of [{ missingFirearms: true }, { badFirearms: true }]) {
-        await mount(option); await click("确认身份", row("pending")); await fill("皮肤类型", "FIREARM"); assert.match(document.body.textContent, /枪械归属未接入/); assert.equal(field("所属对象").disabled, true); await review(); await fill("皮肤本名", "Name"); await click("保存", document.querySelector('[role="dialog"]')); assert.equal(writes.length, 0); assert.ok(!reads.some(p => p.endsWith('/firearms')));
+        await mount(option); await click("确认身份", row("pending")); await fill("皮肤类型", "FIREARM"); assert.match(document.body.textContent, /枪械归属资料暂时无法读取/); assert.equal(field("所属对象").disabled, true); await review(); await fill("皮肤本名", "Name"); await click("保存", document.querySelector('[role="dialog"]')); assert.equal(writes.length, 0); assert.ok(!reads.some(p => p.endsWith('/firearms')));
       }
     });
     await t.test("catalog-only administrator confirms FIREARM through returned catalog ids", async () => {

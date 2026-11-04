@@ -1329,7 +1329,7 @@ test("a disabled fast mode and a v1 rule both refuse to pretend fast pricing", a
     await v1Fast.type('input[aria-label$="（M）"]', "60");
     await v1Fast.click('.publish-rail-actions input[type="checkbox"]');
     await v1Fast.clickButton("确认上架");
-    assert.match(v1Fast.text(), /当前规则未开放极速比例合同/);
+    assert.match(v1Fast.text(), /当前规则暂不支持极速出租/);
     assert.equal(v1Fast.calls.some((call) => call.op === "quote"), false);
   } finally {
     await v1Fast.close();

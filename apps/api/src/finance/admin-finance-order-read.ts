@@ -5,6 +5,7 @@ import { escapeLike } from "../supply/catalog";
 import type { FinanceLoadScope } from "./admin-finance-query";
 import { gameScopeSql } from "../auth/admin-scope";
 import type { HistoricalRelationAccess } from "./legacy-observation-display";
+import { typedHistoricalOrderReference } from "./legacy-observation-display";
 
 export type FinanceOrderFact = { ref: string; id: string; number: string; sourceType: string; sourceSystem: string; sourceId: string; sourceDigest: string | null; kind: "SETTLEMENT"; state: "ORDER_RECORDED" | "HISTORICAL_ORDER_RECORDED"; occurredAt: string | null; importedAt: string; ownerId: string; renterId: string; accountId: string; dueCents: string | null; recordedPaidCents: string | null; depositCents: string | null; originalOrderStatus: string; originalPaymentStatus: string | null;
   payment?: { state: "SITE_ACCEPTED" | "REVIEW_REQUIRED" | "NO_ACCEPTED_PAYMENT" | "LEGACY_RECORDED" | "UNAVAILABLE"; amountCents: string | null; confirmedAt: string | null; source?:string|null; hasReviewPayment: boolean | null }; postingState?: "POSTED" | "NOT_POSTED" | "LEGACY_OBSERVATION" | "UNAVAILABLE";
@@ -22,7 +23,10 @@ export function financeOrderSql(legacy: boolean, scope: FinanceLoadScope, relate
     EXISTS(SELECT 1 FROM zzsh_order.settlement_posting posting WHERE posting.order_id=o.id) AS has_posting
     FROM zzsh_order.rental_order o LEFT JOIN zzsh_order.payment_confirmation p ON p.id=o.paid_confirmation_id AND p.order_id=o.id AND p.disposition='APPLIED' AND p.currency='CNY'`;
   const values: unknown[] = [], predicates: string[] = [], bind = (value: unknown) => `$${values.push(value)}`;
-  if(scope.orderRefs)predicates.push(`('${legacy?"LEGACY_ORDER:":"ORDER:"}'||r.id)=ANY(${bind(scope.orderRefs)}::text[])`);
+  if(scope.orderRefs){
+    const prefix=legacy?"LEGACY_ORDER:":"ORDER:";
+    predicates.push(`r.id=ANY(${bind(scope.orderRefs.filter(ref=>ref.startsWith(prefix)).map(ref=>ref.slice(prefix.length)))}::text[])`);
+  }
   else if(scope.documentRef){const prefix=legacy?"LEGACY_ORDER:":"ORDER:";predicates.push(scope.documentRef.startsWith(prefix)?`r.id=${bind(scope.documentRef.slice(prefix.length))}`:"FALSE");}
   else if(scope.subjectId){const p=bind(scope.subjectId);predicates.push(`(r.owner_user_id=${p} OR r.renter_user_id=${p})`);}
   else if(scope.filters){const f=scope.filters;if(f.scope!=="ALL"){const p=bind(f.scope);predicates.push(`(r.owner_user_id=${p} OR r.renter_user_id=${p})`);}if(f.bucket!=="ALL"||!["ALL","SETTLEMENT"].includes(f.kind)||!["ALL",legacy?"HISTORICAL_ORDER_RECORDED":"ORDER_RECORDED"].includes(f.state))predicates.push("FALSE");
@@ -34,9 +38,21 @@ export function financeOrderSql(legacy: boolean, scope: FinanceLoadScope, relate
       predicates.push(`(${fields.map(match).join(" OR ")} OR EXISTS(SELECT 1 FROM zzsh_auth_user."user" u WHERE u.id IN(r.owner_user_id,r.renter_user_id) AND (${match("u.id")} OR ${match(name)})))`);
     }}
   const main=predicates.length?predicates.join(" AND "):"TRUE", links:string[]=[];
-  if(legacy)for(const row of related){if(row.reference_id||row.reference_no){const fields=[`r.source_system=${bind(row.source_system)}`];if(row.reference_id)fields.push(`r.legacy_id=${bind(row.reference_id)}`);if(row.reference_no)fields.push(`r.original_order_no=${bind(row.reference_no)}`);links.push("("+fields.join(" AND ")+")");}}
+  if(legacy&&related.length){
+    const refs=related.flatMap(row=>{
+      const id=typedHistoricalOrderReference(row);
+      const earnings=row.source_entity==='la_log_earnings';
+      return id||earnings&&(row.reference_id||row.reference_no)?[{system:row.source_system,id:id??row.reference_id??null,no:earnings?row.reference_no??null:null}]:[];
+    });
+    for(const field of ["id","no"] as const){
+      const exact=refs.filter(ref=>field==='id'?ref.id!==null:ref.id===null&&ref.no!==null);
+      if(exact.length)links.push(`r.source_entity='la_order' AND (r.source_system,r.${field==='id'?'legacy_id':'original_order_no'}) IN
+        (SELECT * FROM unnest(${bind(exact.map(ref=>ref.system))}::text[],${bind(exact.map(ref=>ref[field]))}::text[]))`);
+    }
+  }
   const scoped=access&&(access.isBoss||access.orderRead||access.resourceRead)?gameScopeSql('r.game_id',bind(access.adminId),bind(access.isBoss)):'false';
-  return {text:`WITH finance_order_rows AS (${sql}) SELECT r.*,(${access?.isBoss||access?.orderRead?scoped:'false'}) AS object_readable,(${access?.isBoss||access?.resourceRead?scoped:'false'}) AS account_readable FROM finance_order_rows r WHERE (${main})${links.length?" OR "+links.join(" OR "):""}${limit===null?"":` ORDER BY r.id COLLATE "C" LIMIT ${limit}`}`,values};
+  const visibleOrder=access?.isBoss||access?.orderRead?`${scoped}${legacy?" AND COALESCE(r.source_snapshot->>'is_delete','0')='0'":""}`:'false';
+  return {text:`WITH finance_order_rows AS (${sql}) SELECT r.*,(${visibleOrder}) AS object_readable,(${access?.isBoss||access?.resourceRead?scoped:'false'}) AS account_readable FROM finance_order_rows r WHERE (${main})${links.length?" OR "+links.join(" OR "):""}${limit===null?"":` ORDER BY r.id COLLATE "C" LIMIT ${limit}`}`,values};
 }
 export async function loadFinanceOrderFacts(client: PoolClient, ready: { native_orders?: boolean; legacy_orders?: boolean }, scope: FinanceLoadScope = {}, related: Record<string, any>[] = [],access?:HistoricalRelationAccess): Promise<FinanceOrderFact[]> {
   const records: FinanceOrderFact[] = [];

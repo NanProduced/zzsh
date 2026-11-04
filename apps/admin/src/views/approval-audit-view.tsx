@@ -83,8 +83,8 @@ const TARGET_SCOPED_OPERATIONS = new Set(["approval.request.decide", "approval.r
 const INITIATION_ENTRY: Record<string, { label: string; path?: string }> = {
   "membership.benefit.policy.publish": { label: "会员成长页 · 政策草稿提交审批", path: "/membership-growth" },
   "membership.entitlement.grant": { label: "会员成长页 · 礼遇发放提交审批", path: "/membership-growth" },
-  "membership.entitlement.replace": { label: "尚未接入发起入口（会员礼遇页需补替换提交）" },
-  "membership.entitlement.revoke": { label: "尚未接入发起入口（会员礼遇明细需补撤销提交）" },
+  "membership.entitlement.replace": { label: "暂无法从此处发起替换" },
+  "membership.entitlement.revoke": { label: "暂无法从此处发起撤销" },
   "order.settlement.adjust": { label: "由订单结算流程在结算事务内发起，审批页不可发起" },
 };
 
@@ -465,7 +465,7 @@ export function ApprovalAuditView({
       if (isCurrent(requestEpoch, requestContextKey) && seqRef.current.operations === seq) {
         setOperations(undefined);
         setOperationsNote(failure instanceof AdminApiError && failure.status === 404
-          ? "业务登记读取未接入：当前 API 没有装配该接口。"
+          ? "可配置的审批业务暂时无法读取，请稍后重试。"
           : failure instanceof AdminApiError && failure.status === 403
             ? "业务登记读取当前需要审批申请读取权限，本岗位没有该权限；因此模板表单暂时列不出可配置的业务，这不是系统未部署。需要为模板配置岗位开放一项最小业务读取后才会可用。"
             : friendlyError(failure));
@@ -493,7 +493,7 @@ export function ApprovalAuditView({
       if (isCurrent(requestEpoch, requestContextKey) && seqRef.current.candidates === seq) {
         setCandidateOptions(null);
         setCandidateNote(failure instanceof AdminApiError && failure.status === 404
-          ? "可选审批人能力暂未接入，无法列出可追加或可配置的审批人；请联系管理员确认接入进度。"
+          ? "暂时无法读取可选审批人，请联系管理员核对。"
           : failure instanceof AdminApiError && failure.status === 403
             ? "当前账号没有读取可选审批人的权限，无法列出可追加或可配置的审批人。"
             : friendlyError(failure));
@@ -1126,7 +1126,7 @@ export function ApprovalAuditView({
                             : <InlineStatus tone="neutral">{reasonLabel(operation.initiation.reasonCode)}</InlineStatus>}
                         </div>
                         <p className="mt-1.5 text-xs leading-relaxed text-muted-foreground">
-                          发起入口：{entry?.label ?? "尚未接入发起入口，本页不代为提交。"}
+                          发起入口：{entry?.label ?? "暂无法从此处发起。"}
                           {entry?.path && onOpenPath ? (
                             <Button type="button" size="sm" variant="ghost" className="ml-1.5" onClick={() => onOpenPath(entry.path!, operation.title)}>前往</Button>
                           ) : entry?.path ? (
@@ -1162,9 +1162,9 @@ export function ApprovalAuditView({
                 </p>
                 <Alert variant="warning" role="status" className="mt-4">
                   <TriangleAlert aria-hidden="true" />
-                  <AlertTitle>待接：供给规则发布的审批绑定</AlertTitle>
+                  <AlertTitle>供给规则发布</AlertTitle>
                   <AlertDescription>
-                    供给规则发布尚未接入审批流程，接入前不能在此发起；接入范围与排期由管理员协调。本页不提供临时入口或占位按钮绕过。
+                    当前不能在此发起供给规则发布，请联系管理员处理。
                   </AlertDescription>
                 </Alert>
               </>
@@ -1234,14 +1234,14 @@ export function ApprovalAuditView({
                     {reading.candidates ? <p className="text-xs text-muted-foreground">正在读取可选审批人…</p> : null}
                     {candidateOptions === null && !reading.candidates ? (
                       <NotApplicable reason={candidateNote
-                        ? `${candidateNote} 候选人读取使用审批专用接口，不需要全管理员目录权限；读不到时此处不列出任何人。`
-                        : "读不到可选审批人。候选人读取使用审批专用接口，不需要全管理员目录权限；接口未装配或授权不足时此处不列出任何人。"} />
+                        ? candidateNote
+                        : "暂时无法读取可选审批人，请稍后重试。"} />
                     ) : null}
                     {candidateOptions ? (
                       eligibleCandidates.length === 0 ? (
                         <p className="text-xs leading-relaxed text-muted-foreground">
                           当前没有具备通用审批资格的人可选。
-                          {excludedEntries.length > 0 ? `另有 ${excludedEntries.map(([code, count]) => `${count} 人${reasonLabel(code)}`).join("、")}，按合同不列出身份。` : ""}
+                          {excludedEntries.length > 0 ? `另有 ${excludedEntries.map(([code, count]) => `${count} 人${reasonLabel(code)}`).join("、")}。` : ""}
                         </p>
                       ) : (
                         <>
@@ -1265,7 +1265,7 @@ export function ApprovalAuditView({
                           </ul>
                           {excludedEntries.length > 0 ? (
                             <p className="mt-2 text-xs text-muted-foreground">
-                              另有 {excludedEntries.map(([code, count]) => `${count} 人${reasonLabel(code)}`).join("、")}，按合同不列出身份。通用资格不等于能审某一单。
+                              另有 {excludedEntries.map(([code, count]) => `${count} 人${reasonLabel(code)}`).join("、")}。通用资格不等于能审某一单。
                             </p>
                           ) : null}
                         </>

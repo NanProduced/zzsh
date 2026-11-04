@@ -28,9 +28,20 @@ export function sourceSignedYuanToCents(value:unknown):string {
   if(typeof value!=="string"||! /^-?(0|[1-9]\d{0,21})\.\d{2}$/.test(value)||value==='-0.00')throw invalid('Invalid signed source amount');
   return BigInt(value.replace('.','')).toString();
 }
+export type HistoricalRefundAttempt={source:{type:'LEGACY_MYSQL';entity:'la_refund_log';id:string};originalNumber:string|null;originalStatus:string|null;recordedAmountCents:string|null;occurredAt:string|null;updatedAt:string|null;channelArrival:'UNKNOWN';reasonCodes:string[]};
+export function projectHistoricalRefundAttempts(value:unknown,parentId:string):HistoricalRefundAttempt[]{
+ if(value===undefined||value===null)return[];
+ if(typeof value==='string'){try{value=JSON.parse(value);}catch{throw new SecurityApiError(503,'EVIDENCE_UNAVAILABLE','Refund attempt source unavailable');}}
+ if(!Array.isArray(value))throw new SecurityApiError(503,'EVIDENCE_UNAVAILABLE','Refund attempt source unavailable');
+ return value.map(a=>{
+  if(a.sourceEntity!=='la_refund_log'||a.sourceRecordId!==parentId||typeof a.sourceId!=='string'||! /^[1-9]\d{0,23}$/.test(a.sourceId))throw new SecurityApiError(503,'EVIDENCE_UNAVAILABLE','Refund attempt parent/source differs');
+  const own=a.subjectMatchesParent===true;
+  return{source:{type:'LEGACY_MYSQL',entity:'la_refund_log',id:a.sourceId},originalNumber:own&&typeof a.sourceNumber==='string'&&a.sourceNumber?a.sourceNumber:null,originalStatus:own?a.sourceStatus:null,recordedAmountCents:own?exactCents(a.amountCents):null,occurredAt:own?sourceTime(a.createdEpoch):null,updatedAt:own?sourceTime(a.updatedEpoch):null,channelArrival:'UNKNOWN',reasonCodes:own?[]:['SOURCE_SUBJECT_MISMATCH']};
+ });
+}
 export type ObservationMapping={userId:string;legacyUserId:string;sourceSystem:string;basisId:string|null;openingAdmission?:{sourceDigest:string;included:boolean;cutoff:string}};
 export function prepareHistoricalObservation(row:Record<string,unknown>,mapping:ObservationMapping) {
-  const entity=row.kind==="earningsLog"?"la_log_earnings":row.kind==="historicalDistribution"?"la_distribution_order":row.kind==="withdrawObservation"?"la_withdraw_apply":null;
+  const entity=row.kind==="earningsLog"?"la_log_earnings":row.kind==="historicalDistribution"?"la_distribution_order":row.kind==="withdrawObservation"?"la_withdraw_apply":row.kind==="paymentObservation"?"la_pay_order":row.kind==="refundObservation"?"la_refund_record":null;
   if(!entity || String(row.sourceUserId)!==mapping.legacyUserId || !Number.isSafeInteger(row.sourceId) || Number(row.sourceId)<=0)throw invalid("Historical subject/source mismatch");
   sourceYuanToCents(row.amount);
   if(entity==='la_log_earnings'){
@@ -38,6 +49,8 @@ export function prepareHistoricalObservation(row:Record<string,unknown>,mapping:
     sourceSignedYuanToCents(row.leftAmount);
   }else if(entity==='la_distribution_order'){
     if(![1,2,3].includes(row.sourceStatus as number))throw invalid('Historical distribution status unknown');
+  }else if(entity==='la_pay_order'||entity==='la_refund_record'){
+    if(!Number.isSafeInteger(row.sourceStatus)||Number(row.sourceStatus)<0||Number(row.sourceStatus)>999||entity==='la_pay_order'&&![0,1].includes(Number(row.sourceStatus))||row.channelArrival!=='UNKNOWN')throw invalid('Historical payment/refund source status unknown');
   }else{
     if(![1,2,3,4,5].includes(row.sourceStatus as number))throw invalid('Historical withdrawal status unknown');
     sourceSignedYuanToCents(row.net);sourceSignedYuanToCents(row.fee);
@@ -49,7 +62,7 @@ export function prepareHistoricalObservation(row:Record<string,unknown>,mapping:
   if(mapping.basisId && (!admission||admission.sourceDigest!==sourceDigest||!Number.isFinite(Date.parse(admission.cutoff))||Number(at)*1000>Date.parse(admission.cutoff)))throw invalid('Frozen opening admission/time mismatch');
   if(!mapping.basisId&&admission)throw invalid('Opening admission requires its basis');
   const {openingAdmission:_,...subject}=mapping;
-  return {...subject,sourceType:"LEGACY_MYSQL",sourceEntity:entity,sourceId:String(row.sourceId),sourceKind:entity==="la_log_earnings"?"HISTORICAL_EARNINGS_LOG":entity==="la_distribution_order"?"HISTORICAL_DISTRIBUTION":"HISTORICAL_WITHDRAWAL",sourceCanonical,sourceDigest,includedInOpening:admission?.included??false,sourceEventAt};
+  return {...subject,sourceType:"LEGACY_MYSQL",sourceEntity:entity,sourceId:String(row.sourceId),sourceKind:entity==="la_log_earnings"?"HISTORICAL_EARNINGS_LOG":entity==="la_distribution_order"?"HISTORICAL_DISTRIBUTION":entity==="la_pay_order"?"HISTORICAL_PAYMENT":entity==="la_refund_record"?"HISTORICAL_REFUND":"HISTORICAL_WITHDRAWAL",sourceCanonical,sourceDigest,includedInOpening:admission?.included??false,sourceEventAt};
 }
 async function ready(client:PoolClient,userId:string){
   const schema=(await client.query(`SELECT to_regclass('zzsh_order.wallet_coverage') IS NOT NULL AND to_regclass('zzsh_order.personal_finance_observation') IS NOT NULL AND to_regclass('zzsh_order.wallet_revision') IS NOT NULL AS ready`)).rows[0];
@@ -62,12 +75,21 @@ async function readWalletWithdrawalAmount(client:PoolClient,userId:string,input:
  if(!input.coverageKnown||input.available===null||input.reserved===null)return unknown('SOURCE_COVERAGE_UNKNOWN');
  if(!input.revisionKnown)return unknown('WALLET_REVISION_UNAVAILABLE');
  const installed=(await client.query(`/* wallet withdrawal amount schema */ SELECT to_regclass('zzsh_order.withdrawal_intent') IS NOT NULL AS controlled,
-  to_regclass('zzsh_order.joinpay_withdrawal_intent') IS NOT NULL AS channel`)).rows[0];
- if(installed?.controlled!==true||installed.channel!==true)return unknown('WITHDRAWAL_RESERVATION_SOURCE_NOT_INSTALLED');
+  to_regclass('zzsh_order.joinpay_withdrawal_intent') IS NOT NULL AS channel,
+  (EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid=to_regclass('zzsh_order.finance_economic_root')
+      AND conname='production_no_local_controlled_root' AND contype='c' AND convalidated)
+    AND to_regclass('zzsh_order.withdrawal_intent') IS NULL
+    AND to_regclass('zzsh_order.withdrawal_admission') IS NULL
+    AND to_regclass('zzsh_order.withdrawal_destination') IS NULL
+    AND to_regclass('zzsh_order.withdrawal_provider_fact') IS NULL
+    AND to_regclass('zzsh_order.controlled_payout_operation') IS NULL
+    AND to_regclass('zzsh_order.controlled_payout_notice') IS NULL
+    AND to_regprocedure('zzsh_order.withdrawal_expected_lines(text)') IS NULL) AS production`)).rows[0];
+ if(installed?.channel!==true||(installed.controlled!==true&&installed.production!==true))return unknown('WITHDRAWAL_RESERVATION_SOURCE_NOT_INSTALLED');
  const reservation=(await client.query(`/* wallet withdrawal amount reservations */ SELECT COALESCE(sum(gross_cents),0)::text AS reserved,
   count(*) FILTER(WHERE gross_cents IS NULL OR gross_cents<=0)::text AS invalid FROM (
-   SELECT gross_cents FROM zzsh_order.withdrawal_intent WHERE user_id=$1 AND funds_disposition='RESERVED'
-   UNION ALL SELECT gross_cents FROM zzsh_order.joinpay_withdrawal_intent WHERE user_id=$1 AND funds_disposition='RESERVED'
+   SELECT gross_cents FROM zzsh_order.joinpay_withdrawal_intent WHERE user_id=$1 AND funds_disposition='RESERVED'
+   ${installed.controlled===true?"UNION ALL SELECT gross_cents FROM zzsh_order.withdrawal_intent WHERE user_id=$1 AND funds_disposition='RESERVED'":""}
   ) active`,[userId])).rows[0];
  if(!reservation||reservation.invalid!=='0'||typeof reservation.reserved!=='string'||! /^(0|[1-9]\d{0,23})$/.test(reservation.reserved)||reservation.reserved!==input.reserved)return unknown('WITHDRAWAL_RESERVATION_REQUIRES_RECONCILIATION');
  let recovery:Awaited<ReturnType<typeof readReferralRecovery>>;
@@ -118,37 +140,45 @@ const ledgerEntrySelect=(version:1|2)=>`SELECT 'ledger:'||l.id AS id,l.created_a
  CASE WHEN l.finance_event_id IS NOT NULL THEN root.source_entity ELSE 'settlement_posting' END AS source_entity,
  COALESCE(p.order_id,CASE WHEN root.source_kind='LEGACY_CONTINUATION_DUTY' THEN l.details->>'legacyOrderId' WHEN root.source_kind='LOCAL_CONTROLLED_RENTAL_REFUND' THEN l.details->>'orderId' WHEN root.source_kind='NATIVE_RENTAL_REFERRAL' THEN root.source_id ELSE NULL END) AS business_id,
  CASE WHEN root.source_kind='LEGACY_CONTINUATION_DUTY' THEN l.details->>'legacyOrderNumber' ELSE NULL END AS business_no,
- CASE WHEN root.source_kind='LEGACY_CONTINUATION_DUTY' THEN 'LEGACY_ORDER' WHEN p.order_id IS NOT NULL OR root.source_kind IN('NATIVE_RENTAL_REFERRAL','LOCAL_CONTROLLED_RENTAL_REFUND') THEN 'RENTAL_ORDER' ELSE 'UNKNOWN' END AS business_type
+ CASE WHEN root.source_kind='LEGACY_CONTINUATION_DUTY' THEN 'LEGACY_ORDER' WHEN p.order_id IS NOT NULL OR root.source_kind IN('NATIVE_RENTAL_REFERRAL','LOCAL_CONTROLLED_RENTAL_REFUND') THEN 'RENTAL_ORDER' ELSE 'UNKNOWN' END AS business_type${version===2?",NULL::text AS source_status,NULL::text AS source_number,NULL::text AS source_order_type,NULL::text AS source_ratio,NULL::text AS source_level,NULL::text AS reference_type,NULL::text AS recorded_amount,NULL::text AS source_paid_at,NULL::text AS association_state,NULL::text AS association_reason,NULL::jsonb AS source_attempts,NULL::jsonb AS source_refund_flags,NULL::text AS source_record_type":''}
  FROM zzsh_order.settlement_ledger_entry l LEFT JOIN zzsh_order.finance_event e ON e.id=l.finance_event_id LEFT JOIN zzsh_order.finance_economic_root root ON root.id=e.economic_root_id LEFT JOIN zzsh_order.settlement_posting p ON p.id=l.posting_id
  WHERE l.counterparty_user_id=$1 AND l.account_code IN ('OWNER_AVAILABLE','WALLET_AVAILABLE','RENTER_REFUND_PAYABLE'${version===2?",'WALLET_RESERVED','WALLET_PENDING_EARNINGS'":''})`;
 /* source_kind mirrors source_entity one-to-one (guard_finance_observation + immutable trigger), so the kind predicate is exact and index-friendly. */
-const historyEntrySelect=()=>`SELECT 'history:'||o.id AS id,o.source_event_at AS at,o.imported_at AS imported_at,o.source_event_at AS posted_at,o.imported_at AS recorded_at,'AVAILABLE' AS bucket,
- ((o.snapshot->>'amount')::numeric*100*(CASE WHEN o.snapshot->>'action'='1' THEN 1 WHEN o.snapshot->>'action'='2' THEN -1 ELSE NULL END))::numeric(24,0)::text AS delta,
+const historyEntrySelect=(version:1|2=1)=>`SELECT 'history:'||o.id AS id,o.source_event_at AS at,o.imported_at AS imported_at,${version===2?"CASE WHEN o.source_kind='HISTORICAL_EARNINGS_LOG' THEN o.source_event_at ELSE NULL END":'o.source_event_at'} AS posted_at,o.imported_at AS recorded_at,'AVAILABLE' AS bucket,
+ ((o.snapshot->>'amount')::numeric*100*(CASE ${version===2?"WHEN o.source_kind IN('HISTORICAL_PAYMENT','HISTORICAL_WITHDRAWAL','HISTORICAL_DISTRIBUTION','HISTORICAL_REFUND') THEN 0 ":''}WHEN o.snapshot->>'action'='1' THEN 1 WHEN o.snapshot->>'action'='2' THEN -1 ELSE NULL END))::numeric(24,0)::text AS delta,
  'HISTORICAL' AS kind,COALESCE(oa.included_in_opening,o.included_in_opening) AS included,o.source_kind,o.source_id,((o.snapshot->>'leftAmount')::numeric*100)::numeric(24,0)::text AS balance_after,
- o.source_type,o.source_system,o.source_entity,o.snapshot->>'referenceId' AS business_id,o.snapshot->>'referenceSn' AS business_no,'LEGACY_UNRESOLVED' AS business_type
- FROM zzsh_order.personal_finance_observation o ${OPENING_OBSERVATION_JOIN} WHERE o.user_id=$1 AND o.source_kind='HISTORICAL_EARNINGS_LOG' AND o.source_entity='la_log_earnings'`;
+ o.source_type,o.source_system,o.source_entity,o.snapshot->>'referenceId' AS business_id,NULLIF(o.snapshot->>'referenceSn','') AS business_no,${version===2?"COALESCE(o.snapshot->>'referenceType','LEGACY_UNRESOLVED')":"'LEGACY_UNRESOLVED'"} AS business_type${version===2?",o.snapshot->>'sourceStatus' AS source_status,COALESCE(NULLIF(o.snapshot->>'sourceNumber',''),NULLIF(o.snapshot->>'referenceSn','')) AS source_number,o.snapshot->>'sourceOrderType' AS source_order_type,NULLIF(o.snapshot->>'sourceRatio','') AS source_ratio,o.snapshot->>'level' AS source_level,o.snapshot->>'referenceType' AS reference_type,((o.snapshot->>'amount')::numeric*100)::numeric(24,0)::text AS recorded_amount,COALESCE(o.snapshot->>'sourcePaidAt',o.snapshot->>'sourceSettlementTime') AS source_paid_at,o.snapshot->>'associationState' AS association_state,o.snapshot->>'associationReason' AS association_reason,o.snapshot->'sourceAttempts' AS source_attempts,o.snapshot->'sourceRefundFlags' AS source_refund_flags,o.snapshot->>'sourceRecordType' AS source_record_type":''}
+ FROM zzsh_order.personal_finance_observation o ${OPENING_OBSERVATION_JOIN} WHERE o.user_id=$1 ${version===1?"AND o.source_kind='HISTORICAL_EARNINGS_LOG' AND o.source_entity='la_log_earnings'":"AND o.source_kind IN('HISTORICAL_EARNINGS_LOG','HISTORICAL_DISTRIBUTION','HISTORICAL_WITHDRAWAL','HISTORICAL_PAYMENT','HISTORICAL_REFUND')"}`;
 const entrySql=(version:1|2=1)=>`WITH entries AS (
  ${ledgerEntrySelect(version)}
- UNION ALL ${historyEntrySelect()}
+ UNION ALL ${historyEntrySelect(version)}
  )`;
 /* Totals and the page share one materialization of entries in a single statement, keeping both on one snapshot. */
 const entriesPageSql=(version:1|2)=>entrySql(version)+`,scoped AS (
  SELECT * FROM entries WHERE imported_at<=$2::timestamptz AND ($3='ALL' OR bucket=$3)
  ),totals AS (
- SELECT bucket,count(*)::text AS count,COALESCE(sum(delta::numeric) FILTER(WHERE kind='POSTED'),0)::text AS "postedNetCents",COALESCE(sum(delta::numeric) FILTER(WHERE kind='HISTORICAL' AND included),0)::text AS "coveredHistoricalNetCents",COALESCE(sum(delta::numeric) FILTER(WHERE kind='HISTORICAL' AND NOT included),0)::text AS "uncoveredHistoricalNetCents",count(*) FILTER(WHERE kind='HISTORICAL' AND included)::text AS "coveredCount",count(*) FILTER(WHERE kind='HISTORICAL' AND NOT included)::text AS "uncoveredCount" FROM scoped GROUP BY bucket
+ SELECT bucket,count(*)::text AS count,COALESCE(sum(delta::numeric) FILTER(WHERE kind='POSTED'),0)::text AS "postedNetCents",COALESCE(sum(delta::numeric) FILTER(WHERE kind='HISTORICAL' AND source_kind='HISTORICAL_EARNINGS_LOG' AND included),0)::text AS "coveredHistoricalNetCents",COALESCE(sum(delta::numeric) FILTER(WHERE kind='HISTORICAL' AND source_kind='HISTORICAL_EARNINGS_LOG' AND NOT included),0)::text AS "uncoveredHistoricalNetCents",count(*) FILTER(WHERE kind='HISTORICAL' AND source_kind='HISTORICAL_EARNINGS_LOG' AND included)::text AS "coveredCount",count(*) FILTER(WHERE kind='HISTORICAL' AND source_kind='HISTORICAL_EARNINGS_LOG' AND NOT included)::text AS "uncoveredCount" FROM scoped GROUP BY bucket
  ),page AS (
  SELECT *,to_char(at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS sort_at,to_char(at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS at_text,to_char(imported_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS imported_at_text,to_char(posted_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS posted_at_text,to_char(recorded_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS recorded_at_text FROM scoped WHERE ($4::timestamptz IS NULL OR (at,id COLLATE "C")<($4::timestamptz,$5 COLLATE "C")) ORDER BY at DESC,id COLLATE "C" DESC LIMIT $6
  )
  SELECT COALESCE((SELECT json_agg(json_build_object('bucket',t.bucket,'count',t.count,'postedNetCents',t."postedNetCents",'coveredHistoricalNetCents',t."coveredHistoricalNetCents",'uncoveredHistoricalNetCents',t."uncoveredHistoricalNetCents",'coveredCount',t."coveredCount",'uncoveredCount',t."uncoveredCount") ORDER BY t.bucket)::text FROM totals t),'[]') AS totals_json,
- COALESCE((SELECT json_agg(json_build_object('id',p.id,'at',p.at_text,'imported_at',p.imported_at_text,'posted_at',p.posted_at_text,'recorded_at',p.recorded_at_text,'bucket',p.bucket,'delta',p.delta,'kind',p.kind,'included',p.included,'source_kind',p.source_kind,'source_id',p.source_id,'balance_after',p.balance_after,'source_type',p.source_type,'source_system',p.source_system,'source_entity',p.source_entity,'business_id',p.business_id,'business_no',p.business_no,'business_type',p.business_type,'sort_at',p.sort_at) ORDER BY p.at DESC,p.id COLLATE "C" DESC)::text FROM page p),'[]') AS page_json`;
+ COALESCE((SELECT json_agg(json_build_object('id',p.id,'at',p.at_text,'imported_at',p.imported_at_text,'posted_at',p.posted_at_text,'recorded_at',p.recorded_at_text,'bucket',p.bucket,'delta',p.delta,'kind',p.kind,'included',p.included,'source_kind',p.source_kind,'source_id',p.source_id,'balance_after',p.balance_after,'source_type',p.source_type,'source_system',p.source_system,'source_entity',p.source_entity,'business_id',p.business_id,'business_no',p.business_no,'business_type',p.business_type,'sort_at',p.sort_at${version===2?",'source_status',p.source_status,'source_number',p.source_number,'source_order_type',p.source_order_type,'source_ratio',p.source_ratio,'source_level',p.source_level,'reference_type',p.reference_type,'recorded_amount',p.recorded_amount,'source_paid_at',p.source_paid_at,'association_state',p.association_state,'association_reason',p.association_reason,'source_attempts',p.source_attempts,'source_refund_flags',p.source_refund_flags,'source_record_type',p.source_record_type":''}) ORDER BY p.at DESC,p.id COLLATE "C" DESC)::text FROM page p),'[]') AS page_json`;
 const timestamp=(value:unknown):string|null=>value instanceof Date?value.toISOString():typeof value==='string'&&Number.isFinite(Date.parse(value))?value:null;
-function entry(row:any){return {schemaVersion:1,id:row.id,occurredAt:row.at,importedAt:row.imported_at,postedAt:timestamp(row.posted_at),recordedAt:timestamp(row.recorded_at),bucket:row.bucket,deltaCents:exactCents(row.delta),kind:row.kind,includedInOpening:row.included,sourceKind:row.source_kind,sourceId:row.source_id,source:{type:row.source_type,system:row.source_system,entity:row.source_entity,id:row.source_id},businessReference:{type:row.business_type,id:row.business_id??null,number:row.business_no??null},balanceAfterCents:row.balance_after===null?null:exactCents(row.balance_after)};}
+const sourceTime=(value:unknown):string|null=>typeof value==='string'&&/^[1-9]\d{0,9}$/.test(value)&&Number(value)<=4294967295?new Date(Number(value)*1000).toISOString():null;
+function entry(row:any){return {schemaVersion:1,id:row.id,occurredAt:row.at,importedAt:row.imported_at,postedAt:timestamp(row.posted_at),recordedAt:timestamp(row.recorded_at),bucket:row.bucket,deltaCents:exactCents(row.delta),kind:row.kind,includedInOpening:row.included,sourceKind:row.source_kind,sourceId:row.source_id,source:{type:row.source_type,system:row.source_system,entity:row.source_entity,id:row.source_id},businessReference:{type:row.business_type,id:row.business_id??null,number:row.business_no??null},...(row.source_status!==undefined&&row.source_kind!=='HISTORICAL_EARNINGS_LOG'&&row.kind==='HISTORICAL'?{sourceDetails:{originalType:row.source_record_type??null,attempts:projectHistoricalRefundAttempts(row.source_attempts,row.source_id),reasonCodes:typeof row.source_refund_flags==='string'?JSON.parse(row.source_refund_flags):row.source_refund_flags??[],associationState:row.association_state??null,associationReason:row.association_reason??null,recordedAmountCents:exactCents(row.recorded_amount),sourcePaidAt:sourceTime(row.source_paid_at),originalStatus:row.source_status,originalNumber:row.source_number,originalOrderType:row.source_order_type,originalRatio:row.source_ratio,originalLevel:row.source_level,channelArrival:'UNKNOWN',affectsCurrentWallet:false}}:{}),balanceAfterCents:row.balance_after===null?null:exactCents(row.balance_after)};}
 export async function readPersonalFinanceEntries(client:PoolClient,actor:{userId:string;sessionId:string},q:FinanceQuery,key:ListingCursorKey|undefined){
   const version=q.projectionVersion??1;if(![1,2].includes(version)||version===1&&['RESERVED','PENDING_EARNINGS'].includes(q.bucket))throw invalid('Wallet bucket requires projection 2');
   const wallet=await readPersonalWallet(client,actor.userId);
   const ledgerOnly=version===2&&['RESERVED','PENDING_EARNINGS'].includes(q.bucket);
   const native=!ledgerOnly&&wallet.coverage.knowledge==='KNOWN'&&'origin' in wallet.coverage&&wallet.coverage.origin==='NATIVE_GENESIS'?await hasProvedNativeHistoryAbsence(client,actor.userId,'HISTORICAL_EARNINGS_LOG'):false;
-  const historyCoverage=ledgerOnly?{knowledge:'KNOWN' as const,reason:'POSTED_LEDGER_SCOPE',count:'0',cutoff:null,version:'LEDGER:'+wallet.snapshotVersion}:native?{knowledge:'KNOWN' as const,reason:'PROVED_NATIVE_HISTORY_ABSENCE',count:'0',cutoff:null,version:'NATIVE_GENESIS'}:await readObservationCoverage(client,actor.userId,'HISTORICAL_EARNINGS_LOG');
+  let historyCoverage:{knowledge:'KNOWN'|'UNKNOWN';reason:string;count:string|null;cutoff:string|null;version:string|null}=ledgerOnly?{knowledge:'KNOWN' as const,reason:'POSTED_LEDGER_SCOPE',count:'0',cutoff:null,version:'LEDGER:'+wallet.snapshotVersion}:native?{knowledge:'KNOWN' as const,reason:'PROVED_NATIVE_HISTORY_ABSENCE',count:'0',cutoff:null,version:'NATIVE_GENESIS'}:await readObservationCoverage(client,actor.userId,'HISTORICAL_EARNINGS_LOG');
+  if(version===2&&!ledgerOnly){
+    const sources=[historyCoverage];
+    for(const kind of ['HISTORICAL_DISTRIBUTION','HISTORICAL_WITHDRAWAL','HISTORICAL_PAYMENT','HISTORICAL_REFUND'] as const)sources.push(native&&await hasProvedNativeHistoryAbsence(client,actor.userId,kind)?{knowledge:'KNOWN',reason:'PROVED_NATIVE_HISTORY_ABSENCE',count:'0',cutoff:null,version:'NATIVE_GENESIS'}:await readObservationCoverage(client,actor.userId,kind));
+    const unknown=sources.find(s=>s.knowledge!=='KNOWN'),cutoffs=new Set(sources.map(s=>s.cutoff));
+    const combinedVersion=sources.every(s=>s.reason==='PROVED_NATIVE_HISTORY_ABSENCE'&&s.version==='NATIVE_GENESIS')?'NATIVE_GENESIS':'HISTORY5:'+hash(canonicalize(sources.map(s=>[s.version,s.cutoff,s.knowledge,s.reason,s.count])));
+    historyCoverage={...historyCoverage,knowledge:unknown||cutoffs.size>1?'UNKNOWN':'KNOWN',reason:unknown?.reason??(cutoffs.size>1?'HISTORICAL_COVERAGE_OUTDATED':historyCoverage.reason),version:combinedVersion,cutoff:cutoffs.size===1?historyCoverage.cutoff:null};
+  }
   const binding={userId:actor.userId,sessionHash:hash(actor.sessionId),snapshotVersion:wallet.snapshotVersion,bucket:'WALLET_ENTRIES:'+(version===2?'v2:':'')+q.bucket+':'+historyCoverage.version};
   const after=q.cursor?decodeFinanceCursor(q.cursor,binding,key):null;
   const asOf=after?.asOf??(await client.query(`SELECT to_char(clock_timestamp() AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS at`)).rows[0].at;
@@ -161,4 +191,4 @@ export async function readPersonalFinanceEntries(client:PoolClient,actor:{userId
   return {contractVersion:FINANCE_READ_VERSION,...(version===2?{projectionVersion:2 as const}:{}),subjectId:actor.userId,asOf,snapshotVersion:wallet.snapshotVersion,coverage:wallet.coverage,listCoverage:{knowledge:historyCoverage.knowledge,count:historyCoverage.knowledge==='KNOWN'?count:null,mappedRecordCount:count,reason:historyCoverage.reason,cutoff:historyCoverage.cutoff,version:historyCoverage.version,...(ledgerOnly?{scope:'POSTED_LEDGER_ONLY' as const}:{})},bucket:q.bucket,items:visible.map(entry),totals:{count,byBucket,historicalCoverage:hasUncovered?(hasCovered?'MIXED':'NOT_INCLUDED'):hasCovered?'INCLUDED':'NO_HISTORY',meaning:hasUncovered?'Uncovered historical facts do not change the current wallet':'Covered historical facts are already represented by the opening; do not add them again'},nextCursor:more&&last?encodeFinanceCursor({at:last.sort_at,id:last.id},asOf,binding,key):null};
 }
 /* The qualified id prefix selects its source branch exactly once; the raw id is the branch primary key. */
-export async function readPersonalFinanceEntry(client:PoolClient,userId:string,id:string,projectionVersion:1|2=1){if(![1,2].includes(projectionVersion))throw invalid('Unsupported finance projection version');const wallet=await readPersonalWallet(client,userId);if(!/^(ledger|history):[A-Za-z0-9_-]{1,180}$/.test(id))throw notFound();const separator=id.indexOf(':'),rawId=id.slice(separator+1);const source=id.startsWith('ledger:')?ledgerEntrySelect(projectionVersion)+` AND l.id=$2`:historyEntrySelect()+` AND o.id=$2`;const row=(await client.query(source,[userId,rawId])).rows[0];if(!row)throw notFound();return {contractVersion:FINANCE_READ_VERSION,...(projectionVersion===2?{projectionVersion:2 as const}:{}),subjectId:userId,asOf:wallet.asOf,snapshotVersion:wallet.snapshotVersion,coverage:wallet.coverage,entry:entry(row)};}
+export async function readPersonalFinanceEntry(client:PoolClient,userId:string,id:string,projectionVersion:1|2=1){if(![1,2].includes(projectionVersion))throw invalid('Unsupported finance projection version');const wallet=await readPersonalWallet(client,userId);if(!/^(ledger|history):[A-Za-z0-9_-]{1,180}$/.test(id))throw notFound();const separator=id.indexOf(':'),rawId=id.slice(separator+1);const source=id.startsWith('ledger:')?ledgerEntrySelect(projectionVersion)+` AND l.id=$2`:historyEntrySelect(projectionVersion)+` AND o.id=$2`;const row=(await client.query(source,[userId,rawId])).rows[0];if(!row)throw notFound();return {contractVersion:FINANCE_READ_VERSION,...(projectionVersion===2?{projectionVersion:2 as const}:{}),subjectId:userId,asOf:wallet.asOf,snapshotVersion:wallet.snapshotVersion,coverage:wallet.coverage,entry:entry(row)};}

@@ -22,6 +22,10 @@ const intent = { contractVersion: 'native-withdrawal.v1', source: 'JOINPAY', use
 const historyItem = (id = 'history:h1') => ({ id, source: 'HISTORICAL_WITHDRAWAL', sourceStatus: 2, amountCents: '10000', netCents: '9900', feeCents: '100', occurredAt: at });
 const localItem = { id: 'local-1', state: 'RESERVED', amountCents: '5000', netCents: '4900', feeCents: '100', acceptedAt: at };
 const nativeItem = { ...intent, id: 'joinpay:intent-1', occurredAt: at, sourceReference: { type: 'NATIVE', system: 'zzsh', entity: 'joinpay_withdrawal_intent', id: 'intent-1' }, intentId: 'intent-1', evidenceLevel: 'LOCAL_RECORDS_NOT_REVALIDATED', platformSerialNo: null, mayResubmit: false, reasonCodes: [] };
+const nativeHistoryPage = () => Array.from({ length: 20 }, (_, i) => {
+  const intentId = `intent-${String(20 - i).padStart(2, '0')}`;
+  return { ...nativeItem, id: `joinpay:${intentId}`, intentId, occurredAt: '2026-10-24T00:00:00.000Z' };
+});
 function history(sourceName, { items = [], cursor = null, snapshot = 'snap-1', availability = 'AVAILABLE' } = {}) {
   const notRequested = { availability: 'NOT_REQUESTED', reasonCodes: [], data: null };
   const data = sourceName === 'HISTORICAL' ? { items, coverage: { knowledge: 'KNOWN' }, asOf: at, snapshotVersion: snapshot, nextCursor: cursor }
@@ -162,7 +166,7 @@ test('unknown withdrawal recovery stays available when new options fail; ACK is 
 
 test('the unified timeline follows source cursors and marks unavailable history as partial', async () => {
   const seen = [];
-  const p = await probe({ history: { readWithdrawalHistory: async (_user, query) => { seen.push(query); return query.source === 'HISTORICAL' ? history(query.source,{items:[historyItem(query.cursor?'history:h2':'history:h1')],cursor:query.cursor?null:'history-next',snapshot:'h'}) : query.source === 'LOCAL_CONTROLLED' ? history(query.source,{items:[localItem],snapshot:'c'}) : history(query.source,{availability:'NOT_INTEGRATED'}); } } });
+  const p = await probe({ history: { readWithdrawalHistory: async (_user, query) => { seen.push(query); return query.source === 'HISTORICAL' ? history(query.source,{items:[historyItem(query.cursor?'history:h1':'history:h2')],cursor:query.cursor?null:'history-next',snapshot:'h'}) : query.source === 'LOCAL_CONTROLLED' ? history(query.source,{items:[localItem],snapshot:'c'}) : history(query.source,{availability:'NOT_INTEGRATED'}); } } });
   try { await p.render(); const section = p.host.querySelector('[aria-label="提现记录"]'); assert.match(section.textContent, /当前列表可能不完整/); assert(seen.some(query => query.source === 'HISTORICAL' && query.cursor === 'history-next')); assert.equal(section.querySelectorAll('.bank-history-row').length,3); assert.match(section.textContent,/处理中/); assert.match(section.textContent,/测试记录，不代表真实到账/); } finally { await p.close(); }
 });
 
@@ -209,7 +213,7 @@ test('revoking one history source clears its open private detail without hiding 
 
 for(const denialStatus of [401,403]){
  test(`a late history page cannot restore private rows after detail ${denialStatus}`,async()=>{
-  const later=deferred(),items=Array.from({length:20},(_,i)=>({...nativeItem,id:`joinpay:intent-${i}`,intentId:`intent-${i}`,occurredAt:'2026-10-24T00:00:00.000Z'})),local={...localItem,acceptedAt:at};
+  const later=deferred(),items=nativeHistoryPage(),local={...localItem,acceptedAt:at};
   const p=await probe({history:{readWithdrawalHistory:async(_user,query)=>query.source==='JOINPAY'&&query.cursor?later.promise:history(query.source,{items:query.source==='JOINPAY'?items:query.source==='LOCAL_CONTROLLED'?[local]:[],cursor:query.source==='JOINPAY'?'next':null}),readWithdrawalHistoryItem:async()=>{throw new WithdrawalRequestError(denialStatus,denialStatus===401?'UNAUTHENTICATED':'FORBIDDEN');}}});
   try{
    let revalidations=0;p.session.revalidate=()=>{revalidations++;};await p.render();const section=p.host.querySelector('[aria-label="提现记录"]');
@@ -225,7 +229,7 @@ for(const denialStatus of [401,403]){
 }
 
 test('a late detail cannot reappear after its history source is forbidden',async()=>{
- const detail=deferred(),items=Array.from({length:20},(_,i)=>({...nativeItem,id:`joinpay:intent-${i}`,intentId:`intent-${i}`,occurredAt:'2026-10-24T00:00:00.000Z'}));
+ const detail=deferred(),items=nativeHistoryPage();
  const p=await probe({history:{readWithdrawalHistory:async(_user,query)=>{if(query.source==='JOINPAY'&&query.cursor)throw new WithdrawalRequestError(403,'FORBIDDEN');return history(query.source,{items:query.source==='JOINPAY'?items:query.source==='LOCAL_CONTROLLED'?[localItem]:[],cursor:query.source==='JOINPAY'?'next':null});},readWithdrawalHistoryItem:async()=>detail.promise}});
  try{
   await p.render();const section=p.host.querySelector('[aria-label="提现记录"]');const target=[...section.querySelectorAll('.bank-history-row')].find(row=>row.textContent.includes('0015'));assert(target);

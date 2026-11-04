@@ -208,6 +208,20 @@ test("both document names are keyboard-reachable reading links that neither tick
   } finally { await p.close(); }
 });
 
+test("missing legal documents have no publication placeholder while read failures stay visible", async () => {
+  const pending = await mountAuthComponent(file, "AuthForm", {}, { fetch: async () => Response.json({ terms: null, privacy: null }) });
+  try {
+    await pending.settle();
+    assert.doesNotMatch(pending.host.textContent, /正式协议尚未发布/);
+    assert.equal(pending.host.querySelector("#auth-terms").checked, false);
+  } finally { await pending.close(); }
+  const unavailable = await mountAuthComponent(file, "AuthForm", {}, { fetch: async () => new Response(null, { status: 503 }) });
+  try {
+    await unavailable.settle();
+    assert.match(unavailable.host.textContent, /协议暂时无法读取，请稍后重试/);
+  } finally { await unavailable.close(); }
+});
+
 test("closing and reopening the form cannot launder an unknown identity write into a fresh retry", async () => {
   const slot = { current: null };
   const first = await mountAuthComponent(file, "AuthForm", { pendingWrite: slot }, {

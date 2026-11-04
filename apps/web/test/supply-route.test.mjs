@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 process.env.NODE_ENV='test';
-const {GET,POST,PUT}=await import('../src/app/api/supply/[...path]/route.ts');
+const {GET,HEAD,POST,PUT}=await import('../src/app/api/supply/[...path]/route.ts');
 const ctx=path=>({params:Promise.resolve({path})});
 const input=(path,init={})=>new Request('http://127.0.0.1:3100/api/supply/'+path.join('/')+'?limit=2',{...init,headers:{origin:'http://127.0.0.1:3100',...init.headers}});
 
@@ -61,5 +61,20 @@ test('supply BFF bounds chunked input and upstream output and preserves image by
   try{const p=['accounts'];const body=new ReadableStream({start(c){c.enqueue(new Uint8Array(65537));},cancel(){cancelled=true;}});assert.equal((await POST(input(p,{method:'POST',headers:{'content-type':'application/json','content-length':'1'},body,duplex:'half'}),ctx(p))).status,413);assert.equal(cancelled,true);assert.equal(calls,0);
     globalThis.fetch=async()=>new Response(new Uint8Array([1,2,3]),{headers:{'content-type':'image/png'}});const m=['listings','a','media','m'];assert.deepEqual(new Uint8Array(await(await GET(input(m),ctx(m))).arrayBuffer()),new Uint8Array([1,2,3]));
     globalThis.fetch=async()=>new Response(new Uint8Array(2*1024*1024+1),{headers:{'content-type':'application/json'}});assert.equal((await GET(input(['listings']),ctx(['listings']))).status,502);
+  }finally{globalThis.fetch=old;}
+});
+test('legacy media HEAD preserves only the confirmed missing marker and accepts no arbitrary path',async()=>{
+  const old=globalThis.fetch;let calls=0;
+  globalThis.fetch=async(_url,options)=>{calls++;assert.equal(options.method,'HEAD');return new Response(null,{status:404,headers:{'x-zzsh-legacy-missing':'1'}});};
+  try{const path=['listings','account_1','legacy-images','0'];const response=await HEAD(new Request('http://127.0.0.1:3100/api/supply/'+path.join('/'),{method:'HEAD'}),ctx(path));
+    assert.equal(response.status,404);assert.equal(response.headers.get('x-zzsh-legacy-missing'),'1');assert.equal(await response.text(),'');
+    const invalid=['listings','account_1','legacy-images','../x'];assert.equal((await HEAD(new Request('http://127.0.0.1:3100/api/supply/x',{method:'HEAD'}),ctx(invalid))).status,404);assert.equal(calls,1);
+  }finally{globalThis.fetch=old;}
+});
+test('legacy media URLs are rewritten to the same-origin user proxy',async()=>{
+  const old=globalThis.fetch;
+  globalThis.fetch=async()=>Response.json({legacyImages:[{position:0,url:'/api/v1/supply/listings/account_1/legacy-images/0'}]});
+  try{const path=['listings','account_1'];const response=await GET(new Request('http://127.0.0.1:3100/api/supply/'+path.join('/')),ctx(path));
+    assert.equal((await response.json()).legacyImages[0].url,'/api/supply/listings/account_1/legacy-images/0');
   }finally{globalThis.fetch=old;}
 });

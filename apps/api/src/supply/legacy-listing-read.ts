@@ -1,3 +1,4 @@
+import { recordedListingFeeDisplay } from "./tenant-price-projection";
 import type { PoolClient } from "pg";
 import { loadEffectiveAdminAccess, requirePermission } from "../auth/admin-authorization";
 import { recordAudit } from "../auth/security-core";
@@ -16,7 +17,7 @@ import { publicSkinCategoryCteSql, publicSkinMediaIdSql, publicSkinMetadataSql, 
 
 export type LegacyReadSnapshot = {
   schema: "legacy-listing-read-v1";
-  resourceNo: string;
+  resourceNo: string | null;
   haffRentYuan: string;
   goodsYuan: string;
   depositYuan: string;
@@ -28,7 +29,7 @@ export function parseLegacyReadSnapshot(value: unknown): LegacyReadSnapshot {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw invalid("Invalid legacy read snapshot");
   const x = value as Record<string, unknown>;
   if (Object.keys(x).sort().join(",") !== "dailyHaffBase,depositYuan,goodsYuan,haffRentYuan,resourceNo,schema,termDays"
-    || x.schema !== "legacy-listing-read-v1" || typeof x.resourceNo !== "string" || !/^[A-Za-z0-9_-]{1,64}$/.test(x.resourceNo)) throw invalid("Invalid legacy read snapshot fields");
+    || x.schema !== "legacy-listing-read-v1" || !(x.resourceNo === null || typeof x.resourceNo === "string" && /^[A-Za-z0-9_-]{1,64}$/.test(x.resourceNo))) throw invalid("Invalid legacy read snapshot fields");
   for (const k of ["haffRentYuan", "goodsYuan", "depositYuan"])
     if (typeof x[k] !== "string" || !/^(0|[1-9]\d{0,13})\.\d{2}$/.test(x[k] as string)) throw invalid("Invalid historical amount", k);
   for (const k of ["termDays", "dailyHaffBase"])
@@ -86,10 +87,11 @@ function projectHistoricalDisplay(row: HistoricalReadRow, accountId?: string) {
     observationVersionId: row.display_version_id, baseSourceDigest: row.base_source_digest!,
     extractSha256: row.extract_sha256!, sourceUpdatedAt, evidenceRef: row.display_evidence_ref, snapshot,
   })) throw invalid("Historical display digest is invalid");
+  const attributes: typeof snapshot.attributes = { ...snapshot.attributes, face_is_self: snapshot.risk.faceIsSelf, ban_record: snapshot.risk.banRecord };
   return { state: "KNOWN" as const, facts: {
-    schema: snapshot.schema, rentalMode: snapshot.rentalMode, attributes: snapshot.attributes,
+    schema: snapshot.schema, rentalMode: snapshot.rentalMode, attributes,
     resources: snapshot.resources.map(({ code, name, quantity, unit }) => ({ code, name, quantity, unit })),
-    attributeDisplay: projectPublicAttributeDisplay(snapshot.attributes), sourceUpdatedAt,
+    attributeDisplay: projectPublicAttributeDisplay(attributes), sourceUpdatedAt,
   } };
 }
 
@@ -105,14 +107,32 @@ export function projectLegacyHistoricalRead(row: HistoricalReadRow, accountId = 
   }
   const sourceStatus = Number(row.source_status);
   return {
-    legacyId: row.legacy_id, sourceStatus, ownerUserId: row.owner_user_id, resourceNo: snapshot.resourceNo,
+    legacyId: row.legacy_id, observationVersionId: row.observation_version_id ?? null, sourceUpdatedAt: row.base_updated_at?.toISOString() ?? null,
+    sourceStatus, ownerUserId: row.owner_user_id, resourceNo: snapshot.resourceNo,
     historicalQuote: { haffRentYuan: snapshot.haffRentYuan, goodsYuan: snapshot.goodsYuan, depositYuan: snapshot.depositYuan, termDays: snapshot.termDays, dailyHaffBase: snapshot.dailyHaffBase },
+    feeDisplay: recordedListingFeeDisplay(snapshot),
     quote: null, canCreateOrder: false as const, trade: "UNKNOWN" as const, display,
     sourceStatusPublicCandidate: sourceStatus === 3,
   };
 }
 
 export type LegacyHistoricalRead = ReturnType<typeof projectLegacyHistoricalRead>;
+
+/** Current account display, bound to its imported observation; never an order's frozen contract. */
+export function legacyAccountDisplay(historical: LegacyHistoricalRead | null, versionId: string | null) {
+  if (!historical?.observationVersionId || versionId !== historical.observationVersionId) return null;
+  const display = historical.display.state === "KNOWN" ? historical.display.facts : null;
+  const resources = (display?.resources ?? []).map(item => ({ itemId: `legacy-display:${item.code}`, ...item }));
+  const attributes = display?.attributes ?? {};
+  return {
+    sourceUpdatedAt: historical.sourceUpdatedAt,
+    haff: resources.find(item => item.unit === "HAFF_BASE") ?? null,
+    materials: resources.filter(item => item.unit !== "HAFF_BASE"),
+    term: { code: "legacy_source", name: `${historical.historicalQuote.termDays} 天`, dailyConsumption: historical.historicalQuote.dailyHaffBase, termSeconds: (BigInt(historical.historicalQuote.termDays) * 86400n).toString() },
+    login: { code: attributes.login_method_code ?? null, displayName: display?.attributeDisplay.loginMethod?.displayName ?? null },
+    config: { safeBox: display?.attributeDisplay.safeBox?.displayName ?? null, grading: display?.attributeDisplay.grading?.displayName ?? null, characterLevel: attributes.character_level == null ? null : String(attributes.character_level), gradingDivision: null },
+  };
+}
 
 export async function loadLegacyHistoricalRead(client: PoolClient, accountId: string) {
   const row = (await client.query(legacyHistoricalReadSql(), [accountId])).rows[0];
@@ -228,6 +248,33 @@ const VISIBLE_BASE = `g.enabled AND gs.enabled AND a.lifecycle='ACTIVE' AND ${LE
  AND ${LEGACY_NATIVE_TAKEOVER_GUARD}`;
 const VISIBLE = `${VISIBLE_BASE} AND h.source_status=3 AND NOT a.owner_paused`;
 
+const LEGACY_DISPLAY_EVIDENCE_FIELDS = `a.id,v.title,v.description,h.snapshot,h.evidence_ref,d.snapshot AS display_snapshot,
+  d.display_digest,d.observation_version_id AS display_version_id,d.base_source_digest,d.extract_sha256,
+  d.source_updated_at AS display_updated_at,d.evidence_ref AS display_evidence_ref`;
+
+function verifiedLegacyDisplay(r: Record<string, any>) {
+  if (!evaluatePublicDisplayGuard({ title: r.title, description: r.description, evidenceRef: r.evidence_ref }).ok) throw notFound();
+  const snapshot = parseLegacyReadSnapshot(r.snapshot);
+  const extra = r.display_snapshot ? parseLegacyDisplaySnapshot(r.display_snapshot) : null;
+  if (extra && r.display_digest !== legacyDisplayDigest(r.id, { observationVersionId: r.display_version_id, baseSourceDigest: r.base_source_digest,
+    extractSha256: r.extract_sha256, sourceUpdatedAt: r.display_updated_at.toISOString(), evidenceRef: r.display_evidence_ref, snapshot: extra })) throw notFound();
+  return { snapshot, extra };
+}
+
+/** Status-3 market membership only. Detail-only admissions (4–6) never count as listed. */
+export async function readLegacyMarketAccountIds(client: PoolClient, admission: LegacyPublicAdmission | undefined, ownerId?: string, includePaused = false): Promise<string[]> {
+  const values: unknown[] = [];
+  const param = (value: unknown) => `$${values.push(value)}`;
+  const admitted = legacyAdmissionSql(admission, param);
+  const subject = ownerId === undefined ? "" : ` AND a.owner_user_id=${param(ownerId)}`;
+  const rows = (await client.query(`/* legacy-market-account-ids */ SELECT ${LEGACY_DISPLAY_EVIDENCE_FIELDS}
+    ${FROM} WHERE ${includePaused ? `${VISIBLE_BASE} AND h.source_status=3` : VISIBLE} AND ${admitted}${subject}`, values)).rows;
+  return rows.flatMap(row => {
+    try { verifiedLegacyDisplay(row); return [row.id as string]; }
+    catch (error) { if ((error as { status?: number }).status === 404) return []; throw error; }
+  });
+}
+
 // Mode selection must not depend on the currently visible row count: an
 // enabled game with a valid configuration keeps its filters and returns an
 // empty list when every snapshot is hidden. Hidden rows are never projected.
@@ -250,10 +297,7 @@ export async function readLegacyListing(client: PoolClient, accountId: string, a
     detailAdmission.records.some(record=>record.accountId===r.id && record.sourceStatus===r.source_status))) throw notFound();
   // Shared runtime admission for list and detail: privacy-bearing text and
   // evidence outside the adjudicated batch fail closed without leaking facts.
-  if(!evaluatePublicDisplayGuard({title:r.title,description:r.description,evidenceRef:r.evidence_ref}).ok)throw notFound();
-  const snapshot=parseLegacyReadSnapshot(r.snapshot);
-  const extra=r.display_snapshot ? parseLegacyDisplaySnapshot(r.display_snapshot) : null;
-  if(extra && r.display_digest!==legacyDisplayDigest(r.id,{observationVersionId:r.display_version_id,baseSourceDigest:r.base_source_digest,extractSha256:r.extract_sha256,sourceUpdatedAt:r.display_updated_at.toISOString(),evidenceRef:r.display_evidence_ref,snapshot:extra})) throw notFound();
+  const { snapshot, extra } = verifiedLegacyDisplay(r);
   const rows=(await client.query(`SELECT i.id,i.code,i.name,i.unit,l.quantity::text quantity FROM zzsh_supply.inventory_line l JOIN zzsh_supply.billable_item i ON i.id=l.item_id WHERE l.version_id=$1 ORDER BY i.sort_order,i.id`,[r.version_id])).rows;
   // Same public summary as catalog/publish snapshots, and the same effective
   // visibility as the public catalog: same game, skin enabled and form-visible,
@@ -270,6 +314,8 @@ export async function readLegacyListing(client: PoolClient, accountId: string, a
     ORDER BY m.position,m.asset_id`,[r.version_id])).rows;
   const media=mediaRows.filter(asset=>isAccountMediaBinding(asset,{id:r.id,owner_user_id:r.owner_user_id,game_id:r.game_id})).map(({assetId,position})=>({assetId,position}));
   const attrs=Object.fromEntries(["safe_box_code","vit_level","bear_level","dive_level","character_level","grading_code","login_method_code","region_province","region_city","secret_kd","service_window_start_minute","service_window_end_minute","service_window_timezone","service_window_cross_midnight"].map(k=>[k,extra ? extra.attributes[k]??null : r.attributes[k]??null]));
+  attrs.face_is_self = extra?.risk.faceIsSelf ?? null;
+  attrs.ban_record = extra?.risk.banRecord ?? null;
   const resources=extra ? extra.resources.map(x=>({id:`legacy-display:${x.code}`,code:x.code,name:x.name,quantity:x.quantity,unit:x.unit})) : rows;
   const display=projectPublicAttributeDisplay(attrs);
   const amount=(v:string)=>({currency:"CNY",unit:"yuan",amount:v,scale:2});
@@ -277,7 +323,8 @@ export async function readLegacyListing(client: PoolClient, accountId: string, a
     game:{id:r.game_id,code:r.game_code,name:r.game_name},attributes:attrs,attributeDisplay:display,safeBox:display.safeBox,
     termOption:{code:"legacy_source",displayName:`${snapshot.termDays} 天`,dailyConsumption:{quantity:snapshot.dailyHaffBase,unit:"HAFF_BASE"}},
     source:"LEGACY_READ_ONLY" as const,canCreateOrder:false as const,sourceUpdatedAt:r.source_updated_at.toISOString(),
-    availability:{state:r.owner_paused?"OFFLINE":"LEGACY_READ_ONLY"},
+    availability:{state:r.owner_paused?"OFFLINE":"LEGACY_READ_ONLY",reason:r.owner_paused?"OWNER_PAUSED":r.source_status===3?"PUBLICATION_REQUIRED":"HISTORICAL_STATUS"},
+    feeDisplay:recordedListingFeeDisplay(snapshot),
     sourceAvailability:{state:r.source_status===3?"LISTED":r.source_status===4?"OFFLINE":r.source_status===5?"RENTED":r.source_status===6?"PENDING_PAYMENT":"UNKNOWN",asOfUtc:r.source_updated_at.toISOString()},
     sourceAvailabilityLabel:r.source_status===4?"已下架":r.source_status===5?"已出租":r.source_status===6?"待支付占位":null,
     ...(extra ? {rentalMode:extra.rentalMode,displaySchema:extra.schema} : {}),

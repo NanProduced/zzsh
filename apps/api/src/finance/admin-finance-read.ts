@@ -6,7 +6,7 @@ import { invalid, notFound } from "../supply/supply-util";
 import { requireListingCursorKey, type ListingCursorKey } from "../supply/listing-cursor";
 import { exactCents, sourceYuanToCents, sourceSignedYuanToCents, readPersonalWallet,OPENING_OBSERVATION_JOIN,FINANCE_LEDGER_POSTED_AT_SQL } from "./personal-finance-read";
 import { financeOrderLifecycle, loadFinanceOrderFacts, type FinanceOrderFact } from "./admin-finance-order-read";
-import { scopedFinanceSql, financeVersionSql, financeScopedVersionSql, financeLookupPageSql,FINANCE_LEDGER_BUCKET_SQL,FINANCE_GLOBAL_READ_PREAMBLE_SQL, type FinanceLoadScope, type FinanceVersionScope } from "./admin-finance-query";
+import { scopedFinanceSql, financeVersionSql, financeScopedVersionSql, financeLookupPageSql,typedHistoricalOrderSql,FINANCE_LEDGER_BUCKET_SQL,FINANCE_GLOBAL_READ_PREAMBLE_SQL, type FinanceLoadScope, type FinanceVersionScope } from "./admin-finance-query";
 import {prepareOwnerGuaranteeHistory} from './owner-guarantee-history';
 import { historicalObservationDisplay,enrichHistoricalObservations,resolveHistoricalReverseLinks,type HistoricalFinanceDisplay,type HistoricalRelationAccess } from './legacy-observation-display';
 import type {FinancePeriodBasis} from './admin-finance-period-basis';
@@ -32,7 +32,7 @@ export type FinanceEntry = {
   related: { ref: string; label: string; path?: string }[];
   historical?: HistoricalFinanceDisplay;
 };
-export type FinanceFacts = { historicalLinks?:Record<string,ReturnType<typeof resolveHistoricalReverseLinks>>;distributionCalculation?:AdminEarningCalculation;orderSettlementFacts?:OrderSettlementFacts;entries: FinanceEntry[]; subjects: { id: string; name: string }[]; revisions: unknown[]; withdrawalsReady: boolean; nativeDistributionReady?:boolean; orders?: FinanceOrderFact[]; subjectCandidates?: {items:{id:string;name:string}[];total:number}; lookupPage?: {refs: string[]; documentCount: number; entryCount: number}; localSourceLimits?: string[]; asOf: string; version: string };
+export type FinanceFacts = { historicalLinks?:Record<string,ReturnType<typeof resolveHistoricalReverseLinks>>;legacyOrderObservations?:ReturnType<typeof projectLegacyOrderFinanceObservations>;distributionCalculation?:AdminEarningCalculation;orderSettlementFacts?:OrderSettlementFacts;entries: FinanceEntry[]; subjects: { id: string; name: string }[]; revisions: unknown[]; withdrawalsReady: boolean; nativeDistributionReady?:boolean; orders?: FinanceOrderFact[]; subjectCandidates?: {items:{id:string;name:string}[];total:number}; lookupPage?: {refs: string[]; documentCount: number; entryCount: number}; localSourceLimits?: string[]; asOf: string; version: string };
 const MAX_FACTS = 20_000;
 const digest = (value: unknown) => createHash("sha256").update(canonicalize(value)).digest("hex");
 const singleText=(values:(string|null|undefined)[])=>{const unique=[...new Set(values.filter((v):v is string=>typeof v==='string'))];return unique.length===1?unique[0]!:null;};
@@ -66,7 +66,7 @@ export function parseAdminFinanceFilters(query: URLSearchParams, now = new Date(
   if (scope !== "ALL" && !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(scope)) throw invalid("Invalid finance subject");
   if (bucket !== "ALL" && !(FINANCE_BUCKETS as readonly string[]).includes(bucket)) throw invalid("Invalid finance bucket");
   const kind = query.get("kind") ?? "ALL", state = query.get("state") ?? "ALL", q = (query.get("q") ?? "").trim();
-  if (!/^(ALL|OPENING|SETTLEMENT|WITHDRAWAL|REFUND|EARNINGS|DISTRIBUTION|GUARANTEE)$/.test(kind) || !["ALL", "POSTED", "PENDING", "SETTLED", "REVOKED", "RECOVERY_REQUIRED", "RESERVED", "SUBMITTING", "PROCESSING", "UNKNOWN", "SUCCEEDED", "FAILED", "RECONCILIATION_REQUIRED", "HISTORICAL_OBSERVED", "ORDER_RECORDED", "HISTORICAL_ORDER_RECORDED", "REFUND_PAYABLE_RECORDED"].includes(state) || q.length > 512) throw invalid("Invalid finance query");
+  if (!/^(ALL|OPENING|SETTLEMENT|WITHDRAWAL|REFUND|PAYMENT|EARNINGS|DISTRIBUTION|GUARANTEE)$/.test(kind) || !["ALL", "POSTED", "PENDING", "SETTLED", "REVOKED", "RECOVERY_REQUIRED", "RESERVED", "SUBMITTING", "PROCESSING", "UNKNOWN", "SUCCEEDED", "FAILED", "RECONCILIATION_REQUIRED", "HISTORICAL_OBSERVED", "ORDER_RECORDED", "HISTORICAL_ORDER_RECORDED", "REFUND_PAYABLE_RECORDED"].includes(state) || q.length > 512) throw invalid("Invalid finance query");
   const phoneField=hasPhoneQuery(scope)?'scope':hasPhoneQuery(q)?'q':null;
   if (phoneField) throw invalid("Phone lookup requires the authorized user POST lookup", phoneField);
   const periodValue = query.get("period");
@@ -159,7 +159,7 @@ export function adminFinanceObservationSql(ready:{native_distribution?:boolean;e
  const guarantee=ready.guarantee_history?` UNION ALL SELECT 'guarantee_source:'||g.id,g.user_id,COALESCE(u.name,g.user_id),'OWNER_GUARANTEE_HISTORY','LEGACY_MYSQL','legacy_mysql_restore','la_rental_accounts',g.legacy_account_id,g.source_digest,NULL::text,false,
   NULL::text,${utc('g.imported_at')},NULL::text,'GUARANTEE_HISTORY','HISTORICAL_OBSERVED',NULL::text,g.legacy_account_id,NULL::text,NULL::text,NULL::text,'LEGACY_GUARANTEE_HISTORY',${lookupKeysOnly?'NULL::jsonb':"jsonb_build_object('canonical',g.source_canonical,'accountId',g.account_id)"}
   FROM zzsh_order.legacy_owner_guarantee_observation g LEFT JOIN zzsh_auth_user."user" u ON u.id=g.user_id
-  WHERE jsonb_array_length(g.source_canonical::jsonb->'payOrders')>0 OR(g.source_canonical::jsonb->'source'->>'pay_money')::numeric>0`:'';
+  WHERE jsonb_array_length(g.source_canonical::jsonb->'payOrders')>0 OR(g.source_canonical::jsonb->'source'->>'pay_is'='1' AND (g.source_canonical::jsonb->'source'->>'pay_money')::numeric>0)`:'';
  return`SELECT o.* FROM (${history}${native}${legacy}${guarantee}) o ORDER BY o.id COLLATE "C" LIMIT $1`;
 }
 type Raw = Record<string, any>;
@@ -205,19 +205,19 @@ export function projectAdminFinanceObservation(row: Raw): FinanceEntry {
    evidence:{...(row.extra_evidence??{}),zeroAmount:'0',originalReference:row.reference_id,channelArrival:'UNKNOWN'},related:row.reference_id?[{ref:(legacy?'LEGACY_ORDER:':'ORDER:')+row.reference_id,label:'原订单',path:`/orders/${encodeURIComponent(row.reference_id)}`}]:[]};
  }
   const earnings = row.source_entity === "la_log_earnings", distribution = row.source_entity === "la_distribution_order";
-  const unsigned = cents(row.amount, true), direction = earnings ? row.action === "1" ? "IN" : row.action === "2" ? "OUT" : "UNKNOWN" : distribution ? "IN" : "OUT";
+  const unsigned = cents(row.amount, true), direction = earnings ? row.action === "1" ? "IN" : row.action === "2" ? "OUT" : "UNKNOWN" : distribution || row.source_entity === "la_refund_record" ? "IN" : "OUT";
   const amount = unsigned === null || direction === "UNKNOWN" ? null : direction === "OUT" && unsigned !== "0" ? `-${unsigned}` : unsigned;
-  const identityKind = earnings ? "EARNINGS" : distribution ? "DISTRIBUTION" : "WITHDRAWAL";
+  const identityKind = earnings ? "EARNINGS" : distribution ? "DISTRIBUTION" : row.source_entity === "la_pay_order" ? "PAYMENT" : row.source_entity === "la_refund_record" ? "REFUND" : "WITHDRAWAL";
   const historical=historicalObservationDisplay(row);
   const kind=earnings&&['1002','1003','1004','1005'].includes(historical.changeType??'')?'WITHDRAWAL':identityKind;
   const distributionNumber=distribution?row.extra_evidence?.snapshot?.sourceNumber:null;
-  return { id: `history:${row.id}`, documentRef: `HISTORY_${identityKind}:${row.id}`, documentNumber: earnings?historical.originalLogNumber??row.source_id:row.reference_no??distributionNumber??row.source_id, subjectId: row.subject_id, subjectName: displayName(row.subject_name, row.subject_id),
+  return { id: `history:${row.id}`, documentRef: `HISTORY_${identityKind}:${row.id}`, documentNumber: earnings?historical.originalLogNumber??row.source_id:row.extra_evidence?.snapshot?.sourceNumber??row.reference_no??distributionNumber??row.source_id, subjectId: row.subject_id, subjectName: displayName(row.subject_name, row.subject_id),
     bucket: distribution ? "PENDING_EARNINGS" : "AVAILABLE", direction, deltaCents: amount, knowledge: amount === null ? "UNKNOWN" : "KNOWN", kind,
     state: "HISTORICAL_OBSERVED", classification: row.included_in_opening ? "HISTORICAL_COVERED" : "HISTORICAL_UNCOVERED", affectsCurrentWallet: false, affectsCurrentLedger: false,
     occurredAt: row.at, importedAt: row.imported_at, sourceType: row.source_type, sourceSystem: row.source_system ?? "SOURCE_SYSTEM_UNKNOWN", sourceEntity: row.source_entity, sourceId: row.source_id, sourceDigest: row.source_digest, basisId: row.basis_id,
     reasonCodes: [...(row.included_in_opening ? [] : ["HISTORICAL_NOT_ADMITTED"]), ...(!earnings ? ["HISTORICAL_STATUS_NOT_CHANNEL_RESULT"] : []), ...(amount === null ? ["AMOUNT_OR_DIRECTION_UNKNOWN"] : [])], accountCode: null,
-    evidence: { originalReference: row.reference_id ?? null, originalNumber: row.reference_no ?? null, originalStatus: row.source_status ?? null,
-      originalNetCents: signedSourceCents(row.net), originalFeeCents: signedSourceCents(row.fee), historicalBalanceAfterCents: signedSourceCents(row.balance_after), dueAt: null, policyVersion: null }, related: [],historical };
+    evidence: { originalReference: row.reference_id ?? null, originalStatus: row.source_status ?? null, originalOrderType:row.extra_evidence?.snapshot?.sourceOrderType??null, originalNumber:row.reference_no??row.extra_evidence?.snapshot?.sourceNumber??null, originalRatio:row.extra_evidence?.snapshot?.sourceRatio??null, originalLevel:row.extra_evidence?.snapshot?.level==null?null:String(row.extra_evidence.snapshot.level), channelArrival:'UNKNOWN',
+      originalDestinationMask:row.extra_evidence?.snapshot?.legacyDestination?.cardLast4?'**** '+row.extra_evidence.snapshot.legacyDestination.cardLast4:row.extra_evidence?.snapshot?.legacyDestination?.accountMasked??null,originalBankName:row.extra_evidence?.snapshot?.legacyDestination?.bankName??null,originalRecipientMask:row.extra_evidence?.snapshot?.legacyDestination?.nameMasked??null,originalMobileMask:row.extra_evidence?.snapshot?.legacyDestination?.phoneMasked??null,originalOperatorSourceId:row.extra_evidence?.snapshot?.legacyOperatorId??null,originalNetCents: signedSourceCents(row.net), originalFeeCents: signedSourceCents(row.fee), historicalBalanceAfterCents: signedSourceCents(row.balance_after), dueAt: null, policyVersion: null }, related: [],historical };
 }
 const LOCAL_SOURCE_LIMIT = 64;
 export function projectUnpostedFinanceSource(row: Raw, family: "PAYMENT_REQUEST" | "REFUND_INTENT" | "JOINPAY_WITHDRAWAL"): FinanceEntry {
@@ -323,6 +323,27 @@ async function loadHistoricalReverseRows(client:PoolClient,documentRef:string|un
   if(rows.length>MAX_FACTS)throw unavailable('Historical reverse reference size limit reached');return rows;
 }
 
+async function loadTypedHistoricalOrderRows(client:PoolClient,order:FinanceOrderFact):Promise<Raw[]>{
+  const source=ADMIN_FINANCE_OBSERVATION_SQL.replace(/\s+ORDER BY o\.id COLLATE "C" LIMIT \$1\s*$/,'');
+  const rows=(await client.query(`${source}
+    WHERE o.source_type='LEGACY_MYSQL' AND o.source_system=$1 AND ${typedHistoricalOrderSql("o","$2","$3")}
+    ORDER BY o.source_event_at DESC NULLS LAST,o.id COLLATE "C" LIMIT $4`,[order.sourceSystem,order.sourceId,order.renterId,MAX_FACTS+1])).rows;
+  if(rows.length>MAX_FACTS)throw unavailable('Historical order finance size limit reached');
+  return rows;
+}
+
+function projectLegacyOrderFinanceObservations(rows:Raw[],order:FinanceOrderFact,access:HistoricalRelationAccess){
+  const entries=rows.map(projectAdminFinanceObservation);
+  enrichHistoricalObservations(entries,rows,[order],access);
+  return entries.filter(entry=>entry.historical?.association.state==='MATCHED').map(entry=>({
+    documentRef:entry.documentRef,number:entry.documentNumber,kind:entry.kind,
+    amountCents:entry.historical!.recordedAmountCents,occurredAt:entry.occurredAt,
+    originalStatus:entry.historical!.originalStatus,originalStatusLabel:entry.historical!.originalStatusLabel,
+    refundAttempts:entry.historical!.refundAttempts,sourceRefundFlags:entry.historical!.sourceRefundFlags,
+    channelArrival:'UNKNOWN' as const,
+  }));
+}
+
 export async function loadAdminFinanceFacts(client: PoolClient, scope: FinanceLoadScope = {},relations?:HistoricalRelationAccess): Promise<FinanceFacts> {
   const versionScope: FinanceVersionScope | undefined = scope.lookup ? undefined : scope.documentRef ? { mode: "document", documentRef: scope.documentRef } : scope.subjectId ? { mode: "subject", subjectId: scope.subjectId } : undefined;
   const {ready,version,asOf}=await readFinanceSourceVersion(client, versionScope);
@@ -333,20 +354,30 @@ export async function loadAdminFinanceFacts(client: PoolClient, scope: FinanceLo
     lookupPage={refs:rows.flatMap(row=>row.ref===null?[]:[String(row.ref)]),documentCount:Number(row.document_count),entryCount:Number(row.entry_count)};
     entryScope={...scope,filters:undefined,documentRefs:lookupPage.refs};
   }
+  const legacyOrderDocument=scope.documentRef?.startsWith("LEGACY_ORDER:")===true;
+  const typedHistoryDocument=/^HISTORY_(PAYMENT|REFUND|DISTRIBUTION):/.test(scope.documentRef??"");
   const ledgerQuery=scopedFinanceSql(ledgerSource,"ledger",entryScope,MAX_FACTS+1,ready.withdrawals,ready.joinpay_withdrawals===true);
-  const historyQuery=scopedFinanceSql(historySource,"history",entryScope,MAX_FACTS+1,ready.withdrawals);
-  const ledger=(await client.query(ledgerQuery.text,ledgerQuery.values)).rows,history=(await client.query(historyQuery.text,historyQuery.values)).rows;
+  const historyQuery=scopedFinanceSql(typedHistoryDocument?ADMIN_FINANCE_OBSERVATION_SQL:historySource,"history",entryScope,MAX_FACTS+1,ready.withdrawals);
+  const ledger=legacyOrderDocument||typedHistoryDocument?[]:(await client.query(ledgerQuery.text,ledgerQuery.values)).rows;
+  const history=legacyOrderDocument?[]:(await client.query(historyQuery.text,historyQuery.values)).rows;
   if(ledger.length+history.length>MAX_FACTS)throw new SecurityApiError(503,"EVIDENCE_UNAVAILABLE","Matching finance result exceeds 20000; apply a narrower subject, period or query",[{path:"finance.matchingLimit.20000",code:"INVALID_FIELD"}]);
   let selectedLegacyDuties:AdminLegacyDutyFinance[]=[];
   if(ready.legacy_duty_finance&&scope.documentRef?.startsWith('LEGACY_DUTY:')&&(ledger.length||history.length))selectedLegacyDuties=[...await readAdminLegacyDutyFinances(client,{dutyId:scope.documentRef.slice('LEGACY_DUTY:'.length)})].map(([,duty])=>duty);
   const linkedOrders=[...ledger.flatMap(row=>typeof row.order_id==='string'?[`ORDER:${row.order_id}`]:[]),...selectedLegacyDuties.filter(duty=>duty.knowledge==='KNOWN').map(duty=>`LEGACY_ORDER:${duty.orderId}`)];
   const orderScope=lookupPage?{...scope,orderRefs:[...new Set([...lookupPage.refs,...linkedOrders])]}:scope.documentRef?{...scope,orderRefs:[...new Set([scope.documentRef,...linkedOrders])]}:scope.filters?.q.startsWith("ORDER_LINK:")?scope:{...scope,orderRefs:linkedOrders};
-  const orderReferences=history.filter(row=>row.source_entity==='la_log_earnings'&&String(row.extra_evidence?.snapshot?.legacyChangeType)==='1001');
+  const orderReferences=history.filter(row=>row.source_entity==='la_log_earnings'&&String(row.extra_evidence?.snapshot?.legacyChangeType)==='1001'
+    || ['la_pay_order','la_refund_record','la_distribution_order'].includes(row.source_entity));
   const orders=await loadFinanceOrderFacts(client,ready,orderScope,orderReferences,relations);
   let orderSettlementFacts:OrderSettlementFacts|undefined;
   const selectedOrder=orders.find(order=>order.ref===scope.documentRef&&order.sourceType==='LEGACY_MYSQL'&&order.objectReadable===true);
   if(selectedOrder)orderSettlementFacts={legacyDutyReady:ready.legacy_duty_finance===true,duties:ready.legacy_duty_finance?[...await readAdminLegacyDutyFinances(client,{orderId:selectedOrder.id})].map(([,duty])=>duty):[]};
   const reverseRows=await loadHistoricalReverseRows(client,scope.documentRef,history,orders);
+  let legacyOrderObservations:FinanceFacts["legacyOrderObservations"];
+  if(selectedOrder&&relations&&(relations.isBoss||relations.financeDocumentRead)){
+    const typed=await loadTypedHistoricalOrderRows(client,selectedOrder);
+    legacyOrderObservations=projectLegacyOrderFinanceObservations(typed,selectedOrder,relations);
+    reverseRows.push(...typed);
+  }
   const referenceRows=await loadHistoricalReferenceRows(client,[...history,...reverseRows]);
   const historicalSources=[...new Map([...history,...reverseRows,...referenceRows].map(row=>[row.id,row])).values()];
   const subjectIds=[...new Set([...ledger.map(row=>row.subject_id),...history.map(row=>row.subject_id),...orders.flatMap(order=>[order.ownerId,order.renterId]),scope.subjectId,scope.filters?.scope!=="ALL"?scope.filters?.scope:undefined].filter((id):id is string=>typeof id==="string"))];
@@ -425,7 +456,7 @@ export async function loadAdminFinanceFacts(client: PoolClient, scope: FinanceLo
       entry.reasonCodes.push("LOCAL_RECORDS_NOT_REVALIDATED", ...(gross && net && userFee && BigInt(gross) !== BigInt(net) + BigInt(userFee) ? ["USER_FEE_DOES_NOT_CLOSE"] : []));
     }
   } else for (const entry of entries) if (entry.documentRef.startsWith("JOINPAY_WITHDRAWAL:") && entry.classification !== "LOCAL_SOURCE_WITHOUT_POSTING") entry.reasonCodes.push("JOINPAY_WITHDRAWAL_SOURCE_UNAVAILABLE");
-  return {entries,subjects,revisions:[],orders,subjectCandidates,lookupPage,historicalLinks,distributionCalculation,orderSettlementFacts,withdrawalsReady:ready.withdrawals,nativeDistributionReady:ready.native_distribution===true,...(localSourceLimits.length?{localSourceLimits}:{}),asOf,version};
+  return {entries,subjects,revisions:[],orders,subjectCandidates,lookupPage,historicalLinks,legacyOrderObservations,distributionCalculation,orderSettlementFacts,withdrawalsReady:ready.withdrawals,nativeDistributionReady:ready.native_distribution===true,...(localSourceLimits.length?{localSourceLimits}:{}),asOf,version};
 }
 
 export function filterAdminFinanceEntries(facts: FinanceFacts, filter: FinanceFilters, period: boolean): FinanceEntry[] {
@@ -544,6 +575,7 @@ export function readAdminFinanceDocument(facts: FinanceFacts, ref: string, entry
   if(orderSettlement)related.push(...orderSettlement.dutyRefs.filter((duty):duty is typeof duty&{documentRef:string}=>duty.documentRef!==null).map(duty=>({ref:duty.documentRef,label:duty.kind==='RENTER_REFUND'?'已记退款责任':'已记旧单责任'})));
   return { document, entries, evidence, related: [...new Map(related.map(link => [link.ref + (link.path ?? ""), link])).values()], reasonCodes: [...new Set([...entries.flatMap(entry => entry.reasonCodes),...(reverse?.reasonCodes??[]),...(facts.localSourceLimits??[]), ...(order ? ["ORDER_RECORD_NOT_CHANNEL_RESULT", ...(!entries.length ? ["ORDER_NO_CURRENT_POSTING"] : [])] : [])])],
     ...(orderSettlement?{orderSettlement}:{}),
+    ...(facts.legacyOrderObservations?{legacyOrderObservations:facts.legacyOrderObservations}:{}),
     ...(facts.distributionCalculation?{distributionCalculation:facts.distributionCalculation}:{}),
     platform: { postedComponents: entries.filter(entry => entry.bucket === "PLATFORM").map(entry => ({ accountCode: entry.accountCode, deltaCents: entry.deltaCents,
       payer:entry.evidence.feePayer??null,feeBase:entry.evidence.feeBase??null,feeRate:entry.evidence.feeRate??null })), beforeDistributionCents: null, distributionExpenseCents: null, retainedCents: null, channelCostCents: null, netProfitCents: null, reasonCodes: ["DISTRIBUTION_AND_CHANNEL_COST_NOT_ADMITTED"] } };

@@ -491,7 +491,7 @@ export function SupplyCatalogView({
   const adoptRevision = () => {
     if (!conflictLoaded || !catalog) return;
     if (editor && (editor.kind === "skins" || editor.kind === "skin-owners")) {
-      if (!contractReady) { setError("最新目录的身份合同未就绪，暂不能继续。"); return; }
+      if (!contractReady) { setError("皮肤目录资料暂时无法确认，请稍后重试。"); return; }
       const latest = editor.id ? (editor.kind === "skins" ? catalog.skins : catalog.owners).find(r => r.id === editor.id) : undefined;
       if (editor.id && !latest) { setError("当前对象已不在可维护目录中，输入保留，请核对范围。"); return; }
       if (editor.kind === "skins" && latest && (latest as CatalogSkin).namingState !== (editor.original as CatalogSkin).namingState) { setError("词条身份状态已变化，请保留输入并重新打开核对。"); return; }
@@ -519,7 +519,7 @@ export function SupplyCatalogView({
 
   const openCreate = (kind: CatalogKind) => {
     if (storageBlocked || editor) return;
-    if ((kind === "skins" || kind === "skin-owners") && !contractReady) { setError("当前环境尚未提供完整皮肤身份合同，维护暂不可用。"); return; }
+    if ((kind === "skins" || kind === "skin-owners") && !contractReady) { setError("皮肤目录资料暂时无法确认，维护暂不可用。"); return; }
     if (kind === "skins" && catalog?.game.code !== "delta" && !catalog?.categories.length) { setError("请先维护至少一个皮肤分类，再创建皮肤。"); return; }
     if (kind === "skins" && catalog?.game.code === "delta" && !catalog.skinCategoryModel?.categorylessWriteReady) { setError("无分类词条创建尚未就绪，请先由维护者更新目录结构。"); return; }
     const created = editorValuesFor(kind);
@@ -528,7 +528,7 @@ export function SupplyCatalogView({
 
   const openEdit = (kind: CatalogKind, record: CatalogRow, confirm = false) => {
     if (storageBlocked) return;
-    if ((kind === "skins" || kind === "skin-owners") && !contractReady) { setError("当前环境尚未提供完整皮肤身份合同，维护暂不可用。"); return; }
+    if ((kind === "skins" || kind === "skin-owners") && !contractReady) { setError("皮肤目录资料暂时无法确认，维护暂不可用。"); return; }
     const values = { ...editorValuesFor(kind), ...recordValues(kind, record) };
     if (kind === "skins") Object.assign(values, skinValues(record as unknown as CatalogSkin));
     if (kind === "skin-owners") Object.assign(values, { ownerKind: (record as CatalogSkinOwner).kind, reason: "" });
@@ -541,7 +541,7 @@ export function SupplyCatalogView({
     if (!editor || writeBusy.current || writePhase !== "idle" || storageBlocked) return;
     try {
       if (editor.kind === "skins" || editor.kind === "skin-owners") {
-        if (!contractReady) throw new Error("当前环境的皮肤身份合同未就绪。");
+        if (!contractReady) throw new Error("皮肤目录资料暂时无法确认，请稍后重试。");
         if (!editor.id && !CODE_PATTERN.test(editor.values.code ?? "")) throw new Error("请填写有效的稳定code。");
         if (editor.kind === "skins" && editor.confirm) {
           const source = editor.values.ownerKind === "FIREARM" ? firearms : catalog!.owners.filter(o => o.kind === editor.values.ownerKind);
@@ -573,7 +573,7 @@ export function SupplyCatalogView({
     }
     if (kind === "skins") {
       const skin = catalog?.skins.find(s => s.id === record.id);
-      if (!contractReady || !skin) { setError("皮肤身份合同未就绪。"); return; }
+      if (!contractReady || !skin) { setError("皮肤资料暂时无法确认，请稍后重试。"); return; }
       if (!record[field] && skin.namingState !== "VERIFIED") { setError("请先显式确认皮肤身份，再启用或展示。"); return; }
       beginWrite(kind, { [field]: !record[field], expectedCatalogRevision: catalog!.game.catalogRevision }, record.id); return;
     }
@@ -781,7 +781,7 @@ export function SupplyCatalogView({
     ? "当前身份没有目录维护权限。"
     : storageBlocked ? "目录恢复记录未就绪，暂不能提交新修改。"
     : (tab === "skins" || tab === "skin-owners") && !contractReady
-      ? "当前环境尚未提供完整皮肤身份合同，维护暂不可用；请协调后端环境，不将缺失字段视为空目录。"
+      ? "皮肤目录资料暂时无法确认，维护暂不可用；请稍后重试或联系管理员。"
       : tab === "skins" && catalog?.game.code === "delta" && !catalog.skinCategoryModel?.categorylessWriteReady
         ? "无分类词条创建尚未就绪，请先由维护者更新目录结构。"
       : tab === "skins" && catalog?.game.code !== "delta" && !(catalog?.categories.length)
@@ -892,7 +892,7 @@ export function SupplyCatalogView({
                   </Collapsible>
                 </div>
                 {(kind === "skins" || kind === "skin-owners") && !contractReady && visibleRows.length > 0 ? (
-                  <p className="text-xs text-destructive">当前环境尚未提供完整皮肤身份合同，维护暂不可用；请协调后端环境，不将缺失字段视为空目录。</p>
+                  <p className="text-xs text-destructive">皮肤目录资料暂时无法确认，维护暂不可用；请稍后重试或联系管理员。</p>
                 ) : null}
                 <div className="flex flex-wrap items-end gap-2.5">
                   <div className="w-full sm:w-auto sm:min-w-60">
@@ -1014,7 +1014,7 @@ export function SupplyCatalogView({
                     <Field label="皮肤本名"><Input value={editor.values.baseName ?? ""} onChange={(event) => setEditor({ ...editor, values: { ...editor.values, baseName: event.target.value } })} className="h-9 text-xs" /></Field>
                     {editor.values.ownerKind === "FIREARM" ? (
                       <div className="sm:col-span-2">
-                        {firearms === null ? <StatusMessage themeAware error="当前目录的枪械归属未接入，请协调接口环境；不需要临时增加改枪码管理权限。" /> : firearms.length === 0 ? <p className="text-xs text-muted-foreground">当前游戏尚无枪械所属对象，请先维护枪械目录。</p> : <p className="text-xs text-muted-foreground">枪械归属来自当前受权目录，保存稳定对象编号。</p>}
+                        {firearms === null ? <StatusMessage themeAware error="枪械归属资料暂时无法读取，请稍后重试或联系管理员。" /> : firearms.length === 0 ? <p className="text-xs text-muted-foreground">当前游戏尚无枪械所属对象，请先维护枪械目录。</p> : <p className="text-xs text-muted-foreground">枪械归属来自当前受权目录，保存稳定对象编号。</p>}
                       </div>
                     ) : null}
                   </>

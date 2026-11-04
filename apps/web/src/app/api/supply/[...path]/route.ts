@@ -14,10 +14,11 @@ const apiOrigin =
 const webOrigin =
   process.env.ZZSH_WEB_ORIGIN ?? (local ? "http://127.0.0.1:3100" : "");
 const id = "[A-Za-z0-9][A-Za-z0-9._:-]{0,127}";
+const slot = "(?:0|[1-9][0-9]{0,5})";
 // Owner-approved explicit whitelist: exact public listing-number lookup is a read-only
 // passthrough distinct from the generic /listings/:id branch.
 const getPath = new RegExp(
-  `^/(?:operation-result|games|games/${id}/(?:catalog|publishing-catalog|publishing-options|listing-filters|resource-income-preview|full-payout-terms)|gunsmith/games|gunsmith/games/${id}/firearms|gunsmith/firearms/${id}/codes|listings/lookup|listings(?:/${id}(?:/media/${id})?)?|me/(?:accounts|favorites)|accounts/${id}(?:/deposit-recommendation)?|media/${id}/(?:access|content))$`,
+  `^/(?:operation-result|games|games/${id}/(?:catalog|publishing-catalog|publishing-options|listing-filters|resource-income-preview|full-payout-terms)|gunsmith/games|gunsmith/games/${id}/firearms|gunsmith/firearms/${id}/codes|listings/lookup|listings(?:/${id}(?:/media/${id}|/legacy-images/${slot})?)?|me/(?:accounts|favorites)|accounts/${id}(?:/deposit-recommendation|/legacy-images/(?:display|penalty)/${slot})?|media/${id}/(?:access|content))$`,
 );
 const postPath = new RegExp(
   `^/(?:accounts|accounts/${id}/(?:drafts|quote|accept-rules|submit|withdraw|pause|resume)|media/upload-intents|games/${id}/owner-income-preview)$`,
@@ -26,8 +27,9 @@ const putPath = new RegExp(
   `^/(?:accounts/${id}/draft|favorites/${id}|media/uploads/${id})$`,
 );
 const mediaPath = new RegExp(
-  `^/(?:media/${id}/(?:access|content)|listings/${id}/media/${id})$`,
+  `^/(?:media/${id}/(?:access|content)|listings/${id}/(?:media/${id}|legacy-images/${slot})|accounts/${id}/legacy-images/(?:display|penalty)/${slot})$`,
 );
+const legacyMediaPath = new RegExp(`^/(?:listings/${id}/legacy-images/${slot}|accounts/${id}/legacy-images/(?:display|penalty)/${slot})$`);
 const error = (status: number, code: string, requestId: string) =>
   Response.json(
     { error: { code, message: "供给请求未完成", requestId } },
@@ -68,15 +70,15 @@ async function forward(
     path = "/" + segments.join("/"),
     method = request.method;
   if (
-    !(method === "GET" ? getPath : method === "POST" ? postPath : putPath).test(
+    !(method === "GET" || method === "HEAD" ? getPath : method === "POST" ? postPath : putPath).test(
       path,
     ) ||
-    !["GET", "POST", "PUT"].includes(method)
+    !["GET", "HEAD", "POST", "PUT"].includes(method) || (method === "HEAD" && !legacyMediaPath.test(path))
   )
     return error(404, "NOT_FOUND", requestId);
   if (
     request.headers.has("authorization") ||
-    (method !== "GET" && request.headers.get("origin") !== webOrigin)
+    (method !== "GET" && method !== "HEAD" && request.headers.get("origin") !== webOrigin)
   )
     return error(403, "FORBIDDEN", requestId);
   const headers = new Headers({ origin: webOrigin, "x-request-id": requestId }),
@@ -86,7 +88,7 @@ async function forward(
   const upload = method === "PUT" && path.startsWith("/media/uploads/"),
     deadline = AbortSignal.timeout(15000);
   let body: ArrayBuffer | undefined;
-  if (method !== "GET") {
+  if (method !== "GET" && method !== "HEAD") {
     const mime = request.headers.get("content-type") ?? "";
     if (
       upload
@@ -142,16 +144,17 @@ async function forward(
   });
   for (const v of copySetCookies(upstream.headers))
     responseHeaders.append("set-cookie", v);
-  for (const h of ["retry-after", "etag"]) {
+  for (const h of ["retry-after", "etag", "x-zzsh-legacy-missing"]) {
     const v = upstream.headers.get(h);
     if (v) responseHeaders.set(h, v);
   }
+  if (method === "HEAD") return new Response(null, { status: upstream.status, headers: responseHeaders });
   try {
     const mime = upstream.headers.get("content-type")?.split(";")[0] ?? "";
     const binary =
       upstream.ok &&
       mediaPath.test(path) &&
-      ["image/png", "image/jpeg", "image/webp"].includes(mime);
+      ["image/png", "image/jpeg", "image/webp", "image/gif", "image/bmp", "image/x-icon"].includes(mime);
     const bytes = await readBoundedBody(
       upstream,
       binary ? 10 * 1024 * 1024 : 2 * 1024 * 1024,
@@ -177,6 +180,9 @@ export async function GET(
   request: Request,
   context: { params: Promise<{ path: string[] }> },
 ) {
+  return forward(request, context);
+}
+export async function HEAD(request: Request, context: { params: Promise<{ path: string[] }> }) {
   return forward(request, context);
 }
 export async function POST(

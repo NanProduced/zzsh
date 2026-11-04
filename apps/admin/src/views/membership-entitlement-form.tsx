@@ -392,7 +392,7 @@ function EntitlementFields({context,initial,onSubmit,busy,error}:ComponentProps<
               <p className="text-xs text-destructive font-medium" role="alert">{ratioError}</p>
             ) : (
               <p className="text-[11px] text-muted-foreground">
-                {rangeReady ? `可选 ${min === max ? formatDiscountLabel(range!.minPayableRatio ?? '') : formatDiscountRangeLabel(range!.minPayableRatio ?? '', range!.maxPayableRatio ?? '')}` : unifiedPending ? '统一范围待 API 接入' : '该礼遇类型尚未统一，请先调整政策并审批'}
+                {rangeReady ? `可选 ${min === max ? formatDiscountLabel(range!.minPayableRatio ?? '') : formatDiscountRangeLabel(range!.minPayableRatio ?? '', range!.maxPayableRatio ?? '')}` : unifiedPending ? '优惠范围暂时无法确认' : '该礼遇类型尚未统一，请先调整政策并审批'}
               </p>
             )}
           </div>

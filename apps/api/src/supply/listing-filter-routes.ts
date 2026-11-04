@@ -1,4 +1,5 @@
 import { legacyListingSortLabel,listLegacyReadListings,buildMixedListingCandidates,mixedListingBinding,readLegacyListing,hasLegacyReadSnapshots } from "./legacy-listing-read";
+import { attachLegacyPathImages } from "./legacy-path-projection";
 import { readAdminContext,assertAdminContextInTransaction } from "../auth/auth-security";
 import { loadEffectiveAdminAccess,requirePermission,ADMIN_PERMISSION } from "../auth/admin-authorization";
 import { withTransaction,recordAudit,setAuditContext } from "../auth/security-core";
@@ -61,7 +62,8 @@ export async function listV2(request:SupplyNodeRequest,options:SupplyRuntimeOpti
     if(state.legacyReadOnly){
       await validateListingQuery(client,q,state);
       const configuredLabel=state.config!.sorts.find(s=>s.key===q.sort)?.label??null;
-      return listLegacyReadListings(client,q,options.listingCursorKey!,{filterRevision:state.filterRevision!,catalogRevision:state.catalogRevision,sortLabel:legacyListingSortLabel(q.sort,configuredLabel)},options.legacyPublicAdmission);
+      const page=await listLegacyReadListings(client,q,options.listingCursorKey!,{filterRevision:state.filterRevision!,catalogRevision:state.catalogRevision,sortLabel:legacyListingSortLabel(q.sort,configuredLabel)},options.legacyPublicAdmission);
+      return {...page,items:await attachLegacyPathImages(client,page.items as Record<string,unknown>[])};
     }
     if(state.mixed){
       const binding=mixedListingBinding(q,{filterRevision:state.filterRevision!,catalogRevision:state.catalogRevision,ruleReleaseId:state.ruleReleaseId!},options.legacyPublicAdmission);
@@ -75,7 +77,7 @@ export async function listV2(request:SupplyNodeRequest,options:SupplyRuntimeOpti
         const account=page.account(row.id);if(!account)continue;
         try{items.push(await listingDetail(client,account,"public",options.supplyGateReader??unknownSupplyGate,undefined,undefined,false,"RENTABLE",{version:page.version(row.id),shared:page.shared}));}catch(e){if((e as {status?:number}).status!==404)throw e;}}
       const more=scanned<rows.length||rows.length===200;
-      return {queryVersion:2,items,nextCursor:more&&last?encodeListingCursor(last,binding,options.listingCursorKey):null,sort:q.sort,direction:q.direction,sortLabel:state.config!.sorts.find(s=>s.key===q.sort)!.label,filterRevision:state.filterRevision,catalogRevision:state.catalogRevision,ruleReleaseId:state.ruleReleaseId,scannedCount:scanned,scanBudget:200,scanBudgetReached:scanned===200,limit:q.limit};
+      return {queryVersion:2,items:await attachLegacyPathImages(client,items as Record<string,unknown>[]),nextCursor:more&&last?encodeListingCursor(last,binding,options.listingCursorKey):null,sort:q.sort,direction:q.direction,sortLabel:state.config!.sorts.find(s=>s.key===q.sort)!.label,filterRevision:state.filterRevision,catalogRevision:state.catalogRevision,ruleReleaseId:state.ruleReleaseId,scannedCount:scanned,scanBudget:200,scanBudgetReached:scanned===200,limit:q.limit};
     }
     const binding:ListingCursorBinding={queryVersion:2,gameId:q.gameId,queryHash:sha256Hex(canonicalize({mode:"RENTABLE_ONLY",gameId:q.gameId,q:q.q,filters:q.filters,sort:q.sort,direction:q.direction,coreItemId:q.coreItemId})),sort:q.sort,direction:q.direction,coreItemId:q.coreItemId,filterRevision:state.filterRevision??"0",catalogRevision:state.catalogRevision,ruleReleaseId:state.ruleReleaseId??""};
     const after=q.cursor===null?null:decodeListingCursor(q.cursor,binding,options.listingCursorKey);
@@ -87,6 +89,6 @@ export async function listV2(request:SupplyNodeRequest,options:SupplyRuntimeOpti
       const account=page.account(row.id);if(!account)continue;
       try{items.push(await listingDetail(client,account,"public",options.supplyGateReader??unknownSupplyGate,undefined,undefined,false,"RENTABLE",{version:page.version(row.id),shared:page.shared}));}catch(e){if((e as {status?:number}).status!==404)throw e;}}
     const more=scanned<rows.length||rows.length===200;
-    return {queryVersion:2,items,nextCursor:more&&last?encodeListingCursor(last,binding,options.listingCursorKey):null,sort:q.sort,direction:q.direction,sortLabel:state.config!.sorts.find(s=>s.key===q.sort)!.label,filterRevision:state.filterRevision,catalogRevision:state.catalogRevision,ruleReleaseId:state.ruleReleaseId,scannedCount:scanned,scanBudget:200,scanBudgetReached:scanned===200,limit:q.limit};
+    return {queryVersion:2,items:await attachLegacyPathImages(client,items as Record<string,unknown>[]),nextCursor:more&&last?encodeListingCursor(last,binding,options.listingCursorKey):null,sort:q.sort,direction:q.direction,sortLabel:state.config!.sorts.find(s=>s.key===q.sort)!.label,filterRevision:state.filterRevision,catalogRevision:state.catalogRevision,ruleReleaseId:state.ruleReleaseId,scannedCount:scanned,scanBudget:200,scanBudgetReached:scanned===200,limit:q.limit};
   });
 }

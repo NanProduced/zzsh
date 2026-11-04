@@ -3,13 +3,29 @@ export type ReferralRatio={numerator:string;denominator:string};
 export type LevelCondition={metric:'LAST_PAID_AMOUNT'|'TOTAL_PAID_AMOUNT'|'PAID_COUNT'|'SETTLED_REFERRAL';value:string};
 export type DistributionLevelPolicy={code:string;rank:number;default:boolean;renterPercent:string;ownerPercent:string;upgrade:null|{match:'ANY'|'ALL';conditions:LevelCondition[]}};
 type DistributionPolicyBase={scope:'LOCAL_CONTROLLED'|'NATIVE';enabled:boolean;participation:'AUTO_AT_REGISTRATION';depth:1;selfRebate:false;accountModes:('ordinary'|'custom')[];minimumAccrualCents:string;settlementDelayDays:number};
-export type DistributionPolicyConfig=DistributionPolicyBase&({schema:'distribution-policy.v1';levels:DistributionLevelPolicy[]}|{schema:'distribution-policy.v2';rateMode:'UNIFORM';renterPercent:string;ownerPercent:string;levels:[]});
+type LegacyRentalPolicySource={receiptSha256:string;configurationSha256:string;levelsSha256:string;levelNames:Record<string,string>};
+export type DistributionPolicyConfig=DistributionPolicyBase&(
+ {schema:'distribution-policy.v1';levels:DistributionLevelPolicy[]}|
+ {schema:'distribution-policy.v2';rateMode:'UNIFORM';renterPercent:string;ownerPercent:string;levels:[]}|
+ {schema:'distribution-policy.v3';levels:DistributionLevelPolicy[];legacySource:LegacyRentalPolicySource});
 const unsigned=(v:unknown)=>{const text=exactCents(v);if(BigInt(text)<0n)throw invalid('Nonnegative policy amount required');return text;};
 export function referralPercent(value:unknown):{percent:string;ratio:ReferralRatio}{if(typeof value!=='string'||!/^(0|[1-9]\d{0,2})(?:\.\d{1,8})?$/.test(value))throw invalid('Exact percent string required');const n=parseNonNegativeDecimal(value,8,'referral percent'),den=100n*10n**BigInt(n.scale);if(n.value>den)throw invalid('Referral percent exceeds 100');return{percent:formatDecimalExact(n),ratio:{numerator:n.value.toString(),denominator:den.toString()}};}
 const compare=(a:ReferralRatio,b:ReferralRatio)=>BigInt(a.numerator)*BigInt(b.denominator)-BigInt(b.numerator)*BigInt(a.denominator);
 function boundedPair(a:ReferralRatio,b:ReferralRatio){if(BigInt(a.numerator)*BigInt(b.denominator)+BigInt(b.numerator)*BigInt(a.denominator)>BigInt(a.denominator)*BigInt(b.denominator))throw invalid('Cross-level referral total exceeds the same base');}
 export function validateDistributionPolicy(value:Record<string,unknown>,expectedScope:'LOCAL_CONTROLLED'|'NATIVE'='LOCAL_CONTROLLED'):DistributionPolicyConfig{
  if(value.schema==='distribution-policy.v2')return validateUniformDistributionPolicy(value,expectedScope);
+ if(value.schema==='distribution-policy.v3'){
+  const {legacySource,...fields}=value;
+  const graded=validateDistributionPolicy({...fields,schema:'distribution-policy.v1'},expectedScope);
+  if(!legacySource||typeof legacySource!=='object'||Array.isArray(legacySource))throw invalid('Legacy policy source proof required');
+  const proof=legacySource as Record<string,unknown>;
+  ensureOnlyFields(proof,['receiptSha256','configurationSha256','levelsSha256','levelNames']);
+  for(const key of ['receiptSha256','configurationSha256','levelsSha256'])if(typeof proof[key]!=='string'||!/^[0-9a-f]{64}$/.test(proof[key]))throw invalid('Exact legacy policy source digest required');
+  if(!proof.levelNames||typeof proof.levelNames!=='object'||Array.isArray(proof.levelNames))throw invalid('Legacy level names required');
+  const names=proof.levelNames as Record<string,unknown>;
+  if(Object.keys(names).length!==graded.levels.length||graded.levels.some(l=>!/^legacy_[1-9]\d{0,18}$/.test(l.code)||l.upgrade!==null||!Object.hasOwn(names,l.code)||typeof names[l.code]!=='string'||!String(names[l.code]).trim()||String(names[l.code]).length>100))throw invalid('Exact legacy level metadata required');
+  return {...graded,schema:'distribution-policy.v3',levels:graded.levels,legacySource:proof as LegacyRentalPolicySource};
+ }
  ensureOnlyFields(value,['schema','scope','enabled','participation','depth','selfRebate','accountModes','minimumAccrualCents','settlementDelayDays','levels']);
  if(!['LOCAL_CONTROLLED','NATIVE'].includes(expectedScope)||value.schema!=='distribution-policy.v1'||value.scope!==expectedScope||typeof value.enabled!=='boolean'||value.participation!=='AUTO_AT_REGISTRATION'||value.depth!==1||value.selfRebate!==false)throw invalid('Unsupported rental distribution policy mode');
  if(!Array.isArray(value.accountModes)||!value.accountModes.length||value.accountModes.length>2||new Set(value.accountModes).size!==value.accountModes.length||value.accountModes.some(m=>m!=='ordinary'&&m!=='custom'))throw invalid('Unreviewed account mode');

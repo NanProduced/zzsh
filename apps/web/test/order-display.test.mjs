@@ -11,10 +11,25 @@ const display = requireFromTree(path.join(tree, "apps/web/src/lib/order-display.
 
 const yuan = (amount) => ({ currency: "CNY", unit: "yuan", scale: 2, amount });
 
+test("payment observation translates known states without treating the original request as confirmed", () => {
+  assert.equal(display.paymentObservation(null), "暂未查到付款记录");
+  assert.equal(display.paymentObservation({ disposition: "APPLIED" }), "已有付款记录（已记入订单）");
+  assert.equal(display.paymentObservation({ disposition: "REVIEW_REQUIRED" }), "已有付款记录（需要人工核对）");
+  assert.equal(display.paymentObservation({ disposition: "FUTURE_STATE" }), "已有付款记录（状态待确认）");
+});
+
+test("settlement preview failures remain actionable without exposing internal reason codes", () => {
+  assert.match(display.settlementPreviewProblem(["FULL_PAYOUT_UNKNOWN"]), /包赔资料.*联系客服/);
+  assert.match(display.settlementPreviewProblem(["SETTLEMENT_QUANTITY_MISMATCH"]), /数量.*核对/);
+  assert.match(display.settlementPreviewProblem(["FUTURE_REASON"]), /暂时无法确认/);
+  assert.doesNotMatch(display.settlementPreviewProblem(["FUTURE_REASON"]), /FUTURE_REASON/);
+});
+
 test("order facts name historical, frozen or current sources without pretending current facts are snapshots", () => {
   assert.equal(display.orderListingSourceLabel({ source: { origin: "LEGACY" } }), "历史订单");
   assert.equal(display.orderListingSourceLabel({ listingFacts: { source: "ORDER_VERSION" } }), "下单时账号资料");
   assert.equal(display.orderListingSourceLabel({ listingFacts: { source: "ACCOUNT_CURRENT" } }), "当前账号资料");
+  assert.equal(display.orderListingSourceLabel({ source: { origin: "LEGACY" }, listingFacts: { source: "LEGACY_ACCOUNT_SNAPSHOT" } }), "当前账号资料（迁入时记录）");
   assert.equal(display.orderListingSourceLabel({ listingFactsUnknownReason: "UNREADABLE" }), "账号资料待核实");
   assert.equal(display.orderListingSourceLabel({}), null);
 });

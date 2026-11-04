@@ -1,4 +1,6 @@
-import { projectTenantMoney, projectTenantPriceQuote, publishedBaseRenterHaffRatioWanPerYuan } from "./tenant-price-projection";
+import { projectTenantMoney, projectTenantPriceQuote, publishedBaseRenterHaffRatioWanPerYuan, publishedListingFeeDisplay } from "./tenant-price-projection";
+import { attachLegacyPathImages } from "./legacy-path-projection";
+import { readLegacyPublishedReference } from "./legacy-published-reference";
 import { assertFullPayoutTermsAccepted, readFullPayoutTerms } from "./full-payout-terms";
 import type { LegacyPublicAdmission, LegacyPublicAdmissionDetailIndex } from "../legacy-load/legacy-public-admission";
 import type { Pool, PoolClient } from "pg";
@@ -731,6 +733,7 @@ export async function saveListingDraft(
   a: PublishingAccount,
   body: Record<string, unknown>,
   gate: SupplyGateReader,
+  verifiedLegacyReference?: string,
 ): Promise<void> {
   ensureOnlyFields(body, [
     "expectedRevision",
@@ -774,11 +777,15 @@ export async function saveListingDraft(
       throw conflict("客户端未保留已申报的通行证计划或德穆兰状态，请更新客户端后重试");
   }
   let normalized: ContentDeclaration;
+  const attributes = (body.attributes ?? {}) as Record<string, unknown>;
+  const legacyReference = verifiedLegacyReference ?? v.attributes.legacy_published_reference;
+  if (Object.hasOwn(attributes, "legacy_published_reference") && attributes.legacy_published_reference !== legacyReference)
+    throw invalid("旧刊登图片来源不可修改", "attributes.legacy_published_reference");
   try {
     normalized = normalizeDeclaration({
       title,
       description,
-      attributes: (body.attributes ?? {}) as Record<string, unknown>,
+      attributes: legacyReference === undefined ? attributes : { ...attributes, legacy_published_reference: legacyReference },
       inventory: [],
       skins: [],
       entitlements: [],
@@ -1061,12 +1068,21 @@ export type LegacyTakeoverGradingContext = {
   gradingCode: string | null;
   gradingDivision: number | null;
 };
-function validatePublicationAttributes(a: PublishingAccount, attributes: Record<string, unknown>, legacy?: LegacyTakeoverGradingContext): void {
+async function validatePublicationAttributes(client: PoolClient, a: PublishingAccount, attributes: Record<string, unknown>, legacy?: LegacyTakeoverGradingContext): Promise<void> {
   if (legacy && (legacy.kind !== "VERIFIED_LEGACY_TAKEOVER" || legacy.accountId !== a.id
     || !/^[a-f0-9]{64}$/.test(legacy.sourceDigest) || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(legacy.observationVersionId)
     || legacy.gradingCode !== (attributes.grading_code ?? null) || legacy.gradingDivision !== (attributes.grading_division ?? null)))
     throw conflict("旧账号段位来源与当前申报不一致");
-  validateDeltaPublicationAttributes(attributes, { requireGradingDivision: legacy === undefined, requireSupplementalDeclarations: legacy === undefined });
+  const marker = attributes.legacy_published_reference;
+  const reference = typeof marker === "string" ? await readLegacyPublishedReference(client, a.id, marker) : null;
+  if (marker !== undefined && !reference) throw conflict("旧刊登图片来源已变化");
+  if (reference && legacy && (reference.sourceDigest !== legacy.sourceDigest || reference.observationVersionId !== legacy.observationVersionId))
+    throw conflict("旧刊登图片来源与当前申报不一致");
+  validateDeltaPublicationAttributes(attributes, {
+    requireGradingDivision: legacy === undefined && (!reference || reference.gradingCode !== attributes.grading_code),
+    requireSupplementalDeclarations: legacy === undefined && !reference,
+    requireServiceWindow: !reference,
+  });
 }
 export async function quoteListing(
   client: PoolClient,
@@ -1082,7 +1098,7 @@ export async function quoteListing(
   if (v.review_state !== "DRAFT" || v.origin !== "NATIVE")
     throw conflict("仅可为新申报草稿报价");
   const d = await readDeclaration(client, v);
-  validatePublicationAttributes(a, d.attributes, legacyGrading);
+  await validatePublicationAttributes(client, a, d.attributes, legacyGrading);
   if (d.inventory.some((i) => i.quantity === null))
     throw invalid("请补齐库存，未知数量不能当作零", "inventory");
   const missing = await client.query(
@@ -1392,7 +1408,7 @@ export async function acceptListingRules(
   await assertCurrentRelease(client, a, v);
   if (v.review_state !== "DRAFT" || v.origin !== "NATIVE")
     throw conflict("仅可确认新申报草稿");
-  validateDeltaPublicationAttributes(v.payload!.declaration.attributes);
+  await validatePublicationAttributes(client, a, v.payload!.declaration.attributes);
   await assertPublicationRentalTerm(client, v);
   const selected=v.payload?.declaration.attributes.full_payout_declaration as {selected?:boolean}|undefined;
   const policy=selected?.selected?await readFundingPolicyForRelease(client,v.rule_release_id!):null;
@@ -1463,6 +1479,10 @@ async function assertMediaReady(
   if (!frozen || media.length !== frozen.length || new Set(media.map(m => m.id)).size !== media.length || media.some(m =>
     !isAccountMediaBinding(m, account) || !frozen.some(binding => binding.assetId === m.id && binding.byteHash === m.content_hash && binding.purpose === m.purpose)))
     throw notFound();
+  const legacyReference = v.payload?.declaration.attributes.legacy_published_reference;
+  if (media.length === 0 && typeof legacyReference === "string" && v.attributes.legacy_published_reference === legacyReference
+    && await readLegacyPublishedReference(client, account.id, legacyReference))
+    return;
   if (!media.some((m) => m.purpose === "ACCOUNT_DISPLAY" && publicMediaCategory(v.attributes, m.id, m.source_note) === "SHOWCASE"))
     throw invalid("至少需要一张展示图", "mediaBindings");
   if (mode === "review") {
@@ -1496,7 +1516,7 @@ export async function submitListing(
   requireVersionToken(v, body);
   if (v.review_state !== "DRAFT") throw conflict("当前资料不能重复提交");
   await assertCurrentRelease(client, a, v);
-  validateDeltaPublicationAttributes(v.payload!.declaration.attributes);
+  await validatePublicationAttributes(client, a, v.payload!.declaration.attributes);
   await assertPublicationRentalTerm(client, v);
   const blockers = await publicationBlockers(client, a, v, gate);
   if (blockers.length) throw conflict(blockers.join(","));
@@ -1549,7 +1569,7 @@ export async function reviewListing(
   if (reason.length < 2 || reason.length > 500)
     throw invalid("请填写具体审核理由");
   if (body.decision === "APPROVE") {
-    validatePublicationAttributes(a, v.payload!.declaration.attributes, legacyGrading);
+    await validatePublicationAttributes(client, a, v.payload!.declaration.attributes, legacyGrading);
     await assertPublicationRentalTerm(client, v);
     const blockers = await publicationBlockers(client, a, v, gate);
     if (blockers.length) throw conflict(blockers.join(","));
@@ -1834,7 +1854,9 @@ export function publicListingBasis(listing: Record<string, unknown>) {
     attributeDisplay: listing.attributeDisplay && typeof listing.attributeDisplay === "object" ? listing.attributeDisplay : null,
     presentation: listing.presentation && typeof listing.presentation === "object" ? listing.presentation : null,
     media: Array.isArray(listing.media) ? listing.media : [],
+    ...(Array.isArray(listing.legacyImages) ? { legacyImages: listing.legacyImages } : {}),
     quote: listing.quote && typeof listing.quote === "object" ? listing.quote : null,
+    feeDisplay: listing.feeDisplay && typeof listing.feeDisplay === "object" ? listing.feeDisplay : null,
     baseDeposit: listing.baseDeposit && typeof listing.baseDeposit === "object" ? listing.baseDeposit : null,
     termOption: listing.termOption && typeof listing.termOption === "object" ? listing.termOption : null,
     fullPayoutSelected: listing.fullPayoutSelected === true ? true : listing.fullPayoutSelected === false ? false : null,
@@ -1866,6 +1888,13 @@ export function publicAvailability(blockers: readonly string[], current: boolean
   return blockers.length ? "UNAVAILABLE" : "RENTABLE";
 }
 
+function publicAvailabilityReason(state: PublicAvailabilityState, blockers: readonly string[]) {
+  if (state === "RENTABLE") return null;
+  if (state === "OFFLINE") return blockers.includes("OWNER_PAUSED") ? "OWNER_PAUSED" : "VERSION_INACTIVE";
+  if (state === "PENDING_PAYMENT" || state === "RENTED" || state === "OCCUPIED") return "OCCUPIED";
+  return blockers.find(reason => READABLE_NON_RENTAL_BLOCKERS.has(reason) && (state !== "UNKNOWN" || publicationHasUnknownFacts([reason]))) ?? null;
+}
+
 // Native publication owns the stable account even when it cannot take a new
 // order. Detail/favorites may show that approved version, never an old legacy
 // fallback or an unreviewed current draft.
@@ -1893,12 +1922,14 @@ export async function readPublicListing(
     if (prefetch?.publicListing && !strictReadErrors && mode === "DETAIL") {
       const listing = await prefetch.publicListing(a);
       if (!listing) throw notFound();
-      return listing;
+      return (await attachLegacyPathImages(client, [listing]))[0]!;
     }
-    return listingDetail(client, a, "public", gate, "public", a, strictReadErrors, mode, prefetch);
+    const listing = await listingDetail(client, a, "public", gate, "public", a, strictReadErrors, mode, prefetch);
+    return (await attachLegacyPathImages(client, [listing]))[0]!;
   }
   if (mode === "RENTABLE") throw notFound();
-  return readLegacyListing(client, a.id, admission, detailIndex);
+  const listing = await readLegacyListing(client, a.id, admission, detailIndex);
+  return (await attachLegacyPathImages(client, [listing]))[0]!;
 }
 /** Display-only fallback from the same sealed declaration; never changes the stored quote or its hash. */
 export function publicDepositProjection(quote: unknown, declaration: unknown): { tenantDeposit: ReturnType<typeof yuanAmountObject>; tenantPayableTotal: ReturnType<typeof yuanAmountObject> | null } | null {
@@ -2045,7 +2076,8 @@ export async function listingDetail(
       fullPayoutSelected,
       presentation,
       quote,
-      availability: { state: availability },
+      feeDisplay: publishedListingFeeDisplay(quote),
+      availability: { state: availability, reason: publicAvailabilityReason(availability, blockers) },
       canCreateOrder: availability === "RENTABLE",
       publishedAt: publication?.published_at?.toISOString() ?? null,
       media: publicMedia.map((m) => ({
@@ -2123,6 +2155,7 @@ export async function listingDetail(
       ...(v.origin === "LEGACY_OBSERVATION" ? { legacySkinHolding: await readLegacySkinHolding(client, a.id, v.id, a.game_id, v.origin) } : {}),
       presentation,
       quote,
+      feeDisplay: publication ? publishedListingFeeDisplay(quote) : null,
     },
     available: !blockers.length,
     blockers,

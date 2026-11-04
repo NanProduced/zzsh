@@ -150,7 +150,7 @@ export function LoginTwoFactorPanel({
         ) : null}
       </div>
       <div className="facts-grid">
-        <div><span>当前设置</span><strong>{typeof required !== "boolean" ? "服务端未接入" : required ? "登录时验证" : "登录时不验证"}</strong></div>
+        <div><span>当前设置</span><strong>{typeof required !== "boolean" ? "暂未提供" : required ? "登录时验证" : "登录时不验证"}</strong></div>
       </div>
       {!available && typeof required === "boolean" ? <p className="text-xs text-muted-foreground">需先完成 2FA 绑定并激活账号后才能调整。</p> : null}
       {open && available ? (

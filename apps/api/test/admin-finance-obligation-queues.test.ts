@@ -9,7 +9,7 @@ const item = (overrides: Record<string, unknown> = {}) => ({ id: "POSTING:p1", n
   reasonCodes: ["NO_LOCAL_INTENT_DOES_NOT_PROVE_NO_BANK_REFUND"], ...overrides });
 const empty = (refund: boolean) => ({ count: "0", amount: "0", unknown_count: "0", overdue_count: refund ? "0" : null,
   overdue_amount: refund ? "0" : null, unknown_due_count: "0", items: [], sources: [] });
-function fixture(options: { refunds?: Record<string, unknown>; withdrawals?: Record<string, unknown>; ready?: { refunds: boolean; withdrawals: boolean } } = {}) {
+function fixture(options: { refunds?: Record<string, unknown>; withdrawals?: Record<string, unknown>; ready?: { refunds: boolean; withdrawals: boolean; production?: boolean } } = {}) {
   const calls: { sql: string; values?: unknown[] }[] = [];
   const client = { query: async (sql: string, values?: unknown[]) => {
     calls.push({ sql, values });
@@ -61,6 +61,15 @@ test("LOCAL_CONTROLLED and formal original reservations stay separate and have n
   assert.equal(q.withdrawals.amountCents, "1800"); assert.equal(q.withdrawals.overdueCount, null); assert.equal(q.withdrawals.overdueAmountCents, null);
   assert.equal(q.withdrawals.sources.length, 2); assert.ok(q.withdrawals.items.every(i => i.documentRef === null));
   assert.equal(q.withdrawals.bankArrival, "UNKNOWN");
+});
+
+test("production-only schema reads formal withdrawals without a synthetic queue", async () => {
+  const f = fixture({ ready: { refunds: false, withdrawals: true, production: true },
+    withdrawals: { ...empty(false), sources: [{ source: "JOINPAY_FORMAL", count: "0", unknownCount: "0", amountCents: "0" }] } });
+  const q = await readAdminFinanceObligationQueues(f.client, asOf, true);
+  assert.deepEqual(q.withdrawals.sources.map(s => s.source), ["JOINPAY_FORMAL"]);
+  assert.match(f.calls[1]!.sql, /zzsh_order\.joinpay_withdrawal_complete\(id\)/);
+  assert.doesNotMatch(f.calls[1]!.sql, /zzsh_order\.withdrawal_intent|LOCAL_CONTROLLED/);
 });
 
 test("even a FINANCE-labeled legacy source amount stays unknown until the original canonical verifier runs", async () => {

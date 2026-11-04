@@ -20,7 +20,8 @@ import { readAdminDistributionOrder, readAdminDistributionRelations } from '../s
 import { projectMyDistributionTerms, projectMyDistributionTermsV2 } from '../src/finance/invitation-store';
 import * as invitationStore from '../src/finance/invitation-store';
 import * as userIdentity from '../src/auth/user-identity';
-import { createPaymentDistributionStore } from '../src/finance/distribution-payment-store';
+import { createPaymentDistributionStore, estimatePaymentReferralBase } from '../src/finance/distribution-payment-store';
+import { prepareAccrualFromFrozenPayment, type CompletedDistributionFacts } from '../src/finance/distribution-accrual';
 import { prepareHistoricalObservation } from '../src/finance/personal-finance-read';
 
 const flat = { schema:'distribution-policy.v2',scope:'LOCAL_CONTROLLED',enabled:true,participation:'AUTO_AT_REGISTRATION',depth:1,selfRebate:false,accountModes:['ordinary','custom'],minimumAccrualCents:'1',settlementDelayDays:1,rateMode:'UNIFORM',renterPercent:'3',ownerPercent:'2' };
@@ -88,6 +89,64 @@ test('approved changes pin exact policy id/revision/digest and cannot alter othe
 function paymentInput(config:any,levelCode:string|null='OLD_GOLD'){
  return{orderId:'order_1',gameId:'game_1',currency:'CNY' as const,confirmationId:'payment_1',acceptedAt:'2026-10-26T08:00:00.000Z',paymentDigest:'a'.repeat(64),admissionId:'admission_1',admissionRevision:'1',origin:'NATIVE' as const,accountMode:'ordinary',estimate:{baseCents:'10000',sourceDigest:'b'.repeat(64)},policy:{versionId:'policy_1',digest:hash(config),config},facts:['RENTER_REFERRAL','OWNER_REFERRAL'].map((role,index)=>({role,partyUserId:'party_'+index,relation:{knowledge:'KNOWN_PARENT',id:'relation_'+index,childUserId:'party_'+index,parentUserId:'beneficiary_'+index,sourceDigest:'c'.repeat(64)},beneficiary:{userId:'beneficiary_'+index,active:true,eligibility:'ELIGIBLE',commissionFrozen:false,levelCode}}))} as any;
 }
+
+const legacyEffectiveConfig=validateDistributionPolicy({
+ ...legacy,schema:'distribution-policy.v3',enabled:true,settlementDelayDays:7,
+ levels:[1,10,20,30].map((rank,index)=>({code:'legacy_'+(index+1),rank,default:index===0,renterPercent:index%2?'30':'20',ownerPercent:index%2?'30':'20',upgrade:null})),
+ legacySource:{receiptSha256:'a'.repeat(64),configurationSha256:'b'.repeat(64),levelsSha256:'c'.repeat(64),levelNames:{legacy_1:'青铜会员',legacy_2:'白银会员',legacy_3:'黄金会员',legacy_4:'秋水'}},
+});
+
+test('reviewed legacy initial request binds scope, level names and rates and cannot switch to uniform through a state change',()=>{
+ const input=parseDistributionPolicyChange({schema:'distribution-policy-initialize.v2',config:legacyEffectiveConfig,reason:'承接原档位'}) as DistributionPolicyInitial;
+ assert.deepEqual(initialDistributionPolicyConfig(input,'LOCAL_CONTROLLED'),legacyEffectiveConfig);
+ assert.throws(()=>initialDistributionPolicyConfig(input,'NATIVE'));
+ const effectiveHead={...head,digest:hash(legacyEffectiveConfig),config:legacyEffectiveConfig};
+ const proposal={...change(),expectedPolicyDigest:effectiveHead.digest,changes:{enabled:false}};
+ assert.deepEqual(prepareDistributionPolicyChange(effectiveHead,proposal),{...legacyEffectiveConfig,enabled:false});
+ assert.throws(()=>prepareDistributionPolicyChange(effectiveHead,{...proposal,changes:{enabled:false,renterPercent:'20'}}));
+});
+
+test('old purchase and listing goldens are reproduced from frozen grades and actual completed residual',()=>{
+ const sourceGoldens=[
+  ['RENTER_REFERRAL','legacy_3','2800','560'],
+  ['RENTER_REFERRAL','legacy_4','36100','10830'],
+  ['OWNER_REFERRAL','legacy_3','6760','1352'],
+  ['RENTER_REFERRAL','legacy_2','18080','5424'],
+  ['OWNER_REFERRAL','legacy_1','9860','1972'],
+  ['OWNER_REFERRAL','legacy_2','4940','1482'],
+ ];
+ for(const [role,level,base,amount] of sourceGoldens){
+  const input=paymentInput(legacyEffectiveConfig,level);
+  const posting:CompletedDistributionFacts={origin:'NATIVE',orderId:input.orderId,confirmationId:input.confirmationId,postingId:'post_1',postingDigest:'a'.repeat(64),
+   postedAt:'2026-11-03T08:00:00.000Z',classification:'NORMAL',calculationMode:'SYSTEM',capturedCents:(BigInt(base!)+20000n).toString(),
+   ownerNetCents:'16000',renterRefundCents:'4000',platformContributionCents:base!,compensationFeeCents:'100'};
+  const basis=freezePaymentDistributionBasis(input),result=prepareAccrualFromFrozenPayment(basis,posting);
+  assert.equal(result.knowledge,'KNOWN');
+  assert.equal(result.baseCents,base);
+  assert.equal(result.items.find(item=>item.role===role)?.amountCents,amount);
+  assert.equal(result.items[0]?.dueAt,'2026-11-10T08:00:00.000000Z');
+  input.facts[0].beneficiary.levelCode='legacy_2';
+  input.facts[0].relation.parentUserId='changed_after_first_payment';
+  assert.deepEqual(prepareAccrualFromFrozenPayment(readOriginalPaymentDistributionBasis(basis,input).basis,posting),result);
+  assert.throws(()=>prepareAccrualFromFrozenPayment(basis,{...posting,origin:'LEGACY_MYSQL'}));
+  assert.equal(prepareAccrualFromFrozenPayment(null,posting).knowledge,'UNKNOWN');
+ }
+});
+
+test('old first payment uses Haff spread alone and retains skip and cancellation behavior',()=>{
+ const quote={platformFullProfit:{currency:'CNY',unit:'yuan',scale:2,amount:'50.00'},lines:[
+  {pricingKind:'HAFF_RATIO',unit:'HAFF_BASE',platformAmount:{currency:'CNY',unit:'yuan',scale:2,amount:'30.00'}},
+  {pricingKind:'FIXED_UNIT',unit:'ROUND',platformAmount:{currency:'CNY',unit:'yuan',scale:2,amount:'20.00'}},
+ ]};
+ assert.equal(estimatePaymentReferralBase(quote,true)?.baseCents,'3000');
+ assert.equal(estimatePaymentReferralBase(quote,false)?.baseCents,'5000');
+ assert.equal(estimatePaymentReferralBase({...quote,lines:[quote.lines[1]]},true),null);
+ const input=paymentInput(legacyEffectiveConfig,'legacy_1');
+ input.facts[0].beneficiary.commissionFrozen=true;
+ assert.equal(freezePaymentDistributionBasis(input).roles.find(r=>r.role==='RENTER_REFERRAL')?.status,'SKIPPED_INELIGIBLE');
+ input.accountMode='fast';
+ assert(freezePaymentDistributionBasis(input).roles.every(r=>r.status==='SKIPPED_FAST'));
+});
 test('uniform new payment ignores historical grade while preserving qualification and existing basis',()=>{
  const config=validateDistributionPolicy(flat),basis=freezePaymentDistributionBasis(paymentInput(config));
  assert(basis.roles.every(r=>r.status==='ELIGIBLE'&&r.levelCode===null));assert.deepEqual(basis.roles.map(r=>r.percent).sort(),['2','3']);

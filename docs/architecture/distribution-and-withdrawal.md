@@ -2,11 +2,11 @@
 
 支付、退款、真实银行卡提现及新旧资金承接的共同口径见[支付与资金领域规格](payments-and-funds.md)。本页维护分销计算、显式准入装配与本地受控边界，不代替正式渠道准入。
 
-新政策使用 `distribution-policy.v2` 的 `UNIFORM` 模式，分别配置租客来源和号主来源两个统一比例，不再按等级编辑。运营提交冻结变更，经有资格的 Boss 审批后执行；直接 PUT 不再用于管理端改政策。经营比例须明确给出，不从海报、历史等级或测试示例推导。旧 `distribution-policy.v1` 和已冻结依据保留兼容，最低提现额仍与计佣规则分开。
+旧平台租赁分销承接使用 `distribution-policy.v3`。首版审批冻结源配置、档位原件摘要与有效比例，批准后执行指定 scope 的新版本。购买佣金取租客直属上级的档位 `first_ratio`，上架佣金取号主直属上级的档位 `second_ratio`。两类受益人均为直属上级。独立任务入口及 `self_ratio` 不进入租赁计算。旧 v1 分级与 v2 统一政策依据按各自冻结版本读取，最低提现额仍与计佣规则分开。
 
 租客和号主分别通过自己的直属 `DISTRIBUTION_LEADER` 确定受益人；v2 按受益角色使用统一比例，旧 v1 依据继续使用原受益人等级。注册 `INVITER` 与分销上级分别保存，登录不重写注册来源。新 v2 关闭只停止新首款计佣，不删除合法关系或改写既有依据、计提和责任；旧结构上的 v1 注册/绑定保留原准入规则，避免源码先部署时破坏原约束。当前只支持一层、禁止自身上级，ordinary/custom 可配置，fast 不计佣。最低计佣额与最低提现额互不替代。
 
-付款原事务冻结政策版本、关系、受益人资格和比例。付款估算基数为 quote 的 platformFullProfit；最终佣金按不可变结算 posting 的 `platformContributionCents - compensationFeeCents` 计算，HALF_UP 到分，两角色总额不得超过该基数。不是订单支付总额的 5%。已有 APPLIED 付款只读原冻结依据；缺失保持 `MISSING_ORIGINAL_BASIS`，不能换政策追补。历史佣金观察和旧钱包期初不生成新佣金。
+付款原事务冻结政策版本、关系、受益人资格和比例。v3 首付取冻结报价的全量哈夫价差并以 1 分为计佣门槛，完成时按原结算过账的实付减号主实结及租客应退重算，成熟时间为完成后七天。v1/v2 继续使用全报价平台价差估算及 `platformContributionCents - compensationFeeCents` 最终基数。两类基数均 HALF_UP 到分，合计不超过基数。已应用付款只读原冻结依据，缺失保留 `MISSING_ORIGINAL_BASIS`。历史佣金观察和钱包期初不生成新佣金。
 
 本人收益详情的 v2 投影可返回本笔冻结的分销比例、受益等级、政策版本、计佣口径与舍入说明；不公开计佣基数、平台贡献或补偿费数值。来源订单公开号仅对该订单的租客或号主本人可见，收益受益人身份本身不增加订单读取权。原依据缺失或不一致保持未知，历史观察未记录的比例不按当前政策倒算。Web 用稳定收益记录 ID 定位详情，刷新与浏览器历史恢复仍按当前登录主体重新授权。
 
@@ -28,7 +28,7 @@
 
 汇聚产品与联调必须按[官方凭据边界](https://github.com/Joinpay-Official/hj-payment-skills/blob/main/hj-joinpay-pay-shared-base/governance/credential-boundary.md)及实际商户开通范围核定，不能只凭域名判断为无资金沙盒。公共技术测试账号只支持收款签名验证，不能外推退款、代付、压测或真实收款许可。本地受控结果不是汇聚或银行到账验收。
 
-## 管理读取与统一政策准入
+## 管理读取与政策准入
 
 分销管理将当前政策、订单佣金和邀请关系分开读取，均按实际对象权限与来源核对。计提事件、入账事件和回退记录不相加成重复收益；可入账时点不称为已结算日期。历史观察不冒充当前钱包或渠道到账。
 
@@ -48,14 +48,14 @@ v2 UNIFORM、支付依据推导和NATIVE账本/冲回scope要求目标已安装0
 
 ## 旧关系与旧佣金承接
 
-旧 `inviter_id` 迁为 `INVITER`，旧直属上级迁为 `DISTRIBUTION_LEADER`，两者可同一人但类型不合并；`second_leader`/`third_leader` 只作历史对照，不生成新计佣边。旧已结算佣金只随钱包期初承接并标记已覆盖，不再按新政策计提；旧已失效（VOID/失效状态）保持只读，不复活；旧待结算必须逐笔核父单仍完成、原受益人/原比例/原基数与父单证据，再按原责任显式入账，不能用切换日重算到期或新比例追补。旧等级和 5/10/20/30 比例仅作历史显示，不能成为新政策默认值。旧聚合在其最新源副本导入并逐域对账前只是观察，不是当前钱包或渠道到账事实。
+旧 `inviter_id` 迁为 `INVITER`，旧直属上级迁为 `DISTRIBUTION_LEADER`，两者可同一人但类型不合并。更高层关系保留历史对照。旧已结算佣金随钱包期初承接，旧已失效记录保留原状态。旧待结算必须逐笔核原受益人、比例、基数、完成时间及父单，再按原责任显式入账。每笔历史比例独立保存，当前 v3 档位来自冻结的有效配置。旧聚合仍按来源及对账状态标识覆盖范围。
 
 | 旧源 | 目标 | 规则 |
 | --- | --- | --- |
 | `la_user.inviter_id` | `invitation_relation(INVITER, source_type=LEGACY_MYSQL)` | 只表达注册来源；与分销上级分开，同人也不合并 |
 | `la_user.first_leader` | `invitation_relation(DISTRIBUTION_LEADER)` | 唯一计佣边；原父非零但未映射时拒绝，不补建 |
 | `second_leader`/`third_leader`/`ancestor_relation` | 不迁计佣边 | 只留历史对照；新平台一层 |
-| `la_distribution.level_id` | `distribution_participant.level_code` | 仅历史等级；v2 不读等级 |
+| `la_distribution.level_id` | `distribution_participant.level_code` | 原档位保留。经原审计与生效 v3 配置核验后，以稳定 `legacy_<id>` 准入；v2 计算不读档位 |
 | `la_distribution.is_freeze`/`is_distribution`/`is_delete` | `commission_frozen`/`eligibility` | 冻结、资格和删除分别映射；未知不冒充资格 |
 | `la_distribution_order.status=2` | `personal_finance_observation(HISTORICAL_DISTRIBUTION)` + 期初 covered | 已入账只承接一次；不再新增佣金，不按新比例重算 |
 | `status=1` 待结 | 原责任逐笔核验后显式入账 | 需父单完成、原受益人/比例/基数/原到期证据；不进 `settleDue` 的新 PENDING |
@@ -69,6 +69,8 @@ v2 UNIFORM、支付依据推导和NATIVE账本/冲回scope要求目标已安装0
 v2/NATIVE 结构必须作为一个前向包安装：政策 v2 形状/guard、按 scope 的 head 锁、UNIFORM 支付依据推导、participant v1/v2 约束与 trigger、NATIVE 分录/冲回 scope、`distribution_policy_contract_version()=2`。0121–0123须在同一迁移事务应用；函数标记只在同包成功后存在，runtime EXECUTE由公共`applyRuntimePrivileges`步骤授予，随后`configureDistributionFinancialPrivileges`收敛财务权限；有效权限仍须实库读回。v2 `levels=[]`、`level_code=null` 合法；v2 disabled 只停止新首款计佣，注册资格仍为 `ELIGIBLE`，旧 v1 的 disabled→`INELIGIBLE` 语义不变。注册必须引用其 scope 的当前不可变 head，旧头或伪造新生 proof 拒绝；后续仅更新上级关系知识/版本时保留原注册政策，实际更换政策来源才重新校验当前头。
 
 空 NATIVE 政策的首版由显式 `distribution-policy-initialize.v1` 审批发起：完整填写两类比例、租赁方式、最低计提、结算期限和原因，经独立 Boss 审批后在同一执行事务插入 revision 1 与 head。它不接受伪造的 `expectedPolicyId`/正 revision，不灌 5% 或旧等级。Admin 政策页在 `knowledge=UNKNOWN` 且结构/审批就绪时显示首版表单；未就绪保持只读。首版初始化载荷当前未冻结LOCAL/NATIVE scope；有待决初始化申请时不得切换装配范围，跨scope须先处置旧申请并重新发起。此限制未作运行时完整验收，不能据首版表单存在就开放正式政策。
+
+迁移租赁策略使用 `distribution-policy-initialize.v2`，审批载荷同时冻结完整 v3 配置与 scope。前向结构就绪后执行首版，现有 head 仍须走变更合同。经批准的旧资格转换以原审计、政策摘要、参与者修订及来源摘要校验，只更新参与资格、档位和政策引用。
 
 漏计提发现按 `(posted_at,id)` 稳定 keyset 向旧分页，返回 `nextCursor`；管理端必须能继续检查更早记录。COMPLETE/SKIPPED/UNKNOWN/CONFLICT 均占扫描页但不隐藏旧 MISSING；没有下一页不等于没有漏计提，新单需从最新重查。到期与重放命令共用一个维护键空间（`[actor, userId, 'distribution.maintenance', null]` + `requestId`），持久保存原命令快照 `command{limit|orderIds,games}`、原 earningIds/versions 或 orderIds、参数指纹与状态回执：指纹包含 operation，因此同一键换 operation 或换参数一律 409，读取也不会挑到另一操作的批次。计划与执行在同一次持锁内完成，不留重规划窗口；每根仍是该连接上的独立事务，外层批次回执不承诺回滚已提交的内层钱。若 ROLLBACK 未确认，立即停止该连接上的回执保存与后续事务并销毁连接；原计划保留，另连接只按原键恢复，不能借下一次 COMMIT 结束未知旧事务。`POST` 走原命令、`resumeBatch` 只按原键读原计划（不重算 limit、不重挑下一批），UNKNOWN 后必须走这两条路之一。`GET /maintenance/orders/:orderId` 与 `GET /maintenance/batches/:key` 成功读取均为 HTTP 200，原执行状态保留在 `httpStatus`；批次读取在同一事务内按当前游戏范围逐个复核计划中的订单/收益根，范围被收回即 `FORBIDDEN`，不返回旧计划。批次回执的 `command` 允许页面在重载后用同一 `requestId` 精确重建原 body。
 

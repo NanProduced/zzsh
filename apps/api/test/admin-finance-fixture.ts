@@ -36,6 +36,7 @@ export class FinanceSqlFixture {
     this.table("zzsh_order.controlled_payout_operation", "id final_evidence_digest", data.operations??[]);
     this.table("zzsh_order.wallet_revision", "user_id ledger_revision read_revision", []);
     this.table("zzsh_order.wallet_coverage", "user_id origin basis_id opening_event_id coverage_version", []);
+    this.table("zzsh_order.finance_observation_admission", "user_id legacy_user_id basis_id source_system source_entity source_id source_digest source_event_at included_in_opening", []);
     this.table("zzsh_order.finance_opening_basis", "id user_id source_kind source_system source_entity source_id source_digest identity_source_digest covered_set_digest source_cutoff available_cents covered_count native_origin_canonical", []);
     this.table("zzsh_order.finance_economic_root", "id basis_id subject_user_id source_kind source_type source_system source_entity source_id beneficiary_role source_digest policy_version", []);
     this.table('zzsh_order.finance_event','id economic_root_id kind subject_user_id created_at',data.financeEvents??[]);
@@ -43,7 +44,7 @@ export class FinanceSqlFixture {
     this.table('zzsh_order.legacy_duty_finance_fact','duty_id order_id kind subject_user_id root_id event_id amount_cents zero_finalization facts_canonical facts_digest ref_type ref_id created_at',data.legacyDutyFacts??[]);
     this.table('zzsh_order.legacy_order_duty','id order_id kind source_record_id counterparty_user_id amount_cents currency source source_status continuation_version_id admission_id revision status maturity_at settled_by settled_ref_type settled_ref_id settled_ref_digest',data.legacyDuties??[]);
     this.db.exec(`CREATE VIEW zzsh_order.settlement_ledger_entry AS SELECT id,account_code,counterparty_user_id,credit_cents,debit_cents,posting_id,finance_event_id,details,created_at FROM fixture_ledger`);
-    this.db.exec(`CREATE VIEW zzsh_order.personal_finance_observation AS SELECT id,subject_id AS user_id,basis_id,source_system,source_entity,source_id,source_digest,extra_evidence->>'canonical' AS source_canonical,extra_evidence->>'snapshot' AS snapshot,included_in_opening,at AS source_event_at,imported_at FROM fixture_history`);
+    this.db.exec(`CREATE VIEW zzsh_order.personal_finance_observation AS SELECT id,subject_id AS user_id,NULL AS legacy_user_id,basis_id,source_type,source_system,source_entity,source_id,source_digest,extra_evidence->>'canonical' AS source_canonical,extra_evidence->>'snapshot' AS snapshot,included_in_opening,at AS source_event_at,imported_at FROM fixture_history`);
     this.db.exec("COMMIT");
   }
   private table(name: string, columns: string, rows: Row[]) {
@@ -55,11 +56,15 @@ export class FinanceSqlFixture {
   query(sql: string, values: unknown[]):{rows:Record<string,any>[];rowCount:number} {
     if(sql.includes("AS finance_version"))return {rows:[{finance_version:this.sourceVersion(sql, values)}],rowCount:1};
     const base = (source: string) => source.replace(/\s+ORDER BY [lo]\.id COLLATE "C" LIMIT \$1\s*$/, "");
-    const text = sql.replaceAll(base(ADMIN_FINANCE_LEDGER_SQL), "SELECT * FROM fixture_ledger").replaceAll(base(adminFinanceLedgerSql(false)),"SELECT * FROM fixture_ledger")
+    const observation = base(ADMIN_FINANCE_OBSERVATION_SQL);
+    const typedSource = "SELECT o.* FROM (SELECT h.*,subject_id AS user_id,at AS source_event_at,extra_evidence->'snapshot' AS snapshot FROM fixture_history h) o";
+    const text = sql.replace(observation + "\n    WHERE o.source_type=", typedSource + "\n    WHERE o.source_type=")
+      .replaceAll(base(ADMIN_FINANCE_LEDGER_SQL), "SELECT * FROM fixture_ledger").replaceAll(base(adminFinanceLedgerSql(false)),"SELECT * FROM fixture_ledger")
       .replaceAll(base(ADMIN_FINANCE_LOOKUP_OBSERVATION_SQL),"SELECT "+HISTORY_COLUMNS.split(' ').map(c=>c==='extra_evidence'?"extra_evidence->'snapshot' AS extra_evidence":c).join(',')+" FROM fixture_history")
       .replaceAll(base(ADMIN_FINANCE_OBSERVATION_SQL), "SELECT * FROM fixture_history")
       // SQLite has no LATERAL. The same correlated receipt proof is grouped against the fixture's exact earning root.
       .replace(/LEFT JOIN LATERAL \(SELECT([\s\S]*?)\) accrual ON TRUE/g,(_,body:string)=>`LEFT JOIN (SELECT t.earning_id,${body.replace('FROM zzsh_order.rental_referral_transition t LEFT JOIN','FROM zzsh_order.rental_referral_transition t LEFT JOIN zzsh_order.rental_referral_earning origin_e ON origin_e.id=t.earning_id LEFT JOIN').replace("WHERE t.earning_id=e.id AND t.action='ACCRUE'","WHERE t.action='ACCRUE' GROUP BY t.earning_id").replace(/\be\./g,'origin_e.')}) accrual ON accrual.earning_id=e.id`)
+      .replace(/SELECT \* FROM unnest\((\$\d+)::text\[\],(\$\d+)::text\[\]\)/g, "SELECT a.value,b.value FROM json_each($1) a JOIN json_each($2) b ON a.key=b.key")
       .replace(/=ANY\((\$\d+)::text\[\]\)/g, " IN(SELECT value FROM json_each($1))")
       .replace(/([\w.]+|\$\d+)::timestamptz/g, "julianday($1)")
       .replace(/::text\b/g, "")
@@ -81,17 +86,18 @@ export class FinanceSqlFixture {
     if(sql.includes("pg_current_snapshot()"))return "pg-snapshot-v2:"+md5("fixture-db:"+this.clusterSnapshot);
     const relations=[...sql.matchAll(/FROM \((SELECT[\s\S]*?)\) v/g)].map(match=>match[1]!);
     if(!relations.length)throw Error("Unrecognized source-version SQL");
+    const prelude = sql.startsWith("WITH ") ? sql.slice(0, sql.indexOf("SELECT md5(concat_ws")).trimEnd() + " " : "";
     const bindings = Object.fromEntries(values.map((value, index) => ["$" + (index + 1), Array.isArray(value) ? JSON.stringify(value) : value as string | number]));
     // The real generated SELECTs determine membership and fields; PG JSONB serialization/cost remain NOT_RUN.
     return md5(relations.map(relation=>{
-      let text=relation.replace(/::text\b/g,"");
+      let text=(prelude+"SELECT * FROM ("+relation+") version_rows ORDER BY id").replace(/::text\b/g,"").replaceAll("jsonb_build_array(","json_array(");
       // PG whole-row JSON binds every fixture intent column; adapt its syntax, not its membership.
       if(text.includes('to_jsonb(i)')){
         const columns=this.db.prepare('PRAGMA zzsh_order.table_info(channel_refund_intent)').all().map(row=>String(row.name));
         text=text.replaceAll('to_jsonb(i)','json_object('+columns.map(c=>"'"+c+"',i.\""+c+"\"").join(',')+')');
       }
       const used=Object.fromEntries(Object.entries(bindings).filter(([name])=>text.includes(name)));
-      const rows=this.db.prepare('SELECT * FROM ('+text+') version_rows ORDER BY id').all(used);
+      const rows=this.db.prepare(text).all(used);
       return md5(rows.map(row=>md5(JSON.stringify(Object.fromEntries(Object.entries(row).sort(([a],[b])=>a<b?-1:a>b?1:0))))).join(""));
     }).join("|"));
   }

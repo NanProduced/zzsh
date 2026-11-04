@@ -1,35 +1,17 @@
 # 业务数据库新装基线
 
-`apps/api/migrations/initial/release_0151/` 是冻结业务迁移0000–0151的中文新装基线，由真实空目标安装152份原链后导出，并与原链的结构、种子、序列及有效ACL逐项核验一致。`release_0141/` 保持原字节，继续支持已装旧基线升级。四段分别保存最终结构、必要静态种子、约束/索引/触发器和原PUBLIC权限；runtime权限继续调用统一的`applyRuntimePrivileges`，不在SQL里绑定本机角色。
-
-原`migrations/business` SQL和journal不改写。已有canonical库仍按原链升级；新装initial库只记一条明确的baseline记录，后续接canonical增量。baseline的manifest逐项绑定所覆盖源SQL和时间、四段文件及组合hash；任何漂移拒绝。不能为已有私有分叉库补造baseline或历史执行记录。
-
-initial段内可能保留已安装函数正文的CRLF，`.gitattributes`对这些SQL禁用换行转换；不能通过编辑器或Git规范化破坏manifest校验。新版本继续以原始UTF-8字节封签。
-
-使用既有migration profile和独立DDL/runtime身份，在确认目标业务schema为空后执行：
+生产空库使用 `apps/api/migrations/initial/release_production_0153/`，覆盖 canonical 0000–0153。它由空库安装原链后生成，保留业务结构、静态种子、约束和权限。所有业务表和有效列，以及业务版本账，都有数据库目录中的中文 `COMMENT`。安装前先确认目标业务 schema 为空，并使用已有 migration profile 的独立 DDL 与 runtime 身份：
 
 ```sh
-npm run migrate:business -w @zzsh/api -- --initial
+npm run migrate:business -w @zzsh/api -- --initial --baseline release_production_0153
 ```
 
-兼容默认值仍选择registry的`active=release_0141`；显式安装152份覆盖的新基线：
+四个 SQL 段依次安装结构、必要静态种子、约束和触发器、PUBLIC 权限。runtime 窄权由 `applyRuntimePrivileges` 安装。manifest 校验源迁移、覆盖前缀、各段及组合的原始字节；保留函数正文的换行，不格式化已封签的 SQL。
 
-```sh
-npm run migrate:business -w @zzsh/api -- --initial --baseline release_0151
-```
+生产投影省略已下线的管理工作台布局、纯本地模拟支付声明、退款沙箱、模拟提现及其辅助对象，也不安装独立的 `zzsh_meta` 测试元数据。保留 `zzsh_business_meta.migrations` 业务版本账、正式汇聚收款／退款／出款、绑卡、钱包及旧来源和审计。通用 `payment_channel_observation` 保留作兼容观察读取，生产约束仅接受未验证的汇聚观察；正式收款观察保存在 `joinpay_collection_observation`，任何单条观察均不代表已收款或到账。
 
-再次迁移时无需重复指定initial，runner识别已安装baseline并校验其精确前缀，再执行覆盖截点之后的原编号增量。原链目标不用`--initial`；错误历史、非空未登记目标、源SQL/种子/manifest漂移均拒绝，不删表重装。
+已装 `release_0141`、`release_0151` 或原 canonical 的库按原版本账接后续编号迁移；原文件与哈希不变。生产 initial 只记一条明确的基线和后续增量，不补造覆盖历史，也不用于删表重灌。以后正常迁移无需重复传 `--initial`。空库使用初始安装时显式选基线；仅用 `--initial` 仍由 registry 的兼容默认值决定。
 
-基线生成工具`node scripts/migration/build-business-initial.mjs --plan`默认零连接。实际生成只允许已登记的空业务回归资源、准确OID、正式完整链和只读一致快照；发现非静态业务数据即拒绝，防止把用户、令牌或业务记录打包进Git。维护密码只从进程引用读取，不进入SQL文件或前端。
+本地受控渠道测试使用登记的独立测试资源，按其原 canonical 链或 `--initial --baseline release_0151` 新装，并使用已有受控资源准入。不要将测试辅助对象、模拟凭据或事实迁入生产基线。此路径的受控成功也不代表真实渠道或银行到账。
 
-后续生成必须显式给新`--baseline`名称及已冻结的`--source-count`，目标目录已存在即拒绝，不覆盖`release_0141`或任何已记账文件。中文版本由生成器写入总说明、四段用途和七个schema的模块导览；保留原依赖顺序及函数体，不用注释改造重排SQL。需要写入数据库的对象`COMMENT`应先作为canonical前向迁移，再随新基线导出，保证原链与新装的元数据也一致。新的中文基线在真实等价验证及维护者选择前不自动代替当前版本；已装旧baseline继续沿其原hash承接后续增量。
-
-`release_0151` 由同一生成器覆盖冻结canonical 0000–0151。先设置本次回归复位的 `ZZSH_REGRESSION_RUN`，再执行 `node scripts/migration/build-business-initial.mjs --execute --oid <现场OID> --baseline release_0151 --source-count 152`；OID、nonce与marker须现场匹配。目标目录已存在则拒绝，不覆盖 `release_0141`。生成结果含四段SQL、`NAVIGATION.md`、`README.md` 和绑定152份源SQL、journal字节与各段hash的manifest。中文说明是SQL行注释和导航；不在initial里新增数据库 `COMMENT`。
-
-manifest保留生成时完整journal字节hash，并单独绑定覆盖前缀的全部journal字段。未来追加原编号迁移时，仍逐项核覆盖前缀与原SQL；不要求追加后的完整journal字节hash等于旧截点。0151新增的头像审核策略只接纳canonical默认单例（须人工审核、revision=1、无修改管理员）；用户、会话、经营改值或资源准入行不属于种子。
-
-registry的`active`保持`release_0141`，`supported`包含0141和0151。已装`release_0141`的库即使请求0151也拒绝换基线，继续按已安装hash承接0142及之后的原编号增量；原角色、种子和历史安装时间保留。canonical库不带`--initial`时仍按原链升级。一条baseline记账不是152次历史执行。
-
-在空canonical回归库完成原链安装、initial安装和未放宽的结构/种子/ACL比较之前，`release_0151` 不得标为已验收，也不得改成默认基线。
-
-更新基线须重新核验原链和initial新装的表/有效列顺序、类型/default/identity/generated、约束和函数体、触发器、索引、种子逐行内容、序列和有效ACL，以及关键业务行为。物理DROP COLUMN遗留attnum空洞与新表压缩不是业务列序变化，原始目录快照需保留；不剥括号或放宽表达式比较。新装等价不代替已有数据升级、真实旧数据转换或渠道验收。
+`node scripts/migration/build-business-initial.mjs --plan` 不连接数据库。生产导出需 `--execute --production --source-db <登记的临时生成库> --oid <现场OID> --baseline <新版本> --source-count <冻结迁移数>`，并绑定准确 marker、nonce 和维护锁。生成器只读空业务库的同一快照，仅允许固定的静态种子；发现业务数据、缺失中文注释或混入排除对象即拒绝。发布前比较原链与生产投影的有意差集、投影与新装的结构和有效权限，以及已装旧基线的升级路径。目录和安装验证不替代真实旧数据转换或渠道验收。

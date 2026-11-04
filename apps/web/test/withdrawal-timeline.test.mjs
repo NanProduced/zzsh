@@ -42,14 +42,15 @@ test('a source snapshot change on continuation rejects instead of merging incons
   assert.deepEqual(first.items.map(item => item.id), ['history:1']);
 });
 
-test('timezone and microseconds are parsed without rounding; same-millisecond records are flagged', async () => {
+test('orders sub-millisecond records by exact time, then breaks exact ties by ID', async () => {
   assert.equal(withdrawalTimeMicros('2026-10-30T08:00:00.123456+08:00') - withdrawalTimeMicros('2026-10-30T00:00:00.123000Z'), 456n);
   assert.throws(() => withdrawalTimeMicros('invalid'), /WITHDRAWAL_TIME_INVALID/);
   assert.throws(() => withdrawalTimeMicros('2026-02-30T00:00:00.000Z'), /WITHDRAWAL_TIME_INVALID/);
   const state = await advanceWithdrawalTimeline(emptyWithdrawalTimeline(), async source => ({ ...snapshot,
     items: source === 'HISTORICAL' ? [{ source, id: 'history:1', at: '2026-10-30T00:00:00.123456Z' }]
-      : source === 'LOCAL_CONTROLLED' ? [{ source, id: 'controlled:1', at: '2026-10-30T00:00:00.123Z' }] : [], cursor: null }));
-  assert.equal(state.items.length, 2);
+      : source === 'LOCAL_CONTROLLED' ? [{ source, id: 'controlled:1', at: '2026-10-30T08:00:00.123789+08:00' }]
+      : [{ source, id: 'joinpay:1', at: '2026-10-30T00:00:00.123456Z' }], cursor: null }));
+  assert.deepEqual(state.items.map(item => item.id), ['controlled:1', 'joinpay:1', 'history:1']);
   assert.equal(state.temporalTies, true);
 });
 

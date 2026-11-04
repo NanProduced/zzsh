@@ -1,3 +1,4 @@
+import { prepareLocalFundsPlan, assertFundsWriterCoverage,continuationCommissionEffects } from "./local-funds-plan.mjs";
 import { createHash } from "node:crypto";
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
@@ -13,34 +14,49 @@ function freezePhase(ctx, name, rows) { ctx.state.generatedPhases ??= {}; const 
         throw new Error("PREPARED_PHASE_SHA_CHANGED");
     return JSON.parse(bytes);
 } const bytes = JSON.stringify(rows); writeFileSync(file, bytes, { flag: "wx" }); ctx.state.generatedPhases[name] = { file, sha256: sha(bytes), rows: rows.length }; ctx.save(); return rows; }
-async function facts(ctx, legacyIds) { const { client, actor } = ctx; const parents = (await client.query(`SELECT legacy_id AS "legacyId",id AS "parentOrderId",source_digest AS "sourceDigest",binding_digest AS "bindingDigest",source_snapshot AS "sourceSnapshot",to_char(source_completed_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "sourceCompletedAt",owner_user_id AS "ownerUserId",renter_user_id AS "renterUserId",account_id AS "accountId",deposit_amount_cents::text AS "depositAmountCents" FROM zzsh_order.legacy_order_read_snapshot WHERE legacy_id=ANY($1::text[])`, [legacyIds])).rows; const ids = parents.map(p => p.parentOrderId); const duties = (await client.query(`SELECT id,order_id AS "orderId",kind,source_record_id AS "sourceRecordId",amount_cents::text AS "amountCents",status,counterparty_user_id AS "counterpartyUserId",settled_by AS "settledBy",admission_id AS "admissionId" FROM zzsh_order.legacy_order_duty WHERE order_id=ANY($1::text[])`, [ids])).rows; const admissions = (await client.query(`SELECT id,duty_id AS "dutyId",order_id AS "orderId",admission_digest AS "admissionDigest" FROM zzsh_order.legacy_order_duty_admission WHERE order_id=ANY($1::text[])`, [ids])).rows; const heads = (await client.query(`SELECT order_id AS "orderId",revision::text FROM zzsh_order.legacy_continuation_version WHERE order_id=ANY($1::text[]) AND superseded_at IS NULL`, [ids])).rows; const operations = ["order.legacy.liability.import", "order.legacy.commission.completed-import", "order.legacy.continuation.import"]; const scopes = ids.flatMap(id => operations.map(op => JSON.stringify(["admin", actor.userId, op, id]))); const receipts = (await client.query('SELECT scope_key,key,request_fingerprint AS fingerprint,response_status AS "responseStatus" FROM zzsh_supply.idempotency_record WHERE scope_key=ANY($1::text[])', [scopes])).rows.map(row => { const [realm, principalId, operation, resourceId] = JSON.parse(row.scope_key); return { principalId, operation, resourceId, key: row.key, fingerprint: row.fingerprint, responseStatus: row.responseStatus }; }); const current = parents.map(parent => ({ orderId: parent.parentOrderId, readRef: "core-dataset:" + ctx.state.binding.oid + ":" + parent.parentOrderId, headRevision: heads.find(h => h.orderId === parent.parentOrderId)?.revision ?? null, depositAmountCents: parent.depositAmountCents, duties: duties.filter(d => d.orderId === parent.parentOrderId), admissions: admissions.filter(a => a.orderId === parent.parentOrderId), idempotency: { principalId: actor.userId, records: receipts.filter(r => r.resourceId === parent.parentOrderId) } })); return { parents, current }; }
+async function facts(ctx, legacyIds) { const { client, actor } = ctx; const parents = (await client.query(`SELECT legacy_id AS "legacyId",id AS "parentOrderId",source_digest AS "sourceDigest",binding_digest AS "bindingDigest",source_snapshot AS "sourceSnapshot",to_char(source_completed_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "sourceCompletedAt",owner_user_id AS "ownerUserId",renter_user_id AS "renterUserId",account_id AS "accountId",deposit_amount_cents::text AS "depositAmountCents" FROM zzsh_order.legacy_order_read_snapshot WHERE legacy_id=ANY($1::text[])`, [legacyIds])).rows; const ids = parents.map(p => p.parentOrderId); const duties = (await client.query(`SELECT id,order_id AS "orderId",kind,source_record_id AS "sourceRecordId",amount_cents::text AS "amountCents",status,counterparty_user_id AS "counterpartyUserId",settled_by AS "settledBy",admission_id AS "admissionId" FROM zzsh_order.legacy_order_duty WHERE order_id=ANY($1::text[])`, [ids])).rows; const admissions = (await client.query(`SELECT id,duty_id AS "dutyId",order_id AS "orderId",admission_digest AS "admissionDigest" FROM zzsh_order.legacy_order_duty_admission WHERE order_id=ANY($1::text[])`, [ids])).rows; const heads = (await client.query(`SELECT order_id AS "orderId",revision::text FROM zzsh_order.legacy_continuation_version WHERE order_id=ANY($1::text[]) AND superseded_at IS NULL`, [ids])).rows; const operations = ["order.legacy.liability.import", "order.legacy.commission.completed-import", "order.legacy.continuation.import"]; const scopes = ids.flatMap(id => operations.map(op => JSON.stringify(["admin", actor.userId, op, id]))); const receipts = (await client.query('SELECT scope_key,key,request_fingerprint AS fingerprint,response_status AS "responseStatus" FROM zzsh_supply.idempotency_record WHERE scope_key=ANY($1::text[])', [scopes])).rows.map(row => { const [realm, principalId, operation, resourceId] = JSON.parse(row.scope_key); return { principalId, operation, resourceId, key: row.key, fingerprint: row.fingerprint, responseStatus: row.responseStatus }; }); const revisions = new Map(heads.map(h => [h.orderId, h.revision]));
+    const dutiesByOrder = Map.groupBy(duties, d => d.orderId);
+    const admissionsByOrder = Map.groupBy(admissions, a => a.orderId);
+    const receiptsByOrder = Map.groupBy(receipts, r => r.resourceId);
+    const current = parents.map(parent => ({ orderId: parent.parentOrderId, readRef: "core-dataset:" + ctx.state.binding.oid + ":" + parent.parentOrderId, headRevision: revisions.get(parent.parentOrderId) ?? null, depositAmountCents: parent.depositAmountCents, duties: dutiesByOrder.get(parent.parentOrderId) ?? [], admissions: admissionsByOrder.get(parent.parentOrderId) ?? [], idempotency: { principalId: actor.userId, records: receiptsByOrder.get(parent.parentOrderId) ?? [] } })); return { parents, current }; }
 export async function applyFinancialDomains(ctx) {
+    if(!ctx.fundsSource||!ctx.refundAttemptsSource)throw new Error("EXACT_FINANCIAL_SUPPLEMENTS_REQUIRED");
     const { client, actor, mod, manifest, state } = ctx, preparation = mod("finance/legacy-finance-source-preparation"), canonical = mod("supply/content-hash").canonicalize;
+    const sourceCutoff=new Date(manifest.sourceCutoff).toISOString();
     const resource = { host: "127.0.0.1", port: 55432, database: "zzsh_test_regression", oid: Number(state.binding.oid), owner: state.resource.owner, marker: state.resource.marker, role: state.resource.role, roleOid: Number(state.resource.role_oid) };
-    const reviewCommon = { ref: "CORE_FULL_LEGACY_" + state.binding.oid, attempt: "dataset-" + state.binding.datasetSha256.slice(0, 16), actor: { userId: actor.userId, sessionId: actor.sessionId }, resource, notBefore: state.startedAt, expiresAt: new Date(Date.parse(state.startedAt) + 12 * 3600000).toISOString(), cutoff: manifest.sourceCutoff };
-    let history = state.generatedPhases?.financeHistory ? freezePhase(ctx, "financeHistory", []) : null;
-    if (!history) {
-        const groups = new Map();
-        for (const row of await arrayOf(ctx, "finance-observations")) {
-            const key = row.userId + ":" + row.kind;
-            if (!groups.has(key))
-                groups.set(key, { userId: row.userId, legacyUserId: row.legacyUserId, identityDigest: row.identityDigest, sourceKind: row.kind, domain: row.domain, rows: [] });
-            groups.get(key).rows.push(row.row);
-        }
-        history = [];
-        for (const group of groups.values()) {
-            const inputSha256 = manifest.files["finance-observations"].sha256;
-            try {
-                const input = preparation.prepareFrozenFinanceHistory({ subject: { userId: group.userId, legacyUserId: group.legacyUserId, identityDigest: group.identityDigest }, sourceKind: group.sourceKind, inputSha256, cutoff: manifest.sourceCutoff, sourceCount: group.rows.length, rows: group.rows, isolated: [] });
-                history.push({ sourceId: group.legacyUserId + ":" + group.sourceKind, input });
-            }
-            catch (error) {
-                state.quarantine.push({ domain: "financeHistory", sourceId: group.legacyUserId, sourceKind: group.sourceKind, code: error.code ?? "HISTORY_PREPARATION_REFUSED" });
-            }
-        }
-        history = freezePhase(ctx, "financeHistory", history);
-    }
+    const reviewCommon = { ref: "CORE_FULL_LEGACY_" + state.binding.oid, attempt: "dataset-" + state.binding.datasetSha256.slice(0, 16), actor: { userId: actor.userId, sessionId: actor.sessionId }, resource, ...(state.executionWindow ?? { notBefore: state.startedAt, expiresAt: new Date(Date.parse(state.startedAt) + 12 * 3600000).toISOString() }), cutoff: sourceCutoff };
+    const preparationStarted = performance.now(), fundsPlan = await prepareLocalFundsPlan(ctx);
+    const preparedMs = performance.now() - preparationStarted;
+    if (state.generatedPhases?.financeHistory && !state.fundsSupplement) throw new Error("FROZEN_V1_FINANCE_HISTORY_REQUIRES_SEPARATE_REVIEW");
+    const history = freezePhase(ctx, "financeHistory", fundsPlan.history);
+    const guarantees = freezePhase(ctx, "guaranteeHistory", fundsPlan.guaranteeHistory);
+    const emptyChunks=[];for(let i=0;i<fundsPlan.emptyHistory.length;i+=400){const rows=fundsPlan.emptyHistory.slice(i,i+400);emptyChunks.push({sourceId:'empty-'+sha(canonical(rows.map(r=>r.sourceId))).slice(0,40),rows});}
+    const empties=freezePhase(ctx,"financeEmptyCoverage",emptyChunks);
+    const coverage = assertFundsWriterCoverage(fundsPlan, history, guarantees,empties.flatMap(chunk=>chunk.rows));
+    const priorSupplement=state.fundsSupplement;
+    state.fundsSupplement = { executionProvenance:[...(priorSupplement?.executionProvenance??[]),{at:new Date().toISOString(),toolFiles:fundsPlan.binding.toolFiles,compiledModules:fundsPlan.binding.compiledModules,preparedMs,historyGroups:history.length,emptyGroups:fundsPlan.emptyHistory.length,emptyChunks:empties.length,guaranteeGroups:guarantees.length}],binding: priorSupplement?.binding??fundsPlan.binding, inputSha256: fundsPlan.inputSha256, refundAttemptCoverage:fundsPlan.refundAttemptCoverage,pendingCommissionCoverage:fundsPlan.pendingCommissionCoverage, coverage };
+    ctx.save();
+    await ctx.runItems("invitationFacts",await arrayOf(ctx,"invitation-facts"),async packet=>{
+        if(packet.input.policy!==null)throw new Error("SOURCE_INVITATION_POLICY_MUST_REMAIN_UNBOUND");
+        const module=mod("finance/legacy-invitation-facts-maintenance"),review={ref:reviewCommon.ref,attempt:reviewCommon.attempt,actor:reviewCommon.actor,resource:{...resource,ownerOid:Number(state.resource.owner_oid)},notBefore:reviewCommon.notBefore,expiresAt:reviewCommon.expiresAt,sourceDigest:sha(canonical(packet.input.source)),bodyDigest:packet.bodyDigest,phase:'IMPORT'};
+        const scope=await module.bindReviewedLegacyInvitationFacts(client,actor,review);
+        return module.importReviewedLegacyInvitationFacts(client,actor,packet.input,packet.bodyDigest,scope);
+    },1);
     await ctx.runItems("financeHistory", history, async (row) => { const input = row.input; const review = { ...reviewCommon, inputSha256: input.coverage.inputSha256, bodyDigest: sha(canonical(input)), userId: input.coverage.userId, sourceKind: input.coverage.sourceKind }; const module = mod("finance/personal-finance-observation-maintenance"); const scope = await module.bindReviewedFinanceObservationAdmission(client, actor, review); return module.importReviewedFinanceObservations(client, actor, input, scope); }, 20);
+    await ctx.runItems("financeEmptyCoverage",empties,async chunk=>{
+        const module=mod("finance/personal-finance-observation-maintenance"),inputs=chunk.rows.map(row=>row.input);
+        const reviews=inputs.map(input=>({...reviewCommon,inputSha256:input.coverage.inputSha256,bodyDigest:sha(canonical(input)),userId:input.coverage.userId,sourceKind:input.coverage.sourceKind}));
+        const scope=await module.bindReviewedEmptyFinanceObservationBatch(client,actor,inputs,reviews);
+        const result=await module.importReviewedEmptyFinanceObservationBatch(client,actor,inputs,scope);
+        return{...result.body,replayed:result.body.created===0};
+    },1);
+    await ctx.runItems("guaranteeHistory", guarantees, async row => {
+        const input=row.input, module=mod("finance/owner-guarantee-history-maintenance");
+        const {cutoff,...base}=reviewCommon;
+        const review={...base,userId:input.userId,inputSha256:input.inputSha256,bodyDigest:sha(canonical(input)),cutoff:input.cutoff,sourceCount:input.sourceCount};
+        const admission=await module.bindReviewedOwnerGuaranteeHistory(client,actor,review);
+        return module.importReviewedOwnerGuaranteeHistory(client,actor,input,admission);
+    },20);
     const continuations = await arrayOf(ctx, "continuations");
     let continuationRows = state.generatedPhases?.continuationEvidence ? freezePhase(ctx, "continuationEvidence", []) : null;
     if (!continuationRows) {
@@ -57,7 +73,7 @@ export async function applyFinancialDomains(ctx) {
                 state.quarantine.push({ domain: "continuationEvidence", sourceId: row.sourceId, code: "SOURCE_PARAMETERS_ISOLATED" });
                 continue;
             }
-            continuationRows.push({ sourceId: row.sourceId, body: { orderId: parent.parentOrderId, sourceDigest: parent.sourceDigest, sourceAsOf: micros(manifest.sourceCutoff), evidenceRef: manifest.sourceRef + ":continuation:" + row.sourceId, source: row.source, commissionEvidence: row.commissionEvidence } });
+            continuationRows.push({ sourceId: row.sourceId, body: { orderId: parent.parentOrderId, sourceDigest: parent.sourceDigest, sourceAsOf: micros(sourceCutoff), evidenceRef: manifest.sourceRef + ":continuation:" + row.sourceId, source: row.source, commissionEvidence: row.commissionEvidence } });
         }
         continuationRows = freezePhase(ctx, "continuationEvidence", continuationRows);
     }
@@ -85,7 +101,7 @@ export async function applyFinancialDomains(ctx) {
         const target = await facts(ctx, pending.map(row => row.parentLegacyOrderId));
         const parents = new Map(target.parents.map(p => [p.legacyId, p]));
         const identities = (await client.query("SELECT split_part(i.provider_reference,':',2) AS id FROM zzsh_iam.user_identity_state i WHERE i.provider='legacy_mysql_restore' AND EXISTS(SELECT 1 FROM zzsh_iam.audit_event a WHERE a.object_id=i.user_id AND a.action='user.legacy_owner.migrated' AND a.outcome='SUCCESS' AND a.details->>'legacyId'=split_part(i.provider_reference,':',2))")).rows.map(r => r.id);
-        const assembly = preparation.assembleLegacyCompletedCommissionBatch({ batchId: "full-commissions-" + state.binding.oid, cutoff: micros(manifest.sourceCutoff), parents: target.parents, current: target.current, verifiedBeneficiaries: identities, rows: pending.map(row => ({ sourceRecord: row.sourceRecord, parentLegacyOrderId: row.parentLegacyOrderId, mappedOrderId: parents.get(row.parentLegacyOrderId)?.parentOrderId ?? null, bucket: parents.get(row.parentLegacyOrderId)?.sourceSnapshot?.order_status === '4' ? "COMPLETED_PARENT" : "INFLIGHT_PARENT", evidenceRef: manifest.sourceRef + ":commission:" + row.sourceRecord.id })) });
+        const assembly = preparation.assembleLegacyCompletedCommissionBatch({ batchId: "full-commissions-" + state.binding.oid, cutoff: micros(sourceCutoff), parents: target.parents, current: target.current, verifiedBeneficiaries: identities, rows: pending.map(row => ({ sourceRecord: row.sourceRecord, parentLegacyOrderId: row.parentLegacyOrderId, mappedOrderId: parents.get(row.parentLegacyOrderId)?.parentOrderId ?? null, bucket: parents.get(row.parentLegacyOrderId)?.sourceSnapshot?.order_status === '4' ? "COMPLETED_PARENT" : "INFLIGHT_PARENT", evidenceRef: manifest.sourceRef + ":commission:" + row.sourceRecord.id })) });
         writeFileSync(join(ctx.output, "commission-assembly.json"), JSON.stringify(assembly, null, 2), { flag: "wx" });
         completedRows = [];
         for (const row of assembly.rows) {
@@ -97,18 +113,40 @@ export async function applyFinancialDomains(ctx) {
         completedRows = freezePhase(ctx, "completedCommissions", completedRows);
     }
     await ctx.runItems("completedCommissions", completedRows, row => mod("order/legacy-continuation-evidence").importLegacyCompletedCommission(client, actor, row.body), 20);
-    const wanted = [...liabilityRows, ...completedRows].filter(row => row.effect);
+    const wanted = [...liabilityRows, ...completedRows].filter(row => row.effect).map(row=>({...row,effect:{...row.effect,...(row.body?.commission?{level:row.body.commission.level,ratio:row.body.commission.ratio,sourceRecordId:row.body.commission.id}:{} )}}));
+    wanted.push(...continuationCommissionEffects(continuationRows,mod).map(effect=>({effect})));
     const ids = wanted.map(row => row.effect.dutyId);
-    const actual = (await client.query("SELECT id,amount_cents::text AS amount,status,counterparty_user_id AS beneficiary,kind,source_record_id AS source_id,settled_by AS settled_by FROM zzsh_order.legacy_order_duty WHERE id=ANY($1::text[])", [ids])).rows;
+    const actual = (await client.query("SELECT id,amount_cents::text AS amount,status,counterparty_user_id AS beneficiary,kind,source_record_id AS source_id,settled_by,level::text AS level,ratio::text,source_digest FROM zzsh_order.legacy_order_duty WHERE id=ANY($1::text[])", [ids])).rows;
     const byId = new Map(actual.map(row => [row.id, row]));
     const mismatches = [];
     for (const row of wanted) {
         const expected = row.effect, found = byId.get(expected.dutyId);
-        if (!found || found.amount !== expected.amountCents || found.beneficiary !== expected.beneficiaryUserId || found.kind !== expected.kind || found.status !== expected.status || found.settled_by !== expected.settledBy)
+        if (!found || found.amount !== expected.amountCents || found.beneficiary !== expected.beneficiaryUserId || found.kind !== expected.kind || found.status !== expected.status || found.settled_by !== expected.settledBy || expected.sourceRecordId!==undefined&&found.source_id!==expected.sourceRecordId || expected.level!==undefined&&(found.level!==expected.level||!mod("order/legacy-continuation-model").legacyDecimalEquals(found.ratio,expected.ratio)) || expected.sourceDigest!==undefined&&found.source_digest!==expected.sourceDigest)
             mismatches.push({ dutyId: expected.dutyId, reason: "EXACT_DUTY_FACT_DIFFERED" });
     }
+    const subjects=[...new Set([...history,...empties.flatMap(chunk=>chunk.rows)].map(row=>row.input.coverage.legacyUserId))];
+    const observed=(await client.query(`SELECT source_kind,count(*)::int AS count,(sum((snapshot->>'amount')::numeric)*100)::numeric(24,0)::text AS amount FROM zzsh_order.personal_finance_observation WHERE source_system='legacy_mysql_restore' AND legacy_user_id=ANY($1::text[]) GROUP BY source_kind`,[subjects])).rows;
+    const targetReadable={};
+    for(const [domain,count]of Object.entries(coverage)){
+        if(domain==='guarantees')continue;
+        const kind=history.find(row=>row.domain===domain)?.input.coverage.sourceKind,found=observed.find(row=>row.source_kind===kind);
+        targetReadable[domain]={expected:count.writer,actual:found?.count??0,recordedAmountCents:found?.amount??'0'};
+        if((found?.count??0)!==count.writer||(found?.amount??'0')!==count.recordedAmountCents)mismatches.push({domain,reason:'SOURCE_OBSERVATION_COUNT_OR_AMOUNT_DRIFT'});
+    }
+    const actualCoverage=(await client.query(`SELECT source_kind,count(*)::int AS count,count(*) FILTER(WHERE source_count=0 AND imported_count=0 AND isolated_count=0)::int AS empty FROM zzsh_order.personal_finance_observation_coverage WHERE source_system='legacy_mysql_restore' AND source_cutoff=$1::timestamptz AND legacy_user_id=ANY($2::text[]) GROUP BY source_kind`,[sourceCutoff,subjects])).rows;
+    for(const [domain,count]of Object.entries(coverage))if(domain!=='guarantees'){
+        const kind=history.find(row=>row.domain===domain)?.input.coverage.sourceKind??empties.flatMap(chunk=>chunk.rows).find(row=>row.domain===domain)?.input.coverage.sourceKind;
+        const found=actualCoverage.find(row=>row.source_kind===kind);Object.assign(targetReadable[domain],{coverageExpected:count.coverageSelected,coverageActual:found?.count??0,provedEmpty:found?.empty??0});
+        if(found?.count!==count.coverageSelected||found?.empty!==count.emptyCoverage)mismatches.push({domain,reason:'SOURCE_COVERAGE_SUBJECT_OR_EMPTY_SET_GAP'});
+    }
+    const attemptActual=(await client.query(`SELECT count(*)::int AS count,count(DISTINCT a->>'sourceId')::int AS distinct_count,COALESCE(sum((a->>'amountCents')::numeric),0)::text AS amount FROM zzsh_order.personal_finance_observation o CROSS JOIN LATERAL jsonb_array_elements(o.snapshot->'sourceAttempts') a WHERE o.source_kind='HISTORICAL_REFUND' AND o.legacy_user_id=ANY($1::text[])`,[subjects])).rows[0];
+    targetReadable.refundAttempts={expected:fundsPlan.refundAttemptCoverage.selected,actual:attemptActual?.count??0,distinctSourceIds:attemptActual?.distinct_count??0,recordedAmountCents:attemptActual?.amount??'0'};
+    if(attemptActual?.count!==fundsPlan.refundAttemptCoverage.selected||attemptActual?.distinct_count!==fundsPlan.refundAttemptCoverage.selected||attemptActual?.amount!==fundsPlan.refundAttemptCoverage.recordedAmountCents)mismatches.push({domain:'refundAttempts',reason:'TYPED_SOURCE_ATTEMPT_COVERAGE_GAP'});
+    const guaranteeActual=(await client.query(`SELECT count(*)::int AS count,COALESCE(sum(jsonb_array_length(source_canonical::jsonb->'payOrders')),0)::text AS payments FROM zzsh_order.legacy_owner_guarantee_observation WHERE source_cutoff=$1::timestamptz AND legacy_user_id=ANY($2::text[])`,[sourceCutoff,guarantees.map(row=>row.input.legacyUserId)])).rows[0];
+    targetReadable.guarantees={expected:coverage.guarantees.writer,actual:guaranteeActual?.count??0,payments:guaranteeActual?.payments??'0'};
+    if(guaranteeActual?.count!==coverage.guarantees.writer||guaranteeActual?.payments!==String(coverage.guarantees.payments))mismatches.push({domain:'guarantees',reason:'SOURCE_GUARANTEE_OR_PAYMENT_COUNT_DRIFT'});
     const native = (await client.query("SELECT (SELECT count(*)::int FROM zzsh_order.rental_order) native_orders,(SELECT count(*)::int FROM zzsh_order.payment_confirmation) native_payments,(SELECT count(*)::int FROM zzsh_order.settlement_posting) native_postings,(SELECT count(*)::int FROM zzsh_order.settlement_ledger_entry) native_ledger")).rows[0];
-    const report = { expectedDuties: wanted.length, matched: actual.length, mismatches, native, storedOpening: "NOT_IMPORTED_WITHOUT_REVIEWED_ECONOMIC_PROOF", financialHistory: "OBSERVATION_ONLY_NO_CHANNEL_OR_WALLET_POSTING", sourceRawRetained: true };
+    const report = { targetReadable,expectedDuties: wanted.length, matched: actual.length, mismatches, native, storedOpening: "NOT_IMPORTED_WITHOUT_REVIEWED_ECONOMIC_PROOF", financialHistory: "OBSERVATION_ONLY_NO_CHANNEL_OR_WALLET_POSTING", sourceRawRetained: true,sourceRawScope:"SAFE_PG_SNAPSHOTS_AND_RESTRICTED_SOURCE_REFERENCE" };
     writeFileSync(join(ctx.output, "financial-reconciliation.json"), JSON.stringify(report, null, 2), { flag: "wx" });
     state.financialReconciliation = report;
     if (mismatches.length)

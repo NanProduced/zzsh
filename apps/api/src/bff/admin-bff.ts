@@ -579,7 +579,8 @@ export async function handleAdminBff(request: NodeRequest, response: NodeRespons
     return;
   }
   if (path === "/supply" || path.startsWith("/supply/")) {
-    if (method !== "GET" && method !== "POST" && method !== "PUT") {
+    const legacyImageHead = method === "HEAD" && /^\/supply\/accounts\/[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\/legacy-images\/(?:display|penalty)\/(?:0|[1-9][0-9]{0,5})$/.test(path);
+    if (method !== "GET" && method !== "POST" && method !== "PUT" && !legacyImageHead) {
       sendError(response, 404, API_V1_ERROR_CODES.NOT_FOUND, "Resource not found", requestId);
       return;
     }

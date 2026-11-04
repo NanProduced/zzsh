@@ -70,6 +70,7 @@ export type PublicBasis = {
   attributeDisplay?: AttributeDisplay | null;
   presentation: Presentation | null;
   media: Array<{ assetId?: string; url?: string; category?: string | null }>;
+  legacyImages?: Array<{ position: number; url: string }>;
   quote: {
     resourceTotal?: { amount?: string } | null;
     termSeconds?: string;
@@ -133,7 +134,8 @@ export type SupplyFacts = { businessState?: AccountBusinessState | null; lifecyc
 /** 列表最小受权摘要：金额保持接口原始十进制字符串，缺字段一律 null（未提供），不由前端补齐。 */
 export type SupplyQuoteAmount = { amount: string; currency: string | null; unit: string | null; scale: string | null } | null;
 export type SupplyListSummary = {
-  displaySource?: "PUBLIC_VERSION" | "CURRENT_VERSION";
+  displaySource?: "PUBLIC_VERSION" | "CURRENT_VERSION" | "LEGACY_SNAPSHOT";
+  sourceUpdatedAt?: string | null;
   versionId: string | null;
   sequence: string | null;
   title?: string | null;
@@ -307,6 +309,7 @@ export type Detail = {
     restriction_reason: string | null;
   };
   ownerName: string;
+  legacyMediaCounts?: { displayCount: number; penaltyCount: number } | null;
   version: Version;
   history?: VersionHistoryEntry[];
   previousDeclaration: Declaration | null;
@@ -373,7 +376,7 @@ export function accountBusinessStatus(facts: SupplyFacts, reviewState?: string |
 }
 
 export function reviewStateLabel(state: string): string {
-  return STATE_LABELS[state] ?? state;
+  return STATE_LABELS[state] ?? "状态待确认";
 }
 
 export function publicationSourceLabel(source: string | null | undefined): string {
@@ -616,7 +619,7 @@ function codeFact(label: string, display: CodeDisplay | null | undefined, raw: u
   if (display?.displayName) return { label, value: display.displayName, unconfirmed: false };
   const code = display?.code ?? (raw === null || raw === undefined || raw === "" ? "" : String(raw));
   return code
-    ? { label, value: `未确认(代码 ${code})`, unconfirmed: true }
+    ? { label, value: "未确认", unconfirmed: true }
     : { label, value: "未申报", unconfirmed: false };
 }
 
@@ -657,7 +660,7 @@ function attributeFactsFrom(attributes: Record<string, unknown>, display: Attrib
     { label: "上号时间", value: display?.serviceWindow?.displayName ?? "未确认", unconfirmed: !display?.serviceWindow?.displayName },
     {
       label: "租期规则",
-      value: term?.displayName ?? (term ? `未确认(代码 ${term.code})` : "未申报"),
+      value: term?.displayName ?? (term ? "未确认" : "未申报"),
       unconfirmed: Boolean(term) && !term?.displayName,
     },
     { label: "每日消耗", value: quantityText(term?.dailyConsumption?.quantity), unconfirmed: false },

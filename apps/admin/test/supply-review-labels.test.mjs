@@ -36,5 +36,5 @@ test("draft item names use the current catalog and frozen snapshots stay unchang
     presentation: [{ id: "item-x", name: "只有名称" }],
     catalog: [{ id: "item-x", name: "目录名", unit: "PIECE" }],
   }), { name: "只有名称", unit: "未确认" });
-  assert.deepEqual(reviewItemLabel({ itemId: "item-missing", inCurrent: true }), { name: "未确认（item-missing）", unit: "未确认" });
+  assert.deepEqual(reviewItemLabel({ itemId: "item-missing", inCurrent: true }), { name: "名称待确认", unit: "未确认" });
 });

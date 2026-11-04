@@ -377,7 +377,7 @@ test("R7 缺失 scope 呈现未知并禁止修改与恢复；显式空集合仍�
   const view = mount();
   t.after(view.cleanup);
   const detail = await openDetail(view);
-  assert.ok(detail.textContent.includes("未接入"), "未知范围用未接入徽标呈现");
+  assert.ok(detail.textContent.includes("未提供"), "未知范围用未提供徽标呈现");
   assert.ok(!detail.textContent.includes("可读取全部游戏的业务"), "未知范围不得说成全部游戏");
   assert.equal(detail.querySelectorAll("input[type=radio]").length, 0, "只读详情不伪造范围单选");
   assert.equal(btn("调整业务范围", detail).disabled, true, "未知范围必须阻止进入写表单与恢复");
@@ -832,7 +832,7 @@ test("P0 会话列只说事实：零会话、有会话、未接入三种呈现�
   const cells = [...browser.document.querySelectorAll("tbody tr")].map((row) => row.querySelectorAll("td")[5]?.textContent ?? "");
   assert.ok(cells[0]?.includes("无未过期会话"), "零会话是事实，不是未接入");
   assert.ok(cells[1]?.includes("2 个未过期会话") && cells[1]?.includes("含 1 锁定"), "有会话时给出计数与锁定数");
-  assert.ok(cells[2]?.includes("未接入"), "旧接口不返回会话摘要时标未接入，不冒充 0");
+  assert.ok(cells[2]?.includes("未提供"), "缺少会话摘要时标未提供，不冒充 0");
   const fallbacks = [...browser.document.querySelectorAll("tbody [data-slot=avatar-fallback], tbody .size-8")].map((node) => node.textContent.trim());
   assert.ok(fallbacks.includes("测") || fallbacks.includes("第"), "无头像时回退姓名首字");
   assert.ok(!browser.document.body.textContent.includes("在线"), "会话数不得被叫作在线");
@@ -895,9 +895,9 @@ test("P2 信息窗会话三态：缺字段标未接入，零锁定明确显示0"
     try {
       const page = await openDetail(view);
       const value = (label) => [...page.querySelectorAll("dt")].find((node) => node.textContent === label)?.parentElement.querySelector("dd")?.textContent;
-      assert.equal(value("未过期会话"), sessionSummary ? "0 个" : "未接入");
-      assert.equal(value("其中锁定"), sessionSummary ? "0 个" : "未接入");
-      assert.equal(value("最近建立"), sessionSummary ? "无未过期会话" : "未接入");
+      assert.equal(value("未过期会话"), sessionSummary ? "0 个" : "未提供");
+      assert.equal(value("其中锁定"), sessionSummary ? "0 个" : "未提供");
+      assert.equal(value("最近建立"), sessionSummary ? "无未过期会话" : "未提供");
       assert.equal(calls.filter((call) => call.route.startsWith("POST ")).length, 0);
     } finally { await view.cleanup(); }
   }
@@ -943,7 +943,7 @@ test("D3 创建必须显式选范围，旧接口未声明支持时拒绝发送",
       assert.equal(btn("创建管理员", dialog).disabled, true);
       await act(async () => dialog.querySelector("form").dispatchEvent(new browser.Event("submit", { bubbles: true, cancelable: true })));
       assert.equal(calls.filter((call) => call.route.startsWith("POST ")).length, 0);
-      if (!supported) assert.ok(dialog.textContent.includes("未接入创建时业务范围"));
+      if (!supported) assert.ok(dialog.textContent.includes("暂时无法设置业务范围"));
     } finally { await view.cleanup(); }
   }
 });

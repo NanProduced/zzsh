@@ -243,6 +243,8 @@ export type UserDirectoryDetail = Omit<UserDirectoryItem, "source"> & {
 
 type HistoricalDisplayCode = { code: string; displayName: string | null; mappingStatus: "CONFIRMED" | "UNCONFIRMED"; issueCode: string | null };
 export type LegacyHistoricalRead = {
+  observationVersionId?: string | null;
+  sourceUpdatedAt?: string | null;
   resourceNo: string; canCreateOrder: false; trade: "UNKNOWN"; quote?: null;
   historicalQuote: { haffRentYuan: string; goodsYuan: string; depositYuan: string; termDays: string; dailyHaffBase: string };
   display?: { state: "NOT_IMPORTED"; facts: null } | { state: "KNOWN"; facts: {
@@ -263,7 +265,7 @@ export type UserRentalAccountItem = {
   restrictionReason: string | null;
   legacyHold: "NONE" | "UNRESOLVED" | "ACTIVE_LEGACY";
   currentVersionId: string | null;
-  publication: { versionState: string | null; source: string | null; versionPublished: boolean; currentlyPublished?: boolean };
+  publication: { versionState: string | null; source: string | null; versionPublished: boolean; currentlyPublished?: boolean; publiclyListed?: true };
   createdAt: string;
   historicalRead?: LegacyHistoricalRead | null;
 };
@@ -288,7 +290,7 @@ export type UserOrderItem = {
   counterpartyUserId?: string;
   counterpartySummary?: DirectoryUserPreview;
   orderFacts?: {termSeconds: string | null; resources: UserOrderResource[]};
-  accountFacts?: {source: 'ORDER_VERSION' | 'ACCOUNT_PUBLIC_VERSION'; resources: UserOrderResource[]; loginMethodText: string | null; termDays?: string; safeBoxText?: string | null; gradingText?: string | null};
+  accountFacts?: {source: 'ORDER_VERSION' | 'ACCOUNT_PUBLIC_VERSION' | 'LEGACY_ACCOUNT_SNAPSHOT'; resources: UserOrderResource[]; loginMethodText: string | null; termDays?: string; safeBoxText?: string | null; gradingText?: string | null};
   amounts: { rental: UserOrderAmount | null; deposit: UserOrderAmount | null; totalDue: UserOrderAmount | null };
   createdAt: string | null;
   holdUntil: string | null;

@@ -109,8 +109,9 @@ function detailReader(duty=legacyFixture(),options:{ready?:boolean;objectReadabl
   if(sql.includes('clock_timestamp()'))return{rows:[{at}]};
   if(sql.includes('admin exact legacy duty complete financial facts'))return{rows:[options.invalidFact?{...duty.row,root_source:'wrong'}:duty.row]};
   if(sql.startsWith('WITH finance_scoped_rows'))return{rows:sql.includes('FROM zzsh_order.settlement_ledger_entry l')?ledger:[]};
-  if(sql.startsWith('WITH finance_order_rows'))return{rows:values.some(value=>Array.isArray(value)&&value.includes(o.ref))?[rawOrder]:[]};
+  if(sql.startsWith('WITH finance_order_rows'))return{rows:values.some(value=>Array.isArray(value)&&value.includes(o.id))?[rawOrder]:[]};
   if(sql.startsWith('WITH finance_reverse_candidates'))return{rows:[]};
+  if(sql.startsWith('SELECT o.id,o.user_id AS subject_id')&&sql.includes('FROM zzsh_order.personal_finance_observation o'))return{rows:[]};
   if(sql.startsWith('SELECT id,COALESCE(name,id)'))return{rows:[{id:'owner',name:'owner'},{id:'renter',name:'renter'}]};
   throw new Error('Unexpected SQL: '+sql.slice(0,100));
  }};
@@ -130,7 +131,7 @@ test('legacy financial root closes its source-qualified old-order link only afte
  for(const invalidFact of [false,true]){
   const r=detailReader(undefined,{direct:true,invalidFact}),ref='LEGACY_DUTY:'+r.duty.duty.id,facts=await loadAdminFinanceFacts(r.client,{documentRef:ref},relationAccess),detail=readAdminFinanceDocument(facts,ref);
   assert.equal(detail.related.some(link=>link.ref==='LEGACY_ORDER:'+oldOrderId),!invalidFact);assert.equal(detail.entries.length,2);assert.equal(r.queries.filter(query=>query.sql.includes('admin exact legacy duty')).length,1);
-  if(!invalidFact)assert(r.queries.some(query=>query.sql.startsWith('WITH finance_order_rows')&&query.values.some(value=>Array.isArray(value)&&value.includes('LEGACY_ORDER:'+oldOrderId))));
+  if(!invalidFact)assert(r.queries.some(query=>query.sql.startsWith('WITH finance_order_rows')&&query.sql.includes('zzsh_order.legacy_order_read_snapshot')&&query.values.some(value=>Array.isArray(value)&&value.includes(oldOrderId))));
  }
 });
 test('unreadable objects and absent old finance relation do not trigger a duty query or invent empty-known amounts',async()=>{

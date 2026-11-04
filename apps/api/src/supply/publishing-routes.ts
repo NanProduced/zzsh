@@ -564,7 +564,7 @@ export async function handlePublishingRoute(
       }
       if (!admin) {
         // B1: owner list with rentalState / accountDisplay / activeOrder; legacy row fields and `after`/`nextCursor` unchanged.
-        const owned = await listOwnerAccounts(client, actorId, parseOwnerAccountQuery(query), options.listingCursorKey);
+        const owned = await listOwnerAccounts(client, actorId, parseOwnerAccountQuery(query), options.listingCursorKey, options.legacyPublicAdmission);
         const historical = await loadLegacyHistoricalReads(client, owned.page.map(row => row.id));
         return {
           items: owned.page.map(row => ({ ...projectOwnerAccount(row), historicalRead: withoutLegacyResourceNo(historical.get(row.id) ?? null) })),

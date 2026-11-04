@@ -44,6 +44,8 @@ function environment(patch: {
     }
     if (sql.includes("clock_timestamp()::text AS at")) return rows([{ at: "2026-11-02T03:00:00.000000Z" }]);
     if (sql.includes("WITH rows AS")) { if (patch.revokeAfterRead) state.permissions = []; return rows(state.earnings); }
+    if (sql.includes("/* original distribution qualifications */")) return rows();
+    if (sql.includes("FROM dashboard_records WHERE beneficiary_id=ANY")) return rows();
     if (sql.includes("FROM zzsh_order.distribution_participant p")) return rows(state.participants);
     if (sql.includes("WHERE r.child_user_id=$1")) return rows([{ type: "DISTRIBUTION_LEADER", parent_user_id: "parent-1", name: "上级", source_type: "NATIVE", policy_version_id: "policy-1" }]);
     throw new Error("unexpected dashboard route SQL: " + sql.slice(0, 100));
@@ -133,19 +135,19 @@ test("Boss earnings and participant pagination bind snapshot, exact offsets and 
   assert.equal(participants.status, 200);
   assert.equal(participants.json.total, "5");
   assert.ok(participants.json.snapshot);
-  const participantPage = env.state.calls.filter(call => call.sql.includes("FROM zzsh_order.distribution_participant p")).at(-1)!;
+  const participantPage = env.state.calls.filter(call => call.sql.includes("ORDER BY p.user_id LIMIT")).at(-1)!;
   assert.deepEqual(participantPage.values.slice(-2), [2, 0]);
 
   const next = await invoke(env, "GET", `/participants?page=2&pageSize=2&snapshot=${encodeURIComponent(participants.json.snapshot)}`);
   assert.equal(next.status, 200);
-  const nextPage = env.state.calls.filter(call => call.sql.includes("FROM zzsh_order.distribution_participant p")).at(-1)!;
+  const nextPage = env.state.calls.filter(call => call.sql.includes("ORDER BY p.user_id LIMIT")).at(-1)!;
   assert.deepEqual(nextPage.values.slice(-2), [2, 2]);
 
   const detail = await invoke(env, "GET", "/participants/user-1");
   assert.equal(detail.status, 200);
   assert.equal(detail.json.participant.userId, "user-1");
   assert.equal(detail.json.relations[0].parentName, "上级");
-  const exact = env.state.calls.filter(call => call.sql.includes("FROM zzsh_order.distribution_participant p")).at(-1)!;
+  const exact = env.state.calls.filter(call => call.sql.includes("ORDER BY p.user_id LIMIT")).at(-1)!;
   assert.equal(exact.values[0], "user-1");
   assert.deepEqual(exact.values.slice(-2), [20, 0]);
 });

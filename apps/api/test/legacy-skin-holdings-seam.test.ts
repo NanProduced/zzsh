@@ -12,7 +12,8 @@ import {
   type LegacySkinHoldingsInput,
   type LegacyImportActor,
 } from "../src/supply/legacy-observation";
-import { buildLegacySkinIndex, mapLegacySkinHolding, type LegacySkinCatalogEntry, type LegacySkinTokenRule } from "../src/legacy-load/legacy-skin-holdings";
+import { buildLegacySkinIndex, mapLegacySkinHolding, type LegacySkinCatalogEntry, type LegacySkinTokenRule, type LegacySkinMappingOverlay } from "../src/legacy-load/legacy-skin-holdings";
+import { canonicalize } from "../src/supply/content-hash";
 import { sha256Hex } from "../src/supply/supply-util";
 
 const DIGEST = "a".repeat(64);
@@ -82,7 +83,7 @@ class FakeClient {
   readonly accounts = new Map<string, PublishingAccount>([["account-1", account()]]);
   readonly maps = new Map<string, FakeMap>();
   readonly versions = new Map<string, FakeVersion>();
-  readonly skins = new Map<string, { id: string; game_id: string; naming_state: string; enabled: boolean; form_visible: boolean; source_field?: string; source_token?: string }>();
+  readonly skins = new Map<string, { id: string; game_id: string; naming_state: string; enabled: boolean; form_visible: boolean; source_field?: string; source_token?: string; source_namespace?: string; name?: string; owner_kind?: "MELEE_TYPE" | "AGENT" | "FIREARM" }>();
   readonly legacySkinHoldings = new Map<string, LegacyHoldingRow>();
   readonly listingSkins: Array<{ version_id: string; skin_id: string }> = [];
   readonly audits: Array<Record<string, unknown>> = [];
@@ -195,6 +196,9 @@ class FakeClient {
           namingState: s.naming_state,
           enabled: s.enabled,
           formVisible: s.form_visible,
+          sourceNamespace: s.source_namespace,
+          name: s.name,
+          ownerKind: s.owner_kind,
           naming_state: s.naming_state,
           form_visible: s.form_visible,
         }) as T),
@@ -645,7 +649,7 @@ test("SK11-R2-03: resolveLegacyObservationToDraft with legal empty holding produ
 
 function catalogFor(fake: FakeClient): LegacySkinCatalogEntry[] {
   return [...fake.skins.values()].map(s => ({ skinId: s.id, gameId: s.game_id, sourceField: s.source_field ?? null,
-    sourceToken: s.source_token ?? null, namingState: s.naming_state as LegacySkinCatalogEntry["namingState"], enabled: s.enabled, formVisible: s.form_visible }));
+    sourceToken: s.source_token ?? null, namingState: s.naming_state as LegacySkinCatalogEntry["namingState"], enabled: s.enabled, formVisible: s.form_visible, sourceNamespace: s.source_namespace, name: s.name, ownerKind: s.owner_kind }));
 }
 
 test("SK11-R3-01: another sealed account's columns and freshly recomputed digest cannot replace the admitted row", async () => {
@@ -717,6 +721,67 @@ test("SK11-R3-03: all nine preserved ambiguous source tokens remain blocked afte
     assert.equal(unguarded.complete, true);
     await assert.rejects(() => recordLegacySkinHoldings(asClient(fake), "account-1", Object.assign(validInput({ columns, skinIds: [skinId], holdingDigest: unguarded.digest }), { tokenRules: [] }), ACTOR), /unmapped, pending, or ambiguous/);
     assert.throws(() => prepareLegacySkinHoldingsInput(admissionFor(fake), "source-1", catalogFor(fake), "fixture:ambiguous"), /not completely declarable/);
+    assert.equal(fake.legacySkinHoldings.size, 0);
+  }
+});
+
+function reviewedExactFixture() {
+  const columns = { ...EMPTY_COLUMNS, knife_skin: "影锋", gold_skin: "威龙-吴彦祖" };
+  const rules: LegacySkinTokenRule[] = [{ field: "knife_skin", token: "影锋", decision: "SOURCE_AMBIGUOUS", sources: [
+    { dictField: "knife_skin", dictTypeId: 1, dictDataId: 3, state: "HISTORICAL_SOFT_DELETED" },
+    { dictField: "knife_skin", dictTypeId: 1, dictDataId: 29, state: "CURRENT" },
+  ] }];
+  const fake = new FakeClient(columns, rules);
+  fake.skins.set("reviewed-knife", { id: "reviewed-knife", game_id: "game-delta", source_namespace: "legacy_mysql_restore", source_field: "knife_skin", source_token: "影锋", name: "影锋", owner_kind: "MELEE_TYPE", naming_state: "VERIFIED", enabled: true, form_visible: true });
+  fake.skins.set("old-agent", { id: "old-agent", game_id: "game-delta", source_namespace: "legacy_mysql_restore", source_field: "gold_skin", source_token: "威龙-吴彦祖", name: "威龙-吴彦祖", owner_kind: "AGENT", naming_state: "VERIFIED", enabled: false, form_visible: false });
+  fake.skins.set("reviewed-agent", { id: "reviewed-agent", game_id: "game-delta", source_namespace: "pzds_platform_reference", source_field: "platform_code", source_token: "SA200011", name: "威龙-吴彦祖", owner_kind: "AGENT", naming_state: "VERIFIED", enabled: true, form_visible: true });
+  const overlay: LegacySkinMappingOverlay = { schema: "legacy-skin-exact-mapping.v2", version: "EXACT_FIVE_REVIEW_FIXTURE", reviewRef: "fixture:root-reviewed-source-tuples", sourceReceiptSha256: "3".repeat(64), sourceExtractSha256: "1".repeat(64), sourceDictionarySha256: "4".repeat(64), gameId: "game-delta", catalogRevision: "146", mappings: [
+    { field: "knife_skin", token: "影锋", sourceRows: rules[0]!.decision === "SOURCE_AMBIGUOUS" ? rules[0]!.sources : [], target: { skinId: "reviewed-knife", sourceNamespace: "legacy_mysql_restore", sourceField: "knife_skin", sourceToken: "影锋", name: "影锋", ownerKind: "MELEE_TYPE" } },
+    { field: "gold_skin", token: "威龙-吴彦祖", sourceRows: [{ dictField: "gold_skin", dictTypeId: 5, dictDataId: 50, state: "CURRENT" }], target: { skinId: "reviewed-agent", sourceNamespace: "pzds_platform_reference", sourceField: "platform_code", sourceToken: "SA200011", name: "威龙-吴彦祖", ownerKind: "AGENT" } },
+  ] };
+  const pkg: LegacySkinHoldingsSourcePackage = { ...sourcePackage(fake), schema: "legacy-skin-holdings-source-v2", mappingOverlay: { sha256: sha256Hex(canonicalize(overlay)), body: overlay } };
+  return { fake, overlay, pkg };
+}
+
+test("SK11-v2: explicit reviewed tuples supersede only this batch's ambiguity/retired source id and preserve original facts", async () => {
+  const { fake, overlay, pkg } = reviewedExactFixture(), old = sourcePackage(fake), oldBytes = JSON.stringify(old);
+  const oldAdmission = prepareLegacySkinHoldingsAdmission(oldBytes, sha256Hex(oldBytes));
+  assert.throws(() => prepareLegacySkinHoldingsInput(oldAdmission, "source-1", catalogFor(fake), "fixture:v1"), /not completely declarable/);
+  const bytes = JSON.stringify(pkg), admitted = prepareLegacySkinHoldingsAdmission(bytes, sha256Hex(bytes));
+  const prepared = prepareLegacySkinHoldingsInput(admitted, "source-1", catalogFor(fake), "fixture:reviewed-v2");
+  assert.deepEqual(prepared.input.skinIds, ["reviewed-agent", "reviewed-knife"]);
+  assert.deepEqual(prepared.input.columns, fake.sealedColumns);
+  await writeLegacySkinHoldings(asClient(fake), prepared.accountId, prepared.input, ACTOR, admitted);
+  assert.equal(fake.legacySkinHoldings.size, 1); assert.equal(fake.skins.get("old-agent")!.enabled, false);
+  const empty = { accountKey: "x", gameId: "game-delta", columns: EMPTY_COLUMNS };
+  assert.equal(mapLegacySkinHolding(empty, buildLegacySkinIndex(catalogFor(fake), fake.sealedRules, overlay), "146").mappingOverlaySha256, pkg.mappingOverlay!.sha256);
+  assert.notEqual(mapLegacySkinHolding(empty, buildLegacySkinIndex(catalogFor(fake), fake.sealedRules), "146").digest,
+    mapLegacySkinHolding(empty, buildLegacySkinIndex(catalogFor(fake), fake.sealedRules, overlay), "146").digest, "even an empty v2 set binds the reviewed overlay SHA");
+});
+
+test("SK11-v2: overlay bytes, source/revision, current dictionary and historical version fail closed", () => {
+  const { fake, pkg } = reviewedExactFixture();
+  const check = (value: LegacySkinHoldingsSourcePackage) => { const bytes = JSON.stringify(value); return prepareLegacySkinHoldingsAdmission(bytes, sha256Hex(bytes)); };
+  for (const mutate of [
+    (p: LegacySkinHoldingsSourcePackage) => { p.mappingOverlay!.sha256 = "f".repeat(64); },
+    (p: LegacySkinHoldingsSourcePackage) => { p.schema = "legacy-skin-holdings-source-v1"; },
+    (p: LegacySkinHoldingsSourcePackage) => { delete p.mappingOverlay; },
+    (p: LegacySkinHoldingsSourcePackage) => { p.mappingOverlay!.body.sourceExtractSha256 = "f".repeat(64); },
+    (p: LegacySkinHoldingsSourcePackage) => { p.mappingOverlay!.body.catalogRevision = "147"; },
+    (p: LegacySkinHoldingsSourcePackage) => { p.mappingOverlay!.body.mappings[0]!.sourceRows = []; },
+  ]) { const changed = structuredClone(pkg); mutate(changed); assert.throws(() => check(changed)); }
+  const changed = structuredClone(pkg); changed.mappingOverlay!.body.gameId = "other-game"; changed.mappingOverlay!.sha256 = sha256Hex(canonicalize(changed.mappingOverlay!.body)); assert.throws(() => check(changed), /does not match/);
+  const okay = check(pkg); assert.ok(prepareLegacySkinHoldingsInput(okay, "source-1", catalogFor(fake), "fixture:v2"));
+});
+
+test("SK11-v2: writer rechecks exact target tuple, name, owner type, game and availability instead of trusting declared ids", async () => {
+  for (const change of [
+    { source_namespace: "unrelated" }, { source_token: "other" }, { name: "other" }, { owner_kind: "FIREARM" as const }, { game_id: "other-game" }, { enabled: false }, { form_visible: false }, { naming_state: "PENDING" },
+  ]) {
+    const { fake, pkg } = reviewedExactFixture(), bytes = JSON.stringify(pkg), admitted = prepareLegacySkinHoldingsAdmission(bytes, sha256Hex(bytes));
+    const prepared = prepareLegacySkinHoldingsInput(admitted, "source-1", catalogFor(fake), "fixture:v2");
+    Object.assign(fake.skins.get("reviewed-agent")!, change);
+    await assert.rejects(() => writeLegacySkinHoldings(asClient(fake), prepared.accountId, prepared.input, ACTOR, admitted), /does not match the current catalog/);
     assert.equal(fake.legacySkinHoldings.size, 0);
   }
 });

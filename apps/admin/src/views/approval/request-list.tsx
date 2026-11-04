@@ -93,7 +93,7 @@ export function RequestList({
         {filterActive
           ? `仅筛选当前页：命中 ${filtered.length} / 当前页 ${items.length} 行。`
           : `当前页 ${items.length} 行。`}
-        按条件查全集与统计暂未接入；当前只过滤本页。
+        筛选仅覆盖本页，无法统计全部申请。
       </p>
 
       {busy ? <ReadingNote /> : null}

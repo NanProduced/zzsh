@@ -1,8 +1,16 @@
 import type { PoolClient } from "pg";
 import { conflict } from "../supply/supply-util";
+import { LEGACY_EFFECTIVE_STAGE_SQL } from "./legacy-order-read";
 
 export type OrderOccupancy = "FREE" | "OCCUPIED" | "UNKNOWN";
 export type AccountOccupancyFacts = { state: OrderOccupancy; kind: "PENDING_PAYMENT" | "RENTED" | "OCCUPIED" | null; rentalCompleted?: true };
+
+/** The same active legacy rows determine occupancy and the owner-only order link. */
+export function occupyingLegacyOrdersSql(accountId: string, continuationReady = true) {
+  return `FROM zzsh_order.legacy_order_read_snapshot l
+    ${continuationReady ? `LEFT JOIN zzsh_order.legacy_continuation_version h ON h.order_id=l.id AND h.superseded_at IS NULL` : ""}
+    WHERE l.account_id=${accountId} AND l.source_pay_status=1 AND ${continuationReady ? LEGACY_EFFECTIVE_STAGE_SQL : "l.source_order_status"} IN(3,8,9)`;
+}
 
 /** Only server-owned SQL references (a.id or $1); never a request value. */
 export function accountOccupancySql(accountId: string) {
@@ -10,9 +18,7 @@ export function accountOccupancySql(accountId: string) {
   const pending = `EXISTS(SELECT 1 FROM zzsh_order.rental_order WHERE account_id=${accountId} AND status='PENDING_PAYMENT')`;
   return {
     occupied: `(${paid} OR ${pending}
-      OR EXISTS(SELECT 1 FROM zzsh_order.legacy_order_read_snapshot l
-        LEFT JOIN zzsh_order.legacy_continuation_version h ON h.order_id=l.id AND h.superseded_at IS NULL
-        WHERE l.account_id=${accountId} AND l.source_pay_status=1 AND l.source_order_status IN(3,8,9) AND (h.id IS NULL OR h.stage<>4))
+      OR EXISTS(SELECT 1 ${occupyingLegacyOrdersSql(accountId)})
       OR EXISTS(SELECT 1 FROM zzsh_order.legacy_inflight_register r WHERE r.account_id=${accountId} AND r.disposition='ISOLATED_PARTY'))`,
     unknown: `(EXISTS(SELECT 1 FROM zzsh_order.legacy_inflight_register r WHERE r.account_id=${accountId} AND r.disposition IN('REVIEW_REQUIRED','UNKNOWN'))
       OR EXISTS(SELECT 1 FROM zzsh_order.legacy_order_read_snapshot l WHERE l.account_id=${accountId}

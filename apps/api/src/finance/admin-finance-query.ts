@@ -6,8 +6,8 @@ export type FinanceLoadScope = { filters?: FinanceFilters; documentRef?: string;
 export const FINANCE_LEDGER_BUCKET_SQL = `CASE WHEN r.account_code IN ('OWNER_AVAILABLE','WALLET_AVAILABLE') THEN 'AVAILABLE' WHEN r.account_code='WALLET_RESERVED' THEN 'RESERVED' WHEN r.account_code='GUARANTEE_HELD' THEN 'GUARANTEE_HELD' WHEN r.account_code='WALLET_PENDING_EARNINGS' THEN 'PENDING_EARNINGS' WHEN r.account_code='RENTER_REFUND_PAYABLE' THEN 'REFUND_PAYABLE' WHEN r.account_code LIKE 'PLATFORM_%' OR r.account_code='WITHDRAW_FEE' THEN 'PLATFORM' ELSE 'CLEARING' END`;
 const historyBucket = `CASE WHEN r.observation_origin='LEGACY_GUARANTEE_HISTORY' THEN 'GUARANTEE_HELD' WHEN r.observation_origin='LEGACY_DUTY_ZERO' AND r.action='RENTER_REFUND' THEN 'REFUND_PAYABLE' WHEN r.source_entity='la_distribution_order' OR r.observation_origin='NATIVE_EARNING_ZERO' AND r.source_status='PENDING' THEN 'PENDING_EARNINGS' ELSE 'AVAILABLE' END`;
 const ledgerKind = `CASE WHEN r.event_kind='OPENING' THEN 'OPENING' WHEN r.source_entity IN('withdrawal_intent','joinpay_withdrawal_intent') THEN 'WITHDRAWAL' WHEN r.source_kind='NATIVE_RENTAL_REFERRAL' OR r.source_kind='LEGACY_CONTINUATION_DUTY' AND r.beneficiary_role='COMMISSION' THEN 'DISTRIBUTION' WHEN r.source_kind='NATIVE_GUARANTEE' THEN 'GUARANTEE' WHEN r.source_kind='NATIVE_PRESTART_REFUND' OR r.account_code='RENTER_REFUND_PAYABLE' THEN 'REFUND' ELSE 'SETTLEMENT' END`;
-const historyKind = `CASE WHEN r.observation_origin='LEGACY_GUARANTEE_HISTORY' THEN 'GUARANTEE' WHEN r.observation_origin='NATIVE_EARNING_ZERO' OR r.observation_origin='LEGACY_DUTY_ZERO' AND r.action='COMMISSION' THEN 'DISTRIBUTION' WHEN r.observation_origin='LEGACY_DUTY_ZERO' THEN CASE WHEN r.action='RENTER_REFUND' THEN 'REFUND' ELSE 'SETTLEMENT' END WHEN r.source_entity='la_log_earnings' THEN CASE WHEN r.extra_evidence->'snapshot'->>'legacyChangeType' IN('1002','1003','1004','1005') THEN 'WITHDRAWAL' ELSE 'EARNINGS' END WHEN r.source_entity='la_distribution_order' THEN 'DISTRIBUTION' ELSE 'WITHDRAWAL' END`;
-const historyDocument=`CASE WHEN r.observation_origin='LEGACY_GUARANTEE_HISTORY' THEN 'GUARANTEE_SOURCE:'||r.id WHEN r.observation_origin='NATIVE_EARNING_ZERO' THEN 'DISTRIBUTION:'||r.source_id WHEN r.observation_origin='LEGACY_DUTY_ZERO' THEN 'LEGACY_DUTY:'||r.source_id ELSE (CASE WHEN r.source_entity='la_log_earnings' THEN 'HISTORY_EARNINGS:' WHEN r.source_entity='la_distribution_order' THEN 'HISTORY_DISTRIBUTION:' ELSE 'HISTORY_WITHDRAWAL:' END)||r.id END`;
+const historyKind = `CASE WHEN r.observation_origin='LEGACY_GUARANTEE_HISTORY' THEN 'GUARANTEE' WHEN r.observation_origin='NATIVE_EARNING_ZERO' OR r.observation_origin='LEGACY_DUTY_ZERO' AND r.action='COMMISSION' THEN 'DISTRIBUTION' WHEN r.observation_origin='LEGACY_DUTY_ZERO' THEN CASE WHEN r.action='RENTER_REFUND' THEN 'REFUND' ELSE 'SETTLEMENT' END WHEN r.source_entity='la_log_earnings' THEN CASE WHEN r.extra_evidence->'snapshot'->>'legacyChangeType' IN('1002','1003','1004','1005') THEN 'WITHDRAWAL' ELSE 'EARNINGS' END WHEN r.source_entity='la_distribution_order' THEN 'DISTRIBUTION' WHEN r.source_entity='la_pay_order' THEN 'PAYMENT' WHEN r.source_entity='la_refund_record' THEN 'REFUND' ELSE 'WITHDRAWAL' END`;
+const historyDocument=`CASE WHEN r.observation_origin='LEGACY_GUARANTEE_HISTORY' THEN 'GUARANTEE_SOURCE:'||r.id WHEN r.observation_origin='NATIVE_EARNING_ZERO' THEN 'DISTRIBUTION:'||r.source_id WHEN r.observation_origin='LEGACY_DUTY_ZERO' THEN 'LEGACY_DUTY:'||r.source_id ELSE (CASE WHEN r.source_entity='la_log_earnings' THEN 'HISTORY_EARNINGS:' WHEN r.source_entity='la_distribution_order' THEN 'HISTORY_DISTRIBUTION:' WHEN r.source_entity='la_pay_order' THEN 'HISTORY_PAYMENT:' WHEN r.source_entity='la_refund_record' THEN 'HISTORY_REFUND:' ELSE 'HISTORY_WITHDRAWAL:' END)||r.id END`;
 const ledgerSubject = `COALESCE(r.subject_id,CASE WHEN (${FINANCE_LEDGER_BUCKET_SQL})='PLATFORM' THEN 'PLATFORM' ELSE 'SYSTEM' END)`;
 const ledgerDocument = `CASE WHEN r.event_kind='OPENING' THEN 'OPENING:'||r.basis_id WHEN r.source_entity='withdrawal_intent' THEN 'WITHDRAWAL:'||r.source_id WHEN r.source_entity='joinpay_withdrawal_intent' THEN 'JOINPAY_WITHDRAWAL:'||r.source_id WHEN r.source_kind='NATIVE_RENTAL_REFERRAL' THEN 'DISTRIBUTION:'||r.economic_root_id WHEN r.source_kind='LEGACY_CONTINUATION_DUTY' THEN 'LEGACY_DUTY:'||r.source_id WHEN r.source_entity='owner_guarantee_payment' THEN 'GUARANTEE_PAYMENT:'||r.source_id WHEN r.source_entity='owner_guarantee_refund' THEN 'GUARANTEE_REFUND:'||r.source_id WHEN r.order_id IS NOT NULL THEN 'ORDER:'||r.order_id ELSE 'POSTING:'||COALESCE(r.posting_id,r.id) END`;
 
@@ -22,7 +22,12 @@ export function scopedFinanceSql(source: string, family: "ledger" | "history", s
   const number = family === "ledger" ? "COALESCE(r.display_no,CASE WHEN r.event_kind='OPENING' THEN r.basis_id ELSE r.source_id END,r.posting_id,r.id)" : `COALESCE(CASE WHEN r.source_entity='la_log_earnings' THEN NULLIF(${snapshot}->>'legacyLogNumber','') END,r.reference_no,r.source_id)`;
   const state = family === "history" ? "CASE WHEN r.observation_origin IN('NATIVE_EARNING_ZERO','LEGACY_DUTY_ZERO') THEN r.source_status ELSE 'HISTORICAL_OBSERVED' END" : `CASE${withdrawalsReady ? " WHEN r.source_entity='withdrawal_intent' AND i.id IS NOT NULL THEN i.state" : ""}${joinpayReady ? " WHEN r.source_entity='joinpay_withdrawal_intent' AND j.id IS NOT NULL THEN j.state" : ""} WHEN r.source_kind='NATIVE_RENTAL_REFERRAL' THEN COALESCE(r.earning_state,'UNKNOWN') WHEN r.source_kind='NATIVE_PRESTART_REFUND' OR r.account_code='RENTER_REFUND_PAYABLE' THEN 'REFUND_PAYABLE_RECORDED' ELSE 'POSTED' END`;
   if (scope.documentRefs) conditions.push(`(${document})=ANY(${bind(scope.documentRefs)}::text[])`);
-  if (scope.documentRef) conditions.push(`(${document})=${bind(scope.documentRef)}`);
+  if (scope.documentRef) {
+    conditions.push(`(${document})=${bind(scope.documentRef)}`);
+    if(family==="history"&&/^HISTORY_(PAYMENT|REFUND|DISTRIBUTION|WITHDRAWAL|EARNINGS):/.test(scope.documentRef)) {
+      conditions.push(`r.id=${bind(scope.documentRef.slice(scope.documentRef.indexOf(":")+1))}`);
+    }
+  }
   else if (scope.subjectId) conditions.push(`(${subject})=${bind(scope.subjectId)}`);
   if (!scope.documentRef && scope.filters) {
     const f = scope.filters;
@@ -46,7 +51,7 @@ export function scopedFinanceSql(source: string, family: "ledger" | "history", s
 }
 
 /** List, period and export stay on this domain. Document and subject reads do not. */
-export const FINANCE_GLOBAL_VERSION_DOMAIN = "admin-finance-proof.r6.narrow";
+export const FINANCE_GLOBAL_VERSION_DOMAIN = "admin-finance-proof.r7.typed-history";
 // PG16's presorted aggregates sort the wide input before hashing; these flags are transaction-local.
 export const FINANCE_GLOBAL_READ_PREAMBLE_SQL="SET LOCAL jit=off; SET LOCAL enable_presorted_aggregate=off;";
 export const FINANCE_DOCUMENT_VERSION_DOMAIN = "admin-finance-proof.r3.document";
@@ -126,12 +131,65 @@ export function financeVersionSql(ready: FinanceVersionReady): string {
 }
 const orderPostings = `SELECT id FROM zzsh_order.settlement_posting WHERE order_id=$1`;
 const orderEvents = `SELECT finance_event_id FROM zzsh_order.settlement_ledger_entry WHERE posting_id IN (${orderPostings})`;
+/** SQL candidate filter. The canonical source and subject are checked again by the display projection. */
+export function typedHistoricalOrderSql(observation:string,sourceId:string,renterId:string):string {
+  const o=observation,s=`${o}.snapshot`;
+  return `((${o}.user_id=${renterId} AND ${s}->>'referenceId'=${sourceId}
+    AND ${s}->>'referenceType'='LEGACY_ORDER' AND ${s}->>'associationState'='SOURCE_VERIFIED'
+    AND ((${o}.source_entity='la_pay_order' AND ${s}->>'sourceOrderType'='1')
+      OR (${o}.source_entity='la_refund_record' AND ${s}->>'sourceOrderType'='order')))
+    OR (${o}.source_entity='la_distribution_order' AND ${s}->>'sourceOrderType'='1' AND ${s}->>'orderId'=${sourceId}))`;
+}
+
+function legacyDocumentVersionSql(ready:FinanceVersionReady,kind:string,id:string){
+  if(!ready.legacy_orders)return null;
+  const entity={HISTORY_PAYMENT:'la_pay_order',HISTORY_REFUND:'la_refund_record',HISTORY_DISTRIBUTION:'la_distribution_order'}[kind];
+  if(!entity&&kind!=='LEGACY_ORDER')return null;
+  const order=kind==='LEGACY_ORDER';
+  const observations="zzsh_order.personal_finance_observation";
+  const historyInput=order?`SELECT o.* FROM ${observations} o JOIN order_parent l ON l.source_system=o.source_system
+    WHERE o.source_type='LEGACY_MYSQL' AND (${typedHistoricalOrderSql("o","l.legacy_id","l.renter_user_id")}
+      OR (o.source_entity='la_log_earnings' AND o.user_id=l.owner_user_id AND o.snapshot->>'referenceId'=l.legacy_id AND o.snapshot->>'legacyChangeType'='1001'))`
+    :`SELECT o.* FROM ${observations} o WHERE o.id=$1 AND o.source_type='LEGACY_MYSQL' AND o.source_entity='${entity}'`;
+  const parentInput=order?"l.id=$1":`EXISTS(SELECT 1 FROM history_input o WHERE o.source_system=l.source_system
+    AND ${typedHistoricalOrderSql("o","l.legacy_id","l.renter_user_id")})`;
+  const prelude=`WITH ${order?"order_parent":"history_input"} AS MATERIALIZED (${order?
+    `SELECT l.* FROM zzsh_order.legacy_order_read_snapshot l WHERE l.source_entity='la_order' AND ${parentInput}`:historyInput}),
+    ${order?"history_input":"order_parent"} AS MATERIALIZED (${order?historyInput:
+    `SELECT l.* FROM zzsh_order.legacy_order_read_snapshot l WHERE l.source_entity='la_order' AND ${parentInput}`}),
+    history_bound AS MATERIALIZED (SELECT id,user_id,legacy_user_id,source_system,source_entity,source_id,source_digest,source_event_at,imported_at,basis_id,included_in_opening FROM history_input
+     ${order?`UNION SELECT o.id,o.user_id,o.legacy_user_id,o.source_system,o.source_entity,o.source_id,o.source_digest,o.source_event_at,o.imported_at,o.basis_id,o.included_in_opening
+      FROM history_input l JOIN ${observations} o ON o.source_system=l.source_system AND o.user_id=l.user_id AND o.source_id=l.snapshot->>'referenceId'
+      WHERE l.source_entity='la_log_earnings' AND o.source_type='LEGACY_MYSQL' AND o.source_entity='la_distribution_order'`:""}),
+    subjects AS (SELECT user_id id FROM history_bound UNION SELECT owner_user_id FROM order_parent UNION SELECT renter_user_id FROM order_parent)`;
+  const selected=[
+    `SELECT 'admin-finance-proof.r4.typed-document:${kind}:'||$1 AS id`,
+    "SELECT * FROM history_bound",
+    "SELECT id,source_system,source_entity,legacy_id,source_digest,binding_digest,original_order_no,owner_user_id,renter_user_id,account_id,game_id FROM order_parent",
+    'SELECT id,name FROM zzsh_auth_user."user" WHERE id IN(SELECT id FROM subjects)',
+    'SELECT user_id id,basis_id,coverage_version FROM zzsh_order.wallet_coverage WHERE user_id IN(SELECT id FROM subjects)',
+    `SELECT jsonb_build_array(a.basis_id,a.source_entity,a.source_id)::text id,a.source_digest,a.included_in_opening FROM zzsh_order.finance_observation_admission a
+      JOIN zzsh_order.wallet_coverage c ON c.user_id=a.user_id AND c.basis_id=a.basis_id
+      WHERE EXISTS(SELECT 1 FROM history_bound b WHERE b.user_id=a.user_id AND b.legacy_user_id=a.legacy_user_id AND b.source_system=a.source_system AND b.source_entity=a.source_entity
+        AND b.source_id=a.source_id AND b.source_digest=a.source_digest AND b.source_event_at=a.source_event_at)`,
+  ];
+  if(order&&ready.legacy_duty_finance){
+    const duties="SELECT id FROM zzsh_order.legacy_order_duty WHERE order_id=$1";
+    const roots=`SELECT root_id FROM zzsh_order.legacy_duty_finance_fact WHERE duty_id IN(${duties})`;
+    const events=`SELECT event_id FROM zzsh_order.legacy_duty_finance_fact WHERE duty_id IN(${duties})`;
+    const clauses:Record<string,string>={duty:"order_id=$1",duty_fact:`duty_id IN(${duties})`,root:`id IN(${roots})`,event:`id IN(${events})`,ledger:`finance_event_id IN(${events})`};
+    selected.push(...versionRelations(ready).filter(r=>clauses[r.name]).map(r=>`${r.sql} WHERE ${clauses[r.name]}`));
+  }
+  return {text:prelude+versionDigest(selected,true),values:[id]};
+}
 /** Exact rows for one document or subject. Null keeps the global digest; list/period/export always do. */
 export function financeScopedVersionSql(ready: FinanceVersionReady, scope: FinanceVersionScope): { text: string; values: string[] } | null {
   const parsed = scope.mode === "subject" ? null : /^([A-Z][A-Z0-9_]*):([A-Za-z0-9][A-Za-z0-9._:-]{0,200})$/.exec(scope.documentRef);
   const kind = scope.mode === "subject" ? "SUBJECT" : parsed?.[1];
   const id = scope.mode === "subject" ? scope.subjectId : parsed?.[2];
   if (!kind || !id || !VERSION_ID.test(id)) return null;
+  const legacy=legacyDocumentVersionSql(ready,kind,id);
+  if(legacy)return legacy;
   const none = "1=0";
   const orderRefundIntents = `SELECT id FROM zzsh_order.channel_refund_intent WHERE order_id=$1`;
   const relatedRefundIntents = kind === "REFUND_INTENT"

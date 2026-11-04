@@ -25,7 +25,7 @@ function deferred() {
 const ORDER_COMPONENTS = new Set(["order-detail", "order-list", "order-presentation", "order-trade-actions"]);
 
 /** Resolve the internal order view modules from source, with the trade panel stubbed to a no-op. */
-function loadWorkspace(session, router) {
+function loadWorkspace(session, router, legacyContinuationPanel = () => null) {
   const cache = new Map();
   const loadOrderComponent = (file) => {
     if (cache.has(file)) return cache.get(file);
@@ -41,7 +41,7 @@ function loadWorkspace(session, router) {
       if (name === "@/lib/order-client") return requireFromTree(path.join(tree, "apps/web/src/lib/order-client.ts"));
       if (name === "@/lib/order-display") return requireFromTree(path.join(tree, "apps/web/src/lib/order-display.ts"));
       const local = name.match(/(?:^\.\/|@\/components\/order\/)([a-z-]+)$/)?.[1];
-      if (local === "legacy-continuation-panel") return { LegacyContinuationPanel: () => null };
+      if (local === "legacy-continuation-panel") return { LegacyContinuationPanel: legacyContinuationPanel };
       if (local === "prestart-termination-panel") return { PrestartTerminationPanel: () => null };
       if (local && (ORDER_COMPONENTS.has(local) || local === "legacy-order-workspace")) {
         if (local === "order-trade-actions") return { OrderTradeActions: () => null };
@@ -99,7 +99,7 @@ async function createProbe(fetchImpl, options = {}) {
   const router = { push(href) { navigation.push(href); }, replace(href) { navigation.push(href); } };
   const previousFetch = globalThis.fetch;
   globalThis.fetch = fetchImpl;
-  const components = loadWorkspace(session, router);
+  const components = loadWorkspace(session, router, options.legacyContinuationPanel);
   const host = window.document.createElement("div");
   window.document.body.append(host);
   const root = requireFromTree("react-dom/client").createRoot(host);
@@ -338,6 +338,21 @@ test('unified list binds each identity and ignores a previous identity late page
   await probe.render({},'identity-B');assert.match(probe.host.textContent,/B-001/);
   await React.act(async()=>{pending.resolve(Response.json({items:[orderA],nextCursor:null,limit:20}));await tick();});
   assert.deepEqual(subjects,['user_A','user_B']);assert.doesNotMatch(probe.host.textContent,/A-001|PRIVATE_ORDER_A/);
+ }finally{await probe.dispose();}
+});
+
+test('unified renting filter shows the current stage and original order number for a legacy row',async()=>{
+ const legacy={...orderA,id:'legacy-active',displayNo:'ORIGINAL-ORDER-A',status:'PAID',party:'owner',readOnly:true,
+  source:{origin:'LEGACY',statusLabel:'进行中'},stage:{code:'RENTING',label:'进行中',viewerActionRequired:false,settlementVersionNo:null}};
+ const calls=[];
+ const probe=await createProbe(async input=>{calls.push(new URL(String(input),'https://example.test'));return Response.json({items:[legacy],nextCursor:null,limit:20});});
+ try{
+  await probe.render({party:'owner',filters:{stage:'RENTING'}});
+  assert.ok(calls.some(url=>url.searchParams.get('party')==='owner'&&url.searchParams.get('stage')==='RENTING'));
+  assert.match(probe.host.textContent,/ORIGINAL-ORDER-A[\s\S]*进行中/);
+  assert.doesNotMatch(probe.host.querySelector('.order-row')?.textContent??'',/进度待确认|需要你处理/);
+  const details=[...probe.host.querySelectorAll('a')].find(link=>link.getAttribute('href')?.includes('orderId=legacy-active'));
+  assert.match(details?.getAttribute('href')??'',/source=legacy/);
  }finally{await probe.dispose();}
 });
 
@@ -595,6 +610,46 @@ test("one list includes both sources and old deep links return to the same filte
     assert.equal(probe.host.querySelectorAll(".order-row").length,2);
     assert.equal(calls.filter(c=>c.url.startsWith("/api/orders/unified?")).length,1);
   }finally{await probe.dispose();}
+});
+
+test("legacy detail labels current imported account facts separately from original resources and money", async () => {
+  const original = { ...legacyOrder, id: orderA.id, orderFacts: { resources: [{ code: "df_billable_haff", quantity: "12.50", unit: null }] },
+    listingFacts: { source: "LEGACY_ACCOUNT_SNAPSHOT", versionId: null, sourceUpdatedAt: "2026-11-03T00:00:00Z", rentalMode: null, attributeDisplay: { safeBox: "基础安全箱", grading: null, loginMethod: "QQ账密" }, resourceLines: [{ itemId: "legacy-display:haff_base", code: "haff_base", name: "哈夫币", quantity: "130000000", unit: "HAFF_BASE" }], termSeconds: "1123200" } };
+  const probe = await createProbe(async input => {
+    if(String(input).includes("/legacy/")) return Response.json({order:original});
+    return Response.json({items:[original],nextCursor:null,limit:20});
+  });
+  try {
+    await probe.render({party:"renter",orderId:orderA.id,source:"legacy"});
+    assert.match(probe.host.textContent,/130 M 哈夫币/); assert.match(probe.host.textContent,/当前账号资料（迁入时记录）/);
+    assert.match(probe.host.textContent,/本单资源记录/); assert.match(probe.host.textContent,/12\.50/);
+    assert.doesNotMatch(probe.host.textContent,/账号资料来自本单记录/);
+    assert.deepEqual(original.orderFacts.resources,[{code:"df_billable_haff",quantity:"12.50",unit:null}]);
+  } finally { await probe.dispose(); }
+});
+
+test("a confirmed legacy continuation refreshes its detail and unified list from the server", async () => {
+  let reads = { detail: 0, list: 0 }, completed = false;
+  const original = { ...legacyOrder, source: { ...legacyOrder.source, statusLabel: "待租客确认" } };
+  const updated = { ...original, status: "COMPLETED", source: { ...original.source, statusLabel: "已完成" } };
+  const probe = await createProbe(async input => {
+    const order = completed ? updated : original;
+    if (String(input).includes("/legacy/")) { reads.detail++; return Response.json({ order }); }
+    reads.list++;
+    return Response.json({ items: [order], nextCursor: null, limit: 20 });
+  }, { legacyContinuationPanel: ({ onOrderChanged }) => React.createElement("button", { onClick: () => { completed = true; onOrderChanged(); } }, "模拟已确认回执") });
+  try {
+    await probe.render({ party: "renter", orderId: original.id, source: "legacy" });
+    assert.match(probe.host.textContent, /待租客确认/);
+    await React.act(async () => {
+      [...probe.host.querySelectorAll("button")].find(button => button.textContent === "模拟已确认回执").click();
+      await tick();
+    });
+    assert.match(probe.host.textContent, /已完成/);
+    assert.deepEqual(reads, { detail: 2, list: 2 });
+    await probe.render({ party: "renter" });
+    assert.match(probe.host.textContent, /已完成/);
+  } finally { await probe.dispose(); }
 });
 
 test("a closed order detail drops the payment prompt and names the figure as a snapshot", async () => {

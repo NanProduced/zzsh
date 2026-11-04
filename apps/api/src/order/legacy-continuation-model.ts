@@ -11,7 +11,7 @@ export type LegacyOrderBinding = {
   id: string; legacyId: string; accountId: string; legacyAccountId: string; gameId: string;
   ownerUserId: string; renterUserId: string; legacyOwnerId: string; legacyRenterId: string;
   ownerSourceDigest: string; renterSourceDigest: string; sourceDigest: string;
-  sourceOrderStatus: number; sourcePayStatus: number; paidCents: string | null; completedAt?: string | null;
+  sourceOrderStatus: number; sourcePayStatus: number; paidCents: string | null; completedAt?: string | null; sourceDeletedFlag?: string | null;
 };
 export type LegacyEffectiveFacts = {
   schemaVersion: 1; evidence: LegacyContinuationEvidence;

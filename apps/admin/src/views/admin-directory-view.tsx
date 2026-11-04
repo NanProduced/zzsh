@@ -113,12 +113,12 @@ const SCOPE_FILTER_ITEMS = [
   { value: "ALL_GAMES", label: "全部游戏" },
   { value: "SELECTED_GAMES", label: "指定游戏" },
   { value: "NO_SCOPE", label: "无业务范围" },
-  { value: "UNKNOWN", label: "未接入" },
+  { value: "UNKNOWN", label: "待确认" },
 ];
 
-/** 未登记的枚举原样带出，不塌缩成"待激活"。 */
+/** 未登记的状态不塌缩成"待激活"。 */
 function adminStatusLabel(status: string): string {
-  return ADMIN_STATUS_LABELS[status] ?? `未知状态（${status}）`;
+  return ADMIN_STATUS_LABELS[status] ?? "状态待确认";
 }
 
 /** 必要的说明性文案统一收进问号 + Tooltip，正文只留事实。 */
@@ -139,7 +139,7 @@ function InfoHint({ label, children }: { label: string; children: ReactNode }) {
 function UnknownFact({ hint }: { hint: string }) {
   return (
     <Tooltip>
-      <TooltipTrigger render={<Badge variant="unknown">未接入</Badge>} />
+      <TooltipTrigger render={<Badge variant="unknown">未提供</Badge>} />
       <TooltipContent className="max-w-64">{hint}</TooltipContent>
     </Tooltip>
   );
@@ -1600,7 +1600,7 @@ export function AdminDirectoryView({
       <>
       <div className="flex flex-wrap items-end justify-between gap-4">
         <div className="min-w-0">
-          <h1 className="flex items-center gap-2 text-2xl font-semibold tracking-tight text-foreground">管理员账号{visibleUnknownCount > 0 ? <InfoHint label="为什么有的单元格标未接入">标「未接入」的单元格表示当前运行的 API 版本没有返回该字段，不是这个账号的事实；部署含该字段的构建后会自动显示真实值。</InfoHint> : null}</h1>
+          <h1 className="flex items-center gap-2 text-2xl font-semibold tracking-tight text-foreground">管理员账号{visibleUnknownCount > 0 ? <InfoHint label="为什么有的资料未提供">标「未提供」的资料暂时无法确认，不代表没有此项。</InfoHint> : null}</h1>
           <p className="mt-1 text-sm tabular-nums text-muted-foreground">
             {ready
               ? `${admins.length} 个账号 · 生效 ${admins.filter((item) => item.status === "ACTIVE").length} · 冻结 ${admins.filter((item) => item.status === "FROZEN").length} · 待激活 ${admins.filter((item) => item.status === "PENDING_ENROLLMENT").length}`
@@ -1665,7 +1665,7 @@ export function AdminDirectoryView({
                   <SelectItem value="ALL_GAMES">全部游戏</SelectItem>
                   <SelectItem value="SELECTED_GAMES">指定游戏</SelectItem>
                   <SelectItem value="NO_SCOPE">无业务范围</SelectItem>
-                  <SelectItem value="UNKNOWN">未接入</SelectItem>
+                  <SelectItem value="UNKNOWN">待确认</SelectItem>
                 </SelectContent>
               </Select>
             </label>
@@ -1981,7 +1981,7 @@ export function AdminDirectoryView({
                 </label>
                 <fieldset className="space-y-2" disabled={loading || !createScopeSupported}>
                   <FieldLabel>业务范围（必须明确选择）</FieldLabel>
-                  {!createScopeSupported ? <p className="text-xs text-muted-foreground">当前接口未接入创建时业务范围，暂不能创建管理员。</p> : null}
+                  {!createScopeSupported ? <p className="text-xs text-muted-foreground">暂时无法设置业务范围，不能创建管理员；请联系管理员核对。</p> : null}
                   {(["ALL_GAMES", "SELECTED_GAMES", "NO_SCOPE"] as const).map((choice) => (
                     <label key={choice} className="mr-4 inline-flex items-center gap-2 text-sm">
                       <input type="radio" name="create-admin-scope" value={choice} checked={createScopeChoice === choice} onChange={() => setCreateScopeChoice(choice)} />

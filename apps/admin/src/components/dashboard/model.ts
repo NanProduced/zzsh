@@ -117,6 +117,12 @@ export function dashboardOrdersPath(period: DashboardPayload["period"], serverDr
   if (serverDrilldown) {
     if (!serverDrilldown.startsWith("/orders?") || /[#\\]/.test(serverDrilldown)) return null;
     const query = new URLSearchParams(serverDrilldown.slice("/orders?".length));
+    if (query.has("paidFrom") || query.has("paidTo")) {
+      const paidTo = query.get("paidTo");
+      if (query.size !== 2 || query.get("paidFrom") !== period.from || !paidTo || to && paidTo !== to
+        || ![period.from, paidTo].every(value => Number.isFinite(Date.parse(value)))) return null;
+      return `/orders?${new URLSearchParams({ paidFrom: period.from, paidTo })}`;
+    }
     if ([...query.keys()].some(key => !["origin", "paymentConfirmedFrom", "paymentConfirmedTo"].includes(key)) || ["origin", "paymentConfirmedFrom", "paymentConfirmedTo"].some(key => query.getAll(key).length !== 1) || query.get("origin") !== "NATIVE" || query.get("paymentConfirmedFrom") !== period.from) return null;
     const suppliedTo = query.get("paymentConfirmedTo");
     if (to && suppliedTo !== to) return null;
@@ -160,7 +166,7 @@ const SHORT_NOTES: Record<string, string> = {
   confirmedCents: "含押金 · 未扣退款",
   quotedSpread: "冻结报价估算 · 非最终收益",
   settledContribution: "过账分量 · 非净利润",
-  paidOrders: "本期已付款原生订单",
+  paidOrders: "本期已付款订单",
   ordersPendingPayment: "未过期待付款",
   ordersPaid: "已付款，待完成订单处理",
   listingsPendingReview: "等待审核",

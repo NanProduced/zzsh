@@ -86,7 +86,7 @@ export function CarouselTab({
           <div>
             <h3 className="text-sm font-semibold">首页固定槽位轮播</h3>
             <p className="text-[11px] text-muted-foreground mt-1">
-              槽位 HOME_HERO 为当前首页主轮播。仅启用、在起止时间内且素材已审核公开的条目会被公共接口返回；撤权素材的条目自动隐藏。
+              仅启用、在展示时间内且图片已审核公开的条目会显示在首页；图片撤权后自动隐藏。
             </p>
           </div>
           {canEdit ? <Button type="button" size="sm" onClick={() => setSelected("new")}>新建轮播条目</Button> : null}
@@ -279,9 +279,9 @@ function CarouselEditor({
     <section className="section-panel">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
-          <h3 className="text-sm font-semibold">{existing ? "编辑轮播条目" : "新建轮播条目"}<span className="ml-2 text-[11px] font-normal text-muted-foreground">HOME_HERO</span></h3>
+          <h3 className="text-sm font-semibold">{existing ? "编辑轮播条目" : "新建轮播条目"}</h3>
           <p className="text-[11px] text-muted-foreground mt-1">
-            跳转只允许站内已实现路径（/、/accounts、/publish、/account、/help）；开始时间包含、结束时间不包含，由服务端按 UTC 判断。
+            跳转只支持站内指定页面（/、/accounts、/publish、/account、/help）；从开始时间起展示，至结束时间停止，按 UTC 时间计算。
           </p>
         </div>
         <div className="flex gap-2">

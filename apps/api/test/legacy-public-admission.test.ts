@@ -279,6 +279,10 @@ test("legacy public listing projection stays read only and leaks no private evid
   assert.equal(listing.canCreateOrder, false);
   assert.equal(listing.quote, null);
   assert.equal(listing.displayNo, null);
+  assert.deepEqual(listing.availability, { state: "LEGACY_READ_ONLY", reason: "PUBLICATION_REQUIRED" });
+  assert.equal(listing.feeDisplay.basis, "RECORDED");
+  assert.equal(listing.feeDisplay.resourceTotal.amount, "12.70");
+  assert.equal(listing.feeDisplay.deposit.amount, "99.00");
   assert.deepEqual(listing.historicalQuote, {
     haffRent: { currency: "CNY", unit: "yuan", amount: "12.30", scale: 2 },
     goods: { currency: "CNY", unit: "yuan", amount: "0.40", scale: 2 },
@@ -292,6 +296,19 @@ test("legacy public listing projection stays read only and leaks no private evid
   // Mode is unknown for legacy rows: it is dropped, never defaulted to ordinary/fast.
   assert.equal(Object.hasOwn(listing as Record<string, unknown>, "rentalMode"), false);
   assert.equal(wire.includes("rentalMode"), false);
+});
+
+test("historical accounts with no old alias display their assigned public number without leaking old identifiers", async () => {
+  const baseline = legacyProjectionRow();
+  for (const resourceNo of [null, "A-1"]) {
+    const row = { ...baseline, display_no: "ZZ20261103000001", snapshot: { ...baseline.snapshot, resourceNo } };
+    const listing = await readLegacyListing(legacyProjectionClient(row), "account_1");
+    assert.equal(listing.displayNo, "ZZ20261103000001");
+    assert.equal(listing.historicalQuote.haffRent.amount, "12.30");
+    assert.equal(listing.termOption.dailyConsumption.quantity, "20000000");
+    assert.doesNotMatch(JSON.stringify(listing), /resourceNo|legacyId|"A-1"/);
+    assert.equal(row.snapshot.resourceNo, resourceNo);
+  }
 });
 
 test("historical media uses the same account identity guard and keeps missing pictures readable", async () => {

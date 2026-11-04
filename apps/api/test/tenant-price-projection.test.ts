@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { computeDeltaQuote, projectDeltaQuote, type InternalQuote, type QuoteInput } from "../src/supply/pricing";
 import { applyTotalDiscountToQuote } from "../src/auth/membership-total-discount";
-import { publishedBaseRenterHaffRatioWanPerYuan, projectTenantPriceQuote } from "../src/supply/tenant-price-projection";
+import { publishedBaseRenterHaffRatioWanPerYuan, projectTenantPriceQuote, publishedListingFeeDisplay } from "../src/supply/tenant-price-projection";
 import { compatRule } from "./pricing-compat-fixture";
 import { projectOrder, type OrderRow } from "../src/order/order";
 
@@ -106,4 +106,18 @@ test("owner quote and order expose own frozen income without renter private pric
   assert.ok(support.quote.lines[0].buyerAmount); assert.ok(support.quote.lines[0].ownerAmount);
   assert.equal(support.quote.pricingInputs, undefined);
   assert.equal(JSON.stringify(internal), before);
+});
+
+
+test("listing fee display reads sealed tenant money without promoting unknown deposit or missing components", () => {
+  const internal = quote(), projected = projectTenantPriceQuote(internal, internal);
+  assert.deepEqual(publishedListingFeeDisplay(projected), {
+    basis: "PUBLISHED_OFFER", completeness: "COMPLETE", haffRental: projected.resourceTotal,
+    materials: { currency: "CNY", unit: "yuan", amount: "0.00", scale: 2 },
+    resourceTotal: projected.resourceTotal, deposit: projected.tenantDeposit,
+  });
+  assert.deepEqual(publishedListingFeeDisplay({ ...projected, lines: undefined, tenantDeposit: null }), {
+    basis: "PUBLISHED_OFFER", completeness: "PARTIAL", haffRental: null, materials: null,
+    resourceTotal: projected.resourceTotal, deposit: null,
+  });
 });

@@ -77,7 +77,7 @@ test('已关闭时提供开启；服务端未返回字段时不提供开关', as
   assert.match(off.host.textContent, /登录时不验证/);
   assert.ok([...off.host.querySelectorAll('button')].some(b => b.textContent.trim() === '开启登录验证'));
   const missing = await mount(t, snap({}));
-  assert.match(missing.host.textContent, /服务端未接入/);
+  assert.match(missing.host.textContent, /暂未提供/);
   assert.equal([...missing.host.querySelectorAll('button')].length, 0);
 });
 

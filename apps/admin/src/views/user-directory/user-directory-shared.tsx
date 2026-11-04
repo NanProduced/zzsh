@@ -373,11 +373,11 @@ export function Summary({ part, kind }: { part: Part<Order[] | Resource[]>; kind
     return <span>{count === undefined ? <span className="ud-muted">账号数待更新</span> : count ? `${count} 个` : '暂无资源账号'}{published === undefined ? null : <span className="ud-subline">已上架 {published}</span>}<span className="ud-subline">授权游戏范围内</span></span>;
   }
   const current = knownCount(part.current);
-  if (current === undefined) return <span className="ud-muted">订单摘要暂未接入</span>;
+  if (current === undefined) return <span className="ud-muted">订单摘要暂不可用</span>;
   return <span>{current ? `${current} 个进行中` : '暂无进行中订单'}<span className="ud-subline">订单权限范围内</span></span>;
 }
 export function Recent({ user }: { user: User }) {
-  return <span className="ud-muted">业务活动暂未接入</span>;
+  return <span className="ud-muted">业务活动暂不可用</span>;
 }
 
 export function DomainBlock({ adapter, id, domain, refreshNonce, filters = {}, children }: { adapter: UserDirectoryData; id: string; domain: Domain; refreshNonce: number; filters?: Record<string,string>; children: (data: Order[] | Resource[] | Audit[] | string[]) => ReactNode }) {

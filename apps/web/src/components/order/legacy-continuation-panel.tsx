@@ -27,7 +27,7 @@ function safePending(userId: string, orderId: string): PendingState {
   if (kind === "propose") { try { parseLegacyQuantitiesInput(intent.body.quantities); } catch { return { state: "UNREADABLE", intent: null }; } }
   return result;
 }
-export function LegacyContinuationPanel({ orderId, party }: { orderId: string; party: "renter" | "owner" }) {
+export function LegacyContinuationPanel({ orderId, party, onOrderChanged }: { orderId: string; party: "renter" | "owner"; onOrderChanged?: () => void }) {
   const session = useUserSession(), scope = `${session.status}:${session.userId}:${session.identityVersion}:${orderId}:${party}`;
   const live = useRef({ scope, read: 0, operation: 0 });
   if (live.current.scope !== scope) live.current = { scope, read: live.current.read + 1, operation: live.current.operation + 1 };
@@ -85,7 +85,8 @@ export function LegacyContinuationPanel({ orderId, party }: { orderId: string; p
       const receipt = await legacyContinuationApi.write(orderId, kind, intent.body, intent.key);
       if (!current() || live.current.operation !== ticket) return;
       recordIntentReceipt(intent.userId, "legacy.continuation", orderId, receipt); clearIntent(intent.userId, "legacy.continuation", orderId);
-      setPending({ scope, value: { state: "NONE", intent: null } }); setError({ scope, value: "" }); setNonce(n => n + 1);
+      setPending({ scope, value: { state: "NONE", intent: null } }); setError({ scope, value: "" });
+      if (onOrderChanged) onOrderChanged(); else setNonce(n => n + 1);
     } catch (e) { if (current() && live.current.operation === ticket) setError({ scope, value: message(e) }); }
     finally { if (current() && live.current.operation === ticket) setBusy({ scope, value: false }); }
   }
@@ -104,7 +105,11 @@ export function LegacyContinuationPanel({ orderId, party }: { orderId: string; p
       const receipt = await legacyContinuationApi.receipt(orderId, intent.context!.command as LegacyCommandName, intent.key, intent.body);
       if (!current() || live.current.operation !== ticket) return;
       setResolved({ scope, value: receipt });
-      if (receipt.state === "KNOWN_SUCCESS") { recordIntentReceipt(intent.userId, "legacy.continuation", orderId, receipt.receipt); clearIntent(intent.userId, "legacy.continuation", orderId); setPending({ scope, value: { state: "NONE", intent: null } }); setNonce(n => n + 1); }
+      if (receipt.state === "KNOWN_SUCCESS") {
+        recordIntentReceipt(intent.userId, "legacy.continuation", orderId, receipt.receipt); clearIntent(intent.userId, "legacy.continuation", orderId);
+        setPending({ scope, value: { state: "NONE", intent: null } });
+        if (onOrderChanged) onOrderChanged(); else setNonce(n => n + 1);
+      }
     } catch (e) { if (current() && live.current.operation === ticket) setError({ scope, value: message(e) }); }
     finally { if (current() && live.current.operation === ticket) setBusy({ scope, value: false }); }
   }

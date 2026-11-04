@@ -69,7 +69,7 @@ function projectCancelled(x:ReturnType<typeof cancelled>){
  return projectLegacyGrowthConsumption(x.input,new Set([x.input.origin.components.digest]),x.receipt);
 }
 function changeCancelledProof(x:ReturnType<typeof cancelled>,field:"payment"|"refundRecord"|"refundLog",patch:Record<string,string>){
- if(x.input.origin.kind!=="LEGACY_CANCELLED_UNCONSUMED")assert.fail();
+ if(x.input.origin.kind!=="LEGACY_CANCELLED_UNCONSUMED"&&x.input.origin.kind!=="LEGACY_CANCELLED_FULL_REFUND")assert.fail();
  const value=JSON.parse(x.input.origin.components.canonical),row=JSON.parse(value[field].records[0].canonical);value[field].records=[proof({...row,...patch})];
  x.input.origin.components=proof(value);x.receipt.refundReviewEvidenceRefs=[x.input.origin.components.digest,value.refundRecord.records[0].digest,value.refundLog.records[0].digest];
 }
@@ -108,4 +108,30 @@ test("refund flags or a proof alone cannot replace scoped source receipt, admitt
  assert.equal(projectLegacyGrowthConsumption(x.input,new Set(),x.receipt).reason,"COMPONENT_EVIDENCE_NOT_ADMITTED");
  x.receipt.refundReviewEvidenceRefs=[];assert.equal(projectCancelled(x).reason,"CANCELLATION_NOT_IN_RECEIPT_LINEAGE");
  const wrong=cancelled();wrong.input.binding.sourceDigest="e".repeat(64);assert.equal(projectCancelled(wrong).knowledge,"UNKNOWN");
+});
+
+function fullRefund(){
+ const x=cancelled("30.00",{expend_haff:"130.00",return_order_money:"87.00",awm_bullet_num:"2"});
+ if(x.input.origin.kind!=="LEGACY_CANCELLED_UNCONSUMED")assert.fail();
+ x.input.origin.kind="LEGACY_CANCELLED_FULL_REFUND";
+ x.input.origin.components=proof({...JSON.parse(x.input.origin.components.canonical),classification:"PAID_CANCELLED_FULL_REFUND"});
+ x.receipt.refundReviewEvidenceRefs=[x.input.origin.components.digest,...x.receipt.refundReviewEvidenceRefs.slice(1)];return x;
+}
+function projectReviewed(x:ReturnType<typeof cancelled>){
+ if(x.input.origin.kind==="CONTINUATION_CONFIRM")assert.fail();
+ return projectLegacyGrowthConsumption(x.input,new Set([x.input.origin.components.digest]),x.receipt);
+}
+test("a never-confirmed proposal followed by a full typed refund is void, while a confirmed or partial-refund order stays unknown",()=>{
+ const x=fullRefund();assert.equal(projectReviewed(x).reason,"CANCELLED_FULL_REFUND");assert.deepEqual(projectReviewed(x).facts,[]);
+ const confirmed=fullRefund();confirmed.input.binding.completedAt="2026-10-01T01:00:30.000000Z";assert.equal(projectReviewed(confirmed).knowledge,"UNKNOWN");
+ const partial=fullRefund();changeCancelledProof(partial,"refundRecord",{refund_amount:"99.00"});assert.equal(projectReviewed(partial).knowledge,"UNKNOWN");
+ const noLog=fullRefund();if(noLog.input.origin.kind==="CONTINUATION_CONFIRM")assert.fail();const p=JSON.parse(noLog.input.origin.components.canonical);p.refundLog.records=[];noLog.input.origin.components=proof(p);noLog.receipt.refundReviewEvidenceRefs.push(noLog.input.origin.components.digest);assert.equal(projectReviewed(noLog).knowledge,"UNKNOWN");
+});
+test("scoped paid but unconfirmed sources exclude proposals until formal CONFIRM; a final confirmation cannot be erased",()=>{
+ const x=cancelled();if(x.input.origin.kind!=="LEGACY_CANCELLED_UNCONSUMED")assert.fail();
+ const raw={...JSON.parse(x.input.origin.sourceRecord.canonical),order_status:"8",return_order_money:"87.00",expend_haff:"130.00"};
+ const sourceRecord=proof(raw);x.input.binding={...x.input.binding,sourceDigest:sourceRecord.digest,sourceOrderStatus:8};
+ x.input.origin={kind:"LEGACY_PENDING_UNSETTLED",parentSourceSnapshot:raw,sourceRecord,components:proof({schema:"legacy-consumption-exclusion.v1",classification:"PAID_NOT_EFFECTIVELY_SETTLED",parentSourceDigest:sourceRecord.digest,basisDigest:sourceRecord.digest,legacyOrderId:"7",subjectUserId:x.input.subjectUserId,cutoff:x.receipt.cutoff,oldRuleEvidenceRef:"FIXTURE_UNCONFIRMED_PROPOSAL"})};
+ assert.equal(projectReviewed(x).reason,"NOT_EFFECTIVELY_SETTLED");assert.equal(projectLegacyGrowthConsumption(x.input,new Set([x.input.origin.components.digest])).knowledge,"UNKNOWN");
+ x.input.binding.completedAt="2026-10-01T01:00:30.000000Z";assert.equal(projectReviewed(x).knowledge,"UNKNOWN");
 });

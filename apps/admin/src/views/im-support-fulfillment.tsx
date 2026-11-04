@@ -753,7 +753,7 @@ function SupportCancelCard({ orderId, displayNo }: { orderId: string; displayNo:
       setPhase("IDLE");
       if (cause instanceof AdminApiError && (cause.status === 401 || cause.status === 423)) setError("登录状态已变化；请重新确认管理员身份后核对。");
       else if (cause instanceof AdminApiError && cause.status === 403) setError("当前账号不是本单客服，或没有订单结算写权限。");
-      else if (cause instanceof AdminApiError && cause.status === 404) setError("客服取消服务未装配或订单不可读；不能据此认定无需退款。");
+      else if (cause instanceof AdminApiError && cause.status === 404) setError("当前无法办理客服取消或读取订单，请核对退款责任。");
       else setError(friendlyError(cause));
     }
   };

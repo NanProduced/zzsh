@@ -123,8 +123,8 @@ test('detail breadcrumb stays generic without a server-confirmed game', () => {
 test('condition lines skip absent fields and keep unknown keys out', () => {
   assert.deepEqual(conditionLines({ vit_level: null, bear_level: '', grading_code: undefined }), []);
   assert.equal(JSON.stringify(conditionLines({ vit_level: 7 })).includes('safe'), false);
-  assert.equal(conditionLines({ grading_code: 'future', login_method_code: 'steam_cn' })[0].value, '未确认（代码 future）');
-  assert.equal(conditionLines({ grading_code: 'future', login_method_code: 'steam_cn' })[1].value, '未确认（代码 steam_cn）');
+  assert.equal(conditionLines({ grading_code: 'future', login_method_code: 'steam_cn' })[0].value, '未确认');
+  assert.equal(conditionLines({ grading_code: 'future', login_method_code: 'steam_cn' })[1].value, '未确认');
 });
 
 test('resource labels use catalog code and quoted unit quantity', () => {
@@ -204,7 +204,7 @@ test('unmapped resource IDs stay explicit instead of becoming display names', ()
     ...listing,
     presentation: { ...listing.presentation, items: [] },
   });
-  assert.equal(card.resourceLines[0].name, '未确认（代码 item_haff）');
+  assert.equal(card.resourceLines[0].name, '未确认');
 });
 
 const accountTitleCode = ts.transpileModule(
@@ -537,6 +537,21 @@ test('historical listing keeps exact source amounts without inventing a current 
   assert.deepEqual(empty.skinNames, []);
   assert.throws(() => toListingCard({ ...historical, canCreateOrder: true }));
   assert.throws(() => toListingCard({ ...listing, quote: null }));
+});
+
+test('legacy image slots keep order without replacing actual bound media', () => {
+  const money = amount => ({ currency: 'CNY', unit: 'yuan', amount, scale: 2 });
+  const historical = { ...listing, source: 'LEGACY_READ_ONLY', canCreateOrder: false, quote: null, media: [],
+    historicalQuote: { haffRent: money('1.00'), goods: money('0.00'), deposit: money('0.00'), termDays: '1' }, inventory: [],
+    legacyImages: [{ position: 1, url: '/api/supply/listings/account_1/legacy-images/1' }, { position: 0, url: '/api/supply/listings/account_1/legacy-images/0' }] };
+  const view = toListingCard(historical);
+  assert.deepEqual(view.media.map(item => [item.assetId, item.legacy]), [['legacy-slot-0', true], ['legacy-slot-1', true]]);
+  assert.equal(view.imageUrl, '/api/supply/listings/account_1/legacy-images/0');
+  const existing = toListingCard({ ...historical, media: [{ assetId: 'real_asset', position: 0, url: '/api/supply/listings/account_1/media/real_asset' }] });
+  assert.equal(existing.media[0].assetId, 'real_asset'); assert.equal(existing.media[0].legacy, undefined);
+  const published = toListingCard({ ...listing, media: [], legacyImages: [{ position: 0, url: '/api/supply/listings/account_1/legacy-images/0' }], availability: { state: 'RENTABLE' }, canCreateOrder: true });
+  assert.equal(published.imageUrl, '/api/supply/listings/account_1/legacy-images/0');
+  assert.equal(published.media[0].legacy, true); assert.equal(published.canCreateOrder, true);
 });
 
 test('historical detail consumes the frozen haff rent for the display ratio only, never for goods rows', () => {

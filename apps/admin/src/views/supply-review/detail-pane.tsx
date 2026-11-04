@@ -1,4 +1,6 @@
 import { useState, type ReactNode } from "react";
+import { LegacyAccountMediaGrid } from "@zzsh/ui/legacy-account-media-grid";
+import { LegacyAccountImage } from "@zzsh/ui/legacy-account-image";
 
 import { ChevronDown } from "lucide-react";
 import { useIsMobile } from "../../hooks/use-mobile";
@@ -36,6 +38,7 @@ import {
   type MediaBinding,
   type PublicBasis,
   type QueueItem,
+  type SupplyWorkDetail,
   type ZoomTarget,
 } from "./model";
 
@@ -85,10 +88,11 @@ export function ImportedAccountView({ read }: { read: LegacyHistoricalRead }) {
 }
 
 /** Same detail helpers as the archive. Draft fields are not consulted. */
-function AccountProfile({ version, depositCents, payoutText, media, assets, showManagement = true }: {
-  version: Detail["version"]; depositCents?: string | null; payoutText: string; media: ReactNode; assets: ReactNode; showManagement?: boolean;
+function AccountProfile({ version, depositCents, payoutText, media, assets, historicalRead, showManagement = true }: {
+  version: Detail["version"]; depositCents?: string | null; payoutText: string; media: ReactNode; assets: ReactNode; historicalRead?: LegacyHistoricalRead | null; showManagement?: boolean;
 }) {
   const mobile = useIsMobile();
+  if (version.origin === "LEGACY_OBSERVATION" && historicalRead?.observationVersionId === version.id) return <><ImportedAccountView read={historicalRead}/><Section title="皮肤与权益">{assets}</Section><Section title="账号图片">{media}</Section></>;
   const facts = attributeFacts(version);
   const named = [...(version.presentation.items ?? []), ...(version.catalogItems ?? [])];
   const haff = version.declaration.inventory.find(item => named.some(entry => entry.id === item.itemId && entry.unit === "HAFF_BASE") || version.quote?.lines?.some(line => line.itemId === item.itemId && line.unit === "HAFF_BASE"));
@@ -142,13 +146,19 @@ function AccountProfile({ version, depositCents, payoutText, media, assets, show
   </>;
 }
 
+function publicLegacyMedia(images: PublicBasis["legacyImages"]) {
+  return images?.length ? <ul className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">{images.map(item =>
+    <li key={item.position}><LegacyAccountImage src={item.url} alt={`账号展示图，第${item.position + 1}张`} className="aspect-[4/3] w-full rounded-lg border border-border object-contain" /></li>)}</ul> : null;
+}
+
 export function PublicBasisView({ basis, showManagement = true, showRecords = true }: { basis: PublicBasis; showManagement?: boolean; showRecords?: boolean }) {
   const version = publicBasisVersion(basis);
   const payout = basis.fullPayoutSelected === true ? "已选" : basis.fullPayoutSelected === false ? "未选" : "未提供";
+  const legacyMedia = publicLegacyMedia(basis.legacyImages);
   return <section className="space-y-6" aria-label="租客当前看到的版本">
     <AccountProfile version={version} depositCents={basis.baseDeposit?.amountCents} payoutText={payout} showManagement={showManagement}
       assets={<><SkinList version={version}/>{version.declaration.entitlements.map(item => <p key={item.entitlementId} className="text-sm">{version.presentation.entitlements?.find(entry => entry.id === item.entitlementId)?.name ?? "权益名称未提供"} · {entitlementTermText(item)}</p>)}</>}
-      media={basis.media.length ? <ul className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">{basis.media.map((item, index) => <li key={item.assetId ?? index}>{item.url ? <img src={item.url} alt={item.category === "PENALTY" ? "处罚公示" : "账号展示图"} className="aspect-[4/3] w-full rounded-lg border border-border object-contain" loading="lazy"/> : <span className="text-sm text-muted-foreground">图片暂不可读</span>}<p className="mt-1 text-xs text-muted-foreground">{item.category === "PENALTY" ? "处罚公示" : "账号展示图"}</p></li>)}</ul> : <p className="text-sm text-muted-foreground">暂未提供可读图片。</p>}/>
+      media={basis.media.length ? <ul className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">{basis.media.map((item, index) => <li key={item.assetId ?? index}>{item.url ? <img src={item.url} alt={item.category === "PENALTY" ? "处罚公示" : "账号展示图"} className="aspect-[4/3] w-full rounded-lg border border-border object-contain" loading="lazy"/> : <span className="text-sm text-muted-foreground">图片暂不可读</span>}<p className="mt-1 text-xs text-muted-foreground">{item.category === "PENALTY" ? "处罚公示" : "账号展示图"}</p></li>)}</ul> : legacyMedia ?? <p className="text-sm text-muted-foreground">暂未提供可读图片。</p>}/>
     {showManagement && showRecords ? <Collapsible className="border-t border-border pt-4"><CollapsibleTrigger className="group flex w-full items-center justify-between text-sm text-muted-foreground">资料版本与发布时间<ChevronDown className="size-3.5"/></CollapsibleTrigger><CollapsibleContent keepMounted className="pt-3 text-xs text-muted-foreground data-[closed]:hidden"><dl className="grid gap-2 break-all"><div><dt>原标题</dt><dd>{basis.title || "未填写"}</dd></div><div><dt>发布时间</dt><dd>{displayTime(basis.publishedAt)}</dd></div><div><dt>版本</dt><dd>{basis.id}</dd></div><div><dt>内容摘要</dt><dd>{basis.contentHash ?? "未提供"}</dd></div><div><dt>规则</dt><dd>{basis.releaseId ?? "未提供"}</dd></div></dl></CollapsibleContent></Collapsible> : null}
   </section>;
 }
@@ -160,10 +170,10 @@ function StateBadge({ state }: { state: string }) {
 
 /** 完整账号资料：图片、属性、资产、费用、权益、历史与记录在一页分区呈现，不再嵌套第二层档案 tab。 */
 export function AccountCompleteView({
-  detail, version, canReviewMedia, busy, reasonReady, onZoom, onQuarantine, onRestore,
+  detail, version, historicalRead, canReviewMedia, busy, reasonReady, onZoom, onQuarantine, onRestore,
   onSelectVersion, versionId, actions, entryNote, showManagement = true, showRecords = true,
 }: {
-  detail: Omit<Detail, "version">; version: Detail["version"]; historicalRead?: LegacyHistoricalRead | null;
+  detail: Omit<Detail, "version"> & Partial<Pick<SupplyWorkDetail, "supervision">>; version: Detail["version"]; historicalRead?: LegacyHistoricalRead | null;
   canReviewMedia: boolean; busy: boolean; reasonReady: boolean;
   onZoom: (target: ZoomTarget, trigger?: HTMLElement) => void;
   onQuarantine: (assetId: string) => void; onRestore: (assetId: string) => void;
@@ -171,15 +181,19 @@ export function AccountCompleteView({
   actions?: ReactNode; entryNote?: string; showManagement?: boolean; showRecords?: boolean;
 }) {
   const historical = isHistorical(detail), media = version.declaration.mediaBindings.filter(binding => showManagement || binding.purpose === "ACCOUNT_DISPLAY" && binding.publiclyReadable === true && Boolean(binding.publicUrl));
+  const publicBasis = detail.supervision?.facts.publicBasis;
+  const publicMedia = publicBasis?.id === version.id ? publicLegacyMedia(publicBasis.legacyImages) : null;
+  const legacyMedia = showManagement && version.origin === "LEGACY_OBSERVATION" && detail.legacyMediaCounts
+    ? <LegacyAccountMediaGrid accountId={detail.account.id} {...detail.legacyMediaCounts} /> : null;
   const payout = version.declaration.attributes.full_payout_declaration as Record<string, unknown> | undefined;
   const payoutText = payout?.selected === true ? "已选" : payout?.selected === false ? "未选" : "未提供";
   return <div className="supervision-detail-body min-w-0 space-y-6">
     <h2 className="sr-only">完整账号资料</h2>
     {actions || entryNote ? <header className="flex flex-wrap items-center justify-between gap-3">{entryNote ? <p className="text-sm text-muted-foreground">{entryNote}</p> : null}<div className="flex flex-wrap gap-2">{actions}</div></header> : null}
     {historical ? <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-border px-3 py-2 text-sm"><span>正在查看资料存档，只能阅读。</span><Button size="sm" variant="outline" onClick={() => onSelectVersion(null)}>回到当前资料</Button></div> : null}
-    <AccountProfile version={version} payoutText={payoutText} showManagement={showManagement}
+    <AccountProfile version={version} payoutText={payoutText} historicalRead={historicalRead} showManagement={showManagement}
       assets={<><SkinList version={version}/>{version.declaration.entitlements.length ? <ul className="mt-3 space-y-1.5 text-sm">{version.declaration.entitlements.map(item => <li key={item.entitlementId}>{version.presentation.entitlements?.find(entry => entry.id === item.entitlementId)?.name ?? "权益名称未提供"} · {item.value === true ? "持有" : item.value === false ? "未持有" : String(item.value ?? "未提供")} · {entitlementTermText(item)}</li>)}</ul> : null}</>}
-      media={media.length ? <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">{media.map((binding, index) => <MediaCard key={binding.assetId} binding={binding} index={index} total={media.length} showManagement={showManagement} canReviewMedia={showManagement && canReviewMedia} readOnly={historical} busy={busy} reasonReady={reasonReady} onZoom={onZoom} onQuarantine={onQuarantine} onRestore={onRestore}/>)}</div> : <p className="text-sm text-muted-foreground">{showManagement ? "暂未提供图片。" : "本次读取未提供可公开读取的展示图。"}</p>}/>
+      media={media.length ? <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">{media.map((binding, index) => <MediaCard key={binding.assetId} binding={binding} index={index} total={media.length} showManagement={showManagement} canReviewMedia={showManagement && canReviewMedia} readOnly={historical} busy={busy} reasonReady={reasonReady} onZoom={onZoom} onQuarantine={onQuarantine} onRestore={onRestore}/>)}</div> : publicMedia ?? legacyMedia ?? <p className="text-sm text-muted-foreground">{showManagement ? "暂未提供图片。" : "本次读取未提供可公开读取的展示图。"}</p>}/>
     {showManagement && showRecords ? <Collapsible className="border-t border-border pt-4"><CollapsibleTrigger className="group flex w-full items-center justify-between text-sm font-medium text-muted-foreground">版本与审核记录<ChevronDown className="size-3.5 transition-transform group-data-[panel-open]:rotate-180"/></CollapsibleTrigger><CollapsibleContent className="space-y-4 pt-3">
       <dl className="grid gap-3 break-all text-xs text-muted-foreground sm:grid-cols-2"><div><dt>原标题</dt><dd>{version.declaration.title || "未填写"}</dd></div><div><dt>资料版本</dt><dd>{version.id}</dd></div><div><dt>状态</dt><dd><StateBadge state={version.reviewState}/></dd></div><div><dt>内容摘要</dt><dd>{version.contentHash ?? "未提供"}</dd></div><div><dt>规则版本</dt><dd>{version.releaseId ?? "未提供"}</dd></div><div><dt>租期规则</dt><dd>{version.termOption?.displayName ?? "未提供"}</dd></div><div><dt>发布时间</dt><dd>{displayTime(version.publication?.publishedAt)}</dd></div></dl>
       {detail.history?.length ? <div className="flex flex-wrap gap-2">{detail.history.map(entry => <Button key={entry.id} variant="outline" size="sm" type="button" aria-pressed={versionId === entry.id} onClick={() => onSelectVersion(entry.id)}>第 {entry.sequence} 版 · {reviewStateLabel(entry.review_state)}</Button>)}</div> : <p className="text-sm text-muted-foreground">没有更早的资料记录。</p>}

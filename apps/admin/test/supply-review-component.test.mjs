@@ -95,6 +95,23 @@ test('detail pane renders declaration, catalog resources and quote lines', async
   assert.deepEqual([...h.el.querySelector('[data-resource-billing] thead').querySelectorAll('th')].map(node => node.textContent), ['物资', '数量', '单位', '计价基数', '单价', '行额']);
 });
 
+test('the current public version displays admitted legacy picture slots', async t => {
+  const value = detail(accountA, 'PUBLISHED');
+  value.version.declaration.mediaBindings = [];
+  const url = '/api/v1/supply/listings/a/legacy-images/0';
+  value.supervision = { historical: false, facts: {
+    newOrders: true, reasons: [], ownerPaused: false, staffRestricted: false, occupancy: 'FREE', publicSource: 'NATIVE_PUBLICATION', sources: [], legacyNumbers: [],
+    publicVisible: true,
+    publicVersionId: value.version.id,
+    publicBasis: { id: value.version.id, media: [], legacyImages: [{ position: 0, url }] },
+  }, restrictionHistory: { state: 'NOT_RECORDED', items: [], limit: 20 }, ownerLink: { state: 'DENIED' }, orders: { state: 'DENIED' } };
+  value.contextKey = 'fixture-context';
+  const h = await mountHarness(t, { permissions, initialAccountId: 'a', initialQuery: { context: 'situation' }, fetchImpl: async () => json(value) });
+  await tick(h);
+  assert.match(h.el.textContent, /正在查看对外资料/);
+  assert.equal(h.el.querySelector('img[alt="账号展示图，第1张"]')?.getAttribute('src'), url);
+});
+
 test('skin grid shows only image, name and factual quality badges without repeating classification metadata', async t => {
   const value = workDetail();
   value.version.presentation.skins = [{ id: 'skin1', name: '可读外观', ownerKind: 'AGENT', rarityName: '传说', rarityBasis: 'PLATFORM_REFERENCE', isCollectible: true, defaultState: 'DEFAULT' }, { id: 'skin2', name: '未定品质外观', ownerKind: 'MELEE_TYPE', rarityName: null, isCollectible: false, defaultState: 'NON_DEFAULT' }];

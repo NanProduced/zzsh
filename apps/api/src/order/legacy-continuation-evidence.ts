@@ -7,6 +7,7 @@ import { legacyOwnerUserId } from "../supply/legacy-user-migration";
 import { assertGameScope, conflict, forbidden, fingerprintRequest, invalid, newSupplyId, notFound, sha256Hex, withIdempotency } from "../supply/supply-util";
 import { canonicalize } from "../supply/content-hash";
 import type { LegacyContinuationSource } from "./legacy-continuation-calc";
+import { legacyContinuationReady } from "./legacy-order-read";
 import { assertLegacyCommissionEvidence, initialLegacyFacts, legacyCommissionMaturity, legacyDecimalEquals, legacyEconomicDutyId, legacyOrderAdvisoryKey, legacyPlanYuanToCents, legacyTimeMicros, projectLegacyContinuation, readSealedLegacyFacts, sealLegacyFacts,
   type CompletedCommissionTime, type LegacyCommissionEvidence, type LegacyContinuationActor, type LegacyDutyFinalizationReader, type LegacyDutyRow, type LegacyEvidenceRow, type LegacyHeadRow, type LegacyOrderBinding } from "./legacy-continuation-model";
 
@@ -17,13 +18,14 @@ export async function readLegacyContinuationBinding(client: PoolClient, orderId:
   const row = (await client.query<LegacyOrderBinding>(`SELECT id,legacy_id AS "legacyId",account_id AS "accountId",legacy_account_id AS "legacyAccountId",game_id AS "gameId",
     owner_user_id AS "ownerUserId",renter_user_id AS "renterUserId",legacy_owner_id AS "legacyOwnerId",legacy_renter_id AS "legacyRenterId",
     owner_source_digest AS "ownerSourceDigest",renter_source_digest AS "renterSourceDigest",source_digest AS "sourceDigest",
-    source_order_status AS "sourceOrderStatus",source_pay_status AS "sourcePayStatus",recorded_paid_amount_cents::text AS "paidCents",${utc("source_completed_at")} AS "completedAt"
+    source_order_status AS "sourceOrderStatus",source_pay_status AS "sourcePayStatus",recorded_paid_amount_cents::text AS "paidCents",${utc("source_completed_at")} AS "completedAt",source_snapshot->>'is_delete' AS "sourceDeletedFlag"
     FROM zzsh_order.legacy_order_read_snapshot WHERE id=$1`, [orderId])).rows[0];
   if (!row) throw notFound();
   return row;
 }
 export async function authorizeLegacyContinuation(client: PoolClient, actor: LegacyContinuationActor, binding: LegacyOrderBinding, write = false, userIds: readonly string[] = [binding.ownerUserId,binding.renterUserId]): Promise<{ canOperate: boolean; canReadCommission: boolean }> {
-  if (actor.realm === "user" && actor.userId !== binding.ownerUserId && actor.userId !== binding.renterUserId) throw notFound();
+  if (actor.realm === "user" && ((actor.userId !== binding.ownerUserId && actor.userId !== binding.renterUserId)
+    || (binding.sourceDeletedFlag != null && binding.sourceDeletedFlag !== "0"))) throw notFound();
   // F's prefix uses the same ordered parties. No account lock is taken after the order lock.
   if (write) await client.query(`SELECT id FROM zzsh_auth_user."user" WHERE id=ANY($1::text[]) ORDER BY id FOR UPDATE`, [[...new Set([...userIds,binding.ownerUserId,binding.renterUserId])].sort()]);
   let canOperate = false;
@@ -88,6 +90,9 @@ export async function readLegacyContinuationEvidence(client: PoolClient, orderId
 export async function readLegacyContinuation(client: PoolClient, actor: LegacyContinuationActor, orderId: string, finance?: LegacyDutyFinalizationReader) {
   const binding = await readLegacyContinuationBinding(client, orderId);
   const access = await authorizeLegacyContinuation(client, actor, binding);
+  if (!(await legacyContinuationReady(client))) {
+    return { continuation: projectLegacyContinuation(binding, actor, null, null, []) };
+  }
   const head = await readLegacyContinuationHead(client, orderId), duties = await readLegacyContinuationDuties(client, orderId);
   const evidence = await readLegacyContinuationEvidence(client, orderId, head);
   const disposition = finance ? await finance(client, orderId, duties) : "UNKNOWN";

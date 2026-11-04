@@ -4,6 +4,7 @@ import { createRequire } from 'node:module';
 import test from 'node:test';
 import ts from 'typescript';
 import React from 'react';
+import { contentFixtureDependency } from './content-fixture.mjs';
 
 const require = createRequire(import.meta.url);
 const source = readFileSync(new URL('../src/components/ui/thumbnail-carousel.tsx', import.meta.url), 'utf8');
@@ -52,7 +53,7 @@ function setup({ index = 1, itemCount = 3, width = 100 } = {}) {
         return { ChevronLeft: 'span', ChevronRight: 'span', ImageOff: 'span' };
       }
       if (name === 'react/jsx-runtime') return require('react/jsx-runtime');
-      return require(name);
+      return contentFixtureDependency(name) ?? require(name);
     }, exports, React);
     const tree = exports.ThumbnailCarousel({
       items: Array.from({ length: itemCount }, (_, itemIndex) => ({ id: `item-${itemIndex}`, src: `/item-${itemIndex}`, alt: `item ${itemIndex}` })),

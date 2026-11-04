@@ -48,9 +48,14 @@ test('坏2xx回执保留原键/body；重复点击只恢复原退款，不覆盖
  assert.equal(ui.calls.length,2);assert.equal(new Headers(ui.calls[0].headers).get('idempotency-key'),new Headers(ui.calls[1].headers).get('idempotency-key'));
  assert.equal(ui.calls[0].body,ui.calls[1].body);assert.deepEqual(JSON.parse(ui.calls[0].body),{});
 });
+test('退款需要复核时展示可理解原因，不暴露内部码',async t=>{
+ const ui=await setup(t,'/apps/admin/src/views/admin-original-refund-panel.tsx',originalProps,()=>response({contractVersion:'admin-prestart-native-refund.v1',orderId:'order_1',terminationId:'term_1',replayed:false,outcome:'REVIEW_REQUIRED',reason:'ORIGINAL_ORDER_NO_AMBIGUOUS',channel:{result:'NOT_SUBMITTED',bankArrival:'UNKNOWN'}}));
+ await ui.click(ui.host.querySelector('input[type=checkbox]'));await ui.click(ui.host.querySelector('button'));
+ assert.match(ui.host.textContent,/原订单号不明确/);assert.doesNotMatch(ui.host.textContent,/ORIGINAL_ORDER_NO_AMBIGUOUS/);
+});
 test('审核读取只GET，责任/本地核销/未知与原号并列，零默认渠道命令',async t=>{
  const ui=await setup(t,'/apps/admin/src/views/admin-prestart-termination-panel.tsx',{componentName:'AdminPrestartTerminationPanel',orderId:'order_1',binding,canWrite:true},()=>response(ctx));
- assert.equal(ui.calls.length,1);assert.equal(ui.calls[0].method,'GET');assert.match(ui.host.textContent,/159\.08/);assert.match(ui.host.textContent,/本站尚未核销/);assert.match(ui.host.textContent,/UNKNOWN/);assert.match(ui.host.textContent,/银行到账未核定/);
+ assert.equal(ui.calls.length,1);assert.equal(ui.calls[0].method,'GET');assert.match(ui.host.textContent,/159\.08/);assert.match(ui.host.textContent,/本站尚未核销/);assert.match(ui.host.textContent,/结果待确认/);assert.doesNotMatch(ui.host.textContent,/UNKNOWN/);assert.match(ui.host.textContent,/银行到账未核定/);
  assert.equal(ui.host.textContent.includes('已经到账'),false);
 });
 test('纯回执解析不把review、坏枚举或数组当已登记/渠道成功',async t=>{

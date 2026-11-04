@@ -129,7 +129,7 @@ test('unified overview preserves unknown responsibilities, actual recovery, one 
   const sql=calls[0]!.sql;
   assert.match(sql,/DISTINCT ON\(p.source_system,p.source_entity,p.source_id,p.user_id,p.snapshot->>'level'\)/);
   assert.match(sql,/sourceOrderType'='1'/);assert.match(sql,/d.order_id=p.allowed_order_id/);assert.match(sql,/source_record_id=p.source_id/);
-  assert.match(sql,/legacyChangeType'='1001'.*action'='1'/s);assert.match(sql,/credit.n=1/);assert.match(sql,/rawSource/);assert.match(sql,/legacy_credit_keys AS MATERIALIZED/);assert.match(sql,/k.amount=l.snapshot->>'amount'/);assert.match(sql,/k.original_at=l.snapshot->>'createdAt'/);assert.doesNotMatch(sql,/LATERAL/);
+  assert.match(sql,/legacyChangeType'='1001'.*action'='1'/s);assert.match(sql,/credit.n=1/);assert.match(sql,/rawSource/);assert.match(sql,/legacy_log_candidates AS MATERIALIZED/);assert.match(sql,/credit.amount=p.original->>'earnings'/);assert.match(sql,/credit.original_at=p.original->>'settle_time'/);assert.doesNotMatch(sql,/LATERAL/);
   assert.doesNotMatch(sql,/sourceUpdatedAt|FOR UPDATE|\bINSERT\b|\bUPDATE\b|\bDELETE\b/);
   const empty=await readUnifiedDistributionOverview({query:async()=>({rows:[unifiedAggregate()]})} as any,dashboardContext(),filtersForTest(),{legacy:true,duties:false});
   assert.equal(empty.current.settled.cents,'0');assert.equal(empty.current.pending.count,'0');assert.equal(empty.recordSummary.knowledge,'KNOWN');
@@ -310,6 +310,35 @@ test("native stock keeps role rows in earnings but counts each order once", asyn
 function filtersForTest(): DashboardFilters {
   return { from: "2026-10-01", to: "2026-10-31", source: "ALL", state: "ALL", role: "ALL", q: "", page: 1, pageSize: 20, rankingBasis: "CURRENT_SETTLED_STOCK", rankingLimit: 10 };
 }
+
+test('participants include historical commissions and leave incomplete child totals unknown',async()=>{
+ const client={query:async(sql:string)=>{
+  if(sql.includes('to_regclass'))return{rows:[{native:true,legacy:true,duties:true}]};
+  if(sql.includes('WITH visible_earnings AS'))return{rows:[{native:'n'}]};
+  if(sql.includes('clock_timestamp'))return{rows:[{at:'2026-11-03T00:00:00Z'}]};
+  if(sql.includes('ORDER BY p.user_id LIMIT'))return{rows:[{user_id:'old_user',eligibility:'UNKNOWN',source_type:'LEGACY_MYSQL',invitees_knowledge:'UNKNOWN',leader_children:0,inviter_children:0,total:1}]};
+  if(sql.startsWith('WITH legacy_records'))return{rows:[{beneficiary_id:'old_user',record_count:'3',settled_cents:'9007199254740993',pending_cents:'25',recovery_cents:'0',review_cents:'100',review_count:'1'}]};
+  return{rows:[]};
+ }} as any;
+ const result=await readAdminDistributionParticipants(client,dashboardContext(),filtersForTest()),p=result.items[0]!;
+ assert.equal(p.settledCents,'9007199254740993');assert.equal(p.pendingCents,'25');assert.equal(p.needsReviewCents,'100');assert.equal(p.needsReviewCount,'1');assert.equal(p.mappedRecordCount,'3');assert.equal(p.recordCount,null);
+ assert.equal(p.inviterChildren,null);assert.equal(p.leaderChildren,null);assert.equal(p.eligibility,'UNKNOWN');assert.deepEqual(p.earningsReasonCodes,['HISTORICAL_COVERAGE_NOT_CLOSED']);
+});
+
+test('participant zero amounts require the existing exact history coverage proof',async()=>{
+ let covered=false;const client={query:async(sql:string)=>{
+  if(sql.includes('finance history coverage installed'))return{rows:[{installed:true}]};
+  if(sql.includes('finance history coverage exact target'))return{rows:[{id:'coverage_one',source_count:0,imported_count:0,isolated_count:0,imported_set_digest:'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855',actual_digest:'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855',actual_count:'0',invalid_count:'0',outside_count:'0',cutoff:'2026-11-03T00:00:00.000Z'}]};
+  if(sql.includes('to_regclass'))return{rows:[{native:true,legacy:true,coverage:covered}]};
+  if(sql.includes('WITH visible_earnings AS'))return{rows:[{native:'n'}]};
+  if(sql.includes('clock_timestamp'))return{rows:[{at:'2026-11-03T00:00:00Z'}]};
+  if(sql.includes('ORDER BY p.user_id LIMIT'))return{rows:[{user_id:'old_user',eligibility:'UNKNOWN',source_type:'LEGACY_MYSQL',invitees_knowledge:'KNOWN',leader_children:0,inviter_children:0,total:1}]};
+  return{rows:[]};
+ }} as any;
+ const read=()=>readAdminDistributionParticipants(client,dashboardContext(),filtersForTest());
+ assert.equal((await read()).items[0]!.settledCents,null);covered=true;const p=(await read()).items[0]!;
+ assert.equal(p.settledCents,'0');assert.equal(p.pendingCents,'0');assert.equal(p.recordCount,'0');assert.equal(p.earningsCoverage,'KNOWN');assert.equal(p.inviterChildren,0);
+});
 
 test("empty tail pages preserve the same filtered total and snapshot while a genuine empty set remains zero",async()=>{
  for(const kind of ['earnings','participants'] as const){for(const expected of ['7','0']){

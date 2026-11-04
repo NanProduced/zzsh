@@ -125,7 +125,7 @@ export function StatCard({ metric, onNavigate }: { metric: DashboardMetric; onNa
 }
 
 type TrendKey = "receipts" | "orders";
-const TREND_LABELS: Record<TrendKey, string> = { receipts: "确认收款", orders: "已付款订单" };
+const TREND_LABELS: Record<TrendKey, string> = { receipts: "实付金额", orders: "已付款订单" };
 const TREND_CONFIG: ChartConfig = { receipts: { label: TREND_LABELS.receipts, color: "var(--chart-receipts)" }, orders: { label: TREND_LABELS.orders, color: "var(--chart-orders)" } };
 const TREND_IDS: Record<TrendKey, string> = { receipts: "confirmedCents", orders: "paidOrders" };
 const STATE_LABELS = { FORBIDDEN: "无读取权限", NO_GAME_SCOPE: "当前游戏范围无数据权限", UNAVAILABLE: "暂不可用", KNOWN: "", PARTIAL: "覆盖不完整" };
@@ -171,7 +171,7 @@ export function TrendPanel({ data, onNavigate }: { data: DashboardPayload; onNav
             <XAxis dataKey="date" tickFormatter={value => String(value).slice(5)} tickLine={false} axisLine={false} tick={{ fill: "var(--muted-foreground)", fontSize: 11 }} minTickGap={22} />
             <YAxis tickLine={false} axisLine={false} tick={{ fill: "var(--muted-foreground)", fontSize: 11 }} tickFormatter={(value) => Number(value).toLocaleString("zh-CN")} />
             {tooltip}
-            <ChartArea dataKey="receipts" name="确认收款" />
+            <ChartArea dataKey="receipts" name="实付金额" />
           </AreaChart> : <BarChart data={chartData} margin={{ top: 8, right: 4, left: -18, bottom: 0 }}>
             <CartesianGrid vertical={false} stroke="var(--border)" />
             <XAxis dataKey="date" tickFormatter={value => String(value).slice(5)} tickLine={false} axisLine={false} tick={{ fill: "var(--muted-foreground)", fontSize: 11 }} minTickGap={22} />
@@ -184,7 +184,7 @@ export function TrendPanel({ data, onNavigate }: { data: DashboardPayload; onNav
       <details className="mt-3 text-xs text-muted-foreground" open={overflow || undefined}>
         <summary className="chart-table-summary">查看精确数据表</summary>
         <div className="mt-2 overflow-x-auto">
-          <Table><caption className="sr-only">{label}，原始精确数值，未核日期显示横杠</caption><TableHeader><TableRow><TableHead scope="col">日期</TableHead><TableHead scope="col" className="text-right">确认收款（元）</TableHead><TableHead scope="col" className="text-right">已付款订单（笔）</TableHead></TableRow></TableHeader>
+          <Table><caption className="sr-only">{label}，原始精确数值，未核日期显示横杠</caption><TableHeader><TableRow><TableHead scope="col">日期</TableHead><TableHead scope="col" className="text-right">实付金额（元）</TableHead><TableHead scope="col" className="text-right">已付款订单（笔）</TableHead></TableRow></TableHeader>
             <TableBody>{data.trend.map(day => <TableRow key={day.date}><TableCell>{day.date}</TableCell><TableCell className="text-right tabular-nums">{available("receipts") ? formatCents(day.confirmedCents) : "—"}</TableCell><TableCell className="text-right tabular-nums">{available("orders") ? formatCount(day.paidOrders) : "—"}</TableCell></TableRow>)}</TableBody>
           </Table>
         </div>
@@ -240,19 +240,19 @@ export function RecentTable({ orders, period, ordersState, ordersDrilldown, onNa
   const ordersPath = readable ? dashboardOrdersPath(period, ordersDrilldown) : null;
   const showContribution = allowContribution && orders.some((order) => order.contributionState !== "UNAVAILABLE");
   return <Card className="min-w-0">
-    <CardHeader><div><CardTitle role="heading" aria-level={2}>最近成交</CardTitle><p className="mt-1 text-xs text-muted-foreground">{readable && (orders.length > 0 || ordersPath) ? `最近 ${orders.length} 笔本期已付款原生订单${ordersState === "PARTIAL" ? " · 范围未完整核定" : ""}` : "当前无法读取本期成交"}</p></div>{ordersPath ? <CardAction><Button type="button" variant="link" size="sm" onClick={() => onNavigate(ordersPath)}>全部订单</Button></CardAction> : null}</CardHeader>
+    <CardHeader><div><CardTitle role="heading" aria-level={2}>最近成交</CardTitle><p className="mt-1 text-xs text-muted-foreground">{readable && (orders.length > 0 || ordersPath) ? `最近 ${orders.length} 笔本期已付款订单${ordersState === "PARTIAL" ? " · 范围未完整核定" : ""}` : "当前无法读取本期成交"}</p></div>{ordersPath ? <CardAction><Button type="button" variant="link" size="sm" onClick={() => onNavigate(ordersPath)}>全部订单</Button></CardAction> : null}</CardHeader>
     <CardContent>
       {!readable || orders.length === 0 ? <div className="chart-state" role="status">{!readable ? "当前无法读取本期成交" : ordersState === "PARTIAL" ? "暂未读到成交，范围未完整核定" : !ordersPath ? "当前无法读取本期成交" : "本期暂无成交"}</div> : <>
         <div className="grid gap-2 sm:hidden">
           {orders.map((order) => <Button key={order.id} type="button" variant="ghost" onClick={() => onNavigate(`/orders/${encodeURIComponent(order.id)}`)} className="block h-auto w-full whitespace-normal rounded-lg border-border p-3 text-left">
             <div className="flex items-center justify-between gap-2"><span className="font-medium tabular-nums">{order.displayNo}</span><Badge variant={order.status === "PAID" ? "info" : order.status === "COMPLETED" ? "success" : order.status === "CANCELLED" ? "secondary" : "outline"}>{STATUS_LABELS[order.status]}</Badge></div>
-            <div className="mt-2 flex items-center justify-between gap-2 text-xs text-muted-foreground"><span>确认收款 <strong className="font-medium text-foreground tabular-nums">{formatCents(order.confirmedCents)}</strong></span><span>{order.paidAt ? new Date(order.paidAt).toLocaleString("zh-CN", { timeZone: "Asia/Shanghai", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" }) : "—"}</span></div>
+            <div className="mt-2 flex items-center justify-between gap-2 text-xs text-muted-foreground"><span>实付金额 <strong className="font-medium text-foreground tabular-nums">{formatCents(order.confirmedCents)}</strong></span><span>{order.paidAt ? new Date(order.paidAt).toLocaleString("zh-CN", { timeZone: "Asia/Shanghai", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" }) : "—"}</span></div>
             {showContribution ? <p className="mt-1 text-[11px] text-muted-foreground">平台贡献 {formatCents(order.contributionState === "UNAVAILABLE" ? null : order.contributionCents)} · {contributionLabel(order)}</p> : null}
           </Button>)}
         </div>
         <div className="hidden overflow-x-auto sm:block">
           <Table>
-            <TableHeader><TableRow><TableHead>订单号</TableHead><TableHead>状态</TableHead><TableHead className="text-right">确认收款</TableHead>{showContribution ? <TableHead className="text-right">平台贡献</TableHead> : null}<TableHead className="text-right">时间</TableHead></TableRow></TableHeader>
+            <TableHeader><TableRow><TableHead>订单号</TableHead><TableHead>状态</TableHead><TableHead className="text-right">实付金额</TableHead>{showContribution ? <TableHead className="text-right">平台贡献</TableHead> : null}<TableHead className="text-right">时间</TableHead></TableRow></TableHeader>
             <TableBody>{orders.map((order) => <TableRow key={order.id}>
               <TableCell><Button type="button" variant="link" size="sm" onClick={() => onNavigate(`/orders/${encodeURIComponent(order.id)}`)} className="h-auto justify-start px-0 font-medium text-foreground tabular-nums">{order.displayNo}</Button></TableCell>
               <TableCell><Badge variant={order.status === "PAID" ? "info" : order.status === "COMPLETED" ? "success" : order.status === "CANCELLED" ? "secondary" : "outline"}>{STATUS_LABELS[order.status]}</Badge></TableCell>

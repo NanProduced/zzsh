@@ -45,6 +45,7 @@ function contextOf(value:unknown,orderId:string):Context{
  return{orderId,canReview:r.canReview,eligibility:{allowed:e.allowed,reason:e.reason as string|null,refundCents:e.refundCents as string|null},request:requestOf(r.request),refund};
 }
 const labels={REQUESTED:'待客服核实',REVIEW_REQUIRED:'存在争议/依据待核',REJECTED:'申请已驳回',APPROVED:'已终止并记录退款责任'};
+const refundStates:Record<string,string>={READY:'待提交',SUBMITTING:'提交中',UNKNOWN:'结果待确认',PROCESSING:'处理中',REVIEW_REQUIRED:'需复核',SUCCEEDED:'本地处理成功',FAILED:'处理失败',CONFLICT:'记录冲突'};
 type Pending={version:1;scope:string;key:string;terminationId:string;body:{expectedRevision:string;decision:'APPROVE'|'REJECT'|'REVIEW_REQUIRED';reason:string;assessment?:string}};
 
 export function AdminPrestartTerminationPanel({orderId,binding,canWrite}:{orderId:string;binding:{adminUserId:string;sessionId:string};canWrite:boolean}){
@@ -87,7 +88,7 @@ export function AdminPrestartTerminationPanel({orderId,binding,canWrite}:{orderI
    {r.reviewReason?<p>最近核实：{r.reviewReason}</p>:null}
    {r.state==='APPROVED'?<div className="space-y-2" aria-label="未开租退款责任与进度">
     {read?.refund?.totals?<p>已分配 {formatFundingCents(read.refund.totals.allocatedCents)} · 本地核销 {formatFundingCents(read.refund.totals.consumedCents)} · 尚未分配责任 {formatFundingCents(read.refund.totals.remainingCents)}</p>:<p>退款合计未核定，不能补零。</p>}
-    {read?.refund?.intents?.map((i,n)=><p key={i.intentId??`unknown-${n}`}>{i.refundOrderNo??'原退款号未知'} · {i.state} · {i.firstSubmit==='DISPATCHED'?'已有提交尝试':i.firstSubmit==='NEVER_DISPATCHED'?'尚无提交尝试':'首派未知'}{i.blockedReason?' · 原号歧义，需复核':''} · {i.localWriteOff==='RECORDED'?'本站核销已记录':'本站尚未核销'}</p>)}
+    {read?.refund?.intents?.map((i,n)=><p key={i.intentId??`unknown-${n}`}>{i.refundOrderNo??'原退款号未知'} · {refundStates[i.state]??'状态待核'} · {i.firstSubmit==='DISPATCHED'?'已有提交尝试':i.firstSubmit==='NEVER_DISPATCHED'?'尚无提交尝试':'提交状态待核'}{i.blockedReason?' · 原号歧义，需复核':''} · {i.localWriteOff==='RECORDED'?'本站核销已记录':i.localWriteOff==='NOT_RECORDED'?'本站尚未核销':'核销状态待核'}</p>)}
     {read?.refund?.truncated?<p>记录已截断，合计未知。</p>:null}
     {r.dataOrigin==='JOINPAY_LOCAL_ACCEPTANCE'?<AdminOriginalRefundPanel orderId={orderId} basis="PRESTART_TERMINATION" reference={r.id}
       canWrite={canWrite&&read?.canReview===true} binding={binding} onRecorded={()=>reload(n=>n+1)}/>:<p>本地受控责任未接真实渠道。</p>}

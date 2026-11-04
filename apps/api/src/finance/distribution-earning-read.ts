@@ -29,10 +29,22 @@ export function parseEarningsDetailQuery(q:URLSearchParams):EarningsQuery{for(co
 export function decodeEarningDetailId(raw:string){let id:string;try{id=decodeURIComponent(raw);}catch{throw notFound();}if(!/^(native|history):[A-Za-z0-9_-]{1,180}$/.test(id))throw notFound();return id;}
 const hash=(s:string)=>createHash('sha256').update(s).digest('hex');
 const unavailable=()=>new SecurityApiError(503,'EVIDENCE_UNAVAILABLE','Original earning evidence is inconsistent');
-export type EarningCalculation={knowledge:'NOT_RECORDED'|'UNKNOWN';reason:string}|{
- knowledge:'KNOWN';policyVersion:string;beneficiaryLevelCode:string|null;rateMode?:'UNIFORM';percent:string;basis:'FINAL_PLATFORM_CONTRIBUTION_MINUS_COMPENSATION_FEE';
+export type RecordedLegacyCommissionRate={knowledge:'RECORDED_SOURCE';percent:string;levelId:string|null};
+export type EarningCalculation={knowledge:'NOT_RECORDED'|'UNKNOWN';reason:string}|RecordedLegacyCommissionRate|{
+ knowledge:'KNOWN';policyVersion:string;beneficiaryLevelCode:string|null;beneficiaryLevelName?:string;rateMode?:'UNIFORM';percent:string;basis:'FINAL_PLATFORM_CONTRIBUTION_MINUS_COMPENSATION_FEE'|'LEGACY_RENTAL_CAPTURE_MINUS_OWNER_AND_REFUND';
  baseDisclosure:'INTERNAL_SETTLEMENT_ONLY';rounding:'HALF_UP_CENT';cap:'COMBINED_ROLES_NOT_ABOVE_BASE';scope:'LOCAL_CONTROLLED'|'NATIVE';orderNumber:string|null;
 };
+export function readRecordedLegacyCommissionRate(row:Record<string,any>):RecordedLegacyCommissionRate|null{
+ const snapshot=row.snapshot,raw=snapshot?.rawSource;
+ if(row.origin!=='LEGACY_MYSQL'||raw?.entity!=='la_distribution_order'||typeof raw.canonical!=='string'||hash(raw.canonical)!==raw.digest||typeof row.source_canonical!=='string'||hash(row.source_canonical)!==row.source_digest)return null;
+ try{
+  if(canonicalize(snapshot)!==row.source_canonical)return null;
+  const original=JSON.parse(raw.canonical);
+  if(original.id!==row.source_id||original.user_id!==row.legacy_user_id||original.earnings!==row.source_amount||String(original.level)!==String(snapshot.level)||original.ratio!==snapshot.sourceRatio)return null;
+  referralPercent(original.ratio);
+  return{knowledge:'RECORDED_SOURCE',percent:original.ratio,levelId:typeof original.level_id==='string'&&/^[1-9]\d{0,18}$/.test(original.level_id)?original.level_id:null};
+ }catch{return null;}
+}
 function verifiedFrozenCalculation(f:Record<string,any>){
  if(hash(f.canonical_seed)!==f.seed_digest||f.basis_digest!==f.payment_basis_digest)throw unavailable();
  const seed=JSON.parse(f.canonical_seed),basis={...JSON.parse(f.canonical_basis),digest:f.payment_basis_digest} as PaymentDistributionBasis;
@@ -50,7 +62,7 @@ function verifiedFrozenCalculation(f:Record<string,any>){
 }
 /** Only the beneficiary's frozen terms; the private posting/base and other parties never leave this reader. */
 export async function readEarningCalculation(c:PoolClient,actor:UserContext,row:Record<string,any>,installed:boolean,calculationVersion:1|2=1):Promise<EarningCalculation>{
- if(row.origin==='LEGACY_MYSQL')return{knowledge:'NOT_RECORDED',reason:'HISTORICAL_CALCULATION_NOT_RECORDED'};
+ if(row.origin==='LEGACY_MYSQL')return (calculationVersion===2?readRecordedLegacyCommissionRate(row):null)??{knowledge:'NOT_RECORDED',reason:'HISTORICAL_CALCULATION_NOT_RECORDED'};
  if(!installed)return{knowledge:'UNKNOWN',reason:'ORIGINAL_BASIS_UNAVAILABLE'};
  const f=(await c.query(`SELECT e.id,e.order_id,e.payment_confirmation_id,e.beneficiary_user_id,e.beneficiary_role,e.amount_cents::text,
   e.canonical_seed,e.seed_digest,e.basis_digest,e.posting_digest,b.canonical_basis,b.basis_digest AS payment_basis_digest,
@@ -64,9 +76,9 @@ export async function readEarningCalculation(c:PoolClient,actor:UserContext,row:
   if(f.beneficiary_user_id!==actor.userId||`native:${f.id}`!==row.id||f.order_id!==row.order_id||f.beneficiary_role!==row.role||exactCents(f.amount_cents)!==exactCents(row.source_amount)
    )throw unavailable();
   const {policyVersion,level,percent,rateMode,policy}=verifiedFrozenCalculation(f);
-  if(rateMode==='UNIFORM'&&calculationVersion!==2)return{knowledge:'UNKNOWN',reason:'UNIFORM_CALCULATION_REQUIRES_VERSION_2'};
-  return{knowledge:'KNOWN',policyVersion,beneficiaryLevelCode:level.code,...(rateMode?{rateMode}:{}),percent:percent.percent,
-   basis:'FINAL_PLATFORM_CONTRIBUTION_MINUS_COMPENSATION_FEE',baseDisclosure:'INTERNAL_SETTLEMENT_ONLY',rounding:'HALF_UP_CENT',
+  if((rateMode==='UNIFORM'||policy.schema==='distribution-policy.v3')&&calculationVersion!==2)return{knowledge:'UNKNOWN',reason:policy.schema==='distribution-policy.v3'?'LEGACY_RENTAL_CALCULATION_REQUIRES_VERSION_2':'UNIFORM_CALCULATION_REQUIRES_VERSION_2'};
+  return{knowledge:'KNOWN',policyVersion,beneficiaryLevelCode:level.code,...(policy.schema==='distribution-policy.v3'&&level.code?{beneficiaryLevelName:policy.legacySource.levelNames[level.code]}:{}),...(rateMode?{rateMode}:{}),percent:percent.percent,
+   basis:policy.schema==='distribution-policy.v3'?'LEGACY_RENTAL_CAPTURE_MINUS_OWNER_AND_REFUND':'FINAL_PLATFORM_CONTRIBUTION_MINUS_COMPENSATION_FEE',baseDisclosure:'INTERNAL_SETTLEMENT_ONLY',rounding:'HALF_UP_CENT',
    cap:'COMBINED_ROLES_NOT_ABOVE_BASE',scope:policy.scope,orderNumber:typeof f.order_number==='string'&&f.order_number.length<=80?f.order_number:null};
  }catch{return{knowledge:'UNKNOWN',reason:'FROZEN_CALCULATION_NOT_VERIFIED'};}
 }
@@ -107,7 +119,7 @@ export async function readAdminEarningCalculations(c:PoolClient,earningRootIds:s
    if(items.length!==1)throw unavailable();const item=items[0]!;
    if(item.amountCents!==exactCents(f.amount_cents)||item.economicKey!==f.economic_key||seed.economicKey!==item.economicKey||seed.dueAt!==item.dueAt)throw unavailable();
    result.set(f.id,{knowledge:'KNOWN',policyVersion:basis.policyVersion,levelCode:level.code,...(rateMode?{rateMode}:{}),percent:percent.percent,baseCents:allocation.baseCents,
-    formula:'FINAL_PLATFORM_CONTRIBUTION_MINUS_COMPENSATION_FEE',reasonCodes:[]});
+    formula:basis.policyConfig?.schema==='distribution-policy.v3'?'LEGACY_RENTAL_CAPTURE_MINUS_OWNER_AND_REFUND':'FINAL_PLATFORM_CONTRIBUTION_MINUS_COMPENSATION_FEE',reasonCodes:[]});
   }catch{result.set(f.id,unknownCalculation('FROZEN_CALCULATION_NOT_VERIFIED'));}
  }
  return result;

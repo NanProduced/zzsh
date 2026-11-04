@@ -11,11 +11,11 @@ import {loadEffectiveAdminAccess,requirePermission,ADMIN_PERMISSION} from '../au
 import {readAdminGameScope,assertGameScopeUsable,gameScopeSql} from '../auth/admin-scope';
 import {notFound} from '../supply/supply-util';
 
-export type LegacyGuaranteeAccountSource=Record<string,string|null|number>;
+export type LegacyGuaranteeAccountSource=Record<string,string|null|number|boolean>;
 export type LegacyGuaranteeHistoryInput={userId:string;legacyUserId:string;accountId:string|null;source:LegacyGuaranteeAccountSource;payOrders:Record<string,string|null>[]};
 const sha=(s:string)=>createHash('sha256').update(s).digest('hex'),oldId=/^[1-9]\d{0,23}$/,newId=/^[A-Za-z0-9][A-Za-z0-9._:-]{0,179}$/;
 const unavailable=()=>new SecurityApiError(503,'EVIDENCE_UNAVAILABLE','Owner guarantee finance source is inconsistent');
-const accountFields=['id','user_id','no','status','is_delete','pay_is','pay_money','pay_time','create_pay_time','pay_way','order_sn','leshua_order_id','yj_order_id','transaction_id','return_is','service_id','team_id','base_bot','update_time','pay_url_present'];
+const accountFields=['id','user_id','no','status','is_delete','pay_is','pay_money','pay_time','create_pay_time','pay_way','order_sn','leshua_order_id','yj_order_id','transaction_id','return_is','service_id','team_id','base_bot','update_time','pay_url_present','pay_url_sha256'];
 const paymentFields=['id','order_id','order_type','pay_way','pay_order_sn','pay_money','pay_is','pay_time','create_time'];
 /** CF-3's existing classification, kept as source observations. It cannot create held balance, refund or eligibility. */
 export function prepareOwnerGuaranteeHistory(value:LegacyGuaranteeHistoryInput){

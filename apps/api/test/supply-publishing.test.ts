@@ -3,7 +3,8 @@ import test from "node:test";
 import { assertCurrentRelease, evaluatePublication, freezePresentationSkin, orderAccountTitleFact, publicListingAttributes, publicListingBasis, publicationBlockers, quoteListing, readDraftSkinSummary, readPresentation, readResourceIncomePreview } from "../src/supply/publishing";
 import { createCatalogEntry, updateCatalogEntry } from "../src/supply/catalog";
 import { updatePriceDraft } from "../src/supply/rules";
-import { assertDeltaResourceUnit, DELTA_RESOURCE_UNITS } from "../src/supply/delta-rental";
+import { assertDeltaResourceUnit, DELTA_RESOURCE_UNITS, validateDeltaPublicationAttributes } from "../src/supply/delta-rental";
+import { readLegacyPublishedReference } from "../src/supply/legacy-published-reference";
 import { assertActiveInTransaction, assertUserContextInTransaction } from "../src/auth/user-identity";
 
 test("identity READ purpose omits row locks while every existing default WRITE keeps the original lock", async () => {
@@ -300,6 +301,33 @@ test("an unquoted native draft is one quote step, and a stale release still bloc
   assert.equal(media.includes("QUOTE_REQUIRED"), false, JSON.stringify(media));
 });
 
+test("trade media qualification requires the same frozen legacy reference on the native publication", async () => {
+  const base = nativeGateClient(true);
+  const source = { ownerUserId: "o", gameId: "g", observationVersionId: "original", sourceDigest: "c".repeat(64),
+    legacyId: "17", gradingCode: "6", displayPaths: ["accountsImage/20261103/source.png"], blockedPaths: [] as string[] };
+  const client = { query: async (sql: string) => {
+    if (sql.includes("FROM zzsh_supply.legacy_account_media_paths p")) return { rows: [source], rowCount: 1 };
+    if (sql.includes("FROM zzsh_supply.listing_publication")) return { rows: [{ source: "LEGACY_APPROVED" }], rowCount: 1 };
+    return base.query(sql);
+  } };
+  const proof = await readLegacyPublishedReference(client as never, "a");
+  assert(proof);
+  const attributes = { legacy_published_reference: proof.digest };
+  const v = { id: "v", account_id: "a", origin: "NATIVE", review_state: "APPROVED", rule_release_id: "rel",
+    content_hash: "a".repeat(64), attributes, payload: { ruleRefs: { catalogRevision: "1" }, declaration: { attributes, mediaBindings: [] } } };
+  assert.deepEqual(await evaluatePublication(client as never, nativeAccount as never, v as never, nativeGate, "READ"), []);
+  assert.deepEqual(await evaluatePublication(client as never, nativeAccount as never, { ...v, attributes: {} } as never, nativeGate, "READ"), ["MEDIA_REQUIRED"]);
+  source.blockedPaths.push(source.displayPaths[0]!);
+  assert.deepEqual(await evaluatePublication(client as never, nativeAccount as never, v as never, nativeGate, "READ"), ["MEDIA_REQUIRED"]);
+  assert.equal(Object.hasOwn(publicListingAttributes(attributes), "legacy_published_reference"), false);
+
+  const missing = { grading_code: "6", login_method_code: "legacy_login_qq", vit_level: 6, bear_level: 6, dive_level: 0 };
+  assert.doesNotThrow(() => validateDeltaPublicationAttributes(missing, { requireGradingDivision: false, requireSupplementalDeclarations: false, requireServiceWindow: false }));
+  assert.throws(() => validateDeltaPublicationAttributes(missing, { requireGradingDivision: false, requireSupplementalDeclarations: false }), /开始时间/);
+  assert.throws(() => validateDeltaPublicationAttributes({ ...missing, service_window_start_minute: 0 },
+    { requireGradingDivision: false, requireSupplementalDeclarations: false, requireServiceWindow: false }), /结束时间/);
+});
+
 test("public declaration reads face and ban as tri-state without inventing a verified face", () => {
   assert.equal(publicListingAttributes({}).face_is_self, null);
   assert.equal(publicListingAttributes({}).ban_record, null);
@@ -322,4 +350,6 @@ test("public declaration reads face and ban as tri-state without inventing a ver
   assert.equal(publicListingBasis({ versionId: "version-a", id: "a", releaseId: 42 })?.releaseId, null);
   assert.equal(publicListingBasis({ versionId: "version-a", id: "a" })?.releaseId, null);
   assert.equal(publicListingBasis({ id: "a", releaseId: "release-without-version" }), null);
+  const legacyImages = [{ position: 0, url: "/api/v1/supply/listings/a/legacy-images/0" }];
+  assert.deepEqual(publicListingBasis({ versionId: "version-a", id: "a", legacyImages })?.legacyImages, legacyImages);
 });

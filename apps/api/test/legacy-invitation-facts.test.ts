@@ -5,11 +5,24 @@ import {canonicalize} from '../src/supply/content-hash';
 import {legacyOwnerUserId} from '../src/supply/legacy-user-migration';
 import {invitationFactHash as hash,planLegacyInvitationFacts,prepareLegacyInvitationFacts,projectInvitationFactParticipant,type LegacyInvitationRawFact,type LegacyInvitationFactSource,type LegacyInvitationFactsInput,type LegacyInvitationFactPolicy} from '../src/finance/legacy-invitation-facts';
 import {bindReviewedLegacyInvitationFacts,planReviewedLegacyInvitationFactsTarget,importReviewedLegacyInvitationFacts,closeReviewedLegacyInvitationCounts,recoverReviewedLegacyInvitationFacts,type LegacyInvitationFactsReview} from '../src/finance/legacy-invitation-facts-maintenance';
+import {projectLegacyInvitationQualification} from '../src/finance/legacy-invitation-facts';
+import {readLegacyDistributionQualifications} from '../src/finance/admin-distribution-read';
 
 const actor={userId:'boss',sessionId:'session',requestId:'request'},at='2026-11-02T14:00:00.000Z';
 function raw(id:string,parent='0'):LegacyInvitationRawFact{return{legacyId:id,userId:legacyOwnerUserId('legacy_mysql_restore','la_user',id),identitySourceDigest:'a'.repeat(64),userSource:{id,is_delete:'0',is_disable:'0',inviter_id:parent,first_leader:parent,second_leader:'0',third_leader:'0',create_time:'1',update_time:'2'},codeSource:{id,code:'fx'+id},qualificationSource:{id,user_id:id,level_id:'7',is_delete:'0',is_freeze:'0',is_distribution:'1'}};}
 function source(facts:LegacyInvitationRawFact[]):LegacyInvitationFactSource{const ids=facts.map(s=>s.legacyId).sort(),m=new Map(facts.map(s=>[s.legacyId,s]));return{schema:'legacy-invitation-source.v2',sourceSystem:'legacy_mysql_restore',cutoff:'2026-09-13T13:31:13.000Z',receiptSha256:'a'.repeat(64),supplementReceiptSha256:'b'.repeat(64),files:{users:{sha256:'c'.repeat(64),rows:facts.length},qualification:{sha256:'d'.repeat(64),rows:facts.filter(s=>s.qualificationSource!==null).length},codes:{sha256:'e'.repeat(64),rows:facts.length}},subjectSetDigest:hash(ids),codeSetDigest:hash(ids.map(id=>[id,m.get(id)!.codeSource.code.toUpperCase(),hash(m.get(id)!.codeSource)]))};}
 function planned(facts=[raw('1'),raw('2','1'),raw('3','2')],max=5000,policy:LegacyInvitationFactPolicy|null=null){return planLegacyInvitationFacts(source(facts),facts,policy,max);}
+test('authenticated original qualification remains readable without granting current policy eligibility',async()=>{
+ const input=planned([raw('1')]).packets[0]!,participant=prepareLegacyInvitationFacts(input,hash(input)).subjects[0]!;
+ const historical=projectLegacyInvitationQualification(input.source,input.subjects[0]!,participant.sourceDigest);
+ assert.deepEqual(historical,{eligibility:'ELIGIBLE',commissionFrozen:false,levelId:'7'});assert.equal(participant.eligibility,'UNKNOWN');assert.equal(participant.policyVersionId,null);
+ const row={user_id:participant.userId,source_digest:participant.sourceDigest,source:input.source,fact:input.subjects[0]};
+ const read=(rows:unknown[])=>readLegacyDistributionQualifications({query:async()=>({rows})} as any,[participant.userId]);
+ assert.deepEqual((await read([row])).get(participant.userId),historical);assert.equal((await read([row,row])).size,0);
+ assert.equal((await read([{...row,source_digest:'f'.repeat(64)}])).size,0);
+ const changed=structuredClone(input.subjects[0]!);changed.qualificationSource!.is_distribution='0';assert.throws(()=>projectLegacyInvitationQualification(input.source,changed,participant.sourceDigest));
+ const missing=structuredClone(changed);missing.qualificationSource=null;assert.equal(projectLegacyInvitationQualification(input.source,missing,hash({schema:'legacy-invitation.fact.v2',source:input.source,fact:{legacyId:missing.legacyId,userId:missing.userId,identitySourceDigest:missing.identitySourceDigest,userSource:missing.userSource,codeSource:missing.codeSource,qualificationSource:null}})).eligibility,'UNKNOWN');
+});
 function uniform():LegacyInvitationFactPolicy{const config:LegacyInvitationFactPolicy['config']={schema:'distribution-policy.v2',scope:'LOCAL_CONTROLLED',enabled:true,participation:'AUTO_AT_REGISTRATION',depth:1,selfRebate:false,accountModes:['ordinary'],minimumAccrualCents:'1',settlementDelayDays:7,rateMode:'UNIFORM',renterPercent:'5',ownerPercent:'5',levels:[]};return{versionId:'published',configDigest:hash(config),scope:'LOCAL_CONTROLLED',config,qualification:'EXACT_LEGACY_FLAGS_V2'};}
 function review(input:LegacyInvitationFactsInput,phase:'IMPORT'|'COUNTS'='IMPORT'):LegacyInvitationFactsReview{return{ref:'ROOT_REVIEW',attempt:'facts_01',actor:{userId:actor.userId,sessionId:actor.sessionId},resource:{host:'127.0.0.1',port:55432,database:'zzsh_dev_daily',oid:2400547,owner:'zzsh',ownerOid:10,marker:'zzsh:synthetic-target:2400547',role:'daily_m',roleOid:1221849},notBefore:'2026-11-02T13:00:00.000Z',expiresAt:'2026-11-02T15:00:00.000Z',bodyDigest:hash(input),sourceDigest:hash(input.source),phase};}
 
@@ -130,4 +143,12 @@ test('count closure and recovery require the exact original import receipt',asyn
  }
  const packet=planned([raw('1')]).packets[0]!,d=database();await importReviewedLegacyInvitationFacts(d.client,actor,packet,hash(packet),await bind(d,packet));const importKey=[...d.receipts.keys()][0]!,cap=await bind(d,packet,'COUNTS');await closeReviewedLegacyInvitationCounts(d.client,actor,packet,hash(packet),cap);
  assert.ok(importKey);d.receipts.delete(importKey);await assert.rejects(recoverReviewedLegacyInvitationFacts(d.client,actor,packet,hash(packet),cap,'COUNTS'));
+});
+
+
+test('a newly reviewed regression epoch can import facts while the protected old epoch and wrong markers stay forbidden',async()=>{
+ const packet=planned([raw('1')]).packets[0]!,db=database(),r=review(packet);Object.assign(r.resource,{database:'zzsh_test_regression',oid:2734882,owner:'zzsh',ownerOid:10,marker:'zzsh:regression-test:v1',role:'zzsh_regression_migration',roleOid:12345});
+ Object.assign((db.client as any).connectionParameters,{database:r.resource.database,user:r.resource.role});const query=db.client.query.bind(db.client);(db.client as any).query=async(sql:string,args:any[])=>sql.includes('invitation-facts resource')?{rows:[{...r.resource,now:at,owned:3,complete:true,read_only:'off'}],rowCount:1}:query(sql,args);
+ const scope=await bindReviewedLegacyInvitationFacts(db.client,actor,r);assert.equal((await importReviewedLegacyInvitationFacts(db.client,actor,packet,hash(packet),scope)).status,200);assert.equal(db.participants.size,1);assert.equal(db.participants.values().next().value?.eligibility,'UNKNOWN');
+ for(const change of [{oid:2220718},{marker:'unreviewed'},{role:'another_role'}])await assert.rejects(bindReviewedLegacyInvitationFacts(db.client,actor,{...r,resource:{...r.resource,...change}}));
 });

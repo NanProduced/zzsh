@@ -107,6 +107,7 @@ export type AdminDirectoryViewer = {
   businessScopeUsable?: boolean;
   authorizationKey?: string;
   legacyRead?: boolean;
+  legacyMarketAccountIds?: readonly string[];
 };
 
 export type UserDirectoryFilter = {
@@ -215,20 +216,21 @@ function originalRegistrationSql(migration = "mig", projected = false): string {
     THEN ${migration}.source_created_at::timestamptz ELSE NULL END`;
 }
 
-function publishedAccountSql(account: string): string {
-  return `${account}.lifecycle='ACTIVE' AND EXISTS (
+function publishedAccountSql(account: string, legacyIds?: string): string {
+  const native = `EXISTS (
     SELECT 1 FROM zzsh_supply.listing_version pv
     JOIN zzsh_supply.listing_publication pp ON pp.version_id=pv.id AND pp.account_id=pv.account_id
       AND pp.owner_user_id=${account}.owner_user_id AND pp.game_id=${account}.game_id
       AND pp.rule_release_id=pv.rule_release_id AND pp.content_hash=pv.content_hash
     WHERE pv.id=${account}.current_version_id AND pv.account_id=${account}.id
       AND ${effectivePublicationStateSql("pv", "pp")})`;
+  return `${account}.lifecycle='ACTIVE' AND ${legacyIds ? `(${native} OR ${account}.id=ANY(${legacyIds}::text[]))` : native}`;
 }
 
-function resourceCountsSql(read: string, boss: string, admin: string): string {
+function resourceCountsSql(read: string, boss: string, admin: string, legacyIds?: string): string {
   return `LEFT JOIN LATERAL (
     SELECT count(*)::int AS account_count,
-      count(*) FILTER (WHERE ${publishedAccountSql("ra")})::int AS published_count
+      count(*) FILTER (WHERE ${publishedAccountSql("ra", legacyIds)})::int AS published_count
     FROM zzsh_supply.rental_account ra
     WHERE ${read}::boolean AND ra.owner_user_id=u.id AND ${gameScopeSql("ra.game_id", admin, boss)}
   ) resource_counts ON true`;
@@ -463,6 +465,7 @@ export async function listUserDirectory(
   const cursorId = values.length - 1;
   const limitParameter = values.length;
   const offsetParameter = filter.page === undefined ? undefined : values.push((filter.page - 1) * filter.limit);
+  const legacyMarketIds = viewer.legacyMarketAccountIds?.length ? `$${values.push(viewer.legacyMarketAccountIds)}` : undefined;
   const cursorCondition = !registeredSort ? `($${cursorTime}::timestamptz IS NULL AND $${cursorId}::text IS NULL)` : original
     ? `(($${cursorTime}::timestamptz IS NULL AND $${cursorId}::text IS NULL) OR ($${cursorId}::text IS NOT NULL AND (
         ($${cursorTime}::timestamptz IS NULL AND ${timeColumn} IS NULL AND u.id COLLATE "C" < $${cursorId}) OR
@@ -475,7 +478,7 @@ export async function listUserDirectory(
   // 排序用的候选集聚合：与展示用同一谓词、同一授权范围；未知排后不补 0。
   const resourceAggregateJoin = `LEFT JOIN (
       SELECT owner_user_id AS user_id, count(*)::int AS account_count,
-        count(*) FILTER (WHERE ${publishedAccountSql("ra")})::int AS published_count
+        count(*) FILTER (WHERE ${publishedAccountSql("ra", legacyMarketIds)})::int AS published_count
       FROM zzsh_supply.rental_account ra
       WHERE $3::boolean AND ${gameScopeSql("ra.game_id", "$2", "$1")}
       GROUP BY owner_user_id
@@ -565,7 +568,7 @@ export async function listUserDirectory(
          JOIN zzsh_auth_user."user" u ON u.id = selected.id
          LEFT JOIN zzsh_iam.user_identity_state s ON s.user_id = u.id
          ${materializeDates ? "" : "LEFT JOIN migration mig ON mig.object_id = u.id"}
-         ${resourceCountsSql("$3", "$1", "$2")}
+         ${resourceCountsSql("$3", "$1", "$2", legacyMarketIds)}
          LEFT JOIN LATERAL (
            SELECT count(*)::int AS current_count,
                   count(*) FILTER (WHERE o.renter_user_id=u.id)::int AS renter_count,
@@ -650,6 +653,7 @@ export async function readUserDirectoryDetail(
   const resourceRead = viewer.resourceRead === true && viewer.businessScopeUsable !== false;
   const orderRead = viewer.orderRead === true && viewer.businessScopeUsable !== false;
   const detailOrderRelation = orderRead && viewer.legacyRead ? orderReadRelation(await legacyContinuationReady(client), true, { participantUserId: '$1' }) : null;
+  const legacyMarketIds = viewer.legacyMarketAccountIds?.length ? viewer.legacyMarketAccountIds : undefined;
   const row = (
     await client.query<UserDetailRow>(
       `SELECT u.id, u.name, u.image, u.username, u."displayUsername", u."phoneNumber", u."phoneNumberVerified",
@@ -693,7 +697,7 @@ export async function readUserDirectoryDetail(
            FROM zzsh_iam.user_registration_fact fact WHERE fact.user_id=u.id
          ) registration_mig ON true
          LEFT JOIN LATERAL (SELECT ${originalRegistrationSql("registration_mig", true)} AS registered_at) registration ON true` : ""}
-         ${resourceCountsSql("$4", "$2", "$3")}
+         ${resourceCountsSql("$4", "$2", "$3", legacyMarketIds ? "$6" : undefined)}
          LEFT JOIN LATERAL (
            SELECT count(*)::int AS current_count,
                   count(*) FILTER (WHERE o.renter_user_id=u.id)::int AS renter_count,
@@ -703,7 +707,7 @@ export async function readUserDirectoryDetail(
               AND o.status IN ('PENDING_PAYMENT','PAID') AND ${gameScopeSql("o.game_id","$3","$2")}
          ) current_orders ON true
         WHERE u.id = $1`,
-      [userId, viewer.isBoss, viewer.adminId, resourceRead, orderRead],
+      [userId, viewer.isBoss, viewer.adminId, resourceRead, orderRead, ...(legacyMarketIds ? [legacyMarketIds] : [])],
     )
   ).rows[0];
   if (!row) return null;
@@ -796,6 +800,7 @@ export async function listUserRentalAccounts(
     JSON.stringify({ scope: "admin-user-rental-accounts", principal: viewer.adminId, isBoss: viewer.isBoss, authorizationKey: viewer.authorizationKey ?? null, userId, limit: page.limit, ...(page.publication ? { publication: page.publication } : {}) }),
   );
   const cursor = parseKeysetCursor(page.cursor, filterKey);
+  const legacyMarketIds = new Set(viewer.legacyMarketAccountIds);
   const rows = (
     await client.query<UserRentalAccountRow>(
       `SELECT a.id, ${viewer.legacyRead ? "COALESCE(a.display_no,(SELECT l.legacy_account_no FROM zzsh_order.legacy_order_read_snapshot l WHERE l.account_id=a.id ORDER BY l.imported_at DESC LIMIT 1))" : "a.display_no"} AS "displayNo", a.lifecycle, a.owner_paused AS "ownerPaused",
@@ -812,11 +817,12 @@ export async function listUserRentalAccounts(
            AND p.owner_user_id=a.owner_user_id AND p.game_id=a.game_id AND p.rule_release_id=v.rule_release_id AND p.content_hash=v.content_hash
         WHERE a.owner_user_id = $1
           AND ${gameScopeSql("a.game_id","$3","$2")}
-          ${page.publication ? `AND ${publishedAccountSql("a")}` : ""}
+          ${page.publication ? `AND ${publishedAccountSql("a", legacyMarketIds.size ? "$7" : undefined)}` : ""}
           AND ($4::timestamptz IS NULL OR a.created_at < $4::timestamptz OR (a.created_at = $4::timestamptz AND a.id < $5))
         ORDER BY a.created_at DESC, a.id DESC
         LIMIT $6`,
-      [userId, viewer.isBoss, viewer.adminId, cursor?.createdAt ?? null, cursor?.id ?? null, page.limit + 1],
+      [userId, viewer.isBoss, viewer.adminId, cursor?.createdAt ?? null, cursor?.id ?? null, page.limit + 1,
+        ...(page.publication && legacyMarketIds.size ? [[...legacyMarketIds]] : [])],
     )
   ).rows;
   const items = rows.slice(0, page.limit);
@@ -835,6 +841,7 @@ export async function listUserRentalAccounts(
       legacyHold: row.legacyHold,
       currentVersionId: row.currentVersionId,
       publication: { versionState: row.versionState ?? null, source: row.publicationSource ?? null,
+        ...(legacyMarketIds.has(row.id) ? { publiclyListed: true } : {}),
         versionPublished: isEffectivePublicationState(row.versionState, row.publicationSource),
         currentlyPublished: row.lifecycle === "ACTIVE" && isEffectivePublicationState(row.versionState, row.publicationSource) },
       createdAt: row.createdAt,
@@ -901,7 +908,7 @@ type UserOrderRow = {
 };
 
 type OrderAccountBinding = { origin: 'NATIVE' | 'LEGACY'; orderId: string; accountId: string; versionId?: string | null; contentHash?: string | null };
-type OrderAccountFacts = { source: 'ORDER_VERSION' | 'ACCOUNT_PUBLIC_VERSION'; resources: Array<{code: string; name?: string; quantity: string | null; unit: string}>; loginMethodText: string | null; termDays?: string; safeBoxText?: string | null; gradingText?: string | null };
+type OrderAccountFacts = { source: 'ORDER_VERSION' | 'ACCOUNT_PUBLIC_VERSION' | 'LEGACY_ACCOUNT_SNAPSHOT'; resources: Array<{code: string; name?: string; quantity: string | null; unit: string}>; loginMethodText: string | null; termDays?: string; safeBoxText?: string | null; gradingText?: string | null };
 
 /** Page-selected accounts only: never substitute current inventory for the frozen native version. */
 async function readOrderAccountFacts(client: PoolClient, viewer: AdminDirectoryViewer, bindings: OrderAccountBinding[], accountViews?: OrderAccountViewReader) {
@@ -936,14 +943,14 @@ async function readOrderAccountFacts(client: PoolClient, viewer: AdminDirectoryV
     facts.set(`NATIVE\u0000${row.orderId}`, {source:'ORDER_VERSION',resources,loginMethodText:display.loginMethod?.displayName ?? null,safeBoxText:display.safeBox?.displayName ?? null,gradingText:display.grading?.displayName ?? null});
   }
   const legacy = rows.filter(row => row.origin==='LEGACY');
-  // 迁入单：账号即账号，资料与账号页同一版本口径（公开版本存在且不同于当前时取公开版，否则取当前），不再读历史快照
+  // 迁入单当前账号资料与供给页同源；来源随投影保留，原单事实单独读取。
   const views = accountViews && legacy.length ? await accountViews(client, [...new Set(legacy.map(row => row.accountId))]) : new Map();
   for (const row of legacy) {
     const view = views.get(row.accountId);
     if (!view) continue;
     const account = accountViewFrozen(view);
     const resources = [...(account.haff ? [account.haff] : []), ...account.materials].map(item => ({code:item.code,...(item.name ? {name:item.name} : {}),quantity:item.quantity,unit:item.unit}));
-    facts.set(`LEGACY\u0000${row.orderId}`, {source:'ACCOUNT_PUBLIC_VERSION',resources,loginMethodText:account.loginMethodText,...(account.termDays ? {termDays:account.termDays} : {}),safeBoxText:account.safeBoxText ?? null,gradingText:account.gradingText ?? null});
+    facts.set(`LEGACY\u0000${row.orderId}`, {source:account.source,resources,loginMethodText:account.loginMethodText,...(account.termDays ? {termDays:account.termDays} : {}),safeBoxText:account.safeBoxText ?? null,gradingText:account.gradingText ?? null});
   }
   return facts;
 }

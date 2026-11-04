@@ -5,6 +5,7 @@ import { recordAudit } from "../auth/security-core";
 import { canonicalize } from "../supply/content-hash";
 import { legacyOwnerUserId } from "../supply/legacy-user-migration";
 import { assertGameScope, conflict, ensureOnlyFields, fingerprintRequest, invalid, sha256Hex, withIdempotency } from "../supply/supply-util";
+import type { SettlementStage, SettlementStageCode } from "./settlement-record";
 
 /** 0074 continuation capability. A chain that stops before 0074 has no continuation tables; every
  *  relation that joins them must degrade to its pre-continuation shape instead of failing the read. */
@@ -12,13 +13,29 @@ export async function legacyContinuationReady(client: Pick<PoolClient, "query">)
   return (await client.query<{ ready?: boolean }>(`SELECT to_regclass('zzsh_order.legacy_continuation_version') IS NOT NULL AS ready`)).rows[0]?.ready === true;
 }
 // Every consuming relation joins the unique current continuation head as h.
-export const LEGACY_ORDER_STATUS_SQL = `CASE WHEN COALESCE(h.stage,l.source_order_status)=5 THEN 'CANCELLED' WHEN COALESCE(h.stage,l.source_order_status)=4 THEN 'COMPLETED'
- WHEN COALESCE(h.stage,l.source_order_status)=1 AND l.source_pay_status=0 THEN 'PENDING_PAYMENT'
- WHEN COALESCE(h.stage,l.source_order_status) IN(2,3,6,7,8,9) AND l.source_pay_status=1 THEN 'PAID' ELSE 'UNKNOWN' END`;
+export const LEGACY_EFFECTIVE_STAGE_SQL = `COALESCE(h.stage,l.source_order_status)`;
+export const LEGACY_CONTINUATION_COMPLETED_AT_SQL = `COALESCE((SELECT created_at FROM zzsh_order.legacy_continuation_version WHERE order_id=l.id AND command='CONFIRM' ORDER BY revision DESC LIMIT 1),l.source_completed_at)`;
+export const LEGACY_ORDER_STATUS_SQL = `CASE WHEN ${LEGACY_EFFECTIVE_STAGE_SQL}=5 THEN 'CANCELLED' WHEN ${LEGACY_EFFECTIVE_STAGE_SQL}=4 THEN 'COMPLETED'
+ WHEN ${LEGACY_EFFECTIVE_STAGE_SQL}=1 AND l.source_pay_status=0 THEN 'PENDING_PAYMENT'
+ WHEN ${LEGACY_EFFECTIVE_STAGE_SQL} IN(2,3,6,7,8,9) AND l.source_pay_status=1 THEN 'PAID' ELSE 'UNKNOWN' END`;
 const LEGACY_STATE: Record<string,string> = {"1":"待支付","2":"待上号","3":"进行中","4":"已完成","5":"已取消","6":"待验号","7":"待确认额外消耗","8":"待卖家确认","9":"待买家确认"};
 export function legacyOrderReadState(status: number, payStatus: number) {
   const paymentState = payStatus === 1 ? "RECORDED_PAID" : payStatus === 0 ? "RECORDED_UNPAID" : "UNKNOWN";
-  return { status: status === 5 ? "CANCELLED" : status === 4 ? "COMPLETED" : status === 1 && payStatus === 0 ? "PENDING_PAYMENT" : [2,3,6,7,8,9].includes(status) && payStatus === 1 ? "PAID" : "UNKNOWN", paymentState, statusLabel: LEGACY_STATE[String(status)] ?? "源状态未知" };
+  const orderStatus = status === 5 ? "CANCELLED" : status === 4 ? "COMPLETED" : status === 1 && payStatus === 0 ? "PENDING_PAYMENT" : [2,3,6,7,8,9].includes(status) && payStatus === 1 ? "PAID" : "UNKNOWN";
+  return { status: orderStatus, paymentState, statusLabel: orderStatus === "UNKNOWN" ? "状态待核实" : LEGACY_STATE[String(status)]! };
+}
+
+/** A historical lifecycle label does not establish a native posting or authorize an action. */
+export function legacyOrderLifecycleStage(status: number, payStatus: number, party?: "owner" | "renter"): SettlementStage {
+  const state = legacyOrderReadState(status, payStatus);
+  let code: SettlementStageCode = "UNKNOWN";
+  if (["PENDING_PAYMENT", "COMPLETED", "CANCELLED"].includes(state.status)) code = "NONE";
+  if (state.status === "PAID") {
+    if (status === 2) code = "OPENING_PENDING";
+    if (status === 3) code = "RENTING";
+    if (status === 8 || status === 9) code = party === (status === 8 ? "owner" : "renter") ? "DECISION_PENDING" : "DECISION_WAITING";
+  }
+  return { code, label: code === "NONE" ? null : code === "UNKNOWN" ? "状态待核实" : state.statusLabel, viewerActionRequired: false, settlementVersionNo: null };
 }
 
 type PartyBinding = { userId: string; legacyId: string; businessNo: string | null; sourceDigest: string };

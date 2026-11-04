@@ -122,13 +122,13 @@ test("missing or malformed contract arrays fail closed instead of reading as emp
   try {
     const { entitlements, ...withoutEntitlements } = known;
     globalThis.fetch = async () => new Response(JSON.stringify(withoutEntitlements), { status: 200 });
-    await assert.rejects(() => readMyMembershipGrowth(), /entitlements/);
+    await assert.rejects(() => readMyMembershipGrowth(), error => error.code === "MEMBERSHIP_CONTRACT_REQUIRED" && /资料暂时无法确认/.test(error.message));
 
     globalThis.fetch = async () => new Response(JSON.stringify({
       ...known,
       growth: { ...known.growth, contributions: [{ label: "租赁结算消费" }] },
     }), { status: 200 });
-    await assert.rejects(() => readMyMembershipGrowth(), /contributions/);
+    await assert.rejects(() => readMyMembershipGrowth(), error => error.code === "MEMBERSHIP_CONTRACT_REQUIRED" && /资料暂时无法确认/.test(error.message));
 
     globalThis.fetch = async () => new Response(JSON.stringify(known), { status: 200 });
     const ready = await readMyMembershipGrowth();

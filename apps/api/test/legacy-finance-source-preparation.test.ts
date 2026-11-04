@@ -7,6 +7,43 @@ import {planFinanceObservations} from '../src/finance/personal-finance-observati
 const subject={userId:'fixture-user',legacyUserId:'11',identityDigest:'a'.repeat(64)},cutoff='2026-09-13T13:31:22.000Z',inputSha256='b'.repeat(64);
 const log={id:101,sn:'FIXTURE-LOG-NOT-BUSINESS-NUMBER',action:1,amount:'1.10',userId:11,sourceId:501,createdAt:1779469800,changeType:1001,leftAmount:'1.10'};
 const withdrawal={id:201,sn:'FIXTURE-WITHDRAWAL',type:1,money:'5.00',status:2,userId:11,batch_no:'FIXTURE',is_delete:0,left_money:'4.50',create_time:1779469800,handling_fee:'0.50',payment_time:1779469900};
+
+test('the accepted twelve-field withdrawal keeps its original canonical observation and hash when new source fields are absent',()=>{
+ const rawCanonical='{"batch_no":"FIXTURE","create_time":1779469800,"handling_fee":"0.50","id":201,"is_delete":0,"left_money":"4.50","money":"5.00","payment_time":1779469900,"sn":"FIXTURE-WITHDRAWAL","status":2,"type":1,"userId":11}';
+ const expected={kind:'withdrawObservation',sourceId:201,sourceUserId:11,amount:'5.00',sourceStatus:2,createdAt:1779469800,fee:'0.50',net:'4.50',referenceType:'LEGACY_WITHDRAWAL',referenceId:'201',referenceSn:'FIXTURE-WITHDRAWAL',sourcePaidAt:1779469900,sourceDeleted:0,sourceAnomalies:[],rawSource:{entity:'la_withdraw_apply',canonical:rawCanonical,digest:'9fc4d20ceb4015b7bd344654a34314e8fd695d3ad88b4a3f2be1002d43c00c87'}};
+ const original=structuredClone(withdrawal),result=prepareFrozenFinanceObservation('HISTORICAL_WITHDRAWAL',withdrawal,subject);
+ assert.equal(canonicalize(result.row),canonicalize(expected));assert.equal(result.sourceDigest,'313fb85b828fb5899ea95b9bbc9165362fb2f96f5ee264f94f5e7ca3579f5510');
+ assert.equal(Object.hasOwn(result.row,'sourceRecordType'),false);assert.deepEqual(withdrawal,original);
+ assert.equal(prepareFrozenFinanceObservation('HISTORICAL_WITHDRAWAL',{...withdrawal,update_time:'1779469900'},subject).row.sourceRecordType,'1');
+});
+test('typed original payments/refunds retain amounts/status/times without opening or channel success; conflicting refund references stay private',()=>{
+ const payment={id:'301',order_id:'71',order_type:'1',pay_is:'1',pay_way:'2',pay_money:'5.00',pay_order_sn:'PAY-ORIGINAL',pay_time:'1779469900',create_time:'1779469800',userId:'11',relationship:'VERIFIED'};
+ const refund={id:'401',user_id:'11',order_id:'71',order_sn:'ORDER-ORIGINAL',order_type:'order',sn:'REFUND-ORIGINAL',refund_status:'1',order_amount:'5.00',refund_amount:'2.00',transaction_id:'ORIGINAL-TRACE',refund_way:'2',create_time:'1779469800',update_time:'1779469900',refund_type:'1',userId:'11',relationship:'VERIFIED'};
+ for(const [sourceKind,raw,amount] of [['HISTORICAL_PAYMENT',payment,'5.00'],['HISTORICAL_REFUND',refund,'2.00']] as const){
+  const input=prepareFrozenFinanceHistory({subject,sourceKind,inputSha256,cutoff,sourceCount:1,rows:[raw],isolated:[]}),p=planFinanceObservations(input),o=p.observations[0]!;
+  assert.equal(o.snapshot.amount,amount);assert.equal(o.snapshot.channelArrival,'UNKNOWN');assert.equal(o.includedInOpening,false);assert.equal(o.basisId,null);assert.equal(o.sourceEventAt,'2026-05-22T17:10:00.000Z');
+  const original=JSON.parse((o.snapshot.rawSource as any).canonical);assert.equal(original.id,raw.id);assert.equal(original.userId,undefined);assert.equal(original.relationship,undefined);
+ }
+ const unresolved=prepareFrozenFinanceObservation('HISTORICAL_REFUND',{...refund,relationship:'UNRESOLVED'},subject).row;
+ assert.equal(unresolved.referenceId,null);assert.equal(unresolved.referenceSn,null);assert.equal(unresolved.orderLink,null);assert.equal(unresolved.associationState,'UNRESOLVED');assert.equal(JSON.parse((unresolved.rawSource as any).canonical).order_sn,refund.order_sn);
+ for(const raw of [{...payment,order_type:'order'},{...payment,userId:'12'},{...payment,pay_money:'1.001'}])assert.throws(()=>prepareFrozenFinanceObservation('HISTORICAL_PAYMENT',raw,subject));
+});
+
+test('refund children retain typed attempt IDs, pending/success states and source amounts independently from the parent result',()=>{
+ const base={sourceEntity:'la_refund_log',sourceId:'701',sourceRecordId:'401',legacyUserId:'11',legacyOperatorId:'7',sourceNumber:'ATTEMPT-ORIGINAL',amountCents:'200',orderAmountCents:'500',sourceStatus:'0',createdEpoch:'1779469800',updatedEpoch:'1779469900',subjectMatchesParent:true,sourceDigest:'c'.repeat(64),restrictedSourceRef:'restricted-fixture:log:701',messagePresence:'PRESENT',messageSha256:'d'.repeat(64)};
+ const raw={id:'401',user_id:'11',order_id:'71',order_sn:'ORDER',order_type:'order',sn:'REFUND',refund_status:'1',order_amount:'5.00',refund_amount:'2.00',transaction_id:null,refund_way:'2',create_time:'1779469800',update_time:'1779469900',refund_type:'1',userId:'11',relationship:'VERIFIED',refundAttempts:[base,{...base,sourceId:'702',sourceStatus:'1'}],sourceRefundFlags:['MULTIPLE_REFUND_RECORDS_FOR_TYPED_ORDER']};
+ const row=prepareFrozenFinanceObservation('HISTORICAL_REFUND',raw,subject).row;
+ assert.equal(row.sourceStatus,1);assert.deepEqual((row.sourceAttempts as any[]).map(a=>[a.sourceEntity,a.sourceId,a.sourceStatus,a.amountCents]),[['la_refund_log','701','0','200'],['la_refund_log','702','1','200']]);assert.equal(JSON.parse((row.rawSource as any).canonical).refundAttempts,undefined);assert(!JSON.stringify(row).includes('FULL-PRIVATE-MESSAGE'));
+ for(const bad of [{...base,sourceRecordId:'999'},{...base,refund_msg:'FULL-PRIVATE-MESSAGE'}])assert.throws(()=>prepareFrozenFinanceObservation('HISTORICAL_REFUND',{...raw,refundAttempts:[bad]},subject));
+});
+
+test('supplemental earnings/withdrawal fields are retained in immutable evidence and old level 2/3 commission ratios stay original',()=>{
+ const p=prepareFrozenFinanceObservation('HISTORICAL_EARNINGS_LOG',{...log,sourceSn:'ORIGINAL-BUSINESS',remark:'PRIVATE-MEMO',extra:'PRIVATE-EXTRA'},subject);
+ assert.equal(p.row.referenceSn,'ORIGINAL-BUSINESS');assert.equal(JSON.parse((p.row.sourceSupplement as any).canonical).remark,'PRIVATE-MEMO');
+ const w=prepareFrozenFinanceObservation('HISTORICAL_WITHDRAWAL',{...withdrawal,payment_no:'PAYMENT-ORIGINAL',global_no:'GLOBAL-ORIGINAL',update_time:'1779469900'},subject);
+ assert.equal(JSON.parse((w.row.rawSource as any).canonical).payment_no,'PAYMENT-ORIGINAL');
+ for(const level of ['2','3']){const r=prepareFrozenFinanceObservation('HISTORICAL_DISTRIBUTION',{id:'501',sn:'DIST',user_id:'11',order_type:'1',order_id:'71',earnings:'1.10',level,level_id:'1',ratio:'7.1234',status:'1',settle_time:'0',is_delete:'0',create_time:'1779460000',update_time:'1779469800',delete_time:null},subject);assert.equal(r.row.level,Number(level));assert.equal(r.row.sourceRatio,'7.1234');assert.equal(r.row.amount,'1.10');}
+});
 test('raw frozen earnings retain their own log number and unknown economic source; typed ID or 1001 alone never proves an order',()=>{
  const p=prepareFrozenFinanceObservation('HISTORICAL_EARNINGS_LOG',log,subject);assert.equal(p.row.sourceId,101);assert.equal(p.row.referenceId,'501');assert.equal(p.row.referenceSn,null);assert.equal(p.row.referenceType,'UNRESOLVED_ECONOMIC_SOURCE');assert.equal(p.financialSource,'UNKNOWN');assert.equal(p.row.legacyLogNumber,log.sn);assert.equal((p.row.rawSource as any).digest,createHash('sha256').update(canonicalize(log)).digest('hex'));
  for(const raw of [{...log,userId:12},{...log,amount:'1.001'},{...log,id:9007199254740992},{...log,action:3},{...log,createdAt:0},{...log,phone:'not-a-finance-input'}])assert.throws(()=>prepareFrozenFinanceObservation('HISTORICAL_EARNINGS_LOG',raw,subject));

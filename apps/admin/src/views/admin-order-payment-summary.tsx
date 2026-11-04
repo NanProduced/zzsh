@@ -10,7 +10,7 @@ export function AdminOrderPaymentSummary({ summary }: { summary?: Summary | null
     || (summary?.dataOrigin === 'UNKNOWN' && summary.integration !== 'NOT_INTEGRATED');
   if (unknownSource) return <section className="oc-section"><h2>渠道付款</h2><p className="oc-fact-note">付款来源待核，暂不据此认定付款或渠道到账。</p></section>;
   if (!summary || summary.integration === 'NOT_INTEGRATED') {
-    return <section className="oc-section"><h2>渠道付款</h2><p className="oc-fact-note">渠道付款摘要尚未接入，订单支付记录仍按原有依据核对。</p></section>;
+    return <section className="oc-section"><h2>渠道付款</h2><p className="oc-fact-note">渠道付款摘要暂不可用，请按订单支付记录核对。</p></section>;
   }
   if (summary.contractVersion !== 'admin-order-payment-summary.v1' || typeof summary.productionPaymentCapability !== 'boolean'
     || !['NOT_INTEGRATED', 'CONTROLLED_LOCAL', 'JOINPAY'].includes(summary.integration)

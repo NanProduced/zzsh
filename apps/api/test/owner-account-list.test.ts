@@ -22,11 +22,13 @@ test("B1 query parsing validates rentalState and cursor/after exclusivity", () =
 });
 
 test("B1 rentalState precedence lives in SQL and filters server-side", () => {
-  const order = ["'RENTED'", "'RESTRICTED'", "'UNKNOWN'", "'REVIEWING'", "'REJECTED'", "'DRAFT'", "'PAUSED'"].map(s => RENTAL_STATE_SQL.indexOf(s));
+  const order = ["'RENTED'", "'RESTRICTED'", "'PAUSED'", "'UNKNOWN'", "'REVIEWING'", "'REJECTED'", "'DRAFT'"].map(s => RENTAL_STATE_SQL.indexOf(s));
   for (let i = 1; i < order.length; i++) assert.ok(order[i]! > order[i - 1]!, "precedence");
   assert.match(OWNER_ACCOUNT_LIST_SQL, /t\.rental_state=\$3/);
   assert.match(OWNER_ACCOUNT_LIST_SQL, /a\.owner_user_id=\$1/);
   assert.match(OWNER_ACCOUNT_LIST_SQL, /o\.owner_user_id=a\.owner_user_id/);
+  assert.match(OWNER_ACCOUNT_LIST_SQL, /l\.owner_user_id=\$1 AND l\.owner_user_id=a\.owner_user_id/);
+  assert.match(OWNER_ACCOUNT_LIST_SQL, /count\(\*\)=1 AND bool_and\(bound\)/);
   assert.match(OWNER_ACCOUNT_LIST_SQL, /LEFT JOIN LATERAL/);
   // AT TIME ZONE must bind to the timestamp sum, not the interval inside make_interval.
   assert.match(OWNER_ACCOUNT_LIST_SQL, /LEFT JOIN zzsh_order\.rental_opening opening ON opening\.order_id=ao\.id AND opening\.status='CONFIRMED'/);
@@ -62,6 +64,10 @@ test("B1 projection: titleFacts, available, blockers; unquoted owner total is nu
   assert.equal(notStarted.activeOrder.termSeconds, "14515200");
   assert.equal(notStarted.activeOrder.startedAt, null); assert.equal(notStarted.activeOrder.rentalDeadlineAt, null);
   assert.deepEqual(notStarted.activeOrder.ownerAmount, rented.activeOrder.ownerAmount);
+  const occupied=projectOwnerAccount({...base,rental_state:"RENTED",ao_id:"legacy-order",ao_display_no:"ORIGINAL-SN",ao_origin:"LEGACY",ao_status:"PAID",ao_legacy_deadline:"1793491200"} as any);
+  assert.equal(occupied.activeOrder?.displayNo,"ORIGINAL-SN");assert.equal(occupied.activeOrder?.origin,"LEGACY");
+  assert.equal(occupied.activeOrder?.rentalDeadlineAt,"2026-11-01T00:00:00.000Z");assert.equal(occupied.activeOrder?.renterName,null);
+  assert.equal(projectOwnerAccount({...base,legacy_market:true} as any).available,false);
 });
 
 test("B1 signed cursor binds owner and filter; LIMIT n+1 without N+1 queries", async () => {
@@ -72,9 +78,11 @@ test("B1 signed cursor binds owner and filter; LIMIT n+1 without N+1 queries", a
   assert.throws(() => decodeOwnerAccountCursor(token.slice(0, -2) + "AA", "u1", "LISTED", key), (e: any) => e.status === 400);
   assert.throws(() => decodeOwnerAccountCursor(token, "u1", "LISTED", undefined), (e: any) => e.status === 503);
   let calls = 0, params: unknown[] = [];
-  const client = { query: async (_s: string, p: unknown[]) => { calls++; params = p; return { rows: [{ ...base, id: "a1" }, { ...base, id: "a2" }, { ...base, id: "a3" }] }; } } as unknown as PoolClient;
+  const client = { query: async (sql: string, p: unknown[]) => { calls++; if(sql.includes('to_regclass'))return {rows:[{ready:false}]}; if(sql.includes('legacy-market-account-ids'))return {rows:[]};
+    assert.doesNotMatch(sql,/legacy_continuation_version|legacy_inflight_register/);assert.match(sql,/l\.source_order_status IN\(3,8,9\)/);
+    params = p; return { rows: [{ ...base, id: "a1" }, { ...base, id: "a2" }, { ...base, id: "a3" }] }; } } as unknown as PoolClient;
   const r = await listOwnerAccounts(client, "u1", { limit: 2, after: "", cursor: token, rentalState: "LISTED" }, key);
-  assert.equal(calls, 1); assert.deepEqual(params, ["u1", "acc-2", "LISTED", 3]);
+  assert.equal(calls, 3); assert.deepEqual(params, ["u1", "acc-2", "LISTED", 3, []]);
   assert.equal(r.page.length, 2); assert.equal(r.hasMore, true); assert.equal(r.last, "a2");
   assert.equal(decodeOwnerAccountCursor(r.nextPageCursor!, "u1", "LISTED", key), "a2");
   const noKey = await listOwnerAccounts(client, "u1", { limit: 2, after: "", cursor: null, rentalState: null }, undefined);

@@ -6,7 +6,7 @@ import { orderApi, formatOrderMoney, formatOrderTime, OrderRequestError, type Le
 import { orderTermLabel, orderUrl } from "@/components/order/order-presentation";
 import "./order.css";
 import { LegacyContinuationPanel } from "./legacy-continuation-panel";
-import { orderAccountTitle, orderAmountFacts, orderResourceLines, orderUsesResourceSummary } from "@/lib/order-display";
+import { orderAccountTitle, orderAmountFacts, orderListingSourceLabel, orderResourceLines, orderUsesResourceSummary } from "@/lib/order-display";
 
 export function legacyOrderHref(party: OrderParty, page = 1, orderId?: string, accountId?: string) {
   const q = new URLSearchParams({ view: party === "owner" ? "leased" : "rentals", source: "legacy", page: String(page) });
@@ -15,7 +15,7 @@ export function legacyOrderHref(party: OrderParty, page = 1, orderId?: string, a
   return `/account?${q}`;
 }
 
-export function LegacyOrderWorkspace({ party, orderId, page: pageText, accountId, status = "", filters }: { party: OrderParty; orderId?: string; page?: string; accountId?: string; status?: OrderStatusFilter; filters?: OrderSearchFilters }) {
+export function LegacyOrderWorkspace({ party, orderId, page: pageText, accountId, status = "", filters, onOrderChanged }: { party: OrderParty; orderId?: string; page?: string; accountId?: string; status?: OrderStatusFilter; filters?: OrderSearchFilters; onOrderChanged?: () => void }) {
   const session = useUserSession();
   const page = pageText && /^[1-9]\d{0,6}$/.test(pageText) ? Number(pageText) : 1;
   const scope = `${session.status}:${session.userId}:${session.identityVersion}:${party}:${page}:${orderId ?? ""}:${accountId ?? ""}`;
@@ -68,7 +68,7 @@ export function LegacyOrderWorkspace({ party, orderId, page: pageText, accountId
   return <section className="order-detail-view">
     <Link href={orderUrl(party, status, accountId, undefined, undefined, filters)} scroll={false}>返回订单列表</Link>
     <header><h2>{data.displayNo || "订单"}</h2><p>{orderAccountTitle(data)}</p><p>{orderTermLabel(data)}</p><strong>{data.source.statusLabel || "状态待确认"}</strong></header>
-    {orderUsesResourceSummary(data) ? <p className="order-muted">账号资料来自本单记录。</p> : null}
+    {data.listingFacts?.source === "LEGACY_ACCOUNT_SNAPSHOT" ? <p className="order-muted">{orderListingSourceLabel(data)}；原单资源与金额分别保留。</p> : orderUsesResourceSummary(data) ? <p className="order-muted">账号资料来自本单记录。</p> : null}
     {orderResourceLines(data).length ? <section className="account-module-card"><h3>本单资源记录</h3><dl className="order-facts">
       {orderResourceLines(data).map(resource => <div key={resource.code}><dt>{resource.name}</dt><dd>{resource.value}</dd></div>)}
     </dl></section> : null}
@@ -79,7 +79,11 @@ export function LegacyOrderWorkspace({ party, orderId, page: pageText, accountId
       <div><dt>押金</dt><dd>{formatOrderMoney(data.legacyAmounts?.deposit)}</dd></div>
       <div><dt>退款记录金额</dt><dd>{formatOrderMoney(data.legacyAmounts?.refund)}</dd></div>
     </dl>}</section>
-    <LegacyContinuationPanel orderId={data.id} party={party}/>
+    <LegacyContinuationPanel orderId={data.id} party={party} onOrderChanged={() => {
+      setState({ scope, loading: true, data: null, error: "" });
+      setReload(n => n + 1);
+      onOrderChanged?.();
+    }}/>
     <section className="account-module-card"><h3>订单信息</h3><dl className="order-facts">
       <div><dt>创建时间</dt><dd>{formatOrderTime(data.createdAt)}</dd></div><div><dt>支付记录时间</dt><dd>{formatOrderTime(data.paidAt)}</dd></div>
       <div><dt>完成时间</dt><dd>{formatOrderTime(data.completedAt)}</dd></div><div><dt>取消时间</dt><dd>{formatOrderTime(data.cancelledAt)}</dd></div>

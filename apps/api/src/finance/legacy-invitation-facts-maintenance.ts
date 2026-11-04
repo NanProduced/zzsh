@@ -1,20 +1,24 @@
 import type {PoolClient} from 'pg';
 import {recordAudit} from '../auth/security-core';
-import {authorizeFinanceMaintenance} from './personal-finance-maintenance';
+import {authorizeFinanceMaintenance,isReviewedFinanceMaintenanceResource} from './personal-finance-maintenance';
 import {canonicalize} from '../supply/content-hash';
 import {ensureOnlyFields,invalid,conflict,forbidden,withIdempotency,fingerprintRequest} from '../supply/supply-util';
 import {prepareLegacyInvitationFacts,invitationFactHash,invitationFactTypes,invitationFactSourceDigest,invitationFactCodeId,legacyInvitationFactsOperation,legacyInvitationCountsOperation,type LegacyInvitationFactsInput} from './legacy-invitation-facts';
 
+import {readLegacyDistributionQualifications} from './admin-distribution-read';
+import {readDistributionPolicyRowInTransaction} from './distribution-policy-store';
+
 type Actor={userId:string;sessionId:string;requestId:string};
-export type LegacyInvitationFactsReview={ref:string;attempt:string;actor:{userId:string;sessionId:string};resource:{host:'127.0.0.1';port:55432;database:string;oid:number;owner:string;ownerOid:number;marker:string;role:string;roleOid:number};notBefore:string;expiresAt:string;sourceDigest:string;bodyDigest:string;phase:'IMPORT'|'COUNTS'};
+export type LegacyInvitationFactsReview={ref:string;attempt:string;actor:{userId:string;sessionId:string};resource:{host:'127.0.0.1';port:55432;database:string;oid:number;owner:string;ownerOid:number;marker:string;role:string;roleOid:number};notBefore:string;expiresAt:string;sourceDigest:string;bodyDigest:string;phase:'IMPORT'|'COUNTS'|'QUALIFY';nonce?:string};
 export type LegacyInvitationFactsAdmission=Readonly<{kind:'REVIEWED_LEGACY_INVITATION_FACTS'}>;
 const admissions=new WeakMap<object,{review:LegacyInvitationFactsReview;recoverOnly:boolean}>(),hex=/^[a-f0-9]{64}$/;
 const factAction='distribution.legacy_facts.imported',countAction='distribution.legacy_facts.counts_closed';
 function transaction(c:PoolClient){if(c.getTransactionStatus()!=='T')throw conflict('Caller-owned invitation fact transaction required');}
 function reviewShape(r:LegacyInvitationFactsReview){
- ensureOnlyFields(r,['ref','attempt','actor','resource','notBefore','expiresAt','sourceDigest','bodyDigest','phase']);ensureOnlyFields(r.actor,['userId','sessionId']);ensureOnlyFields(r.resource,['host','port','database','oid','owner','ownerOid','marker','role','roleOid']);
- if(![r.ref,r.attempt,r.actor.userId,r.actor.sessionId].every(x=>typeof x==='string'&&/^[A-Za-z0-9][A-Za-z0-9._:-]{0,179}$/.test(x))||!hex.test(r.sourceDigest)||!hex.test(r.bodyDigest)||!['IMPORT','COUNTS'].includes(r.phase)
-  ||r.resource.host!=='127.0.0.1'||r.resource.port!==55432||r.resource.database==='zzsh_test_regression'||r.resource.oid===2220718||!/^(zzsh_dev_daily|zzsh_test_[a-z0-9_]+)$/.test(r.resource.database)
+ ensureOnlyFields(r,['ref','attempt','actor','resource','notBefore','expiresAt','sourceDigest','bodyDigest','phase','nonce']);ensureOnlyFields(r.actor,['userId','sessionId']);ensureOnlyFields(r.resource,['host','port','database','oid','owner','ownerOid','marker','role','roleOid']);
+ if(r.phase==='QUALIFY'&&r.resource.database==='zzsh_test_regression'&&(typeof r.nonce!=='string'||!/^[a-z0-9_]{12,40}$/.test(r.nonce)))throw invalid('Exact qualification regression epoch required');
+ if(![r.ref,r.attempt,r.actor.userId,r.actor.sessionId].every(x=>typeof x==='string'&&/^[A-Za-z0-9][A-Za-z0-9._:-]{0,179}$/.test(x))||!hex.test(r.sourceDigest)||!hex.test(r.bodyDigest)||!['IMPORT','COUNTS','QUALIFY'].includes(r.phase)
+  ||r.resource.host!=='127.0.0.1'||r.resource.port!==55432||r.resource.database==='zzsh_test_regression'&&!isReviewedFinanceMaintenanceResource(r.resource)||r.resource.oid===2220718||!/^(zzsh_dev_daily|zzsh_test_[a-z0-9_]+)$/.test(r.resource.database)
   ||![r.resource.oid,r.resource.ownerOid,r.resource.roleOid].every(x=>Number.isSafeInteger(x)&&x>0&&x<=4294967295)||![r.resource.owner,r.resource.role].every(x=>/^[A-Za-z_][A-Za-z0-9_]{0,62}$/.test(x))
   ||typeof r.resource.marker!=='string'||!r.resource.marker||r.resource.marker.length>1024||/[\x00-\x1f\x7f]/.test(r.resource.marker)
   ||![r.notBefore,r.expiresAt].every(x=>typeof x==='string'&&/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/.test(x)&&Number.isFinite(Date.parse(x)))||Date.parse(r.expiresAt)<=Date.parse(r.notBefore))throw invalid('Exact internal invitation fact review required');
@@ -23,11 +27,11 @@ async function resource(c:PoolClient,actor:Actor,r:LegacyInvitationFactsReview,r
  transaction(c);const p=(c as PoolClient&{connectionParameters?:{host:string;port:number;database:string;user:string}}).connectionParameters;
  if(!p||p.host!==r.resource.host||Number(p.port)!==r.resource.port||p.database!==r.resource.database||p.user!==r.resource.role||actor.userId!==r.actor.userId||actor.sessionId!==r.actor.sessionId)throw forbidden('Invitation review connection or actor differs');
  const row=(await c.query(`/* invitation-facts resource */ SELECT d.oid::int AS oid,current_database() AS database,pg_get_userbyid(d.datdba) AS owner,d.datdba::int AS "ownerOid",
-  shobj_description(d.oid,'pg_database') AS marker,current_user AS role,r.oid::int AS "roleOid",clock_timestamp() AS now,current_setting('transaction_read_only') AS read_only,
+  shobj_description(d.oid,'pg_database') AS marker,current_user AS role,r.oid::int AS "roleOid",clock_timestamp() AS now,current_setting('transaction_read_only') AS read_only,current_setting('zzsh.regression_run',true) AS nonce,
   (SELECT count(*)::int FROM pg_class t JOIN pg_namespace n ON n.oid=t.relnamespace WHERE n.nspname='zzsh_order' AND t.relname IN('distribution_participant','distribution_invite_code','invitation_relation') AND pg_get_userbyid(t.relowner)=current_user) AS owned,
   zzsh_order.distribution_policy_contract_version()>=2 AS complete
   FROM pg_database d JOIN pg_roles r ON r.rolname=current_user WHERE d.datname=current_database()`)).rows[0];
- if(!row||['oid','database','owner','ownerOid','marker','role','roleOid'].some(k=>row[k]!==r.resource[k as keyof LegacyInvitationFactsReview['resource']])||row.owned!==3||row.complete!==true||!planOnly&&!recover&&row.read_only!=='off')throw conflict('Invitation target identity, table ownership or contract differs');
+ if(!row||['oid','database','owner','ownerOid','marker','role','roleOid'].some(k=>row[k]!==r.resource[k as keyof LegacyInvitationFactsReview['resource']])||r.nonce!==undefined&&row.nonce!==r.nonce||row.owned!==3||row.complete!==true||!planOnly&&!recover&&row.read_only!=='off')throw conflict('Invitation target identity, table ownership or contract differs');
  const now=new Date(row.now).getTime();if(!Number.isFinite(now)||now<Date.parse(r.notBefore)||!recover&&now>=Date.parse(r.expiresAt))throw forbidden('Invitation fact execution window is not active');
 }
 async function admitted(c:PoolClient,actor:Actor,input:LegacyInvitationFactsInput,scope:LegacyInvitationFactsAdmission,phase:'IMPORT'|'COUNTS',recover=false){
@@ -40,6 +44,48 @@ export async function bindReviewedLegacyInvitationFacts(c:PoolClient,actor:Actor
  const value=Object.freeze({kind:'REVIEWED_LEGACY_INVITATION_FACTS' as const});admissions.set(value,{review:JSON.parse(canonicalize(review)),recoverOnly:mode==='recover'});return value;
 }
 const digestFingerprint=(operation:string,bodyDigest:string)=>fingerprintRequest(operation,undefined,{bodyDigest});
+export type LegacyQualificationBatch={
+ scope:'LOCAL_CONTROLLED'|'NATIVE';policyId:string;policyDigest:string;
+ subjects:{userId:string;sourceDigest:string;revision:string;levelCode:string;frozen:boolean}[];
+};
+
+/** Root-admitted metadata transition using the original audited qualification and the exact active policy. */
+export async function qualifyReviewedLegacyParticipants(c:PoolClient,actor:Actor,input:LegacyQualificationBatch,scope:LegacyInvitationFactsAdmission){
+ const admission=admissions.get(scope),bodyDigest=invitationFactHash(input);
+ if(!admission||admission.recoverOnly||admission.review.phase!=='QUALIFY'||admission.review.bodyDigest!==bodyDigest)throw forbidden('Reviewed legacy qualification batch required');
+ const review=admission.review;
+ ensureOnlyFields(input,['scope','policyId','policyDigest','subjects']);
+ if(!['LOCAL_CONTROLLED','NATIVE'].includes(input.scope)||!hex.test(input.policyDigest)||!Array.isArray(input.subjects)||!input.subjects.length||input.subjects.length>1000)throw invalid('Bounded exact legacy qualification batch required');
+ for(const s of input.subjects){
+  ensureOnlyFields(s,['userId','sourceDigest','revision','levelCode','frozen']);
+  if(!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,179}$/.test(s.userId)||!hex.test(s.sourceDigest)||!/^[1-9]\d{0,18}$/.test(s.revision)||!/^legacy_[1-9]\d{0,18}$/.test(s.levelCode)||typeof s.frozen!=='boolean')throw invalid('Original qualification subject and revision required');
+ }
+ const ids=input.subjects.map(s=>s.userId).sort();
+ if(new Set(ids).size!==ids.length)throw invalid('Duplicate original qualification subject');
+ const verify=async()=>{await resource(c,actor,review);await authorizeFinanceMaintenance(c,actor);};
+ await verify();await lockActor(c,actor);
+ await c.query("SELECT pg_advisory_xact_lock(hashtextextended('zzsh:invitation-graph:v1',0))");
+ const operation='distribution.legacy-qualification.v1',key='legacy-qualification-'+bodyDigest;
+ return withIdempotency(c,{realm:'admin',principalId:actor.userId,operation},key,digestFingerprint(operation,bodyDigest),verify,async()=>{
+  const locked=await c.query('SELECT id FROM zzsh_auth_user."user" WHERE id=ANY($1::text[]) ORDER BY id FOR UPDATE',[ids]);
+  if(locked.rowCount!==ids.length)throw conflict('Original qualification subject missing');
+  const {policy}=await readDistributionPolicyRowInTransaction(c,true,input.scope);
+  if(!policy||policy.versionId!==input.policyId||policy.digest!==input.policyDigest||policy.config.schema!=='distribution-policy.v3'||!policy.config.enabled||policy.config.legacySource.receiptSha256!==review.sourceDigest)throw conflict('Reviewed active legacy policy differs');
+  const codes=new Set(policy.config.levels.map(l=>l.code));
+  const original=await readLegacyDistributionQualifications(c,ids,review.sourceDigest);
+  for(const s of input.subjects){const fact=original.get(s.userId);if(!fact||fact.eligibility!=='ELIGIBLE'||fact.commissionFrozen!==s.frozen||s.levelCode!=='legacy_'+fact.levelId||!codes.has(s.levelCode))throw conflict('Original qualification flags or active level differ');}
+  const updated=await c.query(`UPDATE zzsh_order.distribution_participant p SET eligibility='ELIGIBLE',level_code=x."levelCode",policy_version_id=$2,revision=p.revision+1
+    FROM jsonb_to_recordset($1::jsonb) x("userId" text,"sourceDigest" text,revision bigint,"levelCode" text,frozen boolean)
+    WHERE p.user_id=x."userId" AND p.source_digest=x."sourceDigest" AND p.revision=x.revision
+      AND p.source_type='LEGACY_MYSQL' AND p.eligibility='UNKNOWN' AND p.policy_version_id IS NULL AND p.level_code IS NULL
+      AND p.commission_frozen IS NOT DISTINCT FROM x.frozen`,[JSON.stringify(input.subjects),input.policyId]);
+  if(updated.rowCount!==ids.length)throw conflict('Original participant qualification CAS differs');
+  await recordAudit(c,{actorType:'admin',actorId:actor.userId,sessionId:actor.sessionId,requestId:actor.requestId,action:'distribution.legacy_qualification.admitted',objectType:'distribution_policy_version',objectId:input.policyId,outcome:'SUCCESS',reason:'Reviewed legacy grade and qualification provenance',details:{bodyDigest,participants:ids.length,sourceDigest:review.sourceDigest,reviewRef:review.ref,attempt:review.attempt,financialEffects:false}});
+  await verify();
+  return {status:200,body:{bodyDigest,policyId:input.policyId,participants:ids.length,financialEffects:false}};
+ });
+}
+
 const fingerprint=(operation:string,input:LegacyInvitationFactsInput)=>digestFingerprint(operation,invitationFactHash(input));
 function expectedReceipt(input:LegacyInvitationFactsInput){const p=prepareLegacyInvitationFacts(input,invitationFactHash(input));return{bodyDigest:p.bodyDigest,sourceDigest:invitationFactHash(input.source),policyVersionId:input.policy?.versionId??null,participants:p.subjects.length,codes:p.subjects.length,relations:p.relations.length,financialEffects:false,
  subjectProofs:p.subjects.map(s=>({userId:s.userId,sourceDigest:s.sourceDigest}))};}

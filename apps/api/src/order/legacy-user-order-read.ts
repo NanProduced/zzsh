@@ -3,7 +3,7 @@ import type { PoolClient } from "pg";
 import { invalid, notFound } from "../supply/supply-util";
 import { centsToYuan } from "./order";
 import { publicAccountNumber } from "../supply/account-number";
-import { legacyContinuationReady, legacyEpochTimestamp, legacyMoneyCents, legacyOrderReadState, LEGACY_ORDER_STATUS_SQL } from "./legacy-order-read";
+import { legacyContinuationReady, legacyEpochTimestamp, legacyMoneyCents, legacyOrderLifecycleStage, legacyOrderReadState, LEGACY_CONTINUATION_COMPLETED_AT_SQL, LEGACY_ORDER_STATUS_SQL } from "./legacy-order-read";
 
 export type LegacyUserOrderFilter = {
   party: "renter" | "owner";
@@ -74,9 +74,10 @@ function legacyOwnerRecordedIncome(row: LegacyUserOrderRow) {
       ? centsToYuan(BigInt(gross) - BigInt(fee)) : null;
   } catch { return null; }
 }
-export function projectUserLegacyOrder(row: LegacyUserOrderRow, userId: string) {
+export function projectUserLegacyOrder(row: LegacyUserOrderRow, userId: string, requestedParty?: "renter" | "owner") {
   if (row.sourceDeletedFlag != null && row.sourceDeletedFlag !== "0") throw notFound();
-  const party = row.renterUserId === userId ? "renter" : row.ownerUserId === userId ? "owner" : null;
+  const party = requestedParty === "owner" ? (row.ownerUserId === userId ? "owner" : null)
+    : row.renterUserId === userId ? "renter" : requestedParty !== "renter" && row.ownerUserId === userId ? "owner" : null;
   if (!party) throw notFound();
   const state = legacyOrderReadState(row.continuationStage ?? row.sourceOrderStatus, row.sourcePayStatus);
   const goods = legacyMoneyCents(row.goodsYuan), items = legacyMoneyCents(row.itemsYuan);
@@ -87,6 +88,7 @@ export function projectUserLegacyOrder(row: LegacyUserOrderRow, userId: string) 
     // Only a real current title crosses this boundary. Without one the field stays null, so readers can fall
     // back to the frozen order resource summary instead of being blocked by fabricated placeholder text.
     id: row.id, displayNo: row.displayNo, status: state.status, party, title: row.accountReadable ? row.title : null, gameId: row.gameId,
+    stage: legacyOrderLifecycleStage(row.continuationStage ?? row.sourceOrderStatus, row.sourcePayStatus, party),
     source: { origin: "LEGACY" as const, ruleOrigin: "LEGACY_ORDER" as const, originalStatus: row.sourceOrderStatus, originalPayStatus: row.sourcePayStatus, statusLabel: state.statusLabel },
     createdAt: row.createdAt, paidAt: row.paidAt, cancelledAt: row.cancelledAt, completedAt: row.completedAt,
     amounts: { rental: renter && goods !== null && items !== null ? centsToYuan(BigInt(goods) + BigInt(items)) : null,
@@ -106,7 +108,7 @@ const utc = (column: string) => `to_char(${column} AT TIME ZONE 'UTC','YYYY-MM-D
 export function legacyUserOrderFields(continuationReady: boolean): string { return `l.id,l.original_order_no AS "displayNo",l.source_order_status AS "sourceOrderStatus",l.source_pay_status AS "sourcePayStatus",h.stage AS "continuationStage",l.source_snapshot->>'is_delete' AS "sourceDeletedFlag",
  l.owner_user_id AS "ownerUserId",l.renter_user_id AS "renterUserId",l.game_id AS "gameId",CASE WHEN a.owner_user_id=$1 THEN v.title ELSE NULL END AS title,
  l.account_id AS "accountId",a.display_no AS "accountDisplayNo",COALESCE(a.owner_user_id=$1,false) AS "accountReadable",
- ${utc("l.source_created_at")} AS "createdAt",${utc("l.source_paid_at")} AS "paidAt",${utc("l.source_cancelled_at")} AS "cancelledAt",${utc(continuationReady ? `COALESCE((SELECT created_at FROM zzsh_order.legacy_continuation_version WHERE order_id=l.id AND command='CONFIRM' ORDER BY revision DESC LIMIT 1),l.source_completed_at)` : "l.source_completed_at")} AS "completedAt",
+ ${utc("l.source_created_at")} AS "createdAt",${utc("l.source_paid_at")} AS "paidAt",${utc("l.source_cancelled_at")} AS "cancelledAt",${utc(continuationReady ? LEGACY_CONTINUATION_COMPLETED_AT_SQL : "l.source_completed_at")} AS "completedAt",
  l.due_amount_cents::text AS "dueCents",l.recorded_paid_amount_cents::text AS "paidCents",l.deposit_amount_cents::text AS "depositCents",
  l.source_snapshot->>'goods_money' AS "goodsYuan",l.source_snapshot->>'expend_pay_money' AS "itemsYuan",l.source_snapshot->>'return_order_money' AS "refundYuan",
  l.source_snapshot->>'sale_earnings' AS "saleEarningsYuan",l.source_snapshot->>'full_payout_money' AS "fullPayoutFeeYuan",
@@ -128,7 +130,7 @@ export async function listUserLegacyOrders(client: PoolClient, userId: string, f
       COALESCE((SELECT jsonb_agg(p ORDER BY p."createdAt" DESC NULLS LAST,p.id DESC) FROM paged p),'[]'::jsonb) AS items`,
     [userId, filter.status ?? null, filter.accountId ?? null, filter.pageSize, (filter.page - 1) * filter.pageSize],
   )).rows[0]!;
-  return { items: result.items.map(row => projectUserLegacyOrder(row, userId)), page: filter.page, pageSize: filter.pageSize, total: Number(result.total) };
+  return { items: result.items.map(row => projectUserLegacyOrder(row, userId, filter.party)), page: filter.page, pageSize: filter.pageSize, total: Number(result.total) };
 }
 export async function getUserLegacyOrder(client: PoolClient, userId: string, id: string) {
   const continuationReady = await legacyContinuationReady(client);

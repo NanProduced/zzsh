@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { AdminApiError, adminRequest, friendlyError, hasPermission, type SessionSnapshot } from "../api";
 import type { WorkspaceTab } from "../workspace/tab-model";
 import { MembershipBenefitsWorkspace, useMembershipApprovalRequest } from "./membership-benefits-workspace";
+import { statusView } from "./approval/contract";
 import {
   bootstrapGrowthPolicy,
   MembershipGrowthAdminView,
@@ -259,8 +260,8 @@ function toDraftPolicyBody(policy: AdminGrowthPolicy, versionNo: number): Record
 
 function subjectOf(response: SubjectResponse | null, subjectId: string | undefined, error: unknown = null): AdminGrowthSubject {
   if (!subjectId) return { subjectId: "", status: "NOT_LOADED", reason: "从用户详情打开会员成长后再读取对象" };
-  if (!response) return { subjectId, status: error instanceof AdminApiError && error.status === 403 ? "FORBIDDEN" : "UNKNOWN", reason: error instanceof AdminApiError ? `读取失败：${error.status}` : "用户成长来源暂未闭合" };
-  if (response.growth?.knowledge !== "KNOWN") return { subjectId, status: "UNKNOWN", reason: `来源状态：${response.growth?.sourceState ?? "UNKNOWN"}` };
+  if (!response) return { subjectId, status: error instanceof AdminApiError && error.status === 403 ? "FORBIDDEN" : "UNKNOWN", reason: error instanceof AdminApiError && error.status === 403 ? "当前身份无权读取成长资料" : "用户成长资料暂时无法确认" };
+  if (response.growth?.knowledge !== "KNOWN") return { subjectId, status: "UNKNOWN", reason: "用户成长资料暂时无法确认" };
   return { subjectId, status: "LOADED", userLabel: subjectId, tier: response.growth.effectiveTier ?? "UNKNOWN", rollingPoints: response.growth.rollingPoints ?? undefined, lifetimePoints: response.growth.lifetimePoints ?? undefined };
 }
 
@@ -430,7 +431,7 @@ function MembershipGrowthPolicyHost({ tab, snapshot, onDirtyChange, refreshNonce
       : approvalWrite.detailStatus === "PENDING"
         ? "已提交审批，等待审批中心处理。"
         : approvalWrite.detailStatus
-          ? `服务端审批状态：${approvalWrite.detailStatus}。`
+          ? `审批状态：${statusView(approvalWrite.detailStatus).label}。`
           : "已提交审批，等待审批中心处理。";
 
   useEffect(() => {

@@ -20,9 +20,9 @@ export function reviewItemLabel(input: {
     if (snapshot?.name) return { name: snapshot.name, unit: unitText(snapshot.unit, snapshot.code) };
     const catalog = find(input.catalog);
     if (catalog?.name) return { name: catalog.name, unit: unitText(catalog.unit, catalog.code) };
-    return { name: `未确认（${input.itemId}）`, unit: "未确认" };
+    return { name: "名称待确认", unit: "未确认" };
   }
   const previous = find(input.previousPresentation);
   if (previous?.name) return { name: previous.name, unit: unitText(previous.unit, previous.code) };
-  return { name: `未确认（${input.itemId}）`, unit: "未确认" };
+  return { name: "名称待确认", unit: "未确认" };
 }

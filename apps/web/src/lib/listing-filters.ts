@@ -667,5 +667,5 @@ export function resourceItemDisplayName(
   if (context.gameCode === DELTA_GAME_CODE && ["六级子弹", "六级头盔", "六级护甲"].includes(item?.name ?? "")) {
     return item!.name!.replace(/^六级/, "6级");
   }
-  return item?.name || (context.itemId ? `未确认（代码 ${context.itemId}）` : "未确认");
+  return item?.name || "未确认";
 }

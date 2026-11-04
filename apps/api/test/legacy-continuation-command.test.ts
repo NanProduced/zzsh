@@ -109,6 +109,25 @@ test("unrelated user is denied before session/resource lookup and no-op settled/
   await assert.rejects(() => applyLegacyDutyCommand(p.client, actor("user"), legacyBinding.id, { kind: "mature", dutyId: "fixture_duty", expectedRevision: "1" }), /DUTY_NOT_AUTHORIZED/);
 });
 
+test("legacy continuation read keeps hidden orders private and reports missing continuation data without capabilities", async t => {
+  t.mock.method(userAuth, "assertUserContextInTransaction", async () => undefined);
+  let deleted = false;
+  const { client, calls } = clientFor(sql => {
+    if (sql.includes("FROM zzsh_order.legacy_order_read_snapshot WHERE id=$1")) return { rows: [{ ...legacyBinding, sourceDeletedFlag: deleted ? "1" : "0" }], rowCount: 1 };
+    if (sql.includes("AS valid")) return { rows: [{ valid: true }], rowCount: 1 };
+    if (sql.includes("to_regclass")) return { rows: [{ ready: false }], rowCount: 1 };
+    assert.fail(`unexpected legacy continuation query: ${sql}`);
+  });
+  const { continuation } = await evidence.readLegacyContinuation(client, actor("user"), legacyBinding.id);
+  assert.equal(continuation.availability, "NOT_IMPORTED");
+  assert.deepEqual(continuation.capabilities, []);
+  assert.equal(continuation.channelState, "UNKNOWN");
+  deleted = true;
+  calls.length = 0;
+  await assert.rejects(() => evidence.readLegacyContinuation(client, actor("user"), legacyBinding.id), (e: unknown) => (e as { status: number }).status === 404);
+  assert.equal(calls.length, 1);
+});
+
 type VoidAudit = { id: string; actorType: string; actorId: string; sessionId: string; requestId: string; action: string; objectType: string; objectId: string; outcome: string; details: Record<string, unknown> };
 type ReviewedVoid = { sourceDigest: string; decisionEvidenceRef: string | null; decidedBy: LegacyContinuationActor | null; decisionReason: string | null; factAudit: VoidAudit | null; voidAudit: VoidAudit | null };
 function reviewedCommissionFixture(t: import("node:test").TestContext, stage: "8" | "9", mutate?: (proof: ReviewedVoid) => void) {

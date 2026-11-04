@@ -13,8 +13,13 @@ const SEEDS = new Set(['zzsh_iam.admin_permission', 'zzsh_iam.admin_role', 'zzsh
 const sha = b => createHash('sha256').update(b).digest('hex');
 const args = process.argv.slice(2);
 const opt = n => { const i = args.indexOf(n); return i < 0 ? null : args[i + 1]; };
+const production = args.includes('--production');
+const excludedTables = ['zzsh_iam.admin_workspace_layout', 'zzsh_order.local_financial_sandbox_registration',
+    'zzsh_order.local_controlled_refund_operation', 'zzsh_order.local_controlled_refund_evidence',
+    'zzsh_order.controlled_payment_declaration', 'zzsh_order.controlled_payout_notice', 'zzsh_order.controlled_payout_operation',
+    'zzsh_order.withdrawal_admission', 'zzsh_order.withdrawal_destination', 'zzsh_order.withdrawal_intent', 'zzsh_order.withdrawal_provider_fact'];
 if (!args.includes('--execute')) {
-    console.log(JSON.stringify({ action: 'PLAN', database: 'zzsh_test_regression', required: ['--execute', '--oid', '--baseline <new-release-name>', '--source-count <frozen-canonical-count>', 'ZZSH_REGRESSION_RUN', 'DB_PASSWORD_FILE'], writes: 'new, exclusive migrations/initial baseline only; no database writes or replacement of release_0141', pgConnections: 0, privateReads: 0 }));
+    console.log(JSON.stringify({ action: 'PLAN', database: production ? 'registered production initial build resource' : 'zzsh_test_regression', required: ['--execute', '--oid', '--baseline <new-release-name>', '--source-count <frozen-canonical-count>', ...(production ? ['--source-db <registered-scratch>'] : []), 'ZZSH_REGRESSION_RUN', 'DB_PASSWORD_FILE'], writes: 'new, exclusive migrations/initial baseline only; no database writes or replacement of release_0141', pgConnections: 0, privateReads: 0 }));
     process.exit(0);
 }
 if (process.version !== 'v24.20.0')
@@ -29,11 +34,13 @@ const target = join(ROOT, 'apps/api/migrations/initial', baseline);
 if (existsSync(target)) throw Error('INITIAL_OUTPUT_ALREADY_EXISTS');
 const expectedNonce = process.env.ZZSH_REGRESSION_RUN;
 if (!/^[a-z0-9_]{12,40}$/.test(expectedNonce ?? '')) throw Error('REGRESSION_NONCE_REQUIRED');
+const database = production ? opt('--source-db') : 'zzsh_test_regression';
+if (production && (!/^zzsh_test_[a-z0-9_]{1,48}$/.test(database ?? '') || database === 'zzsh_test_regression')) throw Error('PRODUCTION_INITIAL_SCRATCH_REQUIRED');
 const passwordFile = process.env.DB_PASSWORD_FILE;
 if (!passwordFile)
     throw Error('DB_PASSWORD_FILE_REQUIRED');
 const password = readFileSync(passwordFile, 'utf8').trim();
-const c = new Client({ host: '127.0.0.1', port: 55432, database: 'zzsh_test_regression', user: 'zzsh', password, application_name: 'zzsh-build-initial', connectionTimeoutMillis: 3000, statement_timeout: 10000, lock_timeout: 500 });
+const c = new Client({ host: '127.0.0.1', port: 55432, database, user: 'zzsh', password, application_name: 'zzsh-build-initial', connectionTimeoutMillis: 3000, statement_timeout: 10000, lock_timeout: 500 });
 const maintenance = new Client({ host: '127.0.0.1', port: 55432, database: 'postgres', user: 'zzsh', password, application_name: 'zzsh-build-initial-lock', connectionTimeoutMillis: 3000, statement_timeout: 3000, lock_timeout: 500 });
 let held = false, begun = false;
 try {
@@ -45,7 +52,7 @@ try {
     await c.query('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY');
     begun = true;
     const id = (await c.query("SELECT d.oid::text,pg_get_userbyid(d.datdba) owner,shobj_description(d.oid,'pg_database') marker,current_setting('zzsh.regression_run',true) nonce FROM pg_database d WHERE datname=current_database()")).rows[0];
-    if (id.oid !== expectedOid || id.owner !== 'zzsh' || id.marker !== 'zzsh:regression-test:v1' || id.nonce !== expectedNonce)
+    if (id.oid !== expectedOid || id.owner !== 'zzsh' || id.marker !== (production ? 'zzsh:production-initial-scratch:v1' : 'zzsh:regression-test:v1') || id.nonce !== expectedNonce)
         throw Error('REGRESSION_IDENTITY_MISMATCH');
     const journal = JSON.parse(readFileSync(join(ROOT, 'apps/api/migrations/business/meta/_journal.json')));
     if (journal.entries.length < sourceCount)
@@ -55,6 +62,7 @@ try {
     if (applied.length !== sourceChain.length || applied.some((r, i) => r.hash !== sourceChain[i].sha256 || r.createdAt !== String(sourceChain[i].when)))
         throw Error('SOURCE_DATABASE_NOT_EXACT_CANONICAL_CHAIN');
     const tables = (await c.query("SELECT n.nspname schema,c.relname name FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname=ANY($1::text[]) AND c.relkind IN ('r','p') ORDER BY 1,2", [SCHEMAS])).rows;
+    const ledgerComments = production ? await productionCatalogComments(c, tables) : '';
     const seedCounts = [];
     for (const t of tables) {
         const n = (await c.query(`SELECT count(*)::int n FROM "${t.schema}"."${t.name}"`)).rows[0].n;
@@ -69,12 +77,12 @@ try {
         throw Error('AVATAR_POLICY_MUST_BE_CANONICAL_DEFAULT');
     }
     const snapshot = (await c.query('SELECT pg_export_snapshot() id')).rows[0].id;
-    function dump(extra) { const r = spawnSync('docker', ['exec', '--env', 'PGPASSWORD', 'zzsh-rebuild-local-postgres-1', 'pg_dump', '-h', '127.0.0.1', '-U', 'zzsh', '-d', 'zzsh_test_regression', '--snapshot=' + snapshot, '--no-owner', ...SCHEMAS.map(s => '--schema=' + s), ...extra], { env: { ...process.env, PGPASSWORD: password }, encoding: 'utf8', timeout: 60000, maxBuffer: 20 * 1024 * 1024 }); if (r.status !== 0)
+    function dump(extra) { const r = spawnSync('docker', ['exec', '--env', 'PGPASSWORD', 'zzsh-rebuild-local-postgres-1', 'pg_dump', '-h', '127.0.0.1', '-U', 'zzsh', '-d', database, '--snapshot=' + snapshot, '--no-owner', ...SCHEMAS.map(s => '--schema=' + s), ...extra], { env: { ...process.env, PGPASSWORD: password }, encoding: 'utf8', timeout: 60000, maxBuffer: 20 * 1024 * 1024 }); if (r.status !== 0)
         throw Error('PG_DUMP_FAILED:' + String(r.stderr).slice(0, 180)); return r.stdout.split(String.fromCharCode(10)).filter(line => !line.startsWith(String.fromCharCode(92) + 'restrict ') && !line.startsWith(String.fromCharCode(92) + 'unrestrict ') && !['statement_timeout', 'lock_timeout', 'idle_in_transaction_session_timeout'].some(setting => line.startsWith('SET ' + setting + ' = 0;'))).join(String.fromCharCode(10)); }
     const notes = await loadInitialNotes(c);
     const pre = annotateDump(dump(['--section=pre-data', '--no-privileges']), notes);
     const data = dump(['--section=data', '--no-privileges', '--inserts', '--column-inserts']);
-    const post = annotateDump(dump(['--section=post-data', '--no-privileges']), notes);
+    const post = annotateDump(dump(['--section=post-data', '--no-privileges']), notes) + ledgerComments;
     const publicObjects = (await c.query(`SELECT 'SCHEMA' kind,quote_ident(n.nspname) object,a.privilege_type privilege,a.is_grantable FROM pg_namespace n LEFT JOIN LATERAL aclexplode(coalesce(n.nspacl,acldefault('n',n.nspowner))) a ON a.grantee=0 WHERE n.nspname=ANY($1::text[])
 UNION ALL SELECT CASE WHEN c.relkind='S' THEN 'SEQUENCE' ELSE 'TABLE' END,format('%I.%I',n.nspname,c.relname),a.privilege_type,a.is_grantable FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace LEFT JOIN LATERAL aclexplode(coalesce(c.relacl,acldefault((CASE WHEN c.relkind='S' THEN 'S' ELSE 'r' END)::"char",c.relowner))) a ON a.grantee=0 WHERE n.nspname=ANY($1::text[]) AND c.relkind IN ('r','p','v','m','S','f')
 UNION ALL SELECT 'FUNCTION',format('%I.%I(%s)',n.nspname,p.proname,pg_get_function_identity_arguments(p.oid)),a.privilege_type,a.is_grantable FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace LEFT JOIN LATERAL aclexplode(coalesce(p.proacl,acldefault('f',p.proowner))) a ON a.grantee=0 WHERE n.nspname=ANY($1::text[])
@@ -109,18 +117,18 @@ UNION ALL SELECT 'TYPE',format('%I.%I',n.nspname,t.typname),a.privilege_type,a.i
       ['03-constraints-triggers.sql', '约束、索引与触发器', '保留唯一性、外键、资金守卫、时序及不可变约束；不关闭触发器或放宽表达式。', post],
       ['04-public-privileges.sql', 'PUBLIC权限边界', '逐对象恢复已核PUBLIC语义；runtime窄权仍由统一applyRuntimePrivileges安装，不绑定本机角色。', acl],
     ].map(([file, title, purpose, sql]) => {
-      const header = [`-- 洲洲商行业务数据库新装基线：${baseline}`, `-- 本段：${title}。${purpose}`, `-- 来源：canonical前${sourceCount}份SQL至${sourceChain.at(-1).tag}；已执行的旧SQL和journal不改写。`, '-- 账务*_cents为CNY整数分；比例、单价与旧源文本另依各自单位，不用浮点当账务真值。', '-- UNKNOWN/null不是0；历史观察、当前应付责任、账务入账、银行到账是不同事实。', '-- 保留来源类型、原键、冻结版本和不可变审计；不从流水求和重造原期初。', '-- schema模块导览（以下仅注释，不改变SQL或跨域依赖顺序）：', ...modules.map(([schema, explanation]) => `--   ${schema}：${explanation}`), '-- 原对象COMMENT来自canonical；新增数据库元数据说明须先以前向迁移纳入来源。', ''].join('\n');
+      const header = [`-- 洲洲商行业务数据库新装基线：${baseline}`, `-- 本段：${title}。${purpose}`, `-- 来源：canonical前${sourceCount}份SQL至${sourceChain.at(-1).tag}；已执行的旧SQL和journal不改写。`, '-- 账务*_cents为CNY整数分；比例、单价与旧源文本另依各自单位，不用浮点当账务真值。', '-- UNKNOWN/null不是0；历史观察、当前应付责任、账务入账、银行到账是不同事实。', '-- 保留来源类型、原键、冻结版本和不可变审计；不从流水求和重造原期初。', '-- schema模块导览（以下仅注释，不改变SQL或跨域依赖顺序）：', ...modules.map(([schema, explanation]) => `--   ${schema}：${explanation}`), production ? '-- 正式初始投影剥离纯本地模拟对象和已下线的布局表，写入中文对象COMMENT。' : '-- 原对象COMMENT来自canonical；新增数据库元数据说明须先以前向迁移纳入来源。', ''].join('\n');
       return [file, header + '\n' + sql];
     });
     mkdirSync(target);
     const parts = sections.map(([file, sql]) => { writeFileSync(join(target, file), sql, { flag: 'wx' }); return { file, sha256: sha(sql) }; });
     const documents = [
-      ['README.md', readmeMarkdown(baseline, sourceCount, sourceChain.at(-1).tag)],
+      ['README.md', production ? productionReadme(baseline, sourceCount, sourceChain.at(-1).tag) : readmeMarkdown(baseline, sourceCount, sourceChain.at(-1).tag)],
       ['NAVIGATION.md', navigationMarkdown(baseline, notes, sections[0][1])],
     ].map(([file, text]) => { writeFileSync(join(target, file), text, { flag: 'wx' }); return { file, sha256: sha(text) }; });
     const combined = sections.map(([, sql]) => sql).join('\n--> statement-breakpoint\n');
     const journalBytes = readFileSync(join(ROOT, 'apps/api/migrations/business/meta/_journal.json'));
-    const manifest = { format: 'zzsh.business-initial.v1', baseline, migrationTag: sourceChain.at(-1).tag.slice(0, 4) + '_initial_' + baseline, migrationHash: sha(combined), when: sourceChain.at(-1).when, sourceCount, journalSha256: sha(journalBytes), journalPrefixSha256: sha(JSON.stringify(journal.entries.slice(0, sourceCount))), sourceChain, parts, documents, seedCounts, notes: '仅新装基线；原canonical SQL/journal保持升级历史。中文注释不改对象和函数体；新增COMMENT须先纳入canonical。runtime权限由applyRuntimePrivileges安装。' };
+    const manifest = { format: 'zzsh.business-initial.v1', baseline, migrationTag: sourceChain.at(-1).tag.slice(0, 4) + '_initial_' + baseline, migrationHash: sha(combined), when: sourceChain.at(-1).when, sourceCount, journalSha256: sha(journalBytes), journalPrefixSha256: sha(JSON.stringify(journal.entries.slice(0, sourceCount))), sourceChain, parts, documents, seedCounts, ...(production ? { profile: 'PRODUCTION', excludedTables } : {}), notes: production ? '生产新装投影；纯本地模拟和停用布局不部署，存续表列含中文COMMENT。canonical历史保持不变；runtime权限由applyRuntimePrivileges安装。' : '仅新装基线；原canonical SQL/journal保持升级历史。中文注释不改对象和函数体；新增COMMENT须先纳入canonical。runtime权限由applyRuntimePrivileges安装。' };
     writeFileSync(join(target, 'manifest.json'), JSON.stringify(manifest, null, 2) + '\n', { flag: 'wx' });
     console.log(JSON.stringify({ status: 'INITIAL_GENERATED', sourceCount, baseline, parts: parts.length, seedCounts, migrationHash: manifest.migrationHash, bytes: Buffer.byteLength(combined) }));
     await c.query('ROLLBACK');
@@ -136,6 +144,37 @@ finally {
     if (held && !(await maintenance.query('SELECT pg_advisory_unlock(806006::bigint) ok')).rows[0].ok)
         throw Error('REGRESSION_UNLOCK_UNKNOWN');
     await maintenance.end();
+}
+
+async function productionCatalogComments(client, tables) {
+    if (tables.some(t => excludedTables.includes(t.schema + '.' + t.name))
+        || (await client.query("SELECT to_regnamespace('zzsh_meta') IS NOT NULL present")).rows[0].present)
+        throw Error('PRODUCTION_INITIAL_CONTAINS_EXCLUDED_TABLES');
+    const proof = (await client.query(`SELECT EXISTS (SELECT 1 FROM pg_constraint
+      WHERE conrelid='zzsh_order.finance_economic_root'::regclass AND conname='production_no_local_controlled_root'
+        AND contype='c' AND convalidated) AS ready`)).rows[0].ready;
+    if (!proof) throw Error('PRODUCTION_INITIAL_CONTRACT_REQUIRED');
+    const comments = (await client.query(`SELECT n.nspname schema,c.relname name,a.attname AS "column",
+      CASE WHEN a.attname IS NULL THEN obj_description(c.oid,'pg_class') ELSE col_description(c.oid,a.attnum) END description,
+      CASE WHEN a.attname IS NULL THEN format('%I.%I',n.nspname,c.relname) ELSE format('%I.%I.%I',n.nspname,c.relname,a.attname) END identifier
+      FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+      CROSS JOIN LATERAL (SELECT NULL::name attname,0 attnum UNION ALL SELECT attname,attnum FROM pg_attribute
+        WHERE attrelid=c.oid AND attnum>0 AND NOT attisdropped) a
+      WHERE c.relkind IN ('r','p') AND (n.nspname=ANY($1::text[]) OR (n.nspname='zzsh_business_meta' AND c.relname='migrations'))
+      ORDER BY n.nspname,c.relname,a.attnum`, [SCHEMAS])).rows;
+    const incomplete = comments.filter(row => !/\p{Script=Han}/u.test(row.description ?? ''));
+    if (incomplete.length) throw Error('PRODUCTION_INITIAL_MISSING_CHINESE_COMMENT:' + incomplete.map(row => row.identifier).join(','));
+    const ledger = comments.filter(row => row.schema === 'zzsh_business_meta');
+    if (ledger.length !== 4) throw Error('PRODUCTION_INITIAL_LEDGER_COMMENT_SHAPE');
+    // Drizzle creates this ledger before running the first migration; its rows are never dumped.
+    return '\n' + ledger.map(row => `COMMENT ON ${row.column ? 'COLUMN' : 'TABLE'} ${row.identifier} IS '${row.description.replaceAll("'", "''")}';`).join('\n') + '\n';
+}
+
+function productionReadme(baseline, sourceCount, sourceTag) {
+    return `# ${baseline} 生产新装基线\n\n基于 canonical 前 ${sourceCount} 份迁移（至 ${sourceTag}）形成的空库生产投影。表和有效列均含写入数据库目录的中文 COMMENT。\n\n` +
+        '本基线不部署测试元数据、已下线的工作台布局或纯模拟资金辅助表；正式渠道守卫、旧来源、责任和审计表保留。\n\n' +
+        '剥离的业务 schema 表：\n\n' + excludedTables.map(table => '- `' + table + '`').join('\n') +
+        '\n\n已装 canonical 或旧 initial 的数据库沿各自记录升级。生产投影只用于空库；版本账记一条 baseline 及后续 canonical 增量。\n';
 }
 
 async function loadInitialNotes(client) {

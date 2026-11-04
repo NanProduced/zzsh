@@ -21,6 +21,7 @@ export async function createOfflineAdminSource(options){
     const native=createRequire(file);
     m.require=name=>{
       if(name.endsWith(".css"))return {};
+      if(name.endsWith(".png"))return name;
       const source=resolveSource(name,file);
       if(source&&/\.(?:tsx?|jsx?)$/.test(source))return load(source);
       if(name.startsWith("@zzsh/")){const shared=native.resolve(name);if(/\.(?:tsx?|jsx?)$/.test(shared))return load(shared);}

@@ -219,7 +219,8 @@ export type FulfillmentAssignment = {
 };
 
 export type OrderListingFacts = {
-  source: "ORDER_VERSION" | "ACCOUNT_CURRENT";
+  source: "ORDER_VERSION" | "ACCOUNT_CURRENT" | "LEGACY_ACCOUNT_SNAPSHOT";
+  sourceUpdatedAt?: string | null;
   versionId: string | null;
   rentalMode: string | null;
   attributeDisplay: { safeBox: string | null; grading: string | null; loginMethod: string | null };
@@ -301,6 +302,9 @@ export type Order = {
 };
 
 export type LegacyOrder = {
+  listingFacts?: OrderListingFacts | null;
+  listingFactsUnknownReason?: Order["listingFactsUnknownReason"];
+  stage?: OrderStage | null;
   id: string; displayNo: string; status: OrderStatus | "UNKNOWN"; party: OrderParty; title: string | null; gameId: string;
   source: { origin: "LEGACY"; ruleOrigin: "LEGACY_ORDER"; originalStatus: number; originalPayStatus: number; statusLabel: string };
   createdAt: string | null; paidAt: string | null; cancelledAt: string | null; completedAt: string | null;
@@ -317,6 +321,16 @@ export type LegacyOrderPage = { items: LegacyOrder[]; page: number; pageSize: nu
 
 export type OrderPage = { items: Order[]; nextCursor: string | null; limit: number; scanIncomplete?: boolean; stageUnknownObserved?: boolean };
 export type OrderSearchFilters = { orderNo?: string; createdFrom?: string; createdTo?: string; stage?: string };
+
+export function orderUrl(party: OrderParty, status: OrderStatusFilter, accountId?: string, orderId?: string, source?: "NATIVE" | "LEGACY", filters?: OrderSearchFilters): string {
+  const query = new URLSearchParams({ view: party === "renter" ? "rentals" : "leased" });
+  if (status) query.set("status", status);
+  if (accountId) query.set("accountId", accountId);
+  if (orderId) query.set("orderId", orderId);
+  if (orderId && source === "LEGACY") query.set("source", "legacy");
+  for (const key of ["orderNo", "createdFrom", "createdTo", "stage"] as const) if (filters?.[key]) query.set(key, filters[key]!);
+  return `/account?${query.toString()}`;
+}
 
 export type RentalPricePreviewInput = { accountId: string; versionId: string; releaseId: string };
 /** Read-only price view. It is not a transaction confirmation or an order credential. */

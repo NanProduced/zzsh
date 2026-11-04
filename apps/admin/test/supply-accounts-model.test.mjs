@@ -116,25 +116,25 @@ test('list core assets and rental terms come from the same-version summary, with
   assert.deepEqual(rowRentalTerms(row), { term: '1 天', daily: '10 M 哈夫币', login: 'QQ扫码', payout: '已选' });
   assert.equal(rowRentalTerms(row).term.includes('保证金'), false, 'guarantee is not folded into rental terms');
   const bare = rowOf();
-  assert.equal(rowCoreAssetsText(bare), '未提供 · 物资摘要未装配');
-  assert.deepEqual(rowRentalTerms(bare), { term: '租期摘要未装配', daily: '日耗摘要未装配', login: '登录摘要未装配', payout: '未提供' });
+  assert.equal(rowCoreAssetsText(bare), '未提供 · 物资未提供');
+  assert.deepEqual(rowRentalTerms(bare), { term: '租期未提供', daily: '日耗未提供', login: '登录未提供', payout: '未提供' });
 });
 
 test('list rental terms render one compact line per missing basis instead of repeating the same placeholder', () => {
   const summary = { versionId: 'v-1', sequence: '2', refs: {}, timing: {}, term: { code: 'daily', name: '日耗 10M', dailyConsumption: '10000000', termSeconds: '86400' }, login: { code: 'login_qq_qr', displayName: 'QQ扫码' }, fullPayout: 'SELECTED' };
   assert.deepEqual(rowTermsLines(rowOf({ summary })), { conditions: '1 天 · 10 M 哈夫币', loginPayout: '登录 QQ扫码 · 包赔 已选' });
-  assert.deepEqual(rowTermsLines(rowOf()), { conditions: '租期与日耗摘要未装配', loginPayout: '登录与包赔摘要未装配' });
+  assert.deepEqual(rowTermsLines(rowOf()), { conditions: '租期与日耗未提供', loginPayout: '登录与包赔未提供' });
   assert.deepEqual(rowTermsLines(rowOf({ summary: { ...summary, versionId: null } })), { conditions: '资料版本未提供，租期、日耗与登录方式待核对', loginPayout: '包赔 未提供' });
 });
 
 test('missing summary never becomes 免保证金、未交、已包赔 or 已下架', () => {
   const bare = rowOf();
-  assert.equal(rowGuaranteeRequirementText(bare), '要求未提供（摘要未装配）');
+  assert.equal(rowGuaranteeRequirementText(bare), '要求未提供');
   assert.equal(rowGuaranteeEligibilityText(bare), '资格未提供');
-  assert.equal(rowGuaranteeProofText(bare), '凭证事实未提供（摘要未装配）');
+  assert.equal(rowGuaranteeProofText(bare), '凭证记录未提供');
   assert.equal(rowFullPayout(bare).label, '未提供');
   assert.equal(rowHaffText(bare), '未提供', 'the 100M in the title is never a quantity');
-  assert.equal(rowDepositText(bare), '摘要未装配');
+  assert.equal(rowDepositText(bare), '未提供');
   assert.equal(rowQuoteText(bare).total, '未提供');
   assert.ok(!rowFullPayout(bare).label.includes('❌'));
   for (const text of [rowDepositText(bare), rowGuaranteeProofText(bare), rowGuaranteeRequirementText(bare)]) {
@@ -230,7 +230,7 @@ const historicalRead = {
 
 test('historical display fills missing list facts with explicit provenance and preserves zero', () => {
   const historical = rowOf({ facts: facts({ historicalRead }) });
-  assert.equal(rowHaffText(historical), '历史 0 M 哈夫币');
+  assert.equal(rowHaffText(historical), '0 M 哈夫币');
   assert.equal(rowDepositText(historical), '历史 ¥0.00');
   assert.equal(rowQuoteText(historical).total, '历史租金 ¥125.30');
   assert.match(rowQuoteText(historical).note, /历史物资费 ¥0.00.*10 天.*非当前报价/);
@@ -296,7 +296,7 @@ test('historical-only rows keep old fees separately and never show the old numbe
   const historicalRead = { resourceNo: 'OLD-7', display: { state: 'KNOWN', facts: { attributeDisplay: { safeBox: { displayName: '基础安全箱' }, grading: null, loginMethod: null, serviceWindow: null }, resources: [{ code: 'haff', name: '哈夫币', quantity: '97000000', unit: 'HAFF_BASE' }] } }, historicalQuote: { haffRentYuan: '125.30', goodsYuan: '0.00', depositYuan: '0.00', termDays: '10' } };
   const row = rowOf({ versionId: null, sequence: null, summary: null, displayNo: 'ZZ-NEW', facts: { ...facts(), historicalRead } });
   assert.deepEqual(rowBaseFeeRows(row), { haff: '历史 ¥125.30', materials: '历史 ¥0.00', deposit: '历史 ¥0.00', total: '未提供', note: '历史记录，非当前资料' });
-  assert.match(rowCoreAssetsText(row), /历史 97 M 哈夫币 · 基础安全箱/);
+  assert.match(rowCoreAssetsText(row), /97 M 哈夫币 · 基础安全箱/);
   assert.equal(rowDisplaySourceText(row), '历史资料');
   assert.equal(rowAccountTitle(row), 'g账号');
 });

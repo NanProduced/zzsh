@@ -1065,6 +1065,34 @@
       "when": 1793681783926,
       "tag": "0151_profile_avatar_policy",
       "breakpoints": true
+    },
+    {
+      "idx": 152,
+      "version": "7",
+      "when": 1793701425296,
+      "tag": "0152_legacy_payment_refund_observations",
+      "breakpoints": true
+    },
+    {
+      "idx": 153,
+      "version": "7",
+      "when": 1793713168359,
+      "tag": "0153_stored_opening_cached_observations",
+      "breakpoints": true
+    },
+    {
+      "idx": 154,
+      "version": "7",
+      "when": 1793730640475,
+      "tag": "0154_legacy_account_media_paths",
+      "breakpoints": true
+    },
+    {
+      "idx": 155,
+      "version": "7",
+      "when": 1793730640476,
+      "tag": "0155_legacy_rental_distribution_policy",
+      "breakpoints": true
     }
   ]
 }

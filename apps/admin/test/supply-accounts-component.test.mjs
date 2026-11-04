@@ -270,7 +270,7 @@ test('U2 the first column has three business layers, a new number only, and one 
     assert.match(text, /10 M 哈夫币[\s\S]*顶级安全箱 · 巅峰/);
     assert.match(text, /ZZ-2026-000001/);
     assert.equal(text.includes('OLD-9'), false, 'the old number stays out of the first column');
-    assert.match(text, /旧平台/);
+    assert.doesNotMatch(text, /旧平台迁入/);
     assert.match(text, /这是一位名字很长的号主用于核对换行/);
     assert.equal(text.includes('来源：'), false, 'no per-row technical source notes');
   }
@@ -552,8 +552,9 @@ test('R2 known resource 111.00 plus base deposit remains 161.00 despite unknown 
   assert.match(complete, /物资预付\s*分项待核/);
   assert.equal(h.writes.length, 0);
 });
-test('historical list, mobile card and quick view expose existing source facts without new queries or current-quote claims', async (t) => {
+for (const observationVersion of [false, true]) test(`historical list, mobile card and quick view expose source facts with observation version=${observationVersion}`, async (t) => {
   const historicalRead = {
+    observationVersionId: observationVersion ? 'v-a' : null,
     resourceNo: 'OLD-7', canCreateOrder: false, trade: 'UNKNOWN', quote: null,
     historicalQuote: { haffRentYuan: '125.30', goodsYuan: '0.00', depositYuan: '0.00', termDays: '10', dailyHaffBase: '10000000' },
     display: { state: 'KNOWN', facts: {
@@ -563,9 +564,14 @@ test('historical list, mobile card and quick view expose existing source facts w
       sourceUpdatedAt: '2026-09-09T10:38:00Z',
     } },
   };
-  const historicalRow = { ...row, versionId: null, sequence: null, summary: null, facts: { ...facts, historicalRead } };
+  const historicalRow = { ...row, versionId: observationVersion ? 'v-a' : null, sequence: null, summary: observationVersion ? {
+    displaySource: 'LEGACY_SNAPSHOT', versionId: 'v-a', sequence: '1', refs: {}, timing: {},
+    haff: { itemId: 'legacy-display:haff', quantity: '97000000', unit: 'HAFF_BASE' }, materials: [{ itemId: 'legacy-display:ammo', code: 'ammo', name: '弹药', quantity: null, unit: 'ROUND' }], materialsTotal: 1, materialsVisibleTotal: 1,
+    config: { safeBox: '基础安全箱', grading: null }, login: { code: 'wechat', displayName: '微信扫码' }, term: { termSeconds: '864000', dailyConsumption: '10000000' }, quote: null, fullPayout: 'NOT_DECLARED', baseDeposit: null, guarantee: { requirement: null, requirementSource: 'UNAVAILABLE', eligibility: null, recordedProof: null },
+  } : null, facts: { ...facts, historicalRead } };
   const value = workDetail();
-  value.version = null;
+  if (observationVersion) { value.version.id = 'v-a'; value.version.origin = 'LEGACY_OBSERVATION'; value.version.declaration.attributes = {}; value.version.declaration.inventory = []; value.version.quote = null; }
+  else value.version = null;
   value.supervision.facts = historicalRow.facts;
   let detailReads = 0;
   const h = await mountHarness(t, { permissions, fetchImpl: async url => {
@@ -581,7 +587,7 @@ test('historical list, mobile card and quick view expose existing source facts w
     assert.match(text, /97 M 哈夫币/);
     assert.match(text, /基础安全箱/);
     assert.equal(text.includes('OLD-7'), false, 'the old source number stays in the detail trace, not the first column');
-    assert.match(text, /旧平台/);
+    assert.doesNotMatch(text, /旧平台迁入/);
   }
   assert.equal(detailReads, 0, 'existing row projection is enough for both list layouts');
   await h.click(h.el.querySelector('#supply-open-a')); await tick(h);

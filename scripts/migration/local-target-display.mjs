@@ -21,12 +21,17 @@ export async function applyDisplayDomain(ctx, directory, manifestSha256) {
   ctx.save();
   const accountId = ctx.mod("legacy-load/legacy-account-seam").legacyAccountId;
   const writer = ctx.mod("supply/legacy-listing-read").recordLegacyDisplaySnapshot;
+  const idFor = row => accountId("legacy_mysql_restore", "la_rental_accounts", row.sourceId);
+  let bindings;
   await ctx.runItems("accountDisplay", ctx.readRows(file), async row => {
-    const id = accountId("legacy_mysql_restore", "la_rental_accounts", row.sourceId);
-    const original = (await ctx.client.query("SELECT observation_version_id,source_digest,to_char(source_updated_at AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') source_updated_at FROM zzsh_supply.legacy_listing_read_snapshot WHERE account_id=$1", [id])).rows[0];
+    const id = idFor(row), original = bindings.get(id);
     if (!original) { const error = new Error("TARGET_ACCOUNT_SNAPSHOT_NOT_MAPPED"); error.status = 409; error.code = "TARGET_ACCOUNT_SNAPSHOT_NOT_MAPPED"; throw error; }
     if (original.source_digest !== row.baseSourceDigest || original.source_updated_at !== row.sourceUpdatedAt) throw new Error("TARGET_ACCOUNT_SNAPSHOT_SOURCE_DRIFT");
     return writer(ctx.client, id, { observationVersionId: original.observation_version_id, baseSourceDigest: row.baseSourceDigest, extractSha256: manifest.extractSha256, sourceUpdatedAt: row.sourceUpdatedAt, evidenceRef: `legacy-display-v1:${manifest.extractSha256}:${row.sourceId}`, snapshot: row.snapshot }, ctx.actor);
+  }, 100, async batch => {
+    // The writer still rechecks the immutable original and live permissions per account.
+    const originals = (await ctx.client.query("SELECT account_id,observation_version_id,source_digest,to_char(source_updated_at AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') source_updated_at FROM zzsh_supply.legacy_listing_read_snapshot WHERE account_id=ANY($1::text[])", [batch.map(idFor)])).rows;
+    bindings = new Map(originals.map(row => [row.account_id, row]));
   });
   const actual = (await ctx.client.query("SELECT count(*)::int n FROM zzsh_supply.legacy_listing_display_snapshot WHERE extract_sha256=$1" + (ctx.displayAccountIds ? " AND account_id=ANY($2::text[])" : ""), ctx.displayAccountIds ? [manifest.extractSha256, ctx.displayAccountIds] : [manifest.extractSha256])).rows[0].n;
   const phase = ctx.state.phases.accountDisplay;

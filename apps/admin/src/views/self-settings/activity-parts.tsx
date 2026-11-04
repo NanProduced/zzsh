@@ -217,7 +217,7 @@ export function ActivityTimeline({ events, dimmed }: { events: ActivityEvent[]; 
                     <div className="flex shrink-0 items-center gap-2 text-xs">
                       <span className={cn("inline-flex items-center gap-1", failed ? "text-destructive" : "text-muted-foreground")}>
                         <span className={cn("size-1.5 rounded-full", failed ? "bg-destructive" : "bg-emerald-500")} aria-hidden />
-                        {outcome ?? `未识别：${event.outcome}`}
+                        {outcome ?? "结果待确认"}
                       </span>
                       <time className="text-muted-foreground font-mono tabular-nums" dateTime={event.occurredAt ?? undefined} title="北京时间">
                         {beijingTime(event.occurredAt)}

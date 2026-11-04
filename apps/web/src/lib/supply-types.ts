@@ -94,6 +94,7 @@ export type PublicListing = {
   historicalQuote?: { haffRent: Money; goods: Money; deposit: Money; termDays: string };
   inventory?: Array<{ itemId: string; quantity: string | null; unit: string }>;
   media: Array<{ assetId: string; position: number; url: string; category?: "SHOWCASE" | "PENALTY" }>;
+  legacyImages?: Array<{ position: number; url: string }>;
 };
 export type PublicAvailabilityState = "RENTABLE" | "PENDING_PAYMENT" | "RENTED" | "OCCUPIED" | "OFFLINE" | "UNKNOWN" | "UNAVAILABLE" | "LEGACY_READ_ONLY";
 export type Favorite = {
@@ -558,6 +559,7 @@ export type AccountDisplay = {
 export type AccountActiveOrder = {
   id: string;
   displayNo: string;
+  origin?: "NATIVE" | "LEGACY";
   status: "PENDING_PAYMENT" | "PAID";
   renterName: string | null;
   termSeconds: string | null;

@@ -184,7 +184,7 @@ export function ContentStoragePanel() {
   const load = async (check = false) => { setBusy(true); setError(undefined); try { setStatus(await adminRequest<StorageStatus>(check ? "/content/storage/check" : "/content/storage")); } catch (failure) { setError(friendlyError(failure)); } finally { setBusy(false); } };
   useEffect(() => { void load(); }, []);
   return <div className="content-storage-strip">
-    <div className="content-storage-summary"><strong>图片存储</strong>{status ? <span>{status.backend === "local" ? "本地目录" : status.backend === "oss" ? "OSS" : status.backend} · {status.configured ? "已配置" : "未配置"} · {{ NOT_RUN: "读取未检查", NO_PUBLIC_SAMPLE: "无公开样本", PASS: "读取通过", FAILED: "读取失败" }[status.readCheck]}</span> : !error ? <span>读取中…</span> : null}<span className="content-storage-note">已配置仅表示适配器装配。</span></div>
+    <div className="content-storage-summary"><strong>图片存储</strong>{status ? <span>{status.backend === "local" ? "本地目录" : status.backend === "oss" ? "OSS" : "状态待确认"} · {status.configured ? "已配置" : "未配置"} · {{ NOT_RUN: "读取未检查", NO_PUBLIC_SAMPLE: "无公开样本", PASS: "读取通过", FAILED: "读取失败" }[status.readCheck]}</span> : !error ? <span>读取中…</span> : null}<span className="content-storage-note">已配置不代表读取正常，请检查读取状态。</span></div>
     <Button type="button" size="sm" variant="ghost" loading={busy} onClick={() => void load(true)}>检查读取</Button>
     <StatusMessage error={error} />
   </div>;

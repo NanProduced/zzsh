@@ -10,7 +10,7 @@ test('draft inventory keeps exact quantities and shows unpriced lines',()=>{
   assert.deepEqual(rows.map(row=>[row.itemId,row.name,row.quantity,row.priced,row.unit]),[
     ['priced','哈夫币','0',true,'HAFF_BASE'],
     ['extra','六级头盔','0',false,'PIECE'],
-    ['unknown','未确认（unknown）',null,false,null],
+    ['unknown','名称待确认',null,false,null],
   ]);
   assert.equal(rows.some(row=>row.quantity==='0'&&row.itemId==='unknown'),false);
 });
@@ -35,7 +35,7 @@ test('current catalog membership overrides an older priced label and keeps unkno
   const labels=[{id:'zero',name:'六级子弹',unit:'ROUND',priced:true},{id:'missing',name:'六级头盔',unit:'PIECE',priced:true}];
   const pending=inventoryEditorRows(null,inventory,labels);
   const failed=inventoryEditorRows(null,inventory,labels,'failed');
-  assert.deepEqual(pending.map(row=>[row.itemId,row.quantity,row.priced,row.catalogState,row.name]),[['kept','4',null,'pending','未确认（kept）'],['zero','0',null,'pending','六级子弹'],['missing',null,null,'pending','六级头盔']]);
+  assert.deepEqual(pending.map(row=>[row.itemId,row.quantity,row.priced,row.catalogState,row.name]),[['kept','4',null,'pending','名称待确认'],['zero','0',null,'pending','六级子弹'],['missing',null,null,'pending','六级头盔']]);
   assert.deepEqual(failed.map(row=>[row.priced,row.catalogState]),[[null,'failed'],[null,'failed'],[null,'failed']]);
   assert.equal(inventoryPriceHint(pending[0]),'发布目录尚未加载，暂不能判断可否报价');
   assert.equal(inventoryPriceHint(failed[0]),'发布目录读取失败，暂不能判断可否报价');

@@ -44,6 +44,24 @@ test("original body/key is retained before POST, uncertain result reads receipt 
   await p.click("查询处理进度");await p.click("继续提交上次申请");assert.equal(p.calls.length,2);assert.deepEqual(p.calls[1],p.calls[0]);assert.equal(p.intents.inspectIntent("user_A","legacy.continuation",id).state,"VALID");
   p.client.receipt=async()=>({state:"KNOWN_REJECTED",status:409,fingerprint:digest,receipt:{outcome:"REJECTED"}});await p.click("查询处理进度");assert.equal(p.intents.inspectIntent("user_A","legacy.continuation",id).state,"VALID");await p.click("刷新后重新核对");assert.equal(p.intents.inspectIntent("user_A","legacy.continuation",id).state,"NONE");
 });
+test("detail refresh is signalled after a direct or recovered success", async t => {
+  for (const recovery of [false, true]) await t.test(recovery ? "recovered" : "direct", async sub => {
+    const receipt = { orderId: id, revision: "1", stage: "4", channelState: "UNKNOWN" };
+    const p = await setup(sub, {
+      write: async () => { if (recovery) throw new Error("uncertain"); return receipt; },
+      receipt: async () => ({ state: "KNOWN_SUCCESS", receipt }),
+    });
+    let refreshes = 0;
+    await p.render(React.createElement(p.LegacyContinuationPanel, { orderId: id, party: "owner", onOrderChanged: () => refreshes++ }));
+    await p.click("确认结算方案"); await p.click("确认提交");
+    if (recovery) {
+      assert.equal(refreshes, 0);
+      await p.click("查询处理进度");
+    }
+    assert.equal(refreshes, 1);
+    assert.equal(p.intents.inspectIntent("user_A", "legacy.continuation", id).state, "NONE");
+  });
+});
 test("bad pending bytes block mutations while history remains readable",async t=>{
   const p=await setup(t), key=`zzsh.order-intent.v1:user_A:legacy.continuation:${id}`;p.browser.sessionStorage.setItem(key,"{BROKEN_PENDING");await p.render();
   assert(p.host.textContent.includes("82.00"));assert(p.host.textContent.includes("暂时无法确认上次操作"));assert.equal(p.browser.sessionStorage.getItem(key),"{BROKEN_PENDING");

@@ -10,6 +10,25 @@ test("historical read amounts remain exact source strings, including a legitimat
   assert.deepEqual(parseLegacyReadSnapshot(valid), valid);
   assert.equal(parseLegacyReadSnapshot({ ...valid, depositYuan: "0.00" }).depositYuan, "0.00");
 });
+test("a null historical alias stays null and immutable while old numbered snapshots stay exact", () => {
+  const snapshot = { ...valid, resourceNo: null };
+  assert.deepEqual(parseLegacyReadSnapshot(snapshot), snapshot);
+  const old = {
+    observation_version_id: "observation", source_system: "legacy_mysql_restore", source_entity: "la_rental_accounts",
+    legacy_id: "1", source_digest: "a".repeat(64), source_status: 3, source_updated_at: new Date("2026-01-01T00:00:00.000Z"),
+    evidence_ref: "frozen", snapshot,
+  };
+  const next = {
+    observationVersionId: "observation", sourceSystem: "legacy_mysql_restore", sourceEntity: "la_rental_accounts",
+    legacyId: "1", sourceDigest: "a".repeat(64), sourceStatus: 3, sourceUpdatedAt: "2026-01-01T00:00:00.000Z", evidenceRef: "frozen",
+  };
+  assert.equal(legacySnapshotConflicts(old, next, parseLegacyReadSnapshot(snapshot)), false);
+  assert.equal(legacySnapshotConflicts(old, { ...next, sourceDigest: "b".repeat(64) }, snapshot), true);
+  assert.equal(legacySnapshotConflicts(old, next, valid), true);
+  assert.equal(legacySnapshotConflicts({ ...old, snapshot: valid }, next, snapshot), true);
+  assert.equal(projectLegacyHistoricalRead({ source_status: 3, legacy_id: "1", owner_user_id: "owner", snapshot }).resourceNo, null);
+  for (const resourceNo of ["", " ", 0, undefined]) assert.throws(() => parseLegacyReadSnapshot({ ...valid, resourceNo }));
+});
 test("historical public snapshot refuses private fields, missing values and numeric coercion", () => {
   for (const extra of ["ownerUserId", "mobile", "ownerRatioB", "quote", "canCreateOrder"])
     assert.throws(() => parseLegacyReadSnapshot({ ...valid, [extra]: "untrusted" }));

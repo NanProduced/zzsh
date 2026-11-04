@@ -8,12 +8,13 @@ import { accountOccupancySql } from "../order/legacy-order-occupancy";
 import { readDirectoryUserSummaries } from "../auth/user-directory-summary";
 import { escapeLike } from "./catalog";
 import { canonicalize } from "./content-hash";
+import { readLegacyPathCounts } from "./legacy-path-projection";
 import { requireListingCursorKey, type ListingCursorKey } from "./listing-cursor";
-import { loadLegacyHistoricalRead, loadLegacyHistoricalReads, type LegacyHistoricalRead } from "./legacy-listing-read";
+import { legacyAccountDisplay, loadLegacyHistoricalRead, loadLegacyHistoricalReads, type LegacyHistoricalRead } from "./legacy-listing-read";
 import { validateFundingPolicy, validateOwnerDepositDeclaration } from "./funding-policy";
-import { decimalToBigInt, parseNonNegativeDecimal, yuanAmountObject } from "./decimal";
 import { DELTA_INFO_SOURCE_DICTIONARY, projectDeltaQuote } from "./delta-rental";
-import { projectTenantMoney } from "./tenant-price-projection";
+import { publishedListingFeeDisplay, quoteFeeSummary } from "./tenant-price-projection";
+export { quoteFeeSummary } from "./tenant-price-projection";
 import { boundBaseRenterRatio, evaluatePublication, listingCandidatePage, listingDetail, listingPageShared, publicListingAttributes, readPublishingAccounts, publicListingBasis, publicListingMemo, readPublicListing, type ListingDetailPrefetch, type ListingPageShared, type ListingPublication, type ListingVersion, type PublishingAccount, type SupplyGate, type SupplyGateReader } from "./publishing";
 import { projectPublicAttributeDisplay, publicLoginMethodOptions } from "./listing-query";
 import { conflict, forbidden, invalid, notFound, sha256Hex } from "./supply-util";
@@ -285,42 +286,6 @@ function guaranteeRequirement(gate: SupplyGate | undefined, policyRequirement: P
     return { requirement: policyRequirement, requirementSource: policyRequirement ? "FIXED_FUNDING_POLICY" as const : "UNAVAILABLE" as const };
 }
 
-type ListFeeSummary = { completeness: "COMPLETE" | "PARTIAL" | "UNKNOWN"; haffRental: ReturnType<typeof yuanAmountObject> | null; materials: ReturnType<typeof yuanAmountObject> | null; resourceTotal: ReturnType<typeof yuanAmountObject> | null };
-const unknownFeeSummary = (): ListFeeSummary => ({ completeness: "UNKNOWN", haffRental: null, materials: null, resourceTotal: null });
-/** Strict CNY/yuan/scale-2 money; an invalid side is unknown, never re-labelled or coerced. */
-function centsOfAmount(value: unknown): bigint | null {
-    try {
-        const amount = projectTenantMoney(value).amount;
-        return decimalToBigInt(parseNonNegativeDecimal(amount, 2, "list fee amount"), 2);
-    } catch { return null; }
-}
-/** The known total survives unknown components; missing lines never become zero and components are never derived by subtraction. */
-export function quoteFeeSummary(quote: Record<string, any> | null | undefined): ListFeeSummary {
-    if (!quote || quote.currency !== "CNY") return unknownFeeSummary();
-    const resource = centsOfAmount(quote.resourceTotal);
-    const partial = (): ListFeeSummary => ({ completeness: "PARTIAL", haffRental: null, materials: null, resourceTotal: resource === null ? null : yuanAmountObject(resource) });
-    if (!Array.isArray(quote.lines)) return partial();
-    let haff: bigint | null = null, materials: bigint | null = null, haffSeen = false, invalid = false;
-    for (const line of quote.lines) {
-        if (!line || typeof line !== "object") { invalid = true; continue; }
-        const cents = centsOfAmount(line.buyerAmount);
-        if (cents === null) { invalid = true; continue; }
-        if (line.unit === "HAFF_BASE") {
-            if (haffSeen) { haff = null; invalid = true; } else { haffSeen = true; haff = cents; }
-        } else if (line.unit === "ROUND" || line.unit === "PIECE" || line.unit === "DAY") materials = (materials ?? 0n) + cents;
-        else invalid = true;
-    }
-    // A HAFF-only quote is a proven zero materials fee only when the total closes exactly.
-    if (!invalid && haff !== null && materials === null && resource !== null && haff === resource) materials = 0n;
-    const complete = !invalid && haff !== null && materials !== null && resource !== null && haff + materials === resource;
-    const knownComponent = haff !== null || materials !== null;
-    return {
-        completeness: complete ? "COMPLETE" : knownComponent || resource !== null ? "PARTIAL" : "UNKNOWN",
-        haffRental: haff === null ? null : yuanAmountObject(haff),
-        materials: materials === null ? null : yuanAmountObject(materials),
-        resourceTotal: resource === null ? null : yuanAmountObject(resource),
-    };
-}
 /** Cheap predicates are already in SQL; these selected aliases keep the same tuple visible to the bounded sampler. */
 export function matchesCheapFilters(q: SupervisionQuery, row: Record<string, any>): boolean {
     const legacy = row.filterLegacy === true;
@@ -398,7 +363,7 @@ function publicBasisListingSummary(publicBasis: Record<string, any>, facts: Reco
         grading: display?.grading?.displayName ?? (typeof attributes.grading_code === "string" ? `未确认（代码 ${attributes.grading_code}）` : null),
         gradingDivision: Object.hasOwn(attributes, "grading_division") && attributes.grading_division !== null && attributes.grading_division !== "" ? String(attributes.grading_division) : null,
     };
-    return {
+    return historicalListingSummary({
         displaySource: "PUBLIC_VERSION",
         versionId: publicBasis.id,
         sequence: null,
@@ -415,13 +380,27 @@ function publicBasisListingSummary(publicBasis: Record<string, any>, facts: Reco
         login,
         config,
         feeSummary: quoteFeeSummary(quote),
+        feeDisplay: publicBasis.feeDisplay ?? null,
         quote: quote ? { currency: quote.currency ?? null, resourceTotal: amount(quote.resourceTotal), tenantDeposit: amount(quote.tenantDeposit), tenantPayableTotal: amount(quote.tenantPayableTotal), baseRenterHaffRatioWanPerYuan: quote.baseRenterHaffRatioWanPerYuan ?? null, frozen: true, personalised: false } : null,
         baseDeposit: declaredCents ? { amountCents: declaredCents } : null,
         fullPayout: payout === true ? "SELECTED" : payout === false ? "NOT_SELECTED" : "NOT_DECLARED",
         guarantee: { ...guaranteeRequirement(gate, guarantee?.policyRequirement ?? null), recordedProof: guarantee?.proof ?? null, eligibility: readiness },
+    }, facts, facts.publicSource === "LEGACY_READ_ONLY");
+}
+
+/** Only the bound imported observation uses old display facts; a native version never borrows them. */
+function historicalListingSummary<T extends { versionId: string | null }>(summary: T, facts: Record<string, any>, legacy: boolean): T {
+    const historical: LegacyHistoricalRead | null = facts.historicalRead ?? null;
+    const display = legacy ? legacyAccountDisplay(historical, summary.versionId) : null;
+    if (!display) return summary;
+    const visible = display.materials.filter(item => item.quantity === null || !/^0+$/.test(item.quantity));
+    return { ...summary, ...display,
+        displaySource: "LEGACY_SNAPSHOT",
+        materials: visible.slice(0, 6), materialsTotal: display.materials.length, materialsVisibleTotal: visible.length,
+        quote: null, feeSummary: quoteFeeSummary(null), feeDisplay: historical?.feeDisplay ?? null, baseDeposit: null, fullPayout: "NOT_DECLARED",
     };
 }
-/** 订单页关联账号：与账号供给页默认展示同一公开版本；没有公开版本即不提供，不回退当前草稿或历史参考。 */
+/** 当前关联账号与供给页同源；原生版本优先，导入观察单独标记，不作为本单冻结资料。 */
 export async function readOrderAccountViews(client: PoolClient, accountIds: string[], gate: SupplyGateReader, admission?: LegacyPublicAdmission, detailIndex?: LegacyPublicAdmissionDetailIndex): Promise<Map<string, OrderAccountView>> {
     const result = new Map<string, OrderAccountView>();
     const accounts = await readPublishingAccounts(client, accountIds);
@@ -438,10 +417,12 @@ export async function readOrderAccountViews(client: PoolClient, accountIds: stri
             ? publicBasisListingSummary(facts.publicBasis as Record<string, any>, facts, undefined, undefined, rowFacts)
             : listingSummary(detail, facts, undefined, undefined, termOption, rowFacts);
         const versionId = usePublic ? String((facts.publicBasis as Record<string, any>).id) : String(detail.version.id);
+        const source = s.displaySource === "LEGACY_SNAPSHOT" ? "LEGACY_ACCOUNT_SNAPSHOT" : "ACCOUNT_PUBLIC_VERSION";
+        const historical = source === "LEGACY_ACCOUNT_SNAPSHOT" ? legacyAccountDisplay(facts.historicalRead, versionId) : null;
         result.set(account.id, {
-            source: "ACCOUNT_PUBLIC_VERSION", versionId,
+            source, versionId, ...(historical ? { sourceUpdatedAt: historical.sourceUpdatedAt } : {}),
             haff: s.haff ? { itemId: String(s.haff.itemId ?? ""), quantity: s.haff.quantity } : null,
-            materials: s.materials, materialsVisibleTotal: s.materialsVisibleTotal,
+            materials: historical?.materials ?? s.materials, materialsVisibleTotal: historical?.materials.length ?? s.materialsVisibleTotal,
             safeBoxText: s.config?.safeBox ?? null, gradingText: s.config?.grading ?? null, loginMethodText: s.login?.displayName ?? null,
             term: s.term ? { name: s.term.name, termSeconds: s.term.termSeconds, dailyConsumption: s.term.dailyConsumption } : { name: null, termSeconds: null, dailyConsumption: null },
             fullPayout: s.fullPayout as OrderAccountView["fullPayout"],
@@ -513,7 +494,7 @@ function listingSummary(detail: Record<string, any>, facts: Record<string, any>,
     }).scale ?? null } : null;
     // 资格沿用权威 gate 已给出的阻塞码，不在列表里重算保证金规则。
     const eligibility = !version ? null : (facts.reasons as string[]).includes("PUBLISHER_BAIL_UNCONFIRMED") ? "UNCONFIRMED" : "CONFIRMED";
-    return {
+    return historicalListingSummary({
         displaySource: "CURRENT_VERSION",
         versionId: version?.id ?? null,
         sequence: version?.sequence ?? null,
@@ -530,11 +511,12 @@ function listingSummary(detail: Record<string, any>, facts: Record<string, any>,
         login,
         config,
         feeSummary: quoteFeeSummary(quote),
+        feeDisplay: version?.publication ? publishedListingFeeDisplay(quote) : null,
         quote: quote ? { currency: quote.currency ?? null, resourceTotal: amount(quote.resourceTotal), tenantDeposit: amount(quote.tenantDeposit), tenantPayableTotal: amount(quote.tenantPayableTotal), baseRenterHaffRatioWanPerYuan: quote.baseRenterHaffRatioWanPerYuan ?? null, ownerTotal: amount(quote.ownerTotal), publisherBailRequirement: amount(quote.publisherBailRequirement), frozen: true, personalised: false } : null,
         baseDeposit: typeof declaredCents === "string" ? { amountCents: declaredCents } : null,
         fullPayout,
         guarantee: { ...guaranteeRequirement(gate, guarantee?.policyRequirement ?? null), recordedProof: guarantee?.proof ?? null, eligibility },
-    };
+    }, facts, version?.origin === "LEGACY_OBSERVATION");
 }
 /** List rows need the same blockers and the quote already stored on the version.
  *  They do not load agreement text, review history, presentation or draft skins. */
@@ -590,6 +572,7 @@ async function listVersionProjection(client: PoolClient, account: PublishingAcco
         blockers,
         version: {
             id: version.id,
+            origin: version.origin,
             sequence: version.sequence,
             contentHash: version.content_hash,
             publication: observed.publication ? { source: observed.publication.source, publishedAt: observed.publication.published_at.toISOString() } : null,
@@ -847,5 +830,7 @@ export async function readSupervision(client: PoolClient, a: PublishingAccount, 
             delete detail.version.management;
         }
     }
-    return { ...detail, decisions: managementAccess ? detail.decisions : [], contractVersion: SUPERVISION_READ_VERSION, contextKey: viewer.contextKey, history, previousDeclaration: previous?.version?.declaration ?? null, previousPresentation: previous?.version?.presentation ?? null, duplicateHints, supervision: { managementAccess: managementAccess ? "READY" : "DENIED", historical, facts, changes, previousVersion: previous?.version ?? null, originalRestrictionVersion: originalRestriction?.version ?? null, restrictionHistory: { state: !managementAccess ? "DENIED" : events.length ? "KNOWN" : "NOT_RECORDED", items: events, limit: 20 }, ownerLink: viewer.access.permissions.has("user.directory.read") ? { state: "READY", userId: a.owner_user_id } : { state: "DENIED" }, orders: orders ? { state: "READY", ...orders } : { state: "DENIED", permission: "order.read" } } };
+    const legacyMediaCounts = managementAccess && detail.version?.origin === "LEGACY_OBSERVATION"
+        ? await readLegacyPathCounts(client, a.id, detail.version.id) : null;
+    return { ...detail, legacyMediaCounts, decisions: managementAccess ? detail.decisions : [], contractVersion: SUPERVISION_READ_VERSION, contextKey: viewer.contextKey, history, previousDeclaration: previous?.version?.declaration ?? null, previousPresentation: previous?.version?.presentation ?? null, duplicateHints, supervision: { managementAccess: managementAccess ? "READY" : "DENIED", historical, facts, changes, previousVersion: previous?.version ?? null, originalRestrictionVersion: originalRestriction?.version ?? null, restrictionHistory: { state: !managementAccess ? "DENIED" : events.length ? "KNOWN" : "NOT_RECORDED", items: events, limit: 20 }, ownerLink: viewer.access.permissions.has("user.directory.read") ? { state: "READY", userId: a.owner_user_id } : { state: "DENIED" }, orders: orders ? { state: "READY", ...orders } : { state: "DENIED", permission: "order.read" } } };
 }

@@ -68,15 +68,19 @@ test("registry lookup is hardened against prototype keys", () => {
   assert.ok(isLegalDocId("terms") && isLegalDocId("privacy"));
 });
 
-test("pending and unavailable pages state the truth without a fabricated version or body", async () => {
+test("pending pages stay empty and unavailable pages offer a retry without a fabricated version or body", async () => {
   for (const state of ["PENDING", "UNAVAILABLE"]) {
     const page = loadPage(() => state === "PENDING" ? { state: "PENDING", title: "平台服务协议" } : { state: "UNAVAILABLE" });
     assert.deepEqual(page.generateStaticParams(), [{ doc: "terms" }, { doc: "privacy" }]);
     for (const doc of ["terms", "privacy"]) {
       const html = await renderDoc(page, doc);
       assert.ok(html.includes(`《${getLegalDocument(doc).title}》`), doc);
-      assert.ok(html.includes("不是正式协议文本"), `${state} ${doc} keeps honest status semantics`);
-      assert.ok(html.includes('role="status"'), `${state} ${doc} exposes the status landmark`);
+      assert.ok(!html.includes("不是正式协议文本") && !html.includes("正式内容尚未提供"), `${state} ${doc} omits internal copy`);
+      if (state === "PENDING") {
+        assert.ok(!html.includes('role="status"'), `${doc} has no placeholder body`);
+      } else {
+        assert.ok(html.includes("协议正文暂时无法读取，请稍后重试。") && html.includes('role="status"'), `${doc} shows a retryable failure`);
+      }
       assert.ok(!/版本\s*[0-9a-zA-Z_]/.test(html), `${state} ${doc} must not show a fabricated version`);
       assert.ok(!/于 .* 生效/.test(html), `${state} ${doc} must not show an effective date`);
     }

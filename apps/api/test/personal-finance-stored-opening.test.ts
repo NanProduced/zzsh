@@ -80,7 +80,7 @@ test('proved zero opening creates basis/event/receipt, without fake zero ledger 
 });
 test('an independently imported identical observation is linked by immutable admission, never updated or reinserted',async()=>{
  const f=await prepare(),o=(await planFinanceOpening(f.client,actor,f.i,f.scope)).observations[0]!;
- f.state.existing={user_id:o.userId,legacy_user_id:o.legacyUserId,source_kind:o.sourceKind,basis_id:null,included_in_opening:false,source_digest:o.sourceDigest,source_canonical:o.sourceCanonical,snapshot:JSON.parse(o.sourceCanonical),source_event_at:o.sourceEventAt};
+ f.state.existing={source_entity:o.sourceEntity,source_id:o.sourceId,user_id:o.userId,legacy_user_id:o.legacyUserId,source_kind:o.sourceKind,basis_id:null,included_in_opening:false,source_digest:o.sourceDigest,source_canonical:o.sourceCanonical,snapshot:JSON.parse(o.sourceCanonical),source_event_at:o.sourceEventAt};
  await importReviewedStoredOpeningBatch(f.pool,actor,[f.i],[f.scope]);assert(f.state.queries.some(q=>q.sql.includes('INSERT INTO zzsh_order.finance_observation_admission')));assert(!f.state.queries.some(q=>q.sql.includes('INSERT INTO zzsh_order.personal_finance_observation')));assert(!f.state.queries.some(q=>/^UPDATE/.test(q.sql)));
  const g=await prepare();g.state.existing={...f.state.existing,source_digest:'c'.repeat(64)};await assert.rejects(importReviewedStoredOpeningBatch(g.pool,actor,[g.i],[g.scope]),/cannot be attached/);assert(!g.state.queries.some(q=>q.sql.includes('INSERT INTO zzsh_order.finance_opening_basis')));
 });
@@ -165,7 +165,7 @@ test('0108 new proof fails closed before insert when its schema readiness is mis
 
 test('FIN02 supplement is admitted only through a new sealed opening without replacing an already immutable nine-field observation',async()=>{
  const f=await prepare(adminInput()),o=(await planFinanceOpening(f.client,actor,f.i,f.scope)).observations[0]!;
- f.state.existing={user_id:o.userId,legacy_user_id:o.legacyUserId,source_kind:o.sourceKind,basis_id:null,included_in_opening:false,source_digest:o.sourceDigest,source_canonical:o.sourceCanonical,snapshot:JSON.parse(o.sourceCanonical),source_event_at:o.sourceEventAt};
+ f.state.existing={source_entity:o.sourceEntity,source_id:o.sourceId,user_id:o.userId,legacy_user_id:o.legacyUserId,source_kind:o.sourceKind,basis_id:null,included_in_opening:false,source_digest:o.sourceDigest,source_canonical:o.sourceCanonical,snapshot:JSON.parse(o.sourceCanonical),source_event_at:o.sourceEventAt};
  await importReviewedStoredOpeningBatch(f.pool,actor,[f.i],[f.scope]);
  assert(!f.state.queries.some(q=>/^\s*UPDATE/.test(q.sql)||q.sql.includes('INSERT INTO zzsh_order.personal_finance_observation')));
  const sealed=f.state.queries.find(q=>q.sql.includes('finance_stored_opening_review('));assert(sealed);

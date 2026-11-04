@@ -300,13 +300,13 @@ const REASONS: Record<string, string> = {
   TEST_OPERATION_DISABLED: "测试操作在当前环境未开启",
   OPERATION_UNREGISTERED: "该业务操作未登记，只读且不可办理",
   EXECUTION_MODE_SOURCE_BUSINESS: "由来源业务流程完成，审批页不执行",
-  EXECUTOR_NOT_ASSEMBLED: "执行器尚未装配",
+  EXECUTOR_NOT_ASSEMBLED: "暂时无法执行",
   TARGET_NOT_ACTIVE: "目标对象当前状态不允许该动作",
   OBJECT_VERSION_CHANGED: "对象版本已变化，需要重新核对",
   UNKNOWN_STATE: "当前状态未知，按不可操作处理",
   INITIATED_FROM_SOURCE_BUSINESS: "只能由来源业务流程发起",
   CANDIDATE_NOT_ACTIVE: "账号不是生效状态",
-  BUSINESS_ADAPTER_MISSING: "该业务尚未接入摘要适配",
+  BUSINESS_ADAPTER_MISSING: "业务摘要暂时无法读取",
   TEST_OPERATION_PAYLOAD_WITHHELD: "测试操作载荷不外发",
   MEMBERSHIP_DETAIL_READ_REQUIRED: "定价与成本口径需要会员明细读取权限",
   NO_CANDIDATE_SNAPSHOT: "候选快照为空",
@@ -437,7 +437,7 @@ export function actionBlockReason(actions: ActionEligibility[] | undefined, name
   return next ? `${reasonLabel(found.reasonCode)}；${next}` : reasonLabel(found.reasonCode);
 }
 
-export const BUSINESS_NOT_CONNECTED = "业务摘要未接入";
+export const BUSINESS_NOT_CONNECTED = "业务摘要暂不可用";
 
 /** 列表主标题：业务名称优先，缺失时明确说未接入，不把裸操作码当主文本。 */
 export function businessTitleOf(item: Pick<RequestSummary, "business" | "operationCode">): string {

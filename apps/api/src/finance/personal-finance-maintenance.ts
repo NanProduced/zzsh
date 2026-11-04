@@ -157,11 +157,18 @@ export async function importFinanceOpening(client:PoolClient,actor:Actor,input:O
   await assertFinanceSingleCutoff(client,{userId:p.userId,cutoff:input.cutoff,write:'OPENING'});
   const stored=scope?admission(scope).stored:undefined,reused=new Set<string>();
   if(stored)await setAuditContext(client,'admin',actor.userId,actor.sessionId,actor.requestId);
-  if(stored)for(const o of plan.observations){
-   const row=(await client.query(`/* stored opening existing observation */ SELECT * FROM zzsh_order.personal_finance_observation WHERE source_type='LEGACY_MYSQL' AND source_system=$1 AND source_entity=$2 AND source_id=$3`,[o.sourceSystem,o.sourceEntity,o.sourceId])).rows[0];
-   if(!row)continue;
-   if(row.user_id!==p.userId||row.legacy_user_id!==o.legacyUserId||row.source_kind!==o.sourceKind||row.basis_id!==null||row.included_in_opening!==false||row.source_digest!==o.sourceDigest||row.source_canonical!==o.sourceCanonical||canonicalize(row.snapshot)!==o.sourceCanonical||new Date(row.source_event_at).toISOString()!==o.sourceEventAt)throw conflict('Existing historical fact cannot be attached to this opening');
-   reused.add(o.sourceEntity+':'+o.sourceId);
+  if(stored&&plan.observations.length){
+   const existing=(await client.query(`/* stored opening existing observation */ SELECT o.* FROM unnest($2::text[],$3::text[]) AS requested(source_entity,source_id)
+     JOIN zzsh_order.personal_finance_observation o ON o.source_type='LEGACY_MYSQL' AND o.source_system=$1
+       AND o.source_entity=requested.source_entity AND o.source_id=requested.source_id`,
+   [p.source.sourceSystem,plan.observations.map(o=>o.sourceEntity),plan.observations.map(o=>o.sourceId)])).rows;
+   const bySource=new Map(existing.map(row=>[row.source_entity+':'+row.source_id,row]));
+   for(const o of plan.observations){
+    const key=o.sourceEntity+':'+o.sourceId,row=bySource.get(key);
+    if(!row)continue;
+    if(row.user_id!==p.userId||row.legacy_user_id!==o.legacyUserId||row.source_kind!==o.sourceKind||row.basis_id!==null||row.included_in_opening!==false||row.source_digest!==o.sourceDigest||row.source_canonical!==o.sourceCanonical||canonicalize(row.snapshot)!==o.sourceCanonical||new Date(row.source_event_at).toISOString()!==o.sourceEventAt)throw conflict('Existing historical fact cannot be attached to this opening');
+    reused.add(key);
+   }
   }
   const revision=(await client.query('SELECT ledger_revision::text FROM zzsh_order.wallet_revision WHERE user_id=$1',[p.userId])).rows[0]?.ledger_revision??'0';
   await client.query(`INSERT INTO zzsh_order.finance_opening_basis(id,user_id,source_kind,source_system,source_entity,source_id,identity_source_digest,source_digest,available_cents,source_cutoff,covered_count,covered_set_digest) VALUES($1,$2,'LEGACY_OPENING',$3,'la_user',$4,$5,$6,$7,$8,$9,$10)`,[plan.basisId,p.userId,p.source.sourceSystem,p.source.sourceId,p.source.identityDigest,p.sourceDigest,p.availableCents,input.cutoff,p.coveredCount,p.coveredDigest]);

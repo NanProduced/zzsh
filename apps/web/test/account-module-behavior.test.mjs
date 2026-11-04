@@ -670,16 +670,30 @@ test("F2: 切换详情只换详情作用域，迟到的旧详情响应不回填"
 
 test("身份切换撤销旧私有列表，迟到响应不回填", async () => {
   const pendingA = deferred();
+  const order = { id: "active-old-order", displayNo: "ORIGINAL-LEASE-001", status: "PAID", origin: "LEGACY" };
   const p = await probe({ pages: (params, call) => (call === 1 ? pendingA.promise : Promise.resolve({ items: [accountRow("acc-B")], nextCursor: null })) });
   try {
     await p.render("accounts");
     p.session.userId = "user_B";
     p.sessionChange();
     await p.render("accounts");
-    await React.act(async () => { pendingA.resolve({ items: [accountRow("acc-A")], nextCursor: null }); await new Promise(setImmediate); });
+    await React.act(async () => { pendingA.resolve({ items: [accountRow("acc-A", { rentalState: "RENTED", activeOrder: order })], nextCursor: null }); await new Promise(setImmediate); });
     assert.match(p.host.textContent, /登录身份已变化，旧账号资料已清除。/);
     assert.deepEqual(rowIds(p), ["acc-B"], "旧身份的迟到列表响应不得回填");
+    assert.doesNotMatch(p.host.textContent, /ORIGINAL-LEASE-001/);
   } finally { pendingA.resolve({ items: [], nextCursor: null }); await p.close(); }
+});
+
+test("本人账号的在途单使用原号并打开出租订单详情", async () => {
+  const p = await probe({ pages: [{ items: [accountRow("acc-old", { rentalState: "RENTED", activeOrder: {
+    id: "order-old", displayNo: "ORIGINAL-LEASE-001", status: "PAID", origin: "LEGACY"
+  } })], nextCursor: null }] });
+  try {
+    await p.render("accounts", undefined, "RENTED");
+    const link = [...p.host.querySelectorAll('a')].find(a => a.textContent.includes("ORIGINAL-LEASE-001"));
+    assert.ok(link);
+    assert.equal(link.getAttribute('href'), '/account?view=leased&accountId=acc-old&orderId=order-old&source=legacy');
+  } finally { await p.close(); }
 });
 
 test("列表读取 401 要求登录并撤全部，403 撤列表如实表达无权", async () => {

@@ -576,7 +576,7 @@ export type ReadFailure = {
  */
 export function classifyReadFailure(error: unknown, fallbackMessage = "读取未完成"): ReadFailure {
   if (error instanceof ContractViolation) {
-    return { kind: "contract", message: error.message };
+    return { kind: "contract", message: "返回的资料不完整或异常，请重试或联系管理员。" };
   }
   if (error instanceof AdminApiError) {
     if (error.status === 0 || error.code === "NETWORK_ERROR") {
@@ -590,7 +590,7 @@ export function classifyReadFailure(error: unknown, fallbackMessage = "读取未
     if (error.status >= 500) {
       return { kind: "server", message: "服务暂时无法完成请求，请稍后重试。", requestId: error.requestId };
     }
-    return { kind: "other", message: `${fallbackMessage}（${error.code}）`, requestId: error.requestId };
+    return { kind: "other", message: fallbackMessage, requestId: error.requestId };
   }
   return { kind: "other", message: error instanceof Error && error.message ? error.message : fallbackMessage };
 }

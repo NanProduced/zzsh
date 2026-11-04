@@ -30,12 +30,25 @@ test('historical manual-close resolution queue keeps native cancellation and gam
  const item=projectAdminReadOrder('NATIVE',{...native,status:'CANCELLED',cancel_reason:'MANUAL_CLOSE'},viewer);
  assert.equal(item.fundsResolution.status,'REVIEW_REQUIRED');
 });
+test('recorded-payment period preserves microsecond bounds and filters source status before pagination',async()=>{
+ const from='2026-11-01T00:00:00.000001Z',to='2026-11-01T08:00:00.000002+08:00';
+ const filters=parseAdminOrderPageQuery(new URLSearchParams({paidFrom:from,paidTo:to}));
+ assert.equal(filters.paidFrom,from);assert.equal(filters.paidTo,to);
+ for(const bad of [{paidFrom:to,paidTo:from},{paidFrom:from,paidTo:from},{paidFrom:'2026-11-01T00:00:00.0000001Z'}])
+   assert.throws(()=>parseAdminOrderPageQuery(new URLSearchParams(bad as Record<string,string>)));
+ const f=orderClient({keys:[],total:'0'});await queryAdminReadOrders(f.client,viewer,filters);
+ const {sql,values}=f.statements.find(row=>row.sql.includes('AS keys'))!;
+ assert.match(sql,/p\.id=paid\.paid_confirmation_id AND p\.disposition='APPLIED' AND p\.currency='CNY'/);
+ assert.match(sql,/paid\.source_pay_status=1 AND paid\.source_paid_at IS NOT NULL AND paid\.source_paid_at>=\$\d+::timestamptz AND paid\.source_paid_at<\$\d+::timestamptz/);
+ assert.match(sql,/COALESCE\(l\.source_snapshot->>'is_delete','0'\)='0'/);
+ assert.ok(values.includes(from));assert.ok(values.includes(to));
+});
 test('participant restriction combines with origin-bound page keys before either source expands',()=>{
  for(const ready of [false,true]){
   const restrict={nativeIds:'$4',legacyIds:'$5',participantUserId:'$1'};
   for(const relation of [orderReadRelation(ready,true,restrict),orderReadKeyRelation(ready,restrict)]){
    assert.match(relation,/WHERE o\.id=ANY\(\$4::text\[\]\) AND \(o\.owner_user_id=\$1 OR o\.renter_user_id=\$1\)/);
-   assert.match(relation,/WHERE l\.id=ANY\(\$5::text\[\]\) AND \(l\.owner_user_id=\$1 OR l\.renter_user_id=\$1\)/);
+   assert.match(relation,/l\.id=ANY\(\$5::text\[\]\) AND \(l\.owner_user_id=\$1 OR l\.renter_user_id=\$1\)/);
    assert.ok(relation.includes(LEGACY_ORDER_STATUS_SQL));
    assert.doesNotMatch(relation,/\bDISTINCT\b/,'a self-associated row remains one row; no second participant UNION');
   }
@@ -765,6 +778,21 @@ test('迁入单以账号为准：ZZ 编号、真实名称、无草稿标题；�
  assert.equal(JSON.stringify(row).includes('本地联验草稿'),false);
  const frozen=accountViewFrozen({source:'ACCOUNT_PUBLIC_VERSION',versionId:'v1',haff:{itemId:'haff',quantity:'51000000'},materials:[{itemId:'m',code:'awm',name:'AWM子弹',quantity:'10',unit:'ROUND'}],materialsVisibleTotal:1,safeBoxText:'基础安全箱(1*2)',gradingText:'黄金',loginMethodText:'QQ账密',term:{name:'6天',termSeconds:'518400',dailyConsumption:'10000000'},fullPayout:'NOT_SELECTED',haffRatioWanPerYuan:'52',fees:{completeness:'COMPLETE',haffRental:null,materials:null,resourceTotal:null,tenantDeposit:null,tenantPayableTotal:null,baseDepositCents:null}});
  assert.equal(frozen.source,'ACCOUNT_PUBLIC_VERSION');assert.equal(frozen.termDays,'6');assert.equal(frozen.haff?.quantity,'51000000');assert.equal(frozen.gradingText,'黄金');assert.equal(frozen.materials[0]!.name,'AWM子弹');
+});
+
+for(const [name,status,haff,days,total]of [['closed-order32',5,'130000000','13','68500'],['inflight-order3013',3,'144000000','5','32900']] as const)test(`current imported account ${name} keeps the original order facts and money`,async()=>{
+ const original={...record,id:name,source_order_status:status,due_amount_cents:total,recorded_paid_amount_cents:total};
+ const options={keys:[{origin:'LEGACY',id:name}],records:[{origin:'LEGACY',id:name,record:original}]};
+ const readViewer={...viewer,permissions:new Set(['supply.rental_account.read'])};
+ const before=(await queryAdminReadOrders(orderClient(options).client,readViewer,{page:1,pageSize:20})).items[0]!;
+ const view={source:'LEGACY_ACCOUNT_SNAPSHOT' as const,sourceUpdatedAt:'2026-11-03T00:00:00.000Z',versionId:`observation-${name}`,haff:{itemId:'legacy-display:haff_base',quantity:haff},materials:[{itemId:'legacy-display:awm_round',code:'awm_round',name:'AWM子弹',quantity:'10',unit:'ROUND'}],materialsVisibleTotal:1,safeBoxText:'基础安全箱(1*2)',gradingText:'黄金',loginMethodText:'QQ账密',term:{name:`${days}天`,termSeconds:(BigInt(days)*86400n).toString(),dailyConsumption:'10000000'},fullPayout:'NOT_DECLARED' as const,haffRatioWanPerYuan:null,fees:{completeness:'UNKNOWN',haffRental:null,materials:null,resourceTotal:null,tenantDeposit:null,tenantPayableTotal:null,baseDepositCents:null}};
+ const after=(await queryAdminReadOrders(orderClient(options).client,readViewer,{page:1,pageSize:20},async()=>new Map([['account',view]]))).items[0]!;
+ assert.equal(after.accountView.source,'LEGACY_ACCOUNT_SNAPSHOT');assert.equal(after.frozenAccount.source,'LEGACY_ACCOUNT_SNAPSHOT');
+ assert.equal(after.frozenAccount.haff.quantity,haff);assert.equal(after.frozenAccount.termDays,days);assert.equal(after.frozenAccount.loginMethodText,'QQ账密');
+ for(const key of ['amounts','prepaymentBreakdown','prepaymentReconciliation','legacyResources','payment','haffRatio','source'])assert.deepEqual(after[key],before[key],key);
+ assert.equal(original.source_snapshot,record.source_snapshot,'the original snapshot object remains unchanged');
+ const denied=(await queryAdminReadOrders(orderClient(options).client,{...viewer,isBoss:false,permissions:new Set()},{page:1,pageSize:20},async()=>{throw Error('account reader must not be called');})).items[0]!;
+ assert.equal(denied.accountView,undefined);assert.equal(denied.frozenAccount,undefined);
 });
 
 test('未开租已付终止保留原付款；普通未付取消不提升，金额权限保持',()=>{

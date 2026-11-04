@@ -54,7 +54,7 @@ export class MembershipGrowthRequestError extends Error {
 
   constructor(status: number, body: unknown) {
     const payload = isRecord(body) && isRecord(body.error) ? body.error : null;
-    super(typeof payload?.message === "string" ? payload.message : "会员成长暂时无法读取");
+    super(payload?.code === "MEMBERSHIP_CONTRACT_REQUIRED" ? "会员成长资料暂时无法确认，请稍后重试。" : typeof payload?.message === "string" ? payload.message : "会员成长暂时无法读取");
     this.name = "MembershipGrowthRequestError";
     this.status = status;
     this.code = typeof payload?.code === "string" ? payload.code : status === 0 ? "NETWORK_ERROR" : "INTERNAL_ERROR";

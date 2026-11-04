@@ -138,7 +138,7 @@ test("document and subject digests ignore unrelated rows and still change when t
   fixture.db.exec("INSERT INTO zzsh_order.settlement_posting(id,order_id,version_hash,captured_cents) VALUES('post-1','order-1','hash-1','100'),('post-2','order-2','hash-2','900')");
   const ready={native_orders:true},global=()=>financeVersionSql(ready),scoped=()=>financeScopedVersionSql(ready,{mode:"document",documentRef:"ORDER:order-1"}),subject=()=>financeScopedVersionSql(ready,{mode:"subject",subjectId:"u1"});
   assert.equal(financeScopedVersionSql(ready,{mode:"document",documentRef:"POSTING:post-1"}),null);
-  assert.match(global(),/admin-finance-proof\.r6\.narrow/);assert.doesNotMatch(global(),/\$1|pg_current_snapshot/i);
+  assert.ok(global().includes(FINANCE_GLOBAL_VERSION_DOMAIN));assert.doesNotMatch(global(),/\$1|pg_current_snapshot/i);
   const digest=(query:{text:string;values:string[]}|null)=>fixture.query(query!.text,query!.values).rows[0]!.finance_version;
   const beforeGlobal=digest({text:global(),values:[]}),beforeDoc=digest(scoped()),beforeSubject=digest(subject());
   const ledgerRows=(query:{text:string;values:string[]}|null)=>[...query!.text.matchAll(/FROM \((SELECT[\s\S]*?)\) v/g)].map(match=>match[1]!).filter(sql=>sql.startsWith("SELECT id,account_code")).map(sql=>fixture.query(sql,query!.values).rows.length);
@@ -165,7 +165,7 @@ test("document and subject digests ignore unrelated rows and still change when t
   const key={keyId:"read1",secret:"x".repeat(64)},filters=parseAdminFinanceFilters(new URLSearchParams("from=2026-10-03&to=2026-10-03")),actor={userId:"admin1",sessionId:"session1",authorizationKey:"access1"};
   const token=financeSnapshot({entries:[],subjects:[],revisions:[],withdrawalsReady:false,asOf:"2026-10-03T00:00:00.000000Z",version:String(beforeDoc)},filters,actor,key).token;
   assert.throws(()=>financeSnapshot({entries:[],subjects:[],revisions:[],withdrawalsReady:false,asOf:"2026-10-03T00:00:00.000000Z",version:String(beforeGlobal)},filters,actor,key,token),(error:any)=>error.status===409);
-  assert.equal(FINANCE_GLOBAL_VERSION_DOMAIN,"admin-finance-proof.r6.narrow");
+  assert.equal(FINANCE_GLOBAL_VERSION_DOMAIN,"admin-finance-proof.r7.typed-history");
   assert.doesNotMatch(readFileSync("src/finance/admin-finance-export.ts","utf8"),/financeScopedVersionSql/);
   assert.match(readFileSync("src/finance/admin-finance-export.ts","utf8"),/readFinanceSourceVersion\(client\)/);
   assert.doesNotMatch(readFileSync("src/finance/admin-finance-routes.ts","utf8"),/SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY/);
@@ -205,9 +205,11 @@ test('unposted business amount and platform reference never become ledger income
  assert.equal(financePeriodProjection([payment,refund]).find(row=>row.bucket==='CLEARING')!.knownInflows,'0');
 });
 
-test('legacy order keeps global history admission proof instead of an incomplete r3 dependency set',()=>{
+test('legacy order document bounds original history, later opening admission and duty evidence',()=>{
  const ready={native_orders:true,legacy_orders:true,history_coverage:true};
- assert.equal(financeScopedVersionSql(ready,{mode:'document',documentRef:'LEGACY_ORDER:old-1'}),null);
+ const scoped=financeScopedVersionSql({...ready,legacy_duty_finance:true},{mode:'document',documentRef:'LEGACY_ORDER:old-1'})!;
+ assert.deepEqual(scoped.values,['old-1']);
+ for(const required of ['history_bound','finance_observation_admission','legacy_order_duty','legacy_duty_finance_fact','la_pay_order','la_refund_record','la_distribution_order'])assert.ok(scoped.text.includes(required));
  assert.match(financeVersionSql(ready),/wallet_coverage/);assert.match(financeVersionSql(ready),/finance_opening_basis/);
  assert.ok(financeScopedVersionSql(ready,{mode:'document',documentRef:'ORDER:native-1'}),'native scope stays narrow');
 });

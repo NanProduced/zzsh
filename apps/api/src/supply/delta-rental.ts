@@ -81,7 +81,7 @@ export function deltaPublicationLevels(map: Record<string, unknown> | undefined)
 }
 
 // New quote/publication validation is separate from historical normalization.
-export function validateDeltaPublicationAttributes(attributes: Record<string, unknown>, options: { requireGradingDivision?: boolean; requireSupplementalDeclarations?: boolean } = {}): void {
+export function validateDeltaPublicationAttributes(attributes: Record<string, unknown>, options: { requireGradingDivision?: boolean; requireSupplementalDeclarations?: boolean; requireServiceWindow?: boolean } = {}): void {
   validateDeltaGradingAttributes(attributes, options.requireGradingDivision !== false);
   if (!(DELTA_LOGIN_METHOD_CODES as readonly unknown[]).includes(attributes.login_method_code))
     throw invalid("请选择有效登录方式", "attributes.login_method_code");
@@ -93,12 +93,15 @@ export function validateDeltaPublicationAttributes(attributes: Record<string, un
       throw invalid(`请确认${field === "vit_level" ? "体力" : field === "bear_level" ? "负重" : "潜水"}等级（${min}–${max}）`, `attributes.${field}`);
   }
   const start = attributes.service_window_start_minute, end = attributes.service_window_end_minute;
-  if (!Number.isSafeInteger(start) || Number(start) < 0 || Number(start) > 1439)
-    throw invalid("请确认上号开始时间", "attributes.service_window_start_minute");
-  if (!Number.isSafeInteger(end) || Number(end) < 0 || Number(end) > 1440 || end === start)
-    throw invalid("请确认上号结束时间，起止不能相同", "attributes.service_window_end_minute");
-  if (attributes.service_window_timezone !== "Asia/Shanghai" || attributes.service_window_cross_midnight !== (Number(end) < Number(start)))
-    throw invalid("请确认上号时段及跨日状态", "attributes.service_window_timezone");
+  const windowUnknown = start == null && end == null && attributes.service_window_timezone == null && attributes.service_window_cross_midnight == null;
+  if (options.requireServiceWindow !== false || !windowUnknown) {
+    if (!Number.isSafeInteger(start) || Number(start) < 0 || Number(start) > 1439)
+      throw invalid("请确认上号开始时间", "attributes.service_window_start_minute");
+    if (!Number.isSafeInteger(end) || Number(end) < 0 || Number(end) > 1440 || end === start)
+      throw invalid("请确认上号结束时间，起止不能相同", "attributes.service_window_end_minute");
+    if (attributes.service_window_timezone !== "Asia/Shanghai" || attributes.service_window_cross_midnight !== (Number(end) < Number(start)))
+      throw invalid("请确认上号时段及跨日状态", "attributes.service_window_timezone");
+  }
   for (const field of DELTA_OPTIONAL_BOOLEAN_FIELDS) {
     if (typeof attributes[field] !== "boolean" && (options.requireSupplementalDeclarations !== false || attributes[field] != null))
       throw invalid(field === "next_season_pass" ? "请明确选择下赛季是否计划购买通行证" : "请明确选择是否已解锁德穆兰", `attributes.${field}`);
@@ -434,7 +437,7 @@ const DELTA_LEVEL_FIELDS = ["vitLevel", "bearLevel", "vit_level", "bear_level", 
 const DELTA_TEXT_FIELDS = ["safe_box_code", "grading_code", "login_method_code", "legacy_helmet_code", "legacy_armor_code", "legacy_insure_code", "service_window_timezone", "region_province", "region_city", "info_source"] as const;
 // Optional legacy keys are emitted only when present so the frozen content-hash
 // byte contract of previously accepted declarations is preserved.
-const DELTA_OPTIONAL_TEXT_FIELDS = ["legacy_resource_no"] as const;
+const DELTA_OPTIONAL_TEXT_FIELDS = ["legacy_resource_no", "legacy_published_reference"] as const;
 const DELTA_OPTIONAL_INTEGER_FIELDS = ["grading_division"] as const;
 const DELTA_OPTIONAL_BOOLEAN_FIELDS = ["next_season_pass", "demulan_unlocked"] as const;
 const DELTA_BOOLEAN_FIELDS = ["ban_record", "face_is_self", "service_window_cross_midnight"] as const;
@@ -464,6 +467,8 @@ export function normalizeDeltaAttributes(value: Record<string, unknown>): Record
   const normalized = Object.fromEntries(allowed.filter((key) => key !== "full_payout_declaration" && key !== "owner_deposit_declaration" && key !== "media_categories"
     && !((([...DELTA_OPTIONAL_TEXT_FIELDS, ...DELTA_OPTIONAL_INTEGER_FIELDS, ...DELTA_OPTIONAL_BOOLEAN_FIELDS]) as readonly string[]).includes(key) && !Object.hasOwn(value, key))).map((key) => {
     const child = value[key] ?? null;
+    if (key === "legacy_published_reference" && (typeof child !== "string" || !/^[a-f0-9]{64}$/.test(child)))
+      throw new DeltaDeclarationError("Invalid legacy publication reference");
     if (child === null) return [key, null];
     if (key === "grading_division" && !isDeltaGradingDivision(value.grading_code, child)) throw new DeltaDeclarationError("Invalid Delta grading division");
     if ((DELTA_LEVEL_FIELDS as readonly string[]).includes(key) && (!Number.isSafeInteger(child) || Number(child) < 0 || Number(child) > 2147483647)) throw new DeltaDeclarationError("Invalid Delta level");

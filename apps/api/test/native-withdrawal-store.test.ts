@@ -12,6 +12,29 @@ const scope=()=>createPayoutScope({reference:"review://fixture/scope",reviewSha2
 test("执行ready只读固定4表/19函数/23trigger/窄ACL；缺失或第二阶段不符失败关闭",async()=>{
  for(const stop of [1,2]){let queries=0;const sqls:string[]=[];const c={query:async(sql:string,args:any[])=>{queries++;sqls.push(sql);if(queries===2){const e=JSON.parse(args[0]);assert.equal(e.tables.length,4);assert.equal(e.functions.length,19);assert.equal(e.triggers.length,23);assert.equal(e.ordinaryHelperExecute.length,6);assert.equal(e.tables[0].columns.filter((x:any)=>x.insert).length,37);assert.equal(e.tables[0].columns.find((x:any)=>x.name==="created_xid").insert,false);}return{rows:[{ready:queries!==stop}]};}} as unknown as PoolClient;await assert.rejects(assertNativePayoutExecutionReady(c));assert.equal(queries,stop);assert.equal(sqls.some(s=>/^\s*(INSERT|UPDATE|DELETE|GRANT|CREATE|ALTER)/.test(s)),false);}
 });
+test("仅两条共享分录守卫接纳精确的正式历史版本，不接纳删条件或额外来源排除",async()=>{
+ const base=["intentId","earningId","guaranteeId","legacyDutyId","nativeRefundIntentId","joinpayWithdrawalIntentId"];
+ const formal=[...base,"abnormalRefundLiabilityId","prestartTerminationId"];
+ const qual=(names:string[])=>`((new.finance_event_id IS NOT NULL)${names.map(n=>` AND (NOT (new.details ? '${n}'::text))`).join("")})`;
+ const c={query:async(sql:string,args:string[])=>{
+  if(sql.includes("G4 payout fixed guards")){
+   assert.match(sql,/IS DISTINCT FROM eg\.quals->>\(CASE/);
+   assert.match(sql,/to_regclass\('zzsh_order\.local_controlled_refund_evidence'\) IS NOT NULL THEN 2/);
+   assert.match(sql,/to_regclass\('zzsh_order\.prestart_termination'\) IS NOT NULL THEN 1/);
+   const triggers=JSON.parse(args[0]!).triggers as {name:string;qual:string|null;quals:(string|null)[]}[];
+   const extended=triggers.filter(t=>t.quals.length>1);
+   assert.deepEqual(extended.map(t=>t.name),["finance_entry_guard","finance_entry_batch_guard"]);
+   for(const t of triggers){
+    if(!extended.includes(t)){assert.deepEqual(t.quals,[t.qual]);continue;}
+    assert.deepEqual(t.quals,[qual(base),qual(formal),qual([...formal,"localRefundIntentId"])]);
+    assert(!t.quals.includes(qual(formal.filter(n=>n!=="nativeRefundIntentId"))));
+    assert(!t.quals.includes(qual([...formal,"unreviewedPayoutSource"])));
+   }
+  }
+  return{rows:[{ready:true}]};
+ }} as unknown as PoolClient;
+ await assertNativePayoutExecutionReady(c);
+});
 test("有效原key先重验身份后恢复，不依赖当前policy/目标/profile/余额可用",async t=>{
  const identity=require("../src/auth/user-identity");let auth=0;t.mock.method(identity,"assertUserContextInTransaction",async()=>{auth++;});
  let foreign=false;const b={amountCents:body.amountCents,destinationId:body.destinationId,expectedWalletVersion:body.expectedWalletVersion,policyVersion:body.policyVersion},receipt={intent:{id:"fixture_original",state:"UNKNOWN"}},calls:string[]=[],c={query:async(sql:string)=>{calls.push(sql);if(sql.includes("current_database()"))return{rows:[{db:"zzsh_fixture",actor:"zzsh_fixture_r",xid:"100",isolation:"read committed"}]};if(sql.includes("native withdrawal original receipt ownership"))return{rows:foreign?[]:[{id:"fixture_original"}]};if(sql.includes("idempotency_record")&&sql.includes("SELECT"))return{rows:[{requestFingerprint:fingerprintRequest("joinpay.withdrawal.reserve.v1",undefined,b),responseStatus:200,responseBody:receipt,publishRequired:false}]};if(sql.includes("pg_advisory"))return{rows:[]};throw Error("UNEXPECTED_NEW_QUALIFICATION");}} as unknown as PoolClient;

@@ -60,6 +60,7 @@ function unifiedSql(legacy:boolean,native:boolean){
  const legacySql=legacy?`SELECT 'legacy:account:'||o.id AS id,NULL::timestamptz AS occurred_at,o.imported_at AS recorded_at,
    jsonb_build_object('sourceType','LEGACY_MYSQL','eventKind','ACCOUNT_OBSERVATION','sourceId',o.legacy_account_id,'observationId',o.id) AS payload,o.source_canonical,o.source_digest
    FROM zzsh_order.legacy_owner_guarantee_observation o WHERE o.user_id=$1 AND o.source_cutoff=$2::timestamptz
+    AND (jsonb_array_length(o.source_canonical::jsonb->'payOrders')>0 OR (o.source_canonical::jsonb->'source'->>'pay_is'='1' AND (o.source_canonical::jsonb->'source'->>'pay_money')::numeric>0))
   UNION ALL SELECT 'legacy:payment:'||(payment->>'id'),COALESCE(${stamp("payment->>'pay_time'")},${stamp("payment->>'create_time'")}),o.imported_at,
    jsonb_build_object('sourceType','LEGACY_MYSQL','eventKind','PAYMENT_OBSERVATION','sourceId',payment->>'id'),o.source_canonical,o.source_digest
    FROM zzsh_order.legacy_owner_guarantee_observation o CROSS JOIN LATERAL jsonb_array_elements(o.source_canonical::jsonb->'payOrders') payment
@@ -97,7 +98,7 @@ export function projectUnifiedGuaranteeEvent(row:any,userId:string):UnifiedGuara
    const expected=payment.sourcePaidAt??payment.sourceCreatedAt;
    if((expected===null)!==(result.occurredAt===null)||expected!==null&&Date.parse(expected)!==Date.parse(result.occurredAt!))throw unavailable();
    result.amountCents=payment.amountCents;result.source={type:'LEGACY_MYSQL',entity:'la_pay_order',id:p.sourceId};
-   result.paymentAttempt={id:p.sourceId,status:payment.sourceStatus==='1'?'SOURCE_PAID_RECORD':'SOURCE_UNCONFIRMED',providerState:null,merchantOrderNumber:payment.merchantOrderNumber};
+   result.paymentAttempt={id:p.sourceId,status:payment.sourceStatus==='1'?'SOURCE_PAID_RECORD':payment.sourceStatus==='0'?'SOURCE_UNPAID_RECORD':'SOURCE_UNCONFIRMED',providerState:null,merchantOrderNumber:payment.merchantOrderNumber};
   }else throw unavailable();
   return result;
  }

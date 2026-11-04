@@ -505,6 +505,18 @@ test('CHAIN refund intents keep their own coverage, budget and review facts apar
   assert.match(text,/预算已用/);assert.match(text,/预算释放/);
   assert.match(text,/渠道到账未核定/);assert.equal(text.includes('银行已到账'),false);
 });
+test('CHAIN abnormal refund shows readable reasons without claiming channel arrival', async t => {
+  const {root,node,AdminOrderChainView}=await setup(t);
+  const value={...chainOrder,id:'refund-abnormal',displayNo:'REFUND-ABNORMAL',status:'PAID',source:{origin:'NATIVE'}};
+  const refundSummary={contractVersion:'admin-order-refund-summary.v1',integration:'INTEGRATED',bankArrival:'UNKNOWN',reasonCodes:[],intents:[],abnormalResponsibilities:[{
+    confirmationId:'c1',reasonCode:'DUPLICATE_PAYMENT',originalCents:'1000',currency:'CNY',intentIds:[],allocatedCents:null,consumedCents:null,releasedCents:null,remainingCents:null,totalsComplete:false,state:'FUTURE_STATE',firstSubmit:{dispatch:'NEVER_DISPATCHED',blockedReason:'ORIGINAL_ORDER_NO_AMBIGUOUS'},reasonCodes:['ABNORMAL_INTENT_BINDING_MISMATCH','FUTURE_ISSUE'],
+  }]};
+  globalThis.fetch=async url=>String(url).includes('readMode=combined')?response({order:value,refundSummary}):response({error:{code:'NOT_FOUND'}},404);
+  await act(async()=>root.render(createElement(AdminOrderChainView,{...chainProps('refund-abnormal'),objectOnly:true,initialOrderId:value.id})));
+  await until(()=>node.textContent.includes('REFUND-ABNORMAL'));
+  assert.match(node.textContent,/重复支付/);assert.match(node.textContent,/原订单号不明确/);assert.match(node.textContent,/退款关联信息不一致/);assert.match(node.textContent,/退款资料需核对/);
+  assert.doesNotMatch(node.textContent,/DUPLICATE_PAYMENT|FUTURE_STATE|ORIGINAL_ORDER_NO_AMBIGUOUS|ABNORMAL_INTENT_BINDING_MISMATCH|FUTURE_ISSUE|银行已到账/);
+});
 test('optional finance/group reads are independent and never call controlled settlement or infer rental start', async t => {
   const {root,node,AdminOrderChainView}=await setup(t);const calls=[];let finishFinance,mode='slow';
   const native={...chainOrder,id:'native-old',displayNo:'NATIVE-OLD',status:'PAID',source:{origin:'NATIVE'}};
@@ -519,6 +531,32 @@ test('optional finance/group reads are independent and never call controlled set
   mode='slow';await act(async () => root.render(createElement(AdminOrderChainView,{...props,refreshNonce:1})));await until(()=>node.textContent.includes('关键费用'));const stale=finishFinance;
   mode='ready';await act(async () => root.render(createElement(AdminOrderChainView,{...props,initialOrderId:'native-current'})));await until(()=>node.textContent.includes('NATIVE-CURRENT'));
   await act(async () => stale(response(proof('/finance/documents/ORDER:native-old'))));assert(node.textContent.includes('NATIVE-CURRENT'));assert(!node.textContent.includes('NATIVE-OLD'));assert(node.textContent.includes('开租待核'));assert(!calls.some(p=>p.includes('/settlement')));
+});
+
+test('legacy finance links preserve original attempts and clear on finance permission loss', async t => {
+  const {root,node,AdminOrderChainView}=await setup(t),opened=[];
+  const legacy={...chainOrder,id:'observed-old',displayNo:'OLD-ORDER',status:'CANCELLED',source:{origin:'LEGACY',statusLabel:'已取消'}};
+  const ref='HISTORY_REFUND:old-refund';
+  globalThis.fetch=async input=>{
+    const path=decodeURIComponent(String(input));
+    if(path.includes('readMode=combined'))return response({order:legacy,refundSummary:{integration:'NOT_APPLICABLE'}});
+    if(path.includes('/finance/documents/LEGACY_ORDER:observed-old'))return response({document:{ref:'LEGACY_ORDER:observed-old'},legacyOrderObservations:[{
+      documentRef:ref,number:'ORIGINAL-REFUND',kind:'REFUND',amountCents:'68500',originalStatusLabel:'旧平台记为退款成功',channelArrival:'UNKNOWN',refundAttempts:[{
+        source:{id:'old-attempt'},originalNumber:'ORIGINAL-ATTEMPT',originalStatus:'1',recordedAmountCents:'68500'
+      }]
+    }]});
+    return response({error:{code:'NOT_FOUND'}},404);
+  };
+  const props={...chainProps('legacy-observations'),objectOnly:true,initialOrderId:legacy.id,onOpenPath:(path)=>opened.push(path)};
+  await act(async()=>root.render(createElement(AdminOrderChainView,{...props,snapshot:{...props.snapshot,permissions:['order.read','finance.read']}})));
+  await until(()=>node.textContent.includes('ORIGINAL-ATTEMPT'));
+  assert.match(node.textContent,/ORIGINAL-REFUND[\s\S]*685\.00[\s\S]*ORIGINAL-ATTEMPT[\s\S]*渠道到账待确认/);
+  assert.doesNotMatch(node.textContent,/退款已到账|旧来源退款未接入/);
+  await act(async()=>buttonNamed(node,'原退款 ORIGINAL-REFUND').click());
+  assert.ok(opened.some(path=>path.startsWith('/finance/documents/'+encodeURIComponent(ref))));
+  await act(async()=>root.render(createElement(AdminOrderChainView,props)));
+  await until(()=>node.textContent.includes('OLD-ORDER'));
+  assert.doesNotMatch(node.textContent,/ORIGINAL-REFUND|ORIGINAL-ATTEMPT/);
 });
 
 test('frozen account summary is displayed from the existing order payload without another business request', async t => {
@@ -554,6 +592,22 @@ test('legacy frozen account is a historical reference, not an order-frozen inven
   await until(()=>node.textContent.includes('关键费用'));
   assert.match(node.textContent,/账号资料（与账号页一致）/);
   assert.match(node.textContent,/6 天/);
+});
+
+for(const [status,days,haff,total]of [['CANCELLED','13','130000000','685.00'],['PAID','5','144000000','329.00']])test(`current source account facts are explicit for legacy ${status} orders`,async t=>{
+  const {root,node,AdminOrderChainView}=await setup(t);
+  const amount={currency:'CNY',unit:'yuan',amount:total,scale:2};
+  const value={...chainOrder,status,amounts:{rental:amount,deposit:{...amount,amount:'0.00'},totalDue:amount},frozenAccount:{source:'LEGACY_ACCOUNT_SNAPSHOT',sourceUpdatedAt:'2026-11-03T00:00:00Z',haff:{code:'haff_base',name:'哈夫币',quantity:haff,unit:'HAFF_BASE'},materials:[{code:'awm_round',name:'AWM子弹',quantity:'10',unit:'ROUND'}],termDays:days,termSeconds:String(BigInt(days)*86400n),loginMethodText:'QQ账密',safeBoxText:'基础安全箱(1*2)',gradingText:'黄金'}};
+  globalThis.fetch=async()=>response(chainPage([value]));
+  await act(async()=>root.render(createElement(AdminOrderChainView,chainProps(`source-${status}`))));
+  await until(()=>node.textContent.includes(value.displayNo));
+  assert.match(node.textContent,/当前账号资料（迁入时记录）/);assert.ok(node.textContent.includes(`${BigInt(haff)/1000000n} M 哈夫币`));assert.ok(node.textContent.includes(`${days} 天`));
+  assert.equal(node.textContent.includes('本单冻结：'),false);
+  globalThis.fetch=async()=>response({order:value});
+  await act(async()=>root.render(createElement(AdminOrderChainView,{...chainProps(`source-detail-${status}`),objectOnly:true,initialOrderId:value.id})));
+  await until(()=>node.textContent.includes('关键费用'));
+  assert.match(node.textContent,/当前账号资料（迁入时记录，与账号页一致）/);assert.match(node.textContent,/QQ账密/);assert.ok(node.textContent.includes(total));
+  assert.equal(node.textContent.includes('本单冻结账号摘要'),false);
 });
 
 test('CHAIN order detail orders identity, frozen parties, prepay/channel, fulfillment, settlement and funds evidence once', async t => {
@@ -678,7 +732,7 @@ test('order party labels and real names are identical for migrated and native or
 test('channel payment summary keeps local acceptance and simulated evidence distinct from receipt',async t=>{
   const {root,node,AdminOrderChainView}=await setup(t);
   const base={contractVersion:'admin-order-payment-summary.v1',productionPaymentCapability:false,originalRequest:null,latestTrustedObservation:null,acceptance:null,conflicts:null,recovery:null,settlement:'NOT_INTEGRATED',unknowns:null,updatedAt:null};
-  const cases=[{integration:'NOT_INTEGRATED',text:'渠道付款摘要尚未接入'},{integration:'CONTROLLED_LOCAL',acceptance:{state:'APPLIED'},text:'本地已接纳'},
+  const cases=[{integration:'NOT_INTEGRATED',text:'渠道付款摘要暂不可用'},{integration:'CONTROLLED_LOCAL',acceptance:{state:'APPLIED'},text:'本地已接纳'},
     {integration:'JOINPAY',acceptance:{state:'APPLIED'},unknowns:['PAYMENT_SOURCE_DIFFERS_FROM_REQUEST'],text:'本地受控接纳，付款来源与渠道请求不同'},
     {integration:'JOINPAY',dataOrigin:'JOINPAY_PROVIDER',productionPaymentCapability:true,acceptance:{state:'APPLIED'},text:'汇聚原确认 · 本地已接纳'},
     {integration:'JOINPAY',dataOrigin:'JOINPAY_PROVIDER',productionPaymentCapability:false,acceptance:{state:'APPLIED'},text:'汇聚原确认 · 本地已接纳'},
@@ -876,6 +930,7 @@ test('overview order drilldowns keep exact creation/payment periods and effectiv
   for (const [mode, query] of [
     ['created', { origin: 'NATIVE', createdFrom: from, createdTo: to }],
     ['payment', { origin: 'NATIVE', paymentConfirmedFrom: from, paymentConfirmedTo: to }],
+    ['recorded', { paidFrom: from, paidTo: to }],
     ['pending', { origin: 'NATIVE', status: 'PENDING_PAYMENT', paymentOpen: 'true' }],
   ]) {
     await act(async () => root.render(createElement(AdminOrderChainView, { ...chainProps('overview-' + mode), initialQuery: query })));
@@ -883,6 +938,7 @@ test('overview order drilldowns keep exact creation/payment periods and effectiv
     const request = calls.at(-1);
     for (const [key, value] of Object.entries(query)) assert.equal(request.searchParams.get(key), value, key);
     if (mode === 'payment') assert.match(node.textContent, /收款确认时段/);
+    if (mode === 'recorded') { assert.match(node.textContent, /经营概览付款时段/);assert.equal(request.searchParams.get('origin'),null); }
     if (mode === 'pending') assert.match(node.textContent, /仅有效待付款/);
   }
 });

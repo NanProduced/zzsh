@@ -2,6 +2,8 @@
 import { BusinessUpdateNotices } from "@/components/content/platform-update-notices";
 import { ManagedNoticeSections } from "@/components/content/managed-notice";
 import { CatalogItemArt } from "@/components/supply/catalog-item-art";
+import { LegacyAccountImage } from "@zzsh/ui/legacy-account-image";
+import { AccountMediaPlaceholder } from "@zzsh/ui/account-media-placeholder";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import Link from "next/link";
@@ -111,15 +113,18 @@ function DetailImage({
   className,
   loading = "lazy",
   onLoad,
+  legacy,
 }: {
   src: string;
   alt: string;
   className?: string;
   loading?: "lazy" | "eager";
   onLoad?: (image: HTMLImageElement) => void;
+  legacy?: boolean;
 }) {
   const [failed, setFailed] = useState(false);
   useEffect(() => setFailed(false), [src]);
+  if (legacy) return <LegacyAccountImage src={src} alt={alt} className={className} loading={loading} />;
   if (failed) {
     return (
       <span className={`detail-image-fallback${className ? ` ${className}` : ""}`}>
@@ -139,7 +144,7 @@ function DetailImage({
   );
 }
 
-function DetailGallery({ title, media }: { title: string; media: ListingDetailData["media"] }) {
+function DetailGallery({ title, media, legacyEmpty = false }: { title: string; media: ListingDetailData["media"]; legacyEmpty?: boolean }) {
   const [activeIndex, setActiveIndex] = useState(0);
   const [previewOpen, setPreviewOpen] = useState(false);
   const galleryMedia = media.filter((m) => m.category !== "PENALTY");
@@ -150,8 +155,7 @@ function DetailGallery({ title, media }: { title: string; media: ListingDetailDa
   if (activeList.length === 0) {
     return (
       <div className="detail-gallery detail-gallery--empty" role="note">
-        <ImageOff size={18} aria-hidden="true" />
-        <span>暂无可展示的图片</span>
+        {legacyEmpty ? <AccountMediaPlaceholder state="UNAVAILABLE" /> : <><ImageOff size={18} aria-hidden="true" /><span>暂无可展示的图片</span></>}
       </div>
     );
   }
@@ -184,6 +188,7 @@ function DetailGallery({ title, media }: { title: string; media: ListingDetailDa
             >
               <DetailImage
                 src={activeMedia.url}
+                legacy={activeMedia.legacy}
                 alt={`${title}公开展示图，第${index + 1}张`}
                 loading="eager"
               />
@@ -201,6 +206,7 @@ function DetailGallery({ title, media }: { title: string; media: ListingDetailDa
               </Dialog.Close>
               <DetailImage
                 src={activeMedia.url}
+                legacy={activeMedia.legacy}
                 alt={`${title}公开展示图大图，第${index + 1}张`}
                 className="detail-preview-image"
                 loading="eager"
@@ -241,7 +247,7 @@ function DetailGallery({ title, media }: { title: string; media: ListingDetailDa
             aria-pressed={thumbnailIndex === index}
             onClick={() => select(thumbnailIndex)}
           >
-            <DetailImage src={item.url} alt="" className="detail-gallery-thumb-image" />
+            <DetailImage src={item.url} legacy={item.legacy} alt="" className="detail-gallery-thumb-image" />
             <span className="detail-gallery-thumb-index">{thumbnailIndex + 1}</span>
           </button>
         ))}
@@ -510,7 +516,7 @@ function ReadyDetail({ data }: { data: ListingDetailData }) {
           <section className="account-overview account-hero-section" aria-label="图片与基本信息">
             <div className={`account-detail-gallery${hasGallery ? "" : " account-detail-gallery--empty"}`}>
               {hasGallery ? <h2 className="sr-only">账号图片</h2> : null}
-              <DetailGallery title={title.primary} media={data.media} />
+              <DetailGallery title={title.primary} media={data.media} legacyEmpty={data.historicalReadOnly} />
               {hasGallery ? <p className="account-media-caption">号主提供 · 点击图片查看大图</p> : null}
             </div>
 

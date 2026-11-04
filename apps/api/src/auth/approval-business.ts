@@ -666,8 +666,9 @@ export async function projectApprovalBusinesses(
       if (!readable) { views.set(row.id, restricted(base, "BUSINESS_PERMISSION_REQUIRED")); continue; }
       const payload = row.finalPayload ?? row.operationPayload;
       const receipt = executions.get(row.id);
+      const initial = payload.schema === 'distribution-policy-initialize.v1' || payload.schema === 'distribution-policy-initialize.v2';
       views.set(row.id, { ...base, summaryAvailable: true, detailsAvailable: true, changeSummary: row.summary,
-        policyChange: { schema: payload.schema, initial: payload.schema === 'distribution-policy-initialize.v1', expectedPolicyId: textField(payload, "expectedPolicyId"), expectedRevision: textField(payload, "expectedRevision"), expectedPolicyDigest: textField(payload, "expectedPolicyDigest"), changes: payload.schema === 'distribution-policy-initialize.v1' ? payload.config : payload.changes, reason: textField(payload, "reason") },
+        policyChange: { schema: payload.schema, initial, expectedPolicyId: textField(payload, "expectedPolicyId"), expectedRevision: textField(payload, "expectedRevision"), expectedPolicyDigest: textField(payload, "expectedPolicyDigest"), changes: initial ? payload.config : payload.changes, reason: textField(payload, "reason") },
         result: receipt?.status === "SUCCEEDED" && (receipt.resultCode === "DISTRIBUTION_POLICY_APPLIED" || receipt.resultCode === "DISTRIBUTION_POLICY_INITIALIZED") ? { knowledge: "KNOWN", policyVersionId: receipt.resultDetail } : { knowledge: "UNKNOWN" }, restrictedReasonCodes: [] });
       continue;
     }

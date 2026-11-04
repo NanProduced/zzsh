@@ -9,10 +9,27 @@ import { fileURLToPath } from "node:url";
 import { createHash } from "node:crypto";
 import { applyNumberBindings, applyContactAppend, applyCancelledContactCorrections, verifyFullContactProjection } from "./local-target-contact-append.mjs";
 import { prepareLocalStoredOpening } from "./local-opening-proof.mjs";
+import fs from "node:fs";
+import { writeLoadCheckpoint } from "./local-load-checkpoint.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url)), dirs = [], sha = bytes => createHash("sha256").update(bytes).digest("hex");
 const temporary = () => { const path = mkdtempSync(join(tmpdir(), "zzsh-contact-append-")); dirs.push(path); return path; };
 after(() => { for (const path of dirs) { assert.equal(dirname(path), tmpdir()); assert.ok(path.split(/[\\/]/).at(-1).startsWith("zzsh-contact-append-")); rmSync(path, { recursive: true }); } });
+
+test("checkpoint stages retain old evidence and survive bounded Windows sharing conflicts",()=>{
+  const dir=temporary(),file=join(dir,"checkpoint.json"),oldStage=file+".new";
+  writeFileSync(oldStage,"original failure evidence");writeLoadCheckpoint(file,{nextIndex:100});
+  assert.deepEqual(JSON.parse(readFileSync(file,"utf8")),{nextIndex:100});assert.equal(readFileSync(oldStage,"utf8"),"original failure evidence");
+  const rename=fs.renameSync;let calls=0;
+  try{fs.renameSync=(...args)=>{if(calls++===0)throw Object.assign(new Error("busy"),{code:"EBUSY"});return rename(...args);};writeLoadCheckpoint(file,{nextIndex:200});}
+  finally{fs.renameSync=rename;}
+  assert.equal(calls,2);assert.deepEqual(JSON.parse(readFileSync(file,"utf8")),{nextIndex:200});
+  let staged;
+  try{fs.renameSync=()=>{throw Object.assign(new Error("denied"),{code:"EACCES"});};assert.throws(()=>writeLoadCheckpoint(file,{nextIndex:300}),error=>{staged=error.checkpointTemporaryFile;return error.code==="EACCES";});}
+  finally{fs.renameSync=rename;}
+  assert.deepEqual(JSON.parse(readFileSync(file,"utf8")),{nextIndex:200});assert.deepEqual(JSON.parse(readFileSync(staged,"utf8")),{nextIndex:300});
+  writeLoadCheckpoint(file,{nextIndex:400});assert.equal(fs.existsSync(staged),true);assert.deepEqual(JSON.parse(readFileSync(file,"utf8")),{nextIndex:400});
+});
 
 for (const cli of ["prepare-legacy-contact-append.mjs", "load-local-dataset.mjs"]) test(cli + " defaults to a plan before private input access", () => {
   const result = spawnSync(process.execPath, [join(here, cli), "--dataset", "DOES_NOT_EXIST", "--credentials", "DOES_NOT_EXIST"], { encoding: "utf8" });

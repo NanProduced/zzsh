@@ -16,6 +16,7 @@ export function assertDistributionApprovalAccess(access:EffectiveAdminAccess|nul
 export async function validateDistributionPolicySubmission(client:PoolClient,payload:Record<string,unknown>,writeScope?:LocalDistributionScope){
  const input=parseDistributionPolicyChange(payload);
  await assertDistributionPolicyWriteReadyInTransaction(client,writeScope);
+ if(input.schema==='distribution-policy-initialize.v2'&&!(await client.query("SELECT to_regprocedure('zzsh_order.legacy_rental_referral_contract()') IS NOT NULL AS installed")).rows[0]?.installed)throw new SecurityApiError(503,'EVIDENCE_UNAVAILABLE','Legacy rental referral contract unavailable');
  await client.query("SELECT pg_advisory_xact_lock(hashtextextended('zzsh:distribution-policy-approval:v1',0))");
  const current=await readDistributionPolicyRowInTransaction(client,false,distributionPolicyScopeOf(writeScope));
  if(isInitialPolicyChange(input)){

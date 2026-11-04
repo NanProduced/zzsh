@@ -24,7 +24,7 @@ import {
   type SettlementVersion,
 } from "@/lib/order-client";
 import { clearIntent, inspectIntent, isIntentStale, loadIntent, saveIntent, type IntentKind } from "@/lib/order-intents";
-import { cancelEntryOpen, chargeRowLabel, consumptionRows, decisionAmountRows, isAdjustedVersion, moneyCents, moneyText, paymentEntryOpen, postingAmountRows, previewAmounts, proposedConfirmationCents, quantityText, resourceName, settlementAmountRows, unitHint, type SettlementAmountRow } from "@/lib/order-display";
+import { cancelEntryOpen, chargeRowLabel, consumptionRows, decisionAmountRows, isAdjustedVersion, moneyCents, moneyText, paymentEntryOpen, paymentObservation, postingAmountRows, previewAmounts, proposedConfirmationCents, quantityText, resourceName, settlementAmountRows, settlementPreviewProblem, unitHint, type SettlementAmountRow } from "@/lib/order-display";
 import "./order.css";
 
 type PanelError = { message: string; retryable: boolean };
@@ -453,9 +453,7 @@ function PaymentAction({ order, party, onChanged }: { order: Order; party: Order
     try {
       const authority = await orderApi.paymentStatus(order.id);
       if (!isCurrent(acting)) return;
-      const observed = authority.payment
-        ? `服务端已有付款记录（${authority.payment.disposition}）`
-        : `当前订单状态 ${authority.order.status}，暂未观察到付款记录`;
+      const observed = paymentObservation(authority.payment);
       const message = `原${label}请求仍未取得确定回执（原申请保留）。${observed}；当前页面状态不能确定这笔申请是否生效，请稍后再次查询或联系客服核对。`;
       if (kind === "pay") setUnknown(message); else setCancelUnknown(message);
     } catch {
@@ -586,7 +584,7 @@ function OpeningPanel({ opening, order, party, onChanged }: { opening: Settlemen
         onChanged();
         return;
       }
-      const observed = target ? `原目标期初当前状态 ${target.status}` : "未在原结算记录中找到该期初版本";
+      const observed = target ? `原目标期初${target.status === "CONFIRMED" ? "已确认" : target.status === "DRAFT" ? "待确认" : "状态待核对"}` : "未在原结算记录中找到该期初版本";
       setUnknown(`原开租确认申请仍未取得确定回执（原申请保留）。${observed}；当前页面状态不能确定这笔申请是否生效，请稍后再次查询或联系客服核对。`);
     } catch {
       if (isCurrent(acting)) setUnknown("原开租确认申请仍未取得确定回执；最新结算状态暂时无法读取。原请求保留，请稍后再次查询。");
@@ -729,7 +727,7 @@ function EndingForm({ opening, order, party, onChanged }: { opening: SettlementO
       const preview = await orderApi.settlementPreview(order.id, { lines: result.lines });
       if (sequence !== revision.current) return;
       if (!preview.versionHash || (preview.reasons ?? []).some((reason) => reason !== "EARLY_REASON_REQUIRED")) {
-        setError(preview.reasons?.join("、") || "服务端暂不能生成可提交的结算版本。");
+        setError(settlementPreviewProblem(preview.reasons));
         return;
       }
       setChecked({ lines: result.lines, versionHash: preview.versionHash, snapshot: JSON.stringify(result.lines), preview });
@@ -759,7 +757,7 @@ function EndingForm({ opening, order, party, onChanged }: { opening: SettlementO
       const authority = await orderApi.settlement(order.id);
       if (!isCurrent(acting)) return;
       const observed = authority.currentRequest
-        ? `当前申请状态 ${authority.currentRequest.kind}/${authority.currentRequest.status ?? "待确认"}`
+        ? authority.currentRequest.kind === "INTAKE" ? "当前有结束申请，状态待核对" : authority.currentRequest.kind === "SETTLEMENT_VERSION" ? "当前有结算方案" : "当前申请状态待确认"
         : authority.settlement
           ? `当前结算版本 ${authority.settlement.versionNo}`
           : "当前没有可读的申请或结算版本";

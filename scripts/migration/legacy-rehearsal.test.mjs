@@ -212,6 +212,29 @@ test("source adapter: all local tool default plans refuse network, child process
   }
 });
 
+test("source capture plans include invitation codes and current seasonal facts without treating the old boss as current", () => {
+  const capture=join(HERE,"capture-local-source.mjs");
+  const run=(flags=[])=>{const result=spawnSync(process.execPath,[capture,"--plan",...flags],{encoding:"utf8",timeout:5000});assert.equal(result.status,0,result.stderr);return JSON.parse(result.stdout);};
+  const base=run();assert.ok(base.fieldsByDomain.users.includes("code"));assert.equal(base.dbConnections,0);
+  assert.deepEqual(base.fieldsByDomain.accounts,base.fieldsByDomain.accountDisplay);
+  for(const field of ["agent_skin","is_demulan","is_next_season_pass","price_per","price_vip","ratio_type","create_time"])assert.ok(base.fieldsByDomain.accounts.includes(field));
+  assert.ok(base.fieldsByDomain.skinDictionaryData.includes("type_id"));assert.ok(base.fieldsByDomain.orderAfter.includes("order_id"));
+  const display=run(["--account-display-only"]);assert.ok(display.fieldsByDomain.accountDisplay.includes("is_demulan"));
+  assert.ok(display.fieldsByDomain.accountDisplay.includes("is_next_season_pass"));assert.equal(display.fieldsByDomain.accountDisplay.includes("is_sayyid"),false);
+  assert.equal(display.dbConnections,0);assert.equal(display.credentialReads,0);
+});
+
+test("invitation scenario packets validate all source codes, preserve omitted child proofs, and keep policy absent", async () => {
+  const {sourceInvitationPlan}=await import("./local-source-adapter.mjs");
+  const modules={invitation:fixtureRequire(join(API_DIST,"finance/legacy-invitation-facts.js")),migration:fixtureRequire(join(API_DIST,"supply/legacy-user-migration.js")),contentHash:fixtureRequire(join(API_DIST,"supply/content-hash.js"))};
+  const raw=["1","2","3"].map(id=>({id,code:"Code"+id,is_delete:"0",is_disable:"0",inviter_id:id==="1"?"0":"1",first_leader:"0",second_leader:"0",third_leader:"0",create_time:"1",update_time:"1"}));
+  const receipt={files:{users:{sha256:"a".repeat(64)},distribution:{sha256:"b".repeat(64)}}};
+  const plan=sourceInvitationPlan(raw,[],modules,receipt,"c".repeat(64),"2026-11-03T07:47:05.000Z",new Set(["1","2"]));
+  assert.equal(plan.summary.subjects,3);assert.equal(plan.summary.selectedSubjects,2);assert.equal(plan.summary.automaticEligibilityEnabled,false);
+  assert.equal(plan.packets[0].input.policy,null);assert.equal(plan.packets.flatMap(p=>p.input.subjects).find(s=>s.legacyId==="1").children.INVITER.sourceCount,2);
+  assert.throws(()=>sourceInvitationPlan([...raw.slice(0,2),{...raw[2],code:"cODE2"}],[],modules,receipt,"c".repeat(64),"2026-11-03T07:47:05.000Z",new Set(["1","2"])),/Global original identity\/code collision/);
+});
+
 test("source adapter: reference bootstrap rejects business tables before credentials or a DB connection", () => {
   const dir=temp(),manifest=join(dir,"manifest.json");
   const doc={kind:"REVIEWED_REFERENCE_SNAPSHOT_NOT_BUSINESS_MIGRATION",transactionRollback:true,tables:[{schema:"zzsh_order",table:"rental_order",file:"forbidden.json",rows:0,sha256:"0".repeat(64)}]};

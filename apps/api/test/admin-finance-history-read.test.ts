@@ -26,6 +26,9 @@ function reader(fixture:FinanceSqlFixture,ready:{legacy_orders?:boolean;native_o
   if(sql.startsWith('SELECT to_regclass'))return {rows:[{ready:true,withdrawals:false,native_orders:false,legacy_orders:false,...ready}],rowCount:1};
   if(sql.includes('AS finance_version'))return {rows:[{finance_version:'fixture-content-version'}],rowCount:1};
   if(sql.includes('clock_timestamp()'))return {rows:[{at:'2026-10-22T00:00:00.000000Z'}],rowCount:1};
+  if(sql.includes("WHERE o.source_type='LEGACY_MYSQL' AND o.source_system=$1"))return fixture.query(
+    "SELECT o.* FROM fixture_history o "+sql.slice(sql.indexOf("WHERE o.source_type"))
+      .replaceAll("o.user_id","o.subject_id").replaceAll("o.snapshot","o.extra_evidence->'snapshot'").replaceAll("o.source_event_at","o.at"),values);
   return fixture.query(sql,values);
  }} as unknown as PoolClient;
  return{client,queries};

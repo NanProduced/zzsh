@@ -8,14 +8,14 @@ import { projectPublicAttributeDisplay } from "../supply/listing-query";
 import { frozenResourceLines } from "./frozen-listing-read";
 import { conflict, invalid, notFound } from "../supply/supply-util";
 import { escapeLike } from "../supply/catalog";
-import { legacyContinuationReady, legacyMoneyCents, legacyOrderReadState, LEGACY_ORDER_STATUS_SQL } from "./legacy-order-read";
+import { legacyContinuationReady, legacyMoneyCents, legacyOrderReadState, LEGACY_CONTINUATION_COMPLETED_AT_SQL, LEGACY_ORDER_STATUS_SQL } from "./legacy-order-read";
 import { formatDecimalExact, parseNonNegativeDecimal } from "../supply/decimal";
 import { settlementConfirmationReady, type SettlementConfirmationFacts } from "./settlement";
 import { readDirectoryUserSummaries, type DirectoryUserSummary } from "../auth/user-directory-summary";
 import { legacyUserOrderResources } from "./legacy-user-order-read";
 
 export type OrderReadViewer = { adminId: string; isBoss: boolean; internalQuote: boolean; authorizationKey: string; financeReadable?: boolean; permissions?: ReadonlySet<string> };
-export type OrderReadFilters = { page: number; pageSize: number; status?: string; origin?: "NATIVE" | "LEGACY"; displayNo?: string; accountId?: string; renterUserId?: string; ownerUserId?: string; createdFrom?: string; createdTo?: string; paymentConfirmedFrom?: string; paymentConfirmedTo?: string; paymentOpen?: true; qKind?: "order" | "account" | "party" | "renter" | "owner"; qValue?: string; restoreKey?: string; view?: "list"; fundsResolution?: "MANUAL_CLOSE" };
+export type OrderReadFilters = { page: number; pageSize: number; status?: string; origin?: "NATIVE" | "LEGACY"; displayNo?: string; accountId?: string; renterUserId?: string; ownerUserId?: string; createdFrom?: string; createdTo?: string; paymentConfirmedFrom?: string; paymentConfirmedTo?: string; paidFrom?: string; paidTo?: string; paymentOpen?: true; qKind?: "order" | "account" | "party" | "renter" | "owner"; qValue?: string; restoreKey?: string; view?: "list"; fundsResolution?: "MANUAL_CLOSE" };
 /** Strict source filter: omitted means both; repeated or unknown values are rejected, never coerced. */
 export function parseOrderOrigin(query: URLSearchParams): "NATIVE" | "LEGACY" | undefined {
  const values = query.getAll("origin");
@@ -28,7 +28,6 @@ const utc=(column:string)=>`to_char(${column} AT TIME ZONE 'UTC','YYYY-MM-DD"T"H
 const CONTINUATION_JOIN = `LEFT JOIN zzsh_order.legacy_continuation_version h ON h.order_id=l.id AND h.superseded_at IS NULL`;
 /** Pre-0074 shape: same output columns, no continuation source (see api-change-request.md). */
 const ABSENT_CONTINUATION_JOIN = `LEFT JOIN (SELECT NULL::text AS order_id,NULL::int AS stage) h ON h.order_id=l.id`;
-const CONTINUATION_COMPLETED_AT = `COALESCE((SELECT created_at FROM zzsh_order.legacy_continuation_version WHERE order_id=l.id AND command='CONFIRM' ORDER BY revision DESC LIMIT 1),l.source_completed_at)`;
 
 // Both sources are filtered and sorted together, before counting or pagination.
 /** The relation's shapes share these column fragments: the head (identity,
@@ -49,7 +48,7 @@ const NATIVE_RECORD = `to_jsonb(o)||jsonb_build_object('rental_amount_cents',o.r
     'first_response_at',to_jsonb(g)->>'first_response_at','remind_due_at',to_jsonb(g)->>'remind_due_at',
     'add_round',COALESCE((to_jsonb(g)->>'add_round')::int,0),'escalation_state',COALESCE(to_jsonb(g)->>'escalation_state','NOT_STARTED'))`;
 const LEGACY_RECORD = (continuationReady: boolean) => `to_jsonb(l)||jsonb_build_object('due_amount_cents',l.due_amount_cents::text,'recorded_paid_amount_cents',l.recorded_paid_amount_cents::text,'deposit_amount_cents',l.deposit_amount_cents::text,
-    'source_created_at',${utc('l.source_created_at')},'source_paid_at',${utc('l.source_paid_at')},'source_cancelled_at',${utc('l.source_cancelled_at')},'source_completed_at',${utc(continuationReady ? CONTINUATION_COMPLETED_AT : "l.source_completed_at")},
+    'source_created_at',${utc('l.source_created_at')},'source_paid_at',${utc('l.source_paid_at')},'source_cancelled_at',${utc('l.source_cancelled_at')},'source_completed_at',${utc(continuationReady ? LEGACY_CONTINUATION_COMPLETED_AT_SQL : "l.source_completed_at")},
     'continuation_stage',h.stage,
     'owner_name',ou.name,'renter_name',ru.name,'account_no',a.display_no)`;
 
@@ -60,7 +59,7 @@ export type OrderReadRestriction = { nativeIds?: string; legacyIds?: string; par
 
 function orderReadSql(continuationReady: boolean, nativeColumns: string, legacyColumns: string, restrict?: OrderReadRestriction): string {
  const where = (alias: string, ids?: string) => {
-  const predicates = [ids && `${alias}.id=ANY(${ids}::text[])`, restrict?.participantUserId && `(${alias}.owner_user_id=${restrict.participantUserId} OR ${alias}.renter_user_id=${restrict.participantUserId})`].filter(Boolean);
+  const predicates = [alias === 'l' && `COALESCE(l.source_snapshot->>'is_delete','0')='0'`, ids && `${alias}.id=ANY(${ids}::text[])`, restrict?.participantUserId && `(${alias}.owner_user_id=${restrict.participantUserId} OR ${alias}.renter_user_id=${restrict.participantUserId})`].filter(Boolean);
   return predicates.length ? ` WHERE ${predicates.join(' AND ')}` : '';
  };
  return `
@@ -309,13 +308,13 @@ async function readNativeOrderProgress(client:PoolClient,ids:string[]):Promise<M
  return result;
 }
 export type AdminOrderFrozenAccount={
- source:'ORDER_VERSION'|'ACCOUNT_PUBLIC_VERSION';
+ source:'ORDER_VERSION'|'ACCOUNT_PUBLIC_VERSION'|'LEGACY_ACCOUNT_SNAPSHOT';sourceUpdatedAt?:string|null;
  haff:{itemId:string;code:string;name:string|null;quantity:string|null;unit:string}|null;
  materials:Array<{itemId:string;code:string;name:string|null;quantity:string|null;unit:string}>;
  termDays:string|null;termSeconds:string|null;loginMethodText:string|null;safeBoxText?:string|null;gradingText?:string|null;
 };
-/** 订单关联账号视图：与账号供给页同一公开版本口径（不读当前草稿、不读历史参考）；由路由注入，避免订单读与供给读循环依赖。 */
-export type OrderAccountView={source:'ACCOUNT_PUBLIC_VERSION';versionId:string;haff:{itemId:string;quantity:string|null}|null;
+/** 当前关联账号资料与供给页同源；导入观察单独标记，不能当作本单冻结资料。 */
+export type OrderAccountView={source:'ACCOUNT_PUBLIC_VERSION'|'LEGACY_ACCOUNT_SNAPSHOT';sourceUpdatedAt?:string|null;versionId:string;haff:{itemId:string;quantity:string|null}|null;
  materials:Array<{itemId:string;code:string|null;name:string|null;quantity:string|null;unit:string|null}>;materialsVisibleTotal:number;
  safeBoxText:string|null;gradingText:string|null;loginMethodText:string|null;term:{name:string|null;termSeconds:string|null;dailyConsumption:string|null};
  fullPayout:'SELECTED'|'NOT_SELECTED'|'NOT_DECLARED';haffRatioWanPerYuan:string|null;
@@ -351,10 +350,10 @@ export async function readNativeFrozenAccounts(client:PoolClient,viewer:OrderRea
  }
  return result;
 }
-/** 迁入单：账号即账号，账号资料取公开版本（与账号页一致）；租期用账号当前租期，不再读历史快照。 */
+/** 迁入单的当前账号资料保留准确来源，不改原单资源、租期或金额。 */
 export function accountViewFrozen(view:OrderAccountView):AdminOrderFrozenAccount{
  const seconds=view.term.termSeconds,termDays=seconds&&/^\d+$/.test(seconds)&&BigInt(seconds)%86400n===0n?(BigInt(seconds)/86400n).toString():null;
- return {source:'ACCOUNT_PUBLIC_VERSION',haff:view.haff?{itemId:view.haff.itemId,code:view.haff.itemId,name:'哈夫币',quantity:view.haff.quantity,unit:'HAFF_BASE'}:null,
+ return {source:view.source,...(view.sourceUpdatedAt!==undefined?{sourceUpdatedAt:view.sourceUpdatedAt}:{}),haff:view.haff?{itemId:view.haff.itemId,code:view.haff.itemId,name:'哈夫币',quantity:view.haff.quantity,unit:'HAFF_BASE'}:null,
   materials:view.materials.map(m=>({itemId:m.itemId,code:m.code??m.itemId,name:m.name,quantity:m.quantity,unit:m.unit??''})),termDays,termSeconds:seconds,loginMethodText:view.loginMethodText,safeBoxText:view.safeBoxText,gradingText:view.gradingText};
 }
 async function attachFrozenAccounts(client:PoolClient,viewer:OrderReadViewer,items:Record<string,any>[],accountViews?:OrderAccountViewReader){
@@ -417,6 +416,15 @@ export function adminOrderReadPredicatePlan(viewer:OrderReadViewer,filter:OrderR
   if(filter.paymentConfirmedTo)paid.push(`paid.paid_at<$${values.push(filter.paymentConfirmedTo)}::timestamptz`);
   where.push(`x.origin='NATIVE' AND EXISTS(SELECT 1 FROM zzsh_order.rental_order paid JOIN zzsh_order.payment_confirmation p ON p.order_id=paid.id WHERE ${paid.join(' AND ')})`);
  }
+ if(filter.paidFrom||filter.paidTo){
+  const from=filter.paidFrom ? `$${values.push(filter.paidFrom)}::timestamptz` : null;
+  const to=filter.paidTo ? `$${values.push(filter.paidTo)}::timestamptz` : null;
+  const time=(column:string)=>`${column} IS NOT NULL${from?` AND ${column}>=${from}`:""}${to?` AND ${column}<${to}`:""}`;
+  where.push(`(x.origin='NATIVE' AND EXISTS(SELECT 1 FROM zzsh_order.rental_order paid JOIN zzsh_order.payment_confirmation p ON p.order_id=paid.id
+    WHERE paid.id=x.id AND p.id=paid.paid_confirmation_id AND p.disposition='APPLIED' AND p.currency='CNY' AND ${time('paid.paid_at')}))
+    OR (x.origin='LEGACY' AND EXISTS(SELECT 1 FROM zzsh_order.legacy_order_read_snapshot paid
+    WHERE paid.id=x.id AND paid.source_pay_status=1 AND ${time('paid.source_paid_at')}))`);
+ }
  if(filter.qValue){const q=filter.qValue,p='$'+values.push(q);if(filter.qKind==='order')where.push(`x.display_no=${p}`);else if(filter.qKind==='account')where.push(`x.account_no=${p} OR x.account_id=${p} OR x.legacy_account_no=${p}`);else{
   if(/^(?:\+?86[\s-]*)?1[3-9](?:[\s-]*\d){9}$/.test(q))throw invalid('Phone lookup must use the user lookup contract');
   const pattern='$'+values.push('%'+escapeLike(q)+'%'),party=(role:string)=>`(x.${role}_user_id=${p} OR x.${role}_no=${p} OR x.${role}_name ILIKE ${pattern} ESCAPE '\\' OR x.${role}_username ILIKE ${pattern} ESCAPE '\\')`;
@@ -430,7 +438,7 @@ export async function queryAdminReadOrders(client:PoolClient,viewer:OrderReadVie
  const continuationReady=await legacyContinuationReady(client);
  // Authorization, filtering, counting and key selection run on the narrow
  // relation; only this page's own keys are read again for their full record.
- const page=(await client.query<{total:string;keys:Array<{origin:string;id:string}>}>(`WITH all_orders AS(${orderReadKeyRelation(continuationReady)}),filtered AS(SELECT * FROM all_orders x WHERE ${where.map(w=>'('+w+')').join(' AND ')}),paged AS(SELECT origin,id,created_at FROM filtered ORDER BY created_at DESC NULLS LAST,id DESC LIMIT ${pageSize} OFFSET ${offset}) SELECT (SELECT count(*)::text FROM filtered) AS total,COALESCE((SELECT jsonb_agg(jsonb_build_object('origin',p.origin,'id',p.id) ORDER BY p.created_at DESC NULLS LAST,p.id DESC) FROM paged p),'[]'::jsonb) AS keys`,values)).rows[0]!;
+ const page=(await client.query<{total:string;keys:Array<{origin:string;id:string}>}>(`WITH all_orders AS(${orderReadKeyRelation(continuationReady)}),filtered AS(SELECT * FROM all_orders x WHERE ${where.map(w=>'('+w+')').join(' AND ')}),paged AS(SELECT origin,id,created_at FROM filtered ORDER BY created_at DESC NULLS LAST,id DESC,origin DESC LIMIT ${pageSize} OFFSET ${offset}) SELECT (SELECT count(*)::text FROM filtered) AS total,COALESCE((SELECT jsonb_agg(jsonb_build_object('origin',p.origin,'id',p.id) ORDER BY p.created_at DESC NULLS LAST,p.id DESC,p.origin DESC) FROM paged p),'[]'::jsonb) AS keys`,values)).rows[0]!;
  const keys=page.keys,items:Record<string,any>[]=[];
  if(keys.length){
   // The keys are already authorized and filtered; their records are read back

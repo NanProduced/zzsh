@@ -148,7 +148,7 @@ export type DirectoryActionPlan = { action: AdminActionEligibility["action"]; la
 export function directoryActionBlockedReason(entry: AdminDirectoryEntry | undefined, action: AdminActionEligibility["action"]): string | null {
   const eligibility = entry && eligibilityOf(entry, action);
   if (!eligibility) return "操作资格未提供";
-  return eligibility.allowed === true ? null : ADMIN_REASON_LABELS[eligibility.reasonCode] ?? `当前不可执行（${eligibility.reasonCode}）`;
+  return eligibility.allowed === true ? null : ADMIN_REASON_LABELS[eligibility.reasonCode] ?? "当前不可执行，原因待确认";
 }
 
 /**

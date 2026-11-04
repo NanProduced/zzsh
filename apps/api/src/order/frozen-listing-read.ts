@@ -1,6 +1,7 @@
 import type { PoolClient } from "pg";
 import { effectivePublicationStateSql, projectPublicAttributeDisplay } from "../supply/listing-query";
 import { publicAccountNumber } from "../supply/account-number";
+import { legacyAccountDisplay, loadLegacyHistoricalReads } from "../supply/legacy-listing-read";
 
 /** Shared frozen-version reader (B2). Admin `readNativeFrozenAccounts` reuses `frozenResourceLines`. */
 export type FrozenResourceLine = { itemId: string; code: string; name: string | null; quantity: string | null; unit: string };
@@ -16,9 +17,9 @@ export function frozenResourceLines(presentationItems: unknown, resources: Array
   });
 }
 
-export type ListingFactsSource = "ORDER_VERSION" | "ACCOUNT_CURRENT";
+export type ListingFactsSource = "ORDER_VERSION" | "ACCOUNT_CURRENT" | "LEGACY_ACCOUNT_SNAPSHOT";
 export type OrderListingFacts = {
-  source: ListingFactsSource; versionId: string | null; rentalMode: string | null;
+  source: ListingFactsSource; sourceUpdatedAt?: string | null; versionId: string | null; rentalMode: string | null;
   attributeDisplay: { safeBox: string | null; grading: string | null; loginMethod: string | null };
   resourceLines: FrozenResourceLine[]; termSeconds: string | null;
 };
@@ -46,18 +47,19 @@ export const NATIVE_ORDER_FACTS_SQL = `SELECT /* user-order-frozen-listing */ o.
   LEFT JOIN zzsh_supply.billable_item i ON i.id=l.item_id
   GROUP BY o.id,a.display_no,v.id,v.attributes,v.presentation,o.term_seconds,o.quote_snapshot`;
 /** Legacy orders (Owner decision): the account's CURRENT effective public version, labelled ACCOUNT_CURRENT. */
-export const LEGACY_ORDER_FACTS_SQL = `SELECT /* user-legacy-order-current-listing */ s.id AS "orderId",a.display_no AS "accountDisplayNo",v.id AS "versionId",v.attributes,
+export const LEGACY_ORDER_FACTS_SQL = `SELECT /* user-legacy-order-current-listing */ s.id AS "orderId",a.id AS "accountId",a.current_version_id AS "currentVersionId",current_v.origin AS "currentOrigin",a.display_no AS "accountDisplayNo",v.id AS "versionId",v.attributes,
    v.presentation->'items' AS "presentationItems",NULL::jsonb AS "presentationEntitlements",NULL::text AS "termSeconds",NULL::jsonb AS disclosures,${RESOURCE_AGG}
   FROM jsonb_to_recordset($1::jsonb) AS wanted("orderId" text)
   JOIN zzsh_order.legacy_order_read_snapshot s ON s.id=wanted."orderId" AND (s.owner_user_id=$2 OR s.renter_user_id=$2)
   JOIN zzsh_supply.rental_account a ON a.id=s.account_id
+  LEFT JOIN zzsh_supply.listing_version current_v ON current_v.id=a.current_version_id AND current_v.account_id=a.id
   LEFT JOIN LATERAL (SELECT cv.* FROM zzsh_supply.listing_publication p JOIN zzsh_supply.listing_version cv ON cv.id=p.version_id AND cv.account_id=p.account_id
      WHERE p.account_id=a.id AND ${effectivePublicationStateSql("cv", "p")} ORDER BY cv.sequence DESC LIMIT 1) v ON true
   LEFT JOIN zzsh_supply.inventory_line l ON l.version_id=v.id
   LEFT JOIN zzsh_supply.billable_item i ON i.id=l.item_id
-  GROUP BY s.id,a.display_no,v.id,v.attributes,v.presentation`;
+  GROUP BY s.id,a.id,current_v.origin,v.id,v.attributes,v.presentation`;
 
-type FactsRow = { orderId: string; accountDisplayNo: unknown; versionId: string | null; attributes: Record<string, unknown> | null; presentationItems: unknown;
+type FactsRow = { orderId: string; accountId?: string; currentVersionId?: string | null; currentOrigin?: string | null; accountDisplayNo: unknown; versionId: string | null; attributes: Record<string, unknown> | null; presentationItems: unknown;
   presentationEntitlements: unknown; termSeconds: string | null; disclosures: unknown; resources: Array<{ itemId: string; code: string; quantity: string | null; unit: string }> };
 
 export function projectListingFacts(row: FactsRow, source: ListingFactsSource, showVersionId: boolean): OrderListingFacts | null {
@@ -103,6 +105,9 @@ export async function readOrderUserFacts(client: PoolClient, userId: string, inp
   if (ids.length) for (const row of (await client.query<{ id: string; name: string | null; expiryKind: "PERMANENT" | "TIMED" | null }>(
     `SELECT id,name,expiry_kind AS "expiryKind" FROM zzsh_supply.entitlement WHERE id=ANY($1::text[])`, [ids])).rows) if (row && typeof row.id === "string") catalog.set(row.id, row);
   const byInput = new Map(inputs.map(i => [`${i.origin}:${i.orderId}`, i]));
+  // Only party-scoped rows with an imported current version may use the bound source snapshot.
+  const imported = legacyRows.filter(row => !row.versionId && row.currentOrigin === "LEGACY_OBSERVATION" && row.accountId && row.accountId === byInput.get(`LEGACY:${row.orderId}`)?.accountId);
+  const historical = await loadLegacyHistoricalReads(client, [...new Set(imported.map(row => row.accountId!))]);
   for (const row of nativeRows) {
     const facts = projectListingFacts(row, "ORDER_VERSION", true);
     const ents = projectEntitlements(row.disclosures, row.presentationEntitlements, catalog);
@@ -111,7 +116,16 @@ export async function readOrderUserFacts(client: PoolClient, userId: string, inp
   }
   for (const row of legacyRows) {
     const input = byInput.get(`LEGACY:${row.orderId}`);
-    const facts = projectListingFacts(row, "ACCOUNT_CURRENT", input?.ownerUserId === userId);
+    let facts = projectListingFacts(row, "ACCOUNT_CURRENT", input?.ownerUserId === userId);
+    const read = row.accountId ? historical.get(row.accountId) ?? null : null;
+    const display = !facts && imported.includes(row) ? legacyAccountDisplay(read, row.currentVersionId ?? null) : null;
+    if (display) facts = {
+      source: "LEGACY_ACCOUNT_SNAPSHOT", sourceUpdatedAt: display.sourceUpdatedAt,
+      versionId: input?.ownerUserId === userId ? row.currentVersionId ?? null : null,
+      rentalMode: read?.display.facts?.rentalMode ?? null,
+      attributeDisplay: { safeBox: display.config.safeBox, grading: display.config.grading, loginMethod: display.login.displayName },
+      resourceLines: [...(display.haff ? [display.haff] : []), ...display.materials], termSeconds: display.term.termSeconds,
+    };
     result.set(`LEGACY:${row.orderId}`, { accountDisplayNo: publicAccountNumber(row.accountDisplayNo), listingFacts: facts, listingFactsUnknownReason: facts ? null : "ACCOUNT_PUBLIC_VERSION_MISSING",
       entitlements: null, entitlementsUnknownReason: "NOT_FROZEN" });
   }

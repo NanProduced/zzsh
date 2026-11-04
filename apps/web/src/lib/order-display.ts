@@ -1,6 +1,23 @@
 import { formatOrderMoney, formatOrderTime } from "./order-client.ts";
 import type { Order, OrderImProjection, OrderImStage, OrderLine, OrderParty, PersonalRentalQuote, SettlementOpening, SettlementPosting, SettlementPreview, SettlementVersion } from "./order-client";
 
+export function paymentObservation(payment: { disposition: string } | null): string {
+  if (!payment) return "暂未查到付款记录";
+  const status = payment.disposition === "APPLIED" ? "已记入订单" : payment.disposition === "REVIEW_REQUIRED" ? "需要人工核对" : "状态待确认";
+  return `已有付款记录（${status}）`;
+}
+
+export function settlementPreviewProblem(reasons: string[] | undefined): string {
+  const labels: Record<string, string> = {
+    FULL_PAYOUT_UNKNOWN: "包赔资料暂时无法确认，请联系客服。",
+    QUOTE_BASIS_INVALID: "订单计价资料暂时无法确认，请联系客服。",
+    OPENING_QUANTITY_MISMATCH: "物资数量与开租记录不一致，请核对后重试。",
+    SETTLEMENT_QUANTITY_MISMATCH: "物资数量与开租记录不一致，请核对后重试。",
+    EARLY_REASON_REQUIRED: "请填写提前结束原因。",
+  };
+  return reasons?.length ? [...new Set(reasons.map(reason => labels[reason] ?? "结算方案暂时无法确认，请联系客服。"))].join(" ") : "结算方案暂时无法生成，请稍后重试。";
+}
+
 /** The frozen order snapshot's rental mode; older v1 orders carry no mode and stay unlabeled. */
 export function orderRentalModeLabel(order: Pick<Order, "quote">): string | null {
   const mode = order.quote?.rentalMode;
@@ -9,6 +26,7 @@ export function orderRentalModeLabel(order: Pick<Order, "quote">): string | null
 
 /** Current catalog facts remain useful, but must not look like the frozen order contract. */
 export function orderListingSourceLabel(order: Pick<Order, "source" | "listingFacts" | "listingFactsUnknownReason">): string | null {
+  if (order.listingFacts?.source === "LEGACY_ACCOUNT_SNAPSHOT") return "当前账号资料（迁入时记录）";
   if (order.source?.origin === "LEGACY") return "历史订单";
   if (order.listingFacts?.source === "ACCOUNT_CURRENT") return "当前账号资料";
   if (order.listingFacts?.source === "ORDER_VERSION") return "下单时账号资料";

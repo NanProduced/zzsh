@@ -458,8 +458,8 @@ async function round2DetailHelpers() {
 test('B2 unresolved grading codes from the real listing projection do not become a known title rank', async () => {
   const { conditionLines, deriveDetailTitle } = await round2DetailHelpers();
   const conditions = conditionLines({ grading_code: 'gold4', safe_box_code: '3*3' });
-  assert.equal(conditions.find(line => line.key === 'grading_code').value, '未确认（代码 gold4）');
-  assert.equal(conditions.find(line => line.key === 'safe_box_code').value, '未确认（代码 3*3）');
+  assert.equal(conditions.find(line => line.key === 'grading_code').value, '未确认');
+  assert.equal(conditions.find(line => line.key === 'safe_box_code').value, '未确认');
   const title = deriveDetailTitle({ publicTitle: '备用公开标题', resourceLines: [], conditionLines: conditions });
   assert.equal(title.primary, '备用公开标题');
   assert.doesNotMatch(title.primary, /黄金|IV|3×3|gold4/);

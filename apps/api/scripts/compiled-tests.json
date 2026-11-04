@@ -1,4 +1,5 @@
 [
+  "dist/test/business-initial-cli.test.js",
   "dist/test/admin-permission-seed-0113.test.js",
   "dist/test/admin-role-preset-grants-0114.test.js",
   "dist/test/admin-brute-force.test.js",
@@ -108,6 +109,8 @@
   "dist/test/user-directory-read-r1.test.js",
   "dist/test/rental-membership-routing.test.js",
   "dist/test/readiness-business-pool.test.js",
+  "dist/test/legacy-path-projection.test.js",
+  "dist/test/legacy-path-records.test.js",
   "dist/test/legacy-public-admission.test.js",
   "dist/test/legacy-display-snapshot.test.js",
   "dist/test/user-read-closure.test.js",
@@ -131,6 +134,7 @@
   "dist/test/personal-finance-maintenance.test.js",
   "dist/test/personal-finance-coverage.test.js",
   "dist/test/personal-finance-observation-maintenance.test.js",
+  "dist/test/personal-finance-empty-observation-batch.test.js",
   "dist/test/personal-finance-stored-opening.test.js",
   "dist/test/legacy-finance-source-preparation.test.js",
   "dist/test/legacy-duty-finance.test.js",

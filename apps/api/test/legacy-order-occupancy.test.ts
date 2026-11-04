@@ -10,7 +10,7 @@ test("occupancy precedence and actual shared query include isolated liability an
   for (const state of ["FREE", "OCCUPIED", "UNKNOWN"] as const) {
     const client = { query: async (sql: string, params: unknown[]) => {
       assert(sql.includes("legacy_inflight_register")); assert(sql.includes("ISOLATED_PARTY"));
-      assert(sql.includes("h.superseded_at IS NULL")); assert(sql.includes("h.stage<>4"));
+      assert(sql.includes("h.superseded_at IS NULL")); assert(sql.includes("COALESCE(h.stage,l.source_order_status) IN(3,8,9)"));
       assert.deepEqual(params, ["fixture_account"]);
       return { rows: [{ state }] };
     } } as unknown as PoolClient;

@@ -187,7 +187,6 @@ export async function applyRuntimePrivileges(pool: Pick<Pool, "query">, runtimeR
     GRANT UPDATE ("ended_at", "end_reason", "last_heartbeat_at") ON TABLE "zzsh_iam"."im_support_presence_session" TO ${runtimeUser};
     GRANT SELECT, INSERT ON TABLE "zzsh_iam"."im_support_handover" TO ${runtimeUser};
     REVOKE UPDATE, DELETE, TRUNCATE ON TABLE "zzsh_iam"."im_support_handover" FROM ${runtimeUser};
-    GRANT SELECT, INSERT, UPDATE ON TABLE "zzsh_iam"."admin_workspace_layout" TO ${runtimeUser};
     GRANT SELECT, INSERT, UPDATE ON ALL TABLES IN SCHEMA "zzsh_supply" TO ${runtimeUser};
     REVOKE DELETE, TRUNCATE ON ALL TABLES IN SCHEMA "zzsh_supply" FROM ${runtimeUser};
     -- ADM-SCOPE-1: the account-level scope writer replaces selected games, so it
@@ -218,6 +217,9 @@ export async function applyRuntimePrivileges(pool: Pick<Pool, "query">, runtimeR
     REVOKE UPDATE, DELETE, TRUNCATE ON TABLE "zzsh_iam"."approval_request_candidate", "zzsh_iam"."approval_decision", "zzsh_iam"."approval_execution" FROM ${runtimeUser};
     REVOKE DELETE, TRUNCATE ON TABLE "zzsh_iam"."user_identity_state" FROM ${runtimeUser};
   `);
+  if ((await pool.query("SELECT to_regclass('zzsh_iam.admin_workspace_layout') AS relation")).rows[0]?.relation) {
+    await pool.query(`GRANT SELECT, INSERT, UPDATE ON TABLE "zzsh_iam"."admin_workspace_layout" TO ${runtimeUser}`);
+  }
   await configureSkinIdentityPrivileges(pool, runtimeRole);
   const fundingValidators = [
     "zzsh_supply.valid_funding_policy_legacy_v1(jsonb)",
@@ -255,6 +257,9 @@ export async function applyRuntimePrivileges(pool: Pick<Pool, "query">, runtimeR
   }
   if ((await pool.query(`SELECT to_regclass('zzsh_supply.legacy_listing_display_snapshot') AS relation`)).rows[0]?.relation) {
     await pool.query(`REVOKE ALL ON zzsh_supply.legacy_listing_display_snapshot FROM PUBLIC; GRANT SELECT,INSERT ON zzsh_supply.legacy_listing_display_snapshot TO ${runtimeUser}; REVOKE UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER ON zzsh_supply.legacy_listing_display_snapshot FROM ${runtimeUser}`);
+  }
+  if ((await pool.query(`SELECT to_regclass('zzsh_supply.legacy_account_media_paths') AS relation`)).rows[0]?.relation) {
+    await pool.query(`REVOKE ALL ON zzsh_supply.legacy_account_media_paths FROM PUBLIC, ${runtimeUser}; GRANT SELECT ON zzsh_supply.legacy_account_media_paths TO ${runtimeUser}`);
   }
   if ((await pool.query(`SELECT to_regclass('zzsh_supply.legacy_skin_holding') AS relation`)).rows[0]?.relation) {
     await pool.query(`REVOKE ALL ON zzsh_supply.legacy_skin_holding FROM PUBLIC; GRANT SELECT,INSERT ON zzsh_supply.legacy_skin_holding TO ${runtimeUser}; REVOKE UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER ON zzsh_supply.legacy_skin_holding FROM ${runtimeUser}`);
@@ -353,7 +358,10 @@ export async function applyRuntimePrivileges(pool: Pick<Pool, "query">, runtimeR
         zzsh_order.finance_event, zzsh_order.wallet_coverage, zzsh_order.wallet_revision, zzsh_order.finance_observation_admission,
         zzsh_order.personal_finance_observation, zzsh_iam.personal_finance_read_scope TO ${runtimeUser};`);
   }
-  if ((await pool.query(`SELECT to_regclass('zzsh_order.withdrawal_intent') AS relation`)).rows[0]?.relation) {
+  const withdrawalSchema = (await pool.query(`SELECT to_regclass('zzsh_order.withdrawal_intent') AS relation,
+    EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid=to_regclass('zzsh_order.finance_economic_root')
+      AND conname='production_no_local_controlled_root' AND contype='c' AND convalidated) AS production`)).rows[0];
+  if (withdrawalSchema?.relation) {
     await pool.query(`
       REVOKE INSERT, UPDATE, DELETE, TRUNCATE ON TABLE zzsh_order.withdrawal_admission, zzsh_order.withdrawal_destination,
         zzsh_order.withdrawal_intent, zzsh_order.withdrawal_provider_fact, zzsh_order.controlled_payout_operation FROM ${runtimeUser};
@@ -363,7 +371,10 @@ export async function applyRuntimePrivileges(pool: Pick<Pool, "query">, runtimeR
         expected_ledger_revision,accepted_at,payout_key,economic_root_id,state,operation_version,funds_disposition) ON zzsh_order.withdrawal_intent TO ${runtimeUser};
       GRANT UPDATE(state,operation_version,funds_disposition,terminal,conflict_digest,lease_token_hash,lease_until,last_provider_fact_id) ON zzsh_order.withdrawal_intent TO ${runtimeUser};
       GRANT INSERT(id,intent_id,payout_key,mode,result_key,evidence_canonical,evidence_digest,producer_lease_hash) ON zzsh_order.withdrawal_provider_fact TO ${runtimeUser};
-      GRANT INSERT(id,intent_id,payout_key,mode,scenario,final_evidence_canonical,final_evidence_digest,original_lease_hash) ON zzsh_order.controlled_payout_operation TO ${runtimeUser};
+      GRANT INSERT(id,intent_id,payout_key,mode,scenario,final_evidence_canonical,final_evidence_digest,original_lease_hash) ON zzsh_order.controlled_payout_operation TO ${runtimeUser};`);
+  }
+  if (withdrawalSchema?.relation || withdrawalSchema?.production === true) {
+    await pool.query(`
       GRANT INSERT(id,basis_id,source_kind,source_type,source_system,source_entity,source_id,subject_user_id,beneficiary_role,policy_version,source_digest) ON zzsh_order.finance_economic_root TO ${runtimeUser};
       GRANT INSERT(id,economic_root_id,kind,subject_user_id,expected_ledger_revision) ON zzsh_order.finance_event TO ${runtimeUser};`);
   }
@@ -528,15 +539,23 @@ export async function configureSkinIdentityPrivileges(pool: Pick<Pool, "query">,
 /** Re-converge after every broad order grant, including repeated standard migrations. */
 export async function configureDistributionFinancialPrivileges(pool: Pick<Pool, "query">, runtimeRole: string): Promise<void> {
   const role = quoteIdentifier(runtimeRole);
+  const controlledPayment = "zzsh_order.controlled_payment_declaration";
   const names = ["distribution_order_admission", "payment_distribution_basis", "controlled_payment_declaration",
     "rental_referral_earning", "rental_referral_reversal_source", "rental_referral_transition"].map(name => `zzsh_order.${name}`);
   const found = (await pool.query("SELECT name,to_regclass(name) IS NOT NULL AS present FROM unnest($1::text[]) AS t(name)", [names])).rows;
-  if (found.length !== names.length) throw new Error("Financial schema inventory is incomplete");
+  if (found.length !== names.length || new Set(found.map(row => row.name)).size !== names.length ||
+    found.some(row => !names.includes(row.name) || typeof row.present !== "boolean")) throw new Error("Financial schema inventory is incomplete");
   if (found.every(row => row.present === false)) return;
-  if (found.some(row => row.present !== true)) throw new Error("Financial schema is incomplete; runtime privileges not finalized");
-  for (const table of names) {
-    await resetRuntimeTablePrivileges(pool, table, role);
+  const missing = found.filter(row => row.present !== true);
+  if (missing.length && (missing.length !== 1 || missing[0]?.name !== controlledPayment ||
+    (await pool.query(`SELECT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid=to_regclass('zzsh_order.finance_economic_root')
+      AND conname='production_no_local_controlled_root' AND contype='c' AND convalidated) AS production`)).rows[0]?.production !== true)) {
+    throw new Error("Financial schema is incomplete; runtime privileges not finalized");
   }
+  for (const table of names) {
+    if (!missing.some(row => row.name === table)) await resetRuntimeTablePrivileges(pool, table, role);
+  }
+  const controlledFunctions = missing.length ? "" : ",zzsh_order.guard_controlled_payment_declaration(),zzsh_order.guard_withdrawal_referral_recovery()";
   await pool.query(`
     GRANT INSERT(id,order_id,payment_confirmation_id,admission_id,admission_revision,canonical_basis,basis_digest)
       ON zzsh_order.payment_distribution_basis TO ${role};
@@ -548,10 +567,10 @@ export async function configureDistributionFinancialPrivileges(pool: Pick<Pool, 
       ON zzsh_order.rental_referral_transition TO ${role};
     REVOKE ALL ON FUNCTION zzsh_order.canonical_finance_json(jsonb,integer),zzsh_order.derive_payment_referral_inputs(text),
       zzsh_order.earning_expected_lines(text),zzsh_order.guard_distribution_order_admission(),zzsh_order.guard_payment_distribution_basis(),
-      zzsh_order.check_payment_distribution_basis_pair(),zzsh_order.guard_controlled_payment_declaration(),zzsh_order.guard_native_earning_root(),
+      zzsh_order.check_payment_distribution_basis_pair(),zzsh_order.guard_native_earning_root(),
       zzsh_order.guard_rental_referral_earning(),zzsh_order.guard_earning_event(),zzsh_order.guard_earning_entry(),zzsh_order.check_earning_batch(),
       zzsh_order.guard_referral_transition_source(),zzsh_order.guard_referral_reversal_declaration(),zzsh_order.check_earning_reverse_closure(),
-      zzsh_order.referral_debt_read_revision(),zzsh_order.guard_withdrawal_referral_recovery() FROM ${role};
+      zzsh_order.referral_debt_read_revision()${controlledFunctions} FROM ${role};
     GRANT EXECUTE ON FUNCTION zzsh_order.canonical_finance_json(jsonb,integer),zzsh_order.derive_payment_referral_inputs(text),
       zzsh_order.earning_expected_lines(text) TO ${role};
   `);

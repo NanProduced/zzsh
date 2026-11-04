@@ -14,7 +14,7 @@ import { Popover, PopoverContent, PopoverTrigger } from "../components/ui/popove
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "../components/ui/table";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "../components/ui/tabs";
 import { ListPagination } from "../components/admin-list/list-pagination";
-import { receiptEnvelopeIssue, type RecoveryResult, type RequestDetail } from "./approval/contract";
+import { receiptEnvelopeIssue, statusView, type RecoveryResult, type RequestDetail } from "./approval/contract";
 import { dropPendingWrite, inspectPending, pendingWriteSubject, savePendingWrite, updatePendingWriteKind, type PendingInspection } from "./approval/pending-writes";
 import { directoryAdapter, EMPTY_FILTERS, type User } from "./user-directory/user-directory-data";
 import { InfoHint, MembershipEntitlementForm, formatDiscountLabel, formatDepositBenefitText, type AdminEntitlementDraft, type MembershipEntitlementContext } from "./membership-entitlement-form";
@@ -702,7 +702,7 @@ function BenefitsWorkspace({ snapshot, initialUserId, initialGameId, refreshNonc
             {command.detailStatus === "REJECTED" ? <TriangleAlert aria-hidden /> : <Info aria-hidden />}
             <AlertTitle>{command.detailStatus === "REJECTED" ? "审批已驳回" : command.detailStatus && command.detailStatus !== "PENDING" ? "审批状态已读取" : "已提交审批"}</AlertTitle>
             <AlertDescription>
-              {command.detailStatus === "PENDING" ? "审批通过并执行后才会生效。" : command.detailStatus === "REJECTED" ? "请核对原因后重新办理。" : command.detailStatus ? `服务端状态：${command.detailStatus}。` : "审批通过后仍需确认业务执行结果。"}
+              {command.detailStatus === "PENDING" ? "审批通过并执行后才会生效。" : command.detailStatus === "REJECTED" ? "请核对原因后重新办理。" : command.detailStatus ? `审批状态：${statusView(command.detailStatus).label}。` : "审批通过后仍需确认业务执行结果。"}
             </AlertDescription>
             {onOpenPath ? <AlertAction><Button size="sm" variant="link" onClick={() => openApproval(command.requestId)}>查看审批</Button></AlertAction> : null}
           </Alert>

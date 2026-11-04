@@ -50,7 +50,7 @@ test('U04 real detail shows frozen terms without inventing a base, and history e
  const p=await probe(async()=>Response.json({...base('user_A'),item:{...native,calculation}}),'view=invite&earning=native%3Atwo');
  try{await p.render();const text=p.host.querySelector('.earning-calculation').textContent;assert.match(text,/7\.5%/);assert.match(text,/LEVEL_FROZEN/);assert.doesNotMatch(text,/FROZEN_POLICY_ONLY/);assert.equal(client.earningsDetail({...base('user_A'),item:{...native,calculation}},'user_A','native:two',2).item.calculation.policyVersion,'FROZEN_POLICY_ONLY');assert.match(text,/四舍五入到分/);assert.match(text,/扣除补偿费用/);assert.doesNotMatch(text,/基数.*¥/);}finally{await p.close();}
  const historical=await probe(async()=>Response.json({...base('user_A'),item:{...old,state:'EXPIRED',includedInOpening:false}}),'view=invite&earning=history%3Aone');
- try{await historical.render();const text=historical.host.querySelector('.earning-calculation').textContent;assert.match(text,/这笔记录未保存计算比例/);assert.match(text,/原因尚未提供/);assert.doesNotMatch(text,/5%|0%/);}finally{await historical.close();}
+ try{await historical.render();const text=historical.host.querySelector('.earning-calculation').textContent;assert.match(text,/原计算比例待核/);assert.match(text,/原因尚未提供/);assert.doesNotMatch(text,/5%|0%/);}finally{await historical.close();}
 });
 
 test('U07 malformed IDs do not fetch and late previous detail cannot replace the current URL target',async()=>{

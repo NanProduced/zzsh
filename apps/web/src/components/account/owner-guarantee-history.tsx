@@ -51,17 +51,18 @@ function GuaranteeHistoryBody({scope,projectionVersion}:{scope:string;projection
 }
 function LegacyGuaranteeItem({item}:{item:OwnerGuaranteeHistoryItem}){return <details className="account-module-card" data-guarantee-history={item.id}><summary><strong>{item.accountNumber?'账号 '+item.accountNumber:'账号信息待确认'}</strong><span>{labels[item.classification]??'收退情况待确认'}</span></summary>
  {item.conflicts.length?<p>部分缴纳记录有差异，请联系客服核对。</p>:null}
- {item.payments.length?<ol>{item.payments.map(payment=><li key={payment.source.id}><strong>{payment.sourceStatus==='1'?'记录显示已支付，结果待确认':'支付状态待确认'} · {walletMoney(payment.amountCents)}</strong><p>支付单号：{payment.merchantOrderNumber??'未记录'}</p><p>记录时间：{at(payment.sourceCreatedAt)}{payment.sourcePaidAt?' · 记录付款时间：'+at(payment.sourcePaidAt):''}</p><small>到账情况请以收款记录为准。</small></li>)}</ol>:<p>暂时没有可显示的缴纳记录。</p>}
+ {item.payments.length?<ol>{item.payments.map(payment=><li key={payment.source.id}><strong>原缴纳状态：{payment.sourceStatus==='1'?'已支付':payment.sourceStatus==='0'?'未支付':'未知'} · {walletMoney(payment.amountCents)}</strong><p>支付单号：{payment.merchantOrderNumber??'未记录'}</p><p>记录时间：{at(payment.sourceCreatedAt)}{payment.sourcePaidAt?' · 付款时间：'+at(payment.sourcePaidAt):''}</p><small>渠道结果待确认。</small></li>)}</ol>:<p>暂时没有可显示的缴纳记录。</p>}
  </details>;}
-const eventLabels:Record<UnifiedGuaranteeEvent['eventKind'],string>={REQUIREMENT:'保证金要求',PAYMENT_ATTEMPT:'缴纳申请',REFUND_ATTEMPT:'退还申请',PAYMENT_OBSERVATION:'缴纳记录',ACCOUNT_OBSERVATION:'保证金情况'};
+const eventLabels:Record<UnifiedGuaranteeEvent['eventKind'],string>={REQUIREMENT:'保证金要求',PAYMENT_ATTEMPT:'缴纳申请',REFUND_ATTEMPT:'退还申请',PAYMENT_OBSERVATION:'保证金付款',ACCOUNT_OBSERVATION:'保证金情况'};
 function UnifiedGuaranteeItem({item}:{item:UnifiedGuaranteeEvent}){
  const payment=item.paymentAttempt,refund=item.refundAttempt,posting=item.localPosting;
- return <details className="account-module-card guarantee-history-event" data-guarantee-history={item.id}><summary><div><strong>{eventLabels[item.eventKind]}{item.accountNumber?' · '+item.accountNumber:''}</strong><p className="account-module-note">{item.occurredAt?<time dateTime={item.occurredAt}>{at(item.occurredAt)}</time>:'时间未记录'}</p></div>{item.amountCents!==null?<span className="guarantee-event-amount">{walletMoney(item.amountCents)}</span>:<span>情况待确认</span>}</summary>
+ const originalPaymentState=item.eventKind==='PAYMENT_OBSERVATION'?payment?.status==='SOURCE_PAID_RECORD'?'已支付':payment?.status==='SOURCE_UNPAID_RECORD'?'未支付':'未知':null;
+ return <details className="account-module-card guarantee-history-event" data-guarantee-history={item.id}><summary><div><strong>{eventLabels[item.eventKind]}{item.accountNumber?' · '+item.accountNumber:''}</strong><p className="account-module-note">{originalPaymentState?`原缴纳状态 ${originalPaymentState} · `:null}{item.occurredAt?<time dateTime={item.occurredAt}>{at(item.occurredAt)}</time>:'时间未记录'}</p></div>{item.amountCents!==null?<span className="guarantee-event-amount">{walletMoney(item.amountCents)}</span>:<span>情况待确认</span>}</summary>
   <dl className="account-fact-list">
    {item.requirement?<div><dt>保证金责任</dt><dd>{guaranteeResponsibilityLabel(item.requirement.status)} · 要求 {walletMoney(item.requirement.requiredCents)}</dd></div>:null}
-   {payment?<div><dt>{item.eventKind==='PAYMENT_OBSERVATION'?'缴纳记录':'缴纳申请'}</dt><dd>{item.eventKind==='PAYMENT_OBSERVATION'?payment.status==='SOURCE_PAID_RECORD'?'记录显示已支付，结果待确认':'支付状态待确认':guaranteePaymentAttemptLabel(payment.status)}</dd></div>:null}
+   {payment&&!originalPaymentState?<div><dt>缴纳申请</dt><dd>{guaranteePaymentAttemptLabel(payment.status)}</dd></div>:null}
    {payment?.merchantOrderNumber?<div><dt>支付单号</dt><dd>{payment.merchantOrderNumber}</dd></div>:null}
-   {payment?.providerState?<div><dt>收款渠道</dt><dd>{guaranteeProviderRequestLabel('payment',payment.providerState)}</dd></div>:null}
+   {payment?.providerState||item.eventKind==='PAYMENT_OBSERVATION'?<div><dt>收款渠道</dt><dd>{payment?.providerState?guaranteeProviderRequestLabel('payment',payment.providerState):'待核实'}</dd></div>:null}
    {refund?<><div><dt>退还申请</dt><dd>{guaranteeRefundAttemptLabel(refund.status)}</dd></div><div><dt>退还放行</dt><dd>{guaranteeReleasePolicyLabel(refund.releasePolicyState)}</dd></div><div><dt>退款渠道</dt><dd>{guaranteeProviderRequestLabel('refund',refund.providerState)}</dd></div></>:null}
    {posting?<div><dt>本站记账</dt><dd>{posting.knowledge==='KNOWN'?(item.eventKind==='REFUND_ATTEMPT'?'退还已记账':'缴纳已记账')+' · '+walletMoney(posting.amountCents)+' · '+at(posting.postedAt):'尚未确认相关记账'}</dd></div>:null}
    {item.classification?<div><dt>当前记录情况</dt><dd>{labels[item.classification]??'收退情况待确认'}</dd></div>:null}

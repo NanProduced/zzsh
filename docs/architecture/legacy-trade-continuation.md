@@ -30,7 +30,7 @@ Web BFF沿 `/api/orders/legacy/…`，管理 BFF沿 `/api/bff/admin/orders/legac
 
 历史完成未退与暂扣均保留经核净额的PENDING退款责任；暂扣由HELD阻断执行，解除后消费同一责任，保留detain且不追加退款。旧侧已没收保留LEGACY_RECORDS终态及空新财账ref，不再次支付；既有退款记录仅作防重复依据，不等于到账。完整来源缺失逐行隔离，不能以0代替未知；具体批次行数不是业务全量。
 
-共同占用读取新订单、旧519映射单有效head与1条隔离登记。OCCUPIED优先，其次UNKNOWN，再FREE；缺schema/查询异常不可回退FREE。供给/新建单与维护导入遵循用户→game→account前缀；续办与财务使用同一稳定mapped order advisory→head→按id排序duty。纯续办仅保持占用或释放，不复开终态；财务先锁全部资金受益人并在共同锁后复核集合，不能持head后补锁user/account。
+共同占用读取新订单、旧订单有效阶段与隔离登记。OCCUPIED优先，其次UNKNOWN，再FREE；缺schema/查询异常不可回退FREE。本人账号列表仅在唯一在途单与当前号主均已绑定时显示旧原单号和跳转；占用事实可成立而无可见订单。供给/新建单与维护导入遵循用户→game→account前缀；续办与财务使用同一稳定mapped order advisory→head→按id排序duty。纯续办仅保持占用或释放，不复开终态；财务先锁全部资金受益人并在共同锁后复核集合，不能持head后补锁user/account。
 
 财务通过 `readLegacyDutyBasis` 重核原命令的完整input/result、逐条终金额与当前有效事实，不把pool、旧stored或派生摘要冒充原佣金行。默认财务hook拒绝，缺resolver保持UNKNOWN。安装严格F适配后，非零只引用最终受益正向ledger；真实终0只可引用专用最终event且无ledger行。四态为NONE、POSTED_POSITIVE_REFUND、FINALIZED_ZERO、UNKNOWN；仅正净退款终定阻断重复处置，零额不清其他责任。
 

@@ -3,11 +3,13 @@
 import { useEffect, useRef, useState } from "react";
 import { animate, motion, useMotionValue } from "motion/react";
 import { ChevronLeft, ChevronRight, ImageOff } from "lucide-react";
+import { LegacyAccountImage } from "@zzsh/ui/legacy-account-image";
 
 export type ThumbnailCarouselItem = {
   id: string;
   src: string;
   alt: string;
+  legacy?: boolean;
 };
 
 type ThumbnailCarouselProps = {
@@ -100,6 +102,8 @@ export function ThumbnailCarousel({
                 <div key={item.id} className="thumbnail-carousel-slide" aria-hidden={itemIndex !== activeIndex}>
                   {failed ? (
                     <span className="thumbnail-carousel-fallback"><ImageOff size={24} aria-hidden="true" />图片暂不可用</span>
+                  ) : item.legacy ? (
+                    <LegacyAccountImage src={item.src} alt={item.alt} loading={itemIndex === activeIndex ? "eager" : "lazy"} />
                   ) : (
                     <img
                       src={item.src}

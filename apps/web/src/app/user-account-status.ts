@@ -30,15 +30,15 @@ export function ageStatusLabel(status: UserIdentitySnapshot["ageStatus"]): strin
 }
 
 export function providerAvailability(snapshot: Pick<UserIdentitySnapshot, "provider" | "identityStatus">): string {
-  if (snapshot.provider === "none") return "实名服务暂未接入或尚未完成确认；当前不会开放受保护操作。";
-  if (snapshot.provider === "fake") return "当前为受控测试 provider；结果来自服务端 fixture，不代表真实实名通过。";
+  if (snapshot.provider === "none") return "实名状态暂未确认，暂不能进行需要实名的操作。";
+  if (snapshot.provider === "fake") return "当前结果仅供测试，不代表真实实名通过。";
   if (snapshot.identityStatus === "UNKNOWN") return "实名服务暂时无法确认；当前不会开放受保护操作。";
-  return "实名状态由服务端 provider 返回。";
+  return "实名状态以核验结果为准。";
 }
 
 export function protectedActionReason(snapshot: Pick<UserIdentitySnapshot, "identityStatus" | "ageStatus" | "eligibleForProtectedTrade">): string {
-  if (snapshot.eligibleForProtectedTrade) return "当前满足服务端身份与年龄门槛；这只是资格检查，不代表任何交易已执行。";
-  if (snapshot.identityStatus === "UNKNOWN") return "实名服务暂时无法确认；完成真实 provider 接入前不会开放受保护操作。";
+  if (snapshot.eligibleForProtectedTrade) return "当前满足身份与年龄要求；具体交易仍需确认。";
+  if (snapshot.identityStatus === "UNKNOWN") return "实名服务暂时无法确认，需要实名的操作暂不可用。";
   if (snapshot.identityStatus === "UNVERIFIED") return "尚未完成实名校验，受保护操作暂不可用。";
   if (snapshot.identityStatus === "REJECTED") return "实名校验未通过，受保护操作暂不可用。";
   if (snapshot.ageStatus === "MINOR") return "实名已通过，但当前年龄不满足受保护操作要求。";

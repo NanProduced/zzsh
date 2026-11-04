@@ -1,10 +1,11 @@
 import {test} from 'node:test';import {strict as assert} from 'node:assert';import type {Pool} from 'pg';
 import {applyRuntimePrivileges,configureDistributionFinancialPrivileges,configureMembershipGrowthPrivileges} from '../src/database/business-migrations';
-function probe(present:boolean|boolean[]=true){const seen:string[]=[],pool={query:async(sql:string,args:any[]=[])=>{seen.push(sql);
+function probe(present:boolean|boolean[]=true,production=false){const seen:string[]=[],pool={query:async(sql:string,args:any[]=[])=>{seen.push(sql);
  if(sql.includes('joinpay financial optional tables'))return{rows:args[0].map((name:string)=>({name,present:false}))};
  if(sql.startsWith('SELECT name,to_regprocedure(name)'))return{rows:args[0].map((name:string)=>({name,present:false}))};
  if(sql.startsWith('SELECT name,to_regclass'))return{rows:args[0].map((name:string,i:number)=>({name,present:args[0].some((n:string)=>['zzsh_order.legacy_duty_finance_contract','zzsh_order.channel_refund_intent','zzsh_order.local_financial_sandbox_registration','zzsh_iam.membership_growth_legacy_read_admission'].includes(n))?false:Array.isArray(present)?present[i]:present}))};
  if(sql.startsWith('SELECT attname FROM pg_attribute'))return{rows:['id','state','canonical_seed','unlisted_column'].map(attname=>({attname}))};
+ if(sql.includes('production_no_local_controlled_root'))return{rows:[{production}]};
  if(sql.includes('native_user_insert_proof')&&sql.startsWith('SELECT'))return{rows:[{proof:false,initializer:false}]};
  if(sql.includes('count(*)'))return{rows:[{count:0,ready:false}]};
  return{rows:[{relation:null,present:false,ready:false}]};
@@ -12,6 +13,15 @@ function probe(present:boolean|boolean[]=true){const seen:string[]=[],pool={quer
 test('older prefixes without all financial tables remain a no-op, while a partial schema refuses finalization',async()=>{
  const absent=probe(false);await configureDistributionFinancialPrivileges(absent.pool,'runtime_role');assert.equal(absent.seen.length,1);
  const partial=probe([true,false,false,false,false,false]);await assert.rejects(configureDistributionFinancialPrivileges(partial.pool,'runtime_role'),/incomplete/);assert.equal(partial.seen.length,1);
+});
+test('only the validated production contract permits the controlled declaration table to be absent',async()=>{
+ const absent=[true,true,false,true,true,true];
+ const drift=probe(absent);await assert.rejects(configureDistributionFinancialPrivileges(drift.pool,'runtime_role'),/incomplete/);
+ assert(!drift.seen.some(sql=>sql.startsWith('REVOKE')));
+ const production=probe(absent,true);await configureDistributionFinancialPrivileges(production.pool,'runtime_role');
+ assert.equal(production.seen.filter(sql=>sql.startsWith('REVOKE ALL ON TABLE')).length,5);
+ assert(!production.seen.some(sql=>sql.includes('guard_controlled_payment_declaration')));
+ assert(production.seen.at(-1)?.includes('guard_native_earning_root'));
 });
 test('unsafe roles are rejected before any SQL',async()=>{const p=probe();await assert.rejects(configureDistributionFinancialPrivileges(p.pool,'role;drop'),/safe identifier/);assert.equal(p.seen.length,0);});
 test('convergence clears every discovered column privilege before granting only explicit writable columns',async()=>{

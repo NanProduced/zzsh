@@ -191,10 +191,10 @@ export function SessionsView({
     try {
       let revokedSessionCount = 0;
       if (scope === "single") {
-        if (!revokeSession) throw new Error("撤销单个会话的接口尚未接入");
+        if (!revokeSession) throw new Error("暂时无法注销该设备");
         revokedSessionCount = parseRevokePayload(await revokeSession({ sessionId: targetId as string, ...stepUp })).revokedSessionCount;
       } else {
-        if (!revokeOtherSessions) throw new Error("退出其他设备的接口尚未接入");
+        if (!revokeOtherSessions) throw new Error("暂时无法退出其他设备");
         revokedSessionCount = parseRevokePayload(await revokeOtherSessions({ sessionIds: [...targetIds], ...stepUp })).revokedSessionCount;
       }
       if (!isCurrent(epoch, seq)) return;
@@ -271,7 +271,7 @@ export function SessionsView({
         <>
           {!currentMarked ? (
             <SettingsNotice tone="warning" role="alert">
-              服务端未标记当前会话，无法可靠区分「本次登录」与「其他会话」。为避免误注销自己，本页暂时禁用注销动作，请重新读取或核对合同字段。
+              无法确认当前会话，暂时不能注销设备。请重新读取或联系管理员核对。
             </SettingsNotice>
           ) : null}
           {rows.length === 0 ? (
@@ -286,7 +286,7 @@ export function SessionsView({
           ) : null}
           {writeUnavailable ? (
             <SettingsNotice tone="warning">
-              本人会话撤销接口尚未接入（等待 ADM-SELF-SETTINGS-BACKEND-1 装配）。当前只能读取列表。
+              当前只能查看设备列表，暂时无法注销设备。
             </SettingsNotice>
           ) : null}
           {outcome ? (

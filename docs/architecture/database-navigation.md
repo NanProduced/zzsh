@@ -4,7 +4,7 @@
 
 ## 迁移基线与结构事实
 
-业务迁移位于 `apps/api/migrations/business/`，源码共 **152份SQL**，`meta/_journal.json` **152条**登记（idx 0…151，tag与文件名一一对应）。源码登记不表示数据库已经执行；实际链与权限须分别核验。旧`release_0141`基线覆盖原0000–0141，保持原hash后接原编号增量。中文`release_0151`由同一生成器覆盖0000–0151，已通过原链与新装的逐项结构/种子/序列/ACL比较；[表级导航](../../apps/api/migrations/initial/release_0151/NAVIGATION.md)指向本基线最终定义。每个baseline只记一条，不能冒称142或152次历史执行。默认`--initial`兼容0141，新0151使用`--initial --baseline release_0151`显式选择，见[新装基线](../operations/database-initial.md)。另有一条独立正式迁移线 `apps/api/migrations/0000_fnd004_test_metadata.sql`（`zzsh_meta.database_marker`，journal 1 条）。两条线分别由 `apps/api/src/database/migrations.ts` 与 `business-migrations.ts` 执行，记账 schema 分别为 `zzsh_meta` 与 `zzsh_business_meta`（后者不在任何 SQL 中 CREATE，由 migrator 自建）。
+业务迁移位于 `apps/api/migrations/business/`，源码共 **154份SQL**，`meta/_journal.json` **154条**登记（idx 0…153，tag与文件名一一对应）。源码登记不表示数据库已经执行；实际链与权限须分别核验。旧`release_0141`基线覆盖原0000–0141，保持原hash后接原编号增量。中文`release_0151`由同一生成器覆盖0000–0151，已通过原链与新装的逐项结构/种子/序列/ACL比较；[表级导航](../../apps/api/migrations/initial/release_0151/NAVIGATION.md)指向本基线最终定义。每个baseline只记一条，不能冒称142或152次历史执行。默认`--initial`兼容0141，新0151使用`--initial --baseline release_0151`显式选择，见[新装基线](../operations/database-initial.md)。另有一条独立正式迁移线 `apps/api/migrations/0000_fnd004_test_metadata.sql`（`zzsh_meta.database_marker`，journal 1 条）。两条线分别由 `apps/api/src/database/migrations.ts` 与 `business-migrations.ts` 执行，记账 schema 分别为 `zzsh_meta` 与 `zzsh_business_meta`（后者不在任何 SQL 中 CREATE，由 migrator 自建）。
 
 0102 支持极速比例仅设下限；0103 增加用户冻结状态及权限；0104 增加提现查单权限；0105 保存本人实名展示来源；0106 增加异常原款退款责任，0107 增加未开租终止与全额原款应退。0105 的 runtime 权限由正式 `migrate:business` 后置 ACL 收敛为仅 SELECT，不能把 `GRANT SELECT` 当作撤销 schema 默认写权限。升级保留已执行 SQL 字节与 journal 时间；新的迁移须使用未占用编号和晚于现有链的时间。
 
@@ -66,6 +66,8 @@
 | 0149 | 准确登记的本地资金沙箱与原号恢复；不开放真实渠道或改写旧付款依据 |
 | 0150 | M维护的不可变零成长读取准入；runtime只读，新增贡献或订单会排除快速路径 |
 | 0151 | 头像上传审核全局策略，默认须审；系统批准来源与人工审核分开记录 |
+| 0152 | 旧支付与退款历史观察及来源覆盖，不生成新渠道成功或钱包分录 |
+| 0153 | 期初来源证明逐绑定复用已解码JSONB；原金额、原件、唯一性与时点守卫不变 |
 
 ### 按 schema 查对象（0000–0090 历史静态基线）
 

@@ -1,7 +1,7 @@
 import type { PoolClient } from "pg";
 import { SecurityApiError } from "../auth/security-core";
 
-type Requirement = { domain: "refunds" | "withdrawals"; table: string; columns: string[] };
+type Requirement = { domain: "refunds" | "withdrawals" | "controlledWithdrawals"; table: string; columns: string[] };
 const table = (domain: Requirement["domain"], name: string, columns: string): Requirement => ({ domain, table: `zzsh_order.${name}`, columns: columns.split(" ") });
 const common = "id source_kind source_type source_system source_entity source_id subject_user_id beneficiary_role basis_id policy_version source_digest";
 const ledger = "id posting_id finance_event_id line_no account_code debit_cents credit_cents counterparty_user_id source_payment_confirmation_id details";
@@ -24,13 +24,14 @@ const requirements: Requirement[] = [
   table("refunds", "legacy_order_read_snapshot", "id original_order_no source_system source_entity legacy_id source_digest renter_user_id"),
   ...["joinpay_refund_evidence", "prestart_termination_decision", "rental_opening", "settlement_version", "settlement_intake", "rental_referral_earning"].map(name => table("refunds", name, "id")),
   table("refunds", "rental_opening_ack", "opening_id"),
-  table("withdrawals", "withdrawal_intent", "id user_id mode policy_version input_digest gross_cents net_cents fee_cents economic_root_id expected_ledger_revision state funds_disposition accepted_at"),
+  table("controlledWithdrawals", "withdrawal_intent", "id user_id mode policy_version input_digest gross_cents net_cents fee_cents economic_root_id expected_ledger_revision state funds_disposition accepted_at"),
   table("withdrawals", "joinpay_withdrawal_intent", "id user_id merchant_order_no gross_cents funds_disposition state requires_review accepted_at"),
   ...["joinpay_payout_evidence", "joinpay_payout_attempt"].map(name => table("withdrawals", name, "id")),
 ];
 const functions = [
   ...["native_refund_terminal_complete", "native_abnormal_refund_liability_complete", "native_abnormal_refund_terminal_complete", "prestart_liability_complete", "prestart_payment_basis_valid", "support_cancel_payment_basis_valid", "native_prestart_refund_liability_complete", "native_prestart_refund_terminal_complete"].map(name => ({ domain: "refunds", name: `zzsh_order.${name}(${name.endsWith("basis_valid") ? "jsonb" : "text"})` })),
-  ...["withdrawal_expected_lines", "joinpay_withdrawal_expected_lines", "joinpay_withdrawal_complete"].map(name => ({ domain: "withdrawals", name: `zzsh_order.${name}(text)` })),
+  { domain: "controlledWithdrawals", name: "zzsh_order.withdrawal_expected_lines(text)" },
+  ...["joinpay_withdrawal_expected_lines", "joinpay_withdrawal_complete"].map(name => ({ domain: "withdrawals", name: `zzsh_order.${name}(text)` })),
 ];
 
 const preflightSql = `/* finance obligation queues effective schema and ACL */
@@ -43,11 +44,21 @@ WITH required AS (SELECT x->>'domain' AS domain,x->>'table' AS tbl,ARRAY(SELECT 
  UNION ALL SELECT x->>'domain',COALESCE(has_function_privilege(current_user,to_regprocedure(x->>'name'),'EXECUTE'),false)
  FROM jsonb_array_elements($2::jsonb) x)
 SELECT COALESCE(bool_and(ready) FILTER(WHERE domain='refunds'),false) AS refunds,
- COALESCE(bool_and(ready) FILTER(WHERE domain='withdrawals'),false) AS withdrawals FROM checked`;
+ COALESCE(bool_and(ready) FILTER(WHERE domain='withdrawals'),false)
+  AND (COALESCE(bool_and(ready) FILTER(WHERE domain='controlledWithdrawals'),false) OR production) AS withdrawals,
+ production FROM checked CROSS JOIN (SELECT (EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid=to_regclass('zzsh_order.finance_economic_root')
+      AND conname='production_no_local_controlled_root' AND contype='c' AND convalidated)
+    AND to_regclass('zzsh_order.withdrawal_intent') IS NULL
+    AND to_regclass('zzsh_order.withdrawal_admission') IS NULL
+    AND to_regclass('zzsh_order.withdrawal_destination') IS NULL
+    AND to_regclass('zzsh_order.withdrawal_provider_fact') IS NULL
+    AND to_regclass('zzsh_order.controlled_payout_operation') IS NULL
+    AND to_regclass('zzsh_order.controlled_payout_notice') IS NULL
+    AND to_regprocedure('zzsh_order.withdrawal_expected_lines(text)') IS NULL) AS production) p GROUP BY production`;
 
 const utc = (field: string) => `to_char(${field} AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`;
 // Only the bounded preview crosses the API boundary; all money and counts are aggregated in PostgreSQL.
-const queueSelect = (refund: boolean) => `,
+const queueSelect = (refund: boolean, includeControlled = true) => `,
  pending AS MATERIALIZED (SELECT * FROM classified WHERE amount IS NULL OR amount>0),
  preview AS (SELECT * FROM pending ORDER BY CASE WHEN source='LEGACY_DUTY' THEN 1 ELSE 0 END,
   due_at NULLS LAST,id COLLATE "C" LIMIT 5)
@@ -61,7 +72,7 @@ SELECT count(*)::text AS count,COALESCE(sum(amount),0)::text AS amount,
   'documentRef',document_ref,'reasonCodes',reasons) ORDER BY CASE WHEN source='LEGACY_DUTY' THEN 1 ELSE 0 END,due_at NULLS LAST,id COLLATE "C") FROM preview),'[]'::jsonb) AS items,
  COALESCE((SELECT jsonb_agg(jsonb_build_object('source',source,'count',n::text,'unknownCount',unknown::text,'amountCents',amount::text) ORDER BY source)
   FROM (SELECT f.source,count(p.id) AS n,count(p.id) FILTER(WHERE p.amount IS NULL) AS unknown,COALESCE(sum(p.amount),0) AS amount
-   FROM (VALUES ${refund ? "('POSTING'),('REVIEW_CONFIRMATION'),('PRESTART_TERMINATION'),('LEGACY_DUTY')" : "('LOCAL_CONTROLLED'),('JOINPAY_FORMAL')"}) f(source)
+   FROM (VALUES ${refund ? "('POSTING'),('REVIEW_CONFIRMATION'),('PRESTART_TERMINATION'),('LEGACY_DUTY')" : includeControlled ? "('LOCAL_CONTROLLED'),('JOINPAY_FORMAL')" : "('JOINPAY_FORMAL')"}) f(source)
    LEFT JOIN pending p ON p.source=f.source GROUP BY f.source) s),'[]'::jsonb) AS sources
 FROM pending`;
 
@@ -171,8 +182,8 @@ WITH basis AS MATERIALIZED (
   ARRAY['LEGACY_FINAL_CANONICAL_NOT_REVALIDATED','RECORDED_AMOUNT_IS_NOT_CURRENT_PAYABLE_PROOF','DUE_AT_UNKNOWN','BANK_ARRIVAL_UNKNOWN'] FROM legacy
 )${queueSelect(true)}`;
 
-const withdrawalsSql = `/* finance obligation queues withdrawal original reserve debit and release */
-WITH local AS MATERIALIZED (
+const withdrawalsSql = (includeControlled: boolean) => `/* finance obligation queues withdrawal original reserve debit and release */
+WITH ${includeControlled ? `local AS MATERIALIZED (
  SELECT i.id,i.state,i.funds_disposition,i.gross_cents,i.accepted_at,
   COALESCE(i.mode='LOCAL_CONTROLLED' AND i.gross_cents=i.net_cents+i.fee_cents
    AND r.source_kind='LOCAL_CONTROLLED_WITHDRAWAL' AND r.source_type='NATIVE' AND r.source_system='zzsh-local-controlled'
@@ -198,21 +209,21 @@ WITH local AS MATERIALIZED (
    AND ((i.funds_disposition='RESERVED' AND i.state IN('RESERVED','SUBMITTING','PROCESSING','UNKNOWN','RECONCILIATION_REQUIRED'))
      OR(i.funds_disposition='PAYOUT_POSTED' AND i.state='SUCCEEDED') OR(i.funds_disposition='RELEASE_POSTED' AND i.state='FAILED')),false) AS complete
  FROM zzsh_order.withdrawal_intent i LEFT JOIN zzsh_order.finance_economic_root r ON r.id=i.economic_root_id WHERE i.accepted_at<=$1::timestamptz
-), formal AS MATERIALIZED (
+), ` : ""}formal AS MATERIALIZED (
  SELECT id,merchant_order_no,state,funds_disposition,gross_cents,accepted_at,requires_review,zzsh_order.joinpay_withdrawal_complete(id) AS complete
  FROM zzsh_order.joinpay_withdrawal_intent WHERE accepted_at<=$1::timestamptz
 ), classified AS (
- SELECT 'WITHDRAWAL:'||id AS id,NULL::text AS number,'LOCAL_CONTROLLED'::text AS source,state AS status,
+ ${includeControlled ? `SELECT 'WITHDRAWAL:'||id AS id,NULL::text AS number,'LOCAL_CONTROLLED'::text AS source,state AS status,
   CASE WHEN complete AND funds_disposition='RESERVED' THEN gross_cents END AS amount,gross_cents AS recorded_amount,NULL::timestamptz AS due_at,
   'WITHDRAWAL:'||id AS document_ref,ARRAY['LOCAL_CONTROLLED_NOT_BANK_PAYOUT','WITHDRAWAL_DUE_AT_NOT_DEFINED']
    ||CASE WHEN NOT complete THEN ARRAY['ORIGINAL_RESERVE_OR_TERMINAL_UNPROVED'] ELSE ARRAY[]::text[] END AS reasons
  FROM local WHERE NOT complete OR funds_disposition='RESERVED'
- UNION ALL SELECT 'JOINPAY_WITHDRAWAL:'||id,merchant_order_no,'JOINPAY_FORMAL',state,
-  CASE WHEN complete AND NOT requires_review AND funds_disposition='RESERVED' THEN gross_cents END,gross_cents,NULL::timestamptz,'JOINPAY_WITHDRAWAL:'||id,
+ UNION ALL ` : ""}SELECT 'JOINPAY_WITHDRAWAL:'||id AS id,merchant_order_no AS number,'JOINPAY_FORMAL'::text AS source,state AS status,
+  CASE WHEN complete AND NOT requires_review AND funds_disposition='RESERVED' THEN gross_cents END AS amount,gross_cents AS recorded_amount,NULL::timestamptz AS due_at,'JOINPAY_WITHDRAWAL:'||id AS document_ref,
   ARRAY['FORMAL_LOCAL_ACCEPTANCE_NOT_BANK_ARRIVAL','WITHDRAWAL_DUE_AT_NOT_DEFINED']
-   ||CASE WHEN NOT complete OR requires_review THEN ARRAY['ORIGINAL_RESERVE_OR_TERMINAL_UNPROVED'] ELSE ARRAY[]::text[] END
+   ||CASE WHEN NOT complete OR requires_review THEN ARRAY['ORIGINAL_RESERVE_OR_TERMINAL_UNPROVED'] ELSE ARRAY[]::text[] END AS reasons
  FROM formal WHERE NOT complete OR requires_review OR funds_disposition='RESERVED'
-)${queueSelect(false)}`;
+)${queueSelect(false,includeControlled)}`;
 
 type QueueRow = { count: unknown; amount: unknown; unknown_count: unknown; overdue_count: unknown; overdue_amount: unknown; unknown_due_count: unknown; items: unknown; sources: unknown };
 const unavailable = () => new SecurityApiError(503, "EVIDENCE_UNAVAILABLE", "Finance obligation queue aggregate is inconsistent");
@@ -262,9 +273,9 @@ function project(row: QueueRow | undefined, documentReadable: boolean, refund: b
 /** finance.read authorization and one consistent read-only snapshot belong to the caller; refs add no detail authority. */
 export async function readAdminFinanceObligationQueues(client: PoolClient, asOf: string, documentReadable: boolean) {
   if (!/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{6}Z$/.test(asOf) || !Number.isFinite(Date.parse(asOf))) throw unavailable();
-  const ready = (await client.query<{ refunds: boolean; withdrawals: boolean }>(preflightSql, [JSON.stringify(requirements), JSON.stringify(functions)])).rows[0];
+  const ready = (await client.query<{ refunds: boolean; withdrawals: boolean; production?: boolean }>(preflightSql, [JSON.stringify(requirements), JSON.stringify(functions)])).rows[0];
   return {
     refunds: ready?.refunds === true ? project((await client.query<QueueRow>(refundsSql, [asOf])).rows[0], documentReadable, true) : notAvailable(),
-    withdrawals: ready?.withdrawals === true ? project((await client.query<QueueRow>(withdrawalsSql, [asOf])).rows[0], documentReadable, false) : notAvailable(),
+    withdrawals: ready?.withdrawals === true ? project((await client.query<QueueRow>(withdrawalsSql(ready.production!==true), [asOf])).rows[0], documentReadable, false) : notAvailable(),
   };
 }

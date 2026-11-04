@@ -46,6 +46,12 @@ function policyShape(p:LegacyInvitationFactPolicy|null){if(p===null)return;ensur
  const config=validateDistributionPolicy(p.config as unknown as Record<string,unknown>,p.scope);if(config.schema!=='distribution-policy.v2'||canonicalize(config)!==canonicalize(p.config)||invitationFactHash(config)!==p.configDigest)throw conflict('Current immutable uniform policy differs');
 }
 export function invitationFactSourceDigest(source:LegacyInvitationFactSource,fact:LegacyInvitationRawFact){return invitationFactHash({schema:'legacy-invitation.fact.v2',source,fact:{legacyId:fact.legacyId,userId:fact.userId,identitySourceDigest:fact.identitySourceDigest,userSource:fact.userSource,codeSource:fact.codeSource,qualificationSource:fact.qualificationSource}});}
+/** Historical qualification is independent of admission to a current commission policy. */
+export function projectLegacyInvitationQualification(source:LegacyInvitationFactSource,fact:LegacyInvitationRawFact,sourceDigest:string){
+ sourceShape(source);rawFactShape(fact);if(invitationFactSourceDigest(source,fact)!==sourceDigest)throw conflict('Original qualification provenance differs');
+ const q=fact.qualificationSource,deleted=invitationSourceFlag(fact.userSource.is_delete),qDeleted=q?invitationSourceFlag(q.is_delete):null,qualified=q?invitationSourceFlag(q.is_distribution):null;
+ return{eligibility:deleted===true||qDeleted===true||qualified===false?'INELIGIBLE':deleted===false&&qDeleted===false&&qualified===true?'ELIGIBLE':'UNKNOWN',commissionFrozen:q?invitationSourceFlag(q.is_freeze):null,levelId:typeof q?.level_id==='string'?q.level_id:null};
+}
 export function invitationFactCodeId(id:string){return'legacy_code_'+invitationFactHash(['legacy_mysql_restore','la_user',id]).slice(0,40);}
 export function invitationFactRelation(source:LegacyInvitationFactSource,fact:LegacyInvitationRawFact,type:InvitationFactType){
  const parent=parentId(fact.userSource[parentField[type]]);if(!parent)throw invalid('Known original parent required');

@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import path from "node:path";
 import fs from "node:fs";
 import { test } from "node:test";
+import { contentFixtureDependency } from "./content-fixture.mjs";
 
 const tree = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
 const require = createRequire(path.join(tree, "apps/web/package.json"));
@@ -71,7 +72,7 @@ function loadCard() {
     if (name === "@/lib/listing-view") return listingView;
     if (name === "@/lib/account-title") return accountTitle;
     if (name === "@/lib/listing-filters") return listingFilters;
-    return require(name);
+    return contentFixtureDependency(name) ?? require(name);
   };
   module._compile(compiled, module.filename);
   return module.exports;

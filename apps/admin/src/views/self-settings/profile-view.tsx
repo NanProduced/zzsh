@@ -128,7 +128,7 @@ export function ProfileView({
         if (!isCurrent(epoch, seq)) return null;
         if (parsed.adminUserId !== adminUserId) {
           // 响应身份与当前会话不一致：属于合同/装配异常，不能把它当本人资料展示。
-          setLoadFailure({ kind: "contract", message: "返回的资料不属于当前管理员，已停止显示；请联系维护人员核对装配。" });
+          setLoadFailure({ kind: "contract", message: "返回的资料不属于当前管理员，已停止显示；请联系管理员核对。" });
           setFacts(null);
           setDraft("");
           return null;

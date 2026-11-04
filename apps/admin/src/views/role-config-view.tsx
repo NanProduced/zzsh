@@ -40,9 +40,9 @@ import { createRoleFormDirty, roleFormDirty, snapshotRole, type RoleBaseline } f
 
 const ROLE_STATUS_LABELS: Record<string, string> = { ACTIVE: "生效", DISABLED: "停用" };
 
-/** 未登记的枚举值原样带出，不塌缩成"停用"。 */
+/** 未登记的状态不塌缩成"停用"。 */
 function roleStatusLabel(status: string): string {
-  return ROLE_STATUS_LABELS[status] ?? `未知状态（${status}）`;
+  return ROLE_STATUS_LABELS[status] ?? "状态待确认";
 }
 
 function RoleStatusBadge({ status }: { status: string }) {

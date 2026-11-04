@@ -4,6 +4,38 @@ import { act,createElement,StrictMode } from 'react';
 import { setup,snap,known,flat,context,operations,json,settle,input,click,manager } from './distribution-ops-fixture.mjs';
 const button=(root,text)=>[...root.querySelectorAll('button')].find(b=>b.textContent.includes(text));
 
+test('effective legacy policy shows current names and separate purchase/listing rates and submits only an explicit state change',async()=>{
+ const h=await setup();try{
+  const config={...known.policy.config,schema:'distribution-policy.v3',enabled:true,levels:[{code:'legacy_1',rank:1,default:true,renterPercent:'20',ownerPercent:'30',upgrade:null}],legacySource:{receiptSha256:'a'.repeat(64),configurationSha256:'b'.repeat(64),levelsSha256:'c'.repeat(64),levelNames:{legacy_1:'青铜会员'}}};
+  const response={...known,policy:{...known.policy,config},changeContext:context};
+  globalThis.fetch=h.browser.fetch=async url=>json(String(url).endsWith('/operations')?operations:response);
+  const m=await h.loader.ssrLoadModule('/src/views/distribution-policy-panel.tsx'),model=await h.loader.ssrLoadModule('/src/views/distribution-policy-model.ts');
+  const ui=await h.mount(m.DistributionPolicyPanel,{snapshot:snap(manager)});
+  await click(button(ui.host,'当前按分销档位计佣'));
+  assert.match(ui.host.textContent,/青铜会员.*20%.*30%/);
+  await click(button(ui.host,'申请调整政策'));
+  assert.equal(h.browser.document.querySelector('[aria-label="推荐租客奖励比例"]'),null);
+  assert.deepEqual(model.buildDistributionPolicyPayload(response.policy,{enabled:false,renter:'',owner:'',reason:'暂停新增计佣'}).changes,{enabled:false});
+ }finally{await h.close();}
+});
+
+test('historical qualification, grade and mapped children do not become current policy admission or zero',async()=>{
+ const h=await setup();try{const m=await h.loader.ssrLoadModule('/src/views/distribution-dashboard-model.ts');
+  const p={eligibility:'UNKNOWN',levelCode:null,legacyQualification:{eligibility:'ELIGIBLE',commissionFrozen:false,levelId:'2'}};
+  assert.equal(m.participantEligibilityLabel(p),'原资格有效 · 当前计佣待核');assert.equal(m.participantLevelLabel(p),'原分销档位 ID 2');
+  assert.equal(m.participantChildrenLabel(null,164),'已接入 164 · 总数待核');assert.equal(m.participantChildrenLabel(0,0),'0');assert.equal(m.money(null),'未核定');
+ }finally{await h.close();}
+});
+
+test('participant desktop and mobile retain observed relations, commission subtotal and unknown coverage',async()=>{
+ const h=await setup();try{
+  const participant={userId:'historical_subject',name:'历史分销商',eligibility:'UNKNOWN',frozen:false,levelCode:null,sourceType:'LEGACY_MYSQL',leaderChildren:null,inviterChildren:null,mappedLeaderChildren:2,mappedInviterChildren:164,settledCents:'398183',pendingCents:null,recoveryCents:null,mappedRecordCount:'959',earningsCoverage:'UNKNOWN',needsReviewCount:'1',needsReviewCents:'100',legacyQualification:{eligibility:'ELIGIBLE',commissionFrozen:false,levelId:'2'}};
+  globalThis.fetch=h.browser.fetch=async()=>json({items:[participant],total:'1',page:1,pageSize:20,hasMore:false,snapshot:null,scope:{network:'AVAILABLE'}});
+  const m=await h.loader.ssrLoadModule('/src/views/distribution-dashboard-pages.tsx'),ui=await h.mount(m.DistributionParticipantsPage,{snapshot:snap([], 'boss', 'session', true),onOpenPath(){}});
+  for(const root of [ui.host.querySelector('table'),ui.host.querySelector('ul')]){assert(root);assert.match(root.textContent,/原资格有效 · 当前计佣待核/);assert.match(root.textContent,/已接入 164 · 总数待核/);assert.match(root.textContent,/¥3,981.83/);assert.match(root.textContent,/未核定/);assert.match(root.textContent,/待核对\s*1 笔/);assert.match(root.textContent,/原分销档位 ID 2/);assert.doesNotMatch(root.textContent,/¥0.00/);}
+ }finally{await h.close();}
+});
+
 test('exact cents, zero, uniform parsing and proposal identity do not invent grade fallback',async()=>{
  const h=await setup();try{const m=await h.loader.ssrLoadModule('/src/views/distribution-policy-model.ts');
   assert.equal(m.distributionCentsLabel('9007199254740993'),'¥90,071,992,547,409.93');assert.equal(m.distributionCentsLabel('0'),'¥0.00');assert.equal(m.distributionCentsLabel(null),'未知');

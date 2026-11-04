@@ -28,25 +28,54 @@ export function prepareFrozenFinanceObservation(kind:ObservationKind,raw:Record<
 function frozenObservation(kind:ObservationKind,raw:Record<string,unknown>,s:PreviewSubject){
  let row:Record<string,unknown>;
  if(kind==='HISTORICAL_EARNINGS_LOG'){
-  ensureOnlyFields(raw,['id','sn','action','amount','userId','sourceId','createdAt','changeType','leftAmount']);
+  ensureOnlyFields(raw,['id','sn','action','amount','userId','sourceId','createdAt','changeType','leftAmount','sourceSn','remark','extra','update_time','delete_time']);
   if(String(raw.userId)!==s.legacyUserId||![1,2].includes(integer(raw.action)))throw invalid('Original earnings direction/subject required');
   row={kind:'earningsLog',sourceId:sourceId(raw.id),sourceUserId:sourceId(raw.userId),amount:raw.amount,leftAmount:raw.leftAmount,action:raw.action,createdAt:integer(raw.createdAt),
-   referenceType:'UNRESOLVED_ECONOMIC_SOURCE',referenceId:String(raw.sourceId),referenceSn:null,legacyChangeType:integer(raw.changeType),legacyLogNumber:raw.sn,rawSource:rawEvidence('la_log_earnings',raw)};
+   referenceType:'UNRESOLVED_ECONOMIC_SOURCE',referenceId:String(raw.sourceId),referenceSn:typeof raw.sourceSn==='string'&&raw.sourceSn?raw.sourceSn:null,legacyChangeType:integer(raw.changeType),legacyLogNumber:raw.sn,rawSource:rawEvidence('la_log_earnings',Object.fromEntries(['id','sn','action','amount','userId','sourceId','createdAt','changeType','leftAmount'].map(k=>[k,raw[k]]))),...(Object.keys(raw).length>9?{sourceSupplement:rawEvidence('la_log_earnings',raw)}:{})};
  }else if(kind==='HISTORICAL_WITHDRAWAL'){
-  ensureOnlyFields(raw,['id','sn','type','money','status','userId','batch_no','is_delete','left_money','create_time','handling_fee','payment_time']);
+  ensureOnlyFields(raw,['id','sn','type','money','status','userId','batch_no','is_delete','left_money','create_time','handling_fee','payment_time','update_time','delete_time','payment_no','transfer_time','global_no','legacyDestination','restrictedSourceRef','restrictedSourceDigest','restrictedFields','legacyOperatorId']);
   if(String(raw.userId)!==s.legacyUserId||![1,2,3,4,5].includes(integer(raw.status)))throw invalid('Original withdrawal subject/status required');
+  if(raw.legacyDestination!==undefined){
+   const destination=raw.legacyDestination as Record<string,unknown>;
+   if(!destination||typeof destination!=='object'||Array.isArray(destination))throw invalid('Masked legacy withdrawal destination required');
+   ensureOnlyFields(destination,['bankName','cardLast4','nameMasked','phoneMasked','accountMasked']);
+   if(destination.cardLast4!==null&&!/^\d{4}$/.test(String(destination.cardLast4))||destination.nameMasked!==null&&!/^[^\d*]\*\*$/u.test(String(destination.nameMasked))||destination.phoneMasked!==null&&!/^\d{3}\*{4}\d{4}$/.test(String(destination.phoneMasked))||destination.accountMasked!==null&&!/^\*{4}(?:\d{4})?$/.test(String(destination.accountMasked))||destination.bankName!==null&&(typeof destination.bankName!=='string'||destination.bankName.length>80||/[\u0000-\u001f\u007f@]|https?:|\d{5,}/i.test(destination.bankName)))throw invalid('Legacy payout snapshot must contain masks only');
+   if(typeof raw.restrictedSourceRef!=='string'||raw.restrictedSourceRef.length>256||typeof raw.restrictedSourceDigest!=='string'||!digest.test(raw.restrictedSourceDigest))throw invalid('Restricted legacy payout source reference required');
+  }
   const gross=sourceYuanToCents(raw.money),fee=sourceSignedYuanToCents(raw.handling_fee),net=sourceSignedYuanToCents(raw.left_money);
   const sourceAnomalies=[...(BigInt(fee)<0n?['NEGATIVE_SOURCE_FEE']:[]),...(BigInt(net)<0n?['NEGATIVE_SOURCE_NET']:[]),...(BigInt(fee)+BigInt(net)!==BigInt(gross)?['SOURCE_GROSS_FEE_NET_MISMATCH']:[])];
-  row={kind:'withdrawObservation',sourceId:sourceId(raw.id),sourceUserId:sourceId(raw.userId),amount:raw.money,sourceStatus:raw.status,createdAt:integer(raw.create_time),fee:raw.handling_fee,net:raw.left_money,
-   referenceType:'LEGACY_WITHDRAWAL',referenceId:String(raw.id),referenceSn:raw.sn,sourcePaidAt:raw.payment_time,sourceDeleted:raw.is_delete,sourceAnomalies,rawSource:rawEvidence('la_withdraw_apply',raw)};
+  row={kind:'withdrawObservation',sourceId:sourceId(raw.id),sourceUserId:sourceId(raw.userId),amount:raw.money,...(Object.keys(raw).length>12?{sourceRecordType:String(raw.type)}:{}),sourceStatus:raw.status,createdAt:integer(raw.create_time),fee:raw.handling_fee,net:raw.left_money,
+   ...(raw.legacyDestination===undefined?{}:{legacyDestination:raw.legacyDestination,legacyOperatorId:raw.legacyOperatorId??null}),referenceType:'LEGACY_WITHDRAWAL',referenceId:String(raw.id),referenceSn:raw.sn,sourcePaidAt:raw.payment_time,sourceDeleted:raw.is_delete,sourceAnomalies,rawSource:rawEvidence('la_withdraw_apply',raw)};
  }else if(kind==='HISTORICAL_DISTRIBUTION'){
-  ensureOnlyFields(raw,['id','sn','user_id','order_type','order_id','earnings','level','level_id','ratio','status','settle_time','is_delete','create_time','update_time']);
+  ensureOnlyFields(raw,['id','sn','user_id','order_type','order_id','earnings','level','level_id','ratio','status','settle_time','is_delete','create_time','update_time','order_goods_id','goods_id','sku_id','delete_time']);
   if(raw.user_id!==s.legacyUserId||!['1','2'].includes(String(raw.order_type))||!['1','2','3'].includes(String(raw.status))||!['1','2','3'].includes(String(raw.level)))throw invalid('Typed distribution source/role/subject required');
   row={kind:'historicalDistribution',sourceId:sourceId(raw.id),sourceUserId:sourceId(raw.user_id),amount:raw.earnings,sourceStatus:Number(raw.status),sourceUpdatedAt:sourceId(raw.update_time),level:Number(raw.level),orderId:sourceId(raw.order_id),
    sourceOrderType:String(raw.order_type),sourceNumber:raw.sn,sourceRatio:raw.ratio,sourceDeleted:raw.is_delete,sourceSettlementTime:raw.settle_time,rawSource:rawEvidence('la_distribution_order',raw)};
+ }else if(kind==='HISTORICAL_PAYMENT'||kind==='HISTORICAL_REFUND'){
+  const payment=kind==='HISTORICAL_PAYMENT';
+  ensureOnlyFields(raw,payment?['id','order_id','order_type','pay_is','pay_way','pay_money','pay_order_sn','pay_time','transaction_id','create_time','userId','relationship']:['id','user_id','order_id','order_sn','order_type','sn','refund_status','order_amount','refund_amount','transaction_id','refund_way','create_time','update_time','refund_type','userId','relationship','refundAttempts','sourceRefundFlags']);
+  if(String(raw.userId)!==s.legacyUserId||!old.test(String(raw.order_id))||payment&&!['1','2'].includes(String(raw.order_type))||!payment&&raw.order_type!=='order')throw invalid('Typed original payment/refund subject required');
+  if(!payment&&raw.sourceRefundFlags!==undefined&&(!Array.isArray(raw.sourceRefundFlags)||raw.sourceRefundFlags.some(flag=>!['MULTIPLE_REFUND_RECORDS_FOR_TYPED_ORDER','SOURCE_REFUND_SUM_EXCEEDS_RECORDED_PAID_AMOUNT'].includes(String(flag)))))throw invalid('Typed refund source conflict codes required');
+  const original={...raw};delete original.userId;delete original.relationship;delete original.refundAttempts;delete original.sourceRefundFlags;
+  const status=payment?raw.pay_is:raw.refund_status;
+  if(typeof status!=='string'||!/^\d{1,3}$/.test(status)||payment&&!['0','1'].includes(status))throw invalid('Original payment/refund status required');
+  row={kind:payment?'paymentObservation':'refundObservation',sourceId:sourceId(raw.id),sourceUserId:sourceId(raw.userId),amount:payment?raw.pay_money:raw.refund_amount,sourceStatus:Number(status),createdAt:sourceId(raw.create_time),
+   referenceType:raw.relationship!=='VERIFIED'?'LEGACY_UNRESOLVED':payment&&raw.order_type==='2'?'LEGACY_ACCOUNT_GUARANTEE':'LEGACY_ORDER',referenceId:raw.relationship==='VERIFIED'?String(raw.order_id):null,referenceSn:raw.relationship==='VERIFIED'&&!payment?raw.order_sn:null,orderLink:null,associationState:raw.relationship==='VERIFIED'?'SOURCE_VERIFIED':'UNRESOLVED',associationReason:raw.relationship==='VERIFIED'?null:'SOURCE_ORDER_ID_NUMBER_OR_PARTY_MISMATCH',sourceNumber:payment?raw.pay_order_sn:raw.sn,sourceOrderType:raw.order_type,sourceRecordType:payment?raw.order_type:raw.refund_type,
+   ...(!payment?{sourceAttempts:prepareFrozenRefundAttempts(raw.refundAttempts,raw.id,s.legacyUserId),sourceRefundFlags:raw.sourceRefundFlags??[]}:{}),sourcePaidAt:payment?raw.pay_time:null,channelArrival:'UNKNOWN',rawSource:rawEvidence(payment?'la_pay_order':'la_refund_record',original)};
  }else throw invalid('Supported frozen finance source kind required');
  const prepared=prepareHistoricalObservation(row,{userId:s.userId,legacyUserId:s.legacyUserId,sourceSystem:'legacy_mysql_restore',basisId:null});
  return{row,sourceId:prepared.sourceId,sourceDigest:prepared.sourceDigest,sourceEventAt:prepared.sourceEventAt,financialSource:kind==='HISTORICAL_EARNINGS_LOG'?'UNKNOWN' as const:'OBSERVATION_ONLY' as const};
+}
+
+function prepareFrozenRefundAttempts(value:unknown,parentId:unknown,legacyUserId:string){
+ if(value===undefined)return[];if(!Array.isArray(value)||value.length>1000)throw invalid('Bounded original refund attempts required');
+ const seen=new Set<string>();
+ return value.map(a=>{
+  if(!a||typeof a!=='object'||Array.isArray(a))throw invalid('Typed original refund attempt required');
+  ensureOnlyFields(a,['sourceEntity','sourceId','sourceRecordId','legacyUserId','legacyOperatorId','sourceNumber','amountCents','orderAmountCents','sourceStatus','createdEpoch','updatedEpoch','subjectMatchesParent','sourceDigest','restrictedSourceRef','messagePresence','messageSha256']);
+  if(a.sourceEntity!=='la_refund_log'||typeof a.sourceId!=='string'||!old.test(a.sourceId)||seen.has(a.sourceId)||a.sourceRecordId!==String(parentId)||typeof a.legacyUserId!=='string'||!old.test(a.legacyUserId)||a.subjectMatchesParent!==(a.legacyUserId===legacyUserId)||typeof a.sourceStatus!=='string'||! /^-?\d{1,3}$/.test(a.sourceStatus)||!digest.test(a.sourceDigest)||!digest.test(a.messageSha256)||typeof a.restrictedSourceRef!=='string'||a.restrictedSourceRef.length>256||!['NULL','EMPTY','PRESENT'].includes(a.messagePresence)||[a.amountCents,a.orderAmountCents].some(v=>typeof v!=='string'||! /^(0|[1-9]\d{0,23})$/.test(v)))throw invalid('Refund attempt source, amount or subject changed');
+  seen.add(a.sourceId);return a;
+ });
 }
 
 export type FinanceObservationSourcePreview=ReturnType<typeof frozenObservation>&{executable:false;identityAudit:'UNBOUND'};
@@ -55,7 +84,7 @@ export function previewFrozenFinanceObservation(kind:ObservationKind,raw:Record<
  previewSubject(s);
  let normalized=raw;
  if(kind==='HISTORICAL_DISTRIBUTION'){
-  ensureOnlyFields(raw,['id','sn','user_id','order_type','order_id','earnings','level','level_id','ratio','status','settle_time','is_delete','create_time','update_time']);
+  ensureOnlyFields(raw,['id','sn','user_id','order_type','order_id','earnings','level','level_id','ratio','status','settle_time','is_delete','create_time','update_time','order_goods_id','goods_id','sku_id','delete_time']);
   normalized={...raw};
   for(const key of ['id','user_id','order_type','order_id','level','level_id','status','settle_time','is_delete','create_time','update_time']){
    const value=raw[key];if(typeof value==='number'&&!Number.isSafeInteger(value))throw invalid('Original frozen integer required');

@@ -187,7 +187,7 @@ export function OrderWorkspace({ party, orderId, status: statusParam, accountId,
     : null;
 
   if (session.status !== "authenticated" || !session.userId) return <section className="order-session-guard" role="status"><LockKeyhole size={22} aria-hidden="true" /><h2>正在确认订单身份</h2><p>确认期间不会展示上一位用户的订单数据。</p></section>;
-  if (orderId && source === "legacy") return <LegacyOrderWorkspace party={party} orderId={orderId} accountId={accountId} status={status} filters={filters} />;
+  if (orderId && source === "legacy") return <LegacyOrderWorkspace party={party} orderId={orderId} accountId={accountId} status={status} filters={filters} onOrderChanged={() => void loadFirst(false)} />;
   if (orderId && detail) return <OrderDetail party={party} status={status} accountId={accountId} orderId={orderId} filters={filters} state={detail} onRetry={() => setDetailReload((value) => value + 1)} onLogin={login} onChanged={() => setDetailReload((value) => value + 1)} />;
   return <OrderListPanel party={party} status={status} accountId={accountId} filters={filters} onApplyFilters={next=>router.push(orderUrl(party,status,accountId,undefined,undefined,next),{scroll:false})} state={visibleListState} onRefresh={retryList} onRetryList={retryList} onLoadMore={() => void loadMore()} onLogin={login} onReauthorize={() => session.revalidate()} onOpen={onOpen} />;
 }

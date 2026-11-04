@@ -24,8 +24,8 @@ const message=(e:WalletRequestError)=>e.status===401?'登录状态已变化，�
 function EarningBasis({item}:{item:EarningItem}){
  const c=item.calculation;
  return <section className="earning-calculation" aria-label="佣金计算方式"><h5>计算方式</h5>{item.origin==='LEGACY_MYSQL'
-  ? <p>这笔记录未保存计算比例。{item.state==='EXPIRED'?'记录已失效，原因尚未提供。':''}</p>
-  : c?.knowledge==='KNOWN'?<><dl><div><dt>佣金比例</dt><dd>{c.percent}%</dd></div>{c.rateMode==='UNIFORM'?null:<div><dt>当时的等级</dt><dd>{c.beneficiaryLevelCode}</dd></div>}{c.orderNumber?<div><dt>关联订单</dt><dd>{c.orderNumber}</dd></div>:null}</dl><p>佣金按订单结算后的平台收益扣除补偿费用计算，金额四舍五入到分。</p>{c.scope==='LOCAL_CONTROLLED'?<p>测试记录，不代表正式佣金。</p>:null}</>
+  ? <>{c?.knowledge==='RECORDED_SOURCE'?<dl><div><dt>原佣金比例</dt><dd>{c.percent}%</dd></div>{c.levelId?<div><dt>原分销档位 ID</dt><dd>{c.levelId}</dd></div>:null}</dl>:<p>原计算比例待核。</p>}{item.state==='EXPIRED'?<p>记录已失效，原因尚未提供。</p>:null}</>
+  : c?.knowledge==='KNOWN'?<><dl><div><dt>佣金比例</dt><dd>{c.percent}%</dd></div>{c.rateMode==='UNIFORM'?null:<div><dt>当时的等级</dt><dd>{c.beneficiaryLevelName??c.beneficiaryLevelCode}</dd></div>}{c.orderNumber?<div><dt>关联订单</dt><dd>{c.orderNumber}</dd></div>:null}</dl><p>{c.basis==='LEGACY_RENTAL_CAPTURE_MINUS_OWNER_AND_REFUND'?'佣金按实付扣除号主实结与租客应退后的金额计算，四舍五入到分。':'佣金按订单结算后的平台收益扣除补偿费用计算，金额四舍五入到分。'}</p>{c.scope==='LOCAL_CONTROLLED'?<p>测试记录，不代表正式佣金。</p>:null}</>
   : <p>这笔佣金的计算规则尚未确认。</p>}</section>;
 }
 type View={scope:string;filter:EarningFilter;reload:number;page:EarningsPage|null;selectedId:string|null;detail:EarningItem|null;busy:boolean;error:WalletRequestError|null};

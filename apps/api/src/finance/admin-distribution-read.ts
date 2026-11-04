@@ -7,8 +7,22 @@ import { requireAdminAccess } from '../supply/supply-routes';
 import { invalid, notFound } from '../supply/supply-util';
 import { SecurityApiError } from '../auth/security-core';
 import { canonicalize } from '../supply/content-hash';
-import { legacyRentalDistributionPredicate, earningProjection, readAdminEarningCalculations, readAdminEarningEventActions, type AdminEarningCalculation } from './distribution-earning-read';
+import { legacyRentalDistributionPredicate, earningProjection, readAdminEarningCalculations, readAdminEarningEventActions, readRecordedLegacyCommissionRate, type AdminEarningCalculation } from './distribution-earning-read';
 import { readAdminLegacyDutyFinances } from './legacy-duty-finance-store';
+import { projectLegacyInvitationQualification } from './legacy-invitation-facts';
+
+export async function readLegacyDistributionQualifications(c:PoolClient,userIds:string[],sourceReceiptSha256:string|null=null){
+ const result=new Map<string,ReturnType<typeof projectLegacyInvitationQualification>>();if(!userIds.length)return result;
+ const rows=(await c.query(`/* original distribution qualifications */ WITH original_qualifications AS MATERIALIZED (
+  SELECT a.details->'source' source,f.fact FROM zzsh_iam.audit_event a CROSS JOIN LATERAL jsonb_array_elements(a.details->'facts') f(fact)
+  WHERE a.action='distribution.legacy_facts.imported' AND a.outcome='SUCCESS' AND f.fact->>'userId'=ANY($1::text[])
+    AND ($2::text IS NULL OR a.details#>>'{source,receiptSha256}'=$2))
+  SELECT p.user_id,p.source_digest,f.source,f.fact FROM zzsh_order.distribution_participant p JOIN original_qualifications f ON f.fact->>'userId'=p.user_id
+  WHERE p.source_type='LEGACY_MYSQL' AND p.user_id=ANY($1::text[])`,[userIds,sourceReceiptSha256])).rows;
+ const counts=new Map<string,number>();for(const r of rows)counts.set(r.user_id,(counts.get(r.user_id)??0)+1);
+ for(const r of rows)if(counts.get(r.user_id)===1){try{result.set(r.user_id,projectLegacyInvitationQualification(r.source,r.fact,r.source_digest));}catch{/* Missing or inconsistent provenance remains unknown. */}}
+ return result;
+}
 
 type Actor = AdminContext;
 const ID=/^[A-Za-z0-9][A-Za-z0-9._:-]{0,179}$/;
@@ -72,7 +86,9 @@ export async function readAdminDistributionOrder(c:PoolClient,actor:Actor,input:
  const items=visible.map(row=>{
   if(seen.has(row.id)||legacy&&(row.source_system!==order.source_system||String(row.order_id)!==String(order.legacy_id))||!legacy&&row.order_id!==input.orderId)throw unavailable('Distribution order/source binding differs');seen.add(row.id);
   const projected=earningProjection(row);
-  const original=legacy?unknownCalculation('HISTORICAL_CALCULATION_NOT_RECORDED'):calculations.get(row.earning_id)??unknownCalculation('ORIGINAL_BASIS_UNAVAILABLE');
+  const sourceRate=legacy?readRecordedLegacyCommissionRate(row):null;
+  const original=sourceRate?{...unknownCalculation('HISTORICAL_BASE_NOT_RECORDED'),percent:sourceRate.percent,levelCode:sourceRate.levelId?'legacy_'+sourceRate.levelId:null}
+   :legacy?unknownCalculation('HISTORICAL_CALCULATION_NOT_RECORDED'):calculations.get(row.earning_id)??unknownCalculation('ORIGINAL_BASIS_UNAVAILABLE');
   const calculation=financial?original:{...original,baseCents:null,reasonCodes:[...original.reasonCodes,'INTERNAL_COMMISSION_BASE_REDACTED']};
   return{id:projected.id,origin:projected.origin as 'NATIVE'|'LEGACY_MYSQL',beneficiary:{userId:userReadable?row.beneficiary_user_id:null,name:userReadable&&typeof row.beneficiary_name==='string'?row.beneficiary_name:null},role:projected.role,amountCents:projected.amount.amountCents,state:projected.state,fundsDisposition:projected.fundsDisposition,occurredAt:projected.occurredAt,dueAt:projected.dueAt,dueAtKnowledge:projected.dueAtKnowledge,calculation,channelArrival:'UNKNOWN' as const,documentRef:documentReadable?(legacy?`HISTORY_DISTRIBUTION:${row.id.slice('history:'.length)}`:`DISTRIBUTION:${row.earning_id}`):null,recoveryRequiredCents:projected.recoveryRequiredCents,events:events.get(row.earning_id)??[]};
  });

@@ -1,6 +1,6 @@
 import {createHash} from 'node:crypto';import type {PoolClient} from 'pg';
 import type {AppConfig} from '../config/config';
-import {SecurityApiError,recordAudit} from '../auth/security-core';import {conflict,invalid,notFound} from '../supply/supply-util';import {canonicalize,withoutContentHash} from '../supply/content-hash';import {sourceYuanToCents} from './personal-finance-read';
+import {SecurityApiError,recordAudit} from '../auth/security-core';import {conflict,invalid,notFound} from '../supply/supply-util';import {canonicalize,withoutContentHash} from '../supply/content-hash';import {sourceSignedYuanToCents} from './personal-finance-read';
 import {readDistributionPolicyRowInTransaction} from './distribution-policy-store';import {readDistributionParentInTransaction} from './invitation-store';import {freezePaymentDistributionBasis,readOriginalPaymentDistributionBasis,type PaymentDistributionBasis,type PaymentReferralFacts} from './distribution-payment-basis';
 import {readFormalCollectionAdmission,assertFormalInitialAdmission,type FormalCollectionAdmission} from '../order/joinpay-collection-profile';
 import {REGRESSION_DATABASE,REGRESSION_MARKER,REGRESSION_RUNTIME_USER} from '../config/test-resource';
@@ -49,6 +49,21 @@ export function createNativePaymentDistributionStore(admission:FormalCollectionA
 export function assertNativePaymentDistributionStore(store:unknown,admissionSha256:string){
  if(!store||typeof store!=='object'||nativeStores.get(store)!==admissionSha256)throw new SecurityApiError(503,'EVIDENCE_UNAVAILABLE','Native distribution payment admission unavailable');
 }
+/** Legacy payment used the full Haff spread; separately billed item consumption enters only at completion. */
+export function estimatePaymentReferralBase(quote:any,legacyRental:boolean){
+ const amountCents=(amount:any)=>amount?.currency==='CNY'&&amount.unit==='yuan'&&amount.scale===2&&typeof amount.amount==='string'&&/^-?(0|[1-9]\d{0,21})\.\d{2}$/.test(amount.amount)?BigInt(sourceSignedYuanToCents(amount.amount)):null;
+ try{
+  let base:bigint|null=null;
+  if(legacyRental&&Array.isArray(quote?.lines)){
+   const haff:(bigint|null)[]=quote.lines.filter((line:any)=>line?.pricingKind==='HAFF_RATIO'&&line.unit==='HAFF_BASE').map((line:any)=>amountCents(line.platformAmount));
+   if(haff.length&&haff.every(n=>n!==null))base=haff.reduce<bigint>((sum,n)=>sum+n!,0n);
+   if(base!==null&&base<0n)base=0n;
+  }else if(!legacyRental)base=amountCents(quote?.platformFullProfit);
+  if(base===null||base<0n||base>=10n**24n)return null;
+  return{baseCents:base.toString(),sourceDigest:sha(canonicalize({definition:legacyRental?'LEGACY_RENTAL_QUOTE_HAFF_SPREAD_V1':'QUOTE_PLATFORM_FULL_PROFIT_ESTIMATE_V1',quote:withoutContentHash(quote),...(quote.contentHash===undefined?{}:{listingHash:quote.contentHash})}))};
+ }catch(error){if(!(error instanceof SecurityApiError&&error.status===400))throw error;return null;}
+}
+
 function paymentStore(scope:DistributionOrderScope|null,formal?:FormalCollectionAdmission){
  const native=formal?readFormalCollectionAdmission(formal):null;
  const sandbox=scope?sandboxScopes.get(scope):undefined;
@@ -76,7 +91,8 @@ function paymentStore(scope:DistributionOrderScope|null,formal?:FormalCollection
    const knowledge=own?.leader_knowledge==='KNOWN_NONE'&&!r?'KNOWN_NONE':own?.leader_knowledge==='KNOWN_PARENT'&&r&&parent?.graphComplete?'KNOWN_PARENT':'UNKNOWN';
    facts.push({role,partyUserId:party,relation:{knowledge,id:r?.id??null,childUserId:party,parentUserId:r?.parent_user_id??null,sourceDigest:r?.source_digest??null},beneficiary:parent?.parent?{userId:parent.parent.user_id,active:parent.ownerActive,eligibility:parent.parent.eligibility,commissionFrozen:parent.parent.commission_frozen??null,levelCode:parent.parent.level_code}:null});
   }
-  const mode=order.quote_snapshot?.schemaVersion===2?order.quote_snapshot?.pricingInputs?.compatibility?.rentalMode:null;let estimate:null|{baseCents:string;sourceDigest:string}=null;try{const amount=order.quote_snapshot?.platformFullProfit;if(amount?.currency==='CNY'&&amount.unit==='yuan'&&amount.scale===2)estimate={baseCents:sourceYuanToCents(amount.amount),sourceDigest:sha(canonicalize({definition:'QUOTE_PLATFORM_FULL_PROFIT_ESTIMATE_V1',quote:withoutContentHash(order.quote_snapshot),...(order.quote_snapshot.contentHash===undefined?{}:{listingHash:order.quote_snapshot.contentHash})}))};}catch(e){if(!(e instanceof SecurityApiError&&e.status===400))throw e;}
+  const mode=order.quote_snapshot?.schemaVersion===2?order.quote_snapshot?.pricingInputs?.compatibility?.rentalMode:null;
+  const estimate=estimatePaymentReferralBase(order.quote_snapshot,policy.policy?.config.schema==='distribution-policy.v3');
   const transactionId=(await c.query('SELECT pg_current_xact_id()::text AS id')).rows[0]?.id;if(typeof transactionId!=='string'||!/^[1-9]\d*$/.test(transactionId))throw conflict('Original payment transaction unavailable');
   const value=Object.freeze({orderId});prepared.set(value,{client:c,transactionId,input:{orderId,gameId:order.game_id,currency:order.currency,admissionId:admission.id,admissionRevision:String(admission.revision),origin:'NATIVE',accountMode:['ordinary','custom','fast'].includes(mode)?mode:null,estimate,policy:policy.policy?{versionId:policy.policy.versionId,digest:policy.policy.digest,config:policy.policy.config}:null,facts}});return value;
  }
