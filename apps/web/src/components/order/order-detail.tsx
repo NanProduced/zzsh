@@ -22,7 +22,7 @@ type Attention = { tone: "info" | "warning"; title: string; note: string; action
 
 function attentionFor(order: Order, facts: OrderStageFacts | null, readFailed: boolean, party: OrderParty): Attention {
   if (order.fundsResolution?.code === "HISTORICAL_MANUAL_CLOSE") return {
-    tone: "warning", title: "订单已关闭，资金处理待核实", note: "原人工关闭没有自动完成结算或退款。请联系平台核对原付款与资金处理记录，勿将订单关闭理解为退款已到账。", actions: ["group"],
+    tone: "warning", title: "订单已关闭，资金处理未确认", note: "原人工关闭没有自动完成结算或退款。请联系平台核对原付款与资金处理记录，勿将订单关闭理解为退款已到账。", actions: ["group"],
   };
   if (facts?.phase === "DECISION_REJECTED") {
     return {
@@ -85,7 +85,7 @@ type StageReadState = { scope: string; status: "loading" | "ready" | "failed"; p
 
 /**
  * A compact six-step bar. It is read-only: the stage comes from the order IM projection, the group
- * entry reuses the existing support host, and a missing projection says "阶段待核对" rather than
+ * entry reuses the existing support host, and a missing projection says "阶段未确认" rather than
  * deriving progress from the order status.
  */
 function FulfillmentStageBar({ order, party, facts }: { order: Order; party: OrderParty; facts: OrderStageFacts | null }) {
@@ -118,7 +118,7 @@ function FulfillmentStageBar({ order, party, facts }: { order: Order; party: Ord
     : null;
   const summary = projection
     ? orderFulfillmentSummary(projection, { ending })
-    : visible.status === "failed" ? "阶段待核对" : "阶段核对中…";
+    : visible.status === "failed" ? "阶段未确认" : "阶段核对中…";
   const steps = projection ? orderFulfillmentStepStates(projection.stage) : null;
   const tone = !projection ? "unknown" : projection.stage === "SETTLED" ? "done" : projection.stage === "CANCELLED" ? "closed" : "active";
   return <section className="order-fulfillment-stage" data-stage={projection?.stage ?? "UNKNOWN"} data-tone={tone} aria-label="履约阶段">
@@ -159,7 +159,7 @@ function OrderTimeline({ order, facts, party }: { order: Order; facts: OrderStag
       {events.map((event) => <li key={event.key} data-state={event.state}>
         <span className="order-timeline-dot" aria-hidden="true" />
         <strong>{event.label}</strong>
-        <time>{event.time ? timeText(event.time) : "待确认"}</time>
+        <time>{event.time ? timeText(event.time) : "未记录"}</time>
       </li>)}
     </ol>
   </section>;
@@ -190,7 +190,7 @@ function OrderLines({ order, party }: { order: Order; party: OrderParty }) {
         <tbody>{lines.map((line, index) => {
           const unitPrice = orderUnitPriceText(party === "owner" ? line.ownerUnitAmount : line.buyerUnitAmount, line.unitQuantity, line.unit);
           return <tr key={`${line.itemId ?? line.name ?? line.unit ?? "line"}-${index}`}>
-            <td data-label="资源"><span>{line.name ?? unitLabel(line.unit) ?? "资源待确认"}</span>{unitPrice ? <small className="order-line-unit">{unitPrice}</small> : null}</td>
+            <td data-label="资源"><span>{line.name ?? unitLabel(line.unit) ?? "资源未记录"}</span>{unitPrice ? <small className="order-line-unit">{unitPrice}</small> : null}</td>
             <td data-label="数量">{orderLineQuantityText(line)}</td>
             <td data-label={party === "owner" ? "号主报价" : "金额"}>{formatOrderMoney(party === "owner" ? line.ownerAmount : line.buyerAmount)}</td>
           </tr>;
@@ -205,8 +205,8 @@ function OrderLines({ order, party }: { order: Order; party: OrderParty }) {
 /** Each party sees its own quoted amounts; a missing owner total stays unknown instead of borrowing the renter's. */
 function linesSummary(order: Order, party: OrderParty): string {
   const count = order.quote?.lines?.length ?? 0;
-  if (!count) return "明细待确认";
-  if (party === "owner") return order.quote?.ownerTotal ? `号主报价合计 ${formatOrderMoney(order.quote.ownerTotal)}` : "号主报价 · 合计待确认";
+  if (!count) return "明细未记录";
+  if (party === "owner") return order.quote?.ownerTotal ? `号主报价合计 ${formatOrderMoney(order.quote.ownerTotal)}` : "号主报价 · 合计未记录";
   return `费用 ${count} 项 · ${orderLinesTotalLabel(party)} ${formatOrderMoney(order.amounts?.rental)}`;
 }
 
@@ -278,13 +278,13 @@ function ContactCard({ order, onChanged, quiet }: { order: Order; onChanged: () 
           ? "本单未开租终止；退款处理期间订单群仍可沟通，窗口以群内提示为准。"
           : "本单已结束，沟通权限以订单群当前提示为准；如需进一步核对请联系客服。"
         : "订单群已就绪，可在订单群中与客服、对方核对交付事项。"
-    : value.state === "ASSIGNED" ? "客服已分配，订单群准备中。" : "履约状态待确认。";
+    : value.state === "ASSIGNED" ? "客服已分配，订单群准备中。" : "履约状态未记录。";
   return <section className="order-side-card">
     <h2 className="order-section-title">履约与沟通</h2>
     <p className="order-contact-copy"><MessageCircle size={16} aria-hidden="true" />{copy}</p>
     {value.state === "ASSIGNED" ? <dl className="order-facts order-contact-facts">
-      <div><dt>客服分配</dt><dd>{value.assignedAt ? timeText(value.assignedAt, { timeZoneName: false }) : "时间待确认"}</dd></div>
-      <div><dt>订单群</dt><dd>{value.teamReady ? "已就绪" : value.teamState ? "尚未就绪" : "状态待确认"}</dd></div>
+      <div><dt>客服分配</dt><dd>{value.assignedAt ? timeText(value.assignedAt, { timeZoneName: false }) : "时间未记录"}</dd></div>
+      <div><dt>订单群</dt><dd>{value.teamReady ? "已就绪" : value.teamState ? "尚未就绪" : "状态未记录"}</dd></div>
     </dl> : null}
     {quiet ? null : <div className="order-contact-actions">
       <button type="button" className="button quiet" onClick={onChanged}><RefreshCw size={15} aria-hidden="true" />刷新订单</button>
@@ -293,32 +293,32 @@ function ContactCard({ order, onChanged, quiet }: { order: Order; onChanged: () 
 }
 
 const refundOutcomeCopy: Record<PersonalRefundRead["outcome"], { label: string; note: string }> = {
-  RESPONSIBILITY_NOT_POSTED: { label: "退款金额待确认", note: "如有退款，进度会显示在这里。" },
+  RESPONSIBILITY_NOT_POSTED: { label: "退款金额未记录", note: "如有退款，进度会显示在这里。" },
   ZERO_RESPONSIBILITY: { label: "本次结算应退为零", note: "其他退款事项会单独显示。" },
   NOT_DUE: { label: "退款尚未到期", note: "到期不代表退款已处理或到账。" },
-  NO_INTENT: { label: "退款进度待确认", note: "如有疑问，请联系客服。" },
-  PARTIALLY_ALLOCATED: { label: "退款进度待确认", note: "到账情况请以收款记录为准。" },
-  FULLY_ALLOCATED: { label: "退款进度待确认", note: "到账情况请以收款记录为准。" },
-  PARTIALLY_CONSUMED: { label: "退款进度待确认", note: "到账情况请以收款记录为准。" },
-  FULLY_CONSUMED: { label: "退款进度待确认", note: "到账情况请以收款记录为准。" },
-  RELEASED: { label: "退款进度待确认", note: "如有疑问，请联系客服。" },
+  NO_INTENT: { label: "退款进度未记录", note: "如有疑问，请联系客服。" },
+  PARTIALLY_ALLOCATED: { label: "退款进度未记录", note: "到账情况请以收款记录为准。" },
+  FULLY_ALLOCATED: { label: "退款进度未记录", note: "到账情况请以收款记录为准。" },
+  PARTIALLY_CONSUMED: { label: "退款进度未记录", note: "到账情况请以收款记录为准。" },
+  FULLY_CONSUMED: { label: "退款进度未记录", note: "到账情况请以收款记录为准。" },
+  RELEASED: { label: "退款进度未记录", note: "如有疑问，请联系客服。" },
   PROCESSING: { label: "退款处理中", note: "到账情况请以收款记录为准。" },
-  UNKNOWN: { label: "退款结果待确认", note: "请稍后查看，或联系客服。" },
+  UNKNOWN: { label: "退款结果未记录", note: "请稍后查看，或联系客服。" },
   REVIEW_REQUIRED: { label: "退款需要核对", note: "如有疑问，请联系客服。" },
-  TRUNCATED: { label: "部分退款记录待确认", note: "当前显示的记录可能不完整。" },
+  TRUNCATED: { label: "部分退款记录未记录", note: "当前显示的记录可能不完整。" },
   CONFLICT: { label: "退款记录需要核对", note: "部分金额暂时无法确认，请联系客服。" },
 };
 const refundIntentStateLabel: Record<PersonalRefundIntent["state"], string> = {
-  READY: "等待处理", SUBMITTING: "提交中", UNKNOWN: "结果待确认", PROCESSING: "处理中",
-  REVIEW_REQUIRED: "需要核对", SUCCEEDED: "到账待确认", FAILED: "申请处理失败", UNRECOGNIZED: "状态待确认",
+  READY: "等待处理", SUBMITTING: "提交中", UNKNOWN: "结果未记录", PROCESSING: "处理中",
+  REVIEW_REQUIRED: "需要核对", SUCCEEDED: "到账未记录", FAILED: "申请处理失败", UNRECOGNIZED: "状态未记录",
 };
 const abnormalReasonLabel: Record<PersonalAbnormalResponsibility["reasonCode"], string> = { DUPLICATE_PAYMENT: "重复支付", LATE_PAYMENT: "支付时间异常", UNKNOWN_REASON: "其他付款" };
 const abnormalStateLabel: Record<PersonalAbnormalResponsibility["state"], string> = {
-  NO_INTENT: "待处理", READY: "待处理", PROCESSING: "处理中", UNKNOWN: "待确认", CONSUMED: "到账待确认", RELEASED: "待确认", REVIEW_REQUIRED: "需要核对", CONFLICT: "需要核对",
+  NO_INTENT: "待处理", READY: "待处理", PROCESSING: "处理中", UNKNOWN: "未记录", CONSUMED: "到账未记录", RELEASED: "未记录", REVIEW_REQUIRED: "需要核对", CONFLICT: "需要核对",
 };
 
 function refundMoney(cents: string | null): string {
-  if (cents === null) return "待确认";
+  if (cents === null) return "未记录";
   const value = BigInt(cents);
   return `¥${(value / 100n).toLocaleString("zh-CN")}.${(value % 100n).toString().padStart(2, "0")}`;
 }
@@ -326,7 +326,7 @@ function refundMoney(cents: string | null): string {
 function AbnormalResponsibilityCard({ item }: { item: PersonalAbnormalResponsibility }) {
   return <li className="order-refund-intent order-refund-abnormal-item">
     <div className="order-refund-intent-head"><strong>{abnormalReasonLabel[item.reasonCode]}</strong><span className="order-refund-state">{abnormalStateLabel[item.state]}</span></div>
-    <dl className="order-facts order-refund-intent-facts"><div><dt>相关金额</dt><dd>{item.totalsComplete ? refundMoney(item.originalCents) : "待确认"}</dd></div></dl>
+    <dl className="order-facts order-refund-intent-facts"><div><dt>相关金额</dt><dd>{item.totalsComplete ? refundMoney(item.originalCents) : "未记录"}</dd></div></dl>
     {item.firstSubmit?.dispatch === "NEVER_DISPATCHED" && item.firstSubmit.blockedReason ? <p className="order-muted">暂时无法提交，请联系客服。</p> : null}
   </li>;
 }
@@ -335,7 +335,7 @@ function RefundIntentCard({ intent }: { intent: PersonalRefundIntent }) {
   return <li className="order-refund-intent">
     <div className="order-refund-intent-head"><strong>{intent.refundOrderNo ?? "退款申请"}</strong><span className="order-refund-state">{refundIntentStateLabel[intent.state]}</span></div>
     <dl className="order-facts order-refund-intent-facts">
-      <div><dt>申请金额</dt><dd>{intent.amount ? refundMoney(intent.amount.cents) : "待确认"}</dd></div>
+      <div><dt>申请金额</dt><dd>{intent.amount ? refundMoney(intent.amount.cents) : "未记录"}</dd></div>
       {intent.createdAt ? <div><dt>申请时间</dt><dd>{timeText(intent.createdAt, { timeZoneName: false })}</dd></div> : null}
     </dl>
     {intent.source === "LOCAL_CONTROLLED" ? <p className="order-muted">测试记录，不代表真实退款。</p> : null}
@@ -388,14 +388,14 @@ function OrderRefundSection({ order }: { order: Order }) {
         {incomplete ? <p className="order-inline-notice" role="status">部分退款信息仍在核对，当前记录可能不完整。</p> : null}
         {responsibility.state === "POSTED" ? <dl className="order-facts order-refund-amounts">
           <div><dt>本次结算应退</dt><dd>{refundMoney(responsibility.originalCents)}</dd></div>
-          {responsibility.dueAt ? <div><dt>退款到期时间</dt><dd>{timeText(responsibility.dueAt, { timeZoneName: false })}{responsibility.dueState === "DUE" ? "（已到期）" : responsibility.dueState === "NOT_DUE" ? "（未到期）" : "（状态待确认）"}</dd></div> : null}
+          {responsibility.dueAt ? <div><dt>退款到期时间</dt><dd>{timeText(responsibility.dueAt, { timeZoneName: false })}{responsibility.dueState === "DUE" ? "（已到期）" : responsibility.dueState === "NOT_DUE" ? "（未到期）" : "（状态未记录）"}</dd></div> : null}
         </dl> : null}
         {responsibility.state === "POSTED" && responsibility.dueAt ? <p className="order-muted">到期不代表退款已处理或到账。</p> : null}
         {read.abnormalResponsibilities?.length ? <section className="order-refund-abnormal" aria-label="其他付款处理">
           <div className="order-refund-intents-heading"><h3>其他付款处理</h3></div>
           <ul className="order-refund-intents">{read.abnormalResponsibilities.map(item => <AbnormalResponsibilityCard key={item.confirmationId} item={item} />)}</ul>
         </section> : null}
-        {read.intents.length ? <section aria-label="退款申请记录"><div className="order-refund-intents-heading"><h3>退款申请</h3><span>{read.intentsTruncated || !read.coverage.intentsComplete ? "部分记录待确认" : `${read.returnedIntentCount} 笔`}</span></div><ul className="order-refund-intents">{read.intents.map(intent => <RefundIntentCard key={intent.intentId} intent={intent} />)}</ul></section> : null}
+        {read.intents.length ? <section aria-label="退款申请记录"><div className="order-refund-intents-heading"><h3>退款申请</h3><span>{read.intentsTruncated || !read.coverage.intentsComplete ? "部分记录未记录" : `${read.returnedIntentCount} 笔`}</span></div><ul className="order-refund-intents">{read.intents.map(intent => <RefundIntentCard key={intent.intentId} intent={intent} />)}</ul></section> : null}
         <p className="order-muted">到账情况请以收款记录为准。</p>
       </div>
     </details>
@@ -414,8 +414,8 @@ function OrderEntitlements({ order }: { order: Order }) {
     <h2 className="order-section-title">订单权益</h2>
     <dl className="order-facts order-entitlements">
       {list.map((item) => <div key={item.id}>
-        <dt>{item.name?.trim() || "权益名称待确认"}{item.nameSource === "CURRENT_CATALOG" ? <small className="order-source-note">名称取自当前目录</small> : item.nameSource === "UNKNOWN" ? <small className="order-source-note">名称尚未核定</small> : null}</dt>
-        <dd>{item.expiryKind === "PERMANENT" ? "长期有效" : item.expiresAt ? `至 ${timeText(item.expiresAt, { timeZoneName: false })}` : "期限待确认"}{item.fullTermGuaranteed === false ? " · 不保证覆盖完整租期" : ""}</dd>
+        <dt>{item.name?.trim() || "权益名称未记录"}{item.nameSource === "CURRENT_CATALOG" ? <small className="order-source-note">名称取自当前目录</small> : item.nameSource === "UNKNOWN" ? <small className="order-source-note">名称尚未记录</small> : null}</dt>
+        <dd>{item.expiryKind === "PERMANENT" ? "长期有效" : item.expiresAt ? `至 ${timeText(item.expiresAt, { timeZoneName: false })}` : "期限未记录"}{item.fullTermGuaranteed === false ? " · 不保证覆盖完整租期" : ""}</dd>
       </div>)}
     </dl>
   </section>;
@@ -462,11 +462,11 @@ export function OrderDetail({ party, status, accountId, orderId, filters, state,
         <p className="order-detail-meta">
           {order.accountDisplayNo ? <span className="order-detail-account-no">账号 {order.accountDisplayNo}</span> : null}
           {order.accountId ? <Link className="account-inline-link" href={party === "owner" ? `/account?view=accounts&accountId=${encodeURIComponent(order.accountId)}` : `/accounts/${encodeURIComponent(order.accountId)}`} scroll={false}>{party === "owner" ? "查看本人账号" : "查看当前公开资料"}</Link> : null}
-          <span className="order-detail-no">订单 {order.displayNo ?? "待确认"}<CopyOrderNo value={order.displayNo} /></span>
+          <span className="order-detail-no">订单 {order.displayNo ?? "未记录"}<CopyOrderNo value={order.displayNo} /></span>
           {party === "owner" ? <span>租客：{order.renterName ?? "暂不显示"}</span> : null}
           <span>下单 {timeText(order.createdAt, { timeZoneName: false })}</span>
           <span>{orderTermLabel(order)}</span>
-          {!order.listingFacts && order.listingFactsUnknownReason ? <span>账号资料待核实</span> : null}
+          {!order.listingFacts && order.listingFactsUnknownReason ? <span>账号资料未确认</span> : null}
           {modeLabel ? <span className="order-detail-mode" data-mode={order.quote?.rentalMode}>{modeLabel}</span> : null}
           {sourceLabel ? <span className="order-source-note">{sourceLabel}</span> : null}
         </p>

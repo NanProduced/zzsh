@@ -135,7 +135,7 @@ function EntryRows({ items, bucket, onOpen }: { items: WalletEntry[]; bucket: En
               </small>
               {e.sourceDetails?.attempts?.map(a => (
                 <small key={"la_refund_log:" + a.source.id}>
-                  原尝试 {a.originalNumber ?? "原号待核"} · {walletMoney(a.recordedAmountCents)} ·{" "}
+                  原尝试 {a.originalNumber ?? "未记录"} · {walletMoney(a.recordedAmountCents)} ·{" "}
                   {refundAttemptStatus(a.originalStatus)}
                 </small>
               ))}
@@ -254,7 +254,7 @@ export function PersonalWallet({ scope }: { scope: string }) {
       <ControlledWithdrawal key={`controlled:${scope}`} wallet={w} scope={scope} onWalletChanged={refresh} onIdentityFailure={read.invalidate} />
     </> : read.loading ? <div className="account-module-card wallet-loading"><SkeletonBlock label="正在读取钱包" variant="amount" lines={4} /></div> : read.error || !w ? <div className="account-module-card account-empty-state" role="alert"><Info size={28} aria-hidden="true" /><h3>钱包暂时无法读取</h3><p>{errorText(read.error)}</p><button className="button secondary" type="button" onClick={refresh}>重试读取</button></div> : <>
       {pane === "overview" ? <>
-        {/* 仅在有待确认提现申请或异常时渲染待处理横幅，平时为 null */}
+        {/* 仅在有待处理提现申请或异常时渲染待处理横幅，平时为 null */}
         <ControlledWithdrawal key={`controlled:${scope}`} wallet={w} scope={scope} onWalletChanged={refresh} onIdentityFailure={read.invalidate} compact />
 
         <div className="wallet-overview-top-grid">
@@ -370,7 +370,7 @@ export function PersonalWallet({ scope }: { scope: string }) {
           ) : visiblePage.error ? (
             <div role="alert"><p>{errorText(visiblePage.error)}</p><button className="button secondary" onClick={() => void loadPage(null)}>重试流水</button></div>
           ) : (
-            <div className="account-module-card account-empty-state"><FileText size={26} aria-hidden="true" /><h3>{recordsComplete ? "暂无余额流水" : "流水记录尚待核对"}</h3><p>{recordsComplete ? "还没有可显示的流水。" : "部分流水仍在核对，请稍后查看。"}</p></div>
+            <div className="account-module-card account-empty-state"><FileText size={26} aria-hidden="true" /><h3>{recordsComplete ? "暂无余额流水" : "流水记录尚未确认"}</h3><p>{recordsComplete ? "还没有可显示的流水。" : "部分流水仍在核对，请稍后查看。"}</p></div>
           )}
         </div>
       </> : null}

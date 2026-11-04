@@ -3,7 +3,7 @@ import type { Order, OrderImProjection, OrderImStage, OrderLine, OrderParty, Per
 
 export function paymentObservation(payment: { disposition: string } | null): string {
   if (!payment) return "暂未查到付款记录";
-  const status = payment.disposition === "APPLIED" ? "已记入订单" : payment.disposition === "REVIEW_REQUIRED" ? "需要人工核对" : "状态待确认";
+  const status = payment.disposition === "APPLIED" ? "已记入订单" : payment.disposition === "REVIEW_REQUIRED" ? "需要人工核对" : "状态未记录";
   return `已有付款记录（${status}）`;
 }
 
@@ -30,7 +30,7 @@ export function orderListingSourceLabel(order: Pick<Order, "source" | "listingFa
   if (order.source?.origin === "LEGACY") return "历史订单";
   if (order.listingFacts?.source === "ACCOUNT_CURRENT") return "当前账号资料";
   if (order.listingFacts?.source === "ORDER_VERSION") return "下单时账号资料";
-  return order.listingFactsUnknownReason ? "账号资料待核实" : null;
+  return order.listingFactsUnknownReason ? "账号资料未确认" : null;
 }
 
 /** Opening and settlement stages come from the server; absence never becomes a renting label. */
@@ -87,13 +87,13 @@ function fulfillmentWindowText(sendUntil: string | null, canSend: boolean, now: 
 
 /**
  * One compact line: current stage plus the next thing that matters. Due and read-only states come
- * only from the server projection; a missing projection stays "阶段待核对".
+ * only from the server projection; a missing projection stays "阶段未确认".
  */
 export function orderFulfillmentSummary(
   projection: OrderImProjection | null | undefined,
   options: { now?: number; ending?: OrderFulfillmentEnding } = {},
 ): string {
-  if (!projection) return "阶段待核对";
+  if (!projection) return "阶段未确认";
   const now = options.now ?? Date.now();
   switch (projection.stage) {
     case "PENDING_PAYMENT": return "待付款";
@@ -103,7 +103,7 @@ export function orderFulfillmentSummary(
       if (projection.openingState === "NONE") return "账号与开租确认 · 待客服录入开租清单";
       const acks = projection.openingAcks;
       if (!acks) return "账号与开租确认";
-      return `账号与开租确认 · 租客${acks.renter ? "已确认" : "待确认"} · 号主${acks.owner ? "已确认" : "待确认"}`;
+      return `账号与开租确认 · 租客${acks.renter ? "已确认" : "未记录"} · 号主${acks.owner ? "已确认" : "未记录"}`;
     }
     case "RENTING": {
       if (!projection.dueAt) return "租用中";
@@ -117,7 +117,7 @@ export function orderFulfillmentSummary(
       if (options.ending === "PENDING") return "结束确认 · 待你确认";
       if (options.ending === "WAITING") return "结束确认 · 待对方确认";
       if (options.ending === "SERVICE") return "结束确认 · 待客服核实";
-      return "结束确认 · 等待确认";
+      return "结束确认 · 等双方确认";
     case "CANCELLED": {
       if (projection.cancelReason === "MANUAL_CLOSE") return `客服手动结束 · ${fulfillmentWindowText(projection.sendUntil, projection.canSend, now)}`;
       if (projection.cancelReason !== "PRESTART_TERMINATED") return `已取消 · ${fulfillmentWindowText(projection.sendUntil, projection.canSend, now)}`;
@@ -127,7 +127,7 @@ export function orderFulfillmentSummary(
     case "SETTLED":
       return `结算完成 · ${fulfillmentWindowText(projection.sendUntil, projection.canSend, now)}`;
     default:
-      return "阶段待核对";
+      return "阶段未确认";
   }
 }
 
@@ -178,8 +178,8 @@ export function personalMembershipLabel(quote: {
         DIAMOND: "钻石会员",
         BLACK_GOLD: "黑金会员·终身",
       } as Record<string, string>
-    )[b.effectiveTier] ?? "会员权益待核";
-  return quote.customerTier ? "既有确认方案" : "会员权益待核";
+    )[b.effectiveTier] ?? "会员权益未记录";
+  return quote.customerTier ? "既有确认方案" : "会员权益未记录";
 }
 export function personalBenefitSources(quote: {
   membershipBenefits?: { priceSource?: string; depositSource?: string } | null;
@@ -187,7 +187,7 @@ export function personalBenefitSources(quote: {
   const b = quote.membershipBenefits;
   if (!b) return null;
   const names = { GROWTH: "成长权益", FRIEND: "挚友礼遇", PRESTIGE: "尊享礼遇" } as Record<string, string>;
-  return `价格：${names[b.priceSource ?? ""] ?? "待核"}；押金：${names[b.depositSource ?? ""] ?? "待核"}`;
+  return `价格：${names[b.priceSource ?? ""] ?? "未记录"}；押金：${names[b.depositSource ?? ""] ?? "未记录"}`;
 }
 
 /**
@@ -345,7 +345,7 @@ export function quantityText(unit: string | null | undefined, quantity: string):
 /** The original bill uses the exact M quantity; full base units remain in settlement records. */
 export function orderLineQuantityText(line: OrderLine): string {
   const quantity = line.quantity ?? line.unitQuantity;
-  if (quantity === null || quantity === undefined || quantity === "") return "数量待确认";
+  if (quantity === null || quantity === undefined || quantity === "") return "数量未记录";
   if (line.unit === "HAFF_BASE" && /^\d+$/.test(quantity)) {
     const value = BigInt(quantity);
     const fraction = (value % 1_000_000n).toString().padStart(6, "0").replace(/0+$/, "");

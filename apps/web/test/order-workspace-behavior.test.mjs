@@ -351,7 +351,7 @@ test('unified renting filter shows the current stage and original order number f
   await probe.render({party:'owner',filters:{stage:'RENTING'}});
   assert.ok(calls.some(url=>url.searchParams.get('party')==='owner'&&url.searchParams.get('stage')==='RENTING'));
   assert.match(probe.host.textContent,/ORIGINAL-ORDER-A[\s\S]*进行中/);
-  assert.doesNotMatch(probe.host.querySelector('.order-row')?.textContent??'',/进度待确认|需要你处理/);
+  assert.doesNotMatch(probe.host.querySelector('.order-row')?.textContent??'',/进度未记录|需要你处理/);
   const details=[...probe.host.querySelectorAll('a')].find(link=>link.getAttribute('href')?.includes('orderId=legacy-active'));
   assert.match(details?.getAttribute('href')??'',/source=legacy/);
  }finally{await probe.dispose();}
@@ -591,7 +591,7 @@ test("one list includes both sources and old deep links return to the same filte
     assert.match(probe.host.textContent,/租赁截止/);
     // U5-R1-02: the historical refund figure is labelled as the original record in the list row.
     assert.match(probe.host.textContent,/退款记录金额/);
-    assert.doesNotMatch(probe.host.textContent,/应退金额（到账待确认）|应退责任 /);
+    assert.doesNotMatch(probe.host.textContent,/应退金额（到账未记录）|应退责任 /);
     const links=[...probe.host.querySelectorAll("a[data-order-id]")];
     assert.equal(new Set(links.map(a=>a.dataset.orderKey)).size,2);
     assert.ok(links.some(a=>a.href.includes("source=legacy")));
@@ -602,7 +602,7 @@ test("one list includes both sources and old deep links return to the same filte
     assert.match(probe.host.textContent,/租赁截止/);
     // U5-R1-02: the detail keeps the original refund record wording and never calls it the current duty.
     assert.match(probe.host.textContent,/退款记录金额/);
-    assert.doesNotMatch(probe.host.textContent,/应退金额（到账待确认）|应退责任 /);
+    assert.doesNotMatch(probe.host.textContent,/应退金额（到账未记录）|应退责任 /);
     assert.doesNotMatch(probe.host.textContent,/历史|旧平台|新平台|旧单记录/);
     const back=[...probe.host.querySelectorAll("a")].find(a=>a.textContent==="返回订单列表");
     assert.equal(back.getAttribute("href"),"/account?view=rentals&status=PAID&accountId=acct_9");
@@ -807,7 +807,7 @@ test("the six-step projection maps to stage, due, ending and read-only copy", ()
   assert.equal(display.orderFulfillmentSummary(stageProjection({ stage: "TEAM_PENDING" }), { now }), "已付款 · 订单群准备中");
   assert.equal(
     display.orderFulfillmentSummary(stageProjection({ stage: "OPENING_CONFIRM", openingAcks: { renter: true, owner: false } }), { now }),
-    "账号与开租确认 · 租客已确认 · 号主待确认",
+    "账号与开租确认 · 租客已确认 · 号主未记录",
   );
   assert.match(display.orderFulfillmentSummary(stageProjection({ dueAt: "2026-11-01T00:00:00.000Z" }), { now }), /^租用中 · 到期 /);
   assert.match(display.orderFulfillmentSummary(stageProjection({ dueAt: "2026-10-01T00:00:00.000Z" }), { now }), /^租用中 · 已到期 /);
@@ -820,7 +820,7 @@ test("the six-step projection maps to stage, due, ending and read-only copy", ()
   );
   assert.equal(display.orderFulfillmentSummary(stageProjection({ stage: "SETTLED", canSend: false }), { now }), "结算完成 · 仅可查看");
   // A missing projection is a state of its own; no stage, due or window is invented.
-  assert.equal(display.orderFulfillmentSummary(null), "阶段待核对");
+  assert.equal(display.orderFulfillmentSummary(null), "阶段未确认");
   assert.deepEqual(display.orderFulfillmentStepStates("RENTING"), ["done", "done", "done", "current", "pending", "pending"]);
   assert.deepEqual(display.orderFulfillmentStepStates("SETTLED"), ["done", "done", "done", "done", "done", "done"]);
   assert.deepEqual(display.orderFulfillmentStepStates("CANCELLED"), ["cancelled", "cancelled", "cancelled", "cancelled", "cancelled", "cancelled"]);
@@ -937,7 +937,7 @@ test("a failed IM projection leaves the stage pending verification without a six
     await tick(); await tick();
     const detail = probe.host.querySelector("[data-testid=order-detail]");
     const bar = detail.querySelector(".order-fulfillment-stage");
-    assert.equal(detail.querySelector(".order-fulfillment-summary").textContent, "阶段待核对");
+    assert.equal(detail.querySelector(".order-fulfillment-summary").textContent, "阶段未确认");
     assert.equal(detail.querySelector(".order-fulfillment-steps"), null);
     assert.doesNotMatch(bar.textContent, /租用中|结算完成 ·|待客服接入|账号与开租/);
   } finally { await probe.dispose(); }

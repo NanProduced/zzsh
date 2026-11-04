@@ -45,7 +45,7 @@ export function statusLabel(order: Order): string {
     }
     return STATUS_LABELS[order.status];
   }
-  return "待确认";
+  return "未记录";
 }
 
 export function statusTone(order: Order): string {
@@ -64,7 +64,7 @@ export function OrderStatusBadge({ order }: { order: Order }) {
 /** Agreed rental term; never converted into an elapsed/remaining countdown. */
 export function termText(value: string | null | undefined): string {
   const seconds = Number(value);
-  if (!value || !Number.isSafeInteger(seconds) || seconds <= 0) return "待确认";
+  if (!value || !Number.isSafeInteger(seconds) || seconds <= 0) return "未记录";
   if (seconds % 86400 === 0) return `${seconds / 86400} 天`;
   if (seconds % 3600 === 0) return `${seconds / 3600} 小时`;
   if (seconds % 60 === 0) return `${seconds / 60} 分钟`;
@@ -75,7 +75,7 @@ export function termText(value: string | null | undefined): string {
 export function orderTermLabel(order: Pick<Order, "termSeconds" | "orderFacts">): string {
   if (order.termSeconds) return `约定租期 ${termText(order.termSeconds)}`;
   const deadline = order.orderFacts?.rentalDeadlineAt;
-  return deadline ? `租赁截止 ${formatOrderTime(deadline, { timeZoneName: false })}` : "约定租期 待确认";
+  return deadline ? `租赁截止 ${formatOrderTime(deadline, { timeZoneName: false })}` : "约定租期 未记录";
 }
 
 export function OrderError({ error, first, onRetry, onLogin, onReauthorize, label }: { error: OrderRequestError; first: boolean; onRetry: () => void; onLogin: () => void; onReauthorize?: () => void; label?: string }) {

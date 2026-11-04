@@ -11,8 +11,8 @@ import { performGuardedWrite } from "./order-trade-actions";
 
 const stateText={REQUESTED:"等待客服处理",REVIEW_REQUIRED:"申请需要核对",REJECTED:"结束申请未通过",APPROVED:"结束申请已通过"};
 const blockedText:Record<string,string>={RENTAL_ALREADY_STARTED:"账号已开租，请使用结束租用流程",SETTLEMENT_ALREADY_POSTED:"订单已结算，请查看结算记录",
- MANUAL_ADJUSTMENT_REVIEW:"订单金额需要客服先核对",DISTRIBUTION_RECONCILIATION_REQUIRED:"订单信息需要客服先核对",PAYMENT_BASIS_UNAVAILABLE:"付款信息待确认",
- PRESTART_FACTS_UNAVAILABLE:"开租或付款情况待确认",ORDER_NOT_PAID:"当前订单无法申请未开租结束"};
+ MANUAL_ADJUSTMENT_REVIEW:"订单金额需要客服先核对",DISTRIBUTION_RECONCILIATION_REQUIRED:"订单信息需要客服先核对",PAYMENT_BASIS_UNAVAILABLE:"付款信息未记录",
+ PRESTART_FACTS_UNAVAILABLE:"开租或付款情况未记录",ORDER_NOT_PAID:"当前订单无法申请未开租结束"};
 
 export function PrestartTerminationPanel({order,party,onChanged}:{order:Order;party:OrderParty;onChanged:()=>void}){
  const session=useUserSession(),[state,setState]=useState<{scope:string;read:PrestartView|null;error:OrderRequestError|null}>({scope:'',read:null,error:null});
@@ -39,7 +39,7 @@ export function PrestartTerminationPanel({order,party,onChanged}:{order:Order;pa
    (key,body)=>prestartApi.request(userId,order.id,key,body));
   if(scopeRef.current!==expectedScope)return;setBusy(false);
   if(out.status==='ok'){setPending(false);setNote('结束申请已提交，请等待客服处理。');refresh(n=>n+1);onChanged();}
-  else{setPending(inspectIntent(userId,'order.prestart.request',order.id).state!=='NONE');setNote(out.status==='unauthorized'?'登录状态已变化，请重新登录查看上次申请。':out.status==='unknown'||out.status==='recovery-unresolved'?'申请结果待确认，请稍后继续处理上次申请。':out.status==='blocked'?'暂时无法继续申请，请联系客服。':'申请未完成，请核对信息后重试。');}
+  else{setPending(inspectIntent(userId,'order.prestart.request',order.id).state!=='NONE');setNote(out.status==='unauthorized'?'登录状态已变化，请重新登录查看上次申请。':out.status==='unknown'||out.status==='recovery-unresolved'?'申请结果未记录，请稍后继续处理上次申请。':out.status==='blocked'?'暂时无法继续申请，请联系客服。':'申请未完成，请核对信息后重试。');}
  };
  return <section className="order-detail-section order-prestart-section" aria-label="未开租结束申请"><details className="order-secondary-details" open={Boolean(read?.request || pending || note || visible?.error)}><summary><h2 className="order-section-title">未开租结束</h2><span>{read?.request ? stateText[read.request.state] : '尚未开租需要取消？查看申请条件'}</span></summary><div className="order-prestart-content">
   <p className="order-muted">双方尚未开租时可申请结束，客服会核实后处理。</p>
@@ -48,13 +48,13 @@ export function PrestartTerminationPanel({order,party,onChanged}:{order:Order;pa
    {party==='renter'?<><p>原付款记录金额：{walletMoney(read.request.fullRefundCents)}</p>{!read.request.liabilityRecognized?<p className="order-muted">退款情况以审核结果为准。</p>:null}</>:null}
    <p className="order-muted">{formatOrderTime(read.request.updatedAt)}{read.request.dataOrigin==='LOCAL_CONTROLLED'?' · 测试记录，不代表真实退款':''}</p>
    {read.request.state==='APPROVED'?<div className="order-muted" aria-label="退款进度">
-    {read.refund?.intents?.length?<ul>{read.refund.intents.map((item,n)=><li key={item.intentId??n}>{item.refundOrderNo??'退款申请'} · {({READY:'待处理',SUBMITTING:'提交中',UNKNOWN:'结果待确认',PROCESSING:'处理中',REVIEW_REQUIRED:'需要核对',SUCCEEDED:'到账待确认',FAILED:'本次退款未完成',CONFLICT:'需要核对'} as Record<string,string>)[item.state]??'状态待确认'}{item.blockedReason?' · 请联系客服':''}</li>)}</ul>:<p>退款进度待确认。</p>}
+    {read.refund?.intents?.length?<ul>{read.refund.intents.map((item,n)=><li key={item.intentId??n}>{item.refundOrderNo??'退款申请'} · {({READY:'待处理',SUBMITTING:'提交中',UNKNOWN:'结果未记录',PROCESSING:'处理中',REVIEW_REQUIRED:'需要核对',SUCCEEDED:'到账未记录',FAILED:'本次退款未完成',CONFLICT:'需要核对'} as Record<string,string>)[item.state]??'状态未记录'}{item.blockedReason?' · 请联系客服':''}</li>)}</ul>:<p>退款进度未记录。</p>}
     {read.refund?.truncated?<p>部分退款记录仍在核对。</p>:null}<p>到账情况请以收款记录为准。</p>
    </div>:null}</>:null}
   {read&&(!read.request||read.request.state==='REJECTED')&&read.eligibility.allowed||pending?<form onSubmit={e=>{e.preventDefault();void submit();}} className="order-trade-form">
    <label>结束原因<textarea aria-label="未开租结束原因" value={reason} maxLength={150} disabled={busy||pending} onChange={e=>setReason(e.target.value)}/></label>
    <button type="submit" className="button secondary button--sm" disabled={busy||!read||!pending&&reason.trim().length<3}>{busy?'正在提交…':pending?'继续提交上次申请':'申请未开租结束'}</button>
-  </form>:read&&!read.request?<p className="order-muted">{blockedText[read.eligibility.reason??'']??'申请条件待确认'}</p>:null}
+  </form>:read&&!read.request?<p className="order-muted">{blockedText[read.eligibility.reason??'']??'申请条件未记录'}</p>:null}
   {note?<p role="status" className="order-muted">{note}</p>:null}<button type="button" className="button quiet button--sm" disabled={busy} onClick={()=>refresh(n=>n+1)}>刷新</button>
  </div></details></section>;
 }

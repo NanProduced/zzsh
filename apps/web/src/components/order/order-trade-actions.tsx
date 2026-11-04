@@ -151,17 +151,17 @@ function RecordList({ title, records }: { title: string; records: Array<{ label:
     <ul>{records.map((record, index) => {
       const recordedAt = record.time;
       const knownTime = typeof recordedAt === "string" && Number.isFinite(Date.parse(recordedAt));
-      return <li key={`${record.label}-${index}`}><span className="order-record-mark" aria-hidden="true"><CheckCircle2 size={13} /></span><span>{record.label}</span>{knownTime ? <time dateTime={recordedAt}>{formatOrderTime(recordedAt)}</time> : <span className="order-muted">时间待确认</span>}</li>;
+      return <li key={`${record.label}-${index}`}><span className="order-record-mark" aria-hidden="true"><CheckCircle2 size={13} /></span><span>{record.label}</span>{knownTime ? <time dateTime={recordedAt}>{formatOrderTime(recordedAt)}</time> : <span className="order-muted">时间未记录</span>}</li>;
     })}</ul>
   </div>;
 }
 
 const channelStateLabels: Record<string, string> = {
   SUBMITTING: "正在提交支付请求", UNKNOWN: "支付结果正在确认", ACTION_READY: "等待付款", PROCESSING_UNCONFIRMED: "支付状态正在确认",
-  CHANNEL_SUCCEEDED_PENDING_ACCEPTANCE: "付款依据正在接纳", ACCEPTED: "付款依据待确认", REVIEW_REQUIRED: "支付需要人工核对", REJECTED_BY_CHANNEL: "渠道未受理本次请求",
+  CHANNEL_SUCCEEDED_PENDING_ACCEPTANCE: "付款依据正在接纳", ACCEPTED: "付款依据未记录", REVIEW_REQUIRED: "支付需要人工核对", REJECTED_BY_CHANNEL: "渠道未受理本次请求",
 };
 function channelMoneyText(value: { cents: string; currency: string } | null | undefined) {
-  if (!value || value.currency !== "CNY" || typeof value.cents !== "string" || !/^(0|[1-9][0-9]{0,15})$/.test(value.cents)) return "待确认";
+  if (!value || value.currency !== "CNY" || typeof value.cents !== "string" || !/^(0|[1-9][0-9]{0,15})$/.test(value.cents)) return "未记录";
   const cents = BigInt(value.cents);
   return moneyText({ amount: `${cents / 100n}.${(cents % 100n).toString().padStart(2, "0")}`, currency: "CNY" });
 }
@@ -246,7 +246,7 @@ function ChannelPaymentAction({ order, blocked, onChanged, onModeChange, onPendi
     if (outcome.status === "unknown") setNotice("支付请求回执尚未确认，原请求和支付方式已保留；请恢复原请求，不要重复付款。");
     else if (outcome.status === "blocked") setNotice(BLOCKED_MESSAGE);
     else if (outcome.status === "unauthorized") { setNotice(AUTH_MESSAGE); void session.confirm(); }
-    else setNotice(outcome.status === "recovery-unresolved" ? "原请求仍待确认，恢复记录已保留；请刷新状态或联系平台核对。" : panelError(outcome.error).message);
+    else setNotice(outcome.status === "recovery-unresolved" ? "原请求仍未记录，恢复记录已保留；请刷新状态或联系平台核对。" : panelError(outcome.error).message);
   };
   const queryChannel = async () => {
     const queryingRequestId = view?.request?.id;
@@ -303,7 +303,7 @@ function ChannelPaymentAction({ order, blocked, onChanged, onModeChange, onPendi
     && view.dataOrigin === "JOINPAY_CANDIDATE" && view.capability.channelEnabled === true && view.capability.productionPaymentCapability === true
     && ["ACTION_READY", "PROCESSING_UNCONFIRMED"].includes(view.request.state) && view.projection?.actionBlockedReason === null && !url);
   return <div className="order-channel-payment" aria-busy={busy || reading}>
-    <p role="status">{applied ? "渠道付款已接纳" : view?.dataOrigin === "LOCAL_CONTROLLED" ? "当前付款记录属于本地测试支付" : view?.request && view.dataOrigin === "SYNTHETIC_PROTOCOL" ? "协议测试记录，不代表真实付款" : view?.payment?.disposition === "REVIEW_REQUIRED" ? "支付需要人工核对" : view?.payment?.disposition === "APPLIED" ? "付款依据待确认" : view?.request ? channelStateLabels[view.request.state] ?? "支付状态待确认" : "请选择支付方式"}</p>
+    <p role="status">{applied ? "渠道付款已接纳" : view?.dataOrigin === "LOCAL_CONTROLLED" ? "当前付款记录属于本地测试支付" : view?.request && view.dataOrigin === "SYNTHETIC_PROTOCOL" ? "协议测试记录，不代表真实付款" : view?.payment?.disposition === "REVIEW_REQUIRED" ? "支付需要人工核对" : view?.payment?.disposition === "APPLIED" ? "付款依据未记录" : view?.request ? channelStateLabels[view.request.state] ?? "支付状态未记录" : "请选择支付方式"}</p>
     {view?.request ? <p className="order-muted">本次请求金额：{channelMoneyText(view.request.amount)}。支付方式与原请求保持一致。</p> : null}
     {url ? <figure className="order-channel-code"><QRCodeSVG value={url} size={176} level="M" marginSize={4} role="img" aria-label="本单支付二维码" /><figcaption className="order-muted">请使用{view?.request?.method === "WEIXIN_NATIVE" ? "微信" : "支付宝"}扫描本单二维码。二维码有效期未确认，请以渠道提示为准。</figcaption></figure> : null}
     {capabilityOff ? <p className="order-inline-notice" role="status">当前环境未开放真实渠道支付；本页不会生成支付参数，也不会自动改用其他收款方式。</p> : null}
@@ -513,7 +513,7 @@ function PaymentAction({ order, party, onChanged }: { order: Order; party: Order
     {order.status === "PENDING_PAYMENT" && order.holdUntil ? <p className="order-trade-deadline">{expired ? "原支付保留截止" : "支付保留至"} {formatOrderTime(order.holdUntil)}；到期后是否取消以服务端订单状态为准。</p> : null}
     {expired ? <div className="order-notice is-warning" role="status"><Clock3 size={17} aria-hidden="true" /><div><strong>已到期，取消处理中</strong><span>占用时间以订单记录为准；系统正在按序释放该账号，不再接受新的支付。</span></div></div> : null}
     {party === "renter" ? <p className="order-muted">付款或取消后，请先确认处理结果。结果尚未确认时，请查询原申请，不要重复操作；确认前暂不能付款或取消。</p> : null}
-    {receipt?.disposition === "REVIEW_REQUIRED" ? <div className="order-notice is-warning" role="status"><AlertCircle size={17} aria-hidden="true" /><div><strong>支付结果需要人工核对</strong><span>原因：{receipt.reasonCode ?? "待确认"}。未重复扣款；不再新发起支付，等待平台核对。</span></div></div> : null}
+    {receipt?.disposition === "REVIEW_REQUIRED" ? <div className="order-notice is-warning" role="status"><AlertCircle size={17} aria-hidden="true" /><div><strong>支付结果需要人工核对</strong><span>原因：{receipt.reasonCode ?? "未记录"}。未重复扣款；不再新发起支付，等待平台核对。</span></div></div> : null}
     {unknown ? <UnknownNotice label="支付结果未知" message={unknown} onQuery={() => void queryPayment()} onOpenOrder={onChanged} /> : null}
     {cancelUnknown ? <UnknownNotice label="取消结果未知" message={cancelUnknown} onQuery={() => void queryCancel()} onOpenOrder={onChanged} /> : null}
     {error ? <p className="order-inline-notice" role="alert">{error.message}</p> : null}
@@ -553,7 +553,7 @@ function OpeningPanel({ opening, order, party, onChanged }: { opening: Settlemen
   const acked = acks.some((ack) => ack.party === myParty);
   const otherAcked = acks.some((ack) => ack.party !== myParty);
   const confirmed = opening.status === "CONFIRMED";
-  const tag = confirmed ? "双方已确认" : acked && otherAcked ? "双方已确认" : acked ? "你已确认 · 对方待确认" : otherAcked ? `${partyLabel(acks.find((ack) => ack.party !== myParty)?.party ?? "")}已确认 · 你待确认` : "待双方确认";
+  const tag = confirmed ? "双方已确认" : acked && otherAcked ? "双方已确认" : acked ? "你已确认 · 对方未记录" : otherAcked ? `${partyLabel(acks.find((ack) => ack.party !== myParty)?.party ?? "")}已确认 · 你未记录` : "待双方确认";
   const apply = (acting: string, outcome: WriteOutcome<OrderSettlement>) => {
     if (outcome.status === "ok") { onChanged(); return; }
     if (outcome.status === "unknown") { setUnknown(outcome.message); return; }
@@ -584,7 +584,7 @@ function OpeningPanel({ opening, order, party, onChanged }: { opening: Settlemen
         onChanged();
         return;
       }
-      const observed = target ? `原目标期初${target.status === "CONFIRMED" ? "已确认" : target.status === "DRAFT" ? "待确认" : "状态待核对"}` : "未在原结算记录中找到该期初版本";
+      const observed = target ? `原目标期初${target.status === "CONFIRMED" ? "已确认" : target.status === "DRAFT" ? "未记录" : "状态未确认"}` : "未在原结算记录中找到该期初版本";
       setUnknown(`原开租确认申请仍未取得确定回执（原申请保留）。${observed}；当前页面状态不能确定这笔申请是否生效，请稍后再次查询或联系客服核对。`);
     } catch {
       if (isCurrent(acting)) setUnknown("原开租确认申请仍未取得确定回执；最新结算状态暂时无法读取。原请求保留，请稍后再次查询。");
@@ -646,8 +646,8 @@ function ConsumedTable({ order, opening, remaining, consumed }: { order: Order; 
       return <tr key={line.itemId}>
         <td>{resourceName(order, line.itemId)}<span className="order-trade-unit">{unitHint(resourceName(order, line.itemId), line.unit)}</span></td>
         <td>{quantityText(line.unit, open)}</td>
-        <td>{rest === "" ? "待确认" : quantityText(line.unit, rest)}</td>
-        <td>{used === null || used === undefined ? "待确认" : quantityText(line.unit, used)}</td>
+        <td>{rest === "" ? "未记录" : quantityText(line.unit, rest)}</td>
+        <td>{used === null || used === undefined ? "未记录" : quantityText(line.unit, used)}</td>
       </tr>;
     })}</tbody></table>;
 }
@@ -658,9 +658,9 @@ function ConsumptionTable({ order, opening, version }: { order: Order; opening: 
   return <table className="order-trade-lines"><thead><tr><th scope="col">资源</th><th scope="col">期初</th><th scope="col">期末剩余</th><th scope="col">实际消耗</th></tr></thead>
     <tbody>{rows.map((row) => <tr key={row.itemId}>
       <td>{row.name}<span className="order-trade-unit">{unitHint(row.name, row.unit)}</span></td>
-      <td>{row.opening === null ? "待确认" : quantityText(row.unit, row.opening)}</td>
-      <td>{row.remaining === null ? "待确认" : quantityText(row.unit, row.remaining)}</td>
-      <td>{row.consumed === null ? "待确认" : quantityText(row.unit, row.consumed)}</td>
+      <td>{row.opening === null ? "未记录" : quantityText(row.unit, row.opening)}</td>
+      <td>{row.remaining === null ? "未记录" : quantityText(row.unit, row.remaining)}</td>
+      <td>{row.consumed === null ? "未记录" : quantityText(row.unit, row.consumed)}</td>
     </tr>)}</tbody></table>;
 }
 
@@ -757,7 +757,7 @@ function EndingForm({ opening, order, party, onChanged }: { opening: SettlementO
       const authority = await orderApi.settlement(order.id);
       if (!isCurrent(acting)) return;
       const observed = authority.currentRequest
-        ? authority.currentRequest.kind === "INTAKE" ? "当前有结束申请，状态待核对" : authority.currentRequest.kind === "SETTLEMENT_VERSION" ? "当前有结算方案" : "当前申请状态待确认"
+        ? authority.currentRequest.kind === "INTAKE" ? "当前有结束申请，状态未确认" : authority.currentRequest.kind === "SETTLEMENT_VERSION" ? "当前有结算方案" : "当前申请状态未记录"
         : authority.settlement
           ? `当前结算版本 ${authority.settlement.versionNo}`
           : "当前没有可读的申请或结算版本";
@@ -1001,7 +1001,7 @@ function PostingResult({ data, order, party, posting }: { data: OrderSettlement;
   const effectiveAmounts = posting.amounts ?? null;
   const feePayer = effectiveAmounts && typeof effectiveAmounts.feePayer === "string" ? effectiveAmounts.feePayer : null;
   const amountRows = postingAmountRows(party, posting);
-  const captured = typeof posting.capturedCents === "string" && /^\d+$/.test(posting.capturedCents) ? moneyCents(posting.capturedCents) : "待确认";
+  const captured = typeof posting.capturedCents === "string" && /^\d+$/.test(posting.capturedCents) ? moneyCents(posting.capturedCents) : "未记录";
   const charge = amountRows.find((row) => row.label === chargeRowLabel(Boolean(posting.manualAdjustment))) ?? null;
   const records = (version?.decisions ?? []).map((decision) => ({ label: `${partyLabel(decision.party)}${decision.action === "CONFIRM" ? "已确认" : "已拒绝"}`, time: decision.createdAt ?? null }));
   if (posting.postedAt) records.push({ label: "结算生效", time: posting.postedAt });
@@ -1015,12 +1015,12 @@ function PostingResult({ data, order, party, posting }: { data: OrderSettlement;
         </> : <>
           <div><dt>本单净入账</dt><dd>{moneyCents(posting.owner?.availableCents)}</dd></div>
           <div><dt>本次毛收入</dt><dd>{moneyText(posting.owner?.gross)}</dd></div>
-          {feePayer === "OWNER" ? <div><dt>包赔费（号主承担）</dt><dd>{fee ?? "待确认"}</dd></div> : null}
+          {feePayer === "OWNER" ? <div><dt>包赔费（号主承担）</dt><dd>{fee ?? "未记录"}</dd></div> : null}
         </>}
         {party === "renter" ? <><div><dt>原订单已付</dt><dd>{captured}</dd></div>
         <div><dt>退款应付款时间</dt><dd>{formatOrderTime(posting.refundDueAt)}</dd></div></> : null}
       </dl>
-      <p className="order-muted">{party === "owner" ? "本单净入账只表示这一笔订单的净额，不代表钱包全部余额或提现结果。" : "最终应退为已生效的应付金额；退款到账结果待确认，需以收款渠道的实际记录为准，可在我的钱包查看。"}</p>
+      <p className="order-muted">{party === "owner" ? "本单净入账只表示这一笔订单的净额，不代表钱包全部余额或提现结果。" : "最终应退为已生效的应付金额；退款到账结果未记录，需以收款渠道的实际记录为准，可在我的钱包查看。"}</p>
       {amountRows.length ? <AmountTable rows={amountRows} caption={`生效结算金额明细（${party === "renter" ? "租客口径" : "号主口径"}）`} /> : null}
       {adjustment ? <div className="order-trade-sub">
         <h5>人工调整</h5>

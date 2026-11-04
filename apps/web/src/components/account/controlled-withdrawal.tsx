@@ -4,8 +4,8 @@ import {useUserSession,useUserSessionStore} from '@/components/session/user-sess
 import {RecoveryAlert,FieldGroup,fieldControlProps} from '@/components/ui/information';
 import {WalletRequestError,walletMoney,type WalletRead} from '@/lib/personal-wallet-client';
 import {historicalWithdrawalStatus,pendingLocalWithdrawal,quoteLocalWithdrawal,readMyWithdrawalRecords,readMyWithdrawalRecord,recoverLocalWithdrawal,submitLocalWithdrawal,yuanToCents,type LocalWithdrawalScope,type WithdrawalQuote,type HistoricalWithdrawalPage,type HistoricalWithdrawal} from '@/lib/controlled-withdrawal-client';
-const labels={RESERVED:'资金已冻结',SUBMITTING:'正在受理',PROCESSING:'处理中',UNKNOWN:'结果待确认',SUCCEEDED:'测试处理完成',FAILED:'测试处理未完成',RECONCILIATION_REQUIRED:'需要核对'};
-const errorText=(e:unknown)=>e instanceof WalletRequestError&&e.status===401?'登录身份已变化，请重新登录后查询申请进度。':e instanceof WalletRequestError&&e.status===409?'金额、额度或钱包状态已变化，请重新读取；结果待确认时只能查询申请进度。':'当前无法确认提现状态，请稍后查询。';
+const labels={RESERVED:'资金已冻结',SUBMITTING:'正在受理',PROCESSING:'处理中',UNKNOWN:'结果未记录',SUCCEEDED:'测试处理完成',FAILED:'测试处理未完成',RECONCILIATION_REQUIRED:'需要核对'};
+const errorText=(e:unknown)=>e instanceof WalletRequestError&&e.status===401?'登录身份已变化，请重新登录后查询申请进度。':e instanceof WalletRequestError&&e.status===409?'金额、额度或钱包状态已变化，请重新读取；结果未记录时只能查询申请进度。':'当前无法确认提现状态，请稍后查询。';
 export function ControlledWithdrawal({wallet,scope,onWalletChanged,onIdentityFailure,compact=false,showRecoveryFallback=false}:{wallet:WalletRead|null;scope:string;onWalletChanged:()=>void;onIdentityFailure?:(error:WalletRequestError)=>void;compact?:boolean;showRecoveryFallback?:boolean}){
  const session=useUserSession(),store=useUserSessionStore(),userId=session.userId,snapshot=wallet?.snapshotVersion??'WALLET_UNAVAILABLE',live=useRef({scope,snapshot,mounted:false});live.current.scope=scope;live.current.snapshot=snapshot;
  const [value,setValue]=useState<{scope:string;data:LocalWithdrawalScope|null;unavailable?:boolean}>({scope,data:null}),[error,setError]=useState(''),[busy,setBusy]=useState(false),[pending,setPending]=useState(false),[amount,setAmount]=useState(''),[destination,setDestination]=useState(''),[quote,setQuote]=useState<WithdrawalQuote|null>(null),[notice,setNotice]=useState('');
@@ -39,8 +39,8 @@ export function ControlledWithdrawal({wallet,scope,onWalletChanged,onIdentityFai
   const hasPendingWork=pending||(Boolean(data)&&unsettled>0);
   if(!hasPendingWork)return showRecoveryFallback&&(error||value.scope===scope&&value.unavailable||data?.pagination?.nextCursor)?<p className="wallet-history-note"><Link className="account-inline-link" href="/account?view=wallet&wallet=withdraw-local" scroll={false}>查看其他提现记录</Link></p>:null;
   return <section className="account-module-card wallet-attention" aria-busy={busy||undefined}>
-    <h3><Clock3 size={17} aria-hidden="true"/>提现待确认</h3>
-    <strong>{pending?'提现申请状态待确认':`${unsettled} 笔提现申请处理中`}</strong>
+    <h3><Clock3 size={17} aria-hidden="true"/>提现处理中</h3>
+    <strong>{pending?'提现申请状态未记录':`${unsettled} 笔提现申请处理中`}</strong>
     <p>请先查看处理进度，避免重复申请。</p>
     <Link className="button secondary" href="/account?view=wallet&wallet=withdraw-local" scroll={false}>查看申请</Link>
   </section>;
@@ -49,14 +49,14 @@ export function ControlledWithdrawal({wallet,scope,onWalletChanged,onIdentityFai
    <div className="wallet-section-heading"><h3>历史提现记录</h3><button type="button" className="button secondary" disabled={busy} onClick={()=>void load()}>重新读取</button></div>
    <p className="wallet-history-note">到账情况请以收款记录为准。</p>
    {historical?.coverage.knowledge==='UNKNOWN'?<p role="status">部分记录仍在核对，以下为已确认的记录。</p>:null}
-   {historical?.items.length?<div className="wallet-records">{historical.items.map(item=><article key={item.id} className="wallet-withdraw-record"><div><strong>{historicalWithdrawalStatus(item.sourceStatus)}</strong><p>{new Date(item.occurredAt).toLocaleString('zh-CN',{timeZone:'Asia/Shanghai'})}</p><small>到账情况待确认</small></div><strong>{walletMoney(item.amountCents)}</strong><button type="button" className="button secondary" disabled={busy} onClick={()=>void openHistory(item.id)}>查看详情</button></article>)}</div>:busy?<p role="status">正在读取历史提现记录…</p>:historical?.coverage.knowledge==='KNOWN'?<p>当前没有可显示的记录。</p>:<p>记录仍在核对，请稍后查看。</p>}
+   {historical?.items.length?<div className="wallet-records">{historical.items.map(item=><article key={item.id} className="wallet-withdraw-record"><div><strong>{historicalWithdrawalStatus(item.sourceStatus)}</strong><p>{new Date(item.occurredAt).toLocaleString('zh-CN',{timeZone:'Asia/Shanghai'})}</p><small>到账情况未记录</small></div><strong>{walletMoney(item.amountCents)}</strong><button type="button" className="button secondary" disabled={busy} onClick={()=>void openHistory(item.id)}>查看详情</button></article>)}</div>:busy?<p role="status">正在读取历史提现记录…</p>:historical?.coverage.knowledge==='KNOWN'?<p>当前没有可显示的记录。</p>:<p>记录仍在核对，请稍后查看。</p>}
    {historyError?<p role="alert">{historyError}<button type="button" className="button secondary" disabled={busy} onClick={()=>void load()}>重试读取</button></p>:null}
    {historical?.nextCursor?<button type="button" className="button secondary" disabled={busy} onClick={()=>void moreHistory()}>加载更多历史记录</button>:null}
-   {visibleHistoryDetail?<article className="account-module-card" aria-label="历史提现记录详情"><h4>历史提现记录详情</h4><dl className="account-fact-list"><div><dt>提现单号</dt><dd>{visibleHistoryDetail.originalNumber??"未记录"}</dd></div><div><dt>处理状态</dt><dd>{historicalWithdrawalStatus(visibleHistoryDetail.sourceStatus)}</dd></div><div><dt>申请金额</dt><dd>{walletMoney(visibleHistoryDetail.amountCents)}</dd></div><div><dt>原净额</dt><dd>{walletMoney(visibleHistoryDetail.netCents)}</dd></div><div><dt>原手续费</dt><dd>{walletMoney(visibleHistoryDetail.feeCents)}</dd></div><div><dt>到账情况</dt><dd>待确认</dd></div><div><dt>余额处理</dt><dd>{visibleHistoryDetail.includedInOpening?'已计入余额':'仅供查询，不会重复扣款'}</dd></div></dl><button type="button" className="button secondary" onClick={()=>setHistoryDetail(null)}>关闭详情</button></article>:null}
+   {visibleHistoryDetail?<article className="account-module-card" aria-label="历史提现记录详情"><h4>历史提现记录详情</h4><dl className="account-fact-list"><div><dt>提现单号</dt><dd>{visibleHistoryDetail.originalNumber??"未记录"}</dd></div><div><dt>处理状态</dt><dd>{historicalWithdrawalStatus(visibleHistoryDetail.sourceStatus)}</dd></div><div><dt>申请金额</dt><dd>{walletMoney(visibleHistoryDetail.amountCents)}</dd></div><div><dt>原净额</dt><dd>{walletMoney(visibleHistoryDetail.netCents)}</dd></div><div><dt>原手续费</dt><dd>{walletMoney(visibleHistoryDetail.feeCents)}</dd></div><div><dt>到账情况</dt><dd>未记录</dd></div><div><dt>余额处理</dt><dd>{visibleHistoryDetail.includedInOpening?'已计入余额':'仅供查询，不会重复扣款'}</dd></div></dl><button type="button" className="button secondary" onClick={()=>setHistoryDetail(null)}>关闭详情</button></article>:null}
   </section>
   <p className="wallet-history-note">以下为测试申请，不会实际出款。</p>
   {debtMessage?<p className="wallet-history-note" role="status">{debtMessage}</p>:null}
-  {pending?<section className="account-module-card wallet-withdraw-pending" role="status"><h3><Clock3 size={18} aria-hidden="true"/>上次申请结果待确认</h3><p>请先查询处理进度，确认前无法再次申请。</p><button type="button" className="button primary" disabled={busy} onClick={()=>void recover()}>查询申请进度</button></section>:null}
+  {pending?<section className="account-module-card wallet-withdraw-pending" role="status"><h3><Clock3 size={18} aria-hidden="true"/>上次申请结果未记录</h3><p>请先查询处理进度，确认前无法再次申请。</p><button type="button" className="button primary" disabled={busy} onClick={()=>void recover()}>查询申请进度</button></section>:null}
   {notice?<p role="status">{notice}</p>:null}
   {data&&error?<p className="wallet-read-error" role="alert">{error}</p>:null}
   {!data?<RecoveryAlert live={Boolean(error)} tone={busy?'info':error?'error':'unknown'} title={busy?'正在读取提现条件':'提现条件尚未确认'}

@@ -532,6 +532,8 @@ function MarketView({ initialFilters }: { initialFilters: ListingFilters }) {
     ? [{ label: "首页", href: "/" }, { label: game.name }, { label: "租号" }]
     : [{ label: "首页", href: "/" }, { label: "三角洲行动" }, { label: "租号" }];
   const available = activeMetadata?.available ?? false;
+  /** 筛选配置未初始化（filterRevision 为空）时，列表不会发起请求，必须给出明确状态而不是一直转圈。 */
+  const listingNotOpen = metadata.status === "ready" && (!activeMetadata?.filterRevision || activeMetadata?.reasonCode === "FILTERS_UNCONFIGURED");
   const readyToBrowse = lookupNumber ? filterSourceReady : metadata.status === "ready" && available && restoreReady;
   const resetFilters = () => {
     setResetToken((value) => value + 1);
@@ -674,7 +676,7 @@ function MarketView({ initialFilters }: { initialFilters: ListingFilters }) {
       <div className="market-directory" id="account-list" tabIndex={-1}>
         {!lookupNumber && (metadata.status === "loading" || games.status === "loading") ? <p className="market-state-note" role="status">正在读取当前游戏与可用筛选项…</p> : null}
         {!lookupNumber && metadata.status === "error" ? <div className="market-inline-state" role="alert"><p>筛选配置暂时不可用，账号目录尚未发起请求。</p><button type="button" className="button secondary" onClick={() => setMetadataAttempt((value) => value + 1)}><RotateCw size={15} />重试筛选配置</button></div> : null}
-        {!lookupNumber && metadata.status === "ready" && !available ? <div className="market-inline-state" role="status"><h3>当前游戏暂不可筛选</h3><p>{activeMetadata?.reasonCode === "FILTERS_UNCONFIGURED" ? "公开展示配置尚未完成，暂时无法读取账号。" : "此游戏的账号目录暂不可用，请稍后重试。"}</p></div> : null}
+        {!lookupNumber && metadata.status === "ready" && (listingNotOpen || !available) ? <div className="market-inline-state" role="status"><h3>暂未开放选号</h3><p>{listingNotOpen ? "平台正在完成上架配置，稍后即可查看账号。" : "此游戏的账号目录暂不可用，请稍后重试。"}</p>{listingNotOpen ? <button type="button" className="button secondary" onClick={() => setMetadataAttempt((value) => value + 1)}><RotateCw size={15} />重新检查</button> : null}</div> : null}
 
         {activeMetadata && available && !lookupNumber && <>
           {compact && <div className="market-filter-mobile-row">
@@ -754,7 +756,7 @@ function MarketView({ initialFilters }: { initialFilters: ListingFilters }) {
         {catalog.status === "error" && activeMetadata && !lookupNumber ? <p className="market-catalog-note" role="status">皮肤目录暂不可用；已选条件和其他筛选仍可继续使用。</p> : null}
         <FavoriteNotice />
         <div className="market-results-toolbar">
-          <div><h2>{lookupNumber ? "编号查询结果" : "账号列表"}</h2><p className="sr-only" aria-live="polite" aria-atomic="true">{feed.status === "ready" ? `已加载 ${resultCount} 条` : feed.status === "error" ? currentError?.title ?? "结果读取失败" : "正在读取结果"}{feed.nextCursor ? " · 还有更多可继续加载" : ""}</p></div>
+          <div><h2>{lookupNumber ? "编号查询结果" : "账号列表"}</h2><p className="sr-only" aria-live="polite" aria-atomic="true">{feed.status === "ready" ? (resultCount ? `已加载 ${resultCount} 条` : "暂时没有符合条件的账号") : feed.status === "error" ? currentError?.title ?? "结果读取失败" : listingNotOpen ? "暂未开放选号" : readyToBrowse ? "正在读取结果" : "正在准备账号列表"}{feed.nextCursor ? " · 还有更多可继续加载" : ""}</p></div>
           <div className="market-results-controls">
             {activeMetadata && !lookupNumber && compact && <div className="market-sort-controls" aria-label="账号排序">
               <MarketSelect
@@ -835,7 +837,7 @@ function MarketView({ initialFilters }: { initialFilters: ListingFilters }) {
         ) : null}
         {filters.q && <div className="market-search-summary" role="status">搜索“{filters.q}” · {lookupNumber ? "按完整编号精确查找" : "按账号标题关键词筛选"}<button type="button" onClick={clearSearch}>清除搜索</button></div>}
         <div className="market-results" aria-busy={feed.status === "loading" || feed.isLoadingMore}>
-          {feed.status === "loading" ? <div className={`account-grid account-grid--${effectiveViewMode}`}>{Array.from({ length: 5 }, (_, index) => <AccountCardSkeleton key={index} />)}</div> : null}
+          {feed.status === "loading" && !listingNotOpen && metadata.status !== "error" ? <div className={`account-grid account-grid--${effectiveViewMode}`}>{Array.from({ length: 5 }, (_, index) => <AccountCardSkeleton key={index} />)}</div> : null}
           {feed.status === "error" && feed.items.length === 0 && currentError ? <div className="market-inline-state" role={currentError.kind === "adjust" ? "alert" : "status"}>
             <h3>{currentError.title}</h3><p>{currentError.description}</p>
             {currentError.kind === "retry" ? <button type="button" className="button secondary" onClick={feed.reload}><RotateCw size={15} />重试</button> : <button type="button" className="button secondary" onClick={lookupNumber ? clearSearch : resetFilters}>{lookupNumber ? "清除编号" : "清空筛选条件"}</button>}
@@ -843,7 +845,7 @@ function MarketView({ initialFilters }: { initialFilters: ListingFilters }) {
           {feed.items.length > 0 && currentError ? <p className="market-inline-state market-inline-state--compact" role="alert"><strong>{currentError.title}</strong> {currentError.description}{currentError.kind === "retry" ? <button type="button" onClick={feed.loadMoreError ? feed.loadMore : feed.reload}>{feed.loadMoreError ? "重试加载" : "重试读取"}</button> : currentError.kind === "adjust" ? <button type="button" onClick={lookupNumber ? clearSearch : resetFilters}>{lookupNumber ? "清除编号" : "清空筛选条件"}</button> : null}</p> : null}
           {feed.items.length > 0 ? <div className={`account-grid account-grid--${effectiveViewMode}`}>
             {feed.items.map((listing, index) => <AccountCard key={listing.id} data={toListingCard(listing)} viewMode={effectiveViewMode} matchedResourceItemIds={matchedResourceItemIds} imageLoading={index < (effectiveViewMode === "grid" ? 8 : 4) ? "eager" : "lazy"} getReturnState={() => ({ scrollY: window.scrollY, pageCursors: feed.requestedCursors.length ? feed.requestedCursors : [null], filterKey, viewMode: effectiveViewMode })} />)}
-          </div> : feed.status === "ready" && !feed.nextCursor ? <AccountCardEmpty message={filterCount > 0 ? "没有符合条件的账号" : "暂无可展示账号"} description={filterCount > 0 ? "可以单项移除条件以逐步放宽范围，或重置全部条件：" : "当前没有可展示的号源，请稍后再来。"} onReset={filterCount > 0 ? resetFilters : undefined} onRetry={filterCount === 0 ? feed.reload : undefined}>
+          </div> : feed.status === "ready" && !feed.nextCursor ? <AccountCardEmpty message="暂时没有符合条件的账号" description={filterCount > 0 ? "可以单项移除条件以逐步放宽范围，或清除全部筛选：" : "当前没有可展示的号源，也可以返回全部账号重新查看："} onReset={resetFilters} resetLabel={filterCount > 0 ? "清除筛选条件" : "返回全部账号"} onRetry={filterCount === 0 ? feed.reload : undefined}>
             {activeTags.length > 0 && <div className="account-empty-filters" role="group" aria-label="当前已选筛选条件">
               <div className="account-empty-chips">
                 {activeTags.map((tag) => <button key={tag.id} type="button" className="market-filter-chip account-empty-chip" onClick={tag.onRemove} aria-label={`移除筛选：${tag.label}`}><span>{tag.label}</span><X size={12} aria-hidden="true" /></button>)}

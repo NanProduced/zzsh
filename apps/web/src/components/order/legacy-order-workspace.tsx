@@ -58,7 +58,7 @@ export function LegacyOrderWorkspace({ party, orderId, page: pageText, accountId
     <div className="account-module-card">
       {data.items.length ? <ul className="legacy-order-list">{data.items.map(row => {
         const facts = orderAmountFacts(row, party);
-        return <li key={row.id}><Link href={legacyOrderHref(party, page, row.id, accountId)}><strong>{row.displayNo || "订单号暂未提供"}<small> · {facts.caption} {facts.main}</small></strong><span>{orderAccountTitle(row)}</span><span>{row.source.statusLabel || "状态待确认"} · {orderTermLabel(row)}</span><time>{formatOrderTime(row.createdAt)}</time></Link></li>;
+        return <li key={row.id}><Link href={legacyOrderHref(party, page, row.id, accountId)}><strong>{row.displayNo || "订单号暂未提供"}<small> · {facts.caption} {facts.main}</small></strong><span>{orderAccountTitle(row)}</span><span>{row.source.statusLabel || "状态未记录"} · {orderTermLabel(row)}</span><time>{formatOrderTime(row.createdAt)}</time></Link></li>;
       })}</ul> : <p>暂无订单记录。</p>}
       <nav className="order-trade-actions" aria-label="订单分页">
         {page > 1 ? <Link className="button secondary" href={legacyOrderHref(party, page - 1, undefined, accountId)}>上一页</Link> : null}
@@ -73,7 +73,7 @@ export function LegacyOrderWorkspace({ party, orderId, page: pageText, accountId
     <Link className="order-detail-back" href={orderUrl(party, status, accountId, undefined, undefined, filters)} scroll={false}><ArrowLeft size={16} aria-hidden="true" />返回订单列表</Link>
     <header className="order-legacy-hero-card">
       <div className="order-legacy-hero-row">
-        <strong className="order-status" data-state={data.status === "PENDING_PAYMENT" ? "pending" : data.status.toLowerCase()}>{data.source.statusLabel || "状态待确认"}</strong>
+        <strong className="order-status" data-state={data.status === "PENDING_PAYMENT" ? "pending" : data.status.toLowerCase()}>{data.source.statusLabel || "状态未记录"}</strong>
         <div className="order-legacy-id-group">
           {data.displayNo ? <span className="order-id-badge">订单号 <strong>{data.displayNo}</strong></span> : null}
           {accountNo ? <span className="order-id-badge">账号编号 <strong>{accountNo}</strong></span> : null}
@@ -83,7 +83,7 @@ export function LegacyOrderWorkspace({ party, orderId, page: pageText, accountId
       <p className="order-legacy-hero-meta">{orderTermLabel(data)}</p>
       {data.listingFacts?.source === "LEGACY_ACCOUNT_SNAPSHOT" ? <p className="order-muted">{orderListingSourceLabel(data)}；原单资源与金额分别保留。</p> : orderUsesResourceSummary(data) ? <p className="order-muted">账号资料来自本单记录。</p> : null}
     </header>
-    <section className="account-module-card order-legacy-bill-card"><h3>{party === "owner" ? "出租收益记录" : "金额记录"}</h3>{party === "owner" ? <div className="order-owner-income-block">{recordedIncome ? <><p className="order-amount-total">{formatOrderMoney(recordedIncome)}</p><p className="order-muted">记录金额仅供查看，余额请以钱包为准。</p></> : <p className="order-muted">收益金额待确认。</p>}<Link className="order-wallet-link" href="/account?view=wallet" scroll={false}>查看钱包记录</Link></div> : <dl className="order-facts order-bill-facts">
+    <section className="account-module-card order-legacy-bill-card"><h3>{party === "owner" ? "出租收益记录" : "金额记录"}</h3>{party === "owner" ? <div className="order-owner-income-block">{recordedIncome ? <><p className="order-amount-total">{formatOrderMoney(recordedIncome)}</p><p className="order-muted">记录金额仅供查看，余额请以钱包为准。</p></> : <p className="order-muted">收益金额未记录。</p>}<Link className="order-wallet-link" href="/account?view=wallet" scroll={false}>查看钱包记录</Link></div> : <dl className="order-facts order-bill-facts">
       <div><dt>应付金额</dt><dd>{formatOrderMoney(data.legacyAmounts?.required)}</dd></div>
       <div><dt>已付金额</dt><dd>{formatOrderMoney(data.legacyAmounts?.paid)}</dd></div>
       <div><dt>押金</dt><dd>{formatOrderMoney(data.legacyAmounts?.deposit)}</dd></div>

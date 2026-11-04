@@ -6,7 +6,7 @@ export type HistoricalWithdrawal={id:string;source:'HISTORICAL_WITHDRAWAL';sourc
 export type HistoricalWithdrawalPage={source:'HISTORICAL_WITHDRAWAL';availability:'AVAILABLE'|'NOT_IMPORTED'|'NOT_INSTALLED';coverage:{knowledge:'KNOWN'|'UNKNOWN';reason:string;cutoff?:string|null;version?:string|null};items:HistoricalWithdrawal[];mappedRecordCount:string|null;count:string|null;asOf:string|null;snapshotVersion:string|null;nextCursor:string|null};
 export type WithdrawalRead={contractVersion:'personal-withdrawals.read.v1';subjectId:string;source:'ALL'|'HISTORICAL'|'LOCAL_CONTROLLED';state:string;historical:HistoricalWithdrawalPage|null;controlled:{availability:'AVAILABLE'|'NOT_ADMITTED'|'NOT_CONFIGURED'|'NOT_IN_SCOPE'|'NOT_REQUESTED';reason:string|null;data:LocalWithdrawalScope|null}};
 export type WithdrawalReadFilter={source?:WithdrawalRead['source'];state?:string;cursor?:string|null;limit?:number};
-export function historicalWithdrawalStatus(status:number):string{return ({1:'待处理',2:'处理中',3:'记录已处理，到账待确认',4:'记录标记失败',5:'转账处理中'} as Record<number,string>)[status]??'状态待确认';}
+export function historicalWithdrawalStatus(status:number):string{return ({1:'待处理',2:'处理中',3:'记录已处理，到账未记录',4:'记录标记失败',5:'转账处理中'} as Record<number,string>)[status]??'状态未记录';}
 export type WithdrawalQuote=WithdrawalBody&{requestKey:string;netCents:string;feeCents:string;destinationMask:string;acceptedAt:string};
 type Pending={version:1;userId:string;key:string;body:WithdrawalBody};
 const bad=()=>new WalletRequestError(502,'WITHDRAWAL_CONTRACT_REQUIRED');

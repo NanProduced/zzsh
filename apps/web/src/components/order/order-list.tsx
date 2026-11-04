@@ -30,14 +30,14 @@ function fulfillmentText(value: FulfillmentAssignment): string {
   if (value.state === "WAITING") return value.waitingReason === "NO_ELIGIBLE_STAFF" ? "当前暂无可用客服" : "等待客服分配";
   if (value.state === "ASSIGNED" && value.teamReady) return "订单群已就绪";
   if (value.state === "ASSIGNED") return "订单群准备中";
-  return "履约状态待确认";
+  return "履约状态未记录";
 }
 
 /** Compact Beijing date for a list row; the detail keeps the exact, offset-annotated time. */
 function shortTime(value: string | null | undefined): string {
-  if (!value) return "待确认";
+  if (!value) return "未记录";
   const date = new Date(value);
-  if (!Number.isFinite(date.getTime())) return "待确认";
+  if (!Number.isFinite(date.getTime())) return "未记录";
   return new Intl.DateTimeFormat("zh-CN", {
     timeZone: "Asia/Shanghai", month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit", hourCycle: "h23",
   }).format(date);
@@ -96,7 +96,7 @@ function resourceSummary(order: Order, includeHaff = true): string | null {
  */
 function statusHint(order: Order): string | null {
   const stage = orderSettlementStageLabel(order);
-  if (order.readOnly) return order.status === "PAID" ? stage ?? "进度待确认" : null;
+  if (order.readOnly) return order.status === "PAID" ? stage ?? "进度未记录" : null;
   if (stage) {
     return order.stage?.viewerActionRequired ? `${stage} · 需要你处理` : stage;
   }
@@ -107,7 +107,7 @@ function statusHint(order: Order): string | null {
   if (order.status === "PAID") return order.fulfillmentAssignment ? fulfillmentText(order.fulfillmentAssignment) : "等待客服分配";
   if (order.status === "COMPLETED") return null;
   if (order.status === "CANCELLED") return "订单已关闭";
-  return "订单状态待确认";
+  return "订单状态未记录";
 }
 
 function InlineCopyBtn({ text, label }: { text: string; label: string }) {
@@ -148,7 +148,7 @@ function ListRow({ party, order, status, accountId, filters, onOpen }: { party: 
         <Link className="order-row-title" href={orderUrl(party, status, accountId, order.id, order.source?.origin, filters)} scroll={false} data-order-id={order.id} data-order-key={orderItemKey(order)} aria-label={[action, order.displayNo ? `订单号 ${order.displayNo}` : null, title].filter(Boolean).join("，")} onClick={(event) => onOpen(orderItemKey(order), event)}>{title}</Link>
         {stageTag ? <span className="order-row-tag order-row-stage" data-fulfillment-stage={stageTag.code}>{stageTag.label}</span> : null}
         {modeLabel ? <span className="order-row-tag" data-mode={order.quote?.rentalMode}>{modeLabel}</span> : null}
-        {!order.listingFacts && order.listingFactsUnknownReason ? <span className="order-row-tag">资料待核实</span> : null}
+        {!order.listingFacts && order.listingFactsUnknownReason ? <span className="order-row-tag">资料未确认</span> : null}
       </div>
       {resources ? <p className="order-row-resources">{resources}</p> : null}
       <p className="order-row-meta">
@@ -269,7 +269,7 @@ export function OrderListPanel({ party, status, accountId, filters = {}, onApply
         <div id="order-more-filters" className="order-search-extra" hidden={!showMoreFilters}>
           <label className="order-extra-field"><span className="order-field-label">开始日期</span><input type="date" value={draft.createdFrom ?? ""} onChange={event=>setDraft(value=>({...value,createdFrom:event.target.value}))}/></label>
           <label className="order-extra-field"><span className="order-field-label">结束日期</span><input type="date" value={draft.createdTo ?? ""} onChange={event=>setDraft(value=>({...value,createdTo:event.target.value}))}/></label>
-          <label className="order-extra-field"><span className="order-field-label">订单进度</span><select value={draft.stage ?? ""} onChange={event=>setDraft(value=>({...value,stage:event.target.value}))}><option value="">全部进度</option><option value="OPENING_PENDING">待确认开租</option><option value="RENTING">租赁中</option><option value="INTAKE_PENDING">结算受理中</option><option value="DECISION_PENDING">待你确认结算</option><option value="DECISION_WAITING">等待对方或平台确认</option><option value="DECISION_REJECTED">结算方案未达成一致</option><option value="POSTED">已结算</option><option value="UNKNOWN">进度待确认</option></select></label>
+          <label className="order-extra-field"><span className="order-field-label">订单进度</span><select value={draft.stage ?? ""} onChange={event=>setDraft(value=>({...value,stage:event.target.value}))}><option value="">全部进度</option><option value="OPENING_PENDING">等待开租确认</option><option value="RENTING">租赁中</option><option value="INTAKE_PENDING">结算受理中</option><option value="DECISION_PENDING">待你确认结算</option><option value="DECISION_WAITING">等待对方或平台确认</option><option value="DECISION_REJECTED">结算方案未达成一致</option><option value="POSTED">已结算</option><option value="UNKNOWN">进度未记录</option></select></label>
         </div>
         {filterError ? <p role="alert" className="order-filter-alert">{filterError}</p> : null}
       </form>

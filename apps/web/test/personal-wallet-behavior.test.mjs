@@ -7,7 +7,7 @@ const entry={schemaVersion:1,id:'ledger:entry_A',occurredAt:at,importedAt:at,buc
 const page=(id='user_A')=>({...ctx(id),bucket:'ALL',items:[entry],nextCursor:'original_cursor',totals:{count:'2',historicalCoverage:'INCLUDED',meaning:'covered',byBucket:[{bucket:'AVAILABLE',count:'2',postedNetCents:'123456',coveredHistoricalNetCents:'123456',uncoveredHistoricalNetCents:'0',coveredCount:'1',uncoveredCount:'0'}]}});
 const reply=(b,status=200)=>Response.json(b,{status}),deferred=()=>{let resolve;const promise=new Promise(r=>resolve=r);return{promise,resolve};};
 async function probe(fetcher,query=''){const w=new Window({url:'http://127.0.0.1:4200/account?view=wallet'});Object.assign(globalThis,{window:w,localStorage:w.localStorage,document:w.document,HTMLElement:w.HTMLElement,Element:w.Element,Node:w.Node,Event:w.Event,MouseEvent:w.MouseEvent,DOMException:w.DOMException,IS_REACT_ACT_ENVIRONMENT:true});Object.defineProperty(globalThis,'navigator',{value:w.navigator,configurable:true});const previous=globalThis.fetch;globalThis.fetch=fetcher;const session={status:'authenticated',userId:'user_A',identityVersion:1,revalidations:0,revalidate(){this.revalidations++;}},store={getSnapshot:()=>session};let params=new URLSearchParams(query);const m=new Module(tree+'/wallet-probe.cjs');m.filename=tree+'/wallet-probe.cjs';m.paths=Module._nodeModulePaths(tree);m.require=name=>{if(name==='./bank-binding-workspace')return{BankBindingWorkspace:({scope})=>React.createElement('section',{'data-testid':'bank-binding-workspace','data-scope':scope},'绑卡与提现候选')};if(name==='./owner-guarantee-history')return{OwnerGuaranteeHistory:()=>null};if(name==='next/link')return({scroll:_scroll,...props})=>React.createElement('a',props);if(name==='next/navigation')return{useSearchParams:()=>params};if(name==='@/components/session/user-session-provider')return{useUserSession:()=>session,useUserSessionStore:()=>store};if(name==='./controlled-withdrawal'){const child=new Module(tree+'/withdrawal-probe.cjs');child.filename=tree+'/withdrawal-probe.cjs';child.paths=m.paths;child.require=n=>n==='@/lib/controlled-withdrawal-client'?require(tree+'/apps/web/src/lib/controlled-withdrawal-client.ts'):m.require(n);child._compile(ts.transpileModule(readFileSync(tree+'/apps/web/src/components/account/controlled-withdrawal.tsx','utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,jsx:ts.JsxEmit.ReactJSX,target:ts.ScriptTarget.ES2022,esModuleInterop:true}}).outputText,child.filename);return child.exports;}if(name==='@/lib/personal-wallet-client')return client;if(name==='@/lib/withdrawal-bank-binding-client')return require(tree+'/apps/web/src/lib/withdrawal-bank-binding-client.ts');if(name==='@/lib/order-client')return require(tree+'/apps/web/src/lib/order-client.ts');if(name==='@/components/ui/information')return information;if(name.endsWith('.css'))return{};return require(name);};m._compile(compiled,m.filename);const host=w.document.createElement('div');w.document.body.append(host);const root=require('react-dom/client').createRoot(host),commits=[],settle=async()=>{for(let i=0;i<3;i++)await React.act(async()=>{await new Promise(setImmediate);});};function Frame(){const scope=`${session.userId}:${session.identityVersion}`;React.useLayoutEffect(()=>{commits.push({scope,text:host.textContent});});return React.createElement(m.exports.PersonalWallet,{scope});}const render=async()=>{await React.act(async()=>root.render(React.createElement(Frame)));await settle();};return{host,session,render,settle,commits,async fill(selector,value){const target=host.querySelector(selector);assert(target,selector);const proto=target.tagName==='SELECT'?w.HTMLSelectElement.prototype:w.HTMLInputElement.prototype;await React.act(async()=>{Object.getOwnPropertyDescriptor(proto,'value').set.call(target,value);target.dispatchEvent(new w.Event(target.tagName==='SELECT'?'change':'input',{bubbles:true}));});await settle();},async click(selector){const target=host.querySelector(selector);assert(target,selector);await React.act(async()=>{target.dispatchEvent(new w.MouseEvent('click',{bubbles:true}));await new Promise(setImmediate);});await settle();},async setQuery(q){params=new URLSearchParams(q);await render();},async close(){await React.act(async()=>root.unmount());await w.happyDOM.abort();globalThis.fetch=previous;}};}
-test('exact large amounts and UNKNOWN are distinct from known zero',()=>{assert.equal(client.walletMoney('999999999999999999999999'),'¥9,999,999,999,999,999,999,999.99');assert.equal(client.walletMoney(null),'待确认');assert.equal(client.walletMoney('0'),'¥0.00');assert.equal(client.walletMoney('-1',true),'− ¥0.01');assert.throws(()=>client.walletMoney('-0'));});
+test('exact large amounts and UNKNOWN are distinct from known zero',()=>{assert.equal(client.walletMoney('999999999999999999999999'),'¥9,999,999,999,999,999,999,999.99');assert.equal(client.walletMoney(null),'未记录');assert.equal(client.walletMoney('0'),'¥0.00');assert.equal(client.walletMoney('-1',true),'− ¥0.01');assert.throws(()=>client.walletMoney('-0'));});
 
 test('wallet timestamps distinguish authoritative day, explicit unknown and compatible record time',async()=>{
  const previous=globalThis.fetch;
@@ -41,7 +41,7 @@ test('source-only history renders the known occurrence time in both list and det
   const p=await probe(async url=>reply(String(url).includes('/entries/')?{...ctx(),entry:historical}:String(url).includes('/entries?')?{...page(),items:[historical]}:wallet()),'wallet=entries');
   try{
    await p.render();const record=p.host.querySelector('.wallet-record');assert(record,sourceKind);
-   assert.equal(record.querySelector('time').getAttribute('dateTime'),at);assert.match(record.textContent,/发生时间/);assert.doesNotMatch(record.textContent,/发生时间待确认/);
+   assert.equal(record.querySelector('time').getAttribute('dateTime'),at);assert.match(record.textContent,/发生时间/);assert.doesNotMatch(record.textContent,/发生时间未记录/);
    await p.setQuery('wallet=entry&entry=history%3Asource_time');
    const detail=p.host.querySelector('.wallet-entry-detail');assert(detail,sourceKind);
    const occurrence=[...detail.querySelectorAll('dl > div')].find(row=>row.querySelector('dt')?.textContent==='发生时间');
@@ -161,7 +161,7 @@ test('F2: unreadable withdrawal catalog with no known intent is neutral and neve
     localStorage.removeItem(withdrawalMarker);
     await p.render();
     assert.equal(p.host.querySelector('.wallet-attention'),null);
-    assert.doesNotMatch(p.host.textContent,/没有提现申请|暂无提现申请|提现待确认/);
+    assert.doesNotMatch(p.host.textContent,/没有提现申请|暂无提现申请|提现处理中/);
     assert(p.host.querySelector('a[href*="wallet=withdraw"]'));
     assert.equal(p.host.querySelector('a[href*="wallet=withdraw-local"]'),null, 'the overview does not add recovery noise without a known intent');
     // 目录失败不阻塞钱包主读取，也不退化成空申请列表或开启提现。
@@ -174,26 +174,26 @@ test('a partial local history keeps the recovery entry without claiming older re
  const terminal={scope:'LOCAL_CONTROLLED',evidenceLevel:'LOCAL_CONTROLLED',id:'local-1',userId:'user_A',state:'FAILED',operationVersion:'1',fundsDisposition:'RELEASE_POSTED',amountCents:'200',netCents:'100',feeCents:'100',destinationId:'bank',policyVersion:'server_policy',acceptedAt:at,terminal:{state:'FAILED',reference:'receipt-1'}};
  const local={...localScope(),items:[terminal],pagination:{asOf:at,snapshotVersion:'snapshot-local',mappedRecordCount:'2',nextCursor:'next-page'}};
  const p=await probe(async url=>reply(String(url).includes('/withdrawals')?local:String(url).includes('/entries?')?page():wallet()),'wallet=withdraw');
- try{localStorage.removeItem(withdrawalMarker);await p.render();assert(p.host.querySelector('a[href*="wallet=withdraw-local"]'));assert.doesNotMatch(p.host.textContent,/提现待确认|有一笔提现申请/);}finally{await p.close();}
+ try{localStorage.removeItem(withdrawalMarker);await p.render();assert(p.host.querySelector('a[href*="wallet=withdraw-local"]'));assert.doesNotMatch(p.host.textContent,/提现处理中|有一笔提现申请/);}finally{await p.close();}
 });
 
 test('an unavailable local catalog keeps its records entry on the withdrawal page',async()=>{
  const p=await probe(async url=>String(url).includes('/withdrawals')?reply({error:{code:'EVIDENCE_UNAVAILABLE'}},503):reply(String(url).includes('/entries?')?page():wallet()),'wallet=withdraw');
- try{localStorage.removeItem(withdrawalMarker);await p.render();assert(p.host.querySelector('a[href*="wallet=withdraw-local"]'));assert.doesNotMatch(p.host.textContent,/提现待确认|有一笔提现申请/);}finally{await p.close();}
+ try{localStorage.removeItem(withdrawalMarker);await p.render();assert(p.host.querySelector('a[href*="wallet=withdraw-local"]'));assert.doesNotMatch(p.host.textContent,/提现处理中|有一笔提现申请/);}finally{await p.close();}
 });
 
 for(const availability of ['NOT_ADMITTED','NOT_CONFIGURED','NOT_IN_SCOPE'])test(`an HTTP 200 ${availability} catalog keeps its records entry`,async()=>{
  const body={contractVersion:'personal-withdrawals.read.v1',subjectId:'user_A',source:'ALL',state:'ALL',historical:{source:'HISTORICAL_WITHDRAWAL',availability:'NOT_INSTALLED',coverage:{knowledge:'UNKNOWN',reason:'HISTORY_NOT_INSTALLED'},items:[],mappedRecordCount:null,count:null,asOf:null,snapshotVersion:null,nextCursor:null},controlled:{availability,reason:'UNAVAILABLE',data:null}};
  const p=await probe(async url=>reply(String(url).includes('/withdrawals')?body:String(url).includes('/entries?')?page():wallet()),'wallet=withdraw');
- try{localStorage.removeItem(withdrawalMarker);await p.render();assert(p.host.querySelector('a[href*="wallet=withdraw-local"]'));assert.doesNotMatch(p.host.textContent,/提现待确认|有一笔提现申请/);}finally{await p.close();}
+ try{localStorage.removeItem(withdrawalMarker);await p.render();assert(p.host.querySelector('a[href*="wallet=withdraw-local"]'));assert.doesNotMatch(p.host.textContent,/提现处理中|有一笔提现申请/);}finally{await p.close();}
 });
 test('F2: a known original intent still carries pending semantics when the catalog is unreadable',async()=>{
   const p=await probe(async url=>String(url).includes('/withdrawals')?reply({error:{code:'EVIDENCE_UNAVAILABLE'}},503):reply(String(url).includes('/entries?')?page():wallet()));
   try{
     localStorage.setItem(withdrawalMarker,JSON.stringify({version:1,userId:'user_A',key:'original-key',body:{amountCents:'200',destinationId:'bank',policyVersion:'server_policy',expectedWalletVersion:'1'}}));
     await p.render();
-    assert.match(p.host.textContent,/提现待确认/);
-    assert.match(p.host.textContent,/提现申请状态待确认/);
+    assert.match(p.host.textContent,/提现处理中/);
+    assert.match(p.host.textContent,/提现申请状态未记录/);
     assert.match(p.host.textContent,/避免重复申请/);
     assert.doesNotMatch(p.host.textContent,/提现信息暂时无法读取/);
   }finally{localStorage.removeItem(withdrawalMarker);await p.close();}
@@ -201,16 +201,16 @@ test('F2: a known original intent still carries pending semantics when the catal
 
 test('an unreadable withdrawal marker does not claim a specific application exists',async()=>{
   const calls=[],p=await probe(async (url,options)=>{calls.push(options?.method??'GET');return String(url).includes('/withdrawals')?reply({error:{code:'EVIDENCE_UNAVAILABLE'}},503):reply(String(url).includes('/entries?')?page():wallet());});
-  try{localStorage.setItem(withdrawalMarker,'unreadable');await p.render();assert.match(p.host.textContent,/提现申请状态待确认/);assert.doesNotMatch(p.host.textContent,/有一笔提现申请/);assert.equal(localStorage.getItem(withdrawalMarker),'unreadable');assert(calls.every(method=>method==='GET'));}finally{localStorage.removeItem(withdrawalMarker);await p.close();}
+  try{localStorage.setItem(withdrawalMarker,'unreadable');await p.render();assert.match(p.host.textContent,/提现申请状态未记录/);assert.doesNotMatch(p.host.textContent,/有一笔提现申请/);assert.equal(localStorage.getItem(withdrawalMarker),'unreadable');assert(calls.every(method=>method==='GET'));}finally{localStorage.removeItem(withdrawalMarker);await p.close();}
 });
 
 for(const pane of ['', 'wallet=withdraw', 'wallet=withdraw-local'])for(const marker of ['valid','unreadable'])test(`identity switch clears ${marker} withdrawal state before the first ${pane||'overview'} frame`,async()=>{
  let who='user_A';const p=await probe(async url=>String(url).includes('/withdrawals')?reply({error:{code:'EVIDENCE_UNAVAILABLE'}},503):reply(String(url).includes('/entries?')?page(who):wallet(who)),pane);
  const saved=marker==='valid'?JSON.stringify({version:1,userId:'user_A',key:'original-key',body:{amountCents:'200',destinationId:'bank',policyVersion:'server_policy',expectedWalletVersion:'1'}}):'unreadable';
  try{
-  localStorage.setItem(withdrawalMarker,saved);await p.render();assert.match(p.host.textContent,/提现待确认|上次申请结果待确认/);
+  localStorage.setItem(withdrawalMarker,saved);await p.render();assert.match(p.host.textContent,/提现处理中|上次申请结果未记录/);
   p.commits.length=0;who='user_B';p.session.userId='user_B';p.session.identityVersion=2;await p.render();
-  const first=p.commits.find(frame=>frame.scope==='user_B:2');assert(first);assert.doesNotMatch(first.text,/提现待确认|提现申请状态待确认|上次申请结果待确认/);assert.equal(localStorage.getItem(withdrawalMarker),saved);
+  const first=p.commits.find(frame=>frame.scope==='user_B:2');assert(first);assert.doesNotMatch(first.text,/提现处理中|提现申请状态未记录|上次申请结果未记录/);assert.equal(localStorage.getItem(withdrawalMarker),saved);
  }finally{localStorage.removeItem(withdrawalMarker);await p.close();}
 });
 

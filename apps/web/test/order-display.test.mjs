@@ -15,7 +15,7 @@ test("payment observation translates known states without treating the original 
   assert.equal(display.paymentObservation(null), "暂未查到付款记录");
   assert.equal(display.paymentObservation({ disposition: "APPLIED" }), "已有付款记录（已记入订单）");
   assert.equal(display.paymentObservation({ disposition: "REVIEW_REQUIRED" }), "已有付款记录（需要人工核对）");
-  assert.equal(display.paymentObservation({ disposition: "FUTURE_STATE" }), "已有付款记录（状态待确认）");
+  assert.equal(display.paymentObservation({ disposition: "FUTURE_STATE" }), "已有付款记录（状态未记录）");
 });
 
 test("settlement preview failures remain actionable without exposing internal reason codes", () => {
@@ -30,21 +30,21 @@ test("order facts name historical, frozen or current sources without pretending 
   assert.equal(display.orderListingSourceLabel({ listingFacts: { source: "ORDER_VERSION" } }), "下单时账号资料");
   assert.equal(display.orderListingSourceLabel({ listingFacts: { source: "ACCOUNT_CURRENT" } }), "当前账号资料");
   assert.equal(display.orderListingSourceLabel({ source: { origin: "LEGACY" }, listingFacts: { source: "LEGACY_ACCOUNT_SNAPSHOT" } }), "当前账号资料（迁入时记录）");
-  assert.equal(display.orderListingSourceLabel({ listingFactsUnknownReason: "UNREADABLE" }), "账号资料待核实");
+  assert.equal(display.orderListingSourceLabel({ listingFactsUnknownReason: "UNREADABLE" }), "账号资料未确认");
   assert.equal(display.orderListingSourceLabel({}), null);
 });
 
 test("server opening and renting stages stay distinct, while rejection stays explicit", () => {
   assert.equal(display.orderSettlementStageLabel({ stage: { code: "NONE", label: null } }), null);
-  assert.equal(display.orderSettlementStageLabel({ stage: { code: "UNKNOWN", label: "待核对" } }), null);
+  assert.equal(display.orderSettlementStageLabel({ stage: { code: "UNKNOWN", label: "未确认" } }), null);
   assert.equal(display.orderSettlementStageLabel({ stage: { code: "RENTING", label: "租赁中" } }), "租赁中");
-  assert.equal(display.orderSettlementStageLabel({ stage: { code: "OPENING_PENDING", label: "待确认开租" } }), "待确认开租");
+  assert.equal(display.orderSettlementStageLabel({ stage: { code: "OPENING_PENDING", label: "未记录开租" } }), "未记录开租");
   assert.equal(display.orderSettlementStageLabel({ stage: { code: "DECISION_REJECTED", label: "结算方案未达成一致" } }), "结算方案未达成一致");
   assert.match(display.orderFulfillmentSummary({ stage: "ENDING" }, { ending: "REJECTED" }), /本版已拒绝/);
   const opening = { stage: "OPENING_CONFIRM", openingState: "NONE", openingAcks: { renter: false, owner: false } };
   assert.equal(display.orderFulfillmentSummary(opening), "账号与开租确认 · 待客服录入开租清单");
-  assert.equal(display.orderFulfillmentSummary({ ...opening, openingState: "DRAFT" }), "账号与开租确认 · 租客待确认 · 号主待确认");
-  assert.equal(display.orderFulfillmentSummary({ ...opening, openingState: "PARTIAL", openingAcks: { renter: true, owner: false } }), "账号与开租确认 · 租客已确认 · 号主待确认");
+  assert.equal(display.orderFulfillmentSummary({ ...opening, openingState: "DRAFT" }), "账号与开租确认 · 租客未记录 · 号主未记录");
+  assert.equal(display.orderFulfillmentSummary({ ...opening, openingState: "PARTIAL", openingAcks: { renter: true, owner: false } }), "账号与开租确认 · 租客已确认 · 号主未记录");
 });
 
 test("owner projections and historical owner records never borrow renter money", () => {
@@ -87,7 +87,7 @@ test("bill quantities are compact and exact while missing quantities remain unkn
   assert.equal(display.orderLineQuantityText({ name: "哈夫币", unit: "HAFF_BASE", quantity: "1500001" }), "1.500001 M");
   assert.equal(display.orderLineQuantityText({ name: "保险（天）", unit: "DAY", quantity: "3" }), "3");
   assert.equal(display.orderLineQuantityText({ name: "保险卡", unit: "DAY", quantity: "3" }), "3 天");
-  assert.equal(display.orderLineQuantityText({ name: "哈夫币", unit: "HAFF_BASE" }), "数量待确认");
+  assert.equal(display.orderLineQuantityText({ name: "哈夫币", unit: "HAFF_BASE" }), "数量未记录");
 });
 
 test("party amounts expose the concrete values and fee payer without internal profit fields", () => {

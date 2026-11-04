@@ -96,7 +96,7 @@ test('workspace composes installed controls and never persists raw inputs itself
 });
 
 test('withdrawal shows only the confirmed wallet balance and keeps a missing balance unknown', async () => {
-  for (const [amount, expected] of [['123456', /¥1,234\.56/], [null, /待确认/]]) {
+  for (const [amount, expected] of [['123456', /¥1,234\.56/], [null, /未记录/]]) {
     const p=await probe({availableBalance:amount});
     try { await p.render(); assert.match(p.host.querySelector('.bank-available').textContent, expected); assert.equal(p.calls.filter(call=>call.method==='submit').length,0); } finally { await p.close(); }
   }
@@ -109,7 +109,7 @@ test('not-integrated binding is not displayed as no bank and cannot create a quo
 
 test('unavailable bank information stays unknown in the withdrawal steps', async () => {
   const p=await probe({bank:{readBankBinding:async()=>unavailableBank},channel:{readChannelWithdrawalOptions:async()=>options(unavailableBank,false)}});
-  try { await p.render(); const steps=p.host.querySelector('[aria-label="提现指引流程"]'); assert.match(steps.textContent,/收款资料待确认/);assert.doesNotMatch(p.host.textContent,/自动解锁|极速审核到账|尚未绑定收款银行卡/); } finally { await p.close(); }
+  try { await p.render(); const steps=p.host.querySelector('[aria-label="提现指引流程"]'); assert.match(steps.textContent,/收款资料未记录/);assert.doesNotMatch(p.host.textContent,/自动解锁|极速审核到账|尚未绑定收款银行卡/); } finally { await p.close(); }
 });
 
 test('filling a large balance preserves every cent without promising withdrawal eligibility', async () => {
@@ -125,7 +125,7 @@ test('editing never prefills previous name/card and saved data is not bank verif
 test('binding UNKNOWN re-enters original data without allocating a replacement request', async () => {
   const marker = { userId: 'user_A', key: 'old-binding-key', expectedRevision: '0' };
   const p = await probe({ pendingBank: marker, bank: { readBankBinding: async () => emptyBank } });
-  try { await p.render(); assert.match(p.host.textContent, /上次保存结果待确认/); await p.click('重新输入原资料'); assert.equal(p.host.querySelector('[name="bank-card-number"]').value, ''); await p.fill('[name="bank-holder-name"]', '离线测试甲'); await p.fill('[name="bank-card-number"]', '0000000000000015'); await p.submit('.bank-binding-form'); const call = p.calls.find(x => x.method === 'saveBank'); assert.equal(call.opts.resume, true); assert.deepEqual(call.opts.expectedPending,marker); assert.notEqual(call.opts.expectedPending,marker); assert.equal(call.body.expectedRevision, '0'); assert.equal(call.body.cardNo, '0000000000000015'); assert.equal(p.host.querySelector('.bank-binding-form'), null); } finally { await p.close(); }
+  try { await p.render(); assert.match(p.host.textContent, /上次保存结果未记录/); await p.click('重新输入原资料'); assert.equal(p.host.querySelector('[name="bank-card-number"]').value, ''); await p.fill('[name="bank-holder-name"]', '离线测试甲'); await p.fill('[name="bank-card-number"]', '0000000000000015'); await p.submit('.bank-binding-form'); const call = p.calls.find(x => x.method === 'saveBank'); assert.equal(call.opts.resume, true); assert.deepEqual(call.opts.expectedPending,marker); assert.notEqual(call.opts.expectedPending,marker); assert.equal(call.body.expectedRevision, '0'); assert.equal(call.body.cardNo, '0000000000000015'); assert.equal(p.host.querySelector('.bank-binding-form'), null); } finally { await p.close(); }
 });
 
 test('known bank save with failed current read never substitutes its old ACK', async () => {
@@ -135,7 +135,7 @@ test('known bank save with failed current read never substitutes its old ACK', a
 
 test('server quote values require explicit confirmation before withdrawal submission', async () => {
   const p = await probe();
-  try { await p.render(); await p.fill('.bank-withdraw-form input', '100'); await p.submit('.bank-withdraw-form'); assert.deepEqual(p.calls.find(x => x.method === 'quote').input, { amountCents: '10000', destinationId: 'bank-1', policyVersion: 'policy-1' }); assert.match(p.host.querySelector('.bank-quote').textContent, /¥99\.00/); assert.match(p.host.querySelector('.bank-quote').textContent, /手续费由你承担。确认前不会扣款，到账情况以收款记录为准/); assert.equal(p.calls.filter(x => x.method === 'submit').length, 0); await p.click('确认提现申请'); assert.ok(p.host.querySelector('[role="alertdialog"]')); assert.equal(p.calls.filter(x => x.method === 'submit').length, 0); await p.click('确认提交申请'); assert.equal(p.calls.filter(x => x.method === 'submit').length, 1); assert.match(p.host.querySelector('[aria-label="原提现申请记录"]').textContent, /待确认/); } finally { await p.close(); }
+  try { await p.render(); await p.fill('.bank-withdraw-form input', '100'); await p.submit('.bank-withdraw-form'); assert.deepEqual(p.calls.find(x => x.method === 'quote').input, { amountCents: '10000', destinationId: 'bank-1', policyVersion: 'policy-1' }); assert.match(p.host.querySelector('.bank-quote').textContent, /¥99\.00/); assert.match(p.host.querySelector('.bank-quote').textContent, /手续费由你承担。确认前不会扣款，到账情况以收款记录为准/); assert.equal(p.calls.filter(x => x.method === 'submit').length, 0); await p.click('确认提现申请'); assert.ok(p.host.querySelector('[role="alertdialog"]')); assert.equal(p.calls.filter(x => x.method === 'submit').length, 0); await p.click('确认提交申请'); assert.equal(p.calls.filter(x => x.method === 'submit').length, 1); assert.match(p.host.querySelector('[aria-label="原提现申请记录"]').textContent, /未记录/); } finally { await p.close(); }
 });
 
 test('identity and quota show only server facts; missing or unknown values stay unknown', async () => {
@@ -155,9 +155,9 @@ test('identity and quota show only server facts; missing or unknown values stay 
       await p.render();
       const box = p.host.querySelector('[aria-label="提现资格与次数"]');
       const values = [...box.querySelectorAll('dd')].map(node => node.textContent);
-      assert.ok(values.includes('实名状态待确认')); assert.ok(values.includes('年龄状态待确认'));
+      assert.ok(values.includes('实名状态未记录')); assert.ok(values.includes('年龄状态未记录'));
       assert.equal(values.includes('已实名') || values.includes('已成年'), false);
-      assert.match(box.textContent, /提现次数待确认/);
+      assert.match(box.textContent, /提现次数未记录/);
       assert.doesNotMatch(box.textContent, /剩余 0 笔/);
     } finally { await p.close(); }
   }
@@ -183,13 +183,13 @@ test('the unified timeline follows source cursors and marks unavailable history 
 test('historical original destination never falls back to the current bank', async () => {
   const old = { ...nativeItem, originalDestination: null };
   const p = await probe({ history: { readWithdrawalHistory: async (_user, query) => history(query.source,{items:query.source==='JOINPAY'?[old]:[]}), readWithdrawalHistoryItem: async()=>({contractVersion:'personal-withdrawals.read.v2',subjectId:'user_A',source:'JOINPAY',availability:'AVAILABLE',reasonCodes:[],data:{item:old,scope:'LOCAL_NATIVE_INTENTS_ONLY'}}) } });
-  try { await p.render(); const section = p.host.querySelector('[aria-label="提现记录"]'); await p.click('详情',section); assert.match(section.textContent,/原收款目标未提供/); assert.doesNotMatch(section.textContent,/0015/); assert.match(section.textContent,/待确认/); } finally { await p.close(); }
+  try { await p.render(); const section = p.host.querySelector('[aria-label="提现记录"]'); await p.click('详情',section); assert.match(section.textContent,/原收款目标未提供/); assert.doesNotMatch(section.textContent,/0015/); assert.match(section.textContent,/未记录/); } finally { await p.close(); }
 });
 
 test('historical detail shows the original number and source amounts without claiming bank arrival', async () => {
   const old = { ...historyItem(), originalNumber: '旧提现_2026-001', amountCents: '10000', netCents: '9500', feeCents: '100' };
   const p = await probe({ history: { readWithdrawalHistory: async (_user, query) => history(query.source,{items:query.source==='HISTORICAL'?[old]:[]}), readWithdrawalHistoryItem: async()=>({contractVersion:'personal-withdrawals.read.v2',subjectId:'user_A',source:'HISTORICAL_WITHDRAWAL',item:old}) } });
-  try { await p.render(); const section=p.host.querySelector('[aria-label="提现记录"]'); await p.click('详情',section); assert.match(section.textContent,/旧提现_2026-001/); assert.match(section.textContent,/金额按原记录展示/); assert.match(section.textContent,/待确认/); assert.doesNotMatch(section.textContent,/按申请金额减手续费/); } finally { await p.close(); }
+  try { await p.render(); const section=p.host.querySelector('[aria-label="提现记录"]'); await p.click('详情',section); assert.match(section.textContent,/旧提现_2026-001/); assert.match(section.textContent,/金额按原记录展示/); assert.match(section.textContent,/未记录/); assert.doesNotMatch(section.textContent,/按申请金额减手续费/); } finally { await p.close(); }
 });
 
 test('identity changes hide previous bank data and diagnostics before effect cleanup', async () => {
@@ -207,7 +207,7 @@ test('editing bank invalidates a late quote without leaving the new quote action
 test('history-key recovery can show local records without clearing the original ACK recovery slot', async () => {
   const pending={userId:'user_A',key:'native-old-key',body:{amountCents:'10000',destinationId:'bank-1',policyVersion:'policy-1',expectedWalletVersion:quote.expectedWalletVersion}};const seen=[];
   const p=await probe({pendingNative:pending,channel:{readChannelWithdrawalOptions:async()=>{throw new WithdrawalRequestError(503,'NOT_INTEGRATED');}},history:{recoverWithdrawalFromHistory:async(userId,key)=>{seen.push({userId,key});return {contractVersion:'personal-withdrawals.read.v2',subjectId:'user_A',source:'JOINPAY',knowledge:'KNOWN',item:nativeItem,mayResubmit:false,receiptMeaning:'CURRENT_LOCAL_INTENT_ORIGINAL_KEY_NOT_ORIGINAL_ACK'};}}});
-  try{await p.render();await p.click('查看申请记录');assert.deepEqual(seen,[{userId:'user_A',key:'native-old-key'}]);assert.match(p.host.querySelector('[aria-label="申请记录"]').textContent,/上次提交结果仍待确认/);assert.equal(p.channelApi.pendingChannelWithdrawal().key,'native-old-key');assert.equal(p.host.querySelector('.bank-withdraw-form button').disabled,true);assert.equal(p.calls.filter(x=>x.method==='submit').length,0);}finally{await p.close();}
+  try{await p.render();await p.click('查看申请记录');assert.deepEqual(seen,[{userId:'user_A',key:'native-old-key'}]);assert.match(p.host.querySelector('[aria-label="申请记录"]').textContent,/上次提交结果仍未记录/);assert.equal(p.channelApi.pendingChannelWithdrawal().key,'native-old-key');assert.equal(p.host.querySelector('.bank-withdraw-form button').disabled,true);assert.equal(p.calls.filter(x=>x.method==='submit').length,0);}finally{await p.close();}
 });
 
 test('saved binding with failed latest read clears raw draft and requests a refresh instead of another save', async()=>{
@@ -254,20 +254,20 @@ for(const [caseName,changed] of [['missing',null],['different-key',{userId:'user
   test(`recovery form keeps its original mode and stops when marker is ${caseName}`,async()=>{
     const original={userId:'user_A',key:'original-key',expectedRevision:'0'};
     const p=await probe({pendingBank:original,bank:{readBankBinding:async()=>emptyBank}});
-    try{await p.render();await p.click('重新输入原资料');await p.fill('[name="bank-holder-name"]','离线测试甲');await p.fill('[name="bank-card-number"]','0000000000000015');p.setPendingBank(changed);await p.submit('.bank-binding-form');assert.equal(p.calls.filter(x=>x.method==='saveBank').length,0);assert.match(p.host.querySelector('.bank-binding-form').textContent,/上次保存状态已变化/);assert.match(p.host.querySelector('.bank-binding-form button[type="submit"]').textContent,/确认并继续保存/);assert.equal(p.host.querySelector('.bank-binding-form button[type="submit"]').disabled,true);await p.click('取消填写');assert.match(p.host.querySelector('.bank-binding-panel').textContent,/上次保存结果待确认/);assert.equal([...p.host.querySelectorAll('.bank-binding-panel button')].some(x=>x.textContent==='修改收款资料'||x.textContent==='绑定银行卡'),false);}finally{await p.close();}
+    try{await p.render();await p.click('重新输入原资料');await p.fill('[name="bank-holder-name"]','离线测试甲');await p.fill('[name="bank-card-number"]','0000000000000015');p.setPendingBank(changed);await p.submit('.bank-binding-form');assert.equal(p.calls.filter(x=>x.method==='saveBank').length,0);assert.match(p.host.querySelector('.bank-binding-form').textContent,/上次保存状态已变化/);assert.match(p.host.querySelector('.bank-binding-form button[type="submit"]').textContent,/确认并继续保存/);assert.equal(p.host.querySelector('.bank-binding-form button[type="submit"]').disabled,true);await p.click('取消填写');assert.match(p.host.querySelector('.bank-binding-panel').textContent,/上次保存结果未记录/);assert.equal([...p.host.querySelectorAll('.bank-binding-panel button')].some(x=>x.textContent==='修改收款资料'||x.textContent==='绑定银行卡'),false);}finally{await p.close();}
   });
 }
 
 test('a new edit never turns itself into a resume when another pending marker appears',async()=>{
   const marker={userId:'user_A',key:'other-request',expectedRevision:'1'};
   const p=await probe();
-  try{await p.render();await p.click('修改收款资料');await p.fill('[name="bank-holder-name"]','离线新资料');await p.fill('[name="bank-card-number"]','0000000000000023');p.setPendingBank(marker);await p.submit('.bank-binding-form');assert.equal(p.calls.filter(x=>x.method==='saveBank').length,0);assert.match(p.host.querySelector('.bank-binding-form').textContent,/上次保存结果待确认/);assert.equal(p.host.querySelector('.bank-binding-form button[type="submit"]').textContent,'保存收款资料');await p.click('重新输入原资料');assert.equal(p.host.querySelector('[name="bank-holder-name"]').value,'');assert.equal(p.host.querySelector('[name="bank-card-number"]').value,'');await p.fill('[name="bank-holder-name"]','离线原资料');await p.fill('[name="bank-card-number"]','0000000000000015');await p.submit('.bank-binding-form');const call=p.calls.find(x=>x.method==='saveBank');assert.equal(call.opts.resume,true);assert.deepEqual(call.opts.expectedPending,marker);assert.equal(call.body.expectedRevision,'1');}finally{await p.close();}
+  try{await p.render();await p.click('修改收款资料');await p.fill('[name="bank-holder-name"]','离线新资料');await p.fill('[name="bank-card-number"]','0000000000000023');p.setPendingBank(marker);await p.submit('.bank-binding-form');assert.equal(p.calls.filter(x=>x.method==='saveBank').length,0);assert.match(p.host.querySelector('.bank-binding-form').textContent,/上次保存结果未记录/);assert.equal(p.host.querySelector('.bank-binding-form button[type="submit"]').textContent,'保存收款资料');await p.click('重新输入原资料');assert.equal(p.host.querySelector('[name="bank-holder-name"]').value,'');assert.equal(p.host.querySelector('[name="bank-card-number"]').value,'');await p.fill('[name="bank-holder-name"]','离线原资料');await p.fill('[name="bank-card-number"]','0000000000000015');await p.submit('.bank-binding-form');const call=p.calls.find(x=>x.method==='saveBank');assert.equal(call.opts.resume,true);assert.deepEqual(call.opts.expectedPending,marker);assert.equal(call.body.expectedRevision,'1');}finally{await p.close();}
 });
 
 test('readonly recovery uses the selected original key after marker replacement and leaves the other request intact',async()=>{
   const original={userId:'user_A',key:'original-key',expectedRevision:'0'},replacement={userId:'user_A',key:'replacement-key',expectedRevision:'1'},seen=[];
   const p=await probe({pendingBank:original,bank:{recoverBankBinding:async(userId,opts)=>{seen.push({userId,expectedPending:opts.expectedPending});return {knowledge:'KNOWN',receipt:bank('1'),current:bank('2','0023')};}}});
-  try{await p.render();await p.click('重新输入原资料');p.setPendingBank(replacement);await p.submit('.bank-binding-form');await p.click('查询保存结果');assert.deepEqual(seen,[{userId:'user_A',expectedPending:original}]);assert.deepEqual(p.bankApi.pendingBankBinding(),replacement);assert.equal(p.calls.filter(x=>x.method==='saveBank').length,0);assert.match(p.host.querySelector('.bank-binding-panel').textContent,/上次保存结果待确认/);}finally{await p.close();}
+  try{await p.render();await p.click('重新输入原资料');p.setPendingBank(replacement);await p.submit('.bank-binding-form');await p.click('查询保存结果');assert.deepEqual(seen,[{userId:'user_A',expectedPending:original}]);assert.deepEqual(p.bankApi.pendingBankBinding(),replacement);assert.equal(p.calls.filter(x=>x.method==='saveBank').length,0);assert.match(p.host.querySelector('.bank-binding-panel').textContent,/上次保存结果未记录/);}finally{await p.close();}
 });
 
 test('formal admission quota/age blockers use their exact server reason copy, not a generic failure', async () => {
