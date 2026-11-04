@@ -32,22 +32,23 @@ export async function applyOpeningDomain(ctx, directory, manifestSha256) {
       yield row;
     }
   }
-  await ctx.runItems("storedOpening", candidates(), async row => {
-    const input = row.input, proof = input.proof;
-    const review = { ...common, inputSha256: input.inputSha256, cutoff: input.cutoff, bodyDigest: hash(canonical(input)), subject: { userId: proof.userId, sourceId: proof.source.sourceId, identityDigest: proof.source.identityDigest, sourceDigest: proof.sourceDigest, availableCents: proof.availableCents, coveredDigest: proof.coveredDigest }, coveredCount: proof.coveredCount, observationCount: input.observations.length, admissionDigest: hash(canonical(input.admissions)), ...(input.sourceProof ? { sourceProofDigest: hash(canonical(input.sourceProof)) } : {}) };
-    try {
-      const scope = await module.bindReviewedStoredOpeningAdmission(ctx.client, ctx.actor, review);
-      const result = await module.importFinanceOpening(ctx.client, ctx.actor, input, scope);
-      return { ...result.body, replayed: result.replayed };
-    }
-    catch (cause) {
-      // An independently accepted money proof rejected by the target is a stop,
-      // not a reason to silently skip the balance and carry on through the batch.
-      const error = new Error("TARGET_REVIEWED_OPENING_REJECTED", { cause });
-      error.code = cause.code ?? "TARGET_REVIEWED_OPENING_REJECTED";
-      throw error;
-    }
-  }, 20);
+    await ctx.runBatches("storedOpening", candidates(), async (rows) => {
+        const module = ctx.mod("finance/personal-finance-maintenance");
+        const inputs = rows.map(row => row.input);
+        const reviews = rows.map(row => {
+            const input = row.input, proof = input.proof;
+            return { ...common, inputSha256: input.inputSha256, cutoff: input.cutoff, bodyDigest: hash(canonical(input)), subject: { userId: proof.userId, sourceId: proof.source.sourceId, identityDigest: proof.source.identityDigest, sourceDigest: proof.sourceDigest, availableCents: proof.availableCents, coveredDigest: proof.coveredDigest }, coveredCount: proof.coveredCount, observationCount: input.observations.length, admissionDigest: hash(canonical(input.admissions)), ...(input.sourceProof ? { sourceProofDigest: hash(canonical(input.sourceProof)) } : {}) };
+        });
+        try {
+            const scopes = await module.bindReviewedStoredOpeningAdmissionBatch(ctx.client, ctx.actor, reviews);
+            const result = await module.importReviewedStoredOpeningBatchOn(ctx.client, ctx.actor, inputs, scopes);
+            return rows.map((_, i) => ({ replayed: i >= result.created }));
+        } catch (cause) {
+            const error = new Error("TARGET_REVIEWED_OPENING_REJECTED", { cause });
+            error.code = cause.code ?? "TARGET_REVIEWED_OPENING_REJECTED";
+            throw error;
+        }
+    }, 200);
   const actual = (await ctx.client.query("SELECT count(*)::int subjects,count(*) FILTER(WHERE available_cents>0)::int positive,count(*) FILTER(WHERE available_cents=0)::int zero,sum(available_cents)::text amount FROM zzsh_order.finance_opening_basis WHERE source_system='legacy_mysql_restore'" + (ctx.openingSubjectIds ? " AND user_id=ANY($1::text[])" : ""), ctx.openingSubjectIds ? [ctx.openingSubjectIds] : [])).rows[0];
   const isolatedAmountsNotZeroed = expected.isolated.length === plan.stats.reviewRequired;
   const phase = ctx.state.phases.storedOpening;
@@ -55,4 +56,10 @@ export async function applyOpeningDomain(ctx, directory, manifestSha256) {
   ctx.state.openingReconciliation = report;
   ctx.save();
   if (phase.quarantined || actual.subjects !== expected.subjects || actual.positive !== expected.positive || actual.zero !== expected.zero || actual.amount !== expected.amountCents.toString() || !isolatedAmountsNotZeroed) throw new Error("STORED_OPENING_RECONCILIATION_NOT_COMPLETE");
+  // 硬闸门：账本加总必须等于 basis 加总，且 OPENING 条目数 = 2×有余额户数。
+  // 这是唯一能挡住“为提速删分录”的自动机制；不满足直接 fail 整轮。
+  const conservation = await module.assertOpeningConservation(ctx.client, { amountCents: expected.amountCents.toString(), entryRows: expected.positive * 2 });
+  report.conservation = conservation;
+  ctx.state.openingReconciliation = report;
+  ctx.save();
 }

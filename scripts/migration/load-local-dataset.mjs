@@ -154,7 +154,7 @@ const subject = mod("auth/identity-subject"), subjectKey = subject.deriveIdentit
 let client, held = false, unsafeConnection;
 const gameIds = new Map();
 const domainFile = name => manifest.files[name] ? join(dataset, manifest.files[name].file) : null;
-async function checkpointBatch(domain, batch, start, body, beforeBatch) {
+async function checkpointBatch(domain, batch, start, body, beforeBatch, batchBody) {
     assertRoundWindow();
     const sourceIds = batch.map(row => row.sourceId ?? row.parentLegacyOrderId ?? row.key);
     if (strictBatch && sourceIds.some(id => id === undefined || id === "")) throw new Error("STRICT_BATCH_ORIGINAL_KEYS_REQUIRED");
@@ -168,6 +168,14 @@ async function checkpointBatch(domain, batch, start, body, beforeBatch) {
         await client.query("BEGIN");
         await beforeBatch?.(batch);
         for (const [offset, row] of batch.entries()) {
+            // Batch-body mode: one call writes the whole chunk in a few jsonb_to_recordset statements.
+            // It must return one outcome per row so created/replayed accounting stays exact.
+            if (batchBody) {
+                const produced = await batchBody(batch);
+                if (!Array.isArray(produced) || produced.length !== batch.length) throw new Error("BATCH_BODY_OUTCOME_SHAPE_INVALID");
+                outcomes.push(...produced);
+                break;
+            }
             if (strictBatch) {
                 try { outcomes.push(await body(row)); }
                 catch (error) {
@@ -241,7 +249,7 @@ async function checkpointBatch(domain, batch, start, body, beforeBatch) {
     if (state.checkpoints % 10 === 0)
         console.log(JSON.stringify({ status: "PROGRESS", domain, nextIndex: start + batch.length, queries: state.queries }));
 }
-async function runItems(domain, items, body, batchSize = 100, beforeBatch) {
+async function runItems(domain, items, body, batchSize = 100, beforeBatch, batchBody) {
     state.phases[domain] ??= { nextIndex: 0, created: 0, replayed: 0, quarantined: 0 };
     const phase = state.phases[domain], started = performance.now(), queriesBefore = state.queries, checkpointsBefore = state.checkpoints;
     const segment = { startedAt: new Date().toISOString(), startIndex: phase.nextIndex, queriesBefore, batchSize, concurrency: 1 };
@@ -255,11 +263,11 @@ async function runItems(domain, items, body, batchSize = 100, beforeBatch) {
             if (index++ < phase.nextIndex) continue;
             batch.push(row);
             if (batch.length === batchSize) {
-                await checkpointBatch(domain, batch, index - batch.length, body, beforeBatch);
+                await checkpointBatch(domain, batch, index - batch.length, body, beforeBatch, batchBody);
                 batch = [];
             }
         }
-        if (batch.length) await checkpointBatch(domain, batch, index - batch.length, body, beforeBatch);
+        if (batch.length) await checkpointBatch(domain, batch, index - batch.length, body, beforeBatch, batchBody);
         phase.complete = true;
         save();
     }
@@ -272,6 +280,10 @@ async function runItems(domain, items, body, batchSize = 100, beforeBatch) {
         try { save(); } catch (error) { if (!failed) throw error; }
         if (phase.complete) console.log(JSON.stringify({ status: "PHASE_COMPLETE", domain, ...phase }));
     }
+}
+/** Batch-body variant: chunkBody(rows) writes a whole checkpoint chunk and returns one outcome per row. */
+async function runBatches(domain, items, chunkBody, batchSize = 500) {
+    return runItems(domain, items, null, batchSize, undefined, chunkBody);
 }
 async function runPhase(domain, body, batchSize = 100) { const file = domainFile(domain); if (file)
     return runItems(domain, readRows(file), body, batchSize); }
@@ -370,7 +382,7 @@ try {
         save();
         if (contactAppend || numberOnly) {
             const { applyContactAppend, applyNumberBindings } = await import("./local-target-contact-append.mjs");
-            const ctx = { client, actor, mod, manifest, state, output, domainFile, readRows, runItems, save, event };
+            const ctx = { client, actor, mod, manifest, state, output, domainFile, readRows, runItems, runBatches, save, event };
             if (numberOnly) await applyNumberBindings(ctx);
             else {
                 await applyContactAppend(ctx, { applyUsers, applyAccounts, applyOrders, display: { directory: option("--display-plan"), sha256: option("--display-plan-sha") },
@@ -380,17 +392,17 @@ try {
         }
         else if (holdingsOnly) {
             const { applyHoldingDomain } = await import("./local-target-holdings.mjs");
-            await applyHoldingDomain({ client, actor, mod, manifest, state, output, domainFile, readRows, runItems, save, event }, { source: option("--holding-source"), sourceSha256: option("--holding-source-sha"), dictionary: option("--skin-dictionary"), dictionarySha256: option("--skin-dictionary-sha"), mappingOverlay: option("--holding-mapping-overlay"), mappingOverlaySha256: option("--holding-mapping-overlay-sha") });
+            await applyHoldingDomain({ client, actor, mod, manifest, state, output, domainFile, readRows, runItems, runBatches, save, event }, { source: option("--holding-source"), sourceSha256: option("--holding-source-sha"), dictionary: option("--skin-dictionary"), dictionarySha256: option("--skin-dictionary-sha"), mappingOverlay: option("--holding-mapping-overlay"), mappingOverlaySha256: option("--holding-mapping-overlay-sha") });
             state.status = "LOCAL_DATASET_SKIN_HOLDINGS_COMMITTED_REVIEW_REQUIRED";
         }
         else if (openingOnly) {
             const { applyOpeningDomain } = await import("./local-target-opening.mjs");
-            await applyOpeningDomain({ client, actor, mod, manifest, state, output, domainFile, readRows, runItems, save, event }, option("--opening-proof"), option("--opening-proof-sha"));
+            await applyOpeningDomain({ client, actor, mod, manifest, state, output, domainFile, readRows, runItems, runBatches, save, event }, option("--opening-proof"), option("--opening-proof-sha"));
             state.status = "LOCAL_DATASET_STORED_OPENINGS_COMMITTED_REVIEW_REQUIRED";
         }
         else if (displayOnly) {
             const { applyDisplayDomain } = await import("./local-target-display.mjs");
-            await applyDisplayDomain({ client, actor, mod, manifest, state, output, domainFile, readRows, runItems, save, event }, option("--display-plan"), option("--display-plan-sha"));
+            await applyDisplayDomain({ client, actor, mod, manifest, state, output, domainFile, readRows, runItems, runBatches, save, event }, option("--display-plan"), option("--display-plan-sha"));
             state.status = "LOCAL_DATASET_DISPLAY_ENRICHMENT_COMMITTED_REVIEW_REQUIRED";
         }
         else {
@@ -402,7 +414,7 @@ try {
                 state.status="LOCAL_DATASET_CORE_ONLY_COMMITTED_FINANCE_NOT_RUN";
             }else{
                 const { applyFinancialDomains } = await import("./local-target-finance.mjs");
-                await applyFinancialDomains({ client, actor, mod, manifest, state, output, domainFile, readRows, runItems, save, event, apiDist:api,fundsSource:fundsSourceBinding,refundAttemptsSource:refundAttemptsBinding });
+                await applyFinancialDomains({ client, actor, mod, manifest, state, output, domainFile, readRows, runItems, runBatches, save, event, apiDist:api,fundsSource:fundsSourceBinding,refundAttemptsSource:refundAttemptsBinding });
                 state.status = "LOCAL_DATASET_CORE_AND_FINANCIAL_DOMAINS_COMMITTED_REVIEW_REQUIRED";
             }
         }

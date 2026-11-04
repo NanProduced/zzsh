@@ -42,7 +42,7 @@ export async function applyFinancialDomains(ctx) {
         const scope=await module.bindReviewedLegacyInvitationFacts(client,actor,review);
         return module.importReviewedLegacyInvitationFacts(client,actor,packet.input,packet.bodyDigest,scope);
     },1);
-    await ctx.runItems("financeHistory", history, async (row) => { const input = row.input; const review = { ...reviewCommon, inputSha256: input.coverage.inputSha256, bodyDigest: sha(canonical(input)), userId: input.coverage.userId, sourceKind: input.coverage.sourceKind }; const module = mod("finance/personal-finance-observation-maintenance"); const scope = await module.bindReviewedFinanceObservationAdmission(client, actor, review); return module.importReviewedFinanceObservations(client, actor, input, scope); }, 20);
+    await ctx.runBatches("financeHistory", history, async (rows) => { const module = mod("finance/personal-finance-observation-maintenance"); const inputs = rows.map(row => row.input); const reviews = inputs.map(input => ({ ...reviewCommon, inputSha256: input.coverage.inputSha256, bodyDigest: sha(canonical(input)), userId: input.coverage.userId, sourceKind: input.coverage.sourceKind })); const scopes = await module.bindReviewedFinanceObservationAdmissionBatch(client, actor, reviews); const result = await module.importReviewedFinanceObservationsBatchOn(client, actor, inputs, scopes); const created = result.body.created; return rows.map((_, i) => ({ replayed: i >= created })); }, 500);
     await ctx.runItems("financeEmptyCoverage",empties,async chunk=>{
         const module=mod("finance/personal-finance-observation-maintenance"),inputs=chunk.rows.map(row=>row.input);
         const reviews=inputs.map(input=>({...reviewCommon,inputSha256:input.coverage.inputSha256,bodyDigest:sha(canonical(input)),userId:input.coverage.userId,sourceKind:input.coverage.sourceKind}));
@@ -50,13 +50,16 @@ export async function applyFinancialDomains(ctx) {
         const result=await module.importReviewedEmptyFinanceObservationBatch(client,actor,inputs,scope);
         return{...result.body,replayed:result.body.created===0};
     },1);
-    await ctx.runItems("guaranteeHistory", guarantees, async row => {
-        const input=row.input, module=mod("finance/owner-guarantee-history-maintenance");
+    await ctx.runBatches("guaranteeHistory", guarantees, async (rows) => {
+        const module=mod("finance/owner-guarantee-history-maintenance");
         const {cutoff,...base}=reviewCommon;
-        const review={...base,userId:input.userId,inputSha256:input.inputSha256,bodyDigest:sha(canonical(input)),cutoff:input.cutoff,sourceCount:input.sourceCount};
-        const admission=await module.bindReviewedOwnerGuaranteeHistory(client,actor,review);
-        return module.importReviewedOwnerGuaranteeHistory(client,actor,input,admission);
-    },20);
+        const inputs=rows.map(row=>row.input);
+        const reviews=inputs.map(input=>({...base,userId:input.userId,inputSha256:input.inputSha256,bodyDigest:sha(canonical(input)),cutoff:input.cutoff,sourceCount:input.sourceCount}));
+        const admissions=await module.bindReviewedOwnerGuaranteeHistoryBatch(client,actor,reviews);
+        const result=await module.importReviewedOwnerGuaranteeHistoryBatchOn(client,actor,inputs,admissions);
+        const created=result.body.created;
+        return rows.map((_,i)=>({replayed:i>=created}));
+    },500);
     const continuations = await arrayOf(ctx, "continuations");
     let continuationRows = state.generatedPhases?.continuationEvidence ? freezePhase(ctx, "continuationEvidence", []) : null;
     if (!continuationRows) {

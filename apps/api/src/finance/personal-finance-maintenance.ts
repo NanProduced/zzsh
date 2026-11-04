@@ -1,5 +1,5 @@
 import type {Pool,PoolClient} from 'pg';
-import {createHash} from 'node:crypto';
+import {createHash,randomUUID} from 'node:crypto';
 import {loadEffectiveAdminAccess} from '../auth/admin-authorization';
 import {assertAdminContextInTransaction} from '../auth/auth-security';
 import {recordAudit,setAuditContext,withTransaction,SecurityApiError} from '../auth/security-core';
@@ -64,6 +64,36 @@ export async function bindReviewedFinanceOpeningAdmission(client:PoolClient,acto
  ||![review.notBefore,review.expiresAt,review.cutoff].every(x=>typeof x==='string'&&/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/.test(x)&&Number.isFinite(Date.parse(x)))||Date.parse(review.expiresAt)<=Date.parse(review.notBefore))throw invalid('Exact reviewed opening binding required');
  const token=Object.freeze({kind:'REVIEWED_FINANCE_OPENING' as const});admissions.set(token,{review:JSON.parse(canonicalize(review)),recoveryOnly:mode==='recover'});
  try{await authorizeFinanceMaintenance(client,actor);await assertAdmission(client,actor,token,mode==='recover');return token;}catch(error){admissions.delete(token);throw error;}
+}
+/** Pure shape check shared by the single-object and batch opening binds.
+ *  Kept byte-identical to bindReviewedFinanceOpeningAdmission's condition; the batch bind
+ *  test asserts both reject the same shapes so they cannot drift apart. */
+function assertReviewedOpeningShape(review:FinanceOpeningReview,mode:'execute'|'recover'){
+ if(!review||typeof review!=='object'||!review.resource||!review.actor||!review.subject)throw invalid('Complete internal opening review required');
+ ensureOnlyFields(review,['ref','attempt','actor','resource','notBefore','expiresAt','inputSha256','cutoff','bodyDigest','subject']);
+ ensureOnlyFields(review.actor,['userId','sessionId']);ensureOnlyFields(review.resource,['host','port','database','oid','owner','marker','role','roleOid']);
+ ensureOnlyFields(review.subject,['userId','sourceId','identityDigest','sourceDigest','availableCents','coveredDigest']);
+ if(![review.ref,review.attempt,review.actor.userId,review.actor.sessionId,review.subject.userId].every(x=>typeof x==='string'&&identifier.test(x))
+ ||review.resource.host!=='127.0.0.1'||review.resource.port!==55432||!isReviewedFinanceMaintenanceResource(review.resource)
+ ||![review.resource.owner,review.resource.role].every(x=>typeof x==='string'&&/^[a-zA-Z_][a-zA-Z0-9_]{0,62}$/.test(x))
+ ||![review.resource.oid,review.resource.roleOid].every(x=>Number.isSafeInteger(x)&&x>0)||typeof review.subject.sourceId!=='string'||!/^[1-9]\d{0,23}$/.test(review.subject.sourceId)
+ ||typeof review.subject.availableCents!=='string'||!/^(0|[1-9]\d{0,23})$/.test(review.subject.availableCents)||!['execute','recover'].includes(mode)
+ ||![review.inputSha256,review.bodyDigest,review.subject.identityDigest,review.subject.sourceDigest,review.subject.coveredDigest].every(x=>typeof x==='string'&&digest.test(x))
+ ||![review.notBefore,review.expiresAt,review.cutoff].every(x=>typeof x==='string'&&/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/.test(x)&&Number.isFinite(Date.parse(x)))||Date.parse(review.expiresAt)<=Date.parse(review.notBefore))throw invalid('Exact reviewed opening binding required');
+}
+/** 批级绑定：逐个做纯 JS 形状校验，然后一次鉴权覆盖整批。 */
+export async function bindReviewedStoredOpeningAdmissionBatch(client:PoolClient,actor:Actor,reviews:StoredOpeningReview[],mode:'execute'|'recover'='execute'):Promise<FinanceOpeningAdmission[]>{
+ if(!Array.isArray(reviews)||reviews.length<1||reviews.length>200)throw invalid('Bounded stored opening review batch required');
+ const bases=reviews.map(review=>{
+  if(!review||Date.parse(review.cutoff)>Date.parse(review.notBefore)||!Number.isSafeInteger(review.coveredCount)||review.coveredCount<0||review.coveredCount>5000
+   ||!Number.isSafeInteger(review.observationCount)||review.observationCount<0||review.observationCount>10000||!digest.test(review.admissionDigest)
+   ||review.sourceProofDigest!==undefined&&!digest.test(review.sourceProofDigest))throw invalid('Exact bounded stored review required');
+  const {coveredCount,observationCount,admissionDigest,sourceProofDigest,...base}=JSON.parse(canonicalize(review)) as StoredOpeningReview;
+  assertReviewedOpeningShape(base,mode);
+  return{base,stored:{coveredCount,observationCount,admissionDigest,...(sourceProofDigest!==undefined?{sourceProofDigest}:{})}};
+ });
+ await authorizeMaintenanceBatch(client,actor,bases.map(b=>b.base),{recover:mode==='recover',recoveryOnly:mode==='recover'});
+ return bases.map(({base,stored})=>{const token=Object.freeze({kind:'REVIEWED_FINANCE_OPENING' as const});admissions.set(token,{review:JSON.parse(canonicalize(base)),recoveryOnly:mode==='recover',stored});return token;});
 }
 /** A separate, bounded review of each stored balance; the original C admissions stay unchanged. */
 export async function bindReviewedStoredOpeningAdmission(client:PoolClient,actor:Actor,review:StoredOpeningReview,mode:'execute'|'recover'='execute'){
@@ -141,6 +171,11 @@ async function planOpening(client:PoolClient,actor:Actor,input:OpeningMaintenanc
   if((input as StoredOpeningInput).sourceProof!==undefined&&schema.proof_ready!==true)throw new SecurityApiError(503,'EVIDENCE_UNAVAILABLE','Reviewed legacy source-proof schema is not deployed');}
  const identity=(await client.query(`SELECT 1 FROM zzsh_iam.audit_event WHERE object_id=$1 AND action='user.legacy_owner.migrated' AND outcome='SUCCESS' AND details->>'sourceSystem'=$2 AND details->>'sourceEntity'='la_user' AND details->>'legacyId'=$3 AND details->>'sourceDigest'=$4`,[p.userId,p.source.sourceSystem,p.source.sourceId,p.source.identityDigest])).rowCount;
  if(!identity)throw conflict('Opening source identity changed');
+ return openingPlanCore(input);
+}
+/** Pure plan core shared by the single-object and batch importers. No I/O, no authorization. */
+export function openingPlanCore(input:OpeningMaintenanceInput){
+ const p=input.proof;
  if(sha(p.coveredSet.map(row=>JSON.stringify(row)).join('\n'))!==p.coveredDigest)throw invalid('Covered set digest mismatch');
  const basisId='basis_'+sha(p.userId).slice(0,32),admitted=new Map(input.admissions.map(a=>[a.sourceEntity+':'+a.sourceId,a]));
  if(admitted.size!==input.admissions.length||input.observations.length!==input.admissions.length)throw invalid('Observation admission set mismatch');
@@ -202,7 +237,7 @@ export async function importReviewedFinanceOpeningBatch(pool:Pool,actor:Actor,in
 }
 
 function storedPairs(inputs:StoredOpeningInput[],scopes:FinanceOpeningAdmission[]){
- if(!Array.isArray(inputs)||inputs.length<1||inputs.length>100||inputs.length!==scopes.length||new Set(inputs.map(i=>i.proof.userId)).size!==inputs.length
+ if(!Array.isArray(inputs)||inputs.length<1||inputs.length>200||inputs.length!==scopes.length||new Set(inputs.map(i=>i.proof.userId)).size!==inputs.length
   ||inputs.reduce((n,i)=>n+i.observations.length,0)>50000)throw invalid('Bounded distinct stored opening subjects required');
  return inputs.map((input,i)=>{const scope=scopes[i]!;if(!admission(scope).stored)throw invalid('Stored opening requires its separate internal review');reviewedInput(input,scope);return{input,scope};}).sort((a,b)=>a.input.proof.userId<b.input.proof.userId?-1:1);
 }
@@ -258,4 +293,152 @@ async function verifyReviewedRecovery(client:PoolClient,actor:Actor,input:Openin
  const audit=await client.query(`/* finance-opening recovery audit */ SELECT 1 FROM zzsh_iam.audit_event WHERE action='finance.opening.imported' AND object_type='finance_event' AND object_id=$1 AND actor_type='admin' AND actor_id=$2 AND session_id=$7 AND outcome='SUCCESS' AND details->>'bodyDigest'=$3 AND details->>'inputSha256'=$4 AND details->>'approvalRef'=$5 AND details->>'attempt'=$6`,[plan.eventId,actor.userId,plan.bodyDigest,input.inputSha256,r.ref,r.attempt,actor.sessionId]);
  if(stored)for(const row of observed)if(row.observationBasis===null&&row.observationIncluded===false){row.observationBasis=plan.basisId;row.observationIncluded=row.included;}
  if(canonicalize(basis)!==canonicalize([expectedBasis])||canonicalize(covered)!==canonicalize(p.coveredSet)||canonicalize(observed)!==canonicalize(expectedObservations)||canonicalize(ledger)!==canonicalize(expectedLedger)||audit.rowCount!==1)throw conflict('Opening recovery coverage/observations/audit differ from original review');
+}
+
+// ───────────────────────── batch maintenance (R05 batch 2) ─────────────────────────
+// One authorization per batch instead of one per object. The per-object authorizer above is
+// kept unchanged for replay/recovery and remains the only gate for single-object callers.
+
+export type BatchWindow=Readonly<{authorizedAt:string;windowExpiresAt:string}>;
+type BatchReviewShape=Pick<FinanceOpeningReview,'actor'|'resource'|'notBefore'|'expiresAt'>;
+
+/** 批首鉴权：一次覆盖整批。批内对象必须共享同一 actor/resource/窗口，否则整批拒绝。 */
+export async function authorizeMaintenanceBatch(client:PoolClient,actor:Actor,reviews:readonly BatchReviewShape[],mode:{recover?:boolean;recoveryOnly?:boolean}={}):Promise<BatchWindow>{
+ if(!Array.isArray(reviews)||!reviews.length||reviews.length>1000)throw invalid('Batched maintenance review required');
+ const first=reviews[0]!;
+ for(const r of reviews){
+  if(!r||!r.actor||!r.resource||r.actor.userId!==first.actor.userId||r.actor.sessionId!==first.actor.sessionId
+   ||r.resource.host!==first.resource.host||r.resource.port!==first.resource.port||r.resource.database!==first.resource.database
+   ||r.resource.oid!==first.resource.oid||r.resource.owner!==first.resource.owner||r.resource.marker!==first.resource.marker
+   ||r.resource.role!==first.resource.role||r.resource.roleOid!==first.resource.roleOid
+   ||r.notBefore!==first.notBefore||r.expiresAt!==first.expiresAt)
+   throw conflict('Batched maintenance objects do not share one actor, resource and window');
+ }
+ await authorizeFinanceMaintenance(client,actor);
+ await assertFinanceMaintenanceResource(client,actor,first,mode);
+ const at=(await client.query(`/* batch window head */ SELECT to_char(clock_timestamp() AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS at`)).rows[0]?.at;
+ if(typeof at!=='string')throw conflict('Batch maintenance clock unavailable');
+ return Object.freeze({authorizedAt:at,windowExpiresAt:first.expiresAt});
+}
+
+/** 批尾鉴权：窗口必须仍然有效。抛错即整批回滚，越权/过期不会写入任何一行。 */
+export async function closeMaintenanceBatch(client:PoolClient,actor:Actor,review:BatchReviewShape,mode:{recover?:boolean;recoveryOnly?:boolean}={}):Promise<{closedAt:string}>{
+ await authorizeFinanceMaintenance(client,actor);
+ await assertFinanceMaintenanceResource(client,actor,review,mode);
+ const at=(await client.query(`/* batch window tail */ SELECT to_char(clock_timestamp() AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS at`)).rows[0]?.at;
+ if(typeof at!=='string')throw conflict('Batch maintenance clock unavailable');
+ return{closedAt:at};
+}
+
+/** 通用硬闸门：OPENING 账本加总必须等于期初 basis 加总，且 OPENING 条目数 = 2×有余额户数。
+ *  与数据集无关，任何轮次都必须成立。 */
+export async function assertOpeningLedgerClosure(client:PoolClient){
+ const row=(await client.query(`/* opening ledger closure gate */ SELECT
+  (SELECT COALESCE(sum(available_cents),0)::text FROM zzsh_order.finance_opening_basis WHERE source_kind='LEGACY_OPENING') AS "basisCents",
+  (SELECT count(*)::text FROM zzsh_order.finance_opening_basis WHERE source_kind='LEGACY_OPENING' AND available_cents>0) AS "positiveSubjects",
+  (SELECT COALESCE(sum(l.credit_cents-l.debit_cents),0)::text FROM zzsh_order.settlement_ledger_entry l
+     JOIN zzsh_order.finance_event e ON e.id=l.finance_event_id
+     JOIN zzsh_order.finance_economic_root r ON r.id=e.economic_root_id
+    WHERE e.kind='OPENING' AND l.account_code='WALLET_AVAILABLE' AND r.source_kind='LEGACY_OPENING') AS "ledgerCents",
+  (SELECT count(*)::text FROM zzsh_order.settlement_ledger_entry l
+     JOIN zzsh_order.finance_event e ON e.id=l.finance_event_id
+     JOIN zzsh_order.finance_economic_root r ON r.id=e.economic_root_id
+    WHERE e.kind='OPENING' AND r.source_kind='LEGACY_OPENING') AS "entryRows"`)).rows[0];
+ let basis:bigint,ledger:bigint,rows:number,positive:number;
+ try{basis=BigInt(row?.basisCents);ledger=BigInt(row?.ledgerCents);rows=Number(row?.entryRows);positive=Number(row?.positiveSubjects);}
+ catch{throw conflict('Opening ledger closure is unreadable');}
+ if(!Number.isSafeInteger(rows)||!Number.isSafeInteger(positive))throw conflict('Opening ledger closure is unreadable');
+ if(basis!==ledger)throw conflict('Opening ledger total differs from basis total');
+ if(rows!==positive*2)throw conflict('Opening ledger rows differ from 2x positive opening subjects');
+ return Object.freeze({basisCents:row.basisCents as string,ledgerCents:row.ledgerCents as string,entryRows:rows,positiveSubjects:positive});
+}
+
+/** 数据集级硬闸门：金额与行数必须等于本轮冻结期望，否则整轮 fail（挡住“为提速删分录”）。 */
+export async function assertOpeningConservation(client:PoolClient,expected:{amountCents:string;entryRows:number}){
+ if(typeof expected?.amountCents!=='string'||!/^(0|[1-9]\d{0,23})$/.test(expected.amountCents)
+  ||!Number.isSafeInteger(expected?.entryRows)||expected.entryRows<0)throw invalid('Opening conservation expectation required');
+ const actual=await assertOpeningLedgerClosure(client);
+ if(actual.basisCents!==expected.amountCents)throw conflict('Opening basis total differs from frozen expectation');
+ if(actual.entryRows!==expected.entryRows)throw conflict('Opening ledger rows differ from frozen expectation');
+ return actual;
+}
+
+const openingEntryDetails=(basisId:string,rootId:string,sourceDigest:string)=>JSON.stringify({basisId,economicRootId:rootId,sourceDigest});
+
+/** 批级期初写入：整批 8 张表各一条 jsonb_to_recordset 语句；每户 2 条账本分录原样保留。
+ *  调用方负责事务与 SET CONSTRAINTS ALL IMMEDIATE；本函数不做提交。 */
+export async function importReviewedStoredOpeningBatchOn(client:PoolClient,actor:Actor,inputs:StoredOpeningInput[],scopes:FinanceOpeningAdmission[]){
+ const pairs=storedPairs(JSON.parse(JSON.stringify(inputs)),scopes);
+ const window=await authorizeMaintenanceBatch(client,actor,pairs.map(p=>admission(p.scope).review));
+ const plans=pairs.map(({input,scope})=>({input,scope,plan:openingPlanCore(input),stored:admission(scope).stored!}));
+ const scopeKey=JSON.stringify(['admin',actor.userId,'finance.opening.import',null]);
+ await client.query(`/* opening batch key locks */ SELECT pg_advisory_xact_lock(hashtextextended(k,0)) FROM unnest($1::text[]) WITH ORDINALITY keys(k,n) ORDER BY n`,
+  [plans.map(p=>JSON.stringify(['supply-idempotency',scopeKey,p.plan.key]))]);
+ const subjects=plans.map(p=>p.input.proof.userId).sort();
+ if((await client.query(`/* opening batch subject locks */ SELECT id FROM zzsh_auth_user."user" WHERE id=ANY($1::text[]) ORDER BY id COLLATE "C" FOR UPDATE`,[subjects])).rowCount!==subjects.length)throw conflict('Opening batch subject is not mapped');
+ const identity=await client.query(`/* opening batch source identities */ SELECT x.user_id FROM jsonb_to_recordset($1::jsonb) x(user_id text,legacy_user_id text,identity_digest text)
+   WHERE (SELECT count(*) FROM zzsh_iam.audit_event a WHERE a.object_id=x.user_id AND a.action='user.legacy_owner.migrated' AND a.outcome='SUCCESS'
+     AND a.details->>'sourceSystem'='legacy_mysql_restore' AND a.details->>'sourceEntity'='la_user' AND a.details->>'legacyId'=x.legacy_user_id
+     AND a.details->>'sourceDigest'=x.identity_digest)<>1`,
+  [JSON.stringify(plans.map(p=>({user_id:p.input.proof.userId,legacy_user_id:p.input.proof.source.sourceId,identity_digest:p.input.proof.source.identityDigest})))]);
+ if(identity.rows.length)throw conflict('Opening batch original source identity changed');
+ const revisions=new Map<string,string>((await client.query(`/* opening batch wallet revisions */ SELECT user_id,ledger_revision::text AS revision FROM zzsh_order.wallet_revision WHERE user_id=ANY($1::text[])`,[subjects])).rows.map((r:any)=>[r.user_id,r.revision]));
+ const receipts=await client.query(`/* opening batch original receipts */ SELECT key,request_fingerprint,response_status,response_body FROM zzsh_supply.idempotency_record WHERE scope_key=$1 AND key=ANY($2::text[]) FOR UPDATE`,[scopeKey,plans.map(p=>p.plan.key)]);
+ const receiptByKey=new Map<string,any>(receipts.rows.map((r:any)=>[r.key,r]));
+ const reused=new Set<string>((await client.query(`/* opening batch existing observations */ SELECT o.source_entity,o.source_id FROM unnest($2::text[],$3::text[]) AS requested(source_entity,source_id)
+   JOIN zzsh_order.personal_finance_observation o ON o.source_type='LEGACY_MYSQL' AND o.source_system=$1 AND o.source_entity=requested.source_entity AND o.source_id=requested.source_id`,
+  [plans[0]!.input.proof.source.sourceSystem,plans.flatMap(p=>p.plan.observations.map(o=>o.sourceEntity)),plans.flatMap(p=>p.plan.observations.map(o=>o.sourceId))])).rows.map((r:any)=>r.source_entity+':'+r.source_id));
+ const fresh=plans.filter(p=>!receiptByKey.has(p.plan.key));
+ const basisRows:any[]=[],reviewRows:any[]=[],coveredRows:any[]=[],rootRows:any[]=[],eventRows:any[]=[],entryRows:any[]=[],admissionRows:any[]=[],observationRows:any[]=[],auditRows:any[]=[],receiptRows:any[]=[];
+ for(const {input,plan,stored,scope} of fresh){
+  const p=input.proof,amount=BigInt(p.availableCents),rev=revisions.get(p.userId)??'0';
+  basisRows.push({id:plan.basisId,user_id:p.userId,source_kind:'LEGACY_OPENING',source_system:p.source.sourceSystem,source_entity:'la_user',source_id:p.source.sourceId,identity_source_digest:p.source.identityDigest,source_digest:p.sourceDigest,available_cents:amount.toString(),source_cutoff:input.cutoff,covered_count:p.coveredCount,covered_set_digest:p.coveredDigest});
+  const reviewCanonical=canonicalize({...admission(scope).review,...stored});
+  reviewRows.push({basis_id:plan.basisId,body_digest:plan.bodyDigest,source_canonical:input.sourceCanonical,review_canonical:reviewCanonical,review_digest:sha(reviewCanonical),input_canonical:canonicalize(input)});
+  for(const row of p.coveredSet)coveredRows.push({basis_id:plan.basisId,user_id:row[0],source_kind:row[1],source_type:row[2],source_entity:row[3],source_id:row[4],beneficiary_role:row[5],source_event_at:new Date(Number(row[6])*1000).toISOString(),source_digest:row[7]});
+  rootRows.push({id:plan.rootId,basis_id:plan.basisId,source_kind:'LEGACY_OPENING',source_type:'LEGACY_MYSQL',source_system:p.source.sourceSystem,source_entity:'la_user',source_id:p.source.sourceId,subject_user_id:p.userId,beneficiary_role:'WALLET_HOLDER',source_digest:p.sourceDigest});
+  eventRows.push({id:plan.eventId,economic_root_id:plan.rootId,kind:'OPENING',subject_user_id:p.userId,expected_ledger_revision:rev});
+  if(amount!==0n){
+   entryRows.push({id:'dr_'+plan.eventId,finance_event_id:plan.eventId,line_no:1,account_code:'LEGACY_OPENING_SOURCE',debit_cents:amount.toString(),credit_cents:'0',counterparty_user_id:null,details:openingEntryDetails(plan.basisId,plan.rootId,p.sourceDigest)});
+   entryRows.push({id:'cr_'+plan.eventId,finance_event_id:plan.eventId,line_no:2,account_code:'WALLET_AVAILABLE',debit_cents:'0',credit_cents:amount.toString(),counterparty_user_id:p.userId,details:openingEntryDetails(plan.basisId,plan.rootId,p.sourceDigest)});
+  }
+  for(const o of plan.observations){
+   admissionRows.push({basis_id:plan.basisId,user_id:o.userId,source_system:o.sourceSystem,legacy_user_id:o.legacyUserId,source_entity:o.sourceEntity,source_id:o.sourceId,source_digest:o.sourceDigest,source_event_at:o.sourceEventAt,included_in_opening:o.includedInOpening});
+   if(!reused.has(o.sourceEntity+':'+o.sourceId))observationRows.push({id:'obs_'+sha(canonicalize([o.sourceSystem,o.sourceEntity,o.sourceId])).slice(0,32),user_id:o.userId,basis_id:plan.basisId,source_kind:o.sourceKind,source_type:'LEGACY_MYSQL',source_system:o.sourceSystem,legacy_user_id:o.legacyUserId,source_entity:o.sourceEntity,source_id:o.sourceId,source_digest:o.sourceDigest,source_canonical:o.sourceCanonical,source_event_at:o.sourceEventAt,included_in_opening:o.includedInOpening,snapshot:JSON.parse(o.sourceCanonical)});
+  }
+  auditRows.push({id:'audit_'+randomUUID().replaceAll('-',''),object_id:plan.eventId,details:{inputSha256:input.inputSha256,bodyDigest:plan.bodyDigest,subjectId:p.userId,sourceDigest:p.sourceDigest,cutoff:input.cutoff,observations:plan.observations.length,approvalRef:admission(scope).review.ref,attempt:admission(scope).review.attempt,authorizedAt:window.authorizedAt,windowExpiresAt:window.windowExpiresAt}});
+  receiptRows.push({key:plan.key,fingerprint:fingerprintRequest('finance.opening.import',p.userId,input),body:{eventId:plan.eventId,subjectId:p.userId,bodyDigest:plan.bodyDigest}});
+ }
+ if(basisRows.length){
+  await client.query(`/* opening batch basis */ INSERT INTO zzsh_order.finance_opening_basis(id,user_id,source_kind,source_system,source_entity,source_id,identity_source_digest,source_digest,available_cents,source_cutoff,covered_count,covered_set_digest)
+   SELECT x.id,x.user_id,x.source_kind,x.source_system,x.source_entity,x.source_id,x.identity_source_digest,x.source_digest,x.available_cents::numeric,x.source_cutoff::timestamptz,x.covered_count,x.covered_set_digest
+   FROM jsonb_to_recordset($1::jsonb) x(id text,user_id text,source_kind text,source_system text,source_entity text,source_id text,identity_source_digest text,source_digest text,available_cents text,source_cutoff text,covered_count integer,covered_set_digest text) ORDER BY x.user_id COLLATE "C"`,[JSON.stringify(basisRows)]);
+  await client.query(`/* opening batch stored review */ INSERT INTO zzsh_order.finance_stored_opening_review(basis_id,body_digest,source_canonical,review_canonical,review_digest,input_canonical)
+   SELECT x.basis_id,x.body_digest,x.source_canonical,x.review_canonical,x.review_digest,x.input_canonical FROM jsonb_to_recordset($1::jsonb) x(basis_id text,body_digest text,source_canonical text,review_canonical text,review_digest text,input_canonical text) ORDER BY x.basis_id COLLATE "C"`,[JSON.stringify(reviewRows)]);
+  if(coveredRows.length)await client.query(`/* opening batch covered events */ INSERT INTO zzsh_order.finance_covered_event(basis_id,user_id,source_kind,source_type,source_entity,source_id,beneficiary_role,source_event_at,source_digest)
+   SELECT x.basis_id,x.user_id,x.source_kind,x.source_type,x.source_entity,x.source_id,x.beneficiary_role,x.source_event_at::timestamptz,x.source_digest
+   FROM jsonb_to_recordset($1::jsonb) x(basis_id text,user_id text,source_kind text,source_type text,source_entity text,source_id text,beneficiary_role text,source_event_at text,source_digest text)
+   ORDER BY x.source_kind COLLATE "C",x.source_type COLLATE "C",x.source_entity COLLATE "C",x.source_id COLLATE "C",x.beneficiary_role COLLATE "C"`,[JSON.stringify(coveredRows)]);
+  await client.query(`/* opening batch roots */ INSERT INTO zzsh_order.finance_economic_root(id,basis_id,source_kind,source_type,source_system,source_entity,source_id,subject_user_id,beneficiary_role,source_digest)
+   SELECT x.id,x.basis_id,x.source_kind,x.source_type,x.source_system,x.source_entity,x.source_id,x.subject_user_id,x.beneficiary_role,x.source_digest
+   FROM jsonb_to_recordset($1::jsonb) x(id text,basis_id text,source_kind text,source_type text,source_system text,source_entity text,source_id text,subject_user_id text,beneficiary_role text,source_digest text) ORDER BY x.subject_user_id COLLATE "C"`,[JSON.stringify(rootRows)]);
+  await client.query(`/* opening batch events */ INSERT INTO zzsh_order.finance_event(id,economic_root_id,kind,subject_user_id,expected_ledger_revision)
+   SELECT x.id,x.economic_root_id,x.kind,x.subject_user_id,x.expected_ledger_revision::bigint FROM jsonb_to_recordset($1::jsonb) x(id text,economic_root_id text,kind text,subject_user_id text,expected_ledger_revision text) ORDER BY x.subject_user_id COLLATE "C"`,[JSON.stringify(eventRows)]);
+  if(entryRows.length)await client.query(`/* opening batch ledger entries */ INSERT INTO zzsh_order.settlement_ledger_entry(id,finance_event_id,line_no,account_code,debit_cents,credit_cents,counterparty_user_id,details)
+   SELECT x.id,x.finance_event_id,x.line_no,x.account_code,x.debit_cents::numeric,x.credit_cents::numeric,x.counterparty_user_id,x.details::jsonb
+   FROM jsonb_to_recordset($1::jsonb) x(id text,finance_event_id text,line_no integer,account_code text,debit_cents text,credit_cents text,counterparty_user_id text,details text) ORDER BY x.finance_event_id COLLATE "C",x.line_no`,[JSON.stringify(entryRows)]);
+  if(admissionRows.length)await client.query(`/* opening batch observation admissions */ INSERT INTO zzsh_order.finance_observation_admission(basis_id,user_id,source_system,legacy_user_id,source_entity,source_id,source_digest,source_event_at,included_in_opening)
+   SELECT x.basis_id,x.user_id,x.source_system,x.legacy_user_id,x.source_entity,x.source_id,x.source_digest,x.source_event_at::timestamptz,x.included_in_opening
+   FROM jsonb_to_recordset($1::jsonb) x(basis_id text,user_id text,source_system text,legacy_user_id text,source_entity text,source_id text,source_digest text,source_event_at text,included_in_opening boolean) ORDER BY x.basis_id COLLATE "C",x.source_entity COLLATE "C",x.source_id COLLATE "C"`,[JSON.stringify(admissionRows)]);
+  if(observationRows.length)await client.query(`/* opening batch observations */ INSERT INTO zzsh_order.personal_finance_observation(id,user_id,basis_id,source_kind,source_type,source_system,legacy_user_id,source_entity,source_id,source_digest,source_canonical,source_event_at,included_in_opening,snapshot)
+   SELECT x.id,x.user_id,x.basis_id,x.source_kind,x.source_type,x.source_system,x.legacy_user_id,x.source_entity,x.source_id,x.source_digest,x.source_canonical,x.source_event_at::timestamptz,x.included_in_opening,x.snapshot::jsonb
+   FROM jsonb_to_recordset($1::jsonb) x(id text,user_id text,basis_id text,source_kind text,source_type text,source_system text,legacy_user_id text,source_entity text,source_id text,source_digest text,source_canonical text,source_event_at text,included_in_opening boolean,snapshot jsonb) ORDER BY x.user_id COLLATE "C",x.id COLLATE "C"`,[JSON.stringify(observationRows)]);
+  await client.query(`/* opening batch audit */ INSERT INTO zzsh_iam.audit_event(id,actor_type,actor_id,session_id,action,object_type,object_id,outcome,request_id,reason,occurred_at,details)
+   SELECT x.id,'admin',$2,$3,'finance.opening.imported','finance_event',x.object_id,'SUCCESS',$4,'Master-reviewed local frozen opening',clock_timestamp(),x.details
+   FROM jsonb_to_recordset($1::jsonb) x(id text,object_id text,details jsonb) ORDER BY x.object_id COLLATE "C"`,[JSON.stringify(auditRows),actor.userId,actor.sessionId,actor.requestId]);
+  await client.query(`/* opening batch receipts */ INSERT INTO zzsh_supply.idempotency_record(scope_key,key,request_fingerprint,response_status,response_body,publish_required)
+   SELECT $2,x.key,x.fingerprint,200,x.body,false FROM jsonb_to_recordset($1::jsonb) x(key text,fingerprint text,body jsonb) ORDER BY x.key COLLATE "C"`,[JSON.stringify(receiptRows),scopeKey]);
+ }
+ await closeMaintenanceBatch(client,actor,admission(pairs[0]!.scope).review);
+ return Object.freeze({subjects:pairs.length,created:fresh.length,replayed:pairs.length-fresh.length,authorizedAt:window.authorizedAt,windowExpiresAt:window.windowExpiresAt});
 }
