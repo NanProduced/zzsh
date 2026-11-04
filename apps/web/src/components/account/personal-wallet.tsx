@@ -40,15 +40,26 @@ const href = (pane = "overview", entry?: string, bucket: EntryBucket = "ALL") =>
 const bucketLabel = (b: Exclude<EntryBucket,'ALL'>) => ({AVAILABLE:'余额',REFUND_PAYABLE:'待退款',RESERVED:'提现处理中',PENDING_EARNINGS:'待结算收益'})[b];
 const errorText = (e: WalletRequestError | null) => e?.status === 401 ? "登录状态已变化，请重新登录。" : e?.status === 403 ? "暂时无法查看钱包，请确认账号状态。" : e?.status === 409 ? "流水已更新，请刷新后查看。" : "钱包暂时无法查看，请稍后重试。";
 function entryDisplayTime(e:WalletEntry){return e.kind==='HISTORICAL'?{label:'发生时间',at:e.occurredAt}:Object.hasOwn(e,'postedAt')?{label:'入账时间',at:e.postedAt??null}:{label:'记录时间',at:e.occurredAt};}
+/** 只有金额真的变了才是"余额变动"；旧平台的业务记录只是旁证，不改余额。 */
 function entryNature(e: WalletEntry) {
-  if (e.kind === "HISTORICAL") return e.sourceDetails
-    ? { reference: true, label: "业务存据 · 仅供查验", note: "原单存据 · 不变动余额" }
-    : { reference: true, label: e.includedInOpening ? "历史流水 · 已纳入期初" : "历史流水 · 未纳入期初", note: e.includedInOpening ? "历史记录 · 不重复入账" : "历史记录 · 不影响当前余额" };
-  if (e.bucket !== "AVAILABLE") return { reference: false, label: `${bucketLabel(e.bucket)}记账`, note: "不等于可用余额" };
-  return e.sourceKind === "OPENING"
-    ? { reference: false, label: "余额期初", note: "已纳入可用余额" }
-    : { reference: false, label: "可用余额变动", note: "已记账" };
+  if (e.sourceDetails) return { reference: true, label: "旧平台记录", note: "不影响余额" };
+  if (e.bucket !== "AVAILABLE") return { reference: false, label: bucketLabel(e.bucket), note: "" };
+  return { reference: false, label: "余额变动", note: "" };
 }
+/** 状态只用四个词：已入账 / 已扣除 / 处理中 / 已完成。旧平台旁证不冒充余额状态。 */
+function entryStatus(e: WalletEntry): string | null {
+  if (e.sourceDetails) return null;
+  if (e.bucket === "RESERVED") return "处理中";
+  if (e.bucket !== "AVAILABLE") return "已入账";
+  return e.deltaCents.startsWith("-") ? "已扣除" : "已入账";
+}
+/** 空列表要说清"这里为什么空、去哪里看"，不写"仍在核对"。 */
+const BUCKET_EMPTY: Record<Exclude<EntryBucket, "ALL">, { title: string; body: string; href: string; action: string }> = {
+  AVAILABLE: { title: "暂无余额变动", body: "余额增加或扣减会显示在这里。", href: "/account?view=wallet", action: "返回钱包概览" },
+  REFUND_PAYABLE: { title: "暂无待退款", body: "退款进度在对应订单里查看。", href: "/account?view=rentals", action: "去看订单" },
+  RESERVED: { title: "暂无处理中的提现", body: "提现申请与到账进度在提现页查看。", href: "/account?view=wallet&wallet=withdraw", action: "去提现页" },
+  PENDING_EARNINGS: { title: "暂无待结算收益", body: "佣金记录在邀请与佣金页查看。", href: "/account?view=invite", action: "去看佣金" },
+};
 function BankChipSvg() {
   return (
     <svg className="bank-chip-svg" width="34" height="26" viewBox="0 0 36 28" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
@@ -92,6 +103,7 @@ function EntryRows({ items, bucket, onOpen }: { items: WalletEntry[]; bucket: En
       {items.map(e => {
         const display = entryDisplayTime(e);
         const nature = entryNature(e);
+        const status = entryStatus(e);
         return (
           <Link
             key={e.id}
@@ -107,7 +119,7 @@ function EntryRows({ items, bucket, onOpen }: { items: WalletEntry[]; bucket: En
               {display.at ? (
                 <time dateTime={display.at}>{formatOrderTime(display.at, { timeZoneName: false })}</time>
               ) : (
-                "待确认"
+                "未记录"
               )}
             </span>
             <div className="wallet-record-copy">
@@ -116,7 +128,7 @@ function EntryRows({ items, bucket, onOpen }: { items: WalletEntry[]; bucket: En
                 <span className={`wallet-type-tag ${nature.reference ? "reference-tag" : "balance-tag"}`}>{nature.label}</span>
               </div>
               <small>
-                {e.sourceDetails ? "业务往来" : bucketLabel(e.bucket)}
+                {e.sourceDetails ? "单号" : bucketLabel(e.bucket)}
                 {e.sourceDetails?.originalNumber ?? e.businessReference.number
                   ? ` · ${e.sourceDetails?.originalNumber ?? e.businessReference.number}`
                   : ""}
@@ -141,17 +153,24 @@ function EntryRows({ items, bucket, onOpen }: { items: WalletEntry[]; bucket: En
               >
                 {walletMoney(e.sourceDetails?.recordedAmountCents ?? e.deltaCents, !e.sourceDetails)}
               </strong>
-              <small className={`wallet-delta-sub ${nature.reference ? "reference" : "balance"}`}>{nature.note}</small>
+              {nature.note ? <small className={`wallet-delta-sub ${nature.reference ? "reference" : "balance"}`}>{nature.note}</small> : null}
             </div>
-            <RecordStatus tone={e.kind === "HISTORICAL" ? "neutral" : "success"}>
-              {e.kind === "HISTORICAL" ? (e.includedInOpening ? "已计入余额" : "仅供查看") : "已记账"}
-            </RecordStatus>
+            {status ? <RecordStatus tone={e.kind === "HISTORICAL" ? "neutral" : "success"}>{status}</RecordStatus> : <span />}
             <ChevronRight size={15} aria-hidden="true" />
           </Link>
         );
       })}
     </div>
   );
+}
+
+function EmptyEntries({ bucket, filtered, recordsComplete, hasMore }: { bucket: EntryBucket; filtered: boolean; recordsComplete: boolean; hasMore: boolean }) {
+  if (filtered) return <div className="account-empty-state"><FileText size={28} aria-hidden="true" /><h3>已加载记录中没有符合条件的流水</h3><p>可继续加载更多记录。</p></div>;
+  if (bucket !== "ALL") {
+    const empty = BUCKET_EMPTY[bucket];
+    return <div className="account-empty-state"><FileText size={28} aria-hidden="true" /><h3>{empty.title}</h3><p>{empty.body}</p><Link className="button secondary" href={empty.href} scroll={false}>{empty.action}</Link></div>;
+  }
+  return <div className="account-empty-state"><FileText size={28} aria-hidden="true" /><h3>{recordsComplete && !hasMore ? "暂无流水" : "流水仍在核对"}</h3><p>{hasMore ? "可继续加载更多记录。" : recordsComplete ? "可以切换其他类型查看。" : "请稍后再来查看。"}</p></div>;
 }
 
 export function PersonalWallet({ scope }: { scope: string }) {
@@ -410,7 +429,7 @@ export function PersonalWallet({ scope }: { scope: string }) {
               <span className="th-col th-action"></span>
             </div>
             <div className="wallet-table-body">
-              {displayItems.length ? <EntryRows items={displayItems} bucket={records.bucket} onOpen={rememberList} /> : <div className="account-empty-state"><FileText size={28} /><h3>{filterOnlyReal || timeRange !== "ALL" ? "已加载记录中没有符合条件的流水" : recordsComplete && !records.nextCursor ? "暂无流水" : "流水仍在核对"}</h3><p>{records.nextCursor ? "可继续加载更多记录。" : recordsComplete ? "可以切换其他类型查看。" : "请稍后再来查看。"}</p></div>}
+              {displayItems.length ? <EntryRows items={displayItems} bucket={records.bucket} onOpen={rememberList} /> : <EmptyEntries bucket={records.bucket} filtered={filterOnlyReal || timeRange !== "ALL"} recordsComplete={recordsComplete} hasMore={Boolean(records.nextCursor)} />}
             </div>
           </div>
           <div className="wallet-records-footer">
@@ -426,31 +445,31 @@ export function PersonalWallet({ scope }: { scope: string }) {
 }
 function EntryDetail({ detail }: { detail: WalletEntryDetail }) {
  const e=detail.entry,display=entryDisplayTime(e);
- const nature = entryNature(e);
- const note=e.kind==='HISTORICAL'?(e.includedInOpening?'这笔记录已包含在余额中，不会重复计算。':'这笔记录仅供查看，不会改变余额。'):null;
+ const nature = entryNature(e), status = entryStatus(e);
+ const note=e.sourceDetails?'旧平台记录，不影响余额。':e.kind==='HISTORICAL'?(e.includedInOpening?'已计入当前余额。':null):null;
  return <article className="account-module-card wallet-entry-detail">
    <div className="wallet-entry-detail-header">
-     <StatusBadge tone={e.kind === "HISTORICAL" ? "neutral" : "success"}>{e.kind === "HISTORICAL" ? e.includedInOpening ? "已计入余额" : "仅供查看" : "已记账"}</StatusBadge>
+     {status?<StatusBadge tone={e.kind === "HISTORICAL" ? "neutral" : "success"}>{status}</StatusBadge>:null}
      <span className={`wallet-type-tag ${nature.reference ? "reference-tag" : "balance-tag"}`}>{nature.label}</span>
    </div>
    <h3>{financeEntryLabel(e)}</h3>
    <strong className="wallet-main-amount">{walletMoney(e.sourceDetails?.recordedAmountCents??e.deltaCents, !e.sourceDetails)}</strong>
-   {e.sourceDetails ? <p className="wallet-detail-nature-hint">此记录为历史业务发生凭证，原单金额不影响或重复计入当前可用余额。</p> : null}
+   {e.sourceDetails ? <p className="wallet-detail-nature-hint">这是旧平台的业务记录，金额没有计入当前余额。</p> : null}
    <dl className="account-fact-list">
-     <div><dt>记录类型</dt><dd>{e.sourceDetails?'业务往来':bucketLabel(e.bucket)}</dd></div>
-     <div><dt>{display.label}</dt><dd>{display.at?formatOrderTime(display.at, { timeZoneName: false }):'待确认'}</dd></div>
+     <div><dt>记录类型</dt><dd>{e.sourceDetails?'旧平台记录':bucketLabel(e.bucket)}</dd></div>
+     <div><dt>{display.label}</dt><dd>{display.at?formatOrderTime(display.at, { timeZoneName: false }):'未记录'}</dd></div>
      {Object.hasOwn(e,'recordedAt')?<div><dt>记录时间</dt><dd>{e.recordedAt?formatOrderTime(e.recordedAt,{timeZoneName:false}):'未记录'}</dd></div>:null}
      {e.sourceDetails?<>{walletOriginalType(e)?<div><dt>{e.sourceKind==='HISTORICAL_WITHDRAWAL'?'原提现方式':e.sourceKind==='HISTORICAL_PAYMENT'?'原业务类型':'原退款类型'}</dt><dd>{walletOriginalType(e)}</dd></div>:null}
-     <div><dt>原平台状态</dt><dd>{walletSourceStatus(e)??'待确认'}</dd></div>
-     {e.sourceDetails.associationState==='UNRESOLVED'?<div><dt>关联状态</dt><dd>原记录关联待核查</dd></div>:null}
-     <div><dt>原记录单号</dt><dd>{e.sourceDetails.originalNumber??'尚未提供'}</dd></div>
+     <div><dt>原平台状态</dt><dd>{walletSourceStatus(e)??'未记录'}</dd></div>
+     {e.sourceDetails.associationState==='UNRESOLVED'?<div><dt>关联状态</dt><dd>未记录</dd></div>:null}
+     <div><dt>原记录单号</dt><dd>{e.sourceDetails.originalNumber??'未记录'}</dd></div>
      {e.sourceDetails.sourcePaidAt?<div><dt>{e.sourceKind==='HISTORICAL_DISTRIBUTION'?'原结算时间':'原支付时间'}</dt><dd>{formatOrderTime(e.sourceDetails.sourcePaidAt,{timeZoneName:false})}</dd></div>:null}
-     {e.sourceDetails.attempts?.map(a=><div key={'la_refund_log:'+a.source.id}><dt>原退款尝试</dt><dd>{a.originalNumber??'原号待核'} · {walletMoney(a.recordedAmountCents)} · {refundAttemptStatus(a.originalStatus)}{a.occurredAt?' · '+formatOrderTime(a.occurredAt,{timeZoneName:false}):' · 时间待核'}</dd></div>)}
-     {e.sourceDetails.reasonCodes?.length?<div><dt>原记录核对</dt><dd>同订单退款记录存在重复或金额待核事项，保留原记录等待核查。</dd></div>:null}
-     <div><dt>资金含义</dt><dd>原平台业务记录，不改变当前钱包；渠道到账尚未核实。</dd></div>
-     {e.sourceDetails.originalLevel?<div><dt>原分销层级与比例</dt><dd>{e.sourceDetails.originalLevel}级 · {e.sourceDetails.originalRatio??'待确认'}</dd></div>:null}</>:null}
-     <div><dt>关联单号</dt><dd>{e.businessReference.number ?? "暂未提供"}</dd></div>
-     <div><dt>当时余额</dt><dd>{e.balanceAfterCents === null ? "尚未提供" : walletMoney(e.balanceAfterCents)}</dd></div>
+     {e.sourceDetails.attempts?.map(a=><div key={'la_refund_log:'+a.source.id}><dt>原退款尝试</dt><dd>{a.originalNumber??'未记录'} · {walletMoney(a.recordedAmountCents)} · {refundAttemptStatus(a.originalStatus)}{a.occurredAt?' · '+formatOrderTime(a.occurredAt,{timeZoneName:false}):''}</dd></div>)}
+     {e.sourceDetails.reasonCodes?.length?<div><dt>原记录核对</dt><dd>这笔记录有退款需要核对。</dd></div>:null}
+     <div><dt>资金含义</dt><dd>不影响余额</dd></div>
+     {e.sourceDetails.originalLevel?<div><dt>原分销层级与比例</dt><dd>{e.sourceDetails.originalLevel}级 · {e.sourceDetails.originalRatio??'未记录'}</dd></div>:null}</>:null}
+     <div><dt>关联单号</dt><dd>{e.businessReference.number ?? "未记录"}</dd></div>
+     <div><dt>当时余额</dt><dd>{e.balanceAfterCents === null ? "未记录" : walletMoney(e.balanceAfterCents)}</dd></div>
    </dl>
    {note?<p className="account-module-note">{note}</p>:null}
  </article>;

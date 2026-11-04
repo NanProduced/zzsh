@@ -130,7 +130,7 @@ function InlineCopyBtn({ text, label }: { text: string; label: string }) {
 
 function ListRow({ party, order, status, accountId, filters, onOpen }: { party: OrderParty; order: Order; status: OrderStatusFilter; accountId?: string; filters?: OrderSearchFilters; onOpen: (orderId: string, event: ReactMouseEvent<HTMLAnchorElement>) => void }) {
   const facts = orderAmountFacts(order, party);
-  const caption = !order.readOnly && party === "renter" && ["PAID", "COMPLETED"].includes(order.status) ? "下单金额" : facts.caption === "下单时号主报价" ? "下单时的出租报价" : facts.caption === "原单净收益记录" ? "收益记录" : facts.caption === "历史收益请查看收益记录" ? "收益待确认" : facts.caption;
+  const caption = !order.readOnly && party === "renter" && ["PAID", "COMPLETED"].includes(order.status) ? "下单金额" : facts.caption === "下单时号主报价" ? "下单时的出租报价" : facts.caption;
   const hint = statusHint(order);
   const stageTag = orderListFulfillmentTag(order);
   const title = orderAccountTitle(order);
@@ -178,9 +178,9 @@ function ListRow({ party, order, status, accountId, filters, onOpen }: { party: 
       {hint ? <p className="order-row-hint">{hint}</p> : null}
     </div>
     <div className="order-row-amount">
-      <strong>{facts.main === "待核定" ? "待确认" : facts.main}</strong>
+      <strong>{facts.main}</strong>
       <span className="order-row-amount-label">{caption}</span>
-      {facts.secondary.length ? <span className="order-row-amount-sub">{facts.secondary.map((line) => <span key={line}>{line === "原记录，不代表当前应收或到账" ? "实际入账请查看钱包" : line.replace("原退款金额记录", "退款记录金额")}</span>)}</span> : null}
+      {facts.secondary.length ? <span className="order-row-amount-sub">{facts.secondary.map((line) => <span key={line}>{line.replace("原退款金额记录", "退款记录金额")}</span>)}</span> : null}
     </div>
     <span className={`order-row-action${pending || order.stage?.viewerActionRequired ? " is-primary" : ""}`} aria-hidden="true">{action}<ChevronRight size={15} /></span>
   </li>;

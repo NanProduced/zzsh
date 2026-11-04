@@ -510,8 +510,8 @@ test("a missing owner quote stays unknown instead of borrowing the renter's paya
   const probe = await createProbe(async () => Response.json({ items: [noQuote], nextCursor: null, limit: 20 }));
   try {
     await probe.render({ party: "owner" }, "owner-no-quote");
-    assert.equal(probe.host.querySelector(".order-row-amount strong").textContent, "待确认");
-    assert.match(probe.host.querySelector(".order-row-amount-label").textContent, /号主报价暂不可用/);
+    assert.equal(probe.host.querySelector(".order-row-amount strong").textContent, "未记录");
+    assert.match(probe.host.querySelector(".order-row-amount-label").textContent, /号主报价/);
   } finally {
     await probe.dispose();
   }

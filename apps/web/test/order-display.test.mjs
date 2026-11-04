@@ -52,10 +52,10 @@ test("owner projections and historical owner records never borrow renter money",
   assert.equal(display.orderAmountFacts(native, "owner").main, "135.00 元");
   const legacy = { readOnly: true, source: { origin: "LEGACY" }, legacyAmounts: { paid: yuan("900.00"), deposit: yuan("300.00") }, payment: { state: "RECORDED_PAID" } };
   const facts = display.orderAmountFacts(legacy, "owner");
-  assert.equal(facts.main, "待核定");
+  assert.equal(facts.main, "未记录");
   assert.deepEqual(facts.secondary, []);
   assert.doesNotMatch(JSON.stringify(facts), /900|300|租客实付/);
-  assert.equal(display.orderAmountFacts({ ...legacy, legacyAmounts: null }, "owner").main, "待核定");
+  assert.equal(display.orderAmountFacts({ ...legacy, legacyAmounts: null }, "owner").main, "未记录");
 });
 
 test("order titles come from frozen facts, never from a stored listing title",()=>{
@@ -215,13 +215,13 @@ test("legacy amount facts keep renter evidence private instead of relabelling it
   const renter = display.orderAmountFacts(order, "renter");
   const owner = display.orderAmountFacts(order, "owner");
   assert.equal(renter.main, "66.00 元");
-  assert.equal(owner.main, "待核定");
+  assert.equal(owner.main, "未记录");
   assert.equal(renter.caption, "已付金额记录");
-  assert.equal(owner.caption, "历史收益请查看收益记录");
+  assert.equal(owner.caption, "待结算");
   assert.deepEqual(owner.secondary, []);
   assert.doesNotMatch(JSON.stringify(owner), /66\.00|租客实付/);
   const unknown = display.orderAmountFacts({ ...order, legacyAmounts: { required: null, paid: null, deposit: null, refund: null }, payment: { state: "UNKNOWN" } }, "owner");
-  assert.equal(unknown.main, "待核定");
+  assert.equal(unknown.main, "未记录");
   assert.deepEqual(unknown.secondary, []);
 });
 
@@ -301,8 +301,9 @@ test("ORDER-A: the fee total names the resource subtotal, never the deposit or o
 test("historical owner income is shown only with explicit original-net evidence", () => {
   const order = { readOnly: true, source: { origin: "LEGACY" }, ownerIncomeSource: { source: "LEGACY_ORDER_SNAPSHOT", sourceLabel: "旧平台原单净收益记录" }, amounts: { ownerRecordedIncome: yuan("87.00") } };
   const facts = display.orderAmountFacts(order, "owner");
-  assert.equal(facts.main, "87.00 元"); assert.equal(facts.caption, "原单净收益记录");
-  assert.match(facts.secondary[0], /不代表当前应收或到账/);
-  assert.equal(display.orderAmountFacts({ ...order, ownerIncomeSource: undefined }, "owner").main, "待核定");
-  assert.equal(display.orderAmountFacts({ ...order, amounts: { ownerRecordedIncome: null } }, "owner").main, "待核定");
+  assert.equal(facts.main, "87.00 元"); assert.equal(facts.caption, "已结算");
+  assert.deepEqual(facts.secondary, []);
+  assert.equal(display.orderAmountFacts({ ...order, ownerIncomeSource: undefined }, "owner").main, "未记录");
+  assert.equal(display.orderAmountFacts({ ...order, amounts: { ownerRecordedIncome: null } }, "owner").main, "未记录");
+  assert.equal(display.orderAmountFacts({ ...order, amounts: { ownerRecordedIncome: null } }, "owner").caption, "待结算");
 });

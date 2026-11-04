@@ -3,8 +3,10 @@ import { beijingCalendarDate } from "../workspace/beijing-time";
 import { findPhoneClue } from "../workspace/tab-model";
 
 export const FINANCE_ACCESS_FAILURE_EVENT = "zzsh-admin-finance-access-failure";
-export const bucketLabels: Record<string, string> = { AVAILABLE: "用户可用", RESERVED: "提现预留", GUARANTEE_HELD: "号主上架保证金", REFUND_PAYABLE: "退款应付", PENDING_EARNINGS: "待结算收益", PLATFORM: "平台权益", CLEARING: "支付清算过渡" };
-export const bucketNature: Record<string, string> = { AVAILABLE: "用户负债", RESERVED: "用户负债", GUARANTEE_HELD: "保证金责任", REFUND_PAYABLE: "退款责任", PENDING_EARNINGS: "收益责任", PLATFORM: "平台权益", CLEARING: "清算过渡" };
+export const bucketLabels: Record<string, string> = { AVAILABLE: "用户可用", RESERVED: "提现预留", GUARANTEE_HELD: "号主上架保证金", REFUND_PAYABLE: "退款应付", PENDING_EARNINGS: "待结算收益", PLATFORM: "平台权益", CLEARING: "待核对款项", OPENING_BASIS: "旧平台余额结转" };
+export const bucketNature: Record<string, string> = { AVAILABLE: "用户负债", RESERVED: "用户负债", GUARANTEE_HELD: "保证金责任", REFUND_PAYABLE: "退款责任", PENDING_EARNINGS: "收益责任", PLATFORM: "平台权益", CLEARING: "待核对款项", OPENING_BASIS: "余额来源" };
+/** 旧平台余额结转只在对账口径里出现，不进入资金查找的业务类别下拉。 */
+export const businessBucketLabels: Record<string, string> = Object.fromEntries(Object.entries(bucketLabels).filter(([bucket]) => bucket !== "OPENING_BASIS"));
 export const kindLabels: Record<string, string> = { OPENING: "迁移期初", SETTLEMENT: "订单结算", PAYMENT: "付款记录", WITHDRAWAL: "提现", EARNINGS: "历史流水", DISTRIBUTION: "分销", GUARANTEE: "上架保证金" };
 kindLabels.REFUND = "退款责任";
 export const stateLabels: Record<string, string> = { POSTED: "已入账", RESERVED: "已预留", SUBMITTING: "提交中", PROCESSING: "处理中", UNKNOWN: "结果未知", SUCCEEDED: "本地成功记录", FAILED: "失败", RECONCILIATION_REQUIRED: "结果冲突待核", HISTORICAL_OBSERVED: "历史观察" };

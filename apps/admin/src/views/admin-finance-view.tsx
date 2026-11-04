@@ -2,7 +2,7 @@ import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { ArrowUpRight, CalendarDays, ChevronDown, ChevronLeft, ChevronRight, CircleAlert, Copy, Download, Info, RotateCcw, SlidersHorizontal, TriangleAlert, Search } from "lucide-react";
 import { AdminApiError, friendlyError, ADMIN_AUTH_FAILURE_EVENT, type SessionSnapshot } from "../api";
 import { findPhoneClue, sanitizeFinanceReturn, tabFromLocation, canOpenKind, type WorkspaceTab } from "../workspace/tab-model";
-import { FINANCE_ACCESS_FAILURE_EVENT, bucketLabels, bucketNature, kindLabels, stateLabels, reasonLabels, defaultFinanceFilters, financeQuery, financeRead, downloadFinanceCsv, financeMoney, financeTime, financeIsHistorical, financeBusinessLabel, financeRecordNumber, financeRecordState, historicalAssociationPath, historicalFinanceFacts, type HistoricalFinanceDisplay, type FinanceFilters, type FinanceResponse, type FinanceDocument, type FinanceEntry } from "./admin-finance-api";
+import { FINANCE_ACCESS_FAILURE_EVENT, bucketLabels, bucketNature, businessBucketLabels, kindLabels, stateLabels, reasonLabels, defaultFinanceFilters, financeQuery, financeRead, downloadFinanceCsv, financeMoney, financeTime, financeIsHistorical, financeBusinessLabel, financeRecordNumber, financeRecordState, historicalAssociationPath, historicalFinanceFacts, type HistoricalFinanceDisplay, type FinanceFilters, type FinanceResponse, type FinanceDocument, type FinanceEntry } from "./admin-finance-api";
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible';
@@ -597,8 +597,8 @@ export function AdminFinanceView({ tab, snapshot, onOpenPath, onQueryChange, onR
               <FinanceSelect label="业务状态" value={draft.state} options={getAvailableStates(draft.kind)} onChange={state => setDraft({ ...draft, state })} />
             </div>
             <div className="finance-advanced-field">
-              <span className="finance-advanced-label">会计科目 (专审)</span>
-              <FinanceSelect label="会计科目 (专审)" value={draft.bucket} options={{ ALL: '全部资金类别', ...bucketLabels }} onChange={bucket => setDraft({ ...draft, bucket })} />
+              <span className="finance-advanced-label">资金类别 (专审)</span>
+              <FinanceSelect label="资金类别 (专审)" value={draft.bucket} options={{ ALL: '全部资金类别', ...businessBucketLabels }} onChange={bucket => setDraft({ ...draft, bucket })} />
             </div>
             {!period ? (
               <div className="finance-advanced-field">

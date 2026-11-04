@@ -276,8 +276,8 @@ export type OrderAmountFacts = { main: string; caption: string; secondary: strin
 export function orderAmountFacts(order: Order, party: OrderParty): OrderAmountFacts {
   if (order.readOnly && order.source?.origin === "LEGACY") {
     if (party === "owner") return order.ownerIncomeSource?.source === "LEGACY_ORDER_SNAPSHOT" && order.amounts?.ownerRecordedIncome
-      ? { main: formatOrderMoney(order.amounts.ownerRecordedIncome), caption: "原单净收益记录", secondary: ["原记录，不代表当前应收或到账"] }
-      : { main: "待核定", caption: "历史收益请查看收益记录", secondary: [] };
+      ? { main: formatOrderMoney(order.amounts.ownerRecordedIncome), caption: "已结算", secondary: [] }
+      : { main: "未记录", caption: "待结算", secondary: [] };
     const paid = order.payment?.state === "RECORDED_PAID";
     return {
       main: formatOrderMoney(paid ? order.legacyAmounts?.paid : order.legacyAmounts?.required),
@@ -294,7 +294,7 @@ export function orderAmountFacts(order: Order, party: OrderParty): OrderAmountFa
     const quote = order.amounts?.ownerExpectedIncome ?? order.quote?.ownerTotal;
     return quote
       ? { main: formatOrderMoney(quote), caption: "下单时号主报价", secondary: [] }
-      : { main: "待确认", caption: "号主报价暂不可用", secondary: [] };
+      : { main: "未记录", caption: "号主报价", secondary: [] };
   }
   const caption = order.status === "PENDING_PAYMENT" ? "待支付"
     : order.status === "PAID" ? "已支付"

@@ -22,11 +22,11 @@ test('wallet timestamps distinguish authoritative day, explicit unknown and comp
    try{
     await p.render();const record=p.host.querySelector('.wallet-record');
     if(!Object.hasOwn(times,'postedAt'))assert.match(record.textContent,/记录时间/);
-    else if(times.postedAt===null){assert.match(record.textContent,/入账时间待确认/);assert.equal(record.querySelector('time'),null);}
+    else if(times.postedAt===null){assert.match(record.textContent,/入账时间未记录/);assert.equal(record.querySelector('time'),null);}
     else assert.equal(record.querySelector('time').getAttribute('dateTime'),times.postedAt);
     await p.setQuery('wallet=entry&entry=ledger%3Aentry_A');
     const detail=p.host.querySelector('.wallet-entry-detail');
-    assert.match(detail.textContent,Object.hasOwn(times,'postedAt')?times.postedAt===null?/入账时间待确认/:/入账时间/:/记录时间/);
+    assert.match(detail.textContent,Object.hasOwn(times,'postedAt')?times.postedAt===null?/入账时间未记录/:/入账时间/:/记录时间/);
    }finally{await p.close();}
   }
   globalThis.fetch=async()=>reply({...ctx(),entry:{...entry,postedAt:'invalid-date'}});
@@ -71,7 +71,8 @@ test('opening and historical observations are not offered as new balance movemen
  const value={...page(),items,totals:{...page().totals,count:'5'},listCoverage:{knowledge:'KNOWN',count:'5',mappedRecordCount:'5',reason:'SOURCE_COMPLETE_THROUGH_CUTOFF',cutoff:at,version:'proof'}};
  const p=await probe(async url=>reply(String(url).includes('/entries?')?value:wallet()),'wallet=entries');
  try{await p.render();const rows=[...p.host.querySelectorAll('.wallet-record')];
-  assert.match(rows[0].textContent,/余额期初/);assert.match(rows[1].textContent,/已纳入期初.*不重复入账/);assert.match(rows[2].textContent,/未纳入期初.*不影响当前余额/);assert.match(rows[3].textContent,/提现处理中记账.*不等于可用余额/);assert.match(rows[4].textContent,/可用余额变动/);
+  assert.match(rows[0].textContent,/余额变动/);assert.match(rows[1].textContent,/余额变动.*已入账/);assert.match(rows[2].textContent,/余额变动.*已入账/);assert.match(rows[3].textContent,/提现处理中/);assert.match(rows[4].textContent,/余额变动/);
+  assert.doesNotMatch(p.host.querySelector('.wallet-records').textContent,/期初|存据|不重复入账|仅供查验|不影响当前余额/);
   assert.match(p.host.textContent,/已显示 5 条/);assert.doesNotMatch(p.host.textContent,/共 5 条记录/);
   await p.click('.wallet-toggle-chip');assert.equal(p.host.querySelectorAll('.wallet-record').length,1);assert.equal(p.host.querySelector('.wallet-record').dataset.walletEntry,'ledger:movement');assert.match(p.host.textContent,/仅筛选已加载的记录/);
  }finally{await p.close();}
@@ -80,7 +81,7 @@ test('opening and historical observations are not offered as new balance movemen
 test('the overview keeps the opening out of recent activity',async()=>{
  const movement={...entry,id:'ledger:movement',sourceKind:'NATIVE_SETTLEMENT'};
  const p=await probe(async url=>reply(String(url).includes('/entries?')?{...page(),items:[entry,movement]}:wallet()),'');
- try{await p.render();const rows=[...p.host.querySelectorAll('.wallet-overview-table-section .wallet-record')];assert.deepEqual(rows.map(row=>row.dataset.walletEntry),['ledger:movement']);assert.doesNotMatch(p.host.querySelector('.wallet-overview-table-section').textContent,/余额期初/);}finally{await p.close();}
+ try{await p.render();const rows=[...p.host.querySelectorAll('.wallet-overview-table-section .wallet-record')];assert.deepEqual(rows.map(row=>row.dataset.walletEntry),['ledger:movement']);assert.equal(p.host.querySelector('.wallet-overview-table-section [data-wallet-entry="'+entry.id+'"]'),null);}finally{await p.close();}
 });
 
 test('time filter uses the displayed posting time and excludes unknown times',async()=>{
@@ -125,7 +126,7 @@ test('a known zero withdrawal field remains zero in the contract without becomin
 });
 test('detail retry keeps list snapshot and missing record balance unknown without order links',async()=>{
  let details=0,lists=0;const p=await probe(async url=>{const s=String(url);if(s.includes('/entries/'))return ++details===1?reply({error:{code:'INTERNAL_ERROR'}},503):reply({...ctx(),entry});if(s.includes('/entries?')){lists++;return reply(page());}return reply(wallet());},'wallet=entries');
- try{await p.render();const url=new URL(p.host.querySelector('.wallet-record').href);await p.click('.wallet-record');await p.setQuery(url.searchParams.toString());await p.click('.account-empty-state button');assert.equal(details,2);assert.equal(lists,1);const facts=p.host.querySelector('.wallet-entry-detail');assert.match(facts.textContent,/当时余额尚未提供/);assert.doesNotMatch(facts.textContent,/当时余额¥1,234\.56/);assert.equal(facts.querySelectorAll('a').length,0);await p.setQuery('wallet=entries');assert.equal(lists,1);assert.equal(document.activeElement.dataset.walletEntry,entry.id);}finally{await p.close();}
+ try{await p.render();const url=new URL(p.host.querySelector('.wallet-record').href);await p.click('.wallet-record');await p.setQuery(url.searchParams.toString());await p.click('.account-empty-state button');assert.equal(details,2);assert.equal(lists,1);const facts=p.host.querySelector('.wallet-entry-detail');assert.match(facts.textContent,/当时余额未记录/);assert.doesNotMatch(facts.textContent,/当时余额¥1,234\.56/);assert.equal(facts.querySelectorAll('a').length,0);await p.setQuery('wallet=entries');assert.equal(lists,1);assert.equal(document.activeElement.dataset.walletEntry,entry.id);}finally{await p.close();}
 });
 test('continuation failure retains original entries/cursor and successful retry appends once',async()=>{let attempts=0;const p=await probe(async(url)=>{if(!String(url).includes('/entries?'))return reply(wallet());if(!String(url).includes('cursor='))return reply(page());attempts++;if(attempts===1)return reply({error:{code:'INTERNAL_ERROR'}},503);return reply({...page(),items:[{...entry,id:'history:entry_B',kind:'HISTORICAL',includedInOpening:true}],nextCursor:null});},'wallet=entries');try{await p.render();await p.click('.wallet-load-more');assert.equal(p.host.querySelectorAll('.wallet-record').length,1);assert.match(p.host.textContent,/PRIVATE_SOURCE_A/);await p.click('.wallet-read-error button');assert.equal(p.host.querySelectorAll('.wallet-record').length,2);assert.equal(attempts,2);}finally{await p.close();}});
 test('definite 401 on continuation clears all private projections and revalidates identity',async()=>{const p=await probe(async url=>reply(String(url).includes('cursor=')?{error:{code:'UNAUTHENTICATED'}}:String(url).includes('/entries?')?page():wallet(),String(url).includes('cursor=')?401:200),'wallet=entries');try{await p.render();assert.match(p.host.textContent,/PRIVATE_SOURCE_A/);await p.click('.wallet-load-more');assert.doesNotMatch(p.host.textContent,/PRIVATE_SOURCE_A|¥1,234\.56/);assert.equal(p.session.revalidations,1);}finally{await p.close();}});
@@ -215,7 +216,7 @@ for(const pane of ['', 'wallet=withdraw', 'wallet=withdraw-local'])for(const mar
 
 test('wallet keeps opening-balance facts without exposing platform source labels',async()=>{
  const p=await probe(async url=>String(url).includes('/entries/')?reply({...ctx(),entry}):String(url).includes('/entries?')?reply(page()):reply(wallet()),'wallet=entries');
- try{await p.render();assert.doesNotMatch(p.host.textContent,/旧平台|本平台/);assert.match(p.host.textContent,/余额记录/);const url=new URL(p.host.querySelector('.wallet-record').href);await p.click('.wallet-record');await p.setQuery(url.searchParams.toString());assert.doesNotMatch(p.host.textContent,/旧平台|本平台/);assert.match(p.host.textContent,/当时余额尚未提供/);}finally{await p.close();}
+ try{await p.render();assert.doesNotMatch(p.host.textContent,/旧平台|本平台/);assert.match(p.host.textContent,/余额记录/);const url=new URL(p.host.querySelector('.wallet-record').href);await p.click('.wallet-record');await p.setQuery(url.searchParams.toString());assert.doesNotMatch(p.host.textContent,/旧平台|本平台/);assert.match(p.host.textContent,/当时余额未记录/);}finally{await p.close();}
 });
 
 
@@ -224,4 +225,34 @@ test('BIND-03 wallet entry renders the new workspace independently of unreadable
 test('guarantee records remain independently reachable when wallet money is unavailable',async()=>{
  const p=await probe(async()=>reply({error:{code:'EVIDENCE_UNAVAILABLE'}},503),'wallet=guarantees');
  try{await p.render();assert.match(p.host.textContent,/上架保证金/);assert.doesNotMatch(p.host.textContent,/其他收退记录/);assert(p.host.querySelector('a[href="/account?view=credit"]'));assert.equal(p.host.querySelector('.account-module-heading button'),null);}finally{await p.close();}
+});
+
+test('a legacy business record is an aside, never a balance movement and never an internal word',async()=>{
+ const sourceDetails={associationState:null,associationReason:null,recordedAmountCents:'1776',originalStatus:'2',originalNumber:'ORIGINAL_1776',originalOrderType:'1',originalRatio:'30.00',originalLevel:'2',sourcePaidAt:at,channelArrival:'UNKNOWN',affectsCurrentWallet:false};
+ const basis={...entry,id:'history:basis',kind:'HISTORICAL',sourceKind:'HISTORICAL_DISTRIBUTION',deltaCents:'0',postedAt:null,sourceDetails};
+ const p=await probe(async url=>String(url).includes('/entries/')?reply({...ctx(),entry:basis}):String(url).includes('/entries?')?reply({...page(),items:[basis]}):reply(wallet()),'wallet=entries');
+ try{
+  await p.render();const row=p.host.querySelector('.wallet-record');assert(row);
+  assert.match(row.textContent,/旧平台记录/);assert.match(row.textContent,/不影响余额/);
+  assert.doesNotMatch(row.textContent,/存据|期初|不重复入账|仅供查验/);
+  assert.equal(row.querySelector('.info-record-status'),null);
+  await p.setQuery('wallet=entry&entry=history%3Abasis');
+  const detail=p.host.querySelector('.wallet-entry-detail');assert(detail);
+  assert.match(detail.textContent,/不影响余额/);
+  assert.doesNotMatch(detail.textContent,/存据|期初|渠道到账尚未核实|仅供查验|不影响或重复计入/);
+ }finally{await p.close();}
+});
+
+test('empty withdrawal-in-progress and pending-earnings buckets say why they are empty and where to look',async()=>{
+ const empty=(bucket)=>({...page(),bucket,items:[],nextCursor:null,totals:{...page().totals,count:'0',byBucket:[]},listCoverage:{knowledge:'KNOWN',count:'0',mappedRecordCount:'0',reason:'SOURCE_COMPLETE_THROUGH_CUTOFF',cutoff:at,version:'proof'}});
+ const p=await probe(async url=>{const s=String(url);if(s.includes('/entries?'))return reply(empty(new URL(s,'http://127.0.0.1').searchParams.get('bucket')??'ALL'));return reply(wallet());},'wallet=entries&bucket=RESERVED');
+ try{
+  await p.render();const box=p.host.querySelector('.account-empty-state');assert(box);
+  assert.match(box.textContent,/暂无处理中的提现/);assert.doesNotMatch(box.textContent,/流水仍在核对/);
+  assert(box.querySelector('a[href="/account?view=wallet&wallet=withdraw"]'));
+  await p.setQuery('wallet=entries&bucket=PENDING_EARNINGS');await p.render();
+  const next=p.host.querySelector('.account-empty-state');assert(next);
+  assert.match(next.textContent,/暂无待结算收益/);assert.doesNotMatch(next.textContent,/流水仍在核对/);
+  assert(next.querySelector('a[href="/account?view=invite"]'));
+ }finally{await p.close();}
 });
