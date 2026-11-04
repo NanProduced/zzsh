@@ -370,6 +370,10 @@ const openingEntryDetails=(basisId:string,rootId:string,sourceDigest:string)=>JS
 export async function importReviewedStoredOpeningBatchOn(client:PoolClient,actor:Actor,inputs:StoredOpeningInput[],scopes:FinanceOpeningAdmission[]){
  const pairs=storedPairs(JSON.parse(JSON.stringify(inputs)),scopes);
  const window=await authorizeMaintenanceBatch(client,actor,pairs.map(p=>admission(p.scope).review));
+ // The stored-opening review trigger validates the transaction-scoped audit context;
+ // the single-object path sets it per import, so the batch path must set it once
+ // before writing any review row.
+ await setAuditContext(client,'admin',actor.userId,actor.sessionId,actor.requestId);
  const plans=pairs.map(({input,scope})=>({input,scope,plan:openingPlanCore(input),stored:admission(scope).stored!}));
  const scopeKey=JSON.stringify(['admin',actor.userId,'finance.opening.import',null]);
  await client.query(`/* opening batch key locks */ SELECT pg_advisory_xact_lock(hashtextextended(k,0)) FROM unnest($1::text[]) WITH ORDINALITY keys(k,n) ORDER BY n`,

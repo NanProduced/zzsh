@@ -133,11 +133,12 @@ function assertResource(resource, checkpoint) {
     if (resource.database !== binding.database || resource.oid !== expectedOid || resource.nonce !== expectedNonce || resource.pendingReset)
         throw new Error("REGISTERED_MIGRATION_CREDENTIAL_REQUIRED");
     const reservation = resource.protectedDataset;
-    if (reservation?.bootstrapReservation === strictRoundReservation && !strictBatch) throw new Error("CHECKPOINT_STRICT_BATCH_CHANGED");
+    const strictRound = status => status === strictRoundReservation || status === "ROUND05_BOOTSTRAP_RESERVED";
+    if (strictRound(reservation?.bootstrapReservation) && !strictBatch) throw new Error("CHECKPOINT_STRICT_BATCH_CHANGED");
     if (reservation?.report && reservation.report !== statePath && ["BUILDING", "COMMIT_UNKNOWN", "ROLLBACK_UNKNOWN", "RECEIPT_WRITE_FAILED_COMMITTED"].includes(reservation.status))
         throw new Error("ORIGINAL_PENDING_CHECKPOINT_REQUIRED");
-    if (strictBatch && (!matchesLoadReservation(reservation, binding) || !(reservation.status === strictRoundReservation
-        || (reservation.bootstrapReservation === strictRoundReservation && reservation.report === statePath && checkpoint?.strictBatch === true))))
+    if (strictBatch && (!matchesLoadReservation(reservation, binding) || !(strictRound(reservation.status)
+        || (strictRound(reservation.bootstrapReservation) && reservation.report === statePath && checkpoint?.strictBatch === true))))
         throw new Error("STRICT_BATCH_REQUIRES_ROUND04");
 }
 assertResource(registered, existsSync(statePath) ? state : null);

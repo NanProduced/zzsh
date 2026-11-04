@@ -18,7 +18,7 @@ export {readAdminFinancePeriodBasis} from './admin-finance-period-basis';
 export type { HistoricalFinanceDisplay,HistoricalRelationAccess } from './legacy-observation-display';
 
 export const ADMIN_FINANCE_VERSION = "admin-finance.read.v1";
-export const FINANCE_BUCKETS = ["AVAILABLE", "RESERVED", "GUARANTEE_HELD", "REFUND_PAYABLE", "PENDING_EARNINGS", "PLATFORM", "CLEARING"] as const;
+export const FINANCE_BUCKETS = ["AVAILABLE", "RESERVED", "GUARANTEE_HELD", "REFUND_PAYABLE", "PENDING_EARNINGS", "PLATFORM", "CLEARING", "OPENING_BASIS"] as const;
 export type FinanceBucket = typeof FINANCE_BUCKETS[number];
 export type FinanceFilters = { scope: string; from: string; to: string; period: boolean; bucket: FinanceBucket | "ALL"; kind: string; state: string; q: string };
 export type FinanceActor = { userId: string; sessionId: string; authorizationKey: string };
@@ -89,6 +89,9 @@ function signedSourceCents(value: unknown): string | null { try { return sourceS
 export function displayName(value: unknown, fallback: string): string { return typeof value !== "string" || !value.trim() ? fallback : /^1[3-9]\d{9}$/.test(value) ? value.slice(0, 3) + "****" + value.slice(-4) : value; }
 function bucketOf(code: string): FinanceBucket {
   if (["OWNER_AVAILABLE", "WALLET_AVAILABLE"].includes(code)) return "AVAILABLE";
+  // Opening-basis against-account: kept out of AVAILABLE/CLEARING so period
+  // reconciliation and the ledger aggregate classify it the same way.
+  if (code === "LEGACY_OPENING_SOURCE") return "OPENING_BASIS";
   if (code==='WALLET_RESERVED') return "RESERVED";
   if(code==='GUARANTEE_HELD')return'GUARANTEE_HELD';
   if (code === "WALLET_PENDING_EARNINGS") return "PENDING_EARNINGS";

@@ -83,7 +83,7 @@ assert(!registry.pendingReset && (!reservation || reservation.status === reserva
   && matchesLoadReservation(reservation, { ...input.target, datasetSha256: input.dataset.sha256 })), "FRESH_REGISTERED_RESOURCE_OR_EXACT_BOOTSTRAP_RESERVATION_REQUIRED");
 assert(input.strictBatch === undefined || typeof input.strictBatch === "boolean", "ROUND_STRICT_BATCH_INVALID");
 const strictBatch = input.strictBatch === true;
-assert(!strictBatch || reservation?.status === strictRoundReservation, "STRICT_BATCH_REQUIRES_ROUND04");
+assert(!strictBatch || reservation?.status === strictRoundReservation || reservation?.status === "ROUND05_BOOTSTRAP_RESERVED", "STRICT_BATCH_REQUIRES_ROUND04");
 const apiDist = resolve(input.apiDist);
 function assertBuild() {
   const files = readdirSync(apiDist, { recursive: true }).filter(file => file.endsWith(".js")).map(file => file.replaceAll("\\", "/")).sort();
