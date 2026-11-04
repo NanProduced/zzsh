@@ -265,22 +265,22 @@ html[data-theme="dark"] .functional-shell.functional-shell--browse .market-secti
 .market-region-search { display:flex; min-height:40px; align-items:center; gap:8px; padding:0 10px; border:1px solid var(--color-border-default); border-radius:6px; color:var(--color-text-muted); background:var(--color-bg-surface); }
 .market-region-search:focus-within { border-color:var(--color-delta-accent); outline:2px solid var(--color-delta-accent); outline-offset:-2px; }
 .market-region-search input { width:100%; min-width:0; min-height:38px; border:0; outline:0; color:var(--color-text-primary); background:transparent; font-size:14px; }
-.market-region-columns { display:grid; grid-template-columns:140px minmax(0,1fr); gap:14px; margin-top:10px; }
-.market-region-provinces { display:flex; flex-direction:column; gap:3px; max-height:260px; overflow-y:auto; padding-right:4px; }
+.market-region-columns { display:grid; grid-template-columns:140px minmax(0,1fr); gap:14px; margin-top:10px; height:340px; min-height:0; }
+.market-region-provinces { display:flex; flex-direction:column; gap:3px; height:100%; overflow-y:auto; padding-right:4px; scrollbar-width:thin; }
 .market-region-province-item { display:flex; align-items:center; justify-content:space-between; width:100%; min-height:34px; padding:6px 10px; border:1px solid transparent; border-radius:6px; color:var(--color-text-secondary); background:transparent; font-size:13px; cursor:pointer; text-align:left; transition:all 120ms ease; }
 .market-region-province-item:hover { background:var(--color-bg-card-hover); color:var(--color-text-primary); }
 .market-region-province-item[data-active="true"] { border-color:var(--color-delta-accent); background:var(--color-delta-surface); color:var(--color-delta-accent-hover); font-weight:600; }
 .market-region-province-name { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .market-region-province-badge { display:inline-flex; align-items:center; justify-content:center; min-width:18px; height:18px; padding:0 5px; border-radius:999px; font-size:11px; font-weight:600; background:var(--color-bg-elevated); color:var(--color-text-primary); flex-shrink:0; }
 .market-region-province-badge[data-all="true"] { background:var(--color-delta-accent); color:var(--color-text-inverse); }
-.market-region-cities { display:flex; flex-direction:column; min-width:0; max-height:260px; margin:0; padding:0; border:0; }
-.market-region-cities-header { display:flex; align-items:center; justify-content:space-between; width:100%; padding:2px 0 8px; border-bottom:1px solid var(--color-border-subtle); margin-bottom:8px; }
+.market-region-cities { display:flex; flex-direction:column; min-width:0; height:100%; min-height:0; margin:0; padding:0; border:0; }
+.market-region-cities-header { display:flex; align-items:center; justify-content:space-between; width:100%; padding:2px 0 8px; border-bottom:1px solid var(--color-border-subtle); margin-bottom:8px; flex:0 0 auto; }
 .market-region-cities-title { font-size:13px; font-weight:600; color:var(--color-text-primary); }
 .market-region-cities-title small { font-size:11px; font-weight:normal; color:var(--color-text-muted); margin-left:4px; }
 .market-region-select-all-btn { padding:3px 9px; border:1px solid var(--color-border-default); border-radius:5px; font-size:12px; color:var(--color-delta-accent); background:var(--color-delta-surface); cursor:pointer; transition:all 140ms ease; }
 .market-region-select-all-btn:hover { border-color:var(--color-delta-accent); background:var(--color-bg-card-hover); }
 .market-region-select-all-btn[data-selected="true"] { border-color:var(--color-border-strong); color:var(--color-text-secondary); background:var(--color-bg-card); }
-.market-region-cities-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(96px,1fr)); gap:4px 8px; max-height:215px; overflow-y:auto; padding-right:2px; }
+.market-region-cities-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(96px,1fr)); align-content:start; gap:4px 8px; flex:1 1 0; min-height:0; overflow-y:auto; padding-right:2px; scrollbar-width:thin; }
 .market-region-city { width:100%; min-height:32px; justify-content:flex-start; padding-inline:6px; font-size:12px; }
 .market-region-empty { margin:0; padding:18px 8px; color:var(--color-text-primary); font-size:14px; text-align:center; }
 .market-region-summary { margin:10px 0 0; padding-top:8px; border-top:1px solid var(--color-border-subtle); color:var(--color-text-muted); font-size:13px; }

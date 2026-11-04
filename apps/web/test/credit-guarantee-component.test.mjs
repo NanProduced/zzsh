@@ -36,7 +36,7 @@ const historyPath = path.join(tree, "apps/web/src/components/account/owner-guara
 function loadHistory() {
   const wallet = loadTs(walletClientPath);
   const client = loadTs(historyClientPath, { "./personal-wallet-client.ts": wallet });
-  return loadTs(historyPath, { "@/components/session/user-session-provider": { useUserSession: () => session, useUserSessionStore: () => store }, "@/lib/owner-guarantee-history-client": client, "@/lib/personal-wallet-client": wallet, "@/lib/order-client": loadTs(orderClientPath), "@/components/ui/information": loadInformation({ "lucide-react": icons }), "./owner-guarantee-history.css": {} });
+  return loadTs(historyPath, { "@/components/session/user-session-provider": { useUserSession: () => session, useUserSessionStore: () => store }, "@/lib/owner-guarantee-history-client": client, "@/lib/owner-guarantee-unified-client": loadTs(path.join(tree, "apps/web/src/lib/owner-guarantee-unified-client.ts"), { "./personal-wallet-client.ts": wallet }), "@/lib/personal-wallet-client": wallet, "@/lib/order-client": loadTs(orderClientPath), "@/components/ui/information": loadInformation({ "lucide-react": icons }), "./owner-guarantee-history.css": {} });
 }
 
 function setupStorage(throws = false) {

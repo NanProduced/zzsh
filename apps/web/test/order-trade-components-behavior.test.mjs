@@ -50,6 +50,7 @@ function loadComponent(relativePath, session, extra) {
     if (name === "@/lib/listing-filters" || name === "./listing-filters") return loadComponent("apps/web/src/lib/listing-filters.ts", session);
     if (name === "@/lib/supply-games" || name === "./supply-games.ts") return loadComponent("apps/web/src/lib/supply-games.ts", session);
     if (name === "./order-aftersale") return {OrderAftersale:()=>null};
+    if (name === "./order-account-dossier" || name === "@/components/order/order-account-dossier") return { OrderAccountDossier: () => null, OrderAccountDossierModal: () => null };
     if (name.endsWith(".css")) return {};
     return requireFromTree(name);
   };

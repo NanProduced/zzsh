@@ -1804,5 +1804,17 @@ export const DELTA_REGION_OPTIONS = [
   {
     "province": "新疆维吾尔自治区",
     "city": "白杨市"
+  },
+  {
+    "province": "香港特别行政区",
+    "city": "香港"
+  },
+  {
+    "province": "澳门特别行政区",
+    "city": "澳门"
+  },
+  {
+    "province": "台湾省",
+    "city": "台湾"
   }
 ] as const;

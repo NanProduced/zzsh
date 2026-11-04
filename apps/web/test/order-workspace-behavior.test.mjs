@@ -41,6 +41,7 @@ function loadWorkspace(session, router, legacyContinuationPanel = () => null) {
       if (name === "@/lib/order-client") return requireFromTree(path.join(tree, "apps/web/src/lib/order-client.ts"));
       if (name === "@/lib/order-display") return requireFromTree(path.join(tree, "apps/web/src/lib/order-display.ts"));
       const local = name.match(/(?:^\.\/|@\/components\/order\/)([a-z-]+)$/)?.[1];
+      if (local === "order-account-dossier") return { OrderAccountDossier: () => null };
       if (local === "legacy-continuation-panel") return { LegacyContinuationPanel: legacyContinuationPanel };
       if (local === "prestart-termination-panel") return { PrestartTerminationPanel: () => null };
       if (local && (ORDER_COMPONENTS.has(local) || local === "legacy-order-workspace")) {

@@ -12,6 +12,7 @@ import { OrderTradeActions, type OrderStageFacts } from "@/components/order/orde
 import { OrderAftersale } from "./order-aftersale";
 import { PrestartTerminationPanel } from "@/components/order/prestart-termination-panel";
 import { OrderError, OrderStatusBadge, orderTermLabel, orderUrl, statusLabel } from "@/components/order/order-presentation";
+import { OrderAccountDossier } from "./order-account-dossier";
 import "./order.css";
 
 type DetailState = { status: "loading" } | { status: "ready"; order: Order | null; error: OrderRequestError | null } | { status: "error"; error: OrderRequestError | null };
@@ -494,6 +495,12 @@ export function OrderDetail({ party, status, accountId, orderId, filters, state,
             <OrderLines order={order} party={party} />
           </details>
         </section>
+        <OrderAccountDossier
+          accountId={order.accountId}
+          accountDisplayNo={order.accountDisplayNo}
+          party={party}
+          listingFacts={order.listingFacts}
+        />
         <OrderEntitlements order={order} />
         <OrderTimeline order={order} facts={facts} party={party} />
       </div>

@@ -66,8 +66,25 @@ function useWithdrawalIdentity(scope: string, onIdentityFailure?: IdentityFailur
   return { userId, current, ready, session, identityFailure };
 }
 
-function BankBindingPanel({ scope, onChanged, onLocked, onIdentityFailure }: {
-  scope: string; onChanged: () => void; onLocked: (locked: boolean) => void; onIdentityFailure?: IdentityFailure;
+function BankChipSvg() {
+  return (
+    <svg className="bank-chip-svg" width="34" height="26" viewBox="0 0 36 28" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+      <rect width="36" height="28" rx="4" fill="url(#chip-grad-workspace)" />
+      <rect x="0.5" y="0.5" width="35" height="27" rx="3.5" stroke="#D4AF37" strokeOpacity="0.4" />
+      <path d="M0 10H12M0 18H12M24 10H36M24 18H36M12 10C12 14 12 14 12 18M24 10C24 14 24 14 24 18M12 14H24M18 0V10M18 18V28" stroke="#8C6D1F" strokeWidth="1" strokeOpacity="0.6" />
+      <defs>
+        <linearGradient id="chip-grad-workspace" x1="0" y1="0" x2="36" y2="28" gradientUnits="userSpaceOnUse">
+          <stop stopColor="#F5D77F" />
+          <stop offset="0.5" stopColor="#E5C158" />
+          <stop offset="1" stopColor="#C99E32" />
+        </linearGradient>
+      </defs>
+    </svg>
+  );
+}
+
+function BankBindingPanel({ scope, onChanged, onLocked, onIdentityFailure, onBoundChange }: {
+  scope: string; onChanged: () => void; onLocked: (locked: boolean) => void; onIdentityFailure?: IdentityFailure; onBoundChange?: (bound: boolean) => void;
 }) {
   const identity = useWithdrawalIdentity(scope, onIdentityFailure), ids = useId();
   const [read, setRead] = useState<ReadState<BankBindingRead>>({ scope, value: null, busy: true, error: null });
@@ -87,6 +104,7 @@ function BankBindingPanel({ scope, onChanged, onLocked, onIdentityFailure }: {
   const activeRecovery = selectedRecovery ?? pending;
   const isLocked = Boolean(activeRecovery) || storageBlocked || (read.scope === scope && writing);
   useEffect(() => { lockedRef.current(isLocked); }, [isLocked, scope]);
+  useEffect(() => { onBoundChange?.(Boolean(visible.value?.binding)); }, [visible.value?.binding, onBoundChange]);
   const syncPending = () => {
     if (!identity.current() || !identity.userId) return null;
     try { const p = pendingBankBinding(identity.userId); setPending(p); setStorageBlocked(false); return p; }
@@ -178,10 +196,46 @@ function BankBindingPanel({ scope, onChanged, onLocked, onIdentityFailure }: {
     <div className="bank-section-heading"><h3 id={`${ids}-heading`}><CreditCard size={19} aria-hidden="true" />收款银行卡</h3><Button variant="tertiary" className="bank-action" isDisabled={visible.busy || writing} onPress={() => void load()} aria-label="重新读取收款资料"><RefreshCw size={15} aria-hidden="true" />刷新</Button></div>
     <p className="bank-help">银行卡归属尚未核验。</p>
     {visible.busy ? <SkeletonBlock label="正在读取收款资料" lines={2} /> : visible.error ? <RecoveryAlert tone="error" live title="收款资料暂时无法读取" problem={errorCopy(visible.error)} details={{ summary: "查看查询信息", body: <ErrorDetails error={visible.error} /> }} /> : visible.value?.integration !== "INTEGRATED" ? <RecoveryAlert tone="unknown" title="暂时无法查看收款资料" problem="暂时无法确认是否已绑定，请稍后重试。" /> : visible.value.binding ? <>
-      <div className="bank-saved"><span className="bank-card-mark" aria-hidden="true"><CreditCard size={26} /></span><div><strong>{visible.value.binding.cardMask}</strong><p>持卡人：{visible.value.binding.holderNameMask}</p></div><StatusBadge tone="neutral">资料已保存</StatusBadge></div>
-      <p className="bank-meta">更新于 {timeLabel(visible.value.binding.updatedAt)}</p>
-      {!form.open && !activeRecovery && !storageBlocked ? <Button variant="secondary" className="bank-action" onPress={beginEdit}>修改收款资料</Button> : null}
-    </> : <div className="bank-empty"><p>尚未绑定收款银行卡。</p>{!form.open && !activeRecovery && !storageBlocked ? <Button variant="primary" className="bank-action bank-primary" onPress={beginEdit}>绑定银行卡</Button> : null}</div>}
+      <div className="bank-saved">
+        <div className="bank-card-realistic">
+          <svg className="bank-card-waves" viewBox="0 0 320 200" fill="none" preserveAspectRatio="none" aria-hidden="true">
+            <path d="M-20 130 C 80 80, 160 180, 340 90" stroke="currentColor" strokeWidth="1.5" strokeOpacity="0.12" fill="none" />
+            <path d="M-10 160 C 90 110, 180 210, 350 120" stroke="currentColor" strokeWidth="1.5" strokeOpacity="0.08" fill="none" />
+            <circle cx="270" cy="40" r="70" fill="url(#card-glow-workspace)" opacity="0.15" />
+            <defs>
+              <radialGradient id="card-glow-workspace" cx="50%" cy="50%" r="50%">
+                <stop stopColor="#F5D77F" />
+                <stop offset="100%" stopColor="transparent" />
+              </radialGradient>
+            </defs>
+          </svg>
+          <div className="bank-card-top">
+            <span className="bank-card-network">银联借记卡</span>
+            <BankChipSvg />
+          </div>
+          <div className="bank-card-number">{visible.value.binding.cardMask}</div>
+          <div className="bank-card-bottom">
+            <div className="bank-card-holder">
+              <span className="bank-card-label">持卡人</span>
+              <span className="bank-card-name">{visible.value.binding.holderNameMask}</span>
+            </div>
+            <StatusBadge tone="neutral">资料已保存</StatusBadge>
+          </div>
+        </div>
+        <p className="bank-meta">更新于 {timeLabel(visible.value.binding.updatedAt)}</p>
+        {!form.open && !activeRecovery && !storageBlocked ? <Button variant="secondary" className="bank-action" onPress={beginEdit}>修改收款资料</Button> : null}
+      </div>
+    </> : <div className="bank-empty">
+      <div className="bank-empty-visual" aria-hidden="true"><span className="bank-card-ghost"><CreditCard size={32} /></span></div>
+      <div className="bank-empty-copy">
+        <p className="bank-empty-title">尚未绑定收款银行卡。</p>
+        <p className="bank-empty-desc">绑定本人借记卡后，即可随时将账户余额提现到账。支持银联借记卡，实名安全托管。</p>
+      </div>
+      <div className="bank-supported-banks" aria-hidden="true">
+        <span>工商银行</span><span>建设银行</span><span>招商银行</span><span>农业银行</span><span>银联借记卡</span>
+      </div>
+      {!form.open && !activeRecovery && !storageBlocked ? <Button variant="primary" className="bank-action bank-primary bank-bind-cta" onPress={beginEdit}>绑定银行卡</Button> : null}
+    </div>}
     {storageBlocked ? <RecoveryAlert tone="unknown" title="上次保存状态待确认" problem="请保留当前页面并联系客服，确认前无法继续操作。" /> : activeRecovery ? <RecoveryAlert tone="unknown" title="上次保存结果待确认" problem="请先查询上次保存结果。" action={<div className="bank-actions"><Button variant="primary" className="bank-action bank-primary" isDisabled={writing} onPress={() => void recover()}>{writing ? "正在核对…" : "查询保存结果"}</Button><Button variant="secondary" className="bank-action" isDisabled={writing || visible.value?.integration !== "INTEGRATED"} onPress={beginRecovery}>重新输入原资料</Button></div>} /> : null}
     {form.open ? <form className="bank-binding-form" onSubmit={save} noValidate>
       <FieldGroup id={`${ids}-name`} label="持卡人姓名" required helper="填写银行账户登记姓名。修改时需要重新填写，不会预填旧资料。"><Input {...fieldControlProps({ id: `${ids}-name`, helper: true })} ref={nameRef} name="bank-holder-name" autoComplete="off" spellCheck={false} maxLength={128} value={form.name} disabled={writing} onChange={e => setDraft(d => ({ ...d, name: e.target.value, error: "" }))} /></FieldGroup>
@@ -310,7 +364,10 @@ function ChannelWithdrawalPanel({ scope, refreshKey, bindingLocked, availableBal
     <div className="bank-section-heading"><h3 id={`${id}-title`}>银行卡提现</h3><Button variant="tertiary" className="bank-action" isDisabled={read.busy || busy} onPress={() => void load()}><RefreshCw size={15} aria-hidden="true" />刷新</Button></div>
     <div className="bank-available"><span>余额</span><strong>{walletMoney(availableBalance)}</strong></div>
     {storageBlocked ? <RecoveryAlert tone="unknown" title="原申请信息暂时无法读取" problem="无法确认是否已有提交，已暂停新申请。请保留当前浏览器状态。" /> : pending ? <RecoveryAlert tone="unknown" title="上次提现结果待确认" problem="请先查询处理结果，确认前无法再次申请。" action={<div className="bank-actions"><Button variant="primary" className="bank-action bank-primary" isDisabled={busy} onPress={() => void recover()}>{busy ? "正在查询…" : "查询提现进度"}</Button><Button variant="secondary" className="bank-action" isDisabled={busy} onPress={() => void readLocalRecovery()}>查看申请记录</Button></div>} /> : null}
-    {read.busy ? <SkeletonBlock label="正在确认提现条件" lines={2} /> : read.error ? <RecoveryAlert tone="error" title="暂时无法确认提现条件" problem={errorCopy(read.error)} details={{ summary: "查看查询信息", body: <ErrorDetails error={read.error} /> }} /> : options && !options.canQuote ? <RecoveryAlert tone="unknown" title="当前暂不可申请提现" problem={[...new Set(options.reasonCodes.map(code => reasonLabel[code] ?? "暂不满足提现条件"))].join("；") || "当前提现条件尚未确认。"} /> : null}
+    {read.busy ? <SkeletonBlock label="正在确认提现条件" lines={2} /> : read.error ? <RecoveryAlert tone="error" title="暂时无法确认提现条件" problem={errorCopy(read.error)} details={{ summary: "查看查询信息", body: <ErrorDetails error={read.error} /> }} /> : options && !options.canQuote ? <>
+      {!options.bankBinding.binding ? <div className="bank-onboarding-callout" role="note"><p><strong>提现第一步：请先绑定收款银行卡</strong></p><small>绑定本人借记卡后，此提现表单与手续费实时试算将自动解锁。</small></div> : null}
+      <RecoveryAlert tone="unknown" title="当前暂不可申请提现" problem={[...new Set(options.reasonCodes.map(code => reasonLabel[code] ?? "暂不满足提现条件"))].join("；") || "当前提现条件尚未确认。"} />
+    </> : null}
     {options ? <details className="bank-eligibility" aria-label="提现资格与次数"><summary>查看提现条件</summary><dl className="bank-facts">
       <div><dt>实名状态</dt><dd>{identityStatusLabel(options.identity?.identityStatus)}</dd></div>
       <div><dt>年龄状态</dt><dd>{ageStatusLabel(options.identity?.ageStatus)}</dd></div>
@@ -318,7 +375,29 @@ function ChannelWithdrawalPanel({ scope, refreshKey, bindingLocked, availableBal
       {options.quota ? <><div><dt>已申请</dt><dd>{options.quota.used} / {options.quota.maxIntents} 笔</dd></div><div><dt>剩余次数</dt><dd>{options.quota.remaining} 笔</dd></div><div><dt>有效时间</dt><dd>{timeLabel(options.quota.windowStart)} 至 {timeLabel(options.quota.windowEnd)}</dd></div></> : null}
     </dl>{!options.identity ? <p className="bank-help">实名信息待确认。</p> : null}{!options.quota ? <p className="bank-help">提现次数待确认。</p> : null}</details> : null}
     {options?.policy ? <div className="bank-policy"><span>单笔 {walletMoney(options.policy.minCents)}–{walletMoney(options.policy.maxCents)}</span><span>{options.policy.fee.kind === "FIXED" ? `手续费 ${walletMoney(options.policy.fee.cents)}` : "手续费按比例计算，下一步确认"}</span><span>每个时段最多 {options.policy.maxIntents} 笔</span></div> : null}
-    <form className="bank-withdraw-form" onSubmit={preview} noValidate><FieldGroup id={`${id}-amount`} label="提现金额（元）" helper="请填写金额，下一步确认手续费。"><Input {...fieldControlProps({ id: `${id}-amount`, helper: true })} inputMode="decimal" autoComplete="off" placeholder="填写提现金额" value={amountText} disabled={!canEditAmount} onChange={e => { setAmount({ scope, value: e.target.value }); setQuote(null); setConfirmOpen(false); setNotice(""); }} /></FieldGroup><Button type="submit" variant="secondary" className="bank-action" isDisabled={blocked || busy || !amountText}>{busy ? "正在核对…" : "核对金额与费用"}</Button></form>
+    <form className="bank-withdraw-form" onSubmit={preview} noValidate>
+      <FieldGroup id={`${id}-amount`} label="提现金额（元）" helper="请填写金额，下一步确认手续费。">
+        <Input {...fieldControlProps({ id: `${id}-amount`, helper: true })} inputMode="decimal" autoComplete="off" placeholder="填写提现金额" value={amountText} disabled={!canEditAmount} onChange={e => { setAmount({ scope, value: e.target.value }); setQuote(null); setConfirmOpen(false); setNotice(""); }} />
+      </FieldGroup>
+      {canEditAmount && availableBalance && BigInt(availableBalance) > 0n ? (
+        <div className="bank-quick-amounts" aria-label="快捷金额选择">
+          <Button type="button" variant="tertiary" className="bank-quick-chip" onPress={() => {
+            const yuan = (Number(availableBalance) / 100).toFixed(2);
+            setAmount({ scope, value: yuan });
+            setQuote(null); setConfirmOpen(false); setNotice("");
+          }}>全部提现 ({walletMoney(availableBalance)})</Button>
+          <Button type="button" variant="tertiary" className="bank-quick-chip" onPress={() => {
+            setAmount({ scope, value: "100" });
+            setQuote(null); setConfirmOpen(false); setNotice("");
+          }}>¥100</Button>
+          <Button type="button" variant="tertiary" className="bank-quick-chip" onPress={() => {
+            setAmount({ scope, value: "50" });
+            setQuote(null); setConfirmOpen(false); setNotice("");
+          }}>¥50</Button>
+        </div>
+      ) : null}
+      <Button type="submit" variant="secondary" className="bank-action" isDisabled={blocked || busy || !amountText}>{busy ? "正在核对…" : "核对金额与费用"}</Button>
+    </form>
     {bindingLocked ? <p className="bank-help">请先确认收款资料的保存结果，再核对提现费用。</p> : null}
     {error ? <RecoveryAlert tone={pending ? "unknown" : "error"} live title={pending ? "申请结果尚未确认" : "本次操作未完成"} problem={errorCopy(error)} details={{ summary: "查看查询信息", body: <ErrorDetails error={error} /> }} /> : null}
     {visibleQuote && !blocked ? <div className="bank-quote"><dl className="bank-facts"><div><dt>申请金额</dt><dd>{walletMoney(visibleQuote.grossCents)}</dd></div><div><dt>手续费</dt><dd>{walletMoney(visibleQuote.feeCents)}</dd></div><div><dt>提现净额</dt><dd>{walletMoney(visibleQuote.netCents)}</dd></div><div><dt>本次收款银行卡</dt><dd>{visibleQuote.destination.mask}</dd></div></dl><p className="bank-help bank-quote-note">手续费由你承担。确认前不会扣款，到账情况以收款记录为准。</p><Button variant="primary" className="bank-action bank-primary" isDisabled={busy} onPress={() => setConfirmOpen(true)}>确认提现申请</Button></div> : null}
@@ -422,6 +501,29 @@ function WithdrawalHistorySection({ scope, refreshKey, onIdentityFailure }: { sc
 export function BankBindingWorkspace({ scope, availableBalance = null, onWalletChanged, onIdentityFailure }: { scope: string; availableBalance?: string | null; onWalletChanged: () => void; onIdentityFailure?: IdentityFailure }) {
   const identity = useWithdrawalIdentity(scope, onIdentityFailure);
   const [bindingRefresh, setBindingRefresh] = useState(0), [historyRefresh, setHistoryRefresh] = useState(0), [bindingLock, setBindingLock] = useState({ scope, value: false });
+  const [isBankBound, setIsBankBound] = useState(false);
   if (!identity.ready) return identity.session.status === "guest" ? <RecoveryAlert tone="info" title="登录后查看提现信息" problem="银行卡资料与提现记录仅本人可见。" action={<Link className="button primary" href="/login?next=%2Faccount%3Fview%3Dwallet%26wallet%3Dwithdraw">去登录</Link>} /> : <SkeletonBlock label="正在确认登录身份" lines={3} />;
-  return <div className="bank-binding-workspace" data-testid="bank-binding-workspace"><div className="bank-withdrawal-grid"><BankBindingPanel scope={scope} onChanged={() => setBindingRefresh(value => value + 1)} onLocked={value => setBindingLock({ scope, value })} onIdentityFailure={onIdentityFailure} /><ChannelWithdrawalPanel scope={scope} refreshKey={bindingRefresh} bindingLocked={bindingLock.scope === scope && bindingLock.value} availableBalance={availableBalance} onWalletChanged={() => { setHistoryRefresh(value => value + 1); onWalletChanged(); }} onIdentityFailure={onIdentityFailure} /></div><WithdrawalHistorySection scope={scope} refreshKey={historyRefresh} onIdentityFailure={onIdentityFailure} /></div>;
+  return <div className="bank-binding-workspace" data-testid="bank-binding-workspace" data-scope={scope}>
+    <div className="bank-onboarding-stepper" aria-label="提现指引流程">
+      <div className={`onboarding-step ${isBankBound ? 'step-done' : 'step-active'}`}>
+        <span className="step-badge">{isBankBound ? '✓' : '1'}</span>
+        <div className="step-copy"><strong>{isBankBound ? '已绑定银行卡' : '第 1 步：绑定银行卡'}</strong><small>{isBankBound ? '银联借记卡已就绪' : '添加本人收款储蓄卡'}</small></div>
+      </div>
+      <span className="onboarding-step-arrow" aria-hidden="true">→</span>
+      <div className={`onboarding-step ${isBankBound ? 'step-active' : 'step-waiting'}`}>
+        <span className="step-badge">2</span>
+        <div className="step-copy"><strong>第 2 步：金额与试算</strong><small>{isBankBound ? '填写提现金额即时核算' : '完成绑卡后自动解锁'}</small></div>
+      </div>
+      <span className="onboarding-step-arrow" aria-hidden="true">→</span>
+      <div className="onboarding-step step-waiting">
+        <span className="step-badge">3</span>
+        <div className="step-copy"><strong>第 3 步：极速审核到账</strong><small>系统受托流转处理</small></div>
+      </div>
+    </div>
+    <div className="bank-withdrawal-grid">
+      <BankBindingPanel scope={scope} onChanged={() => setBindingRefresh(value => value + 1)} onLocked={value => setBindingLock({ scope, value })} onIdentityFailure={onIdentityFailure} onBoundChange={setIsBankBound} />
+      <ChannelWithdrawalPanel scope={scope} refreshKey={bindingRefresh} bindingLocked={bindingLock.scope === scope && bindingLock.value} availableBalance={availableBalance} onWalletChanged={() => { setHistoryRefresh(value => value + 1); onWalletChanged(); }} onIdentityFailure={onIdentityFailure} />
+    </div>
+    <WithdrawalHistorySection scope={scope} refreshKey={historyRefresh} onIdentityFailure={onIdentityFailure} />
+  </div>;
 }

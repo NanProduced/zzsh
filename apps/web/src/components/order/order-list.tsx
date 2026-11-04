@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useEffect, useState, type FormEvent, type MouseEvent as ReactMouseEvent } from "react";
-import { AlertCircle, ChevronDown, ChevronRight, Info, RefreshCw } from "lucide-react";
+import { AlertCircle, Check, ChevronDown, ChevronRight, Copy, Info, RefreshCw, RotateCcw, Search } from "lucide-react";
 import { orderItemKey, formatOrderTime as timeText, type FulfillmentAssignment, type Order, type OrderLine, type OrderPage, type OrderParty, type OrderRequestError, type OrderStatusFilter, type OrderSearchFilters } from "@/lib/order-client";
 import { groupedInteger, orderAccountTitle, orderAmountFacts, orderListFulfillmentTag, orderRentalModeLabel, orderSettlementStageLabel, paymentEntryOpen } from "@/lib/order-display";
 import { OrderError, OrderStatusBadge, orderTermLabel, orderUrl, STATUS_LABELS } from "@/components/order/order-presentation";
@@ -110,6 +110,24 @@ function statusHint(order: Order): string | null {
   return "订单状态待确认";
 }
 
+function InlineCopyBtn({ text, label }: { text: string; label: string }) {
+  const [copied, setCopied] = useState(false);
+  const copy = async (e: ReactMouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 2000);
+    } catch {}
+  };
+  return (
+    <button type="button" className="order-inline-copy-btn" title={`复制${label}`} aria-label={copied ? `已复制${label}` : `复制${label}`} onClick={copy}>
+      {copied ? <Check size={11} aria-hidden="true" /> : <Copy size={11} aria-hidden="true" />}
+    </button>
+  );
+}
+
 function ListRow({ party, order, status, accountId, filters, onOpen }: { party: OrderParty; order: Order; status: OrderStatusFilter; accountId?: string; filters?: OrderSearchFilters; onOpen: (orderId: string, event: ReactMouseEvent<HTMLAnchorElement>) => void }) {
   const facts = orderAmountFacts(order, party);
   const caption = !order.readOnly && party === "renter" && ["PAID", "COMPLETED"].includes(order.status) ? "下单金额" : facts.caption === "下单时号主报价" ? "下单时的出租报价" : facts.caption === "原单净收益记录" ? "收益记录" : facts.caption === "历史收益请查看收益记录" ? "收益待确认" : facts.caption;
@@ -118,6 +136,7 @@ function ListRow({ party, order, status, accountId, filters, onOpen }: { party: 
   const title = orderAccountTitle(order);
   const resources = order.source?.origin === "LEGACY" ? null : resourceSummary(order, !title.includes("哈夫币"));
   const modeLabel = orderRentalModeLabel(order);
+  const loginMethod = order.listingFacts?.attributeDisplay?.loginMethod;
   // Only the renter, and only while the server still offers the payment entry, is invited to pay.
   const pending = party === "renter" && paymentEntryOpen(order);
   const action = pending ? "查看并付款" : order.stage?.viewerActionRequired ? "查看并处理" : "查看订单";
@@ -125,6 +144,8 @@ function ListRow({ party, order, status, accountId, filters, onOpen }: { party: 
     <div className="order-row-account">
       {/* The title link is the row's single focusable target; its click surface covers the whole row. */}
       <div className="order-row-title-line">
+        <span className="order-row-tag order-row-game">三角洲行动</span>
+        {loginMethod ? <span className="order-row-tag order-row-login">{loginMethod}</span> : null}
         <Link className="order-row-title" href={orderUrl(party, status, accountId, order.id, order.source?.origin, filters)} scroll={false} data-order-id={order.id} data-order-key={orderItemKey(order)} aria-label={[action, order.displayNo ? `订单号 ${order.displayNo}` : null, title].filter(Boolean).join("，")} onClick={(event) => onOpen(orderItemKey(order), event)}>{title}</Link>
         {stageTag ? <span className="order-row-tag order-row-stage" data-fulfillment-stage={stageTag.code}>{stageTag.label}</span> : null}
         {modeLabel ? <span className="order-row-tag" data-mode={order.quote?.rentalMode}>{modeLabel}</span> : null}
@@ -132,8 +153,19 @@ function ListRow({ party, order, status, accountId, filters, onOpen }: { party: 
       </div>
       {resources ? <p className="order-row-resources">{resources}</p> : null}
       <p className="order-row-meta">
-        {order.accountDisplayNo ? <><span className="order-row-account-no">账号 {order.accountDisplayNo}</span><span aria-hidden="true">·</span></> : null}
-        <span className="order-row-no">订单 {order.displayNo ?? "暂不可用"}</span>
+        {order.accountDisplayNo ? (
+          <>
+            <span className="order-row-account-no">
+              账号 {order.accountDisplayNo}
+              <InlineCopyBtn text={order.accountDisplayNo} label="账号编号" />
+            </span>
+            <span aria-hidden="true">·</span>
+          </>
+        ) : null}
+        <span className="order-row-no">
+          订单 {order.displayNo ?? "暂不可用"}
+          {order.displayNo ? <InlineCopyBtn text={order.displayNo} label="订单号" /> : null}
+        </span>
         <span aria-hidden="true">·</span>
         <span>{shortTime(order.createdAt)}</span>
         <span aria-hidden="true">·</span>
@@ -217,21 +249,32 @@ export function OrderListPanel({ party, status, accountId, filters = {}, onApply
         <button type="button" className="button quiet" onClick={onRefresh} disabled={state.refreshing}><RefreshCw size={15} aria-hidden="true" />{state.refreshing ? "刷新中…" : "刷新"}</button>
       </div>
     </div>
-    <nav className="order-filter-bar" aria-label={`${title}状态`}>
-      {ORDER_LIST_FILTERS.map((filter) => <Link key={filter.value || "all"} className="order-filter" href={orderUrl(party, filter.value, accountId, undefined, undefined, filters)} scroll={false} replace aria-current={status === filter.value ? "page" : undefined}>{filter.label}</Link>)}
-    </nav>
-    <form className="order-search-filters" onSubmit={submitFilters}>
-      <label>订单号<input value={draft.orderNo ?? ""} maxLength={255} placeholder="输入订单号" onChange={event=>setDraft(value=>({...value,orderNo:event.target.value}))}/></label>
-      <button type="submit" className="button secondary">查找订单</button>
-      <button type="button" className="button quiet" aria-expanded={showMoreFilters} aria-controls="order-more-filters" onClick={()=>setShowMoreFilters(value=>!value)}>更多筛选<ChevronDown size={15} aria-hidden="true" /></button>
-      {extraFilter ? <button type="button" className="button quiet" onClick={()=>onApplyFilters({})}>清除查找条件</button> : null}
-      <div id="order-more-filters" className="order-search-extra" hidden={!showMoreFilters}>
-        <label>开始日期<input type="date" value={draft.createdFrom ?? ""} onChange={event=>setDraft(value=>({...value,createdFrom:event.target.value}))}/></label>
-        <label>结束日期<input type="date" value={draft.createdTo ?? ""} onChange={event=>setDraft(value=>({...value,createdTo:event.target.value}))}/></label>
-        <label>订单进度<select value={draft.stage ?? ""} onChange={event=>setDraft(value=>({...value,stage:event.target.value}))}><option value="">全部进度</option><option value="OPENING_PENDING">待确认开租</option><option value="RENTING">租赁中</option><option value="INTAKE_PENDING">结算受理中</option><option value="DECISION_PENDING">待你确认结算</option><option value="DECISION_WAITING">等待对方或平台确认</option><option value="DECISION_REJECTED">结算方案未达成一致</option><option value="POSTED">已结算</option><option value="UNKNOWN">进度待确认</option></select></label>
-      </div>
-      {filterError ? <p role="alert">{filterError}</p> : null}
-    </form>
+    <div className="order-filter-console">
+      <nav className="order-filter-bar" aria-label={`${title}状态`}>
+        {ORDER_LIST_FILTERS.map((filter) => <Link key={filter.value || "all"} className="order-filter" href={orderUrl(party, filter.value, accountId, undefined, undefined, filters)} scroll={false} replace aria-current={status === filter.value ? "page" : undefined}>{filter.label}</Link>)}
+      </nav>
+      <form className="order-search-filters" onSubmit={submitFilters}>
+        <div className="order-search-row">
+          <label className="order-search-input-wrap">
+            <Search size={15} className="order-search-icon" aria-hidden="true" />
+            <span className="sr-only">订单号</span>
+            <input value={draft.orderNo ?? ""} maxLength={255} placeholder="输入订单号查找…" onChange={event=>setDraft(value=>({...value,orderNo:event.target.value}))}/>
+          </label>
+          <button type="submit" className="button secondary order-search-btn">查找订单</button>
+          <button type="button" className={`button quiet order-more-toggle${showMoreFilters ? " is-open" : ""}`} aria-expanded={showMoreFilters} aria-controls="order-more-filters" onClick={()=>setShowMoreFilters(value=>!value)}>
+            <span>更多筛选</span>
+            <ChevronDown size={14} className="order-more-chevron" aria-hidden="true" />
+          </button>
+          {extraFilter ? <button type="button" className="button quiet order-clear-btn" onClick={()=>onApplyFilters({})} title="清除查找条件"><RotateCcw size={13} aria-hidden="true" /><span>重置</span></button> : null}
+        </div>
+        <div id="order-more-filters" className="order-search-extra" hidden={!showMoreFilters}>
+          <label className="order-extra-field"><span className="order-field-label">开始日期</span><input type="date" value={draft.createdFrom ?? ""} onChange={event=>setDraft(value=>({...value,createdFrom:event.target.value}))}/></label>
+          <label className="order-extra-field"><span className="order-field-label">结束日期</span><input type="date" value={draft.createdTo ?? ""} onChange={event=>setDraft(value=>({...value,createdTo:event.target.value}))}/></label>
+          <label className="order-extra-field"><span className="order-field-label">订单进度</span><select value={draft.stage ?? ""} onChange={event=>setDraft(value=>({...value,stage:event.target.value}))}><option value="">全部进度</option><option value="OPENING_PENDING">待确认开租</option><option value="RENTING">租赁中</option><option value="INTAKE_PENDING">结算受理中</option><option value="DECISION_PENDING">待你确认结算</option><option value="DECISION_WAITING">等待对方或平台确认</option><option value="DECISION_REJECTED">结算方案未达成一致</option><option value="POSTED">已结算</option><option value="UNKNOWN">进度待确认</option></select></label>
+        </div>
+        {filterError ? <p role="alert" className="order-filter-alert">{filterError}</p> : null}
+      </form>
+    </div>
     {(filters.createdFrom || filters.createdTo) ? <p className="order-inline-notice">按北京时间的下单日期筛选；没有下单时间的订单不在结果中。</p> : null}
     {page?.stageUnknownObserved ? <p className="order-inline-notice" role="status">部分订单的进度尚未确认。</p> : null}
     {accountId ? <div className="account-filter-context"><span>正在查看指定账号的订单</span><Link href={orderUrl(party, status, undefined, undefined, undefined, filters)} scroll={false}>查看全部{title}</Link></div> : null}
