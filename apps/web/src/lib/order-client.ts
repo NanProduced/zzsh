@@ -449,9 +449,9 @@ export type SettlementPreview = {
 };
 
 export function formatOrderTime(value: string | null | undefined, options: { timeZoneName?: boolean } = {}): string {
-  if (!value) return "待确认";
+  if (!value) return "未记录";
   const date = new Date(value);
-  if (!Number.isFinite(date.getTime())) return "待确认";
+  if (!Number.isFinite(date.getTime())) return "未记录";
   // 订单时间默认带显式时区偏移；记录行传 timeZoneName:false 收敛逐行 GMT 噪声，时区在页面说明中一次性交代。
   const base = {
     year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit",
@@ -461,7 +461,7 @@ export function formatOrderTime(value: string | null | undefined, options: { tim
 }
 
 export function formatOrderMoney(value: { amount?: unknown; currency?: unknown } | null | undefined): string {
-  if (!value || value.currency !== "CNY" || typeof value.amount !== "string" || !/^\d+\.\d{2}$/.test(value.amount)) return "待确认";
+  if (!value || value.currency !== "CNY" || typeof value.amount !== "string" || !/^\d+\.\d{2}$/.test(value.amount)) return "未记录";
   const whole = value.amount.slice(0, -3);
   const fraction = value.amount.slice(-2);
   return `${whole.replace(/\B(?=(\d{3})+(?!\d))/g, ",")}.${fraction} 元`;
@@ -680,7 +680,7 @@ const orderImTime = (value: unknown): string | null => {
 
 /**
  * The stage is the only fact the bar may not invent: a projection without a recognized `stage`
- * is rejected as a whole, so the page shows "阶段待核对" instead of borrowing another status.
+ * is rejected as a whole, so the page shows "阶段未确认" instead of borrowing another status.
  * Missing optional facts stay unknown (null / false), never guessed.
  */
 export function parseOrderImProjection(value: unknown): OrderImProjection {

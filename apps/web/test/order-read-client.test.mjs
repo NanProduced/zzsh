@@ -6,15 +6,15 @@ const { formatOrderMoney, formatOrderTime, mergeOrderItems, orderApi, OrderReque
 test("order times use the declared timezone and refuse missing or invalid dates", () => {
   assert.match(formatOrderTime("2026-10-01T00:30:00Z"), /08:30/);
   assert.match(formatOrderTime("2026-10-01T00:30:00Z"), /GMT\+08:00/);
-  assert.equal(formatOrderTime(undefined), "待确认");
-  assert.equal(formatOrderTime("not-a-date"), "待确认");
+  assert.equal(formatOrderTime(undefined), "未记录");
+  assert.equal(formatOrderTime("not-a-date"), "未记录");
 });
 
 test("money rendering preserves zero and refuses unknown values", () => {
   assert.equal(formatOrderMoney({ amount: "0.00", currency: "CNY" }), "0.00 元");
-  assert.equal(formatOrderMoney({ amount: "12.3", currency: "CNY" }), "待确认");
-  assert.equal(formatOrderMoney({ amount: "12.30" }), "待确认");
-  assert.equal(formatOrderMoney(null), "待确认");
+  assert.equal(formatOrderMoney({ amount: "12.3", currency: "CNY" }), "未记录");
+  assert.equal(formatOrderMoney({ amount: "12.30" }), "未记录");
+  assert.equal(formatOrderMoney(null), "未记录");
   assert.equal(formatOrderMoney({ amount: "12345678901234567890.01", currency: "CNY" }), "12,345,678,901,234,567,890.01 元");
 });
 
