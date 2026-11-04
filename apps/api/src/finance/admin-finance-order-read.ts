@@ -9,13 +9,13 @@ import { typedHistoricalOrderReference } from "./legacy-observation-display";
 
 export type FinanceOrderFact = { ref: string; id: string; number: string; sourceType: string; sourceSystem: string; sourceId: string; sourceDigest: string | null; kind: "SETTLEMENT"; state: "ORDER_RECORDED" | "HISTORICAL_ORDER_RECORDED"; occurredAt: string | null; importedAt: string; ownerId: string; renterId: string; accountId: string; dueCents: string | null; recordedPaidCents: string | null; depositCents: string | null; originalOrderStatus: string; originalPaymentStatus: string | null;
   payment?: { state: "SITE_ACCEPTED" | "REVIEW_REQUIRED" | "NO_ACCEPTED_PAYMENT" | "LEGACY_RECORDED" | "UNAVAILABLE"; amountCents: string | null; confirmedAt: string | null; source?:string|null; hasReviewPayment: boolean | null }; postingState?: "POSTED" | "NOT_POSTED" | "LEGACY_OBSERVATION" | "UNAVAILABLE";
-  objectReadable?:boolean;accountReadable?:boolean;legacySource?:{entity:string;snapshot:Record<string,unknown>;completedAt:string|null} };
+  objectReadable?:boolean;accountReadable?:boolean;legacySource?:{entity:string;snapshot:Record<string,unknown>;completedAt:string|null;paidAt?:string|null} };
 const utc = (column: string) => `to_char(${column} AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`;
 function amount(value: unknown) { try { return exactCents(value); } catch { return null; } }
 export function financeOrderSql(legacy: boolean, scope: FinanceLoadScope, related: Record<string, any>[] = [], limit: number | null = 20001,access?:HistoricalRelationAccess) {
   const sql = legacy ? `SELECT id,source_system,source_entity,legacy_id,source_digest,original_order_no,owner_user_id,renter_user_id,account_id,game_id,source_snapshot,
     due_amount_cents::text AS due,recorded_paid_amount_cents::text AS recorded_paid,deposit_amount_cents::text AS deposit,
-    source_order_status::text AS order_status,source_pay_status::text AS pay_status,${utc("source_completed_at")} AS completed_at,${utc("source_created_at")} AS at,${utc("imported_at")} AS imported_at
+    source_order_status::text AS order_status,source_pay_status::text AS pay_status,${utc("source_paid_at")} AS paid_at,${utc("source_completed_at")} AS completed_at,${utc("source_created_at")} AS at,${utc("imported_at")} AS imported_at
     FROM zzsh_order.legacy_order_read_snapshot` : `SELECT o.id,o.display_no,o.owner_user_id,o.renter_user_id,o.account_id,o.game_id,o.status,o.revision::text,
     (o.rental_amount_cents+o.deposit_amount_cents)::text AS due,o.deposit_amount_cents::text AS deposit,${utc("o.created_at")} AS at,
     p.id AS accepted_payment_id,p.amount_cents::text AS accepted_paid,p.source AS accepted_source,${utc("o.paid_at")} AS paid_at,
@@ -63,7 +63,7 @@ export async function loadFinanceOrderFacts(client: PoolClient, ready: { native_
   if (ready.legacy_orders) {
     const query=financeOrderSql(true,scope,related,20001,access);const rows=(await client.query(query.text,query.values)).rows;
     for (const row of rows) records.push({ ref: `LEGACY_ORDER:${row.id}`, id: row.id, number: row.original_order_no, sourceType: "LEGACY_MYSQL", sourceSystem: row.source_system, sourceId: row.legacy_id, sourceDigest: row.source_digest, kind: "SETTLEMENT", state: "HISTORICAL_ORDER_RECORDED", occurredAt: row.at, importedAt: row.imported_at, ownerId: row.owner_user_id, renterId: row.renter_user_id, accountId: row.account_id, dueCents: amount(row.due), recordedPaidCents: amount(row.recorded_paid), depositCents: amount(row.deposit), originalOrderStatus: row.order_status, originalPaymentStatus: row.pay_status,objectReadable:row.object_readable===true||row.object_readable===1,accountReadable:row.account_readable===true||row.account_readable===1,
-      legacySource:{entity:row.source_entity,snapshot:row.source_snapshot,completedAt:row.completed_at??null} });
+      legacySource:{entity:row.source_entity,snapshot:row.source_snapshot,completedAt:row.completed_at??null,paidAt:row.paid_at??null} });
   }
   if (records.length > 20000) throw new SecurityApiError(503, "EVIDENCE_UNAVAILABLE", "Finance order reference size limit reached");
   return records;

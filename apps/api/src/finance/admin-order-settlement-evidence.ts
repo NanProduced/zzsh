@@ -1,8 +1,11 @@
-import type {FinanceEntry} from './admin-finance-read';
+import type {FinanceEntry,FinanceFacts} from './admin-finance-read';
 import type {FinanceOrderFact} from './admin-finance-order-read';
 import type {AdminLegacyDutyFinance} from './legacy-duty-finance-store';
 import {exactCents} from './finance-money';
-import {sourceYuanToCents} from './personal-finance-read';
+import {sourceYuanToCents,type HistoricalRefundAttempt} from './personal-finance-read';
+import {legacyEpochTimestamp,legacyOrderReadState} from '../order/legacy-order-read';
+import {canonicalize} from '../supply/content-hash';
+import {sha256Hex} from '../supply/supply-util';
 
 export type OrderSettlementMoney={knowledge:'KNOWN'|'UNKNOWN';cents:string|null;reasonCodes:string[]};
 export type OrderSettlementFacts={legacyDutyReady:boolean;duties:AdminLegacyDutyFinance[]};
@@ -16,6 +19,18 @@ export type AdminOrderSettlementEvidence={
  refundDueAt:string|null;channel:{state:'UNKNOWN';reference:null};
  dutyRefs:{documentRef:string|null;kind:string;state:string;amount:OrderSettlementMoney}[];reasonCodes:string[];
 };
+type OrderFinanceTransaction={
+ documentRef:string;number:string;kind:'PAYMENT'|'REFUND';source:'NATIVE'|'LEGACY_MYSQL';state:string;
+ amountCents:string|null;occurredAt:string|null;channelArrival:'UNKNOWN';
+ originalStatus?:string|null;refundAttempts?:HistoricalRefundAttempt[];sourceRefundFlags?:string[];
+};
+type OrderFinanceBusiness={
+ payment:{state:'SITE_ACCEPTED'|'LEGACY_RECORDED_PAID'|'UNPAID'|'REVIEW_REQUIRED'|'UNKNOWN';amount:OrderSettlementMoney;occurredAt:string|null};
+ settlementState:'POSTED'|'FINALIZED_ZERO'|'NOT_SETTLED'|'LEGACY_RECORDED_COMPLETE'|'UNKNOWN';
+ /** Original sale earnings before separate deductions and the original recorded refund amount. */
+ legacyCompletedAmounts:{ownerEarnings:OrderSettlementMoney;refundAmount:OrderSettlementMoney}|null;
+ paymentAttempts:OrderFinanceTransaction[];refundOrders:OrderFinanceTransaction[];reasonCodes:string[];
+};
 const unknown=(reason:string):OrderSettlementMoney=>({knowledge:'UNKNOWN',cents:null,reasonCodes:[reason]});
 function money(value:unknown,reason:string):OrderSettlementMoney{
  try{const cents=exactCents(value);return BigInt(cents)<0n?unknown(reason):{knowledge:'KNOWN',cents,reasonCodes:[]};}catch{return unknown(reason);}
@@ -23,6 +38,67 @@ function money(value:unknown,reason:string):OrderSettlementMoney{
 function same(values:(string|null|undefined)[]):string|null{
  const first=values[0];return typeof first==='string'&&first.length>0&&values.every(v=>v===first)?first:null;
 }
+function legacyCompletedAmounts(order:FinanceOrderFact):OrderFinanceBusiness['legacyCompletedAmounts']{
+ const source=order.legacySource;
+ if(source?.entity!=='la_order'||!source.completedAt||order.originalOrderStatus!=='4'||order.originalPaymentStatus!=='1')return null;
+ const snapshot=source.snapshot;
+ try{
+  if(String(snapshot.id)!==order.sourceId||snapshot.order_sn!==order.number||String(snapshot.order_status)!=='4'||String(snapshot.pay_is)!=='1'||
+   sha256Hex(canonicalize(snapshot))!==order.sourceDigest||Date.parse(legacyEpochTimestamp(snapshot.confirm_time)??'')!==Date.parse(source.completedAt))return null;
+ }catch{return null;}
+ const original=(value:unknown,reason:string)=>{try{return money(sourceYuanToCents(value),reason);}catch{return unknown(reason);}};
+ return{ownerEarnings:original(snapshot.sale_earnings,'LEGACY_OWNER_EARNINGS_SOURCE_UNAVAILABLE'),
+  refundAmount:original(snapshot.return_order_money,'LEGACY_REFUND_AMOUNT_SOURCE_UNAVAILABLE')};
+}
+
+export function projectAdminOrderFinanceBusiness(order:FinanceOrderFact,receipt:AdminOrderSettlementEvidence,facts:Pick<FinanceFacts,'entries'|'legacyOrderObservations'|'orderSettlementFacts'>):OrderFinanceBusiness{
+ const legacy=order.sourceType==='LEGACY_MYSQL', legacyState=legacyOrderReadState(Number(order.originalOrderStatus),Number(order.originalPaymentStatus??NaN));
+ const completedAmounts=legacy?legacyCompletedAmounts(order):null;
+ const payment:OrderFinanceBusiness['payment']={state:'UNKNOWN',amount:unknown('ORDER_PAYMENT_AMOUNT_UNAVAILABLE'),occurredAt:null};
+ if(legacy){
+  // The order snapshot is the business payment record. Its child observations are attempts.
+  if(legacyState.paymentState==='RECORDED_PAID'){
+   payment.state='LEGACY_RECORDED_PAID';
+   payment.amount=money(order.recordedPaidCents,'LEGACY_ORDER_PAYMENT_AMOUNT_UNAVAILABLE');
+   payment.occurredAt=order.legacySource?.paidAt??null;
+  }else if(legacyState.paymentState==='RECORDED_UNPAID')payment.state='UNPAID';
+ }else if(order.payment?.state==='SITE_ACCEPTED'){
+  payment.state='SITE_ACCEPTED';
+  payment.amount=money(order.payment.amountCents,'ORDER_PAYMENT_AMOUNT_UNAVAILABLE');
+  payment.occurredAt=order.payment.confirmedAt;
+ }else if(order.payment?.state==='NO_ACCEPTED_PAYMENT')payment.state='UNPAID';
+ else if(order.payment?.state==='REVIEW_REQUIRED')payment.state='REVIEW_REQUIRED';
+
+ let settlementState:OrderFinanceBusiness['settlementState']='UNKNOWN';
+ if(receipt.posting.state==='POSTED'||receipt.posting.state==='FINALIZED_ZERO')settlementState=receipt.posting.state;
+ else if(!legacy&&order.postingState==='NOT_POSTED')settlementState='NOT_SETTLED';
+ else if(completedAmounts)settlementState='LEGACY_RECORDED_COMPLETE';
+ else if(legacy&&['PAID','PENDING_PAYMENT'].includes(legacyState.status)&&!order.legacySource?.completedAt&&facts.orderSettlementFacts?.legacyDutyReady&&
+   facts.orderSettlementFacts.duties.every(duty=>['PENDING','MATURED','VOID'].includes(duty.state)))settlementState='NOT_SETTLED';
+
+ const transactions:OrderFinanceTransaction[]=[];
+ if(legacy){
+  for(const row of facts.legacyOrderObservations??[]){
+   if(row.kind!=='PAYMENT'&&row.kind!=='REFUND')continue;
+   const state=row.kind==='PAYMENT'?({'0':'RECORDED_UNPAID','1':'RECORDED_PAID'}[row.originalStatus??'']):
+    ({'0':'RECORDED_PENDING','1':'RECORDED_SUCCESS','2':'RECORDED_FAILED'}[row.originalStatus??'']);
+   transactions.push({...row,kind:row.kind,source:'LEGACY_MYSQL',state:state??'UNKNOWN'});
+  }
+ }else{
+  for(const row of facts.entries){
+   if(row.classification!=='LOCAL_SOURCE_WITHOUT_POSTING'||row.sourceType!=='NATIVE'||row.subjectId!==order.renterId||
+    !row.related.some(link=>link.ref===order.ref))continue;
+   if(row.sourceEntity!=='payment_request'&&row.sourceEntity!=='channel_refund_intent')continue;
+   transactions.push({documentRef:row.documentRef,number:row.documentNumber,kind:row.sourceEntity==='payment_request'?'PAYMENT':'REFUND',
+    source:'NATIVE',state:row.state,amountCents:money(row.evidence.requestedAmountCents,'ORDER_TRANSACTION_AMOUNT_UNAVAILABLE').cents,
+    occurredAt:row.occurredAt,channelArrival:'UNKNOWN'});
+  }
+ }
+ const paymentAttempts=transactions.filter(row=>row.kind==='PAYMENT'),refundOrders=transactions.filter(row=>row.kind==='REFUND');
+ const reasonCodes=paymentAttempts.filter(row=>row.state==='RECORDED_PAID').length>1?['LEGACY_MULTIPLE_RECORDED_PAID_ATTEMPTS']:[];
+ return{payment,settlementState,legacyCompletedAmounts:completedAmounts,paymentAttempts,refundOrders,reasonCodes};
+}
+
 function nativeReceipt(order:FinanceOrderFact,entries:readonly FinanceEntry[],base:AdminOrderSettlementEvidence):AdminOrderSettlementEvidence{
  const rows=entries.filter(row=>row.documentRef===order.ref);
  if(!rows.length)return{...base,posting:{state:'NOT_POSTED',ref:null,postedAt:null},reasonCodes:['ORDER_NO_CURRENT_POSTING']};

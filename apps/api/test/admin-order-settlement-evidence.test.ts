@@ -2,7 +2,7 @@ import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {createHash} from 'node:crypto';
 import {canonicalize} from '../src/supply/content-hash';
-import {loadAdminFinanceFacts,projectAdminFinanceLedger,readAdminFinanceDocument,type FinanceFacts} from '../src/finance/admin-finance-read';
+import {loadAdminFinanceFacts,projectAdminFinanceLedger,projectUnpostedFinanceSource,readAdminFinanceDocument,type FinanceFacts} from '../src/finance/admin-finance-read';
 import type {FinanceOrderFact} from '../src/finance/admin-finance-order-read';
 import * as dutyStore from '../src/finance/legacy-duty-finance-store';
 import {planLegacyDutyFinalization,type LegacyFinanceDuty,type LegacyDutyFinalBasis,type LegacyDutyFundingProof} from '../src/finance/legacy-duty-finance';
@@ -24,7 +24,25 @@ test('ordinary native document reuses its exact complete receipt and keeps refun
  assert.equal(read.refundPayable.knowledge,'KNOWN');assert.equal(read.refunded.knowledge,'UNKNOWN');assert.equal(read.refunded.cents,null);assert.equal(read.channel.state,'UNKNOWN');
  assert.equal(read.platformContribution.knowledge,'KNOWN');assert.equal(read.platformContribution.cents,'1908');
  assert(read.reasonCodes.includes('PLATFORM_CONTRIBUTION_IS_NOT_NET_PROFIT'));
+ assert.equal(read.business.settlementState,'POSTED');
  assert.equal(f.entries.length,4);assert.equal(read.documentRef,'ORDER:order1');
+});
+test('native business payment is independent of settlement and uses only the renter’s related requests',()=>{
+ const f=facts(false,[]),original=f.orders![0]!,paidAt='2026-10-22T08:00:00Z';
+ original.payment={state:'SITE_ACCEPTED',amountCents:'15908',confirmedAt:paidAt,hasReviewPayment:false};
+ original.postingState='NOT_POSTED';
+ const request={id:'p1',order_id:original.id,renter_user_id:original.renterId,amount_cents:'15908',state:'PAID',at};
+ f.entries=[projectUnpostedFinanceSource(request,'PAYMENT_REQUEST'),
+  projectUnpostedFinanceSource({...request,id:'r1',amount_cents:'1000',state:'PENDING'},'REFUND_INTENT'),
+  projectUnpostedFinanceSource({...request,id:'wrong-subject',renter_user_id:'other'},'REFUND_INTENT'),
+  projectUnpostedFinanceSource({...request,id:'wrong-order',order_id:'other'},'PAYMENT_REQUEST')];
+ const read=evidence(f);
+ assert.deepEqual(read.business.payment,{state:'SITE_ACCEPTED',amount:{knowledge:'KNOWN',cents:'15908',reasonCodes:[]},occurredAt:paidAt});
+ assert.equal(read.business.settlementState,'NOT_SETTLED');
+ assert.deepEqual(read.business.paymentAttempts.map((row:{documentRef:string})=>row.documentRef),['PAYMENT_REQUEST:p1']);
+ assert.deepEqual(read.business.refundOrders.map((row:{documentRef:string;channelArrival:string})=>[row.documentRef,row.channelArrival]),[['REFUND_INTENT:r1','UNKNOWN']]);
+ assert.equal(read.refundPayable.cents,null);assert.equal(read.refunded.cents,null);
+ original.postingState='POSTED';assert.equal(evidence(f).business.settlementState,'UNKNOWN');
 });
 test('native proved zero stays known while a missing receipt or contradictory header stays unknown',()=>{
  const zero=evidence(facts(false,entries('0','0')));assert.equal(zero.refundPayable.cents,'0');assert.equal(zero.ownerNet.cents,'0');assert.equal(zero.ownerNet.knowledge,'KNOWN');
@@ -99,15 +117,15 @@ test('legacy ambiguity, source binding drift and a settled historical label do n
  const historic=await readBatch({query:async()=>({rows:[{...first.row,actual_duty:{...first.row.actual_duty,settled_by:'LEGACY_RECORDS'}}]})} as any,{orderId:oldOrderId});f.orderSettlementFacts.duties=[...historic.values()];assert.equal(evidence(f).refunded.cents,null);assert.equal(evidence(f).dutyRefs.length,1);
 });
 
-function detailReader(duty=legacyFixture(),options:{ready?:boolean;objectReadable?:boolean;direct?:boolean;invalidFact?:boolean}={}){
- const queries:{sql:string;values:unknown[]}[]=[],o=order(true),rawOrder={id:o.id,original_order_no:o.number,legacy_id:o.sourceId,source_system:o.sourceSystem,source_entity:'la_order',source_digest:o.sourceDigest,owner_user_id:o.ownerId,renter_user_id:o.renterId,account_id:o.accountId,due:o.dueCents,recorded_paid:null,deposit:o.depositCents,order_status:'4',pay_status:'1',at,imported_at:at,completed_at:at,source_snapshot:o.legacySource!.snapshot,object_readable:options.objectReadable!==false,account_readable:false};
+function detailReader(duty=legacyFixture(),options:{ready?:boolean;objectReadable?:boolean;direct?:boolean;invalidFact?:boolean;ongoing?:boolean}={}){
+ const queries:{sql:string;values:unknown[]}[]=[],o=order(true),rawOrder={id:o.id,original_order_no:o.number,legacy_id:o.sourceId,source_system:o.sourceSystem,source_entity:'la_order',source_digest:o.sourceDigest,owner_user_id:o.ownerId,renter_user_id:o.renterId,account_id:o.accountId,due:o.dueCents,recorded_paid:options.ongoing?'16500':null,deposit:o.depositCents,order_status:options.ongoing?'3':'4',pay_status:'1',at,imported_at:at,paid_at:options.ongoing?'2026-10-22T08:00:00Z':null,completed_at:options.ongoing?null:at,source_snapshot:o.legacySource!.snapshot,object_readable:options.objectReadable!==false,account_readable:false};
  const ledger=options.direct?duty.row.actual_lines.map((line,i)=>({id:'duty-line-'+i,account_code:line.account,delta:(BigInt(line.credit)-BigInt(line.debit)).toString(),subject_id:line.subject,subject_name:line.subject,at,recorded_at:at,finance_event_id:duty.row.event_id,event_kind:'LEGACY_DUTY_SETTLED',source_kind:'LEGACY_CONTINUATION_DUTY',source_type:'LEGACY_CONTINUATION',source_system:'zzsh',source_entity:'legacy_order_duty',source_id:duty.duty.id,beneficiary_role:duty.duty.kind,order_id:null})):[];
  const client={query:async(sql:string,values:unknown[]=[])=>{
   queries.push({sql,values});
   if(sql.startsWith('SELECT to_regclass'))return{rows:[{ready:true,withdrawals:false,native_orders:false,legacy_orders:true,native_distribution:false,legacy_duty_finance:options.ready!==false}]};
   if(sql.includes('AS finance_version'))return{rows:[{finance_version:'v1'}]};
   if(sql.includes('clock_timestamp()'))return{rows:[{at}]};
-  if(sql.includes('admin exact legacy duty complete financial facts'))return{rows:[options.invalidFact?{...duty.row,root_source:'wrong'}:duty.row]};
+  if(sql.includes('admin exact legacy duty complete financial facts'))return{rows:options.ongoing?[]:[options.invalidFact?{...duty.row,root_source:'wrong'}:duty.row]};
   if(sql.startsWith('WITH finance_scoped_rows'))return{rows:sql.includes('FROM zzsh_order.settlement_ledger_entry l')?ledger:[]};
   if(sql.startsWith('WITH finance_order_rows'))return{rows:values.some(value=>Array.isArray(value)&&value.includes(o.id))?[rawOrder]:[]};
   if(sql.startsWith('WITH finance_reverse_candidates'))return{rows:[]};
@@ -122,6 +140,18 @@ test('ordinary legacy document adds one exact duty batch without duplicating its
  const r=detailReader(),facts=await loadAdminFinanceFacts(r.client,{documentRef:'LEGACY_ORDER:'+oldOrderId},relationAccess),detail=readAdminFinanceDocument(facts,'LEGACY_ORDER:'+oldOrderId);
  assert.equal(detail.orderSettlement!.refundPayable.cents,'8200');assert.equal(detail.entries.length,0);assert.equal(detail.document.entryCount,0);assert(detail.related.some(link=>link.ref==='LEGACY_DUTY:'+r.duty.duty.id));
  const queries=r.queries.filter(query=>query.sql.includes('admin exact legacy duty'));assert.equal(queries.length,1);assert.deepEqual(queries[0]!.values,[oldOrderId]);
+});
+test('in-progress legacy order keeps the ¥165 order payment and original paid time without inventing a posting',async()=>{
+ const ref='LEGACY_ORDER:'+oldOrderId,r=detailReader(undefined,{ongoing:true});
+ const facts=await loadAdminFinanceFacts(r.client,{documentRef:ref},relationAccess);
+ const read=readAdminFinanceDocument(facts,ref).orderSettlement!;
+ assert.deepEqual(read.business.payment,{state:'LEGACY_RECORDED_PAID',amount:{knowledge:'KNOWN',cents:'16500',reasonCodes:[]},occurredAt:'2026-10-22T08:00:00Z'});
+ assert.equal(read.business.settlementState,'NOT_SETTLED');assert.equal(read.captured.cents,null);assert.equal(read.refundPayable.cents,null);
+ assert.equal(read.business.legacyCompletedAmounts,null);
+ assert.equal(read.refunded.cents,null);assert.equal(read.channel.state,'UNKNOWN');
+ const missing=detailReader(undefined,{ongoing:true,ready:false});
+ const unavailable=readAdminFinanceDocument(await loadAdminFinanceFacts(missing.client,{documentRef:ref},relationAccess),ref).orderSettlement!;
+ assert.equal(unavailable.business.payment.amount.cents,'16500');assert.equal(unavailable.business.settlementState,'UNKNOWN');
 });
 test('r1 ordinary legacy loader exposes a verified zero finalization without claiming posting or adding ledger rows',async()=>{
  const r=detailReader(legacyFixture('0')),facts=await loadAdminFinanceFacts(r.client,{documentRef:'LEGACY_ORDER:'+oldOrderId},relationAccess),detail=readAdminFinanceDocument(facts,'LEGACY_ORDER:'+oldOrderId);

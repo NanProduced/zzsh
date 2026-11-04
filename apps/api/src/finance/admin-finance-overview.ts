@@ -33,6 +33,18 @@ export async function readAdminFinanceOverview(client: PoolClient, range: "today
       COALESCE(sum(p.amount_cents) FILTER(WHERE p.source='JOINPAY'),0)::text AS channel
     FROM zzsh_order.payment_confirmation p JOIN zzsh_order.rental_order o ON o.id=p.order_id AND o.paid_confirmation_id=p.id
     WHERE p.disposition='APPLIED' AND p.currency='CNY' AND o.paid_at>=$1::timestamptz AND o.paid_at<=$2::timestamptz`, period)).rows[0];
+  const legacyAvailable = (await client.query<{ readable: boolean }>(`/* finance overview legacy paid order access */
+    SELECT COALESCE(has_table_privilege(to_regclass('zzsh_order.legacy_order_read_snapshot'),'SELECT'),false) AS readable`)).rows[0]?.readable === true;
+  const legacyPaid = legacyAvailable ? (await client.query(`/* finance overview legacy paid order facts */
+    SELECT count(*) FILTER (WHERE in_period AND amount IS NOT NULL)::text AS count,
+      COALESCE(sum(amount) FILTER (WHERE in_period),0)::text AS amount,
+      count(*) FILTER (WHERE in_period AND amount IS NULL)::text AS missing_amount_count,
+      count(*) FILTER (WHERE source_paid_at IS NULL)::text AS undated_count
+    FROM (SELECT source_paid_at,source_paid_at >= $1::timestamptz AND source_paid_at <= $2::timestamptz AS in_period,
+      CASE WHEN recorded_paid_amount_cents >= 0 THEN recorded_paid_amount_cents END AS amount
+      FROM zzsh_order.legacy_order_read_snapshot
+      WHERE source_system='legacy_mysql_restore' AND source_entity='la_order' AND source_pay_status=1
+        AND COALESCE(source_snapshot->>'is_delete','0')='0') paid_orders`, period)).rows[0] : null;
   const settled = (await client.query(`/* finance overview period settlement allocation */
     SELECT count(*)::text AS count,COALESCE(sum(captured_cents),0)::text AS captured,
       COALESCE(sum(owner_net_cents),0)::text AS owner,COALESCE(sum(renter_refund_cents),0)::text AS refund,
@@ -79,6 +91,12 @@ export async function readAdminFinanceOverview(client: PoolClient, range: "today
   }
   const paidCents=nonnegative(paid.amount),controlledCents=nonnegative(paid.controlled),channelCents=nonnegative(paid.channel);
   if(BigInt(paidCents)!==BigInt(controlledCents)+BigInt(channelCents)||BigInt(count(review.unknown_count))>BigInt(count(review.count)))throw unavailable();
+  if (legacyAvailable && !legacyPaid) throw unavailable();
+  const legacyOrderPayments = legacyPaid ? {
+    state: "RECORDED" as const, count: count(legacyPaid.count), knownAmountCents: nonnegative(legacyPaid.amount),
+    missingAmountCount: count(legacyPaid.missing_amount_count), sourceUndatedCount: count(legacyPaid.undated_count),
+    timeBasis: "source_paid_at" as const,
+  } : { state: "UNAVAILABLE" as const, count: null, knownAmountCents: null, missingAmountCount: null, sourceUndatedCount: null, timeBasis: "source_paid_at" as const };
   const recentSettlements=recent.map(row=>{
     const capturedCents=nonnegative(row.captured),ownerNetCents=nonnegative(row.owner),refundPayableCents=nonnegative(row.refund),platformContributionCents=nonnegative(row.platform);
     if(BigInt(capturedCents)!==BigInt(ownerNetCents)+BigInt(refundPayableCents)+BigInt(platformContributionCents))throw unavailable();
@@ -90,6 +108,7 @@ export async function readAdminFinanceOverview(client: PoolClient, range: "today
     version:"admin.finance-overview.v1" as const,asOf:clock.as_of,period:{range,from:clock.starts_at,to:clock.as_of,timeZone:"Asia/Shanghai"},
     confirmedPayments:{count:count(paid.count),amountCents:paidCents,controlledAmountCents:controlledCents,channelAmountCents:channelCents,
       source:"CURRENT_APPLIED_ORIGINAL" as const,timeBasis:"paid_at",scope:"NATIVE_ORDER_ORIGINAL_ONLY",reasonCodes:["EXCLUDES_HANDOFF_TOPUPS_GUARANTEE_AND_LEGACY_OBSERVATIONS","CHANNEL_CLEARING_NOT_PROVED"]},
+    legacyOrderPayments,
     settlements:{count:count(settled.count),capturedCents:captured,ownerNetCents:owner,refundPayableCents:refund,platformContributionCents:platform,timeBasis:"posted_at",reasonCodes:["ALLOCATION_NOT_PAYMENT_PERIOD","PLATFORM_CONTRIBUTION_IS_NOT_NET_PROFIT"]},
     pendingSettlement:{count:count(pending.count),amountCents:nonnegative(pending.amount),hasMore:BigInt(count(pending.count))>BigInt(preview.length),
       items:preview.map(row=>({id:row.id,number:row.number,status:"PAID",amountCents:nonnegative(row.amount),paidAt:row.paid_at,documentRef:documentReadable?"ORDER:"+row.id:null})),reasonCodes:["CURRENT_CONFIRMED_PAYMENT_AWAITING_ALLOCATION_NOT_OVERDUE"]},

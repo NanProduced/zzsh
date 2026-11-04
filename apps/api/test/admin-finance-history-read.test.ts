@@ -9,10 +9,11 @@ import {financeOrderSql} from '../src/finance/admin-finance-order-read';
 import {FinanceSqlFixture,legacyFinanceOrder} from './admin-finance-fixture';
 
 const at=1782762304,subject={userId:'u1',legacyUserId:'11'};
-function observation(kind:'HISTORICAL_EARNINGS_LOG'|'HISTORICAL_WITHDRAWAL',raw:Record<string,unknown>,id:string){
+function observation(kind:'HISTORICAL_EARNINGS_LOG'|'HISTORICAL_WITHDRAWAL'|'HISTORICAL_PAYMENT'|'HISTORICAL_REFUND',raw:Record<string,unknown>,id:string){
  const prepared=previewFrozenFinanceObservation(kind,raw,subject),source=prepared.row;
  return{id,subject_id:subject.userId,subject_name:'用户一',source_type:'LEGACY_MYSQL',source_system:'legacy_mysql_restore',source_kind:kind,
-  source_entity:kind==='HISTORICAL_EARNINGS_LOG'?'la_log_earnings':'la_withdraw_apply',source_id:String(prepared.sourceId),source_digest:prepared.sourceDigest,
+  source_entity:{HISTORICAL_EARNINGS_LOG:'la_log_earnings',HISTORICAL_WITHDRAWAL:'la_withdraw_apply',HISTORICAL_PAYMENT:'la_pay_order',HISTORICAL_REFUND:'la_refund_record'}[kind],
+  source_id:String(prepared.sourceId),source_digest:prepared.sourceDigest,
   amount:source.amount,action:source.action,source_status:source.sourceStatus,reference_id:source.referenceId,reference_no:source.referenceSn,
   net:source.net,fee:source.fee,balance_after:source.leftAmount,at:prepared.sourceEventAt,imported_at:'2026-10-22T00:00:00Z',included_in_opening:false,
   extra_evidence:{snapshot:source,canonical:canonicalize(source),legacyUserId:subject.legacyUserId}};
@@ -46,13 +47,58 @@ test('withdrawal detail batches reverse debit evidence by original source and su
 });
 
 test('legacy order detail resolves its exact owner income through immutable source bytes and retains a missing current posting',async()=>{
- const source={id:71,order_sn:'OLD-BUSINESS',sale_user_id:11,order_status:4,pay_is:1,sale_earnings:'80.00',full_payout_money:'3.00',confirm_time:at};
+ const source={id:'71',order_sn:'OLD-BUSINESS',sale_user_id:'11',order_status:'4',pay_is:'1',sale_earnings:'80.00',full_payout_money:'3.00',return_order_money:'12.00',confirm_time:String(at)};
  const h=observation('HISTORICAL_EARNINGS_LOG',{id:'501',sn:'OWNER-INCOME',action:1,amount:'77.00',userId:'11',sourceId:'71',createdAt:at,changeType:1001,leftAmount:'77.00'},'owner-income');
  const order=legacyFinanceOrder('old-order',{source_system:'legacy_mysql_restore',source_entity:'la_order',legacy_id:'71',original_order_no:'OLD-BUSINESS',owner_user_id:'u1',source_snapshot:source,source_digest:createHash('sha256').update(canonicalize(source)).digest('hex'),source_completed_at:new Date(at*1000).toISOString()});
  const fixture=new FinanceSqlFixture({history:[h],legacy:[order]});
  try{const r=reader(fixture,{legacy_orders:true}),facts=await loadAdminFinanceFacts(r.client,{documentRef:'LEGACY_ORDER:old-order'},{...access,isBoss:true,orderRead:true}),detail=readAdminFinanceDocument(facts,'LEGACY_ORDER:old-order');
   assert.equal(detail.entries.length,0);assert(detail.related.some(link=>link.ref==='HISTORY_EARNINGS:owner-income'));assert(detail.reasonCodes.includes('ORDER_NO_CURRENT_POSTING'));assert(!detail.reasonCodes.includes('ORIGINAL_ORDER_REFERENCE_UNRESOLVED'));
+  const read=detail.orderSettlement!;
+  assert.equal(read.business.settlementState,'LEGACY_RECORDED_COMPLETE');
+  assert.equal(read.business.legacyCompletedAmounts?.ownerEarnings.cents,'8000');
+  assert.equal(read.business.legacyCompletedAmounts?.refundAmount.cents,'1200');
+  assert.equal(read.ownerNet.cents,null);assert.equal(read.refundPayable.cents,null);assert.equal(read.refunded.cents,null);
+  facts.orders![0]!.sourceDigest='b'.repeat(64);
+  assert.equal(readAdminFinanceDocument(facts,'LEGACY_ORDER:old-order').orderSettlement!.business.legacyCompletedAmounts,null);
   assert.equal(r.queries.filter(query=>query.sql.startsWith('WITH finance_reverse_candidates')).length,1);
+ }finally{fixture.close();}
+});
+
+test('legacy order payment is counted once, with independently bound payment and refund records',async()=>{
+ const source={id:'71',order_sn:'OLD-BUSINESS',user_id:'11',sale_user_id:'22',order_status:'3',pay_is:'1',pay_time:String(at),pay_money:'664.50',sale_earnings:'400.00',return_order_money:'12.00'};
+ const payment=(id:string,status:string,type='1')=>observation('HISTORICAL_PAYMENT',{id,order_id:'71',order_type:type,pay_is:status,pay_way:'1',pay_money:'664.50',
+  pay_order_sn:'PAY-'+id,pay_time:status==='1'?String(at):'0',transaction_id:null,create_time:String(at-10),userId:'11',relationship:'VERIFIED'},'pay-'+id);
+ const attempt={sourceEntity:'la_refund_log',sourceId:'701',sourceRecordId:'401',legacyUserId:'11',legacyOperatorId:'7',sourceNumber:'REFUND-ATTEMPT',amountCents:'500',orderAmountCents:'66450',
+  sourceStatus:'0',createdEpoch:String(at),updatedEpoch:String(at),subjectMatchesParent:true,sourceDigest:'c'.repeat(64),restrictedSourceRef:'restricted-fixture:log:701',messagePresence:'PRESENT',messageSha256:'d'.repeat(64)};
+ const refund=(id:string,number=source.order_sn)=>observation('HISTORICAL_REFUND',{id,user_id:'11',order_id:'71',order_sn:number,order_type:'order',sn:'REFUND-'+id,refund_status:'1',order_amount:'664.50',
+  refund_amount:id==='401'?'5.00':'7.00',transaction_id:null,refund_way:'2',create_time:String(at),update_time:String(at),refund_type:'1',userId:'11',relationship:'VERIFIED',
+  refundAttempts:id==='401'?[attempt,{...attempt,sourceId:'702',sourceStatus:'1'},{...attempt,sourceId:'703',legacyUserId:'22',subjectMatchesParent:false}]:[]},'refund-'+id);
+ const paidAt=new Date(at*1000).toISOString();
+ const order=legacyFinanceOrder('old-order',{source_system:'legacy_mysql_restore',source_entity:'la_order',legacy_id:source.id,original_order_no:source.order_sn,
+  owner_user_id:'u2',renter_user_id:'u1',source_snapshot:source,source_digest:createHash('sha256').update(canonicalize(source)).digest('hex'),
+  source_paid_at:paidAt,source_order_status:'3',recorded_paid_amount_cents:'66450'});
+ const fixture=new FinanceSqlFixture({legacy:[order],history:[payment('301','1'),payment('302','0'),payment('303','1','2'),{...payment('304','1'),subject_id:'u2'},refund('401'),refund('402'),refund('403','OTHER-ORDER')]});
+ try{
+  const ref='LEGACY_ORDER:old-order',r=reader(fixture,{legacy_orders:true});
+  const facts=await loadAdminFinanceFacts(r.client,{documentRef:ref},{...access,isBoss:true,orderRead:true});
+  const detail=readAdminFinanceDocument(facts,ref),read=detail.orderSettlement!,business=read.business;
+  assert.deepEqual(business.payment,{state:'LEGACY_RECORDED_PAID',amount:{knowledge:'KNOWN',cents:'66450',reasonCodes:[]},occurredAt:paidAt});
+  assert.equal(business.legacyCompletedAmounts,null);
+  assert.deepEqual(business.paymentAttempts.map(row=>[row.documentRef,row.state,row.channelArrival]),[
+   ['HISTORY_PAYMENT:pay-301','RECORDED_PAID','UNKNOWN'],['HISTORY_PAYMENT:pay-302','RECORDED_UNPAID','UNKNOWN']]);
+  assert.deepEqual(business.refundOrders.map(row=>[row.documentRef,row.amountCents,row.state,row.channelArrival]),[
+   ['HISTORY_REFUND:refund-401','500','RECORDED_SUCCESS','UNKNOWN'],['HISTORY_REFUND:refund-402','700','RECORDED_SUCCESS','UNKNOWN']]);
+  assert.deepEqual(business.refundOrders[0]!.refundAttempts?.map(row=>[row.source.id,row.originalStatus,row.recordedAmountCents]),[['701','0','500'],['702','1','500'],['703',null,null]]);
+  assert.equal(read.refundPayable.cents,null);assert.equal(read.refunded.cents,null);assert.equal(detail.entries.length,0);
+
+  const multiplePaid=readAdminFinanceDocument({...facts,legacyOrderObservations:facts.legacyOrderObservations!.map(row=>
+   row.documentRef==='HISTORY_PAYMENT:pay-302'?{...row,originalStatus:'1'}:row)},ref).orderSettlement!.business;
+  assert.equal(multiplePaid.payment.amount.cents,'66450');
+  assert.deepEqual(multiplePaid.reasonCodes,['LEGACY_MULTIPLE_RECORDED_PAID_ATTEMPTS']);
+
+  const denied=await loadAdminFinanceFacts(r.client,{documentRef:ref},access);
+  assert.equal(readAdminFinanceDocument(denied,ref).orderSettlement,undefined);
+  assert.equal(denied.legacyOrderObservations,undefined);
  }finally{fixture.close();}
 });
 

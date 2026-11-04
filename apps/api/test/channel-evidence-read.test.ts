@@ -607,6 +607,12 @@ test("refund exact search follows the original payment numbers or the refund num
   assert.equal(found.candidates[0]?.budgetDisposition, "CONSUMED");
   assert.equal(found.candidates[0]?.localTerminalEvidenceId, "rfe_1");
 
+  const sameNumber = searchClient({ product: "REFUND", rows: [refundSearchRow({ refund_order_no: "ORDER_1" })] });
+  const originalPair = await searchAdminChannelOriginals(pool(sameNumber), scope(), { merchantIdentityId: MERCHANT,
+    productFamily: "REFUND", merchantOrderNo: "ORDER_1", channelTrxNo: "PTRX_1" });
+  assert.equal(originalPair.status, "FOUND");
+  assert.equal(originalPair.candidates[0]?.matchedNumberRole, "ORIGINAL_PAYMENT");
+
   const mixed = searchClient({ product: "REFUND", rows: [refundSearchRow()] });
   const mismatch = await searchAdminChannelOriginals(pool(mixed), scope(), { merchantIdentityId: MERCHANT,
     productFamily: "REFUND", merchantOrderNo: "ORDER_1", channelTrxNo: "RTRX_1" });

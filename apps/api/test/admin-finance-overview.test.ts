@@ -8,12 +8,14 @@ test("finance overview accepts only its explicit bounded range", () => {
   for (const range of ["today", "7d", "30d"]) assert.equal(parseFinanceOverviewRange(new URLSearchParams({ range })), range);
   for (const query of ["range=all", "range=today&range=7d", "scope=ALL"]) assert.throws(() => parseFinanceOverviewRange(new URLSearchParams(query)));
 });
-function fixture(broken = false) {
+function fixture(broken = false, legacyReadable = true) {
   const statements: string[] = [];
   const client = { query: async (sql: string) => {
     statements.push(sql); let rows: object[];
     if (sql.includes(" AS as_of")) rows = [{ as_of: "2026-11-02T04:00:00.000000Z", starts_at: "2026-10-26T16:00:00.000000Z" }];
     else if (sql.includes("original accepted payments")) rows = [{ count: "6", amount: "1379935", controlled: "1379935", channel: "0" }];
+    else if (sql.includes("legacy paid order access")) rows = [{ readable: legacyReadable }];
+    else if (sql.includes("legacy paid order facts")) rows = [{ count: "2", amount: "82950", missing_amount_count: "1", undated_count: "3" }];
     else if (sql.includes("period settlement allocation")) rows = [{ count: "3", captured: broken ? "266403" : "266402", owner: "18000", refund: "206284", platform: "42118" }];
     else if (sql.includes("current paid unallocated")) rows = [{ count: "3", amount: "1113533" }];
     else if (sql.includes("current paid preview")) rows = [{ id: "o_fixture", number: "ZZ-TEST", amount: "368686", paid_at: "2026-10-30T00:00:00.000000Z" }];
@@ -31,6 +33,7 @@ function fixture(broken = false) {
 test("original receipts, posting allocation and current balances are different facts and clocks", async () => {
   const f = fixture(), result = await readAdminFinanceOverview(f.client, "7d", true, false);
   assert.equal(result.confirmedPayments.amountCents, "1379935");
+  assert.deepEqual(result.legacyOrderPayments, { state: "RECORDED", count: "2", knownAmountCents: "82950", missingAmountCount: "1", sourceUndatedCount: "3", timeBasis: "source_paid_at" });
   assert.equal(result.settlements.capturedCents, "266402");
   assert.equal(result.confirmedPayments.timeBasis, "paid_at"); assert.equal(result.settlements.timeBasis, "posted_at");
   assert.equal(result.pendingSettlement.amountCents, "1113533");
@@ -45,6 +48,13 @@ test("pending preview does not manufacture a document read capability", async ()
   assert.equal(result.pendingSettlement.items[0]?.documentRef, null);
   assert.equal(result.channels.state, "CONFIGURED_NOT_OBSERVED");
   assert.equal(result.confirmedPayments.channelAmountCents, "0");
+});
+test("an unreadable legacy source leaves old paid amounts unavailable while native results remain readable", async () => {
+  const f = fixture(false, false), result = await readAdminFinanceOverview(f.client, "7d", true, false);
+  assert.equal(result.legacyOrderPayments.state, "UNAVAILABLE");
+  assert.equal(result.legacyOrderPayments.knownAmountCents, null);
+  assert.equal(result.confirmedPayments.amountCents, "1379935");
+  assert.ok(f.statements.every(sql => !sql.includes("legacy paid order facts")));
 });
 test("a broken posting allocation is unavailable, never rounded or replaced by zero", async () => {
   await assert.rejects(readAdminFinanceOverview(fixture(true).client, "30d", true, false), (error: unknown) => (error as { status?: number }).status === 503);

@@ -23,12 +23,13 @@ type PaymentOrigin = "NATIVE" | "LEGACY";
 
 declare const channelEvidenceScopeBrand: unique symbol;
 export type ChannelEvidenceReadScope = Readonly<{ readonly [channelEvidenceScopeBrand]: "ChannelEvidenceReadScope" }>;
+type ReadableOrderIdLoader = (client: Client, orderIds: readonly string[]) => Promise<readonly string[]>;
 type ScopeData = Readonly<{ database: string; runtimeUser: string; adminId: string; merchantIds: ReadonlySet<string>;
   financeReadable: boolean; orderReadable: boolean; userReadable: boolean;
-  readableOrderIds: ReadonlySet<string>; readableUserIds: ReadonlySet<string> }>;
+  readableOrderIds: ReadonlySet<string>; readableUserIds: ReadonlySet<string>; loadReadableOrderIds?: ReadableOrderIdLoader }>;
 export type ChannelEvidenceScopeInput = Readonly<{ database: string; runtimeUser: string; adminId: string;
   merchantIds: readonly string[]; financeReadable: boolean; orderReadable: boolean; userReadable: boolean;
-  readableOrderIds?: readonly string[]; readableUserIds?: readonly string[] }>;
+  readableOrderIds?: readonly string[]; readableUserIds?: readonly string[]; loadReadableOrderIds?: ReadableOrderIdLoader }>;
 const scopeRegistry = new WeakMap<object, ScopeData>();
 
 const unavailable = (message: string) => new SecurityApiError(503, "EVIDENCE_UNAVAILABLE", message);
@@ -39,10 +40,11 @@ const notFound = () => new SecurityApiError(404, "NOT_FOUND", "Channel evidence 
 /** 只接受服务端根据真实会话/权限/对象范围铸造的 token；普通对象或浏览器布尔值不放行。 */
 export function createChannelEvidenceReadScope(input: ChannelEvidenceScopeInput): ChannelEvidenceReadScope {
   if (!input || typeof input !== "object") throw invalid("Invalid channel evidence scope");
-  const { database, runtimeUser, adminId, merchantIds, financeReadable, orderReadable, userReadable } = input;
+  const { database, runtimeUser, adminId, merchantIds, financeReadable, orderReadable, userReadable, loadReadableOrderIds } = input;
   if (typeof database !== "string" || !WIDE_ID.test(database) || typeof runtimeUser !== "string" || !WIDE_ID.test(runtimeUser)
     || typeof adminId !== "string" || !WIDE_ID.test(adminId) || !Array.isArray(merchantIds) || merchantIds.length > 256
-    || typeof financeReadable !== "boolean" || typeof orderReadable !== "boolean" || typeof userReadable !== "boolean") {
+    || typeof financeReadable !== "boolean" || typeof orderReadable !== "boolean" || typeof userReadable !== "boolean"
+    || loadReadableOrderIds !== undefined && typeof loadReadableOrderIds !== "function") {
     throw invalid("Invalid channel evidence scope");
   }
   const merchants = new Set<string>();
@@ -58,7 +60,7 @@ export function createChannelEvidenceReadScope(input: ChannelEvidenceScopeInput)
   const readableOrderIds = objectIds(input.readableOrderIds), readableUserIds = objectIds(input.readableUserIds);
   const token = Object.freeze({}) as ChannelEvidenceReadScope;
   scopeRegistry.set(token, Object.freeze({ database, runtimeUser, adminId, merchantIds: merchants,
-    financeReadable, orderReadable, userReadable, readableOrderIds, readableUserIds }));
+    financeReadable, orderReadable, userReadable, readableOrderIds, readableUserIds, loadReadableOrderIds }));
   return token;
 }
 
@@ -854,7 +856,7 @@ export async function searchAdminChannelOriginals(client: Client, scope: Channel
         AND ($3::text IS NULL OR r.channel_order_no=$3) AND ($4::text IS NULL OR t.channel_trx_no IS NOT NULL)
       ORDER BY r.created_at DESC,r.id COLLATE "C" DESC,t.created_at DESC,t.id COLLATE "C" DESC LIMIT $5`,
     [merchantIdentityId, input.productFamily, query.merchantOrderNo, query.channelTrxNo, query.limit + 1])).rows;
-    return mapSearchRows("COLLECTION", rows, echo, asOf, query, data, reasons);
+    return mapSearchRows(client, "COLLECTION", rows, echo, asOf, query, data, reasons);
   }
   if (input.productFamily === "REFUND") {
     if (!await schemaReady(client, "zzsh_order.channel_refund_intent",
@@ -874,7 +876,7 @@ export async function searchAdminChannelOriginals(client: Client, scope: Channel
         OR ($2::text IS NULL AND $3::text IS NOT NULL AND (i.provider_refund_trx_no=$3 OR i.original_payment_trx_no=$3)))
       ORDER BY i.created_at DESC,i.id COLLATE "C" DESC LIMIT $4`,
     [merchantIdentityId, query.merchantOrderNo, query.channelTrxNo, query.limit + 1])).rows;
-    return mapSearchRows("REFUND", rows, echo, asOf, query, data, reasons);
+    return mapSearchRows(client, "REFUND", rows, echo, asOf, query, data, reasons);
   }
   if (!await schemaReady(client, "zzsh_order.joinpay_withdrawal_intent",
     ["id", "user_id", "merchant_identity_id", "merchant_order_no", "platform_serial_no", "state", "funds_disposition",
@@ -891,7 +893,7 @@ export async function searchAdminChannelOriginals(client: Client, scope: Channel
       AND ($3::text IS NULL OR i.platform_serial_no=$3)
     ORDER BY i.accepted_at DESC,i.id COLLATE "C" DESC LIMIT $4`,
   [merchantIdentityId, query.merchantOrderNo, query.channelTrxNo, query.limit + 1])).rows;
-  return mapSearchRows("PAYOUT", rows, echo, asOf, query, data, reasons);
+  return mapSearchRows(client, "PAYOUT", rows, echo, asOf, query, data, reasons);
 }
 
 const REQUEST_STATES = ["NONE", "SUBMITTING", "UNKNOWN", "ACTION_READY", "PROCESSING_UNCONFIRMED", "REJECTED_BY_CHANNEL",
@@ -901,12 +903,18 @@ const WITHDRAWAL_STATES = ["RESERVED", "SUBMITTING", "PROCESSING", "UNKNOWN", "C
 const BUDGET = ["ALLOCATED", "CONSUMED", "RELEASED"];
 const FUNDS = ["RESERVED", "PAYOUT_POSTED", "RELEASE_POSTED"];
 
-function mapSearchRows(kind: "COLLECTION" | "REFUND" | "PAYOUT", rows: Row[],
+async function mapSearchRows(client: Client, kind: "COLLECTION" | "REFUND" | "PAYOUT", rows: Row[],
   echo: { merchantIdentityId: string; productFamily: ChannelProductFamily; merchantOrderNo: string | null; channelTrxNo: string | null; limit: number },
   asOf: string, query: { merchantOrderNo: string | null; channelTrxNo: string | null; limit: number }, data: ScopeData,
-  reasons: string[]): ChannelOriginalSearch {
+  reasons: string[]): Promise<ChannelOriginalSearch> {
   const candidates: ChannelOriginalCandidate[] = [];
-  for (const row of rows.slice(0, query.limit)) {
+  const page = rows.slice(0, query.limit);
+  let readableOrderIds = data.readableOrderIds;
+  if (kind !== "PAYOUT" && data.orderReadable && data.loadReadableOrderIds) {
+    const orderIds = [...new Set(page.map(row => id(row.order_id)).filter((value): value is string => value !== null))];
+    if (orderIds.length) readableOrderIds = new Set([...readableOrderIds, ...await data.loadReadableOrderIds(client, orderIds)]);
+  }
+  for (const row of page) {
     const merchantIdentityId = id(row.merchant_identity_id);
     const recordedAt = iso(row.recorded_at);
     if (!recordedAt) add(reasons, "RECORD_TIME_UNREADABLE");
@@ -924,7 +932,7 @@ function mapSearchRows(kind: "COLLECTION" | "REFUND" | "PAYOUT", rows: Row[],
       const state = typeof row.state === "string" && REQUEST_STATES.includes(row.state) ? row.state : "UNKNOWN";
       if (state === "UNKNOWN") add(reasons, "UNKNOWN_LOCAL_STATE");
       candidates.push({ sourceFamily: "JOINPAY", productFamily: echo.productFamily, objectKind: "PAYMENT_REQUEST", objectId,
-        requestId: objectId, orderId: data.orderReadable && orderIdRaw && data.readableOrderIds.has(orderIdRaw) ? orderIdRaw : null, postingId: null, userId: null,
+        requestId: objectId, orderId: data.orderReadable && orderIdRaw && readableOrderIds.has(orderIdRaw) ? orderIdRaw : null, postingId: null, userId: null,
         merchantIdentityId, merchantOrderNo, channelTrxNo, amount, state,
         evidenceLevel: code(row.evidence_level) ?? "UNKNOWN", recordedAt,
         requiresReview: null, matchedNumberRole: query.merchantOrderNo !== null ? "OBJECT_ORDER" : "CHANNEL_TRX_ONLY",
@@ -947,12 +955,10 @@ function mapSearchRows(kind: "COLLECTION" | "REFUND" | "PAYOUT", rows: Row[],
       if (merchantIdentityId !== echo.merchantIdentityId) return searchFailure("UNAVAILABLE", echo, asOf, "SEARCH_CANDIDATE_BINDING_MISMATCH");
       let role: ChannelOriginalCandidate["matchedNumberRole"];
       if (query.merchantOrderNo !== null) {
-        if (merchantOrderNo === query.merchantOrderNo) {
+        if (merchantOrderNo === query.merchantOrderNo && (query.channelTrxNo === null || providerTrx === query.channelTrxNo)) {
           role = "OBJECT_ORDER";
-          if (query.channelTrxNo !== null && providerTrx !== query.channelTrxNo) return searchFailure("UNAVAILABLE", echo, asOf, "SEARCH_CLUE_MISMATCH");
-        } else if (originalOrderNo === query.merchantOrderNo) {
+        } else if (originalOrderNo === query.merchantOrderNo && (query.channelTrxNo === null || originalTrx === query.channelTrxNo)) {
           role = "ORIGINAL_PAYMENT";
-          if (query.channelTrxNo !== null && originalTrx !== query.channelTrxNo) return searchFailure("UNAVAILABLE", echo, asOf, "SEARCH_CLUE_MISMATCH");
         } else return searchFailure("UNAVAILABLE", echo, asOf, "SEARCH_CLUE_MISMATCH");
       } else {
         role = "CHANNEL_TRX_ONLY";
@@ -971,7 +977,7 @@ function mapSearchRows(kind: "COLLECTION" | "REFUND" | "PAYOUT", rows: Row[],
       const requiresReview = typeof row.requires_review === "boolean" ? row.requires_review : null;
       if (requiresReview === null) add(reasons, "LOCAL_REVIEW_FLAG_UNREADABLE");
       candidates.push({ sourceFamily: "JOINPAY", productFamily: "REFUND", objectKind: "REFUND_INTENT", objectId,
-        requestId: null, orderId: data.orderReadable && orderIdRaw && data.readableOrderIds.has(orderIdRaw) ? orderIdRaw : null, postingId, userId: null,
+        requestId: null, orderId: data.orderReadable && orderIdRaw && readableOrderIds.has(orderIdRaw) ? orderIdRaw : null, postingId, userId: null,
         merchantIdentityId, merchantOrderNo, channelTrxNo: providerTrx, amount, state,
         evidenceLevel: code(row.evidence_level) ?? "UNKNOWN", recordedAt,
         requiresReview, matchedNumberRole: role,

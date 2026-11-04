@@ -12,7 +12,7 @@ import { historicalObservationDisplay,enrichHistoricalObservations,resolveHistor
 import type {FinancePeriodBasis} from './admin-finance-period-basis';
 import {readAdminEarningCalculations,readAdminEarningEventActions,type AdminEarningCalculation} from './distribution-earning-read';
 import {readAdminLegacyDutyFinances,type AdminLegacyDutyFinance} from './legacy-duty-finance-store';
-import {projectAdminOrderSettlementEvidence,type OrderSettlementFacts} from './admin-order-settlement-evidence';
+import {projectAdminOrderFinanceBusiness,projectAdminOrderSettlementEvidence,type OrderSettlementFacts} from './admin-order-settlement-evidence';
 import { projectOriginalWithdrawalBankDestination } from './native-withdrawal-store';
 export {readAdminFinancePeriodBasis} from './admin-finance-period-basis';
 export type { HistoricalFinanceDisplay,HistoricalRelationAccess } from './legacy-observation-display';
@@ -571,7 +571,8 @@ export function readAdminFinanceDocument(facts: FinanceFacts, ref: string, entry
     if(order.accountReadable)related.push({ ref: order.accountId, label: "资源账号", path: `/supply/accounts/${encodeURIComponent(order.accountId)}` });
     related.push(...facts.entries.filter(entry => entry.related.some(link => link.ref === ref)).map(entry => ({ ref: entry.documentRef, label: entry.documentNumber })));
   }
-  const orderSettlement=order?.objectReadable===true?projectAdminOrderSettlementEvidence(order,entries,facts.orderSettlementFacts):undefined;
+  const receipt=order?.objectReadable===true?projectAdminOrderSettlementEvidence(order,entries,facts.orderSettlementFacts):undefined;
+  const orderSettlement=receipt&&order?{...receipt,business:projectAdminOrderFinanceBusiness(order,receipt,facts)}:undefined;
   if(orderSettlement)related.push(...orderSettlement.dutyRefs.filter((duty):duty is typeof duty&{documentRef:string}=>duty.documentRef!==null).map(duty=>({ref:duty.documentRef,label:duty.kind==='RENTER_REFUND'?'已记退款责任':'已记旧单责任'})));
   return { document, entries, evidence, related: [...new Map(related.map(link => [link.ref + (link.path ?? ""), link])).values()], reasonCodes: [...new Set([...entries.flatMap(entry => entry.reasonCodes),...(reverse?.reasonCodes??[]),...(facts.localSourceLimits??[]), ...(order ? ["ORDER_RECORD_NOT_CHANNEL_RESULT", ...(!entries.length ? ["ORDER_NO_CURRENT_POSTING"] : [])] : [])])],
     ...(orderSettlement?{orderSettlement}:{}),

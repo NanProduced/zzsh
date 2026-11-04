@@ -29,7 +29,7 @@ export class FinanceSqlFixture {
     this.table('zzsh_order.legacy_owner_guarantee_coverage','id body_digest',[]);
     this.table("zzsh_order.rental_order", "id display_no owner_user_id renter_user_id account_id game_id status revision paid_confirmation_id paid_at rental_amount_cents deposit_amount_cents created_at", data.native ?? []);
     this.table("zzsh_order.payment_confirmation","id order_id source disposition amount_cents currency accepted_at",data.payments??[]);
-    this.table("zzsh_order.legacy_order_read_snapshot", "id source_system source_entity legacy_id source_digest binding_digest original_order_no owner_user_id renter_user_id account_id game_id source_snapshot source_completed_at due_amount_cents recorded_paid_amount_cents deposit_amount_cents source_order_status source_pay_status source_created_at imported_at", data.legacy ?? []);
+    this.table("zzsh_order.legacy_order_read_snapshot", "id source_system source_entity legacy_id source_digest binding_digest original_order_no owner_user_id renter_user_id account_id game_id source_snapshot source_paid_at source_completed_at due_amount_cents recorded_paid_amount_cents deposit_amount_cents source_order_status source_pay_status source_created_at imported_at", data.legacy ?? []);
     this.table('zzsh_auth_user."user"', "id name", data.subjects ?? [{ id: "u1", name: "用户一" }, { id: "u2", name: "用户二" }]);
     this.table("zzsh_order.withdrawal_intent", "id state operation_version funds_disposition last_provider_fact_id", data.withdrawals??[]);
     this.table("zzsh_order.withdrawal_provider_fact", "id evidence_digest", []);

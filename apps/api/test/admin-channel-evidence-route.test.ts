@@ -34,7 +34,7 @@ test("order evidence requires order read and a game-scoped visible order", async
   await rejects(readAdminChannelEvidenceRoute(pool(c), actor(), "channel-evidence/orders/ord_1", q("origin=NATIVE"), access()), 400, "INVALID_ARGUMENT");
 });
 test("order origin is derived from the server row, not the request", async () => {
-  const c = new FakeClient(respond([{ origin: "LEGACY" }]));
+  const c = new FakeClient(respond([{ id: "ord_1", origin: "LEGACY" }]));
   const body = await readAdminChannelEvidenceRoute(pool(c), actor(), "channel-evidence/orders/ord_1", q(), access()).catch(e => e);
   if (body instanceof Error) assert.equal((body as { status?: number }).status, 503);
   else { assert.equal(body.origin, "LEGACY"); assert.equal((body as any).payment.status, "NOT_APPLICABLE"); assert.equal(body.bankArrival, "UNKNOWN"); }
@@ -49,3 +49,39 @@ test("withdrawal and original reads only accept server-granted merchants", async
   await rejects(readAdminChannelEvidenceRoute(pool(c), actor(), `channel-evidence/originals/${MERCHANT}`, q("productFamily=PAYOUT&merchantIdentityId=mi_x"), access()), 400, "INVALID_ARGUMENT");
   assert.equal(c.calls.length, 0);
 });
+
+for (const family of ["ALIPAY_NATIVE", "REFUND"] as const) {
+  test(`${family} search returns only game-scoped order links for actors with order read`, async () => {
+    const makeClient = () => new FakeClient(sql => {
+      if (sql.includes("all_orders")) return [{ id: "ord_1", origin: "NATIVE" }, { id: "ord_3", origin: "LEGACY" }];
+      if (sql.includes("to_regclass")) return [{ ready: true }];
+      if (sql.includes("current_database() AS database")) return [{ database: DB, runtime_user: USER, as_of: AS_OF }];
+      return [1, 2, 3].map(n => ({ merchant_identity_id: MERCHANT, order_id: `ord_${n}`, amount_cents: "10000", currency: "CNY",
+        recorded_at: AS_OF, state: "UNKNOWN", ...(family === "REFUND"
+          ? { intent_id: `refund_${n}`, refund_order_no: `RF${n}`, original_payment_order_no: "ORDER_1", original_payment_trx_no: null,
+              provider_refund_trx_no: null, posting_id: null, terminal_evidence_id: null, budget_disposition: "ALLOCATED", requires_review: false }
+          : { request_id: "preq_1", method: family, merchant_order_no: "ORDER_1", channel_trx_no: `TRX_${n}` }) }));
+    });
+    const run = (c: FakeClient, order: boolean) => readAdminChannelEvidenceRoute(pool(c), actor({ order }), `channel-evidence/originals/${MERCHANT}`,
+      q(`productFamily=${family}&merchantOrderNo=ORDER_1`), access());
+    const c = makeClient();
+    const linked = await run(c, true);
+    assert.equal(linked.kind, "ORIGINAL_SEARCH");
+    assert.equal(linked.bankArrival, "UNKNOWN");
+    assert.ok(linked.search);
+    assert.equal(linked.search.status, "AMBIGUOUS");
+    assert.deepEqual(linked.search.candidates.map(candidate => candidate.orderId), ["ord_1", null, null]);
+    assert.ok(linked.search.reasonCodes.includes("ORDER_LINK_REDACTED"));
+    const scopes = c.calls.filter(call => call.sql.includes("all_orders"));
+    assert.equal(scopes.length, 1);
+    assert.deepEqual(scopes[0]!.values, [["ord_1", "ord_2", "ord_3"], false, ADMIN]);
+    assert.match(scopes[0]!.sql, /sgame\."game_id" = x\.game_id/);
+
+    const withoutOrder = makeClient();
+    const redacted = await run(withoutOrder, false);
+    assert.equal(redacted.kind, "ORIGINAL_SEARCH");
+    assert.ok(redacted.search);
+    assert.deepEqual(redacted.search.candidates.map(candidate => candidate.orderId), [null, null, null]);
+    assert.ok(!withoutOrder.calls.some(call => call.sql.includes("all_orders")));
+  });
+}
