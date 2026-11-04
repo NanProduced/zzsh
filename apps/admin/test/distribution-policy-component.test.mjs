@@ -20,7 +20,7 @@ test('policy permissions and strict contract remain; direct policy PUT is not an
   v=await h.mount(m.DistributionPolicyPanel,{snapshot:snap(manager)});assert.equal(v.host.querySelector("[aria-label='切换分销政策开关']"),null);assert.equal([...v.host.querySelectorAll('button')].find(b=>b.textContent.includes('申请调整政策')).disabled,true);assert(calls.every(c=>c.method==='GET'));
   await act(async()=>v.root.unmount());
   globalThis.fetch=h.browser.fetch=async()=>json({},503);
-  v=await h.mount(m.DistributionPolicyPanel,{snapshot:snap([], 'boss_1','boss_session',true)});assert.match(v.host.textContent,/未就绪/);assert.doesNotMatch(v.host.textContent,/%/);
+  v=await h.mount(m.DistributionPolicyPanel,{snapshot:snap([], 'boss_1','boss_session',true)});assert.match(v.host.textContent,/分销政策暂未读到/);assert.ok([...v.host.querySelectorAll('button')].some(b=>b.textContent.includes('重新读取')),'read failure offers a retry');assert.doesNotMatch(v.host.textContent,/%/);
  }finally{await h.close();}
 });
 

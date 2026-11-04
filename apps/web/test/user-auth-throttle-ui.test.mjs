@@ -17,10 +17,18 @@ const challenge = {
   signature: "ab".repeat(32),
 };
 
+// The login form blocks submission until both published legal documents are readable, so every
+// sign-in fixture must answer the consent read with two versioned summaries.
+const publishedLegalDocs = {
+  terms: { id: "terms_20261103", docType: "PLATFORM_TERMS", title: "平台服务协议", digest: "1".repeat(64), effectiveAt: "2026-11-03T00:00:00.000Z" },
+  privacy: { id: "privacy_20261103", docType: "PLATFORM_PRIVACY", title: "用户隐私政策", digest: "2".repeat(64), effectiveAt: "2026-11-03T00:00:00.000Z" },
+};
+
 test("password login retries the original request after a challenge and drops a late one", async () => {
   let phase = "challenge";
   const p = await mountAuthComponent("apps/web/src/components/auth/auth-form.tsx", "AuthForm", {}, {
     fetch: async (url, body) => {
+      if (String(url).includes("/api/legal-documents/")) return Response.json(publishedLegalDocs);
       if (!String(url).includes("/api/auth/user")) return Response.json({});
       if (phase === "challenge" && !body?.captcha) {
         phase = "retry";
@@ -32,6 +40,7 @@ test("password login retries the original request after a challenge and drops a 
     },
   });
   try {
+    await p.settle();
     await p.click("密码登录");
     await p.input("auth-identifier", "13800138000");
     await p.input("auth-terms", true);
@@ -53,12 +62,14 @@ test("a changed return intent ignores a late challenge instead of replaying it",
   const gate = deferred();
   const p = await mountAuthComponent("apps/web/src/components/auth/auth-form.tsx", "AuthForm", { next: "/publish" }, {
     fetch: async (url) => {
+      if (String(url).includes("/api/legal-documents/")) return Response.json(publishedLegalDocs);
       if (!String(url).includes("/api/auth/user")) return Response.json({});
       if (String(url).endsWith("/sign-in/identifier")) await gate.promise;
       return Response.json({ error: { code: "FORBIDDEN", reason: "CAPTCHA_REQUIRED" }, challenge }, { status: 403 });
     },
   });
   try {
+    await p.settle();
     await p.click("密码登录");
     await p.input("auth-identifier", "13800138000");
     await p.input("auth-terms", true);

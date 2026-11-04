@@ -6,6 +6,7 @@ import assert from "node:assert/strict";
 
 const rootPath = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
 const require = createRequire(path.join(rootPath, "package.json"));
+const uiExports = JSON.parse(fs.readFileSync(path.join(rootPath, "packages/ui/package.json"), "utf8")).exports ?? {};
 const React = require("react");
 const ts = require("typescript");
 const { Window } = require("happy-dom");
@@ -84,7 +85,14 @@ export async function mountAuthComponent(relativePath, componentName, props = {}
       if (name === "./contact-popover") return { ContactPopover: () => null };
       if (name === "./customer-support-workspace") return { CustomerSupportWorkspace: props => React.createElement("div", {"data-support-entry-type": props.initialType}) };
       if (name.endsWith(".css")) return {};
-      if (name === '@zzsh/ui/avatar-crop') return load(path.join(rootPath, 'packages/ui/src/avatar-crop.tsx'));
+      // Workspace UI package: mirror its exports map so any .ts/.tsx subpath (and the asset imports
+      // inside it) loads through the TypeScript transpile path. The CommonJS loader cannot read TSX.
+      if (name.startsWith("@zzsh/ui/")) {
+        const target = uiExports["./" + name.slice("@zzsh/ui/".length)];
+        const file = typeof target === "string" ? path.join(rootPath, "packages/ui", target) : null;
+        if (file && !file.endsWith(".css") && fs.existsSync(file)) return load(file);
+      }
+      if (/\.(?:png|jpe?g|webp|gif|svg)$/.test(name)) return { __esModule: true, default: name };
       // Sibling imports inside src/ resolve like a bundler would; the two stubs above still win.
       if (name.startsWith("./") || name.startsWith("../")) {
         const base = path.resolve(path.dirname(module.filename), name);

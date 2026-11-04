@@ -2182,7 +2182,7 @@ test("legacy detail exposes the complete frozen resource record after the short 
     ],rentalDeadlineAt:null}};
     const Legacy=loadComponent('apps/web/src/components/order/legacy-order-workspace.tsx',session('user_A')).LegacyOrderWorkspace;
     const methods=[];const probe=createProbe(window,Legacy,{party:'renter',orderId:row.id},async(url,init={})=>{methods.push(init.method??'GET');return json({order:row});});
-    try{await probe.render();const section=[...probe.host.querySelectorAll('section')].find(node=>node.querySelector(':scope > h3')?.textContent==='本单资源记录');assert.ok(section,'the detail has a full resource section');assert.deepEqual([...section.querySelectorAll('dt')].map(node=>node.textContent),['哈夫币','AWM子弹','6级头盔','6级护甲','顶级保险卡']);assert.deepEqual([...section.querySelectorAll('dd')].map(node=>node.textContent),['64.00','46','4','7','0 天']);assert.match(probe.host.textContent,/\+1项/);assert.ok(methods.every(method=>method==='GET'));}finally{await probe.dispose();}
+    try{await probe.render();const sections=[...probe.host.querySelectorAll('section.order-legacy-assets-card')];assert.equal(sections.length,1,'the detail has exactly one full resource section');const section=sections[0];assert.equal(section.querySelector('h3')?.textContent,'本单资源记录');assert.deepEqual([...section.querySelectorAll('dt')].map(node=>node.textContent),['哈夫币','AWM子弹','6级头盔','6级护甲','顶级保险卡']);assert.deepEqual([...section.querySelectorAll('dd')].map(node=>node.textContent),['64.00','46','4','7','0 天']);assert.match(probe.host.textContent,/\+1项/);assert.ok(methods.every(method=>method==='GET'));}finally{await probe.dispose();}
   });
 });
 
