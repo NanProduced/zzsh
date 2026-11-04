@@ -4,7 +4,7 @@ import { closeSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, re
 import { basename, delimiter, dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn, spawnSync } from "node:child_process";
-import { writeLoadCheckpoint } from "./local-load-checkpoint.mjs";
+import { matchesLoadReservation, strictRoundReservation, writeLoadCheckpoint } from "./local-load-checkpoint.mjs";
 
 const args = process.argv.slice(2), option = name => {
   const i = args.indexOf(name);
@@ -37,7 +37,9 @@ function bound(file, expected) {
 }
 const inputSha256 = option("--input-sha"), input = bound(privatePath(option("--input")), inputSha256);
 assert.equal(input.schema, "zzsh.local-round.v1");
-assert(input.window && Date.now() >= Date.parse(input.window.notBefore) && Date.now() < Date.parse(input.window.expiresAt), "ROUND_EXECUTION_WINDOW_INACTIVE");
+assert(input.window && Object.keys(input.window).every(k => ["notBefore", "expiresAt"].includes(k))
+  && [input.window.notBefore, input.window.expiresAt].every(time => /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/.test(time)), "ROUND_EXECUTION_WINDOW_INVALID");
+assert(Date.now() >= Date.parse(input.window.notBefore) && Date.now() < Date.parse(input.window.expiresAt), "ROUND_EXECUTION_WINDOW_INACTIVE");
 assert(/^[1-9]\d*$/.test(input.target.oid) && /^[a-f0-9]{24}$/.test(input.target.nonce));
 assert(input.target.schemaHashes.length >= 1 && input.target.schemaHashes.every(x => /^[a-f0-9]{64}$/.test(x)));
 const out = privatePath(input.out, true);
@@ -78,8 +80,10 @@ const reservation = registry.protectedDataset;
 const reservationStatus = input.target.bootstrapReservation ?? "ROUND02_BOOTSTRAP_RESERVED";
 assert(/^ROUND[0-9]{2}_BOOTSTRAP_RESERVED$/.test(reservationStatus), "ROUND_BOOTSTRAP_RESERVATION_STATUS_INVALID");
 assert(!registry.pendingReset && (!reservation || reservation.status === reservationStatus
-  && reservation.manifestSha256 === input.dataset.sha256 && reservation.epoch?.oid === input.target.oid
-  && reservation.epoch?.nonce === input.target.nonce), "FRESH_REGISTERED_RESOURCE_OR_EXACT_BOOTSTRAP_RESERVATION_REQUIRED");
+  && matchesLoadReservation(reservation, { ...input.target, datasetSha256: input.dataset.sha256 })), "FRESH_REGISTERED_RESOURCE_OR_EXACT_BOOTSTRAP_RESERVATION_REQUIRED");
+assert(input.strictBatch === undefined || typeof input.strictBatch === "boolean", "ROUND_STRICT_BATCH_INVALID");
+const strictBatch = input.strictBatch === true;
+assert(!strictBatch || reservation?.status === strictRoundReservation, "STRICT_BATCH_REQUIRES_ROUND04");
 const apiDist = resolve(input.apiDist);
 function assertBuild() {
   const files = readdirSync(apiDist, { recursive: true }).filter(file => file.endsWith(".js")).map(file => file.replaceAll("\\", "/")).sort();
@@ -90,8 +94,9 @@ function assertBuild() {
 const buildModulesVerified = assertBuild();
 for (const file of ["database/business-migrations.js", "supply/legacy-user-migration.js", "legacy-load/legacy-account-seam.js", "order/legacy-order-read.js", "finance/personal-finance-maintenance.js", "legacy-load/legacy-path-records.js"])
   assert(Object.hasOwn(input.buildFiles, file), "ROUND_BUILD_ENTRYPOINT_MISSING:" + file);
+const validationWallMs = performance.now() - started;
 if (validate) {
-  console.log(JSON.stringify({ status: "SEALED_INPUTS_VALIDATED_TARGET_NOT_RUN", inputSha256, datasetSha256: input.dataset.sha256, buildModulesVerified, targetConnections: 0, credentialReads: 0, targetWrites: 0 }));
+  console.log(JSON.stringify({ status: "SEALED_INPUTS_VALIDATED_TARGET_NOT_RUN", inputSha256, datasetSha256: input.dataset.sha256, strictBatch, validationWallMs, buildModulesVerified, targetConnections: 0, credentialReads: 0, targetWrites: 0 }));
   process.exit(0);
 }
 
@@ -100,17 +105,18 @@ assert(sid, "ROUND_SID_REQUIRED");
 mkdirSync(out);
 assert.equal(spawnSync("icacls", [out, "/inheritance:r", "/grant:r", `*${sid}:(OI)(CI)F`, "*S-1-5-18:(OI)(CI)F", "*S-1-5-32-544:(OI)(CI)F"], { windowsHide: true }).status, 0, "ROUND_ACL_FAILED");
 const root = fileURLToPath(new URL("../..", import.meta.url)), scripts = dirname(fileURLToPath(import.meta.url));
-const toolFiles = Object.fromEntries(["run-local-round.mjs", "load-local-dataset.mjs", "local-target-finance.mjs", "local-funds-plan.mjs", "local-target-display.mjs", "local-target-opening.mjs", "local-target-holdings.mjs", "load-legacy-path-accounts.mjs", "readback-local-dataset.mjs", "run-local-growth.mjs", "local-growth-plan.mjs"].map(name => [name, sha(readFileSync(join(scripts, name)))]));
-const receipt = { schema: "zzsh.local-round-receipt.v1", inputSha256, datasetSha256: input.dataset.sha256, target: input.target, buildModulesVerified, toolFiles, status: "RUNNING", startedAt: new Date().toISOString(), stages: [] };
+const toolFiles = Object.fromEntries(["run-local-round.mjs", "load-local-dataset.mjs", "local-load-checkpoint.mjs", "local-target-finance.mjs", "local-funds-plan.mjs", "local-target-display.mjs", "local-target-opening.mjs", "local-target-holdings.mjs", "load-legacy-path-accounts.mjs", "readback-local-dataset.mjs", "run-local-growth.mjs", "local-growth-plan.mjs"].map(name => [name, sha(readFileSync(join(scripts, name)))]));
+const receipt = { schema: "zzsh.local-round-receipt.v1", inputSha256, datasetSha256: input.dataset.sha256, target: input.target, strictBatch, validationWallMs, buildModulesVerified, toolFiles, status: "RUNNING", startedAt: new Date().toISOString(), stages: [] };
 const receiptFile = join(out, "round-receipt.json"), work = join(out, "loader"), checkpoint = join(work, "checkpoint.json");
 const save = () => writeLoadCheckpoint(receiptFile, receipt);
 save();
 const load = "load-local-dataset.mjs", base = ["--dataset", input.dataset.path, "--dataset-sha", input.dataset.sha256, "--credentials", input.credentials, "--api-dist", apiDist];
 const target = ["--oid", input.target.oid, "--nonce", input.target.nonce];
 const bind = (name, item) => ["--" + name, item.path, "--" + name + "-sha", item.sha256];
-const write = ["--execute", ...base, ...target, "--out", work, "--actor-id", actor.id, "--session-id", actor.sessionId, "--schema-binding", JSON.stringify(input.target.schemaHashes), "--execution-window", JSON.stringify(input.window)];
+const write = ["--execute", ...(strictBatch ? ["--strict-round-batch"] : []), ...base, ...target, "--out", work, "--actor-id", actor.id, "--session-id", actor.sessionId, "--schema-binding", JSON.stringify(input.target.schemaHashes), "--execution-window", JSON.stringify(input.window)];
 function assertCheckpoint(phaseNames) {
   const state = read(checkpoint);
+  assert.equal(state.strictBatch ?? false, strictBatch, "CHECKPOINT_STRICT_BATCH_CHANGED");
   assert.equal(state.pending, null, "ROUND_COMMIT_KNOWLEDGE_UNKNOWN");
   for (const field of ["poolClosed", "unlock", "maintenanceClosed", "rollbackConfirmed"]) assert.equal(state[field], true, "ROUND_CLEANUP_UNCONFIRMED:" + field);
   assert(!["RUNNING", "COMMIT_UNKNOWN", "ROLLBACK_UNKNOWN", "RECEIPT_WRITE_FAILED_COMMITTED", "FAILED_STOPPED"].includes(state.status));

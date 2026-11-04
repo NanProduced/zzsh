@@ -1,15 +1,17 @@
 import { createHash } from "node:crypto";
-import { createReadStream, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync, appendFileSync } from "node:fs";
+import { createReadStream, existsSync, mkdirSync, readFileSync, writeFileSync, appendFileSync } from "node:fs";
 import { join, resolve, dirname, basename } from "node:path";
 import { createInterface } from "node:readline";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
-import { writeLoadCheckpoint } from "./local-load-checkpoint.mjs";
+import { matchesLoadReservation, strictRoundReservation, writeLoadCheckpoint } from "./local-load-checkpoint.mjs";
 const require = createRequire(import.meta.url), { Client, Pool } = require("pg");
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const args = process.argv.slice(2), option = name => { const i = args.indexOf(name); return i < 0 ? undefined : args[i + 1]; };
-if (!args.includes("--execute") && !args.includes("--recover")) {
+const execute = args.includes("--execute"), recover = args.includes("--recover"), strictBatch = args.includes("--strict-round-batch");
+if (execute && recover) throw new Error("ONE_LOAD_ACTION_REQUIRED");
+if (!execute && !recover) {
     console.log(JSON.stringify({ action: "PLAN", target: "zzsh_test_regression", required: ["--execute", "--dataset", "--dataset-sha", "--oid", "--nonce", "--actor-id", "--session-id", "--credentials", "--out", "--funds-source", "--funds-source-sha"], connections: 0, credentialReads: 0 }));
     process.exit(0);
 }
@@ -36,6 +38,8 @@ function assertRoundWindow() {
         throw new Error("ROUND_EXECUTION_WINDOW_INACTIVE");
 }
 const contactAppend = args.includes("--contact-append"), numberOnly = args.includes("--legacy-number-only");
+if (strictBatch && (!executionWindow || !expectedSchema || contactAppend || numberOnly)) throw new Error("STRICT_ROUND_BATCH_BINDING_REQUIRED");
+if (strictBatch && execute) assertRoundWindow();
 if (contactAppend && numberOnly) throw new Error("ONE_ADDITIVE_PHASE_PER_EXECUTION");
 if (contactAppend || numberOnly) {
     if (manifest.format !== "zzsh.legacy-contact-append-plan.v1" || manifest.status !== "SOURCE_CLOSED_PENDING_ROOT_REVIEW_AND_FRESH_TARGET_CAS"
@@ -69,7 +73,8 @@ const actor = { id: option("--actor-id"), userId: option("--actor-id"), realm: "
 if (!actor.id || !actor.sessionId)
     throw new Error("EXISTING_MAINTENANCE_ACTOR_REQUIRED");
 const statePath = join(output, "checkpoint.json"), eventsPath = join(output, "events.jsonl");
-if (!existsSync(output)) {
+function createOutput() {
+    if (existsSync(output)) return;
     mkdirSync(output);
     const sid = /S-1-5-[0-9-]+/.exec(spawnSync("whoami", ["/user", "/fo", "csv", "/nh"], { encoding: "utf8", windowsHide: true }).stdout)?.[0];
     if (!sid)
@@ -79,15 +84,18 @@ if (!existsSync(output)) {
 }
 let state = existsSync(statePath) ? JSON.parse(readFileSync(statePath)) : null;
 const binding = { datasetSha256: sha(manifestBytes), database: "zzsh_test_regression", oid: expectedOid, nonce: expectedNonce, actorId: actor.id, sessionId: actor.sessionId };
-if (state && JSON.stringify(state.binding) !== JSON.stringify(binding))
-    throw new Error("CHECKPOINT_BINDING_CHANGED");
-if (state && JSON.stringify(state.executionWindow ?? null) !== JSON.stringify(executionWindow))
-    throw new Error("CHECKPOINT_EXECUTION_WINDOW_CHANGED");
-if (state && JSON.stringify(state.schemaHashes ?? null) !== JSON.stringify(expectedSchema))
-    throw new Error("CHECKPOINT_SCHEMA_BINDING_CHANGED");
-if (state?.pending && !args.includes("--recover"))
-    throw new Error("PENDING_TRANSACTION_READ_ONLY_RECOVERY_REQUIRED");
+function assertCheckpointBinding(checkpoint) {
+    if (recover && !checkpoint?.pending) throw new Error("ORIGINAL_PENDING_CHECKPOINT_REQUIRED");
+    if (!checkpoint) return;
+    if (JSON.stringify(checkpoint.binding) !== JSON.stringify(binding)) throw new Error("CHECKPOINT_BINDING_CHANGED");
+    if (JSON.stringify(checkpoint.executionWindow ?? null) !== JSON.stringify(executionWindow)) throw new Error("CHECKPOINT_EXECUTION_WINDOW_CHANGED");
+    if (JSON.stringify(checkpoint.schemaHashes ?? null) !== JSON.stringify(expectedSchema)) throw new Error("CHECKPOINT_SCHEMA_BINDING_CHANGED");
+    if ((checkpoint.strictBatch ?? false) !== strictBatch) throw new Error("CHECKPOINT_STRICT_BATCH_CHANGED");
+    if (checkpoint.pending && !recover) throw new Error("PENDING_TRANSACTION_READ_ONLY_RECOVERY_REQUIRED");
+}
+assertCheckpointBinding(state);
 state ??= { schema: "zzsh.local-legacy-load.v1", binding, status: "STARTED", startedAt: new Date().toISOString(), phases: {}, pending: null, queries: 0, quarantine: [], checkpoints: 0 };
+if (strictBatch) state.strictBatch = true;
 if (executionWindow) state.executionWindow = executionWindow;
 if (expectedSchema) state.schemaHashes = expectedSchema;
 const displayOnly = args.includes("--enrich-display");
@@ -114,32 +122,60 @@ const refundAttemptsBinding=option("--refund-attempts")?{path:resolve(option("--
 if(refundAttemptsBinding){if(!refundAttemptsBinding.path.toLowerCase().startsWith("e:\\zzsh-local-state\\restricted\\")||sha(readFileSync(join(refundAttemptsBinding.path,"receipt.json")))!==refundAttemptsBinding.sha256||state.refundAttemptsBinding&&JSON.stringify(state.refundAttemptsBinding)!==JSON.stringify(refundAttemptsBinding))throw new Error("REFUND_ATTEMPT_CHECKPOINT_BINDING_CHANGED");}
 let checkpointOwned = false;
 function resetRunCleanup() { state.poolClosed=false; state.unlock=false; state.maintenanceClosed=false; state.rollbackConfirmed=false; }
-function save() { if (checkpointOwned) writeLoadCheckpoint(statePath, state); }
+function save(value = state) { if (checkpointOwned) writeLoadCheckpoint(statePath, value); }
 function event(value) { if (!checkpointOwned) return; appendFileSync(eventsPath, JSON.stringify({ at: new Date().toISOString(), ...value }) + "\n"); }
 const credentialFile = option("--credentials");
 if (!credentialFile)
     throw new Error("REGISTERED_MIGRATION_CREDENTIAL_REQUIRED");
-const registered = JSON.parse(readFileSync(join(dirname(resolve(credentialFile)), "resource.json"), "utf8"));
+const registryPath = join(dirname(resolve(credentialFile)), "resource.json");
+const registered = JSON.parse(readFileSync(registryPath, "utf8"));
+function assertResource(resource, checkpoint) {
+    if (resource.database !== binding.database || resource.oid !== expectedOid || resource.nonce !== expectedNonce || resource.pendingReset)
+        throw new Error("REGISTERED_MIGRATION_CREDENTIAL_REQUIRED");
+    const reservation = resource.protectedDataset;
+    if (reservation?.bootstrapReservation === strictRoundReservation && !strictBatch) throw new Error("CHECKPOINT_STRICT_BATCH_CHANGED");
+    if (reservation?.report && reservation.report !== statePath && ["BUILDING", "COMMIT_UNKNOWN", "ROLLBACK_UNKNOWN", "RECEIPT_WRITE_FAILED_COMMITTED"].includes(reservation.status))
+        throw new Error("ORIGINAL_PENDING_CHECKPOINT_REQUIRED");
+    if (strictBatch && (!matchesLoadReservation(reservation, binding) || !(reservation.status === strictRoundReservation
+        || (reservation.bootstrapReservation === strictRoundReservation && reservation.report === statePath && checkpoint?.strictBatch === true))))
+        throw new Error("STRICT_BATCH_REQUIRES_ROUND04");
+}
+assertResource(registered, existsSync(statePath) ? state : null);
 const credentials = JSON.parse(readFileSync(credentialFile, "utf8"));
-if (registered.database !== "zzsh_test_regression" || registered.oid !== expectedOid || registered.nonce !== expectedNonce || registered.pendingReset || credentials.database !== "zzsh_test_regression" || credentials.migration?.name !== registered.roles?.migration?.name || credentials.migration?.oid !== registered.roles?.migration?.oid)
-    throw new Error("REGISTERED_MIGRATION_CREDENTIAL_REQUIRED");
+function assertRegisteredRole(resource) {
+    if (credentials.database !== binding.database || !credentials.migration?.name || !credentials.migration.oid
+        || credentials.migration.name !== resource.roles?.migration?.name || credentials.migration.oid !== resource.roles?.migration?.oid)
+        throw new Error("REGISTERED_MIGRATION_CREDENTIAL_REQUIRED");
+}
+assertRegisteredRole(registered);
 const maintenance = new Client({ host: "127.0.0.1", port: 55432, database: "postgres", user: "zzsh", password: readFileSync(process.env.DB_PASSWORD_FILE ?? "E:/zzsh/zzsh/apps/api/.secrets/postgres_password", "utf8").trim(), application_name: "core-full-legacy-lock", connectionTimeoutMillis: 3000, statement_timeout: 5000, lock_timeout: 500 });
 const pool = new Pool({ host: "127.0.0.1", port: 55432, database: "zzsh_test_regression", user: credentials.migration.name, password: credentials.migration.password, application_name: "core-full-legacy-import", max: 1, connectionTimeoutMillis: 3000, statement_timeout: 15000, lock_timeout: 1000 });
 const subject = mod("auth/identity-subject"), subjectKey = subject.deriveIdentitySubjectKey(readFileSync(process.env.USER_IDENTITY_SUBJECT_HMAC_KEY_FILE ?? "E:/zzsh/zzsh/apps/api/.secrets/user_identity_subject_hmac", "utf8").trim());
-let client, held = false;
+let client, held = false, unsafeConnection;
 const gameIds = new Map();
 const domainFile = name => manifest.files[name] ? join(dataset, manifest.files[name].file) : null;
 async function checkpointBatch(domain, batch, start, body, beforeBatch) {
     assertRoundWindow();
-    state.pending = { domain, start, end: start + batch.length, sourceIds: batch.map(row => row.sourceId ?? row.parentLegacyOrderId), phaseBodyDigest: sha(canonical(batch)), stage: "BEFORE_BEGIN" };
+    const sourceIds = batch.map(row => row.sourceId ?? row.parentLegacyOrderId ?? row.key);
+    if (strictBatch && sourceIds.some(id => id === undefined || id === "")) throw new Error("STRICT_BATCH_ORIGINAL_KEYS_REQUIRED");
+    const batchIntent = { domain, start, end: start + batch.length, sourceIds, phaseBodyDigest: sha(canonical(batch)), stage: "BEFORE_BEGIN" };
+    state.pending = batchIntent;
     save();
     event({ domain, start, end: start + batch.length, event: "INTENT" });
     let commitSent = false, commitAck = false;
-    const outcomes = [];
-    await client.query("BEGIN");
+    const outcomes = [], quarantine = [];
     try {
+        await client.query("BEGIN");
         await beforeBatch?.(batch);
-        for (const row of batch) {
+        for (const [offset, row] of batch.entries()) {
+            if (strictBatch) {
+                try { outcomes.push(await body(row)); }
+                catch (error) {
+                    try { event({ event: "STRICT_ROW_REJECTED", domain, index: start + offset, status: error?.status ?? null }); } catch { }
+                    throw error;
+                }
+                continue;
+            }
             await client.query("SAVEPOINT source_row");
             try {
                 outcomes.push(await body(row));
@@ -154,54 +190,56 @@ async function checkpointBatch(domain, batch, start, body, beforeBatch) {
                 await client.query("RELEASE SAVEPOINT source_row");
                 const failure = { domain, sourceId: row.sourceId ?? row.parentLegacyOrderId, code: error.code ?? "SOURCE_BINDING_REJECTED", status: error.status };
                 outcomes.push({ quarantined: true });
-                state.quarantine.push(failure);
+                quarantine.push(failure);
                 event({ ...failure, event: "ROW_QUARANTINED" });
             }
         }
         await client.query("SET CONSTRAINTS ALL IMMEDIATE");
-        state.pending.stage = "COMMIT_INTENT";
+        state.pending = { ...batchIntent, stage: "COMMIT_INTENT" };
         save();
         assertRoundWindow();
         commitSent = true;
         if ((await client.query("COMMIT")).command !== "COMMIT") throw new Error("ROUND_COMMIT_ACK_NOT_CONFIRMED");
         commitAck = true;
-        state.phases[domain].nextIndex = start + batch.length;
-        state.phases[domain].created += outcomes.filter(row => row?.replayed === false).length;
-        state.phases[domain].replayed += outcomes.filter(row => row?.replayed === true).length;
-        state.phases[domain].quarantined += outcomes.filter(row => row?.quarantined).length;
-        state.checkpoints++;
-        state.pending = null;
-        save();
+        const phase = state.phases[domain], committed = {
+            ...phase, nextIndex: batchIntent.end,
+            created: phase.created + outcomes.filter(row => row?.replayed === false).length,
+            replayed: phase.replayed + outcomes.filter(row => row?.replayed === true).length,
+            quarantined: phase.quarantined + quarantine.length,
+        };
+        const next = { ...state, phases: { ...state.phases, [domain]: committed }, quarantine: [...state.quarantine, ...quarantine], checkpoints: state.checkpoints + 1, pending: null };
         event({ domain, start, end: start + batch.length, event: "COMMIT_ACK" });
-        if (state.checkpoints % 10 === 0)
-            console.log(JSON.stringify({ status: "PROGRESS", domain, nextIndex: start + batch.length, queries: state.queries }));
+        save(next);
+        Object.assign(state, { quarantine: next.quarantine, checkpoints: next.checkpoints, pending: null });
+        Object.assign(phase, committed);
     }
     catch (error) {
-        if (commitSent && !commitAck) {
-            state.status = "COMMIT_UNKNOWN";
-            state.pending.stage = "COMMIT_UNKNOWN";
-            event({ event: "COMMIT_UNKNOWN", domain, start });
-            save();
-        }
-        else if (commitAck) {
-            state.status = "RECEIPT_WRITE_FAILED_COMMITTED";
-            event({ event: "RECEIPT_WRITE_FAILED_COMMITTED", domain, start });
+        if (commitSent) {
+            unsafeConnection = error;
+            state.status = commitAck ? "RECEIPT_WRITE_FAILED_COMMITTED" : "COMMIT_UNKNOWN";
+            state.pending = { ...batchIntent, stage: commitAck ? "COMMIT_ACK_RECEIPT_FAILED" : "COMMIT_UNKNOWN" };
         }
         else {
             try {
+                if (unsafeConnection) throw unsafeConnection;
                 if ((await client.query("ROLLBACK")).command !== "ROLLBACK") throw new Error("ROUND_ROLLBACK_ACK_NOT_CONFIRMED");
+                state.rollbackConfirmed = true;
                 state.pending = null;
                 state.status = "FAILED_ROLLED_BACK";
-                save();
             }
-            catch {
+            catch (rollbackError) {
+                unsafeConnection = rollbackError;
                 state.status = "ROLLBACK_UNKNOWN";
-                event({ event: "ROLLBACK_UNKNOWN", domain, start });
-                save();
+                state.pending = { ...batchIntent, stage: "ROLLBACK_UNKNOWN" };
             }
         }
+        // Keep the original failure even when the evidence volume cannot accept writes.
+        try { save(); } catch { }
+        try { event({ event: state.status, domain, start }); } catch { }
         throw error;
     }
+    if (state.checkpoints % 10 === 0)
+        console.log(JSON.stringify({ status: "PROGRESS", domain, nextIndex: start + batch.length, queries: state.queries }));
 }
 async function runItems(domain, items, body, batchSize = 100, beforeBatch) {
     state.phases[domain] ??= { nextIndex: 0, created: 0, replayed: 0, quarantined: 0 };
@@ -210,6 +248,7 @@ async function runItems(domain, items, body, batchSize = 100, beforeBatch) {
     phase.timingSegments ??= [];
     phase.timingSegments.push(segment);
     save();
+    let failed = false;
     try {
         let index = 0, batch = [];
         for await (const row of items) {
@@ -224,9 +263,13 @@ async function runItems(domain, items, body, batchSize = 100, beforeBatch) {
         phase.complete = true;
         save();
     }
+    catch (error) {
+        failed = true;
+        throw error;
+    }
     finally {
         Object.assign(segment, { finishedAt: new Date().toISOString(), monotonicElapsedMs: performance.now() - started, endIndex: phase.nextIndex, committedItems: phase.nextIndex - segment.startIndex, committedChunks: state.checkpoints - checkpointsBefore, queriesAfter: state.queries, queryDelta: state.queries - queriesBefore, complete: phase.complete === true });
-        save();
+        try { save(); } catch (error) { if (!failed) throw error; }
         if (phase.complete) console.log(JSON.stringify({ status: "PHASE_COMPLETE", domain, ...phase }));
     }
 }
@@ -250,7 +293,8 @@ function protectDataset(resourceState, status) {
             || resourceState.protectedDataset?.epoch?.nonce !== expectedNonce) throw new Error("CONTACT_APPEND_PARENT_DATASET_NOT_PROTECTED");
         resourceState.protectedDataset.additiveReports ??= {};
         resourceState.protectedDataset.additiveReports[state.binding.datasetSha256 + (numberOnly ? ":public-numbers" : ":contact-append")] = { status, report: statePath, sourceReviewRef: option("--source-review-ref") };
-    } else resourceState.protectedDataset={manifestSha256:state.binding.datasetSha256,epoch:{oid:expectedOid,nonce:expectedNonce},reason:"REHEARSAL_REVIEW",status,report:statePath};
+    } else resourceState.protectedDataset={manifestSha256:state.binding.datasetSha256,epoch:{oid:expectedOid,nonce:expectedNonce},reason:"REHEARSAL_REVIEW",status,report:statePath,
+        ...(strictBatch ? { bootstrapReservation: strictRoundReservation } : {})};
     return resourceState;
 }
 resetRunCleanup();
@@ -260,28 +304,27 @@ try {
     if (!held)
         throw new Error("REGRESSION_RESOURCE_BUSY");
     // A previous writer may have finished while this invocation was validating its inputs.
-    if (existsSync(statePath)) state=JSON.parse(readFileSync(statePath));
-    if (JSON.stringify(state.binding)!==JSON.stringify(binding)) throw new Error("CHECKPOINT_BINDING_CHANGED");
-    if (JSON.stringify(state.executionWindow ?? null) !== JSON.stringify(executionWindow)) throw new Error("CHECKPOINT_EXECUTION_WINDOW_CHANGED");
-    if (JSON.stringify(state.schemaHashes ?? null) !== JSON.stringify(expectedSchema)) throw new Error("CHECKPOINT_SCHEMA_BINDING_CHANGED");
+    const currentCheckpoint = existsSync(statePath) ? JSON.parse(readFileSync(statePath)) : null;
+    assertCheckpointBinding(currentCheckpoint);
+    if (currentCheckpoint) state = currentCheckpoint;
+    const startingResource = JSON.parse(readFileSync(registryPath));
+    assertResource(startingResource, currentCheckpoint);
+    assertRegisteredRole(startingResource);
     if(fundsSourceBinding&&state.fundsSourceBinding&&JSON.stringify(state.fundsSourceBinding)!==JSON.stringify(fundsSourceBinding))throw new Error("CHECKPOINT_FUNDS_SOURCE_CHANGED");
-    if (state.pending&&!args.includes("--recover")) throw new Error("PENDING_TRANSACTION_READ_ONLY_RECOVERY_REQUIRED");
     client = await pool.connect();
+    // pg emits socket errors separately from rejecting the active query.
+    client.on("error", error => { unsafeConnection ??= error; });
     const original = client.query.bind(client);
     client.query = (...args) => { state.queries++; return original(...args); };
     const actual = (await client.query("SELECT d.oid::text,d.datdba::int AS owner_oid,pg_get_userbyid(d.datdba) owner,shobj_description(d.oid,'pg_database') marker,current_user role,r.oid::text role_oid,current_setting('zzsh.regression_run') nonce,r.rolsuper,r.rolcreatedb,r.rolcreaterole,r.rolbypassrls FROM pg_database d JOIN pg_roles r ON r.rolname=current_user WHERE d.datname=current_database()")).rows[0];
     if (actual.oid !== expectedOid || actual.nonce !== expectedNonce || actual.owner !== "zzsh" || actual.marker !== "zzsh:regression-test:v1" || actual.role !== credentials.migration.name || actual.role_oid !== credentials.migration.oid || actual.rolsuper || actual.rolcreatedb || actual.rolcreaterole || actual.rolbypassrls)
         throw new Error("TARGET_IDENTITY_CHANGED");
-    checkpointOwned = true;
     resetRunCleanup();
-    state.resource = actual;
-    if(fundsSourceBinding)state.fundsSourceBinding=fundsSourceBinding;
     if(refundAttemptsBinding&&state.refundAttemptsBinding&&JSON.stringify(state.refundAttemptsBinding)!==JSON.stringify(refundAttemptsBinding))throw new Error("REFUND_ATTEMPT_CHECKPOINT_BINDING_CHANGED");
-    if(refundAttemptsBinding)state.refundAttemptsBinding=refundAttemptsBinding;
-    if (args.includes("--recover")) {
-        const domains = Object.keys(state.phases), counts = (await client.query("SELECT (SELECT count(*)::text FROM zzsh_iam.user_identity_state WHERE provider='legacy_mysql_restore') legacy_users,(SELECT count(*)::text FROM zzsh_supply.legacy_supply_map WHERE source_system='legacy_mysql_restore') legacy_accounts,(SELECT count(*)::text FROM zzsh_order.legacy_order_read_snapshot) legacy_orders")).rows[0];
-        writeFileSync(join(output, "recovery-" + Date.now() + ".json"), JSON.stringify({ mode: "READ_ONLY", binding, pending: state.pending, domains, counts, knowledge: state.pending ? "EXACT_PENDING_KEYS_REQUIRE_INSPECTION" : "NO_PENDING_COMMIT" }, null, 2), { flag: "wx" });
-        console.log(JSON.stringify({ status: "READ_ONLY_RECOVERY_RECORDED", counts }));
+    if (recover) {
+        const { pending, status } = state;
+        writeFileSync(join(output, "recovery-" + Date.now() + ".json"), JSON.stringify({ mode: "READ_ONLY", binding, pending, checkpointStatus: status, knowledge: "EXACT_PENDING_KEYS_REQUIRE_INSPECTION" }, null, 2), { flag: "wx" });
+        console.log(JSON.stringify({ status: "READ_ONLY_RECOVERY_RECORDED", phase: pending.domain }));
     }
     else {
         await mod("database/business-migrations").assertBusinessMigrationPrefix(client);
@@ -309,16 +352,21 @@ try {
                 throw new Error("TARGET_GAME_BINDING_DRIFT");
             gameIds.set(code, game.id);
         }
-        await client.query("ROLLBACK");
+        try {
+            if ((await client.query("ROLLBACK")).command !== "ROLLBACK") throw new Error("ROUND_ROLLBACK_ACK_NOT_CONFIRMED");
+        } catch (error) { unsafeConnection = error; throw error; }
         assertRoundWindow();
-        state.gameBindings = Object.fromEntries(gameIds);
-        state.status = "RUNNING";
-        const startingResource=JSON.parse(readFileSync(join(dirname(resolve(credentialFile)),"resource.json")));
-        if(startingResource.oid!==expectedOid||startingResource.nonce!==expectedNonce)throw new Error("PROTECTED_DATASET_RESOURCE_DRIFT");
         if (expectedSchema && !contactAppend && !numberOnly && startingResource.protectedDataset
             && startingResource.protectedDataset.manifestSha256 !== binding.datasetSha256) throw new Error("DIFFERENT_DATASET_ALREADY_PROTECTED");
+        createOutput();
+        checkpointOwned = true;
+        state.resource = actual;
+        if(fundsSourceBinding)state.fundsSourceBinding=fundsSourceBinding;
+        if(refundAttemptsBinding)state.refundAttemptsBinding=refundAttemptsBinding;
+        state.gameBindings = Object.fromEntries(gameIds);
+        state.status = "RUNNING";
         protectDataset(startingResource, "BUILDING");
-        writeFileSync(join(dirname(resolve(credentialFile)),"resource.json"),JSON.stringify(startingResource,null,2)+"\n");
+        writeLoadCheckpoint(registryPath, startingResource);
         save();
         if (contactAppend || numberOnly) {
             const { applyContactAppend, applyNumberBindings } = await import("./local-target-contact-append.mjs");
@@ -362,7 +410,8 @@ try {
     }
 }
 catch (error) {
-    if (!["COMMIT_UNKNOWN", "ROLLBACK_UNKNOWN", "RECEIPT_WRITE_FAILED_COMMITTED"].includes(state.status))
+    const batchFailure = ["COMMIT_UNKNOWN", "ROLLBACK_UNKNOWN", "RECEIPT_WRITE_FAILED_COMMITTED"].includes(state.status);
+    if (!checkpointOwned || (!batchFailure && (!strictBatch || state.status !== "FAILED_ROLLED_BACK")))
         state.status = "FAILED_STOPPED";
     state.error = { name: error.name, code: error.code ?? null, status: error.status ?? null, message: String(error.message).slice(0, 300), detail: error.detail ?? null, constraint: error.constraint ?? null };
     try {
@@ -374,16 +423,24 @@ catch (error) {
 }
 finally {
     if (client) {
-        try {
-            await client.query("ROLLBACK");
-            state.rollbackConfirmed = true;
+        if (!recover && !unsafeConnection && !state.rollbackConfirmed) {
+            try {
+                if ((await client.query("ROLLBACK")).command !== "ROLLBACK") throw new Error("ROUND_ROLLBACK_ACK_NOT_CONFIRMED");
+                state.rollbackConfirmed = true;
+            } catch (error) { unsafeConnection = error; }
         }
-        catch {
-            state.rollbackConfirmed = false;
-        }
-        client.release();
+        client.release(unsafeConnection);
     }
     try { await pool.end(); state.poolClosed = true; } catch { state.poolClosed = false; process.exitCode=1; }
+    if (checkpointOwned && (strictBatch || state.pending || Object.values(state.phases).some(phase => phase.nextIndex > 0))) {
+        try {
+            const resourceState = JSON.parse(readFileSync(registryPath));
+            assertResource(resourceState, state);
+            protectDataset(resourceState, state.status);
+            writeLoadCheckpoint(registryPath, resourceState);
+            state.protectionRecorded = true;
+        } catch { process.exitCode = 1; }
+    }
     if (held) {
         try {
             state.unlock = (await maintenance.query("SELECT pg_advisory_unlock(806006::bigint) ok")).rows[0].ok;
@@ -394,16 +451,10 @@ finally {
     }
     try { await maintenance.end(); state.maintenanceClosed = true; } catch { state.maintenanceClosed = false; process.exitCode=1; }
     if(checkpointOwned && (!state.poolClosed || !state.unlock || !state.maintenanceClosed || !state.rollbackConfirmed)) process.exitCode=1;
-    if(checkpointOwned && (Object.values(state.phases).some(phase=>phase.nextIndex>0)||["COMMIT_UNKNOWN","ROLLBACK_UNKNOWN"].includes(state.status))){
-        const registryPath=join(dirname(resolve(credentialFile)),"resource.json");const resourceState=JSON.parse(readFileSync(registryPath));
-        if(resourceState.oid!==expectedOid||resourceState.nonce!==expectedNonce)throw new Error("PROTECTED_DATASET_RESOURCE_DRIFT");
-        protectDataset(resourceState, state.status);
-        writeFileSync(registryPath,JSON.stringify(resourceState,null,2)+"\n");state.protectionRecorded=true;
-    }
     state.updatedAt = new Date().toISOString();
     try {
         save();
     }
-    catch { }
+    catch { process.exitCode = 1; }
     console.log(JSON.stringify({ status: state.status, phases: state.phases, quarantine: state.quarantine.length, queries: state.queries, unlock: state.unlock, poolClosed: state.poolClosed, checkpointOwned }));
 }

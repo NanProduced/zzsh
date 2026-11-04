@@ -1,6 +1,12 @@
 import fs from "node:fs";
 import { randomUUID } from "node:crypto";
 
+export const strictRoundReservation = "ROUND04_BOOTSTRAP_RESERVED";
+
+export function matchesLoadReservation(reservation, { datasetSha256, oid, nonce }) {
+  return reservation?.manifestSha256 === datasetSha256 && reservation.epoch?.oid === oid && reservation.epoch?.nonce === nonce;
+}
+
 // A stale staging file must not hide the original write error or block recovery.
 export function writeLoadCheckpoint(file, value) {
   const temporary = file + "." + randomUUID() + ".new";

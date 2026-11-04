@@ -279,9 +279,9 @@ test('load checkpoint: no lock/identity ownership means no checkpoint or event w
   const line=source.split('\n').find(line=>line.startsWith('function '+name+'('));assert.ok(line,name);return line;
  }).join('\n');
  const state={poolClosed:true,unlock:true,maintenanceClosed:true,rollbackConfirmed:true,phases:{users:{nextIndex:10}}};
- const writes=[],sandbox={state,statePath:'checkpoint.json',eventsPath:'events.jsonl',writeFileSync:(...args)=>writes.push(['write',...args]),renameSync:(...args)=>writes.push(['rename',...args]),appendFileSync:(...args)=>writes.push(['event',...args])};
+ const writes=[],sandbox={state,statePath:'checkpoint.json',eventsPath:'events.jsonl',writeLoadCheckpoint:(...args)=>writes.push(['checkpoint',...args]),appendFileSync:(...args)=>writes.push(['event',...args])};
  runInNewContext('let checkpointOwned=false;'+functions+';globalThis.reset=resetRunCleanup;globalThis.save=save;globalThis.event=event;globalThis.own=()=>{checkpointOwned=true;};',sandbox);
  sandbox.reset();assert.equal(state.poolClosed,false);assert.equal(state.unlock,false);assert.equal(state.maintenanceClosed,false);assert.equal(state.rollbackConfirmed,false);
  assert.equal(state.phases.users.nextIndex,10);sandbox.save();sandbox.event({event:'should-not-write'});assert.equal(writes.length,0);
- sandbox.own();sandbox.save();sandbox.event({event:'owned'});assert.equal(writes.length,3);assert.equal(writes[0][3].flag,'wx');
+ sandbox.own();sandbox.save();sandbox.event({event:'owned'});assert.deepEqual(writes.map(write=>write[0]),['checkpoint','event']);
 });
