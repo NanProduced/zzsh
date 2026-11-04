@@ -9,21 +9,33 @@ import { channelEvidenceErrorDisplay, channelEvidenceStatusDisplay, evidenceCent
 type Section = { status?: string; coverage?: string; truncated?: boolean; reasonCodes?: string[]; [key: string]: unknown };
 const money = (v: unknown) => { const c = evidenceCents(v); return c === null ? "未知" : formatFundingCents(c); };
 const REF = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,179}$/;
+const familyLabels: Record<string, string> = {
+  PAYOUT: "提现出款",
+  REFUND: "退款",
+  ALIPAY_NATIVE: "支付宝收款",
+  WEIXIN_NATIVE: "微信收款"
+};
 function Line({ title, section }: { title: string; section: Section | null | undefined }) {
   const d = channelEvidenceStatusDisplay(section);
   return <li data-evidence-state={d.kind}><strong>{title}</strong>：{d.text}{section?.reasonCodes?.length ? ` · ${section.reasonCodes.join(",")}` : ""}</li>;
 }
-type LoadState = { display?: ChannelEvidenceDisplay; body?: any; path?: string; requestId?: string | null; loading?: boolean };
+type LoadState = { display?: ChannelEvidenceDisplay; body?: any; path?: string; requestId?: string | null; loading?: boolean; target?: string; queriedAt?: string };
 const text = (v: unknown) => typeof v === "string" && v ? v : "未知";
 /** 只接受最后一次请求的结果；输入改变或新请求开始后，迟到响应一律丢弃。 */
-async function load(path: string, seq: { current: number }, set: (v: LoadState) => void) {
-  const id = ++seq.current; set({ path, loading: true });
-  try { const body: any = await adminRequest(path, undefined, "GET"); if (id === seq.current) set({ body, path, requestId: typeof body?.requestId === "string" ? body.requestId : null }); }
-  catch (e) { if (id === seq.current) set({ path, display: channelEvidenceErrorDisplay(e instanceof AdminApiError ? e.status : undefined), requestId: e instanceof AdminApiError ? e.requestId ?? null : null }); }
+async function load(path: string, seq: { current: number }, set: (v: LoadState) => void, target?: string) {
+  const id = ++seq.current;
+  const now = new Intl.DateTimeFormat("zh-CN", { timeZone: "Asia/Shanghai", hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false }).format(new Date());
+  set({ path, loading: true, target, queriedAt: now });
+  try {
+    const body: any = await adminRequest(path, undefined, "GET");
+    if (id === seq.current) set({ body, path, requestId: typeof body?.requestId === "string" ? body.requestId : null, target, queriedAt: now });
+  } catch (e) {
+    if (id === seq.current) set({ path, display: channelEvidenceErrorDisplay(e instanceof AdminApiError ? e.status : undefined), requestId: e instanceof AdminApiError ? e.requestId ?? null : null, target, queriedAt: now });
+  }
 }
 function Meta({ state, seq, set }: { state: LoadState; seq: { current: number }; set: (v: LoadState) => void }) {
-  return <p className="oc-fact-note" data-evidence-meta>{state.loading ? "读取中…" : `请求编号：${state.requestId ?? "未返回"}`}
-    {state.path && !state.loading ? <Button size="sm" type="button" variant="secondary" onClick={() => void load(state.path!, seq, set)}>重新读取</Button> : null}</p>;
+  return <p className="oc-fact-note" data-evidence-meta>{state.loading ? "读取中…" : `查询对象：${state.target ?? "未指定"} · 查询时间：${state.queriedAt ?? "未记录"} · 请求编号：${state.requestId ?? "未返回"}`}
+    {state.path && !state.loading ? <Button size="sm" type="button" variant="secondary" onClick={() => void load(state.path!, seq, set, state.target)}>重新读取</Button> : null}</p>;
 }
 function Failure({ display }: { display: ChannelEvidenceDisplay }) { return <p role="status" data-evidence-state={display.kind}>{display.text}</p>; }
 
@@ -32,7 +44,7 @@ export function OrderChannelEvidence({ orderId, canRead }: { orderId: string; ca
   const [state, setState] = useState<LoadState | null>(null), seq = useRef(0);
   if (!canRead) return null;
   return <div className="oc-channel-evidence space-y-1 text-sm" data-channel-evidence="order">
-    <Button size="sm" variant="secondary" type="button" onClick={() => void load(`/finance/channel-evidence/orders/${encodeURIComponent(orderId)}`, seq, setState)}>读取渠道证据</Button>
+    <Button size="sm" variant="secondary" type="button" onClick={() => void load(`/finance/channel-evidence/orders/${encodeURIComponent(orderId)}`, seq, setState, `订单 [${orderId}]`)}>读取渠道证据</Button>
     {state ? <Meta state={state} seq={seq} set={setState}/> : null}
     {state?.display ? <Failure display={state.display}/> : null}
     {state?.body ? <ul><Line title="付款证据" section={state.body.payment}/><Line title="退款证据" section={state.body.refund}/></ul> : null}
@@ -47,8 +59,8 @@ export function ChannelEvidenceLookup({ canRead, canSearch }: { canRead: boolean
   const reset = () => { seq.current++; setState(null); };
   if (!canRead) return null;
   const valid = REF.test(merchant) && REF.test(ref);
-  const withdrawal = () => valid ? void load(`/finance/channel-evidence/withdrawals/${encodeURIComponent(merchant)}/${encodeURIComponent(ref)}`, seq, setState) : setState({ display: { kind: "unknown", text: "商户标识或原号格式无效" } });
-  const search = () => valid ? void load(`/finance/channel-evidence/originals/${encodeURIComponent(merchant)}?${new URLSearchParams({ productFamily: family, merchantOrderNo: ref })}`, seq, setState) : setState({ display: { kind: "unknown", text: "商户标识或原号格式无效" } });
+  const withdrawal = () => valid ? void load(`/finance/channel-evidence/withdrawals/${encodeURIComponent(merchant)}/${encodeURIComponent(ref)}`, seq, setState, `商户 [${merchant}] 提现 [${ref}]`) : setState({ display: { kind: "unknown", text: "商户标识或原号格式无效" } });
+  const search = () => valid ? void load(`/finance/channel-evidence/originals/${encodeURIComponent(merchant)}?${new URLSearchParams({ productFamily: family, merchantOrderNo: ref })}`, seq, setState, `商户 [${merchant}] ${familyLabels[family] ?? family} [${ref}]`) : setState({ display: { kind: "unknown", text: "商户标识或原号格式无效" } });
   const w = state?.body?.withdrawal as Section | undefined, s = state?.body?.search as Section | undefined;
   return <div className="finance-channel-evidence space-y-1 text-sm" data-channel-evidence="lookup" role="group" aria-label="渠道证据读取">
     <div className="flex flex-wrap items-center gap-2"><Input aria-label="证据商户标识" placeholder="商户标识" value={merchant} onChange={e => { reset(); setMerchant(e.target.value.trim()); }} className="h-9 w-36 text-xs font-mono" />
@@ -58,14 +70,14 @@ export function ChannelEvidenceLookup({ canRead, canSearch }: { canRead: boolean
         <Select
           value={family}
           onValueChange={(val) => { if (val) { reset(); setFamily(val); } }}
-          items={["PAYOUT", "REFUND", "ALIPAY_NATIVE", "WEIXIN_NATIVE"].map(f => ({ value: f, label: f }))}
+          items={["PAYOUT", "REFUND", "ALIPAY_NATIVE", "WEIXIN_NATIVE"].map(f => ({ value: f, label: familyLabels[f] ?? f }))}
         >
           <SelectTrigger aria-label="业务来源" className="h-9 w-36 text-xs">
             <SelectValue />
           </SelectTrigger>
           <SelectContent>
             {["PAYOUT", "REFUND", "ALIPAY_NATIVE", "WEIXIN_NATIVE"].map(f => (
-              <SelectItem key={f} value={f}>{f}</SelectItem>
+              <SelectItem key={f} value={f}>{familyLabels[f] ?? f}</SelectItem>
             ))}
           </SelectContent>
         </Select>

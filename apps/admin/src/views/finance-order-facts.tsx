@@ -31,3 +31,30 @@ export function FinanceOrderCosts({ body }: { body: FinanceResponse }) {
     <p className="finance-secondary">平台结算贡献不是净利润；分销与渠道成本须按本单原根核定，不使用全库金额代替。</p>
   </section>;
 }
+
+export function FinanceLifecycleProgress({ document }: { document: FinanceDocument }) {
+  const lifecycle = document.orderLifecycle;
+  if (!lifecycle && document.kind !== 'WITHDRAWAL' && document.kind !== 'REFUND') return null;
+  const paymentState = lifecycle?.payment.state === 'SITE_ACCEPTED' ? '已确认付款' : lifecycle?.payment.state === 'REVIEW_REQUIRED' ? '有异常款待核' : lifecycle?.payment.state === 'NO_ACCEPTED_PAYMENT' ? '未确认付款' : lifecycle?.payment.state === 'LEGACY_RECORDED' ? '旧记录付款' : '未涉及';
+  const settlementState = lifecycle?.postingState === 'POSTED' ? '已过账分配' : lifecycle?.postingState === 'NOT_POSTED' ? (lifecycle.orderStatus === 'PAID' ? '待结算分配' : '未产生分配') : lifecycle?.postingState === 'LEGACY_OBSERVATION' ? '旧单责任另核' : document.kind === 'SETTLEMENT' ? '单据记录' : '不适用';
+  const refundState = document.kind === 'REFUND' ? '退款单据责任' : lifecycle?.orderStatus === 'CANCELLED' ? '退款责任需按原单核对' : '无退款责任';
+  const withdrawalState = document.kind === 'WITHDRAWAL' ? '提现单据责任' : '不适用';
+  const nextAction = lifecycle?.orderStatus === 'PAID' && lifecycle.postingState === 'NOT_POSTED'
+    ? '待办建议：已确认付款，等待结算分配任务执行；若长时间停滞需排查订单履约状态。'
+    : document.kind === 'WITHDRAWAL' && document.state === 'UNKNOWN'
+    ? '待办建议：渠道结果未知，请在渠道工具中按原提现单号补查结果，切勿重复发起提现。'
+    : document.kind === 'REFUND' && (document.state === 'RECONCILIATION_REQUIRED' || document.state === 'UNKNOWN')
+    ? '待办建议：退款责任待核，核对原收款及到期时间后走渠道退款流程。'
+    : null;
+
+  return <section className="finance-lifecycle-progress" aria-label="业务进度各阶段">
+    <div className="finance-section-heading"><h3>业务处理进度</h3><span>付款、结算、退款、提现进度与下一步</span></div>
+    <div className="finance-lifecycle-stages">
+      <div className="finance-stage-step"><span className="finance-stage-name">1. 付款</span><strong>{paymentState}</strong></div>
+      <div className="finance-stage-step"><span className="finance-stage-name">2. 结算</span><strong>{settlementState}</strong></div>
+      <div className="finance-stage-step"><span className="finance-stage-name">3. 退款</span><strong>{refundState}</strong></div>
+      <div className="finance-stage-step"><span className="finance-stage-name">4. 提现</span><strong>{withdrawalState}</strong></div>
+    </div>
+    {nextAction ? <p className="finance-stage-next-action">{nextAction}</p> : null}
+  </section>;
+}

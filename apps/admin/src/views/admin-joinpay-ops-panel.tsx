@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { adminRequest, friendlyError, AdminApiError } from "../api";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -154,17 +154,35 @@ const accountText = (a: AccountSummary | undefined) => !a ? "未读取" : a.inte
 /** 提现QUERY-only：只按原提现单号补查，不发起新提现/重发/换收款目标；需finance.withdrawal.query。 */
 export function AdminWithdrawalQueryBox() {
   const [id, setId] = useState(""), [text, setText] = useState(""), [busy, setBusy] = useState(false);
+  const [meta, setMeta] = useState<{ target?: string; queriedAt?: string } | null>(null);
+  const seq = useRef(0);
+  const reset = () => { seq.current++; setText(""); setMeta(null); };
   const run = async () => {
     if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(id)) { setText("提现单号格式无效"); return; }
+    const currentSeq = ++seq.current;
+    const now = new Intl.DateTimeFormat("zh-CN", { timeZone: "Asia/Shanghai", hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false }).format(new Date());
     setBusy(true);
-    try { const r = await adminRequest<QueryResult>(`/joinpay/withdrawals/${encodeURIComponent(id)}/query-only`, {}, "POST");
-      setText(!validQueryResult(r, { operation: "PAYOUT_QUERY", objectId: id })?queryOutcomeText(null):r.outcome.kind === "NOT_DISPATCHED" ? "原提现尚未派发，不会发起新提现" : r.outcome.kind === "UNKNOWN" ? "已提交查询，结果未知；请稍后刷新，不要重复发起提现" : queryOutcomeText(r)); }
-    catch (e) { setText(e instanceof AdminApiError && e.status === 503 ? "提现补查暂不可用（未装配）" : friendlyError(e)); }
-    finally { setBusy(false); }
+    setMeta({ target: `提现单号 [${id}]`, queriedAt: now });
+    try {
+      const r = await adminRequest<QueryResult>(`/joinpay/withdrawals/${encodeURIComponent(id)}/query-only`, {}, "POST");
+      if (currentSeq !== seq.current) return;
+      setText(!validQueryResult(r, { operation: "PAYOUT_QUERY", objectId: id }) ? queryOutcomeText(null) : r.outcome.kind === "NOT_DISPATCHED" ? "原提现尚未派发，不会发起新提现" : r.outcome.kind === "UNKNOWN" ? "已提交查询，结果未知；请稍后刷新，不要重复发起提现" : queryOutcomeText(r));
+    } catch (e) {
+      if (currentSeq !== seq.current) return;
+      setText(e instanceof AdminApiError && e.status === 503 ? "提现补查暂不可用（未装配）" : friendlyError(e));
+    } finally {
+      if (currentSeq === seq.current) setBusy(false);
+    }
   };
-  return <div className="flex items-center gap-2" role="group" aria-label="提现按原号补查"><Input aria-label="提现单号" value={id} onChange={e => setId(e.target.value.trim())} placeholder="原提现单号" className="h-8 w-44 text-xs font-mono" />
-    <Button size="sm" type="button" variant="secondary" disabled={busy} onClick={() => void run()}>按原号同步提现结果</Button>
-    {text ? <span role="status">{text}</span> : null}<span className="oc-fact-note">查询可能触发本站账务处理；查询成功不等于银行到账。</span></div>;
+  return <div className="space-y-1.5" role="group" aria-label="提现按原号补查">
+    <div className="flex flex-wrap items-center gap-2">
+      <Input aria-label="提现单号" value={id} onChange={e => { reset(); setId(e.target.value.trim()); }} placeholder="原提现单号" className="h-8 w-44 text-xs font-mono" />
+      <Button size="sm" type="button" variant="secondary" disabled={busy} onClick={() => void run()}>按原号同步提现结果</Button>
+    </div>
+    {meta ? <p className="oc-fact-note text-xs" data-query-meta>本次查询对象：{meta.target} · 时间：{meta.queriedAt}</p> : null}
+    {text ? <p role="status" className="text-xs font-medium text-foreground">{text}</p> : null}
+    <p className="oc-fact-note text-xs">查询可能触发本站账务处理；查询成功不等于银行到账。</p>
+  </div>;
 }
 
 /** 收款QUERY-only：只按原收款请求号补查，不首派、不重付、不改金额；需订单结算命令权限（服务端按原订单复核）。 */
@@ -176,36 +194,66 @@ export function collectionQueryText(r: QueryResult | null, status?: number, expe
 }
 export function AdminCollectionQueryBox({ canWrite }: { canWrite: boolean }) {
   const [id, setId] = useState(""), [text, setText] = useState(""), [busy, setBusy] = useState(false);
+  const [meta, setMeta] = useState<{ target?: string; queriedAt?: string } | null>(null);
+  const seq = useRef(0);
+  const reset = () => { seq.current++; setText(""); setMeta(null); };
   if (!canWrite) return null;
   const run = async () => {
     if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(id)) { setText("收款请求号格式无效"); return; }
+    const currentSeq = ++seq.current;
+    const now = new Intl.DateTimeFormat("zh-CN", { timeZone: "Asia/Shanghai", hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false }).format(new Date());
     setBusy(true);
-    try { const r = await adminRequest<QueryResult>(`/joinpay/collection-requests/${encodeURIComponent(id)}/query-only`, {}, "POST"); setText(collectionQueryText(r, undefined, { operation: "COLLECTION_QUERY", objectId: id })); }
-    catch (e) { setText(e instanceof AdminApiError && e.status === 503 ? "收款补查暂不可用（未装配）" : friendlyError(e)); }
-    finally { setBusy(false); }
+    setMeta({ target: `收款请求号 [${id}]`, queriedAt: now });
+    try {
+      const r = await adminRequest<QueryResult>(`/joinpay/collection-requests/${encodeURIComponent(id)}/query-only`, {}, "POST");
+      if (currentSeq !== seq.current) return;
+      setText(collectionQueryText(r, undefined, { operation: "COLLECTION_QUERY", objectId: id }));
+    } catch (e) {
+      if (currentSeq !== seq.current) return;
+      setText(e instanceof AdminApiError && e.status === 503 ? "收款补查暂不可用（未装配）" : friendlyError(e));
+    } finally {
+      if (currentSeq === seq.current) setBusy(false);
+    }
   };
-  return <div className="flex items-center gap-2" role="group" aria-label="收款按原号补查"><Input aria-label="收款请求号" value={id} onChange={e => setId(e.target.value.trim())} placeholder="原收款请求号" className="h-8 w-44 text-xs font-mono" />
-    <Button size="sm" type="button" variant="secondary" disabled={busy} onClick={() => void run()}>按原号补查收款</Button>
-    {text ? <span role="status">{text}</span> : null}<span className="oc-fact-note">只补查原单，不发起新收款；查询成功不等于银行到账。</span></div>;
+  return <div className="space-y-1.5" role="group" aria-label="收款按原号补查">
+    <div className="flex flex-wrap items-center gap-2">
+      <Input aria-label="收款请求号" value={id} onChange={e => { reset(); setId(e.target.value.trim()); }} placeholder="原收款请求号" className="h-8 w-44 text-xs font-mono" />
+      <Button size="sm" type="button" variant="secondary" disabled={busy} onClick={() => void run()}>按原号补查收款</Button>
+    </div>
+    {meta ? <p className="oc-fact-note text-xs" data-query-meta>本次查询对象：{meta.target} · 时间：{meta.queriedAt}</p> : null}
+    {text ? <p role="status" className="text-xs font-medium text-foreground">{text}</p> : null}
+    <p className="oc-fact-note text-xs">只补查原单，不发起新收款；查询成功不等于银行到账。</p>
+  </div>;
 }
 
 export function AdminJoinpayOpsPanel({ canRead, canWithdrawalQuery = false }: { canRead: boolean; canWithdrawalQuery?: boolean }) {
   const [workers, setWorkers] = useState<WorkerStatus | null | undefined>();
   const [merchant, setMerchant] = useState(""), [account, setAccount] = useState<{ available?: AccountSummary; collection?: AccountSummary } | null>(null), [note, setNote] = useState("");
+  const seq = useRef(0);
+  const resetMerchant = () => { seq.current++; setAccount(null); setNote(""); };
   const readWorkers = () => adminRequest<WorkerStatus>("/joinpay/worker-status", undefined, "GET").then(w => setWorkers(w?.refund && w.payout && w.collection ? w : null), () => setWorkers(null));
   if (!canRead) return null;
   const lookup = async () => {
     if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(merchant)) { setNote("商户标识格式无效"); return; }
-    try { setAccount(await adminRequest(`/finance/merchant-accounts/${encodeURIComponent(merchant)}`, undefined, "GET")); setNote(""); }
-    catch (e) { setAccount(null); setNote(friendlyError(e)); }
+    const currentSeq = ++seq.current;
+    try {
+      const acc = await adminRequest<{ available?: AccountSummary; collection?: AccountSummary }>(`/finance/merchant-accounts/${encodeURIComponent(merchant)}`, undefined, "GET");
+      if (currentSeq === seq.current) { setAccount(acc); setNote(""); }
+    } catch (e) {
+      if (currentSeq === seq.current) { setAccount(null); setNote(friendlyError(e)); }
+    }
   };
-  return <section className="finance-joinpay-ops space-y-2 text-sm" data-joinpay-ops><h2 className="font-semibold">渠道运行与商户账户</h2>
+  return <section className="finance-joinpay-ops space-y-2 text-sm" data-joinpay-ops>
+    <h3 className="font-semibold text-sm">渠道运行与商户账户</h3>
     {workers === undefined ? <Button size="sm" variant="secondary" onClick={() => void readWorkers()}>读取补查任务状态</Button> : workers === null ? <p>补查任务状态不可用</p>
-      : <ul><li>退款补查：{workerText(workers.refund)}</li><li>提现补查：{workerText(workers.payout)}</li><li>收款补查：{workerText(workers.collection)}</li></ul>}
-    <div className="flex items-center gap-2" role="group" aria-label="商户账户摘要读取"><Input aria-label="商户标识" value={merchant} onChange={e => setMerchant(e.target.value.trim())} placeholder="商户标识" className="h-8 w-36 text-xs font-mono" /><Button size="sm" type="button" onClick={() => void lookup()}>读取账户摘要</Button></div>
-    {account ? <p>可用账户：{accountText(account.available)} · 收款账户：{accountText(account.collection)} · 资产合计：未核定（渠道余额不是资产）· 银行到账未核定</p> : null}
-    {note ? <p role="status">{note}</p> : null}
+      : <ul className="text-xs space-y-0.5 text-muted-foreground"><li>退款补查：{workerText(workers.refund)}</li><li>提现补查：{workerText(workers.payout)}</li><li>收款补查：{workerText(workers.collection)}</li></ul>}
+    <div className="flex items-center gap-2" role="group" aria-label="商户账户摘要读取">
+      <Input aria-label="商户标识" value={merchant} onChange={e => { resetMerchant(); setMerchant(e.target.value.trim()); }} placeholder="商户标识" className="h-8 w-36 text-xs font-mono" />
+      <Button size="sm" type="button" onClick={() => void lookup()}>读取账户摘要</Button>
+    </div>
+    {account ? <p className="text-xs">可用账户：{accountText(account.available)} · 收款账户：{accountText(account.collection)} · 资产合计：未核定（渠道余额不是资产）· 银行到账未核定</p> : null}
+    {note ? <p role="status" className="text-xs text-destructive">{note}</p> : null}
     {canWithdrawalQuery ? <AdminWithdrawalQueryBox /> : null}
-    <p className="oc-fact-note">本地补查状态与渠道余额均不等于银行到账；旧来源与对账差异按原来源核对，不在此自动结论。</p>
+    <p className="oc-fact-note text-xs">本地补查状态与渠道余额均不等于银行到账；旧来源与对账差异按原来源核对，不在此自动结论。</p>
   </section>;
 }

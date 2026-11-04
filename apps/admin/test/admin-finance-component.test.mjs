@@ -91,8 +91,8 @@ test('historical balance proof stays unknown beside known ledger flow and proved
   const row={bucket:'AVAILABLE',openingBalance:'0',knownInflows:'18000',knownOutflows:'0',migrationMovement:'0',closingBalance:'18000',difference:'0',ledgerOpeningBalance:'0',ledgerClosingBalance:'18000',ledgerDifference:'0',knowledge:'UNKNOWN',balanceBasis:{knowledge:'UNKNOWN',origin:null,sourceCutoff:null,openingPostedAt:null,reasonCodes:['PERIOD_BALANCE_PROOF_NOT_AVAILABLE']},reasonCodes:[],unknownCount:0,unknownTimeCount:0,coveredHistoricalCount:45,uncoveredHistoricalCount:0};
   globalThis.fetch=async url=>response(payload(url,{entries:[],gaps:[],reconciliation:[row,{...row,bucket:'RESERVED',knownInflows:'0',closingBalance:'0',knowledge:'KNOWN',balanceBasis:{...row.balanceBasis,knowledge:'KNOWN',origin:'NATIVE_GENESIS'}}]}));
   const ui=await setup(t,'honest-balances','/finance/period');await ui.render();await until(()=>ui.node.textContent.includes('部分期间余额尚未核定'));
-  const rows=[...ui.node.querySelectorAll('tbody tr')];assert.match(rows[0].textContent,/余额未核定/);assert.equal(rows[0].children[1].textContent,'0.00 元已核余额 未核定');assert.match(rows[0].children[2].textContent,/180\.00/);assert.equal(rows[0].children[4].textContent,'180.00 元已核余额 未核定');assert.equal(rows[0].children[5].textContent,'0.00 元已核差额 未核定');
-  assert.equal(rows[1].children[1].textContent,'0.00 元已核余额 0.00 元');assert.equal(rows[1].children[5].textContent,'0.00 元已核差额 0.00 元');assert.match(ui.node.textContent,/单次最多367天/);assert.match(ui.node.textContent,/外部差异：未取得对账依据，未计算/);
+  const rows=[...ui.node.querySelectorAll('tbody tr')];assert.match(rows[0].textContent,/余额未核定/);assert.equal(rows[0].children[1].textContent,'0.00 元已核余额 未核定');assert.match(rows[0].children[3].textContent,/180\.00/);assert.equal(rows[0].children[5].textContent,'180.00 元已核余额 未核定');assert.equal(rows[0].children[6].textContent,'0.00 元已核差额 未核定');
+  assert.equal(rows[1].children[1].textContent,'0.00 元已核余额 0.00 元');assert.equal(rows[1].children[6].textContent,'0.00 元已核差额 0.00 元');assert.match(ui.node.textContent,/单次最多367天/);assert.match(ui.node.textContent,/外部差异：未取得对账依据，未计算/);
 });
 test('withdrawal document shows only application, fee, payable, target/source and never upgrades local success to bank arrival', async t => {
   const entry = { id: 'w-entry', documentRef: 'WITHDRAWAL:w1', documentNumber: '申请一', subjectId: 'u1', subjectName: '用户一', bucket: 'RESERVED', direction: 'OUT', deltaCents: '-20000', knowledge: 'KNOWN', kind: 'WITHDRAWAL', state: 'SUCCEEDED', classification: 'POSTED', occurredAt: '2026-10-03T01:00:00Z', evidence: {}, reasonCodes: [], sourceType: 'LOCAL_CONTROLLED', sourceSystem: 'zzsh_order', sourceEntity: 'withdrawal_intent', sourceId: 'internal-intent-id' };
@@ -271,4 +271,16 @@ test('written-off review receipts remain original records outside current respon
  const tasks=ui.node.querySelector('section[aria-labelledby="finance-current-tasks-title"]'),records=ui.node.querySelector('section[aria-labelledby="finance-review-records-title"]');
  assert.match(tasks.textContent,/0 笔 · 0\.00 元/);assert.doesNotMatch(tasks.textContent,/CANCELLED-LATE|31\.00|异常款待核/);
  assert.match(records.textContent,/1 笔原始记录 · 已知记录金额 31\.00 元/);assert.match(records.textContent,/原记录可能已核销；当前待处理以退款责任队列为准/);assert.match(records.textContent,/不代表当前待办或未核销责任/);assert.equal(tasks.contains(records),false);
+});
+
+test('unadmitted legacy refund duties are completely excluded from overview pending tasks',async t=>{
+ const legacyQueue={...unavailableQueue,knowledge:'PARTIAL',count:'38',amountCents:'0',unknownCount:'38',unknownDueCount:'38',overdueCount:'0',items:[{id:'duty-1',source:'LEGACY_DUTY',status:'SOURCE_RESPONSIBILITY_REVIEW',amountCents:null,recordedAmountCents:'18100',documentRef:'LEGACY_ORDER:one',dueAt:null}],sources:[{source:'POSTING',count:'0',unknownCount:'0',amountCents:'0'},{source:'REVIEW_CONFIRMATION',count:'0',unknownCount:'0',amountCents:'0'},{source:'PRESTART_TERMINATION',count:'0',unknownCount:'0',amountCents:'0'},{source:'LEGACY_DUTY',count:'38',unknownCount:'38',amountCents:'0'}],hasMore:true};
+ globalThis.fetch=async()=>response(overviewPayload('7d',{queues:{refunds:legacyQueue,withdrawals:unavailableQueue}}));
+ const ui=await setup(t,'legacy-duty-excluded','/finance',undefined,true);await ui.render();
+ await until(()=>ui.node.textContent.includes('用户退款'));
+ const tasks=ui.node.querySelector('section[aria-labelledby="finance-current-tasks-title"]');
+ assert.match(tasks.textContent,/用户退款[\s\S]*?0 笔 · 0\.00 元/);
+ assert.match(tasks.textContent,/当前范围没有待核事项/);
+ assert.doesNotMatch(tasks.textContent,/38 笔/);
+ assert.doesNotMatch(tasks.textContent,/LEGACY_ORDER|181\.00/);
 });

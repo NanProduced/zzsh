@@ -134,6 +134,7 @@ export function financeRead(route: string, filters: FinanceFilters, signal: Abor
 export type FinanceOverviewQueue = {
   knowledge: 'KNOWN' | 'PARTIAL' | 'UNAVAILABLE'; count: string | null; amountCents: string | null; unknownCount: string | null; overdueCount?: string | null; overdueAmountCents?: string | null; unknownDueCount?: string | null;
   items: { id: string; number?: string | null; source?: string; status?: string; recordedAmountCents?: string | null; documentRef?: string | null; amountCents?: string | null; dueAt?: string | null; overdue?: boolean | null; reasonCodes?: string[] }[];
+  sources?: { source: string; count: string; unknownCount: string; amountCents: string }[];
   hasMore: boolean; reasonCodes: string[]; bankArrival?: 'UNKNOWN';
 };
 export type FinanceOverview = {
