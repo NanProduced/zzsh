@@ -241,7 +241,7 @@ test("lookup independently pages subject candidates after documents are exhauste
 });
 
 test("lookup retains the 20000 matched-entry guard inside a selected document",async t=>{
- const ledger=Array.from({length:20001},(_,n)=>({id:"line-"+n,account_code:"WALLET_AVAILABLE",subject_id:"u1",subject_name:"用户一",delta:"1",at:"2026-10-03T00:00:00.000000Z",event_kind:"OPENING",basis_id:"one-large-document"}));
+ const ledger=Array.from({length:20001},(_,n)=>({id:"line-"+n,account_code:"WALLET_AVAILABLE",subject_id:"u1",subject_name:"用户一",delta:"1",at:"2026-10-03T00:00:00.000000Z",event_kind:"SETTLEMENT",basis_id:"one-large-document",order_id:"one-large-document"}));
  const fixture=new FinanceSqlFixture({ledger}),env=environment(undefined,fixture);t.after(()=>fixture.close());
  const result=await request(env.options,"lookup","period=0");assert.equal(result.status,503);assert.equal(result.json.documents,undefined);assert.equal(result.json.error.details[0].path,"finance.matchingLimit.20000");assert.equal(env.state.audits.length,0);
 });
@@ -349,3 +349,5 @@ test("export generation and prepare recheck content, ignoring unrelated activity
   }finally{fixture.close();}
  }
 });
+
+
