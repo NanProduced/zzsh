@@ -1883,3 +1883,14 @@ html[data-theme="dark"] .publish-quote-badge[data-status="stale"], .dark .publis
   body:has(.publish-page-layout) .functional-main { padding-bottom:0; }
   body:has(.publish-page-layout) .site-footer { padding-bottom:calc(94px + env(safe-area-inset-bottom)); }
 }
+
+/* 上架门禁：用户可修与系统处理中分组展示，语气与配色分开，避免让用户背系统状态 */
+.supply-blockers:has(.supply-blocker-group) { background: color-mix(in srgb, var(--color-bg-card) 94%, var(--color-text-secondary) 6%); border-color: color-mix(in srgb, var(--color-text-secondary) 22%, transparent); }
+.supply-blocker-group { display: block; padding: 10px 12px; margin: 0 0 10px; border-radius: 8px; border: 1px solid transparent; }
+.supply-blocker-group > strong { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; }
+.supply-blocker-group p { margin: 6px 0 0; font-size: 12px; }
+.supply-blocker-group ul { margin: 6px 0 0; padding-left: 18px; }
+.supply-blocker-group.is-user { background: color-mix(in srgb, #f0a020 12%, var(--color-bg-card)); border-color: color-mix(in srgb, #f0a020 32%, transparent); }
+.supply-blocker-group.is-user > strong { color: #8a5200; }
+.supply-blocker-group.is-system { background: color-mix(in srgb, var(--color-text-secondary) 8%, var(--color-bg-card)); border-color: color-mix(in srgb, var(--color-text-secondary) 24%, transparent); }
+.supply-blocker-group.is-system > strong { color: var(--color-text-secondary); }

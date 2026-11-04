@@ -29,6 +29,7 @@ import {
   HardHat,
   Shield,
   Ticket,
+  TriangleAlert,
   CalendarClock,
   Clock3,
   CircleHelp,
@@ -58,6 +59,7 @@ import {
   inventoryEditorRows,
   mergeInventory,
   supplyApi,
+  supplyBlockerGroup,
   supplyBlockerMessages,
   SupplyRequestError,
   uploadSupplyMedia,
@@ -2773,6 +2775,10 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
   const ratioInlineProblem = ratioInput.trim() === "" ? null : ratioEntryProblem(rentalMode, rentalModes?.[rentalMode], ratioInput);
   const fastReady = optionsAvailability === "ready" && options?.pricingSchema === "haff-ratio-v2" && rentalModes?.fast?.enabled === true;
   const visibleBlockers = [...new Set(blockers)].filter((code) => code !== "PUBLICATION_REQUIRED" && code !== "CONFIRMATION_OR_MEDIA_REQUIRED");
+  /** 门禁前置：进入页面就按「用户能修 / 系统处理中」分组展示，并据此禁用上架按钮。 */
+  const userBlockers = visibleBlockers.filter((code) => supplyBlockerGroup(code) === "USER");
+  const systemBlockers = visibleBlockers.filter((code) => supplyBlockerGroup(code) === "SYSTEM");
+  const blockerHint = visibleBlockers.length ? `还有 ${visibleBlockers.length} 项未满足，处理后即可上架` : undefined;
   const serviceWindowStart = typeof draft.attributes.service_window_start_minute === "number" ? draft.attributes.service_window_start_minute : null;
   const serviceWindowEnd = typeof draft.attributes.service_window_end_minute === "number" ? draft.attributes.service_window_end_minute : null;
   const serviceWindowAllDay = serviceWindowStart === 0 && serviceWindowEnd === 1440 && draft.attributes.service_window_cross_midnight === false;
@@ -2797,7 +2803,7 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
         : item.bindingSaved ? "已保存，状态待核" : "已上传，待保存；状态待核";
 
   const primaryLabel = effectiveQuote ? "确认上架" : busy === "quote" ? "核对中…" : "确认上架";
-  const primaryDisabled = readOnly || Boolean(busy) || writePending || Boolean(intentStorageIssue) || identityState !== "confirmed" || !identityRef.current || (effectiveQuote ? !agreementChecked || !quoteConsistent || (payoutSelected === true && !payoutAcceptance) : false);
+  const primaryDisabled = readOnly || Boolean(busy) || writePending || Boolean(intentStorageIssue) || identityState !== "confirmed" || !identityRef.current || visibleBlockers.length > 0 || (effectiveQuote ? !agreementChecked || !quoteConsistent || (payoutSelected === true && !payoutAcceptance) : false);
   const primaryAction = async () => {
     if (primaryDisabled) return;
     if (effectiveQuote) {
@@ -3589,7 +3595,12 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
           {effectiveQuote ? <small className="publish-rail-deposit-note">会员实际实付押金以下单时的个人报价为准。</small> : null}
           {effectiveQuote?.expiryDisclosures.length ? <div className="publish-rail-expiry"><strong>权益有效期</strong>{effectiveQuote.expiryDisclosures.map((item) => <p key={item.entitlementId}>{catalog?.entitlements.find((entitlement) => entitlement.id === item.entitlementId)?.name ?? supply?.version?.presentation?.entitlements.find((entitlement) => entitlement.id === item.entitlementId)?.name ?? "该项权益"}：{item.expiresAt ? new Date(item.expiresAt).toLocaleString("zh-CN", { dateStyle: "medium", timeStyle: "short" }) : "长期有效"} · 本租期不保证覆盖完整有效期</p>)}</div> : null}
           {effectiveQuote && !quoteConsistent ? <div className="supply-blockers" role="alert"><strong>报价金额待核对</strong><p>本次报价的行金额与合计不一致，暂不能确认上架。</p></div> : null}
-          {visibleBlockers.length ? <div className="supply-blockers"><strong>上架前请处理</strong><ul>{visibleBlockers.map((code) => <li key={code}>{blockerText(code)}</li>)}</ul></div> : null}
+          {visibleBlockers.length ? <div className="supply-blockers" data-blocker-count={visibleBlockers.length}>
+            {userBlockers.length ? <section className="supply-blocker-group is-user" data-blocker-group="user"><strong><TriangleAlert size={14} aria-hidden="true" />需要你处理（{userBlockers.length}）</strong><ul>{userBlockers.map((code) => <li key={code}>{blockerText(code)}</li>)}</ul></section> : null}
+            {systemBlockers.length ? <section className="supply-blocker-group is-system" data-blocker-group="system"><strong><Clock3 size={14} aria-hidden="true" />系统处理中（{systemBlockers.length}）</strong><p>这些由平台侧推进，不需要你改表单；状态变化后这里会自动消失。</p><ul>{systemBlockers.map((code) => <li key={code}>{blockerText(code)}</li>)}</ul></section> : null}
+            <p className="supply-muted" role="status">上架按钮暂时不可用：{blockerHint}。</p>
+            <button type="button" className="button secondary" disabled={Boolean(busy) || formDisabled} onClick={() => void refreshLatest(false)}>重新检查</button>
+          </div> : null}
           {!agreement ? <p className="supply-muted">本次条款正文尚未读取，暂不能确认上架。</p> : null}
           {payoutSelected === true && !published && !currentPayoutTerms ? (
             <p className="supply-muted" role={payoutTerms?.status === "unavailable" ? "alert" : "status"}>
@@ -3606,7 +3617,7 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
               {quoteConsistent ? <>
                 {agreementConsent}
                 {payoutConsent}
-                <button type="button" className="button primary" disabled={primaryDisabled} onClick={() => void confirmPublish()}>{busy === "submit" ? "上架中…" : busy === "accept" ? "确认条款中…" : "确认上架"}</button>
+                <button type="button" className="button primary" disabled={primaryDisabled} title={blockerHint} onClick={() => void confirmPublish()}>{busy === "submit" ? "上架中…" : busy === "accept" ? "确认条款中…" : "确认上架"}</button>
               </> : null}
               <button type="button" className="button quiet" disabled={formDisabled} onClick={() => void quote()}>重新核对报价</button>
               <button type="button" className="button secondary" disabled={formDisabled} onClick={() => void save()}>{busy === "save" ? "保存中…" : "保存草稿"}</button>
@@ -3614,7 +3625,7 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
             </div> : <div className="publish-rail-actions">
               {agreementConsent}
               {payoutConsent}
-              <button type="button" className="button primary" disabled={primaryDisabled} onClick={() => void primaryAction()}>{primaryLabel}</button>
+              <button type="button" className="button primary" disabled={primaryDisabled} title={blockerHint} onClick={() => void primaryAction()}>{primaryLabel}</button>
               <button type="button" className="button secondary" disabled={formDisabled} onClick={() => void save()}>{busy === "save" ? "保存中…" : "保存草稿"}</button>
             </div>}
           </>}

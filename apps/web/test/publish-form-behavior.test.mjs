@@ -2735,3 +2735,39 @@ test('the publish group map is visible and provides a real focus-return target w
     assert.equal(p.calls.some(call => ['saveDraft', 'quote', 'accept', 'submit'].includes(call.op)), false);
   } finally { await p.close(); }
 });
+
+test("publish blockers gate the button up front and split user-fixable from platform-side states", async () => {
+  const blocked = await probe({accountId:"account_1", mine:()=>({...supplyOf(declaration({title:"quoted"}), {quote:ownerQuote}),blockers:["QUOTE_REQUIRED","MEDIA_REQUIRED","OCCUPIED","FUNDING_UNKNOWN"]})});
+  try {
+    await blocked.render();
+    const panel = blocked.host.querySelector(".supply-blockers");
+    assert(panel, "blockers render as soon as the page opens");
+    assert.equal(panel.getAttribute("data-blocker-count"), "4");
+    const user = panel.querySelector('[data-blocker-group="user"]');
+    const system = panel.querySelector('[data-blocker-group="system"]');
+    assert(user, "user-fixable group exists");
+    assert(system, "platform-side group exists");
+    assert.match(user.textContent, /需要你处理（2）/);
+    assert.match(user.textContent, /重新核算报价/);
+    assert.match(user.textContent, /补充账号图片/);
+    assert.match(system.textContent, /系统处理中（2）/);
+    assert.match(system.textContent, /账号当前被占用/);
+    assert.match(system.textContent, /不需要你改表单/);
+    assert.doesNotMatch(user.textContent, /被占用|保证金/, "platform states never leak into the user-fixable group");
+    assert.doesNotMatch(system.textContent, /重新核算报价|补充账号图片/, "user fixes never leak into the platform group");
+    const primary = blocked.host.querySelector(".publish-rail-footer button.button.primary");
+    assert(primary);
+    assert.equal(primary.disabled, true, "blockers disable the publish button instead of failing on click");
+    assert.match(primary.getAttribute("title") ?? "", /还有 4 项未满足/);
+    assert.equal(blocked.calls.some((call) => call.op === "confirm"), false);
+  } finally { await blocked.close(); }
+
+  const clear = await probe({accountId:"account_1", mine:()=>({...supplyOf(declaration({title:"quoted"}), {quote:ownerQuote}),blockers:[]})});
+  try {
+    await clear.render();
+    assert.equal(clear.host.querySelector(".supply-blockers"), null, "no blocker panel once nothing blocks");
+    const primary = clear.host.querySelector(".publish-rail-footer button.button.primary");
+    assert(primary);
+    assert.equal(primary.getAttribute("title"), null, "no blocker reason on an unblocked button");
+  } finally { await clear.close(); }
+});

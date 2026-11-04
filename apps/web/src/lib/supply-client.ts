@@ -175,7 +175,52 @@ export const supplyBlockerMessages: Record<string, string> = {
   ACCEPTANCE_REQUIRED: "请确认本次报价对应的规则与协议",
   MEDIA_REQUIRED: "请补充账号图片并完成校验",
   TITLE_REVIEW_REQUIRED: "账号名称需核对，请更新资料后重新提交",
+  TERM_UNDETERMINED: "租期无法按当前规则确定，请调整租期后再试",
+  SPECIAL_TERMS: "这个账号适用特殊赔付条款，需要你单独确认",
+  RULE_INPUT_MISSING: "当前资料不满足核价规则，请检查账号属性、库存与租期",
 };
+/** 用户自己能处理的门禁：进「需要你处理」组，并允许引导去改表单。 */
+export const supplyBlockerUserCodes = new Set([
+  "QUOTE_REQUIRED",
+  "TERM_UNDETERMINED",
+  "MEDIA_REQUIRED",
+  "ACCEPTANCE_REQUIRED",
+  "SPECIAL_TERMS",
+  "RULE_INPUT_MISSING",
+  "TITLE_REVIEW_REQUIRED",
+  "IDENTITY_REQUIRED",
+  "ADULT_REQUIRED",
+]);
+/** 系统侧状态：用户改表单也没用，不给「去修改」的引导。 */
+export const supplyBlockerSystemCodes = new Set([
+  "OCCUPIED",
+  "RENTED",
+  "PENDING_PAYMENT",
+  "OWNER_PAUSED",
+  "STAFF_RESTRICTED",
+  "REVIEW_REQUIRED",
+  "UNDER_REVIEW",
+  "FUNDING_UNKNOWN",
+  "PUBLISHER_BAIL_UNCONFIRMED",
+  "RULE_CHANGED",
+  "RULE_UNCONFIGURED",
+  "REQUIRED_ITEM_UNPRICED",
+  "ACCOUNT_NOT_PUBLISHABLE",
+  "GAME_UNAVAILABLE",
+  "GAME_SERVICE_UNAVAILABLE",
+  "OWNER_UNAVAILABLE",
+  "OCCUPANCY_UNKNOWN",
+  "STATE_UNKNOWN",
+  "HISTORICAL_VERSION",
+  "NOT_PUBLISHED",
+  "PUBLICATION_REQUIRED",
+  "CONFIRMATION_OR_MEDIA_REQUIRED",
+  "RENTAL_COMPLETED",
+]);
+/** 不认识的 code 归到系统侧：看不懂就不该把责任推给用户。 */
+export function supplyBlockerGroup(code: string): "USER" | "SYSTEM" {
+  return supplyBlockerUserCodes.has(code) ? "USER" : "SYSTEM";
+}
 export class SupplyRequestError extends Error {
   status: number;
   code: string;
