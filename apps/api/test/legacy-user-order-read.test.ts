@@ -26,7 +26,7 @@ test("user historical projection preserves paid cancellation, unknown refund and
   const result=projectUserLegacyOrder(row,"renter");
   assert.equal(result.status,"CANCELLED");assert.equal(result.party,"renter");assert.equal(result.payment.state,"RECORDED_PAID");
   assert.equal(result.payment.recordedAmount!.amount,"66.00");assert.equal(result.paidAt,null);assert.equal(result.amounts.rental!.amount,"66.00");
-  assert.equal(result.legacyAmounts!.refund,null);assert.equal(result.legacyAmounts!.refundChannelState,"UNKNOWN");
+  assert.equal(result.legacyAmounts!.refund,null);assert.equal(result.legacyAmounts!.refundChannelState,"NOT_RECORDED_BY_SOURCE");
   assert.equal(result.account.id,null);assert.equal(result.account.displayNo,null);assert.equal(result.account.readable,false);
   assert.equal(result.readOnly,true);assert.equal(result.paymentOpen,false);assert.equal(result.cancelOpen,false);assert.equal(result.continuationCount,0);assert.deepEqual(result.actions,[]);
   for(const key of ["ownerUserId","renterUserId","source_snapshot","evidence_ref","owner_phone","quote","accountId"])assert.equal(Object.hasOwn(result,key),false);
@@ -39,7 +39,47 @@ test("shared normalization covers completed, in-flight, unpaid and unknown witho
     assert.equal(result.status,expected);assert.deepEqual(result.actions,[]);assert.equal(result.cancelOpen,false);assert.equal(result.paymentOpen,false);
     if(pay!==1)assert.equal(result.payment.recordedAmount,null);
   }
-  const refunded=projectUserLegacyOrder({...row,refundYuan:"12.34"},"renter");assert.equal(refunded.legacyAmounts!.refund!.amount,"12.34");assert.equal(refunded.legacyAmounts!.refundChannelState,"UNKNOWN");
+  const refunded=projectUserLegacyOrder({...row,refundYuan:"12.34"},"renter");assert.equal(refunded.legacyAmounts!.refund!.amount,"12.34");assert.equal(refunded.legacyAmounts!.refundChannelState,"NOT_RECORDED_BY_SOURCE");
+});
+test("channel evidence separates 'the source never recorded it' from 'this platform still owes a result'",()=>{
+  // la_* carries transfer_time only; with no local settlement document the source simply has no receipt.
+  const pure=projectUserLegacyOrder(row,"renter").legacyAmounts!;
+  assert.equal(pure.refundChannelState,"NOT_RECORDED_BY_SOURCE");
+  assert.equal(pure.paidState,"RECORDED");
+  assert.equal(pure.paid!.amount,"66.00");
+  // A continuation head in an unresolved settlement stage means this platform still owes a local result.
+  const continued=projectUserLegacyOrder({...row,continuationStage:8},"renter").legacyAmounts!;
+  assert.equal(continued.refundChannelState,"PENDING");
+  // A finalized continuation is not an in-flight document; the source still has no receipt of its own.
+  assert.equal(projectUserLegacyOrder({...row,continuationStage:4},"renter").legacyAmounts!.refundChannelState,"NOT_RECORDED_BY_SOURCE");
+  // Unpaid is a source fact, not a missing value: the paid slot is an explicit zero, never null.
+  for(const [status,pay] of [[1,0],[5,0],[9,0]] as const){
+    const unpaid=projectUserLegacyOrder({...row,sourceOrderStatus:status,sourcePayStatus:pay},"renter");
+    assert.equal(unpaid.payment.state,"RECORDED_UNPAID");
+    assert.equal(unpaid.payment.recordedAmountState,"NOT_PAID");
+    assert.equal(unpaid.legacyAmounts!.paidState,"NOT_PAID");
+    assert.deepEqual(unpaid.legacyAmounts!.paid,{currency:"CNY",unit:"yuan",amount:"0.00",scale:2});
+  }
+  // A recorded payment always carries an amount or an explicit reason for its absence.
+  const ownerPaid=projectUserLegacyOrder({...row,accountReadable:true},"owner");
+  assert.equal(ownerPaid.payment.recordedAmountState,"NOT_VISIBLE_FOR_ROLE");
+  assert.equal(projectUserLegacyOrder(row,"renter").payment.recordedAmountState,"RECORDED");
+  const noAmount=projectUserLegacyOrder({...row,paidCents:null},"renter");
+  assert.equal(noAmount.payment.recordedAmountState,"NOT_RETAINED");
+  assert.equal(noAmount.payment.recordedAmount,null);
+  assert.equal(noAmount.legacyAmounts!.paidState,"NOT_RETAINED");
+  const unknown=projectUserLegacyOrder({...row,sourcePayStatus:9},"renter");
+  assert.equal(unknown.payment.recordedAmountState,"UNKNOWN");
+  assert.equal(unknown.legacyAmounts!.paidState,"UNKNOWN");
+  assert.equal(unknown.legacyAmounts!.paid,null);
+});
+test("the legacy placeholder is not an account title",()=>{
+  const visible=projectUserLegacyOrder({...row,accountReadable:true,title:"历史资料待核实"},"owner");
+  assert.equal(visible.title,null);
+  const real=projectUserLegacyOrder({...row,accountReadable:true,title:"真实当前标题"},"owner");
+  assert.equal(real.title,"真实当前标题");
+  const opaque=projectUserLegacyOrder({...row,accountReadable:true,title:"   "},"owner");
+  assert.equal(opaque.title,null);
 });
 test("owner account navigation follows the separate read authorization and nonparties get 404",()=>{
   const result=projectUserLegacyOrder({...row,accountReadable:true},"owner");assert.equal(result.party,"owner");assert.equal(result.account.id,"account");
@@ -88,7 +128,7 @@ test("historical party permission does not expose the current private account ti
   const owned=projectUserLegacyOrder({...row,title:"MY_ACCOUNT_TITLE",accountReadable:true},"owner");assert.equal(owned.title,"MY_ACCOUNT_TITLE");
 });
 test("effective continuation stage updates the list while original source status and recorded payment remain unchanged",()=>{
- const result=projectUserLegacyOrder({...row,sourceOrderStatus:8,continuationStage:4,completedAt:"2026-10-16T00:00:00.123456Z"},"renter");assert.equal(result.status,"COMPLETED");assert.equal(result.source.originalStatus,8);assert.equal(result.payment.state,"RECORDED_PAID");assert.equal(result.completedAt,"2026-10-16T00:00:00.123456Z");assert.equal(result.legacyAmounts!.refundChannelState,"UNKNOWN");
+  const result=projectUserLegacyOrder({...row,sourceOrderStatus:8,continuationStage:4,completedAt:"2026-10-16T00:00:00.123456Z"},"renter");assert.equal(result.status,"COMPLETED");assert.equal(result.source.originalStatus,8);assert.equal(result.payment.state,"RECORDED_PAID");assert.equal(result.completedAt,"2026-10-16T00:00:00.123456Z");assert.equal(result.legacyAmounts!.refundChannelState,"NOT_RECORDED_BY_SOURCE");
 });
 
 test("unreadable legacy accounts expose neither old nor canonical account numbers",()=>{

@@ -3,6 +3,7 @@ import type { PoolClient } from "pg";
 import { invalid, notFound } from "../supply/supply-util";
 import { centsToYuan } from "./order";
 import { publicAccountNumber } from "../supply/account-number";
+import { declaredTitleOrNull } from "../supply/publishing";
 import { legacyContinuationReady, legacyEpochTimestamp, legacyMoneyCents, legacyOrderLifecycleStage, legacyOrderReadState, LEGACY_CONTINUATION_COMPLETED_AT_SQL, LEGACY_ORDER_STATUS_SQL } from "./legacy-order-read";
 
 export type LegacyUserOrderFilter = {
@@ -66,6 +67,25 @@ export function legacyUserOrderResources(row: LegacyOrderResourceRow) {
   });
 }
 const money = (value: string | null) => value === null ? null : centsToYuan(value);
+
+/** The refund-channel evidence states a legacy order can truthfully have. */
+export type LegacyChannelEvidenceState = "NOT_RECORDED_BY_SOURCE" | "PENDING" | "UNKNOWN";
+/**
+ * la_order/la_pay_order carry transfer_time only — the legacy source never recorded a settlement-channel
+ * receipt (no payment_no/global_no). "The source has no such record" is therefore not "waiting for
+ * confirmation": it is NOT_RECORDED_BY_SOURCE. PENDING is reserved for the case where this platform
+ * itself holds the order's settlement document and that document is not final yet (an imported
+ * continuation head in 待验号/待确认额外消耗/待卖家确认/待买家确认), so a local result is still owed.
+ */
+function legacyRefundChannelState(row: LegacyUserOrderRow): LegacyChannelEvidenceState {
+  const stage = row.continuationStage;
+  return stage !== null && stage !== undefined && [6, 7, 8, 9].includes(stage) ? "PENDING" : "NOT_RECORDED_BY_SOURCE";
+}
+/** Why payment.recordedAmount is or is not a number, so a null amount is never rendered as "pending". */
+export type LegacyRecordedAmountState = "RECORDED" | "NOT_RETAINED" | "NOT_VISIBLE_FOR_ROLE" | "NOT_PAID" | "UNKNOWN";
+/** The renter-side reading of legacyAmounts.paid. */
+export type LegacyPaidState = "RECORDED" | "NOT_RETAINED" | "NOT_PAID" | "UNKNOWN";
+
 function legacyOwnerRecordedIncome(row: LegacyUserOrderRow) {
   if (row.sourceOrderStatus !== 4 || row.sourcePayStatus !== 1) return null;
   try {
@@ -83,11 +103,23 @@ export function projectUserLegacyOrder(row: LegacyUserOrderRow, userId: string, 
   const goods = legacyMoneyCents(row.goodsYuan), items = legacyMoneyCents(row.itemsYuan);
   const renter = party === "renter";
   const paid = renter && state.paymentState === "RECORDED_PAID" ? money(row.paidCents) : null;
+  // A recorded payment must never leave the amount ambiguous: either it is a number, or the projection
+  // says why it is absent instead of letting the reader render null as "待确认".
+  const recordedAmountState: LegacyRecordedAmountState = state.paymentState === "RECORDED_UNPAID" ? "NOT_PAID"
+    : state.paymentState !== "RECORDED_PAID" ? "UNKNOWN"
+      : !renter ? "NOT_VISIBLE_FOR_ROLE"
+        : paid === null ? "NOT_RETAINED" : "RECORDED";
+  // RECORDED_UNPAID is a source fact ("the source recorded no payment"), not a missing value: expose an
+  // explicit zero so 已付金额 cannot be shown as "待确认", and keep paidState for the same distinction.
+  const paidYuan = state.paymentState === "RECORDED_UNPAID" ? centsToYuan("0") : paid;
+  const paidState: LegacyPaidState = state.paymentState === "RECORDED_UNPAID" ? "NOT_PAID"
+    : state.paymentState !== "RECORDED_PAID" ? "UNKNOWN"
+      : paidYuan === null ? "NOT_RETAINED" : "RECORDED";
   const ownerRecordedIncome = renter ? null : legacyOwnerRecordedIncome(row);
   return {
     // Only a real current title crosses this boundary. Without one the field stays null, so readers can fall
     // back to the frozen order resource summary instead of being blocked by fabricated placeholder text.
-    id: row.id, displayNo: row.displayNo, status: state.status, party, title: row.accountReadable ? row.title : null, gameId: row.gameId,
+    id: row.id, displayNo: row.displayNo, status: state.status, party, title: row.accountReadable ? declaredTitleOrNull(row.title) : null, gameId: row.gameId,
     stage: legacyOrderLifecycleStage(row.continuationStage ?? row.sourceOrderStatus, row.sourcePayStatus, party),
     source: { origin: "LEGACY" as const, ruleOrigin: "LEGACY_ORDER" as const, originalStatus: row.sourceOrderStatus, originalPayStatus: row.sourcePayStatus, statusLabel: state.statusLabel },
     createdAt: row.createdAt, paidAt: row.paidAt, cancelledAt: row.cancelledAt, completedAt: row.completedAt,
@@ -96,8 +128,8 @@ export function projectUserLegacyOrder(row: LegacyUserOrderRow, userId: string, 
       ...(!renter ? { ownerExpectedIncome: null, ownerRecordedIncome } : {}) },
     amountsPerspective: renter ? "RENTER" : "OWNER",
     ...(!renter ? { ownerIncomeSource: ownerRecordedIncome === null ? null : { source: "LEGACY_ORDER_SNAPSHOT", sourceLabel: "旧平台原单净收益记录" } } : {}),
-    payment: { state: state.paymentState, recordedAt: row.paidAt, recordedAmount: paid },
-    legacyAmounts: renter ? { required: money(row.dueCents), paid, deposit: money(row.depositCents), refund: money(legacyMoneyCents(row.refundYuan)), refundChannelState: "UNKNOWN" as const } : null,
+    payment: { state: state.paymentState, recordedAt: row.paidAt, recordedAmount: paid, recordedAmountState },
+    legacyAmounts: renter ? { required: money(row.dueCents), paid: paidYuan, paidState, deposit: money(row.depositCents), refund: money(legacyMoneyCents(row.refundYuan)), refundChannelState: legacyRefundChannelState(row) } : null,
     account: { id: row.accountReadable ? row.accountId : null, displayNo: row.accountReadable ? publicAccountNumber(row.accountDisplayNo) : null, readable: row.accountReadable },
     orderFacts: { resources: legacyUserOrderResources(row), rentalDeadlineAt: legacyEpochTimestamp(row.rentalDeadlineSource) },
     readOnly: true as const, paymentOpen: false as const, cancelOpen: false as const, continuationCount: 0 as const, actions: [] as never[],

@@ -677,6 +677,19 @@ export async function readGuaranteeContextsBatch(client: PoolClient, ownerUserId
   return results;
 }
 
+/**
+ * A guarantee row is a *requirement*, so the page may only list one where a guarantee fact exists:
+ * a recorded owner_guarantee_requirement for this account tuple, or a policy outcome that was actually
+ * computed from the account's current quote. `UNKNOWN` without a requirement record carries no fact —
+ * it is what an account with no current quote (unlisted / imported without a declaration), no credit
+ * file, or nothing to guarantee projects — so listing it would invent a "pending confirmation" the
+ * owner has nothing to confirm and no row to act on. The projection itself keeps returning that
+ * UNKNOWN context, because the supply gate must stay closed (fail-closed) for the same accounts.
+ */
+export function isGuaranteeRequirementFact(context: GuaranteeContext): boolean {
+  return context.state !== "UNKNOWN" || context.requirementId !== undefined;
+}
+
 function projectGuaranteeContext(row: GuaranteeContextRow, policy: FundingPolicy, credit: GuaranteeCreditRow | undefined, binding: GuaranteeBindingRow | undefined): GuaranteeContext {
   if (!credit) return { accountId: row.accountId, ownerUserId: row.ownerUserId, gameId: row.gameId, versionId: row.versionId, priceVersionId: row.priceVersionId, releaseId: row.releaseId, policy, baseCents: null, requiredCents: "0", score: null, creditRevision: null, coverageRevision: null, state: "UNKNOWN", reference: null, reasonCode: "CREDIT_UNINITIALIZED" };
   const baseCents = quoteResourceCents(row.payload);

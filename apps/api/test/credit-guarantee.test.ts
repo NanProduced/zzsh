@@ -1,7 +1,21 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { createGuaranteePaymentIntent, readGuaranteeTransactions, requiredGuaranteeCents } from "../src/credit/credit-guarantee";
+import { createGuaranteePaymentIntent, isGuaranteeRequirementFact, readGuaranteeTransactions, requiredGuaranteeCents } from "../src/credit/credit-guarantee";
+
+test("only accounts with a guarantee fact become page rows", () => {
+  const context = (state: string, extra: Record<string, unknown> = {}) => ({ state, ...extra }) as any;
+  // No current quote / no credit file / nothing to guarantee: the projection stays UNKNOWN for the
+  // fail-closed supply gate, but there is no requirement to list.
+  assert.equal(isGuaranteeRequirementFact(context("UNKNOWN", { reasonCode: "STANDARD_QUOTE_UNAVAILABLE", baseCents: null })), false);
+  assert.equal(isGuaranteeRequirementFact(context("UNKNOWN", { reasonCode: "CREDIT_UNINITIALIZED", score: null })), false);
+  assert.equal(isGuaranteeRequirementFact(context("UNKNOWN", { reasonCode: "ZERO_AMOUNT_PROVIDER_UNSUPPORTED" })), false);
+  // A recorded requirement stays listable even when its own projection is unresolved.
+  assert.equal(isGuaranteeRequirementFact(context("UNKNOWN", { requirementId: "requirement-1", reasonCode: "PAYMENT_LEDGER_UNRECONCILED" })), true);
+  for (const state of ["NOT_REQUIRED", "REQUIRED", "PAYMENT_PENDING", "SATISFIED", "REFUND_REQUESTED", "REFUND_PROCESSING", "REFUNDED", "FAILED"]) {
+    assert.equal(isGuaranteeRequirementFact(context(state)), true, state);
+  }
+});
 
 test("credit guarantee uses exact integer HALF_UP and the 100 yuan cap", () => {
   assert.equal(requiredGuaranteeCents("0"), "0");

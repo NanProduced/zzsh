@@ -15,6 +15,7 @@ import { assertGameScope, bodyOf, ensureOnlyFields, forbidden, headerValue, inva
 import {
   confirmBreach,
   decideRecovery,
+  isGuaranteeRequirementFact,
   readCreditSnapshot,
   readGuaranteeContextsBatch,
   requestGuaranteeRefund,
@@ -58,7 +59,7 @@ async function ownedGuarantees(client: PoolClient, userId: string, creditRow?: {
   const items = [];
   for (const account of accounts) {
     const context = contexts.get(account.id);
-    if (!context) continue;
+    if (!context || !isGuaranteeRequirementFact(context)) continue;
     items.push({ ...context, displayNo: account.displayNo });
   }
   return items.map(({ policy: _policy, ...item }) => item);
@@ -68,7 +69,7 @@ async function scopedGuarantees(client: PoolClient, userId: string, actor: { use
   const accounts = (await client.query(`SELECT id,display_no AS "displayNo",game_id AS "gameId" FROM zzsh_supply.rental_account WHERE owner_user_id=$1 AND ${gameScopeSql("rental_account.game_id","$3","$2")} ORDER BY id`, [userId, actor.isBoss, actor.userId])).rows as Array<{ id: string; displayNo: string | null; gameId: string }>;
   const contexts = await readGuaranteeContextsBatch(client, userId, accounts.map((account) => account.id), creditRow);
   const items = [];
-  for (const account of accounts) { const context = contexts.get(account.id); if (context) items.push({ ...context, displayNo: account.displayNo }); }
+  for (const account of accounts) { const context = contexts.get(account.id); if (context && isGuaranteeRequirementFact(context)) items.push({ ...context, displayNo: account.displayNo }); }
   return items.map(({ policy: _policy, ...item }) => item);
 }
 

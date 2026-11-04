@@ -1838,6 +1838,18 @@ export function publicListingAttributes(attrs: Record<string, unknown>): Record<
 }
 
 const MIGRATION_TITLE = "历史资料待核实";
+/**
+ * The legacy importer stores this placeholder instead of a title when the source has no readable
+ * declaration. It is a marker for "no title", not an account name: a read model that returns it makes
+ * every imported account look like it is called "历史资料待核实". Readers therefore expose null and let
+ * the caller fall back to the account number, while the unknown reason stays in titleFacts/unknownReason
+ * (DECLARATION_UNREADABLE / VERSION_MISSING / NOT_QUOTED) instead of a fabricated name.
+ */
+export function declaredTitleOrNull(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const title = value.trim();
+  return !title || title.includes(MIGRATION_TITLE) ? null : title;
+}
 /** Order snapshot title and the account's current title are different facts. A placeholder is not either title. */
 /** Fields the renter already received. Admin keeps its own current version beside this. */
 export function publicListingBasis(listing: Record<string, unknown>) {

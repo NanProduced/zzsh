@@ -70,6 +70,19 @@ test("B1 projection: titleFacts, available, blockers; unquoted owner total is nu
   assert.equal(projectOwnerAccount({...base,legacy_market:true} as any).available,false);
 });
 
+test("B1 the stored placeholder is not an account name; the unknown reason stays on accountDisplay", () => {
+  // Imported observations store 历史资料待核实 in listing_version.title; readers must not present it as a name.
+  const placeholder = projectOwnerAccount({ ...base, title: "历史资料待核实", payload: null, rental_state: "DRAFT", review_state: "IMPORTED_UNVERIFIED" } as any) as any;
+  assert.equal(placeholder.title, null);
+  assert.equal(placeholder.display_no, "AC0000000001");
+  assert.equal(placeholder.accountDisplay.titleFacts, null);
+  assert.equal(placeholder.accountDisplay.unknownReason, "DECLARATION_UNREADABLE");
+  // A real title and a blank title keep their distinct answers.
+  assert.equal((projectOwnerAccount({ ...base, title: "真实标题" } as any) as any).title, "真实标题");
+  assert.equal((projectOwnerAccount({ ...base, title: "   " } as any) as any).title, null);
+  assert.equal((projectOwnerAccount({ ...base, title: null } as any) as any).title, null);
+});
+
 test("B1 signed cursor binds owner and filter; LIMIT n+1 without N+1 queries", async () => {
   const token = encodeOwnerAccountCursor("acc-2", "u1", "LISTED", key);
   assert.equal(decodeOwnerAccountCursor(token, "u1", "LISTED", key), "acc-2");

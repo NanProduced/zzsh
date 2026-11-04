@@ -3,6 +3,7 @@ import type { PoolClient } from "pg";
 import { requireListingCursorKey, type ListingCursorKey } from "./listing-cursor";
 import { effectivePublicationStateSql, projectPublicAttributeDisplay } from "./listing-query";
 import { publicAccountNumber } from "./account-number";
+import { declaredTitleOrNull } from "./publishing";
 import { conflict, invalid } from "./supply-util";
 import { occupyingLegacyOrdersSql } from "../order/legacy-order-occupancy";
 import { legacyContinuationReady, legacyEpochTimestamp } from "../order/legacy-order-read";
@@ -145,11 +146,14 @@ export function projectOwnerAccount(row: OwnerAccountRow) {
   if (row.rental_state === "UNKNOWN") blockers.push("STATE_UNKNOWN");
   if (row.legacy_market) blockers.push("NOT_TRADE_READY");
   if (row.version_id && row.rule_current === false) blockers.push("RULE_CHANGED");
-  const { payload: _p, presentation_items: _i, rule_current: _r, legacy_market: _m, ...rest } = row;
+  const { payload: _p, presentation_items: _i, rule_current: _r, legacy_market: _m, title: storedTitle, ...rest } = row;
   for (const k of Object.keys(rest)) if (k.startsWith("ao_")) delete (rest as any)[k];
   const displayNo = publicAccountNumber(row.display_no);
   return {
     ...rest,
+    // B1: the stored placeholder is not a name. Absent title stays null so readers fall back to the
+    // account number; the reason stays in accountDisplay.unknownReason.
+    title: declaredTitleOrNull(storedTitle),
     display_no: displayNo,
     rentalState: row.rental_state,
     accountDisplay: { displayNo, gameId: row.game_id, titleFacts, unknownReason },
