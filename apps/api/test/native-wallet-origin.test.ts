@@ -1,4 +1,4 @@
-import {test} from 'node:test';import {strict as assert} from 'node:assert';import type {PoolClient} from 'pg';import {initializeNativeWalletOrigin,createProvisionedNativeWalletOriginResource,assertNativeWalletOriginAssembly} from '../src/finance/native-wallet-origin';
+import {test} from 'node:test';import {strict as assert} from 'node:assert';import type {PoolClient} from 'pg';import {initializeNativeWalletOrigin,createControlledNativeWalletOriginResource,createProvisionedNativeWalletOriginResource,createRegisteredLocalNativeWalletOriginResource,assertNativeWalletOriginAssembly} from '../src/finance/native-wallet-origin';
 const resource={resourceSet:'personal_finance',resourceOid:869754};
 function probe(installed:boolean,proof:any=null,result:any=null,templateError:any=null){
  const seen:{sql:string;args:any[]}[]=[],c={query:async(sql:string,args:any[]=[])=>{seen.push({sql,args});
@@ -86,4 +86,44 @@ test('provisioned native genesis is independent of merchants and cannot promote 
  for(const profile of ['test','provider-test','migration'])assert.throws(()=>createProvisionedNativeWalletOriginResource({...config,profile,database:{...config.database,targetProfile:profile}}));
  assert.throws(()=>createProvisionedNativeWalletOriginResource({...config,database:{...config.database,name:'zzsh_test_regression'}}));
  assert.throws(()=>createProvisionedNativeWalletOriginResource({...config,database:{...config.database,user:'migration'}}));
+});
+
+test('registered local preview admits only the exact test/fake resource with test operations disabled',async()=>{
+ const config={profile:'test',provider:'fake',host:'127.0.0.1',testOperationsEnabled:false,database:{target:'local-compose',targetProfile:'test',host:'127.0.0.1',port:55432,name:'zzsh_test_regression',user:'zzsh_regression_runtime',runtimeUser:'zzsh_regression_runtime'}} as any;
+ const input={config,resourceOid:42,nonce:'a'.repeat(24),runtimeRoleOid:99},registered=createRegisteredLocalNativeWalletOriginResource(input);
+ assert.equal(assertNativeWalletOriginAssembly(registered,undefined),false);
+ assert.throws(()=>assertNativeWalletOriginAssembly(registered,{} as never));
+ assert.throws(()=>createControlledNativeWalletOriginResource(input));
+ for(const changed of [
+  {...config,testOperationsEnabled:true},{...config,testOperationsEnabled:undefined},{...config,profile:'production'},{...config,provider:'real'},{...config,host:'0.0.0.0'},
+  {...config,database:{...config.database,host:'remote'}},{...config,database:{...config.database,name:'other'}},{...config,database:{...config.database,runtimeUser:'other'}},
+ ])assert.throws(()=>createRegisteredLocalNativeWalletOriginResource({...input,config:changed}));
+ for(const changed of [{resourceOid:0},{runtimeRoleOid:0},{nonce:'bad'}])assert.throws(()=>createRegisteredLocalNativeWalletOriginResource({...input,...changed}));
+ const role={databaseName:config.database.name,currentUser:config.database.user,owner:'zzsh',...Object.fromEntries([
+  'isSuperuser','canCreateRole','canCreateDb','canReplicate','canBypassRls','canCreateDatabase','canCreateIamSchema','canCreateUserSchema',
+  'canCreateAdminSchema','canCreateSupplySchema','canCreateContentSchema','canCreateOrderSchema','canUpdateAudit','canDeleteAudit','canTruncateAudit',
+ ].map(key=>[key,false]))};
+ const make=(changes:Record<string,unknown>={},fresh=true,ownerRow=true,roleChanges:Record<string,unknown>={})=>{let writes=0,proofQuery='';
+  const c={query:async(sql:string)=>{
+   if(sql.startsWith('SELECT to_regprocedure'))return{rows:[{installed:true,oid:42,name:'zzsh_test_regression',role:'zzsh_regression_runtime',role_oid:99,marker:'zzsh:regression-test:v1',nonce:'a'.repeat(24),...changes}]};
+   if(sql.includes('AS "databaseName"'))return{rows:[{...role,...roleChanges}]};
+   if(sql.includes('AS "ownsBusinessSchema"'))return{rows:[{ownsBusinessSchema:false,ownsBusinessRelation:false,hasPrivilegedMembership:false}]};
+   if(sql.startsWith('SELECT u.id')){proofQuery=sql;return{rows:fresh?[admittedProof]:[]};}
+   if(sql.startsWith('SELECT zzsh_order.initialize')){writes++;return{rows:[{result:ownerRow?knownResult:{knowledge:'UNKNOWN',reason:'NATIVE_ORIGIN_RESOURCE_NOT_ADMITTED'}}]};}
+   throw Error('Unexpected registered origin query');
+  }} as unknown as PoolClient;return{c,writes:()=>writes,proofQuery:()=>proofQuery};
+ };
+ const good=make();assert.equal((await initializeNativeWalletOrigin(good.c,'new_user','request',registered)).knowledge,'KNOWN');assert.equal(good.writes(),1);
+ assert.match(good.proofQuery(),/p\.insert_xid=pg_current_xact_id\(\)/);assert.match(good.proofQuery(),/user\.legacy_owner\.migrated/);
+ for(const changes of [{oid:43},{name:'other'},{role:'other'},{role_oid:100},{marker:'other'},{nonce:'b'.repeat(24)}]){
+  const bad=make(changes);assert.equal((await initializeNativeWalletOrigin(bad.c,'new_user','request',registered)).knowledge,'UNKNOWN');assert.equal(bad.writes(),0);
+ }
+ const noAdmission=make({},true,false);assert.deepEqual(await initializeNativeWalletOrigin(noAdmission.c,'new_user','request',registered),{knowledge:'UNKNOWN',reason:'NATIVE_ORIGIN_RESOURCE_NOT_ADMITTED'});
+ const old=make({},false);await assert.rejects(initializeNativeWalletOrigin(old.c,'old_user','request',registered));assert.equal(old.writes(),0);
+ const copied=make();assert.equal((await initializeNativeWalletOrigin(copied.c,'new_user','request',{...registered})).knowledge,'UNKNOWN');assert.equal(copied.writes(),0);
+ const privileged=make({},true,true,{isSuperuser:true});await assert.rejects(initializeNativeWalletOrigin(privileged.c,'new_user','request',registered));assert.equal(privileged.writes(),0);
+ const previous=process.env.NODE_ENV;process.env.NODE_ENV='production';try{
+  assert.throws(()=>createRegisteredLocalNativeWalletOriginResource(input));assert.throws(()=>assertNativeWalletOriginAssembly(registered,undefined));
+  const prod=make();assert.equal((await initializeNativeWalletOrigin(prod.c,'new_user','request',registered)).knowledge,'UNKNOWN');assert.equal(prod.writes(),0);
+ }finally{if(previous===undefined)delete process.env.NODE_ENV;else process.env.NODE_ENV=previous;}
 });

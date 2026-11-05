@@ -679,23 +679,28 @@ async function requireWriteAccess(client: PoolClient, context: AdminContext, per
 async function configureTemplate(request: AuthSecurityNodeRequest, response: AuthSecurityNodeResponse, requestId: string, options: AuthSecurityOptions, readContext: ContextReader): Promise<void> {
   const context = await readContext(request, options);
   const body = bodyOf(request);
-  assertFields(body, ["operationCode", "triggerCondition", "candidateUsernames"]);
+  assertFields(body, ["operationCode", "triggerCondition", "candidateUsernames", "expectedVersion"]);
   const op = operationCode(requiredString(body, "operationCode", 128));
   const trigger = triggerCondition(requiredString(body, "triggerCondition", 64));
   const candidateUsernames = usernameList(body, "candidateUsernames");
+  const expectedVersion = body.expectedVersion;
+  if (expectedVersion !== undefined && (typeof expectedVersion !== "number" || !Number.isInteger(expectedVersion) || expectedVersion < 0 || expectedVersion > 2147483647)) invalid("Expected template version is invalid");
   await runApprovalWrite(request, response, requestId, options, context, {
     operation: APPROVAL_WRITE_OPERATIONS.configureTemplate,
-    fingerprint: approvalFingerprint([op, trigger, ...[...candidateUsernames].sort()]),
+    fingerprint: approvalFingerprint([op, trigger, ...[...candidateUsernames].sort(), ...(expectedVersion === undefined ? [] : ["expected-version:", expectedVersion as number])]),
     authorize: async (client) => {
       await requireWriteAccess(client, context, ADMIN_PERMISSION.approvalTemplateConfigure);
     },
     action: async (client) => {
-      const candidates = await adminsByUsernames(client, candidateUsernames);
+      // Serialize both versioned and legacy callers, including the first insertion where no row can be locked yet.
+      await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))", [JSON.stringify(["approval-template-v1", op, trigger])]);
       const current = await client.query<{ id: string; version: number }>(
         `SELECT "id", "version" FROM "zzsh_iam"."approval_template" WHERE "operation_code" = $1 AND "trigger_condition" = $2 FOR UPDATE`,
         [op, trigger],
       );
       const existing = current.rows[0];
+      if (expectedVersion !== undefined && (existing?.version ?? 0) !== expectedVersion) conflict("Approval template changed; reload before saving");
+      const candidates = await adminsByUsernames(client, candidateUsernames);
       const templateId = existing?.id ?? `approval_tpl_${randomUUID().replaceAll("-", "")}`;
       const version = existing ? existing.version + 1 : 1;
       if (existing) {

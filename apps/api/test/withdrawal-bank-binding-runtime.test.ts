@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { readFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmdirSync, unlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { isAbsolute, join, relative, resolve } from "node:path";
 import type { AppConfig } from "../src/config/config";
 import { loadWithdrawalBankBindingRuntime, type BankBindingRuntimeDocument } from "../src/finance/withdrawal-bank-binding-runtime";
 
@@ -34,6 +36,24 @@ test("保护钥惰性、按版本精确读取及缓存；返回副本不能损�
   const key = p.keyFor("unit_storage_key"), count = reads; assert.equal(key.byteLength, 32); key.fill(0);
   assert(p.keyFor("unit_storage_key").every(v => v === 17)); assert.equal(reads, count);
   rejected(() => p.keyFor("unknown_version"), "BANK_BINDING_KEY_REFERENCE_MISSING");
+});
+test("真实 loader 接受工作目录内相对 .secrets 文件，绝对或越界路径拒绝", () => {
+  const base = resolve(tmpdir()), root = resolve(mkdtempSync(join(base, "zzsh-bank-loader-"))), rel = relative(base, root);
+  if (!rel || rel.startsWith("..") || isAbsolute(rel)) throw Error("SYNTHETIC_TEMP_BOUNDARY_INVALID");
+  const dir = join(root, ".secrets"), configPath = join(dir, "binding.json"), keyPath = join(dir, "key.v1");
+  try {
+    mkdirSync(dir); writeFileSync(configPath, JSON.stringify(document())); writeFileSync(keyPath, Buffer.alloc(32, 17).toString("base64url"));
+    const env: NodeJS.ProcessEnv = { WITHDRAWAL_BANK_BINDING_ENABLED: "true", WITHDRAWAL_BANK_BINDING_CONFIG_FILE: ".secrets/binding.json",
+      WITHDRAWAL_BANK_KEY_01_FILE: ".secrets/key.v1" };
+    const result = loadWithdrawalBankBindingRuntime(context, env, root)!; assert(result.protection!.keyFor("unit_storage_key").every(v => v === 17));
+    rejected(() => loadWithdrawalBankBindingRuntime(context, { ...env, WITHDRAWAL_BANK_BINDING_CONFIG_FILE: configPath }, root), "BANK_BINDING_CONFIG_UNAVAILABLE");
+    rejected(() => loadWithdrawalBankBindingRuntime(context, { ...env, WITHDRAWAL_BANK_BINDING_CONFIG_FILE: "../binding.json" }, root), "BANK_BINDING_CONFIG_UNAVAILABLE");
+    rejected(() => loadWithdrawalBankBindingRuntime(context, { ...env, WITHDRAWAL_BANK_KEY_01_FILE: keyPath }, root)!.protection!.keyFor("unit_storage_key"), "BANK_BINDING_KEY_UNAVAILABLE");
+    rejected(() => loadWithdrawalBankBindingRuntime(context, { ...env, WITHDRAWAL_BANK_KEY_01_FILE: "../key.v1" }, root)!.protection!.keyFor("unit_storage_key"), "BANK_BINDING_KEY_UNAVAILABLE");
+  } finally {
+    if (existsSync(keyPath)) unlinkSync(keyPath); if (existsSync(configPath)) unlinkSync(configPath);
+    if (existsSync(dir)) rmdirSync(dir); if (existsSync(root)) rmdirSync(root);
+  }
 });
 test("不能拿JoinPay商户钥或错误长度替代本地资料保护钥，私有错误固定脱敏", () => {
   const d = document(); d.keyVariables!.unit_storage_key = "JOINPAY_PAYOUT_KEY_01";

@@ -9,7 +9,7 @@ type Context = Pick<AppConfig, "provider" | "database"> & { authEnabled: boolean
 export type JoinpayPayoutRuntimeDocument = { scope: Omit<Parameters<typeof createPayoutScope>[0], "profiles">;
   profiles: PayoutProfileInput[]; newRequestsEnabled: boolean; submitProfileId?: string; queryProfileId: string;
   notifyProfilesByInitialKey: Record<string, string>; keyVariables: Record<string, string>; recovery?: Assembly["recovery"];
-  userWithdrawal?: { policy: WithdrawalBankPolicy; identityProvider: string; targetEncoding: "LEGACY_CODE_PASSTHROUGH"; destinationAuthorization: "AUTHENTICATED_USER_DECLARATION" } };
+  userWithdrawal?: { policy: WithdrawalBankPolicy; identityProvider: string; targetEncoding: "LEGACY_CODE_PASSTHROUGH"; destinationAuthorization: "AUTHENTICATED_USER_DECLARATION" | "AUTHENTICATED_USER_OR_LEGACY_BINDING" } };
 const fail = (code: string): never => { throw new ConfigurationError(code); };
 const object = (v: unknown): v is Record<string, unknown> => v !== null && typeof v === "object" && !Array.isArray(v);
 const id = (v: unknown): v is string => typeof v === "string" && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(v);

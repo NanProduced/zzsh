@@ -5,6 +5,7 @@ import { dirname, isAbsolute, join, parse, resolve } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 import { parseSourceCaptureLine, sourceJsonLine, readSourceRows, assertSourceSupplementFields } from "./local-source-adapter.mjs";
+import { assertAccountExtraColumns } from "./capture-legacy-account-extra.mjs";
 const TABLES = {
     tradePolicy: { table: "la_system_config", fields: ["id", "type", "name", "value"], where: "(type='trade' AND name='advanceOrderSetRatio') OR (type='expendConfig' AND name IN ('barrettBullet','bullet','awm','armor','helmet','coffee','experienceCard','barrettBulletSale','bulletSale','awmSale','armorSale','helmetSale','coffeeSale','experienceCardSale'))" },
     users: { table: "la_user", fields: ["id", "sn", "nickname", "mobile", "is_bind_id", "is_disable", "is_delete", "is_high_risk", "password", "salt", "id_card", "create_time", "update_time", "money", "earnings", "code", "inviter_id", "first_leader", "second_leader", "third_leader"] },
@@ -21,7 +22,7 @@ const TABLES = {
 };
 // Capture display, holdings and business continuation facts in the original snapshot, not a later supplement.
 TABLES.users.fields.push("ancestor_relation", "avatar", "sex", "channel", "delete_time", "commission_rate", "is_deposit_free", "is_checked");
-TABLES.accounts.fields.push("title", "description", "create_time", "agent_skin", "insure_lv", "insure_code", "grading_lv", "login_way", "vit_lv", "bear_lv", "dive_lv", "character_lv", "province", "city", "secret_kd", "processing_time_start", "processing_time_end", "ratio_type", "ban_record", "face_is_self", "level6_helmet_num", "level6_armor_num", "barrett_bullet_num", "coffee_num", "is_demulan", "is_next_season_pass", "price_per", "price_vip", "extra_goods_total_price", "extra_goods_total_price_vip", "order_sn", "pay_is", "pay_money", "pay_time", "return_is", "team_id", "service_id", "info_source", "punishment_img_url", "personal_info_screenshot_url", "secret_service_screenshot_url", "advanced_weapon_screenshot_url", "high_risk_owner");
+TABLES.accounts.fields.push("title", "description", "create_time", "agent_skin", "insure_lv", "insure_code", "grading_lv", "login_way", "vit_lv", "bear_lv", "dive_lv", "character_lv", "province", "city", "secret_kd", "processing_time_start", "processing_time_end", "ratio_type", "ban_record", "face_is_self", "level6_helmet_num", "level6_armor_num", "barrett_bullet_num", "coffee_num", "is_demulan", "is_sayyid", "awm_number", "helmet", "armor", "is_next_season_pass", "price_per", "price_vip", "extra_goods_total_price", "extra_goods_total_price_vip", "order_sn", "pay_is", "pay_money", "pay_time", "return_is", "team_id", "service_id", "info_source", "punishment_img_url", "personal_info_screenshot_url", "secret_service_screenshot_url", "advanced_weapon_screenshot_url", "high_risk_owner");
 TABLES.accounts.expressions = { high_risk_owner: "(SELECT is_high_risk FROM la_user WHERE id=la_rental_accounts.user_id)" };
 TABLES.orders.fields.push("leshua_order_id", "yj_order_id", "delete_time", "add_order_sn", "add_transaction_id", "add_money", "is_pay_add", "advance_time", "compensation", "expend_money", "expend_ratio", "extra_haff", "extra_money", "service_id", "is_dismiss", "disagree_count", "form_options", "form_rule", "form_data", "form_data_format", "expend_remark", "user_remark", "shop_remark");
 TABLES.distribution.fields.push("distribution_time", "create_time", "update_time", "delete_time");
@@ -138,7 +139,7 @@ const acl = spawnSync("icacls", [destination, "/inheritance:r", "/grant:r", `*${
 if (acl.status !== 0)
     throw new Error("PRIVATE_OUTPUT_ACL_FAILED");
 const monotonicStarted = performance.now();
-const receipt = { schema: "zzsh.legacy-source-capture.v1", toolSha256: hash(readFileSync(fileURLToPath(import.meta.url))), supportToolSha256: hash(readFileSync(new URL("./local-source-adapter.mjs", import.meta.url))), transport: "HEX_JSON_TO_UTF8_JSONL", startedAt: new Date().toISOString(), containerId, database: "sg_zzsh_restore", status: "STARTED", files: {}, physicalColumns: {}, statements: 0, privateReads: 0, connections: 1 };
+const receipt = { schema: "zzsh.legacy-source-capture.v1", toolSha256: hash(readFileSync(fileURLToPath(import.meta.url))), supportToolSha256: hash(readFileSync(new URL("./local-source-adapter.mjs", import.meta.url))), accountExtraToolSha256: hash(readFileSync(new URL("./capture-legacy-account-extra.mjs", import.meta.url))), transport: "HEX_JSON_TO_UTF8_JSONL", startedAt: new Date().toISOString(), containerId, database: "sg_zzsh_restore", status: "STARTED", files: {}, physicalColumns: {}, statements: 0, privateReads: 0, connections: 1 };
 if (sourceSupplement) receipt.sourceSupplement = supplementBinding;
 if (refundSupplement) receipt.aggregates = [];
 let child, stderr = "", section = null, failure, rollbackConfirmed = false;
@@ -190,6 +191,7 @@ try {
                 const present = columns.get(entry.table);
                 if (!present?.has("id"))
                     throw new Error("SOURCE_REQUIRED_TABLE_MISSING:" + entry.table);
+                if (entry.table === "la_rental_accounts") assertAccountExtraColumns(present);
                 const available = field => present.has(field) || Object.hasOwn(entry.expressions??{},field) && (entry.expressionSources?.[field] ?? []).every(source => present.has(source));
                 const fields = [...new Set(entry.fields)].filter(available);
                 receipt.files[domain] = { file: domain + ".jsonl", table: entry.table, fields, missingFields: entry.fields.filter(field => !available(field)), rows: 0, bytes: 0 };

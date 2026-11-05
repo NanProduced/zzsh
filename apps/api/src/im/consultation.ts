@@ -2526,6 +2526,12 @@ export async function createOrResumeUserConsultation(
     await lockSupportMutation(client, options.appId, [context.userId]);
     await setAuditContext(client, "user", context.userId, context.sessionId, requestId);
     await assertUserContextInTransaction(client, context);
+    if (subjectRef?.startsWith("legacy-order:")) {
+      const legacyId = subjectRef.slice("legacy-order:".length);
+      if (!await resolveLegacyConsultationOrder(client, legacyId, context.userId)) {
+        throw new SecurityApiError(404, "NOT_FOUND", "Order not found");
+      }
+    }
     const accountId = await readyAccount(client, identityKey(options.appId, "user", "USER", context.userId));
     const thread = await ensureThread(client, options.appId, context.userId, type, accountId);
     const open = (await client.query<{ id: string; state: ConsultationState }>(
@@ -3710,6 +3716,7 @@ export type ConsultationSubjectView =
     title: string | null;
     target: { kind: ConsultationSubjectKind; id: string };
     party?: "RENTER" | "OWNER";
+    origin?: "LEGACY";
   };
 
 export type ConsultationContextView = {
@@ -3733,6 +3740,21 @@ function splitSubjectRef(value: string): { ref: string; kind: ConsultationSubjec
   return kind && value.length > index + 1 ? { ref: value.slice(index + 1), kind } : { ref: value, kind: null };
 }
 
+/** Legacy IDs are a separate source type; only the consultation user's own order is projected. */
+async function resolveLegacyConsultationOrder(client: PoolClient, id: string, userId: string): Promise<Extract<ConsultationSubjectView, { status: "resolved" }> | null> {
+  if (!/^legacy_order_[a-f0-9]{40}$/.test(id)) return null;
+  const row = (await client.query<{ id: string; displayNo: string | null; party: "RENTER" | "OWNER" }>(
+    `SELECT l.id, l.original_order_no AS "displayNo",
+       CASE WHEN l.renter_user_id=$2 THEN 'RENTER' WHEN l.owner_user_id=$2 THEN 'OWNER' END AS party
+       FROM zzsh_order.legacy_order_read_snapshot l
+      WHERE l.id=$1 AND COALESCE(l.source_snapshot->>'is_delete','0')='0'
+        AND (l.renter_user_id=$2 OR l.owner_user_id=$2)`, [id, userId],
+  )).rows[0];
+  if (!row || row.id !== id || !row.displayNo || !["RENTER", "OWNER"].includes(row.party)) return null;
+  return { status: "resolved", kind: "ORDER", origin: "LEGACY", displayNo: row.displayNo, title: null,
+    target: { kind: "ORDER", id: row.id }, party: row.party };
+}
+
 /**
  * 把 subject_ref 解析成客服能用的业务单号；解析不了就 unresolved。
  * 只在唯一命中时 resolved（订单 id/display_no、资源账号 id/display_no、listing_version id）；
@@ -3745,6 +3767,10 @@ async function resolveConsultationSubject(
   readPublicAccount: ConsultationRouteOptions["readPublicAccount"],
 ): Promise<ConsultationSubjectView> {
   if (!subjectRef) return { status: "absent" };
+  if (subjectRef.startsWith("legacy-order:")) {
+    return await resolveLegacyConsultationOrder(client, subjectRef.slice("legacy-order:".length), userId)
+      ?? { status: "unresolved", rawRef: subjectRef };
+  }
   const { ref, kind } = splitSubjectRef(subjectRef);
   if (!ref) return { status: "unresolved", rawRef: subjectRef };
   const rows = (await client.query<{
@@ -3826,5 +3852,19 @@ export async function readConsultationContext(
       // This tree carries no membership read dependency; absence is not "ordinary member".
       membership: { status: "unavailable", reason: "membership_projection_not_integrated" },
     };
+  });
+}
+
+/** A text card is only a reference; authorize both the consultation and its user's legacy order. */
+export async function readConsultationLegacyOrderReference(options: ConsultationRouteOptions, context: AdminContext,
+  consultationId: string, legacyOrderId: string): Promise<{ contractVersion: "im-legacy-order-reference.v1"; subject: Extract<ConsultationSubjectView, { status: "resolved" }> }> {
+  if (!ID_PATTERN.test(consultationId) || !/^legacy_order_[a-f0-9]{40}$/.test(legacyOrderId)) throw new SecurityApiError(404, "NOT_FOUND", "Order not found");
+  return withTransaction(options.pool, async client => {
+    await client.query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY");
+    await assertAdminContextInTransaction(client, context);
+    const consultation = await readAuthorizedAdminConsultation(client, context, options.appId, consultationId);
+    const subject = await resolveLegacyConsultationOrder(client, legacyOrderId, consultation.userId);
+    if (!subject) throw new SecurityApiError(404, "NOT_FOUND", "Order not found");
+    return { contractVersion: "im-legacy-order-reference.v1", subject };
   });
 }

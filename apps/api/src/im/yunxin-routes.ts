@@ -44,6 +44,7 @@ import {
   listConsultationEvents,
   markConsultationRead,
   readConsultationContext,
+  readConsultationLegacyOrderReference,
   listTransferTargets,
   listUserConsultations,
   markUserConsultationRead,
@@ -1474,6 +1475,18 @@ export async function handleYunxinRoute(request: NodeRequest, response: NodeResp
         return;
       }
       await handleAdminMessageAccess(request, response, requestId, options);
+      return;
+    }
+    const legacyOrderMatch = /^\/admin\/consultations\/([A-Za-z0-9][A-Za-z0-9._:-]{0,127})\/legacy-orders\/(legacy_order_[a-f0-9]{40})$/.exec(path);
+    if (legacyOrderMatch) {
+      if (!originAllowed(request, [options.security.apiOrigin, options.security.adminOrigin]) || method !== "GET") {
+        sendError(response, new SecurityApiError(method === "GET" ? 403 : 404, method === "GET" ? API_V1_ERROR_CODES.FORBIDDEN : API_V1_ERROR_CODES.NOT_FOUND, "Request rejected"), requestId);
+        return;
+      }
+      if (!options.consultation) { sendUnavailable(response, requestId); return; }
+      if (routeQuery(request).size) throw new SecurityApiError(400, "INVALID_ARGUMENT", "Query is invalid");
+      const context = await readAdminContext(request, options.security);
+      sendJson(response, 200, await readConsultationLegacyOrderReference(options.consultation, context, legacyOrderMatch[1]!, legacyOrderMatch[2]!), requestId);
       return;
     }
     const readMatch = /^\/admin\/consultations\/([A-Za-z0-9][A-Za-z0-9._:-]{0,127})\/(events|context)$/.exec(path);

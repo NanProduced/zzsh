@@ -15,7 +15,7 @@ const {createRoot}=await import("react-dom/client");
 const vite=await createServer({root:repo,configFile:false,plugins:[react()],resolve:{alias:{"@":path.join(repo,"apps/admin/src")}},server:{middlewareMode:true,hmr:false,ws:false,watch:null}});
 const {MediaMessage}=await vite.ssrLoadModule("/packages/ui/src/message-media.tsx");
 const model=await vite.ssrLoadModule("/apps/admin/src/views/im-support-management-model.ts");
-const {SupportMessageBody}=await vite.ssrLoadModule("/apps/admin/src/views/im-support-message-body.tsx");
+const {SupportMessageBody,supportMessageSummary}=await vite.ssrLoadModule("/apps/admin/src/views/im-support-message-body.tsx");
 after(async()=>{await vite.close();await browser.happyDOM.abort();});
 
 test("preview chunk loading and failure keep the workspace, isolate Escape and can retry",async t=>{
@@ -120,4 +120,37 @@ test("shared order card renders in admin and patrol, keeps caption separate and 
  assert.equal(host.querySelector('[aria-label="关联订单卡片"]'),null,"media caption is not a text order reference");assert.ok(host.querySelector('.message-media-video-open'));
  await act(async()=>root.render(createElement(SupportMessageBody,{message:{messageType:0,text,revoked:true}})));
  assert.equal(host.querySelector('[aria-label="关联订单卡片"]'),null);assert.equal(host.textContent,"消息已撤回");
+});
+
+test("legacy order card ignores untrusted message fields until consultation-scoped verification",async t=>{
+ const {encodeOrderReference}=await import("../../../packages/im-client/src/order-reference.ts"),id=`legacy_order_${'a'.repeat(40)}`;
+ const text=encodeOrderReference({id,title:'FORGED TITLE',displayNo:'FORGED NUMBER',party:'owner'}),opened=[],calls=[];
+ assert.equal(supportMessageSummary(text),'[旧订单]');
+ const host=document.createElement('div');document.body.append(host);const root=createRoot(host);t.after(async()=>{await act(async()=>root.unmount());host.remove();});
+ const resolve=async(orderId,signal)=>{calls.push({orderId,signal});return {contractVersion:'im-legacy-order-reference.v1',subject:{status:'resolved',kind:'ORDER',origin:'LEGACY',displayNo:'OLD-VERIFIED',party:'RENTER',target:{kind:'ORDER',id:orderId}}};};
+ const props={message:{messageType:0,text},legacyScopeKey:'consult-1',resolveLegacyOrder:resolve,onOpenOrder:value=>opened.push(value)};
+ await act(async()=>root.render(createElement(SupportMessageBody,props)));
+ assert.doesNotMatch(host.textContent,/FORGED|OLD-VERIFIED/);assert.match(host.textContent,/旧订单/);
+ await act(async()=>host.querySelector('button').click());
+ assert.deepEqual(calls.map(call=>call.orderId),[id]);assert.match(host.textContent,/OLD-VERIFIED/);assert.match(host.textContent,/租客/);assert.doesNotMatch(host.textContent,/FORGED|号主/);assert.equal(opened.length,0);
+ assert.equal(host.querySelector('button'),null,'no full order link without order.read');
+ await act(async()=>root.render(createElement(SupportMessageBody,{...props,allowLegacyOrderOpen:true})));
+ await act(async()=>host.querySelector('button').click());assert.deepEqual(opened,[id]);
+ await act(async()=>root.render(createElement(SupportMessageBody,{...props,legacyScopeKey:'changed-permission'})));
+ assert.doesNotMatch(host.textContent,/OLD-VERIFIED/,'consultation or permission changes clear the verified projection');
+});
+
+test("legacy order verification refuses wrong subject and drops a late response after consultation changes",async t=>{
+ const {encodeOrderReference}=await import("../../../packages/im-client/src/order-reference.ts"),id=`legacy_order_${'b'.repeat(40)}`;
+ const text=encodeOrderReference({id,title:'FAKE',displayNo:'FAKE',party:'renter'}),host=document.createElement('div');document.body.append(host);const root=createRoot(host);let finish;
+ t.after(async()=>{await act(async()=>root.unmount());host.remove();});
+ const resolve=()=>new Promise(done=>{finish=done;});
+ await act(async()=>root.render(createElement(SupportMessageBody,{message:{messageType:0,text},legacyScopeKey:'consult-1',resolveLegacyOrder:resolve})));
+ await act(async()=>host.querySelector('button').click());
+ await act(async()=>root.render(createElement(SupportMessageBody,{message:{messageType:0,text},legacyScopeKey:'consult-2',resolveLegacyOrder:resolve})));
+ await act(async()=>finish({contractVersion:'im-legacy-order-reference.v1',subject:{status:'resolved',kind:'ORDER',origin:'LEGACY',displayNo:'LATE-PRIVATE',party:'RENTER',target:{kind:'ORDER',id}}}));
+ assert.doesNotMatch(host.textContent,/LATE-PRIVATE|FAKE/);
+ await act(async()=>host.querySelector('button').click());
+ await act(async()=>finish({contractVersion:'im-legacy-order-reference.v1',subject:{status:'resolved',kind:'ORDER',origin:'LEGACY',displayNo:'WRONG-PRIVATE',party:'OWNER',target:{kind:'ORDER',id:'other'}}}));
+ assert.match(host.textContent,/暂时无法核对该订单/);assert.doesNotMatch(host.textContent,/WRONG-PRIVATE|FAKE/);
 });

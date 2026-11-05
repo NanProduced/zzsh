@@ -40,6 +40,12 @@ export function fixture() {
       const r = current().banks.get(values[0]); if (!r) return { rows: [] };
       const row = structuredClone(r); if (!sql.includes(",sealed_details")) delete row.sealed_details; return { rows: [row] };
     }
+    if (sql.startsWith("SELECT action,actor_type,actor_id,session_id,outcome,details FROM zzsh_iam.audit_event")) {
+      const rows = current().audits.filter(a => ["withdrawal.bank_binding.legacy_imported", "withdrawal.bank_binding.saved"].includes(String(a[4]))
+        && a[6] === values[0] && JSON.parse(String(a[10])).revision === values[1])
+        .map(a => ({ action: a[4], actor_type: a[1], actor_id: a[2], session_id: a[3], outcome: a[7], details: JSON.parse(String(a[10])) }));
+      return { rows };
+    }
     if (sql.startsWith("INSERT INTO zzsh_order.withdrawal_bank_binding") || sql.startsWith("UPDATE zzsh_order.withdrawal_bank_binding")) {
       const old = current().banks.get(values[1]);
       if (state.casFailure || sql.startsWith("UPDATE") && (!old || old.id !== values[0] || old.revision !== values[6])) return { rows: [] };

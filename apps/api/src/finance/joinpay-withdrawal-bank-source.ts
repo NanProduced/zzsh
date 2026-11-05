@@ -6,7 +6,7 @@ import { notFound } from "../supply/supply-util";
 import { calculateWithdrawalAmounts, type WithdrawalFee } from "./withdrawal-ledger";
 import { assertPayoutProfile, assertPayoutReviewStrategy, assertPayoutStart, createWithdrawalAdmission, describePayoutProfile,
   type BoundPayoutProfile, type PayoutScope, type WithdrawalPolicy } from "./joinpay-payout-profile";
-import { readWithdrawalBankBinding, readWithdrawalBankBindingForPayout, type WithdrawalBankBindingOptions } from "./withdrawal-bank-binding";
+import { hasLegacyBankBindingSource, readWithdrawalBankBinding, readWithdrawalBankBindingForPayout, type WithdrawalBankBindingOptions } from "./withdrawal-bank-binding";
 import type { NativeWithdrawalActor, NativeWithdrawalOptions } from "./native-withdrawal-store";
 
 const sha = (v: string) => createHash("sha256").update(v).digest("hex");
@@ -17,7 +17,7 @@ export type WithdrawalBankPolicy = Readonly<{ version: string; reference: string
   fee: WithdrawalFee; frequencyBasis: WithdrawalPolicy["frequencyBasis"]; maxIntents: number; reviewStrategy: WithdrawalPolicy["reviewStrategy"];
   quotaUtcOffsetMinutes: number; identityMaximumAgeSeconds: number; validFrom: string; expiresAt: string }>;
 type SourceOptions = { scope: PayoutScope; profile: BoundPayoutProfile; bankBinding: WithdrawalBankBindingOptions; policy: WithdrawalBankPolicy; identityProvider: string;
-  targetEncoding: "LEGACY_CODE_PASSTHROUGH"; destinationAuthorization: "AUTHENTICATED_USER_DECLARATION" };
+  targetEncoding: "LEGACY_CODE_PASSTHROUGH"; destinationAuthorization: "AUTHENTICATED_USER_DECLARATION" | "AUTHENTICATED_USER_OR_LEGACY_BINDING" };
 type IdentityRow = { accountStatus: string; identityStatus: string; ageStatus: string; provider: string; providerReference: string | null;
   version: number; verifiedAt: string | null; now: string };
 const unavailable = (message: string) => new SecurityApiError(503, "EVIDENCE_UNAVAILABLE", message);
@@ -82,7 +82,7 @@ export function createBankBoundWithdrawalOptions(input: SourceOptions): NativeWi
   assertPayoutStart(input.scope); assertPayoutReviewStrategy(input.profile, p.reviewStrategy);
   const { binding: _binding, ...targetRules } = descriptor.targetRules;
   if (!actual(input.identityProvider) || /^(fake|mock|test|synthetic|legacy|none)/i.test(input.identityProvider)
-    || input.targetEncoding !== "LEGACY_CODE_PASSTHROUGH" || input.destinationAuthorization !== "AUTHENTICATED_USER_DECLARATION"
+    || input.targetEncoding !== "LEGACY_CODE_PASSTHROUGH" || !["AUTHENTICATED_USER_DECLARATION", "AUTHENTICATED_USER_OR_LEGACY_BINDING"].includes(input.destinationAuthorization)
     || descriptor.targetRules.encodingImplementationRef !== JOINPAY_BANK_PASSTHROUGH_IMPLEMENTATION.reference
     || descriptor.targetRules.encodingImplementationSha256 !== JOINPAY_BANK_PASSTHROUGH_IMPLEMENTATION.sha256
     || input.bankBinding.database !== scope.database || input.bankBinding.runtimeUser !== scope.runtimeUser || !input.bankBinding.protection
@@ -92,6 +92,8 @@ export function createBankBoundWithdrawalOptions(input: SourceOptions): NativeWi
     const row = await identity(c, userId), reason = identityReason(row, p, input.identityProvider);
     if (reason) throw unavailable(reason);
     const policy = currentPolicy(p, row!.now), bank = await readWithdrawalBankBindingForPayout(c, userId, body.destinationId, input.bankBinding);
+    if (bank.source.kind === "LEGACY_IMPORT" && input.destinationAuthorization !== "AUTHENTICATED_USER_OR_LEGACY_BINDING")
+      throw unavailable("LEGACY_BANK_SOURCE_NOT_ADMITTED");
     const verified = row!, identityProof = { userId, provider: verified.provider, providerReference: verified.providerReference,
       version: verified.version, verifiedAt: verified.verifiedAt, identityStatus: verified.identityStatus, ageStatus: verified.ageStatus };
     return createWithdrawalAdmission(input.scope, { reference: `USER_WITHDRAWAL_AUTHORIZATION:${bank.bindingId}:${bank.revision}`,
@@ -100,12 +102,15 @@ export function createBankBoundWithdrawalOptions(input: SourceOptions): NativeWi
         proofReference: `USER_IDENTITY_STATE:${userId}:${verified.version}`, proofSha256: sha(JSON.stringify(identityProof)),
         validUntil: new Date(Math.min(Date.parse(verified.verifiedAt!) + p.identityMaximumAgeSeconds * 1000, Date.parse(p.expiresAt))).toISOString() },
       target: { destinationId: bank.bindingId, revision: bank.revision, userId, mask: bank.cardMask, fingerprint: bank.sourceDigest,
-        // 历史字段名保留；依据是已认证用户的目标声明，绝不称为银行归属验证通过。
-        bankOwnershipReference: `USER_AUTHORIZED_BANK_BINDING:${bank.bindingId}:${bank.revision}`, bankOwnershipSha256: bank.sourceDigest,
+        // 历史字段名保留；来源为本人声明或旧平台绑定，不表示银行归属核验。
+        bankOwnershipReference: `${bank.source.kind === "LEGACY_IMPORT" ? "LEGACY_PLATFORM_BANK_BINDING" : "USER_AUTHORIZED_BANK_BINDING"}:${bank.bindingId}:${bank.revision}`,
+        bankOwnershipSha256: bank.source.evidenceSha256,
         ...targetRules, receiverAccountNoEnc: bank.cardNo, receiverNameEnc: bank.name, receiverAccountType: "201" } });
   };
   const readContext = async (c: PoolClient, actor: NativeWithdrawalActor) => {
     const bank = await readWithdrawalBankBinding(c, actor, input.bankBinding), row = await identity(c, actor.userId), reason = identityReason(row, p, input.identityProvider);
+    const legacyNotAdmitted = bank.binding && input.destinationAuthorization !== "AUTHENTICATED_USER_OR_LEGACY_BINDING"
+      ? await hasLegacyBankBindingSource(c, actor.userId, bank.binding.id, bank.binding.revision) : false;
     let policy: WithdrawalPolicy | null = null; try { if (row) policy = currentPolicy(p, row.now); } catch { /* 只读表达不可用，不伪造有效政策。 */ }
     // 与quote同一业务日界核算已用次数；读不到次数时不能声称仍可报价。
     let used: string | null = null, remaining: number | null = null;
@@ -119,7 +124,7 @@ export function createBankBoundWithdrawalOptions(input: SourceOptions): NativeWi
       }
     }
     const reasons = [...(bank.integration !== "INTEGRATED" ? ["BANK_BINDING_NOT_INTEGRATED"] : !bank.binding ? ["BANK_BINDING_REQUIRED"] : []),
-      ...(reason ? [reason] : []), ...(!policy ? ["WITHDRAWAL_POLICY_UNAVAILABLE"] : []),
+      ...(legacyNotAdmitted ? ["LEGACY_BANK_SOURCE_NOT_ADMITTED"] : []), ...(reason ? [reason] : []), ...(!policy ? ["WITHDRAWAL_POLICY_UNAVAILABLE"] : []),
       ...(policy && used === null ? ["WITHDRAWAL_QUOTA_UNKNOWN"] : []), ...(remaining === 0 ? ["WITHDRAWAL_QUOTA_EXHAUSTED"] : [])];
     return { contractVersion: "withdrawal-request-context.v1", bankBinding: bank,
       identity: row ? { identityStatus: row.identityStatus, ageStatus: row.ageStatus, verifiedAt: row.verifiedAt } : null,

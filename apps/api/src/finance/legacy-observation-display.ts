@@ -9,6 +9,7 @@ export type HistoricalFinancePurpose = 'SETTLEMENT_INCOME'|'OWNER_RENTAL_INCOME'
   |'PAYMENT_RECORD'|'REFUND_RECORD'|'PLATFORM_CREDIT'|'PLATFORM_DEBIT'|'DEPOSIT_COMPENSATION'|'TASK_SETTLEMENT'|'UNKNOWN';
 export type HistoricalFinanceDisplay = {refundAttempts?:HistoricalRefundAttempt[];sourceRefundFlags?:string[];
   changeType:string|null; purposeCode:HistoricalFinancePurpose; purposeLabel:string; originalLogNumber:string|null;
+  amountSemantics:'BALANCE_RECORD'|'BUSINESS_RECORD'|'UNVERIFIED';
   recordedAmountCents:string|null; balanceAfterCents:string|null; feeCents:string|null; netCents:string|null;
   originalStatus:string|null; originalStatusLabel:string|null; channelState:'UNVERIFIED';
   association:{state:'MATCHED'|'UNRESOLVED'|'AMBIGUOUS'|'DENIED';kind:'ORDER'|'WITHDRAWAL'|'DISTRIBUTION'|'TASK'|'UNKNOWN';
@@ -37,7 +38,11 @@ export function historicalObservationDisplay(row:Raw):HistoricalFinanceDisplay {
     row.source_entity==='la_distribution_order'?['DISTRIBUTION_INCOME','分销收益记录'] as const:
     row.source_entity==='la_pay_order'?['PAYMENT_RECORD','旧平台付款记录'] as const:row.source_entity==='la_refund_record'?['REFUND_RECORD','旧平台退款记录'] as const:purposes[changeType??'']??['UNKNOWN','用途待核'];
   const originalStatus=code(row.source_status);
+  const original=originalSource(row),originalLog=row.source_entity==='la_log_earnings'?original:null;
+  const originalLogAt=originalLog?epoch(originalLog.createdAt):null;
+  const verifiedBalance=originalLog&&['1','2'].includes(String(originalLog.action))&&money(originalLog.amount)!==null&&originalLogAt!==null&&Date.parse(row.at??'')===originalLogAt;
   return {...(row.source_entity==='la_refund_record'?{refundAttempts:projectHistoricalRefundAttempts(source.sourceAttempts,row.source_id),sourceRefundFlags:source.sourceRefundFlags??[]}:{}),changeType,purposeCode,purposeLabel,originalLogNumber:row.source_entity==='la_log_earnings'?text(source.legacyLogNumber):null,
+    amountSemantics:row.source_entity==='la_log_earnings'?verifiedBalance?'BALANCE_RECORD':'UNVERIFIED':original?'BUSINESS_RECORD':'UNVERIFIED',
     recordedAmountCents:money(row.amount),balanceAfterCents:money(row.balance_after,true),feeCents:money(row.fee,true),netCents:money(row.net,true),
     originalStatus,originalStatusLabel:row.source_entity==='la_withdraw_apply'?withdrawalStates[originalStatus??'']??null:row.source_entity==='la_distribution_order'?distributionStates[originalStatus??'']??null:row.source_entity==='la_pay_order'?({'0':'旧平台未付款','1':'旧平台已付款'}[originalStatus??'']??null):row.source_entity==='la_refund_record'&&originalStatus!==null?({'0':'旧平台退款中','1':'旧平台记为退款成功','2':'旧平台记为退款失败'}[originalStatus]??'旧平台退款状态 '+originalStatus):null,
     channelState:'UNVERIFIED',association:emptyAssociation()};
@@ -81,6 +86,18 @@ function originalSource(row:Raw):Raw|null {
   }catch{return null;}
 }
 
+/** The original nine-field earnings proof predates sourceSn; the supplemental proof binds that second key. */
+function verifiedLogSourceNumber(row:Raw,original:Raw):string|null {
+  const source=snapshot(row),proof=source.sourceSupplement;
+  try {
+    if(!proof||proof.entity!=='la_log_earnings'||typeof proof.canonical!=='string'||sha(proof.canonical)!==proof.digest)return null;
+    const supplement=JSON.parse(proof.canonical);
+    if(canonicalize(supplement)!==proof.canonical||Object.keys(original).some(key=>canonicalize(supplement[key])!==canonicalize(original[key])))return null;
+    const number=text(supplement.sourceSn);
+    return number&&source.referenceSn===number&&row.reference_no===number?number:null;
+  } catch { return null; }
+}
+
 type Match={kind:'ORDER'|'WITHDRAWAL'|'DISTRIBUTION';number:string;ref:string;path:string|null;role:'OWNER'|'BENEFICIARY'|'WITHDRAWER';status:string|null;statusLabel:string|null;allowed:boolean;purpose?:[HistoricalFinancePurpose,string];fee?:string|null;net?:string|null};
 const typedHistoryPrefixes: Record<string,string> = {la_pay_order:'HISTORY_PAYMENT',la_refund_record:'HISTORY_REFUND',la_distribution_order:'HISTORY_DISTRIBUTION'};
 const typedOrderKey=(system:unknown,id:unknown)=>[system,id].join('\u0000');
@@ -122,8 +139,8 @@ function orderMatch(entry:RelationEntry,log:Raw,source:Raw,order:FinanceOrderFac
       ||String(original.order_status)!=='4'||String(original.pay_is)!=='1'||String(log.action)!=='1'||String(log.changeType)!=='1001')return null;
     const earnings=money(original.sale_earnings),fee=money(original.full_payout_money),at=epoch(original.confirm_time),logAt=epoch(log.createdAt);
     if(earnings===null||fee===null||BigInt(earnings)<BigInt(fee)||BigInt(earnings)-BigInt(fee)!==BigInt(entry.historical!.recordedAmountCents??'-1')
-      ||at===null||at!==logAt||at!==Date.parse(proof.completedAt??'')||source.at===null||Date.parse(source.at)!==logAt)return null;
-    if(entry.evidence.originalNumber&&entry.evidence.originalNumber!==order.number)return null;
+      ||at===null||logAt===null||logAt<at||at!==Date.parse(proof.completedAt??'')||source.at===null||Date.parse(source.at)!==logAt)return null;
+    if(verifiedLogSourceNumber(source,log)!==order.number||entry.evidence.originalNumber!==order.number)return null;
     return {kind:'ORDER',number:order.number,ref:order.ref,path:`/orders/${encodeURIComponent(order.id)}`,role:'OWNER',status:'4',statusLabel:'旧平台已完成',allowed:order.objectReadable===true,purpose:['OWNER_RENTAL_INCOME','号主租赁收入']};
   }catch{return null;}
 }
@@ -134,16 +151,16 @@ function observationMatch(entry:RelationEntry,log:Raw,source:Raw,candidate:Raw,a
   const original=originalSource(candidate);if(!original)return null;
   const value=money(candidate.amount),logAt=epoch(log.createdAt);
   if(value===null||value!==entry.historical!.recordedAmountCents||logAt===null||Date.parse(source.at??'')!==logAt)return null;
-  const permitted=access?.isBoss===true||access?.financeDocumentRead===true;
+  const permitted=access?.isBoss===true||access?.financeDocumentRead===true,applicationAt=epoch(original.create_time),settledAt=epoch(original.settle_time);
   if(String(log.changeType)==='1002'&&String(log.action)==='2'&&candidate.source_entity==='la_withdraw_apply'
-    &&String(original.userId)===String(log.userId)&&['1','2','3','4','5'].includes(String(original.status))&&epoch(original.create_time)===logAt){
-    const number=text(original.sn);if(!number||entry.evidence.originalNumber&&entry.evidence.originalNumber!==number)return null;
+    &&String(original.userId)===String(log.userId)&&['1','2','3','4','5'].includes(String(original.status))&&applicationAt!==null&&applicationAt<=logAt){
+    const number=text(original.sn);if(!number||verifiedLogSourceNumber(source,log)!==number||entry.evidence.originalNumber!==number)return null;
     return {kind:'WITHDRAWAL',number,ref:`HISTORY_WITHDRAWAL:${candidate.id}`,path:`/finance/documents/${encodeURIComponent('HISTORY_WITHDRAWAL:'+candidate.id)}`,role:'WITHDRAWER',status:String(original.status),statusLabel:withdrawalStates[String(original.status)]??null,allowed:permitted,fee:money(candidate.fee,true),net:money(candidate.net,true)};
   }
   if(String(log.changeType)==='1001'&&String(log.action)==='1'&&candidate.source_entity==='la_distribution_order'
     &&String(original.user_id)===String(log.userId)&&String(original.status)==='2'&&String(original.is_delete)==='0'&&['1','2'].includes(String(original.order_type))
-    &&['1','2','3'].includes(String(original.level))&&epoch(original.settle_time)===logAt){
-    const number=text(original.sn);if(!number||entry.evidence.originalNumber&&entry.evidence.originalNumber!==number)return null;
+    &&['1','2','3'].includes(String(original.level))&&settledAt!==null&&settledAt>=logAt){
+    const number=text(original.sn);if(!number||verifiedLogSourceNumber(source,log)!==number||entry.evidence.originalNumber!==number)return null;
     return {kind:'DISTRIBUTION',number,ref:`HISTORY_DISTRIBUTION:${candidate.id}`,path:`/finance/documents/${encodeURIComponent('HISTORY_DISTRIBUTION:'+candidate.id)}`,role:'BENEFICIARY',status:'2',statusLabel:distributionStates['2']!,allowed:permitted,purpose:['DISTRIBUTION_INCOME','分销收入']};
   }
   return null;
@@ -207,10 +224,10 @@ function reverseLinks(documentRef:string,index:RelationIndex,access?:HistoricalR
     if(returns.length){
       const row=returns[0]!,original=originalSource(row),debitOriginal=originalSource(debit)!,eventAt=original?epoch(original.createdAt):null;
       // This proves an original display link only; it grants no opening admission or channel payment fact.
-      if(!original||!['1003','1004'].includes(String(original.changeType))||String(root!.status)!=='4'||String(original.action)!=='1'
+      if(!original||!['1003','1004','1005'].includes(String(original.changeType))||String(root!.status)!=='4'||String(original.action)!=='1'
         ||String(original.userId)!==String(root!.userId)||money(original.amount)!==money(root!.money)||eventAt===null
         ||eventAt<epoch(debitOriginal.createdAt)!||eventAt<epoch(root!.create_time)!||Date.parse(row.at??'')!==eventAt
-        ||row.reference_no&&row.reference_no!==root!.sn)return result('UNRESOLVED',['HISTORICAL_RETURN_EVENT_TIME_UNAVAILABLE']);
+        ||verifiedLogSourceNumber(row,original)!==text(root!.sn))return result('UNRESOLVED',['HISTORICAL_RETURN_EVENT_TIME_UNAVAILABLE']);
       related.push(historyLink(row));
     }
   }
@@ -267,6 +284,19 @@ export function enrichHistoricalObservations(entries:FinanceEntry[],sources:Raw[
     if(unique.length!==1){entry.historical.association=emptyAssociation(unique.length?'AMBIGUOUS':'UNRESOLVED');entry.reasonCodes.push(unique.length?'ORIGINAL_ORDER_REFERENCE_AMBIGUOUS':'ORIGINAL_ORDER_REFERENCE_UNRESOLVED');continue;}
     const match=unique[0]!;
     if(!match.allowed){entry.historical.association=emptyAssociation('DENIED');continue;}
+    if(match.kind==='ORDER'||match.kind==='DISTRIBUTION'){
+      const key=relationKey(source.source_system,source.subject_id,original.sourceId);
+      const siblings=(index.logs.get(key)??[]).filter(row=>{
+        const raw=originalSource(row);return raw&&String(raw.changeType)==='1001'&&logMatches(row,raw,index,access).some(candidate=>candidate.ref===match.ref);
+      });
+      if(siblings.length!==1){entry.historical.association=emptyAssociation('AMBIGUOUS');entry.reasonCodes.push('ORIGINAL_ORDER_REFERENCE_AMBIGUOUS');continue;}
+    }
+    if(match.kind==='WITHDRAWAL'){
+      const reverse=resolve(match.ref);
+      if(reverse.state!=='MATCHED'||!reverse.related.some(link=>link.ref===entry.documentRef)){
+        entry.historical.association=emptyAssociation(reverse.state==='AMBIGUOUS'?'AMBIGUOUS':'UNRESOLVED');entry.reasonCodes.push(...reverse.reasonCodes);continue;
+      }
+    }
     entry.historical.association={state:'MATCHED',kind:match.kind,documentRef:access?.isBoss||access?.financeDocumentRead?match.ref:null,number:match.number,path:match.path,role:match.role,originalStatus:match.status,originalStatusLabel:match.statusLabel};
     if(match.purpose){[entry.historical.purposeCode,entry.historical.purposeLabel]=match.purpose;}
     if(match.fee!==undefined)entry.historical.feeCents=match.fee;

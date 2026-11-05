@@ -1,6 +1,6 @@
 import type {INestApplication} from '@nestjs/common';import type {AuthSecurityOptions} from '../auth/auth-security';import {readUserContext} from '../auth/user-identity';import {ensureApiV1RequestId} from '../contracts/api-v1';import {withTransaction} from '../auth/security-core';import {readMyDistributionSummary} from './admin-distribution-dashboard';
 import {bodyOf,invalid,notFound,sendJson,type SupplyNodeRequest} from '../supply/supply-util';import {requestPath,safely,requireOrigin,type SupplyResponse} from '../supply/supply-routes';import {readMyInvitations,readMyInvitees,parseInviteesQuery,readMyLeaderBindingReceipt,bindMyDistributionLeader,readMyDistributionTerms,readMyDistributionTermsV2} from './invitation-store';
-import type {LocalDistributionScope} from './distribution-policy-store';
+import {assertLocalNativeDistributionWriteUnavailable,type LocalDistributionScope} from './distribution-policy-store';
 import type {ListingCursorKey} from '../supply/listing-cursor';
 import {parseEarningsQuery,parseEarningsDetailQuery,decodeEarningDetailId,readMyDistributionEarnings} from './distribution-earning-read';
 /** Candidate self BFF-independent API; no registration INVITER rewrite endpoint. */
@@ -10,7 +10,7 @@ export function mountInvitationRoutes(app:INestApplication,options:AuthSecurityO
   if(method==='GET'&&(path==='/earnings'||earningDetail)){sendJson(response,200,await readMyDistributionEarnings(options.pool,actor,(earningDetail?parseEarningsDetailQuery(query):parseEarningsQuery(query)),options.listingCursorKey,earningDetail?decodeEarningDetailId(earningDetail[1]!):undefined),requestId);return;}
   if(method==='GET'&&path==='/terms'){if(query.size&&(query.size!==1||query.getAll('projectionVersion').length!==1||query.get('projectionVersion')!=='2'))throw invalid('Unsupported distribution terms projection');sendJson(response,200,await (query.size?readMyDistributionTermsV2:readMyDistributionTerms)(options.pool,actor,options.distributionReadScope??options.distributionScope),requestId);return;}
   if(method==='GET'){if(path==='/invitees'){sendJson(response,200,await readMyInvitees(options.pool,actor,parseInviteesQuery(query),options.listingCursorKey),requestId);return;}if(path==='/bind/receipt'){if(query.size!==1||query.getAll('key').length!==1)throw notFound();sendJson(response,200,await readMyLeaderBindingReceipt(options.pool,actor,query.get('key')!),requestId);return;}sendJson(response,200,await readMyInvitations(options.pool,actor,options.distributionReadScope??options.distributionScope),requestId);return;}
-  const key=request.headers['idempotency-key'];if(typeof key!=='string'||!/^[A-Za-z0-9._:-]{1,128}$/.test(key))throw invalid('Original binding idempotency key required');const result=await bindMyDistributionLeader(options.pool,actor,bodyOf(request),key,options.distributionScope);sendJson(response,result.status,result.body,requestId);
+  assertLocalNativeDistributionWriteUnavailable(options.distributionReadScope);const key=request.headers['idempotency-key'];if(typeof key!=='string'||!/^[A-Za-z0-9._:-]{1,128}$/.test(key))throw invalid('Original binding idempotency key required');const result=await bindMyDistributionLeader(options.pool,actor,bodyOf(request),key,options.distributionScope);sendJson(response,result.status,result.body,requestId);
  });
 });}
 

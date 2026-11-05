@@ -4,6 +4,8 @@ import { handleAdminBff, type AdminBffOptions } from "../src/bff/admin-bff";
 import * as orderRoutes from '../src/order/order-routes';
 import * as legalRoutes from "../src/legal/legal-routes";
 import * as yunxinRoutes from '../src/im/yunxin-routes';
+import * as consultation from '../src/im/consultation';
+import * as authSecurity from '../src/auth/auth-security';
 import * as domainSummary from '../src/auth/admin-domain-summary-routes';
 
 const ADMIN_ORIGIN = "http://127.0.0.1:4291";
@@ -116,6 +118,34 @@ test("admin BFF forwards the transfer-targets route and still rejects unknown or
 
   const unrelated = await route("/im/transfer-targets-extra");
   assert.equal(unrelated.status, 404);
+});
+
+test("admin BFF only forwards exact legacy consultation order reads", async t => {
+  const calls: string[] = [];
+  t.mock.method(yunxinRoutes, "handleYunxinRoute", async (request: any, response: any) => { calls.push(request.originalUrl); response.status(200).json({ ok: true }); });
+  const id=`legacy_order_${"a".repeat(40)}`,path=`/im/consultations/consult_1/legacy-orders/${id}`;
+  assert.equal((await route(path)).status,200);
+  assert.deepEqual(calls,[`/api/v1/im/admin/consultations/consult_1/legacy-orders/${id}`]);
+  assert.equal((await route(path,"POST")).status,404);
+  assert.equal((await route('/im/consultations/consult_1/legacy-orders/legacy_order_bad')).status,404);
+  assert.equal((await route(path+'/extra')).status,404);
+  assert.equal(calls.length,1);
+});
+
+test("legacy consultation order route preserves authorization boundary and rejects query or wrong method", async t => {
+  const id=`legacy_order_${"a".repeat(40)}`,path=`/api/v1/im/admin/consultations/consult_1/legacy-orders/${id}`, calls: string[] = [];
+  t.mock.method(authSecurity, "readAdminContext", async () => ({ userId:"staff_1", sessionId:"session_1" } as never));
+  t.mock.method(consultation, "readConsultationLegacyOrderReference", async (_options: any, actor: any, consultationId: string, orderId: string) => {
+    calls.push(`${actor.userId}:${consultationId}:${orderId}`);
+    return {contractVersion:"im-legacy-order-reference.v1" as const,subject:{status:"resolved" as const,kind:"ORDER" as const,origin:"LEGACY" as const,displayNo:"OLD-1",title:null,target:{kind:"ORDER" as const,id:orderId},party:"OWNER" as const}};
+  });
+  const opts={...options().yunxin!,consultation:{} as never};
+  const invoke=async(url:string,method="GET",origin=ADMIN_ORIGIN)=>{const out=capture();await yunxinRoutes.handleYunxinRoute({method,url,originalUrl:url,headers:{origin}} as never,out.response as never,opts);return out.result();};
+  assert.equal((await invoke(path)).status,200);assert.deepEqual(calls,[`staff_1:consult_1:${id}`]);
+  assert.equal((await invoke(path,"POST")).status,404);
+  assert.equal((await invoke(path+"?untrusted=1")).status,400);
+  assert.equal((await invoke(path,"GET","https://other.invalid")).status,403);
+  assert.equal(calls.length,1);
 });
 
 test("admin BFF keeps rejecting cross-origin and bearer requests before any IM forwarding", async () => {

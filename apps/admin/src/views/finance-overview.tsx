@@ -138,10 +138,10 @@ export function FinanceOverviewView({ tab, snapshot, refreshNonce, onOpenPath, o
       <div className="finance-overview-grid">
         <section className="finance-overview-section finance-card-section" aria-labelledby="finance-recent-title">
           <div className="finance-section-heading">
-            <h2 id="finance-recent-title">本期最近结算</h2>
+            <h2 id="finance-recent-title">新平台本期最近结算</h2>
             <span className="finance-scope-badge">按结算入账时间</span>
           </div>
-          {data.recentSettlements?.length ? <div className="finance-recent-settlements">{data.recentSettlements.map(item => <article key={item.id}><div className="finance-section-heading">{documentLink(item.documentRef, item.number)}<small>{financeTime(item.postedAt)}</small></div><p>号主 {item.owner.name} · 租客 {item.renter.name}</p><dl className="finance-recent-amounts"><div><dt>原入账基数</dt><dd>{financeMoney(item.capturedCents)}</dd></div><div><dt>号主净额</dt><dd>{financeMoney(item.ownerNetCents)}</dd></div><div><dt>应退责任</dt><dd>{financeMoney(item.refundPayableCents)}</dd></div><div><dt>平台贡献</dt><dd>{financeMoney(item.platformContributionCents)}</dd></div></dl></article>)}</div> : <p className="finance-secondary">{data.recentSettlements ? '本期没有结算分配记录。' : '本次尚未取得最近结算摘要。'}</p>}
+          {data.recentSettlements?.length ? <div className="finance-recent-settlements">{data.recentSettlements.map(item => <article key={item.id}><div className="finance-section-heading">{documentLink(item.documentRef, item.number)}<small>{financeTime(item.postedAt)}</small></div><p>号主 {item.owner.name} · 租客 {item.renter.name}</p><dl className="finance-recent-amounts"><div><dt>原入账基数</dt><dd>{financeMoney(item.capturedCents)}</dd></div><div><dt>号主净额</dt><dd>{financeMoney(item.ownerNetCents)}</dd></div><div><dt>应退责任</dt><dd>{financeMoney(item.refundPayableCents)}</dd></div><div><dt>平台贡献</dt><dd>{financeMoney(item.platformContributionCents)}</dd></div></dl></article>)}</div> : <p className="finance-secondary">{data.recentSettlements ? '本期没有新平台已入账结算。' : '本次尚未取得新平台最近结算摘要。'}</p>}
         </section>
 
         <section className="finance-overview-section finance-card-section" aria-labelledby="finance-balances-title">

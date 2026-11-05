@@ -89,8 +89,8 @@ import { mountYunxinHandlers } from "../im/yunxin-routes";
 import { mountReadCopyHandler } from "../im/read-copy";
 import { mountOrderImEventHandlers, OrderImEventRecoveryLifecycle, orderImEventsActivateApp } from "../im/order-im-events";
 
-import { assertLocalDistributionAssembly, type LocalDistributionScope } from '../finance/distribution-policy-store';
-import { initializeNewDistributionRegistration } from "../finance/distribution-registration";
+import { assertLocalDistributionAssembly, assertLocalNativeDistributionReadOnlyAssembly, type LocalDistributionScope } from '../finance/distribution-policy-store';
+import { assertLocalNativeDistributionRegistrationAssembly, initializeNewDistributionRegistration, type LocalNativeDistributionRegistrationScope } from "../finance/distribution-registration";
 import { initializeNativeWalletOrigin, assertNativeWalletOriginAssembly, type NativeOriginResource } from "../finance/native-wallet-origin";
 import { assertLocalControlledPaymentAssembly, mountLocalControlledPayments, type LocalControlledPaymentOptions } from "../order/local-payment-routes";
 import { assertLocalFinancialSandboxRuntimeAssembly, preflightLocalFinancialSandboxRuntime, type LocalFinancialSandboxAssembly } from "../finance/local-financial-sandbox-runtime";
@@ -141,6 +141,8 @@ export type AuthRuntimeOptions = AuthRuntimeConfig & {
   /** Exact local creation-receipt capability; absent in ordinary configuration. */
   distributionScope?: LocalDistributionScope;
   distributionReadScope?: LocalDistributionScope;
+  /** Local, exact-resource, fresh-user registration only; never a general distribution writer. */
+  distributionRegistrationScope?: LocalNativeDistributionRegistrationScope;
   /** Explicit bounded local driver; no production or environment default. */
   distributionEarnings?: DistributionEarningStore;
   /** Explicit local assembly only; lets fresh registrations initialize a native zero origin on one exact resource. */
@@ -552,6 +554,7 @@ function buildPhoneRegistrationPlugin(
   nativeWalletOrigin?: NativeOriginResource,
   creditGuaranteeEnabled = false,
   distributionScope?: LocalDistributionScope,
+  distributionRegistrationScope?: LocalNativeDistributionRegistrationScope,
   smsThrottle?: UserAuthThrottle,
   smsSender?: UserSmsSender,
 ) {
@@ -738,7 +741,7 @@ function buildPhoneRegistrationPlugin(
             // their existing auth behavior until the credit package is installed.
             if (creditGuaranteeEnabled) await ensureCreditAccount(client, userId);
             // Existing-user OTP returned above: only this new-user transaction initializes provenance.
-            await initializeNewDistributionRegistration(client, { userId, requestId, ...(body.inviteCode === undefined ? {} : { inviteCode: body.inviteCode as string }) }, distributionScope);
+            await initializeNewDistributionRegistration(client, { userId, requestId, ...(body.inviteCode === undefined ? {} : { inviteCode: body.inviteCode as string }) }, distributionScope, distributionRegistrationScope);
             await initializeNativeWalletOrigin(client, userId, requestId, nativeWalletOrigin);
             if (legalAcceptance) await recordPlatformAcceptances(client, userId, legalAcceptance, "REGISTRATION", requestId);
             passwordCapability.state = passwordHash !== undefined ? "set" : "not-set";
@@ -913,6 +916,11 @@ export async function mountAuthHandlers(
   app: INestApplication,
   options: AuthRuntimeOptions,
 ): Promise<AuthSecurityOptions & { settlementRecordingEnabled: boolean }> {
+  // Validate the whole scope before any optional channel lifecycle can start.
+  assertLocalNativeDistributionRegistrationAssembly(options.distributionRegistrationScope, options.distributionReadScope);
+  assertLocalNativeDistributionReadOnlyAssembly(options.distributionReadScope, options.distributionScope, options);
+  assertLocalDistributionAssembly(options.distributionScope, options);
+  assertLocalDistributionAssembly(options.distributionReadScope, options);
   if (options.localFinancialSandbox) {
     assertLocalFinancialSandboxRuntimeAssembly(options.localFinancialSandbox, options);
     await preflightLocalFinancialSandboxRuntime(options.pool, options.localFinancialSandbox);
@@ -942,8 +950,6 @@ export async function mountAuthHandlers(
       ...(payoutRecovery !== undefined ? { payout: { ...payoutRecovery, execution: { ...payout!.execution!, pool: options.pool } } } : {}),
     });
   }
-  assertLocalDistributionAssembly(options.distributionScope, options);
-  assertLocalDistributionAssembly(options.distributionReadScope, options);
   if(options.distributionEarnings && !options.localFinancialSandbox && !assertNativeDistributionEarningAssembly(
     options.distributionEarnings, options.distributionScope, options.joinpayCollection?.admission,
   )){
@@ -1086,7 +1092,7 @@ export async function mountAuthHandlers(
     plugins: [
       bearer(),
       buildFakePhoneNumberPlugin(phoneNumber, fakeSmsOutbox, options.localSmsMock === true, buildTransactionalPhoneSignIn(options.pool, createAuthEndpoint, APIError, setSessionCookie)),
-      buildPhoneRegistrationPlugin(createAuthEndpoint, APIError, setSessionCookie, options.pool, fakeSmsOutbox, options.fakeSmsOutbox !== undefined || options.localSmsMock === true, options.localSmsMock === true, signInIdentifier, options.nativeWalletOrigin, options.creditGuaranteeEnabled === true, options.distributionScope, userThrottle, options.userSmsSender),
+      buildPhoneRegistrationPlugin(createAuthEndpoint, APIError, setSessionCookie, options.pool, fakeSmsOutbox, options.fakeSmsOutbox !== undefined || options.localSmsMock === true, options.localSmsMock === true, signInIdentifier, options.nativeWalletOrigin, options.creditGuaranteeEnabled === true, options.distributionScope, options.distributionRegistrationScope, userThrottle, options.userSmsSender),
       userSecurityPlugin,
     ],
     advanced: {

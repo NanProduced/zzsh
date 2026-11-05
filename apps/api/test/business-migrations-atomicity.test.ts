@@ -73,11 +73,12 @@ test('0092 keeps the newest success even when its date is invalid and exposes on
 const runnerSource=readFileSync(runnerPath,'utf8');
 const lastMigration=readFileSync(resolve('migrations/business/0079_owner_guarantee_history.sql'),'utf8');
 const names=['legacy_continuation_evidence','legacy_continuation_version','legacy_order_duty','legacy_order_duty_revision','legacy_order_duty_admission','legacy_inflight_register','personal_finance_observation_coverage','finance_stored_opening_review','legacy_duty_finance_contract','legacy_duty_finance_fact','legacy_owner_guarantee_observation','legacy_owner_guarantee_coverage'].map(n=>'zzsh_order.'+n);
+const withdrawalLinkNames=['legacy_withdrawal_subject_revision','legacy_withdrawal_link_evidence'].map(n=>'zzsh_order.'+n),allNames=[...names,...withdrawalLinkNames];
 const continuityStart=runnerSource.indexOf('export async function configureContinuityFinancePrivileges(');
 const continuityEnd=runnerSource.indexOf('\nexport async function ',continuityStart+1);
 assert(continuityStart>=0&&continuityEnd>continuityStart);
 const profiles=[...runnerSource.slice(continuityStart,continuityEnd).matchAll(/^\s+(\{"name":"zzsh_order\.[^\n]+\}),?\r?$/gm)].map(m=>JSON.parse(m[1]!));
-assert.deepEqual(profiles.map(p=>p.name).sort(),[...names].sort());
+assert.deepEqual(profiles.map(p=>p.name).sort(),[...allNames].sort());
 const columns=new Map<string,string[]>(profiles.map(p=>[p.name,[...new Set<string>(['id','unlisted_column',...(p.insert??[]),...(p.update??[])])]]));
 const runtime='runtime_role',owner='migration_owner';
 type Rights={table:Set<string>;columns:Set<string>};
@@ -86,7 +87,7 @@ const copy=(acl:Acl):Acl=>new Map([...acl].map(([table,roles])=>[table,new Map([
 
 // Run the actual entry and ACL body; only the external Drizzle migration seam is simulated.
 // This ACL model and the SQL text checks are offline evidence, never PostgreSQL execution.
-function fixture(options:{failAcl?:boolean;rollbackFails?:boolean;commitFailure?:'before'|'after';migrationFails?:boolean;connectFails?:boolean;datedNumbers?:boolean}={}){
+function fixture(options:{failAcl?:boolean;failLinkGuard?:boolean;rollbackFails?:boolean;commitFailure?:'before'|'after';migrationFails?:boolean;connectFails?:boolean;datedNumbers?:boolean}={}){
  const fault=Error('OFFLINE_ACL_METADATA_FAILURE'),rollbackFault=Error('OFFLINE_ROLLBACK_FAILURE'),commitFault=Error('OFFLINE_COMMIT_CONNECTION_LOSS'),migrationFault=Error('OFFLINE_MIGRATION_FAILURE'),connectFault=Error('OFFLINE_ACL_POOL_UNAVAILABLE');
  let durable:Acl=new Map(),pending:Acl|null=null,migrated=false,connects=0;
  const seen:{via:string;sql:string}[]=[],releases:unknown[]=[],migrationVisibility:Acl[]=[];
@@ -98,6 +99,7 @@ function fixture(options:{failAcl?:boolean;rollbackFails?:boolean;commitFailure?
    ['PUBLIC',{table:new Set(['SELECT']),columns:new Set(['INSERT'])}],
    ['inherited_reader',{table:new Set<string>(),columns:new Set(['SELECT'])}],
   ]));
+  for(const name of withdrawalLinkNames)durable.set(name,new Map([[owner,{table:new Set(['SELECT','INSERT','UPDATE']),columns:new Set(['SELECT','UPDATE'])}]]));
   durable.set('zzsh_order.old_table_untouched',new Map([[runtime,{table:new Set(['SELECT','INSERT']),columns:new Set(['UPDATE'])}]]));
   // Existing runtime column grants survive a table-only REVOKE during a later ACL repair.
   if(options.datedNumbers)durable.set('zzsh_supply.account_display_no_counter',new Map([[runtime,{table:new Set(['SELECT','INSERT','UPDATE']),columns:new Set(['SELECT','INSERT','UPDATE'])}]]));
@@ -118,9 +120,10 @@ function fixture(options:{failAcl?:boolean;rollbackFails?:boolean;commitFailure?
   if(sql==='BEGIN'){assert.equal(pending,null);pending=copy(durable);return{rows:[]};}
   if(sql==='ROLLBACK'){if(options.rollbackFails)throw rollbackFault;pending=null;return{rows:[]};}
   if(sql==='COMMIT'){assert(pending);if(options.commitFailure==='before')throw commitFault;durable=pending;pending=null;if(options.commitFailure==='after')throw commitFault;return{rows:[]};}
+  if(sql.includes('withdrawal link schema guard readiness'))return{rows:[{ready:!options.failLinkGuard}]};
   if(sql.includes('continuity runtime role ownership')){if(options.failAcl)throw fault;return{rows:[{roleOid:'20001',superuser:false,ownerRights:false}]};}
   if(sql.startsWith('SELECT name,to_regprocedure(name)'))return{rows:(args[0] as string[]).map(name=>({name,present:false}))};
-  if(sql.startsWith('SELECT name,to_regclass'))return{rows:(args[0] as string[]).map(name=>({name,present:names.includes(name)}))};
+  if(sql.startsWith('SELECT name,to_regclass'))return{rows:(args[0] as string[]).map(name=>({name,present:allNames.includes(name)}))};
   if(sql.includes("to_regprocedure('zzsh_order.assert_personal_growth_order_v4"))return{rows:[{present:true}]};
   if(sql.startsWith('SELECT attname AS name FROM pg_attribute'))return{rows:(columns.get(args[0])??[]).map(name=>({name}))};
   if(sql.includes('native_user_insert_proof')&&sql.startsWith('SELECT'))return{rows:[{proof:false,initializer:false}]};
@@ -129,7 +132,7 @@ function fixture(options:{failAcl?:boolean;rollbackFails?:boolean;commitFailure?
   const acl=pending??durable;
   for(const raw of sql.split(';')){
    const text=raw.replace(/--[^\n]*/g,'').replace(/\s+/g,' ').trim();
-   if(/^GRANT .+ ON ALL TABLES IN SCHEMA "zzsh_order" TO/.test(text)){for(const name of names){const roles=acl.get(name)!;const r=roles.get(runtime)??{table:new Set<string>(),columns:new Set<string>()};for(const op of ['SELECT','INSERT','UPDATE'])r.table.add(op);roles.set(runtime,r);}continue;}
+   if(/^GRANT .+ ON ALL TABLES IN SCHEMA "zzsh_order" TO/.test(text)){for(const name of allNames){const roles=acl.get(name)!;const r=roles.get(runtime)??{table:new Set<string>(),columns:new Set<string>()};for(const op of ['SELECT','INSERT','UPDATE'])r.table.add(op);roles.set(runtime,r);}continue;}
    const m=/^(GRANT|REVOKE) (.+?) ON TABLE ([\w."]+) (?:TO|FROM) /.exec(text);if(!m)continue;
    const name=m[3]!.replaceAll('"',''),roles=acl.get(name);if(!roles)continue;const r=roles.get(runtime)??{table:new Set<string>(),columns:new Set<string>()};roles.set(runtime,r);
    if(m[2]==='ALL'){r.table.clear();continue;}if(m[2]!.startsWith('ALL (')){r.columns.clear();continue;}
@@ -158,8 +161,12 @@ test('real migration entry rolls back a mid-ACL failure; fake contract INSERT an
  assert.equal(caught?.outcome,'ACL_NOT_COMMITTED');assert.equal(caught.cause,f.fault);assert.equal(caught.rollbackAcknowledged,true);
  assert.deepEqual(f.seen.filter(q=>/^(BEGIN|COMMIT|ROLLBACK)$/.test(q.sql)).map(q=>q.sql),['BEGIN','ROLLBACK']);assert.equal(f.connects,1);assert.deepEqual(f.releases,[undefined]);
 });
+test('withdrawal link ACL is not opened when a source or certificate guard is missing',async()=>{
+ const f=fixture({failLinkGuard:true});await assert.rejects(f.run(),(error:any)=>error.outcome==='ACL_NOT_COMMITTED'&&/guards unavailable/.test(error.cause?.message));
+ assert(!f.can('legacy_withdrawal_link_evidence','INSERT'));assert(!f.can('legacy_withdrawal_link_evidence','SELECT'));assert(!f.can('legacy_withdrawal_subject_revision','UPDATE'));
+});
 test('successful and repeated entry use one bound ACL client and commit only the final narrow policy',async()=>{
- const f=fixture();await f.run();assert(f.can('legacy_order_duty','UPDATE'));assert(f.can('legacy_duty_finance_fact','SELECT'));assert(!f.can('legacy_duty_finance_fact','INSERT'));assert(!f.can('legacy_duty_finance_contract','INSERT'));assert(!f.can('finance_stored_opening_review','SELECT'));
+ const f=fixture();await f.run();assert(f.can('legacy_order_duty','UPDATE'));assert(f.can('legacy_duty_finance_fact','SELECT'));assert(!f.can('legacy_duty_finance_fact','INSERT'));assert(!f.can('legacy_duty_finance_contract','INSERT'));assert(!f.can('finance_stored_opening_review','SELECT'));assert(f.can('legacy_withdrawal_link_evidence','SELECT'));assert(!f.can('legacy_withdrawal_link_evidence','INSERT'));assert(!f.can('legacy_withdrawal_subject_revision','UPDATE'));
  assert.equal(f.connects,1);assert(f.seen.filter(q=>q.via==='pool').every(q=>q.sql==="SELECT to_regclass('zzsh_business_meta.migrations') IS NOT NULL AS present"));assert.deepEqual(f.seen.filter(q=>/^(BEGIN|COMMIT|ROLLBACK)$/.test(q.sql)).map(q=>q.sql),['BEGIN','COMMIT']);assert.deepEqual(f.releases,[undefined]);
  const before=JSON.stringify([...f.durable].map(([name,roles])=>[name,[...roles].map(([role,r])=>[role,[...r.table],[...r.columns]])]));await f.run();assert.equal(f.connects,2);assert.equal(JSON.stringify([...f.durable].map(([name,roles])=>[name,[...roles].map(([role,r])=>[role,[...r.table],[...r.columns]])])),before);
 });

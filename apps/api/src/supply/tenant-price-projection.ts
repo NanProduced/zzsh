@@ -2,11 +2,12 @@ import { SecurityApiError } from "../auth/security-core";
 import { decimalToBigInt, formatDecimalExact, formatDecimalAtScale, parseNonNegativeDecimal, yuanAmountObject } from "./decimal";
 import { projectDeltaQuote, type InternalQuote, type QuoteAmount, type QuoteUnitAmount } from "./pricing";
 import type { DeltaProjectedQuote } from "./delta-rental";
+import { legacyListedSourceRatio } from "./legacy-listed-quote";
 
 type PublicQuote = DeltaProjectedQuote;
 export type TenantPriceLine = Pick<PublicQuote["lines"][number], "itemId" | "quantity" | "unit" | "unitQuantity" | "buyerUnitAmount" | "buyerAmount">;
 export type TenantPriceQuote = {
-  schemaVersion: 1 | 2;
+  schemaVersion: 1 | 2 | 3;
   currency: "CNY";
   ruleReleaseId: string | null;
   lines: TenantPriceLine[];
@@ -28,6 +29,7 @@ const record = (value: unknown): Record<string, unknown> | null => value !== nul
 export function publishedBaseRenterHaffRatioWanPerYuan(publishedQuote: unknown): string | null {
   const quote = record(publishedQuote), inputs = record(quote?.pricingInputs), denominators = record(inputs?.denominators);
   if (!quote || !inputs || !denominators || !Array.isArray(quote.lines) || !quote.lines.some(line => record(line)?.unit === "HAFF_BASE")) return null;
+  if (quote.schemaVersion === 3) return legacyListedSourceRatio(quote, "buyer");
   const compatibility = record(inputs.compatibility);
   if (compatibility && compatibility.customerTier !== "STANDARD") return null;
   if (quote.schemaVersion === 1 && inputs.haffRatioSchema !== "haff-ratio-v1"
@@ -66,7 +68,7 @@ export function projectTenantPriceQuote(quote: InternalQuote, publishedQuote: un
   let projected: PublicQuote;
   try { projected = projectDeltaQuote(quote, "public"); }
   catch { return unavailable(); }
-  if (![1, 2].includes(projected.schemaVersion) || projected.currency !== "CNY" || !Array.isArray(projected.lines)
+  if (![1, 2, 3].includes(projected.schemaVersion) || projected.currency !== "CNY" || !Array.isArray(projected.lines)
     || !Array.isArray(projected.expiryDisclosures) || typeof projected.unitAmountsInformational !== "boolean"
     || projected.ruleReleaseId !== null && typeof projected.ruleReleaseId !== "string") return unavailable();
   const lines = projected.lines.map((line): TenantPriceLine => {

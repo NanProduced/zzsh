@@ -568,7 +568,7 @@ for (const observationVersion of [false, true]) test(`historical list, mobile ca
     displaySource: 'LEGACY_SNAPSHOT', versionId: 'v-a', sequence: '1', refs: {}, timing: {},
     haff: { itemId: 'legacy-display:haff', quantity: '97000000', unit: 'HAFF_BASE' }, materials: [{ itemId: 'legacy-display:ammo', code: 'ammo', name: '弹药', quantity: null, unit: 'ROUND' }], materialsTotal: 1, materialsVisibleTotal: 1,
     config: { safeBox: '基础安全箱', grading: null }, login: { code: 'wechat', displayName: '微信扫码' }, term: { termSeconds: '864000', dailyConsumption: '10000000' }, quote: null, fullPayout: 'NOT_DECLARED', baseDeposit: null, guarantee: { requirement: null, requirementSource: 'UNAVAILABLE', eligibility: null, recordedProof: null },
-  } : null, facts: { ...facts, historicalRead } };
+  } : null, facts: { ...facts, businessState: 'IN_PROGRESS', lifecycle: 'ACTIVE', staffRestricted: false, occupancy: 'OCCUPIED', reasons: ['ACCOUNT_NOT_PUBLISHABLE', 'OCCUPIED'], primaryReasonCode: 'ACCOUNT_NOT_PUBLISHABLE', historicalRead } };
   const value = workDetail();
   if (observationVersion) { value.version.id = 'v-a'; value.version.origin = 'LEGACY_OBSERVATION'; value.version.declaration.attributes = {}; value.version.declaration.inventory = []; value.version.quote = null; }
   else value.version = null;
@@ -584,6 +584,9 @@ for (const observationVersion of [false, true]) test(`historical list, mobile ca
     assert.match(text, /哈夫币租金\s*历史 ¥125.30/);
     assert.match(text, /物资预付\s*历史 ¥0.00/);
     assert.match(text, /基础押金\s*历史 ¥0.00/);
+    assert.match(text, /迁入记录合计\s*¥125.30/);
+    assert.match(text, /订单进行中/); assert.match(text, /当前账号资料暂不能发布/);
+    assert.doesNotMatch(text, /账号不可发布\(历史\/归档\)/);
     assert.match(text, /97 M 哈夫币/);
     assert.match(text, /基础安全箱/);
     assert.equal(text.includes('OLD-7'), false, 'the old source number stays in the detail trace, not the first column');

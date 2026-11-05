@@ -12,7 +12,7 @@ export function FinanceOrderPayment({ document }: { document: FinanceDocument })
   const lifecycle = document.orderLifecycle;
   if (!lifecycle) return null;
   const payment = lifecycle.payment;
-  return <section className="finance-order-payment"><h2>{lifecycle.origin === 'NATIVE' ? '本站确认付款' : '旧平台付款记录'}</h2>
+  return <section className="finance-order-payment"><h2>{lifecycle.origin === 'LEGACY_MYSQL' ? '旧平台付款记录' : payment.state === 'SITE_ACCEPTED' ? '本站确认付款' : '本站付款状态'}</h2>
     <p>{financeOrderState(document)}</p>
     <dl className="finance-fact-list"><div><dt>{payment.state === 'LEGACY_RECORDED' ? '旧记录付款金额' : '实际接纳付款金额'}</dt><dd>{financeMoney(payment.state === 'SITE_ACCEPTED' || payment.state === 'LEGACY_RECORDED' ? payment.amountCents : null)}</dd></div><div><dt>确认付款时间</dt><dd>{financeTime(payment.state === 'SITE_ACCEPTED' ? payment.confirmedAt : null)}</dd></div>{document.parties ? <><div><dt>号主</dt><dd>{document.parties.owner.name}</dd></div><div><dt>租客</dt><dd>{document.parties.renter.name}</dd></div></> : null}</dl>
     {payment.hasReviewPayment ? <p className="finance-secondary">存在额外异常收款原始记录，可能已核销；退款进度可在关联单据核对。这些原记录不计入本站已接纳付款金额。</p> : null}

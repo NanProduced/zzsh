@@ -141,6 +141,8 @@ test("document and subject digests ignore unrelated rows and still change when t
   assert.ok(global().includes(FINANCE_GLOBAL_VERSION_DOMAIN));assert.doesNotMatch(global(),/\$1|pg_current_snapshot/i);
   const digest=(query:{text:string;values:string[]}|null)=>fixture.query(query!.text,query!.values).rows[0]!.finance_version;
   const beforeGlobal=digest({text:global(),values:[]}),beforeDoc=digest(scoped()),beforeSubject=digest(subject());
+  const oldGlobal=global().replace(FINANCE_GLOBAL_VERSION_DOMAIN,'admin-finance-proof.r9.history-amount-semantics');assert.notEqual(digest({text:oldGlobal,values:[]}),beforeGlobal);
+  const subjectQuery=subject()!;assert.match(subjectQuery.text,/admin-finance-proof\.r6\.subject/);assert.notEqual(digest({...subjectQuery,text:subjectQuery.text.replace('admin-finance-proof.r6.subject','admin-finance-proof.r5.subject')}),beforeSubject);
   const ledgerRows=(query:{text:string;values:string[]}|null)=>[...query!.text.matchAll(/FROM \((SELECT[\s\S]*?)\) v/g)].map(match=>match[1]!).filter(sql=>sql.startsWith("SELECT id,account_code")).map(sql=>fixture.query(sql,query!.values).rows.length);
   assert.deepEqual(ledgerRows({text:global(),values:[]}),[3]);assert.deepEqual(ledgerRows(scoped()),[2]);assert.deepEqual(ledgerRows(subject()),[1]);
   fixture.db.exec("UPDATE zzsh_order.fixture_ledger SET credit_cents='901' WHERE id='other'");
@@ -165,7 +167,7 @@ test("document and subject digests ignore unrelated rows and still change when t
   const key={keyId:"read1",secret:"x".repeat(64)},filters=parseAdminFinanceFilters(new URLSearchParams("from=2026-10-03&to=2026-10-03")),actor={userId:"admin1",sessionId:"session1",authorizationKey:"access1"};
   const token=financeSnapshot({entries:[],subjects:[],revisions:[],withdrawalsReady:false,asOf:"2026-10-03T00:00:00.000000Z",version:String(beforeDoc)},filters,actor,key).token;
   assert.throws(()=>financeSnapshot({entries:[],subjects:[],revisions:[],withdrawalsReady:false,asOf:"2026-10-03T00:00:00.000000Z",version:String(beforeGlobal)},filters,actor,key,token),(error:any)=>error.status===409);
-  assert.equal(FINANCE_GLOBAL_VERSION_DOMAIN,"admin-finance-proof.r7.typed-history");
+  assert.equal(FINANCE_GLOBAL_VERSION_DOMAIN,"admin-finance-proof.r11.withdrawal-source-links");
   assert.doesNotMatch(readFileSync("src/finance/admin-finance-export.ts","utf8"),/financeScopedVersionSql/);
   assert.match(readFileSync("src/finance/admin-finance-export.ts","utf8"),/readFinanceSourceVersion\(client\)/);
   assert.doesNotMatch(readFileSync("src/finance/admin-finance-routes.ts","utf8"),/SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY/);
@@ -209,6 +211,7 @@ test('legacy order document bounds original history, later opening admission and
  const ready={native_orders:true,legacy_orders:true,history_coverage:true};
  const scoped=financeScopedVersionSql({...ready,legacy_duty_finance:true},{mode:'document',documentRef:'LEGACY_ORDER:old-1'})!;
  assert.deepEqual(scoped.values,['old-1']);
+ assert.match(scoped.text,/admin-finance-proof\.r7\.typed-document/);
  for(const required of ['history_bound','finance_observation_admission','legacy_order_duty','legacy_duty_finance_fact','la_pay_order','la_refund_record','la_distribution_order'])assert.ok(scoped.text.includes(required));
  assert.match(financeVersionSql(ready),/wallet_coverage/);assert.match(financeVersionSql(ready),/finance_opening_basis/);
  assert.ok(financeScopedVersionSql(ready,{mode:'document',documentRef:'ORDER:native-1'}),'native scope stays narrow');
@@ -254,14 +257,28 @@ test('lookup raw snapshot keys are equivalent to full evidence across filters, p
    assert.deepEqual(fixture.query(next.text,next.values).rows,fixture.query(old.text,old.values).rows,JSON.stringify({q,scope,kind,page}));comparisons++;
   }
   const filters=parseAdminFinanceFilters(new URLSearchParams('period=0'),new Date(),false),query=financeLookupPageSql(ADMIN_FINANCE_LEDGER_SQL,adminFinanceObservationSql({},true),{native_orders:true,legacy_orders:true},{filters,lookup:{exact:false},page:1,pageSize:20},true),rows=fixture.query(query.text,query.values).rows;
-  assert.equal(comparisons,252);assert(rows.some(r=>r.ref==='ORDER:o2'),'an unposted unpaid order remains a real document');assert.equal(rows.filter(r=>r.ref==='ORDER:o1').length,1);// A-3: the withdrawal application's 1002/1003/1004/1005 posting no longer ranks as its own document, so the paged口径 counts applications instead of technical rows.
- assert.equal(Number(rows[0]!.entry_count),4);
+  assert.equal(comparisons,252);assert(rows.some(r=>r.ref==='ORDER:o2'),'an unposted unpaid order remains a real document');assert.equal(rows.filter(r=>r.ref==='ORDER:o1').length,1);
+  assert(rows.some(r=>r.ref==='HISTORY_EARNINGS:h1'),'unproved withdrawal children remain searchable');
+  assert.equal(Number(rows[0]!.entry_count),5);
   for(const exact of [false,true])for(const period of ['0','1'])for(const bucket of ['ALL','AVAILABLE','PENDING_EARNINGS'])for(const state of ['ALL','HISTORICAL_OBSERVED','ORDER_RECORDED']){
    const f=parseAdminFinanceFilters(new URLSearchParams({q:'FLOW-1',period,bucket,state,from:'2026-10-03',to:'2026-10-03'}),new Date(),false),scope={filters:f,lookup:{exact},page:1,pageSize:2};
    const old=financeLookupPageSql(ADMIN_FINANCE_LEDGER_SQL,adminFinanceObservationSql({}),{native_orders:true,legacy_orders:true},scope),next=financeLookupPageSql(ADMIN_FINANCE_LEDGER_SQL,adminFinanceObservationSql({},true),{native_orders:true,legacy_orders:true},scope,true);
    assert.deepEqual(fixture.query(next.text,next.values).rows,fixture.query(old.text,old.values).rows,JSON.stringify({exact,period,bucket,state}));
   }
   assert.doesNotMatch(query.text,/canonical',o\.source_canonical|legacyUserId/);assert.match(ADMIN_FINANCE_LOOKUP_OBSERVATION_SQL,/o\.snapshot AS extra_evidence/);assert.match(adminFinanceObservationSql({}),/'canonical',o\.source_canonical/);
+ }finally{fixture.close();}
+});
+
+test('withdrawal lookup counts records without adding amounts and exact child numbers remain searchable',()=>{
+ const history=[
+  {id:'apply',subject_id:'u1',subject_name:'用户一',source_type:'LEGACY_MYSQL',source_system:'legacy',source_entity:'la_withdraw_apply',source_id:'55',reference_no:'APPLY-55',amount:'734.00',at:'2026-10-03T01:00:00.000000Z',extra_evidence:{snapshot:{referenceSn:'APPLY-55'}}},
+  {id:'debit',subject_id:'u1',subject_name:'用户一',source_type:'LEGACY_MYSQL',source_system:'legacy',source_entity:'la_log_earnings',source_id:'66',reference_no:'APPLY-55',amount:'734.00',action:'2',at:'2026-10-03T01:00:01.000000Z',extra_evidence:{snapshot:{legacyChangeType:1002,legacyLogNumber:'DEBIT-66',referenceId:'55',referenceSn:'APPLY-55'}}},
+  {id:'orphan',subject_id:'u1',subject_name:'用户一',source_type:'LEGACY_MYSQL',source_system:'legacy',source_entity:'la_log_earnings',source_id:'67',reference_no:'UNKNOWN-APPLY',amount:'10.00',action:'1',at:'2026-10-03T01:01:00.000000Z',extra_evidence:{snapshot:{legacyChangeType:1004,legacyLogNumber:'ORPHAN-67',referenceId:'99',referenceSn:'UNKNOWN-APPLY'}}},
+ ];
+ const fixture=new FinanceSqlFixture({history});try{
+  const page=(q:string,exact:boolean)=>{const filters=parseAdminFinanceFilters(new URLSearchParams({q,kind:'WITHDRAWAL',period:'0'}),new Date(),false);const query=financeLookupPageSql('SELECT * FROM fixture_ledger','SELECT * FROM fixture_history',{}, {filters,lookup:{exact},page:1,pageSize:20});assert.doesNotMatch(query.text,/\bsum\s*\(/i);return fixture.query(query.text,query.values).rows;};
+  const all=page('',false);assert.deepEqual(all.map(row=>row.ref).sort(),['HISTORY_EARNINGS:debit','HISTORY_EARNINGS:orphan','HISTORY_WITHDRAWAL:apply']);assert.equal(Number(all[0]!.document_count),3);assert.equal(Number(all[0]!.entry_count),3);
+  for(const exact of [false,true]){const debit=page('DEBIT-66',exact);assert.deepEqual(debit.map(row=>row.ref),['HISTORY_EARNINGS:debit']);assert.equal(Number(debit[0]!.document_count),1);assert.deepEqual(page('ORPHAN-67',exact).map(row=>row.ref),['HISTORY_EARNINGS:orphan']);}
  }finally{fixture.close();}
 });
 

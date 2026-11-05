@@ -3,72 +3,47 @@
 .wallet-local-tabs a { display: inline-flex; align-items: center; min-height: 44px; padding: 8px 0; border-bottom: 2px solid transparent; color: var(--color-text-secondary); font-size: var(--type-label-size); font-weight: var(--type-label-weight); line-height: var(--type-label-leading); }
 .wallet-local-tabs a[aria-current="page"] { color: var(--account-accent); border-bottom-color: var(--account-accent); font-weight: 600; }
 
-/* 现代账单流水类别筛选药丸栏 */
-.wallet-filter-container { margin: 16px 0 20px; padding: 16px 20px; border-radius: 14px; background: var(--color-bg-card); border: 1px solid var(--color-border-subtle); box-shadow: 0 1px 3px rgba(0,0,0,0.02); }
-.wallet-filter-header { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
-.wallet-filter-label { font-size: 13px; font-weight: 650; color: var(--color-text-secondary); flex: none; }
-.wallet-filter-pills { display: flex; flex-wrap: wrap; gap: 8px; }
-.wallet-filter-pill { display: inline-flex; align-items: center; min-height: 32px; padding: 4px 14px; border-radius: 999px; background: var(--color-bg-elevated); border: 1px solid var(--color-border-subtle); color: var(--color-text-secondary); font-size: 13px; font-weight: 500; text-decoration: none; transition: all 0.15s ease; }
-.wallet-filter-pill:hover { border-color: var(--color-border-default); color: var(--color-text-primary); }
-.wallet-filter-pill[aria-current="page"] { background: var(--account-accent, #eab308); color: var(--color-accent-brand-text, #fff); border-color: transparent; font-weight: 650; }
-
-.wallet-filter-secondary { display: flex; align-items: center; justify-content: space-between; margin-top: 12px; padding-top: 12px; border-top: 1px dashed var(--color-border-subtle); flex-wrap: wrap; gap: 10px; }
+/* 时间筛选仅作用于已加载的记录。 */
+.wallet-filter-container { margin: 16px 0 20px; }
+.wallet-filter-label { font-size: 13px; font-weight: 600; color: var(--color-text-secondary); flex: none; margin-right: 4px; }
 .wallet-filter-quick-toggles { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-.wallet-toggle-chip { background: var(--color-bg-elevated); border: 1px solid var(--color-border-subtle); padding: 4px 12px; border-radius: 6px; font-size: 12px; color: var(--color-text-secondary); cursor: pointer; transition: all 0.15s ease; }
+.wallet-toggle-chip { min-height: 44px; background: var(--color-bg-elevated); border: 1px solid var(--color-border-subtle); padding: 8px 14px; border-radius: 8px; font-size: 13px; color: var(--color-text-secondary); cursor: pointer; transition: border-color 0.15s ease, color 0.15s ease, background-color 0.15s ease; }
 .wallet-toggle-chip:hover { border-color: var(--color-border-default); color: var(--color-text-primary); }
 .wallet-toggle-chip.active { background: var(--account-accent-muted, rgba(234, 179, 8, 0.15)); border-color: var(--account-accent); color: var(--account-accent-hover, #ca8a04); font-weight: 600; }
+.wallet-toggle-chip:focus-visible { outline: 2px solid var(--account-accent); outline-offset: 3px; }
 
-/* Devl Billing Overview 2-Card Top Grid (对称优雅资产看板) */
-.wallet-overview-top-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 20px; margin: 20px 0 16px; align-items: stretch; }
-.wallet-overview-card { border-radius: 16px; padding: 24px; display: flex; flex-direction: column; justify-content: space-between; border: 1px solid var(--color-border-subtle); background: var(--color-bg-card); box-shadow: 0 1px 3px rgba(0,0,0,0.03); transition: transform 0.15s ease, box-shadow 0.15s ease; }
-.wallet-overview-card:hover { box-shadow: 0 4px 14px rgba(0,0,0,0.05); }
+/* 余额优先，收款资料作为辅助信息。 */
+.wallet-overview-top-grid { display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(0, 0.75fr); gap: 16px; margin: 20px 0 28px; align-items: stretch; }
+.wallet-overview-card { border-radius: 16px; padding: 24px; display: flex; flex-direction: column; border: 1px solid var(--color-border-subtle); background: var(--color-bg-card); }
 .wallet-card-header { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 16px; }
 .wallet-card-title-group { display: flex; align-items: center; gap: 8px; }
 .wallet-card-header-icon { color: var(--account-accent, #eab308); flex-shrink: 0; }
-.wallet-card-title { font-size: 13px; font-weight: 650; color: var(--color-text-secondary); text-transform: uppercase; letter-spacing: 0.5px; }
-.wallet-card-header-link { font-size: 13px; font-weight: 600; color: var(--account-accent); text-decoration: none; }
+.wallet-card-title { font-size: 14px; font-weight: 600; color: var(--color-text-secondary); }
+.wallet-card-header-link { display: inline-flex; align-items: center; min-height: 44px; margin: -12px 0; font-size: 13px; font-weight: 600; color: var(--account-accent); text-decoration: none; }
 .wallet-card-header-link:hover { text-decoration: underline; }
-.wallet-badge-pill { font-size: 11px; font-weight: 600; padding: 2px 9px; border-radius: 999px; background: var(--account-accent-muted, rgba(234, 179, 8, 0.12)); color: var(--account-accent-hover, #ca8a04); border: 1px solid rgba(234, 179, 8, 0.25); }
-.wallet-badge-pill.subtle { background: var(--color-bg-elevated); color: var(--color-text-secondary); border-color: var(--color-border-subtle); }
 
-.wallet-balance-content { display: flex; flex-direction: column; gap: 14px; height: 100%; justify-content: space-between; }
-.wallet-balance-subhint { margin: -6px 0 0; font-size: 12px; color: var(--color-text-tertiary); line-height: 1.5; }
+.wallet-balance-content { display: flex; flex-direction: column; gap: 12px; }
+.wallet-balance-subhint { margin: 0; font-size: 13px; color: var(--color-text-secondary); line-height: 1.6; }
 .wallet-card-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-top: 6px; }
-.wallet-withdraw-btn { min-height: 40px; padding: 8px 20px; border-radius: 10px; font-weight: 650; text-decoration: none; }
-.wallet-entries-btn { min-height: 40px; padding: 8px 16px; border-radius: 10px; font-weight: 600; text-decoration: none; }
+.wallet-withdraw-btn { min-height: 44px; padding: 8px 20px; border-radius: 10px; font-weight: 650; text-decoration: none; }
+.wallet-entries-btn { min-height: 44px; padding: 8px 16px; border-radius: 10px; font-weight: 600; text-decoration: none; }
 
-.wallet-bank-card-container .wallet-bank-card-body { display: flex; flex-direction: column; justify-content: center; height: 100%; }
+.wallet-bank-card-body { display: flex; flex-direction: column; justify-content: center; flex: 1; }
+.wallet-bank-saved strong { display: block; font-size: 18px; font-weight: 650; font-variant-numeric: tabular-nums; letter-spacing: 0.06em; color: var(--color-text-primary); }
+.wallet-bank-saved p, .wallet-bank-state p { margin: 8px 0 0; color: var(--color-text-secondary); font-size: 13px; line-height: 1.6; }
+.wallet-bank-state { color: var(--color-text-secondary); font-size: 14px; line-height: 1.6; }
+.wallet-bank-state strong { color: var(--color-text-primary); font-weight: 600; }
 
-/* 仿真实名借记卡 PaymentCard 视觉 (还原 devl 优雅波浪金属与芯片质感) */
-.bank-card-realistic { position: relative; aspect-ratio: 1.586; width: 100%; max-width: 380px; min-height: 156px; margin: 0 auto; border-radius: 16px; padding: 18px 20px; display: flex; flex-direction: column; justify-content: space-between; background: linear-gradient(135deg, #18181b 0%, #27272a 60%, #09090b 100%); color: #fff; border: 1px solid rgba(255, 255, 255, 0.14); box-shadow: 0 12px 28px -6px rgba(0, 0, 0, 0.4), inset 0 1px 0 rgba(255, 255, 255, 0.18); overflow: hidden; }
-.bank-card-waves { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
-.bank-card-top { display: flex; align-items: center; justify-content: space-between; position: relative; z-index: 1; }
-.bank-card-network { font-size: 11px; font-weight: 750; letter-spacing: 1.2px; color: rgba(255, 255, 255, 0.85); text-transform: uppercase; }
-.bank-chip-svg { filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.4)); flex-shrink: 0; }
-.bank-card-number { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 17px; font-weight: 600; letter-spacing: 2px; color: #fff; text-shadow: 0 1px 2px rgba(0, 0, 0, 0.6); position: relative; z-index: 1; margin: 6px 0; }
-.bank-card-bottom { display: flex; align-items: flex-end; justify-content: space-between; position: relative; z-index: 1; }
-.bank-card-holder .bank-card-label { display: block; font-size: 9px; text-transform: uppercase; color: rgba(255, 255, 255, 0.55); letter-spacing: 0.5px; }
-.bank-card-holder .bank-card-name { display: block; font-size: 13px; font-weight: 600; color: rgba(255, 255, 255, 0.95); margin-top: 1px; }
-.bank-card-bound-badge { font-size: 10px; font-weight: 600; padding: 2px 8px; border-radius: 999px; background: rgba(255, 255, 255, 0.16); backdrop-filter: blur(4px); color: rgba(255, 255, 255, 0.92); border: 1px solid rgba(255, 255, 255, 0.2); }
-
-/* 未绑卡虚线卡槽 (精致 devl 空态卡片) */
-.bank-card-unbound-slot { min-height: 156px; border-radius: 16px; border: 2px dashed var(--color-border-default); background: var(--color-bg-elevated); padding: 18px; display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; gap: 8px; transition: border-color 0.15s ease; }
-.bank-card-unbound-slot:hover { border-color: var(--account-accent); }
-.unbound-slot-icon { width: 38px; height: 38px; border-radius: 50%; background: var(--account-accent-muted, rgba(234, 179, 8, 0.12)); color: var(--account-accent, #eab308); display: grid; place-items: center; }
-.unbound-slot-copy strong { display: block; font-size: 13px; font-weight: 650; color: var(--color-text-primary); }
-.unbound-slot-copy p { margin: 2px 0 0; font-size: 11px; color: var(--color-text-secondary); }
-.unbound-slot-cta { font-size: 12px; min-height: 34px; padding: 4px 16px; border-radius: 8px; text-decoration: none; margin-top: 4px; }
-
-.wallet-withdrawal-global-note { margin: 4px 0 22px; font-size: 12px; color: var(--color-text-secondary); }
-
-/* Devl Billing Overview 通栏数据表格 Section */
+/* 最近流水 */
 .wallet-overview-table-section { margin-top: 10px; }
-.wallet-section-subtitle { margin: 2px 0 0; font-size: 12px; color: var(--color-text-tertiary); font-weight: 400; }
-.wallet-view-all-link { display: inline-flex; align-items: center; gap: 4px; font-size: 13px; font-weight: 600; color: var(--account-accent); text-decoration: none; }
+.wallet-overview-table-section .wallet-section-heading { display: flex; align-items: end; justify-content: space-between; gap: 16px; margin-bottom: 14px; }
+.wallet-overview-table-section .wallet-section-heading h3 { margin: 0; color: var(--color-text-primary); font-size: var(--type-section-title-size); font-weight: var(--type-section-title-weight); line-height: var(--type-section-title-leading); }
+.wallet-section-subtitle { margin: 4px 0 0; font-size: 13px; color: var(--color-text-secondary); font-weight: 400; }
+.wallet-view-all-link { display: inline-flex; align-items: center; gap: 4px; min-height: 44px; font-size: 13px; font-weight: 600; color: var(--account-accent); text-decoration: none; white-space: nowrap; }
 .wallet-view-all-link:hover { text-decoration: underline; }
 
 /* 现代账单 Invoices Table 结构 */
-.personal-wallet .wallet-table-card { border-radius: 14px; border: 1px solid var(--color-border-subtle); background: var(--color-bg-card); overflow: hidden; padding: 0 !important; box-shadow: 0 1px 3px rgba(0,0,0,0.02); }
+.personal-wallet .wallet-table-card { border-radius: 14px; border: 1px solid var(--color-border-subtle); background: var(--color-bg-card); overflow: hidden; padding: 0 !important; }
 .wallet-table-header { display: grid; grid-template-columns: minmax(130px, 0.85fr) minmax(0, 1.6fr) minmax(120px, 1fr) 96px 36px; gap: 14px; padding: 12px 20px; background: var(--color-bg-elevated); border-bottom: 1px solid var(--color-border-subtle); font-size: 12px; font-weight: 600; color: var(--color-text-secondary); letter-spacing: 0.3px; }
 .wallet-table-header .th-amount { text-align: right; }
 .wallet-table-header .th-status { text-align: center; }
@@ -76,8 +51,8 @@
 .wallet-record { display: grid; grid-template-columns: minmax(130px, 0.85fr) minmax(0, 1.6fr) minmax(120px, 1fr) 96px 36px; align-items: center; gap: 14px; padding: 16px 20px; min-height: 72px; border-bottom: 1px solid var(--color-border-subtle); text-decoration: none; color: var(--color-text-primary); transition: background-color 0.15s ease; }
 .wallet-record:last-child { border-bottom: 0; }
 .wallet-record:hover { background-color: var(--color-bg-elevated); }
-.wallet-record-time { color: var(--color-text-secondary); font-size: var(--type-meta-size); line-height: 1.5; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
-.wallet-record-time small { font-size: 11px; color: var(--color-text-tertiary); }
+.wallet-record-time { display: flex; flex-direction: column; gap: 2px; color: var(--color-text-secondary); font-size: var(--type-meta-size); line-height: 1.5; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.wallet-record-time small { font-size: 12px; color: var(--color-text-secondary); }
 .wallet-record:focus-visible { outline: 2px solid var(--account-accent); outline-offset: -2px; }
 
 .wallet-record-copy { min-width: 0; }
@@ -98,6 +73,7 @@
 .wallet-delta-sub.balance { color: rgba(34, 197, 94, 0.85); }
 
 .wallet-record .info-record-status { justify-self: center; }
+.wallet-record-history { justify-self: center; color: var(--color-text-secondary); font-size: 12px; line-height: 1.5; }
 .wallet-record>svg { color: var(--color-text-tertiary); justify-self: end; transition: transform 0.15s ease, color 0.15s ease; }
 .wallet-record:hover>svg { transform: translateX(2px); color: var(--account-accent); }
 .wallet-record:hover .wallet-record-title-row strong { color: var(--account-accent); }
@@ -134,18 +110,31 @@
   .wallet-overview-top-grid { grid-template-columns: 1fr; }
   .personal-wallet .wallet-workbench { grid-template-columns: minmax(0,1.2fr) minmax(230px,1fr); }
 }
+@media(max-width:1099px) {
+  /* Leave the fixed support control outside the wallet record and detail hit areas. */
+  .personal-wallet .wallet-table-card, .personal-wallet .wallet-entry-detail { margin-right: calc(32px + max(14px, env(safe-area-inset-right, 0px))); }
+}
 @media(max-width:700px) {
   .wallet-table-header { display: none; }
   .personal-wallet .wallet-workbench { grid-template-columns: minmax(0,1fr); gap: 14px; }
   .wallet-main-amount { font-size: 28px; }
   .wallet-balance-pair { gap: 18px; }
-  .wallet-record { grid-template-columns: minmax(0,1fr) minmax(70px,40%) 12px; gap: 6px 10px; padding: 15px 0; }
+  .wallet-overview-top-grid { gap: 12px; margin-bottom: 24px; }
+  .wallet-overview-card { padding: 20px; }
+  .wallet-record { grid-template-columns: minmax(0,1fr) minmax(88px,40%) 12px; gap: 6px 10px; padding: 15px 16px; }
   .wallet-record-time { grid-column: 1; grid-row: 2; }
   .wallet-record-copy { grid-column: 1; grid-row: 1; }
-  .wallet-record .info-record-status { grid-column: 2; grid-row: 2; justify-self: start; }
+  .wallet-record .info-record-status, .wallet-record-history { grid-column: 2; grid-row: 2; justify-self: end; }
   .wallet-delta-container { grid-column: 2; grid-row: 1; }
   .wallet-record>svg { grid-column: 3; grid-row: 1/3; }
   .wallet-record-title-row strong { font-size: 15px; }
-  .wallet-filter-header { flex-direction: column; align-items: flex-start; gap: 8px; }
   .wallet-records-footer { flex-direction: column; align-items: flex-start; }
+}
+@media(max-width:360px) {
+  .wallet-record { grid-template-columns: minmax(0,1fr) 12px; gap: 6px 8px; }
+  .wallet-record-copy { grid-column: 1; grid-row: 1; }
+  .wallet-delta-container { grid-column: 1; grid-row: 2; align-items: flex-start; }
+  .wallet-record-time { grid-column: 1; grid-row: 3; flex-direction: row; flex-wrap: wrap; gap: 2px 6px; }
+  .wallet-record .info-record-status, .wallet-record-history { grid-column: 1; grid-row: 4; justify-self: start; }
+  .wallet-record>svg { grid-column: 2; grid-row: 1 / span 4; }
 }

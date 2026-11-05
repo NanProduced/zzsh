@@ -485,7 +485,11 @@ test('quote subtotals distinguish known zero groups from absent quote data', () 
 test('missing term rule stays explicitly unconfirmed', () => {
   assert.equal(listTermRuleLabel(null), '租期规则待确认');
   assert.equal(listTermRuleLabel(''), '租期规则待确认');
-  assert.equal(listTermRuleLabel('日消耗 10M (测试)'), '租期规则 待确认');
+  assert.equal(listTermRuleLabel('  '), '租期规则待确认');
+  assert.equal(listTermRuleLabel('每日消耗10M'), '租期规则 每日消耗10M');
+  assert.equal(listTermRuleLabel('日消耗 10M (测试)'), '租期规则 日消耗 10M');
+  assert.equal(listTermRuleLabel('TEST_ONLY 日消耗10M'), '租期规则 日消耗10M');
+  assert.equal(listTermRuleLabel('(测试)'), '租期规则待确认');
   assert.equal(listTermRuleLabel('按月租用'), '租期规则 按月租用');
 });
 

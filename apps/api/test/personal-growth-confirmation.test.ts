@@ -4,9 +4,11 @@ import type {PoolClient} from "pg";
 import {computeDeltaQuote,projectDeltaQuote,type InternalQuote,type QuoteInput} from "../src/supply/pricing";
 import {quoteToGrowthOfferPlan,type OfferBinding} from "../src/auth/membership-growth";
 import {selectPersonalGrowthOffer,frozenPersonalGrowthV4Valid,type GrowthConfirmationKnown} from "../src/order/personal-growth-confirmation";
-import {rebuildPersonalConfirmation,type PersonalConfirmationOptions} from "../src/order/personal-confirmation";
+import {readPersonalPriceProjection,rebuildPersonalConfirmation,type PersonalConfirmationOptions} from "../src/order/personal-confirmation";
 import {computeContentHash,normalizeContentPayload} from "../src/supply/content-hash";
 import {compatRule} from "./pricing-compat-fixture";
+import {legacyPayload} from "./legacy-listed-fixture";
+import {applyTotalDiscountToQuote} from "../src/auth/membership-total-discount";
 const asOf="2026-10-16T04:00:00.123456Z",binding:OfferBinding={userId:"user-1",ownerUserId:"owner-1",accountId:"account-1",listingVersionId:"version-1",ruleReleaseId:"release-1",quantityDigest:"a".repeat(64)};
 function input(base="47",deposit="30000"):QuoteInput{return {priceVersionId:"price-v1",mode:"SPREAD",roundingPolicy:"HALF_UP_CENT_V1",customerTier:"STANDARD",haffRule:compatRule(base),lines:[{itemId:"haff",quantity:"60000000",pricingKind:"HAFF_RATIO",unit:"HAFF_BASE",customerTier:"STANDARD"}],conditions:{safeBoxCode:"box-a",vitLevel:6,bearLevel:6,termOptionCode:"daily-10m",rentalPricing:{rentalMode:"ordinary"}},termOption:{code:"daily-10m",dailyConsumption:"10000000",durationRounding:"CEIL_DAY"},deposits:{tenantDepositCents:deposit,publisherBailRequirementCents:"0"}};}
 function quote(base="47",deposit="30000"):InternalQuote{const result=computeDeltaQuote(input(base,deposit));assert(result.quotable,result.quotable?"":result.reasonCodes.join(","));return result.quote;}
@@ -60,4 +62,58 @@ test("actual confirmation rebuild skips readRentalMembership when growth is conf
  const result=await rebuildPersonalConfirmation(client,{userId:"user-1",sessionId:"session-1"},{accountId:"account-1",versionId:"version-1",releaseId:"release-1"},options);
  assert.equal(result.snapshot.schema,"personal-quote-v4");assert(!Object.hasOwn(result.snapshot,"membership"));assert(!Object.hasOwn(result.projection,"customerTier"));assert("membershipBenefits" in result.projection);assert.equal(result.projection.membershipBenefits.effectiveTier,"GOLD");assert.equal(result.projection.quote.tenantPayableTotal?.amount,result.projection.quote.resourceTotal.amount);assert.equal(legacyReads,0);
  unknown=true;await assert.rejects(()=>rebuildPersonalConfirmation(client,{userId:"user-1",sessionId:"session-1"},{accountId:"account-1",versionId:"version-1",releaseId:"release-1"},options),(e:unknown)=>(e as {code:string}).code==="MEMBERSHIP_UNKNOWN");assert.equal(legacyReads,0);
+});
+
+test("legacy confirmation uses its frozen base with new growth and rejects missing source or policy",async t=>{
+ const order:typeof import("../src/order/order")=require("../src/order/order"),publishing:typeof import("../src/supply/publishing")=require("../src/supply/publishing"),funding:typeof import("../src/supply/funding-authority")=require("../src/supply/funding-authority"),reference:typeof import("../src/supply/legacy-published-reference")=require("../src/supply/legacy-published-reference");
+ t.mock.method(order,"assertFreshCreateAuthorization",async()=>({ownerUserId:"owner-1",gameId:"game"}));
+ t.mock.method(publishing,"evaluatePublication",async()=>[]);t.mock.method(funding,"isProductionConfirmationFundingReader",()=>true);
+ let sourceValid=true;
+ t.mock.method(reference,"readLegacyPublishedReference",async()=>sourceValid?{digest:"c".repeat(64),observationVersionId:"observation",sourceDigest:"a".repeat(64),legacyId:"42",gradingCode:null,slots:[{position:0,path:"accountsImage/20261101/fixture.png"}]}:null);
+ const payload=normalizeContentPayload(legacyPayload());
+ const version={id:"version-1",account_id:"legacy-account",rule_release_id:"release",review_state:"APPROVED",payload,content_hash:computeContentHash(payload)},account={id:"legacy-account",owner_user_id:"owner-1",game_id:"game",current_version_id:"version-1"};
+ const statements:string[]=[];
+ const client={query:async(sql:string)=>{statements.push(sql);
+  if(sql.includes("FROM zzsh_supply.game"))return {rows:[{current_release_id:"release",enabled:true}]};
+  if(sql.includes("SELECT * FROM zzsh_supply.rental_account"))return {rows:[account]};
+  if(sql.includes("SELECT * FROM zzsh_supply.listing_version"))return {rows:[version]};
+  if(sql.includes("FROM zzsh_supply.listing_publication"))return {rows:[{source:"LEGACY_APPROVED"}]};
+  if(sql.includes("SELECT p.id,p.status"))return {rows:[{id:"price",status:"SEALED",mode:"SPREAD",haff_rule:compatRule("52"),commission_rate:null,rounding_policy:"HALF_UP_CENT_V1",term_version_id:"term"}]};
+  if(sql.includes("FROM zzsh_supply.price_line"))return {rows:[]}; // no new price may replace the frozen legacy base
+  if(sql.includes("FROM zzsh_supply.term_option"))return {rows:[{code:"daily-10m",dailyConsumption:"10000000",durationRounding:"CEIL_DAY"}]};
+  if(sql.includes("AS at"))return {rows:[{at:asOf}]};if(sql.includes(" AS now"))return {rows:[{now:"1792123200"}]};throw new Error("unexpected SQL: "+sql);
+ }} as unknown as PoolClient;
+ let unknown=false;
+ const growthReader:NonNullable<PersonalConfirmationOptions["membershipGrowthReader"]>=async(_c,i)=>{
+  if(unknown)return {knowledge:"UNKNOWN",reason:"GROWTH_UNKNOWN"};
+  const discounted=applyTotalDiscountToQuote(i.baseQuote,"0.95");assert(discounted);
+  const planBinding={userId:i.userId,ownerUserId:i.ownerUserId,accountId:i.accountId,listingVersionId:i.listingVersionId,ruleReleaseId:i.ruleReleaseId,quantityDigest:i.quantityDigest};
+  return {knowledge:"KNOWN",effectiveTier:"GOLD",policyTier:"GOLD",asOfUtc:i.asOfUtc,policyVersion:"1",entitlementIds:[],candidates:[{quote:discounted.quote,plan:quoteToGrowthOfferPlan(discounted.quote,{source:"GROWTH",benefitVersion:"1",binding:planBinding})}]};
+ };
+ const terms={termsVersionId:"terms-1",termsDigest:"e".repeat(64),disclosureVersion:"v1",policyRef:"fixture-policy",policyVersion:"1",title:"Fixture terms",body:"Synthetic terms"};
+ let withTerms=false;
+ const options:PersonalConfirmationOptions={gate:async()=>({occupancy:"FREE",publisherBail:"NOT_REQUIRED",reference:"FIXTURE"}),fundingReader:async()=>({schema:"personal-quote-v2",version:"1",sourceRef:"FIXTURE",baseDepositCents:"20000",publisherBailRequirementCents:"0",vipWaiver:false,svipWaiver:false,fullPayoutPolicyRef:"fixture-policy",fullPayoutPolicyVersion:"1",disclosureVersion:"v1",...(withTerms?{fullPayoutTerms:terms}:{})}),membershipGrowthReader:growthReader};
+ const user={userId:"user-1",sessionId:"session-1"},request={accountId:"legacy-account",versionId:"version-1",releaseId:"release"};
+ const result=await rebuildPersonalConfirmation(client,user,request,options);
+ assert.equal(result.snapshot.schema,"personal-quote-v4");assert.equal(result.snapshot.quote.schemaVersion,3);
+ assert.equal(result.snapshot.quote.resourceTotal.amount,"384.75");assert.equal(result.snapshot.quote.ownerTotal.amount,"349.00");
+ assert.equal(result.projection.quote.baseRenterHaffRatioWanPerYuan,"37");assert.equal(result.snapshot.quote.legacyQuote?.ownerRatio,"43");
+ unknown=true;await assert.rejects(()=>rebuildPersonalConfirmation(client,user,request,options),(e:unknown)=>(e as {code:string}).code==="MEMBERSHIP_UNKNOWN");
+ unknown=false;sourceValid=false;await assert.rejects(()=>rebuildPersonalConfirmation(client,user,request,options),(e:unknown)=>(e as {code:string}).code==="CONFIRMATION_DEPENDENCY_UNAVAILABLE");
+ sourceValid=true;await assert.rejects(()=>rebuildPersonalConfirmation(client,user,request,{...options,membershipGrowthReader:undefined}),(e:unknown)=>(e as {code:string}).code==="MEMBERSHIP_UNKNOWN");
+ // Owner's old election is carried as a fact, but the renter must still see and accept the sealed terms.
+ payload.legacyQuote!.fullPayoutSelected=true;(payload.quoteValues as any).legacyQuote.fullPayoutSelected=true;
+ (payload.declaration.attributes.full_payout_declaration as {selected:boolean}).selected=true;version.content_hash=computeContentHash(payload);
+ t.mock.method(publishing,"evaluatePricePreviewPublication",async()=>[]);
+ t.mock.method(publishing,"readListingPublication",async()=>({source:"LEGACY_APPROVED"} as never));
+ t.mock.method(funding,"readProductionConfirmationFundingForPreview",async()=>options.fundingReader!(client,account as never,version as never) as never);
+ const prepared={account:account as never,game:{current_release_id:"release",enabled:true},asOfUtc:asOf};
+ await assert.rejects(()=>readPersonalPriceProjection(client,user,request,options,prepared),(e:unknown)=>(e as {code:string}).code==="CONFIRMATION_DEPENDENCY_UNAVAILABLE");
+ withTerms=true;const preview=await readPersonalPriceProjection(client,user,request,options,prepared);
+ assert.equal(preview.projection.compensationDisclosure?.terms?.termsDigest,terms.termsDigest);
+ await assert.rejects(()=>rebuildPersonalConfirmation(client,user,request,options),(e:unknown)=>(e as {status:number}).status===409);
+ await assert.rejects(()=>rebuildPersonalConfirmation(client,user,{...request,fullPayoutTermsAcceptance:{termsVersionId:"other",termsDigest:terms.termsDigest,disclosureVersion:terms.disclosureVersion}},options),(e:unknown)=>(e as {status:number}).status===409);
+ const accepted=await rebuildPersonalConfirmation(client,user,{...request,fullPayoutTermsAcceptance:{termsVersionId:terms.termsVersionId,termsDigest:terms.termsDigest,disclosureVersion:terms.disclosureVersion}},options);
+ assert.equal(accepted.snapshot.schema,"personal-quote-v4");assert.equal(accepted.projection.compensationDisclosure?.selected,true);
+ assert.equal(statements.some(sql=>/^\s*(INSERT|UPDATE|DELETE)\b/i.test(sql)),false);
 });

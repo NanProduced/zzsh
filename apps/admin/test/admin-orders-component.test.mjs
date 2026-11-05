@@ -574,6 +574,16 @@ test('frozen account summary is displayed from the existing order payload withou
   assert.equal(calls,1,'the frozen summary reuses the list payload');
 });
 
+test('a source-listed order shows the original base ratio without presenting it as a discounted effective ratio', async t => {
+  const {root,node,AdminOrderChainView}=await setup(t);
+  const value={...chainOrder,haffRatio:{source:'ORDER_QUOTE_SNAPSHOT',state:'KNOWN',wanPerYuan:'37',customerTier:null,referenceOnly:true}};
+  globalThis.fetch=async()=>response(chainPage([value]));
+  await act(async()=>root.render(createElement(AdminOrderChainView,chainProps('source-base-ratio'))));
+  await until(()=>node.textContent.includes(value.displayNo));
+  assert.match(node.textContent,/基础比例 1元=37万哈夫币/);
+  assert.doesNotMatch(node.textContent,/参考比例 1元≈/);
+});
+
 
 test('legacy frozen account is a historical reference, not an order-frozen inventory or actual term', async t => {
   const {root,node,AdminOrderChainView}=await setup(t);

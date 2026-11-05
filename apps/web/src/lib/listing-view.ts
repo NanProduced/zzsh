@@ -43,6 +43,8 @@ export type ListingCardData = {
   fullPayoutSelected?: boolean | null;
   /** Published base ratio, not an equivalent member rate or rental eligibility. */
   baseRenterHaffRatioWanPerYuan?: string | null;
+  /** A legacy source base ratio, before any new-platform member benefit. */
+  baseRatioReferenceOnly?: boolean;
   id: string;
   gameId?: string;
   versionId?: string;
@@ -282,6 +284,7 @@ export function toListingCard(listing: PublicListing): ListingCardData {
     displayNo: listing.displayNo ?? null,
     fullPayoutSelected: listing.fullPayoutSelected ?? null,
     baseRenterHaffRatioWanPerYuan: listing.quote.baseRenterHaffRatioWanPerYuan ?? null,
+    baseRatioReferenceOnly: listing.quote.schemaVersion === 3,
     title: listing.title?.trim() || structuredTitle || (listing.displayNo ? `账号 ${listing.displayNo}` : "账号资料待补充"),
     imageUrl: firstMedia?.url,
     media,

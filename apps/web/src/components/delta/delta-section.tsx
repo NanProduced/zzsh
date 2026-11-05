@@ -23,7 +23,7 @@ export interface DeltaSectionProps {
 
 export function HomeFastAccountRow({ data }: { data: AccountCardData }) {
   const title = deriveAccountTitle(data);
-  const ratio = authoritativeRatioLabel(data.baseRenterHaffRatioWanPerYuan);
+  const ratio = authoritativeRatioLabel(data.baseRenterHaffRatioWanPerYuan, data.baseRatioReferenceOnly);
   const href = accountHref(data.id);
   const rememberDetail = (event: MouseEvent<HTMLAnchorElement>) => {
     if (event.button === 0 && !event.metaKey && !event.ctrlKey && !event.shiftKey && !event.altKey)

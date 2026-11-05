@@ -58,7 +58,8 @@ export class FinanceSqlFixture {
     const base = (source: string) => source.replace(/\s+ORDER BY [lo]\.id COLLATE "C" LIMIT \$1\s*$/, "");
     const observation = base(ADMIN_FINANCE_OBSERVATION_SQL);
     const typedSource = "SELECT o.* FROM (SELECT h.*,subject_id AS user_id,at AS source_event_at,extra_evidence->'snapshot' AS snapshot FROM fixture_history h) o";
-    const text = sql.replace(observation + "\n    WHERE o.source_type=", typedSource + "\n    WHERE o.source_type=")
+    const text = sql.replace(observation + " WHERE o.source_type=", typedSource + " WHERE o.source_type=")
+      .replace(observation + "\n    WHERE o.source_type=", typedSource + "\n    WHERE o.source_type=")
       .replaceAll(base(ADMIN_FINANCE_LEDGER_SQL), "SELECT * FROM fixture_ledger").replaceAll(base(adminFinanceLedgerSql(false)),"SELECT * FROM fixture_ledger")
       .replaceAll(base(ADMIN_FINANCE_LOOKUP_OBSERVATION_SQL),"SELECT "+HISTORY_COLUMNS.split(' ').map(c=>c==='extra_evidence'?"extra_evidence->'snapshot' AS extra_evidence":c).join(',')+" FROM fixture_history")
       .replaceAll(base(ADMIN_FINANCE_OBSERVATION_SQL), "SELECT * FROM fixture_history")
@@ -71,6 +72,7 @@ export class FinanceSqlFixture {
       .replace(/::boolean\b/g, "")
       .replace(/::jsonb\b/g, "").replaceAll('jsonb_build_object(','json_object(').replaceAll('jsonb_array_length(','json_array_length(')
       .replace(/r\.extra_evidence(?:->'snapshot')?->>'(?:legacyChangeType|legacyLogNumber)'/g,match=>`CAST(${match} AS TEXT)`)
+      .replace(/o\.snapshot->>'legacyChangeType'/g,match=>`CAST(${match} AS TEXT)`)
       .replaceAll('sum(r.delta::numeric)','exact_cents_sum(r.delta)').replace(/::numeric\b/g, "")
       .replace(/to_char\(([\w.]+) AT TIME ZONE 'UTC','[^']*'\)/g, "$1")
       .replace(/([\w.]+) ~ ('[^']*')/g, "regexp($2,$1)")

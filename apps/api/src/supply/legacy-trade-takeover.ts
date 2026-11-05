@@ -8,9 +8,11 @@ import { validateDeltaPublicationAttributes } from "./delta-rental";
 import { readFundingPolicyForRelease } from "./funding-authority";
 import { validateOwnerDepositAmount } from "./funding-policy";
 import { DELTA_LEGACY_RESOURCES, lockLegacySource, normalizeResolutionInput, readLegacyMap, resolveLegacyObservationToDraft, type LegacyDraftResolutionInput } from "./legacy-observation";
-import { legacyDisplayDigest, parseLegacyDisplaySnapshot, type LegacyDisplaySnapshot } from "./legacy-display-snapshot";
+import { convertLegacyDisplayFields, legacyDisplayDigest, parseLegacyDisplaySnapshot, type LegacyDisplaySnapshot } from "./legacy-display-snapshot";
+import { readLegacyListedSource } from "./legacy-listed-source";
+import { readLegacyListedPolicy } from "./legacy-listed-policy";
 import { readLegacyPublishedReference } from "./legacy-published-reference";
-import { lockPublishingAccount, currentVersion, readDeclaration, saveListingDraft, quoteListing, reviewListing, assertCurrentRelease, checkAccountRevision, type LegacyTakeoverGradingContext, type ListingVersion, type PublishingAccount, type SupplyGateReader } from "./publishing";
+import { createListingDraft, lockPublishingAccount, currentVersion, readDeclaration, saveListingDraft, quoteListing, reviewListing, assertCurrentRelease, checkAccountRevision, type LegacyTakeoverGradingContext, type ListingVersion, type PublishingAccount, type SupplyGateReader } from "./publishing";
 import { assertGameScope, conflict, ensureOnlyFields, fingerprintRequest, invalid, newSupplyId, sha256Hex, withIdempotency } from "./supply-util";
 import { legacyPlanYuanToCents } from "../order/legacy-continuation-model";
 
@@ -25,6 +27,8 @@ export type LegacyTradeIntake = {
   media: Array<{ assetId: string; byteHash: string; position: number; technicalState: string; accessClass: string }>;
   /** Reviewed extract row, kept in the batch file and the normal takeover audit, not a new runtime table. */
   sourceFieldEvidence: { canonical: string; digest: string; extractSha256: string; evidenceRef: string };
+  /** Supplied only by the reviewed maintenance loader, never a public account declaration. */
+  legacyQuoteEvidence?: { sourceCanonical:string; policyCanonical:string; policyBinding:Parameters<typeof readLegacyListedPolicy>[1] };
 };
 export function assertLegacyTradeSourceFields(input: LegacyTradeIntake) {
   const proof = input.sourceFieldEvidence;
@@ -120,7 +124,8 @@ async function authorize(client: PoolClient, actor: TradeActor, a: PublishingAcc
   requirePermission(access, "supply.catalog.manage"); requirePermission(access, "supply.review.decide");
   await assertGameScope(client, actor.id, access?.isBoss === true, a.game_id);
 }
-async function assertTierCoverage(client: PoolClient, a: PublishingAccount) {
+async function assertTierCoverage(client: PoolClient, a: PublishingAccount, version?: ListingVersion) {
+  if (version?.payload?.schemaVersion === 3 && version.payload.quoteSource === "LEGACY_QUOTED") return;
   // The new growth/benefit chain computes on the formal STANDARD base at confirmation (auth-runtime
   // injects the growth reader; a closed switch returns UNKNOWN and never falls back to the retired
   // legacy member tiers). Publish readiness therefore checks the STANDARD base lines only — the
@@ -149,7 +154,7 @@ async function assertMaterialized(client: PoolClient, a: PublishingAccount, plan
   }
   if (canonicalize(declaration.mediaBindings) !== canonicalize(plan.expectedMedia)) throw conflict("MATERIALIZATION_MEDIA_MISMATCH");
   await assertMediaBindingSubject(client, a, v);
-  await assertTierCoverage(client, a);
+  await assertTierCoverage(client, a, v);
   const policy = await readFundingPolicyForRelease(client, v.rule_release_id!);
   if (!policy) throw conflict("FUNDING_POLICY_UNKNOWN");
   validateOwnerDepositAmount(policy, (v.attributes.owner_deposit_declaration as { amountCents: string }).amountCents, (v.attributes.full_payout_declaration as { selected: boolean }).selected);
@@ -163,10 +168,11 @@ async function publishTakenOverDraft(client: PoolClient, a: PublishingAccount, a
   await assertMediaBindingSubject(client, a, v);
   const selected = (v.attributes.full_payout_declaration as { selected?: boolean })?.selected;
   if (typeof selected !== "boolean") throw conflict("FUNDING_POLICY_UNKNOWN");
-  if (!selected) {
+  if (!selected || v.payload.schemaVersion === 3 && v.payload.quoteSource === "LEGACY_QUOTED") {
     await client.query(`INSERT INTO zzsh_supply.rule_acceptance(id,owner_user_id,account_id,listing_version_id,rule_release_id,accepted_content_hash,acceptance_kind,authorization_evidence)
       VALUES($1,$2,$3,$4,$5,$6,'LEGACY_TAKEOVER_AUTHORIZED',$7::jsonb) ON CONFLICT(owner_user_id,listing_version_id,rule_release_id,accepted_content_hash) DO NOTHING`,
-      [newSupplyId("accept"), a.owner_user_id, a.id, v.id, v.rule_release_id, v.content_hash, JSON.stringify({ sourceSystem: source.sourceSystem, sourceEntity: source.sourceEntity, legacyId: source.legacyId, sourceDigest: source.sourceDigest, observationVersionId: source.expectedObservationVersionId, authorizingAdminId: actor.id, batchId })]);
+      [newSupplyId("accept"), a.owner_user_id, a.id, v.id, v.rule_release_id, v.content_hash, JSON.stringify({ sourceSystem: source.sourceSystem, sourceEntity: source.sourceEntity, legacyId: source.legacyId, sourceDigest: source.sourceDigest, observationVersionId: source.expectedObservationVersionId, authorizingAdminId: actor.id, batchId,
+        ...(selected ? { legacyFullPayout:"1", basis:"ADMIN_AUTHORIZED_LEGACY_ELECTION" } : {}) })]);
   } else {
     const accepted = (await client.query(`SELECT 1 FROM zzsh_supply.rule_acceptance WHERE owner_user_id=$1 AND listing_version_id=$2 AND rule_release_id=$3 AND accepted_content_hash=$4 AND acceptance_kind='OWNER_ACCEPTED' AND full_payout_terms_version_id IS NOT NULL`, [a.owner_user_id, v.id, v.rule_release_id, v.content_hash])).rowCount;
     if (!accepted) throw conflict("TERMS_ACCEPTANCE_REQUIRED");
@@ -204,6 +210,16 @@ async function assertLegacyTradeBindings(client: PoolClient, account: Publishing
   if (!mapping || mapping.account_id !== account.id || mapping.source_digest !== intake.source.sourceDigest || mapping.version_id !== intake.source.expectedObservationVersionId) throw conflict("SOURCE_BINDING_MISMATCH");
   const display = await readBoundLegacyDisplay(client, account.id, intake.source, intake.display);
   assertLegacyTradeSourceFields(intake);
+  if (intake.legacyQuoteEvidence) {
+    const evidence = intake.legacyQuoteEvidence, raw = readLegacyListedSource(evidence.sourceCanonical, intake.source);
+    const rawRow = JSON.parse(evidence.sourceCanonical) as Record<string,unknown>, binding=evidence.policyBinding;
+    if (binding.sourceId !== intake.source.legacyId || binding.sourceDigest !== intake.source.sourceDigest || binding.legacyGameId !== rawRow.game_id
+      || raw.fullPayoutSelected !== (intake.isFullPayout === "1") || raw.rentalMode !== intake.display.rentalMode
+      || intake.depositYuan === null || legacyPlanYuanToCents(raw.depositYuan) !== legacyPlanYuanToCents(intake.depositYuan)
+      || raw.rentalMode !== "ordinary" && raw.ownerRatio !== intake.ownerRatioB
+      || canonicalize(convertLegacyDisplayFields(rawRow)) !== canonicalize(display)) throw conflict("LEGACY_QUOTE_SOURCE_BINDING_MISMATCH");
+    readLegacyListedPolicy(evidence.policyCanonical,binding);
+  }
   const observation = (await client.query(`SELECT title,description FROM zzsh_supply.listing_version WHERE id=$1 AND account_id=$2 AND origin='LEGACY_OBSERVATION'`, [mapping.version_id, account.id])).rows[0];
   if (!observation || observation.title !== intake.title || observation.description !== intake.description) throw conflict("OBSERVATION_DECLARATION_MISMATCH");
   return display;
@@ -310,6 +326,7 @@ export async function takeoverLegacyTrade(client: PoolClient, actor: TradeActor,
       const a = account!;
       const reviewed = reviewedTakeoverDeclaration(input.reviewedDeclaration);
       const preparedToken = input.preparedDraft === undefined ? undefined : parsePreparedDraft(input.preparedDraft);
+      if (preparedToken && intake.legacyQuoteEvidence) throw conflict("LEGACY_QUOTE_REQUIRES_FRESH_SOURCE_PREPARATION");
       const declarationIntake = reviewed ? { ...intake, title: reviewed.title } : intake;
       const catalog = (await client.query<TradeCatalogItem>(`SELECT id,code,unit,quantity_scale AS "quantityScale" FROM zzsh_supply.billable_item WHERE game_id=$1 AND enabled ORDER BY id`, [a.game_id])).rows;
       const reference = await legacyReferenceForIntake(client, intake);
@@ -326,7 +343,7 @@ export async function takeoverLegacyTrade(client: PoolClient, actor: TradeActor,
       }
       const grading = legacyGradingContext(current.id, intake.source, display!);
       const selected = intake.isFullPayout === "1";
-      const result = selected ? { accountId: current.id, versionId: materialized.id, releaseId: materialized.rule_release_id, contentHash: materialized.content_hash, state: "OWNER_ACCEPTANCE_REQUIRED" as const }
+      const result = selected && materialized.payload?.schemaVersion !== 3 ? { accountId: current.id, versionId: materialized.id, releaseId: materialized.rule_release_id, contentHash: materialized.content_hash, state: "OWNER_ACCEPTANCE_REQUIRED" as const }
         : await publishTakenOverDraft(client, current, actor, intake.source, input.batchId, gate, grading);
       await recordAudit(client, { actorType: "admin", actorId: actor.id, sessionId: actor.sessionId, requestId: actor.requestId, action: operation, objectType: "rental_account", objectId: current.id, outcome: "SUCCESS", details: { batchId: input.batchId, source: intake.source, inputDigest: plan.inputDigest,
         ...(reviewed ? { reviewedDeclaration: { originalTitle: intake.title, title: reviewed.title, reason: reviewed.reason } } : {}),
@@ -378,12 +395,26 @@ function preparedDeclarationPlan(intake: LegacyTradeIntake, catalog: readonly Tr
 async function materializeTakeoverDraft(client: PoolClient, actor: TradeActor, a: PublishingAccount, intake: LegacyTradeIntake, plan: LegacyTradePlan, catalog: readonly TradeCatalogItem[], display: LegacyDisplaySnapshot, gate: SupplyGateReader) {
   const v = a.current_version_id ? await currentVersion(client, a) : null;
   if (v?.origin === "LEGACY_OBSERVATION") await resolveLegacyObservationToDraft(client, a.id, intake.source, actor, gate);
+  else if (v?.origin === "NATIVE" && v.review_state === "APPROVED" && intake.legacyQuoteEvidence) {
+    const prior = (await client.query(`SELECT 1 FROM zzsh_supply.listing_publication p JOIN zzsh_iam.audit_event e ON e.object_id=p.account_id
+      WHERE p.account_id=$1 AND p.version_id=$2 AND p.owner_user_id=$3 AND p.content_hash=$4 AND p.source='LEGACY_APPROVED'
+        AND e.action='supply.legacy.trade_takeover' AND e.outcome='SUCCESS' AND e.details->>'versionId'=p.version_id
+        AND e.details#>>'{source,sourceSystem}'=$5 AND e.details#>>'{source,sourceEntity}'=$6 AND e.details#>>'{source,legacyId}'=$7
+        AND e.details#>>'{source,sourceDigest}'=$8 AND e.details#>>'{source,expectedObservationVersionId}'=$9 LIMIT 1`,
+      [a.id,v.id,a.owner_user_id,v.content_hash,intake.source.sourceSystem,intake.source.sourceEntity,intake.source.legacyId,intake.source.sourceDigest,intake.source.expectedObservationVersionId])).rowCount;
+    if (!prior) throw conflict("LEGACY_PREVIOUS_PUBLICATION_SOURCE_MISMATCH");
+    await createListingDraft(client,a,a.revision,gate);
+  }
   else if (!v || v.origin !== "NATIVE" || v.review_state !== "DRAFT") throw conflict("TAKEOVER_DRAFT_REQUIRED");
   else await assertSameSourceOrdinaryDraft(client, a, v, intake, buildLegacyTradeDeclaration(ordinaryDraftIntake(intake), catalog).declaration, plan);
   const current = await lockPublishingAccount(client, a.id);
   const reference = (plan.draft!.attributes as Record<string, unknown>).legacy_published_reference;
   await saveListingDraft(client, current, { ...plan.draft, expectedRevision: current.revision }, gate, typeof reference === "string" ? reference : undefined);
-  await quoteListing(client, current, current.revision, legacyGradingContext(current.id, intake.source, display));
+  const evidence = intake.legacyQuoteEvidence;
+  await quoteListing(client, current, current.revision, legacyGradingContext(current.id, intake.source, display), evidence ? {
+    actorId:actor.id, sourceCanonical:evidence.sourceCanonical, policyCanonical:evidence.policyCanonical, policyBinding:evidence.policyBinding, display,
+    source:{ sourceSystem:intake.source.sourceSystem, sourceEntity:intake.source.sourceEntity, legacyId:intake.source.legacyId, sourceDigest:intake.source.sourceDigest, observationVersionId:intake.source.expectedObservationVersionId },
+  } : undefined);
   return { current, materialized: await assertMaterialized(client, current, plan) };
 }
 type PreparedMedia = { assetId: string; position: number; byteHash: string; assetRevision: string };

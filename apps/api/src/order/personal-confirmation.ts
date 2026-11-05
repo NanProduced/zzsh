@@ -15,6 +15,7 @@ import { assertFullPayoutTermsAccepted, parseFullPayoutTermsAcceptance, type Ful
 import { assertFinalConfirmationFunding, isProductionConfirmationFundingReader, readProductionConfirmationFundingForPreview } from "../supply/funding-authority";
 import { EFFECTIVE_PUBLICATION_STATE_SQL, isEffectivePublicationState } from "../supply/listing-query";
 import { ensureOnlyFields, invalid, notFound } from "../supply/supply-util";
+import { readLegacyPublishedReference } from "../supply/legacy-published-reference";
 import { assertFreshCreateAuthorization, type OrderUserContext } from "./order";
 import { requireConfirmationKey, signConfirmation, verifyConfirmation, type ConfirmationKey } from "./confirmation-token";
 
@@ -117,6 +118,15 @@ async function calculateBoundPersonalPrice(client:PoolClient,context:OrderUserCo
   if(account.current_version_id!==version.id) { if(purpose === "READ") throw new SecurityApiError(409,"CONFIRMATION_CHANGED","Listing version changed"); throw notFound(); }
   if(version.rule_release_id!==input.releaseId || game.current_release_id!==input.releaseId)throw new SecurityApiError(409,"CONFIRMATION_CHANGED","Listing rules changed");
   if(version.payload.accountId!==account.id || version.payload.gameId!==account.game_id || computeContentHash(version.payload)!==version.content_hash)unavailable("Listing snapshot cannot be verified");
+  const legacy = version.payload.schemaVersion === 3;
+  if (legacy) {
+    const source = version.payload.legacyQuote, marker = version.payload.declaration.attributes.legacy_published_reference;
+    const reference = typeof marker === "string" ? await readLegacyPublishedReference(client, account.id, marker) : null;
+    if (version.payload.quoteSource !== "LEGACY_QUOTED" || source?.sourceSystem !== "legacy_mysql_restore" || source.sourceEntity !== "la_rental_accounts"
+      || !reference || reference.legacyId !== source.legacyId || reference.observationVersionId !== source.observationVersionId || reference.sourceDigest !== source.sourceDigest)
+      unavailable("Legacy listing source cannot be verified");
+    if (!options.membershipGrowthReader) throw new SecurityApiError(503,"MEMBERSHIP_UNKNOWN","Membership growth is unavailable");
+  }
   const publication=purpose === "READ" ? await readListingPublication(client,account,version) : (await client.query<{source:string}>(`SELECT source FROM zzsh_supply.listing_publication WHERE version_id=$1 AND account_id=$2 AND owner_user_id=$3 AND rule_release_id=$4 AND content_hash=$5 LIMIT 1`,[version.id,account.id,account.owner_user_id,version.rule_release_id,version.content_hash])).rows[0];
   if(!isEffectivePublicationState(version.review_state, publication?.source)) { if(purpose === "READ") throw notFound(); unavailable("Listing publication evidence cannot be verified"); }
   const blockers=purpose === "READ" ? await evaluatePricePreviewPublication(client,account,version,options.gate) : await evaluatePublication(client,account,version,options.gate);
@@ -169,18 +179,18 @@ async function calculateBoundPersonalPrice(client:PoolClient,context:OrderUserCo
   const rows=(await client.query(`SELECT item_id,pricing_kind,unit_quantity::text,buyer_unit_amount::text,owner_unit_amount::text FROM zzsh_supply.price_line WHERE price_version_id=$1 AND customer_tier=$2 ORDER BY item_id`,[release.id,calculationTier])).rows;
   const prices=new Map(rows.map(r=>[r.item_id,r]));
   const original=normalizeQuote(version.payload.quoteValues);
-  if(original.lines.some(l=>!prices.has(l.itemId)))unavailable("Required membership price is missing");
+  if(!legacy && original.lines.some(l=>!prices.has(l.itemId)))unavailable("Required membership price is missing");
   const term=(await client.query(`SELECT code,daily_consumption::text AS "dailyConsumption",duration_rounding AS "durationRounding" FROM zzsh_supply.term_option WHERE version_id=$1 AND code=$2`,[release.term_version_id,version.payload.declaration.termOptionCode])).rows[0];
   if(!term)unavailable("Frozen term unavailable");
   const attrs=version.payload.declaration.attributes;
   const waive=membership?.tier==="VIP"?f.vipWaiver:membership?.tier==="SVIP"?f.svipWaiver:false;
   const quoteInput: QuoteInput = { priceVersionId: release.id, mode: release.mode, customerTier: calculationTier, roundingPolicy: release.rounding_policy, haffRule: release.haff_rule, ...(release.commission_rate===null?{}:{commissionRate:release.commission_rate}),
-    lines:original.lines.map(line=>{const price=prices.get(line.itemId)!;return {itemId:line.itemId,unit:line.unit,quantity:line.quantity,customerTier:calculationTier,pricingKind:price.pricing_kind,...(price.unit_quantity===null?{}:{unitQuantity:price.unit_quantity}),...(price.buyer_unit_amount===null?{}:{buyerUnitAmount:price.buyer_unit_amount}),...(price.owner_unit_amount===null?{}:{ownerUnitAmount:price.owner_unit_amount})};}),
+    lines:original.lines.map(line=>{if(legacy)return {itemId:line.itemId,unit:line.unit,quantity:line.quantity,customerTier:calculationTier,pricingKind:line.pricingKind,unitQuantity:line.unitQuantity,buyerUnitAmount:line.buyerUnitAmount.amount,ownerUnitAmount:line.ownerUnitAmount.amount};const price=prices.get(line.itemId)!;return {itemId:line.itemId,unit:line.unit,quantity:line.quantity,customerTier:calculationTier,pricingKind:price.pricing_kind,...(price.unit_quantity===null?{}:{unitQuantity:price.unit_quantity}),...(price.buyer_unit_amount===null?{}:{buyerUnitAmount:price.buyer_unit_amount}),...(price.owner_unit_amount===null?{}:{ownerUnitAmount:price.owner_unit_amount})};}),
     conditions:{safeBoxCode:attrs.safe_box_code as string,vitLevel:(attrs.vit_level??attrs.vitLevel) as number,bearLevel:(attrs.bear_level??attrs.bearLevel) as number,termOptionCode:term.code,pricingOptionCode:version.payload.declaration.pricingOptionCode,...(attrs.rentalPricing===undefined?{}:{rentalPricing:normalizeRentalPricing(attrs.rentalPricing)})},termOption:term,
     entitlements:original.expiryDisclosures.map(e=>({entitlementId:e.entitlementId,expiryKind:e.expiresAt===null?"PERMANENT":"TIMED",...(e.expiresAt===null?{}:{expiresAt:e.expiresAt})})),
     deposits:{tenantDepositCents:waive?"0":f.baseDepositCents,publisherBailRequirementCents:f.publisherBailRequirementCents},
   };
-  const result=computeDeltaQuote(quoteInput);
+  const result=legacy?{quotable:true as const,quote:original}:computeDeltaQuote(quoteInput);
   if(!result.quotable)unavailable("Membership price cannot be calculated");
   if(!result.quotable)throw new Error("unreachable");
   const binding = {

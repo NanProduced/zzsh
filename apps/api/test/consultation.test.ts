@@ -3,7 +3,7 @@ import { test } from "node:test";
 import { spawnSync } from "node:child_process";
 import { resolve } from "node:path";
 
-import { MessageScopeRecoveryLifecycle, listAdminConsultations, listConsultationEvents, readConsultationContext, decodeEventCursor, encodeEventCursor, parseEventLimit, parseConsultationBody, parseLimit, parsePresenceBody, parseSupportType, requireSupportAccess, scanSupportFirstResponseBreaches, startMessageScopeRecovery, toView } from "../src/im/consultation";
+import { MessageScopeRecoveryLifecycle, listAdminConsultations, listConsultationEvents, readConsultationContext, readConsultationLegacyOrderReference, decodeEventCursor, encodeEventCursor, parseEventLimit, parseConsultationBody, parseLimit, parsePresenceBody, parseSupportType, requireSupportAccess, scanSupportFirstResponseBreaches, startMessageScopeRecovery, toView } from "../src/im/consultation";
 import { buildYunxinIdentityMarker, deriveYunxinAccountId } from "../src/im/identity-lifecycle";
 import { OrderDispatchLifecycle } from "../src/im/order-dispatch";
 import { reserveSupportCandidateOutcome, resolveSupportConcurrencyLimit } from "../src/im/support-dispatch";
@@ -282,6 +282,7 @@ function consultationReadFixture() {
       kind: "SERVICE", state: "ACTIVE", assignedAdminId: "admin_a", adminName: "客服甲",
       subjectRef: null as string | null, version: 3, messageScopeState: "READY" },
     subjectMatches: [] as { kind: string; id: string; displayNo: string | null; title: string | null; related?: boolean; versionId?: string | null }[],
+    legacyOrders: [] as { id: string; displayNo: string; renter: string; owner: string; deleted?: boolean }[],
     publicVersionId: null as string | null, publicFailure: null as Error | null, publicReads: [] as string[],
     events: [
       { id: "event_c", type: "TRANSFERRED", actorType: "admin", actorId: "missing_admin", fromAdminId: "admin_a", toAdminId: "admin_b", createdAt: "2026-10-11T08:19:04.123457Z" },
@@ -326,6 +327,12 @@ function consultationReadFixture() {
       return { rows: [{ id: "admin_a", name: "客服甲" }, { id: "admin_b", name: "客服乙" }] };
     }
     if (sql.includes('FROM "zzsh_auth_user"."user"')) return { rows: [{ id: "user_a", name: "用户甲" }] };
+    if (sql.includes('FROM zzsh_order.legacy_order_read_snapshot l')) {
+      assert.match(sql, /l\.renter_user_id=\$2 OR l\.owner_user_id=\$2/);
+      assert.match(sql, /source_snapshot->>'is_delete'/);
+      const row=state.legacyOrders.find(item=>item.id===values[0]&&!item.deleted&&(item.renter===values[1]||item.owner===values[1]));
+      return { rows: row?[{id:row.id,displayNo:row.displayNo,party:row.renter===values[1]?"RENTER":"OWNER"}]:[] };
+    }
     if (sql.includes('FROM "zzsh_order"."rental_order" o')) {
       assert.equal(values[2],state.row.userId);
       assert.match(sql,/o\."renter_user_id"=\$3 OR o\."owner_user_id"=\$3/);
@@ -363,6 +370,33 @@ test("event projection keeps newest pages, microseconds and actor roles without 
   assert.ok(f.calls.every(({ sql }) => !/\b(INSERT|UPDATE|DELETE|TRUNCATE)\b/.test(sql)));
   f.state.events = [];
   assert.deepEqual(await listConsultationEvents(f.options, f.actor, "cons_a", null, null), { events: [], nextCursor: null });
+});
+
+test("legacy consultation reference checks current consultation user and keeps source distinct", async () => {
+  const f=consultationReadFixture(), legacy=`legacy_order_${"a".repeat(40)}`;
+  f.state.legacyOrders=[{id:legacy,displayNo:"OLD-123",renter:"user_a",owner:"owner"}];
+  f.state.row.subjectRef=`legacy-order:${legacy}`;
+  const subject=(await readConsultationContext(f.options,f.actor,"cons_a")).subject;
+  assert.deepEqual(subject,{status:"resolved",kind:"ORDER",origin:"LEGACY",displayNo:"OLD-123",title:null,target:{kind:"ORDER",id:legacy},party:"RENTER"});
+  const later=await readConsultationLegacyOrderReference(f.options,f.actor,"cons_a",legacy);
+  assert.equal(later.contractVersion,"im-legacy-order-reference.v1");assert.deepEqual(later.subject,subject);
+  assert.doesNotMatch(JSON.stringify(later),/amount|money|mobile|owner_user_id|renter_user_id/);
+  f.state.legacyOrders[0]!.renter="other";f.state.legacyOrders[0]!.owner="user_a";
+  assert.equal((await readConsultationLegacyOrderReference(f.options,f.actor,"cons_a",legacy)).subject.party,"OWNER");
+  f.state.legacyOrders[0]!.owner="other";
+  await assert.rejects(readConsultationLegacyOrderReference(f.options,f.actor,"cons_a",legacy),(error:any)=>error.status===404);
+  assert.equal((await readConsultationContext(f.options,f.actor,"cons_a")).subject.status,"unresolved");
+  f.state.legacyOrders[0]!.owner="user_a";f.state.legacyOrders[0]!.deleted=true;
+  await assert.rejects(readConsultationLegacyOrderReference(f.options,f.actor,"cons_a",legacy),(error:any)=>error.status===404);
+  await assert.rejects(readConsultationLegacyOrderReference(f.options,f.actor,"cons_a","legacy_order_invalid"),(error:any)=>error.status===404);
+  for(const scenario of ["no-read","other-app","other-owner","closed","expired","locked","frozen"]){
+    const denied=consultationReadFixture();denied.state.legacyOrders=[{id:legacy,displayNo:"OLD-123",renter:"user_a",owner:"owner"}];
+    if(scenario==="no-read")denied.state.permissions=[];if(scenario==="other-app")denied.state.row.appId="app_other";
+    if(scenario==="other-owner")denied.state.row.assignedAdminId="admin_other";if(scenario==="closed")denied.state.row.state="CLOSED";
+    if(scenario==="expired")denied.state.expired=true;if(scenario==="locked")denied.state.locked=true;if(scenario==="frozen")denied.state.security="FROZEN";
+    await assert.rejects(readConsultationLegacyOrderReference(denied.options,denied.actor,"cons_a",legacy));
+    assert(!denied.calls.some(({sql})=>sql.includes('legacy_order_read_snapshot')));
+  }
 });
 
 test("context distinguishes absent and untyped subject without granting directory or membership access", async () => {

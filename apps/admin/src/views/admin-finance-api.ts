@@ -27,6 +27,7 @@ export const reasonLabels: Record<string, string> = {
   AMBIGUOUS_ORIGINAL_BASIS: '原计佣依据存在多个候选',
   FROZEN_CALCULATION_NOT_VERIFIED: '冻结计佣依据未通过完整校验',
   PERIOD_BALANCE_PROOF_NOT_AVAILABLE: "所选期间起止余额尚无完整依据",
+  POSTED_EVENT_AMOUNT_OR_TIME_UNAVAILABLE: '部分已入账记录的金额或时间尚未取得完整依据',
   CURRENT_LEDGER_EXCLUDES_UNADMITTED_LEGACY:'当前勾稽仅覆盖已入账分录，待承接的历史责任另行核对',
   ZERO_FACT_NO_LEDGER_OR_CHANNEL_PAYMENT:'这是有依据的零额事实，没有资金分录或渠道支付',
   CHANNEL_ARRIVAL_NOT_PROVED:'账内记录不证明渠道到账',
@@ -56,8 +57,9 @@ export function financeMoney(cents: string | null | undefined): string {
   return `${value < 0n ? "−" : ""}${(abs / 100n).toLocaleString("zh-CN")}.${(abs % 100n).toString().padStart(2, "0")} 元`;
 }
 export function financeTime(value: string | null | undefined): string { return !value || !Number.isFinite(Date.parse(value)) ? "时间未记录" : new Intl.DateTimeFormat("zh-CN", { timeZone: "Asia/Shanghai", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false }).format(new Date(value)); }
-export type HistoricalFinancePurpose = 'SETTLEMENT_INCOME' | 'OWNER_RENTAL_INCOME' | 'DISTRIBUTION_INCOME' | 'WITHDRAWAL_APPLICATION' | 'WITHDRAWAL_DEBIT' | 'WITHDRAWAL_REJECTED_RETURN' | 'TRANSFER_FAILED_RETURN' | 'WECHAT_WITHDRAWAL_FAILED_RETURN' | 'PLATFORM_CREDIT' | 'PLATFORM_DEBIT' | 'DEPOSIT_COMPENSATION' | 'TASK_SETTLEMENT' | 'UNKNOWN';
+export type HistoricalFinancePurpose = 'SETTLEMENT_INCOME' | 'OWNER_RENTAL_INCOME' | 'DISTRIBUTION_INCOME' | 'WITHDRAWAL_APPLICATION' | 'WITHDRAWAL_DEBIT' | 'WITHDRAWAL_REJECTED_RETURN' | 'TRANSFER_FAILED_RETURN' | 'WECHAT_WITHDRAWAL_FAILED_RETURN' | 'PAYMENT_RECORD' | 'REFUND_RECORD' | 'PLATFORM_CREDIT' | 'PLATFORM_DEBIT' | 'DEPOSIT_COMPENSATION' | 'TASK_SETTLEMENT' | 'UNKNOWN';
 export type HistoricalFinanceDisplay = {refundAttempts?:{source:{type:'LEGACY_MYSQL';entity:'la_refund_log';id:string};originalNumber:string|null;originalStatus:string|null;recordedAmountCents:string|null;occurredAt:string|null;updatedAt:string|null;channelArrival:'UNKNOWN';reasonCodes:string[]}[];sourceRefundFlags?:string[];
+  amountSemantics?: 'BALANCE_RECORD' | 'BUSINESS_RECORD' | 'UNVERIFIED';
   changeType: string | null; purposeCode: HistoricalFinancePurpose; purposeLabel: string; originalLogNumber: string | null;
   recordedAmountCents: string | null; balanceAfterCents: string | null; feeCents: string | null; netCents: string | null;
   originalStatus: string | null; originalStatusLabel: string | null; channelState: 'UNVERIFIED';
@@ -65,13 +67,22 @@ export type HistoricalFinanceDisplay = {refundAttempts?:{source:{type:'LEGACY_MY
 };
 type FinanceRecord = { kind: string; state: string; ref?: string; documentRef?: string; sourceEntity?: string; historical?: HistoricalFinanceDisplay };
 const sourceFamily = (record: FinanceRecord) => (record.ref ?? record.documentRef ?? "").split(":")[0] ?? "";
-export function financeIsHistorical(record: FinanceRecord): boolean { return !!record.historical || record.state.startsWith('HISTORICAL_'); }
-export function financeBusinessLabel(record: FinanceRecord): string { const family=sourceFamily(record); return record.historical?.purposeLabel?.trim() || (family==='PAYMENT_REQUEST'?'付款请求':family==='REFUND_INTENT'?'退款申请':kindLabels[record.kind]) || '资金记录'; }
+export function financeIsHistorical(record: FinanceRecord): boolean { return !!record.historical || record.state?.startsWith('HISTORICAL_') === true; }
+/** Old clients may lack the new field; only the typed original earnings source establishes a balance record. */
+export function financeIsHistoricalBalance(record: FinanceRecord): boolean {
+  return financeIsHistorical(record) && (sourceFamily(record)==='HISTORY_EARNINGS'||record.sourceEntity==='la_log_earnings') && (!record.historical?.amountSemantics || record.historical.amountSemantics==='BALANCE_RECORD');
+}
+export function historicalFinanceAmount(record: FinanceRecord, balanceCents: string | null | undefined): string {
+  if(record.historical?.amountSemantics==='UNVERIFIED')return '记录金额待核实';
+  return financeIsHistoricalBalance(record) ? `历史变动 ${financeMoney(balanceCents)}` : `记录金额 ${financeMoney(record.historical?.recordedAmountCents)}`;
+}
+export function financeBusinessLabel(record: FinanceRecord): string { const family=sourceFamily(record); return record.historical?.amountSemantics==='UNVERIFIED'?'旧平台记录（来源待核）':record.historical?.purposeLabel?.trim() || (family==='PAYMENT_REQUEST'?'付款请求':family==='REFUND_INTENT'?'退款申请':kindLabels[record.kind]) || '资金记录'; }
 export function financeRecordNumber(record: FinanceRecord, fallback: string): string {
   return record.historical?.originalLogNumber ? `原流水号 ${record.historical.originalLogNumber}` : financeIsHistorical(record) ? `记录编号 ${fallback}` : fallback;
 }
 export function financeRecordState(record: FinanceRecord): string {
   if (!financeIsHistorical(record) && record.state === "SUCCEEDED") return sourceFamily(record) === "WITHDRAWAL" || record.sourceEntity === "withdrawal_intent" ? "本地受控成功" : "本地成功记录，渠道另核";
+  if (record.historical?.amountSemantics === 'UNVERIFIED') return '来源待核';
   const original = record.historical?.originalStatusLabel;
   return financeIsHistorical(record) ? original ? original.startsWith('旧平台') ? original : `旧平台状态：${original}` : '旧平台记录' : stateLabels[record.state] ?? '状态未记录';
 }
@@ -85,8 +96,15 @@ export function historicalAssociationPath(historical: HistoricalFinanceDisplay |
   return association.documentRef && access.documentRead ? `/finance/documents/${encodeURIComponent(association.documentRef)}` : null;
 }
 export function historicalFinanceFacts(historical: HistoricalFinanceDisplay): [string, string][] {
-  return [['原流水号', historical.originalLogNumber || '未取得'], ['原金额', financeMoney(historical.recordedAmountCents)], ['变动后余额（旧）', financeMoney(historical.balanceAfterCents)],
-    ['手续费', financeMoney(historical.feeCents)], ['净额', financeMoney(historical.netCents)], ['原用途码', historical.changeType ?? '未取得'], ['原状态码', historical.originalStatus ?? '未取得']];
+  const earnings = historical.purposeCode === 'UNKNOWN' || historical.changeType !== null || historical.originalLogNumber !== null;
+  const withdrawal = historical.purposeCode === 'UNKNOWN' || ['WITHDRAWAL_APPLICATION','WITHDRAWAL_DEBIT','WITHDRAWAL_REJECTED_RETURN','TRANSFER_FAILED_RETURN','WECHAT_WITHDRAWAL_FAILED_RETURN'].includes(historical.purposeCode);
+  const statusApplies = ['PAYMENT_RECORD','REFUND_RECORD','WITHDRAWAL_APPLICATION'].includes(historical.purposeCode);
+  return [...(earnings ? [['原流水号', historical.originalLogNumber || '未取得'] as [string, string]] : []), [historical.amountSemantics==='UNVERIFIED'?'原金额（待核）':'原金额', financeMoney(historical.recordedAmountCents)],
+    ...(earnings || historical.balanceAfterCents !== null ? [[historical.amountSemantics==='UNVERIFIED'?'原记录后余额（待核）':'变动后余额（旧）', financeMoney(historical.balanceAfterCents)] as [string, string]] : []),
+    ...(withdrawal || historical.feeCents !== null ? [[historical.amountSemantics==='UNVERIFIED'?'手续费（待核）':'手续费', financeMoney(historical.feeCents)] as [string, string]] : []),
+    ...(withdrawal || historical.netCents !== null ? [[historical.amountSemantics==='UNVERIFIED'?'净额（待核）':'净额', financeMoney(historical.netCents)] as [string, string]] : []),
+    ...(historical.changeType !== null ? [['原用途码', historical.changeType] as [string, string]] : []),
+    ...(statusApplies || historical.originalStatus !== null ? [[historical.amountSemantics==='UNVERIFIED'?'原状态码（待核）':'原状态码', historical.originalStatus ?? '未取得'] as [string, string]] : [])];
 }
 export type FinanceEntry = { id: string; documentRef: string; documentNumber: string; subjectId: string; subjectName: string; bucket: string; direction: string; deltaCents: string | null; knowledge: string; kind: string; state: string; classification: string; affectsCurrentWallet: boolean; affectsCurrentLedger: boolean; occurredAt: string | null; importedAt: string; sourceType: string; sourceEntity: string; sourceSystem: string; sourceId: string; sourceDigest: string | null; basisId: string | null; reasonCodes: string[]; accountCode: string | null; evidence: Record<string, string | null>; historical?: HistoricalFinanceDisplay };
 export type FinanceOrderLifecycle = { origin: 'NATIVE' | 'LEGACY_MYSQL'; orderStatus: string; payment: { state: 'SITE_ACCEPTED' | 'REVIEW_REQUIRED' | 'NO_ACCEPTED_PAYMENT' | 'LEGACY_RECORDED' | 'UNAVAILABLE'; amountCents: string | null; confirmedAt: string | null; source?: string | null; hasReviewPayment: boolean | null }; postingState: 'POSTED' | 'NOT_POSTED' | 'LEGACY_OBSERVATION' | 'UNAVAILABLE' };
@@ -97,6 +115,7 @@ export function financeEntryScope(document: FinanceDocument): string {
   return document.summaryScope === 'SUBJECT' ? `本人相关 ${document.subjectEntryCount ?? document.entryCount} 条${document.documentEntryCount == null ? ' · 全单条数未读取' : ` / 全单 ${document.documentEntryCount} 条`}` : `${document.entryCount} 条${financeIsHistorical(document) ? '历史记录' : '分录'}`;
 }
 export function financeEntryEvent(entry: FinanceEntry): string {
+  if (financeIsHistorical(entry)) return financeBusinessLabel(entry);
   if (entry.kind !== 'DISTRIBUTION') return financeBusinessLabel(entry);
   const evidence = entry.evidence ?? {};
   if (Object.hasOwn(evidence,'eventAction')) return ({ACCRUE:'分销计提',SETTLE:'分销转可用',REVOKE:'分销撤销',RECOVER:'分销追偿'} as Record<string,string>)[evidence.eventAction??'']??'分销事件未记录';

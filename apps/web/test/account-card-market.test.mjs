@@ -321,6 +321,7 @@ test("the published base ratio is shown as-is and never re-derived from amounts"
   await without.unmount();
 
   assert.equal(card.authoritativeRatioLabel("44.10000000"), "44.1万/元");
+  assert.equal(card.authoritativeRatioLabel("37", true), "基础 37万/元");
   assert.equal(card.authoritativeRatioLabel("0"), "0万/元");
   assert.equal(card.authoritativeRatioLabel("not-a-number"), null);
   assert.equal(card.authoritativeRatioLabel(null), null);

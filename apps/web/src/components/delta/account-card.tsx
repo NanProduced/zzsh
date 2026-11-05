@@ -50,10 +50,10 @@ function compactLevel(value: string | null, fallback: string | null = null): str
 }
 
 /** Published base ratio exactly as the server delivered it; never re-derived from quantities or amounts. */
-export function authoritativeRatioLabel(raw: string | null | undefined): string | null {
+export function authoritativeRatioLabel(raw: string | null | undefined, referenceOnly = false): string | null {
   const trimmed = raw?.trim();
   if (!trimmed || !/^\d+(?:\.\d+)?$/.test(trimmed)) return null;
-  return `${trimmed.replace(/(\.\d*?[1-9])0+$|\.0+$/, "$1")}万/元`;
+  return `${referenceOnly ? "基础 " : ""}${trimmed.replace(/(\.\d*?[1-9])0+$|\.0+$/, "$1")}万/元`;
 }
 
 function isZeroQuantity(line: ResourceLine): boolean {
@@ -138,7 +138,7 @@ function financeFacts(data: AccountCardData) {
     depositLabel: historical ? "押金记录" : "押金",
     depositValue: depositKnown ? moneyValue(data.depositLabel, "无需押金") : historical ? "未提供" : "详情核定",
     depositUnknown: !historical && !depositKnown,
-    ratio: authoritativeRatioLabel(data.baseRenterHaffRatioWanPerYuan),
+    ratio: authoritativeRatioLabel(data.baseRenterHaffRatioWanPerYuan, data.baseRatioReferenceOnly),
   };
 }
 
@@ -242,13 +242,13 @@ export function moneyValue(value: string | null | undefined, zeroLabel = "¥0.00
 }
 
 export function listTermRuleLabel(termOptionLabel: string | null | undefined): string {
-  if (!termOptionLabel) return "租期规则待确认";
+  if (!termOptionLabel?.trim()) return "租期规则待确认";
   const cleanTerm = termOptionLabel
-    .replace(/日消耗\s*[^\s·|]*/g, "")
     .replace(/\(测试\)|\（测试\）/g, "")
+    .replace(/^\s*TEST_ONLY\s*/i, "")
     .replace(/^[\s·|]+|[\s·|]+$/g, "")
     .trim();
-  return `租期规则 ${cleanTerm || "待确认"}`;
+  return cleanTerm ? `租期规则 ${cleanTerm}` : "租期规则待确认";
 }
 
 export function composeGridTitle(

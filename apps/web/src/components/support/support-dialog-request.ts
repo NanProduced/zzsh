@@ -1,5 +1,6 @@
 "use client";
 import type { SupportType } from "@/lib/support-intent";
+import type { OrderReference } from "@zzsh/im-client/nim-web-client";
 
 /**
  * 页面内的客服/投诉入口共用这一个触发方式：发窗口事件，由全局 SupportRail 接住——
@@ -10,7 +11,7 @@ import type { SupportType } from "@/lib/support-intent";
  * 保持原样（既有测试按模块逐个打桩）。改这里务必同步改那边。
  */
 export const SUPPORT_OPEN_EVENT = "zzsh:open-support";
-export type SupportOrderContext = {userId:string;subjectRef:string;recordId:string;draftText:string};
+export type SupportOrderContext = {userId:string;subjectRef:string;recordId:string;draftText:string;legacyOrder?:OrderReference};
 
 /** trigger 随事件传：Safari 点按钮不聚焦，靠 document.activeElement 拿不到原触发钮，关窗后焦点回不去。 */
 export function requestSupportDialog(type: SupportType, trigger?: HTMLElement | null, orderContext?:SupportOrderContext): void {

@@ -295,10 +295,21 @@ test('fee rows keep an explicit zero, mark a partial split and never infer the m
 test('historical-only rows keep old fees separately and never show the old number in the first column', () => {
   const historicalRead = { resourceNo: 'OLD-7', display: { state: 'KNOWN', facts: { attributeDisplay: { safeBox: { displayName: '基础安全箱' }, grading: null, loginMethod: null, serviceWindow: null }, resources: [{ code: 'haff', name: '哈夫币', quantity: '97000000', unit: 'HAFF_BASE' }] } }, historicalQuote: { haffRentYuan: '125.30', goodsYuan: '0.00', depositYuan: '0.00', termDays: '10' } };
   const row = rowOf({ versionId: null, sequence: null, summary: null, displayNo: 'ZZ-NEW', facts: { ...facts(), historicalRead } });
-  assert.deepEqual(rowBaseFeeRows(row), { haff: '历史 ¥125.30', materials: '历史 ¥0.00', deposit: '历史 ¥0.00', total: '未提供', note: '历史记录，非当前资料' });
+  assert.deepEqual(rowBaseFeeRows(row), { haff: '历史 ¥125.30', materials: '历史 ¥0.00', deposit: '历史 ¥0.00', total: '¥125.30', note: '迁入时账号记录，不是订单实付或当前报价' });
   assert.match(rowCoreAssetsText(row), /97 M 哈夫币 · 基础安全箱/);
   assert.equal(rowDisplaySourceText(row), '历史资料');
   assert.equal(rowAccountTitle(row), 'g账号');
+});
+
+test('historical recorded total uses exact yuan cents and stays unknown if a component is absent', () => {
+  const historicalRead = { historicalQuote: { haffRentYuan: '96.00', goodsYuan: '0.00', depositYuan: '100.00', termDays: '2' } };
+  const row = rowOf({ summary: null, facts: { ...facts(), historicalRead } });
+  assert.equal(rowBaseFeeRows(row).total, '¥196.00');
+  historicalRead.historicalQuote.goodsYuan = undefined;
+  assert.equal(rowBaseFeeRows(row).total, '未提供');
+  assert.equal(rowBaseFeeRows(row).materials, '未提供');
+  historicalRead.historicalQuote.goodsYuan = '0.00'; historicalRead.historicalQuote.depositYuan = undefined;
+  assert.equal(rowBaseFeeRows(row).total, '未提供'); assert.equal(rowBaseFeeRows(row).deposit, '未提供');
 });
 
 test('list base fees include the declared deposit and do not use a personalised payable amount', () => {

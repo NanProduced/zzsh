@@ -39,6 +39,7 @@ type SubjectProjection = {
   target?: unknown;
   rawRef?: unknown;
   party?: unknown;
+  origin?: unknown;
 };
 type ContextView = {
   consultationId: string;
@@ -94,7 +95,7 @@ function subjectView(context: ContextView | null, state: ContextState): SubjectV
       ? (subject.party === "RENTER" ? "租客" : subject.party === "OWNER" ? "号主" : null)
       : null;
     return {
-      label: `关联对象 · ${SUBJECT_KIND_LABEL[kind]}`,
+      label: `关联对象 · ${kind === "ORDER" && subject.origin === "LEGACY" ? "旧订单" : SUBJECT_KIND_LABEL[kind]}`,
       value: displayNo,
       party,
       resolved: { kind, id: target?.kind === kind ? target.id : "", displayNo, title },

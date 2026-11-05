@@ -54,4 +54,7 @@ test("support entry carries the explicit order/account reference and ignores inv
   assert.equal(supportSubjectRefFromUrl("https://example.test/?listingId=listing_1"),"listing:listing_1");
   assert.equal(supportSubjectRefFromUrl("https://example.test/?orderId=bad%20id"),null);
   assert.equal(supportSubjectRefFromUrl("invalid"),null);
+  const legacy=`legacy_order_${'a'.repeat(40)}`;
+  assert.equal(supportSubjectRefFromUrl(`https://example.test/account?source=legacy&orderId=${legacy}`),`legacy-order:${legacy}`);
+  assert.equal(supportSubjectRefFromUrl("https://example.test/account?source=legacy&orderId=legacy_order_bad"),null);
 });

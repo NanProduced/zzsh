@@ -191,6 +191,7 @@ export type OrderLine = {
 };
 
 export type OrderQuote = {
+  schemaVersion?: 1 | 2 | 3;
   rentalMode?: RentalMode;
   lines?: OrderLine[];
   unitAmountsInformational?: boolean;

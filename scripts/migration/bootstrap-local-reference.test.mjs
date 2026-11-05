@@ -94,9 +94,10 @@ for (const invalid of ["six-digit", "im-enabled"]) test("formal initialization r
     assert.doesNotMatch(result.stderr, /ENOENT|ECONN/);
 });
 
-for (const mode of ["commit", "replay", "rollback", "unknown"]) test("business execution host: " + mode, { skip: process.platform !== "win32" }, t => {
+for (const mode of ["commit", "replay", "rollback", "unknown", "skin-time", "skin-created", "skin-field"]) test("business execution host: " + mode, { skip: process.platform !== "win32" }, t => {
     const pkg = fixture(t, (tables, manifest) => {
         tables.find(table => table.table === "firearm_classification").rows = ['{"id":"class-1","created_by_admin_id":"original-admin","updated_by_admin_id":null,"revision":9007199254740993}'];
+        if (mode.startsWith("skin-")) tables.find(table => table.table === "skin").rows = ['{"id":"skin-1","name":"original","created_at":"2026-01-01","updated_at":"2026-01-01"}'];
         manifest.foreignKeys.push({ child: "zzsh_supply.firearm_classification", parent: "zzsh_auth_admin.user", columns: ["created_by_admin_id"], parentColumns: ["id"] });
     }), preload = join(pkg.root, "fake-pg.cjs"), calls = join(pkg.root, "calls.json"), receipt = join(pkg.root, "receipt.json"), parameters = join(pkg.root, "parameters.json");
     const requestedReceipt = "E:/zzsh-local-state/restricted/bootstrap-host-test.json";
@@ -117,7 +118,11 @@ if(sql.includes('FOR SHARE OF a,u'))return {rows:[{is_boss:true,status:'ACTIVE',
 if(sql.includes('SELECT attname AS name'))return {rows:[{name:'id'},{name:'code'},{name:'catalog_revision'}]};
 if(sql.includes('FROM pg_constraint k CROSS'))return {rows:[{name:'id'}]};
 if(sql.includes('SELECT sn.nspname'))return {rows:[]};
-if(sql.startsWith('SELECT to_jsonb(t)=')){const key=sql.match(/FROM ("[^\"]+"\."[^\"]+")/)[1];return {rows:rows.has(key)||mode==='replay'?[{exact:true,semantic:true,restore_time_only:true}]:[]};}
+if(sql.startsWith('SELECT to_jsonb(t)=')){const key=sql.match(/FROM ("[^\"]+"\."[^\"]+")/)[1];
+ if(key==='"zzsh_supply"."skin"'&&mode.startsWith('skin-')){const source=JSON.parse(params[0]),target={...source};target.updated_at='2026-02-01';if(mode==='skin-created')target.created_at='2026-02-01';if(mode==='skin-field')target.name='changed';
+ const equal=(ignore)=>{const a={...source},b={...target};for(const field of ignore){delete a[field];delete b[field]}return JSON.stringify(a)===JSON.stringify(b)};
+ return {rows:[{exact:equal([]),semantic:equal(['created_at','updated_at']),restore_time_only:equal(['updated_at'])}]};}
+ return {rows:rows.has(key)||mode==='replay'?[{exact:true,semantic:true,restore_time_only:true}]:[]};}
 if(sql.startsWith('INSERT INTO')){if(mode==='rollback')throw Error('FIXTURE_INSERT_FAILURE');rows.set(sql.match(/^INSERT INTO ("[^\"]+"\."[^\"]+")/)[1],params[0]);writes.push(params[0]);}
 if(sql==='COMMIT'&&mode==='unknown')throw Error('FIXTURE_COMMIT_TRANSPORT_UNKNOWN');
 return {rows:[]};}
@@ -128,26 +133,37 @@ mod._load=function(name,...rest){return name==='pg'?{Client,Pool}:originalLoad.c
     const result = spawnSync(process.execPath, ["--require", preload, script, "--execute", ...pkg.args, "--maintenance-admin-id", "existing-boss", "--oid", "123", "--nonce", "fixture-nonce", "--credentials", join(pkg.root, "credentials.json"), "--receipt", requestedReceipt], { encoding: "utf8", timeout: 5000, env: { ...process.env, DB_PASSWORD_FILE: join(pkg.root, "password.txt") } });
     assert.ok(existsSync(receipt), result.stderr + result.stdout);
     const observed = JSON.parse(readFileSync(receipt)), sql = JSON.parse(readFileSync(calls));
+    assert.equal(observed.database, "zzsh_test_regression");
+    assert.ok(Number.isFinite(Date.parse(observed.startedAt)) && Number.isFinite(Date.parse(observed.finishedAt)) && observed.wallMs >= 0);
     assert.equal(observed.poolClosed, true);
     assert.equal(observed.maintenanceClosed, true);
     assert.equal(observed.unlock, true);
-    if (mode === "commit" || mode === "replay") {
+    if (mode === "commit" || mode === "replay" || mode === "skin-time") {
         assert.equal(result.status, 0, result.stderr);
         assert.equal(observed.status, "REFERENCE_BOOTSTRAP_COMMITTED");
         assert.equal(observed.commitAck, true);
         assert.equal(sql.filter(query => query.startsWith("INSERT INTO")).length, mode === "replay" ? 0 : 2);
+        if (mode === "skin-time") {
+            assert.equal(sql.some(query => /^(INSERT INTO|UPDATE) "zzsh_supply"\."skin"/.test(query)), false);
+            assert.equal(observed.tables.find(row => row.table === "zzsh_supply.skin").baselineTimestampOnly, 1);
+            assert.deepEqual(observed.expectedDifferences.filter(row => row.table === "zzsh_supply.skin").map(row => row.fields), [["updated_at"]]);
+        }
         if (mode === "commit") {
             const raw = JSON.parse(readFileSync(parameters)).find(row => row.includes("class-1"));
             assert.match(raw, /"created_by_admin_id":"existing-boss"/);
             assert.match(raw, /"updated_by_admin_id":null/);
             assert.match(raw, /"revision":9007199254740993/);
         }
-    } else if (mode === "rollback") {
+    } else if (mode === "rollback" || mode === "skin-created" || mode === "skin-field") {
         assert.equal(result.status, 1);
         assert.equal(observed.status, "FAILED_STOPPED");
         assert.equal(observed.rollbackAck, true);
         assert.equal(sql.filter(query => query === "ROLLBACK").length, 1);
         assert.equal(sql.includes("COMMIT"), false);
+        if (mode.startsWith("skin-")) {
+            assert.match(observed.error.message, /REFERENCE_EXISTING_ROW_DIFFERS:zzsh_supply.skin/);
+            assert.equal(sql.some(query => /^(INSERT INTO|UPDATE) "zzsh_supply"\."skin"/.test(query)), false);
+        }
     } else {
         assert.equal(result.status, 1);
         assert.equal(observed.status, "REFERENCE_COMMIT_UNKNOWN");
@@ -203,6 +219,8 @@ return new Response(JSON.stringify(result),{status:200,headers});};
     const result = spawnSync(process.execPath, ["--require", preload, script, "--execute", "--initialize-admins", "--stage", stage === "staff" ? "staff" : "bosses", "--input", join(root, "input.json"), "--credentials", join(root, "credentials.json"), "--out", out], { encoding: "utf8", timeout: 20000, env: { ...process.env, DB_PASSWORD_FILE: join(root, "password") } });
     assert.ok(existsSync(join(out, "receipt.json")), result.stderr + result.stdout);
     const receipt = JSON.parse(readFileSync(join(out, "receipt.json"))), calls = JSON.parse(readFileSync(callsFile)), posts = calls.filter(call => call.kind === "http");
+    assert.ok(Number.isFinite(Date.parse(receipt.startedAt)) && Number.isFinite(Date.parse(receipt.finishedAt)) && receipt.wallMs >= 0);
+    assert.ok(receipt.steps.every(step => Number.isFinite(Date.parse(step.startedAt)) && Number.isFinite(Date.parse(step.finishedAt)) && step.wallMs >= 0));
     assert.equal(receipt.preflightRollbackAck, true);
     assert.equal(receipt.preflightClientClosed, true);
     assert.equal(receipt.unlock, true);
@@ -211,6 +229,7 @@ return new Response(JSON.stringify(result),{status:200,headers});};
     if (stage === "partial-failure") {
         assert.equal(result.status, 1);
         assert.equal(receipt.status, "STOPPED_POSSIBLE_PARTIAL_APPLICATION");
+        assert.ok(receipt.pendingStepTiming?.wallMs >= 0 && Number.isFinite(Date.parse(receipt.pendingStepTiming.finishedAt)));
         assert.equal(posts.filter(call => call.path.endsWith("/bootstrap")).length, 1);
         assert.equal(receipt.steps.some(step => step.path.endsWith("/enrollment/activate")), false);
     } else {

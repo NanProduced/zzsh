@@ -217,10 +217,10 @@ test("source capture plans include invitation codes and current seasonal facts w
   const run=(flags=[])=>{const result=spawnSync(process.execPath,[capture,"--plan",...flags],{encoding:"utf8",timeout:5000});assert.equal(result.status,0,result.stderr);return JSON.parse(result.stdout);};
   const base=run();assert.ok(base.fieldsByDomain.users.includes("code"));assert.equal(base.dbConnections,0);
   assert.deepEqual(base.fieldsByDomain.accounts,base.fieldsByDomain.accountDisplay);
-  for(const field of ["agent_skin","is_demulan","is_next_season_pass","price_per","price_vip","ratio_type","create_time"])assert.ok(base.fieldsByDomain.accounts.includes(field));
+  for(const field of ["agent_skin","is_demulan","is_sayyid","awm_number","helmet","armor","is_next_season_pass","price_per","price_vip","ratio_type","create_time"])assert.ok(base.fieldsByDomain.accounts.includes(field));
   assert.ok(base.fieldsByDomain.skinDictionaryData.includes("type_id"));assert.ok(base.fieldsByDomain.orderAfter.includes("order_id"));
   const display=run(["--account-display-only"]);assert.ok(display.fieldsByDomain.accountDisplay.includes("is_demulan"));
-  assert.ok(display.fieldsByDomain.accountDisplay.includes("is_next_season_pass"));assert.equal(display.fieldsByDomain.accountDisplay.includes("is_sayyid"),false);
+  for(const field of ["is_sayyid","awm_number","helmet","armor","is_next_season_pass"])assert.ok(display.fieldsByDomain.accountDisplay.includes(field));
   assert.equal(display.dbConnections,0);assert.equal(display.credentialReads,0);
 });
 

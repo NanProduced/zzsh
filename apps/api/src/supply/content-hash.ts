@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
-import { parseSignedDecimal, formatDecimalAtScale, formatScaledInteger } from "./decimal";
+import { decimalToBigInt, divideToScale, multiplyDecimal, parseNonNegativeDecimal, parseSignedDecimal, formatDecimalAtScale, formatScaledInteger } from "./decimal";
 import { CUSTOMER_TIERS, DeltaDeclarationError, normalizeDeltaAttributes, normalizeRentalPricing } from "./delta-rental";
+import { legacyPriceInteger, quoteLegacyHaff } from "./legacy-listed-pricing";
 import type { InternalQuote } from "./pricing";
 
 export class ContentHashError extends Error {}
@@ -36,12 +37,22 @@ export type ContentRuleRefs = {
 };
 
 export type ContentPayloadInput = {
-  schemaVersion: 1 | 2;
+  schemaVersion: 1 | 2 | 3;
   accountId: string;
   gameId: string;
   declaration: ContentDeclaration;
   ruleRefs: ContentRuleRefs;
   quoteValues: Record<string, unknown>;
+  quoteSource?: "LEGACY_QUOTED";
+  legacyQuote?: LegacyQuoteProvenance;
+};
+
+export type LegacyQuoteProvenance = {
+  schema: "legacy-listed-quote-v1"; sourceSystem: "legacy_mysql_restore"; sourceEntity: "la_rental_accounts";
+  legacyId: string; observationVersionId: string; sourceDigest: string; sourcePolicyDigest: string;
+  haffMillions: string; ownerRatio: string; spread: string; recordedOwnerYuan: string;
+  recordedTenantYuan: string | null; recordedVipYuan: string | null; depositYuan: string; rentalDays: string;
+  rentalMode: "ordinary" | "custom" | "fast"; fullPayoutSelected: boolean;
 };
 
 const MAX_DEPTH = 24;
@@ -79,9 +90,13 @@ export function normalizeTime(value: string | null): string | null {
 }
 
 export function normalizeQuote(value: Record<string, unknown> | InternalQuote): InternalQuote {
-  fields(value, ["schemaVersion", "currency", "priceVersionId", "ruleReleaseId", "mode", "lines", "resourceTotal", "ownerTotal", "platformFullProfit", "tenantDeposit", "publisherBailRequirement", "termSeconds", "expiryDisclosures", "unitAmountsInformational", "roundingPolicy", "pricingInputs"]);
   const q = value as InternalQuote;
-  if (![1, 2].includes(q.schemaVersion) || q.currency !== "CNY" || !["SPREAD", "PERCENT"].includes(q.mode) || !Array.isArray(q.lines)) throw new ContentHashError("Invalid quote");
+  fields(value, ["schemaVersion", "currency", "priceVersionId", "ruleReleaseId", "mode", "lines", "resourceTotal", "ownerTotal", "platformFullProfit", "tenantDeposit", "publisherBailRequirement", "termSeconds", "expiryDisclosures", "unitAmountsInformational", "roundingPolicy", "pricingInputs", ...(q.schemaVersion === 3 ? ["quoteSource", "legacyQuote"] : [])]);
+  if (![1, 2, 3].includes(q.schemaVersion) || q.currency !== "CNY" || !["SPREAD", "PERCENT"].includes(q.mode) || !Array.isArray(q.lines)) throw new ContentHashError("Invalid quote");
+  if (q.schemaVersion === 3) {
+    if (q.quoteSource !== "LEGACY_QUOTED" || !q.legacyQuote) throw new ContentHashError("Legacy quote source is missing");
+    validateLegacyProvenance(q.legacyQuote);
+  }
   const amount = <T extends { currency: "CNY"; unit: "yuan"; amount: string; scale: 2 | 8 }>(v: T, scale: 2 | 8): T => {
     fields(v, ["currency", "unit", "amount", "scale"]);
     if (v.currency !== "CNY" || v.unit !== "yuan" || v.scale !== scale) throw new ContentHashError("Invalid amount unit");
@@ -94,13 +109,21 @@ export function normalizeQuote(value: Record<string, unknown> | InternalQuote): 
   }), (l) => l.itemId);
   const p = q.pricingInputs;
   if (q.schemaVersion === 1 && p.haffRatioSchema === "haff-ratio-v2") throw new ContentHashError("Compatibility quote requires schema 2");
-  fields(p, ["haffRatioSchema", "conditions", "denominators", "spreadDelta", "commissionRate", "exactRatios", "roundingPolicy", "depositPolicy", "reasonCodes", ...(q.schemaVersion === 2 ? ["compatibility"] : [])]);
+  fields(p, ["haffRatioSchema", "conditions", "denominators", "spreadDelta", "commissionRate", "exactRatios", "roundingPolicy", "depositPolicy", "reasonCodes", ...(q.schemaVersion !== 1 ? ["compatibility"] : [])]);
   if (q.schemaVersion === 2) {
     const c = p.compatibility;
     if (!c || q.mode !== "SPREAD" || p.haffRatioSchema !== "haff-ratio-v2") throw new ContentHashError("Invalid compatibility quote");
     fields(c, ["rentalMode", "customerTier", "baseRatioC", "ownerRatioB", "memberDelta"]);
     if (!["ordinary", "custom", "fast"].includes(c.rentalMode) || !CUSTOMER_TIERS.includes(c.customerTier)) throw new ContentHashError("Invalid compatibility inputs");
+    if (!("baseRatioC" in c) || !("memberDelta" in c)) throw new ContentHashError("Invalid compatibility inputs");
     for (const key of ["baseRatioC", "ownerRatioB", "memberDelta"] as const) decimalText(c[key]);
+  }
+  if (q.schemaVersion === 3) {
+    const c = p.compatibility;
+    if (!c || q.mode !== "SPREAD" || p.haffRatioSchema !== "legacy-listed-v1") throw new ContentHashError("Invalid legacy quote");
+    fields(c, ["rentalMode", "customerTier", "ownerRatioB"]);
+    if (!["ordinary", "custom", "fast"].includes(c.rentalMode) || c.customerTier !== "STANDARD") throw new ContentHashError("Invalid legacy quote inputs");
+    legacyPriceInteger(c.ownerRatioB, false);
   }
   if (p.conditions) fields(p.conditions, ["safeBoxCode", "vitLevel", "bearLevel", "termOptionCode", "pricingOptionCode"]);
   if (p.denominators) fields(p.denominators, ["owner", "buyer"]);
@@ -133,7 +156,7 @@ function ensureUnique(values: readonly string[], label: string): void {
   }
 }
 
-export function normalizeDeclaration(declaration: ContentDeclaration, schemaVersion: 1 | 2 = 1): ContentDeclaration {
+export function normalizeDeclaration(declaration: ContentDeclaration, schemaVersion: 1 | 2 | 3 = 1): ContentDeclaration {
   fields(declaration, ["title", "description", "attributes", "inventory", "skins", "entitlements", "termOptionCode", "pricingOptionCode", "mediaBindings"]);
   for (const media of declaration.mediaBindings) { fields(media, ["assetId", "byteHash", "purpose", "position"]); if (!Number.isSafeInteger(media.position) || media.position < 0) throw new ContentHashError("Invalid position"); }
   ensureUnique(declaration.inventory.map((item) => item.itemId), "inventory");
@@ -142,7 +165,7 @@ export function normalizeDeclaration(declaration: ContentDeclaration, schemaVers
   ensureUnique(declaration.mediaBindings.map((item) => `${item.purpose}:${item.position}:${item.assetId}`), "mediaBindings");
   let attributes: Record<string, unknown>;
   try {
-    if (schemaVersion === 2) {
+    if (schemaVersion === 2 || schemaVersion === 3) {
       const { rentalPricing, ...existing } = declaration.attributes;
       attributes = { ...normalizeDeltaAttributes(existing), rentalPricing: normalizeRentalPricing(rentalPricing) };
     } else attributes = normalizeDeltaAttributes(declaration.attributes);
@@ -199,16 +222,18 @@ export function canonicalize(value: unknown, depth = 0): string {
 }
 
 export function normalizeContentPayload(input: ContentPayloadInput): ContentPayloadInput {
-  fields(input, ["schemaVersion", "accountId", "gameId", "declaration", "ruleRefs", "quoteValues"]);
+  fields(input, ["schemaVersion", "accountId", "gameId", "declaration", "ruleRefs", "quoteValues", "quoteSource", "legacyQuote"]);
   fields(input.ruleRefs, ["releaseId", "priceVersionId", "termVersionId", "agreementVersionId", "agreementDigest", "catalogRevision"]);
   if (Object.values(input.ruleRefs).some((value) => typeof value !== "string")) throw new ContentHashError("Invalid rule reference");
   if (input.ruleRefs.catalogRevision !== undefined && !/^(0|[1-9]\d*)$/.test(input.ruleRefs.catalogRevision)) throw new ContentHashError("Invalid catalog revision");
-  if (![1, 2].includes(input.schemaVersion) || input.quoteValues.schemaVersion !== input.schemaVersion) throw new ContentHashError("Invalid content schema");
+  if (![1, 2, 3].includes(input.schemaVersion) || input.quoteValues.schemaVersion !== input.schemaVersion) throw new ContentHashError("Invalid content schema");
+  if (input.schemaVersion !== 3 && (input.quoteSource !== undefined || input.legacyQuote !== undefined)) throw new ContentHashError("Legacy source requires content schema 3");
   if (input.schemaVersion === 2) {
     const choice = normalizeRentalPricing(input.declaration.attributes.rentalPricing);
     const quote = normalizeQuote(input.quoteValues);
     if (quote.pricingInputs.compatibility?.customerTier !== "STANDARD" || choice.rentalMode !== quote.pricingInputs.compatibility.rentalMode || (choice.ownerRatioB !== undefined && choice.ownerRatioB !== decimalText(quote.pricingInputs.compatibility.ownerRatioB))) throw new ContentHashError("Declaration and quote pricing disagree");
   }
+  if (input.schemaVersion === 3) validateLegacyContent(input);
   return {
     schemaVersion: input.schemaVersion,
     accountId: input.accountId,
@@ -216,7 +241,68 @@ export function normalizeContentPayload(input: ContentPayloadInput): ContentPayl
     declaration: normalizeDeclaration(input.declaration, input.schemaVersion),
     ruleRefs: input.ruleRefs,
     quoteValues: normalizeQuote(input.quoteValues) as unknown as Record<string, unknown>,
+    ...(input.schemaVersion === 3 ? { quoteSource: input.quoteSource, legacyQuote: input.legacyQuote } : {}),
   };
+}
+
+function validateLegacyProvenance(p: LegacyQuoteProvenance): void {
+  fields(p, ["schema", "sourceSystem", "sourceEntity", "legacyId", "observationVersionId", "sourceDigest", "sourcePolicyDigest", "haffMillions", "ownerRatio", "spread", "recordedOwnerYuan", "recordedTenantYuan", "recordedVipYuan", "depositYuan", "rentalDays", "rentalMode", "fullPayoutSelected"]);
+  if (p.schema !== "legacy-listed-quote-v1" || p.sourceSystem !== "legacy_mysql_restore" || p.sourceEntity !== "la_rental_accounts"
+    || !/^[1-9]\d{0,23}$/.test(p.legacyId) || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(p.observationVersionId) || !/^[a-f0-9]{64}$/.test(p.sourceDigest) || !/^[a-f0-9]{64}$/.test(p.sourcePolicyDigest)
+    || !["ordinary", "custom", "fast"].includes(p.rentalMode) || typeof p.fullPayoutSelected !== "boolean"
+    || [p.recordedTenantYuan, p.recordedVipYuan].some(value => value !== null && typeof value !== "string")) throw new ContentHashError("Legacy quote provenance is invalid");
+}
+
+function validateLegacyContent(input: ContentPayloadInput): void {
+  const p = input.legacyQuote, q = normalizeQuote(input.quoteValues);
+  if (input.quoteSource !== "LEGACY_QUOTED" || !p) throw new ContentHashError("Legacy quote source is missing");
+  validateLegacyProvenance(p);
+  try {
+    const base = quoteLegacyHaff({ haffMillions: p.haffMillions, ownerRatio: p.ownerRatio, spread: p.spread, recordedOwnerYuan: p.recordedOwnerYuan });
+    const days = legacyPriceInteger(p.rentalDays, false), deposit = decimalToBigInt(parseNonNegativeDecimal(p.depositYuan, 2, "legacy deposit"), 2);
+    for (const value of [p.recordedTenantYuan, p.recordedVipYuan]) if (value !== null) parseNonNegativeDecimal(value, 2, "recorded legacy price");
+    const cents = (value: string) => decimalToBigInt(parseNonNegativeDecimal(value, 2, "legacy quote amount"), 2);
+    const haff = q.lines.filter(line => line.pricingKind === "HAFF_RATIO" && line.unit === "HAFF_BASE");
+    const ratio = haff.length === 1 ? q.pricingInputs.exactRatios.find(item => item.itemId === haff[0]!.itemId) : undefined;
+    const c = q.pricingInputs.compatibility, choice = normalizeRentalPricing(input.declaration.attributes.rentalPricing);
+    const payout = input.declaration.attributes.full_payout_declaration as { schema?: unknown; selected?: unknown } | undefined;
+    const depositDeclaration = input.declaration.attributes.owner_deposit_declaration as { schema?: unknown; amountCents?: unknown } | undefined;
+    const reference = input.declaration.attributes.legacy_published_reference;
+    if (q.schemaVersion !== 3 || q.quoteSource !== input.quoteSource || canonicalize(q.legacyQuote) !== canonicalize(p)
+      || q.priceVersionId !== input.ruleRefs.priceVersionId || q.ruleReleaseId !== input.ruleRefs.releaseId
+      || q.roundingPolicy !== "LEGACY_WHOLE_YUAN_PREPAY_V1" || q.pricingInputs.roundingPolicy !== q.roundingPolicy
+      || q.pricingInputs.depositPolicy !== "CONFIGURED" || !q.tenantDeposit || cents(q.tenantDeposit.amount) !== deposit
+      || q.termSeconds !== (days * 86400n).toString() || q.unitAmountsInformational !== true
+      || !c || c.customerTier !== "STANDARD" || c.rentalMode !== p.rentalMode || c.ownerRatioB !== p.ownerRatio
+      || choice.rentalMode !== p.rentalMode || choice.ownerRatioB !== undefined && choice.ownerRatioB !== p.ownerRatio
+      || !payout || payout.schema !== "full-payout-declaration-v1" || payout.selected !== p.fullPayoutSelected
+      || !depositDeclaration || depositDeclaration.schema !== "owner-deposit-declaration-v1" || depositDeclaration.amountCents !== deposit.toString()
+      || typeof reference !== "string" || !/^[a-f0-9]{64}$/.test(reference)
+      || q.lines.filter(line => line.pricingKind === "HAFF_RATIO").length !== 1
+      || haff.length !== 1 || haff[0]!.unitQuantity !== "1000000" || haff[0]!.quantity !== (legacyPriceInteger(p.haffMillions, false) * 1000000n).toString()
+      || cents(haff[0]!.ownerAmount.amount).toString() !== base.ownerCents || cents(haff[0]!.buyerAmount.amount).toString() !== base.renterCents
+      || !ratio || ratio.ownerNumerator !== base.ownerCents || ratio.ownerDenominator !== "100" || ratio.buyerNumerator !== base.renterCents || ratio.buyerDenominator !== "100"
+      || q.pricingInputs.exactRatios.length !== 1 || q.pricingInputs.denominators?.owner !== p.ownerRatio || q.pricingInputs.denominators?.buyer !== base.buyerRatio
+      || q.pricingInputs.spreadDelta !== p.spread) throw new Error();
+    let buyer = 0n, owner = 0n;
+    const declared = new Map(input.declaration.inventory.map(item => [item.itemId, item.quantity]));
+    if (declared.size !== input.declaration.inventory.length || declared.size !== q.lines.length) throw new Error();
+    for (const line of q.lines) {
+      const b = cents(line.buyerAmount.amount), o = cents(line.ownerAmount.amount);
+      if (declared.get(line.itemId) !== line.quantity || b < o || cents(line.platformAmount.amount) !== b - o) throw new Error();
+      if (line.pricingKind === "FIXED_UNIT") {
+        if (!(["ROUND", "PIECE", "DAY"] as string[]).includes(line.unit)) throw new Error();
+        const quantity = parseNonNegativeDecimal(line.quantity, 0, "legacy quantity");
+        const units = parseNonNegativeDecimal(line.unitQuantity, 0, "legacy unit quantity");
+        const buyerUnit = parseNonNegativeDecimal(line.buyerUnitAmount.amount, 8, "legacy buyer unit");
+        const ownerUnit = parseNonNegativeDecimal(line.ownerUnitAmount.amount, 8, "legacy owner unit");
+        if (units.value <= 0n || divideToScale(multiplyDecimal(quantity, buyerUnit), units, 2).value !== b
+          || divideToScale(multiplyDecimal(quantity, ownerUnit), units, 2).value !== o) throw new Error();
+      } else if (line.pricingKind !== "HAFF_RATIO") throw new Error();
+      buyer += b; owner += o;
+    }
+    if (cents(q.resourceTotal.amount) !== buyer || cents(q.ownerTotal.amount) !== owner || cents(q.platformFullProfit.amount) !== buyer - owner) throw new Error();
+  } catch { throw new ContentHashError("Legacy quote does not match its source facts"); }
 }
 
 export function canonicalizeContentPayload(input: ContentPayloadInput): string {

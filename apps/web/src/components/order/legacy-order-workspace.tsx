@@ -9,6 +9,7 @@ import "./order.css";
 import { LegacyContinuationPanel } from "./legacy-continuation-panel";
 import { OrderAccountDossier } from "./order-account-dossier";
 import { orderAccountTitle, orderAmountFacts, orderListingSourceLabel, orderResourceLines, orderUsesResourceSummary } from "@/lib/order-display";
+import { requestSupportDialog } from "@/components/support/support-dialog-request";
 
 export function legacyOrderHref(party: OrderParty, page = 1, orderId?: string, accountId?: string) {
   const q = new URLSearchParams({ view: party === "owner" ? "leased" : "rentals", source: "legacy", page: String(page) });
@@ -77,6 +78,13 @@ export function LegacyOrderWorkspace({ party, orderId, page: pageText, accountId
         <div className="order-legacy-id-group">
           {data.displayNo ? <span className="order-id-badge">订单号 <strong>{data.displayNo}</strong></span> : null}
           {accountNo ? <span className="order-id-badge">账号编号 <strong>{accountNo}</strong></span> : null}
+          <button type="button" className="button secondary" data-support-trigger onClick={event => {
+            const valid = /^legacy_order_[a-f0-9]{40}$/.test(data.id) && Boolean(data.displayNo);
+            requestSupportDialog("SERVICE", event.currentTarget, valid ? {
+              userId: session.userId!, subjectRef: `legacy-order:${data.id}`, recordId: data.id, draftText: `旧订单 ${data.displayNo}`,
+              legacyOrder: { id: data.id, displayNo: data.displayNo!, title: orderAccountTitle(data).replace(/[\u0000-\u001f\u007f]/g, " ").slice(0, 240).trim() || "租赁账号", party: data.party },
+            } : undefined);
+          }}>联系客服</button>
         </div>
       </div>
       <h2 className="order-legacy-hero-title">{orderAccountTitle(data)}</h2>

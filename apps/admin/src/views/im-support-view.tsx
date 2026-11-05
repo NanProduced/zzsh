@@ -1,9 +1,8 @@
 import { ProfileImage } from "@zzsh/ui/profile-image";
-import { orderReferenceSummary } from "@zzsh/im-client/nim-web-client";
 "use client";
 import { formatSubjectRef, messageScopeLabel } from "./im-support-vocabulary";
 import { NIM_RECEIPT_PENDING, nimMessageView, oldestNimMessage } from "@zzsh/im-client/nim-web-client";
-import { SupportMessageBody } from "./im-support-message-body";
+import { SupportMessageBody, supportMessageSummary } from "./im-support-message-body";
 import { AftersaleInbox } from "./im-aftersale-inbox";
 import type { AftersaleRecord } from "@zzsh/im-client/aftersale";
 
@@ -892,7 +891,7 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
     const last = history?.length ? history[history.length - 1] : undefined;
     const lastMessageAt = item.lastMessageAt ? Date.parse(item.lastMessageAt) : Number.NaN;
     // 后端 best-effort 写入的最近消息摘要；没有历史时用它，避免未打开的 ACTIVE 行只显示“打开查看”。
-    const preview = item.lastMessagePreview ? orderReferenceSummary(item.lastMessagePreview).trim() || null : null;
+    const preview = item.lastMessagePreview ? supportMessageSummary(item.lastMessagePreview).trim() || null : null;
     // R1 重写时把这里的措辞缩短成了「待人工核验」，丢掉了「远端结果未知」这个
     // 关键差异（会读成普通待办）。恢复 HEAD 的完整措辞，队列行不得让 FAILED
     // 看起来像正常会话。
@@ -972,7 +971,7 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
           tag: "",
           tone: "neutral" as const,
           snippet: typeof row.lastMessagePreview === "string" && row.lastMessagePreview.trim()
-            ? orderReferenceSummary(row.lastMessagePreview).trim()
+            ? supportMessageSummary(row.lastMessagePreview).trim()
             : row.lastMessageAt ? "有新消息" : "暂无消息",
           state, stateTone: orderStageTone(row),
           // 到期只对正在租用/待结束的订单有意义；已完成的历史群不再占用列表宽度。
@@ -1085,9 +1084,9 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
   const sendBlocked = sending || imageInFlight || mediaInFlight || selectedPending?.state === "UNKNOWN" || selectedPending?.state === "SENDING" || selectedMedia?.state === "UNKNOWN";
 
   /* ---------- platform message menu: copy / reply / revoke / delete ---------- */
-  const replySummaryOf = (message: SupportMessage): string => message.image ? "[图片]" : mediaSummaryOf(message) ?? (message.text.trim() ? orderReferenceSummary(message.text).trim().slice(0, 120) : "消息");
+  const replySummaryOf = (message: SupportMessage): string => message.image ? "[图片]" : mediaSummaryOf(message) ?? (message.text.trim() ? supportMessageSummary(message.text).trim().slice(0, 120) : "消息");
   const copyableTextOf = (message: SupportMessage): string | null => !message.revoked && message.from !== "system" && !message.image && !message.media
-    && (message.messageType === undefined || message.messageType === 0) && message.text.trim() ? orderReferenceSummary(message.text) : null;
+    && (message.messageType === undefined || message.messageType === 0) && message.text.trim() ? supportMessageSummary(message.text) : null;
   const clearReplyFor = (key: string) => {
     setReplyTargets((current) => (current[key] ? { ...current, [key]: null } : current));
     setReplyUncertain((current) => (current[key] ? { ...current, [key]: false } : current));
@@ -1916,7 +1915,10 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
           <SupportMessageBody message={{ ...message.source, text: message.text, media: message.media, revoked: message.revoked }}
             image={message.image ? { url: imageUrl, thumbnailUrl: imageThumbnailUrl, name: message.image.name } : null}
             replySenderName={(() => { const target = selectedMessages.find((item) => item.id === message.source?.reply?.messageId || item.source?.messageServerId === message.source?.reply?.messageId || item.source?.messageClientId === message.source?.reply?.messageId); return target ? authorFor(target).name : null; })()}
-            onJump={jumpToMessage} onOpenOrder={onOpenPath ? id => onOpenPath(`/orders/${encodeURIComponent(id)}`, "订单详情") : undefined} align={mine ? "end" : "start"} />
+            onJump={jumpToMessage} onOpenOrder={onOpenPath ? id => onOpenPath(`/orders/${encodeURIComponent(id)}`, "订单详情") : undefined}
+            legacyScopeKey={`${snapshot.adminUserId}:${snapshot.session.id}:${snapshot.permissions.join(",")}:${selected?.id ?? ""}:${selected?.version ?? ""}:${selected?.state ?? ""}:${selected?.assignedAdmin?.id ?? ""}`}
+            allowLegacyOrderOpen={profileScope.orders} resolveLegacyOrder={selected ? (id, signal) => adminRequest(`/im/consultations/${encodeURIComponent(selected.id)}/legacy-orders/${encodeURIComponent(id)}`, undefined, "GET", {}, signal) : undefined}
+            align={mine ? "end" : "start"} />
           {mine && !message.revoked ? <MessageFooter className="im-wb-msg-status"><time>{message.time}</time><Check size={11} />已发送</MessageFooter> : null}
         </MessageContent>
       </Message>

@@ -16,6 +16,7 @@ export type ReferenceFees = {
   lines?: readonly ResourceLine[];
   unitAmountsInformational?: boolean;
   baseRenterHaffRatioWanPerYuan?: string | null;
+  baseRatioReferenceOnly?: boolean;
 };
 
 /** Strictly narrowed metadata allowed to be borrowed from reference. No quantities, no costs! */
@@ -57,12 +58,12 @@ function cleanDecimal(amount: string): string {
   return amount.replace(/(\.\d*?[1-9])0+$|\.0+$/, "$1");
 }
 
-export function formatAuthoritativeRatio(raw: string | null | undefined): string | null {
+export function formatAuthoritativeRatio(raw: string | null | undefined, referenceOnly = false): string | null {
   if (!raw) return null;
   const trimmed = raw.trim();
   if (!trimmed || !/^\d+(?:\.\d+)?$/.test(trimmed)) return null;
   const clean = cleanDecimal(trimmed);
-  return `${clean}万/元`;
+  return `${referenceOnly ? "基础 " : ""}${clean}万/元`;
 }
 
 function unitPriceText(line: { code?: string | null; unitPriceLabel?: string | null }): string {
@@ -114,7 +115,7 @@ type FormattedBillRow = {
   ratioTag?: string | null;
 };
 
-function formatPublicRow(line: ResourceLine, authoritativeRatio?: string | null): FormattedBillRow {
+function formatPublicRow(line: ResourceLine, authoritativeRatio?: string | null, referenceOnly = false): FormattedBillRow {
   const isHaff = isHaffLine(line);
   const isZeroQuantity = line.quantity === "0";
   const isUnknownQuantity = line.quantity == null || line.quantity === "";
@@ -128,7 +129,7 @@ function formatPublicRow(line: ResourceLine, authoritativeRatio?: string | null)
 
   if (isHaff) {
     const qtyText = line.quantityLabel?.replace(/\s+/g, "") || (line.quantity ? `${Math.round(parseInt(line.quantity, 10) / 1_000_000)}M` : "未提供");
-    const ratio = formatAuthoritativeRatio(authoritativeRatio);
+    const ratio = formatAuthoritativeRatio(authoritativeRatio, referenceOnly);
     const spec = qtyText;
     return {
       key: line.itemId || "haff_rent",
@@ -184,7 +185,7 @@ function formatPublicRow(line: ResourceLine, authoritativeRatio?: string | null)
   };
 }
 
-function formatPersonalRow(line: OrderLine, refLine?: RefLineMeta, authoritativeRatio?: string | null): FormattedBillRow {
+function formatPersonalRow(line: OrderLine, refLine?: RefLineMeta, authoritativeRatio?: string | null, referenceOnly = false): FormattedBillRow {
   const code = refLine?.code ?? null;
   const name = line.name || refLine?.name || "资源项目";
   const isHaff = isHaffLine({ code, itemId: line.itemId, unit: line.unit });
@@ -214,7 +215,7 @@ function formatPersonalRow(line: OrderLine, refLine?: RefLineMeta, authoritative
       : "未提供";
     // Authoritative base ratio is shown only if personal haff amount is present and ratio is provided.
     // If personal haff amount is missing, never display a ratio.
-    ratioTag = line.buyerAmount?.amount ? formatAuthoritativeRatio(authoritativeRatio) : null;
+    ratioTag = line.buyerAmount?.amount ? formatAuthoritativeRatio(authoritativeRatio, referenceOnly) : null;
     spec = qtyStr;
   } else {
     let qtyStr = "未提供";
@@ -341,7 +342,7 @@ export function RentalPriceSummary({
         }
       }
       billRows = quote.quote.lines.map((l) =>
-        formatPersonalRow(l, l.itemId ? refLineMap.get(l.itemId) : undefined, authoritativeRatio)
+        formatPersonalRow(l, l.itemId ? refLineMap.get(l.itemId) : undefined, authoritativeRatio, quote.quote.schemaVersion === 3 || reference.baseRatioReferenceOnly)
       );
     } else {
       billRows = [];
@@ -357,7 +358,7 @@ export function RentalPriceSummary({
   } else if (reference.lines) {
     billTag = "参考计价";
     suppliesSubtotal = reference.items;
-    billRows = reference.lines.map((l) => formatPublicRow(l, reference.baseRenterHaffRatioWanPerYuan));
+    billRows = reference.lines.map((l) => formatPublicRow(l, reference.baseRenterHaffRatioWanPerYuan, reference.baseRatioReferenceOnly));
   }
 
   const haffRow = billRows.find((r) => r.isHaff);
@@ -413,7 +414,7 @@ export function RentalPriceSummary({
                 {haffRow.ratioTag ? (
                   <span
                     className="account-haff-ratio-badge"
-                    title="发布版基础客价（已含平台价差，未计会员优惠）"
+                    title={reference.baseRatioReferenceOnly || quote?.quote.schemaVersion === 3 ? "基础租客比例，未计会员优惠；金额以冻结报价为准" : "发布版基础客价（已含平台价差，未计会员优惠）"}
                   >
                     {haffRow.ratioTag}
                   </span>

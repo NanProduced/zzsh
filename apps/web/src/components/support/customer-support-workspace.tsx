@@ -555,6 +555,8 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, vi
   const [activeId, setActiveId] = useState<string | null>(() => preview ? PREVIEW_CONVERSATIONS[0].id : null);
   const [messages, setMessages] = useState<Record<string, SupportMessage[]>>(() => preview ? PREVIEW_MESSAGES : {});
   const [drafts, setDrafts] = useState<Record<string, string>>({});
+  const [validatedLegacyOrder, setValidatedLegacyOrder] = useState<{ signature: string; thread: string; order: OrderReference } | null>(null);
+  const [sentLegacySignature, setSentLegacySignature] = useState<string | null>(null);
   const [attachments, setAttachments] = useState<Record<string, string | null>>({});
   const [panelView, setPanelView] = useState<"list" | "chat">("chat");
   /** 窄屏下列表/聊天互斥；宽屏两栏常显。聊天窗是否真正可见决定已读上报和“新”标记。 */
@@ -668,6 +670,14 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, vi
     orderNavigationRef.current = controller;
     const generation = identityGenerationRef.current;
     try {
+      if (/^legacy_order_[a-f0-9]{40}$/.test(orderId)) {
+        const order = await orderApi.legacyDetail(orderId, controller.signal);
+        if (controller.signal.aborted || generation !== identityGenerationRef.current || identityRef.current !== currentIdentity) return;
+        if (order.id !== orderId || order.source?.origin !== "LEGACY" || !["renter", "owner"].includes(order.party)) {
+          setError("暂时无法确认你的订单身份，请从个人中心的订单列表查看。"); return;
+        }
+        window.location.assign(orderUrl(order.party, "", undefined, orderId, "LEGACY")); return;
+      }
       const order = await orderApi.detail(orderId, controller.signal);
       if (controller.signal.aborted || generation !== identityGenerationRef.current || identityRef.current !== currentIdentity) return;
       if (order.id !== orderId || !order.viewerParty) {
@@ -1401,9 +1411,11 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, vi
     if(!validOrderContext||!orderContextSignature||preview||!visible||!imReady||!directoryReady||busy||orderContextApplied.current===orderContextSignature)return;
     const expected=orderContextSignature,context=validOrderContext;orderContextApplied.current=expected;
     void startConsultation("SERVICE",context.subjectRef).then(row=>{
-      if(!row){if(latestOrderContext.current===expected)orderContextApplied.current=null;return;}
+      if(!row){if(latestOrderContext.current===expected&&!context.legacyOrder)orderContextApplied.current=null;return;}
       if(latestOrderContext.current!==expected)return;
-      setDrafts(current=>{const key=threadKeyOf(row);return current[key]?.trim()?current:{...current,[key]:context.draftText};});
+      if(context.legacyOrder && context.subjectRef===`legacy-order:${context.legacyOrder.id}`){
+        setValidatedLegacyOrder({signature:expected,thread:threadKeyOf(row),order:context.legacyOrder});
+      }else setDrafts(current=>{const key=threadKeyOf(row);return current[key]?.trim()?current:{...current,[key]:context.draftText};});
     });
   // A context is applied once per explicit entry; existing drafts are kept.
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1842,7 +1854,7 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, vi
       if (!order && currentMedia) setMediaFor(conversationKey, null);
       if (currentReply) clearReplyFor(conversationKey);
       isSubmittingRef.current = false;
-      return;
+      return true;
     }
     if (!conversationId || !client || !canSend) {
       isSubmittingRef.current = false;
@@ -1980,6 +1992,7 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, vi
         void markThreadRead(conversationKey, readRoundId, `${readRoundId}:sent:${Date.now()}`);
       }
     }
+    return sentAny;
   };
 
   /** Every outbound entry shares this gate: an unresolved text on the conversation must be
@@ -2013,6 +2026,8 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, vi
           setMessages((current) => ({ ...current, [conversationKey]: mergeImMessages(current[conversationKey] ?? [], [next]) }));
         }
         if (!failure.preserveDraft) setDrafts((current) => current[conversationKey] === text ? { ...current, [conversationKey]: "" } : current);
+        if (failure.preserveDraft && validatedLegacyOrder?.thread === conversationKey
+          && parseOrderReference(text)?.order.id === validatedLegacyOrder.order.id) setSentLegacySignature(validatedLegacyOrder.signature);
         setUnresolvedTextFor(conversationKey, null);
       }
     } catch (cause) {
@@ -2262,7 +2277,7 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, vi
           <span className="support-fact-chip">{activeConversation ? typeLabel(activeConversation.type) : preview ? "商品咨询" : "客服咨询"}</span>
           {activeConversation && (activeConversation.messageScopeState === "FAILED" || threadStateLabel(activeConversation)) ? <span className="support-fact-chip" data-tone={activeConversation.messageScopeState === "FAILED" ? "warn" : threadStateOf(activeConversation) === "ACTIVE" ? "good" : "neutral"}>{activeConversation.messageScopeState === "FAILED" ? "待人工核验" : threadStateLabel(activeConversation)}</span> : null}
           {activeConversation?.assignedAdmin ? <span className="support-fact-chip" data-tone="good">{`客服 · ${activeConversation.assignedAdmin.name}`}</span> : null}
-          {validOrderContext ? <span className="support-fact-chip">{validOrderContext.draftText.split("\n")[0]}</span> : subjectRef ? <span className="support-fact-chip">{`对象 ${subjectRef}`}</span> : preview ? <span className="support-fact-chip">演示对象</span> : null}
+          {validOrderContext ? <span className="support-fact-chip">{validOrderContext.draftText.split("\n")[0]}</span> : subjectRef ? <span className="support-fact-chip">{subjectRef.startsWith("legacy-order:") ? "旧订单" : `对象 ${subjectRef}`}</span> : preview ? <span className="support-fact-chip">演示对象</span> : null}
           <span className="support-facts-spacer" />
         </div>
         <div className="support-message-area">
@@ -2270,6 +2285,11 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, vi
            {!preview && !activeConversation ? <div className="support-start-panel" data-state="initial"><Headphones size={27} /><strong>从这里开始你的咨询</strong><span>点击后立即开始，客服接入后会看到你的留言。</span><SupportTypePicker value={selectedType} onChange={setSelectedType} disabled={busy} onSelect={(type) => void startConsultation(type)} />{busy ? <span className="support-start-panel-status" role="status">正在创建咨询…</span> : null}</div> : !preview && activeConversation?.messageScopeState === "FAILED" ? <div className="support-start-panel"><CircleAlert size={27} /><strong>{messageScopeUserLabel("FAILED")}</strong><span>平台暂时无法确认客服会话状态，已暂停发送和自动重试。请稍后再试或联系平台处理。</span></div> : <MessageScrollerPrimitive.Provider autoScroll defaultScrollPosition="last-anchor"><MessageScrollerPrimitive.Root className="support-message-scroller"><MessageScrollerPrimitive.Viewport preserveScrollOnPrepend className="support-message-viewport" aria-label="消息内容" onContextMenu={onSupportContextMenu}><MessageScrollerPrimitive.Content className="support-message-content">{timelineItems.length > 0 ? <>{historyMore[activeConversationKey] ? <MessageScrollerPrimitive.Item messageId="load-earlier"><div className="support-history-more"><button type="button" onClick={() => void loadEarlier()} disabled={historyLoading}>{historyLoading ? "正在读取更早消息…" : "更早的消息"}</button></div></MessageScrollerPrimitive.Item> : null}{timelineItems}</> : <MessageScrollerPrimitive.Item messageId="empty"><div className="support-message-empty"><Headphones size={24} /><strong>{activeConversation?.state === "WAITING" ? "咨询已提交" : "等待第一条消息"}</strong><span>{activeConversation?.state === "WAITING" ? (activeScopeReady ? "客服接入后会看到你的留言；现在也可以先发消息。" : "正在连接客服…已输入的内容会保留。") : preview ? "可以从下方快捷回复开始检查交互。" : "客服连接就绪后，消息会出现在这里。"}</span></div></MessageScrollerPrimitive.Item>}</MessageScrollerPrimitive.Content></MessageScrollerPrimitive.Viewport><MessageScrollerPrimitive.Button direction="end" className="support-jump-button" render={<button type="button" aria-label="跳到最新消息" title="跳到最新消息" />}><ArrowDown size={14} aria-hidden="true" /></MessageScrollerPrimitive.Button></MessageScrollerPrimitive.Root></MessageScrollerPrimitive.Provider>}
         </div>
         <div className="support-composer-wrap">
+          {validatedLegacyOrder?.signature===orderContextSignature && validatedLegacyOrder.thread===activeConversationKey ? <div className="support-attachment" role="group" aria-label="关联旧订单">
+            <span>旧订单 {validatedLegacyOrder.order.displayNo} · 发送后客服可核对</span><button type="button" disabled={busy || !canSend || Boolean(unresolvedText) || sentLegacySignature===validatedLegacyOrder.signature} onClick={() => {
+              const context=validatedLegacyOrder;void sendMessage(undefined,context.order).then(sent=>{if(sent)setSentLegacySignature(context.signature);});
+            }}>{sentLegacySignature===validatedLegacyOrder.signature?"已发送":"发送订单信息"}</button>
+          </div> : null}
           {preview ? <div className="support-quick-replies" aria-label="快捷回复"><span>快捷回复</span>{["我先帮你确认一下", "请稍等，我正在核对"].map((reply) => <button key={reply} type="button" onClick={() => chooseQuickReply(reply)}>{reply}</button>)}</div> : null}
           {attachment ? <div className="support-attachment" data-slot="attachment"><Paperclip size={14} /><span>{attachment}</span><button type="button" onClick={() => setAttachment(null)} aria-label="移除附件" title="移除附件">×</button></div> : null}
           {!preview && pendingImage[activeConversationKey] ? (() => {

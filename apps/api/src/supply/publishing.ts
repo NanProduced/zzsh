@@ -7,6 +7,7 @@ import type { Pool, PoolClient } from "pg";
 import { SecurityApiError, withTransaction } from "../auth/security-core";
 import { assertActiveInTransaction, identityAllowsProtectedTrade } from "../auth/user-identity";
 import {
+  canonicalize,
   computeContentHash,
   normalizeContentPayload,
   normalizeDeclaration,
@@ -43,6 +44,7 @@ import {
   invalid,
   newSupplyId,
   notFound,
+  sha256Hex,
 } from "./supply-util";
 import { GAME_SERVICE, readGameService, requireWritableGameService, type GameServiceState } from "./game-services";
 import { assertDeltaResourceUnit, isDeltaGradingDivision, isRetiredDeltaInsurance, normalizeRentalPricing, validateDeltaPublicationAttributes, validateDeltaRentalTerm } from "./delta-rental";
@@ -684,7 +686,8 @@ export async function createListingDraft(
       old?.attributes ?? {},
       old?.term_option_code ?? "",
       old?.pricing_option_code ?? "",
-      old?.schema_version ?? 1,
+      // An owner editing a migrated listing starts a normal draft, never an inherited old-price authorization.
+      old?.schema_version === 3 ? 2 : old?.schema_version ?? 1,
     ],
   );
   if (old) {
@@ -1089,6 +1092,10 @@ export async function quoteListing(
   a: PublishingAccount,
   expected: unknown,
   legacyGrading?: LegacyTakeoverGradingContext,
+  legacyQuote?: { actorId: string; sourceCanonical: string; policyCanonical: string;
+    source: Parameters<typeof import("./legacy-listed-source-quote").buildLegacyListedSourceQuote>[0]["source"];
+    policyBinding: Parameters<typeof import("./legacy-listed-source-quote").buildLegacyListedSourceQuote>[0]["policyBinding"];
+    display: Parameters<typeof import("./legacy-listed-source-quote").buildLegacyListedSourceQuote>[0]["display"] },
 ): Promise<void> {
   checkAccountRevision(a, expected);
   if (a.lifecycle !== "ACTIVE") throw conflict("账号已归档，不能重新核价或上架");
@@ -1124,7 +1131,7 @@ export async function quoteListing(
   validateDeltaRentalTerm(d.attributes.rentalPricing == null ? undefined : normalizeRentalPricing(d.attributes.rentalPricing), term, d.termOptionCode);
   const rows = (
     await client.query(
-      `SELECT l.item_id AS "itemId", i.code, l.quantity::text,i.unit,i.name,i.enabled,p.pricing_kind AS "pricingKind",p.unit_quantity::text AS "unitQuantity",p.buyer_unit_amount::text AS "buyerUnitAmount",p.owner_unit_amount::text AS "ownerUnitAmount" FROM zzsh_supply.inventory_line l JOIN zzsh_supply.billable_item i ON i.id=l.item_id LEFT JOIN zzsh_supply.price_line p ON p.item_id=i.id AND p.price_version_id=$2 AND p.customer_tier='STANDARD' WHERE l.version_id=$1 ORDER BY l.item_id`,
+      `SELECT l.item_id AS "itemId", i.code, l.quantity::text,i.unit,i.name,i.enabled,i.quantity_scale AS "quantityScale",p.pricing_kind AS "pricingKind",p.unit_quantity::text AS "unitQuantity",p.buyer_unit_amount::text AS "buyerUnitAmount",p.owner_unit_amount::text AS "ownerUnitAmount" FROM zzsh_supply.inventory_line l JOIN zzsh_supply.billable_item i ON i.id=l.item_id LEFT JOIN zzsh_supply.price_line p ON p.item_id=i.id AND p.price_version_id=$2 AND p.customer_tier='STANDARD' WHERE l.version_id=$1 ORDER BY l.item_id`,
       [v.id, release.price_version_id],
     )
   ).rows;
@@ -1176,7 +1183,7 @@ export async function quoteListing(
         publisherBailRequirementCents: fundingPolicy.guaranteeRequirement.mode === "NOT_REQUIRED" ? "0" : fundingPolicy.guaranteeRequirement.requiredCents,
       }
     : undefined;
-  const result = computeDeltaQuote({
+  const normalInput = {
     customerTier: "STANDARD",
     priceVersionId: release.price_version_id,
     mode: release.mode,
@@ -1214,7 +1221,23 @@ export async function quoteListing(
       ...(e.expiresAt ? { expiresAt: e.expiresAt } : {}),
     })),
     ...(deposits ? { deposits } : {}),
-  } as QuoteInput);
+  } as QuoteInput;
+  let policyCanonical: string | undefined;
+  let result: ReturnType<typeof computeDeltaQuote>;
+  if (legacyQuote) {
+    const marker = attrs.legacy_published_reference;
+    const reference = typeof marker === "string" ? await readLegacyPublishedReference(client, a.id, marker) : null;
+    if (!deposits || legacyGrading?.kind !== "VERIFIED_LEGACY_TAKEOVER" || legacyGrading.accountId !== a.id
+      || legacyGrading.sourceDigest !== legacyQuote.source.sourceDigest || legacyGrading.observationVersionId !== legacyQuote.source.observationVersionId
+      || !reference || reference.legacyId !== legacyQuote.source.legacyId || reference.sourceDigest !== legacyQuote.source.sourceDigest
+      || reference.observationVersionId !== legacyQuote.source.observationVersionId) throw conflict("LEGACY_QUOTE_SOURCE_BINDING_MISMATCH");
+    const { buildLegacyListedSourceQuote } = await import("./legacy-listed-source-quote");
+    const frozen = buildLegacyListedSourceQuote({ ...legacyQuote, catalog: rows.map(r => ({ id:r.itemId, code:r.code, unit:r.unit, quantityScale:r.quantityScale })),
+      declaredInventory:d.inventory.map(item => ({ itemId:item.itemId, quantity:item.quantity! })), termOption:term,
+      priceVersionId:release.price_version_id, ruleReleaseId:release.id, publisherBailRequirementCents:deposits.publisherBailRequirementCents,
+      expiryDisclosures:ents.map(e => ({ entitlementId:e.entitlementId, expiresAt:e.expiryKind === "TIMED" ? e.expiresAt : null, fullTermGuaranteed:false })) });
+    policyCanonical = frozen.policyCanonical; result = { quotable:true, quote:frozen.quote };
+  } else result = computeDeltaQuote(normalInput);
   if (!result.quotable)
     throw invalid(
       `当前条件无法报价：${result.reasonCodes.join(",")}`,
@@ -1235,9 +1258,20 @@ export async function quoteListing(
       agreementDigest: release.digest,
     },
     quoteValues: result.quote as unknown as Record<string, unknown>,
+    ...(result.quote.schemaVersion === 3 ? { quoteSource:"LEGACY_QUOTED" as const, legacyQuote:result.quote.legacyQuote } : {}),
   });
+  if (legacyQuote && policyCanonical && result.quote.schemaVersion === 3) {
+    const policyDigest = result.quote.legacyQuote!.sourcePolicyDigest, quoteCanonical = canonicalize(result.quote);
+    await client.query(`INSERT INTO zzsh_supply.legacy_listed_policy_evidence(policy_digest,policy_canonical,policy,created_by_admin_id) VALUES($1,$2::text,$2::text::jsonb,$3) ON CONFLICT(policy_digest) DO NOTHING`, [policyDigest,policyCanonical,legacyQuote.actorId]);
+    const policy = (await client.query(`SELECT 1 FROM zzsh_supply.legacy_listed_policy_evidence WHERE policy_digest=$1 AND policy_canonical=$2`,[policyDigest,policyCanonical])).rowCount;
+    if (!policy) throw conflict("LEGACY_POLICY_EVIDENCE_MISMATCH");
+    await client.query(`INSERT INTO zzsh_supply.legacy_listed_quote_evidence(listing_version_id,account_id,policy_digest,quote_digest,quote_canonical,quote,created_by_admin_id) VALUES($1,$2,$3,$4,$5::text,$5::text::jsonb,$6) ON CONFLICT(listing_version_id) DO NOTHING`,
+      [v.id,a.id,policyDigest,sha256Hex(quoteCanonical),quoteCanonical,legacyQuote.actorId]);
+    const quoteEvidence = (await client.query(`SELECT 1 FROM zzsh_supply.legacy_listed_quote_evidence WHERE listing_version_id=$1 AND account_id=$2 AND policy_digest=$3 AND quote_canonical=$4`,[v.id,a.id,policyDigest,quoteCanonical])).rowCount;
+    if (!quoteEvidence) throw conflict("LEGACY_QUOTE_EVIDENCE_MISMATCH");
+  }
   await client.query(
-    `UPDATE zzsh_supply.listing_version SET payload=$2,content_hash=$3,rule_release_id=$4,presentation=$5,revision=revision+1 WHERE id=$1`,
+    `UPDATE zzsh_supply.listing_version SET payload=$2,content_hash=$3,rule_release_id=$4,presentation=$5,schema_version=$6,revision=revision+1 WHERE id=$1`,
     [
       v.id,
       payload,
@@ -1248,6 +1282,7 @@ export async function quoteListing(
         skins: skins.map(freezePresentationSkin),
         entitlements: ents.map((e) => ({ id: e.entitlementId, name: e.name })),
       },
+      result.quote.schemaVersion,
     ],
   );
   await bumpAccount(client, a);
@@ -1439,6 +1474,16 @@ async function assertAccepted(
   const policy=selected?await readFundingPolicyForRelease(client,v.rule_release_id!):null;
   if(selected && !policy)throw conflict("包赔资金政策未提供");
   const terms=selected?await readFullPayoutTerms(client,a.game_id,policy!,v.payload!.ruleRefs.priceVersionId):undefined;
+  if (selected && v.payload?.schemaVersion === 3 && v.payload.quoteSource === "LEGACY_QUOTED") {
+    const authorized = (await client.query(`SELECT 1 FROM zzsh_supply.rule_acceptance r
+      WHERE r.account_id=$1 AND r.listing_version_id=$2 AND r.rule_release_id=$3 AND r.accepted_content_hash=$4 AND r.owner_user_id=$5
+        AND r.acceptance_kind='LEGACY_TAKEOVER_AUTHORIZED'
+        AND r.authorization_evidence->>'basis'='ADMIN_AUTHORIZED_LEGACY_ELECTION'
+        AND zzsh_supply.legacy_listed_quote_source_valid($1,$5,$2,$6::jsonb)`,
+      [a.id,v.id,v.rule_release_id,v.content_hash,a.owner_user_id,JSON.stringify(v.payload)])).rowCount;
+    if (!authorized) throw conflict("旧在架包赔来源授权未核实");
+    return;
+  }
   if (
     !(
       await client.query(

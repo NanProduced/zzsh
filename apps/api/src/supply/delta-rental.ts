@@ -13,6 +13,7 @@ import {
 import { ensureOnlyFields, invalid } from "./supply-util";
 import type { ExpiryDisclosure, InternalQuote, QuoteAmount, QuoteUnitAmount } from "./pricing";
 import { validateOwnerDepositDeclaration } from "./funding-policy";
+import { legacyListedSourceRatio } from "./legacy-listed-quote";
 
 export const DELTA_QUOTE_SCHEMA_VERSION = 1;
 export const DELTA_HAFF_RATIO_SCHEMA = "haff-ratio-v1";
@@ -522,7 +523,7 @@ type DeltaProjectedLine = {
 };
 
 export type DeltaProjectedQuote = {
-  schemaVersion: 1 | 2;
+  schemaVersion: 1 | 2 | 3;
   rentalMode?: RentalMode;
   currency: "CNY";
   ruleReleaseId: string | null;
@@ -564,9 +565,11 @@ export function projectDeltaQuote(quote: InternalQuote | DeltaProjectedQuote, vi
     termSeconds: quote.termSeconds,
     expiryDisclosures: quote.expiryDisclosures,
     unitAmountsInformational: quote.unitAmountsInformational,
-    ...(quote.schemaVersion === 2 ? { rentalMode: quote.pricingInputs?.compatibility?.rentalMode ?? (quote as DeltaProjectedQuote).rentalMode } : {}),
+    ...(quote.schemaVersion === 2 || quote.schemaVersion === 3 ? { rentalMode: quote.pricingInputs?.compatibility?.rentalMode ?? (quote as DeltaProjectedQuote).rentalMode } : {}),
   };
-  const ownerRatio = quote.pricingInputs?.compatibility?.ownerRatioB ?? (quote as DeltaProjectedQuote).ownerHaffRatio;
+  const ownerRatio = quote.schemaVersion === 3
+    ? legacyListedSourceRatio(quote, "owner") ?? undefined
+    : quote.pricingInputs?.compatibility?.ownerRatioB ?? (quote as DeltaProjectedQuote).ownerHaffRatio;
   const ownerFields = {
     ownerTotal: quote.ownerTotal,
     ...(ownerRatio === undefined ? {} : { ownerHaffRatio: ownerRatio }),

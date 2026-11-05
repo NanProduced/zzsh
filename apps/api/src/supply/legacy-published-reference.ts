@@ -32,5 +32,5 @@ export async function readLegacyPublishedReference(client: PoolClient, accountId
   if (expectedDigest !== undefined && digest !== expectedDigest) return null;
   const blocked = new Set(row.blockedPaths);
   const slots = row.displayPaths.flatMap((path, position) => blocked.has(path) ? [] : [{ position, path }]);
-  return slots.length ? { digest, observationVersionId: row.observationVersionId, sourceDigest: row.sourceDigest, gradingCode: row.gradingCode, slots } : null;
+  return slots.length ? { digest, observationVersionId: row.observationVersionId, sourceDigest: row.sourceDigest, legacyId: row.legacyId, gradingCode: row.gradingCode, slots } : null;
 }

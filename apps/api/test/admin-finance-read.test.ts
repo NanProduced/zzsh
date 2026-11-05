@@ -8,6 +8,8 @@ import { loadFinanceOrderFacts } from "../src/finance/admin-finance-order-read";
 import { loadAdminFinanceFacts } from "../src/finance/admin-finance-read";
 import {readAdminFinancePeriodBalances} from '../src/finance/admin-finance-read';
 import type { PoolClient } from "pg";
+import { previewFrozenFinanceObservation } from '../src/finance/legacy-finance-source-preparation';
+import { canonicalize } from '../src/supply/content-hash';
 
 const filters = parseAdminFinanceFilters(new URLSearchParams("from=2026-10-03&to=2026-10-03"));
 const line = (overrides: Record<string, unknown> = {}) => projectAdminFinanceLedger({ id: "a", account_code: "WALLET_AVAILABLE", subject_id: "u1", subject_name: "同昵称", delta: "-20000", at: "2026-10-03T00:00:00.000000Z", source_entity: "withdrawal_intent", source_id: "w1", event_kind: "RESERVE", ...overrides });
@@ -19,6 +21,16 @@ test('historical payment/refund documents preserve original business states and 
   assert.equal(record.documentRef,`HISTORY_${kind}:source-${kind}`);assert.equal(record.kind,kind);assert.equal(record.documentNumber,'ORIGINAL-'+kind);assert.equal(record.historical!.purposeLabel,purpose);assert.equal(record.historical!.originalStatus,'1');assert.equal(record.affectsCurrentLedger,false);assert.equal(record.affectsCurrentWallet,false);assert.equal(record.evidence.channelArrival,'UNKNOWN');assert.equal(record.related.length,0);
  }
  assert.equal(parseAdminFinanceFilters(new URLSearchParams('kind=PAYMENT')).kind,'PAYMENT');
+});
+
+test('history exposes additive amount semantics while preserving existing source amount and delta fields',()=>{
+ const samples=[['la_pay_order','0','UNVERIFIED','-1234'],['la_pay_order','1','UNVERIFIED','-1234'],['la_refund_record','1','UNVERIFIED','1234'],['la_distribution_order','2','UNVERIFIED','1234'],['la_withdraw_apply','3','UNVERIFIED','-1234'],['la_log_earnings',null,'UNVERIFIED','-1234']] as const;
+ for(const [entity,status,semantics,legacyDelta] of samples){
+  const record=projectAdminFinanceObservation({id:'source-'+entity+'-'+status,subject_id:'u1',subject_name:'fixture',source_type:'LEGACY_MYSQL',source_system:'legacy_mysql_restore',source_entity:entity,source_id:'11',source_digest:'a'.repeat(64),amount:'12.34',action:'2',source_status:status,at:facts().asOf,imported_at:facts().asOf,included_in_opening:false,extra_evidence:{snapshot:{legacyChangeType:1002}}});
+  assert.equal(record.historical!.amountSemantics,semantics);assert.equal(record.historical!.recordedAmountCents,'1234');assert.equal(record.deltaCents,legacyDelta);assert.equal(record.affectsCurrentLedger,false);assert.equal(record.affectsCurrentWallet,false);
+  assert.equal(financeDocuments([record])[0]!.historical!.amountSemantics,semantics);
+  assert.equal(financePeriodProjection([record]).find(row=>row.bucket==='AVAILABLE')!.knownOutflows,'0');
+ }
 });
 
 test('native pending/settled/recovery uses the earning economic root and original state, not a withdrawal or generic settlement',()=>{
@@ -142,6 +154,17 @@ test("CSV is all matching rows, exact integer columns, unknown blank and text fo
   const text = csv.bytes.toString("utf8"); assert.equal(csv.rowCount, 2); assert.match(text, /"-900719925474099312345"/); assert.match(text, /"","UNKNOWN"/); assert.match(text, /' =HYPERLINK\(""x,y""\)/); assert.match(text, /\nnext/); assert.equal(csv.sha256.length, 64);
   assert.throws(() => generateAdminFinanceCsv([{ ...known, deltaCents: "=1+1" }], filters, facts().asOf, facts().version));
   assert.equal(line({ delta: "0" }).deltaCents, "0");
+});
+
+test('CSV preserves legacy columns and explicitly identifies business observation amount and wallet effect',()=>{
+ const prepared=previewFrozenFinanceObservation('HISTORICAL_PAYMENT',{id:'11',userId:'11',order_type:'1',order_id:'32',pay_order_sn:'PAY-1',pay_money:'12.34',pay_is:'0',pay_time:'0',create_time:'1782762304',relationship:'VERIFIED'},{userId:'u1',legacyUserId:'11'}),s=prepared.row;
+ const record=projectAdminFinanceObservation({id:'pay',subject_id:'u1',subject_name:'fixture',source_type:'LEGACY_MYSQL',source_system:'legacy_mysql_restore',source_entity:'la_pay_order',source_id:prepared.sourceId,source_digest:prepared.sourceDigest,amount:'12.34',source_status:'0',at:prepared.sourceEventAt,imported_at:facts().asOf,included_in_opening:false,extra_evidence:{snapshot:s,canonical:canonicalize(s),legacyUserId:'11'}});
+ assert.equal(record.historical!.amountSemantics,'BUSINESS_RECORD');
+ const text=generateAdminFinanceCsv([record],filters,facts().asOf,facts().version).bytes.toString('utf8');
+ const [header,row]=text.split('\r\n');assert.match(header!,/"变动金额_分"/);assert.match(header!,/"历史金额性质","历史原记录金额_分","是否影响当前余额"/);
+ assert.match(row!,/"-1234"/,'legacy delta stays compatible');assert.match(row!,/"历史业务记录金额","1234","false"$/);assert.equal(record.affectsCurrentLedger,false);assert.equal(record.affectsCurrentWallet,false);
+ const unverified=projectAdminFinanceObservation({id:'bad-log',subject_id:'u1',subject_name:'fixture',source_type:'LEGACY_MYSQL',source_system:'legacy_mysql_restore',source_entity:'la_log_earnings',source_id:'12',source_digest:'0'.repeat(64),amount:'12.34',action:'2',at:facts().asOf,imported_at:facts().asOf,included_in_opening:false,extra_evidence:{snapshot:{legacyChangeType:1002}}});
+ const uncertain=generateAdminFinanceCsv([unverified],filters,facts().asOf,facts().version).bytes.toString('utf8').split('\r\n')[1];assert.match(uncertain!,/"历史来源待核","1234","false"$/);
 });
 
 test('admin finance snapshot rejects a noncanonical alias of the valid signature', () => {

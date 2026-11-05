@@ -19,6 +19,8 @@ import { parseMembershipEntitlementQuery, readMembershipPolicyChange, readMember
 import { hashApprovalPayload } from "../src/auth/approval-audit";
 import { normalizeUnifiedMembershipPolicy, projectUnifiedMembershipPricing } from "../src/auth/membership-unified-pricing";
 import { signConfirmation, verifyConfirmation } from "../src/order/confirmation-token";
+import { legacyPayload } from "./legacy-listed-fixture";
+import { normalizeQuote } from "../src/supply/content-hash";
 
 test("entitlement list input uses bounded numeric pages and rejects duplicate or unknown filters", () => {
   assert.deepEqual(parseMembershipEntitlementQuery(new URLSearchParams()), { page: 1, pageSize: 20 });
@@ -516,6 +518,40 @@ function growthReaderClient(state: { normalTier: string; effectiveTier: string; 
     throw new Error(`unexpected query: ${sql}`);
   } } as never;
 }
+
+test("new growth and entitlement discounts use the frozen legacy base; absent authority stays unknown", async () => {
+  const at = "2026-10-18T00:00:00.123456Z", state = { normalTier: "STANDARD", effectiveTier: "STANDARD", blackGoldState: "NOT_QUALIFIED", lastTierDropAt: null };
+  const fact = { userId: "user-1", gameId: "game-1", sourceKey: "RENTAL_SETTLEMENT:settlement-1:haff", sourceType: "RENTAL_SETTLEMENT" as const, sourceId: "settlement-1:haff", settlementVersion: "1", effectiveAt: "2026-10-10T00:00:00Z", recordedAt: "2026-10-10T00:00:00Z", amountCents: "100", status: "SETTLED" as const, eligible: true, revision: 0 };
+  const contribution = { ...fact, sourceDigest: growthContributionSourceDigest("a".repeat(64), "game-1", fact) };
+  const policy = normalizeUnifiedMembershipPolicy(readerPolicy(), unifiedTestPricing(), { enabledModes: ["ordinary", "custom", "fast"], priceVersionId: "price-v1" });
+  const entitlement = { id: "ent-unified", kind: "FRIEND", scopeKey: "game:game-1", startsAt: "2026-10-01T00:00:00Z", endsAt: "2026-10-20T00:00:00Z", status: "ACTIVE", depositWaived: false, depositAllowanceCents: "0", pricingPayload: { status: "CONFIGURED", kind: "TOTAL_DISCOUNT", scope: "ALL_ENABLED_RENTAL_MODES", priceVersionId: "price-v1", payableRatio: "0.95", costBasisRef: "price-v1" } };
+  const baseQuote = normalizeQuote(legacyPayload().quoteValues); baseQuote.priceVersionId = "price-v1"; baseQuote.ruleReleaseId = "release-1";
+  const quote = quoteInput(); quote.deposits = { tenantDepositCents: "20000", publisherBailRequirementCents: "0" };
+  const common = { userId: "user-1", gameId: "game-1", accountId: "account-1", listingVersionId: "listing-1", listingHash: "h".repeat(64), priceVersionId: "price-v1", baseQuote, ruleReleaseId: "release-1", ownerUserId: "owner-1", quantityDigest: "quantity-1", quoteInput: quote, asOfUtc: at };
+  const client = growthReaderClient(state, [contribution], policy, "1.00", "a".repeat(64), false, quote.haffRule, [entitlement]);
+  const result = await readMembershipGrowthQuoteCandidatesAt(client, common);
+  assert.equal(result.knowledge, "KNOWN", JSON.stringify(result)); if (result.knowledge !== "KNOWN") return;
+  const standard = result.candidates.find(candidate => candidate.plan.source === "GROWTH")!, gift = result.candidates.find(candidate => candidate.plan.source === "FRIEND")!;
+  assert.equal(standard.quote.resourceTotal.amount, "405.00");
+  assert.equal(gift.quote.resourceTotal.amount, "384.75");
+  assert.equal(gift.quote.ownerTotal.amount, "349.00");
+  assert.equal(baseQuote.resourceTotal.amount, "405.00");
+  for (const [depositWaived, depositAllowanceCents, expected] of [[false,"5000","150.00"],[true,"0","0.00"]] as const) {
+    const configured = { ...entitlement, depositWaived, depositAllowanceCents };
+    const withBenefit = growthReaderClient(state, [contribution], policy, "1.00", "a".repeat(64), false, quote.haffRule, [configured]);
+    const candidates = await readMembershipGrowthQuoteCandidatesAt(withBenefit, common);
+    assert.equal(candidates.knowledge,"KNOWN",JSON.stringify(candidates)); if (candidates.knowledge !== "KNOWN") continue;
+    const binding = { userId:common.userId, ownerUserId:common.ownerUserId, accountId:common.accountId, listingVersionId:common.listingVersionId, ruleReleaseId:common.ruleReleaseId, quantityDigest:common.quantityDigest };
+    const selected = selectPersonalGrowthOffer(candidates, binding, at, baseQuote);
+    assert.equal(selected.quote.tenantDeposit?.amount,expected);assert.equal(selected.quote.resourceTotal.amount,"384.75");assert.equal(selected.quote.ownerTotal.amount,"349.00");
+  }
+  const wrongSource = structuredClone(baseQuote); (wrongSource.legacyQuote as any).sourceSystem = "native";
+  assert.deepEqual(await readMembershipGrowthQuoteCandidatesAt(client, { ...common, baseQuote: wrongSource }), { knowledge: "UNKNOWN", reason: "LEGACY_QUOTE_SOURCE_INVALID", asOfUtc: at });
+  const wrapped = client as unknown as { query: (sql: string) => Promise<unknown> };
+  const missingPolicy = { query: (sql: string) => sql.includes("FROM zzsh_iam.membership_growth_policy") ? Promise.resolve({ rows: [] }) : wrapped.query(sql) } as never;
+  const unknown = await readMembershipGrowthQuoteCandidatesAt(missingPolicy, common);
+  assert.equal(unknown.knowledge, "UNKNOWN");
+});
 
 function globalCarryoverFixture(policy: GrowthBenefitPolicy, entitlements: unknown[] = [], patch?: (input: QuoteInput) => void) {
   const at = "2026-10-18T00:00:00.123456Z", state = { normalTier: "GOLD", effectiveTier: "GOLD", blackGoldState: "NOT_QUALIFIED", lastTierDropAt: null };

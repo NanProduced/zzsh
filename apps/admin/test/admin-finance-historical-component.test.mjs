@@ -44,14 +44,24 @@ async function mount(t,{mode='lookup',documents=[debit,application],doc=debit,li
   return{host,opened,requests,props,render:async()=>{await act(async()=>root.render(createElement(AdminFinanceView,props)));await settle();}};
 }
 
-test('lookup explains the application and debit as two records of one withdrawal without adding them',async t=>{
+test('lookup explains certified grouping and independently visible unverified records',async t=>{
   const ui=await mount(t);await waitFor(()=>ui.host.textContent.includes('SYNTHETIC-LOG-11437'));
-  assert.match(ui.host.textContent,/提现申请扣款/);assert.match(ui.host.textContent,/提现申请记录/);assert.match(ui.host.textContent,/2 份记录/);assert.doesNotMatch(ui.host.textContent,/2 次提现|1,468\.00/);
+  const table=ui.host.querySelector('.finance-lookup-table'),firstRow=table.querySelector('tbody tr');assert.equal(table.getAttribute('role'),'table');assert.equal(table.getAttribute('aria-label'),'业务与历史记录');assert([...table.querySelectorAll('thead th')].every(cell=>cell.getAttribute('scope')==='col'));assert.deepEqual([...firstRow.querySelectorAll('[data-label]')].map(cell=>cell.getAttribute('data-label')),['相关主体','业务进度 / 状态','金额','时间']);
+  assert.match(ui.host.textContent,/提现申请扣款/);assert.match(ui.host.textContent,/提现申请记录/);assert.match(ui.host.textContent,/历史余额变动/);assert.match(ui.host.textContent,/金额不应重复相加/);assert.match(ui.host.textContent,/2 份记录/);assert.doesNotMatch(ui.host.textContent,/2 次提现|1,468\.00/);
+  assert.match(ui.host.textContent,/按已核证关联合并为一笔业务/);assert.match(ui.host.textContent,/未核证或无关联查看权限的记录独立列出/);assert.match(ui.host.textContent,/原流水号仍可查/);assert.doesNotMatch(ui.host.textContent,/历史余额变动分别列示/);
   assert.match(ui.host.textContent,/原流水号 SYNTHETIC-LOG-11437/);assert.match(ui.host.textContent,/关联提现单：20260629192242694162/);
   assert.match(ui.host.textContent,/历史变动 −734\.00 元/);assert.doesNotMatch(ui.host.textContent,/用户可用.*−734/);
-  await click(button('历史记录详情',ui.host));assert.match(ui.host.textContent,/同一笔业务，不重复汇总/);
+  await click(button('历史记录详情',ui.host));assert.match(ui.host.textContent,/已核证的提现申请与余额流水属于同一笔业务，金额不重复汇总/);
   await click(ui.host.querySelector('[data-historical-association] button'));
   const target=new URL(ui.opened.at(-1)[0],browser.location.href);assert.equal(target.pathname,association.path);assert.ok(target.searchParams.get('origin'));assert.ok(ui.requests.every(value=>value.startsWith('/api/bff/admin/finance/')));
+});
+
+test('unresolved withdrawal detail does not claim a verified relationship',async t=>{
+  const unknown={...historical,association:{...association,state:'UNRESOLVED',kind:'UNKNOWN',number:null,documentRef:null,path:null}};
+  const host=browser.document.createElement('div');browser.document.body.append(host);const root=createRoot(host);
+  t.after(async()=>{await act(async()=>root.unmount());host.remove();});
+  await act(async()=>root.render(createElement(HistoricalFinanceDetail,{historical:unknown,recordKind:'WITHDRAWAL',orderRead:true,documentRead:true,onOpenPath(){},expanded:true})));await settle();
+  assert.match(host.textContent,/关联未记录/);assert.match(host.textContent,/历史金额不改变当前钱包/);assert.doesNotMatch(host.textContent,/已核证的提现申请与余额流水/);
 });
 
 test('document shows raw fee, net and old balance separately from channels and keeps the original deep link',async t=>{
@@ -64,6 +74,101 @@ test('document shows raw fee, net and old balance separately from channels and k
   const original=ui.host.querySelector('[data-finance-focus="history:synthetic-log"]');await click(original);
   const target=new URL(ui.opened.at(-1)[0],browser.location.href);assert.equal(decodeURIComponent(target.pathname.slice('/finance/documents/'.length)),debit.ref);assert.equal(target.searchParams.get('entry'),entry.id);
   assert.equal(ui.opened.at(-1)[1],'提现申请扣款 · SYNTHETIC-LOG-11437','workspace titles retain the specific record alongside its purpose');
+});
+
+test('payment history hides unrelated empty withdrawal and distribution fields but keeps applicable evidence',async t=>{
+  const paymentHistory={...historical,changeType:null,purposeCode:'PAYMENT_RECORD',purposeLabel:'旧平台付款记录',originalLogNumber:null,balanceAfterCents:null,feeCents:null,netCents:null,originalStatus:'0',originalStatusLabel:'旧平台未付款',association:{...association,state:'UNRESOLVED',kind:'UNKNOWN',number:null,documentRef:null,path:null}};
+  const paymentDoc={...debit,ref:'HISTORY_PAYMENT:payment',kind:'PAYMENT',historical:paymentHistory};
+  const evidence={originalReference:'123',originalStatus:'0',originalOrderType:'1',originalNumber:'OLD-PAY',originalRatio:null,originalLevel:null,originalBankName:null,originalRecipientMask:null,originalMobileMask:null,originalDestinationMask:null,originalOperatorSourceId:null,originalNetCents:null,originalFeeCents:null,historicalBalanceAfterCents:null,dueAt:null,policyVersion:null,channelArrival:'UNKNOWN'};
+  const ui=await mount(t,{mode:'document',doc:paymentDoc,lines:[{...entry,documentRef:paymentDoc.ref,kind:'PAYMENT',historical:paymentHistory}],evidence});await waitFor(()=>ui.host.textContent.includes('旧平台付款记录'));
+  const facts=ui.host.querySelector('[data-historical-finance]');assert.match(facts.textContent,/原金额/);assert.doesNotMatch(facts.textContent,/原流水号|变动后余额|手续费|净额/);
+  await click(button('原始来源字段',ui.host));assert.match(ui.host.textContent,/原编号[\s\S]*OLD-PAY/);assert.match(ui.host.textContent,/渠道到账[\s\S]*未取得依据/);assert.doesNotMatch(ui.host.textContent,/原分销比例|原分销层级|旧收款银行|原净额|原手续费|历史记录后余额|计划转可用时间/);
+  await click([...ui.host.querySelectorAll('button')].find(b=>b.textContent.startsWith('资金来源与版本')));assert.match(ui.host.textContent,/历史记录未纳入期初覆盖/);assert.doesNotMatch(ui.host.textContent,/历史未记录，未入当前余额/);
+});
+
+test('old payment attempts and commission business records show source amounts, not balance movement',async t=>{
+  const payment=(status)=>({...debit,ref:`HISTORY_PAYMENT:payment-${status}`,kind:'PAYMENT',number:`PAY-${status}`,amounts:[{bucket:'AVAILABLE',knownNetCents:'-66450',unknownCount:0}],historical:{...historical,amountSemantics:'BUSINESS_RECORD',changeType:null,purposeCode:'PAYMENT_RECORD',purposeLabel:'旧平台付款记录',originalLogNumber:null,recordedAmountCents:'66450',originalStatus:status,originalStatusLabel:status==='0'?'旧平台未付款':'旧平台已付款',association:{...association,state:'UNRESOLVED',kind:'UNKNOWN',number:null,documentRef:null,path:null}}});
+  const distribution={...debit,ref:'HISTORY_DISTRIBUTION:earning',kind:'DISTRIBUTION',number:'DIST-1',amounts:[{bucket:'PENDING_EARNINGS',knownNetCents:'1776',unknownCount:0}],historical:{...historical,amountSemantics:'BUSINESS_RECORD',changeType:null,purposeCode:'DISTRIBUTION_INCOME',purposeLabel:'分销收益记录',originalLogNumber:null,recordedAmountCents:'1776'}};
+  const balance={...debit,ref:'HISTORY_EARNINGS:balance',historical:{...historical,amountSemantics:'BALANCE_RECORD',purposeCode:'DISTRIBUTION_INCOME',purposeLabel:'分销收入',recordedAmountCents:'73400'}};
+  const ui=await mount(t,{documents:[payment('0'),payment('1'),distribution,balance]});await waitFor(()=>ui.host.textContent.includes('PAY-0'));
+  const rows=[...ui.host.querySelectorAll('tbody tr')];
+  for(const n of ['PAY-0','PAY-1']){const row=rows.find(r=>r.textContent.includes(n));assert.match(row.textContent,/记录金额 664\.50 元/);assert.doesNotMatch(row.textContent,/历史变动|−664\.50/);}
+  assert.match(rows.find(r=>r.textContent.includes('DIST-1')).textContent,/记录金额 17\.76 元/);
+  assert.match(rows.find(r=>r.textContent.includes('SYNTHETIC-LOG-11437')).textContent,/历史变动 −734\.00 元/);
+});
+
+test('legacy order root with a recorded payment does not acquire a second unknown business amount',async t=>{
+  const original={...debit,ref:'LEGACY_ORDER:old-order',number:'OLD-ORDER',kind:'SETTLEMENT',state:'HISTORICAL_ORDER_RECORDED',requestedAmountCents:null,amounts:[],historical:undefined,
+    orderLifecycle:{origin:'LEGACY_MYSQL',orderStatus:'COMPLETED',payment:{state:'LEGACY_RECORDED',amountCents:'66450',confirmedAt:null,hasReviewPayment:null},postingState:'LEGACY_OBSERVATION'}};
+  const ui=await mount(t,{documents:[original]});await waitFor(()=>ui.host.textContent.includes('旧单付款原记'));
+  const row=ui.host.querySelector('tbody tr');assert.match(row.textContent,/664\.50 元/);assert.match(row.textContent,/旧单付款原记/);assert.doesNotMatch(row.textContent,/记录金额 未记录/);
+});
+
+test('an unverified source never becomes a confirmed historical balance change',async t=>{
+  const suspect={...historical,amountSemantics:'UNVERIFIED',purposeCode:'WITHDRAWAL_DEBIT',purposeLabel:'提现申请扣款'};
+  const doc={...debit,ref:'HISTORY_EARNINGS:suspect',historical:suspect};
+  assert.equal(formats.financeIsHistoricalBalance(doc),false);assert.equal(formats.historicalFinanceAmount(doc,'-73400'),'记录金额待核实');assert.match(formats.financeBusinessLabel(doc),/来源待核/);
+  const line={...entry,documentRef:doc.ref,historical:suspect};
+  const ui=await mount(t,{mode:'document',doc,lines:[line]});await waitFor(()=>ui.host.textContent.includes('来源待核'));
+  assert.doesNotMatch(ui.host.textContent,/余额扣款记录/);await click([...ui.host.querySelectorAll('button')].find(b=>b.textContent.startsWith('相关历史记录')));
+  assert.match(ui.host.textContent,/记录金额待核实/);assert.match(ui.host.textContent,/余额变动依据待核/);assert.doesNotMatch(ui.host.textContent,/历史变动 −734\.00/);
+  let copied='';t.mock.method(browser.navigator.clipboard,'writeText',async value=>{copied=value;});await click(button('复制摘要',ui.host));assert.match(copied,/记录金额待核实/);assert.match(copied,/原金额（待核）：734\.00 元/);assert.doesNotMatch(copied,/历史变动 −734\.00/);
+});
+
+test('unverified legacy business observations do not present the original amount or status as confirmed',async t=>{
+  const base={...historical,amountSemantics:'UNVERIFIED',originalLogNumber:null,changeType:null,recordedAmountCents:'66450',originalStatusLabel:'旧平台记为成功'};
+  const rows=[
+    {...debit,ref:'HISTORY_PAYMENT:bad',kind:'PAYMENT',number:'BAD-PAY',requestedAmountCents:null,historical:{...base,purposeCode:'PAYMENT_RECORD',purposeLabel:'旧平台付款记录'}},
+    {...debit,ref:'HISTORY_DISTRIBUTION:bad',kind:'DISTRIBUTION',number:'BAD-DIST',requestedAmountCents:null,historical:{...base,purposeCode:'DISTRIBUTION_INCOME',purposeLabel:'分销收益记录'}},
+    {...application,ref:'HISTORY_WITHDRAWAL:bad',number:'BAD-APPLY',requestedAmountCents:'66450',historical:{...base,purposeCode:'WITHDRAWAL_APPLICATION',purposeLabel:'提现申请记录'}}
+  ];
+  const ui=await mount(t,{documents:rows});await waitFor(()=>ui.host.textContent.includes('BAD-PAY'));
+  for(const row of ui.host.querySelectorAll('.finance-lookup-table tbody tr')){assert.match(row.textContent,/记录金额待核实/);assert.match(row.textContent,/来源待核/);assert.doesNotMatch(row.textContent,/664\.50 元|旧平台记为成功/);}
+  const app=rows[2],line={...entry,id:'history:bad-apply',documentRef:app.ref,kind:'WITHDRAWAL',sourceEntity:'la_withdraw_apply',historical:app.historical};
+  const detail=await mount(t,{mode:'document',doc:app,lines:[line]});await waitFor(()=>detail.host.textContent.includes('记录金额待核实'));
+  assert.match(detail.host.querySelector('.finance-document-result').textContent,/记录金额待核实/);assert.doesNotMatch(detail.host.querySelector('.finance-document-result').textContent,/664\.50/);assert.match(detail.host.textContent,/原金额（待核）/);
+});
+
+test('old payment detail and copied summary never present a requested amount as a balance deduction',async t=>{
+  const paymentHistory={...historical,amountSemantics:'BUSINESS_RECORD',changeType:null,purposeCode:'PAYMENT_RECORD',purposeLabel:'旧平台付款记录',originalLogNumber:null,recordedAmountCents:'66450',originalStatus:'0',originalStatusLabel:'旧平台未付款',association:{...association,state:'UNRESOLVED',kind:'UNKNOWN',number:null,documentRef:null,path:null}};
+  const doc={...debit,ref:'HISTORY_PAYMENT:payment',kind:'PAYMENT',historical:paymentHistory};
+  const line={...entry,id:'history:payment',documentRef:doc.ref,kind:'PAYMENT',deltaCents:'-66450',sourceEntity:'la_pay_order',historical:paymentHistory};
+  const ui=await mount(t,{mode:'document',doc,lines:[line]});await waitFor(()=>ui.host.textContent.includes('旧平台付款记录'));
+  assert.match(ui.host.textContent,/1 条历史记录/);assert.doesNotMatch(ui.host.textContent,/1 条分录/);
+  await click([...ui.host.querySelectorAll('button')].find(b=>b.textContent.startsWith('相关历史记录')));
+  assert.match(ui.host.textContent,/记录金额 664\.50 元/);assert.match(ui.host.textContent,/不作为余额变动/);assert.doesNotMatch(ui.host.textContent,/历史变动 −664\.50|减少/);
+  let copied='';t.mock.method(browser.navigator.clipboard,'writeText',async value=>{copied=value;});await click(button('复制摘要',ui.host));
+  assert.match(copied,/记录金额 664\.50 元/);assert.doesNotMatch(copied,/历史变动|−664\.50/);
+});
+
+test('finance detail only offers the order channel shortcut for a native order',async t=>{
+  const paymentHistory={...historical,amountSemantics:'BUSINESS_RECORD',changeType:null,purposeCode:'PAYMENT_RECORD',purposeLabel:'旧平台付款记录',originalLogNumber:null,association:{...association,state:'MATCHED',kind:'ORDER',documentRef:'LEGACY_ORDER:old',number:'OLD-ORDER',path:'/orders/old'}};
+  const old={...debit,ref:'HISTORY_PAYMENT:old',kind:'PAYMENT',historical:paymentHistory};
+  const oldUi=await mount(t,{mode:'document',doc:old,lines:[{...entry,documentRef:old.ref,kind:'PAYMENT',historical:paymentHistory}],related:[{ref:'LEGACY_ORDER:old',label:'OLD-ORDER',path:'/orders/old'}]});await waitFor(()=>oldUi.host.textContent.includes('旧平台付款记录'));
+  assert.match(oldUi.host.textContent,/旧渠道依据尚未接入/);assert.equal(button('在汇聚对账查看本单',oldUi.host),undefined);
+  const native={...debit,ref:'PAYMENT_REQUEST:native',kind:'PAYMENT',state:'READY',historical:undefined};
+  const nativeUi=await mount(t,{mode:'document',doc:native,lines:[],related:[{ref:'ORDER:native',label:'本站订单',path:'/orders/native'}]});await waitFor(()=>Boolean(button('在汇聚对账查看本单',nativeUi.host)));
+  await click(button('在汇聚对账查看本单',nativeUi.host));const target=new URL(nativeUi.opened.at(-1)[0],browser.location.href);assert.equal(target.pathname,'/finance/channels');assert.equal(target.searchParams.get('fromOrderId'),'native');
+});
+
+test('an applicable but unknown historical payment status remains visible',()=>{
+  const payment={...historical,changeType:null,purposeCode:'PAYMENT_RECORD',originalLogNumber:null,balanceAfterCents:null,feeCents:null,netCents:null,originalStatus:null};
+  assert.ok(formats.historicalFinanceFacts(payment).some(([label,value])=>label==='原状态码'&&value==='未取得'));
+});
+
+test('unknown legacy purpose does not hide potentially applicable empty fields',async t=>{
+  const unknown={...historical,changeType:'9999',purposeCode:'UNKNOWN',purposeLabel:'用途待核',feeCents:null,netCents:null};
+  const doc={...debit,ref:'HISTORY_EARNINGS:unknown',historical:unknown};
+  const ui=await mount(t,{mode:'document',doc,lines:[{...entry,documentRef:doc.ref,historical:unknown}],evidence:{originalRatio:null,originalBankName:null}});
+  await waitFor(()=>ui.host.textContent.includes('用途待核'));await click(button('原始来源字段',ui.host));assert.match(ui.host.textContent,/原分销比例[\s\S]*未取得/);assert.match(ui.host.textContent,/旧收款银行[\s\S]*未取得/);
+  assert.ok(formats.historicalFinanceFacts(unknown).some(([name,value])=>name==='手续费'&&value==='未记录'));
+});
+
+test('withdrawal evidence keeps applicable unknown fields instead of turning them into zero',async t=>{
+  const pending={...application,ref:'HISTORY_WITHDRAWAL:missing',historical:{...application.historical,feeCents:null,netCents:null}};
+  const ui=await mount(t,{mode:'document',doc:pending,lines:[{...entry,documentRef:pending.ref,kind:'WITHDRAWAL',historical:pending.historical}],evidence:{originalBankName:null,originalFeeCents:null,originalNetCents:null,originalRatio:null}});
+  await waitFor(()=>ui.host.textContent.includes('提现申请记录'));await click(button('原始来源字段',ui.host));
+  assert.match(ui.host.textContent,/旧收款银行[\s\S]*未取得/);assert.match(ui.host.textContent,/原手续费[\s\S]*未记录/);assert.doesNotMatch(ui.host.textContent,/原分销比例|0\.00 元/);
 });
 
 test('DENIED hides relation identity in detail, evidence, secondary links and copied summary',async t=>{
@@ -123,12 +228,16 @@ test('related finance-document navigation retains its entry and a source origin 
 });
 
 test('user-finance table shares the same historical facts while the current wallet stays unchanged',async t=>{
+  const payment={...debit,ref:'HISTORY_PAYMENT:user-payment',kind:'PAYMENT',number:'USER-PAYMENT',amounts:[{bucket:'AVAILABLE',knownNetCents:'-66450',unknownCount:0}],historical:{...historical,amountSemantics:'BUSINESS_RECORD',purposeCode:'PAYMENT_RECORD',purposeLabel:'旧平台付款记录',originalLogNumber:null,recordedAmountCents:'66450'}};
+  const suspect={...application,ref:'HISTORY_WITHDRAWAL:user-unverified',requestedAmountCents:'66450',historical:{...application.historical,amountSemantics:'UNVERIFIED',recordedAmountCents:'66450'}};
   const permissions=['finance.read','finance.document.read','order.read'],opened=[],adapter={snapshot:{authenticated:true,adminUserId:`user-history-${++serial}`,session:{id:`user-history-session-${serial}`,locked:false},security:{status:'ACTIVE',isBoss:false,passwordChangeRequired:false},permissions},has:code=>permissions.includes(code),
-    finance:async()=>({documents:[debit,application]}),consumption:async()=>({knowledge:'UNKNOWN',amountCents:null,knownAmountCents:'0',components:{haffRentCents:null,itemConsumptionCents:null,earlyMakeupCents:null,renterFeeCents:null},total:0,unknownCount:0,page:1,pageSize:20,items:[]})};
+    finance:async()=>({documents:[debit,application,payment,suspect]}),consumption:async()=>({knowledge:'UNKNOWN',amountCents:null,knownAmountCents:'0',components:{haffRentCents:null,itemConsumptionCents:null,earlyMakeupCents:null,renterFeeCents:null},total:0,unknownCount:0,page:1,pageSize:20,items:[]})};
   const host=browser.document.createElement('div');browser.document.body.append(host);const root=createRoot(host);await act(async()=>root.render(createElement(UserDetailFinance,{adapter,user:{id:'synthetic-user',name:'用户一',walletSummary:{state:'ready',amountCents:'15000'}},refreshNonce:0,onOpenPath:(...args)=>opened.push(args)})));t.after(async()=>{await act(async()=>root.unmount());host.remove();});
   await waitFor(()=>host.querySelector('[aria-label="用户资金单据"]')?.textContent.includes('提现申请扣款'));
   assert.match(host.textContent,/150\.00 元/);const table=host.querySelector('[aria-label="用户资金单据"]');assert.match(table.textContent,/原流水号 SYNTHETIC-LOG-11437/);assert.match(table.textContent,/历史变动 −734\.00 元/);assert.doesNotMatch(table.textContent,/用户可用 −734/);
   const applicationRow=table.querySelectorAll('tbody tr')[1];assert.match(applicationRow.textContent,/原申请 734\.00 元/);assert.doesNotMatch(applicationRow.textContent,/历史变动/,'the application is not presented as another wallet debit');
+  const paymentRow=table.querySelectorAll('tbody tr')[2];assert.match(paymentRow.textContent,/记录金额 664\.50 元/);assert.doesNotMatch(paymentRow.textContent,/历史变动|−664\.50/);
+  const suspectRow=table.querySelectorAll('tbody tr')[3];assert.match(suspectRow.textContent,/记录金额待核实/);assert.doesNotMatch(suspectRow.textContent,/原申请 664\.50/);
   await click(table.querySelector('[data-historical-association] button'));const target=new URL(opened.at(-1)[0],browser.location.href);assert.equal(target.pathname,association.path);assert.ok(target.searchParams.get('origin'));
 });
 

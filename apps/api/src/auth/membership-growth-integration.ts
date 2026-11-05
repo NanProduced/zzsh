@@ -39,8 +39,8 @@ import {
 import { computeDeltaQuote, type InternalQuote, type PricingLineInput, type QuoteInput } from "../supply/pricing";
 import { applyTotalDiscountToQuote } from "./membership-total-discount";
 import { projectUnifiedMembershipPricing } from "./membership-unified-pricing";
-import { canonicalize, normalizeTime } from "../supply/content-hash";
-import { decimalToBigInt, formatScaledInteger, parseNonNegativeDecimal } from "../supply/decimal";
+import { canonicalize, normalizeQuote, normalizeTime } from "../supply/content-hash";
+import { decimalToBigInt, formatScaledInteger, parseNonNegativeDecimal, yuanAmountObject } from "../supply/decimal";
 import { type MembershipGrowthConfirmationReader } from "../order/personal-confirmation";
 import { recordAudit, SecurityApiError, withTransaction } from "./security-core";
 import { ADMIN_PERMISSION, hasPermission, loadEffectiveAdminAccess } from "./admin-authorization";
@@ -546,7 +546,7 @@ function quoteInputForGrowth(base: QuoteInput, contract: GrowthPricingContract):
   return { ...base, customerTier: "STANDARD", lines, haffRule };
 }
 
-function quoteCandidate(base: QuoteInput, contract: Exclude<ModePricingContract, NotPricedParameter>, source: GrowthOfferPlan["source"], benefitVersion: string, binding: OfferBinding, depositWaived: boolean, entitlementId?: string, validUntil?: string, allowanceCents?: string, approvedUniformTier = false): { plan: GrowthOfferPlan; quote: InternalQuote } | null {
+function quoteCandidate(base: QuoteInput, contract: Exclude<ModePricingContract, NotPricedParameter>, source: GrowthOfferPlan["source"], benefitVersion: string, binding: OfferBinding, depositWaived: boolean, entitlementId?: string, validUntil?: string, allowanceCents?: string, approvedUniformTier = false, frozenLegacyBase?: InternalQuote): { plan: GrowthOfferPlan; quote: InternalQuote } | null {
   const depositCents = tenantDepositAfterBenefit(base.deposits?.tenantDepositCents ?? null, depositWaived, allowanceCents);
   base = { ...base, deposits: { ...base.deposits, ...(depositCents === null ? {} : { tenantDepositCents: depositCents }) } };
   const planInput = { source, benefitVersion, binding, ...(entitlementId ? { entitlementId } : {}), ...(validUntil ? { validUntil } : {}) };
@@ -558,12 +558,14 @@ function quoteCandidate(base: QuoteInput, contract: Exclude<ModePricingContract,
     // Actual amounts and owner floors always come from this listing's sealed base, never the old contract.
     const carryRatio = approvedUniformTier || unified || source !== "GROWTH";
     if ((carryRatio && entitlementPricingSummary(contract).knowledge !== "KNOWN") || (!carryRatio && contract.priceVersionId !== base.priceVersionId)) return null;
-    const result = computeDeltaQuote(base);
+    const result = frozenLegacyBase ? { quotable: true as const, quote: normalizeQuote({ ...frozenLegacyBase,
+      tenantDeposit: depositCents === null ? null : yuanAmountObject(BigInt(depositCents)) }) } : computeDeltaQuote(base);
     if (!result.quotable) return null;
     const discounted = applyTotalDiscountToQuote(result.quote, contract.payableRatio);
     if (!discounted) return null;
     return { quote: discounted.quote, plan: quoteToGrowthOfferPlan(discounted.quote, planInput) };
   }
+  if (frozenLegacyBase) return null;
   const input = quoteInputForGrowth(base, contract);
   if (!input) return null;
   const result = computeDeltaQuote(input);
@@ -898,6 +900,11 @@ export async function readMembershipGrowthQuoteCandidatesAt(client: PoolClient, 
   if (input.asOfUtc === undefined) asOfUtc = `${new Date().toISOString().slice(0, 23)}000Z`;
   else if (typeof input.asOfUtc !== "string" || !CANONICAL_MICRO_INSTANT.test(input.asOfUtc) || !Number.isFinite(Date.parse(input.asOfUtc))) return { knowledge: "UNKNOWN", reason: "AS_OF_INVALID" };
   else asOfUtc = input.asOfUtc;
+  const legacy = input.baseQuote.schemaVersion === 3;
+  if (legacy && (input.baseQuote.quoteSource !== "LEGACY_QUOTED" || input.baseQuote.legacyQuote?.sourceSystem !== "legacy_mysql_restore"
+    || input.baseQuote.legacyQuote.sourceEntity !== "la_rental_accounts"
+    || input.baseQuote.legacyQuote.rentalMode !== (input.quoteInput.conditions.rentalPricing?.rentalMode ?? "ordinary")))
+    return { knowledge: "UNKNOWN", reason: "LEGACY_QUOTE_SOURCE_INVALID", asOfUtc };
   let model: Awaited<ReturnType<typeof readMembershipGrowthModel>>;
   try { model = await readMembershipGrowthModel(client, input.userId, asOfUtc); }
   catch (error) { if (error instanceof GrowthRuleError) return { knowledge: "UNKNOWN", reason: "GROWTH_UNKNOWN", asOfUtc }; throw error; }
@@ -923,7 +930,7 @@ export async function readMembershipGrowthQuoteCandidatesAt(client: PoolClient, 
   const growthContract = tier?.pricing?.[rentalMode];
   if (!configuredModeContract(growthContract)) return { knowledge: "UNKNOWN", reason: "GROWTH_PRICE_UNAVAILABLE", asOfUtc };
   const binding: OfferBinding = { userId: input.userId, accountId: input.accountId, ownerUserId: input.ownerUserId, listingVersionId: input.listingVersionId, ruleReleaseId: input.ruleReleaseId, quantityDigest: input.quantityDigest };
-  const growthCandidate = quoteCandidate(input.quoteInput, growthContract, "GROWTH", policyRow.version, binding, tier.tenantDeposit === "WAIVED", undefined, undefined, tier.depositAllowanceCents, uniformPolicy.tiers[policyTier].knowledge === "KNOWN");
+  const growthCandidate = quoteCandidate(input.quoteInput, growthContract, "GROWTH", policyRow.version, binding, tier.tenantDeposit === "WAIVED", undefined, undefined, tier.depositAllowanceCents, uniformPolicy.tiers[policyTier].knowledge === "KNOWN", legacy ? input.baseQuote : undefined);
   if (!growthCandidate) return { knowledge: "UNKNOWN", reason: "GROWTH_QUOTE_UNAVAILABLE", asOfUtc };
   let rows: StoredQuoteEntitlement[];
   try {
@@ -938,7 +945,7 @@ export async function readMembershipGrowthQuoteCandidatesAt(client: PoolClient, 
     if (state !== "ACTIVE") continue; // proven expired / revoked / replaced / pending / not started: excluded normally
     if (entitlement.kind !== "FRIEND" && entitlement.kind !== "PRESTIGE") return { knowledge: "UNKNOWN", reason: "ENTITLEMENT_KIND_UNKNOWN", asOfUtc, entitlementId: entitlement.id };
     if (!configuredModeContract(entitlement.pricingPayload)) return { knowledge: "UNKNOWN", reason: "ENTITLEMENT_PRICE_UNAVAILABLE", asOfUtc, entitlementId: entitlement.id };
-    const candidate = quoteCandidate(input.quoteInput, entitlement.pricingPayload, entitlement.kind, policyRow.version, binding, entitlement.depositWaived, entitlement.id, entitlement.endsAt, entitlement.depositAllowanceCents ?? undefined);
+    const candidate = quoteCandidate(input.quoteInput, entitlement.pricingPayload, entitlement.kind, policyRow.version, binding, entitlement.depositWaived, entitlement.id, entitlement.endsAt, entitlement.depositAllowanceCents ?? undefined, false, legacy ? input.baseQuote : undefined);
     if (!candidate) return { knowledge: "UNKNOWN", reason: "ENTITLEMENT_QUOTE_UNAVAILABLE", asOfUtc, entitlementId: entitlement.id };
     candidates.push(candidate);
     entitlementIds.push(entitlement.id);

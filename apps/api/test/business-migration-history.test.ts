@@ -72,3 +72,17 @@ test("local duplicate or decreasing timestamps are refused before querying a dat
     }
   } finally { rmSync(dir, { recursive: true }); }
 });
+
+test("only the independently verified 0155 LF/CRLF byte pair is compatible in either direction", async () => {
+  const dir=mkdtempSync(join(tmpdir(),"zzsh-migration-eol-")),tag="0155_legacy_rental_distribution_policy",when=1793730640476;
+  const lf="99de6809f28ad8fcc4e1fb16e1d80ed2b616d6085ff075cfcf2ee3fac9db0f61",crlf="794c7f9f5680d1e9d925abb6a5693ab98954e21198cdd6ca0ec45ee4d92f33b0";
+  try {
+    mkdirSync(join(dir,"meta"));const canonical=readFileSync(resolve("migrations/business",`${tag}.sql`),"utf8").replace(/\r\n/g,"\n");
+    const seal=(name:string,sql:string,time=when)=>{writeFileSync(join(dir,`${name}.sql`),sql);writeFileSync(join(dir,"meta/_journal.json"),JSON.stringify({entries:[{tag:name,when:time,breakpoints:true}]}));};
+    seal(tag,canonical);await fixture([{hash:crlf,createdAt:String(when)}]).prefix(dir);
+    seal(tag,canonical.replace(/\n/g,"\r\n"));await fixture([{hash:lf,createdAt:String(when)}]).prefix(dir);
+    for(const [name,sql,time,installed] of [[tag,canonical,when,"a".repeat(64)],[tag,canonical,when+1,crlf],["different_0155",canonical,when,crlf],[tag,canonical+"\n-- changed",when,crlf]] as const){
+      seal(name,sql,time);await assert.rejects(fixture([{hash:installed,createdAt:String(time)}]).prefix(dir),(e:any)=>e.reason==="NOT_EXACT_PREFIX");
+    }
+  } finally { rmSync(dir,{recursive:true}); }
+});

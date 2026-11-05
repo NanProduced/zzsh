@@ -92,6 +92,7 @@ export function supportSubjectRefFromUrl(value: string): string | null {
   const order = url.searchParams.get("orderId");
   const listing = url.searchParams.get("listingId");
   const account = url.searchParams.get("accountId") ?? /^\/accounts\/([^/]+)\/?$/.exec(url.pathname)?.[1];
+  if (order && url.searchParams.get("source") === "legacy") return /^legacy_order_[a-f0-9]{40}$/.test(order) ? `legacy-order:${order}` : null;
   const ref = order ?? listing ?? account;
   return ref && /^[A-Za-z0-9][A-Za-z0-9._-]{0,119}$/.test(ref)
     ? `${order ? "order" : listing ? "listing" : "account"}:${ref}` : null;

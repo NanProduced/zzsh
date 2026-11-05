@@ -642,9 +642,9 @@ function ReadyDetail({ data }: { data: ListingDetailData }) {
             <div className="account-mobile-quote-inner">
               <div className="account-mobile-quote-amount">
                 <span className="account-mobile-quote-label">
-                  {data.historicalReadOnly ? "来源记录费用" : "当前参考费用"}
+                  {data.historicalReadOnly ? "来源记录费用" : "参考费用 · 押金另核"}
                 </span>
-                <strong>{data.payableTotalLabel ?? data.resourceTotalLabel}</strong>
+                <strong>{(data.historicalReadOnly ? data.payableTotalLabel ?? data.resourceTotalLabel : data.resourceTotalLabel) ?? "以平台确认为准"}</strong>
               </div>
               <div className="account-mobile-quote-status">
                 {availability ? <span className="account-detail-status">{availability}</span> : null}
@@ -961,6 +961,7 @@ function ReadyDetail({ data }: { data: ListingDetailData }) {
                     lines: data.resourceLines,
                     unitAmountsInformational: data.unitAmountsInformational,
                     ...(data.baseRenterHaffRatioWanPerYuan ? { baseRenterHaffRatioWanPerYuan: data.baseRenterHaffRatioWanPerYuan } : {}),
+                    baseRatioReferenceOnly: data.baseRatioReferenceOnly,
                   }}
                 />
               </div>

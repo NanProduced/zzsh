@@ -30,6 +30,7 @@ function loadComponent(relativePath, session, extra) {
     if (name === "@heroui/react/toast") return heroToast;
     if (name === "next/link") return function Link({ scroll: _scroll, ...props }) { return React.createElement("a", props); };
     if (name === "@/components/session/user-session-provider") return { useUserSession: () => session };
+    if (name === "@/components/support/support-dialog-request") return requireFromTree(path.join(tree, "apps/web/src/components/support/support-dialog-request.ts"));
     if (name === "@/lib/order-client") return requireFromTree(path.join(tree, "apps/web/src/lib/order-client.ts"));
     if (name === "@/lib/order-intents") return requireFromTree(path.join(tree, "apps/web/src/lib/order-intents.ts"));
     if (name === "@/lib/order-display") return requireFromTree(path.join(tree, "apps/web/src/lib/order-display.ts"));
@@ -1591,6 +1592,20 @@ test('legacy rental income points to wallet records rather than referral commiss
  });
 });
 
+test('legacy order contact opens ordinary support with the typed order and current party',async()=>{
+ await withDom(async window=>{
+  const Component=loadComponent('apps/web/src/components/order/legacy-order-workspace.tsx',session('user_A')).LegacyOrderWorkspace;
+  for(const party of ['renter','owner']){
+   const id=`legacy_order_${(party==='renter'?'a':'b').repeat(40)}`,events=[];
+   const listener=event=>events.push(event.detail);window.addEventListener('zzsh:open-support',listener);
+   const row={id,displayNo:'OLD-123',party,status:'COMPLETED',readOnly:true,source:{origin:'LEGACY',statusLabel:'已完成'},account:{id:null,displayNo:null,readable:false},legacyAmounts:{required:money('470.00'),paid:money('470.00'),deposit:null,refund:null}};
+   const probe=createProbe(window,Component,{party,orderId:id},async()=>json({order:row}));
+   try{await probe.render();await probe.click('联系客服');assert.equal(events.length,1);assert.equal(events[0].type,'SERVICE');assert.equal(events[0].orderContext.subjectRef,`legacy-order:${id}`);assert.equal(events[0].orderContext.legacyOrder.party,party);assert.equal(events[0].orderContext.legacyOrder.displayNo,'OLD-123');assert.doesNotMatch(JSON.stringify(events[0].orderContext),/470\.00/);}
+   finally{window.removeEventListener('zzsh:open-support',listener);await probe.dispose();}
+  }
+ });
+});
+
 test("F5: a settled order shows the effective result, its records and no owner-side leak", async () => {
   await withDom(async (window) => {
     const log = [];
@@ -2137,14 +2152,15 @@ test("polish: expanded quote shows only own amounts and cancellation has one nex
 });
 
 
-test("legacy orders remain read-only and only owners get authorized account navigation", async () => {
+test("legacy orders retain read-only amounts, customer support and owner-only account navigation", async () => {
   await withDom(async (window) => {
     for (const party of ["owner", "renter"]) {
       const row = { id: "legacy_1", displayNo: "OLD-1", title: "历史记录", party, status: "PAID", source: { origin: "LEGACY", statusLabel: "历史进行中" }, readOnly: true, actions: [], account: { id: "account_1", displayNo: "OLD-A", readable: party === "owner" }, legacyAmounts: { required: money("10.00"), paid: money("10.00"), deposit: null, refund: money("2.00") } };
       const Legacy = loadComponent("apps/web/src/components/order/legacy-order-workspace.tsx", session("user_A")).LegacyOrderWorkspace;
       const log=[]; const fetchImpl=async (url,init={}) => {log.push(init.method??"GET");return json({order:row});};
-      const probe=createProbe(window,Legacy,{party,orderId:"legacy_1"},fetchImpl);
-      try { await probe.render();if(party==="renter")assert.match(probe.host.textContent,/退款记录金额/);else assert.doesNotMatch(probe.host.textContent,/退款记录金额/);assert.doesNotMatch(probe.host.textContent,/应退金额（到账未记录）|应退责任 /);assert.equal(probe.host.querySelectorAll("button").length,0);assert.equal(Boolean(probe.host.querySelector('a[href*="view=accounts"]')),party==="owner");assert.ok(log.every(m=>m==="GET")); } finally {await probe.dispose();}
+      const probe=createProbe(window,Legacy,{party,orderId:"legacy_1"},fetchImpl),events=[];
+      const listener=event=>events.push(event.detail);window.addEventListener('zzsh:open-support',listener);
+      try { await probe.render();if(party==="renter")assert.match(probe.host.textContent,/退款记录金额/);else assert.doesNotMatch(probe.host.textContent,/退款记录金额/);assert.doesNotMatch(probe.host.textContent,/应退金额（到账未记录）|应退责任 /);assert.deepEqual(probe.buttons(),['联系客服']);assert.equal(Boolean(probe.host.querySelector('a[href*="view=accounts"]')),party==="owner");await probe.click('联系客服');assert.equal(events.length,1);assert.equal(events[0].type,'SERVICE');assert.equal(events[0].orderContext,undefined);assert.ok(log.every(m=>m==="GET")); } finally {window.removeEventListener('zzsh:open-support',listener);await probe.dispose();}
     }
   });
 });

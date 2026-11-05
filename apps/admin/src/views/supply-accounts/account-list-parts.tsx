@@ -176,7 +176,7 @@ export function AccountResources({ row }: { row: SupplyWorkItem }) {
   const total = row.summary?.materialsVisibleTotal ?? materials.length;
   const unit = (item: typeof materials[number]) => item.unit === "ROUND" ? "发" : item.unit === "DAY" ? "天" : item.unit === "PIECE" ? "件" : "";
   return <div className="space-y-1 text-xs" data-account-resources>
-    <p className="flex flex-wrap items-baseline gap-x-2 gap-y-1"><span className="font-semibold tabular-nums text-amber-900 dark:text-amber-300">{rowHaffText(row)}</span><span className="text-xs text-muted-foreground" title="本版基础租客比例，会员优惠前；不是最终结算金额">{haffRateText(row.summary?.quote?.baseRenterHaffRatioWanPerYuan)}</span></p>
+    <p className="flex flex-wrap items-baseline gap-x-2 gap-y-1"><span className="font-semibold tabular-nums text-amber-900 dark:text-amber-300">{rowHaffText(row)}</span><span className="text-xs text-muted-foreground" title="租客基础比例，会员优惠前；金额以冻结报价为准">{haffRateText(row.summary?.quote?.baseRenterHaffRatioWanPerYuan)}</span></p>
     {config && [config.safeBox, config.grading].some(value => readableConfigName(value)) ? <p className="text-muted-foreground">{[config.safeBox, config.grading].map(value => readableConfigName(value)).filter(Boolean).join(" · ")}</p> : null}
     <p className="max-w-[310px] break-words leading-relaxed text-muted-foreground">{materials.length ? materials.slice(0, 3).map(item => `${item.name ?? "物资"} ${item.quantity ?? "数量未知"}${unit(item)}`).join(" · ") : row.summary?.materialsVisibleTotal === 0 && row.summary.materialsTotal ? "物资数量均为 0" : row.summary?.versionId ? "暂无物资申报" : "资源待完善"}{total > 3 ? ` · 另 ${total - 3} 项` : ""}</p>
   </div>;
@@ -196,8 +196,9 @@ export function AccountTerms({ row }: { row: SupplyWorkItem }) {
 
 export function AccountFees({ row }: { row: SupplyWorkItem }) {
   const fees = rowBaseFeeRows(row), hasQuote = [fees.total, fees.haff, fees.materials, fees.resources ?? ""].some(value => value.includes("¥"));
+  const historical = Boolean((!row.summary || row.summary.displaySource === "LEGACY_SNAPSHOT") && row.facts.historicalRead);
   return <div className="min-w-[150px] space-y-1 text-xs tabular-nums" data-account-fees>
-    {hasQuote ? <><div className="flex items-baseline justify-between gap-3"><span className="text-muted-foreground">基础总价</span><strong className="text-base font-semibold text-sky-900 dark:text-sky-300">{fees.total}</strong></div><div className="flex justify-between gap-3 text-muted-foreground"><span>哈夫币租金</span><span>{fees.haff}</span></div><div className="flex justify-between gap-3 text-muted-foreground"><span>物资预付</span><span>{fees.materials}</span></div></> : <p className="font-medium text-muted-foreground">报价待完善</p>}
+    {hasQuote ? <><div className="flex items-baseline justify-between gap-3"><span className="text-muted-foreground" title={historical ? fees.note : undefined}>{historical ? "迁入记录合计" : "基础总价"}</span><strong className="text-base font-semibold text-sky-900 dark:text-sky-300">{fees.total}</strong></div><div className="flex justify-between gap-3 text-muted-foreground"><span>哈夫币租金</span><span>{fees.haff}</span></div><div className="flex justify-between gap-3 text-muted-foreground"><span>物资预付</span><span>{fees.materials}</span></div></> : <p className="font-medium text-muted-foreground">{historical ? "迁入金额待核" : "报价待完善"}</p>}
     <div className="flex justify-between gap-3 pt-1.5 text-muted-foreground"><span>租客基础押金</span><span className="font-medium text-foreground">{fees.deposit}</span></div>
     {fees.resources && fees.resources !== "未提供" && (fees.total === "未提供" || !fees.haff.startsWith("¥") || !fees.materials.startsWith("¥")) ? <div className="flex justify-between gap-3 text-muted-foreground"><span>资源费合计</span><span>{fees.resources}</span></div> : null}
     {(!row.summary || row.summary.displaySource === "LEGACY_SNAPSHOT") && row.facts.historicalRead ? <span className="text-[11px] text-muted-foreground">迁入时记录</span> : null}
@@ -348,7 +349,7 @@ export function QuickView({ row, canRead, onClose, onOpenFull }: QuickProps) {
           {fees.resources && fees.resources !== "未提供" && (fees.total === "未提供" || !fees.haff.startsWith("¥") || !fees.materials.startsWith("¥")) ? <div><dt className="text-xs text-muted-foreground">资源费合计</dt><dd className="mt-1 tabular-nums">{fees.resources}</dd></div> : null}
           <div><dt className="text-xs text-muted-foreground">预计租期</dt><dd className="mt-1">{termSeconds ? formatTermDays(termSeconds) : "未提供"}</dd></div>
           <div><dt className="text-xs text-muted-foreground">全额包赔</dt><dd className="mt-1">{payoutLabel}</dd></div>
-          <div><dt className="text-xs text-muted-foreground">基础租客兑换比例</dt><dd className="mt-1">{haffRateText(ratio)}</dd></div>
+          <div><dt className="text-xs text-muted-foreground">租客基础比例</dt><dd className="mt-1">{haffRateText(ratio)}</dd></div>
         </dl>
         <p className="mt-3 text-xs text-muted-foreground">基础总价含哈夫币租金、物资预付和基础押金；租客实际费用按本人报价核定。</p>
         {fees.note ? <p className="mt-1 text-xs text-muted-foreground">{fees.note}</p> : null}

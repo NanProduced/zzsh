@@ -1093,6 +1093,20 @@
       "when": 1793730640476,
       "tag": "0155_legacy_rental_distribution_policy",
       "breakpoints": true
+    },
+    {
+      "idx": 156,
+      "version": "7",
+      "when": 1793730640477,
+      "tag": "0156_legacy_listed_quote",
+      "breakpoints": true
+    },
+    {
+      "idx": 157,
+      "version": "7",
+      "when": 1793730640478,
+      "tag": "0157_legacy_withdrawal_link_evidence",
+      "breakpoints": true
     }
   ]
 }

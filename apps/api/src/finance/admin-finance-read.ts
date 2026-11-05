@@ -6,7 +6,7 @@ import { invalid, notFound } from "../supply/supply-util";
 import { requireListingCursorKey, type ListingCursorKey } from "../supply/listing-cursor";
 import { exactCents, sourceYuanToCents, sourceSignedYuanToCents, readPersonalWallet,OPENING_OBSERVATION_JOIN,FINANCE_LEDGER_POSTED_AT_SQL } from "./personal-finance-read";
 import { financeOrderLifecycle, loadFinanceOrderFacts, type FinanceOrderFact } from "./admin-finance-order-read";
-import { scopedFinanceSql, financeVersionSql, financeScopedVersionSql, financeLookupPageSql,typedHistoricalOrderSql,FINANCE_LEDGER_BUCKET_SQL,FINANCE_GLOBAL_READ_PREAMBLE_SQL, type FinanceLoadScope, type FinanceVersionScope } from "./admin-finance-query";
+import { scopedFinanceSql, financeVersionSql, financeScopedVersionSql, financeLookupPageSql,verifiedLegacyWithdrawalLinksSql,typedHistoricalOrderSql,FINANCE_LEDGER_BUCKET_SQL,FINANCE_GLOBAL_READ_PREAMBLE_SQL, type FinanceLoadScope, type FinanceVersionScope } from "./admin-finance-query";
 import {prepareOwnerGuaranteeHistory} from './owner-guarantee-history';
 import { historicalObservationDisplay,enrichHistoricalObservations,resolveHistoricalReverseLinks,type HistoricalFinanceDisplay,type HistoricalRelationAccess } from './legacy-observation-display';
 import type {FinancePeriodBasis} from './admin-finance-period-basis';
@@ -32,7 +32,7 @@ export type FinanceEntry = {
   related: { ref: string; label: string; path?: string }[];
   historical?: HistoricalFinanceDisplay;
 };
-export type FinanceFacts = { historicalLinks?:Record<string,ReturnType<typeof resolveHistoricalReverseLinks>>;legacyOrderObservations?:ReturnType<typeof projectLegacyOrderFinanceObservations>;distributionCalculation?:AdminEarningCalculation;orderSettlementFacts?:OrderSettlementFacts;entries: FinanceEntry[]; subjects: { id: string; name: string }[]; revisions: unknown[]; withdrawalsReady: boolean; nativeDistributionReady?:boolean; orders?: FinanceOrderFact[]; subjectCandidates?: {items:{id:string;name:string}[];total:number}; lookupPage?: {refs: string[]; documentCount: number; entryCount: number}; localSourceLimits?: string[]; asOf: string; version: string };
+export type FinanceFacts = { historicalLinks?:Record<string,ReturnType<typeof resolveHistoricalReverseLinks>>;legacyOrderObservations?:ReturnType<typeof projectLegacyOrderFinanceObservations>;distributionCalculation?:AdminEarningCalculation;orderSettlementFacts?:OrderSettlementFacts;entries: FinanceEntry[]; subjects: { id: string; name: string }[]; revisions: unknown[]; withdrawalsReady: boolean; legacyWithdrawalLinksReady?:boolean; nativeDistributionReady?:boolean; orders?: FinanceOrderFact[]; subjectCandidates?: {items:{id:string;name:string}[];total:number}; lookupPage?: {refs: string[]; documentCount: number; entryCount: number}; localSourceLimits?: string[]; asOf: string; version: string };
 const MAX_FACTS = 20_000;
 const digest = (value: unknown) => createHash("sha256").update(canonicalize(value)).digest("hex");
 const singleText=(values:(string|null|undefined)[])=>{const unique=[...new Set(values.filter((v):v is string=>typeof v==='string'))];return unique.length===1?unique[0]!:null;};
@@ -278,7 +278,10 @@ export async function readFinanceSourceVersion(client: PoolClient, scope?: Finan
       AND COALESCE(has_table_privilege(to_regclass('zzsh_iam.audit_event'),'SELECT'),false)
       AND COALESCE(has_table_privilege(to_regclass('zzsh_order.payment_confirmation'),'SELECT'),false)) AS refund_read_dependencies,
     to_regclass('zzsh_order.joinpay_withdrawal_intent') IS NOT NULL AS joinpay_withdrawals,
-    to_regclass('zzsh_order.prestart_termination') IS NOT NULL AND to_regprocedure('zzsh_order.prestart_liability_complete(text)') IS NOT NULL AS prestart_termination`)).rows[0];
+    to_regclass('zzsh_order.prestart_termination') IS NOT NULL AND to_regprocedure('zzsh_order.prestart_liability_complete(text)') IS NOT NULL AS prestart_termination,
+    to_regclass('zzsh_order.legacy_withdrawal_subject_revision') IS NOT NULL
+      AND to_regclass('zzsh_order.legacy_withdrawal_link_evidence') IS NOT NULL
+      AND to_regprocedure('zzsh_order.legacy_withdrawal_row_fingerprint(zzsh_order.personal_finance_observation)') IS NOT NULL AS legacy_withdrawal_links`)).rows[0];
   if (!ready?.ready) throw unavailable("Finance read foundation is not available");
   const scoped = scope ? financeScopedVersionSql(ready, scope) : null;
   // The global batch has no bind parameters, so pg uses the simple protocol and returns one result per statement.
@@ -300,29 +303,33 @@ async function loadHistoricalReferenceRows(client:PoolClient,history:Raw[]):Prom
   // A bounded VALUES batch retains exact source/subject/entity identity and stays below PG's parameter ceiling.
   for(let offset=0;offset<refs.length;offset+=16_000){
     const values:unknown[]=[],tuples=refs.slice(offset,offset+16_000).map(reference=>'('+reference.map(value=>'$'+values.push(value)).join(',')+')');
-    const query=`WITH finance_reference_rows AS (${source}) SELECT r.* FROM finance_reference_rows r
-      WHERE (r.source_system,r.subject_id,r.source_entity,r.source_id) IN (VALUES ${tuples.join(',')}) ORDER BY r.id COLLATE "C" LIMIT $${values.push(MAX_FACTS+1)}`;
+    const query=`WITH finance_reference_rows AS (${source} WHERE o.source_type='LEGACY_MYSQL'
+      AND (o.source_system,o.user_id,o.source_entity,o.source_id) IN (VALUES ${tuples.join(',')}))
+      SELECT r.* FROM finance_reference_rows r ORDER BY r.id COLLATE "C" LIMIT $${values.push(MAX_FACTS+1)}`;
     rows.push(...(await client.query(query,values)).rows);
     if(rows.length>MAX_FACTS)throw unavailable('Historical reference size limit reached');
   }
   return rows;
 }
 
-async function loadHistoricalReverseRows(client:PoolClient,documentRef:string|undefined,history:Raw[],orders:FinanceOrderFact[]):Promise<Raw[]>{
-  if(!documentRef)return[];
+async function loadHistoricalReverseRows(client:PoolClient,documentRef:string|undefined,history:Raw[],orders:FinanceOrderFact[],lookup=false):Promise<Raw[]>{
+  if(!documentRef&&!lookup)return[];
   const targets:string[][]=[];
-  for(const row of history)if(documentRef===`HISTORY_WITHDRAWAL:${row.id}`&&row.source_type==='LEGACY_MYSQL'&&row.source_entity==='la_withdraw_apply')
+  for(const row of history)if((lookup||documentRef===`HISTORY_WITHDRAWAL:${row.id}`)&&row.source_type==='LEGACY_MYSQL'&&row.source_entity==='la_withdraw_apply')
     for(const type of ['1002','1003','1004','1005'])targets.push([row.source_system,row.subject_id,row.source_id,type]);
-  for(const row of history)if(documentRef===`HISTORY_EARNINGS:${row.id}`&&row.source_type==='LEGACY_MYSQL'&&row.source_entity==='la_log_earnings'&&['1003','1004','1005'].includes(String(row.extra_evidence?.snapshot?.legacyChangeType))&&typeof row.reference_id==='string')
-    for(const type of ['1002','1003','1004','1005'])targets.push([row.source_system,row.subject_id,row.reference_id,type]);
+  for(const row of history)if((lookup||documentRef===`HISTORY_EARNINGS:${row.id}`)&&row.source_type==='LEGACY_MYSQL'&&row.source_entity==='la_log_earnings'&&typeof row.reference_id==='string'){
+    const change=String(row.extra_evidence?.snapshot?.legacyChangeType);
+    const types=change==='1001'?['1001']:['1002','1003','1004','1005'].includes(change)?['1002','1003','1004','1005']:[];
+    for(const type of types)targets.push([row.source_system,row.subject_id,row.reference_id,type]);
+  }
   for(const order of orders)if(order.ref===documentRef&&order.sourceType==='LEGACY_MYSQL')targets.push([order.sourceSystem,order.ownerId,order.sourceId,'1001']);
   if(!targets.length)return[];
-  const values:unknown[]=[],tuples=targets.map(target=>'('+target.map(value=>'$'+values.push(value)).join(',')+')');
+  const values:unknown[]=[],unique=[...new Map(targets.map(target=>[target.join('\u0000'),target])).values()],tuples=unique.map(target=>'('+target.map(value=>'$'+values.push(value)).join(',')+')');
   const source=ADMIN_FINANCE_OBSERVATION_SQL.replace(/\s+ORDER BY o\.id COLLATE "C" LIMIT \$1\s*$/,'');
-  const rows=(await client.query(`WITH finance_reverse_candidates AS (${source}) SELECT r.* FROM finance_reverse_candidates r
-    WHERE r.source_type='LEGACY_MYSQL' AND r.source_entity='la_log_earnings'
-    AND (r.source_system,r.subject_id,r.reference_id,r.extra_evidence->'snapshot'->>'legacyChangeType') IN (VALUES ${tuples.join(',')})
-    ORDER BY r.id COLLATE "C" LIMIT $${values.push(MAX_FACTS+1)}`,values)).rows;
+  const rows=(await client.query(`WITH finance_reverse_candidates AS (${source} WHERE o.source_type='LEGACY_MYSQL'
+    AND o.source_kind='HISTORICAL_EARNINGS_LOG' AND o.source_entity='la_log_earnings'
+    AND (o.source_system,o.user_id,o.snapshot->>'referenceId',o.snapshot->>'legacyChangeType') IN (VALUES ${tuples.join(',')}))
+    SELECT r.* FROM finance_reverse_candidates r ORDER BY r.id COLLATE "C" LIMIT $${values.push(MAX_FACTS+1)}`,values)).rows;
   if(rows.length>MAX_FACTS)throw unavailable('Historical reverse reference size limit reached');return rows;
 }
 
@@ -374,7 +381,7 @@ export async function loadAdminFinanceFacts(client: PoolClient, scope: FinanceLo
   let orderSettlementFacts:OrderSettlementFacts|undefined;
   const selectedOrder=orders.find(order=>order.ref===scope.documentRef&&order.sourceType==='LEGACY_MYSQL'&&order.objectReadable===true);
   if(selectedOrder)orderSettlementFacts={legacyDutyReady:ready.legacy_duty_finance===true,duties:ready.legacy_duty_finance?[...await readAdminLegacyDutyFinances(client,{orderId:selectedOrder.id})].map(([,duty])=>duty):[]};
-  const reverseRows=await loadHistoricalReverseRows(client,scope.documentRef,history,orders);
+  const reverseRows=await loadHistoricalReverseRows(client,scope.documentRef,history,orders,Boolean(scope.lookup));
   let legacyOrderObservations:FinanceFacts["legacyOrderObservations"];
   if(selectedOrder&&relations&&(relations.isBoss||relations.financeDocumentRead)){
     const typed=await loadTypedHistoricalOrderRows(client,selectedOrder);
@@ -459,7 +466,16 @@ export async function loadAdminFinanceFacts(client: PoolClient, scope: FinanceLo
       entry.reasonCodes.push("LOCAL_RECORDS_NOT_REVALIDATED", ...(gross && net && userFee && BigInt(gross) !== BigInt(net) + BigInt(userFee) ? ["USER_FEE_DOES_NOT_CLOSE"] : []));
     }
   } else for (const entry of entries) if (entry.documentRef.startsWith("JOINPAY_WITHDRAWAL:") && entry.classification !== "LOCAL_SOURCE_WITHOUT_POSTING") entry.reasonCodes.push("JOINPAY_WITHDRAWAL_SOURCE_UNAVAILABLE");
-  return {entries,subjects,revisions:[],orders,subjectCandidates,lookupPage,historicalLinks,legacyOrderObservations,distributionCalculation,orderSettlementFacts,withdrawalsReady:ready.withdrawals,nativeDistributionReady:ready.native_distribution===true,...(localSourceLimits.length?{localSourceLimits}:{}),asOf,version};
+  return {entries,subjects,revisions:[],orders,subjectCandidates,lookupPage,historicalLinks,legacyOrderObservations,distributionCalculation,orderSettlementFacts,withdrawalsReady:ready.withdrawals,legacyWithdrawalLinksReady:ready.legacy_withdrawal_links===true,nativeDistributionReady:ready.native_distribution===true,...(localSourceLimits.length?{localSourceLimits}:{}),asOf,version};
+}
+
+/** CSV keeps one row per original observation while sharing the proved business reference. */
+export async function attachLegacyWithdrawalBusinessReferences(client:PoolClient,entries:FinanceEntry[]):Promise<FinanceEntry[]> {
+  const ids=entries.filter(e=>e.sourceType==='LEGACY_MYSQL'&&e.sourceEntity==='la_log_earnings'&&e.id.startsWith('history:')).map(e=>e.id.slice('history:'.length));
+  if(!ids.length)return entries;
+  const sql=verifiedLegacyWithdrawalLinksSql('SELECT unnest($1::text[]) AS id');
+  const links=new Map((await client.query(sql,[[...new Set(ids)]])).rows.map(row=>[String(row.child_id),String(row.parent_id)]));
+  return entries.map(entry=>{const parent=entry.id.startsWith('history:')?links.get(entry.id.slice('history:'.length)):undefined;return parent?{...entry,documentRef:'HISTORY_WITHDRAWAL:'+parent}:entry;});
 }
 
 export function filterAdminFinanceEntries(facts: FinanceFacts, filter: FinanceFilters, period: boolean): FinanceEntry[] {

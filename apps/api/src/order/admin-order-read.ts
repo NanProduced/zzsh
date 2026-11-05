@@ -13,6 +13,7 @@ import { formatDecimalExact, parseNonNegativeDecimal } from "../supply/decimal";
 import { settlementConfirmationReady, type SettlementConfirmationFacts } from "./settlement";
 import { readDirectoryUserSummaries, type DirectoryUserSummary } from "../auth/user-directory-summary";
 import { legacyUserOrderResources } from "./legacy-user-order-read";
+import { legacyListedSourceRatio } from "../supply/legacy-listed-quote";
 
 export type OrderReadViewer = { adminId: string; isBoss: boolean; internalQuote: boolean; authorizationKey: string; financeReadable?: boolean; permissions?: ReadonlySet<string> };
 export type OrderReadFilters = { page: number; pageSize: number; status?: string; origin?: "NATIVE" | "LEGACY"; displayNo?: string; accountId?: string; renterUserId?: string; ownerUserId?: string; createdFrom?: string; createdTo?: string; paymentConfirmedFrom?: string; paymentConfirmedTo?: string; paidFrom?: string; paidTo?: string; paymentOpen?: true; qKind?: "order" | "account" | "party" | "renter" | "owner"; qValue?: string; restoreKey?: string; view?: "list"; fundsResolution?: "MANUAL_CLOSE" };
@@ -166,12 +167,13 @@ export function legacyOrderResources(raw:unknown):LegacyOrderResources{
   return items.length?{...none,state:'KNOWN',items}:none;
  }catch{return {...none,state:'INVALID'};}
 }
-/** 本单哈夫币兑换比例：只读下单冻结报价 pricingInputs.denominators.buyer（万哈夫币/元，已含会员/礼遇后的成交口径）；缺失或非法即 UNKNOWN，不回退上架价、不推算。 */
-export type AdminOrderHaffRatio={source:'ORDER_QUOTE_SNAPSHOT'|'LEGACY_ORIGINAL_ORDER';state:'KNOWN'|'UNKNOWN'|'NOT_RECORDED';wanPerYuan:string|null;customerTier:string|null};
+/** v3 显示冻结的旧基础比例；新会员优惠后的金额仍以本单报价为准。其他版本保留原有比例语义。 */
+export type AdminOrderHaffRatio={source:'ORDER_QUOTE_SNAPSHOT'|'LEGACY_ORIGINAL_ORDER';state:'KNOWN'|'UNKNOWN'|'NOT_RECORDED';wanPerYuan:string|null;customerTier:string|null;referenceOnly?:true};
 export function orderHaffRatio(quote:unknown):AdminOrderHaffRatio{
  const unknown:AdminOrderHaffRatio={source:'ORDER_QUOTE_SNAPSHOT',state:'UNKNOWN',wanPerYuan:null,customerTier:null};
  const rec=(v:unknown)=>v&&typeof v==='object'&&!Array.isArray(v)?v as Record<string,any>:null;
  const q=rec(quote),inputs=rec(q?.pricingInputs),den=rec(inputs?.denominators);
+ if(q?.schemaVersion===3){const ratio=legacyListedSourceRatio(q,'buyer');return ratio?{...unknown,state:'KNOWN',wanPerYuan:ratio,referenceOnly:true}:unknown;}
  // 客户档位只取冻结报价自身记录；缺失保持 null，不默认为 STANDARD。
  const tierRaw=rec(inputs?.compatibility)?.customerTier??rec(rec(q?.personal)?.membership)?.tier;
  const customerTier=typeof tierRaw==='string'&&/^[A-Z_]{1,32}$/.test(tierRaw)?tierRaw:null;

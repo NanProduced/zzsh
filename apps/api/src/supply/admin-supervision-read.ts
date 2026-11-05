@@ -5,6 +5,7 @@ import type { EffectiveAdminAccess } from "../auth/admin-authorization";
 import { assertGameScopeUsable, gameScopeSignature, gameScopeSql, readAdminGameScope } from "../auth/admin-scope";
 import { queryAdminReadOrders, type OrderAccountView } from "../order/admin-order-read";
 import { accountOccupancySql } from "../order/legacy-order-occupancy";
+import { LEGACY_CONTINUATION_COMPLETED_AT_SQL, LEGACY_EFFECTIVE_STAGE_SQL } from "../order/legacy-order-read";
 import { readDirectoryUserSummaries } from "../auth/user-directory-summary";
 import { escapeLike } from "./catalog";
 import { canonicalize } from "./content-hash";
@@ -174,7 +175,36 @@ export function accountBusinessState(facts: { occupied: boolean; completed: bool
     return facts.newOrders === true && facts.publicVisible === true ? "LISTED" : null;
 }
 
-export async function supervisionFacts(client: PoolClient, a: PublishingAccount, detail: Record<string, any>, gate: SupplyGateReader, admission?: LegacyPublicAdmission, detailIndex?: LegacyPublicAdmissionDetailIndex, context?: { page?: SupervisionPageFacts; prefetch?: ListingDetailPrefetch; state?: { occupied?: boolean; completed?: boolean } }) {
+/** Admin display only: a finished old order does not become a publication/transaction gate. */
+export function legacyCompletedForSupervisionSql(accountId: string): string {
+    return `EXISTS(SELECT 1
+ FROM zzsh_supply.legacy_listing_read_snapshot ls
+ JOIN zzsh_supply.rental_account la ON la.id=ls.account_id
+ JOIN zzsh_supply.listing_version lv ON lv.id=ls.observation_version_id AND lv.account_id=ls.account_id
+ JOIN zzsh_order.legacy_order_read_snapshot l ON l.account_id=ls.account_id AND l.source_system=ls.source_system
+  AND l.legacy_account_entity=ls.source_entity AND l.legacy_account_id=ls.legacy_id AND l.legacy_account_source_digest=ls.source_digest
+ LEFT JOIN zzsh_order.legacy_continuation_version h ON h.order_id=l.id AND h.superseded_at IS NULL
+ WHERE ls.account_id=${accountId} AND ls.source_system='legacy_mysql_restore' AND ls.source_entity='la_rental_accounts' AND l.source_entity='la_order'
+  AND l.owner_user_id=la.owner_user_id AND l.game_id=la.game_id
+  AND ls.source_status=5 AND la.lifecycle='ACTIVE' AND NOT la.owner_paused AND NOT la.staff_restricted
+  AND la.current_version_id=ls.observation_version_id AND lv.origin='LEGACY_OBSERVATION'
+  AND l.source_pay_status=1 AND ${LEGACY_EFFECTIVE_STAGE_SQL}=4 AND ${LEGACY_CONTINUATION_COMPLETED_AT_SQL}>=ls.source_updated_at
+  AND NOT EXISTS(SELECT 1 FROM zzsh_order.legacy_order_read_snapshot other
+   LEFT JOIN zzsh_order.legacy_continuation_version oh ON oh.order_id=other.id AND oh.superseded_at IS NULL
+   WHERE other.account_id=ls.account_id AND (
+    (other.source_pay_status=1 AND COALESCE(oh.stage,other.source_order_status) IN(4,5)) OR
+    (other.source_pay_status=0 AND COALESCE(oh.stage,other.source_order_status)=5)) IS NOT TRUE)
+  AND NOT EXISTS(SELECT 1 FROM zzsh_order.legacy_inflight_register r WHERE r.account_id=ls.account_id AND r.disposition IN('REVIEW_REQUIRED','UNKNOWN','ISOLATED_PARTY'))
+  AND NOT EXISTS(SELECT 1 FROM zzsh_supply.listing_publication p
+   JOIN zzsh_supply.listing_version pv ON pv.id=p.version_id AND pv.account_id=la.id
+    AND p.account_id=la.id AND p.owner_user_id=la.owner_user_id AND p.game_id=la.game_id
+    AND p.rule_release_id=pv.rule_release_id AND p.content_hash=pv.content_hash
+   WHERE ((pv.review_state='PUBLISHED' AND p.source='OWNER_DIRECT') OR (pv.review_state='APPROVED' AND p.source='LEGACY_APPROVED'))
+    AND EXISTS(SELECT 1 FROM zzsh_supply.rule_acceptance ra WHERE ra.account_id=la.id AND ra.listing_version_id=pv.id
+     AND ra.rule_release_id=pv.rule_release_id AND ra.accepted_content_hash=pv.content_hash AND ra.owner_user_id=la.owner_user_id)))`;
+}
+
+export async function supervisionFacts(client: PoolClient, a: PublishingAccount, detail: Record<string, any>, gate: SupplyGateReader, admission?: LegacyPublicAdmission, detailIndex?: LegacyPublicAdmissionDetailIndex, context?: { page?: SupervisionPageFacts; prefetch?: ListingDetailPrefetch; state?: { occupied?: boolean; completed?: boolean }; checkLegacyCompletion?: boolean }) {
     const sources = context?.page ? (context.page.sources.get(a.id) ?? []) : (await client.query(sourceSql, [a.id])).rows;
     const oldNumbers = context?.page ? (context.page.oldNumbers.get(a.id) ?? []) : (await client.query<{
         value: string;
@@ -199,10 +229,12 @@ export async function supervisionFacts(client: PoolClient, a: PublishingAccount,
     const flow = ["RULE_CHANGED", "QUOTE_REQUIRED", "ACCEPTANCE_REQUIRED", "MEDIA_REQUIRED", "CONFIRMATION_OR_MEDIA_REQUIRED", "PUBLICATION_REQUIRED"].find(code => blockers.includes(code));
     const primaryReasonCode = a.staff_restricted ? "STAFF_RESTRICTED" : a.owner_paused ? "OWNER_PAUSED" : blockers.includes("CURRENT_VERSION_MISSING") ? "CURRENT_VERSION_MISSING" : flow ?? blockers[0] ?? null;
     const historicalRead = context?.page ? (context.page.historical.get(a.id) ?? null) : await loadLegacyHistoricalRead(client, a.id);
+    const legacyCompleted = context?.checkLegacyCompletion && !context.state && historicalRead?.sourceStatus === 5 && historicalRead.observationVersionId === a.current_version_id
+        ? (await client.query<{ completed: boolean }>(`SELECT ${legacyCompletedForSupervisionSql("$1")} AS completed`, [a.id])).rows[0]?.completed === true : false;
     const occupancyKind = detail.occupancyKind === "PENDING_PAYMENT" || detail.occupancyKind === "RENTED" || detail.occupancyKind === "OCCUPIED" ? detail.occupancyKind : null;
     const publicBasis = publicVisible ? publicListingBasis(publicRead ?? {}) : null;
     if (publicBasis) (publicBasis as Record<string, unknown>).feeSummary = quoteFeeSummary((publicRead as { quote?: Record<string, any> } | null)?.quote);
-    return { businessState: accountBusinessState({ occupied: context?.state?.occupied === true || blockers.includes("OCCUPIED"), completed: context?.state?.completed === true || blockers.includes("RENTAL_COMPLETED"), ownerPaused: a.owner_paused, staffRestricted: a.staff_restricted, newOrders, publicVisible, lifecycle: a.lifecycle ?? null }), lifecycle: a.lifecycle ?? null, publicVisible, publicSource, publicVersionId: publicBasis?.id ?? null, publicBasis, newOrders, reasons: blockers, primaryReasonCode, ownerPaused: a.owner_paused, staffRestricted: a.staff_restricted, occupancy: !detail.version ? "UNKNOWN" : blockers.includes("OCCUPIED") ? "OCCUPIED" : blockers.includes("OCCUPANCY_UNKNOWN") ? "UNKNOWN" : "FREE", occupancyKind, sources, legacyNumbers: [...new Set([...sources.map(r => r.businessNo).filter(Boolean), ...oldNumbers])], historicalRead };
+    return { businessState: accountBusinessState({ occupied: context?.state?.occupied === true || blockers.includes("OCCUPIED"), completed: context?.state?.completed === true || legacyCompleted || blockers.includes("RENTAL_COMPLETED"), ownerPaused: a.owner_paused, staffRestricted: a.staff_restricted, newOrders, publicVisible, lifecycle: a.lifecycle ?? null }), lifecycle: a.lifecycle ?? null, publicVisible, publicSource, publicVersionId: publicBasis?.id ?? null, publicBasis, newOrders, reasons: blockers, primaryReasonCode, ownerPaused: a.owner_paused, staffRestricted: a.staff_restricted, occupancy: !detail.version ? "UNKNOWN" : blockers.includes("OCCUPIED") ? "OCCUPIED" : blockers.includes("OCCUPANCY_UNKNOWN") ? "UNKNOWN" : "FREE", occupancyKind, sources, legacyNumbers: [...new Set([...sources.map(r => r.businessNo).filter(Boolean), ...oldNumbers])], historicalRead };
 }
 const timestamp = (value: string) => `to_char(${value} AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`;
 
@@ -602,11 +634,17 @@ export async function listSupervision(client: PoolClient, viewer: SupervisionVie
     const canDirectory = viewer.access.permissions.has("user.directory.read");
     const hasResidualFilters = Boolean(q.eligibility || q.status === "LISTED");
     const stateSql = accountOccupancySql("a.id");
+    const completedForSupervision = `(${stateSql.completed} OR ${legacyCompletedForSupervisionSql("a.id")})`;
+    // State filters have already established these values before LIMIT; avoid re-running the same correlated predicates for each returned row.
+    const selectedOccupied = q.status ? (q.status === "IN_PROGRESS" ? "true" : "false") : stateSql.occupied;
+    const selectedCompleted = q.status ? (q.status === "COMPLETED" ? "true" : "false") : completedForSupervision;
     const needsDisplayVersion = q.haffMin !== undefined || q.haffMax !== undefined || q.depositMin !== undefined || q.depositMax !== undefined || q.loginMethod !== undefined;
     const hasCheapFilters = Boolean(q.source || needsDisplayVersion);
     const sort = "COALESCE(v.created_at,a.created_at)", sortAt = `to_char(${sort} AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`;
     const orderExists = (predicate = "") => `(EXISTS(SELECT 1 FROM zzsh_order.rental_order o WHERE o.account_id=a.id${predicate}) OR EXISTS(SELECT 1 FROM zzsh_order.legacy_order_read_snapshot o WHERE o.account_id=a.id${predicate.replaceAll("o.display_no", "o.original_order_no")}))`;
     const legacySourceSql = `(EXISTS(SELECT 1 FROM zzsh_supply.legacy_supply_map m WHERE m.account_id=a.id) OR EXISTS(SELECT 1 FROM zzsh_supply.legacy_listing_read_snapshot h WHERE h.account_id=a.id))`;
+    // For completed+legacy, a semijoin lets PostgreSQL build the source set once before the expensive completion predicates.
+    const legacySourceFilterSql = `a.id IN (SELECT account_id FROM zzsh_supply.legacy_supply_map UNION ALL SELECT account_id FROM zzsh_supply.legacy_listing_read_snapshot)`;
     // The displayed version is the public publication selected by readPublicListing; otherwise the current version.
     const displayJoin = `LEFT JOIN LATERAL (
  SELECT pv.*
@@ -683,9 +721,9 @@ export async function listSupervision(client: PoolClient, viewer: SupervisionVie
         const values: unknown[] = [viewer.access.isBoss, viewer.adminId], p = (value: unknown) => "$" + values.push(value);
         const where = [gameScopeSql("a.game_id","$2","$1")];
         if (q.status === "IN_PROGRESS") where.push(stateSql.occupied);
-        if (q.status === "COMPLETED") where.push(stateSql.completed, "NOT " + stateSql.occupied);
-        if (q.status === "OFFLINE") where.push("a.lifecycle='ACTIVE'", "(a.owner_paused OR a.staff_restricted)", "NOT " + stateSql.occupied, "NOT " + stateSql.completed);
-        if (q.status === "LISTED") where.push("a.lifecycle='ACTIVE'", "NOT a.owner_paused", "NOT a.staff_restricted", "NOT " + stateSql.occupied, "NOT " + stateSql.unknown, "NOT " + stateSql.completed, "dv.id=a.current_version_id");
+        if (q.status === "COMPLETED") where.push(completedForSupervision, "NOT " + stateSql.occupied);
+        if (q.status === "OFFLINE") where.push("a.lifecycle='ACTIVE'", "(a.owner_paused OR a.staff_restricted)", "NOT " + stateSql.occupied, "NOT " + completedForSupervision);
+        if (q.status === "LISTED") where.push("a.lifecycle='ACTIVE'", "NOT a.owner_paused", "NOT a.staff_restricted", "NOT " + stateSql.occupied, "NOT " + stateSql.unknown, "NOT " + completedForSupervision, "dv.id=a.current_version_id");
         if (q.gameId)
             where.push(`a.game_id=${p(q.gameId)}`);
         if (q.view === "restricted")
@@ -709,7 +747,7 @@ export async function listSupervision(client: PoolClient, viewer: SupervisionVie
             if (q.queryKind === "order")
                 where.push(orderExists(` AND (o.id=${value} OR o.display_no=${value})`));
         }
-        if (q.source === "LEGACY") where.push(legacySourceSql);
+        if (q.source === "LEGACY") where.push(q.status === "COMPLETED" ? legacySourceFilterSql : legacySourceSql);
         if (q.source === "NEW") where.push(`NOT ${legacySourceSql}`);
         if (q.haffMin !== undefined) where.push(`(${haffSql})>=${p(q.haffMin)}::numeric`);
         if (q.haffMax !== undefined) where.push(`(${haffSql})<=${p(q.haffMax)}::numeric`);
@@ -733,7 +771,7 @@ export async function listSupervision(client: PoolClient, viewer: SupervisionVie
         const fetchLimit = hasResidualFilters ? Math.min(batchLimit, FILTER_SCAN_MAX_CANDIDATES - scanned) : batchLimit;
         if (fetchLimit <= 0) throw filterScopeTooLarge();
         const { values, where } = candidateWhere(scanAfter), p = (value: unknown) => "$" + values.push(value);
-        const rows = (await client.query(`SELECT a.id,a.id AS "accountId",a.display_no AS "displayNo",a.owner_user_id AS "ownerId",a.revision::text AS "revision",${sortAt} AS "sortAt",${timestamp("a.created_at")} AS "accountCreatedAt",${timestamp("a.updated_at")} AS "accountUpdatedAt",v.id AS "versionId",v.sequence::text AS sequence,v.title,v.review_state AS "reviewState",${timestamp("v.created_at")} AS "versionCreatedAt",v.rule_release_id AS "ruleReleaseId",v.term_option_code AS "termOptionCode",v.payload#>>'{ruleRefs,priceVersionId}' AS "priceVersionId",u.name AS "ownerName",g.name AS "gameName",(${stateSql.occupied}) AS "statusOccupied",(${stateSql.completed}) AS "statusCompleted"${hasCheapFilters ? `,(${legacySourceSql}) AS "filterLegacy"${needsDisplayVersion ? `,(${haffSql})::text AS "filterHaff",(${depositSql})::text AS "filterDeposit",(${displayAttributes}->>'login_method_code') AS "filterLogin"` : ""}` : ""} ${from} WHERE ${where.join(" AND ")} ORDER BY ${sort} DESC,a.id COLLATE "C" DESC LIMIT ${p(fetchLimit)}`, values)).rows;
+        const rows = (await client.query(`SELECT a.id,a.id AS "accountId",a.display_no AS "displayNo",a.owner_user_id AS "ownerId",a.revision::text AS "revision",${sortAt} AS "sortAt",${timestamp("a.created_at")} AS "accountCreatedAt",${timestamp("a.updated_at")} AS "accountUpdatedAt",v.id AS "versionId",v.sequence::text AS sequence,v.title,v.review_state AS "reviewState",${timestamp("v.created_at")} AS "versionCreatedAt",v.rule_release_id AS "ruleReleaseId",v.term_option_code AS "termOptionCode",v.payload#>>'{ruleRefs,priceVersionId}' AS "priceVersionId",u.name AS "ownerName",g.name AS "gameName",(${selectedOccupied}) AS "statusOccupied",(${selectedCompleted}) AS "statusCompleted"${hasCheapFilters ? `,(${legacySourceSql}) AS "filterLegacy"${needsDisplayVersion ? `,(${haffSql})::text AS "filterHaff",(${depositSql})::text AS "filterDeposit",(${displayAttributes}->>'login_method_code') AS "filterLogin"` : ""}` : ""} ${from} WHERE ${where.join(" AND ")} ORDER BY ${sort} DESC,a.id COLLATE "C" DESC LIMIT ${p(fetchLimit)}`, values)).rows;
         if (!rows.length) break;
         // A-5: the imported placeholder ("历史资料待核实") is a marker for "no title", not a name. The
         // owner-facing list already treats it as null (declaredTitleOrNull); the admin list must not
@@ -808,7 +846,7 @@ export async function readSupervision(client: PoolClient, a: PublishingAccount, 
         detail.blockers = [...((detail.blockers as string[]) ?? []), "HISTORICAL_VERSION"];
     }
     if (managementAccess && detail.version) detail.version.management = accountManagement(detail.version.declaration.attributes.info_source);
-    const facts = await supervisionFacts(client, a, live, gate, admission, detailIndex, { prefetch });
+    const facts = await supervisionFacts(client, a, live, gate, admission, detailIndex, { prefetch, checkLegacyCompletion: true });
     if (managementAccess && facts.publicBasis) {
         const basis = facts.publicBasis, same = detail.version?.id === basis.id && detail.version?.contentHash === basis.contentHash;
         const source = same ? detail.version.declaration.attributes.info_source : (await client.query(`SELECT attributes->'info_source' AS source FROM zzsh_supply.listing_version WHERE id=$1 AND account_id=$2 AND content_hash=$3`, [basis.id, a.id, basis.contentHash])).rows[0]?.source;

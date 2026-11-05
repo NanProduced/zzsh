@@ -1,4 +1,4 @@
-import { createCipheriv, createDecipheriv, createHash, randomBytes, randomUUID } from "node:crypto";
+import { createCipheriv, createDecipheriv, createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import type { Pool, PoolClient } from "pg";
 import { assertActiveInTransaction, assertUserContextInTransaction, type UserContext } from "../auth/user-identity";
 import { recordAudit, SecurityApiError, withTransaction } from "../auth/security-core";
@@ -10,6 +10,10 @@ export type WithdrawalBankBindingOptions = Readonly<{ database: string; runtimeU
 type Actor = UserContext & { requestId: string };
 type Details = { name: string; cardNo: string };
 type Row = { id: string; user_id: string; revision: string; card_mask: string; holder_mask: string; updated_at: string; sealed_details?: string };
+export type LegacyBankSource = Readonly<{ legacyUserId: string; userSourceDigest: string; sourceReceiptSha256: string;
+  sourceDumpSha256: string; sourceCutoff: string; sourceCreateTime: string; sourceUpdateTime: string }>;
+type LegacyBankProof = LegacyBankSource & { sourceSystem: "legacy_mysql_restore"; sourceEntity: "la_user_bank";
+  revision: string; proofKeyVersion: string; sourceHmac: string; ownershipVerification: "NOT_VERIFIED" };
 const TABLE = "zzsh_order.withdrawal_bank_binding", OP = "withdrawal.bank-binding.save.v1";
 const TOKEN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/, BANK_ID = /^bank_[a-f0-9]{32}$/, REVISION = /^(0|[1-9][0-9]{0,18})$/;
 const COLUMNS = `id,user_id,revision::text,card_mask,holder_mask,to_char(updated_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS updated_at`;
@@ -21,6 +25,10 @@ function details(body: Record<string, unknown>): Details {
   const name = body.name.trim(), cardNo = body.cardNo.replaceAll(" ", "");
   if (!name || Buffer.byteLength(name) > 128 || !/^[0-9]{15,19}$/.test(cardNo)) throw invalid("Invalid bank binding fields");
   return { name, cardNo };
+}
+/** Used by offline source selection without exposing the normalized private values. */
+export function validLegacyBankDetails(name: unknown, cardNo: unknown): boolean {
+  try { details({ name, cardNo }); return true; } catch { return false; }
 }
 function revision(value: unknown): string {
   if (typeof value !== "string" || !REVISION.test(value) || BigInt(value) > 9223372036854775807n) throw invalid("Invalid bank binding revision");
@@ -74,6 +82,82 @@ function seal(value: Details, o: WithdrawalBankBindingOptions, userId: string, i
     const encrypted = Buffer.concat([cipher.update(JSON.stringify(value), "utf8"), cipher.final()]);
     return JSON.stringify({ version: 1, keyVersion: version, nonce: nonce.toString("base64url"), tag: cipher.getAuthTag().toString("base64url"), encrypted: encrypted.toString("base64url") });
   } finally { secret.fill(0); }
+}
+
+function legacySource(value: LegacyBankSource): LegacyBankSource {
+  if (!value || !/^[1-9][0-9]{0,23}$/.test(value.legacyUserId)
+    || ![value.userSourceDigest, value.sourceReceiptSha256, value.sourceDumpSha256].every(v => typeof v === "string" && /^[a-f0-9]{64}$/.test(v))
+    || typeof value.sourceCutoff !== "string" || !Number.isFinite(Date.parse(value.sourceCutoff))
+    || !/^[1-9][0-9]{0,11}$/.test(value.sourceCreateTime) || !/^[1-9][0-9]{0,11}$/.test(value.sourceUpdateTime)
+    || Number(value.sourceCreateTime) > Number(value.sourceUpdateTime) || Number(value.sourceUpdateTime) * 1000 > Date.parse(value.sourceCutoff)) {
+    throw unavailable("LEGACY_BANK_SOURCE_INVALID");
+  }
+  return { legacyUserId: value.legacyUserId, userSourceDigest: value.userSourceDigest, sourceReceiptSha256: value.sourceReceiptSha256,
+    sourceDumpSha256: value.sourceDumpSha256, sourceCutoff: new Date(value.sourceCutoff).toISOString(),
+    sourceCreateTime: value.sourceCreateTime, sourceUpdateTime: value.sourceUpdateTime };
+}
+
+function legacySourceHmac(value: Details, source: LegacyBankSource, o: WithdrawalBankBindingOptions, userId: string, id: string, rev: string, version: string): string {
+  const secret = key(o, version), hmacKey = createHmac("sha256", secret).update("withdrawal-bank-binding.legacy-source.key.v1").digest();
+  try {
+    return createHmac("sha256", hmacKey).update(JSON.stringify(["withdrawal-bank-binding.legacy-source.v1", userId, id, rev, version,
+      source.legacyUserId, source.userSourceDigest, source.sourceReceiptSha256, source.sourceDumpSha256, source.sourceCutoff,
+      source.sourceCreateTime, source.sourceUpdateTime, value.name, value.cardNo])).digest("hex");
+  } finally { secret.fill(0); hmacKey.fill(0); }
+}
+
+/** Offline migration helper: same validation, masks, keyring and AAD as a normal binding; never a user declaration. */
+export function prepareLegacyBankBinding(body: { name: string; cardNo: string }, sourceInput: LegacyBankSource,
+  o: WithdrawalBankBindingOptions, userId: string, id: string) {
+  if (!TOKEN.test(userId) || !BANK_ID.test(id)) throw unavailable("LEGACY_BANK_TARGET_INVALID");
+  const source = legacySource(sourceInput), value = details(body), version = o.protection?.currentKeyVersion;
+  if (typeof version !== "string" || !TOKEN.test(version)) throw unavailable("BANK_BINDING_WRITE_DISABLED");
+  const masked = masks(value), sealedDetails = seal(value, o, userId, id, "1");
+  const proof: LegacyBankProof = { ...source, sourceSystem: "legacy_mysql_restore", sourceEntity: "la_user_bank", revision: "1",
+    proofKeyVersion: version, sourceHmac: legacySourceHmac(value, source, o, userId, id, "1", version), ownershipVerification: "NOT_VERIFIED" };
+  return { sealedDetails, cardMask: masked.card_mask, holderMask: masked.holder_mask, proof };
+}
+
+async function legacyBankProof(c: PoolClient, row: Pick<Row, "id" | "user_id" | "revision">): Promise<LegacyBankProof | null> {
+  const rows = (await c.query<{ action: string; actor_type: string; actor_id: string; session_id: string | null; outcome: string; details: LegacyBankProof }>(`SELECT action,actor_type,actor_id,session_id,outcome,details FROM zzsh_iam.audit_event
+    WHERE object_id=$1 AND object_type='withdrawal_bank_binding' AND action IN ('withdrawal.bank_binding.saved','withdrawal.bank_binding.legacy_imported')
+      AND details->>'revision'=$2`, [row.id, row.revision])).rows;
+  if (rows.length !== 1 || rows[0]!.outcome !== "SUCCESS") throw unavailable("BANK_BINDING_SOURCE_UNAVAILABLE");
+  const event = rows[0]!;
+  if (event.action === "withdrawal.bank_binding.saved") {
+    if (event.actor_type !== "user" || event.actor_id !== row.user_id) throw unavailable("BANK_BINDING_SOURCE_UNAVAILABLE");
+    return null;
+  }
+  if (event.action !== "withdrawal.bank_binding.legacy_imported" || event.actor_type !== "admin" || typeof event.actor_id !== "string" || !TOKEN.test(event.actor_id)
+    || typeof event.session_id !== "string" || !TOKEN.test(event.session_id))
+    throw unavailable("BANK_BINDING_SOURCE_UNAVAILABLE");
+  const proof = event.details;
+  if (!proof || proof.sourceSystem !== "legacy_mysql_restore" || proof.sourceEntity !== "la_user_bank" || proof.revision !== row.revision
+    || proof.ownershipVerification !== "NOT_VERIFIED" || typeof proof.proofKeyVersion !== "string" || !TOKEN.test(proof.proofKeyVersion)
+    || typeof proof.sourceHmac !== "string" || !/^[a-f0-9]{64}$/.test(proof.sourceHmac)) throw unavailable("LEGACY_BANK_SOURCE_INVALID");
+  return { ...legacySource(proof), sourceSystem: "legacy_mysql_restore", sourceEntity: "la_user_bank", revision: proof.revision,
+    proofKeyVersion: proof.proofKeyVersion, sourceHmac: proof.sourceHmac, ownershipVerification: "NOT_VERIFIED" };
+}
+
+function validLegacyBankProof(row: Row, value: Details, proof: LegacyBankProof, o: WithdrawalBankBindingOptions): boolean {
+  const expected = legacySourceHmac(value, proof, o, row.user_id, row.id, row.revision, proof.proofKeyVersion);
+  return timingSafeEqual(Buffer.from(expected, "hex"), Buffer.from(proof.sourceHmac, "hex"));
+}
+
+/** Independent readback compares protected source proof without returning private values. */
+export async function matchesLegacyBankSource(c: PoolClient, userId: string, expected: LegacyBankSource,
+  original: { name: string; cardNo: string }, o: WithdrawalBankBindingOptions): Promise<boolean> {
+  if (!await ready(c, o)) throw unavailable("BANK_BINDING_NOT_INTEGRATED");
+  const row = await current(c, userId, true); if (!row || row.revision !== "1") return false;
+  const proof = await legacyBankProof(c, row); if (!proof) return false;
+  if (JSON.stringify(legacySource(expected)) !== JSON.stringify(legacySource(proof))) return false;
+  summary(row);
+  return validLegacyBankProof(row, unseal(row, o), proof, o) && validLegacyBankProof(row, details(original), proof, o);
+}
+
+/** A mask-only check does not decrypt the stored target or grant payout authority. */
+export async function hasLegacyBankBindingSource(c: PoolClient, userId: string, id: string, rev: string): Promise<boolean> {
+  return (await legacyBankProof(c, { id, user_id: userId, revision: rev })) !== null;
 }
 function unseal(row: Row, o: WithdrawalBankBindingOptions): Details {
   try {
@@ -172,5 +256,9 @@ export async function readWithdrawalBankBindingForPayout(c: PoolClient, userId: 
   if (!await ready(c, o)) throw unavailable("BANK_BINDING_NOT_INTEGRATED");
   await assertActiveInTransaction(c, userId); const row = await current(c, userId, true);
   if (!row || row.id !== id) throw notFound();
-  return privateProjection(row, o);
+  const value = privateProjection(row, o), proof = await legacyBankProof(c, row);
+  if (!proof) return { ...value, source: { kind: "USER_DECLARATION" as const, evidenceSha256: value.sourceDigest } };
+  if (!validLegacyBankProof(row, value, proof, o)) throw unavailable("LEGACY_BANK_SOURCE_PROOF_MISMATCH");
+  const evidenceSha256 = createHash("sha256").update(JSON.stringify(["legacy-bank-source.v1", value.sourceDigest, proof])).digest("hex");
+  return { ...value, source: { kind: "LEGACY_IMPORT" as const, evidenceSha256 } };
 }

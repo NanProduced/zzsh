@@ -560,6 +560,48 @@ test("template update replays keep a single version bump and a single audit", as
   assert.equal(differentIntent.code, "IDEMPOTENCY_KEY_REUSED");
 });
 
+test("versioned template update rejects stale candidates and replays the original result", async () => {
+  const view = harness(baseFixture());
+  const body = { operationCode: "approval.test.execute", triggerCondition: "manual", candidateUsernames: [CANDIDATE.username], expectedVersion: 1 };
+  const accepted = await call(view, BOSS.id, "POST", "/approvals/templates/update", body, { "idempotency-key": "idem_versioned_tpl" });
+  assert.equal(accepted.status, 200, JSON.stringify(accepted.body)); assert.equal(accepted.body.version, 2);
+  const before = [...view.state.templateCandidates], audits = view.state.audits;
+  const replay = await call(view, BOSS.id, "POST", "/approvals/templates/update", body, { "idempotency-key": "idem_versioned_tpl" });
+  assert.equal(replay.status, 200); assert.equal(replay.body.version, 2); assert.equal(replay.body.idempotencyReplay, true);
+  assert.equal(view.state.audits, audits); assert.deepEqual(view.state.templateCandidates, before);
+  const stale = await call(view, BOSS.id, "POST", "/approvals/templates/update", { ...body, candidateUsernames: [BOSS.username] }, { "idempotency-key": "idem_stale_tpl" });
+  assert.equal(stale.status, 409); assert.deepEqual(view.state.templateCandidates, before); assert.equal(view.state.audits, audits);
+  const changed = await call(view, BOSS.id, "POST", "/approvals/templates/update", { ...body, expectedVersion: 2 }, { "idempotency-key": "idem_versioned_tpl" });
+  assert.equal(changed.status, 409); assert.equal(changed.code, "IDEMPOTENCY_KEY_REUSED");
+});
+
+test("template expectedVersion zero only creates a missing template; omitted field keeps the legacy contract", async () => {
+  const view = harness(baseFixture({ templates: [], templateCandidates: [] }));
+  const body = { operationCode: "approval.test.execute", triggerCondition: "manual", candidateUsernames: [CANDIDATE.username] };
+  const missing = await call(view, BOSS.id, "POST", "/approvals/templates/update", { ...body, expectedVersion: 1 }, { "idempotency-key": "idem_absent_stale" });
+  assert.equal(missing.status, 409); assert.equal(view.state.templates.length, 0);
+  const created = await call(view, BOSS.id, "POST", "/approvals/templates/update", { ...body, expectedVersion: 0 }, { "idempotency-key": "idem_absent_create" });
+  assert.equal(created.status, 200); assert.equal(created.body.version, 1);
+  const stale = await call(view, BOSS.id, "POST", "/approvals/templates/update", { ...body, expectedVersion: 0 }, { "idempotency-key": "idem_absent_retry" });
+  assert.equal(stale.status, 409); assert.equal(view.state.templates[0]?.version, 1);
+  const legacy = await call(view, BOSS.id, "POST", "/approvals/templates/update", body, { "idempotency-key": "idem_legacy_template" });
+  assert.equal(legacy.status, 200); assert.equal(legacy.body.version, 2);
+  for (const invalid of [-1, 1.5, "1", null, 2147483648]) {
+    const denied = await call(view, BOSS.id, "POST", "/approvals/templates/update", { ...body, expectedVersion: invalid }, { "idempotency-key": "idem_invalid_version" });
+    assert.equal(denied.status, 400); assert.equal(view.state.templates[0]?.version, 2);
+  }
+});
+
+test("an existing pre-versioned template idempotency record still replays after upgrade", async () => {
+  const scope = JSON.stringify(["admin", BOSS.id, "approval.template.configure", null]);
+  const old = { fingerprint: "d4a45964dd502d13b906af11b27beee7b205870479d9b7a3dbd3265aa799f6fb", status: 200,
+    body: { templateId: "approval_tpl_1", version: 1, candidateCount: 1, status: "CONFIGURED" }, createdAt: new Date().toISOString() };
+  const view = harness(baseFixture(), [[scope + "|old_template_key", old]]);
+  const result = await call(view, BOSS.id, "POST", "/approvals/templates/update", { operationCode: "approval.test.execute", triggerCondition: "manual", candidateUsernames: [CANDIDATE.username] }, { "idempotency-key": "old_template_key" });
+  assert.equal(result.status, 200); assert.equal(result.body.idempotencyReplay, true); assert.equal(result.body.version, 1);
+  assert.equal(view.state.templates[0]?.version, 1); assert.equal(view.state.audits, 0);
+});
+
 test("request creation replays return the original request id without a second request", async () => {
   const view = harness(baseFixture());
   const body = { operationCode: "approval.test.execute", triggerCondition: "manual", payloadVersion: 1, payload: { outcome: "SUCCESS" }, summary: "幂等创建申请" };

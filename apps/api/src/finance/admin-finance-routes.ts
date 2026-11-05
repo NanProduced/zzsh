@@ -13,7 +13,7 @@ import { forbidden, invalid, notFound, sendJson, type SupplyNodeRequest } from "
 import { safely, type SupplyResponse } from "../supply/supply-routes";
 import { ensureApiV1RequestId } from "../contracts/api-v1";
 import type { ListingCursorKey } from "../supply/listing-cursor";
-import { ADMIN_FINANCE_VERSION, parseAdminFinanceFilters, resolveFinanceLookup, loadAdminFinanceFacts, filterAdminFinanceEntries, financeSnapshot, financeDocuments, financeOrderDocuments, withFinanceOrderContext, financePeriodProjection,readAdminFinancePeriodBalances,readAdminFinancePeriodBasis, readAdminFinanceSubject, readAdminFinanceDocument } from "./admin-finance-read";
+import { ADMIN_FINANCE_VERSION, parseAdminFinanceFilters, resolveFinanceLookup, loadAdminFinanceFacts, filterAdminFinanceEntries, attachLegacyWithdrawalBusinessReferences, financeSnapshot, financeDocuments, financeOrderDocuments, withFinanceOrderContext, financePeriodProjection,readAdminFinancePeriodBalances,readAdminFinancePeriodBasis, readAdminFinanceSubject, readAdminFinanceDocument } from "./admin-finance-read";
 import { generateAdminFinanceCsv, prepareAdminFinanceExport, observeAdminFinanceDelivery } from "./admin-finance-export";
 import { parseFinanceOverviewRange, readAdminFinanceOverview } from "./admin-finance-overview";
 import { withDirectoryRead, withDirectoryReadTransaction } from "../auth/user-directory-read";
@@ -66,11 +66,12 @@ export async function handleAdminFinanceRead(request: SupplyNodeRequest, respons
       if(channel)return{actor,body:{contextKey:actor.authorizationKey,...await readAdminChannelEvidenceRoute(client,actor,route,url.searchParams,options.joinpayAccountRead)}};
       if(merchant)return{actor,body:{contextKey:actor.authorizationKey,...await readAdminJoinpayMerchantAccounts(client,{adminId:context.userId,merchantIdentityId:reference(route.slice('merchant-accounts/'.length))},options.joinpayAccountRead)}};
       if (route === "lookup" && !actor.complete && !filters.q) throw invalid("A document lookup reference is required");
-      const facts = await loadAdminFinanceFacts(client,{filters,...(route==="lookup"?{lookup:{exact:!actor.complete}}:{}),...(route.startsWith("subjects/")?{subjectId:reference(route.slice(9))}:{}),...(route.startsWith("documents/")?{documentRef:reference(route.slice(10))}:{}),page,pageSize},actor.relations), snapshot = financeSnapshot(facts, filters, actor, options.listingCursorKey, token);
+      const facts = await loadAdminFinanceFacts(client,{filters,...(route==="lookup"?{lookup:{exact:!actor.complete,withdrawalLinkRead:actor.relations.isBoss||actor.relations.financeDocumentRead}}:{}),...(route.startsWith("subjects/")?{subjectId:reference(route.slice(9))}:{}),...(route.startsWith("documents/")?{documentRef:reference(route.slice(10))}:{}),page,pageSize},actor.relations), snapshot = financeSnapshot(facts, filters, actor, options.listingCursorKey, token);
       const common = { contractVersion: ADMIN_FINANCE_VERSION, currency: "CNY", amountUnit: "CENT", timezone: "Asia/Shanghai", applied: filters, snapshot: snapshot.token, asOf: snapshot.asOf, contextKey: actor.authorizationKey, snapshotVersion: facts.version };
       if (route.startsWith("subjects/")) return { actor, body: { ...common, ...await readAdminFinanceSubject(client, facts, reference(route.slice(9)), snapshot.asOf) } };
       if (route.startsWith("documents/")) return { actor, body: { ...common, ...readAdminFinanceDocument(facts, reference(route.slice(10)), url.searchParams.get("entry")) } };
-      const entries = route === "lookup" ? [...facts.entries].sort((a,b)=>(b.occurredAt??"").localeCompare(a.occurredAt??"")||(a.id<b.id?1:a.id>b.id?-1:0)) : filterAdminFinanceEntries(facts, filters, filters.period);
+      let entries = route === "lookup" ? [...facts.entries].sort((a,b)=>(b.occurredAt??"").localeCompare(a.occurredAt??"")||(a.id<b.id?1:a.id>b.id?-1:0)) : filterAdminFinanceEntries(facts, filters, filters.period);
+      if(route==='export'&&facts.legacyWithdrawalLinksReady&&(actor.relations.isBoss||actor.relations.financeDocumentRead))entries=await attachLegacyWithdrawalBusinessReferences(client,entries);
       let documents = financeDocuments(entries);
       if (route === "lookup") {
         const byRef = new Map([...financeOrderDocuments(facts, filters), ...documents].map(document => [document.ref, document]));

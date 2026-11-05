@@ -4,6 +4,7 @@ import { basename, dirname, join, resolve } from "node:path";
 import { createRequire } from "node:module";
 import { execFileSync } from "node:child_process";
 import { LocalSession, localOrigin, totp, validateProfile, writePrivate } from "../local-auth.mjs";
+const processStarted = performance.now(), processStartedAt = new Date().toISOString();
 const require = createRequire(import.meta.url), { Client, Pool } = require("pg");
 const args = process.argv.slice(2), option = name => { const i = args.indexOf(name); return i < 0 ? undefined : args[i + 1]; };
 const BUSINESS_KIND = "BUSINESS_REFERENCE_PACKAGE_V1";
@@ -75,7 +76,7 @@ if (registered.database !== "zzsh_test_regression" || registered.oid !== expecte
 const receiptFile = resolve(option("--receipt") ?? "");
 if (!receiptFile.toLowerCase().startsWith("e:\\zzsh-local-state\\restricted\\") || existsSync(receiptFile))
     throw new Error("NEW_PRIVATE_RECEIPT_REQUIRED");
-const result = { status: "STARTED", kind: source.kind, manifestSha256: sha(bytes), oid: expectedOid, nonce: expectedNonce, startedAt: new Date().toISOString(), tables: [], expectedDifferences: [], pending: [], sourceIdsPreserved: true, sourceRawUnchanged: true, ...(business ? { maintenanceAdminId, attributionPolicy: "non-null source admin FKs rebound; original attribution remains in sealed source", mediaBytesVerified: false } : {}) };
+const result = { status: "STARTED", kind: source.kind, manifestSha256: sha(bytes), database: registered.database, oid: expectedOid, nonce: expectedNonce, startedAt: processStartedAt, tables: [], expectedDifferences: [], pending: [], sourceIdsPreserved: true, sourceRawUnchanged: true, ...(business ? { maintenanceAdminId, attributionPolicy: "non-null source admin FKs rebound; original attribution remains in sealed source", mediaBytesVerified: false } : {}) };
 const cfg = { host: "127.0.0.1", port: 55432, connectionTimeoutMillis: 3000, statement_timeout: 15000, lock_timeout: 500 };
 const maintenance = new Client({ ...cfg, database: "postgres", user: "zzsh", password: readFileSync(process.env.DB_PASSWORD_FILE ?? "E:/zzsh/zzsh/apps/api/.secrets/postgres_password", "utf8").trim(), application_name: "core-reference-bootstrap-lock" });
 const pool = new Pool({ ...cfg, database: "zzsh_test_regression", user: credentials.migration.name, password: credentials.migration.password, max: 1, application_name: "core-reference-bootstrap" });
@@ -120,6 +121,10 @@ async function insertTable(table) { const fields = table.columns.filter(c => !c.
     }
     if (found) {
         if (found.exact)
+            continue;
+        // The legal skin restore touches updated_at; retain that target timestamp on replay.
+        // The same single-field comparison is used by restoreTable and the final readback.
+        if (table.key === "zzsh_supply.skin" && found.restore_time_only)
             continue;
         if (STATIC.has(table.key) && found.semantic) {
             result.expectedDifferences.push({ table: table.key, fields: ["created_at", "updated_at"], basis: "baseline seed provenance timestamps retained; all other fields equal" });
@@ -267,6 +272,7 @@ finally {
     await maintenance.end();
     result.maintenanceClosed = true;
     result.finishedAt = new Date().toISOString();
+    result.wallMs = performance.now() - processStarted;
     writeFileSync(receiptFile, JSON.stringify(result, null, 2) + "\n", { flag: "wx" });
     console.log(JSON.stringify({ status: result.status, tables: result.tables.length, commitAck: result.commitAck, rollbackAck: result.rollbackAck, unlock: result.unlock, error: result.error }));
 }
@@ -383,7 +389,7 @@ async function initializeFormalAdmins() {
     if (registered.database !== input.target.database || registered.oid !== input.target.oid || registered.nonce !== input.target.nonce || registered.pendingReset || credentials.migration?.name !== registered.roles?.migration?.name || credentials.migration?.oid !== registered.roles?.migration?.oid) throw new Error("REGISTERED_RESOURCE_CHANGED");
     const profile = stage === "bosses" ? { version: 1, localTest: true, resource: input.resource, actors: {} } : validateProfile(JSON.parse(readFileSync(input.bossProfileFile)));
     if (stage === "staff" && (profile.resource !== input.resource || Object.keys(profile.actors).sort().join() !== "boss-one,boss-two" || Object.values(profile.actors).some(actor => actor.realm !== "admin" || actor.origin !== adminOrigin))) throw new Error("EXACT_NEW_BOSS_PROFILE_REQUIRED");
-    const receipt = { status: "STARTED", stage, target: input.target, serverBindingSha256: sha(bindingBytes), steps: [], credentialsOutput: join(out, "profile.json"), credentialsPrinted: false, oldAdminRowsImported: false, imProvisionerConfigured: false };
+    const receipt = { status: "STARTED", stage, target: input.target, serverBindingSha256: sha(bindingBytes), startedAt: processStartedAt, steps: [], credentialsOutput: join(out, "profile.json"), credentialsPrinted: false, oldAdminRowsImported: false, imProvisionerConfigured: false };
     const responses = [];
     writePrivate(join(out, "receipt.json"), receipt);
     writePrivate(join(out, "profile.json"), profile);
@@ -394,13 +400,18 @@ async function initializeFormalAdmins() {
     const save = () => { writePrivate(join(out, "profile.json"), profile); writePrivate(join(out, "receipt.json"), receipt); };
     const call = async (session, path, body) => {
         activeStep = path;
-        receipt.pendingStep = path; save();
-        const result = await session.request(path, body);
-        responses.push({ path, status: result.status, body: result.body, storageState: session.state() });
-        writePrivate(join(out, "http-responses.json"), responses);
-        receipt.steps.push({ path, httpStatus: result.status }); delete receipt.pendingStep; save();
-        if (result.status !== 200) throw new Error("FORMAL_INITIALIZATION_HTTP_" + result.status);
-        return result.body;
+        const started = performance.now(), step = { path, startedAt: new Date().toISOString() };
+        receipt.pendingStep = path; receipt.pendingStepTiming = step; save();
+        try {
+            const result = await session.request(path, body);
+            responses.push({ path, status: result.status, body: result.body, storageState: session.state() });
+            writePrivate(join(out, "http-responses.json"), responses);
+            step.httpStatus = result.status; receipt.steps.push(step); delete receipt.pendingStep; delete receipt.pendingStepTiming; save();
+            if (result.status !== 200) throw new Error("FORMAL_INITIALIZATION_HTTP_" + result.status);
+            return result.body;
+        } finally {
+            step.finishedAt = new Date().toISOString(); step.wallMs = performance.now() - started; save();
+        }
     };
     async function enroll(alias, userId, username, temporaryPassword) {
         const password = randomBytes(24).toString("base64url");
@@ -485,7 +496,8 @@ async function initializeFormalAdmins() {
         if (begun) { await db.query("ROLLBACK"); receipt.preflightRollbackAck = true; }
         await db.end(); receipt.preflightClientClosed = true;
         if (held) receipt.unlock = (await maintenance.query("SELECT pg_advisory_unlock(806006::bigint) ok")).rows[0].ok;
-        await maintenance.end(); receipt.maintenanceClosed = true; save();
+        await maintenance.end(); receipt.maintenanceClosed = true;
+        receipt.finishedAt = new Date().toISOString(); receipt.wallMs = performance.now() - processStarted; save();
     }
     console.log(JSON.stringify({ status: receipt.status, stage, profile: receipt.credentialsOutput, receipt: join(out, "receipt.json"), credentialsPrinted: false, oldAdminRowsImported: false, externalImCalls: 0, error: receipt.error }));
 }

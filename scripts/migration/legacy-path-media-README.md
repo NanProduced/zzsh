@@ -16,6 +16,8 @@
 
 ## 账号关联和读取
 
-`prepare-legacy-path-accounts.mjs` 从封存来源和已审账号计划生成每账号双数组，`load-legacy-path-accounts.mjs --verify` 只离线重算来源和数组；`--apply` 由环境维护者使用登记的 M 角色、有效管理 session、精确数据库身份及受限日志执行。执行前表结构和 R 只读 ACL 由维护者安装；脚本不创建账号，按 `legacy_supply_map` 核对原 sourceDigest 和 owner，重复相同记录安全重放，不同记录报冲突。
+先运行 `node scripts/migration/prepare-legacy-path-source.mjs --prepare --private-root <受限根目录> --source-dir <封签capture目录> --receipt-sha <capture回执SHA256> --out <受限根内新目录>`，从只读封签 capture 生成来源引用及回执；结果只含源字段和路径引用，不读取对象、不创建媒体资产，也不标记 READY。源字段明确为 null/空时保留空路径；字段缺失或路径非法时明确标记，若被选入后续账号计划则停止核查，不能冒充无图。相同封签输入在新目录重放得到相同引用文件摘要，已有输出目录不得覆盖。旧 `prepare-legacy-account-media.mjs` 保持退役。
+
+`prepare-legacy-path-accounts.mjs` 从上述封存来源引用和已审账号计划生成每账号双数组，`load-legacy-path-accounts.mjs --verify` 只离线重算来源和数组；`--apply` 由环境维护者使用登记的 M 角色、有效管理 session、精确数据库身份及受限日志执行。执行前表结构和 R 只读 ACL 由维护者安装；脚本不创建账号，按 `legacy_supply_map` 核对原 sourceDigest 和 owner，重复相同记录安全重放，不同记录报冲突。
 
 读取接口只接受已授权的 accountId、用途和槽位，服务端从表中取原路径并推导对象键；客户端不能提交 OSS 路径。公开展示需继续经过既有公开准入，处罚图只对本人及有 `supply.review.read` 和游戏 scope 的管理员提供。只有源引用明确存在且 OSS 精确返回 `NoSuchKey` 时可显示迁移占位；权限、网络、对象损坏及无源引用使用不可展示占位。

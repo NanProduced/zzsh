@@ -2322,7 +2322,7 @@ async function mountSupportActions(t, options = {}) {
   const consultations = [{ id: "c-1", type: "SERVICE", state: "ACTIVE", conversationId: "team-1", messageScopeState: "READY", assignedAdmin: { id: "a-1", name: "客服甲" }, peerAccountId: "staff-a", updatedAt: "2026-09-26T00:00:00Z" }];
   globalThis.fetch = async (input, init = {}) => {
     const url = String(input);
-    if (/^\/api\/orders\/[^/?]+$/.test(url)) {
+    if (/^\/api\/orders\/(?:legacy\/)?[^/?]+$/.test(url)) {
       orderReads.push(url);
       return options.orderDetail ? options.orderDetail(url, init) : new Response(JSON.stringify({}), { status: 404 });
     }
@@ -3019,6 +3019,52 @@ test("a long item list folds and a card row still opens the message menu", async
   assert.equal(browser.document.querySelector(".message-action-menu"), null, "Escape closes the menu");
 });
 
+test("existing consultation can explicitly share successive authorized legacy orders without consuming the draft", async t => {
+  const originalFetch=globalThis.fetch, creates=[], sent=[];let deniedRef='',failCard=true;
+  const existing={id:'c-1',threadId:'thread-1',type:'SERVICE',state:'ACTIVE',conversationId:'team-1',messageScopeState:'READY',canSend:true,subjectRef:'order:original',assignedAdmin:{id:'a-1',name:'客服甲'},updatedAt:'2026-09-26T00:00:00Z'};
+  globalThis.fetch=async(input,init={})=>{
+    const url=String(input),method=init.method??'GET';
+    if(url.startsWith('/api/orders/'))return new Response(JSON.stringify({items:[],nextCursor:null}));
+    if(url.includes('/im/token'))return new Response(JSON.stringify({appKey:'synthetic',accountId:'preview-user',token:'synthetic',transport:'local-fake'}));
+    if(new URL(url,'http://synthetic.local').pathname==='/api/im/consultations'){
+      if(method==='POST'){const input=JSON.parse(String(init.body));creates.push(input);if(input.subjectRef===deniedRef)return new Response(JSON.stringify({error:{code:'NOT_FOUND'}}),{status:404});return new Response(JSON.stringify({consultation:existing}));}
+      return new Response(JSON.stringify({consultations:[existing]}));
+    }
+    if(url.includes('/im/consultations/'))return new Response('{}');
+    if(url.includes('/im/message-access'))return new Response(JSON.stringify({authorized:true}));
+    if(url.includes('/im/messages')){
+      if(method==='GET')return new Response(JSON.stringify({messages:[]}));
+      const body=JSON.parse(String(init.body));sent.push(body);const id=`msg-${sent.length}`;
+      if(body.text?.includes('OLD-d')&&failCard){failCard=false;return new Response(JSON.stringify({error:{code:'INTERNAL_ERROR'}}),{status:500});}
+      return new Response(JSON.stringify({message:{messageClientId:id,messageServerId:id,conversationId:body.conversationId,senderId:'preview-user',receiverId:'staff-a',createTime:Date.now(),text:body.text,messageType:0}}));
+    }
+    throw Error(`unexpected synthetic request ${url}`);
+  };
+  const host=browser.document.createElement('div');host.className='support-dialog-content';browser.document.body.append(host);const root=createRoot(host);
+  t.after(async()=>{await act(async()=>root.unmount());host.remove();globalThis.fetch=originalFetch;});
+  const render=async(context,serial)=>act(async()=>root.render(renderPreview({preview:false,embedded:true,visible:true,onClose:()=>{},initialOrderContext:context,requestSerial:serial})));
+  const until=async(predicate)=>{for(let i=0;i<120;i++){if(predicate())return;await settle();}throw Error('legacy support condition timed out');};
+  await render(undefined,0);await until(()=>host.querySelector('textarea')&&!host.querySelector('textarea').disabled);
+  await act(async()=>{const textarea=host.querySelector('textarea');Object.getOwnPropertyDescriptor(browser.HTMLTextAreaElement.prototype,'value').set.call(textarea,'原有咨询草稿');textarea.dispatchEvent(new Event('input',{bubbles:true}));});
+  const make=letter=>{const id=`legacy_order_${letter.repeat(40)}`;return {userId:'preview-user',subjectRef:`legacy-order:${id}`,recordId:id,draftText:`旧订单 OLD-${letter}`,legacyOrder:{id,displayNo:`OLD-${letter}`,title:'租赁账号',party:'renter'}};};
+  const first=make('a');await render(first,1);await until(()=>host.querySelector('[aria-label="关联旧订单"] button'));
+  assert.equal(creates.at(-1).subjectRef,first.subjectRef);assert.equal(sent.length,0);assert.equal(host.querySelector('textarea').value,'原有咨询草稿');
+  await act(async()=>host.querySelector('[aria-label="关联旧订单"] button').click());await until(()=>sent.length===1);
+  assert.match(sent[0].text,/OLD-a/);assert.equal(host.querySelector('textarea').value,'原有咨询草稿');await until(()=>host.querySelector('[aria-label="关联旧订单"] button').textContent==='已发送');
+  const second=make('b');await render(second,2);await until(()=>host.querySelector('[aria-label="关联旧订单"]')?.textContent.includes('OLD-b'));
+  assert.equal(creates.at(-1).subjectRef,second.subjectRef);assert.equal(host.querySelector('textarea').value,'原有咨询草稿');
+  await act(async()=>host.querySelector('[aria-label="关联旧订单"] button').click());await until(()=>sent.length===2);
+  assert.match(sent[1].text,/OLD-b/);assert.equal(host.querySelector('textarea').value,'原有咨询草稿');
+  const denied=make('c');deniedRef=denied.subjectRef;await render(denied,3);await until(()=>creates.some(item=>item.subjectRef===deniedRef));await settle();await settle();
+  assert.equal(creates.filter(item=>item.subjectRef===deniedRef).length,1,'denied order is not retried automatically');
+  assert.equal(host.querySelector('[aria-label="关联旧订单"]'),null);assert.equal(sent.length,2);assert.equal(host.querySelector('textarea').value,'原有咨询草稿');
+  const retry=make('d');await render(retry,4);await until(()=>host.querySelector('[aria-label="关联旧订单"]')?.textContent.includes('OLD-d'));
+  await act(async()=>host.querySelector('[aria-label="关联旧订单"] button').click());await until(()=>host.textContent.includes('发送结果未确认'));
+  assert.equal(host.querySelector('textarea').value,'原有咨询草稿');assert.equal(host.querySelector('[aria-label="关联旧订单"] button').disabled,true);
+  await act(async()=>[...host.querySelectorAll('button')].find(button=>button.textContent==='原消息重试').click());await until(()=>sent.length===4);
+  assert.equal(sent[3].messageClientId,sent[2].messageClientId);await until(()=>host.querySelector('[aria-label="关联旧订单"] button').textContent==='已发送');assert.equal(host.querySelector('textarea').value,'原有咨询草稿');
+});
+
 test("order card sends on selection, preserves draft through UNKNOWN and retries original message", async (t) => {
   const originalFetch = globalThis.fetch;
   const rows = [{ id: "c-1", type: "SERVICE", state: "ACTIVE", messageScopeState: "READY", conversationId: "team-1", assignedAdmin: { id: "admin-a", name: "客服 A" }, updatedAt: "2026-09-26T00:00:00Z" }];
@@ -3104,7 +3150,7 @@ function captureOrderNavigation(t) {
 async function mountReferenceNavigation(t, options = {}) {
   const { encodeOrderReference } = await vite.ssrLoadModule("/../../packages/im-client/src/order-reference.ts");
   const card = { messageClientId: "reference-client", messageServerId: "srv-reference", conversationId: "team-1", senderId: "staff-a", receiverId: "preview-user", createTime: 1_700_000_005_000, messageType: 0,
-    text: encodeOrderReference({ id: "order-reference", displayNo: "ZZ-REFERENCE", title: "关联订单", party: "renter" }) };
+    text: encodeOrderReference(options.referenceOrder ?? { id: "order-reference", displayNo: "ZZ-REFERENCE", title: "关联订单", party: "renter" }) };
   const page = await mountSupportActions(t, { ...options, history: [...supportMenuHistory(), card] });
   await page.until(() => page.host.querySelector('[aria-label="关联订单卡片"] button'));
   return { ...page, clickCard: async () => { await act(async () => page.host.querySelector('[aria-label="关联订单卡片"] button').click()); await settle(); } };
@@ -3117,6 +3163,14 @@ test("order reference uses the authorized directory party, not the sender party,
   await page.clickCard();
   assert.deepEqual(paths, ["/account?view=leased&orderId=order-reference"]);
   assert.deepEqual(page.orderReads, [], "directory hit performs no extra detail read");
+});
+
+test("legacy order card opens only after a fresh party-authorized legacy detail read",async t=>{
+  const paths=captureOrderNavigation(t),id=`legacy_order_${'d'.repeat(40)}`;
+  const page=await mountReferenceNavigation(t,{referenceOrder:{id,displayNo:'OLD-D',title:'租赁账号',party:'renter'},
+    orderDetail:()=>new Response(JSON.stringify({order:{id,party:'owner',source:{origin:'LEGACY'},readOnly:true}}))});
+  await page.clickCard();assert.deepEqual(page.orderReads,[`/api/orders/legacy/${id}`]);
+  assert.deepEqual(paths,[`/account?view=leased&orderId=${id}&source=legacy`]);
 });
 
 test("order reference missing from directory reads details only on click and uses server viewerParty", async (t) => {

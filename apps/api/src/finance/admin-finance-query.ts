@@ -2,20 +2,11 @@ import type { FinanceFilters } from "./admin-finance-read";
 import { escapeLike } from "../supply/catalog";
 import { financeOrderSql } from "./admin-finance-order-read";
 
-export type FinanceLoadScope = { filters?: FinanceFilters; documentRef?: string; subjectId?: string; page?: number; pageSize?: number; lookup?: { exact: boolean }; documentRefs?: string[]; orderRefs?: string[] };
+export type FinanceLoadScope = { filters?: FinanceFilters; documentRef?: string; subjectId?: string; page?: number; pageSize?: number; lookup?: { exact: boolean; withdrawalLinkRead?:boolean }; documentRefs?: string[]; orderRefs?: string[] };
 /* A-1: the legacy opening basis is its own reference account, not a payment-clearing transition. Without an
  * explicit arm it fell into the ELSE bucket and every opened user's credit was summarised as a negative
  * "支付清算过渡" amount, which reads as a reconciliation failure instead of the migrated opening it is. */
 export const FINANCE_LEDGER_BUCKET_SQL = `CASE WHEN r.account_code IN ('OWNER_AVAILABLE','WALLET_AVAILABLE') THEN 'AVAILABLE' WHEN r.account_code='LEGACY_OPENING_SOURCE' THEN 'OPENING_BASIS' WHEN r.account_code='WALLET_RESERVED' THEN 'RESERVED' WHEN r.account_code='GUARANTEE_HELD' THEN 'GUARANTEE_HELD' WHEN r.account_code='WALLET_PENDING_EARNINGS' THEN 'PENDING_EARNINGS' WHEN r.account_code='RENTER_REFUND_PAYABLE' THEN 'REFUND_PAYABLE' WHEN r.account_code LIKE 'PLATFORM_%' OR r.account_code='WITHDRAW_FEE' THEN 'PLATFORM' ELSE 'CLEARING' END`;
-/* A-3: one legacy withdrawal application is one business document. Its 1002/1003/1004/1005 earnings-log
- * events (balance debit, fee, return, void) are technical postings of that application and already appear as
- * 子项 inside the application's detail (loadHistoricalReverseRows). Letting each one rank as its own document
- * doubled the withdrawal口径 41,993 vs 20,503. The rows are never deleted — only excluded from the paged
- * document list, so exports and per-document reads keep every technical fact. The snapshot expression is
- * passed in because the lookup reads either the full evidence or the raw snapshot column. */
-export function legacyWithdrawalChildSql(snapshot: string): string {
-  return `NOT (r.source_entity='la_log_earnings' AND COALESCE(${snapshot}->>'legacyChangeType','') IN ('1002','1003','1004','1005'))`;
-}
 const historyBucket = `CASE WHEN r.observation_origin='LEGACY_GUARANTEE_HISTORY' THEN 'GUARANTEE_HELD' WHEN r.observation_origin='LEGACY_DUTY_ZERO' AND r.action='RENTER_REFUND' THEN 'REFUND_PAYABLE' WHEN r.source_entity='la_distribution_order' OR r.observation_origin='NATIVE_EARNING_ZERO' AND r.source_status='PENDING' THEN 'PENDING_EARNINGS' ELSE 'AVAILABLE' END`;
 const ledgerKind = `CASE WHEN r.event_kind='OPENING' THEN 'OPENING' WHEN r.source_entity IN('withdrawal_intent','joinpay_withdrawal_intent') THEN 'WITHDRAWAL' WHEN r.source_kind='NATIVE_RENTAL_REFERRAL' OR r.source_kind='LEGACY_CONTINUATION_DUTY' AND r.beneficiary_role='COMMISSION' THEN 'DISTRIBUTION' WHEN r.source_kind='NATIVE_GUARANTEE' THEN 'GUARANTEE' WHEN r.source_kind='NATIVE_PRESTART_REFUND' OR r.account_code='RENTER_REFUND_PAYABLE' THEN 'REFUND' ELSE 'SETTLEMENT' END`;
 const historyKind = `CASE WHEN r.observation_origin='LEGACY_GUARANTEE_HISTORY' THEN 'GUARANTEE' WHEN r.observation_origin='NATIVE_EARNING_ZERO' OR r.observation_origin='LEGACY_DUTY_ZERO' AND r.action='COMMISSION' THEN 'DISTRIBUTION' WHEN r.observation_origin='LEGACY_DUTY_ZERO' THEN CASE WHEN r.action='RENTER_REFUND' THEN 'REFUND' ELSE 'SETTLEMENT' END WHEN r.source_entity='la_log_earnings' THEN CASE WHEN r.extra_evidence->'snapshot'->>'legacyChangeType' IN('1002','1003','1004','1005') THEN 'WITHDRAWAL' ELSE 'EARNINGS' END WHEN r.source_entity='la_distribution_order' THEN 'DISTRIBUTION' WHEN r.source_entity='la_pay_order' THEN 'PAYMENT' WHEN r.source_entity='la_refund_record' THEN 'REFUND' ELSE 'WITHDRAWAL' END`;
@@ -24,7 +15,7 @@ const ledgerSubject = `COALESCE(r.subject_id,CASE WHEN (${FINANCE_LEDGER_BUCKET_
 const ledgerDocument = `CASE WHEN r.event_kind='OPENING' THEN 'OPENING:'||r.basis_id WHEN r.source_entity='withdrawal_intent' THEN 'WITHDRAWAL:'||r.source_id WHEN r.source_entity='joinpay_withdrawal_intent' THEN 'JOINPAY_WITHDRAWAL:'||r.source_id WHEN r.source_kind='NATIVE_RENTAL_REFERRAL' THEN 'DISTRIBUTION:'||r.economic_root_id WHEN r.source_kind='LEGACY_CONTINUATION_DUTY' THEN 'LEGACY_DUTY:'||r.source_id WHEN r.source_entity='owner_guarantee_payment' THEN 'GUARANTEE_PAYMENT:'||r.source_id WHEN r.source_entity='owner_guarantee_refund' THEN 'GUARANTEE_REFUND:'||r.source_id WHEN r.order_id IS NOT NULL THEN 'ORDER:'||r.order_id ELSE 'POSTING:'||COALESCE(r.posting_id,r.id) END`;
 
 /** The same scope is applied in SQL before the matched-result ceiling. Values never become SQL. */
-export function scopedFinanceSql(source: string, family: "ledger" | "history", scope: FinanceLoadScope, limit: number | null, withdrawalsReady: boolean, joinpayReady = false, historySnapshotRaw = false, foldWithdrawalChildren = false, excludeOpening = false) {
+export function scopedFinanceSql(source: string, family: "ledger" | "history", scope: FinanceLoadScope, limit: number | null, withdrawalsReady: boolean, joinpayReady = false, historySnapshotRaw = false, excludeOpening = false) {
   const values: unknown[] = [], conditions: string[] = [], bind = (value: unknown) => `$${values.push(value)}`;
   const bucket = family === "ledger" ? FINANCE_LEDGER_BUCKET_SQL : historyBucket;
   const snapshot = historySnapshotRaw ? "r.extra_evidence" : "r.extra_evidence->'snapshot'";
@@ -59,18 +50,17 @@ export function scopedFinanceSql(source: string, family: "ledger" | "history", s
     }
   }
   const base = source.replace(/\s+ORDER BY [lo]\.id COLLATE "C" LIMIT \$1\s*$/, "");
-  if (foldWithdrawalChildren && family === "history") conditions.push(legacyWithdrawalChildSql(snapshot));
   const join = family === "ledger" ? `${withdrawalsReady ? " LEFT JOIN zzsh_order.withdrawal_intent i ON i.id=r.source_id AND r.source_entity='withdrawal_intent'" : ""}${joinpayReady ? " LEFT JOIN zzsh_order.joinpay_withdrawal_intent j ON j.id=r.source_id AND r.source_entity='joinpay_withdrawal_intent'" : ""}` : "";
   return { text: `WITH finance_scoped_rows AS (${base}) SELECT r.* FROM finance_scoped_rows r${join} WHERE ${conditions.length ? conditions.join(" AND ") : "TRUE"}${limit === null ? "" : ` ORDER BY r.id COLLATE "C" LIMIT ${bind(limit)}`}`, values };
 }
 
 /** List, period and export stay on this domain. Document and subject reads do not. */
-export const FINANCE_GLOBAL_VERSION_DOMAIN = "admin-finance-proof.r7.typed-history";
+export const FINANCE_GLOBAL_VERSION_DOMAIN = "admin-finance-proof.r11.withdrawal-source-links";
 // PG16's presorted aggregates sort the wide input before hashing; these flags are transaction-local.
 export const FINANCE_GLOBAL_READ_PREAMBLE_SQL="SET LOCAL jit=off; SET LOCAL enable_presorted_aggregate=off;";
 export const FINANCE_DOCUMENT_VERSION_DOMAIN = "admin-finance-proof.r3.document";
-export const FINANCE_SUBJECT_VERSION_DOMAIN = "admin-finance-proof.r3.subject";
-export type FinanceVersionReady = { withdrawals?: boolean; native_orders?: boolean; legacy_orders?: boolean; native_distribution?: boolean; earning_basis?: boolean; earning_transitions?: boolean; history_coverage?: boolean; legacy_duty_finance?: boolean; guarantee_history?: boolean; payment_requests?: boolean; refund_intents?: boolean; refund_read_dependencies?: boolean; joinpay_withdrawals?: boolean };
+export const FINANCE_SUBJECT_VERSION_DOMAIN = "admin-finance-proof.r6.subject";
+export type FinanceVersionReady = { withdrawals?: boolean; native_orders?: boolean; legacy_orders?: boolean; native_distribution?: boolean; earning_basis?: boolean; earning_transitions?: boolean; history_coverage?: boolean; legacy_duty_finance?: boolean; guarantee_history?: boolean; payment_requests?: boolean; refund_intents?: boolean; refund_read_dependencies?: boolean; joinpay_withdrawals?: boolean; legacy_withdrawal_links?:boolean };
 export type FinanceVersionScope = { mode: "document"; documentRef: string } | { mode: "subject"; subjectId: string };
 const VERSION_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,200}$/;
 
@@ -90,6 +80,9 @@ function versionRelations(ready: FinanceVersionReady): { name: string; sql: stri
   if (ready.native_orders) relations.push(
     {name:"native_order",sql:`SELECT id,revision::text,status,paid_confirmation_id,paid_at FROM zzsh_order.rental_order`},
     {name:"order_payment",sql:`SELECT id,order_id,source,disposition,amount_cents::text,currency,accepted_at FROM zzsh_order.payment_confirmation`});
+  if(ready.legacy_withdrawal_links)relations.push(
+    {name:'withdrawal_link_revision',sql:`SELECT jsonb_build_array(source_system,user_id)::text id,revision::text FROM zzsh_order.legacy_withdrawal_subject_revision`},
+    {name:'withdrawal_link_evidence',sql:`SELECT jsonb_build_array(parent_id,revision)::text id,debit_id,return_id,source_system,user_id,parent_digest,debit_digest,return_digest,parent_fingerprint,debit_fingerprint,return_fingerprint FROM zzsh_order.legacy_withdrawal_link_evidence`});
   if (ready.legacy_orders) relations.push({ name: "legacy_order", sql: `SELECT id,source_system,source_entity,legacy_id,source_digest,binding_digest,original_order_no,owner_user_id,renter_user_id,account_id,game_id,source_snapshot->>'return_order_money' AS historical_refund FROM zzsh_order.legacy_order_read_snapshot` });
   if (ready.native_distribution) {
     relations.push({ name: "earning", sql: `SELECT id,economic_root_id,version::text,state,funds_disposition,recovery_required_cents::text,canonical_seed,seed_digest,basis_digest,posting_digest,economic_key,posting_id,payment_confirmation_id,beneficiary_user_id,beneficiary_role,amount_cents::text,order_id,created_at,due_at FROM zzsh_order.rental_referral_earning` });
@@ -177,7 +170,7 @@ function legacyDocumentVersionSql(ready:FinanceVersionReady,kind:string,id:strin
       WHERE l.source_entity='la_log_earnings' AND o.source_type='LEGACY_MYSQL' AND o.source_entity='la_distribution_order'`:""}),
     subjects AS (SELECT user_id id FROM history_bound UNION SELECT owner_user_id FROM order_parent UNION SELECT renter_user_id FROM order_parent)`;
   const selected=[
-    `SELECT 'admin-finance-proof.r4.typed-document:${kind}:'||$1 AS id`,
+    `SELECT 'admin-finance-proof.r7.typed-document:${kind}:'||$1 AS id`,
     "SELECT * FROM history_bound",
     "SELECT id,source_system,source_entity,legacy_id,source_digest,binding_digest,original_order_no,owner_user_id,renter_user_id,account_id,game_id FROM order_parent",
     'SELECT id,name FROM zzsh_auth_user."user" WHERE id IN(SELECT id FROM subjects)',
@@ -320,26 +313,45 @@ function exactFinanceSourceKeys(ready: FinanceVersionReady, scope: FinanceLoadSc
   if (wantsWithdrawal) keys.push(`SELECT 'joinpay:'||w.id,'JOINPAY_WITHDRAWAL:'||w.id,${utcAt("w.accepted_at")},2 FROM zzsh_order.joinpay_withdrawal_intent w WHERE (w.merchant_order_no=${number} OR w.platform_serial_no=${number})${subjectParam ? ` AND w.user_id=${subjectParam}` : ""}${during("w.accepted_at")}`);
   return keys;
 }
+/** The certificate is valid only while every source row and the subject revision still match. */
+export function verifiedLegacyWithdrawalLinksSql(candidates:string):string {
+  return `SELECT child_id,min(parent_id) AS parent_id FROM (
+    SELECT wanted.id AS child_id,c.parent_id FROM (${candidates}) wanted
+    JOIN zzsh_order.legacy_withdrawal_link_evidence c ON (c.debit_id=wanted.id OR c.return_id=wanted.id)
+    JOIN zzsh_order.legacy_withdrawal_subject_revision v ON v.source_system=c.source_system AND v.user_id=c.user_id AND v.revision=c.revision
+    JOIN zzsh_order.personal_finance_observation p ON p.id=c.parent_id
+    JOIN zzsh_order.personal_finance_observation d ON d.id=c.debit_id
+    LEFT JOIN zzsh_order.personal_finance_observation r ON r.id=c.return_id
+    WHERE p.source_digest=c.parent_digest AND d.source_digest=c.debit_digest
+      AND zzsh_order.legacy_withdrawal_row_fingerprint(p)=c.parent_fingerprint
+      AND zzsh_order.legacy_withdrawal_row_fingerprint(d)=c.debit_fingerprint
+      AND (c.return_id IS NULL OR r.source_digest=c.return_digest AND zzsh_order.legacy_withdrawal_row_fingerprint(r)=c.return_fingerprint)
+  ) verified GROUP BY child_id HAVING count(*)=1`;
+}
+
 /** Select document keys before loading payloads; ledger documents override their order-only counterpart. */
 export function financeLookupPageSql(ledger: string, history: string, ready: FinanceVersionReady, scope: FinanceLoadScope, historySnapshotRaw=false) {
   const values: unknown[] = [], include = (query: {text: string; values: unknown[]}) => {
     const offset = values.length; values.push(...query.values);
     return query.text.replace(/\$(\d+)/g, (_, n: string) => `$${Number(n) + offset}`);
   }, bind = (value: unknown) => `$${values.push(value)}`;
-  const ledgerSql = include(scopedFinanceSql(ledger, "ledger", scope, null, !!ready.withdrawals, !!ready.joinpay_withdrawals, false, false, true));
-  // A-3: the paged/lookup document list counts one row per business document, so a withdrawal
-  // application's technical postings fold into it instead of doubling the withdrawal口径.
-  const historySql = include(scopedFinanceSql(history, "history", scope, null, !!ready.withdrawals, false, historySnapshotRaw, true, true));
+  const ledgerSql = include(scopedFinanceSql(ledger, "ledger", scope, null, !!ready.withdrawals, !!ready.joinpay_withdrawals, false, true));
+  const historySql = include(scopedFinanceSql(history, "history", scope, null, !!ready.withdrawals, false, historySnapshotRaw, true));
   const exactSourceKeys = exactFinanceSourceKeys(ready, scope, bind);
   const orderKeys = [false, true].filter(legacy => legacy ? ready.legacy_orders : ready.native_orders).map(legacy => {
     const sql = include(financeOrderSql(legacy, scope, [], null));
     return `SELECT id,'${legacy ? "LEGACY_ORDER:" : "ORDER:"}'||id AS ref,at,1 AS priority FROM (${sql}) orders`;
   });
   const pageSize = scope.pageSize ?? 20, limit = bind(pageSize), offset = bind(((scope.page ?? 1) - 1) * pageSize);
+  const linkSql=ready.legacy_withdrawal_links&&scope.lookup?.withdrawalLinkRead
+    ? verifiedLegacyWithdrawalLinksSql(`SELECT id FROM finance_lookup_history WHERE source_type='LEGACY_MYSQL' AND source_entity='la_log_earnings' AND observation_origin='LEGACY_MYSQL'`)
+    : `SELECT NULL::text AS child_id,NULL::text AS parent_id WHERE FALSE`;
   return { text: `WITH finance_lookup_ledger AS (${ledgerSql}),finance_lookup_history AS (${historySql}),
+    finance_lookup_links AS (${linkSql}),
     finance_lookup_entries AS (
       SELECT 'ledger:'||r.id AS id,${ledgerDocument} AS ref,r.at FROM finance_lookup_ledger r
-      UNION ALL SELECT 'history:'||r.id,${historyDocument},r.at FROM finance_lookup_history r
+      UNION ALL SELECT 'history:'||r.id,COALESCE('HISTORY_WITHDRAWAL:'||link.parent_id,${historyDocument}),r.at
+       FROM finance_lookup_history r LEFT JOIN finance_lookup_links link ON link.child_id=r.id
     ),finance_lookup_ranked AS (
       SELECT ref,at,row_number() OVER(PARTITION BY ref COLLATE "C" ORDER BY priority,at DESC NULLS LAST,id COLLATE "C" DESC) AS rank FROM (
         SELECT id,ref,at,0 AS priority FROM finance_lookup_entries

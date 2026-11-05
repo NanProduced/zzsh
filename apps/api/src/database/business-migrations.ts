@@ -1,4 +1,6 @@
-import { resolve } from "node:path";
+import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { join, resolve } from "node:path";
 
 import { drizzle } from "drizzle-orm/node-postgres";
 import { migrate } from "drizzle-orm/node-postgres/migrator";
@@ -40,6 +42,25 @@ export class BusinessMigrationHistoryError extends Error {
     super(`Business migration preflight rejected: ${reason}${index === undefined ? "" : ` at index ${index}`}`);
     this.name = "BusinessMigrationHistoryError";
   }
+}
+
+// R05 applied this exact SQL from a CRLF checkout; Git's canonical file uses LF. The only
+// accepted alternate bytes are the independently checked historical pair for this one tag/time.
+const LISTED_0155_EOL = {
+  tag: "0155_legacy_rental_distribution_policy", when: "1793730640476",
+  lf: "99de6809f28ad8fcc4e1fb16e1d80ed2b616d6085ff075cfcf2ee3fac9db0f61",
+  crlf: "794c7f9f5680d1e9d925abb6a5693ab98954e21198cdd6ca0ec45ee4d92f33b0",
+} as const;
+function accepted0155LineEndingVariant(folder: string, tag: string | undefined, localHash: string, installedHash: string, when: string): boolean {
+  const allowed: readonly string[] = [LISTED_0155_EOL.lf, LISTED_0155_EOL.crlf];
+  if (tag !== LISTED_0155_EOL.tag || when !== LISTED_0155_EOL.when || !allowed.includes(localHash) || !allowed.includes(installedHash)) return false;
+  try {
+    const bytes=readFileSync(join(folder,`${LISTED_0155_EOL.tag}.sql`)), text=bytes.toString("utf8"), normalized=text.replace(/\r\n/g,"\n");
+    if (normalized.includes("\r")) return false;
+    const digest=(value:string|Buffer)=>createHash("sha256").update(value).digest("hex");
+    return digest(bytes)===localHash && digest(normalized)===LISTED_0155_EOL.lf
+      && digest(normalized.replace(/\n/g,"\r\n"))===LISTED_0155_EOL.crlf;
+  } catch { return false; }
 }
 
 export const BUSINESS_INITIAL_FOLDER = resolve(__dirname, "../../../migrations/initial/release_0141");
@@ -90,8 +111,10 @@ export async function assertBusinessMigrationPrefix(pool: Pick<Pool, "query">, m
     'SELECT hash,created_at::text AS "createdAt" FROM zzsh_business_meta.migrations ORDER BY id',
   )).rows;
   if (history.length > local.length) throw new BusinessMigrationHistoryError("NOT_EXACT_PREFIX", local.length);
+  const journal = JSON.parse(readFileSync(join(migrationsFolder,"meta/_journal.json"),"utf8")) as { entries: Array<{tag:string}> };
   for (const [index, row] of history.entries()) {
-    if (row.hash !== local[index]!.hash || row.createdAt !== String(local[index]!.folderMillis)) {
+    const sameTime=row.createdAt === String(local[index]!.folderMillis);
+    if (!sameTime || row.hash !== local[index]!.hash && !accepted0155LineEndingVariant(migrationsFolder,journal.entries[index]?.tag,local[index]!.hash,row.hash,row.createdAt)) {
       throw new BusinessMigrationHistoryError("NOT_EXACT_PREFIX", index);
     }
   }
@@ -263,6 +286,10 @@ export async function applyRuntimePrivileges(pool: Pick<Pool, "query">, runtimeR
   }
   if ((await pool.query(`SELECT to_regclass('zzsh_supply.legacy_skin_holding') AS relation`)).rows[0]?.relation) {
     await pool.query(`REVOKE ALL ON zzsh_supply.legacy_skin_holding FROM PUBLIC; GRANT SELECT,INSERT ON zzsh_supply.legacy_skin_holding TO ${runtimeUser}; REVOKE UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER ON zzsh_supply.legacy_skin_holding FROM ${runtimeUser}`);
+  }
+  for (const relation of ["legacy_listed_policy_evidence", "legacy_listed_quote_evidence"]) {
+    if ((await pool.query(`SELECT to_regclass('zzsh_supply.${relation}') AS relation`)).rows[0]?.relation)
+      await pool.query(`REVOKE ALL ON zzsh_supply.${relation} FROM PUBLIC; GRANT SELECT ON zzsh_supply.${relation} TO ${runtimeUser}; REVOKE INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER ON zzsh_supply.${relation} FROM ${runtimeUser}`);
   }
   if ((await pool.query(`SELECT to_regclass('zzsh_order.legacy_order_read_snapshot') AS relation`)).rows[0]?.relation) {
     await pool.query(`GRANT SELECT,INSERT ON zzsh_order.legacy_order_read_snapshot TO ${runtimeUser}; REVOKE UPDATE,DELETE,TRUNCATE ON zzsh_order.legacy_order_read_snapshot FROM ${runtimeUser}`);
@@ -694,6 +721,8 @@ export async function configureContinuityFinancePrivileges(pool: Pick<Pool, "que
     {"name":"zzsh_order.legacy_order_duty_admission","read":true},
     {"name":"zzsh_order.legacy_inflight_register","read":true},
     {"name":"zzsh_order.personal_finance_observation_coverage","read":true},
+    {"name":"zzsh_order.legacy_withdrawal_subject_revision","read":true},
+    {"name":"zzsh_order.legacy_withdrawal_link_evidence","read":true},
     {"name":"zzsh_order.finance_stored_opening_review","read":false},
     {"name":"zzsh_order.legacy_duty_finance_contract","read":false},
     {"name":"zzsh_order.legacy_duty_finance_fact","read":true},
@@ -705,6 +734,8 @@ export async function configureContinuityFinancePrivileges(pool: Pick<Pool, "que
   )).rows;
   if (found.length !== profiles.length || new Set(found.map(r => r.name)).size !== profiles.length
     || found.some(r => typeof r.present !== "boolean" || !profiles.some(p => p.name === r.name))) throw new Error("Continuity schema inventory is incomplete");
+  const withdrawalLinkTables=found.filter(r=>r.name==='zzsh_order.legacy_withdrawal_subject_revision'||r.name==='zzsh_order.legacy_withdrawal_link_evidence');
+  if(withdrawalLinkTables.some(r=>r.present)&&withdrawalLinkTables.some(r=>!r.present))throw new Error('Legacy withdrawal link schema is partially deployed');
   const v4 = (await pool.query(`SELECT to_regprocedure('zzsh_order.assert_personal_growth_order_v4(zzsh_order.rental_order)') IS NOT NULL AS present,
     to_regprocedure('zzsh_order.legacy_opening_source_proof(text)') IS NOT NULL AS proof_present,
     EXISTS(SELECT 1 FROM pg_proc p JOIN pg_class c ON c.oid=to_regclass('zzsh_order.finance_stored_opening_review')
@@ -713,6 +744,21 @@ export async function configureContinuityFinancePrivileges(pool: Pick<Pool, "que
         AND t.tgname='stored_opening_source_proof_guard' AND t.tgenabled='O' AND NOT t.tgisinternal)) AS proof_ready`)).rows[0];
   if (typeof v4?.present !== "boolean") throw new Error("Continuity helper inventory is incomplete");
   if(v4.proof_present===true&&v4.proof_ready!==true)throw new Error('Legacy source proof helper is partially deployed');
+  if(withdrawalLinkTables.every(r=>r.present)){
+    const linkGuard=(await pool.query(`/* withdrawal link schema guard readiness */ SELECT
+      EXISTS(SELECT 1 FROM pg_class c JOIN pg_proc f ON f.oid=to_regprocedure('zzsh_order.legacy_withdrawal_row_fingerprint(zzsh_order.personal_finance_observation)')
+        WHERE c.oid=to_regclass('zzsh_order.legacy_withdrawal_link_evidence') AND f.proowner=c.relowner AND f.provolatile='i')
+      AND EXISTS(SELECT 1 FROM pg_class c JOIN pg_proc f ON f.oid=to_regprocedure('zzsh_order.bump_legacy_withdrawal_subject_revision()')
+        WHERE c.oid=to_regclass('zzsh_order.legacy_withdrawal_subject_revision') AND f.proowner=c.relowner AND f.prosecdef AND f.proconfig=ARRAY['search_path=pg_catalog'])
+      AND NOT EXISTS(SELECT 1 FROM (VALUES
+        ('zzsh_order.personal_finance_observation','legacy_withdrawal_subject_revision_insert','zzsh_order.bump_legacy_withdrawal_subject_revision()'),
+        ('zzsh_order.personal_finance_observation','finance_observation_immutable','zzsh_order.finance_immutable()'),
+        ('zzsh_order.legacy_withdrawal_link_evidence','legacy_withdrawal_link_evidence_guard','zzsh_order.guard_legacy_withdrawal_link_evidence()'),
+        ('zzsh_order.legacy_withdrawal_link_evidence','legacy_withdrawal_link_evidence_immutable','zzsh_order.finance_immutable()')
+      ) required(relation,trigger_name,procedure) WHERE NOT EXISTS(SELECT 1 FROM pg_trigger t WHERE t.tgrelid=to_regclass(required.relation)
+        AND t.tgname=required.trigger_name AND t.tgfoid=to_regprocedure(required.procedure) AND t.tgenabled IN('O','A') AND NOT t.tgisinternal)) AS ready`)).rows[0];
+    if(linkGuard?.ready!==true)throw new Error('Legacy withdrawal link guards unavailable');
+  }
   if (found.every(r => !r.present) && !v4.present&&v4.proof_present!==true) return;
   const identity = (await pool.query<{ roleOid: string; superuser: boolean; ownerRights: boolean }>(`
     /* continuity runtime role ownership */
@@ -753,6 +799,12 @@ export async function configureContinuityFinancePrivileges(pool: Pick<Pool, "que
   }
   if(v4.proof_present===true)await pool.query(`REVOKE ALL ON FUNCTION zzsh_order.legacy_opening_source_proof(text) FROM PUBLIC;
     GRANT EXECUTE ON FUNCTION zzsh_order.legacy_opening_source_proof(text) TO ${role}`);
+  if(withdrawalLinkTables.every(r=>r.present))await pool.query(`
+    REVOKE ALL ON FUNCTION zzsh_order.legacy_withdrawal_verified_source(zzsh_order.personal_finance_observation),
+      zzsh_order.bump_legacy_withdrawal_subject_revision(),zzsh_order.guard_legacy_withdrawal_link_evidence(),
+      zzsh_order.certify_legacy_withdrawal_link(text) FROM PUBLIC,${role};
+    REVOKE ALL ON FUNCTION zzsh_order.legacy_withdrawal_row_fingerprint(zzsh_order.personal_finance_observation) FROM PUBLIC;
+    GRANT EXECUTE ON FUNCTION zzsh_order.legacy_withdrawal_row_fingerprint(zzsh_order.personal_finance_observation) TO ${role}`);
 }
 
 /** 退款可选表在宽授权之后重新收窄；调用方保有原ACL事务，不在旧前缀创建对象。 */

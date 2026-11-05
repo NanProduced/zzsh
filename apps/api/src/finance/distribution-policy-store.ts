@@ -4,6 +4,9 @@ import {canonicalize} from '../supply/content-hash';import {ensureOnlyFields,inv
 import {validateDistributionPolicy,type DistributionPolicyConfig} from './distribution-policy';
 import {prepareDistributionPolicyChange,initialDistributionPolicyConfig,isInitialPolicyChange,type DistributionPolicyChange,type DistributionPolicyUpdate,type DistributionPolicyInitial} from './distribution-policy-change';
 import {ConfigurationError,type AppConfig} from '../config/config';
+import {assertBusinessRuntimeIdentity} from '../database/business';
+import {assertControlledRegressionResource,type ControlledRegressionResource} from './controlled-regression-resource';
+import {REGRESSION_DATABASE,REGRESSION_MARKER,REGRESSION_RUNTIME_USER} from '../config/test-resource';
 import {readFormalCollectionAdmission,type FormalCollectionAdmission} from '../order/joinpay-collection-profile';
 import {assertLocalFinancialSandboxAssembly,assertLocalFinancialSandboxResource,localFinancialSandboxRegistration,type LocalFinancialSandbox} from './local-financial-sandbox-resource';
 export type LocalDistributionScope=Readonly<{kind:'LOCAL_CONTROLLED_DISTRIBUTION'|'NATIVE_DISTRIBUTION'}>;
@@ -12,14 +15,21 @@ type CreationReceipt={database:string;resourceOid:number;owner:string;marker:str
 type DistributionOrigins=Readonly<{apiOrigin:string;userOrigin:string;adminOrigin:string}>;
 const localName='zzsh_test_order_credit_admin_batch2',localRuntime='zzsh_order_credit_admin_batch2_r',localMigration='zzsh_order_credit_admin_batch2_m',localMarker='zzsh:order-reservation-test:v1';
 const milestoneName='zzsh_test_order_milestone_real_1',milestoneRuntime='zzsh_order_milestone_real_1_r',milestoneMigration='zzsh_order_milestone_real_1_m';
-const localProofs=new WeakMap<LocalDistributionScope,Readonly<CreationReceipt&{readOnly:boolean;origins?:DistributionOrigins;sandbox?:LocalFinancialSandbox}>>();
+const localProofs=new WeakMap<LocalDistributionScope,Readonly<CreationReceipt&{readOnly:boolean;origins?:DistributionOrigins;sandbox?:LocalFinancialSandbox;nativeReadNonce?:string}>>();
 const nativeProofs=new WeakMap<LocalDistributionScope,Readonly<{kind:'NATIVE';database:string;runtimeUser:string;admissionSha256:string}>>();
+const reviewedLocalNativeProofs=new WeakMap<LocalDistributionScope,Readonly<{proof:ControlledRegressionResource;owner:string;ownerOid:number}>>();
 /** Formal NATIVE scope comes only from the reviewed formal collection admission; no receipt or env shortcut. */
 export function createNativeDistributionPolicyScope(admission:FormalCollectionAdmission):LocalDistributionScope{
  const view=readFormalCollectionAdmission(admission),value=Object.freeze({kind:'NATIVE_DISTRIBUTION' as const});
  nativeProofs.set(value,Object.freeze({kind:'NATIVE' as const,database:view.database,runtimeUser:view.runtimeUser,admissionSha256:view.sha256}));return value;
 }
-export function distributionPolicyScopeOf(binding:LocalDistributionScope|undefined):DistributionPolicyScopeKind{return binding!==undefined&&nativeProofs.has(binding)?'NATIVE':'LOCAL_CONTROLLED';}
+/** Offline migration only; the original regression proof is rechecked on every transaction. */
+export function createReviewedLocalNativeDistributionScope(proof:ControlledRegressionResource,owner:{owner:string;ownerOid:number}):LocalDistributionScope{
+ if(!owner||!/^[a-z][a-z0-9_]{0,62}$/.test(owner.owner)||owner.owner===REGRESSION_RUNTIME_USER||!Number.isSafeInteger(owner.ownerOid)||owner.ownerOid<=0||owner.ownerOid>4294967295)
+  throw new ConfigurationError('REVIEWED_LOCAL_NATIVE_DISTRIBUTION_OWNER_INVALID');
+ const value=Object.freeze({kind:'NATIVE_DISTRIBUTION' as const});reviewedLocalNativeProofs.set(value,Object.freeze({proof,owner:owner.owner,ownerOid:owner.ownerOid}));return value;
+}
+export function distributionPolicyScopeOf(binding:LocalDistributionScope|undefined):DistributionPolicyScopeKind{return binding!==undefined&&(nativeProofs.has(binding)||reviewedLocalNativeProofs.has(binding)||localProofs.get(binding)?.nativeReadNonce!==undefined)?'NATIVE':'LOCAL_CONTROLLED';}
 /** Explicit server assembly from the resource creation receipt; never HTTP or environment input. */
 export function createLocalDistributionScope(config:AppConfig,receipt:CreationReceipt):LocalDistributionScope{
  return createScope(config,receipt,false);
@@ -50,6 +60,29 @@ export function createRegisteredLocalDistributionReadScope(config:AppConfig,rece
  const value=Object.freeze({kind:'LOCAL_CONTROLLED_DISTRIBUTION' as const});
  localProofs.set(value,Object.freeze({...receipt,readOnly:true,origins:Object.freeze({apiOrigin:origins.apiOrigin,userOrigin:origins.userOrigin,adminOrigin:origins.adminOrigin}),sandbox:undefined}));return value;
 }
+/** One registered local regression epoch can read the NATIVE policy without payment or write admission. */
+export function createRegisteredLocalNativeDistributionReadScope(config:AppConfig,receipt:Required<CreationReceipt>&{nonce:string},origins:DistributionOrigins&{secureCookies:boolean}):LocalDistributionScope{
+ if(config.profile!=='test'||config.testOperationsEnabled||process.env.NODE_ENV==='production'||config.database.targetProfile!=='test'
+  ||config.database.name!==REGRESSION_DATABASE||config.database.user!==REGRESSION_RUNTIME_USER||receipt.marker!==REGRESSION_MARKER
+  ||typeof receipt.nonce!=='string'||!/^[a-f0-9]{24}$/.test(receipt.nonce))throw new ConfigurationError('Exact registered local native distribution read resource required');
+ const base=createRegisteredLocalDistributionReadScope(config,receipt,origins),proof=localProofs.get(base)!;
+ const value=Object.freeze({kind:'NATIVE_DISTRIBUTION' as const});
+ localProofs.set(value,Object.freeze({...proof,nativeReadNonce:receipt.nonce}));return value;
+}
+export function assertRegisteredLocalNativeDistributionReadScope(scope:LocalDistributionScope):void{
+ if(localProofs.get(scope)?.nativeReadNonce===undefined)throw new ConfigurationError('REGISTERED_LOCAL_NATIVE_READ_SCOPE_REQUIRED');
+}
+
+/** This local read brand cannot be combined with write, funds or distribution worker assembly. */
+export function assertLocalNativeDistributionReadOnlyAssembly(readScope:LocalDistributionScope|undefined,writeScope:LocalDistributionScope|undefined,options:{testOperationsEnabled:boolean;settlementRecordingEnabled?:boolean;distributionEarnings?:unknown;joinpayCollection?:unknown;joinpayRefund?:unknown;joinpayWithdrawal?:unknown;joinpayAccountRead?:unknown;joinpayAccountObservation?:unknown;localControlledPayments?:unknown;localFinancialSandbox?:unknown;nativeWithdrawalScope?:unknown;distributionDue?:unknown}):void{
+ const localNative=(scope:LocalDistributionScope|undefined)=>scope!==undefined&&localProofs.get(scope)?.nativeReadNonce!==undefined;
+ if(!localNative(readScope)&&!localNative(writeScope))return;
+ if(localNative(writeScope)||writeScope!==undefined||options.testOperationsEnabled||options.settlementRecordingEnabled||options.distributionEarnings||options.joinpayCollection||options.joinpayRefund||options.joinpayWithdrawal||options.joinpayAccountRead||options.joinpayAccountObservation||options.localControlledPayments||options.localFinancialSandbox||options.nativeWithdrawalScope||options.distributionDue)
+  throw new ConfigurationError('LOCAL_NATIVE_DISTRIBUTION_READ_ONLY_ASSEMBLY_REQUIRED');
+}
+export function assertLocalNativeDistributionWriteUnavailable(binding:LocalDistributionScope|undefined):void{
+ if(binding!==undefined&&localProofs.get(binding)?.nativeReadNonce!==undefined)throw new SecurityApiError(503,'EVIDENCE_UNAVAILABLE','Local native distribution scope is read only');
+}
 function createScope(config:AppConfig,receipt:CreationReceipt,readOnly:boolean):LocalDistributionScope{
  const milestone=receipt.database===milestoneName,name=milestone?milestoneName:localName,runtime=milestone?milestoneRuntime:localRuntime,migration=milestone?milestoneMigration:localMigration;
  if(config.profile!=='test'||config.provider!=='fake'||!readOnly&&!config.testOperationsEnabled||readOnly&&!milestone
@@ -61,8 +94,9 @@ function createScope(config:AppConfig,receipt:CreationReceipt,readOnly:boolean):
   ||[793252,878001,893390,881699,820148,833000,869754].includes(receipt.resourceOid))throw new ConfigurationError('Exact local test/fake distribution creation receipt required');
  const value=Object.freeze({kind:'LOCAL_CONTROLLED_DISTRIBUTION' as const});localProofs.set(value,Object.freeze({...receipt,readOnly,origins:undefined,sandbox:undefined}));return value;
 }
-export function assertLocalDistributionAssembly(binding:LocalDistributionScope|undefined,options:{testOperationsEnabled:boolean;secureCookies:boolean;apiOrigin:string;userOrigin:string;adminOrigin:string}){
+export function assertLocalDistributionAssembly(binding:LocalDistributionScope|undefined,options:{testOperationsEnabled:boolean;secureCookies:boolean;apiOrigin:string;userOrigin:string;adminOrigin:string;joinpayCollection?:unknown;joinpayRefund?:unknown;joinpayWithdrawal?:unknown;joinpayAccountObservation?:unknown;localControlledPayments?:unknown;localFinancialSandbox?:unknown;distributionEarnings?:unknown;settlementRecordingEnabled?:boolean}){
  if(binding===undefined)return;
+ if(reviewedLocalNativeProofs.has(binding))throw new ConfigurationError('REVIEWED_LOCAL_NATIVE_DISTRIBUTION_IS_OFFLINE_ONLY');
  const native=nativeProofs.get(binding);
  if(native){
   const https=(origin:string)=>/^https:\/\/[^/]+(?:\/.*)?$/.test(origin)&&!/^https:\/\/(?:localhost|127\.0\.0\.1)(?::|\/|$)/.test(origin);
@@ -78,7 +112,21 @@ export function assertLocalDistributionAssembly(binding:LocalDistributionScope|u
 export const DISTRIBUTION_POLICY_PERMISSION={read:'personal.distribution.policy.read',manage:'personal.distribution.policy.manage'} as const;
 type Actor={userId:string;sessionId:string;requestId:string};const sha=(s:string)=>createHash('sha256').update(s).digest('hex'),scope='LOCAL_CONTROLLED';
 async function authorize(c:PoolClient,actor:Actor,write=false){await assertAdminContextInTransaction(c,actor);const user=(await c.query('SELECT suspended FROM zzsh_auth_admin."user" WHERE id=$1',[actor.userId])).rows[0];if(!user||user.suspended)throw forbidden('Policy operator unavailable');const access=await loadEffectiveAdminAccess(c,actor.userId);if(write)requirePermission(access,DISTRIBUTION_POLICY_PERMISSION.manage);else if(!hasPermission(access,DISTRIBUTION_POLICY_PERMISSION.read)&&!hasPermission(access,DISTRIBUTION_POLICY_PERMISSION.manage))throw forbidden('Policy read permission required');return access;}
-async function resource(c:PoolClient, allowUnadmitted=false,binding?:LocalDistributionScope,maintenanceOwner=false,readOnly=false){const r=(await c.query("SELECT d.oid,current_database() AS name,current_user AS role,shobj_description(d.oid,'pg_database') AS marker,to_regclass('zzsh_order.distribution_policy_version') IS NOT NULL AND to_regclass('zzsh_order.distribution_policy_head') IS NOT NULL AS complete FROM pg_database d WHERE d.datname=current_database()")).rows[0];
+async function resource(c:PoolClient, allowUnadmitted=false,binding?:LocalDistributionScope,maintenanceOwner=false,readOnly=false){
+ const reviewed=binding&&reviewedLocalNativeProofs.get(binding);
+ if(reviewed){
+  const connection=(c as PoolClient&{connectionParameters?:{host?:string;port?:number;database?:string;user?:string}}).connectionParameters;
+  if(maintenanceOwner||c.getTransactionStatus()!=='T'||!connection||connection.host!=='127.0.0.1'||Number(connection.port)!==55432||connection.database!==REGRESSION_DATABASE||connection.user!==REGRESSION_RUNTIME_USER)
+   throw new SecurityApiError(503,'EVIDENCE_UNAVAILABLE','Reviewed local distribution connection differs');
+  await assertControlledRegressionResource(c,reviewed.proof,'DISTRIBUTION');
+  const state=(await c.query(`SELECT pg_get_userbyid(d.datdba) AS owner,d.datdba::int AS "ownerOid",
+   to_regclass('zzsh_order.distribution_policy_version') IS NOT NULL AND to_regclass('zzsh_order.distribution_policy_head') IS NOT NULL AND to_regclass('zzsh_order.distribution_participant') IS NOT NULL AND to_regclass('zzsh_order.distribution_invite_code') IS NOT NULL AND to_regclass('zzsh_order.invitation_relation') IS NOT NULL AS complete
+   FROM pg_database d WHERE d.datname=current_database()`)).rows[0];
+  if(!state||state.owner!==reviewed.owner||Number(state.ownerOid)!==reviewed.ownerOid)throw new SecurityApiError(503,'EVIDENCE_UNAVAILABLE','Reviewed local distribution owner differs');
+  if(state.complete!==true){if(allowUnadmitted)return false;throw new SecurityApiError(503,'EVIDENCE_UNAVAILABLE','Reviewed local distribution structure unavailable');}
+  return true;
+ }
+ const r=(await c.query("SELECT d.oid,current_database() AS name,current_user AS role,current_setting('zzsh.regression_run',true) AS nonce,shobj_description(d.oid,'pg_database') AS marker,to_regclass('zzsh_order.distribution_policy_version') IS NOT NULL AND to_regclass('zzsh_order.distribution_policy_head') IS NOT NULL AS complete FROM pg_database d WHERE d.datname=current_database()")).rows[0];
  const native=nativeProofs.get(binding!);
  if(native){
   if(maintenanceOwner||!r||r.name!==native.database||r.role!==native.runtimeUser)throw new SecurityApiError(503,'EVIDENCE_UNAVAILABLE','Bound native distribution resource differs');
@@ -93,6 +141,11 @@ async function resource(c:PoolClient, allowUnadmitted=false,binding?:LocalDistri
   const proof=localProofs.get(binding);
   if(!proof)throw new SecurityApiError(503,'EVIDENCE_UNAVAILABLE','Bound distribution resource differs');
   if(proof.sandbox){if(maintenanceOwner)throw new SecurityApiError(503,'EVIDENCE_UNAVAILABLE','Sandbox is not a legacy maintenance authority');const checked=await assertLocalFinancialSandboxResource(c,proof.sandbox,readOnly||allowUnadmitted?'READ_ORIGINAL':'WRITE');return allowUnadmitted?checked.active:true;}
+  if(proof.nativeReadNonce!==undefined){
+   const connection=(c as PoolClient&{connectionParameters?:{host?:string;port?:number;database?:string;user?:string}}).connectionParameters;
+   if(process.env.NODE_ENV==='production'||maintenanceOwner||!readOnly||c.getTransactionStatus()!=='T'||!connection||connection.host!=='127.0.0.1'||Number(connection.port)!==55432||connection.database!==proof.database||connection.user!==proof.runtimeRole||r?.nonce!==proof.nativeReadNonce)
+    throw new SecurityApiError(503,'EVIDENCE_UNAVAILABLE','Bound local native distribution read resource differs');
+  }
   const roles=maintenanceOwner&&proof.database===milestoneName?[proof.owner]:proof.readOnly?[proof.runtimeRole]:[proof.runtimeRole,proof.migrationRole];
   if(proof.readOnly&&!readOnly||!r||maintenanceOwner&&proof.database!==milestoneName||r.name!==proof.database||Number(r.oid)!==proof.resourceOid||r.marker!==proof.marker||!roles.includes(r.role)||r.complete!==true)throw new SecurityApiError(503,'EVIDENCE_UNAVAILABLE','Bound distribution resource differs');
   const shape=(await c.query(`SELECT pg_get_userbyid(d.datdba) AS owner,d.datdba::int AS "ownerOid",r.oid::int AS "roleOid",r.rolsuper,r.rolbypassrls,
@@ -103,6 +156,7 @@ async function resource(c:PoolClient, allowUnadmitted=false,binding?:LocalDistri
   if(!shape||shape.owner!==proof.owner||!maintenanceOwner&&(shape.rolsuper!==false||shape.rolbypassrls!==false)||shape.complete!==true
    ||(proof.database===milestoneName||proof.origins)&&(shape.ownerOid!==proof.ownerOid||shape.roleOid!==expectedRole)
    ||proof.origins&&(shape.migrationRoleOid!==proof.migrationRoleOid||shape.migrationSuper!==false||shape.migrationBypass!==false))throw new SecurityApiError(503,'EVIDENCE_UNAVAILABLE','Bound distribution schema or role unavailable');
+  if(proof.nativeReadNonce!==undefined){try{await assertBusinessRuntimeIdentity(c,{database:{name:proof.database,user:proof.runtimeRole,runtimeUser:proof.runtimeRole}});}catch{throw new SecurityApiError(503,'EVIDENCE_UNAVAILABLE','Bound local native distribution runtime identity unavailable');}}
   return true;
  }
  const resources=[['zzsh_test_m2_auth_auth_compat',820148,'zzsh_m2_auth_compat_','zzsh:m2-auth-test:v1'],['zzsh_test_m2_auth_auth_compat_ui',833000,'zzsh_m2_auth_compat_ui_','zzsh:m2-auth-test:v1'],['zzsh_test_order_personal_finance',869754,'zzsh_order_personal_finance_','zzsh:order-reservation-test:v1']] as const;
@@ -131,7 +185,7 @@ export async function readActiveDistributionPolicyInTransaction(c:PoolClient,loc
 /** Invitation reads do not require write admission; its capability still uses the original gate. */
 export async function readInvitationPolicyInTransaction(c:PoolClient,binding?:LocalDistributionScope){
  if(!(await c.query("SELECT to_regclass('zzsh_order.distribution_policy_version') IS NOT NULL AND to_regclass('zzsh_order.distribution_policy_head') IS NOT NULL AS complete")).rows[0]?.complete)throw new SecurityApiError(503,'EVIDENCE_UNAVAILABLE','Distribution policy sources are not installed');
- const admitted=await resource(c,true,binding,false,true),writeResourceAdmitted=admitted&&(binding===undefined||nativeProofs.has(binding)||localProofs.get(binding)?.readOnly!==true);return{...await readDistributionPolicyRowInTransaction(c,false,distributionPolicyScopeOf(binding)),writeResourceAdmitted};
+ const admitted=await resource(c,true,binding,false,true),writeResourceAdmitted=admitted&&(binding===undefined||nativeProofs.has(binding)||reviewedLocalNativeProofs.has(binding)||localProofs.get(binding)?.readOnly!==true);return{...await readDistributionPolicyRowInTransaction(c,false,distributionPolicyScopeOf(binding)),writeResourceAdmitted};
 }
 /** Registration remains available before distribution admission; policy reads/writes elsewhere stay strict. */
 export async function readRegistrationDistributionPolicyInTransaction(c:PoolClient,binding?:LocalDistributionScope){

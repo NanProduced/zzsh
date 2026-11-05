@@ -265,10 +265,24 @@ test('business status predicates are shared occupancy facts and run in SQL befor
   const calls:Array<{sql:string;values:unknown[]}>=[];
   await listSupervision({query:async(sql:string,values:unknown[])=>{calls.push({sql,values});return{rows:[]};}} as never,queryViewer,parseSupervisionQuery(new URLSearchParams({status,limit:'5'})),async()=>{throw new Error('empty query has no gate work');},queryKey);
   const page=calls.find(x=>x.sql.startsWith('SELECT a.id,'))!,count=calls.find(x=>x.sql.startsWith('SELECT count(*)::text AS total'))!;
-  assert(page&&count);assert.match(page.sql,/LIMIT/);assert.match(page.sql,/'COMPLETED'/);assert.match(count.sql,/'COMPLETED'|'PENDING_PAYMENT'/);
-  if(status==='OFFLINE')assert.match(count.sql,/a.owner_paused OR a.staff_restricted/);
-  if(status==='IN_PROGRESS')assert.match(count.sql,/ISOLATED_PARTY/,'legacy occupancy uses the same authoritative SQL');
+  assert(page&&count);assert.match(page.sql,/LIMIT/);assert.match(count.sql,/'COMPLETED'|'PENDING_PAYMENT'/);
+  if(status==='OFFLINE'){assert.match(count.sql,/a.owner_paused OR a.staff_restricted/);assert.match(page.sql,/\(false\) AS "statusCompleted"/);}
+  if(status==='IN_PROGRESS'){assert.match(count.sql,/ISOLATED_PARTY/,'legacy occupancy uses the same authoritative SQL');assert.match(page.sql,/\(true\) AS "statusOccupied"/);}
+  if(status==='COMPLETED')assert.match(page.sql,/\(true\) AS "statusCompleted"/);
  }
+});
+
+test('legacy completion uses the same source-bound admin predicate in page and total, without changing the transaction gate',async()=>{
+ const calls:Array<{sql:string;values:unknown[]}>=[];
+ await listSupervision({query:async(sql:string,values:unknown[])=>{calls.push({sql,values});return{rows:[]};}} as never,queryViewer,parseSupervisionQuery(new URLSearchParams({status:'COMPLETED',gameId:'game-a',limit:'5'})),async()=>{throw new Error('empty query has no gate work');},queryKey);
+ const page=calls.find(x=>x.sql.startsWith('SELECT a.id,'))!,count=calls.find(x=>x.sql.startsWith('SELECT count(*)::text AS total'))!;
+ for(const q of [page,count]){
+  assert(q);assert.match(q.sql,/legacy_listing_read_snapshot ls/);assert.match(q.sql,/legacy_account_source_digest=ls\.source_digest/);
+  assert.match(q.sql,/COALESCE\(h\.stage,l\.source_order_status\)=4/);assert.match(q.sql,/IS NOT TRUE/);
+  assert.match(q.sql,/NOT EXISTS\(SELECT 1 FROM zzsh_supply\.listing_publication/);assert.match(q.sql,/a\.game_id=\$\d+/);
+  assert(q.values.includes('game-a'));
+ }
+ assert.match(page.sql,/LIMIT/);assert.match(count.sql,/NOT \(EXISTS/);
 });
 test("every location branch allocates only referenced SQL parameters", async () => {
     for (const kind of ["account", "legacy", "owner", "nickname", "order"]) {
@@ -517,6 +531,25 @@ test("filter SQL selects the same display version and pushes source, haff, depos
     assert.match(sql, /FROM .*listing_publication/s);
     assert.match(sql, /WHERE .*legacy_supply_map/s);
     assert.match(sql, /LIMIT \$/);
+});
+test('completed legacy source uses the equivalent source semijoin in both count and page without changing NEW or game scope', async () => {
+  const capture=async(params:URLSearchParams)=>{
+    const calls:Array<{sql:string;values:unknown[]}>=[];
+    await listSupervision({query:async(sql:string,values:unknown[])=>{calls.push({sql,values});return {rows:[]};}} as never,queryViewer,parseSupervisionQuery(params),async()=>{throw Error('empty page has no gate work');},queryKey);
+    return {count:calls.find(x=>x.sql.startsWith('SELECT count(*)::text AS total'))!,page:calls.find(x=>x.sql.startsWith('SELECT a.id,'))!};
+  };
+  const combined=await capture(new URLSearchParams('status=COMPLETED&source=LEGACY&gameId=game-a&limit=5'));
+  for(const query of [combined.count,combined.page]){
+    assert(query);assert.match(query.sql,/a\.id IN \(SELECT account_id FROM zzsh_supply\.legacy_supply_map UNION ALL SELECT account_id FROM zzsh_supply\.legacy_listing_read_snapshot\)/);
+    assert.match(query.sql,/admin_supply_scope/);assert.match(query.sql,/legacy_account_source_digest=ls\.source_digest/);assert(query.values.includes('game-a'));
+  }
+  const legacyOnly=await capture(new URLSearchParams('source=LEGACY&limit=5'));
+  const fresh=await capture(new URLSearchParams('status=COMPLETED&source=NEW&limit=5'));
+  for(const query of [legacyOnly.count,legacyOnly.page,fresh.count,fresh.page]){
+    assert(query);assert.doesNotMatch(query.sql,/a\.id IN \(SELECT account_id FROM zzsh_supply\.legacy_supply_map UNION ALL/);
+    assert.match(query.sql,/EXISTS\(SELECT 1 FROM zzsh_supply\.legacy_supply_map/);assert.match(query.sql,/admin_supply_scope/);
+  }
+  assert.match(fresh.count.sql,/NOT \(EXISTS\(SELECT 1 FROM zzsh_supply\.legacy_supply_map/);
 });
 test("private cursor binds the complete normalized account filter set", () => {
     const key = { keyId: "fixture", secret: "fixture-only-private-cursor-key-000001" }, position = { at: "2026-10-03T00:00:00.000000Z", id: "account_fixture" };

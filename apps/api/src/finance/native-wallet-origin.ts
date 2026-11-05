@@ -16,15 +16,23 @@ export function createProvisionedNativeWalletOriginResource(config:AppConfig):Na
  const resource=Object.freeze({kind:'PROVISIONED_NATIVE_WALLET_ORIGIN' as const});
  provisionedOrigins.set(resource,{database:config.database.name,runtimeUser:config.database.runtimeUser});return resource;
 }
-/** Internal local regression authority only; an actual immutable owner admission row remains required. */
-export function createControlledNativeWalletOriginResource(input:{config:AppConfig;resourceOid:number;nonce:string;runtimeRoleOid:number}):NativeOriginResource{
+function createLocalNativeWalletOriginResource(input:{config:AppConfig;resourceOid:number;nonce:string;runtimeRoleOid:number},testOperationsEnabled:boolean):NativeOriginResource{
  const c=input.config;
- if(c.profile!=='test'||c.provider!=='fake'||!c.testOperationsEnabled||process.env.NODE_ENV==='production'
+ if(c.profile!=='test'||c.provider!=='fake'||c.testOperationsEnabled!==testOperationsEnabled||process.env.NODE_ENV==='production'
   ||c.database.target!=='local-compose'||c.database.targetProfile!=='test'||c.database.host!=='127.0.0.1'||c.database.port!==55432
   ||c.database.name!==REGRESSION_DATABASE||c.database.user!==REGRESSION_RUNTIME_USER||c.database.runtimeUser!==REGRESSION_RUNTIME_USER
   ||!Number.isSafeInteger(input.resourceOid)||input.resourceOid<=0||!Number.isSafeInteger(input.runtimeRoleOid)||input.runtimeRoleOid<=0||!/^[a-f0-9]{24}$/.test(input.nonce))
   throw new ConfigurationError('Controlled native origin requires the exact test/fake regression resource');
  const resource=Object.freeze({kind:'CONTROLLED_NATIVE_WALLET_ORIGIN' as const});controlledOrigins.set(resource,{oid:input.resourceOid,nonce:input.nonce,runtimeRoleOid:input.runtimeRoleOid});return resource;
+}
+/** Internal local regression authority only; an actual immutable owner admission row remains required. */
+export function createControlledNativeWalletOriginResource(input:{config:AppConfig;resourceOid:number;nonce:string;runtimeRoleOid:number}):NativeOriginResource{
+ return createLocalNativeWalletOriginResource(input,true);
+}
+/** Local preview may initialize only a newly registered wallet without enabling test operations. */
+export function createRegisteredLocalNativeWalletOriginResource(input:{config:AppConfig;resourceOid:number;nonce:string;runtimeRoleOid:number}):NativeOriginResource{
+ if(input.config.host!=='127.0.0.1')throw new ConfigurationError('Registered local native origin requires loopback');
+ return createLocalNativeWalletOriginResource(input,false);
 }
 /** Resource proof only; the database owner must separately provision the exact native-origin admission row. */
 export function createNativeWalletOriginResource(admission:FormalCollectionAdmission):NativeOriginResource{

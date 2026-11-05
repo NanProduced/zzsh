@@ -92,6 +92,13 @@ async function mount(t, { context, onOpenSubject, onOpenProfile }) {
 
 const footerOf = (rootNode) => rootNode.querySelector(".im-wb-card");
 
+test("verified legacy subject is labelled as an old order without private identifiers",async t=>{
+ const id=`legacy_order_${'a'.repeat(40)}`;
+ const {rootNode}=await mount(t,{context:{consultationId:'c-1',user:{status:'available',publicId:'user-a',displayName:'用户 A'},
+  subject:{status:'resolved',kind:'ORDER',origin:'LEGACY',displayNo:'OLD-123',title:null,party:'RENTER',target:{kind:'ORDER',id}}}});
+ assert.match(rootNode.textContent,/关联对象 · 旧订单/);assert.match(rootNode.textContent,/OLD-123/);assert.match(rootNode.textContent,/租客/);assert.doesNotMatch(rootNode.textContent,new RegExp(id));
+});
+
 test("resolved 订单：类型 + 业务展示号 + 标题 + 可跳转入口，id 不上屏", async (t) => {
   const opened = [];
   const { rootNode } = await mount(t, {

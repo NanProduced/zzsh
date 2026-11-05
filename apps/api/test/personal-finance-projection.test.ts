@@ -7,6 +7,8 @@ import {resolve} from 'node:path';
 import {createHash} from 'node:crypto';
 import * as historyCoverage from '../src/finance/personal-finance-coverage';
 import * as nativeWallet from '../src/finance/native-wallet-projection';
+import {prepareFrozenFinanceObservation} from '../src/finance/legacy-finance-source-preparation';
+import {canonicalize} from '../src/supply/content-hash';
 const {parseWalletEntryListCoverage}=require(resolve('../web/src/lib/personal-wallet-client.ts'));
 const at='2026-10-15T00:00:00.000000Z',asOf='2026-10-16T00:00:00.000000Z',actor={userId:'u1',sessionId:'s1'},key={keyId:'fixture',secret:'x'.repeat(40)};
 /** Executes the actual small-value CASE/filter/page SQL; PG numeric/MVCC/lock behavior is not simulated. */
@@ -25,6 +27,7 @@ function fixture(){
  const translate=(sql:string)=>sql.replace(/to_char\((at|imported_at|posted_at|recorded_at) AT TIME ZONE 'UTC','[^']*'\)/g,'$1').replace(/::numeric\(24,0\)/g,'').replace(/::(?:text|numeric|timestamptz|jsonb)\b/g,'').replaceAll("o.snapshot->>'action'","CAST(o.snapshot->>'action' AS TEXT)").replaceAll(' COLLATE "C"','').replaceAll('json_build_object(','json_object(').replaceAll('json_agg(','json_group_array(');
  const mapRow=(r:Record<string,any>)=>Object.fromEntries(Object.entries(r).map(([k,v])=>[k,k==='included'?Boolean(v):v!==null&&['delta','balance_after','recorded_amount','source_status','source_level','count','postedNetCents','coveredHistoricalNetCents','uncoveredHistoricalNetCents','coveredCount','uncoveredCount'].includes(k)?String(v):v]));
  const query=async(sql:string,args:any[]=[])=>{seen.push({sql,args});
+  if(sql.includes('wallet purpose observations')||sql.includes('wallet purpose orders'))return{rows:[],rowCount:0};
   if(sql.startsWith('WITH entries')||sql.startsWith(`SELECT 'ledger:'||`)||sql.startsWith(`SELECT 'history:'||`)){
    const rows=db.prepare(translate(sql)).all(Object.fromEntries(args.map((v,i)=>['$'+(i+1),v]))) as Record<string,any>[];
    if(sql.includes('page_json')){
@@ -44,6 +47,66 @@ function fixture(){
  const c={query,release(){}} as any,pool={query,connect:async()=>c} as any;
  return{db,c,pool,seen,close:()=>db.close()};
 }
+
+test('v3 pages balance movements before totals and keeps v1/v2 refund liabilities intact',async()=>{
+ const f=fixture();try{
+  const insert=f.db.prepare('INSERT INTO zzsh_order.personal_finance_observation VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)');
+  insert.run('old','u1',at,at,JSON.stringify({amount:'5.00',action:1,leftAmount:'50.00',referenceId:'77',referenceSn:'UNPROVED'}),0,'HISTORICAL_EARNINGS_LOG','11','LEGACY_MYSQL','legacy_mysql_restore','la_log_earnings',null,'digest','11');
+  insert.run('zero','u1',at,at,JSON.stringify({amount:'0.00',action:1,leftAmount:'50.00'}),0,'HISTORICAL_EARNINGS_LOG','12','LEGACY_MYSQL','legacy_mysql_restore','la_log_earnings',null,'digest','11');
+  const old=await readPersonalFinanceEntries(f.c,actor,{limit:100,cursor:null,bucket:'ALL',projectionVersion:2},key);
+  const page=await readPersonalFinanceEntries(f.c,actor,{limit:100,cursor:null,bucket:'ALL',projectionVersion:3},key);
+  assert(old.items.some(i=>i.bucket==='REFUND_PAYABLE'));assert.equal(page.projectionVersion,3);
+  assert.deepEqual(page.items.map(i=>i.id).sort(),['history:old','ledger:available']);
+  assert.equal(page.totals.count,'2');assert.equal(page.totals.byBucket[0]!.postedNetCents,'100');
+  const historic=page.items.find(i=>i.id==='history:old')!;assert.equal(historic.deltaCents,null);assert.equal(historic.includedInOpening,null);assert.equal(historic.occurredAt,null);assert.equal(historic.balanceAfterCents,null);
+  assert('purpose' in historic);assert.equal(historic.purpose,'UNKNOWN');assert('historicalAmountSemantics' in historic);assert.equal(historic.historicalAmountSemantics,'UNVERIFIED');assert.equal(historic.businessReference.number,null);
+  assert.equal(page.totals.byBucket[0]!.coveredHistoricalNetCents,null);assert.equal(page.totals.byBucket[0]!.uncoveredHistoricalNetCents,null);
+  const detail=await readPersonalFinanceEntry(f.c,'u1','history:old',3);assert('purpose' in detail.entry);assert.equal(detail.entry.purpose,'UNKNOWN');assert.deepEqual(detail.entry,historic);
+  const oldHistoric=old.items.find(i=>i.id==='history:old')!;assert.equal(oldHistoric.deltaCents,'500');assert.equal(oldHistoric.includedInOpening,false);
+  await assert.rejects(readPersonalFinanceEntry(f.c,'u1','ledger:refund',3),(e:any)=>e.status===404);
+  await assert.rejects(readPersonalFinanceEntry(f.c,'u1','history:zero',3),(e:any)=>e.status===404);
+  assert.equal((await readPersonalFinanceEntry(f.c,'u1','ledger:refund',2)).entry.bucket,'REFUND_PAYABLE');
+  assert.throws(()=>parseFinanceQuery(new URLSearchParams('projectionVersion=3&bucket=REFUND_PAYABLE')));
+ }finally{f.close();}
+});
+
+test('v3 cursor order uses the displayed posting time and explicit recorded-time fallback',async()=>{
+ const f=fixture();try{
+  f.db.exec(`DELETE FROM zzsh_order.settlement_ledger_entry;
+   INSERT INTO zzsh_order.finance_event VALUES('event','SETTLEMENT',NULL,'2026-10-15T16:00:00.000000Z');
+   INSERT INTO zzsh_order.settlement_posting VALUES('posting','order','2026-10-14T15:59:59.999000Z');
+   INSERT INTO zzsh_order.settlement_ledger_entry VALUES
+    ('event-line','2026-10-15T15:59:59.999000Z','WALLET_AVAILABLE','100','0','u1','event','posting','{}'),
+    ('posting-line','2026-10-15T16:00:00.001000Z','WALLET_AVAILABLE','200','0','u1',NULL,'posting','{}'),
+    ('orphan-event','2026-10-15T15:59:59.998000Z','WALLET_AVAILABLE','300','0','u1','missing','posting','{}');`);
+  const query={limit:1,cursor:null,bucket:'ALL' as const,projectionVersion:3 as const};
+  const first=await readPersonalFinanceEntries(f.c,actor,query,key);assert.equal(first.items[0]!.id,'ledger:event-line');assert.equal(first.items[0]!.occurredAt,first.items[0]!.postedAt);assert(first.nextCursor);
+  const second=await readPersonalFinanceEntries(f.c,actor,{...query,cursor:first.nextCursor},key);assert.equal(second.items[0]!.id,'ledger:orphan-event');assert.equal(second.items[0]!.postedAt,null);assert.equal(second.items[0]!.occurredAt,second.items[0]!.recordedAt);assert(second.nextCursor);
+  const third=await readPersonalFinanceEntries(f.c,actor,{...query,cursor:second.nextCursor},key);assert.equal(third.items[0]!.id,'ledger:posting-line');assert.equal(third.items[0]!.occurredAt,third.items[0]!.postedAt);
+  await assert.rejects(readPersonalFinanceEntries(f.c,actor,{...query,projectionVersion:2,cursor:first.nextCursor},key),(e:any)=>e.status===409);
+ }finally{f.close();}
+});
+
+test('v3 keeps a verified historical amount when its business source cannot be determined',async()=>{
+ const f=fixture();try{
+  const seconds=Date.parse(at)/1000,p=prepareFrozenFinanceObservation('HISTORICAL_EARNINGS_LOG',{id:101,sn:'LOG-101',action:1,amount:'5.00',userId:11,sourceId:77,createdAt:seconds,changeType:1001,leftAmount:'50.00',sourceSn:'OLD-77'}, {userId:'u1',legacyUserId:'11',identityDigest:'a'.repeat(64)});
+  f.db.prepare('INSERT INTO zzsh_order.personal_finance_observation VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)').run('verified','u1',at,at,JSON.stringify(p.row),0,'HISTORICAL_EARNINGS_LOG',p.sourceId,'LEGACY_MYSQL','legacy_mysql_restore','la_log_earnings',null,p.sourceDigest,'11');
+  const source={id:'verified',user_id:'u1',legacy_user_id:'11',source_kind:'HISTORICAL_EARNINGS_LOG',source_type:'LEGACY_MYSQL',source_system:'legacy_mysql_restore',source_entity:'la_log_earnings',source_id:p.sourceId,source_digest:p.sourceDigest,source_canonical:canonicalize(p.row),source_event_at:at,snapshot:p.row};
+  const query=f.c.query;f.c.query=async(sql:string,args:any[]=[])=>sql.includes('wallet purpose observations')?{rows:[source],rowCount:1}:sql.includes('wallet purpose orders')?{rows:[],rowCount:0}:query(sql,args);
+  const page=await readPersonalFinanceEntries(f.c,actor,{limit:100,cursor:null,bucket:'ALL',projectionVersion:3},key),item=page.items.find(i=>i.id==='history:verified')!;
+  assert('historicalAmountSemantics' in item);assert.equal(item.historicalAmountSemantics,'BALANCE_RECORD');assert('purpose' in item);assert.equal(item.purpose,'UNKNOWN');assert.equal(item.deltaCents,'500');assert.equal(item.includedInOpening,false);assert.equal(item.businessReference.number,null);
+  const detail=await readPersonalFinanceEntry(f.c,'u1',item.id,3);assert.deepEqual(detail.entry,item);
+ }finally{f.close();}
+});
+
+test('v3 uses the import time only for pagination when an old occurrence time is missing',async()=>{
+ const f=fixture();try{
+  f.db.prepare('INSERT INTO zzsh_order.personal_finance_observation VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)').run('missing-time','u1',null,at,JSON.stringify({amount:'5.00',action:1,leftAmount:'50.00'}),0,'HISTORICAL_EARNINGS_LOG','11','LEGACY_MYSQL','legacy_mysql_restore','la_log_earnings',null,'digest','11');
+  const page=await readPersonalFinanceEntries(f.c,actor,{limit:100,cursor:null,bucket:'ALL',projectionVersion:3},key),item=page.items.find(i=>i.id==='history:missing-time')!;
+  assert(item);assert.equal(item.occurredAt,null);assert.equal(item.deltaCents,null);assert('historicalAmountSemantics' in item);assert.equal(item.historicalAmountSemantics,'UNVERIFIED');
+  const detail=await readPersonalFinanceEntry(f.c,'u1',item.id,3);assert.deepEqual(detail.entry,item);
+ }finally{f.close();}
+});
 
 test('five full-length source coverage revisions fit the actual wallet parser and any source change invalidates the cursor',async t=>{
  const f=fixture(),cutoff='2026-09-13T13:31:22.000Z';let changed=false;
@@ -153,7 +216,7 @@ test('v1 fixed two-bucket ALL remains unchanged; v2 lists only spendable movemen
   // The bucket filter still parses and still scopes to the posted ledger, but a hold leg is not a listed movement.
   const reserved=await readPersonalFinanceEntries(f.c,actor,parseFinanceQuery(new URLSearchParams('projectionVersion=2&bucket=RESERVED')),key);assert.equal(reserved.listCoverage.scope,'POSTED_LEDGER_ONLY');assert.equal(reserved.listCoverage.count,'0');assert.equal(reserved.items.length,0);
   await assert.rejects(readPersonalFinanceEntry(f.c,'u1','ledger:reserved'),(e:any)=>e.status===404);const detail=await readPersonalFinanceEntry(f.c,'u1','ledger:reserved',2);assert.equal(detail.projectionVersion,2);assert.equal(detail.entry.bucket,'RESERVED');assert.equal(detail.entry.deltaCents,'30');await assert.rejects(readPersonalFinanceEntry(f.c,'u1','ledger:foreign',2),(e:any)=>e.status===404);
-  for(const q of ['bucket=RESERVED','projectionVersion=1&bucket=PENDING_EARNINGS','projectionVersion=3','projectionVersion=2&projectionVersion=2'])assert.throws(()=>parseFinanceQuery(new URLSearchParams(q)),(e:any)=>e.status===400);
+  for(const q of ['bucket=RESERVED','projectionVersion=1&bucket=PENDING_EARNINGS','projectionVersion=4','projectionVersion=2&projectionVersion=2'])assert.throws(()=>parseFinanceQuery(new URLSearchParams(q)),(e:any)=>e.status===400);
  }finally{f.close();}
 });
 test('wallet cursors bind exact projection, bucket, subject and session; missing history is not global known empty',async()=>{
@@ -168,7 +231,9 @@ test('actual mounted wallet handler decodes qualified IDs once, keeps list/detai
  try{for(const path of ['/entries/ledger%3Areserved?projectionVersion=2','/entries/ledger:reserved?projectionVersion=2']){const r=await call(path);assert.equal(r.statusCode,200);assert.equal(r.body.subjectId,'u1');assert.equal(r.body.entry.bucket,'RESERVED');assert.equal(r.body.projectionVersion,2);}
   // U-3: the accrual leg stays in the distribution module, never in the wallet entry list.
   assert.equal((await call('/entries?projectionVersion=2&bucket=PENDING_EARNINGS')).body.items.length,0);
-  for(const path of ['/entries?projectionVersion=3','/entries/ledger%3Areserved?projectionVersion=3','/entries/ledger%3Areserved?projectionVersion=2&state=ALL'])assert.equal((await call(path)).statusCode,400);
+  assert.equal((await call('/entries?projectionVersion=3')).statusCode,200);
+  assert.equal((await call('/entries/ledger%3Areserved?projectionVersion=3')).statusCode,404);
+  for(const path of ['/entries?projectionVersion=4','/entries/ledger%3Areserved?projectionVersion=4','/entries/ledger%3Areserved?projectionVersion=2&state=ALL'])assert.equal((await call(path)).statusCode,400);
   for(const path of ['/entries/ledger%253Areserved?projectionVersion=2','/entries/ledger%3Areserved%2Fforeign?projectionVersion=2','/entries/ledger%3Areserved%5Cforeign?projectionVersion=2'])assert.equal((await call(path)).statusCode,404);
   assert(f.seen.some(q=>q.sql==='SET TRANSACTION ISOLATION LEVEL REPEATABLE READ'));assert(!f.seen.some(q=>/^(INSERT|UPDATE|DELETE)/.test(q.sql)));
  }finally{f.close();}

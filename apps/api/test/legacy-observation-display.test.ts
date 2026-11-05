@@ -3,9 +3,10 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { canonicalize } from '../src/supply/content-hash';
 import { previewFrozenFinanceObservation } from '../src/finance/legacy-finance-source-preparation';
-import { projectAdminFinanceObservation, financePeriodProjection, financeDocuments } from '../src/finance/admin-finance-read';
+import { projectAdminFinanceObservation, financePeriodProjection, financeDocuments, loadAdminFinanceFacts, parseAdminFinanceFilters } from '../src/finance/admin-finance-read';
 import type { FinanceOrderFact } from '../src/finance/admin-finance-order-read';
 import { enrichHistoricalObservations, historicalObservationDisplay, resolveHistoricalReverseLinks, type HistoricalRelationAccess } from '../src/finance/legacy-observation-display';
+import {FinanceSqlFixture} from './admin-finance-fixture';
 
 type Row = Record<string, any>;
 const userId = 'fixture-user', legacyUserId = '11', at = 1782762304;
@@ -31,7 +32,8 @@ function rawObservation(kind: 'HISTORICAL_EARNINGS_LOG' | 'HISTORICAL_WITHDRAWAL
 function log(overrides: Row = {}): Row {
   return rawObservation('HISTORICAL_EARNINGS_LOG', {
     id: 901, sn: 'LOG-SELF-NUMBER', action: 1, amount: '77.00', userId: 11,
-    sourceId: 14998, createdAt: at, changeType: 1001, leftAmount: '200.00', ...overrides,
+    sourceId: 14998, createdAt: at, changeType: 1001, leftAmount: '200.00',
+    ...(['1002','1003','1004','1005'].includes(String(overrides.changeType)) ? {sourceSn:'WITHDRAWAL-BUSINESS-NUMBER'} : {}), ...overrides,
   }, String(overrides.userId ?? legacyUserId));
 }
 function withdrawal(overrides: Row = {}): Row {
@@ -106,6 +108,29 @@ test('legacy purpose codes keep their business meaning without inferring from si
   assert.equal(historicalObservationDisplay(log({ changeType: 32109, action: 2 })).purposeCode, 'UNKNOWN');
 });
 
+test('only a proved original earnings log receives balance-record amount semantics',()=>{
+  const valid=log({action:2,amount:'734.00',sourceId:5053,changeType:1002});
+  assert.equal(projectAdminFinanceObservation(valid).historical!.amountSemantics,'BALANCE_RECORD');
+  const zero=log({action:2,amount:'0.00',sourceId:5053,changeType:1002});assert.equal(projectAdminFinanceObservation(zero).historical!.amountSemantics,'BALANCE_RECORD');
+  const badDigest=structuredClone(valid);badDigest.source_digest='0'.repeat(64);
+  const badTime=structuredClone(valid);badTime.at=iso(at-1);
+  const rewrite=(field:string,value:unknown)=>{const row=structuredClone(valid),s=row.extra_evidence.snapshot,raw=JSON.parse(s.rawSource.canonical);raw[field]=value;s[field]=value;row[field==='action'?'action':'amount']=String(value);s.rawSource.canonical=canonicalize(raw);s.rawSource.digest=sha(raw);row.extra_evidence.canonical=canonicalize(s);row.source_digest=sha(s);return row;};
+  for(const row of [badDigest,badTime,rewrite('action',9),rewrite('amount','invalid')]){
+    const projected=projectAdminFinanceObservation(row);assert.equal(projected.historical!.amountSemantics,'UNVERIFIED');assert.equal(projected.affectsCurrentWallet,false);assert.equal(projected.affectsCurrentLedger,false);
+  }
+});
+
+test('every legacy business observation requires original source proof before its amount is presented as recorded',()=>{
+  const payment=(pay_is:string)=>rawObservation('HISTORICAL_PAYMENT',{id:'19',userId:'11',order_type:'1',order_id:'32',pay_order_sn:'PAY-19',pay_money:'685.00',pay_is,pay_time:'0',create_time:String(at),relationship:'VERIFIED'});
+  const refund=rawObservation('HISTORICAL_REFUND',{id:'20',user_id:'11',userId:'11',order_type:'order',order_id:'32',order_sn:'ORDER-32',sn:'REFUND-20',order_amount:'685.00',refund_amount:'10.00',refund_status:'1',create_time:String(at),relationship:'VERIFIED'});
+  for(const row of [payment('0'),payment('1'),refund,distribution(),withdrawal()]){
+    const value=projectAdminFinanceObservation(row);assert.equal(value.historical!.amountSemantics,'BUSINESS_RECORD');assert.notEqual(value.historical!.recordedAmountCents,null);
+    assert.equal(value.affectsCurrentWallet,false);assert.equal(value.affectsCurrentLedger,false);
+    const broken=structuredClone(row);broken.source_digest='0'.repeat(64);const unverified=projectAdminFinanceObservation(broken);
+    assert.equal(unverified.historical!.amountSemantics,'UNVERIFIED');assert.equal(unverified.historical!.recordedAmountCents,value.historical!.recordedAmountCents);
+  }
+});
+
 test('the original log number is its own number and never an invented order reference', () => {
   const entry = enrich(log());
   assert.equal(entry.documentNumber, 'LOG-SELF-NUMBER');
@@ -164,7 +189,7 @@ test('known owner income examples use the generic original fact predicate rather
     { logId: 997713, orderId: 887719, number: 'SYNTHETIC-OTHER-ORDER', amount: '2.01', earnings: '5.01', seconds: at + 300 },
   ];
   for (const sample of examples) {
-    const row = log({ id: sample.logId, sourceId: sample.orderId, amount: sample.amount, createdAt: sample.seconds });
+    const row = log({ id: sample.logId, sourceId: sample.orderId, sourceSn: sample.number, amount: sample.amount, createdAt: sample.seconds });
     const original = order({ id: String(sample.orderId), order_sn: sample.number, sale_earnings: sample.earnings, confirm_time: String(sample.seconds) });
     const before = projectAdminFinanceObservation(row), entry = enrich(row, [], [original]);
     assert.equal(entry.historical!.purposeCode, 'OWNER_RENTAL_INCOME');
@@ -185,17 +210,29 @@ test('owner relation rejects wrong party, amount, state, payment status, source 
     order({ pay_is: '0' }), order({ confirm_time: String(at + 1) }), order({}, { ownerId: 'other-user' }),
     order({}, { sourceSystem: 'another-source' }), order({}, { sourceId: '42' }), order({}, { sourceType: 'NATIVE' }),
     order({}, { legacySource: undefined })];
-  for (const candidate of candidates) assert.equal(enrich(log(), [], [candidate]).historical!.association.state, 'UNRESOLVED');
+  for (const candidate of candidates) assert.equal(enrich(log({sourceSn:'ORDER-BUSINESS-NUMBER'}), [], [candidate]).historical!.association.state, 'UNRESOLVED');
+});
+
+test('owner income permits a later log only with verified source number, amount and original proof',()=>{
+  const parent=order(),expected='ORDER-BUSINESS-NUMBER';
+  for(const seconds of [0,1,60])assert.equal(enrich(log({sourceSn:expected,createdAt:at+seconds}),[],[parent]).historical!.association.state,'MATCHED');
+  for(const row of [log({sourceSn:expected,createdAt:at-1}),log({sourceSn:'WRONG-ORDER',createdAt:at+1}),log({createdAt:at+1}),log({sourceSn:expected,createdAt:at+1,amount:'76.99'})])assert.equal(enrich(row,[],[parent]).historical!.association.state,'UNRESOLVED');
+  const corrupt=log({sourceSn:expected,createdAt:at+1}),snap=corrupt.extra_evidence.snapshot;snap.sourceSupplement.digest='0'.repeat(64);corrupt.extra_evidence.canonical=canonicalize(snap);corrupt.source_digest=sha(snap);
+  assert.equal(enrich(corrupt,[],[parent]).historical!.association.state,'UNRESOLVED');
+  const first=log({id:901,sourceSn:expected,createdAt:at+1}),second=log({id:902,sourceSn:expected,createdAt:at+1});
+  assert.equal(enrich(first,[second],[parent]).historical!.association.state,'AMBIGUOUS');
+  assert.equal(resolveHistoricalReverseLinks(parent.ref,[first,second],[parent],access).state,'AMBIGUOUS');
 });
 
 test('owner original number and canonical proof must agree with the projected order fact', () => {
-  assert.equal(enrich(log(), [], [order({}, { number: 'WRONG-PROJECTED-NUMBER' })]).historical!.association.state, 'UNRESOLVED');
-  assert.equal(enrich(log(), [], [order({}, { sourceDigest: '0'.repeat(64) })]).historical!.association.state, 'UNRESOLVED');
-  assert.equal(enrich(log({ action: 2 }), [], [order()]).historical!.association.state, 'UNRESOLVED');
+  const sourceSn='ORDER-BUSINESS-NUMBER';
+  assert.equal(enrich(log({sourceSn}), [], [order({}, { number: 'WRONG-PROJECTED-NUMBER' })]).historical!.association.state, 'UNRESOLVED');
+  assert.equal(enrich(log({sourceSn}), [], [order({}, { sourceDigest: '0'.repeat(64) })]).historical!.association.state, 'UNRESOLVED');
+  assert.equal(enrich(log({sourceSn, action: 2 }), [], [order()]).historical!.association.state, 'UNRESOLVED');
 });
 
 test('distribution income is polymorphic; a task distribution links only to its finance document', () => {
-  const entry = enrich(log(), [distribution({ order_type: 2, level: 1 })]);
+  const entry = enrich(log({sourceSn:'DISTRIBUTION-BUSINESS-NUMBER'}), [distribution({ order_type: 2, level: 1 })]);
   assert.equal(entry.historical!.purposeCode, 'DISTRIBUTION_INCOME');
   assert.equal(entry.historical!.association.kind, 'DISTRIBUTION');
   assert.equal(entry.historical!.association.role, 'BENEFICIARY');
@@ -204,8 +241,17 @@ test('distribution income is polymorphic; a task distribution links only to its 
   assert.equal(entry.related.some(link => link.path?.startsWith('/orders/')), false);
 });
 
+test('distribution log precedes settlement time only when both original keys and amount close',()=>{
+  const number='DISTRIBUTION-BUSINESS-NUMBER', parent=distribution();
+  for(const seconds of [0,1,60])assert.equal(enrich(log({sourceSn:number,createdAt:at-seconds}),[parent]).historical!.association.state,'MATCHED');
+  for(const row of [log({sourceSn:number,createdAt:at+1}),log({sourceSn:'WRONG-DISTRIBUTION',createdAt:at-1}),log({createdAt:at-1}),log({sourceSn:number,createdAt:at-1,amount:'76.99'})])assert.equal(enrich(row,[parent]).historical!.association.state,'UNRESOLVED');
+  const first=log({id:901,sourceSn:number,createdAt:at-1}),second=log({id:902,sourceSn:number,createdAt:at-1});
+  assert.equal(enrich(first,[parent,second]).historical!.association.state,'AMBIGUOUS');
+  assert.equal(enrich(first,[distribution({status:1})]).historical!.association.state,'UNRESOLVED');
+});
+
 test('a matching numeric ID in both economic source entities stays ambiguous without an object link', () => {
-  const entry = enrich(log(), [distribution()], [order()]);
+  const entry = enrich(log({sourceSn:'ORDER-BUSINESS-NUMBER'}), [distribution({sn:'ORDER-BUSINESS-NUMBER'})], [order()]);
   assert.equal(entry.historical!.association.state, 'AMBIGUOUS');
   assert.equal(entry.historical!.purposeCode, 'SETTLEMENT_INCOME');
   assert.equal(entry.historical!.association.documentRef, null);
@@ -222,7 +268,7 @@ test('corrupt observation proof and mismatched source projection never establish
   for (const entry of [enrich(corruptLog, [], [order()]),
     enrich(log({ action: 2, amount: '734.00', sourceId: 5053, changeType: 1002 }), [corruptWithdrawal]),
     enrich(log({ action: 2, amount: '734.00', sourceId: 5053, changeType: 1002 }), [wrongFee]),
-    enrich(log(), [wrongAmount])]) {
+    enrich(log({sourceSn:'DISTRIBUTION-BUSINESS-NUMBER'}), [wrongAmount])]) {
     assert.equal(entry.historical!.association.state, 'UNRESOLVED');
     assert.equal(entry.historical!.association.path, null);
   }
@@ -230,8 +276,8 @@ test('corrupt observation proof and mismatched source projection never establish
 
 test('relationship authorization denial discloses no object reference, number, path or role', () => {
   const denied: HistoricalRelationAccess = { adminId: 'limited', isBoss: false, orderRead: false, financeDocumentRead: false };
-  const entries = [enrich(log(), [], [order({}, { objectReadable: false })], denied),
-    enrich(log(), [distribution()], [], denied),
+  const entries = [enrich(log({sourceSn:'ORDER-BUSINESS-NUMBER'}), [], [order({}, { objectReadable: false })], denied),
+    enrich(log({sourceSn:'DISTRIBUTION-BUSINESS-NUMBER'}), [distribution()], [], denied),
     enrich(log({ action: 2, amount: '734.00', sourceId: 5053, changeType: 1002 }), [withdrawal()], [], denied)];
   for (const entry of entries) {
     assert.equal(entry.historical!.association.state, 'DENIED');
@@ -272,7 +318,7 @@ test('withdrawal application and old order expose their precisely proved origina
   const result = resolveHistoricalReverseLinks(`HISTORY_WITHDRAWAL:${application.id}`, sources, [], access);
   assert.equal(result.state, 'MATCHED');
   assert.deepEqual(result.related, [{ ref: `HISTORY_EARNINGS:${debit.id}`, label: 'LOG-SELF-NUMBER', path: `/finance/documents/${encodeURIComponent('HISTORY_EARNINGS:' + debit.id)}` }]);
-  const original = order(), income = log();
+  const original = order(), income = log({sourceSn:'ORDER-BUSINESS-NUMBER'});
   const incomeResult = resolveHistoricalReverseLinks(original.ref, [income], [original], access);
   assert.equal(incomeResult.state, 'MATCHED');
   assert.equal(incomeResult.related[0]!.ref, `HISTORY_EARNINGS:${income.id}`);
@@ -286,9 +332,9 @@ test('withdrawal application and old order expose their precisely proved origina
   assert.equal(entry.affectsCurrentLedger, false);
 });
 
-test('reverse relationship rejects amount, subject, original user, source, time and missing proof mismatches', () => {
+test('reverse relationship rejects amount, subject, original user, source, reversed time and missing proof mismatches', () => {
   const application = withdrawal(), base = { id: 11437, action: 2, amount: '734.00', sourceId: 5053, changeType: 1002 };
-  const mismatches = [log({ ...base, amount: '733.00' }), log({ ...base, sourceId: 5054 }), log({ ...base, createdAt: at + 1 }),
+  const mismatches = [log({ ...base, amount: '733.00' }), log({ ...base, sourceId: 5054 }), log({ ...base, createdAt: at - 1 }), log({ ...base, sourceSn: 'WRONG-SOURCE-SN' }), log({ ...base, sourceSn: null }),
     { ...log(base), subject_id: 'other-user' }, { ...log(base), source_system: 'another-source' },
     { ...log(base), source_digest: '0'.repeat(64) }];
   for (const candidate of mismatches) {
@@ -300,12 +346,61 @@ test('reverse relationship rejects amount, subject, original user, source, time 
   assert.equal(resolveHistoricalReverseLinks(`HISTORY_WITHDRAWAL:${otherOriginal.id}`, [otherOriginal, log(base)], [], access).state, 'UNRESOLVED');
 });
 
+test('withdrawal association accepts separately sampled clocks only with both verified original keys', () => {
+  const application=withdrawal(),base={id:11437,action:2,amount:'734.00',sourceId:5053,changeType:1002};
+  for(const seconds of [0,1,60]){
+    const debit=log({...base,createdAt:at+seconds}),sources=[application,debit];
+    assert.equal(resolveHistoricalReverseLinks(`HISTORY_WITHDRAWAL:${application.id}`,sources,[],access).state,'MATCHED');
+    assert.deepEqual(resolveHistoricalReverseLinks(`HISTORY_WITHDRAWAL:${application.id}`,sources,[],access).related.map(link=>link.ref),[`HISTORY_EARNINGS:${debit.id}`]);
+    assert.equal(enrich(debit,[application]).historical!.association.state,'MATCHED');
+  }
+  const brokenSupplement=log(base),snapshot=brokenSupplement.extra_evidence.snapshot;
+  snapshot.sourceSupplement.digest='0'.repeat(64);
+  brokenSupplement.extra_evidence.canonical=canonicalize(snapshot);brokenSupplement.source_digest=sha(snapshot);
+  assert.equal(resolveHistoricalReverseLinks(`HISTORY_WITHDRAWAL:${application.id}`,[application,brokenSupplement],[],access).state,'UNRESOLVED');
+  assert.deepEqual(resolveHistoricalReverseLinks(`HISTORY_WITHDRAWAL:${application.id}`,[application,brokenSupplement],[],access).related,[]);
+  const wrongSupplement=log(base),snap=wrongSupplement.extra_evidence.snapshot,raw=JSON.parse(snap.sourceSupplement.canonical);
+  raw.sourceSn='OTHER-APPLICATION';snap.sourceSupplement.canonical=canonicalize(raw);snap.sourceSupplement.digest=sha(raw);
+  wrongSupplement.extra_evidence.canonical=canonicalize(snap);wrongSupplement.source_digest=sha(snap);
+  assert.equal(resolveHistoricalReverseLinks(`HISTORY_WITHDRAWAL:${application.id}`,[application,wrongSupplement],[],access).state,'UNRESOLVED');
+  assert.deepEqual(resolveHistoricalReverseLinks(`HISTORY_WITHDRAWAL:${application.id}`,[application,wrongSupplement],[],access).related,[]);
+  assert.equal(resolveHistoricalReverseLinks(`HISTORY_WITHDRAWAL:${application.id}`,[application,log(base)],[],{...access,financeDocumentRead:false}).state,'DENIED');
+});
+
+test('lookup of an old debit loads its siblings and original application before exposing the parent link',async()=>{
+  const application=withdrawal(),debit=log({id:11437,action:2,amount:'734.00',sourceId:5053,changeType:1002,createdAt:at+1});
+  for(const duplicate of [false,true]){
+  const sibling=log({id:11438,action:2,amount:'734.00',sourceId:5053,changeType:1002,createdAt:at+1});
+  const calls:string[]=[],fixture=new FinanceSqlFixture({history:duplicate?[application,debit,sibling]:[application,debit]});
+  const client={query:async(sql:string,values:unknown[]=[])=>{calls.push(sql);
+    if(sql.startsWith('SELECT to_regclass'))return{rows:[{ready:true}]};
+    if(sql.includes('AS finance_version'))return{rows:[{finance_version:'fixture-version'}]};
+    if(sql.includes('clock_timestamp()'))return{rows:[{at:iso(at+90)}]};
+    if(sql.startsWith('WITH finance_lookup_'))return{rows:[{ref:`HISTORY_EARNINGS:${debit.id}`,document_count:'1',entry_count:'1'}]};
+    if(sql.startsWith('WITH finance_scoped_rows'))return{rows:sql.includes('personal_finance_observation')?[debit]:[]};
+    if(sql.startsWith('WITH finance_reverse_candidates')||sql.startsWith('WITH finance_reference_rows'))return fixture.query(sql,values);
+    if(sql.startsWith('SELECT id,COALESCE(name'))return{rows:[{id:userId,name:'用户一'}]};
+    throw Error('unexpected finance read');
+  }};
+  const filters=parseAdminFinanceFilters(new URLSearchParams({q:'LOG-SELF-NUMBER',period:'0',kind:'WITHDRAWAL'}),new Date(),false);
+  try{
+    const facts=await loadAdminFinanceFacts(client as never,{filters,lookup:{exact:true},page:1,pageSize:20},access);
+    assert.equal(facts.lookupPage!.documentCount,1);assert.equal(facts.entries.length,1);
+    assert.equal(facts.entries[0]!.historical!.association.state,duplicate?'AMBIGUOUS':'MATCHED');assert.equal(facts.entries[0]!.historical!.association.documentRef,duplicate?null:`HISTORY_WITHDRAWAL:${application.id}`);
+    assert.equal(facts.entries[0]!.affectsCurrentWallet,false);assert.equal(facts.entries[0]!.affectsCurrentLedger,false);
+    const reverse=calls.find(sql=>sql.startsWith('WITH finance_reverse_candidates'))!,reference=calls.find(sql=>sql.startsWith('WITH finance_reference_rows'))!;
+    assert.match(reverse,/o\.source_kind='HISTORICAL_EARNINGS_LOG'/);assert.match(reverse,/o\.user_id/);assert.match(reference,/o\.source_type='LEGACY_MYSQL'/);assert.match(reference,/o\.source_id/);
+  }finally{fixture.close();}
+  }
+});
+
 test('reverse dual log or polymorphic source matches stay ambiguous without leaking candidate references', () => {
   const application = withdrawal(), base = { action: 2, amount: '734.00', sourceId: 5053, changeType: 1002 };
   const duplicate = resolveHistoricalReverseLinks(`HISTORY_WITHDRAWAL:${application.id}`, [application, log({ ...base, id: 1 }), log({ ...base, id: 2 })], [], access);
   assert.equal(duplicate.state, 'AMBIGUOUS');
   assert.deepEqual(duplicate.related, []);
-  const original = order(), ambiguous = resolveHistoricalReverseLinks(original.ref, [log(), distribution()], [original], access);
+  assert.equal(enrich(log({...base,id:1}),[application,log({...base,id:2})]).historical!.association.state,'AMBIGUOUS');
+  const original = order(), ambiguous = resolveHistoricalReverseLinks(original.ref, [log({sourceSn:'ORDER-BUSINESS-NUMBER'}), distribution({sn:'ORDER-BUSINESS-NUMBER'})], [original], access);
   assert.equal(ambiguous.state, 'AMBIGUOUS');
   assert.deepEqual(ambiguous.related, []);
 });
@@ -320,7 +415,7 @@ test('reverse authorization is explicit and matches the original object and fina
 });
 
 test('a failed application links a unique original debit and supported return without granting accounting proof', () => {
-  for (const changeType of [1003, 1004]) {
+  for (const changeType of [1003, 1004, 1005]) {
     const application = withdrawal({ status: 4 }), debit = log({ id: 11437, action: 2, amount: '734.00', sourceId: 5053, changeType: 1002 });
     const returned = log({ id: 11438, action: 1, amount: '734.00', sourceId: 5053, changeType, createdAt: at + 60 });
     const sources = [application, debit, returned], before = JSON.stringify(sources);
@@ -343,7 +438,7 @@ test('a failed application links a unique original debit and supported return wi
 test('return without exact debit, terminal status, time, gross or a unique supported event stays unresolved', () => {
   const application = withdrawal({ status: 4 }), debit = log({ id: 11437, action: 2, amount: '734.00', sourceId: 5053, changeType: 1002 });
   const base = { id: 11438, action: 1, amount: '734.00', sourceId: 5053, changeType: 1003, createdAt: at + 60 };
-  const badReturns = [log({ ...base, amount: '733.00' }), log({ ...base, createdAt: at - 1 }), log({ ...base, changeType: 1005 }), log({ ...base, action: 2 })];
+  const badReturns = [log({ ...base, amount: '733.00' }), log({ ...base, createdAt: at - 1 }), log({ ...base, sourceSn:'WRONG-SOURCE-SN' }), log({ ...base, action: 2 })];
   for (const candidate of badReturns) assert.equal(resolveHistoricalReverseLinks(`HISTORY_WITHDRAWAL:${application.id}`, [application, debit, candidate], [], access).state, 'UNRESOLVED');
   assert.equal(resolveHistoricalReverseLinks(`HISTORY_WITHDRAWAL:${application.id}`, [application, log(base)], [], access).state, 'UNRESOLVED');
   assert.equal(resolveHistoricalReverseLinks(`HISTORY_WITHDRAWAL:${application.id}`, [withdrawal({ status: 3 }), debit, log(base)], [], access).state, 'UNRESOLVED');

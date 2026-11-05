@@ -23,7 +23,7 @@ export function mountPersonalFinanceRead(app:INestApplication,options:AuthSecuri
       const origin=request.headers.origin;if(origin!==undefined&&origin!==options.userOrigin&&origin!==options.apiOrigin)throw forbidden();
       const context=await readUserContext(request,options);
       const body=await withTransaction(options.pool,async client=>{
-        if((path.includes('/entries')||path.endsWith('/guarantees'))&&url.searchParams.get('projectionVersion')==='2')await client.query('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ');
+        if((path.includes('/entries')&&['2','3'].includes(url.searchParams.get('projectionVersion')??'')||path.endsWith('/guarantees')&&url.searchParams.get('projectionVersion')==='2'))await client.query('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ');
         await assertReplayAuthorization(client,context);
         if(path.endsWith('/guarantees')){
           for(const k of url.searchParams.keys())if(!['cursor','projectionVersion'].includes(k)||url.searchParams.getAll(k).length!==1)throw invalid('Unsupported guarantee history query');
@@ -34,7 +34,7 @@ export function mountPersonalFinanceRead(app:INestApplication,options:AuthSecuri
         if(path.endsWith('/wallet')){if(url.search)throw notFound();return {wallet:await readPersonalWallet(client,context.userId,options.nativeWithdrawalScope)};}
         if(path.endsWith('/entries'))return await readPersonalFinanceEntries(client,context,parseFinanceQuery(url.searchParams),options.listingCursorKey);
         for(const k of url.searchParams.keys())if(k!=='projectionVersion')throw invalid('Unsupported wallet detail query');
-        return await readPersonalFinanceEntry(client,context.userId,decodeFinanceEntryId(path.split('/').at(-1)!),parseFinanceProjectionVersion(url.searchParams));
+        return await readPersonalFinanceEntry(client,context.userId,decodeFinanceEntryId(path.split('/').at(-1)!),parseFinanceProjectionVersion(url.searchParams,true));
       });
       sendJson(response,200,body,requestId);
     });

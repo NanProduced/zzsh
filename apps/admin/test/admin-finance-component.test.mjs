@@ -40,6 +40,15 @@ test("document-only initial view asks for a reference without querying bulk data
   const ui = await setup(t, "doc-only", "/finance", ["finance.document.read"]); await ui.render(); await settle();
   assert.equal(requests, 0); assert.match(ui.node.textContent, /输入单据编号或用户线索/); assert.doesNotMatch(ui.node.textContent, /正在读取/);
 });
+test('finance category filters expose the selected button and apply its scope',async t=>{
+  const calls=[];globalThis.fetch=async url=>{calls.push(String(url));return response(payload(url));};
+  const ui=await setup(t,'finance-category');await ui.render();await until(()=>ui.node.textContent.includes('业务与历史记录'));
+  const group=ui.node.querySelector('[aria-label="业务分类"]');assert.equal(group.getAttribute('role'),'group');
+  const selected=()=>[...group.querySelectorAll('button')].filter(button=>button.getAttribute('aria-pressed')==='true');
+  assert.equal(selected().length,1);assert.match(selected()[0].textContent,/全部业务/);
+  await act(async()=>[...group.querySelectorAll('button')].find(button=>button.textContent.includes('余额提现')).click());
+  await until(()=>selected()[0].textContent.includes('余额提现'));assert.equal(selected().length,1);await until(()=>calls.some(url=>new URL(url,'http://local').searchParams.get('kind')==='WITHDRAWAL'));
+});
 test("unapplied text leaves old result scope, apply discards it and late old response cannot repaint", async t => {
   let releaseOld; let count = 0;
   globalThis.fetch = async url => { count++; if (count === 1) return new Promise(resolve => { releaseOld = () => resolve(response(payload(url, { documents: [{ ...document, number: "OLD_PRIVATE" }] }))); }); return response(payload(url, { documents: [{ ...document, number: "新单据" }] })); };
@@ -66,6 +75,27 @@ test("empty and source failure are distinct; snapshot conflict clears old result
   assert.doesNotMatch(ui.node.textContent, /该生效范围没有资金分录/);
   assert.equal([...ui.node.querySelectorAll("button")].find(button => button.textContent.includes("导出完整明细")).disabled, true);
 });
+test("period pagination counts and navigates entries rather than distinct business documents", async t => {
+  const entry = { documentRef:'ORDER:o1',documentNumber:'ORDER-1',subjectId:'u1',subjectName:'用户一',bucket:'AVAILABLE',direction:'IN',deltaCents:'100',knowledge:'KNOWN',kind:'SETTLEMENT',state:'POSTED',classification:'POSTED',occurredAt:'2026-10-03T01:00:00Z',evidence:{},reasonCodes:[],sourceType:'NATIVE',sourceSystem:'zzsh',sourceEntity:'ledger_entry',sourceId:'fixture' };
+  const calls=[];
+  globalThis.fetch=async url=>{
+    const page=Number(new URL(url,'http://localhost').searchParams.get('page')??1);calls.push(page);
+    return response(payload(url,{documents:undefined,documentCount:2,entryCount:23,page,entries:Array.from({length:page===1?20:3},(_,i)=>({...entry,id:`entry-${page}-${i}`})),reconciliation:[],gaps:[]}));
+  };
+  const ui=await setup(t,'period-entry-pagination','/finance/period');await ui.render();
+  await until(()=>ui.node.querySelector('[aria-label="分页导航"]')?.textContent.includes('共 23 条记录'));
+  let nav=ui.node.querySelector('[aria-label="分页导航"]');
+  assert.match(nav.textContent,/第 1 \/ 2 页/);assert.ok(nav.querySelector('[title="第 1–20 位"]'));
+  await act(async()=>nav.querySelector('[aria-label="第 2 页"]').click());
+  await until(()=>calls.includes(2)&&ui.node.querySelector('[aria-label="分页导航"]')?.textContent.includes('第 2 / 2 页'));
+  nav=ui.node.querySelector('[aria-label="分页导航"]');assert.ok(nav.querySelector('[title="第 21–23 位"]'));
+});
+test("finance lookup pagination continues to count business documents", async t => {
+  globalThis.fetch=async url=>response(payload(url,{documentCount:1,entryCount:23,entries:[]}));
+  const ui=await setup(t,'lookup-document-pagination','/finance/search');await ui.render();
+  await until(()=>ui.node.querySelector('[aria-label="分页导航"]')?.textContent.includes('共 1 份记录'));
+  const nav=ui.node.querySelector('[aria-label="分页导航"]');assert.match(nav.textContent,/第 1 \/ 1 页/);assert.ok(nav.querySelector('[title="第 1–1 位"]'));
+});
 test("candidate enters stable source-typed independent object with original query/entry context", async t => {
   globalThis.fetch = async url => response(payload(url));
   const ui = await setup(t, "navigation"); ui.props.tab.query = { q: "w1" }; await ui.render(); await until(() => ui.node.textContent.includes("申请一"));
@@ -90,9 +120,32 @@ test("external history A-B-A-B cancels late A and an unapplied draft does not qu
 test('historical balance proof stays unknown beside known ledger flow and proved zero stays zero',async t=>{
   const row={bucket:'AVAILABLE',openingBalance:'0',knownInflows:'18000',knownOutflows:'0',migrationMovement:'0',closingBalance:'18000',difference:'0',ledgerOpeningBalance:'0',ledgerClosingBalance:'18000',ledgerDifference:'0',knowledge:'UNKNOWN',balanceBasis:{knowledge:'UNKNOWN',origin:null,sourceCutoff:null,openingPostedAt:null,reasonCodes:['PERIOD_BALANCE_PROOF_NOT_AVAILABLE']},reasonCodes:[],unknownCount:0,unknownTimeCount:0,coveredHistoricalCount:45,uncoveredHistoricalCount:0};
   globalThis.fetch=async url=>response(payload(url,{entries:[],gaps:[],reconciliation:[row,{...row,bucket:'RESERVED',knownInflows:'0',closingBalance:'0',knowledge:'KNOWN',balanceBasis:{...row.balanceBasis,knowledge:'KNOWN',origin:'NATIVE_GENESIS'}}]}));
-  const ui=await setup(t,'honest-balances','/finance/period');await ui.render();await until(()=>ui.node.textContent.includes('部分期间余额尚未记录'));
-  const rows=[...ui.node.querySelectorAll('tbody tr')];assert.match(rows[0].textContent,/余额未记录/);assert.equal(rows[0].children[1].textContent,'0.00 元已核余额 未记录');assert.match(rows[0].children[3].textContent,/180\.00/);assert.equal(rows[0].children[5].textContent,'180.00 元已核余额 未记录');assert.equal(rows[0].children[6].textContent,'0.00 元已核差额 未记录');
+  const ui=await setup(t,'honest-balances','/finance/period');await ui.render();await until(()=>ui.node.textContent.includes('部分期间余额依据未确认'));
+  assert.match(ui.node.textContent,/差额 0\.00 元表示该行起止余额与变动算术一致/);assert.doesNotMatch(ui.node.textContent,/差额 0\.00 元为账内平衡/);
+  const rows=[...ui.node.querySelectorAll('tbody tr')];assert.match(rows[0].textContent,/余额依据未确认/);assert.equal(rows[0].children[1].textContent,'0.00 元已核余额 未记录');assert.match(rows[0].children[3].textContent,/180\.00/);assert.equal(rows[0].children[5].textContent,'180.00 元已核余额 未记录');assert.equal(rows[0].children[6].textContent,'0.00 元已核差额 未记录');
   assert.equal(rows[1].children[1].textContent,'0.00 元已核余额 0.00 元');assert.equal(rows[1].children[6].textContent,'0.00 元已核差额 0.00 元');assert.match(ui.node.textContent,/单次最多367天/);assert.match(ui.node.textContent,/外部差异：未取得对账依据，未计算/);
+});
+test('a known opening basis does not turn an unknown period balance into proved amounts',async t=>{
+  const row={bucket:'AVAILABLE',openingBalance:'123',knownInflows:'0',knownOutflows:'0',migrationMovement:'0',closingBalance:'123',difference:'0',ledgerOpeningBalance:'123',ledgerClosingBalance:'123',ledgerDifference:'0',knowledge:'UNKNOWN',balanceBasis:{knowledge:'KNOWN',origin:'NATIVE_GENESIS',sourceCutoff:null,openingPostedAt:null,reasonCodes:[]},reasonCodes:['POSTED_EVENT_AMOUNT_OR_TIME_UNAVAILABLE'],unknownCount:1,unknownTimeCount:0,coveredHistoricalCount:0,uncoveredHistoricalCount:0};
+  globalThis.fetch=async url=>response(payload(url,{entries:[],gaps:[],reconciliation:[row]}));
+  const ui=await setup(t,'basis-known-amount-unknown','/finance/period');await ui.render();await until(()=>ui.node.textContent.includes('部分期间余额依据未确认'));
+  const line=ui.node.querySelector('tbody tr');assert.match(ui.node.textContent,/期初依据已取得/);assert.match(line.textContent,/余额依据未确认/);assert.match(line.textContent,/金额或时间尚未取得完整依据/);assert.match(line.children[1].textContent,/已核余额 未记录/);assert.match(line.children[6].textContent,/已核差额 未记录/);assert.doesNotMatch(line.textContent,/缺全平台完整性证明/);
+});
+test('period shows a common missing basis once while preserving each bucket’s distinct cause',async t=>{
+  const shared='ALL_SUBJECTS_PERIOD_BALANCE_NOT_PROVABLE';
+  const row={bucket:'AVAILABLE',openingBalance:null,knownInflows:'0',knownOutflows:'0',migrationMovement:'0',closingBalance:null,difference:null,ledgerOpeningBalance:'0',ledgerClosingBalance:'0',ledgerDifference:'0',knowledge:'UNKNOWN',balanceBasis:{knowledge:'UNKNOWN',origin:null,sourceCutoff:null,openingPostedAt:null,reasonCodes:[shared]},reasonCodes:[shared,'POSTED_EVENT_AMOUNT_OR_TIME_UNAVAILABLE'],unknownCount:1,unknownTimeCount:0,coveredHistoricalCount:0,uncoveredHistoricalCount:0};
+  globalThis.fetch=async url=>response(payload(url,{entries:[],gaps:[],reconciliation:[row,{...row,bucket:'RESERVED',reasonCodes:[shared]}]}));
+  const ui=await setup(t,'period-shared-reasons','/finance/period');await ui.render();await until(()=>ui.node.textContent.includes('未核类别共同原因'));
+  assert.equal((ui.node.textContent.match(/全平台集合未提供各主体完整的期间余额依据/g)??[]).length,1);
+  const rows=[...ui.node.querySelectorAll('tbody tr')];assert.match(rows[0].textContent,/余额依据未确认/);assert.match(rows[1].textContent,/余额依据未确认/);assert.match(rows[0].textContent,/金额或时间尚未取得完整依据/);assert.doesNotMatch(rows[1].textContent,/金额或时间尚未取得完整依据/);
+  await act(async()=>[...ui.node.querySelectorAll('button')].find(item=>item.textContent.includes('账内算术、余额依据与缺项')).click());assert((ui.node.textContent.match(/全平台集合未提供各主体完整的期间余额依据/g)??[]).length>1);
+});
+test('period never claims balanced books or a proved opening when reconciliation is missing or empty',async t=>{
+  for (const [index,reconciliation] of [undefined,[]].entries()) {
+    globalThis.fetch=async url=>response(payload(url,{entries:[],gaps:[],reconciliation}));
+    const ui=await setup(t,`period-missing-${index}`,'/finance/period');await ui.render();await until(()=>ui.node.textContent.includes('账内汇总未取得'));
+    assert.match(ui.node.textContent,/期初依据未确认/);assert.doesNotMatch(ui.node.textContent,/账面借贷平衡|期初依据已取得|期初证明已核定/);
+  }
 });
 test('withdrawal document shows only application, fee, payable, target/source and never upgrades local success to bank arrival', async t => {
   const entry = { id: 'w-entry', documentRef: 'WITHDRAWAL:w1', documentNumber: '申请一', subjectId: 'u1', subjectName: '用户一', bucket: 'RESERVED', direction: 'OUT', deltaCents: '-20000', knowledge: 'KNOWN', kind: 'WITHDRAWAL', state: 'SUCCEEDED', classification: 'POSTED', occurredAt: '2026-10-03T01:00:00Z', evidence: {}, reasonCodes: [], sourceType: 'LOCAL_CONTROLLED', sourceSystem: 'zzsh_order', sourceEntity: 'withdrawal_intent', sourceId: 'internal-intent-id' };
@@ -112,6 +165,7 @@ test('withdrawal document shows only application, fee, payable, target/source an
   assert.equal(card.textContent.includes('原入账基数'), false);
   assert.equal(card.textContent.includes('internal-settlement-id'), false);
   assert.match(card.textContent, /本地受控成功、SUCCEEDED 或出款已记录都不是银行到账/);
+  assert.doesNotMatch(card.textContent, /旧提现申请与余额扣款/);
 });
 test('CHAIN a cancelled unpaid order document is named as an unsettled original, not an order settlement', async t => {
   const cancelled = { ...document, ref: 'ORDER:order_cancelled', number: 'ORDER-CANCELLED', kind: 'SETTLEMENT', state: 'CANCELLED', subjects: [{ id: 'u1', name: '用户一' }] };
@@ -236,7 +290,7 @@ test('overview refuses bulk read without finance.read and old responses cannot p
 });
 test('overview read failure remains distinct from an empty period and refresh clears private data',async t=>{
  let mode='error';globalThis.fetch=async()=>mode==='error'?response({error:{code:'NOT_FOUND'}},404):response(overviewPayload('7d',{confirmedPayments:{...overviewPayload().confirmedPayments,count:'0',amountCents:'0'},recentSettlements:[]}));const ui=await setup(t,'overview-empty','/finance',undefined,true);await ui.render();await until(()=>ui.node.textContent.includes('当前服务尚未提供'));assert.doesNotMatch(ui.node.textContent,/0\.00 元/);
- mode='empty';await act(async()=>[...ui.node.querySelectorAll('button')].find(x=>x.textContent==='重新读取').click());await until(()=>ui.node.textContent.includes('本期没有结算分配记录'));assert.match(ui.node.textContent,/0\.00 元/);ui.props.refreshNonce++;mode='error';await ui.render();await until(()=>ui.node.textContent.includes('当前服务尚未提供'));assert.doesNotMatch(ui.node.textContent,/PAID-ORDER/);
+ mode='empty';await act(async()=>[...ui.node.querySelectorAll('button')].find(x=>x.textContent==='重新读取').click());await until(()=>ui.node.textContent.includes('本期没有新平台已入账结算'));assert.match(ui.node.textContent,/新平台本期最近结算/);assert.match(ui.node.textContent,/0\.00 元/);ui.props.refreshNonce++;mode='error';await ui.render();await until(()=>ui.node.textContent.includes('当前服务尚未提供'));assert.doesNotMatch(ui.node.textContent,/PAID-ORDER/);
 });
 test('overview keeps legacy order amounts and posted wallet buckets separate from native payment',async t=>{
  let legacy={state:'RECORDED',count:'1',knownAmountCents:'7400',missingAmountCount:'2',sourceUndatedCount:'3',timeBasis:'source_paid_at'};
@@ -271,6 +325,15 @@ test('cancelled accepted and late review orders never become pending settlement 
  assert.match(financeOrderState(order('PAID','SITE_ACCEPTED')),/待结算分配/);
  for(const state of ['SITE_ACCEPTED','REVIEW_REQUIRED','NO_ACCEPTED_PAYMENT']){const text=financeOrderState(order('CANCELLED',state));assert.match(text,/已取消/);assert.match(text,/未产生结算分配，退款责任另核/);assert.doesNotMatch(text,/待结算分配|无资金|未收款/);}
  assert.match(financeOrderState(order('CANCELLED','SITE_ACCEPTED')),/本站已确认付款/);assert.match(financeOrderState(order('CANCELLED','REVIEW_REQUIRED')),/异常收款原始记录，当前责任另核/);
+});
+
+test('finance detail without settlement business retains review status in the heading and copied summary',async t=>{
+ const lifecycle={origin:'NATIVE',orderStatus:'CANCELLED',payment:{state:'REVIEW_REQUIRED',amountCents:null,confirmedAt:null,source:null,hasReviewPayment:true},postingState:'NOT_POSTED'};
+ const doc={...document,ref:'ORDER:review',kind:'SETTLEMENT',entryCount:0,requestedAmountCents:null,orderLifecycle:lifecycle};
+ globalThis.fetch=async url=>response(payload(url,{document:doc,entries:[],evidence:{},related:[]}));
+ const ui=await setup(t,'review-summary','/finance/documents/ORDER%3Areview');await ui.render();await until(()=>ui.node.textContent.includes('本站付款状态'));
+ assert.match(ui.node.textContent,/异常收款原始记录/);assert.doesNotMatch(ui.node.textContent,/本站确认付款/);
+ await act(async()=>[...ui.node.querySelectorAll('button')].find(x=>x.textContent==='复制摘要').click());assert.match(ui.node.querySelector('textarea[aria-label="核对摘要"]').value,/本站接纳付款：异常收款需复核/);
 });
 
 test('overview range switch discards late data and a scope-denied refresh clears all prior values',async t=>{

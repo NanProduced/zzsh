@@ -1059,7 +1059,7 @@ function closeFixture() {
  * round is opened by the create transaction, with the welcome delegated to the
  * supplied transport.
  */
-function createConsultationFixture(transport: { sendText: (input: { messageClientId: string; text: string }) => Promise<void> }) {
+function createConsultationFixture(transport: { sendText: (input: { messageClientId: string; text: string }) => Promise<void> }, legacyIds: string[] = []) {
   const userAccountId = identityFor("USER", "user_a").accountId;
   let round: { id: string; state: string; subjectRef: string | null } | null = null;
   let threadState = "IDLE";
@@ -1086,6 +1086,9 @@ function createConsultationFixture(transport: { sendText: (input: { messageClien
   const f = fakePool((sql, values) => {
     const auth = userAuth(sql, values);
     if (auth) return auth;
+    if (sql.includes('FROM zzsh_order.legacy_order_read_snapshot l')) {
+      return { rows: legacyIds.includes(String(values[0])) && values[1] === "user_a" ? [{ id: values[0], displayNo: "OLD-123", party: "RENTER" }] : [] };
+    }
     if (sql.includes('FROM "zzsh_iam"."im_consultation" c') && sql.includes("NOT EXISTS")) {
       autoAssignCalls += 1;
       return { rows: [] };
@@ -1156,5 +1159,17 @@ test("resuming an open round keeps its original immutable subject and creates no
   assert.equal(resumed.consultation.subjectRef, "order:original");
   assert.equal(f.inserts.length, 1);
   assert.equal(f.f.calls.filter(q => /UPDATE[\s\S]*?SET\s+"subject_ref"/.test(q.sql)).length, 0);
+  await flush();
+});
+
+test("legacy order subject is reauthorized on first open and resume without overwriting the original round", async () => {
+  const firstId=`legacy_order_${"a".repeat(40)}`,laterId=`legacy_order_${"b".repeat(40)}`,foreignId=`legacy_order_${"c".repeat(40)}`;
+  const f=createConsultationFixture({sendText:async()=>{}},[firstId,laterId]);
+  const options={pool:f.f.pool,appId:APP_ID,provider:{} as never,messageTransport:{sendText:f.transport.sendText},supportManager:managerOptions(new FakeSupportScopeProvider())} as never;
+  const first=await createOrResumeUserConsultation(options,userContext,"SERVICE",`legacy-order:${firstId}`,"req_legacy_first");
+  const later=await createOrResumeUserConsultation(options,userContext,"SERVICE",`legacy-order:${laterId}`,"req_legacy_later");
+  assert.equal(later.consultation.id,first.consultation.id);assert.equal(later.consultation.subjectRef,`legacy-order:${firstId}`);assert.equal(f.inserts.length,1);
+  await assert.rejects(createOrResumeUserConsultation(options,userContext,"SERVICE",`legacy-order:${foreignId}`,"req_foreign"),(error:any)=>error.status===404);
+  assert.equal(f.inserts.length,1);assert.equal(f.f.calls.filter(q=>/UPDATE[\s\S]*?SET\s+"subject_ref"/.test(q.sql)).length,0);
   await flush();
 });

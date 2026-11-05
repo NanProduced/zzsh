@@ -37,6 +37,7 @@ function loadWorkspace(session, router, legacyContinuationPanel = () => null) {
       if (name === "next/navigation") return { useRouter: () => router };
       if (name === "@/components/auth/auth-overlay-provider") return { useAuthOverlay: () => ({ open() {} }) };
       if (name === "@/components/session/user-session-provider") return { useUserSession: () => session };
+      if (name === "@/components/support/support-dialog-request") return requireFromTree(path.join(tree, "apps/web/src/components/support/support-dialog-request.ts"));
       if (name === "@/components/session/identity-reset") return requireFromTree(path.join(tree, "apps/web/src/components/session/identity-reset.ts"));
       if (name === "@/lib/order-client") return requireFromTree(path.join(tree, "apps/web/src/lib/order-client.ts"));
       if (name === "@/lib/order-display") return requireFromTree(path.join(tree, "apps/web/src/lib/order-display.ts"));

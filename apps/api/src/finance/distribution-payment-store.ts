@@ -4,6 +4,7 @@ import {SecurityApiError,recordAudit} from '../auth/security-core';import {confl
 import {readDistributionPolicyRowInTransaction} from './distribution-policy-store';import {readDistributionParentInTransaction} from './invitation-store';import {freezePaymentDistributionBasis,readOriginalPaymentDistributionBasis,type PaymentDistributionBasis,type PaymentReferralFacts} from './distribution-payment-basis';
 import {readFormalCollectionAdmission,assertFormalInitialAdmission,type FormalCollectionAdmission} from '../order/joinpay-collection-profile';
 import {REGRESSION_DATABASE,REGRESSION_MARKER,REGRESSION_RUNTIME_USER} from '../config/test-resource';
+import {isLegacyListedQuote} from '../supply/legacy-listed-quote';
 import {createControlledRegressionResource,assertControlledRegressionResource,type ControlledRegressionBinding,type ControlledRegressionResource} from './controlled-regression-resource';
 import {assertLocalFinancialSandboxResource,assertLocalSandboxOrderAdmission,localFinancialSandboxRegistration,type LocalFinancialSandbox} from './local-financial-sandbox-resource';
 const sha=(s:string)=>createHash('sha256').update(s).digest('hex'),ID=/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
@@ -91,7 +92,7 @@ function paymentStore(scope:DistributionOrderScope|null,formal?:FormalCollection
    const knowledge=own?.leader_knowledge==='KNOWN_NONE'&&!r?'KNOWN_NONE':own?.leader_knowledge==='KNOWN_PARENT'&&r&&parent?.graphComplete?'KNOWN_PARENT':'UNKNOWN';
    facts.push({role,partyUserId:party,relation:{knowledge,id:r?.id??null,childUserId:party,parentUserId:r?.parent_user_id??null,sourceDigest:r?.source_digest??null},beneficiary:parent?.parent?{userId:parent.parent.user_id,active:parent.ownerActive,eligibility:parent.parent.eligibility,commissionFrozen:parent.parent.commission_frozen??null,levelCode:parent.parent.level_code}:null});
   }
-  const mode=order.quote_snapshot?.schemaVersion===2?order.quote_snapshot?.pricingInputs?.compatibility?.rentalMode:null;
+  const mode=order.quote_snapshot?.schemaVersion===2||isLegacyListedQuote(order.quote_snapshot)?order.quote_snapshot?.pricingInputs?.compatibility?.rentalMode:null;
   const estimate=estimatePaymentReferralBase(order.quote_snapshot,policy.policy?.config.schema==='distribution-policy.v3');
   const transactionId=(await c.query('SELECT pg_current_xact_id()::text AS id')).rows[0]?.id;if(typeof transactionId!=='string'||!/^[1-9]\d*$/.test(transactionId))throw conflict('Original payment transaction unavailable');
   const value=Object.freeze({orderId});prepared.set(value,{client:c,transactionId,input:{orderId,gameId:order.game_id,currency:order.currency,admissionId:admission.id,admissionRevision:String(admission.revision),origin:'NATIVE',accountMode:['ordinary','custom','fast'].includes(mode)?mode:null,estimate,policy:policy.policy?{versionId:policy.policy.versionId,digest:policy.policy.digest,config:policy.policy.config}:null,facts}});return value;

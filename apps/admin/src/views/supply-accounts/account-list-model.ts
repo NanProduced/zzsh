@@ -246,13 +246,17 @@ export function rowBaseFeeRows(row: SupplyWorkItem): { haff: string; materials: 
   const deposit = rowDepositText(row);
   if (!row.summary || row.summary.displaySource === "LEGACY_SNAPSHOT") {
     const historical = row.facts.historicalRead?.historicalQuote;
-    if (historical) return {
-      haff: `历史 ¥${formatAmount(historical.haffRentYuan)}`,
-      materials: `历史 ¥${formatAmount(historical.goodsYuan)}`,
-      deposit,
-      total: "未提供",
-      note: "历史记录，非当前资料",
-    };
+    if (historical) {
+      const cents = (value: unknown) => typeof value === "string" ? depositCentsFromYuan(value).value || null : null;
+      const rent = cents(historical.haffRentYuan), materials = cents(historical.goodsYuan), oldDeposit = cents(historical.depositYuan);
+      return {
+        haff: rent === null ? "未提供" : `历史 ${formatFundingCents(rent)}`,
+        materials: materials === null ? "未提供" : `历史 ${formatFundingCents(materials)}`,
+        deposit,
+        total: rent === null || materials === null || oldDeposit === null ? "未提供" : formatFundingCents((BigInt(rent) + BigInt(materials) + BigInt(oldDeposit)).toString()),
+        note: "迁入时账号记录，不是订单实付或当前报价",
+      };
+    }
     return { haff: "未提供", materials: "未提供", deposit, total: "未提供", note: "资料未提供" };
   }
   return baseFeeRows(row.summary.feeSummary, row.summary.quote?.personalised ? null : row.summary.quote?.resourceTotal, row.summary.baseDeposit?.amountCents);
@@ -323,7 +327,10 @@ export function rowDepositText(row: QuickViewRow): string {
   const declared = row.summary?.baseDeposit;
   if (declared) return formatFundingCents(declared.amountCents);
   const historical = !row.summary || row.summary.displaySource === "LEGACY_SNAPSHOT" ? row.facts.historicalRead?.historicalQuote : null;
-  if (historical) return `历史 ¥${formatAmount(historical.depositYuan)}`;
+  if (historical) {
+    const cents = typeof historical.depositYuan === "string" ? depositCentsFromYuan(historical.depositYuan).value : undefined;
+    return cents ? `历史 ${formatFundingCents(cents)}` : "未提供";
+  }
   if (!row.summary) return "未提供";
   if (row.depositDeclarationUnknown) return "未提供";
   return "未申报";

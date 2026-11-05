@@ -1,4 +1,5 @@
-import { normalizeQuote } from "./content-hash";
+import { normalizeQuote, type LegacyQuoteProvenance } from "./content-hash";
+import { legacyPriceInteger, quoteLegacyHaff } from "./legacy-listed-pricing";
 import {
   DecimalError,
   divideToScale,
@@ -99,7 +100,9 @@ export type QuoteExactRatio = {
 };
 
 export type InternalQuote = {
-  schemaVersion: 1 | 2;
+  schemaVersion: 1 | 2 | 3;
+  quoteSource?: "LEGACY_QUOTED";
+  legacyQuote?: LegacyQuoteProvenance;
   currency: "CNY";
   priceVersionId: string;
   ruleReleaseId: string | null;
@@ -115,7 +118,7 @@ export type InternalQuote = {
   unitAmountsInformational: boolean;
   roundingPolicy: string;
   pricingInputs: {
-    compatibility?: import("./delta-rental").DeltaHaffContext["compatibility"];
+    compatibility?: import("./delta-rental").DeltaHaffContext["compatibility"] | { rentalMode: "ordinary" | "custom" | "fast"; customerTier: "STANDARD"; ownerRatioB: string };
     haffRatioSchema: string | null;
     conditions: Record<string, string> | null;
     denominators: { owner: string; buyer: string } | null;
@@ -335,6 +338,36 @@ export function computeDeltaQuote(input: QuoteInput): QuoteResult {
 }
 
 export const computeQuote = computeDeltaQuote;
+
+/** Legacy source prices are frozen once; later membership discounts use this quote as their base. */
+export function computeLegacyListedQuote(input: { provenance: LegacyQuoteProvenance; priceVersionId: string; ruleReleaseId: string;
+  lines: readonly PricingLineInput[]; tenantDepositCents: string; publisherBailRequirementCents: string; expiryDisclosures: ExpiryDisclosure[] }): InternalQuote {
+  const p = input.provenance, base = quoteLegacyHaff({ haffMillions: p.haffMillions, ownerRatio: p.ownerRatio, spread: p.spread, recordedOwnerYuan: p.recordedOwnerYuan });
+  const haff = input.lines.filter(line => line.pricingKind === "HAFF_RATIO" && line.unit === "HAFF_BASE");
+  if (haff.length !== 1 || input.lines.filter(line => line.pricingKind === "HAFF_RATIO").length !== 1
+    || haff[0]!.quantity !== (legacyPriceInteger(p.haffMillions, false) * HAFF_BASE_PER_MILLION).toString()) throw new Error("LEGACY_HAFF_QUANTITY_MISMATCH");
+  const buyerCents = BigInt(base.renterCents), ownerCents = BigInt(base.ownerCents), millions = legacyPriceInteger(p.haffMillions, false);
+  const unitFor = (cents: bigint) => quoteUnitAmount(divideToScale({ value: cents, scale: 2 }, { value: millions, scale: 0 }, 8));
+  const lines: QuoteLine[] = [{ itemId: haff[0]!.itemId, quantity: haff[0]!.quantity, unit: "HAFF_BASE", unitQuantity: HAFF_BASE_PER_MILLION.toString(), pricingKind: "HAFF_RATIO",
+    buyerUnitAmount: unitFor(buyerCents), ownerUnitAmount: unitFor(ownerCents), buyerAmount: yuanAmountObject(buyerCents), ownerAmount: yuanAmountObject(ownerCents), platformAmount: yuanAmountObject(buyerCents - ownerCents) }];
+  let buyerTotal = buyerCents, ownerTotal = ownerCents;
+  for (const line of input.lines.filter(item => item.pricingKind !== "HAFF_RATIO")) {
+    const values = computeFixedUnitAmounts(line, "SPREAD");
+    pushLine(lines, line, values.quantity, values.unitQuantity, values.buyerUnit, values.ownerUnit, values.buyerAmount.value, values.ownerAmount.value);
+    buyerTotal += values.buyerAmount.value; ownerTotal += values.ownerAmount.value;
+  }
+  const tenant = parseNonNegativeDecimal(input.tenantDepositCents, 0, "tenant deposit").value;
+  const ownerBail = parseNonNegativeDecimal(input.publisherBailRequirementCents, 0, "publisher bail").value;
+  const roundingPolicy = "LEGACY_WHOLE_YUAN_PREPAY_V1";
+  return normalizeQuote({ schemaVersion: 3, quoteSource: "LEGACY_QUOTED", legacyQuote: p, currency: "CNY", priceVersionId: input.priceVersionId,
+    ruleReleaseId: input.ruleReleaseId, mode: "SPREAD", lines, resourceTotal: yuanAmountObject(buyerTotal), ownerTotal: yuanAmountObject(ownerTotal),
+    platformFullProfit: yuanAmountObject(buyerTotal - ownerTotal), tenantDeposit: yuanAmountObject(tenant), publisherBailRequirement: yuanAmountObject(ownerBail),
+    termSeconds: (legacyPriceInteger(p.rentalDays, false) * 86400n).toString(), expiryDisclosures: input.expiryDisclosures, unitAmountsInformational: true, roundingPolicy,
+    pricingInputs: { haffRatioSchema: "legacy-listed-v1", compatibility: { rentalMode: p.rentalMode, customerTier: "STANDARD", ownerRatioB: p.ownerRatio }, conditions: null,
+      denominators: { owner: p.ownerRatio, buyer: base.buyerRatio }, spreadDelta: p.spread, commissionRate: null,
+      exactRatios: [{ itemId: haff[0]!.itemId, buyerNumerator: base.renterCents, buyerDenominator: "100", ownerNumerator: base.ownerCents, ownerDenominator: "100" }],
+      roundingPolicy, depositPolicy: "CONFIGURED", reasonCodes: [] } });
+}
 
 function pushLine(
   quoteLines: QuoteLine[],

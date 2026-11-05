@@ -12,6 +12,7 @@ import { OrderImSdkRouteError, type OrderImSdkRoute, type OrderImSdkRouteBinding
 import { readPrestartRefundProgress } from "../order/prestart-refund-store";
 import type { PrestartPaymentBasis } from "../order/prestart-termination";
 import type { StageCardKind } from "./order-stage-cards";
+import { isLegacyListedQuote } from "../supply/legacy-listed-quote";
 
 export type OrderTeamActor={realm:"user"|"admin";userId:string;sessionId:string};
 const denied=()=>new SecurityApiError(403,"FORBIDDEN","Order Team access denied");
@@ -126,7 +127,7 @@ export function projectOrderTerms(snapshot:unknown,itemNames:ReadonlyMap<string,
   const publisherBail=quote.publisherBailRequirement==null?null:termsAmount(quote.publisherBailRequirement);
   const complete=rawLines.length>0&&known.length===rawLines.length
     &&known.every(line=>line.buyerCents!==null&&line.ownerCents!==null&&line.platformCents!==null)
-    &&(quote.schemaVersion===1||quote.schemaVersion===2)&&quote.currency==="CNY";
+    &&(quote.schemaVersion===1||quote.schemaVersion===2||isLegacyListedQuote(quote))&&quote.currency==="CNY";
   const depositsReadable=(quote.tenantDeposit==null||tenantDeposit!==null)&&(quote.publisherBailRequirement==null||publisherBail!==null);
   if(!complete||!resource||!ownerRental||!platformTotal||!depositsReadable)return base("UNKNOWN",version,lines);
   let buyerSum=0n,ownerSum=0n;

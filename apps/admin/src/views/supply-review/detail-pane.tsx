@@ -131,14 +131,14 @@ function AccountProfile({ version, depositCents, payoutText, media, assets, hist
           <div className="flex justify-between gap-4 border-t border-border pt-3"><dt className="text-muted-foreground">租客基础押金</dt><dd className="font-medium tabular-nums">{fees.deposit}</dd></div>
           <div className="flex justify-between gap-4"><dt className="text-muted-foreground">预计租期</dt><dd>{version.quote ? formatTermDays(version.quote.termSeconds) : "未提供"}</dd></div>
           <div className="flex justify-between gap-4"><dt className="text-muted-foreground">全额包赔</dt><dd>{payoutText}</dd></div>
-          {version.quote?.baseRenterHaffRatioWanPerYuan ? <div className="flex justify-between gap-4"><dt className="text-muted-foreground">基础客价比例</dt><dd>{version.quote.baseRenterHaffRatioWanPerYuan} 万/元</dd></div> : null}
+          {version.quote?.baseRenterHaffRatioWanPerYuan ? <div className="flex justify-between gap-4"><dt className="text-muted-foreground">租客基础比例</dt><dd>{version.quote.baseRenterHaffRatioWanPerYuan} 万/元</dd></div> : null}
         </dl>
         <p className="text-xs leading-relaxed text-muted-foreground">基础总价含哈夫币租金、物资预付和基础押金；会员优惠及押金减免以租客本人报价为准。</p>
         {fees.note ? <p className="text-xs text-muted-foreground">{fees.note}</p> : null}
       </aside>
       {mobile ? <div className="min-w-0 space-y-6">{rentalAndDeclarations}</div> : null}
     </div>
-    <Section title="哈夫币租金"><dl className="grid gap-3 text-sm sm:grid-cols-3" data-haff-pricing><div><dt className="text-xs text-muted-foreground">哈夫币数量</dt><dd className="mt-1 font-semibold tabular-nums text-amber-900 dark:text-amber-300">{haff ? quantityText(haff.quantity) : "未提供"}</dd></div><div><dt className="text-xs text-muted-foreground">基础租客兑换比例</dt><dd className="mt-1 font-medium">{haffRateText(version.quote?.baseRenterHaffRatioWanPerYuan)}</dd></div><div><dt className="text-xs text-muted-foreground">租金</dt><dd className="mt-1 font-semibold tabular-nums">{fees.haff}</dd></div></dl></Section>
+    <Section title="哈夫币租金"><dl className="grid gap-3 text-sm sm:grid-cols-3" data-haff-pricing><div><dt className="text-xs text-muted-foreground">哈夫币数量</dt><dd className="mt-1 font-semibold tabular-nums text-amber-900 dark:text-amber-300">{haff ? quantityText(haff.quantity) : "未提供"}</dd></div><div><dt className="text-xs text-muted-foreground">租客基础比例</dt><dd className="mt-1 font-medium">{haffRateText(version.quote?.baseRenterHaffRatioWanPerYuan)}</dd></div><div><dt className="text-xs text-muted-foreground">租金</dt><dd className="mt-1 font-semibold tabular-nums">{fees.haff}</dd></div></dl></Section>
     <ResourceBillingTable version={version}/>
     <Section title="皮肤与权益">{assets}</Section>
     <Section title="账号图片">{media}</Section>

@@ -280,6 +280,17 @@ function personalQuote(lines) {
   return { quote: { lines, unitAmountsInformational: true, resourceTotal: cny("179.08"), tenantDeposit: cny("20.00"), tenantPayableTotal: cny("199.08") }, baseTenantDeposit: cny("20.00"), depositWaived: false, customerTier: "STANDARD" };
 }
 
+test("frozen legacy source ratio remains the base ratio before membership benefits", async () => {
+  await withDom(async (host, render) => {
+    const reference = { ...sourceReference, baseRenterHaffRatioWanPerYuan:"37", baseRatioReferenceOnly:true };
+    await render(React.createElement(RentalPriceSummary,{reference,quote:null}));
+    assert.equal(host.querySelector('.account-haff-ratio-badge')?.textContent,'基础 37万/元');
+    const base=personalQuote([personalHaff,personalAwm]);
+    await render(React.createElement(RentalPriceSummary,{reference,quote:{...base,quote:{...base.quote,schemaVersion:3,baseRenterHaffRatioWanPerYuan:"37"}}}));
+    assert.equal(host.querySelector('.account-haff-ratio-badge')?.textContent,'基础 37万/元');
+  });
+});
+
 test("personal quantity stays personal even when the public quantity label differs", async () => {
   await withDom(async (host, render) => {
     await render(React.createElement(RentalPriceSummary, { reference: sourceReference, quote: personalQuote([personalHaff, personalAwm]) }));

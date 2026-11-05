@@ -129,12 +129,19 @@ if (!credentialFile)
     throw new Error("REGISTERED_MIGRATION_CREDENTIAL_REQUIRED");
 const registryPath = join(dirname(resolve(credentialFile)), "resource.json");
 const registered = JSON.parse(readFileSync(registryPath, "utf8"));
+const round06Reservation = "ROUND06_BOOTSTRAP_RESERVED";
+const initialReservation = registered.protectedDataset;
+const round06 = initialReservation?.status === round06Reservation || initialReservation?.bootstrapReservation === round06Reservation;
 function assertResource(resource, checkpoint) {
     if (resource.database !== binding.database || resource.oid !== expectedOid || resource.nonce !== expectedNonce || resource.pendingReset)
         throw new Error("REGISTERED_MIGRATION_CREDENTIAL_REQUIRED");
     const reservation = resource.protectedDataset;
-    const strictRound = status => status === strictRoundReservation || status === "ROUND05_BOOTSTRAP_RESERVED";
-    if (strictRound(reservation?.bootstrapReservation) && !strictBatch) throw new Error("CHECKPOINT_STRICT_BATCH_CHANGED");
+    const strictRound = status => status === strictRoundReservation || status === "ROUND05_BOOTSTRAP_RESERVED" || status === round06Reservation;
+    if ((strictRound(reservation?.bootstrapReservation) || reservation?.status === round06Reservation) && !strictBatch) throw new Error("CHECKPOINT_STRICT_BATCH_CHANGED");
+    if (round06 && (reservation?.status === round06Reservation
+        ? reservation.bootstrapReservation !== undefined && reservation.bootstrapReservation !== round06Reservation
+        : reservation?.bootstrapReservation !== round06Reservation || [strictRoundReservation, "ROUND05_BOOTSTRAP_RESERVED"].includes(reservation.status)))
+        throw new Error("ROUND06_RESERVATION_CHANGED");
     if (reservation?.report && reservation.report !== statePath && ["BUILDING", "COMMIT_UNKNOWN", "ROLLBACK_UNKNOWN", "RECEIPT_WRITE_FAILED_COMMITTED"].includes(reservation.status))
         throw new Error("ORIGINAL_PENDING_CHECKPOINT_REQUIRED");
     if (strictBatch && (!matchesLoadReservation(reservation, binding) || !(strictRound(reservation.status)
@@ -307,7 +314,7 @@ function protectDataset(resourceState, status) {
         resourceState.protectedDataset.additiveReports ??= {};
         resourceState.protectedDataset.additiveReports[state.binding.datasetSha256 + (numberOnly ? ":public-numbers" : ":contact-append")] = { status, report: statePath, sourceReviewRef: option("--source-review-ref") };
     } else resourceState.protectedDataset={manifestSha256:state.binding.datasetSha256,epoch:{oid:expectedOid,nonce:expectedNonce},reason:"REHEARSAL_REVIEW",status,report:statePath,
-        ...(strictBatch ? { bootstrapReservation: strictRoundReservation } : {})};
+        ...(strictBatch ? { bootstrapReservation: round06 ? round06Reservation : strictRoundReservation } : {})};
     return resourceState;
 }
 resetRunCleanup();

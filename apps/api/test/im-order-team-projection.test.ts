@@ -291,6 +291,12 @@ const TERMS_QUOTE = {
 };
 const TERMS_NAMES = new Map([["item_haff", "哈夫币"], ["item_ammo", "巴雷特子弹"]]);
 const TERMS_ITEM_ROWS = [...TERMS_NAMES].map(([id, name]) => ({ id, name }));
+test("order terms recognize only the specifically marked legacy v3 source", () => {
+  const legacy = { ...TERMS_QUOTE, schemaVersion: 3, quoteSource: "LEGACY_QUOTED", legacyQuote: { schema: "legacy-listed-quote-v1", sourceSystem: "legacy_mysql_restore", sourceEntity: "la_rental_accounts" } };
+  assert.equal(projectOrderTerms(legacy, TERMS_NAMES, "RENTER").basis, "QUOTE");
+  assert.equal(projectOrderTerms({ ...legacy, quoteSource: "OTHER" }, TERMS_NAMES, "RENTER").basis, "UNKNOWN");
+  assert.equal(projectOrderTerms({ ...legacy, legacyQuote: { ...legacy.legacyQuote, sourceSystem: "native" } }, TERMS_NAMES, "RENTER").basis, "UNKNOWN");
+});
 function termsFixture(quoteSnapshot: unknown): Fixture {
   return { orderStatus: "PAID", quoteSnapshot, itemNames: TERMS_ITEM_ROWS };
 }

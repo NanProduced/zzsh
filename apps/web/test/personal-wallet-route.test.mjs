@@ -26,7 +26,34 @@ test('actual wallet BFF carries projection 2 for reserved/pending list and quali
  }finally{globalThis.fetch=previous;}
 });
 test('wallet unknown/duplicate projections and detail query changes reject before upstream',async()=>{
- const previous=globalThis.fetch;let calls=0;globalThis.fetch=async()=>{calls++;throw Error();};try{for(const path of ['/entries?projectionVersion=3','/entries?projectionVersion=2&projectionVersion=2','/entries/ledger%3Ax?projectionVersion=3','/entries/ledger%3Ax?projectionVersion=2&bucket=ALL'])assert.equal((await GET(new Request(root+path),context(path.includes('/entries/')?['entries','ledger:x']:['entries']))).status,400);assert.equal(calls,0);}finally{globalThis.fetch=previous;}
+ const previous=globalThis.fetch;let calls=0;globalThis.fetch=async()=>{calls++;throw Error();};try{for(const path of ['/entries?projectionVersion=4','/entries?projectionVersion=2&projectionVersion=2','/entries/ledger%3Ax?projectionVersion=4','/entries/ledger%3Ax?projectionVersion=2&bucket=ALL'])assert.equal((await GET(new Request(root+path),context(path.includes('/entries/')?['entries','ledger:x']:['entries']))).status,400);assert.equal(calls,0);}finally{globalThis.fetch=previous;}
+});
+
+test('v3 wallet BFF forwards only verified purpose and rejects non-balance or malformed records',async()=>{
+ const previous=globalThis.fetch,at=page.asOf,base={schemaVersion:1,id:'history:one',occurredAt:at,importedAt:at,bucket:'AVAILABLE',deltaCents:'500',kind:'HISTORICAL',includedInOpening:false,sourceKind:'HISTORICAL_EARNINGS_LOG',purpose:'OWNER_RENTAL_INCOME',historicalAmountSemantics:'BALANCE_RECORD',source:{type:'LEGACY_MYSQL',system:'legacy_mysql_restore',entity:'la_log_earnings',id:'11'},businessReference:{type:'UNKNOWN',id:null,number:null},balanceAfterCents:null,rawSource:'PRIVATE'};
+ try{
+  globalThis.fetch=async()=>Response.json({...page,projectionVersion:3,entry:base});
+  const r=await GET(new Request(root+'/entries/history%3Aone?projectionVersion=3'),context(['entries','history:one'])),body=await r.json();
+  assert.equal(r.status,200);assert.equal(body.projectionVersion,3);assert.equal(body.entry.purpose,'OWNER_RENTAL_INCOME');assert(!JSON.stringify(body).includes('PRIVATE'));
+  const totals={...page.totals,count:'1',byBucket:[{bucket:'AVAILABLE',count:'1',postedNetCents:'0',coveredHistoricalNetCents:null,uncoveredHistoricalNetCents:null,coveredCount:'0',uncoveredCount:'1'}]};
+  globalThis.fetch=async()=>Response.json({...page,projectionVersion:3,items:[base],totals,nextCursor:'signed-cursor'});
+  const list=await GET(new Request(root+'/entries?projectionVersion=3'),context(['entries'])),listed=await list.json();
+  assert.equal(list.status,200);assert.equal(listed.items[0].purpose,'OWNER_RENTAL_INCOME');assert.equal(listed.nextCursor,'signed-cursor');assert(!JSON.stringify(listed).includes('PRIVATE'));
+  globalThis.fetch=async()=>Response.json({...page,projectionVersion:3,items:[base],totals:{...totals,byBucket:[{...totals.byBucket[0],bucket:'REFUND_PAYABLE'}]}});
+  assert.equal((await GET(new Request(root+'/entries?projectionVersion=3'),context(['entries']))).status,502);
+  const pending={...base,purpose:'UNKNOWN',historicalAmountSemantics:'UNVERIFIED',deltaCents:null,occurredAt:null,postedAt:null,balanceAfterCents:null,includedInOpening:null};
+  globalThis.fetch=async()=>Response.json({...page,projectionVersion:3,entry:pending});
+  const pendingResponse=await GET(new Request(root+'/entries/history%3Aone?projectionVersion=3'),context(['entries','history:one'])),pendingBody=await pendingResponse.json();
+  assert.equal(pendingResponse.status,200);assert.equal(pendingBody.entry.deltaCents,null);assert.equal(pendingBody.entry.occurredAt,null);assert.equal(pendingBody.entry.historicalAmountSemantics,'UNVERIFIED');
+  for(const unsafe of [{deltaCents:'500'},{occurredAt:at},{includedInOpening:false},{purpose:'OWNER_RENTAL_INCOME'},{businessReference:{type:'LEGACY_ORDER',id:'other',number:'OTHER'}}]){
+   globalThis.fetch=async()=>Response.json({...page,projectionVersion:3,entry:{...pending,...unsafe}});
+   assert.equal((await GET(new Request(root+'/entries/history%3Aone?projectionVersion=3'),context(['entries','history:one']))).status,502);
+  }
+  for(const patch of [{purpose:'NOT_A_PURPOSE'},{purpose:undefined},{bucket:'REFUND_PAYABLE'},{sourceKind:'HISTORICAL_REFUND'}]){
+   globalThis.fetch=async()=>Response.json({...page,projectionVersion:3,entry:{...base,...patch}});
+   assert.equal((await GET(new Request(root+'/entries/history%3Aone?projectionVersion=3'),context(['entries','history:one']))).status,502);
+  }
+ }finally{globalThis.fetch=previous;}
 });
 test('wallet proxy rejects foreign origins, caller identities, duplicate filters and unsupported guarantee actions before upstream',async()=>{
  const original=globalThis.fetch;let calls=0;globalThis.fetch=async()=>{calls++;throw Error();};try{

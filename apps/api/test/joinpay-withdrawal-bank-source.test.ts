@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { withTransaction } from "../src/auth/security-core";
 import { describePayoutProfile, readWithdrawalAdmission } from "../src/finance/joinpay-payout-profile";
-import { saveWithdrawalBankBinding } from "../src/finance/withdrawal-bank-binding";
+import { matchesLegacyBankSource, prepareLegacyBankBinding, saveWithdrawalBankBinding } from "../src/finance/withdrawal-bank-binding";
 import { createBankBoundWithdrawalOptions, JOINPAY_BANK_PASSTHROUGH_IMPLEMENTATION,readUnavailableWithdrawalContext } from "../src/finance/joinpay-withdrawal-bank-source";
 import { actor, input, fixture } from "./fixtures/withdrawal-bank-binding-model";
 
@@ -41,6 +41,51 @@ test("版本化持久绑卡被逐字段装配；bankOwnership历史字段只记�
   assert.equal(a.target.revision, "1"); assert.match(a.target.fingerprint, /^[a-f0-9]{64}$/); assert(a.target.bankOwnershipReference.startsWith("USER_AUTHORIZED_BANK_BINDING:"));
   assert.equal(a.identity.proofReference, "USER_IDENTITY_STATE:" + actor.userId + ":1"); assert.equal(a.identity.validUntil, "2026-10-26T00:00:00.000Z");
   assert.equal(a.policy.quotaStart, "2026-10-24T16:00:00.000Z"); assert.equal(a.policy.quotaEnd, "2026-10-25T16:00:00.000Z");
+});
+test("旧卡保留旧来源：不要求重绑，不伪装新声明，仍受实名、账户与显式渠道配置约束", async () => {
+  const f = fixture(), id = "bank_" + "a".repeat(32);
+  const source = { legacyUserId: "1", userSourceDigest: "1".repeat(64), sourceReceiptSha256: "2".repeat(64), sourceDumpSha256: "3".repeat(64),
+    sourceCutoff: "2026-10-26T00:00:00.000Z", sourceCreateTime: "1760000000", sourceUpdateTime: "1760000001" };
+  const prepared = prepareLegacyBankBinding(input, source, f.options, actor.userId, id);
+  f.data().banks.set(actor.userId, { id, user_id: actor.userId, revision: "1", sealed_details: prepared.sealedDetails,
+    card_mask: prepared.cardMask, holder_mask: prepared.holderMask, updated_at: "2026-10-25T01:00:00.000000Z" });
+  f.data().audits.push(["audit_unit", "admin", "unit_boss", "unit_session", "withdrawal.bank_binding.legacy_imported",
+    "withdrawal_bank_binding", id, "SUCCESS", "unit_import", null, JSON.stringify(prepared.proof)]);
+  assert(!JSON.stringify(prepared.proof).includes(input.name)); assert(!JSON.stringify(prepared.proof).includes(input.cardNo));
+  assert.equal(await withTransaction(f.pool, c => matchesLegacyBankSource(c, actor.userId, source, input, f.options)), true);
+  assert.equal(await withTransaction(f.pool, c => matchesLegacyBankSource(c, actor.userId, source, { ...input, cardNo: "0000000000000023" }, f.options)), false);
+  const defaultMode = createBankBoundWithdrawalOptions(configuration(f)); verified(f);
+  await assert.rejects(withTransaction(f.pool, async c => defaultMode.loadAdmission!(c, actor.userId, { destinationId: id, policyVersion: "unit_policy" })), /LEGACY_BANK_SOURCE_NOT_ADMITTED/);
+  assert((await withTransaction(f.pool, c => defaultMode.readContext!(c, actor)) as any).reasonCodes.includes("LEGACY_BANK_SOURCE_NOT_ADMITTED"));
+  const enabled = createBankBoundWithdrawalOptions({ ...configuration(f), destinationAuthorization: "AUTHENTICATED_USER_OR_LEGACY_BINDING" });
+  const admission = readWithdrawalAdmission(await withTransaction(f.pool, async c => enabled.loadAdmission!(c, actor.userId, { destinationId: id, policyVersion: "unit_policy" })));
+  assert.match(admission.target.bankOwnershipReference, /^LEGACY_PLATFORM_BANK_BINDING:/); assert.match(admission.target.bankOwnershipSha256, /^[a-f0-9]{64}$/);
+  f.state.identityRow.provider = "legacy_mysql_restore";
+  await assert.rejects(withTransaction(f.pool, async c => enabled.loadAdmission!(c, actor.userId, { destinationId: id, policyVersion: "unit_policy" })), /REAL_IDENTITY_SOURCE_REQUIRED/);
+  verified(f); f.state.authenticated = false;
+  await assert.rejects(withTransaction(f.pool, async c => enabled.loadAdmission!(c, actor.userId, { destinationId: id, policyVersion: "unit_policy" })));
+});
+test("旧卡来源证明与密文/版本/身份及版本化密钥共同绑定，来源篡改不得准入", async () => {
+  const f = fixture(), id = "bank_" + "b".repeat(32), source = { legacyUserId: "2", userSourceDigest: "1".repeat(64), sourceReceiptSha256: "2".repeat(64),
+    sourceDumpSha256: "3".repeat(64), sourceCutoff: "2026-10-26T00:00:00.000Z", sourceCreateTime: "1760000000", sourceUpdateTime: "1760000001" };
+  const p = prepareLegacyBankBinding(input, source, f.options, actor.userId, id);
+  f.data().banks.set(actor.userId, { id, user_id: actor.userId, revision: "1", sealed_details: p.sealedDetails, card_mask: p.cardMask,
+    holder_mask: p.holderMask, updated_at: "2026-10-25T01:00:00.000000Z" });
+  const audit: unknown[] = ["audit_unit", "admin", "unit_boss", "unit_session", "withdrawal.bank_binding.legacy_imported", "withdrawal_bank_binding", id, "SUCCESS", "unit_import", null, JSON.stringify(p.proof)];
+  f.data().audits.push(audit); verified(f);
+  const enabled = createBankBoundWithdrawalOptions({ ...configuration(f), destinationAuthorization: "AUTHENTICATED_USER_OR_LEGACY_BINDING" });
+  audit[10] = JSON.stringify({ ...p.proof, sourceDumpSha256: "4".repeat(64) });
+  await assert.rejects(withTransaction(f.pool, async c => enabled.loadAdmission!(c, actor.userId, { destinationId: id, policyVersion: "unit_policy" })), /LEGACY_BANK_SOURCE_PROOF_MISMATCH/);
+  audit[10] = JSON.stringify(p.proof);
+  audit[1] = "user";
+  await assert.rejects(withTransaction(f.pool, async c => enabled.loadAdmission!(c, actor.userId, { destinationId: id, policyVersion: "unit_policy" })), /BANK_BINDING_SOURCE_UNAVAILABLE/);
+  audit[1] = "admin"; f.data().audits.push([...audit]);
+  await assert.rejects(withTransaction(f.pool, async c => enabled.loadAdmission!(c, actor.userId, { destinationId: id, policyVersion: "unit_policy" })), /BANK_BINDING_SOURCE_UNAVAILABLE/);
+  f.data().audits.pop(); f.data().audits.pop();
+  await assert.rejects(withTransaction(f.pool, async c => enabled.loadAdmission!(c, actor.userId, { destinationId: id, policyVersion: "unit_policy" })), /BANK_BINDING_SOURCE_UNAVAILABLE/);
+  f.data().audits.push(audit);
+  const wrong = { ...f.options, protection: { currentKeyVersion: "unit_storage_key", keyFor: () => Buffer.alloc(32, 18) } };
+  await assert.rejects(withTransaction(f.pool, c => matchesLegacyBankSource(c, actor.userId, source, input, wrong)));
 });
 test("改卡只产生新目标版本；原准入快照及原卡不被回写", async () => {
   const { f, id } = await bound(); verified(f); const o = createBankBoundWithdrawalOptions(configuration(f));
