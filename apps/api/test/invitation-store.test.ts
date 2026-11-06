@@ -101,6 +101,7 @@ test("GAP-014 self terms: only own level/version, unknown stays unknown, no full
   const gone = projectMyDistributionTerms("u1", policy, { eligibility: "ELIGIBLE", level_code: "L9" });
   assert.deepEqual([gone.knowledge, gone.reason, gone.level], ["UNKNOWN", "LEVEL_NOT_IN_CURRENT_POLICY", null], "never falls back to the default level");
   assert.deepEqual(["INELIGIBLE", "COMMISSION_FROZEN"].map((r) => projectMyDistributionTerms("u1", policy, r === "INELIGIBLE" ? { eligibility: "INELIGIBLE", level_code: "L2" } : { eligibility: "ELIGIBLE", level_code: "L2", commission_frozen: true }).reason), ["INELIGIBLE", "COMMISSION_FROZEN"]);
+  const unknownFreeze=projectMyDistributionTerms("u1",policy,{eligibility:"ELIGIBLE",level_code:"L2",commission_frozen:null});assert.equal(unknownFreeze.knowledge,"UNKNOWN");assert.equal(unknownFreeze.reason,"COMMISSION_FREEZE_STATE_UNKNOWN");
   const disabled = projectMyDistributionTerms("u1", { knowledge: "KNOWN", policy: { versionId: "pv-2", config: { ...config, enabled: false } } }, { eligibility: "ELIGIBLE", level_code: "L1" });
   assert.deepEqual([disabled.applicable, disabled.reason], [false, "POLICY_DISABLED"]);
 });

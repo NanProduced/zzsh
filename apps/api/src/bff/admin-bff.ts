@@ -478,8 +478,8 @@ export async function handleAdminBff(request: NodeRequest, response: NodeRespons
     }
     return;
   }
-  if (/^\/distribution\/manage\/(levels|participants(?:\/[A-Za-z0-9._:-]+\/(?:level|code))?)$/.test(path)) {
-    const allowed = method === "GET" && (path === "/distribution/manage/levels" || path === "/distribution/manage/participants") || method === "POST" && (path === "/distribution/manage/levels" || /^\/distribution\/manage\/participants\/[A-Za-z0-9._:-]+\/(level|code)$/.test(path));
+  if (/^\/distribution\/manage\/(levels|participants(?:\/[A-Za-z0-9._:-]+\/(?:level|code|freeze))?)$/.test(path)) {
+    const allowed = method === "GET" && (path === "/distribution/manage/levels" || path === "/distribution/manage/participants") || method === "POST" && (path === "/distribution/manage/levels" || /^\/distribution\/manage\/participants\/[A-Za-z0-9._:-]+\/(level|code|freeze)$/.test(path));
     if (!allowed) { sendError(response, 404, API_V1_ERROR_CODES.NOT_FOUND, "Resource not found", requestId); return; }
     const targetPath = "/api/v1/admin" + path + requestQuery(request);
     request.url = targetPath; request.originalUrl = targetPath;

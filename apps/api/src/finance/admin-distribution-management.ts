@@ -73,7 +73,8 @@ export async function readManagementParticipants(pool:Pool,actor:Actor,query:{q:
  if(!access)throw new SecurityApiError(403,'FORBIDDEN','Active administrator required');
  const hasName=hasPermission(access,ADMIN_PERMISSION.userDirectoryRead),q=query.q.trim();
  if(q.length>100||!Number.isInteger(query.page)||query.page<1||query.page>10000)throw invalid('Invalid participant search');
- const marker=(await c.query("SELECT to_regprocedure('zzsh_order.distribution_management_contract_version()') IS NOT NULL AS ready")).rows[0]?.ready===true;
+ const readiness=(await c.query("SELECT to_regprocedure('zzsh_order.distribution_management_contract_version()') IS NOT NULL AS ready,has_column_privilege(current_user,'zzsh_order.distribution_participant','commission_frozen','UPDATE') AS freeze_ready")).rows[0];
+ const marker=readiness?.ready===true;
  const filter=q.replace(/[\\%_]/g,'\\$&');
  const rows=(await c.query(`SELECT p.user_id,p.eligibility,p.commission_frozen,p.level_code,p.revision::text,
    ${hasName?'u.name':'NULL::text AS name'},codes.display_code,codes.id AS code_id,count(*) OVER()::int AS total
@@ -87,6 +88,7 @@ export async function readManagementParticipants(pool:Pool,actor:Actor,query:{q:
  const body={items:rows.map(r=>({userId:r.user_id,name:r.name??null,eligibility:r.eligibility,frozen:r.commission_frozen,revision:r.revision,
   levelCode:r.level_code,levelName:r.level_code?managed?.levelNames[r.level_code]??null:null,inviteCode:r.display_code??null,inviteCodeId:r.code_id??null})),
   total:rows.length?String(rows[0].total):null,page:query.page,hasMore:rows.length===20,writeAssemblyReady:!!resource,
+  freezeWriteReady:!!resource&&marker&&readiness?.freeze_ready===true&&hasPermission(access,ADMIN_PERMISSION.distributionParticipantManage),
   policy:policy.knowledge==='KNOWN'?{versionId:policy.policy.versionId,revision:policy.policy.revision,schema:policy.policy.config.schema,levels:managed!.levels.map(l=>({code:l.code,name:managed!.levelNames[l.code]}))}:null};
  return{body,key:accessKey(access,actor)};
  });await recheckRead(pool,actor,result.key,'participants');return result.body;
@@ -135,6 +137,33 @@ export async function changeParticipantLevel(pool:Pool,actor:Actor,userId:string
     await recordAudit(c,{actorType:'admin',actorId:actor.userId,sessionId:actor.sessionId,requestId:actor.requestId,action:'distribution.participant.level_changed',objectType:'distribution_participant',objectId:userId,outcome:'SUCCESS',reason:why,
      details:{beforeLevel:p.level_code,levelCode,previousPolicyId:p.policy_version_id,policyId,previousRevision:participantRevision}});
     await c.query('SET CONSTRAINTS ALL IMMEDIATE');return{status:200,body:{userId,levelCode,revision:(BigInt(participantRevision)+1n).toString()}};
+   });
+ });
+}
+
+/** The flag changes future payment eligibility only; frozen order bases and existing earnings are untouched. */
+export async function setParticipantCommissionFrozen(pool:Pool,actor:Actor,userId:string,body:Record<string,unknown>,key:string,resource?:DistributionManagementResource){
+ subject(userId);ensureOnlyFields(body,['expectedParticipantRevision','frozen','reason']);
+ const expectedRevision=revision(body.expectedParticipantRevision),why=reason(body.reason);
+ if(typeof body.frozen!=='boolean')throw invalid('Explicit frozen state required');const frozen=body.frozen;
+ return withTransaction(pool,async c=>{
+  await authorize(c,actor,ADMIN_PERMISSION.distributionParticipantManage,true);await assertDistributionManagementResource(c,resource);
+  return withIdempotency(c,{realm:'admin',principalId:actor.userId,operation:'distribution.participant.freeze',resourceId:userId},key,fingerprintRequest('distribution.participant.freeze',userId,body),
+   ()=>authorize(c,actor,ADMIN_PERMISSION.distributionParticipantManage,true).then(()=>{}),async()=>{
+    const available=(await c.query("SELECT has_column_privilege(current_user,'zzsh_order.distribution_participant','commission_frozen','UPDATE') AS allowed")).rows[0]?.allowed;
+    if(available!==true)throw new SecurityApiError(503,'EVIDENCE_UNAVAILABLE','Distribution freeze runtime grant unavailable');
+    // Payment freezes beneficiary facts under this same graph lock before taking participant locks.
+    await c.query("SELECT pg_advisory_xact_lock(hashtextextended('zzsh:invitation-graph:v1',0))");
+    const participant=(await c.query('SELECT commission_frozen,revision::text FROM zzsh_order.distribution_participant WHERE user_id=$1 FOR UPDATE',[userId])).rows[0];
+    if(!participant)throw notFound();if(participant.revision!==expectedRevision)throw conflict('Participant changed; reload');
+    if(typeof participant.commission_frozen!=='boolean')throw conflict('Original freeze state is unknown; verify before changing');
+    const changed=participant.commission_frozen!==frozen;
+    if(changed){const result=await c.query('UPDATE zzsh_order.distribution_participant SET commission_frozen=$2,revision=revision+1 WHERE user_id=$1 AND revision=$3',[userId,frozen,expectedRevision]);
+     if(result.rowCount!==1)throw conflict('Participant changed; reload');}
+    const next=changed?(BigInt(expectedRevision)+1n).toString():expectedRevision;
+    await recordAudit(c,{actorType:'admin',actorId:actor.userId,sessionId:actor.sessionId,requestId:actor.requestId,action:'distribution.participant.freeze_changed',objectType:'distribution_participant',objectId:userId,outcome:'SUCCESS',reason:why,
+     details:{beforeFrozen:participant.commission_frozen,frozen,changed,beforeRevision:expectedRevision,revision:next}});
+    await c.query('SET CONSTRAINTS ALL IMMEDIATE');return{status:200,body:{userId,frozen,revision:next,changed}};
    });
  });
 }

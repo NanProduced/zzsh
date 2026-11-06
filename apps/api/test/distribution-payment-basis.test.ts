@@ -11,6 +11,15 @@ test('qualification, level, missing estimate and source minimum do not collapse 
 test('rounded pair that exceeds source becomes recorded uncertainty and does not reject the original payment',()=>{const basis=freezePaymentDistributionBasis({...input(),policy:policy('50'),estimate:{baseCents:'1',sourceDigest:h}});assert(basis.roles.every(r=>r.status==='UNKNOWN_ESTIMATE_CONSERVATION'&&r.percent==='50'&&r.estimatedCents===null));});
 test('distributor status and commission freeze are separate source facts; missing mode or freeze is UNKNOWN',()=>{const frozen=structuredClone(facts);frozen[0]!.beneficiary!.commissionFrozen=true;assert.equal(freezePaymentDistributionBasis({...input(),facts:frozen}).roles.find(r=>r.role==='RENTER_REFERRAL')?.status,'SKIPPED_INELIGIBLE');frozen[0]!.beneficiary!.commissionFrozen=null;assert.equal(freezePaymentDistributionBasis({...input(),facts:frozen}).roles.find(r=>r.role==='RENTER_REFERRAL')?.status,'UNKNOWN_PARTICIPANT');assert(freezePaymentDistributionBasis({...input(),accountMode:null}).roles.every(r=>r.status==='UNKNOWN_MODE'));});
 
+test('freezing affects later payments only and unfreezing never rewrites the original payment basis',()=>{
+ const before=freezePaymentDistributionBasis(input()),later=input();later.facts[0]!.beneficiary!.commissionFrozen=true;
+ const during=freezePaymentDistributionBasis(later);assert.equal(during.roles.find(r=>r.role==='RENTER_REFERRAL')?.status,'SKIPPED_INELIGIBLE');
+ assert.equal(readOriginalPaymentDistributionBasis(before,{orderId:'order',confirmationId:'confirmation',paymentDigest:h}).basis?.roles.find(r=>r.role==='RENTER_REFERRAL')?.status,'ELIGIBLE');
+ later.facts[0]!.beneficiary!.commissionFrozen=false;const after=freezePaymentDistributionBasis(later);
+ assert.equal(after.roles.find(r=>r.role==='RENTER_REFERRAL')?.status,'ELIGIBLE');
+ assert.equal(readOriginalPaymentDistributionBasis(during,{orderId:'order',confirmationId:'confirmation',paymentDigest:h}).basis?.roles.find(r=>r.role==='RENTER_REFERRAL')?.status,'SKIPPED_INELIGIBLE');
+});
+
 test('wrong relation child or beneficiary cannot acquire eligibility under the original role',()=>{
  for(const mismatch of ['child','beneficiary'] as const){const i=input();if(mismatch==='child')i.facts[0]!.relation.childUserId='foreign';else i.facts[0]!.beneficiary!.userId='foreign';const frozen=freezePaymentDistributionBasis(i);assert.equal(frozen.roles.find(r=>r.role==='RENTER_REFERRAL')!.status,mismatch==='child'?'UNKNOWN_RELATION':'UNKNOWN_PARTICIPANT');assert(frozen.roles.every(r=>r.estimatedCents===null));}
  const frozen=freezePaymentDistributionBasis(input());for(const patch of [{confirmationId:'foreign'},{paymentDigest:'b'.repeat(64)}])assert.throws(()=>readOriginalPaymentDistributionBasis(frozen,{orderId:'order',confirmationId:'confirmation',paymentDigest:h,...patch}));

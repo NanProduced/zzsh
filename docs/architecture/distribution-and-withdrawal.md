@@ -42,6 +42,8 @@
 
 等级配置、参与人等级与邀请码由受权运营直接维护，不创建审批申请。`distribution.level.manage` 控制等级配置，`distribution.participant.read` 只读必要参与人字段，`distribution.participant.manage` 控制等级和邀请码更改；不因此授予分销看板全局关系、财务维护或佣金冲回权限。写入在同一事务内重核管理员会话与权限、资源和版本，保留原幂等键、变更原因及审计。邀请码新旧码大小写不敏感，旧码停用后永久占用，不重分配；既有邀请关系和历史佣金不改写。
 
+受权运营可通过 `POST /api/v1/admin/distribution/manage/participants/:id/freeze` 显式设置 `frozen`，请求携带原参与人修订、原因和幂等键；Admin BFF 转发同一合同。它只改变参与人的 `commission_frozen`，与付款共用关系锁决定先后，影响变更后的新付款能否产生佣金，不改动已付款冻结依据、已生成佣金、钱包、邀请码及关系。原冻结状态未知时拒绝操作；同状态返回 `changed=false` 且版本不变。`freezeWriteReady` 为真仅表示当前操作权限、管理结构与该列 runtime 写权限已具备，不代表写入已执行；ACL 未安装时拒绝新写，原幂等回执仍按权限可重放。
+
 其他全局政策的 `distribution.policy.publish` 仍冻结原政策ID、revision、digest、明确改动和理由，经既有审批执行；这与直接维护等级是独立合同。管理写资源按经验证的非测试应用数据库/runtime身份独立装配，检查 `distribution_management_contract_version()=1`，不依赖汇聚商户准入，也不调用渠道。前向结构和runtime ACL未就绪时保持不可写；源码存在不表示实际库已安装或写入已验收。
 
 本地启用须先确认目标是独立、已登记的非测试应用库，先停该库对应旧版 API 写入，再安装对应前向结构、刷新 runtime ACL、启动同版 API 并按最小权限验收；迁移序号以目标当前 journal 为准。旧 API 不认识邀请码停用状态，不能与新结构混跑。暂停维护可通过既有角色权限撤销新管理权限，保留数据及新 API 的旧码校验；一旦发生过换码，不得直接回退到不认识停用状态的旧 API。恢复或回滚前须审查同版本备份、原码状态及已建立关系。

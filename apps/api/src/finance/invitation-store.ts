@@ -101,6 +101,7 @@ export function projectMyDistributionTerms(subjectId:string,policy:PolicyReadLik
  if(p.eligibility==='INELIGIBLE')return known(false,'INELIGIBLE',level);
  if(p.commission_frozen===true)return known(false,'COMMISSION_FROZEN',level);
  if(!config.enabled)return known(false,'POLICY_DISABLED',level);
+ if(typeof p.commission_frozen!=='boolean')return unknown('COMMISSION_FREEZE_STATE_UNKNOWN',v);
  return known(true,null,level);
 }
 /** Self read of applicable terms. Same user authorization and read gate as readMyInvitations; no write admission required. */
