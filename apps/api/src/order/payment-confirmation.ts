@@ -46,7 +46,7 @@ export function createControlledPaymentSource(options: {
       && Number.isSafeInteger(options.resourceOid) && options.resourceOid! > 0 && options.allowedOrderIds.length <= 100 && process.env.NODE_ENV !== "production"
     : config.database.name === `zzsh_test_order_${resourceSet}` && config.database.user === `zzsh_order_${resourceSet}_r`;
   if (config.profile !== "test" || config.provider !== "fake" || !config.testOperationsEnabled
-    || config.database.target !== "local-compose" || config.database.host !== "127.0.0.1" || config.database.port !== 55432
+    || config.database.target !== "local-compose" || config.database.host !== "127.0.0.1" || ![55432,55433].includes(config.database.port)
     || !/^[a-z][a-z0-9_]{0,20}$/.test(resourceSet)
     || !resourceMatches
     || !ID.test(appId) || !ID.test(merchantScopeId) || !options.allowedOrderIds.length

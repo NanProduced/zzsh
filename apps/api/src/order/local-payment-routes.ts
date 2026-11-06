@@ -28,7 +28,7 @@ const PATHS = ["/api/v1/orders", "/api/bff/user/orders"] as const;
 export function assertLocalControlledPaymentAssembly(options: LocalControlledPaymentOptions): void {
   const { config, resourceSet } = options;
   if (config.profile !== "test" || config.provider !== "fake" || !config.testOperationsEnabled
-    || config.database.target !== "local-compose" || config.database.host !== "127.0.0.1" || config.database.port !== 55432
+    || config.database.target !== "local-compose" || config.database.host !== "127.0.0.1" || ![55432,55433].includes(config.database.port)
     || !/^[a-z][a-z0-9_]{0,20}$/.test(resourceSet)
     || config.database.name !== `zzsh_test_order_${resourceSet}` || config.database.user !== `zzsh_order_${resourceSet}_r`
     || !ID.test(options.appId) || !ID.test(options.merchantScopeId)) {

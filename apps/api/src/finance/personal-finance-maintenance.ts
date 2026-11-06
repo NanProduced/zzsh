@@ -15,7 +15,7 @@ export type OpeningMaintenanceInput={inputSha256:string;cutoff:string;proof:{use
 const sha=(s:string)=>createHash('sha256').update(s).digest('hex');
 export type FinanceOpeningReview={
  ref:string;attempt:string;actor:{userId:string;sessionId:string};
- resource:{host:'127.0.0.1';port:55432;database:string;oid:number;owner:string;marker:string;role:string;roleOid:number};
+ resource:{host:'127.0.0.1';port:number;database:string;oid:number;owner:string;marker:string;role:string;roleOid:number};
  notBefore:string;expiresAt:string;inputSha256:string;cutoff:string;bodyDigest:string;
  subject:{userId:string;sourceId:string;identityDigest:string;sourceDigest:string;availableCents:string;coveredDigest:string};
 };
@@ -56,7 +56,7 @@ export async function bindReviewedFinanceOpeningAdmission(client:PoolClient,acto
  ensureOnlyFields(review.actor,['userId','sessionId']);ensureOnlyFields(review.resource,['host','port','database','oid','owner','marker','role','roleOid']);
  ensureOnlyFields(review.subject,['userId','sourceId','identityDigest','sourceDigest','availableCents','coveredDigest']);
  if(![review.ref,review.attempt,review.actor.userId,review.actor.sessionId,review.subject.userId].every(x=>typeof x==='string'&&identifier.test(x))
- ||review.resource.host!=='127.0.0.1'||review.resource.port!==55432||!isReviewedFinanceMaintenanceResource(review.resource)
+ ||review.resource.host!=='127.0.0.1'||![55432,55433].includes(review.resource.port)||!isReviewedFinanceMaintenanceResource(review.resource)
  ||![review.resource.owner,review.resource.role].every(x=>typeof x==='string'&&/^[a-zA-Z_][a-zA-Z0-9_]{0,62}$/.test(x))
  ||![review.resource.oid,review.resource.roleOid].every(x=>Number.isSafeInteger(x)&&x>0)||typeof review.subject.sourceId!=='string'||!/^[1-9]\d{0,23}$/.test(review.subject.sourceId)
  ||typeof review.subject.availableCents!=='string'||!/^(0|[1-9]\d{0,23})$/.test(review.subject.availableCents)||!['execute','recover'].includes(mode)
@@ -74,7 +74,7 @@ function assertReviewedOpeningShape(review:FinanceOpeningReview,mode:'execute'|'
  ensureOnlyFields(review.actor,['userId','sessionId']);ensureOnlyFields(review.resource,['host','port','database','oid','owner','marker','role','roleOid']);
  ensureOnlyFields(review.subject,['userId','sourceId','identityDigest','sourceDigest','availableCents','coveredDigest']);
  if(![review.ref,review.attempt,review.actor.userId,review.actor.sessionId,review.subject.userId].every(x=>typeof x==='string'&&identifier.test(x))
- ||review.resource.host!=='127.0.0.1'||review.resource.port!==55432||!isReviewedFinanceMaintenanceResource(review.resource)
+ ||review.resource.host!=='127.0.0.1'||![55432,55433].includes(review.resource.port)||!isReviewedFinanceMaintenanceResource(review.resource)
  ||![review.resource.owner,review.resource.role].every(x=>typeof x==='string'&&/^[a-zA-Z_][a-zA-Z0-9_]{0,62}$/.test(x))
  ||![review.resource.oid,review.resource.roleOid].every(x=>Number.isSafeInteger(x)&&x>0)||typeof review.subject.sourceId!=='string'||!/^[1-9]\d{0,23}$/.test(review.subject.sourceId)
  ||typeof review.subject.availableCents!=='string'||!/^(0|[1-9]\d{0,23})$/.test(review.subject.availableCents)||!['execute','recover'].includes(mode)

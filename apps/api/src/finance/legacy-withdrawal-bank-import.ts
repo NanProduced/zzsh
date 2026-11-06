@@ -28,7 +28,7 @@ export function prepareLegacyBankImport(rows: readonly BankRow[], userSourceDige
   target: LocalBankTarget, operator: LocalBankOperator): LegacyBankImportPlan {
   if (!Array.isArray(rows) || !(userSourceDigests instanceof Map) || !source || !hash(source.sourceReceiptSha256) || !hash(source.sourceDumpSha256)
     || typeof source.sourceCutoff !== "string" || !Number.isFinite(Date.parse(source.sourceCutoff))
-    || !target || target.round !== 6 || target.host !== "127.0.0.1" || target.port !== 55432 || process.env.NODE_ENV === "production"
+    || !target || target.round !== 6 || target.host !== "127.0.0.1" || ![55432,55433].includes(target.port) || process.env.NODE_ENV === "production"
     || !/^zzsh_test_[a-z0-9_]{1,48}$/.test(target.database) || !/^zzsh_[a-z0-9_]{1,55}$/.test(target.runtimeUser)
     || !/^zzsh:[a-z0-9-]+:v1$/.test(target.marker) || !/^[a-f0-9]{24}$/.test(target.nonce)
     || !/^zzsh(?:_[a-z0-9_]+)?$/.test(target.owner) || target.owner === target.runtimeUser

@@ -42,7 +42,7 @@ export function createNativeWithdrawalScope(options: {
   const regression = resourceSet === 'regression' && options.regression ? createControlledRegressionResource(config, options.regression, 'WITHDRAWAL') : undefined;
   if (config.profile !== 'test' || config.provider !== 'fake' || !config.testOperationsEnabled
     || config.database.target !== 'local-compose' || config.database.host !== '127.0.0.1'
-    || config.database.port !== 55432 || !/^[a-z][a-z0-9_]{0,20}$/.test(resourceSet)
+    || ![55432,55433].includes(config.database.port) || !/^[a-z][a-z0-9_]{0,20}$/.test(resourceSet)
     || (resourceSet === 'regression' ? !regression || options.regression!.resourceOid !== resourceOid
       : name !== `zzsh_test_order_${resourceSet}` || role !== `zzsh_order_${resourceSet}_r`)
     || !Number.isSafeInteger(resourceOid) || resourceOid <= 0) {

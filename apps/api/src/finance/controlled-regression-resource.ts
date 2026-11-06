@@ -12,7 +12,7 @@ const proofs = new WeakMap<object, ControlledRegressionBinding & { purpose: Purp
 /** Shared by the three explicit local money-test factories; this is not a production admission. */
 export function createControlledRegressionResource(config: AppConfig, binding: ControlledRegressionBinding, purpose: Purpose): ControlledRegressionResource {
   if (config.profile !== "test" || config.provider !== "fake" || !config.testOperationsEnabled || process.env.NODE_ENV === "production"
-    || config.database.target !== "local-compose" || config.database.targetProfile !== "test" || config.database.host !== "127.0.0.1" || config.database.port !== 55432
+    || config.database.target !== "local-compose" || config.database.targetProfile !== "test" || config.database.host !== "127.0.0.1" || ![55432,55433].includes(config.database.port)
     || config.database.name !== REGRESSION_DATABASE || config.database.user !== REGRESSION_RUNTIME_USER || config.database.runtimeUser !== REGRESSION_RUNTIME_USER
     || !Number.isSafeInteger(binding.resourceOid) || binding.resourceOid <= 0 || !Number.isSafeInteger(binding.runtimeRoleOid) || binding.runtimeRoleOid <= 0
     || !/^[a-f0-9]{24}$/.test(binding.nonce)) throw new ConfigurationError("Exact controlled regression test/fake runtime required");

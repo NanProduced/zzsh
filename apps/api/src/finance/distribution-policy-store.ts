@@ -48,7 +48,7 @@ export function createRegisteredLocalDistributionReadScope(config:AppConfig,rece
  const oid=(value:number)=>Number.isSafeInteger(value)&&value>0&&value<=4294967295;
  const localOrigin=(value:string)=>{try{const url=new URL(value);return url.protocol==='http:'&&url.hostname==='127.0.0.1'&&Boolean(url.port)&&url.origin===value;}catch{return false;}};
  if(!['test','dev'].includes(config.profile)||config.provider!=='fake'||config.host!=='127.0.0.1'
-  ||config.database.target!=='local-compose'||config.database.host!=='127.0.0.1'||config.database.port!==55432
+  ||config.database.target!=='local-compose'||config.database.host!=='127.0.0.1'||![55432,55433].includes(config.database.port)
   ||config.database.name!==receipt.database||config.database.user!==receipt.runtimeRole||config.database.runtimeUser!==receipt.runtimeRole
   ||!['database','owner','runtimeRole','migrationRole'].every(key=>{const value=receipt[key as keyof CreationReceipt];return typeof value==='string'&&value.length>0&&value.length<=63&&value===value.trim()&&!/[\x00-\x1f\x7f]/.test(value);})
   ||typeof receipt.marker!=='string'||!receipt.marker.length||receipt.marker.length>1024||/[\x00-\x1f\x7f]/.test(receipt.marker)
@@ -86,7 +86,7 @@ export function assertLocalNativeDistributionWriteUnavailable(binding:LocalDistr
 function createScope(config:AppConfig,receipt:CreationReceipt,readOnly:boolean):LocalDistributionScope{
  const milestone=receipt.database===milestoneName,name=milestone?milestoneName:localName,runtime=milestone?milestoneRuntime:localRuntime,migration=milestone?milestoneMigration:localMigration;
  if(config.profile!=='test'||config.provider!=='fake'||!readOnly&&!config.testOperationsEnabled||readOnly&&!milestone
-  ||config.database.target!=='local-compose'||config.database.host!=='127.0.0.1'||config.database.port!==55432
+  ||config.database.target!=='local-compose'||config.database.host!=='127.0.0.1'||![55432,55433].includes(config.database.port)
   ||config.database.name!==name||config.database.user!==runtime
   ||receipt.database!==name||receipt.runtimeRole!==runtime||receipt.migrationRole!==migration
   ||receipt.owner!=='zzsh'||receipt.marker!==localMarker||!Number.isSafeInteger(receipt.resourceOid)||receipt.resourceOid<=0||receipt.resourceOid>4294967295

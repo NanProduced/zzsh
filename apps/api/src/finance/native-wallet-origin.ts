@@ -19,7 +19,7 @@ export function createProvisionedNativeWalletOriginResource(config:AppConfig):Na
 function createLocalNativeWalletOriginResource(input:{config:AppConfig;resourceOid:number;nonce:string;runtimeRoleOid:number},testOperationsEnabled:boolean):NativeOriginResource{
  const c=input.config;
  if(c.profile!=='test'||c.provider!=='fake'||c.testOperationsEnabled!==testOperationsEnabled||process.env.NODE_ENV==='production'
-  ||c.database.target!=='local-compose'||c.database.targetProfile!=='test'||c.database.host!=='127.0.0.1'||c.database.port!==55432
+  ||c.database.target!=='local-compose'||c.database.targetProfile!=='test'||c.database.host!=='127.0.0.1'||![55432,55433].includes(c.database.port)
   ||c.database.name!==REGRESSION_DATABASE||c.database.user!==REGRESSION_RUNTIME_USER||c.database.runtimeUser!==REGRESSION_RUNTIME_USER
   ||!Number.isSafeInteger(input.resourceOid)||input.resourceOid<=0||!Number.isSafeInteger(input.runtimeRoleOid)||input.runtimeRoleOid<=0||!/^[a-f0-9]{24}$/.test(input.nonce))
   throw new ConfigurationError('Controlled native origin requires the exact test/fake regression resource');

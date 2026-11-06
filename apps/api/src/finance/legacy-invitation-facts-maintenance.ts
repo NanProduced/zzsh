@@ -9,7 +9,7 @@ import {readLegacyDistributionQualifications} from './admin-distribution-read';
 import {readDistributionPolicyRowInTransaction} from './distribution-policy-store';
 
 type Actor={userId:string;sessionId:string;requestId:string};
-export type LegacyInvitationFactsReview={ref:string;attempt:string;actor:{userId:string;sessionId:string};resource:{host:'127.0.0.1';port:55432;database:string;oid:number;owner:string;ownerOid:number;marker:string;role:string;roleOid:number};notBefore:string;expiresAt:string;sourceDigest:string;bodyDigest:string;phase:'IMPORT'|'COUNTS'|'QUALIFY';nonce?:string};
+export type LegacyInvitationFactsReview={ref:string;attempt:string;actor:{userId:string;sessionId:string};resource:{host:'127.0.0.1';port:number;database:string;oid:number;owner:string;ownerOid:number;marker:string;role:string;roleOid:number};notBefore:string;expiresAt:string;sourceDigest:string;bodyDigest:string;phase:'IMPORT'|'COUNTS'|'QUALIFY';nonce?:string};
 export type LegacyInvitationFactsAdmission=Readonly<{kind:'REVIEWED_LEGACY_INVITATION_FACTS'}>;
 const admissions=new WeakMap<object,{review:LegacyInvitationFactsReview;recoverOnly:boolean}>(),hex=/^[a-f0-9]{64}$/;
 const factAction='distribution.legacy_facts.imported',countAction='distribution.legacy_facts.counts_closed';
@@ -18,7 +18,7 @@ function reviewShape(r:LegacyInvitationFactsReview){
  ensureOnlyFields(r,['ref','attempt','actor','resource','notBefore','expiresAt','sourceDigest','bodyDigest','phase','nonce']);ensureOnlyFields(r.actor,['userId','sessionId']);ensureOnlyFields(r.resource,['host','port','database','oid','owner','ownerOid','marker','role','roleOid']);
  if(r.phase==='QUALIFY'&&r.resource.database==='zzsh_test_regression'&&(typeof r.nonce!=='string'||!/^[a-z0-9_]{12,40}$/.test(r.nonce)))throw invalid('Exact qualification regression epoch required');
  if(![r.ref,r.attempt,r.actor.userId,r.actor.sessionId].every(x=>typeof x==='string'&&/^[A-Za-z0-9][A-Za-z0-9._:-]{0,179}$/.test(x))||!hex.test(r.sourceDigest)||!hex.test(r.bodyDigest)||!['IMPORT','COUNTS','QUALIFY'].includes(r.phase)
-  ||r.resource.host!=='127.0.0.1'||r.resource.port!==55432||r.resource.database==='zzsh_test_regression'&&!isReviewedFinanceMaintenanceResource(r.resource)||r.resource.oid===2220718||!/^(zzsh_dev_daily|zzsh_test_[a-z0-9_]+)$/.test(r.resource.database)
+  ||r.resource.host!=='127.0.0.1'||![55432,55433].includes(r.resource.port)||r.resource.database==='zzsh_test_regression'&&!isReviewedFinanceMaintenanceResource(r.resource)||r.resource.oid===2220718||!/^(zzsh_dev_daily|zzsh_test_[a-z0-9_]+)$/.test(r.resource.database)
   ||![r.resource.oid,r.resource.ownerOid,r.resource.roleOid].every(x=>Number.isSafeInteger(x)&&x>0&&x<=4294967295)||![r.resource.owner,r.resource.role].every(x=>/^[A-Za-z_][A-Za-z0-9_]{0,62}$/.test(x))
   ||typeof r.resource.marker!=='string'||!r.resource.marker||r.resource.marker.length>1024||/[\x00-\x1f\x7f]/.test(r.resource.marker)
   ||![r.notBefore,r.expiresAt].every(x=>typeof x==='string'&&/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/.test(x)&&Number.isFinite(Date.parse(x)))||Date.parse(r.expiresAt)<=Date.parse(r.notBefore))throw invalid('Exact internal invitation fact review required');
