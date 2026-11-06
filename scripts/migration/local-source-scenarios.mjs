@@ -1,5 +1,43 @@
+import { createHash } from 'node:crypto';
+
 const key = value => typeof value === "string" && /^[1-9]\d*$/.test(value);
 const nonzero = value => typeof value === "string" && /^-?\d+(?:\.\d+)?$/.test(value) && /[1-9]/.test(value);
+
+/** Selection is explicit: "full" means every row of the bound capture, not every legacy table. */
+export function resolvePopulationMode(args) {
+  const count = flag => args.filter(value => value === flag).length;
+  const scenario = count('--scenario-selection'), full = count('--full-source'), selected = count('--business-selection');
+  // The seventh round keeps a business-selected subset: a distinct mode, not a variant of the full
+  // capture and not the retired scenario sample.
+  if (scenario + full + selected !== 1) throw new Error('EXACTLY_ONE_POPULATION_MODE_REQUIRED');
+  return selected ? 'SELECTED_BUSINESS_SCOPE' : full ? 'FULL_CAPTURED_SOURCE' : 'SCENARIO_SELECTION';
+}
+
+/** Digests cover original source IDs in capture order; selected means considered, not imported or enabled. */
+export function summarizePopulationScope(data,mode,selection,sourceReceiptSha256) {
+  if(!['FULL_CAPTURED_SOURCE','SCENARIO_SELECTION','SELECTED_BUSINESS_SCOPE'].includes(mode)||!/^([a-f0-9]{64})$/.test(sourceReceiptSha256??'')
+    ||mode==='SCENARIO_SELECTION'&&typeof selection?.includes!=='function'||mode==='FULL_CAPTURED_SOURCE'&&selection!==null||mode==='SELECTED_BUSINESS_SCOPE'&&typeof selection?.includes!=='function')throw new Error('POPULATION_SCOPE_INPUT_INVALID');
+  for(const required of ['users','accounts','orders'])if(!Array.isArray(data[required]))throw new Error('POPULATION_REQUIRED_DOMAIN_MISSING');
+  const domains={};
+  for(const domain of Object.keys(data).sort()){
+    const rows=data[domain];if(!Array.isArray(rows))throw new Error('POPULATION_DOMAIN_INVALID');
+    const source=createHash('sha256'),selected=createHash('sha256'),seen=new Set();let selectedCount=0;
+    for(const row of rows){
+      if(typeof row?.id!=='string'||!row.id||seen.has(row.id))throw new Error('POPULATION_SOURCE_KEY_INVALID:'+domain);
+      seen.add(row.id);const bytes=JSON.stringify(row.id)+'\n';source.update(bytes);
+      if(mode==='FULL_CAPTURED_SOURCE'||selection.includes(domain,row)){selected.update(bytes);selectedCount++;}
+    }
+    domains[domain]={captured:rows.length,considered:selectedCount,excluded:rows.length-selectedCount,
+      capturedIdsSha256:source.digest('hex'),consideredIdsSha256:selected.digest('hex')};
+  }
+  return {schema:'zzsh.local-population-scope.v1',mode,sourceReceiptSha256,
+    meaning:'CAPTURED_DOMAINS_ONLY_NOT_ALL_LEGACY_TABLES',digestOrder:'CAPTURE_ORDER_JSON_ID_PER_LINE',
+    consideredMeans:'INPUT_LOADED_NOT_CONVERTED_OR_IMPORTED',sourceStatusPolicy:'PRESERVE_SOURCE_FLAGS_VERIFY_SEPARATELY',
+    targetStatus:'NOT_VERIFIED',domains,
+   // This planner hands empty finance coverage to the bounded chunk sink; a dataset built before that
+   // path existed must not pass the full-execution admission on the strength of this build alone.
+   ...(mode==='FULL_CAPTURED_SOURCE'?{boundedEmptyCoverage:true}:{})};
+}
 
 /** Trades, current supply and recorded funds seed the owner and upstream closure. */
 export function selectSourceScenarios(data, contacts = new Map()) {

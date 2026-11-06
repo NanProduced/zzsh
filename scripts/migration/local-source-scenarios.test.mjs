@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { selectSourceScenarios } from "./local-source-scenarios.mjs";
+import { resolvePopulationMode, selectSourceScenarios, summarizePopulationScope } from "./local-source-scenarios.mjs";
 import { parseSourceCaptureLine, sourceJsonLine, readSourceRows, sourceAccountPlan } from "./local-source-adapter.mjs";
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
@@ -32,6 +32,23 @@ test("source JSONL reader uses LF and retains Unicode separators across read bou
 
 const user = (id, extra = {}) => ({ id, inviter_id: "0", first_leader: "0", second_leader: "0", third_leader: "0", money: "0.00", earnings: "0.00", is_delete: "0", is_disable: "0", mobile: "present", ...extra });
 const account = (id, user_id, extra = {}) => ({ id, user_id, status: "0", is_delete: "0", no: "old", title: "", is_demulan: "0", is_next_season_pass: null, ...extra });
+test('population scope requires one explicit choice and covers every captured row without enabling it', () => {
+  assert.equal(resolvePopulationMode(['--prepare','--full-source']),'FULL_CAPTURED_SOURCE');
+  assert.equal(resolvePopulationMode(['--prepare','--scenario-selection']),'SCENARIO_SELECTION');
+  for(const args of [[],['--full-source','--scenario-selection'],['--full-source','--full-source']])
+    assert.throws(()=>resolvePopulationMode(args),/EXACTLY_ONE_POPULATION_MODE_REQUIRED/);
+  const data={users:[user('1'),user('2',{is_delete:'1'}),user('3',{is_disable:'1'})],accounts:[account('10','2')],orders:[]};
+  const full=summarizePopulationScope(data,'FULL_CAPTURED_SOURCE',null,'a'.repeat(64));
+  assert.equal(full.meaning,'CAPTURED_DOMAINS_ONLY_NOT_ALL_LEGACY_TABLES');assert.equal(full.consideredMeans,'INPUT_LOADED_NOT_CONVERTED_OR_IMPORTED');
+  assert.equal(full.sourceStatusPolicy,'PRESERVE_SOURCE_FLAGS_VERIFY_SEPARATELY');assert.equal(full.targetStatus,'NOT_VERIFIED');assert.equal(full.domains.users.captured,3);assert.equal(full.domains.users.considered,3);
+  assert.equal(full.domains.users.capturedIdsSha256,full.domains.users.consideredIdsSha256);assert.equal(full.domains.accounts.considered,1);
+  const selected={includes:(domain,row)=>domain!=='users'||row.id==='1'};
+  const partial=summarizePopulationScope(data,'SCENARIO_SELECTION',selected,'a'.repeat(64));
+  assert.equal(partial.domains.users.considered,1);assert.equal(partial.domains.users.excluded,2);
+  assert.notEqual(partial.domains.users.capturedIdsSha256,partial.domains.users.consideredIdsSha256);
+  assert.throws(()=>summarizePopulationScope({...data,users:[user('1'),user('1')]},'FULL_CAPTURED_SOURCE',null,'a'.repeat(64)),/POPULATION_SOURCE_KEY_INVALID/);
+  assert.throws(()=>summarizePopulationScope(data,'FULL_CAPTURED_SOURCE',selected,'a'.repeat(64)),/POPULATION_SCOPE_INPUT_INVALID/);
+});
 test("selection closes independent funds, ancestors and owner history without expanding unrelated descendants", () => {
   const data = {
     users: [user("1", { first_leader: "3" }), user("2"), user("3"), user("4", { inviter_id: "3", earnings: "10.00" }), user("5", { earnings: "99.00" }), user("6"), user("7"), user("8"), user("9", { inviter_id: "3" })],
