@@ -23,6 +23,7 @@ import {
   resourceUnitLabel,
   validateResourceQuantityInput,
   toggleSkinId,
+  skinGroupOptions,
   regionProvinceSelectionState,
   toggleRegionSelection,
   withFilterChange,
@@ -81,6 +82,19 @@ const metadata = {
 };
 
 const base = parseListingFilters({});
+
+test('type-based skin filters keep their meaning through selection, URL and reconciliation', () => {
+  const typeField = { key: 'skinGroups', operator: 'GROUPED', label: '皮肤', enabled: true, order: 9, ownerKinds: ['AGENT', 'FIREARM', 'MELEE_TYPE'] };
+  const typedMetadata = { ...metadata, skinGrouping: 'TYPE', categories: [], fields: metadata.fields.map(field => field.key === 'skinGroups' ? typeField : field) };
+  assert.deepEqual(skinGroupOptions(typeField, null).map(item => item.name), ['干员外观', '枪械外观', '近战外观']);
+  const selected = toggleSkinId({ ...base, game: 'game_delta' }, 'MELEE_TYPE', 'skin_melee');
+  assert.deepEqual(selected.filters.skinGroups, [{ ownerKind: 'MELEE_TYPE', ids: ['skin_melee'], match: 'ANY' }]);
+  const parsed = parseListingFilters(Object.fromEntries(new URL(listingFiltersUrl(selected), 'https://example.test').searchParams));
+  assert.deepEqual(parsed.filters.skinGroups, selected.filters.skinGroups);
+  assert.deepEqual(reconcileListingFilters(parsed, typedMetadata).filters.skinGroups, selected.filters.skinGroups);
+  const legacy = toggleSkinId({ ...base, game: 'game_delta' }, 'category_agent', 'skin_agent');
+  assert.equal(reconcileListingFilters(legacy, typedMetadata).filters.skinGroups, undefined);
+});
 
 
 test('resource display names prefer stable codes and gate legacy names to Delta context', () => {

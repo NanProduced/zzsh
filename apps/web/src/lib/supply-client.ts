@@ -363,7 +363,7 @@ export const supplyApi = {
     supplyRequest<PublicListingPageV2>("/listings?" + query, { signal }),
   listingFilters: (gameId: string, signal?: AbortSignal) =>
     supplyRequest<PublicListingFilterMetadata>(
-      "/games/" + id(gameId) + "/listing-filters?queryVersion=2",
+      "/games/" + id(gameId) + "/listing-filters?queryVersion=2&skinGrouping=TYPE",
       { signal },
     ),
   listing: (accountId: string, signal?: AbortSignal) =>

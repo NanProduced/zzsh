@@ -119,7 +119,7 @@ export type ListingFilterConditions = {
     crossMidnight: boolean;
     timezone: "Asia/Shanghai";
   };
-  skinGroups?: Array<{ categoryId: string; ids: string[]; match: "ANY" | "ALL" }>;
+  skinGroups?: Array<{ categoryId?: string; ownerKind?: SkinOwnerKind; ids: string[]; match: "ANY" | "ALL" }>;
 };
 export type PublicListingFilterField = {
   key: string;
@@ -132,6 +132,7 @@ export type PublicListingFilterField = {
   levels?: number[];
   regions?: Array<{ province: string; city: string }>;
   categoryIds?: string[];
+  ownerKinds?: SkinOwnerKind[];
 };
 export type PublicListingFilterMetadata = {
   available: boolean;
@@ -139,6 +140,7 @@ export type PublicListingFilterMetadata = {
   reasonCode: string | null;
   gameId: string;
   queryVersion: 2;
+  skinGrouping?: "TYPE";
   resourceQuantityRange?: boolean;
   filterRevision: string | null;
   catalogRevision: string | null;
@@ -222,7 +224,7 @@ export type PublicSkinSummary = {
   name: string;
   baseName: string | null;
   ownerName: string | null;
-  categoryId: string;
+  categoryId: string | null;
   rarityCode: string | null;
   /** Game-scoped quality name; evidence basis distinguishes platform and official sources. */
   rarityName?: string | null;
@@ -255,6 +257,7 @@ export type PublicListingSkin = {
 };
 export type PublicCatalog = {
   owners?: Array<{ id: string; kind: SkinOwnerKind; name: string }>;
+  skinFilters?: { ownerKinds: SkinOwnerKind[] };
   game: SupplyGame & { catalogRevision: string; currentReleaseId: string | null };
   items: Array<{
     id: string;
@@ -280,6 +283,7 @@ export type PublicCatalog = {
 };
 export type PublishingCatalog = {
   owners?: Array<{ id: string; kind: SkinOwnerKind; name: string }>;
+  skinFilters?: { ownerKinds: SkinOwnerKind[] };
   game: {
     id: string;
     code: string;

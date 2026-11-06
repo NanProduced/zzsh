@@ -317,7 +317,7 @@ html[data-theme="dark"] .functional-shell.functional-shell--browse .market-secti
 .market-grade-option { display:flex; min-height:36px; justify-content:flex-start; font-size:14px; }
 
 /* Advanced skin picker and panels. */
-.market-skin-popover { z-index:95; width:min(1040px,calc(100vw - 32px)); max-height:min(84vh,760px); overflow:auto; border:1px solid var(--color-border-default); border-radius:10px; color:var(--color-text-primary); background:var(--color-bg-card); box-shadow:var(--shadow-lg); }
+.market-skin-popover { z-index:95; width:min(1040px,calc(100vw - 32px)); max-height:min(84vh,760px,var(--radix-popover-content-available-height,84vh)); overflow:auto; overscroll-behavior:contain; border:1px solid var(--color-border-default); border-radius:10px; color:var(--color-text-primary); background:var(--color-bg-card); box-shadow:var(--shadow-lg); }
 .market-skin-panel { position:relative; }
 .market-skin-panel-content { display:grid; grid-template-columns:120px minmax(0,1fr) 220px; }
 .market-skin-categories { display:flex; flex-direction:column; gap:4px; padding:12px 8px; border-right:1px solid var(--color-border-subtle); }
@@ -382,6 +382,7 @@ html[data-theme="dark"] .functional-shell.functional-shell--browse .market-secti
 .market-skin-match-btn[data-selected="true"],.market-skin-match-btn[aria-pressed="true"] { border-color:var(--color-accent-brand); color:var(--color-accent-brand-ink); background:color-mix(in srgb,var(--color-accent-brand) 8%,var(--color-bg-card)); font-weight:600; }
 .market-skin-match-icon { flex-shrink:0; color:var(--color-accent-brand-ink); }
 .market-skin-panel-footer { display:flex; align-items:center; gap:12px; padding:14px 16px; border-top:1px solid var(--color-border-subtle); }
+.market-skin-popover .market-skin-panel-footer { position:sticky; bottom:0; z-index:2; background:var(--color-bg-card); }
 .market-skin-panel-footer > span { margin-right:auto; }
 .market-skin-confirm { min-height:34px; padding:4px 24px; border:1px solid var(--color-accent-brand); border-radius:6px; color:var(--color-accent-brand-text); background:var(--color-accent-brand); cursor:pointer; }
 .market-load-catalog { display:inline-flex; align-items:center; gap:5px; white-space:nowrap; min-height:34px; margin-top:10px; padding:4px 10px; border:1px solid var(--color-border-default); border-radius:6px; cursor:pointer; }

@@ -19,6 +19,8 @@ import {
   regionProvinceSelectionState,
   toggleRegionSelection,
   toggleSkinId,
+  skinGroupKey,
+  skinGroupOptions,
   type ListingFilters,
   type ResourceInputMode,
 } from "@/lib/listing-filters";
@@ -663,12 +665,11 @@ function SkinFilters({
   };
   const close = () => { setOpen(false); triggerRef.current?.focus(); };
   const skinField = field(metadata, "skinGroups");
-  const categoryIds = new Set(skinField?.categoryIds ?? []);
-  const categories = (catalog?.categories ?? []).filter((category) => categoryIds.has(category.id));
+  const categories = skinGroupOptions(skinField, catalog);
   const activeCategory = categories.find((category) => category.id === activeSkinCategoryId) ?? categories[0];
   const owners = (catalog?.owners ?? []).filter((owner) => !activeCategory?.ownerKind || owner.kind === activeCategory.ownerKind);
   if (!skinField) return null;
-  const group = filters.filters.skinGroups?.find((entry) => entry.categoryId === activeCategory?.id);
+  const group = filters.filters.skinGroups?.find((entry) => skinGroupKey(entry) === activeCategory?.id);
   const totalSelected = (filters.filters.skinGroups ?? []).reduce((sum, entry) => sum + entry.ids.length, 0);
   const searchQuery = skinSearch.normalize("NFKC").trim();
   const skinResultsStatus = skinSearchStatus;
@@ -677,7 +678,7 @@ function SkinFilters({
   const updateMatch = (match: "ANY" | "ALL") => {
     if (!activeCategory) return;
     const groups = [...(filters.filters.skinGroups ?? [])];
-    const index = groups.findIndex((entry) => entry.categoryId === activeCategory.id);
+    const index = groups.findIndex((entry) => skinGroupKey(entry) === activeCategory.id);
     if (index < 0) return;
     groups[index] = { ...groups[index]!, match };
     onChange({ ...filters, filters: { ...filters.filters, skinGroups: groups }, cursor: null });
@@ -691,7 +692,7 @@ function SkinFilters({
       {catalogStatus === "ready" && categories.length > 0 ? <>
         <div className="market-skin-categories" role="group" aria-label="皮肤类别">
           {categories.map((category) => {
-            const count = filters.filters.skinGroups?.find((entry) => entry.categoryId === category.id)?.ids.length ?? 0;
+            const count = filters.filters.skinGroups?.find((entry) => skinGroupKey(entry) === category.id)?.ids.length ?? 0;
             return <button type="button" key={category.id} aria-pressed={activeCategory?.id === category.id} onClick={() => onSkinCategoryChange(category.id)}>{category.name}{count > 0 ? <span>{count}</span> : null}</button>;
           })}
         </div>
@@ -726,7 +727,7 @@ function SkinFilters({
                 <span className="market-skin-selected-name" title={skin?.name ?? skinId}>
                   {skin?.name ?? "已选皮肤"}
                 </span>
-                <button type="button" className="market-skin-selected-remove" aria-label={`移除皮肤 ${skin?.name ?? skinId}`} onClick={() => onChange(toggleSkinId(filters, selectedGroup.categoryId, skinId))}>
+                <button type="button" className="market-skin-selected-remove" aria-label={`移除皮肤 ${skin?.name ?? skinId}`} onClick={() => onChange(toggleSkinId(filters, skinGroupKey(selectedGroup), skinId))}>
                   <X size={14} aria-hidden="true" />
                 </button>
               </div>;
@@ -846,11 +847,10 @@ export function MarketFilterControls(props: Props) {
   });
 
   const skinField = field(metadata, "skinGroups");
-  const categoryIds = new Set(skinField?.categoryIds ?? []);
-  const categories = (props.catalog?.categories ?? []).filter((category) => categoryIds.has(category.id));
+  const categories = skinGroupOptions(skinField, props.catalog);
   const activeSkinCategory = categories.find((c) => c.id === props.activeSkinCategoryId) ?? categories[0];
   const owners = (props.catalog?.owners ?? []).filter((o) => !activeSkinCategory?.ownerKind || o.kind === activeSkinCategory.ownerKind);
-  const currentSkinGroup = selected.skinGroups?.find((g) => g.categoryId === activeSkinCategory?.id);
+  const currentSkinGroup = selected.skinGroups?.find((g) => skinGroupKey(g) === activeSkinCategory?.id);
   const skins = props.skinSearchCatalog?.skins ?? [];
 
   const basicCount = (selected.loginMethodCodes?.length ?? 0)
@@ -1084,7 +1084,7 @@ export function MarketFilterControls(props: Props) {
             <div className="market-mobile-category-content market-mobile-skin-panel">
               <div className="market-mobile-skin-categories" role="tablist" aria-label="皮肤类别">
                 {categories.map((cat) => {
-                  const count = selected.skinGroups?.find((g) => g.categoryId === cat.id)?.ids.length ?? 0;
+                  const count = selected.skinGroups?.find((g) => skinGroupKey(g) === cat.id)?.ids.length ?? 0;
                   const isActive = activeSkinCategory?.id === cat.id;
                   return (
                     <button
@@ -1236,7 +1236,7 @@ export function MarketFilterControls(props: Props) {
                           type="button"
                           className="skin-pill-remove"
                           aria-label={`移除皮肤 ${knownSkins[id]?.name ?? id}`}
-                          onClick={() => onChange(toggleSkinId(filters, g.categoryId, id))}
+                          onClick={() => onChange(toggleSkinId(filters, skinGroupKey(g), id))}
                         >
                           <X size={12} aria-hidden="true" />
                         </button>

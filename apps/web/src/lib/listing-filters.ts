@@ -1,6 +1,9 @@
 import type {
   ListingFilterConditions,
+  PublicCatalog,
+  PublicListingFilterField,
   PublicListingFilterMetadata,
+  SkinOwnerKind,
 } from "./supply-types.ts";
 import { DELTA_GAME_CODE } from "./supply-games.ts";
 
@@ -9,6 +12,21 @@ const CURSOR_PATTERN = /^[A-Za-z0-9_-]{1,1024}$/;
 const QUANTITY_PATTERN = /^(0|[1-9]\d{0,23})$/;
 export const LISTING_PAGE_SIZE = 20;
 export const LISTING_MAX_SKINS = 50;
+const SKIN_TYPE_NAMES: Record<SkinOwnerKind, string> = { AGENT: "干员外观", FIREARM: "枪械外观", MELEE_TYPE: "近战外观" };
+export function isSkinOwnerKind(value: unknown): value is SkinOwnerKind {
+  return typeof value === "string" && Object.hasOwn(SKIN_TYPE_NAMES, value);
+}
+export function skinGroupKey(group: { ownerKind?: SkinOwnerKind; categoryId?: string }): string {
+  return group.ownerKind ?? group.categoryId ?? "";
+}
+export function skinTypeOptions(kinds: SkinOwnerKind[]) {
+  return kinds.filter(isSkinOwnerKind).map((kind) => ({ id: kind, name: SKIN_TYPE_NAMES[kind], ownerKind: kind }));
+}
+export function skinGroupOptions(field: PublicListingFilterField | undefined, catalog: PublicCatalog | null) {
+  if (field?.ownerKinds) return skinTypeOptions(field.ownerKinds);
+  const allowed = new Set(field?.categoryIds ?? []);
+  return (catalog?.categories ?? []).filter((category) => allowed.has(category.id));
+}
 export type ListingViewMode = "list" | "grid";
 export type ResourceInputMode = "display" | "base";
 
@@ -159,16 +177,18 @@ export function normalizeListingConditions(value: unknown): ListingFilterConditi
     const seenCategories = new Set<string>();
     const seenSkins = new Set<string>();
     let remaining = LISTING_MAX_SKINS;
-    const groups = value.skinGroups.filter(record).sort((left, right) => String(left.categoryId ?? "").localeCompare(String(right.categoryId ?? ""))).flatMap((entry) => {
-      if (!record(entry) || !id(entry.categoryId) || seenCategories.has(entry.categoryId)) return [];
+    const groups = value.skinGroups.filter(record).sort((left, right) => String(left.ownerKind ?? left.categoryId ?? "").localeCompare(String(right.ownerKind ?? right.categoryId ?? ""))).flatMap((entry) => {
+      if (!record(entry) || (entry.ownerKind !== undefined && entry.categoryId !== undefined)) return [];
+      const key = isSkinOwnerKind(entry.ownerKind) ? entry.ownerKind : id(entry.categoryId) && entry.ownerKind === undefined ? entry.categoryId : "";
+      if (!key || seenCategories.has(key)) return [];
       const match: "ANY" | "ALL" = entry.match === "ALL" ? "ALL" : "ANY";
       const selected = values(entry.ids, remaining).filter((skinId) => !seenSkins.has(skinId));
       if (selected.length === 0) return [];
-      seenCategories.add(entry.categoryId);
+      seenCategories.add(key);
       selected.forEach((skinId) => seenSkins.add(skinId));
       remaining -= selected.length;
-      return [{ categoryId: entry.categoryId, ids: selected, match }];
-    }).sort((left, right) => left.categoryId.localeCompare(right.categoryId)).slice(0, 8);
+      return [{ ...(isSkinOwnerKind(entry.ownerKind) ? { ownerKind: entry.ownerKind } : { categoryId: key }), ids: selected, match }];
+    }).sort((left, right) => skinGroupKey(left).localeCompare(skinGroupKey(right))).slice(0, 8);
     if (groups.length) output.skinGroups = groups;
   }
 
@@ -330,13 +350,13 @@ export function toggleCode(values: string[], value: string): string[] {
 
 export function toggleSkinId(filters: ListingFilters, categoryId: string, skinId: string): ListingFilters {
   const groups = [...(filters.filters.skinGroups ?? [])];
-  const index = groups.findIndex((group) => group.categoryId === categoryId);
+  const index = groups.findIndex((group) => skinGroupKey(group) === categoryId);
   const current = groups[index];
   const ids = toggleCode(current?.ids ?? [], skinId).slice(0, LISTING_MAX_SKINS);
   if (index >= 0) {
     if (ids.length) groups[index] = { ...current!, ids };
     else groups.splice(index, 1);
-  } else if (ids.length) groups.push({ categoryId, ids, match: "ANY" });
+  } else if (ids.length) groups.push({ ...(isSkinOwnerKind(categoryId) ? { ownerKind: categoryId } : { categoryId }), ids, match: "ANY" });
   const total = groups.reduce((sum, group) => sum + group.ids.length, 0);
   if (total > LISTING_MAX_SKINS) return filters;
   return withFilterChange(filters, { filters: { ...filters.filters, skinGroups: groups.length ? groups : undefined } });
@@ -404,8 +424,9 @@ export function reconcileListingFilters(
   const bearLevels = new Set(enabledField(metadata, "bear")?.levels ?? []);
   const regionRules = new Set((enabledField(metadata, "regions")?.regions ?? []).map(({ province, city }) => `${province}\u0000${city}`));
   const allowedCategories = new Set((enabledField(metadata, "skinGroups")?.categoryIds ?? []).filter((categoryId) => metadata.categories.some((category) => category.id === categoryId)));
+  const allowedKinds = new Set(enabledField(metadata, "skinGroups")?.ownerKinds ?? []);
   let skinBudget = Math.min(LISTING_MAX_SKINS, metadata.limits.skinIds);
-  const skinGroups = (conditions.skinGroups ?? []).filter((group) => allowedCategories.has(group.categoryId)).slice(0, Math.min(8, metadata.limits.skinGroups)).flatMap((group) => {
+  const skinGroups = (conditions.skinGroups ?? []).filter((group) => group.ownerKind ? allowedKinds.has(group.ownerKind) : !!group.categoryId && allowedCategories.has(group.categoryId)).slice(0, Math.min(8, metadata.limits.skinGroups)).flatMap((group) => {
     const ids = group.ids.filter((skinId) => (!allowedSkinIds || allowedSkinIds.has(skinId)) && skinBudget > 0).slice(0, skinBudget);
     skinBudget -= ids.length;
     return ids.length ? [{ ...group, ids }] : [];
