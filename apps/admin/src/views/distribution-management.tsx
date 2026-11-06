@@ -16,10 +16,10 @@ type Snapshot=Extract<SessionSnapshot,{authenticated:true}>;
 type ManagedConfig={schema:'distribution-policy.v4';levels:DistributionLevel[];levelNames:Record<string,string>};
 type LevelRead={knowledge:'KNOWN'|'UNKNOWN';policy:null|{versionId:string;revision:string;managed:ManagedConfig};writeAssemblyReady:boolean};
 type Participant={userId:string;name:string|null;eligibility:string;frozen:boolean|null;revision:string;levelCode:string|null;levelName:string|null;inviteCode:string|null;inviteCodeId:string|null};
-type ParticipantsRead={items:Participant[];total:string|null;page:number;hasMore:boolean;writeAssemblyReady:boolean;policy:null|{versionId:string;revision:string;schema:string;levels:{code:string;name:string}[]}};
+type ParticipantsRead={items:Participant[];total:string|null;page:number;hasMore:boolean;writeAssemblyReady:boolean;freezeWriteReady?:boolean;policy:null|{versionId:string;revision:string;schema:string;levels:{code:string;name:string}[]}};
 type Intent={actor:string;session:string;path:string;body:Record<string,unknown>;key:string};
 const can=(snapshot:Snapshot,permission:string)=>snapshot.security.status==='ACTIVE'&&!snapshot.session.locked&&!snapshot.security.passwordChangeRequired&&(snapshot.security.isBoss||hasPermission(snapshot,permission));
-const pathPattern=/^\/distribution\/manage\/(?:levels|participants\/[A-Za-z0-9._:-]+\/(?:level|code))$/;
+const pathPattern=/^\/distribution\/manage\/(?:levels|participants\/[A-Za-z0-9._:-]+\/(?:level|code|freeze))$/;
 const storageKey=(s:Snapshot)=>`zzsh.distribution.management.pending.${encodeURIComponent(s.adminUserId+'|'+s.session.id)}`;
 function readIntent(snapshot:Snapshot):Intent|null|'unreadable'{
  try{
@@ -33,11 +33,13 @@ const object=(value:unknown):value is Record<string,any>=>value!==null&&typeof v
 /** A bare HTTP 200 is not a matching original receipt. */
 export function matchesDistributionManagementReceipt(intent:Intent,value:unknown):boolean{
  if(!object(value))return false;
- const match=/^\/distribution\/manage\/participants\/([A-Za-z0-9._:-]+)\/(level|code)$/.exec(intent.path);
+ const match=/^\/distribution\/manage\/participants\/([A-Za-z0-9._:-]+)\/(level|code|freeze)$/.exec(intent.path);
  try{
   if(match?.[2]==='code')return value.userId===match[1]&&value.code===intent.body.code&&typeof value.codeId==='string'&&value.codeId!==intent.body.expectedCodeId;
   if(match?.[2]==='level')return value.userId===match[1]&&value.levelCode===intent.body.levelCode&&typeof intent.body.expectedParticipantRevision==='string'
    &&value.revision===(BigInt(intent.body.expectedParticipantRevision)+1n).toString();
+  if(match?.[2]==='freeze')return value.userId===match[1]&&value.frozen===intent.body.frozen&&typeof intent.body.expectedParticipantRevision==='string'
+   &&typeof value.changed==='boolean'&&value.revision===(BigInt(intent.body.expectedParticipantRevision)+(value.changed?1n:0n)).toString();
   if(intent.path!=='/distribution/manage/levels'||typeof intent.body.expectedRevision!=='string'||!object(intent.body.command)||!object(value.config)
    ||typeof value.versionId!=='string'||!value.versionId||value.revision!==(BigInt(intent.body.expectedRevision)+1n).toString()
    ||value.config.schema!=='distribution-policy.v4'||!Array.isArray(value.config.levels)||!value.config.levels.length
@@ -88,12 +90,12 @@ function CommandNotice({command,disabled=false}:{command:ReturnType<typeof useMa
 function loadError(error:unknown){return error instanceof AdminApiError&&error.status===403?'当前身份没有相应权限':error instanceof AdminApiError&&error.status===503?'管理能力或数据库结构尚未就绪':'读取失败，请刷新后重试';}
 
 type LevelDraft={mode:'edit'|'delete';code:string|null;name:string;rank:string;renter:string;owner:string;isDefault:boolean;reason:string};
-export function DistributionLevelManager({snapshot}:{snapshot:Snapshot}){
- return <DistributionLevelManagerBody key={dashboardContextIdentity(snapshot)} snapshot={snapshot}/>;
+export function DistributionLevelManager({snapshot,onChanged}:{snapshot:Snapshot;onChanged?:()=>void}){
+ return <DistributionLevelManagerBody key={dashboardContextIdentity(snapshot)} snapshot={snapshot} onChanged={onChanged}/>;
 }
-function DistributionLevelManagerBody({snapshot}:{snapshot:Snapshot}){
+function DistributionLevelManagerBody({snapshot,onChanged}:{snapshot:Snapshot;onChanged?:()=>void}){
  const [read,setRead]=useState<LevelRead|null>(null),[error,setError]=useState(''),[nonce,setNonce]=useState(0),[draft,setDraft]=useState<LevelDraft|null>(null);
- const allowed=can(snapshot,'distribution.level.manage'),command=useManagedCommand(snapshot,()=>{setDraft(null);setNonce(n=>n+1);});
+ const allowed=can(snapshot,'distribution.level.manage'),command=useManagedCommand(snapshot,()=>{setDraft(null);setNonce(n=>n+1);onChanged?.();});
  useEffect(()=>{if(!allowed)return;const controller=new AbortController();setRead(null);setError('');
   void adminRequest<LevelRead>('/distribution/manage/levels',undefined,'GET',{},controller.signal).then(setRead).catch(e=>{if(!controller.signal.aborted)setError(loadError(e));});return()=>controller.abort();},[allowed,nonce,snapshot.adminUserId,snapshot.session.id]);
  if(!allowed)return null;
@@ -119,32 +121,45 @@ function DistributionLevelManagerBody({snapshot}:{snapshot:Snapshot}){
  </section>;
 }
 
-export function DistributionParticipantManager({snapshot,initialUserId,onOpenUser}:{snapshot:Snapshot;initialUserId?:string;onOpenUser?:(userId:string)=>void}){
- return <DistributionParticipantManagerBody key={dashboardContextIdentity(snapshot)+'|'+(initialUserId??'')} snapshot={snapshot} initialUserId={initialUserId} onOpenUser={onOpenUser}/>;
+export type ParticipantManagementAction='level'|'code'|'freeze';
+type ParticipantManagerProps={snapshot:Snapshot;initialUserId?:string;onOpenUser?:(userId:string)=>void;directAction?:ParticipantManagementAction;onChanged?:()=>void;onClose?:()=>void};
+
+export function DistributionParticipantManager(props:ParticipantManagerProps){
+ return <DistributionParticipantManagerBody key={dashboardContextIdentity(props.snapshot)+'|'+(props.initialUserId??'')+'|'+(props.directAction??'')} {...props}/>;
 }
-function DistributionParticipantManagerBody({snapshot,initialUserId,onOpenUser}:{snapshot:Snapshot;initialUserId?:string;onOpenUser?:(userId:string)=>void}){
+function DistributionParticipantManagerBody({snapshot,initialUserId,onOpenUser,directAction,onChanged,onClose}:ParticipantManagerProps){
  const [q,setQ]=useState(initialUserId??''),[search,setSearch]=useState(initialUserId??''),[page,setPage]=useState(1),[nonce,setNonce]=useState(0),[read,setRead]=useState<ParticipantsRead|null>(null),[error,setError]=useState('');
  const [chosen,setChosen]=useState<Participant|null>(null),[newLevel,setNewLevel]=useState(''),[newCode,setNewCode]=useState(''),[reason,setReason]=useState('');
  const allowed=can(snapshot,'distribution.participant.read'),mayChange=can(snapshot,'distribution.participant.manage'),canDirectory=can(snapshot,'user.directory.read');
- const command=useManagedCommand(snapshot,()=>{setChosen(null);setReason('');setNonce(n=>n+1);});
+ const command=useManagedCommand(snapshot,()=>{setChosen(null);setReason('');setNonce(n=>n+1);onChanged?.();});
  useEffect(()=>{if(!allowed)return;const controller=new AbortController();setRead(null);setError('');
   void adminRequest<ParticipantsRead>('/distribution/manage/participants?'+new URLSearchParams({q:search,page:String(page)}),undefined,'GET',{},controller.signal).then(setRead).catch(e=>{if(!controller.signal.aborted)setError(loadError(e));});return()=>controller.abort();},[allowed,search,page,nonce,snapshot.adminUserId,snapshot.session.id]);
+ const directTarget=directAction&&initialUserId?read?.items.find(item=>item.userId===initialUserId)??null:null;
+ useEffect(()=>{if(directTarget){setNewLevel(directTarget.levelCode??'');setNewCode(directTarget.inviteCode??'');setReason('');}},[directTarget]);
  if(!allowed)return null;
- const disabled=!mayChange||!read?.writeAssemblyReady||command.busy||command.pending!==null;
+ const selected=directAction?directTarget:chosen,disabled=!mayChange||!read?.writeAssemblyReady||command.busy||command.pending!==null;
  const select=(item:Participant)=>{setChosen(item);setNewLevel(item.levelCode??'');setNewCode(item.inviteCode??'');setReason('');};
- const saveLevel=()=>{if(!chosen||!read?.policy)return;command.submit(`/distribution/manage/participants/${encodeURIComponent(chosen.userId)}/level`,{expectedPolicyId:read.policy.versionId,expectedPolicyRevision:read.policy.revision,expectedParticipantRevision:chosen.revision,levelCode:newLevel,reason});};
- const saveCode=()=>{if(!chosen?.inviteCodeId)return;command.submit(`/distribution/manage/participants/${encodeURIComponent(chosen.userId)}/code`,{expectedCodeId:chosen.inviteCodeId,code:newCode,reason});};
- return <section className="space-y-4 rounded-xl border border-border p-4" data-distribution-participant-management>
-  <div><h2 className="text-lg font-semibold">维护分销参与人</h2><p className="mt-1 text-sm text-muted-foreground">按用户查找并调整分销等级或邀请码，原邀请关系和历史佣金保留。</p></div>
-  <form className="flex flex-wrap gap-2" onSubmit={event=>{event.preventDefault();setChosen(null);setPage(1);setSearch(q.trim());}}><Input aria-label="搜索参与人" className="max-w-sm" value={q} onChange={e=>setQ(e.target.value)} placeholder="用户 ID 或昵称"/><Button type="submit" variant="outline">查找</Button></form>
+ const saveLevel=()=>{if(!selected||!read?.policy)return;command.submit(`/distribution/manage/participants/${encodeURIComponent(selected.userId)}/level`,{expectedPolicyId:read.policy.versionId,expectedPolicyRevision:read.policy.revision,expectedParticipantRevision:selected.revision,levelCode:newLevel,reason});};
+ const saveCode=()=>{if(!selected?.inviteCodeId)return;command.submit(`/distribution/manage/participants/${encodeURIComponent(selected.userId)}/code`,{expectedCodeId:selected.inviteCodeId,code:newCode,reason});};
+ const saveFreeze=()=>{if(!selected||selected.frozen===null||!read?.freezeWriteReady)return;command.submit(`/distribution/manage/participants/${encodeURIComponent(selected.userId)}/freeze`,{expectedParticipantRevision:selected.revision,frozen:!selected.frozen,reason});};
+ const showLevel=!directAction||directAction==='level',showCode=!directAction||directAction==='code';
+ const actionButtons=(label:string,onClick:()=>void,blocked:boolean,destructive=false)=><div className={directAction?'flex justify-end gap-2':'flex gap-2'}>{directAction&&onClose?<Button variant="outline" disabled={command.busy} onClick={onClose}>取消</Button>:null}<Button variant={destructive?'destructive':'default'} disabled={blocked} onClick={onClick}>{label}</Button></div>;
+ return <section className={directAction?'space-y-4':'space-y-4 rounded-xl border border-border p-4'} data-distribution-participant-management>
+  {!directAction?<><div><h2 className="text-lg font-semibold">维护分销参与人</h2><p className="mt-1 text-sm text-muted-foreground">按用户查找并调整分销等级或邀请码，原邀请关系和历史佣金保留。</p></div>
+   <form className="flex flex-wrap gap-2" onSubmit={event=>{event.preventDefault();setChosen(null);setPage(1);setSearch(q.trim());}}><Input aria-label="搜索参与人" className="max-w-sm" value={q} onChange={e=>setQ(e.target.value)} placeholder="用户 ID 或昵称"/><Button type="submit" variant="outline">查找</Button></form></>:null}
   <CommandNotice command={command} disabled={!mayChange||!read?.writeAssemblyReady}/>{error?<Alert variant="warning"><AlertCircle/><AlertTitle>参与人暂不可用</AlertTitle><AlertDescription>{error}</AlertDescription></Alert>:null}
   {!read&&!error?<Skeleton className="h-28 w-full"/>:null}
   {read&&!read.writeAssemblyReady?<p className="text-sm text-muted-foreground">当前环境未启用参与人维护，暂可查看。</p>:null}
-  {read?<><div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead>用户</TableHead><TableHead>等级</TableHead><TableHead>邀请码</TableHead><TableHead className="text-right">操作</TableHead></TableRow></TableHeader><TableBody>{read.items.map(item=><TableRow key={item.userId}><TableCell><DistributionUserName userId={item.userId} name={item.name} canOpen={canDirectory&&Boolean(onOpenUser)} onOpen={()=>onOpenUser?.(item.userId)}/>{item.frozen?<Badge className="ml-2" variant="secondary">佣金冻结</Badge>:null}</TableCell><TableCell>{item.levelName??(item.levelCode?'待核对':'未设置')}</TableCell><TableCell>{item.inviteCode??'待核对'}</TableCell><TableCell className="text-right"><Button variant="ghost" size="sm" onClick={()=>select(item)}>维护</Button></TableCell></TableRow>)}</TableBody></Table></div>{!read.items.length?<p className="py-4 text-center text-sm text-muted-foreground">没有找到匹配用户，试试其他用户 ID 或昵称。</p>:null}<div className="flex items-center gap-3 text-sm"><Button variant="outline" size="sm" disabled={page<=1} onClick={()=>setPage(p=>p-1)}>上一页</Button><span>第 {page} 页{read.total!==null?` · 共 ${read.total} 人`:''}</span><Button variant="outline" size="sm" disabled={!read.hasMore} onClick={()=>setPage(p=>p+1)}>下一页</Button></div></>:null}
-  {chosen?<div className="space-y-4 border-t border-border pt-4"><div className="flex items-center justify-between gap-3"><h3 className="font-semibold">维护 {distributionUserLabel(chosen.name,chosen.userId)}</h3><Button variant="ghost" size="sm" onClick={()=>setChosen(null)}>关闭</Button></div>
+  {directAction&&read&&!selected?<p className="text-sm text-muted-foreground">未找到当前用户的分销资料，请刷新列表后重试。</p>:null}
+  {!directAction&&read?<><div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead>用户</TableHead><TableHead>等级</TableHead><TableHead>邀请码</TableHead><TableHead className="text-right">操作</TableHead></TableRow></TableHeader><TableBody>{read.items.map(item=><TableRow key={item.userId}><TableCell><DistributionUserName userId={item.userId} name={item.name} canOpen={canDirectory&&Boolean(onOpenUser)} onOpen={()=>onOpenUser?.(item.userId)}/>{item.frozen?<Badge className="ml-2" variant="secondary">佣金冻结</Badge>:null}</TableCell><TableCell>{item.levelName??(item.levelCode?'待核对':'未设置')}</TableCell><TableCell>{item.inviteCode??'待核对'}</TableCell><TableCell className="text-right"><Button variant="ghost" size="sm" onClick={()=>select(item)}>维护</Button></TableCell></TableRow>)}</TableBody></Table></div>{!read.items.length?<p className="py-4 text-center text-sm text-muted-foreground">没有找到匹配用户，试试其他用户 ID 或昵称。</p>:null}<div className="flex items-center gap-3 text-sm"><Button variant="outline" size="sm" disabled={page<=1} onClick={()=>setPage(p=>p-1)}>上一页</Button><span>第 {page} 页{read.total!==null?` · 共 ${read.total} 人`:''}</span><Button variant="outline" size="sm" disabled={!read.hasMore} onClick={()=>setPage(p=>p+1)}>下一页</Button></div></>:null}
+  {selected?<div className={directAction?'space-y-4':'space-y-4 border-t border-border pt-4'}>
+   {!directAction?<div className="flex items-center justify-between gap-3"><h3 className="font-semibold">维护 {distributionUserLabel(selected.name,selected.userId)}</h3><Button variant="ghost" size="sm" onClick={()=>setChosen(null)}>关闭</Button></div>:null}
    <label className="block max-w-xl space-y-1 text-sm">变更原因<Input value={reason} maxLength={500} onChange={e=>setReason(e.target.value)} placeholder="填写至少 3 个字"/></label>
-   <div className="grid gap-5 md:grid-cols-2"><div className="space-y-2"><label className="block text-sm">分销等级</label><div className="flex gap-2"><Select value={newLevel} onValueChange={value=>setNewLevel(value??'')}><SelectTrigger aria-label="选择分销等级" className="min-w-44"><SelectValue>{read?.policy?.levels.find(level=>level.code===newLevel)?.name??(newLevel?'等级待核对':'选择等级')}</SelectValue></SelectTrigger><SelectContent>{read?.policy?.levels.map(level=><SelectItem key={level.code} value={level.code}>{level.name}</SelectItem>)}</SelectContent></Select><Button disabled={disabled||reason.trim().length<3||!newLevel||newLevel===chosen.levelCode||read?.policy?.schema==='distribution-policy.v2'} onClick={saveLevel}>保存等级</Button></div>{read?.policy?.schema==='distribution-policy.v2'?<p className="text-xs text-muted-foreground">请先在分销政策中保存等级配置。</p>:null}</div>
-    <div className="space-y-2"><label className="block text-sm">邀请码</label><div className="flex gap-2"><Input aria-label="邀请码" value={newCode} maxLength={30} onChange={e=>setNewCode(e.target.value)}/><Button disabled={disabled||reason.trim().length<3||!chosen.inviteCodeId||!/^[A-Za-z0-9_-]{1,30}$/.test(newCode)||newCode.toUpperCase()===chosen.inviteCode?.toUpperCase()} onClick={saveCode}>保存邀请码</Button></div><p className="text-xs text-muted-foreground">保存后旧码立即失效，且不会再分配给其他用户。</p></div></div>
+   <div className={!directAction?'grid gap-5 md:grid-cols-2':'space-y-4'}>
+    {showLevel?<div className="space-y-2"><label className="block text-sm">分销等级</label><Select value={newLevel} onValueChange={value=>setNewLevel(value??'')}><SelectTrigger aria-label="选择分销等级" className={directAction?'w-full':'min-w-44'}><SelectValue>{read?.policy?.levels.find(level=>level.code===newLevel)?.name??(newLevel?'等级待核对':'选择等级')}</SelectValue></SelectTrigger><SelectContent>{read?.policy?.levels.map(level=><SelectItem key={level.code} value={level.code}>{level.name}</SelectItem>)}</SelectContent></Select>{read?.policy?.schema==='distribution-policy.v2'?<p className="text-xs text-muted-foreground">请先在分销政策中保存等级配置。</p>:null}{actionButtons('保存等级',saveLevel,disabled||reason.trim().length<3||!newLevel||newLevel===selected.levelCode||read?.policy?.schema==='distribution-policy.v2')}</div>:null}
+    {showCode?<div className="space-y-2"><label className="block text-sm">邀请码</label><Input aria-label="邀请码" value={newCode} maxLength={30} onChange={e=>setNewCode(e.target.value)}/><p className="text-xs text-muted-foreground">保存后旧码立即失效，且不会再分配给其他用户。</p>{actionButtons('保存邀请码',saveCode,disabled||reason.trim().length<3||!selected.inviteCodeId||!/^[A-Za-z0-9_-]{1,30}$/.test(newCode)||newCode.toUpperCase()===selected.inviteCode?.toUpperCase())}</div>:null}
+    {!directAction||directAction==='freeze'?<div className="space-y-3"><p className="text-sm">冻结状态：{selected.frozen===null?'待核对':selected.frozen?'已冻结':'未冻结'}</p><p className="text-sm text-muted-foreground">冻结后，后续付款不会产生该分销商的新佣金；已付款订单的依据、已有佣金及邀请关系不变。</p>{!read?.freezeWriteReady?<p className="text-sm text-muted-foreground">当前环境尚未启用资格维护。</p>:null}{actionButtons(selected.frozen?'解除冻结':'冻结资格',saveFreeze,disabled||!read?.freezeWriteReady||selected.frozen===null||reason.trim().length<3,!selected.frozen)}</div>:null}
+   </div>
   </div>:null}
  </section>;
 }

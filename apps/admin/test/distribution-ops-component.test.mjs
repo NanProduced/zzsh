@@ -19,6 +19,16 @@ test('effective legacy policy shows current names and separate purchase/listing 
  }finally{await h.close();}
 });
 
+test('compact policy summary keeps calculation rules without repeating the level table or an unavailable approval banner',async()=>{
+ const h=await setup();try{
+  const config={...known.policy.config,schema:'distribution-policy.v3',enabled:true,levels:[{code:'legacy_1',rank:1,default:true,renterPercent:'20',ownerPercent:'30',upgrade:null}],legacySource:{receiptSha256:'a'.repeat(64),configurationSha256:'b'.repeat(64),levelsSha256:'c'.repeat(64),levelNames:{legacy_1:'青铜会员'}}};
+  globalThis.fetch=h.browser.fetch=async url=>json(String(url).endsWith('/operations')?operations:{...known,policy:{...known.policy,config},changeContext:{...context,writeAssemblyReady:false}});
+  const m=await h.loader.ssrLoadModule('/src/views/distribution-policy-panel.tsx'),ui=await h.mount(m.DistributionPolicyPanel,{snapshot:snap(manager),compact:true});
+  assert.match(ui.host.textContent,/计佣规则/);assert.match(ui.host.textContent,/计佣口径/);assert.match(ui.host.textContent,/待入账期/);
+  assert.doesNotMatch(ui.host.textContent,/当前按分销档位计佣|政策提审与执行能力待接入|青铜会员/);
+ }finally{await h.close();}
+});
+
 test('historical qualification, grade and mapped children do not become current policy admission or zero',async()=>{
  const h=await setup();try{const m=await h.loader.ssrLoadModule('/src/views/distribution-dashboard-model.ts');
   const p={eligibility:'UNKNOWN',levelCode:null,legacyQualification:{eligibility:'ELIGIBLE',commissionFrozen:false,levelId:'2'}};
@@ -34,6 +44,20 @@ test('participant desktop and mobile retain observed relations, commission subto
   const m=await h.loader.ssrLoadModule('/src/views/distribution-dashboard-pages.tsx'),ui=await h.mount(m.DistributionParticipantsPage,{snapshot:snap([], 'boss', 'session', true),onOpenPath(){}});
   for(const root of [ui.host.querySelector('table'),ui.host.querySelector('ul')]){assert(root);assert.match(root.textContent,/原资格有效 · 当前计佣待核/);assert.match(root.textContent,/产生佣金人数/);assert.match(root.textContent,/邀请人数/);assert.match(root.textContent,/已确认 6 · 总数待核/);assert.doesNotMatch(root.textContent,/计佣下级|邀请注册/);assert.doesNotMatch(root.textContent,/直属计佣/);assert.doesNotMatch(root.textContent,/注册邀请/);assert.match(root.textContent,/已接入 164 · 总数待核/);assert.match(root.textContent,/¥3,981.83/);assert.match(root.textContent,/未核定/);assert.match(root.textContent,/待核对\s*1 笔/);assert.match(root.textContent,/原分销档位 ID 2/);assert.doesNotMatch(root.textContent,/¥0.00/);}
  }finally{await h.close();}
+});
+
+test('participant list exposes direct row actions on desktop and mobile with a scoped editor',async()=>{
+ const h=await setup(),oldFetch=globalThis.fetch;try{
+  const participant={userId:'user_1',name:'测试分销商',eligibility:'ELIGIBLE',frozen:false,levelCode:'silver',levelName:'白银会员',sourceType:'NATIVE',inviterChildren:0,leaderChildren:0,settledCents:'0',pendingCents:'0',recoveryCents:'0',mappedRecordCount:'0'};
+  globalThis.fetch=h.browser.fetch=async url=>String(url).includes('/manage/participants')?json({items:[{...participant,revision:'1',inviteCode:'CODE1',inviteCodeId:'code_1'}],total:'1',page:1,hasMore:false,writeAssemblyReady:true,freezeWriteReady:true,policy:{versionId:'policy_1',revision:'1',schema:'distribution-policy.v4',levels:[{code:'silver',name:'白银会员'}]}}):json({items:[participant],total:'1',page:1,pageSize:20,hasMore:false,snapshot:null,scope:{network:'AVAILABLE'}});
+  const m=await h.loader.ssrLoadModule('/src/views/distribution-dashboard-pages.tsx'),ui=await h.mount(m.DistributionParticipantsPage,{snapshot:snap([], 'boss','session',true),onOpenPath(){}});
+  for(const root of [ui.host.querySelector('table'),ui.host.querySelector('ul')]){assert.match(root.textContent,/详情/);assert.match(root.textContent,/调整等级/);assert.match(root.textContent,/修改邀请码/);assert.match(root.textContent,/冻结资格/);}
+  await click([...ui.host.querySelectorAll('table button')].find(b=>b.textContent==='调整等级'));
+  const dialog=h.browser.document.querySelector('[role="dialog"]');assert.ok(dialog);assert.match(dialog.textContent,/调整分销等级/);assert.match(dialog.textContent,/测试分销商/);
+  assert.match(dialog.querySelector('[aria-label="选择分销等级"]').textContent,/白银会员/);assert.equal(dialog.querySelector('[aria-label="搜索参与人"]'),null);
+  await act(async()=>ui.root.render(createElement(m.DistributionParticipantsPage,{snapshot:snap(['distribution.dashboard.read']),onOpenPath(){}})));await settle();
+  assert.equal(h.browser.document.querySelector('[role="dialog"]'),null);assert.doesNotMatch(ui.host.querySelector('table').textContent,/调整等级|修改邀请码|冻结资格/);
+ }finally{globalThis.fetch=oldFetch;await h.close();}
 });
 
 test('exact cents, zero, uniform parsing and proposal identity do not invent grade fallback',async()=>{

@@ -27,6 +27,28 @@ test('operator edits a code directly and retries an unknown result with the iden
  assert.match(ui.host.textContent,/已保存/);assert.equal(h.browser.sessionStorage.length,0);
 });
 
+test('direct participant actions load only the selected user and display the current level name',async t=>{
+ const h=await setup(),oldFetch=globalThis.fetch,calls=[];t.after(async()=>{globalThis.fetch=oldFetch;await h.close();});
+ globalThis.fetch=h.browser.fetch=async url=>{calls.push(String(url));return json(people);};
+ const m=await h.loader.ssrLoadModule('/src/views/distribution-management.tsx');
+ const ui=await h.mount(m.DistributionParticipantManager,{snapshot:snap(['distribution.participant.read','distribution.participant.manage']),initialUserId:'user_1',directAction:'level'});
+ assert.ok(calls.some(url=>url.includes('q=user_1')));assert.equal(ui.host.querySelector('[aria-label="搜索参与人"]'),null);
+ assert.match(ui.host.querySelector('[aria-label="选择分销等级"]').textContent,/白银/);assert.equal(ui.host.querySelector('[aria-label="邀请码"]'),null);
+});
+
+test('unknown freeze state or missing write admission cannot submit, and freeze receipts bind the original revision',async t=>{
+ const h=await setup(),oldFetch=globalThis.fetch,calls=[];t.after(async()=>{globalThis.fetch=oldFetch;await h.close();});
+ globalThis.fetch=h.browser.fetch=async(url,options={})=>{calls.push(options.method??'GET');return json({...people,freezeWriteReady:true,items:[{...people.items[0],frozen:null}]});};
+ const m=await h.loader.ssrLoadModule('/src/views/distribution-management.tsx');
+ const ui=await h.mount(m.DistributionParticipantManager,{snapshot:snap(['distribution.participant.read','distribution.participant.manage']),initialUserId:'user_1',directAction:'freeze'});
+ assert.match(ui.host.textContent,/冻结状态：待核对/);assert.equal([...ui.host.querySelectorAll('button')].find(b=>b.textContent==='冻结资格').disabled,true);
+ assert.ok(calls.every(method=>method==='GET'));
+ const intent={actor:'ops',session:'s',key:'idem_'+'a'.repeat(32),path:'/distribution/manage/participants/user_1/freeze',body:{expectedParticipantRevision:'4',frozen:true}};
+ assert.equal(m.matchesDistributionManagementReceipt(intent,{userId:'user_1',frozen:true,changed:true,revision:'5'}),true);
+ assert.equal(m.matchesDistributionManagementReceipt(intent,{userId:'user_1',frozen:true,changed:false,revision:'4'}),true);
+ assert.equal(m.matchesDistributionManagementReceipt(intent,{userId:'user_1',frozen:true,changed:true,revision:'4'}),false);
+});
+
 test('default level is protected and deleting another level clearly shows reassignment',async t=>{
  const h=await setup(),oldFetch=globalThis.fetch,calls=[];t.after(async()=>{globalThis.fetch=oldFetch;await h.close();});
  globalThis.fetch=h.browser.fetch=async(url,options={})=>{calls.push({url:String(url),options});return json(options.method==='POST'?{versionId:'policy_2',revision:'2',reassigned:1,config:{schema:'distribution-policy.v4',levels:[levels.policy.managed.levels[0]],levelNames:{base:'默认'}}}:levels);};
