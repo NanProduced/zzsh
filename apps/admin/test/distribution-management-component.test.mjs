@@ -17,6 +17,7 @@ test('operator edits a code directly and retries an unknown result with the iden
  const button=text=>[...ui.host.querySelectorAll('button')].find(b=>b.textContent.trim()===text);
  assert.match(ui.host.textContent,/原邀请关系和历史佣金保留/);assert.match(ui.host.textContent,/佣金冻结/);
  await click(button('维护'));assert.match(ui.host.textContent,/旧码立即失效/);
+ assert.match(ui.host.querySelector('[aria-label="选择分销等级"]').textContent,/白银/);
  const reason=[...ui.host.querySelectorAll('input')].find(i=>i.placeholder.includes('至少 3'));await input(h.browser,reason,'调整邀请码');
  await input(h.browser,ui.host.querySelector('input[aria-label="邀请码"]'),'NEW_CODE');
  await click(button('保存邀请码'));assert.match(ui.host.textContent,/操作结果待核对/);
