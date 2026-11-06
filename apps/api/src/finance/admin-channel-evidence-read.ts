@@ -9,7 +9,7 @@ import type { JoinpayAccountReadAccess } from "./channel-finance-read";
 
 export const ADMIN_CHANNEL_EVIDENCE_VERSION = "admin-channel-evidence.read.v1";
 const REF = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,179}$/;
-type Actor = { userId: string; complete: boolean; relations: { adminId: string; isBoss: boolean; orderRead: boolean } };
+type Actor = { userId: string; complete: boolean; relations: { adminId: string; isBoss: boolean; orderRead: boolean; userDirectoryRead?: boolean } };
 const invalid = (m: string) => new SecurityApiError(400, "INVALID_ARGUMENT", m);
 const notFound = () => new SecurityApiError(404, "NOT_FOUND", "Channel evidence object not found");
 function ref(value: string): string {
@@ -33,9 +33,12 @@ async function readScopedOrders(client: PoolClient, actor: Actor, orderIds: read
 export async function readAdminChannelEvidenceRoute(client: PoolClient, actor: Actor, route: string, query: URLSearchParams, access?: JoinpayAccountReadAccess) {
   if (!access) throw new SecurityApiError(503, "EVIDENCE_UNAVAILABLE", "Channel evidence scope is not configured");
   const [, kind, first, second] = route.split("/");
+  const subjectUserId = query.has("subjectUserId") ? ref(query.get("subjectUserId") ?? "") : undefined;
+  if (subjectUserId && (!actor.complete || !actor.relations.isBoss && !actor.relations.userDirectoryRead))
+    throw new SecurityApiError(403, "FORBIDDEN", "User directory and finance permissions are required");
   const merchantIds = [...(access.merchantIdsByAdmin.get(actor.relations.adminId) ?? [])];
   const base = { database: access.database, runtimeUser: access.runtimeUser, adminId: actor.relations.adminId, merchantIds,
-    financeReadable: actor.complete, userReadable: false, readableUserIds: [] as string[] };
+    financeReadable: actor.complete, userReadable: Boolean(subjectUserId), readableUserIds: subjectUserId ? [subjectUserId] : [], isBoss: actor.relations.isBoss };
   const orderReadable = actor.relations.isBoss || actor.relations.orderRead;
   if (kind === "orders" && first && !second) {
     onlyParams(query, []);
@@ -50,13 +53,13 @@ export async function readAdminChannelEvidenceRoute(client: PoolClient, actor: A
       refund: await readAdminChannelRefundEvidence(client, scope, { orderId, origin }), bankArrival: "UNKNOWN" as const };
   }
   if (kind === "withdrawals" && first && second) {
-    onlyParams(query, []);
+    onlyParams(query, ["subjectUserId"]);
     const scope = createChannelEvidenceReadScope({ ...base, orderReadable: false });
     return { contractVersion: ADMIN_CHANNEL_EVIDENCE_VERSION, kind: "WITHDRAWAL", bankArrival: "UNKNOWN" as const,
-      withdrawal: await readAdminChannelWithdrawalEvidence(client, scope, { merchantIdentityId: ref(first), intentId: ref(second) }) };
+      withdrawal: await readAdminChannelWithdrawalEvidence(client, scope, { merchantIdentityId: ref(first), intentId: ref(second), subjectUserId }) };
   }
   if (kind === "originals" && first && !second) {
-    onlyParams(query, ["productFamily", "merchantOrderNo", "channelTrxNo"]);
+    onlyParams(query, ["productFamily", "merchantOrderNo", "channelTrxNo", "subjectUserId"]);
     const productFamily = query.get("productFamily") as ChannelProductFamily;
     if (!CHANNEL_EVIDENCE_PRODUCTS.includes(productFamily)) throw invalid("Unsupported channel product family");
     const scope = createChannelEvidenceReadScope({ ...base, orderReadable, loadReadableOrderIds: async (evidenceClient, orderIds) => {
@@ -66,7 +69,7 @@ export async function readAdminChannelEvidenceRoute(client: PoolClient, actor: A
     } });
     return { contractVersion: ADMIN_CHANNEL_EVIDENCE_VERSION, kind: "ORIGINAL_SEARCH", bankArrival: "UNKNOWN" as const,
       search: await searchAdminChannelOriginals(client, scope, { merchantIdentityId: ref(first), productFamily,
-        merchantOrderNo: query.get("merchantOrderNo"), channelTrxNo: query.get("channelTrxNo") }) };
+        merchantOrderNo: query.get("merchantOrderNo"), channelTrxNo: query.get("channelTrxNo"), subjectUserId }) };
   }
   throw notFound();
 }

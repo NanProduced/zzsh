@@ -4,6 +4,7 @@ import { readOrderPaymentSummary, type AdminOrderPaymentSummary, type AdminPayme
 import { exactCents } from "./finance-money";
 import { readAdminOrderRefundSummary } from "./channel-finance-read";
 import { nativeProjection } from "./personal-withdrawal-history";
+import { gameScopeSql } from "../auth/admin-scope";
 
 type Client = PoolClient;
 type Row = Record<string, unknown>;
@@ -25,10 +26,10 @@ declare const channelEvidenceScopeBrand: unique symbol;
 export type ChannelEvidenceReadScope = Readonly<{ readonly [channelEvidenceScopeBrand]: "ChannelEvidenceReadScope" }>;
 type ReadableOrderIdLoader = (client: Client, orderIds: readonly string[]) => Promise<readonly string[]>;
 type ScopeData = Readonly<{ database: string; runtimeUser: string; adminId: string; merchantIds: ReadonlySet<string>;
-  financeReadable: boolean; orderReadable: boolean; userReadable: boolean;
+  financeReadable: boolean; orderReadable: boolean; userReadable: boolean; isBoss: boolean;
   readableOrderIds: ReadonlySet<string>; readableUserIds: ReadonlySet<string>; loadReadableOrderIds?: ReadableOrderIdLoader }>;
 export type ChannelEvidenceScopeInput = Readonly<{ database: string; runtimeUser: string; adminId: string;
-  merchantIds: readonly string[]; financeReadable: boolean; orderReadable: boolean; userReadable: boolean;
+  merchantIds: readonly string[]; financeReadable: boolean; orderReadable: boolean; userReadable: boolean; isBoss?: boolean;
   readableOrderIds?: readonly string[]; readableUserIds?: readonly string[]; loadReadableOrderIds?: ReadableOrderIdLoader }>;
 const scopeRegistry = new WeakMap<object, ScopeData>();
 
@@ -41,9 +42,10 @@ const notFound = () => new SecurityApiError(404, "NOT_FOUND", "Channel evidence 
 export function createChannelEvidenceReadScope(input: ChannelEvidenceScopeInput): ChannelEvidenceReadScope {
   if (!input || typeof input !== "object") throw invalid("Invalid channel evidence scope");
   const { database, runtimeUser, adminId, merchantIds, financeReadable, orderReadable, userReadable, loadReadableOrderIds } = input;
+  const isBoss = input.isBoss ?? false;
   if (typeof database !== "string" || !WIDE_ID.test(database) || typeof runtimeUser !== "string" || !WIDE_ID.test(runtimeUser)
     || typeof adminId !== "string" || !WIDE_ID.test(adminId) || !Array.isArray(merchantIds) || merchantIds.length > 256
-    || typeof financeReadable !== "boolean" || typeof orderReadable !== "boolean" || typeof userReadable !== "boolean"
+    || typeof financeReadable !== "boolean" || typeof orderReadable !== "boolean" || typeof userReadable !== "boolean" || typeof isBoss !== "boolean"
     || loadReadableOrderIds !== undefined && typeof loadReadableOrderIds !== "function") {
     throw invalid("Invalid channel evidence scope");
   }
@@ -60,7 +62,7 @@ export function createChannelEvidenceReadScope(input: ChannelEvidenceScopeInput)
   const readableOrderIds = objectIds(input.readableOrderIds), readableUserIds = objectIds(input.readableUserIds);
   const token = Object.freeze({}) as ChannelEvidenceReadScope;
   scopeRegistry.set(token, Object.freeze({ database, runtimeUser, adminId, merchantIds: merchants,
-    financeReadable, orderReadable, userReadable, readableOrderIds, readableUserIds, loadReadableOrderIds }));
+    financeReadable, orderReadable, userReadable, isBoss, readableOrderIds, readableUserIds, loadReadableOrderIds }));
   return token;
 }
 
@@ -79,6 +81,13 @@ function requireMerchant(data: ScopeData, merchantIdentityId: unknown): string {
 function requireStoredMerchant(data: ScopeData, value: unknown): string {
   if (typeof value !== "string" || !ID.test(value)) throw unavailable("Channel evidence merchant binding is unavailable");
   return requireMerchant(data, value);
+}
+
+function scopedSubject(data: ScopeData, value: string | undefined): string | null {
+  if (value === undefined) return null;
+  if (typeof value !== "string" || !WIDE_ID.test(value)) throw invalid("Invalid channel evidence user");
+  if (!data.financeReadable || !data.userReadable || !data.readableUserIds.has(value)) throw forbidden("User-scoped channel evidence is not authorized");
+  return value;
 }
 
 /** 真实资源核验只读 current_database/current_user；调用方必须复用同一已有 client/事务。 */
@@ -665,11 +674,12 @@ const WITHDRAWAL_REDACTED_COLUMNS = ["id", "state", "requires_review", "accepted
 
 /** 只读原 intent 冻结字段；不查当前绑定卡、不解密、不调用用户history入口。 */
 export async function readAdminChannelWithdrawalEvidence(client: Client, scope: ChannelEvidenceReadScope, input: {
-  intentId: string; merchantIdentityId: string;
+  intentId: string; merchantIdentityId: string; subjectUserId?: string;
 }): Promise<ChannelWithdrawalEvidence> {
   const data = scopeData(scope);
   if (!input || typeof input !== "object") throw invalid("Invalid withdrawal evidence request");
   const merchantIdentityId = requireMerchant(data, input.merchantIdentityId);
+  const subjectUserId = scopedSubject(data, input.subjectUserId);
   if (typeof input.intentId !== "string" || !WIDE_ID.test(input.intentId)) throw invalid("Invalid withdrawal intent");
   const asOf = await assertResource(client, data);
   const finance = data.financeReadable;
@@ -683,8 +693,8 @@ export async function readAdminChannelWithdrawalEvidence(client: Client, scope: 
        destination_id,destination_revision,admission_canonical,admission_sha256,${utc("accepted_at")} AS accepted_at,
        merchant_identity_id,economic_root_id,reserve_event_id,terminal_evidence_id`
     : `id,state,requires_review,${utc("accepted_at")} AS accepted_at,merchant_identity_id`}
-    FROM zzsh_order.joinpay_withdrawal_intent WHERE id=$1 AND merchant_identity_id=$2 LIMIT 2`,
-  [input.intentId, merchantIdentityId])).rows;
+    FROM zzsh_order.joinpay_withdrawal_intent WHERE id=$1 AND merchant_identity_id=$2${subjectUserId ? " AND user_id=$3" : ""} LIMIT 2`,
+  [input.intentId, merchantIdentityId, ...(subjectUserId ? [subjectUserId] : [])])).rows;
   if (rows.length === 0) return emptyWithdrawal(input.intentId, merchantIdentityId, asOf, "NOT_FOUND_LOCAL",
     "LOCAL_WITHDRAWAL_INTENT_NOT_REGISTERED_OR_NOT_AUTHORIZED");
   if (rows.length > 1) return emptyWithdrawal(input.intentId, merchantIdentityId, asOf, "UNAVAILABLE",
@@ -717,6 +727,7 @@ export async function readAdminChannelWithdrawalEvidence(client: Client, scope: 
   }
   const rowUserId = id(row.user_id);
   if (!rowUserId) return emptyWithdrawal(input.intentId, merchantIdentityId, asOf, "UNAVAILABLE", "WITHDRAWAL_USER_BINDING_UNREADABLE");
+  if (subjectUserId && rowUserId !== subjectUserId) return emptyWithdrawal(input.intentId, merchantIdentityId, asOf, "NOT_FOUND_LOCAL", "LOCAL_WITHDRAWAL_INTENT_NOT_REGISTERED_OR_NOT_AUTHORIZED");
   let projected: ReturnType<typeof nativeProjection>;
   try { projected = nativeProjection(row, rowUserId); }
   catch (error) {
@@ -764,6 +775,7 @@ export type ChannelOriginalCandidate = Readonly<{
   orderId: string | null;
   postingId: string | null;
   userId: string | null;
+  subjectRole?: "RENTER" | "OWNER" | "BOTH" | "WITHDRAWER";
   merchantIdentityId: string;
   merchantOrderNo: string;
   channelTrxNo: string | null;
@@ -822,17 +834,21 @@ function searchFailure(status: ChannelOriginalSearch["status"], input: { merchan
 /** 产品族白名单 + 稳定商户 + 精确原号；同号跨商户/跨产品不会串单，两线索必须同时命中。 */
 export async function searchAdminChannelOriginals(client: Client, scope: ChannelEvidenceReadScope, input: {
   merchantIdentityId: string; productFamily: ChannelProductFamily; merchantOrderNo?: string | null;
-  channelTrxNo?: string | null; limit?: number;
+  channelTrxNo?: string | null; limit?: number; subjectUserId?: string;
 }): Promise<ChannelOriginalSearch> {
   const data = scopeData(scope);
   if (!input || typeof input !== "object") throw invalid("Invalid original search request");
   const merchantIdentityId = requireMerchant(data, input.merchantIdentityId);
+  const subjectUserId = scopedSubject(data, input.subjectUserId);
   if (!CHANNEL_EVIDENCE_PRODUCTS.includes(input.productFamily)) throw invalid("Unsupported channel product family");
   if (!data.financeReadable) throw forbidden("Finance read permission is required for exact original search");
+  if (subjectUserId && input.productFamily !== "PAYOUT" && !data.orderReadable) throw forbidden("Order read permission is required for user-scoped order evidence");
   const query = validateSearchInput(input);
   const asOf = await assertResource(client, data);
   const reasons: string[] = [];
   const echo = { merchantIdentityId, productFamily: input.productFamily, ...query };
+  if (subjectUserId && input.productFamily !== "PAYOUT" && !await schemaReady(client, "zzsh_order.rental_order", ["id", "owner_user_id", "renter_user_id", "game_id"]))
+    return searchFailure("NOT_INTEGRATED", echo, asOf, "ORDER_PARTY_SCOPE_UNAVAILABLE");
 
   if (input.productFamily === "ALIPAY_NATIVE" || input.productFamily === "WEIXIN_NATIVE") {
     add(reasons, "PAYMENT_TRANSACTION_LOOKUP_ANCHORS_ONLY");
@@ -845,8 +861,9 @@ export async function searchAdminChannelOriginals(client: Client, scope: Channel
     }
     const rows = (await client.query<Row>(`SELECT r.id AS request_id,r.order_id,r.merchant_identity_id,
         r.channel_order_no AS merchant_order_no,r.method,r.state,r.amount_cents::text AS amount_cents,r.currency,
-        r.evidence_level,${utc("r.created_at")} AS recorded_at,t.channel_trx_no
+        r.evidence_level,${utc("r.created_at")} AS recorded_at,t.channel_trx_no${subjectUserId ? ",scope_order.owner_user_id AS scope_owner_id,scope_order.renter_user_id AS scope_renter_id" : ""}
       FROM zzsh_order.payment_request r
+      ${subjectUserId ? "JOIN zzsh_order.rental_order scope_order ON scope_order.id=r.order_id" : ""}
       LEFT JOIN LATERAL (SELECT x.id,x.created_at,x.channel_trx_no
         FROM zzsh_order.payment_channel_transaction x
         WHERE x.request_id=r.id AND x.channel='JOINPAY' AND x.merchant_identity_id=$1
@@ -854,9 +871,10 @@ export async function searchAdminChannelOriginals(client: Client, scope: Channel
         ORDER BY x.created_at DESC,x.id COLLATE "C" DESC) t ON TRUE
       WHERE r.channel='JOINPAY' AND r.merchant_identity_id=$1 AND r.method=$2
         AND ($3::text IS NULL OR r.channel_order_no=$3) AND ($4::text IS NULL OR t.channel_trx_no IS NOT NULL)
+        ${subjectUserId ? `AND (scope_order.owner_user_id=$6 OR scope_order.renter_user_id=$6) AND ${gameScopeSql("scope_order.game_id", "$7", "$8")}` : ""}
       ORDER BY r.created_at DESC,r.id COLLATE "C" DESC,t.created_at DESC,t.id COLLATE "C" DESC LIMIT $5`,
-    [merchantIdentityId, input.productFamily, query.merchantOrderNo, query.channelTrxNo, query.limit + 1])).rows;
-    return mapSearchRows(client, "COLLECTION", rows, echo, asOf, query, data, reasons);
+    [merchantIdentityId, input.productFamily, query.merchantOrderNo, query.channelTrxNo, query.limit + 1, ...(subjectUserId ? [subjectUserId, data.adminId, data.isBoss] : [])])).rows;
+    return mapSearchRows(client, "COLLECTION", rows, echo, asOf, query, data, reasons, subjectUserId);
   }
   if (input.productFamily === "REFUND") {
     if (!await schemaReady(client, "zzsh_order.channel_refund_intent",
@@ -868,15 +886,17 @@ export async function searchAdminChannelOriginals(client: Client, scope: Channel
     const rows = (await client.query<Row>(`SELECT i.id AS intent_id,i.order_id,i.merchant_identity_id,i.posting_id,
         i.refund_order_no,i.original_payment_order_no,i.provider_refund_trx_no,i.original_payment_trx_no,i.state,
         i.budget_disposition,i.amount_cents::text AS amount_cents,i.currency,i.evidence_level,i.requires_review,
-        i.terminal_evidence_id,${utc("i.created_at")} AS recorded_at
+        i.terminal_evidence_id,${utc("i.created_at")} AS recorded_at${subjectUserId ? ",scope_order.owner_user_id AS scope_owner_id,scope_order.renter_user_id AS scope_renter_id" : ""}
       FROM zzsh_order.channel_refund_intent i
+      ${subjectUserId ? "JOIN zzsh_order.rental_order scope_order ON scope_order.id=i.order_id" : ""}
       WHERE i.payment_source='JOINPAY' AND i.merchant_identity_id=$1 AND (
         ($2::text IS NOT NULL AND i.refund_order_no=$2 AND ($3::text IS NULL OR i.provider_refund_trx_no=$3))
         OR ($2::text IS NOT NULL AND i.original_payment_order_no=$2 AND ($3::text IS NULL OR i.original_payment_trx_no=$3))
         OR ($2::text IS NULL AND $3::text IS NOT NULL AND (i.provider_refund_trx_no=$3 OR i.original_payment_trx_no=$3)))
+      ${subjectUserId ? `AND (scope_order.owner_user_id=$5 OR scope_order.renter_user_id=$5) AND ${gameScopeSql("scope_order.game_id", "$6", "$7")}` : ""}
       ORDER BY i.created_at DESC,i.id COLLATE "C" DESC LIMIT $4`,
-    [merchantIdentityId, query.merchantOrderNo, query.channelTrxNo, query.limit + 1])).rows;
-    return mapSearchRows(client, "REFUND", rows, echo, asOf, query, data, reasons);
+    [merchantIdentityId, query.merchantOrderNo, query.channelTrxNo, query.limit + 1, ...(subjectUserId ? [subjectUserId, data.adminId, data.isBoss] : [])])).rows;
+    return mapSearchRows(client, "REFUND", rows, echo, asOf, query, data, reasons, subjectUserId);
   }
   if (!await schemaReady(client, "zzsh_order.joinpay_withdrawal_intent",
     ["id", "user_id", "merchant_identity_id", "merchant_order_no", "platform_serial_no", "state", "funds_disposition",
@@ -891,9 +911,10 @@ export async function searchAdminChannelOriginals(client: Client, scope: Channel
     FROM zzsh_order.joinpay_withdrawal_intent i
     WHERE i.merchant_identity_id=$1 AND ($2::text IS NULL OR i.merchant_order_no=$2)
       AND ($3::text IS NULL OR i.platform_serial_no=$3)
+      ${subjectUserId ? "AND i.user_id=$5" : ""}
     ORDER BY i.accepted_at DESC,i.id COLLATE "C" DESC LIMIT $4`,
-  [merchantIdentityId, query.merchantOrderNo, query.channelTrxNo, query.limit + 1])).rows;
-  return mapSearchRows(client, "PAYOUT", rows, echo, asOf, query, data, reasons);
+  [merchantIdentityId, query.merchantOrderNo, query.channelTrxNo, query.limit + 1, ...(subjectUserId ? [subjectUserId] : [])])).rows;
+  return mapSearchRows(client, "PAYOUT", rows, echo, asOf, query, data, reasons, subjectUserId);
 }
 
 const REQUEST_STATES = ["NONE", "SUBMITTING", "UNKNOWN", "ACTION_READY", "PROCESSING_UNCONFIRMED", "REJECTED_BY_CHANNEL",
@@ -906,7 +927,7 @@ const FUNDS = ["RESERVED", "PAYOUT_POSTED", "RELEASE_POSTED"];
 async function mapSearchRows(client: Client, kind: "COLLECTION" | "REFUND" | "PAYOUT", rows: Row[],
   echo: { merchantIdentityId: string; productFamily: ChannelProductFamily; merchantOrderNo: string | null; channelTrxNo: string | null; limit: number },
   asOf: string, query: { merchantOrderNo: string | null; channelTrxNo: string | null; limit: number }, data: ScopeData,
-  reasons: string[]): Promise<ChannelOriginalSearch> {
+  reasons: string[], subjectUserId: string | null): Promise<ChannelOriginalSearch> {
   const candidates: ChannelOriginalCandidate[] = [];
   const page = rows.slice(0, query.limit);
   let readableOrderIds = data.readableOrderIds;
@@ -915,6 +936,15 @@ async function mapSearchRows(client: Client, kind: "COLLECTION" | "REFUND" | "PA
     if (orderIds.length) readableOrderIds = new Set([...readableOrderIds, ...await data.loadReadableOrderIds(client, orderIds)]);
   }
   for (const row of page) {
+    let subjectRole: ChannelOriginalCandidate["subjectRole"];
+    if (subjectUserId) {
+      if (kind === "PAYOUT") subjectRole = row.user_id === subjectUserId ? "WITHDRAWER" : undefined;
+      else if (id(row.scope_owner_id) && id(row.scope_renter_id)) {
+        const owner = row.scope_owner_id === subjectUserId, renter = row.scope_renter_id === subjectUserId;
+        subjectRole = owner && renter ? "BOTH" : owner ? "OWNER" : renter ? "RENTER" : undefined;
+      }
+      if (!subjectRole) return searchFailure("UNAVAILABLE", echo, asOf, "SEARCH_USER_BINDING_MISMATCH");
+    }
     const merchantIdentityId = id(row.merchant_identity_id);
     const recordedAt = iso(row.recorded_at);
     if (!recordedAt) add(reasons, "RECORD_TIME_UNREADABLE");
@@ -932,6 +962,7 @@ async function mapSearchRows(client: Client, kind: "COLLECTION" | "REFUND" | "PA
       const state = typeof row.state === "string" && REQUEST_STATES.includes(row.state) ? row.state : "UNKNOWN";
       if (state === "UNKNOWN") add(reasons, "UNKNOWN_LOCAL_STATE");
       candidates.push({ sourceFamily: "JOINPAY", productFamily: echo.productFamily, objectKind: "PAYMENT_REQUEST", objectId,
+        ...(subjectRole ? { subjectRole } : {}),
         requestId: objectId, orderId: data.orderReadable && orderIdRaw && readableOrderIds.has(orderIdRaw) ? orderIdRaw : null, postingId: null, userId: null,
         merchantIdentityId, merchantOrderNo, channelTrxNo, amount, state,
         evidenceLevel: code(row.evidence_level) ?? "UNKNOWN", recordedAt,
@@ -977,6 +1008,7 @@ async function mapSearchRows(client: Client, kind: "COLLECTION" | "REFUND" | "PA
       const requiresReview = typeof row.requires_review === "boolean" ? row.requires_review : null;
       if (requiresReview === null) add(reasons, "LOCAL_REVIEW_FLAG_UNREADABLE");
       candidates.push({ sourceFamily: "JOINPAY", productFamily: "REFUND", objectKind: "REFUND_INTENT", objectId,
+        ...(subjectRole ? { subjectRole } : {}),
         requestId: null, orderId: data.orderReadable && orderIdRaw && readableOrderIds.has(orderIdRaw) ? orderIdRaw : null, postingId, userId: null,
         merchantIdentityId, merchantOrderNo, channelTrxNo: providerTrx, amount, state,
         evidenceLevel: code(row.evidence_level) ?? "UNKNOWN", recordedAt,
@@ -1013,6 +1045,7 @@ async function mapSearchRows(client: Client, kind: "COLLECTION" | "REFUND" | "PA
     const requiresReview = typeof row.requires_review === "boolean" ? row.requires_review : null;
     if (requiresReview === null) add(reasons, "LOCAL_REVIEW_FLAG_UNREADABLE");
     candidates.push({ sourceFamily: "JOINPAY", productFamily: "PAYOUT", objectKind: "JOINPAY_WITHDRAWAL_INTENT", objectId,
+      ...(subjectRole ? { subjectRole } : {}),
       requestId: null, orderId: null, postingId: null, userId,
       merchantIdentityId, merchantOrderNo, channelTrxNo: platformSerial, amount, state,
       evidenceLevel: "LOCAL_RECORDS_NOT_REVALIDATED", recordedAt,

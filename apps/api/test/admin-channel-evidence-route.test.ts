@@ -11,8 +11,8 @@ class FakeClient { calls: { sql: string; values: readonly unknown[] }[] = [];
   constructor(private readonly respond: (sql: string, values: readonly unknown[]) => Row[]) {}
   async query(sql: string, values: readonly unknown[] = []) { this.calls.push({ sql, values }); return { rows: this.respond(sql, values), rowCount: 0 }; } }
 const access = (merchants: string[] = [MERCHANT]) => ({ database: DB, runtimeUser: USER, merchantIdsByAdmin: new Map([[ADMIN, new Set(merchants)]]) });
-const actor = (o: { finance?: boolean; order?: boolean; boss?: boolean } = {}) => ({ userId: ADMIN, complete: o.finance ?? true,
-  relations: { adminId: ADMIN, isBoss: o.boss ?? false, orderRead: o.order ?? true } });
+const actor = (o: { finance?: boolean; order?: boolean; boss?: boolean; directory?: boolean } = {}) => ({ userId: ADMIN, complete: o.finance ?? true,
+  relations: { adminId: ADMIN, isBoss: o.boss ?? false, orderRead: o.order ?? true, userDirectoryRead: o.directory ?? false } });
 const respond = (orders: Row[]) => (sql: string): Row[] => sql.includes("current_database() AS database") ? [{ database: DB, runtime_user: USER, as_of: AS_OF }]
   : sql.includes("to_regclass") && !sql.includes("all_orders") ? [{ ready: false }] : sql.includes("all_orders") ? orders : [];
 const rejects = (p: Promise<unknown>, status: number, code: string) => assert.rejects(p, (e: Error & { status?: number; code?: string }) => e.status === status && e.code === code);
@@ -48,6 +48,17 @@ test("withdrawal and original reads only accept server-granted merchants", async
   await rejects(readAdminChannelEvidenceRoute(pool(c), actor(), `channel-evidence/originals/${MERCHANT}`, q("productFamily=CARD"), access()), 400, "INVALID_ARGUMENT");
   await rejects(readAdminChannelEvidenceRoute(pool(c), actor(), `channel-evidence/originals/${MERCHANT}`, q("productFamily=PAYOUT&merchantIdentityId=mi_x"), access()), 400, "INVALID_ARGUMENT");
   assert.equal(c.calls.length, 0);
+});
+
+test("user-scoped channel evidence requires both user-directory and finance access", async () => {
+  const c = new FakeClient(respond([]));
+  const search = `channel-evidence/originals/${MERCHANT}`, query = q("productFamily=PAYOUT&merchantOrderNo=W1&subjectUserId=user_1");
+  await rejects(readAdminChannelEvidenceRoute(pool(c), actor(), search, query, access()), 403, "FORBIDDEN");
+  await rejects(readAdminChannelEvidenceRoute(pool(c), actor({ finance: false, directory: true }), search, query, access()), 403, "FORBIDDEN");
+  assert.equal(c.calls.length, 0);
+  const allowed = await readAdminChannelEvidenceRoute(pool(c), actor({ directory: true }), search, query, access());
+  assert.equal(allowed.kind, "ORIGINAL_SEARCH");
+  await rejects(readAdminChannelEvidenceRoute(pool(c), actor({ directory: true }), search, q("productFamily=PAYOUT&merchantOrderNo=W1&subjectUserId=user_1&subjectUserId=user_2"), access()), 400, "INVALID_ARGUMENT");
 });
 
 for (const family of ["ALIPAY_NATIVE", "REFUND"] as const) {

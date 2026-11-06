@@ -48,7 +48,7 @@ async function mount(t,options={}) {
     if(address.pathname.endsWith('/rental-accounts'))return json({items:[],nextCursor:null});
     if(address.pathname.endsWith('/audit-events'))return json({items:[],nextCursor:null});
     if(address.pathname.endsWith('/membership-growth'))return json({subjectId:address.pathname.split('/')[4]||'user_normal',growth:{knowledge:'KNOWN',sourceState:'COMPLETE',benefitsState:'CONFIGURED',normalTier:'GOLD',effectiveTier:'GOLD',blackGold:'NOT_QUALIFIED',grace:null},entitlements:[{id:'ent-1',kind:'FRIEND',scopeKey:'friend',startsAtUtc:'2026-01-01T00:00:00Z',endsAtUtc:'2026-12-31T23:59:59Z',status:'ACTIVE',label:'密友礼遇',depositWaived:true}]});
-    if(address.pathname.includes('/finance/subjects/'))return json({wallet:{buckets:{available:{amountCents:'15000',knowledge:'KNOWN'},reserved:{amountCents:'5000',knowledge:'KNOWN'},restricted:{amountCents:'0',knowledge:'KNOWN'},pendingEarnings:{amountCents:'2000',knowledge:'KNOWN'},refundPayable:{amountCents:'0',knowledge:'KNOWN'}},withdrawable:{amountCents:'15000',reasonCodes:[]},coverage:{knowledge:'KNOWN',cutoff:'2026-10-18T00:00:00Z'}}});
+    if(address.pathname.endsWith('/finance/activity/channels'))return json({items:[],total:0});
     if(address.pathname==='/api/bff/admin/security/users/restore')return failure(404);
     if(address.pathname==='/api/bff/admin/security/users/freeze'||address.pathname==='/api/bff/admin/security/users/unfreeze'){if(options.restore==='pending')throw new Error('Injected response loss');if(typeof options.restore==='number')return failure(options.restore);restored=true;writtenStatus=address.pathname.endsWith('/freeze')?'FROZEN':'ACTIVE';return json({status:writtenStatus});}
     if(restored&&readbackFailures>0){readbackFailures-=1;return failure(options.detailErrorAfterRestore);}
@@ -420,17 +420,17 @@ test('U-DETAIL: finance section performs independent read of wallet in CENT and 
     permissions: [...permissions, 'finance.read'],
     fetch: async address => address.pathname.endsWith('/consumption')
       ? json({subjectId:'user_normal',knowledge:'UNKNOWN',amountCents:null,knownAmountCents:'0',components:{haffRentCents:null,itemConsumptionCents:null,earlyMakeupCents:null,renterFeeCents:null},total:0,unknownCount:0,page:1,pageSize:20,items:[]})
-      : address.pathname.includes('/finance/subjects/')
-        ? json({documents:[{ref:'synthetic-withdrawal',number:'SYNTHETIC-WITHDRAWAL',kind:'WITHDRAWAL',state:'RESERVED',occurredAt:user.createdAt,requestedAmountCents:'5000',amounts:[{bucket:'RESERVED',knownNetCents:'5000',unknownCount:0}]}]})
+      : address.pathname.endsWith('/finance/activity/channels')
+        ? json({total:1,items:[{id:'synthetic-withdrawal',number:'SYNTHETIC-WITHDRAWAL',kind:'WITHDRAWAL',subjectRole:'WITHDRAWER',state:'RESERVED',occurredAt:user.createdAt,amountCents:'5000',amountLabel:'渠道出款金额',documentRef:'JOINPAY_WITHDRAWAL:synthetic-withdrawal'}]})
         : json({user:{...detail,userId:'user_normal',walletSummary:{state:'ready',amountCents:'15000'}}})
   });
   await waitFor(() => browser.document.querySelector('[data-user-detail-finance]')?.textContent.includes('SYNTHETIC-WITHDRAWAL'));
   const text = browser.document.querySelector('[data-user-detail-finance]').textContent;
-  assert.ok(calls.some(c => c.url.includes('/finance/subjects/')));
+  const activity=calls.find(c => c.url.includes('/finance/activity/channels'));assert.ok(activity);assert.equal(new URL(activity.url,browser.location.href).searchParams.get('subjectUserId'),'user_normal');
   assert.ok(text.includes('150.00 元'));
   assert.ok(text.includes('50.00 元'),'reserved cents remain readable in the relevant financial document');
   assert.ok(text.includes('未记录'),'unknown consumption is not inferred from available balance');
-  assert.ok(namedButton('完整资金核对'));
+  assert.ok(namedButton('查看用户资金详情'));
 });
 
 const growthSectionFetch = (growth, entitlements) => async address => {

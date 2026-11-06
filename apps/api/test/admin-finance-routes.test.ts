@@ -6,6 +6,8 @@ import { financeSnapshot } from "../src/finance/admin-finance-read";
 import * as overview from "../src/finance/admin-finance-overview";
 import * as activity from "../src/finance/admin-finance-activity";
 import * as dashboard from "../src/finance/admin-finance-dashboard";
+import * as channelEvidence from "../src/finance/admin-channel-evidence-read";
+import { SecurityApiError } from "../src/auth/security-core";
 import "./admin-finance-dashboard.test";
 
 function environment(permissions = ["finance.read", "finance.document.read"], financeSql?: FinanceSqlFixture) {
@@ -60,7 +62,7 @@ function environment(permissions = ["finance.read", "finance.document.read"], fi
 async function request(options: AdminFinanceOptions, route: string, query = "") {
   const result = { status: 200, json: undefined as any, bytes: undefined as Buffer | undefined, headers: {} as Record<string, string>, events: new Map<string, () => void>() };
   const response = { headersSent: false, status(code: number) { result.status = code; return this; }, setHeader(name: string, value: string | string[]) { result.headers[name] = Array.isArray(value) ? value.join(",") : value; return this; }, json(body: unknown) { result.json = body; }, send(body: unknown) { assert.ok(Buffer.isBuffer(body)); result.bytes = body; }, end() {}, once(event: string, callback: () => void) { result.events.set(event, callback); } };
-  const parameters=route==='overview'||route.startsWith('activity/')||route.startsWith('dashboard/')?query:`from=2026-10-03&to=2026-10-03${query ? "&" + query : ""}`;
+  const parameters=route==='overview'||route.startsWith('activity/')||route.startsWith('dashboard/')||route.startsWith('channel-evidence/')?query:`from=2026-10-03&to=2026-10-03${query ? "&" + query : ""}`;
   await handleAdminFinanceRead({ method: "GET", originalUrl: `/api/v1/admin/finance/${route}?${parameters}`, headers: { origin: options.adminOrigin } }, response, options);
   return result;
 }
@@ -74,6 +76,15 @@ test('dashboard applies finance, order and directory permissions and rechecks re
  assert.ok(allowed.state.statements.includes('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY'));assert.ok(allowed.state.statements.includes('ROLLBACK'));
  const revoked=environment(['finance.read','order.read','user.directory.read']);revoked.state.revokeOnPrepare=true;
  assert.equal((await request(revoked.options,'dashboard/customers')).status,403);assert.equal(reads,2);
+});
+test('user-scoped channel searches require directory permission and recheck it before returning',async t=>{
+ let reads=0;
+ t.mock.method(channelEvidence,'readAdminChannelEvidenceRoute',async(_client:unknown,actor:{relations:{userDirectoryRead?:boolean}})=>{reads++;if(!actor.relations.userDirectoryRead)throw new SecurityApiError(403,'FORBIDDEN','Directory permission required');return {contractVersion:'admin-channel-evidence.read.v1',kind:'ORIGINAL_SEARCH' as const,bankArrival:'UNKNOWN' as const,search:{status:'NOT_FOUND_LOCAL'} as never};});
+ const query='productFamily=PAYOUT&merchantOrderNo=M1&subjectUserId=u1';
+ const denied=environment(['finance.read','order.read']);assert.equal((await request(denied.options,'channel-evidence/originals/merchant',query)).status,403);
+ const allowed=environment(['finance.read','order.read','user.directory.read']);assert.equal((await request(allowed.options,'channel-evidence/originals/merchant',query)).status,200);
+ const revoked=environment(['finance.read','order.read','user.directory.read']);revoked.state.revokeOnPrepare=true;assert.equal((await request(revoked.options,'channel-evidence/originals/merchant',query)).status,403);
+ assert.equal(reads,3);
 });
 test('contribution detail requires directory permission for a specific customer', async t => {
  let reads=0;
@@ -102,6 +113,17 @@ test('document-only access can search channel records by exact reference without
  assert.equal((await request(partial.options,'activity/balances','q=u1')).status,403);
  const result=await request(partial.options,'activity/channels','q=PAY-123');assert.equal(result.status,200);assert.equal(exactMode,true);assert.equal(reads,1);
  const full=environment(['finance.read']);assert.equal((await request(full.options,'activity/channels')).status,200);assert.equal(exactMode,false);
+});
+
+test('user-scoped activity requires finance and directory permissions and rechecks them',async t=>{
+ let reads=0;
+ t.mock.method(activity,'readAdminChannelActivity',async()=>{reads++;return {version:'admin.finance-channel-activity.v1',asOf:'2026-01-01T00:00:00.000Z',page:1,pageSize:20,total:0,hasMore:false,items:[]};});
+ const documentOnly=environment(['finance.document.read','user.directory.read']);
+ assert.equal((await request(documentOnly.options,'activity/channels','subjectUserId=u1&q=PAY-1')).status,403);assert.equal(reads,0);
+ const noDirectory=environment(['finance.read']);assert.equal((await request(noDirectory.options,'activity/channels','subjectUserId=u1')).status,403);assert.equal(reads,0);
+ const allowed=environment(['finance.read','user.directory.read']);assert.equal((await request(allowed.options,'activity/channels','subjectUserId=u1')).status,200);assert.equal(reads,1);
+ const revoked=environment(['finance.read','user.directory.read']);revoked.state.beforeSecondTransaction=()=>{revoked.state.permissions=['finance.read'];};
+ assert.equal((await request(revoked.options,'activity/channels','subjectUserId=u1')).status,403);assert.equal(reads,2);
 });
 
 test('finance overview is pure read-only, finance.read scoped, bounded, and reauthorizes before delivery',async t=>{

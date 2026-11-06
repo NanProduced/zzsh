@@ -216,9 +216,6 @@ test('a full reload fallback preserves public finance filters but cannot navigat
   globalThis.fetch=async url=>response(payload(url,{document,entries:[],evidence:{},related:[]}));const ui=await setup(t,'reload-return','/finance/documents/WITHDRAWAL%3Aw1');const path='/finance?q=20260913125844629986&page=2&kind=WITHDRAWAL';ui.props.tab.query={origin:'lost-token',financeReturn:path};ui.clearFinanceContexts();await ui.render();await until(()=>ui.node.textContent.includes('申请一'));await act(async()=>[...ui.node.querySelectorAll('button')].find(button=>button.textContent==='返回来源').click());assert.equal(ui.opened.at(-1)[0],path);
   assert.equal(ui.financeOriginPath(undefined,{...ui.props.snapshot,permissions:[]},path),undefined);assert.equal(ui.financeOriginPath(undefined,ui.props.snapshot,'https://example.com/finance'),undefined);
 });
-test('wallet unknown remains unknown even when an inconsistent payload includes zero cents',async t=>{
-  globalThis.fetch=async url=>response(payload(url,{subject:{id:'u1',name:'用户一'},wallet:{buckets:{available:{amountCents:'0',knowledge:'UNKNOWN',scope:'POSTED_LEDGER_ONLY'}},withdrawable:{amountCents:null,reasonCodes:[]},coverage:{knowledge:'UNKNOWN'},snapshotVersion:'v1'}}));const ui=await setup(t,'wallet-unknown','/finance/users/u1');await ui.render();await until(()=>ui.node.textContent.includes('资金来源覆盖'));assert.equal(ui.node.querySelector('.finance-wallet dd').textContent,'未记录');assert.match(ui.node.textContent,/仅已入账账本/);
-});
 test('R1 formatted phone API gate and explicit unknown distribution action fail closed',async t=>{
   globalThis.fetch=async url=>response(payload(url));const ui=await setup(t,'r1-pure-gates');await ui.render();
   for(const q of ['+86 (138) 1234-5678','138.1234.5678','＋８６（１３８）１２３４－５６７８','备注 138.1234.5678'])assert.throws(()=>ui.formats.financeQuery({...ui.formats.defaultFinanceFilters(false),q}),q);
@@ -302,6 +299,26 @@ test('finance detail without settlement business retains review status in the he
  await act(async()=>[...ui.node.querySelectorAll('button')].find(x=>x.textContent==='复制摘要').click());assert.match(ui.node.querySelector('textarea[aria-label="核对摘要"]').value,/本站接纳付款：异常收款需复核/);
 });
 
+test('channel page explains disabled query capabilities without sending provider requests',async t=>{
+ const calls=[];globalThis.fetch=async(url,init)=>{calls.push({url:String(url),method:init?.method??'GET'});return response({payout:{configured:false},collection:{configured:false}});};
+ const ui=await setup(t,'channel-unavailable','/finance/channels',['finance.read','finance.withdrawal.query','order.settlement.write'],'channels');
+ await ui.render();await until(()=>ui.node.textContent.includes('当前环境未接入提现查询'));
+ assert.match(ui.node.textContent,/当前环境未接入收款查询/);
+ assert.equal([...ui.node.querySelectorAll('button')].find(button=>button.textContent==='向汇聚查询提现').disabled,true);
+ assert.equal([...ui.node.querySelectorAll('button')].find(button=>button.textContent==='向汇聚查询收款').disabled,true);
+ assert.ok(calls.every(call=>call.method==='GET'&&call.url.includes('/worker-status')));
+});
+
+test('channel query controls wait for a verified capability status and allow retry after a read error',async t=>{
+ let reads=0;globalThis.fetch=async(url,init)=>{assert.equal(init?.method??'GET','GET');reads++;return reads===1?response({error:{code:'EVIDENCE_UNAVAILABLE'}},503):response({payout:{configured:true},collection:{configured:true}});};
+ const ui=await setup(t,'channel-retry','/finance/channels',['finance.read','finance.withdrawal.query','order.settlement.write'],'channels');
+ await ui.render();await until(()=>ui.node.textContent.includes('渠道查询状态暂不可读取'));
+ const payout=()=>[...ui.node.querySelectorAll('button')].find(button=>button.textContent==='向汇聚查询提现');
+ assert.equal(payout().disabled,true);
+ await act(async()=>[...ui.node.querySelectorAll('button')].find(button=>button.textContent==='重试').click());
+ await until(()=>payout().disabled===false);assert.equal(reads,2);
+});
+
 test('JoinPay lookup uses exact channel serial and links only API-scoped orders with a private return context',async t=>{
  const requests=[];
  globalThis.fetch=async url=>{
@@ -318,7 +335,7 @@ test('JoinPay lookup uses exact channel serial and links only API-scoped orders 
  ui.props.tab={...ui.props.tab,query:{evidenceOrigin:initial}};
  await ui.render();
  await until(()=>ui.node.textContent.includes('查看关联订单'));
- assert.equal(ui.node.querySelectorAll('table button').length,1);
+ assert.equal([...ui.node.querySelectorAll('table button')].filter(button=>button.textContent==='查看关联订单').length,1);
  const search = new URL(requests.find(url=>url.includes('/channel-evidence/originals/')), 'http://local');
  assert.equal(search.searchParams.get('productFamily'),'WEIXIN_NATIVE');
  assert.equal(search.searchParams.get('channelTrxNo'),'serial-1');

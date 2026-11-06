@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import { ArrowUpRight, CalendarDays, ChevronDown, ChevronLeft, ChevronRight, CircleAlert, Copy, Download, Info, RotateCcw, SlidersHorizontal, TriangleAlert, Search } from "lucide-react";
+import { ArrowUpRight, CalendarDays, ChevronDown, ChevronLeft, ChevronRight, CircleAlert, Copy, Download, RotateCcw, SlidersHorizontal, TriangleAlert, Search } from "lucide-react";
 import { AdminApiError, friendlyError, ADMIN_AUTH_FAILURE_EVENT, type SessionSnapshot } from "../api";
 import { findPhoneClue, sanitizeFinanceReturn, tabFromLocation, canOpenKind, type WorkspaceTab } from "../workspace/tab-model";
 import { FINANCE_ACCESS_FAILURE_EVENT, bucketLabels, bucketNature, businessBucketLabels, kindLabels, stateLabels, reasonLabels, defaultFinanceFilters, financeQuery, financeRead, downloadFinanceCsv, financeMoney, financeTime, financeIsHistorical, financeIsHistoricalBalance, historicalFinanceAmount, financeBusinessLabel, financeRecordNumber, financeRecordState, historicalAssociationPath, historicalFinanceFacts, type HistoricalFinanceDisplay, type FinanceFilters, type FinanceResponse, type FinanceDocument, type FinanceEntry } from "./admin-finance-api";
@@ -195,7 +195,7 @@ function FinanceDisclosure({ title, children, className, defaultOpen = false }: 
   return <Collapsible className={className} defaultOpen={defaultOpen}><CollapsibleTrigger render={<Button variant="ghost" size="sm"/>}>{title}<ChevronDown size={14}/></CollapsibleTrigger><CollapsibleContent>{children}</CollapsibleContent></Collapsible>;
 }
 function scroller() { const page = document.querySelector<HTMLElement>(".workspace-page"); return page && page.scrollHeight > page.clientHeight ? page : document.scrollingElement; }
-function rangeDays(from: string, to: string): number {
+export function rangeDays(from: string, to: string): number {
   const dates = [from,to].map(value=>/^\d{4}-\d{2}-\d{2}$/.test(value)?new Date(`${value}T00:00:00Z`):new Date(NaN));
   if (dates.some((date,index)=>!Number.isFinite(date.getTime())||date.toISOString().slice(0,10)!==[from,to][index])) return NaN;
   return (dates[1]!.getTime()-dates[0]!.getTime())/86400000+1;
@@ -319,7 +319,7 @@ export function AdminFinanceView({ tab, snapshot, onOpenPath, onQueryChange, onR
   const identity = financeContextIdentity(snapshot);
   if (identity !== currentIdentity) { clearFinanceContexts(); currentIdentity = identity; }
   const period = tab.path === "/finance/period", documentId = tab.path.startsWith("/finance/documents/") ? decodeReference(tab.path.slice(19)) : null;
-  const subjectId = tab.path.startsWith("/finance/users/") ? decodeReference(tab.path.slice(15)) : null, object = documentId !== null || subjectId !== null;
+  const object = documentId !== null;
   const viewKey = `${identity}:${tab.id}`, saved = savedViews.get(viewKey);
   const incomingNavigation = navigationKey(tab), previousNavigation = useRef(incomingNavigation), ownNavigation = useRef<string | undefined>(undefined);
   const externalNavigationChanged = previousNavigation.current !== incomingNavigation && ownNavigation.current !== incomingNavigation;
@@ -350,7 +350,7 @@ export function AdminFinanceView({ tab, snapshot, onOpenPath, onQueryChange, onR
   const channelOrderId = !legacyChannel && channelOrder?.ref.startsWith('ORDER:') ? tabFromLocation(channelOrder.path!).objectId : undefined;
   const documentAllowed = has(snapshot, "finance.document.read");
   const active = snapshot.security.status === 'ACTIVE' && !snapshot.security.passwordChangeRequired && !snapshot.session.locked;
-  const allowed = active && (documentId !== null ? documentAllowed : period || subjectId ? has(snapshot, "finance.read") : has(snapshot, "finance.read") || documentAllowed);
+  const allowed = active && (documentId !== null ? documentAllowed : period ? has(snapshot, "finance.read") : has(snapshot, "finance.read") || documentAllowed);
   const needsLookup = !object && !period && !has(snapshot, "finance.read") && !applied.q.trim();
   remembered.current = { ...remembered.current, applied, draft, page, pageSize, snapshot: snapshotRef.current };
   function accessFailure(cause: unknown) {
@@ -387,7 +387,7 @@ export function AdminFinanceView({ tab, snapshot, onOpenPath, onQueryChange, onR
     if (previousRefresh.current !== refreshNonce) { snapshotRef.current = undefined; previousRefresh.current = refreshNonce; }
     setRead(undefined); setError(undefined); setSummary(undefined); setNotice(undefined); exportController.current?.abort();
     if (!allowed || needsLookup || externalNavigationChanged) return () => controller.abort();
-    const route = documentId ? `documents/${encodeURIComponent(documentId)}` : subjectId ? `subjects/${encodeURIComponent(subjectId)}` : period ? "period" : "lookup";
+    const route = documentId ? `documents/${encodeURIComponent(documentId)}` : period ? "period" : "lookup";
     async function load() {
       const extras: Record<string, string> = { page: String(page), pageSize: String(pageSize), ...(tab.query.entry ? { entry: tab.query.entry } : {}) };
       if (!snapshotRef.current && page > 1 && !object) { const first = await financeRead(route, applied, controller.signal, { page: "1", pageSize: String(pageSize) }); if(controller.signal.aborted || sequence !== requestSequence.current || identity !== currentIdentity)return; snapshotRef.current = first.snapshot; }
@@ -401,7 +401,7 @@ export function AdminFinanceView({ tab, snapshot, onOpenPath, onQueryChange, onR
       accessFailure(cause); setError(cause);
     });
     return () => controller.abort();
-  }, [identity, applied, page, pageSize, period, documentId, subjectId, tab.query.entry, refreshNonce, nonce, allowed, needsLookup, externalNavigationChanged]);
+  }, [identity, applied, page, pageSize, period, documentId, tab.query.entry, refreshNonce, nonce, allowed, needsLookup, externalNavigationChanged]);
   useLayoutEffect(() => {
     if (!body) return;
     const container = scroller(); if (container) container.scrollTop = remembered.current.scroll;
@@ -506,7 +506,7 @@ export function AdminFinanceView({ tab, snapshot, onOpenPath, onQueryChange, onR
     setSummary(text); try { await navigator.clipboard.writeText(text); setNotice("摘要已复制"); } catch { setNotice("复制未完成，可从下方摘要选择复制"); }
   }
   const resultLimit = error instanceof AdminApiError && error.details.some(detail=>detail.path.startsWith("finance.matchingLimit")||detail.path.startsWith("finance.exportLimit"));
-  const title = body?.document ? financeIsHistorical(body.document) ? financeDocumentLabel(body.document) : body.document.number : body?.subject?.name ?? (object ? "资金详情" : period ? "期间核对" : "资金查找");
+  const title = body?.document ? financeIsHistorical(body.document) ? financeDocumentLabel(body.document) : body.document.number : object ? "资金详情" : period ? "期间核对" : "资金查找";
   const withdrawal = body?.document?.kind === 'WITHDRAWAL' && !financeIsHistorical(body.document);
   const pagination = body && !object ? (
     <ListPagination
@@ -555,7 +555,7 @@ export function AdminFinanceView({ tab, snapshot, onOpenPath, onQueryChange, onR
 
   return <section className="finance-page" aria-labelledby="finance-title">
     <div className="finance-page-header"><h1 id="finance-title" tabIndex={-1} data-finance-focus="finance-title">{allowed ? title : "资金读取"}</h1><div className="finance-page-actions">{object ? <><Button variant="outline" onClick={back}>返回来源</Button><Button variant="outline" onClick={() => { snapshotRef.current = undefined; onOpenPath("/finance/records", "资金记录"); }}>重新查找</Button>{body?.document ? <Button variant="outline" className="primary" onClick={() => void copySummary()}><Copy size={15} />复制摘要</Button> : null}</> : null}{period ? <Button variant="outline" className="primary" disabled={!body || exporting || !!error} onClick={() => void exportCsv()}><Download size={15} />{exporting ? "正在生成" : "导出完整明细"}</Button> : null}</div></div>
-    {!allowed ? <Alert variant="warning" role="status"><TriangleAlert aria-hidden /><AlertTitle>当前身份没有该项资金读取能力</AlertTitle><AlertDescription>{period || subjectId ? "完整钱包和期间核对需要完整资金读取能力。" : "单据读取需要对应能力。"}</AlertDescription></Alert> : <>
+    {!allowed ? <Alert variant="warning" role="status"><TriangleAlert aria-hidden /><AlertTitle>当前身份没有该项资金读取能力</AlertTitle><AlertDescription>{period ? "期间核对需要完整资金读取能力。" : "单据读取需要对应能力。"}</AlertDescription></Alert> : <>
       {!object ? <form className={period ? "finance-period-filter" : "finance-search-card"} onSubmit={event => { event.preventDefault(); void apply(); }}>
         {period ? <><label>主体<Input aria-label="主体" value={draft.scope === 'ALL' ? '' : draft.scope} onChange={event => setDraft({ ...draft, scope: event.target.value.trim() || 'ALL' })} placeholder="全部用户；或输入用户ID" /></label><FinanceDateRange from={draft.from} to={draft.to} onChange={(from,to)=>setDraft({...draft,from,to})}/></> : <>
           {/* 业务分类快速 Tab 栏 */}
@@ -691,10 +691,6 @@ export function AdminFinanceView({ tab, snapshot, onOpenPath, onQueryChange, onR
           })}</TableBody></Table></div>
           <FinanceDisclosure title="账内算术、余额依据与缺项" className="finance-period-basis"><ul>{body.gaps?.map(reason=><li key={reason}>{label(reason)}</li>)}</ul>{body.reconciliation?.map(row=><div key={row.bucket} className="finance-basis-row"><h3>{bucketLabels[row.bucket]}</h3><p>账内起始 {financeMoney(row.ledgerOpeningBalance)} · 账内期末 {financeMoney(row.ledgerClosingBalance)} · 账内差额 {financeMoney(row.ledgerDifference)}</p><p>余额依据：{row.balanceBasis?.knowledge==='KNOWN'?'已取得':'未记录'} · 历史来源截止 {financeTime(row.balanceBasis?.sourceCutoff)} · 新账承接入账 {financeTime(row.balanceBasis?.openingPostedAt)}</p><p>历史已覆盖 {row.coveredHistoricalCount} 条，未覆盖 {row.uncoveredHistoricalCount} 条，事实时间未定 {row.unknownTimeCount} 条。覆盖笔数不代替期初余额证明。</p>{[...new Set([...(row.reasonCodes??[]),...(row.balanceBasis?.reasonCodes??[])])].map(reason=><p key={reason}>{label(reason)}</p>)}</div>)}</FinanceDisclosure>
         </section><h2>资金明细</h2>{body.entries?.length?entries(body.entries):<div className="finance-empty">该生效范围没有资金分录。</div>}{pagination}</> : null}
-        {body.subject && body.wallet ? <><div className="finance-wallet"><div className="finance-section-heading"><h2>用户资金</h2>{has(snapshot,'user.directory.read')?<Button variant="outline" size="sm" onClick={()=>openAssociated(`/users/${encodeURIComponent(body.subject!.id)}?section=finance`,body.subject!.name)}>查看用户资料<ArrowUpRight size={14}/></Button>:null}</div>
-          <p>当前已入账范围 · 未确认项不按零展示</p><dl>{Object.entries(body.wallet.buckets).map(([key,value])=><div key={key}><dt>{({available:'可用',reserved:'提现预留',restricted:'受限',pendingEarnings:'待结算收益',refundPayable:'退款应付'} as Record<string,string>)[key]??'资金类别'}</dt><dd>{financeMoney(value.knowledge==='KNOWN'?value.amountCents:null)}</dd>{value.scope==='POSTED_LEDGER_ONLY'?<small>仅已入账账本</small>:null}</div>)}</dl>
-          <Alert variant={body.wallet.coverage.knowledge==='KNOWN'?'info':'warning'} role="status">{body.wallet.coverage.knowledge==='KNOWN'?<Info aria-hidden />:<TriangleAlert aria-hidden />}<AlertTitle>资金来源覆盖：{body.wallet.coverage.knowledge==='KNOWN'?'已准入':'未记录'}</AlertTitle><AlertDescription><p>依据类型：{body.wallet.coverage.origin==='NATIVE_GENESIS'?'原生零期初':body.wallet.coverage.origin==='RECONCILED_OPENING'?'历史期初承接':'未取得'}。历史来源截止 {financeTime(body.wallet.coverage.cutoff)}；已准入不证明渠道到账。</p>{body.wallet.coverage.reason?<p>{label(body.wallet.coverage.reason)}</p>:null}<p>上架保证金与租客押金分别核对，均不自动计入可用余额。</p></AlertDescription></Alert>
-        </div><div className="finance-page-actions"><Button onClick={()=>{const next={...defaultFinanceFilters(true),scope:body.subject!.id};open(`/finance/period?${financeQuery(next)}`,'期间核对','finance-title');}}>核对该用户期间</Button>{has(snapshot,'credit.guarantee.read')&&has(snapshot,'user.directory.read')?<Button variant="outline" onClick={()=>openAssociated(`/users/${encodeURIComponent(body.subject!.id)}?section=credit`,'保证金与信用')}>核对保证金来源</Button>:null}</div><FinanceDisclosure title="可提现与来源缺项" className="finance-help"><p>可提现 {financeMoney(body.wallet.withdrawable.amountCents)}</p>{[...(body.wallet.withdrawable.reasonCodes??[]),...(body.gaps??[])].map(reason=><p key={reason}>{label(reason)}</p>)}</FinanceDisclosure><h2>关联业务</h2>{candidates(body.documents??[])}</>:null}
         {body.document ? <>
           <div className="finance-detail-layout"><div>
             {body.document.historical?.amountSemantics==='UNVERIFIED' ? <h2 className="finance-document-result">记录金额待核实</h2> : !withdrawal && !settlementEvidence?.business && body.document.requestedAmountCents !== null ? <h2 className="finance-document-result">{financeIsHistorical(body.document) ? '原申请 ' : '申请 '}{financeMoney(body.document.requestedAmountCents)}</h2> : null}

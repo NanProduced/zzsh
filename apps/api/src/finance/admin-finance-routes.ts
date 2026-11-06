@@ -42,10 +42,11 @@ export async function handleAdminFinanceRead(request: SupplyNodeRequest, respons
     if (origin !== undefined && origin !== options.adminOrigin && origin !== options.apiOrigin || request.headers["sec-fetch-site"] === "cross-site") throw forbidden();
     if (match[1] === 'activity/balances' || match[1] === 'activity/channels') {
       const wallet = match[1] === 'activity/balances', filters = parseActivityQuery(url.searchParams,wallet), context = await readAdminContext(request,options);
-      const operation = wallet ? 'complete' : 'lookup';
+      const operation = wallet || filters.subjectUserId ? 'complete' : 'lookup';
       await withDirectoryRead(options.directoryReadPool ?? options.pool,request,response,async signal => {
         const result = await withDirectoryReadTransaction(options.directoryReadPool ?? options.pool,signal,async client => {
           const actor = await authorizeAdminFinance(client,context,operation);
+          if (filters.subjectUserId && !actor.relations.isBoss && !(await loadEffectiveAdminAccess(client,context.userId))?.permissions.has(ADMIN_PERMISSION.userDirectoryRead)) throw forbidden('User directory permission required');
           if (!wallet && !actor.complete && !filters.q) throw invalid('A document lookup reference is required');
           const body = wallet ? await readAdminBalanceActivity(client,filters,actor.relations) : await readAdminChannelActivity(client,filters,actor.relations,!actor.complete);
           return { actor, body };
@@ -124,7 +125,11 @@ export async function handleAdminFinanceRead(request: SupplyNodeRequest, respons
       // Wallet subject reads still take FOR SHARE inside readPersonalWallet, so this stays repeatable read.
       await client.query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ");
       const actor = await authorizeAdminFinance(client, context, operation);
-      if(channel)return{actor,body:{contextKey:actor.authorizationKey,...await readAdminChannelEvidenceRoute(client,actor,route,url.searchParams,options.joinpayAccountRead)}};
+      if(channel){
+        const access=url.searchParams.has('subjectUserId')?await loadEffectiveAdminAccess(client,context.userId):null;
+        const channelActor={...actor,relations:{...actor.relations,userDirectoryRead:access?.permissions.has(ADMIN_PERMISSION.userDirectoryRead)===true}};
+        return{actor,body:{contextKey:actor.authorizationKey,...await readAdminChannelEvidenceRoute(client,channelActor,route,url.searchParams,options.joinpayAccountRead)}};
+      }
       if(merchant)return{actor,body:{contextKey:actor.authorizationKey,...await readAdminJoinpayMerchantAccounts(client,{adminId:context.userId,merchantIdentityId:reference(route.slice('merchant-accounts/'.length))},options.joinpayAccountRead)}};
       if (route === "lookup" && !actor.complete && !filters.q) throw invalid("A document lookup reference is required");
       const facts = await loadAdminFinanceFacts(client,{filters,...(route==="lookup"?{lookup:{exact:!actor.complete,withdrawalLinkRead:actor.relations.isBoss||actor.relations.financeDocumentRead}}:{}),...(route.startsWith("subjects/")?{subjectId:reference(route.slice(9))}:{}),...(route.startsWith("documents/")?{documentRef:reference(route.slice(10))}:{}),page,pageSize},actor.relations), snapshot = financeSnapshot(facts, filters, actor, options.listingCursorKey, token);

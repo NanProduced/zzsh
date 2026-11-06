@@ -137,6 +137,7 @@ function searchClient(options: { product: "COLLECTION" | "REFUND" | "PAYOUT"; ro
     : options.product === "REFUND" ? "zzsh_order.channel_refund_intent" : "zzsh_order.joinpay_withdrawal_intent";
   return new FakeClient((sql, values) => {
     if (isResource(sql)) return [resource()];
+    if (sql.includes("FROM pg_attribute") && values[0] === "zzsh_order.rental_order") return [{ ready: options.schema ?? true }];
     if (sql.includes("FROM pg_attribute") && values[0] === table) return [{ ready: options.schema ?? true }];
     if (options.product === "COLLECTION" && sql.includes("FROM pg_attribute") && values[0] === "zzsh_order.payment_channel_transaction") return [{ ready: options.schema ?? true }];
     if (sql.includes("FROM zzsh_order.payment_request")) return options.rows;
@@ -639,6 +640,45 @@ test("payout exact search keeps user and order links behind their own permission
     productFamily: "ALIPAY_NATIVE", merchantOrderNo: "ORDER_1" });
   assert.equal(withoutOrder.candidates[0]?.orderId, null);
   assert.ok(withoutOrder.reasonCodes.includes("ORDER_LINK_REDACTED"));
+});
+
+test("user-scoped collection and refund search bind both order roles and game scope before the result limit", async () => {
+  for (const product of ["COLLECTION", "REFUND"] as const) {
+    for (const role of ["RENTER", "OWNER"] as const) {
+      const parties = role === "RENTER" ? { scope_owner_id: "user_2", scope_renter_id: "user_1" } : { scope_owner_id: "user_1", scope_renter_id: "user_2" };
+      const row = product === "COLLECTION" ? collectionRow(parties) : refundSearchRow(parties);
+      const client = searchClient({ product, rows: [row] });
+      const result = await searchAdminChannelOriginals(pool(client), scope(), { merchantIdentityId: MERCHANT,
+        productFamily: product === "COLLECTION" ? "ALIPAY_NATIVE" : "REFUND", merchantOrderNo: "ORDER_1", subjectUserId: "user_1" });
+      assert.equal(result.status, "FOUND"); assert.equal(result.candidates[0]?.subjectRole, role);
+      const call = client.calls.find(x => x.sql.includes(product === "COLLECTION" ? "FROM zzsh_order.payment_request" : "FROM zzsh_order.channel_refund_intent"))!;
+      assert.match(call.sql, /scope_order\.owner_user_id/); assert.match(call.sql, /scope_order\.renter_user_id/);
+      assert.match(call.sql, /sgame\."game_id" = scope_order\.game_id/); assert.ok(call.sql.indexOf("scope_order.renter_user_id=$") < call.sql.indexOf(" LIMIT $"));
+      assert.ok(call.values.includes("user_1")); assert.ok(call.values.includes(ADMIN)); noWrites(client.calls);
+    }
+  }
+  const foreign = searchClient({ product: "COLLECTION", rows: [collectionRow({ scope_owner_id: "user_2", scope_renter_id: "user_3" })] });
+  const result = await searchAdminChannelOriginals(pool(foreign), scope(), { merchantIdentityId: MERCHANT, productFamily: "ALIPAY_NATIVE", merchantOrderNo: "ORDER_1", subjectUserId: "user_1" });
+  assert.equal(result.status, "UNAVAILABLE"); assert.equal(result.candidates.length, 0);
+  const unauthorized = searchClient({ product: "COLLECTION", rows: [] });
+  await assert.rejects(() => searchAdminChannelOriginals(pool(unauthorized), scope({ order: false }), { merchantIdentityId: MERCHANT, productFamily: "ALIPAY_NATIVE", merchantOrderNo: "ORDER_1", subjectUserId: "user_1" }), error => statusOf(error, 403, "FORBIDDEN"));
+  assert.equal(unauthorized.calls.length, 0);
+});
+
+test("user-scoped payout search and detail never return another user's withdrawal", async () => {
+  const own = searchClient({ product: "PAYOUT", rows: [payoutSearchRow()] });
+  const result = await searchAdminChannelOriginals(pool(own), scope(), { merchantIdentityId: MERCHANT, productFamily: "PAYOUT", channelTrxNo: "PS_1", subjectUserId: "user_1" });
+  assert.equal(result.candidates[0]?.subjectRole, "WITHDRAWER");
+  const sql = own.calls.find(call => call.sql.includes("FROM zzsh_order.joinpay_withdrawal_intent"))!;
+  assert.match(sql.sql, /i\.user_id=\$5/); assert.equal(sql.values[4], "user_1");
+  const other = searchClient({ product: "PAYOUT", rows: [payoutSearchRow({ user_id: "user_2" })] });
+  const rejected = await searchAdminChannelOriginals(pool(other), scope(), { merchantIdentityId: MERCHANT, productFamily: "PAYOUT", channelTrxNo: "PS_1", subjectUserId: "user_1" });
+  assert.equal(rejected.status, "UNAVAILABLE"); assert.equal(rejected.candidates.length, 0);
+  const detail = withdrawalClient({ rows: [withdrawalRow({ user_id: "user_2" })] });
+  const hidden = await readAdminChannelWithdrawalEvidence(pool(detail), scope(), { intentId: "jwd_1", merchantIdentityId: MERCHANT, subjectUserId: "user_1" });
+  assert.equal(hidden.status, "NOT_FOUND_LOCAL");
+  assert.match(detail.calls.find(call => call.sql.includes("FROM zzsh_order.joinpay_withdrawal_intent"))!.sql, /user_id=\$3/);
+  await assert.rejects(() => searchAdminChannelOriginals(pool(own), scope({ users: ["user_2"] }), { merchantIdentityId: MERCHANT, productFamily: "PAYOUT", channelTrxNo: "PS_1", subjectUserId: "user_1" }), error => statusOf(error, 403, "FORBIDDEN"));
 });
 
 test("exact search rejects bad scopes and inputs before business SQL and reports missing schema", async () => {

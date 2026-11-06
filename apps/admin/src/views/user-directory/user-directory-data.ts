@@ -1,5 +1,6 @@
 import { adminRequest, AdminApiError, type SessionSnapshot, type UserDirectoryItem, type UserDirectoryDetail, type UserOrderItem, type UserRentalAccountItem, type UserAuditEventItem, type UserDirectorySort, type UserDirectoryWalletSummary } from '../../api';
-import { financeRead, defaultFinanceFilters, type FinanceResponse, type FinanceFilters } from '../admin-finance-api';
+
+export type UserFinanceActivityPreview = {total:number;items:{id:string;kind:string;number:string|null;subjectRole?:string;state:string|null;amountCents:string|null;amountLabel?:string;occurredAt:string|null;documentRef:string|null}[]};
 
 export const PERMISSION = {
   orders: 'order.read',
@@ -429,9 +430,9 @@ export class UserDirectoryBff {
     if(!this.has(PERMISSION.growthSummary) && !this.has(PERMISSION.growthDetail) && !this.snapshot.security.isBoss) throw new AdminApiError(403,'FORBIDDEN');
     return this.request<MembershipGrowthRead>(`/users/${encodeURIComponent(id)}/membership-growth`,signal);
   }
-  async finance(id:string,signal:AbortSignal,filters:FinanceFilters=defaultFinanceFilters(false)) {
+  async financeActivity(id:string,signal:AbortSignal,from:string,to:string) {
     if(!this.has(PERMISSION.finance) && !this.snapshot.security.isBoss) throw new AdminApiError(403,'FORBIDDEN');
-    return financeRead(`subjects/${encodeURIComponent(id)}`, filters, signal);
+    return this.request<UserFinanceActivityPreview>(`/finance/activity/channels?${new URLSearchParams({source:'NATIVE',subjectUserId:id,from,to,page:'1',pageSize:'10'})}`,signal);
   }
   async notes(id:string,signal:AbortSignal,cursor?:string) {
     return this.request<UserNotePage>(`/users/${encodeURIComponent(id)}/notes?limit=20${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`,signal);

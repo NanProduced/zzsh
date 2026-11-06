@@ -2,6 +2,9 @@ import { strict as assert } from 'node:assert';
 import test from 'node:test';
 import type { PoolClient } from 'pg';
 import { parseActivityQuery, readAdminBalanceActivity, readAdminChannelActivity } from '../src/finance/admin-finance-activity';
+import * as financeRead from '../src/finance/admin-finance-read';
+import * as financeOrders from '../src/finance/admin-finance-order-read';
+import * as legacyDisplay from '../src/finance/legacy-observation-display';
 
 const access = { adminId:'admin',isBoss:true,orderRead:true,financeDocumentRead:true,resourceRead:true };
 const base = { q:'',source:'NATIVE' as const,kind:'ALL' as const,view:'LIVE' as const,page:1,pageSize:20,asOf:null };
@@ -21,6 +24,42 @@ test('activity filters reject ambiguous queries, phone numbers and unanchored la
   for(const input of ['from=2026-01-01','from=2026-02-30&to=2026-03-01','from=2026-03-02&to=2026-03-01','view=OPENING&type=WITHDRAWAL','view=HISTORY&nonzero=1','view=OPENING&from=2026-01-01&to=2026-01-02'])assert.throws(()=>parseActivityQuery(new URLSearchParams(input),true));
   const selected=parseActivityQuery(new URLSearchParams('view=HISTORY&type=SETTLEMENT&from=2026-01-01&to=2026-01-31'),true);assert.equal(selected.balanceType,'SETTLEMENT');assert.equal(selected.from,'2026-01-01');assert.equal(selected.to,'2026-01-31');
   assert.equal(parseActivityQuery(new URLSearchParams('view=OPENING&nonzero=1'),true).nonzero,true);
+  assert.equal(parseActivityQuery(new URLSearchParams('subjectUserId=user_123'),true).subjectUserId,'user_123');
+  for(const input of ['subjectUserId=','subjectUserId=u1&subjectUserId=u2','subjectUserId=u%2F2'])assert.throws(()=>parseActivityQuery(new URLSearchParams(input),true));
+});
+
+test('user scoped channel results retain payer and owner roles and bind the subject as a parameter',async()=>{
+ let selection='',parameters:unknown[]=[];
+ const client={query:async(sql:string,values:unknown[])=>{
+  if(sql.startsWith('WITH activity_candidates')){selection=sql;parameters=values;return {rows:[{family:'payment',id:'p1',at:'2026-01-01T00:00:00Z',total:'2'},{family:'payment',id:'p2',at:'2025-12-31T00:00:00Z',total:'2'}]};}
+  return {rows:[{id:'p1',business_id:'one',number:'one',user_id:'u1',name:'租客',state:'ACCEPTED',amount:'100',at:'2026-01-01T00:00:00Z'},{id:'p2',business_id:'two',number:'two',user_id:'other',name:'租客二',state:'ACCEPTED',amount:'200',at:'2025-12-31T00:00:00Z'}]};
+ }} as unknown as PoolClient;
+ const result=await readAdminChannelActivity(client,{...base,kind:'PAYMENT',subjectUserId:'u1'},access);
+ assert.equal(parameters[11],'u1');assert.doesNotMatch(selection,/u1/);
+ assert.match(selection,/ord\.renter_user_id=\$12/);assert.match(selection,/ord\.owner_user_id=\$12/);
+ assert.deepEqual(result.items.map((item:any)=>item.subjectRole),['RENTER','OWNER']);assert.equal(result.total,2);
+});
+
+test('user scoped balance, opening, and historic channel selection stay separated',async()=>{
+ let selection='',parameters:unknown[]=[];
+ const client={query:async(sql:string,values:unknown[])=>{selection=sql;parameters=values;return {rows:[{family:null,id:null,at:null,total:'0'}]};}} as unknown as PoolClient;
+ for(const [view,field] of [['LIVE','l.counterparty_user_id'],['HISTORY','o.user_id'],['OPENING','b.user_id']] as const){
+  await readAdminBalanceActivity(client,{...base,view,subjectUserId:'u1'},access);
+  assert.ok(selection.includes(`${field}=$12`));assert.equal(parameters[11],'u1');
+ }
+ await readAdminChannelActivity(client,{...base,source:'LEGACY',subjectUserId:'u1'},access);
+ assert.match(selection,/lo\.owner_user_id=\$12/);assert.match(selection,/lo\.renter_user_id=o\.user_id/);assert.match(selection,/associationState/);assert.match(selection,/rawSource/);
+});
+
+test('historic user roles require verified order evidence; an unverified owner relation fails closed',async t=>{
+ let unverified=false;
+ t.mock.method(financeRead,'projectAdminFinanceObservation',(row:any)=>({id:`history:${row.id}`,documentRef:`HISTORY_PAYMENT:${row.id}`,documentNumber:row.id,subjectId:row.subject_id,subjectName:'用户',kind:'PAYMENT',historical:{amountSemantics:'BUSINESS_RECORD',recordedAmountCents:'100',association:{state:'UNRESOLVED'}}} as never));
+ t.mock.method(financeOrders,'loadFinanceOrderFacts',async()=>[{ref:'LEGACY_ORDER:renter',renterId:'u1',ownerId:'u3',objectReadable:true},{ref:'LEGACY_ORDER:owner',renterId:'u2',ownerId:'u1',objectReadable:true}] as never);
+ t.mock.method(legacyDisplay,'enrichHistoricalObservations',(entries:any[])=>{for(const entry of entries)if(!unverified||entry.subjectId==='u1')entry.historical.association={state:'MATCHED',kind:'ORDER',documentRef:entry.subjectId==='u1'?'LEGACY_ORDER:renter':'LEGACY_ORDER:owner'};});
+ const client={query:async(sql:string)=>sql.startsWith('WITH activity_candidates')?{rows:[{family:'history',id:'r',at:null,total:'2'},{family:'history',id:'o',at:null,total:'2'}]}:{rows:[{id:'r',subject_id:'u1',source_entity:'la_pay_order'},{id:'o',subject_id:'u2',source_entity:'la_pay_order'}]}} as unknown as PoolClient;
+ const q={...base,source:'LEGACY' as const,subjectUserId:'u1'};
+ const result=await readAdminChannelActivity(client,q,access);assert.deepEqual(result.items.map((item:any)=>item.subjectRole),['RENTER','OWNER']);
+ unverified=true;await assert.rejects(()=>readAdminChannelActivity(client,q,access),/Historical owner association unavailable/);
 });
 
 test('channel list selects recorded Joinpay attempts and never builds SQL from a search term',async()=>{

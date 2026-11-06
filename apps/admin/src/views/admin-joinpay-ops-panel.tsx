@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { adminRequest, friendlyError, AdminApiError } from "../api";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Field } from "@/components/ui/field";
 import { Checkbox } from "@/components/ui/checkbox";
 import { formatFundingCents } from "./supply-review/model";
 import { formatCentsToYuan } from "./membership-entitlement-form";
@@ -152,13 +153,14 @@ const accountText = (a: AccountSummary | undefined) => !a ? "未读取" : a.inte
 
 /** 资金页渠道运维：worker白名单状态与商户账户摘要；均为只读，不显示银行全量数据。 */
 /** 提现QUERY-only：只按原提现单号补查，不发起新提现/重发/换收款目标；需finance.withdrawal.query。 */
-export function AdminWithdrawalQueryBox() {
+export function AdminWithdrawalQueryBox({ unavailable = false }: { unavailable?: boolean }) {
   const [id, setId] = useState(""), [text, setText] = useState(""), [busy, setBusy] = useState(false);
   const [meta, setMeta] = useState<{ target?: string; queriedAt?: string } | null>(null);
   const seq = useRef(0);
   const reset = () => { seq.current++; setText(""); setMeta(null); };
   const run = async () => {
-    if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(id)) { setText("提现单号格式无效"); return; }
+    if (unavailable) return;
+    if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(id)) { setText("请填写有效的提现申请 ID。"); return; }
     const currentSeq = ++seq.current;
     const now = new Intl.DateTimeFormat("zh-CN", { timeZone: "Asia/Shanghai", hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false }).format(new Date());
     setBusy(true);
@@ -175,13 +177,13 @@ export function AdminWithdrawalQueryBox() {
     }
   };
   return <div className="space-y-1.5" role="group" aria-label="提现按原号补查">
-    <div className="flex flex-wrap items-center gap-2">
-      <Input aria-label="提现单号" value={id} onChange={e => { reset(); setId(e.target.value.trim()); }} placeholder="原提现单号" className="h-8 w-44 text-xs font-mono" />
-      <Button size="sm" type="button" variant="secondary" disabled={busy} onClick={() => void run()}>按原号同步提现结果</Button>
+    <div className="flex flex-wrap items-end gap-3">
+      <Field label="提现申请 ID" className="max-w-xs"><Input aria-label="提现申请 ID" value={id} onChange={e => { reset(); setId(e.target.value.trim()); }} placeholder="输入平台提现申请 ID" /></Field>
+      <Button size="sm" type="button" variant="secondary" disabled={busy || unavailable} onClick={() => void run()}>{busy ? "正在查询…" : "向汇聚查询提现"}</Button>
     </div>
     {meta ? <p className="oc-fact-note text-xs" data-query-meta>本次查询对象：{meta.target} · 时间：{meta.queriedAt}</p> : null}
     {text ? <p role="status" className="text-xs font-medium text-foreground">{text}</p> : null}
-    <p className="oc-fact-note text-xs">查询可能触发本站账务处理；查询成功不等于银行到账。</p>
+    <p className="oc-fact-note text-xs">查询可能更新本站提现状态和账务，不会再次发起提现。</p>
   </div>;
 }
 
@@ -192,14 +194,15 @@ export function collectionQueryText(r: QueryResult | null, status?: number, expe
   if (status === 202 || r.outcome?.kind === "UNKNOWN") return "已提交查询，结果未知（202）；请稍后刷新本地记录，不要重复收款";
   return queryOutcomeText(r, status);
 }
-export function AdminCollectionQueryBox({ canWrite }: { canWrite: boolean }) {
+export function AdminCollectionQueryBox({ canWrite, unavailable = false }: { canWrite: boolean; unavailable?: boolean }) {
   const [id, setId] = useState(""), [text, setText] = useState(""), [busy, setBusy] = useState(false);
   const [meta, setMeta] = useState<{ target?: string; queriedAt?: string } | null>(null);
   const seq = useRef(0);
   const reset = () => { seq.current++; setText(""); setMeta(null); };
   if (!canWrite) return null;
   const run = async () => {
-    if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(id)) { setText("收款请求号格式无效"); return; }
+    if (unavailable) return;
+    if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(id)) { setText("请填写有效的收款请求 ID。"); return; }
     const currentSeq = ++seq.current;
     const now = new Intl.DateTimeFormat("zh-CN", { timeZone: "Asia/Shanghai", hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false }).format(new Date());
     setBusy(true);
@@ -216,13 +219,13 @@ export function AdminCollectionQueryBox({ canWrite }: { canWrite: boolean }) {
     }
   };
   return <div className="space-y-1.5" role="group" aria-label="收款按原号补查">
-    <div className="flex flex-wrap items-center gap-2">
-      <Input aria-label="收款请求号" value={id} onChange={e => { reset(); setId(e.target.value.trim()); }} placeholder="原收款请求号" className="h-8 w-44 text-xs font-mono" />
-      <Button size="sm" type="button" variant="secondary" disabled={busy} onClick={() => void run()}>按原号补查收款</Button>
+    <div className="flex flex-wrap items-end gap-3">
+      <Field label="收款请求 ID" className="max-w-xs"><Input aria-label="收款请求 ID" value={id} onChange={e => { reset(); setId(e.target.value.trim()); }} placeholder="输入平台收款请求 ID" /></Field>
+      <Button size="sm" type="button" variant="secondary" disabled={busy || unavailable} onClick={() => void run()}>{busy ? "正在查询…" : "向汇聚查询收款"}</Button>
     </div>
     {meta ? <p className="oc-fact-note text-xs" data-query-meta>本次查询对象：{meta.target} · 时间：{meta.queriedAt}</p> : null}
     {text ? <p role="status" className="text-xs font-medium text-foreground">{text}</p> : null}
-    <p className="oc-fact-note text-xs">只补查原单，不发起新收款；查询成功不等于银行到账。</p>
+    <p className="oc-fact-note text-xs">查询可能更新本站订单和付款状态，不会再次发起收款。</p>
   </div>;
 }
 
@@ -243,17 +246,16 @@ export function AdminJoinpayOpsPanel({ canRead, canWithdrawalQuery = false }: { 
       if (currentSeq === seq.current) { setAccount(null); setNote(friendlyError(e)); }
     }
   };
-  return <section className="finance-joinpay-ops space-y-2 text-sm" data-joinpay-ops>
-    <h3 className="font-semibold text-sm">渠道运行与商户账户</h3>
+  return <section className="finance-joinpay-ops space-y-3 text-sm" data-joinpay-ops>
     {workers === undefined ? <Button size="sm" variant="secondary" onClick={() => void readWorkers()}>读取补查任务状态</Button> : workers === null ? <p>补查任务状态不可用</p>
       : <ul className="text-xs space-y-0.5 text-muted-foreground"><li>退款补查：{workerText(workers.refund)}</li><li>提现补查：{workerText(workers.payout)}</li><li>收款补查：{workerText(workers.collection)}</li></ul>}
-    <div className="flex items-center gap-2" role="group" aria-label="商户账户摘要读取">
-      <Input aria-label="商户标识" value={merchant} onChange={e => { resetMerchant(); setMerchant(e.target.value.trim()); }} placeholder="商户标识" className="h-8 w-36 text-xs font-mono" />
+    <div className="flex flex-wrap items-end gap-3" role="group" aria-label="商户账户摘要读取">
+      <Field label="商户标识" className="max-w-xs"><Input aria-label="商户标识" value={merchant} onChange={e => { resetMerchant(); setMerchant(e.target.value.trim()); }} placeholder="输入平台登记的商户标识" /></Field>
       <Button size="sm" type="button" onClick={() => void lookup()}>读取账户摘要</Button>
     </div>
     {account ? <p className="text-xs">可用账户：{accountText(account.available)} · 收款账户：{accountText(account.collection)} · 资产合计：未记录（渠道余额不是资产）· 银行到账未记录</p> : null}
     {note ? <p role="status" className="text-xs text-destructive">{note}</p> : null}
     {canWithdrawalQuery ? <AdminWithdrawalQueryBox /> : null}
-    <p className="oc-fact-note text-xs">本地补查状态与渠道余额均不等于银行到账；旧来源与对账差异按原来源核对，不在此自动结论。</p>
+    <p className="oc-fact-note text-xs">这里只读取已保存的账户快照和任务状态，不会实时查询汇聚。</p>
   </section>;
 }

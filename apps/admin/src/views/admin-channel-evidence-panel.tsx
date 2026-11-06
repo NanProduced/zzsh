@@ -3,7 +3,13 @@ import { adminRequest, AdminApiError, ADMIN_AUTH_FAILURE_EVENT } from "../api";
 import { Button } from "@/components/ui/button";
 import { financeTime, stateLabels } from "./admin-finance-api";
 import { Input } from "@/components/ui/input";
+import { Field } from "@/components/ui/field";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../components/ui/select";
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/admin-list/list-table";
+import { PreviewCopyButton } from "@/components/admin-preview";
+import { TooltipProvider } from "@/components/ui/tooltip";
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
+import { ChevronDown } from "lucide-react";
 import { formatFundingCents } from "./supply-review/model";
 import { channelEvidenceErrorDisplay, channelEvidenceStatusDisplay, evidenceCents, type ChannelEvidenceDisplay } from "./admin-channel-evidence-model";
 
@@ -19,9 +25,13 @@ const familyLabels: Record<string, string> = {
   ALIPAY_NATIVE: "支付宝收款",
   WEIXIN_NATIVE: "微信收款"
 };
+const subjectRoleLabels: Record<string, string> = { RENTER: "租客", OWNER: "号主", BOTH: "租客 / 号主", WITHDRAWER: "提现人" };
+const evidenceLabels: Record<string, string> = { JOINPAY_CANDIDATE: "汇聚请求记录", JOINPAY_VERIFIED: "已登记渠道核验标记", SYNTHETIC_PROTOCOL: "协议模拟记录", LOCAL_CONTROLLED: "本地受控记录", LOCAL_RECORDS_NOT_REVALIDATED: "本站记录，未重新核验" };
+const dispositionLabels: Record<string, string> = { RESERVED: "已预留", PAYOUT_POSTED: "已核销", RELEASE_POSTED: "已退回可用余额" };
+const channelStateLabels: Record<string, string> = { ...stateLabels, NONE: "待处理", ACTION_READY: "待付款", PROCESSING_UNCONFIRMED: "处理中，结果待核", REJECTED_BY_CHANNEL: "渠道拒绝", CHANNEL_SUCCEEDED_PENDING_ACCEPTANCE: "渠道成功，待本站确认", ACCEPTED: "本站已接纳", READY: "待提交", REVIEW_REQUIRED: "需核对" };
 function Line({ title, section }: { title: string; section: Section | null | undefined }) {
   const d = channelEvidenceStatusDisplay(section);
-  return <li data-evidence-state={d.kind}><strong>{title}</strong>：{d.text}{section?.reasonCodes?.length ? ` · ${section.reasonCodes.join(",")}` : ""}</li>;
+  return <li data-evidence-state={d.kind}><strong>{title}</strong>：{d.text}{section?.reasonCodes?.length ? <Collapsible><CollapsibleTrigger render={<Button type="button" variant="ghost" size="sm"/>}>查看技术原因<ChevronDown size={14} aria-hidden/></CollapsibleTrigger><CollapsibleContent className="break-words text-xs text-muted-foreground">{section.reasonCodes.join("、")}</CollapsibleContent></Collapsible> : null}</li>;
 }
 type LoadState = { display?: ChannelEvidenceDisplay; body?: any; path?: string; requestId?: string | null; loading?: boolean; target?: string; queriedAt?: string };
 const text = (v: unknown) => typeof v === "string" && v ? v : "未知";
@@ -77,11 +87,12 @@ export function OrderChannelEvidence({ orderId, canRead, autoLoad = false }: { o
 }
 
 /** 资金页/用户资金：按商户原号读取提现证据或检索原单；商户范围由服务端授予，不由输入扩大。 */
-export function ChannelEvidenceLookup({ canRead, canSearch, onOpenOrder, initialSearch }: {
-  canRead: boolean; canSearch: boolean; onOpenOrder?: (id: string, clue: ChannelSearchClue) => void; initialSearch?: ChannelSearchClue;
+export function ChannelEvidenceLookup({ canRead, canSearch, onOpenOrder, initialSearch, subjectUserId, canReadOrders = true }: {
+  canRead: boolean; canSearch: boolean; onOpenOrder?: (id: string, clue: ChannelSearchClue) => void; initialSearch?: ChannelSearchClue; subjectUserId?: string; canReadOrders?: boolean;
 }) {
   const [merchant, setMerchant] = useState(initialSearch?.merchant ?? ""), [ref, setRef] = useState(initialSearch?.ref ?? ""), [family, setFamily] = useState(initialSearch?.family ?? "PAYOUT");
-  const [trx, setTrx] = useState(initialSearch?.trx ?? "");
+  const [trx, setTrx] = useState(initialSearch?.trx ?? ""), [withdrawalRef, setWithdrawalRef] = useState("");
+  const [mode, setMode] = useState<"transaction" | "withdrawal">(canSearch ? "transaction" : "withdrawal");
   const [state, setState] = useState<LoadState | null>(null), seq = useRef(0);
   const reset = () => { seq.current++; setState(null); };
   useEffect(() => {
@@ -89,66 +100,67 @@ export function ChannelEvidenceLookup({ canRead, canSearch, onOpenOrder, initial
     if (initialSearch && canRead && canSearch) search();
     return () => { seq.current++; window.removeEventListener(ADMIN_AUTH_FAILURE_EVENT, reset); };
   }, []);
-  const valid = REF.test(merchant) && REF.test(ref);
+  const scopedPath = (path: string) => subjectUserId ? `${path}?${new URLSearchParams({ subjectUserId })}` : path;
+  const validSubject = subjectUserId === undefined || REF.test(subjectUserId);
   const withdrawal = () => {
-    if (!valid) {
+    if (!validSubject || !REF.test(merchant) || !REF.test(withdrawalRef)) {
       seq.current++;
-      setState({ display: { kind: "unknown", text: "请输入有效商户标识和提现申请编号" } });
+      setState({ display: { kind: "unknown", text: "请填写有效的商户标识和提现申请 ID。" } });
       return;
     }
-    void load('/finance/channel-evidence/withdrawals/' + encodeURIComponent(merchant) + '/' + encodeURIComponent(ref), seq, setState, '商户 [' + merchant + '] 提现 [' + ref + ']');
+    void load(scopedPath('/finance/channel-evidence/withdrawals/' + encodeURIComponent(merchant) + '/' + encodeURIComponent(withdrawalRef)), seq, setState, '商户 [' + merchant + '] 提现申请 [' + withdrawalRef + ']');
   };
   const search = () => {
-    if (!REF.test(merchant) || !ref && !trx || ref && !ORIGINAL_NO.test(ref) || trx && !CHANNEL_TRX_NO.test(trx)) {
+    if (!validSubject || !REF.test(merchant) || !ref && !trx || ref && !ORIGINAL_NO.test(ref) || trx && !CHANNEL_TRX_NO.test(trx)) {
       seq.current++;
-      setState({ display: { kind: "unknown", text: "请输入有效商户标识及至少一个精确原号或渠道流水" } });
+      setState({ display: { kind: "unknown", text: "请填写有效商户标识，以及完整的商户原单号或渠道流水号。" } });
       return;
     }
     const query = new URLSearchParams({ productFamily: family });
     if (ref) query.set("merchantOrderNo", ref);
     if (trx) query.set("channelTrxNo", trx);
+    if (subjectUserId) query.set("subjectUserId", subjectUserId);
     void load('/finance/channel-evidence/originals/' + encodeURIComponent(merchant) + '?' + query, seq, setState, '商户 [' + merchant + '] ' + (familyLabels[family] ?? family));
   };
   if (!canRead) return null;
+  if (!validSubject) return <p role="alert" className="text-sm text-destructive">当前用户范围无法识别，请返回用户列表重新打开。</p>;
   const w = state?.body?.kind === "WITHDRAWAL" ? state.body.withdrawal as Section : undefined;
   const s = state?.body?.kind === "ORIGINAL_SEARCH" ? state.body.search as Section : undefined;
-  return <div className="finance-channel-evidence space-y-1 text-sm" data-channel-evidence="lookup" role="group" aria-label="渠道证据读取">
-    <div className="flex flex-wrap items-center gap-2"><Input aria-label="证据商户标识" placeholder="商户标识" value={merchant} onChange={e => { reset(); setMerchant(e.target.value.trim()); }} className="h-9 w-36 text-xs font-mono" />
-      <Input aria-label="原申请或商户原号" placeholder="原申请/商户原号" value={ref} onChange={e => { reset(); setRef(e.target.value.trim()); }} className="h-9 w-44 text-xs font-mono" />
-      <Button size="sm" type="button" variant="secondary" onClick={withdrawal}>读取提现证据</Button>
-      {canSearch ? <>
-        <Select
-          value={family}
-          onValueChange={(val) => { if (val) { reset(); setFamily(val); } }}
-          items={["PAYOUT", "REFUND", "ALIPAY_NATIVE", "WEIXIN_NATIVE"].map(f => ({ value: f, label: familyLabels[f] ?? f }))}
-        >
-          <SelectTrigger aria-label="业务来源" className="h-9 w-36 text-xs">
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
-            {["PAYOUT", "REFUND", "ALIPAY_NATIVE", "WEIXIN_NATIVE"].map(f => (
-              <SelectItem key={f} value={f}>{familyLabels[f] ?? f}</SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
-        <Input aria-label="渠道流水" placeholder="渠道流水" value={trx} onChange={e => { reset(); setTrx(e.target.value.trim()); }} className="h-9 w-44 text-xs font-mono" />
-        <Button size="sm" type="button" variant="secondary" onClick={search}>检索渠道交易</Button></> : null}</div>
+  return <div className="finance-channel-evidence space-y-4 text-sm" data-channel-evidence="lookup" role="group" aria-label="渠道记录查询">
+    {canSearch ? <div className="inline-flex rounded-lg border bg-muted/30 p-1" role="group" aria-label="查询方式">
+      <Button type="button" size="sm" variant={mode === "transaction" ? "secondary" : "ghost"} aria-pressed={mode === "transaction"} onClick={() => { reset(); setMode("transaction"); }}>查交易记录</Button>
+      <Button type="button" size="sm" variant={mode === "withdrawal" ? "secondary" : "ghost"} aria-pressed={mode === "withdrawal"} onClick={() => { reset(); setMode("withdrawal"); }}>查提现申请</Button>
+    </div> : null}
+    <p className="text-sm text-muted-foreground">{mode === "transaction" ? "输入商户标识，再填写商户原单号或渠道流水号，可在资金记录中查找这些编号。" : "输入商户标识和平台提现申请 ID，查看该笔申请保存的凭证。"}</p>
+    {subjectUserId && !canReadOrders && mode === "transaction" ? <p className="text-sm text-muted-foreground">查看关联订单的收付款和退款需要订单读取权限；提现记录不受此限制。</p> : null}
+    <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+      <Field label="商户标识" required><Input aria-label="证据商户标识" placeholder="输入平台登记的商户标识" value={merchant} onChange={e => { reset(); setMerchant(e.target.value.trim()); }}/></Field>
+      {mode === "transaction" ? <>
+        <Field label="交易类型" composite><Select value={family} onValueChange={val => { if (val) { reset(); setFamily(val); } }} items={["PAYOUT", "REFUND", "ALIPAY_NATIVE", "WEIXIN_NATIVE"].map(f => ({ value: f, label: familyLabels[f] ?? f }))}>
+          <SelectTrigger aria-label="业务来源" className="w-full"><SelectValue /></SelectTrigger><SelectContent>{["PAYOUT", "REFUND", "ALIPAY_NATIVE", "WEIXIN_NATIVE"].map(f => <SelectItem key={f} value={f}>{familyLabels[f] ?? f}</SelectItem>)}</SelectContent>
+        </Select></Field>
+        <Field label="商户原单号"><Input aria-label="商户原单号" placeholder="与渠道交易对应的原单号" value={ref} onChange={e => { reset(); setRef(e.target.value.trim()); }}/></Field>
+        <Field label="渠道流水号"><Input aria-label="渠道流水" placeholder="汇聚返回的流水号" value={trx} onChange={e => { reset(); setTrx(e.target.value.trim()); }}/></Field>
+      </> : <Field label="提现申请 ID" required><Input aria-label="提现申请 ID" placeholder="平台中的提现申请 ID" value={withdrawalRef} onChange={e => { reset(); setWithdrawalRef(e.target.value.trim()); }}/></Field>}
+    </div>
+    <Button size="sm" type="button" onClick={mode === "transaction" ? search : withdrawal}>{mode === "transaction" ? "查询本站记录" : "查看提现凭证"}</Button>
     {state ? <Meta state={state} seq={seq} set={setState}/> : null}
     {state?.display ? <Failure display={state.display}/> : null}
     {w ? <ul><Line title="提现证据" section={w}/>{w.status === "FOUND" ? <>
+      {subjectUserId ? <li>当前用户身份：提现人</li> : null}
       <li data-withdrawal-amounts>扣款金额（含费）：{money((w.amounts as any)?.grossDeduction)} · 应出款（净额）：{money((w.amounts as any)?.netPayout)} · 用户手续费：{money((w.amounts as any)?.userPolicyFee)} · 渠道实际出款：未知</li>
       <li data-withdrawal-ref>商户原号：{text(w.merchantOrderNo)} · 渠道流水：{text(w.platformSerialNo)} · 受理时间：{text(w.acceptedAt)}</li>
-      <li data-withdrawal-target>冻结目标卡：{text((w.originalDestination as any)?.cardMask)}（{text((w.originalDestination as any)?.basis)}） · 状态：{text(w.state)} · 本站处置：{text(w.localFundsDisposition)} · 银行到账：未知</li></> : null}</ul> : null}
+      <li data-withdrawal-target>收款卡（申请时记录）：{text((w.originalDestination as any)?.cardMask)} · 状态：{channelStateLabels[text(w.state)] ?? "状态待核"} · 本站处置：{dispositionLabels[text(w.localFundsDisposition)] ?? "待核"} · 银行到账：未知</li></> : null}</ul> : null}
     {s ? <ul><Line title="原单检索" section={s}/>{Array.isArray(s.candidates) ? <li>候选 {s.candidates.length} 条{s.truncated ? "（已截断，非全部）" : ""}</li> : null}</ul> : null}
-    {s && Array.isArray(s.candidates) && s.candidates.length ? <div className="overflow-x-auto"><table data-evidence-candidates><thead><tr><th>汇聚业务</th><th>商户原号 / 渠道流水</th><th>本地状态</th><th>记录金额</th><th>证据等级</th><th>登记时间</th><th>关联与证据</th></tr></thead>
-      <tbody>{(s.candidates as any[]).map((c, i) => <tr key={`${text(c?.objectKind)}:${text(c?.objectId)}:${i}`} data-requires-review={c?.requiresReview ? "true" : "false"}>
-        <td>{familyLabels[text(c?.productFamily)] ?? "渠道业务未记录"}</td><td>{text(c?.merchantOrderNo)} / {c?.channelTransactionRecorded ? text(c?.channelTrxNo) : "未登记"}</td>
-        <td>{stateLabels[text(c?.state)] ?? text(c?.state)}{c?.fundsDisposition ? ` · ${text(c.fundsDisposition)}` : ""}{c?.requiresReview ? " · 未记录" : ""}</td><td>{money(c?.amount)} {text(c?.amount?.currency)}</td>
-        <td>{text(c?.evidenceLevel)}</td><td>{financeTime(c?.recordedAt)}</td><td>{c?.objectKind === 'JOINPAY_WITHDRAWAL_INTENT' && typeof c.objectId === 'string' && REF.test(c.objectId) && c.merchantIdentityId === merchant
-          ? <Button variant="link" size="sm" onClick={() => void load('/finance/channel-evidence/withdrawals/' + encodeURIComponent(merchant) + '/' + encodeURIComponent(c.objectId), seq, setState, '提现申请 [' + c.objectId + ']')}>查看出款证据</Button>
+    {s && Array.isArray(s.candidates) && s.candidates.length ? <TooltipProvider><div className="overflow-x-auto"><Table data-evidence-candidates><TableHeader><TableRow><TableHead>交易类型</TableHead>{subjectUserId ? <TableHead>当前用户身份</TableHead> : null}<TableHead>平台请求 ID</TableHead><TableHead>商户原单号 / 渠道流水</TableHead><TableHead>本站状态</TableHead><TableHead>记录金额</TableHead><TableHead>证据等级</TableHead><TableHead>登记时间</TableHead><TableHead>关联与凭证</TableHead></TableRow></TableHeader>
+      <TableBody>{(s.candidates as any[]).map((c, i) => <TableRow key={`${text(c?.objectKind)}:${text(c?.objectId)}:${i}`} data-requires-review={c?.requiresReview ? "true" : "false"}>
+        <TableCell>{familyLabels[text(c?.productFamily)] ?? "渠道业务未记录"}</TableCell>{subjectUserId ? <TableCell>{subjectRoleLabels[text(c?.subjectRole)] ?? "身份待核"}</TableCell> : null}<TableCell><span className="inline-flex items-center gap-1">{text(c?.objectId)}{typeof c?.objectId === 'string' && REF.test(c.objectId) ? <PreviewCopyButton value={c.objectId} tooltip="复制平台请求 ID"/> : null}</span></TableCell><TableCell>{text(c?.merchantOrderNo)} / {c?.channelTransactionRecorded ? text(c?.channelTrxNo) : "未登记"}</TableCell>
+        <TableCell>{channelStateLabels[text(c?.state)] ?? "状态待核"}{c?.fundsDisposition ? ` · ${dispositionLabels[text(c.fundsDisposition)] ?? "资金处置待核"}` : ""}{c?.requiresReview ? " · 需核对" : ""}</TableCell><TableCell>{money(c?.amount)} {text(c?.amount?.currency)}</TableCell>
+        <TableCell>{evidenceLabels[text(c?.evidenceLevel)] ?? "依据待核"}</TableCell><TableCell>{financeTime(c?.recordedAt)}</TableCell><TableCell>{c?.objectKind === 'JOINPAY_WITHDRAWAL_INTENT' && typeof c.objectId === 'string' && REF.test(c.objectId) && c.merchantIdentityId === merchant
+          ? <Button variant="link" size="sm" onClick={() => void load(scopedPath('/finance/channel-evidence/withdrawals/' + encodeURIComponent(merchant) + '/' + encodeURIComponent(c.objectId)), seq, setState, '提现申请 [' + c.objectId + ']')}>查看出款凭证</Button>
           : onOpenOrder && typeof c?.orderId === "string" && REF.test(c.orderId)
             ? <Button variant="link" size="sm" onClick={() => onOpenOrder(c.orderId, { merchant, ref, trx, family })}>查看关联订单</Button>
-            : <span>暂无可查看订单</span>}</td></tr>)}</tbody></table></div> : null}
-    <p className="oc-fact-note">本地登记证据不等于渠道结果或银行到账；未授权、未接入与未找到分别显示。</p>
+            : <span>暂无可查看订单</span>}</TableCell></TableRow>)}</TableBody></Table></div></TooltipProvider> : null}
+    <p className="text-xs text-muted-foreground">本站记录不代表银行到账；未接入、无权限和未找到会分别提示。</p>
   </div>;
 }
