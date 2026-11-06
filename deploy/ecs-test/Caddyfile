@@ -1,0 +1,53 @@
+{
+	email {$ACME_EMAIL}
+}
+
+(trusted_upstream) {
+	header_up -Forwarded
+	header_up -X-Forwarded-Host
+	header_up -X-ZZSH-User-Client-IP
+	header_up -X-ZZSH-Admin-Client-IP
+	header_up X-Forwarded-For {remote_host}
+	header_up X-Real-IP {remote_host}
+	header_up X-Forwarded-Proto https
+}
+
+{$USER_DOMAIN} {
+	encode zstd gzip
+	reverse_proxy web:3100 {
+		import trusted_upstream
+	}
+}
+
+{$ADMIN_DOMAIN} {
+	encode zstd gzip
+	@api path /api /api/*
+	handle @api {
+		reverse_proxy api:3102 {
+			import trusted_upstream
+		}
+	}
+	@static path /assets/* /art/* /brand/* /fonts/* /favicon.ico
+	handle @static {
+		root * /srv/admin
+		file_server
+	}
+	handle {
+		root * /srv/admin
+		try_files {path} /index.html
+		file_server
+	}
+}
+
+{$API_DOMAIN} {
+	encode zstd gzip
+	@api path /api /api/*
+	handle @api {
+		reverse_proxy api:3102 {
+			import trusted_upstream
+		}
+	}
+	handle {
+		respond "Not found" 404
+	}
+}

@@ -1,0 +1,8 @@
+{
+  "schema": "zzsh.ecs-test-dump-approval.v1",
+  "decision": "REPLACE_ONLY_AFTER_OWNER_APPROVAL",
+  "planSha256": "REPLACE_WITH_APPROVED_PLAN_SHA256",
+  "manifestSha256": "REPLACE_WITH_APPROVED_MANIFEST_SHA256",
+  "notBefore": "REPLACE_WITH_APPROVED_UTC_INSTANT",
+  "expiresAt": "REPLACE_WITH_APPROVED_UTC_INSTANT"
+}

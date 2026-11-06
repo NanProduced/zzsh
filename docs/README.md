@@ -22,6 +22,7 @@
 - [系统配置、媒体存储与新环境初始化](operations/media-storage.md)
 - [部署配置与第三方凭据准备](operations/deployment-prerequisites.md)
 - [线上团队测试服务器准备](operations/team-test-server.md)
+- [香港内部测试服 Compose 运行说明](operations/ecs-test-compose.md)
 - [旧交易续办与责任边界](architecture/legacy-trade-continuation.md)
 - [会员成长与人工礼遇](architecture/membership-growth.md)
 - [信用与号主保证金运行合同](architecture/credit-guarantee.md)
