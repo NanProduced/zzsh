@@ -515,6 +515,57 @@ test('native-only earnings exclude irrelevant historical sources from both page 
  assert.match(page,/FROM zzsh_order\.rental_referral_earning/);
 });
 
+test('earnings page resolves settlement times once for the selected source-qualified records',async()=>{
+ const calls:{sql:string;values:unknown[]}[]=[],page=[
+  {id:'native_1',source:'NATIVE',beneficiary_id:'person',amount_cents:'125',state:'SETTLED',total:2},
+  {id:'history:legacy_1',source:'LEGACY',beneficiary_id:'person',amount_cents:'350',state:'SETTLED',total:2},
+ ];
+ const client={query:async(sql:string,values:unknown[]=[])=>{calls.push({sql,values});
+  if(sql.includes('to_regclass'))return{rows:[{native:true,legacy:true,duties:true}]};
+  if(sql.includes('WITH visible_earnings AS'))return{rows:[{native:'n',events:'e',legacy:'l'}]};
+  if(sql.includes('clock_timestamp'))return{rows:[{at:'2026-11-03T00:00:00Z'}]};
+  if(sql.startsWith('WITH rows AS'))return{rows:page.map(item=>({...item}))};
+  if(sql.includes('SELECT id,source,settled_at FROM dashboard_records'))return{rows:[{id:'history:legacy_1',source:'LEGACY',settled_at:'2026-10-02T01:00:00Z'}, {id:'native_1',source:'NATIVE',settled_at:'2026-10-03T01:00:00Z'}]};
+  throw Error('Unexpected query');
+ }} as any;
+ const result=await readAdminDistributionEarnings(client,dashboardContext(false),{...filtersForTest(),beneficiary:'person'});
+ assert.equal(result.total,'2');assert.deepEqual(result.items.map(item=>item.settledAt),['2026-10-03T01:00:00Z','2026-10-02T01:00:00Z']);
+ const first=calls.find(call=>call.sql.startsWith('WITH rows AS'))!,times=calls.find(call=>call.sql.includes('SELECT id,source,settled_at FROM dashboard_records'))!;
+ assert.doesNotMatch(first.sql,/legacy_log_candidates/);assert.match(times.sql,/p\.id=ANY\(\$\d+::text\[\]\)/);assert.match(times.sql,/e\.id=ANY\(\$\d+::text\[\]\)/);
+ assert.match(times.sql,/p\.source_system=l\.source_system AND p\.user_id=l\.user_id AND p\.source_id=l\.snapshot->>'referenceId'/);
+ assert.deepEqual(times.values.slice(-2),[['native_1'],['legacy_1']]);assert.ok(times.values.includes('person'));
+ assert.equal(calls.filter(call=>call.sql.includes('SELECT id,source,settled_at FROM dashboard_records')).length,1);
+});
+
+test('missing or duplicate page settlement-time results fail closed',async()=>{
+ for(const returned of [[],[{id:'native_1',source:'NATIVE',settled_at:null},{id:'native_1',source:'NATIVE',settled_at:null}]]){
+  const client={query:async(sql:string)=>{
+   if(sql.includes('to_regclass'))return{rows:[{native:true,legacy:false,duties:false}]};
+   if(sql.includes('WITH visible_earnings AS'))return{rows:[{native:'n'}]};
+   if(sql.includes('clock_timestamp'))return{rows:[{at:'2026-11-03T00:00:00Z'}]};
+   if(sql.startsWith('WITH rows AS'))return{rows:[{id:'native_1',source:'NATIVE',beneficiary_id:'person',amount_cents:'125',state:'SETTLED',total:1}]};
+   if(sql.includes('SELECT id,source,settled_at FROM dashboard_records'))return{rows:returned};
+   throw Error('Unexpected query');
+  }} as any;
+  await assert.rejects(readAdminDistributionEarnings(client,dashboardContext(),{...filtersForTest(),source:'NATIVE'}),error=>(error as {status?:number}).status===503);
+ }
+});
+
+test('nonempty native-only page keeps its source and excludes every legacy lookup',async()=>{
+ const calls:{sql:string;values:unknown[]}[]=[],client={query:async(sql:string,values:unknown[]=[])=>{calls.push({sql,values});
+  if(sql.includes('to_regclass'))return{rows:[{native:true,legacy:true,duties:true}]};
+  if(sql.includes('WITH visible_earnings AS'))return{rows:[{native:'n'}]};
+  if(sql.includes('clock_timestamp'))return{rows:[{at:'2026-11-03T00:00:00Z'}]};
+  if(sql.startsWith('WITH rows AS'))return{rows:[{id:'native_1',source:'NATIVE',beneficiary_id:'person',beneficiary_name:'private',amount_cents:'125',state:'SETTLED',total:1}]};
+  if(sql.includes('SELECT id,source,settled_at FROM dashboard_records'))return{rows:[{id:'native_1',source:'NATIVE',settled_at:'2026-10-03T01:00:00Z'}]};
+  throw Error('Unexpected query');
+ }} as any;
+ const result=await readAdminDistributionEarnings(client,dashboardContext(false),{...filtersForTest(),source:'NATIVE'});
+ assert.equal(result.items[0]!.settledAt,'2026-10-03T01:00:00Z');assert.equal(result.items[0]!.beneficiaryName,null);
+ const times=calls.find(call=>call.sql.includes('SELECT id,source,settled_at FROM dashboard_records'))!;
+ assert.doesNotMatch(times.sql,/personal_finance_observation|legacy_log_candidates/);assert.deepEqual(times.values.at(-1),['native_1']);
+});
+
 
 test("downline combines migrated and new relations, without inventing old dates or complete counts",async()=>{
  const calls:string[]=[];

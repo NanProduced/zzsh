@@ -44,6 +44,7 @@ function environment(patch: {
     }
     if (sql.includes("clock_timestamp()::text AS at")) return rows([{ at: "2026-11-02T03:00:00.000000Z" }]);
     if (sql.includes("WITH rows AS")) { if (patch.revokeAfterRead) state.permissions = []; return rows(state.earnings); }
+    if (sql.includes('SELECT id,source,settled_at FROM dashboard_records')) return rows(state.earnings.map(row=>({id:row.id,source:row.source,settled_at:row.settled_at})));
     if (sql.includes("/* original distribution qualifications */")) return rows();
     if (sql.includes("contributor_records AS MATERIALIZED")) return rows();
     if (sql.includes("FROM dashboard_records WHERE beneficiary_id=ANY")) return rows();
@@ -180,6 +181,14 @@ test("participant edits invalidate a previously signed page even when participan
   env.state.participantRevision = "2";
   const next = await invoke(env, "GET", `/participants?page=2&pageSize=2&snapshot=${encodeURIComponent(first.json.snapshot)}`);
   assert.equal(next.status, 409);
+});
+
+test('earnings source changes invalidate a signed next page after timestamp enrichment',async()=>{
+ const env=environment({isBoss:true,earnings:[earning(41)]});
+ const first=await invoke(env,'GET','/earnings?pageSize=20');assert.equal(first.status,200);assert.ok(first.json.snapshot);
+ env.state.participantRevision='2';
+ const next=await invoke(env,'GET',`/earnings?page=2&pageSize=20&snapshot=${encodeURIComponent(first.json.snapshot)}`);
+ assert.equal(next.status,409);assert.equal(next.json.items,undefined);
 });
 
 test("permission removal during a read rejects the response before exposing its already loaded rows", async () => {

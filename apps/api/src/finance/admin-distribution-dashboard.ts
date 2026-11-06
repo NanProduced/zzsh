@@ -158,7 +158,7 @@ export async function dashboardVersion(c: PoolClient, context: DashboardAccess, 
     FROM zzsh_order.rental_referral_transition t JOIN visible_earnings e ON e.id=t.earning_id
     JOIN zzsh_order.finance_event f ON f.id=t.finance_event_id AND f.economic_root_id=e.id`}
   ), visible_legacy AS (
-    ${legacyAvailable ? `SELECT p.id,p.user_id,p.source_system,p.source_id,p.source_digest,p.source_canonical,p.snapshot,lo.id order_id,jsonb_build_array(p.id,p.user_id,p.source_system,p.snapshot->>'sourceOrderType',p.snapshot->>'orderId',p.snapshot->>'amount',p.snapshot->>'sourceStatus',p.snapshot->>'level',p.source_event_at,p.imported_at,lo.id,lo.original_order_no,lo.game_id,lo.renter_user_id,lo.owner_user_id,${name})::text payload
+    ${legacyAvailable ? `SELECT p.id,p.user_id,p.source_system,p.source_id,p.source_digest,${distributionContentDigestSql('p.source_canonical')} AS canonical_digest,${distributionContentDigestSql('p.snapshot')} AS snapshot_digest,lo.id order_id,jsonb_build_array(p.id,p.user_id,p.source_system,p.snapshot->>'sourceOrderType',p.snapshot->>'orderId',p.snapshot->>'amount',p.snapshot->>'sourceStatus',p.snapshot->>'level',p.source_event_at,p.imported_at,lo.id,lo.original_order_no,lo.game_id,lo.renter_user_id,lo.owner_user_id,${name})::text payload
       FROM zzsh_order.personal_finance_observation p LEFT JOIN zzsh_order.legacy_order_read_snapshot lo ON lo.legacy_id=p.snapshot->>'orderId' AND lo.source_system=p.source_system AND lo.source_entity='la_order' AND (${legacyRentalDistributionPredicate('p')} )
       LEFT JOIN zzsh_auth_user."user" u ON u.id=p.user_id WHERE p.source_kind='HISTORICAL_DISTRIBUTION' AND ${nativeScope.replaceAll('o.game_id','lo.game_id')}${subject('p.user_id')}` : "SELECT NULL::text id,NULL::text payload WHERE FALSE"}
   ), visible_legacy_logs AS MATERIALIZED (
@@ -182,7 +182,7 @@ export async function dashboardVersion(c: PoolClient, context: DashboardAccess, 
         AND d.order_id=p.order_id WHERE d.kind='COMMISSION' GROUP BY p.id`
       : "SELECT NULL::text id,NULL::text version WHERE FALSE"}
   ), visible_legacy_effects AS (
-    ${legacyAvailable ? `SELECT p.id,jsonb_build_array(p.source_digest,${distributionContentDigestSql('p.source_canonical')},${distributionContentDigestSql('p.snapshot')},l.version,d.version)::text payload
+    ${legacyAvailable ? `SELECT p.id,jsonb_build_array(p.source_digest,p.canonical_digest,p.snapshot_digest,l.version,d.version)::text payload
       FROM visible_legacy p LEFT JOIN visible_legacy_logs l ON l.source_system=p.source_system AND l.user_id=p.user_id AND l.source_id=p.source_id
       LEFT JOIN visible_legacy_duties d ON d.id=p.id`
       : "SELECT NULL::text id,NULL::text payload WHERE FALSE"}
@@ -498,11 +498,24 @@ export async function readAdminDistributionEarnings(c: PoolClient, context: Dash
   if (f.source === "LEGACY" && !sources.legacy) throw new SecurityApiError(503, "EVIDENCE_UNAVAILABLE", "Legacy distribution source unavailable");
   const values: unknown[] = [], nativeScope = scopeSql("o", values, context);
   const beneficiaryParameter = f.beneficiary ? `$${values.push(f.beneficiary)}` : undefined;
-  const source = unifiedDistributionSourceSql(includeLegacy, 'duties' in sources && sources.duties === true, nativeScope, context.directoryRead, beneficiaryParameter);
+  // Filtering, ordering and the total do not depend on settlement timestamps. Resolve those only for the selected page.
+  const source = unifiedDistributionSourceSql(includeLegacy, 'duties' in sources && sources.duties === true, nativeScope, context.directoryRead, beneficiaryParameter, undefined, false);
   const records = source + 'SELECT id,source,beneficiary_id,beneficiary_name,role,order_id,order_number,game_id,amount_cents::text,recovery_cents::text,state,occurred_at,settled_at,due_at,recorded_at FROM dashboard_records';
   const where = listWhere(f, values, context), offset = (f.page - 1) * (limitOverride ?? f.pageSize), limit = limitOverride ?? f.pageSize;
   values.push(limit, offset);
   const rows = (await c.query(`WITH rows AS (${records}) SELECT *,count(*) OVER()::int AS total FROM rows WHERE ${where} ORDER BY occurred_at DESC NULLS LAST,id DESC LIMIT $${values.length - 1} OFFSET $${values.length}`, values)).rows;
+  if(rows.length){
+    const pageValues:unknown[]=[],pageScope=scopeSql('o',pageValues,context),pageBeneficiary=f.beneficiary?`$${pageValues.push(f.beneficiary)}`:undefined;
+    const nativeIds=rows.filter((row:any)=>row.source==='NATIVE').map((row:any)=>String(row.id));
+    const legacyIds=rows.filter((row:any)=>row.source==='LEGACY'&&typeof row.id==='string'&&row.id.startsWith('history:')).map((row:any)=>row.id.slice('history:'.length));
+    if(nativeIds.length+legacyIds.length!==rows.length)throw new SecurityApiError(503,'EVIDENCE_UNAVAILABLE','Distribution page source unavailable');
+    const nativeParameter=`$${pageValues.push(nativeIds)}`,recordScope={nativeIds:nativeParameter,legacyIds:includeLegacy?`$${pageValues.push(legacyIds)}`:nativeParameter};
+    const pageSource=unifiedDistributionSourceSql(includeLegacy,'duties' in sources&&sources.duties===true,pageScope,context.directoryRead,pageBeneficiary,undefined,true,recordScope);
+    const times=(await c.query(pageSource+'SELECT id,source,settled_at FROM dashboard_records',pageValues)).rows;
+    const byKey=new Map(times.map((row:any)=>[`${row.source}:${row.id}`,row.settled_at??null]));
+    if(times.length!==rows.length||byKey.size!==rows.length||rows.some((row:any)=>!byKey.has(`${row.source}:${row.id}`)))throw new SecurityApiError(503,'EVIDENCE_UNAVAILABLE','Distribution page timestamps unavailable');
+    for(const row of rows)row.settled_at=byKey.get(`${row.source}:${row.id}`);
+  }
   const items: DashboardEarning[] = rows.map((row: any) => mapEarningRow(row, context.directoryRead));
   const total = rows.length ? Number(rows[0].total) : Number((await c.query(`WITH rows AS (${records}) SELECT count(*)::text AS total FROM rows WHERE ${where}`,values.slice(0,-2))).rows[0]?.total);
   if(!Number.isSafeInteger(total)||total<0)throw new SecurityApiError(503,'EVIDENCE_UNAVAILABLE','Distribution total unavailable');
