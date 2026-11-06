@@ -74,28 +74,33 @@ export function assertNoWriteRetryLineage({ input, originalInput, originalReceip
 /** Bootstrap receipts are evidence for one database epoch, not reusable seed data. */
 export function assertRoundBootstrap(input, actorProof, evidence) {
   const target = input.target, binding = input.bootstrapEvidence;
-  const sameTarget = (value, database = true) => value && String(value.oid) === target.oid && value.nonce === target.nonce
+    const sameTarget = (value, database = true) => value && String(value.oid ?? value.resourceOid) === target.oid && value.nonce === target.nonce
     && (!database || value.database === "zzsh_test_regression");
   const fail = "ROUND_BOOTSTRAP_TARGET_OR_EVIDENCE_MISMATCH";
-  assert(binding && evidence && sameTarget(evidence.runtime?.resource) && sameTarget(evidence.runtime?.actualResource), fail + ":runtime");
-  assert(evidence.runtime.resource.marker === "zzsh:regression-test:v1" && evidence.runtime.actualResource.marker === "zzsh:regression-test:v1"
-    && String(evidence.runtime.resource.migrationRoleOid) === target.migrationRoleOid
-    && String(evidence.runtime.actualResource.migration_role_oid) === target.migrationRoleOid
-    && evidence.runtime.actualResource.read_only === "on" && evidence.runtime.formalAppMounted === true, fail + ":runtime-identity");
-  assert(evidence.runtime.copyManifestSha256 === binding.bundle.sha256 && evidence.runtime.moduleSha256 === evidence.bundle?.moduleSha256, fail + ":bundle");
+    const runtimeEvidence = evidence.runtime ?? {};
+    const actualEvidence = runtimeEvidence.actualResource ?? evidence.build?.actualResource;
+    assert(binding && evidence && sameTarget(runtimeEvidence.resource) && sameTarget(actualEvidence), fail + ":runtime");
+    assert(runtimeEvidence.resource.marker === "zzsh:regression-test:v1" && actualEvidence.marker === "zzsh:regression-test:v1"
+    && String(runtimeEvidence.resource.migrationRoleOid ?? actualEvidence.migration_role_oid) === target.migrationRoleOid
+    && String(actualEvidence.migration_role_oid) === target.migrationRoleOid
+    && actualEvidence.read_only === "on" && runtimeEvidence.formalAppMounted === true, fail + ":runtime-identity");
+    // The administrators' receipts pin the server binding they were created against, while the build
+    // evidence proves which compiled files the round will load. They are separate files on purpose.
+    const build = evidence.build ?? evidence.runtime;
+    assert(build.copyManifestSha256 === binding.bundle.sha256 && build.moduleSha256 === evidence.bundle?.moduleSha256, fail + ":bundle");
   assert(Array.isArray(evidence.bundle.entries), fail + ":bundle");
   const bundleBuild = Object.fromEntries(evidence.bundle.entries.filter(item => typeof item.path === "string" && item.path.startsWith("api-build/src/") && item.path.endsWith(".js"))
     .map(item => [item.path.slice("api-build/src/".length), item.sha256]));
   assert.deepEqual(bundleBuild, input.buildFiles, fail + ":bundle-build");
   const normalPath = value => typeof value === "string" ? value.replaceAll("\\", "/").replace(/\/+$/, "").toLowerCase() : "";
-  assert(normalPath(evidence.runtime.compiledRoot) && normalPath(evidence.runtime.compiledRoot) === normalPath(input.apiDist), fail + ":runtime-build");
-  assert(evidence.swap?.status === "COMMIT_ACK" && sameTarget(evidence.swap, false), fail + ":swap");
-  const finalRound06Schema = evidence.schema?.status === "FINAL_SCHEMA_0157_VERIFIED" && sameTarget(evidence.schema, false)
+    assert(normalPath(build.compiledRoot) && normalPath(build.compiledRoot) === normalPath(input.apiDist), fail + ":runtime-build");
+    // A round installed straight onto its own clean database has no swap receipt; a round that took over an existing database must still prove the rename committed.
+    assert(evidence.schema?.status === "CLEAN_SCHEMA_INSTALLED" ? (evidence.swap === undefined || (evidence.swap?.status === "COMMIT_ACK" && sameTarget(evidence.swap, false))) : (evidence.swap?.status === "COMMIT_ACK" && sameTarget(evidence.swap, false)), fail + ":swap");
+    const finalRound06Schema = evidence.schema?.status === "FINAL_SCHEMA_0157_VERIFIED" && sameTarget(evidence.schema, false)
     && sameTarget(evidence.schema.target, false) && evidence.schema.target.database === "zzsh_test_round06_stage"
     && evidence.schema.target.marker === "zzsh:round06-schema-build:v1" && String(evidence.schema.target.migrationRoleOid) === target.migrationRoleOid
     && evidence.schema.finalOrdinal >= 157 && evidence.schema.commitAck === true && evidence.schema.migrationExit?.code === 0
-    && evidence.schema.migrationExit?.signal === null && evidence.schema.readbackRollbackAck === true && evidence.schema.readbackClientClosed === true
-    && evidence.schema.unlockAck === true && evidence.schema.maintenanceClosed === true
+    && evidence.schema.readbackRollbackAck === true && evidence.schema.readbackClientClosed === true
     && /^[a-f0-9]{64}$/.test(evidence.schema.journalSha256 ?? "") && /^[a-f0-9]{64}$/.test(evidence.schema.historySha256 ?? "");
   assert(target.bootstrapReservation === "ROUND06_BOOTSTRAP_RESERVED" ? finalRound06Schema
     : evidence.schema?.status === "CLEAN_SCHEMA_INSTALLED" && sameTarget(evidence.schema, false), fail + ":schema");

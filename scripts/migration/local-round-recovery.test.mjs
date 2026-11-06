@@ -6,7 +6,9 @@ import { win32 as path } from "node:path";
 import { createInterface } from "node:readline";
 import { Readable } from "node:stream";
 import test from "node:test";
-import { matchesLoadReservation, strictRoundReservation } from "./local-load-checkpoint.mjs";
+import { isStrictRoundReservation, matchesLoadReservation, strictRoundReservation } from "./local-load-checkpoint.mjs";
+import { advisoryLockSql, assertLiveTarget, maintenanceConnection, normalizeRegisteredTarget, targetConnection, targetIdentityQuery } from "./local-target-registry.mjs";
+import { assertRoundPopulationBinding, assertFullExecutionAdmitted } from "./full-source-scope.mjs";
 import { assertRoundBootstrap, assessRoundEvidence, assertGrowthPlanEvidence, assertGrowthPackages, assertResumeLineage, verifyResumeSchema, assessResumeStages, assertNoWriteRetryLineage } from "./local-round-contract.mjs";
 
 const sha = bytes => createHash("sha256").update(bytes).digest("hex");
@@ -21,7 +23,7 @@ const ds = path.join(restricted, "dataset"), out = path.join(restricted, "load")
 const credentials = path.join(restricted, "resource", "credentials.json"), registry = path.join(path.dirname(credentials), "resource.json");
 const checkpoint = path.join(out, "checkpoint.json"), users = [{ sourceId: "101", input: { id: 1 } }, { sourceId: "102", input: { id: 2 } }];
 
-async function load({ failure, strict = true, reservation = {}, previous, recover = false, exitAfterUsers = false } = {}) {
+async function load({ failure, strict = true, reservation = {}, previous, recover = false, exitAfterUsers = false, populationMode, undeclaredPopulation = false, invalidPopulationDigest = false } = {}) {
   const files = new Map(), directories = new Set(), commands = [], events = [], logs = [], saves = [];
   const put = (file, value) => files.set(file, JSON.stringify(value));
   const get = file => { assert(files.has(file), file); return files.get(file); };
@@ -32,10 +34,12 @@ async function load({ failure, strict = true, reservation = {}, previous, recove
     fileEntries[name] = { file, sha256: sha(body) };
   }
   const manifest = path.join(ds, "manifest.json"), fundsReceipt = path.join(funds, "receipt.json");
-  put(manifest, { status: "FULL_SOURCE_DATASET_PREPARED_TARGET_NOT_RUN", gameBindings: {}, files: fileEntries });
+  const population = populationMode ? { schema: "zzsh.local-population-scope.v1", mode: populationMode } : null;
+  put(manifest, { status: "FULL_SOURCE_DATASET_PREPARED_TARGET_NOT_RUN", gameBindings: {}, files: fileEntries,
+    ...(population ? { population, populationSha256: invalidPopulationDigest ? "f".repeat(64) : sha(JSON.stringify(population)) } : undeclaredPopulation ? {} : { scenarioSelection: { schema: "zzsh.source-scenarios.v1" } }) });
   put(fundsReceipt, {});
-  const migration = { name: "test_migration", oid: "91", password: "test" };
-  const registration = { ...epoch, database: "zzsh_test_regression", roles: { migration }, ...(strict || Object.keys(reservation).length ? { protectedDataset: {
+  const migration = { name: "test_migration", oid: "91", password: "test" }, runtime = { name: "test_runtime", oid: "92" };
+  const registration = { ...epoch, database: "zzsh_test_regression", marker: "zzsh:regression-test:v1", roles: { migration, runtime }, ...(strict || Object.keys(reservation).length ? { protectedDataset: {
     status: strictRoundReservation, epoch, manifestSha256: sha(get(manifest)), ...reservation,
   } } : {}) };
   files.set(registry, previous?.files.get(registry) ?? JSON.stringify(registration));
@@ -53,7 +57,7 @@ async function load({ failure, strict = true, reservation = {}, previous, recove
   let commitAck = false, diskFailed = false;
   const client = Object.assign(new EventEmitter(), {
     async query(sql) {
-      if (sql.startsWith("SELECT d.oid")) return { rows: [{ ...epoch, owner: "zzsh", marker: "zzsh:regression-test:v1", role: migration.name, role_oid: migration.oid }] };
+      if (sql.startsWith("SELECT current_database()")) return { rows: [{ ...epoch, database: registration.database, owner: "zzsh", marker: registration.marker, role: migration.name, role_oid: migration.oid, is_super: "false", can_create_db: "false", can_create_role: "false", system_identifier: null }] };
       if (sql.startsWith("SELECT hash")) return { rows: schema.map(hash => ({ hash })) };
       if (sql.startsWith("SELECT EXISTS")) return { rows: [{ occupied: false }] };
       commands.push(sql);
@@ -83,8 +87,10 @@ async function load({ failure, strict = true, reservation = {}, previous, recove
     } },
   };
   const context = {
-    ...path, createHash, matchesLoadReservation, strictRoundReservation, process: proc, moduleUrl: "fixture", fileURLToPath: () => "C:\\project\\scripts\\migration\\load-local-dataset.mjs",
-    financialFixture: () => ({ applyFinancialDomains: ctx => ctx.runItems("financeEmptyCoverage", [{ sourceId: "empty-original" }], () => { throw Object.assign(Error("coverage rejected"), { status: 409 }); }) }),
+    ...path, createHash, isStrictRoundReservation, matchesLoadReservation, strictRoundReservation, process: proc, moduleUrl: "fixture", fileURLToPath: () => "C:\\project\\scripts\\migration\\load-local-dataset.mjs",
+    advisoryLockSql, assertLiveTarget, maintenanceConnection, targetConnection, targetIdentityQuery, assertFullExecutionAdmitted,
+    // The loader reads its registry through this sandbox filesystem, not the real disk.
+    loadRegisteredTarget: credentialPath => { const file = path.join(path.dirname(credentialPath), "resource.json"); return normalizeRegisteredTarget(JSON.parse(get(file)), file); },    financialFixture: () => ({ applyFinancialDomains: ctx => ctx.runItems("financeEmptyCoverage", [{ sourceId: "empty-original" }], () => { throw Object.assign(Error("coverage rejected"), { status: 409 }); }) }),
     console: { log: message => logs.push(JSON.parse(message)), error: message => logs.push(JSON.parse(message)) },
     createInterface, createReadStream: file => Readable.from([Buffer.from(get(file))]),
     existsSync: file => files.has(file) || directories.has(file), mkdirSync: file => directories.add(file), readFileSync: (file, encoding) => encoding ? get(file) : Buffer.from(get(file)),
@@ -114,7 +120,7 @@ async function load({ failure, strict = true, reservation = {}, previous, recove
 test("strict run commits one batch without savepoints", async () => {
   const r = await load();
   assert.ifError(r.error);
-  assert.equal(r.exit, undefined);
+  assert.equal(r.exit, undefined, JSON.stringify(r.logs));
   assert.deepEqual(r.commands.slice(3, 6), ["BEGIN", "SET CONSTRAINTS ALL IMMEDIATE", "COMMIT"]);
   assert.equal(r.state.phases.users.nextIndex, 2);
   assert.equal(r.state.rollbackConfirmed, true);
@@ -124,6 +130,20 @@ test("strict run commits one batch without savepoints", async () => {
   assert.equal(continued.exit, undefined);
   assert.equal(continued.state.phases.users.nextIndex, 2);
   assert.ok(!continued.commands.includes("COMMIT"));
+});
+
+test("direct loader refuses full captured source before database connection while selected and legacy plans remain compatible", async () => {
+  // A full-source dataset that does not declare the bounded empty-coverage path stays refused before
+  // any connection or output, and a scenario or legacy dataset keeps working.
+  const full = await load({ populationMode: "FULL_CAPTURED_SOURCE" });
+  assert.match(full.error.message, /FULL_CAPTURED_EXECUTION_REQUIRES_BOUNDED_EMPTY_COVERAGE/);
+  assert.deepEqual(full.commands, []); assert.equal(full.state, null); assert.deepEqual([...full.directories], []);
+  const selected = await load({ populationMode: "SCENARIO_SELECTION" });
+  assert.ifError(selected.error); assert.ok(selected.commands.includes("COMMIT"));
+  const legacy = await load(); assert.ifError(legacy.error); assert.ok(legacy.commands.includes("COMMIT"));
+  const unknown = await load({ undeclaredPopulation: true }); assert.match(unknown.error.message, /UNDECLARED_POPULATION_EXECUTION_BLOCKED/); assert.deepEqual(unknown.commands, []);
+  const invalid = await load({ populationMode: "UNKNOWN" }); assert.match(invalid.error.message, /UNDECLARED_POPULATION_EXECUTION_BLOCKED/); assert.deepEqual(invalid.commands, []);
+  const badDigest = await load({ populationMode: "SCENARIO_SELECTION", invalidPopulationDigest: true }); assert.match(badDigest.error.message, /POPULATION_SCOPE_DIGEST_INVALID/); assert.deepEqual(badDigest.commands, []);
 });
 
 test("R06 strict reservation remains bound across checkpoint continuation", async () => {
@@ -235,7 +255,7 @@ async function round({ reservationStatus = strictRoundReservation, action = "exe
   };
   const source = pinned("source", { status: "CAPTURED_READ_ONLY" }, "receipt.json");
   const supplement = { sourceSupplement: { baseReceiptSha256: source.sha256 } };
-  const dataset = pinned("dataset", { sourceReceiptSha256: source.sha256, sourceCutoff: "2026-01-01T00:00:00.000Z", domains: { accounts: { ready: cohort }, users: { ready: cohort }, orders: { ready: cohort }, continuations: { parameterComplete: 0 } } });
+  const dataset = pinned("dataset", { sourceReceiptSha256: source.sha256, sourceCutoff: "2026-01-01T00:00:00.000Z", scenarioSelection: { schema: "zzsh.source-scenarios.v1" }, domains: { accounts: { ready: cohort }, users: { ready: cohort }, orders: { ready: cohort }, continuations: { parameterComplete: 0 } } });
   const pathSourcePlan = pinned("paths-source", {}, "receipt.json");
   const apiDist = "C:\\project\\dist", buildFiles = {};
   for (const file of ["database/business-migrations.js", "supply/legacy-user-migration.js", "legacy-load/legacy-account-seam.js", "order/legacy-order-read.js", "finance/personal-finance-maintenance.js", "legacy-load/legacy-path-records.js"]) buildFiles[file] = put(path.join(apiDist, file), {}).sha256;
@@ -301,7 +321,7 @@ async function round({ reservationStatus = strictRoundReservation, action = "exe
     put(credentials, { database: "zzsh_test_regression", migration: { name: "fixture_m", oid: "91", password: "fixture" } });
   }
   const input = put(path.join(restricted, "round-input.json"), inputBody);
-  put(registry, { ...epoch, database: "zzsh_test_regression", roles: { migration: { name: "fixture_m", oid: "91" } },
+  put(registry, { ...epoch, database: "zzsh_test_regression", marker: "zzsh:regression-test:v1", roles: { migration: { name: "fixture_m", oid: "91" }, runtime: { name: "fixture_r", oid: "92" } },
     ...(resumeCase ? { protectedDataset: { status: "LOCAL_DATASET_SKIN_HOLDINGS_COMMITTED_REVIEW_REQUIRED", manifestSha256: dataset.sha256, epoch, report: oldCheckpointPath } }
       : reservationStatus ? { protectedDataset: { status: reservationStatus, manifestSha256: dataset.sha256, epoch, ...drift } } : {}) });
   const attemptPath = path.join(restricted, `growth-resume-attempt-${epoch.oid}-${epoch.nonce}.json`);
@@ -317,7 +337,8 @@ async function round({ reservationStatus = strictRoundReservation, action = "exe
   if (brokenPath) files.set(brokenPath, Buffer.from(artifactFault.kind === "null" ? "null" : artifactFault.kind === "array" ? "[]" : "{"));
   let attemptFile;
   const context = {
-    ...path, assert, createHash, matchesLoadReservation, strictRoundReservation, assertRoundBootstrap, assessRoundEvidence, assertGrowthPlanEvidence, assertGrowthPackages, assertResumeLineage, verifyResumeSchema, assessResumeStages, assertNoWriteRetryLineage, process: proc, moduleUrl: "file:///C:/project/scripts/migration/run-local-round.mjs",
+    ...path, assert, createHash, isStrictRoundReservation, matchesLoadReservation, strictRoundReservation, assertRoundBootstrap, assessRoundEvidence, assertGrowthPlanEvidence, assertGrowthPackages, assertResumeLineage, verifyResumeSchema, assessResumeStages, assertNoWriteRetryLineage, assertRoundPopulationBinding, assertFullExecutionAdmitted, process: proc, moduleUrl: "file:///C:/project/scripts/migration/run-local-round.mjs",
+    targetConnection, loadRegisteredTarget: credentialPath => { const file = path.join(path.dirname(credentialPath), "resource.json"); return normalizeRegisteredTarget(JSON.parse(String(files.get(file))), file); },
     inspectRoundDependencyLayout: () => ({ sourceRoot: "C:\\fixture", scriptDir: "C:\\fixture\\scripts\\migration", moduleDirs: ["C:\\fixture\\node_modules"] }),
     assertRoundDependencyProof: () => { if (dependencyDrift === "proof") throw Error("ROUND_DEPENDENCY_PROOF_CHANGED"); },
     probeRoundDependencies: () => ({ closureSha256: dependencyDrift === "closure" ? "d".repeat(64) : "c".repeat(64), entrypoints: 32 }),

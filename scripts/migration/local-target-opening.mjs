@@ -21,7 +21,7 @@ export async function applyOpeningDomain(ctx, directory, manifestSha256) {
   const reviewed = ctx.state.additiveInputs.opening ?? { directory: path, manifestSha256, sourceFileSha256: plan.sha256, ...(ctx.state.executionWindow ?? { notBefore: new Date().toISOString(), expiresAt: new Date(Date.now() + 12 * 3600000).toISOString() }), candidateCount: plan.stats.candidate, isolatedCount: plan.stats.reviewRequired };
   ctx.state.additiveInputs.opening = reviewed;
   ctx.save();
-  const common = { ref: "CORE_FULL_STORED_OPENING_" + ctx.state.binding.oid, attempt: "opening-" + manifestSha256.slice(0, 16), actor: { userId: ctx.actor.userId, sessionId: ctx.actor.sessionId }, resource: { host: "127.0.0.1", port: 55432, database: "zzsh_test_regression", oid: Number(ctx.state.binding.oid), owner: ctx.state.resource.owner, marker: ctx.state.resource.marker, role: ctx.state.resource.role, roleOid: Number(ctx.state.resource.role_oid) }, notBefore: reviewed.notBefore, expiresAt: reviewed.expiresAt };
+  const common = { ref: "CORE_FULL_STORED_OPENING_" + ctx.state.binding.oid, attempt: "opening-" + manifestSha256.slice(0, 16), actor: { userId: ctx.actor.userId, sessionId: ctx.actor.sessionId }, resource: { host: "127.0.0.1", port: Number(ctx.targetPort ?? 55432), database: "zzsh_test_regression", oid: Number(ctx.state.binding.oid), owner: ctx.state.resource.owner, marker: ctx.state.resource.marker, role: ctx.state.resource.role, roleOid: Number(ctx.state.resource.role_oid) }, notBefore: reviewed.notBefore, expiresAt: reviewed.expiresAt };
   const expected = { subjects: 0, positive: 0, zero: 0, amountCents: 0n, isolated: [] };
   async function* candidates() {
     for await (const row of ctx.readRows(file)) {
@@ -40,11 +40,15 @@ export async function applyOpeningDomain(ctx, directory, manifestSha256) {
             return { ...common, inputSha256: input.inputSha256, cutoff: input.cutoff, bodyDigest: hash(canonical(input)), subject: { userId: proof.userId, sourceId: proof.source.sourceId, identityDigest: proof.source.identityDigest, sourceDigest: proof.sourceDigest, availableCents: proof.availableCents, coveredDigest: proof.coveredDigest }, coveredCount: proof.coveredCount, observationCount: input.observations.length, admissionDigest: hash(canonical(input.admissions)), ...(input.sourceProof ? { sourceProofDigest: hash(canonical(input.sourceProof)) } : {}) };
         });
         try {
-            const scopes = await module.bindReviewedStoredOpeningAdmissionBatch(ctx.client, ctx.actor, reviews);
+            if (process.env.ZZSH_OPENING_DIAG === "1") {
+        const cp = ctx.client?.connectionParameters ?? {};
+        console.error(JSON.stringify({ diag: "opening-review", connection: { host: cp.host, port: cp.port, database: cp.database, user: cp.user }, review: reviews[0]?.resource }));
+    }
+    const scopes = await module.bindReviewedStoredOpeningAdmissionBatch(ctx.client, ctx.actor, reviews);
             const result = await module.importReviewedStoredOpeningBatchOn(ctx.client, ctx.actor, inputs, scopes);
             return rows.map((_, i) => ({ replayed: i >= result.created }));
         } catch (cause) {
-            const error = new Error("TARGET_REVIEWED_OPENING_REJECTED", { cause });
+            const error = new Error("TARGET_REVIEWED_OPENING_REJECTED: " + String(cause?.message ?? cause), { cause });
             error.code = cause.code ?? "TARGET_REVIEWED_OPENING_REJECTED";
             throw error;
         }

@@ -6,10 +6,10 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { spawnSync } from "node:child_process";
 import { writePrivate } from "../local-auth.mjs";
 
-const modules = ["auth/identity-subject", "auth/membership-growth", "auth/membership-growth-integration", "auth/membership-growth-legacy", "auth/membership-growth-legacy-cli",
+export const ROUND_MODULES = ["auth/identity-subject", "auth/membership-growth", "auth/membership-growth-integration", "auth/membership-growth-legacy", "auth/membership-growth-legacy-cli",
   "auth/membership-growth-legacy-maintenance", "auth/membership-growth-legacy-store", "auth/auth-security", "auth/security-core", "credit/credit-initialization",
   "database/business-migrations", "finance/legacy-finance-source-preparation", "finance/legacy-invitation-facts", "finance/legacy-invitation-facts-maintenance",
-  "finance/owner-guarantee-history", "finance/owner-guarantee-history-maintenance", "finance/personal-finance-maintenance", "finance/personal-finance-observation-maintenance",
+  "finance/personal-finance-maintenance", "finance/personal-finance-observation-maintenance",
   "legacy-load/legacy-account-seam", "legacy-load/legacy-skin-holdings", "legacy-load/legacy-path-records", "order/legacy-continuation-evidence", "order/legacy-continuation-model",
   "order/legacy-growth-consumption", "order/legacy-liability-intake", "order/legacy-order-read", "profile/profile-avatar", "profile/profile-avatar-presets",
   "supply/content-hash", "supply/legacy-listing-read", "supply/legacy-observation", "supply/legacy-user-migration"];
@@ -48,7 +48,7 @@ export function inspectRoundDependencyLayout({ apiDist, bundlePath, bundleSha256
 export function probeRoundDependencies(layout) {
   const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => /^(PATH|PATHEXT|SYSTEMROOT|WINDIR|COMSPEC|TEMP|TMP)$/i.test(key)));
   env.NODE_PATH = layout.moduleDirs.join(process.platform === "win32" ? ";" : ":");
-  const result = spawnSync(process.execPath, ["-e", childCode, layout.apiDist, layout.sourceRoot, JSON.stringify(modules)], { cwd: layout.sourceRoot, env, encoding: "utf8", windowsHide: true, timeout: 30000, maxBuffer: 2 * 1024 * 1024 });
+  const result = spawnSync(process.execPath, ["-e", childCode, layout.apiDist, layout.sourceRoot, JSON.stringify(ROUND_MODULES)], { cwd: layout.sourceRoot, env, encoding: "utf8", windowsHide: true, timeout: 30000, maxBuffer: 2 * 1024 * 1024 });
   assert(result.status === 0 && result.signal === null, "ROUND_DEPENDENCY_CLOSURE_NOT_LOADABLE");
   const output = JSON.parse(result.stdout); assert(Array.isArray(output.files) && output.files.length > 0 && output.entrypoints === modules.length, "ROUND_DEPENDENCY_PROBE_INVALID");
   return { ...layout, nodeVersion: process.version, closureFiles: output.files, closureSha256: sha(JSON.stringify(output.files)), entrypoints: output.entrypoints };
@@ -60,7 +60,7 @@ export function assertRoundDependencyProof(proof, expected) {
     && proof.sourceRoot === expected.sourceRoot && proof.sourceSnapshot === expected.sourceSnapshot && proof.sourceManifestSha256 === expected.sourceManifestSha256
     && proof.scriptDir === expected.scriptDir && JSON.stringify(proof.moduleDirs) === JSON.stringify(expected.moduleDirs)
     && JSON.stringify(proof.scriptFiles) === JSON.stringify(expected.scriptFiles) && Array.isArray(proof.closureFiles) && proof.closureFiles.length > 0
-    && sha(JSON.stringify(proof.closureFiles)) === proof.closureSha256 && proof.entrypoints === modules.length, "ROUND_DEPENDENCY_PROOF_CHANGED");
+    && sha(JSON.stringify(proof.closureFiles)) === proof.closureSha256 && proof.entrypoints === ROUND_MODULES.length, "ROUND_DEPENDENCY_PROOF_CHANGED");
   for (const [relative, digest] of proof.closureFiles) {
     assert(typeof relative === "string" && !isAbsolute(relative) && !relative.split("/").includes("..") && /^[a-f0-9]{64}$/.test(digest), "ROUND_DEPENDENCY_FILE_INVALID");
     assert.equal(fileSha(join(expected.sourceRoot, relative)), digest, "ROUND_DEPENDENCY_FILE_CHANGED:" + basename(relative));

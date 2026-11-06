@@ -5,7 +5,9 @@ import { createInterface } from "node:readline";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
-import { matchesLoadReservation, strictRoundReservation, writeLoadCheckpoint } from "./local-load-checkpoint.mjs";
+import { isStrictRoundReservation, matchesLoadReservation, strictRoundReservation, writeLoadCheckpoint } from "./local-load-checkpoint.mjs";
+import { assertFullExecutionAdmitted } from "./full-source-scope.mjs";
+import { advisoryLockSql, assertLiveTarget, loadRegisteredTarget, maintenanceConnection, targetConnection, targetIdentityQuery } from "./local-target-registry.mjs";
 const require = createRequire(import.meta.url), { Client, Pool } = require("pg");
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const args = process.argv.slice(2), option = name => { const i = args.indexOf(name); return i < 0 ? undefined : args[i + 1]; };
@@ -25,6 +27,10 @@ const manifestBytes = readFileSync(join(dataset, "manifest.json"));
 if (sha(manifestBytes) !== option("--dataset-sha"))
     throw new Error("DATASET_MANIFEST_SHA_MISMATCH");
 const manifest = JSON.parse(manifestBytes);
+// A direct invocation must not bypass the runner's full-capture readiness gate.
+const population = manifest.population ?? { mode: manifest.scenarioSelection?.schema === "zzsh.source-scenarios.v1" ? "LEGACY_SCENARIO_SELECTION" : "LEGACY_UNDECLARED" };
+assertFullExecutionAdmitted(population, execute ? "execute" : "recover");
+if (execute && manifest.population && (manifest.population.schema !== "zzsh.local-population-scope.v1" || sha(JSON.stringify(manifest.population)) !== manifest.populationSha256)) throw new Error("POPULATION_SCOPE_DIGEST_INVALID");
 const schemaBinding = option("--schema-binding");
 const expectedSchema = schemaBinding ? JSON.parse(schemaBinding) : null;
 if (expectedSchema && (!Array.isArray(expectedSchema) || !expectedSchema.length || expectedSchema.some(hash => !/^[a-f0-9]{64}$/.test(hash))))
@@ -82,8 +88,12 @@ function createOutput() {
     if (spawnSync("icacls", [output, "/inheritance:r", "/grant:r", `*${sid}:(OI)(CI)F`, "*S-1-5-18:(OI)(CI)F", "*S-1-5-32-544:(OI)(CI)F"], { encoding: "utf8", windowsHide: true }).status !== 0)
         throw new Error("OUTPUT_ACL_FAILED");
 }
+// The registered target is resolved before the checkpoint binding is built, so a checkpoint can only
+// ever be compared against the target its registry names - never against a literal in this script.
+const registered = loadRegisteredTarget(option("--credentials"));
+
 let state = existsSync(statePath) ? JSON.parse(readFileSync(statePath)) : null;
-const binding = { datasetSha256: sha(manifestBytes), database: "zzsh_test_regression", oid: expectedOid, nonce: expectedNonce, actorId: actor.id, sessionId: actor.sessionId };
+const binding = { datasetSha256: sha(manifestBytes), database: registered.database, oid: expectedOid, nonce: expectedNonce, actorId: actor.id, sessionId: actor.sessionId };
 function assertCheckpointBinding(checkpoint) {
     if (recover && !checkpoint?.pending) throw new Error("ORIGINAL_PENDING_CHECKPOINT_REQUIRED");
     if (!checkpoint) return;
@@ -125,18 +135,14 @@ function resetRunCleanup() { state.poolClosed=false; state.unlock=false; state.m
 function save(value = state) { if (checkpointOwned) writeLoadCheckpoint(statePath, value); }
 function event(value) { if (!checkpointOwned) return; appendFileSync(eventsPath, JSON.stringify({ at: new Date().toISOString(), ...value }) + "\n"); }
 const credentialFile = option("--credentials");
-if (!credentialFile)
-    throw new Error("REGISTERED_MIGRATION_CREDENTIAL_REQUIRED");
-const registryPath = join(dirname(resolve(credentialFile)), "resource.json");
-const registered = JSON.parse(readFileSync(registryPath, "utf8"));
 const round06Reservation = "ROUND06_BOOTSTRAP_RESERVED";
 const initialReservation = registered.protectedDataset;
 const round06 = initialReservation?.status === round06Reservation || initialReservation?.bootstrapReservation === round06Reservation;
 function assertResource(resource, checkpoint) {
     if (resource.database !== binding.database || resource.oid !== expectedOid || resource.nonce !== expectedNonce || resource.pendingReset)
-        throw new Error("REGISTERED_MIGRATION_CREDENTIAL_REQUIRED");
+        throw new Error("RES:"+JSON.stringify([resource.database,binding.database,resource.oid,expectedOid,resource.nonce,expectedNonce,resource.pendingReset]));
     const reservation = resource.protectedDataset;
-    const strictRound = status => status === strictRoundReservation || status === "ROUND05_BOOTSTRAP_RESERVED" || status === round06Reservation;
+    const strictRound = status => isStrictRoundReservation(status) || status === round06Reservation;
     if ((strictRound(reservation?.bootstrapReservation) || reservation?.status === round06Reservation) && !strictBatch) throw new Error("CHECKPOINT_STRICT_BATCH_CHANGED");
     if (round06 && (reservation?.status === round06Reservation
         ? reservation.bootstrapReservation !== undefined && reservation.bootstrapReservation !== round06Reservation
@@ -151,13 +157,18 @@ function assertResource(resource, checkpoint) {
 assertResource(registered, existsSync(statePath) ? state : null);
 const credentials = JSON.parse(readFileSync(credentialFile, "utf8"));
 function assertRegisteredRole(resource) {
+    // The resolved target and the registry file read back for drift both reach here: one carries the
+    // role name directly, the other still holds the raw roles block that is written back unchanged.
+    const registeredRole = resource.migrationRole ?? resource.roles?.migration?.name;
+    const registeredRoleOid = resource.roles?.migration?.oid;
     if (credentials.database !== binding.database || !credentials.migration?.name || !credentials.migration.oid
-        || credentials.migration.name !== resource.roles?.migration?.name || credentials.migration.oid !== resource.roles?.migration?.oid)
+        || credentials.migration.name !== registeredRole
+        || (registeredRoleOid !== undefined && credentials.migration.oid !== registeredRoleOid))
         throw new Error("REGISTERED_MIGRATION_CREDENTIAL_REQUIRED");
 }
 assertRegisteredRole(registered);
-const maintenance = new Client({ host: "127.0.0.1", port: 55432, database: "postgres", user: "zzsh", password: readFileSync(process.env.DB_PASSWORD_FILE ?? "E:/zzsh/zzsh/apps/api/.secrets/postgres_password", "utf8").trim(), application_name: "core-full-legacy-lock", connectionTimeoutMillis: 3000, statement_timeout: 5000, lock_timeout: 500 });
-const pool = new Pool({ host: "127.0.0.1", port: 55432, database: "zzsh_test_regression", user: credentials.migration.name, password: credentials.migration.password, application_name: "core-full-legacy-import", max: 1, connectionTimeoutMillis: 3000, statement_timeout: 15000, lock_timeout: 1000 });
+const maintenance = new Client(maintenanceConnection(registered, { user: "zzsh", password: readFileSync(process.env.DB_PASSWORD_FILE ?? join(ROOT, "apps/api/.secrets/postgres_password"), "utf8").trim(), applicationName: "core-full-legacy-lock", connectionTimeoutMillis: 3000, statement_timeout: 5000, lock_timeout: 500 }));
+const pool = new Pool(targetConnection(registered, { user: credentials.migration.name, password: credentials.migration.password, applicationName: "core-full-legacy-import", max: 1, connectionTimeoutMillis: 3000, statement_timeout: 600000, lock_timeout: 1000 }));
 const subject = mod("auth/identity-subject"), subjectKey = subject.deriveIdentitySubjectKey(readFileSync(process.env.USER_IDENTITY_SUBJECT_HMAC_KEY_FILE ?? "E:/zzsh/zzsh/apps/api/.secrets/user_identity_subject_hmac", "utf8").trim());
 let client, held = false, unsafeConnection;
 const gameIds = new Map();
@@ -320,14 +331,14 @@ function protectDataset(resourceState, status) {
 resetRunCleanup();
 try {
     await maintenance.connect();
-    held = (await maintenance.query("SELECT pg_try_advisory_lock(806006::bigint) ok")).rows[0].ok;
+    held = (await maintenance.query(advisoryLockSql(registered, "try"))).rows[0].ok;
     if (!held)
         throw new Error("REGRESSION_RESOURCE_BUSY");
     // A previous writer may have finished while this invocation was validating its inputs.
     const currentCheckpoint = existsSync(statePath) ? JSON.parse(readFileSync(statePath)) : null;
     assertCheckpointBinding(currentCheckpoint);
     if (currentCheckpoint) state = currentCheckpoint;
-    const startingResource = JSON.parse(readFileSync(registryPath));
+    const startingResource = JSON.parse(readFileSync(registered.sourceFile));
     assertResource(startingResource, currentCheckpoint);
     assertRegisteredRole(startingResource);
     if(fundsSourceBinding&&state.fundsSourceBinding&&JSON.stringify(state.fundsSourceBinding)!==JSON.stringify(fundsSourceBinding))throw new Error("CHECKPOINT_FUNDS_SOURCE_CHANGED");
@@ -336,8 +347,11 @@ try {
     client.on("error", error => { unsafeConnection ??= error; });
     const original = client.query.bind(client);
     client.query = (...args) => { state.queries++; return original(...args); };
-    const actual = (await client.query("SELECT d.oid::text,d.datdba::int AS owner_oid,pg_get_userbyid(d.datdba) owner,shobj_description(d.oid,'pg_database') marker,current_user role,r.oid::text role_oid,current_setting('zzsh.regression_run') nonce,r.rolsuper,r.rolcreatedb,r.rolcreaterole,r.rolbypassrls FROM pg_database d JOIN pg_roles r ON r.rolname=current_user WHERE d.datname=current_database()")).rows[0];
-    if (actual.oid !== expectedOid || actual.nonce !== expectedNonce || actual.owner !== "zzsh" || actual.marker !== "zzsh:regression-test:v1" || actual.role !== credentials.migration.name || actual.role_oid !== credentials.migration.oid || actual.rolsuper || actual.rolcreatedb || actual.rolcreaterole || actual.rolbypassrls)
+    const actual = (await client.query(targetIdentityQuery())).rows[0];
+    // Every field of the registered target - including the cluster identity when the registry pins
+    // one - is proved on the live connection before this run opens a transaction.
+    assertLiveTarget(registered, actual);
+    if (actual.role_oid !== credentials.migration.oid || actual.oid !== expectedOid || actual.nonce !== expectedNonce)
         throw new Error("TARGET_IDENTITY_CHANGED");
     resetRunCleanup();
     if(refundAttemptsBinding&&state.refundAttemptsBinding&&JSON.stringify(state.refundAttemptsBinding)!==JSON.stringify(refundAttemptsBinding))throw new Error("REFUND_ATTEMPT_CHECKPOINT_BINDING_CHANGED");
@@ -386,7 +400,7 @@ try {
         state.gameBindings = Object.fromEntries(gameIds);
         state.status = "RUNNING";
         protectDataset(startingResource, "BUILDING");
-        writeLoadCheckpoint(registryPath, startingResource);
+        writeLoadCheckpoint(registered.sourceFile, startingResource);
         save();
         if (contactAppend || numberOnly) {
             const { applyContactAppend, applyNumberBindings } = await import("./local-target-contact-append.mjs");
@@ -405,7 +419,7 @@ try {
         }
         else if (openingOnly) {
             const { applyOpeningDomain } = await import("./local-target-opening.mjs");
-            await applyOpeningDomain({ client, actor, mod, manifest, state, output, domainFile, readRows, runItems, runBatches, save, event }, option("--opening-proof"), option("--opening-proof-sha"));
+            await applyOpeningDomain({ client, actor, mod, manifest, state, output, domainFile, readRows, runItems, runBatches, save, event, targetPort: registered.port ?? registered.instance?.port ?? null }, option("--opening-proof"), option("--opening-proof-sha"));
             state.status = "LOCAL_DATASET_STORED_OPENINGS_COMMITTED_REVIEW_REQUIRED";
         }
         else if (displayOnly) {
@@ -422,7 +436,7 @@ try {
                 state.status="LOCAL_DATASET_CORE_ONLY_COMMITTED_FINANCE_NOT_RUN";
             }else{
                 const { applyFinancialDomains } = await import("./local-target-finance.mjs");
-                await applyFinancialDomains({ client, actor, mod, manifest, state, output, domainFile, readRows, runItems, runBatches, save, event, apiDist:api,fundsSource:fundsSourceBinding,refundAttemptsSource:refundAttemptsBinding });
+                await applyFinancialDomains({ client, actor, mod, manifest, state, output, domainFile, readRows, runItems, runBatches, save, event, targetPort: registered.port ?? registered.instance?.port ?? null, apiDist:api,fundsSource:fundsSourceBinding,refundAttemptsSource:refundAttemptsBinding });
                 state.status = "LOCAL_DATASET_CORE_AND_FINANCIAL_DOMAINS_COMMITTED_REVIEW_REQUIRED";
             }
         }
@@ -454,16 +468,16 @@ finally {
     try { await pool.end(); state.poolClosed = true; } catch { state.poolClosed = false; process.exitCode=1; }
     if (checkpointOwned && (strictBatch || state.pending || Object.values(state.phases).some(phase => phase.nextIndex > 0))) {
         try {
-            const resourceState = JSON.parse(readFileSync(registryPath));
+            const resourceState = JSON.parse(readFileSync(registered.sourceFile));
             assertResource(resourceState, state);
             protectDataset(resourceState, state.status);
-            writeLoadCheckpoint(registryPath, resourceState);
+            writeLoadCheckpoint(registered.sourceFile, resourceState);
             state.protectionRecorded = true;
         } catch { process.exitCode = 1; }
     }
     if (held) {
         try {
-            state.unlock = (await maintenance.query("SELECT pg_advisory_unlock(806006::bigint) ok")).rows[0].ok;
+            state.unlock = (await maintenance.query(advisoryLockSql(registered, "unlock"))).rows[0].ok;
         }
         catch {
             state.unlock = false;

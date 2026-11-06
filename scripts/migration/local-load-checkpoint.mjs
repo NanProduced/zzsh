@@ -2,6 +2,9 @@ import fs from "node:fs";
 import { randomUUID } from "node:crypto";
 
 export const strictRoundReservation = "ROUND04_BOOTSTRAP_RESERVED";
+// One list for every entry point: a round is strict only if it was registered under one of these.
+export const strictRoundReservations = Object.freeze([strictRoundReservation, "ROUND05_BOOTSTRAP_RESERVED", "ROUND06_BOOTSTRAP_RESERVED", "ROUND07_BOOTSTRAP_RESERVED"]);
+export const isStrictRoundReservation = status => strictRoundReservations.includes(status);
 
 export function matchesLoadReservation(reservation, { datasetSha256, oid, nonce }) {
   return reservation?.manifestSha256 === datasetSha256 && reservation.epoch?.oid === oid && reservation.epoch?.nonce === nonce;

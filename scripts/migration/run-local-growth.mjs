@@ -2,10 +2,11 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { createReadStream, existsSync, lstatSync, mkdirSync, readFileSync, writeFileSync, appendFileSync } from "node:fs";
 import { createRequire } from "node:module";
+import { advisoryLockSql, loadRegisteredTarget } from "./local-target-registry.mjs";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { writePrivate } from "../local-auth.mjs";
-import { buildLocalGrowthPlan } from "./local-growth-plan.mjs";
+import { assertGrowthScopePartition, buildLocalGrowthPlan } from "./local-growth-plan.mjs";
 import { readSourceRows } from "./local-source-adapter.mjs";
 
 const args = process.argv.slice(2), option = name => { const i = args.indexOf(name); return i < 0 ? undefined : args[i + 1]; };
@@ -37,7 +38,7 @@ const growthInput = input.growth;
 assert(growthInput && typeof growthInput.policyId === "string" && Number.isFinite(Date.parse(growthInput.policyEffectiveAt)), "EXACT_CURRENT_GROWTH_POLICY_REQUIRED");
 const out = privatePath(option("--out"), true);
 assert(!existsSync(out), "PRESERVE_ORIGINAL_GROWTH_OUTPUT");
-const target = input.target, database = "zzsh_test_regression", marker = "zzsh:regression-test:v1";
+const target = input.target;
 assert(/^[1-9]\d*$/.test(target.oid) && /^[a-f0-9]{24}$/.test(target.nonce));
 const source = privatePath(input.source.path), dataset = privatePath(input.dataset.path), refundDir = privatePath(input.refundAttempts.path);
 const m = pinned(join(dataset, "manifest.json"), input.dataset.sha256), capture = pinned(join(source, "receipt.json"), input.source.sha256);
@@ -55,23 +56,23 @@ const mod = name => {
   assert(Object.hasOwn(input.buildFiles, name + ".js"), "GROWTH_BUILD_FILE_UNPINNED:" + name);
   return require(join(api, name + ".js"));
 };
-const credentialsFile = resolve(input.credentials), resource = read(join(dirname(credentialsFile), "resource.json"));
-assert.equal(resource.database, database);
-assert.equal(resource.marker, marker);
+const credentialsFile = resolve(input.credentials), resource = loadRegisteredTarget(credentialsFile);
+const database = resource.database, marker = resource.marker;
 assert.equal(resource.oid, target.oid);
 assert.equal(resource.nonce, target.nonce);
 assert(!resource.pendingReset && resource.protectedDataset?.manifestSha256 === input.dataset.sha256 && resource.protectedDataset.epoch?.oid === target.oid && resource.protectedDataset.epoch?.nonce === target.nonce, "GROWTH_PROTECTED_SOURCE_TARGET_REQUIRED");
 const credentials = read(credentialsFile);
 assert.equal(credentials.database, database);
 for (const role of ["migration", "runtime"]) {
-  assert.equal(credentials[role].name, resource.roles[role].name);
-  assert.equal(credentials[role].oid, resource.roles[role].oid);
+  assert.equal(credentials[role].name, resource[role + "Role"]);
+  const expectedOid = resource[role + "RoleOid"];
+  if (expectedOid !== null) assert.equal(credentials[role].oid, expectedOid);
 }
 assert.equal(credentials.migration.oid, target.migrationRoleOid);
 const summaryFile = join(out, "summary.json");
 const result = { schema: "zzsh.local-growth-round-receipt.v1", status: "STARTED", mode, inputSha256, datasetSha256: input.dataset.sha256, oid: target.oid, nonce: target.nonce, startedAt: new Date().toISOString(), queries: 0, retries: 0, fundsWrites: 0 };
 const save = () => writePrivate(summaryFile, result);
-const base = { host: "127.0.0.1", port: 55432, statement_timeout: 30000, connectionTimeoutMillis: 3000, lock_timeout: 1000, application_name: "zzsh-local-growth-round" };
+const base = { host: resource.host, port: resource.port, statement_timeout: 30000, connectionTimeoutMillis: 3000, lock_timeout: 1000, application_name: "zzsh-local-growth-round" };
 const instrument = client => { const query = client.query.bind(client); client.query = (...a) => { result.queries++; return query(...a); }; return client; };
 async function identity(client, role, roleOid) {
   const i = (await client.query(`SELECT current_database() database,d.oid::text,shobj_description(d.oid,'pg_database') marker,pg_get_userbyid(d.datdba) owner,current_setting('zzsh.regression_run') nonce,current_user role,r.oid::text role_oid,current_setting('transaction_read_only') read_only,pg_get_userbyid(c.relowner) coverage_owner,to_char(transaction_timestamp() AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') as_of FROM pg_database d JOIN pg_roles r ON r.rolname=current_user CROSS JOIN pg_class c WHERE d.datname=current_database() AND c.oid=to_regclass('zzsh_iam.membership_growth_legacy_coverage')`)).rows[0];
@@ -115,7 +116,11 @@ const pinManifest = () => {
 save();
 try {
   if (mode === "--prepare") {
-    const cohort = await checkedRows(dataset, m.files.users), orders = await checkedRows(source, capture.files.orders);
+    const cohort = await checkedRows(dataset, m.files.users), allOrders = await checkedRows(source, capture.files.orders);
+    // The seventh round migrates a business-selected subset of the source orders. Growth must close over
+    // the orders the target is supposed to hold, and must still account for every order it leaves out.
+    const scoped = assertGrowthScopePartition(allOrders, m.selectedScope);
+    const orders = scoped.orders, growthExcluded = scoped.excluded;
     const [payments, refunds, refundLogs] = await Promise.all([checkedRows(source, capture.files.pays), checkedRows(source, capture.files.refunds), checkedRows(refundDir, refundsReceipt.files.refundLogs)]);
     const targetProof = await readonly(async (db, identity, policy) => {
       const users = (await db.query("SELECT user_id FROM zzsh_iam.user_identity_state WHERE provider='legacy_mysql_restore' ORDER BY user_id")).rows.map(r => r.user_id);
@@ -130,7 +135,7 @@ try {
     assert(ruleFiles && Object.keys(ruleFiles).length > 0, "REVIEWED_OLD_RULE_FILES_REQUIRED");
     for (const [file, expected] of Object.entries(ruleFiles)) assert.equal(sha(readFileSync(file)), expected, "OLD_GROWTH_RULE_CHANGED");
     const lineage = { captureReceiptSha256: input.source.sha256, scenarioManifestSha256: input.dataset.sha256, refundReceiptSha256: input.refundAttempts.sha256, targetFactsSha256: sha(canonicalize({ oid: target.oid, nonce: target.nonce, policy: targetProof.policy, orders: targetProof.orders })), orderFileSha256: capture.files.orders.sha256, paymentFileSha256: capture.files.pays.sha256, refundFileSha256: capture.files.refunds.sha256, refundLogFileSha256: refundsReceipt.files.refundLogs.sha256, cohortSha256: m.files.users.sha256, oldRuleFiles: ruleFiles, sourceCutoffMeaning: m.sourceOrigin.cutoffMeaning };
-    const p = buildLocalGrowthPlan({ modules: { canonicalize, ...mod("order/legacy-growth-consumption"), ...legacy, ...model }, cohort, orders, targets: targetProof.orders, payments, refunds, refundLogs, cutoff, lineage, oldRuleEvidenceRef: "local-growth-reviewed-source:" + sha(canonicalize(lineage)) });
+    const p = buildLocalGrowthPlan({ modules: { canonicalize, ...mod("order/legacy-growth-consumption"), ...legacy, ...model }, cohort, orders, growthExcluded, targets: targetProof.orders, payments, refunds, refundLogs, cutoff, lineage, oldRuleEvidenceRef: "local-growth-reviewed-source:" + sha(canonicalize(lineage)) });
     writePrivate(join(out, "source-review.json"), p.review);
     writePrivate(join(out, "unknown-sources.json"), p.unknownSources);
     mkdirSync(join(out, "packages"));
@@ -221,7 +226,7 @@ try {
     let held = false, lockConnected = false;
     try {
       await lock.connect(); lockConnected = true;
-      held = (await lock.query("SELECT pg_try_advisory_lock(806006::bigint) ok")).rows[0]?.ok === true;
+      held = (await lock.query(advisoryLockSql(resource, "try"))).rows[0]?.ok === true;
       assert(held, "REGRESSION_RESOURCE_BUSY");
       await readonly(async (db, i) => {
         assert.equal(i.coverage_owner, user);
@@ -285,7 +290,7 @@ try {
       result.status = recovery ? "RECOVERED_READ_ONLY" : "APPLIED_COMMIT_ACK_INDEPENDENT_READBACK_REQUIRED";
     } finally {
       try { await pool.end(); result.poolClosed = true; } finally {
-        try { if (held) result.unlockAck = (await lock.query("SELECT pg_advisory_unlock(806006::bigint) ok")).rows[0]?.ok === true; }
+        try { if (held) result.unlockAck = (await lock.query(advisoryLockSql(resource, "unlock"))).rows[0]?.ok === true; }
         finally { if (lockConnected) await lock.end(); result.lockClosed = true; }
       }
     }

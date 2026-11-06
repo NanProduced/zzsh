@@ -5,9 +5,11 @@ import { basename, delimiter, dirname, isAbsolute, join, resolve } from "node:pa
 import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
 import { spawn, spawnSync } from "node:child_process";
-import { matchesLoadReservation, strictRoundReservation, writeLoadCheckpoint } from "./local-load-checkpoint.mjs";
+import { loadRegisteredTarget, targetConnection } from "./local-target-registry.mjs";
+import { isStrictRoundReservation, matchesLoadReservation, strictRoundReservation, writeLoadCheckpoint } from "./local-load-checkpoint.mjs";
 import { assertRoundBootstrap, assessRoundEvidence, assertGrowthPlanEvidence, assertGrowthPackages, assertResumeLineage, verifyResumeSchema, assessResumeStages, assertNoWriteRetryLineage } from "./local-round-contract.mjs";
 import { inspectRoundDependencyLayout, probeRoundDependencies, assertRoundDependencyProof } from "./local-round-dependencies.mjs";
+import { assertFullExecutionAdmitted, assertRoundPopulationBinding } from "./full-source-scope.mjs";
 
 const args = process.argv.slice(2), option = name => {
   const i = args.indexOf(name);
@@ -16,7 +18,7 @@ const args = process.argv.slice(2), option = name => {
 const execute = args.includes("--execute"), validate = args.includes("--validate"), inspect = args.includes("--inspect-receipt"), resumeGrowth = args.includes("--resume-growth");
 assert([execute, validate, inspect, resumeGrowth].filter(Boolean).length <= 1, "ONE_ROUND_ACTION_REQUIRED");
 if (!execute && !validate && !inspect && !resumeGrowth) {
-  console.log(JSON.stringify({ action: "PLAN", required: ["--execute or --resume-growth or --validate or --inspect-receipt", "--input", "--input-sha"], inspectRequired: ["--receipt", "--receipt-sha"], stages: ["core-and-funds", "display", "opening", "holdings", "paths", "readback", "growth-prepare", "growth-apply", "growth-readback"], resumeGrowth: "complete original checkpoint + fresh target-bound readbacks + new growth authorization; original checkpoint is not written", prerequisites: ["fresh registered regression database or exact completed checkpoint", "target-bound formal bootstrap evidence", "bound source and derived packages"], connections: 0, credentialReads: 0 }));
+  console.log(JSON.stringify({ action: "PLAN", required: ["--execute or --resume-growth or --validate or --inspect-receipt", "--input", "--input-sha"], inspectRequired: ["--receipt", "--receipt-sha"], stages: ["core-and-funds", "display", "opening", "holdings", "paths", "readback", "growth-prepare", "growth-apply", "growth-readback"], fullCapturedSource: "VALIDATE_ONLY_EXECUTION_BLOCKED_PENDING_BOUNDED_COVERAGE_AND_TARGET_SET_READBACK", resumeGrowth: "complete original checkpoint + fresh target-bound readbacks + new growth authorization; original checkpoint is not written", prerequisites: ["fresh registered regression database or exact completed checkpoint", "target-bound formal bootstrap evidence", "bound source and derived packages"], connections: 0, credentialReads: 0 }));
   process.exit(0);
 }
 const started = performance.now(), sha = bytes => createHash("sha256").update(bytes).digest("hex");
@@ -55,7 +57,7 @@ function bootstrapFile(entry) {
 function bootstrap(actorProof) {
   const refs = input.bootstrapEvidence;
   assert(refs && Array.isArray(refs.administrators), "ROUND_BOOTSTRAP_EVIDENCE_REQUIRED");
-  const evidence = { runtime: bootstrapFile(refs.runtime), swap: bootstrapFile(refs.swap), schema: bootstrapFile(refs.schema),
+        const evidence = { runtime: bootstrapFile(refs.runtime), build: refs.build ? bootstrapFile(refs.build) : undefined, swap: refs.swap ? bootstrapFile(refs.swap) : undefined, schema: bootstrapFile(refs.schema),
     administrators: refs.administrators.map(bootstrapFile), adminBindings: refs.administrators.map(ref => ref.serverBinding ? bootstrapFile(ref.serverBinding) : null),
     business: bootstrapFile(refs.business), readback: bootstrapFile(refs.readback),
     bundle: bootstrapFile(refs.bundle), ...(input.growth ? { policy: bootstrapFile(refs.policy) } : {}) };
@@ -150,6 +152,12 @@ if (inspect) {
   const actorProof = bound(privatePath(input.actor.path), input.actor.sha256);
   const pinned = (entry, name = "manifest.json") => bound(join(privatePath(entry.path), name), entry.sha256);
   const expected = { dataset: pinned(input.dataset), display: pinned(input.display), openings: pinned(input.openings), paths: pinned(input.paths, "receipt.json") };
+  let populationIssue=false;
+  if(expected.dataset.population||input.population)try{
+    const source=pinned(input.source,'receipt.json'),v=input.population?.verification;
+    const proof=expected.dataset.population?.mode==='FULL_CAPTURED_SOURCE'?bound(privatePath(v?.path),v?.sha256):null;
+    assertRoundPopulationBinding(input,expected.dataset,source,proof);
+  }catch{populationIssue=true;}
   let bootstrapStatus, bootstrapReason;
   try { bootstrap(actorProof); bootstrapStatus = "PASS"; } catch (error) {
     bootstrapStatus = "INCOMPLETE";
@@ -161,6 +169,7 @@ if (inspect) {
   const completion = assessArtifacts(output, { input, inputSha256, actorProof, receipt, expected,
     ...(lineage ? { checkpointInput: lineage.previousInput, checkpointActorProof: lineage.previousActorProof, requireStageAcks: false } : {}) });
   if (input.resume && !lineage) { completion.status = "INCOMPLETE"; completion.issues.unshift("ROUND_RESUME_LINEAGE_UNCONFIRMED"); }
+  if(populationIssue){completion.status='INCOMPLETE';completion.dataset='INCOMPLETE';completion.issues.unshift('ROUND_POPULATION_SCOPE_UNCONFIRMED');}
   if (input.retryEvidence) try { readNoWriteRetry(); } catch { completion.status = "INCOMPLETE"; completion.issues.unshift("ROUND_RETRY_LINEAGE_UNCONFIRMED"); }
   if (bootstrapStatus !== "PASS") { completion.status = "INCOMPLETE"; completion.issues.unshift("ROUND_BOOTSTRAP_EVIDENCE_UNCONFIRMED"); }
   console.log(JSON.stringify({ status: completion.status, bootstrap: bootstrapStatus, ...(bootstrapReason ? { bootstrapReason } : {}), ...completion, evidenceOnly: true, targetConnections: 0, credentialReads: 0, targetWrites: 0 }));
@@ -173,11 +182,24 @@ assert(Date.now() >= Date.parse(input.window.notBefore) && Date.now() < Date.par
 assert(/^[1-9]\d*$/.test(input.target.oid) && /^[a-f0-9]{24}$/.test(input.target.nonce));
 assert(input.target.schemaHashes.length >= 1 && input.target.schemaHashes.every(x => /^[a-f0-9]{64}$/.test(x)));
 const out = privatePath(input.out, true);
-assert(!existsSync(out), "PRESERVE_ORIGINAL_ROUND_OUTPUT");
+    // A stopped round keeps its output as the resumable checkpoint, so re-entering that same directory is
+    // the recovery path; a completed round must never be overwritten.
+    const priorReceiptPath = join(out, "round-receipt.json");
+    let resumableStop = false;
+    try {
+        const prior = JSON.parse(readFileSync(priorReceiptPath, "utf8"));
+        resumableStop = prior?.status === "STOPPED_PRESERVE_ORIGINAL_KEYS_AND_RECEIPTS" && existsSync(join(out, "loader", "checkpoint.json"));
+    } catch {
+        resumableStop = false;
+    }
+    assert(!existsSync(out) || resumableStop, "PRESERVE_ORIGINAL_ROUND_OUTPUT");
 const pinned = (entry, name = "manifest.json") => bound(join(privatePath(entry.path), name), entry.sha256);
 const m = pinned(input.dataset), display = pinned(input.display), openings = pinned(input.openings);
 const funds = pinned(input.funds, "receipt.json"), refund = pinned(input.refundAttempts, "receipt.json");
 const source = pinned(input.source, "receipt.json"), pathPlan = pinned(input.paths, "receipt.json");
+const populationProof=m.population?.mode==='FULL_CAPTURED_SOURCE'?bound(privatePath(input.population?.verification?.path),input.population?.verification?.sha256):null;
+const populationAudit=assertRoundPopulationBinding(input,m,source,populationProof);
+assertFullExecutionAdmitted(populationAudit,execute?'execute':resumeGrowth?'resume-growth':'validate');
 pinned(input.pathSourcePlan, "receipt.json");
 pinned(input.dictionary, "receipt.json");
 assert.equal(m.sourceReceiptSha256, input.source.sha256);
@@ -208,11 +230,10 @@ const secretEnv = Object.fromEntries(Object.entries(secretFiles).map(([name, env
     && /^[a-f0-9]{64}$/.test(binding.sha256) && lstatSync(binding.path).isFile() && !lstatSync(binding.path).isSymbolicLink(), "ROUND_SECRET_FILE_BINDING_REQUIRED:" + name);
   return [env, binding.path];
 }));
-const registry = read(join(dirname(input.credentials), "resource.json"));
-assert.equal(registry.database, "zzsh_test_regression");
+const registry = loadRegisteredTarget(input.credentials);
 assert.equal(registry.oid, input.target.oid);
 assert.equal(registry.nonce, input.target.nonce);
-assert.equal(registry.roles.migration.oid, input.target.migrationRoleOid);
+assert.equal(registry.migrationRoleOid, input.target.migrationRoleOid);
 const reservation = registry.protectedDataset;
 const reservationStatus = input.target.bootstrapReservation ?? "ROUND02_BOOTSTRAP_RESERVED";
 assert(/^ROUND[0-9]{2}_BOOTSTRAP_RESERVED$/.test(reservationStatus), "ROUND_BOOTSTRAP_RESERVATION_STATUS_INVALID");
@@ -227,7 +248,7 @@ if (lineage) {
 assert(input.strictBatch === undefined || typeof input.strictBatch === "boolean", "ROUND_STRICT_BATCH_INVALID");
 const strictBatch = input.strictBatch === true;
 assert(lineage || strictBatch || reservation?.status !== "ROUND06_BOOTSTRAP_RESERVED", "ROUND06_STRICT_BATCH_REQUIRED");
-assert(lineage || !strictBatch || [strictRoundReservation, "ROUND05_BOOTSTRAP_RESERVED", "ROUND06_BOOTSTRAP_RESERVED"].includes(reservation?.status), "STRICT_BATCH_REQUIRES_REGISTERED_ROUND");
+    assert(lineage || !strictBatch || isStrictRoundReservation(reservation?.status), "STRICT_BATCH_REQUIRES_REGISTERED_ROUND");
 const bootstrapEvidence = bootstrap(actorProof);
 const apiDist = resolve(input.apiDist);
 function assertBuild() {
@@ -254,13 +275,13 @@ if (input.target.bootstrapReservation === "ROUND06_BOOTSTRAP_RESERVED") {
 }
 const validationWallMs = performance.now() - started;
 if (validate) {
-  console.log(JSON.stringify({ status: "SEALED_INPUTS_VALIDATED_TARGET_NOT_RUN", inputSha256, datasetSha256: input.dataset.sha256, strictBatch, bootstrapEvidence, ...(lineage ? { resumeLineage: lineage.proof } : {}), ...(retryProof ? { retryLineage: retryProof } : {}), ...(dependencyProof ? { dependencies: { status: dependencyProof.status, entrypoints: dependencyProof.entrypoints, files: dependencyProof.closureFiles.length, closureSha256: dependencyProof.closureSha256 } } : {}), growthPlanned: Boolean(input.growth), validationWallMs, buildModulesVerified, targetConnections: 0, credentialReads: 0, targetWrites: 0 }));
+  console.log(JSON.stringify({ status: "SEALED_INPUTS_VALIDATED_TARGET_NOT_RUN", inputSha256, datasetSha256: input.dataset.sha256, population:populationAudit, strictBatch, bootstrapEvidence, ...(lineage ? { resumeLineage: lineage.proof } : {}), ...(retryProof ? { retryLineage: retryProof } : {}), ...(dependencyProof ? { dependencies: { status: dependencyProof.status, entrypoints: dependencyProof.entrypoints, files: dependencyProof.closureFiles.length, closureSha256: dependencyProof.closureSha256 } } : {}), growthPlanned: Boolean(input.growth), validationWallMs, buildModulesVerified, targetConnections: 0, credentialReads: 0, targetWrites: 0 }));
   process.exit(0);
 }
 
 const sid = /S-1-5-[0-9-]+/.exec(spawnSync("whoami", ["/user", "/fo", "csv", "/nh"], { encoding: "utf8", windowsHide: true }).stdout)?.[0];
 assert(sid, "ROUND_SID_REQUIRED");
-mkdirSync(out);
+    mkdirSync(out, { recursive: true });
 assert.equal(spawnSync("icacls", [out, "/inheritance:r", "/grant:r", `*${sid}:(OI)(CI)F`, "*S-1-5-18:(OI)(CI)F", "*S-1-5-32-544:(OI)(CI)F"], { windowsHide: true }).status, 0, "ROUND_ACL_FAILED");
 const runnerScripts = dirname(fileURLToPath(import.meta.url)), root = dependencyLayout?.sourceRoot ?? fileURLToPath(new URL("../..", import.meta.url)), scripts = dependencyLayout?.scriptDir ?? runnerScripts;
 const toolNames = ["run-local-round.mjs", "local-round-contract.mjs", ...(dependencyLayout ? ["local-round-dependencies.mjs", "local-source-adapter.mjs"] : []), "load-local-dataset.mjs", "local-load-checkpoint.mjs", "local-target-finance.mjs", "local-funds-plan.mjs", "local-target-display.mjs", "local-target-opening.mjs", "local-target-holdings.mjs", "load-legacy-path-accounts.mjs", "readback-local-dataset.mjs", "run-local-growth.mjs", "local-growth-plan.mjs"];
@@ -332,7 +353,8 @@ async function step(name, script, flags, verify) {
   save();
   console.log(JSON.stringify({ stage: name, status: "STARTED" }));
   const stdoutPath = join(out, name + ".stdout.log"), stderrPath = join(out, name + ".stderr.log");
-  const stdout = openSync(stdoutPath, "wx"), stderr = openSync(stderrPath, "wx");
+    const logFlags = resumableStop ? "w" : "wx";
+    const stdout = openSync(stdoutPath, logFlags), stderr = openSync(stderrPath, logFlags);
   try {
     const child = spawn(process.execPath, [join(scripts, script), ...flags], {
       cwd: root, windowsHide: true, stdio: ["ignore", stdout, stderr],
@@ -361,11 +383,11 @@ async function resumeSchemaPreflight() {
   receipt.stages.push(stage); save();
   try {
     const credentials = read(input.credentials), migration = credentials.migration;
-    assert(credentials.database === "zzsh_test_regression" && migration?.name === registry.roles.migration.name
+    assert(credentials.database === registry.database && migration?.name === registry.migrationRole
       && migration?.oid === input.target.migrationRoleOid && typeof migration.password === "string" && migration.password.length > 0, "ROUND_RESUME_MIGRATION_ROLE_CHANGED");
     const { Client } = createRequire(import.meta.url)("pg");
-    const client = new Client({ host: "127.0.0.1", port: 55432, database: "zzsh_test_regression", user: migration.name, password: migration.password,
-      connectionTimeoutMillis: 3000, statement_timeout: 15000, lock_timeout: 500, application_name: "zzsh-round-resume-schema-readonly" });
+    const client = new Client(targetConnection(registry, { user: migration.name, password: migration.password,
+      connectionTimeoutMillis: 3000, statement_timeout: 15000, lock_timeout: 500, applicationName: "zzsh-round-resume-schema-readonly" }));
     stage.metrics = await verifyResumeSchema(client, { target: input.target, migrationName: migration.name });
     Object.assign(stage, { code: 0, signal: null, status: "ACK" });
   } finally {
@@ -395,7 +417,7 @@ try {
   if (lineage) await resumeSchemaPreflight();
   if (!lineage) {
   await step("core-and-funds", load, [...write, ...bind("funds-source", input.funds), ...bind("refund-attempts", input.refundAttempts)], () => closedPhases(
-    ["users", "accounts", "orders", "invitationFacts", "financeHistory", "financeEmptyCoverage", "guaranteeHistory", "continuationEvidence", "liabilityDuties", "completedCommissions"],
+    ["users", "accounts", "orders", "invitationFacts", "financeHistory", "financeEmptyCoverage", "continuationEvidence", "liabilityDuties", "completedCommissions"],
     { users: m.domains.users.ready, accounts: m.domains.accounts.ready, orders: m.domains.orders.ready, continuationEvidence: m.domains.continuations.parameterComplete },
   ));
   await step("display", load, [...write, "--enrich-display", ...bind("display-plan", input.display)], () => closedPhases(["accountDisplay"], { accountDisplay: display.rows }));

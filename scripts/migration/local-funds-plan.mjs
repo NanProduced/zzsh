@@ -9,6 +9,39 @@ const accountFields=["id","user_id","no","status","is_delete","pay_is","pay_mone
 const paymentFields=["id","order_id","order_type","pay_way","pay_order_sn","pay_money","pay_is","pay_time","create_time"];
 const pick=(row,fields)=>Object.fromEntries(fields.filter(k=>Object.hasOwn(row,k)).map(k=>[k,row[k]]));
 
+/**
+ * Empty history coverage is one entry per subject and source kind, so a full-source round would hold
+ * roughly five entries for every legacy user at once. The sink keeps the same 400-entry chunking the
+ * loader already used, hands each complete chunk to `onChunk`, and records an ordered digest per
+ * chunk; without a sink it still collects the entries so small rounds and tests are unchanged.
+ */
+export const EMPTY_COVERAGE_CHUNK_SIZE = 400;
+export function emptyCoverageChunkDigest(rows) { return sha(rows.map(row => row.sourceId).join("\n")); }
+export function createEmptyCoverageSink({ onChunk = null } = {}) {
+  const buffered = [], chunks = [], collected = [], subjects = new Set(), kinds = {}, domainRows = {};
+  const flush = () => {
+    if (!buffered.length) return;
+    const rows = buffered.splice(0, buffered.length), digest = emptyCoverageChunkDigest(rows);
+    const domains = {};
+    for (const row of rows) { domains[row.domain] = (domains[row.domain] ?? 0) + 1; domainRows[row.domain] = (domainRows[row.domain] ?? 0) + 1; const subject = row.input?.coverage?.legacyUserId; if (subject !== undefined) subjects.add(subject); const kind = row.input?.coverage?.sourceKind; if (kind !== undefined) kinds[row.domain] = kind; }
+    const chunk = { sourceId: "empty-" + digest.slice(0, 40), digest, rows: rows.length, domains };
+    chunks.push(chunk);
+    if (onChunk) onChunk({ ...chunk, entries: rows });
+    else collected.push(...rows);
+  };
+  return {
+    push(entry) { buffered.push(entry); if (buffered.length >= EMPTY_COVERAGE_CHUNK_SIZE) flush(); },
+    finish() {
+      flush();
+      return { chunks, entries: collected, manifest: {
+        schema: "zzsh.empty-coverage-chunks.v1", chunkSize: EMPTY_COVERAGE_CHUNK_SIZE,
+        chunks: chunks.length, rows: chunks.reduce((n, chunk) => n + chunk.rows, 0),
+        digest: sha(chunks.map(chunk => chunk.digest).join("\n")), subjects: [...subjects], kinds, domainRows,
+      } };
+    },
+  };
+}
+
 export function continuationCommissionEffects(rows,mod){
  const model=mod("order/legacy-continuation-model"),users=mod("supply/legacy-user-migration");
  return rows.flatMap(({body})=>body.source.commissions.filter(c=>c.status==='1').map(c=>({dutyId:model.legacyEconomicDutyId(body.orderId,'COMMISSION',c.id),kind:'COMMISSION',sourceRecordId:c.id,amountCents:model.legacyPlanYuanToCents(c.storedEarnings),beneficiaryUserId:users.legacyOwnerUserId('legacy_mysql_restore','la_user',c.beneficiaryId),level:c.level,ratio:c.ratio,sourceDigest:body.sourceDigest,status:'PENDING',settledBy:null})));
@@ -28,26 +61,32 @@ export function safeLegacyWithdrawalEvidence(raw,ref,canonical){
 }
 
 /** Additive source contract: original dataset/display bytes and all earlier observation fingerprints stay frozen. */
-export async function prepareLocalFundsPlan({manifest,domainFile,mod,fundsSource,refundAttemptsSource,apiDist}) {
+export async function prepareLocalFundsPlan({manifest,domainFile,mod,fundsSource,refundAttemptsSource,apiDist,emitEmptyChunk=null}) {
  const receiptBytes=readFileSync(join(manifest.source,"receipt.json"));
  if(sha(receiptBytes)!==manifest.sourceReceiptSha256)throw Error("FUNDS_CAPTURE_BINDING_CHANGED");
  const receipt=JSON.parse(receiptBytes),canonical=mod("supply/content-hash").canonicalize;
  const selected={};
  for(const domain of ["users","accounts","orders"]){selected[domain]=new Map();for await(const row of readSourceRows(domainFile(domain)))selected[domain].set(row.sourceId,row);}
- const source={};
- for(const domain of ["accounts","orders","earnings","withdraws","distributionOrders","pays","refunds"]){
+  const selectedCounts = {};
+  const source = {};
+  for(const domain of ["accounts","orders","earnings","withdraws","distributionOrders","pays","refunds"]){
   const file=receipt.files[domain];if(!file||file.file!==basename(file.file)||await fileSha(join(manifest.source,file.file))!==file.sha256)throw Error("FUNDS_SOURCE_FILE_CHANGED:"+domain);
   source[domain]=[];
   for await(const row of readSourceRows(join(manifest.source,file.file))){
    const keep=domain==="accounts"||domain==="orders"?selected[domain].has(row.id):domain==="pays"?(row.order_type==="1"?selected.orders.has(row.order_id):row.order_type==="2"&&selected.accounts.has(row.order_id)):selected.users.has(row.user_id);
    if(keep)source[domain].push(row);
   }
-  const expected=manifest.domains[domain]?.source;
-  if(source[domain].length!==expected)throw Error("FUNDS_SELECTED_DENOMINATOR_CHANGED:"+domain);
- }
- let supplementSha256=null;
- if(fundsSource){
-  const bytes=readFileSync(join(fundsSource.path,"receipt.json"));
+  const domainMeta = manifest.domains[domain] ?? {};
+  // A domain marked as retained source-relation evidence keeps its full-source count, so the selected
+  // count is not comparable to it; record it instead of asserting equality against a different scope.
+  const retainedAsEvidence = String(domainMeta.disposition ?? "").startsWith("RETAINED_SOURCE_RELATION_EVIDENCE");
+  const expected = domainMeta.selected ?? domainMeta.source;
+  if (!retainedAsEvidence && source[domain].length !== expected) throw Error("FUNDS_SELECTED_DENOMINATOR_CHANGED:" + domain);
+  selectedCounts[domain] = source[domain].length;
+}
+let supplementSha256 = null;
+if (fundsSource) {
+  const bytes = readFileSync(join(fundsSource.path, "receipt.json"));
   if(sha(bytes)!==fundsSource.sha256)throw Error("FUNDS_SUPPLEMENT_SHA_CHANGED");
   const supplement=JSON.parse(bytes);
   if(supplement.containerId!==receipt.containerId||supplement.database!==receipt.database||supplement.status!=="CAPTURED_READ_ONLY"||!supplement.rollbackConfirmed||!supplement.clientClosed||supplement.sourceSupplement?.baseReceiptSha256!==manifest.sourceReceiptSha256||supplement.sourceSupplement?.fullSourcePopulation!==true)throw Error("FUNDS_SUPPLEMENT_ORIGIN_NOT_CONFIRMED");
@@ -94,14 +133,19 @@ export async function prepareLocalFundsPlan({manifest,domainFile,mod,fundsSource
   refundAttemptCoverage={selected:seen.size,planned:seen.size,writer:0,recordedAmountCents:total.toString(),statusCounts,multipleRefundOrders,exceedsSourceBasePaidOrders,externalUnrecordedCalls:'UNKNOWN'};
  }
  const toolFiles=Object.fromEntries(["local-funds-plan.mjs","local-source-adapter.mjs","local-opening-proof.mjs","local-load-checkpoint.mjs","local-target-finance.mjs","readback-local-dataset.mjs"].map(name=>[name,sha(readFileSync(new URL(name,import.meta.url)))]));
- const compiledModules=apiDist?Object.fromEntries(["finance/legacy-finance-source-preparation","finance/personal-finance-observation-maintenance","finance/personal-finance-coverage","finance/personal-finance-read","finance/owner-guarantee-history","finance/owner-guarantee-history-maintenance","finance/legacy-invitation-facts","finance/legacy-invitation-facts-maintenance"].map(name=>[name,sha(readFileSync(join(apiDist,name+".js")))])):null;
+ const compiledModules=apiDist?Object.fromEntries(["finance/legacy-finance-source-preparation","finance/personal-finance-observation-maintenance","finance/personal-finance-coverage","finance/personal-finance-read","finance/legacy-invitation-facts","finance/legacy-invitation-facts-maintenance"].map(name=>[name,sha(readFileSync(join(apiDist,name+".js")))])):null;
  const binding={refundAttemptReceiptSha256,toolFiles,compiledModules,supplementSha256,datasetManifestSha256:sha(readFileSync(join(dirname(domainFile("users")),"manifest.json"))),schema:"legacy-funds-supplement.v1",captureReceiptSha256:manifest.sourceReceiptSha256,sourceCutoff:manifest.sourceCutoff,sourceFiles:Object.fromEntries(Object.keys(source).map(d=>[d,receipt.files[d].sha256])),selectedFiles:Object.fromEntries(["users","accounts","orders"].map(d=>[d,manifest.files[d].sha256]))};
  const cutoff=new Date(manifest.sourceCutoff).toISOString();
  const {toolFiles:executionTools,compiledModules:executionModules,...sourceBinding}=binding;
  const inputSha256=sha(canonical(sourceBinding)),groups=new Map(),summary={};
+ // The old listing deposit (order_type=2) is out of scope: it is neither rental money nor a current
+ // platform fact, so it is counted once and never turned into a historical payment observation.
+ const listingDepositPays=source.pays.filter(raw=>raw.order_type==="2");
+ const rentalPays=source.pays.filter(raw=>raw.order_type==="1");
+ const scopeSource=domain=>domain==="pays"?rentalPays:source[domain];
  for(const domain of ["earnings","withdraws","distributionOrders","pays","refunds"]){
   const seen=new Set();
-  for(const raw of source[domain]){
+  for(const raw of scopeSource(domain)){
    let subjectId=raw.user_id;
    if(domain==="pays")subjectId=raw.order_type==="1"?orderById.get(raw.order_id)?.user_id:accountById.get(raw.order_id)?.user_id;
    if(domain==="refunds"&&raw.order_type!=="order")throw Error("FUNDS_REFUND_TYPE_UNKNOWN");
@@ -113,8 +157,8 @@ export async function prepareLocalFundsPlan({manifest,domainFile,mod,fundsSource
    if(!groups.has(key))groups.set(key,{subject:{userId:subject.userId,legacyUserId:subjectId,identityDigest:subject.sourceDigest},sourceKind:observed.kind,domain,rows:[]});
    groups.get(key).rows.push(observed.row);
   }
-  summary[domain]={selected:source[domain].length,planned:0,writer:0,recordedAmountCents:"0",statusCounts:{}};
-  for(const raw of source[domain]){
+  summary[domain]={selected:scopeSource(domain).length,planned:0,writer:0,recordedAmountCents:"0",statusCounts:{}};
+  for(const raw of scopeSource(domain)){
    const amount=domain==="earnings"?raw.change_amount:domain==="withdraws"?raw.money:domain==="distributionOrders"?raw.earnings:domain==="pays"?raw.pay_money:raw.refund_amount;
    summary[domain].recordedAmountCents=(BigInt(summary[domain].recordedAmountCents)+BigInt(mod("finance/personal-finance-read").sourceYuanToCents(amount))).toString();
    const status=raw.status??raw.pay_is??raw.refund_status??raw.action;summary[domain].statusCounts[status]=(summary[domain].statusCounts[status]??0)+1;
@@ -129,30 +173,24 @@ export async function prepareLocalFundsPlan({manifest,domainFile,mod,fundsSource
   summary[group.domain].planned+=plan.observations.length;
   history.push({sourceId:group.subject.legacyUserId+":"+group.sourceKind,domain:group.domain,input});
  }
- const emptyHistory=[];
+ const emptySink=createEmptyCoverageSink({onChunk:emitEmptyChunk});
  const kinds={earnings:'HISTORICAL_EARNINGS_LOG',withdraws:'HISTORICAL_WITHDRAWAL',distributionOrders:'HISTORICAL_DISTRIBUTION',pays:'HISTORICAL_PAYMENT',refunds:'HISTORICAL_REFUND'};
  for(const [domain,sourceKind]of Object.entries(kinds)){
   summary[domain].coverageSelected=selected.users.size;summary[domain].nonemptyCoverage=history.filter(row=>row.domain===domain).length;summary[domain].emptyCoverage=0;
   for(const [legacyUserId,user]of selected.users)if(!groups.has(user.userId+":"+sourceKind)){
    const input=mod("finance/legacy-finance-source-preparation").prepareFrozenFinanceHistory({subject:{userId:user.userId,legacyUserId,identityDigest:user.sourceDigest},sourceKind,inputSha256,cutoff,sourceCount:0,rows:[],isolated:[]});
-   emptyHistory.push({sourceId:legacyUserId+":"+sourceKind,domain,input});summary[domain].emptyCoverage++;
+   emptySink.push({sourceId:legacyUserId+":"+sourceKind,domain,input});summary[domain].emptyCoverage++;
   }
   summary[domain].coveragePlanned=summary[domain].nonemptyCoverage+summary[domain].emptyCoverage;
   if(summary[domain].coveragePlanned!==selected.users.size)throw Error("FUNDS_COVERAGE_SUBJECT_SET_GAP:"+domain);
  }
- const guaranteeGroups=new Map(),guaranteePayments=new Map();
- for(const raw of source.pays)if(raw.order_type==="2"){if(!guaranteePayments.has(raw.order_id))guaranteePayments.set(raw.order_id,[]);guaranteePayments.get(raw.order_id).push(pick(raw,paymentFields));}
- for(const raw of source.accounts){
-  const user=selected.users.get(raw.user_id),account=selected.accounts.get(raw.id);if(!user)throw Error("FUNDS_GUARANTEE_OWNER_NOT_MAPPED");
-  if(!guaranteeGroups.has(user.userId))guaranteeGroups.set(user.userId,{userId:user.userId,legacyUserId:raw.user_id,identityDigest:user.sourceDigest,inputSha256,cutoff,rows:[],isolated:[]});
-  guaranteeGroups.get(user.userId).rows.push({userId:user.userId,legacyUserId:raw.user_id,accountId:mod("legacy-load/legacy-account-seam").legacyAccountId("legacy_mysql_restore","la_rental_accounts",account.sourceId),source:pick(raw,accountFields),payOrders:guaranteePayments.get(raw.id)??[]});
- }
+ // Owner decision: the old platform has no outstanding listing deposit, so the new platform neither
+ // migrates nor displays it. Nothing here becomes a target fact; the count stays only so the report
+ // can prove the exclusion was deliberate rather than a silent gap.
  const guaranteeHistory=[];
- for(const input of guaranteeGroups.values()){
-  input.sourceCount=input.rows.length;const plan=mod("finance/owner-guarantee-history").planOwnerGuaranteeHistoryBatch(input);
-  guaranteeHistory.push({sourceId:input.legacyUserId,input});
-  if(plan.rows.length!==input.sourceCount)throw Error("FUNDS_GUARANTEE_PLAN_INCOMPLETE");
- }
+ const listingDepositExclusion={schema:"zzsh.listing-deposit-exclusion.v1",policy:"NOT_MIGRATED_OWNER_CONFIRMED_NO_OUTSTANDING",
+  sourcePayments:listingDepositPays.length,sourcePaymentAmountCents:listingDepositPays.reduce((n,raw)=>n+BigInt(mod("finance/personal-finance-read").sourceYuanToCents(raw.pay_money)),0n).toString(),
+  sourceAccountsWithPaidMark:source.accounts.filter(raw=>raw.pay_is==="1").length,sourceAccountsWithReturnMark:source.accounts.filter(raw=>raw.return_is==="1").length,targetRows:0};
  let completedPending=0,continuationPending=0,pendingAmount=0n;
  for(const row of source.distributionOrders)if(row.status==="1"&&row.is_delete==="0"){
   const parent=orderById.get(row.order_id);if(parent?.order_status==="4")completedPending++;else if(["3","8","9"].includes(parent?.order_status))continuationPending++;else throw Error("FUNDS_PENDING_COMMISSION_PARENT_NOT_CLOSED");
@@ -162,19 +200,22 @@ export async function prepareLocalFundsPlan({manifest,domainFile,mod,fundsSource
  const pendingRows=[];for await(const row of readSourceRows(domainFile("pending-commissions")))pendingRows.push(row);
  if(pendingRows.length!==completedPending+continuationPending||continuationRows.reduce((n,r)=>n+r.source.commissions.length,0)!==continuationPending)throw Error("FUNDS_PENDING_COMMISSION_WRITER_SOURCE_GAP");
  const pendingCommissionCoverage={selected:pendingRows.length,completedDutyCandidates:completedPending,continuationEvidence:continuationPending,recordedAmountCents:pendingAmount.toString(),targetDuties:"TARGET_PARENT_AND_RECEIPT_CHECK_REQUIRED"};
- summary.guarantees={selected:source.accounts.length,planned:guaranteeHistory.reduce((n,g)=>n+g.input.rows.length,0),writer:0,payments:source.pays.filter(r=>r.order_type==="2").length,sourceReturnMarks:source.accounts.filter(r=>r.return_is==="1").length,heldLiability:"UNKNOWN",typedAccountRefunds:"NOT_PRESENT_IN_CAPTURE"};
+ summary.guarantees={selected:0,planned:0,writer:0,policyExcluded:true,listingDeposit:listingDepositExclusion};
  for(const [domain,count]of Object.entries(summary))if(count.selected!==count.planned)throw Error("FUNDS_SOURCE_PLAN_MISMATCH:"+domain);
  if(refundAttemptCoverage){refundAttemptCoverage.writer=history.filter(r=>r.domain==='refunds').reduce((n,r)=>n+r.input.observations.reduce((m,o)=>m+(o.sourceAttempts?.length??0),0),0);if(refundAttemptCoverage.writer!==refundAttemptCoverage.selected)throw Error("REFUND_ATTEMPT_WRITER_COVERAGE_GAP");}
- return{binding,inputSha256,history,emptyHistory,guaranteeHistory,summary,pendingCommissionCoverage,refundAttemptCoverage};
+ const emptyCoverage=emptySink.finish();
+ return{binding,inputSha256,history,emptyHistory:emptyCoverage.entries,emptyCoverage:emptyCoverage.manifest,emptyChunks:emptyCoverage.chunks,guaranteeHistory,listingDepositExclusion,summary,pendingCommissionCoverage,refundAttemptCoverage};
 }
 
 /** Called with the exact frozen phase items handed to runItems, before the first writer is invoked. */
 export function assertFundsWriterCoverage(plan,history,guarantees,emptyHistory=plan.emptyHistory??[]){
  if(sha(JSON.stringify(history))!==sha(JSON.stringify(plan.history))||sha(JSON.stringify(guarantees))!==sha(JSON.stringify(plan.guaranteeHistory)))throw Error("FUNDS_WRITER_SOURCE_SET_CHANGED");
- if(sha(JSON.stringify(emptyHistory))!==sha(JSON.stringify(plan.emptyHistory??[])))throw Error("FUNDS_EMPTY_COVERAGE_SOURCE_SET_CHANGED");
+ const streamedEmpty=emptyHistory?.schema==="zzsh.empty-coverage-chunks.v1";
+ if(streamedEmpty){if(!plan.emptyCoverage||plan.emptyCoverage.digest!==emptyHistory.digest||plan.emptyCoverage.rows!==emptyHistory.rows||plan.emptyCoverage.chunks!==emptyHistory.chunks)throw Error("FUNDS_EMPTY_COVERAGE_SOURCE_SET_CHANGED");}
+ else if(sha(JSON.stringify(emptyHistory))!==sha(JSON.stringify(plan.emptyHistory??[])))throw Error("FUNDS_EMPTY_COVERAGE_SOURCE_SET_CHANGED");
  const summary=structuredClone(plan.summary);
  for(const row of history){if(!summary[row.domain])throw Error("FUNDS_WRITER_DOMAIN_UNKNOWN");summary[row.domain].writer+=row.input.observations.length;}
- for(const [domain,count]of Object.entries(summary))if(domain!=="guarantees"&&count.coverageSelected!==undefined){count.coverageWriter=history.filter(r=>r.domain===domain).length+emptyHistory.filter(r=>r.domain===domain).length;if(count.coverageWriter!==count.coverageSelected)throw Error("FUNDS_COVERAGE_WRITER_SET_GAP:"+domain);}
+ for(const [domain,count]of Object.entries(summary))if(domain!=="guarantees"&&count.coverageSelected!==undefined){count.coverageWriter=history.filter(r=>r.domain===domain).length+(streamedEmpty?emptyHistory.domainRows?.[domain]??0:emptyHistory.filter(r=>r.domain===domain).length);if(count.coverageWriter!==count.coverageSelected)throw Error("FUNDS_COVERAGE_WRITER_SET_GAP:"+domain);}
  summary.guarantees.writer=guarantees.reduce((n,g)=>n+g.input.rows.length,0);
  for(const [domain,count]of Object.entries(summary))if(count.selected!==count.planned||count.planned!==count.writer)throw Error("FUNDS_WRITER_COVERAGE_MISMATCH:"+domain);
  return summary;

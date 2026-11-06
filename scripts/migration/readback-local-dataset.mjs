@@ -1,4 +1,6 @@
 import {continuationCommissionEffects} from "./local-funds-plan.mjs";
+import { advisoryLockSql, assertLiveTarget, loadRegisteredTarget, maintenanceConnection, targetConnection, targetIdentityQuery } from "./local-target-registry.mjs";
+import { compareKeySets } from "./local-key-set.mjs";
 import { createHash } from "node:crypto";
 import { createReadStream, readFileSync, writeFileSync, existsSync } from "node:fs";
 import { createInterface } from "node:readline";
@@ -16,38 +18,40 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), "../.."), require 
 const hash = value => createHash("sha256").update(value).digest("hex");
 const dataset = resolve(option("--dataset") ?? ""), checkpoint = resolve(option("--checkpoint") ?? ""), output = resolve(option("--out") ?? "");
 if (![dataset, checkpoint].every(path => path.toLowerCase().startsWith("e:\\zzsh-local-state\\restricted\\")) || existsSync(output)) throw new Error("BOUND_PRIVATE_INPUT_NEW_RECEIPT_REQUIRED");
+const credentialPath = option("--credentials");
+if (!credentialPath) throw new Error("REGISTERED_CREDENTIAL_REQUIRED");
+const registration = loadRegisteredTarget(credentialPath);
 const bytes = readFileSync(join(dataset, "manifest.json"));
 if (hash(bytes) !== option("--dataset-sha")) throw new Error("DATASET_MANIFEST_SHA_MISMATCH");
 const manifest = JSON.parse(bytes), state = JSON.parse(readFileSync(checkpoint));
-if (state.binding?.datasetSha256 !== option("--dataset-sha") || state.binding.database !== "zzsh_test_regression" || state.pending || state.status === "RUNNING" || !["users", "accounts", "orders"].every(name => state.phases[name]?.complete)) throw new Error("KNOWN_COMPLETED_CORE_CHECKPOINT_REQUIRED");
+// The checkpoint may only be reconciled against the target its registry names, never against a
+// database name repeated in this script.
+if (state.binding?.datasetSha256 !== option("--dataset-sha") || state.binding.database !== registration.database || state.binding.oid !== registration.oid || state.pending || state.status === "RUNNING" || !["users", "accounts", "orders"].every(name => state.phases[name]?.complete)) throw new Error("KNOWN_COMPLETED_CORE_CHECKPOINT_REQUIRED");
 async function* rows(path) { const stream = createReadStream(path), reader = createInterface({ input: stream, crlfDelay: Infinity }); try { for await (const line of reader) if (line) yield JSON.parse(line); } finally { reader.close(); stream.destroy(); } }
 for (const [name, entry] of Object.entries(manifest.files)) {
   if (entry.file !== basename(entry.file)) throw new Error("DATASET_FILE_PATH_INVALID");
   const digest = createHash("sha256"); for await (const bytes of createReadStream(join(dataset, entry.file))) digest.update(bytes);
   if (digest.digest("hex") !== entry.sha256) throw new Error("DATASET_FILE_SHA_MISMATCH:" + name);
 }
-const credentialPath = option("--credentials");
-if (!credentialPath) throw new Error("REGISTERED_CREDENTIAL_REQUIRED");
-const registration = JSON.parse(readFileSync(join(dirname(resolve(credentialPath)), "resource.json")));
 const credential = JSON.parse(readFileSync(credentialPath));
-if (registration.oid !== state.binding.oid || registration.nonce !== state.binding.nonce || registration.database !== "zzsh_test_regression" || registration.pendingReset || credential.migration.name !== registration.roles.migration.name || credential.migration.oid !== registration.roles.migration.oid) throw new Error("RESOURCE_BINDING_CHANGED");
-const parameters = { host: "127.0.0.1", port: 55432, user: credential.migration.name, password: credential.migration.password, connectionTimeoutMillis: 3000, statement_timeout: 15000, lock_timeout: 500 };
-const maintenance = new Client({ ...parameters, database: "postgres", application_name: "core-dataset-reconciliation-lock" });
-const db = new Client({ ...parameters, database: "zzsh_test_regression", application_name: "core-dataset-reconciliation-read-only" });
+if (registration.oid !== state.binding.oid || registration.nonce !== state.binding.nonce || registration.database !== state.binding.database || registration.pendingReset || credential.migration.name !== registration.migrationRole || credential.migration.oid !== registration.roles?.migration?.oid) throw new Error("RESOURCE_BINDING_CHANGED");
+const maintenance = new Client(maintenanceConnection(registration, { user: "zzsh", password: readFileSync(process.env.DB_PASSWORD_FILE ?? join(root, "apps/api/.secrets/postgres_password"), "utf8").trim(), applicationName: "core-dataset-reconciliation-lock", connectionTimeoutMillis: 3000, statement_timeout: 15000, lock_timeout: 500 }));
+const db = new Client(targetConnection(registration, { user: credential.migration.name, password: credential.migration.password, applicationName: "core-dataset-reconciliation-read-only", connectionTimeoutMillis: 3000, statement_timeout: 15000, lock_timeout: 500 }));
 const api = resolve(option("--api-dist") ?? join(root, "apps/api/dist/src"));
 const mod = name => require(join(api, name + ".js"));
 const canonical = mod("supply/content-hash").canonicalize, accountId = mod("legacy-load/legacy-account-seam").legacyAccountId, orderRead = mod("order/legacy-order-read");
-const report = { schema: "zzsh.local-dataset-readback.v1", startedAt: new Date().toISOString(), resource: { oid: state.binding.oid, nonce: state.binding.nonce, database: "zzsh_test_regression" }, sourceDatasetSha256: option("--dataset-sha"), status: "STARTED", queries: 0, domains: {}, differences: [], differenceCount: 0, targetWrites: 0, rollbackConfirmed: false, lockReleased: false, connectionsClosed: false };
+const report = { schema: "zzsh.local-dataset-readback.v1", startedAt: new Date().toISOString(), resource: { oid: state.binding.oid, nonce: state.binding.nonce, database: registration.database }, sourceDatasetSha256: option("--dataset-sha"), status: "STARTED", queries: 0, domains: {}, differences: [], differenceCount: 0, targetWrites: 0, rollbackConfirmed: false, lockReleased: false, connectionsClosed: false };
 const difference = (domain, id, reason) => { report.differenceCount++; if (report.differences.length < 100) report.differences.push({ domain, id, reason }); };
 const query = async (...args) => { report.queries++; return db.query(...args); };
-async function batched(domain, apply) { let batch = [], count = 0; for await (const row of rows(join(dataset, manifest.files[domain].file))) { batch.push(row); if (batch.length === 1000) { await apply(batch); count += batch.length; batch = []; } } if (batch.length) { await apply(batch); count += batch.length; } return count; }
+async function batched(domain, apply, collect = null) { let batch = [], count = 0; for await (const row of rows(join(dataset, manifest.files[domain].file))) { batch.push(row); if (collect) collect.push(row.sourceId); if (batch.length === 1000) { await apply(batch); count += batch.length; batch = []; } } if (batch.length) { await apply(batch); count += batch.length; } return count; }
 const started = performance.now(); let held = false, connected = false;
 try {
-  await maintenance.connect(); held = (await maintenance.query("SELECT pg_try_advisory_lock(806006::bigint) held")).rows[0].held;
+  await maintenance.connect(); held = (await maintenance.query(advisoryLockSql(registration, "try"))).rows[0].ok;
   if (!held) throw new Error("REGRESSION_RESOURCE_BUSY");
   await db.connect(); connected = true; await query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
-  const actual = (await query("SELECT d.oid::text,shobj_description(d.oid,'pg_database') marker,current_setting('zzsh.regression_run') nonce,current_user FROM pg_database d WHERE d.datname=current_database()")).rows[0];
-  if (actual.oid !== registration.oid || actual.nonce !== registration.nonce || actual.marker !== registration.marker || actual.current_user !== credential.migration.name) throw new Error("LIVE_RESOURCE_CHANGED");
+  const actual = (await query(targetIdentityQuery())).rows[0];
+  assertLiveTarget(registration, actual);
+  const userKeys = [], accountKeys = [], orderKeys = [];
   const users = await batched("users", async batch => {
     const actual = new Map((await query(`SELECT u.id,u.name,u."phoneNumber",u."phoneNumberVerified",u.suspended,u.image,
        i.provider,i.provider_reference,i.account_status,i.identity_status,i.age_status,i.verified_at,
@@ -69,7 +73,7 @@ try {
       if (password ? found.password !== null || found.md5 !== password.md5 || found.salt !== password.salt || found.password_version !== password.version : found.md5 !== null || found.password !== null) difference("users", row.sourceId, "SOURCE_CREDENTIAL_NOT_PRESERVED");
       if (found.current_kind !== "DEFAULT" || found.default_preset_id !== found.current_preset_id || found.current_asset_id !== null || !mod("profile/profile-avatar-presets").isProfileAvatarPresetId(found.default_preset_id) || found.image !== mod("profile/profile-avatar").avatarImagePath("user", row.userId, found.avatar_version)) difference("users", row.sourceId, "PERSISTED_DEFAULT_AVATAR_NOT_BOUND");
     }
-  });
+  }, userKeys);
   report.domains.users = { expected: users };
   const accounts = await batched("accounts", async batch => {
     const actual = new Map((await query(`SELECT m.legacy_id,m.account_id,m.source_digest,m.evidence_ref,m.version_id,a.owner_user_id,a.game_id,a.current_version_id,a.legacy_hold,v.origin,v.review_state,
@@ -84,7 +88,7 @@ try {
       const snapshotExpected = row.snapshot && row.sourceUpdatedAt && [0, 3, 4, 5, 6].includes(Number(row.sourceStatus)) && !row.sourceDeleted;
       if (snapshotExpected ? !found.snapshot_account || canonical(found.snapshot) !== canonical(row.snapshot) || found.snapshot_digest !== row.sourceDigest || found.snapshot_updated_at !== row.sourceUpdatedAt || Number(found.source_status) !== Number(row.sourceStatus) : found.snapshot_account !== null) difference("accounts", row.sourceId, "HISTORICAL_SNAPSHOT_DRIFT_OR_UNPROVED_PUBLIC_FACT");
     }
-  });
+  }, accountKeys);
   report.domains.accounts = { expected: accounts };
   let deleted = 0;
   const orders = await batched("orders", async batch => {
@@ -95,8 +99,19 @@ try {
       if (!found) { difference("orders", row.sourceId, "TARGET_ORDER_SNAPSHOT_MISSING"); continue; }
       if (found.id !== expected.id || found.binding_digest !== expected.bindingDigest || found.source_digest !== row.sourceDigest || canonical(found.source_snapshot) !== canonical(row.source.row) || found.account_id !== bound.account.accountId || found.game_id !== bound.account.gameId || found.owner_user_id !== row.owner.userId || found.renter_user_id !== row.renter.userId || found.due !== expected.dueCents || found.paid !== expected.paidCents || found.deposit !== expected.depositCents) difference("orders", row.sourceId, "ORIGINAL_ORDER_RELATION_STATUS_OR_MONEY_DRIFT");
     }
-  });
+  }, orderKeys);
   report.domains.orders = { expected: orders, preservedSourceDeleted: deleted };
+  // Per-row checks prove each planned row is right; this proves the planned key set and the target
+  // key set are the same set, so a missing or extra object cannot hide behind matching totals.
+  report.sets = {};
+  const compareSet = async (domain, sourceKeys, targetSql) => {
+    const result = compareKeySets(sourceKeys, (await query(targetSql)).rows);
+    report.sets[domain] = result;
+    if (!result.equal) difference(domain, "KEY_SET", "TARGET_KEY_SET_DIFFERS");
+  };
+  await compareSet("users", userKeys, `SELECT substring(provider_reference from 8) AS legacy_id FROM zzsh_iam.user_identity_state WHERE provider='legacy_mysql_restore' AND provider_reference LIKE 'la_user:%'`);
+  await compareSet("accounts", accountKeys, `SELECT legacy_id FROM zzsh_supply.legacy_supply_map WHERE source_system='legacy_mysql_restore' AND source_entity='la_rental_accounts'`);
+  await compareSet("orders", orderKeys, `SELECT legacy_id FROM zzsh_order.legacy_order_read_snapshot WHERE source_system='legacy_mysql_restore' AND source_entity='la_order'`);
   if (option("--paths-plan")) {
     const checked = async (dir, name, expected) => {
       const path = join(dir, basename(name)), digest = createHash("sha256");
@@ -184,12 +199,13 @@ try {
     }
     report.emptyFinancialCoverage={expected:expected.length,readable,scope:"EXACT_SOURCE_ZERO_PER_SUBJECT_AND_KIND_NOT_A_ZERO_WALLET"};
   }
-  if(state.phases.guaranteeHistory?.complete){
-    const phase=state.generatedPhases.guaranteeHistory,bytes=readFileSync(join(dirname(checkpoint),"phases","guaranteeHistory.json"));if(hash(bytes)!==phase.sha256)throw new Error("FINANCIAL_PHASE_INPUT_CHANGED");
-    const expected=JSON.parse(bytes).flatMap(group=>mod("finance/owner-guarantee-history").planOwnerGuaranteeHistoryBatch(group.input).rows);
-    let readable=0;
-    for(let i=0;i<expected.length;i+=500){const batch=expected.slice(i,i+500),actual=new Map((await query(`SELECT legacy_account_id,user_id,legacy_user_id,account_id,source_digest,source_canonical FROM zzsh_order.legacy_owner_guarantee_observation WHERE legacy_account_id=ANY($1::text[]) AND source_cutoff=$2::timestamptz`,[batch.map(r=>r.sourceId),manifest.sourceCutoff])).rows.map(r=>[r.legacy_account_id,r]));for(const row of batch){const found=actual.get(row.sourceId);if(!found||found.user_id!==row.userId||found.legacy_user_id!==row.legacyUserId||found.account_id!==row.accountId||found.source_digest!==row.sourceDigest||found.source_canonical!==row.sourceCanonical)difference("guaranteeHistory",row.sourceId,"FROZEN_GUARANTEE_SOURCE_DRIFT");else readable++;}}
-    report.ownerGuaranteeHistory={expected:expected.length,readable,financialEffect:"NONE",heldAmount:"UNKNOWN_WITHOUT_CURRENT_LIABILITY_PROOF"};
+  // The old listing deposit is retired: nothing to reconcile, and any row would be a leak.
+  {
+    // The retired listing-deposit table is expected to be absent; treat absence as zero.
+  const guaranteePresent=(await query(`SELECT to_regclass('zzsh_order.legacy_owner_guarantee_observation') IS NOT NULL AS present`)).rows[0]?.present===true;
+  const actual=guaranteePresent?(await query(`SELECT count(*)::int AS count FROM zzsh_order.legacy_owner_guarantee_observation`)).rows[0]:{count:0};
+    report.ownerGuaranteeHistory={expected:0,readable:0,actual:actual?.count??0,policyExcluded:true};
+    if((actual?.count??0)!==0)difference("guaranteeHistory","TABLE","RETIRED_LISTING_DEPOSIT_PRESENT_IN_TARGET");
   }
   if(state.phases.invitationFacts?.complete){
     const module=mod("finance/legacy-invitation-facts");let expectedSubjects=0,matchedSubjects=0,expectedRelations=0,matchedRelations=0,childProofAudits=0;
@@ -263,7 +279,7 @@ catch (error) { report.status = "READBACK_FAILED"; report.error = error.code ?? 
 finally {
   if (connected && !report.rollbackConfirmed) { try { await query("ROLLBACK"); report.rollbackConfirmed = true; } catch {} }
   await db.end();
-  if (held) { try { report.lockReleased = (await maintenance.query("SELECT pg_advisory_unlock(806006::bigint) released")).rows[0].released; } catch {} }
+  if (held) { try { report.lockReleased = (await maintenance.query(advisoryLockSql(registration, "unlock"))).rows[0].ok; } catch {} }
   await maintenance.end(); report.connectionsClosed = true; report.finishedAt = new Date().toISOString(); report.monotonicElapsedMs = performance.now() - started;
   if (!report.rollbackConfirmed || !report.lockReleased || report.differenceCount) process.exitCode = 1;
   writeFileSync(output, JSON.stringify(report, null, 2) + "\n", { flag: "wx" });
