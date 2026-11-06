@@ -34,12 +34,17 @@ function activeEntries(pathname, search = "", nav = boss) {
 test("每条目标路由只有唯一活动入口，不再按前缀点亮父级", () => {
   const cases = [
     ["/finance", "", ["/finance"]],
-    ["/finance", "?q=OLD-ORDER", ["/finance/search"]],
+    ["/finance", "?q=OLD-ORDER", ["/finance/records"]],
     ["/finance/period", "", ["/finance/period"]],
-    ["/finance/search", "", ["/finance/search"]],
+    ["/finance/search", "", ["/finance/records"]],
+    ["/finance/records", "", ["/finance/records"]],
+    ["/finance/records/history", "", ["/finance/records"]],
+    ["/finance/balances", "", ["/finance/balances"]],
+    ["/finance/balances/history", "", ["/finance/balances"]],
+    ["/finance/balances/opening", "", ["/finance/balances"]],
     ["/finance/channels", "", ["/finance/channels"]],
-    ["/finance/documents/doc_1", "", ["/finance/search"]],
-    ["/finance/users/user_1", "", ["/finance/search"]],
+    ["/finance/documents/doc_1", "", ["/finance/records"]],
+    ["/finance/users/user_1", "", ["/finance/records"]],
     ["/users", "", ["/users"]],
     ["/users/restore", "", ["/users"]],
     ["/users/user_1", "?section=orders", ["/users"]],
@@ -95,7 +100,7 @@ test("侧栏菜单保留全部既有入口与分组命名一致性", () => {
   }
   assert.equal(items.find((item) => item.path === "/approvals").label, "审批中心", "侧栏与页内审批命名一致");
   const paths = menuPaths(boss);
-  assert.equal(paths.length, 37, "真实Boss入口并集：保留资金总览/查找/期间/渠道，分销拆为五个入口");
+  assert.equal(paths.length, 38, "资金查找拆成资金记录与用户余额两个入口");
   assert.equal(paths.includes("/users/restore"), false, "账号恢复入口已移除");
   for (const path of ["/system","/distribution","/distribution/earnings","/distribution/participants","/distribution/policy","/supply/media","/finance/period","/settings?section=security","/support","/support/mine","/support/overview","/support/patrol","/support/settings","/avatar-reviews"]) {
     assert.ok(paths.includes(path), `保留既有入口 ${path}`);

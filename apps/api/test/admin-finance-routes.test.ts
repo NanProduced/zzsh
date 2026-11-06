@@ -4,6 +4,7 @@ import { authorizeAdminFinance, handleAdminFinanceRead, type AdminFinanceOptions
 import { FinanceSqlFixture, legacyFinanceOrder } from "./admin-finance-fixture";
 import { financeSnapshot } from "../src/finance/admin-finance-read";
 import * as overview from "../src/finance/admin-finance-overview";
+import * as activity from "../src/finance/admin-finance-activity";
 
 function environment(permissions = ["finance.read", "finance.document.read"], financeSql?: FinanceSqlFixture) {
   const state = { permissions, isBoss: false, gameIds: ["game1"], connected: 0, auditFailure: false, revokeOnPrepare: false, schemaReady: true, locked: false, passwordChangeRequired: false, authenticated: true, withdrawalsReady: false, versionSqlOverride:undefined as string|undefined, beforeSecondTransaction:undefined as (()=>void)|undefined, operations: [] as Record<string, unknown>[], subjects: [{ id: "u1", name: "用户一" }, { id: "u2", name: "用户二" }], extraLedger: [] as Record<string, unknown>[], audits: [] as Record<string, unknown>[], statements: [] as string[] };
@@ -57,10 +58,29 @@ function environment(permissions = ["finance.read", "finance.document.read"], fi
 async function request(options: AdminFinanceOptions, route: string, query = "") {
   const result = { status: 200, json: undefined as any, bytes: undefined as Buffer | undefined, headers: {} as Record<string, string>, events: new Map<string, () => void>() };
   const response = { headersSent: false, status(code: number) { result.status = code; return this; }, setHeader(name: string, value: string | string[]) { result.headers[name] = Array.isArray(value) ? value.join(",") : value; return this; }, json(body: unknown) { result.json = body; }, send(body: unknown) { assert.ok(Buffer.isBuffer(body)); result.bytes = body; }, end() {}, once(event: string, callback: () => void) { result.events.set(event, callback); } };
-  const parameters=route==='overview'?query:`from=2026-10-03&to=2026-10-03${query ? "&" + query : ""}`;
+  const parameters=route==='overview'||route.startsWith('activity/')?query:`from=2026-10-03&to=2026-10-03${query ? "&" + query : ""}`;
   await handleAdminFinanceRead({ method: "GET", originalUrl: `/api/v1/admin/finance/${route}?${parameters}`, headers: { origin: options.adminOrigin } }, response, options);
   return result;
 }
+
+test('new finance activity requires complete access, stays read-only and reauthorizes before delivery',async t=>{
+ let reads=0;t.mock.method(activity,'readAdminBalanceActivity',async()=>{reads++;return {version:'admin.finance-balance-activity.v1',view:'LIVE',asOf:'2026-01-01T00:00:00.000Z',page:1,pageSize:20,total:0,hasMore:false,items:[]};});
+ const denied=environment(['finance.document.read']);assert.equal((await request(denied.options,'activity/balances')).status,403);assert.equal(reads,0);
+ const allowed=environment(['finance.read']);assert.equal((await request(allowed.options,'activity/balances')).status,200);assert.equal(reads,1);
+ assert.ok(allowed.state.statements.includes('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY'));assert.ok(allowed.state.statements.includes('ROLLBACK'));
+ assert.ok(allowed.state.statements.every(sql=>!/^\s*(?:INSERT|UPDATE|DELETE|TRUNCATE)\b/.test(sql)));
+ const revoked=environment();revoked.state.revokeOnPrepare=true;const stopped=await request(revoked.options,'activity/balances');assert.equal(stopped.status,403);assert.equal(stopped.json.items,undefined);assert.equal(reads,2);
+});
+
+test('document-only access can search channel records by exact reference without browsing balances',async t=>{
+ let exactMode:boolean|undefined, reads=0;
+ t.mock.method(activity,'readAdminChannelActivity',async(...args:Parameters<typeof activity.readAdminChannelActivity>)=>{const [,filters,,exact]=args;reads++;exactMode=exact;return {version:'admin.finance-channel-activity.v1',asOf:'2026-01-01T00:00:00.000Z',page:1,pageSize:20,total:1,hasMore:false,items:[{id:filters.q}]};});
+ const partial=environment(['finance.document.read']);
+ assert.equal((await request(partial.options,'activity/channels')).status,400);assert.equal(reads,0);
+ assert.equal((await request(partial.options,'activity/balances','q=u1')).status,403);
+ const result=await request(partial.options,'activity/channels','q=PAY-123');assert.equal(result.status,200);assert.equal(exactMode,true);assert.equal(reads,1);
+ const full=environment(['finance.read']);assert.equal((await request(full.options,'activity/channels')).status,200);assert.equal(exactMode,false);
+});
 
 test('finance overview is pure read-only, finance.read scoped, bounded, and reauthorizes before delivery',async t=>{
  let reads=0;t.mock.method(overview,'readAdminFinanceOverview',async()=>{reads++;return{version:'admin.finance-overview.v1',confirmedPayments:{amountCents:'123'}};});

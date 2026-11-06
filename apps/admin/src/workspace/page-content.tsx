@@ -1,6 +1,7 @@
 import { AdminFinanceView } from "../views/admin-finance-view";
 import { FinanceOverviewView } from "../views/finance-overview";
 import { FinanceChannels } from "../views/finance-channels";
+import { FinanceActivity } from "../views/finance-activity";
 import { SupplyListingReviewView } from "../views/supply-listing-review-view";
 import { adminRequest, type SessionSnapshot, type Theme, type ThemeMode } from "../api";
 import type { ThemeStorageStatus } from "../lib/theme";
@@ -87,6 +88,7 @@ export function WorkspacePageContent({
   };
   if(tab.kind === "finance-overview")return <FinanceOverviewView key={tab.id} tab={tab} snapshot={snapshot} onOpenPath={onOpenPath} onQueryChange={onQueryChange} onRefresh={onRefresh} refreshNonce={refreshNonce}/>;
   if(tab.kind === "finance-channels")return <FinanceChannels key={tab.id} snapshot={snapshot} tab={tab} onOpenPath={onOpenPath}/>;
+  if(["finance-records","finance-record-history","finance-balances","finance-balance-history","finance-balance-opening"].includes(tab.kind))return <FinanceActivity key={`${tab.id}:${tab.query.kind ?? ''}`} tab={tab} snapshot={snapshot} onOpenPath={onOpenPath} onQueryChange={onQueryChange} onRefresh={onRefresh} refreshNonce={refreshNonce}/>;
   if(tab.kind.startsWith("finance-"))return <AdminFinanceView key={tab.id} tab={tab} snapshot={snapshot} onOpenPath={onOpenPath} onQueryChange={onQueryChange} onRefresh={onRefresh} refreshNonce={refreshNonce}/>;
   if (tab.kind === "workbench") {
     return <DashboardPage key={tab.id} snapshot={snapshot} onNavigate={(path) => onOpenPath(path)} refreshNonce={refreshNonce} />;

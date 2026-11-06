@@ -459,7 +459,7 @@ export function AdminFinanceView({ tab, snapshot, onOpenPath, onQueryChange, onR
   }
   function back() {
     const path = financeOriginPath(tab.query.origin,snapshot,tab.query.financeReturn);
-    onOpenPath(path ?? "/finance/search", path ? undefined : "资金查找");
+    onOpenPath(path ?? "/finance/records", path ? undefined : "资金记录");
   }
   function openAssociated(path: string, title?: string, focus = 'finance-title') {
     if (path.startsWith('/finance/')) { open(path, title ?? '关联资金记录', focus); return; }
@@ -554,7 +554,7 @@ export function AdminFinanceView({ tab, snapshot, onOpenPath, onQueryChange, onR
   const hasFilters = draft.q || draft.kind !== 'ALL' || draft.state !== 'ALL' || draft.bucket !== 'ALL' || draft.period;
 
   return <section className="finance-page" aria-labelledby="finance-title">
-    <div className="finance-page-header"><h1 id="finance-title" tabIndex={-1} data-finance-focus="finance-title">{allowed ? title : "资金读取"}</h1><div className="finance-page-actions">{object ? <><Button variant="outline" onClick={back}>返回来源</Button><Button variant="outline" onClick={() => { snapshotRef.current = undefined; onOpenPath("/finance/search?reset=1", "资金查找"); }}>重新查找</Button>{body?.document ? <Button variant="outline" className="primary" onClick={() => void copySummary()}><Copy size={15} />复制摘要</Button> : null}</> : null}{period ? <Button variant="outline" className="primary" disabled={!body || exporting || !!error} onClick={() => void exportCsv()}><Download size={15} />{exporting ? "正在生成" : "导出完整明细"}</Button> : null}</div></div>
+    <div className="finance-page-header"><h1 id="finance-title" tabIndex={-1} data-finance-focus="finance-title">{allowed ? title : "资金读取"}</h1><div className="finance-page-actions">{object ? <><Button variant="outline" onClick={back}>返回来源</Button><Button variant="outline" onClick={() => { snapshotRef.current = undefined; onOpenPath("/finance/records", "资金记录"); }}>重新查找</Button>{body?.document ? <Button variant="outline" className="primary" onClick={() => void copySummary()}><Copy size={15} />复制摘要</Button> : null}</> : null}{period ? <Button variant="outline" className="primary" disabled={!body || exporting || !!error} onClick={() => void exportCsv()}><Download size={15} />{exporting ? "正在生成" : "导出完整明细"}</Button> : null}</div></div>
     {!allowed ? <Alert variant="warning" role="status"><TriangleAlert aria-hidden /><AlertTitle>当前身份没有该项资金读取能力</AlertTitle><AlertDescription>{period || subjectId ? "完整钱包和期间核对需要完整资金读取能力。" : "单据读取需要对应能力。"}</AlertDescription></Alert> : <>
       {!object ? <form className={period ? "finance-period-filter" : "finance-search-card"} onSubmit={event => { event.preventDefault(); void apply(); }}>
         {period ? <><label>主体<Input aria-label="主体" value={draft.scope === 'ALL' ? '' : draft.scope} onChange={event => setDraft({ ...draft, scope: event.target.value.trim() || 'ALL' })} placeholder="全部用户；或输入用户ID" /></label><FinanceDateRange from={draft.from} to={draft.to} onChange={(from,to)=>setDraft({...draft,from,to})}/></> : <>

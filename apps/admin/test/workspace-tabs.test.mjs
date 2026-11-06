@@ -240,13 +240,17 @@ test("customer statistics keeps its canonical route and refreshes old persisted 
   assert.equal(restored.activeId,current.id);
 });
 
-test('finance has four independent entrances and restores old lookup tabs without losing filters',()=>{
+test('finance splits the lookup into channel records and balances while restoring old tabs',()=>{
  const read={isBoss:false,permissions:['finance.read','finance.document.read']};
- assert.equal(tabFromLocation('/finance').kind,'finance-overview');assert.equal(tabFromLocation('/finance','range=30d').kind,'finance-overview');assert.equal(tabFromLocation('/finance','q=OLD-ORDER&page=2').path,'/finance/search');
+ assert.equal(tabFromLocation('/finance').kind,'finance-overview');assert.equal(tabFromLocation('/finance','range=30d').kind,'finance-overview');assert.equal(tabFromLocation('/finance','q=OLD-ORDER&page=2').path,'/finance/records');
  assert.equal(tabFromLocation('/finance/channels').kind,'finance-channels');assert.equal(tabFromLocation('/finance/period').kind,'finance-period');
+ assert.equal(tabFromLocation('/finance/records').kind,'finance-records');assert.equal(tabFromLocation('/finance/balances').kind,'finance-balances');
+ assert.equal(tabFromLocation('/finance/records/history').kind,'finance-record-history');assert.equal(tabFromLocation('/finance/records','source=LEGACY').path,'/finance/records/history');
+ assert.equal(tabFromLocation('/finance/records','operation=QUERY').query.operation,undefined);
+ assert.equal(tabFromLocation('/finance/balances/history').kind,'finance-balance-history');assert.equal(tabFromLocation('/finance/balances/opening').kind,'finance-balance-opening');
  const store=new Map();globalThis.sessionStorage={getItem:key=>store.get(key)??null,setItem:(key,value)=>store.set(key,value)};
- const old={...tabFromLocation('/finance/search'),path:'/finance',query:{q:'OLD-ORDER',kind:'SETTLEMENT',page:'2',financeReturn:'/finance?range=30d'}};
- persistTabs('finance-tabs',{activeId:old.id,tabs:[tabFromLocation('/workbench'),old]});const result=restoreTabs('finance-tabs',read);assert.equal(result.activeId,old.id);assert.equal(result.tabs.find(tab=>tab.id===old.id).path,'/finance/search');assert.deepEqual(result.tabs.find(tab=>tab.id===old.id).query,old.query);
+ const old={...tabFromLocation('/finance/records'),id:'finance-lookup',kind:'finance-lookup',path:'/finance',query:{q:'OLD-ORDER',kind:'SETTLEMENT',page:'2',financeReturn:'/finance?range=30d'}};
+ persistTabs('finance-tabs',{activeId:old.id,tabs:[tabFromLocation('/workbench'),old]});const result=restoreTabs('finance-tabs',read);assert.equal(result.activeId,'finance-records');assert.equal(result.tabs.find(tab=>tab.id==='finance-records').path,'/finance/records');assert.deepEqual(result.tabs.find(tab=>tab.id==='finance-records').query,old.query);
  assert.equal(canOpenKind('finance-overview',{isBoss:true,permissions:['finance.document.read']}),false);assert.equal(canOpenKind('finance-lookup',{isBoss:false,permissions:['finance.document.read']}),true);assert.equal(canOpenKind('finance-document',{isBoss:false,permissions:['finance.read']}),false);assert.equal(sanitizeFinanceReturn('/finance?range=30d'),'/finance?range=30d');
  delete globalThis.sessionStorage;
 });

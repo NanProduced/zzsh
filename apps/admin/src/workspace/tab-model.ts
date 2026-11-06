@@ -59,6 +59,11 @@ export type WorkspaceRouteKind =
   | "order-object"
   | "resource-object"
   | "finance-lookup"
+  | "finance-records"
+  | "finance-record-history"
+  | "finance-balances"
+  | "finance-balance-history"
+  | "finance-balance-opening"
   | "finance-overview"
   | "finance-channels"
   | "finance-period"
@@ -161,8 +166,8 @@ export function sanitizeFinanceReturn(value: string | undefined): string | undef
   try {
     const url = new URL(value, 'https://workspace.invalid');
     const route=parseWorkspacePath(url.pathname);
-    if (url.origin !== 'https://workspace.invalid' || url.searchParams.has('financeReturn') || !['finance-overview','finance-lookup','finance-channels','finance-period','finance-document','finance-user','order-object','orders','user-object','users'].includes(route.kind) || route.objectId&&findPhoneClue(route.objectId)) return undefined;
-    const allowed = new Set(['range','scope','from','to','period','bucket','kind','state','q','page','pageSize','size','section','role','status','publication','sort','fromUserId','fromUserSection','fromUserRole','fromUserStatus','fromOrderId','entry','draft','financeFrom','financeTo']);
+    if (url.origin !== 'https://workspace.invalid' || url.searchParams.has('financeReturn') || !['finance-overview','finance-lookup','finance-records','finance-record-history','finance-balances','finance-balance-history','finance-balance-opening','finance-channels','finance-period','finance-document','finance-user','order-object','orders','user-object','users'].includes(route.kind) || route.objectId&&findPhoneClue(route.objectId)) return undefined;
+    const allowed = new Set(['range','scope','from','to','period','bucket','kind','state','source','q','page','pageSize','size','section','role','status','publication','sort','fromUserId','fromUserSection','fromUserRole','fromUserStatus','fromOrderId','entry','draft','financeFrom','financeTo']);
     const query: Record<string,string> = {};
     for (const [key,item] of url.searchParams) {
       if (findPhoneClue(item) || SENSITIVE_QUERY.test(key) || SENSITIVE_QUERY.test(item)) return undefined;
@@ -246,7 +251,11 @@ export function parseWorkspacePath(pathname: string): { kind: WorkspaceRouteKind
     return { kind: "order-object", objectType: "order", objectId, tabId: `order:${objectId}`, path, title: objectId };
   }
   if (path === "/finance") return {kind:"finance-overview",tabId:"finance-overview",path,title:"财务总览"};
-  if (path === "/finance/search") return {kind:"finance-lookup",tabId:"finance-lookup",path,title:"资金查找"};
+  if (path === "/finance/search" || path === "/finance/records") return {kind:"finance-records",tabId:"finance-records",path:"/finance/records",title:"资金记录"};
+  if (path === "/finance/records/history") return {kind:"finance-record-history",tabId:"finance-record-history",path,title:"旧平台资金记录"};
+  if (path === "/finance/balances") return {kind:"finance-balances",tabId:"finance-balances",path,title:"用户余额"};
+  if (path === "/finance/balances/history") return {kind:"finance-balance-history",tabId:"finance-balance-history",path,title:"旧平台余额记录"};
+  if (path === "/finance/balances/opening") return {kind:"finance-balance-opening",tabId:"finance-balance-opening",path,title:"迁移期初"};
   if (path === "/finance/channels") return {kind:"finance-channels",tabId:"finance-channels",path,title:"汇聚对账"};
   if (path === "/finance/period") return {kind:"finance-period",tabId:"finance-period",path,title:"期间核对"};
   const financeObject=/^\/finance\/(documents|users)\/([^/]+)$/.exec(path);
@@ -270,7 +279,9 @@ export function tabFromLocation(pathname: string, search = ""): WorkspaceTab {
     delete query.userId;
     distributionPath = target ? `/distribution/participants/${encodeURIComponent(target)}` : "/distribution/participants";
   }
-  const parsed = parseWorkspacePath(legacyFinanceQuery ? "/finance/search" : distributionPath);
+  let financePath = legacyFinanceQuery ? "/finance/search" : distributionPath;
+  if (['/finance/search','/finance/records','/finance/records/history'].includes(financePath)) { if(query.source==='LEGACY')financePath='/finance/records/history';delete query.source;delete query.operation; }
+  const parsed = parseWorkspacePath(financePath);
   const base = LIST_TABS[parsed.tabId];
   if (base) return { ...base, query };
   return {
@@ -305,6 +316,8 @@ export function canOpenKind(kind: WorkspaceRouteKind, nav: NavPermission): boole
   if (kind === "workbench" || kind === "account" || kind === "settings") return true;
   if (kind === "system-configuration") return nav.isBoss;
   if(kind==="finance-lookup")return has("finance.read")||has("finance.document.read");
+  if(kind==="finance-records"||kind==="finance-record-history")return has("finance.read")||has("finance.document.read");
+  if(kind==="finance-balances"||kind==="finance-balance-history"||kind==="finance-balance-opening")return has("finance.read");
   if(kind==="finance-overview"||kind==="finance-channels")return has("finance.read");
   if(kind==="finance-period"||kind==="finance-user")return has("finance.read");
   if(kind==="finance-document")return has("finance.document.read");
@@ -420,8 +433,8 @@ export function restoreTabs(adminUserId: string, nav: NavPermission): { tabs: Wo
     let restoredActiveId = parsed.activeId;
     for (const tab of stored) {
       let candidate = normalizeDistribution(tab);
+      if (candidate.kind === "finance-lookup" || ['finance-records','finance-record-history'].includes(candidate.kind) && (candidate.query?.source||candidate.query?.operation)) candidate = tabFromLocation(candidate.kind==='finance-lookup'?'/finance/records':candidate.path, new URLSearchParams(candidate.query ?? {}).toString());
       if (tab.id === parsed.activeId) restoredActiveId = candidate.id;
-      if (candidate.kind === "finance-lookup" && candidate.path === "/finance") candidate = { ...candidate, path: "/finance/search", title: "资金查找" };
       if (candidate.kind === "support-management" || candidate.id === "support-management" || candidate.path === "/support/overview" || candidate.path === "/support/management" || candidate.title === "运营看板" || candidate.title === "客服管理") {
         candidate = { ...candidate, id: "support-overview", kind: "support-overview", path: "/support/overview", title: "客服统计" };
       }

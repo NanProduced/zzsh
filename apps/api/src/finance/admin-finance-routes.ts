@@ -17,6 +17,7 @@ import { ADMIN_FINANCE_VERSION, parseAdminFinanceFilters, resolveFinanceLookup, 
 import { generateAdminFinanceCsv, prepareAdminFinanceExport, observeAdminFinanceDelivery } from "./admin-finance-export";
 import { parseFinanceOverviewRange, readAdminFinanceOverview } from "./admin-finance-overview";
 import { withDirectoryRead, withDirectoryReadTransaction } from "../auth/user-directory-read";
+import { parseActivityQuery, readAdminBalanceActivity, readAdminChannelActivity } from './admin-finance-activity';
 
 export type AdminFinanceOptions = AuthSecurityOptions & { listingCursorKey?: ListingCursorKey; joinpayAccountRead?: JoinpayAccountReadAccess };
 function pageNumber(query: URLSearchParams, name: string, fallback: number, max: number): number {
@@ -33,10 +34,26 @@ export async function handleAdminFinanceRead(request: SupplyNodeRequest, respons
   const requestId = ensureApiV1RequestId(request);
   await safely(response, requestId, async () => {
     const url = new URL(request.originalUrl ?? request.url ?? "", options.apiOrigin);
-    const match = /^\/api\/(?:v1\/admin|bff\/admin)\/finance\/(overview|lookup|period|export|subjects\/[^/]+|documents\/[^/]+|merchant-accounts\/[^/]+|channel-evidence\/orders\/[^/]+|channel-evidence\/withdrawals\/[^/]+\/[^/]+|channel-evidence\/originals\/[^/]+)$/.exec(url.pathname);
+    const match = /^\/api\/(?:v1\/admin|bff\/admin)\/finance\/(overview|lookup|period|export|activity\/(?:balances|channels)|subjects\/[^/]+|documents\/[^/]+|merchant-accounts\/[^/]+|channel-evidence\/orders\/[^/]+|channel-evidence\/withdrawals\/[^/]+\/[^/]+|channel-evidence\/originals\/[^/]+)$/.exec(url.pathname);
     if ((request.method ?? "GET") !== "GET" || !match) throw notFound();
     const origin = request.headers.origin;
     if (origin !== undefined && origin !== options.adminOrigin && origin !== options.apiOrigin || request.headers["sec-fetch-site"] === "cross-site") throw forbidden();
+    if (match[1] === 'activity/balances' || match[1] === 'activity/channels') {
+      const wallet = match[1] === 'activity/balances', filters = parseActivityQuery(url.searchParams,wallet), context = await readAdminContext(request,options);
+      const operation = wallet ? 'complete' : 'lookup';
+      await withDirectoryRead(options.directoryReadPool ?? options.pool,request,response,async signal => {
+        const result = await withDirectoryReadTransaction(options.directoryReadPool ?? options.pool,signal,async client => {
+          const actor = await authorizeAdminFinance(client,context,operation);
+          if (!wallet && !actor.complete && !filters.q) throw invalid('A document lookup reference is required');
+          const body = wallet ? await readAdminBalanceActivity(client,filters,actor.relations) : await readAdminChannelActivity(client,filters,actor.relations,!actor.complete);
+          return { actor, body };
+        });
+        const current = await withTransaction(options.pool,client=>authorizeAdminFinance(client,context,operation));
+        if (current.authorizationKey !== result.actor.authorizationKey) throw forbidden('Finance access changed; reload');
+        signal.throwIfAborted(); sendJson(response,200,{ ...result.body, contextKey:current.authorizationKey },requestId);
+      });
+      return;
+    }
     if (match[1] === "overview") {
       const range = parseFinanceOverviewRange(url.searchParams), context = await readAdminContext(request, options);
       await withDirectoryRead(options.directoryReadPool ?? options.pool, request, response, async signal => {
