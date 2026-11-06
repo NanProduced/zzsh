@@ -101,7 +101,7 @@ for (const mode of ["commit", "replay", "rollback", "unknown", "skin-time", "ski
         manifest.foreignKeys.push({ child: "zzsh_supply.firearm_classification", parent: "zzsh_auth_admin.user", columns: ["created_by_admin_id"], parentColumns: ["id"] });
     }), preload = join(pkg.root, "fake-pg.cjs"), calls = join(pkg.root, "calls.json"), receipt = join(pkg.root, "receipt.json"), parameters = join(pkg.root, "parameters.json");
     const requestedReceipt = "E:/zzsh-local-state/restricted/bootstrap-host-test.json";
-    const registered = { database: "zzsh_test_regression", oid: "123", nonce: "fixture-nonce", roles: { migration: { name: "fixture_m", oid: "456" } } };
+    const registered = { database: "zzsh_test_regression", marker: "zzsh:regression-test:v1", oid: "123", nonce: "a1b2c3d4e5f60718293a4b5c", roles: { migration: { name: "fixture_m", oid: "456" }, runtime: { name: "fixture_r", oid: "457" } } };
     writeFileSync(join(pkg.root, "resource.json"), JSON.stringify(registered));
     writeFileSync(join(pkg.root, "credentials.json"), JSON.stringify({ migration: { name: "fixture_m", oid: "456", password: "fixture-only" } }));
     writeFileSync(join(pkg.root, "password.txt"), "fixture-only");
@@ -113,7 +113,7 @@ fs.existsSync=function(file){return path.resolve(String(file))===requested?false
 fs.writeFileSync=function(file,...rest){return write.call(this,path.resolve(String(file))===requested?receipt:file,...rest)};
 mod.syncBuiltinESMExports();
 async function query(sql,params=[]){calls.push(sql);if(sql.includes('pg_try_advisory_lock')||sql.includes('pg_advisory_unlock'))return {rows:[{ok:true}]};
-if(sql.includes("current_setting('zzsh.regression_run')"))return {rows:[{oid:'123',nonce:'fixture-nonce',owner:'zzsh',marker:'zzsh:regression-test:v1',role:'fixture_m',role_oid:'456',rolsuper:false,rolcreatedb:false,rolcreaterole:false,rolinherit:false,rolbypassrls:false}]};
+if(sql.includes("current_setting('zzsh.regression_run')"))return {rows:[{oid:'123',nonce:'a1b2c3d4e5f60718293a4b5c',owner:'zzsh',marker:'zzsh:regression-test:v1',role:'fixture_m',role_oid:'456',rolsuper:false,rolcreatedb:false,rolcreaterole:false,rolinherit:false,rolbypassrls:false}]};
 if(sql.includes('FOR SHARE OF a,u'))return {rows:[{is_boss:true,status:'ACTIVE',suspended:false}]};
 if(sql.includes('SELECT attname AS name'))return {rows:[{name:'id'},{name:'code'},{name:'catalog_revision'}]};
 if(sql.includes('FROM pg_constraint k CROSS'))return {rows:[{name:'id'}]};
@@ -130,8 +130,8 @@ class Client{async connect(){calls.push('maintenance.connect')}query(...args){re
 class Pool{async connect(){calls.push('pool.connect');return {query,release(){calls.push('client.release')}}}async end(){calls.push('pool.end')}}
 mod._load=function(name,...rest){return name==='pg'?{Client,Pool}:originalLoad.call(this,name,...rest)};
 `);
-    const result = spawnSync(process.execPath, ["--require", preload, script, "--execute", ...pkg.args, "--maintenance-admin-id", "existing-boss", "--oid", "123", "--nonce", "fixture-nonce", "--credentials", join(pkg.root, "credentials.json"), "--receipt", requestedReceipt], { encoding: "utf8", timeout: 5000, env: { ...process.env, DB_PASSWORD_FILE: join(pkg.root, "password.txt") } });
-    assert.ok(existsSync(receipt), result.stderr + result.stdout);
+    const result = spawnSync(process.execPath, ["--require", preload, script, "--execute", ...pkg.args, "--maintenance-admin-id", "existing-boss", "--oid", "123", "--nonce", "a1b2c3d4e5f60718293a4b5c", "--credentials", join(pkg.root, "credentials.json"), "--receipt", requestedReceipt], { encoding: "utf8", timeout: 5000, env: { ...process.env, DB_PASSWORD_FILE: join(pkg.root, "password.txt") } });
+    assert.ok(existsSync(receipt), (result.stderr||"") + (result.stdout||"") + " STATUS=" + result.status);
     const observed = JSON.parse(readFileSync(receipt)), sql = JSON.parse(readFileSync(calls));
     assert.equal(observed.database, "zzsh_test_regression");
     assert.ok(Number.isFinite(Date.parse(observed.startedAt)) && Number.isFinite(Date.parse(observed.finishedAt)) && observed.wallMs >= 0);
@@ -139,7 +139,7 @@ mod._load=function(name,...rest){return name==='pg'?{Client,Pool}:originalLoad.c
     assert.equal(observed.maintenanceClosed, true);
     assert.equal(observed.unlock, true);
     if (mode === "commit" || mode === "replay" || mode === "skin-time") {
-        assert.equal(result.status, 0, result.stderr);
+        assert.equal(result.status, 0, JSON.stringify({ error: observed.error, status: observed.status, step: observed.step }));
         assert.equal(observed.status, "REFERENCE_BOOTSTRAP_COMMITTED");
         assert.equal(observed.commitAck, true);
         assert.equal(sql.filter(query => query.startsWith("INSERT INTO")).length, mode === "replay" ? 0 : 2);
@@ -178,7 +178,7 @@ for (const stage of ["bosses", "staff", "partial-failure"]) test("formal admin H
     const out = join("E:/zzsh-local-state/restricted", "data-first-bootstrap-host-" + root.split(/[\\/]/).at(-1).toLowerCase());
     assert.match(out.replaceAll("\\", "/"), /^E:\/zzsh-local-state\/restricted\/data-first-bootstrap-host-/);
     t.after(() => { if (existsSync(out)) rmSync(out, { recursive: true }); });
-    const target = { database: "zzsh_test_regression", oid: "123", nonce: "fixture-nonce" };
+    const target = { database: "zzsh_test_regression", oid: "123", nonce: "a1b2c3d4e5f60718293a4b5c" };
     const binding = { resource: { database: target.database, resourceOid: target.oid }, initialization: { nonce: target.nonce, imProvisioner: false, imIdentityRepository: false, imAppId: null }, origins: { apiOrigin: "http://127.0.0.1:4292", adminOrigin: "http://127.0.0.1:4291" } };
     const bindingFile = join(root, "binding.json"), bindingBytes = JSON.stringify(binding);
     writeFileSync(bindingFile, bindingBytes);
@@ -186,7 +186,7 @@ for (const stage of ["bosses", "staff", "partial-failure"]) test("formal admin H
     writeFileSync(join(root, "boss-profile.json"), JSON.stringify(bossProfile));
     const input = { kind: "FORMAL_LOCAL_ADMIN_INITIALIZATION_V1", numberingDigits: 5, target, resource: "scene_test", names: { "boss-one": "第一Boss", "boss-two": "第二Boss", operations: "运营", support: "客服" }, serverBinding: { file: bindingFile, sha256: hash(bindingBytes) }, bootstrapSecretFile: join(root, "bootstrap-secret"), bossProfileFile: join(root, "boss-profile.json") };
     writeFileSync(join(root, "input.json"), JSON.stringify(input));
-    writeFileSync(join(root, "resource.json"), JSON.stringify({ ...target, roles: { migration: { name: "fixture_m", oid: "456" } } }));
+    writeFileSync(join(root, "resource.json"), JSON.stringify({ ...target, marker: "zzsh:regression-test:v1", roles: { migration: { name: "fixture_m", oid: "456" }, runtime: { name: "fixture_r", oid: "457" } } }));
     writeFileSync(join(root, "credentials.json"), JSON.stringify({ migration: { name: "fixture_m", oid: "456", password: "fixture-only" } }));
     writeFileSync(join(root, "bootstrap-secret"), "fixture-only"); writeFileSync(join(root, "password"), "fixture-only");
     const preload = join(root, "formal-host.cjs");
@@ -194,7 +194,7 @@ for (const stage of ["bosses", "staff", "partial-failure"]) test("formal admin H
 const stage=${JSON.stringify(stage)},callsFile=${JSON.stringify(callsFile)},calls=[],actors=stage==='staff'?[1,2].map(n=>({id:'new-admin-'+n,username:'zz0000'+n,is_boss:true,status:'ACTIVE',suspended:false,two_factor:true,password_change_required:false,game_scope_mode:'ALL_GAMES'})):[];
 const originalLoad=mod._load;net.Socket.prototype.connect=function(){throw Error('REAL_NETWORK_FORBIDDEN')};
 async function query(sql,params=[]){calls.push({kind:'sql',sql});if(sql.includes('pg_try_advisory_lock')||sql.includes('pg_advisory_unlock'))return {rows:[{ok:true}]};
-if(sql.includes('current_database() database'))return {rows:[{database:'zzsh_test_regression',oid:'123',marker:'zzsh:regression-test:v1',nonce:'fixture-nonce',role:'fixture_m',role_oid:'456'}]};
+if(sql.includes('current_database() database'))return {rows:[{database:'zzsh_test_regression',oid:'123',marker:'zzsh:regression-test:v1',nonce:'a1b2c3d4e5f60718293a4b5c',role:'fixture_m',role_oid:'456'}]};
 if(sql.includes('FROM zzsh_auth_admin."user"'))return {rows:actors};
 if(sql.includes('FROM zzsh_iam.admin_login_number_seq'))return {rows:[{last_value:stage==='staff'?'2':'1',is_called:stage==='staff'}]};
 if(sql.includes('FROM zzsh_supply.profile_avatar'))return {rows:[{n:actors.length}]};

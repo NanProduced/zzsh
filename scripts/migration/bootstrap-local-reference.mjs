@@ -2,6 +2,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { createRequire } from "node:module";
+import { advisoryLockSql, loadRegisteredTarget, maintenanceConnection, targetConnection } from "./local-target-registry.mjs";
 import { execFileSync } from "node:child_process";
 import { LocalSession, localOrigin, totp, validateProfile, writePrivate } from "../local-auth.mjs";
 const processStarted = performance.now(), processStartedAt = new Date().toISOString();
@@ -69,19 +70,25 @@ if (business) for (const table of tables.values()) {
 const expectedOid = option("--oid"), expectedNonce = option("--nonce"), credentialFile = option("--credentials");
 if (!expectedOid || !expectedNonce || !credentialFile)
     throw new Error("EXACT_TARGET_BINDING_REQUIRED");
-const registered = JSON.parse(readFileSync(join(dirname(resolve(credentialFile)), "resource.json")));
+const registered = loadRegisteredTarget(credentialFile);
 const credentials = JSON.parse(readFileSync(credentialFile));
-if (registered.database !== "zzsh_test_regression" || registered.oid !== expectedOid || registered.nonce !== expectedNonce || registered.pendingReset || credentials.migration?.name !== registered.roles?.migration?.name || credentials.migration?.oid !== registered.roles?.migration?.oid)
+if (registered.database !== "zzsh_test_regression" || registered.oid !== expectedOid || registered.nonce !== expectedNonce || registered.pendingReset || credentials.migration?.name !== registered.migrationRole || (registered.migrationRoleOid !== null && credentials.migration?.oid !== registered.migrationRoleOid))
     throw new Error("REGISTERED_RESOURCE_CHANGED");
 const receiptFile = resolve(option("--receipt") ?? "");
 if (!receiptFile.toLowerCase().startsWith("e:\\zzsh-local-state\\restricted\\") || existsSync(receiptFile))
     throw new Error("NEW_PRIVATE_RECEIPT_REQUIRED");
 const result = { status: "STARTED", kind: source.kind, manifestSha256: sha(bytes), database: registered.database, oid: expectedOid, nonce: expectedNonce, startedAt: processStartedAt, tables: [], expectedDifferences: [], pending: [], sourceIdsPreserved: true, sourceRawUnchanged: true, ...(business ? { maintenanceAdminId, attributionPolicy: "non-null source admin FKs rebound; original attribution remains in sealed source", mediaBytesVerified: false } : {}) };
-const cfg = { host: "127.0.0.1", port: 55432, connectionTimeoutMillis: 3000, statement_timeout: 15000, lock_timeout: 500 };
-const maintenance = new Client({ ...cfg, database: "postgres", user: "zzsh", password: readFileSync(process.env.DB_PASSWORD_FILE ?? "E:/zzsh/zzsh/apps/api/.secrets/postgres_password", "utf8").trim(), application_name: "core-reference-bootstrap-lock" });
-const pool = new Pool({ ...cfg, database: "zzsh_test_regression", user: credentials.migration.name, password: credentials.migration.password, max: 1, application_name: "core-reference-bootstrap" });
+const cfg = { connectionTimeoutMillis: 3000, statement_timeout: 15000, lock_timeout: 500 };
+const maintenance = new Client(maintenanceConnection(registered, { ...cfg, user: "zzsh", password: readFileSync(process.env.DB_PASSWORD_FILE ?? join(ROOT, "apps/api/.secrets/postgres_password"), "utf8").trim(), applicationName: "core-reference-bootstrap-lock" }));
+const pool = new Pool(targetConnection(registered, { ...cfg, user: credentials.migration.name, password: credentials.migration.password, max: 1, applicationName: "core-reference-bootstrap" }));
 let client, held = false, begun = false, commitSent = false;
 const STATIC = new Set(["zzsh_iam.admin_permission", "zzsh_iam.admin_role", "zzsh_iam.admin_role_permission", "zzsh_iam.approval_template"]);
+// A package captured in one environment carries that environment's provenance timestamps. A target's
+// own triggers rewrite created_at/updated_at on insert, so those two columns can never match across
+// environments. Only these tables may differ on those two columns and only while every other field
+// is byte-identical; the difference is recorded, never ignored silently.
+const CROSS_ENVIRONMENT_TIMESTAMP_TABLES = new Set(["zzsh_supply.price_version", "zzsh_supply.rule_release", "zzsh_supply.price_line"]);
+const timestampDifference = (table, result) => result.expectedDifferences.push({ table: table.key, fields: ["created_at", "updated_at", "sealed_at", "activated_at"], basis: "cross-environment import: target triggers own these provenance timestamps; every other field is byte-identical" });
 const versions = new Set(["zzsh_supply.price_version", "zzsh_supply.term_version", "zzsh_supply.agreement_version", "zzsh_supply.full_payout_terms_version"]);
 const fixedJson = (base, field, value) => `jsonb_set(${base},'{${field}}',${value},true)`;
 function stageExpression(table) { let body = "$1::jsonb"; if (table.key === "zzsh_supply.game") {
@@ -106,7 +113,7 @@ function stageExpression(table) { let body = "$1::jsonb"; if (table.key === "zzs
 async function keyCondition(table) { if (table.pk)
     return table.pk; table.pk = (await client.query(`SELECT a.attname name FROM pg_constraint k CROSS JOIN LATERAL unnest(k.conkey) WITH ORDINALITY keys(attnum,n) JOIN pg_attribute a ON a.attrelid=k.conrelid AND a.attnum=keys.attnum WHERE k.conrelid=$1::regclass AND k.contype='p' ORDER BY keys.n`, [table.sql])).rows.map(r => r.name); if (!table.pk.length)
     throw new Error("REFERENCE_PRIMARY_KEY_REQUIRED:" + table.key); return table.pk; }
-async function existing(table, row) { const pk = await keyCondition(table); return (await client.query(`SELECT to_jsonb(t)=$1::jsonb AS exact,to_jsonb(t)-ARRAY['created_at','updated_at']::text[]=($1::jsonb)-ARRAY['created_at','updated_at']::text[] AS semantic,(to_jsonb(t)-'updated_at')=($1::jsonb-'updated_at') AS restore_time_only FROM ${table.sql} t CROSS JOIN jsonb_populate_record(NULL::${table.sql},$1::jsonb) s WHERE ${pk.map(k => `t.${q(k)} IS NOT DISTINCT FROM s.${q(k)}`).join(" AND ")}`, [row])).rows[0]; }
+async function existing(table, row) { const pk = await keyCondition(table); return (await client.query(`SELECT to_jsonb(t)=$1::jsonb AS exact,to_jsonb(t)-ARRAY['created_at','updated_at']::text[]=($1::jsonb)-ARRAY['created_at','updated_at']::text[] AS semantic,(to_jsonb(t)-'updated_at')=($1::jsonb-'updated_at') AS restore_time_only,(to_jsonb(t)-ARRAY['created_at','updated_at','sealed_at','activated_at']::text[])=(($1::jsonb)-ARRAY['created_at','updated_at','sealed_at','activated_at']::text[]) AS version_time_only FROM ${table.sql} t CROSS JOIN jsonb_populate_record(NULL::${table.sql},$1::jsonb) s WHERE ${pk.map(k => `t.${q(k)} IS NOT DISTINCT FROM s.${q(k)}`).join(" AND ")}`, [row])).rows[0]; }
 async function insertTable(table) { const fields = table.columns.filter(c => !c.generated).map(c => c.name); for (const row of table.rows) {
     let found = await existing(table, row);
     if (!found && table.key === "zzsh_iam.approval_template") {
@@ -130,6 +137,10 @@ async function insertTable(table) { const fields = table.columns.filter(c => !c.
             result.expectedDifferences.push({ table: table.key, fields: ["created_at", "updated_at"], basis: "baseline seed provenance timestamps retained; all other fields equal" });
             continue;
         }
+        if (CROSS_ENVIRONMENT_TIMESTAMP_TABLES.has(table.key) && found.version_time_only) {
+            timestampDifference(table, result);
+            continue;
+        }
         throw new Error("REFERENCE_EXISTING_ROW_DIFFERS:" + table.key);
     }
     await client.query(`INSERT INTO ${table.sql} (${fields.map(q).join(",")}) SELECT ${fields.map(c => `s.${q(c)}`).join(",")} FROM jsonb_populate_record(NULL::${table.sql},${stageExpression(table)}) s`, [row]);
@@ -150,7 +161,7 @@ async function sealVersions() { for (const key of versions) {
 } }
 try {
     await maintenance.connect();
-    held = (await maintenance.query("SELECT pg_try_advisory_lock(806006::bigint) ok")).rows[0].ok;
+    held = (await maintenance.query(advisoryLockSql(registered, "try"))).rows[0].ok;
     if (!held)
         throw new Error("REGRESSION_RESOURCE_BUSY");
     client = await pool.connect();
@@ -226,8 +237,8 @@ try {
             const found = await existing(table, row);
             if (found?.exact)
                 exact++;
-            else if (STATIC.has(table.key) && found?.semantic || table.key==="zzsh_supply.skin"&&found?.restore_time_only) {
-                semantic++;if(table.key==="zzsh_supply.skin")result.expectedDifferences.push({table:table.key,fields:["updated_at"],basis:"legal PENDING→derived VERIFIED restore; database touch timestamp, source timestamp remains in sealed source file"});
+        else if (STATIC.has(table.key) && found?.semantic || CROSS_ENVIRONMENT_TIMESTAMP_TABLES.has(table.key) && found?.version_time_only || table.key==="zzsh_supply.skin"&&found?.restore_time_only) {
+            semantic++;if(table.key==="zzsh_supply.skin")result.expectedDifferences.push({table:table.key,fields:["updated_at"],basis:"legal PENDING→derived VERIFIED restore; database touch timestamp, source timestamp remains in sealed source file"});else if(CROSS_ENVIRONMENT_TIMESTAMP_TABLES.has(table.key))timestampDifference(table,result);
             }
             else
                 throw new Error("REFERENCE_FINAL_ROW_DIFFERS:" + table.key);
@@ -264,7 +275,7 @@ finally {
     result.poolClosed = true;
     if (held)
         try {
-            result.unlock = (await maintenance.query("SELECT pg_advisory_unlock(806006::bigint) ok")).rows[0].ok;
+            result.unlock = (await maintenance.query(advisoryLockSql(registered, "unlock"))).rows[0].ok;
         }
         catch {
             result.unlock = false;
@@ -385,17 +396,17 @@ async function initializeFormalAdmins() {
     if (["3100", "3101", "3102", "4220", "4221", "4222"].includes(new URL(apiOrigin).port)) throw new Error("ISOLATED_INITIALIZATION_API_REQUIRED");
     const out = resolve(output), restricted = realpathSync("E:/zzsh-local-state/restricted");
     if (dirname(out).toLowerCase() !== restricted.toLowerCase() || !/^data-first-bootstrap-[a-z0-9-]+$/i.test(basename(out)) || existsSync(out)) throw new Error("NEW_RESTRICTED_BOOTSTRAP_DIRECTORY_REQUIRED");
-    const registered = JSON.parse(readFileSync(join(dirname(resolve(credentialFile)), "resource.json"))), credentials = JSON.parse(readFileSync(credentialFile));
-    if (registered.database !== input.target.database || registered.oid !== input.target.oid || registered.nonce !== input.target.nonce || registered.pendingReset || credentials.migration?.name !== registered.roles?.migration?.name || credentials.migration?.oid !== registered.roles?.migration?.oid) throw new Error("REGISTERED_RESOURCE_CHANGED");
+    const registered = loadRegisteredTarget(credentialFile), credentials = JSON.parse(readFileSync(credentialFile));
+    if (registered.database !== input.target.database || registered.oid !== input.target.oid || registered.nonce !== input.target.nonce || registered.pendingReset || credentials.migration?.name !== registered.migrationRole || (registered.migrationRoleOid !== null && credentials.migration?.oid !== registered.migrationRoleOid)) throw new Error("REGISTERED_RESOURCE_CHANGED");
     const profile = stage === "bosses" ? { version: 1, localTest: true, resource: input.resource, actors: {} } : validateProfile(JSON.parse(readFileSync(input.bossProfileFile)));
     if (stage === "staff" && (profile.resource !== input.resource || Object.keys(profile.actors).sort().join() !== "boss-one,boss-two" || Object.values(profile.actors).some(actor => actor.realm !== "admin" || actor.origin !== adminOrigin))) throw new Error("EXACT_NEW_BOSS_PROFILE_REQUIRED");
     const receipt = { status: "STARTED", stage, target: input.target, serverBindingSha256: sha(bindingBytes), startedAt: processStartedAt, steps: [], credentialsOutput: join(out, "profile.json"), credentialsPrinted: false, oldAdminRowsImported: false, imProvisionerConfigured: false };
     const responses = [];
     writePrivate(join(out, "receipt.json"), receipt);
     writePrivate(join(out, "profile.json"), profile);
-    const cfg = { host: "127.0.0.1", port: 55432, connectionTimeoutMillis: 3000, statement_timeout: 15000, lock_timeout: 500 };
-    const maintenance = new Client({ ...cfg, database: "postgres", user: "zzsh", password: readFileSync(process.env.DB_PASSWORD_FILE ?? "E:/zzsh/zzsh/apps/api/.secrets/postgres_password", "utf8").trim(), application_name: "formal-admin-initialization-lock" });
-    const db = new Client({ ...cfg, database: input.target.database, user: credentials.migration.name, password: credentials.migration.password, application_name: "formal-admin-initialization-readonly" });
+    const cfg = { connectionTimeoutMillis: 3000, statement_timeout: 15000, lock_timeout: 500 };
+    const maintenance = new Client(maintenanceConnection(registered, { ...cfg, user: "zzsh", password: readFileSync(process.env.DB_PASSWORD_FILE ?? join(ROOT, "apps/api/.secrets/postgres_password"), "utf8").trim(), applicationName: "formal-admin-initialization-lock" }));
+    const db = new Client(targetConnection(registered, { ...cfg, user: credentials.migration.name, password: credentials.migration.password, applicationName: "formal-admin-initialization-readonly" }));
     let held = false, begun = false, activeStep;
     const save = () => { writePrivate(join(out, "profile.json"), profile); writePrivate(join(out, "receipt.json"), receipt); };
     const call = async (session, path, body) => {
@@ -436,7 +447,7 @@ async function initializeFormalAdmins() {
     }
     try {
         await maintenance.connect();
-        held = (await maintenance.query("SELECT pg_try_advisory_lock(806006::bigint) ok")).rows[0].ok;
+        held = (await maintenance.query(advisoryLockSql(registered, "try"))).rows[0].ok;
         if (!held) throw new Error("REGRESSION_RESOURCE_BUSY");
         await db.connect();
         await db.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY"); begun = true;
@@ -495,7 +506,7 @@ async function initializeFormalAdmins() {
     } finally {
         if (begun) { await db.query("ROLLBACK"); receipt.preflightRollbackAck = true; }
         await db.end(); receipt.preflightClientClosed = true;
-        if (held) receipt.unlock = (await maintenance.query("SELECT pg_advisory_unlock(806006::bigint) ok")).rows[0].ok;
+        if (held) receipt.unlock = (await maintenance.query(advisoryLockSql(registered, "unlock"))).rows[0].ok;
         await maintenance.end(); receipt.maintenanceClosed = true;
         receipt.finishedAt = new Date().toISOString(); receipt.wallMs = performance.now() - processStarted; save();
     }
