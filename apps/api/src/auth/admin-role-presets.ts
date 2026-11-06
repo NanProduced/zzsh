@@ -49,6 +49,13 @@ export const OPS_PRESET_0118_ADDITIONS = [
   P.userIdentitySensitiveRead,
 ] as const;
 
+/** 运营直接管理分销主体与等级，不附带财务或全局关系读取权限。 */
+export const OPS_PRESET_DISTRIBUTION_MANAGEMENT_ADDITIONS = [
+  P.distributionParticipantRead,
+  P.distributionParticipantManage,
+  P.distributionLevelManage,
+] as const;
+
 export const OPS_PRESET_PERMISSIONS = [
   ...SUPPORT_PRESET_PERMISSIONS,
   // 订单
@@ -90,6 +97,7 @@ export const OPS_PRESET_PERMISSIONS = [
   P.membershipGrowthBackfill,
   P.distributionPolicyRead,
   P.distributionPolicyManage,
+  ...OPS_PRESET_DISTRIBUTION_MANAGEMENT_ADDITIONS,
   // 资金（财务并入运营）
   P.financeRead,
   P.financeDocumentRead,

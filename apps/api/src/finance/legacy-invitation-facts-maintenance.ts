@@ -103,7 +103,7 @@ async function identityProofs(c:PoolClient,input:LegacyInvitationFactsInput,lock
 }
 async function immutableRows(c:PoolClient,input:LegacyInvitationFactsInput,subjects:LegacyInvitationFactsInput['subjects'],includeAudit=false){
  const ids=subjects.map(s=>s.userId),participants=(await c.query('/* invitation-facts participants */ SELECT user_id,source_type,source_ref,source_digest,revision::text,invitees_knowledge FROM zzsh_order.distribution_participant WHERE user_id=ANY($1::text[])',[ids])).rows;
- const codes=(await c.query('/* invitation-facts codes */ SELECT id,user_id,display_code,match_code,source_type,source_system,source_entity,source_id,source_digest FROM zzsh_order.distribution_invite_code WHERE user_id=ANY($1::text[])',[ids])).rows;
+ const codes=(await c.query("/* invitation-facts codes */ SELECT id,user_id,display_code,match_code,source_type,source_system,source_entity,source_id,source_digest FROM zzsh_order.distribution_invite_code WHERE user_id=ANY($1::text[]) AND source_type='LEGACY_MYSQL'",[ids])).rows;
  const edges=(await c.query("/* invitation-facts original edges */ SELECT id,type,child_user_id,parent_user_id,policy_version_id,source_type,source_ref,source_digest FROM zzsh_order.invitation_relation WHERE child_user_id=ANY($1::text[]) AND source_type='LEGACY_MYSQL'",[ids])).rows;
  const pm=new Map(participants.map(r=>[r.user_id,r])),cm=new Map(codes.map(r=>[r.user_id,r])),em=new Map(edges.map(r=>[r.id,r]));let wantedEdges=0;
  if(participants.length!==subjects.length||codes.length!==subjects.length)throw conflict('Original invitation participant/code source is missing');

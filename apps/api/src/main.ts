@@ -12,6 +12,7 @@ import {
 import { assertBusinessRuntimeIdentity, createBusinessPool } from "./database/business";
 import { loadAuthRuntimeConfig } from "./auth/auth-runtime";
 import { loadNativeDistributionRuntime } from "./finance/distribution-native-runtime";
+import { createProvisionedDistributionManagementResource } from "./finance/distribution-management-resource";
 import { createNativeWalletOriginResource, createProvisionedNativeWalletOriginResource } from "./finance/native-wallet-origin";
 import { loadDistributionDueRuntime } from "./finance/distribution-due.module";
 import { loadOrderSweepRuntime } from "./order/order-sweep.module";
@@ -23,6 +24,8 @@ export async function bootstrap() {
   const joinpayWithdrawal = loadJoinpayPayoutRuntime({ provider: config.provider, database: config.database, authEnabled: authEnabledValue === "true" }, withdrawalBankBinding);
   const joinpayCollection = loadJoinpayCollectionRuntime({ provider: config.provider, database: config.database, authEnabled: authEnabledValue === "true" });
   const distributionNative = loadNativeDistributionRuntime({ config, authEnabled: authEnabledValue === "true", admission: joinpayCollection?.admission });
+  const distributionManagement = ["dev","ecs-test","production"].includes(config.profile) && !/^zzsh_(?:test|provider_test)(?:_|$)/.test(config.database.name)
+    ? createProvisionedDistributionManagementResource(config) : undefined;
   const joinpayRefund = loadJoinpayRefundRuntime({ provider: config.provider, database: config.database, authEnabled: authEnabledValue === "true" });
   const joinpayAccounts = loadJoinpayAccountRuntime({ provider: config.provider, database: config.database, authEnabled: authEnabledValue === "true" });
   const readinessMode = process.env.READINESS_MODE?.trim() || "real";
@@ -66,6 +69,7 @@ export async function bootstrap() {
               ...(joinpayAccounts ? { joinpayAccountRead: joinpayAccounts.read, joinpayAccountObservation: joinpayAccounts.observation } : {}),
               directoryReadPool,
               ...(distributionNative ? distributionNative.auth : {}),
+              ...(distributionManagement ? { distributionManagement } : {}),
               ...(config.orderImSdkRouteConfig ? { orderImSdkRouteConfig: config.orderImSdkRouteConfig } : {}),
               ...(config.yunxin.enabled && config.yunxin.appKey && config.yunxin.appSecret
                 ? {

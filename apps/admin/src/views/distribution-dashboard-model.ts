@@ -23,7 +23,9 @@ export type DashboardOverview = {
   recent: DashboardEarning[];
   reasonCodes: string[];
 };
-export type DashboardParticipant = { userId: string; name: string | null; eligibility: string; frozen: boolean; levelCode: string | null; levelName?: string | null; inviter: string; leader: string; sourceType: string; revision: string; leaderChildren: number | null; inviterChildren: number | null; mappedLeaderChildren?: number; mappedInviterChildren?: number; contributorChildren?: number | null; mappedContributorChildren?: number; settledCents: string | null; pendingCents: string | null; recoveryCents: string | null; legacyQualification?: { eligibility: string; commissionFrozen: boolean | null; levelId: string | null } | null; recordCount?: string | null; mappedRecordCount?: string; earningsCoverage?: string; needsReviewCount?: string | null; needsReviewCents?: string | null; earningsReasonCodes?: string[] };
+export type DashboardOverviewCore = Pick<DashboardOverview, 'asOf' | 'scope' | 'current' | 'flow' | 'trend' | 'participants' | 'recordSummary' | 'recent'> & {section:'CORE'};
+export type DashboardOverviewRanking = { section:'EARNINGS_RANKING' | 'INVITE_RANKING'; asOf:string; ranking:{items:DashboardRanking[];knowledge:'KNOWN'|'PARTIAL'|'UNKNOWN';reasonCodes:string[]} };
+export type DashboardParticipant = { userId: string; name: string | null; eligibility: string; frozen: boolean; levelCode: string | null; levelName?: string | null; inviter: string; leader: string; sourceType: string; revision: string; leaderChildren: number | null; inviterChildren: number | null; mappedLeaderChildren?: number; mappedInviterChildren?: number; contributorChildren?: number | null; mappedContributorChildren?: number; settledCents: string | null; pendingCents: string | null; recoveryCents: string | null; legacyQualification?: { eligibility: string; commissionFrozen: boolean | null; levelId: string | null } | null; legacyQualificationKnowledge?:'NOT_LOADED'; recordCount?: string | null; mappedRecordCount?: string; earningsCoverage?: string; needsReviewCount?: string | null; needsReviewCents?: string | null; earningsReasonCodes?: string[] };
 export type DashboardParticipantDetail = { participant: DashboardParticipant; downline?: { knowledge: 'KNOWN' | 'PARTIAL'; leader?: number; inviter?: number; contributors?: number; contributorKnowledge?: 'KNOWN' | 'PARTIAL' }; relations: { type: string; parentUserId: string | null; parentName: string | null; sourceType: string | null; policyVersion: string | null }[] };
 
 const dateShift = (date: string, days: number) => new Date(Date.parse(`${date}T00:00:00Z`) + days * 86400_000).toISOString().slice(0, 10);
@@ -32,7 +34,7 @@ export function defaultDashboardFilters(): DashboardFilters {
   return { from: dateShift(to, -29), to, source: 'ALL', state: 'ALL', role: 'ALL', q: '', page: 1, pageSize: 20, rankingBasis: 'CURRENT_SETTLED_STOCK', rankingLimit: 10, sort: 'recordCount', order: 'desc' };
 }
 export function dashboardContextIdentity(snapshot: Extract<SessionSnapshot, { authenticated: true }>) {
-  return JSON.stringify([snapshot.adminUserId, snapshot.session.id, snapshot.session.locked, snapshot.security.status, snapshot.security.passwordChangeRequired, snapshot.security.isBoss, [...snapshot.permissions].sort()]);
+  return JSON.stringify([snapshot.adminUserId, snapshot.session.id, snapshot.session.locked, snapshot.security.status, snapshot.security.passwordChangeRequired, snapshot.security.isBoss, [...snapshot.permissions].sort(), snapshot.gameScope?.mode??null, [...(snapshot.gameScope?.gameIds??[])].sort()]);
 }
 export function dashboardFiltersFromQuery(query: Record<string, string> = {}): DashboardFilters {
   const defaults = defaultDashboardFilters();
@@ -81,6 +83,7 @@ export function participantEligibilityLabel(item: DashboardParticipant) {
 }
 export function participantLevelLabel(item: DashboardParticipant) {
   if (item.levelName) return item.levelName;
+  if (item.sourceType==='LEGACY_MYSQL'&&item.legacyQualificationKnowledge==='NOT_LOADED'&&!item.levelCode) return '查看详情';
   return item.legacyQualification?.levelId ? `原分销档位 ID ${item.legacyQualification.levelId}` : item.levelCode ?? (item.sourceType === 'LEGACY_MYSQL' ? '原档位待核' : '无档位记录');
 }
 export function participantChildrenLabel(total: number | null, mapped?: number, partialLabel = '已接入') {
@@ -92,8 +95,10 @@ async function read<T>(path: string, query: URLSearchParams, signal?: AbortSigna
   catch (error) { if (error instanceof AdminApiError) throw error; throw new AdminApiError(0, 'NETWORK_ERROR'); }
 }
 export const readDashboardOverview = (filters: DashboardFilters, signal?: AbortSignal) => read<DashboardOverview>('overview', dashboardQuery(filters), signal);
+export const readDashboardOverviewCore = (filters: DashboardFilters, signal?: AbortSignal) => read<DashboardOverviewCore>('overview', dashboardQuery(filters,{section:'CORE'}), signal);
+export const readDashboardOverviewRanking = (filters: DashboardFilters, section:DashboardOverviewRanking['section'], signal?: AbortSignal) => read<DashboardOverviewRanking>('overview', dashboardQuery(filters,{section}), signal);
 export const readDashboardEarnings = (filters: DashboardFilters, snapshot: string | null, signal?: AbortSignal) => read<{ items: DashboardEarning[]; total: string; page: number; pageSize: number; hasMore: boolean; snapshot: string | null; asOf: string; snapshotVersion: string; scope: DashboardScope }>('earnings', dashboardQuery(filters, snapshot ? { snapshot } : {}), signal);
-export const readDashboardParticipants = (filters: DashboardFilters, snapshot: string | null, signal?: AbortSignal) => read<{ items: DashboardParticipant[]; scope: DashboardScope; total: string; page: number; pageSize: number; hasMore: boolean; snapshot: string | null; asOf: string; snapshotVersion: string }>('participants', dashboardQuery(filters, snapshot ? { snapshot } : {}), signal);
+export const readDashboardParticipants = (filters: DashboardFilters, snapshot: string | null, signal?: AbortSignal) => read<{ items: DashboardParticipant[]; scope: DashboardScope; total: string; page: number; pageSize: number; hasMore: boolean; snapshot: string | null; asOf: string; snapshotVersion: string }>('participants', dashboardQuery(filters, { projection:'DISPLAY',...(snapshot ? { snapshot } : {}) }), signal);
 export const readDashboardParticipant = (userId: string, signal?: AbortSignal) => read<DashboardParticipantDetail>('participants/' + encodeURIComponent(userId), new URLSearchParams(), signal);
 export type DashboardDownlineType = 'COMMISSION_CONTRIBUTOR' | 'INVITER';
 export type DashboardDownline = { subjectId: string; type: DashboardDownlineType; knowledge: 'KNOWN' | 'PARTIAL'; total: string; page: number; pageSize: number; items: { userId: string; name: string | null; sourceType: string | null; boundAt: string | null; participant: { eligibility: string; frozen: boolean; levelCode: string | null; levelName: string | null } | null; children: number | null; mappedChildren?: number }[] };

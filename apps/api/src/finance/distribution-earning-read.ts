@@ -9,7 +9,7 @@ import {exactCents,sourceYuanToCents,encodeFinanceCursor,decodeFinanceCursor,OPE
 import {hasProvedNativeHistoryAbsence,readObservationCoverage} from './personal-finance-coverage';
 import {readLegacyCommissionFinance,readLegacyCommissionFinanceVersion,readLegacyCommissionResponsibility,readLegacyCommissionResponsibilityVersion,type LegacyCommissionFinance,type LegacyCommissionResponsibility} from './legacy-duty-finance-store';
 import {readOriginalPaymentDistributionBasis,type PaymentDistributionBasis} from './distribution-payment-basis';
-import {distributionPolicyRates,referralPercent,validateDistributionPolicy} from './distribution-policy';
+import {distributionPolicyRates,referralPercent,validateDistributionPolicy,usesLegacyRentalDistributionBase} from './distribution-policy';
 import {prepareAccrualFromFrozenPayment} from './distribution-accrual';
 
 // Legacy task and rental IDs share a numeric space; only explicit rental provenance may join an order.
@@ -76,9 +76,10 @@ export async function readEarningCalculation(c:PoolClient,actor:UserContext,row:
   if(f.beneficiary_user_id!==actor.userId||`native:${f.id}`!==row.id||f.order_id!==row.order_id||f.beneficiary_role!==row.role||exactCents(f.amount_cents)!==exactCents(row.source_amount)
    )throw unavailable();
   const {policyVersion,level,percent,rateMode,policy}=verifiedFrozenCalculation(f);
-  if((rateMode==='UNIFORM'||policy.schema==='distribution-policy.v3')&&calculationVersion!==2)return{knowledge:'UNKNOWN',reason:policy.schema==='distribution-policy.v3'?'LEGACY_RENTAL_CALCULATION_REQUIRES_VERSION_2':'UNIFORM_CALCULATION_REQUIRES_VERSION_2'};
-  return{knowledge:'KNOWN',policyVersion,beneficiaryLevelCode:level.code,...(policy.schema==='distribution-policy.v3'&&level.code?{beneficiaryLevelName:policy.legacySource.levelNames[level.code]}:{}),...(rateMode?{rateMode}:{}),percent:percent.percent,
-   basis:policy.schema==='distribution-policy.v3'?'LEGACY_RENTAL_CAPTURE_MINUS_OWNER_AND_REFUND':'FINAL_PLATFORM_CONTRIBUTION_MINUS_COMPENSATION_FEE',baseDisclosure:'INTERNAL_SETTLEMENT_ONLY',rounding:'HALF_UP_CENT',
+  if((rateMode==='UNIFORM'||usesLegacyRentalDistributionBase(policy))&&calculationVersion!==2)return{knowledge:'UNKNOWN',reason:usesLegacyRentalDistributionBase(policy)?'LEGACY_RENTAL_CALCULATION_REQUIRES_VERSION_2':'UNIFORM_CALCULATION_REQUIRES_VERSION_2'};
+  const levelName=level.code?(policy.schema==='distribution-policy.v3'?policy.legacySource.levelNames[level.code]:policy.schema==='distribution-policy.v4'?policy.levelNames[level.code]:undefined):undefined;
+  return{knowledge:'KNOWN',policyVersion,beneficiaryLevelCode:level.code,...(levelName?{beneficiaryLevelName:levelName}:{}),...(rateMode?{rateMode}:{}),percent:percent.percent,
+   basis:usesLegacyRentalDistributionBase(policy)?'LEGACY_RENTAL_CAPTURE_MINUS_OWNER_AND_REFUND':'FINAL_PLATFORM_CONTRIBUTION_MINUS_COMPENSATION_FEE',baseDisclosure:'INTERNAL_SETTLEMENT_ONLY',rounding:'HALF_UP_CENT',
    cap:'COMBINED_ROLES_NOT_ABOVE_BASE',scope:policy.scope,orderNumber:typeof f.order_number==='string'&&f.order_number.length<=80?f.order_number:null};
  }catch{return{knowledge:'UNKNOWN',reason:'FROZEN_CALCULATION_NOT_VERIFIED'};}
 }
@@ -119,7 +120,7 @@ export async function readAdminEarningCalculations(c:PoolClient,earningRootIds:s
    if(items.length!==1)throw unavailable();const item=items[0]!;
    if(item.amountCents!==exactCents(f.amount_cents)||item.economicKey!==f.economic_key||seed.economicKey!==item.economicKey||seed.dueAt!==item.dueAt)throw unavailable();
    result.set(f.id,{knowledge:'KNOWN',policyVersion:basis.policyVersion,levelCode:level.code,...(rateMode?{rateMode}:{}),percent:percent.percent,baseCents:allocation.baseCents,
-    formula:basis.policyConfig?.schema==='distribution-policy.v3'?'LEGACY_RENTAL_CAPTURE_MINUS_OWNER_AND_REFUND':'FINAL_PLATFORM_CONTRIBUTION_MINUS_COMPENSATION_FEE',reasonCodes:[]});
+    formula:usesLegacyRentalDistributionBase(basis.policyConfig)?'LEGACY_RENTAL_CAPTURE_MINUS_OWNER_AND_REFUND':'FINAL_PLATFORM_CONTRIBUTION_MINUS_COMPENSATION_FEE',reasonCodes:[]});
   }catch{result.set(f.id,unknownCalculation('FROZEN_CALCULATION_NOT_VERIFIED'));}
  }
  return result;

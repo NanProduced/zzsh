@@ -81,6 +81,7 @@ const addDays = (value: string, days: number) => {
 };
 const rangeStart = (from: string) => `${from}T00:00:00+08:00`;
 const rangeEnd = (to: string) => `${addDays(to, 1)}T00:00:00+08:00`;
+export const distributionContentDigestSql = (value:string) => `CASE WHEN ${value} IS NULL THEN NULL ELSE encode(sha256(convert_to((${value})::text,'UTF8')),'hex') END`;
 
 export function parseDashboardFilters(query: URLSearchParams, now = new Date()): DashboardFilters {
   const today = day(now), from = query.get("from") ?? addDays(today, -29), to = query.get("to") ?? today;
@@ -140,7 +141,7 @@ function scopeSql(alias: string, values: unknown[], context: DashboardAccess) {
   return gameScopeSql(`${alias}.game_id`, `$${values.length - 1}`, `$${values.length}`);
 }
 
-export async function dashboardVersion(c: PoolClient, context: DashboardAccess, legacyAvailable: boolean, dutiesAvailable = false, coverageAvailable = false, beneficiary?: string, nativeOriginAvailable = false) {
+export async function dashboardVersion(c: PoolClient, context: DashboardAccess, legacyAvailable: boolean, dutiesAvailable = false, coverageAvailable = false, beneficiary?: string, nativeOriginAvailable = false, participantView = false) {
   const values: unknown[] = [], nativeScope = scopeSql("o", values, context);
   const beneficiaryParameter = beneficiary ? `$${values.push(beneficiary)}::text` : null;
   const subject = (column: string) => beneficiaryParameter ? ` AND ${column}=${beneficiaryParameter}` : "";
@@ -153,16 +154,16 @@ export async function dashboardVersion(c: PoolClient, context: DashboardAccess, 
     FROM zzsh_order.rental_referral_earning e JOIN zzsh_order.rental_order o ON o.id=e.order_id
     LEFT JOIN zzsh_auth_user."user" u ON u.id=e.beneficiary_user_id WHERE ${nativeScope}${subject("e.beneficiary_user_id")}
   ), visible_events AS (
-    SELECT t.id,jsonb_build_array(t.id,t.action,t.created_at,f.id,f.kind,f.created_at)::text payload
+    ${participantView ? 'SELECT NULL::text id,NULL::text payload WHERE FALSE' : `SELECT t.id,jsonb_build_array(t.id,t.action,t.created_at,f.id,f.kind,f.created_at)::text payload
     FROM zzsh_order.rental_referral_transition t JOIN visible_earnings e ON e.id=t.earning_id
-    JOIN zzsh_order.finance_event f ON f.id=t.finance_event_id AND f.economic_root_id=e.id
+    JOIN zzsh_order.finance_event f ON f.id=t.finance_event_id AND f.economic_root_id=e.id`}
   ), visible_legacy AS (
     ${legacyAvailable ? `SELECT p.id,p.user_id,p.source_system,p.source_id,p.source_digest,p.source_canonical,p.snapshot,lo.id order_id,jsonb_build_array(p.id,p.user_id,p.source_system,p.snapshot->>'sourceOrderType',p.snapshot->>'orderId',p.snapshot->>'amount',p.snapshot->>'sourceStatus',p.snapshot->>'level',p.source_event_at,p.imported_at,lo.id,lo.original_order_no,lo.game_id,lo.renter_user_id,lo.owner_user_id,${name})::text payload
       FROM zzsh_order.personal_finance_observation p LEFT JOIN zzsh_order.legacy_order_read_snapshot lo ON lo.legacy_id=p.snapshot->>'orderId' AND lo.source_system=p.source_system AND lo.source_entity='la_order' AND (${legacyRentalDistributionPredicate('p')} )
       LEFT JOIN zzsh_auth_user."user" u ON u.id=p.user_id WHERE p.source_kind='HISTORICAL_DISTRIBUTION' AND ${nativeScope.replaceAll('o.game_id','lo.game_id')}${subject('p.user_id')}` : "SELECT NULL::text id,NULL::text payload WHERE FALSE"}
   ), visible_legacy_logs AS MATERIALIZED (
-    ${legacyAvailable ? `SELECT l.source_system,l.user_id,l.snapshot->>'referenceId' source_id,
-        encode(sha256(convert_to(string_agg(jsonb_build_array(l.source_digest,l.source_canonical,l.snapshot)::text,',' ORDER BY l.id COLLATE "C")
+    ${legacyAvailable && !participantView ? `SELECT l.source_system,l.user_id,l.snapshot->>'referenceId' source_id,
+        encode(sha256(convert_to(string_agg(jsonb_build_array(l.source_digest,${distributionContentDigestSql('l.source_canonical')},${distributionContentDigestSql('l.snapshot')})::text,',' ORDER BY l.id COLLATE "C")
           FILTER(WHERE l.snapshot->>'legacyChangeType'='1001' AND l.snapshot->>'action'='1'),'UTF8')),'hex') version
       FROM zzsh_order.personal_finance_observation l
       WHERE l.source_kind='HISTORICAL_EARNINGS_LOG' AND l.source_entity='la_log_earnings'
@@ -170,18 +171,26 @@ export async function dashboardVersion(c: PoolClient, context: DashboardAccess, 
       GROUP BY l.source_system,l.user_id,l.snapshot->>'referenceId'`
       : "SELECT NULL::text source_system,NULL::text user_id,NULL::text source_id,NULL::text version WHERE FALSE"}
   ), visible_legacy_duties AS (
-    ${legacyAvailable && dutiesAvailable ? `SELECT p.id,string_agg(jsonb_build_array(d.id,d.revision,d.status,d.amount_cents::text,d.settled_by,d.maturity_at)::text,',' ORDER BY d.id COLLATE "C") version
+    ${legacyAvailable && dutiesAvailable ? `SELECT p.id,string_agg(jsonb_build_array(to_jsonb(d),
+      EXISTS(SELECT 1 FROM zzsh_order.legacy_order_duty_admission a WHERE a.id=d.admission_id AND a.duty_id=d.id AND a.order_id=d.order_id
+        AND a.source_record_id=d.source_record_id AND a.counterparty_user_id=d.counterparty_user_id AND a.amount_cents=d.amount_cents AND a.maturity_at=d.maturity_at),
+      EXISTS(SELECT 1 FROM zzsh_order.legacy_continuation_version v WHERE v.id=d.continuation_version_id AND v.order_id=d.order_id AND v.command='CONFIRM'),
+      EXISTS(SELECT 1 FROM zzsh_order.legacy_order_duty_revision r JOIN zzsh_order.legacy_continuation_version v ON v.id=r.source_command_version_id
+        WHERE r.duty_id=d.id AND r.reason='CONFIRM_FINAL_AMOUNT' AND v.order_id=d.order_id AND v.command='CONFIRM'
+          AND r.after_values->>'amountCents'=d.amount_cents::text AND (r.after_values->>'maturityAt')::timestamptz=d.maturity_at))::text,',' ORDER BY d.id COLLATE "C") version
       FROM visible_legacy p JOIN zzsh_order.legacy_order_duty d ON d.counterparty_user_id=p.user_id AND d.source_record_id=p.source_id
         AND d.order_id=p.order_id WHERE d.kind='COMMISSION' GROUP BY p.id`
       : "SELECT NULL::text id,NULL::text version WHERE FALSE"}
   ), visible_legacy_effects AS (
-    ${legacyAvailable ? `SELECT p.id,jsonb_build_array(p.source_digest,p.source_canonical,p.snapshot,l.version,d.version)::text payload
+    ${legacyAvailable ? `SELECT p.id,jsonb_build_array(p.source_digest,${distributionContentDigestSql('p.source_canonical')},${distributionContentDigestSql('p.snapshot')},l.version,d.version)::text payload
       FROM visible_legacy p LEFT JOIN visible_legacy_logs l ON l.source_system=p.source_system AND l.user_id=p.user_id AND l.source_id=p.source_id
       LEFT JOIN visible_legacy_duties d ON d.id=p.id`
       : "SELECT NULL::text id,NULL::text payload WHERE FALSE"}
   ), visible_participants AS (
-    ${context.scope.network === "AVAILABLE" ? `SELECT p.user_id id,jsonb_build_array(p.user_id,p.revision,p.eligibility,p.commission_frozen,p.level_code,p.policy_version_id,p.inviter_knowledge,p.leader_knowledge,p.invitees_knowledge,p.source_type,p.source_digest,${name})::text payload
-      FROM zzsh_order.distribution_participant p LEFT JOIN zzsh_auth_user."user" u ON u.id=p.user_id WHERE TRUE${subject("p.user_id")}` : "SELECT NULL::text id,NULL::text payload WHERE FALSE"}
+    ${context.scope.network === "AVAILABLE" ? `SELECT p.user_id id,jsonb_build_array(p.user_id,p.revision,p.eligibility,p.commission_frozen,p.level_code,p.policy_version_id,p.inviter_knowledge,p.leader_knowledge,p.invitees_knowledge,p.source_type,p.source_digest,ph.current_version_id,${name})::text payload
+      FROM zzsh_order.distribution_participant p LEFT JOIN zzsh_auth_user."user" u ON u.id=p.user_id
+      LEFT JOIN zzsh_order.distribution_policy_version pv ON pv.id=p.policy_version_id
+      LEFT JOIN zzsh_order.distribution_policy_head ph ON ph.scope=pv.scope WHERE TRUE${subject("p.user_id")}` : "SELECT NULL::text id,NULL::text payload WHERE FALSE"}
   ), visible_relations AS (
     ${context.scope.network === "AVAILABLE" ? `SELECT r.id,jsonb_build_array(r.id,r.type,r.parent_user_id,r.child_user_id,r.source_type,r.policy_version_id)::text payload FROM zzsh_order.invitation_relation r${beneficiaryParameter ? ` WHERE r.parent_user_id=${beneficiaryParameter} OR r.child_user_id=${beneficiaryParameter}` : ""}` : "SELECT NULL::text id,NULL::text payload WHERE FALSE"}
   ), visible_coverage AS (
@@ -353,7 +362,7 @@ async function inviteRanking(c: PoolClient, context: DashboardAccess, limit: num
 
 /** Count people only after matching their registration invitation to an effective earning. */
 export function contributorSourceSql(legacy: boolean, duties: boolean, scope: string, beneficiaries: string) {
-  return unifiedDistributionSourceSql(legacy, duties, scope, false, undefined, beneficiaries) + `,
+  return unifiedDistributionSourceSql(legacy, duties, scope, false, undefined, beneficiaries, false) + `,
     contributor_records AS MATERIALIZED (
       SELECT d.beneficiary_id,d.party_user_id,d.state,d.amount_cents,d.source_valid,d.contributor_confirmed,(r.id IS NOT NULL) invited
       FROM dashboard_records d LEFT JOIN zzsh_order.invitation_relation r ON r.type='INVITER'
@@ -397,12 +406,17 @@ export async function readAdminDistributionOverview(c: PoolClient, context: Dash
   };
 }
 
-export async function readUnifiedDistributionOverview(c: PoolClient, context: DashboardAccess, f: DashboardFilters, sources: { legacy: boolean; duties: boolean }) {
+export async function readUnifiedDistributionOverview(c: PoolClient, context: DashboardAccess, f: DashboardFilters, sources: { legacy: boolean; duties: boolean }, includeRanking = true) {
   const values: unknown[] = [], scope = scopeSql('o', values, context), source = unifiedDistributionSourceSql(sources.legacy, sources.duties, scope, context.directoryRead);
   values.push(rangeStart(f.from), rangeEnd(f.to));
   const from = `$${values.length - 1}::timestamptz`, to = `$${values.length}::timestamptz`, occurred = `occurred_at>=${from} AND occurred_at<${to}`, credited = `settled_at>=${from} AND settled_at<${to}`;
   const rankingAmount=f.rankingBasis === 'PERIOD_SETTLED_FLOW'?'source_amount_cents':'amount_cents';
-  const row = (await c.query(source + `SELECT count(*)::text count,count(*) FILTER(WHERE source='LEGACY')::text legacy_count,COALESCE(sum(amount_cents),0)::text record_amount_cents,
+  const row = (await c.query(source + `, daily_totals AS (
+    SELECT day,sum(accrued)::numeric AS accrued,sum(settled)::numeric AS settled FROM (
+      SELECT (occurred_at AT TIME ZONE 'Asia/Shanghai')::date AS day,source_amount_cents AS accrued,0::numeric AS settled FROM dashboard_records WHERE ${occurred}
+      UNION ALL SELECT (settled_at AT TIME ZONE 'Asia/Shanghai')::date,0::numeric,source_amount_cents FROM dashboard_records WHERE ${credited}
+    ) movements GROUP BY day
+  ) SELECT count(*)::text count,count(*) FILTER(WHERE source='LEGACY')::text legacy_count,COALESCE(sum(amount_cents),0)::text record_amount_cents,
     count(*) FILTER(WHERE state='UNKNOWN')::text unknown_state_count,
     COALESCE(sum(recovery_cents) FILTER(WHERE state='RECOVERY_REQUIRED'),0)::text recovery_cents,
     COALESCE((SELECT jsonb_agg(jsonb_build_object('state',state,'count',n,'amountCents',amount)) FROM
@@ -413,18 +427,19 @@ export async function readUnifiedDistributionOverview(c: PoolClient, context: Da
     count(*) FILTER(WHERE state='SETTLED' AND settled_at IS NULL)::text unconfirmed_credit_count,
     count(*) FILTER(WHERE occurred_at IS NULL)::text unconfirmed_occurred_count,
     COALESCE((SELECT jsonb_agg(jsonb_build_object('date',date,'cents',cents,'accruedCents',accrued)) FROM
-      (SELECT to_char(d.day,'YYYY-MM-DD') date,
-        COALESCE((SELECT sum(source_amount_cents) FROM dashboard_records WHERE settled_at>=d.day AT TIME ZONE 'Asia/Shanghai' AND settled_at<(d.day+interval '1 day') AT TIME ZONE 'Asia/Shanghai'),0)::text cents,
-        COALESCE((SELECT sum(source_amount_cents) FROM dashboard_records WHERE occurred_at>=d.day AT TIME ZONE 'Asia/Shanghai' AND occurred_at<(d.day+interval '1 day') AT TIME ZONE 'Asia/Shanghai'),0)::text accrued
-      FROM generate_series($${values.length - 1}::timestamptz AT TIME ZONE 'Asia/Shanghai',($${values.length}::timestamptz AT TIME ZONE 'Asia/Shanghai')-interval '1 day',interval '1 day')d(day) ORDER BY d.day)t),'[]') trend,
-    COALESCE((SELECT jsonb_agg(r) FROM (SELECT beneficiary_id user_id,min(beneficiary_name) name,array_agg(DISTINCT role ORDER BY role) roles,
+      (SELECT to_char(d.day,'YYYY-MM-DD') date,COALESCE(totals.settled,0)::text cents,COALESCE(totals.accrued,0)::text accrued
+      FROM generate_series($${values.length - 1}::timestamptz AT TIME ZONE 'Asia/Shanghai',($${values.length}::timestamptz AT TIME ZONE 'Asia/Shanghai')-interval '1 day',interval '1 day')d(day)
+      LEFT JOIN daily_totals totals ON totals.day=d.day::date ORDER BY d.day)t),'[]') trend,
+    ${includeRanking ? `COALESCE((SELECT jsonb_agg(r) FROM (SELECT beneficiary_id user_id,min(beneficiary_name) name,array_agg(DISTINCT role ORDER BY role) roles,
       sum(${rankingAmount})::text cents,count(*)::text count FROM dashboard_records WHERE ${f.rankingBasis === 'PERIOD_SETTLED_FLOW' ? credited : "state='SETTLED'"}
-      GROUP BY beneficiary_id HAVING sum(${rankingAmount})>0 ORDER BY sum(${rankingAmount}) DESC,beneficiary_id COLLATE "C" LIMIT ${f.rankingLimit})r),'[]') ranking,
+      GROUP BY beneficiary_id HAVING sum(${rankingAmount})>0 ORDER BY sum(${rankingAmount}) DESC,beneficiary_id COLLATE "C" LIMIT ${f.rankingLimit})r),'[]')` : "'[]'::jsonb"} ranking,
     COALESCE((SELECT jsonb_agg(to_jsonb(r)||jsonb_build_object('amount_cents',r.amount_cents::text,'recovery_cents',r.recovery_cents::text)) FROM (SELECT * FROM dashboard_records
       ORDER BY occurred_at DESC NULLS LAST,id COLLATE "C" DESC LIMIT 8)r),'[]') recent
     FROM dashboard_records`, values)).rows[0];
   if (!row) throw new SecurityApiError(503,'EVIDENCE_UNAVAILABLE','Commission aggregate unavailable');
-  const complete=sources.legacy && row.legacy_count==='0';
+  // An installed but empty history table does not prove the historical population was imported.
+  // No global distribution coverage admission is currently available for this aggregate.
+  const complete=false;
   const summary = commissionRecordSummaryProjection(row, complete, null, complete ? [] : [sources.legacy ? 'HISTORICAL_COVERAGE_NOT_CLOSED' : 'LEGACY_SOURCE_NOT_INSTALLED']);
   const metric = (states: string[]) => !sources.legacy ? UNKNOWN('LEGACY_SOURCE_NOT_INSTALLED') : KNOWN(summary.states.filter(s=>states.includes(s.state)).reduce((n,s)=>n+BigInt(s.amountCents),0n).toString(),summary.states.filter(s=>states.includes(s.state)).reduce((n,s)=>n+BigInt(s.count),0n).toString());
   const period = (cents: string, count: string) => sources.legacy ? KNOWN(cents,count) : UNKNOWN('LEGACY_SOURCE_NOT_INSTALLED');
@@ -434,6 +449,29 @@ export async function readUnifiedDistributionOverview(c: PoolClient, context: Da
       unconfirmedCreditCount: String(row.unconfirmed_credit_count), unconfirmedOccurredCount: String(row.unconfirmed_occurred_count) },
     trend: row.trend.map((p:any)=>({...p,knowledge:sources.legacy?'KNOWN':'UNKNOWN'})),
     earningsRanking: rankingRows(row.ranking), recent: row.recent.map((r:any)=>mapEarningRow(r,context.directoryRead)) };
+}
+
+export type DashboardOverviewSection = 'CORE' | 'EARNINGS_RANKING' | 'INVITE_RANKING';
+
+/** Independent non-paginated sections share the same domain readers and each has its own read timestamp. */
+export async function readAdminDistributionOverviewSection(c:PoolClient,context:DashboardAccess,f:DashboardFilters,section:DashboardOverviewSection){
+  const asOf=(await c.query('SELECT clock_timestamp()::text AS at')).rows[0]!.at;
+  if(section==='INVITE_RANKING')return{contractVersion:DASHBOARD_VERSION,section,asOf,scope:context.scope,ranking:await inviteRanking(c,context,f.rankingLimit)};
+  const sources=await ready(c);
+  if(section==='CORE'){
+    const [unified,participants]=[await readUnifiedDistributionOverview(c,context,f,sources,false),await participantCounts(c,context)];
+    return{contractVersion:DASHBOARD_VERSION,section,asOf,scope:context.scope,applied:f,current:unified.current,flow:unified.flow,trend:unified.trend,recordSummary:unified.recordSummary,recent:unified.recent,participants};
+  }
+  const values:unknown[]=[],scope=scopeSql('o',values,context),source=unifiedDistributionSourceSql(sources.legacy,sources.duties,scope,context.directoryRead);
+  let credited="state='SETTLED'";
+  if(f.rankingBasis==='PERIOD_SETTLED_FLOW'){values.push(rangeStart(f.from),rangeEnd(f.to));credited=`settled_at>=$${values.length-1}::timestamptz AND settled_at<$${values.length}::timestamptz`;}
+  const amount=f.rankingBasis==='PERIOD_SETTLED_FLOW'?'source_amount_cents':'amount_cents';
+  const rows=(await c.query(source+`, ranking_rows AS (SELECT beneficiary_id user_id,min(beneficiary_name) name,array_agg(DISTINCT role ORDER BY role) roles,
+    sum(${amount})::text cents,count(*)::text count FROM dashboard_records WHERE ${credited}
+    GROUP BY beneficiary_id HAVING sum(${amount})>0 ORDER BY sum(${amount}) DESC,beneficiary_id COLLATE "C" LIMIT ${f.rankingLimit})
+    SELECT ranking_rows.* FROM ranking_rows`,values)).rows;
+  const complete=false; // Empty source rows alone do not establish complete historical coverage.
+  return{contractVersion:DASHBOARD_VERSION,section,asOf,scope:context.scope,ranking:{items:rankingRows(rows.filter((row:any)=>row.user_id!=null)),knowledge:complete?'KNOWN' as const:'PARTIAL' as const,reasonCodes:complete?[]:[sources.legacy?'HISTORICAL_COVERAGE_NOT_CLOSED':'LEGACY_SOURCE_NOT_INSTALLED']}};
 }
 
 function listWhere(f: DashboardFilters, values: unknown[], context: DashboardAccess) {
@@ -456,11 +494,11 @@ export function mapEarningRow(row: any, directoryRead: boolean): DashboardEarnin
 }
 
 export async function readAdminDistributionEarnings(c: PoolClient, context: DashboardAccess, f: DashboardFilters, key?: ListingCursorKey, limitOverride?: number, token?: string | null, prepared?: { sources: { native: boolean; legacy: boolean }; version: string; asOf: string; duties?: boolean }) {
-  const sources = prepared?.sources ?? await ready(c), version = prepared?.version ?? await dashboardVersion(c, context, sources.legacy, 'duties' in sources && sources.duties === true, false, f.beneficiary), asOf = prepared?.asOf ?? (await c.query(`SELECT clock_timestamp()::text AS at`)).rows[0]!.at;
+  const sources = prepared?.sources ?? await ready(c), includeLegacy=sources.legacy&&f.source!=='NATIVE', version = prepared?.version ?? await dashboardVersion(c, context, includeLegacy, 'duties' in sources && sources.duties === true, false, f.beneficiary), asOf = prepared?.asOf ?? (await c.query(`SELECT clock_timestamp()::text AS at`)).rows[0]!.at;
   if (f.source === "LEGACY" && !sources.legacy) throw new SecurityApiError(503, "EVIDENCE_UNAVAILABLE", "Legacy distribution source unavailable");
   const values: unknown[] = [], nativeScope = scopeSql("o", values, context);
   const beneficiaryParameter = f.beneficiary ? `$${values.push(f.beneficiary)}` : undefined;
-  const source = unifiedDistributionSourceSql(sources.legacy, 'duties' in sources && sources.duties === true, nativeScope, context.directoryRead, beneficiaryParameter);
+  const source = unifiedDistributionSourceSql(includeLegacy, 'duties' in sources && sources.duties === true, nativeScope, context.directoryRead, beneficiaryParameter);
   const records = source + 'SELECT id,source,beneficiary_id,beneficiary_name,role,order_id,order_number,game_id,amount_cents::text,recovery_cents::text,state,occurred_at,settled_at,due_at,recorded_at FROM dashboard_records';
   const where = listWhere(f, values, context), offset = (f.page - 1) * (limitOverride ?? f.pageSize), limit = limitOverride ?? f.pageSize;
   values.push(limit, offset);
@@ -472,11 +510,12 @@ export async function readAdminDistributionEarnings(c: PoolClient, context: Dash
   return { contractVersion: DASHBOARD_VERSION, asOf, snapshotVersion: version, applied: f, scope: context.scope, items, total: String(total), page: f.page, pageSize: limit, hasMore: offset + items.length < total, snapshot: snapshot?.token ?? null };
 }
 
-export async function readAdminDistributionParticipants(c: PoolClient, context: DashboardAccess, f: DashboardFilters, key?: ListingCursorKey, token?: string | null, exactUserId?: string) {
+export async function readAdminDistributionParticipants(c: PoolClient, context: DashboardAccess, f: DashboardFilters, key?: ListingCursorKey, token?: string | null, exactUserId?: string, displayProjection = false) {
   if (context.scope.network !== "AVAILABLE") throw new SecurityApiError(403, "FORBIDDEN", "Global distribution network requires Boss or ALL_GAMES scope");
   // Participant amount CTE scans unified native+legacy stock; keep page reads under a slightly wider budget than overview cards.
   await c.query("SELECT set_config('statement_timeout','8s',true)");
-  const sources = await ready(c), version = exactUserId && !key && !token ? null : await dashboardVersion(c, context, sources.legacy, sources.duties, sources.coverage, undefined, sources.nativeOrigin), asOf = (await c.query(`SELECT clock_timestamp()::text AS at`)).rows[0]!.at;
+  const sources = await ready(c), rawVersion = exactUserId && !key && !token ? null : await dashboardVersion(c, context, sources.legacy, sources.duties, sources.coverage, undefined, sources.nativeOrigin, displayProjection), asOf = (await c.query(`SELECT clock_timestamp()::text AS at`)).rows[0]!.at;
+  const version=rawVersion===null?null:displayProjection?createHash('sha256').update(rawVersion+'|display-projection-v1').digest('hex'):rawVersion;
   // Bindings appear in SQL order: game-scope for amount CTE, optional exact user, search, then LIMIT/OFFSET.
   const values: unknown[] = [];
   const amountScope = scopeSql("o", values, context);
@@ -487,7 +526,7 @@ export async function readAdminDistributionParticipants(c: PoolClient, context: 
   if (exactIdx) where.push(`p.user_id=$${exactIdx}`);
   if (f.q) { values.push(`%${escapeLike(f.q.toLowerCase())}%`); where.push(`lower(coalesce(p.user_id,'')${context.directoryRead ? "||' '||coalesce(u.name,'')" : ""}) LIKE $${values.length}`); }
   const limit = f.pageSize, offset = (f.page - 1) * limit;
-  const amountsCte = unifiedDistributionSourceSql(sources.legacy, 'duties' in sources && sources.duties === true, amountScope, context.directoryRead, exactIdx ? `$${exactIdx}` : undefined)
+  const amountsCte = unifiedDistributionSourceSql(sources.legacy, 'duties' in sources && sources.duties === true, amountScope, context.directoryRead, exactIdx ? `$${exactIdx}` : undefined, undefined, false)
     + `, participant_amounts AS (
     SELECT beneficiary_id,
       count(*)::bigint AS record_count,
@@ -506,7 +545,7 @@ export async function readAdminDistributionParticipants(c: PoolClient, context: 
   const whereSql = where.length ? "WHERE " + where.join(" AND ") : "";
   const rows = (await c.query(`${amountsCte}
     SELECT p.user_id,u.name,p.eligibility,p.commission_frozen,p.level_code,p.inviter_knowledge,p.leader_knowledge,p.invitees_knowledge,p.source_type,p.revision,
-    CASE WHEN v.schema_version='distribution-policy.v3' THEN v.canonical_config::jsonb#>>ARRAY['legacySource','levelNames',p.level_code] END level_name,
+    CASE WHEN v.schema_version='distribution-policy.v3' THEN v.canonical_config::jsonb#>>ARRAY['legacySource','levelNames',p.level_code] WHEN v.schema_version='distribution-policy.v4' THEN v.canonical_config::jsonb#>>ARRAY['levelNames',p.level_code] END level_name,
     COALESCE(ch.leader_children,0)::int AS leader_children,
     COALESCE(ch.inviter_children,0)::int AS inviter_children,
     COALESCE(a.record_count,0)::text AS record_count,
@@ -518,7 +557,9 @@ export async function readAdminDistributionParticipants(c: PoolClient, context: 
     count(*) OVER()::int AS total
     FROM zzsh_order.distribution_participant p
     LEFT JOIN zzsh_auth_user."user" u ON u.id=p.user_id
-    LEFT JOIN zzsh_order.distribution_policy_version v ON v.id=p.policy_version_id
+    LEFT JOIN zzsh_order.distribution_policy_version pv ON pv.id=p.policy_version_id
+      LEFT JOIN zzsh_order.distribution_policy_head ph ON ph.scope=pv.scope
+      LEFT JOIN zzsh_order.distribution_policy_version v ON v.id=ph.current_version_id
     LEFT JOIN participant_amounts a ON a.beneficiary_id=p.user_id
     LEFT JOIN (
       SELECT parent_user_id,
@@ -539,7 +580,7 @@ export async function readAdminDistributionParticipants(c: PoolClient, context: 
     total = Number((await c.query(`SELECT count(*)::text AS total FROM zzsh_order.distribution_participant p LEFT JOIN zzsh_auth_user."user" u ON u.id=p.user_id ${countWhere.length ? "WHERE " + countWhere.join(" AND ") : ""}`, countValues)).rows[0]?.total);
   }
   if(!Number.isSafeInteger(total)||total<0)throw new SecurityApiError(503,'EVIDENCE_UNAVAILABLE','Distribution total unavailable');
-  const userIds=rows.map((r: any)=>String(r.user_id)),qualifications=await readLegacyDistributionQualifications(c,userIds);
+  const userIds=rows.map((r: any)=>String(r.user_id)),qualifications=displayProjection?new Map<string,ReturnType<typeof import('./legacy-invitation-facts').projectLegacyInvitationQualification>>():await readLegacyDistributionQualifications(c,userIds);
   const coverage = sources.coverage ? await readObservationCoverages(c, userIds, 'HISTORICAL_DISTRIBUTION') : new Map<string, ObservationCoverage>();
   const nativeAbsences = await provedNativeHistoryAbsences(c, rows.filter((r:any)=>r.source_type==='NATIVE_REGISTRATION').map((r:any)=>String(r.user_id)), 'HISTORICAL_DISTRIBUTION');
   const contributors = await readContributorCounts(c, context, sources, userIds);
@@ -549,7 +590,7 @@ export async function readAdminDistributionParticipants(c: PoolClient, context: 
     sourceType: row.source_type, revision: String(row.revision ?? "0"), leaderChildren:row.invitees_knowledge==='KNOWN'?Number(row.leader_children??0):null,inviterChildren:row.invitees_knowledge==='KNOWN'?Number(row.inviter_children??0):null,
     mappedLeaderChildren:Number(row.leader_children??0),mappedInviterChildren:Number(row.inviter_children??0),
     contributorChildren:contributorComplete?contributor!.count:null,mappedContributorChildren:contributor?.count,
-    legacyQualification:qualifications.get(row.user_id)??null,recordCount:closed?String(row.record_count??'0'):null,mappedRecordCount:String(row.record_count??'0'),earningsCoverage:coverage.get(row.user_id)?.knowledge??'UNKNOWN',
+    legacyQualification:qualifications.get(row.user_id)??null,...(displayProjection?{legacyQualificationKnowledge:'NOT_LOADED' as const}:{}),recordCount:closed?String(row.record_count??'0'):null,mappedRecordCount:String(row.record_count??'0'),earningsCoverage:coverage.get(row.user_id)?.knowledge??'UNKNOWN',
     needsReviewCount:sources.legacy?String(row.review_count??'0'):null,needsReviewCents:sources.legacy?String(row.review_cents??'0'):null,
     earningsReasonCodes:closed?[]:[sources.legacy?coverage.get(row.user_id)?.reason??'HISTORICAL_COVERAGE_NOT_CLOSED':'LEGACY_SOURCE_NOT_INSTALLED'],
     settledCents:cents(row.settled_cents),pendingCents:cents(row.pending_cents),recoveryCents:cents(row.recovery_cents) });}), total: String(total), page: f.page, pageSize: limit, hasMore: offset + rows.length < total, snapshot: snapshot?.token ?? null };
@@ -627,11 +668,13 @@ export async function readAdminDistributionDownline(c: PoolClient, context: Dash
     const source=contributorSourceSql(sources.legacy,sources.duties,scope,parameter),limitParameter=`$${values.push(limit)}`,offsetParameter=`$${values.push(offset)}`;
     const found=(await c.query(source+`, contributor_page AS (
       SELECT r.child_user_id,u.name,r.source_type,r.bound_at,p.eligibility,p.commission_frozen,p.level_code,p.invitees_knowledge,
-        CASE WHEN v.schema_version='distribution-policy.v3' THEN v.canonical_config::jsonb#>>ARRAY['legacySource','levelNames',p.level_code] END level_name,
+        CASE WHEN v.schema_version='distribution-policy.v3' THEN v.canonical_config::jsonb#>>ARRAY['legacySource','levelNames',p.level_code] WHEN v.schema_version='distribution-policy.v4' THEN v.canonical_config::jsonb#>>ARRAY['levelNames',p.level_code] END level_name,
         (SELECT count(DISTINCT g.child_user_id)::int FROM zzsh_order.invitation_relation g WHERE g.parent_user_id=r.child_user_id AND g.type='INVITER') AS children,r.id
       FROM contributor_users x JOIN zzsh_order.invitation_relation r ON r.type='INVITER' AND r.parent_user_id=x.beneficiary_id AND r.child_user_id=x.child_user_id
       LEFT JOIN zzsh_auth_user."user" u ON u.id=r.child_user_id LEFT JOIN zzsh_order.distribution_participant p ON p.user_id=r.child_user_id
-      LEFT JOIN zzsh_order.distribution_policy_version v ON v.id=p.policy_version_id
+      LEFT JOIN zzsh_order.distribution_policy_version pv ON pv.id=p.policy_version_id
+      LEFT JOIN zzsh_order.distribution_policy_head ph ON ph.scope=pv.scope
+      LEFT JOIN zzsh_order.distribution_policy_version v ON v.id=ph.current_version_id
       ORDER BY r.bound_at DESC,r.id COLLATE "C" DESC LIMIT ${limitParameter} OFFSET ${offsetParameter}
     ) SELECT page.*,s.total,s.uncertain FROM (SELECT (SELECT count(*)::int FROM contributor_users) total,
       EXISTS(SELECT 1 FROM contributor_uncertain) uncertain) s LEFT JOIN contributor_page page ON true
@@ -646,13 +689,15 @@ export async function readAdminDistributionDownline(c: PoolClient, context: Dash
         participant:row.eligibility?{eligibility:row.eligibility,frozen:row.commission_frozen===true,levelCode:row.level_code??null,levelName:row.level_name??null}:null,children:row.invitees_knowledge==='KNOWN'?Number(row.children??0):null,mappedChildren:Number(row.children??0)}))};
   }
   const rows = (await c.query(`SELECT r.child_user_id,u.name,r.source_type,r.bound_at,p.eligibility,p.commission_frozen,p.level_code,p.invitees_knowledge,
-      CASE WHEN v.schema_version='distribution-policy.v3' THEN v.canonical_config::jsonb#>>ARRAY['legacySource','levelNames',p.level_code] END level_name,
+      CASE WHEN v.schema_version='distribution-policy.v3' THEN v.canonical_config::jsonb#>>ARRAY['legacySource','levelNames',p.level_code] WHEN v.schema_version='distribution-policy.v4' THEN v.canonical_config::jsonb#>>ARRAY['levelNames',p.level_code] END level_name,
       (SELECT count(*)::int FROM zzsh_order.invitation_relation g WHERE g.parent_user_id=r.child_user_id AND g.type=r.type) AS children,
       count(*) OVER()::int AS total
     FROM zzsh_order.invitation_relation r
     LEFT JOIN zzsh_auth_user."user" u ON u.id=r.child_user_id
     LEFT JOIN zzsh_order.distribution_participant p ON p.user_id=r.child_user_id
-    LEFT JOIN zzsh_order.distribution_policy_version v ON v.id=p.policy_version_id
+    LEFT JOIN zzsh_order.distribution_policy_version pv ON pv.id=p.policy_version_id
+      LEFT JOIN zzsh_order.distribution_policy_head ph ON ph.scope=pv.scope
+      LEFT JOIN zzsh_order.distribution_policy_version v ON v.id=ph.current_version_id
     WHERE r.parent_user_id=$1 AND r.type=$2
     ORDER BY r.bound_at DESC, r.id COLLATE "C" DESC LIMIT $3 OFFSET $4`, [userId, type, limit, offset])).rows;
   const total = rows.length ? Number(rows[0].total) : Number((await c.query(`SELECT count(*)::int AS total FROM zzsh_order.invitation_relation WHERE parent_user_id=$1 AND type=$2`, [userId, type])).rows[0]?.total ?? 0);

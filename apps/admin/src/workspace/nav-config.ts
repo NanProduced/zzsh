@@ -79,9 +79,12 @@ export function workspaceMenuItems(nav: NavPermission): WorkspaceMenuItem[] {
       { label: "分销商", icon: UsersRoundIcon, path: "/distribution/participants", kind: "distribution-participants" },
     );
   }
+  if (!nav.isBoss && !has("distribution.dashboard.read") && has("distribution.participant.read")) {
+    distribution.push({ label: "分销商", icon: UsersRoundIcon, path: "/distribution/participants", kind: "distribution-participants" });
+  }
   if (nav.isBoss || has("user.directory.read") && has("personal.distribution.policy.read")) {
   }
-  if (nav.isBoss || ["personal.distribution.policy.read", "personal.distribution.policy.manage"].some(has)) {
+  if (nav.isBoss || ["personal.distribution.policy.read", "personal.distribution.policy.manage", "distribution.level.manage"].some(has)) {
     distribution.push({ label: "分销政策", icon: ScaleIcon, path: "/distribution/policy", kind: "distribution-policy" });
   }
   if (distribution.length) items.push({ label: "分销", isTitle: true }, ...distribution);

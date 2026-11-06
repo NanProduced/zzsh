@@ -12,6 +12,7 @@ import {
   readMyDistributionSummary,
   readAdminDistributionEarnings,
   readAdminDistributionOverview,
+  readAdminDistributionOverviewSection,
   readUnifiedDistributionOverview,
   readAdminDistributionParticipants,
   readAdminDistributionDownline,
@@ -129,6 +130,36 @@ test('invite ranking uses registration relations and marks incomplete source cov
  const sql=calls.find(value=>value.includes("WHERE r.type='INVITER'"))!;assert.match(sql,/count\(DISTINCT r\.child_user_id\)/);assert.doesNotMatch(sql,/commission_frozen/);
 });
 
+test('overview sections independently return their own authorized projection without the global pagination digest',async()=>{
+ const calls:string[]=[];const client={query:async(sql:string)=>{calls.push(sql);
+  if(sql.includes('clock_timestamp'))return{rows:[{at:'2026-11-02T00:00:00Z'}]};
+  if(sql.includes('to_regclass'))return{rows:[{native:true,legacy:true,duties:true}]};
+  if(sql.includes('ranking_rows AS'))return{rows:[{user_id:'person',name:'User',roles:['OWNER_REFERRAL'],cents:'100',count:'1',has_legacy:true}]};
+  if(sql.startsWith('WITH legacy_records'))return{rows:[unifiedAggregate()]};
+  if(sql.includes("WHERE r.type='INVITER'"))return{rows:[{user_id:'parent',count:3,partial:true}]};
+  if(sql.includes('count(*)::int AS participants'))return{rows:[{participants:1,eligible:1,frozen:0}]};
+  return{rows:[]};
+ }} as any;
+ const ctx=dashboardContext(),filters=filtersForTest();
+ const core=await readAdminDistributionOverviewSection(client,ctx,filters,'CORE');assert.equal(core.section,'CORE');assert.ok('current' in core);assert.ok(!('ranking' in core));
+ const ranking=await readAdminDistributionOverviewSection(client,ctx,filters,'EARNINGS_RANKING');assert.equal(ranking.section,'EARNINGS_RANKING');assert.ok('ranking' in ranking);assert.equal(ranking.ranking.knowledge,'PARTIAL');
+ const invite=await readAdminDistributionOverviewSection(client,ctx,filters,'INVITE_RANKING');assert.equal(invite.section,'INVITE_RANKING');assert.ok('ranking' in invite);assert.equal(invite.ranking.items[0]?.count,'3');
+ assert.equal(calls.some(sql=>sql.includes('WITH visible_earnings AS')),false);
+});
+
+test('installed but empty historical source does not prove ranking coverage',async()=>{
+ const client={query:async(sql:string)=>{
+  if(sql.includes('clock_timestamp'))return{rows:[{at:'2026-11-02T00:00:00Z'}]};
+  if(sql.includes('to_regclass'))return{rows:[{native:true,legacy:true,duties:true,coverage:false}]};
+  if(sql.includes('ranking_rows AS'))return{rows:[]};
+  throw Error('Unexpected query');
+ }} as any;
+ const read=await readAdminDistributionOverviewSection(client,dashboardContext(),filtersForTest(),'EARNINGS_RANKING');
+ assert.equal(read.section,'EARNINGS_RANKING');assert.ok('ranking' in read);
+ assert.deepEqual(read.ranking.items,[]);assert.equal(read.ranking.knowledge,'PARTIAL');
+ assert.deepEqual(read.ranking.reasonCodes,['HISTORICAL_COVERAGE_NOT_CLOSED']);
+});
+
 // Synthetic SQL response contract; this is not a PostgreSQL or migration acceptance fixture.
 function unifiedAggregate(patch: Record<string,unknown> = {}) {
   return {count:'0',legacy_count:'0',record_amount_cents:'0',unknown_state_count:'0',record_states:[],recovery_cents:'0',
@@ -152,7 +183,7 @@ test('unified overview preserves unknown responsibilities, actual recovery, one 
   assert.match(sql,/legacyChangeType'='1001'.*action'='1'/s);assert.match(sql,/credit.n=1/);assert.match(sql,/rawSource/);assert.match(sql,/legacy_log_candidates AS MATERIALIZED/);assert.match(sql,/credit.amount=p.original->>'earnings'/);assert.match(sql,/credit.original_at=p.original->>'settle_time'/);assert.doesNotMatch(sql,/LATERAL/);
   assert.doesNotMatch(sql,/sourceUpdatedAt|FOR UPDATE|\bINSERT\b|\bUPDATE\b|\bDELETE\b/);
   const empty=await readUnifiedDistributionOverview({query:async()=>({rows:[unifiedAggregate()]})} as any,dashboardContext(),filtersForTest(),{legacy:true,duties:false});
-  assert.equal(empty.current.settled.cents,'0');assert.equal(empty.current.pending.count,'0');assert.equal(empty.recordSummary.knowledge,'KNOWN');
+  assert.equal(empty.current.settled.cents,'0');assert.equal(empty.current.pending.count,'0');assert.equal(empty.recordSummary.knowledge,'UNKNOWN');
 });
 
 function summaryRecordRows(){
@@ -344,6 +375,23 @@ test('participants include historical commissions and leave incomplete child tot
  assert.equal(p.inviterChildren,null);assert.equal(p.leaderChildren,null);assert.equal(p.eligibility,'UNKNOWN');assert.deepEqual(p.earningsReasonCodes,['HISTORICAL_COVERAGE_NOT_CLOSED']);
 });
 
+test('display projection omits legacy qualification bytes explicitly and retains duty proof in the pagination version',async()=>{
+ const calls:string[]=[];const client={query:async(sql:string)=>{calls.push(sql);
+  if(sql.includes('to_regclass'))return{rows:[{native:true,legacy:true,duties:true,coverage:false,native_origin:false}]};
+  if(sql.includes('WITH visible_earnings AS'))return{rows:[{native:'n',legacy:'l',participants:'p',relations:'r',effects:'e'}]};
+  if(sql.includes('clock_timestamp'))return{rows:[{at:'2026-11-03T00:00:00Z'}]};
+  if(sql.includes('participant_amounts AS')&&sql.includes('ORDER BY'))return{rows:[{user_id:'old_user',name:'Old',eligibility:'ELIGIBLE',source_type:'LEGACY_MYSQL',level_code:'legacy_1',level_name:'默认',invitees_knowledge:'UNKNOWN',leader_children:0,inviter_children:0,record_count:'3',settled_cents:'2',pending_cents:'1',recovery_cents:'0',review_cents:'0',review_count:'0',total:1}]};
+  if(sql.includes('contributor_records AS'))return{rows:[{user_id:'old_user',count:0,uncertain:true}]};
+  return{rows:[]};
+ }} as any;
+ const read=await readAdminDistributionParticipants(client,dashboardContext(),filtersForTest(),undefined,undefined,undefined,true);
+ assert.equal(read.items[0]!.legacyQualification,null);assert.equal(read.items[0]!.legacyQualificationKnowledge,'NOT_LOADED');
+ assert.equal(calls.some(sql=>sql.includes('original distribution qualifications')),false);
+ const version=calls.find(sql=>sql.includes('WITH visible_earnings AS'))!;
+ assert.match(version,/legacy_order_duty_admission/);assert.match(version,/legacy_order_duty_revision/);assert.match(version,/legacy_continuation_version/);
+ assert.doesNotMatch(version,/FROM zzsh_order\.personal_finance_observation l\s+WHERE l\.source_kind='HISTORICAL_EARNINGS_LOG'/);
+});
+
 test('contributor totals require closed invitations, covered commissions and resolved earning facts',async()=>{
  let relationKnown=false,historyKnown=false,uncertain=false;
  const client={query:async(sql:string)=>{
@@ -424,6 +472,7 @@ test('participants sort by settled/pending and keep user_id tiebreak',async()=>{
  const settled=calls.find(c=>c.sql.includes('ORDER BY COALESCE(a.settled_cents,0) ASC'))!;
  assert.match(settled.sql,/p\.user_id COLLATE "C" ASC/);
  assert.match(settled.sql,/LEFT JOIN \(\s*SELECT parent_user_id/);
+  assert.doesNotMatch(settled.sql,/legacy_log_candidates/,'participant totals do not need individual settlement times');
  calls.length=0;
  await readAdminDistributionParticipants(client,dashboardContext(),{...filtersForTest(),sort:'pendingCents',order:'desc'});
  assert.ok(calls.some(c=>c.sql.includes('ORDER BY COALESCE(a.pending_cents,0) DESC')));
@@ -450,6 +499,20 @@ test("participant earnings bind the exact beneficiary without altering other fil
  assert.equal(page.values[Number(match[1])-1],"user-42");
  assert.ok(page.values.includes("SETTLED"));
  assert.ok(page.values.includes("%order%"));
+});
+
+test('native-only earnings exclude irrelevant historical sources from both page and snapshot',async()=>{
+ const calls:string[]=[];const client={query:async(sql:string)=>{calls.push(sql);
+  if(sql.includes('to_regclass'))return{rows:[{native:true,legacy:true,duties:true}]};
+  if(sql.includes('WITH visible_earnings AS'))return{rows:[{native:'n'}]};
+  if(sql.includes('clock_timestamp'))return{rows:[{at:'2026-11-02T00:00:00Z'}]};
+  if(sql.includes('count(*)::text AS total'))return{rows:[{total:'0'}]};return{rows:[]};
+ }} as any;
+ const result=await readAdminDistributionEarnings(client,dashboardContext(),{...filtersForTest(),source:'NATIVE'});
+ assert.equal(result.total,'0');assert.deepEqual(result.items,[]);
+ const version=calls.find(sql=>sql.includes('WITH visible_earnings AS'))!,page=calls.find(sql=>sql.includes('WITH rows AS'))!;
+ for(const sql of [version,page])assert.doesNotMatch(sql,/FROM zzsh_order\.personal_finance_observation/);
+ assert.match(page,/FROM zzsh_order\.rental_referral_earning/);
 });
 
 
@@ -489,7 +552,7 @@ test("one participant detail narrows source proof and does not hash the unrelate
  assert.equal(calls.some(call=>call.sql.includes('WITH visible_earnings AS')),false);
  const page=calls.find(call=>call.sql.includes('participant_amounts'))!;
  assert.match(page.sql,/p\.user_id=\$3::text/);
- assert.match(page.sql,/l\.user_id=\$3::text/);
+ assert.doesNotMatch(page.sql,/legacy_log_candidates/,'detail totals do not read settlement-time logs');
  assert.match(page.sql,/e\.beneficiary_user_id=\$3::text/);
  assert.equal(page.values[2],'user-42');
 });

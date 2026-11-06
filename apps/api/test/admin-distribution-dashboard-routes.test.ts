@@ -93,10 +93,24 @@ const participant = (total: number) => ({
 test("dashboard routes reject unsupported methods, missing page tokens and unauthenticated reads", async () => {
   const env = environment({ isBoss: true });
   assert.equal((await invoke(env, "POST", "/overview")).status, 404);
+  assert.equal((await invoke(env, "GET", "/overview?section=BAD")).status, 400);
+  assert.equal((await invoke(env, "GET", "/earnings?section=CORE")).status, 400);
+  assert.equal((await invoke(env, "GET", "/overview?section=CORE&section=INVITE_RANKING")).status, 400);
+  assert.equal((await invoke(env, "GET", "/overview?projection=DISPLAY")).status, 400);
+  assert.equal((await invoke(env, "GET", "/participants?projection=DISPLAY&projection=DISPLAY")).status, 400);
   assert.equal((await invoke(env, "GET", "/earnings?page=2")).status, 400);
   assert.equal((await invoke(env, "GET", "/earnings?page=2")).json.error.code, "INVALID_ARGUMENT");
   const anonymous = environment({ authenticated: false });
   assert.equal((await invoke(anonymous, "GET", "/overview")).status, 401);
+});
+
+test('display projection has its own signed pagination version and does not claim omitted qualification',async()=>{
+ const env=environment({isBoss:true,participants:[participant(5)]});
+ const first=await invoke(env,'GET','/participants?pageSize=2&projection=DISPLAY');assert.equal(first.status,200);
+ assert.equal(first.json.items[0].legacyQualificationKnowledge,'NOT_LOADED');
+ assert.equal(env.state.calls.some(call=>call.sql.includes('original distribution qualifications')),false);
+ const next=await invoke(env,'GET',`/participants?page=2&pageSize=2&projection=DISPLAY&snapshot=${encodeURIComponent(first.json.snapshot)}`);assert.equal(next.status,200);
+ const crossProjection=await invoke(env,'GET',`/participants?page=2&pageSize=2&snapshot=${encodeURIComponent(first.json.snapshot)}`);assert.equal(crossProjection.status,409);
 });
 
 test("non-Boss dashboard reads need the dedicated permission and selected-game scope cannot open the global network", async () => {

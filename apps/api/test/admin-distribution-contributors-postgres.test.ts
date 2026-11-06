@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { Client } from 'pg';
-import { contributorSourceSql } from '../src/finance/admin-distribution-dashboard';
+import { contributorSourceSql, distributionContentDigestSql } from '../src/finance/admin-distribution-dashboard';
 
 // Explicit opt-in outside the offline manifest: absent resource binding is a failure, not a pass.
 test('contributor matching counts invited people once and rejects unconfirmed earnings', async () => {
@@ -56,5 +56,15 @@ test('contributor matching counts invited people once and rejects unconfirmed ea
    SELECT d.id,${finalized} AS confirmed FROM fixture_duties d
    GROUP BY d.id,d.order_id,d.source_record_id,d.counterparty_user_id,d.amount_cents,d.maturity_at,d.admission_id,d.continuation_version_id ORDER BY d.id`;
   const rows=(await client.query(finalSql)).rows;assert.deepEqual(Object.fromEntries(rows.map(r=>[r.id,r.confirmed])),{admitted:true,created:true,provisional:false,revised:true,wrong_amount:false});
+  const versionRows=(await client.query(`WITH facts(label,canonical,snapshot) AS (VALUES
+    ('base','{"text":"original"}'::text,'{"value":1}'::jsonb),('same','{"text":"original"}','{"value":1}'::jsonb),
+    ('canonical_changed','{"text":"changed"}','{"value":1}'::jsonb),('snapshot_changed','{"text":"original"}','{"value":2}'::jsonb),
+    ('null_canonical',NULL::text,'{"value":1}'::jsonb),('empty_canonical','','{"value":1}'::jsonb),
+    ('null_snapshot','{"text":"original"}',NULL::jsonb),('empty_snapshot','{"text":"original"}','{}'::jsonb))
+   SELECT label,encode(sha256(convert_to(jsonb_build_array('source',canonical,snapshot)::text,'UTF8')),'hex') original,
+    encode(sha256(convert_to(jsonb_build_array('source',${distributionContentDigestSql('canonical')},${distributionContentDigestSql('snapshot')})::text,'UTF8')),'hex') compact FROM facts`)).rows;
+  const versions=new Map(versionRows.map(row=>[row.label,row]));
+  for(const row of versionRows)for(const other of versionRows)assert.equal(row.original===other.original,row.compact===other.compact,`${row.label}/${other.label}`);
+  assert.equal(versions.get('base').compact,versions.get('same').compact);assert.notEqual(versions.get('base').compact,versions.get('canonical_changed').compact);assert.notEqual(versions.get('base').compact,versions.get('snapshot_changed').compact);
  }finally{try{if(begun)await client.query('ROLLBACK');}finally{await client.end();}}
 });

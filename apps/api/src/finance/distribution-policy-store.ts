@@ -12,6 +12,7 @@ import {assertLocalFinancialSandboxAssembly,assertLocalFinancialSandboxResource,
 export type LocalDistributionScope=Readonly<{kind:'LOCAL_CONTROLLED_DISTRIBUTION'|'NATIVE_DISTRIBUTION'}>;
 export type DistributionPolicyScopeKind='LOCAL_CONTROLLED'|'NATIVE';
 type CreationReceipt={database:string;resourceOid:number;owner:string;marker:string;migrationRole:string;runtimeRole:string;ownerOid?:number;migrationRoleOid?:number;runtimeRoleOid?:number};
+export type RegisteredLocalNativeDistributionBinding=Required<CreationReceipt>&{nonce:string};
 type DistributionOrigins=Readonly<{apiOrigin:string;userOrigin:string;adminOrigin:string}>;
 const localName='zzsh_test_order_credit_admin_batch2',localRuntime='zzsh_order_credit_admin_batch2_r',localMigration='zzsh_order_credit_admin_batch2_m',localMarker='zzsh:order-reservation-test:v1';
 const milestoneName='zzsh_test_order_milestone_real_1',milestoneRuntime='zzsh_order_milestone_real_1_r',milestoneMigration='zzsh_order_milestone_real_1_m';
@@ -71,6 +72,17 @@ export function createRegisteredLocalNativeDistributionReadScope(config:AppConfi
 }
 export function assertRegisteredLocalNativeDistributionReadScope(scope:LocalDistributionScope):void{
  if(localProofs.get(scope)?.nativeReadNonce===undefined)throw new ConfigurationError('REGISTERED_LOCAL_NATIVE_READ_SCOPE_REQUIRED');
+}
+/** A read capability is never a write capability; this only compares a server-owned registered epoch. */
+export function assertRegisteredLocalNativeDistributionReadBinding(scope:LocalDistributionScope,binding:RegisteredLocalNativeDistributionBinding):void{
+ const proof=localProofs.get(scope);
+ if(!proof||proof.nativeReadNonce===undefined||!proof.readOnly||proof.database!==binding.database||proof.resourceOid!==binding.resourceOid
+  ||proof.owner!==binding.owner||proof.ownerOid!==binding.ownerOid||proof.marker!==binding.marker||proof.migrationRole!==binding.migrationRole
+  ||proof.migrationRoleOid!==binding.migrationRoleOid||proof.runtimeRole!==binding.runtimeRole||proof.runtimeRoleOid!==binding.runtimeRoleOid
+  ||proof.nativeReadNonce!==binding.nonce)throw new ConfigurationError('REGISTERED_LOCAL_NATIVE_READ_BINDING_MISMATCH');
+}
+export function isRegisteredLocalNativeDistributionReadScope(scope:LocalDistributionScope|undefined):boolean{
+ return scope!==undefined&&localProofs.get(scope)?.nativeReadNonce!==undefined;
 }
 
 /** This local read brand cannot be combined with write, funds or distribution worker assembly. */
@@ -163,6 +175,10 @@ async function resource(c:PoolClient, allowUnadmitted=false,binding?:LocalDistri
  const expected=resources.find(([name,oid])=>r?.name===name&&Number(r.oid)===oid);if(!expected&&allowUnadmitted)return false;if(!expected||r.marker!==expected[3]||![expected[2]+'r',expected[2]+'m'].includes(r.role)||!r.complete)throw new SecurityApiError(503,'EVIDENCE_UNAVAILABLE','Distribution policy resource or schema unavailable');return true;}
 /** Internal historical migration only: the exact receipt admits owner10, never the runtime role or an arbitrary local database. */
 export async function assertReviewedDistributionMaintenanceResource(c:PoolClient,binding:LocalDistributionScope){return resource(c,false,binding,true);}
+/** Identity verification only; the read scope itself remains incapable of authorizing a write. */
+export async function assertRegisteredLocalNativeDistributionReadResource(c:PoolClient,binding:LocalDistributionScope){
+ assertRegisteredLocalNativeDistributionReadScope(binding);await resource(c,false,binding,false,true);
+}
 
 function decode(row:Record<string,any>,expectedScope:'LOCAL_CONTROLLED'|'NATIVE'='LOCAL_CONTROLLED'){if(sha(row.canonical_config)!==row.config_digest)throw new SecurityApiError(503,'EVIDENCE_UNAVAILABLE','Policy digest differs');let config:DistributionPolicyConfig;try{config=validateDistributionPolicy(JSON.parse(row.canonical_config),expectedScope);if(canonicalize(config)!==row.canonical_config)throw Error();}catch{throw new SecurityApiError(503,'EVIDENCE_UNAVAILABLE','Policy schema is not valid');}return{versionId:row.id,revision:String(row.revision),digest:row.config_digest,config,createdAt:new Date(row.created_at).toISOString()};}
 /** Caller has verified its resource. Payment and relation writers may pin the immutable head. */

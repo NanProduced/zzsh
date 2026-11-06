@@ -323,8 +323,9 @@ export function canOpenKind(kind: WorkspaceRouteKind, nav: NavPermission): boole
   if(kind==="finance-document")return has("finance.document.read");
   if (kind === "support" || kind === "support-mine") return has("im.support.read") || nav.isBoss;
   if (kind === "support-management" || kind === "support-overview" || kind === "support-patrol" || kind === "support-settings") return has("im.support.management.read") || nav.isBoss;
-  if (kind === "distribution-overview" || kind === "distribution-earnings" || kind === "distribution-participants" || kind === "distribution-participant") return nav.isBoss || has("distribution.dashboard.read");
-  if (kind === "distribution-policy") return nav.isBoss || ["personal.distribution.policy.read", "personal.distribution.policy.manage"].some(has);
+  if (kind === "distribution-overview" || kind === "distribution-earnings") return nav.isBoss || has("distribution.dashboard.read");
+  if (kind === "distribution-participants" || kind === "distribution-participant") return nav.isBoss || has("distribution.dashboard.read") || has("distribution.participant.read");
+  if (kind === "distribution-policy") return nav.isBoss || ["personal.distribution.policy.read", "personal.distribution.policy.manage", "distribution.level.manage"].some(has);
   if (kind === "membership-growth") return nav.isBoss || ["membership.policy.draft", "membership.policy.publish", "membership.growth.read.summary"].some(has) || has("approval.request.create") && has("membership.entitlement.request");
   if (kind === "admins" || kind === "admin-object") return has("admin.account.read") || nav.isBoss;
   if (kind === "roles" || kind === "role-object") return has("admin.role.read") || has("admin.permission.read");

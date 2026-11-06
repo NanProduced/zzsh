@@ -13,7 +13,7 @@ test('effective legacy policy shows current names and separate purchase/listing 
   const ui=await h.mount(m.DistributionPolicyPanel,{snapshot:snap(manager)});
   await click(button(ui.host,'当前按分销档位计佣'));
   assert.match(ui.host.textContent,/青铜会员.*20%.*30%/);
-  await click(button(ui.host,'申请调整政策'));
+  await click(button(ui.host,'申请调整计佣状态'));
   assert.equal(h.browser.document.querySelector('[aria-label="推荐租客奖励比例"]'),null);
   assert.deepEqual(model.buildDistributionPolicyPayload(response.policy,{enabled:false,renter:'',owner:'',reason:'暂停新增计佣'}).changes,{enabled:false});
  }finally{await h.close();}
@@ -295,8 +295,9 @@ test('overview layout drops 关系与资格, shows 佣金排行 + 邀请人数 a
  const a=body.indexOf('佣金排行'),b=body.indexOf('邀请人数'),c=body.indexOf('最近分销记录');
  assert.ok(a>0&&a<b&&b<c);assert.ok(body.includes('DistributionDateRange'));
  assert.ok(src.includes('DistributionUserName'));
- assert.ok(src.includes('UserProfilePreview'));
- assert.ok(src.includes('EntityPreviewTrigger'));
+ const shared=readFileSync(new URL('../src/views/distribution-user-name.tsx',import.meta.url),'utf8');
+ assert.ok(shared.includes('UserProfilePreview'));
+ assert.ok(shared.includes('EntityPreviewTrigger'));
 });
 test('dashboard earnings uses unified ListPagination with page numbers, jump and page size',async()=>dashboardProbe(async(h,m)=>{
  const calls=[];globalThis.fetch=h.browser.fetch=async url=>{const q=new URL(String(url),'http://fixture.invalid').searchParams;calls.push(Object.fromEntries(q));return json(dashboardPage(url,{total:'100',hasMore:Number(q.get('page')??1)<5}));};

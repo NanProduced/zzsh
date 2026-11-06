@@ -7,13 +7,23 @@ type LegacyRentalPolicySource={receiptSha256:string;configurationSha256:string;l
 export type DistributionPolicyConfig=DistributionPolicyBase&(
  {schema:'distribution-policy.v1';levels:DistributionLevelPolicy[]}|
  {schema:'distribution-policy.v2';rateMode:'UNIFORM';renterPercent:string;ownerPercent:string;levels:[]}|
- {schema:'distribution-policy.v3';levels:DistributionLevelPolicy[];legacySource:LegacyRentalPolicySource});
+ {schema:'distribution-policy.v3';levels:DistributionLevelPolicy[];legacySource:LegacyRentalPolicySource}|
+ {schema:'distribution-policy.v4';levels:DistributionLevelPolicy[];levelNames:Record<string,string>;baseMode:'LEGACY_RENTAL'|'PLATFORM_CONTRIBUTION'});
 const unsigned=(v:unknown)=>{const text=exactCents(v);if(BigInt(text)<0n)throw invalid('Nonnegative policy amount required');return text;};
 export function referralPercent(value:unknown):{percent:string;ratio:ReferralRatio}{if(typeof value!=='string'||!/^(0|[1-9]\d{0,2})(?:\.\d{1,8})?$/.test(value))throw invalid('Exact percent string required');const n=parseNonNegativeDecimal(value,8,'referral percent'),den=100n*10n**BigInt(n.scale);if(n.value>den)throw invalid('Referral percent exceeds 100');return{percent:formatDecimalExact(n),ratio:{numerator:n.value.toString(),denominator:den.toString()}};}
 const compare=(a:ReferralRatio,b:ReferralRatio)=>BigInt(a.numerator)*BigInt(b.denominator)-BigInt(b.numerator)*BigInt(a.denominator);
 function boundedPair(a:ReferralRatio,b:ReferralRatio){if(BigInt(a.numerator)*BigInt(b.denominator)+BigInt(b.numerator)*BigInt(a.denominator)>BigInt(a.denominator)*BigInt(b.denominator))throw invalid('Cross-level referral total exceeds the same base');}
 export function validateDistributionPolicy(value:Record<string,unknown>,expectedScope:'LOCAL_CONTROLLED'|'NATIVE'='LOCAL_CONTROLLED'):DistributionPolicyConfig{
  if(value.schema==='distribution-policy.v2')return validateUniformDistributionPolicy(value,expectedScope);
+ if(value.schema==='distribution-policy.v4'){
+  const {levelNames,baseMode,...fields}=value;
+  if(baseMode!=='LEGACY_RENTAL'&&baseMode!=='PLATFORM_CONTRIBUTION')throw invalid('Managed distribution base mode required');
+  const graded=validateDistributionPolicy({...fields,schema:'distribution-policy.v1'},expectedScope);
+  if(!levelNames||typeof levelNames!=='object'||Array.isArray(levelNames))throw invalid('Managed level names required');
+  const names=levelNames as Record<string,unknown>;
+  if(Object.keys(names).length!==graded.levels.length||graded.levels.some(l=>!Object.hasOwn(names,l.code)||typeof names[l.code]!=='string'||!String(names[l.code]).trim()||String(names[l.code]).length>100))throw invalid('Exact managed level names required');
+  return {...graded,schema:'distribution-policy.v4',levels:graded.levels,levelNames:names as Record<string,string>,baseMode};
+ }
  if(value.schema==='distribution-policy.v3'){
   const {legacySource,...fields}=value;
   const graded=validateDistributionPolicy({...fields,schema:'distribution-policy.v1'},expectedScope);
@@ -57,6 +67,7 @@ export function distributionPolicyRates(policy:DistributionPolicyConfig,levelCod
  if(policy.schema==='distribution-policy.v2')return{mode:'UNIFORM' as const,levelCode:null,renterPercent:policy.renterPercent,ownerPercent:policy.ownerPercent};
  const level=policy.levels.find(l=>l.code===levelCode);return level?{mode:'LEVEL' as const,levelCode:level.code,renterPercent:level.renterPercent,ownerPercent:level.ownerPercent}:null;
 }
+export function usesLegacyRentalDistributionBase(policy:DistributionPolicyConfig|null|undefined){return policy?.schema==='distribution-policy.v3'||policy?.schema==='distribution-policy.v4'&&policy.baseMode==='LEGACY_RENTAL';}
 /** Pair applies the actual payment-frozen ratios; no rebalance or silent subsidy. */
 export function allocateFrozenReferralPair(baseCents:string,renter:ReferralRatio|null,owner:ReferralRatio|null,minimumAccrualCents:string){
  const base=BigInt(unsigned(baseCents)),minimum=BigInt(unsigned(minimumAccrualCents));const amount=(r:ReferralRatio|null)=>{if(!r)return 0n;const n=BigInt(unsigned(r.numerator)),d=BigInt(unsigned(r.denominator));if(d===0n||n>d)throw invalid('Frozen referral ratio invalid');return divideToScale({value:base*n,scale:0},{value:d,scale:0},0).value;};

@@ -24,6 +24,8 @@ import { executeMembershipGrowthOperation } from "./membership-growth-approval";
 import { createDistributionPolicyApprovalExecutor } from "../finance/distribution-policy-approval";
 import { createDistributionReversalApprovalExecutor, DISTRIBUTION_REVERSAL_OPERATION } from "../finance/distribution-reversal-approval";
 import { mountAdminDistributionReadRoutes } from "../finance/admin-distribution-routes";
+import { mountAdminDistributionManagementRoutes } from "../finance/admin-distribution-management-routes";
+import { assertDistributionManagementAssembly, type DistributionManagementResource } from "../finance/distribution-management-resource";
 import { assertNativeDistributionEarningAssembly } from '../finance/distribution-native-runtime';
 import { mountAdminDistributionMaintenanceRoutes } from "../finance/admin-distribution-maintenance";
 import { membershipGrowthEnabled, readMembershipGrowthQuoteCandidates } from "./membership-growth-integration";
@@ -141,6 +143,7 @@ export type AuthRuntimeOptions = AuthRuntimeConfig & {
   /** Exact local creation-receipt capability; absent in ordinary configuration. */
   distributionScope?: LocalDistributionScope;
   distributionReadScope?: LocalDistributionScope;
+  distributionManagement?: DistributionManagementResource;
   /** Local, exact-resource, fresh-user registration only; never a general distribution writer. */
   distributionRegistrationScope?: LocalNativeDistributionRegistrationScope;
   /** Explicit bounded local driver; no production or environment default. */
@@ -919,6 +922,7 @@ export async function mountAuthHandlers(
   // Validate the whole scope before any optional channel lifecycle can start.
   assertLocalNativeDistributionRegistrationAssembly(options.distributionRegistrationScope, options.distributionReadScope);
   assertLocalNativeDistributionReadOnlyAssembly(options.distributionReadScope, options.distributionScope, options);
+  assertDistributionManagementAssembly(options.distributionManagement,options.distributionReadScope,options);
   assertLocalDistributionAssembly(options.distributionScope, options);
   assertLocalDistributionAssembly(options.distributionReadScope, options);
   if (options.localFinancialSandbox) {
@@ -1397,6 +1401,7 @@ export async function mountAuthHandlers(
     adminSecurityOptions: { ...securityOptions, listingCursorKey: options.listingCursorKey },
     distributionScope: options.distributionScope,
     distributionReadScope: options.distributionReadScope,
+    distributionManagement: options.distributionManagement,
     ...(options.distributionEarnings ? { distributionEarnings: options.distributionEarnings } : {}),
     supply: { ...securityOptions, mediaStorage, supplyGateReader,legacyPublicAdmission,legacyPublicAdmissionDetail,listingCursorKey:options.listingCursorKey },
     order: orderOptions,
@@ -1444,6 +1449,7 @@ export async function mountAuthHandlers(
   mountUserDirectory(app,{...securityOptions,supplyGateReader,legacyPublicAdmission,legacyPublicAdmissionDetail});
   mountInvitationRoutes(app,{...securityOptions,listingCursorKey:options.listingCursorKey,distributionScope:options.distributionScope,distributionReadScope:options.distributionReadScope});
   mountDistributionPolicyRoutes(app,{...securityOptions,distributionScope:options.distributionScope,distributionReadScope:options.distributionReadScope});
+  mountAdminDistributionManagementRoutes(app,{...securityOptions,distributionScope:options.distributionScope,distributionReadScope:options.distributionReadScope,distributionManagement:options.distributionManagement});
   mountAdminDistributionReadRoutes(app, { ...securityOptions, listingCursorKey: options.listingCursorKey });
   if (options.distributionEarnings) mountAdminDistributionMaintenanceRoutes(app, { ...securityOptions, distributionEarnings: options.distributionEarnings });
   const payout=options.joinpayWithdrawal;

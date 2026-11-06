@@ -4,11 +4,19 @@ import { act, createElement } from 'react';
 import { setup, snap, json, settle, click } from './distribution-ops-fixture.mjs';
 import { overviewFixture } from './distribution-unified-overview-fixture.mjs';
 
+function sectionFixture(value,url){
+  const section=new URL(String(url),'http://fixture.invalid').searchParams.get('section');
+  if(section==='CORE')return{...value,section};
+  if(section==='EARNINGS_RANKING')return{section,asOf:value.asOf,ranking:{items:value.rankings.earnings,knowledge:'KNOWN',reasonCodes:[]}};
+  if(section==='INVITE_RANKING')return{section,asOf:value.asOf,ranking:value.rankings.directInvites};
+  throw Error('unexpected overview section');
+}
+
 async function probe(t, value = overviewFixture(), permissions = ['distribution.dashboard.read','user.directory.read']) {
   const h = await setup(), oldFetch = globalThis.fetch, calls = [], paths = [];
   Object.assign(globalThis, { ResizeObserver: h.browser.ResizeObserver, SVGElement: h.browser.SVGElement });
   h.browser.HTMLElement.prototype.getBoundingClientRect = () => ({ x: 0, y: 0, top: 0, left: 0, right: 640, bottom: 224, width: 640, height: 224 });
-  globalThis.fetch = h.browser.fetch = async (url, options = {}) => { calls.push({ url: String(url), options }); return json(value); };
+  globalThis.fetch = h.browser.fetch = async (url, options = {}) => { calls.push({ url: String(url), options }); return json(sectionFixture(value,url)); };
   const m = await h.loader.ssrLoadModule('/src/views/distribution-dashboard-pages.tsx');
   let props = { snapshot: snap(permissions), query: { from:'2026-11-01',to:'2026-11-03' }, onOpenPath: (...args) => paths.push(args), onQueryChange: next => { props = { ...props, query: next }; } };
   const ui = await h.mount(m.DistributionOverviewPage, props); await settle();
@@ -24,7 +32,7 @@ test('one business overview keeps four current metrics, three period metrics and
   assert.equal(h.host.querySelector('time').dateTime,'2026-11-03T03:42:00Z'); assert.match(text,/11:42/);
   assert.equal(h.host.querySelectorAll('table').length,1); assert.match(text,/¥90,071,992,547,409.93/);
   assert.equal(h.host.querySelectorAll('dl')[0].children.length,4); assert.equal(h.host.querySelectorAll('dl')[1].children.length,3);
-  assert.match(h.host.textContent,/4 个/); assert.equal(h.calls.length,1);
+  assert.match(h.host.textContent,/4 个/); assert.equal(h.calls.length,3);
   const rankings = h.host.querySelector('[data-distribution-rankings]');
   assert.ok(rankings);
   const rankingNames = [...rankings.querySelectorAll('button')].filter(b => b.textContent.trim() === '可读受益人');
@@ -34,13 +42,13 @@ test('one business overview keeps four current metrics, three period metrics and
     assert.match(name.className, /hover:underline/);
   }
   assert.equal([...rankings.querySelectorAll('button')].filter(b => b.getAttribute('aria-label') === '预览用户 可读受益人').length, 2);
-  await click(h.button('发生额')); assert.match(h.host.textContent,/按佣金原始发生时间统计/); assert.equal(h.calls.length,1);
+  await click(h.button('发生额')); assert.match(h.host.textContent,/按佣金原始发生时间统计/); assert.equal(h.calls.length,3);
   assert.ok(h.calls.every(c=>(c.options.method??'GET')==='GET'));
 });
 
 test('period changes reread with new dates while the current state and recent scope stay unchanged',async t=>{
   const h=await probe(t); await h.render({query:{from:'2024-01-01',to:'2024-01-31'}});
-  assert.equal(h.calls.length,2); assert.match(h.calls[1].url,/from=2024-01-01/);
+  assert.equal(h.calls.length,5); assert.equal(h.calls.filter(call=>/from=2024-01-01/.test(call.url)).length,2);
   assert.match(h.host.textContent,/佣金记录已结算¥44,416.95/); assert.match(h.host.textContent,/DIST-1/);
   await click(h.button('查看全部')); assert.deepEqual(h.paths,[['/distribution/earnings','佣金明细']]);
 });
@@ -53,6 +61,24 @@ test('unknown source and restricted relations do not become zero or a clickable 
   assert.match(h.host.textContent,/佣金记录已结算未核定/);assert.doesNotMatch(h.host.textContent,/佣金记录已结算¥0.00/);
   assert.match(h.host.textContent,/当前游戏范围无法读取全平台关系网络/);
   assert.equal([...h.host.querySelectorAll('button')].find(b=>b.textContent==='可读受益人')?.disabled,true);
+});
+
+test('overview sections load independently and do not retain another identity\'s data',async t=>{
+  const h=await setup(),oldFetch=globalThis.fetch,value=overviewFixture();let releaseCore,releaseOther,second=false;
+  t.after(async()=>{globalThis.fetch=oldFetch;await h.close();});
+  globalThis.fetch=h.browser.fetch=async url=>{
+    const section=new URL(String(url),'http://fixture.invalid').searchParams.get('section');
+    if(second)return new Promise(resolve=>{releaseOther=()=>resolve(json(sectionFixture(value,url)));});
+    if(section==='CORE')return new Promise(resolve=>{releaseCore=()=>resolve(json(sectionFixture(value,url)));});
+    return json(sectionFixture(value,url));
+  };
+  const m=await h.loader.ssrLoadModule('/src/views/distribution-dashboard-pages.tsx');
+  const props={snapshot:snap(['distribution.dashboard.read','user.directory.read'],'first','session-a'),query:{from:'2026-11-01',to:'2026-11-03'},onOpenPath(){}};
+  const ui=await h.mount(m.DistributionOverviewPage,props);await settle();
+  assert.ok(ui.host.querySelector('[aria-label="正在读取佣金概览"]'));assert.match(ui.host.textContent,/可读受益人/);
+  await act(async()=>releaseCore());await settle();assert.match(ui.host.textContent,/佣金记录已结算/);
+  second=true;await act(async()=>ui.root.render(createElement(m.DistributionOverviewPage,{...props,snapshot:snap(['distribution.dashboard.read','user.directory.read'],'second','session-b')})));
+  assert.doesNotMatch(ui.host.textContent,/可读受益人|44,416\.95/);assert.ok(ui.host.querySelector('[aria-label="正在读取佣金概览"]'));
 });
 
 test('expand top 100 only skeletons rankings and keeps current metrics visible', async t => {
@@ -69,9 +95,9 @@ test('expand top 100 only skeletons rankings and keeps current metrics visible',
       const expanded = overviewFixture();
       expanded.applied = { ...expanded.applied, rankingLimit: 100 };
       expanded.rankings.earnings = Array.from({ length: 12 }, (_, i) => ({ userId: `u${i}`, name: `排行${i}`, roles: ['INVITER'], cents: String(1000 - i), count: '1' }));
-      return json(expanded);
+      return json(sectionFixture(expanded,url));
     }
-    return json(value);
+    return json(sectionFixture(value,url));
   };
   const m = await h.loader.ssrLoadModule('/src/views/distribution-dashboard-pages.tsx');
   let props = {
