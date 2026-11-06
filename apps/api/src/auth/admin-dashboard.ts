@@ -147,19 +147,20 @@ function fromOverview(
   };
 }
 
-function quoteCentsSql(alias: string): string {
+export function quoteAmountCentsSql(alias: string, field: 'platformFullProfit' | 'resourceTotal' | 'ownerTotal'): string {
   return `CASE
-    WHEN jsonb_typeof(${alias}.quote_snapshot->'platformFullProfit') = 'object'
-      AND ${alias}.quote_snapshot->'platformFullProfit'->>'currency' = 'CNY'
-      AND ${alias}.quote_snapshot->'platformFullProfit'->>'unit' = 'yuan'
-      AND jsonb_typeof(${alias}.quote_snapshot->'platformFullProfit'->'scale') = 'number'
-      AND ${alias}.quote_snapshot->'platformFullProfit'->'scale' = '2'::jsonb
-      AND jsonb_typeof(${alias}.quote_snapshot->'platformFullProfit'->'amount') = 'string'
-      AND ${alias}.quote_snapshot->'platformFullProfit'->>'amount' ~ '^(0|[1-9][0-9]{0,21})(\\.[0-9]{1,2})?$'
-    THEN ((${alias}.quote_snapshot->'platformFullProfit'->>'amount')::numeric(24,2) * 100)::numeric(24,0)
+    WHEN jsonb_typeof(${alias}.quote_snapshot->'${field}') = 'object'
+      AND ${alias}.quote_snapshot->'${field}'->>'currency' = 'CNY'
+      AND ${alias}.quote_snapshot->'${field}'->>'unit' = 'yuan'
+      AND jsonb_typeof(${alias}.quote_snapshot->'${field}'->'scale') = 'number'
+      AND ${alias}.quote_snapshot->'${field}'->'scale' = '2'::jsonb
+      AND jsonb_typeof(${alias}.quote_snapshot->'${field}'->'amount') = 'string'
+      AND ${alias}.quote_snapshot->'${field}'->>'amount' ~ '^(0|[1-9][0-9]{0,21})(\\.[0-9]{1,2})?$'
+    THEN ((${alias}.quote_snapshot->'${field}'->>'amount')::numeric(24,2) * 100)::numeric(24,0)
     ELSE NULL
   END`;
 }
+export function quoteCentsSql(alias: string): string { return quoteAmountCentsSql(alias,'platformFullProfit'); }
 
 async function readQuotedSpread(
   client: PoolClient,

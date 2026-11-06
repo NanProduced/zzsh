@@ -16,6 +16,8 @@ import type { ListingCursorKey } from "../supply/listing-cursor";
 import { ADMIN_FINANCE_VERSION, parseAdminFinanceFilters, resolveFinanceLookup, loadAdminFinanceFacts, filterAdminFinanceEntries, attachLegacyWithdrawalBusinessReferences, financeSnapshot, financeDocuments, financeOrderDocuments, withFinanceOrderContext, financePeriodProjection,readAdminFinancePeriodBalances,readAdminFinancePeriodBasis, readAdminFinanceSubject, readAdminFinanceDocument } from "./admin-finance-read";
 import { generateAdminFinanceCsv, prepareAdminFinanceExport, observeAdminFinanceDelivery } from "./admin-finance-export";
 import { parseFinanceOverviewRange, readAdminFinanceOverview } from "./admin-finance-overview";
+import { parseFinanceDashboardContributionQuery, parseFinanceDashboardQuery, readFinanceDashboardChannels, readFinanceDashboardContributions, readFinanceDashboardCustomers, readFinanceDashboardTrend } from "./admin-finance-dashboard";
+import { ADMIN_PERMISSION, loadEffectiveAdminAccess } from "../auth/admin-authorization";
 import { withDirectoryRead, withDirectoryReadTransaction } from "../auth/user-directory-read";
 import { parseActivityQuery, readAdminBalanceActivity, readAdminChannelActivity } from './admin-finance-activity';
 
@@ -34,7 +36,7 @@ export async function handleAdminFinanceRead(request: SupplyNodeRequest, respons
   const requestId = ensureApiV1RequestId(request);
   await safely(response, requestId, async () => {
     const url = new URL(request.originalUrl ?? request.url ?? "", options.apiOrigin);
-    const match = /^\/api\/(?:v1\/admin|bff\/admin)\/finance\/(overview|lookup|period|export|activity\/(?:balances|channels)|subjects\/[^/]+|documents\/[^/]+|merchant-accounts\/[^/]+|channel-evidence\/orders\/[^/]+|channel-evidence\/withdrawals\/[^/]+\/[^/]+|channel-evidence\/originals\/[^/]+)$/.exec(url.pathname);
+    const match = /^\/api\/(?:v1\/admin|bff\/admin)\/finance\/(overview|lookup|period|export|dashboard\/(?:trend|customers|merchant|channels|contributions)|activity\/(?:balances|channels)|subjects\/[^/]+|documents\/[^/]+|merchant-accounts\/[^/]+|channel-evidence\/orders\/[^/]+|channel-evidence\/withdrawals\/[^/]+\/[^/]+|channel-evidence\/originals\/[^/]+)$/.exec(url.pathname);
     if ((request.method ?? "GET") !== "GET" || !match) throw notFound();
     const origin = request.headers.origin;
     if (origin !== undefined && origin !== options.adminOrigin && origin !== options.apiOrigin || request.headers["sec-fetch-site"] === "cross-site") throw forbidden();
@@ -51,6 +53,48 @@ export async function handleAdminFinanceRead(request: SupplyNodeRequest, respons
         const current = await withTransaction(options.pool,client=>authorizeAdminFinance(client,context,operation));
         if (current.authorizationKey !== result.actor.authorizationKey) throw forbidden('Finance access changed; reload');
         signal.throwIfAborted(); sendJson(response,200,{ ...result.body, contextKey:current.authorizationKey },requestId);
+      });
+      return;
+    }
+    if (match[1] === "dashboard/merchant") {
+      if (url.searchParams.size) throw invalid("Merchant dashboard does not accept query parameters");
+      const context = await readAdminContext(request, options);
+      await withDirectoryRead(options.directoryReadPool ?? options.pool, request, response, async signal => {
+        const result = await withDirectoryReadTransaction(options.directoryReadPool ?? options.pool, signal, async client => {
+          const actor = await authorizeAdminFinance(client, context, "complete");
+          const ids = [...(options.joinpayAccountRead?.merchantIdsByAdmin.get(context.userId) ?? [])];
+          if (ids.length > 20) throw new SecurityApiError(503, "EVIDENCE_UNAVAILABLE", "Merchant scope exceeds dashboard limit");
+          const accounts = [];
+          for (const merchantIdentityId of ids) accounts.push(await readAdminJoinpayMerchantAccounts(client, { adminId: context.userId, merchantIdentityId }, options.joinpayAccountRead));
+          return { actor, ids: ids.sort(), body: { version: 'admin.finance-dashboard-merchant.v1', state: options.joinpayAccountRead ? (ids.length ? 'AVAILABLE' : 'NO_SCOPE') : 'NOT_CONFIGURED', accounts } };
+        });
+        const current = await withTransaction(options.pool, client => authorizeAdminFinance(client, context, "complete"));
+        if (current.authorizationKey !== result.actor.authorizationKey || JSON.stringify([...(options.joinpayAccountRead?.merchantIdsByAdmin.get(context.userId) ?? [])].sort()) !== JSON.stringify(result.ids)) throw forbidden("Finance access changed; reload");
+        signal.throwIfAborted(); sendJson(response, 200, { ...result.body, contextKey: current.authorizationKey }, requestId);
+      });
+      return;
+    }
+    if (match[1] === "dashboard/trend" || match[1] === "dashboard/customers" || match[1] === "dashboard/channels" || match[1] === "dashboard/contributions") {
+      const detail = match[1] === 'dashboard/contributions';
+      const filters = detail ? parseFinanceDashboardContributionQuery(url.searchParams) : parseFinanceDashboardQuery(url.searchParams), context = await readAdminContext(request, options);
+      const customers = match[1] === "dashboard/customers", channels = match[1] === "dashboard/channels";
+      await withDirectoryRead(options.directoryReadPool ?? options.pool, request, response, async signal => {
+        const result = await withDirectoryReadTransaction(options.directoryReadPool ?? options.pool, signal, async client => {
+          const actor = await authorizeAdminFinance(client, context, "complete");
+          if (!actor.relations.isBoss && !actor.relations.orderRead) throw forbidden("Order read permission required");
+          const access = await loadEffectiveAdminAccess(client, context.userId);
+          if ((customers || detail && 'userId' in filters && filters.userId) && !access?.isBoss && !access?.permissions.has(ADMIN_PERMISSION.userDirectoryRead)) throw forbidden("User directory permission required");
+          const viewer = { adminId: context.userId, isBoss: actor.relations.isBoss, quoteRead: access?.permissions.has(ADMIN_PERMISSION.supplyQuoteInternalRead) === true };
+          const ids = channels ? [...(options.joinpayAccountRead?.merchantIdsByAdmin.get(context.userId) ?? [])].sort() : [];
+          if (ids.length > 20) throw new SecurityApiError(503, "EVIDENCE_UNAVAILABLE", "Merchant scope exceeds dashboard limit");
+          const body = detail ? await readFinanceDashboardContributions(client, filters as ReturnType<typeof parseFinanceDashboardContributionQuery>, viewer) : customers ? await readFinanceDashboardCustomers(client, filters, viewer) : channels
+            ? ids.length ? await readFinanceDashboardChannels(client, filters, viewer, ids) : { version: 'admin.finance-dashboard-channels.v1', state: options.joinpayAccountRead ? 'NO_SCOPE' : 'NOT_CONFIGURED', items: [] }
+            : await readFinanceDashboardTrend(client, filters, viewer);
+          return { actor, ids, body };
+        });
+        const current = await withTransaction(options.pool, client => authorizeAdminFinance(client, context, "complete"));
+        if (current.authorizationKey !== result.actor.authorizationKey || channels && JSON.stringify([...(options.joinpayAccountRead?.merchantIdsByAdmin.get(context.userId) ?? [])].sort()) !== JSON.stringify(result.ids)) throw forbidden("Finance access changed; reload");
+        signal.throwIfAborted(); sendJson(response, 200, { ...result.body, contextKey: current.authorizationKey }, requestId);
       });
       return;
     }

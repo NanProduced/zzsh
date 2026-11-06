@@ -151,10 +151,10 @@ export function workspaceMenuItems(nav: NavPermission): WorkspaceMenuItem[] {
 
   if (has("finance.read") || has("finance.document.read")) {
     items.push({ label: "资金", isTitle: true });
-    if (has("finance.read")) items.push({ label: "财务总览", icon: WalletIcon, path: "/finance", kind: "finance-overview" });
+    if (has("finance.read")) items.push({ label: "资金与经营看板", icon: WalletIcon, path: "/finance", kind: "finance-overview" });
     items.push({ label: "资金记录", icon: SearchIcon, path: "/finance/records", kind: "finance-records" });
     if (has("finance.read")) items.push({ label: "用户余额", icon: WalletIcon, path: "/finance/balances", kind: "finance-balances" });
-    if (has("finance.read")) items.push({ label: "期间核对", icon: CalculatorIcon, path: "/finance/period", kind: "finance-period" }, { label: "汇聚对账", icon: WalletIcon, path: "/finance/channels", kind: "finance-channels" });
+    if (has("finance.read")) items.push({ label: "汇聚对账", icon: WalletIcon, path: "/finance/channels", kind: "finance-channels" });
   }
   if (has("order.read") || nav.isBoss) {
     items.push({ label: "交易", isTitle: true }, { label: "订单", icon: ShoppingBagIcon, path: "/orders", kind: "orders" });
@@ -201,7 +201,7 @@ export function titleForPath(pathname: string): string {
   if (pathname === "/supply/reviews") return "账号供给";
   if (pathname === "/supply/media") return "平台素材审核";
   if (pathname === "/content") return "内容管理";
-  if(pathname==="/finance")return "财务总览";
+  if(pathname==="/finance")return "资金与经营看板";
   if(pathname==="/finance/search" || pathname==="/finance/records")return "资金记录";
   if(pathname==="/finance/records/history")return "旧平台资金记录";
   if(pathname==="/finance/balances")return "用户余额";
@@ -273,7 +273,7 @@ export const PAGE_SEARCH_KEYWORDS: Record<string, string[]> = {
   "/supply/reviews": ["账号供给", "供给", "审核", "上架审核", "reviews", "sh", "gj"],
   "/supply/media": ["平台素材审核", "图片审核", "素材", "截图", "图片", "media", "review", "sc", "tp"],
   "/content": ["内容管理", "运营内容", "content", "nr"],
-  "/finance": ["财务总览", "资金", "待核", "余额", "finance", "zj"],
+  "/finance": ["资金与经营看板", "财务总览", "资金", "待核", "余额", "finance", "zj"],
   "/finance/records": ["资金记录", "收款", "退款", "提现", "finance", "zj"],
   "/finance/balances": ["用户余额", "余额变动", "流水", "wallet", "ye"],
   "/finance/channels": ["汇聚对账", "渠道工具", "商户", "渠道证据", "channels"],

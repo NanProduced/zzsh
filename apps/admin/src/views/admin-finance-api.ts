@@ -175,9 +175,6 @@ export type FinanceOverview = {
   costs: { netContributionCents: string | null; channelCostState: string; reasonCodes: string[] };
   channels: { state: string };
 };
-export function financeOverviewRead(range: FinanceOverview['period']['range'], signal: AbortSignal) {
-  return adminRequest<FinanceOverview>(`/finance/overview?range=${range}`, undefined, 'GET', {}, signal);
-}
 export async function downloadFinanceCsv(filters: FinanceFilters, snapshot: string, signal: AbortSignal) {
   const query = financeQuery(filters); query.set("snapshot", snapshot);
   const path = `${API_ROOT}/finance/export?${query}`;

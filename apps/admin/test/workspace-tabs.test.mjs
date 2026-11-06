@@ -243,6 +243,8 @@ test("customer statistics keeps its canonical route and refreshes old persisted 
 test('finance splits the lookup into channel records and balances while restoring old tabs',()=>{
  const read={isBoss:false,permissions:['finance.read','finance.document.read']};
  assert.equal(tabFromLocation('/finance').kind,'finance-overview');assert.equal(tabFromLocation('/finance','range=30d').kind,'finance-overview');assert.equal(tabFromLocation('/finance','q=OLD-ORDER&page=2').path,'/finance/records');
+ assert.equal(tabFromLocation('/finance','range=custom&from=2026-10-20&to=2026-10-20').kind,'finance-overview');
+ assert.equal(tabFromLocation('/finance','from=2026-10-20&to=2026-10-20').kind,'finance-records');
  assert.equal(tabFromLocation('/finance/channels').kind,'finance-channels');assert.equal(tabFromLocation('/finance/period').kind,'finance-period');
  assert.equal(tabFromLocation('/finance/records').kind,'finance-records');assert.equal(tabFromLocation('/finance/balances').kind,'finance-balances');
  assert.equal(tabFromLocation('/finance/records/history').kind,'finance-record-history');assert.equal(tabFromLocation('/finance/records','source=LEGACY').path,'/finance/records/history');

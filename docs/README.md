@@ -28,6 +28,7 @@
 - [信用与号主保证金运行合同](architecture/credit-guarantee.md)
 - [管理端用户详情与权限边界](architecture/admin-user-directory.md)
 - [管理工作台经营概览](architecture/admin-workspace-overview.md)
+- [管理端资金与经营看板](architecture/admin-finance-dashboard.md)
 - [分销与本地提现](architecture/distribution-and-withdrawal.md)
 - [分销看板、汇总与权限](architecture/distribution-dashboard.md)
 - [开租与结算确认](architecture/settlement-confirmation.md)

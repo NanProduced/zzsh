@@ -27,7 +27,7 @@ async function setup(t, key, tabPath = "/finance", permissions = ["finance.read"
   const tree = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
   const vite = sharedVite ??= await createServer({ configFile: false, resolve: { alias: { "@": fileURLToPath(new URL("../src", import.meta.url)) } }, root: tree, cacheDir: path.resolve(tree, "tmp/admin-test-cache/admin-finance"), plugins: [react()], optimizeDeps:{noDiscovery:true,include:[]}, server: { middlewareMode: true, hmr: false, ws:false, watch:null } });
   const { AdminFinanceView, clearFinanceContexts, registerFinanceOrigin, financeOriginPath, financeContextIdentity } = await vite.ssrLoadModule("/apps/admin/src/views/admin-finance-view.tsx");
-  const Component = overview === 'channels' ? (await vite.ssrLoadModule('/apps/admin/src/views/finance-channels.tsx')).FinanceChannels : overview ? (await vite.ssrLoadModule('/apps/admin/src/views/finance-overview.tsx')).FinanceOverviewView : AdminFinanceView;
+  const Component = overview === 'channels' ? (await vite.ssrLoadModule('/apps/admin/src/views/finance-channels.tsx')).FinanceChannels : AdminFinanceView;
   const formats=await vite.ssrLoadModule('/apps/admin/src/views/admin-finance-api.ts');
   const node = browser.document.createElement("div"); browser.document.body.append(node); const root = createRoot(node);
   const opened = [], queries = [], props = { tab: { id: key, path: tabPath, kind: "unknown", title: "资金", query: {}, closable: true }, snapshot: { ...baseSnapshot, adminUserId: key, session: { ...baseSnapshot.session, id: key }, permissions }, onOpenPath: (...args) => opened.push(args), onQueryChange: query => queries.push(query), onRefresh: async () => props.snapshot, refreshNonce: 0 };
@@ -85,16 +85,16 @@ test("period pagination counts and navigates entries rather than distinct busine
   const ui=await setup(t,'period-entry-pagination','/finance/period');await ui.render();
   await until(()=>ui.node.querySelector('[aria-label="分页导航"]')?.textContent.includes('共 23 条记录'));
   let nav=ui.node.querySelector('[aria-label="分页导航"]');
-  assert.match(nav.textContent,/第 1 \/ 2 页/);assert.ok(nav.querySelector('[title="第 1–20 位"]'));
+  assert.match(nav.textContent,/第 1 \/ 2 页/);assert.ok(nav.querySelector('[title="第 1–20 条"]'));
   await act(async()=>nav.querySelector('[aria-label="第 2 页"]').click());
   await until(()=>calls.includes(2)&&ui.node.querySelector('[aria-label="分页导航"]')?.textContent.includes('第 2 / 2 页'));
-  nav=ui.node.querySelector('[aria-label="分页导航"]');assert.ok(nav.querySelector('[title="第 21–23 位"]'));
+  nav=ui.node.querySelector('[aria-label="分页导航"]');assert.ok(nav.querySelector('[title="第 21–23 条"]'));
 });
 test("finance lookup pagination continues to count business documents", async t => {
   globalThis.fetch=async url=>response(payload(url,{documentCount:1,entryCount:23,entries:[]}));
   const ui=await setup(t,'lookup-document-pagination','/finance/search');await ui.render();
   await until(()=>ui.node.querySelector('[aria-label="分页导航"]')?.textContent.includes('共 1 份记录'));
-  const nav=ui.node.querySelector('[aria-label="分页导航"]');assert.match(nav.textContent,/第 1 \/ 1 页/);assert.ok(nav.querySelector('[title="第 1–1 位"]'));
+  const nav=ui.node.querySelector('[aria-label="分页导航"]');assert.match(nav.textContent,/第 1 \/ 1 页/);assert.ok(nav.querySelector('[title="第 1–1 条"]'));
 });
 test("candidate enters stable source-typed independent object with original query/entry context", async t => {
   globalThis.fetch = async url => response(payload(url));
@@ -276,40 +276,6 @@ test('unposted cancelled original is named as an original and its order state is
   assert.equal(ui.node.textContent.includes('订单结算'), false);
 });
 
-const unavailableQueue = {knowledge:'UNAVAILABLE',count:null,amountCents:null,unknownCount:null,items:[],hasMore:false,reasonCodes:[]};
-function overviewPayload(range='7d',extra={}) { return {version:'admin.finance-overview.v1',asOf:'2026-11-02T08:00:00Z',period:{range,from:'2026-10-27T16:00:00Z',to:'2026-11-02T08:00:00Z',timeZone:'Asia/Shanghai'},confirmedPayments:{count:'2',amountCents:'51000',controlledAmountCents:'51000',channelAmountCents:'0',timeBasis:'paid_at',scope:'NATIVE_ORDER_ORIGINAL_ONLY',reasonCodes:[]},settlements:{count:'1',capturedCents:'10000',ownerNetCents:'0',refundPayableCents:'8000',platformContributionCents:'2000',timeBasis:'posted_at',reasonCodes:[]},pendingSettlement:{count:'1',amountCents:'41000',hasMore:false,items:[{id:'paid',number:'PAID-ORDER',status:'PAID',amountCents:'41000',paidAt:'2026-11-01T03:00:00Z',documentRef:'ORDER:paid'}],reasonCodes:[]},ledgerBalances:[{bucket:'AVAILABLE',balanceCents:'12345',state:'KNOWN',source:'POSTED_LEDGER_ONLY'},{bucket:'CLEARING',balanceCents:'-12345',state:'KNOWN',source:'POSTED_LEDGER_ONLY'}],coverage:{registeredSubjects:'2',totalCurrentSubjects:'3',globalProof:'UNPROVEN',reasonCodes:[]},queues:{refunds:unavailableQueue,withdrawals:unavailableQueue},reviewPayments:{sourceScope:'ORIGINAL_REVIEW_RECORDS',currentOutstandingOnly:false,count:'1',amountCents:'3100',unknownCount:'0',items:[{id:'review',number:'CANCELLED-LATE',amountCents:'3100',confirmedAt:'2026-11-01T03:00:00Z',reasonCode:'LATE',source:'CONTROLLED',documentRef:'ORDER:review'}],hasMore:false,reasonCodes:[]},recentSettlements:[{id:'posting',number:'SETTLED-ORDER',owner:{id:'owner',name:'零额号主'},renter:{id:'renter',name:'租客甲'},capturedCents:'10000',ownerNetCents:'0',refundPayableCents:'8000',platformContributionCents:'2000',postedAt:'2026-10-30T02:00:00Z',documentRef:'ORDER:posting'}],costs:{netContributionCents:null,channelCostState:'NOT_ADMITTED',reasonCodes:[]},channels:{state:'NOT_CONFIGURED'},...extra}; }
-
-test('overview uses one server aggregate, separates payment and allocation clocks, and preserves zero owner',async t=>{
- const calls=[];globalThis.fetch=async url=>{calls.push(String(url));return response(overviewPayload());};const ui=await setup(t,'overview-clocks','/finance',undefined,true);await ui.render();await until(()=>ui.node.textContent.includes('SETTLED-ORDER'));
- assert.equal(calls.length,1);assert.match(calls[0],/\/finance\/overview\?range=7d$/);assert.match(ui.node.textContent,/510\.00 元/);assert.match(ui.node.textContent,/按付款确认时间/);assert.match(ui.node.textContent,/按结算入账时间/);assert.match(ui.node.textContent,/零额号主/);assert.match(ui.node.textContent,/号主净额\s*0\.00 元/);assert.match(ui.node.textContent,/−123\.45 元/);assert.match(ui.node.textContent,/成本依据不完整，未计算/);assert.doesNotMatch(ui.node.textContent,/CANCELLED-LATE|PAID-ORDER|待办|净收入/);assert.doesNotMatch(ui.node.textContent,/银行已到账|净贡献200\.00/);
- const link=[...ui.node.querySelectorAll('button')].find(x=>x.textContent.includes('SETTLED-ORDER'));await act(async()=>link.click());const target=new URL(ui.opened.at(-1)[0],'http://local');assert.equal(target.pathname,'/finance/documents/ORDER%3Aposting');assert.equal(target.searchParams.get('financeReturn'),'/finance?range=7d');
-});
-test('overview refuses bulk read without finance.read and old responses cannot paint a changed identity',async t=>{
- let calls=0,release;globalThis.fetch=async()=>{calls++;return new Promise(resolve=>release=()=>resolve(response(overviewPayload())));};const ui=await setup(t,'overview-denied','/finance',['finance.document.read'],true);await ui.render();await settle();assert.equal(calls,0);assert.match(ui.node.textContent,/没有完整资金读取能力/);
- ui.props.snapshot={...ui.props.snapshot,permissions:['finance.read']};await ui.render();await until(()=>calls===1);ui.props.snapshot={...ui.props.snapshot,adminUserId:'other',permissions:[]};await ui.render();await act(async()=>release());await settle();assert.doesNotMatch(ui.node.textContent,/PAID-ORDER|510\.00/);
-});
-test('overview read failure remains distinct from an empty period and refresh clears private data',async t=>{
- let mode='error';globalThis.fetch=async()=>mode==='error'?response({error:{code:'NOT_FOUND'}},404):response(overviewPayload('7d',{confirmedPayments:{...overviewPayload().confirmedPayments,count:'0',amountCents:'0'},recentSettlements:[]}));const ui=await setup(t,'overview-empty','/finance',undefined,true);await ui.render();await until(()=>ui.node.textContent.includes('当前服务尚未提供'));assert.doesNotMatch(ui.node.textContent,/0\.00 元/);
- mode='empty';await act(async()=>[...ui.node.querySelectorAll('button')].find(x=>x.textContent==='重新读取').click());await until(()=>ui.node.textContent.includes('本期没有新平台已入账结算'));assert.match(ui.node.textContent,/新平台本期最近结算/);assert.match(ui.node.textContent,/0\.00 元/);ui.props.refreshNonce++;mode='error';await ui.render();await until(()=>ui.node.textContent.includes('当前服务尚未提供'));assert.doesNotMatch(ui.node.textContent,/PAID-ORDER/);
-});
-test('overview keeps legacy order amounts and posted wallet buckets separate from native payment',async t=>{
- let legacy={state:'RECORDED',count:'1',knownAmountCents:'7400',missingAmountCount:'2',sourceUndatedCount:'3',timeBasis:'source_paid_at'};
- globalThis.fetch=async()=>response(overviewPayload('7d',{legacyOrderPayments:legacy,ledgerBalances:[
-  {bucket:'AVAILABLE',balanceCents:'12345',state:'KNOWN'},{bucket:'GUARANTEE_HELD',balanceCents:'0',state:'UNKNOWN'},
-  {bucket:'RESERVED',balanceCents:'2600',state:'KNOWN'},{bucket:'REFUND_PAYABLE',balanceCents:'0',state:'KNOWN'},
- ]}));
- const ui=await setup(t,'overview-legacy','/finance',undefined,true);await ui.render();await until(()=>ui.node.textContent.includes('74.00 元'));
- assert.match(ui.node.textContent,/新平台订单实付510\.00 元/);
- assert.match(ui.node.textContent,/旧平台订单实付记录74\.00 元[\s\S]*1 笔金额已知 · 按旧单付款时间[\s\S]*本期 2 笔金额未记录 · 来源中另有 3 笔付款时间未记录/);
- const balances=ui.node.querySelector('[aria-labelledby="finance-balances-title"]');
- assert.match(balances.textContent,/用户可用[\s\S]*123\.45 元/);
- assert.match(balances.textContent,/号主上架保证金[\s\S]*未记录/);
- assert.match(balances.textContent,/提现预留[\s\S]*26\.00 元/);
- assert.match(balances.textContent,/退款应付[\s\S]*0\.00 元/);
- assert.doesNotMatch(ui.node.textContent,/584\.00 元|银行已到账/);
- legacy={...legacy,count:'0',knownAmountCents:'0'};ui.props.refreshNonce++;await ui.render();
- await until(()=>ui.node.textContent.includes('旧平台订单实付记录未记录'));
-});
 test('native detail shows APPLIED payment without posting and uses frozen owner versus renter fee payers',async t=>{
  const lifecycle={origin:'NATIVE',orderStatus:'PAID',payment:{state:'SITE_ACCEPTED',amountCents:'368686',confirmedAt:'2026-10-30T01:00:00Z',source:'CONTROLLED',hasReviewPayment:true},postingState:'NOT_POSTED'};
  const doc={...document,ref:'ORDER:paid',number:'PAID-ZERO-POSTING',kind:'SETTLEMENT',entryCount:0,requestedAmountCents:null,orderLifecycle:lifecycle,parties:{owner:{id:'owner',name:'零额号主'},renter:{id:'renter',name:'租客甲'}},subjects:[{id:'owner',name:'零额号主'},{id:'renter',name:'租客甲'}]};
@@ -334,25 +300,6 @@ test('finance detail without settlement business retains review status in the he
  const ui=await setup(t,'review-summary','/finance/documents/ORDER%3Areview');await ui.render();await until(()=>ui.node.textContent.includes('本站付款状态'));
  assert.match(ui.node.textContent,/异常收款原始记录/);assert.doesNotMatch(ui.node.textContent,/本站确认付款/);
  await act(async()=>[...ui.node.querySelectorAll('button')].find(x=>x.textContent==='复制摘要').click());assert.match(ui.node.querySelector('textarea[aria-label="核对摘要"]').value,/本站接纳付款：异常收款需复核/);
-});
-
-test('overview range switch discards late data and a scope-denied refresh clears all prior values',async t=>{
- let releaseOld,mode='initial';const calls=[];globalThis.fetch=async url=>{const range=new URL(url,'http://local').searchParams.get('range');calls.push(range);if(mode==='initial')return new Promise(resolve=>releaseOld=()=>resolve(response(overviewPayload('7d'))));return mode==='denied'?response({error:{code:'FORBIDDEN'}},403):response(overviewPayload(range,{pendingSettlement:{...overviewPayload().pendingSettlement,items:[]}}));};
- const ui=await setup(t,'overview-scope','/finance',undefined,true);await ui.render();await until(()=>calls.length===1);mode='ready';ui.props.tab={...ui.props.tab,query:{range:'30d'}};await ui.render();await until(()=>ui.node.textContent.includes('近30天'));await until(()=>calls.at(-1)==='30d');await act(async()=>releaseOld());await settle();assert.doesNotMatch(ui.node.textContent,/PAID-ORDER/);
- mode='denied';ui.props.refreshNonce++;await ui.render();await until(()=>ui.node.textContent.includes('财务总览暂不可读取'));assert.doesNotMatch(ui.node.textContent,/SETTLED-ORDER|510\.00/);
-});
-
-test('overview keeps obligations out of the dashboard and links to the refund business list',async t=>{
- const queue={...unavailableQueue,knowledge:'PARTIAL',count:'38',amountCents:'0',unknownCount:'38',items:[{id:'duty',source:'LEGACY_DUTY',status:'PENDING',recordedAmountCents:'18100'}],hasMore:true};
- globalThis.fetch=async()=>response(overviewPayload('7d',{queues:{refunds:queue,withdrawals:unavailableQueue}}));
- const ui=await setup(t,'overview-lookup','/finance',undefined,true);await ui.render();await until(()=>ui.node.textContent.includes('SETTLED-ORDER'));
- assert.doesNotMatch(ui.node.textContent,/38 笔|181\.00|CANCELLED-LATE|PAID-ORDER|待办|待处理/);
- assert.match(ui.node.querySelector('.finance-kpi-grid').textContent,/旧平台订单实付记录未记录/);
- await act(async()=>[...ui.node.querySelectorAll('button')].find(b=>b.textContent==='退款单据').click());
- const url = new URL(ui.opened.at(-1)[0], 'http://local');
- assert.equal(url.pathname, '/finance/search');
- assert.equal(url.searchParams.get('kind'), 'REFUND');
- assert.equal(url.searchParams.get('financeReturn'), '/finance?range=7d');
 });
 
 test('JoinPay lookup uses exact channel serial and links only API-scoped orders with a private return context',async t=>{

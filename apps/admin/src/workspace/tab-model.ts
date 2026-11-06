@@ -250,7 +250,7 @@ export function parseWorkspacePath(pathname: string): { kind: WorkspaceRouteKind
     const objectId = decodeURIComponent(orderObject[1] ?? "");
     return { kind: "order-object", objectType: "order", objectId, tabId: `order:${objectId}`, path, title: objectId };
   }
-  if (path === "/finance") return {kind:"finance-overview",tabId:"finance-overview",path,title:"财务总览"};
+  if (path === "/finance") return {kind:"finance-overview",tabId:"finance-overview",path,title:"资金与经营看板"};
   if (path === "/finance/search" || path === "/finance/records") return {kind:"finance-records",tabId:"finance-records",path:"/finance/records",title:"资金记录"};
   if (path === "/finance/records/history") return {kind:"finance-record-history",tabId:"finance-record-history",path,title:"旧平台资金记录"};
   if (path === "/finance/balances") return {kind:"finance-balances",tabId:"finance-balances",path,title:"用户余额"};
@@ -266,7 +266,8 @@ export function parseWorkspacePath(pathname: string): { kind: WorkspaceRouteKind
 
 export function tabFromLocation(pathname: string, search = ""): WorkspaceTab {
   const query = sanitizeTabQuery(new URLSearchParams(search.startsWith("?") ? search.slice(1) : search));
-  const legacyFinanceQuery = pathname === "/finance" && ["scope", "q", "kind", "bucket", "state", "period", "entry", "from", "to", "page"].some(key => Object.hasOwn(query, key));
+  const legacyFinanceQuery = pathname === "/finance" && (["scope", "q", "kind", "bucket", "state", "period", "entry", "page"].some(key => Object.hasOwn(query, key))
+    || query.range !== "custom" && ["from", "to"].some(key => Object.hasOwn(query, key)));
   let distributionPath = pathname;
   if (pathname === "/distribution-policy" || pathname === "/distribution/policy") {
     if (query.section === "earnings") distributionPath = "/distribution/earnings";

@@ -5,6 +5,8 @@ import { FinanceSqlFixture, legacyFinanceOrder } from "./admin-finance-fixture";
 import { financeSnapshot } from "../src/finance/admin-finance-read";
 import * as overview from "../src/finance/admin-finance-overview";
 import * as activity from "../src/finance/admin-finance-activity";
+import * as dashboard from "../src/finance/admin-finance-dashboard";
+import "./admin-finance-dashboard.test";
 
 function environment(permissions = ["finance.read", "finance.document.read"], financeSql?: FinanceSqlFixture) {
   const state = { permissions, isBoss: false, gameIds: ["game1"], connected: 0, auditFailure: false, revokeOnPrepare: false, schemaReady: true, locked: false, passwordChangeRequired: false, authenticated: true, withdrawalsReady: false, versionSqlOverride:undefined as string|undefined, beforeSecondTransaction:undefined as (()=>void)|undefined, operations: [] as Record<string, unknown>[], subjects: [{ id: "u1", name: "用户一" }, { id: "u2", name: "用户二" }], extraLedger: [] as Record<string, unknown>[], audits: [] as Record<string, unknown>[], statements: [] as string[] };
@@ -58,10 +60,30 @@ function environment(permissions = ["finance.read", "finance.document.read"], fi
 async function request(options: AdminFinanceOptions, route: string, query = "") {
   const result = { status: 200, json: undefined as any, bytes: undefined as Buffer | undefined, headers: {} as Record<string, string>, events: new Map<string, () => void>() };
   const response = { headersSent: false, status(code: number) { result.status = code; return this; }, setHeader(name: string, value: string | string[]) { result.headers[name] = Array.isArray(value) ? value.join(",") : value; return this; }, json(body: unknown) { result.json = body; }, send(body: unknown) { assert.ok(Buffer.isBuffer(body)); result.bytes = body; }, end() {}, once(event: string, callback: () => void) { result.events.set(event, callback); } };
-  const parameters=route==='overview'||route.startsWith('activity/')?query:`from=2026-10-03&to=2026-10-03${query ? "&" + query : ""}`;
+  const parameters=route==='overview'||route.startsWith('activity/')||route.startsWith('dashboard/')?query:`from=2026-10-03&to=2026-10-03${query ? "&" + query : ""}`;
   await handleAdminFinanceRead({ method: "GET", originalUrl: `/api/v1/admin/finance/${route}?${parameters}`, headers: { origin: options.adminOrigin } }, response, options);
   return result;
 }
+
+test('dashboard applies finance, order and directory permissions and rechecks revocation', async t => {
+ let reads=0;
+ t.mock.method(dashboard,'readFinanceDashboardCustomers',async()=>{reads++;return {version:'admin.finance-dashboard-customers.v1',period:{from:null,to:'2026-11-06',asOf:'2026-11-06T00:00:00Z',granularity:'month'},basis:'settled',limit:20,legacy:'RECORDED_PARTIAL',continuations:'INCLUDED',omittedCount:'0',items:[]};});
+ const financeOnly=environment(['finance.read']);assert.equal((await request(financeOnly.options,'dashboard/customers')).status,403);assert.equal(reads,0);
+ const noDirectory=environment(['finance.read','order.read']);assert.equal((await request(noDirectory.options,'dashboard/customers')).status,403);assert.equal(reads,0);
+ const allowed=environment(['finance.read','order.read','user.directory.read']);assert.equal((await request(allowed.options,'dashboard/customers')).status,200);assert.equal(reads,1);
+ assert.ok(allowed.state.statements.includes('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY'));assert.ok(allowed.state.statements.includes('ROLLBACK'));
+ const revoked=environment(['finance.read','order.read','user.directory.read']);revoked.state.revokeOnPrepare=true;
+ assert.equal((await request(revoked.options,'dashboard/customers')).status,403);assert.equal(reads,2);
+});
+test('contribution detail requires directory permission for a specific customer', async t => {
+ let reads=0;
+ t.mock.method(dashboard,'readFinanceDashboardContributions',async()=>{reads++;return{version:'admin.finance-dashboard-contributions.v1',basis:'settled',asOf:'2026-10-03T10:00:00.000000Z',page:1,pageSize:20,total:'0',knownCount:'0',knownCents:null,items:[]};});
+ const financeOrder=environment(['finance.read','order.read']),query='range=all&asOf=2026-10-03T10%3A00%3A00.000000Z';
+ assert.equal((await request(financeOrder.options,'dashboard/contributions',query+'&userId=u1')).status,403);assert.equal(reads,0);
+ assert.equal((await request(financeOrder.options,'dashboard/contributions',query)).status,200);assert.equal(reads,1);
+ const allowed=environment(['finance.read','order.read','user.directory.read']);
+ assert.equal((await request(allowed.options,'dashboard/contributions',query+'&userId=u1')).status,200);assert.equal(reads,2);
+});
 
 test('new finance activity requires complete access, stays read-only and reauthorizes before delivery',async t=>{
  let reads=0;t.mock.method(activity,'readAdminBalanceActivity',async()=>{reads++;return {version:'admin.finance-balance-activity.v1',view:'LIVE',asOf:'2026-01-01T00:00:00.000Z',page:1,pageSize:20,total:0,hasMore:false,items:[]};});
