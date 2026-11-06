@@ -114,6 +114,21 @@ test("period ranking binds timestamps before scope and missing historical source
   assert.equal(calls.some(x => /FROM zzsh_order\.personal_finance_observation/.test(x.sql)), false);
 });
 
+test('invite ranking uses registration relations and marks incomplete source coverage',async()=>{
+ const calls:string[]=[];const client={query:async(sql:string)=>{calls.push(sql);
+  if(sql.includes('to_regclass'))return{rows:[{native:true,legacy:true,duties:true}]};
+  if(sql.includes('WITH visible_earnings AS'))return{rows:[{native:'n'}]};
+  if(sql.includes('clock_timestamp'))return{rows:[{at:'2026-11-02T00:00:00Z'}]};
+  if(sql.startsWith('WITH legacy_records'))return{rows:[unifiedAggregate()]};
+  if(sql.includes('WHERE r.type=\'INVITER\''))return{rows:[{user_id:'parent',name:'Parent',count:3,partial:true}]};
+  if(sql.includes('count(*)::int AS participants'))return{rows:[{participants:1,eligible:1,frozen:0}]};
+  return{rows:[]};
+ }} as any;
+ const read=await readAdminDistributionOverview(client,dashboardContext(),filtersForTest());
+ assert.equal(read.rankings.directInvites.knowledge,'PARTIAL');assert.equal(read.rankings.directInvites.items[0]?.count,'3');
+ const sql=calls.find(value=>value.includes("WHERE r.type='INVITER'"))!;assert.match(sql,/count\(DISTINCT r\.child_user_id\)/);assert.doesNotMatch(sql,/commission_frozen/);
+});
+
 // Synthetic SQL response contract; this is not a PostgreSQL or migration acceptance fixture.
 function unifiedAggregate(patch: Record<string,unknown> = {}) {
   return {count:'0',legacy_count:'0',record_amount_cents:'0',unknown_state_count:'0',record_states:[],recovery_cents:'0',
@@ -329,6 +344,42 @@ test('participants include historical commissions and leave incomplete child tot
  assert.equal(p.inviterChildren,null);assert.equal(p.leaderChildren,null);assert.equal(p.eligibility,'UNKNOWN');assert.deepEqual(p.earningsReasonCodes,['HISTORICAL_COVERAGE_NOT_CLOSED']);
 });
 
+test('contributor totals require closed invitations, covered commissions and resolved earning facts',async()=>{
+ let relationKnown=false,historyKnown=false,uncertain=false;
+ const client={query:async(sql:string)=>{
+  if(sql.includes('finance history coverage installed'))return{rows:[{installed:true}]};
+  if(sql.includes('finance history coverage exact targets'))return{rows:historyKnown?[{user_id:'old_user',id:'coverage_one',source_count:0,imported_count:0,isolated_count:0,imported_set_digest:'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855',actual_digest:'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855',actual_count:'0',invalid_count:'0',outside_count:'0',cutoff:'2026-11-03T00:00:00.000Z'}]:[]};
+  if(sql.includes('to_regclass'))return{rows:[{native:true,legacy:true,duties:true,coverage:true}]};
+  if(sql.includes('WITH visible_earnings AS'))return{rows:[{native:'n'}]};
+  if(sql.includes('clock_timestamp'))return{rows:[{at:'2026-11-03T00:00:00Z'}]};
+  if(sql.includes('contributor_records AS MATERIALIZED'))return{rows:[{user_id:'old_user',count:2,uncertain}]};
+  if(sql.includes('participant_amounts')&&sql.includes('ORDER BY'))return{rows:[{user_id:'old_user',source_type:'LEGACY_MYSQL',invitees_knowledge:relationKnown?'KNOWN':'UNKNOWN',leader_children:8,inviter_children:4,record_count:'3',settled_cents:'12',pending_cents:'0',recovery_cents:'0',review_cents:'0',review_count:'0',total:1}]};
+  return{rows:[]};
+ }} as any;
+ const read=async()=>(await readAdminDistributionParticipants(client,dashboardContext(),filtersForTest())).items[0]!;
+ let item=await read();assert.equal(item.inviterChildren,null);assert.equal(item.contributorChildren,null);assert.equal(item.mappedContributorChildren,2);
+ relationKnown=true;item=await read();assert.equal(item.inviterChildren,4);assert.equal(item.contributorChildren,null);
+ historyKnown=true;item=await read();assert.equal(item.contributorChildren,2);assert.equal(item.mappedContributorChildren,2);
+ uncertain=true;item=await read();assert.equal(item.contributorChildren,null);assert.equal(item.mappedContributorChildren,2);
+});
+
+test('contributor downline is source scoped, paginated and preserves partial coverage',async()=>{
+ const calls:{sql:string;values:unknown[]}[]=[];
+ const client={query:async(sql:string,values:unknown[]=[])=>{
+  calls.push({sql,values});
+  if(sql.includes('SELECT invitees_knowledge'))return{rows:[{invitees_knowledge:'UNKNOWN',source_type:'LEGACY_MYSQL'}]};
+  if(sql.includes('to_regclass'))return{rows:[{native:true,legacy:true,duties:true,coverage:false}]};
+  if(sql.includes('contributor_page AS'))return{rows:[{child_user_id:'invitee',source_type:'LEGACY_MYSQL',bound_at:'2026-11-01T00:00:00Z',invitees_knowledge:'UNKNOWN',children:3,total:4,uncertain:true}]};
+  if(sql.includes('count(DISTINCT child_user_id)'))return{rows:[{count:10}]};
+  return{rows:[]};
+ }} as any;
+ const result=await readAdminDistributionDownline(client,dashboardContext(),'parent',new URLSearchParams('type=COMMISSION_CONTRIBUTOR&page=2&pageSize=2'));
+ assert.equal(result.knowledge,'PARTIAL');assert.equal(result.total,'4');assert.equal(result.items[0]?.userId,'invitee');assert.equal(result.items[0]?.boundAt,null);
+ const page=calls.find(call=>call.sql.includes('contributor_page AS'))!;assert.deepEqual(page.values.slice(-3),[['parent'],2,2]);
+ assert.match(page.sql,/r\.type='INVITER'/);assert.match(page.sql,/count\(\*\)::int FROM contributor_users/);
+ await assert.rejects(()=>readAdminDistributionDownline(client,dashboardContext(false,false),'parent',new URLSearchParams('type=COMMISSION_CONTRIBUTOR')),(error:any)=>error.status===403);
+});
+
 test('participant zero amounts require the existing exact history coverage proof',async()=>{
  let covered=false;const client={query:async(sql:string)=>{
   if(sql.includes('finance history coverage installed'))return{rows:[{installed:true}]};
@@ -446,9 +497,10 @@ test("one participant detail narrows source proof and does not hash the unrelate
 test("participant earnings pagination versions every relevant source for the same subject",async()=>{
  const calls:{sql:string;values:unknown[]}[]=[];
  const c={query:async(sql:string,values:unknown[]=[])=>{calls.push({sql,values});return{rows:[{native:'n',events:'e',legacy:'l',participants:'p',relations:'r',effects:'x',coverage:'c'}]};}} as any;
- await dashboardVersion(c,dashboardContext(),true,true,true,'user-42');
+ await dashboardVersion(c,dashboardContext(),true,true,true,'user-42',true);
  const query=calls[0]!;
  assert.deepEqual(query.values,['admin-1',true,'user-42']);
  for(const column of ['e.beneficiary_user_id','p.user_id','l.user_id','c.user_id'])assert.ok(query.sql.includes(column+'=$3::text'),column);
  assert.ok(query.sql.includes('r.parent_user_id=$3::text OR r.child_user_id=$3::text'));
+  assert.match(query.sql,/visible_native_birth/);assert.match(query.sql,/native_user_insert_proof/);assert.match(query.sql,/o\.renter_user_id,o\.owner_user_id/);
 });

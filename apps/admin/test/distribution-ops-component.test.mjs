@@ -29,10 +29,10 @@ test('historical qualification, grade and mapped children do not become current 
 
 test('participant desktop and mobile retain observed relations, commission subtotal and unknown coverage',async()=>{
  const h=await setup();try{
-  const participant={userId:'historical_subject',name:'历史分销商',eligibility:'UNKNOWN',frozen:false,levelCode:null,sourceType:'LEGACY_MYSQL',leaderChildren:null,inviterChildren:null,mappedLeaderChildren:2,mappedInviterChildren:164,settledCents:'398183',pendingCents:null,recoveryCents:null,mappedRecordCount:'959',earningsCoverage:'UNKNOWN',needsReviewCount:'1',needsReviewCents:'100',legacyQualification:{eligibility:'ELIGIBLE',commissionFrozen:false,levelId:'2'}};
+  const participant={userId:'historical_subject',name:'历史分销商',eligibility:'UNKNOWN',frozen:false,levelCode:null,sourceType:'LEGACY_MYSQL',leaderChildren:null,inviterChildren:null,mappedLeaderChildren:2,mappedInviterChildren:164,contributorChildren:null,mappedContributorChildren:6,settledCents:'398183',pendingCents:null,recoveryCents:null,mappedRecordCount:'959',earningsCoverage:'UNKNOWN',needsReviewCount:'1',needsReviewCents:'100',legacyQualification:{eligibility:'ELIGIBLE',commissionFrozen:false,levelId:'2'}};
   globalThis.fetch=h.browser.fetch=async()=>json({items:[participant],total:'1',page:1,pageSize:20,hasMore:false,snapshot:null,scope:{network:'AVAILABLE'}});
   const m=await h.loader.ssrLoadModule('/src/views/distribution-dashboard-pages.tsx'),ui=await h.mount(m.DistributionParticipantsPage,{snapshot:snap([], 'boss', 'session', true),onOpenPath(){}});
-  for(const root of [ui.host.querySelector('table'),ui.host.querySelector('ul')]){assert(root);assert.match(root.textContent,/原资格有效 · 当前计佣待核/);assert.match(root.textContent,/计佣下级/);assert.match(root.textContent,/邀请注册/);assert.doesNotMatch(root.textContent,/直属计佣/);assert.doesNotMatch(root.textContent,/注册邀请/);assert.match(root.textContent,/已接入 164 · 总数待核/);assert.match(root.textContent,/¥3,981.83/);assert.match(root.textContent,/未核定/);assert.match(root.textContent,/待核对\s*1 笔/);assert.match(root.textContent,/原分销档位 ID 2/);assert.doesNotMatch(root.textContent,/¥0.00/);}
+  for(const root of [ui.host.querySelector('table'),ui.host.querySelector('ul')]){assert(root);assert.match(root.textContent,/原资格有效 · 当前计佣待核/);assert.match(root.textContent,/产生佣金人数/);assert.match(root.textContent,/邀请人数/);assert.match(root.textContent,/已确认 6 · 总数待核/);assert.doesNotMatch(root.textContent,/计佣下级|邀请注册/);assert.doesNotMatch(root.textContent,/直属计佣/);assert.doesNotMatch(root.textContent,/注册邀请/);assert.match(root.textContent,/已接入 164 · 总数待核/);assert.match(root.textContent,/¥3,981.83/);assert.match(root.textContent,/未核定/);assert.match(root.textContent,/待核对\s*1 笔/);assert.match(root.textContent,/原分销档位 ID 2/);assert.doesNotMatch(root.textContent,/¥0.00/);}
  }finally{await h.close();}
 });
 
@@ -223,8 +223,21 @@ test('policy read-only wrapper never mounts maintenance reads or write controls'
  const calls=[];globalThis.fetch=h.browser.fetch=async url=>{calls.push(String(url));return json(flat);};const ui=await h.mount(m.DistributionPolicyPage,{snapshot:snap(['personal.distribution.policy.read']),onOpenPath(){},onDirtyChange(){}});await settle();assert.equal(ui.host.querySelector('[aria-label="分销计提维护"]'),null);assert.equal(dashboardButton(ui.host,'执行到期入账'),undefined);assert(calls.every(p=>!p.includes('/maintenance/')));
 }));
 test('participant detail shows downline and own earnings',async()=>dashboardProbe(async(h,m)=>{
- const urls=[];globalThis.fetch=h.browser.fetch=async url=>{const u=String(url);urls.push(u);if(u.includes('/downline'))return json({subjectId:'old_user',type:'LEADER',knowledge:'KNOWN',total:'1',page:1,pageSize:10,items:[{userId:'child_one',name:'CHILD-ONE',boundAt:'2026-11-01T00:00:00.000Z',childCount:'0'}]});if(u.includes('/participants/old_user'))return json({participant:{userId:'old_user',name:'SUBJECT',knowledge:'KNOWN'},relations:[],downline:{knowledge:'KNOWN',leader:'1',inviter:'0'}});return json(dashboardPage(url,{items:[],total:'0',hasMore:false}));};
+ const urls=[];globalThis.fetch=h.browser.fetch=async url=>{const u=String(url);urls.push(u);if(u.includes('/downline'))return json({subjectId:'old_user',type:'INVITER',knowledge:'KNOWN',total:'1',page:1,pageSize:10,items:[{userId:'child_one',name:'CHILD-ONE',boundAt:'2026-11-01T00:00:00.000Z',childCount:'0'}]});if(u.includes('/participants/old_user'))return json({participant:{userId:'old_user',name:'SUBJECT',knowledge:'KNOWN'},relations:[],downline:{knowledge:'KNOWN',leader:'1',inviter:'0'}});return json(dashboardPage(url,{items:[],total:'0',hasMore:false}));};
  const detail=await h.mount(m.DistributionParticipantPage,{snapshot:dashboardWho(),onOpenPath(){},userId:'old_user'});await dashboardUntil(()=>detail.host.textContent.includes('CHILD-ONE'));assert.ok(urls.some(u=>u.includes('beneficiary=old_user')));assert.ok(urls.some(u=>u.includes('/downline')&&new URL(u,'http://fixture.invalid').searchParams.get('type')==='INVITER'));assert.match(detail.host.textContent,/佣金明细/);
+}));
+
+test('participant detail switches from invitees to confirmed contributors without showing the previous list',async()=>dashboardProbe(async(h,m)=>{
+ const urls=[];let release;
+ globalThis.fetch=h.browser.fetch=async url=>{const u=String(url);urls.push(u);if(u.includes('/downline')){
+  const type=new URL(u,'http://fixture.invalid').searchParams.get('type');
+  if(type==='COMMISSION_CONTRIBUTOR')return new Promise(resolve=>release=()=>resolve(json({subjectId:'old_user',type,knowledge:'PARTIAL',total:'1',page:1,pageSize:10,items:[{userId:'contributor',name:'CONTRIBUTOR',children:0,mappedChildren:0}]})));
+  return json({subjectId:'old_user',type:'INVITER',knowledge:'PARTIAL',total:'1',page:1,pageSize:10,items:[{userId:'invitee',name:'INVITED',children:0,mappedChildren:0}]});
+ }if(u.includes('/participants/old_user'))return json({participant:{userId:'old_user',name:'SUBJECT',knowledge:'KNOWN'},relations:[],downline:{knowledge:'PARTIAL',inviter:10,contributors:1,contributorKnowledge:'PARTIAL'}});return json(dashboardPage(url,{items:[],total:'0',hasMore:false}));};
+ const detail=await h.mount(m.DistributionParticipantPage,{snapshot:dashboardWho(),onOpenPath(){},userId:'old_user'});await dashboardUntil(()=>detail.host.textContent.includes('INVITED'));
+ await click(button(detail.host,'产生佣金人数'));await dashboardUntil(()=>!!release);assert.doesNotMatch(detail.host.textContent,/INVITED/);
+ await act(async()=>release());await dashboardUntil(()=>detail.host.textContent.includes('CONTRIBUTOR'));assert.match(detail.host.textContent,/仅列出已确认产生有效佣金的用户/);
+ assert.ok(urls.some(u=>u.includes('/downline')&&new URL(u,'http://fixture.invalid').searchParams.get('type')==='COMMISSION_CONTRIBUTOR'));
 }));
 
 test('dashboard participant list and detail clear private fields on denied refresh and root changes',async()=>dashboardProbe(async(h,m)=>{

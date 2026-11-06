@@ -45,6 +45,7 @@ function environment(patch: {
     if (sql.includes("clock_timestamp()::text AS at")) return rows([{ at: "2026-11-02T03:00:00.000000Z" }]);
     if (sql.includes("WITH rows AS")) { if (patch.revokeAfterRead) state.permissions = []; return rows(state.earnings); }
     if (sql.includes("/* original distribution qualifications */")) return rows();
+    if (sql.includes("contributor_records AS MATERIALIZED")) return rows();
     if (sql.includes("FROM dashboard_records WHERE beneficiary_id=ANY")) return rows();
     if (sql.includes("FROM zzsh_order.distribution_participant p")) return rows(state.participants);
     if (sql.includes("WHERE r.child_user_id=$1")) return rows([{ type: "DISTRIBUTION_LEADER", parent_user_id: "parent-1", name: "上级", source_type: "NATIVE", policy_version_id: "policy-1" }]);

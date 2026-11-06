@@ -19,12 +19,12 @@ export type DashboardOverview = {
   flow: { accrued: DashboardMetric; settled: DashboardMetric; orders: DashboardMetric; unconfirmedCreditCount: string; unconfirmedOccurredCount: string };
   trend: { date: string; cents: string; accruedCents: string; knowledge: 'KNOWN' | 'UNKNOWN' }[];
   participants: { participants: DashboardMetric; eligible: DashboardMetric; frozen: DashboardMetric; inviter: DashboardMetric; leader: DashboardMetric };
-  rankings: { earnings: DashboardRanking[]; directInvites: { items: DashboardRanking[]; knowledge: 'KNOWN' | 'UNKNOWN'; reasonCodes: string[] } };
+  rankings: { earnings: DashboardRanking[]; directInvites: { items: DashboardRanking[]; knowledge: 'KNOWN' | 'PARTIAL' | 'UNKNOWN'; reasonCodes: string[] } };
   recent: DashboardEarning[];
   reasonCodes: string[];
 };
-export type DashboardParticipant = { userId: string; name: string | null; eligibility: string; frozen: boolean; levelCode: string | null; levelName?: string | null; inviter: string; leader: string; sourceType: string; revision: string; leaderChildren: number | null; inviterChildren: number | null; mappedLeaderChildren?: number; mappedInviterChildren?: number; settledCents: string | null; pendingCents: string | null; recoveryCents: string | null; legacyQualification?: { eligibility: string; commissionFrozen: boolean | null; levelId: string | null } | null; recordCount?: string | null; mappedRecordCount?: string; earningsCoverage?: string; needsReviewCount?: string | null; needsReviewCents?: string | null; earningsReasonCodes?: string[] };
-export type DashboardParticipantDetail = { participant: DashboardParticipant; downline?: { knowledge: 'KNOWN' | 'PARTIAL'; leader?: number; inviter?: number }; relations: { type: string; parentUserId: string | null; parentName: string | null; sourceType: string | null; policyVersion: string | null }[] };
+export type DashboardParticipant = { userId: string; name: string | null; eligibility: string; frozen: boolean; levelCode: string | null; levelName?: string | null; inviter: string; leader: string; sourceType: string; revision: string; leaderChildren: number | null; inviterChildren: number | null; mappedLeaderChildren?: number; mappedInviterChildren?: number; contributorChildren?: number | null; mappedContributorChildren?: number; settledCents: string | null; pendingCents: string | null; recoveryCents: string | null; legacyQualification?: { eligibility: string; commissionFrozen: boolean | null; levelId: string | null } | null; recordCount?: string | null; mappedRecordCount?: string; earningsCoverage?: string; needsReviewCount?: string | null; needsReviewCents?: string | null; earningsReasonCodes?: string[] };
+export type DashboardParticipantDetail = { participant: DashboardParticipant; downline?: { knowledge: 'KNOWN' | 'PARTIAL'; leader?: number; inviter?: number; contributors?: number; contributorKnowledge?: 'KNOWN' | 'PARTIAL' }; relations: { type: string; parentUserId: string | null; parentName: string | null; sourceType: string | null; policyVersion: string | null }[] };
 
 const dateShift = (date: string, days: number) => new Date(Date.parse(`${date}T00:00:00Z`) + days * 86400_000).toISOString().slice(0, 10);
 export function defaultDashboardFilters(): DashboardFilters {
@@ -83,8 +83,8 @@ export function participantLevelLabel(item: DashboardParticipant) {
   if (item.levelName) return item.levelName;
   return item.legacyQualification?.levelId ? `原分销档位 ID ${item.legacyQualification.levelId}` : item.levelCode ?? (item.sourceType === 'LEGACY_MYSQL' ? '原档位待核' : '无档位记录');
 }
-export function participantChildrenLabel(total: number | null, mapped?: number) {
-  return total !== null ? String(total) : mapped === undefined ? '待核' : `已接入 ${mapped} · 总数待核`;
+export function participantChildrenLabel(total: number | null, mapped?: number, partialLabel = '已接入') {
+  return total !== null ? String(total) : mapped === undefined ? '待核' : `${partialLabel} ${mapped} · 总数待核`;
 }
 
 async function read<T>(path: string, query: URLSearchParams, signal?: AbortSignal): Promise<T> {
@@ -95,7 +95,7 @@ export const readDashboardOverview = (filters: DashboardFilters, signal?: AbortS
 export const readDashboardEarnings = (filters: DashboardFilters, snapshot: string | null, signal?: AbortSignal) => read<{ items: DashboardEarning[]; total: string; page: number; pageSize: number; hasMore: boolean; snapshot: string | null; asOf: string; snapshotVersion: string; scope: DashboardScope }>('earnings', dashboardQuery(filters, snapshot ? { snapshot } : {}), signal);
 export const readDashboardParticipants = (filters: DashboardFilters, snapshot: string | null, signal?: AbortSignal) => read<{ items: DashboardParticipant[]; scope: DashboardScope; total: string; page: number; pageSize: number; hasMore: boolean; snapshot: string | null; asOf: string; snapshotVersion: string }>('participants', dashboardQuery(filters, snapshot ? { snapshot } : {}), signal);
 export const readDashboardParticipant = (userId: string, signal?: AbortSignal) => read<DashboardParticipantDetail>('participants/' + encodeURIComponent(userId), new URLSearchParams(), signal);
-export type DashboardDownlineType = 'DISTRIBUTION_LEADER' | 'INVITER';
+export type DashboardDownlineType = 'COMMISSION_CONTRIBUTOR' | 'INVITER';
 export type DashboardDownline = { subjectId: string; type: DashboardDownlineType; knowledge: 'KNOWN' | 'PARTIAL'; total: string; page: number; pageSize: number; items: { userId: string; name: string | null; sourceType: string | null; boundAt: string | null; participant: { eligibility: string; frozen: boolean; levelCode: string | null; levelName: string | null } | null; children: number | null; mappedChildren?: number }[] };
 export const readDashboardParticipantDownline = (userId: string, type: DashboardDownlineType, page: number, pageSize: number, signal?: AbortSignal) => read<DashboardDownline>('participants/' + encodeURIComponent(userId) + '/downline', new URLSearchParams({ type, page: String(page), pageSize: String(pageSize) }), signal);
 export const readDistributionRelations = (userId: string, signal?: AbortSignal) => adminRequest<{ subjectId: string; participant: { knowledge: string; eligibility: string; commissionFrozen: boolean | null; legacyLevelCode: string | null }; relations: { type: string; knowledge: string; parentUserId: string | null; parentName: string | null; sourceType: string | null; policyVersion: string | null }[]; reasonCodes: string[] }>(`/distribution/relations/${encodeURIComponent(userId)}`, undefined, 'GET', {}, signal);
