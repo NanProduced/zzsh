@@ -7,6 +7,7 @@ import * as yunxinRoutes from '../src/im/yunxin-routes';
 import * as consultation from '../src/im/consultation';
 import * as authSecurity from '../src/auth/auth-security';
 import * as domainSummary from '../src/auth/admin-domain-summary-routes';
+import * as distributionDashboard from "../src/finance/admin-distribution-dashboard-routes";
 
 const ADMIN_ORIGIN = "http://127.0.0.1:4291";
 const API_ORIGIN = "http://127.0.0.1:4292";
@@ -172,3 +173,17 @@ test("admin BFF keeps rejecting cross-origin and bearer requests before any IM f
  assert.deepEqual(calls,['/api/v1/admin/users/overview-stats?accountStatus=ACTIVE','/api/v1/admin/orders/overview-stats?accountStatus=ACTIVE']);
  assert.equal((await route('/users/overview-stats','POST')).status,404);assert.equal((await route('/orders/overview-stats','DELETE')).status,404);assert.equal(calls.length,2);
  });
+
+
+test("admin BFF forwards exact paginated downline reads and keeps method boundaries",async t=>{
+ const forwarded:string[]=[];
+ t.mock.method(distributionDashboard,"handleAdminDistributionDashboard",async(request:any,response:any)=>{
+  forwarded.push(request.originalUrl);response.status(200).json({items:[]});
+ });
+ const path="/distribution/participants/user-1/downline?type=INVITER&page=2&pageSize=10";
+ assert.equal((await route(path)).status,200);
+ assert.deepEqual(forwarded,["/api/v1/admin/distribution/participants/user-1/downline?type=INVITER&page=2&pageSize=10"]);
+ assert.equal((await route(path,"POST")).status,404);
+ assert.equal((await route("/distribution/participants/user-1/downline/extra")).status,404);
+ assert.equal(forwarded.length,1);
+});

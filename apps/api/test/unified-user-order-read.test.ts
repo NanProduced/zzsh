@@ -10,6 +10,10 @@ test("unified query validates subject-independent bounded filters",()=>{
   assert.throws(()=>parseUnifiedOrderQuery(new URLSearchParams(query)),Error,query);
  }
  assert.deepEqual(parseUnifiedOrderQuery(new URLSearchParams()),{party:"renter",limit:20});
+assert.deepEqual(parseUnifiedOrderQuery(new URLSearchParams("view=IN_PROGRESS")),{party:"renter",limit:20,view:"IN_PROGRESS"});
+assert.throws(()=>parseUnifiedOrderQuery(new URLSearchParams("status=PAID&view=IN_PROGRESS")),Error);
+assert.throws(()=>parseUnifiedOrderQuery(new URLSearchParams("view=OTHER")),Error);
+
  assert.deepEqual(parseUnifiedOrderQuery(new URLSearchParams("party=owner&orderNo=%E6%97%A7_%25%E5%8D%95&createdFrom=2026-09-01&createdTo=2026-11-03&stage=UNKNOWN")),{party:"owner",limit:20,orderNo:"旧_%单",createdFrom:"2026-09-01",createdTo:"2026-11-03",stage:"UNKNOWN"});
 });
 test("unified keyset binds subject, filters and source while retaining nullable dates",async()=>{
@@ -25,7 +29,7 @@ test("unified keyset binds subject, filters and source while retaining nullable 
  assert.match(sql,/l.renter_user_id=\$1/);assert.match(sql,/NULLS LAST/);assert.match(sql,/x.origin COLLATE "C"/);
  const cursor=result.nextCursor!;
  await listUnifiedUserOrders(client,"renter",{party:"renter",limit:1,cursor});
- assert.deepEqual(params.slice(3),[true,null,"LEGACY","same-id",2,null,null,null]);
+ assert.deepEqual(params.slice(3),[true,null,"LEGACY","same-id",2,null,null,null,null]);
  for(const input of [{user:"stranger",party:"renter" as const},{user:"renter",party:"owner" as const}]){
   await assert.rejects(()=>listUnifiedUserOrders(client,input.user,{party:input.party,limit:1,cursor}),e=>(e as {status:number}).status===409);
  }
@@ -103,5 +107,40 @@ test("server applies subject, literal order number and Beijing date bounds befor
  assert.equal(result.subjectId,"owner-1");assert.deepEqual(result.items,[]);
  assert.match(sql,/o.owner_user_id=\$1/);assert.match(sql,/l.owner_user_id=\$1/);
  assert.match(sql,/strpos\(lower\(o.display_no\),lower\(\$9\)\)/);assert.match(sql,/strpos\(lower\(l.original_order_no\),lower\(\$9\)\)/);
- assert.match(sql,/AT TIME ZONE 'Asia\/Shanghai'/);assert.deepEqual(params.slice(8),["旧_%单","2026-09-01","2026-11-03"]);
+ assert.match(sql,/AT TIME ZONE 'Asia\/Shanghai'/);assert.deepEqual(params.slice(8),["旧_%单","2026-09-01","2026-11-03",null]);
+});
+
+test("owner refund summary authorizes the owner and exposes only minimal progress", async()=>{
+ const {readOwnerRefundMinimalSummary}=await import("../src/finance/owner-refund-summary-read");
+ const actor={userId:"owner-1",sessionId:"session-1"};
+ const calls:string[]=[];
+ const client={query:async(sql:string)=>{
+  calls.push(sql);
+  if(sql.includes('SELECT "suspended"'))return{rows:[{suspended:false}]};
+  if(sql.includes('user_identity_state'))return{rows:[]};
+  if(sql.includes('"session"'))return{rows:[{}],rowCount:1};
+  if(sql.includes('o.owner_user_id'))return{rows:[{status:"CANCELLED",owner_user_id:"owner-1",as_of:"2026-11-06T00:00:00.000000Z"}]};
+  if(sql.includes('channel_refund_intent'))return{rows:[{state:"PROCESSING",count:"1"}]};
+  throw Error("unexpected query");
+ }} as any;
+ const result=await readOwnerRefundMinimalSummary(client,actor,{orderId:"order-1"});
+ assert.equal(result.progress,"PROCESSING");assert.equal(result.openIntentCount,1);
+ assert.deepEqual(Object.keys(result).sort(),["asOf","contractVersion","label","note","openIntentCount","orderId","orderStatus","progress","subjectId"].sort());
+ calls.length=0;
+ await assert.rejects(()=>readOwnerRefundMinimalSummary(client,{...actor,userId:"stranger"},{orderId:"order-1"}),(error:any)=>error.status===404);
+ assert.equal(calls.some(sql=>sql.includes('channel_refund_intent')),false,"unauthorized actor cannot read refund facts");
+});
+
+test("work-view predicate keeps paid or unpaid active orders and only proven unresolved native refunds", async()=>{
+ let sql="",args:unknown[]=[];
+ const client={query:async(s:string,v:unknown[]=[])=>{
+  if(s.includes("to_regclass"))return{rows:[{ready:false}]};
+  if(s.includes("WITH visible_orders")){sql=s;args=v;return{rows:[]};}
+  return{rows:[]};
+ }} as any;
+ await listUnifiedUserOrders(client,"owner-1",{party:"owner",limit:20,view:"IN_PROGRESS"});
+ assert.equal(args[11],"IN_PROGRESS");
+ assert.match(sql,/o\.owner_user_id=\$1/);
+ assert.match(sql,/o\.status IN \('PENDING_PAYMENT','PAID'\)/);
+ assert.match(sql,/channel_refund_intent[\s\S]*i\.order_id=o\.id[\s\S]*'REVIEW_REQUIRED'/);
 });

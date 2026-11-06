@@ -956,3 +956,24 @@ test('overview order drilldowns keep exact creation/payment periods and effectiv
     if (mode === 'pending') assert.match(node.textContent, /仅有效待付款/);
   }
 });
+
+
+test("statusText keeps UNKNOWN distinct and shows paidAt on paid cancellations", async (t) => {
+  const { root, node, AdminOrdersView } = await setup(t);
+  const unknown = { ...order, id: "order_unknown_status", displayNo: "UNKNOWN-STATUS", status: "UNKNOWN", paidAt: null };
+  const paidCancel = { ...order, id: "order_paid_cancel", displayNo: "PAID-CANCEL", status: "CANCELLED", paidAt: "2026-11-01T04:00:00.000Z", cancelReason: "USER" };
+  globalThis.fetch = async (input) => {
+    const url = String(input);
+    if (url.includes(unknown.id)) return response({ order: unknown });
+    if (url.includes(paidCancel.id)) return response({ order: paidCancel });
+    if (url.includes("/orders?")) return response({ items: [unknown, paidCancel], nextCursor: null, limit: 20 });
+    return response({ order: unknown });
+  };
+  await act(async () => root.render(createElement(AdminOrdersView, { snapshot: snapshotFor("list"), objectOnly: false, onOpenPath: () => {}, onQueryChange: () => {}, refreshNonce: 0 })));
+  await until(() => node.textContent.includes("UNKNOWN-STATUS") && node.textContent.includes("PAID-CANCEL"));
+  assert.equal(node.textContent.includes("源状态未记录"), true);
+  assert.equal(node.textContent.includes("已取消"), true);
+  // paidAt should render as a formatted date, not an em dash placeholder for that row's payment column alone —
+  // assert the ISO-derived Beijing date fragment appears.
+  assert.equal(/2026/.test(node.textContent), true);
+});

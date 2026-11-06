@@ -33,7 +33,6 @@ export type WorkspaceRouteKind =
   | "distribution-earnings"
   | "distribution-participants"
   | "distribution-participant"
-  | "distribution-relations"
   | "distribution-policy"
   | "account"
   | "settings"
@@ -124,7 +123,6 @@ const LIST_TABS: Record<string, Omit<WorkspaceTab, "query">> = {
   "distribution-overview": { id: "distribution-overview", title: "分销概览", path: "/distribution", closable: true, kind: "distribution-overview" },
   "distribution-earnings": { id: "distribution-earnings", title: "佣金明细", path: "/distribution/earnings", closable: true, kind: "distribution-earnings" },
   "distribution-participants": { id: "distribution-participants", title: "分销商", path: "/distribution/participants", closable: true, kind: "distribution-participants" },
-  "distribution-relations": { id: "distribution-relations", title: "关系查询", path: "/distribution/relations", closable: true, kind: "distribution-relations" },
   "distribution-policy": { id: "distribution-policy", title: "分销政策", path: "/distribution/policy", closable: true, kind: "distribution-policy" },
   account: { id: "account", title: "账号安全", path: "/account", closable: true, kind: "account" },
   settings: { id: "settings", title: "设置", path: "/settings", closable: true, kind: "settings" },
@@ -197,7 +195,6 @@ export function parseWorkspacePath(pathname: string): { kind: WorkspaceRouteKind
   if (path === "/distribution") return { kind: "distribution-overview", tabId: "distribution-overview", path, title: "分销概览" };
   if (path === "/distribution/earnings") return { kind: "distribution-earnings", tabId: "distribution-earnings", path, title: "佣金明细" };
   if (path === "/distribution/participants") return { kind: "distribution-participants", tabId: "distribution-participants", path, title: "分销商" };
-  if (path === "/distribution/relations") return { kind: "distribution-relations", tabId: "distribution-relations", path, title: "关系查询" };
   if (path === "/distribution/policy" || path === "/distribution-policy") return { kind: "distribution-policy", tabId: "distribution-policy", path: "/distribution/policy", title: "分销政策" };
   const distributionParticipant = path.match(/^\/distribution\/participants\/([^/]+)$/);
   if (distributionParticipant) {
@@ -267,6 +264,12 @@ export function tabFromLocation(pathname: string, search = ""): WorkspaceTab {
     if (query.section === "relations") distributionPath = "/distribution/relations";
     if (["earnings", "relations", "policy"].includes(query.section ?? "")) delete query.section;
   }
+  // 关系查询已并入分销商详情：旧链接带 userId 则直达详情，否则回分销商列表。
+  if (distributionPath === "/distribution/relations") {
+    const target = query.userId && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(query.userId) ? query.userId : "";
+    delete query.userId;
+    distributionPath = target ? `/distribution/participants/${encodeURIComponent(target)}` : "/distribution/participants";
+  }
   const parsed = parseWorkspacePath(legacyFinanceQuery ? "/finance/search" : distributionPath);
   const base = LIST_TABS[parsed.tabId];
   if (base) return { ...base, query };
@@ -308,7 +311,6 @@ export function canOpenKind(kind: WorkspaceRouteKind, nav: NavPermission): boole
   if (kind === "support" || kind === "support-mine") return has("im.support.read") || nav.isBoss;
   if (kind === "support-management" || kind === "support-overview" || kind === "support-patrol" || kind === "support-settings") return has("im.support.management.read") || nav.isBoss;
   if (kind === "distribution-overview" || kind === "distribution-earnings" || kind === "distribution-participants" || kind === "distribution-participant") return nav.isBoss || has("distribution.dashboard.read");
-  if (kind === "distribution-relations") return nav.isBoss || has("user.directory.read") && has("personal.distribution.policy.read");
   if (kind === "distribution-policy") return nav.isBoss || ["personal.distribution.policy.read", "personal.distribution.policy.manage"].some(has);
   if (kind === "membership-growth") return nav.isBoss || ["membership.policy.draft", "membership.policy.publish", "membership.growth.read.summary"].some(has) || has("approval.request.create") && has("membership.entitlement.request");
   if (kind === "admins" || kind === "admin-object") return has("admin.account.read") || nav.isBoss;

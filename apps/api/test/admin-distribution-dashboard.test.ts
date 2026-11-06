@@ -14,6 +14,7 @@ import {
   readAdminDistributionOverview,
   readUnifiedDistributionOverview,
   readAdminDistributionParticipants,
+  readAdminDistributionDownline,
   stockMetrics,
   type DashboardFilters,
 } from "../src/finance/admin-distribution-dashboard";
@@ -63,6 +64,7 @@ test("version hashes visible revisions and optional sources, without unrelated e
   await dashboardVersion(client, dashboardContext(true), true);
   assert.match(calls.at(-1)!.sql, /p\.revision,p\.eligibility,p\.commission_frozen/);
   assert.match(calls.at(-1)!.sql, /r\.parent_user_id,r\.child_user_id/);
+  assert.match(calls.at(-1)!.sql, /lo\.source_entity='la_order'/, 'version join covers the frozen legacy-order key');
   assert.match(calls.at(-1)!.sql, /u\.name/);
 });
 
@@ -73,6 +75,7 @@ test("hidden directory names cannot participate in dashboard list searches; ID s
     if (sql.includes("to_regclass")) return { rows: [{ native: true, legacy: true }] };
     if (sql.includes("WITH visible_earnings AS")) return { rows: [{ native: "n" }] };
     if (sql.includes("clock_timestamp")) return { rows: [{ at: "2026-11-02T00:00:00Z" }] };
+    if (sql.includes("participant_amounts") && sql.includes("ORDER BY")) return { rows: [] };
     if(sql.includes("count(*)::text AS total"))return {rows:[{total:"0"}]};
     if(sql.startsWith('WITH legacy_records'))return {rows:[unifiedAggregate()]};
     return { rows: [] };
@@ -82,10 +85,12 @@ test("hidden directory names cannot participate in dashboard list searches; ID s
   const list = calls.find(x => x.sql.includes("WITH rows AS"))!.sql;
   assert.doesNotMatch(list.slice(list.indexOf("FROM rows WHERE")), /beneficiary_name/);
   assert.match(list, /lo\.id AS allowed_order_id/);
+  assert.match(list, /lo\.source_entity='la_order'/, 'commission join covers the frozen legacy-order key');
   assert.doesNotMatch(list, /::bigint/);
   await readAdminDistributionParticipants(client, dashboardContext(false), f);
-  const participants = calls.filter(x => x.sql.includes("ORDER BY p.user_id LIMIT")).at(-1)!.sql;
+  const participants = calls.filter(x => x.sql.includes("ORDER BY COALESCE(a.record_count,0) DESC")).at(-1)!.sql;
   assert.doesNotMatch(participants.slice(participants.indexOf("WHERE lower")), /u\.name/);
+  assert.match(participants, /participant_amounts/);
   assert.ok(calls.some(x => x.values.includes("%user-1%")));
 });
 
@@ -173,7 +178,7 @@ test("legacy invitation audit reports v1 readiness and the v2 level-mapping gap 
 });
 
 test("distribution snapshot binds source/period but allows page navigation", () => {
-  const filters: DashboardFilters = { from: "2026-10-01", to: "2026-10-31", source: "NATIVE", state: "ALL", role: "ALL", q: "", page: 1, pageSize: 20, rankingBasis: "CURRENT_SETTLED_STOCK", rankingLimit: 10 };
+  const filters: DashboardFilters = { from: "2026-10-01", to: "2026-10-31", source: "NATIVE", state: "ALL", role: "ALL", q: "", page: 1, pageSize: 20, rankingBasis: "CURRENT_SETTLED_STOCK", rankingLimit: 10, sort: "recordCount", order: "desc" };
   const context = { actor: { userId: "admin", sessionId: "session" }, authorizationKey: "access", scope: { isBoss: true, games: "ALL_GAMES", gameIds: [], network: "AVAILABLE", reasonCodes: [] } } as any;
   const key = { keyId: "test", secret: "x".repeat(32) };
   const first = distributionSnapshot("v1", "2026-11-02T00:00:00Z", filters, context, key);
@@ -308,7 +313,7 @@ test("native stock keeps role rows in earnings but counts each order once", asyn
 });
 
 function filtersForTest(): DashboardFilters {
-  return { from: "2026-10-01", to: "2026-10-31", source: "ALL", state: "ALL", role: "ALL", q: "", page: 1, pageSize: 20, rankingBasis: "CURRENT_SETTLED_STOCK", rankingLimit: 10 };
+  return { from: "2026-10-01", to: "2026-10-31", source: "ALL", state: "ALL", role: "ALL", q: "", page: 1, pageSize: 20, rankingBasis: "CURRENT_SETTLED_STOCK", rankingLimit: 10, sort: "recordCount", order: "desc" };
 }
 
 test('participants include historical commissions and leave incomplete child totals unknown',async()=>{
@@ -316,8 +321,7 @@ test('participants include historical commissions and leave incomplete child tot
   if(sql.includes('to_regclass'))return{rows:[{native:true,legacy:true,duties:true}]};
   if(sql.includes('WITH visible_earnings AS'))return{rows:[{native:'n'}]};
   if(sql.includes('clock_timestamp'))return{rows:[{at:'2026-11-03T00:00:00Z'}]};
-  if(sql.includes('ORDER BY p.user_id LIMIT'))return{rows:[{user_id:'old_user',eligibility:'UNKNOWN',source_type:'LEGACY_MYSQL',invitees_knowledge:'UNKNOWN',leader_children:0,inviter_children:0,total:1}]};
-  if(sql.startsWith('WITH legacy_records'))return{rows:[{beneficiary_id:'old_user',record_count:'3',settled_cents:'9007199254740993',pending_cents:'25',recovery_cents:'0',review_cents:'100',review_count:'1'}]};
+  if(sql.includes('participant_amounts')&&sql.includes('ORDER BY'))return{rows:[{user_id:'old_user',eligibility:'UNKNOWN',source_type:'LEGACY_MYSQL',invitees_knowledge:'UNKNOWN',leader_children:0,inviter_children:0,record_count:'3',settled_cents:'9007199254740993',pending_cents:'25',recovery_cents:'0',review_cents:'100',review_count:'1',total:1}]};
   return{rows:[]};
  }} as any;
  const result=await readAdminDistributionParticipants(client,dashboardContext(),filtersForTest()),p=result.items[0]!;
@@ -328,11 +332,11 @@ test('participants include historical commissions and leave incomplete child tot
 test('participant zero amounts require the existing exact history coverage proof',async()=>{
  let covered=false;const client={query:async(sql:string)=>{
   if(sql.includes('finance history coverage installed'))return{rows:[{installed:true}]};
-  if(sql.includes('finance history coverage exact target'))return{rows:[{id:'coverage_one',source_count:0,imported_count:0,isolated_count:0,imported_set_digest:'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855',actual_digest:'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855',actual_count:'0',invalid_count:'0',outside_count:'0',cutoff:'2026-11-03T00:00:00.000Z'}]};
+  if(sql.includes('finance history coverage exact target'))return{rows:[{user_id:'old_user',id:'coverage_one',source_count:0,imported_count:0,isolated_count:0,imported_set_digest:'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855',actual_digest:'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855',actual_count:'0',invalid_count:'0',outside_count:'0',cutoff:'2026-11-03T00:00:00.000Z'}]};
   if(sql.includes('to_regclass'))return{rows:[{native:true,legacy:true,coverage:covered}]};
   if(sql.includes('WITH visible_earnings AS'))return{rows:[{native:'n'}]};
   if(sql.includes('clock_timestamp'))return{rows:[{at:'2026-11-03T00:00:00Z'}]};
-  if(sql.includes('ORDER BY p.user_id LIMIT'))return{rows:[{user_id:'old_user',eligibility:'UNKNOWN',source_type:'LEGACY_MYSQL',invitees_knowledge:'KNOWN',leader_children:0,inviter_children:0,total:1}]};
+  if(sql.includes('participant_amounts')&&sql.includes('ORDER BY'))return{rows:[{user_id:'old_user',eligibility:'UNKNOWN',source_type:'LEGACY_MYSQL',invitees_knowledge:'KNOWN',leader_children:0,inviter_children:0,record_count:'0',settled_cents:'0',pending_cents:'0',recovery_cents:'0',review_cents:'0',review_count:'0',total:1}]};
   return{rows:[]};
  }} as any;
  const read=()=>readAdminDistributionParticipants(client,dashboardContext(),filtersForTest());
@@ -349,6 +353,102 @@ test("empty tail pages preserve the same filtered total and snapshot while a gen
   const read=kind==='earnings'?readAdminDistributionEarnings:readAdminDistributionParticipants,r=await read(client,context,f,key);
   assert.equal(r.total,expected);assert.equal(r.items.length,0);assert.equal(r.hasMore,false);assert.ok(r.snapshot);
   const page=calls.find(c=>c.sql.includes(' OVER()'))!,count=calls.find(c=>c.sql.includes('count(*)::text AS total'))!;
-  assert.deepEqual(count.values,page.values.slice(0,-2),'same bindings without LIMIT/OFFSET');assert.match(count.sql,/%|LIKE/);assert.ok(count.values.includes('%user-1%'));
+  if(kind==='earnings')assert.deepEqual(count.values,page.values.slice(0,-2),'same bindings without LIMIT/OFFSET');
+  else{assert.deepEqual(count.values,['%user-1%'],'participant empty-page count skips amount-scope bindings');assert.match(page.sql,/participant_amounts/);assert.match(page.sql,/ORDER BY COALESCE\(a\.record_count,0\) DESC/);}
+  assert.match(count.sql,/%|LIKE/);assert.ok(count.values.includes('%user-1%'));
  }}
+});
+
+test('participants sort by settled/pending and keep user_id tiebreak',async()=>{
+ const calls:{sql:string;values:unknown[]}[]=[];
+ const client={query:async(sql:string,values:unknown[]=[])=>{
+  calls.push({sql,values});
+  if(sql.includes('to_regclass'))return{rows:[{native:true,legacy:true}]};
+  if(sql.includes('WITH visible_earnings AS'))return{rows:[{native:'n'}]};
+  if(sql.includes('clock_timestamp'))return{rows:[{at:'2026-11-02T00:00:00Z'}]};
+  if(sql.includes('participant_amounts')&&sql.includes('ORDER BY'))return{rows:[{user_id:'u1',eligibility:'ELIGIBLE',commission_frozen:false,source_type:'NATIVE',invitees_knowledge:'KNOWN',leader_children:0,inviter_children:0,record_count:'1',settled_cents:'10',pending_cents:'2',recovery_cents:'0',review_cents:'0',review_count:'0',total:1}]};
+  return{rows:[]};
+ }} as any;
+ await readAdminDistributionParticipants(client,dashboardContext(),{...filtersForTest(),sort:'settledCents',order:'asc'});
+ const settled=calls.find(c=>c.sql.includes('ORDER BY COALESCE(a.settled_cents,0) ASC'))!;
+ assert.match(settled.sql,/p\.user_id COLLATE "C" ASC/);
+ assert.match(settled.sql,/LEFT JOIN \(\s*SELECT parent_user_id/);
+ calls.length=0;
+ await readAdminDistributionParticipants(client,dashboardContext(),{...filtersForTest(),sort:'pendingCents',order:'desc'});
+ assert.ok(calls.some(c=>c.sql.includes('ORDER BY COALESCE(a.pending_cents,0) DESC')));
+ assert.equal(parseDashboardFilters(new URLSearchParams('')).sort,'recordCount');
+ assert.equal(parseDashboardFilters(new URLSearchParams('')).order,'desc');
+ assert.throws(()=>parseDashboardFilters(new URLSearchParams('sort=bogus')),(e:any)=>e.status===400);
+});
+
+test("participant earnings bind the exact beneficiary without altering other filters", async () => {
+ const calls: {sql:string;values:unknown[]}[]=[];
+ const client={query:async(sql:string,values:unknown[]=[])=>{
+  calls.push({sql,values});
+  if(sql.includes("to_regclass"))return{rows:[{native:true,legacy:true}]};
+  if(sql.includes("WITH visible_earnings AS"))return{rows:[{native:"n"}]};
+  if(sql.includes("clock_timestamp"))return{rows:[{at:"2026-11-02T00:00:00Z"}]};
+  if(sql.includes("count(*)::text AS total"))return{rows:[{total:"0"}]};
+  return{rows:[]};
+ }} as any;
+ const filters=parseDashboardFilters(new URLSearchParams("beneficiary=user-42&state=SETTLED&q=order"));
+ await readAdminDistributionEarnings(client,dashboardContext(),filters);
+ const page=calls.find(call=>call.sql.includes("WITH rows AS")&&call.sql.includes("LIMIT"))!;
+ const match=/beneficiary_id=\$(\d+)::text/.exec(page.sql);
+ assert.ok(match,"beneficiary must use a PostgreSQL parameter");
+ assert.equal(page.values[Number(match[1])-1],"user-42");
+ assert.ok(page.values.includes("SETTLED"));
+ assert.ok(page.values.includes("%order%"));
+});
+
+
+test("downline combines migrated and new relations, without inventing old dates or complete counts",async()=>{
+ const calls:string[]=[];
+ const client={query:async(sql:string)=>{
+  calls.push(sql);
+  if(sql.includes('SELECT invitees_knowledge'))return{rows:[{invitees_knowledge:'KNOWN'}]};
+  if(sql.includes('FROM zzsh_order.invitation_relation r'))return{rows:[
+   {child_user_id:'old-child',source_type:'LEGACY_MYSQL',bound_at:'2026-11-05T00:00:00Z',invitees_knowledge:'UNKNOWN',children:2,total:2},
+   {child_user_id:'new-child',source_type:'NATIVE_REGISTRATION',bound_at:'2026-11-06T00:00:00Z',invitees_knowledge:'KNOWN',children:3,total:2}
+  ]};
+  return{rows:[]};
+ }} as any;
+ const result=await readAdminDistributionDownline(client,dashboardContext(),'parent',new URLSearchParams('type=INVITER'));
+ assert.equal(result.total,'2');
+ assert.deepEqual(result.items.map((row:any)=>row.sourceType),['LEGACY_MYSQL','NATIVE_REGISTRATION']);
+ assert.equal(result.items[0]?.boundAt,null,'legacy import time is not its original invitation time');
+ assert.equal(result.items[0]?.children,null);assert.equal(result.items[0]?.mappedChildren,2);
+ assert.equal(result.items[1]?.children,3);assert.equal(result.items[1]?.boundAt,'2026-11-06T00:00:00.000Z');
+ const sql=calls.find(value=>value.includes('FROM zzsh_order.invitation_relation r'))!;
+ assert.doesNotMatch(sql,/r\.source_type\s*=/,'source does not restrict the combined count');
+ await assert.rejects(()=>readAdminDistributionDownline(client,dashboardContext(false,false),'parent',new URLSearchParams()),(error:any)=>error.status===403);
+});
+
+
+test("one participant detail narrows source proof and does not hash the unrelated full network",async()=>{
+ const calls:{sql:string;values:unknown[]}[]=[];
+ const client={query:async(sql:string,values:unknown[]=[])=>{
+  calls.push({sql,values});
+  if(sql.includes('to_regclass'))return{rows:[{native:true,legacy:true,duties:true}]};
+  if(sql.includes('clock_timestamp'))return{rows:[{at:'2026-11-06T00:00:00Z'}]};
+  if(sql.includes('participant_amounts'))return{rows:[{user_id:'user-42',total:1,record_count:'0',settled_cents:'0',pending_cents:'0',recovery_cents:'0',review_cents:'0',review_count:'0'}]};
+  return{rows:[]};
+ }} as any;
+ await readAdminDistributionParticipants(client,dashboardContext(),filtersForTest(),undefined,null,'user-42');
+ assert.equal(calls.some(call=>call.sql.includes('WITH visible_earnings AS')),false);
+ const page=calls.find(call=>call.sql.includes('participant_amounts'))!;
+ assert.match(page.sql,/p\.user_id=\$3::text/);
+ assert.match(page.sql,/l\.user_id=\$3::text/);
+ assert.match(page.sql,/e\.beneficiary_user_id=\$3::text/);
+ assert.equal(page.values[2],'user-42');
+});
+
+test("participant earnings pagination versions every relevant source for the same subject",async()=>{
+ const calls:{sql:string;values:unknown[]}[]=[];
+ const c={query:async(sql:string,values:unknown[]=[])=>{calls.push({sql,values});return{rows:[{native:'n',events:'e',legacy:'l',participants:'p',relations:'r',effects:'x',coverage:'c'}]};}} as any;
+ await dashboardVersion(c,dashboardContext(),true,true,true,'user-42');
+ const query=calls[0]!;
+ assert.deepEqual(query.values,['admin-1',true,'user-42']);
+ for(const column of ['e.beneficiary_user_id','p.user_id','l.user_id','c.user_id'])assert.ok(query.sql.includes(column+'=$3::text'),column);
+ assert.ok(query.sql.includes('r.parent_user_id=$3::text OR r.child_user_id=$3::text'));
 });

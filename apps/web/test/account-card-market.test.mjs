@@ -321,7 +321,7 @@ test("the published base ratio is shown as-is and never re-derived from amounts"
   await without.unmount();
 
   assert.equal(card.authoritativeRatioLabel("44.10000000"), "44.1万/元");
-  assert.equal(card.authoritativeRatioLabel("37", true), "基础 37万/元");
+  assert.equal(card.authoritativeRatioLabel("37", true), "37万/元");
   assert.equal(card.authoritativeRatioLabel("0"), "0万/元");
   assert.equal(card.authoritativeRatioLabel("not-a-number"), null);
   assert.equal(card.authoritativeRatioLabel(null), null);
@@ -440,6 +440,28 @@ test("grid mode exposes the same summary with the existing more pill", async () 
   assert.match(more.textContent, /\+2/);
   const full = [...view.query(".account-resource-pills [data-popover] .resources-grid-2x2").querySelectorAll(".resources-cell")];
   assert.equal(full.length, 8, "grid popover lists every declared row");
-  assert.match(view.query(".breakdown-note").textContent, /39万\/元 · 基准比例/);
+  assert.match(view.query(".breakdown-note").textContent, /哈夫币比例\s*39万\/元/);
   await view.unmount();
+});
+test("list and grid show term, daily consumption and ratio as compact badges", async () => {
+  const listing = realListing({
+    termOption: { code: "daily-10m", displayName: "每日消耗10M", dailyConsumption: { quantity: "10000000", unit: "HAFF_BASE" } },
+  });
+  const data = listingView.toListingCard(listing);
+  for (const viewMode of ["list", "grid"]) {
+    const view = await renderCard(data, { viewMode });
+    try {
+      const badges = view.all(".account-fact-badges .account-tag-pill--fact").map((node) => node.textContent.trim());
+      assert.deepEqual(badges, ["租期20天", "10M/天", "39万/元"]);
+      if (viewMode === "list") {
+        assert.equal(view.query(".finance-row--ratio .finance-label").textContent.trim(), "哈夫币比例");
+        assert.equal(view.query(".finance-row--ratio .finance-val").textContent.trim(), "39万/元");
+        assert.ok(!/基础|基准|租期规则/.test(view.query(".finance-row--ratio").textContent));
+        assert.ok(!/租期规则/.test(view.query(".account-list-subline").textContent));
+      } else {
+        assert.match(view.query(".breakdown-note").textContent, /哈夫币比例\s*39万\/元/);
+        assert.ok(!/基准/.test(view.query(".breakdown-note").textContent));
+      }
+    } finally { await view.unmount(); }
+  }
 });

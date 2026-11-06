@@ -475,7 +475,7 @@ export async function handleAdminBff(request: NodeRequest, response: NodeRespons
     }
     return;
   }
-  if (/^\/distribution\/(overview|earnings|participants(?:\/[A-Za-z0-9._:-]+)?)$/.test(path)) {
+  if (/^\/distribution\/(overview|earnings|participants(?:\/[A-Za-z0-9._:-]+(?:\/downline)?)?)$/.test(path)) {
     if (method !== "GET") { sendError(response, 404, API_V1_ERROR_CODES.NOT_FOUND, "Resource not found", requestId); return; }
     const targetPath = "/api/v1/admin" + path + requestQuery(request);
     request.url = targetPath; request.originalUrl = targetPath;

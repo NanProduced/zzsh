@@ -343,6 +343,52 @@ function RefundIntentCard({ intent }: { intent: PersonalRefundIntent }) {
   </li>;
 }
 
+
+function OrderOwnerRefundSummary({ order }: { order: Order }) {
+  const session = useUserSession();
+  const [state, setState] = useState<{ scope: string; status: "loading" | "ready" | "error"; read: import("@/lib/order-client").OwnerRefundMinimalSummary | null; error: OrderRequestError | null }>({ scope: "", status: "loading", read: null, error: null });
+  const [reload, setReload] = useState(0);
+  const reset = useCallback(() => setState({ scope: "", status: "loading", read: null, error: null }), []);
+  const { userId, isCurrent } = useIdentityReset(session, reset);
+  const current = useRef(isCurrent); current.current = isCurrent;
+  const confirm = useRef(session.confirm); confirm.current = session.confirm;
+  const scope = userId ? `${userId}:${order.id}:${order.status}:owner-refund` : "";
+  const visible = state.scope === scope ? state : { scope, status: "loading" as const, read: null, error: null };
+  useEffect(() => {
+    if (!userId) return;
+    const controller = new AbortController();
+    setState({ scope, status: "loading", read: null, error: null });
+    void orderApi.ownerRefundSummary(userId, order.id, controller.signal).then((read) => {
+      if (!controller.signal.aborted && current.current(userId) && scope.endsWith(":owner-refund")) setState({ scope, status: "ready", read, error: null });
+    }).catch((error: unknown) => {
+      if (controller.signal.aborted || !current.current(userId)) return;
+      const typed = error instanceof OrderRequestError ? error : new OrderRequestError(0, null);
+      if (typed.status === 401 || typed.code === "UNAUTHENTICATED") void confirm.current();
+      setState({ scope, status: "error", read: null, error: typed });
+    });
+    return () => controller.abort();
+  }, [order.id, order.status, reload, scope, userId]);
+  if (!userId) return null;
+  const refresh = <button type="button" className="button quiet button--sm" disabled={visible.status === "loading"} onClick={() => setReload(value => value + 1)}><RefreshCw size={14} aria-hidden="true" />刷新</button>;
+  if (visible.status === "loading") return <section className="order-detail-section order-refund-block" aria-label="退款进度"><h2 className="order-section-title">退款进度</h2><p className="order-muted" role="status">正在加载退款进度…</p></section>;
+  if (visible.status === "error") {
+    return <section className="order-detail-section order-refund-block" aria-label="退款进度"><div className="order-refund-heading"><h2 className="order-section-title">退款进度</h2>{refresh}</div><p className="order-muted" role="status">退款进度暂时无法查看，请稍后重试。</p></section>;
+  }
+  const read = visible.read;
+  if (!read || read.progress === "NOT_APPLICABLE") return null;
+  const open = ["PROCESSING", "NEEDS_REVIEW", "UNKNOWN"].includes(read.progress);
+  return <section className="order-detail-section order-refund-block" aria-label="退款进度" data-progress={read.progress}>
+    <div className="order-refund-heading"><h2 className="order-section-title">退款进度</h2>{refresh}</div>
+    <details className="order-secondary-details order-refund-details" open={open}>
+      <summary><strong>{read.label}</strong><span>{read.note}</span></summary>
+      <div className="order-refund-detail-content">
+        <p className="order-muted">订单主状态仍以页面顶部为准。本摘要不展示租客收款资料。</p>
+        {read.openIntentCount > 0 ? <p className="order-muted">进行中的退款处理记录：{read.openIntentCount} 笔</p> : null}
+      </div>
+    </details>
+  </section>;
+}
+
 function OrderRefundSection({ order }: { order: Order }) {
   const session = useUserSession();
   const [state, setState] = useState<{ scope: string; status: "loading" | "ready" | "error"; read: PersonalRefundRead | null; error: OrderRequestError | null }>({ scope: "", status: "loading", read: null, error: null });
@@ -489,6 +535,7 @@ export function OrderDetail({ party, status, accountId, orderId, filters, state,
         {order.status !== "CANCELLED" ? <OrderTradeActions order={order} party={party} onChanged={onChanged} onStageFacts={(next, failed) => setRead({ scope: readScope, facts: next, failed })} /> : null}
         <PrestartTerminationPanel key={`prestart:${order.id}:${order.status}`} order={order} party={party} onChanged={onChanged}/>
         {party === "renter" && order.source?.origin !== "LEGACY" && !order.readOnly ? <OrderRefundSection key={`${order.id}:${order.status}:${facts?.phase ?? "NONE"}`} order={order} /> : null}
+        {party === "owner" && order.source?.origin !== "LEGACY" && !order.readOnly && (order.status === "CANCELLED" || order.status === "COMPLETED") ? <OrderOwnerRefundSummary key={`owner-refund:${order.id}:${order.status}`} order={order} /> : null}
         <section className="order-detail-section order-lines">
           <details open={order.status === "PENDING_PAYMENT"}>
             <summary><h2 className="order-section-title">下单时费用明细</h2><span className="order-lines-summary">{linesSummary(order, party)}</span></summary>

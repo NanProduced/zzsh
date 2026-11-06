@@ -65,7 +65,6 @@ test("每条目标路由只有唯一活动入口，不再按前缀点亮父级",
     ["/distribution/earnings", "", ["/distribution/earnings"]],
     ["/distribution/participants", "", ["/distribution/participants"]],
     ["/distribution/participants/user_1", "", ["/distribution/participants"]],
-    ["/distribution/relations", "", ["/distribution/relations"]],
     ["/distribution/policy", "", ["/distribution/policy"]],
     ["/distribution-policy", "", []],
     ["/content", "", ["/content"]],
@@ -96,9 +95,9 @@ test("侧栏菜单保留全部既有入口与分组命名一致性", () => {
   }
   assert.equal(items.find((item) => item.path === "/approvals").label, "审批中心", "侧栏与页内审批命名一致");
   const paths = menuPaths(boss);
-  assert.equal(paths.length, 38, "真实Boss入口并集：保留资金总览/查找/期间/渠道，分销拆为五个入口");
+  assert.equal(paths.length, 37, "真实Boss入口并集：保留资金总览/查找/期间/渠道，分销拆为五个入口");
   assert.equal(paths.includes("/users/restore"), false, "账号恢复入口已移除");
-  for (const path of ["/system","/distribution","/distribution/earnings","/distribution/participants","/distribution/relations","/distribution/policy","/supply/media","/finance/period","/settings?section=security","/support","/support/mine","/support/overview","/support/patrol","/support/settings","/avatar-reviews"]) {
+  for (const path of ["/system","/distribution","/distribution/earnings","/distribution/participants","/distribution/policy","/supply/media","/finance/period","/settings?section=security","/support","/support/mine","/support/overview","/support/patrol","/support/settings","/avatar-reviews"]) {
     assert.ok(paths.includes(path), `保留既有入口 ${path}`);
   }
 });

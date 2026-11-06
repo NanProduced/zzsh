@@ -12,7 +12,7 @@ import { conflict, invalid } from "../supply/supply-util";
 import { commissionRecordSummaryProjection, legacyRentalDistributionPredicate, readMyDistributionEarningsInTransaction } from "./distribution-earning-read";
 import { unifiedDistributionSourceSql } from "./admin-distribution-unified-read";
 import { readLegacyDistributionQualifications } from "./admin-distribution-read";
-import { readObservationCoverage, type ObservationCoverage } from "./personal-finance-coverage";
+import { readObservationCoverages, type ObservationCoverage } from "./personal-finance-coverage";
 import { projectInviteeCount } from "./invitation-store";
 
 export const DASHBOARD_VERSION = "admin-distribution.dashboard.v1";
@@ -20,6 +20,8 @@ export type DashboardSource = "ALL" | "NATIVE" | "LEGACY";
 export type DashboardState = "ALL" | "PENDING" | "MATURED" | "SETTLED" | "VOID" | "REVOKED" | "RECOVERY_REQUIRED" | "EXPIRED" | "UNKNOWN";
 export type DashboardRole = "ALL" | "RENTER_REFERRAL" | "OWNER_REFERRAL" | "TASK_REFERRAL";
 export type DashboardRankingBasis = "CURRENT_SETTLED_STOCK" | "PERIOD_SETTLED_FLOW";
+export type DashboardParticipantSort = "recordCount" | "settledCents" | "pendingCents";
+export type DashboardSortOrder = "asc" | "desc";
 
 export type DashboardFilters = {
   from: string;
@@ -32,6 +34,10 @@ export type DashboardFilters = {
   pageSize: number;
   rankingBasis: DashboardRankingBasis;
   rankingLimit: number;
+  sort: DashboardParticipantSort;
+  order: DashboardSortOrder;
+  /** Exact beneficiary scope for participant detail; empty means all. */
+  beneficiary?: string;
 };
 
 export type Metric =
@@ -89,10 +95,14 @@ export function parseDashboardFilters(query: URLSearchParams, now = new Date()):
   if (!["ALL", "NATIVE", "LEGACY"].includes(source) || !["ALL", "PENDING", "MATURED", "SETTLED", "VOID", "REVOKED", "RECOVERY_REQUIRED", "EXPIRED", "UNKNOWN"].includes(state)
     || !["ALL", "RENTER_REFERRAL", "OWNER_REFERRAL", "TASK_REFERRAL"].includes(role) || !["CURRENT_SETTLED_STOCK", "PERIOD_SETTLED_FLOW"].includes(rankingBasis)) throw invalid("Invalid distribution filter");
   const q = (query.get("q") ?? "").trim(), page = query.get("page") ?? "1", pageSize = query.get("pageSize") ?? "20", rankingLimit = Number(query.get("rankingLimit") ?? "10");
+  const sort = (query.get("sort") ?? "recordCount") as DashboardParticipantSort, order = (query.get("order") ?? "desc") as DashboardSortOrder;
   if (q.length > 128 || !/^[A-Za-z0-9\u4e00-\u9fff._:@ -]*$/.test(q)) throw invalid("Invalid distribution search");
   if (!/^[1-9]\d{0,5}$/.test(page) || !/^([1-9]|[1-9]\d|100)$/.test(pageSize)) throw invalid("Invalid distribution page");
   if (!Number.isInteger(rankingLimit) || rankingLimit < 10 || rankingLimit > 100) throw invalid("Invalid distribution ranking limit");
-  return { from, to, source, state, role, q, page: Number(page), pageSize: Number(pageSize), rankingBasis, rankingLimit };
+  if (!["recordCount", "settledCents", "pendingCents"].includes(sort) || !["asc", "desc"].includes(order)) throw invalid("Invalid distribution sort");
+  const beneficiary = (query.get("beneficiary") ?? "").trim();
+  if (beneficiary && !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,179}$/.test(beneficiary)) throw invalid("Invalid distribution beneficiary");
+  return { from, to, source, state, role, q, page: Number(page), pageSize: Number(pageSize), rankingBasis, rankingLimit, sort, order, ...(beneficiary ? { beneficiary } : {}) };
 }
 
 type DashboardAccess = {
@@ -130,8 +140,10 @@ function scopeSql(alias: string, values: unknown[], context: DashboardAccess) {
   return gameScopeSql(`${alias}.game_id`, `$${values.length - 1}`, `$${values.length}`);
 }
 
-export async function dashboardVersion(c: PoolClient, context: DashboardAccess, legacyAvailable: boolean, dutiesAvailable = false, coverageAvailable = false) {
+export async function dashboardVersion(c: PoolClient, context: DashboardAccess, legacyAvailable: boolean, dutiesAvailable = false, coverageAvailable = false, beneficiary?: string) {
   const values: unknown[] = [], nativeScope = scopeSql("o", values, context);
+  const beneficiaryParameter = beneficiary ? `$${values.push(beneficiary)}::text` : null;
+  const subject = (column: string) => beneficiaryParameter ? ` AND ${column}=${beneficiaryParameter}` : "";
   const digest = (table: string) => `(SELECT encode(sha256(convert_to(COALESCE(string_agg(encode(sha256(convert_to(payload,'UTF8')),'hex'),'' ORDER BY id),''),'UTF8')),'hex') FROM ${table})`;
   const name = context.directoryRead ? "u.name" : "NULL::text";
   // Hash only visible domain facts: unrelated games, ledger events and hidden names cannot disturb a page.
@@ -139,22 +151,22 @@ export async function dashboardVersion(c: PoolClient, context: DashboardAccess, 
     SELECT e.id,jsonb_build_array(e.id,e.version,e.state,e.amount_cents::text,e.recovery_required_cents::text,e.due_at,e.created_at,
       e.beneficiary_user_id,e.beneficiary_role,o.id,o.display_no,o.game_id,${name})::text payload
     FROM zzsh_order.rental_referral_earning e JOIN zzsh_order.rental_order o ON o.id=e.order_id
-    LEFT JOIN zzsh_auth_user."user" u ON u.id=e.beneficiary_user_id WHERE ${nativeScope}
+    LEFT JOIN zzsh_auth_user."user" u ON u.id=e.beneficiary_user_id WHERE ${nativeScope}${subject("e.beneficiary_user_id")}
   ), visible_events AS (
     SELECT t.id,jsonb_build_array(t.id,t.action,t.created_at,f.id,f.kind,f.created_at)::text payload
     FROM zzsh_order.rental_referral_transition t JOIN visible_earnings e ON e.id=t.earning_id
     JOIN zzsh_order.finance_event f ON f.id=t.finance_event_id AND f.economic_root_id=e.id
   ), visible_legacy AS (
     ${legacyAvailable ? `SELECT p.id,p.user_id,p.source_system,p.source_id,p.source_digest,p.source_canonical,p.snapshot,lo.id order_id,jsonb_build_array(p.id,p.user_id,p.source_system,p.snapshot->>'sourceOrderType',p.snapshot->>'orderId',p.snapshot->>'amount',p.snapshot->>'sourceStatus',p.snapshot->>'level',p.source_event_at,p.imported_at,lo.id,lo.original_order_no,lo.game_id,${name})::text payload
-      FROM zzsh_order.personal_finance_observation p LEFT JOIN zzsh_order.legacy_order_read_snapshot lo ON lo.legacy_id=p.snapshot->>'orderId' AND lo.source_system=p.source_system AND (${legacyRentalDistributionPredicate('p')} )
-      LEFT JOIN zzsh_auth_user."user" u ON u.id=p.user_id WHERE p.source_kind='HISTORICAL_DISTRIBUTION' AND ${nativeScope.replaceAll('o.game_id','lo.game_id')}` : "SELECT NULL::text id,NULL::text payload WHERE FALSE"}
+      FROM zzsh_order.personal_finance_observation p LEFT JOIN zzsh_order.legacy_order_read_snapshot lo ON lo.legacy_id=p.snapshot->>'orderId' AND lo.source_system=p.source_system AND lo.source_entity='la_order' AND (${legacyRentalDistributionPredicate('p')} )
+      LEFT JOIN zzsh_auth_user."user" u ON u.id=p.user_id WHERE p.source_kind='HISTORICAL_DISTRIBUTION' AND ${nativeScope.replaceAll('o.game_id','lo.game_id')}${subject('p.user_id')}` : "SELECT NULL::text id,NULL::text payload WHERE FALSE"}
   ), visible_legacy_logs AS MATERIALIZED (
     ${legacyAvailable ? `SELECT l.source_system,l.user_id,l.snapshot->>'referenceId' source_id,
         encode(sha256(convert_to(string_agg(jsonb_build_array(l.source_digest,l.source_canonical,l.snapshot)::text,',' ORDER BY l.id COLLATE "C")
           FILTER(WHERE l.snapshot->>'legacyChangeType'='1001' AND l.snapshot->>'action'='1'),'UTF8')),'hex') version
       FROM zzsh_order.personal_finance_observation l
       WHERE l.source_kind='HISTORICAL_EARNINGS_LOG' AND l.source_entity='la_log_earnings'
-        AND l.snapshot->>'legacyChangeType'='1001' AND l.snapshot->>'action'='1'
+        AND l.snapshot->>'legacyChangeType'='1001' AND l.snapshot->>'action'='1'${subject('l.user_id')}
       GROUP BY l.source_system,l.user_id,l.snapshot->>'referenceId'`
       : "SELECT NULL::text source_system,NULL::text user_id,NULL::text source_id,NULL::text version WHERE FALSE"}
   ), visible_legacy_duties AS (
@@ -169,11 +181,11 @@ export async function dashboardVersion(c: PoolClient, context: DashboardAccess, 
       : "SELECT NULL::text id,NULL::text payload WHERE FALSE"}
   ), visible_participants AS (
     ${context.scope.network === "AVAILABLE" ? `SELECT p.user_id id,jsonb_build_array(p.user_id,p.revision,p.eligibility,p.commission_frozen,p.level_code,p.policy_version_id,p.inviter_knowledge,p.leader_knowledge,p.invitees_knowledge,p.source_type,p.source_digest,${name})::text payload
-      FROM zzsh_order.distribution_participant p LEFT JOIN zzsh_auth_user."user" u ON u.id=p.user_id` : "SELECT NULL::text id,NULL::text payload WHERE FALSE"}
+      FROM zzsh_order.distribution_participant p LEFT JOIN zzsh_auth_user."user" u ON u.id=p.user_id WHERE TRUE${subject("p.user_id")}` : "SELECT NULL::text id,NULL::text payload WHERE FALSE"}
   ), visible_relations AS (
-    ${context.scope.network === "AVAILABLE" ? "SELECT r.id,jsonb_build_array(r.id,r.type,r.parent_user_id,r.child_user_id,r.source_type,r.policy_version_id)::text payload FROM zzsh_order.invitation_relation r" : "SELECT NULL::text id,NULL::text payload WHERE FALSE"}
+    ${context.scope.network === "AVAILABLE" ? `SELECT r.id,jsonb_build_array(r.id,r.type,r.parent_user_id,r.child_user_id,r.source_type,r.policy_version_id)::text payload FROM zzsh_order.invitation_relation r${beneficiaryParameter ? ` WHERE r.parent_user_id=${beneficiaryParameter} OR r.child_user_id=${beneficiaryParameter}` : ""}` : "SELECT NULL::text id,NULL::text payload WHERE FALSE"}
   ), visible_coverage AS (
-    ${coverageAvailable&&context.scope.network==='AVAILABLE'?`SELECT c.id,jsonb_build_array(c.id,c.user_id,c.source_count,c.imported_count,c.isolated_count,c.imported_set_digest,c.source_cutoff)::text payload FROM zzsh_order.personal_finance_observation_coverage c WHERE c.source_kind='HISTORICAL_DISTRIBUTION'`:'SELECT NULL::text id,NULL::text payload WHERE FALSE'}
+    ${coverageAvailable&&context.scope.network==='AVAILABLE'?`SELECT c.id,jsonb_build_array(c.id,c.user_id,c.source_count,c.imported_count,c.isolated_count,c.imported_set_digest,c.source_cutoff)::text payload FROM zzsh_order.personal_finance_observation_coverage c WHERE c.source_kind='HISTORICAL_DISTRIBUTION'${subject('c.user_id')}`:'SELECT NULL::text id,NULL::text payload WHERE FALSE'}
   ) SELECT ${digest('visible_earnings')} native,${digest('visible_events')} events,${digest('visible_legacy')} legacy,
     ${digest('visible_participants')} participants,${digest('visible_relations')} relations,${digest('visible_legacy_effects')} effects,${digest('visible_coverage')} coverage`, values)).rows[0];
   if (!row) throw new SecurityApiError(503, "EVIDENCE_UNAVAILABLE", "Distribution version unavailable");
@@ -389,6 +401,7 @@ function listWhere(f: DashboardFilters, values: unknown[], context: DashboardAcc
   if (f.source !== "ALL") { values.push(f.source); clauses.push(`source=$${values.length}`); }
   if (f.state !== "ALL") { values.push(f.state); clauses.push(`state=$${values.length}`); }
   if (f.role !== "ALL") { values.push(f.role); clauses.push(`role=$${values.length}`); }
+  if (f.beneficiary) { values.push(f.beneficiary); clauses.push(`beneficiary_id=$${values.length}::text`); }
   if (f.q) { values.push(`%${escapeLike(f.q.toLowerCase())}%`); clauses.push(`lower(coalesce(beneficiary_id,'')||' '||${context.directoryRead ? "coalesce(beneficiary_name,'')||' '||" : ""}coalesce(order_number,'')) LIKE $${values.length}`); }
   return clauses.length ? clauses.join(" AND ") : "TRUE";
 }
@@ -401,10 +414,11 @@ export function mapEarningRow(row: any, directoryRead: boolean): DashboardEarnin
 }
 
 export async function readAdminDistributionEarnings(c: PoolClient, context: DashboardAccess, f: DashboardFilters, key?: ListingCursorKey, limitOverride?: number, token?: string | null, prepared?: { sources: { native: boolean; legacy: boolean }; version: string; asOf: string; duties?: boolean }) {
-  const sources = prepared?.sources ?? await ready(c), version = prepared?.version ?? await dashboardVersion(c, context, sources.legacy, 'duties' in sources && sources.duties === true), asOf = prepared?.asOf ?? (await c.query(`SELECT clock_timestamp()::text AS at`)).rows[0]!.at;
+  const sources = prepared?.sources ?? await ready(c), version = prepared?.version ?? await dashboardVersion(c, context, sources.legacy, 'duties' in sources && sources.duties === true, false, f.beneficiary), asOf = prepared?.asOf ?? (await c.query(`SELECT clock_timestamp()::text AS at`)).rows[0]!.at;
   if (f.source === "LEGACY" && !sources.legacy) throw new SecurityApiError(503, "EVIDENCE_UNAVAILABLE", "Legacy distribution source unavailable");
   const values: unknown[] = [], nativeScope = scopeSql("o", values, context);
-  const source = unifiedDistributionSourceSql(sources.legacy, 'duties' in sources && sources.duties === true, nativeScope, context.directoryRead);
+  const beneficiaryParameter = f.beneficiary ? `$${values.push(f.beneficiary)}` : undefined;
+  const source = unifiedDistributionSourceSql(sources.legacy, 'duties' in sources && sources.duties === true, nativeScope, context.directoryRead, beneficiaryParameter);
   const records = source + 'SELECT id,source,beneficiary_id,beneficiary_name,role,order_id,order_number,game_id,amount_cents::text,recovery_cents::text,state,occurred_at,settled_at,due_at,recorded_at FROM dashboard_records';
   const where = listWhere(f, values, context), offset = (f.page - 1) * (limitOverride ?? f.pageSize), limit = limitOverride ?? f.pageSize;
   values.push(limit, offset);
@@ -418,51 +432,92 @@ export async function readAdminDistributionEarnings(c: PoolClient, context: Dash
 
 export async function readAdminDistributionParticipants(c: PoolClient, context: DashboardAccess, f: DashboardFilters, key?: ListingCursorKey, token?: string | null, exactUserId?: string) {
   if (context.scope.network !== "AVAILABLE") throw new SecurityApiError(403, "FORBIDDEN", "Global distribution network requires Boss or ALL_GAMES scope");
-  const sources = await ready(c), version = await dashboardVersion(c, context, sources.legacy, 'duties' in sources && sources.duties === true, 'coverage' in sources && sources.coverage === true), asOf = (await c.query(`SELECT clock_timestamp()::text AS at`)).rows[0]!.at;
-  const values: unknown[] = [], where: string[] = [];
-  if (exactUserId) { values.push(exactUserId); where.push(`p.user_id=$${values.length}`); }
+  // Participant amount CTE scans unified native+legacy stock; keep page reads under a slightly wider budget than overview cards.
+  await c.query("SELECT set_config('statement_timeout','8s',true)");
+  const sources = await ready(c), version = exactUserId && !key && !token ? null : await dashboardVersion(c, context, sources.legacy, 'duties' in sources && sources.duties === true, 'coverage' in sources && sources.coverage === true), asOf = (await c.query(`SELECT clock_timestamp()::text AS at`)).rows[0]!.at;
+  // Bindings appear in SQL order: game-scope for amount CTE, optional exact user, search, then LIMIT/OFFSET.
+  const values: unknown[] = [];
+  const amountScope = scopeSql("o", values, context);
+  let exactIdx: number | null = null;
+  if (exactUserId) { values.push(exactUserId); exactIdx = values.length; }
+  const amountFilter = exactIdx ? ` WHERE beneficiary_id=$${exactIdx}::text` : "";
+  const where: string[] = [];
+  if (exactIdx) where.push(`p.user_id=$${exactIdx}`);
   if (f.q) { values.push(`%${escapeLike(f.q.toLowerCase())}%`); where.push(`lower(coalesce(p.user_id,'')${context.directoryRead ? "||' '||coalesce(u.name,'')" : ""}) LIKE $${values.length}`); }
   const limit = f.pageSize, offset = (f.page - 1) * limit;
+  const amountsCte = unifiedDistributionSourceSql(sources.legacy, 'duties' in sources && sources.duties === true, amountScope, context.directoryRead, exactIdx ? `$${exactIdx}` : undefined)
+    + `, participant_amounts AS (
+    SELECT beneficiary_id,
+      count(*)::bigint AS record_count,
+      COALESCE(sum(amount_cents) FILTER(WHERE state='SETTLED'),0)::bigint AS settled_cents,
+      COALESCE(sum(amount_cents) FILTER(WHERE state IN('PENDING','MATURED')),0)::bigint AS pending_cents,
+      COALESCE(sum(recovery_cents) FILTER(WHERE state='RECOVERY_REQUIRED'),0)::bigint AS recovery_cents,
+      COALESCE(sum(amount_cents) FILTER(WHERE state='UNKNOWN'),0)::bigint AS review_cents,
+      count(*) FILTER(WHERE state='UNKNOWN')::bigint AS review_count
+    FROM dashboard_records${amountFilter}
+    GROUP BY beneficiary_id)`;
+  // Sort metric matches UI mapped 「分销单数 / 已结算 / 待结算」.
+  const sortColumn = f.sort === "settledCents" ? "COALESCE(a.settled_cents,0)" : f.sort === "pendingCents" ? "COALESCE(a.pending_cents,0)" : "COALESCE(a.record_count,0)";
+  const sortDir = f.order === "asc" ? "ASC" : "DESC";
   values.push(limit, offset);
-  const rows = (await c.query(`SELECT p.user_id,u.name,p.eligibility,p.commission_frozen,p.level_code,p.inviter_knowledge,p.leader_knowledge,p.invitees_knowledge,p.source_type,p.revision,
+  const limitIdx = values.length - 1, offsetIdx = values.length;
+  const whereSql = where.length ? "WHERE " + where.join(" AND ") : "";
+  const rows = (await c.query(`${amountsCte}
+    SELECT p.user_id,u.name,p.eligibility,p.commission_frozen,p.level_code,p.inviter_knowledge,p.leader_knowledge,p.invitees_knowledge,p.source_type,p.revision,
     CASE WHEN v.schema_version='distribution-policy.v3' THEN v.canonical_config::jsonb#>>ARRAY['legacySource','levelNames',p.level_code] END level_name,
-    (SELECT count(*)::int FROM zzsh_order.invitation_relation r WHERE r.parent_user_id=p.user_id AND r.type='DISTRIBUTION_LEADER') AS leader_children,
-    (SELECT count(*)::int FROM zzsh_order.invitation_relation r WHERE r.parent_user_id=p.user_id AND r.type='INVITER') AS inviter_children,
+    COALESCE(ch.leader_children,0)::int AS leader_children,
+    COALESCE(ch.inviter_children,0)::int AS inviter_children,
+    COALESCE(a.record_count,0)::text AS record_count,
+    COALESCE(a.settled_cents,0)::text AS settled_cents,
+    COALESCE(a.pending_cents,0)::text AS pending_cents,
+    COALESCE(a.recovery_cents,0)::text AS recovery_cents,
+    COALESCE(a.review_cents,0)::text AS review_cents,
+    COALESCE(a.review_count,0)::text AS review_count,
     count(*) OVER()::int AS total
-    FROM zzsh_order.distribution_participant p LEFT JOIN zzsh_auth_user."user" u ON u.id=p.user_id
-    LEFT JOIN zzsh_order.distribution_policy_version v ON v.id=p.policy_version_id ${where.length ? "WHERE " + where.join(" AND ") : ""}
-    ORDER BY p.user_id LIMIT $${values.length - 1} OFFSET $${values.length}` , values)).rows;
-  const total = rows.length ? Number(rows[0].total) : Number((await c.query(`SELECT count(*)::text AS total FROM zzsh_order.distribution_participant p LEFT JOIN zzsh_auth_user."user" u ON u.id=p.user_id ${where.length ? "WHERE " + where.join(" AND ") : ""}`,values.slice(0,-2))).rows[0]?.total);
+    FROM zzsh_order.distribution_participant p
+    LEFT JOIN zzsh_auth_user."user" u ON u.id=p.user_id
+    LEFT JOIN zzsh_order.distribution_policy_version v ON v.id=p.policy_version_id
+    LEFT JOIN participant_amounts a ON a.beneficiary_id=p.user_id
+    LEFT JOIN (
+      SELECT parent_user_id,
+        count(*) FILTER(WHERE type='DISTRIBUTION_LEADER')::int AS leader_children,
+        count(*) FILTER(WHERE type='INVITER')::int AS inviter_children
+      FROM zzsh_order.invitation_relation GROUP BY parent_user_id
+    ) ch ON ch.parent_user_id=p.user_id
+    ${whereSql}
+    ORDER BY ${sortColumn} ${sortDir}, p.user_id COLLATE "C" ASC
+    LIMIT $${limitIdx} OFFSET $${offsetIdx}`, values)).rows;
+  let total = rows.length ? Number(rows[0].total) : NaN;
+  if (!rows.length) {
+    // Empty-page total skips the heavy amount CTE; rebuild participant-only bindings.
+    const countValues: unknown[] = [];
+    const countWhere: string[] = [];
+    if (exactUserId) { countValues.push(exactUserId); countWhere.push(`p.user_id=$${countValues.length}`); }
+    if (f.q) { countValues.push(`%${escapeLike(f.q.toLowerCase())}%`); countWhere.push(`lower(coalesce(p.user_id,'')${context.directoryRead ? "||' '||coalesce(u.name,'')" : ""}) LIKE $${countValues.length}`); }
+    total = Number((await c.query(`SELECT count(*)::text AS total FROM zzsh_order.distribution_participant p LEFT JOIN zzsh_auth_user."user" u ON u.id=p.user_id ${countWhere.length ? "WHERE " + countWhere.join(" AND ") : ""}`, countValues)).rows[0]?.total);
+  }
   if(!Number.isSafeInteger(total)||total<0)throw new SecurityApiError(503,'EVIDENCE_UNAVAILABLE','Distribution total unavailable');
-  const userIds=rows.map(r=>String(r.user_id)),qualifications=await readLegacyDistributionQualifications(c,userIds);
-  const coverage=new Map<string,ObservationCoverage>();if(sources.coverage)for(const userId of userIds)coverage.set(userId,await readObservationCoverage(c,userId,'HISTORICAL_DISTRIBUTION'));
-  const amountValues:unknown[]=[],amountScope=scopeSql('o',amountValues,context);amountValues.push(userIds);
-  const amounts=userIds.length?(await c.query(unifiedDistributionSourceSql(sources.legacy,'duties' in sources&&sources.duties===true,amountScope,context.directoryRead)+`SELECT beneficiary_id,count(*)::text record_count,
-    COALESCE(sum(amount_cents) FILTER(WHERE state='SETTLED'),0)::text settled_cents,
-    COALESCE(sum(amount_cents) FILTER(WHERE state IN('PENDING','MATURED')),0)::text pending_cents,
-    COALESCE(sum(recovery_cents) FILTER(WHERE state='RECOVERY_REQUIRED'),0)::text recovery_cents,
-    COALESCE(sum(amount_cents) FILTER(WHERE state='UNKNOWN'),0)::text review_cents,count(*) FILTER(WHERE state='UNKNOWN')::text review_count
-    FROM dashboard_records WHERE beneficiary_id=ANY($${amountValues.length}::text[]) GROUP BY beneficiary_id`,amountValues)).rows:[];
-  const byUser=new Map(amounts.map(r=>[r.beneficiary_id,r]));
-  const snapshot = key ? distributionSnapshot(version, asOf, f, context, key, token) : null;
-  return { contractVersion: DASHBOARD_VERSION, asOf, snapshotVersion: version, scope: context.scope, items: rows.map((row: any) => {const amount=byUser.get(row.user_id),closed=coverage.get(row.user_id)?.knowledge==='KNOWN';const cents=(value:unknown)=>closed||value!==undefined&&value!=='0'?String(value??'0'):null;return({ userId: row.user_id, name: context.directoryRead ? row.name ?? null : null,
+  const userIds=rows.map((r: any)=>String(r.user_id)),qualifications=await readLegacyDistributionQualifications(c,userIds);
+  const coverage = sources.coverage ? await readObservationCoverages(c, userIds, 'HISTORICAL_DISTRIBUTION') : new Map<string, ObservationCoverage>();
+  const snapshot = key && version !== null ? distributionSnapshot(version, asOf, f, context, key, token) : null;
+  return { contractVersion: DASHBOARD_VERSION, asOf, snapshotVersion: version, scope: context.scope, items: rows.map((row: any) => {const closed=coverage.get(row.user_id)?.knowledge==='KNOWN';const cents=(value:unknown)=>closed||value!==undefined&&value!=='0'?String(value??'0'):null;return({ userId: row.user_id, name: context.directoryRead ? row.name ?? null : null,
     eligibility: row.eligibility, frozen: row.commission_frozen === true, levelCode: row.level_code ?? null, levelName: row.level_name ?? null, inviter: row.inviter_knowledge, leader: row.leader_knowledge,
     sourceType: row.source_type, revision: String(row.revision ?? "0"), leaderChildren:row.invitees_knowledge==='KNOWN'?Number(row.leader_children??0):null,inviterChildren:row.invitees_knowledge==='KNOWN'?Number(row.inviter_children??0):null,
     mappedLeaderChildren:Number(row.leader_children??0),mappedInviterChildren:Number(row.inviter_children??0),
-    legacyQualification:qualifications.get(row.user_id)??null,recordCount:closed?String(amount?.record_count??'0'):null,mappedRecordCount:String(amount?.record_count??'0'),earningsCoverage:coverage.get(row.user_id)?.knowledge??'UNKNOWN',
-    needsReviewCount:sources.legacy?String(amount?.review_count??'0'):null,needsReviewCents:sources.legacy?String(amount?.review_cents??'0'):null,
+    legacyQualification:qualifications.get(row.user_id)??null,recordCount:closed?String(row.record_count??'0'):null,mappedRecordCount:String(row.record_count??'0'),earningsCoverage:coverage.get(row.user_id)?.knowledge??'UNKNOWN',
+    needsReviewCount:sources.legacy?String(row.review_count??'0'):null,needsReviewCents:sources.legacy?String(row.review_cents??'0'):null,
     earningsReasonCodes:closed?[]:[sources.legacy?coverage.get(row.user_id)?.reason??'HISTORICAL_COVERAGE_NOT_CLOSED':'LEGACY_SOURCE_NOT_INSTALLED'],
-    settledCents:cents(amount?.settled_cents),pendingCents:cents(amount?.pending_cents),recoveryCents:cents(amount?.recovery_cents) });}), total: String(total), page: f.page, pageSize: limit, hasMore: offset + rows.length < total, snapshot: snapshot?.token ?? null };
+    settledCents:cents(row.settled_cents),pendingCents:cents(row.pending_cents),recoveryCents:cents(row.recovery_cents) });}), total: String(total), page: f.page, pageSize: limit, hasMore: offset + rows.length < total, snapshot: snapshot?.token ?? null };
 }
 
 export async function readAdminDistributionParticipant(c: PoolClient, context: DashboardAccess, userId: string) {
   if (!ID.test(userId)) throw invalid("Invalid distribution participant");
   if (context.scope.network !== "AVAILABLE") throw new SecurityApiError(403, "FORBIDDEN", "Global distribution network requires Boss or ALL_GAMES scope");
-  const rows = await readAdminDistributionParticipants(c, context, { from: "2000-01-01", to: "2099-12-31", source: "ALL", state: "ALL", role: "ALL", q: "", page: 1, pageSize: 20, rankingBasis: "CURRENT_SETTLED_STOCK", rankingLimit: 10 }, undefined, null, userId);
+  const rows = await readAdminDistributionParticipants(c, context, { from: "2000-01-01", to: "2099-12-31", source: "ALL", state: "ALL", role: "ALL", q: "", page: 1, pageSize: 20, rankingBasis: "CURRENT_SETTLED_STOCK", rankingLimit: 10, sort: "recordCount", order: "desc" }, undefined, null, userId);
   const participant = rows.items.find(item => item.userId === userId);
   if (!participant) throw new SecurityApiError(404, "NOT_FOUND", "Distribution participant not found");
   const relations = (await c.query(`SELECT r.type,r.parent_user_id,u.name,r.source_type,r.policy_version_id FROM zzsh_order.invitation_relation r LEFT JOIN zzsh_auth_user."user" u ON u.id=r.parent_user_id WHERE r.child_user_id=$1 ORDER BY r.type,r.id`,[userId])).rows;
-  return { contractVersion: DASHBOARD_VERSION, scope: context.scope, participant, relations: relations.map((row:any)=>({ type:row.type,parentUserId:row.parent_user_id??null,parentName:context.directoryRead?row.name??null:null,sourceType:row.source_type??null,policyVersion:row.policy_version_id??null })) };
+  return { contractVersion: DASHBOARD_VERSION, scope: context.scope, participant, downline: { knowledge: participant.leaderChildren === null ? "PARTIAL" : "KNOWN", leader: participant.mappedLeaderChildren, inviter: participant.mappedInviterChildren }, relations: relations.map((row:any)=>({ type:row.type,parentUserId:row.parent_user_id??null,parentName:context.directoryRead?row.name??null:null,sourceType:row.source_type??null,policyVersion:row.policy_version_id??null })) };
 }
 
 export async function readMyDistributionSummary(c: PoolClient, actor: UserContext) {
@@ -510,4 +565,30 @@ export async function readMyDistributionSummary(c: PoolClient, actor: UserContex
     recent:recent.map((row:any)=>({id:row.id,source:row.source,beneficiaryId:row.beneficiary_id,beneficiaryName:row.beneficiary_name,role:row.role,amountCents:String(row.amount_cents),state:row.state,occurredAt:row.occurred_at})),
     unified:records.recordSummary,recentRecords:records.items.map(item=>item.record!),
     reasonCodes:[...(sources.legacy?[]:["LEGACY_SOURCE_NOT_INSTALLED"]),...records.recordSummary.reasonCodes] };
+}
+
+export type DownlineType = "INVITER" | "DISTRIBUTION_LEADER";
+/** Direct children of one participant from invitation_relation; offset pages, bounded size. */
+export async function readAdminDistributionDownline(c: PoolClient, context: DashboardAccess, userId: string, query: URLSearchParams) {
+  if (!ID.test(userId)) throw invalid("Invalid distribution participant");
+  if (context.scope.network !== "AVAILABLE") throw new SecurityApiError(403, "FORBIDDEN", "Global distribution network requires Boss or ALL_GAMES scope");
+  const type = (query.get("type") ?? "DISTRIBUTION_LEADER") as DownlineType, page = query.get("page") ?? "1", pageSize = query.get("pageSize") ?? "20";
+  if (!["INVITER", "DISTRIBUTION_LEADER"].includes(type) || !/^[1-9]\d{0,5}$/.test(page) || !/^([1-9]|[1-9]\d|100)$/.test(pageSize)) throw invalid("Invalid distribution downline query");
+  const owner = (await c.query(`SELECT invitees_knowledge FROM zzsh_order.distribution_participant WHERE user_id=$1`, [userId])).rows[0];
+  if (!owner) throw new SecurityApiError(404, "NOT_FOUND", "Distribution participant not found");
+  const limit = Number(pageSize), offset = (Number(page) - 1) * limit;
+  const rows = (await c.query(`SELECT r.child_user_id,u.name,r.source_type,r.bound_at,p.eligibility,p.commission_frozen,p.level_code,p.invitees_knowledge,
+      CASE WHEN v.schema_version='distribution-policy.v3' THEN v.canonical_config::jsonb#>>ARRAY['legacySource','levelNames',p.level_code] END level_name,
+      (SELECT count(*)::int FROM zzsh_order.invitation_relation g WHERE g.parent_user_id=r.child_user_id AND g.type=r.type) AS children,
+      count(*) OVER()::int AS total
+    FROM zzsh_order.invitation_relation r
+    LEFT JOIN zzsh_auth_user."user" u ON u.id=r.child_user_id
+    LEFT JOIN zzsh_order.distribution_participant p ON p.user_id=r.child_user_id
+    LEFT JOIN zzsh_order.distribution_policy_version v ON v.id=p.policy_version_id
+    WHERE r.parent_user_id=$1 AND r.type=$2
+    ORDER BY r.bound_at DESC, r.id COLLATE "C" DESC LIMIT $3 OFFSET $4`, [userId, type, limit, offset])).rows;
+  const total = rows.length ? Number(rows[0].total) : Number((await c.query(`SELECT count(*)::int AS total FROM zzsh_order.invitation_relation WHERE parent_user_id=$1 AND type=$2`, [userId, type])).rows[0]?.total ?? 0);
+  return { contractVersion: DASHBOARD_VERSION, subjectId: userId, type, knowledge: owner.invitees_knowledge === "KNOWN" ? "KNOWN" : "PARTIAL", total: String(total), page: Number(page), pageSize: limit,
+    items: rows.map((row: any) => ({ userId: row.child_user_id, name: context.directoryRead ? row.name ?? null : null, sourceType: row.source_type ?? null, boundAt: row.source_type === 'LEGACY_MYSQL' ? null : row.bound_at ? new Date(row.bound_at).toISOString() : null,
+      participant: row.eligibility ? { eligibility: row.eligibility, frozen: row.commission_frozen === true, levelCode: row.level_code ?? null, levelName: row.level_name ?? null } : null, children: row.invitees_knowledge === 'KNOWN' ? Number(row.children ?? 0) : null, mappedChildren: Number(row.children ?? 0) })) };
 }

@@ -66,7 +66,6 @@ test("page search only lists implemented pages in the current permission set", (
     "/distribution",
     "/distribution/earnings",
     "/distribution/participants",
-    "/distribution/relations",
     "/distribution/policy",
     "/system",
     "/admins",

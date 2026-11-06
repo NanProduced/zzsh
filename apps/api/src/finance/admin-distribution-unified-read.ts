@@ -1,5 +1,6 @@
 /** Same record/responsibility rules as distribution-earning-read v2. Never posts or advances a duty. */
-export function unifiedDistributionSourceSql(legacy: boolean, duties: boolean, nativeScope: string, directoryRead: boolean) {
+export function unifiedDistributionSourceSql(legacy: boolean, duties: boolean, nativeScope: string, directoryRead: boolean, beneficiaryParameter?: string) {
+  const beneficiary = (column: string) => beneficiaryParameter ? ` AND ${column}=${beneficiaryParameter}::text` : "";
   const name = directoryRead ? 'u.name' : 'NULL::text';
   const proof = (a: string) => `${a}.source_canonical::jsonb=${a}.snapshot
     AND encode(sha256(convert_to(${a}.source_canonical,'UTF8')),'hex')=${a}.source_digest
@@ -12,14 +13,14 @@ export function unifiedDistributionSourceSql(legacy: boolean, duties: boolean, n
   const prelude = legacy ? `WITH legacy_input AS MATERIALIZED (
     SELECT p.id,p.user_id,p.legacy_user_id,p.source_system,p.source_entity,p.source_id,p.source_kind,p.snapshot,p.imported_at,lo.id AS allowed_order_id,lo.original_order_no allowed_order_number,lo.game_id allowed_game_id,CASE WHEN ${proof('p')} THEN ${raw('p')} END original
     FROM zzsh_order.personal_finance_observation p
-    LEFT JOIN zzsh_order.legacy_order_read_snapshot lo ON lo.source_system=p.source_system AND lo.legacy_id=p.snapshot->>'orderId'
+    LEFT JOIN zzsh_order.legacy_order_read_snapshot lo ON lo.source_system=p.source_system AND lo.source_entity='la_order' AND lo.legacy_id=p.snapshot->>'orderId'
       AND p.source_kind='HISTORICAL_DISTRIBUTION' AND p.source_entity='la_distribution_order' AND p.snapshot->>'sourceOrderType'='1'
-    WHERE p.source_kind='HISTORICAL_DISTRIBUTION' AND p.source_entity='la_distribution_order' AND (${nativeScope.replaceAll('o.game_id','lo.game_id')})
+    WHERE p.source_kind='HISTORICAL_DISTRIBUTION' AND p.source_entity='la_distribution_order' AND (${nativeScope.replaceAll('o.game_id','lo.game_id')})${beneficiary('p.user_id')}
   ), legacy_log_candidates AS MATERIALIZED (
     SELECT l.source_system,l.user_id,l.legacy_user_id,l.source_id,l.source_entity,l.source_event_at,l.snapshot,l.source_canonical,l.source_digest
     FROM zzsh_order.personal_finance_observation l
     WHERE l.source_kind='HISTORICAL_EARNINGS_LOG' AND l.source_entity='la_log_earnings'
-      AND l.snapshot->>'legacyChangeType'='1001' AND l.snapshot->>'action'='1'
+      AND l.snapshot->>'legacyChangeType'='1001' AND l.snapshot->>'action'='1'${beneficiary('l.user_id')}
   ), legacy_log_input AS MATERIALIZED (
     SELECT l.source_system,l.user_id,l.legacy_user_id,l.source_id,l.source_event_at,l.snapshot,
       CASE WHEN ${proof('l')} THEN ${raw('l')} END original_log FROM legacy_log_candidates l
@@ -71,6 +72,6 @@ export function unifiedDistributionSourceSql(legacy: boolean, duties: boolean, n
         AND f.economic_root_id=e.id AND f.kind='EARNING_SETTLED' AND f.subject_user_id=e.beneficiary_user_id WHERE t.earning_id=e.id AND t.action='SETTLE') settled_at,
       e.due_at,e.created_at recorded_at,jsonb_build_array('zzsh','rental_referral_earning',e.id,e.beneficiary_user_id,e.beneficiary_role)::text economic_key,e.amount_cents source_amount_cents
     FROM zzsh_order.rental_referral_earning e JOIN zzsh_order.rental_order o ON o.id=e.order_id
-    LEFT JOIN zzsh_auth_user."user" u ON u.id=e.beneficiary_user_id WHERE ${nativeScope}
+    LEFT JOIN zzsh_auth_user."user" u ON u.id=e.beneficiary_user_id WHERE ${nativeScope}${beneficiary('e.beneficiary_user_id')}
     UNION ALL SELECT * FROM legacy_records) `;
 }

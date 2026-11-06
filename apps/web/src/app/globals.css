@@ -676,6 +676,42 @@ html[data-theme="dark"] .account-list-deal-tag,html[data-theme="dark"] .account-
 .account-list-subline-row { display:flex; align-items:center; gap:8px; min-width:0; }
 .account-list-subline-row .account-list-subline { flex:1 1 auto; min-width:0; }
 .account-list-subline-row .account-card-number { flex:none; }
+.account-list-subline:has(.account-fact-badges) {
+  flex-wrap: wrap;
+  overflow: visible;
+  text-overflow: unset;
+  white-space: normal;
+}
+.account-fact-badges {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+.account-tag-pill--fact {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 6px;
+  border-radius: 4px;
+  border: 1px solid var(--color-border-default, #e2e8f0);
+  background: var(--color-bg-subtle, #f8fafc);
+  color: var(--color-text-secondary, #475569);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 16px;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+html[data-theme="dark"] .account-tag-pill--fact {
+  border-color: #334155;
+  background: rgba(148, 163, 184, 0.12);
+  color: #cbd5e1;
+}
+.account-card--grid .account-fact-badges {
+  display: flex;
+  margin-top: 6px;
+}
 
 html[data-theme="dark"] .account-list-subline {
   color: #94a3b8;

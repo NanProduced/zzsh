@@ -23,7 +23,7 @@ import { SupportDashboard, SupportManagementPane, SupportPatrol } from "../views
 import { SupportAssistantSettings } from "../views/im-support-settings";
 import { MySupportStatisticsView } from "../views/my-support-statistics";
 import { MembershipGrowthAdminHost } from "../views/membership-growth-admin-host";
-import { DistributionEarningsPage, DistributionOverviewPage, DistributionParticipantPage, DistributionParticipantsPage, DistributionPolicyPage, DistributionRelationsPage } from "../views/distribution-dashboard-pages";
+import { DistributionEarningsPage, DistributionOverviewPage, DistributionParticipantPage, DistributionParticipantsPage, DistributionPolicyPage } from "../views/distribution-dashboard-pages";
 
 import { AdminOrderChainView, AdminResourceReadView } from "../views/admin-order-chain-view";
 
@@ -157,7 +157,6 @@ export function WorkspacePageContent({
   if (tab.kind === "distribution-earnings") return snapshot.authenticated ? <DistributionEarningsPage key={tab.id} snapshot={snapshot} onOpenPath={onOpenPath} query={tab.query} onQueryChange={onQueryChange} refreshNonce={refreshNonce} /> : null;
   if (tab.kind === "distribution-participants") return snapshot.authenticated ? <DistributionParticipantsPage key={tab.id} snapshot={snapshot} onOpenPath={onOpenPath} query={tab.query} onQueryChange={onQueryChange} refreshNonce={refreshNonce} /> : null;
   if (tab.kind === "distribution-participant") return snapshot.authenticated && tab.objectId ? <DistributionParticipantPage key={tab.id} snapshot={snapshot} userId={tab.objectId} onOpenPath={onOpenPath} refreshNonce={refreshNonce} /> : null;
-  if (tab.kind === "distribution-relations") return snapshot.authenticated ? <DistributionRelationsPage key={tab.id} snapshot={snapshot} onOpenPath={onOpenPath} query={tab.query} onQueryChange={onQueryChange} refreshNonce={refreshNonce} /> : null;
   if (tab.kind === "distribution-policy") return snapshot.authenticated ? <DistributionPolicyPage key={tab.id} snapshot={snapshot} onOpenPath={onOpenPath} onDirtyChange={onDirtyChange} /> : null;
   if (tab.kind === "membership-growth") return <>{tab.query.fromUserId && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(tab.query.fromUserId) && (snapshot.security.isBoss || snapshot.permissions.includes("user.directory.read")) ? <Button variant="ghost" onClick={() => onOpenPath("/users/" + tab.query.fromUserId + "?section=growth")}>返回来源用户</Button> : null}<MembershipGrowthAdminHost key={tab.id} tab={tab} snapshot={snapshot} onDirtyChange={onDirtyChange} refreshNonce={refreshNonce} onOpenPath={onOpenPath} /></>;
   if (tab.kind === "admins" || tab.kind === "admin-object") {

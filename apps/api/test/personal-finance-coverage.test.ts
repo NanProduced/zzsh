@@ -2,7 +2,7 @@ import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import type {PoolClient} from 'pg';
 import {DatabaseSync} from 'node:sqlite';
-import {hasProvedNativeHistoryAbsence,prepareObservationCoverage,readObservationCoverage,assertFinanceSingleCutoff,type ObservationCoverageInput} from '../src/finance/personal-finance-coverage';
+import {hasProvedNativeHistoryAbsence,prepareObservationCoverage,readObservationCoverage,readObservationCoverages,assertFinanceSingleCutoff,type ObservationCoverageInput} from '../src/finance/personal-finance-coverage';
 
 test('native history proof survives real-name verification but never proves migrated or incomplete history',async()=>{
  const db=new DatabaseSync(':memory:');
@@ -119,4 +119,20 @@ test('Root single cutoff refuses new writes that would hide an existing incompat
 test('Root a missing required funding table is unavailable, never a compatible empty history',async()=>{
  const c={query:async()=>{throw Object.assign(Error('missing funding table'),{code:'42P01'});}} as unknown as PoolClient;
  await assert.rejects(()=>assertFinanceSingleCutoff(c,{userId:'fixture_user',cutoff:'2026-10-01T00:00:00.000Z',write:'OPENING'}),(e:any)=>e.status===503);
+});
+
+
+test('batch history coverage preserves per-user completeness and unknowns',async()=>{
+ const proof=stored();
+ const calls:{sql:string;args:unknown[]}[]=[];
+ const c={query:async(sql:string,args:unknown[]=[])=>{
+  calls.push({sql,args});
+  if(sql.includes('coverage installed'))return{rows:[{installed:true}]};
+  return{rows:[{...proof,user_id:'user_one'},{...proof,user_id:'user_two',outside_count:'1'}]};
+ }} as unknown as PoolClient;
+ const rows=await readObservationCoverages(c,['user_one','user_two','user_missing'],'HISTORICAL_WITHDRAWAL');
+ assert.equal(rows.get('user_one')?.knowledge,'KNOWN');
+ assert.equal(rows.get('user_two')?.reason,'HISTORICAL_COVERAGE_OUTDATED');
+ assert.equal(rows.get('user_missing')?.reason,'HISTORICAL_COVERAGE_NOT_IMPORTED');
+ assert.deepEqual(calls[1]?.args,[['user_one','user_two','user_missing'],'HISTORICAL_WITHDRAWAL']);
 });

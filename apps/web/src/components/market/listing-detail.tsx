@@ -1,6 +1,5 @@
 "use client";
 import { BusinessUpdateNotices } from "@/components/content/platform-update-notices";
-import { ManagedNoticeSections } from "@/components/content/managed-notice";
 import { CatalogItemArt } from "@/components/supply/catalog-item-art";
 import { LegacyAccountImage } from "@zzsh/ui/legacy-account-image";
 import { AccountMediaPlaceholder } from "@zzsh/ui/account-media-placeholder";
@@ -697,8 +696,6 @@ function ReadyDetail({ data }: { data: ListingDetailData }) {
             </ol>
           </section>
 
-          <details className="account-process-panel"><summary>租赁流程说明</summary><ManagedNoticeSections contentKey="placement:RENTAL_PROCESS" /></details>
-
           {/* Section 2: Rental Conditions & Owner Note */}
           <section className="account-detail-conditions account-conditions-card" aria-labelledby="account-conditions-title">
             <div className="account-section-title">
@@ -844,14 +841,16 @@ function ReadyDetail({ data }: { data: ListingDetailData }) {
                             data-skin-id={tag.id}
                             data-owner-kind={tag.ownerKind ?? "UNKNOWN"}
                           >
-                            <SkinMediaPreview
-                              skin={tag}
-                              triggerClassName="skin-media-preview-trigger account-skin-card-media-btn"
-                              mediaClassName="account-skin-card-media"
-                              fallbackClassName="account-skin-card-media-fallback"
-                            />
-                            <strong title={skinCardTitle(tag)}>{skinCardTitle(tag)}</strong>
-                            <SkinMetadata skin={tag} className="account-skin-card-quality" />
+                            <div className="account-skin-card-media-wrap">
+                              <SkinMediaPreview
+                                skin={tag}
+                                triggerClassName="skin-media-preview-trigger account-skin-card-media-btn"
+                                mediaClassName="account-skin-card-media"
+                                fallbackClassName="account-skin-card-media-fallback"
+                              />
+                              <SkinMetadata skin={tag} qualityTag className="account-skin-card-quality" />
+                            </div>
+                            <strong className="account-skin-card-name" title={skinCardTitle(tag)}>{skinCardTitle(tag)}</strong>
                           </article>
                         ))}
                       </div>

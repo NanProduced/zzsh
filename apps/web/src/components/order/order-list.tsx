@@ -19,11 +19,12 @@ export type OrderListState = {
 };
 
 export const ORDER_LIST_FILTERS: Array<{ value: OrderStatusFilter; label: string }> = [
-  { value: "", label: "全部" },
-  { value: "PENDING_PAYMENT", label: STATUS_LABELS.PENDING_PAYMENT },
-  { value: "PAID", label: STATUS_LABELS.PAID },
+  { value: "IN_PROGRESS", label: "进行中" },
   { value: "COMPLETED", label: STATUS_LABELS.COMPLETED },
   { value: "CANCELLED", label: STATUS_LABELS.CANCELLED },
+  { value: "ALL", label: "全部" },
+  { value: "PENDING_PAYMENT", label: STATUS_LABELS.PENDING_PAYMENT },
+  { value: "PAID", label: STATUS_LABELS.PAID },
 ];
 
 function fulfillmentText(value: FulfillmentAssignment): string {
@@ -94,9 +95,10 @@ function resourceSummary(order: Order, includeHaff = true): string | null {
  * One line of state-specific context under the badge. Nothing here repeats a rule the whole list
  * already states once in the footnote, so a row never has to say "see the detail" to look complete.
  */
-function statusHint(order: Order): string | null {
+function statusHint(order: Order, status: OrderStatusFilter): string | null {
   const stage = orderSettlementStageLabel(order);
   if (order.readOnly) return order.status === "PAID" ? stage ?? "进度未记录" : null;
+  if (status === "IN_PROGRESS" && (order.status === "CANCELLED" || order.status === "COMPLETED")) return "退款处理中或待核对";
   if (stage) {
     return order.stage?.viewerActionRequired ? `${stage} · 需要你处理` : stage;
   }
@@ -106,7 +108,7 @@ function statusHint(order: Order): string | null {
   }
   if (order.status === "PAID") return order.fulfillmentAssignment ? fulfillmentText(order.fulfillmentAssignment) : "等待客服分配";
   if (order.status === "COMPLETED") return null;
-  if (order.status === "CANCELLED") return "订单已关闭";
+  if (order.status === "CANCELLED") return "订单已取消";
   return "订单状态未记录";
 }
 
@@ -131,7 +133,7 @@ function InlineCopyBtn({ text, label }: { text: string; label: string }) {
 function ListRow({ party, order, status, accountId, filters, onOpen }: { party: OrderParty; order: Order; status: OrderStatusFilter; accountId?: string; filters?: OrderSearchFilters; onOpen: (orderId: string, event: ReactMouseEvent<HTMLAnchorElement>) => void }) {
   const facts = orderAmountFacts(order, party);
   const caption = !order.readOnly && party === "renter" && ["PAID", "COMPLETED"].includes(order.status) ? "下单金额" : facts.caption === "下单时号主报价" ? "下单时的出租报价" : facts.caption;
-  const hint = statusHint(order);
+  const hint = statusHint(order, status);
   const stageTag = orderListFulfillmentTag(order);
   const title = orderAccountTitle(order);
   const resources = order.source?.origin === "LEGACY" ? null : resourceSummary(order, !title.includes("哈夫币"));
@@ -193,14 +195,15 @@ const EMPTY_ART: Partial<Record<OrderParty, string>> = {
 };
 
 function emptyCopy(party: OrderParty, status: OrderStatusFilter, accountId?: string): { title: string; body: string; art?: string } {
-  if (status) return { title: "没有符合筛选条件的订单", body: "可以切换订单状态，或清除当前状态筛选。" };
+  if (status === "IN_PROGRESS") return { title: accountId ? "该账号当前没有进行中的订单" : "当前没有进行中的订单", body: "已完成、已取消或全部记录可从上方切换查看。进行中包含待付款、履约中，以及有退款处理中的已取消/已完成订单。" };
+  if (status && status !== "ALL") return { title: "没有符合筛选条件的订单", body: "可以切换订单状态，或查看全部订单。" };
   if (accountId) return { title: "该账号暂无订单记录", body: "这里仅展示当前账号对应的交易记录。" };
   if (party === "renter") return { title: "还没有租入订单", body: "选好账号并创建订单后，交易进展会显示在这里。", art: EMPTY_ART.renter };
   return { title: "还没有收到出租订单", body: "租客下单后，可在这里查看订单进度。", art: EMPTY_ART.owner };
 }
 
 function emptyAction(party: OrderParty, status: OrderStatusFilter, accountId: string | undefined, className: string) {
-  if (status) return <Link className={className} href={orderUrl(party, "", accountId)} scroll={false} replace>清除状态筛选</Link>;
+  if (status && status !== "ALL") return <Link className={className} href={orderUrl(party, "ALL", accountId)} scroll={false} replace>查看全部订单</Link>;
   if (party === "renter") return <Link className={className} href="/accounts">浏览可租账号</Link>;
   return <Link className={className} href={accountId ? `/account?view=accounts&accountId=${encodeURIComponent(accountId)}` : "/account?view=accounts"} scroll={false}>管理账号</Link>;
 }

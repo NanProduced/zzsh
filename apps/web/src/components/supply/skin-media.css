@@ -4,6 +4,54 @@
 .skin-media img[data-state="loading"] { visibility:hidden; }
 .skin-media-loading { position:absolute; inset:0; display:grid; place-items:center; color:var(--color-text-secondary); font-size:12px; }
 .skin-metadata { display:flex; flex-wrap:wrap; gap:4px 8px; color:var(--color-text-secondary); font-size:12px; line-height:1.5; overflow-wrap:anywhere; }
+.skin-metadata--tags { align-items:center; gap:6px; }
+.skin-quality-tag {
+  display:inline-flex;
+  align-items:center;
+  padding:1px 7px;
+  border-radius:999px;
+  font-size:11px;
+  font-weight:650;
+  line-height:1.45;
+  color:var(--color-text-secondary);
+  background:color-mix(in srgb, var(--color-bg-elevated) 55%, var(--color-border-subtle));
+}
+.skin-quality-tag--pending { font-weight:500; color:var(--color-text-muted); background:transparent; border:1px solid var(--color-border-subtle); }
+.skin-quality-tag--collectible {
+  color:#92400e;
+  background:color-mix(in srgb, var(--color-accent-brand, #f5c542) 28%, #fff7ed);
+}
+.skin-quality-tag[data-quality="传说"],
+.skin-quality-tag[data-rarity="legend"] {
+  color:#9a3412;
+  background:#ffedd5;
+}
+.skin-quality-tag[data-quality="至臻"] {
+  color:#9f1239;
+  background:#ffe4e6;
+}
+html[data-theme="dark"] .skin-quality-tag {
+  color:#e5e7eb;
+  background:rgb(255 255 255 / .08);
+}
+html[data-theme="dark"] .skin-quality-tag--pending {
+  color:var(--color-text-muted);
+  background:transparent;
+  border-color:rgb(255 255 255 / .14);
+}
+html[data-theme="dark"] .skin-quality-tag--collectible {
+  color:#fbbf24;
+  background:color-mix(in srgb, var(--color-accent-brand, #f5c542) 22%, #1c1917);
+}
+html[data-theme="dark"] .skin-quality-tag[data-quality="传说"],
+html[data-theme="dark"] .skin-quality-tag[data-rarity="legend"] {
+  color:#fdba74;
+  background:#3b2414;
+}
+html[data-theme="dark"] .skin-quality-tag[data-quality="至臻"] {
+  color:#fda4af;
+  background:#3f1219;
+}
 .skin-media-preview-trigger { display:block; width:100%; padding:0; border:0; border-radius:6px; color:inherit; background:transparent; cursor:zoom-in; }
 .skin-media-preview-trigger:focus-visible,.skin-preview-content button:focus-visible { outline:2px solid var(--color-focus-ring); outline-offset:3px; }
 .skin-preview-overlay { position:fixed; inset:0; z-index:160; background:rgb(0 0 0 / .72); }

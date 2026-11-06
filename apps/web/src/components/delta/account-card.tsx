@@ -53,7 +53,8 @@ function compactLevel(value: string | null, fallback: string | null = null): str
 export function authoritativeRatioLabel(raw: string | null | undefined, referenceOnly = false): string | null {
   const trimmed = raw?.trim();
   if (!trimmed || !/^\d+(?:\.\d+)?$/.test(trimmed)) return null;
-  return `${referenceOnly ? "基础 " : ""}${trimmed.replace(/(\.\d*?[1-9])0+$|\.0+$/, "$1")}万/元`;
+  void referenceOnly;
+  return `${trimmed.replace(/(\.\d*?[1-9])0+$|\.0+$/, "$1")}万/元`;
 }
 
 function isZeroQuantity(line: ResourceLine): boolean {
@@ -241,14 +242,51 @@ export function moneyValue(value: string | null | undefined, zeroLabel = "¥0.00
   return isZeroMoney(trimmed ?? "") ? zeroLabel : trimmed ?? "待确认";
 }
 
-export function listTermRuleLabel(termOptionLabel: string | null | undefined): string {
-  if (!termOptionLabel?.trim()) return "租期规则待确认";
-  const cleanTerm = termOptionLabel
-    .replace(/\(测试\)|\（测试\）/g, "")
-    .replace(/^\s*TEST_ONLY\s*/i, "")
-    .replace(/^[\s·|]+|[\s·|]+$/g, "")
-    .trim();
-  return cleanTerm ? `租期规则 ${cleanTerm}` : "租期规则待确认";
+export function termBadgeLabel(termValue: string | null | undefined): string | null {
+  const raw = termValue?.replace(/\s+/g, "") || "";
+  if (!raw || raw === "-" || /确认|未知|待定/.test(raw)) return null;
+  return raw.startsWith("租期") ? raw : `租期${raw}`;
+}
+
+export function dailyConsumptionBadgeLabel(raw: string | null | undefined): string | null {
+  if (!raw) return null;
+  let text = raw.trim();
+  if (!text || text === "-" || /确认|未知|待定/.test(text)) return null;
+  text = text
+    .replace(/^(每日消耗|每天消耗|每日|每天|日消耗)\s*/, "")
+    .replace(/\s*哈夫币\s*$/u, "")
+    .replace(/\s+/g, "");
+  if (!text) return null;
+  return text.endsWith("/天") ? text : `${text}/天`;
+}
+
+type ListingFactBadge = { key: "term" | "daily" | "ratio"; text: string };
+
+export function listingFactBadges(input: {
+  termValue: string | null | undefined;
+  dailyValue: string | null | undefined;
+  ratio: string | null | undefined;
+}): ListingFactBadge[] {
+  const badges: ListingFactBadge[] = [];
+  const term = termBadgeLabel(input.termValue);
+  if (term) badges.push({ key: "term", text: term });
+  const daily = dailyConsumptionBadgeLabel(input.dailyValue);
+  if (daily) badges.push({ key: "daily", text: daily });
+  if (input.ratio) badges.push({ key: "ratio", text: input.ratio });
+  return badges;
+}
+
+function ListingFactBadgeRow({ badges }: { badges: ListingFactBadge[] }) {
+  if (badges.length === 0) return null;
+  return (
+    <span className="account-fact-badges" aria-label="租期与哈夫币计费要点">
+      {badges.map((badge) => (
+        <span key={badge.key} className={`account-tag-pill account-tag-pill--fact account-tag-pill--${badge.key}`}>
+          {badge.text}
+        </span>
+      ))}
+    </span>
+  );
 }
 
 export function composeGridTitle(
@@ -433,6 +471,11 @@ export function AccountCard({
   const loginValue = data.loginMethod?.displayName?.trim() || null;
   const termValue = data.termLabel?.replace(/\s+/g, "") || null;
   const serviceWindowValue = conditionValue(data, "service_window");
+  const factBadges = listingFactBadges({
+    termValue,
+    dailyValue: conditionValue(data, "daily_consumption"),
+    ratio: facts.ratio,
+  });
 
   const accountTitle = deriveAccountTitle(data, haffQuantityText);
   const accountVisibleTitle = [accountTitle.primary, accountTitle.secondary].filter(Boolean).join(" · ");
@@ -546,18 +589,6 @@ export function AccountCard({
       ? "无押金"
       : `含押金 ${facts.depositValue.replace(/\.00$/, "")}`;
 
-    let sublineContent: ReactNode = null;
-    if (serviceWindowValue) {
-      sublineContent = (
-        <>
-          <Clock size={11} className="subline-clock-icon" aria-hidden="true" />
-          <span>可上号 {serviceWindowValue}</span>
-        </>
-      );
-    } else {
-      sublineContent = <span>{listTermRuleLabel(data.termOptionLabel)}</span>;
-    }
-
     return (
       <article className="account-card account-card--list" data-account-id={data.id}>
         <div className="account-card-surface account-list-item">
@@ -643,7 +674,17 @@ export function AccountCard({
             </div>
             <div className="account-list-subline-row">{data.availabilityLabel || data.historicalReadOnly ? <span className="account-history-badge" data-public-availability={data.availabilityState}>{data.availabilityLabel ?? "暂不可租"}</span> : null}
               {isFastMode ? <span className="account-list-deal-tag">特惠</span> : null}
-              <p className="account-list-subline">{sublineContent}</p>
+              {serviceWindowValue || factBadges.length > 0 ? (
+                <p className="account-list-subline">
+                  {serviceWindowValue ? (
+                    <>
+                      <Clock size={11} className="subline-clock-icon" aria-hidden="true" />
+                      <span>可上号 {serviceWindowValue}</span>
+                    </>
+                  ) : null}
+                  <ListingFactBadgeRow badges={factBadges} />
+                </p>
+              ) : null}
               <CopyableAccountNumber displayNo={data.displayNo} compact />
             </div>
           </div>
@@ -846,8 +887,8 @@ export function AccountCard({
             <div className="account-list-finance">
               {facts.ratio ? (
                 <div className="finance-row finance-row--ratio">
-                  <span className="finance-label">基准比例</span>
-                  <span className="finance-val" title="公开基准比例（万哈夫币/元），不含会员礼遇与个人优惠">{facts.ratio}</span>
+                  <span className="finance-label">哈夫币比例</span>
+                  <span className="finance-val" title="公开哈夫币比例（万哈夫币/元），不含会员礼遇与个人优惠">{facts.ratio}</span>
                 </div>
               ) : null}
               <div className="finance-row">
@@ -894,7 +935,7 @@ export function AccountCard({
                 {facts.ratio ? (
                   <div>
                     <dt>哈夫币比例</dt>
-                    <dd title="公开基准比例（万哈夫币/元），不含会员礼遇与个人优惠">{facts.ratio}</dd>
+                    <dd title="公开哈夫币比例（万哈夫币/元），不含会员礼遇与个人优惠">{facts.ratio}</dd>
                   </div>
                 ) : null}
                 <div>
@@ -921,9 +962,7 @@ export function AccountCard({
   const gridAttrs: string[] = [];
   if (vitValue) gridAttrs.push(`体力 ${vitValue}`);
   if (bearValue) gridAttrs.push(`负重 ${bearValue}`);
-  if (termValue) gridAttrs.push(`租期 ${termValue}`);
   if (serviceWindowValue) gridAttrs.push(`可用 ${serviceWindowValue}`);
-  else if (data.termOptionLabel) gridAttrs.push(`规则 ${data.termOptionLabel}`);
 
   const visibleSkins = data.skinTags.slice(0, 4);
   const extraSkinCount = Math.max(0, data.skinTags.length - visibleSkins.length);
@@ -1038,6 +1077,7 @@ export function AccountCard({
               {isFastMode ? <span className="account-card-deal-tag">特惠</span> : null}
               <CopyableAccountNumber displayNo={data.displayNo} compact />
             </div>
+            <ListingFactBadgeRow badges={factBadges} />
 
             {gridAttrs.length > 0 ? (
               <div className="account-grid-subattrs" title={gridAttrs.join(" · ")}>
@@ -1113,8 +1153,8 @@ export function AccountCard({
               <div className="breakdown-header">
                 <span className="breakdown-title">金额构成</span>
                 {facts.ratio ? (
-                  <span className="breakdown-note" title="公开基准比例（万哈夫币/元），不含会员礼遇与个人优惠">
-                    {facts.ratio} · 基准比例
+                  <span className="breakdown-note" title="公开哈夫币比例（万哈夫币/元），不含会员礼遇与个人优惠">
+                    哈夫币比例 {facts.ratio}
                   </span>
                 ) : null}
               </div>

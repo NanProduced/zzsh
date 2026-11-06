@@ -73,7 +73,7 @@ test('real skin preview restores its clicked trigger after Escape and close, alo
   const data = {
     id: 'ACCOUNT_SYNTHETIC', gameId: 'GAME_SYNTHETIC', versionId: 'VERSION_SYNTHETIC', releaseId: 'RELEASE_SYNTHETIC',
     title: '离线账号', publicTitle: '离线账号', displayNo: 'ZZ20261018000116', conditionLines: [], resourceLines: [],
-    skinTags: [{ id: 'SKIN_SYNTHETIC', name: '测试外观', ownerKind: 'AGENT', rarityName: null, mediaId: 'MEDIA_SYNTHETIC', mediaKind: 'PROMO_POSTER' }],
+    skinTags: [{ id: 'SKIN_SYNTHETIC', name: '测试外观', ownerKind: 'AGENT', rarityName: '传说', rarityCode: 'legend', mediaId: 'MEDIA_SYNTHETIC', mediaKind: 'PROMO_POSTER' }],
     media: [], entitlementNames: [], termLabel: '1天', resourceTotalLabel: '待核定', canCreateOrder: false,
   };
   const settle = () => React.act(async () => { await new Promise(resolve => setTimeout(resolve, 220)); });
@@ -83,6 +83,19 @@ test('real skin preview restores its clicked trigger after Escape and close, alo
         ? React.createElement(components.ReadyDetail, { data })
         : React.createElement(components.DetailGallery, { title: '画廊控制', media: [{ assetId: 'ASSET_SYNTHETIC', url: '/offline-a.png', category: 'SHOWCASE' }] })));
       await settle();
+      if (kind === 'skin' && closing === 'escape') {
+        const card = host.querySelector('.account-skin-card');
+        const wrap = card?.querySelector('.account-skin-card-media-wrap');
+        const quality = wrap?.querySelector('.account-skin-card-quality .skin-quality-tag');
+        const name = card?.querySelector('.account-skin-card-name');
+        assert.ok(wrap, 'quality badge overlays the skin portrait');
+        assert.equal(quality?.textContent, '传说');
+        assert.equal(name?.textContent, '测试外观');
+        assert.equal(card.querySelector('.account-skin-card-title'), null, 'badge leaves the title row');
+        assert.ok(wrap.contains(quality), 'badge stays inside the media wrap');
+        assert.equal(name.contains(quality), false, 'name row no longer holds the badge');
+        assert.ok(!card.textContent.includes('平台资料'), card.textContent);
+      }
       const trigger = host.querySelector(kind === 'skin' ? '.account-skin-card-media-btn' : '.detail-gallery-main');
       assert.ok(trigger, `${kind}: trigger exists`);
       trigger.focus(); assert.equal(document.activeElement === trigger, true);
@@ -97,7 +110,8 @@ test('real skin preview restores its clicked trigger after Escape and close, alo
         assert.equal(preview.getAttribute('alt'), '测试外观 皮肤图片');
         assert.equal(preview.getAttribute('src'), '/api/supply/media/MEDIA_SYNTHETIC/content');
         assert.equal(preview.getAttribute('data-state'), 'loading');
-        assert.match(dialog.textContent, /品质待核/);
+        assert.match(dialog.textContent, /传说/);
+        assert.ok(!dialog.textContent.includes('平台资料'), dialog.textContent);
         await React.act(async () => preview.dispatchEvent(new window.Event('error')));
         assert.match(dialog.textContent, /图片暂不可用/);
         await React.act(async () => dialog.querySelector('.skin-preview-retry').click());
@@ -196,13 +210,23 @@ test('picker metadata renders quality as a tag and hides unconfirmed quality', (
  m._compile(ts.transpileModule(fs.readFileSync(absolute, 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX, target: ts.ScriptTarget.ES2022, esModuleInterop: true } }).outputText, m.filename);
   const { renderToStaticMarkup } = rq('react-dom/server');
   const render = (skin, props = {}) => renderToStaticMarkup(React.createElement(m.exports.SkinMetadata, { skin, ...props }));
-  const known = render({ name: 'M4A1-棱镜攻势', rarityName: '传说', rarityBasis: 'PLATFORM_REFERENCE', isCollectible: true }, { qualityTag: true });
+  const known = render({ name: 'M4A1-棱镜攻势', rarityName: '传说', rarityCode: 'legend', rarityBasis: 'PLATFORM_REFERENCE', isCollectible: true }, { qualityTag: true });
   assert.match(known, /skin-quality-tag/);
   assert.match(known, /传说/);
   assert.match(known, /典藏/);
+  assert.match(known, /data-rarity="legend"/);
+  assert.match(known, /data-quality="传说"/);
   assert.ok(!known.includes('品质待核') && !known.includes('平台资料'), known);
   assert.equal(render({ name: 'X', rarityName: null, isCollectible: null }, { qualityTag: true }), '');
   assert.equal(render({ name: 'X', rarityName: '  ', isCollectible: false }, { qualityTag: true }), '');
   assert.match(render({ name: 'X', rarityName: null, defaultState: 'DEFAULT' }, { qualityTag: true }), /默认外观/);
-  assert.match(render({ name: 'X', rarityName: null }), /品质待核/);
+  const detail = render({ name: '骸爪-水墨云图', rarityName: '至臻', rarityBasis: 'PLATFORM_REFERENCE' });
+  assert.match(detail, /skin-quality-tag/);
+  assert.match(detail, /data-quality="至臻"/);
+  assert.match(detail, /至臻/);
+  assert.ok(!detail.includes('平台资料'), detail);
+  const pending = render({ name: 'X', rarityName: null });
+  assert.match(pending, /品质待核/);
+  assert.match(pending, /skin-quality-tag--pending/);
+  assert.ok(!pending.includes('平台资料'), pending);
 });

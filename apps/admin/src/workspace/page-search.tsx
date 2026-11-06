@@ -87,7 +87,7 @@ function getPageIcon(path: string): LucideIcon {
   if (path === "/distribution") return LayoutDashboardIcon;
   if (path === "/distribution/earnings") return BadgeDollarSignIcon;
   if (path === "/distribution/participants" || path.startsWith("/distribution/participants/")) return UsersRoundIcon;
-  if (path === "/distribution/relations" || path === "/distribution/policy" || path === "/distribution-policy") return NetworkIcon;
+  if (path === "/distribution/policy" || path === "/distribution-policy") return NetworkIcon;
   if (path === "/admins" || path.startsWith("/admins/")) return UserRoundCogIcon;
   if (path === "/roles" || path.startsWith("/roles/")) return KeyRoundIcon;
   if (path === "/supply/catalog") return BoxesIcon;

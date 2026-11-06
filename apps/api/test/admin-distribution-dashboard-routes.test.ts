@@ -135,21 +135,27 @@ test("Boss earnings and participant pagination bind snapshot, exact offsets and 
   assert.equal(participants.status, 200);
   assert.equal(participants.json.total, "5");
   assert.ok(participants.json.snapshot);
-  const participantPage = env.state.calls.filter(call => call.sql.includes("ORDER BY p.user_id LIMIT")).at(-1)!;
+  const participantPage = env.state.calls.filter(call => call.sql.includes("ORDER BY COALESCE(a.record_count,0) DESC")).at(-1)!;
   assert.deepEqual(participantPage.values.slice(-2), [2, 0]);
 
   const next = await invoke(env, "GET", `/participants?page=2&pageSize=2&snapshot=${encodeURIComponent(participants.json.snapshot)}`);
   assert.equal(next.status, 200);
-  const nextPage = env.state.calls.filter(call => call.sql.includes("ORDER BY p.user_id LIMIT")).at(-1)!;
+  const nextPage = env.state.calls.filter(call => call.sql.includes("ORDER BY COALESCE(a.record_count,0) DESC")).at(-1)!;
   assert.deepEqual(nextPage.values.slice(-2), [2, 2]);
 
   const detail = await invoke(env, "GET", "/participants/user-1");
   assert.equal(detail.status, 200);
   assert.equal(detail.json.participant.userId, "user-1");
   assert.equal(detail.json.relations[0].parentName, "上级");
-  const exact = env.state.calls.filter(call => call.sql.includes("ORDER BY p.user_id LIMIT")).at(-1)!;
-  assert.equal(exact.values[0], "user-1");
+  const exact = env.state.calls.filter(call => call.sql.includes("ORDER BY COALESCE(a.record_count,0) DESC")).at(-1)!;
+  assert.ok(exact.values.includes("user-1"));
   assert.deepEqual(exact.values.slice(-2), [20, 0]);
+  assert.match(exact.sql, /participant_amounts/);
+  const sorted = await invoke(env, "GET", "/participants?sort=settledCents&order=asc&pageSize=2");
+  assert.equal(sorted.status, 200);
+  const settledSort = env.state.calls.filter(call => call.sql.includes("ORDER BY COALESCE(a.settled_cents,0) ASC")).at(-1)!;
+  assert.ok(settledSort);
+  assert.deepEqual(settledSort.values.slice(-2), [2, 0]);
 });
 
 test("participant edits invalidate a previously signed page even when participant count is unchanged", async () => {

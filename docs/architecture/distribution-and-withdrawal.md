@@ -32,6 +32,10 @@
 
 分销管理将当前政策、订单佣金和邀请关系分开读取，均按实际对象权限与来源核对。计提事件、入账事件和回退记录不相加成重复收益；可入账时点不称为已结算日期。历史观察不冒充当前钱包或渠道到账。
 
+同一用户只对应一份分销主体；`source_type` 记录该主体的建立来源，不表示用户后续只能产生旧平台记录。旧、新邀请关系均存入 `invitation_relation`，按注册邀请 `INVITER` 与计佣上级 `DISTRIBUTION_LEADER` 分别统计；来源未闭合时只显示已接入数量，不能把它当作完整人数。两种关系可指向同一人，合计关系条数不等于去重人数。
+
+旧佣金保留在 `personal_finance_observation` 的历史观察中，新平台佣金使用 `rental_referral_earning`；管理读取按同一受益人合并展示，并在单笔记录上区分来源。旧记录不按新规则重算或重复入账。`GET /api/v1/admin/distribution/participants/:id/downline` 及相应 Admin BFF 以 `type=INVITER|DISTRIBUTION_LEADER` 分页读取直属关系，只允许有全局关系范围的授权管理员访问；旧关系未证明原绑定时间时不把导入时间当作原时间。
+
 `distribution.policy.publish` 冻结原政策ID、revision、digest、明确改动和理由；审批人与申请人分离，执行前再次核权限、原头CAS及幂等。新申请和执行均需要显式写准入及版本2的结构标记，读scope不授予写入；前向结构尚未安装时保持不可提交，不回退直接改政策。现有v1读取与冻结计算继续兼容。正式结构、实际身份与写准入应分别验收，源码存在不表示经营写入已开放。
 
 用户本人条款仅显式 `projectionVersion=2` 才消费统一政策投影；收益计算扩展使用 `calculationVersion=2`。旧v1不悄悄添加字段，也不以空等级冒充未知后继续使用新规则。

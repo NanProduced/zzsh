@@ -11,7 +11,7 @@ import { readLegacyMarketAccountIds } from "./legacy-listing-read";
 import type { LegacyPublicAdmission } from "../legacy-load/legacy-public-admission";
 
 /** B1: owner-side account list (个人中心「我的账号」). List indicator only — not the full rentability gate. */
-export const OWNER_RENTAL_STATES = ["RENTED", "LISTED", "PAUSED", "REVIEWING", "DRAFT", "REJECTED", "RESTRICTED", "UNKNOWN"] as const;
+export const OWNER_RENTAL_STATES = ["RENTED", "PENDING_PAYMENT", "LISTED", "PAUSED", "REVIEWING", "DRAFT", "REJECTED", "RESTRICTED", "COMPLETED", "UNKNOWN"] as const;
 export type OwnerRentalState = typeof OWNER_RENTAL_STATES[number];
 export type OwnerAccountQuery = { limit: number; after: string; cursor: string | null; rentalState: OwnerRentalState | null };
 const CURSOR_AUDIENCE = "zzsh:owner-accounts-v1";
@@ -54,6 +54,8 @@ export function decodeOwnerAccountCursor(token: string, userId: string, rentalSt
 const rentalStateSql = (continuationReady: boolean) => `CASE
   WHEN ao.status='PAID' OR lo.occupied
     ${continuationReady ? `OR EXISTS(SELECT 1 FROM zzsh_order.legacy_inflight_register r WHERE r.account_id=a.id AND r.disposition='ISOLATED_PARTY')` : ""} THEN 'RENTED'
+  WHEN ao.status='PENDING_PAYMENT' THEN 'PENDING_PAYMENT'
+  WHEN a.lifecycle='ARCHIVED' THEN 'COMPLETED'
   WHEN a.staff_restricted THEN 'RESTRICTED'
   WHEN a.id=ANY($5::text[]) THEN CASE WHEN a.owner_paused THEN 'PAUSED' ELSE 'LISTED' END
   WHEN v.id IS NULL THEN 'UNKNOWN'
@@ -138,7 +140,8 @@ export function projectOwnerAccount(row: OwnerAccountRow) {
   const { titleFacts, unknownReason } = projectTitleFacts(row);
   const blockers: string[] = [];
   if (row.rental_state === "RENTED") blockers.push("RENTED");
-  if (row.ao_status === "PENDING_PAYMENT") blockers.push("PENDING_PAYMENT");
+  if (row.rental_state === "PENDING_PAYMENT" || row.ao_status === "PENDING_PAYMENT") blockers.push("PENDING_PAYMENT");
+  if (row.rental_state === "COMPLETED") blockers.push("RENTAL_COMPLETED");
   if (row.staff_restricted) blockers.push("STAFF_RESTRICTED");
   if (row.owner_paused) blockers.push("OWNER_PAUSED");
   if (row.rental_state === "REVIEWING") blockers.push("UNDER_REVIEW");

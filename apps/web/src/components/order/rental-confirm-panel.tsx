@@ -10,8 +10,8 @@ import { formatMoneyLabel } from "@/lib/listing-view";
 import { supplyApi } from "@/lib/supply-client";
 import { useUserSession } from "@/components/session/user-session-provider";
 import { useIdentityReset } from "@/components/session/identity-reset";
-import { RentalPriceSummary, type ReferenceFees } from "./rental-price-summary";
-import { moneyText,paymentObservation,personalMembershipLabel,personalBenefitSources } from "@/lib/order-display";
+import { RentalPriceSummary, MembershipBenefitsCard, type ReferenceFees } from "./rental-price-summary";
+import { moneyText,paymentObservation,personalMembershipLabel,membershipBenefitPresentation,depositReductionCents } from "@/lib/order-display";
 import { performGuardedWrite, type WriteOutcome } from "@/components/order/order-trade-actions";
 
 type AgreementInfo = { id: string; title: string; body: string; digest: string };
@@ -918,6 +918,10 @@ export function RentalConfirmPanel({
     const quote = stage.quote;
     const money = quote.quote;
     const payable = formatMoneyLabel(money.tenantPayableTotal ?? null) ?? "以服务端确认为准";
+    const depositReduction = depositReductionCents(quote.baseTenantDeposit, money.tenantDeposit ?? null);
+    const baseDepositLabel = moneyText(quote.baseTenantDeposit);
+    const actualDepositLabel = formatMoneyLabel(money.tenantDeposit ?? null) ?? moneyText(money.tenantDeposit);
+    const benefitCard = membershipBenefitPresentation(quote, null, depositReduction, Boolean(quote.depositWaived && actualDepositLabel === "¥0.00"));
     const disclosure = quote.compensationDisclosure;
     const expired = ["已过期", null].includes(countdown(quote.expiresAt, now));
     return <div className="rental-confirm rental-confirm--quote">
@@ -931,10 +935,10 @@ export function RentalConfirmPanel({
       ) : null}
       {!reference ? <><div className="rental-confirm-head"><strong>个人报价确认</strong>
         <span className="rental-confirm-tier">{personalMembershipLabel(quote)}{quote.depositWaived ? " · 已免租客押金" : ""}</span></div>
-      {personalBenefitSources(quote)?<p>{personalBenefitSources(quote)}</p>:null}
+      <MembershipBenefitsCard presentation={benefitCard} />
       <dl className="rental-confirm-facts">
         <div><dt>资源费用</dt><dd>{formatMoneyLabel(money.resourceTotal ?? null) ?? "—"}</dd></div>
-        <div><dt>租客押金</dt><dd>{quote.depositWaived ? "已免押" : formatMoneyLabel(money.tenantDeposit ?? quote.baseTenantDeposit) ?? "—"}</dd></div>
+        <div><dt>租客押金</dt><dd>{depositReduction !== null ? <><del aria-label={`原租客押金 ${baseDepositLabel}`}>{baseDepositLabel}</del><span> {quote.depositWaived && actualDepositLabel === "¥0.00" ? "已免押" : actualDepositLabel}</span></> : quote.depositWaived ? "已免押" : formatMoneyLabel(money.tenantDeposit ?? quote.baseTenantDeposit) ?? "—"}</dd></div>
         <div className="rental-confirm-total"><dt>预计合计</dt><dd>{payable}</dd></div>
       </dl>
       </> : null}

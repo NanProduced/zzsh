@@ -217,12 +217,29 @@ test("legacy amount facts keep renter evidence private instead of relabelling it
   assert.equal(renter.main, "66.00 元");
   assert.equal(owner.main, "未记录");
   assert.equal(renter.caption, "已付金额记录");
-  assert.equal(owner.caption, "待结算");
+  assert.equal(owner.caption, "收益未记录");
   assert.deepEqual(owner.secondary, []);
   assert.doesNotMatch(JSON.stringify(owner), /66\.00|租客实付/);
   const unknown = display.orderAmountFacts({ ...order, legacyAmounts: { required: null, paid: null, deposit: null, refund: null }, payment: { state: "UNKNOWN" } }, "owner");
   assert.equal(unknown.main, "未记录");
   assert.deepEqual(unknown.secondary, []);
+});
+
+test("legacy owner captions never invent 待结算 for cancelled or unpaid rows", () => {
+  const unpaidCancel = {
+    readOnly: true, source: { origin: "LEGACY" }, status: "CANCELLED",
+    payment: { state: "RECORDED_UNPAID" }, legacyAmounts: { required: yuan("10.00"), paid: null, deposit: null, refund: null },
+  };
+  assert.equal(display.orderAmountFacts(unpaidCancel, "owner").caption, "已取消 · 未付款");
+  const completedMissing = {
+    readOnly: true, source: { origin: "LEGACY" }, status: "COMPLETED",
+    payment: { state: "RECORDED_PAID" }, legacyAmounts: { required: yuan("10.00"), paid: yuan("10.00"), deposit: null, refund: null },
+  };
+  assert.equal(display.orderAmountFacts(completedMissing, "owner").caption, "收益未记录");
+  assert.doesNotMatch(JSON.stringify([
+    display.orderAmountFacts(unpaidCancel, "owner"),
+    display.orderAmountFacts(completedMissing, "owner"),
+  ]), /待结算/);
 });
 
 test("a historical refund figure is labelled as the original record, never as the current duty", () => {
@@ -305,5 +322,17 @@ test("historical owner income is shown only with explicit original-net evidence"
   assert.deepEqual(facts.secondary, []);
   assert.equal(display.orderAmountFacts({ ...order, ownerIncomeSource: undefined }, "owner").main, "未记录");
   assert.equal(display.orderAmountFacts({ ...order, amounts: { ownerRecordedIncome: null } }, "owner").main, "未记录");
-  assert.equal(display.orderAmountFacts({ ...order, amounts: { ownerRecordedIncome: null } }, "owner").caption, "待结算");
+  assert.equal(display.orderAmountFacts({ ...order, amounts: { ownerRecordedIncome: null } }, "owner").caption, "无号主收益记录");
+});
+
+
+test("membership discount requires complete unique resource lines and an authoritative total",()=>{
+ const personal=[{itemId:'item-1',quantity:'2',buyerAmount:yuan('8.00')}];
+ const reference=[{itemId:'item-1',quantity:'2',costAmount:'10.00'}];
+ assert.equal(display.matchingResourceDiscount(personal,yuan('8.00'),reference)?.reduction,200n);
+ assert.equal(display.formatNiceZhe(10000n,9800n),'9.8折');
+ assert.equal(display.matchingResourceDiscount(personal,null,reference),null);
+ assert.equal(display.matchingResourceDiscount([...personal,...personal],yuan('16.00'),reference),null);
+ assert.equal(display.matchingResourceDiscount(personal,yuan('8.00'),[...reference,...reference]),null);
+ assert.equal(display.matchingResourceDiscount(personal,yuan('8.00'),[...reference,{itemId:'item-2',quantity:'1',costAmount:'2.00'}]),null);
 });

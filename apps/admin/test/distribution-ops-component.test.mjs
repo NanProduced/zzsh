@@ -32,7 +32,7 @@ test('participant desktop and mobile retain observed relations, commission subto
   const participant={userId:'historical_subject',name:'历史分销商',eligibility:'UNKNOWN',frozen:false,levelCode:null,sourceType:'LEGACY_MYSQL',leaderChildren:null,inviterChildren:null,mappedLeaderChildren:2,mappedInviterChildren:164,settledCents:'398183',pendingCents:null,recoveryCents:null,mappedRecordCount:'959',earningsCoverage:'UNKNOWN',needsReviewCount:'1',needsReviewCents:'100',legacyQualification:{eligibility:'ELIGIBLE',commissionFrozen:false,levelId:'2'}};
   globalThis.fetch=h.browser.fetch=async()=>json({items:[participant],total:'1',page:1,pageSize:20,hasMore:false,snapshot:null,scope:{network:'AVAILABLE'}});
   const m=await h.loader.ssrLoadModule('/src/views/distribution-dashboard-pages.tsx'),ui=await h.mount(m.DistributionParticipantsPage,{snapshot:snap([], 'boss', 'session', true),onOpenPath(){}});
-  for(const root of [ui.host.querySelector('table'),ui.host.querySelector('ul')]){assert(root);assert.match(root.textContent,/原资格有效 · 当前计佣待核/);assert.match(root.textContent,/已接入 164 · 总数待核/);assert.match(root.textContent,/¥3,981.83/);assert.match(root.textContent,/未核定/);assert.match(root.textContent,/待核对\s*1 笔/);assert.match(root.textContent,/原分销档位 ID 2/);assert.doesNotMatch(root.textContent,/¥0.00/);}
+  for(const root of [ui.host.querySelector('table'),ui.host.querySelector('ul')]){assert(root);assert.match(root.textContent,/原资格有效 · 当前计佣待核/);assert.match(root.textContent,/计佣下级/);assert.match(root.textContent,/邀请注册/);assert.doesNotMatch(root.textContent,/直属计佣/);assert.doesNotMatch(root.textContent,/注册邀请/);assert.match(root.textContent,/已接入 164 · 总数待核/);assert.match(root.textContent,/¥3,981.83/);assert.match(root.textContent,/未核定/);assert.match(root.textContent,/待核对\s*1 笔/);assert.match(root.textContent,/原分销档位 ID 2/);assert.doesNotMatch(root.textContent,/¥0.00/);}
  }finally{await h.close();}
 });
 
@@ -143,7 +143,7 @@ test('distribution dashboard model formats exact cents and keeps source/role/sta
   assert.equal(m.sourceLabel('LEGACY'),'历史观察');
   assert.equal(m.stateLabel('RECOVERY_REQUIRED'),'待追回');
   const f=m.defaultDashboardFilters();
-  assert.match(f.from,/^\d{4}-\d{2}-\d{2}$/);assert.equal(f.page,1);assert.equal(f.pageSize,20);
+  assert.match(f.from,/^\d{4}-\d{2}-\d{2}$/);assert.equal(f.page,1);assert.equal(f.pageSize,20);assert.equal(f.sort,'recordCount');assert.equal(f.order,'desc');
  }finally{await h.close();}
 });
 
@@ -155,8 +155,19 @@ test('390 宽度的佣金与分销商页面使用移动卡片保全金额、状�
  assert.ok(earningMobile?.textContent.includes('¥0.95'));assert.ok(earningMobile?.textContent.includes('已结算'));assert.ok(earningMobile?.textContent.includes('入账 2026'));
  assert.ok(earnings.host.querySelector('div.hidden.overflow-x-auto'));
  const participants=await h.mount(m.DistributionParticipantsPage,{snapshot,onOpenPath:()=>{}});const participantMobile=participants.host.querySelector('ul.md\\:hidden');
- assert.ok(participantMobile?.textContent.includes('受益人'));assert.ok(participantMobile?.textContent.includes('user_1'));assert.ok(participantMobile?.textContent.includes('¥0.95'));
+ assert.ok(participantMobile?.textContent.includes('受益人'));assert.ok(!participantMobile?.textContent.includes('user_1'));assert.ok(!participants.host.textContent.includes('本平台'));assert.ok(participants.host.querySelector('[data-distribution-participants-filters]'));assert.ok(participantMobile?.textContent.includes('¥0.95'));
+ const sortBtn=[...participants.host.querySelectorAll('button')].find(b=>b.getAttribute('aria-label')==='按分销单数排序');
+ assert.ok(sortBtn);assert.equal(participants.host.querySelector('th[aria-sort="descending"]')?.textContent.includes('分销单数'),true);
 }finally{globalThis.fetch=previous;await h.close();}});
+
+test('participants table sort headers rewrite query sort/order and reset page',async()=>dashboardProbe(async(h,m)=>{
+ const calls=[];globalThis.fetch=h.browser.fetch=async url=>{const q=new URL(String(url),'http://fixture.invalid').searchParams;calls.push(Object.fromEntries(q));return json(dashboardPage(url,{items:[{userId:'user_1',name:'受益人',eligibility:'ELIGIBLE',frozen:false,levelCode:'L1',inviter:'KNOWN_NONE',leader:'KNOWN_PARENT',sourceType:'NATIVE',revision:'1',leaderChildren:1,inviterChildren:0,settledCents:'95',pendingCents:'0',recoveryCents:'0',recordCount:'3',mappedRecordCount:'3'}],total:'1',hasMore:false}));};
+ const queries=[];const ui=await h.mount(m.DistributionParticipantsPage,{snapshot:dashboardWho(),onOpenPath(){},query:{page:'2',sort:'recordCount',order:'desc'},onQueryChange:q=>queries.push(q)});
+ await dashboardUntil(()=>calls.length>=1);
+ assert.equal(calls[0].sort,'recordCount');assert.equal(calls[0].order,'desc');
+ const settled=[...ui.host.querySelectorAll('button')].find(b=>b.getAttribute('aria-label')==='按已结算排序');
+ await click(settled);assert.equal(queries.at(-1).sort,'settledCents');assert.equal(queries.at(-1).order,'asc');assert.equal(queries.at(-1).page,'1');
+}));
 
 const dashboardWho=()=>snap(['distribution.dashboard.read','user.directory.read','order.read'],'dashboard-reader','dashboard-session');
 const dashboardEarning={id:'earning_1',source:'NATIVE',beneficiaryId:'user_1',beneficiaryName:'PRIVATE_DIRECTORY_NAME',role:'OWNER_REFERRAL',orderId:'order_1',orderNumber:'ORDER-ONE',amountCents:'95',recoveryRequiredCents:null,state:'SETTLED',occurredAt:'2026-10-19T11:51:09Z',settledAt:'2026-10-19T11:51:41Z',dueAt:null,recordedAt:'2026-10-19T11:51:09Z',gameId:'game_1'};
@@ -193,15 +204,16 @@ test('dashboard restores every filter and gets a new first-page token before a r
  const query={from:'2026-10-01',to:'2026-10-19',source:'LEGACY',state:'SETTLED',role:'OWNER_REFERRAL',q:'restored',page:'3',pageSize:'10',rankingBasis:'PERIOD_SETTLED_FLOW',rankingLimit:'100'};
  const ui=await h.mount(m.DistributionEarningsPage,{snapshot:dashboardWho(),onOpenPath(){},query,onQueryChange:q=>queries.push(q)});await dashboardUntil(()=>calls.length===2);
  assert.deepEqual(calls.map(c=>c.page),['1','3']);assert.equal(calls[1].snapshot,'fixture-snapshot');for(const key of ['from','to','source','state','role','q','pageSize','rankingBasis','rankingLimit'])assert.equal(calls[1][key],query[key],key);
- const date=ui.host.querySelector('input[type=date]');await input(h.browser,date,'2026-10-02');await dashboardUntil(()=>queries.length>0);assert.equal(queries.at(-1).from,'2026-10-02');assert.equal(queries.at(-1).page,'1');assert.equal(queries.at(-1).source,'LEGACY');assert.equal(queries.at(-1).snapshot,undefined);
+ assert.equal(ui.host.querySelectorAll('input[type=date]').length,0,'dates use the shared DateSelector');const date=ui.host.querySelector('button[aria-label="选择佣金发生日期"]');assert.match(date.textContent,/2026-10-01 至 2026-10-19/);const filterForm=ui.host.querySelector('[data-distribution-earnings-filters]');assert.ok(filterForm);assert.match(filterForm.className,/flex flex-col gap-3/);const search=[...ui.host.querySelectorAll('input')].find(el=>el.value==='restored');await input(h.browser,search,'restored2');assert.equal(queries.length,0,'typing alone does not refetch');await act(async()=>search.form.requestSubmit());await dashboardUntil(()=>queries.length>0);assert.equal(queries.at(-1).from,'2026-10-01');assert.equal(queries.at(-1).page,'1');assert.equal(queries.at(-1).source,'LEGACY');assert.equal(queries.at(-1).snapshot,undefined);
 }));
 test('dashboard external filter navigation cancels a late prior response',async()=>dashboardProbe(async(h,m)=>{
  let release;globalThis.fetch=h.browser.fetch=async url=>new URL(String(url),'http://fixture.invalid').searchParams.get('q')==='old'?new Promise(resolve=>release=()=>resolve(json(dashboardPage(url,{items:[{...dashboardEarning,orderNumber:'LATE-OLD'}]})))):json(dashboardPage(url,{items:[{...dashboardEarning,orderNumber:'CURRENT-NEW'}]}));
  const props={snapshot:dashboardWho(),onOpenPath(){},query:{q:'old'}};const ui=await h.mount(m.DistributionEarningsPage,props);await act(async()=>ui.root.render(createElement(m.DistributionEarningsPage,{...props,query:{q:'new'}})));await dashboardUntil(()=>ui.host.textContent.includes('CURRENT-NEW'));await act(async()=>release());assert.doesNotMatch(ui.host.textContent,/LATE-OLD/);
 }));
-test('dashboard zero exact-order matches release the query lock without a fake amount',async()=>dashboardProbe(async(h,m)=>{
- globalThis.fetch=h.browser.fetch=async url=>String(url).includes('/orders?')?json({items:[],total:0}):json(dashboardPage(url,{items:[],total:'0',hasMore:false}));const ui=await h.mount(m.DistributionEarningsPage,{snapshot:dashboardWho(),onOpenPath(){}});
- await input(h.browser,ui.host.querySelector('input[placeholder="完整订单号"]'),'NO-SUCH-ORDER');const submit=dashboardButton(ui.host,'查询本单佣金');await click(submit);await dashboardUntil(()=>ui.host.textContent.includes('没有找到可读的匹配订单'));assert.equal(submit.disabled,false);
+test('earnings page has one search box and marks only historical rows',async()=>dashboardProbe(async(h,m)=>{
+ globalThis.fetch=h.browser.fetch=async url=>json(dashboardPage(url,{items:[{...dashboardEarning,id:'n1',source:'NATIVE',beneficiaryName:'新平台用户'},{...dashboardEarning,id:'l1',source:'LEGACY',beneficiaryName:'历史用户'}],total:'2',hasMore:false}));const ui=await h.mount(m.DistributionEarningsPage,{snapshot:dashboardWho(),onOpenPath(){}});
+ await dashboardUntil(()=>ui.host.textContent.includes('历史用户'));assert.equal(ui.host.querySelector('input[placeholder="完整订单号"]'),null);assert.equal(dashboardButton(ui.host,'查询本单佣金'),undefined);assert.equal(ui.host.querySelectorAll('input[placeholder]').length,1);
+ const table=ui.host.querySelector('table');assert.equal(table.querySelector('th').textContent,'受益人');const rows=[...table.querySelectorAll('tbody tr')];assert.doesNotMatch(rows[0].cells[0].textContent,/历史|本平台/);assert.equal(rows[1].cells[0].textContent,'历史用户');assert.match(rows[1].cells[2].textContent,/旧平台记录/);
 }));
 test('legacy exact-order context loads the right root and discards a late earlier root',async()=>dashboardProbe(async(h,m)=>{
  let release;const calls=[];globalThis.fetch=h.browser.fetch=async url=>{calls.push(String(url));return String(url).includes('/orders/NATIVE/old_order')?new Promise(resolve=>release=()=>resolve(json(exactOrder('old_order')))):String(url).includes('/orders/LEGACY/new_order')?json(exactOrder('new_order','LEGACY')):json(dashboardPage(url,{items:[],total:'0',hasMore:false}));};
@@ -210,9 +222,9 @@ test('legacy exact-order context loads the right root and discards a late earlie
 test('policy read-only wrapper never mounts maintenance reads or write controls',async()=>dashboardProbe(async(h,m)=>{
  const calls=[];globalThis.fetch=h.browser.fetch=async url=>{calls.push(String(url));return json(flat);};const ui=await h.mount(m.DistributionPolicyPage,{snapshot:snap(['personal.distribution.policy.read']),onOpenPath(){},onDirtyChange(){}});await settle();assert.equal(ui.host.querySelector('[aria-label="分销计提维护"]'),null);assert.equal(dashboardButton(ui.host,'执行到期入账'),undefined);assert(calls.every(p=>!p.includes('/maintenance/')));
 }));
-test('relations incoming user context and permission withdrawal are request-scoped',async()=>dashboardProbe(async(h,m)=>{
- let release;globalThis.fetch=h.browser.fetch=async url=>{const id=String(url).split('/').at(-1);const body={subjectId:id,participant:{knowledge:'KNOWN',eligibility:'ELIGIBLE',commissionFrozen:false,legacyLevelCode:null},relations:[{type:'INVITER',knowledge:'KNOWN_PARENT',parentUserId:'parent',parentName:id==='old_user'?'PRIVATE-OLD-PARENT':'CURRENT-PARENT',sourceType:'NATIVE',policyVersion:null}],reasonCodes:[]};return id==='old_user'?new Promise(resolve=>release=()=>resolve(json(body))):json(body);};
- const who=snap(['user.directory.read','personal.distribution.policy.read']),props={snapshot:who,onOpenPath(){},query:{userId:'old_user'}};const ui=await h.mount(m.DistributionRelationsPage,props);await act(async()=>ui.root.render(createElement(m.DistributionRelationsPage,{...props,query:{userId:'new_user'}})));await dashboardUntil(()=>ui.host.textContent.includes('CURRENT-PARENT'));await act(async()=>release());assert.doesNotMatch(ui.host.textContent,/PRIVATE-OLD-PARENT/);await input(h.browser,ui.host.querySelector('input'),'bad/user');await click(dashboardButton(ui.host,'查询关系'));assert.match(ui.host.textContent,/请填写准确用户 ID/);await act(async()=>ui.root.render(createElement(m.DistributionRelationsPage,{...props,query:{userId:'third_user'}})));await dashboardUntil(()=>ui.host.textContent.includes('CURRENT-PARENT'));assert.doesNotMatch(ui.host.textContent,/请填写准确用户 ID/);await act(async()=>ui.root.render(createElement(m.DistributionRelationsPage,{...props,query:{userId:'new_user'},snapshot:snap([])})));assert.doesNotMatch(ui.host.textContent,/CURRENT-PARENT/);
+test('participant detail shows downline and own earnings',async()=>dashboardProbe(async(h,m)=>{
+ const urls=[];globalThis.fetch=h.browser.fetch=async url=>{const u=String(url);urls.push(u);if(u.includes('/downline'))return json({subjectId:'old_user',type:'LEADER',knowledge:'KNOWN',total:'1',page:1,pageSize:10,items:[{userId:'child_one',name:'CHILD-ONE',boundAt:'2026-11-01T00:00:00.000Z',childCount:'0'}]});if(u.includes('/participants/old_user'))return json({participant:{userId:'old_user',name:'SUBJECT',knowledge:'KNOWN'},relations:[],downline:{knowledge:'KNOWN',leader:'1',inviter:'0'}});return json(dashboardPage(url,{items:[],total:'0',hasMore:false}));};
+ const detail=await h.mount(m.DistributionParticipantPage,{snapshot:dashboardWho(),onOpenPath(){},userId:'old_user'});await dashboardUntil(()=>detail.host.textContent.includes('CHILD-ONE'));assert.ok(urls.some(u=>u.includes('beneficiary=old_user')));assert.ok(urls.some(u=>u.includes('/downline')&&new URL(u,'http://fixture.invalid').searchParams.get('type')==='INVITER'));assert.match(detail.host.textContent,/佣金明细/);
 }));
 
 test('dashboard participant list and detail clear private fields on denied refresh and root changes',async()=>dashboardProbe(async(h,m)=>{
@@ -224,8 +236,8 @@ test('dashboard participant list and detail clear private fields on denied refre
 
 test('the rendered distribution chart formatter keeps original cents beyond safe integer precision',async()=>dashboardProbe(async(h,m)=>{
  const cents='9007199254740993',tree=m.DistributionTrend({points:[{date:'2026-11-02',cents,knowledge:'KNOWN'}]});let formatter;
- const visit=element=>{if(!element||typeof element!=='object')return;if(typeof element.props?.formatter==='function')formatter=element.props.formatter;const children=element.props?.children;if(Array.isArray(children))children.forEach(visit);else visit(children);};visit(tree);
- assert.equal(formatter,m.distributionTrendTooltip);assert.deepEqual(formatter(Number(cents)/100,'入账',{payload:{cents}}),['¥90,071,992,547,409.93','入账']);assert.deepEqual(formatter(999,'入账',{}),['未核定','入账']);
+ const visit=element=>{if(!element||typeof element!=='object')return;if(typeof element.props?.formatValue==='function')formatter=element.props.formatValue;visit(element.props?.content);const children=element.props?.children;if(Array.isArray(children))children.forEach(visit);else visit(children);};visit(tree);
+ assert.equal(formatter,m.distributionTrendValue);assert.equal(formatter({cents,yuan:Number(cents)/100},'yuan'),'¥90,071,992,547,409.93');assert.equal(formatter({yuan:999},'yuan'),'未核定');
 }));
 test('non-finite distribution chart coordinates use an exact table and unknown points stay unknown',async()=>dashboardProbe(async(h,m)=>{
  const huge='1'+'0'.repeat(400),model=await h.loader.ssrLoadModule('/src/views/distribution-dashboard-model.ts');const ui=await h.mount(m.DistributionTrend,{points:[{date:'2026-11-01',cents:huge,knowledge:'KNOWN'},{date:'2026-11-02',cents:'0',knowledge:'UNKNOWN'}]});
@@ -241,4 +253,41 @@ test('policy without explicit write assembly never mounts the maintenance comman
 }));
 test('failed maintenance read is unfinished, never a completed empty inspection',async()=>dashboardProbe(async(h)=>{
  globalThis.fetch=h.browser.fetch=async()=>json({error:{code:'EVIDENCE_UNAVAILABLE'}},503);const m=await h.loader.ssrLoadModule('/src/views/distribution-maintenance-panel.tsx'),ui=await h.mount(m.DistributionMaintenancePanel,{});await dashboardUntil(()=>ui.host.textContent.includes('维护未完成'));assert.match(ui.host.textContent,/本次检查未完成/);assert.doesNotMatch(ui.host.textContent,/已检查 0|当前范围内没有可检查|已到达当前范围最早/);
+}));
+
+test('DistributionDateRange keeps incomplete ranges local and only commits both ends', async () => {
+  const {readFileSync}=await import('node:fs');const src=readFileSync(new URL('../src/views/distribution-dashboard-pages.tsx',import.meta.url),'utf8');
+  const start=src.indexOf('export function DistributionDateRange'), body=src.slice(start, src.indexOf('\nexport function', start+10));
+  assert.ok(body.includes('setDraft(next)'));
+  assert.ok(body.includes('if (next.startDate && next.endDate)'));
+  assert.ok(body.includes("presets={[{ label: '近 7 天', days: 7 }"));
+  assert.match(body, /onChange\(isoDay\(next\.startDate\), isoDay\(next\.endDate\)\);\s*setOpen\(false\);/);
+  assert.equal(body.includes('onChange(isoDay(next.startDate), isoDay(next.endDate)); if (next.startDate && next.endDate)'), false, 'must not commit half ranges');
+  assert.ok(body.includes('align="start"'));
+});
+test('earnings filters use compact flex layout around the shared DateSelector', async () => {
+  const {readFileSync}=await import('node:fs');const src=readFileSync(new URL('../src/views/distribution-dashboard-pages.tsx',import.meta.url),'utf8');
+  const start=src.indexOf('export function DistributionEarningsPage'), body=src.slice(start, src.indexOf('\nexport function', start+10));
+  assert.ok(body.includes('data-distribution-earnings-filters className="flex flex-col gap-3"'));
+  assert.ok(body.includes('flex flex-wrap items-end gap-x-4 gap-y-3'));
+  assert.ok(body.includes('min-w-[14rem] max-w-md flex-1'));
+  assert.ok(body.includes('flex flex-wrap items-end gap-2'));
+  assert.equal(body.includes('xl:grid-cols-[minmax(16rem,1.6fr)'), false);
+  assert.ok(body.includes('DistributionDateRange'));
+});
+test('overview layout drops 关系与资格, shows 佣金排行 + 邀请人数 above 最近分销记录',async()=>{
+ const {readFileSync}=await import('node:fs');const src=readFileSync(new URL('../src/views/distribution-dashboard-pages.tsx',import.meta.url),'utf8');
+ const start=src.indexOf('export function DistributionOverviewPage'),body=src.slice(start,src.indexOf('\nexport function',start+10));
+ for(const gone of ['关系与资格','计佣关系','最近佣金','label="排行口径"','分销排行'])assert.equal(body.includes(gone),false,gone);
+ const a=body.indexOf('佣金排行'),b=body.indexOf('邀请人数'),c=body.indexOf('最近分销记录');
+ assert.ok(a>0&&a<b&&b<c);assert.ok(body.includes('DistributionDateRange'));
+ assert.ok(src.includes('DistributionUserName'));
+ assert.ok(src.includes('UserProfilePreview'));
+ assert.ok(src.includes('EntityPreviewTrigger'));
+});
+test('dashboard earnings uses unified ListPagination with page numbers, jump and page size',async()=>dashboardProbe(async(h,m)=>{
+ const calls=[];globalThis.fetch=h.browser.fetch=async url=>{const q=new URL(String(url),'http://fixture.invalid').searchParams;calls.push(Object.fromEntries(q));return json(dashboardPage(url,{total:'100',hasMore:Number(q.get('page')??1)<5}));};
+ const ui=await h.mount(m.DistributionEarningsPage,{snapshot:dashboardWho(),onOpenPath(){}});await dashboardUntil(()=>ui.host.textContent.includes('ORDER-ONE'));
+ assert.ok(ui.host.querySelector('[data-slot="admin-list-pagination"]'));assert.match(ui.host.textContent,/共 100 条记录 · 第 1 \/ 5 页/);assert.ok(ui.host.querySelector('[aria-label="每页容量"]'));
+ await click(ui.host.querySelector('[aria-label="第 3 页"]'));await dashboardUntil(()=>calls.some(c=>c.page==='3'));assert.equal(calls.at(-1).pageSize,'20');
 }));
