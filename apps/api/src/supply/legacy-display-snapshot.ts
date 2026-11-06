@@ -50,10 +50,27 @@ export function convertLegacyDisplayFields(row: Record<string, unknown>): Legacy
     if (value === false || value === 0 || value === "0") return false;
     issues.push(`${field}:UNKNOWN`); return null;
   };
-  const start = integer("processing_time_start", 0, 24), end = integer("processing_time_end", 0, 24);
-  // 24:00 as a start is midnight; equal endpoints do not prove a full-day window.
-  const startMinute = start === null ? null : start % 24 * 60, endMinute = end === null ? null : end * 60;
-  const knownWindow = startMinute !== null && endMinute !== null && start !== end && startMinute !== endMinute;
+  // The legacy column mixes two writer generations in one INTEGER: the publish form stores hours
+  // 0..24, while the packed admin time picker stores 100000 + minutes since midnight (observed only
+  // in 100000..101439, in 30-minute steps). Equal endpoints mean the whole day, by owner decision.
+  const windowMinute = (field: string): number | null => {
+    const value = row[field];
+    if (value === null || value === undefined || value === "") { issues.push(`${field}:MISSING`); return null; }
+    const text = typeof value === "string" ? value : typeof value === "number" ? String(value) : null;
+    if (text === null || !/^(0|[1-9]\d*)$/.test(text) || !Number.isSafeInteger(Number(text))) { issues.push(`${field}:INVALID`); return null; }
+    const parsed = Number(text);
+    if (parsed <= 24) return parsed * 60;
+    if (parsed >= 100000 && parsed <= 101439) return parsed - 100000;
+    issues.push(`${field}:UNSUPPORTED_ENCODING`);
+    return null;
+  };
+  const rawStart = windowMinute("processing_time_start"), rawEnd = windowMinute("processing_time_end");
+  // The two encodings can name the same minute (an hour-form start against a packed-form end), so the
+  // whole-day rule compares the decoded minutes, not the raw column values.
+  const startCandidate = rawStart === null ? null : rawStart % 1440;
+  const wholeDay = startCandidate !== null && rawEnd !== null && startCandidate === rawEnd;
+  const startMinute = wholeDay ? 0 : startCandidate, endMinute = wholeDay ? 1440 : rawEnd;
+  const knownWindow = startMinute !== null && endMinute !== null;
   if (!knownWindow) issues.push("processing_time:AMBIGUOUS");
   const attributes: LegacyDisplaySnapshot["attributes"] = {
     safe_box_code: code("insure_lv", { "2":"safe_box_1x2", "4":"safe_box_2x2", "6":"safe_box_2x3", "9":"safe_box_3x3" }),

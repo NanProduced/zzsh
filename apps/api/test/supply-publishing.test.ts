@@ -272,6 +272,22 @@ test("an authoritative completed rental blocks publication even when the old acc
   }
 });
 
+test("the three migration account states keep their server-side listing rules", async () => {
+  // Round seven migrates accounts in exactly two states: listed at the cutoff and delisted at the cutoff.
+  // A delisted one stays UNRESOLVED and must never publish on the same account - the owner has to create a
+  // new account instead. A listed one becomes NONE after takeover, so it rents, and after a pause it can
+  // resume because the hold no longer blocks it. Neither may publish once a rental has completed.
+  const draft = { id: "v", account_id: "a", origin: "NATIVE", review_state: "DRAFT", rule_release_id: null, content_hash: null, payload: null, attributes: {}, title: "" };
+  const delisted = await publicationBlockers(nativeGateClient() as never, { ...nativeAccount, legacy_hold: "UNRESOLVED" } as never, draft as never, nativeGate, "WRITE");
+  assert.equal(delisted.includes("ACCOUNT_NOT_PUBLISHABLE"), true, "a delisted legacy account must not publish on the same account");
+  const listed = await publicationBlockers(nativeGateClient() as never, { ...nativeAccount, legacy_hold: "NONE" } as never, draft as never, nativeGate, "WRITE");
+  assert.equal(listed.includes("ACCOUNT_NOT_PUBLISHABLE"), false, "a taken-over listed account must stay publishable after a pause");
+  const paused = await publicationBlockers(nativeGateClient() as never, { ...nativeAccount, legacy_hold: "NONE", owner_paused: true } as never, draft as never, nativeGate, "WRITE");
+  assert.equal(paused.includes("ACCOUNT_NOT_PUBLISHABLE"), false, "pausing is a runtime state, not a hold");
+  const settled = await publicationBlockers(nativeGateClient() as never, { ...nativeAccount, legacy_hold: "NONE" } as never, draft as never, async () => ({ ...await nativeGate(), rentalCompleted: true }), "WRITE");
+  assert.equal(settled.includes("RENTAL_COMPLETED"), true, "a settled rental must not return to a listing");
+});
+
 test("native empty title is not a write blocker; a legacy placeholder still is", async () => {
   const draft = { id: "v", account_id: "a", origin: "NATIVE", review_state: "DRAFT", rule_release_id: null, content_hash: null, payload: null, attributes: {}, title: "" };
   const write = await publicationBlockers(nativeGateClient() as never, nativeAccount as never, draft as never, nativeGate, "WRITE");
