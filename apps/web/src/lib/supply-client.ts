@@ -168,6 +168,7 @@ export const supplyBlockerMessages: Record<string, string> = {
   HISTORICAL_VERSION: "这是历史版本",
   RENTED: "账号正在出租中",
   PENDING_PAYMENT: "有租客待付款，请查看关联订单",
+  RENTAL_COMPLETED: "账号已完单归档，不能再次上架",
   UNDER_REVIEW: "账号资料审核中，请等待审核结果",
   NOT_PUBLISHED: "账号尚未上架，请补全资料后提交",
   STATE_UNKNOWN: "账号状态待核对，请重新读取",

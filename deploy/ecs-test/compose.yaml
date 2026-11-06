@@ -1,0 +1,244 @@
+name: zzsh-ecs-test
+
+services:
+  proxy:
+    image: zzsh-ecs-test/proxy:${ZZSH_TEST_IMAGE_TAG:?set ZZSH_TEST_IMAGE_TAG}
+    build:
+      context: ../..
+      dockerfile: deploy/ecs-test/app.Dockerfile
+      target: proxy
+    restart: unless-stopped
+    mem_limit: 256m
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      USER_DOMAIN: ${ZZSH_TEST_USER_DOMAIN:-test.nanproduced.cloud}
+      ADMIN_DOMAIN: ${ZZSH_TEST_ADMIN_DOMAIN:-admin-test.nanproduced.cloud}
+      API_DOMAIN: ${ZZSH_TEST_API_DOMAIN:-api-test.nanproduced.cloud}
+      ACME_EMAIL: ${ZZSH_TEST_ACME_EMAIL:?set ACME email}
+    volumes:
+      - caddy_data:/data
+      - caddy_config:/config
+    networks:
+      web_edge:
+        ipv4_address: ${ZZSH_TEST_PROXY_WEB_IP:-172.30.240.2}
+      app_private:
+        ipv4_address: ${ZZSH_TEST_PROXY_APP_IP:-172.30.241.2}
+    depends_on:
+      web:
+        condition: service_healthy
+      api:
+        condition: service_healthy
+
+  web:
+    image: zzsh-ecs-test/web:${ZZSH_TEST_IMAGE_TAG:?set ZZSH_TEST_IMAGE_TAG}
+    build:
+      context: ../..
+      dockerfile: deploy/ecs-test/app.Dockerfile
+      target: web
+    restart: unless-stopped
+    mem_limit: 1536m
+    environment:
+      NODE_ENV: production
+      NODE_OPTIONS: --max-old-space-size=1024
+      ZZSH_API_ORIGIN: http://api:3102
+      ZZSH_WEB_ORIGIN: https://${ZZSH_TEST_USER_DOMAIN:-test.nanproduced.cloud}
+      USER_EDGE_ASSURED: "true"
+      USER_TRUSTED_PROXIES: ${ZZSH_TEST_PROXY_WEB_IP:-172.30.240.2}
+      USER_CLIENT_IP_HEADER: x-forwarded-for
+    networks:
+      web_edge:
+        ipv4_address: ${ZZSH_TEST_WEB_EDGE_IP:-172.30.240.3}
+      app_private:
+        ipv4_address: ${ZZSH_TEST_WEB_APP_IP:-172.30.241.3}
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3100/login').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 8
+      start_period: 30s
+
+  api:
+    image: zzsh-ecs-test/api:${ZZSH_TEST_IMAGE_TAG:?set ZZSH_TEST_IMAGE_TAG}
+    build:
+      context: ../..
+      dockerfile: deploy/ecs-test/app.Dockerfile
+      target: api
+    restart: unless-stopped
+    mem_limit: 1536m
+    env_file:
+      - ${ZZSH_TEST_API_ENV_FILE:?set path to restricted API env file}
+    environment:
+      NODE_ENV: production
+      NODE_OPTIONS: --max-old-space-size=1024
+      APP_PROFILE: ecs-test
+      PROVIDER_MODE: real
+      HOST: 0.0.0.0
+      PORT: "3102"
+      DB_TARGET: ecs-test
+      DB_HOST: postgres
+      DB_PORT: "5432"
+      DB_NAME: zzsh_ecs_test
+      DB_USER: zzsh_ecs_runtime
+      DB_PASSWORD_FILE: .secrets/runtime_db_password
+      DB_TLS_MODE: verify-full
+      DB_TLS_CA_FILE: .secrets/internal-ca.crt
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      REDIS_USER: zzsh_app
+      REDIS_PASSWORD_FILE: .secrets/redis_password
+      REDIS_TLS_MODE: verify-full
+      REDIS_TLS_CA_FILE: .secrets/internal-ca.crt
+      AUTH_USER_ORIGIN: https://${ZZSH_TEST_USER_DOMAIN:-test.nanproduced.cloud}
+      AUTH_ADMIN_ORIGIN: https://${ZZSH_TEST_ADMIN_DOMAIN:-admin-test.nanproduced.cloud}
+      AUTH_API_ORIGIN: https://${ZZSH_TEST_API_DOMAIN:-api-test.nanproduced.cloud}
+      AUTH_SECURE_COOKIES: "true"
+      USER_TRUSTED_PROXIES: ${ZZSH_TEST_PROXY_APP_IP:-172.30.241.2},${ZZSH_TEST_WEB_APP_IP:-172.30.241.3}
+      USER_CLIENT_IP_HEADER: x-forwarded-for
+      ADMIN_TRUSTED_PROXIES: ${ZZSH_TEST_PROXY_APP_IP:-172.30.241.2}
+      ADMIN_CLIENT_IP_HEADER: x-real-ip
+      USER_AUTH_THROTTLE_STORE: postgres
+      USER_AUTH_THROTTLE_MODE: base
+      ENABLE_TEST_OPERATIONS: "false"
+      JOINPAY_COLLECTION_ENABLED: "false"
+      JOINPAY_REFUND_ENABLED: "false"
+      JOINPAY_PAYOUT_ENABLED: "false"
+      JOINPAY_ACCOUNTS_ENABLED: "false"
+    volumes:
+      - ${ZZSH_TEST_SECRETS_DIR:?set absolute secrets directory}/api:/workspace/apps/api/.secrets:ro
+    networks:
+      app_private:
+        ipv4_address: ${ZZSH_TEST_API_APP_IP:-172.30.241.4}
+      data_private:
+        ipv4_address: ${ZZSH_TEST_API_DATA_IP:-172.30.242.2}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3102/api/ready').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 8
+      start_period: 60s
+
+  postgres:
+    image: postgres:16-alpine@sha256:4e6e670bb069649261c9c18031f0aded7bb249a5b6664ddec29c013a89310d50
+    restart: unless-stopped
+    mem_limit: 1g
+    environment:
+      POSTGRES_USER: zzsh_bootstrap
+      POSTGRES_DB: postgres
+      POSTGRES_PASSWORD_FILE: /run/secrets/bootstrap_password
+      POSTGRES_INITDB_ARGS: --auth-host=scram-sha-256 --auth-local=scram-sha-256
+    command: ["postgres", "-c", "ssl=on", "-c", "ssl_cert_file=/run/tls/postgres.crt", "-c", "ssl_key_file=/run/tls/postgres.key", "-c", "hba_file=/etc/zzsh/pg_hba.conf", "-c", "shared_buffers=256MB", "-c", "max_connections=50"]
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ${ZZSH_TEST_SECRETS_DIR:?set absolute secrets directory}/postgres/bootstrap_password:/run/secrets/bootstrap_password:ro
+      - ${ZZSH_TEST_SECRETS_DIR:?set absolute secrets directory}/tls/internal-ca.crt:/run/tls/internal-ca.crt:ro
+      - ${ZZSH_TEST_SECRETS_DIR:?set absolute secrets directory}/tls/postgres.crt:/run/tls/postgres.crt:ro
+      - ${ZZSH_TEST_SECRETS_DIR:?set absolute secrets directory}/tls/postgres.key:/run/tls/postgres.key:ro
+      - ./pg_hba.conf:/etc/zzsh/pg_hba.conf:ro
+    networks:
+      data_private:
+        ipv4_address: ${ZZSH_TEST_PG_IP:-172.30.242.3}
+    healthcheck:
+      test: ["CMD-SHELL", "PGPASSWORD=\"$$(cat /run/secrets/bootstrap_password)\" PGSSLMODE=verify-full PGSSLROOTCERT=/run/tls/internal-ca.crt psql -h postgres -U zzsh_bootstrap -d postgres -w -c 'SELECT 1' >/dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+
+  redis:
+    image: redis:7-alpine@sha256:ee64a64eaab618d88051c3ade8f6352d11531fcf79d9a4818b9b183d8c1d18ba
+    restart: unless-stopped
+    mem_limit: 256m
+    command: ["redis-server", "--port", "0", "--tls-port", "6379", "--tls-cert-file", "/run/tls/redis.crt", "--tls-key-file", "/run/tls/redis.key", "--tls-ca-cert-file", "/run/tls/internal-ca.crt", "--tls-auth-clients", "no", "--aclfile", "/run/secrets/users.acl", "--appendonly", "yes", "--appendfsync", "always", "--maxmemory", "128mb", "--maxmemory-policy", "noeviction"]
+    volumes:
+      - redis_data:/data
+      - ${ZZSH_TEST_SECRETS_DIR:?set absolute secrets directory}/redis/users.acl:/run/secrets/users.acl:ro
+      - ${ZZSH_TEST_SECRETS_DIR:?set absolute secrets directory}/api/redis_password:/run/secrets/redis_password:ro
+      - ${ZZSH_TEST_SECRETS_DIR:?set absolute secrets directory}/tls/internal-ca.crt:/run/tls/internal-ca.crt:ro
+      - ${ZZSH_TEST_SECRETS_DIR:?set absolute secrets directory}/tls/redis.crt:/run/tls/redis.crt:ro
+      - ${ZZSH_TEST_SECRETS_DIR:?set absolute secrets directory}/tls/redis.key:/run/tls/redis.key:ro
+    networks:
+      data_private:
+        ipv4_address: ${ZZSH_TEST_REDIS_IP:-172.30.242.4}
+    healthcheck:
+      test: ["CMD-SHELL", "REDISCLI_AUTH=\"$$(cat /run/secrets/redis_password)\" redis-cli --tls --cacert /run/tls/internal-ca.crt --sni redis -h redis -p 6379 --user zzsh_app --no-auth-warning ping | grep -qx PONG"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 15s
+
+  db-setup:
+    image: postgres:16-alpine@sha256:4e6e670bb069649261c9c18031f0aded7bb249a5b6664ddec29c013a89310d50
+    profiles: ["tools"]
+    entrypoint: ["sh", "/ops/bootstrap-db.sh"]
+    volumes:
+      - ./bootstrap-db.sh:/ops/bootstrap-db.sh:ro
+      - ${ZZSH_TEST_SECRETS_DIR:?set absolute secrets directory}/postgres/bootstrap_password:/run/secrets/bootstrap_password:ro
+      - ${ZZSH_TEST_SECRETS_DIR:?set absolute secrets directory}/api/runtime_db_password:/run/secrets/runtime_db_password:ro
+      - ${ZZSH_TEST_SECRETS_DIR:?set absolute secrets directory}/migration/migration_db_password:/run/secrets/migration_db_password:ro
+      - ${ZZSH_TEST_SECRETS_DIR:?set absolute secrets directory}/tls/internal-ca.crt:/run/tls/internal-ca.crt:ro
+    networks: [data_private]
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  migration:
+    image: zzsh-ecs-test/api:${ZZSH_TEST_IMAGE_TAG:?set ZZSH_TEST_IMAGE_TAG}
+    profiles: ["tools"]
+    working_dir: /workspace/apps/api
+    entrypoint: ["node", "dist/src/database/migrate-business-cli.js"]
+    environment:
+      NODE_ENV: production
+      APP_PROFILE: migration
+      PROVIDER_MODE: fake
+      MIGRATION_TARGET_PROFILE: ecs-test
+      MIGRATION_TARGET_DB_NAME: zzsh_ecs_test
+      MIGRATION_DB_USER: zzsh_ecs_migration
+      MIGRATION_RUNTIME_USER: zzsh_ecs_runtime
+      MIGRATION_DB_PASSWORD_FILE: .secrets/migration_db_password
+      DB_TARGET: ecs-test
+      DB_HOST: postgres
+      DB_PORT: "5432"
+      DB_TLS_MODE: verify-full
+      DB_TLS_CA_FILE: .secrets/internal-ca.crt
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      REDIS_USER: zzsh_app
+      REDIS_PASSWORD_FILE: .secrets/redis_password
+      REDIS_TLS_MODE: verify-full
+      REDIS_TLS_CA_FILE: .secrets/internal-ca.crt
+    volumes:
+      - ${ZZSH_TEST_SECRETS_DIR:?set absolute secrets directory}/migration:/workspace/apps/api/.secrets:ro
+    networks: [data_private]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+volumes:
+  postgres_data:
+  redis_data:
+  caddy_data:
+  caddy_config:
+
+networks:
+  web_edge:
+    ipam:
+      config:
+        - subnet: ${ZZSH_TEST_WEB_SUBNET:-172.30.240.0/28}
+  app_private:
+    ipam:
+      config:
+        - subnet: ${ZZSH_TEST_APP_SUBNET:-172.30.241.0/28}
+  data_private:
+    internal: true
+    ipam:
+      config:
+        - subnet: ${ZZSH_TEST_DATA_SUBNET:-172.30.242.0/28}

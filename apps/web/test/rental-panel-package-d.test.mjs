@@ -400,7 +400,7 @@ test("D-04: zero-stock inventory is omitted while positive zero-cost inventory r
 });
 
 // Case 5: Preview without waiver does not claim waiver
-test("D-05: preview without waiver does not claim waiver even with 0 deposit", async () => {
+test("D-05: preview reducing deposit to zero shows 本次免押 from server amounts without a waiver flag", async () => {
   await withDom(async (window) => {
     const log = [];
     const zeroDepositPayload = {
@@ -419,8 +419,15 @@ test("D-05: preview without waiver does not claim waiver even with 0 deposit", a
     const probe = createProbe(window, RentalConfirmPanel, defaultProps, fetchImpl);
     try {
       await probe.render();
-      // Must not display "本次免押" label since depositWaived was not provided
-      assert.equal(probe.host.querySelector(".rental-waiver-label"), null);
+      const deposit = probe.host.querySelector(".rental-deposit");
+      const card = probe.host.querySelector(".account-quote-benefits");
+      assert.equal(probe.host.querySelector(".rental-waiver-label")?.textContent, "本次免押");
+      assert.equal(deposit.querySelector("del")?.textContent, "¥50.00");
+      assert.ok(card);
+      assert.equal(card.querySelector("strong"), null);
+      assert.deepEqual([...card.querySelectorAll("li")].map((el) => el.textContent), ["免押"]);
+      assert.ok(!probe.host.textContent.includes("成长权益"));
+      assert.ok(!deposit.textContent.includes("已减"));
       assert.match(probe.host.textContent, /¥0\.00/);
     } finally {
       await probe.dispose();

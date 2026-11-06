@@ -10,12 +10,14 @@ import {
   parseDashboardFilters,
   readAdminDistributionEarnings,
   readAdminDistributionOverview,
+  readAdminDistributionOverviewSection,
   readAdminDistributionParticipant,
   readAdminDistributionParticipants,
+  readAdminDistributionDownline,
 } from "./admin-distribution-dashboard";
 
 function dashboardPath(path: string) {
-  return /^\/(overview|earnings|participants(?:\/[A-Za-z0-9._:-]+)?)$/.exec(path);
+  return /^\/(overview|earnings|participants(?:\/[A-Za-z0-9._:-]+(?:\/downline)?)?)$/.exec(path);
 }
 
 export async function handleAdminDistributionDashboard(request: SupplyNodeRequest, response: SupplyResponse, options: AuthSecurityOptions & { listingCursorKey?: ListingCursorKey }): Promise<void> {
@@ -26,17 +28,23 @@ export async function handleAdminDistributionDashboard(request: SupplyNodeReques
     const match = dashboardPath(path);
     if (!match) throw notFound();
     if (!requireOrigin(request, response, options, requestId)) return;
-    const filters = parseDashboardFilters(query, new Date());
+    const downline = /^participants\/([^/]+)\/downline$/.exec(match[1]!);
+    const filters = downline ? parseDashboardFilters(new URLSearchParams(), new Date()) : parseDashboardFilters(query, new Date());
+    const section=query.get('section');
+    if(query.getAll('section').length>1||section!==null&&(match[1]!=='overview'||!['CORE','EARNINGS_RANKING','INVITE_RANKING'].includes(section)))throw invalid('Invalid distribution overview section');
+    const projection=query.get('projection');
+    if(query.getAll('projection').length>1||projection!==null&&(match[1]!=='participants'||projection!=='DISPLAY'))throw invalid('Invalid participant projection');
     const token = query.get("snapshot");
-    if (filters.page > 1 && !token) throw invalid("Distribution snapshot is required");
+    if (!downline && filters.page > 1 && !token) throw invalid("Distribution snapshot is required");
     const actor = await readAdminContext(request, options);
     const result = await withTransaction(options.pool, async client => {
       await client.query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY");
       // Bounded page reads share the API pool; parallel hashes multiply each request's shared-memory peak.
       await client.query("SELECT set_config('statement_timeout','3s',true),set_config('lock_timeout','500ms',true),set_config('max_parallel_workers_per_gather','0',true)");
       const context = await authorizeDistributionDashboard(client, actor);
-      const body = await (match[1] === "overview" ? readAdminDistributionOverview(client, context, filters)
-        : match[1] === "participants" ? readAdminDistributionParticipants(client, context, filters, options.listingCursorKey, token)
+      const body = await (match[1] === "overview" ? section ? readAdminDistributionOverviewSection(client,context,filters,section as 'CORE'|'EARNINGS_RANKING'|'INVITE_RANKING') : readAdminDistributionOverview(client, context, filters)
+        : match[1] === "participants" ? readAdminDistributionParticipants(client, context, filters, options.listingCursorKey, token, undefined, projection==='DISPLAY')
+        : downline ? readAdminDistributionDownline(client, context, decodeURIComponent(downline[1]!), query)
         : match[1]!.startsWith("participants/") ? readAdminDistributionParticipant(client, context, decodeURIComponent(match[1]!.slice("participants/".length)))
         : readAdminDistributionEarnings(client, context, filters, options.listingCursorKey, undefined, token));
       return { body, authorizationKey: context.authorizationKey };

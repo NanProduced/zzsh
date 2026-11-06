@@ -25,6 +25,8 @@ import { handleRentalMembershipAdmin } from "../auth/rental-membership-routes";
 import { handleMembershipGrowthAdmin, handleMembershipGrowthPolicyAdmin } from "../auth/membership-growth-routes";
 import { handleAdminDistributionRead } from "../finance/admin-distribution-routes";
 import { handleAdminDistributionDashboard } from "../finance/admin-distribution-dashboard-routes";
+import { handleAdminDistributionManagement } from "../finance/admin-distribution-management-routes";
+import type { DistributionManagementResource } from "../finance/distribution-management-resource";
 import { handleAdminDistributionMaintenance } from "../finance/admin-distribution-maintenance";
 import type { DistributionEarningStore } from "../finance/distribution-earning-store";
 import { handleDistributionPolicyAdmin } from "../finance/distribution-policy-routes";
@@ -58,6 +60,7 @@ export type AdminBffOptions = {
   adminSecurityOptions: AuthSecurityOptions & { listingCursorKey?: ListingCursorKey };
   distributionScope?: LocalDistributionScope;
   distributionReadScope?: LocalDistributionScope;
+  distributionManagement?: DistributionManagementResource;
   distributionEarnings?: DistributionEarningStore;
   supply: SupplyRuntimeOptions;
   order: OrderRuntimeOptions;
@@ -475,7 +478,16 @@ export async function handleAdminBff(request: NodeRequest, response: NodeRespons
     }
     return;
   }
-  if (/^\/distribution\/(overview|earnings|participants(?:\/[A-Za-z0-9._:-]+)?)$/.test(path)) {
+  if (/^\/distribution\/manage\/(levels|participants(?:\/[A-Za-z0-9._:-]+\/(?:level|code|freeze))?)$/.test(path)) {
+    const allowed = method === "GET" && (path === "/distribution/manage/levels" || path === "/distribution/manage/participants") || method === "POST" && (path === "/distribution/manage/levels" || /^\/distribution\/manage\/participants\/[A-Za-z0-9._:-]+\/(level|code|freeze)$/.test(path));
+    if (!allowed) { sendError(response, 404, API_V1_ERROR_CODES.NOT_FOUND, "Resource not found", requestId); return; }
+    const targetPath = "/api/v1/admin" + path + requestQuery(request);
+    request.url = targetPath; request.originalUrl = targetPath;
+    request.headers = { ...request.headers, "x-request-id": requestId };
+    await handleAdminDistributionManagement(request as Parameters<typeof handleAdminDistributionManagement>[0], response as Parameters<typeof handleAdminDistributionManagement>[1], { ...options.adminSecurityOptions, distributionScope: options.distributionScope, distributionReadScope: options.distributionReadScope, distributionManagement: options.distributionManagement });
+    return;
+  }
+  if (/^\/distribution\/(overview|earnings|participants(?:\/[A-Za-z0-9._:-]+(?:\/downline)?)?)$/.test(path)) {
     if (method !== "GET") { sendError(response, 404, API_V1_ERROR_CODES.NOT_FOUND, "Resource not found", requestId); return; }
     const targetPath = "/api/v1/admin" + path + requestQuery(request);
     request.url = targetPath; request.originalUrl = targetPath;

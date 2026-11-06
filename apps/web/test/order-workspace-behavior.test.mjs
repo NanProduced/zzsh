@@ -210,6 +210,9 @@ test("F3: a successful empty page renders the designed empty state", async () =>
   const probe = await createProbe(async () => Response.json({ items: [], nextCursor: null, limit: 20 }));
   try {
     await probe.render({}, "empty");
+    assert.match(probe.host.textContent, /当前没有进行中的订单/);
+    assert.equal(probe.host.querySelector(".account-empty-art"), null);
+    await probe.render({ status: "ALL" }, "all-empty");
     assert.match(probe.host.textContent, /还没有租入订单/);
     assert.doesNotMatch(probe.host.textContent, /已加载 \d+ 条/);
     assert.doesNotMatch(probe.host.textContent, /没有更多订单了/);
@@ -235,7 +238,7 @@ test("an owner account filter does not claim that the entire account has no orde
   const probe = await createProbe(async () => Response.json({ items: [], nextCursor: null, limit: 20 }));
   try {
     await probe.render({ party: "owner", accountId: "account_A" }, "account-empty");
-    assert.match(probe.host.textContent, /该账号暂无订单记录/);
+    assert.match(probe.host.textContent, /该账号当前没有进行中的订单/);
     assert.doesNotMatch(probe.host.textContent, /上架账号后即可开始接单/);
     // Scoped to one account, the page cannot claim the whole list is empty, so it earns no art either.
     assert.equal(probe.host.querySelector(".account-empty-art"), null);
@@ -495,11 +498,11 @@ test("a closed order never reads as a bill still payable", async () => {
   const closed = { ...pricedOrder, id: "order_closed", status: "CANCELLED", paidAt: null, cancelReason: "USER" };
   const probe = await createProbe(async () => Response.json({ items: [closed], nextCursor: null, limit: 20 }));
   try {
-    await probe.render({ party: "renter" }, "cancelled");
+    await probe.render({ party: "renter", status: "ALL" }, "cancelled");
     assert.match(probe.host.querySelector(".order-row-amount-label").textContent, /下单金额/);
     assert.doesNotMatch(probe.host.querySelector(".order-row-amount-label").textContent, /应付|已付/);
     // The closed row states the closure once, without repeating the list-wide settlement rule per row.
-    assert.match(probe.host.querySelector(".order-row-hint").textContent, /订单已关闭/);
+    assert.match(probe.host.querySelector(".order-row-hint").textContent, /订单已取消/);
     assert.doesNotMatch(probe.host.textContent, /结算与确认记录见订单详情/);
   } finally {
     await probe.dispose();
@@ -958,4 +961,14 @@ test("the list marks only the early stages it can prove and never borrows the se
     assert.equal(row("order_tag_waiting").querySelector(".order-row-stage").textContent, "待客服接入");
     assert.equal(row("order_tag_settled").querySelector(".order-row-stage"), null);
   } finally { await probe.dispose(); }
+});
+
+test("the default work view explains why a closed order still needs attention", async()=>{
+ const closed={...pricedOrder,id:"refund_pending",status:"CANCELLED"};
+ const probe=await createProbe(async()=>Response.json({items:[closed],nextCursor:null,limit:20}));
+ try {
+  await probe.render({party:"owner"},"refund-followup");
+  assert.match(probe.host.querySelector(".order-row-hint").textContent,/退款处理中或待核对/);
+  assert.match(probe.host.textContent,/已取消/);
+ } finally {await probe.dispose();}
 });

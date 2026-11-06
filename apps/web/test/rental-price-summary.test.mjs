@@ -284,10 +284,10 @@ test("frozen legacy source ratio remains the base ratio before membership benefi
   await withDom(async (host, render) => {
     const reference = { ...sourceReference, baseRenterHaffRatioWanPerYuan:"37", baseRatioReferenceOnly:true };
     await render(React.createElement(RentalPriceSummary,{reference,quote:null}));
-    assert.equal(host.querySelector('.account-haff-ratio-badge')?.textContent,'基础 37万/元');
+    assert.equal(host.querySelector('.account-haff-ratio-badge')?.textContent,'37万/元');
     const base=personalQuote([personalHaff,personalAwm]);
     await render(React.createElement(RentalPriceSummary,{reference,quote:{...base,quote:{...base.quote,schemaVersion:3,baseRenterHaffRatioWanPerYuan:"37"}}}));
-    assert.equal(host.querySelector('.account-haff-ratio-badge')?.textContent,'基础 37万/元');
+    assert.equal(host.querySelector('.account-haff-ratio-badge')?.textContent,'37万/元');
   });
 });
 
@@ -295,7 +295,7 @@ test("personal quantity stays personal even when the public quantity label diffe
   await withDom(async (host, render) => {
     await render(React.createElement(RentalPriceSummary, { reference: sourceReference, quote: personalQuote([personalHaff, personalAwm]) }));
     const row = [...host.querySelectorAll('.account-quote-bill-row')].find(row => row.textContent.includes('AWM子弹'));
-    assert.equal(row.querySelector('.account-quote-bill-spec').textContent, '3发 · ¥2 / 发');
+    assert.equal(row.querySelector('.account-quote-bill-spec').textContent, '3发 · 参考单价 ¥2 / 发');
     assert.equal(row.querySelector('.account-quote-bill-amount').textContent, '¥6.00');
     assert.equal(host.querySelector('.account-quote-bill-subtotal strong').textContent, '¥6.00');
   });
@@ -340,7 +340,9 @@ test("positive inventory with zero price stays visible and uses the 60-round gro
 test("missing personal unit quantity remains unknown instead of becoming a one-round rate", async () => {
   await withDom(async (host, render) => {
     await render(React.createElement(RentalPriceSummary, { reference: sourceReference, quote: personalQuote([{ ...personalAwm, unitQuantity: undefined, buyerUnitAmount: cny('12.00000000', 8) }]) }));
-    assert.equal(host.querySelector('.account-quote-bill-spec').textContent, '3发 · ¥12');
+    assert.equal(host.querySelector('.account-quote-bill-spec').textContent, '3发 · 参考单价 ¥2 / 发');
+    assert.ok(!host.querySelector('.account-quote-bill-spec').textContent.includes('¥12 / 发'));
+    assert.equal(host.querySelector('.account-quote-bill-amount').textContent, '¥6.00');
   });
 });
 
@@ -372,22 +374,42 @@ const benefits = (tier = "STANDARD", source = "GROWTH") => ({
   priceSource: source, depositSource: source, policyVersion: "TEST_ONLY",
 });
 
+function savingsLabel(base, actual) {
+  const cents = BigInt(base.amount.replace(".", "")) - BigInt(actual.amount.replace(".", ""));
+  return `¥${cents / 100n}.${String(cents % 100n).padStart(2, "0")}`;
+}
+
+function chipTexts(host) {
+  return [...host.querySelectorAll(".account-quote-benefit-chips li")].map((el) => el.textContent);
+}
+
+const matchedPersonalReference = {
+  total: "¥179.08",
+  haff: "¥173.08",
+  items: "¥6.00",
+  lines: [
+    haffReference,
+    { ...awmReference, quantity: "3", quantityLabel: "3发", costAmount: "6.00", costLabel: "¥6.00" },
+  ],
+  unitAmountsInformational: true,
+};
+
 for (const [name, tier, source] of [["standard", "STANDARD", "GROWTH"], ["higher tier at the same price", "GOLD", "GROWTH"], ["selected courtesy source", "STANDARD", "FRIEND"]]) {
   test(`membership sources without proved savings never imply a discount: ${name}`, async () => {
     await withDom(async (host, render) => {
       const quote = { ...personalQuote([personalHaff, personalAwm]), membershipBenefits: benefits(tier, source), baseTenantDeposit: cny("20.00") };
       await render(React.createElement(RentalPriceSummary, { reference: sourceReference, quote }));
-      assert.equal(host.querySelector('.account-quote-benefits .lucide-gift'), null);
-      if (tier === "STANDARD" && source === "GROWTH") assert.equal(host.querySelector('.account-quote-benefits'), null);
-      else {
-        assert.equal(host.querySelector('.account-quote-benefits strong').textContent, '本次计价来源');
-        assert.match(host.querySelector('.account-quote-benefits').textContent, source === "FRIEND" ? /挚友礼遇/ : /成长权益/);
-      }
+      assert.equal(host.querySelector(".account-quote-benefits"), null);
+      assert.equal(host.querySelector('[data-kind="rent"]'), null);
+      assert.equal(host.querySelector(".rental-deposit del"), null);
+      assert.ok(!host.textContent.includes("已减"));
+      assert.ok(!host.textContent.includes("本次计价来源"));
+      assert.ok(!host.textContent.includes("价格："));
     });
   });
 }
 
-for (const [name, base, actual, waived, expectedGift] of [
+for (const [name, base, actual, waived, expectedChain] of [
   ["known positive reduction", cny("50.00"), cny("20.00"), false, true],
   ["a zero base remains zero", cny("0.00"), cny("0.00"), true, false],
   ["missing baseline", null, cny("0.00"), true, false],
@@ -396,14 +418,214 @@ for (const [name, base, actual, waived, expectedGift] of [
   ["invalid scale", cny("50.00", 8), cny("20.00"), false, false],
   ["large exact amount reduction", cny("90071992547409930.02"), cny("90071992547409930.01"), false, true],
 ]) {
-  test(`gift indicator requires an exact known deposit reduction: ${name}`, async () => {
+  test(`deposit reduction card requires an exact known deposit reduction: ${name}`, async () => {
     await withDom(async (host, render) => {
       const original = personalQuote([personalHaff, personalAwm]);
       const quote = { ...original, membershipBenefits: benefits(), baseTenantDeposit: base, depositWaived: waived, quote: { ...original.quote, tenantDeposit: actual } };
       await render(React.createElement(RentalPriceSummary, { reference: sourceReference, quote }));
-      assert.equal(Boolean(host.querySelector('.account-quote-benefits .lucide-gift')), expectedGift);
-      if (expectedGift) assert.equal(host.querySelector('.account-quote-benefits strong').textContent, '本次押金减免');
-      assert.equal(host.querySelector('.account-reference-price').textContent, '¥199.08', 'only the display indicator changes; payable remains the API amount');
+      const deposit = host.querySelector(".rental-deposit");
+      const card = host.querySelector(".account-quote-benefits");
+      assert.equal(Boolean(deposit?.querySelector("del")), expectedChain);
+      assert.equal(host.querySelector('[data-kind="rent"]'), null, "mismatched public quantities must not invent a rent discount");
+      if (expectedChain) {
+        const savings = savingsLabel(base, actual);
+        assert.ok(card);
+        assert.equal(card.querySelector("strong"), null);
+        assert.deepEqual(chipTexts(host), [`减免押金 ${savings}`]);
+        assert.ok(!card.textContent.includes("成长权益"));
+        assert.equal(deposit.querySelector("del").textContent, `¥${base.amount}`);
+        assert.match(deposit.textContent, new RegExp(`¥${actual.amount.replace(".", "\\.")}`));
+        assert.ok(!deposit.textContent.includes("已减"));
+        assert.ok(!deposit.textContent.includes("成长权益"));
+        assert.ok(!host.textContent.includes("价格：成长权益"));
+        assert.ok(!host.textContent.includes("本次计价来源"));
+      } else {
+        assert.equal(card, null);
+        assert.ok(!host.textContent.includes("减免押金"));
+        assert.equal(deposit?.querySelector("del") ?? null, null);
+      }
+      assert.equal(host.querySelector(".account-reference-price").textContent, "¥199.08", "only the display indicator changes; payable remains the API amount");
     });
   });
 }
+
+test("silver member with only a deposit reduction shows one card and no invented rent discount", async () => {
+  await withDom(async (host, render) => {
+    const original = personalQuote([personalHaff, personalAwm]);
+    const quote = {
+      ...original,
+      membershipBenefits: benefits("SILVER", "GROWTH"),
+      baseTenantDeposit: cny("800.00"),
+      depositWaived: false,
+      quote: { ...original.quote, tenantDeposit: cny("780.00"), tenantPayableTotal: cny("959.08") },
+    };
+    await render(React.createElement(RentalPriceSummary, { reference: matchedPersonalReference, quote }));
+    const card = host.querySelector(".account-quote-benefits");
+    const deposit = host.querySelector(".rental-deposit");
+    assert.equal(card.querySelector("strong").textContent, "银卡会员");
+    assert.deepEqual(chipTexts(host), ["减免押金 ¥20.00"]);
+    assert.ok(!host.textContent.includes("成长权益"));
+    assert.equal(deposit.querySelector("del").textContent, "¥800.00");
+    assert.match(deposit.textContent, /¥780\.00/);
+    assert.ok(!deposit.textContent.includes("银卡会员"));
+    assert.ok(!deposit.textContent.includes("已减"));
+    assert.equal(host.querySelector('[data-kind="rent"]'), null);
+    assert.ok(!host.textContent.includes("价格：成长权益"));
+    assert.equal(host.querySelector(".account-reference-price").textContent, "¥959.08");
+  });
+});
+
+test("silver member with a clean resource ratio shows 9.8折 and 减免押金 together in one card", async () => {
+  await withDom(async (host, render) => {
+    const reference = {
+      total: "¥3447.50",
+      haff: "¥3447.50",
+      items: "¥0.00",
+      lines: [{ ...haffReference, costAmount: "3447.50", costLabel: "¥3447.50" }],
+      unitAmountsInformational: true,
+    };
+    const personal = { ...personalHaff, buyerAmount: cny("3378.55") };
+    const original = personalQuote([personal]);
+    const quote = {
+      ...original,
+      membershipBenefits: benefits("SILVER", "GROWTH"),
+      baseTenantDeposit: cny("800.00"),
+      depositWaived: false,
+      quote: {
+        ...original.quote,
+        lines: [personal],
+        resourceTotal: cny("3378.55"),
+        tenantDeposit: cny("780.00"),
+        tenantPayableTotal: cny("4158.55"),
+      },
+    };
+    await render(React.createElement(RentalPriceSummary, { reference, quote }));
+    const card = host.querySelector(".account-quote-benefits");
+    assert.equal(card.querySelector("strong").textContent, "银卡会员");
+    assert.deepEqual(chipTexts(host), ["9.8折", "减免押金 ¥20.00"]);
+    assert.ok(!host.textContent.includes("成长权益"));
+    const rent = host.querySelector('[data-kind="rent"]');
+    assert.equal(rent.querySelector("del").textContent, "¥3447.50");
+    assert.match(rent.textContent, /¥3378\.55/);
+    assert.ok(!rent.textContent.includes("银卡会员"));
+    assert.ok(!rent.textContent.includes("已减"));
+    const deposit = host.querySelector(".account-bill-section--deposit .rental-deposit");
+    assert.equal(deposit.querySelector("del").textContent, "¥800.00");
+    assert.match(deposit.textContent, /¥780\.00/);
+    assert.ok(!deposit.textContent.includes("银卡会员"));
+    assert.ok(!deposit.textContent.includes("减免押金"));
+  });
+});
+
+test("matching cheaper personal resource lines show one card with fallback 已减 and courtesy title", async () => {
+  await withDom(async (host, render) => {
+    const cheaperHaff = { ...personalHaff, buyerAmount: cny("153.08") };
+    const original = personalQuote([cheaperHaff, personalAwm]);
+    const quote = {
+      ...original,
+      membershipBenefits: benefits("GOLD", "FRIEND"),
+      baseTenantDeposit: cny("50.00"),
+      depositWaived: false,
+      quote: {
+        ...original.quote,
+        lines: [cheaperHaff, personalAwm],
+        resourceTotal: cny("159.08"),
+        tenantDeposit: cny("20.00"),
+        tenantPayableTotal: cny("179.08"),
+      },
+    };
+    await render(React.createElement(RentalPriceSummary, { reference: matchedPersonalReference, quote }));
+    const card = host.querySelector(".account-quote-benefits");
+    assert.equal(card.querySelector("strong").textContent, "金卡会员 · 挚友礼遇");
+    assert.deepEqual(chipTexts(host), ["已减 ¥20.00", "减免押金 ¥30.00"]);
+    assert.ok(!host.textContent.includes("成长权益"));
+    const rent = host.querySelector('[data-kind="rent"]');
+    assert.ok(rent);
+    assert.equal(rent.querySelector("del").textContent, "¥179.08");
+    assert.match(rent.textContent, /¥159\.08/);
+    assert.ok(!rent.textContent.includes("金卡会员"));
+    assert.ok(!rent.textContent.includes("挚友礼遇"));
+    const deposit = host.querySelector(".account-bill-section--deposit .rental-deposit");
+    assert.equal(deposit.querySelector("del").textContent, "¥50.00");
+    assert.match(deposit.textContent, /¥20\.00/);
+    assert.ok(!deposit.textContent.includes("挚友礼遇"));
+    assert.ok(!deposit.textContent.includes("已减"));
+    assert.ok(!host.textContent.includes("价格：挚友礼遇"));
+  });
+});
+
+test("a proved reduction to zero deposit shows 免押 in the card without a waiver flag", async () => {
+  await withDom(async (host, render) => {
+    const original = personalQuote([personalHaff, personalAwm]);
+    const quote = {
+      ...original,
+      membershipBenefits: benefits("SILVER", "GROWTH"),
+      baseTenantDeposit: cny("50.00"),
+      quote: { ...original.quote, tenantDeposit: cny("0.00"), tenantPayableTotal: cny("179.08") },
+    };
+    delete quote.depositWaived;
+    await render(React.createElement(RentalPriceSummary, { reference: sourceReference, quote }));
+    const card = host.querySelector(".account-quote-benefits");
+    const deposit = host.querySelector(".rental-deposit");
+    assert.equal(card.querySelector("strong").textContent, "银卡会员");
+    assert.deepEqual(chipTexts(host), ["免押"]);
+    assert.ok(!host.textContent.includes("成长权益"));
+    assert.equal(deposit.querySelector("del").textContent, "¥50.00");
+    assert.match(deposit.textContent, /¥0\.00/);
+    assert.ok(!deposit.textContent.includes("银卡会员"));
+    assert.match(host.textContent, /本次免押/);
+    assert.equal(host.querySelector('[data-kind="rent"]'), null);
+  });
+});
+
+test("itemized personal amounts remain authoritative while catalog units are labelled as reference", async () => {
+  await withDom(async (host, render) => {
+    const reference = {
+      total: "¥3262.00",
+      haff: "¥2878.00",
+      items: "¥384.00",
+      lines: [
+        { ...haffReference, costAmount: "2878.00", costLabel: "¥2878.00" },
+        { itemId: "awm", code: "df_billable_awm_bullet", name: "AWM子弹", quantity: "240", quantityLabel: "240发", unitLabel: "发", costAmount: "264.00", costLabel: "¥264.00", unitPriceLabel: "¥1.10 / 1 发" },
+        { itemId: "b1", code: "df_billable_level6_bullet", name: "6级子弹", quantity: "600", quantityLabel: "600发", unitLabel: "发", costAmount: "120.00", costLabel: "¥120.00", unitPriceLabel: "¥12.00 / 60 发" },
+      ],
+      unitAmountsInformational: true,
+    };
+    const personalHaffDisc = { ...personalHaff, buyerAmount: cny("2820.44") };
+    const personalAwmDisc = { itemId: "awm", quantity: "240", unit: "ROUND", unitQuantity: "1", buyerUnitAmount: cny("1.07779717", 8), buyerAmount: cny("258.72") };
+    const personalBulletDisc = { itemId: "b1", quantity: "600", unit: "ROUND", unitQuantity: "60", buyerUnitAmount: cny("0.19600000", 8), buyerAmount: cny("117.60") };
+    const original = personalQuote([personalHaffDisc, personalAwmDisc, personalBulletDisc]);
+    const quote = {
+      ...original,
+      membershipBenefits: benefits("SILVER", "GROWTH"),
+      baseTenantDeposit: cny("800.00"),
+      depositWaived: false,
+      quote: {
+        ...original.quote,
+        lines: [personalHaffDisc, personalAwmDisc, personalBulletDisc],
+        resourceTotal: cny("3196.76"),
+        tenantDeposit: cny("780.00"),
+        tenantPayableTotal: cny("3976.76"),
+      },
+    };
+    await render(React.createElement(RentalPriceSummary, { reference, quote }));
+    const haff = [...host.querySelectorAll(".account-quote-bill-row")].find((row) => row.textContent.includes("哈夫币"));
+    assert.equal(haff.querySelector(".account-quote-bill-amount").textContent, "¥2820.44");
+    const awm = [...host.querySelectorAll(".account-quote-bill-row")].find((row) => row.textContent.includes("AWM子弹"));
+    assert.equal(awm.querySelector(".account-quote-bill-spec").textContent, "240发 · 参考单价 ¥1.1 / 发");
+    assert.equal(awm.querySelector(".account-quote-bill-amount").textContent, "¥258.72");
+    const bullets = [...host.querySelectorAll(".account-quote-bill-row")].find((row) => row.textContent.includes("6级子弹"));
+    assert.equal(bullets.querySelector(".account-quote-bill-spec").textContent, "10组（600发） · 参考单价 ¥12 / 组");
+    assert.equal(bullets.querySelector(".account-quote-bill-amount").textContent, "¥117.60");
+    assert.equal(host.querySelector(".account-quote-bill-subtotal strong").textContent, "¥376.32");
+    assert.deepEqual(chipTexts(host), ["9.8折", "减免押金 ¥20.00"]);
+    const rent = host.querySelector('[data-kind="rent"]');
+    assert.equal(rent.querySelector("del").textContent, "¥3262.00");
+    assert.match(rent.textContent, /¥3196\.76/);
+    assert.ok(!rent.textContent.includes("银卡会员"));
+    assert.equal(host.querySelector(".account-reference-price").textContent, "¥3976.76");
+    const card = host.querySelector(".account-quote-benefits");
+    assert.equal(card.querySelector("strong").textContent, "银卡会员");
+    assert.ok(!host.textContent.includes("成长权益"));
+  });
+});

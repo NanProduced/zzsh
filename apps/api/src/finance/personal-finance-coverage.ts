@@ -72,7 +72,70 @@ export async function hasProvedNativeHistoryAbsence(client:PoolClient,userId:str
  if(typeof row?.complete!=='boolean')throw unavailable();return row.complete;
 }
 
+/** Batch the same native-birth proof when a page contains multiple subjects. */
+export async function provedNativeHistoryAbsences(client:PoolClient,userIds:readonly string[],kind:ObservationKind):Promise<Set<string>>{
+ if(!Array.isArray(userIds)||!Object.hasOwn(OBSERVATION_ENTITIES,kind))throw invalid('Historical coverage subject/source required');
+ const ids=[...new Set(userIds)];for(const userId of ids)if(typeof userId!=='string'||!id.test(userId))throw invalid('Historical coverage subject/source required');
+ if(!ids.length)return new Set();
+ const installed=(await client.query(`/* native history absence dependencies */ SELECT to_regclass('zzsh_order.wallet_coverage') IS NOT NULL AND to_regclass('zzsh_order.finance_opening_basis') IS NOT NULL AND to_regclass('zzsh_order.native_user_insert_proof') IS NOT NULL AND to_regclass('zzsh_iam.user_identity_state') IS NOT NULL AND to_regclass('zzsh_order.personal_finance_observation') IS NOT NULL AS ready`)).rows[0];
+ if(installed?.ready!==true)return new Set();
+ const rows=(await client.query(`/* native history absence subjects */ SELECT c.user_id FROM zzsh_order.wallet_coverage c
+  JOIN zzsh_order.finance_opening_basis b ON b.id=c.basis_id AND b.user_id=c.user_id
+  JOIN zzsh_iam.user_identity_state s ON s.user_id=c.user_id JOIN zzsh_order.native_user_insert_proof p ON p.user_id=c.user_id
+  WHERE c.user_id=ANY($1::text[]) AND c.origin='NATIVE_GENESIS' AND b.source_kind='NATIVE_GENESIS' AND b.available_cents=0 AND b.covered_count=0 AND NULLIF(s.provider,'')<>'legacy_mysql_restore'
+   AND NOT EXISTS(SELECT 1 FROM zzsh_iam.audit_event a WHERE a.object_id=c.user_id AND a.action='user.legacy_owner.migrated' AND a.outcome='SUCCESS')
+   AND NOT EXISTS(SELECT 1 FROM zzsh_order.personal_finance_observation h WHERE h.user_id=c.user_id AND h.source_kind=$2)`,[ids,kind])).rows;
+ return new Set(rows.map((row:any)=>String(row.user_id)));
+}
+
 /** SELECT only. Wallet coverage and a zero-row query are never history completeness proofs. */
+
+function observationCoverageFromRow(row:any):ObservationCoverage{
+ const counts=[row.source_count,row.imported_count,row.isolated_count].map(String);
+ if(!counts.every(n=>/^(0|[1-9]\d{0,8})$/.test(n))||BigInt(counts[0]!)!==BigInt(counts[1]!)+BigInt(counts[2]!)
+  ||row.actual_count!==counts[1]||!digest.test(row.imported_set_digest)||row.actual_digest!==row.imported_set_digest
+  ||typeof row.id!=='string'||!id.test(row.id)||typeof row.cutoff!=='string'||!/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/.test(row.cutoff)||!Number.isFinite(Date.parse(row.cutoff))
+  ||row.invalid_count!=='0'||typeof row.outside_count!=='string'||!/^(0|[1-9]\d*)$/.test(row.outside_count))throw unavailable();
+ const version=row.id+':'+row.imported_set_digest;
+ if(row.outside_count!=='0')return{knowledge:'UNKNOWN',reason:'HISTORICAL_COVERAGE_OUTDATED',count:null,cutoff:row.cutoff,version};
+ if(counts[2]!=='0')return{knowledge:'UNKNOWN',reason:'HISTORICAL_SOURCE_ISOLATED',count:null,cutoff:row.cutoff,version};
+ return{knowledge:'KNOWN',reason:'SOURCE_COMPLETE_THROUGH_CUTOFF',count:counts[0]!,cutoff:row.cutoff,version};
+}
+
+/** Same proof as readObservationCoverage; one installed check + one DISTINCT ON set for the page. */
+export async function readObservationCoverages(client:PoolClient,userIds:readonly string[],kind:ObservationKind):Promise<Map<string,ObservationCoverage>>{
+ const out=new Map<string,ObservationCoverage>();
+ if(!Array.isArray(userIds))throw invalid('Historical coverage subject/source required');
+ const ids=[...new Set(userIds)];
+ for(const userId of ids){if(typeof userId!=='string'||!id.test(userId))throw invalid('Historical coverage subject/source required');}
+ if(!Object.hasOwn(OBSERVATION_ENTITIES,kind))throw invalid('Historical coverage subject/source required');
+ if(!ids.length)return out;
+ const installed=(await client.query(`/* finance history coverage installed */ SELECT to_regclass('zzsh_order.personal_finance_observation_coverage') IS NOT NULL AS installed`)).rows[0];
+ if(installed?.installed===false){for(const userId of ids)out.set(userId,{knowledge:'UNKNOWN',reason:'HISTORICAL_COVERAGE_NOT_INSTALLED',count:null,cutoff:null,version:null});return out;}
+ if(installed?.installed!==true)throw unavailable();
+ const rows=(await client.query(`/* finance history coverage exact targets */
+  SELECT DISTINCT ON (c.user_id) c.user_id,c.id,c.source_count,c.imported_count,c.isolated_count,c.imported_set_digest,
+   to_char(c.source_cutoff AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS cutoff,
+   s.actual_count,s.actual_digest,s.invalid_count,s.outside_count
+  FROM zzsh_order.personal_finance_observation_coverage c
+  LEFT JOIN LATERAL (
+   SELECT count(*) FILTER(WHERE o.source_system=c.source_system AND o.source_entity=c.source_entity AND o.source_event_at<=c.source_cutoff)::text AS actual_count,
+    encode(sha256(convert_to(COALESCE(string_agg(o.source_id||':'||o.source_digest,chr(10) ORDER BY o.source_id COLLATE "C") FILTER(WHERE o.source_system=c.source_system AND o.source_entity=c.source_entity AND o.source_event_at<=c.source_cutoff),''),'UTF8')),'hex') AS actual_digest,
+    count(*) FILTER(WHERE o.source_system<>c.source_system OR o.source_entity<>c.source_entity OR o.source_type<>'LEGACY_MYSQL' OR o.source_event_at IS NULL)::text AS invalid_count,
+    count(*) FILTER(WHERE o.source_event_at>c.source_cutoff)::text AS outside_count
+   FROM zzsh_order.personal_finance_observation o WHERE o.user_id=c.user_id AND o.source_kind=c.source_kind
+  ) s ON true
+  WHERE c.user_id=ANY($1::text[]) AND c.source_kind=$2
+  ORDER BY c.user_id,c.source_cutoff DESC,c.id COLLATE "C" DESC`,[ids,kind])).rows;
+ const byUser=new Map(rows.map((row:any)=>[String(row.user_id),row]));
+ for(const userId of ids){
+  const row=byUser.get(userId);
+  if(!row){out.set(userId,{knowledge:'UNKNOWN',reason:'HISTORICAL_COVERAGE_NOT_IMPORTED',count:null,cutoff:null,version:null});continue;}
+  out.set(userId,observationCoverageFromRow(row));
+ }
+ return out;
+}
+
 export async function readObservationCoverage(client:PoolClient,userId:string,kind:ObservationKind):Promise<ObservationCoverage>{
  if(typeof userId!=='string'||!id.test(userId)||!Object.hasOwn(OBSERVATION_ENTITIES,kind))throw invalid('Historical coverage subject/source required');
  const installed=(await client.query(`/* finance history coverage installed */ SELECT to_regclass('zzsh_order.personal_finance_observation_coverage') IS NOT NULL AS installed`)).rows[0];

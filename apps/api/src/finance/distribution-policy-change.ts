@@ -47,8 +47,8 @@ export function prepareDistributionPolicyChange(head:PolicyHead,input:Distributi
  if(isInitialPolicyChange(input))throw invalid('Initial policy has no baseline to update');
  if(head.versionId!==input.expectedPolicyId||head.revision!==input.expectedRevision||head.digest!==input.expectedPolicyDigest)throw conflict('Distribution policy baseline changed');
  const original=head.config,c=input.changes;
- if(original.schema==='distribution-policy.v3'){
-  if(c.renterPercent!==undefined||c.ownerPercent!==undefined||c.enabled===undefined||c.enabled===original.enabled)throw invalid('Legacy graded policy requires an explicit state change; uniform rates cannot replace its source');
+ if(original.schema==='distribution-policy.v3'||original.schema==='distribution-policy.v4'){
+  if(c.renterPercent!==undefined||c.ownerPercent!==undefined||c.enabled===undefined||c.enabled===original.enabled)throw invalid('Graded policy requires an explicit state change; uniform rates cannot replace its source');
   return {...original,enabled:c.enabled};
  }
  if(original.schema==='distribution-policy.v1'&&(c.renterPercent===undefined||c.ownerPercent===undefined))throw invalid('Adopting uniform policy requires both explicit rates; no historical grade fallback');

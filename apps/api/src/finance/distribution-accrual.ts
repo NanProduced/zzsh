@@ -1,5 +1,5 @@
 import {createHash} from 'node:crypto';import {canonicalize,normalizeTime} from '../supply/content-hash';import {conflict,invalid} from '../supply/supply-util';import {exactCents} from './personal-finance-read';
-import {allocateFrozenReferralPair} from './distribution-policy';import {readOriginalPaymentDistributionBasis,type PaymentDistributionBasis} from './distribution-payment-basis';import {earningEconomicKey,type RentalReferralRole} from './distribution-mechanism';
+import {allocateFrozenReferralPair,usesLegacyRentalDistributionBase} from './distribution-policy';import {readOriginalPaymentDistributionBasis,type PaymentDistributionBasis} from './distribution-payment-basis';import {earningEconomicKey,type RentalReferralRole} from './distribution-mechanism';
 export type CompletedDistributionFacts={origin:'NATIVE'|'LEGACY_MYSQL'|'UNKNOWN';orderId:string;confirmationId:string;postingId:string;postingDigest:string;postedAt:string;classification:'NORMAL'|'EARLY'|'UNKNOWN';calculationMode:'SYSTEM'|'MANUAL'|'UNKNOWN';capturedCents:string;ownerNetCents:string;renterRefundCents:string;platformContributionCents:string;compensationFeeCents:string};
 export type AccruedReferral={economicKey:string;beneficiaryUserId:string;role:RentalReferralRole;amountCents:string;dueAt:string;policyVersion:string;basisDigest:string;postingDigest:string;relationDigest:string};
 const sha=(s:string)=>createHash('sha256').update(s).digest('hex'),unsigned=(v:string)=>{const n=BigInt(exactCents(v));if(n<0n)throw invalid('Nonnegative final accounting amounts required');return n;};
@@ -13,7 +13,7 @@ export function prepareAccrualFromFrozenPayment(basis:PaymentDistributionBasis|n
  const captured=unsigned(f.capturedCents),owner=unsigned(f.ownerNetCents),refund=unsigned(f.renterRefundCents),platform=unsigned(f.platformContributionCents),fee=unsigned(f.compensationFeeCents);
  if(owner+refund+platform!==captured)throw conflict('Final source posting does not conserve captured money');
  if(!['NORMAL','EARLY'].includes(f.classification)||!['SYSTEM','MANUAL'].includes(f.calculationMode)||fee>platform)return{knowledge:'UNKNOWN' as const,reason:'UNKNOWN_BASE_MAPPING',baseCents:null,items:[] as AccruedReferral[]};
- const legacyRental=basis.policyConfig?.schema==='distribution-policy.v3';
+ const legacyRental=usesLegacyRentalDistributionBase(basis.policyConfig);
  const base=(legacyRental?captured-owner-refund:platform-fee).toString();if(!basis.policyConfig||!basis.policyVersion||basis.roles.some(r=>r.status.startsWith('UNKNOWN')))return{knowledge:'UNKNOWN' as const,reason:'ORIGINAL_PAYMENT_BASIS_NOT_CLOSED',baseCents:base,items:[] as AccruedReferral[]};
  const eligible=basis.roles.filter(r=>r.status==='ELIGIBLE'),renter=eligible.find(r=>r.role==='RENTER_REFERRAL'),ownerRole=eligible.find(r=>r.role==='OWNER_REFERRAL');
  // A final known zero remains a recorded result for a role admitted at payment; no later threshold reapplies.

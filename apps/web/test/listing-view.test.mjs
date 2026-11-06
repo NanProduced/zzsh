@@ -235,7 +235,7 @@ new Function('require', 'exports', accountCardCode)((name) => {
   return {};
 }, accountCardExports);
 
-const { composeGridTitle, composeListTitle, orderedQuoteResources, skinChipTone, moneyValue, listTermRuleLabel } = accountCardExports;
+const { composeGridTitle, composeListTitle, orderedQuoteResources, skinChipTone, moneyValue, termBadgeLabel, dailyConsumptionBadgeLabel, listingFactBadges } = accountCardExports;
 
 test('grid resource projection excludes Haff-only quote lines', () => {
   const haff = { itemId: 'haff', code: null, name: '哈夫币', unitLabel: '哈夫币', quantity: '60000000' };
@@ -482,15 +482,26 @@ test('quote subtotals distinguish known zero groups from absent quote data', () 
   assert.equal(moneyValue(itemZero.itemResourceTotalLabel, '无物品费用'), '无物品费用');
 });
 
-test('missing term rule stays explicitly unconfirmed', () => {
-  assert.equal(listTermRuleLabel(null), '租期规则待确认');
-  assert.equal(listTermRuleLabel(''), '租期规则待确认');
-  assert.equal(listTermRuleLabel('  '), '租期规则待确认');
-  assert.equal(listTermRuleLabel('每日消耗10M'), '租期规则 每日消耗10M');
-  assert.equal(listTermRuleLabel('日消耗 10M (测试)'), '租期规则 日消耗 10M');
-  assert.equal(listTermRuleLabel('TEST_ONLY 日消耗10M'), '租期规则 日消耗10M');
-  assert.equal(listTermRuleLabel('(测试)'), '租期规则待确认');
-  assert.equal(listTermRuleLabel('按月租用'), '租期规则 按月租用');
+test('term and daily consumption badges drop noise and keep a compact unit', () => {
+  assert.equal(termBadgeLabel(null), null);
+  assert.equal(termBadgeLabel(''), null);
+  assert.equal(termBadgeLabel('-'), null);
+  assert.equal(termBadgeLabel('待确认'), null);
+  assert.equal(termBadgeLabel('15天'), '租期15天');
+  assert.equal(termBadgeLabel('15 天'), '租期15天');
+  assert.equal(termBadgeLabel('租期15天'), '租期15天');
+  assert.equal(dailyConsumptionBadgeLabel(null), null);
+  assert.equal(dailyConsumptionBadgeLabel('-'), null);
+  assert.equal(dailyConsumptionBadgeLabel('待确认'), null);
+  assert.equal(dailyConsumptionBadgeLabel('10 M 哈夫币'), '10M/天');
+  assert.equal(dailyConsumptionBadgeLabel('每日消耗10M'), '10M/天');
+  assert.equal(dailyConsumptionBadgeLabel('每天消耗 10M'), '10M/天');
+  assert.equal(dailyConsumptionBadgeLabel('10M/天'), '10M/天');
+  assert.deepEqual(
+    listingFactBadges({ termValue: '20天', dailyValue: '10 M 哈夫币', ratio: '39万/元' }).map((badge) => badge.text),
+    ['租期20天', '10M/天', '39万/元']
+  );
+  assert.deepEqual(listingFactBadges({ termValue: null, dailyValue: null, ratio: null }), []);
 });
 
 test('skin presentation carries the stable owner, base name and media summary', () => {

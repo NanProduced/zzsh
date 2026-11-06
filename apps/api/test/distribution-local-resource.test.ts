@@ -29,6 +29,7 @@ function probe(options:{identity?:Record<string,unknown>;shape?:Record<string,un
   if(sql.startsWith('SELECT d.oid'))return result([{oid:receipt.resourceOid,name:receipt.database,role:receipt.runtimeRole,marker:receipt.marker,complete:true,...options.identity}]);
   if(sql.startsWith('SELECT pg_get_userbyid'))return result([{owner:'zzsh',rolsuper:false,rolbypassrls:false,complete:true,...options.shape}]);
   if(sql.startsWith('SELECT to_regclass'))return result([{complete:true,protected_proof:true}]);
+  if(sql.startsWith("SELECT to_regprocedure('zzsh_order.distribution_management_contract_version()')"))return result([{ready:false}]);
   if(sql.startsWith('SELECT s.'))return result([{locked:false,twoFactorEnabled:true}]);
   if(sql.includes('FROM "zzsh_iam"."admin_security"'))return result([{status:'ACTIVE',isBoss:options.permissions===undefined,passwordChangeRequired:false}]);
   if(sql.startsWith('WITH role_permissions'))return result((options.permissions??[]).map(permissionCode=>({permissionCode})));
@@ -46,7 +47,7 @@ function probe(options:{identity?:Record<string,unknown>;shape?:Record<string,un
   if(sql.startsWith('INSERT INTO zzsh_order.distribution_invite_code'))return result([{id:args[0]}]);
   if(sql.startsWith('SELECT * FROM zzsh_order.distribution_participant'))return result([participants.get(args[0])??{user_id:'self',eligibility:'ELIGIBLE',level_code:'BATCH2',revision:'1',leader_knowledge:'KNOWN_NONE',inviter_knowledge:'KNOWN_NONE'}]);
   if(sql.startsWith('SELECT eligibility,level_code'))return result([{eligibility:'ELIGIBLE',level_code:'BATCH2',commission_frozen:false,policy_version_id:'policy_test'}]);
-  if(sql.startsWith('SELECT display_code'))return result([{display_code:'FX_SELF',source_type:'NATIVE_REGISTRATION'}]);
+  if(sql.startsWith('SELECT id,display_code'))return result([{id:'own_code',display_code:'FX_SELF',source_type:'NATIVE_REGISTRATION'}]);
   if(sql.startsWith('SELECT * FROM zzsh_order.invitation_relation')||sql.startsWith('SELECT id,child_user_id'))return result();
   if(sql.startsWith('SELECT * FROM zzsh_order.distribution_invite_code'))return result([{id:'code_parent',user_id:'parent',display_code:'FX_PARENT',source_type:'NATIVE_REGISTRATION'}]);
   if(sql.startsWith('SELECT id FROM zzsh_auth_user'))return result((Array.isArray(args[0])?args[0]:[args[0]]).map(id=>({id})));

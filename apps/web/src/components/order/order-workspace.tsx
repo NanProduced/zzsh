@@ -29,7 +29,10 @@ export function OrderWorkspace({ party, orderId, status: statusParam, accountId,
   const router = useRouter();
   const session = useUserSession();
   const { orderNo, createdFrom, createdTo, stage } = filters;
-  const status: OrderStatusFilter = isOrderStatus(statusParam) ? statusParam : "";
+  const status: OrderStatusFilter = statusParam === "IN_PROGRESS" || statusParam == null || statusParam === ""
+    ? "IN_PROGRESS"
+    : statusParam === "ALL" ? "ALL"
+    : isOrderStatus(statusParam) ? statusParam : "IN_PROGRESS";
   const identityScope = session.status === "authenticated" && session.userId ? `${session.userId}:${session.identityVersion}` : "unauthenticated";
   const listScope = JSON.stringify([identityScope,party,status,accountId ?? "",orderNo ?? "",createdFrom ?? "",createdTo ?? "",stage ?? ""]);
   const detailScope = `${identityScope}:${party}:${source ?? ""}:${orderId ?? ""}`;
@@ -70,7 +73,7 @@ export function OrderWorkspace({ party, orderId, status: statusParam, accountId,
       return;
     }
     try {
-      const page = await orderApi.listUnified(session.userId, { party, ...(status ? { status } : {}), ...(accountId ? { accountId } : {}), orderNo, createdFrom, createdTo, stage }, controller.signal);
+      const page = await orderApi.listUnified(session.userId, { party, ...(status && status !== "ALL" ? { status: status === "IN_PROGRESS" ? "IN_PROGRESS" : status } : {}), ...(accountId ? { accountId } : {}), orderNo, createdFrom, createdTo, stage }, controller.signal);
       if (controller.signal.aborted || sequence !== listSequence.current) return;
       setListState({ scope: listScope, page, loading: false, refreshing: false, loadingMore: false, error: null, moreError: null, notice });
     } catch (error) {
@@ -153,7 +156,7 @@ export function OrderWorkspace({ party, orderId, status: statusParam, accountId,
     moreController.current = controller;
     setListState((previous) => previous.scope === listScope ? { ...previous, loadingMore: true, moreError: null } : previous);
     try {
-      const next = await orderApi.listUnified(session.userId, { party, ...(status ? { status } : {}), ...(accountId ? { accountId } : {}), orderNo, createdFrom, createdTo, stage, cursor: page.nextCursor }, controller.signal);
+      const next = await orderApi.listUnified(session.userId, { party, ...(status && status !== "ALL" ? { status: status === "IN_PROGRESS" ? "IN_PROGRESS" : status } : {}), ...(accountId ? { accountId } : {}), orderNo, createdFrom, createdTo, stage, cursor: page.nextCursor }, controller.signal);
       if (controller.signal.aborted || sequence !== listSequence.current || more !== moreSequence.current) return;
       setListState((previous) => previous.scope !== listScope || !previous.page ? previous : { ...previous, page: { ...next, stageUnknownObserved: Boolean(previous.page.stageUnknownObserved || next.stageUnknownObserved), items: mergeOrderItems(previous.page.items, next.items) }, loadingMore: false, moreError: null });
     } catch (error) {

@@ -539,7 +539,7 @@ export type LegacyHistoricalRead = {
     sourceUpdatedAt: string;
   } };
 };
-export type RentalState = "RENTED" | "LISTED" | "PAUSED" | "REVIEWING" | "DRAFT" | "REJECTED" | "RESTRICTED" | "UNKNOWN";
+export type RentalState = "RENTED" | "PENDING_PAYMENT" | "LISTED" | "PAUSED" | "REVIEWING" | "DRAFT" | "REJECTED" | "RESTRICTED" | "COMPLETED" | "UNKNOWN";
 export type AccountTitleFacts = {
   haffBase: string | null;
   safeBox: { code: string; displayName: string | null } | null;

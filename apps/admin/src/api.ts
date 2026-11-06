@@ -748,7 +748,7 @@ export type AdminOrderMoney = { currency: "CNY"; unit: "yuan"; amount: string; s
 export type AdminOrder = {
   id: string;
   displayNo: string;
-  status: "PENDING_PAYMENT" | "PAID" | "CANCELLED" | "COMPLETED";
+  status: "PENDING_PAYMENT" | "PAID" | "CANCELLED" | "COMPLETED" | "UNKNOWN";
   accountId: string;
   versionId: string;
   title: string;

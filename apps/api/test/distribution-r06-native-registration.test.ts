@@ -26,7 +26,7 @@ const read = () => createRegisteredLocalNativeDistributionReadScope(config, rece
 const fresh = { userId: 'fixture_new', requestId: 'fixture_request' };
 
 function probe(change: { missingProof?: boolean; previous?: boolean; user?: Record<string, unknown>; identity?: Record<string, unknown>;
-  owner?: Record<string, unknown>; absentPolicy?: boolean; badDigest?: boolean; inviter?: boolean } = {}) {
+  owner?: Record<string, unknown>; absentPolicy?: boolean; badDigest?: boolean; inviter?: boolean; managedCodes?:boolean; inactiveInviter?:boolean } = {}) {
   const calls: { text: string; values: unknown[] }[] = [];
   const safeIdentity = { databaseName: receipt.database, currentUser: receipt.runtimeRole, owner: receipt.owner,
     ...Object.fromEntries(['isSuperuser','canCreateRole','canCreateDb','canReplicate','canBypassRls','canCreateDatabase',
@@ -37,6 +37,7 @@ function probe(change: { missingProof?: boolean; previous?: boolean; user?: Reco
       calls.push({ text, values }); const result = (rows: unknown[] = [], rowCount = rows.length) => ({ rows, rowCount });
       if (text.startsWith('SELECT to_regclass') && text.includes('protected_proof')) return result([{ complete: true, protected_proof: !change.missingProof }]);
       if (text.startsWith('SELECT pg_advisory_xact_lock')) return result();
+      if (text.startsWith("SELECT to_regprocedure('zzsh_order.distribution_management_contract_version()')")) return result([{ready:change.managedCodes===true}]);
       if (text.startsWith('SELECT user_id FROM zzsh_order.distribution_participant')) return result(change.previous ? [{ user_id: fresh.userId }] : []);
       if (text.startsWith('SELECT u.id,u.suspended')) return result([{ id: fresh.userId, suspended: false, account_status: 'ACTIVE',
         identity_provider: 'none', inserted_in_transaction: true, not_migrated: true, ...change.user }]);
@@ -50,7 +51,7 @@ function probe(change: { missingProof?: boolean; previous?: boolean; user?: Reco
       if (text.includes('AS "ownsBusinessSchema"')) return result([{ ownsBusinessSchema: false, ownsBusinessRelation: false, hasPrivilegedMembership: false }]);
       if (text.startsWith('SELECT v.* FROM zzsh_order.distribution_policy_head')) return result(change.absentPolicy ? [] : [{ id: 'native_policy', revision: '1',
         canonical_config: canonical, config_digest: change.badDigest ? '0'.repeat(64) : digest, created_at: '2026-11-01T00:00:00Z' }]);
-      if (text.startsWith('SELECT * FROM zzsh_order.distribution_invite_code')) return result(change.inviter ? [{ id: 'fixture_code', user_id: 'fixture_parent' }] : []);
+      if (text.startsWith('SELECT * FROM zzsh_order.distribution_invite_code')) return result(change.inviter && !change.inactiveInviter ? [{ id: 'fixture_code', user_id: 'fixture_parent' }] : []);
       if (text.startsWith('SELECT id FROM zzsh_auth_user."user"')) return result([{ id: 'fixture_parent' }]);
       if (text.startsWith('SELECT p.*,u.suspended')) return result([{ user_id: 'fixture_parent', eligibility: 'ELIGIBLE', suspended: false, account_status: 'ACTIVE' }]);
       if (text.startsWith('WITH RECURSIVE chain')) return result([{ user_id: 'fixture_parent', cyclic: false, leader_knowledge: 'KNOWN_NONE', parent_user_id: null }]);
@@ -92,6 +93,14 @@ test('a valid known inviter only creates the normal registration relations', asy
   assert.equal(relations.length, 2); assert(relations.some(q => q.text.includes("'INVITER'")));
   assert(relations.some(q => q.text.includes("'DISTRIBUTION_LEADER'")));
   assert(relations.every(q => q.values.includes(fresh.userId) && q.values.includes('fixture_parent') && q.values.includes('native_policy')));
+});
+
+test('after code-rotation schema, registration only resolves active codes and cannot bind an inactive code',async()=>{
+ const scope=read(),registration=createRegisteredLocalNativeDistributionRegistrationScope(scope),p=probe({inviter:true,managedCodes:true,inactiveInviter:true});
+ const value=await initializeNewDistributionRegistration(p.c,{...fresh,inviteCode:'OLD_CODE'},undefined,registration);
+ const lookup=p.calls.find(q=>q.text.startsWith('SELECT * FROM zzsh_order.distribution_invite_code'));
+ assert.match(lookup!.text,/\bAND active\b/);assert.equal(value.inviterKnowledge,'UNKNOWN');
+ assert.equal(p.calls.some(q=>q.text.startsWith('INSERT INTO zzsh_order.invitation_relation')),false);
 });
 
 test('existing, migrated, wrong-resource or unproved users and unknown policy fail before any write', async () => {

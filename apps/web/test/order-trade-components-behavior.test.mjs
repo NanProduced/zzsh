@@ -1809,11 +1809,12 @@ async function tradeProbe(window, data, party = "owner") {
   return probe;
 }
 
-async function detailProbe(window, order, party, data = settlementBody, refund = refundRead(order.id)) {
+async function detailProbe(window, order, party, data = settlementBody, refund = refundRead(order.id), ownerRefund = null) {
   const OrderDetail = loadComponent("apps/web/src/components/order/order-detail.tsx", session("user_A")).OrderDetail;
+  const ownerSummary = ownerRefund ?? {contractVersion:"owner-refund-minimal.v1",subjectId:"user_A",orderId:order.id,orderStatus:order.status,progress:"NOT_APPLICABLE",label:"不适用",note:"",openIntentCount:0,asOf:"2026-11-06T00:00:00.000Z"};
   const probe = createProbe(window, OrderDetail, { orderId: order.id, party, status: "", accountId: undefined, state: { status: "ready", order, error: null }, onRetry() {}, onLogin() {}, onChanged() {} }, router([
     { match: "/settlement", method: "GET", respond: () => json(data) },
-    { match: "/refunds", method: "GET", respond: () => json(refund) },
+    { match: "/refunds", method: "GET", respond: () => json(party === "owner" ? ownerSummary : refund) },
   ], []));
   await probe.render();
   return probe;
@@ -2309,8 +2310,14 @@ test("C02: cancelled and pending renter orders still read local responsibility, 
         assert.doesNotMatch(section.textContent, /没有退款记录/);
       } finally { await probe.dispose(); }
     }
-    const owner = await detailProbe(window, { ...paidOrder, status: "CANCELLED" }, "owner");
-    try { assert.equal(owner.host.querySelector(".order-refund-block"), null, "owner detail never shows the renter refund projection"); } finally { await owner.dispose(); }
+    const ownerSummary={contractVersion:"owner-refund-minimal.v1",subjectId:"user_A",orderId:"order_A",orderStatus:"CANCELLED",progress:"PROCESSING",label:"退款处理中",note:"到账情况不以本摘要为准",openIntentCount:1,asOf:"2026-11-06T00:00:00.000Z"};
+    const owner = await detailProbe(window, { ...paidOrder, status: "CANCELLED" }, "owner", settlementBody, undefined, ownerSummary);
+    try {
+      const section=owner.host.querySelector(".order-refund-block");
+      assert.ok(section,"owner receives the minimal refund summary");
+      assert.match(section.textContent,/退款处理中/);
+      assert.doesNotMatch(section.textContent,/本次结算应退|退款申请|¥280\.00|银行已到账/);
+    } finally { await owner.dispose(); }
   });
 });
 

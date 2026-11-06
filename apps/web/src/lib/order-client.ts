@@ -3,7 +3,8 @@ export type { FullPayoutTerms, FullPayoutTermsAcceptance } from "./supply-types"
 
 export type OrderParty = "renter" | "owner";
 export type OrderStatus = "PENDING_PAYMENT" | "PAID" | "CANCELLED" | "COMPLETED";
-export type OrderStatusFilter = OrderStatus | "";
+export type OrderWorkView = "IN_PROGRESS";
+export type OrderStatusFilter = OrderStatus | OrderWorkView | "" | "ALL";
 
 export type ChannelPaymentMethod = "ALIPAY_NATIVE" | "WEIXIN_NATIVE";
 export type ChannelPaymentDataOrigin = "SYNTHETIC_PROTOCOL" | "LOCAL_CONTROLLED" | "JOINPAY_CANDIDATE" | "JOINPAY_PROVIDER" | "UNKNOWN";
@@ -325,7 +326,7 @@ export type OrderSearchFilters = { orderNo?: string; createdFrom?: string; creat
 
 export function orderUrl(party: OrderParty, status: OrderStatusFilter, accountId?: string, orderId?: string, source?: "NATIVE" | "LEGACY", filters?: OrderSearchFilters): string {
   const query = new URLSearchParams({ view: party === "renter" ? "rentals" : "leased" });
-  if (status) query.set("status", status);
+  if (status && status !== "IN_PROGRESS") query.set("status", status);
   if (accountId) query.set("accountId", accountId);
   if (orderId) query.set("orderId", orderId);
   if (orderId && source === "LEGACY") query.set("source", "legacy");
@@ -820,10 +821,11 @@ export function orderIntentKey(): string {
   return "op_" + crypto.randomUUID().replaceAll("-", "");
 }
 
-type OrderListInput = { party: OrderParty; status?: OrderStatus; accountId?: string; limit?: number; cursor?: string } & OrderSearchFilters;
+type OrderListInput = { party: OrderParty; status?: OrderStatus | "IN_PROGRESS"; accountId?: string; limit?: number; cursor?: string } & OrderSearchFilters;
 function orderListQuery(input: OrderListInput): string {
   const query = new URLSearchParams({ party: input.party, limit: String(input.limit ?? 20) });
-  if (input.status) query.set("status", input.status);
+  if (input.status === "IN_PROGRESS") query.set("view", "IN_PROGRESS");
+  else if (input.status) query.set("status", input.status);
   if (input.accountId) query.set("accountId", input.accountId);
   if (input.orderNo) query.set("orderNo", input.orderNo);
   if (input.createdFrom) query.set("createdFrom", input.createdFrom);
@@ -831,6 +833,43 @@ function orderListQuery(input: OrderListInput): string {
   if (input.stage) query.set("stage", input.stage);
   if (input.cursor) query.set("cursor", input.cursor);
   return query.toString();
+}
+
+
+export type OwnerRefundMinimalSummary = {
+  contractVersion: "owner-refund-minimal.v1";
+  subjectId: string;
+  orderId: string;
+  orderStatus: string;
+  progress: "NONE" | "PROCESSING" | "NEEDS_REVIEW" | "UNKNOWN" | "DONE" | "NOT_APPLICABLE";
+  label: string;
+  note: string;
+  openIntentCount: number;
+  asOf: string;
+};
+
+function parseOwnerRefundSummary(value: unknown, userId: string, orderId: string): OwnerRefundMinimalSummary {
+  if (!value || typeof value !== "object") throw invalidRefund();
+  const v = value as Record<string, unknown>;
+  if (v.contractVersion !== "owner-refund-minimal.v1") throw invalidRefund();
+  if (v.subjectId !== userId || v.orderId !== orderId) throw invalidRefund();
+  if (typeof v.orderStatus !== "string" || typeof v.label !== "string" || typeof v.note !== "string" || typeof v.asOf !== "string") throw invalidRefund();
+  if (typeof v.openIntentCount !== "number" || !Number.isInteger(v.openIntentCount) || v.openIntentCount < 0) throw invalidRefund();
+  if (!["NONE", "PROCESSING", "NEEDS_REVIEW", "UNKNOWN", "DONE", "NOT_APPLICABLE"].includes(String(v.progress))) throw invalidRefund();
+  for (const key of Object.keys(v)) {
+    if (["bank", "destination", "accountNo", "card", "payout"].some((part) => key.toLowerCase().includes(part))) throw invalidRefund();
+  }
+  return {
+    contractVersion: "owner-refund-minimal.v1",
+    subjectId: userId,
+    orderId,
+    orderStatus: v.orderStatus,
+    progress: v.progress as OwnerRefundMinimalSummary["progress"],
+    label: v.label,
+    note: v.note,
+    openIntentCount: v.openIntentCount,
+    asOf: v.asOf,
+  };
 }
 
 export const orderApi = {
@@ -853,6 +892,8 @@ export const orderApi = {
     requestJson<unknown>(`/api/orders/${encodeURIComponent(orderId)}/im?operation=read`, { signal }).then(parseOrderImProjection),
   personalRefunds: async (userId: string, orderId: string, signal?: AbortSignal) =>
     parsePersonalRefunds(await requestJson<unknown>(`/api/orders/${encodeURIComponent(orderId)}/refunds`, { signal, expectedUserId: userId }), userId, orderId),
+  ownerRefundSummary: async (userId: string, orderId: string, signal?: AbortSignal) =>
+    parseOwnerRefundSummary(await requestJson<unknown>(`/api/orders/${encodeURIComponent(orderId)}/refunds`, { signal, expectedUserId: userId }), userId, orderId),
   previewRentalPrice: (input: RentalPricePreviewInput, signal?: AbortSignal) =>
     requestJson<RentalPricePreview>(`/api/rental-price-preview?${new URLSearchParams({ accountId: input.accountId, versionId: input.versionId, releaseId: input.releaseId }).toString()}`, { signal }),
   confirmRental: (input: { accountId: string; versionId: string; releaseId: string; fullPayoutTermsAcceptance?: FullPayoutTermsAcceptance }, signal?: AbortSignal) =>

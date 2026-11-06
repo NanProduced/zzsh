@@ -86,9 +86,11 @@ type AccountStateFilter = RentalState | "ALL";
 /** 每个状态使用服务端筛选和独立游标；全部不传状态。 */
 const ACCOUNT_STATE_FILTERS: ReadonlyArray<{ value: AccountStateFilter; label: string }> = [
   { value: "ALL", label: "全部" },
-  { value: "RENTED", label: "已有订单" },
-  { value: "LISTED", label: "已上架" },
+  { value: "LISTED", label: "可出租" },
+  { value: "PENDING_PAYMENT", label: "待付款占用" },
+  { value: "RENTED", label: "租赁中" },
   { value: "PAUSED", label: "已暂停" },
+  { value: "COMPLETED", label: "已完成" },
   { value: "REVIEWING", label: "审核中" },
   { value: "DRAFT", label: "待完善" },
   { value: "REJECTED", label: "已退回" },
@@ -96,24 +98,28 @@ const ACCOUNT_STATE_FILTERS: ReadonlyArray<{ value: AccountStateFilter; label: s
   { value: "UNKNOWN", label: "待核实" },
 ];
 const RENTAL_STATE_LABELS: Record<RentalState, string> = {
-  RENTED: "已有订单",
-  LISTED: "已上架",
+  RENTED: "租赁中",
+  PENDING_PAYMENT: "待付款占用",
+  LISTED: "可出租",
   PAUSED: "已暂停",
   REVIEWING: "审核中",
   DRAFT: "待完善",
   REJECTED: "已退回",
   RESTRICTED: "已限制",
+  COMPLETED: "已完成",
   UNKNOWN: "待核实",
 };
 const ACCOUNT_MODE_LABELS: Record<string, string> = { ordinary: "普通出租", custom: "自定义出租", fast: "极速出租" };
 const RENTAL_STATE_TONE: Record<RentalState, string> = {
   RENTED: "success",
+  PENDING_PAYMENT: "warning",
   LISTED: "info",
   PAUSED: "warning",
   REVIEWING: "info",
   DRAFT: "unknown",
   REJECTED: "error",
   RESTRICTED: "error",
+  COMPLETED: "unknown",
   UNKNOWN: "unknown",
 };
 
@@ -1029,10 +1035,10 @@ function MyAccountsPanel({ mode, accountId: accountIdProp, filterParam }: { mode
       <div className="mra-toolbar">
         <span className="mra-count">已显示 {rows.length} 个</span>
         <div className="mra-filter-rail" role="group" aria-label="按账号状态筛选">
-          {ACCOUNT_STATE_FILTERS.filter(chip => ["ALL", "LISTED", "RENTED", "REVIEWING"].includes(chip.value)).map(chip => <button key={chip.value} type="button" className="mra-chip" aria-pressed={stateFilter === chip.value} onClick={() => changeStateFilter(chip.value)}>{chip.label}</button>)}
-          <button type="button" className="mra-chip mra-more-toggle" aria-expanded={moreFilters} aria-controls="account-more-filters" onClick={() => setMoreFilters(open => !open)}>更多状态{!["ALL", "LISTED", "RENTED", "REVIEWING"].includes(stateFilter) ? ` · ${RENTAL_STATE_LABELS[stateFilter as RentalState]}` : ""}<ChevronDown size={14} aria-hidden="true" /></button>
+          {ACCOUNT_STATE_FILTERS.filter(chip => ["ALL", "LISTED", "PENDING_PAYMENT", "RENTED", "COMPLETED"].includes(chip.value)).map(chip => <button key={chip.value} type="button" className="mra-chip" aria-pressed={stateFilter === chip.value} onClick={() => changeStateFilter(chip.value)}>{chip.label}</button>)}
+          <button type="button" className="mra-chip mra-more-toggle" aria-expanded={moreFilters} aria-controls="account-more-filters" onClick={() => setMoreFilters(open => !open)}>更多状态{!["ALL", "LISTED", "PENDING_PAYMENT", "RENTED", "COMPLETED"].includes(stateFilter) ? ` · ${RENTAL_STATE_LABELS[stateFilter as RentalState]}` : ""}<ChevronDown size={14} aria-hidden="true" /></button>
         </div>
-        <div id="account-more-filters" className="mra-more-filters" role="group" aria-label="更多账号状态" hidden={!moreFilters}>{ACCOUNT_STATE_FILTERS.filter(chip => !["ALL", "LISTED", "RENTED", "REVIEWING"].includes(chip.value)).map(chip => <button key={chip.value} type="button" className="mra-chip" aria-pressed={stateFilter === chip.value} onClick={() => changeStateFilter(chip.value)}>{chip.label}</button>)}</div>
+        <div id="account-more-filters" className="mra-more-filters" role="group" aria-label="更多账号状态" hidden={!moreFilters}>{ACCOUNT_STATE_FILTERS.filter(chip => !["ALL", "LISTED", "PENDING_PAYMENT", "RENTED", "COMPLETED"].includes(chip.value)).map(chip => <button key={chip.value} type="button" className="mra-chip" aria-pressed={stateFilter === chip.value} onClick={() => changeStateFilter(chip.value)}>{chip.label}</button>)}</div>
       </div>
       {loading && rows.length === 0 ? <div className="account-module-card account-empty-state" aria-busy="true" role="status"><House size={28} aria-hidden="true" /><h3>正在读取{pageTitle}</h3><p>请稍候。</p></div> : error && rows.length === 0 ? <div className="account-module-card account-empty-state" role="alert"><House size={28} aria-hidden="true" /><h3>{pageTitle}暂时无法读取</h3><p>{error.message || "请稍后重试。"}</p><button type="button" className="button secondary" onClick={() => void load(accountIdProp, false, undefined, stateFilter)}>重试读取</button></div> : rows.length === 0 ? (!loading && !error
         ? <div className="account-module-card account-empty-art-state" role="status">
@@ -1087,7 +1093,7 @@ function MyAccountsPanel({ mode, accountId: accountIdProp, filterParam }: { mode
                 </Link>
                 <div className="mra-row-state">
                   {row.activeOrder ? <Link className="mra-row-anchor" href={orderUrl("owner", "", row.id, row.activeOrder.id, row.activeOrder.origin)} scroll={false}>订单 {row.activeOrder.displayNo}</Link> : null}
-                  {state ? <span className="mra-badge" data-tone={RENTAL_STATE_TONE[state]}><span className="mra-badge-dot" aria-hidden="true" />{state === "DRAFT" ? row.review_state === "WITHDRAWN" ? "已撤回" : row.review_state === "IMPORTED_UNVERIFIED" ? "历史资料待核" : row.review_state === "DRAFT" ? "草稿" : "资料待确认" : RENTAL_STATE_LABELS[state]}</span> : <span className="mra-badge" data-tone={row.review_state ? REVIEW_BADGE_TONE[row.review_state] ?? "unknown" : undefined}><span className="mra-badge-dot" aria-hidden="true" />{row.review_state ? stateLabel(row.review_state) : "资料待确认"}</span>}
+                  {state ? <span className="mra-badge" data-tone={RENTAL_STATE_TONE[state]}><span className="mra-badge-dot" aria-hidden="true" />{state === "DRAFT" ? row.review_state === "WITHDRAWN" ? "已撤回" : row.review_state === "IMPORTED_UNVERIFIED" ? "历史账号" : row.review_state === "DRAFT" ? "草稿" : "资料待确认" : RENTAL_STATE_LABELS[state]}</span> : <span className="mra-badge" data-tone={row.review_state ? REVIEW_BADGE_TONE[row.review_state] ?? "unknown" : undefined}><span className="mra-badge-dot" aria-hidden="true" />{row.review_state ? stateLabel(row.review_state) : "资料待确认"}</span>}
                   {row.owner_paused && state !== "PAUSED" ? <span className="mra-badge" data-tone="warning"><span className="mra-badge-dot" aria-hidden="true" />已暂停接单</span> : null}
                   {row.staff_restricted && state !== "RESTRICTED" ? <span className="mra-badge" data-tone="warning"><span className="mra-badge-dot" aria-hidden="true" />账号受限</span> : null}
                   {state === "LISTED" && row.available === false ? <span className="mra-badge" data-tone="warning"><span className="mra-badge-dot" aria-hidden="true" />暂不可接单</span> : null}

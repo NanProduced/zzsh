@@ -79,7 +79,7 @@ export function FinanceOverviewView({ tab, snapshot, refreshNonce, onOpenPath, o
       </div>
     </header>
 
-    {!allowed ? <Alert variant="warning" role="status"><AlertTitle>当前身份没有完整资金读取能力</AlertTitle><AlertDescription>财务总览需要资金读取权限。{snapshot.permissions.includes('finance.document.read') ? <Button variant="link" onClick={() => onOpenPath('/finance/search', '资金查找')}>进入资金查找<ArrowUpRight aria-hidden size={14}/></Button> : null}</AlertDescription></Alert> : error ? <Alert variant="warning" role="status"><CircleAlert aria-hidden/><AlertTitle>财务总览暂不可读取</AlertTitle><AlertDescription>{error instanceof AdminApiError && error.status === 404 ? '当前服务尚未提供财务总览，请等待同版服务就绪。' : friendlyError(error)}</AlertDescription><AlertAction><Button variant="outline" onClick={() => setRetry(value => value + 1)}>重新读取</Button></AlertAction></Alert> : !data ? <div className="finance-loading" role="status" aria-busy="true"><p>正在读取财务指标和账内余额…</p><Skeleton className="h-28 w-full"/><Skeleton className="h-28 w-full"/></div> : <>
+    {!allowed ? <Alert variant="warning" role="status"><AlertTitle>当前身份没有完整资金读取能力</AlertTitle><AlertDescription>财务总览需要资金读取权限。</AlertDescription></Alert> : error ? <Alert variant="warning" role="status"><CircleAlert aria-hidden/><AlertTitle>财务总览暂不可读取</AlertTitle><AlertDescription>{error instanceof AdminApiError && error.status === 404 ? '当前服务尚未提供财务总览，请等待同版服务就绪。' : friendlyError(error)}</AlertDescription><AlertAction><Button variant="outline" onClick={() => setRetry(value => value + 1)}>重新读取</Button></AlertAction></Alert> : !data ? <div className="finance-loading" role="status" aria-busy="true"><p>正在读取财务指标和账内余额…</p><Skeleton className="h-28 w-full"/><Skeleton className="h-28 w-full"/></div> : <>
       <div className="finance-dashboard-subbar">
         <span>{ranges[range]} · {financeTime(data.period.from)} 至 {financeTime(data.period.to)}（北京时间）</span>
         <span>数据截止 {financeTime(data.asOf)}</span>
@@ -127,9 +127,9 @@ export function FinanceOverviewView({ tab, snapshot, refreshNonce, onOpenPath, o
       <section className="finance-overview-section" aria-labelledby="finance-lookup-title">
         <div className="finance-section-heading"><h2 id="finance-lookup-title">业务单据与对账</h2></div>
         <div className="finance-page-actions">
-          <Button variant="outline" onClick={() => open('/finance/search?kind=PAYMENT', '付款记录')}>付款记录<ArrowUpRight aria-hidden size={14}/></Button>
-          <Button variant="outline" onClick={() => open('/finance/search?kind=REFUND', '退款单据')}>退款单据<ArrowUpRight aria-hidden size={14}/></Button>
-          <Button variant="outline" onClick={() => open('/finance/search?kind=WITHDRAWAL', '提现单据')}>提现单据<ArrowUpRight aria-hidden size={14}/></Button>
+          <Button variant="outline" onClick={() => open('/finance/records?kind=PAYMENT', '收款记录')}>收款记录<ArrowUpRight aria-hidden size={14}/></Button>
+          <Button variant="outline" onClick={() => open('/finance/records?kind=REFUND', '退款记录')}>退款记录<ArrowUpRight aria-hidden size={14}/></Button>
+          <Button variant="outline" onClick={() => open('/finance/records?kind=WITHDRAWAL', '提现记录')}>提现记录<ArrowUpRight aria-hidden size={14}/></Button>
           <Button variant="outline" onClick={() => open('/finance/channels', '汇聚对账')}>汇聚对账<ArrowUpRight aria-hidden size={14}/></Button>
         </div>
         <p className="finance-secondary">退款与提现的状态和金额按单据核对。汇聚渠道结果和银行到账各自取证。</p>

@@ -1,5 +1,6 @@
 import {createHash,randomBytes} from 'node:crypto';import type {PoolClient} from 'pg';import {canonicalize} from '../supply/content-hash';import {invalid,conflict} from '../supply/supply-util';import {recordAudit,SecurityApiError} from '../auth/security-core';import {ConfigurationError} from '../config/config';import {assertRegisteredLocalNativeDistributionReadScope,readDistributionPolicyRowInTransaction,readInvitationPolicyInTransaction,readRegistrationDistributionPolicyInTransaction,type LocalDistributionScope} from './distribution-policy-store';
 import {readDistributionParentInTransaction} from './invitation-store';
+import {resolveCurrentInviteCode} from './distribution-invite-code';
 const sha=(s:string)=>createHash('sha256').update(s).digest('hex');
 export type LocalNativeDistributionRegistrationScope=Readonly<{kind:'LOCAL_NATIVE_DISTRIBUTION_REGISTRATION'}>;
 const registrationProofs=new WeakMap<LocalNativeDistributionRegistrationScope,LocalDistributionScope>();
@@ -35,7 +36,7 @@ export async function initializeNewDistributionRegistration(c:PoolClient,input:{
   if(policy.knowledge!=='KNOWN')throw new SecurityApiError(503,'EVIDENCE_UNAVAILABLE','Native registration policy is not configured');
  }else policy=await readRegistrationDistributionPolicyInTransaction(c,binding);
  const defaultLevel=policy.policy?.config.levels.find(l=>l.default),eligible=policy.knowledge==='KNOWN'?(policy.policy.config.schema==='distribution-policy.v2'||policy.policy.config.enabled?'ELIGIBLE':'INELIGIBLE'):'UNKNOWN';
- let inviter:any=null;if(input.inviteCode)inviter=(await c.query('SELECT * FROM zzsh_order.distribution_invite_code WHERE match_code=$1',[input.inviteCode.toUpperCase()])).rows[0];
+ let inviter:any=null;if(input.inviteCode)inviter=await resolveCurrentInviteCode(c,input.inviteCode);
  if(inviter?.user_id&&inviter.user_id!==input.userId)await c.query('SELECT id FROM zzsh_auth_user."user" WHERE id=$1 FOR UPDATE',[inviter.user_id]);
  const parentFacts=inviter?.user_id?await readDistributionParentInTransaction(c,inviter.user_id):null,parent=parentFacts?.parent;
  const mappedInviter=Boolean(inviter?.user_id&&inviter.user_id!==input.userId),unknownInput=Boolean(input.inviteCode&&!mappedInviter),sourceRef='registration:'+input.userId,sourceDigest=sha(canonicalize({sourceRef,policyVersion:policy.policy?.versionId??null,inviteCodeId:inviter?.id??null}));

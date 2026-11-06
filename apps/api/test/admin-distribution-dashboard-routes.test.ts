@@ -44,7 +44,9 @@ function environment(patch: {
     }
     if (sql.includes("clock_timestamp()::text AS at")) return rows([{ at: "2026-11-02T03:00:00.000000Z" }]);
     if (sql.includes("WITH rows AS")) { if (patch.revokeAfterRead) state.permissions = []; return rows(state.earnings); }
+    if (sql.includes('SELECT id,source,settled_at FROM dashboard_records')) return rows(state.earnings.map(row=>({id:row.id,source:row.source,settled_at:row.settled_at})));
     if (sql.includes("/* original distribution qualifications */")) return rows();
+    if (sql.includes("contributor_records AS MATERIALIZED")) return rows();
     if (sql.includes("FROM dashboard_records WHERE beneficiary_id=ANY")) return rows();
     if (sql.includes("FROM zzsh_order.distribution_participant p")) return rows(state.participants);
     if (sql.includes("WHERE r.child_user_id=$1")) return rows([{ type: "DISTRIBUTION_LEADER", parent_user_id: "parent-1", name: "上级", source_type: "NATIVE", policy_version_id: "policy-1" }]);
@@ -92,10 +94,24 @@ const participant = (total: number) => ({
 test("dashboard routes reject unsupported methods, missing page tokens and unauthenticated reads", async () => {
   const env = environment({ isBoss: true });
   assert.equal((await invoke(env, "POST", "/overview")).status, 404);
+  assert.equal((await invoke(env, "GET", "/overview?section=BAD")).status, 400);
+  assert.equal((await invoke(env, "GET", "/earnings?section=CORE")).status, 400);
+  assert.equal((await invoke(env, "GET", "/overview?section=CORE&section=INVITE_RANKING")).status, 400);
+  assert.equal((await invoke(env, "GET", "/overview?projection=DISPLAY")).status, 400);
+  assert.equal((await invoke(env, "GET", "/participants?projection=DISPLAY&projection=DISPLAY")).status, 400);
   assert.equal((await invoke(env, "GET", "/earnings?page=2")).status, 400);
   assert.equal((await invoke(env, "GET", "/earnings?page=2")).json.error.code, "INVALID_ARGUMENT");
   const anonymous = environment({ authenticated: false });
   assert.equal((await invoke(anonymous, "GET", "/overview")).status, 401);
+});
+
+test('display projection has its own signed pagination version and does not claim omitted qualification',async()=>{
+ const env=environment({isBoss:true,participants:[participant(5)]});
+ const first=await invoke(env,'GET','/participants?pageSize=2&projection=DISPLAY');assert.equal(first.status,200);
+ assert.equal(first.json.items[0].legacyQualificationKnowledge,'NOT_LOADED');
+ assert.equal(env.state.calls.some(call=>call.sql.includes('original distribution qualifications')),false);
+ const next=await invoke(env,'GET',`/participants?page=2&pageSize=2&projection=DISPLAY&snapshot=${encodeURIComponent(first.json.snapshot)}`);assert.equal(next.status,200);
+ const crossProjection=await invoke(env,'GET',`/participants?page=2&pageSize=2&snapshot=${encodeURIComponent(first.json.snapshot)}`);assert.equal(crossProjection.status,409);
 });
 
 test("non-Boss dashboard reads need the dedicated permission and selected-game scope cannot open the global network", async () => {
@@ -135,21 +151,27 @@ test("Boss earnings and participant pagination bind snapshot, exact offsets and 
   assert.equal(participants.status, 200);
   assert.equal(participants.json.total, "5");
   assert.ok(participants.json.snapshot);
-  const participantPage = env.state.calls.filter(call => call.sql.includes("ORDER BY p.user_id LIMIT")).at(-1)!;
+  const participantPage = env.state.calls.filter(call => call.sql.includes("ORDER BY COALESCE(a.record_count,0) DESC")).at(-1)!;
   assert.deepEqual(participantPage.values.slice(-2), [2, 0]);
 
   const next = await invoke(env, "GET", `/participants?page=2&pageSize=2&snapshot=${encodeURIComponent(participants.json.snapshot)}`);
   assert.equal(next.status, 200);
-  const nextPage = env.state.calls.filter(call => call.sql.includes("ORDER BY p.user_id LIMIT")).at(-1)!;
+  const nextPage = env.state.calls.filter(call => call.sql.includes("ORDER BY COALESCE(a.record_count,0) DESC")).at(-1)!;
   assert.deepEqual(nextPage.values.slice(-2), [2, 2]);
 
   const detail = await invoke(env, "GET", "/participants/user-1");
   assert.equal(detail.status, 200);
   assert.equal(detail.json.participant.userId, "user-1");
   assert.equal(detail.json.relations[0].parentName, "上级");
-  const exact = env.state.calls.filter(call => call.sql.includes("ORDER BY p.user_id LIMIT")).at(-1)!;
-  assert.equal(exact.values[0], "user-1");
+  const exact = env.state.calls.filter(call => call.sql.includes("ORDER BY COALESCE(a.record_count,0) DESC")).at(-1)!;
+  assert.ok(exact.values.includes("user-1"));
   assert.deepEqual(exact.values.slice(-2), [20, 0]);
+  assert.match(exact.sql, /participant_amounts/);
+  const sorted = await invoke(env, "GET", "/participants?sort=settledCents&order=asc&pageSize=2");
+  assert.equal(sorted.status, 200);
+  const settledSort = env.state.calls.filter(call => call.sql.includes("ORDER BY COALESCE(a.settled_cents,0) ASC")).at(-1)!;
+  assert.ok(settledSort);
+  assert.deepEqual(settledSort.values.slice(-2), [2, 0]);
 });
 
 test("participant edits invalidate a previously signed page even when participant count is unchanged", async () => {
@@ -159,6 +181,14 @@ test("participant edits invalidate a previously signed page even when participan
   env.state.participantRevision = "2";
   const next = await invoke(env, "GET", `/participants?page=2&pageSize=2&snapshot=${encodeURIComponent(first.json.snapshot)}`);
   assert.equal(next.status, 409);
+});
+
+test('earnings source changes invalidate a signed next page after timestamp enrichment',async()=>{
+ const env=environment({isBoss:true,earnings:[earning(41)]});
+ const first=await invoke(env,'GET','/earnings?pageSize=20');assert.equal(first.status,200);assert.ok(first.json.snapshot);
+ env.state.participantRevision='2';
+ const next=await invoke(env,'GET',`/earnings?page=2&pageSize=20&snapshot=${encodeURIComponent(first.json.snapshot)}`);
+ assert.equal(next.status,409);assert.equal(next.json.items,undefined);
 });
 
 test("permission removal during a read rejects the response before exposing its already loaded rows", async () => {

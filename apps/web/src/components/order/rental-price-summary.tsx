@@ -1,9 +1,9 @@
 import { useEffect, useRef } from "react";
 import Image from "next/image";
-import { CircleHelp, Coins, Gift, Info, Package, ShieldCheck } from "lucide-react";
+import { CircleHelp, Coins, Info, Package, ShieldCheck } from "lucide-react";
 import type { PersonalRentalQuote, RentalPricePreview, OrderLine } from "@/lib/order-client";
 import type { ResourceLine } from "@/lib/listing-view";
-import { moneyText, personalMembershipLabel, personalBenefitSources } from "@/lib/order-display";
+import { moneyText, personalMembershipLabel, depositReductionCents, matchingResourceDiscount, membershipBenefitPresentation } from "@/lib/order-display";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { ManagedNoticeText } from "@/components/content/managed-notice";
 
@@ -20,7 +20,7 @@ export type ReferenceFees = {
 };
 
 /** Strictly narrowed metadata allowed to be borrowed from reference. No quantities, no costs! */
-export type RefLineMeta = Pick<ResourceLine, "itemId" | "code" | "name" | "unitLabel">;
+export type RefLineMeta = Pick<ResourceLine, "itemId" | "code" | "name" | "unitLabel" | "unitPriceLabel">;
 
 /** Display sums of the API's rounded buyer lines, never a price calculation. */
 export function personalFeeLines(quote: PriceQuote): { haff: string; items: string } | null {
@@ -63,7 +63,8 @@ export function formatAuthoritativeRatio(raw: string | null | undefined, referen
   const trimmed = raw.trim();
   if (!trimmed || !/^\d+(?:\.\d+)?$/.test(trimmed)) return null;
   const clean = cleanDecimal(trimmed);
-  return `${referenceOnly ? "基础 " : ""}${clean}万/元`;
+  void referenceOnly;
+  return `${clean}万/元`;
 }
 
 function unitPriceText(line: { code?: string | null; unitPriceLabel?: string | null }): string {
@@ -185,6 +186,12 @@ function formatPublicRow(line: ResourceLine, authoritativeRatio?: string | null,
   };
 }
 
+function catalogUnitFitsPersonal(catalogUnit: string | null, unitLabel: string | null, code: string | null): boolean {
+  if (!catalogUnit || catalogUnit === "未确认") return false;
+  if (code === "df_billable_level6_bullet" && catalogUnit.endsWith(" / 组")) return true;
+  return Boolean(unitLabel && catalogUnit.endsWith(` / ${unitLabel}`));
+}
+
 function formatPersonalRow(line: OrderLine, refLine?: RefLineMeta, authoritativeRatio?: string | null, referenceOnly = false): FormattedBillRow {
   const code = refLine?.code ?? null;
   const name = line.name || refLine?.name || "资源项目";
@@ -204,7 +211,13 @@ function formatPersonalRow(line: OrderLine, refLine?: RefLineMeta, authoritative
   const isZeroQuantity = line.quantity === "0";
   const amount = line.buyerAmount ? moneyText(line.buyerAmount) : "未提供";
 
-  const pStr = formatPersonalUnitPrice(line.buyerUnitAmount, line.unitQuantity, unitLabel, code);
+  const catalogUnitRaw = !isHaff && refLine?.unitPriceLabel
+    ? unitPriceText({ code, unitPriceLabel: refLine.unitPriceLabel })
+    : null;
+  const catalogUnit = catalogUnitFitsPersonal(catalogUnitRaw, unitLabel, code) ? catalogUnitRaw : null;
+  const personalUnit = formatPersonalUnitPrice(line.buyerUnitAmount, line.unitQuantity, unitLabel, code);
+  const pStr = catalogUnit ?? personalUnit;
+
 
   let spec = "未提供";
   let ratioTag: string | null = null;
@@ -241,7 +254,7 @@ function formatPersonalRow(line: OrderLine, refLine?: RefLineMeta, authoritative
     } else if (!pStr) {
       spec = `${qtyStr} · 单价未提供`;
     } else {
-      spec = `${qtyStr} · ${pStr}`;
+      spec = `${qtyStr} · ${catalogUnit ? "参考单价 " : ""}${pStr}`;
     }
   }
 
@@ -271,6 +284,54 @@ function computeSuppliesSubtotal(supplyRows: FormattedBillRow[]): string | null 
   return `¥${totalCents / 100n}.${String(totalCents % 100n).padStart(2, "0")}`;
 }
 
+function depositRowClass(hasDepositReduction: boolean, waived: boolean): string {
+  return ["rental-deposit", hasDepositReduction ? "rental-deposit--reduced" : null, waived ? "rental-deposit--waived" : null]
+    .filter(Boolean)
+    .join(" ");
+}
+
+function BenefitCharge({
+  original,
+  final,
+  reduction,
+  originalAriaLabel,
+  showWaiverLabel = false,
+}: {
+  original: string;
+  final: string;
+  reduction: bigint | null;
+  originalAriaLabel: string;
+  showWaiverLabel?: boolean;
+}) {
+  return (
+    <>
+      {reduction !== null && original !== "—" ? (
+        <del aria-label={originalAriaLabel}>{original}</del>
+      ) : null}
+      <span>{final}</span>
+      {showWaiverLabel ? <span className="rental-waiver-label">本次免押</span> : null}
+    </>
+  );
+}
+
+export function MembershipBenefitsCard({
+  presentation,
+}: {
+  presentation: { title: string | null; chips: string[] } | null;
+}) {
+  if (!presentation) return null;
+  return (
+    <div className="account-quote-benefits">
+      {presentation.title ? <strong>{presentation.title}</strong> : null}
+      <ul className="account-quote-benefit-chips">
+        {presentation.chips.map((chip) => (
+          <li key={chip}>{chip}</li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
 export function RentalPriceSummary({
   reference,
   quote,
@@ -296,8 +357,16 @@ export function RentalPriceSummary({
   }, []);
   const fees = quote ? personalFeeLines(quote) : reference;
   const deposit = quote ? moneyText(quote.quote.tenantDeposit) : "另行核对";
-  const waived = Boolean((quote as PersonalRentalQuote)?.depositWaived && deposit === "¥0.00");
   const baseDeposit = quote ? moneyText(quote.baseTenantDeposit) : "—";
+  const depositReduction = quote ? depositReductionCents(quote.baseTenantDeposit, quote.quote.tenantDeposit ?? null) : null;
+  const hasDepositReduction = depositReduction !== null;
+  const waived = deposit === "¥0.00" && (hasDepositReduction || Boolean((quote as PersonalRentalQuote)?.depositWaived));
+  const resourceDiscount = quote
+    ? matchingResourceDiscount(quote.quote.lines, quote.quote.resourceTotal, reference.lines)
+    : null;
+  const benefitCard = quote
+    ? membershipBenefitPresentation(quote, resourceDiscount, depositReduction, waived)
+    : null;
   const tier = quote ? personalMembershipLabel(quote) : null;
   const total = quote ? moneyText(quote.quote.tenantPayableTotal) : pendingLabel ? "—" : reference.total;
   const note = quote
@@ -337,6 +406,7 @@ export function RentalPriceSummary({
               code: l.code,
               name: l.name,
               unitLabel: l.unitLabel,
+              unitPriceLabel: l.unitPriceLabel,
             });
           }
         }
@@ -366,20 +436,6 @@ export function RentalPriceSummary({
   const visibleSupplies = supplyRows.filter((row) => !row.isZero);
   // Keep incomplete or inconsistent charges visible as a notice when zero stock is omitted.
   const hiddenSupplyIssue = supplyRows.some((row) => row.isZero && (row.isUnknown || !/^¥0(?:\.0+)?$/.test(row.amount)));
-  const benefitSources = quote ? personalBenefitSources(quote) : null;
-  const depositCents = (value: PriceQuote["baseTenantDeposit"]): bigint | null =>
-    value?.unit === "yuan" && value.scale === 2 && moneyText(value) !== "—"
-      ? BigInt(value.amount.replace(".", "")) : null;
-  const baseCents = quote ? depositCents(quote.baseTenantDeposit) : null;
-  const actualCents = quote ? depositCents(quote.quote.tenantDeposit ?? null) : null;
-  const hasDepositReduction = baseCents !== null && actualCents !== null && baseCents > actualCents;
-  // A tier or selected policy identifies the price source, not a monetary saving.
-  const hasAppliedBenefitSource = Boolean(
-    (quote?.membershipBenefits?.effectiveTier && quote.membershipBenefits.effectiveTier !== "STANDARD") ||
-    (quote && "customerTier" in quote && quote.customerTier && quote.customerTier !== "STANDARD") ||
-    (quote?.membershipBenefits?.priceSource && quote.membershipBenefits.priceSource !== "GROWTH") ||
-    (quote?.membershipBenefits?.depositSource && quote.membershipBenefits.depositSource !== "GROWTH")
-  );
 
   return (
     <div ref={summaryRef} className="rental-price-summary" data-personal={Boolean(quote)}>
@@ -469,11 +525,23 @@ export function RentalPriceSummary({
             </div>
           ) : null}
 
-          {benefitSources && (hasAppliedBenefitSource || hasDepositReduction) ? (
-            <div className="account-quote-benefits" data-savings={hasDepositReduction}>
-              {hasDepositReduction ? <Gift size={18} aria-hidden="true" /> : null}
-              <div><strong>{hasDepositReduction ? "本次押金减免" : "本次计价来源"}</strong><p>{benefitSources}</p></div>
-            </div>
+          {<MembershipBenefitsCard presentation={benefitCard} />}
+          {resourceDiscount ? (
+            <dl className="account-fee-lines account-quote-rent-benefit" data-kind="rent">
+              <div className="rental-deposit rental-deposit--reduced">
+                <dt>
+                  <span>资源费用</span>
+                </dt>
+                <dd>
+                  <BenefitCharge
+                    original={resourceDiscount.original}
+                    final={resourceDiscount.final}
+                    reduction={resourceDiscount.reduction}
+                    originalAriaLabel={`原资源费用 ${resourceDiscount.original}`}
+                  />
+                </dd>
+              </div>
+            </dl>
           ) : null}
 
           {billRows.length === 0 ? (
@@ -487,15 +555,17 @@ export function RentalPriceSummary({
               {waived ? <span className="rental-waiver-label">本次免押</span> : null}
             </div>
             <dl className="account-fee-lines">
-              <div className={waived ? "rental-deposit rental-deposit--waived" : "rental-deposit"}>
+              <div className={depositRowClass(hasDepositReduction, waived)}>
                 <dt>
                   <span>租客押金</span>
                 </dt>
                 <dd>
-                  {waived && baseDeposit !== "—" && baseDeposit !== "¥0.00" ? (
-                    <del aria-label={`原租客押金 ${baseDeposit}`}>{baseDeposit}</del>
-                  ) : null}
-                  <span>{deposit}</span>
+                  <BenefitCharge
+                    original={baseDeposit}
+                    final={deposit}
+                    reduction={depositReduction}
+                    originalAriaLabel={`原租客押金 ${baseDeposit}`}
+                  />
                 </dd>
               </div>
             </dl>
@@ -520,16 +590,34 @@ export function RentalPriceSummary({
             </dt>
             <dd>{fees?.items ?? "待确认"}</dd>
           </div>
-          <div className={waived ? "rental-deposit rental-deposit--waived" : "rental-deposit"}>
+          {<MembershipBenefitsCard presentation={benefitCard} />}
+          {resourceDiscount ? (
+            <div className="rental-deposit rental-deposit--reduced" data-kind="rent">
+              <dt>
+                <Coins size={16} aria-hidden="true" />资源费用
+              </dt>
+              <dd>
+                <BenefitCharge
+                  original={resourceDiscount.original}
+                  final={resourceDiscount.final}
+                  reduction={resourceDiscount.reduction}
+                  originalAriaLabel={`原资源费用 ${resourceDiscount.original}`}
+                />
+              </dd>
+            </div>
+          ) : null}
+          <div className={depositRowClass(hasDepositReduction, waived)}>
             <dt>
               <ShieldCheck size={16} aria-hidden="true" />租客押金
             </dt>
             <dd>
-              {waived && baseDeposit !== "—" && baseDeposit !== "¥0.00" ? (
-                <del aria-label={`原租客押金 ${baseDeposit}`}>{baseDeposit}</del>
-              ) : null}
-              <span>{deposit}</span>
-              {waived ? <span className="rental-waiver-label">本次免押</span> : null}
+              <BenefitCharge
+                original={baseDeposit}
+                final={deposit}
+                reduction={depositReduction}
+                originalAriaLabel={`原租客押金 ${baseDeposit}`}
+                showWaiverLabel={waived}
+              />
             </dd>
           </div>
         </dl>

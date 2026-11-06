@@ -328,7 +328,7 @@ test('v1 disabled registration retains its old INELIGIBLE lifecycle before the v
 function lifecyclePool(){const calls:Array<{sql:string;values:any[]}>=[];const c:any={release(){},query:async(sql:string,values:any[]=[])=>{calls.push({sql,values});
  if(sql.includes('to_regclass'))return{rows:[{complete:true}]};
  if(sql.startsWith('SELECT * FROM zzsh_order.distribution_participant'))return{rows:[{user_id:'child',eligibility:'ELIGIBLE',commission_frozen:false,level_code:'BASE',leader_knowledge:'KNOWN_NONE',inviter_knowledge:'KNOWN_NONE',revision:'1'}]};
- if(sql.startsWith('SELECT display_code'))return{rows:[{display_code:'OWN',source_type:'NATIVE_REGISTRATION'}]};
+ if(sql.startsWith('SELECT id,display_code'))return{rows:[{id:'own_code',display_code:'OWN',source_type:'NATIVE_REGISTRATION'}]};
  if(sql.startsWith('SELECT * FROM zzsh_order.distribution_invite_code'))return{rows:[{id:'code',display_code:'CODE',user_id:'parent',source_type:'NATIVE_REGISTRATION'}]};
  if(sql.startsWith('SELECT id FROM zzsh_auth_user'))return{rows:[{id:'child'},{id:'parent'}]};
  if(sql.startsWith('SELECT p.*,u.suspended'))return{rows:[{user_id:'parent',eligibility:'ELIGIBLE',commission_frozen:false,suspended:false,account_status:'ACTIVE'}]};

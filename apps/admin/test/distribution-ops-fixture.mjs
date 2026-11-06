@@ -8,7 +8,7 @@ export const known={knowledge:'KNOWN',policy:{versionId:'policy_1',revision:'3',
 export const context={schema:'distribution-policy-change-context.v1',state:'EMPTY',request:null,contractReady:true,writeAssemblyReady:true,reasonCodes:[]};
 export const flat={...known,policy:{...known.policy,config:{...config,schema:'distribution-policy.v2',rateMode:'UNIFORM',levels:[],renterPercent:'3',ownerPercent:'2'}},semanticsVersion:'distribution-policy.lifecycle.v2',changeContext:context};
 export const operations={operations:[{operationCode:'distribution.policy.publish',businessType:'distribution',title:'调整分销政策',executionMode:'GENERIC_TRANSACTION',testOnly:false,initiation:{allowed:true,reasonCode:'ALLOWED',requiredPermission:'personal.distribution.policy.manage'},triggers:[{triggerCondition:'distribution.policy.publish.requested',templateVersion:1}]}]};
-export const snap=(permissions=[],who='ops_1',session='session_1',boss=false)=>({authenticated:true,adminUserId:who,session:{id:session,locked:false,pinConfigured:true,createdAt:null,expiresAt:null},security:{isBoss:boss,status:'ACTIVE'},permissions,permissionCodes:permissions});
+export const snap=(permissions=[],who='ops_1',session='session_1',boss=false)=>({authenticated:true,adminUserId:who,session:{id:session,locked:false,pinConfigured:true,createdAt:null,expiresAt:null},security:{isBoss:boss,status:'ACTIVE'},gameScope:{mode:'ALL_GAMES',gameIds:[]},permissions,permissionCodes:permissions});
 export const json=(v,status=200)=>new Response(JSON.stringify(v),{status,headers:{'content-type':'application/json'}});
 export const settle=()=>act(async()=>{await new Promise(r=>setTimeout(r,12));});
 export async function setup(){

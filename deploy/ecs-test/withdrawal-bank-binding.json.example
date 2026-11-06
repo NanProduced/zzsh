@@ -1,0 +1,9 @@
+{
+  "database": "zzsh_ecs_test",
+  "runtimeUser": "zzsh_ecs_runtime",
+  "writeEnabled": true,
+  "currentKeyVersion": "test-v1",
+  "keyVariables": {
+    "test-v1": "WITHDRAWAL_BANK_KEY_TEST_V1"
+  }
+}

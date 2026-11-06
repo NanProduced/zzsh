@@ -968,10 +968,39 @@ html[data-theme="dark"] .account-penalty-tag {
   border-radius: 8px;
   background: var(--color-bg-card);
 }
+.account-skin-card-media-wrap {
+  position: relative;
+  min-width: 0;
+}
 .account-skin-card-quality {
-  font-size: 12px;
-  line-height: 18px;
-  color: var(--color-text-muted);
+  position: absolute;
+  top: 6px;
+  left: 6px;
+  z-index: 2;
+  pointer-events: none;
+  max-width: calc(100% - 12px);
+}
+.account-skin-card-quality.skin-metadata--tags {
+  flex-wrap: nowrap;
+  gap: 4px;
+}
+.account-skin-card-quality .skin-quality-tag {
+  font-size: 10.5px;
+  line-height: 1.35;
+  padding: 2px 6px;
+  border: 0;
+  border-radius: 4px;
+  white-space: nowrap;
+  box-shadow: 0 1px 2px rgb(0 0 0 / .18);
+}
+.account-skin-card-name {
+  display: block;
+  min-width: 0;
+  color: var(--color-text-primary);
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
 }
 .account-skin-card-media {
   display: grid;
@@ -1014,12 +1043,6 @@ html[data-theme="dark"] .account-penalty-tag {
 .account-skin-card-media-btn:focus-visible {
   outline: 2px solid var(--color-focus-ring);
   outline-offset: 2px;
-}
-.account-skin-card > strong {
-  color: var(--color-text-primary);
-  font-size: 13px;
-  line-height: 1.5;
-  overflow-wrap: anywhere;
 }
 .account-entitlement-list {
   display: grid;
@@ -1298,8 +1321,9 @@ html[data-theme="dark"] .account-price-help {
 }
 .account-quote-benefits {
   display: flex;
-  align-items: start;
-  gap: 9px;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
   padding: 12px;
   margin: 12px 0 0;
   background: var(--quote-total-bg);
@@ -1309,6 +1333,24 @@ html[data-theme="dark"] .account-price-help {
 .account-quote-benefits > svg { flex: none; margin-top: 2px; }
 .account-quote-benefits strong { font-size: 13px; font-weight: 600; }
 .account-quote-benefits p { margin: 4px 0 0; font-size: 12px; line-height: 1.6; }
+.account-quote-benefit-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.account-quote-benefit-chips li {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 10px;
+  border-radius: 999px;
+  background: var(--color-gold-badge);
+  color: var(--quote-warm);
+  font-size: 12px;
+  font-weight: 600;
+}
 .account-quote-content .account-fee-lines {
   display: grid;
   margin: 0;
@@ -1339,11 +1381,17 @@ html[data-theme="dark"] .account-price-help {
   font-weight: 600;
   font-variant-numeric: tabular-nums;
 }
-.rental-deposit--waived del {
+.rental-deposit del {
   color: var(--quote-secondary);
   font-size: 12px;
   font-weight: 400;
   text-decoration-thickness: 1px;
+}
+.rental-benefit-label,
+.rental-deposit-savings {
+  color: var(--quote-warm);
+  font-size: 12px;
+  font-weight: 600;
 }
 .rental-waiver-label {
   padding: 2px 6px;

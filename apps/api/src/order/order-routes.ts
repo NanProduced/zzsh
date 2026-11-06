@@ -18,6 +18,7 @@ import { assertGameScopeUsable, gameScopeSignature, readAdminGameScope } from ".
 import { readAdminContext, assertAdminContextInTransaction, type AuthSecurityOptions } from "../auth/auth-security";
 import { readUserContext } from "../auth/user-identity";
 import { readPersonalNativeRefunds } from "../finance/personal-refund-read";
+import { readOwnerRefundMinimalSummary } from "../finance/owner-refund-summary-read";
 import { withTransaction, SecurityApiError } from "../auth/security-core";
 import { ensureApiV1RequestId, API_V1_ERROR_CODES } from "../contracts/api-v1";
 import { humanText } from "../supply/content-hash";
@@ -298,7 +299,13 @@ export async function handleOrderUserRoute(
       const context = await readUserContext(request, options), orderId = decodeId(refundMatch[1]!);
       const data = await withTransaction(options.pool, async client => {
         await client.query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY");
-        return readPersonalNativeRefunds(client, context, { orderId },options.localFinancialSandbox);
+        const party = (await client.query<{ renter: string; owner: string }>(
+          `SELECT renter_user_id AS renter, owner_user_id AS owner FROM zzsh_order.rental_order WHERE id=$1`,
+          [orderId],
+        )).rows[0];
+        if (!party) throw notFound();
+        if (party.owner === context.userId) return readOwnerRefundMinimalSummary(client, context, { orderId });
+        return readPersonalNativeRefunds(client, context, { orderId }, options.localFinancialSandbox);
       });
       sendJson(response, 200, data, requestId); return;
     }

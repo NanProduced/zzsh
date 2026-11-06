@@ -60,6 +60,7 @@ function probe(patch: { identity?: Record<string, unknown>; shape?: Record<strin
       if (text.includes('AS "ownsBusinessSchema"')) return result([{ ownsBusinessSchema: patch.unsafe === 'ownsBusinessSchema',
         ownsBusinessRelation: false, hasPrivilegedMembership: false }]);
       if (text.startsWith("SELECT to_regclass('zzsh_order.distribution_policy_version')")) return result([{ complete: true }]);
+      if (text.startsWith("SELECT to_regprocedure('zzsh_order.distribution_management_contract_version()')")) return result([{ready:false}]);
       if (text.startsWith("SELECT to_regclass('zzsh_iam.approval_request')")) return result([{ requests_ready: false, contract_ready: false }]);
       if (text.startsWith('SELECT v.* FROM zzsh_order.distribution_policy_head')) {
         policyScopes.push(values[0]); return result([{ id: 'fixture_native_policy', revision: '1', canonical_config: canonical,
@@ -67,7 +68,7 @@ function probe(patch: { identity?: Record<string, unknown>; shape?: Record<strin
       }
       if (text.startsWith('SELECT * FROM zzsh_order.distribution_participant')) return result([{ user_id: patch.ownerUser ?? actor.userId,
         eligibility: 'ELIGIBLE', level_code: null, revision: '1', leader_knowledge: 'KNOWN_NONE', inviter_knowledge: 'KNOWN_NONE' }]);
-      if (text.startsWith('SELECT display_code')) return result([{ display_code: 'FIXTURE', source_type: 'LEGACY_MYSQL' }]);
+      if (text.startsWith('SELECT id,display_code')) return result([{ id:'fixture_code',display_code: 'FIXTURE', source_type: 'LEGACY_MYSQL' }]);
       if (text.startsWith('SELECT * FROM zzsh_order.invitation_relation')) return result();
       if (text.startsWith('SELECT to_regclass')) return result([{ complete: true }]);
       throw new Error('Unexpected synthetic SQL: ' + text);

@@ -33,7 +33,6 @@ export type WorkspaceRouteKind =
   | "distribution-earnings"
   | "distribution-participants"
   | "distribution-participant"
-  | "distribution-relations"
   | "distribution-policy"
   | "account"
   | "settings"
@@ -60,6 +59,11 @@ export type WorkspaceRouteKind =
   | "order-object"
   | "resource-object"
   | "finance-lookup"
+  | "finance-records"
+  | "finance-record-history"
+  | "finance-balances"
+  | "finance-balance-history"
+  | "finance-balance-opening"
   | "finance-overview"
   | "finance-channels"
   | "finance-period"
@@ -124,7 +128,6 @@ const LIST_TABS: Record<string, Omit<WorkspaceTab, "query">> = {
   "distribution-overview": { id: "distribution-overview", title: "分销概览", path: "/distribution", closable: true, kind: "distribution-overview" },
   "distribution-earnings": { id: "distribution-earnings", title: "佣金明细", path: "/distribution/earnings", closable: true, kind: "distribution-earnings" },
   "distribution-participants": { id: "distribution-participants", title: "分销商", path: "/distribution/participants", closable: true, kind: "distribution-participants" },
-  "distribution-relations": { id: "distribution-relations", title: "关系查询", path: "/distribution/relations", closable: true, kind: "distribution-relations" },
   "distribution-policy": { id: "distribution-policy", title: "分销政策", path: "/distribution/policy", closable: true, kind: "distribution-policy" },
   account: { id: "account", title: "账号安全", path: "/account", closable: true, kind: "account" },
   settings: { id: "settings", title: "设置", path: "/settings", closable: true, kind: "settings" },
@@ -163,8 +166,8 @@ export function sanitizeFinanceReturn(value: string | undefined): string | undef
   try {
     const url = new URL(value, 'https://workspace.invalid');
     const route=parseWorkspacePath(url.pathname);
-    if (url.origin !== 'https://workspace.invalid' || url.searchParams.has('financeReturn') || !['finance-overview','finance-lookup','finance-channels','finance-period','finance-document','finance-user','order-object','orders','user-object','users'].includes(route.kind) || route.objectId&&findPhoneClue(route.objectId)) return undefined;
-    const allowed = new Set(['range','scope','from','to','period','bucket','kind','state','q','page','pageSize','size','section','role','status','publication','sort','fromUserId','fromUserSection','fromUserRole','fromUserStatus','fromOrderId','entry','draft','financeFrom','financeTo']);
+    if (url.origin !== 'https://workspace.invalid' || url.searchParams.has('financeReturn') || !['finance-overview','finance-lookup','finance-records','finance-record-history','finance-balances','finance-balance-history','finance-balance-opening','finance-channels','finance-period','finance-document','finance-user','order-object','orders','user-object','users'].includes(route.kind) || route.objectId&&findPhoneClue(route.objectId)) return undefined;
+    const allowed = new Set(['range','scope','from','to','period','bucket','kind','state','source','q','page','pageSize','size','section','role','status','publication','sort','fromUserId','fromUserSection','fromUserRole','fromUserStatus','fromOrderId','entry','draft','financeFrom','financeTo']);
     const query: Record<string,string> = {};
     for (const [key,item] of url.searchParams) {
       if (findPhoneClue(item) || SENSITIVE_QUERY.test(key) || SENSITIVE_QUERY.test(item)) return undefined;
@@ -197,7 +200,6 @@ export function parseWorkspacePath(pathname: string): { kind: WorkspaceRouteKind
   if (path === "/distribution") return { kind: "distribution-overview", tabId: "distribution-overview", path, title: "分销概览" };
   if (path === "/distribution/earnings") return { kind: "distribution-earnings", tabId: "distribution-earnings", path, title: "佣金明细" };
   if (path === "/distribution/participants") return { kind: "distribution-participants", tabId: "distribution-participants", path, title: "分销商" };
-  if (path === "/distribution/relations") return { kind: "distribution-relations", tabId: "distribution-relations", path, title: "关系查询" };
   if (path === "/distribution/policy" || path === "/distribution-policy") return { kind: "distribution-policy", tabId: "distribution-policy", path: "/distribution/policy", title: "分销政策" };
   const distributionParticipant = path.match(/^\/distribution\/participants\/([^/]+)$/);
   if (distributionParticipant) {
@@ -249,7 +251,11 @@ export function parseWorkspacePath(pathname: string): { kind: WorkspaceRouteKind
     return { kind: "order-object", objectType: "order", objectId, tabId: `order:${objectId}`, path, title: objectId };
   }
   if (path === "/finance") return {kind:"finance-overview",tabId:"finance-overview",path,title:"财务总览"};
-  if (path === "/finance/search") return {kind:"finance-lookup",tabId:"finance-lookup",path,title:"资金查找"};
+  if (path === "/finance/search" || path === "/finance/records") return {kind:"finance-records",tabId:"finance-records",path:"/finance/records",title:"资金记录"};
+  if (path === "/finance/records/history") return {kind:"finance-record-history",tabId:"finance-record-history",path,title:"旧平台资金记录"};
+  if (path === "/finance/balances") return {kind:"finance-balances",tabId:"finance-balances",path,title:"用户余额"};
+  if (path === "/finance/balances/history") return {kind:"finance-balance-history",tabId:"finance-balance-history",path,title:"旧平台余额记录"};
+  if (path === "/finance/balances/opening") return {kind:"finance-balance-opening",tabId:"finance-balance-opening",path,title:"迁移期初"};
   if (path === "/finance/channels") return {kind:"finance-channels",tabId:"finance-channels",path,title:"汇聚对账"};
   if (path === "/finance/period") return {kind:"finance-period",tabId:"finance-period",path,title:"期间核对"};
   const financeObject=/^\/finance\/(documents|users)\/([^/]+)$/.exec(path);
@@ -267,7 +273,15 @@ export function tabFromLocation(pathname: string, search = ""): WorkspaceTab {
     if (query.section === "relations") distributionPath = "/distribution/relations";
     if (["earnings", "relations", "policy"].includes(query.section ?? "")) delete query.section;
   }
-  const parsed = parseWorkspacePath(legacyFinanceQuery ? "/finance/search" : distributionPath);
+  // 关系查询已并入分销商详情：旧链接带 userId 则直达详情，否则回分销商列表。
+  if (distributionPath === "/distribution/relations") {
+    const target = query.userId && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(query.userId) ? query.userId : "";
+    delete query.userId;
+    distributionPath = target ? `/distribution/participants/${encodeURIComponent(target)}` : "/distribution/participants";
+  }
+  let financePath = legacyFinanceQuery ? "/finance/search" : distributionPath;
+  if (['/finance/search','/finance/records','/finance/records/history'].includes(financePath)) { if(query.source==='LEGACY')financePath='/finance/records/history';delete query.source;delete query.operation; }
+  const parsed = parseWorkspacePath(financePath);
   const base = LIST_TABS[parsed.tabId];
   if (base) return { ...base, query };
   return {
@@ -302,14 +316,16 @@ export function canOpenKind(kind: WorkspaceRouteKind, nav: NavPermission): boole
   if (kind === "workbench" || kind === "account" || kind === "settings") return true;
   if (kind === "system-configuration") return nav.isBoss;
   if(kind==="finance-lookup")return has("finance.read")||has("finance.document.read");
+  if(kind==="finance-records"||kind==="finance-record-history")return has("finance.read")||has("finance.document.read");
+  if(kind==="finance-balances"||kind==="finance-balance-history"||kind==="finance-balance-opening")return has("finance.read");
   if(kind==="finance-overview"||kind==="finance-channels")return has("finance.read");
   if(kind==="finance-period"||kind==="finance-user")return has("finance.read");
   if(kind==="finance-document")return has("finance.document.read");
   if (kind === "support" || kind === "support-mine") return has("im.support.read") || nav.isBoss;
   if (kind === "support-management" || kind === "support-overview" || kind === "support-patrol" || kind === "support-settings") return has("im.support.management.read") || nav.isBoss;
-  if (kind === "distribution-overview" || kind === "distribution-earnings" || kind === "distribution-participants" || kind === "distribution-participant") return nav.isBoss || has("distribution.dashboard.read");
-  if (kind === "distribution-relations") return nav.isBoss || has("user.directory.read") && has("personal.distribution.policy.read");
-  if (kind === "distribution-policy") return nav.isBoss || ["personal.distribution.policy.read", "personal.distribution.policy.manage"].some(has);
+  if (kind === "distribution-overview" || kind === "distribution-earnings") return nav.isBoss || has("distribution.dashboard.read");
+  if (kind === "distribution-participants" || kind === "distribution-participant") return nav.isBoss || has("distribution.dashboard.read") || has("distribution.participant.read");
+  if (kind === "distribution-policy") return nav.isBoss || ["personal.distribution.policy.read", "personal.distribution.policy.manage", "distribution.level.manage"].some(has);
   if (kind === "membership-growth") return nav.isBoss || ["membership.policy.draft", "membership.policy.publish", "membership.growth.read.summary"].some(has) || has("approval.request.create") && has("membership.entitlement.request");
   if (kind === "admins" || kind === "admin-object") return has("admin.account.read") || nav.isBoss;
   if (kind === "roles" || kind === "role-object") return has("admin.role.read") || has("admin.permission.read");
@@ -418,8 +434,8 @@ export function restoreTabs(adminUserId: string, nav: NavPermission): { tabs: Wo
     let restoredActiveId = parsed.activeId;
     for (const tab of stored) {
       let candidate = normalizeDistribution(tab);
+      if (candidate.kind === "finance-lookup" || ['finance-records','finance-record-history'].includes(candidate.kind) && (candidate.query?.source||candidate.query?.operation)) candidate = tabFromLocation(candidate.kind==='finance-lookup'?'/finance/records':candidate.path, new URLSearchParams(candidate.query ?? {}).toString());
       if (tab.id === parsed.activeId) restoredActiveId = candidate.id;
-      if (candidate.kind === "finance-lookup" && candidate.path === "/finance") candidate = { ...candidate, path: "/finance/search", title: "资金查找" };
       if (candidate.kind === "support-management" || candidate.id === "support-management" || candidate.path === "/support/overview" || candidate.path === "/support/management" || candidate.title === "运营看板" || candidate.title === "客服管理") {
         candidate = { ...candidate, id: "support-overview", kind: "support-overview", path: "/support/overview", title: "客服统计" };
       }

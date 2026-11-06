@@ -6,7 +6,7 @@ import { ORDER_FIELDS, ORDER_FROM, projectOrder, type OrderRow } from "./order";
 import { legacyContinuationReady, legacyOrderLifecycleStage, LEGACY_ORDER_STATUS_SQL } from "./legacy-order-read";
 import { legacyUserOrderFields, legacyUserOrderFrom, projectUserLegacyOrder, type LegacyUserOrderRow } from "./legacy-user-order-read";
 
-type Filter = { party: "renter" | "owner"; status?: string; accountId?: string; orderNo?: string; createdFrom?: string; createdTo?: string; stage?: string; limit: number; cursor?: string };
+type Filter = { party: "renter" | "owner"; status?: string; view?: "IN_PROGRESS"; accountId?: string; orderNo?: string; createdFrom?: string; createdTo?: string; stage?: string; limit: number; cursor?: string };
 type Cursor = { f: string; c: string | null; o: "NATIVE" | "LEGACY"; i: string };
 type Row = { origin: "NATIVE" | "LEGACY"; id: string; createdAt: string | null; record: OrderRow | LegacyUserOrderRow };
 const ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
@@ -21,21 +21,23 @@ function day(value: string): boolean {
 
 export function parseUnifiedOrderQuery(query: URLSearchParams): Filter {
   for (const key of query.keys()) {
-    if (!["party", "status", "accountId", "orderNo", "createdFrom", "createdTo", "stage", "limit", "cursor"].includes(key) || query.getAll(key).length !== 1) throw invalid("Unsupported order query", key);
+    if (!["party", "status", "view", "accountId", "orderNo", "createdFrom", "createdTo", "stage", "limit", "cursor"].includes(key) || query.getAll(key).length !== 1) throw invalid("Unsupported order query", key);
   }
   const party = query.get("party") ?? "renter";
-  const status = query.get("status"), accountId = query.get("accountId"), cursor = query.get("cursor");
+  const status = query.get("status"), view = query.get("view"), accountId = query.get("accountId"), cursor = query.get("cursor");
   const orderNo = query.get("orderNo"), createdFrom = query.get("createdFrom"), createdTo = query.get("createdTo"), stage = query.get("stage");
   const rawLimit = query.get("limit") ?? "20", limit = Number(rawLimit);
   if (party !== "renter" && party !== "owner") throw invalid("Party is invalid");
   if (!/^[1-9]\d{0,2}$/.test(rawLimit) || limit > 100) throw invalid("Limit is invalid");
+  if (view !== null && view !== "IN_PROGRESS") throw invalid("View is invalid");
+  if (status !== null && view !== null) throw invalid("Use status or view, not both", "view");
   if (status !== null && !["PENDING_PAYMENT", "PAID", "COMPLETED", "CANCELLED", "UNKNOWN"].includes(status)) throw invalid("Status is invalid");
   if (accountId !== null && !ID.test(accountId)) throw invalid("Account is invalid");
   if (orderNo !== null && (!orderNo || orderNo.length > 255 || orderNo.trim() !== orderNo || /[\u0000-\u001f\u007f]/.test(orderNo))) throw invalid("Order number is invalid");
   if (createdFrom !== null && !day(createdFrom) || createdTo !== null && !day(createdTo) || createdFrom !== null && createdTo !== null && createdFrom > createdTo) throw invalid("Order date range is invalid");
   if (stage !== null && !STAGES.includes(stage)) throw invalid("Order stage is invalid");
   if (cursor !== null && (cursor.length > 1024 || !/^[A-Za-z0-9_-]+$/.test(cursor))) throw conflict("Cursor is invalid");
-  return { party, limit, ...(status === null ? {} : { status }), ...(accountId === null ? {} : { accountId }), ...(orderNo === null ? {} : { orderNo }), ...(createdFrom === null ? {} : { createdFrom }), ...(createdTo === null ? {} : { createdTo }), ...(stage === null ? {} : { stage }), ...(cursor === null ? {} : { cursor }) };
+  return { party, limit, ...(status === null ? {} : { status }), ...(view === null ? {} : { view: "IN_PROGRESS" as const }), ...(accountId === null ? {} : { accountId }), ...(orderNo === null ? {} : { orderNo }), ...(createdFrom === null ? {} : { createdFrom }), ...(createdTo === null ? {} : { createdTo }), ...(stage === null ? {} : { stage }), ...(cursor === null ? {} : { cursor }) };
 }
 
 function decodeCursor(value: string | undefined, fingerprint: string): Cursor | null {
@@ -49,8 +51,28 @@ function decodeCursor(value: string | undefined, fingerprint: string): Cursor | 
 }
 
 /** One statement applies subject, filters and a cross-source total order before pagination. */
+const NATIVE_OPEN_REFUND_SQL = `EXISTS(
+  SELECT 1 FROM zzsh_order.channel_refund_intent i
+  WHERE i.order_id=o.id AND i.state IN ('READY','SUBMITTING','PROCESSING','REVIEW_REQUIRED','UNKNOWN')
+)`;
+/** Work view: unpaid/fulfillment plus cancelled/completed only when an open refund intent is proven. */
+const nativeStatusPredicate = (owner: boolean) => `CASE
+  WHEN $12::text='IN_PROGRESS' THEN (
+    o.status IN ('PENDING_PAYMENT','PAID')
+    OR (o.status IN ('CANCELLED','COMPLETED') AND ${NATIVE_OPEN_REFUND_SQL})
+  )
+  WHEN $2::text IS NULL THEN TRUE
+  ELSE o.status=$2
+END`;
+const legacyStatusPredicate = () => `CASE
+  WHEN $12::text='IN_PROGRESS' THEN (${LEGACY_ORDER_STATUS_SQL}) IN ('PENDING_PAYMENT','PAID')
+  WHEN $2::text IS NULL THEN TRUE
+  ELSE (${LEGACY_ORDER_STATUS_SQL})=$2
+END`;
+
 export async function listUnifiedUserOrders(client: PoolClient, userId: string, filter: Filter) {
-  const binding: unknown[] = ["user-orders-v1", userId, filter.party, filter.status ?? null, filter.accountId ?? null, filter.limit];
+  const view = filter.view ?? null;
+  const binding: unknown[] = ["user-orders-v1", userId, filter.party, filter.status ?? null, view, filter.accountId ?? null, filter.limit];
   if (filter.orderNo || filter.createdFrom || filter.createdTo || filter.stage) binding.push(filter.orderNo ?? null, filter.createdFrom ?? null, filter.createdTo ?? null, filter.stage ?? null);
   const fingerprint = sha256Hex(JSON.stringify(binding));
   let cursor = decodeCursor(filter.cursor, fingerprint);
@@ -61,7 +83,7 @@ export async function listUnifiedUserOrders(client: PoolClient, userId: string, 
       SELECT 'NATIVE'::text AS origin,n.id,n."createdAt",to_jsonb(n) AS record
       FROM (SELECT ${ORDER_FIELDS} ${ORDER_FROM}
         WHERE ${owner ? "o.owner_user_id" : "o.renter_user_id"}=$1
-          AND ($2::text IS NULL OR o.status=$2) AND ($3::text IS NULL OR o.account_id=$3)
+          AND (${nativeStatusPredicate(owner)}) AND ($3::text IS NULL OR o.account_id=$3)
           AND ($9::text IS NULL OR strpos(lower(o.display_no),lower($9))>0)
           AND ($10::date IS NULL OR o.created_at>=($10::date::timestamp AT TIME ZONE 'Asia/Shanghai'))
           AND ($11::date IS NULL OR o.created_at<(($11::date+1)::timestamp AT TIME ZONE 'Asia/Shanghai'))) n
@@ -69,7 +91,7 @@ export async function listUnifiedUserOrders(client: PoolClient, userId: string, 
       SELECT 'LEGACY'::text AS origin,l.id,l."createdAt",to_jsonb(l) AS record
       FROM (SELECT ${legacyUserOrderFields(continuationReady)} ${legacyUserOrderFrom(continuationReady)}
         WHERE ${owner ? "l.owner_user_id" : "l.renter_user_id"}=$1
-          AND ($2::text IS NULL OR (${LEGACY_ORDER_STATUS_SQL})=$2) AND ($3::text IS NULL OR l.account_id=$3)
+          AND (${legacyStatusPredicate()}) AND ($3::text IS NULL OR l.account_id=$3)
           AND ($9::text IS NULL OR strpos(lower(l.original_order_no),lower($9))>0)
           AND ($10::date IS NULL OR l.source_created_at>=($10::date::timestamp AT TIME ZONE 'Asia/Shanghai'))
           AND ($11::date IS NULL OR l.source_created_at<(($11::date+1)::timestamp AT TIME ZONE 'Asia/Shanghai'))) l
@@ -80,7 +102,7 @@ export async function listUnifiedUserOrders(client: PoolClient, userId: string, 
         OR (x."createdAt"=$5 AND (x.origin COLLATE "C",x.id COLLATE "C")<($6::text COLLATE "C",$7::text COLLATE "C"))))
       OR ($5::text IS NULL AND x."createdAt" IS NULL AND (x.origin COLLATE "C",x.id COLLATE "C")<($6::text COLLATE "C",$7::text COLLATE "C"))
     ORDER BY x."createdAt" DESC NULLS LAST,x.origin COLLATE "C" DESC,x.id COLLATE "C" DESC LIMIT $8
-  `, [userId, filter.status ?? null, filter.accountId ?? null, position !== null, position?.c ?? null, position?.o ?? null, position?.i ?? null, limit, filter.orderNo ?? null, filter.createdFrom ?? null, filter.createdTo ?? null])).rows;
+  `, [userId, filter.status ?? null, filter.accountId ?? null, position !== null, position?.c ?? null, position?.o ?? null, position?.i ?? null, limit, filter.orderNo ?? null, filter.createdFrom ?? null, filter.createdTo ?? null, view])).rows;
   const matched: Row[] = [], stageById = new Map<string, Awaited<ReturnType<typeof readSettlementStages>> extends Map<string, infer T> ? T : never>();
   let scanned = 0, exhausted = false, stageUnknown = false, lastScanned: Row | undefined;
   do {

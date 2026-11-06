@@ -15,6 +15,7 @@ import {
 import { mountAuthHandlers, type AuthRuntimeOptions } from "./auth/auth-runtime";
 import { assertLocalNativeDistributionReadOnlyAssembly } from "./finance/distribution-policy-store";
 import { assertLocalNativeDistributionRegistrationAssembly } from "./finance/distribution-registration";
+import { assertDistributionManagementAssembly } from "./finance/distribution-management-resource";
 import type { BusinessDatabaseOptions } from "./database/business";
 import type { OrderSweepModuleOptions } from "./order/order-sweep.module";
 import type { DistributionDueModuleOptions } from "./finance/distribution-due.module";
@@ -135,6 +136,7 @@ export async function createApp(options: ApiAppOptions) {
   if (options.auth) {
     assertLocalNativeDistributionRegistrationAssembly(options.auth.distributionRegistrationScope, options.auth.distributionReadScope);
     assertLocalNativeDistributionReadOnlyAssembly(options.auth.distributionReadScope, options.auth.distributionScope, { ...options.auth, distributionDue: options.distributionDue });
+    assertDistributionManagementAssembly(options.auth.distributionManagement,options.auth.distributionReadScope,{...options.auth,distributionDue:options.distributionDue});
   }
   const app = await NestFactory.create(
     AppModule.register(options.health, options.database, options.orderSweep, options.distributionDue),

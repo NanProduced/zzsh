@@ -196,7 +196,8 @@ export function ListPagination(props: ListPaginationProps) {
 
   const displayCount = loadedCount ?? Math.max(0, Math.min(pageSize, safeTotal - (page - 1) * pageSize));
   const rangeStart = (page - 1) * pageSize + 1;
-  const rangeLabel = displayCount > 0 ? `第 ${rangeStart}–${rangeStart + displayCount - 1} 位` : '当前页暂无记录';
+  const rangeUnit = itemLabel.match(/^(条|位|个)/)?.[1] ?? '条';
+  const rangeLabel = displayCount > 0 ? `第 ${rangeStart}–${rangeStart + displayCount - 1} ${rangeUnit}` : '当前页暂无记录';
 
   return (
     <div

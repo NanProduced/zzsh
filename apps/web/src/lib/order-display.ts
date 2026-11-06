@@ -190,6 +190,199 @@ export function personalBenefitSources(quote: {
   return `价格：${names[b.priceSource ?? ""] ?? "未记录"}；押金：${names[b.depositSource ?? ""] ?? "未记录"}`;
 }
 
+const BENEFIT_SOURCE_NAMES: Record<string, string> = {
+  GROWTH: "成长权益",
+  FRIEND: "挚友礼遇",
+  PRESTIGE: "尊享礼遇",
+};
+
+/** Mapped membership source name used next to a proven monetary benefit. */
+export function personalBenefitSourceLabel(source?: string | null): string | null {
+  return source ? (BENEFIT_SOURCE_NAMES[source] ?? null) : null;
+}
+
+/** Exact yuan cents from a server money object; unknown or non-CNY values stay null. */
+export function yuanCentsFromMoney(value: unknown): bigint | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const money = value as { unit?: unknown; scale?: unknown; amount?: unknown };
+  if (money.unit !== "yuan" || money.scale !== 2 || typeof money.amount !== "string" || moneyText(value) === "—") {
+    return null;
+  }
+  return BigInt(money.amount.replace(".", ""));
+}
+
+export function formatYuanFromCents(cents: bigint): string {
+  const sign = cents < 0n ? "-" : "";
+  const absolute = cents < 0n ? -cents : cents;
+  return `${sign}¥${absolute / 100n}.${(absolute % 100n).toString().padStart(2, "0")}`;
+}
+
+/** Positive difference between the recorded base tenant deposit and the payable deposit. */
+export function depositReductionCents(base: unknown, actual: unknown): bigint | null {
+  const baseCents = yuanCentsFromMoney(base);
+  const actualCents = yuanCentsFromMoney(actual);
+  if (baseCents === null || actualCents === null || baseCents <= actualCents) return null;
+  return baseCents - actualCents;
+}
+
+const PLACEHOLDER_MEMBERSHIP_LABELS = new Set(["会员权益未记录", "既有确认方案", "普通会员"]);
+
+/** Visible actor for a reduction chain: tier and/or mapped 礼遇, omitting placeholder labels. */
+export function personalBenefitActorLabel(
+  quote: {
+    membershipBenefits?: { schema?: string; effectiveTier?: string; priceSource?: string; depositSource?: string } | null;
+    customerTier?: string | null;
+  },
+  kind: "price" | "deposit",
+): string | null {
+  const tier = personalMembershipLabel(quote);
+  const source = personalBenefitSourceLabel(
+    kind === "price" ? quote.membershipBenefits?.priceSource : quote.membershipBenefits?.depositSource,
+  );
+  const parts = [tier && !PLACEHOLDER_MEMBERSHIP_LABELS.has(tier) ? tier : null, source].filter(
+    (part): part is string => Boolean(part),
+  );
+  return parts.length ? parts.join(" · ") : null;
+}
+
+export function yuanCentsFromLabel(value: string | null | undefined): bigint | null {
+  if (typeof value !== "string") return null;
+  const match = /^¥(\d+)\.(\d{2})$/.exec(value);
+  if (!match) return null;
+  return BigInt(match[1]!) * 100n + BigInt(match[2]!);
+}
+
+function referenceLineCents(line: { costLabel?: string | null; costAmount?: string | null }): bigint | null {
+  const fromLabel = yuanCentsFromLabel(line.costLabel ?? null);
+  if (fromLabel !== null) return fromLabel;
+  if (typeof line.costAmount === "string" && /^\d+\.\d{2}$/.test(line.costAmount)) {
+    return yuanCentsFromLabel(`¥${line.costAmount}`);
+  }
+  return null;
+}
+
+/**
+ * Rent/resource savings only when every personal line has a same-quantity public counterpart.
+ * Divergent bills are not treated as a membership discount.
+ */
+export function matchingResourceDiscount(
+  personalLines: readonly { itemId?: string | null; quantity?: unknown; buyerAmount?: unknown }[] | null | undefined,
+  personalResourceTotal: unknown,
+  referenceLines: readonly { itemId?: string | null; quantity?: unknown; costLabel?: string | null; costAmount?: string | null }[] | null | undefined,
+): { reduction: bigint; original: string; final: string } | null {
+  if (!personalLines?.length || !referenceLines?.length) return null;
+  const refById = new Map<string, { itemId?: string | null; quantity?: unknown; costLabel?: string | null; costAmount?: string | null }>();
+  for (const line of referenceLines) {
+    if (!line.itemId || refById.has(line.itemId)) return null;
+    refById.set(line.itemId, line);
+  }
+  const matched = new Set<string>();
+  let referenceCents = 0n;
+  let personalCents = 0n;
+  for (const line of personalLines) {
+    if (!line.itemId || matched.has(line.itemId)) return null;
+    matched.add(line.itemId);
+    const referenceLine = refById.get(line.itemId);
+    if (!referenceLine || String(referenceLine.quantity ?? "") !== String(line.quantity ?? "")) return null;
+    const lineReferenceCents = referenceLineCents(referenceLine);
+    const linePersonalCents = yuanCentsFromMoney(line.buyerAmount);
+    if (lineReferenceCents === null || linePersonalCents === null) return null;
+    referenceCents += lineReferenceCents;
+    personalCents += linePersonalCents;
+  }
+  for (const [itemId, line] of refById) {
+    if (!matched.has(itemId) && referenceLineCents(line) !== 0n) return null;
+  }
+  const totalCents = yuanCentsFromMoney(personalResourceTotal);
+  if (totalCents === null || totalCents !== personalCents) return null;
+  if (referenceCents <= personalCents) return null;
+  return {
+    reduction: referenceCents - personalCents,
+    original: formatYuanFromCents(referenceCents),
+    final: formatYuanFromCents(personalCents),
+  };
+}
+
+/** Whole-order payable ratio as a compact 折 label when the cents map cleanly, else null. */
+export function formatNiceZhe(originalCents: bigint, finalCents: bigint): string | null {
+  if (originalCents <= 0n || finalCents < 0n || finalCents >= originalCents) return null;
+  let best: { zhe: number; error: bigint } | null = null;
+  for (let zhe = 1; zhe <= 99; zhe += 1) {
+    if ((originalCents * BigInt(zhe) + 50n) / 100n !== finalCents) continue;
+    const produced = originalCents * BigInt(zhe);
+    const target = finalCents * 100n;
+    const error = produced >= target ? produced - target : target - produced;
+    if (!best || error < best.error) best = { zhe, error };
+  }
+  if (!best) return null;
+  return `${best.zhe / 10}折`;
+}
+
+export function rentBenefitChip(originalCents: bigint, finalCents: bigint): string | null {
+  if (originalCents <= 0n || finalCents >= originalCents) return null;
+  return formatNiceZhe(originalCents, finalCents) ?? `已减 ${formatYuanFromCents(originalCents - finalCents)}`;
+}
+
+export function depositBenefitChip(reductionCents: bigint, fullyWaived = false): string {
+  if (fullyWaived) return "免押";
+  return `减免押金 ${formatYuanFromCents(reductionCents)}`;
+}
+
+function courtesySourceLabel(source?: string | null): string | null {
+  const label = personalBenefitSourceLabel(source);
+  return label && label !== "成长权益" ? label : null;
+}
+
+/** Card heading: visible tier once, plus 挚友/尊享 courtesy names when those sources actually apply. */
+export function membershipBenefitTitle(
+  quote: {
+    membershipBenefits?: { schema?: string; effectiveTier?: string; priceSource?: string; depositSource?: string } | null;
+    customerTier?: string | null;
+  },
+  applied: { rent?: boolean; deposit?: boolean },
+): string | null {
+  const tier = personalMembershipLabel(quote);
+  const visibleTier = tier && !PLACEHOLDER_MEMBERSHIP_LABELS.has(tier) ? tier : null;
+  const courtesies: string[] = [];
+  const push = (source?: string | null) => {
+    const label = courtesySourceLabel(source);
+    if (label && !courtesies.includes(label)) courtesies.push(label);
+  };
+  if (applied.rent) push(quote.membershipBenefits?.priceSource);
+  if (applied.deposit) push(quote.membershipBenefits?.depositSource);
+  const parts = [visibleTier, ...courtesies].filter((part): part is string => Boolean(part));
+  return parts.length ? parts.join(" · ") : null;
+}
+
+export function membershipBenefitPresentation(
+  quote: {
+    membershipBenefits?: { schema?: string; effectiveTier?: string; priceSource?: string; depositSource?: string } | null;
+    customerTier?: string | null;
+  },
+  resourceDiscount: { original: string; final: string; reduction: bigint } | null,
+  depositReduction: bigint | null,
+  depositFullyWaived = false,
+): { title: string | null; chips: string[] } | null {
+  const chips: string[] = [];
+  if (resourceDiscount) {
+    const originalCents = yuanCentsFromLabel(resourceDiscount.original);
+    const finalCents = yuanCentsFromLabel(resourceDiscount.final);
+    const chip =
+      originalCents !== null && finalCents !== null
+        ? rentBenefitChip(originalCents, finalCents)
+        : `已减 ${formatYuanFromCents(resourceDiscount.reduction)}`;
+    if (chip) chips.push(chip);
+  }
+  if (depositReduction !== null) {
+    chips.push(depositBenefitChip(depositReduction, depositFullyWaived));
+  }
+  if (!chips.length) return null;
+  return {
+    title: membershipBenefitTitle(quote, { rent: Boolean(resourceDiscount), deposit: depositReduction !== null }),
+    chips,
+  };
+}
+
 /**
  * Server-observed entry eligibility for the two payment actions. The projection is authoritative when
  * present; the local status facts are only the equivalent fallback, never a wider client-side guess.
@@ -275,9 +468,19 @@ export type OrderAmountFacts = { main: string; caption: string; secondary: strin
 /** The main amount is the renter's actual order record; an owner view never relabels it as owner income. */
 export function orderAmountFacts(order: Order, party: OrderParty): OrderAmountFacts {
   if (order.readOnly && order.source?.origin === "LEGACY") {
-    if (party === "owner") return order.ownerIncomeSource?.source === "LEGACY_ORDER_SNAPSHOT" && order.amounts?.ownerRecordedIncome
-      ? { main: formatOrderMoney(order.amounts.ownerRecordedIncome), caption: "已结算", secondary: [] }
-      : { main: "未记录", caption: "待结算", secondary: [] };
+    if (party === "owner") {
+      if (order.ownerIncomeSource?.source === "LEGACY_ORDER_SNAPSHOT" && order.amounts?.ownerRecordedIncome) {
+        return { main: formatOrderMoney(order.amounts.ownerRecordedIncome), caption: "已结算", secondary: [] };
+      }
+      const paid = order.payment?.state === "RECORDED_PAID";
+      const unpaid = order.payment?.state === "RECORDED_UNPAID";
+      // Cancelled / unpaid rows have no owner settlement duty — never label them 待结算.
+      if (order.status === "CANCELLED" && unpaid) return { main: "未记录", caption: "已取消 · 未付款", secondary: [] };
+      if (order.status === "CANCELLED") return { main: "未记录", caption: paid ? "收益未记录" : "无号主收益记录", secondary: [] };
+      if (order.status === "COMPLETED") return { main: "未记录", caption: "收益未记录", secondary: [] };
+      if (order.status === "PENDING_PAYMENT" || unpaid || !paid) return { main: "未记录", caption: "无号主收益记录", secondary: [] };
+      return { main: "未记录", caption: "结算未入账", secondary: [] };
+    }
     const paid = order.payment?.state === "RECORDED_PAID";
     return {
       main: formatOrderMoney(paid ? order.legacyAmounts?.paid : order.legacyAmounts?.required),

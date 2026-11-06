@@ -1,0 +1,45 @@
+{
+  "schema": "zzsh.ecs-test-approved-dump.v1",
+  "project": "zzsh-ecs-test",
+  "dump": {
+    "path": "/srv/zzsh-test/restricted/approved-local.dump",
+    "sha256": "REPLACE_WITH_APPROVED_DUMP_SHA256",
+    "bytes": 0
+  },
+  "source": {
+    "postgresMajor": 16,
+    "cutoff": "REPLACE_WITH_APPROVED_UTC_INSTANT",
+    "datasetSha256": "REPLACE_WITH_APPROVED_DATASET_SHA256",
+    "migrationTreeSha256": "REPLACE_WITH_MATCHING_MIGRATION_TREE_SHA256",
+    "journalHashes": ["REPLACE_WITH_ORDERED_MIGRATION_JOURNAL_HASHES"],
+    "reviewedAuthArtifacts": "REPLACE_WITH_preserved-approved_OR_sanitized-approved"
+  },
+  "keys": {
+    "AUTH_USER_SECRET_FILE": "REPLACE_WITH_SOURCE_KEY_FILE_SHA256",
+    "AUTH_ADMIN_SECRET_FILE": "REPLACE_WITH_SOURCE_KEY_FILE_SHA256",
+    "USER_IDENTITY_SUBJECT_HMAC_KEY_FILE": "REPLACE_WITH_SOURCE_KEY_FILE_SHA256",
+    "ORDER_CONFIRMATION_SECRET_FILE": "REPLACE_WITH_SOURCE_KEY_FILE_SHA256",
+    "LISTING_CURSOR_SECRET_FILE": "REPLACE_WITH_SOURCE_KEY_FILE_SHA256"
+  },
+  "bankVersions": [],
+  "expected": {
+    "tables": {
+      "users": "REPLACE_WITH_ACTUAL_COUNT",
+      "accounts": "REPLACE_WITH_ACTUAL_COUNT",
+      "orders": "REPLACE_WITH_ACTUAL_COUNT",
+      "ledger": "REPLACE_WITH_ACTUAL_COUNT",
+      "observations": "REPLACE_WITH_ACTUAL_COUNT",
+      "membership": "REPLACE_WITH_ACTUAL_COUNT",
+      "rentalMembership": "REPLACE_WITH_ACTUAL_COUNT",
+      "membershipLegacyCoverage": "REPLACE_WITH_ACTUAL_COUNT",
+      "membershipContribution": "REPLACE_WITH_ACTUAL_COUNT",
+      "membershipPolicy": "REPLACE_WITH_ACTUAL_COUNT",
+      "membershipLegacyReadAdmission": "REPLACE_WITH_ACTUAL_COUNT",
+      "distribution": "REPLACE_WITH_ACTUAL_COUNT",
+      "banks": "REPLACE_WITH_ACTUAL_COUNT"
+    },
+    "ledgerDebitCents": "REPLACE_WITH_NONNEGATIVE_INTEGER_TEXT",
+    "ledgerCreditCents": "REPLACE_WITH_NONNEGATIVE_INTEGER_TEXT"
+  },
+  "startServices": false
+}

@@ -674,7 +674,8 @@ test("skin picker renders the public summary, neutral missing-media state, and k
     assert.equal(p.host.querySelector('.skin-card-name').textContent, '骇爪-维什戴尔');
     assert.equal(p.host.querySelector('.skin-card-owner'), null, 'no duplicate owner/base subtitle');
     assert.equal(p.host.querySelector('.skin-card-media').getAttribute('data-owner-kind'), 'AGENT');
-    assert.match(p.text(), /测试品质 · 平台资料/);
+    assert.match(p.text(), /测试品质/);
+    assert.equal(p.text().includes('平台资料'), false, 'platform-source label stays out of card body copy');
     assert.match(p.text(), /典藏/);
     assert.match(p.text(), /默认外观/);
     assert.match(p.text(), /品质待核/);

@@ -22,7 +22,7 @@ test("B1 query parsing validates rentalState and cursor/after exclusivity", () =
 });
 
 test("B1 rentalState precedence lives in SQL and filters server-side", () => {
-  const order = ["'RENTED'", "'RESTRICTED'", "'PAUSED'", "'UNKNOWN'", "'REVIEWING'", "'REJECTED'", "'DRAFT'"].map(s => RENTAL_STATE_SQL.indexOf(s));
+  const order = ["'RENTED'", "'PENDING_PAYMENT'", "'COMPLETED'", "'RESTRICTED'", "'PAUSED'", "'UNKNOWN'", "'REVIEWING'", "'REJECTED'", "'DRAFT'"].map(s => RENTAL_STATE_SQL.indexOf(s));
   for (let i = 1; i < order.length; i++) assert.ok(order[i]! > order[i - 1]!, "precedence");
   assert.match(OWNER_ACCOUNT_LIST_SQL, /t\.rental_state=\$3/);
   assert.match(OWNER_ACCOUNT_LIST_SQL, /a\.owner_user_id=\$1/);
@@ -68,6 +68,12 @@ test("B1 projection: titleFacts, available, blockers; unquoted owner total is nu
   assert.equal(occupied.activeOrder?.displayNo,"ORIGINAL-SN");assert.equal(occupied.activeOrder?.origin,"LEGACY");
   assert.equal(occupied.activeOrder?.rentalDeadlineAt,"2026-11-01T00:00:00.000Z");assert.equal(occupied.activeOrder?.renterName,null);
   assert.equal(projectOwnerAccount({...base,legacy_market:true} as any).available,false);
+  const pending = projectOwnerAccount({ ...base, rental_state: "PENDING_PAYMENT", ao_id: "p1", ao_display_no: "P1", ao_status: "PENDING_PAYMENT" } as any) as any;
+  assert.equal(pending.available, false);
+  assert.ok(pending.blockers.includes("PENDING_PAYMENT"));
+  const completed = projectOwnerAccount({ ...base, rental_state: "COMPLETED" } as any) as any;
+  assert.equal(completed.available, false);
+  assert.ok(completed.blockers.includes("RENTAL_COMPLETED"));
 });
 
 test("B1 the stored placeholder is not an account name; the unknown reason stays on accountDisplay", () => {

@@ -16,7 +16,6 @@ import {
   LayoutDashboardIcon,
   ChartNoAxesCombinedIcon,
   MessagesSquareIcon,
-  NetworkIcon,
   NewspaperIcon,
   PackageIcon,
   PaletteIcon,
@@ -80,10 +79,12 @@ export function workspaceMenuItems(nav: NavPermission): WorkspaceMenuItem[] {
       { label: "分销商", icon: UsersRoundIcon, path: "/distribution/participants", kind: "distribution-participants" },
     );
   }
-  if (nav.isBoss || has("user.directory.read") && has("personal.distribution.policy.read")) {
-    distribution.push({ label: "关系查询", icon: NetworkIcon, path: "/distribution/relations", kind: "distribution-relations" });
+  if (!nav.isBoss && !has("distribution.dashboard.read") && has("distribution.participant.read")) {
+    distribution.push({ label: "分销商", icon: UsersRoundIcon, path: "/distribution/participants", kind: "distribution-participants" });
   }
-  if (nav.isBoss || ["personal.distribution.policy.read", "personal.distribution.policy.manage"].some(has)) {
+  if (nav.isBoss || has("user.directory.read") && has("personal.distribution.policy.read")) {
+  }
+  if (nav.isBoss || ["personal.distribution.policy.read", "personal.distribution.policy.manage", "distribution.level.manage"].some(has)) {
     distribution.push({ label: "分销政策", icon: ScaleIcon, path: "/distribution/policy", kind: "distribution-policy" });
   }
   if (distribution.length) items.push({ label: "分销", isTitle: true }, ...distribution);
@@ -151,7 +152,8 @@ export function workspaceMenuItems(nav: NavPermission): WorkspaceMenuItem[] {
   if (has("finance.read") || has("finance.document.read")) {
     items.push({ label: "资金", isTitle: true });
     if (has("finance.read")) items.push({ label: "财务总览", icon: WalletIcon, path: "/finance", kind: "finance-overview" });
-    items.push({ label: "资金查找", icon: SearchIcon, path: "/finance/search", kind: "finance-lookup" });
+    items.push({ label: "资金记录", icon: SearchIcon, path: "/finance/records", kind: "finance-records" });
+    if (has("finance.read")) items.push({ label: "用户余额", icon: WalletIcon, path: "/finance/balances", kind: "finance-balances" });
     if (has("finance.read")) items.push({ label: "期间核对", icon: CalculatorIcon, path: "/finance/period", kind: "finance-period" }, { label: "汇聚对账", icon: WalletIcon, path: "/finance/channels", kind: "finance-channels" });
   }
   if (has("order.read") || nav.isBoss) {
@@ -200,7 +202,11 @@ export function titleForPath(pathname: string): string {
   if (pathname === "/supply/media") return "平台素材审核";
   if (pathname === "/content") return "内容管理";
   if(pathname==="/finance")return "财务总览";
-  if(pathname==="/finance/search")return "资金查找";
+  if(pathname==="/finance/search" || pathname==="/finance/records")return "资金记录";
+  if(pathname==="/finance/records/history")return "旧平台资金记录";
+  if(pathname==="/finance/balances")return "用户余额";
+  if(pathname==="/finance/balances/history")return "旧平台余额记录";
+  if(pathname==="/finance/balances/opening")return "迁移期初";
   if(pathname==="/finance/channels")return "汇聚对账";
   if(pathname==="/finance/period")return "期间核对";
   if(pathname.startsWith("/finance/documents/"))return "资金单据";
@@ -219,7 +225,6 @@ export function titleForPath(pathname: string): string {
   if (pathname === "/distribution/earnings") return "佣金明细";
   if (pathname === "/distribution/participants") return "分销商";
   if (pathname.startsWith("/distribution/participants/")) return "分销商详情";
-  if (pathname === "/distribution/relations") return "关系查询";
   if (pathname === "/distribution/policy" || pathname === "/distribution-policy") return "分销政策";
   return "工作台";
 }
@@ -251,7 +256,6 @@ export const PAGE_SEARCH_KEYWORDS: Record<string, string[]> = {
   "/distribution": ["分销概览", "分销", "佣金", "排行", "distribution", "fx"],
   "/distribution/earnings": ["佣金明细", "分销", "佣金", "奖励", "distribution", "fx"],
   "/distribution/participants": ["分销商", "分销", "邀请", "下级", "distribution", "fx"],
-  "/distribution/relations": ["关系查询", "分销", "邀请", "上级", "distribution", "fx"],
   "/distribution/policy": ["分销政策", "分销", "政策", "比例", "distribution", "fx"],
   "/distribution-policy": ["分销政策", "分销", "政策", "distribution", "fx"],
   "/membership-growth": ["会员与礼遇", "会员成长", "礼遇", "会员", "增长", "策略", "membership", "hy", "cz"],
@@ -270,7 +274,8 @@ export const PAGE_SEARCH_KEYWORDS: Record<string, string[]> = {
   "/supply/media": ["平台素材审核", "图片审核", "素材", "截图", "图片", "media", "review", "sc", "tp"],
   "/content": ["内容管理", "运营内容", "content", "nr"],
   "/finance": ["财务总览", "资金", "待核", "余额", "finance", "zj"],
-  "/finance/search": ["资金查找", "流水", "单据", "finance", "zj"],
+  "/finance/records": ["资金记录", "收款", "退款", "提现", "finance", "zj"],
+  "/finance/balances": ["用户余额", "余额变动", "流水", "wallet", "ye"],
   "/finance/channels": ["汇聚对账", "渠道工具", "商户", "渠道证据", "channels"],
   "/finance/period": ["期间核对", "对账", "核对", "period", "dz"],
   "/orders": ["订单", "交易", "orders", "dd"],
