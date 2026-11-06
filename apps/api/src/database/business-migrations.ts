@@ -725,9 +725,9 @@ export async function configureContinuityFinancePrivileges(pool: Pick<Pool, "que
     {"name":"zzsh_order.legacy_withdrawal_link_evidence","read":true},
     {"name":"zzsh_order.finance_stored_opening_review","read":false},
     {"name":"zzsh_order.legacy_duty_finance_contract","read":false},
-    {"name":"zzsh_order.legacy_duty_finance_fact","read":true},
-    {"name":"zzsh_order.legacy_owner_guarantee_observation","read":true},
-    {"name":"zzsh_order.legacy_owner_guarantee_coverage","read":true}
+    {"name":"zzsh_order.legacy_duty_finance_fact","read":true}
+    // The old listing deposit is retired; its two tables are removed by the pending candidate
+    // migration, so this inventory must no longer expect them to exist.
   ];
   const found = (await pool.query<{ name: string; present: boolean }>(
     "SELECT name,to_regclass(name) IS NOT NULL AS present FROM unnest($1::text[]) AS t(name)", [profiles.map(p => p.name)]

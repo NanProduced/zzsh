@@ -1,7 +1,6 @@
 import type { INestApplication } from "@nestjs/common";
 import type { PoolClient } from "pg";
 import type { ListingCursorKey } from "../supply/listing-cursor";
-import { readAdminOwnerGuaranteeHistory } from "../finance/owner-guarantee-history";
 
 import { ADMIN_PERMISSION, requirePermission } from "../auth/admin-authorization";
 import { assertGameScopeUsable, gameScopeSql, readAdminGameScope } from "../auth/admin-scope";
@@ -181,13 +180,6 @@ export function mountCreditGuaranteeRoutes(app: INestApplication, options: AuthS
               action: manualDeduction ? "credit.manual.deducted" : "credit.manual.reversed", objectType: "credit_event", objectId: String(recorded.event.id),
               outcome: "SUCCESS", requestId, reason: common.visibleReason, details: { userId, result: result.replayed ? "REPLAY" : "APPLIED", scoreBefore: recorded.event.scoreBefore, scoreAfter: recorded.event.scoreAfter, appliedDeltaScore: recorded.event.appliedDeltaScore } });
             return { event: userEvent(recorded.event), duplicate: result.replayed };
-          }
-          const historyMatch = /^\/users\/([^/]+)\/guarantee-history$/.exec(path);
-          if (method === "GET" && historyMatch) {
-            for (const key of url.searchParams.keys()) {
-              if (key !== "cursor" || url.searchParams.getAll(key).length !== 1) throw invalid("Only one history cursor is supported");
-            }
-            return readAdminOwnerGuaranteeHistory(client, context, decodeId(historyMatch[1]!), url.searchParams.get("cursor"), options.listingCursorKey, assertCreditUserScope);
           }
           const userMatch = /^\/users\/([^/]+)$/.exec(path);
           if (request.method === "GET" && userMatch) {

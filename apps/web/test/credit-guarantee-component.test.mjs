@@ -31,13 +31,6 @@ const clientPath = path.join(tree, "apps/web/src/lib/credit-guarantee-client.ts"
 const supplyClientPath = path.join(tree, "apps/web/src/lib/supply-client.ts");
 const orderClientPath = path.join(tree, "apps/web/src/lib/order-client.ts");
 const walletClientPath = path.join(tree, "apps/web/src/lib/personal-wallet-client.ts");
-const historyClientPath = path.join(tree, "apps/web/src/lib/owner-guarantee-history-client.ts");
-const historyPath = path.join(tree, "apps/web/src/components/account/owner-guarantee-history.tsx");
-function loadHistory() {
-  const wallet = loadTs(walletClientPath);
-  const client = loadTs(historyClientPath, { "./personal-wallet-client.ts": wallet });
-  return loadTs(historyPath, { "@/components/session/user-session-provider": { useUserSession: () => session, useUserSessionStore: () => store }, "@/lib/owner-guarantee-history-client": client, "@/lib/owner-guarantee-unified-client": loadTs(path.join(tree, "apps/web/src/lib/owner-guarantee-unified-client.ts"), { "./personal-wallet-client.ts": wallet }), "@/lib/personal-wallet-client": wallet, "@/lib/order-client": loadTs(orderClientPath), "@/components/ui/information": loadInformation({ "lucide-react": icons }), "./owner-guarantee-history.css": {} });
-}
 
 function setupStorage(throws = false) {
   const values = new Map();
@@ -53,9 +46,9 @@ async function mount(fetchImpl, { history = false } = {}) {
   currentSession = { status: "authenticated", userId: "user-A", identityVersion: 1 };
   const browser = new Window({ url: "http://127.0.0.1:3100/account" });
   Object.assign(globalThis, { window: browser, document: browser.document, HTMLElement: browser.HTMLElement, Element: browser.Element, Node: browser.Node, Event: browser.Event, DOMException: browser.DOMException, IS_REACT_ACT_ENVIRONMENT: true });
-  // F owner-guarantee-history is an independent read; existing credit-call counting tests isolate it unless opted in.
+  // The guarantee-history read is a separate endpoint; credit-call counting tests isolate it unless opted in.
   globalThis.fetch = history ? fetchImpl : async (url, init) => String(url).includes("/api/account/wallet/guarantees") ? new Response(JSON.stringify({ error: { code: "GUARANTEE_HISTORY_UNAVAILABLE" } }), { status: 503 }) : fetchImpl(url, init);
-  const module = loadTs(componentPath, { "lucide-react": icons, "next/link": ({ scroll, ...props }) => React.createElement("a", props), "./credit-center.css": {}, "../session/user-session-provider": { useUserSession: () => session, useUserSessionStore: () => store }, "../../lib/credit-guarantee-client": loadTs(clientPath), "../../lib/supply-client": loadTs(supplyClientPath), "../../lib/order-client": loadTs(orderClientPath), "@/components/ui/information": loadInformation({ "lucide-react": icons }), "./owner-guarantee-history": loadHistory() });
+  const module = loadTs(componentPath, { "lucide-react": icons, "next/link": ({ scroll, ...props }) => React.createElement("a", props), "./credit-center.css": {}, "../session/user-session-provider": { useUserSession: () => session, useUserSessionStore: () => store }, "../../lib/credit-guarantee-client": loadTs(clientPath), "../../lib/supply-client": loadTs(supplyClientPath), "../../lib/order-client": loadTs(orderClientPath), "@/components/ui/information": loadInformation({ "lucide-react": icons }) });
   const host = browser.document.createElement("div"); browser.document.body.append(host);
   const root = requireFromTree("react-dom/client").createRoot(host);
   await React.act(async () => root.render(React.createElement(module.CreditCenter, { scope: "user-A:1" })));
@@ -265,11 +258,10 @@ test("guarantee groups deduplicate account contexts without adding money or hidi
     assert.equal(groups[0].querySelector("a").getAttribute("href"), "/account?view=accounts&accountId=account-1");
     // 术语收口：NOT_REQUIRED 只说明“不需要缴”，不再叠加免责句（避免与“已缴/已退”混读）。
     assert.match(groups[1].textContent, /该账号当前不需要缴保证金/);
-    assert.equal([...mounted.host.querySelectorAll("button")].filter((b) => !b.closest(".owner-guarantee-history")).length, 1, "credit commands only; F history retry is separate");
+    assert.equal([...mounted.host.querySelectorAll("button")].length, 1, "credit commands only");
     const headings = [...mounted.host.querySelectorAll("h3")].map(item => item.textContent);
-    assert.deepEqual(headings, ["当前信用", "信用变动明细", "出租账号保证金", "我的信用恢复申请", "保证金记录"]);
-    assert.equal(mounted.host.querySelector('a[href="/account?view=wallet&wallet=guarantees"]').textContent, "查看保证金记录");
-    assert.equal(mounted.host.querySelector('.owner-guarantee-history'), null, "historical guarantee panel is not duplicated in credit");
+    assert.deepEqual(headings, ["当前信用", "信用变动明细", "出租账号保证金", "我的信用恢复申请"]);
+    assert.equal(mounted.host.querySelector('a[href="/account?view=wallet&wallet=guarantees"]'), null, "the retired listing-deposit entry must be gone");
   } finally { await React.act(async () => mounted.root.unmount()); await mounted.browser.happyDOM.abort(); }
 });
 
@@ -391,7 +383,7 @@ test("F1: account summary failure never blocks the credit read and stays silent"
     assert.match(mounted.host.textContent, /出租账号/);
     assert.match(mounted.host.textContent, /该账号暂无可显示的公开名称/);
     // 摘要失败不阻塞主读取，也不额外给出会误操作的入口。
-    assert.equal([...mounted.host.querySelectorAll("button")].filter((b) => !b.closest(".owner-guarantee-history")).length, 1, "credit commands only; F history retry is separate");
+    assert.equal([...mounted.host.querySelectorAll("button")].length, 1, "credit commands only");
   } finally { await React.act(async () => mounted.root.unmount()); await mounted.browser.happyDOM.abort(); }
 });
 
@@ -446,7 +438,7 @@ test("R1: a 403 on the account summary withdraws the name without blocking the c
     assert.doesNotMatch(mounted.host.textContent, /PREVIOUS_AUTHORIZED_TITLE/);
     // 摘要授权与信用读取是两种权限：信用主体仍在，只是名称降级。
     assert.match(mounted.host.textContent, /当前信用/);
-    assert.equal([...mounted.host.querySelectorAll("button")].filter((b) => !b.closest(".owner-guarantee-history")).length, 1, "credit commands only; F history retry is separate");
+    assert.equal([...mounted.host.querySelectorAll("button")].length, 1, "credit commands only");
   } finally { await cleanup(mounted); }
 });
 
@@ -539,16 +531,15 @@ test("F1-t: 首页已覆盖所需账号即停，不继续翻页", async () => {
 test("E-F-016 failed credit read still links directly to independent wallet guarantee history", async () => {
   const original = globalThis.fetch;
   const urls = [];
-  const history = { contractVersion: "owner-guarantee-history.read.v1", subjectId: "user-A", asOf: "2026-10-01T00:00:00Z", snapshotVersion: "snap-1", items: [], nextCursor: null, coverage: { knowledge: "UNKNOWN", count: null, mappedRecordCount: null, reason: "SOURCE_PENDING", cutoff: null }, postedHeld: { knowledge: "UNKNOWN", amountCents: null, scope: "POSTED_LEDGER_ONLY", reason: "NOT_POSTED" }, liability: { knowledge: "UNKNOWN", amountCents: null }, channelArrival: "UNKNOWN" };
   try {
     const { host, root } = await mount(async (url) => {
       urls.push(String(url));
-      if (String(url).includes("/api/account/wallet/guarantees")) return new Response(JSON.stringify(history), { status: 200 });
+      if (String(url).includes("/api/account/wallet/guarantees")) throw Error("credit must not read guarantee history itself");
       return new Response(JSON.stringify({ error: { code: "INTERNAL_ERROR", message: "x" } }), { status: 500 });
     }, { history: true });
     await React.act(async () => { await new Promise((r) => setTimeout(r, 20)); });
     assert.equal(urls.some((u) => u.includes("/api/account/wallet/guarantees")), false, "credit does not duplicate the full history read");
-    assert.equal(host.querySelector('a[href="/account?view=wallet&wallet=guarantees"]').textContent, "查看保证金记录");
+    assert.equal(host.querySelector('a[href="/account?view=wallet&wallet=guarantees"]'), null, "the retired listing-deposit entry must be gone");
     assert.match(host.textContent, /信用.*暂时无法读取/);
     await React.act(async () => root.unmount());
   } finally { globalThis.fetch = original; }

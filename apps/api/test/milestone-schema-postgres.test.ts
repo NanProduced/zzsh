@@ -36,7 +36,7 @@ const existingTables = [...orderTables,
 const newTables = [
   "legacy_continuation_evidence", "legacy_continuation_version", "legacy_order_duty", "legacy_order_duty_admission",
   "legacy_order_duty_revision", "legacy_inflight_register", "personal_finance_observation_coverage", "finance_stored_opening_review",
-  "legacy_duty_finance_contract", "legacy_duty_finance_fact", "legacy_owner_guarantee_observation", "legacy_owner_guarantee_coverage",
+  "legacy_duty_finance_contract", "legacy_duty_finance_fact",
 ].map(n => `zzsh_order.${n}`).sort();
 const primaryKeys: Record<string, string[]> = {
   "zzsh_order.finance_covered_event": ["user_id", "source_kind", "source_type", "source_entity", "source_id", "beneficiary_role"],
@@ -436,8 +436,8 @@ export async function runMilestoneRuntimeAclProbes(o: MilestoneSchemaPgOptions):
   });
 }
 
-test("milestone PG helper has no implicit resource or credential fallback and validates the52+12 scope", () => {
-  assert.equal(existingTables.length, 52); assert.equal(new Set(existingTables).size, 52); assert.equal(newTables.length, 12);
+test("milestone PG helper has no implicit resource or credential fallback and validates the52+10 scope", () => {
+  assert.equal(existingTables.length, 52); assert.equal(new Set(existingTables).size, 52); assert.equal(newTables.length, 10);
   assert(existingTables.includes("zzsh_iam.admin_permission")); assert(existingTables.includes("zzsh_supply.rule_acceptance"));
   assert.equal(expectedDefinitionChanges.length, 17);
   let calls = 0;

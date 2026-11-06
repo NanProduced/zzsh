@@ -11,7 +11,6 @@ import { Amount, LocalRetry, RecordStatus, SkeletonBlock, StatusBadge } from "@/
 import "./personal-wallet.css";
 import {ControlledWithdrawal} from './controlled-withdrawal';
 import {BankBindingWorkspace} from './bank-binding-workspace';
-import {OwnerGuaranteeHistory} from './owner-guarantee-history';
 
 function useWalletRead(scope: string) {
   const session = useUserSession(), store = useUserSessionStore(), scopeRef = useRef(scope); scopeRef.current = scope;
@@ -153,7 +152,7 @@ function EmptyEntries({ bucket, filtered, recordsComplete, hasMore }: { bucket: 
 }
 
 export function PersonalWallet({ scope }: { scope: string }) {
-  const params = useSearchParams(), paneRaw = params.get("wallet"), pane = ["entries", "entry", "withdraw", "withdraw-local", "guarantees"].includes(paneRaw ?? "") ? paneRaw! : "overview", entryId = params.get("entry") ?? "", filterRaw = params.get("bucket"), bucket: EntryBucket = filterRaw==='AVAILABLE' ? 'AVAILABLE' : "ALL";
+  const params = useSearchParams(), paneRaw = params.get("wallet"), pane = ["entries", "entry", "withdraw", "withdraw-local"].includes(paneRaw ?? "") ? paneRaw! : "overview", entryId = params.get("entry") ?? "", filterRaw = params.get("bucket"), bucket: EntryBucket = filterRaw==='AVAILABLE' ? 'AVAILABLE' : "ALL";
   const read = useWalletRead(scope), heading = useRef<HTMLHeadingElement>(null), root = useRef<HTMLElement>(null), scopeRef = useRef(scope); scopeRef.current = scope;
   const [bankReload, setBankReload] = useState(0);
   const bankCard = useUserBankBinding(scope, pane === "overview", read.session.userId, bankReload);
@@ -198,7 +197,7 @@ export function PersonalWallet({ scope }: { scope: string }) {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [scope, pane, entryId, read.wallet, detailReload]);
   const refresh = () => { pageRequest.current?.abort(); detailRequest.current?.abort(); setPage({ scope, bucket, value: null, error: null, busy: true }); setDetail({ scope, id: entryId, value: null, error: null }); setBankReload(n => n + 1); read.refresh(); };
-  const title = pane === "entries" ? "余额流水" : pane === "entry" ? "流水详情" : pane === "withdraw" ? "银行卡与提现" : pane === "withdraw-local" ? "提现申请" : pane === "guarantees" ? "上架保证金" : "我的钱包";
+  const title = pane === "entries" ? "余额流水" : pane === "entry" ? "流水详情" : pane === "withdraw" ? "银行卡与提现" : pane === "withdraw-local" ? "提现申请" : "我的钱包";
   const w = read.wallet, records = visiblePage.value;
   const recordsComplete = records?.listCoverage.knowledge === "KNOWN" && records.listCoverage.scope !== "POSTED_LEDGER_ONLY";
   const rawItems = records?.items ?? [];
@@ -213,16 +212,13 @@ export function PersonalWallet({ scope }: { scope: string }) {
     return true;
   });
   return <section ref={root} className="account-module personal-wallet" data-testid="personal-wallet" aria-busy={read.loading || undefined}>
-    <header className="account-module-heading"><div><h2 ref={heading} tabIndex={-1} className="wallet-heading">{title}</h2><p>{pane === "withdraw" ? "管理收款资料，核对提现条件、费用与申请记录。" : pane === "entries" ? "按时间查看余额收入与支出。" : pane === "entry" ? "查看这笔记录的详细信息。" : "查看余额、提现和资金记录。"}</p></div>{pane !== "withdraw" && pane !== "guarantees" ? <button type="button" className="button secondary" disabled={read.loading} onClick={refresh}><RefreshCw size={15} aria-hidden="true" />刷新</button> : null}</header>
+    <header className="account-module-heading"><div><h2 ref={heading} tabIndex={-1} className="wallet-heading">{title}</h2><p>{pane === "withdraw" ? "管理收款资料，核对提现条件、费用与申请记录。" : pane === "entries" ? "按时间查看余额收入与支出。" : pane === "entry" ? "查看这笔记录的详细信息。" : "查看余额、提现和资金记录。"}</p></div>{pane !== "withdraw" ? <button type="button" className="button secondary" disabled={read.loading} onClick={refresh}><RefreshCw size={15} aria-hidden="true" />刷新</button> : null}</header>
     <nav className="wallet-local-tabs" aria-label="钱包页面">
       <Link href={href()} scroll={false} aria-current={pane === "overview" ? "page" : undefined}>钱包概览</Link>
       <Link href={href("entries")} scroll={false} aria-current={pane === "entries" || pane === "entry" ? "page" : undefined}>余额流水</Link>
       <Link href={href("withdraw")} scroll={false} aria-current={pane === "withdraw" || pane === "withdraw-local" ? "page" : undefined}>提现</Link>
     </nav>
-    {pane === "guarantees" ? <>
-      <OwnerGuaranteeHistory scope={scope} />
-      <p className="account-module-note">缴纳、退还和信用相关处理可前往 <Link className="account-inline-link" href="/account?view=credit" scroll={false}>信用与保证金</Link> 查看。</p>
-    </> : pane === "withdraw" ? <>
+    {pane === "withdraw" ? <>
       <ControlledWithdrawal key={`controlled:${scope}`} wallet={w} scope={scope} onWalletChanged={refresh} onIdentityFailure={read.invalidate} compact showRecoveryFallback />
       <BankBindingWorkspace key={scope} scope={scope} availableBalance={w?.buckets.available.amountCents ?? null} onWalletChanged={refresh} />
     </> : pane === "withdraw-local" ? <>

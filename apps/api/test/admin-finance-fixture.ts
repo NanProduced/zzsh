@@ -10,7 +10,7 @@ export class FinanceSqlFixture {
   readonly db = new DatabaseSync(":memory:");
   readonly reads: { family: string; rows: number }[] = [];
   clusterSnapshot = "100:100:";
-  constructor(data: { ledger?: Row[]; history?: Row[]; native?: Row[]; payments?:Row[]; legacy?: Row[]; subjects?: Row[]; withdrawals?: Row[]; operations?: Row[];earnings?:Row[];earningTransitions?:Row[];financeEvents?:Row[];guaranteeHistory?:Row[];legacyDutyFacts?:Row[];legacyDuties?:Row[] } = {}) {
+  constructor(data: { ledger?: Row[]; history?: Row[]; native?: Row[]; payments?:Row[]; legacy?: Row[]; subjects?: Row[]; withdrawals?: Row[]; operations?: Row[];earnings?:Row[];earningTransitions?:Row[];financeEvents?:Row[];legacyDutyFacts?:Row[];legacyDuties?:Row[] } = {}) {
     this.db.function("regexp", (pattern, value) => typeof value === "string" && new RegExp(String(pattern)).test(value) ? 1 : 0);
     this.db.function("md5", value => value===null?null:createHash('md5').update(String(value)).digest('hex'));
     // SQLite floating SUM cannot represent the 24-digit cents contract. The relational FILTER runs in SQL;
@@ -25,8 +25,6 @@ export class FinanceSqlFixture {
     this.table('zzsh_order.rental_referral_earning','id economic_root_id beneficiary_user_id beneficiary_role amount_cents state funds_disposition recovery_required_cents version canonical_seed seed_digest basis_digest posting_digest economic_key posting_id payment_confirmation_id order_id created_at due_at',data.earnings??[]);
     this.table('zzsh_order.payment_distribution_basis','id order_id payment_confirmation_id canonical_basis basis_digest',[]);
     this.table('zzsh_order.rental_referral_transition','id earning_id action expected_version result_version finance_event_id source_digest',data.earningTransitions??[]);
-    this.table('zzsh_order.legacy_owner_guarantee_observation','id user_id account_id legacy_account_id source_canonical source_digest source_cutoff imported_at',data.guaranteeHistory??[]);
-    this.table('zzsh_order.legacy_owner_guarantee_coverage','id body_digest',[]);
     this.table("zzsh_order.rental_order", "id display_no owner_user_id renter_user_id account_id game_id status revision paid_confirmation_id paid_at rental_amount_cents deposit_amount_cents created_at", data.native ?? []);
     this.table("zzsh_order.payment_confirmation","id order_id source disposition amount_cents currency accepted_at",data.payments??[]);
     this.table("zzsh_order.legacy_order_read_snapshot", "id source_system source_entity legacy_id source_digest binding_digest original_order_no owner_user_id renter_user_id account_id game_id source_snapshot source_paid_at source_completed_at due_amount_cents recorded_paid_amount_cents deposit_amount_cents source_order_status source_pay_status source_created_at imported_at", data.legacy ?? []);

@@ -1,6 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
 import { ChevronDownIcon } from 'lucide-react';
-import { AdminOwnerGuaranteeHistory } from '../owner-guarantee-history';
 import { financeMoney } from '../admin-finance-api';
 import { ListPagination } from '@/components/admin-list/list-pagination';
 import { Badge } from '@/components/ui/badge';
@@ -90,12 +89,11 @@ export function CreditPanel({ adapter, user, refreshNonce, active = true, change
   useEffect(() => { setPending(restore(subject)); setDialog(null); setAmount(''); setExplanation(''); setNotice(''); setWorking(false); setEventPage(1); }, [subject, enabled]);
   const { result, retry } = useDirectoryRequest(`${subject}:credit:${refreshNonce}:${revision}:${enabled}`, signal => enabled ? adapter.credit(user.id, signal) : Promise.reject(new AdminApiError(403, 'FORBIDDEN')));
   const current = (intent: Intent) => view.current.mounted && view.current.enabled && view.current.subject === intent.subject;
-  const guaranteeHistory = enabled && adapter.hasCreditGuaranteeRead() ? <Collapsible className="rounded-xl border bg-card"><CollapsibleTrigger render={<Button variant="ghost" className="w-full justify-between px-4" />}>保证金来源记录<ChevronDownIcon className="size-4" aria-hidden /></CollapsibleTrigger><CollapsibleContent className="p-4"><AdminOwnerGuaranteeHistory subjectUserId={user.id} adminUserId={adapter.snapshot.adminUserId} scopeKey={JSON.stringify([subject, refreshNonce, revision, [...adapter.snapshot.permissions].sort()])} canRead={true} /></CollapsibleContent></Collapsible> : null;
 
   if (!adapter.has(PERMISSION.credit)) return <Message kind="denied" title="信用记录无权限">当前管理员无法读取该用户的信用记录。</Message>;
   if (!enabled) return null;
   if (result.state === 'loading') return <div role="status" aria-label="正在加载信用记录" className="grid gap-4"><Skeleton className="h-28 w-full" /><Skeleton className="h-52 w-full" /></div>;
-  if (result.state === 'error') return <><Message kind="error" title="信用记录读取失败" retry={retry}>{errorText(result.error)}</Message>{guaranteeHistory}</>;
+  if (result.state === 'error') return <Message kind="error" title="信用记录读取失败" retry={retry}>{errorText(result.error)}</Message>;
   const data = result.data;
   const credit = data.credit;
   const score = Number.isInteger(credit?.score) && credit.score >= 0 && credit.score <= 100 ? credit.score as number : null;
@@ -188,7 +186,6 @@ export function CreditPanel({ adapter, user, refreshNonce, active = true, change
         {item.paymentHistory?.length ? <Collapsible><CollapsibleTrigger render={<Button variant="outline" size="sm" />}>支付尝试 {item.paymentHistory.length} 笔</CollapsibleTrigger><CollapsibleContent><Table><TableHeader><TableRow><TableHead>商户单号</TableHead><TableHead>金额</TableHead><TableHead>记录状态</TableHead></TableRow></TableHeader><TableBody>{item.paymentHistory.map((attempt: any) => <TableRow key={attempt.id}><TableCell>{attempt.merchantOrderNo || attempt.id}</TableCell><TableCell>{financeMoney(attempt.observedAmountCents ?? attempt.amountCents)}</TableCell><TableCell>{guaranteePaymentAttemptLabel(attempt.status)}</TableCell></TableRow>)}</TableBody></Table></CollapsibleContent></Collapsible> : null}
         {item.refundHistory?.length ? <Collapsible><CollapsibleTrigger render={<Button variant="outline" size="sm" />}>退款尝试 {item.refundHistory.length} 笔</CollapsibleTrigger><CollapsibleContent><Table><TableHeader><TableRow><TableHead>退款单号</TableHead><TableHead>金额</TableHead><TableHead>记录状态</TableHead></TableRow></TableHeader><TableBody>{item.refundHistory.map((attempt: any) => <TableRow key={attempt.id}><TableCell>{attempt.id}</TableCell><TableCell>{financeMoney(attempt.amountCents)}</TableCell><TableCell>{guaranteeRefundAttemptLabel(attempt.status)}</TableCell></TableRow>)}</TableBody></Table></CollapsibleContent></Collapsible> : null}
       </div>)}
-      <AdminOwnerGuaranteeHistory subjectUserId={user.id} adminUserId={adapter.snapshot.adminUserId} scopeKey={JSON.stringify([subject, refreshNonce, revision, adapter.snapshot.security, [...adapter.snapshot.permissions].sort()])} canRead={enabled && adapter.hasCreditGuaranteeRead()} />
     </CollapsibleContent></Collapsible> : null}
     <Dialog open={dialog !== null} onOpenChange={value => { if (!value) setDialog(null); }}><DialogContent closeLabel="关闭" className="sm:max-w-md"><form className="grid gap-4" onSubmit={event => { event.preventDefault(); submit(); }}>
       <DialogHeader><DialogTitle>{dialog === 'deduct' ? '手动扣分' : '更正扣分'}</DialogTitle><DialogDescription>{user.name} · 当前 {score ?? '未知'} 分{dialog && dialog !== 'deduct' ? `，原扣分 ${Math.abs(dialog.appliedDeltaScore)} 分` : ''}</DialogDescription></DialogHeader>

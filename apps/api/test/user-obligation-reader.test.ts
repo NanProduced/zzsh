@@ -4,7 +4,7 @@ import type { PoolClient } from "pg";
 
 import { readUserObligations, USER_OBLIGATION_ORDER } from "../src/auth/user-obligation-reader";
 
-type Hit = Partial<Record<"listing" | "order" | "withdrawal" | "deposit" | "legacyDeposit" | "commission", boolean>>;
+type Hit = Partial<Record<"listing" | "order" | "withdrawal" | "deposit" | "commission", boolean>>;
 type Fixture = {
   installed?: boolean | ((relations: string[]) => boolean);
   subject?: { provider: string | null | undefined; covered: boolean; migrated: boolean } | null;
@@ -34,7 +34,6 @@ function client(f: Fixture) {
       }
       if (sql.includes("settlement_ledger_entry")) return { rows: [f.totals ?? ZERO], rowCount: 1 };
       if (sql.includes("withdrawal_intent")) return rows(Boolean(f.hits?.withdrawal));
-      if (sql.includes("legacy_owner_guarantee_observation")) return rows(Boolean(f.hits?.legacyDeposit));
       if (sql.includes("owner_guarantee_requirement")) return rows(Boolean(f.hits?.deposit));
       if (sql.includes("rental_referral_earning")) return rows(Boolean(f.hits?.commission));
       throw new Error(`unexpected query ${sql}`);
@@ -78,7 +77,6 @@ test("unknown or unreadable sources fail closed", async () => {
   assert.deepEqual(await readUserObligations("u", client({ subject: null }).client), { status: "UNKNOWN", obligation: "WALLET_BALANCE", reason: "IDENTITY_STATE_MISSING" });
   assert.deepEqual(await readUserObligations("u", client({ totals: { ...ZERO, available: "-1" } }).client), { status: "UNKNOWN", obligation: "WALLET_BALANCE", reason: "LEDGER_NEGATIVE" });
   assert.deepEqual(await readUserObligations("u", client({ totals: { ...ZERO, pending: "x" } }).client), { status: "UNKNOWN", obligation: "WALLET_BALANCE", reason: "LEDGER_UNREADABLE" });
-  assert.deepEqual(await readUserObligations("u", client({ hits: { legacyDeposit: true } }).client), { status: "UNKNOWN", obligation: "DEPOSIT", reason: "LEGACY_GUARANTEE_UNRESOLVED" });
 });
 
 test("legacy users without admitted opening balance are refused; covered legacy users use the ledger", async () => {

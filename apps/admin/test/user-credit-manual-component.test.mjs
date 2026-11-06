@@ -58,22 +58,13 @@ async function fill(element, value) { assert.ok(element); await act(async () => 
 async function mount(t, config = {}) {
   browser.sessionStorage.clear(); globalThis.sessionStorage = browser.sessionStorage;
   const a = config.adapter ?? adapter(config);
-  const historyCalls = [];
-  const priorFetch = globalThis.fetch;
-  globalThis.fetch = async (url, init = {}) => {
-    const address = new URL(String(url), browser.location.href); historyCalls.push({ path: address.pathname, search: address.search, method: init.method ?? 'GET' });
-    assert.match(address.pathname, /^\/api\/bff\/admin\/credit\/users\/[^/]+\/guarantee-history$/);
-    return new Response(JSON.stringify({ contractVersion: 'admin-owner-guarantee-history.read.v1', subjectId: address.pathname.split('/').at(-2), adminActorId: a.snapshot.adminUserId,
-      contextKey: 'synthetic-history-context', snapshotVersion: null, asOf: null, nextCursor: null, items: [], channelArrival: 'UNKNOWN', liability: { knowledge: 'UNKNOWN', amountCents: null },
-      coverage: { knowledge: 'KNOWN', count: '0', mappedRecordCount: '0' }, postedHeld: { knowledge: 'KNOWN', amountCents: '0', scope: 'POSTED_LEDGER_ONLY' } }), { status: 200, headers: { 'content-type': 'application/json' } });
-  };
   if (config.initialIntent) browser.sessionStorage.setItem(`zzsh.admin.credit.${encodeURIComponent(`${a.snapshot.adminUserId}:${a.snapshot.session.id}:synthetic-user`)}`, JSON.stringify(config.initialIntent(a)));
   const host = browser.document.createElement('div'); host.className = 'workspace-root'; browser.document.body.append(host);
   let root = createRoot(host); let subject = { id: 'synthetic-user', name: '测试用户' }; let active = true; let changed = 0;
   const props = () => ({ adapter: a, user: subject, refreshNonce: 0, active, changed: () => { changed += 1; } });
   await act(async () => root.render(createElement(CreditPanel, props()))); await settle();
-  t.after(async () => { globalThis.sessionStorage = browser.sessionStorage; globalThis.fetch = priorFetch; await act(async () => root.unmount()); host.remove(); await settle(); });
-  return { a, host, historyCalls, changes: () => changed,
+  t.after(async () => { globalThis.sessionStorage = browser.sessionStorage; await act(async () => root.unmount()); host.remove(); await settle(); });
+  return { a, host, changes: () => changed,
     remount: async () => { await act(async () => root.unmount()); root = createRoot(host); await act(async () => root.render(createElement(CreditPanel, props()))); await settle(); },
     subject: async value => { subject = value; await act(async () => root.render(createElement(CreditPanel, props()))); await settle(); },
     active: async value => { active = value; await act(async () => root.render(createElement(CreditPanel, props()))); await settle(); },
@@ -111,7 +102,7 @@ test('a deduction dialog validates the amount and submits only amount, visible r
 test('a read-only role sees records without deduction or correction controls', async t => {
   const h = await mount(t, { writable: false }); await waitFor(() => h.host.querySelector('table'));
   assert.equal(button('手动扣分'), undefined); assert.equal(button('更正这笔扣分：核实后的扣分说明'), undefined); assert.equal(h.a.calls.write.length, 0);
-  assert.equal(button('号主保证金与收退记录'), undefined); assert.equal(h.historyCalls.length, 0);
+  assert.equal(button('号主保证金与收退记录'), undefined);
 });
 
 test('unavailable browser storage refuses a write before contacting the API', async t => {
@@ -212,7 +203,7 @@ test('guarantee details preserve every payment and refund attempt without exposi
   assert.ok(!attemptCells.includes('待核'), '尝试状态不得再落回旧兜底');
   await click(button('恢复申请')); assert.match(h.host.textContent, /恢复申请待审核/);
   for (const command of ['批准 +10', '驳回', '允许原路退还', '发起支付', '发起退款']) assert.equal(button(command), undefined, command);
-  assert.equal(a.calls.write.length, 0); assert.equal(h.historyCalls.length, 1);
+  assert.equal(a.calls.write.length, 0);
 });
 
 test('guarantee responsibility and unknown codes use their own words, never the shared 待核 fallback', async t => {
@@ -228,14 +219,6 @@ test('guarantee responsibility and unknown codes use their own words, never the 
   assert.ok(cells.includes('已申请退还保证金'), 'REFUND_REQUESTED');
   assert.ok(cells.includes('状态暂不识别，请刷新后核对'), '未登记值必须有诚实回退');
   assert.ok(!cells.includes('待核'), '责任表不得再产生裸“待核”');
-});
-
-test('guarantee history remains independently readable after the credit reader fails, and denied roles do not fetch it', async t => {
-  const a = adapter({ guaranteeRead: true }); a.credit = async () => { throw new AdminApiError(503, 'INTERNAL_ERROR'); };
-  const h = await mount(t, { adapter: a }); await waitFor(() => h.host.textContent.includes('信用记录读取失败'));
-  await click(button('保证金来源记录')); await waitFor(() => h.host.textContent.includes('号主保证金历史来源'));
-  assert.equal(h.historyCalls.length, 1); assert.equal(h.historyCalls[0].path, '/api/bff/admin/credit/users/synthetic-user/guarantee-history');
-  await h.active(false); assert.equal(h.host.textContent, ''); assert.equal(h.historyCalls.length, 1);
 });
 
 test('legacy unresolved credit intent stays preserved without enabling its closed historical writer', async t => {
