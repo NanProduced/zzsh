@@ -375,6 +375,34 @@ test('participants include historical commissions and leave incomplete child tot
  assert.equal(p.inviterChildren,null);assert.equal(p.leaderChildren,null);assert.equal(p.eligibility,'UNKNOWN');assert.deepEqual(p.earningsReasonCodes,['HISTORICAL_COVERAGE_NOT_CLOSED']);
 });
 
+test('participant list preserves true, false and unknown freeze states',async()=>{
+ const frozen=[true,false,null];
+ const client={query:async(sql:string)=>{
+  if(sql.includes('to_regclass'))return{rows:[{native:true,legacy:false,duties:false,coverage:false,native_origin:false}]};
+  if(sql.includes('WITH visible_earnings AS'))return{rows:[{native:'n'}]};
+  if(sql.includes('clock_timestamp'))return{rows:[{at:'2026-11-03T00:00:00Z'}]};
+  if(sql.includes('participant_amounts')&&sql.includes('ORDER BY'))return{rows:frozen.map((value,index)=>({user_id:'person_'+index,eligibility:'ELIGIBLE',commission_frozen:value,source_type:'LEGACY_MYSQL',invitees_knowledge:'UNKNOWN',leader_children:0,inviter_children:0,record_count:'0',settled_cents:'0',pending_cents:'0',recovery_cents:'0',review_cents:'0',review_count:'0',total:3}))};
+  return{rows:[]};
+ }} as any;
+ const result=await readAdminDistributionParticipants(client,dashboardContext(),filtersForTest(),undefined,undefined,undefined,true);
+ assert.deepEqual(result.items.map(item=>item.frozen),frozen);
+});
+
+test('each downline view preserves true, false and unknown freeze states',async()=>{
+ const frozen=[true,false,null];
+ const client={query:async(sql:string)=>{
+  if(sql.includes('SELECT invitees_knowledge'))return{rows:[{invitees_knowledge:'UNKNOWN',source_type:'LEGACY_MYSQL'}]};
+  if(sql.includes('to_regclass'))return{rows:[{native:true,legacy:false,duties:false,coverage:false,native_origin:false}]};
+  if(sql.includes('contributor_page AS')||sql.includes('SELECT r.child_user_id,u.name'))return{rows:frozen.map((value,index)=>({child_user_id:'person_'+index,eligibility:'ELIGIBLE',commission_frozen:value,source_type:'LEGACY_MYSQL',invitees_knowledge:'UNKNOWN',children:0,total:3,uncertain:false}))};
+  if(sql.includes('count(DISTINCT child_user_id)'))return{rows:[{count:3}]};
+  return{rows:[]};
+ }} as any;
+ for(const type of ['INVITER','COMMISSION_CONTRIBUTOR','DISTRIBUTION_LEADER']){
+  const result=await readAdminDistributionDownline(client,dashboardContext(),'parent',new URLSearchParams({type}));
+  assert.deepEqual(result.items.map(item=>item.participant?.frozen),frozen,type);
+ }
+});
+
 test('display projection omits legacy qualification bytes explicitly and retains duty proof in the pagination version',async()=>{
  const calls:string[]=[];const client={query:async(sql:string)=>{calls.push(sql);
   if(sql.includes('to_regclass'))return{rows:[{native:true,legacy:true,duties:true,coverage:false,native_origin:false}]};

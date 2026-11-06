@@ -74,6 +74,7 @@ const ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,179}$/;
 const DATE = /^\d{4}-\d{2}-\d{2}$/;
 const UNKNOWN = (reason: string): Metric => ({ knowledge: "UNKNOWN", cents: null, count: null, reasonCodes: [reason] });
 const KNOWN = (cents: string, count: string | null = null): Metric => ({ knowledge: "KNOWN", cents: cents, count, reasonCodes: [] });
+const frozenState = (value:unknown):boolean|null => typeof value==='boolean'?value:null;
 const day = (value: Date) => new Date(value.getTime() + 8 * 3600_000).toISOString().slice(0, 10);
 const addDays = (value: string, days: number) => {
   const date = new Date(`${value}T00:00:00Z`);
@@ -599,7 +600,7 @@ export async function readAdminDistributionParticipants(c: PoolClient, context: 
   const contributors = await readContributorCounts(c, context, sources, userIds);
   const snapshot = key && version !== null ? distributionSnapshot(version, asOf, f, context, key, token) : null;
   return { contractVersion: DASHBOARD_VERSION, asOf, snapshotVersion: version, scope: context.scope, items: rows.map((row: any) => {const closed=coverage.get(row.user_id)?.knowledge==='KNOWN';const contributor=contributors.get(row.user_id), contributorComplete=Boolean(contributor)&&row.invitees_knowledge==='KNOWN'&&(Number(row.inviter_children??0)===0||closed||nativeAbsences.has(row.user_id))&&!contributor!.uncertain;const cents=(value:unknown)=>closed||value!==undefined&&value!=='0'?String(value??'0'):null;return({ userId: row.user_id, name: context.directoryRead ? row.name ?? null : null,
-    eligibility: row.eligibility, frozen: row.commission_frozen === true, levelCode: row.level_code ?? null, levelName: row.level_name ?? null, inviter: row.inviter_knowledge, leader: row.leader_knowledge,
+    eligibility: row.eligibility, frozen: frozenState(row.commission_frozen), levelCode: row.level_code ?? null, levelName: row.level_name ?? null, inviter: row.inviter_knowledge, leader: row.leader_knowledge,
     sourceType: row.source_type, revision: String(row.revision ?? "0"), leaderChildren:row.invitees_knowledge==='KNOWN'?Number(row.leader_children??0):null,inviterChildren:row.invitees_knowledge==='KNOWN'?Number(row.inviter_children??0):null,
     mappedLeaderChildren:Number(row.leader_children??0),mappedInviterChildren:Number(row.inviter_children??0),
     contributorChildren:contributorComplete?contributor!.count:null,mappedContributorChildren:contributor?.count,
@@ -699,7 +700,7 @@ export async function readAdminDistributionDownline(c: PoolClient, context: Dash
     const complete=owner.invitees_knowledge==='KNOWN'&&(inviterCount===0||coverage.get(userId)?.knowledge==='KNOWN'||native.has(userId))&&!uncertain;
     return {contractVersion:DASHBOARD_VERSION,subjectId:userId,type,knowledge:complete?'KNOWN' as const:'PARTIAL' as const,total:String(total),page:Number(page),pageSize:limit,
       items:found.filter((row:any)=>row.child_user_id!=null).map((row:any)=>({userId:row.child_user_id,name:context.directoryRead?row.name??null:null,sourceType:row.source_type??null,boundAt:row.source_type==='LEGACY_MYSQL'?null:row.bound_at?new Date(row.bound_at).toISOString():null,
-        participant:row.eligibility?{eligibility:row.eligibility,frozen:row.commission_frozen===true,levelCode:row.level_code??null,levelName:row.level_name??null}:null,children:row.invitees_knowledge==='KNOWN'?Number(row.children??0):null,mappedChildren:Number(row.children??0)}))};
+        participant:row.eligibility?{eligibility:row.eligibility,frozen:frozenState(row.commission_frozen),levelCode:row.level_code??null,levelName:row.level_name??null}:null,children:row.invitees_knowledge==='KNOWN'?Number(row.children??0):null,mappedChildren:Number(row.children??0)}))};
   }
   const rows = (await c.query(`SELECT r.child_user_id,u.name,r.source_type,r.bound_at,p.eligibility,p.commission_frozen,p.level_code,p.invitees_knowledge,
       CASE WHEN v.schema_version='distribution-policy.v3' THEN v.canonical_config::jsonb#>>ARRAY['legacySource','levelNames',p.level_code] WHEN v.schema_version='distribution-policy.v4' THEN v.canonical_config::jsonb#>>ARRAY['levelNames',p.level_code] END level_name,
@@ -716,5 +717,5 @@ export async function readAdminDistributionDownline(c: PoolClient, context: Dash
   const total = rows.length ? Number(rows[0].total) : Number((await c.query(`SELECT count(*)::int AS total FROM zzsh_order.invitation_relation WHERE parent_user_id=$1 AND type=$2`, [userId, type])).rows[0]?.total ?? 0);
   return { contractVersion: DASHBOARD_VERSION, subjectId: userId, type, knowledge: owner.invitees_knowledge === "KNOWN" ? "KNOWN" : "PARTIAL", total: String(total), page: Number(page), pageSize: limit,
     items: rows.map((row: any) => ({ userId: row.child_user_id, name: context.directoryRead ? row.name ?? null : null, sourceType: row.source_type ?? null, boundAt: row.source_type === 'LEGACY_MYSQL' ? null : row.bound_at ? new Date(row.bound_at).toISOString() : null,
-      participant: row.eligibility ? { eligibility: row.eligibility, frozen: row.commission_frozen === true, levelCode: row.level_code ?? null, levelName: row.level_name ?? null } : null, children: row.invitees_knowledge === 'KNOWN' ? Number(row.children ?? 0) : null, mappedChildren: Number(row.children ?? 0) })) };
+      participant: row.eligibility ? { eligibility: row.eligibility, frozen: frozenState(row.commission_frozen), levelCode: row.level_code ?? null, levelName: row.level_name ?? null } : null, children: row.invitees_knowledge === 'KNOWN' ? Number(row.children ?? 0) : null, mappedChildren: Number(row.children ?? 0) })) };
 }

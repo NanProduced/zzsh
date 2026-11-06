@@ -33,8 +33,18 @@ test('historical qualification, grade and mapped children do not become current 
  const h=await setup();try{const m=await h.loader.ssrLoadModule('/src/views/distribution-dashboard-model.ts');
   const p={eligibility:'UNKNOWN',levelCode:null,legacyQualification:{eligibility:'ELIGIBLE',commissionFrozen:false,levelId:'2'}};
   assert.equal(m.participantEligibilityLabel(p),'原资格有效 · 当前计佣待核');assert.equal(m.participantLevelLabel(p),'原分销档位 ID 2');
+  assert.equal(m.participantEligibilityLabel({eligibility:'ELIGIBLE',frozen:null}),'计佣状态待核');assert.equal(m.participantEligibilityLabel({eligibility:'ELIGIBLE',frozen:true}),'已冻结');
   assert.equal(m.participantChildrenLabel(null,164),'已接入 164 · 总数待核');assert.equal(m.participantChildrenLabel(0,0),'0');assert.equal(m.money(null),'未核定');
  }finally{await h.close();}
+});
+
+test('unknown freeze state never presents an eligible participant as actively earning',async()=>{
+ const h=await setup(),oldFetch=globalThis.fetch;try{
+  const participant={userId:'user_1',name:'测试分销商',eligibility:'ELIGIBLE',frozen:null,levelCode:'silver',sourceType:'NATIVE',inviterChildren:0,leaderChildren:0,settledCents:'0',pendingCents:'0',recoveryCents:'0',mappedRecordCount:'0'};
+  globalThis.fetch=h.browser.fetch=async()=>json({items:[participant],total:'1',page:1,pageSize:20,hasMore:false,snapshot:null,scope:{network:'AVAILABLE'}});
+  const m=await h.loader.ssrLoadModule('/src/views/distribution-dashboard-pages.tsx'),ui=await h.mount(m.DistributionParticipantsPage,{snapshot:snap([], 'boss','session',true),onOpenPath(){}});
+  for(const root of [ui.host.querySelector('table'),ui.host.querySelector('ul')]){assert.match(root.textContent,/计佣状态待核/);assert.match(root.textContent,/查看资格/);assert.doesNotMatch(root.textContent,/参与中|冻结资格/);}
+ }finally{globalThis.fetch=oldFetch;await h.close();}
 });
 
 test('participant desktop and mobile retain observed relations, commission subtotal and unknown coverage',async()=>{
