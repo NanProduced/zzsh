@@ -9,6 +9,15 @@ const paths=new Set([
  'POST /api/v1/admin/security/enrollment/activate','GET /api/auth/admin/get-session',
 ]);
 
+// Snapshot the complete existing economic roots/events; matching row counts alone cannot
+// prove the already-posted opening facts stayed unchanged during administrator bootstrap.
+export async function readFinanceRootEventDigest(client){
+ const rows=['finance_economic_root','finance_event'].map(name=>`SELECT '${name}' name,count(*)::text count,encode(sha256(convert_to(COALESCE(string_agg(encode(sha256(convert_to(to_jsonb(t)::text,'UTF8')),'hex'),'' ORDER BY t.id::text COLLATE "C"),''),'UTF8')),'hex') digest FROM zzsh_order.${name} t`).join(' UNION ALL ');
+ const result=(await client.query(`SELECT jsonb_agg(to_jsonb(x) ORDER BY x.name) result FROM (${rows}) x`)).rows[0]?.result;
+ assert(Array.isArray(result)&&result.length===2,'R07_BOSS_FINANCE_SNAPSHOT_INVALID');return result;
+}
+export function assertFinanceRootEventUnchanged(before,after){assert.deepEqual(after,before,'R07_BOSS_FINANCE_FACTS_CHANGED');}
+
 // The short-lived local listener exposes only the formal enrollment routes to this process.
 export function createBootstrapGateway(handler,gate){
  assert.equal(typeof handler,'function');assert(/^[a-f0-9]{64}$/.test(gate??''));const expected=Buffer.from(gate,'ascii');

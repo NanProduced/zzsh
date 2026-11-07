@@ -1,4 +1,4 @@
-import test from 'node:test';import assert from 'node:assert/strict';import {createBootstrapGateway,runCloneBossEnrollment} from './r07-clone-admin-bootstrap-flow.mjs';
+import test from 'node:test';import assert from 'node:assert/strict';import {assertFinanceRootEventUnchanged,createBootstrapGateway,readFinanceRootEventDigest,runCloneBossEnrollment} from './r07-clone-admin-bootstrap-flow.mjs';
 const id='admin_'+'a'.repeat(32),request={attempt:'test-attempt',name:'测试管理员',resource:'r07_delivery_clone',adminOrigin:'http://127.0.0.1:4231'};
 function fixture({failPath,throwPath,expireBefore}={}){
  const calls=[],saved=[],staged={bootstrapSecret:'b'.repeat(40),temporaryPassword:'a'.repeat(40),password:'c'.repeat(40)},receipt={steps:[]};let currentId='',windowCount=0;
@@ -37,4 +37,11 @@ test('temporary gateway rejects unknown routes and requests without its process 
   assert.equal((await fetch(origin+'/api/auth/admin/get-session',{method:'POST',headers:{'X-R07-Bootstrap-Gate':token}})).status,404);
   assert.equal((await fetch(origin+'/api/auth/admin/get-session',{headers:{'X-R07-Bootstrap-Gate':token}})).status,204);assert.equal(calls,1);
  }finally{await new Promise((resolve,reject)=>gateway.close(error=>error?reject(error):resolve()));}
+});
+test('economic root and event contents, not just row counts, must remain identical',async()=>{
+ const before=[{name:'finance_economic_root',count:'1',digest:'a'.repeat(64)},{name:'finance_event',count:'1',digest:'b'.repeat(64)}];
+ let query='';const snapshot=await readFinanceRootEventDigest({query:async sql=>{query=sql;return {rows:[{result:before}]};}});
+ assert.match(query,/zzsh_order\.finance_economic_root/);assert.match(query,/zzsh_order\.finance_event/);assert.match(query,/sha256\(convert_to\(to_jsonb\(t\)::text/);
+ assert.doesNotThrow(()=>assertFinanceRootEventUnchanged(snapshot,structuredClone(before)));
+ const changed=structuredClone(before);changed[0].digest='c'.repeat(64);assert.throws(()=>assertFinanceRootEventUnchanged(snapshot,changed),/R07_BOSS_FINANCE_FACTS_CHANGED/);
 });

@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';import {createHash,randomBytes} from 'no
 import Module,{createRequire} from 'node:module';import {dirname,isAbsolute,join,relative,resolve} from 'node:path';import {fileURLToPath} from 'node:url';
 import {LocalSession,writePrivate} from '../local-auth.mjs';import {advisoryLockSql,assertLiveTarget,loadRegisteredTarget,maintenanceConnection,targetConnection,targetIdentityQuery} from './local-target-registry.mjs';
 import {assertBootstrapOnlyAuth,assertCloneBossGrant,R07_CLONE_BOSS_TARGET as targetConstant,R07_CLEAN_EXPORT_SHA} from './r07-clone-admin-bootstrap-guard.mjs';
-import {createBootstrapGateway,runCloneBossEnrollment} from './r07-clone-admin-bootstrap-flow.mjs';
+import {assertFinanceRootEventUnchanged,createBootstrapGateway,readFinanceRootEventDigest,runCloneBossEnrollment} from './r07-clone-admin-bootstrap-flow.mjs';
 
 const mainRoot=resolve('D:/CodexWorktrees/main-consolidation-20261028/zzsh'),privateRoot=resolve('E:/zzsh-local-state/restricted');
 const credentialFile=join(privateRoot,'r07-demo-clone-resource-20261108-01/credentials.json');
@@ -35,10 +35,11 @@ async function readState(c,retiredIds){
  const userAccounts=(await c.query(`SELECT count(*)::int n,encode(sha256(convert_to(coalesce(string_agg(encode(sha256(convert_to(to_jsonb(t)::text,'UTF8')),'hex'),'' ORDER BY id COLLATE "C"),''),'UTF8')),'hex') digest FROM zzsh_auth_user.account t`)).rows[0];
  const retired=(await c.query(`SELECT count(*)::int n,encode(sha256(convert_to(coalesce(string_agg(encode(sha256(convert_to(to_jsonb(u)::text,'UTF8')),'hex'),'' ORDER BY u.id COLLATE "C"),''),'UTF8')),'hex') digest
   FROM zzsh_auth_admin."user" u LEFT JOIN zzsh_iam.admin_security s ON s.admin_user_id=u.id WHERE u.id=ANY($1::text[]) AND u.suspended AND NOT u."twoFactorEnabled" AND s.admin_user_id IS NULL`,[retiredIds])).rows[0];
- return {state,userAccounts,retired};
+ const financialFacts=await readFinanceRootEventDigest(c);return {state,userAccounts,retired,financialFacts};
 }
 function unchanged(before,after){for(const [k,v] of Object.entries(before.state))if(!['admin_users','admin_accounts','admin_factors','admin_sessions','admin_security'].includes(k))assert.equal(after.state[k],v,'R07_BOSS_EXISTING_STATE_CHANGED');
- assert.deepEqual(after.userAccounts,before.userAccounts,'R07_BOSS_USER_ACCOUNTS_CHANGED');assert.deepEqual(after.retired,before.retired,'R07_BOSS_RETIRED_IDENTITIES_CHANGED');}
+ assert.deepEqual(after.userAccounts,before.userAccounts,'R07_BOSS_USER_ACCOUNTS_CHANGED');assert.deepEqual(after.retired,before.retired,'R07_BOSS_RETIRED_IDENTITIES_CHANGED');
+ assertFinanceRootEventUnchanged(before.financialFacts,after.financialFacts);}
 async function criticalRows(c){
  const tables=[['users','zzsh_auth_user."user"','id'],['userAccounts','zzsh_auth_user.account','id'],['accounts','zzsh_supply.rental_account','id'],
   ['legacyAccounts','zzsh_supply.legacy_listing_read_snapshot','account_id'],['accountSourceFacts','zzsh_supply.legacy_listing_capture_fact','account_id'],
@@ -121,7 +122,7 @@ async function main(){
   assert(admin.length===1&&admin[0].status==='ACTIVE'&&admin[0].is_boss&&!admin[0].password_change_required&&!admin[0].suspended&&admin[0].factor&&admin[0].activated&&admin[0].bootstrap_audit===1&&admin[0].activation_audit===1&&admin[0].avatar===1,'R07_BOSS_FINAL_IDENTITY_INVALID');
   assert.equal((await reader.query('ROLLBACK')).command,'ROLLBACK');receipt.readbackRollbackAck=true;receipt.after=after.state;receipt.auditVerified=true;receipt.enrollmentVerified=true;
   receipt.existingIdentityPreserved=true;receipt.userAccountsUnchanged=true;receipt.financialFactsUnchanged=true;receipt.businessFactsUnchanged=true;
-  receipt.verifiedTables=unchangedRows.map(x=>x.name);receipt.added={adminUsers:1,credentialAccounts:1,adminSecurity:1,twoFactor:1,adminProfileAvatars:1,bootstrapAudit:1,activationAudit:1};
+  receipt.verifiedTables=unchangedRows.map(x=>x.name);receipt.verifiedFinancialTables=before.financialFacts.map(x=>x.name);receipt.added={adminUsers:1,credentialAccounts:1,adminSecurity:1,twoFactor:1,adminProfileAvatars:1,bootstrapAudit:1,activationAudit:1};
   receipt.profile=join(output,'profile.json');receipt.adminRuntimeSecret=join(output,'admin-runtime-secret');success=true;
  }catch(error){receipt.status=receipt.pendingStep?'STOPPED_COMMAND_OUTCOME_UNKNOWN':'STOPPED_PRESERVE_ATTEMPT';receipt.failure=/^[A-Z][A-Z0-9_]+$/.test(error.message??'')?error.message:error.code??error.name;process.exitCode=1;}
  finally{
