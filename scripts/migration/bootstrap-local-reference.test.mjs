@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
+import { buildSkinRetirementPackage } from "./derive-business-reference-skin-retirement.mjs";
 
 const script = fileURLToPath(new URL("./bootstrap-local-reference.mjs", import.meta.url));
 const hash = bytes => createHash("sha256").update(bytes).digest("hex");
@@ -18,6 +19,7 @@ function fixture(t, change = () => {}) {
         const [schema, table] = key.split(".");
         return { schema, table, columns: [{ name: "id", generated: "" }], primaryKey: ["id"], rows: table === "game" ? ['{"id":"game-1","code":"delta","catalog_revision":9007199254740993}'] : [] };
     });
+    tables.find(table => table.table === "skin").columns.push({ name: "category_id", generated: "" });
     const manifest = { kind: "BUSINESS_REFERENCE_PACKAGE_V1", gameCode: "delta", source: { database: "zzsh_dev_daily", oid: "2400547", read_only: "on" }, transactionRollback: true, clientClosed: true, foreignKeys: [] };
     change(tables, manifest);
     manifest.tables = tables.map(table => {
@@ -38,9 +40,54 @@ test("business verification is offline and keeps exact source row bytes", t => {
     assert.deepEqual(readFileSync(join(pkg.root, "zzsh_supply.game.json")), before);
 });
 
+function fixtureV2(t) {
+    const pkg = fixture(t, (tables, manifest) => {
+        manifest.sourceRawUnchanged = true;
+        tables.find(table => table.table === "skin_category").rows = ['{"id":"cat-1","game_id":"game-1","parent_id":null}'];
+        tables.find(table => table.table === "skin_owner").rows = ['{"id":"owner-1","game_id":"game-1","kind":"MELEE_TYPE","enabled":false}'];
+        const skin = tables.find(table => table.table === "skin");
+        skin.rows = ['{"id":"skin-1","game_id":"game-1","category_id":"cat-1","owner_kind":"MELEE_TYPE","owner_id":null}'];
+    });
+    const source = readFileSync(join(pkg.root, "manifest.json"));
+    const originals = new Map(pkg.manifest.tables.map(d => [d.file, readFileSync(join(pkg.root, d.file))]));
+    const {derived,files} = buildSkinRetirementPackage(source, originals, hash(source));
+    for (const [name, value] of files) writeFileSync(join(pkg.root, name), value);
+    return { ...pkg, derived, files, args: ["--manifest", join(pkg.root, "manifest.json"), "--manifest-sha", hash(derived.manifest)] };
+}
+
+test("OWNER_KIND_V2 verification recomputes source lineage without credentials", t => {
+    const pkg = fixtureV2(t), result = run(["--verify", ...pkg.args, "--credentials", "must-not-be-read"]);
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(JSON.parse(result.stdout).tables, 18);
+    assert.equal(JSON.parse(result.stdout).connections, 0);
+});
+
+test("OWNER_KIND_V2 rejects forged evidence before credentials", t => {
+    const pkg = fixtureV2(t), manifest = JSON.parse(pkg.derived.manifest);
+    const evidence = join(pkg.root, manifest.catalogRetirementEvidenceFile);
+    writeFileSync(evidence, '{}');
+    const result = run(["--verify", ...pkg.args, "--credentials", "must-not-be-read"]);
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /SKIN_EVIDENCE_MISMATCH/);
+    assert.doesNotMatch(result.stderr, /ECONN|must-not-be-read/);
+});
+
+test("OWNER_KIND_V2 rejects a changed target row even when its descriptor is rehashed", t => {
+    const pkg = fixtureV2(t), manifest = JSON.parse(pkg.derived.manifest);
+    const skin = manifest.tables.find(d => d.schema === "zzsh_supply" && d.table === "skin"), file = join(pkg.root, skin.file);
+    const table = JSON.parse(readFileSync(file)); table.rows[0] = table.rows[0].replace('"MELEE_TYPE"', '"AGENT"');
+    const changed = Buffer.from(JSON.stringify(table) + "\n"); writeFileSync(file, changed); skin.sha256 = hash(changed);
+    const manifestBytes = Buffer.from(JSON.stringify(manifest) + "\n"); writeFileSync(join(pkg.root, "manifest.json"), manifestBytes);
+    const result = run(["--verify", "--manifest", join(pkg.root, "manifest.json"), "--manifest-sha", hash(manifestBytes), "--credentials", "must-not-be-read"]);
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /SKIN_DERIVED_MANIFEST_MISMATCH/);
+    assert.doesNotMatch(result.stderr, /ECONN|must-not-be-read/);
+});
+
 for (const [name, change, error] of [
     ["no identities", tables => tables.push({ schema: "zzsh_auth_admin", table: "session", columns: [], primaryKey: ["id"], rows: [] }), /REFERENCE_TABLE_NOT_ALLOWED/],
     ["all tables required", tables => tables.pop(), /BUSINESS_PACKAGE_SOURCE_OR_CLOSURE_REQUIRED/],
+    ["V1 without category column", tables => { tables.find(table => table.table === "skin").columns = [{name:"id",generated:""}]; }, /BUSINESS_CATALOG_PROFILE_INVALID/],
     ["duplicate PK", tables => tables[0].rows.push(tables[0].rows[0]), /BUSINESS_DUPLICATE_OR_MISSING_PRIMARY_KEY/],
     ["PK required", tables => tables[0].primaryKey = [], /BUSINESS_PRIMARY_KEY_REQUIRED/],
     ["FK closure", (tables, manifest) => { tables[0].rows = ['{"id":"game-1","code":"delta","current_release_id":"missing"}']; manifest.foreignKeys.push({ child: "zzsh_supply.game", parent: "zzsh_supply.rule_release", name: "release_fk", columns: ["current_release_id"], parentColumns: ["id"] }); }, /BUSINESS_FOREIGN_KEY_NOT_CLOSED/],
@@ -94,14 +141,14 @@ for (const invalid of ["six-digit", "im-enabled"]) test("formal initialization r
     assert.doesNotMatch(result.stderr, /ENOENT|ECONN/);
 });
 
-for (const mode of ["commit", "replay", "rollback", "unknown", "skin-time", "skin-created", "skin-field"]) test("business execution host: " + mode, { skip: process.platform !== "win32" }, t => {
-    const pkg = fixture(t, (tables, manifest) => {
+for (const mode of ["commit", "replay", "rollback", "unknown", "skin-time", "skin-created", "skin-field", "v2-schema-old", "v2-schema-current"]) test("business execution host: " + mode, { skip: process.platform !== "win32" }, t => {
+    const pkg = mode.startsWith("v2-") ? fixtureV2(t) : fixture(t, (tables, manifest) => {
         tables.find(table => table.table === "firearm_classification").rows = ['{"id":"class-1","created_by_admin_id":"original-admin","updated_by_admin_id":null,"revision":9007199254740993}'];
         if (mode.startsWith("skin-")) tables.find(table => table.table === "skin").rows = ['{"id":"skin-1","name":"original","created_at":"2026-01-01","updated_at":"2026-01-01"}'];
         manifest.foreignKeys.push({ child: "zzsh_supply.firearm_classification", parent: "zzsh_auth_admin.user", columns: ["created_by_admin_id"], parentColumns: ["id"] });
     }), preload = join(pkg.root, "fake-pg.cjs"), calls = join(pkg.root, "calls.json"), receipt = join(pkg.root, "receipt.json"), parameters = join(pkg.root, "parameters.json");
     const requestedReceipt = "E:/zzsh-local-state/restricted/bootstrap-host-test.json";
-    const registered = { database: "zzsh_test_regression", oid: "123", nonce: "fixture-nonce", roles: { migration: { name: "fixture_m", oid: "456" } } };
+    const registered = { database: "zzsh_test_regression", marker: "zzsh:regression-test:v1", oid: "123", nonce: "a1b2c3d4e5f60718293a4b5c", roles: { migration: { name: "fixture_m", oid: "456" }, runtime: { name: "fixture_r", oid: "457" } } };
     writeFileSync(join(pkg.root, "resource.json"), JSON.stringify(registered));
     writeFileSync(join(pkg.root, "credentials.json"), JSON.stringify({ migration: { name: "fixture_m", oid: "456", password: "fixture-only" } }));
     writeFileSync(join(pkg.root, "password.txt"), "fixture-only");
@@ -113,9 +160,10 @@ fs.existsSync=function(file){return path.resolve(String(file))===requested?false
 fs.writeFileSync=function(file,...rest){return write.call(this,path.resolve(String(file))===requested?receipt:file,...rest)};
 mod.syncBuiltinESMExports();
 async function query(sql,params=[]){calls.push(sql);if(sql.includes('pg_try_advisory_lock')||sql.includes('pg_advisory_unlock'))return {rows:[{ok:true}]};
-if(sql.includes("current_setting('zzsh.regression_run')"))return {rows:[{oid:'123',nonce:'fixture-nonce',owner:'zzsh',marker:'zzsh:regression-test:v1',role:'fixture_m',role_oid:'456',rolsuper:false,rolcreatedb:false,rolcreaterole:false,rolinherit:false,rolbypassrls:false}]};
+if(sql.startsWith('SELECT current_database()'))return {rows:[{database:'zzsh_test_regression',oid:'123',nonce:'a1b2c3d4e5f60718293a4b5c',owner:'zzsh',marker:'zzsh:regression-test:v1',role:'fixture_m',role_oid:'456',is_super:'false',can_create_db:'false',can_create_role:'false',can_inherit:'false',can_bypass_rls:'false',system_identifier:null}]};
 if(sql.includes('FOR SHARE OF a,u'))return {rows:[{is_boss:true,status:'ACTIVE',suspended:false}]};
-if(sql.includes('SELECT attname AS name'))return {rows:[{name:'id'},{name:'code'},{name:'catalog_revision'}]};
+if(sql.includes('AS "categoryTableAbsent"'))return {rows:[{categoryTableAbsent:mode!=='v2-schema-old',categoryColumnAbsent:mode!=='v2-schema-old'}]};
+if(sql.includes('SELECT attname AS name'))return {rows:[{name:'id'},{name:'code'},{name:'catalog_revision'},{name:'category_id'}]};
 if(sql.includes('FROM pg_constraint k CROSS'))return {rows:[{name:'id'}]};
 if(sql.includes('SELECT sn.nspname'))return {rows:[]};
 if(sql.startsWith('SELECT to_jsonb(t)=')){const key=sql.match(/FROM ("[^\"]+"\."[^\"]+")/)[1];
@@ -130,16 +178,16 @@ class Client{async connect(){calls.push('maintenance.connect')}query(...args){re
 class Pool{async connect(){calls.push('pool.connect');return {query,release(){calls.push('client.release')}}}async end(){calls.push('pool.end')}}
 mod._load=function(name,...rest){return name==='pg'?{Client,Pool}:originalLoad.call(this,name,...rest)};
 `);
-    const result = spawnSync(process.execPath, ["--require", preload, script, "--execute", ...pkg.args, "--maintenance-admin-id", "existing-boss", "--oid", "123", "--nonce", "fixture-nonce", "--credentials", join(pkg.root, "credentials.json"), "--receipt", requestedReceipt], { encoding: "utf8", timeout: 5000, env: { ...process.env, DB_PASSWORD_FILE: join(pkg.root, "password.txt") } });
-    assert.ok(existsSync(receipt), result.stderr + result.stdout);
+    const result = spawnSync(process.execPath, ["--require", preload, script, "--execute", ...pkg.args, "--maintenance-admin-id", "existing-boss", "--oid", "123", "--nonce", "a1b2c3d4e5f60718293a4b5c", "--credentials", join(pkg.root, "credentials.json"), "--receipt", requestedReceipt], { encoding: "utf8", timeout: 5000, env: { ...process.env, DB_PASSWORD_FILE: join(pkg.root, "password.txt") } });
+    assert.ok(existsSync(receipt), (result.stderr||"") + (result.stdout||"") + " STATUS=" + result.status);
     const observed = JSON.parse(readFileSync(receipt)), sql = JSON.parse(readFileSync(calls));
     assert.equal(observed.database, "zzsh_test_regression");
     assert.ok(Number.isFinite(Date.parse(observed.startedAt)) && Number.isFinite(Date.parse(observed.finishedAt)) && observed.wallMs >= 0);
     assert.equal(observed.poolClosed, true);
     assert.equal(observed.maintenanceClosed, true);
     assert.equal(observed.unlock, true);
-    if (mode === "commit" || mode === "replay" || mode === "skin-time") {
-        assert.equal(result.status, 0, result.stderr);
+    if (mode === "commit" || mode === "replay" || mode === "skin-time" || mode === "v2-schema-current") {
+        assert.equal(result.status, 0, JSON.stringify({ error: observed.error, status: observed.status, step: observed.step }));
         assert.equal(observed.status, "REFERENCE_BOOTSTRAP_COMMITTED");
         assert.equal(observed.commitAck, true);
         assert.equal(sql.filter(query => query.startsWith("INSERT INTO")).length, mode === "replay" ? 0 : 2);
@@ -154,6 +202,12 @@ mod._load=function(name,...rest){return name==='pg'?{Client,Pool}:originalLoad.c
             assert.match(raw, /"updated_by_admin_id":null/);
             assert.match(raw, /"revision":9007199254740993/);
         }
+    } else if (mode === "v2-schema-old") {
+        assert.equal(result.status, 1);
+        assert.equal(observed.status, "FAILED_STOPPED");
+        assert.match(observed.error.message, /BUSINESS_CATALOG_PROFILE_SCHEMA_MISMATCH/);
+        assert.equal(sql.includes("BEGIN"), false);
+        assert.equal(sql.some(query => /^(INSERT INTO|UPDATE) /.test(query)), false);
     } else if (mode === "rollback" || mode === "skin-created" || mode === "skin-field") {
         assert.equal(result.status, 1);
         assert.equal(observed.status, "FAILED_STOPPED");
@@ -178,7 +232,7 @@ for (const stage of ["bosses", "staff", "partial-failure"]) test("formal admin H
     const out = join("E:/zzsh-local-state/restricted", "data-first-bootstrap-host-" + root.split(/[\\/]/).at(-1).toLowerCase());
     assert.match(out.replaceAll("\\", "/"), /^E:\/zzsh-local-state\/restricted\/data-first-bootstrap-host-/);
     t.after(() => { if (existsSync(out)) rmSync(out, { recursive: true }); });
-    const target = { database: "zzsh_test_regression", oid: "123", nonce: "fixture-nonce" };
+    const target = { database: "zzsh_test_regression", oid: "123", nonce: "a1b2c3d4e5f60718293a4b5c" };
     const binding = { resource: { database: target.database, resourceOid: target.oid }, initialization: { nonce: target.nonce, imProvisioner: false, imIdentityRepository: false, imAppId: null }, origins: { apiOrigin: "http://127.0.0.1:4292", adminOrigin: "http://127.0.0.1:4291" } };
     const bindingFile = join(root, "binding.json"), bindingBytes = JSON.stringify(binding);
     writeFileSync(bindingFile, bindingBytes);
@@ -186,7 +240,7 @@ for (const stage of ["bosses", "staff", "partial-failure"]) test("formal admin H
     writeFileSync(join(root, "boss-profile.json"), JSON.stringify(bossProfile));
     const input = { kind: "FORMAL_LOCAL_ADMIN_INITIALIZATION_V1", numberingDigits: 5, target, resource: "scene_test", names: { "boss-one": "第一Boss", "boss-two": "第二Boss", operations: "运营", support: "客服" }, serverBinding: { file: bindingFile, sha256: hash(bindingBytes) }, bootstrapSecretFile: join(root, "bootstrap-secret"), bossProfileFile: join(root, "boss-profile.json") };
     writeFileSync(join(root, "input.json"), JSON.stringify(input));
-    writeFileSync(join(root, "resource.json"), JSON.stringify({ ...target, roles: { migration: { name: "fixture_m", oid: "456" } } }));
+    writeFileSync(join(root, "resource.json"), JSON.stringify({ ...target, marker: "zzsh:regression-test:v1", roles: { migration: { name: "fixture_m", oid: "456" }, runtime: { name: "fixture_r", oid: "457" } } }));
     writeFileSync(join(root, "credentials.json"), JSON.stringify({ migration: { name: "fixture_m", oid: "456", password: "fixture-only" } }));
     writeFileSync(join(root, "bootstrap-secret"), "fixture-only"); writeFileSync(join(root, "password"), "fixture-only");
     const preload = join(root, "formal-host.cjs");
@@ -194,7 +248,7 @@ for (const stage of ["bosses", "staff", "partial-failure"]) test("formal admin H
 const stage=${JSON.stringify(stage)},callsFile=${JSON.stringify(callsFile)},calls=[],actors=stage==='staff'?[1,2].map(n=>({id:'new-admin-'+n,username:'zz0000'+n,is_boss:true,status:'ACTIVE',suspended:false,two_factor:true,password_change_required:false,game_scope_mode:'ALL_GAMES'})):[];
 const originalLoad=mod._load;net.Socket.prototype.connect=function(){throw Error('REAL_NETWORK_FORBIDDEN')};
 async function query(sql,params=[]){calls.push({kind:'sql',sql});if(sql.includes('pg_try_advisory_lock')||sql.includes('pg_advisory_unlock'))return {rows:[{ok:true}]};
-if(sql.includes('current_database() database'))return {rows:[{database:'zzsh_test_regression',oid:'123',marker:'zzsh:regression-test:v1',nonce:'fixture-nonce',role:'fixture_m',role_oid:'456'}]};
+if(sql.startsWith('SELECT current_database()'))return {rows:[{database:'zzsh_test_regression',oid:'123',owner:'zzsh',marker:'zzsh:regression-test:v1',nonce:'a1b2c3d4e5f60718293a4b5c',role:'fixture_m',role_oid:'456',is_super:'false',can_create_db:'false',can_create_role:'false',can_inherit:'false',can_bypass_rls:'false',system_identifier:null}]};
 if(sql.includes('FROM zzsh_auth_admin."user"'))return {rows:actors};
 if(sql.includes('FROM zzsh_iam.admin_login_number_seq'))return {rows:[{last_value:stage==='staff'?'2':'1',is_called:stage==='staff'}]};
 if(sql.includes('FROM zzsh_supply.profile_avatar'))return {rows:[{n:actors.length}]};

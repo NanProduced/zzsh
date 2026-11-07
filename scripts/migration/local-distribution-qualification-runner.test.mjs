@@ -1,6 +1,26 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { executeQualification } from "./local-distribution-qualification-runner.mjs";
+import { executeQualification, qualificationReviewResource, assertQualificationRecoveryPreimage } from "./local-distribution-qualification-runner.mjs";
+
+test('qualification review binds R07 port, cluster, database, owner, marker and role',()=>{
+ const instance={host:'127.0.0.1',port:55433,systemIdentifier:'123'},target={oid:'41',migrationRoleOid:'11',instance},registry={instance,database:'zzsh_test_regression',owner:'zzsh',marker:'marker',roles:{migration:{name:'migration',oid:'11'}}};
+ const current={oid:'41',system_identifier:'123',database:registry.database,owner:'zzsh',owner_oid:10,marker:'marker',role:'migration',role_oid:'11',read_only:'off'};
+ assert.equal(qualificationReviewResource(current,registry,target).port,55433);
+ assert.equal(qualificationReviewResource({...current,read_only:'on'},registry,target,{readOnly:true}).port,55433);
+ assert.throws(()=>qualificationReviewResource(current,registry,target,{readOnly:true}),/DISTRIBUTION_QUALIFICATION_INSTANCE_CHANGED/);
+ for(const changed of [{system_identifier:'9'},{oid:'42'},{database:'other'},{owner:'other'},{marker:'other'},{role:'runtime'},{role_oid:'12'},{read_only:'on'}])assert.throws(()=>qualificationReviewResource({...current,...changed},registry,target),/DISTRIBUTION_QUALIFICATION_INSTANCE_CHANGED/);
+ assert.throws(()=>qualificationReviewResource(current,{...registry,instance:{...instance,port:55432}},target),/DISTRIBUTION_QUALIFICATION_INSTANCE_CHANGED/);
+ assert.throws(()=>qualificationReviewResource(current,{...registry,instance:{...instance,systemIdentifier:'9'}},target),/DISTRIBUTION_QUALIFICATION_INSTANCE_CHANGED/);
+ assert.equal(qualificationReviewResource({oid:'41',owner:'zzsh',owner_oid:10,marker:'marker',role:'runtime',role_oid:'11'},{database:'zzsh_test_regression'},{nonce:'n'}).port,55432);
+});
+
+test('retry rechecks all subjects, policy, audit and original keys before any batch',async()=>{
+ const plan={accepted:[{userId:'u'}],ineligible:[],unresolved:[{userId:'x'}],existing:[],batches:[{bodyDigest:'a'}],policyId:'p'},actor={userId:'boss'};
+ const client=(changed=false)=>({query:async sql=>sql.includes('jsonb_to_recordset')?{rows:[{n:changed?1:0}]}:{rows:[{participants:2,receipts:0,audits:0,policy_heads:1}]}});
+ assert.equal((await assertQualificationRecoveryPreimage(client(),plan,actor)).status,'ORIGINAL_QUALIFICATION_PREIMAGE_RECHECKED');
+ await assert.rejects(assertQualificationRecoveryPreimage(client(true),plan,actor),/DISTRIBUTION_RECOVERY_PREIMAGE_CHANGED/);
+ await assert.rejects(assertQualificationRecoveryPreimage({query:async sql=>sql.includes('jsonb_to_recordset')?{rows:[{n:0}]}:{rows:[{participants:2,receipts:1,audits:0,policy_heads:1}]}},plan,actor),/DISTRIBUTION_RECOVERY_PREIMAGE_CHANGED/);
+});
 
 function fixture(failure = "") {
   const calls = [], summary = {}, batches = ["a", "b"].map(id => ({ bodyDigest: id, body: { subjects: [{ userId: id }] } }));
@@ -27,6 +47,31 @@ test("a later batch failure rolls back every earlier batch", async () => {
   assert.equal(f.summary.status, "STOPPED"); assert.equal(f.summary.rollbackAck, true);
   assert.equal(f.summary.transaction.status,'ROLLBACK_ACKNOWLEDGED'); assert.equal(f.summary.transaction.committedBatches,undefined);
   assert(f.calls.includes("ROLLBACK")); assert(!f.calls.includes("COMMIT")); assert.equal(f.summary.lockReleased, true);
+});
+
+test('final constraint timeout is finite and never extends the approved window',async()=>{
+ const f=fixture();f.params.now=()=>Date.parse(f.params.authority.expiresAt)-5000;await executeQualification(f.params);
+ assert.equal(f.summary.timings.constraintBudgetMs,4000);assert(f.calls.some(x=>x.includes("set_config('statement_timeout'")));
+ const expired=fixture();expired.params.now=()=>Date.parse(expired.params.authority.expiresAt)-1500;
+ await assert.rejects(executeQualification(expired.params),/DISTRIBUTION_AUTHORITY_EXPIRED_BEFORE_CONSTRAINTS/);
+ assert.equal(expired.summary.rollbackAck,true);assert(!expired.calls.includes('SET CONSTRAINTS ALL IMMEDIATE'));assert(!expired.calls.includes('COMMIT'));
+});
+
+test('the optional qualification index is prepared once inside the transaction and reused only for those batches',async()=>{
+ const f=fixture(),token=Object.freeze({kind:'INDEX'}),original=f.params.bind,seen=[];
+ f.params.bind=async (...args)=>{seen.push(args[4]);return original(...args)};
+ f.params.prepareIndex=async(client,actor,scope)=>{assert.equal(client!==undefined,true);assert.equal(actor.userId,'boss');assert.equal(scope.bodyDigest,'a');f.calls.push('INDEX');return token;};
+ await executeQualification(f.params);
+ assert.deepEqual(seen,[undefined,token,token]);assert.equal(f.calls.filter(x=>x==='INDEX').length,1);
+ assert(f.calls.indexOf('BEGIN')<f.calls.indexOf('INDEX'));assert(f.calls.indexOf('INDEX')<f.calls.indexOf('QUALIFY:a'));
+ assert.equal(f.summary.transaction.status,'COMMIT_ACKNOWLEDGED');
+});
+
+test('a rejected index rolls back before any qualification batch',async()=>{
+ const f=fixture();f.params.prepareIndex=async()=>{throw Error('source changed')};
+ await assert.rejects(executeQualification(f.params),/source changed/);
+ assert.equal(f.summary.transaction.status,'ROLLBACK_ACKNOWLEDGED');assert.equal(f.summary.rollbackAck,true);
+ assert(!f.calls.some(x=>x.startsWith('QUALIFY:')));assert(!f.calls.includes('COMMIT'));
 });
 
 test("commit acknowledgement loss is unknown and never automatically retried", async () => {

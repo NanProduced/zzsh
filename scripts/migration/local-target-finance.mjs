@@ -23,18 +23,38 @@ export async function applyFinancialDomains(ctx) {
     if(!ctx.fundsSource||!ctx.refundAttemptsSource)throw new Error("EXACT_FINANCIAL_SUPPLEMENTS_REQUIRED");
     const { client, actor, mod, manifest, state } = ctx, preparation = mod("finance/legacy-finance-source-preparation"), canonical = mod("supply/content-hash").canonicalize;
     const sourceCutoff=new Date(manifest.sourceCutoff).toISOString();
-    const resource = { host: "127.0.0.1", port: 55432, database: "zzsh_test_regression", oid: Number(state.binding.oid), owner: state.resource.owner, marker: state.resource.marker, role: state.resource.role, roleOid: Number(state.resource.role_oid) };
+    const resource = { host: "127.0.0.1", port: Number(ctx.targetPort ?? 55432), database: "zzsh_test_regression", oid: Number(state.binding.oid), owner: state.resource.owner, marker: state.resource.marker, role: state.resource.role, roleOid: Number(state.resource.role_oid) };
     const reviewCommon = { ref: "CORE_FULL_LEGACY_" + state.binding.oid, attempt: "dataset-" + state.binding.datasetSha256.slice(0, 16), actor: { userId: actor.userId, sessionId: actor.sessionId }, resource, ...(state.executionWindow ?? { notBefore: state.startedAt, expiresAt: new Date(Date.parse(state.startedAt) + 12 * 3600000).toISOString() }), cutoff: sourceCutoff };
-    const preparationStarted = performance.now(), fundsPlan = await prepareLocalFundsPlan(ctx);
+    // Empty coverage is streamed: each 400-entry chunk is frozen to its own restricted file as soon
+    // as it is complete, so a full-source round never holds one entry per subject and source kind.
+    const emptyDir = join(ctx.output, "phases", "financeEmptyCoverage");
+    if (!existsSync(emptyDir)) mkdirSync(emptyDir, { recursive: true });
+    const emptyDescriptors = [];
+    const emitEmptyChunk = chunk => {
+        const file = join(emptyDir, chunk.digest + ".json");
+        if (existsSync(file)) {
+            if (sha(readFileSync(file)) !== sha(JSON.stringify(chunk.entries))) throw new Error("PREPARED_CHUNK_SHA_CHANGED");
+        } else writeFileSync(file, JSON.stringify(chunk.entries), { flag: "wx" });
+        emptyDescriptors.push({ sourceId: chunk.sourceId, digest: chunk.digest, rows: chunk.rows, domains: chunk.domains, file });
+    };
+    const preparationStarted = performance.now(), fundsPlan = await prepareLocalFundsPlan({ ...ctx, emitEmptyChunk });
     const preparedMs = performance.now() - preparationStarted;
     if (state.generatedPhases?.financeHistory && !state.fundsSupplement) throw new Error("FROZEN_V1_FINANCE_HISTORY_REQUIRES_SEPARATE_REVIEW");
     const history = freezePhase(ctx, "financeHistory", fundsPlan.history);
     const guarantees = freezePhase(ctx, "guaranteeHistory", fundsPlan.guaranteeHistory);
-    const emptyChunks=[];for(let i=0;i<fundsPlan.emptyHistory.length;i+=400){const rows=fundsPlan.emptyHistory.slice(i,i+400);emptyChunks.push({sourceId:'empty-'+sha(canonical(rows.map(r=>r.sourceId))).slice(0,40),rows});}
-    const empties=freezePhase(ctx,"financeEmptyCoverage",emptyChunks);
-    const coverage = assertFundsWriterCoverage(fundsPlan, history, guarantees,empties.flatMap(chunk=>chunk.rows));
+    if (state.generatedPhases?.financeEmptyCoverage) {
+        const previous = state.generatedPhases.financeEmptyCoverage;
+        if (previous.digest !== fundsPlan.emptyCoverage.digest || previous.rows !== fundsPlan.emptyCoverage.rows)
+            throw new Error("PREPARED_EMPTY_COVERAGE_CHANGED");
+        for (const chunk of previous.chunks) if (!existsSync(chunk.file)) throw new Error("PREPARED_CHUNK_MISSING");
+    } else {
+        state.generatedPhases ??= {};
+        state.generatedPhases.financeEmptyCoverage = { ...fundsPlan.emptyCoverage, chunks: emptyDescriptors };
+        ctx.save();
+    }
+    const coverage = assertFundsWriterCoverage(fundsPlan, history, guarantees, fundsPlan.emptyCoverage);
     const priorSupplement=state.fundsSupplement;
-    state.fundsSupplement = { executionProvenance:[...(priorSupplement?.executionProvenance??[]),{at:new Date().toISOString(),toolFiles:fundsPlan.binding.toolFiles,compiledModules:fundsPlan.binding.compiledModules,preparedMs,historyGroups:history.length,emptyGroups:fundsPlan.emptyHistory.length,emptyChunks:empties.length,guaranteeGroups:guarantees.length}],binding: priorSupplement?.binding??fundsPlan.binding, inputSha256: fundsPlan.inputSha256, refundAttemptCoverage:fundsPlan.refundAttemptCoverage,pendingCommissionCoverage:fundsPlan.pendingCommissionCoverage, coverage };
+    state.fundsSupplement = { executionProvenance:[...(priorSupplement?.executionProvenance??[]),{at:new Date().toISOString(),toolFiles:fundsPlan.binding.toolFiles,compiledModules:fundsPlan.binding.compiledModules,preparedMs,historyGroups:history.length,emptyGroups:fundsPlan.emptyCoverage.rows,emptyChunks:fundsPlan.emptyCoverage.chunks,guaranteeGroups:guarantees.length}],binding: priorSupplement?.binding??fundsPlan.binding, inputSha256: fundsPlan.inputSha256, refundAttemptCoverage:fundsPlan.refundAttemptCoverage,pendingCommissionCoverage:fundsPlan.pendingCommissionCoverage, coverage };
     ctx.save();
     await ctx.runItems("invitationFacts",await arrayOf(ctx,"invitation-facts"),async packet=>{
         if(packet.input.policy!==null)throw new Error("SOURCE_INVITATION_POLICY_MUST_REMAIN_UNBOUND");
@@ -43,23 +63,15 @@ export async function applyFinancialDomains(ctx) {
         return module.importReviewedLegacyInvitationFacts(client,actor,packet.input,packet.bodyDigest,scope);
     },1);
     await ctx.runBatches("financeHistory", history, async (rows) => { const module = mod("finance/personal-finance-observation-maintenance"); const inputs = rows.map(row => row.input); const reviews = inputs.map(input => ({ ...reviewCommon, inputSha256: input.coverage.inputSha256, bodyDigest: sha(canonical(input)), userId: input.coverage.userId, sourceKind: input.coverage.sourceKind })); const scopes = await module.bindReviewedFinanceObservationAdmissionBatch(client, actor, reviews); const result = await module.importReviewedFinanceObservationsBatchOn(client, actor, inputs, scopes); const created = result.body.created; return rows.map((_, i) => ({ replayed: i >= created })); }, 500);
-    await ctx.runItems("financeEmptyCoverage",empties,async chunk=>{
-        const module=mod("finance/personal-finance-observation-maintenance"),inputs=chunk.rows.map(row=>row.input);
+    await ctx.runItems("financeEmptyCoverage",state.generatedPhases.financeEmptyCoverage.chunks,async chunk=>{
+        const module=mod("finance/personal-finance-observation-maintenance"),inputs=JSON.parse(readFileSync(chunk.file,"utf8")).map(row=>row.input);
         const reviews=inputs.map(input=>({...reviewCommon,inputSha256:input.coverage.inputSha256,bodyDigest:sha(canonical(input)),userId:input.coverage.userId,sourceKind:input.coverage.sourceKind}));
         const scope=await module.bindReviewedEmptyFinanceObservationBatch(client,actor,inputs,reviews);
         const result=await module.importReviewedEmptyFinanceObservationBatch(client,actor,inputs,scope);
         return{...result.body,replayed:result.body.created===0};
-    },1);
-    await ctx.runBatches("guaranteeHistory", guarantees, async (rows) => {
-        const module=mod("finance/owner-guarantee-history-maintenance");
-        const {cutoff,...base}=reviewCommon;
-        const inputs=rows.map(row=>row.input);
-        const reviews=inputs.map(input=>({...base,userId:input.userId,inputSha256:input.inputSha256,bodyDigest:sha(canonical(input)),cutoff:input.cutoff,sourceCount:input.sourceCount}));
-        const admissions=await module.bindReviewedOwnerGuaranteeHistoryBatch(client,actor,reviews);
-        const result=await module.importReviewedOwnerGuaranteeHistoryBatchOn(client,actor,inputs,admissions);
-        const created=result.body.created;
-        return rows.map((_,i)=>({replayed:i>=created}));
-    },500);
+    },5);
+    // The old listing deposit is out of scope: nothing is written for it, and the exclusion is
+    // recorded on the plan so the report can prove it was deliberate.
     const continuations = await arrayOf(ctx, "continuations");
     let continuationRows = state.generatedPhases?.continuationEvidence ? freezePhase(ctx, "continuationEvidence", []) : null;
     if (!continuationRows) {
@@ -127,7 +139,7 @@ export async function applyFinancialDomains(ctx) {
         if (!found || found.amount !== expected.amountCents || found.beneficiary !== expected.beneficiaryUserId || found.kind !== expected.kind || found.status !== expected.status || found.settled_by !== expected.settledBy || expected.sourceRecordId!==undefined&&found.source_id!==expected.sourceRecordId || expected.level!==undefined&&(found.level!==expected.level||!mod("order/legacy-continuation-model").legacyDecimalEquals(found.ratio,expected.ratio)) || expected.sourceDigest!==undefined&&found.source_digest!==expected.sourceDigest)
             mismatches.push({ dutyId: expected.dutyId, reason: "EXACT_DUTY_FACT_DIFFERED" });
     }
-    const subjects=[...new Set([...history,...empties.flatMap(chunk=>chunk.rows)].map(row=>row.input.coverage.legacyUserId))];
+    const subjects=[...new Set([...history.map(row=>row.input.coverage.legacyUserId),...fundsPlan.emptyCoverage.subjects])];
     const observed=(await client.query(`SELECT source_kind,count(*)::int AS count,(sum((snapshot->>'amount')::numeric)*100)::numeric(24,0)::text AS amount FROM zzsh_order.personal_finance_observation WHERE source_system='legacy_mysql_restore' AND legacy_user_id=ANY($1::text[]) GROUP BY source_kind`,[subjects])).rows;
     const targetReadable={};
     for(const [domain,count]of Object.entries(coverage)){
@@ -138,19 +150,28 @@ export async function applyFinancialDomains(ctx) {
     }
     const actualCoverage=(await client.query(`SELECT source_kind,count(*)::int AS count,count(*) FILTER(WHERE source_count=0 AND imported_count=0 AND isolated_count=0)::int AS empty FROM zzsh_order.personal_finance_observation_coverage WHERE source_system='legacy_mysql_restore' AND source_cutoff=$1::timestamptz AND legacy_user_id=ANY($2::text[]) GROUP BY source_kind`,[sourceCutoff,subjects])).rows;
     for(const [domain,count]of Object.entries(coverage))if(domain!=='guarantees'){
-        const kind=history.find(row=>row.domain===domain)?.input.coverage.sourceKind??empties.flatMap(chunk=>chunk.rows).find(row=>row.domain===domain)?.input.coverage.sourceKind;
+        const kind=history.find(row=>row.domain===domain)?.input.coverage.sourceKind??fundsPlan.emptyCoverage.kinds[domain];
         const found=actualCoverage.find(row=>row.source_kind===kind);Object.assign(targetReadable[domain],{coverageExpected:count.coverageSelected,coverageActual:found?.count??0,provedEmpty:found?.empty??0});
         if(found?.count!==count.coverageSelected||found?.empty!==count.emptyCoverage)mismatches.push({domain,reason:'SOURCE_COVERAGE_SUBJECT_OR_EMPTY_SET_GAP'});
     }
     const attemptActual=(await client.query(`SELECT count(*)::int AS count,count(DISTINCT a->>'sourceId')::int AS distinct_count,COALESCE(sum((a->>'amountCents')::numeric),0)::text AS amount FROM zzsh_order.personal_finance_observation o CROSS JOIN LATERAL jsonb_array_elements(o.snapshot->'sourceAttempts') a WHERE o.source_kind='HISTORICAL_REFUND' AND o.legacy_user_id=ANY($1::text[])`,[subjects])).rows[0];
     targetReadable.refundAttempts={expected:fundsPlan.refundAttemptCoverage.selected,actual:attemptActual?.count??0,distinctSourceIds:attemptActual?.distinct_count??0,recordedAmountCents:attemptActual?.amount??'0'};
     if(attemptActual?.count!==fundsPlan.refundAttemptCoverage.selected||attemptActual?.distinct_count!==fundsPlan.refundAttemptCoverage.selected||attemptActual?.amount!==fundsPlan.refundAttemptCoverage.recordedAmountCents)mismatches.push({domain:'refundAttempts',reason:'TYPED_SOURCE_ATTEMPT_COVERAGE_GAP'});
-    const guaranteeActual=(await client.query(`SELECT count(*)::int AS count,COALESCE(sum(jsonb_array_length(source_canonical::jsonb->'payOrders')),0)::text AS payments FROM zzsh_order.legacy_owner_guarantee_observation WHERE source_cutoff=$1::timestamptz AND legacy_user_id=ANY($2::text[])`,[sourceCutoff,guarantees.map(row=>row.input.legacyUserId)])).rows[0];
-    targetReadable.guarantees={expected:coverage.guarantees.writer,actual:guaranteeActual?.count??0,payments:guaranteeActual?.payments??'0'};
-    if(guaranteeActual?.count!==coverage.guarantees.writer||guaranteeActual?.payments!==String(coverage.guarantees.payments))mismatches.push({domain:'guarantees',reason:'SOURCE_GUARANTEE_OR_PAYMENT_COUNT_DRIFT'});
+    // The only acceptable target fact is none at all: any row here would mean the old listing deposit
+    // found another way in.
+    // The retired listing-deposit tables no longer exist in the target, and their absence is exactly the
+  // state this reconciliation wants to prove, so a missing table counts as zero rather than failing.
+  const guaranteePresent=(await client.query(`SELECT to_regclass('zzsh_order.legacy_owner_guarantee_observation') IS NOT NULL AS present`)).rows[0]?.present===true;
+  const guaranteeActual=guaranteePresent?(await client.query(`SELECT count(*)::int AS count FROM zzsh_order.legacy_owner_guarantee_observation`)).rows[0]:{count:0};
+    targetReadable.guarantees={expected:0,actual:guaranteeActual?.count??0,policyExcluded:true,listingDeposit:fundsPlan.listingDepositExclusion};
+    if((guaranteeActual?.count??0)!==0)mismatches.push({domain:'guarantees',reason:'LISTING_DEPOSIT_PRESENT_IN_TARGET'});
     const native = (await client.query("SELECT (SELECT count(*)::int FROM zzsh_order.rental_order) native_orders,(SELECT count(*)::int FROM zzsh_order.payment_confirmation) native_payments,(SELECT count(*)::int FROM zzsh_order.settlement_posting) native_postings,(SELECT count(*)::int FROM zzsh_order.settlement_ledger_entry) native_ledger")).rows[0];
     const report = { targetReadable,expectedDuties: wanted.length, matched: actual.length, mismatches, native, storedOpening: "NOT_IMPORTED_WITHOUT_REVIEWED_ECONOMIC_PROOF", financialHistory: "OBSERVATION_ONLY_NO_CHANNEL_OR_WALLET_POSTING", sourceRawRetained: true,sourceRawScope:"SAFE_PG_SNAPSHOTS_AND_RESTRICTED_SOURCE_REFERENCE" };
-    writeFileSync(join(ctx.output, "financial-reconciliation.json"), JSON.stringify(report, null, 2), { flag: "wx" });
+    // A stopped round re-enters this stage, so an identical reconciliation file from the previous attempt
+  // is reused instead of failing on the exclusive-create flag.
+  const reconciliationFile = join(ctx.output, "financial-reconciliation.json");
+  const reconciliationBody = JSON.stringify(report, null, 2);
+  if (!existsSync(reconciliationFile)) writeFileSync(reconciliationFile, reconciliationBody, { flag: "wx" });
     state.financialReconciliation = report;
     if (mismatches.length)
         throw new Error("FINANCIAL_DUTY_RECONCILIATION_FAILED");

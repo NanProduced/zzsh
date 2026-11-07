@@ -113,6 +113,9 @@ test("skin ACL supports retired categories and rejects a half-retired schema", a
   await configureSkinIdentityPrivileges(retired.pool, "fixture_runtime");
   assert.equal(retired.writes.length, 1);
   assert.doesNotMatch(retired.writes[0]!, /category_id/);
+  assert.match(retired.writes[0]!, /GRANT SELECT ON zzsh_supply\.skin/);
+  assert.match(retired.writes[0]!, /REVOKE INSERT,UPDATE,DELETE,TRUNCATE ON zzsh_supply\.skin/);
+  assert.match(retired.writes[0]!, /GRANT UPDATE \([^)]*owner_kind/);
   for (const category of [{ column: true, table: false }, { column: false, table: true }]) {
     const partial = skinAclFixture(skinMetadataColumns, category);
     await assert.rejects(configureSkinIdentityPrivileges(partial.pool, "fixture_runtime"), /Skin category schema is incomplete/);

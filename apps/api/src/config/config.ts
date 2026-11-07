@@ -191,6 +191,9 @@ export class ConfigurationError extends Error {
 
 const LOCAL_HOST = "127.0.0.1";
 const LOCAL_DB_PORT = 55432;
+// A second registered local instance is allowed for an isolated migration target; the boundary stays
+// loopback plus this fixed set of project ports, never an arbitrary value.
+const LOCAL_DB_PORTS: readonly number[] = [LOCAL_DB_PORT, 55433];
 const LOCAL_REDIS_PORT = 56379;
 const IDENTIFIER = /^[a-z][a-z0-9_]{0,62}$/;
 const PROFILE_DATABASE_PREFIX: Record<ConfigProfile, string> = {
@@ -539,7 +542,7 @@ export function loadConfig(
     if (databaseHost !== LOCAL_HOST || redisHost !== LOCAL_HOST) {
       throw new ConfigurationError("local-compose databases must use 127.0.0.1");
     }
-    if (databasePort !== LOCAL_DB_PORT || redisPort !== LOCAL_REDIS_PORT) {
+    if (!LOCAL_DB_PORTS.includes(databasePort) || redisPort !== LOCAL_REDIS_PORT) {
       throw new ConfigurationError("local-compose ports are outside the zzsh boundary");
     }
   }

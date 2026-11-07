@@ -4,9 +4,10 @@ import type {PoolClient} from 'pg';
 import {canonicalize} from '../src/supply/content-hash';
 import {legacyOwnerUserId} from '../src/supply/legacy-user-migration';
 import {invitationFactHash as hash,planLegacyInvitationFacts,prepareLegacyInvitationFacts,projectInvitationFactParticipant,type LegacyInvitationRawFact,type LegacyInvitationFactSource,type LegacyInvitationFactsInput,type LegacyInvitationFactPolicy} from '../src/finance/legacy-invitation-facts';
-import {bindReviewedLegacyInvitationFacts,planReviewedLegacyInvitationFactsTarget,importReviewedLegacyInvitationFacts,closeReviewedLegacyInvitationCounts,recoverReviewedLegacyInvitationFacts,type LegacyInvitationFactsReview} from '../src/finance/legacy-invitation-facts-maintenance';
+import {bindReviewedLegacyInvitationFacts,planReviewedLegacyInvitationFactsTarget,importReviewedLegacyInvitationFacts,closeReviewedLegacyInvitationCounts,recoverReviewedLegacyInvitationFacts,prepareReviewedLegacyQualificationIndex,readReviewedLegacyQualificationIndex,qualifyReviewedLegacyParticipants,type LegacyInvitationFactsReview,type LegacyQualificationBatch} from '../src/finance/legacy-invitation-facts-maintenance';
 import {projectLegacyInvitationQualification} from '../src/finance/legacy-invitation-facts';
 import {readLegacyDistributionQualifications} from '../src/finance/admin-distribution-read';
+import {validateDistributionPolicy} from '../src/finance/distribution-policy';
 
 const actor={userId:'boss',sessionId:'session',requestId:'request'},at='2026-11-02T14:00:00.000Z';
 function raw(id:string,parent='0'):LegacyInvitationRawFact{return{legacyId:id,userId:legacyOwnerUserId('legacy_mysql_restore','la_user',id),identitySourceDigest:'a'.repeat(64),userSource:{id,is_delete:'0',is_disable:'0',inviter_id:parent,first_leader:parent,second_leader:'0',third_leader:'0',create_time:'1',update_time:'2'},codeSource:{id,code:'fx'+id},qualificationSource:{id,user_id:id,level_id:'7',is_delete:'0',is_freeze:'0',is_distribution:'1'}};}
@@ -85,6 +86,70 @@ function database(){
  return{client,state,participants,codes,edges,receipts,audits};
 }
 async function bind(db:ReturnType<typeof database>,packet:LegacyInvitationFactsInput,phase:'IMPORT'|'COUNTS'='IMPORT',mode:'execute'|'recover'='execute'){return bindReviewedLegacyInvitationFacts(db.client,actor,review(packet,phase),mode);}
+
+function qualificationIndexFixture(duplicate=false){
+ const packet=planned([raw('1'),raw('2'),raw('3')]).packets[0]!,db=database(),prepared=prepareLegacyInvitationFacts(packet,hash(packet));
+ const state={xid:'100',locked:false,events:[{id:'audit1',version:'5'}],packets:new Map([['audit1',{source:packet.source,facts:packet.subjects,facts_type:'array',receipt:packet.source.receiptSha256}]]),participants:new Map(prepared.subjects.map(p=>[p.userId,p.sourceDigest]))};
+ if(duplicate){state.events.push({id:'audit2',version:'6'});state.packets.set('audit2',{source:packet.source,facts:[packet.subjects[0]!],facts_type:'array',receipt:packet.source.receiptSha256});}
+ const r:LegacyInvitationFactsReview={...review(packet),phase:'QUALIFY',sourceDigest:packet.source.receiptSha256,nonce:'regression123456',resource:{host:'127.0.0.1',port:55433,database:'zzsh_test_regression',oid:2734882,owner:'zzsh',ownerOid:10,marker:'zzsh:regression-test:v1',role:'zzsh_regression_migration',roleOid:12345}};
+ const client=db.client as any,base=client.query.bind(client);client.connectionParameters={host:r.resource.host,port:r.resource.port,database:r.resource.database,user:r.resource.role};
+ client.query=async(sql:string,args:any[]=[])=>{const rows=(values:any[]=[])=>({rows:values,rowCount:values.length});
+  if(sql.includes('invitation-facts resource'))return rows([{...r.resource,now:at,owned:3,complete:true,read_only:'off',nonce:r.nonce}]);
+  if(sql.startsWith('LOCK TABLE zzsh_iam.audit_event')){state.locked=true;return rows();}
+  if(sql.includes('qualification index pin transaction'))return rows([{xid:state.xid}]);
+  if(sql.includes('qualification index transaction'))return rows([{xid:state.xid,source_locked:state.locked}]);
+  if(sql.includes('qualification index source versions'))return rows(state.events.map(x=>({...x})));
+  if(sql.includes('qualification index source packet')){const event=state.events.find(x=>x.id===args[0]&&x.version===args[1]);return rows(event?[state.packets.get(event.id)]:[]);}
+  if(sql.includes('qualification index participants'))return rows(args[0].flatMap((id:string)=>state.participants.has(id)?[{user_id:id,source_digest:state.participants.get(id)}]:[]));
+  return base(sql,args);
+ };
+ return{packet,db,client,state,review:r,prepared};
+}
+
+test('reviewed transaction index preserves source projection, duplicates and participant digest semantics',async()=>{
+ for(const duplicate of [false,true]){
+  const f=qualificationIndexFixture(duplicate),scope=await bindReviewedLegacyInvitationFacts(f.client,actor,f.review),index=await prepareReviewedLegacyQualificationIndex(f.client,actor,scope);
+  const ids=f.prepared.subjects.map(p=>p.userId),rows=f.prepared.subjects.map((p,i)=>({user_id:p.userId,source_digest:p.sourceDigest,source:f.packet.source,fact:f.packet.subjects[i]}));
+  if(duplicate)rows.push(rows[0]!);
+  const original=await readLegacyDistributionQualifications({query:async()=>({rows})} as any,ids,f.review.sourceDigest);
+  assert.deepEqual(await readReviewedLegacyQualificationIndex(f.client,actor,f.review,index,ids),original);
+  f.state.participants.set(ids[1]!,'f'.repeat(64));rows[1]!.source_digest='f'.repeat(64);
+  assert.deepEqual(await readReviewedLegacyQualificationIndex(f.client,actor,f.review,index,ids),await readLegacyDistributionQualifications({query:async()=>({rows})} as any,ids,f.review.sourceDigest));
+  assert.equal(f.db.state.writes,0);
+ }
+});
+
+test('qualification index refuses a changed transaction, actor, source, lock or audit source',async()=>{
+ const f=qualificationIndexFixture(),scope=await bindReviewedLegacyInvitationFacts(f.client,actor,f.review),index=await prepareReviewedLegacyQualificationIndex(f.client,actor,scope),ids=f.prepared.subjects.map(p=>p.userId);
+ await assert.rejects(readReviewedLegacyQualificationIndex(f.client,{...actor,requestId:'other'},f.review,index,ids));
+ await assert.rejects(readReviewedLegacyQualificationIndex(f.client,actor,{...f.review,sourceDigest:'f'.repeat(64)},index,ids));
+ await assert.rejects(readReviewedLegacyQualificationIndex({} as PoolClient,actor,f.review,index,ids));
+ await assert.rejects(bindReviewedLegacyInvitationFacts(f.client,actor,f.review,'execute',{kind:'REVIEWED_LEGACY_QUALIFICATION_INDEX'}));
+ f.state.xid='101';await assert.rejects(readReviewedLegacyQualificationIndex(f.client,actor,f.review,index,ids));f.state.xid='100';
+ f.state.locked=false;await assert.rejects(readReviewedLegacyQualificationIndex(f.client,actor,f.review,index,ids));f.state.locked=true;
+ f.state.events[0]!.version='7';await assert.rejects(readReviewedLegacyQualificationIndex(f.client,actor,f.review,index,ids));f.state.events[0]!.version='5';
+ f.state.events.push({id:'audit-new',version:'8'});await assert.rejects(readReviewedLegacyQualificationIndex(f.client,actor,f.review,index,ids));
+ assert.equal(f.db.state.writes,0);
+});
+
+test('qualification executes against the reviewed index and refuses a source change during the batch',async()=>{
+ for(const changed of [false,true]){
+  const f=qualificationIndexFixture(),config=validateDistributionPolicy({schema:'distribution-policy.v3',scope:'NATIVE',enabled:true,participation:'AUTO_AT_REGISTRATION',depth:1,selfRebate:false,accountModes:['ordinary'],minimumAccrualCents:'1',settlementDelayDays:7,
+   levels:[{code:'legacy_7',rank:1,default:true,renterPercent:'5',ownerPercent:'5',upgrade:null}],legacySource:{receiptSha256:f.review.sourceDigest,configurationSha256:'b'.repeat(64),levelsSha256:'c'.repeat(64),levelNames:{legacy_7:'测试等级'}}},'NATIVE');
+  const batch:LegacyQualificationBatch={scope:'NATIVE',policyId:'policy',policyDigest:hash(config),subjects:f.prepared.subjects.map(p=>({userId:p.userId,sourceDigest:p.sourceDigest,revision:'1',levelCode:'legacy_7',frozen:false}))};
+  f.review.bodyDigest=hash(batch);const base=f.client.query.bind(f.client);let updates=0;
+  f.client.query=async(sql:string,args:any[]=[])=>{
+   if(sql.startsWith('SELECT id FROM zzsh_auth_user."user"'))return{rows:args[0].map((id:string)=>({id})),rowCount:args[0].length};
+   if(sql.startsWith('SELECT v.* FROM zzsh_order.distribution_policy_head'))return{rows:[{id:'policy',revision:'1',canonical_config:canonicalize(config),config_digest:hash(config),created_at:at}],rowCount:1};
+   if(sql.startsWith('UPDATE zzsh_order.distribution_participant p SET eligibility=')){updates++;if(changed)f.state.events[0]!.version='7';return{rows:[],rowCount:batch.subjects.length};}
+   return base(sql,args);
+  };
+  const seed=await bindReviewedLegacyInvitationFacts(f.client,actor,f.review),index=await prepareReviewedLegacyQualificationIndex(f.client,actor,seed),scope=await bindReviewedLegacyInvitationFacts(f.client,actor,f.review,'execute',index);
+  if(changed)await assert.rejects(qualifyReviewedLegacyParticipants(f.client,actor,batch,scope));
+  else{const result=await qualifyReviewedLegacyParticipants(f.client,actor,batch,scope);assert.equal(result.status,200);assert.equal((result.body as any).participants,3);}
+  assert.equal(updates,1);assert(!f.db.state.queries.some(sql=>sql==='COMMIT'));
+ }
+});
 
 test('real import/recovery/count entrypoints accept policy-free original facts and reconcile bounded cross-packet parents',async()=>{
  const db=database(),p=planned(undefined,2);for(const packet of p.packets){const cap=await bind(db,packet),r=await importReviewedLegacyInvitationFacts(db.client,actor,packet,hash(packet),cap);assert.equal(r.replayed,false);assert.equal((r.body as any).financialEffects,false);const replay=await importReviewedLegacyInvitationFacts(db.client,actor,packet,hash(packet),cap);assert.equal(replay.replayed,true);assert.equal((await recoverReviewedLegacyInvitationFacts(db.client,actor,packet,hash(packet),cap)).knowledge,'KNOWN');}

@@ -2,7 +2,7 @@ import { hasLegacyReadSnapshots, legacyListingSortLabel } from "./legacy-listing
 import type { PoolClient } from "pg";
 import { SecurityApiError } from "../auth/security-core";
 import { checkedId,parseFilterConfig,type FilterConfig,type FilterField,type ListingQueryV2 } from "./listing-filter-contract";
-import { invalid,notFound } from "./supply-util";
+import { invalid,notFound,retiredSkinCategory } from "./supply-util";
 import { publicGradingOptions,publicGradingRankOptions,publicLoginMethodOptions,publicSafeBoxCodes } from "./listing-query";
 import { GAME_SERVICE,requirePublicGameService } from "./game-services";
 
@@ -10,7 +10,7 @@ export async function listingCatalogContext(client:PoolClient,gameId:string) {
   const game=(await client.query(`SELECT g.id,g.code,g.catalog_revision::text AS "catalogRevision",g.current_release_id AS "ruleReleaseId",p.haff_rule AS rule FROM zzsh_supply.game g LEFT JOIN zzsh_supply.rule_release r ON r.id=g.current_release_id LEFT JOIN zzsh_supply.price_version p ON p.id=r.price_version_id WHERE g.id=$1`,[gameId])).rows[0];
   if(!game || game.code!=="delta")throw notFound();
   const items=(await client.query<{id:string;code:string;name:string;unit:string}>(`SELECT id,code,name,unit FROM zzsh_supply.billable_item WHERE game_id=$1 AND enabled ORDER BY sort_order,id`,[gameId])).rows;
-  const categories=(await client.query<{id:string;parentId:string|null;name:string}>(`WITH RECURSIVE visible AS (SELECT id,parent_id,name FROM zzsh_supply.skin_category WHERE game_id=$1 AND parent_id IS NULL AND enabled AND form_visible UNION ALL SELECT c.id,c.parent_id,c.name FROM zzsh_supply.skin_category c JOIN visible p ON p.id=c.parent_id WHERE c.game_id=$1 AND c.enabled AND c.form_visible) SELECT id,parent_id AS "parentId",name FROM visible ORDER BY id`,[gameId])).rows;
+  const categories: {id:string;parentId:string|null;name:string}[]=[];
   return {game,items,categories};
 }
 type Catalog=Awaited<ReturnType<typeof listingCatalogContext>>;
@@ -29,7 +29,7 @@ function allowedCodes(c:Catalog,field:CodeField,legacy=false):string[] {
 function allowedLevels(c:Catalog,key:string):number[]{return Object.keys(c.game.rule?.[key==="vitality"?"vitalityDeltaByLevel":"bearDeltaByLevel"]??{}).map(Number);}
 export function validateConfigCatalog(config:FilterConfig,c:Catalog,legacy=false,purpose:"READ"|"WRITE"="READ") {
   for(const f of config.fields) {
-    if(purpose==="WRITE"&&c.game.code==="delta"&&f.key==="skinGroups"&&f.categoryIds!==undefined)throw invalid("旧皮肤分类只保留历史读取，新配置请使用皮肤类型","config.fields.categoryIds");
+    if(f.key==="skinGroups"&&f.categoryIds!==undefined)throw retiredSkinCategory();
     if(f.items?.some(r=>!c.items.some(i=>i.id===r.itemId)))throw invalid("Unknown, disabled or foreign item","config.fields.items");
     if(f.categoryIds?.some(id=>!c.categories.some(c=>c.id===id)))throw invalid("Unknown, hidden or foreign category","config.fields.categoryIds");
     if(f.options?.some(o=>!allowedCodes(c,f,legacy).includes(o.value)))throw invalid("Unknown option code","config.fields.options");
@@ -51,6 +51,7 @@ export async function readListingState(client:PoolClient,gameId:string) {
   const row=(await client.query(`SELECT revision::text,config FROM zzsh_supply.listing_filter_config WHERE game_id=$1 ORDER BY revision DESC LIMIT 1`,[gameId])).rows[0];
   let config:FilterConfig|null=null;
   if(row){try{config=parseFilterConfig(row.config);}catch{throw new SecurityApiError(503,"LISTING_QUERY_UNAVAILABLE","Filter configuration requires an update");}}
+  if(config?.fields.some(f=>f.key==="skinGroups"&&f.categoryIds!==undefined))throw retiredSkinCategory();
   const hasSnapshots=await hasLegacyReadSnapshots(client,gameId);
   const mode=listingReadMode({ruleReleaseId:catalog.game.ruleReleaseId as string|null,hasConfig:Boolean(config),hasSnapshots});
   const legacyReadOnly=mode==="LEGACY_READ_ONLY",mixed=mode==="MIXED";
@@ -59,6 +60,7 @@ export async function readListingState(client:PoolClient,gameId:string) {
 export async function validateListingQuery(client:PoolClient,q:ListingQueryV2,state:Awaited<ReturnType<typeof readListingState>>) {
   if(!state.config || (!state.legacyReadOnly && !state.ruleReleaseId))throw new SecurityApiError(503,"LISTING_QUERY_UNAVAILABLE","Listing filters or rules are not configured");
   const config=state.config,c=state.catalog,legacy=state.allowLegacyOptions;
+  if(config.fields.some(f=>f.key==="skinGroups"&&f.categoryIds!==undefined))throw retiredSkinCategory();
   const sort=config.sorts.find(s=>s.key===q.sort&&s.enabled);if(!sort)throw invalid("Sort is disabled","sort");
   if(q.coreItemId && (!sort.itemIds?.includes(q.coreItemId)||!c.items.some(i=>i.id===q.coreItemId&&i.unit==="HAFF_BASE")))throw invalid("Invalid core item","coreItemId");
   for(const [key,value] of Object.entries(q.filters)) {
@@ -69,17 +71,18 @@ export async function validateListingQuery(client:PoolClient,q:ListingQueryV2,st
     if(key==="regions")if(q.filters.regions!.some(r=>!f.regions?.some(a=>a.province===r.province&&a.city===r.city)))throw invalid("Unavailable region pair","filters.regions");
     if(key==="skinGroups") {
       const all=q.filters.skinGroups!.flatMap(g=>g.ids);
-      const skins=(await client.query<{id:string;categoryId:string|null;ownerKind:string|null}>(`SELECT id,category_id AS "categoryId",owner_kind AS "ownerKind" FROM zzsh_supply.skin WHERE game_id=$1 AND enabled AND form_visible AND id=ANY($2::text[])`,[q.gameId,all])).rows;
-      const parents=new Map(c.categories.map(r=>[r.id,r.parentId]));
+      if(q.filters.skinGroups!.some(g=>g.categoryId!==undefined))throw retiredSkinCategory();
+      const skins=(await client.query<{id:string;ownerKind:string|null}>(`SELECT id,owner_kind AS "ownerKind" FROM zzsh_supply.skin WHERE game_id=$1 AND enabled AND form_visible AND id=ANY($2::text[])`,[q.gameId,all])).rows;
       for(const g of q.filters.skinGroups!){
         if(g.ownerKind!==undefined){const allowed=f.ownerKinds??["AGENT","MELEE_TYPE","FIREARM"];if(!allowed.includes(g.ownerKind))throw invalid("Unavailable skin type","filters.skinGroups.ownerKind");for(const id of g.ids)if(!skins.some(s=>s.id===id&&s.ownerKind===g.ownerKind))throw invalid("Unknown, hidden, disabled or foreign skin","filters.skinGroups.ids");continue;}
-        if(!g.categoryId||!f.categoryIds?.includes(g.categoryId)||!parents.has(g.categoryId))throw invalid("Unavailable category","filters.skinGroups.categoryId");
-        for(const id of g.ids){const s=skins.find(s=>s.id===id);let cat=s?.categoryId;while(cat && parents.has(cat)&&cat!==g.categoryId)cat=parents.get(cat)??undefined;if(!s||cat!==g.categoryId)throw invalid("Unknown, hidden, disabled or foreign skin","filters.skinGroups.ids");}}
+        throw retiredSkinCategory();}
     }
   }
 }
 export function publicFilterMetadata(state:Awaited<ReturnType<typeof readListingState>>,signingReady:boolean,skinGrouping:"LEGACY"|"TYPE"="LEGACY") {
+  if(skinGrouping!=="TYPE")throw retiredSkinCategory();
   const {catalog:c,config,legacyReadOnly:legacy}=state;
+  if(config?.fields.some(f=>f.key==="skinGroups"&&f.categoryIds!==undefined))throw retiredSkinCategory();
   const legacyOptions=state.allowLegacyOptions;
   const fields=config?.fields.filter(f=>f.enabled).map(f=>({...f,
     ...(f.items?{items:f.items.filter(r=>c.items.some(i=>i.id===r.itemId))}:{}),

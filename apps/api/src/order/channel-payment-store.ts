@@ -71,7 +71,7 @@ export function createSyntheticChannelRequestCapability(options: { config: AppCo
   const regression = resourceSet === "regression";
   const resource = regression && options.regression ? createControlledRegressionResource(config, options.regression, "CHANNEL_REQUEST") : undefined;
   if (config.profile !== "test" || config.provider !== "fake" || !config.testOperationsEnabled
-    || config.database.target !== "local-compose" || config.database.host !== "127.0.0.1" || config.database.port !== 55432
+    || config.database.target !== "local-compose" || config.database.host !== "127.0.0.1" || ![55432,55433].includes(config.database.port)
     || !/^[a-z][a-z0-9_]{0,20}$/.test(resourceSet)
     || (regression ? !resource || options.evidenceLevel !== "CONTROLLED_TEST" || !options.allowedOrderIds?.length || options.allowedOrderIds.length > 10
       || options.allowedOrderIds.some(id => !ID.test(id)) || new Set(options.allowedOrderIds).size !== options.allowedOrderIds.length

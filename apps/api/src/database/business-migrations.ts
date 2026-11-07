@@ -763,9 +763,7 @@ export async function configureContinuityFinancePrivileges(pool: Pick<Pool, "que
     {"name":"zzsh_order.legacy_refund_terminal_evidence","read":true,"insert":["id","intent_id","observation_id","terminal","merchant_no","refund_transaction_no","completed_at_raw","completed_at","finance_event_id","facts_canonical","facts_digest"]},
     {"name":"zzsh_order.legacy_refund_review_resolution","read":false},
     {"name":"zzsh_order.legacy_refund_terminal_resolution","read":false},
-    {"name":"zzsh_order.legacy_refund_retry_authorization","read":false},
-    {"name":"zzsh_order.legacy_owner_guarantee_observation","read":true},
-    {"name":"zzsh_order.legacy_owner_guarantee_coverage","read":true}
+    {"name":"zzsh_order.legacy_refund_retry_authorization","read":false}
   ];
   const found = (await pool.query<{ name: string; present: boolean }>(
     "SELECT name,to_regclass(name) IS NOT NULL AS present FROM unnest($1::text[]) AS t(name)", [profiles.map(p => p.name)]

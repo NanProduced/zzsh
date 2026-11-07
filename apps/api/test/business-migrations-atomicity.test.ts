@@ -72,13 +72,17 @@ test('0092 keeps the newest success even when its date is invalid and exposes on
 });
 const runnerSource=readFileSync(runnerPath,'utf8');
 const lastMigration=readFileSync(resolve('migrations/business/0079_owner_guarantee_history.sql'),'utf8');
+// Tables created by the frozen new-table migrations (0079 still creates the two retired listing-deposit
+// tables and its initial ACL block still cleans them); the pending forward migration drops them.
 const names=['legacy_continuation_evidence','legacy_continuation_version','legacy_order_duty','legacy_order_duty_revision','legacy_order_duty_admission','legacy_inflight_register','personal_finance_observation_coverage','finance_stored_opening_review','legacy_duty_finance_contract','legacy_duty_finance_fact','legacy_owner_guarantee_observation','legacy_owner_guarantee_coverage'].map(n=>'zzsh_order.'+n);
-const withdrawalLinkNames=['legacy_withdrawal_subject_revision','legacy_withdrawal_link_evidence'].map(n=>'zzsh_order.'+n),allNames=[...names,...withdrawalLinkNames];
+// The old listing deposit is retired: runtime no longer declares an ACL profile for it.
+const retiredNames=['legacy_owner_guarantee_observation','legacy_owner_guarantee_coverage'].map(n=>'zzsh_order.'+n);
+const withdrawalLinkNames=['legacy_withdrawal_subject_revision','legacy_withdrawal_link_evidence'].map(n=>'zzsh_order.'+n),allNames=[...names,...withdrawalLinkNames],profiledNames=allNames.filter(n=>!retiredNames.includes(n));
 const continuityStart=runnerSource.indexOf('export async function configureContinuityFinancePrivileges(');
 const continuityEnd=runnerSource.indexOf('\nexport async function ',continuityStart+1);
 assert(continuityStart>=0&&continuityEnd>continuityStart);
 const profiles=[...runnerSource.slice(continuityStart,continuityEnd).matchAll(/^\s+(\{"name":"zzsh_order\.[^\n]+\}),?\r?$/gm)].map(m=>JSON.parse(m[1]!));
-assert.deepEqual(profiles.map(p=>p.name).sort(),[...allNames].sort());
+assert.deepEqual(profiles.map(p=>p.name).sort(),[...profiledNames].sort());
 const columns=new Map<string,string[]>(profiles.map(p=>[p.name,[...new Set<string>(['id','unlisted_column',...(p.insert??[]),...(p.update??[])])]]));
 const runtime='runtime_role',owner='migration_owner';
 type Rights={table:Set<string>;columns:Set<string>};

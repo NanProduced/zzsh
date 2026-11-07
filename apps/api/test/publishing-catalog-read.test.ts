@@ -36,11 +36,7 @@ test('a game without an active release still exposes its draft inventory and sta
   assert.equal(body.ready,false);assert.deepEqual(body.blockers,[{code:'RULE_UNCONFIGURED',path:'rules'}]);
 });
 
-test('public owners and category kinds cover the whole visible tree regardless of page or search filters',async()=>{
-  const categories=[
-    {id:'root',parentId:null},{id:'agents',parentId:'root'},{id:'firearms',parentId:'root'},
-    {id:'melee',parentId:null},{id:'mixed',parentId:null},{id:'empty',parentId:null},
-  ];
+test('public owners cover all visible skins regardless of page or search filters',async()=>{
   const refs=[
     {categoryId:'agents',kind:'AGENT',id:'owner_A',name:'干员甲'},
     {categoryId:'agents',kind:'AGENT',id:'owner_B',name:'干员乙'},
@@ -56,27 +52,27 @@ test('public owners and category kinds cover the whole visible tree regardless o
     queries.push({sql,args});
     if(sql.includes('catalog-reference-check'))return{rows:[{categoryOk:true,rarityOk:true,ownerOk:true,classificationOk:true}]};
     if(sql.includes('FROM "zzsh_supply"."game"'))return{rows:[{id:'game_delta',code:'compat',catalogRevision:'129',currentReleaseId:null}]};
-    if(sql.startsWith('WITH RECURSIVE'))return{rows:categories};
-    if(sql.startsWith('SELECT DISTINCT s.category_id'))return{rows:refs};
+    if(sql.startsWith('SELECT DISTINCT s.owner_kind'))return{rows:refs};
     if(sql.includes('s."owner_kind" AS "ownerKind"'))return{rows:page};
     return{rows:[]};
   }} as unknown as PoolClient;
-  const filters={categoryId:'agents',ownerId:'owner_A',rarityCode:'quality_A',q:'甲%_'};
+  const filters={ownerId:'owner_A',rarityCode:'quality_A',q:'甲%_'};
   const body=await readPublicCatalog(client,'game_delta',filters,1) as any;
   assert.deepEqual(body.skins,[page[0]]);
   assert.equal(body.skins[0].mediaKind,'PROMO_POSTER');
   assert.deepEqual(body.owners.map((owner:any)=>owner.id).sort(),['firearm_A','owner_A','owner_B'],'same-game owners outside this page/filter remain available');
   assert.equal(body.owners.some((owner:any)=>owner.id===null),false,'an unclassified melee is not a fake owner option');
-  assert.deepEqual(Object.fromEntries(body.categories.map((category:any)=>[category.id,category.ownerKind])),{root:null,agents:'AGENT',firearms:'FIREARM',melee:'MELEE_TYPE',mixed:null,empty:null});
-  const allRefs=queries.find(query=>query.sql.startsWith('SELECT DISTINCT s.category_id'))!;
-  assert.deepEqual(allRefs.args,['game_delta',categories.map(category=>category.id),false]);
+  assert.deepEqual(body.categories,[]);
+  assert.deepEqual(body.skinCategoryModel,{mode:'RETIRED',legacyReferencesReadOnly:false});
+  const allRefs=queries.find(query=>query.sql.startsWith('SELECT DISTINCT s.owner_kind'))!;
+  assert.deepEqual(allRefs.args,['game_delta']);
   assert.match(allRefs.sql,/s\.game_id=\$1 AND s\.enabled=true AND s\.form_visible=true/);
   assert.equal(allRefs.sql.includes('LIMIT'),false);
   assert.match(allRefs.sql,/f\.game_id=s\.game_id/);
   assert.match(allRefs.sql,/o\.game_id=s\.game_id/);
   const skinSql=queries.find(query=>query.sql.includes('s."owner_kind" AS "ownerKind"'))!;
-  assert.match(skinSql.sql,/COALESCE\(s\."owner_id",s\."firearm_id"\) = \$5/);
-  assert.deepEqual(skinSql.args.slice(2),['agents','quality_A','owner_A','%甲\\%\\_%',2]);
+  assert.match(skinSql.sql,/COALESCE\(s\."owner_id",s\."firearm_id"\) = \$3/);
+  assert.deepEqual(skinSql.args.slice(1),['quality_A','owner_A','%甲\\%\\_%',2]);
   assert.ok(skinSql.sql.includes(publicSkinMetadataSql('s')));
   assert.equal(skinSql.sql.includes('AS "mediaSource"'),false);
   assert.equal(skinSql.sql.includes('AS "rarityEvidence"'),false);
@@ -85,12 +81,12 @@ test('public owners and category kinds cover the whole visible tree regardless o
   assert.equal(parseCursor(body.nextCursor,{gameId:'game_delta',revision:'129',filters}),'skin_A');
   assert.throws(()=>parseCursor(body.nextCursor,{gameId:'game_delta',revision:'129',filters:{...filters,ownerId:'owner_B'}}),/cursor does not match/);
   assert.ok(queries.every(query=>!/^\s*(INSERT|UPDATE|DELETE)/.test(query.sql)));
+  assert.ok(queries.every(query=>!/\bskin_category\b|\bcategory_id\b/.test(query.sql)), 'public reads do not depend on retired catalog storage');
 });
 
 /** A bounded relational fixture executes the actual reader's predicates/parameters;
  *  it never substitutes the reader, parser, codec, route or BFF. It is not PostgreSQL. */
 function filterFixture(emptyClasses=false, gameCode='delta') {
-  const categories=[{id:'root',parentId:null},{id:'agents',parentId:'root'},{id:'firearms',parentId:'root'},{id:'melee',parentId:'root'}];
   const owners=[{id:'agent_A',kind:'AGENT',name:'Agent Alpha'},{id:'knife_A',kind:'MELEE_TYPE',name:'Knife Alpha'}];
   const classes=emptyClasses?[]:[{id:'class_A',code:'rifle',name:'Rifle',sortOrder:1,enabled:true},{id:'class_retired',code:'retired',name:'Retired class',sortOrder:2,enabled:false},{id:'class_unused',code:'unused',name:'No current skin',sortOrder:3,enabled:true}];
   const firearms=[{id:'firearm_A',name:'Firearm Alpha',classificationId:emptyClasses?null:'class_A'},{id:'firearm_B',name:'Firearm Beta',classificationId:null},{id:'firearm_old',name:'Old firearm',classificationId:emptyClasses?null:'class_retired'}];
@@ -111,30 +107,29 @@ function filterFixture(emptyClasses=false, gameCode='delta') {
     queries.push({sql,args});assert(!/^\s*(INSERT|UPDATE|DELETE|CREATE|ALTER)/i.test(sql),'read path must not write');
     if(/^(BEGIN|COMMIT|ROLLBACK|SET TRANSACTION)/.test(sql))return{rows:[],rowCount:0};
     if(sql.includes('game_service_operation'))return{rows:[{id:'service',gameCode:'delta',gameEnabled:true,enabled:true}]};
-    if(sql.includes('catalog-reference-check'))return{rows:[{categoryOk:args[1]===null||categories.some(c=>c.id===args[1]),rarityOk:args[2]===null||rarities.some(r=>r.code===args[2]),ownerOk:args[3]===null||[...owners,...firearms].some(o=>o.id===args[3]),classificationOk:args[4]===null||classes.some(c=>c.id===args[4])}]};
+    if(sql.includes('catalog-reference-check'))return{rows:[{categoryOk:args[1]===null,rarityOk:args[2]===null||rarities.some(r=>r.code===args[2]),ownerOk:args[3]===null||[...owners,...firearms].some(o=>o.id===args[3]),classificationOk:args[4]===null||classes.some(c=>c.id===args[4])}]};
     if(sql.includes('FROM "zzsh_supply"."game"'))return{rows:args[0]==='game_delta'?[{id:'game_delta',code:gameCode,catalogRevision:revision,currentReleaseId:null}]:[]};
-    if(sql.startsWith('WITH RECURSIVE'))return{rows:categories};
-    if(sql.startsWith('SELECT DISTINCT s.category_id'))return{rows:skins.map(s=>{const owner=named(s),f=firearms.find(f=>f.id===s.ownerId);return{categoryId:s.categoryId,kind:s.ownerKind,id:s.ownerId,name:owner?.name??null,firearmClassificationId:f?.classificationId??null,firearmClassificationName:classes.find(c=>c.id===f?.classificationId)?.name??null};})};
+    if(sql.startsWith('SELECT DISTINCT s.owner_kind'))return{rows:skins.map(s=>{const owner=named(s),f=firearms.find(f=>f.id===s.ownerId);return{kind:s.ownerKind,id:s.ownerId,name:owner?.name??null,firearmClassificationId:f?.classificationId??null,firearmClassificationName:classes.find(c=>c.id===f?.classificationId)?.name??null};})};
     if(sql.includes('FROM "zzsh_supply"."skin_rarity"'))return{rows:rarities.filter(r=>r.enabled)};
     if(sql.includes('FROM zzsh_supply.firearm_classification'))return{rows:classes.filter(c=>c.enabled).map(({enabled,...c})=>c)};
     if(sql.includes('s."owner_kind" AS "ownerKind"')){
       let rows=skins.slice();const parameter=(re:RegExp)=>{const m=re.exec(sql);return m?{present:true,value:args[Number(m[1])-1]}:{present:false,value:undefined};};
-      const category=parameter(/WHERE "id" = \$(\d+) AND "game_id" = \$1/);if(category.present){const descendants=new Set([category.value]);for(const c of categories)if(c.parentId&&descendants.has(c.parentId))descendants.add(c.id);rows=rows.filter(s=>descendants.has(s.categoryId));}
       for(const [re,field]of [[/s\."rarity_code" = \$(\d+)/,'rarityCode'],[/COALESCE\(s\."owner_id",s\."firearm_id"\) = \$(\d+)/,'ownerId'],[/s\."owner_kind" = \$(\d+)/,'ownerKind'],[/s\."is_collectible" = \$(\d+)/,'isCollectible']] as const){const p=parameter(re);if(p.present)rows=rows.filter(s=>s[field]===p.value);}
       const classification=parameter(/f\."classification_id" = \$(\d+)/);if(classification.present)rows=rows.filter(s=>s.ownerKind==='FIREARM'&&firearms.find(f=>f.id===s.ownerId)?.classificationId===classification.value);
       if(sql.includes('s."is_collectible" IS NULL'))rows=rows.filter(s=>s.isCollectible===null);
       if(sql.includes('s."rarity_code" IS NULL'))rows=rows.filter(s=>s.rarityCode===null);
       const q=parameter(/s\."name" ILIKE \$(\d+)/);if(q.present)rows=rows.filter(s=>[s.name,named(s)?.name??'',...s.aliases].some(v=>matchLike(v,q.value as string)));
       const after=parameter(/s\."id" > \$(\d+)/);if(after.present)rows=rows.filter(s=>s.id>(after.value as string));
-      const page=rows.sort((a,b)=>a.id<b.id?-1:1).slice(0,args.at(-1) as number).map(s=>{const f=firearms.find(f=>f.id===s.ownerId),rarity=rarities.find(r=>r.code===s.rarityCode);return{id:s.id,code:s.id,name:s.name,baseName:s.name,categoryId:s.categoryId,rarityCode:s.rarityCode,ownerKind:s.ownerKind,ownerName:named(s)?.name??null,rarityName:rarity?.name??null,rarityBasis:s.rarityCode?'PLATFORM_REFERENCE':null,isCollectible:s.isCollectible,defaultState:'UNKNOWN',mediaId:null,mediaKind:null,sortOrder:0,...(sql.includes('AS "ownerId"')?{ownerId:s.ownerId,firearmClassificationId:f?.classificationId??null,firearmClassificationName:classes.find(c=>c.id===f?.classificationId)?.name??null}:{})};});return{rows:page};
+      const page=rows.sort((a,b)=>a.id<b.id?-1:1).slice(0,args.at(-1) as number).map(s=>{const f=firearms.find(f=>f.id===s.ownerId),rarity=rarities.find(r=>r.code===s.rarityCode);return{id:s.id,code:s.id,name:s.name,baseName:s.name,categoryId:null,rarityCode:s.rarityCode,ownerKind:s.ownerKind,ownerName:named(s)?.name??null,rarityName:rarity?.name??null,rarityBasis:s.rarityCode?'PLATFORM_REFERENCE':null,isCollectible:s.isCollectible,defaultState:'UNKNOWN',mediaId:null,mediaKind:null,sortOrder:0,...(sql.includes('AS "ownerId"')?{ownerId:s.ownerId,firearmClassificationId:f?.classificationId??null,firearmClassificationName:classes.find(c=>c.id===f?.classificationId)?.name??null}:{})};});return{rows:page};
     }
     if(sql.includes('billable_item')||sql.includes('entitlement'))return{rows:[]};throw Error('Unrecognized fixture query');
   }} as unknown as PoolClient;
   return{client,pool:{connect:async()=>{connections++;return client;}},queries,setRevision(v:string){revision=v;},get connections(){return connections;}};
 }
 
-test('catalog parser preserves old empty queries and strictly parses the accepted single parameters',()=>{
-  assert.deepEqual(parseCatalogQuery(new URLSearchParams('q=&categoryId=&rarityCode=&ownerId=')),{filters:{},limit:20});
+test('catalog parser retires category filters and strictly parses the accepted single parameters',()=>{
+  assert.deepEqual(parseCatalogQuery(new URLSearchParams('q=&rarityCode=&ownerId=')),{filters:{},limit:20});
+  for(const categoryId of ['', 'agents'])assert.throws(()=>parseCatalogQuery(new URLSearchParams({categoryId})),(e:any)=>e.status===410&&e.code==='SKIN_CATEGORY_RETIRED');
   for(const [value,expected]of [['true',true],['false',false],['null',null]] as const)assert.deepEqual(parseCatalogQuery(new URLSearchParams({isCollectible:value})).filters,{isCollectible:expected});
   for(const query of ['ownerKind=','ownerKind=firearm','firearmClassificationId=','isCollectible=0','isCollectible=UNKNOWN','rarityState=KNOWN','rarityState=UNKNOWN&rarityCode=','ownerKind=AGENT&ownerKind=FIREARM','q=a&q=b','limit=20&limit=30','unexpected=x'])assert.throws(()=>parseCatalogQuery(new URLSearchParams(query)),(e:any)=>e.status===400,query);
 });
@@ -156,7 +151,8 @@ test('actual catalog reader applies AND predicates and real false/null/unknown p
 });
 
 test('catalog reference validation is game-scoped and independent of result filters or page',async()=>{
-  for(const filters of [{categoryId:'foreign_category'},{rarityCode:'foreign_quality'},{ownerId:'foreign_owner'},{firearmClassificationId:'foreign_class'}]){const f=filterFixture();await assert.rejects(()=>readPublicCatalog(f.client,'game_delta',filters,20),(e:any)=>e.status===400);assert.equal(f.queries.some(q=>q.sql.includes('s."owner_kind" AS "ownerKind"')),false);}
+  for(const filters of [{rarityCode:'foreign_quality'},{ownerId:'foreign_owner'},{firearmClassificationId:'foreign_class'}]){const f=filterFixture();await assert.rejects(()=>readPublicCatalog(f.client,'game_delta',filters,20),(e:any)=>e.status===400);assert.equal(f.queries.some(q=>q.sql.includes('s."owner_kind" AS "ownerKind"')),false);}
+  {const f=filterFixture();await assert.rejects(()=>readPublicCatalog(f.client,'game_delta',{categoryId:'foreign_category'},20),(e:any)=>e.status===410&&e.code==='SKIN_CATEGORY_RETIRED');assert.equal(f.queries.some(q=>q.sql.includes('s."owner_kind" AS "ownerKind"')),false);}
   const f=filterFixture(),body=await readPublicCatalog(f.client,'game_delta',{q:'no matching skin',ownerId:'firearm_A'},1) as any;assert.deepEqual(body.skins,[]);assert(body.owners.some((o:any)=>o.id==='firearm_A'));assert(body.skinFilters.firearmClassifications.some((c:any)=>c.id==='class_unused'));assert(body.rarities.some((r:any)=>r.code==='quality_unused'));assert.equal(f.queries.filter(q=>q.sql.includes('catalog-reference-check')).length,1);
 });
 
@@ -166,7 +162,7 @@ test('Delta public catalog never offers or projects a legacy melee parent; other
     assert.deepEqual(body.skins.map((s:any)=>s.id),['s6','s7']);
     assert(body.skins.every((s:any)=>s.ownerId===null&&s.ownerName===null));
     assert(body.owners.every((o:any)=>o.kind!=='MELEE_TYPE'));
-    assert.equal(body.categories.find((c:any)=>c.id==='melee').ownerKind,'MELEE_TYPE');
+    assert.deepEqual(body.categories,[]);
   }
   const f=filterFixture(false,'other'),body=await readPublicCatalog(f.client,'game_delta',{ownerKind:'MELEE_TYPE'},20) as any;
   assert.equal(body.skins[0].ownerId,'knife_A');assert.equal(body.skins[0].ownerName,'Knife Alpha');
@@ -186,10 +182,15 @@ test('both real catalog GET handlers share strict parsing and filter execution',
   for(const endpoint of ['catalog','publishing-catalog']){const f=filterFixture(),r=await catalogRoute(f,'/api/v1/supply/games/game_delta/'+endpoint+'?ownerKind=FIREARM&isCollectible=false');assert.equal(r.status,200);assert.deepEqual(r.body.skins.map((s:any)=>s.id),['s4','s5']);assert.equal(r.body.skinFilters.version,1);}
   for(const q of ['ownerKind=bad','isCollectible=','isCollectible=false&isCollectible=null','rarityState=UNKNOWN&rarityCode=quality_A','ignored=x']){const f=filterFixture(),r=await catalogRoute(f,'/api/v1/supply/games/game_delta/catalog?'+q);assert.equal(r.status,400,q);assert.equal(f.connections,0,'syntax rejection precedes database acquisition');}
   const foreign=await catalogRoute(filterFixture(),'/api/v1/supply/games/game_delta/catalog?ownerId=foreign_owner');assert.equal(foreign.status,400);assert.equal(JSON.stringify(foreign.body).includes('Firearm Alpha'),false);
+  for(const endpoint of ['catalog','publishing-catalog'])for(const categoryId of ['', 'agents']){
+    const f=filterFixture(),r=await catalogRoute(f,'/api/v1/supply/games/game_delta/'+endpoint+'?categoryId='+categoryId);
+    assert.equal(r.status,410);assert.equal(r.body.error.code,'SKIN_CATEGORY_RETIRED');assert.equal(f.connections,0);
+  }
 });
 
 test('existing API user BFF preserves literal null and duplicates through the real handler',async()=>{
   const f=filterFixture(),r=await catalogRoute(f,'/api/bff/user/supply/games/game_delta/catalog?isCollectible=null',true);assert.equal(r.status,200);assert.deepEqual(r.body.skins.map((s:any)=>s.id),['s2','s6','s7']);const duplicate=await catalogRoute(filterFixture(),'/api/bff/user/supply/games/game_delta/catalog?ownerKind=AGENT&ownerKind=FIREARM',true);assert.equal(duplicate.status,400);
+  const retired=filterFixture(),response=await catalogRoute(retired,'/api/bff/user/supply/games/game_delta/catalog?categoryId=agents',true);assert.equal(response.status,410);assert.equal(response.body.error.code,'SKIN_CATEGORY_RETIRED');assert.equal(retired.connections,0);
 });
 
 test('owner filtering binds cursors while older unfiltered cursors remain compatible',()=>{
@@ -206,7 +207,9 @@ test('admin receives full metadata and only constructs ownerRef with a real owne
     queries.push(sql);
     return{rows:sql.includes('FROM "zzsh_supply"."game"')?[{id:'game_delta'}]:[]};
   }} as unknown as PoolClient;
-  await readAdminCatalog(client,'boss_fixture',true,'game_delta');
+  const body=await readAdminCatalog(client,'boss_fixture',true,'game_delta');
+  assert.deepEqual(body.categories,[]);
+  assert.deepEqual(body.skinCategoryModel,{mode:'RETIRED',categorylessWriteReady:false,legacyReferencesReadOnly:false});
   const sql=queries.find(query=>query.includes('AS "namingState"'))!;
   for(const field of ['ownerKind','rarityEvidence','isCollectible','defaultState','mediaSource'])assert.ok(sql.includes(`AS "${field}"`),field);
   assert.match(sql,/owner_kind IS NULL OR COALESCE\(owner_id,firearm_id\) IS NULL THEN NULL/);

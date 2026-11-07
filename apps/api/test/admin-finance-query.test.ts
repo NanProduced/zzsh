@@ -5,7 +5,6 @@ import {Pool} from "pg";
 import {scopedFinanceSql,financeVersionSql,financeScopedVersionSql,financeLookupPageSql,FINANCE_GLOBAL_VERSION_DOMAIN} from "../src/finance/admin-finance-query";
 import {parseAdminFinanceFilters,adminFinanceObservationSql,ADMIN_FINANCE_LEDGER_SQL,ADMIN_FINANCE_LOOKUP_OBSERVATION_SQL,projectAdminFinanceObservation,projectAdminFinanceLedger,projectUnpostedFinanceSource,financeDocuments,readAdminFinanceSubject,financeSnapshot,financePeriodProjection} from "../src/finance/admin-finance-read";
 import {FinanceSqlFixture} from './admin-finance-fixture';
-import {prepareOwnerGuaranteeHistory} from '../src/finance/owner-guarantee-history';
 
 test("query selection is before the matched ceiling and restored content digest covers all source rows",()=>{
  const filters=parseAdminFinanceFilters(new URLSearchParams("scope=u1&q=%25_%5C&from=2026-10-03&to=2026-10-03"));
@@ -102,17 +101,6 @@ test('actual native zero source branch remains visible as its distribution docum
   const light=financeLookupPageSql(ADMIN_FINANCE_LEDGER_SQL,adminFinanceObservationSql({native_distribution:true},true),{},{filters,lookup:{exact:false},page:1,pageSize:20},true);assert.deepEqual(fixture.query(light.text,light.values).rows,keys);assert.match(light.text,/t\.action='ACCRUE'/);assert.doesNotMatch(light.text,/'earningRole',e\.beneficiary_role/);
   const empty=scopedFinanceSql(source,'history',{filters:{...filters,scope:'u2'}},20,false);assert.equal(fixture.query(empty.text,empty.values).rows.length,0);
   const version=financeVersionSql({native_distribution:true});assert(version.includes('rental_referral_earning'));assert.match(fixture.query(version,[]).rows[0]!.finance_version as string,/^[a-f0-9]{32}$/);
- }finally{fixture.close();}
-});
-test('actual guarantee history SQL uses its own source document and never adds paid observations to current held or old-order links',()=>{
- const input={userId:'u1',legacyUserId:'11',accountId:'account1',source:{id:'101',user_id:'11',no:'SOURCE-ACCOUNT',pay_money:'0.00',pay_is:'0',pay_time:null,return_is:null},payOrders:[{id:'501',order_id:'101',order_type:'2',pay_money:'5.00',pay_is:'1',create_time:'1779469700',pay_time:'1779469800',pay_order_sn:'ORIGINAL-MERCHANT'}]},p=prepareOwnerGuaranteeHistory(input);
- const fixture=new FinanceSqlFixture({guaranteeHistory:[{id:'guarantee-fixture',user_id:'u1',account_id:'account1',legacy_account_id:'101',source_canonical:p.sourceCanonical,source_digest:p.sourceDigest,source_cutoff:'2026-09-13T13:31:22.000Z',imported_at:'2026-10-03T01:00:00.000000Z'}]});
- try{const filters=parseAdminFinanceFilters(new URLSearchParams('scope=u1&kind=GUARANTEE&from=2026-10-03&to=2026-10-03')),source=adminFinanceObservationSql({guarantee_history:true}),q=scopedFinanceSql(source,'history',{filters},20,false),rows=fixture.query(q.text,q.values).rows;assert.equal(rows.length,1);
-  const row=projectAdminFinanceObservation(rows[0]!);assert.equal(row.documentRef,'GUARANTEE_SOURCE:guarantee_source:guarantee-fixture');assert.equal(row.deltaCents,null);assert.equal(row.knowledge,'UNKNOWN');assert.equal(row.evidence.sourcePaidRecordCents,'500');assert.equal(row.evidence.currentLiabilityCents,null);assert.equal(row.affectsCurrentLedger,false);assert.equal(row.affectsCurrentWallet,false);assert.equal(row.related.length,0);assert(!JSON.stringify(row).includes('ORIGINAL-MERCHANT'));
-  const page=financeLookupPageSql(ADMIN_FINANCE_LEDGER_SQL,source,{}, {filters,lookup:{exact:false},page:1,pageSize:20});assert.equal(fixture.query(page.text,page.values).rows[0]!.ref,row.documentRef);
-  const light=financeLookupPageSql(ADMIN_FINANCE_LEDGER_SQL,adminFinanceObservationSql({guarantee_history:true},true),{},{filters,lookup:{exact:false},page:1,pageSize:20},true);assert.deepEqual(fixture.query(light.text,light.values).rows,fixture.query(page.text,page.values).rows);assert.match(light.text,/jsonb_array_length\(g\.source_canonical/);assert.doesNotMatch(light.text,/jsonb_build_object\('canonical'/);
-  const other=scopedFinanceSql(source,'history',{filters:{...filters,scope:'u2'}},20,false);assert.equal(fixture.query(other.text,other.values).rows.length,0);
-  assert.throws(()=>projectAdminFinanceObservation({...rows[0],subject_id:'u2'}),(e:any)=>e.status===503);
  }finally{fixture.close();}
 });
 test("actual PostgreSQL CTE: 6001 unrelated users and 25001 unrelated entries do not block exact filtered rows",{skip:process.env.ADM_FINANCE_QUERY_PG!=="admin_order_read"},async()=>{
@@ -316,7 +304,7 @@ test('global narrow proof catches non-max CAS, first payment and complete capabi
   assert.equal(fixture.db.prepare('SELECT MAX(CAST(revision AS INTEGER)) AS revision FROM zzsh_order.payment_request').get()!.revision,99);
   assert.equal(fixture.db.prepare('SELECT MAX(CAST(revision AS INTEGER)) AS revision FROM zzsh_order.channel_refund_intent').get()!.revision,99);
   assert.equal(fixture.db.prepare('SELECT MAX(CAST(operation_version AS INTEGER)) AS revision FROM zzsh_order.withdrawal_intent').get()!.revision,99);
-  const empty=new FinanceSqlFixture();try{assert.notEqual(empty.query(financeVersionSql({native_orders:true}),[]).rows[0]!.finance_version,empty.query(financeVersionSql({guarantee_history:true}),[]).rows[0]!.finance_version);}finally{empty.close();}
+  const empty=new FinanceSqlFixture();try{assert.notEqual(empty.query(financeVersionSql({native_orders:true}),[]).rows[0]!.finance_version,empty.query(financeVersionSql({withdrawals:true}),[]).rows[0]!.finance_version);}finally{empty.close();}
  }finally{fixture.close();}
 });
 

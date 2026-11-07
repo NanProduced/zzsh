@@ -59,7 +59,7 @@ export function createLocalFinancialSandbox(input: {
   const local = (value: string) => { try { const url = new URL(value); return url.protocol === "http:" && url.hostname === "127.0.0.1" && Boolean(url.port) && url.origin === value; } catch { return false; } };
   if (!adoption || config.profile !== "dev" || config.provider !== "fake" || process.env.NODE_ENV === "production"
     || config.host !== "127.0.0.1" || config.database.target !== "local-compose" || config.database.targetProfile !== "dev"
-    || config.database.host !== "127.0.0.1" || config.database.port !== 55432 || resource.database !== "zzsh_dev_daily"
+    || config.database.host !== "127.0.0.1" || ![55432,55433].includes(config.database.port) || resource.database !== "zzsh_dev_daily"
     || resource.database !== config.database.name || resource.runtimeRole !== config.database.user || resource.runtimeRole !== config.database.runtimeUser
     || resource.database !== adoption.targetDatabase || resource.resourceOid !== adoption.targetOid || resource.marker !== adoption.targetMarker
     || ![resource.owner, resource.runtimeRole, resource.migrationRole].every(value => typeof value === "string" && DB_ID.test(value))

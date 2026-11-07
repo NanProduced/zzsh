@@ -35,8 +35,23 @@ export function legacyCompletedComponents(raw) {
     return { rentalCents: (resource - material).toString(), materialCents: material.toString(), minimumBillingCents: "0", minimumAgreementRef: null, basis };
 }
 
+/**
+ * Growth closes over the orders the target is supposed to hold. When the round migrates a business-
+ * selected subset, every source order must be either retained or explicitly excluded, and an excluded
+ * order must not have been paid - otherwise the exclusion would silently drop a real consumption fact.
+ */
+export function assertGrowthScopePartition(allOrders, scope) {
+  if (!scope) return { orders: allOrders, excluded: [] };
+  if (scope.schema !== "zzsh.selected-business-scope.v1") fail("GROWTH_SCOPE_SCHEMA_INVALID");
+  const retained = new Set(scope.write.orders), excluded = new Set(scope.excludedKeys.orders);
+  for (const row of allOrders) if (!retained.has(row.id) && !excluded.has(row.id)) fail("GROWTH_SCOPE_PARTITION_INCOMPLETE:" + row.id);
+  if (retained.size + excluded.size !== allOrders.length) fail("GROWTH_SCOPE_PARTITION_INCOMPLETE");
+  for (const row of allOrders) if (excluded.has(row.id) && row.pay_is === "1") fail("GROWTH_EXCLUDED_ORDER_WAS_PAID:" + row.id);
+  return { orders: allOrders.filter(row => retained.has(row.id)), excluded: allOrders.filter(row => excluded.has(row.id)).map(row => row.id).sort() };
+}
+
 /** Original full-source cohort closes every renter source; no-order cohort members get reviewed empty coverage. */
-export function buildLocalGrowthPlan({ modules, cohort, orders, targets, payments, refunds, refundLogs, cutoff, lineage, oldRuleEvidenceRef }) {
+export function buildLocalGrowthPlan({ modules, cohort, orders, growthExcluded = [], targets, payments, refunds, refundLogs, cutoff, lineage, oldRuleEvidenceRef }) {
     const canonical = modules.canonicalize, proof = value => { const canonicalText = canonical(value); return { canonical: canonicalText, digest: sha(canonicalText) }; };
     const targetById = new Map(targets.map(row => [row.legacyId, row])), cohortById = new Map(cohort.map(row => [row.sourceId, row.userId]));
     if (cohortById.size !== cohort.length || targetById.size !== orders.length || cohort.length !== new Set(cohort.map(row => row.userId)).size) fail("GROWTH_SOURCE_DENOMINATOR_CONFLICT");
@@ -46,6 +61,10 @@ export function buildLocalGrowthPlan({ modules, cohort, orders, targets, payment
     const grouped = new Map(cohort.map(row => [row.userId, []])), audit = [], seen = new Set();
     const review = { schema: "local-growth-reviewed-source.v1", cutoff, sourceLineage: lineage, oldRuleEvidenceRef, cohort: cohort.map(row => [row.sourceId, row.userId]).sort(),
         sourceOrderKeys: orders.map(row => "legacy_mysql_restore:la_order:" + row.id).sort(),
+        // Orders the business scope leaves out are listed by key so the report proves they were
+        // excluded on purpose and contributed no growth, instead of simply missing.
+        excludedOrderKeys: growthExcluded.map(id => "legacy_mysql_restore:la_order:" + id).sort(),
+        excludedOrderCount: growthExcluded.length,
         rules: ["FINAL_CONFIRMED_ORDER_COMPONENTS_ONLY", "EXPLICIT_FINAL_MATERIAL_OR_FROZEN_QUANTITY_PRICE", "OLD_FINAL_NULL_QUANTITY_UTILITY_SEMANTICS", "TYPED_FULL_REFUND_VOID_BEFORE_CONFIRM", "PENDING_IS_NOT_SETTLED", "REFUND_CONFLICT_IS_UNKNOWN", "NO_CURRENT_PRICE_OR_PREPAYMENT", "NO_SEPARATE_UNBOOKED_MINIMUM", "NO_DEPOSIT_COMPENSATION_OR_CONFISCATION"] };
     const reviewProof = proof(review);
     for (const raw of orders) {

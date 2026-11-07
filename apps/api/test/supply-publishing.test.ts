@@ -21,16 +21,18 @@ test("identity READ purpose omits row locks while every existing default WRITE k
 
 test("unquoted draft skins use current visible identities with explicit withheld and empty states, without snapshot writes", async () => {
   const calls: Array<{ sql: string; values: unknown[] }> = [];
-  let rows: Record<string, unknown>[] = [{ id: "skin_a", name: "干员-外观", base_name: "外观", owner_name: "干员", owner_kind: "AGENT", rarity_code: "epic", rarity_name: "史诗", rarityBasis: "PLATFORM_REFERENCE", isCollectible: false, defaultState: "NON_DEFAULT", mediaKind: "PROMO_POSTER", media_id: "media_a", category_code: "agent", category_name: "干员外观" }];
+  let rows: Record<string, unknown>[] = [{ id: "skin_a", name: "干员-外观", base_name: "外观", owner_name: "干员", owner_kind: "AGENT", rarity_code: "epic", rarity_name: "史诗", rarityBasis: "PLATFORM_REFERENCE", isCollectible: false, defaultState: "NON_DEFAULT", mediaKind: "PROMO_POSTER", media_id: "media_a", category_retired: true, category_code: null, category_name: null }];
   const client = { query: async (sql: string, values: unknown[]) => { calls.push({ sql, values }); return { rows: [{ revision: "22", items: rows }] }; } };
   const result = await readDraftSkinSummary(client as never, "game", ["skin_a", "hidden_b"]);
   assert.equal(result.source, "CURRENT_DRAFT_SELECTION"); assert.equal(result.catalogRevision, "22"); assert.equal(result.withheld, 1);
   assert.deepEqual((result.items as Record<string, unknown>[])[0], freezePresentationSkin(rows[0]!));
   assert.equal((result.items as Record<string, unknown>[])[0]!.isCollectible, false);
   assert.equal((result.items as Record<string, unknown>[])[0]!.mediaKind, "PROMO_POSTER");
+  assert.equal((result.items as Record<string, unknown>[])[0]!.categoryModel, "RETIRED");
   assert.match(calls[0]!.sql, /s\.media_source->>'kind' AS "mediaKind"/);
   assert.deepEqual(calls[0]!.values, ["game", ["skin_a", "hidden_b"]]);
-  for (const required of ["WITH RECURSIVE", "s.naming_state='VERIFIED'", "s.enabled=true", "s.form_visible=true", "s.category_id IN (SELECT id FROM visible)", "PUBLIC_DISPLAY", "APPROVED"]) assert(calls[0]!.sql.includes(required), required);
+  for (const required of ["s.game_id=$1", "s.id=ANY($2::text[])", "s.naming_state='VERIFIED'", "s.enabled=true", "s.form_visible=true", "true AS category_retired", "NULL::text AS category_code", "PUBLIC_DISPLAY", "APPROVED"]) assert(calls[0]!.sql.includes(required), required);
+  assert.doesNotMatch(calls[0]!.sql, /\bskin_category\b|\bcategory_id\b/);
   assert.doesNotMatch(calls[0]!.sql, /\b(?:INSERT|UPDATE|DELETE)\b/);
   rows = [];
   assert.deepEqual(await readDraftSkinSummary(client as never, "game", []), { source: "CURRENT_DRAFT_SELECTION", catalogRevision: "22", items: [], withheld: 0 });
@@ -168,10 +170,11 @@ test("empty presentation is not filled from the current catalog", async () => {
   assert.deepEqual(result, {});
 });
 
-test("readPresentation fills both missing skin category fields without changing existing labels", async () => {
+test("readPresentation preserves existing category labels without guessing a missing field", async () => {
+  let queried = false;
   const result = await readPresentation(
     {
-      query: async () => ({ rows: [{ id: "skin-a", categoryCode: "current-category", categoryName: "当前分类" }] }),
+      query: async () => { queried = true; return { rows: [{ id: "skin-a", categoryCode: "current-category", categoryName: "当前分类" }] }; },
     } as never,
     {
       presentation: {
@@ -181,12 +184,13 @@ test("readPresentation fills both missing skin category fields without changing 
     } as never,
   );
 
-  assert.deepEqual(result.skins, [{ id: "skin-a", name: "皮肤", categoryName: "审核分类", categoryCode: "current-category" }]);
+  assert.deepEqual(result.skins, [{ id: "skin-a", name: "皮肤", categoryName: "审核分类" }]);
+  assert.equal(queried, false);
 });
 
 // SKIN-MODEL-7 A: a new quote/presentation snapshot freezes owner type and quality facts
 // (null = not known when frozen). Snapshots written before these keys existed keep them
-// absent: readPresentation may still fill category labels, never type or quality.
+// absent: readPresentation never guesses category labels, type or quality.
 test("SK7 new snapshots freeze owner type and quality; unknown is an explicit null", () => {
   const row = { id: "skin-a", name: "露娜-黑·天际线", base_name: "黑·天际线", owner_name: "露娜", owner_kind: "AGENT", rarity_code: "q_fixture", rarity_name: "测试品质", media_id: null, category_code: "df_skin_category_agent", category_name: "干员外观" };
   assert.deepEqual(freezePresentationSkin(row), { id: "skin-a", name: "露娜-黑·天际线", baseName: "黑·天际线", ownerName: "露娜", ownerKind: "AGENT", rarityCode: "q_fixture", rarityName: "测试品质", rarityBasis: null, isCollectible: null, defaultState: "UNKNOWN", mediaKind: null, mediaId: null, categoryCode: "df_skin_category_agent", categoryName: "干员外观" });
@@ -200,13 +204,15 @@ test("SK7 new snapshots freeze owner type and quality; unknown is an explicit nu
   assert.ok(source.includes("publicSkinMetadataSql"), "quote reads quality basis, collectible and default facts through the shared helper");
 });
 
-test("SK7 an old snapshot without type or quality stays without them; category labels may still be filled", async () => {
+test("SK7 an old snapshot without type, quality or category stays without them", async () => {
+  let reads = 0;
   const result = await readPresentation(
-    { query: async (sql: string) => { assert.doesNotMatch(sql, /media_source|mediaKind/); return { rows: [{ id: "skin-old", categoryCode: "df_skin_category_agent", categoryName: "干员外观", ownerKind: "AGENT", rarityCode: "q_now", rarityName: "当前品质", rarityBasis: "OFFICIAL", isCollectible: true, defaultState: "NON_DEFAULT", mediaKind: "PROMO_POSTER" }] }; } } as never,
+    { query: async () => { reads++; return { rows: [] }; } } as never,
     { presentation: { items: [], skins: [{ id: "skin-old", name: "旧快照皮肤" }] } } as never,
   );
-  assert.deepEqual(result.skins, [{ id: "skin-old", name: "旧快照皮肤", categoryCode: "df_skin_category_agent", categoryName: "干员外观" }]);
-  for (const key of ["ownerKind", "rarityCode", "rarityName", "rarityBasis", "isCollectible", "defaultState", "mediaKind"]) assert.equal(Object.hasOwn((result.skins as object[])[0]!, key), false, `${key} is not back-filled from today's catalog`);
+  assert.deepEqual(result.skins, [{ id: "skin-old", name: "旧快照皮肤" }]);
+  assert.equal(reads, 0);
+  for (const key of ["categoryCode", "categoryName", "ownerKind", "rarityCode", "rarityName", "rarityBasis", "isCollectible", "defaultState", "mediaKind"]) assert.equal(Object.hasOwn((result.skins as object[])[0]!, key), false, `${key} is not back-filled from today's catalog`);
   const frozen = await readPresentation(
     { query: async () => ({ rows: [{ id: "skin-new", categoryCode: "c", categoryName: "C", rarityName: "当前品质" }] }) } as never,
     { presentation: { items: [], skins: [{ id: "skin-new", name: "新快照皮肤", ownerKind: "AGENT", rarityCode: null, rarityName: null, categoryCode: "c", categoryName: "C" }] } } as never,
@@ -228,8 +234,8 @@ test("new skin metadata freezes known, false and unknown states without later ca
       reads++;
       return { rows: [{ id: "skin-facts", categoryCode: "current-category", categoryName: "当前分类", rarityBasis: metadata.rarityBasis === "OFFICIAL" ? "PLATFORM_REFERENCE" : "OFFICIAL", isCollectible: metadata.isCollectible !== true, defaultState: metadata.defaultState === "DEFAULT" ? "NON_DEFAULT" : "DEFAULT" }] };
     } } as never, { presentation: { items: [], skins: [snapshot] } } as never);
-    assert.equal(reads, 1, "exercise the category compatibility lookup rather than only the no-read path");
-    assert.deepEqual(later.skins, [{ ...snapshot, categoryCode: "current-category", categoryName: "当前分类" }]);
+    assert.equal(reads, 0, "skin-only presentation must not read today's catalog");
+    assert.deepEqual(later.skins, [snapshot]);
     assert.deepEqual([snapshot.rarityBasis, snapshot.isCollectible, snapshot.defaultState], [metadata.rarityBasis, metadata.isCollectible, metadata.defaultState], "reading does not mutate the frozen snapshot");
   }
 });
@@ -270,6 +276,22 @@ test("an authoritative completed rental blocks publication even when the old acc
     const absent = await publicationBlockers(nativeGateClient() as never, nativeAccount as never, draft as never, async () => ({ ...await nativeGate(), rentalCompleted: false }), purpose);
     assert.equal(absent.includes("RENTAL_COMPLETED"), false, "free occupancy or a missing completion fact never invents a terminal result");
   }
+});
+
+test("the three migration account states keep their server-side listing rules", async () => {
+  // Round seven migrates accounts in exactly two states: listed at the cutoff and delisted at the cutoff.
+  // A delisted one stays UNRESOLVED and must never publish on the same account - the owner has to create a
+  // new account instead. A listed one becomes NONE after takeover, so it rents, and after a pause it can
+  // resume because the hold no longer blocks it. Neither may publish once a rental has completed.
+  const draft = { id: "v", account_id: "a", origin: "NATIVE", review_state: "DRAFT", rule_release_id: null, content_hash: null, payload: null, attributes: {}, title: "" };
+  const delisted = await publicationBlockers(nativeGateClient() as never, { ...nativeAccount, legacy_hold: "UNRESOLVED" } as never, draft as never, nativeGate, "WRITE");
+  assert.equal(delisted.includes("ACCOUNT_NOT_PUBLISHABLE"), true, "a delisted legacy account must not publish on the same account");
+  const listed = await publicationBlockers(nativeGateClient() as never, { ...nativeAccount, legacy_hold: "NONE" } as never, draft as never, nativeGate, "WRITE");
+  assert.equal(listed.includes("ACCOUNT_NOT_PUBLISHABLE"), false, "a taken-over listed account must stay publishable after a pause");
+  const paused = await publicationBlockers(nativeGateClient() as never, { ...nativeAccount, legacy_hold: "NONE", owner_paused: true } as never, draft as never, nativeGate, "WRITE");
+  assert.equal(paused.includes("ACCOUNT_NOT_PUBLISHABLE"), false, "pausing is a runtime state, not a hold");
+  const settled = await publicationBlockers(nativeGateClient() as never, { ...nativeAccount, legacy_hold: "NONE" } as never, draft as never, async () => ({ ...await nativeGate(), rentalCompleted: true }), "WRITE");
+  assert.equal(settled.includes("RENTAL_COMPLETED"), true, "a settled rental must not return to a listing");
 });
 
 test("native empty title is not a write blocker; a legacy placeholder still is", async () => {

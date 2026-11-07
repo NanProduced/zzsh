@@ -10,6 +10,7 @@ import { verifyLegacyListedPolicyDump } from "./verify-legacy-listed-policy-dump
 import { validateLegacyListedExecutionPlan } from "./legacy-listed-execution-plan.mjs";
 import { inspectDeferredLegacyCredit, lockDeferredLegacyCreditTables, deferredCreditGateForRow, requiresFullRollbackTrial, rejectUnmarkedObservation } from "./legacy-listed-provisional-credit.mjs";
 import { verifyRoundBoundSourcePlan, validateRoundTrialReceipt } from "./legacy-listed-round-source.mjs";
+import { advisoryLockSql, assertLiveTarget, loadRegisteredTarget, maintenanceConnection, targetConnection, targetIdentityQuery } from "./local-target-registry.mjs";
 
 const require = createRequire(import.meta.url);
 const args = process.argv.slice(2);
@@ -52,10 +53,13 @@ if (inputSha !== option("--input-sha") || !/^\d+$/.test(oid ?? "") || !/^[a-z0-9
   || typeof actor.sessionId !== "string" || !actor.sessionId) throw new Error("EXACT_TARGET_AND_INPUT_REQUIRED");
 const resource = JSON.parse(readFileSync(join(dirname(credentialsFile), "resource.json")));
 const credentials = JSON.parse(readFileSync(credentialsFile));
+const registered = loadRegisteredTarget(credentialsFile);
 const roleKind = action === "--execute" || action === "--trial" ? "migration" : "runtime";
 const role = credentials[roleKind];
-if (resource.database !== "zzsh_test_regression" || credentials.database !== resource.database || resource.oid !== oid || resource.nonce !== nonce || resource.pendingReset
-  || role?.name !== resource.roles?.[roleKind]?.name || role?.oid !== resource.roles?.[roleKind]?.oid) throw new Error("TARGET_BINDING_INVALID");
+if (resource.database !== "zzsh_test_regression" || registered.database !== resource.database || credentials.database !== resource.database || registered.oid !== oid || registered.nonce !== nonce || resource.oid !== oid || resource.nonce !== nonce || resource.pendingReset
+  || role?.name !== resource.roles?.[roleKind]?.name || role?.oid !== resource.roles?.[roleKind]?.oid
+  || role?.name !== (roleKind === "migration" ? registered.migrationRole : registered.runtimeRole)
+  || role?.oid !== (roleKind === "migration" ? registered.migrationRoleOid : registered.runtimeRoleOid)) throw new Error("TARGET_BINDING_INVALID");
 const moduleNames = ["auth/auth-security", "auth/security-core", "database/business-migrations", "order/order", "order/legacy-continuation-model", "supply/content-hash", "supply/funding-authority",
   "supply/legacy-display-snapshot", "supply/legacy-listing-read", "supply/legacy-published-reference", "supply/legacy-trade-takeover", "supply/publishing", "supply/supply-util",
   "supply/legacy-listed-source-quote", "supply/legacy-listed-policy", "supply/legacy-listed-source", "supply/legacy-listed-pricing", "supply/legacy-listed-quote",
@@ -66,6 +70,7 @@ compiled.policyDumpVerifier = sha(readFileSync(new URL('./verify-legacy-listed-p
 compiled.sourceAdapter = sha(readFileSync(new URL('./local-source-adapter.mjs', import.meta.url)));
 compiled.planValidator = sha(readFileSync(new URL('./legacy-listed-execution-plan.mjs', import.meta.url)));
 compiled.loader = sha(readFileSync(fileURLToPath(import.meta.url)));
+compiled.targetRegistry = sha(readFileSync(new URL('./local-target-registry.mjs', import.meta.url)));
 compiled.provisionalCreditVerifier = sha(readFileSync(new URL('./legacy-listed-provisional-credit.mjs', import.meta.url)));
 if (input.roundBinding) compiled.roundSourceVerifier = sha(readFileSync(new URL('./legacy-listed-round-source.mjs', import.meta.url)));
 const migrationsFolder=resolve(apiDist,'../../migrations/business');
@@ -97,12 +102,13 @@ const { legacyPlanYuanToCents } = mod("order/legacy-continuation-model");
 const { assertBusinessMigrationPrefix } = mod("database/business-migrations");
 const operation = "supply.legacy.trade_takeover";
 const { Client } = require("pg");
-const target = { database: resource.database, oid, nonce, actorId: actor.id };
-const client = new Client({ host: "127.0.0.1", port: 55432, database: target.database, user: role.name, password: role.password,
-  application_name: "legacy-listed-accounts-" + action.slice(2), connectionTimeoutMillis: 3000, statement_timeout: 15000, lock_timeout: 1000 });
+const target = { database: resource.database, oid, nonce, actorId: actor.id, instance: registered.instance, lockKey: registered.lockKey,
+  migrationRoleOid: registered.migrationRoleOid, runtimeRoleOid: registered.runtimeRoleOid };
+const client = new Client(targetConnection(registered, { user: role.name, password: role.password,
+  applicationName: "legacy-listed-accounts-" + action.slice(2), connectionTimeoutMillis: 3000, statement_timeout: 15000, lock_timeout: 1000 }));
 const creditGuaranteeEnabled = action === "--prepare" ? args.includes("--credit-guarantee") : input.creditGuaranteeEnabled === true;
 if (input.schema === 'zzsh.listed-source-continuity-plan.v2' || input.sourcePlanSchema === 'zzsh.listed-source-continuity-plan.v2' || input.roundBinding) {
-  verifyRoundBoundSourcePlan(input, { oid, nonce, credentials: credentialsFile, actorFile: option('--actor-file'), apiDist,
+  verifyRoundBoundSourcePlan(input, { oid, nonce, instance:registered.instance, credentials: credentialsFile, actorFile: option('--actor-file'), apiDist,
     sourceDir: option('--source-dir'), sourceReceiptSha: option('--source-receipt-sha'), sourceBinding: option('--source-binding'),
     policyBundle: option('--policy-bundle'), policyBundleSha: option('--policy-bundle-sha'),
     policyAuthority: option('--policy-authority'), policyAuthoritySha: option('--policy-authority-sha'), creditGuaranteeEnabled,
@@ -287,19 +293,18 @@ try {
   if (action === "--execute" || action === "--trial") {
     const passwordFile = option("--maintenance-password-file");
     if (!isAbsolute(passwordFile ?? "")) throw new Error("MAINTENANCE_LOCK_CREDENTIAL_REQUIRED");
-    maintenance = new Client({ host: "127.0.0.1", port: 55432, database: "postgres", user: "zzsh",
+    maintenance = new Client(maintenanceConnection(registered, { user: "zzsh",
       password: readFileSync(passwordFile, "utf8").trim(), connectionTimeoutMillis: 3000, statement_timeout: 5000,
-      application_name: "legacy-listed-maintenance-lock" });
+      applicationName: "legacy-listed-maintenance-lock" }));
     await maintenance.connect();
-    if (!(await maintenance.query("SELECT pg_try_advisory_lock(806006) locked")).rows[0]?.locked) throw new Error("RESOURCE_MAINTENANCE_BUSY");
+    if (!(await maintenance.query(advisoryLockSql(registered, "try"))).rows[0]?.ok) throw new Error("RESOURCE_MAINTENANCE_BUSY");
   }
   await client.connect();
   await client.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY"); transaction = true;
-  const live = (await client.query(`SELECT d.oid::text oid,shobj_description(d.oid,'pg_database') marker,current_user role,
-    r.oid::text role_oid,r.rolsuper,r.rolcreatedb,r.rolcreaterole,r.rolbypassrls,current_setting('zzsh.regression_run',true) nonce
-    FROM pg_database d JOIN pg_roles r ON r.rolname=current_user WHERE d.datname=current_database()`)).rows[0];
+  const live = (await client.query(targetIdentityQuery())).rows[0];
+  assertLiveTarget(registered, live, roleKind);
   if (live.oid !== oid || live.nonce !== nonce || live.marker !== "zzsh:regression-test:v1" || live.role !== role.name
-    || live.role_oid !== role.oid || live.rolsuper || live.rolcreatedb || live.rolcreaterole || live.rolbypassrls) throw new Error("LIVE_TARGET_CHANGED");
+    || live.role_oid !== role.oid) throw new Error("LIVE_TARGET_CHANGED");
   await assertAdminContextInTransaction(client, { userId: actor.id, sessionId: actor.sessionId });
   if(action==='--execute'||action==='--trial'){
     await assertBusinessMigrationPrefix(client,migrationsFolder);

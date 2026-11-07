@@ -1,6 +1,21 @@
 import assert from 'node:assert/strict';
 import {test} from 'node:test';
-import {assertFundsWriterCoverage,safeLegacyWithdrawalEvidence} from './local-funds-plan.mjs';
+import {assertFundsWriterCoverage,assertRebuiltEmptyCoverageChunk,assertRebuiltEmptyCoverageManifest,createEmptyCoverageSink,safeLegacyWithdrawalEvidence} from './local-funds-plan.mjs';
+
+test('streamed empty coverage is checked against regenerated source, exact bytes and ordered manifest',()=>{
+ const chunks=[],sink=createEmptyCoverageSink({onChunk:chunk=>chunks.push(chunk)});
+ for(let i=0;i<401;i++)sink.push({sourceId:`${i}:PAY`,domain:'pays',input:{coverage:{legacyUserId:String(i),sourceKind:'PAY',sourceCount:0}}});
+ const rebuilt=sink.finish().manifest,saved={...rebuilt,chunks:chunks.map(({entries,...descriptor})=>descriptor)};
+ assert.equal(chunks.length,2);
+ for(let i=0;i<chunks.length;i++)assert.doesNotThrow(()=>assertRebuiltEmptyCoverageChunk(saved.chunks[i],chunks[i],Buffer.from(JSON.stringify(chunks[i].entries))));
+ assert.doesNotThrow(()=>assertRebuiltEmptyCoverageManifest(saved,rebuilt,2));
+ const changed=structuredClone(chunks[0].entries);changed[0].input.coverage.sourceCount=1;
+ assert.throws(()=>assertRebuiltEmptyCoverageChunk(saved.chunks[0],chunks[0],Buffer.from(JSON.stringify(changed))),/EMPTY_COVERAGE_REBUILT_CHUNK_DIFFERS/);
+ assert.throws(()=>assertRebuiltEmptyCoverageChunk({...saved.chunks[0],rows:399},chunks[0],Buffer.from(JSON.stringify(chunks[0].entries))),/EMPTY_COVERAGE_REBUILT_CHUNK_DIFFERS/);
+ assert.throws(()=>assertRebuiltEmptyCoverageManifest({...saved,chunks:[...saved.chunks].reverse()},rebuilt,2),/EMPTY_COVERAGE_REBUILT_MANIFEST_DIFFERS/);
+ assert.throws(()=>assertRebuiltEmptyCoverageManifest({...saved,rows:400},rebuilt,2),/EMPTY_COVERAGE_REBUILT_MANIFEST_DIFFERS/);
+ assert.throws(()=>assertRebuiltEmptyCoverageManifest(saved,rebuilt,1),/EMPTY_COVERAGE_REBUILT_MANIFEST_DIFFERS/);
+});
 
 test('legacy withdrawal destinations become non-reusable masks and immutable restricted refs, never full identities, payout credentials or URLs',()=>{
  const raw={id:'1',real_name:'张三',bank_card_no:'6222021234567890123',bank_name:'工商银行',mobile:'13812345678',account:'13812345678',money_qr_code:'https://private.example/secret',apply_remark:'PRIVATE-REMARK',pay_search_result:'PRIVATE-CHANNEL-RESPONSE',admin_id:'77'};

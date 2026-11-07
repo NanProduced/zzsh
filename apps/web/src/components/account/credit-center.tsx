@@ -224,14 +224,5 @@ export function CreditCenter({ scope }: { scope: string }) {
         </li>)}</ul> : <p className="credit-muted">暂无恢复申请记录。</p>}
       </section>
     </> : null}
-    <section className="credit-history-link account-module-card" aria-label="保证金记录">
-      <div className="credit-card-heading">
-        <div>
-          <h3>保证金记录</h3>
-          <p className="credit-muted">在资金台账中独立查看每笔保证金的缴纳、扣减与原路退还记录。</p>
-        </div>
-        <Link href="/account?view=wallet&wallet=guarantees" scroll={false} className="button secondary">查看保证金记录</Link>
-      </div>
-    </section>
   </section>;
 }

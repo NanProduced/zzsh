@@ -28,7 +28,8 @@ export function validateRoundSourceProof(binding, round, core, audit, observed, 
    ||audit.policyAuthorityCanonicalSha256!==binding.policyAuthoritySha256
    ||!Array.isArray(audit.accounts)||audit.accounts.length!==binding.expectedAccountCount
    ||!Number.isSafeInteger(binding.expectedAccountCount)||binding.expectedAccountCount<1
-   ||round.target?.bootstrapReservation!=='ROUND06_BOOTSTRAP_RESERVED'||!/^\d+$/.test(round.target?.oid??'')
+   ||!['ROUND06_BOOTSTRAP_RESERVED','ROUND07_BOOTSTRAP_RESERVED'].includes(round.target?.bootstrapReservation)||!/^\d+$/.test(round.target?.oid??'')
+   ||round.target?.bootstrapReservation==='ROUND07_BOOTSTRAP_RESERVED'&&(!round.target.instance||canonicalize(round.target.instance)!==canonicalize(observed.instance)||canonicalize(round.target.instance)!==canonicalize(observed.resource?.instance))
    ||!/^[a-f0-9]{24}$/.test(round.target?.nonce??'')||round.target.oid!==observed.oid||round.target.nonce!==observed.nonce
    ||!samePath(round.credentials,observed.credentials)||!samePath(round.actor?.path,observed.actorFile)||!samePath(round.apiDist,observed.apiDist)
    ||!samePath(round.source?.path,binding.sourceDir)||round.actor?.sha256!==observed.actorSha256
@@ -68,17 +69,17 @@ export function verifyRoundBoundSourcePlan(plan,ctx,canonicalize){
  const b=plan.roundBinding;fail(b?.schema==='zzsh.legacy-listed-round-binding.v1','LISTED_ROUND_BINDING_REQUIRED');
  const round=bound(privatePath(b.roundInputFile),b.roundInputSha256),core=bound(privatePath(b.coreReceiptFile),b.coreReceiptSha256),audit=bound(privatePath(b.scopeAuditFile),b.scopeAuditSha256);
  const actorFile=privatePath(round.actor?.path),sourceDir=privatePath(round.source?.path),datasetDir=privatePath(round.dataset?.path);
- const displayDir=privatePath(round.display?.path),pathsDir=privatePath(round.paths?.path),overlayFile=privatePath(round.holdingOverlay?.path);
+ const displayDir=privatePath(round.display?.path),pathsDir=privatePath(round.paths?.path),overlayFile=round.holdingOverlay?privatePath(round.holdingOverlay.path):null;
  const dataset=read(join(datasetDir,'manifest.json')),display=read(join(displayDir,'manifest.json')),paths=read(join(pathsDir,'receipt.json'));
  const localFile=(directory,name)=>{fail(typeof name==='string'&&name===basename(name),'LISTED_UNSAFE_FILE');return privatePath(join(directory,name))};
  const policy=read(privatePath(b.policyBundleFile)),authority=read(privatePath(b.policyAuthorityFile));
- const observed={oid:ctx.oid,nonce:ctx.nonce,credentials:ctx.credentials,actorFile:ctx.actorFile,apiDist:ctx.apiDist,
+ const observed={oid:ctx.oid,nonce:ctx.nonce,instance:ctx.instance,credentials:ctx.credentials,actorFile:ctx.actorFile,apiDist:ctx.apiDist,
   actorSha256:digest(actorFile),resource:read(join(dirname(ctx.credentials),'resource.json')),
   sourceReceiptSha256:digest(join(sourceDir,'receipt.json')),datasetManifestSha256:digest(join(datasetDir,'manifest.json')),
   displayManifestSha256:digest(join(displayDir,'manifest.json')),pathsReceiptSha256:digest(join(pathsDir,'receipt.json')),
   accountFileSha256:digest(localFile(datasetDir,dataset.files?.accounts?.file)),datasetAccountSha256:dataset.files?.accounts?.sha256,
   userFileSha256:digest(localFile(datasetDir,dataset.files?.users?.file)),datasetUserSha256:dataset.files?.users?.sha256,
-  displayFileSha256:digest(localFile(displayDir,display.file)),pathsFileSha256:digest(localFile(pathsDir,paths.file)),holdingOverlaySha256:digest(overlayFile),
+  displayFileSha256:digest(localFile(displayDir,display.file)),pathsFileSha256:digest(localFile(pathsDir,paths.file)),holdingOverlaySha256:overlayFile?digest(overlayFile):undefined,
   sourceBindingSha256:digest(b.sourceBindingFile),policyBundleSha256:sha(canonicalize(policy)),policyAuthoritySha256:sha(canonicalize(authority)),
   loaderSha256:ctx.compiled.loader,helperSha256:digest(new URL('./legacy-listed-round-source.mjs',import.meta.url)),
   creditGuaranteeEnabled:ctx.creditGuaranteeEnabled,compiled:ctx.compiled,allowExpiredReadOnly:ctx.allowExpiredReadOnly===true,now:Date.now()};

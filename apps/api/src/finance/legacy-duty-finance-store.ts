@@ -37,7 +37,7 @@ export async function bindReviewedLegacyDutyFinance(c:PoolClient,actor:Actor,rev
  const r=copy(review);
  if(r.contractVersion!==LEGACY_DUTY_FINANCE_CONTRACT||!/^legacy_order_[a-f0-9]{40}$/.test(r.orderId)||!/^[a-f0-9]{64}$/.test(r.inputDigest)
   ||!['execute','recover'].includes(mode)||!r.funding||r.funding.orderId!==r.orderId||!r.ref||!r.attempt
-  ||r.resource?.host!=='127.0.0.1'||r.resource.port!==55432||!/^zzsh_test_order_[a-z][a-z0-9_]{0,20}$/.test(r.resource.database)||r.resource.marker!=='zzsh:order-reservation-test:v1'
+  ||r.resource?.host!=='127.0.0.1'||![55432,55433].includes(r.resource.port)||!/^zzsh_test_order_[a-z][a-z0-9_]{0,20}$/.test(r.resource.database)||r.resource.marker!=='zzsh:order-reservation-test:v1'
   ||![r.resource.oid,r.resource.roleOid].every(n=>Number.isSafeInteger(n)&&n>0)||![r.resource.role,r.resource.owner].every(s=>typeof s==='string'&&/^[a-zA-Z_][a-zA-Z0-9_]{0,62}$/.test(s)))throw invalid('Bounded actual legacy finance resource required');
  ensureOnlyFields(r.actor,['userId','sessionId']);ensureOnlyFields(r.resource,['host','port','database','oid','owner','marker','role','roleOid']);
  if(![r.notBefore,r.expiresAt].every(s=>typeof s==='string'&&/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/.test(s))||r.ref.length>128||r.attempt.length>128)throw invalid('Exact legacy finance window required');

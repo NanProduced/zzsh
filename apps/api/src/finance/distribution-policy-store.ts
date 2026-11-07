@@ -18,17 +18,20 @@ const localName='zzsh_test_order_credit_admin_batch2',localRuntime='zzsh_order_c
 const milestoneName='zzsh_test_order_milestone_real_1',milestoneRuntime='zzsh_order_milestone_real_1_r',milestoneMigration='zzsh_order_milestone_real_1_m';
 const localProofs=new WeakMap<LocalDistributionScope,Readonly<CreationReceipt&{readOnly:boolean;origins?:DistributionOrigins;sandbox?:LocalFinancialSandbox;nativeReadNonce?:string}>>();
 const nativeProofs=new WeakMap<LocalDistributionScope,Readonly<{kind:'NATIVE';database:string;runtimeUser:string;admissionSha256:string}>>();
-const reviewedLocalNativeProofs=new WeakMap<LocalDistributionScope,Readonly<{proof:ControlledRegressionResource;owner:string;ownerOid:number}>>();
+type ReviewedDistributionInstance=Readonly<{host:'127.0.0.1';port:55432|55433;systemIdentifier:string}>;
+const reviewedLocalNativeProofs=new WeakMap<LocalDistributionScope,Readonly<{proof:ControlledRegressionResource;owner:string;ownerOid:number;instance?:ReviewedDistributionInstance}>>();
 /** Formal NATIVE scope comes only from the reviewed formal collection admission; no receipt or env shortcut. */
 export function createNativeDistributionPolicyScope(admission:FormalCollectionAdmission):LocalDistributionScope{
  const view=readFormalCollectionAdmission(admission),value=Object.freeze({kind:'NATIVE_DISTRIBUTION' as const});
  nativeProofs.set(value,Object.freeze({kind:'NATIVE' as const,database:view.database,runtimeUser:view.runtimeUser,admissionSha256:view.sha256}));return value;
 }
 /** Offline migration only; the original regression proof is rechecked on every transaction. */
-export function createReviewedLocalNativeDistributionScope(proof:ControlledRegressionResource,owner:{owner:string;ownerOid:number}):LocalDistributionScope{
+export function createReviewedLocalNativeDistributionScope(proof:ControlledRegressionResource,owner:{owner:string;ownerOid:number;instance?:ReviewedDistributionInstance}):LocalDistributionScope{
  if(!owner||!/^[a-z][a-z0-9_]{0,62}$/.test(owner.owner)||owner.owner===REGRESSION_RUNTIME_USER||!Number.isSafeInteger(owner.ownerOid)||owner.ownerOid<=0||owner.ownerOid>4294967295)
   throw new ConfigurationError('REVIEWED_LOCAL_NATIVE_DISTRIBUTION_OWNER_INVALID');
- const value=Object.freeze({kind:'NATIVE_DISTRIBUTION' as const});reviewedLocalNativeProofs.set(value,Object.freeze({proof,owner:owner.owner,ownerOid:owner.ownerOid}));return value;
+ const instance=owner.instance;
+ if(instance&&(instance.host!=='127.0.0.1'||![55432,55433].includes(instance.port)||!/^[0-9]+$/.test(instance.systemIdentifier)))throw new ConfigurationError('REVIEWED_LOCAL_NATIVE_DISTRIBUTION_INSTANCE_INVALID');
+ const value=Object.freeze({kind:'NATIVE_DISTRIBUTION' as const});reviewedLocalNativeProofs.set(value,Object.freeze({proof,owner:owner.owner,ownerOid:owner.ownerOid,...(instance?{instance:Object.freeze({...instance})}:{})}));return value;
 }
 export function distributionPolicyScopeOf(binding:LocalDistributionScope|undefined):DistributionPolicyScopeKind{return binding!==undefined&&(nativeProofs.has(binding)||reviewedLocalNativeProofs.has(binding)||localProofs.get(binding)?.nativeReadNonce!==undefined)?'NATIVE':'LOCAL_CONTROLLED';}
 /** Explicit server assembly from the resource creation receipt; never HTTP or environment input. */
@@ -49,7 +52,7 @@ export function createRegisteredLocalDistributionReadScope(config:AppConfig,rece
  const oid=(value:number)=>Number.isSafeInteger(value)&&value>0&&value<=4294967295;
  const localOrigin=(value:string)=>{try{const url=new URL(value);return url.protocol==='http:'&&url.hostname==='127.0.0.1'&&Boolean(url.port)&&url.origin===value;}catch{return false;}};
  if(!['test','dev'].includes(config.profile)||config.provider!=='fake'||config.host!=='127.0.0.1'
-  ||config.database.target!=='local-compose'||config.database.host!=='127.0.0.1'||config.database.port!==55432
+  ||config.database.target!=='local-compose'||config.database.host!=='127.0.0.1'||![55432,55433].includes(config.database.port)
   ||config.database.name!==receipt.database||config.database.user!==receipt.runtimeRole||config.database.runtimeUser!==receipt.runtimeRole
   ||!['database','owner','runtimeRole','migrationRole'].every(key=>{const value=receipt[key as keyof CreationReceipt];return typeof value==='string'&&value.length>0&&value.length<=63&&value===value.trim()&&!/[\x00-\x1f\x7f]/.test(value);})
   ||typeof receipt.marker!=='string'||!receipt.marker.length||receipt.marker.length>1024||/[\x00-\x1f\x7f]/.test(receipt.marker)
@@ -98,7 +101,7 @@ export function assertLocalNativeDistributionWriteUnavailable(binding:LocalDistr
 function createScope(config:AppConfig,receipt:CreationReceipt,readOnly:boolean):LocalDistributionScope{
  const milestone=receipt.database===milestoneName,name=milestone?milestoneName:localName,runtime=milestone?milestoneRuntime:localRuntime,migration=milestone?milestoneMigration:localMigration;
  if(config.profile!=='test'||config.provider!=='fake'||!readOnly&&!config.testOperationsEnabled||readOnly&&!milestone
-  ||config.database.target!=='local-compose'||config.database.host!=='127.0.0.1'||config.database.port!==55432
+  ||config.database.target!=='local-compose'||config.database.host!=='127.0.0.1'||![55432,55433].includes(config.database.port)
   ||config.database.name!==name||config.database.user!==runtime
   ||receipt.database!==name||receipt.runtimeRole!==runtime||receipt.migrationRole!==migration
   ||receipt.owner!=='zzsh'||receipt.marker!==localMarker||!Number.isSafeInteger(receipt.resourceOid)||receipt.resourceOid<=0||receipt.resourceOid>4294967295
@@ -128,9 +131,11 @@ async function resource(c:PoolClient, allowUnadmitted=false,binding?:LocalDistri
  const reviewed=binding&&reviewedLocalNativeProofs.get(binding);
  if(reviewed){
   const connection=(c as PoolClient&{connectionParameters?:{host?:string;port?:number;database?:string;user?:string}}).connectionParameters;
-  if(maintenanceOwner||c.getTransactionStatus()!=='T'||!connection||connection.host!=='127.0.0.1'||Number(connection.port)!==55432||connection.database!==REGRESSION_DATABASE||connection.user!==REGRESSION_RUNTIME_USER)
+  if(maintenanceOwner||c.getTransactionStatus()!=='T'||!connection||connection.host!==(reviewed.instance?.host??'127.0.0.1')||Number(connection.port)!==(reviewed.instance?.port??55432)||connection.database!==REGRESSION_DATABASE||connection.user!==REGRESSION_RUNTIME_USER)
    throw new SecurityApiError(503,'EVIDENCE_UNAVAILABLE','Reviewed local distribution connection differs');
   await assertControlledRegressionResource(c,reviewed.proof,'DISTRIBUTION');
+  if(reviewed.instance){const actual=(await c.query('SELECT system_identifier::text AS system_identifier FROM pg_control_system()')).rows[0];
+   if(actual?.system_identifier!==reviewed.instance.systemIdentifier)throw new SecurityApiError(503,'EVIDENCE_UNAVAILABLE','Reviewed local distribution cluster differs');}
   const state=(await c.query(`SELECT pg_get_userbyid(d.datdba) AS owner,d.datdba::int AS "ownerOid",
    to_regclass('zzsh_order.distribution_policy_version') IS NOT NULL AND to_regclass('zzsh_order.distribution_policy_head') IS NOT NULL AND to_regclass('zzsh_order.distribution_participant') IS NOT NULL AND to_regclass('zzsh_order.distribution_invite_code') IS NOT NULL AND to_regclass('zzsh_order.invitation_relation') IS NOT NULL AS complete
    FROM pg_database d WHERE d.datname=current_database()`)).rows[0];

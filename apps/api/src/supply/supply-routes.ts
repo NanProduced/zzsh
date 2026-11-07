@@ -104,6 +104,7 @@ import {
   invalid,
   newSupplyId,
   notFound,
+  retiredSkinCategory,
   optionalString,
   optionalTrimmedString,
   parseExpectedRevision,
@@ -1309,6 +1310,7 @@ async function handleAdminWrite(
     const entryId = decodeId(updateEntryMatch[2]!);
     const body = bodyOf(request);
     await write(`supply.catalog.${kind}.update`, entryId, ADMIN_PERMISSION.supplyCatalogManage, async (client) => {
+      if (kind === "categories") throw retiredSkinCategory();
       const found = await client.query<{ gameId: string }>(`SELECT "game_id" AS "gameId" FROM "zzsh_supply"."${TABLE_BY_KIND[kind]}" WHERE "id" = $1`, [entryId]);
       if (!found.rows[0]) throw notFound();
       return found.rows[0].gameId;
@@ -1540,7 +1542,6 @@ async function handleAdminWrite(
 const TABLE_BY_KIND = {
   items: "billable_item",
   rarities: "skin_rarity",
-  categories: "skin_category",
   skins: "skin",
   entitlements: "entitlement",
 } as const;

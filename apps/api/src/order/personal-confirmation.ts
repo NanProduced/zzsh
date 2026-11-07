@@ -56,7 +56,7 @@ export function createControlledConfirmationFundingReader(input:{config:AppConfi
       ? { database: "zzsh_test_order_pub_direct", role: "zzsh_order_pub_direct_r" }
       : null;
   if(config.profile!=="test" || config.provider!=="fake" || !config.testOperationsEnabled || config.database.target!=="local-compose"
-    || config.database.targetProfile!=="test" || config.database.host!=="127.0.0.1" || config.database.port!==55432
+    || config.database.targetProfile!=="test" || config.database.host!=="127.0.0.1" || ![55432,55433].includes(config.database.port)
     || !resource || config.database.name!==resource.database || config.database.user!==resource.role || !CONTROLLED_RUN_ID.test(runId)) {
     throw new Error("Controlled funding requires an exact registered test/fake order runtime");
   }

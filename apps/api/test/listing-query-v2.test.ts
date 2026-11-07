@@ -13,6 +13,14 @@ function skinCandidateQuery(match:"ANY"|"ALL") {
   return parseListingQueryV2(new URLSearchParams({queryVersion:"2",gameId:"game",filters:JSON.stringify({skinGroups:[{categoryId:"agents",ids:["skin-luna"],match}]})}),"/listings");
 }
 
+test("a region configuration holds the whole published word list and refuses to grow without bound",()=>{
+ const field=(pairs:unknown[])=>({key:"regions",operator:"PAIRS_ANY",label:"地区",enabled:true,order:0,regions:pairs});
+ const pairs=(n:number)=>Array.from({length:n},(_,i)=>({province:"省"+(i%30),city:"市"+i}));
+ // The published word list has 454 province/city pairs; a 200-pair capacity rejected every initialisation.
+ assert.equal(parseFilterConfig({schemaVersion:1,fields:[field(pairs(454))],sorts:[{key:"latest",label:"最新发布",enabled:true,order:0}]}).fields[0]!.regions!.length,454);
+ assert.throws(()=>parseFilterConfig({schemaVersion:1,fields:[field(pairs(513))],sorts:[{key:"latest",label:"最新发布",enabled:true,order:0}]}));
+});
+
 test("skin ANY candidates include the same-version late verified holding before public projection",()=>{
   const query=skinCandidateQuery("ANY");
   for(const sql of [buildListingCandidates(query,null),buildMixedListingCandidates(query,null)]) {

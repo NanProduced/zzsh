@@ -4,7 +4,7 @@ import { runNativeDistributionApproval } from "./local-distribution-policy-appro
 
 function fixture(variation = "") {
   const calls = [], summary = { steps: [] }, first = { userId: "boss1", username: "boss-one", password: "private-one", totp: "otp-one", cookie: "cookie-one" }, second = { userId: "boss2", username: "boss-two", password: "private-two", totp: "otp-two", cookie: "cookie-two" };
-  let template = variation === 'empty-template' || variation === 'version-conflict', configured = false;
+  let template = variation === 'empty-template' || variation === 'version-conflict' || variation === 'existing', configured = false;
   const handler = async (req, res) => {
     calls.push({ url: req.originalUrl, key: req.headers["idempotency-key"], cookie: req.headers.cookie, body: req.body });
     const path = req.originalUrl.split("?")[0];
@@ -39,6 +39,14 @@ test("native policy uses two sessions, full security handler, step-up and verifi
 test("an existing template without the second Boss is not silently overwritten", async () => {
   const f = fixture("wrong-template"); await assert.rejects(runNativeDistributionApproval(f.params), /EXISTING_TEMPLATE_SECOND_BOSS_NOT_ELIGIBLE/);
   assert.equal(f.calls.length, 1); assert(!f.calls.some(c => c.url.endsWith("/templates/update")));
+});
+
+test('recovery reuses the acknowledged template and the original request key',async()=>{
+ const f=fixture('existing');await runNativeDistributionApproval({...f.params,recoveringRejectedRequest:true});
+ assert(!f.calls.some(c=>c.url.endsWith('/templates/update')));
+ assert.equal(f.calls.find(c=>c.url.endsWith('/requests')).key,f.params.plan.approvalKey+':request');
+ const missing=fixture();await assert.rejects(runNativeDistributionApproval({...missing.params,recoveringRejectedRequest:true}),/RECOVERY_ACKNOWLEDGED_TEMPLATE_MISSING/);
+ assert(!missing.calls.some(c=>c.url.endsWith('/templates/update')||c.url.endsWith('/requests')));
 });
 
 test("existing empty template is extended with the second Boss using its exact version", async () => {

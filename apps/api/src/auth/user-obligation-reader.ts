@@ -11,7 +11,7 @@ const REQUIRED_RELATIONS = {
   ORDER: ["zzsh_order.rental_order"],
   WALLET_BALANCE: ["zzsh_order.wallet_coverage", "zzsh_order.settlement_ledger_entry", "zzsh_iam.user_identity_state", "zzsh_iam.audit_event"],
   WITHDRAWAL: ["zzsh_order.withdrawal_intent", "zzsh_order.joinpay_withdrawal_intent"],
-  DEPOSIT: ["zzsh_order.owner_guarantee_requirement", "zzsh_order.owner_guarantee_payment", "zzsh_order.owner_guarantee_refund", "zzsh_order.legacy_owner_guarantee_observation"],
+  DEPOSIT: ["zzsh_order.owner_guarantee_requirement", "zzsh_order.owner_guarantee_payment", "zzsh_order.owner_guarantee_refund"],
   COMMISSION: ["zzsh_order.rental_referral_earning"],
 } as const satisfies Record<UserObligationKind, readonly string[]>;
 
@@ -72,9 +72,7 @@ const CHECKS: Record<UserObligationKind, (client: PoolClient, userId: string) =>
        UNION ALL SELECT 1 FROM zzsh_order.owner_guarantee_refund WHERE owner_user_id=$1 AND status IN ('REQUESTED','PROCESSING','UNKNOWN') LIMIT 1`, userId)) {
       return { status: "PENDING", obligation: "DEPOSIT" };
     }
-    // 旧系统保证金只有观测记录、没有可判定的退还状态：存在即无法确认。
-    return (await exists(client, "SELECT 1 FROM zzsh_order.legacy_owner_guarantee_observation WHERE user_id=$1 LIMIT 1", userId))
-      ? { status: "UNKNOWN", obligation: "DEPOSIT", reason: "LEGACY_GUARANTEE_UNRESOLVED" } : null;
+    return null;
   },
   async COMMISSION(client, userId) {
     return (await exists(client, "SELECT 1 FROM zzsh_order.rental_referral_earning WHERE beneficiary_user_id=$1 AND state IN ('PENDING','RECOVERY_REQUIRED') LIMIT 1", userId))

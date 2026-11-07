@@ -7,7 +7,6 @@ import { requireListingCursorKey, type ListingCursorKey } from "../supply/listin
 import { exactCents, sourceYuanToCents, sourceSignedYuanToCents, readPersonalWallet,OPENING_OBSERVATION_JOIN,FINANCE_LEDGER_POSTED_AT_SQL } from "./personal-finance-read";
 import { financeOrderLifecycle, loadFinanceOrderFacts, type FinanceOrderFact } from "./admin-finance-order-read";
 import { scopedFinanceSql, financeVersionSql, financeScopedVersionSql, financeLookupPageSql,verifiedLegacyWithdrawalLinksSql,typedHistoricalOrderSql,FINANCE_LEDGER_BUCKET_SQL,FINANCE_GLOBAL_READ_PREAMBLE_SQL, type FinanceLoadScope, type FinanceVersionScope } from "./admin-finance-query";
-import {prepareOwnerGuaranteeHistory} from './owner-guarantee-history';
 import { historicalObservationDisplay,enrichHistoricalObservations,resolveHistoricalReverseLinks,type HistoricalFinanceDisplay,type HistoricalRelationAccess } from './legacy-observation-display';
 import type {FinancePeriodBasis} from './admin-finance-period-basis';
 import {readAdminEarningCalculations,readAdminEarningEventActions,type AdminEarningCalculation} from './distribution-earning-read';
@@ -137,9 +136,9 @@ export const ADMIN_FINANCE_OBSERVATION_SQL = `SELECT o.id,o.user_id AS subject_i
   o.snapshot->>'net' AS net,o.snapshot->>'fee' AS fee,o.snapshot->>'leftAmount' AS balance_after,'LEGACY_MYSQL'::text AS observation_origin,${observationEvidenceSql} AS extra_evidence
   FROM zzsh_order.personal_finance_observation o ${OPENING_OBSERVATION_JOIN} LEFT JOIN zzsh_auth_user."user" u ON u.id=o.user_id ORDER BY o.id COLLATE "C" LIMIT $1`;
 export const ADMIN_FINANCE_LOOKUP_OBSERVATION_SQL=ADMIN_FINANCE_OBSERVATION_SQL.replace(observationEvidenceSql,'o.snapshot');
-export function adminFinanceObservationSql(ready:{native_distribution?:boolean;earning_transitions?:boolean;legacy_duty_finance?:boolean;guarantee_history?:boolean},lookupKeysOnly=false){
+export function adminFinanceObservationSql(ready:{native_distribution?:boolean;earning_transitions?:boolean;legacy_duty_finance?:boolean},lookupKeysOnly=false){
  const original=lookupKeysOnly?ADMIN_FINANCE_LOOKUP_OBSERVATION_SQL:ADMIN_FINANCE_OBSERVATION_SQL;
- if(!ready.native_distribution&&!ready.legacy_duty_finance&&!ready.guarantee_history)return original;
+ if(!ready.native_distribution&&!ready.legacy_duty_finance)return original;
  const history=original.replace(/\s+ORDER BY o\.id COLLATE "C" LIMIT \$1\s*$/,'');
  // Only a unique original ACCRUE receipt proves the zero fact's event clock; the root INSERT is trace data.
  const accrual=ready.earning_transitions!==false?`LEFT JOIN LATERAL (SELECT
@@ -159,11 +158,7 @@ export function adminFinanceObservationSql(ready:{native_distribution?:boolean;e
   FROM zzsh_order.legacy_duty_finance_fact f JOIN zzsh_order.finance_event e ON e.id=f.event_id AND e.economic_root_id=f.root_id AND e.kind='LEGACY_DUTY_SETTLED'
   JOIN zzsh_order.legacy_order_duty d ON d.id=f.duty_id AND d.status='SETTLED' AND d.settled_by='FINANCE' AND d.settled_ref_type='FINANCE_EVENT' AND d.settled_ref_id=f.event_id AND d.settled_ref_digest=f.facts_digest
   LEFT JOIN zzsh_auth_user."user" u ON u.id=f.subject_user_id WHERE f.amount_cents=0 AND f.zero_finalization AND NOT EXISTS(SELECT 1 FROM zzsh_order.settlement_ledger_entry l WHERE l.finance_event_id=f.event_id)`:'';
- const guarantee=ready.guarantee_history?` UNION ALL SELECT 'guarantee_source:'||g.id,g.user_id,COALESCE(u.name,g.user_id),'OWNER_GUARANTEE_HISTORY','LEGACY_MYSQL','legacy_mysql_restore','la_rental_accounts',g.legacy_account_id,g.source_digest,NULL::text,false,
-  NULL::text,${utc('g.imported_at')},NULL::text,'GUARANTEE_HISTORY','HISTORICAL_OBSERVED',NULL::text,g.legacy_account_id,NULL::text,NULL::text,NULL::text,'LEGACY_GUARANTEE_HISTORY',${lookupKeysOnly?'NULL::jsonb':"jsonb_build_object('canonical',g.source_canonical,'accountId',g.account_id)"}
-  FROM zzsh_order.legacy_owner_guarantee_observation g LEFT JOIN zzsh_auth_user."user" u ON u.id=g.user_id
-  WHERE jsonb_array_length(g.source_canonical::jsonb->'payOrders')>0 OR(g.source_canonical::jsonb->'source'->>'pay_is'='1' AND (g.source_canonical::jsonb->'source'->>'pay_money')::numeric>0)`:'';
- return`SELECT o.* FROM (${history}${native}${legacy}${guarantee}) o ORDER BY o.id COLLATE "C" LIMIT $1`;
+ return`SELECT o.* FROM (${history}${native}${legacy}) o ORDER BY o.id COLLATE "C" LIMIT $1`;
 }
 type Raw = Record<string, any>;
 export function projectAdminFinanceLedger(row: Raw): FinanceEntry {
@@ -189,15 +184,6 @@ export function projectAdminFinanceLedger(row: Raw): FinanceEntry {
     related: [...(row.order_id ? [{ ref: `ORDER:${row.order_id}`, label: "原订单", path: `/orders/${encodeURIComponent(row.order_id)}` }] : []), ...(row.account_id ? [{ ref: row.account_id, label: "资源账号", path: `/supply/accounts/${encodeURIComponent(row.account_id)}` }] : [])] };
 }
 export function projectAdminFinanceObservation(row: Raw): FinanceEntry {
- if(row.observation_origin==='LEGACY_GUARANTEE_HISTORY'){
-  let p:ReturnType<typeof prepareOwnerGuaranteeHistory>;try{p=prepareOwnerGuaranteeHistory(JSON.parse(row.extra_evidence?.canonical));}catch{throw unavailable('Guarantee historical source is inconsistent');}
-  if(p.userId!==row.subject_id||p.sourceId!==row.source_id||p.sourceDigest!==row.source_digest||p.sourceCanonical!==row.extra_evidence.canonical||p.accountId!==row.extra_evidence.accountId)throw unavailable('Guarantee source binding changed');
-  const rawTime=p.source.pay_time;let paidAt:string|null=null;if(rawTime!==null&&rawTime!==undefined&&rawTime!==''&&rawTime!=='0'){if(typeof rawTime!=='string'||!/^\d{1,10}$/.test(rawTime)||BigInt(rawTime)>4294967295n)throw unavailable('Guarantee source time is inconsistent');paidAt=new Date(Number(rawTime)*1000).toISOString();}
-  return{id:`history:${row.id}`,documentRef:`GUARANTEE_SOURCE:${row.id}`,documentNumber:typeof p.source.no==='string'&&p.source.no?p.source.no:p.sourceId,subjectId:row.subject_id,subjectName:displayName(row.subject_name,row.subject_id),
-   bucket:'GUARANTEE_HELD',direction:'UNKNOWN',deltaCents:null,knowledge:'UNKNOWN',kind:'GUARANTEE',state:'HISTORICAL_OBSERVED',classification:'HISTORICAL_GUARANTEE',affectsCurrentWallet:false,affectsCurrentLedger:false,
-   occurredAt:null,importedAt:row.imported_at,sourceType:'LEGACY_MYSQL',sourceSystem:'legacy_mysql_restore',sourceEntity:'la_rental_accounts',sourceId:p.sourceId,sourceDigest:p.sourceDigest,basisId:null,
-   reasonCodes:['HISTORICAL_GUARANTEE_NOT_CURRENT_HELD','HISTORICAL_STATUS_NOT_CHANNEL_RESULT'],accountCode:null,evidence:{accountId:p.accountId,legacyAccountId:p.sourceId,sourcePaidRecordCents:p.paidRecordCents,sourcePaidRecordCount:p.paidRecordCount,accountFieldCents:p.accountFieldCents,sourcePaidMark:String(p.source.pay_is),sourceReturnMark:p.source.return_is===null?null:String(p.source.return_is),sourcePaidAt:paidAt,sourceClass:p.classification,sourceConflicts:p.conflicts.join(','),currentLiabilityCents:null,originalReference:null,originalNumber:null,channelArrival:'UNKNOWN'},related:[]};
- }
  if(['NATIVE_EARNING_ZERO','LEGACY_DUTY_ZERO'].includes(row.observation_origin)){
   const legacy=row.observation_origin==='LEGACY_DUTY_ZERO',ref=legacy?`LEGACY_DUTY:${row.source_id}`:`DISTRIBUTION:${row.source_id}`;
   const eventKnown=legacy||typeof row.at==='string'&&typeof row.extra_evidence?.eventId==='string'&&row.extra_evidence.eventAction==='ACCRUE';
@@ -270,7 +256,7 @@ export async function readFinanceSourceVersion(client: PoolClient, scope?: Finan
     to_regclass('zzsh_order.withdrawal_intent') IS NOT NULL AND to_regclass('zzsh_order.withdrawal_provider_fact') IS NOT NULL AND to_regclass('zzsh_order.controlled_payout_operation') IS NOT NULL AS withdrawals,
     to_regclass('zzsh_order.rental_order') IS NOT NULL AS native_orders,to_regclass('zzsh_order.legacy_order_read_snapshot') IS NOT NULL AS legacy_orders,
     to_regclass('zzsh_order.rental_referral_earning') IS NOT NULL AS native_distribution,to_regclass('zzsh_order.payment_distribution_basis') IS NOT NULL AS earning_basis,to_regclass('zzsh_order.rental_referral_transition') IS NOT NULL AS earning_transitions,to_regclass('zzsh_order.personal_finance_observation_coverage') IS NOT NULL AS history_coverage,
-    to_regclass('zzsh_order.legacy_duty_finance_fact') IS NOT NULL AND to_regclass('zzsh_order.legacy_order_duty') IS NOT NULL AS legacy_duty_finance,to_regclass('zzsh_order.legacy_owner_guarantee_coverage') IS NOT NULL AND to_regclass('zzsh_order.legacy_owner_guarantee_observation') IS NOT NULL AS guarantee_history,
+    to_regclass('zzsh_order.legacy_duty_finance_fact') IS NOT NULL AND to_regclass('zzsh_order.legacy_order_duty') IS NOT NULL AS legacy_duty_finance,
     to_regclass('zzsh_order.payment_request') IS NOT NULL AS payment_requests,(to_regclass('zzsh_order.channel_refund_intent') IS NOT NULL AND COALESCE(has_table_privilege(to_regclass('zzsh_order.channel_refund_intent'),'SELECT'),false)) AS refund_intents,
     (to_regclass('zzsh_order.joinpay_refund_attempt') IS NOT NULL AND to_regclass('zzsh_iam.audit_event') IS NOT NULL
       AND to_regclass('zzsh_order.payment_confirmation') IS NOT NULL

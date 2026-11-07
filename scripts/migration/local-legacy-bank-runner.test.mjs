@@ -28,6 +28,14 @@ function fixture() {
 const authority = { schema: "zzsh.local-legacy-bank-authority.v1", purpose: "ROUND_06_BANK_IMPORT", binding, commitment: "2".repeat(64),
   buildSha256: "3".repeat(64), maxWrites: 2, notBefore: "2020-01-01T00:00:00.000Z", expiresAt: "2099-01-01T00:00:00.000Z" };
 
+test("R07 bank authority cannot reuse R06 purpose or target", async () => {
+  const f=fixture(),r07={...binding,target:{...binding.target,round:7}};f.api.legacyBankImportBinding=()=>r07;
+  const token=await prepareLocalLegacyBankRun({sourceInput:{},selectionInput,canonicalize:()=>"",target:r07.target,options:{},api:f.api});
+  await assert.rejects(executeLocalLegacyBankRun(token,{...f,authority:{...authority,binding:r07},buildSha256:authority.buildSha256}));
+  const report=await executeLocalLegacyBankRun(token,{...f,authority:{...authority,binding:r07,purpose:"ROUND_07_BANK_IMPORT"},buildSha256:authority.buildSha256});
+  assert.equal(report.status,"READBACK_MATCHED_WITH_ISOLATIONS");releaseLocalLegacyBankRun(token);
+});
+
 test("候选报告只有绑定、计数和耗时，审核不含用户或银行卡数据", async () => {
   const f = fixture(), token = await prepareLocalLegacyBankRun({ sourceInput: {}, selectionInput, canonicalize: () => "", target: binding.target, options: {}, api: f.api });
   const summary = describeLocalLegacyBankRun(token), text = JSON.stringify(summary);

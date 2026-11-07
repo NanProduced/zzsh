@@ -10,23 +10,24 @@ import { auditSnapshot } from "../src/supply/supply-audit";
 const evidence = { reason: "Reviewed relation", evidenceRefs: [{ url: "https://example.org/official", observedAt: "2026-09-26", region: "CN", note: "Offline fixture, not official evidence" }] };
 const rarityEvidence = { schema: "skin-rarity-evidence-v1", basis: "PLATFORM_REFERENCE", sourceName: "Offline platform fixture", references: evidence.evidenceRefs };
 const mediaSource = { schema: "skin-media-source-v1", kind: "PORTRAIT_CARD", sourceName: "Offline image fixture", url: "https://example.org/skin.png" };
-const draft = { code: "skin_fixture", name: "旧名", categoryId: "category_fixture", expectedCatalogRevision: "10" };
+const draft = { code: "skin_fixture", name: "旧名", expectedCatalogRevision: "10" };
 const legacy = { id: "skin_fixture", game_id: "game_fixture", code: "stable_code", name: "旧名", category_id: "category_fixture", rarity_code: null, media_id: null, sort_order: 0, enabled: true, form_visible: true, naming_state: "LEGACY", aliases: [], owner_kind: null, owner_id: null, firearm_id: null, base_name: null, source_namespace: null, source_field: null, source_token: null };
 
 // Records calls from the real writer; does not implement PostgreSQL constraints/locks.
-function clientFixture(row: Record<string, unknown> = legacy, options: { revision?: string; cas?: boolean; sourceOccupied?: boolean; ownerGameMismatch?: boolean; ownerEnabled?: boolean; mediaGameId?: string; gameCode?: string } = {}) {
+function clientFixture(row: Record<string, unknown> = legacy, options: { revision?: string; cas?: boolean; sourceOccupied?: boolean; ownerGameMismatch?: boolean; ownerEnabled?: boolean; mediaGameId?: string; gameCode?: string; categorylessReady?: boolean } = {}) {
   const calls: Array<{ sql: string; args: unknown[] }> = [];
   const client = { query: async (sql: string, args: unknown[] = []) => {
     calls.push({ sql, args });
     let rows: unknown[] = [];
-    if (sql.startsWith('SELECT code FROM zzsh_supply.game')) rows = [{ code: options.gameCode ?? "fixture" }];
+    if (sql.includes('categoryless-skin-storage')) rows = [{ ready: options.categorylessReady ?? true }];
+    else if (sql.startsWith('SELECT code FROM zzsh_supply.game')) rows = [{ code: options.gameCode ?? "fixture" }];
     else if (sql.startsWith('SELECT game_id AS "gameId",kind,code FROM zzsh_supply.skin_owner')) rows = [{ gameId: row.game_id, kind: row.kind ?? "MELEE_TYPE", code: row.code }];
     else if (sql.startsWith('UPDATE zzsh_supply.skin_owner SET')) rows = [];
     else if (sql.startsWith('SELECT "id", "catalog_revision"')) rows = [{ id: "game_fixture", catalogRevision: options.revision ?? "10" }];
     else if (sql.startsWith('SELECT * FROM "zzsh_supply"."skin"')) rows = [row];
     else if (sql.includes('SELECT catalog_revision::text')) rows = [{ revision: options.revision ?? "10" }];
     else if (sql.startsWith('UPDATE zzsh_supply.game')) rows = options.cas === false ? [] : [{ revision: "11" }];
-    else if (sql.startsWith('UPDATE zzsh_supply.skin SET')) rows = [{ namingState: args[11] ? "VERIFIED" : row.naming_state }];
+    else if (sql.startsWith('UPDATE zzsh_supply.skin SET')) rows = [{ namingState: args[10] ? "VERIFIED" : row.naming_state }];
     else if (sql.includes('source_namespace COLLATE')) rows = options.sourceOccupied ? [{ id: "other_skin" }] : [];
     else if (sql.startsWith('SELECT name,enabled FROM')) rows = options.ownerGameMismatch ? [] : [{ name: "露娜", enabled: options.ownerEnabled ?? true }];
     else if (sql.includes('FROM "zzsh_supply"."media_asset"')) rows = [{ gameId: options.mediaGameId ?? "game_fixture", ownershipKind: "PLATFORM_CATALOG", purpose: "SKIN_MEDIA", reviewState: "APPROVED", accessClass: "PUBLIC_DISPLAY" }];
@@ -56,8 +57,26 @@ test("actual create writes a disabled pending draft and returns the terminal CAS
   assert.equal(result.namingState, "PENDING"); assert.equal(result.catalogRevision, "11");
   const insert = f.calls.find(c => c.sql.startsWith('INSERT INTO zzsh_supply.skin'))!;
   assert.match(insert.sql, /false,false/); assert.ok(!insert.sql.includes('naming_state'));
+  assert.doesNotMatch(insert.sql, /\bcategory_id\b/);
   assert.ok(f.calls.at(-1)!.sql.startsWith('UPDATE zzsh_supply.game'));
   assert.deepEqual(f.calls.at(-1)!.args, ["game_fixture", "10"]);
+});
+
+test("retired category input is rejected and unready categoryless storage cannot create skins", async () => {
+  for (const categoryId of ["category_fixture", null, ""]) {
+    assert.throws(() => parseSkinWrite({ ...draft, categoryId }, false), (e: any) => e.status === 410 && e.code === "SKIN_CATEGORY_RETIRED");
+    for (const operation of ["create", "update"]) {
+      const f = clientFixture();
+      const promise = operation === "create"
+        ? createCatalogEntry(f.client, "a", true, "skins", "game_fixture", { ...draft, categoryId })
+        : updateCatalogEntry(f.client, "a", true, "skins", "skin_fixture", { expectedCatalogRevision: "10", categoryId });
+      await assert.rejects(promise, (e: any) => e.status === 410 && e.code === "SKIN_CATEGORY_RETIRED");
+      assert.equal(f.calls.some(call => /^(INSERT|UPDATE)/.test(call.sql)), false);
+    }
+  }
+  const unready = clientFixture(legacy, { categorylessReady: false });
+  await assert.rejects(createCatalogEntry(unready.client, "a", true, "skins", "game_fixture", draft), (e: any) => e.status === 503);
+  assert.equal(unready.calls.some(call => call.sql.startsWith("INSERT INTO zzsh_supply.skin")), false);
 });
 
 test("actual writers reject stale revisions, foreign owner, source conflicts and failed terminal CAS", async () => {
@@ -99,7 +118,8 @@ test("LEGACY rename keeps flags, stable identity and prior name; explicit confir
   const f = clientFixture();
   await updateCatalogEntry(f.client, "a", true, "skins", "skin_fixture", { expectedCatalogRevision: "10", name: "更正名", reason: "Rename" });
   const update = f.calls.find(c => c.sql.startsWith('UPDATE zzsh_supply.skin SET'))!;
-  assert.deepEqual(update.args.slice(0, 3), ["更正名", true, true]); assert.deepEqual(update.args[7], ["旧名"]);
+  assert.deepEqual(update.args.slice(0, 3), ["更正名", true, true]); assert.deepEqual(update.args[6], ["旧名"]);
+  assert.doesNotMatch(update.sql, /\bcategory_id\b/);
   assert.ok(!update.sql.includes('updated_at')); assert.ok(!update.sql.includes('naming_state='));
   const confirmed = clientFixture();
   const result = await updateCatalogEntry(confirmed.client, "a", true, "skins", "skin_fixture", { expectedCatalogRevision: "10", ownerRef: { kind: "AGENT", id: "owner_fixture" }, baseName: "黑·天际线", confirmIdentity: true, ...evidence });
@@ -125,12 +145,13 @@ test("two names with different owners remain separate; owner writes stay narrow"
   assert.notDeepEqual(refs[0], refs[1]);
 });
 
-test("runner leaves old migration prefixes alone, rejects partial schemas and excludes state/timestamp grants", async () => {
-  for (const [count, present] of [[0, false], [7, true], [1, true]] as const) {
+test("runner preserves prefixes, rejects partial schemas and grants category updates only on old schemas", async () => {
+  for (const [count, present, categoryPresent] of [[0, false, false], [7, true, false], [7, true, true], [1, true, false]] as const) {
     const writes: string[] = [];
     const pool = { query: async (sql: string, args: unknown[] = []) => {
       if ((args[0] as string[] | undefined)?.includes("rarity_evidence")) return { rows: [{ count: 0 }] };
       if (sql.includes('count(*)')) return { rows: [{ count }] };
+      if (sql.includes("attname='category_id'")) return { rows: [{ column_present: categoryPresent, table_present: categoryPresent }] };
       if (sql.includes('AS present')) return { rows: [{ present }] };
       writes.push(sql); return { rows: [] };
     } } as unknown as Parameters<typeof configureSkinIdentityPrivileges>[0];
@@ -140,6 +161,7 @@ test("runner leaves old migration prefixes alone, rejects partial schemas and ex
     if (writes.length) {
       const columns = /GRANT UPDATE \(([^)]+)\) ON zzsh_supply.skin TO/.exec(writes[0]!)![1]!;
       assert.ok(!columns.includes('updated_at')); assert.ok(!columns.includes('naming_state')); assert.ok(columns.includes('media_id'));
+      assert.equal(columns.split(',').includes('category_id'), categoryPresent);
     }
   }
 });
@@ -193,10 +215,10 @@ test("SK7 create refuses a disabled or foreign-game quality before any insert an
   }
   const ok = withRarities(clientFixture());
   await createCatalogEntry(ok.client, "a", true, "skins", "game_fixture", { ...draft, rarityCode: "q_enabled", rarityEvidence });
-  assert.equal(ok.calls.find(c => c.sql.startsWith("INSERT INTO zzsh_supply.skin"))!.args[5], "q_enabled");
+  assert.equal(ok.calls.find(c => c.sql.startsWith("INSERT INTO zzsh_supply.skin"))!.args[4], "q_enabled");
   const unknown = withRarities(clientFixture());
   await createCatalogEntry(unknown.client, "a", true, "skins", "game_fixture", draft);
-  assert.equal(unknown.calls.find(c => c.sql.startsWith("INSERT INTO zzsh_supply.skin"))!.args[5], null, "unknown quality stays null, never defaulted");
+  assert.equal(unknown.calls.find(c => c.sql.startsWith("INSERT INTO zzsh_supply.skin"))!.args[4], null, "unknown quality stays null, never defaulted");
 });
 
 test("SK7 update keeps an existing disabled binding through unrelated edits but refuses a new disabled or foreign one", async () => {
@@ -204,7 +226,7 @@ test("SK7 update keeps an existing disabled binding through unrelated edits but 
   for (const body of [{ expectedCatalogRevision: "10", sortOrder: 3 }, { expectedCatalogRevision: "10", rarityCode: "q_retired", sortOrder: 4 }]) {
     const f = withRarities(clientFixture(bound));
     await updateCatalogEntry(f.client, "a", true, "skins", "skin_fixture", body);
-    assert.equal(sk7Update(f.calls)!.args[5], "q_retired", `kept binding is neither cleared nor relabelled: ${JSON.stringify(body)}`);
+    assert.equal(sk7Update(f.calls)!.args[4], "q_retired", `kept binding is neither cleared nor relabelled: ${JSON.stringify(body)}`);
   }
   for (const rarityCode of ["q_retired", "q_foreign", "q_missing"]) {
     const f = withRarities(clientFixture({ ...legacy, rarity_code: "q_enabled" }));
@@ -213,10 +235,10 @@ test("SK7 update keeps an existing disabled binding through unrelated edits but 
   }
   const changed = withRarities(clientFixture(bound));
   await updateCatalogEntry(changed.client, "a", true, "skins", "skin_fixture", { expectedCatalogRevision: "10", rarityCode: "q_enabled", rarityEvidence });
-  assert.equal(sk7Update(changed.calls)!.args[5], "q_enabled");
+  assert.equal(sk7Update(changed.calls)!.args[4], "q_enabled");
   const cleared = withRarities(clientFixture(bound));
   await updateCatalogEntry(cleared.client, "a", true, "skins", "skin_fixture", { expectedCatalogRevision: "10", rarityCode: null });
-  assert.equal(sk7Update(cleared.calls)!.args[5], null, "clearing to unknown stays possible");
+  assert.equal(sk7Update(cleared.calls)!.args[4], null, "clearing to unknown stays possible");
 });
 
 test("SK7 a referenced quality still cannot be disabled", async () => {
@@ -268,13 +290,13 @@ test("new quality bindings require their own explicit evidence; an unchanged leg
   }
   const old = withRarities(clientFixture({ ...legacy, rarity_code: "q_retired", rarity_evidence: null }));
   await updateCatalogEntry(old.client, "a", true, "skins", "skin_fixture", { expectedCatalogRevision: "10", sortOrder: 2 });
-  assert.equal(sk7Update(old.calls)!.args[5], "q_retired");
-  assert.equal(sk7Update(old.calls)!.args[16], null);
+  assert.equal(sk7Update(old.calls)!.args[4], "q_retired");
+  assert.equal(sk7Update(old.calls)!.args[15], null);
   const erased = withRarities(clientFixture({ ...legacy, rarity_code: "q_enabled", rarity_evidence: rarityEvidence }));
   await assert.rejects(updateCatalogEntry(erased.client, "a", true, "skins", "skin_fixture", { expectedCatalogRevision: "10", rarityEvidence: null }), /Quality source required/);
   const cleared = withRarities(clientFixture({ ...legacy, rarity_code: "q_enabled", rarity_evidence: rarityEvidence }));
   await updateCatalogEntry(cleared.client, "a", true, "skins", "skin_fixture", { expectedCatalogRevision: "10", rarityCode: null });
-  assert.equal(sk7Update(cleared.calls)!.args[16], null);
+  assert.equal(sk7Update(cleared.calls)!.args[15], null);
 });
 
 test("metadata edits preserve unknown/false distinctly and image replacement clears the prior image source", async () => {
@@ -288,13 +310,13 @@ test("metadata edits preserve unknown/false distinctly and image replacement cle
     const f = clientFixture(row);
     await updateCatalogEntry(f.client, "a", true, "skins", "skin_fixture", { expectedCatalogRevision: "10", ...body });
     const args = sk7Update(f.calls)!.args;
-    assert.deepEqual([args[6], args[19]], expected);
-    assert.equal(args[17], null);
-    assert.equal(args[18], "UNKNOWN");
+    assert.deepEqual([args[5], args[18]], expected);
+    assert.equal(args[16], null);
+    assert.equal(args[17], "UNKNOWN");
   }
   const explicit = clientFixture(row);
   await updateCatalogEntry(explicit.client, "a", true, "skins", "skin_fixture", { expectedCatalogRevision: "10", isCollectible: false, defaultState: "NON_DEFAULT" });
-  assert.deepEqual(sk7Update(explicit.calls)!.args.slice(17, 19), [false, "NON_DEFAULT"]);
+  assert.deepEqual(sk7Update(explicit.calls)!.args.slice(16, 18), [false, "NON_DEFAULT"]);
   const foreign = clientFixture(row, { mediaGameId: "game_other" });
   await assert.rejects(updateCatalogEntry(foreign.client, "a", true, "skins", "skin_fixture", { expectedCatalogRevision: "10", mediaId: "media_foreign" }), /Media does not belong/);
   assert.equal(sk7Update(foreign.calls), undefined);
@@ -316,7 +338,7 @@ test("Delta melee is a complete standalone appearance without a parent owner", a
   const f = clientFixture({ ...legacy, enabled: false, form_visible: false }, { gameCode: "delta" });
   await updateCatalogEntry(f.client, "a", true, "skins", "skin_fixture", { expectedCatalogRevision: "10", ownerKind: "MELEE_TYPE", ownerRef: null, baseName: "赤枭", confirmIdentity: true, ...evidence });
   const update = sk7Update(f.calls)!;
-  assert.deepEqual(update.args.slice(11, 15), ["MELEE_TYPE", null, null, "赤枭"]);
+  assert.deepEqual(update.args.slice(10, 14), ["MELEE_TYPE", null, null, "赤枭"]);
   assert.equal(update.args[0], "赤枭");
   assert.equal(f.calls.some(call => call.sql.startsWith('SELECT name,enabled FROM')), false);
   for (const ownerKind of ["AGENT", "FIREARM"]) assert.throws(() => parseSkinWrite({ expectedCatalogRevision: "10", ownerKind, ownerRef: null, baseName: "外观", confirmIdentity: true, ...evidence }, true));
@@ -518,7 +540,7 @@ test("operator display edit preserves stable/source identity, disabled state and
   const row={...legacy,name:"露娜-Old",naming_state:"VERIFIED",owner_kind:"AGENT",owner_id:"owner_fixture",base_name:"Old",enabled:false,form_visible:false,aliases,source_namespace:"legacy.mysql",source_field:"skin",source_token:"raw-token"};
   const f=clientFixture(row);const result=await updateCatalogEntry(f.client,"a",true,"skins","skin_fixture",{...displayEdit,isCollectible:false,defaultState:"UNKNOWN"});
   assert.equal(result.code,"stable_code");assert.equal(result.namingState,"VERIFIED");assert.equal(result.catalogRevision,"11");
-  const update=f.calls.find(c=>c.sql.startsWith("UPDATE zzsh_supply.skin SET"))!;assert.equal(update.args[0],"露娜-New");assert.equal(update.args[1],false);assert.equal(update.args[2],false);assert.equal((update.args[7] as string[]).filter((x:string)=>x==="露娜-Old").length,1);assert.deepEqual(update.args.slice(8,14),["legacy.mysql","skin","raw-token","AGENT","owner_fixture",null]);assert.equal(update.args[15],"skin_fixture");assert.equal(update.args[17],false);assert.equal(update.args[18],"UNKNOWN");
+  const update=f.calls.find(c=>c.sql.startsWith("UPDATE zzsh_supply.skin SET"))!;assert.equal(update.args[0],"露娜-New");assert.equal(update.args[1],false);assert.equal(update.args[2],false);assert.equal((update.args[6] as string[]).filter((x:string)=>x==="露娜-Old").length,1);assert.deepEqual(update.args.slice(7,13),["legacy.mysql","skin","raw-token","AGENT","owner_fixture",null]);assert.equal(update.args[14],"skin_fixture");assert.equal(update.args[16],false);assert.equal(update.args[17],"UNKNOWN");
  }
 });
 test("operator display edit does not bypass evidence, derived name or immutable source constraints", async () => {

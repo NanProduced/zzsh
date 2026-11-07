@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { createServer } from 'node:http';
 import { test } from 'node:test';
-import { executeInitialization, initialSession, inspectInitialization, readbackInitialization, validateInputs } from './initialize-local-legal-filter.mjs';
+import { checkPublicFilters, executeInitialization, initialSession, inspectInitialization, readbackInitialization, validateInputs } from './initialize-local-legal-filter.mjs';
 
 const sha = value => createHash('sha256').update(value).digest('hex');
 const enc = value => Buffer.from(typeof value === 'string' ? value : JSON.stringify(value));
@@ -72,7 +72,7 @@ function service(f, { failAt, statusAt, wrongCatalog, wrongCurrent, wrongPublicF
       body = {terms:summary(docs.terms),privacy:summary(docs.privacy)};
     } else if (args.path === '/api/v1/legal-documents/terms' || args.path === '/api/v1/legal-documents/privacy') {
       const key=args.path.endsWith('/terms')?'terms':'privacy'; body={state:'PUBLISHED',docType:docs[key].docType,document:docs[key]};
-    } else if (args.path.startsWith('/api/v1/supply/games/') && args.path.endsWith('/listing-filters'))
+    } else if (args.path.startsWith('/api/v1/supply/games/') && args.path.split('?')[0].endsWith('/listing-filters'))
       body={gameId:f.seedGame.id,filterRevision:wrongPublicFilter?'0':'1',available:true,reasonCode:null,fields:f.config.fields,sorts:f.config.sorts};
     else throw new Error('UNEXPECTED_SYNTHETIC_ROUTE');
     return {status:200,body:structuredClone(body)};
@@ -90,6 +90,30 @@ test('sealed R06 sources, target, actor, registry and business match before any 
   const f=fixture(), ctx=f.validate();
   assert.equal(ctx.game.id,'game_new'); assert.equal(ctx.items.length,1);
   assert.equal(ctx.documents.terms.digest,sha('测试协议'));
+});
+
+test('R07 legal/filter sources and runtime are bound to the same registered cluster', () => {
+  const f=fixture(),instance={host:'127.0.0.1',port:55433,systemIdentifier:'123'};
+  const edit=(name,fn)=>{const value=JSON.parse(f.bytes[name]);fn(value);f.bytes[name]=enc(value);f.refs[name].sha256=sha(f.bytes[name]);};
+  edit('businessManifest',x=>{x.catalogModel='OWNER_KIND_V2';});
+  edit('businessReceipt',x=>{x.instance=instance;x.manifestSha256=f.refs.businessManifest.sha256;});
+  f.refs.registry.path='E:/zzsh-local-state/restricted/r07/resource.json';
+  edit('registry',x=>{x.instance=instance;});
+  edit('roundInput',x=>{x.target.instance=instance;x.target.bootstrapReservation='ROUND07_BOOTSTRAP_RESERVED';x.credentials='E:/zzsh-local-state/restricted/r07/credentials.json';x.bootstrapEvidence.business.sha256=f.refs.businessReceipt.sha256;});
+  edit('roundReceipt',x=>{x.target.instance=instance;x.target.bootstrapReservation='ROUND07_BOOTSTRAP_RESERVED';x.inputSha256=f.refs.roundInput.sha256;});
+  edit('binding',x=>{x.status='R07_MAINTENANCE_API_LISTENING';x.resource.instance=instance;x.actualResource.instance=instance;x.roundInputSha256=f.refs.roundInput.sha256;x.roundReceiptSha256=f.refs.roundReceipt.sha256;});
+  f.plan.schema='zzsh.round07-legal-filter-plan.v1';f.plan.sourceHashes={filter:f.refs.filter.sha256,businessManifest:f.refs.businessManifest.sha256};
+  assert.equal(f.validate().game.id,'game_new');
+  edit('registry',x=>{x.instance.systemIdentifier='456';});
+  assert.throws(()=>f.validate(),/R07_INSTANCE_BINDING_REQUIRED/);
+});
+
+test('public filter readback rejects missing or changed configured regions', () => {
+  const field={key:'regions',enabled:true,regions:[{province:'上海市',city:'浦东新区'},{province:'北京市',city:'朝阳区'}]};
+  const config={fields:[field],sorts:[]}, result={available:true,reasonCode:null,fields:[structuredClone(field)],sorts:[]};
+  assert.doesNotThrow(()=>checkPublicFilters(config,result));
+  result.fields[0].regions.pop();
+  assert.throws(()=>checkPublicFilters(config,result),/PUBLIC_FILTER_REGIONS_DIFFER/);
 });
 
 test('wrong target, different actor, stale core and changed source are rejected', () => {

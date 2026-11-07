@@ -2,25 +2,37 @@ import assert from 'node:assert/strict';
 import {createHash} from 'node:crypto';
 import {existsSync,lstatSync,readFileSync,readdirSync,writeFileSync} from 'node:fs';
 import Module,{createRequire} from 'node:module';
-import {basename,delimiter,dirname,join,resolve} from 'node:path';
+import {basename,delimiter,dirname,isAbsolute,join,relative,resolve} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {parseArgs} from 'node:util';
 import {defaultStore,writePrivate} from '../local-auth.mjs';
 import {writeLoadCheckpoint} from './local-load-checkpoint.mjs';
 import {readSourceRows} from './local-source-adapter.mjs';
 import {assertCreditAuthority,assertCreditCohort,assertCreditPlanReady,creditCategoryCounts,creditRetainedDigest,creditRowsDigest,executeCreditBatchSequence} from './local-credit-initialization-plan.mjs';
+import {assertLiveTarget,loadRegisteredTarget,targetIdentityQuery} from './local-target-registry.mjs';
 
 const root=resolve(fileURLToPath(new URL('../..',import.meta.url))),restricted=resolve('E:/zzsh-local-state/restricted');
 const sha=value=>createHash('sha256').update(value).digest('hex'),hex=/^[a-f0-9]{64}$/;
 const database='zzsh_test_regression',owner='zzsh',runtimeRole='zzsh_regression_runtime',marker='zzsh:regression-test:v1';
 function noLink(value){const p=resolve(value);for(let x=p;x!==dirname(x);x=dirname(x))assert(!lstatSync(x).isSymbolicLink(),'CREDIT_REPARSE_REFUSED');return p;}
+/** Keep the R06 location and restricted inputs; R07 may also use its own registered secret directory. */
+export function creditMaintenanceSecretLocation(value,secretRoot,target,privateRoot=restricted){
+ assert(typeof value==='string'&&isAbsolute(value),'CREDIT_MAINTENANCE_SECRET_PATH_INVALID');
+ const file=resolve(value),root=resolve(secretRoot),inside=relative(resolve(privateRoot),file);
+ if(file.toLowerCase()===resolve(root,'postgres_password').toLowerCase() || inside&&!inside.startsWith('..')&&!isAbsolute(inside))return file;
+ const local=relative(root,file).replaceAll('\\','/'),instance=target?.instance;
+ assert(target?.bootstrapReservation==='ROUND07_BOOTSTRAP_RESERVED'&&instance?.host==='127.0.0.1'&&Number.isInteger(instance.port)
+  &&instance.port>0&&instance.port<65536&&/^[0-9]+$/.test(instance.systemIdentifier??'')
+  &&/^round07-postgres-[a-z0-9-]+\/postgres_password$/i.test(local),'CREDIT_MAINTENANCE_SECRET_PATH_INVALID');
+ return file;
+}
 let distributionGuards;
 function privatePath(value,output=false){const p=distributionGuards.privateDistributionPath(restricted,value);for(let x=output?dirname(p):p;x!==dirname(x);x=dirname(x))assert(!lstatSync(x).isSymbolicLink(),'CREDIT_REPARSE_REFUSED');return p;}
 function pinned(file,digest){assert(hex.test(digest??''),'CREDIT_SHA_REQUIRED');const bytes=readFileSync(file);assert.equal(sha(bytes),digest,'CREDIT_INPUT_SHA_CHANGED');return JSON.parse(bytes);}
 function fileList(dir,prefix=''){return readdirSync(dir,{withFileTypes:true}).flatMap(e=>{assert(!e.isSymbolicLink(),'CREDIT_BUILD_REPARSE_REFUSED');const n=prefix+e.name;return e.isDirectory()?fileList(join(dir,e.name),n+'/'):e.isFile()&&n.endsWith('.js')?[n]:[];});}
 function buildBinding(api,manifest,manifestSha){
  api=distributionGuards.isolatedDistributionBuild(root,api);for(let p=api;p.toLowerCase()!==root.toLowerCase();p=dirname(p))assert(p!==dirname(p)&&!lstatSync(p).isSymbolicLink(),'CREDIT_BUILD_REPARSE_REFUSED');
- const prefix=manifest.layout?.apiDistDir+'/';assert(prefix==='apps/api/dist-r06-v3/src/','CREDIT_FINAL_BUILD_REQUIRED');
+ const prefix=manifest.layout?.apiDistDir+'/';assert(/^apps\/api\/dist(?:-[a-z0-9-]+)?\/src\/$/i.test(prefix),'CREDIT_FINAL_BUILD_REQUIRED');
  const entries=manifest.components?.api?.filter(x=>x.path.startsWith(prefix)&&x.path.endsWith('.js'))??[],files={};
  for(const entry of entries){const name=entry.path.slice(prefix.length);assert(name&&!name.includes('\\')&&!name.split('/').includes('..')&&hex.test(entry.sha256)&&!files[name],'CREDIT_BUILD_MANIFEST_INVALID');files[name]=entry.sha256;}
  assert(Object.keys(files).length>0&&JSON.stringify(Object.keys(files).sort())===JSON.stringify(fileList(api).sort()),'CREDIT_BUILD_FILE_SET_CHANGED');
@@ -44,17 +56,25 @@ export async function main(args=process.argv.slice(2)){
  const dataset=pinned(privatePath(join(privatePath(round.dataset.path),'manifest.json')),round.dataset.sha256),capture=pinned(privatePath(join(privatePath(round.source.path),'receipt.json')),round.source.sha256),ready=dataset.domains?.users?.ready;
  assert(dataset.sourceReceiptSha256===round.source.sha256&&capture.status==='CAPTURED_READ_ONLY'&&capture.rollbackConfirmed===true&&capture.clientClosed===true,'CREDIT_SOURCE_CAPTURE_REQUIRED');
  assert(Number.isSafeInteger(ready)&&ready>=0,'CREDIT_SOURCE_DENOMINATOR_REQUIRED');
- const core=receipt.stages.findLast(row=>row.name==='core-and-funds');assert(core?.status==='ACK'&&core.metrics?.users?.nextIndex===ready,'CREDIT_CORE_USERS_NOT_ACKNOWLEDGED');
+ let originalReceipt=receipt;
+ if(receipt.mode==='RESUME_GROWTH'){
+  const ref=round.resume?.previousReceipt;
+  assert(ref&&receipt.prior?.previousReceipt?.sha256===ref.sha256&&resolve(receipt.prior.previousReceipt.path).toLowerCase()===resolve(ref.path).toLowerCase()
+   &&receipt.prior?.previousInput?.sha256===round.resume.previousInput?.sha256,'CREDIT_ORIGINAL_RECEIPT_REQUIRED');
+  originalReceipt=pinned(privatePath(ref.path),ref.sha256);
+  assert(originalReceipt.inputSha256===round.resume.previousInput.sha256,'CREDIT_ORIGINAL_RECEIPT_CHANGED');
+ }
+ const core=originalReceipt.stages.findLast(row=>row.name==='core-and-funds');assert(core?.status==='ACK'&&core.metrics?.users?.nextIndex===ready,'CREDIT_CORE_USERS_NOT_ACKNOWLEDGED');
  const actorFile=pinned(privatePath(round.actor.path),round.actor.sha256),actor={actorId:actorFile.actorId??actorFile.id,sessionId:actorFile.sessionId};
  assert(actor.actorId&&actor.sessionId&&(!actorFile.id||!actorFile.actorId||actorFile.id===actorFile.actorId)&&actorFile.realm==='admin'&&actorFile.resourceOid===round.target.oid&&actorFile.nonce===round.target.nonce,'CREDIT_ACTOR_TARGET_CHANGED');
- const secretRoot=dirname(defaultStore()),credentialsPath=resolve(round.credentials);assert.equal(credentialsPath.toLowerCase(),resolve(secretRoot,'local-postgresql/regression_test/credentials.json').toLowerCase(),'CREDIT_CREDENTIAL_RESOURCE_CHANGED');
+ const secretRoot=dirname(defaultStore()),credentialsPath=resolve(round.credentials);if(credentialsPath.toLowerCase()!==resolve(secretRoot,'local-postgresql/regression_test/credentials.json').toLowerCase())privatePath(credentialsPath);
  const registryPath=join(dirname(credentialsPath),'resource.json');
- function registry(){const r=JSON.parse(readFileSync(noLink(registryPath)));distributionGuards.assertRegisteredDistributionTarget(round.target,round.dataset.sha256,r);assert(r.protectedDataset.status==='LOCAL_DATASET_SKIN_HOLDINGS_COMMITTED_REVIEW_REQUIRED'&&r.roles.runtime.name===runtimeRole,'CREDIT_REGISTRY_CHANGED');return r;}
- const registered=registry(),epoch={oid:round.target.oid,nonce:round.target.nonce};
+ function registry(){const r=JSON.parse(readFileSync(noLink(registryPath))),current=loadRegisteredTarget(credentialsPath);r.instance=current.instance;distributionGuards.assertRegisteredDistributionTarget(round.target,round.dataset.sha256,r);assert(current.lockKey==='806006'&&current.maintenanceDatabase==='postgres'&&r.protectedDataset.status==='LOCAL_DATASET_SKIN_HOLDINGS_COMMITTED_REVIEW_REQUIRED'&&r.roles.runtime.name===runtimeRole,'CREDIT_REGISTRY_CHANGED');return r;}
+ const registered=registry(),registeredTarget=loadRegisteredTarget(credentialsPath),epoch={oid:round.target.oid,nonce:round.target.nonce,...(registeredTarget.instance?{instance:registeredTarget.instance}:{})};
  const resource={databaseName:database,databaseOid:epoch.oid,owner,runtimeRole,bindingKind:'DATABASE_COMMENT',databaseComment:marker};
  const manifestFile=noLink(v['build-manifest']),manifest=pinned(manifestFile,v['build-manifest-sha']),build=buildBinding(v.build,manifest,v['build-manifest-sha']);
  assert.deepEqual(Object.entries(round.buildFiles??{}).sort(),Object.entries(build.files).sort(),'CREDIT_BUILD_DIFFERS_FROM_CORE');
- const tools=['run-local-credit-initialization.mjs','local-credit-initialization-plan.mjs','local-distribution-qualification-plan.mjs','local-load-checkpoint.mjs','local-source-adapter.mjs','../local-auth.mjs'];
+ const tools=['run-local-credit-initialization.mjs','local-credit-initialization-plan.mjs','local-distribution-qualification-plan.mjs','local-load-checkpoint.mjs','local-source-adapter.mjs','local-target-registry.mjs','../local-auth.mjs'];
  const toolFiles=Object.fromEntries(tools.map(name=>[name,sha(readFileSync(join(root,'scripts/migration',name)))]));
  function verifyBuild(){assert.equal(sha(readFileSync(noLink(manifestFile))),build.manifestSha,'CREDIT_BUILD_MANIFEST_CHANGED');assert.deepEqual(fileList(build.api).sort(),Object.keys(build.files).sort(),'CREDIT_BUILD_FILE_SET_CHANGED');for(const [name,digest] of Object.entries(build.files))assert.equal(sha(readFileSync(join(build.api,name))),digest,'CREDIT_BUILD_CHANGED');for(const [name,digest] of Object.entries(toolFiles))assert.equal(sha(readFileSync(join(root,'scripts/migration',name))),digest,'CREDIT_TOOL_CHANGED');}
  verifyBuild();
@@ -90,15 +110,15 @@ export async function main(args=process.argv.slice(2)){
  if(authority)assertCreditAuthority(authority,plan,v['plan-sha'],actor);
  const credentials=JSON.parse(readFileSync(noLink(credentialsPath)));assert(credentials.database===database&&credentials.marker===marker&&credentials.runtime?.name===runtimeRole&&credentials.runtime.oid===registered.roles.runtime.oid,'CREDIT_RUNTIME_CREDENTIAL_CHANGED');
  const maintenance=round.secrets?.databaseMaintenance;assert(maintenance&&hex.test(maintenance.sha256),'CREDIT_MAINTENANCE_SECRET_REQUIRED');
- assert.equal(resolve(maintenance.path).toLowerCase(),resolve(secretRoot,'postgres_password').toLowerCase(),'CREDIT_MAINTENANCE_RESOURCE_CHANGED');
- const secret=readFileSync(noLink(maintenance.path));assert.equal(sha(secret),maintenance.sha256,'CREDIT_MAINTENANCE_SECRET_CHANGED');
- const {Client,Pool}=require('pg'),base={host:'127.0.0.1',port:55432,connectionTimeoutMillis:3000,statement_timeout:120000,lock_timeout:1000};
+ const maintenancePath=creditMaintenanceSecretLocation(maintenance.path,secretRoot,round.target);
+ const secret=readFileSync(noLink(maintenancePath));assert.equal(sha(secret),maintenance.sha256,'CREDIT_MAINTENANCE_SECRET_CHANGED');
+ const {Client,Pool}=require('pg'),base={host:registeredTarget.host,port:registeredTarget.port,connectionTimeoutMillis:3000,statement_timeout:120000,lock_timeout:1000};
  const timings={inputValidationMs:Math.round(performance.now()-started)};
  let lock,pool,held=false,lockError,transportError,summary={schema:'zzsh.local-credit-initialization-receipt.v1',status:'STARTED',mode,binding,batches:[],timings,financialWrites:0,channelCalls:0},unlockAck=false,poolClosed=false,lockClosed=false;
  writePrivate(join(out,'summary.json'),summary);
  async function identity(client,readOnly){
-  const r=(await client.query(`SELECT current_database() database,d.oid::text,pg_get_userbyid(d.datdba) owner,shobj_description(d.oid,'pg_database') marker,current_setting('zzsh.regression_run',true) nonce,current_user role,r.oid::text role_oid,r.rolsuper,r.rolbypassrls,current_setting('transaction_read_only') read_only FROM pg_database d JOIN pg_roles r ON r.rolname=current_user WHERE d.datname=current_database()`)).rows[0];
-  assert(r&&r.database===database&&r.oid===epoch.oid&&r.nonce===epoch.nonce&&r.owner===owner&&r.marker===marker&&r.role===runtimeRole&&r.role_oid===registered.roles.runtime.oid&&!r.rolsuper&&!r.rolbypassrls&&r.read_only===(readOnly?'on':'off'),'CREDIT_LIVE_TARGET_CHANGED');
+  const r=(await client.query(targetIdentityQuery())).rows[0];assertLiveTarget(registeredTarget,r,'runtime');
+  assert(r&&r.database===database&&r.oid===epoch.oid&&r.nonce===epoch.nonce&&r.owner===owner&&r.marker===marker&&r.role===runtimeRole&&r.role_oid===registered.roles.runtime.oid&&r.read_only===(readOnly?'on':'off'),'CREDIT_LIVE_TARGET_CHANGED');
  }
  async function lockStillHeld(){assert(!lockError&&!transportError,'CREDIT_CONNECTION_ERROR');const r=await lock.query("SELECT EXISTS(SELECT 1 FROM pg_locks WHERE locktype='advisory' AND pid=pg_backend_pid() AND classid=0::oid AND objid=806006::oid AND objsubid=1 AND mode='ExclusiveLock' AND granted) AS held");assert.equal(r.rows[0].held,true,'CREDIT_MAINTENANCE_LOCK_LOST');}
  function guardedPool(application_name){

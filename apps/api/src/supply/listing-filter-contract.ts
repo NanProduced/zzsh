@@ -1,8 +1,12 @@
-import { invalid } from "./supply-util";
+import { invalid,retiredSkinCategory } from "./supply-util";
 import { parsePublicListingSearch } from "./listing-query";
 import { DELTA_GRADING_DIVISIONS } from "./delta-rental";
 
 export const LISTING_URL_BYTES=8192;
+// The published word list carries 454 province/city pairs, so a 200-pair configuration capacity could
+// never hold it and every initialisation was rejected. 512 leaves room without being unbounded; the
+// per-query selection limit (20) is a different number and is unchanged.
+export const LISTING_REGION_CONFIG_CAPACITY=512;
 export const LISTING_OPERATORS={resources:"AND_MIN",safeBoxCodes:"ANY",vitality:"MIN",bear:"MIN",gradingCodes:"ANY",gradingRanks:"PAIRS_ANY",loginMethodCodes:"ANY",regions:"PAIRS_ANY",serviceWindow:"COVERS",skinGroups:"GROUPS"} as const;
 export type FilterKey=keyof typeof LISTING_OPERATORS;
 export type Region={province:string;city:string};
@@ -43,7 +47,7 @@ export function parseListingFilters(v:unknown):ListingFilters {
   for(const key of ["vitality","bear"] as const)if(o[key]!==undefined){const r=checkedObject(o[key],"filters."+key,["min"]);f[key]={min:integer(r.min,"filters."+key+".min")};}
   if(o.regions!==undefined){const a=regions(o.regions,"filters.regions",20);if(a.length)f.regions=a;}
   if(o.serviceWindow!==undefined)f.serviceWindow=parseServiceWindow(o.serviceWindow);
-  if(o.skinGroups!==undefined){const a=unique(array(o.skinGroups,"filters.skinGroups",8).map(x=>{const r=checkedObject(x,"filters.skinGroups",["categoryId","ownerKind","ids","match"]);if(r.match!=="ANY"&&r.match!=="ALL")throw invalid("Invalid skin match","filters.skinGroups.match");if((r.categoryId===undefined)===(r.ownerKind===undefined))throw invalid("Choose one skin type or legacy category","filters.skinGroups");if(r.ownerKind!==undefined&&!["AGENT","MELEE_TYPE","FIREARM"].includes(r.ownerKind as string))throw invalid("Invalid skin type","filters.skinGroups.ownerKind");return {...(r.categoryId!==undefined?{categoryId:checkedId(r.categoryId,"filters.skinGroups.categoryId")}:{ownerKind:r.ownerKind as "AGENT"|"MELEE_TYPE"|"FIREARM"}),ids:ids(r.ids,"filters.skinGroups.ids",50),match:r.match as "ANY"|"ALL"};}),"filters.skinGroups",x=>"categoryId" in x?"category:"+x.categoryId:"type:"+x.ownerKind);const all=a.flatMap(g=>g.ids);if(all.length>50||new Set(all).size!==all.length)throw invalid("Duplicate or excessive skin IDs","filters.skinGroups.ids");const nonempty=a.filter(g=>g.ids.length);if(nonempty.length)f.skinGroups=nonempty;}
+  if(o.skinGroups!==undefined){const a=unique(array(o.skinGroups,"filters.skinGroups",8).map(x=>{const r=checkedObject(x,"filters.skinGroups",["categoryId","ownerKind","ids","match"]);if(r.categoryId!==undefined)throw retiredSkinCategory();if(r.match!=="ANY"&&r.match!=="ALL")throw invalid("Invalid skin match","filters.skinGroups.match");if(!["AGENT","MELEE_TYPE","FIREARM"].includes(r.ownerKind as string))throw invalid("Invalid skin type","filters.skinGroups.ownerKind");return {ownerKind:r.ownerKind as "AGENT"|"MELEE_TYPE"|"FIREARM",ids:ids(r.ids,"filters.skinGroups.ids",50),match:r.match as "ANY"|"ALL"};}),"filters.skinGroups",x=>"type:"+x.ownerKind);const all=a.flatMap(g=>g.ids);if(all.length>50||new Set(all).size!==all.length)throw invalid("Duplicate or excessive skin IDs","filters.skinGroups.ids");const nonempty=a.filter(g=>g.ids.length);if(nonempty.length)f.skinGroups=nonempty;}
   return f;
 }
 export function assertListingUrlBudget(raw:string){if(Buffer.byteLength(raw,"utf8")>LISTING_URL_BYTES)throw invalid("Query URL exceeds 8KiB","url");}
@@ -75,7 +79,7 @@ export function parseFilterConfig(value:unknown):FilterConfig {
     if(optionKey==="items")field.items=unique(array(f.items,"config.fields.items",16).map(x=>{const i=checkedObject(x,"config.fields.items",["itemId","min","max"]);const min=checkedQuantity(i.min,"config.fields.items.min"),max=checkedQuantity(i.max,"config.fields.items.max");if(BigInt(min)>BigInt(max))throw invalid("Reversed quantity range","config.fields.items");return {itemId:checkedId(i.itemId,"config.fields.items.itemId"),min,max};}),"config.fields.items",x=>x.itemId);
     if(optionKey==="options")field.options=unique(array(f.options,"config.fields.options",200).map(x=>{const v=checkedObject(x,"config.fields.options",["value","label"]);return {value:checkedText(v.value,"config.fields.options.value"),label:checkedText(v.label,"config.fields.options.label",40)};}),"config.fields.options",x=>x.value);
     if(optionKey==="levels")field.levels=unique(array(f.levels,"config.fields.levels",100).map(x=>integer(x,"config.fields.levels")),"config.fields.levels",String);
-    if(optionKey==="regions")field.regions=regions(f.regions,"config.fields.regions",200);
+    if(optionKey==="regions")field.regions=regions(f.regions,"config.fields.regions",LISTING_REGION_CONFIG_CAPACITY);
     if(optionKey==="categoryIds"){if(f.ownerKinds!==undefined){if(f.categoryIds!==undefined)throw invalid("Skin type and legacy category configuration conflict","config.fields");field.ownerKinds=unique(array(f.ownerKinds,"config.fields.ownerKinds",3).map(value=>{if(!["AGENT","MELEE_TYPE","FIREARM"].includes(value as string))throw invalid("Invalid skin type","config.fields.ownerKinds");return value as "AGENT"|"MELEE_TYPE"|"FIREARM";}),"config.fields.ownerKinds",String);}else field.categoryIds=ids(f.categoryIds,"config.fields.categoryIds",100);}
     return field;
   }),"config.fields",x=>x.key);

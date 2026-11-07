@@ -10,6 +10,7 @@ import {
   bumpCatalogRevision,
   conflict,
   invalid,
+  retiredSkinCategory,
   newSupplyId,
   notFound,
   optionalBoolean,
@@ -110,12 +111,13 @@ function skinMetadata(body: Record<string, unknown>): void {
 }
 
 /** Transport-independent validation, shared by the actual catalog writers. */
-export function parseSkinWrite(input: Record<string, unknown>, editing: boolean, retiredCategories = false): Record<string, unknown> {
+export function parseSkinWrite(input: Record<string, unknown>, editing: boolean): Record<string, unknown> {
+  if (Object.hasOwn(input, "categoryId")) throw retiredSkinCategory();
   ensureOnlyFields(input, [...SKIN_FIELDS, ...(editing ? ["mediaId", "ownerKind", "ownerRef", "baseName", "confirmIdentity", "reason", "evidenceRefs"] : ["code"])]);
   const body = { ...input };
   parseExpectedRevision({ expectedRevision: body.expectedCatalogRevision });
   for (const field of ["name", "baseName"] as const) if (field in body) body[field] = skinText(body[field], field, 120);
-  for (const field of ["categoryId", "mediaId"] as const) if (field in body && !((field === "mediaId" || field === "categoryId" && retiredCategories) && body[field] === null)) body[field] = skinText(body[field], field, 128);
+  if ("mediaId" in body && body.mediaId !== null) body.mediaId = skinText(body.mediaId, "mediaId", 128);
   if ("rarityCode" in body && body.rarityCode !== null) body.rarityCode = skinText(body.rarityCode, "rarityCode", 64);
   skinMetadata(body);
   if ("ownerKind" in body && (typeof body.ownerKind !== "string" || !["AGENT", "FIREARM", "MELEE_TYPE"].includes(body.ownerKind))) throw invalid("Invalid owner kind", "ownerKind");
@@ -155,7 +157,7 @@ export function parseSkinWrite(input: Record<string, unknown>, editing: boolean,
   if ("evidenceRefs" in body) identityEvidence(body);
   if (!editing) {
     requireCode(body);
-    if (!body.name || !retiredCategories && !body.categoryId) throw invalid("Name and category required");
+    if (!body.name) throw invalid("Name required");
     if (body.enabled === true || body.formVisible === true) throw invalid("Create a disabled draft first");
   } else if (![...SKIN_FIELDS.filter(field => field !== "expectedCatalogRevision"), "mediaId", "ownerKind", "ownerRef", "baseName"].some(field => field in body) && body.confirmIdentity !== true) {
     throw invalid("No catalog change requested");
@@ -188,14 +190,11 @@ async function gameCode(client: PoolClient, gameId: string): Promise<string> {
   return game.code;
 }
 
-async function skinCategoriesRetired(client: PoolClient, gameId: string): Promise<boolean> {
-  return await gameCode(client, gameId) === "delta";
-}
-
 export async function categorylessSkinStorageReady(client: PoolClient): Promise<boolean> {
-  const row = (await client.query<{ ready: boolean }>(`SELECT /* categoryless-skin-storage */ NOT a.attnotnull
-    AND EXISTS (SELECT 1 FROM pg_trigger t WHERE t.tgrelid=a.attrelid AND t.tgname='skin_category_retirement_guard' AND NOT t.tgisinternal AND t.tgenabled='O') AS ready
-    FROM pg_attribute a WHERE a.attrelid=to_regclass('zzsh_supply.skin') AND a.attname='category_id' AND a.attnum>0 AND NOT a.attisdropped`)).rows[0];
+  const row = (await client.query<{ ready: boolean }>(`SELECT /* categoryless-skin-storage */
+    to_regclass('zzsh_supply.skin') IS NOT NULL AND to_regclass('zzsh_supply.skin_category') IS NULL
+    AND NOT EXISTS (SELECT 1 FROM pg_attribute a WHERE a.attrelid=to_regclass('zzsh_supply.skin')
+      AND a.attname='category_id' AND a.attnum>0 AND NOT a.attisdropped) AS ready`)).rows[0];
   return row?.ready === true;
 }
 
@@ -359,26 +358,21 @@ export async function confirmLegacySkinIdentity(
 }
 
 async function createSkin(client: PoolClient, gameId: string, id: string, input: Record<string, unknown>): Promise<CatalogRow> {
-  const retired = await skinCategoriesRetired(client, gameId);
-  const body = parseSkinWrite(input, false, retired);
-  if (retired && body.categoryId !== undefined) throw invalid("三角洲旧皮肤分类已退役，新词条不接受分类绑定", "categoryId");
-  if (retired && !await categorylessSkinStorageReady(client)) throw new SecurityApiError(503, "EVIDENCE_UNAVAILABLE", "皮肤无分类创建的结构尚未就绪");
+  const body = parseSkinWrite(input, false);
+  if (!await categorylessSkinStorageReady(client)) throw new SecurityApiError(503, "EVIDENCE_UNAVAILABLE", "皮肤无分类创建的结构尚未就绪");
   if (body.mediaSource) throw invalid("Bind an image before recording its source", "mediaSource");
   await checkCatalogRevision(client, gameId, body);
   await assertUnique(client, "skin", gameId, body.code as string);
-  if (!retired) await assertCategoryParent(client, gameId, body.categoryId as string);
   if (body.rarityCode) await assertRarity(client, gameId, body.rarityCode as string, true);
   if (body.rarityCode && !body.rarityEvidence) throw invalid("Quality source required for a new binding", "rarityEvidence");
   await assertSkinSource(client, gameId, id, body.sourceNamespace ?? null, body.sourceField ?? null, body.sourceToken ?? null);
-  await client.query(`INSERT INTO zzsh_supply.skin (id,game_id,code,name,category_id,rarity_code,enabled,form_visible,sort_order,source_namespace,source_field,source_token,aliases,rarity_evidence,is_collectible,default_state,media_source)
-    VALUES ($1,$2,$3,$4,$5,$6,false,false,$7,$8,$9,$10,$11,$12,$13,$14,$15)`, [id, gameId, body.code, body.name, retired ? null : body.categoryId, body.rarityCode ?? null, body.sortOrder ?? 0, body.sourceNamespace ?? null, body.sourceField ?? null, body.sourceToken ?? null, body.aliases ?? [], body.rarityEvidence ?? null, body.isCollectible ?? null, body.defaultState ?? "UNKNOWN", body.mediaSource ?? null]);
+  await client.query(`INSERT INTO zzsh_supply.skin (id,game_id,code,name,rarity_code,enabled,form_visible,sort_order,source_namespace,source_field,source_token,aliases,rarity_evidence,is_collectible,default_state,media_source)
+    VALUES ($1,$2,$3,$4,$5,false,false,$6,$7,$8,$9,$10,$11,$12,$13,$14)`, [id, gameId, body.code, body.name, body.rarityCode ?? null, body.sortOrder ?? 0, body.sourceNamespace ?? null, body.sourceField ?? null, body.sourceToken ?? null, body.aliases ?? [], body.rarityEvidence ?? null, body.isCollectible ?? null, body.defaultState ?? "UNKNOWN", body.mediaSource ?? null]);
   return { id, code: body.code as string, namingState: "PENDING", catalogRevision: await finishCatalogWrite(client, gameId, body) };
 }
 
 async function updateSkin(client: PoolClient, gameId: string, row: Record<string, unknown>, input: Record<string, unknown>): Promise<{ gameId: string; code: string; namingState: string; catalogRevision: string }> {
-  const retired = await skinCategoriesRetired(client, gameId);
-  const body = parseSkinWrite(input, true, retired);
-  if (retired && Object.hasOwn(body, "categoryId") && body.categoryId !== row.category_id) throw conflict("旧分类引用只读，不能通过词条编辑改写");
+  const body = parseSkinWrite(input, true);
   await checkCatalogRevision(client, gameId, body);
   let name = body.name ?? row.name;
   let ownerKind = row.owner_kind ?? null, ownerId = row.owner_id ?? null, firearmId = row.firearm_id ?? null, baseName = row.base_name ?? null;
@@ -417,8 +411,6 @@ async function updateSkin(client: PoolClient, gameId: string, row: Record<string
   if (row.source_namespace === null && row.source_field !== null && (source[1] !== row.source_field || source[2] !== row.source_token)) throw conflict("Legacy source token must be preserved");
   if (namingState !== "LEGACY" && source[0] === null && (source[1] !== null || source[2] !== null)) throw invalid("Review legacy source namespace before confirming identity");
   await assertSkinSource(client, gameId, String(row.id), source[0], source[1], source[2]);
-  const categoryId = body.categoryId ?? row.category_id;
-  if (!retired) await assertCategoryParent(client, gameId, categoryId as string);
   const rarityCode = "rarityCode" in body ? body.rarityCode : row.rarity_code;
   if (rarityCode) await assertRarity(client, gameId, rarityCode as string, rarityCode !== row.rarity_code);
   const rarityEvidence = rarityCode === null ? null : "rarityEvidence" in body ? body.rarityEvidence : rarityCode === row.rarity_code ? row.rarity_evidence ?? null : null;
@@ -427,8 +419,8 @@ async function updateSkin(client: PoolClient, gameId: string, row: Record<string
   if (body.mediaSource && !mediaId) throw invalid("Bind an image before recording its source", "mediaSource");
   if (body.mediaId) await assertPlatformMediaBinding(client, gameId, body.mediaId as string, "SKIN_MEDIA");
   const mediaSource = mediaId === null ? null : "mediaSource" in body ? body.mediaSource : mediaId === row.media_id ? row.media_source ?? null : null;
-  const result = await client.query<{ namingState: string }>(`UPDATE zzsh_supply.skin SET name=$1,enabled=$2,form_visible=$3,sort_order=$4,category_id=$5,rarity_code=$6,media_id=$7,aliases=$8,source_namespace=$9,source_field=$10,source_token=$11,owner_kind=$12,owner_id=$13,firearm_id=$14,base_name=$15,rarity_evidence=$17,is_collectible=$18,default_state=$19,media_source=$20 WHERE id=$16 RETURNING naming_state AS "namingState"`,
-    [name, enabled, formVisible, body.sortOrder ?? row.sort_order, categoryId, rarityCode, mediaId, aliases, ...source, ownerKind, ownerId, firearmId, baseName, row.id, rarityEvidence, "isCollectible" in body ? body.isCollectible : row.is_collectible ?? null, body.defaultState ?? row.default_state ?? "UNKNOWN", mediaSource]);
+  const result = await client.query<{ namingState: string }>(`UPDATE zzsh_supply.skin SET name=$1,enabled=$2,form_visible=$3,sort_order=$4,rarity_code=$5,media_id=$6,aliases=$7,source_namespace=$8,source_field=$9,source_token=$10,owner_kind=$11,owner_id=$12,firearm_id=$13,base_name=$14,rarity_evidence=$16,is_collectible=$17,default_state=$18,media_source=$19 WHERE id=$15 RETURNING naming_state AS "namingState"`,
+    [name, enabled, formVisible, body.sortOrder ?? row.sort_order, rarityCode, mediaId, aliases, ...source, ownerKind, ownerId, firearmId, baseName, row.id, rarityEvidence, "isCollectible" in body ? body.isCollectible : row.is_collectible ?? null, body.defaultState ?? row.default_state ?? "UNKNOWN", mediaSource]);
   if (result.rowCount !== 1) throw notFound();
   return { gameId, code: String(row.code), namingState: result.rows[0]!.namingState, catalogRevision: await finishCatalogWrite(client, gameId, body) };
 }
@@ -621,25 +613,7 @@ export async function createCatalogEntry(
       [id, gameId, code, requiredString(body, "name", 120), optionalInteger(body, "sortOrder", -100000, 100000) ?? 0, optionalBoolean(body, "enabled") ?? true],
     );
   } else if (kind === "categories") {
-    if (await skinCategoriesRetired(client, gameId)) throw invalid("三角洲旧皮肤分类只保留历史读取，不再维护", "categoryId");
-    const code = requireCode(body);
-    await assertUnique(client, "skin_category", gameId, code);
-    const parentId = optionalNullableString(body, "parentId", 128);
-    if (parentId !== undefined && parentId !== null) await assertCategoryParent(client, gameId, parentId);
-    await client.query(
-      `INSERT INTO "zzsh_supply"."skin_category" ("id", "game_id", "code", "name", "parent_id", "sort_order", "enabled", "form_visible")
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
-      [
-        id,
-        gameId,
-        code,
-        requiredString(body, "name", 120),
-        parentId ?? null,
-        optionalInteger(body, "sortOrder", -100000, 100000) ?? 0,
-        optionalBoolean(body, "enabled") ?? true,
-        optionalBoolean(body, "formVisible") ?? true,
-      ],
-    );
+    throw retiredSkinCategory();
   } else if (kind === "skins") {
     return createSkin(client, gameId, id, body);
   } else {
@@ -678,6 +652,7 @@ export async function updateCatalogEntry(
   entryId: string,
   body: Record<string, unknown>,
 ): Promise<{ gameId: string; code?: string; namingState?: string; catalogRevision?: string }> {
+  if (kind === "categories") throw retiredSkinCategory();
   const table = TABLE_BY_KIND[kind];
   const current = await client.query<Record<string, unknown>>(
     `SELECT * FROM "zzsh_supply"."${table}" WHERE "id" = $1${kind === "skins" || kind === "items" ? " FOR UPDATE" : ""}`,
@@ -725,24 +700,6 @@ export async function updateCatalogEntry(
       `UPDATE "zzsh_supply"."skin_rarity" SET "name" = COALESCE($1, "name"), "enabled" = COALESCE($2, "enabled"), "sort_order" = COALESCE($3, "sort_order"), "updated_at" = clock_timestamp() WHERE "id" = $4`,
       [name ?? null, enabled ?? null, sortOrder ?? null, entryId],
     );
-  } else if (kind === "categories") {
-    if (await skinCategoriesRetired(client, gameId)) throw invalid("三角洲旧皮肤分类只保留历史读取，不再维护", "categoryId");
-    const name = optionalString(body, "name", 120);
-    const enabled = optionalBoolean(body, "enabled");
-    const formVisible = optionalBoolean(body, "formVisible");
-    const sortOrder = optionalInteger(body, "sortOrder", -100000, 100000);
-    const parentId = optionalNullableString(body, "parentId", 128);
-    if ([name, enabled, formVisible, sortOrder, parentId].every((value) => value === undefined)) throw invalid();
-    if (parentId !== undefined && parentId !== null) await assertCategoryParent(client, gameId, parentId);
-    await client.query(
-      `UPDATE "zzsh_supply"."skin_category"
-          SET "name" = COALESCE($1, "name"), "enabled" = COALESCE($2, "enabled"),
-              "form_visible" = COALESCE($3, "form_visible"), "sort_order" = COALESCE($4, "sort_order"),
-              "parent_id" = CASE WHEN $5::boolean THEN $6 ELSE "parent_id" END,
-              "updated_at" = clock_timestamp()
-        WHERE "id" = $7`,
-      [name ?? null, enabled ?? null, formVisible ?? null, sortOrder ?? null, parentId !== undefined, parentId ?? null, entryId],
-    );
   } else if (kind === "skins") {
     return updateSkin(client, gameId, row, body);
   } else {
@@ -762,7 +719,6 @@ export async function updateCatalogEntry(
 const TABLE_BY_KIND = {
   items: "billable_item",
   rarities: "skin_rarity",
-  categories: "skin_category",
   skins: "skin",
   entitlements: "entitlement",
 } as const;
@@ -770,11 +726,6 @@ const TABLE_BY_KIND = {
 async function assertUnique(client: PoolClient, table: string, gameId: string, code: string): Promise<void> {
   const existing = await client.query(`SELECT 1 FROM "zzsh_supply"."${table}" WHERE "game_id" = $1 AND "code" = $2`, [gameId, code]);
   if (existing.rows.length > 0) throw conflict("Stable code already exists in this game");
-}
-
-async function assertCategoryParent(client: PoolClient, gameId: string, categoryId: string): Promise<void> {
-  const result = await client.query(`SELECT 1 FROM "zzsh_supply"."skin_category" WHERE "id" = $1 AND "game_id" = $2`, [categoryId, gameId]);
-  if (result.rows.length === 0) throw invalid("Category does not belong to this game");
 }
 
 /**
@@ -842,6 +793,7 @@ const CATALOG_NEW_FILTERS = ["ownerKind", "firearmClassificationId", "isCollecti
 const CATALOG_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 
 function validateCatalogFilters(filters: CatalogFilters): void {
+  if (filters.categoryId !== undefined) throw retiredSkinCategory();
   for (const key of ["categoryId", "rarityCode", "ownerId", "firearmClassificationId"] as const)
     if (filters[key] !== undefined && !CATALOG_ID.test(filters[key]!)) throw invalid("Catalog reference is invalid", key);
   if (filters.ownerKind !== undefined && !CATALOG_OWNER_KINDS.includes(filters.ownerKind)) throw invalid("Owner kind is invalid", "ownerKind");
@@ -853,6 +805,7 @@ function validateCatalogFilters(filters: CatalogFilters): void {
 export function parseCatalogQuery(query: URLSearchParams): { filters: CatalogFilters; limit: number; cursor?: string } {
   const allowed = ["q", "categoryId", "rarityCode", "ownerId", "limit", "cursor", ...CATALOG_NEW_FILTERS];
   for (const key of query.keys()) if (!allowed.includes(key) || query.getAll(key).length !== 1) throw invalid("Unsupported or duplicate catalog query", key);
+  if (query.has("categoryId")) throw retiredSkinCategory();
   if (query.has("rarityState") && query.has("rarityCode")) throw invalid("Rarity state and code are mutually exclusive", "rarityState");
   const limit = query.has("limit") ? Number(query.get("limit")) : 20;
   if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw invalid("Limit is invalid", "limit");
@@ -879,22 +832,6 @@ export function parseCatalogQuery(query: URLSearchParams): { filters: CatalogFil
 export function publicSkinOwnerNameSql(alias: string): string {
   return `CASE WHEN ${alias}.owner_kind = 'FIREARM' THEN (SELECT f.name FROM zzsh_supply.firearm f WHERE f.game_id=${alias}.game_id AND f.id=${alias}.firearm_id)
              ELSE (SELECT o.name FROM zzsh_supply.skin_owner o WHERE o.game_id=${alias}.game_id AND o.kind=${alias}.owner_kind AND o.id=${alias}.owner_id) END`;
-}
-/**
- * Legacy category visibility, retained for non-Delta and historical query compatibility.
- * Delta skin eligibility follows its own enabled/form-visible facts, not this tree.
- */
-export function publicSkinCategoryCteSql(gameParam: string): string {
-  return `visible AS (
-       SELECT c."id", c."code", c."name", c."parent_id" AS "parentId", c."sort_order" AS "sortOrder"
-         FROM "zzsh_supply"."skin_category" c
-        WHERE c."game_id" = ${gameParam} AND c."enabled" = true AND c."form_visible" = true AND c."parent_id" IS NULL
-       UNION ALL
-       SELECT c."id", c."code", c."name", c."parent_id" AS "parentId", c."sort_order" AS "sortOrder"
-         FROM "zzsh_supply"."skin_category" c
-         JOIN visible p ON c."parent_id" = p."id"
-        WHERE c."game_id" = ${gameParam} AND c."enabled" = true AND c."form_visible" = true
-     )`;
 }
 /**
  * Quality label of a skin row: the name of its game-scoped
@@ -982,10 +919,10 @@ export async function readPublicCatalog(
   if (!gameRow) throw notFound();
   let lastSkinId: string | undefined;
   if (cursor !== undefined) lastSkinId = parseCursor(cursor, { gameId, revision: gameRow.catalogRevision, filters });
-  if (filters.categoryId || filters.rarityCode || filters.ownerId || filters.firearmClassificationId) {
+  if (filters.rarityCode || filters.ownerId || filters.firearmClassificationId) {
     const refs = (await client.query<{ categoryOk: boolean; rarityOk: boolean; ownerOk: boolean; classificationOk: boolean }>(
       `SELECT /* catalog-reference-check */
-        ($2::text IS NULL OR EXISTS(SELECT 1 FROM zzsh_supply.skin_category WHERE game_id=$1 AND id=$2)) AS "categoryOk",
+        ($2::text IS NULL) AS "categoryOk",
         ($3::text IS NULL OR EXISTS(SELECT 1 FROM zzsh_supply.skin_rarity WHERE game_id=$1 AND code=$3)) AS "rarityOk",
         ($4::text IS NULL OR EXISTS(SELECT 1 FROM zzsh_supply.skin_owner WHERE game_id=$1 AND id=$4) OR EXISTS(SELECT 1 FROM zzsh_supply.firearm WHERE game_id=$1 AND id=$4)) AS "ownerOk",
         ($5::text IS NULL OR EXISTS(SELECT 1 FROM zzsh_supply.firearm_classification WHERE game_id=$1 AND id=$5)) AS "classificationOk"`,
@@ -1006,32 +943,16 @@ export async function readPublicCatalog(
     itemSearch ? [gameId, `%${escapeLike(itemSearch)}%`] : [gameId],
   );
 
-  const categories = await client.query(
-    `WITH RECURSIVE ${publicSkinCategoryCteSql("$1")}
-     SELECT * FROM visible ORDER BY "sortOrder", "code", "id"`,
-    [gameId],
-  );
-  const visibleRefs = await client.query<{ categoryId: string; kind: SkinOwnerRef["kind"] | null; id: string | null; name: string | null; firearmClassificationId: string | null; firearmClassificationName: string | null }>(
-    `SELECT DISTINCT s.category_id AS "categoryId", s.owner_kind AS kind,
+  const visibleRefs = await client.query<{ kind: SkinOwnerRef["kind"] | null; id: string | null; name: string | null; firearmClassificationId: string | null; firearmClassificationName: string | null }>(
+    `SELECT DISTINCT s.owner_kind AS kind,
             COALESCE(s.owner_id,s.firearm_id) AS id, ${publicSkinOwnerNameSql("s")} AS name,
             f.classification_id AS "firearmClassificationId", fc.name AS "firearmClassificationName"
        FROM "zzsh_supply"."skin" s
        LEFT JOIN zzsh_supply.firearm f ON s.owner_kind='FIREARM' AND f.id=s.firearm_id AND f.game_id=s.game_id
        LEFT JOIN zzsh_supply.firearm_classification fc ON fc.id=f.classification_id AND fc.game_id=f.game_id
-      WHERE s.game_id=$1 AND s.enabled=true AND s.form_visible=true AND ($3::boolean OR s.category_id=ANY($2::text[]))`,
-    [gameId, categories.rows.map(category => category.id), gameRow.code === "delta"],
+      WHERE s.game_id=$1 AND s.enabled=true AND s.form_visible=true`,
+    [gameId],
   );
-  const categoriesById = new Map(categories.rows.map(category => [category.id, category]));
-  const categoryKinds = new Map<string, Set<SkinOwnerRef["kind"] | null>>();
-  for (const reference of visibleRefs.rows) {
-    let categoryId: string | null = reference.categoryId;
-    while (categoryId && categoriesById.has(categoryId)) {
-      const kinds = categoryKinds.get(categoryId) ?? new Set<SkinOwnerRef["kind"] | null>();
-      kinds.add(reference.kind);
-      categoryKinds.set(categoryId, kinds);
-      categoryId = categoriesById.get(categoryId)!.parentId;
-    }
-  }
   const owners = [...new Map(visibleRefs.rows.filter(reference => reference.id && reference.kind && reference.name && (gameRow.code !== "delta" || reference.kind !== "MELEE_TYPE"))
     .map(({ id, kind, name, firearmClassificationId, firearmClassificationName }) => [`${kind}:${id}`, { id, kind, name, ...(kind === "FIREARM" ? { firearmClassificationId: firearmClassificationId ?? null, firearmClassificationName: firearmClassificationName ?? null } : {}) }])).values()]
     .sort((a, b) => a.kind!.localeCompare(b.kind!) || a.name!.localeCompare(b.name!, "zh-CN") || a.id!.localeCompare(b.id!));
@@ -1054,21 +975,6 @@ export async function readPublicCatalog(
 
   const parameters: unknown[] = [gameId];
   const conditions: string[] = [`s."game_id" = $1`, `s."enabled" = true`, `s."form_visible" = true`];
-  if (gameRow.code !== "delta") {
-    parameters.push(categories.rows.map(c=>c.id));
-    conditions.push(`s."category_id" = ANY(${parameters.length}::text[])`);
-  }
-  if (filters.categoryId) {
-    parameters.push(filters.categoryId);
-    conditions.push(`s."category_id" IN (
-      WITH RECURSIVE descendants AS (
-        SELECT "id" FROM "zzsh_supply"."skin_category" WHERE "id" = $${parameters.length} AND "game_id" = $1
-        UNION ALL
-        SELECT c."id" FROM "zzsh_supply"."skin_category" c JOIN descendants d ON c."parent_id" = d."id"
-      )
-      SELECT "id" FROM descendants
-    )`);
-  }
   if (filters.rarityCode) {
     parameters.push(filters.rarityCode);
     conditions.push(`s."rarity_code" = $${parameters.length}`);
@@ -1103,7 +1009,7 @@ export async function readPublicCatalog(
   }
   parameters.push(limit + 1);
   const skins = await client.query(
-    `SELECT s."id", s."code", s."name", s."category_id" AS "categoryId", s."rarity_code" AS "rarityCode",
+    `SELECT s."id", s."code", s."name", NULL::text AS "categoryId", s."rarity_code" AS "rarityCode",
             s."base_name" AS "baseName", s."owner_kind" AS "ownerKind", CASE WHEN s.owner_kind='FIREARM' THEN f.id ELSE (SELECT o.id FROM zzsh_supply.skin_owner o WHERE o.game_id=s.game_id AND o.id=s.owner_id AND o.kind=s.owner_kind) END AS "ownerId",
             f.classification_id AS "firearmClassificationId", fc.name AS "firearmClassificationName",
             ${publicSkinOwnerNameSql("s")} AS "ownerName", ${publicSkinRarityNameSql("s")} AS "rarityName", ${publicSkinMetadataSql("s")},
@@ -1124,12 +1030,9 @@ export async function readPublicCatalog(
   return {
     ...(scope === "publishing" ? {ready: Boolean(gameRow.currentReleaseId) && missing.length===0, blockers: !gameRow.currentReleaseId ? [{code:"RULE_UNCONFIGURED",path:"rules"}] : missing.map(i=>({code:"REQUIRED_ITEM_UNPRICED",path:"inventory",itemId:i.id,name:i.name})), inputScale:0} : {}),
     game: gameRow,
-    skinCategoryModel: { mode: gameRow.code === "delta" ? "RETIRED" : "LEGACY", legacyReferencesReadOnly: gameRow.code === "delta" },
+    skinCategoryModel: { mode: "RETIRED", legacyReferencesReadOnly: false },
     items: items.rows.filter(item => !isRetiredDeltaInsurance(String(item.code))),
-    categories: categories.rows.map(category => {
-      const kinds = categoryKinds.get(category.id);
-      return { ...category, ownerKind: kinds?.size === 1 ? [...kinds][0] : null };
-    }),
+    categories: [],
     owners,
     skinFilters: { version: 1, ownerKinds: [...CATALOG_OWNER_KINDS], firearmClassifications: classifications.map(({ id, code, name, sortOrder }) => ({ id, code, name, sortOrder })), collectibleValues: ["true", "false", "null"], rarityStates: ["UNKNOWN"] },
     rarities: rarities.rows,
@@ -1156,7 +1059,7 @@ export async function readAdminCatalog(
     [gameId],
   );
   if (game.rows.length === 0) throw notFound();
-  const [items, rarities, categories, skins, entitlements, owners, firearmOwners] = await Promise.all([
+  const [items, rarities, skins, entitlements, owners, firearmOwners] = await Promise.all([
     client.query(
       `SELECT "id", "code", "name", "unit", "quantity_scale" AS "quantityScale", "required", "enabled",
               "sort_order" AS "sortOrder", "media_id" AS "mediaId", "source_field" AS "sourceField", "source_token" AS "sourceToken", "source_note" AS "sourceNote"
@@ -1168,12 +1071,7 @@ export async function readAdminCatalog(
       [gameId],
     ),
     client.query(
-      `SELECT "id", "code", "name", "parent_id" AS "parentId", "sort_order" AS "sortOrder", "enabled", "form_visible" AS "formVisible"
-         FROM "zzsh_supply"."skin_category" WHERE "game_id" = $1 ORDER BY "parent_id" NULLS FIRST, "sort_order", "code"`,
-      [gameId],
-    ),
-    client.query(
-      `SELECT "id", "code", "name", "category_id" AS "categoryId", "rarity_code" AS "rarityCode", "enabled",
+      `SELECT "id", "code", "name", NULL::text AS "categoryId", "rarity_code" AS "rarityCode", "enabled",
               "form_visible" AS "formVisible", "media_id" AS "mediaId", "sort_order" AS "sortOrder",
               "source_field" AS "sourceField", "source_token" AS "sourceToken", "source_namespace" AS "sourceNamespace",
               "base_name" AS "baseName", "aliases", "naming_state" AS "namingState",
@@ -1192,14 +1090,13 @@ export async function readAdminCatalog(
     client.query(`SELECT id,kind,code,name,enabled FROM zzsh_supply.skin_owner WHERE game_id=$1 ORDER BY kind,code,id`, [gameId]),
     client.query(`SELECT id,code,name,enabled FROM zzsh_supply.firearm WHERE game_id=$1 ORDER BY sort_order,code,id`, [gameId]),
   ]);
-  const retired = game.rows[0]!.code === "delta";
-  const categorylessWriteReady = retired ? await categorylessSkinStorageReady(client) : false;
+  const categorylessWriteReady = await categorylessSkinStorageReady(client);
   return {
     game: game.rows[0],
-    skinCategoryModel: { mode: retired ? "RETIRED" : "LEGACY", categorylessWriteReady, legacyReferencesReadOnly: retired },
+    skinCategoryModel: { mode: "RETIRED", categorylessWriteReady, legacyReferencesReadOnly: false },
     items: items.rows,
     rarities: rarities.rows,
-    categories: categories.rows,
+    categories: [],
     skins: skins.rows,
     entitlements: entitlements.rows,
     owners: owners.rows.filter(owner => game.rows[0]!.code !== "delta" || owner.kind === "AGENT"),

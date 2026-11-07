@@ -1,6 +1,9 @@
-import {continuationCommissionEffects} from "./local-funds-plan.mjs";
+import {assertRebuiltEmptyCoverageChunk,assertRebuiltEmptyCoverageManifest,continuationCommissionEffects,prepareLocalFundsPlan} from "./local-funds-plan.mjs";
+import { advisoryLockSql, assertLiveTarget, assertReadbackTarget, loadRegisteredTarget, maintenanceConnection, targetConnection, targetIdentityQuery } from "./local-target-registry.mjs";
+import { compareKeySets } from "./local-key-set.mjs";
+import { classifyLegacyRegistrationTime, compareLegacyRegistrationFact, matchesLegacyAccountMetricAudit, legacyAccountCaptureProof, matchesLegacyAccountCapture, legacyOrderCaptureProof, matchesLegacyOrderCapture } from "./local-source-adapter.mjs";
 import { createHash } from "node:crypto";
-import { createReadStream, readFileSync, writeFileSync, existsSync } from "node:fs";
+import { createReadStream, readFileSync, writeFileSync, existsSync, lstatSync } from "node:fs";
 import { createInterface } from "node:readline";
 import { createRequire } from "node:module";
 import { dirname, join, resolve, basename } from "node:path";
@@ -12,56 +15,94 @@ if (!args.includes("--readback")) {
   process.exit(0);
 }
 if (process.version !== "v24.20.0") throw new Error("NODE_BASELINE_MISMATCH");
-const root = resolve(dirname(fileURLToPath(import.meta.url)), "../.."), require = createRequire(import.meta.url), { Client } = require("pg");
+const root = resolve(dirname(fileURLToPath(import.meta.url)), "../.."), api = resolve(option("--api-dist") ?? join(root, "apps/api/dist/src")), require = createRequire(join(api,"app.js")), { Client } = require("pg");
 const hash = value => createHash("sha256").update(value).digest("hex");
 const dataset = resolve(option("--dataset") ?? ""), checkpoint = resolve(option("--checkpoint") ?? ""), output = resolve(option("--out") ?? "");
 if (![dataset, checkpoint].every(path => path.toLowerCase().startsWith("e:\\zzsh-local-state\\restricted\\")) || existsSync(output)) throw new Error("BOUND_PRIVATE_INPUT_NEW_RECEIPT_REQUIRED");
+const credentialPath = option("--credentials");
+if (!credentialPath) throw new Error("REGISTERED_CREDENTIAL_REQUIRED");
+const registration = loadRegisteredTarget(credentialPath);
 const bytes = readFileSync(join(dataset, "manifest.json"));
 if (hash(bytes) !== option("--dataset-sha")) throw new Error("DATASET_MANIFEST_SHA_MISMATCH");
 const manifest = JSON.parse(bytes), state = JSON.parse(readFileSync(checkpoint));
-if (state.binding?.datasetSha256 !== option("--dataset-sha") || state.binding.database !== "zzsh_test_regression" || state.pending || state.status === "RUNNING" || !["users", "accounts", "orders"].every(name => state.phases[name]?.complete)) throw new Error("KNOWN_COMPLETED_CORE_CHECKPOINT_REQUIRED");
+if (manifest.population?.mode === "SELECTED_BUSINESS_SCOPE") {
+  const times=manifest.registrationTimeSource;
+  if (!times || ![times.VALID,times.MISSING,times.INVALID].every(n=>Number.isSafeInteger(n)&&n>=0)
+    || times.VALID+times.MISSING+times.INVALID!==manifest.domains?.users?.source) throw new Error("SOURCE_REGISTRATION_TIME_COUNTS_REQUIRED");
+}
+// The checkpoint may only be reconciled against the target its registry names, never against a
+// database name repeated in this script.
+if (state.binding?.datasetSha256 !== option("--dataset-sha") || state.binding.database !== registration.database || state.binding.oid !== registration.oid || state.pending || state.status === "RUNNING" || !["users", "accounts", "orders"].every(name => state.phases[name]?.complete)) throw new Error("KNOWN_COMPLETED_CORE_CHECKPOINT_REQUIRED");
 async function* rows(path) { const stream = createReadStream(path), reader = createInterface({ input: stream, crlfDelay: Infinity }); try { for await (const line of reader) if (line) yield JSON.parse(line); } finally { reader.close(); stream.destroy(); } }
 for (const [name, entry] of Object.entries(manifest.files)) {
   if (entry.file !== basename(entry.file)) throw new Error("DATASET_FILE_PATH_INVALID");
   const digest = createHash("sha256"); for await (const bytes of createReadStream(join(dataset, entry.file))) digest.update(bytes);
   if (digest.digest("hex") !== entry.sha256) throw new Error("DATASET_FILE_SHA_MISMATCH:" + name);
 }
-const credentialPath = option("--credentials");
-if (!credentialPath) throw new Error("REGISTERED_CREDENTIAL_REQUIRED");
-const registration = JSON.parse(readFileSync(join(dirname(resolve(credentialPath)), "resource.json")));
 const credential = JSON.parse(readFileSync(credentialPath));
-if (registration.oid !== state.binding.oid || registration.nonce !== state.binding.nonce || registration.database !== "zzsh_test_regression" || registration.pendingReset || credential.migration.name !== registration.roles.migration.name || credential.migration.oid !== registration.roles.migration.oid) throw new Error("RESOURCE_BINDING_CHANGED");
-const parameters = { host: "127.0.0.1", port: 55432, user: credential.migration.name, password: credential.migration.password, connectionTimeoutMillis: 3000, statement_timeout: 15000, lock_timeout: 500 };
-const maintenance = new Client({ ...parameters, database: "postgres", application_name: "core-dataset-reconciliation-lock" });
-const db = new Client({ ...parameters, database: "zzsh_test_regression", application_name: "core-dataset-reconciliation-read-only" });
-const api = resolve(option("--api-dist") ?? join(root, "apps/api/dist/src"));
+assertReadbackTarget(registration, state.binding, credential);
+const maintenance = new Client(maintenanceConnection(registration, { user: "zzsh", password: readFileSync(process.env.DB_PASSWORD_FILE ?? join(root, "apps/api/.secrets/postgres_password"), "utf8").trim(), applicationName: "core-dataset-reconciliation-lock", connectionTimeoutMillis: 3000, statement_timeout: 15000, lock_timeout: 500 }));
+const db = new Client(targetConnection(registration, { user: credential.migration.name, password: credential.migration.password, applicationName: "core-dataset-reconciliation-read-only", connectionTimeoutMillis: 3000, statement_timeout: 15000, lock_timeout: 500 }));
 const mod = name => require(join(api, name + ".js"));
 const canonical = mod("supply/content-hash").canonicalize, accountId = mod("legacy-load/legacy-account-seam").legacyAccountId, orderRead = mod("order/legacy-order-read");
-const report = { schema: "zzsh.local-dataset-readback.v1", startedAt: new Date().toISOString(), resource: { oid: state.binding.oid, nonce: state.binding.nonce, database: "zzsh_test_regression" }, sourceDatasetSha256: option("--dataset-sha"), status: "STARTED", queries: 0, domains: {}, differences: [], differenceCount: 0, targetWrites: 0, rollbackConfirmed: false, lockReleased: false, connectionsClosed: false };
+const originalMetricSources = manifest.legacyDashboardSources ? {} : null;
+if (originalMetricSources) {
+  const sourceReceiptBytes = readFileSync(join(manifest.source, "receipt.json"));
+  if (hash(sourceReceiptBytes) !== manifest.sourceReceiptSha256) throw new Error("METRIC_SOURCE_RECEIPT_CHANGED");
+  const sourceReceipt = JSON.parse(sourceReceiptBytes);
+  if (sourceReceipt.status !== "CAPTURED_READ_ONLY" || sourceReceipt.rollbackConfirmed !== true || sourceReceipt.clientClosed !== true) throw new Error("METRIC_SOURCE_RECEIPT_UNCONFIRMED");
+  for (const domain of ["accounts", "orders"]) {
+    const entry = sourceReceipt.files?.[domain];
+    if (!entry || entry.file !== basename(entry.file) || !/^[a-f0-9]{64}$/.test(entry.sha256 ?? "")) throw new Error("METRIC_SOURCE_FILE_INVALID:" + domain);
+    const path = join(manifest.source, entry.file), digest = createHash("sha256");
+    for await (const bytes of createReadStream(path)) digest.update(bytes);
+    if (digest.digest("hex") !== entry.sha256) throw new Error("METRIC_SOURCE_FILE_CHANGED:" + domain);
+    const records = new Map();
+    for await (const raw of rows(path)) {
+      if (!raw?.id || records.has(raw.id)) throw new Error("METRIC_SOURCE_KEY_INVALID:" + domain);
+      records.set(raw.id, domain === "accounts" ? legacyAccountCaptureProof(raw, canonical) : legacyOrderCaptureProof(raw, orderRead.LEGACY_ORDER_READ_SOURCE_FIELDS, canonical));
+    }
+    if (records.size !== entry.rows) throw new Error("METRIC_SOURCE_COUNT_CHANGED:" + domain);
+    originalMetricSources[domain] = records;
+  }
+}
+const report = { schema: "zzsh.local-dataset-readback.v1", startedAt: new Date().toISOString(), resource: { oid: state.binding.oid, nonce: state.binding.nonce, database: registration.database, ...(registration.instance ? {instance:registration.instance} : {}) }, sourceDatasetSha256: option("--dataset-sha"), status: "STARTED", queries: 0, domains: {}, differences: [], differenceCount: 0, targetWrites: 0, rollbackConfirmed: false, lockReleased: false, connectionsClosed: false };
 const difference = (domain, id, reason) => { report.differenceCount++; if (report.differences.length < 100) report.differences.push({ domain, id, reason }); };
 const query = async (...args) => { report.queries++; return db.query(...args); };
-async function batched(domain, apply) { let batch = [], count = 0; for await (const row of rows(join(dataset, manifest.files[domain].file))) { batch.push(row); if (batch.length === 1000) { await apply(batch); count += batch.length; batch = []; } } if (batch.length) { await apply(batch); count += batch.length; } return count; }
+async function batched(domain, apply, collect = null) { let batch = [], count = 0; for await (const row of rows(join(dataset, manifest.files[domain].file))) { batch.push(row); if (collect) collect.push(row.sourceId); if (batch.length === 1000) { await apply(batch); count += batch.length; batch = []; } } if (batch.length) { await apply(batch); count += batch.length; } return count; }
 const started = performance.now(); let held = false, connected = false;
 try {
-  await maintenance.connect(); held = (await maintenance.query("SELECT pg_try_advisory_lock(806006::bigint) held")).rows[0].held;
+  await maintenance.connect(); held = (await maintenance.query(advisoryLockSql(registration, "try"))).rows[0].ok;
   if (!held) throw new Error("REGRESSION_RESOURCE_BUSY");
   await db.connect(); connected = true; await query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
-  const actual = (await query("SELECT d.oid::text,shobj_description(d.oid,'pg_database') marker,current_setting('zzsh.regression_run') nonce,current_user FROM pg_database d WHERE d.datname=current_database()")).rows[0];
-  if (actual.oid !== registration.oid || actual.nonce !== registration.nonce || actual.marker !== registration.marker || actual.current_user !== credential.migration.name) throw new Error("LIVE_RESOURCE_CHANGED");
+  const actual = (await query(targetIdentityQuery())).rows[0];
+  assertLiveTarget(registration, actual);
+  const userKeys = [], accountKeys = [], orderKeys = [];
+  const registrationTime = { sourceCaptured: manifest.registrationTimeSource ?? null, readySource: { VALID: 0, MISSING: 0, INVALID: 0 }, targetFactMissing: 0, targetLegacyIdMismatch: 0, targetTimeMismatch: 0 };
   const users = await batched("users", async batch => {
     const actual = new Map((await query(`SELECT u.id,u.name,u."phoneNumber",u."phoneNumberVerified",u.suspended,u.image,
        i.provider,i.provider_reference,i.account_status,i.identity_status,i.age_status,i.verified_at,
        c.password,c."legacyPasswordMd5" md5,c."legacyPasswordSalt" salt,c."legacyPasswordVersion" password_version,
        a.details->>'sourceDigest' source_digest,a.details->>'evidenceDigest' evidence_digest,
-       p.current_kind,p.default_preset_id,p.current_preset_id,p.current_asset_id,p.current_version::text avatar_version
+       p.current_kind,p.default_preset_id,p.current_preset_id,p.current_asset_id,p.current_version::text avatar_version,
+       rf.user_id registration_user_id,rf.legacy_id registration_legacy_id,rf.registered_at registration_time
        FROM zzsh_auth_user."user" u JOIN zzsh_iam.user_identity_state i ON i.user_id=u.id
        LEFT JOIN zzsh_auth_user.account c ON c."userId"=u.id AND c."providerId"='credential'
        LEFT JOIN LATERAL (SELECT details FROM zzsh_iam.audit_event WHERE object_id=u.id AND action='user.legacy_owner.migrated' AND outcome='SUCCESS' ORDER BY occurred_at DESC LIMIT 1) a ON true
        LEFT JOIN zzsh_supply.profile_avatar p ON p.realm='user' AND p.subject_id=u.id
+       LEFT JOIN zzsh_iam.user_registration_fact rf ON rf.user_id=u.id
        WHERE u.id=ANY($1::text[])`, [batch.map(row => row.userId)])).rows.map(row => [row.id, row]));
     for (const row of batch) {
       const found = actual.get(row.userId), e = row.input.evidence;
-      if (!found) { difference("users", row.sourceId, "TARGET_IDENTITY_MISSING"); continue; }
+      registrationTime.readySource[classifyLegacyRegistrationTime(e.sourceCreatedAt, orderRead.legacyEpochTimestamp)]++;
+      if (!found) { registrationTime.targetFactMissing++; difference("users", row.sourceId, "TARGET_IDENTITY_MISSING"); continue; }
+      const registration = compareLegacyRegistrationFact(e.sourceCreatedAt, row.sourceId, {userId:found.registration_user_id,legacyId:found.registration_legacy_id,registeredAt:found.registration_time});
+      if (registration !== "MATCH") {
+        if (registration === "TARGET_FACT_MISSING") registrationTime.targetFactMissing++;
+        else if (registration === "TARGET_LEGACY_ID_MISMATCH") registrationTime.targetLegacyIdMismatch++;
+        else if (registration === "TARGET_TIME_MISMATCH") registrationTime.targetTimeMismatch++;
+        difference("users", row.sourceId, registration);
+      }
       const expectedPhone = e.contactProjection ? e.contactProjection.authenticationPhone : "+86" + e.mobile;
       const expectedPhoneVerified = e.contactProjection?.authenticationPhone != null;
       if (found.name !== e.nickname || found.phoneNumber !== expectedPhone || found.phoneNumberVerified !== expectedPhoneVerified || found.suspended !== false || found.provider !== "legacy_mysql_restore" || found.provider_reference !== "la_user:" + row.sourceId || found.account_status !== (e.status.deleted ? "CANCELLED" : e.status.disabled ? "FROZEN" : "ACTIVE") || found.identity_status !== (e.status.realNameBound ? "VERIFIED" : "UNVERIFIED") || found.age_status !== (e.status.ageAdult === true ? "ADULT" : e.status.ageAdult === false ? "MINOR" : "UNKNOWN") || found.verified_at !== null || found.source_digest !== e.sourceDigest || found.evidence_digest !== row.input.evidenceDigest) difference("users", row.sourceId, "SOURCE_STATUS_IDENTITY_OR_AUDIT_DRIFT");
@@ -69,8 +110,9 @@ try {
       if (password ? found.password !== null || found.md5 !== password.md5 || found.salt !== password.salt || found.password_version !== password.version : found.md5 !== null || found.password !== null) difference("users", row.sourceId, "SOURCE_CREDENTIAL_NOT_PRESERVED");
       if (found.current_kind !== "DEFAULT" || found.default_preset_id !== found.current_preset_id || found.current_asset_id !== null || !mod("profile/profile-avatar-presets").isProfileAvatarPresetId(found.default_preset_id) || found.image !== mod("profile/profile-avatar").avatarImagePath("user", row.userId, found.avatar_version)) difference("users", row.sourceId, "PERSISTED_DEFAULT_AVATAR_NOT_BOUND");
     }
-  });
+  }, userKeys);
   report.domains.users = { expected: users };
+  report.registrationTime = registrationTime;
   const accounts = await batched("accounts", async batch => {
     const actual = new Map((await query(`SELECT m.legacy_id,m.account_id,m.source_digest,m.evidence_ref,m.version_id,a.owner_user_id,a.game_id,a.current_version_id,a.legacy_hold,v.origin,v.review_state,
        h.account_id snapshot_account,h.snapshot,h.source_digest snapshot_digest,to_char(h.source_updated_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') snapshot_updated_at,h.source_status
@@ -78,25 +120,53 @@ try {
        LEFT JOIN zzsh_supply.legacy_listing_read_snapshot h ON h.account_id=m.account_id
        WHERE m.source_system='legacy_mysql_restore' AND m.source_entity='la_rental_accounts' AND m.legacy_id=ANY($1::text[])`, [batch.map(row => row.sourceId)])).rows.map(row => [row.legacy_id, row]));
     for (const row of batch) {
+      if (originalMetricSources && !matchesLegacyAccountCapture(originalMetricSources.accounts.get(row.sourceId), row, canonical)) difference("accounts", row.sourceId, "ACCOUNT_CAPTURE_METRIC_SOURCE_DRIFT");
       const found = actual.get(row.sourceId);
       if (!found) { difference("accounts", row.sourceId, "TARGET_ACCOUNT_MAP_MISSING"); continue; }
       if (found.account_id !== accountId("legacy_mysql_restore", "la_rental_accounts", row.sourceId) || found.source_digest !== row.sourceDigest || found.evidence_ref !== row.evidenceRef || found.owner_user_id !== row.ownerUserId || found.game_id !== state.gameBindings[row.gameCode] || found.version_id !== found.current_version_id || found.origin !== "LEGACY_OBSERVATION" || found.review_state !== "IMPORTED_UNVERIFIED" || found.legacy_hold !== "UNRESOLVED") difference("accounts", row.sourceId, "SOURCE_OWNER_GAME_OBSERVATION_OR_HOLD_DRIFT");
       const snapshotExpected = row.snapshot && row.sourceUpdatedAt && [0, 3, 4, 5, 6].includes(Number(row.sourceStatus)) && !row.sourceDeleted;
       if (snapshotExpected ? !found.snapshot_account || canonical(found.snapshot) !== canonical(row.snapshot) || found.snapshot_digest !== row.sourceDigest || found.snapshot_updated_at !== row.sourceUpdatedAt || Number(found.source_status) !== Number(row.sourceStatus) : found.snapshot_account !== null) difference("accounts", row.sourceId, "HISTORICAL_SNAPSHOT_DRIFT_OR_UNPROVED_PUBLIC_FACT");
     }
-  });
+  }, accountKeys);
   report.domains.accounts = { expected: accounts };
   let deleted = 0;
+  const accountMetricAudit = { expected: 0, matched: 0 };
   const orders = await batched("orders", async batch => {
-    const actual = new Map((await query(`SELECT legacy_id,id,binding_digest,source_digest,source_snapshot,account_id,game_id,owner_user_id,renter_user_id,due_amount_cents::text due,recorded_paid_amount_cents::text paid,deposit_amount_cents::text deposit FROM zzsh_order.legacy_order_read_snapshot WHERE source_system='legacy_mysql_restore' AND source_entity='la_order' AND legacy_id=ANY($1::text[])`, [batch.map(row => row.sourceId)])).rows.map(row => [row.legacy_id, row]));
+    const actual = new Map((await query(`SELECT legacy_id,id,binding_digest,source_digest,source_snapshot,account_id,game_id,owner_user_id,renter_user_id,due_amount_cents::text due,recorded_paid_amount_cents::text paid,deposit_amount_cents::text deposit,to_char(source_paid_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS source_paid_at FROM zzsh_order.legacy_order_read_snapshot WHERE source_system='legacy_mysql_restore' AND source_entity='la_order' AND legacy_id=ANY($1::text[])`, [batch.map(row => row.sourceId)])).rows.map(row => [row.legacy_id, row]));
+    const orderIds = [...actual.values()].map(row => row.id);
+    const audits = new Map();
+    if (batch.some(row => row.account.metricSourceFields !== undefined) && orderIds.length) for (const audit of (await query(`SELECT object_id,details FROM zzsh_iam.audit_event WHERE object_type='rental_order' AND action='order.legacy.read_imported' AND outcome='SUCCESS' AND object_id=ANY($1::text[])`, [orderIds])).rows) {
+      if (!audits.has(audit.object_id)) audits.set(audit.object_id, []); audits.get(audit.object_id).push(audit.details);
+    }
     for (const row of batch) {
+      if (row.account.metricSourceFields !== undefined) accountMetricAudit.expected++;
+      if (originalMetricSources && !matchesLegacyOrderCapture(originalMetricSources.orders.get(row.sourceId), row, canonical)) difference("orders", row.sourceId, "ORDER_CAPTURE_METRIC_SOURCE_DRIFT");
+      if (originalMetricSources && !matchesLegacyAccountCapture(originalMetricSources.accounts.get(row.account.legacyId), {sourceId:row.account.legacyId,sourceDigest:row.account.sourceDigest,metricSourceFields:row.account.metricSourceFields}, canonical)) difference("orders", row.sourceId, "ORDER_ACCOUNT_CAPTURE_BINDING_DRIFT");
       const found = actual.get(row.sourceId), bound = { source: row.source, account: { ...row.account, accountId: accountId("legacy_mysql_restore", "la_rental_accounts", row.account.legacyId), gameId: state.gameBindings[row.gameCode] }, owner: row.owner, renter: row.renter }, expected = orderRead.normalizeLegacyOrderReadInput(bound);
       if (row.sourceDeleted) deleted++;
       if (!found) { difference("orders", row.sourceId, "TARGET_ORDER_SNAPSHOT_MISSING"); continue; }
-      if (found.id !== expected.id || found.binding_digest !== expected.bindingDigest || found.source_digest !== row.sourceDigest || canonical(found.source_snapshot) !== canonical(row.source.row) || found.account_id !== bound.account.accountId || found.game_id !== bound.account.gameId || found.owner_user_id !== row.owner.userId || found.renter_user_id !== row.renter.userId || found.due !== expected.dueCents || found.paid !== expected.paidCents || found.deposit !== expected.depositCents) difference("orders", row.sourceId, "ORIGINAL_ORDER_RELATION_STATUS_OR_MONEY_DRIFT");
+      if (found.id !== expected.id || found.binding_digest !== expected.bindingDigest || found.source_digest !== row.sourceDigest || canonical(found.source_snapshot) !== canonical(row.source.row) || found.account_id !== bound.account.accountId || found.game_id !== bound.account.gameId || found.owner_user_id !== row.owner.userId || found.renter_user_id !== row.renter.userId || found.due !== expected.dueCents || found.paid !== expected.paidCents || found.deposit !== expected.depositCents || found.source_paid_at !== expected.paidAt) difference("orders", row.sourceId, "ORIGINAL_ORDER_RELATION_STATUS_OR_MONEY_DRIFT");
+      if (bound.account.metricSourceFields !== undefined) {
+        const matches = audits.get(found.id) ?? [], source = orderRead.legacyAccountMetricSource(bound);
+        if (!matchesLegacyAccountMetricAudit(matches, source, expected.bindingDigest, canonical)) difference("orders", row.sourceId, "ACCOUNT_CAPTURE_METRIC_SOURCE_DRIFT");
+        else accountMetricAudit.matched++;
+      }
     }
-  });
+  }, orderKeys);
   report.domains.orders = { expected: orders, preservedSourceDeleted: deleted };
+  if (originalMetricSources) report.legacyDashboardSources = { source: manifest.legacyDashboardSources, sourceReceiptAndFilesSha256Verified: true,
+    accountRowsCompared: accounts, orderRowsCompared: orders, accountMetricAudit };
+  // Per-row checks prove each planned row is right; this proves the planned key set and the target
+  // key set are the same set, so a missing or extra object cannot hide behind matching totals.
+  report.sets = {};
+  const compareSet = async (domain, sourceKeys, targetSql) => {
+    const result = compareKeySets(sourceKeys, (await query(targetSql)).rows);
+    report.sets[domain] = result;
+    if (!result.equal) difference(domain, "KEY_SET", "TARGET_KEY_SET_DIFFERS");
+  };
+  await compareSet("users", userKeys, `SELECT substring(provider_reference from char_length('la_user:') + 1) AS legacy_id FROM zzsh_iam.user_identity_state WHERE provider='legacy_mysql_restore' AND provider_reference LIKE 'la_user:%'`);
+  await compareSet("accounts", accountKeys, `SELECT legacy_id FROM zzsh_supply.legacy_supply_map WHERE source_system='legacy_mysql_restore' AND source_entity='la_rental_accounts'`);
+  await compareSet("orders", orderKeys, `SELECT legacy_id FROM zzsh_order.legacy_order_read_snapshot WHERE source_system='legacy_mysql_restore' AND source_entity='la_order'`);
   if (option("--paths-plan")) {
     const checked = async (dir, name, expected) => {
       const path = join(dir, basename(name)), digest = createHash("sha256");
@@ -176,20 +246,56 @@ try {
     if (actual !== observed) difference("financeHistory", "COHORT", "OBSERVATION_DENOMINATOR_DIFFERED");
   }
   if(state.phases.financeEmptyCoverage?.complete){
-    const phase=state.generatedPhases.financeEmptyCoverage,bytes=readFileSync(join(dirname(checkpoint),"phases","financeEmptyCoverage.json"));if(hash(bytes)!==phase.sha256)throw new Error("FINANCIAL_PHASE_INPUT_CHANGED");
-    const expected=JSON.parse(bytes).flatMap(chunk=>chunk.rows.map(row=>mod("finance/personal-finance-observation-maintenance").planFinanceObservations(row.input).coverage));let readable=0;
-    for(let i=0;i<expected.length;i+=500){
-      const batch=expected.slice(i,i+500),actual=new Map((await query(`SELECT c.id,c.user_id,c.source_kind,c.source_count,c.imported_count,c.isolated_count,c.body_digest,c.source_canonical,(SELECT count(*)::text FROM zzsh_order.personal_finance_observation o WHERE o.user_id=c.user_id AND o.source_system=c.source_system AND o.source_kind=c.source_kind AND (o.source_event_at IS NULL OR o.source_event_at<=c.source_cutoff)) AS actual_count FROM zzsh_order.personal_finance_observation_coverage c WHERE c.id=ANY($1::text[])`,[batch.map(r=>r.id)])).rows.map(r=>[r.id,r]));
-      for(const row of batch){const found=actual.get(row.id);if(!found||found.user_id!==row.userId||found.source_kind!==row.sourceKind||found.source_count!==0||found.imported_count!==0||found.isolated_count!==0||found.actual_count!=='0'||found.body_digest!==row.bodyDigest||found.source_canonical!==row.canonical)difference("financeEmptyCoverage",row.id,"PROVED_EMPTY_COVERAGE_DRIFT");else readable++;}
+    const phase=state.generatedPhases.financeEmptyCoverage, chunks=phase?.chunks;
+    if(phase?.schema!=="zzsh.empty-coverage-chunks.v1"){
+      const bytes=readFileSync(join(dirname(checkpoint),"phases","financeEmptyCoverage.json"));if(hash(bytes)!==phase?.sha256)throw new Error("FINANCIAL_PHASE_INPUT_CHANGED");
+      const expected=JSON.parse(bytes).flatMap(chunk=>chunk.rows.map(row=>mod("finance/personal-finance-observation-maintenance").planFinanceObservations(row.input).coverage));let readable=0;
+      for(let i=0;i<expected.length;i+=500){
+        const batch=expected.slice(i,i+500),actual=new Map((await query(`SELECT c.id,c.user_id,c.source_kind,c.source_count,c.imported_count,c.isolated_count,c.body_digest,c.source_canonical,(SELECT count(*)::text FROM zzsh_order.personal_finance_observation o WHERE o.user_id=c.user_id AND o.source_system=c.source_system AND o.source_kind=c.source_kind AND (o.source_event_at IS NULL OR o.source_event_at<=c.source_cutoff)) AS actual_count FROM zzsh_order.personal_finance_observation_coverage c WHERE c.id=ANY($1::text[])`,[batch.map(r=>r.id)])).rows.map(r=>[r.id,r]));
+        for(const row of batch){const found=actual.get(row.id);if(!found||found.user_id!==row.userId||found.source_kind!==row.sourceKind||found.source_count!==0||found.imported_count!==0||found.isolated_count!==0||found.actual_count!=='0'||found.body_digest!==row.bodyDigest||found.source_canonical!==row.canonical)difference("financeEmptyCoverage",row.id,"PROVED_EMPTY_COVERAGE_DRIFT");else readable++;}
+      }
+      report.emptyFinancialCoverage={expected:expected.length,readable,scope:"EXACT_SOURCE_ZERO_PER_SUBJECT_AND_KIND_NOT_A_ZERO_WALLET"};
+    }else{
+    if(!Array.isArray(chunks))throw new Error("EMPTY_COVERAGE_CHUNK_MANIFEST_REQUIRED");
+    const fundsDir=resolve(option("--funds-source")??""),refundDir=resolve(option("--refund-attempts")??"");
+    if(!fundsDir.toLowerCase().startsWith("e:\\zzsh-local-state\\restricted\\")||!refundDir.toLowerCase().startsWith("e:\\zzsh-local-state\\restricted\\")
+      ||!/^[a-f0-9]{64}$/.test(option("--funds-source-sha")??"")||!/^[a-f0-9]{64}$/.test(option("--refund-attempts-sha")??""))throw new Error("EMPTY_COVERAGE_FROZEN_SOURCE_REQUIRED");
+    const chunkDir=resolve(dirname(checkpoint),"phases","financeEmptyCoverage");let checkedChunks=0;
+    const chunkFile=descriptor=>{
+      if(!/^[a-f0-9]{64}$/.test(descriptor?.digest??""))throw new Error("EMPTY_COVERAGE_CHUNK_PATH_INVALID");
+      const path=resolve(chunkDir,descriptor.digest+".json");
+      if(resolve(descriptor.file??"").toLowerCase()!==path.toLowerCase()||!lstatSync(path).isFile()||lstatSync(path).isSymbolicLink()||lstatSync(chunkDir).isSymbolicLink())throw new Error("EMPTY_COVERAGE_CHUNK_PATH_INVALID");
+      return path;
+    };
+    // Rebuild from the pinned original sources and compare the complete chunk bytes before using
+    // any saved item as evidence. This is source-only; the active target transaction is read-only.
+    const rebuilt=await prepareLocalFundsPlan({manifest,domainFile:name=>manifest.files?.[name]?join(dataset,manifest.files[name].file):null,mod,apiDist:api,
+      fundsSource:{path:fundsDir,sha256:option("--funds-source-sha")},refundAttemptsSource:{path:refundDir,sha256:option("--refund-attempts-sha")},
+      emitEmptyChunk:chunk=>{const descriptor=chunks[checkedChunks++];assertRebuiltEmptyCoverageChunk(descriptor,chunk,readFileSync(chunkFile(descriptor)));}});
+    if(rebuilt.inputSha256!==state.fundsSupplement?.inputSha256)throw new Error("EMPTY_COVERAGE_SOURCE_BINDING_CHANGED");
+    assertRebuiltEmptyCoverageManifest(phase,rebuilt.emptyCoverage,checkedChunks);
+    let readable=0,expected=0,batch=[];
+    async function checkEmptyBatch(){
+      const actual=new Map((await query(`SELECT c.id,c.user_id,c.source_kind,c.source_count,c.imported_count,c.isolated_count,c.body_digest,c.source_canonical,(SELECT count(*)::text FROM zzsh_order.personal_finance_observation o WHERE o.user_id=c.user_id AND o.source_system=c.source_system AND o.source_kind=c.source_kind AND (o.source_event_at IS NULL OR o.source_event_at<=c.source_cutoff)) AS actual_count FROM zzsh_order.personal_finance_observation_coverage c WHERE c.id=ANY($1::text[])`,[batch.map(r=>r.id)])).rows.map(r=>[r.id,r]));
+      for(const row of batch){const found=actual.get(row.id);if(!found||found.user_id!==row.userId||found.source_kind!==row.sourceKind||found.source_count!==0||found.imported_count!==0||found.isolated_count!==0||found.actual_count!=='0'||found.body_digest!==row.bodyDigest||found.source_canonical!==row.canonical)difference("financeEmptyCoverage",row.id,"PROVED_EMPTY_COVERAGE_DRIFT");else readable++;}batch=[];
     }
-    report.emptyFinancialCoverage={expected:expected.length,readable,scope:"EXACT_SOURCE_ZERO_PER_SUBJECT_AND_KIND_NOT_A_ZERO_WALLET"};
+    for(const chunk of chunks)for(const row of JSON.parse(readFileSync(chunkFile(chunk)))){
+      batch.push(mod("finance/personal-finance-observation-maintenance").planFinanceObservations(row.input).coverage);expected++;
+      if(batch.length===500)await checkEmptyBatch();
+    }
+    if(batch.length)await checkEmptyBatch();
+    const total=(await query(`SELECT count(*)::int n FROM zzsh_order.personal_finance_observation_coverage WHERE source_system='legacy_mysql_restore' AND source_count=0 AND source_kind=ANY($1::text[])`,[Object.values(phase.kinds)])).rows[0].n;
+    if(expected!==phase.rows||total!==expected)difference("financeEmptyCoverage","COHORT","EMPTY_COVERAGE_TARGET_COUNT_DRIFT");
+    report.emptyFinancialCoverage={expected,readable,actual:total,sourceRebuilt:true,chunks:checkedChunks,scope:"EXACT_SOURCE_ZERO_PER_SUBJECT_AND_KIND_NOT_A_ZERO_WALLET"};
+    }
   }
-  if(state.phases.guaranteeHistory?.complete){
-    const phase=state.generatedPhases.guaranteeHistory,bytes=readFileSync(join(dirname(checkpoint),"phases","guaranteeHistory.json"));if(hash(bytes)!==phase.sha256)throw new Error("FINANCIAL_PHASE_INPUT_CHANGED");
-    const expected=JSON.parse(bytes).flatMap(group=>mod("finance/owner-guarantee-history").planOwnerGuaranteeHistoryBatch(group.input).rows);
-    let readable=0;
-    for(let i=0;i<expected.length;i+=500){const batch=expected.slice(i,i+500),actual=new Map((await query(`SELECT legacy_account_id,user_id,legacy_user_id,account_id,source_digest,source_canonical FROM zzsh_order.legacy_owner_guarantee_observation WHERE legacy_account_id=ANY($1::text[]) AND source_cutoff=$2::timestamptz`,[batch.map(r=>r.sourceId),manifest.sourceCutoff])).rows.map(r=>[r.legacy_account_id,r]));for(const row of batch){const found=actual.get(row.sourceId);if(!found||found.user_id!==row.userId||found.legacy_user_id!==row.legacyUserId||found.account_id!==row.accountId||found.source_digest!==row.sourceDigest||found.source_canonical!==row.sourceCanonical)difference("guaranteeHistory",row.sourceId,"FROZEN_GUARANTEE_SOURCE_DRIFT");else readable++;}}
-    report.ownerGuaranteeHistory={expected:expected.length,readable,financialEffect:"NONE",heldAmount:"UNKNOWN_WITHOUT_CURRENT_LIABILITY_PROOF"};
+  // The old listing deposit is retired: nothing to reconcile, and any row would be a leak.
+  {
+    // The retired listing-deposit table is expected to be absent; treat absence as zero.
+  const guaranteePresent=(await query(`SELECT to_regclass('zzsh_order.legacy_owner_guarantee_observation') IS NOT NULL AS present`)).rows[0]?.present===true;
+  const actual=guaranteePresent?(await query(`SELECT count(*)::int AS count FROM zzsh_order.legacy_owner_guarantee_observation`)).rows[0]:{count:0};
+    report.ownerGuaranteeHistory={expected:0,readable:0,actual:actual?.count??0,policyExcluded:true};
+    if((actual?.count??0)!==0)difference("guaranteeHistory","TABLE","RETIRED_LISTING_DEPOSIT_PRESENT_IN_TARGET");
   }
   if(state.phases.invitationFacts?.complete){
     const module=mod("finance/legacy-invitation-facts");let expectedSubjects=0,matchedSubjects=0,expectedRelations=0,matchedRelations=0,childProofAudits=0;
@@ -263,7 +369,7 @@ catch (error) { report.status = "READBACK_FAILED"; report.error = error.code ?? 
 finally {
   if (connected && !report.rollbackConfirmed) { try { await query("ROLLBACK"); report.rollbackConfirmed = true; } catch {} }
   await db.end();
-  if (held) { try { report.lockReleased = (await maintenance.query("SELECT pg_advisory_unlock(806006::bigint) released")).rows[0].released; } catch {} }
+  if (held) { try { report.lockReleased = (await maintenance.query(advisoryLockSql(registration, "unlock"))).rows[0].ok; } catch {} }
   await maintenance.end(); report.connectionsClosed = true; report.finishedAt = new Date().toISOString(); report.monotonicElapsedMs = performance.now() - started;
   if (!report.rollbackConfirmed || !report.lockReleased || report.differenceCount) process.exitCode = 1;
   writeFileSync(output, JSON.stringify(report, null, 2) + "\n", { flag: "wx" });

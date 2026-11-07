@@ -26,6 +26,10 @@ export function invalid(message = "Request body is invalid", path?: string): Sec
   return new SecurityApiError(400, API_V1_ERROR_CODES.INVALID_ARGUMENT, message, path ? [{path,code:"INVALID_FIELD"}] : undefined);
 }
 
+export function retiredSkinCategory(): SecurityApiError {
+  return new SecurityApiError(410, API_V1_ERROR_CODES.SKIN_CATEGORY_RETIRED, "旧皮肤分类已退役，请刷新页面并按皮肤类型筛选");
+}
+
 export function notFound(): SecurityApiError {
   return new SecurityApiError(404, API_V1_ERROR_CODES.NOT_FOUND, "Resource not found");
 }

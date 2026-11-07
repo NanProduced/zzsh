@@ -5,6 +5,7 @@ import { createRequire } from "node:module";
 import { dirname, isAbsolute, join, parse, resolve } from "node:path";
 import pg from "pg";
 import { readSourceRows } from "./local-source-adapter.mjs";
+import { advisoryLockSql, assertLiveTarget, loadRegisteredTarget, maintenanceConnection, targetConnection, targetIdentityQuery } from "./local-target-registry.mjs";
 
 const args = process.argv.slice(2), option = name => { const i = args.indexOf(name); return i < 0 ? undefined : args[i + 1]; };
 if (!args.includes("--verify") && !args.includes("--apply")) { console.log(JSON.stringify({ action: "PLAN", required: ["--verify or --apply", "--plan-dir", "--plan-receipt-sha", "--source-plan-dir", "--source-dir", "--source-receipt-sha", "--api-dist"], applyAlsoRequires: ["--credentials", "--actor-file", "--oid", "--nonce", "--out"], dbConnections: 0, targetWrites: 0 })); process.exit(0); }
@@ -59,9 +60,10 @@ for (const path of [actorFile, out]) if (!resolve(path).toLowerCase().startsWith
 for (const path of [actorFile, credentialsFile]) { let p = resolve(path); for (;;) { if (lstatSync(p).isSymbolicLink()) throw new Error("REPARSE_POINT_REFUSED"); const parent = dirname(p); if (parent === p || p === parse(p).root) break; p = parent; } }
 if (existsSync(out)) throw new Error("NEW_OUTPUT_REQUIRED");
 const resource = JSON.parse(readFileSync(join(dirname(credentialsFile), "resource.json"))), credentials = JSON.parse(readFileSync(credentialsFile)), actorProof = JSON.parse(readFileSync(actorFile));
+const registered = loadRegisteredTarget(credentialsFile);
 const actor = { id: actorProof.id ?? actorProof.actorId, sessionId: actorProof.sessionId };
 if (actorProof.actorId && actorProof.actorId !== actor.id) throw new Error("TARGET_ACTOR_ALIASES_CONFLICT");
-if (resource.database !== "zzsh_test_regression" || resource.oid !== expectedOid || resource.nonce !== expectedNonce || resource.pendingReset || credentials.migration?.name !== resource.roles?.migration?.name || credentials.migration?.oid !== resource.roles?.migration?.oid || typeof actor.id !== "string" || typeof actor.sessionId !== "string" || !actor.id || !actor.sessionId) throw new Error("TARGET_BINDING_INVALID");
+if (resource.database !== "zzsh_test_regression" || registered.database !== resource.database || registered.oid !== expectedOid || registered.nonce !== expectedNonce || resource.oid !== expectedOid || resource.nonce !== expectedNonce || resource.pendingReset || credentials.migration?.name !== resource.roles?.migration?.name || credentials.migration?.oid !== resource.roles?.migration?.oid || credentials.migration?.name !== registered.migrationRole || credentials.migration?.oid !== registered.migrationRoleOid || typeof actor.id !== "string" || typeof actor.sessionId !== "string" || !actor.id || !actor.sessionId) throw new Error("TARGET_BINDING_INVALID");
 let ancestor = dirname(resolve(out)); for (;;) { if (lstatSync(ancestor).isSymbolicLink()) throw new Error("REPARSE_POINT_REFUSED"); const parent = dirname(ancestor); if (parent === ancestor || ancestor === parse(ancestor).root) break; ancestor = parent; }
 const user = spawnSync("whoami", ["/user", "/fo", "csv", "/nh"], { encoding: "utf8", windowsHide: true, timeout: 5000 }), sid = /S-1-5-[0-9-]+/.exec(user.stdout)?.[0];
 if (user.status !== 0 || !sid) throw new Error("CURRENT_SID_REQUIRED");
@@ -70,9 +72,9 @@ if (spawnSync("icacls", [out, "/inheritance:r", "/grant:r", `*${sid}:(OI)(CI)F`,
 const acl = "$a=Get-Acl -LiteralPath $env:ZZSH_MEDIA_ACL_PATH;if(!$a.AreAccessRulesProtected){exit 2};$allowed=@($env:ZZSH_MEDIA_ACL_SID,'S-1-5-18','S-1-5-32-544');foreach($r in $a.Access){$s=$r.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value;if($s -notin $allowed){exit 3}}";
 if (spawnSync("pwsh.exe", ["-NoProfile", "-Command", acl], { env: { ...process.env, ZZSH_MEDIA_ACL_PATH: resolve(out), ZZSH_MEDIA_ACL_SID: sid }, windowsHide: true, timeout: 5000 }).status !== 0) throw new Error("PRIVATE_OUTPUT_ACL_UNVERIFIED");
 const fd = openSync(join(out, "load-events.jsonl"), "wx"), log = value => { const bytes = Buffer.from(JSON.stringify(value) + "\n"); let at = 0; while (at < bytes.length) { const n = writeSync(fd, bytes, at, bytes.length - at); if (n <= 0) throw new Error("OUTPUT_WRITE_FAILED"); at += n; } };
-const connection = { host: "127.0.0.1", port: 55432, user: credentials.migration.name, password: credentials.migration.password, connectionTimeoutMillis: 3000, statement_timeout: 15000, lock_timeout: 500 };
-const client = new pg.Client({ ...connection, database: resource.database, application_name: "legacy-path-account-loader" });
-const maintenance = new pg.Client({ ...connection, database: "postgres", application_name: "legacy-path-account-lock" });
+const connection = { user: credentials.migration.name, password: credentials.migration.password, connectionTimeoutMillis: 3000, statement_timeout: 15000, lock_timeout: 500 };
+const client = new pg.Client(targetConnection(registered, { ...connection, applicationName: "legacy-path-account-loader" }));
+const maintenance = new pg.Client(maintenanceConnection(registered, { ...connection, applicationName: "legacy-path-account-lock" }));
 const started = performance.now(), originalQuery = client.query.bind(client), maintenanceQuery = maintenance.query.bind(maintenance);
 let queries = 0, chunks = 0, closed = false, lockHeld = false, lockReleased = false;
 client.query = (...args) => { queries++; return originalQuery(...args); };
@@ -81,11 +83,12 @@ const auth = require(join(resolve(apiDist), "auth/auth-security.js")), security 
 let state = "STARTED", applied = 0, replayed = 0, begun = false, commitSent = false, failure;
 try {
   await maintenance.connect();
-  lockHeld = (await maintenance.query("SELECT pg_try_advisory_lock(806006::bigint) ok")).rows[0]?.ok === true;
+  lockHeld = (await maintenance.query(advisoryLockSql(registered, "try"))).rows[0]?.ok === true;
   if (!lockHeld) throw new Error("REGRESSION_RESOURCE_BUSY");
   await client.connect(); await client.query("BEGIN READ ONLY"); begun = true;
-  const identity = (await client.query("SELECT d.oid::text oid,shobj_description(d.oid,'pg_database') marker,current_user role,r.oid::text role_oid,r.rolsuper,r.rolcreatedb,r.rolcreaterole,r.rolinherit,r.rolbypassrls,current_setting('zzsh.regression_run',true) nonce FROM pg_database d JOIN pg_roles r ON r.rolname=current_user WHERE d.datname=current_database()")).rows[0];
-  if (identity.oid !== expectedOid || identity.nonce !== expectedNonce || identity.marker !== "zzsh:regression-test:v1" || identity.role !== credentials.migration.name || identity.role_oid !== credentials.migration.oid || identity.rolsuper || identity.rolcreatedb || identity.rolcreaterole || identity.rolinherit || identity.rolbypassrls) throw new Error("LIVE_TARGET_CHANGED");
+  const identity = (await client.query(targetIdentityQuery())).rows[0];
+  assertLiveTarget(registered, identity);
+  if (identity.oid !== expectedOid || identity.nonce !== expectedNonce || identity.marker !== "zzsh:regression-test:v1" || identity.role !== credentials.migration.name || identity.role_oid !== credentials.migration.oid) throw new Error("LIVE_TARGET_CHANGED");
   await auth.assertAdminContextInTransaction(client, { userId: actor.id, sessionId: actor.sessionId });
   const rows = (await client.query(`SELECT m.legacy_id,m.account_id,m.source_digest,a.owner_user_id FROM zzsh_supply.legacy_supply_map m JOIN zzsh_supply.rental_account a ON a.id=m.account_id WHERE m.source_system='legacy_mysql_restore' AND m.source_entity='la_rental_accounts' AND m.legacy_id=ANY($1::text[])`, [[...prepared.keys()]])).rows;
   if (rows.length !== prepared.size) throw new Error("TARGET_MAPPING_COUNT_MISMATCH");
@@ -115,7 +118,7 @@ try {
 } finally {
   const targetClosed = await client.end().then(() => true, () => false);
   if (lockHeld) {
-    try { lockReleased = (await maintenance.query("SELECT pg_advisory_unlock(806006::bigint) ok")).rows[0]?.ok === true; } catch {}
+    try { lockReleased = (await maintenance.query(advisoryLockSql(registered, "unlock"))).rows[0]?.ok === true; } catch {}
   }
   const maintenanceClosed = await maintenance.end().then(() => true, () => false);
   closed = targetClosed && maintenanceClosed;

@@ -43,12 +43,23 @@ test("seasonal boss completion and next-season plans preserve explicit zero, nul
 test("missing, out of range, unsafe and ambiguous facts remain unknown; raw private values stay out",()=>{
   const x=convertLegacyDisplayFields({...source(),ratio_type:"future",haff:null,coffee_num:"-1",character_lv:"1954095103",processing_time_start:"8",processing_time_end:"8",province:"微信13800138000",high_risk_owner:null});
   assert.equal(x.rentalMode,null); assert.equal(x.resources[0]!.quantity,null); assert.equal(x.resources[6]!.quantity,null);
-  assert.equal(x.attributes.character_level,null); assert.equal(x.attributes.region_province,null); assert.equal(x.attributes.service_window_start_minute,null);
+  assert.equal(x.attributes.character_level,null); assert.equal(x.attributes.region_province,null); assert.equal(x.attributes.service_window_start_minute,0); assert.equal(x.attributes.service_window_end_minute,1440);
   assert.equal(x.risk.highRiskOwner,null); assert.ok(x.issues.includes("character_lv:OUT_OF_RANGE"));
   assert.ok(!JSON.stringify(x).includes("13800138000")); assert.deepEqual(parseLegacyDisplaySnapshot(x),x);
   const midnight=convertLegacyDisplayFields({...source(),processing_time_start:"24",processing_time_end:"8"}); assert.equal(midnight.attributes.service_window_start_minute,0);
   const fullDay=convertLegacyDisplayFields({...source(),processing_time_start:"0",processing_time_end:"24"}); assert.equal(fullDay.attributes.service_window_end_minute,1440);
-  assert.equal(convertLegacyDisplayFields({...source(),processing_time_start:"24",processing_time_end:"24"}).attributes.service_window_start_minute,null);
+  const sameEnds=convertLegacyDisplayFields({...source(),processing_time_start:"24",processing_time_end:"24"}); assert.equal(sameEnds.attributes.service_window_start_minute,0); assert.equal(sameEnds.attributes.service_window_end_minute,1440);
+});
+test("packed admin encoding 100000+minutes decodes beside the plain-hours publish encoding",()=>{
+  const w=(start: string, end: string)=>convertLegacyDisplayFields({...source(),processing_time_start:start,processing_time_end:end}).attributes;
+  const cases: readonly (readonly [string, string, number, number, boolean])[] = [["100600","100660",600,660,false],["100540","101439",540,1439,false],["100000","101439",0,1439,false],["100420","101320",420,1320,false],["100540","100060",540,60,true],["100420","100000",420,0,true]];
+  for(const [start,end,sm,em,cross] of cases){
+    const a=w(start,end); assert.equal(a.service_window_start_minute,sm,`${start} start`); assert.equal(a.service_window_end_minute,em,`${start} end`);
+    assert.equal(a.service_window_cross_midnight,cross,`${start} cross`); assert.equal(a.service_window_timezone,"Asia/Shanghai");
+  }
+  const day=w("100000","100000"); assert.equal(day.service_window_start_minute,0); assert.equal(day.service_window_end_minute,1440);
+  const broken=convertLegacyDisplayFields({...source(),processing_time_start:"99999",processing_time_end:"100000"});
+  assert.equal(broken.attributes.service_window_start_minute,null); assert.ok(broken.issues.includes("processing_time_start:UNSUPPORTED_ENCODING"));
 });
 test("display parser rejects injected fields, bad units, levels and inconsistent windows",()=>{
   const x=convertLegacyDisplayFields(source());

@@ -4,15 +4,17 @@ import { join, resolve, dirname, basename } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import { createRequire } from "node:module";
-import { sourceUserPlan, sourceContactPlanningRow, sourceAccountPlan, sourceOrderPlan, sourceFinanceObservation, sourceContinuation, sourceInvitationPlan, readSourceRows as rows, sourceJsonLine } from "./local-source-adapter.mjs";
-import { selectSourceScenarios } from "./local-source-scenarios.mjs";
+import { classifyLegacyRegistrationTime, sourceUserPlan, sourceContactPlanningRow, sourceAccountPlan, sourceOrderPlan, sourceFinanceObservation, sourceContinuation, sourceInvitationPlan, summarizeLegacyDashboardSources, readSourceRows as rows, sourceJsonLine } from "./local-source-adapter.mjs";
+import { resolvePopulationMode, selectSourceScenarios, summarizePopulationScope } from "./local-source-scenarios.mjs";
+import { planSelectedBusinessScope, selectedScopeDigest, selectedScopeFilter } from "./selected-business-scope.mjs";
 const require = createRequire(import.meta.url), ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const args = process.argv.slice(2), option = name => { const i = args.indexOf(name); return i < 0 ? undefined : args[i + 1]; };
 if (!args.includes("--prepare")) {
-    console.log(JSON.stringify({ action: "PLAN", required: ["--prepare", "--source", "--source-sha", "--source-binding", "--source-binding-sha", "--out"], optional: ["--scenario-selection", "--api-dist"], dbConnections: 0, credentialReads: 0, writeAllowed: false }));
+    console.log(JSON.stringify({ action: "PLAN", required: ["--prepare", "--source", "--source-sha", "--source-binding", "--source-binding-sha", "--out", "exactly one of --scenario-selection, --full-source or --business-selection"], optional: ["--api-dist"], dbConnections: 0, credentialReads: 0, writeAllowed: false }));
     process.exit(0);
 }
 const monotonicStarted = performance.now();
+const populationMode = resolvePopulationMode(args);
 if (process.version !== "v24.20.0")
     throw new Error("NODE_BASELINE_MISMATCH");
 const source = resolve(option("--source") ?? ""), output = resolve(option("--out") ?? "");
@@ -48,6 +50,7 @@ const mod = name => require(join(api, name + ".js"));
 const modules = { planner: mod("legacy-load/user-order-offline-plan"), contentHash: mod("supply/content-hash"), orderRead: mod("order/legacy-order-read"), finance: mod("finance/legacy-finance-source-preparation"), financeRead: mod("finance/personal-finance-read"), calc: mod("order/legacy-continuation-calc"), identity: mod("auth/identity-subject") };
 if (!Array.isArray(modules.orderRead.LEGACY_ORDER_READ_SOURCE_FIELDS))
     throw new Error("FORMAL_ORDER_SOURCE_FIELDS_NOT_EXPORTED");
+if (typeof modules.orderRead.legacyEpochTimestamp !== "function") throw new Error("FORMAL_REGISTRATION_TIMESTAMP_CONVERTER_REQUIRED");
 const sidResult = spawnSync("whoami", ["/user", "/fo", "csv", "/nh"], { encoding: "utf8", windowsHide: true, timeout: 5000 });
 const sid = /S-1-5-[0-9-]+/.exec(sidResult.stdout)?.[0];
 if (!sid)
@@ -90,9 +93,18 @@ try {
     const contacts = mod("legacy-load/legacy-contact-projection").planLegacyContactProjections(contactSources);
     report.userContactProjection = { schema: "legacy-contact-projection-v1", sourceSubjects: contacts.size, writtenWithOriginalImport: true, winner: "UNIQUE_NON_CANCELLED_ONLY", frozenRetainsClaim: true, decisions: {} };
     for (const p of contacts.values()) report.userContactProjection.decisions[p.decision] = (report.userContactProjection.decisions[p.decision] ?? 0) + 1;
-    const selection = args.includes("--scenario-selection") ? selectSourceScenarios(data, contacts) : null;
+    // The seventh round filters accounts and orders by real rental money movement; users and every other
+    // independent domain stay whole, so this is a filter, not a cohort shrink.
+    const selectedScope = populationMode === 'SELECTED_BUSINESS_SCOPE' ? planSelectedBusinessScope(data) : null;
+    const selection = populationMode === 'SCENARIO_SELECTION' ? selectSourceScenarios(data, contacts) : selectedScope ? selectedScopeFilter(selectedScope) : null;
+    if (selectedScope) { report.selectedScope = selectedScope; report.selectedScopeSha256 = selectedScopeDigest(selectedScope); }
     const sourceRows = domain => selection ? data[domain].filter(raw => selection.includes(domain, raw)) : data[domain];
-    if (selection) {
+    report.legacyDashboardSources = summarizeLegacyDashboardSources(sourceRows("orders"), sourceRows("accounts"), sourceReceipt, sourceRows("distributionOrders"));
+    report.population = summarizePopulationScope(data,populationMode,selection,report.sourceReceiptSha256);
+    report.populationSha256 = sha(JSON.stringify(report.population));
+    // Only the retired scenario mode carries a summary and an emitted selection file; the business
+    // scope is a filter and records its own partition instead.
+    if (selection && populationMode === "SCENARIO_SELECTION") {
         report.scenarioSelection = selection.summary;
         for (const [domain, ids] of Object.entries(selection.selected)) for (const sourceId of ids) emit("scenario-selection", { domain, sourceId });
         for (const missing of selection.missing) isolate("relationships", missing.sourceId, missing.cause);
@@ -124,10 +136,12 @@ try {
     for (const raw of sourceRows("distributionOrders"))
         if (raw.order_type === '1' && raw.status === '1' && raw.is_delete === '0')
             append(commissions, raw.order_id, raw);
-    let sourceMoney = 0n, sourceEarnings = 0n, mappedMoney = 0n, mappedEarnings = 0n;
+    let sourceMoney = 0n, sourceEarnings = 0n, mappedMoney = 0n, mappedEarnings = 0n, readyInvalidBalances = 0;
     report.domains.users = { source: 0, ready: 0, isolated: 0 };
+    report.registrationTimeSource = { VALID: 0, MISSING: 0, INVALID: 0, meaning: "source la_user.create_time, independent of target import time" };
     for (const raw of sourceRows("users")) {
         report.domains.users.source++;
+        report.registrationTimeSource[classifyLegacyRegistrationTime(raw.create_time, modules.orderRead.legacyEpochTimestamp)]++;
         let balance;
         try {
             balance = { money: modules.financeRead.sourceSignedYuanToCents(raw.money), earnings: modules.financeRead.sourceYuanToCents(raw.earnings) };
@@ -160,14 +174,17 @@ try {
                 mappedMoney += BigInt(balance.money);
                 mappedEarnings += BigInt(balance.earnings);
                 emit("stored-balances", { ...metadata, source: { id: raw.id, money: raw.money, earnings: raw.earnings }, amounts: balance, state: "REVIEW_REQUIRED_NO_OPENING_ADMISSION" });
-            }
+            } else readyInvalidBalances++;
         }
         catch (error) {
             report.domains.users.isolated++;
             isolate("users", raw.id, error.code ?? "SOURCE_USER_INVALID");
         }
     }
+    if (report.registrationTimeSource.VALID + report.registrationTimeSource.MISSING + report.registrationTimeSource.INVALID !== report.domains.users.source)
+        throw new Error("SOURCE_REGISTRATION_TIME_COUNTS_MISMATCH");
     report.storedBalanceTotals = { selectedSourceMoneyCents: sourceMoney.toString(), selectedSourceEarningsCents: sourceEarnings.toString(), mappedMoneyCents: mappedMoney.toString(), mappedEarningsCents: mappedEarnings.toString(), targetOpening: "NOT_ADMITTED", fullSourceTotalsNotInferredFromSelection: true };
+    report.storedBalanceCoverage = { readyUsers: report.domains.users.ready, readyAmounts: fileMeta['stored-balances']?.rows ?? 0, isolatedAmounts: readyInvalidBalances, targetOpening: 'NOT_ADMITTED' };
     const invitation = sourceInvitationPlan(data.users, data.distribution, { ...modules, invitation: mod("finance/legacy-invitation-facts"), migration: mod("supply/legacy-user-migration") }, sourceReceipt, report.sourceReceiptSha256, report.sourceCutoff, new Set(users.keys()));
     report.invitationFacts = invitation.summary;
     for (const packet of invitation.packets) emit("invitation-facts", packet);
@@ -281,6 +298,21 @@ try {
             for (const row of retained) emit("source-relations", { domain: name, row });
         }
     for (const [domain, entry] of Object.entries(report.domains)) if (sourceReceipt.files[domain]) entry.fullSource = sourceReceipt.files[domain].rows;
+    if (populationMode === 'FULL_CAPTURED_SOURCE') {
+        for (const domain of ['users','accounts','orders','earnings','withdraws','distributionOrders']) {
+            const expected=sourceReceipt.files[domain]?.rows, result=report.domains[domain];
+            if (!Number.isSafeInteger(expected)||result?.source!==expected||result.ready+result.isolated!==expected
+              || (['users','accounts','orders'].includes(domain)&&(fileMeta[domain]?.rows??0)!==result.ready)) throw Error('FULL_SOURCE_DENOMINATOR_CHANGED:'+domain);
+        }
+        const retained=['pays','refunds','distribution','moneyLogs','orderAfter','distributionLevels','distributionConfig'].filter(name=>data[name]);
+        if(retained.some(name=>report.domains[name]?.source!==sourceReceipt.files[name]?.rows)
+          || (fileMeta['source-relations']?.rows??0)!==retained.reduce((sum,name)=>sum+sourceReceipt.files[name].rows,0)
+          || (fileMeta['finance-observations']?.rows??0)!==['earnings','withdraws','distributionOrders'].reduce((sum,name)=>sum+report.domains[name].ready,0))
+            throw Error('FULL_SOURCE_FINANCIAL_DENOMINATOR_CHANGED');
+        if(report.storedBalanceCoverage.readyAmounts+report.storedBalanceCoverage.isolatedAmounts!==report.domains.users.ready)throw Error('FULL_SOURCE_USER_BALANCE_COVERAGE_INCOMPLETE');
+    }
+    // Eight consumers gate on the historical status string, so the marker stays; the mode is carried
+    // separately in report.population, which is what tells a selected dataset from a full-source one.
     report.status = "FULL_SOURCE_DATASET_PREPARED_TARGET_NOT_RUN";
 }
 catch (error) {

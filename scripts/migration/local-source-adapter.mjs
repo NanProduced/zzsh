@@ -27,6 +27,7 @@ export function assertSourceSupplementFields(original, supplement) {
             throw new Error("SUPPLEMENT_COMMON_FIELD_DRIFT:" + original.id + ":" + field);
 }
 const digest = value => createHash("sha256").update(value).digest("hex");
+export const LEGACY_DISTRIBUTION_CAPTURE_FIELDS = ["id", "sn", "user_id", "order_type", "order_id", "earnings", "level", "level_id", "ratio", "status", "settle_time", "is_delete", "create_time", "update_time", "order_goods_id", "goods_id", "sku_id", "delete_time"];
 const flag = value => { if (value === "1")
     return true; if (value === "0")
     return false; throw new Error("SOURCE_FLAG_NOT_BINARY"); };
@@ -57,6 +58,25 @@ export function sourceUserPlanningRow(raw, modules, sourceRef) {
         legacyPassword: raw.password === null || raw.password === "" ? null : { version: "legacy-md5-v1", md5: raw.password.toLowerCase(), salt: raw.salt ?? "" },
     };
     return row;
+}
+/** Classify the source value without inventing a timestamp for missing or malformed data. */
+export function classifyLegacyRegistrationTime(value, epochTimestamp) {
+    if (value === null || value === undefined || value === 0 || value === "0") return "MISSING";
+    try {
+        if (typeof value === "number" && Number.isSafeInteger(value) && value > 0) return epochTimestamp(String(value)) ? "VALID" : "INVALID";
+        if (typeof value === "string" && /^[1-9]\d*$/.test(value)) return epochTimestamp(value) ? "VALID" : "INVALID";
+        if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?Z$/.test(value)) return "INVALID";
+        const parsed = new Date(value);
+        return Number.isFinite(parsed.getTime()) && parsed.toISOString().slice(0,19) === value.slice(0,19) ? "VALID" : "INVALID";
+    } catch { return "INVALID"; }
+}
+export function compareLegacyRegistrationFact(sourceTime, legacyId, fact) {
+    if (!fact?.userId) return "TARGET_FACT_MISSING";
+    if (fact.legacyId !== legacyId) return "TARGET_LEGACY_ID_MISMATCH";
+    if (sourceTime === null || sourceTime === undefined) return fact.registeredAt === null ? "MATCH" : "TARGET_TIME_MISMATCH";
+    const expected = Date.parse(sourceTime), observed = fact.registeredAt instanceof Date ? fact.registeredAt.getTime() : Date.parse(fact.registeredAt);
+    if (!Number.isFinite(expected)) return "SOURCE_TIME_INVALID";
+    return Number.isFinite(observed) && observed === expected ? "MATCH" : "TARGET_TIME_MISMATCH";
 }
 export function sourceUserPlan(raw, modules, sourceRef, seenPhones, contactProjections) {
     const row = sourceUserPlanningRow(raw, modules, sourceRef);
@@ -136,6 +156,7 @@ export function sourceAccountPlan(raw, users, modules, sourceRef, games) {
         ready: true, sourceId: raw.id, sourceDigest, ownerLegacyId: raw.user_id, ownerUserId: owner.userId, ownerSourceDigest: owner.sourceDigest,
         gameCode, sourceStatus: raw.status, sourceDeleted: raw.is_delete === "1", businessNo: raw.no === null || raw.no === "" ? null : raw.no,
         evidenceRef: `${sourceRef}:la_rental_accounts:${raw.id}`, snapshot: snapshot.snapshot,
+        metricSourceFields: Object.fromEntries(["is_full_payout"].filter(name => Object.hasOwn(raw, name)).map(name => [name, raw[name]])),
         sourceUpdatedAt: snapshot.sourceUpdatedAt, snapshotMissing: snapshot.missing,
         media: { pathsDigest: digest(raw.img_paths ?? ""), pathsLength: (raw.img_paths ?? "").length, titleDigest: digest(raw.title_img_name ?? ""), state: "UNRESOLVED_BYTES" },
         skins: { state: "PENDING_UNASSIGNED", rawFieldPresence: ["gold_skin", "knife_skin", "weapon_skin"].filter(name => Object.hasOwn(raw, name)) },
@@ -158,11 +179,64 @@ export function sourceOrderPlan(raw, users, accounts, modules, sourceRef) {
     const sourceDigest = digest(modules.contentHash.canonicalize(row));
     return {
         ready: true, sourceId: raw.id, sourceDigest, sourceDeleted: raw.is_delete === "1", source: { legacyId: raw.id, digest: sourceDigest, evidenceRef: `${sourceRef}:la_order:${raw.id}`, row },
-        account: { legacyId: raw.accounts_id, businessNo: account.businessNo, sourceDigest: account.sourceDigest },
+        account: { legacyId: raw.accounts_id, businessNo: account.businessNo, sourceDigest: account.sourceDigest,
+          ...(Object.hasOwn(account, "metricSourceFields") ? { metricSourceFields: account.metricSourceFields } : {}) },
         owner: { userId: owner.userId, legacyId: raw.sale_user_id, businessNo: null, sourceDigest: owner.sourceDigest },
         renter: { userId: renter.userId, legacyId: raw.user_id, businessNo: null, sourceDigest: renter.sourceDigest },
         gameCode: account.gameCode,
     };
+}
+
+/** Missing source columns and null values remain distinguishable in the preparation report. */
+export function summarizeLegacyDashboardSources(orders, accounts, receipt, distributionOrders = []) {
+    const describe = (domain, table, field, rows) => {
+        const captured = receipt?.files?.[domain]?.fields, physical = receipt?.physicalColumns?.[table];
+        const counts = { present: 0, null: 0, missing: 0 };
+        for (const row of rows) {
+            if (!Object.hasOwn(row, field)) counts.missing++;
+            else if (row[field] === null) counts.null++;
+            else counts.present++;
+        }
+        return { captured: Array.isArray(captured) ? captured.includes(field) : null,
+            physical: Array.isArray(physical) ? physical.includes(field) : null, ...counts };
+    };
+    const physical = receipt?.physicalColumns?.la_distribution_order, captured = receipt?.files?.distributionOrders?.fields;
+    const distributionColumns = { rows: distributionOrders.length,
+        physicalCount: Array.isArray(physical) ? physical.length : null,
+        capturedCount: Array.isArray(captured) ? captured.length : null,
+        physicalNotCaptured: Array.isArray(physical) && Array.isArray(captured) ? physical.filter(name => !captured.includes(name)) : null,
+        capturedNotProjected: Array.isArray(captured) ? captured.filter(name => !LEGACY_DISTRIBUTION_CAPTURE_FIELDS.includes(name)) : null };
+    return { shareMoney: describe("orders", "la_order", "share_money", orders),
+        commissionMoney: describe("orders", "la_order", "commission_money", orders),
+        paymentTime: describe("orders", "la_order", "pay_time", orders),
+        accountFullPayoutAtCapture: describe("accounts", "la_rental_accounts", "is_full_payout", accounts), distributionColumns,
+        accountFlagMeaning: "ACCOUNT_STATE_AT_SOURCE_CAPTURE_NOT_PROVEN_AT_ORDER_PAYMENT" };
+}
+
+/** Independent readback must find the one bound source observation from the import audit. */
+export function matchesLegacyAccountMetricAudit(records, expected, bindingDigest, canonicalize) {
+    return Boolean(Array.isArray(records) && records.length === 1 && records[0] && records[0].bindingDigest === bindingDigest
+        && records[0].accountMetricSource && canonicalize(records[0].accountMetricSource) === canonicalize(expected));
+}
+
+/** Retain only the digest and requested original field in memory during independent readback. */
+export function legacyAccountCaptureProof(raw, canonicalize) {
+    return { sourceId: raw.id, sourceDigest: digest(canonicalize(raw)), metricSourceFields:
+        Object.fromEntries(["is_full_payout"].filter(name => Object.hasOwn(raw, name)).map(name => [name, raw[name]])) };
+}
+export function matchesLegacyAccountCapture(proof, planned, canonicalize) {
+    return Boolean(proof && proof.sourceId === planned.sourceId && planned.metricSourceFields !== undefined
+        && proof.sourceDigest === planned.sourceDigest && canonicalize(proof.metricSourceFields) === canonicalize(planned.metricSourceFields));
+}
+
+/** Order read snapshots remain exactly the whitelisted original la_order projection. */
+export function legacyOrderCaptureProof(raw, sourceFields, canonicalize) {
+    const source = Object.fromEntries(sourceFields.filter(name => Object.hasOwn(raw, name)).map(name => [name, raw[name]]));
+    return { sourceId: raw.id, sourceDigest: digest(canonicalize(source)) };
+}
+export function matchesLegacyOrderCapture(proof, planned, canonicalize) {
+    return Boolean(proof && proof.sourceId === planned.sourceId && proof.sourceDigest === planned.sourceDigest
+        && digest(canonicalize(planned.source.row)) === proof.sourceDigest);
 }
 export function sourceFinanceObservation(domain, raw) {
     const integer = value => { if (!/^-?[0-9]+$/.test(value ?? "") || !Number.isSafeInteger(Number(value)))
@@ -180,7 +254,7 @@ export function sourceFinanceObservation(domain, raw) {
     if (domain === "distributionOrders")
         return {
             kind: "HISTORICAL_DISTRIBUTION", sourceId: raw.id, legacyUserId: raw.user_id,
-            row: Object.fromEntries(["id", "sn", "user_id", "order_type", "order_id", "earnings", "level", "level_id", "ratio", "status", "settle_time", "is_delete", "create_time", "update_time", "order_goods_id", "goods_id", "sku_id", "delete_time"].filter(k=>Object.hasOwn(raw,k)).map(name => [name, raw[name] ?? null])),
+            row: Object.fromEntries(LEGACY_DISTRIBUTION_CAPTURE_FIELDS.filter(k=>Object.hasOwn(raw,k)).map(name => [name, raw[name] ?? null])),
         };
     throw new Error("SOURCE_DOMAIN_NOT_SUPPORTED");
 }

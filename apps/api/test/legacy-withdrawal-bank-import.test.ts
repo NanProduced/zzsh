@@ -15,17 +15,17 @@ const operator = { userId: "unit_boss", sessionId: "unit_admin_session" };
 const options: WithdrawalBankBindingOptions = { database: target.database, runtimeUser: target.runtimeUser,
   protection: { currentKeyVersion: "unit_key_v1", keyFor: version => { if (version !== "unit_key_v1") throw Error(); return Buffer.alloc(32, 17); } } };
 
-function component() {
-  const state = { identity: { ...target, rolsuper: false, rolcreatedb: false, rolcreaterole: false, rolbypassrls: false },
+function component(boundTarget:LocalBankTarget = target) {
+  const state = { identity: { ...boundTarget, system_identifier:boundTarget.instance?.systemIdentifier, rolsuper: false, rolcreatedb: false, rolcreaterole: false, rolinherit:false, rolbypassrls: false },
     status: "ACTIVE", matched: "1", total: "1", existing: false, readonly: false, race: false, adminStatus: "ACTIVE", isBoss: true,
     sessionLocked: false, sessionExpired: false, twoFactorEnabled: true, audits: [] as any[][],
     rows: new Map<string, any>(), commands: [] as string[] };
-  const client = { connectionParameters: { host: target.host, port: target.port, database: target.database, user: target.runtimeUser },
+  const client = { connectionParameters: { host: boundTarget.host, port: boundTarget.port, database: boundTarget.database, user: boundTarget.runtimeUser },
     getTransactionStatus: () => "T", async query(sql: string, values: any[] = []) {
       state.commands.push(sql);
       if (sql.startsWith("SELECT d.oid::text AS oid")) { const r = state.identity; return { rows: [{ oid: String(r.databaseOid), name: r.database, role: r.runtimeUser,
         role_oid: String(r.runtimeRoleOid), owner: r.owner, owner_oid: String(r.ownerOid), marker: r.marker, nonce: r.nonce,
-        rolsuper: r.rolsuper, rolcreatedb: r.rolcreatedb, rolcreaterole: r.rolcreaterole, rolbypassrls: r.rolbypassrls, ready: true }] }; }
+        rolsuper: r.rolsuper, rolcreatedb: r.rolcreatedb, rolcreaterole: r.rolcreaterole, rolinherit:r.rolinherit, rolbypassrls: r.rolbypassrls, system_identifier:r.system_identifier, ready: true }] }; }
       if (sql.includes('AS "databaseName"')) return { rows: [{ databaseName: target.database, currentUser: target.runtimeUser, owner: target.owner }] };
       if (sql.includes('AS "ownsBusinessSchema"')) return { rows: [{ ownsBusinessSchema: false, ownsBusinessRelation: false, hasPrivilegedMembership: false }] };
       if (sql.startsWith('SELECT "status" FROM "zzsh_iam"."admin_security"')) return { rows: [{ status: state.adminStatus }] };
@@ -63,6 +63,27 @@ test("先在内存筛选全量来源：缺字段、重复主体、缺用户映�
   assert(!JSON.stringify([counts, plan]).includes(input.name)); assert(!JSON.stringify([counts, plan]).includes(input.card_no));
   assert.equal([...legacyBankImportSubjects(plan)].length, 1); releaseLegacyBankImportPlan(plan);
   assert.throws(() => legacyBankImportCounts(plan));
+});
+
+test("R07 绑定实例、端口和独立恢复键，错误或缺失实例在写入前拒绝", async () => {
+  const instance={host:"127.0.0.1" as const,port:55433 as const,systemIdentifier:"123456"};
+  const r07:LocalBankTarget={...target,round:7,port:55433,instance,migrationUser:"zzsh_regression_migration",migrationRoleOid:9988};
+  assert.throws(()=>prepareLegacyBankImport([input],users,source,{...r07,instance:undefined},operator));
+  assert.throws(()=>prepareLegacyBankImport([input],users,source,{...r07,instance:{...instance,port:55432}},operator));
+  assert.throws(()=>prepareLegacyBankImport([input],users,source,{...r07,migrationRoleOid:undefined},operator));
+  const plan=prepareLegacyBankImport([input],users,source,r07,operator),requestId=legacyBankImportRequestId(plan,"1",options);
+  for(const changed of ["999999",undefined]){
+    const blocked=component(r07);blocked.state.identity.system_identifier=changed;
+    await assert.rejects(importLegacyBankBinding(blocked.client,plan,"1",options,requestId),/RESOURCE_MISMATCH/);
+    assert.equal(blocked.state.rows.size,0);assert.equal(blocked.state.audits.length,0);
+  }
+  const wrongPort=component(r07);(wrongPort.client as PoolClient & {connectionParameters:{port:number}}).connectionParameters.port=55432;
+  await assert.rejects(importLegacyBankBinding(wrongPort.client,plan,"1",options,requestId),/RESOURCE_MISMATCH/);
+  assert.equal(wrongPort.state.rows.size,0);
+  const valid=component(r07);assert.equal((await importLegacyBankBinding(valid.client,plan,"1",options,requestId)).status,"IMPORTED");
+  const other=prepareLegacyBankImport([input],users,source,{...r07,instance:{...instance,systemIdentifier:"654321"}},operator);
+  assert.notEqual(legacyBankImportRequestId(other,"1",options),requestId);
+  releaseLegacyBankImportPlan(other);releaseLegacyBankImportPlan(plan);
 });
 
 test("不同已映射用户可以沿用同一卡号，姓名差异本身也不虚构归属验证", () => {

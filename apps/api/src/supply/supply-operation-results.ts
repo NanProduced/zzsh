@@ -2,11 +2,11 @@ import type { PoolClient } from "pg";
 import { ADMIN_PERMISSION, requirePermission, type EffectiveAdminAccess } from "../auth/admin-authorization";
 import { SecurityApiError } from "../auth/security-core";
 import { API_V1_ERROR_CODES, validateIdempotencyKey } from "../contracts/api-v1";
-import { assertGameScope, invalid, notFound } from "./supply-util";
+import { assertGameScope, invalid, notFound, retiredSkinCategory } from "./supply-util";
 
 type Definition = { table: string; permission: string; resultKey?: string; scopeIsTarget?: boolean; platformMedia?: boolean; bossOnly?: boolean };
 const operations = new Map<string, Definition>();
-for (const [kind, table] of Object.entries({ items: "billable_item", rarities: "skin_rarity", categories: "skin_category", skins: "skin", entitlements: "entitlement", skin_owners: "skin_owner" })) {
+for (const [kind, table] of Object.entries({ items: "billable_item", rarities: "skin_rarity", skins: "skin", entitlements: "entitlement", skin_owners: "skin_owner" })) {
   operations.set(`supply.catalog.${kind}.create`, { table, permission: ADMIN_PERMISSION.supplyCatalogManage });
   operations.set(`supply.catalog.${kind}.update`, { table, permission: ADMIN_PERMISSION.supplyCatalogManage, scopeIsTarget: true });
 }
@@ -63,6 +63,10 @@ export async function readUserSupplyOperationResult(client: PoolClient, userId: 
 export async function readAdminSupplyOperationResult(client: PoolClient, actorId: string, access: EffectiveAdminAccess, query: URLSearchParams, keyHeader: string | undefined) {
   for (const name of query.keys()) if (!["operation", "resourceId", "fingerprint"].includes(name) || query.getAll(name).length !== 1) throw invalid("Unsupported operation result query");
   const operation = query.get("operation") ?? "", definition = operations.get(operation);
+  if (operation === "supply.catalog.categories.create" || operation === "supply.catalog.categories.update") {
+    requirePermission(access, ADMIN_PERMISSION.supplyCatalogManage);
+    throw retiredSkinCategory();
+  }
   if (!definition) throw invalid("Operation does not support result recovery", "operation");
   requirePermission(access, definition.permission);
   if (definition.bossOnly && !access.isBoss) throw new SecurityApiError(403, API_V1_ERROR_CODES.FORBIDDEN, "Original operation is boss-only");
