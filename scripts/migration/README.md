@@ -24,6 +24,7 @@
 | 入口或模块 | 目的 | 依赖与输出 |
 | --- | --- | --- |
 | `build-business-initial.mjs` | 从受控空库安装后的最终结构生成新装基线 | 原迁移链、种子白名单、结构/ACL等价验证；不转换旧业务数据 |
+| `admin-staging-handoff.mjs` / `retire-r07-local-auth.mjs` | 精确退役交付副本中的本机认证材料，保留业务身份和用户密码 | 仅接受专用合成库或绑定回执的第七轮独立本机副本；不连接线上、不清空全局验证记录 |
 | `bootstrap-local-reference.mjs` | 正式初始化新管理员，封包/装载已审业务基础资料 | 新目标与正式认证入口；业务包不包含管理员凭据、会话、审批执行或交易 |
 | `initialize-local-policy.mjs` | 用新两Boss正式发布已审本地会员政策 | 正式 API、明确政策正文、原请求键；不直接写政策表 |
 | `capture-local-source.mjs` | 在本地源 MySQL 一致只读事务中提取数据 | 绑定源、物理字段和截点；输出受限 JSONL、摘要及读回收尾回执 |
@@ -102,3 +103,9 @@ readiness核对应plan摘要，合成对账仅标FIXTURE_PASS。缺证种子随p
 4. `node scripts/migration/complete-r07-account-capture.mjs --readback --input <input.json> --input-sha <sha256> --plan <plan.json> --plan-sha <sha256> --apply-receipt <receipt.json> --apply-sha <sha256> --out <另一新受限目录>`：只读重新比对全部源/目标键与值、V1 锚点、事实摘要、每个批次原幂等回执与审计。提交回执为 UNKNOWN 时，只有锁与连接收尾已确认、全部原键及现态匹配才可确认提交；缺失或冲突保持 UNKNOWN，不换键重跑。完成后仍需实际页面、原在架报价和订单回归。输出中的已知/未知数量只说明账号采集事实，不证明渠道到账。
 
 这是一份候选接线；在独立真实数据交付副本完成完整 prepare / execute / readback 前，不应称其已完成 R07 修复。环境角色、授权窗口、文件身份和实际输出摘要均由执行阶段另行登记。
+
+### 第七轮独立副本：本地认证材料退役
+
+`retire-r07-local-auth.mjs` 是绑定到本次已登记副本的维护入口。受限输入引用已封存恢复、邀请人数、结构及账号事实回读；`--prepare` 只读记录精确管理员、用户 session 和已过期短信挑战的行 ID/数据库内摘要，并对用户 account 做整体摘要。`--execute` 需要绑定 plan、目标、数量和时窗的受限 authority，事务内重核前像及全部入向 FK，再定点退役；用户 account/密码和被引用的管理员 user 主键、业务事实及原审计保留。不清空全局 verification；发现不能归属的验证记录即停止。
+
+`--readback` 依据原审计键和目标现态只读核对，提交结果未知时只有连接和锁已确认收尾、原审计与现态全部吻合才能确认；否则保留 UNKNOWN，不换键重跑。该工具不创建目标 Boss、不安装模拟支付结构，也不授权服务器部署。
