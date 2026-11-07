@@ -553,7 +553,7 @@ function DemoWithdrawalPanel({scope,refreshKey,bindingLocked,availableBalance,le
     if(!identity.userId||!ledgerRevision||!binding?.binding||bindingLocked||!enabled)return;
     try{if(pendingBankBinding(identity.userId)){setMessage("请先确认收款资料的保存结果。");return;}}catch{setMessage("收款资料的保存状态无法确认，请联系客服。");return;}
     let original=sync();if(original===undefined||original?.stage==="target"||original?.stage==="confirm")return;
-    if(!original){let amountCents:string;try{amountCents=yuanToCents(amount);if(BigInt(amountCents)<=0n)throw Error();}catch{setMessage("请输入大于 0、最多两位小数的金额。");return;}
+    if(!original){let amountCents:string;try{amountCents=yuanToCents(amount);if(BigInt(amountCents)<=0n)throw Error();}catch{setMessage("请输入大于 0、最多两位小数的金额。");return;}setResult(null);
       original=await createDemoTarget(identity.userId,demoScope,{bankBindingId:binding.binding.id,bankBindingRevision:binding.binding.revision,amountCents},{isCurrent:identity.current});setPending(original);}
     if(original.stage!=="target-ready")return;
     try {const next=await quoteDemoWithdrawal(identity.userId,demoScope,original.target,ledgerRevision);if(identity.current())setQuote(next);}
