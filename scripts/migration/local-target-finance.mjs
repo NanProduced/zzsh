@@ -2,6 +2,7 @@ import { prepareLocalFundsPlan, assertFundsWriterCoverage,continuationCommission
 import { createHash } from "node:crypto";
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
+import { requiresInvitationCountClosure } from "./local-round-contract.mjs";
 const sha = value => createHash("sha256").update(value).digest("hex");
 const micros = value => value.replace(/\.([0-9]{3})Z$/, (_, digits) => "." + digits + "000Z");
 async function arrayOf(ctx, name) { const result = []; const file = ctx.domainFile(name); if (file)
@@ -19,6 +20,27 @@ async function facts(ctx, legacyIds) { const { client, actor } = ctx; const pare
     const admissionsByOrder = Map.groupBy(admissions, a => a.orderId);
     const receiptsByOrder = Map.groupBy(receipts, r => r.resourceId);
     const current = parents.map(parent => ({ orderId: parent.parentOrderId, readRef: "core-dataset:" + ctx.state.binding.oid + ":" + parent.parentOrderId, headRevision: revisions.get(parent.parentOrderId) ?? null, depositAmountCents: parent.depositAmountCents, duties: dutiesByOrder.get(parent.parentOrderId) ?? [], admissions: admissionsByOrder.get(parent.parentOrderId) ?? [], idempotency: { principalId: actor.userId, records: receiptsByOrder.get(parent.parentOrderId) ?? [] } })); return { parents, current }; }
+export async function applyInvitationDomains(ctx, reviewCommon, resource, canonical) {
+    const {client,actor,mod,manifest,state}=ctx;
+    const packets=ctx.invitationPackets??await arrayOf(ctx,"invitation-facts");
+    const review=(packet,phase)=>({ref:reviewCommon.ref,attempt:reviewCommon.attempt,actor:reviewCommon.actor,
+      resource:{...resource,ownerOid:Number(state.resource.owner_oid)},notBefore:reviewCommon.notBefore,expiresAt:reviewCommon.expiresAt,
+      sourceDigest:sha(canonical(packet.input.source)),bodyDigest:packet.bodyDigest,phase});
+    const module=mod("finance/legacy-invitation-facts-maintenance");
+    await ctx.runItems("invitationFacts",packets,async packet=>{
+        if(packet.input.policy!==null)throw new Error("SOURCE_INVITATION_POLICY_MUST_REMAIN_UNBOUND");
+        const scope=await module.bindReviewedLegacyInvitationFacts(client,actor,review(packet,'IMPORT'));
+        return module.importReviewedLegacyInvitationFacts(client,actor,packet.input,packet.bodyDigest,scope);
+    },1);
+    if(requiresInvitationCountClosure(manifest)){
+        if(state.phases.invitationFacts?.complete!==true || state.phases.invitationFacts.quarantined!==0
+          || state.phases.invitationFacts.nextIndex!==packets.length)throw new Error("INVITATION_IMPORT_NOT_COMPLETE");
+        await ctx.runItems("invitationCounts",packets,async packet=>{
+            const scope=await module.bindReviewedLegacyInvitationFacts(client,actor,review(packet,'COUNTS'));
+            return module.closeReviewedLegacyInvitationCounts(client,actor,packet.input,packet.bodyDigest,scope);
+        },1);
+    }
+}
 export async function applyFinancialDomains(ctx) {
     if(!ctx.fundsSource||!ctx.refundAttemptsSource)throw new Error("EXACT_FINANCIAL_SUPPLEMENTS_REQUIRED");
     const { client, actor, mod, manifest, state } = ctx, preparation = mod("finance/legacy-finance-source-preparation"), canonical = mod("supply/content-hash").canonicalize;
@@ -56,12 +78,7 @@ export async function applyFinancialDomains(ctx) {
     const priorSupplement=state.fundsSupplement;
     state.fundsSupplement = { executionProvenance:[...(priorSupplement?.executionProvenance??[]),{at:new Date().toISOString(),toolFiles:fundsPlan.binding.toolFiles,compiledModules:fundsPlan.binding.compiledModules,preparedMs,historyGroups:history.length,emptyGroups:fundsPlan.emptyCoverage.rows,emptyChunks:fundsPlan.emptyCoverage.chunks,guaranteeGroups:guarantees.length}],binding: priorSupplement?.binding??fundsPlan.binding, inputSha256: fundsPlan.inputSha256, refundAttemptCoverage:fundsPlan.refundAttemptCoverage,pendingCommissionCoverage:fundsPlan.pendingCommissionCoverage, coverage };
     ctx.save();
-    await ctx.runItems("invitationFacts",await arrayOf(ctx,"invitation-facts"),async packet=>{
-        if(packet.input.policy!==null)throw new Error("SOURCE_INVITATION_POLICY_MUST_REMAIN_UNBOUND");
-        const module=mod("finance/legacy-invitation-facts-maintenance"),review={ref:reviewCommon.ref,attempt:reviewCommon.attempt,actor:reviewCommon.actor,resource:{...resource,ownerOid:Number(state.resource.owner_oid)},notBefore:reviewCommon.notBefore,expiresAt:reviewCommon.expiresAt,sourceDigest:sha(canonical(packet.input.source)),bodyDigest:packet.bodyDigest,phase:'IMPORT'};
-        const scope=await module.bindReviewedLegacyInvitationFacts(client,actor,review);
-        return module.importReviewedLegacyInvitationFacts(client,actor,packet.input,packet.bodyDigest,scope);
-    },1);
+    await applyInvitationDomains(ctx,reviewCommon,resource,canonical);
     await ctx.runBatches("financeHistory", history, async (rows) => { const module = mod("finance/personal-finance-observation-maintenance"); const inputs = rows.map(row => row.input); const reviews = inputs.map(input => ({ ...reviewCommon, inputSha256: input.coverage.inputSha256, bodyDigest: sha(canonical(input)), userId: input.coverage.userId, sourceKind: input.coverage.sourceKind })); const scopes = await module.bindReviewedFinanceObservationAdmissionBatch(client, actor, reviews); const result = await module.importReviewedFinanceObservationsBatchOn(client, actor, inputs, scopes); const created = result.body.created; return rows.map((_, i) => ({ replayed: i >= created })); }, 500);
     await ctx.runItems("financeEmptyCoverage",state.generatedPhases.financeEmptyCoverage.chunks,async chunk=>{
         const module=mod("finance/personal-finance-observation-maintenance"),inputs=JSON.parse(readFileSync(chunk.file,"utf8")).map(row=>row.input);

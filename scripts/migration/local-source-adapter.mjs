@@ -135,7 +135,8 @@ export function sourceInvitationPlan(rawUsers, qualifications, modules, receipt,
         packets.push({ input, key: prepared.key, bodyDigest: prepared.bodyDigest, relations: prepared.relations.length });
         for (const fact of subjects) prior.set(fact.legacyId, { fact, key: prepared.key, bodyDigest: prepared.bodyDigest });
     }
-    return { packets, summary: { ...full.summary, selectedSubjects: prior.size, selectedPackets: packets.length, policy: null, automaticEligibilityEnabled: false, childCounts: "FULL_SOURCE_PROOF_NOT_CLOSED_ON_PARTIAL_TARGET" } };
+    return { packets, summary: { ...full.summary, selectedSubjects: prior.size, selectedPackets: packets.length, policy: null, automaticEligibilityEnabled: false,
+      childCounts: prior.size === raw.length ? "FULL_SOURCE_PROOF_PENDING_TARGET_CLOSURE" : "FULL_SOURCE_PROOF_NOT_CLOSED_ON_PARTIAL_TARGET" } };
 }
 export function sourceAccountPlan(raw, users, modules, sourceRef, games) {
     if (!/^[1-9][0-9]*$/.test(raw.id ?? ""))

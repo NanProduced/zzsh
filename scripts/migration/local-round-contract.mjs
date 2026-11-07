@@ -8,6 +8,62 @@ const requiredGrowthStages = ["growth-prepare", "growth-apply", "growth-readback
 const loadPhases = ["users", "accounts", "orders", "invitationFacts", "financeHistory", "financeEmptyCoverage", "guaranteeHistory", "continuationEvidence", "liabilityDuties", "completedCommissions", "accountDisplay", "storedOpening", "skinHoldings"];
 const knownLoadStatuses = new Set(["LOCAL_DATASET_CORE_AND_FINANCIAL_DOMAINS_COMMITTED_REVIEW_REQUIRED", "LOCAL_DATASET_DISPLAY_ENRICHMENT_COMMITTED_REVIEW_REQUIRED", "LOCAL_DATASET_STORED_OPENINGS_COMMITTED_REVIEW_REQUIRED", "LOCAL_DATASET_SKIN_HOLDINGS_COMMITTED_REVIEW_REQUIRED", "FAILED_ROLLED_BACK"]);
 
+/** Whole-user migrations must close child sets; scenario subsets intentionally cannot. */
+export function requiresInvitationCountClosure(manifest) {
+  if (!["SELECTED_BUSINESS_SCOPE", "FULL_CAPTURED_SOURCE"].includes(manifest?.population?.mode)) return false;
+  const users = manifest.domains?.users, facts = manifest.invitationFacts;
+  const packetRows = manifest.files?.["invitation-facts"]?.rows ?? 0;
+  if (!users || !facts || ![users.source, users.ready, users.isolated, facts.subjects, facts.codes,
+    facts.selectedSubjects, facts.packets, facts.selectedPackets, packetRows].every(n => Number.isSafeInteger(n) && n >= 0)
+    || users.source !== users.ready || users.isolated !== 0 || facts.subjects !== users.source
+    || facts.codes !== users.source || facts.selectedSubjects !== users.source
+    || facts.selectedPackets !== facts.packets || packetRows !== facts.selectedPackets
+    || facts.financialEffects !== false || facts.policy !== null) throw new Error("INVITATION_FULL_USER_SCOPE_UNPROVEN");
+  return true;
+}
+
+/** Check the exact packet population before any target transaction begins. */
+export function assertInvitationCountPackets(manifest, packets, invitation) {
+  if (!requiresInvitationCountClosure(manifest)) return false;
+  if (!Array.isArray(packets) || packets.length !== manifest.invitationFacts.selectedPackets
+    || !invitation || typeof invitation.prepareLegacyInvitationFacts !== "function" || typeof invitation.invitationFactHash !== "function")
+    throw new Error("INVITATION_PACKET_POPULATION_UNPROVEN");
+  const users = new Set(), legacyIds = [], codes = new Set(), codeFacts = new Map(), sourceHashes = new Set(); let source, qualifications = 0;
+  for (const packet of packets) {
+    if (!packet?.input || packet.input.policy !== null) throw new Error("INVITATION_PACKET_BINDING_INVALID");
+    const planned = invitation.prepareLegacyInvitationFacts(packet.input, packet.bodyDigest);
+    if (planned.key !== packet.key || planned.relations.length !== packet.relations
+      || packet.input.source.receiptSha256 !== manifest.sourceReceiptSha256
+      || packet.input.source.files.users.rows !== manifest.domains.users.source) throw new Error("INVITATION_PACKET_BINDING_INVALID");
+    source = packet.input.source; sourceHashes.add(invitation.invitationFactHash(source));
+    for (const fact of packet.input.subjects) {
+      if (users.has(fact.userId)) throw new Error("INVITATION_DUPLICATE_SUBJECT");
+      const code=fact.codeSource.code.toUpperCase();
+      if(codes.has(code))throw new Error("INVITATION_DUPLICATE_CODE");
+      users.add(fact.userId);legacyIds.push(fact.legacyId);codes.add(code);codeFacts.set(fact.legacyId,[code,invitation.invitationFactHash(fact.codeSource)]);
+      if(fact.qualificationSource!==null)qualifications++;
+    }
+  }
+  legacyIds.sort();
+  if (users.size !== manifest.domains.users.source || (users.size > 0 && (sourceHashes.size !== 1
+    || qualifications!==source.files.qualification.rows
+    || invitation.invitationFactHash(legacyIds) !== source.subjectSetDigest
+    || invitation.invitationFactHash(legacyIds.map(id=>[id,...codeFacts.get(id)])) !== source.codeSetDigest)))
+    throw new Error("INVITATION_PACKET_POPULATION_UNPROVEN");
+  return true;
+}
+
+export function assessInvitationChildSet(fact, actualByType, hash) {
+  const types = ["INVITER", "DISTRIBUTION_LEADER"];
+  let complete = true, matches = true;
+  for (const type of types) {
+    const expected = fact.children[type], actual = actualByType[type] ?? [];
+    if (expected.sourceCount !== expected.knownCount) complete = false;
+    if (expected.knownCount !== actual.length || expected.setDigest !== hash(actual)) matches = false;
+  }
+  return { knowledge: complete ? "KNOWN" : "UNKNOWN", matches };
+}
+
 /** Growth cannot start until the reviewed, immutable old rule sources are available. */
 export function assertReviewedGrowthRuleFiles(files,{root=resolve("E:/zzsh/analysis"),read=readFileSync,stat=lstatSync}={}) {
   assert(files&&typeof files==="object"&&!Array.isArray(files),"REVIEWED_OLD_RULE_FILES_REQUIRED");
@@ -169,6 +225,9 @@ export function assertRoundBootstrap(input, actorProof, evidence) {
 /** Offline assessment: historical artifacts prove their recorded run, not current target state. */
 export function assessRoundEvidence({ input, inputSha256, actorProof, receipt, checkpoint, readback, expected, growth, checkpointInput = input, checkpointActorProof = actorProof, requireStageAcks = true, requireReadback = true, requireGrowth = true }) {
   const issues = [], target = input.target;
+  let invitationClosure = false;
+  try { invitationClosure = requiresInvitationCountClosure(expected?.dataset); }
+  catch { issues.push("ROUND_INVITATION_SCOPE_UNPROVEN"); }
   const sameTarget = value => value && String(value.oid) === target.oid && value.nonce === target.nonce
     && (!target.instance || JSON.stringify(value.instance ?? null) === JSON.stringify(target.instance));
   if (!receipt || receipt.schema !== "zzsh.local-round-receipt.v1" || receipt.inputSha256 !== inputSha256
@@ -214,6 +273,11 @@ export function assessRoundEvidence({ input, inputSha256, actorProof, receipt, c
       if (phase === "guaranteeHistory" && !value && excludedGuarantee) continue;
       if (!value?.complete || value.quarantined !== 0 || !Number.isSafeInteger(value.nextIndex)) issues.push("ROUND_PHASE_INCOMPLETE:" + phase);
     }
+    if(invitationClosure){
+      const phase=checkpoint.phases?.invitationCounts, expectedPackets=expected.dataset.invitationFacts.selectedPackets;
+      if(!phase?.complete || phase.quarantined!==0 || phase.nextIndex!==expectedPackets
+        || checkpoint.phases?.invitationFacts?.nextIndex!==expectedPackets) issues.push("ROUND_INVITATION_COUNT_CLOSURE_INCOMPLETE");
+    }
     const counts = { users: expected?.dataset?.domains?.users?.ready, accounts: expected?.dataset?.domains?.accounts?.ready,
       orders: expected?.dataset?.domains?.orders?.ready, continuationEvidence: expected?.dataset?.domains?.continuations?.parameterComplete,
       accountDisplay: expected?.display?.rows, storedOpening: expected?.openings?.stats?.candidate, skinHoldings: checkpoint.skinHoldingsPreparation?.ready };
@@ -226,6 +290,13 @@ export function assessRoundEvidence({ input, inputSha256, actorProof, receipt, c
     || readback.status !== "CORE_SOURCE_TARGET_EXACT_READBACK_PASSED" || readback.differenceCount !== 0
     || readback.targetWrites !== 0 || !readback.rollbackConfirmed || !readback.lockReleased || !readback.connectionsClosed)) issues.push("ROUND_DATASET_READBACK_UNCONFIRMED");
   else if (requireReadback) {
+    if(invitationClosure){
+      const closure=readback.invitationFacts?.childCountClosure, facts=expected.dataset.invitationFacts;
+      if(closure?.status!=="VERIFIED" || closure.packets!==facts.selectedPackets || closure.auditsMatched!==facts.selectedPackets
+        || closure.subjects!==facts.subjects || closure.matched!==facts.subjects
+        || !Number.isSafeInteger(closure.known) || !Number.isSafeInteger(closure.unknown) || closure.known+closure.unknown!==facts.subjects)
+        issues.push("ROUND_INVITATION_COUNT_READBACK_UNCONFIRMED");
+    }
     for (const domain of ["users", "accounts", "orders"]) if (!Number.isSafeInteger(expected?.dataset?.domains?.[domain]?.ready) || readback.domains?.[domain]?.expected !== expected.dataset.domains[domain].ready) issues.push("ROUND_READBACK_COUNT_DRIFT:" + domain);
     for (const [domain, count] of Object.entries({ display: expected?.display?.rows, openings: expected?.openings?.stats?.candidate,
       holdings: checkpoint?.skinHoldingsPreparation?.ready, paths: expected?.paths?.accounts })) {

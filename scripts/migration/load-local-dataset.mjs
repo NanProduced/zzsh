@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import { isStrictRoundReservation, matchesLoadReservation, strictRoundReservation, writeLoadCheckpoint } from "./local-load-checkpoint.mjs";
 import { assertFullExecutionAdmitted } from "./full-source-scope.mjs";
+import { assertInvitationCountPackets, requiresInvitationCountClosure } from "./local-round-contract.mjs";
 import { advisoryLockSql, assertLiveTarget, loadRegisteredTarget, maintenanceConnection, targetConnection, targetIdentityQuery } from "./local-target-registry.mjs";
 const require = createRequire(import.meta.url), { Client, Pool } = require("pg");
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
@@ -75,6 +76,14 @@ for (const [name, file] of Object.entries(manifest.files)) {
 }
 const api = resolve(option("--api-dist") ?? join(ROOT, "apps/api/dist/src")), mod = name => require(join(api, name + ".js"));
 const canonical = mod("supply/content-hash").canonicalize;
+let invitationPackets;
+if (execute && !["--enrich-display", "--import-openings", "--enrich-holdings", "--contact-append", "--legacy-number-only", "--core-only"].some(flag => args.includes(flag))
+    && requiresInvitationCountClosure(manifest)) {
+    invitationPackets = [];
+    const file = manifest.files["invitation-facts"];
+    if (file) for await (const packet of readRows(join(dataset, file.file))) invitationPackets.push(packet);
+    assertInvitationCountPackets(manifest, invitationPackets, mod("finance/legacy-invitation-facts"));
+}
 const actor = { id: option("--actor-id"), userId: option("--actor-id"), realm: "admin", sessionId: option("--session-id"), requestId: "core-legacy-dataset-" + expectedOid };
 if (!actor.id || !actor.sessionId)
     throw new Error("EXISTING_MAINTENANCE_ACTOR_REQUIRED");
@@ -213,7 +222,7 @@ async function checkpointBatch(domain, batch, start, body, beforeBatch, batchBod
             }
             catch (error) {
                 // Each item in this phase contains an entire coverage chunk.
-                if (contactAppend || numberOnly || domain === "financeEmptyCoverage") throw error;
+                if (contactAppend || numberOnly || ["financeEmptyCoverage", "invitationCounts"].includes(domain)) throw error;
                 if (error?.status !== 400 && error?.status !== 409)
                     throw error;
                 await client.query("ROLLBACK TO SAVEPOINT source_row");
@@ -439,7 +448,7 @@ try {
                 state.status="LOCAL_DATASET_CORE_ONLY_COMMITTED_FINANCE_NOT_RUN";
             }else{
                 const { applyFinancialDomains } = await import("./local-target-finance.mjs");
-                await applyFinancialDomains({ client, actor, mod, manifest, state, output, domainFile, readRows, runItems, runBatches, save, event, targetPort: registered.port ?? registered.instance?.port ?? null, apiDist:api,fundsSource:fundsSourceBinding,refundAttemptsSource:refundAttemptsBinding });
+                await applyFinancialDomains({ client, actor, mod, manifest, state, output, domainFile, readRows, runItems, runBatches, save, event, invitationPackets, targetPort: registered.port ?? registered.instance?.port ?? null, apiDist:api,fundsSource:fundsSourceBinding,refundAttemptsSource:refundAttemptsBinding });
                 state.status = "LOCAL_DATASET_CORE_AND_FINANCIAL_DOMAINS_COMMITTED_REVIEW_REQUIRED";
             }
         }

@@ -2,6 +2,7 @@ import {assertRebuiltEmptyCoverageChunk,assertRebuiltEmptyCoverageManifest,conti
 import { advisoryLockSql, assertLiveTarget, assertReadbackTarget, loadRegisteredTarget, maintenanceConnection, targetConnection, targetIdentityQuery } from "./local-target-registry.mjs";
 import { compareKeySets } from "./local-key-set.mjs";
 import { classifyLegacyRegistrationTime, compareLegacyRegistrationFact, matchesLegacyAccountMetricAudit, legacyAccountCaptureProof, matchesLegacyAccountCapture, legacyOrderCaptureProof, matchesLegacyOrderCapture } from "./local-source-adapter.mjs";
+import { assessInvitationChildSet, requiresInvitationCountClosure } from "./local-round-contract.mjs";
 import { createHash } from "node:crypto";
 import { createReadStream, readFileSync, writeFileSync, existsSync, lstatSync } from "node:fs";
 import { createInterface } from "node:readline";
@@ -298,9 +299,17 @@ try {
     if((actual?.count??0)!==0)difference("guaranteeHistory","TABLE","RETIRED_LISTING_DEPOSIT_PRESENT_IN_TARGET");
   }
   if(state.phases.invitationFacts?.complete){
-    const module=mod("finance/legacy-invitation-facts");let expectedSubjects=0,matchedSubjects=0,expectedRelations=0,matchedRelations=0,childProofAudits=0;
+    const module=mod("finance/legacy-invitation-facts"), closureRequired=requiresInvitationCountClosure(manifest);
+    let expectedSubjects=0,matchedSubjects=0,expectedRelations=0,matchedRelations=0,childProofAudits=0;
+    const closure={status:closureRequired?"VERIFYING":"NOT_APPLICABLE_PARTIAL_SOURCE",packets:0,auditsMatched:0,subjects:0,known:0,unknown:0,matched:0};
+    if(closureRequired && (state.phases.invitationCounts?.complete!==true || state.phases.invitationCounts.quarantined!==0
+      || state.phases.invitationCounts.nextIndex!==manifest.invitationFacts.selectedPackets)) difference("invitationCounts","PHASE","COUNT_CLOSURE_NOT_COMMITTED");
     const audits = new Map((await query("SELECT object_id,details FROM zzsh_iam.audit_event WHERE action='distribution.legacy_facts.imported' AND outcome='SUCCESS'")).rows.map(r => [r.object_id, r.details]));
-    await batched("invitation-facts",async packets=>{for(const packet of packets){
+    const countAudits=new Map();
+    if(closureRequired)for(const row of (await query("SELECT object_id,details FROM zzsh_iam.audit_event WHERE action='distribution.legacy_facts.counts_closed' AND outcome='SUCCESS'")).rows){
+      const values=countAudits.get(row.object_id)??[];values.push(row.details);countAudits.set(row.object_id,values);
+    }
+    if(manifest.files["invitation-facts"]) await batched("invitation-facts",async packets=>{for(const packet of packets){
       const plan=module.prepareLegacyInvitationFacts(packet.input,packet.bodyDigest),ids=plan.subjects.map(p=>p.userId);
       const audit = audits.get(plan.bodyDigest);
       if (!audit || canonical(audit.facts) !== canonical(packet.input.subjects) || canonical(audit.source) !== canonical(packet.input.source) || audit.financialEffects !== false) difference("invitationFacts", plan.bodyDigest, "ORIGINAL_CHILD_DENOMINATOR_AUDIT_DRIFT");
@@ -309,7 +318,30 @@ try {
       for(const expected of plan.subjects){expectedSubjects++;const found=subjects.get(expected.userId);if(!found||found.source_type!=='LEGACY_MYSQL'||found.source_ref!==expected.sourceRef||found.source_digest!==expected.sourceDigest||found.eligibility!==expected.eligibility||found.commission_frozen!==expected.commissionFrozen||found.policy_version_id!==null||found.code_id!==expected.codeId||found.display_code!==expected.fact.codeSource.code||found.match_code!==expected.fact.codeSource.code.toUpperCase()||found.code_source_type!=='LEGACY_MYSQL'||found.code_source_id!==expected.fact.legacyId||found.code_digest!==expected.codeDigest)difference("invitationFacts",expected.userId,"IMMUTABLE_INVITATION_FACT_CODE_OR_ELIGIBILITY_DRIFT");else matchedSubjects++;}
       const relations=new Map((await query(`SELECT * FROM zzsh_order.invitation_relation WHERE child_user_id=ANY($1::text[]) AND source_type='LEGACY_MYSQL'`,[ids])).rows.map(r=>[r.id,r]));
       for(const expected of plan.relations){expectedRelations++;const found=relations.get(expected.id);if(!found||found.type!==expected.type||found.child_user_id!==expected.childUserId||found.parent_user_id!==expected.parentUserId||found.policy_version_id!==null||found.source_ref!==expected.sourceRef||found.source_digest!==expected.sourceDigest)difference("invitationFacts",expected.id,"ORIGINAL_PARENT_RELATION_DRIFT");else matchedRelations++;}
-    }});report.invitationFacts={expectedSubjects,matchedSubjects,expectedRelations,matchedRelations,childProofAudits,policy:null,childCountClosure:"FULL_SOURCE_PROOF_RETAINED_NOT_FORCED_ON_PARTIAL_TARGET"};
+      if(closureRequired){
+        closure.packets++;
+        const childRows=(await query(`SELECT id,type,parent_user_id,source_digest FROM zzsh_order.invitation_relation
+          WHERE parent_user_id=ANY($1::text[]) AND source_type='LEGACY_MYSQL' ORDER BY id COLLATE "C"`,[ids])).rows;
+        const children=new Map();for(const row of childRows){const key=row.parent_user_id+"|"+row.type,list=children.get(key)??[];list.push([row.id,row.source_digest]);children.set(key,list);}
+        let known=0,unknown=0;
+        for(const fact of packet.input.subjects){
+          const checked=assessInvitationChildSet(fact,{INVITER:children.get(fact.userId+"|INVITER"),DISTRIBUTION_LEADER:children.get(fact.userId+"|DISTRIBUTION_LEADER")},module.invitationFactHash);
+          closure.subjects++;if(checked.knowledge==="KNOWN")known++;else unknown++;
+          if(!checked.matches || subjects.get(fact.userId)?.invitees_knowledge!==checked.knowledge) difference("invitationCounts",fact.userId,"ORIGINAL_CHILD_SET_OR_KNOWLEDGE_DRIFT");
+          else closure.matched++;
+        }
+        closure.known+=known;closure.unknown+=unknown;
+        const expected={bodyDigest:plan.bodyDigest,sourceDigest:module.invitationFactHash(packet.input.source),subjects:ids.length,known,unknown,financialEffects:false};
+        const evidence=countAudits.get(plan.bodyDigest)??[];
+        if(evidence.length!==1||canonical(evidence[0])!==canonical(expected))difference("invitationCounts",plan.bodyDigest,"COUNT_CLOSURE_AUDIT_DRIFT");
+        else closure.auditsMatched++;
+      }
+    }});
+    if(closureRequired){
+      if(closure.packets!==manifest.invitationFacts.selectedPackets||closure.subjects!==manifest.domains.users.source)difference("invitationCounts","POPULATION","COUNT_CLOSURE_DENOMINATOR_DRIFT");
+      closure.status=closure.packets===closure.auditsMatched&&closure.subjects===closure.matched&&closure.subjects===manifest.domains.users.source?"VERIFIED":"MISMATCH";
+    }
+    report.invitationFacts={expectedSubjects,matchedSubjects,expectedRelations,matchedRelations,childProofAudits,policy:null,childCountClosure:closure};
   }
   const phaseDirectory = dirname(checkpoint);
   const reviewedEffects = [];

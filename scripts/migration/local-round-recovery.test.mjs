@@ -9,7 +9,7 @@ import test from "node:test";
 import { assertSameDirectoryResumeSafe, isRoundReceiptPath, isStrictRoundReservation, matchesLoadReservation, strictRoundReservation } from "./local-load-checkpoint.mjs";
 import { advisoryLockSql, assertLiveTarget, maintenanceConnection, normalizeRegisteredTarget, targetConnection, targetIdentityQuery } from "./local-target-registry.mjs";
 import { assertRoundPopulationBinding, assertFullExecutionAdmitted } from "./full-source-scope.mjs";
-import { assertRoundBootstrap, assessRoundEvidence, assertGrowthPlanEvidence, assertGrowthPackages, assertResumeLineage, verifyResumeSchema, assessResumeStages, assertNoWriteRetryLineage } from "./local-round-contract.mjs";
+import { assertRoundBootstrap, assessRoundEvidence, assertGrowthPlanEvidence, assertGrowthPackages, assertResumeLineage, verifyResumeSchema, assessResumeStages, assertNoWriteRetryLineage, assertInvitationCountPackets, requiresInvitationCountClosure } from "./local-round-contract.mjs";
 
 const sha = bytes => createHash("sha256").update(bytes).digest("hex");
 const script = name => readFileSync(new URL(name, import.meta.url), "utf8")
@@ -89,7 +89,7 @@ async function load({ failure, strict = true, reservation = {}, previous, recove
   };
   const context = {
     ...path, createHash, isStrictRoundReservation, matchesLoadReservation, strictRoundReservation, process: proc, moduleUrl: "fixture", fileURLToPath: () => "C:\\project\\scripts\\migration\\load-local-dataset.mjs",
-    advisoryLockSql, assertLiveTarget, maintenanceConnection, targetConnection, targetIdentityQuery, assertFullExecutionAdmitted,
+    advisoryLockSql, assertLiveTarget, maintenanceConnection, targetConnection, targetIdentityQuery, assertFullExecutionAdmitted, assertInvitationCountPackets, requiresInvitationCountClosure,
     // The loader reads its registry through this sandbox filesystem, not the real disk.
     loadRegisteredTarget: credentialPath => { const file = path.join(path.dirname(credentialPath), "resource.json"); return normalizeRegisteredTarget(JSON.parse(get(file)), file); },    financialFixture: () => ({ applyFinancialDomains: ctx => ctx.runItems("financeEmptyCoverage", failure === "empty-coverage" ? [{ sourceId: "empty-original" }] : Array.from({length:5},(_,i)=>({sourceId:`chunk-${i}`})), row => { if(failure === "empty-coverage" || (failure === "empty-coverage-batch" && row.sourceId === "chunk-1")) throw Object.assign(Error("coverage rejected"), { status: 409 }); return {replayed:false}; }, failure === "empty-coverage" ? 1 : 5) }),
     console: { log: message => logs.push(JSON.parse(message)), error: message => logs.push(JSON.parse(message)) },
@@ -400,7 +400,7 @@ async function round({ reservationStatus = strictRoundReservation, action = "exe
     assertSameDirectoryResumeSafe,
     inspectRoundResumeOutput: directory => directory === oldOut && oldReceiptRef ? { sequence: 1, previousReceipt: oldReceiptRef } : directory === out && sameOutputReceipt ? { sequence: 1, previousReceipt: sameOutputReceipt, stageNames: sameOutputStages.map(stage => stage.name) } : null,
     reserveRoundResumeOutput: directory => { const attempt = path.join(directory, "round-attempt-000001"); directories.push(attempt); return attempt; },
-    assertRoundBootstrap, assessRoundEvidence, assertGrowthPlanEvidence, assertGrowthPackages, assertResumeLineage, verifyResumeSchema, assessResumeStages, assertNoWriteRetryLineage, assertRoundPopulationBinding, assertFullExecutionAdmitted, process: proc, moduleUrl: "file:///C:/project/scripts/migration/run-local-round.mjs",
+    assertRoundBootstrap, assessRoundEvidence, assertGrowthPlanEvidence, assertGrowthPackages, assertResumeLineage, verifyResumeSchema, assessResumeStages, assertNoWriteRetryLineage, assertRoundPopulationBinding, assertFullExecutionAdmitted, requiresInvitationCountClosure, process: proc, moduleUrl: "file:///C:/project/scripts/migration/run-local-round.mjs",
     targetConnection, loadRegisteredTarget: credentialPath => { const file = path.join(path.dirname(credentialPath), "resource.json"); return normalizeRegisteredTarget(JSON.parse(String(files.get(file))), file); },
     inspectRoundDependencyLayout: () => ({ sourceRoot: "C:\\fixture", scriptDir: "C:\\fixture\\scripts\\migration", moduleDirs: ["C:\\fixture\\node_modules"] }),
     assertRoundDependencyProof: () => { if (dependencyDrift === "proof") throw Error("ROUND_DEPENDENCY_PROOF_CHANGED"); },
@@ -671,6 +671,22 @@ test("full completion requires actual stage acknowledgements, target checkpoints
     assert.equal(result.status, "INCOMPLETE", issue);
     assert.ok(result.issues.includes(issue), `${issue}: ${result.issues}`);
   }
+});
+
+test("whole-user migration cannot report completion without invitation count closure and independent readback",()=>{
+  const data=completedEvidence(),dataset=data.expected.dataset;
+  dataset.population={mode:"SELECTED_BUSINESS_SCOPE"};dataset.domains.users={source:2,ready:2,isolated:0};
+  dataset.invitationFacts={subjects:2,codes:2,selectedSubjects:2,packets:2,selectedPackets:2,policy:null,financialEffects:false};
+  dataset.files={"invitation-facts":{rows:2}};
+  data.checkpoint.phases.invitationCounts={complete:true,quarantined:0,nextIndex:2};
+  data.readback.invitationFacts={childCountClosure:{status:"VERIFIED",packets:2,auditsMatched:2,subjects:2,known:1,unknown:1,matched:2}};
+  assert.equal(assessRoundEvidence(data).status,"COMPLETE");
+  const missing=structuredClone(data);delete missing.checkpoint.phases.invitationCounts;
+  assert(assessRoundEvidence(missing).issues.includes("ROUND_INVITATION_COUNT_CLOSURE_INCOMPLETE"));
+  const unverified=structuredClone(data);unverified.readback.invitationFacts.childCountClosure.auditsMatched=1;
+  assert(assessRoundEvidence(unverified).issues.includes("ROUND_INVITATION_COUNT_READBACK_UNCONFIRMED"));
+  const missingUsers=structuredClone(data);missingUsers.expected.dataset.domains.users.ready=1;
+  assert(assessRoundEvidence(missingUsers).issues.includes("ROUND_INVITATION_SCOPE_UNPROVEN"));
 });
 
 test("R07 accepts an excluded guarantee only with an empty source plan and independent target proof", () => {

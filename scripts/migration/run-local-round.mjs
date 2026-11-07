@@ -7,7 +7,7 @@ import { createRequire } from "node:module";
 import { spawn, spawnSync } from "node:child_process";
 import { loadRegisteredTarget, targetConnection } from "./local-target-registry.mjs";
 import { assertSameDirectoryResumeSafe, inspectRoundResumeOutput, isRoundReceiptPath, isStrictRoundReservation, matchesLoadReservation, reserveRoundResumeOutput, strictRoundReservation, writeLoadCheckpoint } from "./local-load-checkpoint.mjs";
-import { assertRoundBootstrap, assessRoundEvidence, assertGrowthPlanEvidence, assertGrowthPackages, assertResumeLineage, verifyResumeSchema, assessResumeStages, assertNoWriteRetryLineage, assertReadbackRecoveryOverlay, assertReviewedGrowthRuleFiles, assertGrowthRuleRetry } from "./local-round-contract.mjs";
+import { assertRoundBootstrap, assessRoundEvidence, assertGrowthPlanEvidence, assertGrowthPackages, assertResumeLineage, verifyResumeSchema, assessResumeStages, assertNoWriteRetryLineage, assertReadbackRecoveryOverlay, assertReviewedGrowthRuleFiles, assertGrowthRuleRetry, requiresInvitationCountClosure } from "./local-round-contract.mjs";
 import { inspectRoundDependencyLayout, probeRoundDependencies, assertRoundDependencyProof, assertBoundRunnerScripts } from "./local-round-dependencies.mjs";
 import { assertFullExecutionAdmitted, assertRoundPopulationBinding } from "./full-source-scope.mjs";
 
@@ -452,8 +452,9 @@ try {
   if (lineage) await resumeSchemaPreflight();
   if (!lineage) {
   await step("core-and-funds", load, [...write, ...bind("funds-source", input.funds), ...bind("refund-attempts", input.refundAttempts)], () => closedPhases(
-    ["users", "accounts", "orders", "invitationFacts", "financeHistory", "financeEmptyCoverage", "continuationEvidence", "liabilityDuties", "completedCommissions"],
-    { users: m.domains.users.ready, accounts: m.domains.accounts.ready, orders: m.domains.orders.ready, continuationEvidence: m.domains.continuations.parameterComplete },
+    ["users", "accounts", "orders", "invitationFacts", ...(requiresInvitationCountClosure(m)?["invitationCounts"]:[]), "financeHistory", "financeEmptyCoverage", "continuationEvidence", "liabilityDuties", "completedCommissions"],
+    { users: m.domains.users.ready, accounts: m.domains.accounts.ready, orders: m.domains.orders.ready, continuationEvidence: m.domains.continuations.parameterComplete,
+      ...(requiresInvitationCountClosure(m)?{invitationFacts:m.invitationFacts.selectedPackets,invitationCounts:m.invitationFacts.selectedPackets}:{}) },
   ));
   await step("display", load, [...write, "--enrich-display", ...bind("display-plan", input.display)], () => closedPhases(["accountDisplay"], { accountDisplay: display.rows }));
   await step("opening", load, [...write, "--import-openings", ...bind("opening-proof", input.openings)], () => closedPhases(["storedOpening"], { storedOpening: openings.stats.candidate }));
