@@ -1411,7 +1411,7 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
             intentKey: "",
             uploadKey: "",
           })));
-          if (editRequested && loaded.version?.reviewState !== "SUBMITTED") setNotice("点击“开始修改”后，会按当前版本创建可编辑草稿。");
+          if (editRequested && loaded.version?.reviewState !== "SUBMITTED") setNotice("点击“开始修改”后会创建可编辑草稿；如果账号已上架，修改期间将暂停接单。");
         } else if (gameCodeProp) {
           const requested = result.games.find((game) => game.code === gameCodeProp) ?? null;
           selected = requested?.id ?? "";
@@ -2857,7 +2857,7 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
   const modeRange = ratioRangeText(rentalModes?.[rentalMode]);
   const ratioInlineProblem = ratioInput.trim() === "" ? null : ratioEntryProblem(rentalMode, rentalModes?.[rentalMode], ratioInput);
   const fastReady = optionsAvailability === "ready" && options?.pricingSchema === "haff-ratio-v2" && rentalModes?.fast?.enabled === true;
-  const visibleBlockers = [...new Set(blockers)].filter((code) => code !== "PUBLICATION_REQUIRED" && code !== "CONFIRMATION_OR_MEDIA_REQUIRED");
+  const visibleBlockers = [...new Set(blockers)].filter((code) => code !== "PUBLICATION_REQUIRED" && code !== "CONFIRMATION_OR_MEDIA_REQUIRED" && !(code === "ACCEPTANCE_REQUIRED" && effectiveQuote));
   /** 门禁前置：进入页面就按「用户能修 / 系统处理中」分组展示，并据此禁用上架按钮。 */
   const userBlockers = visibleBlockers.filter((code) => supplyBlockerGroup(code) === "USER");
   const systemBlockers = visibleBlockers.filter((code) => supplyBlockerGroup(code) === "SYSTEM");
@@ -3091,7 +3091,7 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
       noticeManualRef.current = false;
       return noticeTriggerRef.current;
     }
-    return null;
+    return document.querySelector<HTMLElement>(".publish-outline a");
   };
   const agreementConsent = <div className="publish-consent-row publish-agreement-acceptance">
     <label className="supply-check"><input type="checkbox" checked={agreementChecked} disabled={formDisabled || !agreement} aria-label="我已阅读并同意出租协议" onChange={(event) => setAgreementChecked(event.target.checked)} /><span>我已阅读并同意</span></label>
@@ -3649,7 +3649,7 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
           </button>
         </div>
         <div className="publish-rail-scroll" id="publish-quote-body">
-        {published ? <div className="publish-success" role="status"><Check size={20} aria-hidden="true" /><strong>已上架</strong><p>公众列表、详情与“我的上架账号”显示的是同一份发布资料。</p><div className="supply-inline-actions"><Link className="button primary" href={`/accounts/${encodeURIComponent(accountId ?? "")}`}>查看公开详情</Link><Link className="button secondary" href="/account?view=accounts">我的上架账号</Link>{readOnly ? <button type="button" className="button quiet" disabled={Boolean(busy)} onClick={() => void beginEditing()}>编辑资料</button> : null}</div></div> : <>
+        {published ? <div className="publish-success" role="status"><Check size={20} aria-hidden="true" /><strong>已上架</strong><p>公众列表、详情与“我的上架账号”显示的是同一份发布资料。</p>{readOnly ? <p>开始编辑后，账号将暂停接单；完成修改并重新发布后，请核对接单状态。</p> : null}<div className="supply-inline-actions"><Link className="button primary" href={`/accounts/${encodeURIComponent(accountId ?? "")}`}>查看公开详情</Link><Link className="button secondary" href="/account?view=accounts">我的上架账号</Link>{readOnly ? <button type="button" className="button quiet" disabled={Boolean(busy)} onClick={() => void beginEditing()}>编辑资料</button> : null}</div></div> : <>
           {netEstimate ? <div className="publish-income-total"><span>预计所得</span><output aria-label="预计净所得">{netEstimate.ownerNet.amount} 元</output></div> : effectiveQuote ? (
             <div className="publish-income-total">
               <span>预计收入（扣费前）</span>
@@ -3751,7 +3751,9 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
             </div> : <div className="publish-rail-actions">
               {agreementConsent}
               {payoutConsent}
-              <button type="button" className="button primary" disabled={primaryDisabled} title={blockerHint} onClick={() => void primaryAction()}>{primaryLabel}</button>
+              {visibleBlockers.includes("QUOTE_REQUIRED")
+                ? <button type="button" className="button primary" disabled={formDisabled} onClick={() => void quote()}>{busy === "quote" ? "核对中…" : "核对报价"}</button>
+                : <button type="button" className="button primary" disabled={primaryDisabled} title={blockerHint} onClick={() => void primaryAction()}>{primaryLabel}</button>}
               <button type="button" className="button secondary" disabled={formDisabled} onClick={() => void save()}>{busy === "save" ? "保存中…" : "保存草稿"}</button>
             </div>}
           </>}

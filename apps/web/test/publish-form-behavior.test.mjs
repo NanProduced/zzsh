@@ -1446,7 +1446,7 @@ test("region popover exposes an accessible name and keeps its search focused", a
   } finally { await p.close(); }
 });
 
-test("notice returns focus to the first entry field and to its trigger when reopened", async () => {
+test("notice moves focus to the first step and returns to its trigger when reopened", async () => {
   const p = await probe({ readNotice: false });
   try {
     await p.render();
@@ -1455,7 +1455,7 @@ test("notice returns focus to the first entry field and to its trigger when reop
     assert.equal(confirm.disabled, false);
     await React.act(async () => confirm.click());
     assert.ok(await p.waitFor(() => !p.window.document.querySelector('[data-slot="dialog-content"]')));
-    assert.equal(p.window.document.activeElement, p.host.querySelector('#publish-secret-kd'));
+    assert.ok(p.window.document.activeElement === p.host.querySelector('.publish-outline a'), 'focus moves to the first step');
     const trigger = [...p.host.querySelectorAll('button')].find(button => button.textContent.includes('上架须知'));
     assert.ok(trigger);
     await React.act(async () => trigger.click());
@@ -1464,7 +1464,19 @@ test("notice returns focus to the first entry field and to its trigger when reop
     assert.equal(close.disabled, false);
     await React.act(async () => close.click());
     assert.ok(await p.waitFor(() => !p.window.document.querySelector('[data-slot="dialog-content"]')));
-    assert.equal(p.window.document.activeElement, trigger);
+    assert.ok(p.window.document.activeElement === trigger, 'focus returns to the notice trigger');
+  } finally { await p.close(); }
+});
+
+test("editing a published account explains that new orders pause", async () => {
+  const p = await probe({
+    accountId: "account_1", editRequested: true,
+    mine: () => supplyOf(declaration(), { quote: ownerQuote, reviewState: "PUBLISHED" }),
+  });
+  try {
+    await p.render();
+    assert.match(p.text(), /修改期间.*暂停接单|开始编辑后.*暂停接单/);
+    assert.equal(p.calls.some(call => ["createDraft", "saveDraft", "quote", "confirm"].includes(call.op)), false);
   } finally { await p.close(); }
 });
 
@@ -2759,6 +2771,62 @@ test('the publish group map is visible and provides a real focus-return target w
     assert.ok(target.getAttribute('href').startsWith('#publish-group-'));
     assert.equal(p.calls.some(call => ['saveDraft', 'quote', 'accept', 'submit'].includes(call.op)), false);
   } finally { await p.close(); }
+});
+
+test("unquoted draft can request a quote before the guarantee gate is resolved", async () => {
+  const declared = declaration({
+    inventory: [{ itemId: "item_haff", quantity: "60000000" }, { itemId: "item_round", quantity: "60" }],
+    termOptionCode: "legacy_daily_10m",
+  });
+  const blockers = ["QUOTE_REQUIRED", "PUBLISHER_BAIL_UNCONFIRMED"];
+  const p = await probe({
+    accountId: "account_1",
+    mine: () => ({ ...supplyOf(declared), blockers }),
+    saveDraft: body => ({ ...supplyOf(body), blockers }),
+    quote: () => ({ ...supplyOf(declared, { quote: ownerQuote }), blockers: ["PUBLISHER_BAIL_UNCONFIRMED"] }),
+  });
+  try {
+    await p.render();
+    const quoteButton = [...p.host.querySelectorAll('.publish-rail-footer button')].find(button => button.textContent === '核对报价');
+    assert.ok(quoteButton, 'the owner has an explicit way to generate the missing quote');
+    assert.equal(quoteButton.disabled, false);
+    await p.clickButton('核对报价');
+    assert.ok(await p.waitFor(() => p.calls.some(call => call.op === 'quote')));
+    assert.equal(p.calls.some(call => call.op === 'confirm'), false, 'quoting never publishes or accepts terms');
+    const publishButton = [...p.host.querySelectorAll('.publish-rail-footer button')].find(button => button.textContent === '确认上架');
+    assert.ok(publishButton);
+    assert.equal(publishButton.disabled, true, 'an unresolved guarantee still blocks publication after quoting');
+  } finally { await p.close(); }
+});
+
+test("quoted draft can accept its agreement while other blockers still prevent publication", async () => {
+  const declared = declaration({ inventory: [{ itemId: "item_haff", quantity: "60000000" }] });
+  const p = await probe({
+    accountId: "account_1",
+    mine: () => ({ ...supplyOf(declared, { quote: ownerQuote }), blockers: ["ACCEPTANCE_REQUIRED"] }),
+    confirm: action => supplyOf(declared, { quote: ownerQuote, reviewState: action === "submit" ? "PUBLISHED" : "DRAFT" }),
+  });
+  try {
+    await p.render();
+    const button = p.host.querySelector('.publish-confirm button.button.primary');
+    assert.equal(button.disabled, true, 'agreement must be explicitly selected');
+    await p.click('.publish-agreement-acceptance input');
+    assert.equal(button.disabled, false, 'the button itself accepts the required agreement');
+    await p.clickButton('确认上架');
+    assert.ok(await p.waitFor(() => p.calls.filter(call => call.op === 'confirm').length === 2));
+    assert.deepEqual(p.calls.filter(call => call.op === 'confirm').map(call => call.action), ['accept-rules', 'submit']);
+  } finally { await p.close(); }
+
+  const blocked = await probe({
+    accountId: "account_1",
+    mine: () => ({ ...supplyOf(declared, { quote: ownerQuote }), blockers: ["ACCEPTANCE_REQUIRED", "PUBLISHER_BAIL_UNCONFIRMED"] }),
+  });
+  try {
+    await blocked.render();
+    await blocked.click('.publish-agreement-acceptance input');
+    assert.equal(blocked.host.querySelector('.publish-confirm button.button.primary').disabled, true);
+    assert.equal(blocked.calls.some(call => call.op === 'confirm'), false);
+  } finally { await blocked.close(); }
 });
 
 test("publish blockers gate the button up front and split user-fixable from platform-side states", async () => {
