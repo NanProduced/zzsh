@@ -73,6 +73,10 @@ const admissionText=JSON.stringify({kind:'FORMAL_NATIVE_REFUND_SERVER_REVIEW',re
  for(const [name,mutation,code] of [
   ['active_lease',"UPDATE zzsh_order.channel_refund_intent SET lease_until=clock_timestamp()+interval '1 minute' WHERE id='native-review-intent'",'23514'],
   ['missing_submit',"DELETE FROM zzsh_order.joinpay_refund_attempt WHERE id='native-review-submit'",'23514'],
+  ['signed_review',`INSERT INTO zzsh_order.joinpay_refund_observation(id,intent_id,operation,profile_id,profile_canonical,profile_sha256,key_version_ref,
+    raw_body,raw_sha256,response_complete,http_status,received_bytes,transport_failure,event,schema_status,signature_status,binding_status,evidence_level,state_before,state_after,request_id)
+   VALUES('native-review-signed','native-review-intent','NOTIFY','synthetic-profile','{}',encode(sha256(convert_to('{}','UTF8')),'hex'),'synthetic-keyref',
+    convert_to('signed','UTF8'),encode(sha256(convert_to('signed','UTF8')),'hex'),true,NULL,6,NULL,'REVIEW','VALID','MATCH','MATCH','PROVIDER_RESPONSE','UNKNOWN','UNKNOWN','synthetic-observation')`,'23514'],
   ['out_of_scope',"UPDATE zzsh_iam.admin_security SET game_scope_mode='SELECTED_GAMES' WHERE admin_user_id='native-review-admin'",'42501'],
   ['denied_permission',"UPDATE zzsh_iam.admin_user_permission SET effect='DENY' WHERE admin_user_id='native-review-admin' AND permission_code='order.settlement.write'",'42501'],
   ['locked_session',"UPDATE zzsh_auth_admin.session SET locked=true WHERE id='native-review-session'",'42501'],

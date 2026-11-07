@@ -317,6 +317,10 @@ const pool=new Pool({host:'127.0.0.1',port:5432,database,user:'postgres',max:3,s
     await assert.rejects(resumeLegacyRefundReview(execution,created.body.intentId,resumeActor,resumeActor.requestId,'已核对渠道记录',authorize));
     await assert.rejects(resumeLegacyRefundReview(execution,created.body.intentId,resumeActor,resumeActor.requestId,'已核对渠道记录',async()=>{}),error=>error.status===403);
     await c.query('ROLLBACK TO SAVEPOINT denied_scope');
+    await c.query('SAVEPOINT reviewed_channel_result');
+    assert.equal((await receiveLegacyRefundNotification(execution,created.body.intentId,'good','synthetic-reviewed-result')).event,'REVIEW');
+    await assert.rejects(resumeLegacyRefundReview(execution,created.body.intentId,resumeActor,resumeActor.requestId,'已核对渠道记录',authorize),error=>error.status===409);
+    await c.query('ROLLBACK TO SAVEPOINT reviewed_channel_result');
     const resumed=await resumeLegacyRefundReview(execution,created.body.intentId,resumeActor,resumeActor.requestId,'已核对渠道记录',authorize);
     assert.equal(resumed.resumed,true);assert.equal(resumed.state,'UNKNOWN');
     assert.equal((await resumeLegacyRefundReview(execution,created.body.intentId,resumeActor,resumeActor.requestId,'已核对渠道记录',authorize)).resumed,false);

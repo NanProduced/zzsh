@@ -396,6 +396,8 @@ BEGIN
  END IF;
  IF i.terminal_evidence_id IS NOT NULL OR i.state IN('SUCCEEDED','FAILED') OR i.budget_disposition<>'ALLOCATED'
   OR i.lease_until IS NULL OR i.lease_until>clock_timestamp() OR NOT EXISTS(SELECT 1 FROM zzsh_order.legacy_refund_attempt WHERE intent_id=i.id AND operation='SUBMIT')
+  OR EXISTS(SELECT 1 FROM zzsh_order.legacy_refund_observation o WHERE o.intent_id=i.id AND o.event='REVIEW'
+    AND o.evidence_level='PROVIDER_RESPONSE' AND o.signature_status='MATCH' AND o.binding_status='MATCH')
  THEN RAISE EXCEPTION 'legacy refund original query cannot resume' USING ERRCODE='23514';END IF;
  resolution_value:='legacy_refund_review_'||replace(gen_random_uuid()::text,'-','');
  INSERT INTO zzsh_order.legacy_refund_review_resolution(id,intent_id,previous_revision,actor_id,session_id,request_id,reason)

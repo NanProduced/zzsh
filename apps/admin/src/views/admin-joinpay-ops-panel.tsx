@@ -150,7 +150,7 @@ function NativeRefundForm({ orderId, canWrite, basis, binding, onAttentionChange
         <small className="ml-2 text-xs text-muted-foreground">原责任 {cents(i.postingResponsibility.frozenCents)} · 已分配 {cents(i.postingResponsibility.allocatedCents)} · 尚未分配责任 {cents(i.postingResponsibility.remainingCents)} · 预算 {i.budgetDisposition}{i.latestObservation ? ` · 最近渠道观察 ${i.latestObservation.event}` : ""} · 银行到账未记录</small>
         {canWrite ? <Button size="sm" variant="secondary" disabled={busy} onClick={() => void query(i.intentId, i.requiresReview)}>按原号补查</Button> : null}
         {canWrite&&i.requiresReview&&!['SUCCEEDED','FAILED'].includes(i.state)?<Button size="sm" variant="secondary" disabled={busy} onClick={()=>setReview({intentId:i.intentId,reason:''})}>核对后恢复查询</Button>:null}
-        {review?.intentId===i.intentId?<div className="mt-2 space-y-2 rounded-md border border-border p-3"><p>先核对汇聚原退款。恢复后仅查询原单，不会重新发起退款。</p>
+        {review?.intentId===i.intentId?<div className="mt-2 space-y-2 rounded-md border border-border p-3"><p>先核对汇聚原退款。恢复后仅查询原单，不会重新发起退款；已有可核验的渠道结果时，请联系财务处理。</p>
           <label className="block space-y-1"><span>核对说明</span><Input aria-label="退款核对说明" value={review.reason} maxLength={200} disabled={busy} onChange={event=>setReview({intentId:i.intentId,reason:event.target.value})}/></label>
           <div className="flex gap-2"><Button size="sm" disabled={busy||review.reason.trim().length<3} onClick={()=>void resume()}>确认恢复查询</Button><Button size="sm" variant="secondary" disabled={busy} onClick={()=>setReview(null)}>取消</Button></div></div>:null}</li>)}</ul>
       : <p className="oc-fact-note">本单暂无退款申请。</p>}
