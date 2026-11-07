@@ -107,7 +107,8 @@ test('legacy refund progress must match the same order, duty, amount and verifie
 test('legacy refund review requires explicit amounts and distinguishes pending from channel success',async t=>{
  const w=storage(t),{createRoot}=require('react-dom/client'),host=document.createElement('div');document.body.append(host);const root=createRoot(host);
  t.after(async()=>React.act(async()=>root.unmount()));let sent;
- let basis={orderId,dutyId:'duty_1',headRevision:'2',dutyRevision:'1',dutyCents:'5000',paidCents:'10000',paymentOrderNo:'OLDPAY123',merchantNo:'12345',refundDueAt:'2026-11-01T00:00:00Z',canStart:true,receipt:null,current:null,progress:null};
+ let basis={orderId,dutyId:'duty_1',headRevision:'0',dutyRevision:'1',dutyCents:'5000',paidCents:'10000',paymentOrderNo:'OLDPAY123',merchantNo:'12345',refundDueAt:null,
+  historicalWaitUncertain:true,historicalHeld:true,historicalRefunds:[{number:'OLD-REFUND',amountCents:'2000',at:'2026-11-01T00:00:00Z'}],historicalRefundsMore:false,canStart:true,receipt:null,current:null,progress:null};
  let queries=0,submits=0,resumes=0,retries=0,resolutions=0;const {LegacyRefundReviewPanel}=load('apps/admin/src/views/legacy-refund-review-panel.tsx',{
   '../api':{friendlyError:e=>e.message,formatDate:x=>x},'../lib/legacy-continuation-client':{readLegacyAdminRefund:async()=>basis,queryLegacyAdminRefund:async id=>{assert.equal(id,'intent_1');queries++;return{kind:'OBSERVED'};},
    submitLegacyAdminRefund:async id=>{assert.equal(id,'intent_1');submits++;return{kind:'SKIPPED',reason:'NEW_REFUND_DISABLED'};},
@@ -123,8 +124,11 @@ test('legacy refund review requires explicit amounts and distinguishes pending f
  const inputs=host.querySelectorAll('input');
  await React.act(async()=>{for(const [i,value] of [[0,'20'],[1,'10'],[2,'汇聚后台已核对']]){Object.getOwnPropertyDescriptor(w.HTMLInputElement.prototype,'value').set.call(inputs[i],value);inputs[i].dispatchEvent(new w.Event('input',{bubbles:true}));}
   inputs[3].click();await tick();});
- assert.match(host.textContent,/¥40\.00/);assert.equal(button.disabled,false);
+ assert.match(host.textContent,/¥40\.00/);assert.match(host.textContent,/OLD-REFUND/);assert.match(host.textContent,/不代表汇聚已退款/);assert.equal(button.disabled,true);
+ await React.act(async()=>{host.querySelector('input[name="refund-due-duty_1"]').click();host.querySelector('input[name="refund-release-duty_1"]').click();await tick();});
+ assert.equal(button.disabled,false);
  await React.act(async()=>{button.click();await tick();});assert.equal(sent.previouslyRefundedCents,'2000');assert.equal(sent.priorAppliedToDutyCents,'1000');assert.equal(sent.noUnresolvedRefunds,true);
+ assert.equal(sent.historicalDueVerified,true);assert.equal(sent.historicalReleaseVerified,true);
  basis={...basis,canStart:false,receipt:{caseId:'case_1',intentId:'intent_1',refundOrderNo:'LR'+'a'.repeat(28),amountCents:'4000',dutyCents:'5000',priorAppliedCents:'1000'},
   current:{intentId:'intent_1',refundOrderNo:'LR'+'a'.repeat(28),generation:1,amountCents:'4000',dutyCents:'5000',priorAppliedCents:'1000',previouslyRefundedCents:'2000',chainReview:false,blockedBy:null},progress:{state:'UNKNOWN',terminal:null,completedAt:null,bankArrival:'UNKNOWN'}};
  await render('2');assert.match(host.textContent,/结果待核对/);assert.doesNotMatch(host.textContent,/渠道已确认退款/);

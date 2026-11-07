@@ -47,7 +47,7 @@ type FulfillmentReadState = "idle" | "ok" | "unavailable" | "forbidden" | "auth"
 type PersistedIntent = { subject: string; intent: FulfillmentIntent; accepted?: boolean };
 const ACCEPTED_STORAGE_WARNING = "操作已受理，但本地无法保存恢复状态；不会重复提交。请勿刷新或离开页面，先查看当前状态或联系维护处理。";
 const SETTLEMENT_REASON_LABELS:Record<string,string>={
-  DISCOUNT_OWNER_FUNDING_INSUFFICIENT:"折后实际消耗不足以覆盖号主应得，请核对会员折扣和本单价格。",
+  DISCOUNT_OWNER_FUNDING_INSUFFICIENT:"折后实际消耗不足以覆盖号主应得，暂不能结算；请联系双方线下协调并记录处理情况。",
   INSUFFICIENT_PREPAYMENT:"本单实付不足以覆盖结算费用，请核对数量并与双方沟通。",
   SETTLEMENT_PRICING_INVALID:"本单冻结价格资料无法核实，请联系维护人员。",
   ORDER_PARTY_UNAVAILABLE:"订单一方账号当前不可用，请核实身份和资金状态后处理。",
@@ -58,8 +58,8 @@ const AMOUNT_LABELS: Record<string, string> = {
   haffConsumedOwner: "哈夫币消耗（号主侧）",
   itemConsumedBuyer: "物品消耗（租客侧）",
   itemConsumedOwner: "物品消耗（号主侧）",
-  unusedItemRefund: "未消耗物资预付款（扣费前）",
-  unusedHaffRefund: "未消耗哈夫币预付款（扣费前）",
+  unusedItemRefund: "未消耗物资预付款（按下单时分配）",
+  unusedHaffRefund: "未消耗哈夫币预付款（按下单时分配）",
   earlyMakeup: "提前结束补足",
   feeBase: "包赔费基数",
   feeRate: "包赔费率",
@@ -138,7 +138,7 @@ export function OrderFulfillmentSection({ orderId, displayNo, viewerId, orderSta
   const [adjustOpen, setAdjustOpen] = useState(false);
   const [finalizeOpen,setFinalizeOpen]=useState(false);
   const [finalizeReason,setFinalizeReason]=useState("");
-  const [finalizeTarget,setFinalizeTarget]=useState<{id:string;hash:string;versionNo:number|undefined;amounts:Record<string,unknown>|null}|null>(null);
+  const [finalizeTarget,setFinalizeTarget]=useState<{id:string;hash:string;versionNo:number|undefined;early:boolean;amounts:Record<string,unknown>|null;parties:string[]}|null>(null);
   const [openingTarget,setOpeningTarget]=useState<{id:string;versionNo:number;party:"RENTER"|"OWNER"}|null>(null);
   const [openingReason,setOpeningReason]=useState("");
   const [panelOpen, setPanelOpen] = useState(false);
@@ -484,7 +484,8 @@ export function OrderFulfillmentSection({ orderId, displayNo, viewerId, orderSta
   const primaryDisabled = busy || loading || locked || storageBlocked || view?.consumptionMode==="UNAVAILABLE";
   const previewAmounts = preview?.amounts ?? null;
   const currentAmounts = (current?.computation?.amounts ?? null) as Record<string, unknown> | null;
-  const finalizationAmountsReady=isSettlementMoney(currentAmounts?.ownerNet)&&isSettlementMoney(currentAmounts?.renterRefund);
+  const finalizationAmountsReady=isSettlementMoney(currentAmounts?.ownerNet)&&isSettlementMoney(currentAmounts?.renterRefund)
+    && typeof current?.early==="boolean" && (!current.early || isSettlementMoney(currentAmounts?.earlyMakeup));
   const currentInputLines = (current?.inputSnapshot?.lines ?? []) as Array<{ itemId?: string; openingQuantity?: string; remainingQuantity?: string; consumedQuantity?:string }>;
   const postingRows = amountRows((posting?.amounts ?? null) as Record<string, unknown> | null);
 
@@ -564,6 +565,7 @@ export function OrderFulfillmentSection({ orderId, displayNo, viewerId, orderSta
       })}
     </div> : null}
     {amountRows(currentAmounts).length > 0 ? <dl>{amountRows(currentAmounts).map((row) => <div key={row.key}><dt>{row.label}</dt><dd>{row.text}</dd></div>)}</dl> : <small>暂无金额明细。</small>}
+    {currentAmounts?.unusedItemRefund || currentAmounts?.unusedHaffRefund ? <small>未消耗预付款按下单时分配计算；实际应退会重新计算会员折扣和费用。</small> : null}
   </div> : null;
 
   const statusMessages = <>
@@ -757,11 +759,18 @@ export function OrderFulfillmentSection({ orderId, displayNo, viewerId, orderSta
 
       {canManualClose&&current?.kind==="SYSTEM"&&current.id&&current.versionHash&&!posting&&view?.currentRequest?.kind!=="INTAKE"?<div className="im-support-fulfillment-stage-panel">
         <strong>客服处理</strong><small>核实双方情况后，可按当前方案直接结算并记录原因。</small>
-        {!finalizationAmountsReady?<Alert variant="warning"><AlertTitle>结算金额尚未完整读取</AlertTitle><AlertDescription>请刷新并核对号主净额与租客应退后再处理。</AlertDescription></Alert>:null}
-        <Button type="button" variant="outline" disabled={primaryDisabled||!finalizationAmountsReady} onClick={()=>{setFinalizeReason("");setFinalizeTarget({id:current.id!,hash:current.versionHash!,versionNo:current.versionNo,amounts:currentAmounts});setFinalizeOpen(true);}}>客服确认结算</Button>
+        {!finalizationAmountsReady?<Alert variant="warning"><AlertTitle>结算信息尚未完整读取</AlertTitle><AlertDescription>请刷新并核对结算方式、提前结束费用、号主净额与租客应退后再处理。</AlertDescription></Alert>:null}
+        <Button type="button" variant="outline" disabled={primaryDisabled||!finalizationAmountsReady} onClick={()=>{
+          const parties=(["RENTER","OWNER"] as const).map(party=>{
+            const decision=current.decisions?.find(item=>item.party===party && item.versionHash===current.versionHash && (item.action==="CONFIRM"||item.action==="REJECT"));
+            return decision ? decisionLabel(decision) : `${partyLabel(party)}未确认`;
+          });
+          setFinalizeReason("");setFinalizeTarget({id:current.id!,hash:current.versionHash!,versionNo:current.versionNo,early:current.early===true,amounts:currentAmounts,parties});setFinalizeOpen(true);
+        }}>客服确认结算</Button>
         <Dialog open={finalizeOpen} onOpenChange={setFinalizeOpen}><DialogContent>
           <div className="space-y-4"><div><DialogTitle>确认按当前方案结算</DialogTitle><DialogDescription>请核对第 {finalizeTarget?.versionNo} 版金额。结算后将登记本单应退责任，退款到账以渠道结果为准。</DialogDescription></div>
-            <dl>{amountRows(finalizeTarget?.amounts??null).filter(row=>row.key==="ownerNet"||row.key==="renterRefund").map(row=><div key={row.key} className="flex justify-between gap-4"><dt>{row.label}</dt><dd>{row.text}</dd></div>)}</dl>
+            <p className="text-sm text-muted-foreground">{finalizeTarget?.parties.join(" · ")} · {finalizeTarget?.early ? "提前结算" : "正常结算"}</p>
+            <dl>{amountRows(finalizeTarget?.amounts??null).filter(row=>row.key==="ownerNet"||row.key==="renterRefund"||finalizeTarget?.early&&row.key==="earlyMakeup").map(row=><div key={row.key} className="flex justify-between gap-4"><dt>{row.label}</dt><dd>{row.text}</dd></div>)}</dl>
             <label className="block space-y-2"><span>处理原因</span><Textarea value={finalizeReason} maxLength={500} disabled={locked||busy} onChange={event=>setFinalizeReason(event.target.value)} placeholder="说明与双方核实的情况" /></label>
             <div className="flex justify-end gap-2"><Button variant="outline" onClick={()=>setFinalizeOpen(false)} disabled={busy}>返回</Button><Button onClick={finalize} disabled={primaryDisabled||finalizeReason.trim().length<3}>确认结算</Button></div>
           </div>

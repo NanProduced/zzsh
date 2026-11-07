@@ -9,7 +9,7 @@ import { assertFormalRefundProfile, assertRefundStart, describeRefundProfile, in
   readRefundOutbound, readRefundProfileEvidence, refundCompleteTimeToUtc, refundFailureMayRelease, refundWayAccepted, RefundProfileError, type BoundRefundProfile, type RefundBinding, type RefundOperation, type RefundOutbound } from "./joinpay-refund-profile";
 import { readAbnormalRefundGate } from "./joinpay-abnormal-refund-store";
 import { readPrestartRefundGate } from "./prestart-refund-store";
-import { captureRefundTerminalFact, refundTerminalConflicts, type RefundSourceOptions } from "./joinpay-refund-source";
+import { captureRefundTerminalFact, nativeTerminalReviewsConsistent, readVerifiedRefundTerminalFact, refundTerminalConflicts, type RefundSourceOptions } from "./joinpay-refund-source";
 import { preflightJoinpayRefundResponse } from "./joinpay-refund-protocol";
 const ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/, sha = (v: string | Uint8Array) => createHash("sha256").update(v).digest("hex"), fresh = (p: string) => `${p}_${randomUUID().replaceAll("-", "")}`;
 export const JOINPAY_REFUND_MAX_AUTOMATIC_QUERIES = 10;
@@ -34,7 +34,10 @@ export async function resumeNativeRefundReview(execution:RefundExecution,id:stri
         AND p.proconfig=ARRAY['search_path=pg_catalog'] AND has_function_privilege(current_user,p.oid,'EXECUTE'))
       AND EXISTS(SELECT 1 FROM pg_trigger t WHERE t.tgrelid=to_regclass('zzsh_order.native_refund_review_resolution')
         AND t.tgname='native_refund_review_resolution_immutable' AND NOT t.tgisinternal AND t.tgenabled IN('O','A')
-        AND t.tgfoid=to_regprocedure('zzsh_order.finance_immutable()')) AS ready`)).rows[0]?.ready;
+        AND t.tgfoid=to_regprocedure('zzsh_order.finance_immutable()'))
+      AND EXISTS(SELECT 1 FROM pg_trigger t WHERE t.tgrelid=to_regclass('zzsh_order.native_refund_review_resolution')
+        AND t.tgname='native_refund_review_resolution_insert_guard' AND NOT t.tgisinternal AND t.tgenabled IN('O','A')
+        AND t.tgfoid=to_regprocedure('zzsh_order.guard_refund_resolution_insert()')) AS ready`)).rows[0]?.ready;
     if(ready!==true)throw new SecurityApiError(503,'EVIDENCE_UNAVAILABLE','Native refund review is unavailable');
     await lockFormalRefundContext(client,execution.admission,id);
     let result:{intentId:string;resumed:boolean;state:string;resolutionId:string}|undefined;
@@ -43,6 +46,37 @@ export async function resumeNativeRefundReview(execution:RefundExecution,id:stri
     catch(error){const code=(error as {code?:string}).code;if(code==='42501')throw forbidden();if(code==='23514'||code==='40001')throw conflict('NATIVE_REFUND_REVIEW_BLOCKED');throw error;}
     if(!result||result.intentId!==id||typeof result.resumed!=='boolean'||typeof result.state!=='string'||typeof result.resolutionId!=='string')throw conflict('NATIVE_REFUND_REVIEW_INVALID');
     return result;
+  });
+}
+/** Recheck saved signed evidence; the staff action never invents a channel result or sends money. */
+export async function resolveNativeRefundTerminal(execution:RefundExecution,id:string,actor:{userId:string;sessionId:string},requestId:string,reason:string,
+  authorize:(client:PoolClient,id:string)=>Promise<void>){
+  if(![id,actor?.userId,actor?.sessionId,requestId].every(value=>typeof value==='string'&&ID.test(value))
+    ||typeof reason!=='string'||reason.trim().length<3||reason.length>200||/[\u0000-\u001f\u007f]/.test(reason)||typeof authorize!=='function')throw invalid('Invalid native refund terminal review');
+  return confirmed(execution.pool,id,'RESULT',async client=>{
+    await authorize(client,id);await setAuditContext(client,'admin',actor.userId,actor.sessionId,requestId);
+    const ready=(await client.query<{ready:boolean}>(`SELECT EXISTS(SELECT 1 FROM pg_proc p JOIN pg_class c ON c.oid=to_regclass('zzsh_order.native_refund_review_resolution')
+      WHERE p.oid=to_regprocedure('zzsh_order.resolve_native_refund_terminal(text,text)') AND p.proowner=c.relowner AND p.prosecdef
+       AND p.proconfig=ARRAY['search_path=pg_catalog'] AND has_function_privilege(current_user,p.oid,'EXECUTE')) AS ready`)).rows[0]?.ready;
+    if(ready!==true)throw new SecurityApiError(503,'EVIDENCE_UNAVAILABLE','Native refund terminal review is unavailable');
+    const row=await lockFormalRefundContext(client,execution.admission,id);
+    if(!row.requires_review && row.terminal_evidence_id && ['SUCCEEDED','FAILED'].includes(row.state)){
+      const proof=await readVerifiedRefundTerminalFact(client,execution,row.terminal_evidence_id);
+      if((proof.terminal==='SUCCEEDED'?'SUCCEEDED':'FAILED')!==row.state)throw conflict('NATIVE_REFUND_REVIEW_INVALID');
+      return {intentId:id,resolved:false,alreadyClear:true,state:row.state};
+    }
+    if(!await nativeTerminalReviewsConsistent(client,execution,row)){
+      await recordAudit(client,{actorType:'admin',actorId:actor.userId,sessionId:actor.sessionId,requestId,
+        action:'order.native.refund.terminal_review_unresolved',objectType:'channel_refund_intent',objectId:id,outcome:'FAILURE',reason:reason.trim(),
+        details:{reason:'CONTRADICTORY_OR_UNVERIFIED',channelResult:'UNCHANGED'}});
+      return {intentId:id,resolved:false,alreadyClear:false,state:'REVIEW_REQUIRED'};
+    }
+    let result:{intentId:string;resolved:boolean;state:string;resolutionId:string}|undefined;
+    try{result=(await client.query<{result:{intentId:string;resolved:boolean;state:string;resolutionId:string}}>(
+      'SELECT zzsh_order.resolve_native_refund_terminal($1,$2) AS result',[id,reason.trim()])).rows[0]?.result;}
+    catch(error){const code=(error as {code?:string}).code;if(code==='42501')throw forbidden();if(code==='23514'||code==='40001')throw conflict('NATIVE_REFUND_REVIEW_BLOCKED');throw error;}
+    if(!result||result.intentId!==id||result.resolved!==true||!['SUCCEEDED','FAILED'].includes(result.state)||typeof result.resolutionId!=='string')throw conflict('NATIVE_REFUND_REVIEW_INVALID');
+    return {...result,alreadyClear:false};
   });
 }
 export type RefundQuerySkipReason = "TERMINAL" | "REVIEW_REQUIRED" | "ACTIVE_LEASE" | "NOT_DUE" | "THROTTLED" | "BUDGET_EXHAUSTED" | "INELIGIBLE" | "ABNORMAL_BASIS_REVIEW" | "PRESTART_BASIS_REVIEW";
@@ -183,6 +217,9 @@ async function recordReceived(c: PoolClient, o: RefundSourceOptions, intentId: s
         : d.result === "CHANNEL_REPORTED_FAILED" && refundFailureMayRelease(received.profile, d) ? "FAILED" : null;
       qualified = terminal !== null && received.exchange.evidenceLevel === "PROVIDER_RESPONSE";
       hardConflict = !!row.terminal_evidence_id && signature === "MATCH" && (terminal !== null && terminal !== row.state || d.reason === "REFUND_TRANSACTION_MISMATCH");
+      hardConflict ||= signature === "MATCH" && d.result === "REVIEW_REQUIRED";
+      hardConflict ||= !!row.terminal_evidence_id && received.operation === "QUERY" && received.exchange.httpStatus === 200
+        && received.exchange.evidenceLevel === "PROVIDER_RESPONSE" && signature === "MATCH" && bound === "MATCH" && d.result === "PROCESSING";
       if(row.terminal_evidence_id && qualified && terminal) hardConflict ||= refundTerminalConflicts({terminal:row.state,refundTransactionNo:row.provider_refund_trx_no,completedAt:row.completed_at===null?null:new Date(row.completed_at).toISOString()},
         {terminal,refundTransactionNo:d.providerRefundTrxNo??null,completedAt:d.completedAtRaw?refundCompleteTimeToUtc(received.profile,d.completedAtRaw):null});
       if (signature === "MATCH" && bound === "MATCH" && d.providerRefundTrxNo) {

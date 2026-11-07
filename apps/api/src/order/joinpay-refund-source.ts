@@ -37,6 +37,7 @@ async function inspectOriginal(client: PoolClient, options: RefundSourceOptions,
   if (raw.operation === "NOTIFY") { try { body = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(raw.raw_body); } catch { return null; } }
   const decision = inspectRefundProfile(profile, raw.operation, body, binding, key);
   if (decision.signature !== "MATCH") return null;
+  if (raw.operation === "QUERY" && decision.result === "PROCESSING") return { raw, terminal: "PROCESSING" as const };
   if (decision.result === "CHANNEL_REPORTED_SUCCEEDED" && decision.providerRefundTrxNo && decision.completedAtRaw && refundWayAccepted(profile, decision.refundWay)) {
     return { raw, terminal: "SUCCEEDED" as const, refundTransactionNo: decision.providerRefundTrxNo, completedAt: refundCompleteTimeToUtc(profile, decision.completedAtRaw), completedAtRaw: decision.completedAtRaw };
   }
@@ -58,7 +59,7 @@ export async function readVerifiedRefundTerminalFact(client: PoolClient, options
   if (!ID.test(evidenceId)) throw invalid(); const xid = await assertRefundResource(client, options.admission);
   const e = (await client.query(`SELECT id,intent_id,observation_id,terminal,refund_transaction_no,completed_at::text,facts_canonical,facts_digest FROM zzsh_order.joinpay_refund_evidence WHERE id=$1`, [evidenceId])).rows[0];
   if (!e || sha(e.facts_canonical) !== e.facts_digest) throw notFound(); const row = await lockFormalRefundContext(client, options.admission, e.intent_id);
-  const checked = await inspectOriginal(client, options, row, e.observation_id); if (!checked) throw conflict("Original refund source did not verify");
+  const checked = await inspectOriginal(client, options, row, e.observation_id); if (!checked || checked.terminal === "PROCESSING") throw conflict("Original refund source did not verify");
   const body = bodyFor(row, e.observation_id, checked.terminal, checked.refundTransactionNo, checked.completedAt), canonical = JSON.stringify(body);
   if (body.evidenceId !== e.id || canonical !== e.facts_canonical || sha(canonical) !== e.facts_digest || e.terminal !== body.terminal || e.refund_transaction_no !== body.refundTransactionNo
     || (e.completed_at === null ? null : new Date(e.completed_at).toISOString()) !== body.completedAt) throw conflict("Original refund terminal binding differs");
@@ -68,7 +69,7 @@ export async function readVerifiedRefundTerminalFact(client: PoolClient, options
 export async function captureRefundTerminalFact(client: PoolClient, options: RefundSourceOptions, intentId: string, observationId: string): Promise<NativeRefundTerminalFact | null> {
   const xid = await assertRefundResource(client, options.admission), row = await lockFormalRefundContext(client, options.admission, intentId);
   if (row.requires_review || row.state === "REVIEW_REQUIRED") return null;
-  const checked = await inspectOriginal(client, options, row, observationId); if (!checked) return null;
+  const checked = await inspectOriginal(client, options, row, observationId); if (!checked || checked.terminal === "PROCESSING") return null;
   if (row.terminal_evidence_id) {
     const original = await readVerifiedRefundTerminalFact(client, options, row.terminal_evidence_id);
     if (refundTerminalConflicts(original,checked)) {
@@ -81,6 +82,23 @@ export async function captureRefundTerminalFact(client: PoolClient, options: Ref
     VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`, [body.evidenceId, intentId, observationId, checked.raw.operation, body.terminal, body.refundTransactionNo,
       checked.completedAtRaw, body.completedAt, canonical, digest]);
   return mint(client, xid, body, digest, options.admission);
+}
+/** A human may clear a terminal review only if every verified saved observation agrees with the original. */
+export async function nativeTerminalReviewsConsistent(client:PoolClient,options:RefundSourceOptions,row:FormalRefundRow):Promise<boolean>{
+  if(!row.terminal_evidence_id || !row.requires_review || !['SUCCEEDED','FAILED'].includes(row.state))return false;
+  const original=await readVerifiedRefundTerminalFact(client,options,row.terminal_evidence_id);
+  if((original.terminal==='SUCCEEDED'?'SUCCEEDED':'FAILED')!==row.state)return false;
+  const observations=(await client.query<{id:string;signature_status:string;evidence_level:string}>(`SELECT id,signature_status,evidence_level
+    FROM zzsh_order.joinpay_refund_observation WHERE intent_id=$1 AND event='REVIEW' ORDER BY created_at,id LIMIT 101`,[row.id])).rows;
+  if(!observations.length || observations.length>100)return false;
+  let verified=0;
+  for(const observation of observations){
+    const checked=await inspectOriginal(client,options,row,observation.id);
+    if(checked?.terminal==='PROCESSING'){verified++;continue;}
+    if(checked ? refundTerminalConflicts(original,checked) : observation.signature_status==='MATCH' && observation.evidence_level==='PROVIDER_RESPONSE')return false;
+    if(checked)verified++;
+  }
+  return verified>0;
 }
 export async function assertJoinpayRefundTerminalFact(client: PoolClient, fact: unknown): Promise<NativeRefundTerminalFact> {
   const p = fact && typeof fact === "object" ? facts.get(fact) : null; if (!p || p.client !== client) throw invalid("Native refund fact is not verified on this transaction");

@@ -25,6 +25,9 @@ export async function createLegacyRefundCase(client:PoolClient,actor:LegacyConti
     AND EXISTS(SELECT 1 FROM pg_proc p JOIN pg_class c ON c.oid=to_regclass('zzsh_order.legacy_refund_review_resolution')
       WHERE p.oid=to_regprocedure('zzsh_order.resume_legacy_refund_review(text,text)') AND p.proowner=c.relowner AND p.prosecdef
        AND p.proconfig=ARRAY['search_path=pg_catalog'] AND has_function_privilege(current_user,p.oid,'EXECUTE'))
+    AND EXISTS(SELECT 1 FROM pg_proc p JOIN pg_class c ON c.oid=to_regclass('zzsh_order.legacy_refund_review_resolution')
+      WHERE p.oid=to_regprocedure('zzsh_order.resolve_legacy_pending_terminal(text,text,text)') AND p.proowner=c.relowner AND p.prosecdef
+       AND p.proconfig=ARRAY['search_path=pg_catalog'] AND has_function_privilege(current_user,p.oid,'EXECUTE'))
     AND EXISTS(SELECT 1 FROM pg_proc p JOIN pg_class c ON c.oid=to_regclass('zzsh_order.legacy_refund_retry_authorization')
       WHERE p.oid=to_regprocedure('zzsh_order.retry_legacy_refund(text,text,text)') AND p.proowner=c.relowner AND p.prosecdef
        AND p.proconfig=ARRAY['search_path=pg_catalog'] AND has_function_privilege(current_user,p.oid,'EXECUTE'))
@@ -53,8 +56,11 @@ export async function createLegacyRefundCase(client:PoolClient,actor:LegacyConti
       ('zzsh_order.legacy_refund_terminal_evidence','legacy_refund_terminal_guard','zzsh_order.guard_legacy_refund_terminal()'),
       ('zzsh_order.legacy_refund_terminal_evidence','legacy_refund_terminal_immutable','zzsh_order.finance_immutable()'),
       ('zzsh_order.legacy_refund_review_resolution','legacy_refund_review_resolution_immutable','zzsh_order.finance_immutable()'),
+      ('zzsh_order.legacy_refund_review_resolution','legacy_refund_review_resolution_insert_guard','zzsh_order.guard_refund_resolution_insert()'),
       ('zzsh_order.legacy_refund_terminal_resolution','legacy_refund_terminal_resolution_immutable','zzsh_order.finance_immutable()'),
+      ('zzsh_order.legacy_refund_terminal_resolution','legacy_refund_terminal_resolution_insert_guard','zzsh_order.guard_refund_resolution_insert()'),
       ('zzsh_order.legacy_refund_retry_authorization','legacy_refund_retry_authorization_immutable','zzsh_order.finance_immutable()'),
+      ('zzsh_order.legacy_refund_retry_authorization','legacy_refund_retry_authorization_insert_guard','zzsh_order.guard_refund_resolution_insert()'),
       ('zzsh_order.joinpay_refund_evidence','zz_legacy_refund_transaction_guard','zzsh_order.guard_native_refund_against_legacy_transaction()'),
       ('zzsh_order.legacy_refund_intent','legacy_refund_terminal_intent_complete','zzsh_order.check_legacy_refund_terminal_complete()'),
       ('zzsh_order.finance_event','legacy_refund_history_event_guard','zzsh_order.guard_legacy_refund_history()'),

@@ -137,6 +137,20 @@ test('staff records a reason to resume the original refund query without another
   assert.deepEqual(JSON.parse(posts[0].body),{reason:'已核对汇聚原退款'});assert.match(ui.host.textContent,/不会重新发起退款/);
 });
 
+test('terminal conflict keeps its status and records a staff explanation when evidence disagrees',async t=>{
+  const item={intentId:'refund_1',postingId:'posting_1',refundOrderNo:'RF123',amountCents:'100',state:'FAILED',budgetDisposition:'RELEASED',requiresReview:true,
+    completedAt:null,postingResponsibility:{frozenCents:'100',allocatedCents:'100',remainingCents:'0'},latestObservation:null,channelArrival:'UNKNOWN'};
+  const ui=await setup(t,call=>response(call.method==='GET'?{items:[item]}:{contractVersion:'admin-joinpay-query.v1',operation:'REFUND_RESOLVE',objectId:'refund_1',channelArrival:'UNKNOWN',outcome:{kind:'REQUIRES_MANUAL',state:'REVIEW_REQUIRED'}}));
+  await act(async()=>{[...ui.host.querySelectorAll('button')].find(button=>button.textContent==='读取退款申请').click();await new Promise(setImmediate);});
+  await act(async()=>{[...ui.host.querySelectorAll('button')].find(button=>button.textContent==='核对退款冲突').click();});
+  const input=ui.host.querySelector('[aria-label="退款核对说明"]');
+  await act(async()=>{Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype,'value').set.call(input,'汇聚记录待财务核对');input.dispatchEvent(new window.Event('input',{bubbles:true}));});
+  await act(async()=>{[...ui.host.querySelectorAll('button')].find(button=>button.textContent==='确认核对').click();await new Promise(setImmediate);});
+  assert.match(ui.host.textContent,/仍有矛盾或无法验证/);
+  const posts=ui.calls.filter(call=>call.method==='POST');assert.equal(posts.length,1);assert.match(posts[0].url,/\/joinpay\/refunds\/refund_1\/resolve$/);
+  assert.deepEqual(JSON.parse(posts[0].body),{reason:'汇聚记录待财务核对'});
+});
+
 test('owned legacy recovery without optional reason keeps its original key and empty-body meaning', async t=>{
   const binding={adminUserId:'admin_A',sessionId:'session_A'},legacy={key:'legacy_owned_key',amount:'100',...binding};
   const ui=await setup(t,()=>response(null),{binding,seed:s=>s.setItem(storageKey,JSON.stringify(legacy))});await ui.submit();

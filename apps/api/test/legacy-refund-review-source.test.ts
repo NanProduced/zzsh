@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { createHash } from "node:crypto";
+import { canonicalize } from "../src/supply/content-hash";
 import * as evidence from "../src/order/legacy-continuation-evidence";
 import * as dutyBasis from "../src/order/legacy-duty-basis";
 import { initialLegacyFacts, type LegacyDutyRow, type LegacyHeadRow } from "../src/order/legacy-continuation-model";
-import { readLockedLegacyRefundSource } from "../src/order/legacy-refund-review-source";
+import { readHistoricalOriginalPayment, readLockedLegacyRefundSource } from "../src/order/legacy-refund-review-source";
 import { legacyBinding, legacyEvidence, legacySource } from "./legacy-continuation-fixture";
 
 const head:LegacyHeadRow={id:"confirm_1",orderId:legacyBinding.id,revision:"1",inputEvidenceId:"input_1",resultEvidenceId:"result_1",stage:4,isSettle:0,command:"CONFIRM",amounts:{}};
@@ -43,4 +45,22 @@ test("multiple payments or an inconsistent legacy paid amount never select an ar
   await assert.rejects(readLockedLegacyRefundSource(mismatch,legacyBinding,head,duty),/LEGACY_PAYMENT_SOURCE_MISMATCH/);
   const duplicate=fixture(t,{duplicate:true});
   await assert.rejects(readLockedLegacyRefundSource(duplicate,legacyBinding,head,duty),/LEGACY_PAYMENT_SOURCE_AMBIGUOUS/);
+});
+
+test("completed historical refund binds one paid source, while held or ambiguous records stay blocked",async t=>{
+  const binding={...legacyBinding,sourceOrderStatus:4};
+  const historic={...duty,source:'LEGACY_IMPORT' as const,sourceStatus:'COMPLETED_UNREFUNDED',continuationVersionId:null};
+  const snapshot={kind:'paymentObservation',sourceUserId:Number(binding.legacyRenterId),sourceId:9,sourceStatus:1,channelArrival:'UNKNOWN',
+    createdAt:1790000000,amount:'100.00',sourceNumber:'FIXTURE_P7',sourceOrderType:'1',referenceType:'LEGACY_ORDER',referenceId:binding.legacyId,associationState:'SOURCE_VERIFIED'};
+  const canonical=canonicalize(snapshot),payment={source_id:'9',source_canonical:canonical,source_digest:createHash('sha256').update(canonical).digest('hex'),snapshot};
+  let payments=[payment];
+  const client={query:async(sql:string)=>({rows:sql.includes('personal_finance_observation')?payments:[{dueAt:'2026-11-07T00:00:00.000000Z'}]})} as any;
+  t.mock.method(dutyBasis,'readLegacyDutyBasis',async()=>({state:'KNOWN',dutyId:historic.id,orderId:binding.id,kind:'RENTER_REFUND',beneficiaryUserId:binding.renterUserId,
+    currency:'CNY',effectiveHeadId:null,effectiveHeadRevision:null,continuationVersionId:null,amountCents:historic.amountCents,parentSourceDigest:binding.sourceDigest,
+    fundsDisposition:'AVAILABLE',currentNetRefundCents:historic.amountCents,effectiveFactsDigest:'d'.repeat(64)}) as any);
+  const result=await readLockedLegacyRefundSource(client,binding,null,historic);
+  assert.equal(result.paymentOrderNo,'FIXTURE_P7');assert.equal(result.paymentRecordId,'9');assert.equal(result.refundDueAt,null);
+  payments=[payment,payment];await assert.rejects(readHistoricalOriginalPayment(client,binding),/LEGACY_PAYMENT_SOURCE_UNAVAILABLE/);
+  payments=[{...payment,source_digest:'a'.repeat(64)}];await assert.rejects(readHistoricalOriginalPayment(client,binding),/LEGACY_PAYMENT_SOURCE_MISMATCH/);
+  payments=[payment];await assert.rejects(readLockedLegacyRefundSource(client,binding,null,{...historic,sourceStatus:'DETAINED'}),/LEGACY_REFUND_DUTY_UNAVAILABLE/);
 });

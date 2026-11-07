@@ -81,6 +81,28 @@ test("旧退款独立恢复，关闭首派仍查询原单；缺结构跳过、�
   shape='partial';await assert.rejects(recoverLegacyJoinpayRefundBatch(input),/LEGACY_REFUND_SCHEMA_INCOMPLETE/);assert.equal(calls,1);
 });
 
+test("旧退款仅隔离外呼前的单笔可确认冲突，审计失败或提交未知仍停止",async t=>{
+  const f=fixture(t),trace:{sql:string;values?:unknown[]}[]=[],calls:string[]=[];let auditFails=false,unknown=false;
+  const pool={connect:async()=>({query:async(sql:string,values?:unknown[])=>{trace.push({sql,values});
+    if(sql.includes("to_regclass('zzsh_order.legacy_refund_case')"))return {rows:[{db:f.view.database,actor:f.view.runtimeUser,
+      cases:true,intents:true,attempts:true,observations:true,terminals:true,resolutions:true,terminal_resolutions:true,retries:true}]};
+    if(sql.startsWith('SELECT current_database()'))return {rows:[{db:f.view.database,actor:f.view.runtimeUser}]};
+    if(sql.includes('JOIN zzsh_order.legacy_refund_case'))return {rows:[{id:'unit_one',state:'UNKNOWN'},{id:'unit_two',state:'UNKNOWN'}]};
+    if(sql.includes('INSERT INTO "zzsh_iam"."audit_event"')&&auditFails)throw Error('AUDIT_UNAVAILABLE');
+    return {rows:[]};},release(){}})} as unknown as Pool;
+  t.mock.method(legacyRefunds,'executeLegacyRefund',async(...[_execution,id]:Parameters<typeof legacyRefunds.executeLegacyRefund>)=>{
+    calls.push(id);if(id==='unit_one')throw unknown?new refunds.RefundAttemptCommitUnknown(id,'CLAIM'):new legacyRefunds.LegacyRefundClaimBlocked('LEGACY_REFUND_BINDING_CHANGED');
+    return {kind:'OBSERVED'} as never;
+  });
+  const input={...f.refund,execution:{...f.refund.execution,pool,legacyRefundsEnabled:false}};
+  assert.deepEqual(await recoverLegacyJoinpayRefundBatch(input),{selected:2,recorded:1,skipped:1});
+  assert.deepEqual(calls,['unit_one','unit_two']);
+  assert(trace.some(q=>q.sql.includes("order.legacy.refund.recovery.deferred")&&q.sql.includes("interval '1 hour'")));
+  assert(trace.some(q=>q.sql.includes('INSERT INTO "zzsh_iam"."audit_event"')&&q.values?.includes('LEGACY_REFUND_BINDING_CHANGED')));
+  calls.length=0;auditFails=true;await assert.rejects(recoverLegacyJoinpayRefundBatch(input),/AUDIT_UNAVAILABLE/);assert.deepEqual(calls,['unit_one']);
+  calls.length=0;auditFails=false;unknown=true;await assert.rejects(recoverLegacyJoinpayRefundBatch(input),refunds.RefundAttemptCommitUnknown);assert.deepEqual(calls,['unit_one']);
+});
+
 test("只消费原退款/提现意图，按商户及已接受历史绑定扫描；外呼前释放扫描连接", async t => {
   const f = fixture(t, [{ id: "unit_one", state: "UNKNOWN" }, { id: "unit_two", state: "PROCESSING" }]);
   const calls: string[] = [];

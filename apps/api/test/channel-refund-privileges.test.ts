@@ -53,6 +53,8 @@ function fixture(present = true) {
     }
     if (sql.startsWith("SELECT name,to_regprocedure")) return { rows: (args[0] as string[]).map(name => ({ name, present: false })) };
     if (sql.startsWith("SELECT attname FROM pg_attribute")) return { rows: (state.columns.get(args[0] as string) ?? []).map(attname => ({ attname })) };
+    if (sql.includes("to_regclass('zzsh_order.native_refund_review_resolution')")) return { rows: [{ present: false, function_present: false }] };
+    if (sql.includes("to_regprocedure('zzsh_order.guard_settlement_refund_policy()')")) return { rows: [{ present: false, guard: false, posting_columns: 0 }] };
     if (sql.includes("native_user_insert_proof") && sql.startsWith("SELECT")) return { rows: [{ proof: false, initializer: false }] };
     if (sql.includes("count(*)")) return { rows: [{ count: 0, ready: false }] };
     emitted(sql);

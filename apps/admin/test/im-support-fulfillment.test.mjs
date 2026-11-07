@@ -616,7 +616,7 @@ test("preview shows named server amounts and editing invalidates the accepted ha
   assert.match(document.body.textContent, /号主净额/);
   assert.match(document.body.textContent, /123\.45 元/);
   assert.match(document.body.textContent, /租客应退/);
-  assert.match(document.body.textContent, /约12\.35 元/);
+  assert.match(document.body.textContent, /约\s*12\.35 元/);
   assert.doesNotMatch(document.body.textContent, /12\.345678/);
   const classify = find(host, "生成结算方案");
   assert.ok(classify && !classify.disabled, "classify enabled after a preview");
@@ -654,8 +654,9 @@ test("staff preview keeps the customer's actual consumption and includes a zero-
 
 test("support finalization records the exact version, reason, and original intent key",async(t)=>{
   const requests=[],hash="a".repeat(64);
-  const current={...confirmedOpening,settlement:{id:"settle-current",versionNo:3,kind:"SYSTEM",early:false,versionHash:hash,
-    computation:{ok:true,amounts:{ownerNet:{currency:"CNY",unit:"yuan",scale:2,amount:"30.00"},renterRefund:{currency:"CNY",unit:"yuan",scale:2,amount:"5.00"}}},decisions:[]}};
+  const current={...confirmedOpening,settlement:{id:"settle-current",versionNo:3,kind:"SYSTEM",early:true,versionHash:hash,
+    computation:{ok:true,amounts:{ownerNet:{currency:"CNY",unit:"yuan",scale:2,amount:"30.00"},renterRefund:{currency:"CNY",unit:"yuan",scale:2,amount:"5.00"},earlyMakeup:{currency:"CNY",unit:"yuan",scale:2,amount:"2.00"}}},
+    decisions:[{party:"RENTER",action:"REJECT",versionHash:hash}]}};
   globalThis.fetch=async(input,init={})=>{const url=String(input);requests.push({url,method:init.method??"GET",headers:init.headers??{},body:init.body});
     if(url.endsWith("/orders/order-A/settlement"))return response(current);
     if(url.endsWith("/orders/order-A/settlements/settle-current/finalize"))return response(current);
@@ -663,6 +664,8 @@ test("support finalization records the exact version, reason, and original inten
   };
   const {host,root}=mount();t.after(async()=>{await act(async()=>root.unmount());host.remove();});await render(root,host,{canManualClose:true});
   await click(host,"客服确认结算");assert.match(document.body.textContent,/第 3 版金额/);
+  assert.match(document.body.textContent,/租客已拒绝 · 号主未确认 · 提前结算/);
+  assert.match(document.body.textContent,/提前结束补足2\.00 元/);
   const reason=document.body.querySelector('textarea[placeholder="说明与双方核实的情况"]');assert.ok(reason);
   const setter=Object.getOwnPropertyDescriptor(browser.HTMLTextAreaElement.prototype,"value").set;
   await act(async()=>{setter.call(reason,"双方已沟通确认");reason.dispatchEvent(new Event("input",{bubbles:true}));});
@@ -670,6 +673,15 @@ test("support finalization records the exact version, reason, and original inten
   await act(async()=>button.click());await settle();
   const request=requests.find(row=>row.method==="POST");assert.ok(request);assert.deepEqual(JSON.parse(request.body),{versionHash:hash,reason:"双方已沟通确认"});
   assert.ok(String(request.headers["idempotency-key"]??"").startsWith("im_ful_finalize_order-A_"));
+});
+
+test("提前结算缺少费用时客服不能确认",async t=>{
+  const current={...confirmedOpening,settlement:{id:"settle-current",versionNo:3,kind:"SYSTEM",early:true,versionHash:"a".repeat(64),
+    computation:{ok:true,amounts:{ownerNet:{currency:"CNY",unit:"yuan",scale:2,amount:"30.00"},renterRefund:{currency:"CNY",unit:"yuan",scale:2,amount:"5.00"}}},decisions:[]}};
+  globalThis.fetch=async()=>response(current);
+  const {host,root}=mount();t.after(async()=>{await act(async()=>root.unmount());host.remove();});await render(root,host,{canManualClose:true});
+  assert.match(document.body.textContent,/结算信息尚未完整读取/);
+  assert.ok([...document.body.querySelectorAll("button")].find(item=>item.textContent.trim()==="客服确认结算")?.disabled);
 });
 
 test("review binds the landed current version id and hash", async (t) => {

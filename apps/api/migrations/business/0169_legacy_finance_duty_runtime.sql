@@ -60,7 +60,15 @@ BEGIN
   OR (b->>'sourceTime') IS NULL OR (b->>'sourceTime')::timestamptz>clock_timestamp()
  THEN RAISE EXCEPTION 'current head/time changed under common lock' USING ERRCODE='23514'; END IF;
  current_state:=CASE WHEN h.id IS NULL THEN o.source_snapshot->>'is_settle' ELSE e.facts#>>'{evidence,source,isSettle}' END;
- IF b->>'fundsDisposition' IS DISTINCT FROM (CASE current_state WHEN '0' THEN 'AVAILABLE' WHEN '2' THEN 'HELD' WHEN '3' THEN 'CONFISCATED' ELSE 'UNKNOWN' END)
+ IF b->>'fundsDisposition' IS DISTINCT FROM (CASE WHEN current_state='2' AND d.source='LEGACY_IMPORT' AND d.source_status='DETAINED' AND h.id IS NULL
+    AND EXISTS(SELECT 1 FROM zzsh_iam.audit_event review_audit WHERE review_audit.object_type='legacy_order_duty' AND review_audit.object_id=d.id
+      AND review_audit.action='order.legacy.refund.reviewed' AND review_audit.actor_type='admin' AND review_audit.outcome='SUCCESS'
+      AND review_audit.actor_id=current_setting('zzsh.actor_id',true) AND review_audit.session_id=current_setting('zzsh.session_id',true)
+      AND review_audit.request_id=current_setting('zzsh.request_id',true) AND review_audit.details->>'orderId'=d.order_id
+      AND review_audit.details->>'sourceDigest'=o.source_digest AND review_audit.details->>'historicalReleaseVerified'='true'
+      AND review_audit.details->>'historicalDueVerified'='true' AND review_audit.details->>'channelResult'='NOT_SUBMITTED'
+      AND encode(sha256(convert_to(zzsh_order.canonical_finance_json(review_audit.details-'reviewDigest'),'UTF8')),'hex')=review_audit.details->>'reviewDigest') THEN 'AVAILABLE'
+    ELSE CASE current_state WHEN '0' THEN 'AVAILABLE' WHEN '2' THEN 'HELD' WHEN '3' THEN 'CONFISCATED' ELSE 'UNKNOWN' END END)
  THEN RAISE EXCEPTION 'current funds disposition source mismatch' USING ERRCODE='23514'; END IF;
  IF d.kind='COMMISSION' AND(d.status<>'MATURED' OR d.maturity_at IS NULL OR d.maturity_at>clock_timestamp()
   OR d.maturity_at IS DISTINCT FROM (b->>'maturityAt')::timestamptz) THEN RAISE EXCEPTION 'commission not matured' USING ERRCODE='23514'; END IF;
@@ -151,6 +159,7 @@ BEGIN
  SELECT * INTO d FROM zzsh_order.legacy_order_duty WHERE id=facts#>>'{duty,id}' FOR UPDATE;
  SELECT * INTO o FROM zzsh_order.legacy_order_read_snapshot WHERE id=d.order_id;
  IF d.id IS NULL OR o.id IS NULL OR NOT((d.kind IN('OWNER_CREDIT','RENTER_REFUND') AND d.source='CONTINUATION' AND d.status='PENDING')
+  OR(d.kind='RENTER_REFUND' AND d.source='LEGACY_IMPORT' AND d.status='PENDING' AND d.source_status IN('COMPLETED_UNREFUNDED','DETAINED'))
   OR(d.kind='COMMISSION' AND d.status='MATURED' AND d.maturity_at IS NOT NULL AND d.maturity_at<=clock_timestamp()))
   OR d.settled_by IS NOT NULL OR facts#>>'{duty,orderId}' IS DISTINCT FROM o.id
  THEN RAISE EXCEPTION 'legacy owner credit duty unavailable' USING ERRCODE='23514'; END IF;

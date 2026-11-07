@@ -212,7 +212,8 @@ const pool=new Pool({host:'127.0.0.1',port:5432,database,user:'postgres',max:3,s
    const oldInitial=refundProfile.assertInitialRefundAdmission,oldProduce=refundProfile.produceRefundRequest,oldOutbound=refundProfile.readRefundOutbound,oldAdmission=refundProfile.readFormalRefundAdmission;
    const oldInspect=refundProfile.inspectRefundProfile,oldTime=refundProfile.refundCompleteTimeToUtc,oldFailure=refundProfile.refundFailureMayRelease;
    const protocol=require('../dist/src/order/joinpay-refund-protocol.js'),oldPreflight=protocol.preflightJoinpayRefundResponse;
-   const queryText=JSON.stringify({kind:'JOINPAY_REFUND_PROFILE_V1',operation:'QUERY',purpose:'MERCHANT_REFUND',database,runtimeUser:'zzsh_completion_synth_probe',merchantIdentityId:'synthetic-merchant',merchantNo:'12345',profileId:'synthetic-query',keyVersionRef:'synthetic-query-key'});
+   const queryText=JSON.stringify({kind:'JOINPAY_REFUND_PROFILE_V1',operation:'QUERY',purpose:'MERCHANT_REFUND',database,runtimeUser:'zzsh_completion_synth_probe',merchantIdentityId:'synthetic-merchant',merchantNo:'12345',profileId:'synthetic-query',keyVersionRef:'synthetic-query-key',rules:{utcOffsetMinutes:480,
+    failureNoExecution:{accepted:true,reference:'synthetic-evidence',sha256:'a'.repeat(64),codes:['E100']}}});
    const notifyText=JSON.stringify({kind:'JOINPAY_REFUND_PROFILE_V1',operation:'NOTIFY',purpose:'MERCHANT_REFUND',database,runtimeUser:'zzsh_completion_synth_probe',merchantIdentityId:'synthetic-merchant',merchantNo:'12345',profileId:'synthetic-notify',keyVersionRef:'synthetic-notify-key',rules:{utcOffsetMinutes:480,
     failureNoExecution:{accepted:true,reference:'synthetic-evidence',sha256:'a'.repeat(64),codes:['E100']}}});
    const knownRefundNumbers=new Set([created.body.refundOrderNo]);
@@ -234,6 +235,7 @@ const pool=new Pool({host:'127.0.0.1',port:5432,database,user:'postgres',max:3,s
      if(operation==='SUBMIT')return {signature:'MATCH',result:'APPLICATION_ACCEPTED'};
      if(String(raw)==='bad')return {signature:'MISMATCH',result:'UNVERIFIED'};
      if(String(raw)==='review')return {signature:'MATCH',result:'REVIEW_REQUIRED',reason:'BINDING_MISMATCH'};
+     if(String(raw)==='processing')return {signature:'MATCH',result:'PROCESSING',channelCode:'100'};
      if(String(raw)==='failure')return {signature:'MATCH',result:'CHANNEL_REPORTED_FAILED',providerRefundTrxNo:'FIXTURE_FAILED_REFUND',channelCode:'E100'};
      return {signature:'MATCH',result:'CHANNEL_REPORTED_SUCCEEDED',providerRefundTrxNo:String(raw)==='conflict'?'FIXTURE_OTHER_REFUND':'FIXTURE_REFUND',
       completedAtRaw:'2026-11-07 09:00:00',refundWay:'ORIGINAL',channelCode:'100'};
@@ -327,6 +329,32 @@ const pool=new Pool({host:'127.0.0.1',port:5432,database,user:'postgres',max:3,s
     const reviewState=(await c.query('SELECT state,requires_review,budget_disposition FROM zzsh_order.legacy_refund_intent WHERE id=$1',[created.body.intentId])).rows[0];
     assert.deepEqual(reviewState,{state:'UNKNOWN',requires_review:false,budget_disposition:'ALLOCATED'});assert.equal(fetchCalls,2);
     await c.query('ROLLBACK TO SAVEPOINT review_branch');
+    await c.query('SAVEPOINT late_processing_branch');await c.query('RESET ROLE');await c.query("SET LOCAL session_replication_role='replica'");
+    await c.query("UPDATE zzsh_order.legacy_refund_intent SET lease_until=clock_timestamp()-interval '1 second' WHERE id=$1",[created.body.intentId]);
+    await c.query("UPDATE zzsh_order.legacy_refund_attempt SET created_at=clock_timestamp()-interval '1 minute' WHERE intent_id=$1",[created.body.intentId]);
+    await c.query("SET LOCAL session_replication_role='origin'");await c.query('SET LOCAL ROLE zzsh_completion_synth_probe');
+    {
+     const transport=require('../dist/src/order/joinpay-refund-attempt.js'),oldTransport=transport.exchangeRefundRequest;
+     try{
+      transport.exchangeRefundRequest=async()=>{
+       const notice=await receiveLegacyRefundNotification(execution,created.body.intentId,'good','late-processing-terminal');assert.equal(notice.terminal?.terminal,'SUCCEEDED');
+       return {body:Buffer.from('processing'),responseComplete:true,receivedBytes:10,httpStatus:200,failure:null,evidenceLevel:'PROVIDER_RESPONSE'};
+      };
+      const late=await executeLegacyRefund(execution,created.body.intentId,'late-processing-worker',{queryOnly:true});
+      assert.equal(late.event,'REVIEW');assert.equal((await readLegacyRefundProgress(c,execution,created.body.intentId)).state,'REVIEW_REQUIRED');
+      assert.equal((await c.query("SELECT count(*)::int AS n FROM zzsh_order.finance_event WHERE kind='LEGACY_REFUND_PAID'")).rows[0].n,1);
+      await c.query('RESET ROLE');await c.query("SET LOCAL session_replication_role='replica'");
+      await c.query("UPDATE zzsh_order.legacy_refund_intent SET lease_until=clock_timestamp()-interval '1 second' WHERE id=$1",[created.body.intentId]);
+      await c.query("UPDATE zzsh_order.legacy_refund_attempt SET created_at=clock_timestamp()-interval '1 minute' WHERE intent_id=$1",[created.body.intentId]);
+      await c.query("SET LOCAL session_replication_role='origin'");await c.query('SET LOCAL ROLE zzsh_completion_synth_probe');
+      transport.exchangeRefundRequest=async()=>({body:Buffer.from('good'),responseComplete:true,receivedBytes:4,httpStatus:200,failure:null,evidenceLevel:'PROVIDER_RESPONSE'});
+      const reviewer={realm:'admin',userId:'synthetic-agent',sessionId:'synthetic-agent-session',requestId:'late-processing-reviewed'};
+      const reconciled=await resolveLegacyRefundTerminal(execution,created.body.intentId,reviewer,reviewer.requestId,'已核对原退款结果','late-processing-review',
+       async client=>reviewService.authorizeLegacyRefundReviewAccess(client,reviewer,b.id));
+      assert.equal(reconciled.event,'REVIEW_RESOLVED');assert.equal((await readLegacyRefundProgress(c,execution,created.body.intentId)).state,'SUCCEEDED');
+     }finally{transport.exchangeRefundRequest=oldTransport;}
+    }
+    await c.query('ROLLBACK TO SAVEPOINT late_processing_branch');
     await c.query('SAVEPOINT success_branch');
     const paid=await receiveLegacyRefundNotification(execution,created.body.intentId,'good','synthetic-paid');
     assert.equal(paid.terminal?.terminal,'SUCCEEDED');assert.equal(paid.ack,'success');
@@ -358,7 +386,11 @@ const pool=new Pool({host:'127.0.0.1',port:5432,database,user:'postgres',max:3,s
     assert.notEqual(synthetic.event,'REVIEW_RESOLVED');assert.equal((await readLegacyRefundProgress(c,execution,created.body.intentId)).state,'REVIEW_REQUIRED');
     const exchange=require('../dist/src/order/joinpay-refund-attempt.js'),oldExchange=exchange.exchangeRefundRequest;
     try{
-     let body='bad';exchange.exchangeRefundRequest=async()=>({body:Buffer.from(body),responseComplete:true,receivedBytes:body.length,httpStatus:200,failure:null,evidenceLevel:'PROVIDER_RESPONSE'});
+     let body='processing';exchange.exchangeRefundRequest=async()=>({body:Buffer.from(body),responseComplete:true,receivedBytes:body.length,httpStatus:200,failure:null,evidenceLevel:'PROVIDER_RESPONSE'});
+     await expireSyntheticRefund();
+     const processing=await resolveLegacyRefundTerminal(execution,created.body.intentId,resolveActor,resolveActor.requestId,'已核对渠道记录','resolve-processing',authorizeResolution);
+     assert.equal(processing.event,'REVIEW');assert.equal((await readLegacyRefundProgress(c,execution,created.body.intentId)).state,'REVIEW_REQUIRED');
+     body='bad';
      await expireSyntheticRefund();
      const mismatch=await resolveLegacyRefundTerminal(execution,created.body.intentId,resolveActor,resolveActor.requestId,'已核对渠道记录','resolve-mismatch',authorizeResolution);
      assert.notEqual(mismatch.event,'REVIEW_RESOLVED');assert.equal((await readLegacyRefundProgress(c,execution,created.body.intentId)).state,'REVIEW_REQUIRED');
@@ -447,6 +479,30 @@ const pool=new Pool({host:'127.0.0.1',port:5432,database,user:'postgres',max:3,s
     const amounts=(await c.query(`SELECT generation,state,budget_disposition,amount_cents::text FROM zzsh_order.legacy_refund_intent WHERE case_id=$1 ORDER BY generation`,[created.body.caseId])).rows;
     assert.deepEqual(amounts.map(item=>[item.generation,item.state,item.budget_disposition,item.amount_cents]),[[1,'FAILED','RELEASED',created.body.amountCents],[2,'READY','ALLOCATED',created.body.amountCents]]);
     const retrySubmit=await executeLegacyRefund(execution,retry.intentId,'retry-worker');assert.equal(retrySubmit.kind,'OBSERVED');assert.equal(retrySubmit.event,'PROCESSING');
+    await c.query('SAVEPOINT pending_terminal_recovery');await c.query('RESET ROLE');await c.query("SET LOCAL session_replication_role='replica'");
+    await c.query(`INSERT INTO zzsh_order.legacy_refund_observation(id,intent_id,attempt_id,operation,lease_version,lease_owner,profile_id,profile_canonical,profile_sha256,key_version_ref,
+      raw_body,raw_sha256,response_complete,http_status,received_bytes,transport_failure,event,schema_status,signature_status,binding_status,channel_code,evidence_level,state_before,state_after,request_id)
+     SELECT 'matching-prior-review',intent_id,NULL,'NOTIFY',NULL,NULL,profile_id,profile_canonical,profile_sha256,key_version_ref,
+      raw_body,raw_sha256,response_complete,http_status,received_bytes,transport_failure,'REVIEW',schema_status,signature_status,binding_status,channel_code,evidence_level,'FAILED','FAILED','matching-prior-review'
+     FROM zzsh_order.legacy_refund_observation WHERE id=$1`,[failed.observationId]);
+    await c.query('UPDATE zzsh_order.legacy_refund_intent SET requires_review=true,revision=revision+1 WHERE id=$1',[created.body.intentId]);
+    await c.query("SET LOCAL session_replication_role='origin'");await c.query('SET LOCAL ROLE zzsh_completion_synth_probe');
+    const pendingNotice=await receiveLegacyRefundNotification(execution,retry.intentId,'good','pending-retry-notice');assert.equal(pendingNotice.event,'REVIEW');
+    try{
+     let body='failure';exchange.exchangeRefundRequest=async()=>({body:Buffer.from(body),responseComplete:true,receivedBytes:body.length,httpStatus:200,failure:null,evidenceLevel:'PROVIDER_RESPONSE'});
+     await expireSyntheticRefund();
+     const priorResolved=await resolveLegacyRefundTerminal(execution,created.body.intentId,resolveActor,resolveActor.requestId,'已核对原退款','resolve-prior-match',authorizeResolution);
+     assert.equal(priorResolved.event,'REVIEW_RESOLVED');
+     await c.query('RESET ROLE');await c.query("SET LOCAL session_replication_role='replica'");
+     await c.query("UPDATE zzsh_order.legacy_refund_intent SET lease_until=clock_timestamp()-interval '1 second' WHERE id=$1",[retry.intentId]);
+     await c.query("UPDATE zzsh_order.legacy_refund_attempt SET created_at=clock_timestamp()-interval '1 minute' WHERE intent_id=$1",[retry.intentId]);
+     await c.query("SET LOCAL session_replication_role='origin'");await c.query('SET LOCAL ROLE zzsh_completion_synth_probe');
+     body='good';const pendingResolved=await resolveLegacyRefundTerminal(execution,retry.intentId,resolveActor,resolveActor.requestId,'已核对后续退款','resolve-successor',authorizeResolution);
+     assert.equal(pendingResolved.event,'REVIEW_RESOLVED');assert.equal(pendingResolved.terminal?.terminal,'SUCCEEDED');
+     assert.equal((await c.query("SELECT count(*)::int AS n FROM zzsh_order.finance_event WHERE kind='LEGACY_REFUND_PAID'")).rows[0].n,1);
+     assert.equal((await c.query("SELECT count(*)::int AS n FROM zzsh_order.legacy_refund_attempt WHERE intent_id=$1 AND operation='SUBMIT'",[retry.intentId])).rows[0].n,1);
+    }finally{exchange.exchangeRefundRequest=oldExchange;}
+    await c.query('ROLLBACK TO SAVEPOINT pending_terminal_recovery');
     const lateConflict=await receiveLegacyRefundNotification(execution,created.body.intentId,'conflict','synthetic-old-conflict');assert.equal(lateConflict.event,'REVIEW');
     assert.deepEqual((await caseService.readLegacyRefundCaseForStatus(c,b.id,refundDuty.id,created.body.caseId)).blockedBy,
      {intentId:created.body.intentId,refundOrderNo:created.body.refundOrderNo,generation:1});
@@ -461,6 +517,48 @@ const pool=new Pool({host:'127.0.0.1',port:5432,database,user:'postgres',max:3,s
    await c.query('ROLLBACK TO SAVEPOINT refund_case_command');
   }finally{refundProfile.assertFormalRefundProfile=oldProfile;refundProfile.describeRefundProfile=oldDescription;refundProfile.readRefundProfileEvidence=oldEvidence;refundProfile.assertRefundStart=oldStart;refundProfile.assertRefundBinding=oldBinding;refundStore.assertRefundResource=oldResource;}
   await c.query('ROLLBACK TO SAVEPOINT admin_flow');
+  for(const classification of ['COMPLETED_UNREFUNDED','DETAINED']){
+   await c.query('SAVEPOINT historical_refund_branch');await c.query('RESET ROLE');await c.query("SET LOCAL session_replication_role='replica'");
+   const source={id:b.legacyId,order_sn:'SYNTHETIC_ORDER',accounts_id:b.legacyAccountId,user_id:b.legacyRenterId,sale_user_id:b.legacyOwnerId,
+    order_status:'4',pay_is:'1',is_delete:'0',is_settle:classification==='DETAINED'?'2':'0',return_order_money:'50.00',detain_money:'0.00'};
+   const sourceCanonical=canonicalize(source),sourceDigest=sha(sourceCanonical),dutyId=model.legacyEconomicDutyId(b.id,'RENTER_REFUND',b.legacyId);
+   await c.query('DELETE FROM zzsh_order.legacy_order_duty WHERE order_id=$1',[b.id]);
+   await c.query('DELETE FROM zzsh_order.legacy_continuation_evidence WHERE order_id=$1',[b.id]);
+   await c.query(`UPDATE zzsh_order.legacy_order_read_snapshot SET source_order_status=4,source_completed_at=clock_timestamp()-interval '1 day',
+     source_snapshot=$2::jsonb,source_digest=$3 WHERE id=$1`,[b.id,sourceCanonical,sourceDigest]);
+   await c.query(`INSERT INTO zzsh_order.legacy_order_duty(id,order_id,kind,source_record_id,counterparty_user_id,amount_cents,currency,status,source,source_status,source_digest)
+    VALUES($1,$2,'RENTER_REFUND',$3,$4,5000,'CNY','PENDING','LEGACY_IMPORT',$5,$6)`,[dutyId,b.id,b.legacyId,b.renterUserId,classification,sourceDigest]);
+   await c.query(`INSERT INTO zzsh_iam.audit_event(id,actor_type,action,object_type,object_id,outcome,occurred_at,details)
+    VALUES('historical-liability','system','order.legacy.liability.import','rental_order',$1,'SUCCESS',clock_timestamp(),$2::jsonb)`,
+    [b.id,JSON.stringify({dutyId,classification,parentSourceDigest:sourceDigest,settlementRecord:{canonical:sourceCanonical,digest:sourceDigest}})]);
+   const payment={kind:'paymentObservation',sourceUserId:Number(b.legacyRenterId),sourceId:9,sourceStatus:1,channelArrival:'UNKNOWN',
+    createdAt:1790000000,amount:'100.00',sourceNumber:'FIXTURE_P7',sourceOrderType:'1',referenceType:'LEGACY_ORDER',referenceId:b.legacyId,associationState:'SOURCE_VERIFIED'};
+   const paymentCanonical=canonicalize(payment);
+   await c.query(`INSERT INTO zzsh_order.personal_finance_observation(id,user_id,source_kind,source_type,source_system,legacy_user_id,
+    source_entity,source_id,source_digest,source_canonical,included_in_opening,snapshot)
+    VALUES('historic-payment',$1,'HISTORICAL_PAYMENT','LEGACY_MYSQL','legacy_mysql_restore',$2,'la_pay_order','9',$3,$4::text,false,$4::text::jsonb)`,
+    [b.renterUserId,b.legacyRenterId,sha(paymentCanonical),paymentCanonical]);
+   await c.query("SET LOCAL session_replication_role='origin'");await c.query('SET LOCAL ROLE zzsh_completion_synth_probe');
+   await setAuditContext(c,'admin',actor.userId,actor.sessionId,actor.requestId);
+   refundProfile.assertFormalRefundProfile=()=>({merchantIdentityId:'synthetic-merchant',reference:'synthetic-admission',sha256:sha(admissionText),canonical:admissionText});
+   refundProfile.describeRefundProfile=()=>({merchantIdentityId:'synthetic-merchant',merchantNo:'12345',profileId:'synthetic-profile',profileSha256:sha(profileText),keyVersionRef:'synthetic-key-ref',notifyUrl:'https://fixture.invalid/refund',fundsAccount:'SETTLED'});
+   refundProfile.readRefundProfileEvidence=()=>profileText;refundProfile.assertRefundStart=()=>{};refundProfile.assertRefundBinding=()=>{};refundStore.assertRefundResource=async()=> '1';
+   try{
+    const service=require('../dist/src/order/legacy-refund-case-command.js');
+    const request={orderId:b.id,dutyId,expectedDutyRevision:'1',expectedHeadRevision:'0',paymentOrderNo:'FIXTURE_P7',confirmedMerchantNo:'12345',
+     paidCents:'10000',previouslyRefundedCents:'0',priorAppliedToDutyCents:'0',noUnresolvedRefunds:true,evidenceRef:'已核对旧站与合成渠道'};
+    await assert.rejects(service.createLegacyRefundCase(c,actor,request,{admission:{},profile:{}}));
+    if(classification==='DETAINED')await assert.rejects(service.createLegacyRefundCase(c,actor,{...request,historicalDueVerified:true},{admission:{},profile:{}}));
+    const receipt=await service.createLegacyRefundCase(c,actor,{...request,historicalDueVerified:true,
+     ...(classification==='DETAINED'?{historicalReleaseVerified:true}:{})},{admission:{},profile:{}});
+    assert.equal(receipt.body.amountCents,'5000');assert.equal(receipt.body.channelResultAtCreation,'NOT_SUBMITTED');
+    assert.equal((await c.query("SELECT count(*)::int AS n FROM zzsh_order.finance_event WHERE kind='LEGACY_REFUND_PAID'")).rows[0].n,0);
+    const reviewed=(await c.query(`SELECT details FROM zzsh_iam.audit_event WHERE action='order.legacy.refund.reviewed' AND object_id=$1`,[dutyId])).rows[0].details;
+    assert.equal(reviewed.historicalDueVerified,true);assert.equal(reviewed.historicalReleaseVerified===true,classification==='DETAINED');
+    await c.query('SET CONSTRAINTS ALL IMMEDIATE');
+   }finally{refundProfile.assertFormalRefundProfile=oldProfile;refundProfile.describeRefundProfile=oldDescription;refundProfile.readRefundProfileEvidence=oldEvidence;refundProfile.assertRefundStart=oldStart;refundProfile.assertRefundBinding=oldBinding;refundStore.assertRefundResource=oldResource;}
+   await c.query('ROLLBACK TO SAVEPOINT historical_refund_branch');
+  }
   const renter={realm:'user',userId:b.renterUserId,sessionId:'user-session-'+b.legacyRenterId,requestId:'synthetic-renter-request'};
   const owner={realm:'user',userId:b.ownerUserId,sessionId:'user-session-'+b.legacyOwnerId,requestId:'synthetic-owner-request'};
   async function confirmAsParties(autoCredit=true){

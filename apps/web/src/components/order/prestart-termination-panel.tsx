@@ -48,7 +48,7 @@ export function PrestartTerminationPanel({order,party,onChanged}:{order:Order;pa
    {party==='renter'?<><p>原付款记录金额：{walletMoney(read.request.fullRefundCents)}</p>{!read.request.liabilityRecognized?<p className="order-muted">退款情况以审核结果为准。</p>:null}</>:null}
    <p className="order-muted">{formatOrderTime(read.request.updatedAt)}{read.request.dataOrigin==='LOCAL_CONTROLLED'?' · 测试记录，不代表真实退款':''}</p>
    {read.request.state==='APPROVED'?<div className="order-muted" aria-label="退款进度">
-    {read.refund?.intents?.length?<ul>{read.refund.intents.map((item,n)=><li key={item.intentId??n}>{item.refundOrderNo??'退款申请'} · {({READY:'待处理',SUBMITTING:'提交中',UNKNOWN:'结果未记录',PROCESSING:'处理中',REVIEW_REQUIRED:'需要核对',SUCCEEDED:'到账未记录',FAILED:'本次退款未完成',CONFLICT:'需要核对'} as Record<string,string>)[item.state]??'状态未记录'}{item.blockedReason?' · 请联系客服':''}</li>)}</ul>:<p>退款进度未记录。</p>}
+    {read.refund?.intents?.length?<ul>{read.refund.intents.map((item,n)=><li key={item.intentId??n}>{item.refundOrderNo??'退款申请'} · {({READY:'待处理',SUBMITTING:'发送结果待核',UNKNOWN:'结果未记录',PROCESSING:'处理中',REVIEW_REQUIRED:'需要核对',SUCCEEDED:'到账未记录',FAILED:'本次退款未完成',CONFLICT:'需要核对'} as Record<string,string>)[item.state]??'状态未记录'}{item.blockedReason?' · 请联系客服':''}</li>)}</ul>:<p>退款进度未记录。</p>}
     {read.refund?.truncated?<p>部分退款记录仍在核对。</p>:null}<p>到账情况请以收款记录为准。</p>
    </div>:null}</>:null}
   {read&&(!read.request||read.request.state==='REJECTED')&&read.eligibility.allowed||pending?<form onSubmit={e=>{e.preventDefault();void submit();}} className="order-trade-form">

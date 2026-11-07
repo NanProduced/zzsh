@@ -42,7 +42,19 @@ BEGIN
         RAISE EXCEPTION 'legacy refund is not yet due or its deadline is unknown' USING ERRCODE='23514';
       END IF;
     ELSIF duty.source='LEGACY_IMPORT' THEN
-      RAISE EXCEPTION 'historical legacy refund deadline requires verified source evidence' USING ERRCODE='23514';
+      SELECT source_completed_at INTO due_at FROM zzsh_order.legacy_order_read_snapshot
+        WHERE id=duty.order_id AND source_order_status=4 AND source_pay_status=1
+          AND source_snapshot->>'is_settle'=CASE duty.source_status WHEN 'COMPLETED_UNREFUNDED' THEN '0' WHEN 'DETAINED' THEN '2' END;
+      IF NOT COALESCE(duty.source_status IN('COMPLETED_UNREFUNDED','DETAINED'),false) OR due_at IS NULL OR due_at>clock_timestamp()
+        OR NOT EXISTS(SELECT 1 FROM zzsh_iam.audit_event a WHERE a.action='order.legacy.refund.reviewed'
+          AND a.object_type='legacy_order_duty' AND a.object_id=duty.id AND a.outcome='SUCCESS' AND a.actor_type='admin'
+          AND a.actor_id=current_setting('zzsh.actor_id',true) AND a.session_id=current_setting('zzsh.session_id',true)
+          AND a.request_id=current_setting('zzsh.request_id',true) AND a.details->>'noUnresolvedRefunds'='true'
+          AND a.details->>'historicalDueVerified'='true' AND (a.details->>'reviewedAt')::timestamptz BETWEEN due_at AND clock_timestamp()
+          AND (duty.source_status<>'DETAINED' OR a.details->>'historicalReleaseVerified'='true')
+          AND a.details->>'channelResult'='NOT_SUBMITTED' AND a.details->>'sourceDigest'=duty.source_digest) THEN
+        RAISE EXCEPTION 'historical refund needs a due date and staff review' USING ERRCODE='23514';
+      END IF;
     END IF;
   END IF;
   RETURN NEW;

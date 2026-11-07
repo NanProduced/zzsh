@@ -309,7 +309,7 @@ const refundOutcomeCopy: Record<PersonalRefundRead["outcome"], { label: string; 
   CONFLICT: { label: "退款记录需要核对", note: "部分金额暂时无法确认，请联系客服。" },
 };
 const refundIntentStateLabel: Record<PersonalRefundIntent["state"], string> = {
-  READY: "等待处理", SUBMITTING: "提交中", UNKNOWN: "结果未记录", PROCESSING: "处理中",
+  READY: "等待处理", SUBMITTING: "发送结果待核", UNKNOWN: "结果未记录", PROCESSING: "处理中",
   REVIEW_REQUIRED: "需要核对", SUCCEEDED: "到账未记录", FAILED: "申请处理失败", UNRECOGNIZED: "状态未记录",
 };
 const abnormalReasonLabel: Record<PersonalAbnormalResponsibility["reasonCode"], string> = { DUPLICATE_PAYMENT: "重复支付", LATE_PAYMENT: "支付时间异常", UNKNOWN_REASON: "其他付款" };

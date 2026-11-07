@@ -102,8 +102,8 @@ test("party amounts expose the concrete values and fee payer without internal pr
   const labels = renter.map((row) => row.label);
   assert.ok(labels.includes("预计应退"));
   assert.ok(labels.includes("本次消耗合计"));
-  assert.ok(labels.includes("未消耗物资预付款（扣费前）"));
-  assert.ok(labels.includes("未消耗哈夫币预付款（扣费前）"));
+  assert.ok(labels.includes("未消耗物资预付款（按下单时分配）"));
+  assert.ok(labels.includes("未消耗哈夫币预付款（按下单时分配）"));
   assert.ok(!labels.some((label) => label.includes("平台")));
   assert.equal(renter.find((row) => row.label === "预计应退").value, "¥316.00");
   const owner = display.settlementAmountRows("owner", amounts);

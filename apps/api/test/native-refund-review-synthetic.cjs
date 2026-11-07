@@ -14,7 +14,9 @@ const admissionText=JSON.stringify({kind:'FORMAL_NATIVE_REFUND_SERVER_REVIEW',re
   (pg_control_system()).system_identifier::text AS system_id FROM pg_database d WHERE d.datname=current_database()`)).rows[0];
  assert.deepEqual(identity,{db:database,role:'postgres',oid:process.env.NATIVE_REVIEW_SYNTH_OID,marker,system_id:process.env.NATIVE_REVIEW_SYNTH_SYSTEM_ID});
  assert.equal((await c.query("SELECT EXISTS(SELECT 1 FROM pg_roles WHERE rolname='zzsh_native_review_synth') AS found")).rows[0].found,false);
- await c.query('BEGIN');const migration=fs.readFileSync('migrations/business/0172_native_refund_review_resume.sql','utf8');
+ await c.query('BEGIN');for(const file of ['0168_legacy_payment_order_number_guard.sql','0169_legacy_finance_duty_runtime.sql','0170_legacy_commission_confirmation_link.sql','0171_legacy_refund_case.sql'])
+  await c.query(fs.readFileSync('migrations/business/'+file,'utf8'));
+ const migration=fs.readFileSync('migrations/business/0172_native_refund_review_resume.sql','utf8');
  await c.query('SAVEPOINT altered_guard');
  await c.query('CREATE OR REPLACE FUNCTION zzsh_order.guard_joinpay_refund_intent() RETURNS trigger LANGUAGE plpgsql VOLATILE AS $$ BEGIN RETURN NEW; END $$');
  await assert.rejects(c.query(migration),e=>e.code==='55000');await c.query('ROLLBACK TO SAVEPOINT altered_guard');
@@ -22,13 +24,14 @@ const admissionText=JSON.stringify({kind:'FORMAL_NATIVE_REFUND_SERVER_REVIEW',re
  await c.query('CREATE ROLE zzsh_native_review_synth NOLOGIN');
  await c.query('GRANT USAGE ON SCHEMA zzsh_order,zzsh_iam,zzsh_auth_admin,zzsh_auth_user TO zzsh_native_review_synth');
  await c.query('GRANT SELECT,UPDATE ON zzsh_order.channel_refund_intent TO zzsh_native_review_synth');
- await c.query('GRANT SELECT ON zzsh_order.joinpay_refund_attempt,zzsh_order.joinpay_refund_evidence,zzsh_order.finance_economic_root TO zzsh_native_review_synth');
+ await c.query('GRANT SELECT ON zzsh_order.joinpay_refund_attempt,zzsh_order.joinpay_refund_observation,zzsh_order.joinpay_refund_evidence,zzsh_order.finance_economic_root TO zzsh_native_review_synth');
  await c.query('GRANT SELECT,UPDATE ON zzsh_auth_user."user" TO zzsh_native_review_synth');
  await c.query('GRANT SELECT ON zzsh_order.wallet_revision TO zzsh_native_review_synth');
  await c.query('GRANT SELECT,INSERT,UPDATE ON zzsh_order.native_refund_review_resolution TO zzsh_native_review_synth');
  const {configureNativeRefundReviewPrivileges}=require('../dist/src/database/business-migrations.js');
  await configureNativeRefundReviewPrivileges({query:(...args)=>c.query(...args)},'zzsh_native_review_synth');
  assert.equal((await c.query("SELECT has_function_privilege('zzsh_native_review_synth','zzsh_order.resume_native_refund_review(text,text)','EXECUTE') AS allowed")).rows[0].allowed,true);
+ assert.equal((await c.query("SELECT has_function_privilege('zzsh_native_review_synth','zzsh_order.resolve_native_refund_terminal(text,text)','EXECUTE') AS allowed")).rows[0].allowed,true);
  assert.equal((await c.query("SELECT has_table_privilege('zzsh_native_review_synth','zzsh_order.native_refund_review_resolution','INSERT') AS allowed")).rows[0].allowed,false);
  await c.query("SET LOCAL session_replication_role='replica'");
  await c.query(`INSERT INTO zzsh_auth_user."user"(id,name,email,"createdAt","updatedAt") VALUES
@@ -86,6 +89,32 @@ const admissionText=JSON.stringify({kind:'FORMAL_NATIVE_REFUND_SERVER_REVIEW',re
   await assert.rejects(c.query("SELECT zzsh_order.resume_native_refund_review('native-review-intent','核对原退款')"),e=>e.code===code);
   await c.query('ROLLBACK TO SAVEPOINT '+name);
  }
+ await c.query('SAVEPOINT native_terminal_review');await c.query('RESET ROLE');await c.query("SET LOCAL session_replication_role='replica'");
+ await c.query(`INSERT INTO zzsh_order.joinpay_refund_observation(id,intent_id,operation,profile_id,profile_canonical,profile_sha256,key_version_ref,
+   raw_body,raw_sha256,response_complete,http_status,received_bytes,transport_failure,event,schema_status,signature_status,binding_status,evidence_level,state_before,state_after,request_id)
+  VALUES('native-terminal-origin','native-review-intent','NOTIFY','synthetic-profile','{}',encode(sha256(convert_to('{}','UTF8')),'hex'),'synthetic-keyref',
+   convert_to('failure','UTF8'),encode(sha256(convert_to('failure','UTF8')),'hex'),true,NULL,7,NULL,'PENDING_TERMINAL','VALID','MATCH','MATCH','PROVIDER_RESPONSE','UNKNOWN','UNKNOWN','terminal-origin')`);
+ await c.query(`INSERT INTO zzsh_order.joinpay_refund_evidence(id,intent_id,observation_id,operation,terminal,facts_canonical,facts_digest)
+  VALUES('native-terminal-proof','native-review-intent','native-terminal-origin','NOTIFY','FAILED_NO_EXECUTION','{}',encode(sha256(convert_to('{}','UTF8')),'hex'))`);
+ await c.query("UPDATE zzsh_order.channel_refund_intent SET state='FAILED',budget_disposition='RELEASED',terminal_evidence_id='native-terminal-proof' WHERE id='native-review-intent'");
+ await c.query("SET LOCAL session_replication_role='origin'");await c.query('SET LOCAL ROLE zzsh_native_review_synth');
+ await context('native-review-admin','native-review-session','native-terminal-review');
+ await c.query('SAVEPOINT native_terminal_forged');
+ await assert.rejects(c.query("UPDATE zzsh_order.channel_refund_intent SET requires_review=false,revision=revision+1 WHERE id='native-review-intent'"),e=>['23514','40001','42501'].includes(e.code));
+ await c.query('ROLLBACK TO SAVEPOINT native_terminal_forged');
+ const terminal=(await c.query("SELECT zzsh_order.resolve_native_refund_terminal('native-review-intent','已核对渠道记录') AS value")).rows[0].value;
+ assert.equal(terminal.resolved,true);assert.equal(terminal.state,'FAILED');
+ assert.deepEqual((await c.query("SELECT state,requires_review,budget_disposition FROM zzsh_order.channel_refund_intent WHERE id='native-review-intent'")).rows[0],
+  {state:'FAILED',requires_review:false,budget_disposition:'RELEASED'});
+ await c.query('RESET ROLE');await c.query("SET LOCAL session_replication_role='replica'");
+ await c.query(`INSERT INTO zzsh_order.joinpay_refund_observation(id,intent_id,operation,profile_id,profile_canonical,profile_sha256,key_version_ref,
+   raw_body,raw_sha256,response_complete,http_status,received_bytes,transport_failure,event,schema_status,signature_status,binding_status,evidence_level,state_before,state_after,request_id)
+  VALUES('native-terminal-late','native-review-intent','NOTIFY','synthetic-profile','{}',encode(sha256(convert_to('{}','UTF8')),'hex'),'synthetic-keyref',
+   convert_to('late','UTF8'),encode(sha256(convert_to('late','UTF8')),'hex'),true,NULL,4,NULL,'REVIEW','VALID','MATCH','MATCH','PROVIDER_RESPONSE','FAILED','FAILED','terminal-late')`);
+ await c.query("SET LOCAL session_replication_role='origin'");await c.query('SET LOCAL ROLE zzsh_native_review_synth');
+ await c.query("UPDATE zzsh_order.channel_refund_intent SET requires_review=true,revision=revision+1 WHERE id='native-review-intent'");
+ assert.equal((await c.query("SELECT requires_review FROM zzsh_order.channel_refund_intent WHERE id='native-review-intent'")).rows[0].requires_review,true);
+ await c.query('ROLLBACK TO SAVEPOINT native_terminal_review');
  if(concurrent){
   await c.query('RESET ROLE');await c.query('COMMIT');
   const a=await pool.connect(),b=await pool.connect();let waiting;

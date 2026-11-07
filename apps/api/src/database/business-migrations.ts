@@ -786,6 +786,9 @@ export async function configureContinuityFinancePrivileges(pool: Pick<Pool, "que
       AND EXISTS(SELECT 1 FROM pg_proc p JOIN pg_class c ON c.oid=to_regclass('zzsh_order.legacy_refund_review_resolution')
         WHERE p.oid=to_regprocedure('zzsh_order.resume_legacy_refund_review(text,text)') AND p.proowner=c.relowner AND p.prosecdef
          AND p.proconfig=ARRAY['search_path=pg_catalog'])
+      AND EXISTS(SELECT 1 FROM pg_proc p JOIN pg_class c ON c.oid=to_regclass('zzsh_order.legacy_refund_review_resolution')
+        WHERE p.oid=to_regprocedure('zzsh_order.resolve_legacy_pending_terminal(text,text,text)') AND p.proowner=c.relowner AND p.prosecdef
+         AND p.proconfig=ARRAY['search_path=pg_catalog'])
       AND EXISTS(SELECT 1 FROM pg_proc p JOIN pg_class c ON c.oid=to_regclass('zzsh_order.legacy_refund_retry_authorization')
         WHERE p.oid=to_regprocedure('zzsh_order.retry_legacy_refund(text,text,text)') AND p.proowner=c.relowner AND p.prosecdef
          AND p.proconfig=ARRAY['search_path=pg_catalog'])
@@ -808,8 +811,11 @@ export async function configureContinuityFinancePrivileges(pool: Pick<Pool, "que
         ('zzsh_order.legacy_refund_terminal_evidence','legacy_refund_terminal_guard','zzsh_order.guard_legacy_refund_terminal()'),
         ('zzsh_order.legacy_refund_terminal_evidence','legacy_refund_terminal_immutable','zzsh_order.finance_immutable()'),
         ('zzsh_order.legacy_refund_review_resolution','legacy_refund_review_resolution_immutable','zzsh_order.finance_immutable()'),
+        ('zzsh_order.legacy_refund_review_resolution','legacy_refund_review_resolution_insert_guard','zzsh_order.guard_refund_resolution_insert()'),
         ('zzsh_order.legacy_refund_terminal_resolution','legacy_refund_terminal_resolution_immutable','zzsh_order.finance_immutable()'),
+        ('zzsh_order.legacy_refund_terminal_resolution','legacy_refund_terminal_resolution_insert_guard','zzsh_order.guard_refund_resolution_insert()'),
         ('zzsh_order.legacy_refund_retry_authorization','legacy_refund_retry_authorization_immutable','zzsh_order.finance_immutable()'),
+        ('zzsh_order.legacy_refund_retry_authorization','legacy_refund_retry_authorization_insert_guard','zzsh_order.guard_refund_resolution_insert()'),
         ('zzsh_order.joinpay_refund_evidence','zz_legacy_refund_transaction_guard','zzsh_order.guard_native_refund_against_legacy_transaction()'),
         ('zzsh_order.legacy_refund_intent','legacy_refund_terminal_intent_complete','zzsh_order.check_legacy_refund_terminal_complete()'),
         ('zzsh_order.finance_event','legacy_refund_history_event_guard','zzsh_order.guard_legacy_refund_history()'),
@@ -904,11 +910,14 @@ export async function configureContinuityFinancePrivileges(pool: Pick<Pool, "que
     GRANT EXECUTE ON FUNCTION zzsh_order.post_legacy_finance_duty(text,text,text) TO ${role}`);
   if(v4.legacy_refund_present===true)await pool.query(`REVOKE ALL ON FUNCTION zzsh_order.create_legacy_refund_case(text) FROM PUBLIC;
     REVOKE ALL ON FUNCTION zzsh_order.resume_legacy_refund_review(text,text) FROM PUBLIC;
+    REVOKE ALL ON FUNCTION zzsh_order.resolve_legacy_pending_terminal(text,text,text) FROM PUBLIC;
     REVOKE ALL ON FUNCTION zzsh_order.retry_legacy_refund(text,text,text) FROM PUBLIC;
     REVOKE ALL ON FUNCTION zzsh_order.resolve_legacy_refund_terminal(text,text,text) FROM PUBLIC;
+    GRANT SELECT(intent_id,verified_observation_id,created_xid,actor_id,session_id,request_id)
+      ON zzsh_order.legacy_refund_review_resolution TO ${role};
     GRANT SELECT(id,case_id,previous_intent_id,next_intent_id,generation,previous_evidence_id,previous_evidence_digest,confirmed_refunded_cents)
       ON zzsh_order.legacy_refund_retry_authorization TO ${role};
-    GRANT EXECUTE ON FUNCTION zzsh_order.create_legacy_refund_case(text),zzsh_order.resume_legacy_refund_review(text,text),zzsh_order.retry_legacy_refund(text,text,text),zzsh_order.resolve_legacy_refund_terminal(text,text,text) TO ${role}`);
+    GRANT EXECUTE ON FUNCTION zzsh_order.create_legacy_refund_case(text),zzsh_order.resume_legacy_refund_review(text,text),zzsh_order.resolve_legacy_pending_terminal(text,text,text),zzsh_order.retry_legacy_refund(text,text,text),zzsh_order.resolve_legacy_refund_terminal(text,text,text) TO ${role}`);
   if(withdrawalLinkTables.every(r=>r.present))await pool.query(`
     REVOKE ALL ON FUNCTION zzsh_order.legacy_withdrawal_verified_source(zzsh_order.personal_finance_observation),
       zzsh_order.bump_legacy_withdrawal_subject_revision(),zzsh_order.guard_legacy_withdrawal_link_evidence(),
@@ -923,16 +932,25 @@ export async function configureNativeRefundReviewPrivileges(pool:Pick<Pool,"quer
     to_regprocedure('zzsh_order.resume_native_refund_review(text,text)') IS NOT NULL AS function_present,
     EXISTS(SELECT 1 FROM pg_proc p JOIN pg_class c ON c.oid=to_regclass('zzsh_order.native_refund_review_resolution')
       WHERE p.oid=to_regprocedure('zzsh_order.resume_native_refund_review(text,text)') AND p.proowner=c.relowner AND p.prosecdef
+       AND p.proconfig=ARRAY['search_path=pg_catalog'])
+    AND EXISTS(SELECT 1 FROM pg_proc p JOIN pg_class c ON c.oid=to_regclass('zzsh_order.native_refund_review_resolution')
+      WHERE p.oid=to_regprocedure('zzsh_order.resolve_native_refund_terminal(text,text)') AND p.proowner=c.relowner AND p.prosecdef
        AND p.proconfig=ARRAY['search_path=pg_catalog']) AS function_ready,
     EXISTS(SELECT 1 FROM pg_trigger t WHERE t.tgrelid=to_regclass('zzsh_order.native_refund_review_resolution')
       AND t.tgname='native_refund_review_resolution_immutable' AND NOT t.tgisinternal AND t.tgenabled IN('O','A')
-      AND t.tgfoid=to_regprocedure('zzsh_order.finance_immutable()')) AS trigger_ready`)).rows[0];
+      AND t.tgfoid=to_regprocedure('zzsh_order.finance_immutable()'))
+    AND EXISTS(SELECT 1 FROM pg_trigger t WHERE t.tgrelid=to_regclass('zzsh_order.native_refund_review_resolution')
+      AND t.tgname='native_refund_review_resolution_insert_guard' AND NOT t.tgisinternal AND t.tgenabled IN('O','A')
+      AND t.tgfoid=to_regprocedure('zzsh_order.guard_refund_resolution_insert()')) AS trigger_ready`)).rows[0];
   if(!state||typeof state.present!=='boolean'||typeof state.function_present!=='boolean')throw new Error('Native refund review inventory is incomplete');
   if(!state.present&&!state.function_present)return;
   if(!state.present||!state.function_present||state.function_ready!==true||state.trigger_ready!==true)throw new Error('Native refund review schema is partially deployed');
   await pool.query(`REVOKE ALL ON TABLE zzsh_order.native_refund_review_resolution FROM ${role};
     REVOKE ALL ON FUNCTION zzsh_order.resume_native_refund_review(text,text) FROM PUBLIC;
-    GRANT EXECUTE ON FUNCTION zzsh_order.resume_native_refund_review(text,text) TO ${role}`);
+    REVOKE ALL ON FUNCTION zzsh_order.resolve_native_refund_terminal(text,text) FROM PUBLIC;
+    GRANT SELECT(intent_id,previous_revision,terminal_evidence_id,created_xid,actor_id,session_id,request_id)
+      ON zzsh_order.native_refund_review_resolution TO ${role};
+    GRANT EXECUTE ON FUNCTION zzsh_order.resume_native_refund_review(text,text),zzsh_order.resolve_native_refund_terminal(text,text) TO ${role}`);
 }
 
 /** 退款可选表在宽授权之后重新收窄；调用方保有原ACL事务，不在旧前缀创建对象。 */

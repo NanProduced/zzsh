@@ -394,6 +394,24 @@ export async function updateFullPayoutTermsDraft(client: PoolClient, adminUserId
 
 export type ActivationResult = { releaseId: string; generation: string; affectedCount: number };
 
+type SettlementResourcePrice = { name:string; unit:string; pricingKind:string|null; unitQuantity:string|null; buyerUnitAmount:string|null; ownerUnitAmount:string|null };
+export function assertSettlementResourcePrices(mode:unknown,rows:readonly SettlementResourcePrice[]) {
+  if(mode!=='SPREAD' && mode!=='PERCENT')throw invalid('价格模式无效');
+  if(rows.length>63)throw invalid('可结算物资超过 63 项，请先调整物资目录');
+  for(const row of rows){
+    let valid=['ROUND','PIECE','DAY'].includes(row.unit) && row.pricingKind==='FIXED_UNIT'
+      && typeof row.unitQuantity==='string' && /^[1-9]\d{0,23}$/.test(row.unitQuantity) && typeof row.buyerUnitAmount==='string';
+    try{
+      if(valid){
+        const buyer=decimalToBigInt(parseNonNegativeDecimal(row.buyerUnitAmount!,8,'buyer unit'),8);
+        valid=mode==='PERCENT' ? row.ownerUnitAmount===null : typeof row.ownerUnitAmount==='string'
+          && decimalToBigInt(parseNonNegativeDecimal(row.ownerUnitAmount,8,'owner unit'),8)<=buyer;
+      }
+    }catch{valid=false;}
+    if(!valid)throw invalid(`物资“${row.name}”的结算单价或单位未配置完整，请先检查价格规则`,'priceVersionId');
+  }
+}
+
 export async function activateRelease(
   client: PoolClient,
   adminUserId: string,
@@ -420,9 +438,16 @@ export async function activateRelease(
     if (row.gameId !== gameId) throw invalid("Rule versions must belong to this game");
     if (row.status !== "SEALED") throw conflict("Rule versions must be sealed before activation");
   }
-  const pricePolicy = (await client.query<{ policy: unknown | null }>(
-    `SELECT "funding_policy" AS policy FROM "zzsh_supply"."price_version" WHERE "id" = $1`, [priceVersionId],
-  )).rows[0]?.policy;
+  const priceMeta = (await client.query<{ policy: unknown | null;mode:string }>(
+    `SELECT "funding_policy" AS policy,mode FROM "zzsh_supply"."price_version" WHERE "id" = $1`, [priceVersionId],
+  )).rows[0];
+  if(!priceMeta)throw invalid('价格规则不存在');
+  const settlementItems=(await client.query<SettlementResourcePrice>(`SELECT i.name,i.unit,p.pricing_kind AS "pricingKind",p.unit_quantity::text AS "unitQuantity",
+    p.buyer_unit_amount::text AS "buyerUnitAmount",p.owner_unit_amount::text AS "ownerUnitAmount"
+    FROM zzsh_supply.billable_item i LEFT JOIN zzsh_supply.price_line p ON p.item_id=i.id AND p.price_version_id=$2 AND p.customer_tier='STANDARD'
+    WHERE i.game_id=$1 AND i.enabled AND i.unit<>'HAFF_BASE' ORDER BY i.id FOR SHARE OF i`,[gameId,priceVersionId])).rows;
+  assertSettlementResourcePrices(priceMeta.mode,settlementItems);
+  const pricePolicy=priceMeta.policy;
   if (pricePolicy !== null && pricePolicy !== undefined) await readFullPayoutTerms(client, gameId, validateFundingPolicy(pricePolicy), priceVersionId);
   const nextGeneration = await client.query<{ generation: string }>(
     `SELECT (COALESCE(MAX("generation"), 0) + 1)::text AS "generation" FROM "zzsh_supply"."rule_release" WHERE "game_id" = $1`,

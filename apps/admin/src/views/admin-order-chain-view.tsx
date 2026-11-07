@@ -92,7 +92,7 @@ const paymentLabel=(o:Order)=>o.payment.state==="RECORDED_PAID"?"支付已记录
 const paymentTime=(o:Order)=>o.payment.state==="RECORDED_PAID"?o.payment.recordedAt?time(o.payment.recordedAt):"支付时间未记录":o.payment.state==="RECORDED_UNPAID"?(o.source.origin==="LEGACY"?"原系统未记录付款时间，渠道结果另核":"暂无已接纳付款时间"):"支付事实未记录";
 /** 履约记录不再重复支付状态；未知与未发生分开。 */
 const paymentRecordTime=(o:Order)=>o.payment.state==="RECORDED_PAID"?paymentTime(o):o.payment.state==="RECORDED_UNPAID"?paymentTime(o):"支付事实与时间未记录";
-const refundLocalStateLabels:Record<string,string>={READY:"待提交",SUBMITTING:"提交中",UNKNOWN:"结果未知",PROCESSING:"处理中",REVIEW_REQUIRED:"需人工复核",SUCCEEDED:"本地退款成功记录",FAILED:"本地失败"};
+const refundLocalStateLabels:Record<string,string>={READY:"待提交",SUBMITTING:"发送结果待核",UNKNOWN:"结果未知",PROCESSING:"处理中",REVIEW_REQUIRED:"需人工复核",SUCCEEDED:"本地退款成功记录",FAILED:"本地失败"};
 const refundLocalStateText=(state:string)=>{const text=refundLocalStateLabels[state]??"状态未记录";return text.startsWith("本地")?text:"本地 "+text;};
 /** 账号摘要：原生单取本单冻结版本，迁入单取账号公开版本（与账号页一致）；缺源保持未提供。 */
 const frozenText=(f:FrozenAccount)=>{

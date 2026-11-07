@@ -55,7 +55,7 @@ export async function readLegacyOrderTeamAccess(c:PoolClient,actor:OrderTeamActo
     g.app_id,g.assigned_admin_id,g.provision_state,g.team_state,g.team_id,g.team_name,g.team_ready_at
     FROM zzsh_order.legacy_order_read_snapshot l JOIN zzsh_supply.game game ON game.id=l.game_id
     LEFT JOIN zzsh_order.legacy_continuation_version h ON h.order_id=l.id AND h.superseded_at IS NULL
-    LEFT JOIN zzsh_order.im_order_group g ON g.legacy_order_id=l.id
+    LEFT JOIN zzsh_order.im_order_group g ON g.order_id=l.id AND g.legacy_order_id=l.id
     WHERE l.id=$1 AND COALESCE(l.source_snapshot->>'is_delete','0')='0'`,[orderId])).rows[0];
   if(!row)throw new SecurityApiError(404,"NOT_FOUND","Order Team unavailable");
   if(actor.realm==="user"&&actor.userId!==row.renter_user_id&&actor.userId!==row.owner_user_id)

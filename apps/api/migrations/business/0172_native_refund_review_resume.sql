@@ -10,9 +10,12 @@ END $$;
 CREATE TABLE zzsh_order.native_refund_review_resolution (
  id text PRIMARY KEY,intent_id text NOT NULL REFERENCES zzsh_order.channel_refund_intent(id),previous_revision bigint NOT NULL,
  actor_id text NOT NULL REFERENCES zzsh_auth_admin."user"(id),session_id text NOT NULL,request_id text NOT NULL,reason text NOT NULL,
+ terminal_evidence_id text REFERENCES zzsh_order.joinpay_refund_evidence(id),
  created_xid xid8 NOT NULL DEFAULT pg_current_xact_id(),created_at timestamptz NOT NULL DEFAULT clock_timestamp(),UNIQUE(intent_id,previous_revision)
 );
+CREATE TRIGGER native_refund_review_resolution_insert_guard BEFORE INSERT ON zzsh_order.native_refund_review_resolution FOR EACH ROW EXECUTE FUNCTION zzsh_order.guard_refund_resolution_insert();
 CREATE TRIGGER native_refund_review_resolution_immutable BEFORE UPDATE OR DELETE ON zzsh_order.native_refund_review_resolution FOR EACH ROW EXECUTE FUNCTION zzsh_order.finance_immutable();
+COMMENT ON COLUMN zzsh_order.native_refund_review_resolution.terminal_evidence_id IS '终态冲突复核所依据的原始渠道终态；普通恢复原号查询时为空。';
 REVOKE ALL ON zzsh_order.native_refund_review_resolution FROM PUBLIC;
 
 --> statement-breakpoint
@@ -33,9 +36,11 @@ BEGIN
   THEN RAISE EXCEPTION 'formal refund original binding immutable' USING ERRCODE='40001';END IF;
   IF OLD.state IN('SUCCEEDED','FAILED') THEN
    IF (to_jsonb(NEW)-ARRAY['revision','requires_review','updated_at']) IS DISTINCT FROM(to_jsonb(OLD)-ARRAY['revision','requires_review','updated_at'])
-    OR OLD.requires_review OR NOT NEW.requires_review
-    OR NOT EXISTS(SELECT 1 FROM zzsh_order.joinpay_refund_observation x WHERE x.intent_id=OLD.id AND x.event='REVIEW'
-      AND x.created_xid=pg_current_xact_id() AND x.state_before=OLD.state AND x.state_after=OLD.state)
+    OR NOT((NOT OLD.requires_review AND NEW.requires_review AND EXISTS(SELECT 1 FROM zzsh_order.joinpay_refund_observation x
+      WHERE x.intent_id=OLD.id AND x.event='REVIEW' AND x.created_xid=pg_current_xact_id() AND x.state_before=OLD.state AND x.state_after=OLD.state))
+     OR(OLD.requires_review AND NOT NEW.requires_review AND EXISTS(SELECT 1 FROM zzsh_order.native_refund_review_resolution z
+      WHERE z.intent_id=OLD.id AND z.previous_revision=OLD.revision AND z.terminal_evidence_id=OLD.terminal_evidence_id AND z.created_xid=pg_current_xact_id()
+       AND z.actor_id=current_setting('zzsh.actor_id',true) AND z.session_id=current_setting('zzsh.session_id',true) AND z.request_id=current_setting('zzsh.request_id',true))))
    THEN RAISE EXCEPTION 'formal refund terminal cannot change' USING ERRCODE='40001';END IF;
   ELSIF OLD.requires_review AND NOT NEW.requires_review THEN
    IF (to_jsonb(NEW)-ARRAY['state','revision','requires_review','updated_at']) IS DISTINCT FROM(to_jsonb(OLD)-ARRAY['state','revision','requires_review','updated_at'])
@@ -302,3 +307,51 @@ BEGIN
  RETURN jsonb_build_object('intentId',i.id,'resumed',true,'state','UNKNOWN','resolutionId',resolution_value);
 END $$;
 REVOKE ALL ON FUNCTION zzsh_order.resume_native_refund_review(text,text) FROM PUBLIC;
+
+--> statement-breakpoint
+CREATE FUNCTION zzsh_order.resolve_native_refund_terminal(intent_value text,reason_text text) RETURNS jsonb
+ LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog AS $$
+DECLARE i zzsh_order.channel_refund_intent;game_value text;boss boolean;resolution_value text;
+ actor_value text:=current_setting('zzsh.actor_id',true);session_value text:=current_setting('zzsh.session_id',true);
+ request_value text:=current_setting('zzsh.request_id',true);
+BEGIN
+ IF current_setting('transaction_isolation')<>'read committed' OR current_setting('zzsh.actor_type',true) IS DISTINCT FROM 'admin'
+  OR COALESCE(length(actor_value),0)=0 OR COALESCE(length(session_value),0)=0 OR COALESCE(length(request_value),0)=0
+  OR length(request_value)>128 OR reason_text IS NULL OR length(trim(reason_text)) NOT BETWEEN 3 AND 200 OR reason_text~'[[:cntrl:]]'
+ THEN RAISE EXCEPTION 'native refund terminal review identity unavailable' USING ERRCODE='42501';END IF;
+ SELECT * INTO i FROM zzsh_order.channel_refund_intent WHERE id=intent_value AND payment_source='JOINPAY';
+ SELECT game_id INTO game_value FROM zzsh_order.rental_order WHERE id=i.order_id;
+ IF i.id IS NULL OR game_value IS NULL THEN RAISE EXCEPTION 'native refund terminal unavailable' USING ERRCODE='23514';END IF;
+ SELECT sec.is_boss INTO boss FROM zzsh_iam.admin_security sec JOIN zzsh_auth_admin."user" u ON u.id=sec.admin_user_id
+  JOIN zzsh_auth_admin."session" s ON s."userId"=u.id AND s.id=session_value
+  WHERE sec.admin_user_id=actor_value AND sec.status='ACTIVE' AND NOT sec.password_change_required AND NOT u.suspended
+   AND u."twoFactorEnabled" IS TRUE AND NOT s.locked AND s."expiresAt">clock_timestamp() FOR SHARE OF sec,u,s;
+ IF boss IS NULL THEN RAISE EXCEPTION 'native refund review session unavailable' USING ERRCODE='42501';END IF;
+ IF NOT boss AND (EXISTS(SELECT 1 FROM zzsh_iam.admin_user_permission deny WHERE deny.admin_user_id=actor_value AND deny.permission_code='order.settlement.write' AND deny.effect='DENY')
+  OR NOT(EXISTS(SELECT 1 FROM zzsh_iam.admin_user_permission allow WHERE allow.admin_user_id=actor_value AND allow.permission_code='order.settlement.write' AND allow.effect='ALLOW')
+   OR EXISTS(SELECT 1 FROM zzsh_iam.admin_user_role ur JOIN zzsh_iam.admin_role role ON role.id=ur.role_id AND role.status='ACTIVE'
+    JOIN zzsh_iam.admin_role_permission rp ON rp.role_id=role.id WHERE ur.admin_user_id=actor_value AND rp.permission_code='order.settlement.write'))
+  OR NOT EXISTS(SELECT 1 FROM zzsh_iam.admin_security sec WHERE sec.admin_user_id=actor_value AND (sec.game_scope_mode='ALL_GAMES'
+   OR EXISTS(SELECT 1 FROM zzsh_supply.admin_supply_scope scope WHERE scope.admin_user_id=actor_value AND scope.game_id=game_value))))
+ THEN RAISE EXCEPTION 'native refund review permission unavailable' USING ERRCODE='42501';END IF;
+ PERFORM pg_advisory_xact_lock(hashtextextended(jsonb_build_array('zzsh:refund-funds:v1','JOINPAY',i.merchant_identity_id,i.original_payment_trx_no)::text,0));
+ PERFORM pg_advisory_xact_lock(hashtextextended(jsonb_build_array('zzsh:refund-order-no:v1',i.merchant_identity_id,i.original_payment_order_no)::text,0));
+ PERFORM pg_advisory_xact_lock(hashtextextended(jsonb_build_array('zzsh:legacy-original-order-no:v1',i.original_payment_order_no)::text,0));
+ PERFORM id FROM zzsh_auth_user."user" WHERE id=i.renter_user_id FOR UPDATE;
+ SELECT * INTO i FROM zzsh_order.channel_refund_intent WHERE id=intent_value AND payment_source='JOINPAY' FOR UPDATE;
+ IF i.state NOT IN('SUCCEEDED','FAILED') OR NOT i.requires_review OR i.terminal_evidence_id IS NULL
+  OR NOT EXISTS(SELECT 1 FROM zzsh_order.joinpay_refund_evidence e WHERE e.id=i.terminal_evidence_id AND e.intent_id=i.id)
+ THEN RAISE EXCEPTION 'native refund terminal review unavailable' USING ERRCODE='23514';END IF;
+ resolution_value:='native_refund_review_'||replace(gen_random_uuid()::text,'-','');
+ INSERT INTO zzsh_order.native_refund_review_resolution(id,intent_id,previous_revision,actor_id,session_id,request_id,reason,terminal_evidence_id)
+  VALUES(resolution_value,i.id,i.revision,actor_value,session_value,request_value,trim(reason_text),i.terminal_evidence_id);
+ UPDATE zzsh_order.channel_refund_intent SET requires_review=false,revision=revision+1 WHERE id=i.id AND revision=i.revision AND requires_review;
+ IF NOT FOUND THEN RAISE EXCEPTION 'native refund terminal review changed' USING ERRCODE='40001';END IF;
+ INSERT INTO zzsh_iam.audit_event(id,actor_type,actor_id,session_id,action,object_type,object_id,outcome,request_id,reason,occurred_at,details)
+  VALUES('audit_'||replace(gen_random_uuid()::text,'-',''),'admin',actor_value,session_value,'order.native.refund.terminal_review_resolved',
+   'channel_refund_intent',i.id,'SUCCESS',request_value,trim(reason_text),clock_timestamp(),
+   jsonb_build_object('orderId',i.order_id,'resolutionId',resolution_value,'terminalEvidenceId',i.terminal_evidence_id,'refundOrderNo',i.refund_order_no));
+ RETURN jsonb_build_object('intentId',i.id,'resolved',true,'state',i.state,'resolutionId',resolution_value);
+END $$;
+REVOKE ALL ON FUNCTION zzsh_order.resolve_native_refund_terminal(text,text) FROM PUBLIC;
+COMMENT ON FUNCTION zzsh_order.resolve_native_refund_terminal(text,text) IS '记录受权客服对原退款终态的核对并解除待核，不产生资金变动。';

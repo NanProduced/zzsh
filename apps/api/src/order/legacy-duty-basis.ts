@@ -21,7 +21,14 @@ export async function readLegacyDutyBasis(client: PoolClient, orderId: string, d
   const binding = await readLegacyContinuationBinding(client, orderId), head = await readLegacyContinuationHead(client, orderId);
   const effective = await readLegacyContinuationEvidence(client, orderId, head), effectiveFacts = effective ? readSealedLegacyFacts(effective) : null;
   const sourceState = effectiveFacts?.evidence.source.isSettle ?? (await client.query<{ state: string }>(`SELECT source_snapshot->>'is_settle' AS state FROM zzsh_order.legacy_order_read_snapshot WHERE id=$1`, [orderId])).rows[0]?.state;
-  const fundsDisposition: "AVAILABLE" | "HELD" | "CONFISCATED" | null = sourceState === "0" ? "AVAILABLE" : sourceState === "2" ? "HELD" : sourceState === "3" ? "CONFISCATED" : null;
+  const released=sourceState==='2' && duty.source==='LEGACY_IMPORT' && duty.sourceStatus==='DETAINED' && !head
+    ? (await client.query<{released:boolean}>(`SELECT EXISTS(SELECT 1 FROM zzsh_iam.audit_event a WHERE a.object_type='legacy_order_duty'
+        AND a.object_id=$1 AND a.action='order.legacy.refund.reviewed' AND a.actor_type='admin' AND a.outcome='SUCCESS'
+        AND a.details->>'orderId'=$2 AND a.details->>'sourceDigest'=$3 AND a.details->>'historicalReleaseVerified'='true'
+        AND a.details->>'historicalDueVerified'='true' AND a.details->>'channelResult'='NOT_SUBMITTED'
+        AND encode(sha256(convert_to(zzsh_order.canonical_finance_json(a.details-'reviewDigest'),'UTF8')),'hex')=a.details->>'reviewDigest') AS released`,
+      [duty.id,orderId,binding.sourceDigest])).rows[0]?.released===true:false;
+  const fundsDisposition: "AVAILABLE" | "HELD" | "CONFISCATED" | null = sourceState === "0" || released ? "AVAILABLE" : sourceState === "2" ? "HELD" : sourceState === "3" ? "CONFISCATED" : null;
   if (!fundsDisposition && duty.kind !== "COMMISSION" && duty.kind !== "OWNER_CREDIT") return { state: "UNKNOWN", reason: "FUNDS_DISPOSITION_UNRESOLVED" };
   let currentNetRefundCents:string|null=null;
   if(duty.kind==="RENTER_REFUND" && effectiveFacts){const source=effectiveFacts.evidence.source;if(source.returnOrderMoney===null)return {state:"UNKNOWN",reason:"CURRENT_REFUND_UNKNOWN"};const gross=BigInt(legacyPlanYuanToCents(source.returnOrderMoney)),detain=source.detainMoney===null?0n:BigInt(legacyPlanYuanToCents(source.detainMoney));

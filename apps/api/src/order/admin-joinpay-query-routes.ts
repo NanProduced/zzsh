@@ -11,7 +11,7 @@ import { ensureApiV1RequestId } from "../contracts/api-v1";
 import { bodyOf, ensureOnlyFields, forbidden, invalid, notFound, sendJson, type SupplyNodeRequest } from "../supply/supply-util";
 import { requireOrigin, requestPath, safely, type SupplyResponse } from "../supply/supply-routes";
 import { authorizeAdminNativeRefund, type AdminNativeRefundActor } from "./native-refund-command";
-import { queryJoinpayRefund, resumeNativeRefundReview, RefundAttemptCommitUnknown, type RefundExecution } from "./joinpay-refund-attempt";
+import { queryJoinpayRefund, resolveNativeRefundTerminal, resumeNativeRefundReview, RefundAttemptCommitUnknown, type RefundExecution } from "./joinpay-refund-attempt";
 import {executeLegacyRefund,resolveLegacyRefundTerminal,resumeLegacyRefundReview,retryLegacyRefund} from './legacy-refund-attempt';
 import {authorizeLegacyRefundReviewAccess} from './legacy-refund-review-store';
 import { CollectionAttemptCommitUnknown, executeJoinpayCollectionAttempt, type JoinpayCollectionExecution } from "./joinpay-collection-attempt";
@@ -34,14 +34,14 @@ export function projectWorkerStatus(raw: Readonly<Partial<Record<"refund" | "leg
       failurePhase: w.failure?.phase === "CLAIM" || w.failure?.phase === "RESULT" || w.failure?.phase === "ALLOCATION" ? w.failure.phase : null, lastSuccessfulQueryAt: null };
   return { contractVersion: "admin-joinpay-worker-status.v1" as const, refund: one(raw?.refund), legacyRefund:one(raw?.legacyRefund), payout: one(raw?.payout), collection: one(raw?.collection), channelArrival: "UNKNOWN" as const };
 }
-type Operation = "REFUND_QUERY" | "REFUND_RESUME" | "LEGACY_REFUND_QUERY" | "LEGACY_REFUND_SUBMIT" | "LEGACY_REFUND_RESUME" | "LEGACY_REFUND_RETRY" | "LEGACY_REFUND_RESOLVE" | "PAYOUT_QUERY" | "COLLECTION_QUERY";
+type Operation = "REFUND_QUERY" | "REFUND_RESUME" | "REFUND_RESOLVE" | "LEGACY_REFUND_QUERY" | "LEGACY_REFUND_SUBMIT" | "LEGACY_REFUND_RESUME" | "LEGACY_REFUND_RETRY" | "LEGACY_REFUND_RESOLVE" | "PAYOUT_QUERY" | "COLLECTION_QUERY";
 const dto = (operation: Operation, objectId: string, outcome: Record<string, unknown>, localFundsEffect: string, requestId: string) =>
   ({ contractVersion: "admin-joinpay-query.v1" as const, operation, objectId, outcome, channelArrival: "UNKNOWN" as const, localFundsEffect, requestId });
 
 /** 与领取共用事务；系统attempt由executionOwner关联到实际管理员，不把查询许可记成资金成功。 */
 async function recordAdminQuery(client: PoolClient, actor: AdminNativeRefundActor, operation: Operation, objectId: string, executionOwner: string, requestId: string) {
   await recordAudit(client, { actorType: "admin", actorId: actor.userId, sessionId: actor.sessionId,
-    action: operation==='LEGACY_REFUND_SUBMIT'?'joinpay.admin.refund.submit.authorized':operation==='LEGACY_REFUND_RESUME'||operation==='REFUND_RESUME'?'joinpay.admin.refund.resume.authorized':operation==='LEGACY_REFUND_RETRY'?'joinpay.admin.refund.retry.authorized':operation==='LEGACY_REFUND_RESOLVE'?'joinpay.admin.refund.resolve.authorized':"joinpay.admin.query.authorized", objectType: ['REFUND_QUERY','REFUND_RESUME'].includes(operation) ? "channel_refund_intent" : ['LEGACY_REFUND_QUERY','LEGACY_REFUND_SUBMIT','LEGACY_REFUND_RESUME','LEGACY_REFUND_RETRY','LEGACY_REFUND_RESOLVE'].includes(operation) ? "legacy_refund_intent" : operation === "PAYOUT_QUERY" ? "joinpay_withdrawal_intent" : "payment_request",
+    action: operation==='LEGACY_REFUND_SUBMIT'?'joinpay.admin.refund.submit.authorized':operation==='LEGACY_REFUND_RESUME'||operation==='REFUND_RESUME'?'joinpay.admin.refund.resume.authorized':operation==='LEGACY_REFUND_RETRY'?'joinpay.admin.refund.retry.authorized':operation==='LEGACY_REFUND_RESOLVE'||operation==='REFUND_RESOLVE'?'joinpay.admin.refund.resolve.authorized':"joinpay.admin.query.authorized", objectType: ['REFUND_QUERY','REFUND_RESUME','REFUND_RESOLVE'].includes(operation) ? "channel_refund_intent" : ['LEGACY_REFUND_QUERY','LEGACY_REFUND_SUBMIT','LEGACY_REFUND_RESUME','LEGACY_REFUND_RETRY','LEGACY_REFUND_RESOLVE'].includes(operation) ? "legacy_refund_intent" : operation === "PAYOUT_QUERY" ? "joinpay_withdrawal_intent" : "payment_request",
     objectId, outcome: "SUCCESS", requestId, details: { operation, executionOwner,
       ...(['LEGACY_REFUND_SUBMIT','LEGACY_REFUND_RETRY'].includes(operation)?{firstDispatchRequested:true}:{firstDispatchAllowed:false}),channelResult: "NOT_QUERIED" } });
 }
@@ -92,14 +92,14 @@ export async function handleAdminJoinpayQueryRoute(request: SupplyNodeRequest, r
     return true;
   }
   const match = PATH.exec(path);
-  if (!match || match[3]!=='query-only' && match[1]!=='legacy-refunds' && !(match[1]==='refunds'&&match[3]==='resume')) return false;
+  if (!match || match[3]!=='query-only' && match[1]!=='legacy-refunds' && !(match[1]==='refunds'&&['resume','resolve'].includes(match[3]!))) return false;
   const requestId = ensureApiV1RequestId(request), method = (request.method ?? "GET").toUpperCase();
   response.setHeader("X-Request-Id", requestId);
   await safely(response, requestId, async () => {
     if (method !== "POST") throw notFound();
     if (!requireOrigin(request, response, security, requestId)) return;
     const context = await readAdminContext(request, security), kind = match[1]!, objectId = match[2]!, action=match[3]!;
-    const body = bodyOf(request); ensureOnlyFields(body,(kind==='legacy-refunds'&&['resume','resolve'].includes(action)||kind==='refunds'&&action==='resume')?['reason']
+    const body = bodyOf(request); ensureOnlyFields(body,(kind==='legacy-refunds'&&['resume','resolve'].includes(action)||kind==='refunds'&&['resume','resolve'].includes(action))?['reason']
       :kind==='legacy-refunds'&&action==='retry'?['reason','previouslyRefundedCents','noUnresolvedRefunds']:[]);
     const actor = { userId: context.userId, sessionId: context.sessionId }, owner = `adminq_${randomUUID()}`;
     if(kind==='legacy-refunds'){
@@ -166,6 +166,12 @@ export async function handleAdminJoinpayQueryRoute(request: SupplyNodeRequest, r
             async client=>{await authorizeByOrder(client,actor,REFUND_ORDER,objectId);await recordAdminQuery(client,actor,'REFUND_RESUME',objectId,owner,requestId);});
           sendJson(response,200,dto('REFUND_RESUME',objectId,{kind:resumed.resumed?'RESUMED':'ALREADY_RESUMED',state:resumed.state},'NONE',requestId),requestId);return;
         }
+        if(action==='resolve'){
+          if(typeof body.reason!=='string')throw invalid('Review reason is required');
+          const resolved=await resolveNativeRefundTerminal({...options.refund,pool:security.pool},objectId,actor,requestId,body.reason,
+            async client=>{await authorizeByOrder(client,actor,REFUND_ORDER,objectId);await recordAdminQuery(client,actor,'REFUND_RESOLVE',objectId,owner,requestId);});
+          sendJson(response,200,dto('REFUND_RESOLVE',objectId,{kind:resolved.resolved?'RESOLVED':resolved.alreadyClear?'ALREADY_RESOLVED':'REQUIRES_MANUAL',state:resolved.state},'NONE',requestId),requestId);return;
+        }
         const out = await queryJoinpayRefund({ ...options.refund, pool: security.pool }, objectId, owner, { minimumIntervalSeconds: INTERVAL,
           authorize: async client => { await authorizeByOrder(client, actor, REFUND_ORDER, objectId);
             await recordAdminQuery(client, actor, "REFUND_QUERY", objectId, owner, requestId); } });
@@ -174,7 +180,7 @@ export async function handleAdminJoinpayQueryRoute(request: SupplyNodeRequest, r
         sendJson(response, 200, dto("REFUND_QUERY", objectId, outcome, out.kind === "OBSERVED" && out.terminal !== null ? "TERMINAL_CONSUMED_BY_STORE" : "NONE", requestId), requestId);
       } catch (error) {
         if (!(error instanceof RefundAttemptCommitUnknown)) throw error;
-        sendJson(response, 202, dto(action==='resume'?'REFUND_RESUME':'REFUND_QUERY', objectId, { kind: "UNKNOWN", phase: error.phase }, "UNKNOWN", requestId), requestId);
+        sendJson(response, 202, dto(action==='resume'?'REFUND_RESUME':action==='resolve'?'REFUND_RESOLVE':'REFUND_QUERY', objectId, { kind: "UNKNOWN", phase: error.phase }, "UNKNOWN", requestId), requestId);
       }
       return;
     }

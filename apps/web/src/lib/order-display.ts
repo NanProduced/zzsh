@@ -613,8 +613,8 @@ export function settlementAmountRows(
   if (party === "renter") {
     rows.push({ label: "哈夫币消耗（租客侧）", value: amountAt(amounts, "haffConsumedBuyer") });
     rows.push({ label: "物品消耗（租客侧）", value: amountAt(amounts, "itemConsumedBuyer") });
-    rows.push({ label: "未消耗物资预付款（扣费前）", value: amountAt(amounts, "unusedItemRefund") });
-    rows.push({ label: "未消耗哈夫币预付款（扣费前）", value: amountAt(amounts, "unusedHaffRefund") });
+    rows.push({ label: "未消耗物资预付款（按下单时分配）", value: amountAt(amounts, "unusedItemRefund"), note: "按下单时的预付款分配计算；实际应退会重新计算会员折扣和费用。" });
+    rows.push({ label: "未消耗哈夫币预付款（按下单时分配）", value: amountAt(amounts, "unusedHaffRefund"), note: "按下单时的预付款分配计算；实际应退会重新计算会员折扣和费用。" });
     rows.push({ label: effective ? "本次结算扣费" : "本次消耗合计", value: amountAt(amounts, "renterCharge") });
     const makeup = amountAt(amounts, "earlyMakeup");
     if (makeup !== "—" && makeup !== "¥0.00") rows.push({ label: "提前结束补足", value: makeup });

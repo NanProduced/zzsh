@@ -13,12 +13,12 @@ import { authorizeLegacyMutation } from "./legacy-continuation-command";
 import { authorizeLegacyContinuation, lockLegacyContinuationOrder, readLegacyContinuationBinding, readLegacyContinuationEvidence } from "./legacy-continuation-evidence";
 import { readSealedLegacyFacts, type LegacyContinuationActor } from "./legacy-continuation-model";
 import { reviewLegacyRefund } from "./legacy-refund-review";
-import { readLockedLegacyRefundSource } from "./legacy-refund-review-source";
+import { readHistoricalOriginalPayment, readLockedLegacyRefundSource } from "./legacy-refund-review-source";
 
 export type LegacyRefundReviewCommand = Readonly<{
   orderId:string; dutyId:string; expectedDutyRevision:string; expectedHeadRevision:string;
   paymentOrderNo:string; confirmedMerchantNo:string; paidCents:string; previouslyRefundedCents:string;
-  priorAppliedToDutyCents:string; noUnresolvedRefunds:boolean; evidenceRef:string;
+  priorAppliedToDutyCents:string; noUnresolvedRefunds:boolean; evidenceRef:string; historicalDueVerified?:boolean; historicalReleaseVerified?:boolean;
 }>;
 const id=/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 
@@ -40,17 +40,19 @@ export async function recordLegacyRefundReview(client:PoolClient,actor:LegacyCon
   command:LegacyRefundReviewCommand,execution:{admission:FormalRefundAdmission;profile:BoundRefundProfile}) {
   if(!actor||actor.realm!=="admin"||!command||![command.orderId,command.dutyId,actor.requestId].every(value=>typeof value==="string"&&id.test(value))
     || typeof command.expectedDutyRevision!=="string"||!/^[1-9]\d{0,18}$/.test(command.expectedDutyRevision)
-    || typeof command.expectedHeadRevision!=="string"||!/^[1-9]\d{0,18}$/.test(command.expectedHeadRevision)
+    || typeof command.expectedHeadRevision!=="string"||!/^(0|[1-9]\d{0,18})$/.test(command.expectedHeadRevision)
     || typeof command.paymentOrderNo!=="string"||!/^[A-Za-z0-9_-]{1,50}$/.test(command.paymentOrderNo)
     || typeof command.confirmedMerchantNo!=="string"||!/^\d{1,15}$/.test(command.confirmedMerchantNo))throw invalid("Invalid legacy refund review");
   const admission=assertFormalRefundProfile(execution.admission,execution.profile,"SUBMIT"),profile=describeRefundProfile(execution.profile,"SUBMIT");
   await assertRefundResource(client,execution.admission);
   if(command.confirmedMerchantNo!==profile.merchantNo || admission.merchantIdentityId!==profile.merchantIdentityId) throw conflict("ORIGINAL_PAYMENT_MISMATCH");
-  await authorizeLegacyRefundReviewAccess(client,actor,command.orderId);
+  const binding=await authorizeLegacyRefundReviewAccess(client,actor,command.orderId);
   const preEvidence=await readLegacyContinuationEvidence(client,command.orderId,null);
-  if(!preEvidence)throw conflict("LEGACY_PAYMENT_SOURCE_UNAVAILABLE");
-  const paid=readSealedLegacyFacts(preEvidence).evidence.source.paidPay;
-  if(!Array.isArray(paid)||paid.length!==1||typeof paid[0]?.payOrderSn!=="string"||paid[0].payOrderSn!==command.paymentOrderNo)
+  if(preEvidence){
+    const paid=readSealedLegacyFacts(preEvidence).evidence.source.paidPay;
+    if(!Array.isArray(paid)||paid.length!==1||typeof paid[0]?.payOrderSn!=="string"||paid[0].payOrderSn!==command.paymentOrderNo)
+      throw conflict("LEGACY_PAYMENT_SOURCE_UNAVAILABLE");
+  }else if(binding.sourceOrderStatus!==4 || (await readHistoricalOriginalPayment(client,binding)).paymentOrderNo!==command.paymentOrderNo)
     throw conflict("LEGACY_PAYMENT_SOURCE_UNAVAILABLE");
   // Match admin refund commands: lock the administrator before the shared payment key.
   const caseId='legacy_refund_case_'+createHash('sha256').update(command.dutyId).digest('hex').slice(0,40);
@@ -60,25 +62,31 @@ export async function recordLegacyRefundReview(client:PoolClient,actor:LegacyCon
   if(!(await client.query(`SELECT id FROM zzsh_supply.rental_account WHERE id=$1 FOR SHARE`,[authority.binding.accountId])).rowCount)throw conflict("LEGACY_REFUND_ACCOUNT_UNAVAILABLE");
   const locked=await lockLegacyContinuationOrder(client,command.orderId);
   const duty=locked.duties.find(value=>value.id===command.dutyId);
-  if(!duty || locked.head?.revision!==command.expectedHeadRevision || duty.revision!==command.expectedDutyRevision)throw conflict("LEGACY_REFUND_REVIEW_CHANGED");
-  const source=await readLockedLegacyRefundSource(client,authority.binding,locked.head,duty);
+  if(!duty || (locked.head?.revision??'0')!==command.expectedHeadRevision || duty.revision!==command.expectedDutyRevision)throw conflict("LEGACY_REFUND_REVIEW_CHANGED");
+  const historical=!locked.head && duty.source==='LEGACY_IMPORT' && ['COMPLETED_UNREFUNDED','DETAINED'].includes(duty.sourceStatus??'');
+  const held=historical && duty.sourceStatus==='DETAINED';
+  if(held ? command.historicalReleaseVerified!==true : command.historicalReleaseVerified!==undefined)throw conflict('LEGACY_REFUND_RELEASE_UNCONFIRMED');
+  const source=await readLockedLegacyRefundSource(client,authority.binding,locked.head,duty,held);
   if(source.paymentOrderNo!==command.paymentOrderNo)throw conflict("LEGACY_PAYMENT_SOURCE_MISMATCH");
   if(await hasNativeOriginalOrderNo(client,source.paymentOrderNo))throw conflict("ORIGINAL_PAYMENT_CONFLICT");
   const clock=(await client.query<{now:string}>(`SELECT to_char(clock_timestamp() AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS now`)).rows[0];
   if(!clock?.now)throw conflict("LEGACY_REFUND_CLOCK_UNAVAILABLE");
+  if(historical && (command.historicalDueVerified!==true || !binding.completedAt || Date.parse(binding.completedAt)>Date.parse(clock.now))
+    || !historical && command.historicalDueVerified!==undefined)throw conflict('LEGACY_REFUND_DUE_UNCONFIRMED');
   const schema=(await client.query<{casePresent:boolean;intentPresent:boolean}>(`SELECT to_regclass('zzsh_order.legacy_refund_case') IS NOT NULL AS "casePresent",
     to_regclass('zzsh_order.legacy_refund_intent') IS NOT NULL AS "intentPresent"`)).rows[0];
   if(typeof schema?.casePresent!=="boolean" || typeof schema.intentPresent!=="boolean" || schema.casePresent!==schema.intentPresent)throw conflict("LEGACY_REFUND_INTENT_STATE_UNKNOWN");
   const legacyIntentExists=schema.casePresent?(await client.query<{found:boolean}>(`SELECT EXISTS(SELECT 1 FROM zzsh_order.legacy_refund_case
     WHERE original_payment_order_no=$1) AS found`,[source.paymentOrderNo])).rows[0]?.found:false;
   if(typeof legacyIntentExists!=="boolean")throw conflict("LEGACY_REFUND_INTENT_STATE_UNKNOWN");
-  const assessment=reviewLegacyRefund({...source,merchantIdentityId:profile.merchantIdentityId,originalIntentExists:legacyIntentExists},
+  const assessment=reviewLegacyRefund({...source,refundDueAt:historical?clock.now:source.refundDueAt,fundsDisposition:held?'AVAILABLE':source.fundsDisposition,
+    merchantIdentityId:profile.merchantIdentityId,originalIntentExists:legacyIntentExists},
     {paymentOrderNo:command.paymentOrderNo,merchantIdentityId:profile.merchantIdentityId,paidCents:command.paidCents,
       previouslyRefundedCents:command.previouslyRefundedCents,priorAppliedToDutyCents:command.priorAppliedToDutyCents,
       noUnresolvedRefunds:command.noUnresolvedRefunds,evidenceRef:command.evidenceRef},clock.now);
   if(!assessment.ok)throw conflict(assessment.reason);
   const reviewId=`legacy_refund_review_${randomUUID().replaceAll("-","")}`;
-  const facts={schema:"legacy-refund-review.v1",reviewId,orderId:source.orderId,dutyId:duty.id,headId:locked.head!.id,headRevision:locked.head!.revision,dutyRevision:duty.revision,
+  const facts={schema:"legacy-refund-review.v1",reviewId,orderId:source.orderId,dutyId:duty.id,headId:locked.head?.id??null,headRevision:locked.head?.revision??null,dutyRevision:duty.revision,
     sourceDigest:source.sourceDigest,dutyEvidenceDigest:source.dutyEvidenceDigest,paymentRecordId:source.paymentRecordId,paymentOrderNo:source.paymentOrderNo,
     merchantIdentityId:profile.merchantIdentityId,merchantNo:profile.merchantNo,profileId:profile.profileId,profileSha256:profile.profileSha256,
     keyVersionRef:profile.keyVersionRef,notifyUrl:profile.notifyUrl,fundsAccount:profile.fundsAccount??null,profileCanonical:readRefundProfileEvidence(execution.profile),
@@ -87,7 +95,7 @@ export async function recordLegacyRefundReview(client:PoolClient,actor:LegacyCon
     priorAppliedToDutyCents:command.priorAppliedToDutyCents,noUnresolvedRefunds:true,refundCents:assessment.refundCents,
     remainingPaymentCents:assessment.remainingPaymentCents,reviewFingerprint:assessment.fingerprint,reviewedAt:clock.now,
     reviewerId:actor.userId,reviewerSessionId:actor.sessionId,requestId:actor.requestId,evidenceRef:command.evidenceRef.trim(),
-    source:"STAFF_REVIEW",merchantProfileUse:"IDENTITY_ONLY",channelResult:"NOT_SUBMITTED"};
+    ...(historical?{historicalDueVerified:true}:{}),...(held?{historicalReleaseVerified:true}:{}),source:"STAFF_REVIEW",merchantProfileUse:"IDENTITY_ONLY",channelResult:"NOT_SUBMITTED"};
   const reviewDigest=createHash("sha256").update(canonicalize(facts)).digest("hex");
   await recordAudit(client,{actorType:"admin",actorId:actor.userId,sessionId:actor.sessionId,requestId:actor.requestId,
     action:"order.legacy.refund.reviewed",objectType:"legacy_order_duty",objectId:duty.id,outcome:"SUCCESS",reason:command.evidenceRef.trim(),

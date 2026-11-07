@@ -1,6 +1,6 @@
 import {createHash,randomUUID} from 'node:crypto';
 import type {Pool,PoolClient} from 'pg';
-import {recordAudit,setAuditContext,withTransaction} from '../auth/security-core';
+import {recordAudit,setAuditContext,withTransaction,SecurityApiError} from '../auth/security-core';
 import {conflict,forbidden,invalid,notFound} from '../supply/supply-util';
 import {assertRefundResource} from './channel-refund-store';
 import {hasNativeOriginalOrderNo,lockRefundOrderNos} from './payment-original-lock';
@@ -17,6 +17,11 @@ import {LEGACY_REFUND_REASON} from './legacy-refund-review';
 const ID=/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/,sha=(value:string|Uint8Array)=>createHash('sha256').update(value).digest('hex');
 const fresh=(prefix:string)=>`${prefix}_${randomUUID().replaceAll('-','')}`;
 export type LegacyRefundExecution=RefundExecution & {legacyRefundsEnabled:boolean};
+const CLAIM_ITEM_CONFLICTS=new Set(['LEGACY_REFUND_SUBJECT_UNAVAILABLE','LEGACY_REFUND_BINDING_CHANGED','LEGACY_REFUND_TIMING_UNAVAILABLE',
+ 'LEGACY_REFUND_CASE_MISMATCH','LEGACY_REFUND_RETRY_CHAIN_INVALID']);
+export class LegacyRefundClaimBlocked extends Error {
+ constructor(readonly reason:string){super(reason);this.name='LegacyRefundClaimBlocked';}
+}
 type LegacyIntent={id:string;case_id:string;state:string;revision:string;lease_version:string;lease_owner:string|null;lease_until:string|null;
   generation:number;
   requires_review:boolean;budget_disposition:string;terminal_evidence_id:string|null;terminal_event_id:string|null;provider_refund_trx_no:string|null;completed_at:string|null;
@@ -112,7 +117,7 @@ async function prepareLegacyRefund(execution:LegacyRefundExecution,id:string,own
 type VerifiedTerminal={terminal:'SUCCEEDED'|'FAILED_NO_EXECUTION';refundTransactionNo:string|null;completedAt:string|null;completedAtRaw:string|null};
 
 /** Re-read and re-verify the channel bytes; saved status and evidence labels are not proof. */
-async function inspectOriginal(client:PoolClient,execution:RefundSourceOptions,row:LegacyIntent,observationId:string):Promise<VerifiedTerminal|null>{
+async function inspectOriginal(client:PoolClient,execution:RefundSourceOptions,row:LegacyIntent,observationId:string):Promise<VerifiedTerminal|'PROCESSING'|null>{
  const raw=(await client.query<any>(`SELECT operation,profile_id,profile_canonical,profile_sha256,key_version_ref,raw_body,raw_sha256,
    response_complete,http_status,transport_failure,evidence_level,event FROM zzsh_order.legacy_refund_observation WHERE id=$1 AND intent_id=$2`,[observationId,row.id])).rows[0];
  if(!raw || !['QUERY','NOTIFY'].includes(raw.operation) || raw.evidence_level!=='PROVIDER_RESPONSE' || raw.event==='STALE'
@@ -128,6 +133,7 @@ async function inspectOriginal(client:PoolClient,execution:RefundSourceOptions,r
  if(raw.operation==='NOTIFY'){try{body=new TextDecoder('utf-8',{fatal:true,ignoreBOM:true}).decode(raw.raw_body);}catch{return null;}}
  const result=inspectRefundProfile(profile,raw.operation,body,binding,key);
  if(result.signature!=='MATCH')return null;
+ if(raw.operation==='QUERY' && result.result==='PROCESSING')return 'PROCESSING';
  if(result.result==='CHANNEL_REPORTED_SUCCEEDED' && result.providerRefundTrxNo && result.completedAtRaw && refundWayAccepted(profile,result.refundWay))
   return {terminal:'SUCCEEDED',refundTransactionNo:result.providerRefundTrxNo,completedAt:refundCompleteTimeToUtc(profile,result.completedAtRaw),completedAtRaw:result.completedAtRaw};
  if(refundFailureMayRelease(profile,result))return {terminal:'FAILED_NO_EXECUTION',refundTransactionNo:result.providerRefundTrxNo??null,
@@ -147,7 +153,7 @@ async function verifyExistingTerminal(client:PoolClient,execution:RefundSourceOp
  const proof=(await client.query<any>(`SELECT id,observation_id,terminal,refund_transaction_no,completed_at::text,finance_event_id,facts_canonical,facts_digest
   FROM zzsh_order.legacy_refund_terminal_evidence WHERE id=$1 AND intent_id=$2`,[row.terminal_evidence_id,row.id])).rows[0];
  if(!proof || sha(proof.facts_canonical)!==proof.facts_digest)throw conflict('LEGACY_REFUND_TERMINAL_UNVERIFIED');
- const original=await inspectOriginal(client,execution,row,proof.observation_id);if(!original)throw conflict('LEGACY_REFUND_TERMINAL_UNVERIFIED');
+ const original=await inspectOriginal(client,execution,row,proof.observation_id);if(!original||original==='PROCESSING')throw conflict('LEGACY_REFUND_TERMINAL_UNVERIFIED');
  const body=terminalBody(row,proof.observation_id,original),canonical=JSON.stringify(body);
  if(proof.id!==body.evidenceId || proof.facts_canonical!==canonical || proof.facts_digest!==sha(canonical)
   || proof.terminal!==body.terminal || proof.refund_transaction_no!==body.refundTransactionNo || proof.finance_event_id!==body.financeEventId
@@ -174,6 +180,7 @@ async function hasConflictingTerminal(client:PoolClient,execution:RefundSourceOp
  if(observations.length>100)return true;
  for(const observation of observations){
   const other=await inspectOriginal(client,execution,row,observation.id);
+  if(other==='PROCESSING')continue;
   if(other?refundTerminalConflicts(original,other):observation.signature_status==='MATCH'&&observation.evidence_level==='PROVIDER_RESPONSE')return true;
  }
  return false;
@@ -191,7 +198,7 @@ async function verifyPredecessors(client:PoolClient,execution:LegacyRefundExecut
 }
 
 async function captureTerminal(client:PoolClient,execution:RefundSourceOptions,row:LegacyIntent,observationId:string):Promise<VerifiedTerminal|null>{
- const verified=await inspectOriginal(client,execution,row,observationId);if(!verified)return null;
+ const verified=await inspectOriginal(client,execution,row,observationId);if(!verified||verified==='PROCESSING')return null;
  const body=terminalBody(row,observationId,verified),canonical=JSON.stringify(body),digest=sha(canonical);
  await client.query(`INSERT INTO zzsh_order.legacy_refund_terminal_evidence(id,intent_id,observation_id,terminal,merchant_no,refund_transaction_no,
   completed_at_raw,completed_at,finance_event_id,facts_canonical,facts_digest) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
@@ -248,6 +255,8 @@ async function recordReceived(client:PoolClient,execution:LegacyRefundExecution,
    qualified=!!incoming && signature==='MATCH' && bound==='MATCH' && e.evidenceLevel==='PROVIDER_RESPONSE'
     && (received.operation==='NOTIFY' && e.httpStatus===null || received.operation==='QUERY' && e.httpStatus===200);
    hardConflict ||= signature==='MATCH' && d.result==='REVIEW_REQUIRED';
+   hardConflict ||= !!row.terminal_evidence_id && received.operation==='QUERY' && e.httpStatus===200 && e.evidenceLevel==='PROVIDER_RESPONSE'
+    && signature==='MATCH' && bound==='MATCH' && d.result==='PROCESSING';
    if(row.terminal_evidence_id && qualified && incoming){
     const original=await verifyExistingTerminal(client,execution,row);
     hardConflict ||= refundTerminalConflicts(original,incoming);
@@ -283,12 +292,25 @@ async function recordReceived(client:PoolClient,execution:LegacyRefundExecution,
   let terminal:VerifiedTerminal|null=null,resolved=false;
   if(resolution&&qualified&&!hardConflict&&row.requires_review&&row.terminal_evidence_id&&received.operation==='QUERY'){
    const original=await verifyExistingTerminal(client,execution,row),checked=await inspectOriginal(client,execution,row,observationId);
-   if(checked&&!refundTerminalConflicts(original,checked)&&!await hasConflictingTerminal(client,execution,row,original)){
+   if(checked&&checked!=='PROCESSING'&&!refundTerminalConflicts(original,checked)&&!await hasConflictingTerminal(client,execution,row,original)){
     await setAuditContext(client,'admin',resolution.actor.userId,resolution.actor.sessionId,resolution.requestId);
     const result=(await client.query<{result:{intentId:string;resolved:boolean}}>(`SELECT zzsh_order.resolve_legacy_refund_terminal($1,$2,$3) AS result`,
       [id,observationId,resolution.reason.trim()])).rows[0]?.result;
     if(!result||result.intentId!==id||result.resolved!==true)throw conflict('LEGACY_REFUND_REVIEW_UNAVAILABLE');
     terminal=original;resolved=true;
+   }
+  }
+  if(resolution&&qualified&&!hardConflict&&row.requires_review&&!row.terminal_evidence_id&&received.operation==='QUERY'){
+   const checked=await inspectOriginal(client,execution,row,observationId);
+   if(checked&&checked!=='PROCESSING'&&!await hasConflictingTerminal(client,execution,row,checked)){
+    await setAuditContext(client,'admin',resolution.actor.userId,resolution.actor.sessionId,resolution.requestId);
+    const result=(await client.query<{result:{intentId:string;resolved:boolean}}>(`SELECT zzsh_order.resolve_legacy_pending_terminal($1,$2,$3) AS result`,
+      [id,observationId,resolution.reason.trim()])).rows[0]?.result;
+    if(!result||result.intentId!==id||result.resolved!==true)throw conflict('LEGACY_REFUND_REVIEW_UNAVAILABLE');
+    const unlocked=await lockContext(client,execution,id);
+    terminal=await captureTerminal(client,execution,unlocked,observationId);
+    if(!terminal)throw conflict('LEGACY_REFUND_TERMINAL_UNVERIFIED');
+    resolved=true;
    }
   }
   if(qualified && !hardConflict && !row.requires_review)terminal=row.terminal_evidence_id?await verifyExistingTerminal(client,execution,row):await captureTerminal(client,execution,row,observationId);
@@ -391,7 +413,12 @@ export async function resolveLegacyRefundTerminal(execution:LegacyRefundExecutio
 
 export async function executeLegacyRefund(execution:LegacyRefundExecution,id:string,owner:string,options:{queryOnly?:boolean;minimumIntervalSeconds?:number;authorize?:(client:PoolClient,id:string)=>Promise<void>}={}){
  if(!ID.test(id)||!ID.test(owner))throw invalid('Invalid legacy refund request');
- const claim=await prepareLegacyRefund(execution,id,owner,options);
+ let claim:PrepareResult;
+ try{claim=await prepareLegacyRefund(execution,id,owner,options);}
+ catch(error){
+  if(!options.authorize && error instanceof SecurityApiError && error.status===409 && CLAIM_ITEM_CONFLICTS.has(error.message))throw new LegacyRefundClaimBlocked(error.message);
+  throw error;
+ }
  if(claim.kind!=='READY')return {...claim,intentId:id};
  const p=claim.prepared,exchange=await exchangeRefundRequest(p.request,{fetch:execution.fetch});
  const result=await confirmed(execution.pool,id,'RESULT',client=>recordReceived(client,execution,id,

@@ -1,7 +1,8 @@
 import { Injectable, type BeforeApplicationShutdown, type OnApplicationBootstrap } from "@nestjs/common";
 import type { Pool } from "pg";
 import { executeJoinpayRefund, allocatePostedJoinpayRefunds, RefundAllocationCommitUnknown, RefundAttemptCommitUnknown, JOINPAY_REFUND_MAX_AUTOMATIC_QUERIES, type RefundExecution } from "../order/joinpay-refund-attempt";
-import {executeLegacyRefund,type LegacyRefundExecution} from "../order/legacy-refund-attempt";
+import {executeLegacyRefund,LegacyRefundClaimBlocked,type LegacyRefundExecution} from "../order/legacy-refund-attempt";
+import {recordAudit,withTransaction} from "../auth/security-core";
 import { readFormalRefundAdmission, assertFormalRefundProfile, assertRefundStart } from "../order/joinpay-refund-profile";
 import { executeJoinpayPayout, PayoutCommitUnknown, JOINPAY_PAYOUT_MAX_AUTOMATIC_QUERIES, type PayoutExecution } from "./joinpay-payout-attempt";
 import { readPayoutScope } from "./joinpay-payout-profile";
@@ -119,12 +120,26 @@ export async function recoverLegacyJoinpayRefundBatch(input:LegacyRefundOptions,
     AND (i.lease_version>0 OR NOT EXISTS(SELECT 1 FROM zzsh_iam.audit_event blocked
       WHERE blocked.action='order.legacy.refund.first_submit.blocked' AND blocked.object_type='legacy_refund_intent' AND blocked.object_id=i.id
       AND blocked.outcome='FAILURE' AND blocked.occurred_at>clock_timestamp()-interval '1 hour'))
+    AND NOT EXISTS(SELECT 1 FROM zzsh_iam.audit_event deferred WHERE deferred.action='order.legacy.refund.recovery.deferred'
+      AND deferred.object_type='legacy_refund_intent' AND deferred.object_id=i.id AND deferred.outcome='FAILURE'
+      AND deferred.occurred_at>clock_timestamp()-interval '1 hour')
     ORDER BY x.refund_due_at,i.id LIMIT $6`,[a.merchantIdentityId,a.merchantNo,JSON.stringify(accepted),REFUND_STATES,
     o.minimumIntervalSeconds,o.batchLimit,JOINPAY_REFUND_MAX_AUTOMATIC_QUERIES,o.execution.legacyRefundsEnabled],REFUND_STATES,o.batchLimit,'REFUND',signal);
   const result={selected:rows.length,recorded:0,skipped:0};
   for(const row of rows){if(signal?.aborted)break;
-    const observed=await executeLegacyRefund(o.execution,row.id,o.workerId,{minimumIntervalSeconds:o.minimumIntervalSeconds});
-    if(observed.kind==='OBSERVED')result.recorded++;else result.skipped++;
+    try{
+      const observed=await executeLegacyRefund(o.execution,row.id,o.workerId,{minimumIntervalSeconds:o.minimumIntervalSeconds});
+      if(observed.kind==='OBSERVED')result.recorded++;else result.skipped++;
+    }catch(error){
+      if(!(error instanceof LegacyRefundClaimBlocked))throw error;
+      await withTransaction(o.execution.pool,async client=>{
+        const identity=(await client.query('SELECT current_database() AS db,current_user AS actor')).rows[0];
+        if(identity?.db!==a.database||identity?.actor!==a.runtimeUser)throw new Error('FUNDS_RECOVERY_RESOURCE_MISMATCH');
+        await recordAudit(client,{actorType:'system',actorId:o.workerId,action:'order.legacy.refund.recovery.deferred',
+          objectType:'legacy_refund_intent',objectId:row.id,outcome:'FAILURE',requestId:row.id,reason:error.reason});
+      });
+      result.skipped++;
+    }
   }
   return result;
 }

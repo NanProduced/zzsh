@@ -55,6 +55,7 @@ function clearSaved(orderId:string,binding:RefundBinding|undefined,key:string){
 }
 const newKey = () => `idem_${(globalThis.crypto?.randomUUID?.() ?? `${Date.now()}_${Math.random().toString(16).slice(2)}`).replaceAll("-", "")}`;
 const cents = (v: string | null) => v == null ? "未知" : formatFundingCents(v);
+const refundStateText:Record<string,string>={READY:'待提交',SUBMITTING:'发送结果待核',UNKNOWN:'结果待核',PROCESSING:'渠道处理中',REVIEW_REQUIRED:'待人工核对',SUCCEEDED:'渠道已确认退款',FAILED:'渠道确认未执行'};
 const skipText: Record<string, string> = { TERMINAL: "已有终态，无需补查", REVIEW_REQUIRED: "本地复核中，不自动重试", ACTIVE_LEASE: "已有查询进行中", NOT_DUE: "未到补查时间",
   THROTTLED: "30秒内已查询，请稍后", BUDGET_EXHAUSTED: "补查次数已用尽，转人工核对", INELIGIBLE: "当前状态不可补查", ABNORMAL_BASIS_REVIEW: "异常原款依据待复核", NOT_ELIGIBLE: "当前不可补查", PENDING_ACCEPTANCE: "渠道成功待本地受理", OUTSIDE_QUERY_WINDOW: "已超出原补查窗口，转人工核对" };
 export function queryOutcomeText(r: QueryResult | null, status?: number, expected?: QueryBinding): string {
@@ -90,7 +91,7 @@ function NativeRefundForm({ orderId, canWrite, basis, binding, onAttentionChange
   const closedNew = basis !== undefined && !basis.eligible;
   const [amount, setAmount] = useState(saved?.amount ? formatCentsToYuan(saved.amount) : ""), [reason, setReason] = useState(saved?.reason ?? ""), [note, setNote] = useState(recovery.blocked ? "原请求恢复资料不可读或冲突，已阻止覆盖或新提交" : saved ? "存在结果未知的申请：只能按原键恢复提交" : ""), [busy, setBusy] = useState(false);
   const [pending, setPending] = useState<string | null>(saved?.key ?? null);
-  const [review, setReview] = useState<{intentId:string;reason:string}|null>(null);
+  const [review, setReview] = useState<{intentId:string;reason:string;terminal:boolean}|null>(null);
   useEffect(() => { onAttentionChange?.(canWrite && Boolean(pending || storageBlocked)); return () => onAttentionChange?.(false); }, [canWrite, pending, storageBlocked, onAttentionChange]);
   const load = useCallback((signal?: AbortSignal) => adminRequest<{ items: NativeRefundItem[] }>(`/orders/${encodeURIComponent(orderId)}/refunds`, undefined, "GET", {}, signal)
     .then(r => setItems(Array.isArray(r?.items) ? r.items : null), e => { if (!signal?.aborted) { setItems(null); setNote(friendlyError(e)); } }), [orderId]);
@@ -135,10 +136,10 @@ function NativeRefundForm({ orderId, canWrite, basis, binding, onAttentionChange
     setBusy(true);
     try{
       const r=await adminRequest<{contractVersion:string;operation:string;objectId:string;outcome:{kind:string};channelArrival:string}>(
-        `/joinpay/refunds/${encodeURIComponent(review.intentId)}/resume`,{reason:review.reason.trim()},"POST");
-      if(r?.contractVersion!=='admin-joinpay-query.v1'||r.operation!=='REFUND_RESUME'||r.objectId!==review.intentId||r.channelArrival!=='UNKNOWN'
-        ||!['RESUMED','ALREADY_RESUMED','UNKNOWN'].includes(r.outcome?.kind))throw new AdminApiError(0,'INVALID_REFUND_RECEIPT');
-      setNote(r.outcome.kind==='UNKNOWN'?'处理结果尚未确认，请刷新后核对原退款。':'已恢复原退款号的查询，不会重新发起退款。');
+        `/joinpay/refunds/${encodeURIComponent(review.intentId)}/${review.terminal?'resolve':'resume'}`,{reason:review.reason.trim()},"POST");
+      if(r?.contractVersion!=='admin-joinpay-query.v1'||r.operation!==(review.terminal?'REFUND_RESOLVE':'REFUND_RESUME')||r.objectId!==review.intentId||r.channelArrival!=='UNKNOWN'
+        ||!(review.terminal?['RESOLVED','ALREADY_RESOLVED','REQUIRES_MANUAL','UNKNOWN']:['RESUMED','ALREADY_RESUMED','UNKNOWN']).includes(r.outcome?.kind))throw new AdminApiError(0,'INVALID_REFUND_RECEIPT');
+      setNote(r.outcome.kind==='UNKNOWN'?'处理结果尚未确认，请刷新后核对原退款。':r.outcome.kind==='REQUIRES_MANUAL'?'渠道记录仍有矛盾或无法验证；已记录核对说明，请联系财务协调。':review.terminal?'已核对保存的渠道证据，原退款结果未改变。':'已恢复原退款号的查询，不会重新发起退款。');
       setReview(null);await load();
     }catch(e){setNote(friendlyError(e));}finally{setBusy(false);}
   };
@@ -146,13 +147,13 @@ function NativeRefundForm({ orderId, canWrite, basis, binding, onAttentionChange
     <h4 className="font-semibold">原单退款申请</h4>
     {!canWrite ? <p className="oc-fact-note">逐笔退款申请读取需要订单结算命令权限；只读资金权限请看上方资金凭证与退款摘要。</p>
       : items === undefined ? <Button size="sm" variant="secondary" onClick={() => void load()}>读取退款申请</Button> : items === null ? <p className="oc-fact-note">退款申请读取不可用；不能据此认定没有退款。</p>
-      : items.length ? <ul className="space-y-1">{items.map(i => <li key={i.intentId}><span>{i.refundOrderNo} · 申请 {cents(i.amountCents)} · 本地状态 {i.state}{i.requiresReview ? " · 需复核" : ""}</span>
+      : items.length ? <ul className="space-y-1">{items.map(i => <li key={i.intentId}><span>{i.refundOrderNo} · 申请 {cents(i.amountCents)} · {refundStateText[i.state]??'状态待核'}{i.requiresReview ? " · 需复核" : ""}</span>
         <small className="ml-2 text-xs text-muted-foreground">原责任 {cents(i.postingResponsibility.frozenCents)} · 已分配 {cents(i.postingResponsibility.allocatedCents)} · 尚未分配责任 {cents(i.postingResponsibility.remainingCents)} · 预算 {i.budgetDisposition}{i.latestObservation ? ` · 最近渠道观察 ${i.latestObservation.event}` : ""} · 银行到账未记录</small>
         {canWrite ? <Button size="sm" variant="secondary" disabled={busy} onClick={() => void query(i.intentId, i.requiresReview)}>按原号补查</Button> : null}
-        {canWrite&&i.requiresReview&&!['SUCCEEDED','FAILED'].includes(i.state)?<Button size="sm" variant="secondary" disabled={busy} onClick={()=>setReview({intentId:i.intentId,reason:''})}>核对后恢复查询</Button>:null}
-        {review?.intentId===i.intentId?<div className="mt-2 space-y-2 rounded-md border border-border p-3"><p>先核对汇聚原退款。恢复后仅查询原单，不会重新发起退款；已有可核验的渠道结果时，请联系财务处理。</p>
-          <label className="block space-y-1"><span>核对说明</span><Input aria-label="退款核对说明" value={review.reason} maxLength={200} disabled={busy} onChange={event=>setReview({intentId:i.intentId,reason:event.target.value})}/></label>
-          <div className="flex gap-2"><Button size="sm" disabled={busy||review.reason.trim().length<3} onClick={()=>void resume()}>确认恢复查询</Button><Button size="sm" variant="secondary" disabled={busy} onClick={()=>setReview(null)}>取消</Button></div></div>:null}</li>)}</ul>
+        {canWrite&&i.requiresReview?<Button size="sm" variant="secondary" disabled={busy} onClick={()=>setReview({intentId:i.intentId,reason:'',terminal:['SUCCEEDED','FAILED'].includes(i.state)})}>{['SUCCEEDED','FAILED'].includes(i.state)?'核对退款冲突':'核对后恢复查询'}</Button>:null}
+        {review?.intentId===i.intentId?<div className="mt-2 space-y-2 rounded-md border border-border p-3"><p>{review.terminal?'请先核对汇聚原退款。系统会重验保存的渠道证据；有矛盾时保留原状态并记录说明。':'先核对汇聚原退款。恢复后仅查询原单，不会重新发起退款；已有可核验的渠道结果时，请联系财务处理。'}</p>
+          <label className="block space-y-1"><span>核对说明</span><Input aria-label="退款核对说明" value={review.reason} maxLength={200} disabled={busy} onChange={event=>setReview({...review,reason:event.target.value})}/></label>
+          <div className="flex gap-2"><Button size="sm" disabled={busy||review.reason.trim().length<3} onClick={()=>void resume()}>{review.terminal?'确认核对':'确认恢复查询'}</Button><Button size="sm" variant="secondary" disabled={busy} onClick={()=>setReview(null)}>取消</Button></div></div>:null}</li>)}</ul>
       : <p className="oc-fact-note">本单暂无退款申请。</p>}
     {canWrite && basis ? <p className="oc-fact-note" data-refund-basis={basis.eligible ? "eligible" : "closed"}>原单 {orderId} · 过账 {basis.postingRef ?? "未知"} · 已核应退责任 {cents(basis.refundPayableCents)} · 责任到期 {basis.refundDueAt ?? "未知"} · 预算以申请回执为准{basis.eligible ? "" : ` · 普通退款关闭：${basis.reason}`} · 异常退款不在此开放</p> : null}
     {canWrite && (!closedNew || pending) ? <form className="flex flex-wrap items-end gap-2" onSubmit={e => { e.preventDefault(); void submit(); }}>

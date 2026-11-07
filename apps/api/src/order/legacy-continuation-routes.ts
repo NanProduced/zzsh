@@ -10,6 +10,7 @@ import { applyLegacyContinuationCommand, applyLegacyDutyCommand, authorizeLegacy
 import { legacyOrderAdvisoryKey, legacyPlanYuanToCents, previewLegacyContinuation, projectLegacyCommandReceipt, readSealedLegacyFacts, visibleLegacyReason, type LegacyContinuationActor, type LegacyDutyFinalizationReader } from "./legacy-continuation-model";
 import { authorizeLegacyFinanceDuty, postLegacyFinanceDuty, postLegacyOwnerCreditOnConfirmation, projectLegacyFinanceDutyReceipt, type LegacyFinanceDutyAuthority, type LegacyFinanceDutyKind } from "./legacy-finance-duty";
 import {authorizeLegacyRefundReviewAccess} from './legacy-refund-review-store';
+import {readHistoricalOriginalPayment} from './legacy-refund-review-source';
 import {createLegacyRefundCase,readLegacyRefundCaseForStatus,readLegacyRefundCaseReceipt} from './legacy-refund-case-command';
 import {describeRefundProfile,RefundProfileError,type BoundRefundProfile} from './joinpay-refund-profile';
 import type {RefundSourceOptions} from './joinpay-refund-source';
@@ -47,6 +48,8 @@ export async function handleLegacyContinuationRoute(request: SupplyNodeRequest, 
         && /^[A-Za-z0-9_-]{1,50}$/.test(payments[0].payOrderSn) && typeof payments[0].payMoney==='string' && typeof binding.paidCents==='string'){
         try{if(legacyPlanYuanToCents(payments[0].payMoney)===binding.paidCents)paymentOrderNo=payments[0].payOrderSn;}catch{/* Missing original must stay unknown. */}
       }
+      const historical=!head && binding.sourceOrderStatus===4 && duty.source==='LEGACY_IMPORT' && ['COMPLETED_UNREFUNDED','DETAINED'].includes(duty.sourceStatus??'');
+      if(historical){try{paymentOrderNo=(await readHistoricalOriginalPayment(client,binding)).paymentOrderNo;}catch(error){if(!(error instanceof SecurityApiError) || error.status!==409)throw error;}}
       const table=(await client.query<{available:boolean}>(`SELECT to_regclass('zzsh_order.legacy_refund_case') IS NOT NULL AS available`)).rows[0];
       if(typeof table?.available!=='boolean')throw new SecurityApiError(503,'EVIDENCE_UNAVAILABLE','Legacy refund unavailable');
       const cases=table.available?(await client.query<{id:string}>(`SELECT id FROM zzsh_order.legacy_refund_case WHERE order_id=$1 AND duty_id=$2 LIMIT 2`,[parsed.orderId,parsed.dutyId])).rows:[];
@@ -57,10 +60,23 @@ export async function handleLegacyContinuationRoute(request: SupplyNodeRequest, 
       const progress=current?.intentId && execution ? await readLegacyRefundProgress(client,{...execution,pool:options.pool,legacyRefundsEnabled:execution.legacyRefundsEnabled===true},current.intentId) : null;
       const configured=!!execution?.legacyRefundsEnabled && !!execution.legacyInitialProfile;
       const merchantNo=configured?describeRefundProfile(execution!.legacyInitialProfile!,'SUBMIT').merchantNo:null;
-      const due=head?.refundDueAt ? (await client.query<{due:boolean}>('SELECT $1::timestamptz<=clock_timestamp() AS due',[head.refundDueAt])).rows[0]?.due===true:false;
-      return {orderId:parsed.orderId,dutyId:parsed.dutyId,headRevision:head?.revision??null,dutyRevision:duty.revision,dutyCents:duty.amountCents,
-        paidCents:binding.paidCents,paymentOrderNo,merchantNo,refundDueAt:head?.refundDueAt??null,receipt,current,progress,
-        canStart:table.available && configured && !!paymentOrderNo && !!binding.paidCents && !receipt && due && String(head?.stage)==='4' && ['PENDING','MATURED'].includes(duty.status)};
+      const refundRows=(await client.query<{number:string|null;amount:string|null;at:Date|null}>(`SELECT snapshot->>'sourceNumber' AS number,
+        snapshot->>'amount' AS amount,source_event_at AS at FROM zzsh_order.personal_finance_observation
+        WHERE user_id=$1 AND source_kind='HISTORICAL_REFUND' AND source_system='legacy_mysql_restore' AND source_entity='la_refund_record'
+          AND snapshot->>'referenceType'='LEGACY_ORDER' AND snapshot->>'referenceId'=$2
+        ORDER BY source_event_at DESC NULLS LAST,id DESC LIMIT 21`,[binding.renterUserId,binding.legacyId])).rows;
+      const historicalRefunds=refundRows.slice(0,20).map(row=>{
+        let amountCents:string|null=null;try{if(row.amount!==null)amountCents=legacyPlanYuanToCents(row.amount);}catch{/* Keep an unreadable source amount unknown. */}
+        return {number:typeof row.number==='string'&&row.number.length<=128?row.number:null,amountCents,
+          at:row.at instanceof Date && Number.isFinite(row.at.getTime())?row.at.toISOString():null};
+      });
+      const refundDueAt=historical?null:head?.refundDueAt??null;
+      const due=refundDueAt ? (await client.query<{due:boolean}>('SELECT $1::timestamptz<=clock_timestamp() AS due',[refundDueAt])).rows[0]?.due===true:false;
+      return {orderId:parsed.orderId,dutyId:parsed.dutyId,headRevision:head?.revision??(historical?'0':null),dutyRevision:duty.revision,dutyCents:duty.amountCents,
+        paidCents:binding.paidCents,paymentOrderNo,merchantNo,refundDueAt,historicalWaitUncertain:historical,historicalHeld:historical && duty.sourceStatus==='DETAINED',
+        historicalRefunds,historicalRefundsMore:refundRows.length>20,receipt,current,progress,
+        canStart:table.available && configured && !!paymentOrderNo && !!binding.paidCents && !receipt
+          && (historical?!!binding.completedAt:due && String(head?.stage)==='4') && ['PENDING','MATURED'].includes(duty.status)};
     });
     sendJson(response,200,data,requestId);return true;
   }
@@ -146,13 +162,17 @@ export async function handleLegacyContinuationRoute(request: SupplyNodeRequest, 
   if (parsed.dutyId && parsed.dutyCommand) {
     if (realm !== "admin") throw notFound();
     if(parsed.dutyCommand==='refund-case'){
-      ensureOnlyFields(body,['expectedDutyRevision','expectedHeadRevision','paymentOrderNo','confirmedMerchantNo','paidCents','previouslyRefundedCents','priorAppliedToDutyCents','noUnresolvedRefunds','evidenceRef']);
+      ensureOnlyFields(body,['expectedDutyRevision','expectedHeadRevision','paymentOrderNo','confirmedMerchantNo','paidCents','previouslyRefundedCents','priorAppliedToDutyCents','noUnresolvedRefunds','evidenceRef','historicalDueVerified','historicalReleaseVerified']);
       const names=['expectedDutyRevision','expectedHeadRevision','paymentOrderNo','confirmedMerchantNo','paidCents','previouslyRefundedCents','priorAppliedToDutyCents','evidenceRef'] as const;
-      if(names.some(name=>typeof body[name]!=='string') || typeof body.noUnresolvedRefunds!=='boolean')throw invalid('Invalid legacy refund review');
+      if(names.some(name=>typeof body[name]!=='string') || typeof body.noUnresolvedRefunds!=='boolean'
+        || body.historicalDueVerified!==undefined && typeof body.historicalDueVerified!=='boolean'
+        || body.historicalReleaseVerified!==undefined && typeof body.historicalReleaseVerified!=='boolean')throw invalid('Invalid legacy refund review');
       const input={orderId:parsed.orderId,dutyId:parsed.dutyId,expectedDutyRevision:body.expectedDutyRevision as string,expectedHeadRevision:body.expectedHeadRevision as string,
         paymentOrderNo:body.paymentOrderNo as string,confirmedMerchantNo:body.confirmedMerchantNo as string,paidCents:body.paidCents as string,
         previouslyRefundedCents:body.previouslyRefundedCents as string,priorAppliedToDutyCents:body.priorAppliedToDutyCents as string,
-        noUnresolvedRefunds:body.noUnresolvedRefunds as boolean,evidenceRef:body.evidenceRef as string};
+        noUnresolvedRefunds:body.noUnresolvedRefunds as boolean,evidenceRef:body.evidenceRef as string,
+        ...(typeof body.historicalDueVerified==='boolean'?{historicalDueVerified:body.historicalDueVerified}:{}),
+        ...(typeof body.historicalReleaseVerified==='boolean'?{historicalReleaseVerified:body.historicalReleaseVerified}:{})};
       await runIdempotentWrite(options,request,response,requestId,{principalId:actor.userId,operation:'order.legacy.duty.refund-case',resourceId:parsed.dutyId},
         {realm,id:actor.userId,sessionId:actor.sessionId},input,async client=>{await authorizeLegacyRefundReviewAccess(client,actor,parsed.orderId);},
         client=>legacyCommandOutcome(client,actor,parsed.orderId,()=>{

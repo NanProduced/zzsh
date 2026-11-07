@@ -43,8 +43,10 @@ function validIntent(value: unknown, subject: string, orderId: string): value is
   if (duty ? typeof value.dutyId !== "string" || !TOKEN.test(value.dutyId) : value.dutyId !== null) return false;
   if(value.command==='refund-case'){
     const fields=['expectedDutyRevision','expectedHeadRevision','paymentOrderNo','confirmedMerchantNo','paidCents','previouslyRefundedCents','priorAppliedToDutyCents','noUnresolvedRefunds','evidenceRef'];
-    return Object.keys(body).length===fields.length && Object.keys(body).every(field=>fields.includes(field))
-      && [body.expectedDutyRevision,body.expectedHeadRevision].every(item=>typeof item==='string'&&/^[1-9]\d{0,17}$/.test(item))
+    return Object.keys(body).length===fields.length+(body.historicalDueVerified===true?1:0)+(body.historicalReleaseVerified===true?1:0)
+      && Object.keys(body).every(field=>fields.includes(field)||field==='historicalDueVerified'||field==='historicalReleaseVerified')
+      && typeof body.expectedDutyRevision==='string'&&/^[1-9]\d{0,17}$/.test(body.expectedDutyRevision)
+      && typeof body.expectedHeadRevision==='string'&&/^(0|[1-9]\d{0,17})$/.test(body.expectedHeadRevision)
       && typeof body.paymentOrderNo==='string'&&/^[A-Za-z0-9_-]{1,50}$/.test(body.paymentOrderNo)
       && typeof body.confirmedMerchantNo==='string'&&/^\d{1,15}$/.test(body.confirmedMerchantNo)
       && [body.paidCents,body.previouslyRefundedCents,body.priorAppliedToDutyCents].every(item=>typeof item==='string'&&/^(0|[1-9]\d{0,23})$/.test(item))
@@ -125,7 +127,8 @@ export async function readLegacyAdminContinuation(orderId: string, signal?: Abor
   return parseLegacyAdminView(response.continuation);
 }
 export type LegacyRefundBasis={orderId:string;dutyId:string;headRevision:string|null;dutyRevision:string;dutyCents:string;paidCents:string|null;
-  paymentOrderNo:string|null;merchantNo:string|null;refundDueAt:string|null;canStart:boolean;receipt:{caseId:string;intentId:string|null;refundOrderNo:string|null;amountCents:string;dutyCents:string;priorAppliedCents:string}|null;
+  paymentOrderNo:string|null;merchantNo:string|null;refundDueAt:string|null;historicalWaitUncertain?:boolean;historicalHeld?:boolean;
+  historicalRefunds?:Array<{number:string|null;amountCents:string|null;at:string|null}>;historicalRefundsMore?:boolean;canStart:boolean;receipt:{caseId:string;intentId:string|null;refundOrderNo:string|null;amountCents:string;dutyCents:string;priorAppliedCents:string}|null;
   current:{intentId:string|null;refundOrderNo:string|null;generation:number|null;amountCents:string;dutyCents:string;priorAppliedCents:string;previouslyRefundedCents:string;chainReview:boolean;blockedBy:{intentId:string;refundOrderNo:string;generation:number}|null}|null;
   progress:{intentId:string;caseId:string;orderId:string;dutyId:string;refundOrderNo:string;amountCents:string;state:string;terminal:string|null;completedAt:string|null;bankArrival:'UNKNOWN'}|null};
 export async function readLegacyAdminRefund(orderId:string,dutyId:string,signal?:AbortSignal):Promise<LegacyRefundBasis>{
@@ -133,9 +136,15 @@ export async function readLegacyAdminRefund(orderId:string,dutyId:string,signal?
   const result=await adminRequest<unknown>(base(orderId)+'/duties/'+encodeURIComponent(dutyId)+'/refund-case',undefined,'GET',{},signal);
   const cents=(value:unknown)=>typeof value==='string'&&/^(0|[1-9]\d{0,23})$/.test(value);
   if(!object(result)||result.orderId!==orderId||result.dutyId!==dutyId||!cents(result.dutyCents)||typeof result.dutyRevision!=='string'
-    || !/^[1-9]\d{0,17}$/.test(result.dutyRevision)||result.headRevision!==null&&(typeof result.headRevision!=='string'||!/^[1-9]\d{0,17}$/.test(result.headRevision))
+    || !/^[1-9]\d{0,17}$/.test(result.dutyRevision)||result.headRevision!==null&&(typeof result.headRevision!=='string'||!/^(0|[1-9]\d{0,17})$/.test(result.headRevision))
     || result.paidCents!==null&&!cents(result.paidCents)||result.paymentOrderNo!==null&&(typeof result.paymentOrderNo!=='string'||!/^[A-Za-z0-9_-]{1,50}$/.test(result.paymentOrderNo))
     || result.merchantNo!==null&&(typeof result.merchantNo!=='string'||!/^\d{1,15}$/.test(result.merchantNo))||typeof result.canStart!=='boolean'
+    || result.historicalWaitUncertain!==undefined&&typeof result.historicalWaitUncertain!=='boolean'
+    || result.historicalHeld!==undefined&&typeof result.historicalHeld!=='boolean'
+    || result.historicalRefundsMore!==undefined&&typeof result.historicalRefundsMore!=='boolean'
+    || result.historicalRefunds!==undefined&&(!Array.isArray(result.historicalRefunds)||result.historicalRefunds.length>20||result.historicalRefunds.some(row=>!object(row)
+      || row.number!==null&&(typeof row.number!=='string'||row.number.length>128)||row.amountCents!==null&&!cents(row.amountCents)
+      || row.at!==null&&(typeof row.at!=='string'||!Number.isFinite(Date.parse(row.at)))))
     || result.refundDueAt!==null&&(typeof result.refundDueAt!=='string'||!Number.isFinite(Date.parse(result.refundDueAt))))throw new Error('退款核对资料暂不可用');
   if(result.receipt!==null&&(!object(result.receipt)||typeof result.receipt.caseId!=='string'||!TOKEN.test(result.receipt.caseId)
     || result.receipt.intentId!==null&&(typeof result.receipt.intentId!=='string'||!TOKEN.test(result.receipt.intentId))||!cents(result.receipt.amountCents)

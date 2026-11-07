@@ -122,6 +122,20 @@ test('新单退款恢复提交结果未知时保留 UNKNOWN，不假定已恢复
   assert.equal(f.s.status,202);assert.equal(f.s.result.operation,'REFUND_RESUME');assert.deepEqual(f.s.result.outcome,{kind:'UNKNOWN',phase:'RESULT'});
   assert.equal(f.s.result.localFundsEffect,'UNKNOWN');
 });
+test('新单退款终态核对受本单权限约束，矛盾结果保留人工处理',async t=>{
+  const f=fixture(t),audits:any[]=[];let allowed=true,invoked=0;
+  t.mock.method(command,'authorizeAdminNativeRefund',async()=>{if(!allowed)throw new SecurityApiError(403,'FORBIDDEN','no');});
+  t.mock.method(securityCore,'recordAudit',async(...[_client,value]:Parameters<typeof securityCore.recordAudit>)=>{audits.push(value);});
+  t.mock.method(refundAttempt,'resolveNativeRefundTerminal',async(...[_o,id,actor,_rid,reason,authorize]:Parameters<typeof refundAttempt.resolveNativeRefundTerminal>)=>{
+    assert.equal(reason,'已核对汇聚记录');await authorize({query:async()=>({rows:[{order_id:'order_1'}]})} as never,id);invoked++;
+    return {intentId:id,resolved:false,alreadyClear:false,state:'REVIEW_REQUIRED'};
+  });
+  await f.invoke('/refunds/refund_1/resolve',{body:{reason:'已核对汇聚记录'}});
+  assert.equal(f.s.status,200);assert.equal(f.s.result.operation,'REFUND_RESOLVE');assert.equal(f.s.result.outcome.kind,'REQUIRES_MANUAL');
+  assert.equal(f.s.result.localFundsEffect,'NONE');assert.equal(audits[0].details.firstDispatchAllowed,false);assert.equal(invoked,1);
+  allowed=false;await f.invoke('/refunds/refund_1/resolve',{body:{reason:'已核对汇聚记录'}});assert.equal(f.s.status,403);assert.equal(invoked,1);
+  await f.invoke('/refunds/refund_1/resolve',{body:{reason:'已核对汇聚记录',force:true}});assert.equal(f.s.status,400);
+});
 test('仅核清历史退款后可创建旧退款的下一次尝试，拒绝越权与额外字段',async t=>{
   const f=fixture(t),audits:any[]=[];let invoked=0,allowed=true;
   t.mock.method(legacyReview,'authorizeLegacyRefundReviewAccess',async()=>{if(!allowed)throw new SecurityApiError(403,'FORBIDDEN','no');return {} as never;});
@@ -153,7 +167,7 @@ test('旧退款终态冲突仅允许授权客服按原退款号查询核对',asy
   assert.equal(f.s.result.outcome.event,'REVIEW_RESOLVED');assert.equal(audits[0].details.firstDispatchAllowed,false);assert.equal(invoked,1);
   allowed=false;await f.invoke('/legacy-refunds/legacy_intent_1/resolve',{body:{reason:'已核对原退款'}},opts);assert.equal(f.s.status,403);assert.equal(invoked,1);
   await f.invoke('/legacy-refunds/legacy_intent_1/resolve',{body:{reason:'已核对原退款',force:true}},opts);assert.equal(f.s.status,400);assert.equal(invoked,1);
-  assert.equal(await f.invoke('/refunds/refund_1/resolve'),false);
+  assert.equal(await f.invoke('/withdrawals/withdrawal_1/resolve'),false);
 });
 
 test("授权失败不进入渠道；提交后未知返回202 UNKNOWN", async t => {

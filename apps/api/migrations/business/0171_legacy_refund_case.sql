@@ -107,18 +107,31 @@ ALTER TABLE zzsh_order.legacy_refund_intent ADD CONSTRAINT legacy_refund_intent_
 CREATE TRIGGER legacy_refund_attempt_immutable BEFORE UPDATE OR DELETE ON zzsh_order.legacy_refund_attempt FOR EACH ROW EXECUTE FUNCTION zzsh_order.finance_immutable();
 CREATE TRIGGER legacy_refund_observation_immutable BEFORE UPDATE OR DELETE ON zzsh_order.legacy_refund_observation FOR EACH ROW EXECUTE FUNCTION zzsh_order.finance_immutable();
 CREATE TRIGGER legacy_refund_terminal_immutable BEFORE UPDATE OR DELETE ON zzsh_order.legacy_refund_terminal_evidence FOR EACH ROW EXECUTE FUNCTION zzsh_order.finance_immutable();
+CREATE FUNCTION zzsh_order.guard_refund_resolution_insert() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+ IF current_user IS DISTINCT FROM (SELECT pg_get_userbyid(relowner) FROM pg_class WHERE oid=TG_RELID) THEN
+  RAISE EXCEPTION 'refund resolution must be created by an authorized function' USING ERRCODE='42501';
+ END IF;
+ RETURN NEW;
+END $$;
+COMMENT ON FUNCTION zzsh_order.guard_refund_resolution_insert() IS '仅允许表所有者通过受权事务写入退款复核和重试决议。';
+REVOKE ALL ON FUNCTION zzsh_order.guard_refund_resolution_insert() FROM PUBLIC;
 CREATE TABLE zzsh_order.legacy_refund_review_resolution (
  id text PRIMARY KEY,intent_id text NOT NULL REFERENCES zzsh_order.legacy_refund_intent(id),previous_revision bigint NOT NULL,
  actor_id text NOT NULL REFERENCES zzsh_auth_admin."user"(id),session_id text NOT NULL,request_id text NOT NULL,reason text NOT NULL,
+ verified_observation_id text REFERENCES zzsh_order.legacy_refund_observation(id),
  created_xid xid8 NOT NULL DEFAULT pg_current_xact_id(),created_at timestamptz NOT NULL DEFAULT clock_timestamp(),UNIQUE(intent_id,previous_revision)
 );
+CREATE TRIGGER legacy_refund_review_resolution_insert_guard BEFORE INSERT ON zzsh_order.legacy_refund_review_resolution FOR EACH ROW EXECUTE FUNCTION zzsh_order.guard_refund_resolution_insert();
 CREATE TRIGGER legacy_refund_review_resolution_immutable BEFORE UPDATE OR DELETE ON zzsh_order.legacy_refund_review_resolution FOR EACH ROW EXECUTE FUNCTION zzsh_order.finance_immutable();
+COMMENT ON COLUMN zzsh_order.legacy_refund_review_resolution.verified_observation_id IS '人工复核时重新验签并绑定原退款的查询观察；普通恢复原号查询时为空。';
 CREATE TABLE zzsh_order.legacy_refund_terminal_resolution (
  id text PRIMARY KEY,intent_id text NOT NULL REFERENCES zzsh_order.legacy_refund_intent(id),observation_id text NOT NULL UNIQUE,
  terminal_evidence_id text NOT NULL REFERENCES zzsh_order.legacy_refund_terminal_evidence(id),actor_id text NOT NULL REFERENCES zzsh_auth_admin."user"(id),
  session_id text NOT NULL,request_id text NOT NULL,reason text NOT NULL,created_xid xid8 NOT NULL DEFAULT pg_current_xact_id(),created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
  FOREIGN KEY(observation_id,intent_id) REFERENCES zzsh_order.legacy_refund_observation(id,intent_id)
 );
+CREATE TRIGGER legacy_refund_terminal_resolution_insert_guard BEFORE INSERT ON zzsh_order.legacy_refund_terminal_resolution FOR EACH ROW EXECUTE FUNCTION zzsh_order.guard_refund_resolution_insert();
 CREATE TRIGGER legacy_refund_terminal_resolution_immutable BEFORE UPDATE OR DELETE ON zzsh_order.legacy_refund_terminal_resolution FOR EACH ROW EXECUTE FUNCTION zzsh_order.finance_immutable();
 CREATE TABLE zzsh_order.legacy_refund_retry_authorization (
  id text PRIMARY KEY,case_id text NOT NULL REFERENCES zzsh_order.legacy_refund_case(id),previous_intent_id text NOT NULL UNIQUE REFERENCES zzsh_order.legacy_refund_intent(id),
@@ -127,6 +140,7 @@ CREATE TABLE zzsh_order.legacy_refund_retry_authorization (
  actor_id text NOT NULL REFERENCES zzsh_auth_admin."user"(id),session_id text NOT NULL,request_id text NOT NULL,reason text NOT NULL,
  created_xid xid8 NOT NULL DEFAULT pg_current_xact_id(),created_at timestamptz NOT NULL DEFAULT clock_timestamp()
 );
+CREATE TRIGGER legacy_refund_retry_authorization_insert_guard BEFORE INSERT ON zzsh_order.legacy_refund_retry_authorization FOR EACH ROW EXECUTE FUNCTION zzsh_order.guard_refund_resolution_insert();
 CREATE TRIGGER legacy_refund_retry_authorization_immutable BEFORE UPDATE OR DELETE ON zzsh_order.legacy_refund_retry_authorization FOR EACH ROW EXECUTE FUNCTION zzsh_order.finance_immutable();
 --> statement-breakpoint
 ALTER TABLE zzsh_order.finance_event DROP CONSTRAINT finance_event_kind_check,
@@ -160,7 +174,8 @@ BEGIN
   OR current_setting('zzsh.actor_type',true) IS DISTINCT FROM 'admin'
   OR NEW.id IS DISTINCT FROM 'legacy_refund_case_'||substr(encode(sha256(convert_to(NEW.duty_id,'UTF8')),'hex'),1,40)
   OR NEW.history_event_id IS DISTINCT FROM (CASE WHEN NEW.prior_applied_cents=0 THEN NULL ELSE 'legacy_refund_history_'||substr(encode(sha256(convert_to(NEW.id,'UTF8')),'hex'),1,40) END)
-  OR o.id IS NULL OR o.source_pay_status<>1 OR o.source_order_status NOT IN(3,8,9) OR o.renter_user_id IS DISTINCT FROM NEW.renter_user_id
+  OR o.id IS NULL OR o.source_pay_status<>1 OR NOT((o.source_order_status IN(3,8,9) AND d.source='CONTINUATION')
+    OR(o.source_order_status=4 AND d.source='LEGACY_IMPORT' AND d.source_status IN('COMPLETED_UNREFUNDED','DETAINED'))) OR o.renter_user_id IS DISTINCT FROM NEW.renter_user_id
   OR o.recorded_paid_amount_cents IS DISTINCT FROM NEW.paid_cents OR o.source_digest IS DISTINCT FROM NEW.source_digest
   OR f.duty_id IS NULL OR f.created_xid<>pg_current_xact_id() OR f.kind<>'RENTER_REFUND' OR f.actor_realm<>'admin'
   OR f.actor_id IS DISTINCT FROM current_setting('zzsh.actor_id',true) OR f.session_id IS DISTINCT FROM current_setting('zzsh.session_id',true)
@@ -184,15 +199,32 @@ BEGIN
   OR a.details->>'priorAppliedToDutyCents' IS DISTINCT FROM NEW.prior_applied_cents::text OR a.details->>'refundCents' IS DISTINCT FROM NEW.new_refund_cents::text
   OR a.details->>'noUnresolvedRefunds' IS DISTINCT FROM 'true' OR a.details->>'source' IS DISTINCT FROM 'STAFF_REVIEW'
   OR a.details->>'channelResult' IS DISTINCT FROM 'NOT_SUBMITTED' OR a.reason IS DISTINCT FROM a.details->>'evidenceRef'
-  OR NOT EXISTS(SELECT 1 FROM zzsh_order.legacy_continuation_version v WHERE v.id=d.continuation_version_id AND v.order_id=d.order_id
+  OR NOT (EXISTS(SELECT 1 FROM zzsh_order.legacy_continuation_version v WHERE v.id=d.continuation_version_id AND v.order_id=d.order_id
     AND v.command='CONFIRM' AND v.refund_due_at=NEW.refund_due_at AND v.refund_due_at<=clock_timestamp())
-  OR NOT EXISTS(SELECT 1 FROM zzsh_order.legacy_continuation_evidence e WHERE e.order_id=NEW.order_id AND e.source_kind='SOURCE_IMPORT'
+    OR d.source='LEGACY_IMPORT' AND d.source_status IN('COMPLETED_UNREFUNDED','DETAINED')
+      AND o.source_snapshot->>'is_settle'=CASE d.source_status WHEN 'COMPLETED_UNREFUNDED' THEN '0' ELSE '2' END
+      AND (d.source_status<>'DETAINED' OR a.details->>'historicalReleaseVerified'='true')
+      AND o.source_completed_at IS NOT NULL AND a.details->>'historicalDueVerified'='true'
+      AND NEW.refund_due_at=(a.details->>'reviewedAt')::timestamptz AND NEW.refund_due_at BETWEEN o.source_completed_at AND clock_timestamp())
+  OR NOT (EXISTS(SELECT 1 FROM zzsh_order.legacy_continuation_evidence e WHERE e.order_id=NEW.order_id AND e.source_kind='SOURCE_IMPORT'
     AND e.source_digest=NEW.source_digest AND e.admission='PARAMETER_COMPLETE' AND jsonb_typeof(e.facts#>'{evidence,source,paidPay}')='array'
     AND jsonb_array_length(e.facts#>'{evidence,source,paidPay}')=1
     AND e.facts#>>'{evidence,source,paidPay,0,id}'=NEW.original_payment_record_id
     AND e.facts#>>'{evidence,source,paidPay,0,payOrderSn}'=NEW.original_payment_order_no
     AND (e.facts#>>'{evidence,source,paidPay,0,payMoney}')::numeric*100=NEW.paid_cents
     AND (e.facts#>>'{evidence,source,payMoney}')::numeric*100=NEW.paid_cents)
+    OR d.source='LEGACY_IMPORT' AND d.source_status IN('COMPLETED_UNREFUNDED','DETAINED') AND EXISTS(
+      SELECT 1 FROM zzsh_order.personal_finance_observation p WHERE p.source_type='LEGACY_MYSQL' AND p.source_system='legacy_mysql_restore'
+       AND p.source_entity='la_pay_order' AND p.source_kind='HISTORICAL_PAYMENT' AND p.user_id=o.renter_user_id AND p.legacy_user_id=o.legacy_renter_id
+       AND p.source_id=NEW.original_payment_record_id AND p.snapshot->>'sourceNumber'=NEW.original_payment_order_no
+       AND p.snapshot->>'referenceType'='LEGACY_ORDER' AND p.snapshot->>'referenceId'=o.legacy_id
+       AND p.snapshot->>'sourceOrderType'='1' AND p.snapshot->>'sourceStatus'='1' AND p.snapshot->>'associationState'='SOURCE_VERIFIED'
+       AND (p.snapshot->>'amount')::numeric*100=NEW.paid_cents AND p.source_canonical::jsonb=p.snapshot
+       AND encode(sha256(convert_to(p.source_canonical,'UTF8')),'hex')=p.source_digest)
+    AND (SELECT count(*) FROM zzsh_order.personal_finance_observation p WHERE p.source_type='LEGACY_MYSQL'
+       AND p.source_system='legacy_mysql_restore' AND p.source_entity='la_pay_order' AND p.source_kind='HISTORICAL_PAYMENT'
+       AND p.user_id=o.renter_user_id AND p.legacy_user_id=o.legacy_renter_id AND p.snapshot->>'referenceType'='LEGACY_ORDER'
+       AND p.snapshot->>'referenceId'=o.legacy_id AND p.snapshot->>'sourceOrderType'='1' AND p.snapshot->>'sourceStatus'='1')=1)
   OR NOT EXISTS(SELECT 1 FROM pg_locks WHERE pid=pg_backend_pid() AND locktype='advisory' AND granted AND mode='ExclusiveLock'
     AND classid=((key_value>>32)&4294967295)::oid AND objid=(key_value&4294967295)::oid AND objsubid=1)
   OR NOT EXISTS(SELECT 1 FROM pg_locks WHERE pid=pg_backend_pid() AND locktype='advisory' AND granted AND mode='ExclusiveLock'
@@ -244,7 +276,11 @@ BEGIN
    END IF;
   ELSIF OLD.requires_review AND NOT NEW.requires_review THEN
    IF (to_jsonb(NEW)-ARRAY['state','revision','requires_review','updated_at']) IS DISTINCT FROM(to_jsonb(OLD)-ARRAY['state','revision','requires_review','updated_at'])
-    OR NEW.state<>'UNKNOWN' OR OLD.terminal_evidence_id IS NOT NULL OR OLD.lease_until>clock_timestamp()
+    OR NEW.state<>'UNKNOWN' OR OLD.terminal_evidence_id IS NOT NULL
+    OR OLD.lease_until>clock_timestamp() AND NOT EXISTS(SELECT 1 FROM zzsh_order.legacy_refund_review_resolution verified
+      WHERE verified.intent_id=OLD.id AND verified.previous_revision=OLD.revision AND verified.created_xid=pg_current_xact_id()
+        AND verified.verified_observation_id IS NOT NULL AND verified.actor_id=current_setting('zzsh.actor_id',true)
+        AND verified.session_id=current_setting('zzsh.session_id',true) AND verified.request_id=current_setting('zzsh.request_id',true))
     OR NOT EXISTS(SELECT 1 FROM zzsh_order.legacy_refund_review_resolution z WHERE z.intent_id=OLD.id AND z.previous_revision=OLD.revision
       AND z.created_xid=pg_current_xact_id() AND z.actor_id=current_setting('zzsh.actor_id',true)
       AND z.session_id=current_setting('zzsh.session_id',true) AND z.request_id=current_setting('zzsh.request_id',true))
@@ -411,6 +447,53 @@ BEGIN
  RETURN jsonb_build_object('intentId',i.id,'resumed',true,'state','UNKNOWN','resolutionId',resolution_value);
 END $$;
 REVOKE ALL ON FUNCTION zzsh_order.resume_legacy_refund_review(text,text) FROM PUBLIC;
+
+--> statement-breakpoint
+CREATE FUNCTION zzsh_order.resolve_legacy_pending_terminal(intent_value text,observation_value text,reason_text text) RETURNS jsonb
+ LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog AS $$
+DECLARE i zzsh_order.legacy_refund_intent;x zzsh_order.legacy_refund_case;o zzsh_order.legacy_refund_observation;
+ actor_value text:=current_setting('zzsh.actor_id',true);session_value text:=current_setting('zzsh.session_id',true);
+ request_value text:=current_setting('zzsh.request_id',true);resolution_value text;lock_no text;
+BEGIN
+ IF current_setting('transaction_isolation')<>'read committed' OR current_setting('zzsh.actor_type',true) IS DISTINCT FROM 'admin'
+  OR COALESCE(length(actor_value),0)=0 OR COALESCE(length(session_value),0)=0 OR COALESCE(length(request_value),0)=0
+  OR length(request_value)>128 OR reason_text IS NULL OR length(trim(reason_text)) NOT BETWEEN 3 AND 200 OR reason_text~'[[:cntrl:]]'
+ THEN RAISE EXCEPTION 'legacy pending refund review identity unavailable' USING ERRCODE='42501';END IF;
+ SELECT * INTO i FROM zzsh_order.legacy_refund_intent WHERE id=intent_value;
+ SELECT * INTO x FROM zzsh_order.legacy_refund_case WHERE id=i.case_id;
+ IF i.id IS NULL OR x.id IS NULL THEN RAISE EXCEPTION 'legacy pending refund unavailable' USING ERRCODE='23514';END IF;
+ PERFORM zzsh_order.assert_legacy_refund_operator(x.order_id);
+ FOR lock_no IN SELECT DISTINCT n COLLATE "C" FROM unnest(ARRAY[x.original_payment_order_no]||
+   ARRAY(SELECT refund_order_no FROM zzsh_order.legacy_refund_intent WHERE case_id=x.id)) n ORDER BY 1 LOOP
+  PERFORM pg_advisory_xact_lock(hashtextextended(jsonb_build_array('zzsh:refund-order-no:v1',x.merchant_identity_id,lock_no)::text,0));
+  PERFORM pg_advisory_xact_lock(hashtextextended(jsonb_build_array('zzsh:legacy-original-order-no:v1',lock_no)::text,0));
+ END LOOP;
+ PERFORM id FROM zzsh_auth_user."user" WHERE id=x.renter_user_id FOR UPDATE;
+ SELECT * INTO i FROM zzsh_order.legacy_refund_intent WHERE id=intent_value FOR UPDATE;
+ SELECT * INTO o FROM zzsh_order.legacy_refund_observation WHERE id=observation_value AND intent_id=i.id;
+ IF i.state NOT IN('SUBMITTING','UNKNOWN','PROCESSING','REVIEW_REQUIRED') OR NOT i.requires_review OR i.terminal_evidence_id IS NOT NULL
+  OR i.budget_disposition<>'ALLOCATED' OR EXISTS(SELECT 1 FROM zzsh_order.legacy_refund_intent previous
+    WHERE previous.case_id=i.case_id AND previous.generation<i.generation AND previous.requires_review)
+  OR NOT EXISTS(SELECT 1 FROM zzsh_order.legacy_refund_attempt a WHERE a.intent_id=i.id AND a.operation='SUBMIT')
+  OR o.id IS NULL OR o.created_xid<>pg_current_xact_id() OR o.operation<>'QUERY' OR o.event<>'REVIEW'
+  OR o.evidence_level<>'PROVIDER_RESPONSE' OR NOT o.response_complete OR o.http_status IS DISTINCT FROM 200 OR o.transport_failure IS NOT NULL
+  OR o.schema_status<>'VALID' OR o.signature_status<>'MATCH' OR o.binding_status<>'MATCH'
+  OR o.lease_version IS DISTINCT FROM i.lease_version OR o.lease_owner IS DISTINCT FROM i.lease_owner
+  OR i.lease_until IS NULL OR i.lease_until<=clock_timestamp() OR o.state_before IS DISTINCT FROM i.state OR o.state_after IS DISTINCT FROM i.state
+ THEN RAISE EXCEPTION 'legacy pending refund evidence unavailable' USING ERRCODE='23514';END IF;
+ resolution_value:='legacy_refund_review_'||replace(gen_random_uuid()::text,'-','');
+ INSERT INTO zzsh_order.legacy_refund_review_resolution(id,intent_id,previous_revision,actor_id,session_id,request_id,reason,verified_observation_id)
+  VALUES(resolution_value,i.id,i.revision,actor_value,session_value,request_value,trim(reason_text),o.id);
+ UPDATE zzsh_order.legacy_refund_intent SET state='UNKNOWN',requires_review=false,revision=revision+1 WHERE id=i.id AND revision=i.revision AND requires_review;
+ IF NOT FOUND THEN RAISE EXCEPTION 'legacy pending refund review changed' USING ERRCODE='40001';END IF;
+ INSERT INTO zzsh_iam.audit_event(id,actor_type,actor_id,session_id,action,object_type,object_id,outcome,request_id,reason,occurred_at,details)
+  VALUES('audit_'||replace(gen_random_uuid()::text,'-',''),'admin',actor_value,session_value,'order.legacy.refund.pending_terminal_reviewed',
+   'legacy_refund_intent',i.id,'SUCCESS',request_value,trim(reason_text),clock_timestamp(),
+   jsonb_build_object('orderId',x.order_id,'resolutionId',resolution_value,'observationId',o.id,'refundOrderNo',i.refund_order_no));
+ RETURN jsonb_build_object('intentId',i.id,'resolved',true,'resolutionId',resolution_value);
+END $$;
+REVOKE ALL ON FUNCTION zzsh_order.resolve_legacy_pending_terminal(text,text,text) FROM PUBLIC;
+COMMENT ON FUNCTION zzsh_order.resolve_legacy_pending_terminal(text,text,text) IS '在客服授权及同事务原号证据下解除旧退款待核，供原结果接纳。';
 
 --> statement-breakpoint
 CREATE FUNCTION zzsh_order.resolve_legacy_refund_terminal(intent_value text,observation_value text,reason_text text) RETURNS jsonb
@@ -584,7 +667,11 @@ BEGIN
  f:=NEW.facts_canonical::jsonb;p:=o.profile_canonical::jsonb;
  IF i.id IS NULL OR x.id IS NULL OR i.state NOT IN('SUBMITTING','UNKNOWN','PROCESSING') OR i.requires_review OR i.budget_disposition<>'ALLOCATED'
   OR EXISTS(SELECT 1 FROM zzsh_order.legacy_refund_intent prior WHERE prior.case_id=i.case_id AND prior.generation<i.generation AND prior.requires_review)
-  OR o.id IS NULL OR o.created_xid<>pg_current_xact_id() OR o.operation NOT IN('QUERY','NOTIFY') OR o.event<>'PENDING_TERMINAL'
+  OR o.id IS NULL OR o.created_xid<>pg_current_xact_id() OR o.operation NOT IN('QUERY','NOTIFY')
+  OR NOT(o.event='PENDING_TERMINAL' OR o.event='REVIEW' AND o.operation='QUERY' AND EXISTS(
+    SELECT 1 FROM zzsh_order.legacy_refund_review_resolution r WHERE r.intent_id=i.id AND r.verified_observation_id=o.id
+      AND r.created_xid=pg_current_xact_id() AND r.actor_id=current_setting('zzsh.actor_id',true)
+      AND r.session_id=current_setting('zzsh.session_id',true) AND r.request_id=current_setting('zzsh.request_id',true)))
   OR o.evidence_level<>'PROVIDER_RESPONSE' OR NOT o.response_complete OR o.transport_failure IS NOT NULL
   OR(o.operation='QUERY' AND o.http_status IS DISTINCT FROM 200) OR(o.operation='NOTIFY' AND o.http_status IS NOT NULL)
   OR o.schema_status<>'VALID' OR o.signature_status<>'MATCH' OR o.binding_status<>'MATCH'
@@ -757,7 +844,11 @@ BEGIN
  PERFORM zzsh_order.assert_legacy_finance_order_lock(d.order_id);
  paid:=(a.details->>'paidCents')::numeric;prior_total:=(a.details->>'previouslyRefundedCents')::numeric;
  applied:=(a.details->>'priorAppliedToDutyCents')::numeric;new_amount:=(a.details->>'refundCents')::numeric;
- SELECT refund_due_at INTO due_value FROM zzsh_order.legacy_continuation_version WHERE id=d.continuation_version_id AND order_id=d.order_id AND command='CONFIRM';
+ IF d.source='LEGACY_IMPORT' THEN
+  due_value:=(a.details->>'reviewedAt')::timestamptz;
+ ELSE
+  SELECT refund_due_at INTO due_value FROM zzsh_order.legacy_continuation_version WHERE id=d.continuation_version_id AND order_id=d.order_id AND command='CONFIRM';
+ END IF;
  case_value:='legacy_refund_case_'||substr(encode(sha256(convert_to(d.id,'UTF8')),'hex'),1,40);
  suffix:=encode(sha256(convert_to(case_value,'UTF8')),'hex');
  intent_value:='legacy_refund_intent_'||substr(suffix,1,40);refund_no:='LR'||substr(suffix,1,28);
