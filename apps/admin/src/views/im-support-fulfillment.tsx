@@ -880,16 +880,23 @@ function supportCancelReasonText(reason: string | null | undefined): string {
 }
 
 function supportCancelRefundText(view: SupportCancelView | null): string {
+  if (view?.simulationScope) {
+    const latest = view.refund?.intents?.at(-1);
+    if (latest?.requiresReview || latest?.state === "REVIEW_REQUIRED") return "模拟退款需要核对，不会实际退回款项。";
+    if (latest?.state === "SUCCEEDED") return "模拟退款已完成，不会实际退回款项。";
+    if (latest?.state === "FAILED") return "模拟退款未完成，不会实际退回款项。";
+    return "模拟退款待处理，不会实际退回款项。";
+  }
   if (!view?.refund || view.refund.integration !== "INTEGRATED" || !view.refund.intents?.length) {
-    return "退款责任已登记，等待系统提交原路退款；银行到账未知。";
+    return "退款责任已登记，退款进度尚未记录；银行到账未知。";
   }
   const latest = view.refund.intents[view.refund.intents.length - 1]!;
   if (latest.requiresReview || latest.state === "REVIEW_REQUIRED") return "退款需人工复核；银行到账未知。";
-  if (latest.state === "SUCCEEDED") return "渠道退款成功（本地核销），银行到账未知。";
-  if (latest.state === "FAILED") return "渠道退款失败（未扣款），请转财务处理。";
-  if (latest.state === "SUBMITTING" || latest.state === "PROCESSING") return "渠道处理中，结果未确认。";
-  if (latest.state === "UNKNOWN") return "渠道结果未确认，不能视为已退款。";
-  return "原路退款待提交；银行到账未知。";
+  if (latest.state === "SUCCEEDED") return "本站已记录退款处理结果，银行到账未知。";
+  if (latest.state === "FAILED") return "退款处理未完成，请核对记录。";
+  if (latest.state === "SUBMITTING" || latest.state === "PROCESSING") return "退款处理中，结果未确认。";
+  if (latest.state === "UNKNOWN") return "退款结果未确认，不能视为已退款。";
+  return "退款待处理；银行到账未知。";
 }
 
 function SupportCancelCard({ orderId, displayNo }: { orderId: string; displayNo: string }) {
@@ -959,12 +966,13 @@ function SupportCancelCard({ orderId, displayNo }: { orderId: string; displayNo:
 
   const refundCents = result?.supportCancellation?.refundCents ?? preview?.eligibility.refundCents ?? null;
   const blocked = preview !== null && !preview.eligibility.allowed && !preview.supportCancellation;
+  const simulated = preview?.simulationScope !== undefined;
   return <Card id={`support-cancel-${orderId}`} tabIndex={-1} className="im-support-fulfillment im-order-card" data-support-cancel="true" aria-label="客服取消订单退款">
     <CardContent className="grid gap-2 p-4">
-      <CardTitle className="flex items-center gap-2 text-sm"><TriangleAlert className="size-4 shrink-0 text-destructive" />取消订单（全额原路退款）</CardTitle>
-      <CardDescription className="text-xs leading-relaxed">仅限尚未确认开租的订单，核实未使用且无争议后登记全额原路退款。已开租订单请使用正常或提前结算；退款是否到账需另行核对。</CardDescription>
+      <CardTitle className="flex items-center gap-2 text-sm"><TriangleAlert className="size-4 shrink-0 text-destructive" />取消未开租订单</CardTitle>
+      <CardDescription className="text-xs leading-relaxed">仅限尚未确认开租的订单，核实未使用且无争议后登记全额退款责任。已开租订单请使用正常或提前结算。</CardDescription>
       {result ? <Alert><ShieldCheck /><AlertTitle>已取消并登记全额退款</AlertTitle><AlertDescription>
-        退款金额 {formatFundingCents(refundCents)}（原支付金额）。{supportCancelRefundText(result)} 订单已取消，群聊保留；退款处理结果以渠道与财务核对为准。
+        退款金额 {formatFundingCents(refundCents)}（原支付金额）。{supportCancelRefundText(result)} 订单已取消，群聊保留。
       </AlertDescription></Alert>
         : <div className="im-support-fulfillment-actions">
           <Button variant="outline" size="sm" data-action="support-cancel-open" onClick={() => void openDialog()}>取消订单</Button>
@@ -972,14 +980,14 @@ function SupportCancelCard({ orderId, displayNo }: { orderId: string; displayNo:
       {error && !open ? <p className="im-support-fulfillment-error" role="alert"><CircleAlert size={14} />{error}</p> : null}
     </CardContent>
     <ConfirmAlertDialog open={open} onOpenChange={(next) => { if (!next && (phase === "SENDING" || phase === "UNKNOWN")) return; setOpen(next); }}
-      contentLabel="取消订单确认" title="确认取消订单并全额原路退款？"
-      description={`订单 ${displayNo}。提交后订单立即取消，并登记原支付金额的全额退款责任；渠道提交结果和银行到账状态未知。`}
-      confirmLabel={phase === "SENDING" ? "提交中…" : phase === "UNKNOWN" ? "重试同一请求" : "确认取消并退款"}
+      contentLabel="取消订单确认" title={simulated?"确认取消订单并模拟退款？":"确认取消订单并登记退款？"}
+      description={simulated?`订单 ${displayNo}。提交后订单立即取消，退款仅用于测试，不会实际退回款项。`:`订单 ${displayNo}。提交后订单立即取消，并登记原支付金额的全额退款责任；渠道提交结果和银行到账状态未知。`}
+      confirmLabel={phase === "SENDING" ? "提交中…" : phase === "UNKNOWN" ? "重试同一请求" : simulated?"确认取消并模拟退款":"确认取消并退款"}
       onConfirm={() => void submit()} busy={phase === "SENDING"} confirmDisabled={!preview?.eligibility.allowed || !valid}>
       {phase === "LOADING" ? <p className="im-wb-dialog-hint">正在读取退款资格与金额…</p> : null}
       {preview ? <div className="grid gap-2">
-        <p className="text-sm"><strong>退款金额：{formatFundingCents(preview.eligibility.refundCents ?? preview.supportCancellation?.refundCents)}</strong>（原支付金额，原路退回）</p>
-        <p className="im-wb-dialog-hint">{preview.openingConfirmed ? "订单已确认开租，请使用现有结算与退款流程。" : "订单尚未确认开租；核实未使用且无争议后登记全额应退。"} 渠道提交结果与银行到账状态未知，不能把本地退款责任当成已到账。</p>
+        <p className="text-sm"><strong>退款金额：{formatFundingCents(preview.eligibility.refundCents ?? preview.supportCancellation?.refundCents)}</strong>（原支付金额）</p>
+        <p className="im-wb-dialog-hint">{preview.openingConfirmed ? "订单已确认开租，请使用现有结算与退款流程。" : "订单尚未确认开租；核实未使用且无争议后登记全额应退。"} {simulated?"这是模拟退款，不会实际退回款项。":"渠道提交结果与银行到账状态未知，不能把本地退款责任当成已到账。"}</p>
         {blocked ? <Alert variant="warning"><TriangleAlert /><AlertTitle>当前不可取消</AlertTitle><AlertDescription>{supportCancelReasonText(preview.eligibility.reason)}</AlertDescription></Alert> : null}
       </div> : null}
       {preview?.supportCancellation ? <Alert><ShieldCheck /><AlertTitle>已存在客服取消记录</AlertTitle><AlertDescription>{supportCancelRefundText(preview)}</AlertDescription></Alert> : null}

@@ -36,6 +36,7 @@ test('模拟退款只接受已证明的受控来源和演示范围',()=>{
  assert.equal(parsePrestartView(p,'order_1').refund.simulationScope,'ECS_TEST_SIMULATED');
  assert.throws(()=>parsePrestartView({...p,request:{...p.request,dataOrigin:'JOINPAY_LOCAL_ACCEPTANCE'}},'order_1'));
  assert.throws(()=>parsePrestartRefund({...p.refund,simulationScope:'OTHER'}));
+ assert.throws(()=>parsePrestartRefund({...p.refund,simulationScope:['ECS_TEST_SIMULATED']}));
  assert.throws(()=>parsePrestartRefund({...p.refund,dataOrigin:'JOINPAY_PROVIDER'}));
  assert.equal(parsePrestartView(view(),'order_1').refund.simulationScope,undefined);
 });

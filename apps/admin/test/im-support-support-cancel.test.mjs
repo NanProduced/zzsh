@@ -102,14 +102,14 @@ test("取消订单入口用 alert dialog 二次确认：金额/原因必填/幂�
   await render(root, host);
   const card = host.querySelector('[data-support-cancel="true"]');
   assert.ok(card, "support cancellation card is visible for paid orders with support write permission");
-  assert.match(card.textContent, /全额原路退款/);
+  assert.match(card.textContent, /取消未开租订单/);
   assert.match(card.textContent, /仅限尚未确认开租/);
   assert.match(card.textContent, /已开租订单请使用正常或提前结算/);
   assert.doesNotMatch(card.textContent, /开租前和开租后都|不按已用时间扣费/);
   await click(button(host, "取消订单"));
   await waitFor(() => document.body.querySelector('[aria-label="取消订单确认"]'));
   assert.match(document.body.textContent, /退款金额：¥159\.08/);
-  assert.match(document.body.textContent, /原路退回/);
+  assert.match(document.body.textContent, /原支付金额/);
   assert.match(document.body.textContent, /银行到账状态未知/);
   const confirm = [...document.body.querySelectorAll("button")].find((item) => item.textContent.includes("确认取消并退款"));
   assert.ok(confirm);
@@ -126,6 +126,57 @@ test("取消订单入口用 alert dialog 二次确认：金额/原因必填/幂�
   assert.match(host.textContent, /退款金额 ¥159\.08/);
   assert.match(host.textContent, /退款责任已登记/);
   assert.match(host.textContent, /银行到账未知/);
+});
+
+test("模拟付款的客服取消在提交前后都不冒充真实退款", async (t) => {
+  const demoPreview={...preview,simulationScope:'ECS_TEST_SIMULATED'};
+  const demoSuccess={...success,simulationScope:'ECS_TEST_SIMULATED',refund:{...success.refund,intents:[{state:'SUCCEEDED',requiresReview:false}]}};
+  let posted=false;
+  globalThis.fetch=async(input,init={})=>{
+    const url=String(input);
+    if(url.endsWith('/orders/order-A/settlement'))return response(settlement);
+    if(url.endsWith('/orders/order-A/support-cancel')&&(init.method??'GET')==='GET')return response(posted?demoSuccess:demoPreview);
+    if(url.endsWith('/orders/order-A/support-cancel')&&init.method==='POST'){posted=true;return response(demoSuccess);}
+    throw new Error(`unexpected request ${url}`);
+  };
+  const {host,root}=mount();t.after(async()=>{await act(async()=>root.unmount());host.remove();});
+  await render(root,host);await click(button(host,'取消订单'));
+  await waitFor(()=>document.body.querySelector('[aria-label="取消订单确认"]'));
+  assert.match(document.body.textContent,/模拟退款/);assert.match(document.body.textContent,/不会实际退回款项/);
+  await typeReason('客服核实后取消');await click([...document.body.querySelectorAll('button')].find(item=>item.textContent.includes('确认取消并模拟退款')));
+  await waitFor(()=>host.textContent.includes('模拟退款已完成'));
+  assert.match(host.textContent,/不会实际退回款项/);assert.doesNotMatch(host.textContent,/渠道退款成功|真实到账/);
+});
+
+test("未知模拟范围不会被当成客服取消结果", async (t) => {
+  let posts=0;
+  globalThis.fetch=async(input,init={})=>{
+    const url=String(input);
+    if(url.endsWith('/orders/order-A/settlement'))return response(settlement);
+    if(url.endsWith('/orders/order-A/support-cancel')&&(init.method??'GET')==='GET')return response({...preview,simulationScope:'OTHER'});
+    if(init.method==='POST'){posts++;return response(success);}
+    throw new Error(`unexpected request ${url}`);
+  };
+  const {host,root}=mount();t.after(async()=>{await act(async()=>root.unmount());host.remove();});
+  await render(root,host);await click(button(host,'取消订单'));
+  await waitFor(()=>document.body.querySelector('[aria-label="取消订单确认"]'));
+  assert.equal(posts,0);assert.doesNotMatch(document.body.textContent,/模拟退款已完成/);
+});
+
+test("提交回执的模拟范围格式错误时保留原请求，不显示成功", async (t) => {
+  let posts=0;
+  globalThis.fetch=async(input,init={})=>{
+    const url=String(input);
+    if(url.endsWith('/orders/order-A/settlement'))return response(settlement);
+    if(url.endsWith('/orders/order-A/support-cancel')&&(init.method??'GET')==='GET')return response({...preview,simulationScope:'ECS_TEST_SIMULATED'});
+    if(url.endsWith('/orders/order-A/support-cancel')&&init.method==='POST'){posts++;return response({...success,simulationScope:['ECS_TEST_SIMULATED']});}
+    throw new Error(`unexpected request ${url}`);
+  };
+  const {host,root}=mount();t.after(async()=>{await act(async()=>root.unmount());host.remove();});
+  await render(root,host);await click(button(host,'取消订单'));await waitFor(()=>document.body.querySelector('[aria-label="取消订单确认"]'));
+  await typeReason('客服核实后取消');await click([...document.body.querySelectorAll('button')].find(item=>item.textContent.includes('确认取消并模拟退款')));
+  await waitFor(()=>document.body.textContent.includes('取消结果未确认'));
+  assert.equal(posts,1);assert.doesNotMatch(host.textContent,/已取消并登记全额退款/);
 });
 
 test("结算已落账的409显示真实原因并保持弹窗，不出现成功文案", async (t) => {

@@ -24,7 +24,7 @@ export function parsePrestartRefund(value:unknown):PrestartRefundProgress|null{
  if(value===null||value===undefined)return null;const r=object(value);
  if(typeof r.integration!=='string'||!['NOT_INTEGRATED','INTEGRATED','UNAVAILABLE'].includes(r.integration)||typeof r.truncated!=='boolean'
   ||r.bankArrival!=='UNKNOWN'||r.channelRecordsChecked!==false||r.reason!==null&&(typeof r.reason!=='string'||!/^[A-Z_]{1,64}$/.test(r.reason))
-  ||r.simulationScope!==undefined&&(r.dataOrigin!=='LOCAL_CONTROLLED'||!['LOCAL_DEMO_SIMULATED','ECS_TEST_SIMULATED'].includes(String(r.simulationScope))))throw invalid();
+  ||r.simulationScope!==undefined&&(r.dataOrigin!=='LOCAL_CONTROLLED'||typeof r.simulationScope!=='string'||!['LOCAL_DEMO_SIMULATED','ECS_TEST_SIMULATED'].includes(r.simulationScope)))throw invalid();
  const amount=(v:unknown)=>{const s=text(v,24);if(!/^(0|[1-9][0-9]*)$/.test(s))throw invalid();return s;};
  let totals:PrestartRefundProgress['totals']=null;
  if(r.totals!==null){const a=object(r.totals);if(a.totalsComplete!==true||r.truncated||r.integration!=='INTEGRATED')throw invalid();

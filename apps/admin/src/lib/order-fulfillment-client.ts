@@ -106,6 +106,7 @@ export type SupportCancelRow = {
 export type SupportCancelView = {
   contractVersion: "admin-support-cancel.v1";
   orderId: string; orderRevision: string; orderStatus: string; cancelReason: string | null; cancelledAt: string | null;
+  simulationScope?: "LOCAL_DEMO_SIMULATED" | "ECS_TEST_SIMULATED";
   eligibility: { allowed: boolean; reason: SupportCancelReason | null; refundCents: string | null; openingConfirmed?: boolean };
   openingConfirmed: boolean;
   supportCancellation: SupportCancelRow | null;
@@ -122,7 +123,11 @@ export type SupportCancelOutcome =
 
 /** The support-cancel preview is a read-only projection; nothing is reserved or submitted. */
 export async function readSupportCancel(orderId: string): Promise<SupportCancelView> {
-  return adminRequest<SupportCancelView>(`${orderBase(orderId)}/support-cancel`);
+  const view = await adminRequest<SupportCancelView>(`${orderBase(orderId)}/support-cancel`);
+  if (!view || view.contractVersion !== "admin-support-cancel.v1" || view.orderId !== orderId
+    || view.simulationScope !== undefined && !["LOCAL_DEMO_SIMULATED", "ECS_TEST_SIMULATED"].includes(view.simulationScope))
+    throw new AdminApiError(502, "SUPPORT_CANCEL_CONTRACT_INVALID");
+  return view;
 }
 
 /** Send or replay one frozen support cancellation. The caller must reuse `key` after an unknown result. */
@@ -132,7 +137,10 @@ export async function sendSupportCancel(orderId: string, expectedOrderRevision: 
       { expectedOrderRevision, reason }, "POST", { "idempotency-key": key });
     if (raw.outcome === "UNKNOWN" || raw.originalKeyRequired === true) return { kind: "unknown" };
     if (raw.contractVersion !== "admin-support-cancel.v1" || raw.orderId !== orderId || typeof raw.orderRevision !== "string"
-      || typeof raw.eligibility !== "object" || raw.eligibility === null) return { kind: "unknown" };
+      || typeof raw.eligibility !== "object" || raw.eligibility === null
+      || raw.simulationScope !== undefined && (typeof raw.simulationScope !== 'string'||!['LOCAL_DEMO_SIMULATED','ECS_TEST_SIMULATED'].includes(raw.simulationScope)
+        || !raw.channel || typeof raw.channel !== 'object' || (raw.channel as {result?:unknown}).result !== 'NOT_SUBMITTED'
+        || (raw.channel as {bankArrival?:unknown}).bankArrival !== 'UNKNOWN')) return { kind: "unknown" };
     return { kind: "accepted", view: raw as unknown as SupportCancelView };
   } catch (error) {
     if (error instanceof AdminApiError) {

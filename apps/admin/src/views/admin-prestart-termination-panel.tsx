@@ -32,7 +32,7 @@ function contextOf(value:unknown,orderId:string):Context{
  let refund:RefundRead|null=null;
  if(r.refund!==null&&r.refund!==undefined){const f=obj(r.refund);if(typeof f.integration!=='string'||!['INTEGRATED','NOT_INTEGRATED','UNAVAILABLE'].includes(f.integration)
   ||f.bankArrival!=='UNKNOWN'||f.channelRecordsChecked!==false||typeof f.truncated!=='boolean'
-  ||f.simulationScope!==undefined&&(f.dataOrigin!=='LOCAL_CONTROLLED'||!['LOCAL_DEMO_SIMULATED','ECS_TEST_SIMULATED'].includes(String(f.simulationScope))))throw invalid();
+  ||f.simulationScope!==undefined&&(f.dataOrigin!=='LOCAL_CONTROLLED'||typeof f.simulationScope!=='string'||!['LOCAL_DEMO_SIMULATED','ECS_TEST_SIMULATED'].includes(f.simulationScope)))throw invalid();
   let totals:RefundRead['totals']=null;if(f.totals!==null){const a=obj(f.totals);if(a.totalsComplete!==true||f.integration!=='INTEGRATED'||f.truncated)throw invalid();
    for(const key of ['originalCents','allocatedCents','consumedCents','releasedCents','remainingCents'])if(typeof a[key]!=='string'||!/^(0|[1-9][0-9]{0,23})$/.test(a[key] as string))throw invalid();
    if(BigInt(a.originalCents as string)-BigInt(a.allocatedCents as string)!==BigInt(a.remainingCents as string)||BigInt(a.consumedCents as string)>BigInt(a.allocatedCents as string))throw invalid();
