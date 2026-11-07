@@ -385,6 +385,31 @@ export function normalizeRentalPricing(value: unknown): RentalPricingSelection {
   return { rentalMode: selection.rentalMode, ownerRatioB: formatDecimalExact(b) };
 }
 
+function compatBaseRatio(rule: DeltaHaffRule, c: DeltaHaffConditions): Decimal {
+  return addDecimal(addDecimal(parseNonNegativeDecimal(rule.baseBySafeBox[c.safeBoxCode!]!, 8, "base"), parseSignedDecimal(rule.vitalityDeltaByLevel[String(c.vitLevel)]!, 8, "vitality")), addDecimal(parseSignedDecimal(rule.bearDeltaByLevel[String(c.bearLevel)]!, 8, "bear"), parseSignedDecimal(rule.dailyDeltaByTermOption[c.termOptionCode!]!, 8, "daily")));
+}
+
+function compatRatioBound(value: RatioBound, base: Decimal): Decimal {
+  return addDecimal(value.base === "C" ? base : { value: 0n, scale: 0 }, parseSignedDecimal(value.value, 8, "bound"));
+}
+
+/** Informational bounds only; the formal quote still checks all rules independently. */
+export function resolveDeltaHaffDisplayRange(input: { mode: "SPREAD" | "PERCENT"; haffRule?: DeltaHaffRule | null; conditions: DeltaHaffConditions; rentalMode: RentalMode }): { min: string; max: string | null } | null {
+  try {
+    if (input.haffRule?.schema !== DELTA_HAFF_COMPAT_SCHEMA || input.conditions.pricingOptionCode) return null;
+    const rule = validateDeltaHaffRule(input.haffRule, input.mode), config = rule.compatibility!;
+    const mode = config.modes[input.rentalMode];
+    if (!mode.enabled) return null;
+    const base = compatBaseRatio(rule, input.conditions);
+    if (base.value <= 0n) return null;
+    const min = input.rentalMode === "ordinary" ? base : compatRatioBound(mode.min!, base);
+    const max = input.rentalMode === "ordinary" ? base : mode.max ? compatRatioBound(mode.max, base) : null;
+    const spread = parseNonNegativeDecimal(config[input.rentalMode === "fast" ? "fast" : "ordinary"].spreadDelta, 8, "P");
+    if (min.value <= 0n || subtractDecimal(min, spread).value <= 0n || (max && subtractDecimal(max, min).value < 0n)) return null;
+    return { min: formatDecimalExact(min), max: max ? formatDecimalExact(max) : null };
+  } catch { return null; }
+}
+
 function resolveCompatHaffContext(input: Parameters<typeof resolveDeltaHaffContext>[0]): DeltaHaffContext {
   const failed: DeltaHaffContext = { haffSchema: DELTA_HAFF_COMPAT_SCHEMA, ownerDenominator: null, buyerDenominator: null, spreadDelta: null, conditions: {}, reasonCodes: ["RULE_INPUT_MISSING"] };
   try {
@@ -398,11 +423,10 @@ function resolveCompatHaffContext(input: Parameters<typeof resolveDeltaHaffConte
     // disabled mode omit compatibility lanes and ratio bounds entirely.
     if (!mode.enabled) return failed;
     const c = input.conditions;
-    const base = addDecimal(addDecimal(parseNonNegativeDecimal(rule.baseBySafeBox[c.safeBoxCode! ]!, 8, "base"), parseSignedDecimal(rule.vitalityDeltaByLevel[String(c.vitLevel)]!, 8, "vitality")), addDecimal(parseSignedDecimal(rule.bearDeltaByLevel[String(c.bearLevel)]!, 8, "bear"), parseSignedDecimal(rule.dailyDeltaByTermOption[c.termOptionCode!]!, 8, "daily")));
+    const base = compatBaseRatio(rule, c);
     const owner = selection.rentalMode === "ordinary" ? base : parseNonNegativeDecimal(selection.ownerRatioB!, 8, "B");
     if (selection.rentalMode !== "ordinary") {
-      const bound = (value: RatioBound) => addDecimal(value.base === "C" ? base : { value: 0n, scale: 0 }, parseSignedDecimal(value.value, 8, "bound"));
-      const min = bound(mode.min!); const max = mode.max === undefined ? null : bound(mode.max);
+      const min = compatRatioBound(mode.min!, base); const max = mode.max === undefined ? null : compatRatioBound(mode.max, base);
       // 无上限时只校验 B ≥ 下限；有上限时保持原有 max ≥ min 且 min ≤ B ≤ max。
       if (subtractDecimal(owner, min).value < 0n || (max !== null && (subtractDecimal(max, min).value < 0n || subtractDecimal(max, owner).value < 0n))) return failed;
     }

@@ -169,6 +169,15 @@ export function ratioBoundText(bound: { base: "C" | "ABSOLUTE"; value: string } 
   return bound.value.startsWith("-") ? `普通比例${bound.value}` : `普通比例+${bound.value}`;
 }
 
+export function ratioDisplayText(value: unknown): string | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const { min, max } = value as { min?: unknown; max?: unknown };
+  const valid = (entry: unknown): entry is string => typeof entry === "string" && entry.length <= 33 && /^(?:0|[1-9]\d*)(?:\.\d{1,8})?$/.test(entry);
+  if (!valid(min) || !(max === null || valid(max))) return null;
+  if (max === null) return `1 元 = ${min} 万哈夫币起`;
+  return `1 元 = ${min}${min === max ? "" : `–${max}`} 万哈夫币`;
+}
+
 export function ratioRangeText(
   mode: { min?: { base: "C" | "ABSOLUTE"; value: string }; max?: { base: "C" | "ABSOLUTE"; value: string } } | null | undefined,
 ): string | null {

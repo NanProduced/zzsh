@@ -109,6 +109,8 @@ publishing-catalog.ready仅表示目录与生效价目配置齐备，不代表�
 
 用户专用 POST `/api/v1/supply/games/{gameId}/owner-income-preview` 消费未保存的计价子集：releaseId/catalogRevision、可选本人accountId、安全箱/体力/负重/租赁方案、当前termOptionCode、库存、权益及基础租客押金/包赔声明。仅JSON原文≤64KiB、库存/权益各≤100；不接图片、备注、皮肤展示、客户端金额/会员或内部模拟参数。复用正式Delta计算和owner白名单，结果schema为`owner-income-preview.v1`。号主比例是名义万哈夫币/元，PERCENT的提成后收入以服务端金额为准。
 
+`haff-ratio-v2` 可返回 `ratioRanges`，按普通、自定义、极速分别给出当前资料下的号主比例范围；`min`、`max` 为精确十进制字符串，无上限时 `max` 为 null，条件不足或该方案不可用时对应项为 null。普通和极速使用当前日耗，自定义使用当前规则中允许的 10M/天选项。此范围仅供填写参考，绑定本次预览版本，不替代正式核价及服务端校验。
+
 `READY`仅收入输入完整，总预计收入取原ownerTotal；`PARTIAL/INCOMPLETE/UNAVAILABLE`保留可核行、已知物资小计及缺项，完整总额为null，不将缺价或未知补0。哈夫币收入/物资收入/总收入和基础租客押金分列；押金有独立depositState。收入为扣费前预计，不是最终到手、发布资格或条款接受。绑定同一game/release/price/term/catalog；30秒只提示刷新，不是可提交凭据。
 
 可选追加`normalEndEstimate`（owner-normal-end-estimate.v1），独立READY/INCOMPLETE/UNAVAILABLE，固定全申报库存耗尽且正常结束。保留旧incomeBasis及三个毛额字段；selected=true且完整毛额/封存资金政策可核时，按号主哈夫币与物资毛额分合计一次收8%并HALF_UP到分，由号主承担，分别返回ownerGross、serviceFee的base/rate/amount/payer、ownerNet和policy/rounding依据。未选包赔为已知0费；选择未知、收入不完整、选包赔但政策缺失时净额不补0。押金/保证金/价差/赔款不计费基。数学估算不表示条款定稿、接受、最终结算或到账。正式quote仍用原毛额比较；只有同身份/输入/绑定且毛额匹配的新服务端估算才补净额展示，缺新字段保待核。

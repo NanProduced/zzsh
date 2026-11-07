@@ -1,7 +1,7 @@
 import type { PoolClient } from "pg";
 import type { UserContext } from "../auth/user-identity";
 import { normalizeTime } from "./content-hash";
-import { DELTA_PUBLISH_LEVELS, assertDeltaResourceUnit, calculateDeltaTermSeconds, isRetiredDeltaInsurance, normalizeDeltaAttributes, normalizeRentalPricing, resolveDeltaHaffContext, validateDeltaRentalTerm, type RentalPricingSelection } from "./delta-rental";
+import { DELTA_CUSTOM_DAILY_CONSUMPTION, DELTA_PUBLISH_LEVELS, assertDeltaResourceUnit, calculateDeltaTermSeconds, isRetiredDeltaInsurance, normalizeDeltaAttributes, normalizeRentalPricing, resolveDeltaHaffContext, resolveDeltaHaffDisplayRange, validateDeltaRentalTerm, type RentalMode, type RentalPricingSelection } from "./delta-rental";
 import { decimalToBigInt, formatDecimalExact, parseNonNegativeDecimal, yuanAmountObject } from "./decimal";
 import { FULL_PAYOUT_FEE_ROUNDING_POLICY, fullPayoutServiceFeeCents } from './full-payout-fee';
 import type { FundingPolicy } from './funding-policy';
@@ -42,6 +42,7 @@ export type OwnerIncomePreview = {
   binding: { gameId: string; releaseId: string; releaseGeneration: string; priceVersionId: string; termVersionId: string; catalogRevision: string } | null;
   evaluatedAt: string; refreshAfter: string; rentalMode: RentalPricingSelection["rentalMode"] | null;
   ownerHaffRatioWanPerYuan: string | null; termSeconds: string | null; lines: PreviewLine[];
+  ratioRanges: Record<RentalMode, { min: string; max: string | null } | null> | null;
   ownerHaffIncome: QuoteAmount | null; ownerResourceIncome: QuoteAmount | null; knownResourceSubtotal: QuoteAmount | null; totalExpectedIncome: QuoteAmount | null;
   baseTenantDeposit: QuoteAmount | null; depositState: "KNOWN" | "INCOMPLETE" | "UNAVAILABLE";
   missingFields: string[]; reasonCodes: string[]; unitAmountsInformational: boolean;
@@ -136,7 +137,7 @@ export async function readOwnerIncomePreview(client: PoolClient, context: UserCo
   const evaluatedAt = (await client.query<{ evaluatedAt: string }>(`SELECT to_char(clock_timestamp() AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS "evaluatedAt"`)).rows[0]!.evaluatedAt;
   const response: OwnerIncomePreview = {
     schema: "owner-income-preview.v1", state: "UNAVAILABLE", binding: null, evaluatedAt, refreshAfter: new Date(Date.parse(evaluatedAt) + 30_000).toISOString(),
-    rentalMode: input.attributes.rentalPricing?.rentalMode ?? null, ownerHaffRatioWanPerYuan: null, termSeconds: null, lines: [], ownerHaffIncome: null,
+    rentalMode: input.attributes.rentalPricing?.rentalMode ?? null, ownerHaffRatioWanPerYuan: null, ratioRanges: null, termSeconds: null, lines: [], ownerHaffIncome: null,
     ownerResourceIncome: null, knownResourceSubtotal: null, totalExpectedIncome: null, baseTenantDeposit: null, depositState: "INCOMPLETE",
     normalEndEstimate: normalEndEstimate({state:'UNAVAILABLE',totalExpectedIncome:null},input.attributes.full_payout_declaration?.selected??null,null),
     missingFields: [], reasonCodes: [], unitAmountsInformational: true, estimateOnly: true, incomeBasis: "OWNER_RESOURCE_INCOME_BEFORE_FEES",
@@ -187,6 +188,16 @@ export async function readOwnerIncomePreview(client: PoolClient, context: UserCo
   }));
   if (selected.some(row => row.pricingKind === null)) reasons.add("RESOURCE_PRICE_UNAVAILABLE");
   const conditions: QuoteInput["conditions"] = { safeBoxCode: input.attributes.safe_box_code ?? undefined, vitLevel: input.attributes.vit_level ?? undefined, bearLevel: input.attributes.bear_level ?? undefined, termOptionCode: input.termOptionCode ?? undefined, pricingOptionCode: input.pricingOptionCode ?? undefined, rentalPricing: input.attributes.rentalPricing ?? undefined };
+  if (release.haffRule?.schema === "haff-ratio-v2" && release.haffRule.dailyDeltaByTermOption && typeof release.haffRule.dailyDeltaByTermOption === "object" && !Array.isArray(release.haffRule.dailyDeltaByTermOption) && term && items.some(row => row.enabled && row.pricingKind === "HAFF_RATIO")) {
+    const rule = release.haffRule;
+    let customCode = term.dailyConsumption === DELTA_CUSTOM_DAILY_CONSUMPTION && Object.hasOwn(rule.dailyDeltaByTermOption, term.code) ? term.code : null;
+    if (!customCode && rule.compatibility?.modes?.custom?.enabled) {
+      const candidates = (await client.query<{ code: string }>(`SELECT code FROM zzsh_supply.term_option WHERE version_id=$1 AND daily_consumption=$2::numeric ORDER BY code`, [release.termVersionId, DELTA_CUSTOM_DAILY_CONSUMPTION])).rows;
+      customCode = candidates.find(row => Object.hasOwn(rule.dailyDeltaByTermOption, row.code))?.code ?? null;
+    }
+    const range = (rentalMode: RentalMode, termOptionCode: string) => resolveDeltaHaffDisplayRange({ mode: release.mode, haffRule: rule, conditions: { ...conditions, termOptionCode }, rentalMode });
+    response.ratioRanges = { ordinary: range("ordinary", term.code), custom: customCode ? range("custom", customCode) : null, fast: range("fast", term.code) };
+  }
   const haff = resolveDeltaHaffContext({ mode: release.mode, haffRule: release.haffRule, hasHaffLines: selected.some(row => row.pricingKind === "HAFF_RATIO"), conditions, customerTier: "STANDARD" });
   if (!haff.reasonCodes.length && haff.ownerDenominator) response.ownerHaffRatioWanPerYuan = formatDecimalExact(haff.ownerDenominator);
   const quoted = term ? computeDeltaQuote({ priceVersionId: release.priceVersionId, customerTier: "STANDARD", mode: release.mode, roundingPolicy: release.roundingPolicy, ...(release.commissionRate === null ? {} : { commissionRate: release.commissionRate }), haffRule: release.haffRule, conditions, lines: quoteLines, termOption: term, entitlements: knownEntitlements }) : null;

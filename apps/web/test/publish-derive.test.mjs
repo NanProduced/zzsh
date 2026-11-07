@@ -17,6 +17,7 @@ import {
   matchedOwnerNetEstimate,
   normalizeRatioInput,
   ownerQuoteBreakdown,
+  ratioDisplayText,
   ratioRangeText,
   rentalModeLabel,
   rentalPricingOf,
@@ -27,6 +28,13 @@ import {
 } from '../src/lib/publish-derive.ts';
 
 const feeMoney = amount => ({ currency: 'CNY', unit: 'yuan', amount, scale: 2 });
+
+test('ratio choices show server bounds without inventing values', () => {
+  assert.equal(ratioDisplayText({ min: '42', max: '42' }), '1 元 = 42 万哈夫币');
+  assert.equal(ratioDisplayText({ min: '39', max: '41' }), '1 元 = 39–41 万哈夫币');
+  assert.equal(ratioDisplayText({ min: '48', max: null }), '1 元 = 48 万哈夫币起');
+  for (const value of [null, {}, { min: '-1', max: '4' }, { min: 'abc', max: null }, { min: '48', max: '99.000000001' }]) assert.equal(ratioDisplayText(value), null);
+});
 const feePreview = (selected = true) => ({
   state: 'READY', binding: { releaseId: 'r1', catalogRevision: '1' }, totalExpectedIncome: feeMoney('215.67'),
   normalEndEstimate: { schema: 'owner-normal-end-estimate.v1', state: 'READY', scenario: 'ALL_DECLARED_INVENTORY_CONSUMED_NORMAL_END', selected,

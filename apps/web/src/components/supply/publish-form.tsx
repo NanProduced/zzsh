@@ -97,6 +97,7 @@ import {
   minutesToTimeValue,
   matchedOwnerNetEstimate,
   ownerQuoteBreakdown,
+  ratioDisplayText,
   ratioRangeText,
   rentalModeLabel,
   rentalPricingOf,
@@ -2854,6 +2855,8 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
   const disabledPricing = formDisabled || !options;
   const rentalModes = options?.rentalModes;
   const rentalModeEntries: RentalMode[] = (["ordinary", "custom", "fast"] as const).filter((entry) => rentalModes ? rentalModes[entry]?.enabled : true);
+  const ratioRanges = !ownerPreviewStale && !ownerIncomePreviewPending ? ownerPreview?.ratioRanges : null;
+  const selectedRatioRange = ratioDisplayText(ratioRanges?.[rentalMode]);
   const modeRange = ratioRangeText(rentalModes?.[rentalMode]);
   const ratioInlineProblem = ratioInput.trim() === "" ? null : ratioEntryProblem(rentalMode, rentalModes?.[rentalMode], ratioInput);
   const fastReady = optionsAvailability === "ready" && options?.pricingSchema === "haff-ratio-v2" && rentalModes?.fast?.enabled === true;
@@ -3558,9 +3561,12 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
                   <span className="publish-term-label">出租方案</span>
                   <div className="publish-term-control publish-ratio-control">
                   {showPricingSelect ? <div><FormSelect label="计价方案" value={draft.pricingOptionCode} disabled={disabledPricing} placeholder="选择计价方案" popupClassName="publish-select-popup" options={[{ value: "", label: "选择计价方案" }, ...(options?.pricingOptionCodes.map((code, index) => ({ value: code, label: `计价方案 ${index + 1}` })) ?? [])]} onChange={(val) => setDraft({ ...draft, pricingOptionCode: val })} /><FieldError text={fieldError("pricingOptionCode")} /></div> : <>
-                    {fastLocked ? <div className={`supply-ratio-locked${fastReady ? "" : " is-disabled"}`} aria-label="极速比例（已锁定）"><LockKeyhole size={14} aria-hidden="true" />{optionsAvailability !== "ready" ? "正在读取极速比例规则" : fastReady ? "当前使用极速出租" : "极速比例当前未启用"}</div> : <FormRadioGroup name="rental_mode" label="出租比例" value={rentalMode} options={rentalModeEntries.map((entry) => ({ value: entry, label: rentalModeLabel(entry), disabled: entry === "custom" && !customTermOptions(options).length }))} disabled={formDisabled} onChange={changeRentalMode} />}
+                    {fastLocked ? <div className={`supply-ratio-locked${fastReady ? "" : " is-disabled"}`} aria-label="极速比例（已锁定）"><LockKeyhole size={14} aria-hidden="true" />{optionsAvailability !== "ready" ? "正在读取极速比例规则" : fastReady ? "当前使用极速出租" : "极速比例当前未启用"}</div> : <FormRadioGroup name="rental_mode" label="出租比例" value={rentalMode} options={rentalModeEntries.map((entry) => {
+                      const range = ratioDisplayText(ratioRanges?.[entry]);
+                      return { value: entry, label: rentalModeLabel(entry), description: range ? `${range}${entry === "custom" ? "（10M/天）" : ""}` : undefined, disabled: entry === "custom" && !customTermOptions(options).length };
+                    })} disabled={formDisabled} onChange={changeRentalMode} />}
                     <small>{rentalMode === "ordinary" ? "按安全箱、体力、负重与日耗匹配平台标准比例，无需手动填写。" : rentalMode === "custom" ? "每日消耗固定为10M，可在允许范围内调整比例；租金较高时，等待出租的时间可能更长。" : "按极速方案的允许范围设置比例，请保持联系方式畅通，便于客服协助交付。"}</small>
-                    {rentalMode !== "ordinary" ? <label className="publish-ratio-input"><span>兑换比例</span><div className="publish-ratio-equation publish-ratio-equation--input"><span>1 元 =</span><Input data-first-field inputMode="decimal" value={ratioInput} disabled={formDisabled} onChange={(event) => changeRatio(event.target.value)} placeholder="填写比例" aria-label="兑换比例" /><span>万哈夫币</span></div><small>{modeRange ? `允许范围（万哈夫币/元）：${modeRange}` : "允许范围需读取当前规则后确认"}</small>{ratioInlineProblem ? <FieldError text={ratioInlineProblem.message} /> : null}</label> : null}
+                    {rentalMode !== "ordinary" ? <label className="publish-ratio-input"><span>兑换比例</span><div className="publish-ratio-equation publish-ratio-equation--input"><span>1 元 =</span><Input data-first-field inputMode="decimal" value={ratioInput} disabled={formDisabled} onChange={(event) => changeRatio(event.target.value)} placeholder="填写比例" aria-label="兑换比例" /><span>万哈夫币</span></div><small>{selectedRatioRange ? `允许范围：${selectedRatioRange}` : modeRange ? `允许范围（万哈夫币/元）：${modeRange}` : "允许范围需读取当前规则后确认"}</small>{ratioInlineProblem ? <FieldError text={ratioInlineProblem.message} /> : null}</label> : null}
                   </>}
                 </div></div>
                 <div className="publish-term-row publish-term-result-row">

@@ -77,6 +77,7 @@ function fixture() {
   ];
   const entitlements = [{ entitlementId: "timed", valueKind: "FLAG", expiryKind: "TIMED", enabled: true }, { entitlementId: "permanent", valueKind: "LEVEL", expiryKind: "PERMANENT", enabled: true }];
   const term: QuoteInput["termOption"] = { code: "daily-10m", dailyConsumption: "10000000", durationRounding: "CEIL_DAY" };
+  const extraTerms: QuoteInput["termOption"][] = [];
   const queries: string[] = [], values: unknown[][] = [];
   let authCalls = 0, connections = 0, releases = 0, poolReads = 0;
   const client = { async query(sql: string, params: unknown[] = []) {
@@ -92,7 +93,9 @@ function fixture() {
     else if (sql.includes('SELECT * FROM zzsh_supply.rental_account')) rows = state.accountExists ? [{ owner_user_id: state.accountOwner, game_id: state.accountGame }] : [];
     else if (sql.includes('commission_rate')) rows = state.ruleExists ? [release] : [];
     else if (sql.includes('FROM zzsh_supply.billable_item')) rows = sql.includes("i.unit<>'HAFF_BASE'") ? items.filter(row => row.unit !== "HAFF_BASE") : items;
-    else if (sql.includes('FROM zzsh_supply.term_option')) rows = params[1] === term.code ? [term] : [];
+    else if (sql.includes('FROM zzsh_supply.term_option')) rows = sql.includes('daily_consumption=$2')
+      ? [term, ...extraTerms].filter(row => row.dailyConsumption === params[1]).sort((a, b) => a.code.localeCompare(b.code))
+      : [term, ...extraTerms].filter(row => row.code === params[1]);
     else if (sql.includes('FROM zzsh_supply.entitlement')) rows = entitlements.filter(row => (params[1] as string[]).includes(row.entitlementId));
     else if (sql.includes('funding_policy AS policy')) rows = state.policyExists ? [{ policy: fundingPolicyFixture("NOT_REQUIRED") }] : [];
     else throw Error("UNEXPECTED_PREVIEW_SQL");
@@ -112,8 +115,35 @@ function fixture() {
       conditions: { safeBoxCode: input.attributes.safe_box_code!, vitLevel: input.attributes.vit_level!, bearLevel: input.attributes.bear_level!, termOptionCode: input.termOptionCode!, pricingOptionCode: input.pricingOptionCode ?? undefined, rentalPricing: input.attributes.rentalPricing ?? undefined }, termOption: term,
       lines: input.inventory.filter(row => row.quantity !== null).map(row => { const item = items.find(i => i.itemId === row.itemId)!; return { itemId: item.itemId, quantity: row.quantity!, unit: item.unit, pricingKind: item.pricingKind!, customerTier: "STANDARD", ...(item.unitQuantity === null ? {} : { unitQuantity: item.unitQuantity }), ...(item.buyerUnitAmount === null ? {} : { buyerUnitAmount: item.buyerUnitAmount }), ...(item.ownerUnitAmount === null ? {} : { ownerUnitAmount: item.ownerUnitAmount }) }; }) };
   }
-  return { state, release, items, entitlements, term, queries, values, run, formalInput, counts: () => ({ authCalls, connections, releases, poolReads }) };
+  return { state, release, items, entitlements, term, extraTerms, queries, values, run, formalInput, counts: () => ({ authCalls, connections, releases, poolReads }) };
 }
+
+test("owner preview exposes exact ratio choices without requiring a selected custom ratio", async () => {
+  const f = fixture(), input = body();
+  input.attributes.rentalPricing = { rentalMode: "custom" };
+  const result = await f.run(input);
+  assert.equal(result.statusCode, 200);
+  assert.deepEqual(result.body.ratioRanges, {
+    ordinary: { min: "47", max: "47" }, custom: { min: "44", max: "46" }, fast: { min: "53", max: "99" },
+  });
+  assert.equal(result.body.totalExpectedIncome, null);
+  input.attributes.bear_level = null;
+  assert.deepEqual((await f.run(input)).body.ratioRanges, { ordinary: null, custom: null, fast: null });
+});
+
+test("custom ratio range uses the 10M term when another daily amount is selected", async () => {
+  const f = fixture(), input = body();
+  f.term.code = "daily-20m"; f.term.dailyConsumption = "20000000";
+  f.extraTerms.push({ code: "daily-10m", dailyConsumption: "10000000", durationRounding: "CEIL_DAY" });
+  f.release.haffRule!.dailyDeltaByTermOption["daily-20m"] = "2";
+  input.termOptionCode = "daily-20m";
+  const result = await f.run(input);
+  assert.equal(result.statusCode, 200);
+  assert.deepEqual(result.body.ratioRanges, {
+    ordinary: { min: "49", max: "49" }, custom: { min: "44", max: "46" }, fast: { min: "55", max: "99" },
+  });
+  assert(f.queries.every(sql => !forbiddenSql.test(sql)));
+});
 
 test("owner preview ordinary/custom/fast equals the actual formal quote engine, without non-price prerequisites", async () => {
   for (const rentalPricing of [{ rentalMode: "ordinary" as const }, { rentalMode: "custom" as const, ownerRatioB: "44" }, { rentalMode: "fast" as const, ownerRatioB: "53" }]) {

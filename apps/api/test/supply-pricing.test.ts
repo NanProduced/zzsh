@@ -2,7 +2,7 @@ import { divideToScale, multiplyDecimal, parseNonNegativeDecimal } from "../src/
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
 import { compatRule } from "./pricing-compat-fixture";
-import { CUSTOMER_TIERS, parseDeltaPriceLines, validateDeltaHaffRule, type CustomerTier, type RentalPricingSelection } from "../src/supply/delta-rental";
+import { CUSTOMER_TIERS, parseDeltaPriceLines, resolveDeltaHaffDisplayRange, validateDeltaHaffRule, type CustomerTier, type RentalPricingSelection } from "../src/supply/delta-rental";
 import { computeDepositRecommendation, type FundingPolicy } from "../src/supply/funding-policy";
 import type { QuoteInput } from "../src/supply/pricing";
 import { createCatalogEntry, updateCatalogEntry } from "../src/supply/catalog";
@@ -26,6 +26,27 @@ function compatInput(base: string, selection: RentalPricingSelection, tier: Cust
     lines: [{ itemId: "haff", pricingKind: "HAFF_RATIO", customerTier: tier, quantity: "100000000" }],
     termOption: { code: "daily-10m", dailyConsumption: "10000000", durationRounding: "CEIL_DAY" } };
 }
+
+test("ratio display ranges use the same exact policy and reject incomplete or impossible inputs", () => {
+  const rule = compatRule("42");
+  const conditions = { safeBoxCode: "box-a", vitLevel: 6, bearLevel: 6, termOptionCode: "daily-10m" };
+  const range = (rentalMode: "ordinary" | "custom" | "fast") => resolveDeltaHaffDisplayRange({ mode: "SPREAD", haffRule: rule, conditions, rentalMode });
+  assert.deepEqual(range("ordinary"), { min: "42", max: "42" });
+  assert.deepEqual(range("custom"), { min: "39", max: "41" });
+  assert.deepEqual(range("fast"), { min: "48", max: "99" });
+  for (const [rentalMode, min, max] of [["custom", "39", "41"], ["fast", "48", "99"]] as const) {
+    for (const ratio of [min, max]) assert.equal(computeQuote(compatInput("42", { rentalMode, ownerRatioB: ratio })).quotable, true);
+  }
+  delete rule.compatibility!.modes.fast.max;
+  assert.deepEqual(range("fast"), { min: "48", max: null });
+  rule.compatibility!.modes.fast.enabled = false;
+  assert.equal(range("fast"), null);
+  assert.equal(resolveDeltaHaffDisplayRange({ mode: "SPREAD", haffRule: rule, conditions: { ...conditions, bearLevel: undefined }, rentalMode: "custom" }), null);
+  assert.equal(resolveDeltaHaffDisplayRange({ mode: "SPREAD", haffRule: compatRule("8"), conditions, rentalMode: "custom" }), null);
+  assert.equal(resolveDeltaHaffDisplayRange({ mode: "SPREAD", haffRule: compatRule("94"), conditions, rentalMode: "fast" }), null);
+  const decimalRule = compatRule("42.125"); decimalRule.vitalityDeltaByLevel["6"] = "-0.005";
+  assert.deepEqual(resolveDeltaHaffDisplayRange({ mode: "SPREAD", haffRule: decimalRule, conditions, rentalMode: "custom" }), { min: "39.12", max: "41.12" });
+});
 
 // Pure writer models only: these fixture IDs and price amounts are not an installed catalog.
 const TURTLE_FIXTURE = { id: "fixture_item_turtle45", gameId: "fixture_game_delta", code: "df_billable_turtle_backpack_45", unit: "PIECE", quantityScale: 0 };

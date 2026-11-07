@@ -2634,6 +2634,35 @@ test('PUBLISH fee read: net is a current server field, and non-pricing declarati
   } finally { await p.close(); }
 });
 
+test('rental choices show current server-calculated ranges for each mode', async () => {
+  const preview = { ...completeNetPreview(false), ratioRanges: {
+    ordinary: { min: '42', max: '42' }, custom: { min: '39', max: '41' }, fast: { min: '48', max: null },
+  } };
+  const p = await probe({ accountId: 'account_1', options: optionsV2, mine: () => supplyOf(declaration()), ownerIncomePreview: async () => preview });
+  try {
+    await p.render(); await previewTick();
+    assert.match(p.text(), /1 元 = 42 万哈夫币/);
+    assert.match(p.text(), /1 元 = 39–41 万哈夫币（10M\/天）/);
+    assert.match(p.text(), /1 元 = 48 万哈夫币起/);
+    assert.doesNotMatch(p.text(), /1 元 = 48–99/);
+  } finally { await p.close(); }
+});
+
+test('rental choice ranges disappear when their preview inputs change', async () => {
+  let calls = 0, finish;
+  const preview = { ...completeNetPreview(false), ratioRanges: {
+    ordinary: { min: '42', max: '42' }, custom: { min: '39', max: '41' }, fast: { min: '48', max: '99' },
+  } };
+  const p = await probe({ accountId: 'account_1', options: optionsV2, mine: () => supplyOf(declaration()),
+    ownerIncomePreview: async () => ++calls === 1 ? preview : new Promise(resolve => { finish = resolve; }) });
+  try {
+    await p.render(); await previewTick();
+    assert.match(p.text(), /1 元 = 39–41 万哈夫币/);
+    await p.type('#publish-haff-balance', '60');
+    assert.doesNotMatch(p.text(), /1 元 = 39–41 万哈夫币/);
+  } finally { if (finish) finish(preview); await p.close(); }
+});
+
 test("FAST-WEB-CONSUME-1 only-min fast range is shown without inventing an upper bound", async () => {
   const options = {
     ...optionsV2,

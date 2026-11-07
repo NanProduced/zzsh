@@ -422,6 +422,7 @@ export type OwnerIncomePreview = {
   refreshAfter: string;
   rentalMode: RentalMode | null;
   ownerHaffRatioWanPerYuan: string | null;
+  ratioRanges?: Record<RentalMode, { min: string; max: string | null } | null> | null;
   termSeconds: string | null;
   lines: OwnerIncomePreviewLine[];
   ownerHaffIncome: Money | null;
