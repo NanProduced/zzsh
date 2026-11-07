@@ -74,6 +74,17 @@ const ok = (p: P) => { assert.equal(p.ok, true, JSON.stringify(p)); return p as 
 const rejected = (p: P, re: RegExp) => { assert.equal(p.ok, false, "must be rejected before any write"); assert.match((p as any).reason, re); };
 const A = order("7"), B2 = order("8");
 
+test("a successful payment conflicting with the order marker keeps the real growth backfill pending",()=>{
+  const conflict=order("7");if(conflict.input.origin.kind!=="LEGACY_COMPLETED")assert.fail();
+  const raw={...conflict.input.origin.parentSourceSnapshot,pay_is:"0"},sourceRecord=proof(raw);
+  const components=proof({schema:"legacy-consumption-unresolved.v1",reason:"ORDER_PAYMENT_SOURCE_CONFLICT"});
+  conflict.input.binding.sourcePayStatus=0;conflict.input.binding.paidCents=null;conflict.input.binding.sourceDigest=sourceRecord.digest;
+  conflict.input.origin.parentSourceSnapshot=raw;conflict.input.origin.sourceRecord=sourceRecord;conflict.input.origin.components=components;conflict.componentDigest=components.digest;
+  const result=ok(prepareLegacyGrowthBackfill(pkg({expected:[key("7")],srcs:[conflict]})));
+  assert.equal(result.coverageState,"BACKFILL_PENDING");assert.equal(result.rows.length,0);
+  assert.equal(projectLegacyGrowthConsumption(conflict.input,new Set([components.digest])).reason,"ORDER_PAYMENT_SOURCE_CONFLICT");
+});
+
 test("legal COMPLETE from original T sources, with an admitted in-snapshot refund correction; record self-verifies", async () => {
   const c = correctionFor(A);
   const p = ok(prepareLegacyGrowthBackfill(pkg({ expected: [key("7"), key("8")], srcs: [A, B2], corrections: [c] })));
