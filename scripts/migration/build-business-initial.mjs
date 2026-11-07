@@ -1,15 +1,15 @@
 import { createHash } from 'node:crypto';
-import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
-import { resolve, join, dirname } from 'node:path';
+import { readFileSync, writeFileSync, mkdirSync, existsSync, lstatSync } from 'node:fs';
+import { isAbsolute, resolve, join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { annotateDump, navigationMarkdown, readmeMarkdown } from './business-initial-notes.mjs';
+import { INITIAL_SEED_TABLES, assertInitialSingleton, assertInitialMigrationHistory } from './business-initial-seeds.mjs';
 const require = createRequire(import.meta.url);
 const { Client } = require('pg');
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const SCHEMAS = ['zzsh_iam', 'zzsh_auth_user', 'zzsh_auth_admin', 'zzsh_supply', 'zzsh_content', 'zzsh_order', 'zzsh_credit'];
-const SEEDS = new Set(['zzsh_iam.admin_permission', 'zzsh_iam.admin_role', 'zzsh_iam.admin_role_permission', 'zzsh_iam.approval_template', 'zzsh_supply.profile_avatar_policy']);
 const sha = b => createHash('sha256').update(b).digest('hex');
 const args = process.argv.slice(2);
 const opt = n => { const i = args.indexOf(n); return i < 0 ? null : args[i + 1]; };
@@ -32,6 +32,11 @@ if (!/^release_[a-zA-Z0-9_]{1,60}$/.test(baseline ?? '')) throw Error('NEW_BASEL
 if (!Number.isSafeInteger(sourceCount) || sourceCount < 1) throw Error('FROZEN_SOURCE_COUNT_REQUIRED');
 const target = join(ROOT, 'apps/api/migrations/initial', baseline);
 if (existsSync(target)) throw Error('INITIAL_OUTPUT_ALREADY_EXISTS');
+const sourceBaseline = opt('--source-baseline'), dumpBinary = opt('--pg-dump-executable'), dumpBinarySha = opt('--pg-dump-sha256');
+if (sourceBaseline && !/^release_[a-zA-Z0-9_]{1,60}$/.test(sourceBaseline)) throw Error('SOURCE_BASELINE_INVALID');
+if (Boolean(dumpBinary) !== Boolean(dumpBinarySha)) throw Error('BOUND_PG_DUMP_EXECUTABLE_REQUIRED');
+if (dumpBinary && (!isAbsolute(dumpBinary) || !/^[a-f0-9]{64}$/.test(dumpBinarySha) || lstatSync(dumpBinary).isSymbolicLink()
+  || !lstatSync(dumpBinary).isFile() || sha(readFileSync(dumpBinary)) !== dumpBinarySha)) throw Error('PG_DUMP_EXECUTABLE_CHANGED');
 const expectedNonce = process.env.ZZSH_REGRESSION_RUN;
 if (!/^[a-z0-9_]{12,40}$/.test(expectedNonce ?? '')) throw Error('REGRESSION_NONCE_REQUIRED');
 const database = production ? opt('--source-db') : 'zzsh_test_regression';
@@ -59,25 +64,48 @@ try {
         throw Error('FROZEN_SOURCE_CHAIN_NOT_AVAILABLE');
     const sourceChain = journal.entries.slice(0, sourceCount).map(e => ({ tag: e.tag, when: e.when, sha256: sha(readFileSync(join(ROOT, 'apps/api/migrations/business', e.tag + '.sql'))) }));
     const applied = (await c.query('SELECT hash,created_at::text "createdAt" FROM zzsh_business_meta.migrations ORDER BY id')).rows;
-    if (applied.length !== sourceChain.length || applied.some((r, i) => r.hash !== sourceChain[i].sha256 || r.createdAt !== String(sourceChain[i].when)))
-        throw Error('SOURCE_DATABASE_NOT_EXACT_CANONICAL_CHAIN');
+    if (sourceBaseline) {
+      // Reuse the application's verifier: it checks the selected registered
+      // baseline, every covered canonical hash, each SQL part and the tail.
+      const { readBusinessInitialRegistry, prepareBusinessInitial } = require(join(ROOT, 'apps/api/dist/src/database/business-initial.js'));
+      const registry = readBusinessInitialRegistry(join(ROOT, 'apps/api/migrations/initial'));
+      const selected = registry.supported.find(entry => entry.name === sourceBaseline);
+      if (!selected || production && selected.manifest.profile !== 'PRODUCTION') throw Error('SOURCE_BASELINE_NOT_REGISTERED');
+      const prepared = prepareBusinessInitial(join(ROOT, 'apps/api/migrations/business'), selected.folder);
+      try {
+        if (prepared.manifest.sourceCount > sourceCount) throw Error('SOURCE_BASELINE_EXCEEDS_CHAIN');
+        const { readMigrationFiles } = require('drizzle-orm/migrator');
+        const count = sourceCount - prepared.manifest.sourceCount + 1;
+        const expected = readMigrationFiles({migrationsFolder:prepared.folder}).slice(0,count).map(row=>({hash:row.hash,createdAt:row.folderMillis}));
+        if (expected.length !== count) throw Error('SOURCE_BASELINE_TAIL_INCOMPLETE');
+        assertInitialMigrationHistory(applied,expected);
+      } finally { prepared.cleanup(); }
+    } else assertInitialMigrationHistory(applied,sourceChain.map(row=>({hash:row.sha256,createdAt:row.when})));
     const tables = (await c.query("SELECT n.nspname schema,c.relname name FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname=ANY($1::text[]) AND c.relkind IN ('r','p') ORDER BY 1,2", [SCHEMAS])).rows;
     const ledgerComments = production ? await productionCatalogComments(c, tables) : '';
     const seedCounts = [];
     for (const t of tables) {
         const n = (await c.query(`SELECT count(*)::int n FROM "${t.schema}"."${t.name}"`)).rows[0].n;
-        if (n && !SEEDS.has(t.schema + '.' + t.name))
+        if (n && !INITIAL_SEED_TABLES.has(t.schema + '.' + t.name))
             throw Error('BUSINESS_DATA_MUST_NOT_ENTER_INITIAL:' + t.schema + '.' + t.name);
         if (n)
             seedCounts.push({ table: t.schema + '.' + t.name, count: n });
     }
-    if (tables.some(t => t.schema === 'zzsh_supply' && t.name === 'profile_avatar_policy')) {
-      const policy = (await c.query('SELECT singleton,requires_review,revision::text,updated_by_admin_id FROM zzsh_supply.profile_avatar_policy')).rows;
-      if (policy.length !== 1 || policy[0].singleton !== true || policy[0].requires_review !== true || policy[0].revision !== '1' || policy[0].updated_by_admin_id !== null)
-        throw Error('AVATAR_POLICY_MUST_BE_CANONICAL_DEFAULT');
-    }
+    const present = name => tables.some(t => t.schema + '.' + t.name === name);
+    const dutyInstalled = sourceChain.some(row => row.tag === '0169_legacy_finance_duty_runtime');
+    const singletonQueries = [
+      ['zzsh_supply.profile_avatar_policy', 'SELECT singleton,requires_review,revision::text,updated_by_admin_id FROM zzsh_supply.profile_avatar_policy'],
+      ['zzsh_order.settlement_refund_policy', 'SELECT singleton,normal_days,early_days,revision::text,updated_by_admin_id FROM zzsh_order.settlement_refund_policy'],
+      ['zzsh_order.legacy_duty_finance_contract', 'SELECT singleton,contract_version,enabled,approval_ref,approval_digest FROM zzsh_order.legacy_duty_finance_contract'],
+    ];
+    for (const [name, sql] of singletonQueries) if (present(name)) assertInitialSingleton(name, (await c.query(sql)).rows, dutyInstalled);
+    if (sourceChain.some(row => row.tag === '0163_settlement_refund_wait_policy') && !present('zzsh_order.settlement_refund_policy')
+      || dutyInstalled && !present('zzsh_order.legacy_duty_finance_contract')) throw Error('CANONICAL_SINGLETON_TABLE_MISSING');
     const snapshot = (await c.query('SELECT pg_export_snapshot() id')).rows[0].id;
-    function dump(extra) { const r = spawnSync('docker', ['exec', '--env', 'PGPASSWORD', 'zzsh-rebuild-local-postgres-1', 'pg_dump', '-h', '127.0.0.1', '-U', 'zzsh', '-d', database, '--snapshot=' + snapshot, '--no-owner', ...SCHEMAS.map(s => '--schema=' + s), ...extra], { env: { ...process.env, PGPASSWORD: password }, encoding: 'utf8', timeout: 60000, maxBuffer: 20 * 1024 * 1024 }); if (r.status !== 0)
+    function dump(extra) { if (dumpBinary && sha(readFileSync(dumpBinary)) !== dumpBinarySha) throw Error('PG_DUMP_EXECUTABLE_CHANGED');
+        const common = ['-h', '127.0.0.1', ...(dumpBinary ? ['-p','55432'] : []), '-U', 'zzsh', '-d', database, '--snapshot=' + snapshot, '--no-owner', ...SCHEMAS.map(s => '--schema=' + s), ...extra];
+        const r = dumpBinary ? spawnSync(dumpBinary, common, { env: { ...process.env, PGPASSWORD: password }, encoding: 'utf8', timeout: 60000, maxBuffer: 20 * 1024 * 1024 })
+          : spawnSync('docker', ['exec', '--env', 'PGPASSWORD', 'zzsh-rebuild-local-postgres-1', 'pg_dump', ...common], { env: { ...process.env, PGPASSWORD: password }, encoding: 'utf8', timeout: 60000, maxBuffer: 20 * 1024 * 1024 }); if (r.status !== 0)
         throw Error('PG_DUMP_FAILED:' + String(r.stderr).slice(0, 180)); return r.stdout.split(String.fromCharCode(10)).filter(line => !line.startsWith(String.fromCharCode(92) + 'restrict ') && !line.startsWith(String.fromCharCode(92) + 'unrestrict ') && !['statement_timeout', 'lock_timeout', 'idle_in_transaction_session_timeout'].some(setting => line.startsWith('SET ' + setting + ' = 0;'))).join(String.fromCharCode(10)); }
     const notes = await loadInitialNotes(c);
     const pre = annotateDump(dump(['--section=pre-data', '--no-privileges']), notes);
@@ -113,7 +141,7 @@ UNION ALL SELECT 'TYPE',format('%I.%I',n.nspname,t.typname),a.privilege_type,a.i
     ];
     const sections = [
       ['01-structure.sql', '最终结构', 'schema、类型、表、序列与函数按原依赖顺序建立；不重排函数体或改变安全属性。', pre],
-      ['02-required-data.sql', '必要静态种子', '仅canonical权限、内置角色、角色权限、审批模板与头像审核默认单例；禁止导入用户、凭据、会话或交易数据。', data],
+      ['02-initial_data.sql', '必要静态种子', '仅canonical权限、内置角色、角色权限、审批模板、头像审核、退款等待及旧单资金合同默认单例；禁止导入用户、凭据、会话或交易数据。', data],
       ['03-constraints-triggers.sql', '约束、索引与触发器', '保留唯一性、外键、资金守卫、时序及不可变约束；不关闭触发器或放宽表达式。', post],
       ['04-public-privileges.sql', 'PUBLIC权限边界', '逐对象恢复已核PUBLIC语义；runtime窄权仍由统一applyRuntimePrivileges安装，不绑定本机角色。', acl],
     ].map(([file, title, purpose, sql]) => {
