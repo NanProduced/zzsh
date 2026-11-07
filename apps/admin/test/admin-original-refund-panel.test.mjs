@@ -58,6 +58,18 @@ test('审核读取只GET，责任/本地核销/未知与原号并列，零默认
  assert.equal(ui.calls.length,1);assert.equal(ui.calls[0].method,'GET');assert.match(ui.host.textContent,/159\.08/);assert.match(ui.host.textContent,/本站尚未核销/);assert.match(ui.host.textContent,/结果未记录/);assert.doesNotMatch(ui.host.textContent,/UNKNOWN/);assert.match(ui.host.textContent,/银行到账未记录/);
  assert.equal(ui.host.textContent.includes('已经到账'),false);
 });
+test('未开租受控付款与退款清楚区分模拟结果',async t=>{
+ const simulated={...ctx,request:{...ctx.request,dataOrigin:'LOCAL_CONTROLLED'},refund:{...ctx.refund,dataOrigin:'LOCAL_CONTROLLED',simulationScope:'ECS_TEST_SIMULATED',
+  totals:{...ctx.refund.totals,consumedCents:'15908'},intents:[{...ctx.refund.intents[0],state:'SUCCEEDED',localWriteOff:'RECORDED'}]}};
+ const ui=await setup(t,'/apps/admin/src/views/admin-prestart-termination-panel.tsx',{componentName:'AdminPrestartTerminationPanel',orderId:'order_1',binding,canWrite:true},()=>response(simulated));
+ assert.match(ui.host.textContent,/模拟付款/);assert.match(ui.host.textContent,/模拟退款已完成/);assert.match(ui.host.textContent,/不会实际退回款项/);
+ assert.doesNotMatch(ui.host.textContent,/登记全额原路退款意图|已经到账/);
+});
+test('缺少受控来源或演示范围冲突时不显示退款结果',async t=>{
+ const invalid={...ctx,refund:{...ctx.refund,simulationScope:'ECS_TEST_SIMULATED'}};
+ const ui=await setup(t,'/apps/admin/src/views/admin-prestart-termination-panel.tsx',{componentName:'AdminPrestartTerminationPanel',orderId:'order_1',binding,canWrite:true},()=>response(invalid));
+ assert.match(ui.host.textContent,/终止依据读取不可用/);assert.doesNotMatch(ui.host.textContent,/模拟退款已完成|已经到账/);
+});
 test('纯回执解析不把review、坏枚举或数组当已登记/渠道成功',async t=>{
  const ui=await setup(t,'/apps/admin/src/views/admin-original-refund-panel.tsx',{...originalProps,canWrite:false},()=>response(null));
  const parse=ui.module.originalRefundReceipt;

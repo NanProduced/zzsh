@@ -302,6 +302,23 @@ test('未开租结束组件只读原责任/未知退款，不显示正常结算�
  finally{await probe.dispose();}
 }));
 
+test('未开租模拟退款明确标注不会实际退回',async()=>withDom(async window=>{
+ const current=session('user_A'),{PrestartTerminationPanel}=loadComponent('apps/web/src/components/order/prestart-termination-panel.tsx',current),at='2026-10-28T00:00:00.000000Z';
+ const read={contractVersion:'order-prestart-termination.v1',orderId:'order_A',orderRevision:'2',eligibility:{allowed:false,reason:'ORDER_NOT_PAID',refundCents:null},
+  request:{id:'term_1',revision:'2',state:'APPROVED',requestedByParty:'RENTER',reason:'申请结束',reviewReason:'核实无争议',createdAt:at,updatedAt:at,approvedAt:at,
+   fullRefundCents:'15908',currency:'CNY',dataOrigin:'LOCAL_CONTROLLED',liabilityRecognized:true,channelSubmission:'NOT_REPORTED',bankArrival:'UNKNOWN'},
+  refund:{integration:'INTEGRATED',truncated:false,reason:null,channelRecordsChecked:false,bankArrival:'UNKNOWN',dataOrigin:'LOCAL_CONTROLLED',simulationScope:'ECS_TEST_SIMULATED',
+   totals:{originalCents:'15908',allocatedCents:'15908',consumedCents:'15908',releasedCents:'0',remainingCents:'0',totalsComplete:true},
+   intents:[{intentId:'refund_1',refundOrderNo:'RF'+'a'.repeat(28),state:'SUCCEEDED',amountCents:'15908',firstSubmit:'DISPATCHED',blockedReason:null,localWriteOff:'RECORDED',savedChannelEvidence:null,bankArrival:'UNKNOWN'}]},
+  coverage:'LOCAL_REGISTERED_ONLY',asOf:at,localAcceptanceObservedAt:at,unknowns:['BANK_ARRIVAL_NOT_VERIFIED'],bankArrival:'UNKNOWN'};
+ const probe=createProbe(window,PrestartTerminationPanel,{order:{...paidOrder,status:'CANCELLED'},party:'renter',onChanged(){}},async()=>json(read));
+ try{await probe.render();assert.match(probe.host.textContent,/模拟退款已完成/);assert.match(probe.host.textContent,/不会实际退回款项/);assert.doesNotMatch(probe.host.textContent,/退款已到账|到账情况请以收款记录为准/);}
+ finally{await probe.dispose();}
+ const unavailable={...read,refund:null};const second=createProbe(window,PrestartTerminationPanel,{order:{...paidOrder,status:'CANCELLED'},party:'renter',onChanged(){}},async()=>json(unavailable));
+ try{await second.render();assert.match(second.host.textContent,/不会实际退回款项/);assert.doesNotMatch(second.host.textContent,/模拟退款已完成|到账情况请以收款记录为准/);}
+ finally{await second.dispose();}
+}));
+
 test('unreviewed prestart requests describe the payment basis without claiming a refund amount',async()=>withDom(async window=>{
  const current=session('user_A'),{PrestartTerminationPanel}=loadComponent('apps/web/src/components/order/prestart-termination-panel.tsx',current),at='2026-10-28T00:00:00.000000Z';
  for(const state of ['REQUESTED','REVIEW_REQUIRED','REJECTED']){

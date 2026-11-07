@@ -7,7 +7,7 @@ import { formatFundingCents } from "./supply-review/model";
 import { AdminOriginalRefundPanel } from './admin-original-refund-panel';
 
 type RequestRead={id:string;revision:string;state:"REQUESTED"|"REVIEW_REQUIRED"|"REJECTED"|"APPROVED";reason:string;reviewReason:string|null;fullRefundCents:string|null;liabilityRecognized:boolean;dataOrigin:string;bankArrival:"UNKNOWN"};
-type RefundRead={integration:string;truncated:boolean;totals:{allocatedCents:string;consumedCents:string;remainingCents:string}|null;
+type RefundRead={integration:string;truncated:boolean;simulationScope?:'LOCAL_DEMO_SIMULATED'|'ECS_TEST_SIMULATED';totals:{allocatedCents:string;consumedCents:string;remainingCents:string}|null;
  intents:{intentId:string|null;state:string;firstSubmit:string;blockedReason:string|null;refundOrderNo:string|null;localWriteOff:string}[]|null};
 type Context={orderId:string;canReview:boolean;eligibility:{allowed:boolean;reason:string|null;refundCents:string|null};request:RequestRead|null;refund:RefundRead|null};
 const invalid=()=>new AdminApiError(502,"PRESTART_CONTRACT_REQUIRED");
@@ -31,7 +31,8 @@ function contextOf(value:unknown,orderId:string):Context{
   ||e.refundCents!==null&&(typeof e.refundCents!=='string'||!/^[1-9][0-9]{0,15}$/.test(e.refundCents)))throw invalid();
  let refund:RefundRead|null=null;
  if(r.refund!==null&&r.refund!==undefined){const f=obj(r.refund);if(typeof f.integration!=='string'||!['INTEGRATED','NOT_INTEGRATED','UNAVAILABLE'].includes(f.integration)
-  ||f.bankArrival!=='UNKNOWN'||f.channelRecordsChecked!==false||typeof f.truncated!=='boolean')throw invalid();
+  ||f.bankArrival!=='UNKNOWN'||f.channelRecordsChecked!==false||typeof f.truncated!=='boolean'
+  ||f.simulationScope!==undefined&&(f.dataOrigin!=='LOCAL_CONTROLLED'||!['LOCAL_DEMO_SIMULATED','ECS_TEST_SIMULATED'].includes(String(f.simulationScope))))throw invalid();
   let totals:RefundRead['totals']=null;if(f.totals!==null){const a=obj(f.totals);if(a.totalsComplete!==true||f.integration!=='INTEGRATED'||f.truncated)throw invalid();
    for(const key of ['originalCents','allocatedCents','consumedCents','releasedCents','remainingCents'])if(typeof a[key]!=='string'||!/^(0|[1-9][0-9]{0,23})$/.test(a[key] as string))throw invalid();
    if(BigInt(a.originalCents as string)-BigInt(a.allocatedCents as string)!==BigInt(a.remainingCents as string)||BigInt(a.consumedCents as string)>BigInt(a.allocatedCents as string))throw invalid();
@@ -41,8 +42,9 @@ function contextOf(value:unknown,orderId:string):Context{
     ||typeof i.firstSubmit!=='string'||!['DISPATCHED','NEVER_DISPATCHED','UNKNOWN'].includes(i.firstSubmit))throw invalid();
    return{intentId:i.intentId===null?null:text(i.intentId,128),state:i.state,firstSubmit:i.firstSubmit,blockedReason:i.blockedReason===null?null:text(i.blockedReason,64),
     refundOrderNo:i.refundOrderNo===null?null:text(i.refundOrderNo,30),localWriteOff:text(i.localWriteOff,32)};});}
-  refund={integration:f.integration,truncated:f.truncated,totals,intents};}
- return{orderId,canReview:r.canReview,eligibility:{allowed:e.allowed,reason:e.reason as string|null,refundCents:e.refundCents as string|null},request:requestOf(r.request),refund};
+  refund={integration:f.integration,truncated:f.truncated,totals,intents,...(f.simulationScope!==undefined?{simulationScope:f.simulationScope as RefundRead['simulationScope']}:{})};}
+ const request=requestOf(r.request);if(refund?.simulationScope&&request?.dataOrigin!=='LOCAL_CONTROLLED')throw invalid();
+ return{orderId,canReview:r.canReview,eligibility:{allowed:e.allowed,reason:e.reason as string|null,refundCents:e.refundCents as string|null},request,refund};
 }
 const labels={REQUESTED:'待客服核实',REVIEW_REQUIRED:'存在争议/依据未记录',REJECTED:'申请已驳回',APPROVED:'已终止并记录退款责任'};
 const refundStates:Record<string,string>={READY:'待提交',SUBMITTING:'提交中',UNKNOWN:'结果未记录',PROCESSING:'处理中',REVIEW_REQUIRED:'需复核',SUCCEEDED:'本地处理成功',FAILED:'处理失败',CONFLICT:'记录冲突'};
@@ -84,11 +86,12 @@ export function AdminPrestartTerminationPanel({orderId,binding,canWrite}:{orderI
  };
  return <section className="space-y-2 text-sm" aria-label="未开租结束审核"><h3 className="font-semibold">未开租结束</h3>
   {!visible||!visible.read&&!visible.error?<p role="status">正在读取本单终止依据…</p>:visible.error?<p role="alert">终止依据读取不可用，不能视为没有申请。{visible.error instanceof AdminApiError&&visible.error.requestId?` 查询编号：${visible.error.requestId}`:''}</p>:null}
-  {r?<><p>{labels[r.state]} · {r.reason}</p><p>租客原款全额：{r.fullRefundCents===null?'未知':formatFundingCents(r.fullRefundCents)} · {r.dataOrigin==='LOCAL_CONTROLLED'?'本地受控':'本站已接纳付款'} · 银行到账未记录</p>
+  {r?<><p>{labels[r.state]} · {r.reason}</p><p>租客原款全额：{r.fullRefundCents===null?'未知':formatFundingCents(r.fullRefundCents)} · {r.dataOrigin==='LOCAL_CONTROLLED'?'模拟付款':'本站已接纳付款'} · 银行到账未记录</p>
+   {r.dataOrigin==='LOCAL_CONTROLLED'?<p>这是模拟退款，不会实际退回款项。</p>:null}
    {r.reviewReason?<p>最近核实：{r.reviewReason}</p>:null}
    {r.state==='APPROVED'?<div className="space-y-2" aria-label="未开租退款责任与进度">
     {read?.refund?.totals?<p>已分配 {formatFundingCents(read.refund.totals.allocatedCents)} · 本地核销 {formatFundingCents(read.refund.totals.consumedCents)} · 尚未分配责任 {formatFundingCents(read.refund.totals.remainingCents)}</p>:<p>退款合计未记录，不能补零。</p>}
-    {read?.refund?.intents?.map((i,n)=><p key={i.intentId??`unknown-${n}`}>{i.refundOrderNo??'原退款号未知'} · {refundStates[i.state]??'状态未记录'} · {i.firstSubmit==='DISPATCHED'?'已有提交尝试':i.firstSubmit==='NEVER_DISPATCHED'?'尚无提交尝试':'提交状态未记录'}{i.blockedReason?' · 原号歧义，需复核':''} · {i.localWriteOff==='RECORDED'?'本站核销已记录':i.localWriteOff==='NOT_RECORDED'?'本站尚未核销':'核销状态未记录'}</p>)}
+    {read?.refund?.intents?.map((i,n)=><p key={i.intentId??`unknown-${n}`}>{i.refundOrderNo??'原退款号未知'} · {i.state==='SUCCEEDED'&&read.refund?.simulationScope?'模拟退款已完成':refundStates[i.state]??'状态未记录'} · {i.firstSubmit==='DISPATCHED'?'已有提交尝试':i.firstSubmit==='NEVER_DISPATCHED'?'尚无提交尝试':'提交状态未记录'}{i.blockedReason?' · 原号歧义，需复核':''} · {i.localWriteOff==='RECORDED'?'本站核销已记录':i.localWriteOff==='NOT_RECORDED'?'本站尚未核销':'核销状态未记录'}</p>)}
     {read?.refund?.truncated?<p>记录已截断，合计未知。</p>:null}
     {r.dataOrigin==='JOINPAY_LOCAL_ACCEPTANCE'?<AdminOriginalRefundPanel orderId={orderId} basis="PRESTART_TERMINATION" reference={r.id}
       canWrite={canWrite&&read?.canReview===true} binding={binding} onRecorded={()=>reload(n=>n+1)}/>:<p>本地受控责任未接真实渠道。</p>}

@@ -31,6 +31,14 @@ test('保存的渠道成功仍保留未重验标签与银行UNKNOWN',()=>{
  assert.equal(p.intents[0].savedChannelEvidence.trust,'SAVED_EVIDENCE_NOT_REVALIDATED');assert.equal(p.bankArrival,'UNKNOWN');
  assert.throws(()=>parsePrestartRefund({...refund,intents:[{...refund.intents[0],savedChannelEvidence:{terminal:'SUCCEEDED',trust:'OFFICIAL_REVERIFIED'}}]}));
 });
+test('模拟退款只接受已证明的受控来源和演示范围',()=>{
+ const p=view();p.request.dataOrigin='LOCAL_CONTROLLED';p.refund.dataOrigin='LOCAL_CONTROLLED';p.refund.simulationScope='ECS_TEST_SIMULATED';
+ assert.equal(parsePrestartView(p,'order_1').refund.simulationScope,'ECS_TEST_SIMULATED');
+ assert.throws(()=>parsePrestartView({...p,request:{...p.request,dataOrigin:'JOINPAY_LOCAL_ACCEPTANCE'}},'order_1'));
+ assert.throws(()=>parsePrestartRefund({...p.refund,simulationScope:'OTHER'}));
+ assert.throws(()=>parsePrestartRefund({...p.refund,dataOrigin:'JOINPAY_PROVIDER'}));
+ assert.equal(parsePrestartView(view(),'order_1').refund.simulationScope,undefined);
+});
 test('提交回执未知/无有效对象不能当成功；原key/body由调用方恢复',async()=>{
  const old=globalThis.fetch,calls=[];globalThis.fetch=async(url,init)=>{calls.push({url,init});return Response.json({outcome:'UNKNOWN',originalKeyRequired:true},{status:202});};
  try{const body={expectedOrderRevision:'1',reason:'申请无交付结束'};

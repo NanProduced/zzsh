@@ -16,14 +16,15 @@ const revision=(v:unknown)=>{const s=text(v,19);if(!/^[1-9][0-9]*$/.test(s))thro
 const cents=(v:unknown)=>{if(v===null)return null;const s=text(v,16);if(!/^[1-9][0-9]*$/.test(s))throw invalid();return s;};
 const time=(v:unknown)=>{if(v===null)return null;const s=text(v,40);if(!/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3,6}Z$/.test(s)||!Number.isFinite(Date.parse(s)))throw invalid();return s;};
 const REASONS=["ORDER_NOT_PAID","PAYMENT_BASIS_UNAVAILABLE","PRESTART_FACTS_UNAVAILABLE","RENTAL_ALREADY_STARTED","SETTLEMENT_ALREADY_POSTED","MANUAL_ADJUSTMENT_REVIEW","DISTRIBUTION_RECONCILIATION_REQUIRED"];
-export type PrestartRefundProgress={integration:'NOT_INTEGRATED'|'INTEGRATED'|'UNAVAILABLE';truncated:boolean;reason:string|null;bankArrival:'UNKNOWN';
+export type PrestartRefundProgress={integration:'NOT_INTEGRATED'|'INTEGRATED'|'UNAVAILABLE';truncated:boolean;reason:string|null;bankArrival:'UNKNOWN';simulationScope?:'LOCAL_DEMO_SIMULATED'|'ECS_TEST_SIMULATED';
  totals:{originalCents:string;allocatedCents:string;consumedCents:string;releasedCents:string;remainingCents:string;totalsComplete:true}|null;
  intents:{intentId:string|null;refundOrderNo:string|null;state:string;amountCents:string|null;firstSubmit:'DISPATCHED'|'NEVER_DISPATCHED'|'UNKNOWN';
   blockedReason:string|null;localWriteOff:'RECORDED'|'NOT_RECORDED';savedChannelEvidence:{terminal:string;channelRefundTrxNo:string|null;completedAt:string|null;observedAt:string|null;trust:'SAVED_EVIDENCE_NOT_REVALIDATED'}|null}[]|null};
 export function parsePrestartRefund(value:unknown):PrestartRefundProgress|null{
  if(value===null||value===undefined)return null;const r=object(value);
  if(typeof r.integration!=='string'||!['NOT_INTEGRATED','INTEGRATED','UNAVAILABLE'].includes(r.integration)||typeof r.truncated!=='boolean'
-  ||r.bankArrival!=='UNKNOWN'||r.channelRecordsChecked!==false||r.reason!==null&&(typeof r.reason!=='string'||!/^[A-Z_]{1,64}$/.test(r.reason)))throw invalid();
+  ||r.bankArrival!=='UNKNOWN'||r.channelRecordsChecked!==false||r.reason!==null&&(typeof r.reason!=='string'||!/^[A-Z_]{1,64}$/.test(r.reason))
+  ||r.simulationScope!==undefined&&(r.dataOrigin!=='LOCAL_CONTROLLED'||!['LOCAL_DEMO_SIMULATED','ECS_TEST_SIMULATED'].includes(String(r.simulationScope))))throw invalid();
  const amount=(v:unknown)=>{const s=text(v,24);if(!/^(0|[1-9][0-9]*)$/.test(s))throw invalid();return s;};
  let totals:PrestartRefundProgress['totals']=null;
  if(r.totals!==null){const a=object(r.totals);if(a.totalsComplete!==true||r.truncated||r.integration!=='INTEGRATED')throw invalid();
@@ -42,7 +43,8 @@ export function parsePrestartRefund(value:unknown):PrestartRefundProgress|null{
   const number=i.refundOrderNo===null?null:text(i.refundOrderNo,30);if(number!==null&&!/^RF[0-9a-f]{28}$/.test(number))throw invalid();
   return {intentId:i.intentId===null?null:id(i.intentId),refundOrderNo:number,state:i.state,amountCents:cents(i.amountCents),firstSubmit:i.firstSubmit as 'DISPATCHED'|'NEVER_DISPATCHED'|'UNKNOWN',
    blockedReason:i.blockedReason as string|null,localWriteOff:i.localWriteOff as 'RECORDED'|'NOT_RECORDED',savedChannelEvidence:saved};});}
- return {integration:r.integration as PrestartRefundProgress['integration'],truncated:r.truncated,reason:r.reason as string|null,bankArrival:'UNKNOWN',totals,intents};
+ return {integration:r.integration as PrestartRefundProgress['integration'],truncated:r.truncated,reason:r.reason as string|null,bankArrival:'UNKNOWN',totals,intents,
+  ...(r.simulationScope!==undefined?{simulationScope:r.simulationScope as PrestartRefundProgress['simulationScope']}:{})};
 }
 export function parsePrestartRequest(value:unknown):PrestartRequest|null{
  if(value===null)return null;const r=object(value);
@@ -64,8 +66,10 @@ export function parsePrestartView(value:unknown,orderId:string):PrestartView{
   ||typeof e.allowed!=='boolean'||e.reason!==null&&(typeof e.reason!=='string'||!REASONS.includes(e.reason))
   ||e.allowed&&e.reason!==null||!e.allowed&&e.reason===null||!Array.isArray(r.unknowns)||r.unknowns.length>32||!r.unknowns.every(v=>typeof v==='string'&&/^[A-Z_]{1,64}$/.test(v)))throw invalid();
  const refundCents=cents(e.refundCents);if(!e.allowed&&refundCents!==null)throw invalid();
+ const request=parsePrestartRequest(r.request),refund=parsePrestartRefund(r.refund);
+ if(refund?.simulationScope&&request?.dataOrigin!=='LOCAL_CONTROLLED')throw invalid();
  return{contractVersion:'order-prestart-termination.v1',orderId,orderRevision:revision(r.orderRevision),eligibility:{allowed:e.allowed,reason:e.reason as string|null,refundCents},
-  request:parsePrestartRequest(r.request),refund:parsePrestartRefund(r.refund),coverage:'LOCAL_REGISTERED_ONLY',asOf:time(r.asOf),localAcceptanceObservedAt:time(r.localAcceptanceObservedAt),unknowns:r.unknowns as string[],bankArrival:'UNKNOWN'};
+  request,refund,coverage:'LOCAL_REGISTERED_ONLY',asOf:time(r.asOf),localAcceptanceObservedAt:time(r.localAcceptanceObservedAt),unknowns:r.unknowns as string[],bankArrival:'UNKNOWN'};
 }
 export const prestartApi={
  read:async(userId:string,orderId:string,signal?:AbortSignal)=>parsePrestartView(await requestOrderJson<unknown>(`/api/orders/${encodeURIComponent(orderId)}/prestart-termination`,{expectedUserId:userId,signal}),orderId),
