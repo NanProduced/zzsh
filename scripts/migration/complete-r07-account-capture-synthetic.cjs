@@ -34,8 +34,16 @@ const digest=b=>crypto.createHash('sha256').update(b).digest('hex');
   lockKey:'806007',protectedDataset:{manifestSha256:datasetSha}};
  writePrivate(path.join(reg,'resource.json'),resource);writePrivate(path.join(reg,'credentials.json'),{migration:{name:'r08_loader_migration',oid:role('r08_loader_migration'),password:'synthetic-only'}});
  const actorPath=path.join(base,'actor.json');writePrivate(actorPath,{realm:'admin',resourceOid:oid,nonce,id:'synthetic-admin',sessionId:'synthetic-session'});
+ const ownerOid=(await admin.query('SELECT datdba::text AS oid FROM pg_database WHERE datname=current_database()')).rows[0].oid;
+ const restorePath=path.join(base,'restore.json'),verification={sameExportedSnapshot:true,dataSummaryMatched:true,keySetsMatched:true,objectAclMatched:true,
+  roleSecurityMatchedWithDeclaredExceptions:true,rlsAndDefinerMatched:true,runtimeAccessTested:true,sourceWrites:0};
+ writePrivate(restorePath,{schema:'zzsh.r07-demo-clone-restored.v1',status:'RESTORED_AND_VERIFIED',verification,
+  source:{database:'zzsh_test_regression',systemIdentifier:'7704972584346443810',oid:'16390',marker:'zzsh:regression-test:v1',archiveSha256:'a'.repeat(64),aclSha256:'b'.repeat(64)},
+  target:{database:db,oid,systemIdentifier:system,nonce,marker:resource.marker,host:'127.0.0.1',port:55434,owner:{name:resource.owner,oid:ownerOid},
+   migration:resource.roles.migration,runtime:resource.roles.runtime}});
  const input={schema:'zzsh.r07-capture-fact-input.v1',sourceReceipt:{path:path.join(src,'receipt.json'),sha256:receiptSha},
-  datasetManifest:{path:path.join(datasetDir,'manifest.json'),sha256:datasetSha},actor:{path:actorPath,sha256:digest(fs.readFileSync(actorPath))},credentialsPath:path.join(reg,'credentials.json')};
+  datasetManifest:{path:path.join(datasetDir,'manifest.json'),sha256:datasetSha},restoreReceipt:{path:restorePath,sha256:digest(fs.readFileSync(restorePath))},
+  actor:{path:actorPath,sha256:digest(fs.readFileSync(actorPath))},credentialsPath:path.join(reg,'credentials.json')};
  const inputPath=path.join(base,'input.json');writePrivate(inputPath,input);const inputSha=digest(fs.readFileSync(inputPath));
  await admin.query(`SET ROLE r08_loader_migration;CREATE SCHEMA zzsh_auth_admin;CREATE SCHEMA zzsh_supply;CREATE SCHEMA zzsh_iam;CREATE SCHEMA zzsh_business_meta;
   CREATE TABLE zzsh_auth_admin."user"(id text PRIMARY KEY);CREATE TABLE zzsh_supply.rental_account(id text PRIMARY KEY,game_id text);
@@ -57,7 +65,7 @@ const digest=b=>crypto.createHash('sha256').update(b).digest('hex');
   await admin.query('INSERT INTO zzsh_supply.legacy_listing_display_snapshot VALUES($1,1,$2,$3,$4,$5,$6)',[account,version,x.sourceDigest,timestamp,'b'.repeat(64),'{}']);}
  await admin.end();
  const stubDir=path.join(root,'tmp',`r08-capture-loader-synth-20261108-0${attempt}`);assert(!fs.existsSync(stubDir));fs.mkdirSync(stubDir,{recursive:true});
- const stub=path.join(stubDir,'auth-stub.cjs');fs.writeFileSync(stub,`if(process.env.R08_CAPTURE_SYNTH_AUTH!=='1')throw Error('synthetic only');const a=require(${JSON.stringify(path.join(root,'apps/api/dist/src/auth/admin-authorization.js'))});const u=require(${JSON.stringify(path.join(root,'apps/api/dist/src/supply/supply-util.js'))});a.loadEffectiveAdminAccess=async()=>({isBoss:true,permissions:new Set(['supply.catalog.manage'])});a.requirePermission=()=>{};u.assertGameScope=async()=>{};`,{flag:'wx'});
+ const stub=path.join(stubDir,'auth-stub.cjs');fs.writeFileSync(stub,`if(process.env.R08_CAPTURE_SYNTH_AUTH!=='1')throw Error('synthetic only');const M=require('node:module'),load=M._load;M._load=function(n,...x){if(n==='sharp')return()=>{throw Error('unused synthetic image')};return load.call(this,n,...x)};const a=require(${JSON.stringify(path.join(root,'apps/api/dist/src/auth/admin-authorization.js'))});const u=require(${JSON.stringify(path.join(root,'apps/api/dist/src/supply/supply-util.js'))});a.loadEffectiveAdminAccess=async()=>({isBoss:true,permissions:new Set(['supply.catalog.manage'])});a.requirePermission=()=>{};u.assertGameScope=async()=>{};`,{flag:'wx'});
  const cli=path.join(root,'scripts/migration/complete-r07-account-capture.mjs'),env={...process.env,NODE_OPTIONS:`--require="${stub.replaceAll('\\','/')}"`,R08_CAPTURE_SYNTH_AUTH:'1'};
  const invoke=(args,expect=0)=>{const p=exec(process.execPath,[cli,...args],{cwd:root,env});if(p.status!==expect)throw Error(`synthetic loader unexpected exit ${p.status}: ${p.stderr} ${p.stdout}`);return p;};
  const prepareDir=path.join(base,'prepare');invoke(['--prepare','--input',inputPath,'--input-sha',inputSha,'--out',prepareDir]);
@@ -67,6 +75,11 @@ const digest=b=>crypto.createHash('sha256').update(b).digest('hex');
   notBefore:new Date(now-1000).toISOString(),expiresAt:new Date(now+20*60000).toISOString()};
  const authPath=path.join(base,'authority.json');writePrivate(authPath,authority);const authSha=digest(fs.readFileSync(authPath));
  const executeArgs=out=>['--execute','--input',inputPath,'--input-sha',inputSha,'--plan',planPath,'--plan-sha',planSha,'--authority',authPath,'--authority-sha',authSha,'--out',out];
+ const unknownPath=path.join(base,'unknown-before.json');writePrivate(unknownPath,{schema:'zzsh.r07-capture-fact-receipt.v1',status:'COMMIT_UNKNOWN',commitSent:true,commitAck:false,
+  target:plan.target,planSha256:planSha,approvalRef:authority.approvalRef,attempt:authority.attempt,notBefore:authority.notBefore,expiresAt:authority.expiresAt,unlockAck:true,connectionsClosed:true});
+ const unknownOut=path.join(base,'unknown-before'),uncommitted=invoke(['--readback','--input',inputPath,'--input-sha',inputSha,'--plan',planPath,'--plan-sha',planSha,
+  '--apply-receipt',unknownPath,'--apply-sha',digest(fs.readFileSync(unknownPath)),'--out',unknownOut],1);
+ assert.match(uncommitted.stdout,/COMMIT_UNKNOWN_UNRESOLVED/);
  fs.writeFileSync(path.join(src,'accounts.jsonl'),Buffer.concat([sourceBytes,Buffer.from('{}\n')]));
  const rejected=invoke(executeArgs(path.join(base,'tampered')),1);assert.match(rejected.stderr,/CAPTURE_SOURCE_FILE_CHANGED/);
  const check=new Client({host:'127.0.0.1',port:55434,user:'postgres',database:db});await check.connect();
@@ -74,7 +87,11 @@ const digest=b=>crypto.createHash('sha256').update(b).digest('hex');
  fs.writeFileSync(path.join(src,'accounts.jsonl'),sourceBytes);
  const executeDir=path.join(base,'execute');invoke(executeArgs(executeDir));const applyPath=path.join(executeDir,'receipt.json'),apply=JSON.parse(fs.readFileSync(applyPath));assert.equal(apply.status,'COMMIT_ACK_READBACK_REQUIRED');
  const readbackDir=path.join(base,'readback');invoke(['--readback','--input',inputPath,'--input-sha',inputSha,'--plan',planPath,'--plan-sha',planSha,'--apply-receipt',applyPath,'--apply-sha',digest(fs.readFileSync(applyPath)),'--out',readbackDir]);
- const readback=JSON.parse(fs.readFileSync(path.join(readbackDir,'readback.json')));assert.equal(readback.status,'CAPTURE_SOURCE_AND_TARGET_MATCHED');assert.equal(readback.counts.selected,2);
+ const readback=JSON.parse(fs.readFileSync(path.join(readbackDir,'readback.json')));assert.equal(readback.status,'CAPTURE_SOURCE_AND_TARGET_MATCHED');assert.equal(readback.counts.selected,2);assert.equal(readback.commitOutcome,'ACKNOWLEDGED');
+ const committedUnknown=path.join(base,'unknown-after.json');writePrivate(committedUnknown,{...apply,status:'COMMIT_UNKNOWN',commitAck:false});
+ const resolvedDir=path.join(base,'unknown-after');invoke(['--readback','--input',inputPath,'--input-sha',inputSha,'--plan',planPath,'--plan-sha',planSha,
+  '--apply-receipt',committedUnknown,'--apply-sha',digest(fs.readFileSync(committedUnknown)),'--out',resolvedDir]);
+ assert.equal(JSON.parse(fs.readFileSync(path.join(resolvedDir,'readback.json'))).commitOutcome,'CONFIRMED_BY_ORIGINAL_RECEIPTS');
  const persisted=(await check.query('SELECT account_id,base_ratio_wan_per_yuan,full_payout_selected FROM zzsh_supply.legacy_listing_capture_fact ORDER BY account_id')).rows;
  assert.deepEqual(persisted,[{account_id:'fixture-account-101',base_ratio_wan_per_yuan:'56',full_payout_selected:false},
   {account_id:'fixture-account-102',base_ratio_wan_per_yuan:'43',full_payout_selected:true}]);

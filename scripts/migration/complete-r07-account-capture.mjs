@@ -43,6 +43,26 @@ export function assertCaptureCloneBinding(target,credentials,actor,datasetSha256
     &&/^[A-Za-z0-9._:-]{1,128}$/.test(actor.id??"")&&/^[A-Za-z0-9._:-]{1,128}$/.test(actor.sessionId??""),
     "CAPTURE_CLONE_BINDING_REQUIRED");
 }
+export function assertCaptureRestoreBinding(restore,target){
+  const t=restore?.target,s=restore?.source,v=restore?.verification;
+  assert(restore?.schema==="zzsh.r07-demo-clone-restored.v1"&&restore.status==="RESTORED_AND_VERIFIED"
+    &&s?.database==="zzsh_test_regression"&&s.systemIdentifier===oldSystem&&s.oid==="16390"&&s.marker==="zzsh:regression-test:v1"
+    &&hex(s.archiveSha256)&&hex(s.aclSha256)&&t?.database===target.database&&t.systemIdentifier===target.instance?.systemIdentifier
+    &&t.oid===target.oid&&t.nonce===target.nonce&&t.marker===target.marker&&t.host===target.host&&t.port===target.port
+    &&t.owner?.name===target.owner&&/^[0-9]+$/.test(t.owner?.oid??"")&&t.migration?.name===target.migrationRole
+    &&t.migration?.oid===target.migrationRoleOid&&t.runtime?.name===target.runtimeRole&&t.runtime?.oid===target.runtimeRoleOid
+    &&["sameExportedSnapshot","dataSummaryMatched","keySetsMatched","objectAclMatched","roleSecurityMatchedWithDeclaredExceptions","rlsAndDefinerMatched","runtimeAccessTested"].every(k=>v?.[k]===true)
+    &&v?.sourceWrites===0,"CAPTURE_RESTORE_BINDING_REQUIRED");
+}
+export function assertCaptureApplyReceipt(applied,planSha,target){
+  const ack=applied?.status==="COMMIT_ACK_READBACK_REQUIRED"&&applied.commitAck===true;
+  const unknown=applied?.status==="COMMIT_UNKNOWN"&&applied.commitAck===false;
+  assert(applied?.schema==="zzsh.r07-capture-fact-receipt.v1"&&(ack||unknown)&&applied.commitSent===true
+    &&applied.planSha256===planSha&&JSON.stringify(applied.target)===JSON.stringify(target)&&applied.unlockAck===true&&applied.connectionsClosed===true
+    &&/^[A-Za-z0-9._:-]{1,179}$/.test(applied.approvalRef??"")&&/^[A-Za-z0-9._:-]{1,179}$/.test(applied.attempt??"")
+    &&Number.isFinite(Date.parse(applied.notBefore))&&Number.isFinite(Date.parse(applied.expiresAt))&&Date.parse(applied.expiresAt)>Date.parse(applied.notBefore)
+    &&Date.parse(applied.expiresAt)-Date.parse(applied.notBefore)<=30*60_000,"CAPTURE_APPLY_UNCONFIRMED");
+}
 function filesProof(){
   const files=["scripts/migration/complete-r07-account-capture.mjs","scripts/migration/local-source-adapter.mjs",
     "scripts/migration/local-target-registry.mjs","scripts/migration/local-load-checkpoint.mjs","scripts/local-auth.mjs",
@@ -68,11 +88,12 @@ async function main(){
   const mode=modes[0],out=privatePath(option("--out"),true);assert(!existsSync(out),"CAPTURE_OUTPUT_EXISTS");
   const inputRef={path:privatePath(option("--input")),sha256:option("--input-sha")},input=pinned(inputRef);
   assert(input.schema==="zzsh.r07-capture-fact-input.v1","CAPTURE_INPUT_INVALID");
-  const receipt=pinned(input.sourceReceipt),dataset=pinned(input.datasetManifest),credentialsPath=privatePath(input.credentialsPath);
+  const receipt=pinned(input.sourceReceipt),dataset=pinned(input.datasetManifest),restore=pinned(input.restoreReceipt),credentialsPath=privatePath(input.credentialsPath);
   const credentialsBytes=readFileSync(credentialsPath),credentials=JSON.parse(credentialsBytes),resourcePath=privatePath(join(dirname(credentialsPath),"resource.json"));
   const credentialSha256=sha(credentialsBytes),resourceSha256=sha(readFileSync(resourcePath));
-  const target=loadRegisteredTarget(credentialsPath),actorFile=pinned(input.actor),targetBinding=bindingOf(target);
+  const target=loadRegisteredTarget(credentialsPath),actorFile=pinned(input.actor),targetBinding={...bindingOf(target),ownerOid:restore.target?.owner?.oid,runtimeRoleOid:target.runtimeRoleOid};
   assertCaptureCloneBinding(target,credentials,actorFile,input.datasetManifest.sha256);
+  assertCaptureRestoreBinding(restore,target);
   assert(receipt.status==="CAPTURED_READ_ONLY"&&receipt.rollbackConfirmed&&receipt.clientClosed
     &&dataset.schema==="zzsh.local-legacy-dataset.v1"&&dataset.status==="FULL_SOURCE_DATASET_PREPARED_TARGET_NOT_RUN"
     &&dataset.sourceReceiptSha256===input.sourceReceipt.sha256
@@ -82,10 +103,13 @@ async function main(){
   const writer=require(join(root,"apps/api/dist/src/supply/legacy-account-capture-maintenance.js")),{canonicalize}=require(join(root,"apps/api/dist/src/supply/content-hash.js"));
   const {fingerprintRequest}=require(join(root,"apps/api/dist/src/supply/supply-util.js"));
   const proof=filesProof(),verifyFiles=()=>{assert.deepEqual(filesProof(),proof,"CAPTURE_TOOL_CHANGED");pinned(inputRef);pinned(input.sourceReceipt);
-    pinned(input.datasetManifest);pinned(input.actor);assert(sha(readFileSync(credentialsPath))===credentialSha256
+    pinned(input.datasetManifest);pinned(input.restoreReceipt);pinned(input.actor);assert(sha(readFileSync(credentialsPath))===credentialSha256
       &&sha(readFileSync(resourcePath))===resourceSha256,"CAPTURE_RESOURCE_FILE_CHANGED");};
   const planRef=mode==="--prepare"?null:{path:privatePath(option("--plan")),sha256:option("--plan-sha")},plan=planRef?pinned(planRef):null;
-  const authority=mode==="--execute"?pinned({path:option("--authority"),sha256:option("--authority-sha")}):null;
+  const authorityRef=mode==="--execute"?{path:option("--authority"),sha256:option("--authority-sha")}:null,authority=authorityRef?pinned(authorityRef):null;
+  const appliedRef=mode==="--readback"?{path:option("--apply-receipt"),sha256:option("--apply-sha")}:null,applied=appliedRef?pinned(appliedRef):null;
+  if(applied)assertCaptureApplyReceipt(applied,planRef.sha256,targetBinding);
+  const verifyRunFiles=()=>{verifyFiles();if(planRef)pinned(planRef);if(authorityRef)pinned(authorityRef);if(appliedRef)pinned(appliedRef);};
   const common={host:target.host,port:target.port,user:credentials.migration.name,password:credentials.migration.password,
     statement_timeout:30000,lock_timeout:1000,connectionTimeoutMillis:3000};
   const client=new Client({...common,database:target.database,application_name:"r07-account-capture"});
@@ -98,6 +122,7 @@ async function main(){
     await lock.connect();held=(await lock.query("SELECT pg_try_advisory_lock($1::bigint) AS ok",[target.lockKey])).rows[0]?.ok===true;assert(held,"CAPTURE_LOCK_BUSY");
     await client.connect();await client.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");begun=true;
     const identity=(await client.query(targetIdentityQuery())).rows[0];assertLiveTarget(target,identity,"migration");assert.equal(identity.read_only,"on");
+    assert.equal(String(identity.owner_oid),targetBinding.ownerOid,"CAPTURE_OWNER_OID_CHANGED");
     const journal=(await client.query('SELECT hash,created_at::text AS "createdAt" FROM zzsh_business_meta.migrations WHERE created_at=ANY($1::bigint[])',[["1793730640495","1793730640496"]])).rows;
     assert(journal.length===2&&journal.some(r=>r.createdAt==="1793730640495"&&r.hash===proof["apps/api/migrations/business/0174_business_schema_comments.sql"])
       &&journal.some(r=>r.createdAt==="1793730640496"&&r.hash===proof["apps/api/migrations/business/0175_legacy_account_capture_facts.sql"]),"CAPTURE_MIGRATION_JOURNAL_CHANGED");
@@ -146,9 +171,9 @@ async function main(){
       facts.push({fact,digest,present:dst.capture_account_id!=null});
     }
     assert(facts.length===selected&&seen.size===selected&&capturedRows===receipt.files.accounts.rows,"CAPTURE_SOURCE_SET_DIFFERS");
-    await sourceFile(dirname(input.sourceReceipt.path),receipt.files.accounts);await sourceFile(dirname(input.datasetManifest.path),dataset.files.accounts);verifyFiles();
+    await sourceFile(dirname(input.sourceReceipt.path),receipt.files.accounts);await sourceFile(dirname(input.datasetManifest.path),dataset.files.accounts);verifyRunFiles();
     const sealed={schema:"zzsh.r07-capture-fact-plan.v1",inputSha256:inputRef.sha256,target:targetBinding,toolFiles:proof,credentialSha256,resourceSha256,
-      sourceReceiptSha256:input.sourceReceipt.sha256,datasetManifestSha256:input.datasetManifest.sha256,
+      sourceReceiptSha256:input.sourceReceipt.sha256,datasetManifestSha256:input.datasetManifest.sha256,restoreReceiptSha256:input.restoreReceipt.sha256,
       facts:facts.map(({fact,digest})=>({fact,digest})),counts:{selected,alreadyPresent:facts.filter(x=>x.present).length,
         ratioKnown:facts.filter(x=>x.fact.sourceAccountBaseRatioWanPerYuan!==null).length,
         payoutSelected:facts.filter(x=>x.fact.sourceAccountFullPayoutSelected===true).length,
@@ -160,9 +185,6 @@ async function main(){
       &&canonicalize(plan.toolFiles)===canonicalize(sealed.toolFiles)&&canonicalize(plan.facts)===canonicalize(sealed.facts),"CAPTURE_PLAN_CHANGED");}
     if(mode==="--prepare")assert.equal(sealed.counts.alreadyPresent,0,"CAPTURE_ORIGINAL_PREIMAGE_REQUIRED");
     if(mode==="--readback"){
-      const applied=pinned({path:option("--apply-receipt"),sha256:option("--apply-sha")});
-      assert(applied.status==="COMMIT_ACK_READBACK_REQUIRED"&&applied.commitAck===true&&applied.planSha256===planRef.sha256
-        &&canonicalize(applied.target)===canonicalize(targetBinding)&&applied.unlockAck===true&&applied.connectionsClosed===true,"CAPTURE_APPLY_UNCONFIRMED");
       assert.equal(sealed.counts.alreadyPresent,sealed.counts.selected,"CAPTURE_READBACK_INCOMPLETE");
       const operation="supply.legacy.account_capture_facts",scopeKey=JSON.stringify(["admin",actorFile.id,operation,receipt.files.accounts.sha256]);
       const expected=[];for(let i=0;i<plan.facts.length;i+=400){
@@ -183,13 +205,13 @@ async function main(){
           &&a[0].details?.attempt===applied.attempt&&a[0].details?.financialEffects===false,"CAPTURE_READBACK_RECEIPT_DIFFERS");
       }
     }
-    assert.equal((await client.query("ROLLBACK")).command,"ROLLBACK");begun=false;rollbackAck=true;
+    verifyRunFiles();assert.equal((await client.query("ROLLBACK")).command,"ROLLBACK");begun=false;rollbackAck=true;
     if(mode==="--prepare")result={...sealed,status:"PREPARED_READ_ONLY",readOnlyRollbackAck:true};
     else if(mode==="--execute"){
       assertCaptureAuthority(authority,plan,planRef.sha256);assert.equal(sealed.counts.alreadyPresent,plan.counts.alreadyPresent,"CAPTURE_PREIMAGE_CHANGED");
-      result.planSha256=planRef.sha256;result.approvalRef=authority.approvalRef;result.attempt=authority.attempt;
+      result.planSha256=planRef.sha256;result.approvalRef=authority.approvalRef;result.attempt=authority.attempt;result.notBefore=authority.notBefore;result.expiresAt=authority.expiresAt;
       result.status="TRANSACTION_INTENT";save();await client.query("BEGIN");begun=true;
-      assertLiveTarget(target,(await client.query(targetIdentityQuery())).rows[0],"migration");
+      const live=(await client.query(targetIdentityQuery())).rows[0];assertLiveTarget(target,live,"migration");assert.equal(String(live.owner_oid),targetBinding.ownerOid,"CAPTURE_OWNER_OID_CHANGED");
       const wanted=new Map(plan.facts.map(item=>[item.fact.legacyId,item])),processed=new Set(),batch=[];
       const actor={id:actorFile.id,sessionId:actorFile.sessionId,requestId:authority.attempt,reviewRef:authority.approvalRef,attempt:authority.attempt};
       const flush=async()=>{if(!batch.length)return;assertCaptureAuthority(authority,plan,planRef.sha256);
@@ -201,15 +223,16 @@ async function main(){
         assert(canonicalize(current)===canonicalize(item.fact)&&factModule.legacyAccountCaptureFactDigest(current)===item.digest,"CAPTURE_PACKET_CHANGED");
         processed.add(raw.id);batch.push({binding,source:raw});if(batch.length===400)await flush();
       }
-      await flush();assert.equal(processed.size,wanted.size,"CAPTURE_SOURCE_SET_CHANGED");await sourceFile(dirname(input.sourceReceipt.path),receipt.files.accounts);verifyFiles();
-      await client.query("SET CONSTRAINTS ALL IMMEDIATE");assertLiveTarget(target,(await client.query(targetIdentityQuery())).rows[0],"migration");assertCaptureAuthority(authority,plan,planRef.sha256);
-      result.status="COMMIT_REQUESTED";save();commitSent=true;assert.equal((await client.query("COMMIT")).command,"COMMIT");begun=false;commitAck=true;
+      await flush();assert.equal(processed.size,wanted.size,"CAPTURE_SOURCE_SET_CHANGED");await sourceFile(dirname(input.sourceReceipt.path),receipt.files.accounts);verifyRunFiles();
+      await client.query("SET CONSTRAINTS ALL IMMEDIATE");const final=(await client.query(targetIdentityQuery())).rows[0];assertLiveTarget(target,final,"migration");assert.equal(String(final.owner_oid),targetBinding.ownerOid,"CAPTURE_OWNER_OID_CHANGED");assertCaptureAuthority(authority,plan,planRef.sha256);
+      result.status="COMMIT_REQUESTED";result.commitSent=true;save();commitSent=true;assert.equal((await client.query("COMMIT")).command,"COMMIT");begun=false;commitAck=true;
       result.status="COMMIT_ACK_READBACK_REQUIRED";result.commitAck=true;result.rows=processed.size;save();
     }else{
-      result={schema:"zzsh.r07-capture-fact-readback.v1",status:"CAPTURE_SOURCE_AND_TARGET_MATCHED",planSha256:planRef.sha256,target:targetBinding,
+      result={schema:"zzsh.r07-capture-fact-readback.v1",status:"CAPTURE_SOURCE_AND_TARGET_MATCHED",planSha256:planRef.sha256,target:targetBinding,commitOutcome:applied.commitAck?"ACKNOWLEDGED":"CONFIRMED_BY_ORIGINAL_RECEIPTS",
         counts:sealed.counts,readOnlyRollbackAck:true};
     }
-  }catch(error){result.status=commitSent&&!commitAck?"COMMIT_UNKNOWN":commitAck?"COMMIT_ACK_READBACK_REQUIRED":"STOPPED";
+  }catch(error){result.status=mode==="--readback"&&applied?.status==="COMMIT_UNKNOWN"?"COMMIT_UNKNOWN_UNRESOLVED":commitSent&&!commitAck?"COMMIT_UNKNOWN":commitAck?"COMMIT_ACK_READBACK_REQUIRED":"STOPPED";
+    if(commitSent)result.commitAck=commitAck;
     result.error=safeErrorCode(error);
     if(begun&&!commitSent){try{rollbackAck=(await client.query("ROLLBACK")).command==="ROLLBACK";begun=false;}catch{rollbackAck=false;}}
     result.rollbackAck=rollbackAck;process.exitCode=1;
