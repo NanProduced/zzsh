@@ -807,7 +807,8 @@ test('order party labels and real names are identical for migrated and native or
 test('channel payment summary keeps local acceptance and simulated evidence distinct from receipt',async t=>{
   const {root,node,AdminOrderChainView}=await setup(t);
   const base={contractVersion:'admin-order-payment-summary.v1',productionPaymentCapability:false,originalRequest:null,latestTrustedObservation:null,acceptance:null,conflicts:null,recovery:null,settlement:'NOT_INTEGRATED',unknowns:null,updatedAt:null};
-  const cases=[{integration:'NOT_INTEGRATED',text:'渠道付款摘要暂不可用'},{integration:'CONTROLLED_LOCAL',acceptance:{state:'APPLIED'},text:'本地已接纳'},
+  const cases=[{integration:'NOT_INTEGRATED',text:'渠道付款摘要暂不可用'},{integration:'CONTROLLED_LOCAL',acceptance:{state:'APPLIED'},text:'模拟付款已接纳'},
+    {integration:'JOINPAY',dataOrigin:'LOCAL_CONTROLLED',acceptance:{state:'APPLIED'},unknowns:['PAYMENT_SOURCE_DIFFERS_FROM_REQUEST'],text:'模拟付款与渠道请求来源不同'},
     {integration:'JOINPAY',acceptance:{state:'APPLIED'},unknowns:['PAYMENT_SOURCE_DIFFERS_FROM_REQUEST'],text:'本地受控接纳，付款来源与渠道请求不同'},
     {integration:'JOINPAY',dataOrigin:'JOINPAY_PROVIDER',productionPaymentCapability:true,acceptance:{state:'APPLIED'},text:'汇聚原确认 · 本地已接纳'},
     {integration:'JOINPAY',dataOrigin:'JOINPAY_PROVIDER',productionPaymentCapability:false,acceptance:{state:'APPLIED'},text:'汇聚原确认 · 本地已接纳'},

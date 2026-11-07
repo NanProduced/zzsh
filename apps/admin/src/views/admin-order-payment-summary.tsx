@@ -20,22 +20,25 @@ export function AdminOrderPaymentSummary({ summary }: { summary?: Summary | null
   const acceptance = summary.acceptance?.state;
   const acceptanceText = acceptance === 'APPLIED' ? '本站已接纳' : acceptance === 'REVIEW_REQUIRED' ? '本站待人工复核' : acceptance === 'PENDING' ? '等待本站接纳' : '暂无本站接纳记录';
   const formal = summary.dataOrigin === 'JOINPAY_PROVIDER';
+  const simulated = summary.dataOrigin === 'LOCAL_CONTROLLED' || (summary.dataOrigin === undefined && summary.integration === 'CONTROLLED_LOCAL');
   const sourceDiffers = summary.unknowns?.includes('PAYMENT_SOURCE_DIFFERS_FROM_REQUEST');
   const mixed = sourceDiffers && !formal;
   const observation = summary.latestTrustedObservation;
   const channelOutcome = observation?.channelStatus === "SUCCEEDED" ? "付款成功" : observation?.channelStatus === "FAILED" ? "付款失败" : observation?.channelStatus === "CREATED_UNPAID" ? "尚未付款" : null;
   const channelText = channelOutcome && observation?.evidenceLevel === "JOINPAY_VERIFIED" ? channelOutcome + "（汇聚确认）" : channelOutcome && observation?.evidenceLevel === "SYNTHETIC_PROTOCOL" ? "模拟：" + channelOutcome : "未取得可信渠道结果";
-  const label = mixed ? '本地受控接纳，付款来源与渠道请求不同'
+  const label = mixed ? simulated ? '模拟付款与渠道请求来源不同' : '本地受控接纳，付款来源与渠道请求不同'
     : formal && sourceDiffers ? '汇聚原确认，付款来源与渠道请求不同'
     : formal && acceptance === 'APPLIED' ? '汇聚原确认 · 本地已接纳'
+    : simulated && acceptance === 'APPLIED' ? '模拟付款已接纳'
     : acceptance === 'APPLIED' ? '本地已接纳'
     : acceptance === 'REVIEW_REQUIRED' ? '需要人工核对'
     : acceptance === 'PENDING' ? '等待本地接纳' : '暂无本地接纳记录';
   return <section className="oc-section">
     <h2>渠道付款</h2>
     <Badge variant={mixed || acceptance === 'REVIEW_REQUIRED' ? 'warning' : 'outline'}>{label}</Badge>
-    <p className="oc-fact-note">{mixed || summary.dataOrigin === 'LOCAL_CONTROLLED' || summary.integration === 'CONTROLLED_LOCAL'
-      ? '本地受控收款依据，不代表真实渠道扣款或到账。'
+    <p className="oc-fact-note">{simulated
+      ? '模拟付款记录，不代表真实渠道扣款或到账。'
+      : mixed ? '本地受控收款依据，不代表真实渠道扣款或到账。'
       : formal ? '按本单已提交的原付款确认核对；本地接纳、结算及渠道到账分别记录。'
       : summary.dataOrigin === 'JOINPAY_CANDIDATE' ? '汇聚请求候选不构成已付款；渠道结果与本地接纳分别核对。'
       : observation?.evidenceLevel === 'SYNTHETIC_PROTOCOL' ? '当前为本地协议验证环境，不代表渠道实收。'
@@ -45,7 +48,7 @@ export function AdminOrderPaymentSummary({ summary }: { summary?: Summary | null
       <CollapsibleTrigger render={<Button variant="ghost" size="sm" />}>查看付款依据</CollapsibleTrigger>
       <CollapsibleContent>
         <dl className="oc-fact-list">
-          <dt>请求渠道</dt><dd>{summary.integration === 'JOINPAY' ? '汇聚支付' : '本地受控'}</dd>
+          <dt>请求渠道</dt><dd>{simulated ? '模拟支付' : summary.integration === 'JOINPAY' ? '汇聚支付' : '本地受控'}</dd>
           <dt>渠道观察</dt><dd>{observation?.evidenceLevel === 'SYNTHETIC_PROTOCOL' ? '协议模拟观察，不代表渠道实收'
             : observation?.evidenceLevel === 'JOINPAY_VERIFIED' && ['NOTIFY', 'QUERY'].includes(observation.source)
               ? `已存汇聚${observation.source === 'NOTIFY' ? '通知' : '查询'}签名与绑定证据` : '尚未取得'}</dd>
