@@ -44,7 +44,10 @@ async function originalTarget(c: PoolClient, sandbox: RegisteredWithdrawalResour
 export async function declareLocalSandboxWithdrawalTarget(pool: Pool, actor: Actor, body: Record<string, unknown>, keyValue: unknown, sandbox: RegisteredWithdrawalResource) {
   const input = targetInput(body), key = validateIdempotencyKey(keyValue), p = withdrawalRegistration(sandbox);
   const policy = ownerLocalWithdrawalPolicy("BANK_CARD", [actor.userId]);
-  if (BigInt(input.amountCents) < BigInt(policy.minCents) || BigInt(input.amountCents) > BigInt(policy.maxCents)) throw conflict("Withdrawal limit reached");
+  if (BigInt(input.amountCents) < BigInt(policy.minCents) || BigInt(input.amountCents) > BigInt(policy.maxCents)) {
+    if (sandbox.kind !== "REGISTERED_LOCAL_FINANCIAL_SANDBOX") throw new SecurityApiError(422, "DEMO_WITHDRAW_AMOUNT_OUT_OF_RANGE", "模拟提现金额超出允许范围");
+    throw conflict("Withdrawal limit reached");
+  }
   let completed = false;
   try { return await withTransaction(pool, async c => {
     await assertRegisteredWithdrawalResource(c, sandbox, "READ_ORIGINAL");

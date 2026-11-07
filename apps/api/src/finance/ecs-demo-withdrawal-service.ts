@@ -4,6 +4,7 @@ import { SecurityApiError, withTransaction } from "../auth/security-core";
 import { assertEcsTestDemoResource, demoFinanceScope, type DemoFinanceResource } from "./ecs-test-demo-resource";
 import { declareLocalSandboxWithdrawalTarget, readLocalSandboxWithdrawalTargetReceipt } from "./local-sandbox-withdrawal-target";
 import { createControlledWithdrawal, readControlledWithdrawalQuote, readControlledWithdrawals, recoverControlledWithdrawal } from "./controlled-withdrawal-store";
+import { ownerLocalWithdrawalPolicy } from "./controlled-withdrawal";
 import type { NativeWithdrawalScope } from "./native-withdrawal-resource";
 
 type Actor = UserContext & { requestId: string };
@@ -46,8 +47,9 @@ export async function readDemoWithdrawalAvailability(pool:Pool,actor:Actor,optio
     await c.query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY");
     const registration=await assertEcsTestDemoResource(c,options.demo,"READ_ORIGINAL");
     await assertUserContextInTransaction(c,actor,"READ");
+    const policy=ownerLocalWithdrawalPolicy("BANK_CARD",[actor.userId]);
     return {contractVersion:"demo-withdrawal-availability.v1",scope:demoFinanceScope(options.demo),
-      withdrawalEnabled:registration.active,productionPayoutCapability:false,bankArrival:"UNKNOWN" as const,observedAt:new Date().toISOString()};
+      withdrawalEnabled:registration.active,limits:{minCents:policy.minCents,maxCents:policy.maxCents},productionPayoutCapability:false,bankArrival:"UNKNOWN" as const,observedAt:new Date().toISOString()};
   });
 }
 

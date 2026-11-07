@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import {test} from 'node:test';
-import {createDemoTarget,quoteDemoWithdrawal,confirmDemoWithdrawal,pendingDemoWithdrawal,recoverDemoWithdrawal,parseDemoResult,parseDemoTarget,parseDemoQuote,parseDemoReceipt} from '../src/lib/demo-withdrawal-client.ts';
+import {createDemoTarget,quoteDemoWithdrawal,confirmDemoWithdrawal,pendingDemoWithdrawal,recoverDemoWithdrawal,parseDemoAvailability,parseDemoResult,parseDemoTarget,parseDemoQuote,parseDemoReceipt} from '../src/lib/demo-withdrawal-client.ts';
 import {userId,json,withStorage} from './withdrawal-fixtures.mjs';
 
 const scope='LOCAL_DEMO_SIMULATED',at='2026-11-08T08:00:00.000Z';
@@ -48,6 +48,18 @@ test('demo projections require simulation scope and exact money without bank arr
  assert.throws(()=>parseDemoResult({...result,intent:{...intent,netCents:'1'}}));
  assert.throws(()=>parseDemoResult({...result,intent:{...intent,state:'SUCCEEDED'}}));
 });
+
+test('availability requires a valid server-provided amount range',()=>{
+ const base={contractVersion:'demo-withdrawal-availability.v1',scope,withdrawalEnabled:true,productionPayoutCapability:false,bankArrival:'UNKNOWN',observedAt:at,limits:{minCents:'200',maxCents:'1000000'}};
+ assert.deepEqual(parseDemoAvailability(base).limits,{minCents:'200',maxCents:'1000000'});
+ for(const limits of [undefined,{minCents:'0',maxCents:'100'}, {minCents:'300',maxCents:'200'}, {minCents:'2.00',maxCents:'1000'}])assert.throws(()=>parseDemoAvailability({...base,limits}));
+});
+
+test('a definitive amount rejection clears only its uncommitted original target',()=>withStorage(async()=>{
+ let calls=0;globalThis.fetch=async()=>{calls++;return Response.json({error:{code:'DEMO_WITHDRAW_AMOUNT_OUT_OF_RANGE'}},{status:422});};
+ await assert.rejects(createDemoTarget(userId,scope,{bankBindingId:'bank-1',bankBindingRevision:'1',amountCents:'100'}));
+ assert.equal(calls,1);assert.equal(pendingDemoWithdrawal(userId),null);
+}));
 
 test('accepts the synthetic backend HTTP receipt with the actual policy and request-key formats',()=>{
  const actualTarget={...target,id:'sandbox_wdd_d266291ccb5546bedc65420066faee705b62cab9',mask:'**** **** 0000',amountCents:'2500',policyVersion:'OWNER_LOCAL_RESTORED_20261003_v1_BANK_CARD'};

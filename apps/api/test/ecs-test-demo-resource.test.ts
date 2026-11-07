@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import type { PoolClient } from "pg";
+import type { Pool, PoolClient } from "pg";
 import { createHash } from "node:crypto";
 import { assertEcsTestDemoAssembly, assertEcsTestDemoResource, createEcsTestDemoResource, createLocalDemoCloneResource, demoFinanceScope,
   readEcsTestDemoRegistration, verifyLocalDemoCloneProof, type DemoFinanceResource } from "../src/finance/ecs-test-demo-resource";
 import {assertEcsTestDemoRuntimeAssembly,createEcsTestDemoRuntime} from "../src/finance/ecs-test-demo-runtime";
+import {declareLocalSandboxWithdrawalTarget} from "../src/finance/local-sandbox-withdrawal-target";
 
 type Input = Parameters<typeof createEcsTestDemoResource>[0];
 const input = (): Input => ({
@@ -19,6 +20,17 @@ const input = (): Input => ({
   reference: "synthetic_demo", sourceSnapshotSha256: "a".repeat(64), restoreReceiptSha256: "b".repeat(64), administratorId: "synthetic_admin",
 });
 const scope = () => { const value = createEcsTestDemoResource(input()); assert(value); return value; };
+
+test("demo amount rejection occurs before a target or balance write",async()=>{
+  let connections=0;
+  const pool={connect:async()=>{connections++;throw Error("unexpected connection");}} as unknown as Pool;
+  const actor={userId:"user_fixture",sessionId:"session_fixture",requestId:"request_fixture"};
+  for(const amountCents of ["100","1000001"]){
+    await assert.rejects(declareLocalSandboxWithdrawalTarget(pool,actor,{bankBindingId:"bank_"+"a".repeat(32),bankBindingRevision:"1",amountCents},"target-key",scope()),
+      (error:unknown)=>(error as {status?:number;code?:string}).status===422&&(error as {code?:string}).code==="DEMO_WITHDRAW_AMOUNT_OUT_OF_RANGE");
+  }
+  assert.equal(connections,0);
+});
 
 test("demo withdrawal runtime must use the same branded payment resource",()=>{
   const options=input(),runtime=createEcsTestDemoRuntime({...options,appId:"synthetic_app"});assert(runtime);

@@ -82,6 +82,16 @@ test('demo withdrawal proxy forwards only the captured user and original target 
  const result=await response.json();assert.deepEqual(result.target,target);assert(!JSON.stringify(result).includes('SENSITIVE_PAYLOAD'));
 }));
 
+test('demo withdrawal proxy keeps the server amount range and definitive amount rejection',()=>mocked(async()=>{
+ const availability={contractVersion:'demo-withdrawal-availability.v1',scope:'LOCAL_DEMO_SIMULATED',withdrawalEnabled:true,
+  limits:{minCents:'200',maxCents:'1000000'},productionPayoutCapability:false,bankArrival:'UNKNOWN',observedAt:'2026-11-08T08:00:00.000Z'};
+ backend(async(url)=>String(url).endsWith('/target')?json({error:{code:'DEMO_WITHDRAW_AMOUNT_OUT_OF_RANGE'}},422):json(availability));
+ const read=await forwardWithdrawalRequest(req('demo-withdrawal'),ctx(),'demo-withdrawal');
+ assert.equal(read.status,200);assert.deepEqual((await read.json()).limits,availability.limits);
+ const rejected=await forwardWithdrawalRequest(req('demo-withdrawal','/target','POST',{bankBindingId:'bank_1',bankBindingRevision:'1',amountCents:'100'}),ctx(['target']),'demo-withdrawal');
+ assert.equal(rejected.status,422);assert.equal((await rejected.json()).error.code,'DEMO_WITHDRAW_AMOUNT_OUT_OF_RANGE');
+}));
+
 test('demo withdrawal proxy preserves uncertain writes and rejects unexpected paths and cross-user commands',()=>mocked(async()=>{
  let commands=0;backend(async()=>{commands++;throw Error('lost response');});
  const body={amountCents:'10000',destinationId:'demo_target',policyVersion:'demo_policy',expectedWalletVersion:'7'};

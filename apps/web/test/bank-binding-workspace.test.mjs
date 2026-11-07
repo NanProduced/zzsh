@@ -13,6 +13,7 @@ const { validateBankBindingInput } = require(tree + '/apps/web/src/lib/withdrawa
 const file = tree + '/apps/web/src/components/account/bank-binding-workspace.tsx';
 const source = fs.readFileSync(file, 'utf8'), information = loadInformation();
 const at = '2026-10-25T00:00:00.000Z';
+const demoLimits = {minCents:'200',maxCents:'1000000'};
 const bank = (revision = '1', tail = '0015') => ({ contractVersion: 'withdrawal-bank-binding.v1', integration: 'INTEGRATED', expectedRevision: revision, binding: { id: 'bank-1', revision, cardMask: '**** **** ' + tail, holderNameMask: '测**', updatedAt: at, ownershipVerification: 'NOT_VERIFIED' } });
 const emptyBank = { contractVersion: 'withdrawal-bank-binding.v1', integration: 'INTEGRATED', expectedRevision: '0', binding: null };
 const unavailableBank = { contractVersion: 'withdrawal-bank-binding.v1', integration: 'NOT_INTEGRATED', expectedRevision: null, binding: null };
@@ -108,7 +109,7 @@ test('demo withdrawal keeps test wording and confirms the server quote without c
  const body={amountCents:'10000',destinationId:'target-1',policyVersion:'policy-1',expectedWalletVersion:'7'};
  const demoQuote={destinationId:'target-1',policyVersion:'policy-1',ledgerRevision:'7',acceptedAt:at,currency:'CNY',grossCents:'10000',netCents:'9900',feeCents:'100',requestKey:'demo-key'};
  const result={id:'intent-demo',state:'SUCCEEDED',fundsDisposition:'PAYOUT_POSTED',amountCents:'10000',netCents:'9900',feeCents:'100',acceptedAt:at};
- const p=await probe({availableBalance:'15000',ledgerRevision:'7',demo:{readDemoAvailability:async()=>({scope,withdrawalEnabled:true,observedAt:at})}});
+ const p=await probe({availableBalance:'15000',ledgerRevision:'7',demo:{readDemoAvailability:async()=>({scope,withdrawalEnabled:true,limits:demoLimits,observedAt:at})}});
  p.demoApi.createDemoTarget=async(userId,receivedScope,input)=>{assert.equal(receivedScope,scope);const ready={version:1,userId,scope,stage:'target-ready',key:'target-key',body:input,target};p.setPendingDemo(ready);p.calls.push({method:'demo-target'});return ready;};
  p.demoApi.quoteDemoWithdrawal=async(userId,receivedScope,receivedTarget,walletVersion)=>{assert.equal(receivedScope,scope);assert.equal(receivedTarget.id,target.id);assert.equal(walletVersion,'7');return{body,quote:demoQuote};};
  p.demoApi.confirmDemoWithdrawal=async(userId,receivedScope,receivedBody,receivedQuote)=>{assert.equal(receivedScope,scope);assert.deepEqual(receivedBody,body);assert.equal(receivedQuote.requestKey,'demo-key');p.calls.push({method:'demo-confirm'});p.setPendingDemo(null);return result;};
@@ -123,14 +124,14 @@ test('demo withdrawal keeps test wording and confirms the server quote without c
 
 test('an unknown demo write blocks a second request and queries the original result',async()=>{
  const scope='LOCAL_DEMO_SIMULATED',pending={version:1,userId:'user_A',scope,stage:'target',key:'original-target',body:{bankBindingId:'bank-1',bankBindingRevision:'1',amountCents:'10000'}};
- const p=await probe({availableBalance:'15000',ledgerRevision:'7',pendingDemo:pending,demo:{readDemoAvailability:async()=>({scope,withdrawalEnabled:true,observedAt:at})}});
+ const p=await probe({availableBalance:'15000',ledgerRevision:'7',pendingDemo:pending,demo:{readDemoAvailability:async()=>({scope,withdrawalEnabled:true,limits:demoLimits,observedAt:at})}});
  p.demoApi.recoverDemoWithdrawal=async(userId,receivedScope)=>{assert.equal(userId,'user_A');assert.equal(receivedScope,scope);p.calls.push({method:'demo-recover'});return{knowledge:'UNKNOWN',pending,intent:null};};
  try{await p.render();assert.match(p.host.textContent,/上次模拟操作结果待确认/);await p.click('查询原申请');assert.match(p.host.textContent,/原申请仍未确认/);assert.equal(p.calls.filter(x=>x.method==='demo-recover').length,1);assert.equal(p.calls.filter(x=>x.method==='demo-target').length,0);}
  finally{await p.close();}
 });
 
 test('demo withdrawal refuses a newly pending bank save before declaring a target',async()=>{
- const scope='LOCAL_DEMO_SIMULATED',p=await probe({availableBalance:'15000',ledgerRevision:'7',demo:{readDemoAvailability:async()=>({scope,withdrawalEnabled:true,observedAt:at})}});
+ const scope='LOCAL_DEMO_SIMULATED',p=await probe({availableBalance:'15000',ledgerRevision:'7',demo:{readDemoAvailability:async()=>({scope,withdrawalEnabled:true,limits:demoLimits,observedAt:at})}});
  try {await p.render();await p.fill('.bank-withdraw-form input','100');p.setPendingBank({userId:'user_A',key:'bank-original',expectedRevision:'1'});
   await p.submit('.bank-withdraw-form');assert.match(p.host.textContent,/请先确认收款资料的保存结果/);assert.equal(p.calls.filter(x=>x.method==='demo-target').length,0);
  }finally{await p.close();}
@@ -138,9 +139,19 @@ test('demo withdrawal refuses a newly pending bank save before declaring a targe
 
 test('demo withdrawal explains only the identity reason returned by the server',async()=>{
  for(const [code,expected] of [['DEMO_WITHDRAW_IDENTITY_REQUIRED',/请先完成本人实名认证/],['DEMO_WITHDRAW_ADULT_REQUIRED',/确认已成年后/],['DEMO_WITHDRAW_IDENTITY_SOURCE_UNCONFIRMED',/实名信息来源暂时无法确认/]]){
-  const scope='LOCAL_DEMO_SIMULATED',p=await probe({availableBalance:'15000',ledgerRevision:'7',demo:{readDemoAvailability:async()=>({scope,withdrawalEnabled:true,observedAt:at}),createDemoTarget:async()=>{throw new WithdrawalRequestError(403,code);}}});
+  const scope='LOCAL_DEMO_SIMULATED',p=await probe({availableBalance:'15000',ledgerRevision:'7',demo:{readDemoAvailability:async()=>({scope,withdrawalEnabled:true,limits:demoLimits,observedAt:at}),createDemoTarget:async()=>{throw new WithdrawalRequestError(403,code);}}});
   try{await p.render();await p.fill('.bank-withdraw-form input','100');await p.submit('.bank-withdraw-form');assert.match(p.host.textContent,expected);assert.doesNotMatch(p.host.textContent,/实名认证已过期/);}finally{await p.close();}
  }
+});
+
+test('demo amount limits are shown and invalid amounts never create a target',async()=>{
+ const scope='LOCAL_DEMO_SIMULATED',p=await probe({availableBalance:'1500000',ledgerRevision:'7',demo:{readDemoAvailability:async()=>({scope,withdrawalEnabled:true,limits:demoLimits,observedAt:at})}});
+ try{
+  await p.render();assert.match(p.host.textContent,/单笔范围.*2\.00.*10,000\.00/);
+  await p.fill('.bank-withdraw-form input','1');await p.submit('.bank-withdraw-form');
+  assert.match(p.host.textContent,/模拟提现金额需在/);assert.equal(p.calls.filter(x=>x.method==='demo-target').length,0);
+  await p.click('本次最多');assert.equal(p.host.querySelector('.bank-withdraw-form input').value,'10000.00');
+ }finally{await p.close();}
 });
 
 test('withdrawal shows only the confirmed wallet balance and keeps a missing balance unknown', async () => {

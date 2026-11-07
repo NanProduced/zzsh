@@ -1,6 +1,7 @@
 import { WithdrawalRequestError, assertCurrent, badWithdrawal, cents, id, key, record, recoveryStorage, revision, text, time, underWithdrawalLock, withdrawalRequest, type WithdrawalWriteOptions } from "./withdrawal-client-core.ts";
 
 export type DemoScope = "LOCAL_DEMO_SIMULATED" | "ECS_TEST_SIMULATED";
+export type DemoWithdrawalLimits = { minCents: string; maxCents: string };
 export type DemoTargetBody = { bankBindingId: string; bankBindingRevision: string; amountCents: string };
 export type DemoBody = { amountCents: string; destinationId: string; policyVersion: string; expectedWalletVersion: string };
 export type DemoTarget = { id: string; kind: "BANK_CARD"; mask: string; amountCents: string; currency: "CNY"; expiresAt: string; policyVersion: string };
@@ -28,7 +29,9 @@ function envelope(value: unknown, contractVersion: string) {
 export function parseDemoAvailability(value: unknown) {
   const {row,scope} = envelope(value,"demo-withdrawal-availability.v1");
   if (typeof row.withdrawalEnabled !== "boolean" || row.productionPayoutCapability !== false) throw badWithdrawal();
-  return {scope,withdrawalEnabled:row.withdrawalEnabled,observedAt:time(row.observedAt)};
+  const raw=record(row.limits),minCents=positive(raw.minCents),maxCents=positive(raw.maxCents);
+  if(BigInt(minCents)>BigInt(maxCents))throw badWithdrawal();
+  return {scope,withdrawalEnabled:row.withdrawalEnabled,limits:{minCents,maxCents},observedAt:time(row.observedAt)};
 }
 export function parseDemoTarget(value: unknown) {
   const {row,scope} = envelope(value,"demo-withdrawal-target.v1"), target = record(row.target), mask = text(target.mask,32);

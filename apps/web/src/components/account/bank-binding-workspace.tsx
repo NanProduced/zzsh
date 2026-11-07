@@ -14,7 +14,7 @@ import { historicalWithdrawalStatus, yuanToCents } from "@/lib/controlled-withdr
 import { WithdrawalRequestError } from "@/lib/withdrawal-client-core";
 import { pendingBankBinding, readBankBinding, recoverBankBinding, saveBankBinding, validateBankBindingInput, type BankBindingRead, type PendingBankBinding } from "@/lib/withdrawal-bank-binding-client";
 import { pendingChannelWithdrawal, quoteChannelWithdrawal, readChannelWithdrawal, readChannelWithdrawalOptions, recoverChannelWithdrawal, submitChannelWithdrawal, type ChannelWithdrawalIntent, type ChannelWithdrawalQuote, type PendingChannelWithdrawal, type WithdrawalOptions } from "@/lib/channel-withdrawal-client";
-import { confirmDemoWithdrawal, createDemoTarget, discardDemoTarget, pendingDemoWithdrawal, quoteDemoWithdrawal, readDemoAvailability, readDemoIntent, recoverDemoWithdrawal, type DemoBody, type DemoIntent, type DemoPending, type DemoQuote, type DemoScope } from "@/lib/demo-withdrawal-client";
+import { confirmDemoWithdrawal, createDemoTarget, discardDemoTarget, pendingDemoWithdrawal, quoteDemoWithdrawal, readDemoAvailability, readDemoIntent, recoverDemoWithdrawal, type DemoBody, type DemoIntent, type DemoPending, type DemoQuote, type DemoScope, type DemoWithdrawalLimits } from "@/lib/demo-withdrawal-client";
 import { readWithdrawalHistory, readWithdrawalHistoryItem, recoverWithdrawalFromHistory, type WithdrawalHistoryDetail, type WithdrawalHistoryRead, type WithdrawalHistoryRecovery, type WithdrawalHistorySource } from "@/lib/withdrawal-history-client";
 import { advanceWithdrawalTimeline, emptyWithdrawalTimeline, hasMoreWithdrawalTimeline, removeWithdrawalTimelineSource, WithdrawalTimelineSourceError, type TimelineItem, type TimelineState } from "@/lib/withdrawal-timeline";
 import "./bank-binding-workspace.css";
@@ -527,7 +527,7 @@ function ChannelWithdrawalPanel({ scope, refreshKey, bindingLocked, availableBal
 }
 
 type WithdrawalPanelProps = {scope:string;refreshKey:number;bindingLocked:boolean;availableBalance:string|null;ledgerRevision:string|null;onWalletChanged:()=>void;onIdentityFailure?:IdentityFailure};
-function DemoWithdrawalPanel({scope,refreshKey,bindingLocked,availableBalance,ledgerRevision,onWalletChanged,onIdentityFailure,demoScope,enabled}:{demoScope:DemoScope;enabled:boolean}&WithdrawalPanelProps) {
+function DemoWithdrawalPanel({scope,refreshKey,bindingLocked,availableBalance,ledgerRevision,onWalletChanged,onIdentityFailure,demoScope,enabled,limits}:{demoScope:DemoScope;enabled:boolean;limits:DemoWithdrawalLimits}&WithdrawalPanelProps) {
   const identity=useWithdrawalIdentity(scope,onIdentityFailure),field=useId(),generation=useRef(0),busyRef=useRef(false);
   const [binding,setBinding]=useState<BankBindingRead|null>(null),[loading,setLoading]=useState(true),[pending,setPending]=useState<DemoPending|null>(null);
   const [amount,setAmount]=useState(""),[quote,setQuote]=useState<{body:DemoBody;quote:DemoQuote}|null>(null),[result,setResult]=useState<DemoIntent|null>(null);
@@ -546,14 +546,15 @@ function DemoWithdrawalPanel({scope,refreshKey,bindingLocked,availableBalance,le
   },[scope,identity.ready,identity.userId,refreshKey,demoScope]);
   useEffect(()=>{if(quote&&quote.body.expectedWalletVersion!==ledgerRevision){setQuote(null);setConfirmOpen(false);}},[ledgerRevision,quote]);
   const run=async(action:()=>Promise<void>)=>{if(!identity.current()||busyRef.current)return;busyRef.current=true;setBusy(true);setMessage("");
-    try{await action();}catch(error){if(identity.current()){const e=asError(error);identity.identityFailure(e);const original=sync(),identityMessage:Record<string,string>={DEMO_WITHDRAW_IDENTITY_REQUIRED:"请先完成本人实名认证。",DEMO_WITHDRAW_ADULT_REQUIRED:"确认已成年后才能进行模拟提现。",DEMO_WITHDRAW_IDENTITY_SOURCE_UNCONFIRMED:"实名信息来源暂时无法确认，请联系客服核对。"};
+    try{await action();}catch(error){if(identity.current()){const e=asError(error);identity.identityFailure(e);const original=sync(),identityMessage:Record<string,string>={DEMO_WITHDRAW_IDENTITY_REQUIRED:"请先完成本人实名认证。",DEMO_WITHDRAW_ADULT_REQUIRED:"确认已成年后才能进行模拟提现。",DEMO_WITHDRAW_IDENTITY_SOURCE_UNCONFIRMED:"实名信息来源暂时无法确认，请联系客服核对。",DEMO_WITHDRAW_AMOUNT_OUT_OF_RANGE:`模拟提现金额需在 ${walletMoney(limits.minCents)} 至 ${walletMoney(limits.maxCents)} 之间。`};
       setMessage(e.status===401?"登录状态已变化，请重新进入页面。":original?.stage==="target"||original?.stage==="confirm"?"操作暂未确认，请先查询原申请。":identityMessage[e.code]??"提现信息暂时无法核对，请稍后重试。");}}
     finally{if(identity.current())setBusy(false);busyRef.current=false;}};
   const preview=()=>void run(async()=>{
     if(!identity.userId||!ledgerRevision||!binding?.binding||bindingLocked||!enabled)return;
     try{if(pendingBankBinding(identity.userId)){setMessage("请先确认收款资料的保存结果。");return;}}catch{setMessage("收款资料的保存状态无法确认，请联系客服。");return;}
     let original=sync();if(original===undefined||original?.stage==="target"||original?.stage==="confirm")return;
-    if(!original){let amountCents:string;try{amountCents=yuanToCents(amount);if(BigInt(amountCents)<=0n)throw Error();}catch{setMessage("请输入大于 0、最多两位小数的金额。");return;}setResult(null);
+    if(!original){let amountCents:string;try{amountCents=yuanToCents(amount);if(BigInt(amountCents)<=0n)throw Error();}catch{setMessage("请输入大于 0、最多两位小数的金额。");return;}
+      if(BigInt(amountCents)<BigInt(limits.minCents)||BigInt(amountCents)>BigInt(limits.maxCents)){setMessage(`模拟提现金额需在 ${walletMoney(limits.minCents)} 至 ${walletMoney(limits.maxCents)} 之间。`);return;}setResult(null);
       original=await createDemoTarget(identity.userId,demoScope,{bankBindingId:binding.binding.id,bankBindingRevision:binding.binding.revision,amountCents},{isCurrent:identity.current});setPending(original);}
     if(original.stage!=="target-ready")return;
     try {const next=await quoteDemoWithdrawal(identity.userId,demoScope,original.target,ledgerRevision);if(identity.current())setQuote(next);}
@@ -573,7 +574,7 @@ function DemoWithdrawalPanel({scope,refreshKey,bindingLocked,availableBalance,le
   const labels:Record<DemoIntent["state"],string>={RESERVED:"金额已暂留",SUBMITTING:"模拟处理中",PROCESSING:"模拟处理中",UNKNOWN:"结果待确认",SUCCEEDED:"模拟提现完成",FAILED:"模拟提现未完成",RECONCILIATION_REQUIRED:"需要客服核对"};
   return <section className="account-module-card channel-withdrawal-panel" data-testid="demo-withdrawal-panel" aria-labelledby={`${field}-title`}>
     <div className="bank-section-heading"><h3 id={`${field}-title`}>模拟提现</h3><StatusBadge tone="neutral">测试环境</StatusBadge></div>
-    <p className="bank-help">使用演示规则测试提现，余额会按测试记录变动，不会向银行卡打款。</p>
+    <p className="bank-help">使用演示规则测试提现，余额会按测试记录变动，不会向银行卡打款。单笔范围 {walletMoney(limits.minCents)} 至 {walletMoney(limits.maxCents)}。</p>
     <div className="bank-available" aria-label="可提现余额"><span className="bank-available-caption">可提现余额</span><strong className="bank-available-sum">{walletMoney(availableBalance)}</strong></div>
     <hr className="bank-metric-divider" />
     {loading?<SkeletonBlock label="正在读取收款资料" lines={2}/>:null}
@@ -583,7 +584,7 @@ function DemoWithdrawalPanel({scope,refreshKey,bindingLocked,availableBalance,le
     <form className="bank-withdraw-form" onSubmit={event=>{event.preventDefault();if(quote)setConfirmOpen(true);else preview();}} noValidate>
       <div className="bank-form-group"><label className="bank-form-label" htmlFor={`${field}-amount`}>提现金额</label><div className="bank-amount-input-box">
         <span className="bank-currency-prefix" aria-hidden="true">¥</span><Input {...fieldControlProps({id:`${field}-amount`,helper:false})} inputMode="decimal" autoComplete="off" placeholder="0.00" value={amount} disabled={blocked||Boolean(readyTarget)} className="bank-amount-input" onChange={event=>{setAmount(event.target.value);setQuote(null);setMessage("");}} />
-        {!blocked&&!readyTarget&&availableBalance&&BigInt(availableBalance)>0n?<Button type="button" variant="tertiary" className="bank-quick-max-btn" onPress={()=>{const n=BigInt(availableBalance);setAmount(`${n/100n}.${(n%100n).toString().padStart(2,"0")}`);setQuote(null);}}>全部提现</Button>:null}
+        {!blocked&&!readyTarget&&availableBalance&&BigInt(availableBalance)>0n?<Button type="button" variant="tertiary" className="bank-quick-max-btn" onPress={()=>{const n=BigInt(availableBalance)>BigInt(limits.maxCents)?BigInt(limits.maxCents):BigInt(availableBalance);setAmount(`${n/100n}.${(n%100n).toString().padStart(2,"0")}`);setQuote(null);}}>{BigInt(availableBalance)>BigInt(limits.maxCents)?"本次最多":"全部提现"}</Button>:null}
       </div></div>
       <div className="bank-form-group"><span className="bank-form-label">收款银行卡</span><div className="bank-destination-card" role="group" aria-label="模拟提现使用的银行卡"><div className="bank-destination-left"><CreditCard size={18} className="bank-destination-icon" aria-hidden="true"/><span className="bank-destination-name">{readyTarget?`银行卡 •••• ${readyTarget.mask.slice(-4)}`:binding?.binding?`银行卡 •••• ${binding.binding.cardMask.slice(-4)}`:binding?.integration==="INTEGRATED"?"尚未绑定收款银行卡":"收款资料暂时无法确认"}</span></div></div></div>
       {quote?<div className="bank-fee-summary has-quote" aria-label="模拟提现费用"><div className="bank-fee-row"><span>手续费</span><span>{walletMoney(quote.quote.feeCents)}</span></div><div className="bank-fee-row"><span>模拟出款金额</span><span>{walletMoney(quote.quote.netCents)}</span></div></div>:null}
@@ -597,17 +598,17 @@ function DemoWithdrawalPanel({scope,refreshKey,bindingLocked,availableBalance,le
 }
 
 function WithdrawalPanel(props:WithdrawalPanelProps) {
-  const identity=useWithdrawalIdentity(props.scope,props.onIdentityFailure),[state,setState]=useState<{scope:string;mode:"loading"|"channel"|"demo"|"error";demoScope?:DemoScope;enabled?:boolean}>({scope:props.scope,mode:"loading"}),[attempt,setAttempt]=useState(0);
+  const identity=useWithdrawalIdentity(props.scope,props.onIdentityFailure),[state,setState]=useState<{scope:string;mode:"loading"|"channel"|"demo"|"error";demoScope?:DemoScope;enabled?:boolean;limits?:DemoWithdrawalLimits}>({scope:props.scope,mode:"loading"}),[attempt,setAttempt]=useState(0);
   useEffect(()=>{if(!identity.ready||!identity.userId)return;const controller=new AbortController();setState({scope:props.scope,mode:"loading"});
     let original:DemoPending|null;try{original=pendingDemoWithdrawal(identity.userId);}catch{setState({scope:props.scope,mode:"error"});return;}
-    void readDemoAvailability(identity.userId,controller.signal).then(value=>{if(identity.current()&&!controller.signal.aborted)setState({scope:props.scope,mode:"demo",demoScope:value.scope,enabled:value.withdrawalEnabled});})
+    void readDemoAvailability(identity.userId,controller.signal).then(value=>{if(identity.current()&&!controller.signal.aborted)setState({scope:props.scope,mode:"demo",demoScope:value.scope,enabled:value.withdrawalEnabled,limits:value.limits});})
       .catch(error=>{if(identity.current()&&!controller.signal.aborted){const e=asError(error);identity.identityFailure(e);setState({scope:props.scope,mode:e.status===404&&!original?"channel":"error"});}});
     return()=>controller.abort();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   },[props.scope,identity.ready,identity.userId,attempt]);
   if(state.scope!==props.scope||state.mode==="loading")return <section className="account-module-card"><SkeletonBlock label="正在确认提现方式" lines={2}/></section>;
   if(state.mode==="error")return <section className="account-module-card"><RecoveryAlert tone="unknown" title="暂时无法确认提现方式" problem="如有未完成申请，请保留原浏览器状态。" action={<Button variant="secondary" className="bank-action" onPress={()=>setAttempt(value=>value+1)}>重新读取</Button>}/></section>;
-  if(state.mode==="demo"&&state.demoScope)return <DemoWithdrawalPanel {...props} demoScope={state.demoScope} enabled={state.enabled===true}/>;
+  if(state.mode==="demo"&&state.demoScope&&state.limits)return <DemoWithdrawalPanel {...props} demoScope={state.demoScope} enabled={state.enabled===true} limits={state.limits}/>;
   return <ChannelWithdrawalPanel {...props}/>;
 }
 
