@@ -557,7 +557,16 @@ export async function readAdminDistributionParticipants(c: PoolClient, context: 
   values.push(limit, offset);
   const limitIdx = values.length - 1, offsetIdx = values.length;
   const whereSql = where.length ? "WHERE " + where.join(" AND ") : "";
-  const rows = (await c.query(`${amountsCte}
+  // Preserve the global order before expanding child relationships for this page.
+  const rows = (await c.query(`${amountsCte}, participant_page AS (
+    SELECT p.user_id,${sortColumn} AS sort_value,count(*) OVER()::int AS total
+    FROM zzsh_order.distribution_participant p
+    ${f.q && context.directoryRead ? 'LEFT JOIN zzsh_auth_user."user" u ON u.id=p.user_id' : ''}
+    LEFT JOIN participant_amounts a ON a.beneficiary_id=p.user_id
+    ${whereSql}
+    ORDER BY ${sortColumn} ${sortDir}, p.user_id COLLATE "C" ASC
+    LIMIT $${limitIdx} OFFSET $${offsetIdx}
+  )
     SELECT p.user_id,u.name,p.eligibility,p.commission_frozen,p.level_code,p.inviter_knowledge,p.leader_knowledge,p.invitees_knowledge,p.source_type,p.revision,
     CASE WHEN v.schema_version='distribution-policy.v3' THEN v.canonical_config::jsonb#>>ARRAY['legacySource','levelNames',p.level_code] WHEN v.schema_version='distribution-policy.v4' THEN v.canonical_config::jsonb#>>ARRAY['levelNames',p.level_code] END level_name,
     COALESCE(ch.leader_children,0)::int AS leader_children,
@@ -568,22 +577,21 @@ export async function readAdminDistributionParticipants(c: PoolClient, context: 
     COALESCE(a.recovery_cents,0)::text AS recovery_cents,
     COALESCE(a.review_cents,0)::text AS review_cents,
     COALESCE(a.review_count,0)::text AS review_count,
-    count(*) OVER()::int AS total
-    FROM zzsh_order.distribution_participant p
+    page.total
+    FROM participant_page page
+    JOIN zzsh_order.distribution_participant p ON p.user_id=page.user_id
     LEFT JOIN zzsh_auth_user."user" u ON u.id=p.user_id
     LEFT JOIN zzsh_order.distribution_policy_version pv ON pv.id=p.policy_version_id
       LEFT JOIN zzsh_order.distribution_policy_head ph ON ph.scope=pv.scope
       LEFT JOIN zzsh_order.distribution_policy_version v ON v.id=ph.current_version_id
     LEFT JOIN participant_amounts a ON a.beneficiary_id=p.user_id
-    LEFT JOIN (
-      SELECT parent_user_id,
+    LEFT JOIN LATERAL (
+      SELECT
         count(DISTINCT child_user_id) FILTER(WHERE type='DISTRIBUTION_LEADER')::int AS leader_children,
         count(DISTINCT child_user_id) FILTER(WHERE type='INVITER')::int AS inviter_children
-      FROM zzsh_order.invitation_relation GROUP BY parent_user_id
-    ) ch ON ch.parent_user_id=p.user_id
-    ${whereSql}
-    ORDER BY ${sortColumn} ${sortDir}, p.user_id COLLATE "C" ASC
-    LIMIT $${limitIdx} OFFSET $${offsetIdx}`, values)).rows;
+      FROM zzsh_order.invitation_relation WHERE parent_user_id=p.user_id
+    ) ch ON TRUE
+    ORDER BY page.sort_value ${sortDir}, p.user_id COLLATE "C" ASC`, values)).rows;
   let total = rows.length ? Number(rows[0].total) : NaN;
   if (!rows.length) {
     // Empty-page total skips the heavy amount CTE; rebuild participant-only bindings.

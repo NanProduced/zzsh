@@ -90,7 +90,9 @@ test("hidden directory names cannot participate in dashboard list searches; ID s
   assert.doesNotMatch(list, /::bigint/);
   await readAdminDistributionParticipants(client, dashboardContext(false), f);
   const participants = calls.filter(x => x.sql.includes("ORDER BY COALESCE(a.record_count,0) DESC")).at(-1)!.sql;
-  assert.doesNotMatch(participants.slice(participants.indexOf("WHERE lower")), /u\.name/);
+  const whereStart = participants.indexOf("WHERE lower");
+  assert.ok(whereStart >= 0);
+  assert.doesNotMatch(participants.slice(whereStart, participants.indexOf("ORDER BY", whereStart)), /u\.name/);
   assert.match(participants, /participant_amounts/);
   assert.ok(calls.some(x => x.values.includes("%user-1%")));
 });
@@ -499,7 +501,8 @@ test('participants sort by settled/pending and keep user_id tiebreak',async()=>{
  await readAdminDistributionParticipants(client,dashboardContext(),{...filtersForTest(),sort:'settledCents',order:'asc'});
  const settled=calls.find(c=>c.sql.includes('ORDER BY COALESCE(a.settled_cents,0) ASC'))!;
  assert.match(settled.sql,/p\.user_id COLLATE "C" ASC/);
- assert.match(settled.sql,/LEFT JOIN \(\s*SELECT parent_user_id/);
+ assert.match(settled.sql,/LEFT JOIN LATERAL\s*\([\s\S]*FROM zzsh_order\.invitation_relation WHERE parent_user_id=p\.user_id/);
+ assert.ok(settled.sql.indexOf('participant_page AS') < settled.sql.indexOf('SELECT p.user_id,u.name'));
   assert.doesNotMatch(settled.sql,/legacy_log_candidates/,'participant totals do not need individual settlement times');
  calls.length=0;
  await readAdminDistributionParticipants(client,dashboardContext(),{...filtersForTest(),sort:'pendingCents',order:'desc'});
