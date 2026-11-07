@@ -40,38 +40,44 @@ export type LocalCheckoutAvailability = {
 /** Only the safe page link is consumed here; signed tickets stay on the API checkout page. */
 export type LocalCheckout = { id: string; displayNo: string; amount: { cents: string; currency: "CNY" }; expiresAt: string; url: string };
 
+export type DemoCheckoutScope = "ECS_TEST_SIMULATED" | "LOCAL_DEMO_SIMULATED";
 export type DemoCheckoutAvailability = {
-  contractVersion: "ecs-test-checkout-availability.v1"; scope: "ECS_TEST_SIMULATED"; orderId: string;
+  contractVersion: "ecs-test-checkout-availability.v1"; scope: DemoCheckoutScope; orderId: string;
   checkoutEnabled: boolean; observedAt: string; productionPaymentCapability: false; bankArrival: "UNKNOWN";
 };
 export type DemoCheckoutResult = {
-  contractVersion: "ecs-test-checkout-result.v1"; scope: "ECS_TEST_SIMULATED"; orderId: string;
+  contractVersion: "ecs-test-checkout-result.v1"; scope: DemoCheckoutScope; orderId: string;
   payment: { confirmationId: string; disposition: "APPLIED"; reasonCode: null; replay: boolean }; bankArrival: "UNKNOWN";
 };
 export type DemoCheckoutReceipt = {
-  contractVersion: "ecs-test-checkout-receipt.v1"; scope: "ECS_TEST_SIMULATED"; orderId: string;
+  contractVersion: "ecs-test-checkout-receipt.v1"; scope: DemoCheckoutScope; orderId: string;
   knowledge: "KNOWN" | "UNKNOWN"; receipt: DemoCheckoutResult | null; observedAt: string; writeAssemblyReady: boolean; mayReapply: false;
 };
 const demoTime = (value: unknown) => typeof value === "string" && Number.isFinite(Date.parse(value));
+const demoScope = (value: unknown): value is DemoCheckoutScope => value === "ECS_TEST_SIMULATED" || value === "LOCAL_DEMO_SIMULATED";
 export function parseDemoCheckoutAvailability(value: unknown, orderId: string): DemoCheckoutAvailability {
   const v = value as DemoCheckoutAvailability | null;
-  if (!v || v.contractVersion !== "ecs-test-checkout-availability.v1" || v.scope !== "ECS_TEST_SIMULATED" || v.orderId !== orderId
+  if (!v || v.contractVersion !== "ecs-test-checkout-availability.v1" || !demoScope(v.scope) || v.orderId !== orderId
     || typeof v.checkoutEnabled !== "boolean" || !demoTime(v.observedAt) || v.productionPaymentCapability !== false || v.bankArrival !== "UNKNOWN") throw new OrderRequestError(502, null);
   return v;
 }
 export function parseDemoCheckoutResult(value: unknown, orderId: string): DemoCheckoutResult {
   const v = value as DemoCheckoutResult | null;
-  if (!v || v.contractVersion !== "ecs-test-checkout-result.v1" || v.scope !== "ECS_TEST_SIMULATED" || v.orderId !== orderId || v.bankArrival !== "UNKNOWN"
+  if (!v || v.contractVersion !== "ecs-test-checkout-result.v1" || !demoScope(v.scope) || v.orderId !== orderId || v.bankArrival !== "UNKNOWN"
     || typeof v.payment?.confirmationId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(v.payment.confirmationId)
     || v.payment.disposition !== "APPLIED" || v.payment.reasonCode !== null || typeof v.payment.replay !== "boolean") throw new OrderRequestError(502, null);
   return v;
 }
 export function parseDemoCheckoutReceipt(value: unknown, orderId: string): DemoCheckoutReceipt {
   const v = value as DemoCheckoutReceipt | null;
-  if (!v || v.contractVersion !== "ecs-test-checkout-receipt.v1" || v.scope !== "ECS_TEST_SIMULATED" || v.orderId !== orderId
+  if (!v || v.contractVersion !== "ecs-test-checkout-receipt.v1" || !demoScope(v.scope) || v.orderId !== orderId
     || !demoTime(v.observedAt) || typeof v.writeAssemblyReady !== "boolean" || v.mayReapply !== false
     || (v.knowledge !== "KNOWN" && v.knowledge !== "UNKNOWN")) throw new OrderRequestError(502, null);
-  if (v.knowledge === "KNOWN") return { ...v, receipt: parseDemoCheckoutResult(v.receipt, orderId) };
+  if (v.knowledge === "KNOWN") {
+    const receipt = parseDemoCheckoutResult(v.receipt, orderId);
+    if (receipt.scope !== v.scope) throw new OrderRequestError(502, null);
+    return { ...v, receipt };
+  }
   if (v.receipt !== null) throw new OrderRequestError(502, null);
   return v;
 }

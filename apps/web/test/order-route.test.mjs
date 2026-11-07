@@ -8,15 +8,16 @@ const ctx=path=>({params:Promise.resolve({path})});
 const input=(path,init={},query='')=>new Request('http://127.0.0.1:3100/api/orders/'+path.join('/')+query,{...init,headers:{origin:'http://127.0.0.1:3100',...init.headers}});
 
 test('demo checkout BFF binds identity and original key, and never invents provider success',async()=>{
- const old=globalThis.fetch,calls=[];let subject='user_a',resultOrder='order_demo';
+ const old=globalThis.fetch,calls=[];let subject='user_a',resultOrder='order_demo',scope='ECS_TEST_SIMULATED';
  globalThis.fetch=async(url,options)=>{calls.push({url:String(url),options});return String(url).endsWith('/get-session')
-  ?Response.json({user:{id:subject}}):Response.json({contractVersion:'ecs-test-checkout-result.v1',scope:'ECS_TEST_SIMULATED',orderId:resultOrder,payment:{confirmationId:'demo_1',disposition:'APPLIED',reasonCode:null,replay:false},bankArrival:'UNKNOWN'});};
+  ?Response.json({user:{id:subject}}):Response.json({contractVersion:'ecs-test-checkout-result.v1',scope,orderId:resultOrder,payment:{confirmationId:'demo_1',disposition:'APPLIED',reasonCode:null,replay:false},bankArrival:'UNKNOWN'});};
  try{
   const path=['order_demo','demo-checkout','confirm'],headers={'content-type':'application/json','idempotency-key':'original_1','x-zzsh-expected-user-id':'user_a',cookie:'zzsh_user.session_token=user; zzsh_admin.session_token=admin'};
   const send=(changes={},body='{}')=>POST(input(path,{method:'POST',headers:{...headers,...changes},body}),ctx(path));
   assert.equal((await send()).status,200);assert.equal(calls.length,2);
   assert.match(calls[1].url,/\/api\/bff\/user\/orders\/order_demo\/demo-checkout\/confirm$/);
   assert.equal(calls[1].options.headers.get('idempotency-key'),'original_1');assert.equal(calls[1].options.headers.get('cookie'),'zzsh_user.session_token=user');
+  scope='LOCAL_DEMO_SIMULATED';assert.equal((await send()).status,200);scope='ECS_TEST_SIMULATED';
   const before=calls.length;assert.equal((await send({'idempotency-key':''})).status,400);assert.equal((await send({},'{"amount":1}')).status,400);assert.equal(calls.length,before);
   subject='user_b';assert.equal((await send()).status,401);assert.equal(calls.length,before+1);
   subject='user_a';resultOrder='other_order';assert.equal((await send()).status,502);

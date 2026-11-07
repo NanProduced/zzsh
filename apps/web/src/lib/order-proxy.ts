@@ -145,7 +145,7 @@ export async function forwardOrderRequest(
   try {
     const bytes = await readBoundedBody(upstream, 2 * 1024 * 1024, deadline);
     const payload = JSON.parse(new TextDecoder().decode(bytes));
-    if (demoCheckout && upstream.ok && (payload?.scope !== "ECS_TEST_SIMULATED" || payload?.orderId !== segments?.[0])) return error(502, "INTERNAL_ERROR", requestId);
+    if (demoCheckout && upstream.ok && (!['ECS_TEST_SIMULATED','LOCAL_DEMO_SIMULATED'].includes(payload?.scope) || payload?.orderId !== segments?.[0])) return error(502, "INTERNAL_ERROR", requestId);
     if (unifiedList && upstream.ok && (payload?.subjectId !== expectedUserId || !Array.isArray(payload?.items))) return error(502, "INTERNAL_ERROR", requestId);
     if (legacyTeamRead && upstream.ok && (payload?.subjectId !== expectedUserId || (path === "/legacy-im-groups" ? !Array.isArray(payload?.items) : payload?.orderId !== segments?.[0]))) return error(502, "INTERNAL_ERROR", requestId);
     if (refundRead && upstream.ok && (payload?.contractVersion !== "personal-native-refunds.v1" || payload?.subjectId !== expectedUserId || payload?.order?.orderId !== segments?.[0])) return error(502, "INTERNAL_ERROR", requestId);

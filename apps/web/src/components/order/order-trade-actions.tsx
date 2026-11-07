@@ -438,9 +438,12 @@ export function DemoCheckoutAction({ order, blocked, onChanged, onModeChange, on
   const submit = async () => {
     if (!userId || busy || blocked || !view?.checkoutEnabled || pending.state !== "NONE" || !paymentEntryOpen(order)) return;
     const acting = userId, expected = order.id; setBusy(true); setNotice(null);
-    const outcome = await performGuardedWrite(acting, "order.demo-checkout", expected, {}, undefined, async (key, body) => {
-      if (Object.keys(body).length) throw new OrderRequestError(409, null);
-      return orderApi.confirmDemoCheckout(acting, expected, key);
+    const scope = view.scope;
+    const outcome = await performGuardedWrite(acting, "order.demo-checkout", expected, {}, { scope }, async (key, body, context) => {
+      if (Object.keys(body).length || context?.scope !== scope) throw new OrderRequestError(409, null);
+      const result = await orderApi.confirmDemoCheckout(acting, expected, key);
+      if (result.scope !== scope) throw new OrderRequestError(502, null);
+      return result;
     });
     if (!mounted.current || !isCurrent(acting) || latest.current.orderId !== expected) return;
     setBusy(false);
@@ -454,9 +457,10 @@ export function DemoCheckoutAction({ order, blocked, onChanged, onModeChange, on
     if (!userId || busy || blocked || pending.state !== "VALID" || !pending.intent) return;
     const acting = userId, expected = order.id, original = pending.intent; setBusy(true); setNotice(null);
     try {
-      if (Object.keys(original.body).length) throw new OrderRequestError(409, null);
+      if (Object.keys(original.body).length || !["ECS_TEST_SIMULATED", "LOCAL_DEMO_SIMULATED"].includes(String(original.context?.scope))) throw new OrderRequestError(409, null);
       const result = await orderApi.demoCheckoutReceipt(acting, expected, original.key);
       if (!mounted.current || !isCurrent(acting) || latest.current.orderId !== expected) return;
+      if (result.scope !== original.context?.scope) throw new OrderRequestError(502, null);
       if (result.knowledge !== "KNOWN" || !result.receipt) { setNotice("原模拟付款结果尚未确认，请稍后再次查询或联系客服。"); return; }
       clearIntent(acting, "order.demo-checkout", expected); setCompleted(true); setNotice("模拟付款已完成，不会真实扣款。"); latest.current.onChanged();
     } catch { if (mounted.current && isCurrent(acting) && latest.current.orderId === expected) setNotice("原模拟付款结果暂时无法读取，请稍后再查询或联系客服。"); }

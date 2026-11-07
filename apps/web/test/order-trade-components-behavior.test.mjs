@@ -197,7 +197,7 @@ test('unknown demo payment is read by its original key and never resubmitted',as
   if(init.method==='POST'){posts++;key=new Headers(init.headers).get('idempotency-key');throw new Error('response lost')}
   if(String(url).includes('/receipt?')){reads++;assert.equal(new URL(String(url),'https://local').searchParams.get('key'),key);return json(demoReceipt(known))}return json(demoAvailability());
  },{exerciseDemo:true});
- try{await p.render();await p.click('确认模拟付款');assert.equal(posts,1);assert.match(p.host.textContent,/结果尚未确认/);const original=intents.loadIntent('user_A','order.demo-checkout','order_A');assert.equal(original.key,key);await p.click('查询原付款结果');assert.equal(intents.loadIntent('user_A','order.demo-checkout','order_A').key,key);assert.equal(changed,0);known=true;await p.click('查询原付款结果');assert.equal(posts,1);assert.equal(reads,2);assert.equal(changed,1);assert.equal(intents.loadIntent('user_A','order.demo-checkout','order_A'),null)}finally{await p.dispose(()=>intents.clearIntent('user_A','order.demo-checkout','order_A'))}
+ try{await p.render();await p.click('确认模拟付款');assert.equal(posts,1);assert.match(p.host.textContent,/结果尚未确认/);const original=intents.loadIntent('user_A','order.demo-checkout','order_A');assert.equal(original.key,key);assert.equal(original.context.scope,'ECS_TEST_SIMULATED');await p.click('查询原付款结果');assert.equal(intents.loadIntent('user_A','order.demo-checkout','order_A').key,key);assert.equal(changed,0);known=true;await p.click('查询原付款结果');assert.equal(posts,1);assert.equal(reads,2);assert.equal(changed,1);assert.equal(intents.loadIntent('user_A','order.demo-checkout','order_A'),null)}finally{await p.dispose(()=>intents.clearIntent('user_A','order.demo-checkout','order_A'))}
 }));
 
 test('demo checkout absence falls back; unavailable or malformed capability remains blocked',async()=>withDom(async window=>{
@@ -210,11 +210,21 @@ test('demo checkout absence falls back; unavailable or malformed capability rema
 
 test('a saved demo request stays locked if its service is no longer installed',async()=>withDom(async window=>{
  const {DemoCheckoutAction}=loadComponent('apps/web/src/components/order/order-trade-actions.tsx',session('user_A'));let pending=false,posts=0;
- intents.saveIntent({userId:'user_A',kind:'order.demo-checkout',resourceId:'order_A',key:'original_demo_key',body:{}});
+ intents.saveIntent({userId:'user_A',kind:'order.demo-checkout',resourceId:'order_A',key:'original_demo_key',body:{},context:{scope:'ECS_TEST_SIMULATED'}});
  const p=createProbe(window,DemoCheckoutAction,localProps({onPendingChange(value){pending=value}}),async(_url,init={})=>{if(init.method==='POST')posts++;return json({error:{code:'NOT_FOUND'}},404)},{exerciseDemo:true});
  try{await p.render();assert.equal(pending,true);assert.doesNotMatch(p.host.textContent,/旧受控入口/);await p.click('查询原付款结果');
   assert.equal(posts,0);assert.equal(intents.loadIntent('user_A','order.demo-checkout','order_A').key,'original_demo_key');assert.match(p.host.textContent,/无法读取/);
  }finally{await p.dispose(()=>intents.clearIntent('user_A','order.demo-checkout','order_A'))}
+}));
+
+test('a demo receipt from another environment cannot resolve the original request',async()=>withDom(async window=>{
+ const {DemoCheckoutAction}=loadComponent('apps/web/src/components/order/order-trade-actions.tsx',session('user_A'));let posts=0;
+ intents.saveIntent({userId:'user_A',kind:'order.demo-checkout',resourceId:'order_A',key:'original_demo_key',body:{},context:{scope:'ECS_TEST_SIMULATED'}});
+ const p=createProbe(window,DemoCheckoutAction,localProps(),async(url,init={})=>{if(init.method==='POST')posts++;
+  return json(String(url).includes('/receipt?')?{...demoReceipt(false),scope:'LOCAL_DEMO_SIMULATED'}:{...demoAvailability(),scope:'LOCAL_DEMO_SIMULATED'});
+ },{exerciseDemo:true});
+ try{await p.render();await p.click('查询原付款结果');assert.equal(posts,0);assert.equal(intents.loadIntent('user_A','order.demo-checkout','order_A').context.scope,'ECS_TEST_SIMULATED');assert.match(p.host.textContent,/无法读取/)}
+ finally{await p.dispose(()=>intents.clearIntent('user_A','order.demo-checkout','order_A'))}
 }));
 
 test('late demo payment reply never updates a different signed-in user',async()=>withDom(async window=>{
@@ -231,10 +241,13 @@ test('late demo payment reply never updates a different signed-in user',async()=
 
 test('demo result and receipt reject another order, formal source or fabricated arrival',()=>{
  assert.equal(orderClient.parseDemoCheckoutResult(demoResult(),'order_A').bankArrival,'UNKNOWN');
+ assert.equal(orderClient.parseDemoCheckoutAvailability({...demoAvailability(),scope:'LOCAL_DEMO_SIMULATED'},'order_A').scope,'LOCAL_DEMO_SIMULATED');
+ assert.equal(orderClient.parseDemoCheckoutResult({...demoResult(),scope:'LOCAL_DEMO_SIMULATED'},'order_A').scope,'LOCAL_DEMO_SIMULATED');
  for(const result of [{...demoResult(),orderId:'other'}, {...demoResult(),scope:'JOINPAY'}, {...demoResult(),bankArrival:'ARRIVED'}])
   assert.throws(()=>orderClient.parseDemoCheckoutResult(result,'order_A'),OrderRequestError);
  assert.throws(()=>orderClient.parseDemoCheckoutReceipt({...demoReceipt(false),mayReapply:true},'order_A'),OrderRequestError);
  assert.throws(()=>orderClient.parseDemoCheckoutReceipt({...demoReceipt(false),receipt:demoResult()},'order_A'),OrderRequestError);
+ assert.throws(()=>orderClient.parseDemoCheckoutReceipt({...demoReceipt(true),scope:'LOCAL_DEMO_SIMULATED'},'order_A'),OrderRequestError);
 });
 
 test('local checkout is explicitly discovered, keeps its own issue key and only opens a validated API page',async()=>withDom(async window=>{

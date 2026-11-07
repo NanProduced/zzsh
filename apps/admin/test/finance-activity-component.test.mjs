@@ -69,7 +69,7 @@ test('native channel page shows request fields and provides paginated access to 
 test('simulated payments are clearly separated from channel facts and offer no fabricated detail',async t=>{
  const ui=await mount(t,'finance-records',[
   {id:'demo',source:'NATIVE',kind:'PAYMENT',dataOrigin:'ECS_TEST_SIMULATED',bankArrival:'UNKNOWN',subjectId:'u1',subjectName:'用户一',documentRef:null,number:'demo-1',relatedNumber:'order-1',relatedNumberLabel:'关联订单',state:'SIMULATED',amountCents:'1250',amountLabel:'模拟金额（未发生汇聚收款）',occurredAt:null},
-  {id:'uncertain',source:'NATIVE',kind:'PAYMENT',dataOrigin:'ECS_TEST_SIMULATED',subjectId:'u1',subjectName:'用户一',documentRef:null,number:'demo-2',state:'SIMULATED',amountCents:'100',occurredAt:null},
+  {id:'uncertain',source:'NATIVE',kind:'PAYMENT',dataOrigin:'LOCAL_DEMO_SIMULATED',subjectId:'u1',subjectName:'用户一',documentRef:null,number:'demo-2',state:'SIMULATED',amountCents:'100',occurredAt:null},
  ]);
  const rows=ui.host.querySelectorAll('tbody tr');assert.equal(rows.length,2);
  assert.match(rows[0].textContent,/模拟收款/);assert.match(rows[0].textContent,/模拟成功/);assert.match(rows[0].textContent,/模拟金额（未发生汇聚收款）/);
