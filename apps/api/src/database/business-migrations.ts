@@ -63,6 +63,25 @@ function accepted0155LineEndingVariant(folder: string, tag: string | undefined, 
   } catch { return false; }
 }
 
+// R07's applied 0162 contains CRLF only after lines 68, 84 and 208; its recovered
+// bytes and installed objects were independently verified against the LF source.
+const SETTLEMENT_0162_EOL = {
+  tag: "0162_support_settlement_finalization", when: "1793730640483",
+  lf: "133c0cd2bae151c114fbd0c754e9fbd74175410d781951227d29f83a0ac06105",
+  mixed: "618d472f49f9f0052d0b71d9001c3ac1521db973db630eb7fdcb066d85e7785a",
+} as const;
+function accepted0162LineEndingVariant(folder: string, tag: string | undefined, localHash: string, installedHash: string, when: string): boolean {
+  const allowed: readonly string[] = [SETTLEMENT_0162_EOL.lf, SETTLEMENT_0162_EOL.mixed];
+  if (tag !== SETTLEMENT_0162_EOL.tag || when !== SETTLEMENT_0162_EOL.when || !allowed.includes(localHash) || !allowed.includes(installedHash)) return false;
+  try {
+    const bytes=readFileSync(join(folder,`${SETTLEMENT_0162_EOL.tag}.sql`)),normalized=bytes.toString("utf8").replace(/\r\n/g,"\n");
+    if (normalized.includes("\r")) return false;
+    const digest=(value:string|Buffer)=>createHash("sha256").update(value).digest("hex");let line=0;
+    const mixed=normalized.replace(/\n/g,()=>[68,84,208].includes(++line)?"\r\n":"\n");
+    return digest(bytes)===localHash&&digest(normalized)===SETTLEMENT_0162_EOL.lf&&digest(mixed)===SETTLEMENT_0162_EOL.mixed;
+  } catch { return false; }
+}
+
 export const BUSINESS_INITIAL_FOLDER = resolve(__dirname, "../../../migrations/initial/release_0141");
 export const BUSINESS_INITIAL_ROOT = resolve(__dirname, "../../../migrations/initial");
 
@@ -114,7 +133,8 @@ export async function assertBusinessMigrationPrefix(pool: Pick<Pool, "query">, m
   const journal = JSON.parse(readFileSync(join(migrationsFolder,"meta/_journal.json"),"utf8")) as { entries: Array<{tag:string}> };
   for (const [index, row] of history.entries()) {
     const sameTime=row.createdAt === String(local[index]!.folderMillis);
-    if (!sameTime || row.hash !== local[index]!.hash && !accepted0155LineEndingVariant(migrationsFolder,journal.entries[index]?.tag,local[index]!.hash,row.hash,row.createdAt)) {
+    if (!sameTime || row.hash !== local[index]!.hash && !accepted0155LineEndingVariant(migrationsFolder,journal.entries[index]?.tag,local[index]!.hash,row.hash,row.createdAt)
+      && !accepted0162LineEndingVariant(migrationsFolder,journal.entries[index]?.tag,local[index]!.hash,row.hash,row.createdAt)) {
       throw new BusinessMigrationHistoryError("NOT_EXACT_PREFIX", index);
     }
   }

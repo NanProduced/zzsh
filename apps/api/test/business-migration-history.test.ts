@@ -86,3 +86,19 @@ test("only the independently verified 0155 LF/CRLF byte pair is compatible in ei
     }
   } finally { rmSync(dir,{recursive:true}); }
 });
+
+test("only the reconstructed 0162 mixed-ending byte pair is compatible in either direction", async () => {
+  const dir=mkdtempSync(join(tmpdir(),"zzsh-migration-eol-0162-")),tag="0162_support_settlement_finalization",when=1793730640483;
+  const lf="133c0cd2bae151c114fbd0c754e9fbd74175410d781951227d29f83a0ac06105",mixed="618d472f49f9f0052d0b71d9001c3ac1521db973db630eb7fdcb066d85e7785a";
+  try {
+    mkdirSync(join(dir,"meta"));const canonical=readFileSync(resolve("migrations/business",`${tag}.sql`),"utf8").replace(/\r\n/g,"\n");let line=0;
+    const original=canonical.replace(/\n/g,()=>[68,84,208].includes(++line)?"\r\n":"\n");
+    const seal=(name:string,sql:string,time=when)=>{writeFileSync(join(dir,`${name}.sql`),sql);writeFileSync(join(dir,"meta/_journal.json"),JSON.stringify({entries:[{tag:name,when:time,breakpoints:true}]}));};
+    seal(tag,canonical);await fixture([{hash:mixed,createdAt:String(when)}]).prefix(dir);
+    seal(tag,original);await fixture([{hash:lf,createdAt:String(when)}]).prefix(dir);
+    for(const [name,sql,time,installed] of [[tag,canonical,when,"a".repeat(64)],[tag,canonical,when+1,mixed],["different_0162",canonical,when,mixed],
+      [tag,canonical+"\n-- changed",when,mixed],[tag,canonical.replace(/\n/,"\r\n"),when,mixed]] as const){
+      seal(name,sql,time);await assert.rejects(fixture([{hash:installed,createdAt:String(time)}]).prefix(dir),(e:any)=>e.reason==="NOT_EXACT_PREFIX");
+    }
+  } finally { rmSync(dir,{recursive:true}); }
+});
