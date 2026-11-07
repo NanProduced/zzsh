@@ -31,8 +31,10 @@ export async function createPersonalReservation(client:PoolClient,context:OrderU
   const verified=await verifyPersonalConfirmation(client,context,input,token,options);
   const account=(await client.query<PublishingAccount>(`SELECT * FROM zzsh_supply.rental_account WHERE id=$1`,[input.accountId])).rows[0]!;
   const version=(await client.query<ListingVersion>(`SELECT * FROM zzsh_supply.listing_version WHERE id=$1`,[input.versionId])).rows[0]!;
-  const {quote,...personal}=verified.snapshot;
+  const {quote,...remainder}=verified.snapshot;
+  const {settlementPricing,...personal}=remainder as typeof remainder & {settlementPricing?:unknown};
   const snapshot={...quote,quoteKind:"ORDER_CONFIRMATION" as const,orderSnapshotSchema:1,confirmationId:verified.claims.confirmationId,confirmationDigest:verified.claims.quoteDigest,confirmationExpiresAt:verified.claims.expiresAt,listingHash:verified.claims.listingHash,personal,
+    ...(settlementPricing===undefined?{}:{settlementPricing}),
     ...(agreementAcceptance ? { agreementAcceptanceSchema: 1, agreementAcceptance, earlySettlementDisclosure: newEarlySettlementDisclosure() } : {}),
     ...(fullPayoutTermsAcceptance ? { fullPayoutTermsAcceptance } : {})};
   const insertNow=Number((await client.query(`SELECT floor(extract(epoch FROM clock_timestamp()))::text AS now`)).rows[0].now);

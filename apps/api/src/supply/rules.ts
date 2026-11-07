@@ -9,6 +9,7 @@ import { assertDeltaResourceUnit, DELTA_RESOURCE_UNITS, DELTA_ROUNDING_POLICY, n
 import { computeContentHash, humanText, normalizeContentPayload, normalizeTime, withoutContentHash, type ContentDeclaration, type ContentPayloadInput } from "./content-hash";
 import { validateFundingPolicy, validateFundingPolicyDraft } from "./funding-policy";
 import { fullPayoutDraftFields, readFullPayoutTerms, verifyFullPayoutTermsRow } from "./full-payout-terms";
+import { decimalToBigInt, parseNonNegativeDecimal } from "./decimal";
 
 const DECIMAL_PATTERN = /^(0|[1-9]\d*)(?:\.\d{1,8})?$/;
 const CODE_PATTERN = /^[a-z][a-z0-9_:-]{1,63}$/;
@@ -19,6 +20,28 @@ export const validateHaffRule = validateDeltaHaffRule;
 export const parsePriceLines = parseDeltaPriceLines;
 
 type VersionRow = Record<string, unknown>;
+type ExistingPriceLine = { itemId: string; customerTier: string; pricingKind: string; unitQuantity: string | null; buyerUnitAmount: string | null; ownerUnitAmount: string | null; mode: string };
+
+async function assertChangedUnitPricesAtCentPrecision(client: PoolClient, versionId: string, gameId: string, mode: string, lines: readonly DeltaPriceLineInputBody[]) {
+  const scaled = (value: string) => decimalToBigInt(parseNonNegativeDecimal(value, 8, "unit amount"), 8);
+  const extraDigits = (value: string | undefined) => value !== undefined && (value.split(".")[1]?.length ?? 0)>2;
+  if (!lines.some(line => extraDigits(line.buyerUnitAmount) || extraDigits(line.ownerUnitAmount))) return;
+  const columns = `l.item_id AS "itemId",l.customer_tier AS "customerTier",l.pricing_kind AS "pricingKind",l.unit_quantity::text AS "unitQuantity",l.buyer_unit_amount::text AS "buyerUnitAmount",l.owner_unit_amount::text AS "ownerUnitAmount",v.mode`;
+  let prior = (await client.query<ExistingPriceLine>(`/* existing precision in draft */ SELECT ${columns} FROM zzsh_supply.price_line l JOIN zzsh_supply.price_version v ON v.id=l.price_version_id WHERE v.id=$1`, [versionId])).rows;
+  if (!prior.length) prior = (await client.query<ExistingPriceLine>(`/* current precision source for empty draft */ SELECT ${columns} FROM zzsh_supply.price_line l JOIN zzsh_supply.price_version v ON v.id=l.price_version_id WHERE v.id=COALESCE(
+    (SELECT price_version_id FROM zzsh_supply.rule_release WHERE game_id=$1 ORDER BY generation DESC LIMIT 1),
+    (SELECT id FROM zzsh_supply.price_version WHERE game_id=$1 AND status='SEALED' ORDER BY created_at DESC,id DESC LIMIT 1))`, [gameId])).rows;
+  for (const line of lines) {
+    const old = prior.find(row => row.itemId===line.itemId && row.customerTier===(line.customerTier??"STANDARD"));
+    for (const field of ["buyerUnitAmount", "ownerUnitAmount"] as const) {
+      const amount=line[field];
+      if (!extraDigits(amount)) continue;
+      const previous=old?.[field];
+      if (!old || old.mode!==mode || old.pricingKind!==line.pricingKind || old.unitQuantity!==line.unitQuantity
+        || typeof previous!=="string" || scaled(previous)!==scaled(amount!)) throw invalid("新建或修改的物资单价最多两位小数", "lines");
+    }
+  }
+}
 
 export async function listRules(
   client: PoolClient,
@@ -162,6 +185,7 @@ export async function updatePriceDraft(
     haffRule = body.haffRule === null ? null : validateDeltaHaffRule(body.haffRule, mode);
   }
   const lines = body.lines === undefined ? undefined : parseDeltaPriceLines(body.lines, mode);
+  if (lines) await assertChangedUnitPricesAtCentPrecision(client,versionId,String(current.game_id),mode,lines);
   // Check both stored and requested schemas: an old editor must not erase tiers,
   // including when it also attempts to replace or clear the compatibility rule.
   if (lines && ((current.haff_rule as HaffRuleInput | null)?.schema === "haff-ratio-v2" || haffRule?.schema === "haff-ratio-v2")

@@ -1,5 +1,5 @@
 import { canonicalize } from "../supply/content-hash";
-import { decimalToBigInt, formatScaledInteger, parseNonNegativeDecimal } from "../supply/decimal";
+import { decimalToBigInt, divideToScale, formatScaledInteger, parseNonNegativeDecimal } from "../supply/decimal";
 import { conflict, invalid, notFound, sha256Hex } from "../supply/supply-util";
 import { admitLegacyEvidence, planLegacyContinuation, type AmountPlan, type LegacyCommand, type LegacyContinuationEvidence, type LegacyContinuationSource, type LegacyQuantities } from "./legacy-continuation-calc";
 
@@ -34,7 +34,7 @@ export type LegacyEvidenceRow = {
 };
 export type LegacyHeadRow = {
   id: string; orderId: string; revision: string; inputEvidenceId: string; resultEvidenceId: string;
-  stage: number; isSettle: number; command: string; amounts: Record<string, string | null>;
+  stage: number; isSettle: number; command: string; amounts: Record<string, string | null>; refundDueAt?: string | null;
 };
 export type LegacyDutyRow = {
   id: string; orderId: string; continuationVersionId: string | null; kind: LegacyDutyKind; sourceRecordId: string;
@@ -49,9 +49,14 @@ export type LegacyContinuationView = {
   schema: "legacy-continuation.v1"; availability: "KNOWN" | "NOT_IMPORTED" | "ISOLATED";
   revision: string | null; evidenceId: string | null; stage: string | null; isSettle: string | null;
   amounts: Record<string, { cents: string; yuan: string } | null>; quantities: LegacyQuantities | null;
-  capabilities: string[]; commandFingerprints: Record<string, string>; reasons: string[]; duties: Array<{ id: string; kind: LegacyDutyKind; amountCents: string; currency: "CNY"; status: LegacyDutyStatus; maturityAt: string | null; sourceStatus: string | null; revision: string; settledBy: string | null }>;
+  confirmationAmounts?: { ownerNet: { cents: string; yuan: string }; refundNet: { cents: string; yuan: string } } | null;
+  refundDueAt?: string | null;
+  settlementKind?: "EARLY" | "NORMAL" | null; earlyFee?: string | null;
+  capabilities: string[]; commandFingerprints: Record<string, string>; reasons: string[]; duties: Array<{ id: string; kind: LegacyDutyKind; amountCents: string; currency: "CNY"; status: LegacyDutyStatus; maturityAt: string | null; sourceStatus: string | null; revision: string; settledBy: string | null; financeVerified:boolean }>;
   channelState: "UNKNOWN";
 };
+const LEGACY_VISIBLE_REASONS = new Set(["DEPOSIT_SHORT", "RETURN_NEGATIVE", "EVIDENCE_ISOLATED", "MISSING_STORED_SETTLEMENT", "FINANCE_FACT_UNAVAILABLE", "FINANCE_FACT_UNKNOWN", "DEPOSIT_ALREADY_SETTLED", "CONTINUATION_REVISION_CONFLICT", "PLAN_FINGERPRINT_MISMATCH", "DUTY_REVISION_CONFLICT", "STATUS_INVALID", "QUANTITY_INVALID", "PRECISION_UNSUPPORTED", "CONFIRM_POOL_NEGATIVE", "OWNER_NET_NEGATIVE", "WALLET_CREDIT_HISTORY_UNPROVEN", "WALLET_CREDIT_BASIS_UNAVAILABLE"]);
+export function visibleLegacyReason(value: unknown): string | undefined { return typeof value === "string" && LEGACY_VISIBLE_REASONS.has(value) ? value : undefined; }
 
 /** Calc emits exact decimals of variable scale; the persisted contract is integer cents. */
 export function legacyPlanYuanToCents(value: string): string {
@@ -153,25 +158,33 @@ export function projectLegacyCommandReceipt(binding: LegacyOrderBinding, actor: 
         ? Object.fromEntries(Object.entries(amount).filter(([field, v]) => ["cents", "yuan"].includes(field) && typeof v === "string")) : null]));
   }
   const error = source.error;
-  if (error && typeof error === "object" && !Array.isArray(error)) result.error = Object.fromEntries(Object.entries(error).filter(([key, value]) => ["code", "message", "requestId"].includes(key) && typeof value === "string"));
+  if (error && typeof error === "object" && !Array.isArray(error)) result.error = Object.fromEntries(Object.entries(error).filter(([key, value]) => (["code", "message", "requestId"].includes(key) && typeof value === "string") || (key === "reason" && visibleLegacyReason(value) !== undefined)));
   return result;
 }
 export function legacyCapabilities(source: LegacyContinuationSource, role: "renter" | "owner" | "admin" | "other", canOperate: boolean, disposition: LegacyFinanceDisposition): string[] {
   if (role === "other") return [];
   if (role === "admin") {
     if (!canOperate || !["NONE", "FINALIZED_ZERO"].includes(disposition)) return [];
-    return source.isSettle === "0" ? ["hold"] : source.isSettle === "2" ? ["release", "confiscate"] : [];
+    const deposit = source.isSettle === "0" ? ["hold"] : source.isSettle === "2" ? ["release", "confiscate"] : [];
+    return [ ...(source.orderStatus === "3" ? ["preview", "propose"] : []), ...(["8", "9"].includes(source.orderStatus) ? ["confirm", "reject"] : []), ...deposit ];
   }
   if (source.orderStatus === "3") return ["preview", "propose"];
   if (source.orderStatus === (role === "owner" ? "8" : "9")) return ["confirm", "reject"];
   return [];
 }
-export function projectLegacyContinuation(binding: LegacyOrderBinding, actor: LegacyContinuationActor, evidence: LegacyEvidenceRow | null, head: LegacyHeadRow | null, duties: readonly LegacyDutyRow[], canOperate = false, disposition: LegacyFinanceDisposition = "UNKNOWN", canReadCommission = false): LegacyContinuationView {
+function legacyEarlyFee(amounts: Record<string, string | null>): string | null {
+  try {
+    const amount = (name: string) => BigInt(legacyPlanYuanToCents(amounts[name]!));
+    const difference = amount("payMoney") - amount("divide") - amount("expendOrder") - amount("returnOrderMoney");
+    return difference >= 0n ? formatScaledInteger(difference, 2) : null;
+  } catch { return null; }
+}
+export function projectLegacyContinuation(binding: LegacyOrderBinding, actor: LegacyContinuationActor, evidence: LegacyEvidenceRow | null, head: LegacyHeadRow | null, duties: readonly LegacyDutyRow[], canOperate = false, disposition: LegacyFinanceDisposition = "UNKNOWN", canReadCommission = false,canSettle=false): LegacyContinuationView {
   const role = legacyContinuationRole(binding, actor);
   if (role === "other") throw notFound();
   const visibleDuties = actor.realm === "admin" ? duties.filter(d => d.kind !== "COMMISSION" || canReadCommission) : duties.filter(d => d.counterpartyUserId === actor.userId);
   const base = { schema: "legacy-continuation.v1" as const, revision: head?.revision ?? null, evidenceId: evidence?.id ?? null, channelState: "UNKNOWN" as const,
-    duties: visibleDuties.map(d => ({ id: d.id, kind: d.kind, amountCents: d.amountCents, currency: d.currency, status: d.status, maturityAt: d.maturityAt, sourceStatus: d.sourceStatus, revision: d.revision, settledBy: d.settledBy })) };
+    duties: visibleDuties.map(d => ({ id: d.id, kind: d.kind, amountCents: d.amountCents, currency: d.currency, status: d.status, maturityAt: d.maturityAt, sourceStatus: d.sourceStatus, revision: d.revision, settledBy: d.settledBy, financeVerified:d.status==="SETTLED" && d.settledBy==="FINANCE" && disposition!=="UNKNOWN" })) };
   if (!evidence) return { ...base, availability: "NOT_IMPORTED", stage: null, isSettle: null, amounts: {}, quantities: null, capabilities: [], commandFingerprints: {}, reasons: ["NOT_IMPORTED"] };
   const facts = readSealedLegacyFacts(evidence), source = facts.evidence.source;
   const amounts = Object.fromEntries(Object.entries(projectLegacyPartyAmounts(binding, actor, facts.amounts)).map(([key, value]) => {
@@ -180,13 +193,23 @@ export function projectLegacyContinuation(binding: LegacyOrderBinding, actor: Le
   }));
   const reasons = [...facts.evidence.reasons, ...(actor.realm === "admin" && disposition === "UNKNOWN" ? ["FINANCE_FACT_UNAVAILABLE"] : [])];
   const commandFingerprints: Record<string, string> = {};
+  let confirmationAmounts: LegacyContinuationView["confirmationAmounts"] = null;
   const capabilities = (facts.evidence.admission === "PARAMETER_COMPLETE" ? legacyCapabilities(source, role, canOperate, disposition) : []).filter(kind => {
     if (kind === "preview" || kind === "propose") return true;
+    if (role === "admin" && kind === "confirm" && !canSettle) return false;
     const plan = planLegacyContinuation(facts.evidence, { kind: kind as "confirm" | "reject" | "hold" | "release" | "confiscate", caller: { role, legacyUserId: role === "owner" ? binding.legacyOwnerId : role === "renter" ? binding.legacyRenterId : "" } });
     if (!plan.ok) { reasons.push(plan.code); return false; }
+    if (role === "admin" && kind === "confirm") {
+      const owner = plan.amounts.ownerNet, refund = plan.amounts.refundNet;
+      if (typeof owner !== "string" || typeof refund !== "string") return false;
+      const ownerCents = legacyPlanYuanToCents(owner), refundCents = legacyPlanYuanToCents(refund);
+      confirmationAmounts = { ownerNet: { cents: ownerCents, yuan: formatScaledInteger(BigInt(ownerCents), 2) }, refundNet: { cents: refundCents, yuan: formatScaledInteger(BigInt(refundCents), 2) } };
+    }
     commandFingerprints[kind] = plan.fingerprint; return true;
   });
-  return { ...base, availability: facts.evidence.admission === "PARAMETER_COMPLETE" ? "KNOWN" : "ISOLATED", stage: source.orderStatus, isSettle: source.isSettle, amounts, quantities: structuredClone(source.quantities), capabilities, commandFingerprints, reasons };
+  const settlementKind = ["8", "9", "4"].includes(source.orderStatus) ? source.isAdvanceSet === "1" ? "EARLY" : source.isAdvanceSet === "0" ? "NORMAL" : null : null;
+  return { ...base, availability: facts.evidence.admission === "PARAMETER_COMPLETE" ? "KNOWN" : "ISOLATED", stage: source.orderStatus, isSettle: source.isSettle, amounts, quantities: structuredClone(source.quantities), capabilities, commandFingerprints, reasons,
+    settlementKind, ...(role === "renter" && settlementKind === "EARLY" ? { earlyFee: legacyEarlyFee(facts.amounts) } : {}), ...(role === "renter" || role === "admin" ? { refundDueAt: head?.refundDueAt ?? null } : {}), ...(role === "admin" ? { confirmationAmounts } : {}) };
 }
 export type CompletedCommissionTime = { kind: "COMPLETED_AT" | "MATURES_AT"; at: string; evidenceDigest: string };
 export function legacyTimeMicros(value: string): bigint {
@@ -203,11 +226,20 @@ export function legacyCommissionMaturity(time: CompletedCommissionTime, cutoff: 
   if (due < 0n || due > 253402300799999999n) throw invalid("ISOLATED_MATURITY_EVIDENCE_MISSING");
   return { maturityAt: new Date(Number(due / 1000000n) * 1000).toISOString().slice(0, 19) + "." + (due % 1000000n).toString().padStart(6, "0") + "Z", maturedByCutoff: due <= asOf };
 }
-export function previewLegacyContinuation(facts: LegacyEffectiveFacts, binding: LegacyOrderBinding, actor: LegacyContinuationActor, quantities: LegacyQuantities) {
+export function previewLegacyContinuation(facts: LegacyEffectiveFacts, binding: LegacyOrderBinding, actor: LegacyContinuationActor, quantities: LegacyQuantities, onBehalf?: "renter" | "owner") {
   const role = legacyContinuationRole(binding, actor);
-  const plan = planLegacyContinuation(facts.evidence, { kind: "preview", caller: { role, legacyUserId: role === "owner" ? binding.legacyOwnerId : binding.legacyRenterId }, quantities });
+  if (role === "admin" ? !onBehalf : onBehalf !== undefined) throw invalid("STAFF_ROLE_INVALID");
+  const caller = { role, legacyUserId: role === "owner" ? binding.legacyOwnerId : role === "renter" ? binding.legacyRenterId : "", ...(onBehalf ? { onBehalf } : {}) };
+  const plan = planLegacyContinuation(facts.evidence, { kind: "preview", caller, quantities });
   if (!plan.ok) throw conflict(plan.code);
-  const proposal = planLegacyContinuation(facts.evidence, { kind: "propose", caller: { role, legacyUserId: role === "owner" ? binding.legacyOwnerId : binding.legacyRenterId }, quantities });
+  const command = { kind: "propose" as const, caller, quantities };
+  const proposal = planLegacyContinuation(facts.evidence, command);
   if (!proposal.ok) throw conflict(proposal.code);
-  return { previewAmounts: projectLegacyPartyAmounts(binding, actor, plan.amounts), proposalAmounts: projectLegacyPartyAmounts(binding, actor, proposal.amounts), proposalFingerprint: proposal.fingerprint };
+  try { deriveLegacyFacts(facts, proposal, command, "preview", "preview"); }
+  catch (error) { if (error instanceof Error && error.message === "PRECISION_UNSUPPORTED") throw conflict("PRECISION_UNSUPPORTED"); throw error; }
+  const display = (amounts: Record<string, string | null>) => Object.fromEntries(Object.entries(projectLegacyPartyAmounts(binding, actor, amounts))
+    .map(([key, value]) => [key, value === null ? null : formatScaledInteger(divideToScale(parseNonNegativeDecimal(value, 18, "legacy preview"), { value: 1n, scale: 0 }, 2).value, 2)]));
+  return { previewAmounts: display(plan.amounts), proposalAmounts: display(proposal.amounts),
+    proposalFingerprint: proposal.fingerprint, settlementKind: proposal.isAdvanceSet === 1 ? "EARLY" as const : "NORMAL" as const,
+    ...(role === "renter" ? { earlyFee: proposal.isAdvanceSet === 1 ? legacyEarlyFee(proposal.amounts) : null } : {}) };
 }

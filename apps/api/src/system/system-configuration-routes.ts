@@ -6,8 +6,9 @@ import { assertAdminContextInTransaction, readAdminContext } from "../auth/auth-
 import { withTransaction } from "../auth/security-core";
 import { ensureApiV1RequestId } from "../contracts/api-v1";
 import { ALLOWED_IMAGE_MIMES, MAX_MEDIA_BYTES } from "../supply/media";
-import { requireAdminAccess, safely, type SupplyResponse, type SupplyRuntimeOptions } from "../supply/supply-routes";
-import { forbidden, headerValue, invalid, notFound, sendJson, type SupplyNodeRequest } from "../supply/supply-util";
+import { requireAdminAccess, runIdempotentWrite, safely, type SupplyResponse, type SupplyRuntimeOptions } from "../supply/supply-routes";
+import { bodyOf, ensureOnlyFields, forbidden, headerValue, invalid, notFound, sendJson, type SupplyNodeRequest } from "../supply/supply-util";
+import { readSettlementRefundPolicy, updateSettlementRefundPolicy, validateSettlementRefundPolicy, type SettlementRefundPolicyInput } from "../order/settlement-refund-policy";
 
 type StorageCheck = {
   state: "NOT_RUN" | "NO_PUBLIC_SAMPLE" | "PASS" | "FAILED";
@@ -25,16 +26,37 @@ export async function handleSystemConfiguration(
   response.setHeader("Cache-Control", "no-store");
   await safely(response, requestId, async () => {
     const url = new URL(request.originalUrl ?? request.url ?? "", options.apiOrigin);
-    if (request.method !== "GET" || !/^\/api\/(?:v1\/admin|bff\/admin)\/system\/storage(?:\/check)?$/.test(url.pathname)) throw notFound();
+    const policy = /^\/api\/(?:v1\/admin|bff\/admin)\/system\/settlement-refund-policy$/.test(url.pathname);
+    if (!(request.method === "GET" && /^\/api\/(?:v1\/admin|bff\/admin)\/system\/storage(?:\/check)?$/.test(url.pathname))
+      && !(policy && (request.method === "GET" || request.method === "PUT"))) throw notFound();
     if (url.searchParams.size) throw invalid("System configuration does not accept query parameters");
     const origin = headerValue(request.headers.origin);
-    if (origin !== undefined && origin !== options.adminOrigin && origin !== options.apiOrigin || headerValue(request.headers["sec-fetch-site"]) === "cross-site") throw forbidden();
+    if (request.method !== "GET" && origin === undefined
+      || origin !== undefined && origin !== options.adminOrigin && origin !== options.apiOrigin
+      || headerValue(request.headers["sec-fetch-site"]) === "cross-site") throw forbidden();
 
     const context = await readAdminContext(request, options);
     const authorize = async (client: PoolClient) => {
       await assertAdminContextInTransaction(client, context);
       if (!(await requireAdminAccess(client, context.userId)).isBoss) throw forbidden();
     };
+    if (policy) {
+      if (request.method === "GET") {
+        const data = await withTransaction(options.pool, async client => { await authorize(client); return readSettlementRefundPolicy(client); });
+        sendJson(response, 200, data, requestId);
+        return;
+      }
+      const body = bodyOf(request);
+      ensureOnlyFields(body, ["normalDays", "earlyDays", "expectedRevision"]);
+      const input = body as SettlementRefundPolicyInput;
+      validateSettlementRefundPolicy(input);
+      await runIdempotentWrite(options, request, response, requestId,
+        { principalId: context.userId, operation: "order.settlement.refund_policy.update", resourceId: "global" },
+        { realm: "admin", id: context.userId, sessionId: context.sessionId }, input,
+        async client => authorize(client),
+        async client => ({ status: 200, body: await updateSettlementRefundPolicy(client, { id: context.userId, sessionId: context.sessionId }, input, requestId) }));
+      return;
+    }
     const checking = url.pathname.endsWith("/check");
     const sample = await withTransaction(options.pool, async client => {
       await authorize(client);

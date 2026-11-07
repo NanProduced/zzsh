@@ -1,5 +1,6 @@
 import type { Money, PublicListing, PublicQuote, PublicCodeLabel, PublicAvailabilityState, SkinOwnerKind, SkinMediaKind } from "./supply-types.ts";
 import { canonicalResourceCode, resourceItemDisplayName, resourceUnitLabel } from "./listing-filters.ts";
+import { formatReferenceYuan } from "@zzsh/ui/display-money";
 
 export type ResourceLine = {
   itemId: string;
@@ -256,7 +257,9 @@ export function toListingCard(listing: PublicListing): ListingCardData {
   const items = new Map(listing.presentation.items.map((item) => [item.id, item]));
   const haffLines = listing.quote.lines.filter((line) => line.unit === "HAFF_BASE");
   const itemLines = listing.quote.lines.filter((line) => line.unit !== "HAFF_BASE");
-  const resourceLines: ResourceLine[] = listing.quote.lines.map((line) => ({
+  const resourceLines: ResourceLine[] = listing.quote.lines.map((line) => {
+    const unitPrice = formatReferenceYuan(line.buyerUnitAmount.amount);
+    return {
     itemId: line.itemId,
     mediaId: items.get(line.itemId)?.mediaId ?? null,
     code: items.get(line.itemId)?.code ?? null,
@@ -266,8 +269,8 @@ export function toListingCard(listing: PublicListing): ListingCardData {
     unitLabel: resourceUnitLabel(line.unit, items.get(line.itemId)?.code),
     costAmount: line.buyerAmount.amount,
     costLabel: formatMoneyLabel(line.buyerAmount),
-    unitPriceLabel: `¥${line.buyerUnitAmount.amount} / ${line.unitQuantity} ${resourceUnitLabel(line.unit, items.get(line.itemId)?.code)}`,
-  }));
+    unitPriceLabel: unitPrice === null ? null : `${unitPrice} / ${line.unitQuantity} ${resourceUnitLabel(line.unit, items.get(line.itemId)?.code)}`,
+  };});
   const media = projectListingMedia(listing);
   const firstMedia = media.find((m) => m.category !== "PENALTY");
   const conditions = conditionLines(listing.attributes, listing);

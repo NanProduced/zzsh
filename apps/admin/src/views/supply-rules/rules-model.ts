@@ -1,4 +1,5 @@
 import type { CatalogItem, PriceLineRecord, PriceVersionRecord, RulesResponse } from "../../api";
+import { formatReferenceYuan } from "@zzsh/ui/display-money";
 import { unitText } from "../supply-review/model.ts";
 
 /** haff-ratio-v2 shape as returned by the API (read-only view model; the server stays the source of truth). */
@@ -58,6 +59,11 @@ export function unitYuan(value: string | number | null | undefined): string {
   return `¥${cents < 0n ? "-" : ""}${(abs / 100n).toLocaleString("zh-CN")}.${(abs % 100n).toString().padStart(2, "0")}`;
 }
 
+/** Historical sub-cent prices are preserved but never displayed as exact cents. */
+export function referenceUnitYuan(value: string | null | undefined): string {
+  return formatReferenceYuan(value,{grouped:true})??"未配置";
+}
+
 /** 十进制元字符串 → 分（四舍五入），非法返回 null；纯字符串运算不经浮点。 */
 export function yuanCents(value: string | null | undefined): bigint | null {
   const raw = value?.trim();
@@ -74,6 +80,13 @@ export function yuanInput(value: string | null | undefined): string {
   if (!raw || !/^-?\d+(\.\d{1,8})?$/.test(raw)) return value ?? "";
   const [whole, fraction = ""] = raw.split(".");
   return `${whole}.${fraction.replace(/0+$/, "").padEnd(2, "0")}`;
+}
+
+/** Display-only input value; callers retain the unrounded source until it is edited. */
+export function unitPriceInput(value: string | null | undefined): string {
+  if (!value) return "";
+  const cents = yuanCents(value);
+  return cents === null || cents < 0n ? "" : `${cents / 100n}.${(cents % 100n).toString().padStart(2, "0")}`;
 }
 
 export function centsYuan(cents: string | null | undefined): string {
@@ -164,16 +177,15 @@ function appendDiff(rows: RuleDiffRow[], group: string, label: string, before: u
   if (JSON.stringify(before) === JSON.stringify(after)) return;
   if (key === "policyVersion") { rows.push({ group, label: "押金政策", before: "", after: "更新为新版", detail: `版本 ${before ?? "无"} → ${after ?? "无"}` }); return; }
   const cents = /Cents$/.test(key) || /保险箱加价/.test(label), unit = /UnitAmount$/.test(key);
-  const text = (value: unknown) => typeof value === "string" && cents && /^-?\d+$/.test(value) ? centsYuan(value) : typeof value === "string" && unit && /^-?\d+(\.\d+)?$/.test(value) ? exactYuan(value) : value === undefined ? "无" : value === null ? "未配置" : typeof value === "boolean" ? value ? "是" : "否" : typeof value === "object" ? JSON.stringify(value) : String(value);
-  rows.push({ group, label: label || "规则内容", before: text(before), after: text(after) });
+  const text = (value: unknown) => typeof value === "string" && cents && /^-?\d+$/.test(value) ? centsYuan(value) : typeof value === "string" && unit && /^-?\d+(\.\d+)?$/.test(value) ? referenceUnitYuan(value) : value === undefined ? "无" : value === null ? "未配置" : typeof value === "boolean" ? value ? "是" : "否" : typeof value === "object" ? JSON.stringify(value) : String(value);
+  const sameDisplay=unit&&typeof before==="string"&&typeof after==="string"&&yuanCents(before)!==null&&yuanCents(before)===yuanCents(after)&&yuanInput(before)!==yuanInput(after);
+  rows.push({ group, label: label || "规则内容", before: text(before), after: text(after), ...(sameDisplay?{detail:"按分显示的金额相同，但原单价存在不足一分的变化。"}:{}) });
 }
 
-/** 元，至少两位小数；超过两位的有效小数原样保留，不在对比里四舍五入掉差异。 */
-function exactYuan(v: string): string { const [i, d = ""] = v.split("."); const t = d.replace(/0+$/, ""); return t.length > 2 ? `¥${i}.${t}` : unitYuan(v); }
 const KIND: Record<string, string> = { AGENT: "干员", MELEE_TYPE: "近战外观", FIREARM: "枪械" };
 function lineSummary(l: PriceLineRecord): string {
   if (l.pricingKind !== "FIXED_UNIT") return "按哈夫币比例";
-  return `租客 ${l.buyerUnitAmount ? exactYuan(l.buyerUnitAmount) : "未配置"} / 号主 ${l.ownerUnitAmount ? exactYuan(l.ownerUnitAmount) : "未配置"}`;
+  return `租客 ${l.buyerUnitAmount ? referenceUnitYuan(l.buyerUnitAmount) : "未配置"} / 号主 ${l.ownerUnitAmount ? referenceUnitYuan(l.ownerUnitAmount) : "未配置"}`;
 }
 /** 皮肤推荐押金一句话摘要：旧版按分类，新版按类型规则（元）。 */
 export function skinSummary(rec: { schema: string; parameters: unknown } | undefined): string {

@@ -15,6 +15,15 @@ function load(file, overrides = {}) {
   m._compile(ts.transpileModule(fs.readFileSync(m.filename,"utf8"),{compilerOptions:{module:ts.ModuleKind.CommonJS,jsx:ts.JsxEmit.ReactJSX,target:ts.ScriptTarget.ES2022,esModuleInterop:true}}).outputText,m.filename);
   return m.exports;
 }
+test("legacy settlement preview rejects unrounded server amounts",async()=>{
+  let amount="10.01";
+  const client=load("apps/web/src/lib/legacy-continuation-client.ts",{"./order-client.ts":{
+    requestOrderWrite:async()=>({revision:null,inputEvidenceId:"evidence_source",proposalFingerprint:digest,previewAmounts:{refundNet:amount},proposalAmounts:{refundNet:amount}}),
+  }}).legacyContinuationApi;
+  assert.equal((await client.preview(id,quantities)).proposalAmounts.refundNet,"10.01");
+  amount="10.00000000";assert.equal((await client.preview(id,quantities)).proposalAmounts.refundNet,"10.00");
+  amount="10.005";await assert.rejects(client.preview(id,quantities),/预估结果暂不可用/);
+});
 const tick = () => new Promise(resolve=>setImmediate(resolve));
 async function setup(t, api = {}) {
   const browser = new Window({url:"http://fixture.invalid/account"}); Object.assign(globalThis,{window:browser,document:browser.document,HTMLElement:browser.HTMLElement,Node:browser.Node,Event:browser.Event,IS_REACT_ACT_ENVIRONMENT:true});
@@ -24,7 +33,7 @@ async function setup(t, api = {}) {
   const helpers = load("apps/web/src/lib/legacy-continuation-client.ts",{"./order-client.ts":{}});
   const calls = [], client = {read:async()=>view(),preview:async()=>({revision:null,inputEvidenceId:"evidence_source",proposalFingerprint:digest,previewAmounts:{},proposalAmounts:{refundNet:"82.00"}}),write:async(...args)=>{calls.push(args);throw new Error("network uncertain");},receipt:async()=>({state:"UNKNOWN"}),...api};
   const {LegacyContinuationPanel} = load("apps/web/src/components/order/legacy-continuation-panel.tsx",{
-    "@/components/session/user-session-provider":{useUserSession:()=>session},"@/lib/order-client":{orderIntentKey:()=>"ORIGINAL_KEY",OrderRequestError:class extends Error{}},"@/lib/order-intents":intents,"@/lib/legacy-continuation-client":{legacyContinuationApi:client,parseLegacyQuantitiesInput:helpers.parseLegacyQuantitiesInput}
+    "@/components/session/user-session-provider":{useUserSession:()=>session},"@/lib/order-client":{orderIntentKey:()=>"ORIGINAL_KEY",formatOrderTime:x=>x,OrderRequestError:class extends Error{}},"@/lib/order-intents":intents,"@/lib/legacy-continuation-client":{legacyContinuationApi:client,parseLegacyQuantitiesInput:helpers.parseLegacyQuantitiesInput}
   });
   const render = async wrapper => React.act(async()=>{root.render(wrapper??React.createElement(LegacyContinuationPanel,{orderId:id,party:"owner"}));await tick();});
   t.after(async()=>{await React.act(async()=>root.unmount());await browser.happyDOM.abort();});
@@ -37,6 +46,51 @@ test("wire parsing strips private source, refuses inconsistent money and does no
   assert.throws(()=>parseLegacyContinuation(view({amounts:{refundNet:{cents:"8200",yuan:"87.00"}}})));
   assert.throws(()=>parseLegacyQuantitiesInput({expendHaff:"1"}));
   assert.equal(parseLegacyContinuation(view({availability:"NOT_IMPORTED",quantities:null,capabilities:[],amounts:{}})).quantities,null);
+});
+test("legacy in-flight renter sees units, explicit zero items and the disclosed early fee before submitting",async t=>{
+ let submitted;
+ const p=await setup(t,{read:async()=>view({stage:"3",quantities:null,capabilities:["propose"],amounts:{},commandFingerprints:{}}),
+  preview:async(_order,values)=>{submitted=values;return {revision:null,inputEvidenceId:"evidence_source",proposalFingerprint:digest,previewAmounts:{},proposalAmounts:{returnOrderMoney:"94.00"},settlementKind:"EARLY",earlyFee:"5.00"};}});
+ await p.render(React.createElement(p.LegacyContinuationPanel,{orderId:id,party:"renter"}));
+ assert.match(p.host.textContent,/哈夫币消耗（M）/);assert.match(p.host.textContent,/6级子弹（组）/);assert.match(p.host.textContent,/1 组为 60 发/);
+ const inputs=[...p.host.querySelectorAll("input")];assert.equal(inputs[0].value,"");assert(inputs.slice(1).every(item=>item.value==="0"));
+ await React.act(async()=>{Object.getOwnPropertyDescriptor(p.browser.HTMLInputElement.prototype,"value").set.call(inputs[0],"0.10");inputs[0].dispatchEvent(new p.browser.Event("input",{bubbles:true}));await tick();});
+ await p.click("核对结算结果");assert.equal(submitted.expendHaff,"0.10");assert.equal(submitted.bullet,"0");
+ assert.match(p.host.textContent,/提前结算费用 ¥5\.00/);assert.match(p.host.textContent,/已计入下方退款金额/);assert.match(p.host.textContent,/94\.00/);
+});
+test("an existing early proposal explains its status without inventing a missing fee",async t=>{
+ const p=await setup(t,{read:async()=>view({settlementKind:"EARLY",earlyFee:null})});await p.render();
+ assert.match(p.host.textContent,/此方案属于提前结算/);assert.match(p.host.textContent,/详情可联系客服核对/);assert.doesNotMatch(p.host.textContent,/提前结算费用 ¥0/);
+});
+test("renter sees the earliest refund handling time without mistaking it for arrival",async t=>{
+ const duty={id:"refund",kind:"RENTER_REFUND",amountCents:"8200",status:"PENDING",settledBy:null};
+ const p=await setup(t,{read:async()=>view({stage:"4",capabilities:[],duties:[duty],refundDueAt:"2026-11-14T08:00:00Z"})});
+ await p.render(React.createElement(p.LegacyContinuationPanel,{orderId:id,party:"renter"}));
+ assert.match(p.host.textContent,/最早可在 2026-11-14T08:00:00Z 后处理/);assert.match(p.host.textContent,/到账以实际退款进度为准/);
+ p.client.read=async()=>view({stage:"4",capabilities:[],duties:[duty],refundDueAt:null});await p.click("刷新");assert.match(p.host.textContent,/退款处理时间待核/);
+ await p.render(React.createElement(p.LegacyContinuationPanel,{orderId:id,party:"owner"}));assert.doesNotMatch(p.host.textContent,/最早可在/);
+});
+test('renter is not told a booked refund liability has arrived',async t=>{
+ const duty={id:'refund',kind:'RENTER_REFUND',amountCents:'8200',status:'SETTLED',settledBy:'FINANCE'};
+ const p=await setup(t,{read:async()=>view({stage:'4',capabilities:[],duties:[duty]})});
+ await p.render(React.createElement(p.LegacyContinuationPanel,{orderId:id,party:'renter'}));
+ assert.match(p.host.textContent,/退款状态待核对/);assert.doesNotMatch(p.host.textContent,/退款成功|已到账/);
+ p.client.read=async()=>view({stage:'4',capabilities:[],duties:[{...duty,refundProgress:'CHANNEL_SUCCEEDED'}]});
+ await p.click('刷新');assert.match(p.host.textContent,/渠道已确认退款/);assert.doesNotMatch(p.host.textContent,/银行已到账/);
+ p.client.read=async()=>view({stage:'4',capabilities:[],duties:[{...duty,refundProgress:'REVIEW_REQUIRED'}]});
+ await p.click('刷新');assert.match(p.host.textContent,/退款状态待核对/);
+ p.client.read=async()=>view({stage:'4',capabilities:[],duties:[{...duty,amountCents:'0',refundProgress:'NO_REFUND_DUE'}]});
+ await p.click('刷新');assert.match(p.host.textContent,/无需退款/);assert.doesNotMatch(p.host.textContent,/旧退款已抵扣/);
+});
+test("owner distinguishes a credited platform balance from income still awaiting review",async t=>{
+ const duty={id:"owner-duty",kind:"OWNER_CREDIT",amountCents:"1234",status:"SETTLED",settledBy:"FINANCE",financeVerified:true};
+ const p=await setup(t,{read:async()=>view({stage:"4",capabilities:[],duties:[duty]})});
+ await p.render(React.createElement(p.LegacyContinuationPanel,{orderId:id,party:"owner"}));
+ assert.match(p.host.textContent,/出租收益/);assert.match(p.host.textContent,/已入平台余额/);
+ p.client.read=async()=>view({stage:"4",capabilities:[],duties:[{...duty,financeVerified:false}]});
+ await p.click("刷新");assert.match(p.host.textContent,/账目待核对/);assert.doesNotMatch(p.host.textContent,/已入平台余额/);
+ p.client.read=async()=>view({stage:"4",capabilities:[],duties:[{...duty,status:"PENDING",settledBy:null}]});
+ await p.click("刷新");assert.match(p.host.textContent,/待核对/);assert.doesNotMatch(p.host.textContent,/已入平台余额/);
 });
 test("original body/key is retained before POST, uncertain result reads receipt and retries only original bytes",async t=>{
   const p=await setup(t);await p.render();await p.click("确认结算方案");await p.click("确认提交");

@@ -98,6 +98,31 @@
 
 合成回归测试可以使用已登记、事先批准的长期测试范围，不默认每次执行都设计一份单次审批包。保留历史/资金验收资源、真实渠道或受控维护写仍按具体任务授权。已消费的单次许可不会因本规范自动恢复。
 
+旧单退款等待期的隔离 PG 守卫验证可运行 `npm run test:legacy-refund-wait:synthetic -w @zzsh/api`；须提供 `LEGACY_REFUND_SYNTH_OPT_IN=1`、`LEGACY_REFUND_SYNTH_OID` 和 `LEGACY_REFUND_SYNTH_SYSTEM_ID`，目标库名、地址和标记由测试严格核对。该测试仅在独立合成库内回滚：fixture 种子绕过触发器，实际等待期守卫和锁使用正常触发器；不证明完整 HTTP、真实迁移数据或渠道退款。
+
+新建/修改单价精度可运行 `npm run test:price-precision:synthetic -w @zzsh/api`，只连接同一独立合成库，须提供 `PRICE_PRECISION_SYNTH_OPT_IN=1`、`PRICE_PRECISION_SYNTH_OID` 和 `PRICE_PRECISION_SYNTH_SYSTEM_ID`。实际价格写入和数据库约束在正常触发器下执行并回滚；测试不触碰已迁移业务库。
+
+客服取消待付款单可运行 `npm run test:support-unpaid:synthetic -w @zzsh/api`；必须使用专用合成库 `zzsh_support_unpaid_synth`，提供 `SUPPORT_UNPAID_SYNTH_OPT_IN=1`、`SUPPORT_UNPAID_SYNTH_OID` 和 `SUPPORT_UNPAID_SYNTH_SYSTEM_ID`，并匹配测试内的 marker 与地址。该测试会提交合成夹具和审计，使用真实 PG 行锁模拟付款请求并发；身份及权限为替身，不能作为真实 HTTP、权限或渠道验收。
+
+皮肤分类退役与退款等待期 ACL 联合验证使用 `npm run test:skin-refund-acl:synthetic -w @zzsh/api`；只允许既有独立合成库，须提供 `SKIN_ACL_SYNTH_OPT_IN=1`、`SKIN_ACL_SYNTH_OID`、`SKIN_ACL_SYNTH_SYSTEM_ID` 和 `SKIN_ACL_0159_SHA256`，并把待测 0159 文件以只读方式挂载到 `/proof/0159.sql`。角色、DDL 和授权均在事务内回滚；不能代替真实迁移器及业务库升级验收。
+
+客服旧单续办授权可运行 `npm run test:support-legacy-permission:synthetic -w @zzsh/api`，仅允许独立合成库，须提供 `SUPPORT_LEGACY_SYNTH_OPT_IN=1`、`SUPPORT_LEGACY_SYNTH_OID` 和 `SUPPORT_LEGACY_SYNTH_SYSTEM_ID`。合成管理员、预设授权与个人 DENY 验证均在单事务回滚；游戏范围和真实会话需另行验证。
+
+旧单退款原付款来源读取可运行 `npm run test:legacy-refund-source:synthetic -w @zzsh/api`，仅允许独立合成库，须提供 `LEGACY_REVIEW_SOURCE_SYNTH_OPT_IN=1`、`LEGACY_REVIEW_SOURCE_SYNTH_OID` 和 `LEGACY_REVIEW_SOURCE_SYNTH_SYSTEM_ID`。来源读取、核对审计和原号锁等待使用真实 PostgreSQL；责任解析、权限、商户准入及新单数据为替身，不代表实际旧单退款或渠道验收。
+
+新收款与旧单原号碰撞守卫可运行 `npm run test:legacy-payment-guard:synthetic -w @zzsh/api`，须提供 `LEGACY_PAYMENT_GUARD_SYNTH_OPT_IN=1`、`LEGACY_PAYMENT_GUARD_SYNTH_OID` 和 `LEGACY_PAYMENT_GUARD_SYNTH_SYSTEM_ID`。测试校验合成库身份后执行数据库守卫及非 owner 权限验证，并回滚所有夹具、角色和 DDL；不使用真实订单或渠道。
+
+旧单收益与佣金账本守卫可运行 `npm run test:legacy-owner-finance:synthetic -w @zzsh/api`，须提供 `LEGACY_OWNER_SYNTH_OPT_IN=1`、`LEGACY_OWNER_SYNTH_OID` 和 `LEGACY_OWNER_SYNTH_SYSTEM_ID`。合成夹具绕过导入触发器，账本守卫、余额版本和重复入账拒绝在 PostgreSQL 执行并回滚；不证明真实历史数据或渠道到账。
+
+旧单双方及客服提议、确认与收益入账可运行 `npm run test:legacy-completion:synthetic -w @zzsh/api`，须提供 `LEGACY_COMPLETION_SYNTH_OPT_IN=1`、`LEGACY_COMPLETION_SYNTH_OID` 和 `LEGACY_COMPLETION_SYNTH_SYSTEM_ID`。该测试使用合成来源，校验实际授权、确认后号主自动入账、佣金到期入账、历史退款核销、来源待核回退、数据库约束和重复入账防护，并在单事务回滚。佣金到期通过合成夹具调整时间模拟；退款核对的商户准入为替身，不包含渠道发送、真实到账或浏览器验收。
+
+旧在途佣金的确认版本关联可运行 `npm run test:legacy-commission-link:synthetic -w @zzsh/api`，须提供 `LEGACY_COMMISSION_LINK_SYNTH_OPT_IN=1`、`LEGACY_COMMISSION_LINK_SYNTH_OID` 和 `LEGACY_COMMISSION_LINK_SYNTH_SYSTEM_ID`；真实约束和运行角色权限在隔离库事务内验证并回滚。
+
+旧在途佣金任务分页可运行 `npm run test:legacy-commission-page:synthetic -w @zzsh/api`，须提供 `LEGACY_DUE_PAGE_SYNTH_OPT_IN=1`、`LEGACY_DUE_PAGE_SYNTH_OID` 和 `LEGACY_DUE_PAGE_SYNTH_SYSTEM_ID`，并使用单独的 `zzsh_legacy_due_synth` 合成库。该测试提交合成夹具以验证真实分页和事务，记账函数使用替身；用后须清理该专用库。
+
+待核退款的查单租约守卫可运行 `npm run test:refund-review-query:synthetic -w @zzsh/api`，须提供 `REFUND_REVIEW_SYNTH_OPT_IN=1`、`REFUND_REVIEW_SYNTH_OID` 和 `REFUND_REVIEW_SYNTH_SYSTEM_ID`。测试在临时表运行真实退款更新守卫并回滚，不调用渠道、不验证真实权限或退款终态。
+
+
 这里的批准可由原任务或资源使用约定一次覆盖，无需每轮重复申请；仅登记资源名称不等于获准重置或执行任意写入。隔离也不等于授权。退役守卫前，在原变更说明中简述“原风险→现有替代→拒绝证据”：资源身份、持续有效的锁/租约（若原合同要求）、权限、越界写和未知责任要有等效保护。标准进程工具不自动提供这些边界；GET也可能含ensure写，不能只凭HTTP方法认定只读。
 
 ## 5. 生命周期、失败与重试

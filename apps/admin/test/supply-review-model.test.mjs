@@ -50,7 +50,7 @@ test("owner review: materials exclude haff, show sixty-round groups and round on
   const before = JSON.stringify(v), rows = resourceBillingRows(v);
   assert.deepEqual(rows.map(row => row.itemId), ["six", "awm"]);
   assert.equal(rows[0].quantity, "5"); assert.equal(rows[0].unit, "组（60发）"); assert.equal(rows[0].unitQuantity, "1");
-  assert.equal(rows[0].unitAmount, "10.00"); assert.equal(rows[1].unitAmount, "1.11"); assert.equal(rows[1].amount, "67.10");
+  assert.equal(rows[0].unitPriceLabel, "¥10.00"); assert.equal(rows[1].unitPriceLabel, "约¥1.11"); assert.equal(rows[1].amount, "67.10");
   v.declaration.inventory[1].quantity = "61"; v.quote.lines[1].quantity = "61";
   assert.equal(resourceBillingRows(v)[0].quantity, "1组余1发");
   v.declaration.inventory[1].quantity = "300"; v.quote.lines[1].quantity = "300";
@@ -101,7 +101,7 @@ test("one resource row retains zero, unknown, free, quote-only and quantity mism
   };
   const before = JSON.stringify(version), rows = resourceBillingRows(version);
   assert.deepEqual(rows.map(row => row.zero), [true, false, false, false, false]);
-  assert.equal(rows[1].amount, "0.00"); assert.equal(rows[1].unitAmount, "0.00");
+  assert.equal(rows[1].amount, "0.00"); assert.equal(rows[1].unitPriceLabel, "¥0.00");
   assert.equal(rows[2].quantity, "数量未知"); assert.equal(rows[2].amount, null);
   assert.match(rows[3].quantityNote, /报价数量 3 发/); assert.equal(rows[3].amount, "1.50");
   assert.equal(rows[4].quantityNote, "数量来自本版报价"); assert.equal(rows[4].name, "名称待核");

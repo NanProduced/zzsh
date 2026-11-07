@@ -62,6 +62,7 @@ export function queryOutcomeText(r: QueryResult | null, status?: number, expecte
   if (status === 202 || r.outcome.kind === "UNKNOWN") return "已提交查询，结果未知；请稍后刷新本地记录，不要重复发起退款";
   if (r.outcome.kind === "SKIPPED") return `未发起渠道查询：${skipText[r.outcome.reason ?? ""] ?? "原因未知，需按原单核对"}`;
   if (r.outcome.kind === "NOT_DISPATCHED") return "尚未派发，无可补查的原单";
+  if (r.operation === "REFUND_QUERY" && r.outcome.event === "REVIEW") return "已取得查询记录，退款仍需核对；请保留原退款号。";
   return `已取得渠道观察（${r.outcome.event ?? "?"}）；银行到账仍未记录`;
 }
 function validQueryResult(r: QueryResult | null, expected?: QueryBinding): r is QueryResult {
@@ -96,6 +97,7 @@ function NativeRefundForm({ orderId, canWrite, basis, binding, onAttentionChange
     if(!canWrite||busy||storageBlocked)return;
     const amountCents = parseYuanToCents(amount);
     if (amountCents === null || !CENTS.test(amountCents)) { setNote(`请输入大于 0 且在允许范围内的退款金额。${yuanInputHint(basis?.refundPayableCents ? formatCentsToYuan(basis.refundPayableCents) : null)}`); return; }
+    if (pending === null && reason.trim().length < 3) { setNote("请填写退款原因，至少 3 个字。"); return; }
     if (pending === null && closedNew) { setNote(`不能发起普通退款：${basis!.reason}`); return; }
     if (pending === null && basis?.eligible && !confirmed) { setNote("请先核对并确认原单过账责任、到期与申请额"); return; }
     if (pending === null && basis?.refundPayableCents && BigInt(amountCents) > BigInt(basis.refundPayableCents)) { setNote("申请额超过已核应退责任"); return; }
@@ -121,9 +123,10 @@ function NativeRefundForm({ orderId, canWrite, basis, binding, onAttentionChange
       if (!unknown && !recovering) { try { clearSaved(orderId,binding,key);setPending(null); } catch { setStorageBlocked(true); } }
     } finally { setBusy(false); }
   };
-  const query = async (intentId: string) => {
+  const query = async (intentId: string, requiresReview: boolean) => {
     setBusy(true);
-    try { const r = await adminRequest<QueryResult>(`/joinpay/refunds/${encodeURIComponent(intentId)}/query-only`, {}, "POST"); setNote(queryOutcomeText(r, undefined, { operation: "REFUND_QUERY", objectId: intentId })); await load(); }
+    try { const r = await adminRequest<QueryResult>(`/joinpay/refunds/${encodeURIComponent(intentId)}/query-only`, {}, "POST"); const expected = { operation: "REFUND_QUERY" as const, objectId: intentId };
+      setNote(requiresReview && validQueryResult(r, expected) && r.outcome.kind === "OBSERVED" ? "查询记录已更新，退款仍需核对；请保留原退款号。" : queryOutcomeText(r, undefined, expected)); await load(); }
     catch (e) { setNote(friendlyError(e)); } finally { setBusy(false); }
   };
   return <div className="oc-native-refund mt-3 space-y-2 text-sm" data-native-refund>
@@ -132,7 +135,7 @@ function NativeRefundForm({ orderId, canWrite, basis, binding, onAttentionChange
       : items === undefined ? <Button size="sm" variant="secondary" onClick={() => void load()}>读取退款申请</Button> : items === null ? <p className="oc-fact-note">退款申请读取不可用；不能据此认定没有退款。</p>
       : items.length ? <ul className="space-y-1">{items.map(i => <li key={i.intentId}><span>{i.refundOrderNo} · 申请 {cents(i.amountCents)} · 本地状态 {i.state}{i.requiresReview ? " · 需复核" : ""}</span>
         <small className="ml-2 text-xs text-muted-foreground">原责任 {cents(i.postingResponsibility.frozenCents)} · 已分配 {cents(i.postingResponsibility.allocatedCents)} · 尚未分配责任 {cents(i.postingResponsibility.remainingCents)} · 预算 {i.budgetDisposition}{i.latestObservation ? ` · 最近渠道观察 ${i.latestObservation.event}` : ""} · 银行到账未记录</small>
-        {canWrite ? <Button size="sm" variant="secondary" disabled={busy} onClick={() => void query(i.intentId)}>按原号补查</Button> : null}</li>)}</ul>
+        {canWrite ? <Button size="sm" variant="secondary" disabled={busy} onClick={() => void query(i.intentId, i.requiresReview)}>按原号补查</Button> : null}</li>)}</ul>
       : <p className="oc-fact-note">本单暂无退款申请。</p>}
     {canWrite && basis ? <p className="oc-fact-note" data-refund-basis={basis.eligible ? "eligible" : "closed"}>原单 {orderId} · 过账 {basis.postingRef ?? "未知"} · 已核应退责任 {cents(basis.refundPayableCents)} · 责任到期 {basis.refundDueAt ?? "未知"} · 预算以申请回执为准{basis.eligible ? "" : ` · 普通退款关闭：${basis.reason}`} · 异常退款不在此开放</p> : null}
     {canWrite && (!closedNew || pending) ? <form className="flex flex-wrap items-end gap-2" onSubmit={e => { e.preventDefault(); void submit(); }}>
@@ -146,7 +149,7 @@ function NativeRefundForm({ orderId, canWrite, basis, binding, onAttentionChange
 }
 
 type WorkerOne = { configured: boolean; running: boolean; failureCode: string | null; failurePhase: string | null; lastSuccessfulQueryAt: string | null };
-type WorkerStatus = { refund: WorkerOne; payout: WorkerOne; collection: WorkerOne };
+type WorkerStatus = { refund: WorkerOne; legacyRefund?:WorkerOne; payout: WorkerOne; collection: WorkerOne };
 type AccountSummary = { integration: string; knowledge: string; latestVerifiedSnapshot: Record<string, unknown> | null };
 const workerText = (w: WorkerOne) => !w.configured ? "未装配" : `${w.running ? "运行中" : "未运行"}${w.failureCode ? ` · 最近失败 ${w.failureCode}${w.failurePhase ? `/${w.failurePhase}` : ""}` : ""} · 最近成功查询时间未提供`;
 const accountText = (a: AccountSummary | undefined) => !a ? "未读取" : a.integration !== "INTEGRATED" ? "未接入" : a.knowledge === "KNOWN" ? "已取得渠道余额快照（以渠道为准）" : "余额未记录";
@@ -248,7 +251,7 @@ export function AdminJoinpayOpsPanel({ canRead, canWithdrawalQuery = false }: { 
   };
   return <section className="finance-joinpay-ops space-y-3 text-sm" data-joinpay-ops>
     {workers === undefined ? <Button size="sm" variant="secondary" onClick={() => void readWorkers()}>读取补查任务状态</Button> : workers === null ? <p>补查任务状态不可用</p>
-      : <ul className="text-xs space-y-0.5 text-muted-foreground"><li>退款补查：{workerText(workers.refund)}</li><li>提现补查：{workerText(workers.payout)}</li><li>收款补查：{workerText(workers.collection)}</li></ul>}
+      : <ul className="text-xs space-y-0.5 text-muted-foreground"><li>退款补查：{workerText(workers.refund)}</li>{workers.legacyRefund?<li>旧单退款补查：{workerText(workers.legacyRefund)}</li>:null}<li>提现补查：{workerText(workers.payout)}</li><li>收款补查：{workerText(workers.collection)}</li></ul>}
     <div className="flex flex-wrap items-end gap-3" role="group" aria-label="商户账户摘要读取">
       <Field label="商户标识" className="max-w-xs"><Input aria-label="商户标识" value={merchant} onChange={e => { resetMerchant(); setMerchant(e.target.value.trim()); }} placeholder="输入平台登记的商户标识" /></Field>
       <Button size="sm" type="button" onClick={() => void lookup()}>读取账户摘要</Button>

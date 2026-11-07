@@ -1,6 +1,11 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { createHmac } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { createRequire } from "node:module";
+import { resolve } from "node:path";
+import { runInNewContext } from "node:vm";
+import { ModuleKind, ScriptTarget, transpileModule } from "typescript";
 import { signConfirmation, verifyConfirmation } from "../src/order/confirmation-token";
 import { parseMembershipChange, membershipProjection, RENTAL_MEMBERSHIP_BENEFIT_POLICY } from "../src/auth/rental-membership";
 import { confirmationInput } from "../src/order/personal-confirmation";
@@ -59,11 +64,11 @@ import { fundingPolicyFixture } from "./funding-authority-fixtures";
 import { evaluatePublication } from "../src/supply/publishing";
 import { withIdempotency } from "../src/supply/supply-util";
 
-function personalRefsFixture(v2=true) {
+function personalRefsFixture(v2=true, mode: "PERCENT" | "SPREAD" = "PERCENT") {
   const context={userId:"renter",sessionId:"session-1"},input={accountId:"account-1",versionId:"version-1",releaseId:"release-1"};
-  const haffRule={schema:"haff-ratio-v1" as const,baseBySafeBox:{a:"40"},vitalityDeltaByLevel:{6:"0"},bearDeltaByLevel:{6:"0"},dailyDeltaByTermOption:{d:"0"},options:{s:{delta:"0",enabled:true}}};
+  const haffRule={schema:"haff-ratio-v1" as const,baseBySafeBox:{a:"40"},vitalityDeltaByLevel:{6:"0"},bearDeltaByLevel:{6:"0"},dailyDeltaByTermOption:{d:"0"},options:{s:{delta:"0",enabled:true}},...(mode==="SPREAD"?{spreadDelta:"5"}:{})};
   const term={code:"d",dailyConsumption:"10000000",durationRounding:"CEIL_DAY" as const};
-  const computed=computeQuote({priceVersionId:"price-1",mode:"PERCENT",commissionRate:"0.2",roundingPolicy:"HALF_UP_CENT_V1",haffRule,lines:[{itemId:"haff",quantity:"60000000",pricingKind:"HAFF_RATIO",customerTier:"STANDARD"}],conditions:{safeBoxCode:"a",vitLevel:6,bearLevel:6,termOptionCode:"d",pricingOptionCode:"s"},termOption:term,deposits:{tenantDepositCents:"30000",publisherBailRequirementCents:"0"}});assert(computed.quotable);computed.quote.ruleReleaseId=input.releaseId;
+  const computed=computeQuote({priceVersionId:"price-1",mode,...(mode==="PERCENT"?{commissionRate:"0.2"}:{}),roundingPolicy:"HALF_UP_CENT_V1",haffRule,lines:[{itemId:"haff",quantity:"60000000",pricingKind:"HAFF_RATIO",customerTier:"STANDARD"}],conditions:{safeBoxCode:"a",vitLevel:6,bearLevel:6,termOptionCode:"d",pricingOptionCode:"s"},termOption:term,deposits:{tenantDepositCents:"30000",publisherBailRequirementCents:"0"}});assert(computed.quotable);computed.quote.ruleReleaseId=input.releaseId;
   const payload:ContentPayloadInput={schemaVersion:1,accountId:input.accountId,gameId:"game-1",ruleRefs:{releaseId:input.releaseId,priceVersionId:"price-1",termVersionId:"term-1",agreementVersionId:"agreement-1",agreementDigest:"d".repeat(64),...(v2?{catalogRevision:"93"}:{})},declaration:{title:"Offline",description:null,attributes:{safe_box_code:"a",vit_level:6,bear_level:6,...(v2?{full_payout_declaration:{schema:"full-payout-declaration-v1",selected:false}}:{})},inventory:[{itemId:"haff",quantity:"60000000"}],skins:[],entitlements:[],termOptionCode:"d",pricingOptionCode:"s",mediaBindings:[{assetId:"media-1",byteHash:"c".repeat(64),purpose:"ACCOUNT_DISPLAY",position:0}]},quoteValues:computed.quote as unknown as Record<string,unknown>};
   const account={id:input.accountId,owner_user_id:"owner",game_id:"game-1",current_version_id:input.versionId,lifecycle:"ACTIVE",legacy_hold:"NONE"};
   const version={id:input.versionId,account_id:input.accountId,origin:"NATIVE",review_state:"PUBLISHED",rule_release_id:input.releaseId,content_hash:computeContentHash(payload),payload,attributes:payload.declaration.attributes};
@@ -89,7 +94,7 @@ function personalRefsFixture(v2=true) {
     else if(sql.includes('/* current-trade-resources */'))rows=[{id:'haff',code:'haff_base',unit:'HAFF_BASE',enabled:true}];
     else if(sql.includes('zzsh_supply.game'))rows=[{enabled:true,current_release_id:input.releaseId,catalog_revision:"93"}];
     else if(sql.includes('user_rental_membership'))rows=[{tier:"STANDARD",version:"1",sourceRef:"registration:v1",updatedBy:null}];
-    else if(sql.includes('SELECT p.id,p.status'))rows=[{id:"price-1",status:"SEALED",mode:"PERCENT",haff_rule:haffRule,commission_rate:"0.2",rounding_policy:"HALF_UP_CENT_V1",term_version_id:"term-1"}];
+    else if(sql.includes('SELECT p.id,p.status'))rows=[{id:"price-1",status:"SEALED",mode,haff_rule:haffRule,commission_rate:mode==="PERCENT"?"0.2":null,rounding_policy:"HALF_UP_CENT_V1",term_version_id:"term-1"}];
     else if(sql.includes('FROM zzsh_supply.price_line'))rows=[{item_id:"haff",pricing_kind:"HAFF_RATIO",unit_quantity:null,buyer_unit_amount:null,owner_unit_amount:null}];
     else if(sql.includes('FROM zzsh_supply.term_option'))rows=[term];
     else if(sql.includes('extract(epoch'))rows=[{now:"1000"}];
@@ -99,6 +104,47 @@ function personalRefsFixture(v2=true) {
   const options={key,gate:async()=>({publisherBail:"NOT_REQUIRED" as const,occupancy:"FREE" as const,reference:v2?`policy:price-1:fixture:trb3b1:${runId}:funding-v1:NOT_REQUIRED`:"fixture"}),fundingReader:v2?controlled:legacy};
   const rehash=()=>{version.content_hash=computeContentHash(payload);allowed.get(account.id)!.listingHash=version.content_hash;};return{client,context,input,options,payload,version,account,rehash,haffRule,term};
 }
+
+test("a non-growth spread quote freezes its own price basis for later actual consumption", async () => {
+  const f = personalRefsFixture(true, "SPREAD");
+  const rebuilt = await rebuildPersonalConfirmation(f.client, f.context, f.input, f.options);
+  assert.ok("settlementPricing" in rebuilt.snapshot && rebuilt.snapshot.settlementPricing);
+  const pricing = rebuilt.snapshot.settlementPricing;
+  assert.equal(pricing.payableRatio, "1");
+  assert.equal(pricing.haff.buyerNumerator, rebuilt.snapshot.quote.pricingInputs.exactRatios[0]!.buyerNumerator);
+  const issued = await issuePersonalConfirmation(f.client, f.context, f.input, f.options);
+  const verified = await verifyPersonalConfirmation(f.client, f.context, f.input, issued.confirmationToken, f.options);
+  assert.deepEqual(verified.snapshot, rebuilt.snapshot);
+  let inserted: Record<string, any> | undefined;
+  const transport = f.client as unknown as { query: (sql: string, values?: unknown[]) => Promise<unknown> }, query = transport.query.bind(transport);
+  transport.query = async (sql, values) => {
+    if (sql.startsWith("INSERT INTO zzsh_order.rental_order")) { inserted = JSON.parse(values![12] as string); throw Error("OFFLINE_INSERT_CAPTURED"); }
+    return query(sql, values);
+  };
+  await assert.rejects(() => createPersonalReservation(f.client, f.context, issued.confirmationToken, { ...f.options, holdSeconds: 600 }, "offline-request"), /OFFLINE_INSERT_CAPTURED/);
+  assert.deepEqual(inserted!.settlementPricing, pricing);
+  assert.equal(inserted!.confirmationDigest, verified.claims.quoteDigest);
+  const source = readFileSync(resolve(__dirname, "../../src/order/settlement-record.ts"), "utf8"), exports: Record<string, any> = {};
+  runInNewContext(transpileModule(source + "\nexport const testBasis = basisOrReasons;", { compilerOptions: { module: ModuleKind.CommonJS, target: ScriptTarget.ES2022 } }).outputText,
+    { exports, require: createRequire(resolve(__dirname, "../src/order/settlement-record.js")) });
+  const resource = rebuilt.snapshot.quote.resourceTotal.amount, captured = (BigInt(resource.replace(".", "")) + 30000n).toString();
+  const basis = exports.testBasis({ id: "order", renterUserId: "renter", ownerUserId: "owner", accountId: f.account.id, listingVersionId: f.version.id,
+    ruleReleaseId: f.input.releaseId, contentHash: f.version.content_hash, depositCents: "30000", quote: inserted },
+    { id: "payment", amountCents: captured, currency: "CNY" }, [{ itemId: "haff", quantity: "60000000" }]);
+  assert.ok(basis.basis, JSON.stringify(basis.reasons));
+  assert.equal(basis.basis.settlementPricing.payableRatio, "1");
+});
+
+test("a new percent quote also freezes its original price basis for actual consumption", async () => {
+  const f = personalRefsFixture(true, "PERCENT");
+  const rebuilt = await rebuildPersonalConfirmation(f.client, f.context, f.input, f.options);
+  assert.ok(rebuilt.snapshot.settlementPricing);
+  assert.equal(rebuilt.snapshot.settlementPricing.schema, "settlement-pricing-v2");
+  assert.equal(rebuilt.snapshot.settlementPricing.payableRatio, "1");
+  const issued = await issuePersonalConfirmation(f.client, f.context, f.input, f.options);
+  const verified = await verifyPersonalConfirmation(f.client, f.context, f.input, issued.confirmationToken, f.options);
+  assert.deepEqual(verified.snapshot, rebuilt.snapshot);
+});
 
 test("v2 five rule refs are signed and verified while catalog and listing hash stay intact; v1 stays compatible",async()=>{
   for(const v2 of [true,false]){const f=personalRefsFixture(v2),original=structuredClone(f.payload),hash=f.version.content_hash;

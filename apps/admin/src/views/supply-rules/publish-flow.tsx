@@ -8,7 +8,7 @@ import { Badge } from "../../components/ui/badge";
 import { Button } from "../../components/ui/button";
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "../../components/ui/sheet";
 import { draftCommand, RULES_RELEASE_OPERATION, type useRulesWrite } from "./rules-write";
-import { centsYuan, safeBoxLabel, skinSummary, unitYuan } from "./rules-model";
+import { centsYuan, referenceUnitYuan, safeBoxLabel, skinSummary, yuanCents, yuanInput } from "./rules-model";
 import { sourcePriceVersion } from "./price-draft";
 import { sealChecks } from "./step0-editors";
 
@@ -97,8 +97,12 @@ export function priceDiff(rules: RulesResponse, target: PriceVersionRecord | und
   if (targetLines.length) for (const l of targetLines) {
     const c = std(live?.id).find(x => x.itemId === l.itemId);
     const name = rules.items.find(i => i.id === l.itemId)?.name ?? "物资";
-    if ((c?.buyerUnitAmount ?? "") !== (l.buyerUnitAmount ?? "") && l.pricingKind === "FIXED_UNIT") rows.push({ label: `${name} · 租客价`, before: c?.buyerUnitAmount ? unitYuan(c.buyerUnitAmount) : "未配置", after: l.buyerUnitAmount ? unitYuan(l.buyerUnitAmount) : "未配置", section: "items" });
-    if ((c?.ownerUnitAmount ?? "") !== (l.ownerUnitAmount ?? "") && l.pricingKind === "FIXED_UNIT") rows.push({ label: `${name} · 号主价`, before: c?.ownerUnitAmount ? unitYuan(c.ownerUnitAmount) : "未配置", after: l.ownerUnitAmount ? unitYuan(l.ownerUnitAmount) : "未配置", section: "items" });
+    if (l.pricingKind === "FIXED_UNIT") for (const [field,label] of [["buyerUnitAmount","租客价"],["ownerUnitAmount","号主价"]] as const) {
+      const before=c?.[field],after=l[field];
+      if ((before??"") === (after??"")) continue;
+      const sameDisplay=before!=null&&after!=null&&yuanCents(before)!==null&&yuanCents(before)===yuanCents(after)&&yuanInput(before)!==yuanInput(after);
+      rows.push({label:`${name} · ${label}`,before:before?referenceUnitYuan(before):"未配置",after:after?referenceUnitYuan(after):"未配置",section:"items",...(sameDisplay?{detail:"按分显示的金额相同，但原单价存在不足一分的变化。"}:{})});
+    }
     if ((c?.unitQuantity ?? "") !== (l.unitQuantity ?? "") && l.pricingKind === "FIXED_UNIT") rows.push({ label: `${name} · 计费数量`, before: c?.unitQuantity ?? "—", after: l.unitQuantity ?? "—", section: "items" });
   }
   // Owner 决定只保留普通档：线上的会员/折扣档位行在新版本里会被移除，必须明示。
@@ -118,7 +122,7 @@ export function priceDiff(rules: RulesResponse, target: PriceVersionRecord | und
   for (const r of rows) {
     const same = rows.filter(x => x.label === r.label);
     if (out.some(x => x.label === r.label)) continue;
-    const plain = /^-?[\d.,¥]+$|^未填$|^\d+ 行$|^将移除$/;
+    const plain = /^(?:约)?-?[\d.,¥]+(?:（不足1分）)?$|^未填$|^\d+ 行$|^将移除$/;
     if (r.label === "皮肤推荐押金") { out.push({ ...r, before: skinSummary(live?.fundingPolicy?.recommendation), after: skinSummary(target.fundingPolicy?.recommendation) }); continue; }
     if (r.label === "押金政策") { out.push({ ...r, before: "", after: "更新为新版", detail: `版本 ${r.before || "无"} → ${r.after}` }); continue; }
     if (r.after === "将移除") { out.push(r); continue; }

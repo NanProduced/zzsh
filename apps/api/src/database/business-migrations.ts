@@ -455,6 +455,7 @@ export async function applyRuntimePrivileges(pool: Pick<Pool, "query">, runtimeR
   await configureChannelRefundPrivileges(pool, runtimeRole);
   await configureJoinpayFinancialPrivileges(pool, runtimeRole);
   await configureProfileAvatarPolicyPrivileges(pool, runtimeRole);
+  await configureSettlementRefundPolicyPrivileges(pool, runtimeRole);
   await configureLocalFinancialSandboxPrivileges(pool, runtimeRole);
 }
 
@@ -555,11 +556,17 @@ export async function configureSkinIdentityPrivileges(pool: Pick<Pool, "query">,
   if (columns === 0 && !owner && metadataCount === 0) return;
   if (columns !== 7 || !owner) throw new Error("Skin identity schema is incomplete; runtime privileges not finalized");
   const metadataColumns = metadataCount === 4 ? ",rarity_evidence,is_collectible,default_state,media_source" : "";
+  const category = (await pool.query(`SELECT EXISTS(SELECT 1 FROM pg_attribute WHERE attrelid=to_regclass('zzsh_supply.skin')
+    AND attname='category_id' AND attnum>0 AND NOT attisdropped) AS column_present,
+    to_regclass('zzsh_supply.skin_category') IS NOT NULL AS table_present`)).rows[0];
+  if (typeof category?.column_present !== "boolean" || typeof category?.table_present !== "boolean" || category.column_present !== category.table_present)
+    throw new Error("Skin category schema is incomplete; runtime privileges not finalized");
+  const categoryColumn = category.column_present ? ",category_id" : "";
   await pool.query(`
     REVOKE INSERT,UPDATE,DELETE,TRUNCATE ON zzsh_supply.skin FROM ${role};
     GRANT SELECT ON zzsh_supply.skin TO ${role};
-    GRANT INSERT (id,game_id,code,name,category_id,rarity_code,enabled,form_visible,media_id,sort_order,source_namespace,source_field,source_token,aliases${metadataColumns}) ON zzsh_supply.skin TO ${role};
-    GRANT UPDATE (name,category_id,rarity_code,enabled,form_visible,media_id,sort_order,source_namespace,source_field,source_token,aliases,owner_kind,owner_id,firearm_id,base_name${metadataColumns}) ON zzsh_supply.skin TO ${role};
+    GRANT INSERT (id,game_id,code,name${categoryColumn},rarity_code,enabled,form_visible,media_id,sort_order,source_namespace,source_field,source_token,aliases${metadataColumns}) ON zzsh_supply.skin TO ${role};
+    GRANT UPDATE (name${categoryColumn},rarity_code,enabled,form_visible,media_id,sort_order,source_namespace,source_field,source_token,aliases,owner_kind,owner_id,firearm_id,base_name${metadataColumns}) ON zzsh_supply.skin TO ${role};
     REVOKE INSERT,UPDATE,DELETE,TRUNCATE ON zzsh_supply.skin_owner FROM ${role};
     GRANT SELECT ON zzsh_supply.skin_owner TO ${role};
     GRANT INSERT (id,game_id,kind,code,name,enabled) ON zzsh_supply.skin_owner TO ${role};
@@ -648,6 +655,25 @@ async function resetRuntimeTablePrivileges(pool: Pick<Pool, "query">, table: str
       ${options.select === false ? "" : `GRANT SELECT ON TABLE ${table} TO ${role}`}`);
 }
 
+/** The refund wait policy is optional until its migration is installed. */
+export async function configureSettlementRefundPolicyPrivileges(pool: Pick<Pool, "query">, runtimeRole: string): Promise<void> {
+  const role = quoteIdentifier(runtimeRole), table = "zzsh_order.settlement_refund_policy";
+  const inventory = (await pool.query(`SELECT to_regclass($1) IS NOT NULL AS present,
+    to_regprocedure('zzsh_order.guard_settlement_refund_policy()') IS NOT NULL AS guard,
+    (SELECT count(*)::integer FROM pg_attribute WHERE attrelid=to_regclass('zzsh_order.settlement_posting')
+      AND attname IN ('refund_policy_revision','refund_wait_days') AND attnum>0 AND NOT attisdropped) AS posting_columns`, [table])).rows[0];
+  if (!inventory || [inventory.present, inventory.guard].some(value => typeof value !== "boolean") || !Number.isInteger(inventory.posting_columns)) throw new Error("Settlement refund policy inventory is incomplete");
+  if (!inventory.present && !inventory.guard && inventory.posting_columns === 0) return;
+  if (!inventory.present || !inventory.guard || inventory.posting_columns !== 2) throw new Error("Settlement refund policy is partially deployed");
+  const columns = (await pool.query("SELECT attname FROM pg_attribute WHERE attrelid=$1::regclass AND attnum>0 AND NOT attisdropped ORDER BY attnum", [table])).rows.map(row => row.attname as string);
+  const expected = ["singleton", "normal_days", "early_days", "revision", "updated_by_admin_id", "updated_at"];
+  if (columns.length !== expected.length || new Set(columns).size !== columns.length || expected.some(name => !columns.includes(name))) throw new Error("Settlement refund policy column inventory differs");
+  await resetRuntimeTablePrivileges(pool, table, "PUBLIC", { columns, select: false });
+  await resetRuntimeTablePrivileges(pool, table, role, { columns });
+  await pool.query(`GRANT UPDATE(normal_days,early_days,revision,updated_by_admin_id,updated_at) ON ${table} TO ${role};
+    REVOKE ALL ON FUNCTION zzsh_order.guard_settlement_refund_policy() FROM PUBLIC, ${role};`);
+}
+
 /** Optional avatar policy; validate the complete group before clearing inherited table/column grants. */
 export async function configureProfileAvatarPolicyPrivileges(pool: Pick<Pool, "query">, runtimeRole: string): Promise<void> {
   const role = quoteIdentifier(runtimeRole), table = "zzsh_supply.profile_avatar_policy";
@@ -730,6 +756,14 @@ export async function configureContinuityFinancePrivileges(pool: Pick<Pool, "que
     {"name":"zzsh_order.finance_stored_opening_review","read":false},
     {"name":"zzsh_order.legacy_duty_finance_contract","read":false},
     {"name":"zzsh_order.legacy_duty_finance_fact","read":true},
+    {"name":"zzsh_order.legacy_refund_case","read":true},
+    {"name":"zzsh_order.legacy_refund_intent","read":true,"update":["state","revision","lease_version","lease_owner","lease_until","claim_xid","requires_review","budget_disposition","terminal_evidence_id","terminal_event_id","provider_refund_trx_no","completed_at"]},
+    {"name":"zzsh_order.legacy_refund_attempt","read":true,"insert":["id","intent_id","operation","lease_version","lease_owner","profile_id","profile_canonical","profile_sha256","key_version_ref","admission_sha256","request_body","request_sha256"]},
+    {"name":"zzsh_order.legacy_refund_observation","read":true,"insert":["id","intent_id","attempt_id","operation","lease_version","lease_owner","profile_id","profile_canonical","profile_sha256","key_version_ref","raw_body","raw_sha256","response_complete","http_status","received_bytes","transport_failure","event","schema_status","signature_status","binding_status","channel_code","evidence_level","state_before","state_after","request_id"]},
+    {"name":"zzsh_order.legacy_refund_terminal_evidence","read":true,"insert":["id","intent_id","observation_id","terminal","merchant_no","refund_transaction_no","completed_at_raw","completed_at","finance_event_id","facts_canonical","facts_digest"]},
+    {"name":"zzsh_order.legacy_refund_review_resolution","read":false},
+    {"name":"zzsh_order.legacy_refund_terminal_resolution","read":false},
+    {"name":"zzsh_order.legacy_refund_retry_authorization","read":false},
     {"name":"zzsh_order.legacy_owner_guarantee_observation","read":true},
     {"name":"zzsh_order.legacy_owner_guarantee_coverage","read":true}
   ];
@@ -742,12 +776,76 @@ export async function configureContinuityFinancePrivileges(pool: Pick<Pool, "que
   if(withdrawalLinkTables.some(r=>r.present)&&withdrawalLinkTables.some(r=>!r.present))throw new Error('Legacy withdrawal link schema is partially deployed');
   const v4 = (await pool.query(`SELECT to_regprocedure('zzsh_order.assert_personal_growth_order_v4(zzsh_order.rental_order)') IS NOT NULL AS present,
     to_regprocedure('zzsh_order.legacy_opening_source_proof(text)') IS NOT NULL AS proof_present,
+    to_regprocedure('zzsh_order.post_legacy_finance_duty(text,text,text)') IS NOT NULL AS owner_credit_present,
+    EXISTS(SELECT 1 FROM pg_proc p JOIN pg_class c ON c.oid=to_regclass('zzsh_order.legacy_duty_finance_fact')
+      WHERE p.oid=to_regprocedure('zzsh_order.post_legacy_finance_duty(text,text,text)') AND p.proowner=c.relowner AND p.prosecdef
+       AND p.proconfig=ARRAY['search_path=pg_catalog']) AS owner_credit_ready,
+    to_regprocedure('zzsh_order.create_legacy_refund_case(text)') IS NOT NULL AS legacy_refund_present,
+    EXISTS(SELECT 1 FROM pg_proc p JOIN pg_class c ON c.oid=to_regclass('zzsh_order.legacy_refund_case')
+      WHERE p.oid=to_regprocedure('zzsh_order.create_legacy_refund_case(text)') AND p.proowner=c.relowner AND p.prosecdef
+       AND p.proconfig=ARRAY['search_path=pg_catalog'])
+      AND EXISTS(SELECT 1 FROM pg_proc p JOIN pg_class c ON c.oid=to_regclass('zzsh_order.legacy_refund_review_resolution')
+        WHERE p.oid=to_regprocedure('zzsh_order.resume_legacy_refund_review(text,text)') AND p.proowner=c.relowner AND p.prosecdef
+         AND p.proconfig=ARRAY['search_path=pg_catalog'])
+      AND EXISTS(SELECT 1 FROM pg_proc p JOIN pg_class c ON c.oid=to_regclass('zzsh_order.legacy_refund_retry_authorization')
+        WHERE p.oid=to_regprocedure('zzsh_order.retry_legacy_refund(text,text,text)') AND p.proowner=c.relowner AND p.prosecdef
+         AND p.proconfig=ARRAY['search_path=pg_catalog'])
+      AND EXISTS(SELECT 1 FROM pg_proc p JOIN pg_class c ON c.oid=to_regclass('zzsh_order.legacy_refund_terminal_resolution')
+        WHERE p.oid=to_regprocedure('zzsh_order.resolve_legacy_refund_terminal(text,text,text)') AND p.proowner=c.relowner AND p.prosecdef
+         AND p.proconfig=ARRAY['search_path=pg_catalog'])
+      AND EXISTS(SELECT 1 FROM pg_index WHERE indexrelid=to_regclass('zzsh_order.legacy_refund_case_unreleased_once') AND indisvalid AND indisready AND indisunique)
+      AND EXISTS(SELECT 1 FROM pg_index WHERE indexrelid=to_regclass('zzsh_order.legacy_refund_observation_number_idx') AND indisvalid AND indisready)
+      AND NOT EXISTS(SELECT 1 FROM (VALUES
+        ('zzsh_order.legacy_refund_case','legacy_refund_case_guard','zzsh_order.guard_legacy_refund_case()'),
+        ('zzsh_order.legacy_refund_case','legacy_refund_case_immutable','zzsh_order.finance_immutable()'),
+        ('zzsh_order.legacy_refund_case','legacy_refund_case_complete','zzsh_order.check_legacy_refund_case_complete()'),
+        ('zzsh_order.legacy_refund_intent','legacy_refund_intent_guard','zzsh_order.guard_legacy_refund_intent()'),
+        ('zzsh_order.legacy_refund_intent','legacy_refund_intent_immutable','zzsh_order.finance_immutable()'),
+        ('zzsh_order.legacy_refund_intent','legacy_refund_intent_complete','zzsh_order.check_legacy_refund_case_complete()'),
+        ('zzsh_order.legacy_refund_attempt','legacy_refund_attempt_guard','zzsh_order.guard_legacy_refund_attempt()'),
+        ('zzsh_order.legacy_refund_attempt','legacy_refund_attempt_immutable','zzsh_order.finance_immutable()'),
+        ('zzsh_order.legacy_refund_observation','legacy_refund_observation_guard','zzsh_order.guard_legacy_refund_observation()'),
+        ('zzsh_order.legacy_refund_observation','legacy_refund_observation_immutable','zzsh_order.finance_immutable()'),
+        ('zzsh_order.legacy_refund_terminal_evidence','legacy_refund_terminal_guard','zzsh_order.guard_legacy_refund_terminal()'),
+        ('zzsh_order.legacy_refund_terminal_evidence','legacy_refund_terminal_immutable','zzsh_order.finance_immutable()'),
+        ('zzsh_order.legacy_refund_review_resolution','legacy_refund_review_resolution_immutable','zzsh_order.finance_immutable()'),
+        ('zzsh_order.legacy_refund_terminal_resolution','legacy_refund_terminal_resolution_immutable','zzsh_order.finance_immutable()'),
+        ('zzsh_order.legacy_refund_retry_authorization','legacy_refund_retry_authorization_immutable','zzsh_order.finance_immutable()'),
+        ('zzsh_order.joinpay_refund_evidence','zz_legacy_refund_transaction_guard','zzsh_order.guard_native_refund_against_legacy_transaction()'),
+        ('zzsh_order.legacy_refund_intent','legacy_refund_terminal_intent_complete','zzsh_order.check_legacy_refund_terminal_complete()'),
+        ('zzsh_order.finance_event','legacy_refund_history_event_guard','zzsh_order.guard_legacy_refund_history()'),
+        ('zzsh_order.finance_event','legacy_refund_history_event_complete','zzsh_order.check_legacy_refund_case_complete()'),
+        ('zzsh_order.finance_event','legacy_refund_history_revision','zzsh_order.withdrawal_wallet_revision()'),
+        ('zzsh_order.finance_event','legacy_refund_paid_event_guard','zzsh_order.guard_legacy_refund_paid()'),
+        ('zzsh_order.finance_event','legacy_refund_paid_event_complete','zzsh_order.check_legacy_refund_terminal_complete()'),
+        ('zzsh_order.finance_event','legacy_refund_paid_revision','zzsh_order.withdrawal_wallet_revision()'),
+        ('zzsh_order.settlement_ledger_entry','legacy_refund_history_entry_guard','zzsh_order.guard_legacy_refund_history()'),
+        ('zzsh_order.settlement_ledger_entry','legacy_refund_history_entry_complete','zzsh_order.check_legacy_refund_case_complete()'),
+        ('zzsh_order.settlement_ledger_entry','legacy_refund_paid_entry_guard','zzsh_order.guard_legacy_refund_paid()'),
+        ('zzsh_order.settlement_ledger_entry','legacy_refund_paid_entry_complete','zzsh_order.check_legacy_refund_terminal_complete()')
+      ) required(relation,name,procedure) WHERE NOT EXISTS(SELECT 1 FROM pg_trigger t WHERE t.tgrelid=to_regclass(required.relation)
+        AND t.tgname=required.name AND t.tgfoid=to_regprocedure(required.procedure) AND t.tgenabled IN('O','A') AND NOT t.tgisinternal))
+      AND NOT EXISTS(SELECT 1 FROM (VALUES('finance_entry_guard'),('finance_entry_batch_guard')) required(name)
+        WHERE NOT EXISTS(SELECT 1 FROM pg_trigger t WHERE t.tgrelid=to_regclass('zzsh_order.settlement_ledger_entry') AND t.tgname=required.name
+          AND t.tgenabled IN('O','A') AND NOT t.tgisinternal AND position('legacyRefundCaseId' in pg_get_triggerdef(t.oid))>0
+          AND position('legacyRefundIntentId' in pg_get_triggerdef(t.oid))>0)) AS legacy_refund_ready,
+    to_regprocedure('zzsh_order.check_legacy_commission_confirmation_link()') IS NOT NULL AS commission_link_present,
+    EXISTS(SELECT 1 FROM pg_trigger t WHERE t.tgrelid=to_regclass('zzsh_order.legacy_order_duty')
+      AND t.tgname='legacy_commission_confirmation_link_complete' AND t.tgenabled IN('O','A') AND NOT t.tgisinternal
+      AND t.tgfoid=to_regprocedure('zzsh_order.check_legacy_commission_confirmation_link()')) AS commission_link_ready,
     EXISTS(SELECT 1 FROM pg_proc p JOIN pg_class c ON c.oid=to_regclass('zzsh_order.finance_stored_opening_review')
       WHERE p.oid=to_regprocedure('zzsh_order.legacy_opening_source_proof(text)') AND p.proowner=c.relowner AND p.prosecdef
        AND p.proconfig=ARRAY['search_path=pg_catalog'] AND EXISTS(SELECT 1 FROM pg_trigger t WHERE t.tgrelid=c.oid
         AND t.tgname='stored_opening_source_proof_guard' AND t.tgenabled='O' AND NOT t.tgisinternal)) AS proof_ready`)).rows[0];
   if (typeof v4?.present !== "boolean") throw new Error("Continuity helper inventory is incomplete");
   if(v4.proof_present===true&&v4.proof_ready!==true)throw new Error('Legacy source proof helper is partially deployed');
+  if(v4.owner_credit_present===true&&v4.owner_credit_ready!==true)throw new Error('Legacy owner credit helper is partially deployed');
+  const refundTables=found.filter(r=>['zzsh_order.legacy_refund_case','zzsh_order.legacy_refund_intent','zzsh_order.legacy_refund_attempt','zzsh_order.legacy_refund_observation','zzsh_order.legacy_refund_terminal_evidence','zzsh_order.legacy_refund_review_resolution','zzsh_order.legacy_refund_terminal_resolution','zzsh_order.legacy_refund_retry_authorization'].includes(r.name));
+  if(refundTables.some(r=>r.present)||v4.legacy_refund_present===true){
+    if(refundTables.length!==8||refundTables.some(r=>!r.present)||v4.legacy_refund_ready!==true)throw new Error('Legacy refund case schema is partially deployed');
+  }
+  if(v4.commission_link_present===true&&v4.commission_link_ready!==true)throw new Error('Legacy commission confirmation link is partially deployed');
+  if(v4.commission_link_ready===true)profiles.find(p=>p.name==='zzsh_order.legacy_order_duty')!.update!.push('continuation_version_id');
   if(withdrawalLinkTables.every(r=>r.present)){
     const linkGuard=(await pool.query(`/* withdrawal link schema guard readiness */ SELECT
       EXISTS(SELECT 1 FROM pg_class c JOIN pg_proc f ON f.oid=to_regprocedure('zzsh_order.legacy_withdrawal_row_fingerprint(zzsh_order.personal_finance_observation)')
@@ -803,6 +901,15 @@ export async function configureContinuityFinancePrivileges(pool: Pick<Pool, "que
   }
   if(v4.proof_present===true)await pool.query(`REVOKE ALL ON FUNCTION zzsh_order.legacy_opening_source_proof(text) FROM PUBLIC;
     GRANT EXECUTE ON FUNCTION zzsh_order.legacy_opening_source_proof(text) TO ${role}`);
+  if(v4.owner_credit_present===true)await pool.query(`REVOKE ALL ON FUNCTION zzsh_order.post_legacy_finance_duty(text,text,text) FROM PUBLIC;
+    GRANT EXECUTE ON FUNCTION zzsh_order.post_legacy_finance_duty(text,text,text) TO ${role}`);
+  if(v4.legacy_refund_present===true)await pool.query(`REVOKE ALL ON FUNCTION zzsh_order.create_legacy_refund_case(text) FROM PUBLIC;
+    REVOKE ALL ON FUNCTION zzsh_order.resume_legacy_refund_review(text,text) FROM PUBLIC;
+    REVOKE ALL ON FUNCTION zzsh_order.retry_legacy_refund(text,text,text) FROM PUBLIC;
+    REVOKE ALL ON FUNCTION zzsh_order.resolve_legacy_refund_terminal(text,text,text) FROM PUBLIC;
+    GRANT SELECT(id,case_id,previous_intent_id,next_intent_id,generation,previous_evidence_id,previous_evidence_digest,confirmed_refunded_cents)
+      ON zzsh_order.legacy_refund_retry_authorization TO ${role};
+    GRANT EXECUTE ON FUNCTION zzsh_order.create_legacy_refund_case(text),zzsh_order.resume_legacy_refund_review(text,text),zzsh_order.retry_legacy_refund(text,text,text),zzsh_order.resolve_legacy_refund_terminal(text,text,text) TO ${role}`);
   if(withdrawalLinkTables.every(r=>r.present))await pool.query(`
     REVOKE ALL ON FUNCTION zzsh_order.legacy_withdrawal_verified_source(zzsh_order.personal_finance_observation),
       zzsh_order.bump_legacy_withdrawal_subject_revision(),zzsh_order.guard_legacy_withdrawal_link_evidence(),

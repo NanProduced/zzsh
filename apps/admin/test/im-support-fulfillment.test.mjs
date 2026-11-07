@@ -16,6 +16,11 @@ globalThis.Element = browser.Element;
 globalThis.Node = browser.Node;
 globalThis.Event = browser.Event;
 Object.defineProperty(globalThis, "navigator", { value: browser.navigator, configurable: true });
+const heldLocks = new Set();
+Object.defineProperty(browser.navigator, "locks", { configurable: true, value: { request: async (name, _options, callback) => {
+  if (heldLocks.has(name)) return callback(null);
+  heldLocks.add(name); try { return await callback({ name }); } finally { heldLocks.delete(name); }
+} } });
 globalThis.CustomEvent = browser.CustomEvent;
 globalThis.getComputedStyle = browser.getComputedStyle.bind(browser);
 globalThis.requestAnimationFrame = browser.requestAnimationFrame.bind(browser);
@@ -29,9 +34,9 @@ const vite = await createServer({
   resolve: { alias: { "@": path.join(adminRoot, "src") } },
   server: { middlewareMode: true, hmr: false },
 });
-const { OrderFulfillmentSection } = await vite.ssrLoadModule("/src/views/im-support-fulfillment.tsx");
+const { OrderFulfillmentSection, SupportUnpaidCancelCard } = await vite.ssrLoadModule("/src/views/im-support-fulfillment.tsx");
 after(async () => { await vite.close(); });
-beforeEach(() => { browser.localStorage.clear(); });
+beforeEach(() => { browser.localStorage.clear(); heldLocks.clear(); });
 
 function response(body, status = 200) {
   return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
@@ -51,6 +56,38 @@ const frozenInventory = [
   { itemId: "item_haff", quantity: "5000", unit: "HAFF_BASE", pricingKind: "HAFF_RATIO", name: "哈夫币" },
   { itemId: "item_ammo", quantity: "120", unit: "ROUND", pricingKind: "PER_UNIT", name: "六级弹" },
 ];
+
+test("待付款客服取消先核付款线索，结果未知时复用原请求", async t => {
+  const calls=[]; let posts=0;
+  globalThis.fetch=async(input,init={})=>{
+    calls.push({url:String(input),method:init.method??"GET",headers:init.headers??{},body:init.body});
+    if((init.method??"GET")==="GET") return response({contractVersion:"admin-support-unpaid-cancel.v1",orderId:"order-A",orderRevision:"4",orderStatus:"PENDING_PAYMENT",eligibility:{allowed:true,reason:null}});
+    if(++posts===1)return response({contractVersion:"admin-support-unpaid-cancel.v1",orderId:"order-A",outcome:"UNKNOWN",originalKeyRequired:true},202);
+    return response({contractVersion:"admin-support-unpaid-cancel.v1",orderId:"order-A",orderRevision:"5",orderStatus:"CANCELLED",cancelReason:"SUPPORT_UNPAID",outcome:"CANCELLED",channelClosed:false});
+  };
+  const {host,root}=mount();t.after(async()=>{await act(async()=>root.unmount());host.remove();});
+  await act(async()=>root.render(createElement(SupportUnpaidCancelCard,{orderId:"order-A",displayNo:"TEST-1"})));
+  await click(host,"取消待付款订单");
+  await waitFor(()=>Boolean(document.body.querySelector('textarea[aria-label="待付款订单取消原因"]:not([disabled])')));
+  const input=document.body.querySelector('textarea[aria-label="待付款订单取消原因"]');
+  const setter=Object.getOwnPropertyDescriptor(browser.HTMLTextAreaElement.prototype,"value").set;
+  await act(async()=>{setter.call(input,"已与租客核实");input.dispatchEvent(new Event("input",{bubbles:true}));});
+  await click(host,"确认取消");assert.match(document.body.textContent,/取消结果尚未确认/);
+  await click(host,"重试同一请求");assert.match(host.textContent,/订单已取消/);
+  const writes=calls.filter(call=>call.method==="POST");assert.equal(writes.length,2);
+  assert.equal(writes[0].headers["idempotency-key"],writes[1].headers["idempotency-key"]);
+  assert.equal(writes[0].body,writes[1].body);assert.deepEqual(JSON.parse(writes[0].body),{expectedOrderRevision:"4",reason:"已与租客核实"});
+});
+
+test("已有付款线索时页面阻止直接取消",async t=>{
+  let reviews=0;
+  globalThis.fetch=async()=>response({contractVersion:"admin-support-unpaid-cancel.v1",orderId:"order-A",orderRevision:"4",orderStatus:"PENDING_PAYMENT",eligibility:{allowed:false,reason:"PAYMENT_REVIEW_REQUIRED"}});
+  const {host,root}=mount();t.after(async()=>{await act(async()=>root.unmount());host.remove();});
+  await act(async()=>root.render(createElement(SupportUnpaidCancelCard,{orderId:"order-A",displayNo:"TEST-1",onReviewPayment:()=>reviews++})));
+  await click(host,"取消待付款订单");await waitFor(()=>document.body.textContent.includes("本单已有付款请求或记录"));
+  const confirm=[...document.body.querySelectorAll('button')].find(button=>button.textContent.trim()==="确认取消");assert.ok(confirm?.disabled);
+  await click(host,"查看资金与退款");assert.equal(reviews,1);
+});
 // Real settlement read shape: no frozen inventory (that lives only in the IM slot projection).
 const paidNoOpening = { orderId: "order-A", rentalStarted: false, openings: [], settlement: null, ready: false, reasons: ["SETTLEMENT_VERSION_MISSING"] };
 const confirmedOpening = { orderId: "order-A", rentalStarted: true, openings: [{ id: "opening_1", versionNo: 1, status: "CONFIRMED", lines: frozenInventory.map((line) => ({ itemId: line.itemId, quantity: line.quantity, unit: line.unit, pricingKind: line.pricingKind })) }], settlement: null, ready: false, reasons: ["SETTLEMENT_VERSION_MISSING"] };
@@ -124,6 +161,47 @@ test("without the slot projection the section refuses to fake an opening", async
   assert.equal(document.body.querySelectorAll(".im-support-fulfillment-lines input").length, 0);
   assert.match(document.body.textContent, /未返回订单冻结库存投影/);
   assert.equal(find(host, "期初代录").disabled, true);
+});
+
+test("a stale second page preserves an existing order intent instead of overwriting it", async t => {
+  let writes=0;
+  globalThis.fetch=async(_input,init={})=>{ if(init.method==="POST")writes++;return response(paidNoOpening); };
+  const {host,root}=mount();t.after(async()=>{await act(async()=>root.unmount());host.remove();});
+  await render(root,host);
+  const key="zzsh.im-support.fulfillment.admin-A.order-A", original={subject:"admin-A",intent:{id:"prior-intent",orderId:"order-A",kind:"record-opening"}};
+  browser.localStorage.setItem(key,JSON.stringify(original));
+  await click(host,"期初代录");
+  assert.equal(writes,0);assert.deepEqual(JSON.parse(browser.localStorage.getItem(key)),original);
+  assert.match(document.body.textContent,/另一页面已有本单操作/);
+});
+
+test("a concurrently held order lock refuses another submit", async t => {
+  let writes=0;
+  globalThis.fetch=async(_input,init={})=>{if(init.method==="POST")writes++;return response(paidNoOpening);};
+  const {host,root}=mount();t.after(async()=>{await act(async()=>root.unmount());host.remove();});
+  await render(root,host);
+  heldLocks.add("zzsh:supply-write:zzsh.im-support.fulfillment.admin-A.order-A");
+  await click(host,"期初代录");assert.equal(writes,0);assert.match(document.body.textContent,/另一页面正在处理本单/);
+});
+
+test("staff can confirm a missing opening acknowledgement with a recorded reason", async t => {
+  let confirmed=false;const writes=[];
+  const opening={id:"opening_1",versionNo:1,status:"DRAFT",lines:frozenInventory.map(line=>({itemId:line.itemId,quantity:line.quantity,unit:line.unit,pricingKind:line.pricingKind})),acks:[]};
+  globalThis.fetch=async (input,init={})=>{
+    const path=String(input);
+    if(init.method==="POST"){writes.push({path,body:JSON.parse(init.body),headers:init.headers});confirmed=true;}
+    return response({...paidNoOpening,openings:[{...opening,acks:confirmed?[{party:"RENTER",source:"ON_BEHALF"}]:[]}]});
+  };
+  const {host,root}=mount();t.after(async()=>{await act(async()=>root.unmount());host.remove();});
+  await render(root,host,{canManualClose:true});
+  await click(host,"协助租客确认");
+  assert.match(document.body.textContent,/不会显示为当事人本人确认/);
+  const reason=document.body.querySelector('textarea[aria-label="协助确认期初原因"]');assert.ok(reason);
+  await act(async()=>{Object.getOwnPropertyDescriptor(browser.HTMLTextAreaElement.prototype,"value").set.call(reason,"已与租客核实");reason.dispatchEvent(new Event("input",{bubbles:true}));});
+  await click(host,"确认协助");
+  assert.equal(writes.length,1);assert.match(writes[0].path,/\/orders\/order-A\/openings\/opening_1\/confirm$/);
+  assert.deepEqual(writes[0].body,{party:"RENTER",versionNo:1,reason:"已与租客核实"});assert.ok(writes[0].headers["idempotency-key"]);
+  assert.match(document.body.textContent,/客服协助确认/);
 });
 
 test("an unknown write keeps the intent; an old identical opening and another version's review never unlock it", async (t) => {
@@ -523,7 +601,7 @@ test("preview shows named server amounts and editing invalidates the accepted ha
     requests.push({ url, method: init.method ?? "GET", body: init.body });
     if (url.endsWith("/orders/order-A/settlement")) return response(confirmedOpening);
     if (url.endsWith("/orders/order-A/settlement-preview")) {
-      return response({ accepted: false, early: true, amounts: { ownerNet: { currency: "CNY", unit: "yuan", scale: 2, amount: "123.45" }, renterRefund: { currency: "CNY", unit: "yuan", scale: 2, amount: "12.00" } }, versionHash: "hash_preview", baseVersionId: "settle_base" });
+      return response({ accepted: false, early: true, amounts: { ownerNet: { currency: "CNY", unit: "yuan", scale: 2, amount: "123.45" }, renterRefund: { currency: "CNY", unit: "yuan", scale: 8, amount: "12.345678" } }, versionHash: "hash_preview", baseVersionId: "settle_base" });
     }
     throw new Error(`unexpected request ${url}`);
   };
@@ -534,11 +612,13 @@ test("preview shows named server amounts and editing invalidates the accepted ha
   assert.ok(trigger);
   await pickOption(document, trigger, "租客自愿提前");
   await settle();
-  await click(host, "生成提前结算预览");
+  await click(host, "预览结算方案");
   assert.match(document.body.textContent, /号主净额/);
   assert.match(document.body.textContent, /123\.45 元/);
   assert.match(document.body.textContent, /租客应退/);
-  const classify = find(host, "确认分类");
+  assert.match(document.body.textContent, /约12\.35 元/);
+  assert.doesNotMatch(document.body.textContent, /12\.345678/);
+  const classify = find(host, "生成结算方案");
   assert.ok(classify && !classify.disabled, "classify enabled after a preview");
   const input = document.body.querySelector(".im-support-fulfillment-lines input");
   await act(async () => {
@@ -547,7 +627,49 @@ test("preview shows named server amounts and editing invalidates the accepted ha
     input.dispatchEvent(new Event("input", { bubbles: true }));
   });
   await settle();
-  assert.equal(find(host, "确认分类"), undefined, "editing invalidates the preview hash");
+  assert.equal(find(host, "生成结算方案"), undefined, "editing invalidates the preview hash");
+});
+
+test("staff preview keeps the customer's actual consumption and includes a zero-opening resource", async (t) => {
+  const requests=[];
+  const pending={...confirmedOpening,consumptionMode:"ACTUAL",currentRequest:{kind:"INTAKE",id:"intake_1"},
+    extraResources:[{itemId:"item_coffee",name:"咖啡豆",unit:"PIECE",pricingKind:"FIXED_UNIT"}],
+    intakes:[{status:"OPEN",lines:[{itemId:"item_haff",consumedQuantity:"6000"},{itemId:"item_ammo",consumedQuantity:"180"},{itemId:"item_coffee",consumedQuantity:"2"}]}]};
+  globalThis.fetch=async(input,init={})=>{
+    const url=String(input);requests.push({url,method:init.method??"GET",body:init.body});
+    if(url.endsWith("/orders/order-A/settlement"))return response(pending);
+    if(url.endsWith("/orders/order-A/settlement-preview"))return response({accepted:false,early:true,amounts:{},versionHash:"hash_preview"});
+    throw new Error(`unexpected request ${url}`);
+  };
+  const {host,root}=mount();t.after(async()=>{await act(async()=>root.unmount());host.remove();});
+  await render(root,host);
+  const inputs=[...document.body.querySelectorAll(".im-support-fulfillment-lines input")];
+  assert.deepEqual(inputs.map(input=>input.value),["6000","180","2"]);
+  assert.match(document.body.textContent,/核对实际消耗/);
+  await pickOption(document,document.body.querySelector('.im-support-fulfillment-controls [aria-label="提前原因"]'),"租客自愿提前");
+  await click(host,"预览结算方案");
+  const request=requests.find(row=>row.method==="POST");assert.ok(request);
+  assert.deepEqual(JSON.parse(request.body).lines,[{itemId:"item_haff",consumedQuantity:"6000"},{itemId:"item_ammo",consumedQuantity:"180"},{itemId:"item_coffee",consumedQuantity:"2"}]);
+});
+
+test("support finalization records the exact version, reason, and original intent key",async(t)=>{
+  const requests=[],hash="a".repeat(64);
+  const current={...confirmedOpening,settlement:{id:"settle-current",versionNo:3,kind:"SYSTEM",early:false,versionHash:hash,
+    computation:{ok:true,amounts:{ownerNet:{currency:"CNY",unit:"yuan",scale:2,amount:"30.00"},renterRefund:{currency:"CNY",unit:"yuan",scale:2,amount:"5.00"}}},decisions:[]}};
+  globalThis.fetch=async(input,init={})=>{const url=String(input);requests.push({url,method:init.method??"GET",headers:init.headers??{},body:init.body});
+    if(url.endsWith("/orders/order-A/settlement"))return response(current);
+    if(url.endsWith("/orders/order-A/settlements/settle-current/finalize"))return response(current);
+    throw new Error(`unexpected request ${url}`);
+  };
+  const {host,root}=mount();t.after(async()=>{await act(async()=>root.unmount());host.remove();});await render(root,host,{canManualClose:true});
+  await click(host,"客服确认结算");assert.match(document.body.textContent,/第 3 版金额/);
+  const reason=document.body.querySelector('textarea[placeholder="说明与双方核实的情况"]');assert.ok(reason);
+  const setter=Object.getOwnPropertyDescriptor(browser.HTMLTextAreaElement.prototype,"value").set;
+  await act(async()=>{setter.call(reason,"双方已沟通确认");reason.dispatchEvent(new Event("input",{bubbles:true}));});
+  const button=[...document.body.querySelectorAll("button")].find(item=>item.textContent.trim()==="确认结算");assert.ok(button&&!button.disabled);
+  await act(async()=>button.click());await settle();
+  const request=requests.find(row=>row.method==="POST");assert.ok(request);assert.deepEqual(JSON.parse(request.body),{versionHash:hash,reason:"双方已沟通确认"});
+  assert.ok(String(request.headers["idempotency-key"]??"").startsWith("im_ful_finalize_order-A_"));
 });
 
 test("review binds the landed current version id and hash", async (t) => {
@@ -578,7 +700,7 @@ test("review stage exposes the current version quantities and amounts for cross-
   await render(root, host);
   assert.match(document.body.textContent, /待客服复核/);
   const labels = [...document.body.querySelectorAll('[aria-label="当前版本数量"] label span')].map((node) => node.textContent);
-  assert.deepEqual(labels, ["六级弹 · 发"], "current version lines are named from the frozen projection");
+  assert.deepEqual(labels, ["六级弹 · 发 · 期末剩余"], "current version lines show their quantity meaning");
   assert.match(document.body.textContent, /123\.45 元/);
   assert.match(document.body.textContent, /12\.00 元/);
   assert.doesNotMatch(document.body.textContent, /物资 · 件/);
@@ -645,7 +767,7 @@ test("a completed order shows read-only ended facts and no write commands", asyn
   assert.equal(host.querySelector('[data-action="open-fulfillment-panel"]'), null, "ended orders offer no write entry");
   assert.equal(document.body.querySelector(".im-order-panel"), null, "no check panel is mounted");
   assert.equal(host.querySelectorAll(".im-support-fulfillment-lines input").length, 0);
-  assert.doesNotMatch(card.textContent, /期初代录|生成提前结算预览|确认复核|人工调整/);
+  assert.doesNotMatch(card.textContent, /期初代录|预览结算方案|确认复核|人工调整/);
 });
 
 test("a cancelled order stays neutral even when settlement recording is unavailable", async (t) => {

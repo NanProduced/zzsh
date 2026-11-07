@@ -1,5 +1,7 @@
 import { formatOrderMoney, formatOrderTime } from "./order-client.ts";
-import type { Order, OrderImProjection, OrderImStage, OrderLine, OrderParty, PersonalRentalQuote, SettlementOpening, SettlementPosting, SettlementPreview, SettlementVersion } from "./order-client";
+import { formatReferenceYuan } from "@zzsh/ui/display-money";
+export { formatReferenceYuan } from "@zzsh/ui/display-money";
+import type { Order, OrderImProjection, OrderImStage, OrderLine, OrderParty, PersonalRentalQuote, SettlementLine, SettlementOpening, SettlementPosting, SettlementPreview, SettlementVersion } from "./order-client";
 
 export function paymentObservation(payment: { disposition: string } | null): string {
   if (!payment) return "暂未查到付款记录";
@@ -13,6 +15,9 @@ export function settlementPreviewProblem(reasons: string[] | undefined): string 
     QUOTE_BASIS_INVALID: "订单计价资料暂时无法确认，请联系客服。",
     OPENING_QUANTITY_MISMATCH: "物资数量与开租记录不一致，请核对后重试。",
     SETTLEMENT_QUANTITY_MISMATCH: "物资数量与开租记录不一致，请核对后重试。",
+    INSUFFICIENT_PREPAYMENT: "本单已付金额不足以覆盖实际费用，请联系客服处理。",
+    SETTLEMENT_PRICING_INVALID: "本单结算价格资料暂不可用，请联系客服核实。",
+    DISCOUNT_OWNER_FUNDING_INSUFFICIENT: "本次结算金额需要客服核实，请联系客服处理。",
     EARLY_REASON_REQUIRED: "请填写提前结束原因。",
   };
   return reasons?.length ? [...new Set(reasons.map(reason => labels[reason] ?? "结算方案暂时无法确认，请联系客服。"))].join(" ") : "结算方案暂时无法生成，请稍后重试。";
@@ -103,7 +108,7 @@ export function orderFulfillmentSummary(
       if (projection.openingState === "NONE") return "账号与开租确认 · 待客服录入开租清单";
       const acks = projection.openingAcks;
       if (!acks) return "账号与开租确认";
-      return `账号与开租确认 · 租客${acks.renter ? "已确认" : "未记录"} · 号主${acks.owner ? "已确认" : "未记录"}`;
+      return `账号与开租确认 · 租客${acks.renter ? "确认已记录" : "未记录"} · 号主${acks.owner ? "确认已记录" : "未记录"}`;
     }
     case "RENTING": {
       if (!projection.dueAt) return "租用中";
@@ -152,8 +157,8 @@ export function orderUnitPriceText(
   unitQuantity: string | null | undefined,
   unit: string | null | undefined,
 ): string | null {
-  if (!amount || typeof amount.amount !== "string" || !/^-?\d+(?:\.\d{1,8})?$/.test(amount.amount)) return null;
-  const price = `¥${amount.amount}`;
+  const price = formatReferenceYuan(amount?.amount);
+  if (!price) return null;
   const quantity = unitQuantity?.trim();
   return quantity ? `${price} / ${quantityText(unit, quantity)}` : price;
 }
@@ -608,8 +613,8 @@ export function settlementAmountRows(
   if (party === "renter") {
     rows.push({ label: "哈夫币消耗（租客侧）", value: amountAt(amounts, "haffConsumedBuyer") });
     rows.push({ label: "物品消耗（租客侧）", value: amountAt(amounts, "itemConsumedBuyer") });
-    rows.push({ label: "未耗物品退回", value: amountAt(amounts, "unusedItemRefund") });
-    rows.push({ label: "未耗哈夫退回", value: amountAt(amounts, "unusedHaffRefund") });
+    rows.push({ label: "未消耗物资预付款（扣费前）", value: amountAt(amounts, "unusedItemRefund") });
+    rows.push({ label: "未消耗哈夫币预付款（扣费前）", value: amountAt(amounts, "unusedHaffRefund") });
     rows.push({ label: effective ? "本次结算扣费" : "本次消耗合计", value: amountAt(amounts, "renterCharge") });
     const makeup = amountAt(amounts, "earlyMakeup");
     if (makeup !== "—" && makeup !== "¥0.00") rows.push({ label: "提前结束补足", value: makeup });
@@ -716,12 +721,14 @@ export type ConsumptionRow = {
  * server projection (opening lines, the version's input snapshot, the computed consumption); the
  * difference is only a display fallback for a line the server did not compute.
  */
-export function consumptionRows(order: Order, opening: SettlementOpening | null, version: SettlementVersion | null | undefined): ConsumptionRow[] {
+export function consumptionRows(order: Order, opening: SettlementOpening | null, version: SettlementVersion | null | undefined, extraResources: SettlementLine[] = []): ConsumptionRow[] {
   const openingLines = opening?.lines ?? [];
   if (openingLines.length === 0) return [];
+  const submittedIds=new Set((version?.inputSnapshot?.lines??[]).filter(line=>typeof line.consumedQuantity==="string"&&/^\d+$/.test(line.consumedQuantity)&&BigInt(line.consumedQuantity)>0n).map(line=>line.itemId));
+  const lines=[...openingLines,...extraResources.filter(line=>submittedIds.has(line.itemId)&&!openingLines.some(item=>item.itemId===line.itemId)).map(line=>({...line,quantity:"0"}))];
   const submitted = new Map((version?.inputSnapshot?.lines ?? []).map((line) => [line.itemId, line.remainingQuantity]));
   const consumed = version?.computation?.consumed;
-  return openingLines.map((line) => {
+  return lines.map((line) => {
     const open = line.quantity ?? null;
     const rest = submitted.get(line.itemId) ?? null;
     const serverLine = consumed?.items?.find((item) => item.itemId === line.itemId);
@@ -731,6 +738,6 @@ export function consumptionRows(order: Order, opening: SettlementOpening | null,
     const used = line.pricingKind === "HAFF_RATIO" && consumed?.haff !== undefined && consumed.haff !== null
       ? String(consumed.haff)
       : serverLine?.consumed ?? derived;
-    return { itemId: line.itemId, name: resourceName(order, line.itemId), unit: line.unit, opening: open, remaining: rest, consumed: used ?? null };
+    return { itemId: line.itemId, name: line.name??resourceName(order, line.itemId), unit: line.unit, opening: open, remaining: rest, consumed: used ?? null };
   });
 }

@@ -427,7 +427,7 @@ test("early settlement requires an explicit consent before submit and sends it t
       await probe.click("提交结束申请");
       assert.equal(log.filter(entry => entry.url.endsWith("/settlements")).length, 0, "no early submit without consent");
       assert.ok(probe.host.textContent.includes("本单冻结的提前结束费用说明"));
-      await probe.checkLabel("我已核对并接受本次提前结束的费用与退款安排");
+      await probe.checkLabel("我已阅读并同意上述提前结束规则，具体金额以结算方案为准");
       await probe.click("提交结束申请");
       const submit = log.find(entry => entry.url.endsWith("/settlements"));
       assert.ok(submit, "consented early submit reaches the server");
@@ -1390,7 +1390,7 @@ test("P1-A: opening recovery consumes the frozen target object and version, neve
 test("P1-B: an existing acknowledgement on the original opening is matched and releases the lock correctly", async () => {
   await withDom(async (window) => {
     const log = [];
-    const openingOldAcked = { ...opening, id: "opening_OLD", status: "DRAFT", acks: [{ party: "RENTER" }] };
+    const openingOldAcked = { ...opening, id: "opening_OLD", status: "DRAFT", acks: [{ party: "RENTER", source: "PARTY" }] };
     const fetchImpl = router([
       { match: "/settlement", method: "GET", respond: () => json({ ...settlementBody, openings: [openingOldAcked] }) },
       { match: "/openings/opening_OLD/confirm", method: "POST", respond: () => json({ error: { code: "CONFLICT", message: "状态已变化" } }, 409) },
@@ -1402,10 +1402,26 @@ test("P1-B: an existing acknowledgement on the original opening is matched and r
     await probe.click("查询原请求结果");
     for (let i = 0; i < 25 && !probe.host.textContent.includes("服务端已记录你的期初确认"); i += 1) await React.act(async () => { await tick(); });
     assert.equal(intents.loadIntent("user_A", "opening.confirm", "order_A"), null, "a matched acknowledgement releases the lock");
-    for (let i = 0; i < 25 && !probe.host.textContent.includes("已提交确认"); i += 1) await React.act(async () => { await tick(); });
-    assert.ok(probe.host.textContent.includes("已提交确认"), "the authoritative acked state is shown");
+    for (let i = 0; i < 25 && !probe.host.textContent.includes("你已确认"); i += 1) await React.act(async () => { await tick(); });
+    assert.ok(probe.host.textContent.includes("你已确认"), "the authoritative acked state is shown");
     assert.ok(!probe.host.textContent.includes("未生效"), "the read must not be presented as a failure");
     await probe.dispose();
+  });
+});
+
+test("a support acknowledgement is displayed honestly and cannot resolve the user's unknown request", async () => {
+  await withDom(async window => {
+    const log=[],openingOld={...opening,id:"opening_OLD",status:"DRAFT",acks:[{party:"RENTER",source:"ON_BEHALF"}]};
+    const fetchImpl=router([{match:"/settlement",method:"GET",respond:()=>json({...settlementBody,openings:[openingOld]})},
+      {match:"/openings/opening_OLD/confirm",method:"POST",respond:()=>json({error:{code:"CONFLICT",message:"状态已变化"}},409)}],log);
+    intents.saveIntent({userId:"user_A",kind:"opening.confirm",resourceId:"order_A",key:"old_key",body:{versionNo:1},context:{openingId:"opening_OLD",orderId:"order_A"}});
+    const Component=loadComponent("apps/web/src/components/order/order-trade-actions.tsx",session("user_A")).OrderTradeActions;
+    const probe=createProbe(window,Component,{order:paidOrder,party:"renter",onChanged(){}},fetchImpl);
+    await probe.render();assert.match(probe.host.textContent,/客服已协助你确认/);
+    await probe.click("查询原请求结果");
+    for(let i=0;i<25&&!probe.host.textContent.includes("仍未取得确定回执");i++)await React.act(async()=>{await tick();});
+    assert.ok(intents.loadIntent("user_A","opening.confirm","order_A"));assert.match(probe.host.textContent,/仍未取得确定回执/);
+    await probe.dispose(()=>intents.clearIntent("user_A","opening.confirm","order_A"));
   });
 });
 
@@ -1562,6 +1578,16 @@ const postedSettlement = {
   },
   ready: true, reasons: [],
 };
+
+test("a support-finalized settlement is attributed to support instead of inventing user confirmations",async()=>{
+ await withDom(async window=>{
+  const current={...postedVersion,decisions:[{party:"SUPPORT",action:"FINALIZE",createdAt:"2026-10-12T04:30:00Z"}]};
+  const body={...postedSettlement,versions:[current],settlement:current};
+  const Component=loadComponent("apps/web/src/components/order/order-trade-actions.tsx",session("user_A")).OrderTradeActions;
+  const probe=createProbe(window,Component,{order:{...paidOrder,status:"COMPLETED"},party:"renter",onChanged(){}},router([{match:"/settlement",method:"GET",respond:()=>json(body)}],[]));
+  try{await probe.render();assert.match(probe.host.textContent,/客服已确认结算/);assert.doesNotMatch(probe.host.textContent,/客服已拒绝|租客已确认|号主已确认/);}finally{await probe.dispose();}
+ });
+});
 
 test('settlement records use Beijing time and malformed timestamps remain unknown without invalid HTML dates',async()=>{
  await withDom(async window=>{
@@ -1757,6 +1783,27 @@ test("F3: an ending quantity above the opening quantity is refused before any pr
     assert.ok(probe.host.textContent.includes("不能大于期初数量"), probe.host.textContent.slice(0, 400));
     assert.equal(log.filter((entry) => entry.url.includes("settlement-preview")).length, 0, "an out-of-range quantity never reaches the server");
     await probe.dispose();
+  });
+});
+
+test("orders with frozen settlement pricing accept actual overconsumption and zero-opening resources", async () => {
+  await withDom(async (window) => {
+    const log=[];
+    const view={...settlementBody,consumptionMode:"ACTUAL",extraResources:[{itemId:"item_extra",name:"6级子弹",unit:"ROUND",pricingKind:"FIXED_UNIT"}]};
+    const fetchImpl=router([{match:"/settlement",method:"GET",respond:()=>json(view)},{match:"settlement-preview",method:"POST",respond:()=>json(previewBody)}],log);
+    const Component=loadComponent("apps/web/src/components/order/order-trade-actions.tsx",session("user_A")).OrderTradeActions;
+    const probe=createProbe(window,Component,{order:paidOrder,party:"renter",onChanged(){}},fetchImpl);
+    try {
+      await probe.render();await probe.click("发起结束租用");
+      assert.equal(probe.host.querySelector('[aria-label="6级子弹 实际消耗数量"]').value,"0");
+      await probe.setInput("哈夫币 实际消耗数量","1050");
+      await probe.setInput("测试物品 实际消耗数量","12");
+      await probe.setInput("6级子弹 实际消耗数量","60");
+      await probe.click("预览结算金额");
+      const request=log.find(entry=>entry.url.includes("settlement-preview"));assert.ok(request);
+      assert.deepEqual(request.body.lines,[{itemId:"item_haff",consumedQuantity:"1050"},{itemId:"item_piece",consumedQuantity:"12"},{itemId:"item_extra",consumedQuantity:"60"}]);
+      assert.ok(!JSON.stringify(request.body).includes("UnitAmount"));
+    } finally {await probe.dispose();}
   });
 });
 

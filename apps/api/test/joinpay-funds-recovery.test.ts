@@ -3,12 +3,14 @@ import assert from "node:assert/strict";
 import { test, type TestContext } from "node:test";
 import type { Pool, PoolClient } from "pg";
 import * as refunds from "../src/order/joinpay-refund-attempt";
+import * as legacyRefunds from "../src/order/legacy-refund-attempt";
+import * as prestart from "../src/order/prestart-refund-store";
 import * as payouts from "../src/finance/joinpay-payout-attempt";
 import * as refundProfiles from "../src/order/joinpay-refund-profile";
 import * as payoutProfiles from "../src/finance/joinpay-payout-profile";
 import * as refundStore from "../src/order/channel-refund-store";
 import * as payoutStore from "../src/finance/native-withdrawal-store";
-import { JoinpayFundsRecoveryLifecycle, recoverJoinpayRefundBatch, recoverJoinpayPayoutBatch } from "../src/finance/joinpay-funds-recovery";
+import { JoinpayFundsRecoveryLifecycle, recoverJoinpayRefundBatch, recoverLegacyJoinpayRefundBatch, recoverJoinpayPayoutBatch } from "../src/finance/joinpay-funds-recovery";
 import { Module } from "@nestjs/common";
 import { NestFactory } from "@nestjs/core";
 
@@ -51,11 +53,32 @@ test("两个域均先核准确数据库/runtime身份；不符不扫描且释放
   assert.equal(f.trace.length, 2); assert.equal(f.releases(), 2);
 });
 
-test("退款query-only准入的扫描首派门禁关闭，完整准入保持既有READY派发资格", async t => {
+test("退款首派必须显式开启，单有SUBMIT准入只允许恢复", async t => {
   const f = fixture(t); await recoverJoinpayRefundBatch(f.refund);
   assert.equal(f.trace[1]!.values!.at(-1), false); assert.match(f.trace[1]!.sql, /i\.lease_version>0 OR \$8::boolean/);
   f.view.acceptedProfiles.push({ operation: "SUBMIT" } as never); await recoverJoinpayRefundBatch(f.refund);
-  assert.equal(f.trace[3]!.values!.at(-1), true);
+  assert.equal(f.trace[3]!.values!.at(-1), false);
+  t.mock.method(refundProfiles,'assertFormalRefundProfile',()=>f.view as never);t.mock.method(refundProfiles,'assertRefundStart',()=>{});
+  t.mock.method(refunds,'allocatePostedJoinpayRefunds',async()=>({} as never));t.mock.method(prestart,'allocatePrestartJoinpayRefunds',async()=>({} as never));
+  await recoverJoinpayRefundBatch({...f.refund,execution:{...f.refund.execution,initialProfile:{} as refundProfiles.BoundRefundProfile}});
+  assert.equal(f.trace[5]!.values!.at(-1),true);
+});
+
+test("旧退款独立恢复，关闭首派仍查询原单；缺结构跳过、半结构拒绝",async t=>{
+  const f=fixture(t);let shape='complete',calls=0;const trace:{sql:string;values?:unknown[]}[]=[];
+  const pool={connect:async()=>({query:async(sql:string,values?:unknown[])=>{trace.push({sql,values});
+    if(sql.includes("to_regclass('zzsh_order.legacy_refund_case')"))return {rows:[{db:f.view.database,actor:f.view.runtimeUser,
+      cases:shape!=='absent',intents:shape!=='absent',attempts:shape==='complete',observations:shape==='complete',terminals:shape==='complete',resolutions:shape==='complete',terminal_resolutions:shape==='complete',retries:shape==='complete'}]};
+    if(sql.startsWith('SELECT current_database()'))return {rows:[{db:f.view.database,actor:f.view.runtimeUser}]};
+    return {rows:[{id:'legacy_intent',state:'UNKNOWN'}]};},release(){}})} as unknown as Pool;
+  t.mock.method(legacyRefunds,'executeLegacyRefund',async(...[o,id,worker,options]:Parameters<typeof legacyRefunds.executeLegacyRefund>)=>{calls++;assert.equal(o.legacyRefundsEnabled,false);
+    assert.equal(id,'legacy_intent');assert.equal(worker,'unit_worker');assert.equal(options?.minimumIntervalSeconds,60);return {kind:'OBSERVED'} as never;});
+  const input={...f.refund,execution:{...f.refund.execution,pool,legacyRefundsEnabled:false}};
+  assert.deepEqual(await recoverLegacyJoinpayRefundBatch(input),{selected:1,recorded:1,skipped:0});assert.equal(calls,1);
+  const scan=trace.find(item=>item.sql.includes('JOIN zzsh_order.legacy_refund_case'))!;
+  assert.equal(scan.values?.at(-1),false);assert.match(scan.sql,/i\.lease_version>0 OR \(\$8::boolean/);
+  shape='absent';assert.deepEqual(await recoverLegacyJoinpayRefundBatch(input),{selected:0,recorded:0,skipped:0});
+  shape='partial';await assert.rejects(recoverLegacyJoinpayRefundBatch(input),/LEGACY_REFUND_SCHEMA_INCOMPLETE/);assert.equal(calls,1);
 });
 
 test("只消费原退款/提现意图，按商户及已接受历史绑定扫描；外呼前释放扫描连接", async t => {

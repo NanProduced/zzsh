@@ -44,7 +44,7 @@ test("server opening and renting stages stay distinct, while rejection stays exp
   const opening = { stage: "OPENING_CONFIRM", openingState: "NONE", openingAcks: { renter: false, owner: false } };
   assert.equal(display.orderFulfillmentSummary(opening), "账号与开租确认 · 待客服录入开租清单");
   assert.equal(display.orderFulfillmentSummary({ ...opening, openingState: "DRAFT" }), "账号与开租确认 · 租客未记录 · 号主未记录");
-  assert.equal(display.orderFulfillmentSummary({ ...opening, openingState: "PARTIAL", openingAcks: { renter: true, owner: false } }), "账号与开租确认 · 租客已确认 · 号主未记录");
+  assert.equal(display.orderFulfillmentSummary({ ...opening, openingState: "PARTIAL", openingAcks: { renter: true, owner: false } }), "账号与开租确认 · 租客确认已记录 · 号主未记录");
 });
 
 test("owner projections and historical owner records never borrow renter money", () => {
@@ -102,6 +102,8 @@ test("party amounts expose the concrete values and fee payer without internal pr
   const labels = renter.map((row) => row.label);
   assert.ok(labels.includes("预计应退"));
   assert.ok(labels.includes("本次消耗合计"));
+  assert.ok(labels.includes("未消耗物资预付款（扣费前）"));
+  assert.ok(labels.includes("未消耗哈夫币预付款（扣费前）"));
   assert.ok(!labels.some((label) => label.includes("平台")));
   assert.equal(renter.find((row) => row.label === "预计应退").value, "¥316.00");
   const owner = display.settlementAmountRows("owner", amounts);
@@ -172,6 +174,10 @@ test("consumption rows read opening, remaining and consumed from the server proj
   assert.deepEqual(bare.map((row) => row.consumed), [null, null]);
   assert.deepEqual(bare.map((row) => row.remaining), [null, null]);
   assert.deepEqual(display.consumptionRows(order, null, version), []);
+  const actual={...version,inputSnapshot:{lines:[...version.inputSnapshot.lines,{itemId:"coffee",openingQuantity:"0",remainingQuantity:"0",consumedQuantity:"2"},{itemId:"unused",openingQuantity:"0",remainingQuantity:"0",consumedQuantity:"0"}]},computation:{consumed:{...version.computation.consumed,items:[...version.computation.consumed.items,{itemId:"coffee",consumed:"2",remaining:"0"}]}}};
+  const extra=display.consumptionRows(order,opening,actual,[{itemId:"coffee",name:"咖啡豆",unit:"PIECE"},{itemId:"unused",name:"未使用物资",unit:"PIECE"}]);
+  assert.deepEqual(extra.at(-1),{itemId:"coffee",name:"咖啡豆",unit:"PIECE",opening:"0",remaining:"0",consumed:"2"});
+  assert.equal(extra.some(row=>row.itemId==="unused"),false);
 });
 
 test("frozen legacy order resources form a labelled summary without a private title or unit conversion", () => {
@@ -300,13 +306,15 @@ test("ORDER-A: frozen rental mode labels are read only from the order quote", ()
   assert.equal(display.orderRentalModeLabel({}), null);
 });
 
-test("ORDER-A: unit price keeps eight decimals and the snapshot's real unit pair", () => {
+test("ORDER-A: reference unit prices round to cents without changing the snapshot's unit pair", () => {
   const amount = (value) => ({ currency: "CNY", unit: "yuan", amount: value, scale: 8 });
-  assert.equal(display.orderUnitPriceText(amount("0.12345678"), "1000000", "HAFF_BASE"), "¥0.12345678 / 1,000,000 哈夫币（1 M）");
-  assert.equal(display.orderUnitPriceText(amount("0.00000012"), "60", "ROUND"), "¥0.00000012 / 60 发");
-  assert.equal(display.orderUnitPriceText(amount("1.00000000"), "1", "PIECE"), "¥1.00000000 / 1 件");
-  assert.equal(display.orderUnitPriceText(amount("2.00000000"), null, "DAY"), "¥2.00000000");
-  assert.equal(display.orderUnitPriceText(amount("0.123456789"), "1", "PIECE"), null);
+  assert.equal(display.orderUnitPriceText(amount("0.12345678"), "1000000", "HAFF_BASE"), "约¥0.12 / 1,000,000 哈夫币（1 M）");
+  assert.equal(display.orderUnitPriceText(amount("0.00000012"), "60", "ROUND"), "约¥0.00（不足1分） / 60 发");
+  assert.equal(display.orderUnitPriceText(amount("1.00000000"), "1", "PIECE"), "¥1.00 / 1 件");
+  assert.equal(display.orderUnitPriceText(amount("2.00000000"), null, "DAY"), "¥2.00");
+  assert.equal(display.orderUnitPriceText(amount("0.005"), "1", "PIECE"), "约¥0.01 / 1 件");
+  assert.equal(display.orderUnitPriceText(amount("0.999"), "1", "PIECE"), "约¥1.00 / 1 件");
+  assert.equal(display.orderUnitPriceText(amount("0.12345678901234567"), "1", "PIECE"), null);
   assert.equal(display.orderUnitPriceText(null, "1", "PIECE"), null);
 });
 

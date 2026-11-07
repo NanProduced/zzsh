@@ -5,7 +5,11 @@ import type { Pool, PoolClient } from "pg";
 import * as adminAuthorization from "../src/auth/admin-authorization";
 import * as adminScope from "../src/auth/admin-scope";
 import * as authSecurity from "../src/auth/auth-security";
-import { assertOpeningOnBehalfAccess } from "../src/order/settlement-record";
+import * as adminDirectory from "../src/auth/admin-directory";
+import * as userIdentity from "../src/auth/user-identity";
+import * as orderCore from "../src/order/order";
+import { SecurityApiError } from "../src/auth/security-core";
+import { assertOpeningOnBehalfAccess, lockSettlement } from "../src/order/settlement-record";
 import {
   OPENING_AUTO_CONFIRM_MS,
   openingAutoConfirmDueAt,
@@ -158,12 +162,10 @@ function mockAdminAccess(t: TestContext, permissions: string[], isBoss = false) 
     status: "ACTIVE" as const, isBoss, passwordChangeRequired: false, permissions: new Set(permissions),
   }));
 }
-function accessClient(responsibleAdminId: string | null): PoolClient {
+function accessClient(): PoolClient {
   return {
     async query(sql: string) {
       if (sql.includes("SELECT game_id AS \"gameId\" FROM zzsh_order.rental_order")) return { rows: [{ gameId: "game_1" }], rowCount: 1 };
-      if (sql.includes("FROM zzsh_order.im_order_member mm")) return { rows: [{ one: 1 }], rowCount: 1 };
-      if (sql.includes("responsible_admin_id")) return { rows: [{ responsibleAdminId }], rowCount: 1 };
       throw new Error(`UNEXPECTED_SQL ${sql}`);
     },
   } as unknown as PoolClient;
@@ -172,16 +174,49 @@ const denied = (error: unknown) => (error as { status?: number }).status === 403
 
 test("CS confirmation on behalf requires order.settlement.write", async (t) => {
   mockAdminAccess(t, []);
-  await assert.rejects(assertOpeningOnBehalfAccess(accessClient("admin_1"), "order_1", { userId: "admin_1", sessionId: "session_1" }), denied);
+  await assert.rejects(assertOpeningOnBehalfAccess(accessClient(), "order_1", { userId: "admin_1", sessionId: "session_1" }), denied);
 });
 
-test("a non-responsible admin cannot confirm for a missing party", async (t) => {
+test("an authorized scoped operator can assist even when no IM group or responsible agent is available", async (t) => {
   mockAdminAccess(t, ["order.settlement.write"]);
-  await assert.rejects(assertOpeningOnBehalfAccess(accessClient("admin_other"), "order_1", { userId: "admin_1", sessionId: "session_1" }), denied);
-  await assert.rejects(assertOpeningOnBehalfAccess(accessClient(null), "order_1", { userId: "admin_1", sessionId: "session_1" }), denied);
+  await assert.doesNotReject(assertOpeningOnBehalfAccess(accessClient(), "order_1", { userId: "admin_1", sessionId: "session_1" }));
 });
 
-test("the responsible admin passes the CS on-behalf boundary", async (t) => {
-  mockAdminAccess(t, ["order.settlement.write"]);
-  await assert.doesNotReject(assertOpeningOnBehalfAccess(accessClient("admin_1"), "order_1", { userId: "admin_1", sessionId: "session_1" }));
+test("the fallback still refuses an operator outside the order's game scope", async (t) => {
+  t.mock.method(authSecurity, "assertAdminContextInTransaction", async () => {});
+  t.mock.method(adminScope, "readAdminGameScope", async () => ({ mode: "SELECTED_GAMES" as const, gameIds: ["other_game"] }));
+  t.mock.method(adminAuthorization, "loadEffectiveAdminAccess", async () => ({ status: "ACTIVE" as const, isBoss: false, passwordChangeRequired: false, permissions: new Set(["order.settlement.write"]) }));
+  await assert.rejects(assertOpeningOnBehalfAccess(accessClient(), "order_1", { userId: "admin_1", sessionId: "session_1" }), denied);
+});
+
+test("order settlement fallback keeps permission and game scope without depending on IM membership", async t => {
+  const permissions = new Set(["order.read", "order.settlement.write"]), access = { status: "ACTIVE" as const, isBoss: false, passwordChangeRequired: false, permissions };
+  t.mock.method(adminDirectory, "lockActor", async () => access);
+  t.mock.method(authSecurity, "assertAdminContextInTransaction", async () => {});
+  t.mock.method(orderCore, "lockOrderPartiesInOrder", async () => {});
+  let activeChecks = 0;
+  const active = t.mock.method(userIdentity, "assertActiveInTransaction", async () => { activeChecks++; });
+  const scope = t.mock.method(adminScope, "readAdminGameScope", async () => ({ mode: "ALL_GAMES" as const, gameIds: [] }));
+  const row = { id: "order_1", renterUserId: "renter", ownerUserId: "owner", accountId: "account", listingVersionId: "listing", gameId: "game_1", status: "PAID", depositCents: "0", contentHash: "hash", ruleReleaseId: "release", quote: {}, appId: null, revision: "1" };
+  const sqls: string[] = [];
+  const client = { query: async (sql: string) => {
+    sqls.push(sql);
+    if (sql.includes("current_database()")) return { rows: [{ db: "zzsh_test_order_fallback", actor: "zzsh_order_fallback_r" }] };
+    if (sql.includes("LEFT JOIN zzsh_order.im_order_group")) return { rows: [row] };
+    if (sql.startsWith("SELECT id FROM zzsh_supply.")) return { rows: [] };
+    throw new Error("Unexpected SQL: " + sql);
+  } } as unknown as PoolClient;
+  const actor = { realm: "admin" as const, userId: "staff", sessionId: "session" };
+  assert.equal((await lockSettlement(client, "order_1", actor, false)).id, "order_1");
+  assert.equal(activeChecks, 0, "read-only support can inspect orders with inactive parties");
+  assert.equal((await lockSettlement(client, "order_1", actor, true)).id, "order_1");
+  assert.equal(activeChecks, 2, "writes still enforce the existing party-state gate");
+  assert(!sqls.some(sql => sql.includes("im_order_member")), "IM membership is not a financial authorization gate");
+  active.mock.mockImplementation(async () => { throw new SecurityApiError(401, "UNAUTHENTICATED", "Account unavailable"); });
+  await assert.rejects(lockSettlement(client, "order_1", actor, true), (error: unknown) => (error as { code?: string }).code === "ORDER_PARTY_UNAVAILABLE");
+  active.mock.mockImplementation(async () => {});
+  scope.mock.mockImplementation(async () => ({ mode: "SELECTED_GAMES" as const, gameIds: ["other_game"] }));
+  await assert.rejects(lockSettlement(client, "order_1", actor, true));
+  permissions.delete("order.settlement.write");
+  await assert.rejects(lockSettlement(client, "order_1", actor, true), denied);
 });

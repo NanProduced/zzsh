@@ -3,10 +3,11 @@ import {SecurityApiError} from "../auth/security-core";
 import {chooseCompleteOffer,quoteToGrowthOfferPlan,type GrowthOfferPlan,type GrowthTier,type NormalGrowthTier,type OfferBinding} from "../auth/membership-growth";
 import {canonicalize,normalizeQuote,normalizeTime} from "../supply/content-hash";
 import {yuanAmountObject} from "../supply/decimal";
+import {applyTotalDiscountToQuote} from "../auth/membership-total-discount";
 import type {InternalQuote} from "../supply/pricing";
 
 export type PersonalGrowthBenefits={schema:"membership-benefits-v1";effectiveTier:Exclude<GrowthTier,"UNKNOWN">;policyTier:NormalGrowthTier;priceSource:GrowthOfferPlan["source"];depositSource:GrowthOfferPlan["source"];policyVersion:string};
-export type GrowthConfirmationKnown={knowledge:"KNOWN";policyVersion:string;candidates:Array<{plan:GrowthOfferPlan;quote:InternalQuote}>;entitlementIds:string[];
+export type GrowthConfirmationKnown={knowledge:"KNOWN";policyVersion:string;candidates:Array<{plan:GrowthOfferPlan;quote:InternalQuote;payableRatio?:string}>;entitlementIds:string[];
   /** Filled by the existing E reader. Missing metadata is UNKNOWN, never synthetic STANDARD. */
   effectiveTier?:Exclude<GrowthTier,"UNKNOWN">;policyTier?:NormalGrowthTier;asOfUtc?:string};
 const fail=(message:string):never=>{throw new SecurityApiError(503,"MEMBERSHIP_UNKNOWN",message);};
@@ -27,6 +28,11 @@ export function selectPersonalGrowthOffer(known:GrowthConfirmationKnown,binding:
   let choice:ReturnType<typeof chooseCompleteOffer>;try{choice=chooseCompleteOffer(known.candidates.map(c=>c.plan),asOfUtc);}catch{return fail("Benefit evidence is invalid");}
   if(choice.knowledge!=="KNOWN" || choice.depositCents===null || choice.depositBasis==="UNKNOWN")return fail("Growth or entitlement offer is unavailable");
   const selected=known.candidates.find(c=>c.plan===choice.selected);if(!selected)return fail("Selected offer cannot be recovered");
+  if(selected.payableRatio!==undefined){
+    const base=normalizeQuote({...baseQuote,tenantDeposit:selected.quote.tenantDeposit});
+    const verified=applyTotalDiscountToQuote(base,selected.payableRatio);
+    if(!verified||canonicalize(verified.quote)!==canonicalize(normalizeQuote(selected.quote)))return fail("Selected discount does not match the frozen quote");
+  }
   const depositPlan=known.candidates.find(c=>c.plan.source===choice.depositBasis && (c.plan.depositWaived?"0":c.plan.depositCents)===choice.depositCents && (c.plan.validUntil==null || normalizeTime(c.plan.validUntil)!>normalizeTime(asOfUtc)!))?.plan;
   if(!depositPlan)return fail("Deposit benefit evidence is unavailable");
   // Whole price plan wins; the independent maximum allowance changes only deposit and derived payable total.
@@ -36,7 +42,7 @@ export function selectPersonalGrowthOffer(known:GrowthConfirmationKnown,binding:
     entitlementIds:[...known.entitlementIds].sort(),binding,selectedBenefitVersion:choice.selected.benefitVersion,selectedEntitlementId:choice.selected.entitlementId??null,selectedValidUntil:choice.selected.validUntil??null,
     depositBenefitVersion:depositPlan.benefitVersion,depositEntitlementId:depositPlan.entitlementId??null,depositValidUntil:depositPlan.validUntil??null,
     pricePlanDigest:createHash("sha256").update(canonicalize(normalizeQuote(selected.quote))).digest("hex"),depositCents:choice.depositCents};
-  return {quote,benefits,growth};
+  return {quote,benefits,growth,...(selected.payableRatio===undefined?{}:{payableRatio:selected.payableRatio})};
 }
 
 /** Shared frozen-v4 consumer for settlement. It never reselects current benefits or recalculates an old order. */

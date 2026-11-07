@@ -1,5 +1,6 @@
 "use client";
 import { BusinessUpdateNotices } from "@/components/content/platform-update-notices";
+import { formatReferenceYuan } from "@zzsh/ui/display-money";
 import { ManagedNoticeSections, ManagedNoticeText } from "@/components/content/managed-notice";
 import { usePublicContent } from "@/components/content/public-content-provider";
 import { FormSelect, FormRadioGroup, Input, IntegerStepper, Textarea, DateTimePicker } from "../ui/form-controls";
@@ -140,9 +141,7 @@ function ammoQuantityText(quantity: string): string {
 }
 function formatUnitPrice(amount: string | number | null | undefined): string {
   if (amount === null || amount === undefined || amount === "") return "";
-  const num = Number(amount);
-  if (Number.isNaN(num)) return String(amount);
-  return num.toFixed(2);
+  return formatReferenceYuan(String(amount)) ?? "未确认";
 }
 type MediaEntry = {
   id: string;
@@ -3224,7 +3223,7 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
                     <span className="supply-resource-art"><CatalogItemArt mediaId={"mediaId" in item ? item.mediaId : null}><InventoryIcon code={itemCode} /></CatalogItemArt></span>
                     <div className="supply-resource-info">
                       <div className="supply-resource-name"><label htmlFor={`quantity-${key}`}>{itemName}</label>{help?<FieldHelp label={itemName}>{help}</FieldHelp>:null}</div>
-                      <div className="publish-owner-rate"><span>单价</span><strong>{line?.ownerUnitAmount ? `¥ ${formatUnitPrice(line.ownerUnitAmount.amount)} / ${inputUnit}` : !item.itemId || unpriced ? "待配置" : ownerIncomePreviewPending ? "读取中…" : "暂未取得"}</strong>{line ? <FieldHelp label={`${itemName}单价`}>按当前规则预估，实际收入以核价和结算为准。</FieldHelp> : null}</div>
+                      <div className="publish-owner-rate"><span>单价</span><strong>{line?.ownerUnitAmount ? `${formatUnitPrice(line.ownerUnitAmount.amount)} / ${inputUnit}` : !item.itemId || unpriced ? "待配置" : ownerIncomePreviewPending ? "读取中…" : "暂未取得"}</strong>{line ? <FieldHelp label={`${itemName}单价`}>单价按分显示，实际收入以核价和结算为准。</FieldHelp> : null}</div>
                     </div>
                     {item.required?<span className="supply-resource-required">必填</span>:null}
                   </div>

@@ -189,6 +189,29 @@ test("an already exact-cent assigned fee retains its padded text and previously 
   assert.deepEqual([result.amounts.saleEarnings, result.amounts.fullPayoutMoney, result.amounts.ownerNet, result.fingerprint], ["10.2500", "0.820000", "9.430000", "ecfa58da3835ced028cbb6b55dd0fe202cc3d2a6e25bfee74d67e725d17b6f5e"]);
 });
 
+test("new fractional legacy proposals round stored amounts once and keep the money equation balanced",()=>{
+ const original=source({isFullPayout:"1",accountPrices:{...prices("8.00"),barrett:"0.01"},orderPrices:{...prices("8.00"),barrett:"0.01"}});
+ for(const caller of [renter,owner]){
+  const command={kind:"propose" as const,caller,quantities:qty("1.00","0.50")};
+  const result=planLegacyContinuation(admitLegacyEvidence(original),command);assert(result.ok);
+  assert.deepEqual([result.amounts.saleEarnings,result.amounts.returnOrderMoney,result.amounts.fullPayoutMoney,result.amounts.ownerNet,result.amounts.commissionPool],
+   ["10.01","87.00","0.80","9.21","2.99"]);
+  const cents=(key:string)=>BigInt(legacyPlanYuanToCents(result.amounts[key]!));
+  assert.equal(cents("ownerNet")+cents("fullPayoutMoney")+cents("returnOrderMoney")+cents("commissionPool"),cents("payMoney"));
+  const facts=deriveLegacyFacts(initialLegacyFacts(original),result,command,"fractional-input","fractional-version");
+  assert.equal(facts.evidence.source.saleEarnings,"10.01");assert.equal(facts.evidence.source.returnOrderMoney,"87.00");
+  const confirmed=planLegacyContinuation(facts.evidence,{kind:"confirm",caller:caller.role==="renter"?owner:renter});assert(confirmed.ok);
+  assert.equal(confirmed.amounts.ownerNet,"9.21");assert.equal(confirmed.amounts.refundNet,"87.00");assert.equal(confirmed.amounts.commissionPool,"2.99");
+  const replay=planLegacyContinuation(admitLegacyEvidence(original),command);assert(replay.ok);assert.equal(replay.fingerprint,result.fingerprint);
+ }
+});
+
+test("rounding that would over-allocate an old payment stops the proposal",()=>{
+ const original=source({profitDot:"0",accountPrices:{...prices("8.00"),barrett:"0.01"},orderPrices:{...prices("8.00"),barrett:"0.01"}});
+ const result=planLegacyContinuation(admitLegacyEvidence(original),{kind:"propose",caller:renter,quantities:qty("1.00","0.50")});
+ assert.equal(result.ok,false);if(!result.ok)assert.equal(result.code,"CONFIRM_POOL_NEGATIVE");
+});
+
 test("CONFIRM consumes the stored fee and never recomputes the newly normalized PROPOSE fee", () => {
   const command = { kind: "confirm" as const, caller: owner }, original = source({ orderStatus: "8", isFullPayout: "1", saleEarnings: "10.20", returnOrderMoney: "87.00", fullPayoutMoney: "0.81" });
   const result = planLegacyContinuation(admitLegacyEvidence(original), command); assert(result.ok);
@@ -199,9 +222,9 @@ test("CONFIRM consumes the stored fee and never recomputes the newly normalized 
   assert.throws(() => deriveLegacyFacts(initialLegacyFacts(fractional), unchanged, command, "synthetic-confirm-input", "synthetic-confirm-version"), /PRECISION_UNSUPPORTED/);
 });
 
-test("legacy PROPOSE still refuses negative quantities, non-cent sale and the old fee-column overflow", () => {
+test("legacy PROPOSE refuses negative quantities and the old fee-column overflow", () => {
   const command = { kind: "propose" as const, caller: renter, quantities: qty("1.00", "1.00") };
-  for (const amount of ["-0.20", "0.201", "1249999990.00", "1249999989.99"]) {
+  for (const amount of ["-0.20", "1249999990.00", "1249999989.99"]) {
     const original = source({ isFullPayout: "1", payMoney: "2000000000.00", paidPay: [{ id: "9", payOrderSn: "P7", payMoney: "2000000000.00" }], accountPrices: { ...prices("8.00"), barrett: amount }, orderPrices: { ...prices("8.00"), barrett: amount } });
     const result = planLegacyContinuation(admitLegacyEvidence(original), command);
     if (result.ok) assert.throws(() => deriveLegacyFacts(initialLegacyFacts(original), result, command, "synthetic-invalid-input", "synthetic-invalid-version"));

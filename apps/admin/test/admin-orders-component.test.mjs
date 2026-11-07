@@ -533,6 +533,46 @@ test('optional finance/group reads are independent and never call controlled set
   await act(async () => stale(response(proof('/finance/documents/ORDER:native-old'))));assert(node.textContent.includes('NATIVE-CURRENT'));assert(!node.textContent.includes('NATIVE-OLD'));assert(node.textContent.includes('开租未记录'));assert(!calls.some(p=>p.includes('/settlement')));
 });
 
+test('an authorized order detail opens the exact order in the support workbench',async t=>{
+ const {root,node,AdminOrderChainView}=await setup(t),opened=[];
+ const native={...chainOrder,id:'native-route',displayNo:'NATIVE-ROUTE',status:'PAID',source:{origin:'NATIVE'}};
+ globalThis.fetch=async input=>{const path=String(input);if(path.includes('/im?'))return response({teamState:'READY',canRead:true});if(path.includes('readMode=combined'))return response({order:native});return response({error:{code:'NOT_FOUND'}},404);};
+ const props={...chainProps('support-link'),snapshot:{...snapshotFor('support-link'),permissions:['order.read','im.support.read']},objectOnly:true,initialOrderId:native.id,onOpenPath:path=>opened.push(path)};
+ await act(async()=>root.render(createElement(AdminOrderChainView,props)));await until(()=>node.textContent.includes('进入客服工作台处理本单'));
+ await act(async()=>buttonNamed(node,'进入客服工作台处理本单').click());
+ const target=new URL(opened.at(-1),'http://127.0.0.1');assert.equal(target.pathname,'/support');assert.equal(target.searchParams.get('section'),'orders');assert.equal(target.searchParams.get('order'),native.id);assert.equal(target.searchParams.get('fromOrderId'),native.id);
+});
+
+test('authorized staff can open fulfillment from the order even when its IM group is unavailable',async t=>{
+ const {root,node,browser,AdminOrderChainView}=await setup(t),calls=[];
+ const native={...chainOrder,id:'fallback-order',displayNo:'FALLBACK',status:'PAID',source:{origin:'NATIVE'},
+  frozenAccount:{source:'ORDER_VERSION',haff:{itemId:'haff-id',code:'haff',name:'哈夫币',quantity:'5000',unit:'HAFF_BASE'},materials:[],termDays:'1',termSeconds:'86400',loginMethodText:null}};
+ globalThis.fetch=async (input,init={})=>{const path=String(input);calls.push({path,method:init.method??'GET'});
+  if(path.includes('readMode=combined'))return response({order:native});
+  if(path.includes('/settlement'))return response({orderId:native.id,rentalStarted:false,openings:[],settlement:null,ready:false,reasons:['SETTLEMENT_VERSION_MISSING']});
+  return response({error:{code:'NOT_FOUND'}},404);};
+ const props={...chainProps('fallback-admin'),snapshot:{...snapshotFor('fallback-admin'),permissions:['order.read','order.settlement.write','supply.rental_account.read']},objectOnly:true,initialOrderId:native.id};
+ await act(async()=>root.render(createElement(AdminOrderChainView,props)));await until(()=>node.textContent.includes('客服处理订单'));
+ assert.match(node.textContent,/订单群不可用时也能按权限办理/);
+ const entry=node.querySelector('[data-action="open-fulfillment-panel"]');assert.ok(entry);
+ await act(async()=>entry.click());await until(()=>browser.document.querySelector('.im-order-panel'));
+ assert.match(browser.document.body.textContent,/哈夫币/);assert.equal(browser.document.body.querySelector('.im-support-fulfillment-lines input').value,'5000');
+ assert(!calls.some(call=>call.method==='POST'));
+});
+
+test('pending-payment support cancellation is visible only with order write permission',async t=>{
+ const {root,node,AdminOrderChainView}=await setup(t);
+ const native={...chainOrder,id:'unpaid-order',displayNo:'UNPAID',status:'PENDING_PAYMENT',source:{origin:'NATIVE'}};
+ globalThis.fetch=async input=>String(input).includes('readMode=combined')?response({order:native}):response({error:{code:'NOT_FOUND'}},404);
+ const props={...chainProps('pending-operator'),objectOnly:true,initialOrderId:native.id};
+ await act(async()=>root.render(createElement(AdminOrderChainView,{...props,snapshot:{...snapshotFor('pending-operator'),permissions:['order.read','order.settlement.write']}})));
+ await until(()=>node.textContent.includes('取消待付款订单'));
+ assert.ok(node.querySelector('[data-support-unpaid-cancel="true"]'));
+ await act(async()=>root.render(createElement(AdminOrderChainView,{...props,snapshot:snapshotFor('pending-reader')})));
+ await until(()=>node.textContent.includes('UNPAID'));
+ assert.equal(node.querySelector('[data-support-unpaid-cancel="true"]'),null);
+});
+
 test('legacy finance links preserve original attempts and clear on finance permission loss', async t => {
   const {root,node,AdminOrderChainView}=await setup(t),opened=[];
   const legacy={...chainOrder,id:'observed-old',displayNo:'OLD-ORDER',status:'CANCELLED',source:{origin:'LEGACY',statusLabel:'已取消'}};

@@ -270,7 +270,7 @@ export function parseDeltaPriceLines(value: unknown, mode: "SPREAD" | "PERCENT")
     for (const field of ["buyerUnitAmount", "ownerUnitAmount"] as const) {
       const entryValue = line[field];
       if (entryValue === undefined) continue;
-      if (typeof entryValue !== "string" || !DECIMAL_PATTERN.test(entryValue)) throw invalid("Unit amount is invalid");
+      if (typeof entryValue !== "string" || entryValue.length > 25 || !DECIMAL_PATTERN.test(entryValue) || entryValue.split(".")[0]!.length > 16) throw invalid("Unit amount is invalid");
       parsed[field] = entryValue;
     }
     if (pricingKind === "FIXED_UNIT") {

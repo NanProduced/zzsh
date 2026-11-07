@@ -141,7 +141,7 @@ export function OrderCardMessage({ message, info, onOpenOrder, onConfirmOpening,
   message: NimMessageLike; info: OrderTeamAccess; onOpenOrder?: () => void;
   /** Party confirmation runs through the user order endpoint; resolution is never faked locally. */
   onConfirmOpening?: (info: OrderTeamAccess) => Promise<void>;
-  /** Staff confirmation on behalf of one missing party; the server re-checks the responsible admin. */
+  /** Staff confirmation on behalf of one missing party; the server re-checks permission and order scope. */
   onConfirmOpeningOnBehalf?: (info: OrderTeamAccess, party: "RENTER" | "OWNER") => Promise<void>;
 }) {
   const [expanded, setExpanded] = useState(false);

@@ -2,12 +2,13 @@ import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
 import type { Pool, PoolClient } from 'pg';
 import { DistributionDueService, loadDistributionDueRuntime } from '../src/finance/distribution-due.module';
+const legacy:typeof import('../src/finance/legacy-commission-due-worker')=require('../src/finance/legacy-commission-due-worker');
 
 type Drive = { kind: 'new' | 'resume' | 'find'; requestId?: string; limit?: number; client: string | null };
 let sessionSequence = 0;
 
 /** One fake server shared by both instances: exactly one session may hold advisory key 806007. */
-function harness(options: { batchLimit?: number; workerId?: string; server?: { holder: string | null } } = { batchLimit: 20 }) {
+function harness(options: { batchLimit?: number; workerId?: string; server?: { holder: string | null }; legacyDue?:boolean } = { batchLimit: 20 }) {
   const locks = options.server ?? { holder: null as string | null };
   const driven: Drive[] = [];
   const control = { unfinished: null as null | { requestId: string }, state: 'COMPLETE' as 'COMPLETE' | 'UNKNOWN', failNew: false, failResume: false };
@@ -56,9 +57,22 @@ function harness(options: { batchLimit?: number; workerId?: string; server?: { h
       return { httpStatus: control.state === 'UNKNOWN' ? 503 : 200, batch: { state: control.state, requestId: input.requestId, results: [{ id: 'earning_a' }], notAttempted: 0 }, replayed: false };
     },
   };
-  const service = new DistributionDueService({ pool, store: store as any, intervalMs: 60000, batchLimit: options.batchLimit ?? 20, workerId: options.workerId ?? 'main' });
+  const service = new DistributionDueService({ pool, store: store as any, intervalMs: 60000, batchLimit: options.batchLimit ?? 20, workerId: options.workerId ?? 'main', legacyDue:options.legacyDue });
   return { service, driven, control, locks, clients, keys: () => driven.filter(d => d.kind !== 'find').map(d => d.requestId), newKey: () => newKey };
 }
+
+test('legacy dues reuse the live worker session and continue from the previous cursor',async t=>{
+ const calls:Array<{client:string;cursor:unknown;limit:number}>=[];
+ t.mock.method(legacy,'runLegacyCommissionDuePage',async(...[client,cursor,limit]:Parameters<typeof legacy.runLegacyCommissionDuePage>)=>{calls.push({client:(client as any).id,cursor,limit});return {available:true,cursor:{at:'2026-11-01T00:00:00.000000Z',id:'duty_1'},posted:1,deferred:0,scanned:1};});
+ const h=harness({legacyDue:true,batchLimit:5});await h.service.tick();await h.service.tick();
+ assert.equal(calls.length,2);assert.equal(calls[0]!.client,h.driven[1]!.client);assert.deepEqual(calls[1]!.cursor,{at:'2026-11-01T00:00:00.000000Z',id:'duty_1'});assert.equal(calls[1]!.limit,5);
+ await h.service.onApplicationShutdown();
+});
+test('an unknown legacy commit releases the worker session before recovery',async t=>{
+ t.mock.method(legacy,'runLegacyCommissionDuePage',async()=>{throw new legacy.LegacyCommissionCommitUnknown();});
+ const h=harness({legacyDue:true});await h.service.tick();assert.equal(h.locks.holder,null);assert.equal(h.clients.filter(c=>c.alive).length,0);
+ await h.service.onApplicationShutdown();
+});
 
 test('the driver only runs while its own session still holds the due lock', async () => {
   const h = harness();

@@ -9,6 +9,7 @@
 
 import type { InlineStatusTone } from "../../components/ui/badge";
 import type { LegacyHistoricalRead } from "../../api";
+import { formatReferenceYuan } from "@zzsh/ui/display-money";
 export type { LegacyHistoricalRead } from "../../api";
 
 export type QueueItem = {
@@ -743,13 +744,6 @@ export function haffRateText(value: string | null | undefined): string {
   return `1元=${BigInt(whole!)}${tail ? "." + tail : ""}万哈夫币`;
 }
 
-function displayedUnitAmount(value: string | null): string | null {
-  if (typeof value !== "string" || !/^\d{1,24}(?:\.\d{1,8})?$/.test(value)) return null;
-  const [whole, fraction = ""] = value.split("."), padded = fraction.padEnd(8, "0");
-  const cents = BigInt(whole!) * 100n + BigInt(padded.slice(0, 2)) + (padded[2]! >= "5" ? 1n : 0n);
-  return `${cents / 100n}.${String(cents % 100n).padStart(2, "0")}`;
-}
-
 export function resourceBillingRows(version: Version) {
   const inventory = version.declaration.inventory, lines = version.quote?.lines ?? [];
   return [...new Set([...inventory.map(item => item.itemId), ...lines.map(line => line.itemId)])].flatMap(itemId => {
@@ -766,7 +760,7 @@ export function resourceBillingRows(version: Version) {
     return [{
       itemId, name: named?.name || "名称待核", quantity: quantityText, unit,
       unitQuantity: grouped ? "1" : line?.unitQuantity ? quantityOrLabel(line.unitQuantity, "未提供") : "未提供",
-      unitAmount: displayedUnitAmount(line?.buyerUnitAmount?.amount ?? null), amount,
+      unitPriceLabel: formatReferenceYuan(line?.buyerUnitAmount?.amount ?? null,{grouped:true}), amount,
       quantityNote: item && line && item.quantity !== line.quantity ? `报价数量 ${quantityOrLabel(line.quantity, "未提供")} ${unitText(line.unit, named?.code)}` : !item && line ? "数量来自本版报价" : null,
       zero: typeof quantity === "string" && /^0+(?:\.0+)?$/.test(quantity) && (!line || /^0+(?:\.0+)?$/.test(line.quantity)) && (amount === null || /^0+(?:\.0+)?$/.test(amount)),
     }];

@@ -99,6 +99,8 @@ test('detail presentation keeps fields unique, copy bound to public number, and 
   assert.equal(host.querySelector('.account-detail-gallery .detail-image-fallback'),null,'missing media has no large failed-image frame');
   assert.equal(host.querySelector('.account-detail-gallery .account-media-caption'),null,'missing image message is not duplicated');
   assert.equal(m.exports.unitPriceText(line),'¥10 / 组');assert.equal(m.exports.unitPriceText({...line,code:'df_billable_top_insure_card',unitPriceLabel:'¥5.00000000 / 1 天'}),'¥5 / 天');assert.equal(m.exports.unitPriceText({...line,code:'df_billable_barrett_bullet',unitPriceLabel:'¥0.50000000 / 1 发'}),'¥0.5 / 发');assert.equal(m.exports.unitPriceText({...line,unitPriceLabel:null}),'未确认');
+  assert.equal(m.exports.unitPriceText({...line,code:'df_billable_barrett_bullet',unitPriceLabel:'¥0.00400000 / 1 发'}),'约¥0.00（不足1分） / 发');
+  assert.equal(m.exports.unitPriceText({...line,code:'df_billable_barrett_bullet',unitPriceLabel:'¥1.235 / 1 发'}),'约¥1.24 / 发');
   assert.equal(host.querySelector('.account-detail-deal'),null);data.rentalMode='fast';await render();assert.match(host.querySelector('.account-detail-deal').textContent,/特惠.*极速出租/);data.rentalMode='ordinary';await render();assert.equal(host.querySelector('.account-detail-deal'),null);
   assert.ok(!host.textContent.includes('7×24'));assert.ok(!host.textContent.includes('已审核'));assert.ok(!host.textContent.includes('资金安全'));
   await React.act(async()=>host.querySelector('.account-share').click());assert.equal(copied,'http://127.0.0.1:4220/accounts/a');assert.equal(host.querySelector('.account-link-notice'),null);assert.match(window.document.querySelector('.account-copy-feedback').textContent,/链接已复制/);

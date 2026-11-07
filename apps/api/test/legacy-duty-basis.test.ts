@@ -7,6 +7,7 @@ import {legacyOwnerUserId} from "../src/supply/legacy-user-migration";
 import {planLegacyContinuation} from "../src/order/legacy-continuation-calc";
 import {deriveLegacyFacts,initialLegacyFacts,type LegacyDutyRow,type LegacyHeadRow} from "../src/order/legacy-continuation-model";
 import {readLegacyDutyBasis} from "../src/order/legacy-duty-basis";
+import {legacyDutyBasisFromTrade} from "../src/finance/legacy-duty-finance";
 import {importLegacyCompletedCommission,type LegacyCompletedCommissionImport} from "../src/order/legacy-continuation-evidence";
 import {legacyBinding,legacyEvidence,legacySource} from "./legacy-continuation-fixture";
 const e:typeof import("../src/order/legacy-continuation-evidence")=require("../src/order/legacy-continuation-evidence");
@@ -20,8 +21,10 @@ test("162 basis replays the exact confirm plan per original commission; does not
  let fingerprint=plan.fingerprint;
  t.mock.method(e,"readLegacyContinuationBinding",async()=>legacyBinding);t.mock.method(e,"readLegacyContinuationHead",async()=>head);t.mock.method(e,"readLegacyContinuationEvidence",async()=>after);
  const client={query:async(sql:string)=>({rows:sql.includes("plan_fingerprint")?[{...head,actor:{realm:"user",userId:legacyBinding.ownerUserId},planFingerprint:fingerprint,commissionRevisions:plan.commissionRevisions,createdAt:"2026-10-16T01:02:03.123456Z"}]:sql.includes("id=ANY")?[before,after]:[]})} as unknown as PoolClient;
- const duty:LegacyDutyRow={id:"fixture_duty",orderId:legacyBinding.id,continuationVersionId:null,kind:"COMMISSION",sourceRecordId:"90",counterpartyUserId:legacyOwnerUserId("legacy_mysql_restore","la_user","44"),amountCents:"60",currency:"CNY",status:"MATURED",source:"LEGACY_IMPORT",sourceStatus:"1",level:"2",ratio:"20.00000000",maturityAt:"2026-10-23T01:02:03.123456Z",revision:"3",settledBy:null,settledRefType:null,settledRefId:null,settledRefDigest:null};
+ const duty:LegacyDutyRow={id:"fixture_duty",orderId:legacyBinding.id,continuationVersionId:head.id,admissionId:null,kind:"COMMISSION",sourceRecordId:"90",counterpartyUserId:legacyOwnerUserId("legacy_mysql_restore","la_user","44"),amountCents:"60",currency:"CNY",status:"MATURED",source:"LEGACY_IMPORT",sourceStatus:"1",level:"2",ratio:"20.00000000",maturityAt:"2026-10-23T01:02:03.123456Z",revision:"3",settledBy:null,settledRefType:null,settledRefId:null,settledRefDigest:null};
  const basis=await readLegacyDutyBasis(client,legacyBinding.id,duty);if(basis.state!=="KNOWN")assert.fail(basis.reason);assert.equal(basis.amountCents,"60");assert.equal(basis.sourceRecordDigest,proof.digest);assert.notEqual(basis.sourceRecordDigest,legacyBinding.sourceDigest);assert.equal(basis.sourceTimeKind,"CONFIRMED_AT");assert.equal(basis.basisFactsDigest,after.factsDigest);
+ assert.equal(legacyDutyBasisFromTrade(duty,basis).knowledge,"KNOWN");
+ assert.deepEqual(await readLegacyDutyBasis(client,legacyBinding.id,{...duty,continuationVersionId:null}),{state:"UNKNOWN",reason:"COMMISSION_CONFIRMATION_LINK_MISSING"});
  assert.equal((await readLegacyDutyBasis(client,legacyBinding.id,{...duty,amountCents:"99900"})).state,"UNKNOWN");assert.equal((await readLegacyDutyBasis(client,legacyBinding.id,{...duty,maturityAt:"2026-10-30T01:02:03.123456Z"})).state,"UNKNOWN");
  const refund:LegacyDutyRow={...duty,kind:"RENTER_REFUND",source:"CONTINUATION",sourceRecordId:head.id,continuationVersionId:head.id,counterpartyUserId:legacyBinding.renterUserId,amountCents:"8200",maturityAt:null};
  const net=await readLegacyDutyBasis(client,legacyBinding.id,refund);assert.equal(net.state,"KNOWN");if(net.state==="KNOWN")assert.equal(net.currentNetRefundCents,"8200");
@@ -33,6 +36,18 @@ test("current effective net drift refuses refund even when disposition is AVAILA
  t.mock.method(e,"readLegacyContinuationBinding",async()=>legacyBinding);t.mock.method(e,"readLegacyContinuationEvidence",async()=>current);t.mock.method(e,"readLegacyContinuationHead",async()=>({id:"later_release",orderId:legacyBinding.id,revision:"2",inputEvidenceId:"earlier",resultEvidenceId:current.id,stage:4,isSettle:0,command:"RELEASE",amounts:facts.amounts}));
  const duty:LegacyDutyRow={id:"refund",orderId:legacyBinding.id,continuationVersionId:"confirm",kind:"RENTER_REFUND",sourceRecordId:"confirm",counterpartyUserId:legacyBinding.renterUserId,amountCents:"8200",currency:"CNY",status:"PENDING",source:"CONTINUATION",sourceStatus:null,level:null,ratio:null,maturityAt:null,revision:"1",settledBy:null,settledRefType:null,settledRefId:null,settledRefDigest:null};
  const result=await readLegacyDutyBasis({query:async()=>{throw new Error("must refuse before original command query");}} as unknown as PoolClient,legacyBinding.id,duty);assert.deepEqual(result,{state:"UNKNOWN",reason:"CURRENT_REFUND_AMOUNT_MISMATCH"});
+});
+test("staff-confirmed legacy settlement replays the same owner and renter duties",async t=>{
+ const facts=initialLegacyFacts(legacySource({orderStatus:"8",saleEarnings:"10.00",returnOrderMoney:"87.00"})),before=legacyEvidence(facts);
+ const command={kind:"confirm" as const,caller:{role:"admin" as const,legacyUserId:""}},plan=planLegacyContinuation(facts.evidence,command);assert(plan.ok);
+ const after={...legacyEvidence(deriveLegacyFacts(facts,plan,command,before.id,"staff_confirm")),id:"staff_result",sourceKind:"DERIVED" as const,evidenceVersion:"2"};
+ const head:LegacyHeadRow={id:"staff_confirm",orderId:legacyBinding.id,revision:"1",inputEvidenceId:before.id,resultEvidenceId:after.id,stage:4,isSettle:0,command:"CONFIRM",amounts:after.facts.amounts};
+ t.mock.method(e,"readLegacyContinuationBinding",async()=>legacyBinding);t.mock.method(e,"readLegacyContinuationHead",async()=>head);t.mock.method(e,"readLegacyContinuationEvidence",async()=>after);
+ const client={query:async(sql:string)=>({rows:sql.includes("plan_fingerprint")?[{...head,actor:{realm:"admin",userId:who.userId},planFingerprint:plan.fingerprint,commissionRevisions:plan.commissionRevisions,createdAt:"2026-10-16T01:02:03.123456Z"}]:sql.includes("id=ANY")?[before,after]:[]})} as unknown as PoolClient;
+ const owner:LegacyDutyRow={id:"owner_duty",orderId:legacyBinding.id,continuationVersionId:head.id,kind:"OWNER_CREDIT",sourceRecordId:head.id,counterpartyUserId:legacyBinding.ownerUserId,
+  amountCents:"1000",currency:"CNY",status:"PENDING",source:"CONTINUATION",sourceStatus:null,level:null,ratio:null,maturityAt:null,revision:"1",settledBy:null,settledRefType:null,settledRefId:null,settledRefDigest:null};
+ const renter:LegacyDutyRow={...owner,id:"renter_duty",kind:"RENTER_REFUND",counterpartyUserId:legacyBinding.renterUserId,amountCents:"8200"};
+ for(const duty of [owner,renter]){const basis=await readLegacyDutyBasis(client,legacyBinding.id,duty);assert.equal(basis.state,"KNOWN");if(basis.state==="KNOWN")assert.equal(basis.amountCents,duty.amountCents);}
 });
 function completedInput(kind:"COMPLETED_AT"|"MATURES_AT"):LegacyCompletedCommissionImport {
  const commission={id:"91",beneficiaryId:"44",ratio:"20.00",level:"2",status:"1",storedEarnings:"10.00"},canonical=canonicalize({id:"91",order_id:"7",user_id:"44",ratio:"20.00",level:"2",status:"1",earnings:"10.00"}),sourceRecord={sourceRecordId:"91",canonical,digest:sha256Hex(canonical),evidenceRef:"FIXTURE_ORIGINAL_COMMISSION"},cutoff="2026-10-16T00:00:00.000000Z",at=kind==="COMPLETED_AT"?"2026-10-01T01:02:03.123456Z":"2026-10-08T01:02:03.123456Z";

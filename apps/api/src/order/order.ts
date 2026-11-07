@@ -57,7 +57,7 @@ export type OrderRow = {
   remindDueAt: string | null;
   addRound: number;
   escalationState: string;
-  cancelReason: "USER" | "TIMEOUT" | "PRESTART_TERMINATED" | "MANUAL_CLOSE" | "SUPPORT_CANCELLED_REFUND" | null;
+  cancelReason: "USER" | "TIMEOUT" | "PRESTART_TERMINATED" | "MANUAL_CLOSE" | "SUPPORT_CANCELLED_REFUND" | "SUPPORT_UNPAID" | null;
   cancelledAt: string | null;
   createdAt: string;
   lastMessageAt?: string | null;

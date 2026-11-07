@@ -148,7 +148,7 @@ function OrderTimeline({ order, facts, party }: { order: Order; facts: OrderStag
   if (order.cancelledAt) {
     events.push({
       key: "cancelled",
-      label: `取消${order.cancelReason === "USER" ? "（租客取消）" : order.cancelReason === "TIMEOUT" ? "（到期未支付）" : order.cancelReason === "PRESTART_TERMINATED" ? "（未开租终止）" : ""}`,
+      label: `取消${order.cancelReason === "USER" ? "（租客取消）" : order.cancelReason === "TIMEOUT" ? "（到期未支付）" : order.cancelReason === "SUPPORT_UNPAID" ? "（客服处理）" : order.cancelReason === "PRESTART_TERMINATED" ? "（未开租终止）" : ""}`,
       time: order.cancelledAt ?? null,
       state: "closed",
     });

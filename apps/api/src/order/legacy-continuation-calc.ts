@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { canonicalize } from "../supply/content-hash";
-import { addDecimal, DecimalError, divideToScale, multiplyDecimal, parseNonNegativeDecimal, subtractDecimal, formatDecimalAtScale, type Decimal } from "../supply/decimal";
+import { addDecimal, DecimalError, divideToScale, multiplyDecimal, parseNonNegativeDecimal, parseSignedDecimal, subtractDecimal, formatDecimalAtScale, type Decimal } from "../supply/decimal";
 
 /** Old settlement arithmetic. Plans only: no database, clock, route, or ledger write. */
 export const LEGACY_CONTINUATION_CALC_VERSION = "legacy-continuation-calc.v1";
@@ -26,7 +26,7 @@ export type LegacyContinuationEvidence = {
   provenance: { profitDot: "ORDER_COLUMN"; baseBot: "ACCOUNT_COLUMN_AT_CUTOFF_NOT_ORDER_FROZEN" };
   parameterDigest: string; source: LegacyContinuationSource;
 };
-type Caller = { role: "renter" | "owner" | "admin" | "other"; legacyUserId: string };
+type Caller = { role: "renter" | "owner" | "admin" | "other"; legacyUserId: string; onBehalf?: "renter" | "owner" };
 export type LegacyCommand =
   | { kind: "preview" | "propose"; caller: Caller; quantities: LegacyQuantities }
   | { kind: "confirm" | "reject" | "hold" | "release" | "confiscate"; caller: Caller };
@@ -170,11 +170,11 @@ function payoutFields(kind: "preview" | "propose", sale: Decimal, assigned: Deci
   if (kind === "preview") return { fullPayoutMoney: null, ownerNet: null };
   if (assigned) {
     const exactCents = (value: Decimal) => value.scale <= 2 || value.value % (10n ** BigInt(value.scale - 2)) === 0n;
-    if (!exactCents(sale)) throw new DecimalError("legacy payout sale has sub-cent precision");
-    // Preserve accepted text; only a sub-cent assigned fee crosses the old DECIMAL(10,2) boundary.
+    // Preserve already accepted values; new sub-cent values cross the old DECIMAL(10,2) boundary.
     const fee = exactCents(assigned) ? assigned : divideToScale(assigned, dec("1", "one"), 2);
-    if (fee.value < 0n || gt(fee, sale) || gt(fee, dec("99999999.99", "legacy payout maximum"))) throw new DecimalError("legacy payout is out of range");
-    return { fullPayoutMoney: text(fee), ownerNet: text(subtractDecimal(sale, fee)) };
+    const storedSale = exactCents(sale) ? sale : divideToScale(sale, dec("1", "one"), 2);
+    if (fee.value < 0n || gt(fee, storedSale) || gt(fee, dec("99999999.99", "legacy payout maximum"))) throw new DecimalError("legacy payout is out of range");
+    return { fullPayoutMoney: text(fee), ownerNet: text(subtractDecimal(storedSale, fee)) };
   }
   if (stored === null) return { fullPayoutMoney: null, ownerNet: null };
   return { fullPayoutMoney: null, ownerNet: text(subtractDecimal(sale, dec(stored, "stored payout"))) };
@@ -190,9 +190,26 @@ function revisions(source: LegacyContinuationSource, pool: Decimal) {
   });
 }
 function refuse(code: string, observed: Record<string, string | null> = {}): CalcRefusal { return { ok: false, code, amounts: observed }; }
-function finish(source: LegacyContinuationEvidence, command: LegacyCommand, plan: Omit<AmountPlan, "ok" | "applied" | "fingerprint" | "recognitionDelta" | "assignments"> & { assignments?: AmountPlan["assignments"] }): AmountPlan {
-  const fingerprint = digest({ evidence: source.parameterDigest, command });
-  return { ok: true, assignments: null, ...plan, applied: false, recognitionDelta: "0", fingerprint };
+function finish(source: LegacyContinuationEvidence, command: LegacyCommand, plan: Omit<AmountPlan, "ok" | "applied" | "fingerprint" | "recognitionDelta" | "assignments"> & { assignments?: AmountPlan["assignments"] }): AmountPlan | CalcRefusal {
+  let amounts=plan.amounts,normalized=false;
+  if(command.kind==="propose"){
+    const values=Object.entries(amounts).map(([key,value])=>[key,value===null?null:parseSignedDecimal(value,18,key)] as const);
+    // Only proposals previously unable to persist require a new rounding fingerprint.
+    normalized=values.some(([,value])=>value!==null&&value.scale>2&&value.value%10n**BigInt(value.scale-2)!==0n);
+    if(normalized){
+      amounts=Object.fromEntries(values.map(([key,value])=>[key,value===null?null:text(divideToScale(value,{value:1n,scale:0},2))]));
+      const value=(key:string)=>parseNonNegativeDecimal(amounts[key]!,2,key);
+      const feeText=amounts.fullPayoutMoney??source.source.fullPayoutMoney;
+      if(feeText===null)return refuse("MISSING_STORED_SETTLEMENT");
+      const sale=value("saleEarnings"),returned=value("returnOrderMoney"),pay=value("payMoney"),fee=divideToScale(parseNonNegativeDecimal(feeText,8,"stored payout"),{value:1n,scale:0},2);
+      const net=subtractDecimal(sale,fee),pool=poolOf(pay,sale,returned);
+      if(net.value<0n)return refuse("OWNER_NET_NEGATIVE");
+      if(pool.value<0n)return refuse("CONFIRM_POOL_NEGATIVE");
+      amounts.ownerNet=text(net);amounts.commissionPool=text(pool);
+    }
+  }
+  const fingerprint = digest({ evidence: source.parameterDigest, command, ...(normalized?{rounding:"LEGACY_COLUMN_HALF_UP_CENT_V1"}:{}) });
+  return { ok: true, assignments: null, ...plan, amounts, applied: false, recognitionDelta: "0", fingerprint };
 }
 export function planLegacyContinuation(evidence: LegacyContinuationEvidence, command: LegacyCommand): AmountPlan | CalcRefusal {
   if (evidence?.schemaVersion !== 1 || evidence.legacyOrderId !== evidence.source?.legacyOrderId || evidence.provenance?.profitDot !== "ORDER_COLUMN" || evidence.provenance?.baseBot !== "ACCOUNT_COLUMN_AT_CUTOFF_NOT_ORDER_FROZEN") return refuse("EVIDENCE_RELATION");
@@ -202,9 +219,9 @@ export function planLegacyContinuation(evidence: LegacyContinuationEvidence, com
   if (evidence.admission !== "PARAMETER_COMPLETE" || checked.admission !== "PARAMETER_COMPLETE") return refuse("EVIDENCE_ISOLATED");
   const source = checked.source;
   const caller = command.caller;
-  if (caller.role === "admin" || caller.role === "other") {
-    if (command.kind === "preview" || command.kind === "propose" || command.kind === "confirm" || command.kind === "reject") return refuse("STAFF_CANNOT_CONFIRM");
-  }
+  if (caller.role === "other" && ["preview", "propose", "confirm", "reject"].includes(command.kind)) return refuse("NOT_PARTY");
+  if (caller.onBehalf !== undefined && (caller.role !== "admin" || !["preview", "propose"].includes(command.kind) || !["renter", "owner"].includes(caller.onBehalf))) return refuse("STAFF_ROLE_INVALID");
+  if (caller.role === "admin" && ["preview", "propose"].includes(command.kind) && !caller.onBehalf) return refuse("STAFF_ROLE_INVALID");
   const party = caller.role === "renter" ? source.renterId : caller.role === "owner" ? source.ownerId : null;
   if (party !== null && caller.legacyUserId !== party) return refuse("NOT_PARTY");
   if (command.kind === "hold" || command.kind === "release" || command.kind === "confiscate") {
@@ -216,12 +233,12 @@ export function planLegacyContinuation(evidence: LegacyContinuationEvidence, com
     return finish(evidence, command, { kind: command.kind, nextStatus: source.orderStatus, isSettle: next, isAdvanceSet: null, amounts, commissionRevisions: [] });
   }
   if (command.kind === "reject") {
-    const expected = caller.role === "owner" ? "8" : caller.role === "renter" ? "9" : "";
+    const expected = caller.role === "owner" ? "8" : caller.role === "renter" ? "9" : caller.role === "admin" && ["8", "9"].includes(source.orderStatus) ? source.orderStatus : "";
     if (source.orderStatus !== expected) return refuse("STATUS_INVALID");
     return finish(evidence, command, { kind: "reject", nextStatus: "3", isSettle: source.isSettle, isAdvanceSet: 0, amounts: {}, assignments: LEGACY_REJECT_ASSIGNMENTS, commissionRevisions: [] });
   }
   if (command.kind === "confirm") {
-    const expected = caller.role === "owner" ? "8" : caller.role === "renter" ? "9" : "";
+    const expected = caller.role === "owner" ? "8" : caller.role === "renter" ? "9" : caller.role === "admin" && ["8", "9"].includes(source.orderStatus) ? source.orderStatus : "";
     if (source.orderStatus !== expected) return refuse("STATUS_INVALID");
     if (source.saleEarnings === null || source.returnOrderMoney === null || source.fullPayoutMoney === null) return refuse("MISSING_STORED_SETTLEMENT");
     const pay = parsed(source.payMoney!), sale = parsed(source.saleEarnings), returned = parsed(source.returnOrderMoney), payout = parsed(source.fullPayoutMoney);
@@ -242,7 +259,8 @@ export function planLegacyContinuation(evidence: LegacyContinuationEvidence, com
   }
   if (command.kind !== "preview" && command.kind !== "propose") return refuse("STATUS_INVALID");
   if (source.orderStatus !== "3") return refuse("STATUS_INVALID");
-  if (caller.role !== "renter" && caller.role !== "owner") return refuse("NOT_PARTY");
+  const calculationRole = caller.role === "admin" ? caller.onBehalf : caller.role;
+  if (calculationRole !== "renter" && calculationRole !== "owner") return refuse("NOT_PARTY");
   const quantities = command.quantities;
   let haff: Decimal;
   try {
@@ -260,7 +278,7 @@ export function planLegacyContinuation(evidence: LegacyContinuationEvidence, com
     const orderExpend = expend(quantities, source.orderPrices, "order", source.policy);
     const accountExpend = expend(quantities, source.accountPrices, "account", source.policy);
     const configExpend = expend(quantities, null, "config", source.policy);
-    if (caller.role === "renter") {
+    if (calculationRole === "renter") {
       if (gt(addDecimal(narrow, orderExpend), pay)) return refuse("DEPOSIT_SHORT");
       const early = advance(goods, source.policy.advanceOrderSetRatio, addDecimal(narrow, orderExpend));
       const returned = early ? subtractDecimal(subtractDecimal(subtractDecimal(pay, wide), orderExpend), stored) : subtractDecimal(subtractDecimal(pay, narrow), orderExpend);

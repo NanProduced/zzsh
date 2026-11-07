@@ -72,13 +72,16 @@ test("rules model: complete changes, honest estimates, original request fingerpr
       const labels = model.priceDiff(rules, "p1", "p2").map(row => row.label).join("|");
       assert.match(labels, /推荐押金上限/); assert.match(labels, /保险箱加价/); assert.match(labels, /账号押金约束.*押金上限/); assert.match(labels, /号主保证金.*要求金额/);
     });
-    await t.test("all tiers, quantity and sub-cent unit amounts are compared without display rounding", () => {
+    await t.test("all tiers and quantities preserve sub-cent differences while displaying cents", () => {
       assert.equal(model.unitYuan("0.00000001"), "¥0.00", "display keeps at most two decimals"); assert.equal(model.unitYuan("10.00500000"), "¥10.01"); assert.equal(model.unitYuan(238.0952), "¥238.10"); assert.equal(model.unitYuan("0"), "¥0.00");
       assert.equal(model.unitYuan("99999999999999.00000001"), "¥99,999,999,999,999.00");
       assert.equal(model.spread("99999999999999.00000002", "99999999999999.00000001"), "¥0.00");
       const rules = next(), line = rules.priceLines.find(line => line.priceVersionId === "p2" && line.itemId === "piece" && line.customerTier === "VIP");
       line.buyerUnitAmount = "1.80000001"; line.unitQuantity = "60";
-      const rows = model.priceDiff(rules, "p1", "p2"); assert.ok(rows.some(row => /VIP.*租客单价/.test(row.label) && row.after === "¥1.80000001")); assert.ok(rows.some(row => /单位数量/.test(row.label)));
+      const rows = model.priceDiff(rules, "p1", "p2"); assert.ok(rows.some(row => /VIP.*租客单价/.test(row.label) && row.after === "约¥1.80")); assert.ok(rows.some(row => /单位数量/.test(row.label)));
+      line.buyerUnitAmount = "1.80000002";
+      rules.priceLines.find(line => line.priceVersionId === "p1" && line.itemId === "piece" && line.customerTier === "VIP").buyerUnitAmount = "1.80000001";
+      assert.ok(model.priceDiff(rules,"p1","p2").some(row=>/VIP.*租客单价/.test(row.label)&&row.detail?.includes("原单价存在不足一分的变化")));
       rules.priceLines.find(line => line.priceVersionId === "p1" && line.itemId === "piece" && line.customerTier === "STANDARD").buyerUnitAmount = "99999999999999.00000001"; assert.equal(edit.baseline(rules).values["item.piece.buyer"], "99999999999999.00000001");
       rules.priceLines = rules.priceLines.filter(line => !(line.priceVersionId === "p2" && line.customerTier === "SVIP"));
       assert.ok(model.priceDiff(rules, "p1", "p2").some(row => /SVIP/.test(row.label) && row.after === "将移除"));
@@ -190,6 +193,11 @@ test("Root: price inputs preserve sub-cent unit prices and publish diff includes
     original.priceVersions.unshift(draft);
     original.priceLines.push(...original.priceLines.map(line => ({ ...line, priceVersionId: draft.id })));
     assert.deepEqual(flow.priceDiff(original, draft), []);
+    const oldUnit=original.priceLines.find(line=>line.priceVersionId===live.id&&line.itemId==="piece"&&line.customerTier==="STANDARD");
+    const newUnit=original.priceLines.find(line=>line.priceVersionId===draft.id&&line.itemId==="piece"&&line.customerTier==="STANDARD");
+    oldUnit.buyerUnitAmount="0.005";newUnit.buyerUnitAmount="0.01";
+    assert.ok(flow.priceDiff(original,draft).some(row=>row.label.includes("租客价")&&row.before==="约¥0.01"&&row.after==="¥0.01"&&row.detail?.includes("原单价存在不足一分的变化")), JSON.stringify(flow.priceDiff(original,draft)));
+    oldUnit.buyerUnitAmount="10";newUnit.buyerUnitAmount="10";
     draft.fundingPolicy.recommendation.parameters.skinOverrides = [];
     assert.ok(flow.priceDiff(original, draft).some(row => row.label === "皮肤推荐押金"));
     draft.fundingPolicy = structuredClone(live.fundingPolicy);

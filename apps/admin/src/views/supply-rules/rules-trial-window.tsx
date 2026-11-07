@@ -8,7 +8,7 @@ import { Input } from "../../components/ui/input";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "../../components/ui/table";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "../../components/ui/tooltip";
 import { baseline, editContext, validate, type EditValues } from "./rules-edit";
-import { REASON_TEXT, haffCount, num, safeBoxLabel, unitLabel, yuan } from "./rules-model";
+import { REASON_TEXT, haffCount, num, safeBoxLabel, unitLabel, unitPriceInput, yuan } from "./rules-model";
 import { SupplySelect } from "../../components/supply/supply-select";
 import { activePriceDraft, pendingSealedPrice, priceDiff } from "./publish-flow";
 import { clampTrialPosition, roundTrialAmount, trialDeposit, trialEstimate, validateTrialAccount, type TrialAccount, type TrialRow } from "./rules-trial-model";
@@ -179,6 +179,8 @@ export function TrialWindow({ rules, seed, onClose }: { rules: RulesResponse; se
 
   const paramKeys = ["haff.spread.ordinary", ...fixed.flatMap(item => [`item.${item.id}.buyer`, `item.${item.id}.owner`])];
   const parameterErrors = validate(bl.fields.filter(field => paramKeys.includes(field.key)), adj);
+  const retainedPrice=(key:string) => key.startsWith("item.") && adj[key]===draftBase[key] && /^\d+(?:\.\d{1,8})?$/.test(adj[key]??"") && /[1-9]/.test((adj[key]?.split(".")[1]??"").slice(2));
+  for(const key of paramKeys)if(retainedPrice(key))delete parameterErrors[key];
 
   const down = (event: ReactPointerEvent<HTMLDivElement>) => { if ((event.target as HTMLElement).closest("button") || (event.target as HTMLElement).closest("input") || (event.target as HTMLElement).closest("select")) return; drag.current = { dx: event.clientX - pos.x, dy: event.clientY - pos.y }; event.currentTarget.setPointerCapture?.(event.pointerId); };
   const move = (event: ReactPointerEvent<HTMLDivElement>) => { if (drag.current) setPos(constrain({ x: event.clientX - drag.current.dx, y: event.clientY - drag.current.dy })); };
@@ -261,7 +263,7 @@ export function TrialWindow({ rules, seed, onClose }: { rules: RulesResponse; se
               </div>
               <CollapsibleContent>
                 <div className="space-y-3 border-t border-border/60 pt-3">
-                  <p className="text-[11px] text-muted-foreground">只改右侧「{draft ? "草稿" : "估算"}」列，不会保存。改了以后该列变为本地估算。</p>
+                  <p className="text-[11px] text-muted-foreground">只改右侧「{draft ? "草稿" : "估算"}」列，不会保存。改了以后该列变为本地估算。原单价按两位显示，未调整时沿用原值。</p>
                   <div className="w-40">
                     <Num label="比例差（普通/自定义）" value={adj["haff.spread.ordinary"] ?? ""} placeholder={draftBase["haff.spread.ordinary"] || ""} error={parameterErrors["haff.spread.ordinary"]} changed={adj["haff.spread.ordinary"] !== draftBase["haff.spread.ordinary"]} onChange={value => setAdj(previous => ({ ...previous, "haff.spread.ordinary": value }))} tip={`租客比例 ＝ 号主比例 − 比例差。线上 ${liveBase["haff.spread.ordinary"] || "未设置"}`} />
                   </div>
@@ -273,7 +275,7 @@ export function TrialWindow({ rules, seed, onClose }: { rules: RulesResponse; se
                           {fixed.map(item => {
                             const buyerKey = `item.${item.id}.buyer`, ownerKey = `item.${item.id}.owner`;
                             const field = (key: string, label: string) => (
-                              <Input aria-label={label} value={adj[key] ?? ""} placeholder={draftBase[key] || "0.00"} inputMode="decimal" aria-invalid={Boolean(parameterErrors[key])}
+                              <Input aria-label={label} value={retainedPrice(key) ? unitPriceInput(adj[key]) : adj[key] ?? ""} placeholder={unitPriceInput(draftBase[key]) || "0.00"} inputMode="decimal" aria-invalid={Boolean(parameterErrors[key])} title={retainedPrice(key) ? "原价含不足一分的精度，未调整时沿用原值" : undefined}
                                 onChange={e => { const v = e.target.value.trim(); if (/^\d*(?:\.\d{0,2})?$/.test(v)) setAdj(prev => ({ ...prev, [key]: v })); }}
                                 className={`h-7 w-20 text-right text-xs tabular-nums ${(adj[key] ?? "") !== (draftBase[key] ?? "") ? "border-amber-500 bg-amber-500/10" : ""}`} />
                             );

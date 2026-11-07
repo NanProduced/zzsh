@@ -1,4 +1,5 @@
 import { requestOrderJson, requestOrderWrite } from "./order-client.ts";
+import { formatExactYuan } from "@zzsh/ui/display-money";
 
 export type LegacyCommandName = "propose" | "confirm" | "reject" | "hold" | "release" | "confiscate";
 export type LegacyQuantitiesInput = Record<"expendHaff" | "barrett" | "bullet" | "awm" | "armor" | "helmet" | "coffee" | "card", string | null>;
@@ -7,10 +8,12 @@ export type LegacyContinuation = {
   revision: string | null; evidenceId: string | null; stage: string | null; isSettle: string | null;
   amounts: Record<string, { cents: string; yuan: string } | null>; quantities: LegacyQuantitiesInput | null;
   capabilities: string[]; commandFingerprints: Record<string, string>; reasons: string[];
-  duties: Array<{ id: string; kind: string; amountCents: string; currency: "CNY"; status: string; maturityAt: string | null; sourceStatus: string | null; revision: string; settledBy: string | null }>;
+  settlementKind: "EARLY" | "NORMAL" | null; earlyFee: string | null; refundDueAt: string | null;
+  duties: Array<{ id: string; kind: string; amountCents: string; currency: "CNY"; status: string; maturityAt: string | null; sourceStatus: string | null; revision: string; settledBy: string | null; financeVerified:boolean;
+    refundProgress:'UNKNOWN'|'NO_REFUND_DUE'|'NO_NEW_REFUND'|'CHANNEL_SUCCEEDED'|'FAILED'|'PROCESSING'|'REVIEW_REQUIRED' }>;
   channelState: "UNKNOWN";
 };
-export type LegacyProposal = { revision: string | null; inputEvidenceId: string; proposalFingerprint: string; previewAmounts: Record<string, string | null>; proposalAmounts: Record<string, string | null> };
+export type LegacyProposal = { revision: string | null; inputEvidenceId: string; proposalFingerprint: string; previewAmounts: Record<string, string | null>; proposalAmounts: Record<string, string | null>; settlementKind?: "EARLY" | "NORMAL"; earlyFee?: string | null };
 export type LegacyReceipt = { state: "UNKNOWN" } | { state: "KNOWN_SUCCESS" | "KNOWN_REJECTED"; status: number; fingerprint: string; receipt: unknown };
 const id = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/, cents = /^(0|[1-9]\d{0,23})$/, digest = /^[a-f0-9]{64}$/;
 function record(value: unknown): value is Record<string, unknown> { return !!value && typeof value === "object" && !Array.isArray(value); }
@@ -24,6 +27,9 @@ export function parseLegacyContinuation(value: unknown): LegacyContinuation {
     || value.revision !== null && (typeof value.revision !== "string" || !/^[1-9]\d{0,17}$/.test(value.revision)) || value.evidenceId !== null && (typeof value.evidenceId !== "string" || !id.test(value.evidenceId))
     || !Array.isArray(value.capabilities) || value.capabilities.some(c => typeof c !== "string" || !["preview", "propose", "confirm", "reject", "hold", "release", "confiscate"].includes(c))
     || !Array.isArray(value.reasons) || value.reasons.some(r => typeof r !== "string" || r.length > 100) || !record(value.commandFingerprints) || Object.values(value.commandFingerprints).some(v => typeof v !== "string" || !digest.test(v))
+    || value.settlementKind !== undefined && value.settlementKind !== null && !["EARLY", "NORMAL"].includes(String(value.settlementKind))
+    || value.earlyFee !== undefined && value.earlyFee !== null && (typeof value.earlyFee !== "string" || !/^(0|[1-9]\d{0,23})\.\d{2}$/.test(value.earlyFee))
+    || value.refundDueAt !== undefined && value.refundDueAt !== null && (typeof value.refundDueAt !== "string" || !Number.isFinite(Date.parse(value.refundDueAt)))
     || !record(value.amounts) || !Array.isArray(value.duties) || value.duties.length > 200) throw new Error("订单续办信息暂不可用");
   if (value.stage !== null && !["3", "8", "9", "4"].includes(String(value.stage)) || value.isSettle !== null && !["0", "2", "3"].includes(String(value.isSettle))) throw new Error("订单状态暂不可用");
   const amounts: LegacyContinuation["amounts"] = {};
@@ -36,12 +42,16 @@ export function parseLegacyContinuation(value: unknown): LegacyContinuation {
   }
   const duties = value.duties.map(d => {
     if (!record(d) || typeof d.id !== "string" || !id.test(d.id) || !["RENTER_REFUND", "OWNER_CREDIT", "COMMISSION", "DEPOSIT_COMPENSATION"].includes(String(d.kind)) || typeof d.amountCents !== "string" || !cents.test(d.amountCents) || d.currency !== "CNY" || !["PENDING", "MATURED", "SETTLED", "VOID"].includes(String(d.status)) || typeof d.revision !== "string" || !/^[1-9]\d{0,17}$/.test(d.revision)
-      || d.maturityAt !== null && (typeof d.maturityAt !== "string" || !Number.isFinite(Date.parse(d.maturityAt))) || d.sourceStatus !== null && typeof d.sourceStatus !== "string" || ![null, "FINANCE", "LEGACY_RECORDS"].includes(d.settledBy as string | null)) throw new Error("结算责任暂不可用");
-    return { id: d.id, kind: String(d.kind), amountCents: d.amountCents, currency: "CNY" as const, status: String(d.status), maturityAt: d.maturityAt as string | null, sourceStatus: d.sourceStatus as string | null, revision: d.revision, settledBy: d.settledBy as string | null };
+      || d.maturityAt !== null && (typeof d.maturityAt !== "string" || !Number.isFinite(Date.parse(d.maturityAt))) || d.sourceStatus !== null && typeof d.sourceStatus !== "string" || ![null, "FINANCE", "LEGACY_RECORDS"].includes(d.settledBy as string | null)
+      || d.financeVerified!==undefined && typeof d.financeVerified!=="boolean" || d.refundProgress!==undefined
+        && (d.kind!=='RENTER_REFUND'||!['UNKNOWN','NO_REFUND_DUE','NO_NEW_REFUND','CHANNEL_SUCCEEDED','FAILED','PROCESSING','REVIEW_REQUIRED'].includes(String(d.refundProgress)))) throw new Error("结算责任暂不可用");
+    return { id: d.id, kind: String(d.kind), amountCents: d.amountCents, currency: "CNY" as const, status: String(d.status), maturityAt: d.maturityAt as string | null, sourceStatus: d.sourceStatus as string | null, revision: d.revision, settledBy: d.settledBy as string | null, financeVerified:d.financeVerified===true,
+      refundProgress:(d.refundProgress??'UNKNOWN') as LegacyContinuation['duties'][number]['refundProgress'] };
   });
   const quantities = value.quantities === null ? null : parseLegacyQuantitiesInput(value.quantities);
   return { schema: "legacy-continuation.v1", availability: value.availability as LegacyContinuation["availability"], revision: value.revision as string | null, evidenceId: value.evidenceId as string | null, stage: value.stage as string | null, isSettle: value.isSettle as string | null,
-    amounts, quantities, capabilities: [...value.capabilities] as string[], commandFingerprints: { ...value.commandFingerprints } as Record<string, string>, reasons: [...value.reasons] as string[], duties, channelState: "UNKNOWN" };
+    amounts, quantities, capabilities: [...value.capabilities] as string[], commandFingerprints: { ...value.commandFingerprints } as Record<string, string>, reasons: [...value.reasons] as string[], duties, channelState: "UNKNOWN",
+    settlementKind: value.settlementKind === "EARLY" || value.settlementKind === "NORMAL" ? value.settlementKind : null, earlyFee: typeof value.earlyFee === "string" ? value.earlyFee : null, refundDueAt: typeof value.refundDueAt === "string" ? value.refundDueAt : null };
 }
 export function parseLegacyQuantitiesInput(value: unknown): LegacyQuantitiesInput {
   if (!record(value)) throw new Error("消耗数量不完整");
@@ -65,8 +75,11 @@ export const legacyContinuationApi = {
     const body = await requestOrderWrite<LegacyProposal>(base(orderId) + "/preview", { body: { quantities }, signal });
     if (!body || typeof body.inputEvidenceId !== "string" || !id.test(body.inputEvidenceId) || !digest.test(body.proposalFingerprint) || !record(body.proposalAmounts) || !record(body.previewAmounts)
       || body.revision !== null && (typeof body.revision !== "string" || !/^[1-9]\d{0,17}$/.test(body.revision))
-      || [...Object.values(body.proposalAmounts), ...Object.values(body.previewAmounts)].some(v => v !== null && (typeof v !== "string" || !/^(0|[1-9]\d{0,23})(?:\.\d{1,8})?$/.test(v)))) throw new Error("预估结果暂不可用");
-    return body;
+      || body.settlementKind !== undefined && !["EARLY", "NORMAL"].includes(body.settlementKind)
+      || body.earlyFee !== undefined && body.earlyFee !== null && (typeof body.earlyFee !== "string" || !/^(0|[1-9]\d{0,23})\.\d{2}$/.test(body.earlyFee))
+      || [...Object.values(body.proposalAmounts), ...Object.values(body.previewAmounts)].some(v => v !== null && formatExactYuan(v) === null)) throw new Error("预估结果暂不可用");
+    const display = (amounts: Record<string, string | null>) => Object.fromEntries(Object.entries(amounts).map(([key, value]) => [key, value === null ? null : formatExactYuan(value)]));
+    return { ...body, proposalAmounts: display(body.proposalAmounts), previewAmounts: display(body.previewAmounts) };
   },
   async write(orderId: string, kind: LegacyCommandName, body: Record<string, unknown>, key: string, signal?: AbortSignal) {
     const result = await requestOrderWrite<unknown>(base(orderId) + "/" + kind, { body, key, signal });

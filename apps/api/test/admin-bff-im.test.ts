@@ -8,6 +8,9 @@ import * as consultation from '../src/im/consultation';
 import * as authSecurity from '../src/auth/auth-security';
 import * as domainSummary from '../src/auth/admin-domain-summary-routes';
 import * as distributionDashboard from "../src/finance/admin-distribution-dashboard-routes";
+import * as legacyEvidenceReader from "../src/order/legacy-continuation-evidence";
+import { initialLegacyFacts } from "../src/order/legacy-continuation-model";
+import { legacyBinding, legacyEvidence, legacyQuantities, legacySource } from "./legacy-continuation-fixture";
 
 const ADMIN_ORIGIN = "http://127.0.0.1:4291";
 const API_ORIGIN = "http://127.0.0.1:4292";
@@ -61,6 +64,31 @@ test('Admin BFF仅放行准确的未开租审核命令，保持原body/key并交
  assert.equal(output.result().status,200);assert.equal(forwarded.originalUrl,'/api/v1/admin/orders/order_1/prestart-termination/term_1/review');
  assert.equal(forwarded.body,body);assert.equal(forwarded.headers['idempotency-key'],'original_review');
  const unknown=await route('/orders/order_1/prestart-termination/term_1/auto-refund','POST');assert.equal(unknown.status,404);
+});
+
+test('Admin BFF forwards the exact legacy settlement operations and retains their original request',async t=>{
+ const calls:any[]=[];t.mock.method(orderRoutes,'handleOrderAdminRoute',async(req:any,res:any)=>{calls.push(req);res.status(200).json({outcome:'DOMAIN_CHECKED'});});
+ const orderId='legacy_order_'+'a'.repeat(40),body={expectedRevision:'1',reason:'双方已核对'};
+ for(const action of ['preview','propose','confirm','reject','duties/duty_1/owner-credit','duties/duty_1/commission-credit','duties/duty_1/refund-case']){
+  const path=`/orders/legacy/${orderId}/continuation/${action}`,output=capture();
+  await handleAdminBff({method:'POST',url:path,originalUrl:path,headers:{origin:ADMIN_ORIGIN,'idempotency-key':'original_key'},body} as any,output.response as never,options());
+  assert.equal(output.result().status,200);assert.equal(calls.at(-1).originalUrl,`/api/v1/admin${path}`);assert.equal(calls.at(-1).body,body);assert.equal(calls.at(-1).headers['idempotency-key'],'original_key');
+ }
+ assert.equal((await route(`/orders/legacy/${orderId}/continuation/approve-all`,'POST')).status,404);
+ assert.equal((await route(`/orders/legacy/${orderId}/continuation/confirm/extra`,'POST')).status,404);
+ assert.equal((await route(`/orders/legacy/${orderId}/continuation/confirm`,'DELETE')).status,404);assert.equal(calls.length,7);
+});
+test('Admin BFF reaches real legacy calculation and returns an actionable shortfall',async t=>{
+ t.mock.method(authSecurity,'readAdminContext',async()=>({userId:'fixture_admin',sessionId:'fixture_session'}));
+ t.mock.method(legacyEvidenceReader,'readLegacyContinuationBinding',async()=>legacyBinding);
+ t.mock.method(legacyEvidenceReader,'authorizeLegacyContinuation',async()=>({canOperate:true,canReadCommission:false}));
+ t.mock.method(legacyEvidenceReader,'readLegacyContinuationHead',async()=>null);
+ t.mock.method(legacyEvidenceReader,'readLegacyContinuationEvidence',async()=>legacyEvidence(initialLegacyFacts(legacySource())));
+ const pool={connect:async()=>({release(){},query:async()=>({rows:[],rowCount:0})})},out=capture();
+ const opt=options();opt.order={pool,apiOrigin:API_ORIGIN,adminOrigin:ADMIN_ORIGIN} as never;
+ const path=`/orders/legacy/${legacyBinding.id}/continuation/preview`;
+ await handleAdminBff({method:'POST',url:path,originalUrl:path,headers:{origin:ADMIN_ORIGIN},body:{onBehalf:'renter',quantities:legacyQuantities('999999')}} as never,out.response as never,opt);
+ assert.equal(out.result().status,409);assert.equal((out.result().body as any).error.reason,'DEPOSIT_SHORT');
 });
 
 function capture() {
@@ -186,4 +214,14 @@ test("admin BFF forwards exact paginated downline reads and keeps method boundar
  assert.equal((await route(path,"POST")).status,404);
  assert.equal((await route("/distribution/participants/user-1/downline/extra")).status,404);
  assert.equal(forwarded.length,1);
+});
+
+test("admin BFF forwards the exact support unpaid cancellation path", async t => {
+ const calls:string[]=[];
+ t.mock.method(orderRoutes,"handleOrderAdminRoute",async(request:any,response:any)=>{calls.push(request.originalUrl);response.status(200).json({ok:true});});
+ const path="/orders/order_1/support-unpaid-cancel";
+ assert.equal((await route(path,"POST")).status,200);
+ assert.equal((await route(path,"DELETE")).status,404);
+ assert.equal((await route(path+"/extra","POST")).status,404);
+ assert.deepEqual(calls,["/api/v1/admin/orders/order_1/support-unpaid-cancel"]);
 });

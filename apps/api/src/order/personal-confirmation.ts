@@ -7,9 +7,10 @@ import { readRentalMembership } from "../auth/rental-membership";
 import { type GrowthOfferPlan } from "../auth/membership-growth";
 import {selectPersonalGrowthOffer,type GrowthConfirmationKnown} from "./personal-growth-confirmation";
 import { canonicalize, computeContentHash, normalizeQuote } from "../supply/content-hash";
-import { computeDeltaQuote, projectDeltaQuote, type InternalQuote, type QuoteInput } from "../supply/pricing";
+import { computeDeltaQuote, computeFixedUnitAmounts, projectDeltaQuote, type InternalQuote, type QuoteInput } from "../supply/pricing";
 import { normalizeRentalPricing } from "../supply/delta-rental";
-import { parseNonNegativeDecimal, yuanAmountObject } from "../supply/decimal";
+import { decimalToBigInt, divideToScale, formatDecimalExact, parseNonNegativeDecimal, yuanAmountObject } from "../supply/decimal";
+import { payableCentsFor } from "../auth/membership-total-discount";
 import { evaluatePricePreviewPublication, readListingPublication, evaluatePublication, type PublishingAccount, type ListingVersion, type SupplyGateReader } from "../supply/publishing";
 import { assertFullPayoutTermsAccepted, parseFullPayoutTermsAcceptance, type FullPayoutTerms } from "../supply/full-payout-terms";
 import { assertFinalConfirmationFunding, isProductionConfirmationFundingReader, readProductionConfirmationFundingForPreview } from "../supply/funding-authority";
@@ -32,7 +33,7 @@ export type V2ConfirmationFunding = ConfirmationFundingBase & {
 export type ConfirmationFunding = LegacyConfirmationFunding | V2ConfirmationFunding;
 export type ConfirmationFundingReader = (client:PoolClient,account:PublishingAccount,version:ListingVersion)=>Promise<ConfirmationFunding|null>;
 export type PersonalConfirmationOptions = {gate:SupplyGateReader;fundingReader?:ConfirmationFundingReader;key?:ConfirmationKey;membershipGrowthReader?:MembershipGrowthConfirmationReader};
-export type MembershipGrowthQuoteCandidate = { plan: GrowthOfferPlan; quote: InternalQuote };
+export type MembershipGrowthQuoteCandidate = { plan: GrowthOfferPlan; quote: InternalQuote; payableRatio?: string };
 export type MembershipGrowthConfirmationReader = (client: PoolClient, input: {
   userId: string; ownerUserId: string; accountId: string; gameId: string; listingVersionId: string; listingHash: string;
   ruleReleaseId: string; priceVersionId: string; quantityDigest: string; baseQuote: InternalQuote; quoteInput: QuoteInput;asOfUtc?:string;
@@ -103,6 +104,48 @@ export function confirmationInput(body:Record<string,unknown>) {
   return {accountId:body.accountId as string,versionId:body.versionId as string,releaseId:body.releaseId as string,...(terms?{fullPayoutTermsAcceptance:terms}:{})};
 }
 const unavailable=(message:string):never=>{throw new SecurityApiError(503,"CONFIRMATION_DEPENDENCY_UNAVAILABLE",message);};
+
+type FrozenPriceLine = { item_id:string; pricing_kind:"HAFF_RATIO"|"FIXED_UNIT"; unit_quantity:string|null; buyer_unit_amount:string|null; owner_unit_amount:string|null; item_unit?:string|null; item_name?:string|null; item_enabled?:boolean };
+/** Captured as part of the signed order confirmation; never reconstructed from the current policy. */
+export function freezeSettlementPricing(quote:InternalQuote,payableRatio:string,rows:readonly FrozenPriceLine[],commissionRate?:string|null) {
+  if(payableCentsFor(1n,payableRatio)===null)throw new Error("Invalid settlement discount");
+  const percent=quote.mode==="PERCENT";
+  const rate=percent&&typeof commissionRate==="string"?parseNonNegativeDecimal(commissionRate,8,"commission rate"):null;
+  if(percent&&(!rate||rate.value>=10n**BigInt(rate.scale)))throw new Error("Missing frozen commission rate");
+  const haff=quote.lines.filter(line=>line.pricingKind==="HAFF_RATIO");
+  const exact=haff.length===1?quote.pricingInputs.exactRatios.find(line=>line.itemId===haff[0]!.itemId):undefined;
+  if(!exact || haff[0]!.quantity==="0")throw new Error("Missing frozen haff price");
+  const material=new Map<string,{itemId:string;name:string|null;unit:"ROUND"|"PIECE"|"DAY";unitQuantity:string;buyerUnitAmount:string;ownerUnitAmount:string}>();
+  const add=(itemId:string,name:unknown,unit:unknown,unitQuantity:unknown,buyer:unknown,owner:unknown)=>{
+    if(!ID.test(itemId)||!["ROUND","PIECE","DAY"].includes(String(unit))||typeof unitQuantity!=="string"||typeof buyer!=="string"||typeof owner!=="string")throw new Error("Missing frozen item price");
+    if(typeof name==="string"&&name.trim().length>120)throw new Error("Invalid frozen item name");
+    const quantity=parseNonNegativeDecimal(unitQuantity,0,"unit quantity"),b=parseNonNegativeDecimal(buyer,8,"buyer unit"),o=parseNonNegativeDecimal(owner,percent?16:8,"owner unit");
+    if(quantity.value<=0n||decimalToBigInt(o,16)>decimalToBigInt(b,16))throw new Error("Invalid frozen item price");
+    material.set(itemId,{itemId,name:typeof name==="string"&&name.trim()?name.trim():null,unit:unit as "ROUND"|"PIECE"|"DAY",unitQuantity:quantity.value.toString(),buyerUnitAmount:formatDecimalExact(b),ownerUnitAmount:formatDecimalExact(o)});
+  };
+  for(const row of rows){
+    if(row.pricing_kind!=="FIXED_UNIT")continue;
+    const line=quote.lines.find(item=>item.itemId===row.item_id);
+    if(row.item_enabled===false&&!line)continue;
+    if(material.has(row.item_id))throw new Error("Duplicate frozen item price");
+    let owner:unknown=line?.ownerUnitAmount.amount??row.owner_unit_amount;
+    if(percent){
+      if(!rate||row.unit_quantity===null||row.buyer_unit_amount===null||row.owner_unit_amount!==null)throw new Error("Missing frozen percent item price");
+      const calculated=computeFixedUnitAmounts({itemId:row.item_id,pricingKind:"FIXED_UNIT",quantity:"0",unitQuantity:row.unit_quantity,buyerUnitAmount:row.buyer_unit_amount},"PERCENT",rate);
+      owner=formatDecimalExact(calculated.ownerUnit);
+      if(line&&decimalToBigInt(parseNonNegativeDecimal(line.ownerUnitAmount.amount,8,"quoted owner unit"),8)!==divideToScale(calculated.ownerUnit,{value:1n,scale:0},8).value)throw new Error("Frozen owner price mismatch");
+    }
+    add(row.item_id,row.item_name,line?.unit??row.item_unit,line?.unitQuantity??row.unit_quantity,line?.buyerUnitAmount.amount??row.buyer_unit_amount,owner);
+  }
+  for(const line of quote.lines)if(line.pricingKind==="FIXED_UNIT"&&!material.has(line.itemId)){
+    if(percent)throw new Error("Missing frozen percent item price");
+    add(line.itemId,null,line.unit,line.unitQuantity,line.buyerUnitAmount.amount,line.ownerUnitAmount.amount);
+  }
+  if(material.size>63)throw new Error("Too many settlement resources");
+  return {schema:percent?"settlement-pricing-v2" as const:"settlement-pricing-v1" as const,priceVersionId:quote.priceVersionId,payableRatio:formatDecimalExact(parseNonNegativeDecimal(payableRatio,8,"payable ratio")),
+    haff:{itemId:haff[0]!.itemId,openingQuantity:haff[0]!.quantity,buyerNumerator:exact.buyerNumerator,buyerDenominator:exact.buyerDenominator},
+    items:[...material.values()].sort((a,b)=>a.itemId<b.itemId?-1:a.itemId>b.itemId?1:0)};
+}
 
 function fullPayoutDeclaration(value:unknown):{schema:"full-payout-declaration-v1";selected:boolean}|null {
   if(value===undefined)return null;
@@ -176,7 +219,9 @@ async function calculateBoundPersonalPrice(client:PoolClient,context:OrderUserCo
   }
   const release=(await client.query(`SELECT p.id,p.status,p.mode,p.haff_rule,p.commission_rate::text,p.rounding_policy,r.term_version_id FROM zzsh_supply.rule_release r JOIN zzsh_supply.price_version p ON p.id=r.price_version_id WHERE r.id=$1 AND r.game_id=$2`,[input.releaseId,account.game_id])).rows[0];
   if(!release || release.status!=="SEALED" || release.id!==version.payload.ruleRefs.priceVersionId)unavailable("Frozen price version unavailable");
-  const rows=(await client.query(`SELECT item_id,pricing_kind,unit_quantity::text,buyer_unit_amount::text,owner_unit_amount::text FROM zzsh_supply.price_line WHERE price_version_id=$1 AND customer_tier=$2 ORDER BY item_id`,[release.id,calculationTier])).rows;
+  const rows=(await client.query<FrozenPriceLine>(`SELECT p.item_id,p.pricing_kind,p.unit_quantity::text,p.buyer_unit_amount::text,p.owner_unit_amount::text,
+    i.unit AS item_unit,i.name AS item_name,i.enabled AS item_enabled FROM zzsh_supply.price_line p JOIN zzsh_supply.billable_item i ON i.id=p.item_id
+    WHERE p.price_version_id=$1 AND p.customer_tier=$2 AND i.game_id=$3 ORDER BY p.item_id`,[release.id,calculationTier,account.game_id])).rows;
   const prices=new Map(rows.map(r=>[r.item_id,r]));
   const original=normalizeQuote(version.payload.quoteValues);
   if(!legacy && original.lines.some(l=>!prices.has(l.itemId)))unavailable("Required membership price is missing");
@@ -227,7 +272,12 @@ async function calculateBoundPersonalPrice(client:PoolClient,context:OrderUserCo
 
   const projection={quote:projectTenantPriceQuote(quote,original),baseTenantDeposit:yuanAmountObject(parseNonNegativeDecimal(f.baseDepositCents,0,"deposit").value),...(growthSelection?{membershipBenefits:growthSelection.benefits}:{customerTier:membership!.tier}),depositWaived:quote.tenantDeposit?.amount === "0.00",
     ...(ownerDeclaration?{compensationDisclosure:{selected:ownerDeclaration.selected,disclosureVersion:v2Funding!.disclosureVersion,...(v2Funding!.fullPayoutTerms?{terms:v2Funding!.fullPayoutTerms}:{})}}:{})};
-  return {account,version:{...version,payload:version.payload!,content_hash:version.content_hash!},membership,ownerDeclaration,v2Funding,f,guarantee,growthSelection,quote,ruleRefs,binding,projection};
+  let settlementPricing:ReturnType<typeof freezeSettlementPricing>|undefined;
+  const settlementRatio=growthSelection===null?"1":growthSelection.payableRatio;
+  if(settlementRatio!==undefined){
+    try{settlementPricing=freezeSettlementPricing(result.quote,settlementRatio,rows,release.commission_rate);}catch{unavailable("Frozen settlement pricing is unavailable");}
+  }
+  return {account,version:{...version,payload:version.payload!,content_hash:version.content_hash!},membership,ownerDeclaration,v2Funding,f,guarantee,growthSelection,settlementPricing,quote,ruleRefs,binding,projection};
 }
 
 /** A price view, not a confirmation: no lock wrapper, agreement acceptance, digest credential or signing. */
@@ -243,7 +293,7 @@ export async function rebuildPersonalConfirmation(client:PoolClient,context:Orde
   const account=(await client.query<PublishingAccount>(`SELECT * FROM zzsh_supply.rental_account WHERE id=$1 FOR UPDATE`,[input.accountId])).rows[0];
   if(!account || account.owner_user_id!==parties.ownerUserId || account.game_id!==parties.gameId || !game?.enabled)throw notFound();
 
-  const {version,membership,ownerDeclaration,v2Funding,f,guarantee,growthSelection,quote,ruleRefs,binding,projection}=await calculateBoundPersonalPrice(client,context,input,options,account,game,"WRITE");
+  const {version,membership,ownerDeclaration,v2Funding,f,guarantee,growthSelection,settlementPricing,quote,ruleRefs,binding,projection}=await calculateBoundPersonalPrice(client,context,input,options,account,game,"WRITE");
   const guaranteeSnapshot = { status: guarantee.publisherBail, reference: guarantee.reference };
   const baseSnapshot=ownerDeclaration
     ? {schema:"personal-quote-v2" as const,userId:context.userId,ownerUserId:account.owner_user_id,accountId:account.id,listingVersionId:version.id,listingHash:version.content_hash,
@@ -253,7 +303,7 @@ export async function rebuildPersonalConfirmation(client:PoolClient,context:Orde
         disclosureVersion:v2Funding!.disclosureVersion,vipWaiver:f.vipWaiver,svipWaiver:f.svipWaiver},quote}
     : {schema:"personal-quote-v1" as const,listingHash:version.content_hash,userId:context.userId,ruleRefs:version.payload.ruleRefs,membership:{tier:membership!.tier,version:membership!.version,sourceRef:membership!.sourceRef},guarantee:guaranteeSnapshot,funding:{version:f.version,sourceRef:f.sourceRef,baseDepositCents:f.baseDepositCents,publisherBailRequirementCents:f.publisherBailRequirementCents,fullPayoutSelected:(f as LegacyConfirmationFunding).fullPayoutSelected,fullPayoutPolicyRef:f.fullPayoutPolicyRef,fullPayoutFeeCents:(f as LegacyConfirmationFunding).fullPayoutFeeCents,vipWaiver:f.vipWaiver,svipWaiver:f.svipWaiver},quote};
   const snapshot=growthSelection ? {schema:"personal-quote-v4" as const,userId:context.userId,ownerUserId:account.owner_user_id,accountId:account.id,listingVersionId:version.id,listingHash:version.content_hash,fullPayoutDeclaration:ownerDeclaration!,ruleRefs,membershipGrowth:growthSelection.growth,guarantee:guaranteeSnapshot,
-    funding:{version:f.version,sourceRef:f.sourceRef,baseDepositCents:f.baseDepositCents,publisherBailRequirementCents:f.publisherBailRequirementCents,fullPayoutPolicyRef:v2Funding!.fullPayoutPolicyRef,fullPayoutPolicyVersion:v2Funding!.fullPayoutPolicyVersion,disclosureVersion:v2Funding!.disclosureVersion},quote} : baseSnapshot;
+    funding:{version:f.version,sourceRef:f.sourceRef,baseDepositCents:f.baseDepositCents,publisherBailRequirementCents:f.publisherBailRequirementCents,fullPayoutPolicyRef:v2Funding!.fullPayoutPolicyRef,fullPayoutPolicyVersion:v2Funding!.fullPayoutPolicyVersion,disclosureVersion:v2Funding!.disclosureVersion},quote,...(settlementPricing?{settlementPricing}:{})} : {...baseSnapshot,...(settlementPricing?{settlementPricing}:{})};
   const quoteDigest=createHash("sha256").update(canonicalize(snapshot)).digest("hex");
   const now=Number((await client.query(`SELECT floor(extract(epoch FROM clock_timestamp()))::text AS now`)).rows[0].now);
   return {snapshot,now,binding:{...input,userId:context.userId,sessionId:context.sessionId,listingHash:version.content_hash,quoteDigest},projection};

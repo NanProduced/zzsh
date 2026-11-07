@@ -23,13 +23,14 @@ export async function readLegacyContinuationBinding(client: PoolClient, orderId:
   if (!row) throw notFound();
   return row;
 }
-export async function authorizeLegacyContinuation(client: PoolClient, actor: LegacyContinuationActor, binding: LegacyOrderBinding, write = false, userIds: readonly string[] = [binding.ownerUserId,binding.renterUserId]): Promise<{ canOperate: boolean; canReadCommission: boolean }> {
+export async function authorizeLegacyContinuation(client: PoolClient, actor: LegacyContinuationActor, binding: LegacyOrderBinding, write = false, userIds: readonly string[] = [binding.ownerUserId,binding.renterUserId]): Promise<{ canOperate: boolean; canReadCommission: boolean; canSettle?:boolean }> {
   if (actor.realm === "user" && ((actor.userId !== binding.ownerUserId && actor.userId !== binding.renterUserId)
     || (binding.sourceDeletedFlag != null && binding.sourceDeletedFlag !== "0"))) throw notFound();
   // F's prefix uses the same ordered parties. No account lock is taken after the order lock.
   if (write) await client.query(`SELECT id FROM zzsh_auth_user."user" WHERE id=ANY($1::text[]) ORDER BY id FOR UPDATE`, [[...new Set([...userIds,binding.ownerUserId,binding.renterUserId])].sort()]);
   let canOperate = false;
   let canReadCommission = false;
+  let canSettle = false;
   if (actor.realm === "user") await assertUserContextInTransaction(client, actor);
   else {
     await assertAdminContextInTransaction(client, actor);
@@ -39,6 +40,7 @@ export async function authorizeLegacyContinuation(client: PoolClient, actor: Leg
     await assertGameScope(client, actor.userId, access?.isBoss === true, binding.gameId);
     canOperate = access?.isBoss === true || access?.permissions.has("order.legacy.continue") === true;
     canReadCommission = access?.isBoss === true || access?.permissions.has("finance.document.read") === true;
+    canSettle = access?.isBoss === true || access?.permissions.has("order.settlement.write") === true;
   }
   if (write) await client.query(`SELECT id FROM zzsh_supply.game WHERE id=$1 FOR SHARE`, [binding.gameId]);
   const valid = (await client.query<{ valid: boolean }>(`SELECT NOT EXISTS(
@@ -49,7 +51,7 @@ export async function authorizeLegacyContinuation(client: PoolClient, actor: Leg
         AND a.details->>'sourceEntity'='la_user' AND a.details->>'legacyId'=p.legacy_id AND a.details->>'sourceDigest'=p.digest)) AS valid`,
     [binding.ownerUserId, binding.legacyOwnerId, binding.ownerSourceDigest, binding.renterUserId, binding.legacyRenterId, binding.renterSourceDigest])).rows[0]?.valid;
   if (valid !== true) throw conflict("PARTY_UNMAPPED");
-  return { canOperate, canReadCommission };
+  return { canOperate, canReadCommission, canSettle };
 }
 /** Pre-read only: FK inserts also take beneficiary locks, so new commissions need the full prefix before head/duty. */
 export async function readLegacyContinuationUserIds(client:PoolClient,binding:LegacyOrderBinding):Promise<string[]> {
@@ -64,7 +66,9 @@ export async function readLegacyContinuationUserIds(client:PoolClient,binding:Le
   return [...new Set(rows.map(r=>r.id))].sort();
 }
 export async function readLegacyContinuationHead(client: PoolClient, orderId: string, lock = false): Promise<LegacyHeadRow | null> {
-  return (await client.query<LegacyHeadRow>(`SELECT id,order_id AS "orderId",revision::text,input_evidence_id AS "inputEvidenceId",result_evidence_id AS "resultEvidenceId",stage,is_settle AS "isSettle",command,amounts
+  return (await client.query<LegacyHeadRow>(`SELECT id,order_id AS "orderId",revision::text,input_evidence_id AS "inputEvidenceId",result_evidence_id AS "resultEvidenceId",stage,is_settle AS "isSettle",command,amounts,
+    (SELECT to_char((to_jsonb(confirmed)->>'refund_due_at')::timestamptz AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') FROM zzsh_order.legacy_continuation_version confirmed
+      WHERE confirmed.order_id=zzsh_order.legacy_continuation_version.order_id AND confirmed.command='CONFIRM' ORDER BY confirmed.revision DESC LIMIT 1) AS "refundDueAt"
     FROM zzsh_order.legacy_continuation_version WHERE order_id=$1 AND superseded_at IS NULL${lock ? " FOR UPDATE" : ""}`, [orderId])).rows[0] ?? null;
 }
 export async function readLegacyContinuationDuties(client: PoolClient, orderId: string, lock = false): Promise<LegacyDutyRow[]> {
@@ -96,7 +100,17 @@ export async function readLegacyContinuation(client: PoolClient, actor: LegacyCo
   const head = await readLegacyContinuationHead(client, orderId), duties = await readLegacyContinuationDuties(client, orderId);
   const evidence = await readLegacyContinuationEvidence(client, orderId, head);
   const disposition = finance ? await finance(client, orderId, duties) : "UNKNOWN";
-  return { continuation: projectLegacyContinuation(binding, actor, evidence, head, duties, access.canOperate, disposition, access.canReadCommission) };
+  const continuation=projectLegacyContinuation(binding, actor, evidence, head, duties, access.canOperate, disposition, access.canReadCommission,access.canSettle===true);
+  if(actor.realm!=="admin" || !access.canReadCommission)return {continuation};
+  const commissionUsers=[...new Set(duties.filter(d=>d.kind==="COMMISSION"&&d.counterpartyUserId).map(d=>d.counterpartyUserId!))];
+  if(!commissionUsers.length)return {continuation};
+  const users=(await client.query<{id:string;name:string|null}>(`SELECT id,name FROM zzsh_auth_user."user" WHERE id=ANY($1::text[])`,[commissionUsers])).rows;
+  const names=new Map(users.map(user=>[user.id,typeof user.name==="string"&&user.name.trim()?user.name.trim():null]));
+  const sources=new Map(duties.map(duty=>[duty.id,duty]));
+  return {continuation:{...continuation,duties:continuation.duties.map(d=>{
+    const source=sources.get(d.id);
+    return source?.kind==="COMMISSION"&&source.counterpartyUserId?{...d,beneficiary:{userId:source.counterpartyUserId,name:names.get(source.counterpartyUserId)??null}}:d;
+  })}};
 }
 
 export async function legacyBeneficiaryUserId(client: PoolClient, legacyId: string): Promise<string | null> {

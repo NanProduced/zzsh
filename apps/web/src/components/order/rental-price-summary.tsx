@@ -3,7 +3,7 @@ import Image from "next/image";
 import { CircleHelp, Coins, Info, Package, ShieldCheck } from "lucide-react";
 import type { PersonalRentalQuote, RentalPricePreview, OrderLine } from "@/lib/order-client";
 import type { ResourceLine } from "@/lib/listing-view";
-import { moneyText, personalMembershipLabel, depositReductionCents, matchingResourceDiscount, membershipBenefitPresentation } from "@/lib/order-display";
+import { formatReferenceYuan, moneyText, personalMembershipLabel, depositReductionCents, matchingResourceDiscount, membershipBenefitPresentation } from "@/lib/order-display";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { ManagedNoticeText } from "@/components/content/managed-notice";
 
@@ -69,9 +69,11 @@ export function formatAuthoritativeRatio(raw: string | null | undefined, referen
 
 function unitPriceText(line: { code?: string | null; unitPriceLabel?: string | null }): string {
   if (!line.unitPriceLabel) return "未确认";
-  const match = line.unitPriceLabel.match(/^(¥\d+(?:\.\d+)?)\s*\/\s*(\d+)\s+(.+)$/);
+  const match = line.unitPriceLabel.match(/^(约?¥\d+(?:\.\d+)?(?:（不足1分）)?)\s*\/\s*(\d+)\s+(.+)$/);
   if (!match) return line.unitPriceLabel;
-  const amount = cleanDecimal(match[1]!);
+  const formatted = formatReferenceYuan(match[1]);
+  if (!formatted) return "未确认";
+  const amount = cleanDecimal(formatted);
   const grouped = canonicalCode(line.code) === "df_billable_level6_bullet" && match[2] === "60" && match[3] === "发";
   return `${amount} / ${grouped ? "组" : `${match[2] === "1" ? "" : match[2]}${match[3]}`}`;
 }
@@ -83,7 +85,9 @@ function formatPersonalUnitPrice(
   code?: string | null,
 ): string | null {
   if (!unitAmount?.amount) return null;
-  const cleanAmount = cleanDecimal(`¥${unitAmount.amount}`);
+  const formatted = formatReferenceYuan(unitAmount.amount);
+  if (!formatted) return null;
+  const cleanAmount = cleanDecimal(formatted);
   if (!unitQuantity && !unitLabel) return cleanAmount;
   if (!unitQuantity) {
     // Missing personal unitQuantity must not default to 1 round base

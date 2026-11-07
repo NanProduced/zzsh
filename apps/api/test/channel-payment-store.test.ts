@@ -12,8 +12,9 @@ import { confirmOrderPayment, createControlledPaymentSource } from "../src/order
 import { installChannelPaymentFixture } from "./channel-payment-postgres.test";
 import type { PaymentDistributionStore } from "../src/finance/distribution-payment-store";
 import { JOINPAY_SIGNATURE_ORDER } from "../src/order/joinpay-protocol";
+import * as collectionProfile from "../src/order/joinpay-collection-profile";
 import {
-  acceptControlledPayment, bindChannelTransaction, claimPaymentRequestLease, createPaymentRequest, createSyntheticChannelRequestCapability,
+  acceptControlledPayment, bindChannelTransaction, claimPaymentRequestLease, createCollectionPaymentRequest, createPaymentRequest, createSyntheticChannelRequestCapability,
   mapChannelOrderNo, readRecoverablePaymentRequest, recordExecutorResult, recordExecutorFailure, recordJoinpayNotify, wireAmountForCents, type ChannelBinding,
 } from "../src/order/channel-payment-store";
 
@@ -29,7 +30,7 @@ const controlledCap = () => createSyntheticChannelRequestCapability({ config, re
 
 type Row = Record<string, any>;
 /** 内存 PoolClient：仅实现本模块与原 confirmOrderPayment 会发出的语句；未知写语句直接失败，防止静默通过。 */
-function fakeDb(opts: { auditFailure?: boolean; expireAfterOrderLock?: boolean; confirmationAfterOrderLock?: boolean; expireDuringRequestLock?: boolean } = {}) {
+function fakeDb(opts: { auditFailure?: boolean; expireAfterOrderLock?: boolean; confirmationAfterOrderLock?: boolean; expireDuringRequestLock?: boolean; legacyOrderConflict?: boolean; legacyGuardMissing?: boolean } = {}) {
   const s = {
     now: 1_000_000,
     orders: new Map<string, Row>([["order_1", { id: "order_1", renter_user_id: "renter", owner_user_id: "owner", account_id: "acct", status: "PENDING_PAYMENT", display_no: "ZZ261022-000123", currency: "CNY", total: "12345", holdOpen: true }]]),
@@ -55,6 +56,8 @@ function fakeDb(opts: { auditFailure?: boolean; expireAfterOrderLock?: boolean; 
     }
     if (sql.startsWith("SELECT hold_until > clock_timestamp()")) return one({ open: s.orders.get(p[0])?.holdOpen === true, has_confirmation: s.confirmations.some((payment) => payment.view.orderId === p[0]) });
     if (sql.includes("FROM zzsh_order.payment_request WHERE order_id=$1")) return one([...s.requests.values()].find((r) => r.order_id === p[0]));
+    if (sql.includes("legacy_payment_order_number_guard")) return one({ready:opts.legacyGuardMissing !== true});
+    if (sql.includes("FROM zzsh_order.legacy_continuation_evidence")) return one({found:opts.legacyOrderConflict === true});
     if (sql.startsWith("SELECT 1 FROM zzsh_order.payment_request WHERE channel=")) return one([...s.requests.values()].find((r) => r.channel === p[0] && r.merchant_identity_id === p[1] && r.channel_order_no === p[2]));
     if (sql.startsWith("INSERT INTO zzsh_order.payment_request")) {
       const r = { id: p[0], order_id: p[1], channel: p[2], merchant_identity_id: p[3], config_profile_id: p[4], protocol_version: p[5], key_version_ref: p[6], platform_order_no: p[7], channel_order_no: p[8], amount_cents: p[9], currency: "CNY", wire_amount_yuan: p[10], method: p[11], evidence_level: p[12], state: "SUBMITTING", revision: "1", lease_version: "0", lease_owner: null, lease_until: null,
@@ -141,6 +144,23 @@ async function newRequest(db: ReturnType<typeof fakeDb>, binding = JOINPAY, cap:
   const r = await createPaymentRequest(db.client, { actor: { userId: "renter" }, orderId: "order_1", idempotencyKey: "idem-1", method: "ALIPAY_NATIVE", binding, capability: cap });
   return r.body as { requestId: string; channelOrderNo: string; state: string };
 }
+
+test("旧单支付原号不会再用于新汇聚收款请求",async()=>{
+  const db=fakeDb({legacyOrderConflict:true});
+  await assert.rejects(newRequest(db),(error:any)=>error.paymentReason==="ORDER_NOT_PAYABLE"&&/联系客服/.test(error.message));
+  assert.equal(db.s.requests.size,0);
+  const original=db.s.seen.findIndex(sql=>sql.includes("refund-order-no:v1"));
+  const check=db.s.seen.findIndex(sql=>sql.includes("FROM zzsh_order.legacy_continuation_evidence"));
+  assert(original>=0&&check>original);
+});
+test("缺少旧单支付号守卫时正式候选关闭，历史纯合成测试仍可运行",async t=>{
+  const db=fakeDb({legacyGuardMissing:true});
+  t.mock.method(collectionProfile,"describeCollectionProfile",()=>({evidenceMode:"OFFICIAL",merchantIdentityId:"mid_synth_01",profileId:"profile_v1",protocolVersion:"2.6",keyVersionRef:"kv1"}) as any);
+  await assert.rejects(createCollectionPaymentRequest(db.client,{actor:{userId:"renter"},orderId:"order_1",idempotencyKey:"idem-1",method:"ALIPAY_NATIVE",profile:{} as any}),
+    (error:any)=>error.paymentReason==="PAYMENT_CHANNEL_NOT_ENABLED");
+  assert.equal(db.s.requests.size,0);
+  assert.equal((await newRequest(db)).state,"SUBMITTING");
+});
 
 test("原号映射与金额：'-'→'_' 仅首次确定；CONTROLLED 保持 display_no；金额复用 PAY-02 整数分范围", () => {
   assert.equal(mapChannelOrderNo("JOINPAY", "ZZ261022-000123"), "ZZ261022_000123");

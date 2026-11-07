@@ -277,6 +277,13 @@ test("rules writes and trial window preserve uncertainty across lifecycle change
     await t.test("empty adjustment cannot produce a numeric result", async () => {
       await mount(); await click("试算一单"); await click("临时调整（估算）"); await fill("比例差（普通/自定义）", ""); const adjusted = document.querySelector('[aria-label="可调整参数"]'); assert.match(adjusted.textContent, /缺失|非法/); assert.ok(!adjusted.textContent.includes("¥"));
     });
+    await t.test("trial displays old sub-cent prices to two decimals while retaining the exact unedited basis", async () => {
+      await mount();for(const row of model.priceLines.filter(line=>line.itemId==="piece")){row.buyerUnitAmount="0.005";row.ownerUnitAmount="0.003";}
+      await mount({preserve:true});await click("试算一单");await click("临时调整（估算）");
+      const input=document.querySelector('[aria-label="物品 租客单价"]');assert.equal(input.value,"0.01");
+      assert.match(input.title,/未调整时沿用原值/);assert.equal(input.getAttribute("aria-invalid"),"false");
+      assert.equal(model.priceLines.find(line=>line.itemId==="piece").buyerUnitAmount,"0.005");assert.equal(businessWrites().length,0);
+    });
     await t.test("drag and resize keep controls reachable; Escape returns focus", async () => {
       await mount(); const trigger = byText("试算一单"); trigger.focus(); await click("试算一单"); const pane = document.querySelector('[aria-label="试算一单"]'), header = pane.firstElementChild;
       await act(async () => { header.dispatchEvent(new browser.PointerEvent("pointerdown", { bubbles: true, clientX: 100, clientY: 100, pointerId: 1 })); header.dispatchEvent(new browser.PointerEvent("pointermove", { bubbles: true, clientX: 10000, clientY: 10000, pointerId: 1 })); }); assert.ok(parseFloat(pane.style.left) <= 452);
@@ -288,7 +295,7 @@ test("rules writes and trial window preserve uncertainty across lifecycle change
 });
 
 
-test("Root: changing one price row never rounds an untouched fractional-cent contract", async () => {
+test("price editing shows cents, preserves untouched old precision, and changes it only deliberately", async () => {
   const browser = new Window({ url: "http://127.0.0.1:3101/" });
   Object.assign(globalThis, { window: browser, document: browser.document, HTMLElement: browser.HTMLElement, Element: browser.Element, Node: browser.Node, Event: browser.Event, CustomEvent: browser.CustomEvent, IS_REACT_ACT_ENVIRONMENT: true, getComputedStyle: browser.getComputedStyle.bind(browser), requestAnimationFrame: browser.requestAnimationFrame.bind(browser), cancelAnimationFrame: browser.cancelAnimationFrame.bind(browser) });
   Object.defineProperty(globalThis, "navigator", { value: browser.navigator, configurable: true });
@@ -300,14 +307,22 @@ test("Root: changing one price row never rounds an untouched fractional-cent con
     const rules = { game: { id: "root-g" }, release: { priceVersionId: "root-draft" }, priceVersions: [{ id: "root-draft", mode: "SPREAD", status: "DRAFT", revision: "1" }], priceLines: [{ priceVersionId: "root-draft", itemId: "fraction", pricingKind: "FIXED_UNIT", unitQuantity: "60", buyerUnitAmount: "0.005", ownerUnitAmount: "0.003", customerTier: "STANDARD" }, { priceVersionId: "root-draft", itemId: "other", pricingKind: "FIXED_UNIT", unitQuantity: "1", buyerUnitAmount: "10", ownerUnitAmount: "4", customerTier: "STANDARD" }], items: [{ id: "fraction", code: "root-fraction", name: "精确单价", unit: "ROUND" }, { id: "other", code: "root-other", name: "其他物资", unit: "PIECE" }] };
     const writes = [];
     await act(async () => root.render(createElement(PriceItemsEditor, { rules, draftId: "root-draft", canEdit: true, onDirtyChange() {}, ensureDraft: async () => ({ rules, draft: rules.priceVersions[0] }), command: { locked: false, write: async command => { writes.push(command); return {}; } } })));
-    assert.equal(host.querySelector('[aria-label="精确单价 租客单价"]').value, "0.005");
+    assert.equal(host.querySelector('[aria-label="精确单价 租客单价"]').value, "0.01");
+    assert.equal(host.querySelector('[aria-label="精确单价 号主单价"]').value, "0.00");
+    assert.match(host.textContent, /未修改时沿用原值/);
     const input = host.querySelector('[aria-label="其他物资 租客单价"]');
     await act(async () => { Object.getOwnPropertyDescriptor(browser.HTMLInputElement.prototype, "value").set.call(input, "11.12345678"); input.dispatchEvent(new browser.Event("input", { bubbles: true })); });
-    assert.equal(input.value, "11.12345678");
+    assert.notEqual(input.value, "11.12345678");
+    await act(async () => { Object.getOwnPropertyDescriptor(browser.HTMLInputElement.prototype, "value").set.call(input, "11.12"); input.dispatchEvent(new browser.Event("input", { bubbles: true })); });
+    assert.equal(input.value, "11.12");
     const save = [...host.querySelectorAll("button")].find(button => button.textContent === "保存物资价目");
     assert.equal(save.disabled, false); await act(async () => save.click());
     assert.equal(writes.length, 1);
     const fraction = writes[0].body.lines.find(line => line.itemId === "fraction");
     assert.equal(fraction.buyerUnitAmount, "0.005"); assert.equal(fraction.ownerUnitAmount, "0.003");
+    await act(async () => host.querySelector('[aria-label="精确单价 租客单价改用两位价格"]').click());
+    assert.equal(save.disabled,false);await act(async () => save.click());
+    const changed = writes[1].body.lines.find(line => line.itemId === "fraction");
+    assert.equal(changed.buyerUnitAmount,"0.01");assert.equal(changed.ownerUnitAmount,"0.003");
   } finally { await act(async () => root.unmount()); host.remove(); await vite.close(); await browser.happyDOM.abort(); }
 });

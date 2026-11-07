@@ -219,6 +219,12 @@ test("accepted settlement maps mutually exclusive buyer consumption facts", () =
   assert.equal(result.unmapped.some((item) => item.code === "REFUND_CORRECTION_SOURCE_MISSING"), true);
 });
 
+test("actual-consumption settlement keeps the same posted growth facts and source keys",()=>{
+  const previous=mapAcceptedSettlementToGrowthFacts(snapshot);
+  const actual=mapAcceptedSettlementToGrowthFacts({...snapshot,inputSnapshot:{...snapshot.inputSnapshot,schema:"settlement-version-v3"}});
+  assert.deepEqual(actual,previous);
+});
+
 test("a superseded or unposted version is never treated as growth input", () => {
   const result = mapAcceptedSettlementToGrowthFacts({ ...snapshot, postingId: null });
   assert.deepEqual(result.facts, []);

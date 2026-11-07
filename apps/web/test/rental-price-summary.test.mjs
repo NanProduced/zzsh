@@ -144,8 +144,7 @@ test("R3-03: 60-bullet denominator displayed with '组' representation", async (
   });
 });
 
-// Case 5: 8-decimal UnitAmount precision preserved (e.g. ¥0.00400000 / 1 发 -> ¥0.004 / 发)
-test("R3-05: positive 8-decimal UnitAmount preserves decimals and never renders as ¥0.00", async () => {
+test("R3-05: a nonzero sub-cent reference price is rounded and clearly labelled", async () => {
   await withDom(async (host, render) => {
     const reference = {
       total: "¥0.04",
@@ -158,8 +157,8 @@ test("R3-05: positive 8-decimal UnitAmount preserves decimals and never renders 
     await render(React.createElement(RentalPriceSummary, { reference, quote: null }));
     const spec = host.querySelector(".account-quote-bill-spec");
     assert.ok(spec);
-    assert.match(spec.textContent, /¥0.004 \/ 发/, "precision preserved without truncation to ¥0.00");
-    assert.ok(!spec.textContent.includes("¥0.00 /"), "must not be ¥0.00");
+    assert.match(spec.textContent, /约¥0.00（不足1分） \/ 发/);
+    assert.equal(host.querySelector('.account-quote-bill-subtotal strong').textContent, "¥0.04");
   });
 });
 

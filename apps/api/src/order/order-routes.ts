@@ -49,6 +49,7 @@ import {
 import { handleSettlementAdminRoute, handleSettlementUserRoute } from "./settlement-routes";
 import { handlePrestartTerminationRoute } from "./prestart-termination-routes";
 import { handleSupportCancelAdminRoute } from "./support-cancel-routes";
+import { handleSupportUnpaidCancelRoute } from "./support-unpaid-cancel-routes";
 import { handleLegacyContinuationRoute } from "./legacy-continuation-routes";
 import type { LegacyDutyFinalizationReader } from "./legacy-continuation-model";
 import {
@@ -72,6 +73,7 @@ export type OrderRuntimeOptions = AuthSecurityOptions & {
   channelPaymentReadOptions?: ChannelPaymentReadOptions;
   distributionEarnings?: DistributionEarningStore;
   legacyDutyFinalizationReader?: LegacyDutyFinalizationReader;
+  legacyRefund?:import('./legacy-continuation-routes').LegacyContinuationRouteOptions['legacyRefund'];
   orderHoldSeconds?: number;
   supplyGateReader?: SupplyGateReader;
   /** 订单关联账号与账号页同一公开口径所需的旧平台准入（可缺省） */
@@ -339,6 +341,11 @@ export async function handleOrderAdminRoute(
     if (await handleLegacyContinuationRoute(request, response, options, "admin")) return;
     if (await handlePrestartTerminationRoute(request, response, options, "admin")) return;
     if (await handleSettlementAdminRoute(request, response, options)) return;
+    const supportUnpaidCancel = /^\/([A-Za-z0-9._:-]+)\/support-unpaid-cancel$/.exec(path);
+    if (supportUnpaidCancel) {
+      await handleSupportUnpaidCancelRoute(request, response, options, decodeId(supportUnpaidCancel[1]!), query, method);
+      return;
+    }
     const supportCancel = /^\/([A-Za-z0-9._:-]+)\/support-cancel$/.exec(path);
     if (supportCancel) {
       await handleSupportCancelAdminRoute(request, response, options, decodeId(supportCancel[1]!), query, method);

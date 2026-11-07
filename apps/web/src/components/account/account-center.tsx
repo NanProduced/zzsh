@@ -138,6 +138,7 @@ function coreStatus(order: Order): string {
   if (order.status === "PENDING_PAYMENT" && order.expiredAwaitingCancel) return "已到期 · 取消处理中";
   if (order.status === "CANCELLED" && order.cancelReason === "TIMEOUT") return "已取消 · 到期未支付";
   if (order.status === "CANCELLED" && order.cancelReason === "USER") return "已取消 · 租客取消";
+  if (order.status === "CANCELLED" && order.cancelReason === "SUPPORT_UNPAID") return "已取消 · 客服处理";
   const stage = orderSettlementStageLabel(order);
   if (order.status === "PAID" && stage) return stage;
   return STATUS_LABELS[order.status] ?? "状态待确认";

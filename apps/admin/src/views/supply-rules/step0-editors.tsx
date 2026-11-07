@@ -12,7 +12,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from ".
 import { Tooltip, TooltipContent, TooltipTrigger } from "../../components/ui/tooltip";
 import { cn } from "@/lib/utils";
 import { draftCommand, type useRulesWrite } from "./rules-write";
-import { asHaffV2, centsYuan, safeBoxLabel, unitLabel, unitYuan, yuanInput, type HaffV2 } from "./rules-model";
+import { asHaffV2, centsYuan, referenceUnitYuan, safeBoxLabel, spread, unitLabel, unitPriceInput, unitYuan, yuanInput, type HaffV2 } from "./rules-model";
 import { draftHasLines, priceSaveBody, type SealCheck } from "./price-draft";
 
 type Command = ReturnType<typeof useRulesWrite>;
@@ -61,8 +61,8 @@ export function HelpTip({
 const currentPrice = (rules: RulesResponse) => rules.priceVersions.find(v => v.id === rules.release?.priceVersionId);
 /** 比例与加减值：可为负，最多两位小数。 */
 const DECIMAL = /^-?\d+(\.\d{1,2})?$/;
-/** 物资合同单价：非负，保留服务端支持的八位小数。 */
-const MONEY = /^\d+(\.\d{1,8})?$/;
+/** 物资新单价：非负，最多两位小数。 */
+const MONEY = /^\d{1,16}(\.\d{1,2})?$/;
 /** 服务端要求这三项的计费数量为 1。见 delta-rental DELTA_RESOURCE_UNITS。 */
 const LOCKED_UNIT_QUANTITY = new Set(["df_billable_top_insure_card", "df_billable_barrett_bullet", "df_billable_turtle_backpack_45"]);
 /** 四舍五入到分。 */
@@ -101,10 +101,10 @@ export function DraftLine({ selected, locked }: { selected: PriceVersionRecord |
   );
 }
 
-function useDirty<T>(initial: T, locked: boolean, onDirtyChange: (dirty: boolean) => void) {
+function useDirty<T>(initial: T, locked: boolean, onDirtyChange: (dirty: boolean) => void, extraDirty = false) {
   const [value, setValue] = useState<T>(initial);
   const [baseline, setBaseline] = useState(JSON.stringify(initial));
-  const dirty = JSON.stringify(value) !== baseline;
+  const dirty = JSON.stringify(value) !== baseline || extraDirty;
   useEffect(() => { onDirtyChange(dirty); return () => onDirtyChange(false); }, [dirty, onDirtyChange]);
   // 未改动时跟随服务端最新值；有未保存输入时保留输入（含 409 后重新读取）。
   useEffect(() => { if (dirty || locked) return; setValue(initial); setBaseline(JSON.stringify(initial)); }, [JSON.stringify(initial), dirty, locked]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -113,7 +113,6 @@ function useDirty<T>(initial: T, locked: boolean, onDirtyChange: (dirty: boolean
 
 /** 金额输入最多两位小数：多打的位数直接不接收。 */
 export const MONEY2 = /^\d*(?:\.\d{0,2})?$/;
-const UNIT_MONEY8 = /^\d*(?:\.\d{0,8})?$/;
 
 function Panel({ title, note, more, children }: { title: string; note?: ReactNode; more?: ReactNode; children: ReactNode }) {
   const [open, setOpen] = useState(false);
@@ -279,6 +278,12 @@ export function BasePricingEditor({ rules, command, draftId, canEdit, onDirtyCha
 /* ---------------- 物资价目（仅普通档位） ---------------- */
 
 type ItemRow = { itemId: string; pricingKind: "FIXED_UNIT" | "HAFF_RATIO"; unitQuantity: string; buyerUnitAmount: string; ownerUnitAmount: string };
+const hasSubCent = (value: string | null | undefined) => typeof value === "string" && /[1-9]/.test((value.split(".")[1] ?? "").slice(2));
+function exactUnit(value: string): bigint | null {
+  if (value.length>25 || !/^\d+(?:\.\d{1,8})?$/.test(value)) return null;
+  const [whole, fraction = ""] = value.split(".");
+  return BigInt(whole!) * 100_000_000n + BigInt(fraction.padEnd(8, "0"));
+}
 
 /** 窄屏下表格行改为卡片，单元格用 data-label 显示列名。 */
 const ML = "max-sm:before:mb-1 max-sm:before:block max-sm:before:text-[11px] max-sm:before:text-muted-foreground max-sm:before:content-[attr(data-label)]";
@@ -289,20 +294,34 @@ export function PriceItemsEditor({ rules, command, draftId, canEdit, onDirtyChan
   const std = (versionId: string | undefined) => rules.priceLines.filter(l => l.priceVersionId === versionId && (l.customerTier ?? "STANDARD") === "STANDARD");
   const hasDraftLines = Boolean(selected && draftHasLines(rules, selected.id));
   const basis = hasDraftLines ? std(selected?.id) : std(current?.id);
-  const initial = useMemo<ItemRow[]>(() => rules.items.map(item => { const l = basis.find(x => x.itemId === item.id); return { itemId: item.id, pricingKind: l?.pricingKind ?? (item.unit === "HAFF_BASE" ? "HAFF_RATIO" : "FIXED_UNIT"), unitQuantity: LOCKED_UNIT_QUANTITY.has(item.code) ? "1" : (l?.unitQuantity ?? "1"), buyerUnitAmount: l?.buyerUnitAmount ? yuanInput(l.buyerUnitAmount) : "", ownerUnitAmount: l?.ownerUnitAmount ? yuanInput(l.ownerUnitAmount) : "" }; }), [JSON.stringify(basis), rules.items]); // eslint-disable-line react-hooks/exhaustive-deps
+  const initial = useMemo<ItemRow[]>(() => rules.items.map(item => { const l = basis.find(x => x.itemId === item.id); return { itemId: item.id, pricingKind: l?.pricingKind ?? (item.unit === "HAFF_BASE" ? "HAFF_RATIO" : "FIXED_UNIT"), unitQuantity: LOCKED_UNIT_QUANTITY.has(item.code) ? "1" : (l?.unitQuantity ?? "1"), buyerUnitAmount: unitPriceInput(l?.buyerUnitAmount), ownerUnitAmount: unitPriceInput(l?.ownerUnitAmount) }; }), [JSON.stringify(basis), rules.items]); // eslint-disable-line react-hooks/exhaustive-deps
   const locked = !canEdit || command.locked || (selected ? selected.status !== "DRAFT" : false); const sealedView = !!selected && selected.status !== "DRAFT";
-  const form = useDirty(initial, command.locked, onDirtyChange);
+  const [changedPrices, setChangedPrices] = useState<Set<string>>(() => new Set());
+  const form = useDirty(initial, command.locked, onDirtyChange, changedPrices.size > 0);
   const save = useSave(command);
   const mode = selected?.mode ?? current?.mode ?? "SPREAD";
   const memberTiers = selected ? rules.priceLines.some(l => l.priceVersionId === selected.id && (l.customerTier ?? "STANDARD") !== "STANDARD") : false;
+  const price = (r: ItemRow, field: "buyerUnitAmount" | "ownerUnitAmount") => {
+    const old = basis.find(line => line.itemId === r.itemId)?.[field];
+    const initialValue = initial.find(line => line.itemId === r.itemId)?.[field];
+    return hasSubCent(old) && !changedPrices.has(`${r.itemId}:${field}`) && r[field] === initialValue ? old! : r[field].trim();
+  };
   const submit = () => {
     if (locked) return;
-    const lines = form.value.filter(r => r.pricingKind === "HAFF_RATIO" || r.buyerUnitAmount.trim() !== "").map(r => r.pricingKind === "HAFF_RATIO" ? { itemId: r.itemId, customerTier: "STANDARD", pricingKind: "HAFF_RATIO" } : { itemId: r.itemId, customerTier: "STANDARD", pricingKind: "FIXED_UNIT", unitQuantity: r.unitQuantity.trim(), buyerUnitAmount: r.buyerUnitAmount.trim(), ...(mode === "SPREAD" && r.ownerUnitAmount.trim() !== "" ? { ownerUnitAmount: r.ownerUnitAmount.trim() } : {}) });
+    const lines = form.value.filter(r => r.pricingKind === "HAFF_RATIO" || r.buyerUnitAmount.trim() !== "").map(r => r.pricingKind === "HAFF_RATIO" ? { itemId: r.itemId, customerTier: "STANDARD", pricingKind: "HAFF_RATIO" } : { itemId: r.itemId, customerTier: "STANDARD", pricingKind: "FIXED_UNIT", unitQuantity: r.unitQuantity.trim(), buyerUnitAmount: price(r,"buyerUnitAmount"), ...(mode === "SPREAD" && r.ownerUnitAmount.trim() !== "" ? { ownerUnitAmount: price(r,"ownerUnitAmount") } : {}) });
     if (!lines.length) return;
-    void save.run(async () => { const t = await ensureDraft(); return t ? draftCommand(t.rules.game.id, "price", "update", priceSaveBody(t.rules, t.draft, { lines }), t.draft.id) : null; }, "物资价目已保存到草稿。", form.markSaved);
+    void save.run(async () => { const t = await ensureDraft(); return t ? draftCommand(t.rules.game.id, "price", "update", priceSaveBody(t.rules, t.draft, { lines }), t.draft.id) : null; }, "物资价目已保存到草稿。", () => { form.markSaved(); setChangedPrices(new Set()); });
   };
   const set = (i: number, key: keyof ItemRow, v: string) => form.setValue(prev => prev.map((r, j) => j === i ? { ...r, [key]: v } : r));
-  const rowIssue = (r: ItemRow) => r.pricingKind === "HAFF_RATIO" ? "" : !/^[1-9]\d*$/.test(r.unitQuantity.trim()) ? "计费数量须为正整数" : (r.buyerUnitAmount.trim() !== "" && !MONEY.test(r.buyerUnitAmount.trim())) || (r.ownerUnitAmount.trim() !== "" && !MONEY.test(r.ownerUnitAmount.trim())) ? "金额须为非负数，最多八位小数" : r.buyerUnitAmount.trim() !== "" && r.ownerUnitAmount.trim() !== "" && Number(r.ownerUnitAmount) > Number(r.buyerUnitAmount) ? "号主价高于租客价，平台会倒贴" : "";
+  const rowIssue = (r: ItemRow) => {
+    if (r.pricingKind === "HAFF_RATIO") return "";
+    if (!/^[1-9]\d*$/.test(r.unitQuantity.trim())) return "计费数量须为正整数";
+    if ((r.buyerUnitAmount.trim() !== "" && !MONEY.test(r.buyerUnitAmount.trim())) || (r.ownerUnitAmount.trim() !== "" && !MONEY.test(r.ownerUnitAmount.trim()))) return "金额须为非负数，整数最多16位、小数最多两位";
+    const old = basis.find(line => line.itemId === r.itemId);
+    if (old && old.unitQuantity !== r.unitQuantity.trim() && (["buyerUnitAmount","ownerUnitAmount"] as const).some(field => hasSubCent(old[field]) && !changedPrices.has(`${r.itemId}:${field}`))) return "计费数量已变，请先将原单价明确调整为两位小数";
+    const buyer=exactUnit(price(r,"buyerUnitAmount")),owner=exactUnit(price(r,"ownerUnitAmount"));
+    return buyer!==null&&owner!==null&&owner>buyer ? "号主价高于租客价，平台会倒贴" : "";
+  };
   const itemsInvalid = form.value.some(r => { const m = rowIssue(r); return m !== "" && !m.startsWith("号主价高于"); });
   return <Panel
     title="物资价目"
@@ -317,6 +336,7 @@ export function PriceItemsEditor({ rules, command, draftId, canEdit, onDirtyChan
     more="例：六级子弹每 60 发租客 ¥10.00、号主 ¥4.00，租 120 发 → 租客付 ¥20.00、号主得 ¥8.00。金额四舍五入到分；会员优惠按总价折扣另算。"
   >
     <DraftLine selected={selected} locked={command.locked} />
+    {basis.some(line => hasSubCent(line.buyerUnitAmount) || hasSubCent(line.ownerUnitAmount)) ? <p role="note" className="text-xs text-muted-foreground">原价有不足一分的精度，未修改时沿用原值；调整后的单价最多两位小数。</p> : null}
     {memberTiers ? <p role="note" className="text-xs text-muted-foreground">此草稿还带有旧的会员档位价目；保存后草稿只保留普通档位（已封存版本不受影响）。</p> : null}
     <div className="rules-items-table overflow-x-auto rounded-md border border-border max-sm:overflow-visible max-sm:border-0 max-sm:[&_thead]:hidden max-sm:[&_table]:block max-sm:[&_tbody]:grid max-sm:[&_tbody]:gap-3 max-sm:[&_tr]:grid max-sm:[&_tr]:grid-cols-2 max-sm:[&_tr]:gap-x-3 max-sm:[&_tr]:gap-y-2 max-sm:[&_tr]:rounded-md max-sm:[&_tr]:border max-sm:[&_tr]:border-border max-sm:[&_tr]:p-3 max-sm:[&_td]:block max-sm:[&_td]:p-0 max-sm:[&_td]:text-left">
       <Table className="min-w-[720px]">
@@ -346,11 +366,10 @@ export function PriceItemsEditor({ rules, command, draftId, canEdit, onDirtyChan
             const cur = std(current?.id).find(l => l.itemId === r.itemId);
             const haff = r.pricingKind === "HAFF_RATIO";
             const lockedQty = LOCKED_UNIT_QUANTITY.has(item?.code ?? "");
-            const spreadVal = haff || !MONEY.test(r.buyerUnitAmount.trim()) || !MONEY.test(r.ownerUnitAmount.trim())
-              ? null
-              : r2(Number(r.buyerUnitAmount) - Number(r.ownerUnitAmount));
-            const buyerChanged = cur && yuanInput(cur.buyerUnitAmount) !== r.buyerUnitAmount.trim();
-            const ownerChanged = cur && yuanInput(cur.ownerUnitAmount) !== r.ownerUnitAmount.trim();
+            const buyer=exactUnit(price(r,"buyerUnitAmount")),owner=exactUnit(price(r,"ownerUnitAmount"));
+            const spreadVal = haff || buyer===null || owner===null ? null : buyer-owner;
+            const buyerChanged = cur && yuanInput(cur.buyerUnitAmount) !== yuanInput(price(r,"buyerUnitAmount"));
+            const ownerChanged = cur && yuanInput(cur.ownerUnitAmount) !== yuanInput(price(r,"ownerUnitAmount"));
             const qtyChanged = cur && cur.unitQuantity !== r.unitQuantity.trim();
             return (
               <TableRow key={r.itemId}>
@@ -373,7 +392,7 @@ export function PriceItemsEditor({ rules, command, draftId, canEdit, onDirtyChan
                   )}
                 </TableCell>
                 <TableCell data-label="当前租客单价" className={`text-right tabular-nums text-muted-foreground ${ML}`}>
-                  {haff ? "—" : cur?.buyerUnitAmount ? unitYuan(cur.buyerUnitAmount) : <span className="text-muted-foreground/50">未配置</span>}
+                  {haff ? "—" : cur?.buyerUnitAmount ? referenceUnitYuan(cur.buyerUnitAmount) : <span className="text-muted-foreground/50">未配置</span>}
                 </TableCell>
                 <TableCell data-label="计费数量 N" className={`min-w-24 ${ML} ${haff ? "max-sm:hidden" : ""}`}>
                   {haff ? "—" : lockedQty ? (
@@ -399,41 +418,45 @@ export function PriceItemsEditor({ rules, command, draftId, canEdit, onDirtyChan
                     <Input
                       aria-label={`${item?.name} 租客单价`}
                       inputMode="decimal"
+                      maxLength={19}
                       value={r.buyerUnitAmount}
                       disabled={locked}
                       className={`text-right tabular-nums transition-colors ${buyerChanged ? "border-primary bg-primary/[0.04] font-medium" : ""}`}
-                      onChange={e => { if (UNIT_MONEY8.test(e.target.value)) set(i, "buyerUnitAmount", e.target.value); }}
+                      onChange={e => { if (MONEY2.test(e.target.value)) { set(i, "buyerUnitAmount", e.target.value); if (hasSubCent(basis.find(line=>line.itemId===r.itemId)?.buyerUnitAmount)) setChangedPrices(previous=>new Set(previous).add(`${r.itemId}:buyerUnitAmount`)); } }}
                     />
                   )}
+                  {!haff && hasSubCent(basis.find(line=>line.itemId===r.itemId)?.buyerUnitAmount) && !changedPrices.has(`${r.itemId}:buyerUnitAmount`) && !locked ? <Button type="button" variant="ghost" size="sm" aria-label={`${item?.name} 租客单价改用两位价格`} onClick={() => setChangedPrices(previous=>new Set(previous).add(`${r.itemId}:buyerUnitAmount`))}>改用两位价格</Button> : null}
                 </TableCell>
                 {mode === "SPREAD" ? (
                   <>
                     <TableCell data-label="当前号主单价" className={`text-right tabular-nums text-muted-foreground ${ML} ${haff ? "max-sm:hidden" : ""}`}>
-                      {haff ? "—" : cur?.ownerUnitAmount ? unitYuan(cur.ownerUnitAmount) : <span className="text-muted-foreground/50">未配置</span>}
+                      {haff ? "—" : cur?.ownerUnitAmount ? referenceUnitYuan(cur.ownerUnitAmount) : <span className="text-muted-foreground/50">未配置</span>}
                     </TableCell>
                     <TableCell data-label={sealedView ? "待生效号主价（元）" : "草稿号主价（元）"} className={`min-w-24 ${ML} ${haff ? "max-sm:hidden" : ""}`}>
                       {haff ? "—" : (
                         <Input
                           aria-label={`${item?.name} 号主单价`}
                           inputMode="decimal"
+                          maxLength={19}
                           value={r.ownerUnitAmount}
                           disabled={locked}
                           className={`text-right tabular-nums transition-colors ${ownerChanged ? "border-primary bg-primary/[0.04] font-medium" : ""}`}
-                          onChange={e => { if (UNIT_MONEY8.test(e.target.value)) set(i, "ownerUnitAmount", e.target.value); }}
+                          onChange={e => { if (MONEY2.test(e.target.value)) { set(i, "ownerUnitAmount", e.target.value); if (hasSubCent(basis.find(line=>line.itemId===r.itemId)?.ownerUnitAmount)) setChangedPrices(previous=>new Set(previous).add(`${r.itemId}:ownerUnitAmount`)); } }}
                         />
                       )}
+                      {!haff && hasSubCent(basis.find(line=>line.itemId===r.itemId)?.ownerUnitAmount) && !changedPrices.has(`${r.itemId}:ownerUnitAmount`) && !locked ? <Button type="button" variant="ghost" size="sm" aria-label={`${item?.name} 号主单价改用两位价格`} onClick={() => setChangedPrices(previous=>new Set(previous).add(`${r.itemId}:ownerUnitAmount`))}>改用两位价格</Button> : null}
                     </TableCell>
                     <TableCell data-label="平台差价" className={`text-right tabular-nums ${ML} ${haff ? "max-sm:hidden" : ""}`}>
                       {spreadVal === null ? (
                         <span className="text-muted-foreground/40">—</span>
-                      ) : spreadVal > 0 ? (
-                        <span className="font-semibold text-emerald-600 dark:text-emerald-400">+{unitYuan(spreadVal)}</span>
-                      ) : spreadVal === 0 ? (
-                        <span className="text-muted-foreground tabular-nums">{unitYuan(spreadVal)}</span>
+                      ) : spreadVal > 0n ? (
+                        <span className="font-semibold text-emerald-600 dark:text-emerald-400">+{spread(price(r,"buyerUnitAmount"),price(r,"ownerUnitAmount"))}</span>
+                      ) : spreadVal === 0n ? (
+                        <span className="text-muted-foreground tabular-nums">{spread(price(r,"buyerUnitAmount"),price(r,"ownerUnitAmount"))}</span>
                       ) : (
                         <span className="inline-flex items-center gap-1 font-bold text-destructive">
                           <CircleAlert className="size-3 shrink-0" />
-                          {unitYuan(spreadVal)}
+                          {spread(price(r,"buyerUnitAmount"),price(r,"ownerUnitAmount"))}
                         </span>
                       )}
                     </TableCell>
@@ -446,7 +469,7 @@ export function PriceItemsEditor({ rules, command, draftId, canEdit, onDirtyChan
       </Table>
     </div>
     {save.messages}
-    {canEdit && !sealedView ? <div className="flex flex-wrap gap-2"><Button type="button" disabled={locked || itemsInvalid || !(form.dirty || (selected && !hasDraftLines))} onClick={submit}>保存物资价目</Button>{form.dirty ? <Button type="button" variant="ghost" onClick={form.reset}>放弃本次输入</Button> : null}</div> : null}
+    {canEdit && !sealedView ? <div className="flex flex-wrap gap-2"><Button type="button" disabled={locked || itemsInvalid || !(form.dirty || (selected && !hasDraftLines))} onClick={submit}>保存物资价目</Button>{form.dirty ? <Button type="button" variant="ghost" onClick={() => { form.reset(); setChangedPrices(new Set()); }}>放弃本次输入</Button> : null}</div> : null}
   </Panel>;
 }
 

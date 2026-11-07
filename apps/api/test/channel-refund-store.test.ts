@@ -205,7 +205,9 @@ test("SYNTHETIC_COMPONENT_MODEL：formal原key重放先于当前能力；对象�
   const row=db.s.intents.get(intent.intentId)!;Object.assign(row,{payment_source:"JOINPAY",evidence_level:"JOINPAY_FORMAL",initial_admission_ref:"HYPOTHETICAL_OLD_REF",budget_disposition:"ALLOCATED"});
   row.request_fingerprint=fingerprintRequest("rental.refund.intent","posting_1",{amountCents:"150",reason:null});
   const input={postingId:"posting_1",renterUserId:"renter_1",amountCents:"150",idempotencyKey:"original_key",requestId:"restore_1"};
-  const before=structuredClone(row),restored=await createFormalRefundIntent(db.client,input);assert.equal(restored.replayed,true);assert.equal(restored.refundOrderNo,intent.refundOrderNo);assert.deepEqual(row,before);
+  const start=db.s.seen.length,before=structuredClone(row),restored=await createFormalRefundIntent(db.client,input);assert.equal(restored.replayed,true);assert.equal(restored.refundOrderNo,intent.refundOrderNo);assert.deepEqual(row,before);
+  const locks=db.s.seen.slice(start),funds=locks.findIndex(q=>q.includes("refund-funds:v1")),number=locks.findIndex(q=>q.includes("refund-order-no:v1"));
+  assert(funds>=0&&number>funds&&number<locks.findIndex(q=>q.includes("WHERE posting_id=$1 AND idempotency_key=$2")));
   await assert.rejects(createFormalRefundIntent(db.client,{...input,renterUserId:"foreign"}),/not found/i);
   await assert.rejects(createFormalRefundIntent(db.client,{...input,amountCents:"149"}),(e:any)=>e.code==="IDEMPOTENCY_KEY_REUSED");
   await assert.rejects(createFormalRefundIntent(db.client,{...input,reason:"different"}),(e:any)=>e.code==="IDEMPOTENCY_KEY_REUSED");

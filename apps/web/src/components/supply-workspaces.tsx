@@ -25,6 +25,7 @@ import { CreditCenter } from "./account/credit-center";
 import { AccountSecurityControls, type SecurityNicknameDraft, type SecurityPendingWrite } from "./account/account-security-controls";
 import { ConfirmAlertDialog } from "./ui/alert-dialog";
 import { LegacyAccountImage } from "@zzsh/ui/legacy-account-image";
+import { formatReferenceYuan } from "@zzsh/ui/display-money";
 import { CONDITION_LABELS, booleanDeclarationText, conditionLines, haffMillionsLabel, skinTypeLabel, termLabel, unitLabel, toListingDetail, type ResourceLine } from "../lib/listing-view";
 import { deriveAccountTitle } from "../lib/account-title";
 import { supplyApi, SupplyRequestError, supplyBlockerMessages, uncertainSupplyWriteFailure } from "../lib/supply-client";
@@ -70,9 +71,8 @@ function moneyText(money: { amount: string } | null | undefined): string {
 /** Unit prices arrive at eight decimals; show the readable figure next to the quantity it is quoted per. */
 function unitPriceText(money: { amount: string } | null | undefined, unitQuantity: string | undefined, unit: string): string {
   if (!money) return "未返回";
-  const rounded = Number(money.amount);
-  const price = Number.isFinite(rounded) ? rounded.toFixed(2) : money.amount;
-  return `${price} 元 / ${unitQuantity && unitQuantity !== "1" ? `${unitQuantity} ` : ""}${unit}`.trim();
+  const price = formatReferenceYuan(money.amount);
+  return price ? `${price} / ${unitQuantity && unitQuantity !== "1" ? `${unitQuantity} ` : ""}${unit}`.trim() : "未返回";
 }
 
 function stateLabel(state: string | null | undefined): string {

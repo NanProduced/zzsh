@@ -15,6 +15,7 @@ export type JoinpayRefundRuntimeDocument = {
   notifyProfilesByInitialKey: Record<string, string>;
   keyVariables: Record<string, string>;
   newRefundsEnabled: boolean;
+  legacyRefundsEnabled?: boolean;
   recovery?: NonNullable<Assembly["recovery"]>;
 };
 type Context = Pick<AppConfig, "provider" | "database"> & { authEnabled: boolean };
@@ -38,11 +39,12 @@ export function loadJoinpayRefundRuntime(context: Context, env: NodeJS.ProcessEn
     if (Buffer.byteLength(raw, "utf8") > 262144) return reject("JOINPAY_REFUND_CONFIG_TOO_LARGE");
     const d: unknown = JSON.parse(raw);
     if (!object(d) || Object.keys(d).some(k => !["admission", "profiles", "submitProfileId", "queryProfileId",
-      "notifyProfilesByInitialKey", "keyVariables", "newRefundsEnabled", "recovery"].includes(k))
+      "notifyProfilesByInitialKey", "keyVariables", "newRefundsEnabled", "legacyRefundsEnabled", "recovery"].includes(k))
       || !object(d.admission) || !Array.isArray(d.profiles) || d.profiles.length < 1 || d.profiles.length > 32
       || !id(d.queryProfileId) || d.submitProfileId !== undefined && !id(d.submitProfileId)
       || !object(d.notifyProfilesByInitialKey) || !object(d.keyVariables) || typeof d.newRefundsEnabled !== "boolean"
-      || d.newRefundsEnabled && (!id(d.submitProfileId) || d.recovery === undefined)) return reject("JOINPAY_REFUND_CONFIG_INVALID");
+      || d.legacyRefundsEnabled !== undefined && typeof d.legacyRefundsEnabled !== "boolean"
+      || (d.newRefundsEnabled || d.legacyRefundsEnabled) && (!id(d.submitProfileId) || d.recovery === undefined)) return reject("JOINPAY_REFUND_CONFIG_INVALID");
     document = d as JoinpayRefundRuntimeDocument;
   } catch { return reject("JOINPAY_REFUND_CONFIG_UNAVAILABLE"); }
   const recovery = document.recovery;
@@ -75,8 +77,10 @@ export function loadJoinpayRefundRuntime(context: Context, env: NodeJS.ProcessEn
     for (const profileId of Object.values(document.notifyProfilesByInitialKey)) selected("NOTIFY", profileId);
     for (const input of document.profiles) if (input.operation === "SUBMIT"
       && !Object.hasOwn(document.notifyProfilesByInitialKey, input.keyVersionRef)) return reject("JOINPAY_REFUND_NOTIFY_SELECTION_MISSING");
-    const initialProfile = document.newRefundsEnabled ? selected("SUBMIT", document.submitProfileId!) : undefined;
-    if (initialProfile) assertRefundStart(admission);
+    const submit = document.newRefundsEnabled || document.legacyRefundsEnabled ? selected("SUBMIT", document.submitProfileId!) : undefined;
+    if (submit) assertRefundStart(admission);
+    const initialProfile = document.newRefundsEnabled ? submit : undefined;
+    const legacyInitialProfile = document.legacyRefundsEnabled ? submit : undefined;
     const profileFor: Assembly["profileFor"] = (operation, original, pinned) => {
       const profile = pinned ? selected(operation, pinned.profileId) : operation === "SUBMIT"
         ? selected(operation, original.profileId) : operation === "QUERY" ? query
@@ -99,7 +103,8 @@ export function loadJoinpayRefundRuntime(context: Context, env: NodeJS.ProcessEn
       }
       return keys.get(reference)!;
     };
-    return { admission, profileFor, keyFor, ...(initialProfile ? { initialProfile } : {}),
+    return { admission, profileFor, keyFor, legacyRefundsEnabled:document.legacyRefundsEnabled===true,
+      ...(initialProfile ? { initialProfile } : {}), ...(legacyInitialProfile ? { legacyInitialProfile } : {}),
       ...(recovery ? { recovery: Object.freeze({ ...recovery }) } : {}) };
   } catch (error) {
     if (error instanceof ConfigurationError) throw error;

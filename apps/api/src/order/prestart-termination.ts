@@ -2,12 +2,11 @@ import { randomUUID } from "node:crypto";
 import type { PoolClient } from "pg";
 import { hashApprovalPayload } from "../auth/approval-audit";
 import { assertAdminContextInTransaction } from "../auth/auth-security";
-import { ADMIN_PERMISSION, loadEffectiveAdminAccess } from "../auth/admin-authorization";
+import { ADMIN_PERMISSION, hasPermission, loadEffectiveAdminAccess } from "../auth/admin-authorization";
 import { gameScopeSql } from "../auth/admin-scope";
 import { recordAudit, SecurityApiError } from "../auth/security-core";
 import { assertUserContextInTransaction } from "../auth/user-identity";
 import { lockSettlement, type SettlementActor } from "./settlement-record";
-import { readOrderTeamAccess } from "../im/order-team-access";
 import { readPrestartRefundProgress } from "./prestart-refund-store";
 import { prestartLiabilityPlan, recognizePrestartRefundLiability, verifyPrestartRefundLiability } from "../finance/prestart-refund-liability";
 import { assertPrestartDecision, prestartTerminationEligibility, PRESTART_TERMINATION_STATES, PRESTART_TERMINATION_VERSION,
@@ -130,9 +129,7 @@ export async function readPrestartTermination(client: PoolClient, actor: Settlem
     const own = (await client.query(`SELECT o.id FROM zzsh_order.rental_order o WHERE o.id=$1 AND ${gameScopeSql("o.game_id","$2","$3")}`,
       [orderId,actor.userId,access.isBoss])).rowCount;
     if (own !== 1) throw missing();
-    const team = access.permissions.has(ADMIN_PERMISSION.orderSettlementWrite)
-      ? await readOrderTeamAccess(client,actor,orderId,"read") : null;
-    canReview = team?.teamState === "READY" && team.canRead === true;
+    canReview = hasPermission(access, ADMIN_PERMISSION.orderSettlementWrite);
     adminMoney = access.permissions.has(ADMIN_PERMISSION.financeRead) || canReview;
   }
   await assertPrestartTerminationSchema(client);

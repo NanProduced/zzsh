@@ -12,7 +12,22 @@ import {
   obligationSourceLabel, refundObligationLabel, withdrawalObligationLabel,
 } from "../src/display-funds.ts";
 import { messageScopeLabel, messageScopeUserLabel } from "../src/display-im.ts";
-import { parseYuanToCents, yuanInputHint } from "../src/display-money.ts";
+import { formatExactYuan, formatReferenceYuan, parseYuanToCents, yuanInputHint } from "../src/display-money.ts";
+
+test("legacy settled amounts preserve exact cents while normalizing padding",()=>{
+  assert.equal(formatExactYuan("10"),"10.00");assert.equal(formatExactYuan("10.5000"),"10.50");
+  assert.equal(formatExactYuan("0.01"),"0.01");assert.equal(formatExactYuan("10.005"),null);
+  assert.equal(formatExactYuan("-1.00"),null);assert.equal(formatExactYuan("01.00"),null);
+});
+
+test("reference unit money rounds half up to two digits without turning a sub-cent value into free",()=>{
+  assert.equal(formatReferenceYuan("1.005"),"约¥1.01");
+  assert.equal(formatReferenceYuan("0.004"),"约¥0.00（不足1分）");
+  assert.equal(formatReferenceYuan("0.00000000"),"¥0.00");
+  assert.equal(formatReferenceYuan("99999999999999.995",{grouped:true}),"约¥100,000,000,000,000.00");
+  assert.equal(formatReferenceYuan("约¥0.00（不足1分）"),"约¥0.00（不足1分）");
+  assert.equal(formatReferenceYuan("not-a-price"),null);
+});
 
 /** 与逐字引用的服务端权威值集对照；新增未登记值应改表，不应静默降级。 */
 const AUTHORITATIVE = {

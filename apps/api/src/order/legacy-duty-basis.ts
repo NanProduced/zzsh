@@ -62,6 +62,7 @@ export async function readLegacyDutyBasis(client: PoolClient, orderId: string, d
   if (!plan.ok || plan.fingerprint !== v.planFingerprint || canonicalize(plan.commissionRevisions) !== canonicalize(v.commissionRevisions) || canonicalize(deriveLegacyFacts(facts,plan,cmd,before.id,v.id)) !== canonicalize(readSealedLegacyFacts(result))) throw conflict("FINAL_COMMAND_EVIDENCE_MISMATCH");
   let amount: string | null = null, beneficiary: string | null = null, sourceRecordDigest = result.factsDigest;
   if (duty.kind === "COMMISSION") {
+    if (duty.continuationVersionId !== v.id) return { state: "UNKNOWN", reason: "COMMISSION_CONFIRMATION_LINK_MISSING" };
     const c = plan.commissionRevisions.find(c => c.id === duty.sourceRecordId), original = facts.evidence.source.commissions.find(c => c.id === duty.sourceRecordId), proof = facts.commissionEvidence?.find(p => p.sourceRecordId === duty.sourceRecordId);
     if (!c?.recalculable || !original || !proof) return { state: "UNKNOWN", reason: "COMMISSION_FINAL_BASIS_MISSING" };
     assertLegacyCommissionEvidence(proof,binding.legacyId,original); sourceRecordDigest = proof.digest; amount = legacyPlanYuanToCents(c.legalEarnings); beneficiary = legacyOwnerUserId("legacy_mysql_restore","la_user",c.beneficiaryId);

@@ -109,7 +109,7 @@ test("部分退款只创建原责任意图并明确渠道尚未提交；重放�
   const result = await requestAdminNativeRefund(m.pool, execution, input);
   assert.equal(audits.length, 1); assert.equal(audits[0].actorType, "admin"); assert.equal(audits[0].actorId, "admin_1");
   assert.equal(audits[0].action, "order.refund.native.requested"); assert.equal(audits[0].objectId, "refund_1");
-  assert.equal(audits[0].details.channelResult, "NOT_SUBMITTED"); assert.equal(audits[0].details.amountCents, "1200");
+  assert.equal(audits[0].details.channelResult, "NOT_SUBMITTED"); assert.equal(audits[0].details.amountCents, "1200");assert.equal(audits[0].details.supportReason,"部分退款");
   assert.equal(creates.length, 1);
   assert.deepEqual(creates[0], { postingId: "posting_1", renterUserId: "renter_1", amountCents: "1200", idempotencyKey: "refund_key_1",
     requestId: "request_1", admission: execution.admission, profile: execution.initialProfile, notifyUrl: "https://refund.example.invalid/notify", reason: "部分退款" });
@@ -163,11 +163,19 @@ test("Admin退款审计失败回滚整个命令，不留下成功回执", async 
   assert(m.calls.queries.includes("ROLLBACK"));
 });
 
-test("退款命令沿用原订单对象范围，不凭同游戏写权限扩大到任意订单", async t => {
+test("已授权同游戏客服无需订单群也可处理原单退款，不代表渠道退款成功", async t => {
   const creates = mocks(t);
   t.mock.method(orderTeam, "readOrderTeamAccess", async () => ({ teamState: "READY", canRead: false }));
-  await assert.rejects(requestAdminNativeRefund(model().pool, execution, input), error => (error as any).status === 403);
-  assert.equal(creates.length, 0);
+  t.mock.method(securityCore, "recordAudit", async () => {});
+  const out = await requestAdminNativeRefund(model().pool, execution, input);
+  assert.equal(creates.length, 1);assert.equal(out.channel.result,"NOT_SUBMITTED");assert.equal(out.channel.bankArrival,"UNKNOWN");
+});
+test("新退款缺处理原因时事务回滚；历史无原因原键仍可恢复",async t=>{
+  mocks(t);const h=model();
+  await assert.rejects(requestAdminNativeRefund(h.pool,execution,{...input,reason:undefined}),/reason is required/);
+  assert(h.calls.queries.includes("ROLLBACK"));t.mock.restoreAll();
+  mocks(t,{receipt:{replayed:true,intentId:"refund_1",refundOrderNo:"RF"+"a".repeat(28),state:"UNKNOWN",budgetDisposition:"ALLOCATED"}});
+  const out=await requestAdminNativeRefund(model().pool,{}, {...input,reason:undefined});assert.equal(out.replayed,true);assert.equal(out.channel.result,"UNKNOWN");
 });
 
 test("关闭新退款后仍允许原键恢复，重放不伪称尚未提交渠道", async t => {

@@ -1,17 +1,20 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type { PoolClient } from "pg";
 
-import { ADMIN_PERMISSION, loadEffectiveAdminAccess, requirePermission } from "../auth/admin-authorization";
+import { ADMIN_PERMISSION, hasPermission, loadEffectiveAdminAccess, requirePermission } from "../auth/admin-authorization";
 import { lockActor } from "../auth/admin-directory";
 import { hashApprovalPayload } from "../auth/approval-audit";
 import { assertAdminContextInTransaction } from "../auth/auth-security";
 import { assertAdminCommandAuthorizedInTransaction } from "../auth/admin-auth-session";
 import { recordAudit, SecurityApiError, type AuditOutcome } from "../auth/security-core";
 import { assertActiveInTransaction, assertUserContextInTransaction } from "../auth/user-identity";
-import { readOrderTeamAccess } from "../im/order-team-access";
 import { lockDispatchGate } from "../im/support-dispatch";
 import { CUSTOMER_TIERS, type CustomerTier } from "../supply/delta-rental";
-import { conflict, forbidden, invalid, notFound } from "../supply/supply-util";
+import { canonicalize, normalizeQuote } from "../supply/content-hash";
+import { decimalToBigInt, divideToScale, formatDecimalExact, parseNonNegativeDecimal } from "../supply/decimal";
+import { payableCentsFor } from "../auth/membership-total-discount";
+import type { freezeSettlementPricing } from "./personal-confirmation";
+import { assertGameScope, conflict, forbidden, invalid, notFound } from "../supply/supply-util";
 import { centsToYuan, lockOrderPartiesInOrder, yuanToCents } from "./order";
 import { readEarlySettlementDisclosure, recordDocumentAcceptance } from "../legal/legal-documents";
 import { assertSupportOrderAccess } from "./manual-close";
@@ -37,10 +40,11 @@ export const SETTLEMENT_ADJUST_OPERATION = "order.settlement.adjust";
 export const SETTLEMENT_ADJUST_TRIGGER = "manual-net";
 const EARLY_REASONS = ["TENANT_VOLUNTARY_EARLY", "OWNER_OR_ACCOUNT_EARLY"] as const;
 type EarlyReason = (typeof EARLY_REASONS)[number];
+type SupportSettlementReason = EarlyReason | "NORMAL";
 type SettlementReadIdentity=Readonly<{database:string;runtimeUser:string}>;
 type Actor = { realm: "user" | "admin"; userId: string; sessionId: string; settlementAdmission?: FormalCollectionAdmission; controlledPaymentFact?: unknown;settlementReadIdentity?:SettlementReadIdentity;localFinancialSandbox?:LocalFinancialSandbox };
 export type SettlementActor = Actor;
-type LineQty = { itemId: string; quantity: string };
+type LineQty = { itemId: string; quantity: string; quantityKind?: "CONSUMED" };
 type Command = { status: number; body: Record<string, unknown> };
 type LockedOrder = {
   id: string;
@@ -149,9 +153,14 @@ export async function lockSettlement(client: PoolClient, orderId: string, actor:
     else await assertAdminContextInTransaction(client, actor);
   }
   await lockOrderPartiesInOrder(client, located.renterUserId, located.ownerUserId);
-  if (write !== "PRESTART_TERMINATION") {
-    await assertActiveInTransaction(client, located.renterUserId);
-    await assertActiveInTransaction(client, located.ownerUserId);
+  if (write !== "PRESTART_TERMINATION" && (actor.realm === "user" || write)) {
+    try {
+      await assertActiveInTransaction(client, located.renterUserId);
+      await assertActiveInTransaction(client, located.ownerUserId);
+    } catch (error) {
+      if (actor.realm === "admin" && error instanceof SecurityApiError && error.status === 401) throw new SecurityApiError(409, "ORDER_PARTY_UNAVAILABLE", "Order party requires review");
+      throw error;
+    }
   }
   if (actor.realm === "user") await assertUserContextInTransaction(client, actor);
   await client.query(`SELECT id FROM zzsh_supply.game WHERE id = $1 FOR SHARE`, [located.gameId]);
@@ -177,11 +186,10 @@ export async function lockSettlement(client: PoolClient, orderId: string, actor:
   if (actor.realm === "user") {
     if (actor.userId !== row.renterUserId && actor.userId !== row.ownerUserId) throw notFound();
   } else {
-    const team = await readOrderTeamAccess(client, { ...actor, realm: "admin" }, orderId, "read");
-    if (team.teamState !== "READY" || team.canRead !== true) throw forbidden();
     if (!adminAccess) throw forbidden();
     if (write) requirePermission(adminAccess, ADMIN_PERMISSION.orderSettlementWrite);
-    else if (!adminAccess.permissions.has(ADMIN_PERMISSION.orderSettlementWrite) && !adminAccess.permissions.has(ADMIN_PERMISSION.orderRead)) throw forbidden();
+    else if (!hasPermission(adminAccess, ADMIN_PERMISSION.orderSettlementWrite) && !hasPermission(adminAccess, ADMIN_PERMISSION.orderRead)) throw forbidden();
+    await assertGameScope(client, actor.userId, adminAccess.isBoss, row.gameId);
   }
   if (write && row.status !== "PAID" && !(allowCompletedReplay && row.status === "COMPLETED")
     && !(write === "PRESTART_TERMINATION" && row.status === "CANCELLED")) throw conflict("ORDER_NOT_SETTLEABLE");
@@ -220,9 +228,47 @@ type Basis = {
   listingHash: string;
   fullPayoutSelected: boolean;
   fullPayout: "SELECTED" | "NOT_SELECTED";
+  settlementPricing?: ReturnType<typeof freezeSettlementPricing>;
 };
 
+/** New price evidence is accepted only as part of the original signed order confirmation. */
+function frozenSettlementPricing(order:LockedOrder):ReturnType<typeof freezeSettlementPricing>|null {
+  const raw=order.quote.settlementPricing;
+  if(raw===undefined)return null;
+  if(!raw||typeof raw!=="object"||Array.isArray(raw))throw new Error("invalid settlement pricing");
+  const basis=raw as ReturnType<typeof freezeSettlementPricing>;
+  if(Object.keys(basis).sort().join(",")!=="haff,items,payableRatio,priceVersionId,schema"||!["settlement-pricing-v1","settlement-pricing-v2"].includes(basis.schema)
+    ||(basis.schema==="settlement-pricing-v2"&&order.quote.mode!=="PERCENT")
+    ||basis.priceVersionId!==order.quote.priceVersionId||typeof basis.payableRatio!=="string"||payableCentsFor(1n,basis.payableRatio)===null
+    ||!basis.haff||typeof basis.haff!=="object"||Object.keys(basis.haff).sort().join(",")!=="buyerDenominator,buyerNumerator,itemId,openingQuantity"
+    ||!Array.isArray(basis.items)||basis.items.length>63)throw new Error("invalid settlement pricing");
+  const ids=new Set<string>();
+  for(const item of basis.items){
+    if(!item||typeof item!=="object"||Object.keys(item).sort().join(",")!=="buyerUnitAmount,itemId,name,ownerUnitAmount,unit,unitQuantity"
+      ||typeof item.itemId!=="string"||!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(item.itemId)||ids.has(item.itemId)
+      ||(item.name!==null&&(typeof item.name!=="string"||!item.name.trim()||item.name.length>120))
+      ||!["ROUND","PIECE","DAY"].includes(item.unit)||typeof item.unitQuantity!=="string"||typeof item.buyerUnitAmount!=="string"||typeof item.ownerUnitAmount!=="string")throw new Error("invalid settlement item");
+    ids.add(item.itemId);
+    const q=parseNonNegativeDecimal(item.unitQuantity,0,"unit quantity"),b=parseNonNegativeDecimal(item.buyerUnitAmount,8,"buyer unit"),o=parseNonNegativeDecimal(item.ownerUnitAmount,basis.schema==="settlement-pricing-v2"?16:8,"owner unit");
+    if(q.value<=0n||decimalToBigInt(o,16)>decimalToBigInt(b,16))throw new Error("invalid settlement item");
+  }
+  if(![basis.haff.itemId,basis.haff.openingQuantity,basis.haff.buyerNumerator,basis.haff.buyerDenominator].every(value=>typeof value==="string"))throw new Error("invalid settlement haff");
+  const haffLine=Array.isArray(order.quote.lines)?order.quote.lines.find((line:any)=>line?.itemId===basis.haff.itemId&&line.pricingKind==="HAFF_RATIO"):undefined;
+  if(!haffLine||haffLine.quantity!==basis.haff.openingQuantity||ids.has(basis.haff.itemId)
+    ||parseNonNegativeDecimal(basis.haff.openingQuantity,0,"haff quantity").value<=0n
+    ||parseNonNegativeDecimal(basis.haff.buyerDenominator,18,"haff denominator").value<=0n)throw new Error("invalid settlement haff");
+  parseNonNegativeDecimal(basis.haff.buyerNumerator,18,"haff numerator");
+  const names=["schemaVersion","currency","priceVersionId","ruleReleaseId","mode","lines","resourceTotal","ownerTotal","platformFullProfit","tenantDeposit","publisherBailRequirement","termSeconds","expiryDisclosures","unitAmountsInformational","roundingPolicy","pricingInputs",...(order.quote.schemaVersion===3?["quoteSource","legacyQuote"]:[])];
+  const quote=normalizeQuote(Object.fromEntries(names.map(name=>[name,order.quote[name]])));
+  const personal=order.quote.personal;
+  if(!personal||typeof personal!=="object"||Array.isArray(personal)||typeof order.quote.confirmationDigest!=="string"
+    ||createHash("sha256").update(canonicalize({...personal,quote,settlementPricing:basis})).digest("hex")!==order.quote.confirmationDigest)throw new Error("settlement pricing signature mismatch");
+  return basis;
+}
+
 function basisOrReasons(order: LockedOrder, payment: { id: string; amountCents: string; currency: string }, openingLines: LineQty[]): { basis: Basis } | { reasons: string[] } {
+  let settlementPricing:ReturnType<typeof freezeSettlementPricing>|null;
+  try{settlementPricing=frozenSettlementPricing(order);}catch{return {reasons:["SETTLEMENT_PRICING_INVALID"]};}
   const personal = order.quote.personal as Record<string, unknown> | undefined;
   const funding = personal?.funding as Record<string, unknown> | undefined;
   const membership = personal?.membership as Record<string, unknown> | undefined;
@@ -321,6 +367,13 @@ function basisOrReasons(order: LockedOrder, payment: { id: string; amountCents: 
     const ownerUnit = amountText(line.ownerUnitAmount, 8);
     if (!buyer || !owner || !buyerUnit || !ownerUnit) return { reasons: ["QUOTE_BASIS_INVALID"] };
     const ratio = line.pricingKind === "HAFF_RATIO" ? ratios.find((item) => item.itemId === line.itemId) : undefined;
+    const originalItem = settlementPricing?.items.find(item=>item.itemId===line.itemId);
+    if(settlementPricing && line.pricingKind==="FIXED_UNIT"){
+      try{
+        if(!originalItem||originalItem.unit!==line.unit||originalItem.unitQuantity!==line.unitQuantity
+          ||divideToScale(parseNonNegativeDecimal(originalItem.ownerUnitAmount,settlementPricing.schema==="settlement-pricing-v2"?16:8,"frozen owner unit"),{value:1n,scale:0},8).value!==decimalToBigInt(parseNonNegativeDecimal(ownerUnit,8,"quoted owner unit"),8))return {reasons:["SETTLEMENT_PRICING_INVALID"]};
+      }catch{return {reasons:["SETTLEMENT_PRICING_INVALID"]};}
+    }
     mapped.push({
       itemId: line.itemId,
       unit: line.unit as SettlementInventoryLine["unit"],
@@ -333,6 +386,8 @@ function basisOrReasons(order: LockedOrder, payment: { id: string; amountCents: 
       prepaidBuyerAmount: buyer,
       prepaidOwnerAmount: owner,
       ...(ratio ? { exactRatio: { buyerNumerator: ratio.buyerNumerator!, buyerDenominator: ratio.buyerDenominator!, ownerNumerator: ratio.ownerNumerator!, ownerDenominator: ratio.ownerDenominator! } } : {}),
+      ...(originalItem?{baseBuyerUnitAmount:originalItem.buyerUnitAmount,...(settlementPricing?.schema==="settlement-pricing-v2"?{baseOwnerUnitAmount:originalItem.ownerUnitAmount}:{})}:{}),
+      ...(settlementPricing && line.pricingKind==="HAFF_RATIO"?{baseHaffBuyerRatio:{numerator:settlementPricing.haff.buyerNumerator,denominator:settlementPricing.haff.buyerDenominator}}:{}),
     });
   }
   if (wanted.size !== 0) return { reasons: ["OPENING_QUANTITY_MISMATCH"] };
@@ -346,7 +401,8 @@ function basisOrReasons(order: LockedOrder, payment: { id: string; amountCents: 
   let quoteDigest: string;
   let paymentDigest: string;
   try {
-    quoteDigest = hashApprovalPayload({ contentHash: order.contentHash, priceVersionId: String(order.quote.priceVersionId ?? ""), lines: digestLines }).hash;
+    quoteDigest = hashApprovalPayload({ contentHash: order.contentHash, priceVersionId: String(order.quote.priceVersionId ?? ""), lines: digestLines,
+      ...(settlementPricing?{settlementPricing}:{}) }).hash;
     paymentDigest = hashApprovalPayload({ confirmationId: payment.id, amountCents: payment.amountCents, currency: payment.currency, disposition: "APPLIED" }).hash;
   } catch {
     return { reasons: ["QUOTE_BASIS_INVALID"] };
@@ -371,6 +427,7 @@ function basisOrReasons(order: LockedOrder, payment: { id: string; amountCents: 
       listingHash: order.contentHash,
       fullPayoutSelected,
       fullPayout: fullPayoutSelected ? "SELECTED" : "NOT_SELECTED",
+      ...(settlementPricing?{settlementPricing}:{}),
     },
   };
 }
@@ -393,14 +450,23 @@ async function confirmedOpening(client: PoolClient, orderId: string): Promise<{ 
 }
 
 function withRemaining(basis: Basis, remaining: LineQty[]): { lines: SettlementInventoryLine[] } | { reasons: string[] } {
-  const wanted = new Map(remaining.map((line) => [line.itemId, line.quantity]));
-  if (wanted.size !== remaining.length || wanted.size !== basis.lines.length) return { reasons: ["SETTLEMENT_QUANTITY_MISMATCH"] };
+  const wanted = new Map(remaining.map((line) => [line.itemId, line]));
+  if (wanted.size !== remaining.length) return { reasons: ["SETTLEMENT_QUANTITY_MISMATCH"] };
   const lines = basis.lines.map((line) => {
     const value = wanted.get(line.itemId);
     wanted.delete(line.itemId);
-    return { ...line, remainingQuantity: value ?? null };
+    return { ...line, remainingQuantity: value?.quantityKind==="CONSUMED"?null:value?.quantity??null,
+      ...(value?.quantityKind==="CONSUMED"?{consumedQuantity:value.quantity}:{}) };
   });
-  if (wanted.size !== 0 || lines.some((line) => line.remainingQuantity === null)) return { reasons: ["SETTLEMENT_QUANTITY_MISMATCH"] };
+  if(lines.some(line=>line.remainingQuantity===null&&line.consumedQuantity===undefined))return {reasons:["SETTLEMENT_QUANTITY_MISMATCH"]};
+  for(const value of [...wanted.values()].sort((a,b)=>a.itemId<b.itemId?-1:a.itemId>b.itemId?1:0)){
+    const item=basis.settlementPricing?.items.find(row=>row.itemId===value.itemId);
+    if(!item||value.quantityKind!=="CONSUMED")return {reasons:["SETTLEMENT_QUANTITY_MISMATCH"]};
+    const exactOwner=basis.settlementPricing?.schema==="settlement-pricing-v2";
+    lines.push({itemId:item.itemId,unit:item.unit,pricingKind:"FIXED_UNIT",openingQuantity:"0",remainingQuantity:null,consumedQuantity:value.quantity,
+      unitQuantity:item.unitQuantity,buyerUnitAmount:item.buyerUnitAmount,ownerUnitAmount:exactOwner?formatDecimalExact(divideToScale(parseNonNegativeDecimal(item.ownerUnitAmount,16,"owner unit"),{value:1n,scale:0},8)):item.ownerUnitAmount,
+      prepaidBuyerAmount:"0.00",prepaidOwnerAmount:"0.00",baseBuyerUnitAmount:item.buyerUnitAmount,...(exactOwner?{baseOwnerUnitAmount:item.ownerUnitAmount}:{})});
+  }
   return { lines };
 }
 
@@ -459,7 +525,7 @@ function payloadFor(input: {
 }): Record<string, unknown> {
   const amounts = input.result.amounts;
   return {
-    schema: "settlement-version-v2",
+    schema: input.basis.settlementPricing||input.lines.some(line=>line.consumedQuantity!==undefined)?"settlement-version-v3":"settlement-version-v2",
     baseVersionId: input.base.versionId,
     baseVersionNo: input.base.versionNo,
     decisionDigest: input.base.decisionDigest,
@@ -485,7 +551,7 @@ function payloadFor(input: {
     fullPayoutSelected: input.basis.fullPayoutSelected,
     fullPayout: input.basis.fullPayout,
     feePolicyVersion: SETTLEMENT_FEE_POLICY_VERSION,
-    lines: input.lines.map((line) => ({ itemId: line.itemId, openingQuantity: line.openingQuantity, remainingQuantity: line.remainingQuantity })),
+    lines: input.lines.map(settlementSnapshotLine),
     kind: input.kind,
     endReason: input.endReason,
     early: input.early,
@@ -517,13 +583,20 @@ function payloadFor(input: {
   };
 }
 
-function stableRemaining(lines: LineQty[]): Array<{ itemId: string; remainingQuantity: string }> {
-  return [...lines].sort((left, right) => left.itemId.localeCompare(right.itemId)).map((line) => ({ itemId: line.itemId, remainingQuantity: line.quantity }));
+type StoredSettlementLine={itemId:string;remainingQuantity?:string;consumedQuantity?:string};
+function settlementSnapshotLine(line:SettlementInventoryLine) {
+  if(line.consumedQuantity===undefined)return {itemId:line.itemId,openingQuantity:line.openingQuantity,remainingQuantity:line.remainingQuantity};
+  const opening=BigInt(line.openingQuantity),consumed=BigInt(line.consumedQuantity!);
+  return {itemId:line.itemId,openingQuantity:line.openingQuantity,remainingQuantity:(consumed<opening?opening-consumed:0n).toString(),consumedQuantity:line.consumedQuantity};
+}
+function stableRemaining(lines: LineQty[]): StoredSettlementLine[] {
+  return [...lines].sort((left, right) => left.itemId.localeCompare(right.itemId)).map((line) => line.quantityKind==="CONSUMED"
+    ?{itemId:line.itemId,consumedQuantity:line.quantity}:{itemId:line.itemId,remainingQuantity:line.quantity});
 }
 
 function intakePayload(order: LockedOrder, opening: { id: string; versionNo: number }, basis: Basis, remaining: LineQty[], base: AcceptanceBase): Record<string, unknown> {
   return {
-    schema: "settlement-intake-v2",
+    schema: remaining.some(line=>line.quantityKind==="CONSUMED")?"settlement-intake-v3":"settlement-intake-v2",
     orderId: order.id,
     openingId: opening.id,
     openingVersion: opening.versionNo,
@@ -554,6 +627,7 @@ function probe(order: LockedOrder, openingId: string, basis: Basis, lines: Settl
     capturedAmount: basis.captured,
     fullPayout: basis.fullPayout,
     fullPayoutPolicyRef: basis.fundingPolicyRef,
+    ...(basis.settlementPricing?{pricingMode:"ACTUAL_TOTAL_DISCOUNT_V1" as const,totalPayableRatio:basis.settlementPricing.payableRatio}:{}),
     haff: lines.find((line) => line.pricingKind === "HAFF_RATIO") ?? basis.haff,
     items: lines.filter((line) => line.pricingKind !== "HAFF_RATIO"),
   };
@@ -608,6 +682,7 @@ async function readyFacts(client: PoolClient, version: {
     renterRejectedVersionId: hit("RENTER", "REJECT") ? version.id : null,
     ownerRejectedVersionId: hit("OWNER", "REJECT") ? version.id : null,
     supportReviewedVersionId: hit("SUPPORT", "REVIEW") ? version.id : null,
+    supportFinalizedVersionId: hit("SUPPORT", "FINALIZE") ? version.id : null,
     opsApproval,
   });
 }
@@ -748,7 +823,7 @@ async function view(client: PoolClient, order: LockedOrder): Promise<Command> {
   const current = withDecisions.find((row) => row.supersededAt === null);
   const intakes = (await client.query<{
     id: string; versionNo: number; initiatorParty: string; initiatorSubjectId: string;
-    lines: Array<{ itemId: string; remainingQuantity: string }>; status: "OPEN" | "CLASSIFIED" | "SUPERSEDED";
+    lines: StoredSettlementLine[]; status: "OPEN" | "CLASSIFIED" | "SUPERSEDED";
     basisHash: string; settlementVersionId: string | null; createdAt: string;
   }>(
     `SELECT id, version_no AS "versionNo", initiator_party AS "initiatorParty", initiator_subject_id AS "initiatorSubjectId",
@@ -757,6 +832,12 @@ async function view(client: PoolClient, order: LockedOrder): Promise<Command> {
     [order.id],
   )).rows;
   const pendingIntake = intakes.at(-1)?.status === "OPEN" ? intakes.at(-1)! : null;
+  let settlementPricing:ReturnType<typeof freezeSettlementPricing>|null=null;
+  let pricingInvalid=false;
+  try{settlementPricing=frozenSettlementPricing(order);}catch{pricingInvalid=true;}
+  const initialIds=new Set((openings.find(opening=>opening.status==="CONFIRMED")?.lines??[]).map(line=>line.itemId));
+  const extraResources=settlementPricing?.items.filter(item=>!initialIds.has(item.itemId))
+    .map(item=>({itemId:item.itemId,name:item.name,unit:item.unit,pricingKind:"FIXED_UNIT" as const}))??[];
   const posting = await settlementPostingView(client, order.id);
   const readiness = posting
     ? { ready: true, reasons: [] as string[] }
@@ -767,6 +848,8 @@ async function view(client: PoolClient, order: LockedOrder): Promise<Command> {
     orderId: order.id,
     revision: order.revision,
     rentalStarted: openings.some((row) => row.status === "CONFIRMED"),
+    consumptionMode:pricingInvalid?"UNAVAILABLE":settlementPricing?"ACTUAL":"REMAINING",
+    extraResources,
     openings,
     intakes,
     versions: withDecisions,
@@ -817,7 +900,7 @@ function projectInputSnapshot(value: unknown): Record<string, unknown> {
     "schema", "openingId", "openingVersion", "capturedAmount", "depositAmount", "lines", "kind", "endReason", "early",
     "proposedOwnerNet", "proposedRenterRefund", "reason", "feePolicyVersion", "amounts",
   ]);
-  if (Array.isArray(snapshot.lines)) snapshot.lines = snapshot.lines.map((line) => pickFields(line, ["itemId", "openingQuantity", "remainingQuantity"]));
+  if (Array.isArray(snapshot.lines)) snapshot.lines = snapshot.lines.map((line) => pickFields(line, ["itemId", "openingQuantity", "remainingQuantity", "consumedQuantity"]));
   if (snapshot.amounts !== undefined) snapshot.amounts = projectAmounts(snapshot.amounts);
   return snapshot;
 }
@@ -876,10 +959,11 @@ function isolateSettlementParty(value: unknown, viewer: SettlementViewer): unkno
 function projectSettlementBody(value: unknown, viewer: SettlementViewer): unknown {
   if (!value || typeof value !== "object" || Array.isArray(value)) return value;
   const body = pickFields(value, [
-    "error", "orderId", "revision", "rentalStarted", "openings", "intakes", "versions", "currentRequest", "settlement", "posting",
+    "error", "orderId", "revision", "rentalStarted", "consumptionMode", "extraResources", "openings", "intakes", "versions", "currentRequest", "settlement", "posting",
     "ready", "reasons", "stage", "postingAuthorized", "feeDeducted", "orderStatus", "accepted", "early", "amounts", "versionHash",
     "baseVersionId", "consumed", "systemOwnerNet", "systemRenterRefund", "proposedOwnerNet", "proposedRenterRefund", "reason",
   ]);
+  if(Array.isArray(body.extraResources))body.extraResources=body.extraResources.map(item=>pickFields(item,["itemId","name","unit","pricingKind"]));
   if (Array.isArray(body.openings)) body.openings = body.openings.map((opening) => {
     const projected = pickFields(opening, ["id", "versionNo", "status", "confirmedAt", "createdAt", "confirmSource", "quoteDigest", "paymentDigest", "lines", "acks"]);
     if (Array.isArray(projected.lines)) projected.lines = projected.lines.map((line) => pickFields(line, ["itemId", "quantity", "unit", "pricingKind"]));
@@ -888,7 +972,7 @@ function projectSettlementBody(value: unknown, viewer: SettlementViewer): unknow
   });
   if (Array.isArray(body.intakes)) body.intakes = body.intakes.map((intake) => {
     const projected = pickFields(intake, ["id", "versionNo", "initiatorParty", "lines", "status", "settlementVersionId", "createdAt"]);
-    if (Array.isArray(projected.lines)) projected.lines = projected.lines.map((line) => pickFields(line, ["itemId", "remainingQuantity"]));
+    if (Array.isArray(projected.lines)) projected.lines = projected.lines.map((line) => pickFields(line, ["itemId", "remainingQuantity", "consumedQuantity"]));
     return projected;
   });
   if (Array.isArray(body.versions)) body.versions = body.versions.map(projectVersion);
@@ -1021,25 +1105,16 @@ export async function confirmOpening(client: PoolClient, orderId: string, openin
 
 /**
  * CS confirmation on behalf of one missing party. Requires the existing support
- * command boundary (active admin, order.settlement.write, game scope, joined
- * staff on a READY team) and, for non-boss admins, that this admin is the order's
- * responsible support. Only the missing party gets an ack; the audit event keeps
- * the acting admin separate from the party whose confirmation is filled in.
+ * command boundary (active admin, order.settlement.write and game scope).
+ * The audit event keeps the acting admin separate from the party whose confirmation is filled in.
  */
 export async function assertOpeningOnBehalfAccess(client: PoolClient, orderId: string, actor: { userId: string; sessionId: string }): Promise<void> {
   await assertSupportOrderAccess(client, orderId, actor);
-  const access = await loadEffectiveAdminAccess(client, actor.userId);
-  if (access?.isBoss) return;
-  const row = (await client.query<{ responsibleAdminId: string | null }>(
-    `SELECT COALESCE(g.responsible_admin_id, g.assigned_admin_id) AS "responsibleAdminId"
-       FROM zzsh_order.im_order_group g WHERE g.order_id = $1`,
-    [orderId],
-  )).rows[0];
-  if (!row?.responsibleAdminId || row.responsibleAdminId !== actor.userId) throw forbidden("Only the responsible support admin can confirm on behalf");
 }
 
-export async function confirmOpeningOnBehalf(client: PoolClient, orderId: string, openingId: string, versionNo: number, party: OpeningConfirmParty, actor: Actor, requestId: string): Promise<Command> {
+export async function confirmOpeningOnBehalf(client: PoolClient, orderId: string, openingId: string, versionNo: number, party: OpeningConfirmParty, actor: Actor, requestId: string, reason?: string): Promise<Command> {
   if (actor.realm !== "admin") throw forbidden();
+  if (reason !== undefined && (typeof reason !== "string" || reason.trim().length < 3 || reason.length > 500)) throw invalid("A valid support reason is required");
   await assertOpeningOnBehalfAccess(client, orderId, actor);
   const order = await lockSettlement(client, orderId, actor, true);
   if (order.status !== "PAID") return blocked(["ORDER_NOT_PAID"]);
@@ -1076,7 +1151,7 @@ export async function confirmOpeningOnBehalf(client: PoolClient, orderId: string
     if (confirmed.rowCount !== 1) return blocked(["STALE_OPENING"]);
   }
   await audit(client, actor, "order.opening.confirmed_on_behalf", orderId, requestId, {
-    openingId: opening.id, versionNo: opening.versionNo, party, completesOpening: step.completes,
+    openingId: opening.id, versionNo: opening.versionNo, party, completesOpening: step.completes, ...(reason === undefined ? {} : { supportReason: reason.trim() }),
   });
   return view(client, order);
 }
@@ -1156,9 +1231,9 @@ async function insertVersion(client: PoolClient, input: {
 async function recordIntake(client: PoolClient, order: LockedOrder, actor: Actor, opening: { id: string; versionNo: number }, basis: Basis, remaining: LineQty[], base: AcceptanceBase, requestId: string): Promise<Command> {
   const lines = stableRemaining(remaining);
   const basisHash = hashApprovalPayload({ openingId: opening.id, openingVersion: opening.versionNo, quoteDigest: basis.quoteDigest, paymentDigest: basis.paymentDigest }).hash;
-  let superseded: { id: string; versionNo: number; lines: Array<{ itemId: string; remainingQuantity: string }> } | null = null;
+  let superseded: { id: string; versionNo: number; lines: StoredSettlementLine[] } | null = null;
   if (base.intake?.status === "OPEN") {
-    const prior = (await client.query<{ lines: Array<{ itemId: string; remainingQuantity: string }> }>(
+    const prior = (await client.query<{ lines: StoredSettlementLine[] }>(
       `UPDATE zzsh_order.settlement_intake SET status = 'SUPERSEDED', superseded_at = clock_timestamp()
         WHERE id = $1 AND order_id = $2 AND version_no = $3 AND status = $4
         RETURNING lines`,
@@ -1184,13 +1259,14 @@ async function recordIntake(client: PoolClient, order: LockedOrder, actor: Actor
 }
 
 async function linkIntake(client: PoolClient, orderId: string, versionId: string, base: AcceptanceBase, lines: SettlementInventoryLine[]): Promise<{
-  id: string; versionNo: number; sourceLines: Array<{ itemId: string; remainingQuantity: string }>;
-  classifiedLines: Array<{ itemId: string; remainingQuantity: string }>; modified: boolean;
+  id: string; versionNo: number; sourceLines: StoredSettlementLine[];
+  classifiedLines: StoredSettlementLine[]; modified: boolean;
 } | null> {
   const expected = base.intake;
   if (expected?.status !== "OPEN") return null;
-  const classifiedLines = stableRemaining(lines.map((line) => ({ itemId: line.itemId, quantity: line.remainingQuantity! })));
-  const linked = (await client.query<{ lines: Array<{ itemId: string; remainingQuantity: string }> }>(
+  const classifiedLines = stableRemaining(lines.map((line) => ({ itemId: line.itemId, quantity: line.consumedQuantity??line.remainingQuantity!,
+    ...(line.consumedQuantity===undefined?{}:{quantityKind:"CONSUMED" as const}) })));
+  const linked = (await client.query<{ lines: StoredSettlementLine[] }>(
     `UPDATE zzsh_order.settlement_intake
         SET status = 'CLASSIFIED', classified_at = clock_timestamp(), settlement_version_id = $2
       WHERE id = $1 AND order_id = $3 AND version_no = $4 AND status = $5 AND settlement_version_id IS NULL
@@ -1284,30 +1360,33 @@ export async function previewStaffSettlement(client: PoolClient, orderId: string
     });
     return done({ accepted: false, early, amounts: payload.amounts, versionHash: hashApprovalPayload(payload).hash, baseVersionId: base.versionId, systemOwnerNet: result.amounts.ownerNet.amount, systemRenterRefund: result.amounts.renterRefund.amount }, order.status);
   }
-  if (!input.endReason) return blocked(early ? ["EARLY_REASON_REQUIRED"] : ["END_REASON_INCONSISTENT"]);
-  if (!early) return blocked(normal.ok ? ["END_REASON_INCONSISTENT"] : normal.reasons);
-  const result = probe(order, bill.opening.id, bill.basis, bill.lines, input.endReason, "preview");
-  if (!result.ok || result.early !== true || !result.amounts) return blocked(result.reasons);
+  if (early && !input.endReason) return blocked(["EARLY_REASON_REQUIRED"]);
+  if (!early && input.endReason) return blocked(normal.ok ? ["END_REASON_INCONSISTENT"] : normal.reasons);
+  const endReason:SupportSettlementReason=early?input.endReason!:"NORMAL";
+  const result = early?probe(order, bill.opening.id, bill.basis, bill.lines, endReason, "preview"):normal;
+  if (!result.ok || result.early !== early || !result.amounts) return blocked(result.reasons);
   const payload = payloadFor({
     order, openingId: bill.opening.id, openingVersion: bill.opening.versionNo, basis: bill.basis, lines: bill.lines,
-    kind: "SYSTEM", endReason: input.endReason, early: true, result, proposedOwnerNet: null, proposedRenterRefund: null, reason: null, base,
+    kind: "SYSTEM", endReason, early, result, proposedOwnerNet: null, proposedRenterRefund: null, reason: null, base,
   });
-  return done({ accepted: false, early: true, amounts: payload.amounts, versionHash: hashApprovalPayload(payload).hash, baseVersionId: base.versionId }, order.status);
+  return done({ accepted: false, early, amounts: payload.amounts, versionHash: hashApprovalPayload(payload).hash, baseVersionId: base.versionId }, order.status);
 }
 
-export async function classifySettlement(client: PoolClient, orderId: string, actor: Actor, remaining: LineQty[], endReason: EarlyReason, acceptedHash: string, requestId: string): Promise<Command> {
+export async function classifySettlement(client: PoolClient, orderId: string, actor: Actor, remaining: LineQty[], endReason: SupportSettlementReason, acceptedHash: string, requestId: string): Promise<Command> {
   if (actor.realm !== "admin") throw forbidden();
   const order = await lockSettlement(client, orderId, actor, true);
   const bill = await loadBill(client, order, remaining);
   if ("status" in bill) return bill;
   const base = await acceptanceBase(client, order.id);
   const normal = probe(order, bill.opening.id, bill.basis, bill.lines, "NORMAL", "preview");
-  if (!needsEarlyReason(normal)) return blocked(normal.ok ? ["END_REASON_INCONSISTENT"] : normal.reasons);
-  const result = probe(order, bill.opening.id, bill.basis, bill.lines, endReason, "preview");
-  if (!result.ok || result.early !== true || !result.amounts) return blocked(result.reasons);
+  const early=needsEarlyReason(normal);
+  if(early&&endReason==="NORMAL")return blocked(["EARLY_REASON_REQUIRED"]);
+  if(!early&&endReason!=="NORMAL")return blocked(normal.ok?["END_REASON_INCONSISTENT"]:normal.reasons);
+  const result = early?probe(order, bill.opening.id, bill.basis, bill.lines, endReason, "preview"):normal;
+  if (!result.ok || result.early !== early || !result.amounts) return blocked(result.reasons);
   const payload = payloadFor({
     order, openingId: bill.opening.id, openingVersion: bill.opening.versionNo, basis: bill.basis, lines: bill.lines,
-    kind: "SYSTEM", endReason, early: true, result, proposedOwnerNet: null, proposedRenterRefund: null, reason: null, base,
+    kind: "SYSTEM", endReason, early, result, proposedOwnerNet: null, proposedRenterRefund: null, reason: null, base,
   });
   if (hashApprovalPayload(payload).hash !== acceptedHash) return blocked(["SETTLEMENT_HASH_MISMATCH"]);
   return insertVersion(client, {
@@ -1518,14 +1597,17 @@ async function postReadySettlement(
   const remaining: LineQty[] = [];
   for (const raw of snapshot.lines) {
     if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw conflict("SETTLEMENT_SNAPSHOT_INVALID");
-    const line = raw as { itemId?: unknown; remainingQuantity?: unknown };
+    const line = raw as { itemId?: unknown; remainingQuantity?: unknown; consumedQuantity?:unknown };
     if (typeof line.itemId !== "string" || typeof line.remainingQuantity !== "string") throw conflict("SETTLEMENT_SNAPSHOT_INVALID");
-    remaining.push({ itemId: line.itemId, quantity: line.remainingQuantity });
+    if(line.consumedQuantity!==undefined){
+      if(snapshot.schema!=="settlement-version-v3"||typeof line.consumedQuantity!=="string")throw conflict("SETTLEMENT_SNAPSHOT_INVALID");
+      remaining.push({itemId:line.itemId,quantity:line.consumedQuantity,quantityKind:"CONSUMED"});
+    }else remaining.push({ itemId: line.itemId, quantity: line.remainingQuantity });
   }
   const bill = await loadBill(client, order, remaining);
   if ("status" in bill) throw conflict(String((bill.body.reasons as string[] | undefined)?.[0] ?? "SETTLEMENT_BASIS_INVALID"));
   const sameLines = hashApprovalPayload({ lines: snapshot.lines }).hash === hashApprovalPayload({
-    lines: bill.lines.map((line) => ({ itemId: line.itemId, openingQuantity: line.openingQuantity, remainingQuantity: line.remainingQuantity })),
+    lines: bill.lines.map(settlementSnapshotLine),
   }).hash;
   if (!sameLines || snapshot.openingVersion !== String(bill.opening.versionNo)
       || snapshot.quoteDigest !== bill.basis.quoteDigest || snapshot.paymentDigest !== bill.basis.paymentDigest
@@ -1752,6 +1834,23 @@ export async function reviewSettlement(client: PoolClient, orderId: string, vers
   await audit(client, actor, "order.settlement.reviewed", orderId, requestId, { settlementVersionId: version.id, versionHash });
   await postReadySettlement(client, order, version.id, actor, requestId, true);
   return view(client, order);
+}
+
+/** Staff finalizes the exact system-computed version under their own identity and an audited reason. */
+export async function finalizeSettlementBySupport(client:PoolClient,orderId:string,versionId:string,actor:Actor,versionHash:string,reason:string,requestId:string):Promise<Command>{
+  if(actor.realm!=="admin")throw forbidden();
+  if(typeof reason!=="string"||reason.trim().length<3||reason.length>500)throw invalid("A finalization reason is required");
+  const order=await lockSettlement(client,orderId,actor,true);
+  const version=await currentVersion(client,orderId,versionId);
+  if(!version||version.supersededAt||version.versionHash!==versionHash)return blocked(["STALE_VERSION"]);
+  if(version.kind!=="SYSTEM")return blocked(["MANUAL_ADJUSTMENT_REQUIRES_REVIEW"]);
+  if((await client.query(`SELECT 1 FROM zzsh_order.settlement_intake WHERE order_id=$1 AND status='OPEN' LIMIT 1`,[orderId])).rowCount)return blocked(["SETTLEMENT_INTAKE_PENDING"]);
+  if((await client.query(`SELECT 1 FROM zzsh_order.settlement_decision WHERE settlement_version_id=$1 AND party='SUPPORT' AND action='FINALIZE'`,[version.id])).rowCount)return blocked(["FINALIZATION_REQUIRES_RECONCILIATION"]);
+  await client.query(`INSERT INTO zzsh_order.settlement_decision (id,settlement_version_id,version_hash,basis_hash,party,action,subject_id,reason)
+    VALUES ($1,$2,$3,$4,'SUPPORT','FINALIZE',$5,$6)`,[`sdec_${randomUUID().replaceAll("-","")}`,version.id,version.versionHash,version.basisHash,actor.userId,reason.trim()]);
+  await audit(client,actor,"order.settlement.support_finalized",orderId,requestId,{settlementVersionId:version.id,versionHash,reason:reason.trim()});
+  await postReadySettlement(client,order,version.id,actor,requestId,true);
+  return view(client,order);
 }
 
 

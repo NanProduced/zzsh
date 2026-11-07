@@ -1,10 +1,11 @@
 import { createHash } from "node:crypto";
 import { computeJoinpayRefundRequest, computeJoinpayRefundQuery, computeJoinpayRefundResponse, validateJoinpayRefundRequestInput, type JoinpayRefundBinding, type RefundNeutralResult } from "./joinpay-refund-protocol";
 export type RefundOperation = "SUBMIT" | "QUERY" | "NOTIFY";
-export type RefundBinding = JoinpayRefundBinding & Readonly<{ intentId: string; postingId: string | null;
+export type RefundWireBinding = JoinpayRefundBinding & Readonly<{merchantIdentityId:string;notifyUrl:string;reason?:string;
+  profileId:string;initialProfileSha256:string;keyVersionRef:string}>;
+export type RefundBinding = RefundWireBinding & Readonly<{ intentId: string; postingId: string | null;
   basisKind?: "POSTING" | "REVIEW_CONFIRMATION" | "PRESTART_TERMINATION"; abnormalConfirmationId?: string | null; orderId: string; paymentConfirmationId: string;
-  renterUserId: string; merchantIdentityId: string; originalPaymentTrxNo: string; responsibilityVersionHash: string; notifyUrl: string; reason?: string;
-  profileId: string; initialProfileSha256: string; keyVersionRef: string }>;
+  renterUserId: string; originalPaymentTrxNo: string; responsibilityVersionHash: string }>;
 const sha = (v: string | Uint8Array) => createHash("sha256").update(v).digest("hex"), ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/, SHA = /^[0-9a-f]{64}$/;
 const isSha=(v:unknown):v is string=>typeof v==="string"&&SHA.test(v);
 export class RefundProfileError extends Error { constructor(readonly code: string) { super(code); } }
@@ -117,24 +118,24 @@ export function assertRefundStart(cap: FormalRefundAdmission) { const a = readFo
 export function assertInitialRefundAdmission(cap: FormalRefundAdmission, reference: string, hash: string) {
   const a = readFormalRefundAdmission(cap); if (!(reference === a.reference && hash === a.sha256) && !a.historicalInitialAdmissions.some(v => v.reference === reference && v.sha256 === hash)) fail("REFUND_INITIAL_ADMISSION_MISMATCH");
 }
-function checkBinding(p: Profile, operation: RefundOperation, b: RefundBinding) {
+function checkBinding(p: Profile, operation: RefundOperation, b: RefundWireBinding) {
   if (p.operation !== operation || b.merchantNo !== p.merchantNo || b.merchantIdentityId !== p.merchantIdentityId || b.currency !== "CNY") fail("REFUND_BINDING_MISMATCH");
   if (operation === "SUBMIT" && (b.profileId !== p.profileId || b.initialProfileSha256 !== p.sha256 || b.keyVersionRef !== p.keyVersionRef || b.notifyUrl !== p.notifyUrl || b.fundsAccount !== p.fundsAccount)) fail("REFUND_INITIAL_PROFILE_MISMATCH");
 }
-export function assertRefundBinding(profile:BoundRefundProfile,operation:RefundOperation,binding:RefundBinding):void {
+export function assertRefundBinding<T extends RefundWireBinding>(profile:BoundRefundProfile,operation:RefundOperation,binding:T):void {
   checkBinding(pget(profile),operation,binding); validateJoinpayRefundRequestInput(binding);
 }
 export type RefundOutbound = Readonly<{ operation: "SUBMIT" | "QUERY"; requestSha256: string }>;
 type Outbound = { endpoint: string; body: string; purpose: RefundServerProfile["purpose"] };
 const outbound = new WeakMap<object, Outbound>();
-export function produceRefundRequest(profile: BoundRefundProfile, operation: "SUBMIT" | "QUERY", binding: RefundBinding, key: string): RefundOutbound {
+export function produceRefundRequest(profile: BoundRefundProfile, operation: "SUBMIT" | "QUERY", binding: RefundWireBinding, key: string): RefundOutbound {
   if (operation !== "SUBMIT" && operation !== "QUERY") fail("REFUND_OUTBOUND_OPERATION_INVALID"); const p = pget(profile); assertRefundBinding(profile, operation, binding);
   const form = operation === "SUBMIT" ? computeJoinpayRefundRequest({ ...binding, notifyUrl: binding.notifyUrl, reason: binding.reason }, key) : computeJoinpayRefundQuery(binding, key);
   const body = new URLSearchParams(form.fields.map(([name, value]) => [name, value])).toString();
   const request = Object.freeze({ operation, requestSha256: sha(body) }); outbound.set(request, Object.freeze({ endpoint: operation === "SUBMIT" ? "https://trade.joinpay.com/tradeRt/refund" : "https://trade.joinpay.com/tradeRt/queryRefund", body, purpose: p.purpose })); return request;
 }
 export function readRefundOutbound(request: RefundOutbound): Readonly<Outbound> { return outbound.get(request) ?? fail("REFUND_OUTBOUND_NOT_BOUND"); }
-export function inspectRefundProfile(profile: BoundRefundProfile, operation: RefundOperation, body: string | Uint8Array, binding: RefundBinding, key: string): RefundNeutralResult {
+export function inspectRefundProfile(profile: BoundRefundProfile, operation: RefundOperation, body: string | Uint8Array, binding: RefundWireBinding, key: string): RefundNeutralResult {
   const p = pget(profile); checkBinding(p, operation, binding);
   return computeJoinpayRefundResponse(operation === "SUBMIT" ? "REFUND_SYNC" : operation === "QUERY" ? "REFUND_QUERY" : "REFUND_NOTIFY", body, { binding, key, leaseCurrent: true });
 }

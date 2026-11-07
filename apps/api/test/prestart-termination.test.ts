@@ -23,6 +23,7 @@ function fixture(t:any,patch:Record<string,unknown>={}){
   merchant_identity_id:"merchant_1",merchant_order_no:"ORIGINAL_1",channel_trx_no:"TRX_1",opening_confirmed:false,has_posting:false,pending_adjustment:false,earning_count:"0",...patch};
  const client={query:async(sql:string,values:any[]=[])=>{calls.push({sql,values});
   if(sql.includes('to_regclass'))return{rows:[{ready:true}]};
+  if(sql.startsWith('SELECT o.id FROM zzsh_order.rental_order o WHERE'))return{rows:[{id:'order_1'}],rowCount:1};
   if(sql.startsWith('SELECT id FROM zzsh_order.rental_order WHERE'))return{rows:[],rowCount:["renter","owner"].includes(values[1])?1:0};
   if(sql.includes('FROM zzsh_order.rental_order o LEFT JOIN'))return{rows:[facts]};
   if(sql.startsWith('SELECT id,order_id,requested_by'))return{rows:row?[row]:[]};
@@ -89,4 +90,11 @@ test('普通GET限本人，缺结构不可报无申请；不取资金锁/改状�
  assert.equal(h.calls.some(c=>/\b(INSERT|UPDATE|DELETE)\b|FOR UPDATE|advisory/i.test(c.sql)),false);
  const stranger=fixture(t);await assert.rejects(readPrestartTermination(stranger.client,{...renter,userId:'stranger'},'order_1'),(e:any)=>e.status===404);
  const noSchema=fixture(t);(noSchema.client as any).query=async()=>({rowCount:1,rows:[{ready:false}]});await assert.rejects(readPrestartTermination(noSchema.client,renter,'order_1'),(e:any)=>e.status===503);
+});
+test('有订单写入权限且在游戏范围的客服无需订单群即可看到未开租复核入口',async t=>{
+ const h=fixture(t);h.seed();
+ t.mock.method(adminAccess,'loadEffectiveAdminAccess',async()=>({status:'ACTIVE',isBoss:false,permissions:new Set(['order.read','order.settlement.write'])}) as any);
+ const out=await readPrestartTermination(h.client,support,'order_1');assert.equal(out.canReview,true);assert.equal(out.request?.fullRefundCents,'15908');
+ const original=h.client.query.bind(h.client);(h.client as any).query=async(sql:string,values:any[])=>sql.startsWith('SELECT o.id FROM zzsh_order.rental_order o WHERE')?{rows:[],rowCount:0}:original(sql,values);
+ await assert.rejects(readPrestartTermination(h.client,support,'order_1'),(e:any)=>e.status===404);
 });

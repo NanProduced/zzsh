@@ -25,7 +25,7 @@ function descriptor(): CollectionServerProfile {
 type Row = Record<string, any>;
 function db() {
   const state = { now: 1_000_000, requests: new Map<string, Row>(), bindings: new Map<string, Row>(), attempts: [] as Row[], observations: [] as Row[],
-    idem: new Map<string, Row>(), audit: [] as Row[], payable: true, confirmation: false, claimOrderOverride: null as string | null };
+    idem: new Map<string, Row>(), audit: [] as Row[], payable: true, confirmation: false, legacyGuardReady:true, legacyConflict:false, claimOrderOverride: null as string | null };
   const trace: string[] = []; let nextCommitLoss: "CLAIM" | "RESULT" | null = null, failAudit: "CLAIM" | "RESULT" | null = null, strictG1Schema = false;
   let expiresOn: "STATE_UPDATE" | "OBSERVATION_INSERT" | null = null, rejectObservation = false;
   const one = (r?: Row) => ({ rows: r ? [structuredClone(r)] : [], rowCount: r ? 1 : 0 });
@@ -52,6 +52,8 @@ function db() {
       if (sql.startsWith("SELECT renter_user_id, status, display_no")) return one({ renter_user_id: "renter", status: "PENDING_PAYMENT", display_no: "ZZMODEL-1", currency: "CNY", total: "12345" });
       if (sql.startsWith("SELECT hold_until > clock_timestamp()")) return one({ open: s.payable, has_confirmation: s.confirmation });
       if (sql.includes("FROM zzsh_order.payment_request WHERE order_id=$1")) return one([...s.requests.values()].find(r => r.order_id === p[0]));
+      if (sql.includes("legacy_payment_order_number_guard")) return one({ready:s.legacyGuardReady});
+      if (sql.includes("FROM zzsh_order.legacy_continuation_evidence")) return one({found:s.legacyConflict});
       if (sql.startsWith("SELECT 1 FROM zzsh_order.payment_request WHERE channel=")) return one();
       if (sql.startsWith("INSERT INTO zzsh_order.payment_request")) { const names = ["id", "order_id", "channel", "merchant_identity_id", "config_profile_id", "protocol_version", "key_version_ref", "platform_order_no", "channel_order_no", "amount_cents", "wire_amount_yuan", "method", "evidence_level"];
         const r: Row = { ...Object.fromEntries(names.map((n, i) => [n, p[i]])), currency: "CNY", state: "SUBMITTING", revision: "1", lease_version: "0", lease_owner: null, lease_until: null,
@@ -115,6 +117,19 @@ test("恢复入口不做首次下单，未尝试的请求保持原状且不读�
     { requestId: first.id, workerId: "recovery_worker", recoveryMinimumIntervalSeconds: 60 });
   assert.equal(result.kind, "SKIPPED"); assert.equal(reads, 0); assert.equal(sent, 0);
   assert.equal(model.state.requests.get(first.id)!.lease_version, "0"); assert.equal(model.state.attempts.length, 0);
+});
+
+test("首派前重查旧单原号；已提交后的原号查询不被新冲突阻断",async()=>{
+  const model=db(),first=await created(model);let sent=0;
+  model.state.legacyConflict=true;
+  await assert.rejects(executeJoinpayCollectionAttempt(execution(model,first.profile,fakeFetch(response(),()=>sent++)),{requestId:first.id,workerId:"worker"}),
+    (error:any)=>error.paymentReason==="ORDER_NOT_PAYABLE");
+  assert.equal(sent,0);assert.equal(model.state.attempts.length,0);assert.equal(model.state.requests.get(first.id)!.lease_version,"0");
+  model.state.legacyConflict=false;
+  assert.equal((await executeJoinpayCollectionAttempt(execution(model,first.profile,fakeFetch(response(),()=>sent++)),{requestId:first.id,workerId:"worker"})).kind,"OBSERVED");
+  model.state.legacyConflict=true;model.state.now+=31000;
+  const resumed=await executeJoinpayCollectionAttempt(execution(model,first.profile,fakeFetch(response(true),()=>sent++)),{requestId:first.id,workerId:"worker"});
+  assert.equal(resumed.kind,"OBSERVED");if(resumed.kind==="OBSERVED")assert.equal(resumed.operation,"QUERY");assert.equal(sent,2);
 });
 
 test("持久意图首次派发需显式授权、等候间隔和仍可付款；之后只查原号", async () => {
@@ -200,7 +215,7 @@ test("同键有效原请求在当前profile/wire/admission不可用时仍重放�
   assert.equal(replay.replayed, true); assert.equal(replay.request.requestId, first.id);
   assert.deepEqual(model.state.bindings.get(first.id), before); assert.equal(model.state.attempts.length, 0);
 });
-test("仅原G1 schema的拒绝适配器模型仍可create/replay/claim，非正式路径不引用新增物理列", async () => {
+test("原G1支付字段与独立原号守卫并存时可create/replay/claim，非正式路径不引用formal字段", async () => {
   const model = db(); model.requireOriginalG1Schema(); const first = await created(model);
   const replay = await createJoinpayCollectionRequest(model.pool, { actor: { userId: "renter" }, orderId: ORDER, idempotencyKey: "model_idem1", method: "ALIPAY_NATIVE" });
   assert.equal(replay.replayed, true);

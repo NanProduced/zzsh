@@ -45,6 +45,13 @@ test("imported8 without head supports opposing party directly and isolates unkno
   const blocked = projectLegacyContinuation(b, { realm: "user", userId: b.ownerUserId, sessionId: "fixture", requestId: "fixture" }, isolated, null, []);
   assert.equal(blocked.availability, "ISOLATED"); assert.deepEqual(blocked.capabilities, []);
 });
+test("authorized staff can return a pending legacy scheme even when amounts cannot be confirmed",()=>{
+ const facts=initialLegacyFacts(legacySource({orderStatus:"8",saleEarnings:null,returnOrderMoney:null})),row=legacyEvidence(facts);
+ const staff={realm:"admin" as const,userId:"staff",sessionId:"fixture",requestId:"fixture"};
+ const view=projectLegacyContinuation(b,staff,row,null,[],true,"NONE");
+ assert(view.capabilities.includes("reject"));assert(!view.capabilities.includes("confirm"));assert.match(view.commandFingerprints.reject!,/^[a-f0-9]{64}$/);
+ assert(!projectLegacyContinuation(b,staff,row,null,[],true,"UNKNOWN").capabilities.includes("reject"));
+});
 
 const partyActor=(who:"owner"|"renter"|"other"|"admin")=>({realm:who==="admin"?"admin" as const:"user" as const,userId:who==="owner"?b.ownerUserId:who==="renter"?b.renterUserId:who,sessionId:"fixture",requestId:"fixture"});
 const distinctAmounts={payMoney:"901.23",saleEarnings:"163.27",ownerNet:"150.21",returnOrderMoney:"517.89",refundGross:"517.89",refundNet:"506.82",fullPayoutMoney:"13.06",detainMoney:"11.07",commissionPool:"220.07",divide:"83",divide2:"71",expendOrder:"42.17",expendAccount:"37.11",depositCompensation:"23.09"};
@@ -69,6 +76,13 @@ test("real legacy GET model keeps own amounts and duty scope without modifying s
  assert.deepEqual(projectLegacyContinuation(b,partyActor("admin"),row,null,duties,false,"UNKNOWN",true).duties.map(d=>d.id),["own","refund","commission"]);
  assert.throws(()=>projectLegacyContinuation(b,partyActor("other"),row,null,duties));assert.equal(JSON.stringify(row),before);
 });
+test("a settled owner duty is presented as verified only after its financial facts are checked",()=>{
+ const row=legacyEvidence(initialLegacyFacts(legacySource({orderStatus:"4"})));
+ const duty={id:"own",kind:"OWNER_CREDIT",counterpartyUserId:b.ownerUserId,amountCents:"100",currency:"CNY",status:"SETTLED",settledBy:"FINANCE",revision:"2",maturityAt:null,sourceStatus:null} as LegacyDutyRow;
+ assert.equal(projectLegacyContinuation(b,partyActor("owner"),row,null,[duty],false,"UNKNOWN").duties[0]?.financeVerified,false);
+ assert.equal(projectLegacyContinuation(b,partyActor("owner"),row,null,[duty],false,"NONE").duties[0]?.financeVerified,true);
+ assert.equal(projectLegacyContinuation(b,partyActor("renter"),row,null,[duty],false,"NONE").duties.length,0);
+});
 test("preview filters both actual calculated bags and keeps the original proposal fingerprint",()=>{
  const facts=initialLegacyFacts(legacySource()),quantities=legacyQuantities("1.00");
  for(const who of ["owner","renter"] as const){
@@ -77,11 +91,63 @@ test("preview filters both actual calculated bags and keeps the original proposa
   for(const amounts of [out.previewAmounts,out.proposalAmounts]){assert.equal(Object.hasOwn(amounts,who==="owner"?"payMoney":"saleEarnings"),false);assert.equal(Object.hasOwn(amounts,who==="owner"?"saleEarnings":"payMoney"),true);}
  }
 });
+test("staff proposal keeps staff identity but calculates with the explicitly selected party's original rule",()=>{
+ const facts=initialLegacyFacts(legacySource()),quantities=legacyQuantities("1.00");
+ for(const who of ["renter","owner"] as const){
+  const admin=previewLegacyContinuation(facts,b,partyActor("admin"),quantities,who);
+  const user=planLegacyContinuation(facts.evidence,{kind:"propose",caller:{role:who,legacyUserId:who==="owner"?b.legacyOwnerId:b.legacyRenterId},quantities});assert(user.ok);
+  const normalized=Object.fromEntries(Object.entries(user.amounts).map(([key,value])=>{
+   if(value===null)return[key,null];const cents=BigInt(legacyPlanYuanToCents(value));return[key,`${cents/100n}.${(cents%100n).toString().padStart(2,"0")}`];
+  }));
+  assert.deepEqual(admin.proposalAmounts,normalized);
+  const bound=planLegacyContinuation(facts.evidence,{kind:"propose",caller:{role:"admin",legacyUserId:"",onBehalf:who},quantities});assert(bound.ok);
+  assert.equal(admin.proposalFingerprint,bound.fingerprint);assert.notEqual(admin.proposalFingerprint,user.fingerprint);
+  assert.equal(bound.nextStatus,who==="renter"?"8":"9");
+ }
+ assert.throws(()=>previewLegacyContinuation(facts,b,partyActor("admin"),quantities),/STAFF_ROLE_INVALID/);
+ assert.throws(()=>previewLegacyContinuation(facts,b,partyActor("renter"),quantities,"owner"),/STAFF_ROLE_INVALID/);
+ const forged=planLegacyContinuation(facts.evidence,{kind:"propose",caller:{role:"renter",legacyUserId:b.legacyRenterId,onBehalf:"owner"},quantities});assert.equal(forged.ok,false);
+});
+test("legacy preview shows two decimals and rounds a new fractional proposal consistently",()=>{
+ const quantities={...legacyQuantities("1.00"),barrett:"1.00"};
+ const prices={...legacySource().accountPrices,barrett:"0.25"};
+ const facts=initialLegacyFacts(legacySource({isFullPayout:"1",accountPrices:prices,orderPrices:prices}));
+ const result=previewLegacyContinuation(facts,b,partyActor("admin"),quantities,"renter");
+ assert.equal(result.proposalAmounts.saleEarnings,"10.25");assert.equal(result.proposalAmounts.fullPayoutMoney,"0.82");
+ assert(Object.values(result.proposalAmounts).every(value=>value===null||/^\d+\.\d{2}$/.test(value)));
+ const fractional=initialLegacyFacts(legacySource({accountPrices:{...prices,barrett:"0.01"},orderPrices:{...prices,barrett:"0.01"}}));
+ const rounded=previewLegacyContinuation(fractional,b,partyActor("admin"),{...quantities,barrett:"0.50"},"renter");
+ assert.equal(rounded.proposalAmounts.saleEarnings,"10.01");assert.equal(rounded.proposalAmounts.returnOrderMoney,"87.00");
+ assert.equal(rounded.proposalAmounts.ownerNet,"10.01");assert.equal(rounded.proposalAmounts.commissionPool,"2.99");
+});
+test("legacy early proposal discloses the renter's actual early deduction without exposing it to the owner",()=>{
+ const facts=initialLegacyFacts(legacySource({storedCommissionMoney:"5.00"})),quantities=legacyQuantities("0.10");
+ const renter=previewLegacyContinuation(facts,b,partyActor("renter"),quantities);
+ assert.equal(renter.settlementKind,"EARLY");assert.equal(renter.earlyFee,"5.00");
+ const owner=previewLegacyContinuation(facts,b,partyActor("owner"),quantities);
+ assert.equal(owner.settlementKind,"EARLY");assert.equal(Object.hasOwn(owner,"earlyFee"),false);
+});
+test("an imported pending early proposal is labelled without inventing a fee from incomplete historical components",()=>{
+ const facts=initialLegacyFacts(legacySource({orderStatus:"8",isAdvanceSet:"1",saleEarnings:"13.00",returnOrderMoney:"87.00",quantities:legacyQuantities("1.00")}));
+ const projected=projectLegacyContinuation(b,partyActor("renter"),legacyEvidence(facts),null,[]);
+ assert.equal(projected.settlementKind,"EARLY");assert.equal(projected.earlyFee,null);
+});
+test("the confirmed legacy refund deadline is shown only to the renter and authorized staff",()=>{
+ const facts=initialLegacyFacts(legacySource({orderStatus:"4",saleEarnings:"13.00",returnOrderMoney:"87.00"})),row=legacyEvidence(facts);
+ const head={id:"head",orderId:b.id,revision:"1",inputEvidenceId:"source",resultEvidenceId:row.id,stage:4,isSettle:0,command:"CONFIRM",amounts:facts.amounts,refundDueAt:"2026-11-14T08:00:00.000000Z"};
+ assert.equal(projectLegacyContinuation(b,partyActor("renter"),row,head,[]).refundDueAt,head.refundDueAt);
+ assert.equal(projectLegacyContinuation(b,partyActor("admin"),row,head,[]).refundDueAt,head.refundDueAt);
+ assert.equal(Object.hasOwn(projectLegacyContinuation(b,partyActor("owner"),row,head,[]),"refundDueAt"),false);
+});
 test("receipt projection drops unknown nested source and diagnostics while preserving safe status and own fee",()=>{
  const raw={orderId:b.id,outcome:"REJECTED",revision:"7",amounts:{...distinctAmounts,ownerNet:{cents:"15021",yuan:"150.21",facts:{payMoney:"901.23"}}},source:{accountPrices:{coffee:"77.31"}},facts:{saleEarnings:"163.27"},error:{code:"CONFLICT",message:"REJECTED",requestId:"fixture",details:{payMoney:"901.23"}}},before=JSON.stringify(raw);
  const owner=projectLegacyCommandReceipt(b,partyActor("owner"),raw) as any,renter=projectLegacyCommandReceipt(b,partyActor("renter"),raw) as any;
  assert.deepEqual(owner.amounts.ownerNet,{cents:"15021",yuan:"150.21"});assert.equal(owner.amounts.fullPayoutMoney,"13.06");assert.equal(Object.hasOwn(owner,"source"),false);assert.equal(Object.hasOwn(owner,"facts"),false);assert.equal(Object.hasOwn(owner.error,"details"),false);
  assert.equal(renter.amounts.payMoney,"901.23");assert.equal(Object.hasOwn(renter.amounts,"ownerNet"),false);assert.equal(owner.outcome,"REJECTED");assert.equal(JSON.stringify(raw),before);
+ const safe=projectLegacyCommandReceipt(b,partyActor("renter"),{error:{code:"CONFLICT",message:"DEPOSIT_SHORT",reason:"DEPOSIT_SHORT"}}) as any;
+ assert.equal(safe.error.reason,"DEPOSIT_SHORT");
+ const hidden=projectLegacyCommandReceipt(b,partyActor("renter"),{error:{code:"CONFLICT",reason:"PRIVATE_INTERNAL_DIAGNOSTIC"}}) as any;
+ assert.equal(Object.hasOwn(hidden.error,"reason"),false);
 });
 test("stored canonical evidence and full evidence metadata are verified", () => {
   const row = legacyEvidence(initialLegacyFacts(legacySource()));

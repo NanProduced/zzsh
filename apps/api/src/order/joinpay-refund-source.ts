@@ -3,9 +3,9 @@ import type { PoolClient } from "pg";
 import { conflict, invalid, notFound } from "../supply/supply-util";
 import { assertRefundResource, formalRefundBinding, lockFormalRefundContext, type FormalRefundRow } from "./channel-refund-store";
 import { assertFormalRefundProfile, describeRefundProfile, inspectRefundProfile, readFormalRefundAdmission, readRefundProfileEvidence, refundCompleteTimeToUtc, refundFailureMayRelease,
-  refundWayAccepted, RefundProfileError, type BoundRefundProfile, type FormalRefundAdmission, type RefundBinding, type RefundOperation } from "./joinpay-refund-profile";
+  refundWayAccepted, RefundProfileError, type BoundRefundProfile, type FormalRefundAdmission, type RefundWireBinding, type RefundOperation } from "./joinpay-refund-profile";
 const sha = (v: string | Uint8Array) => createHash("sha256").update(v).digest("hex"), ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
-export type RefundSourceOptions = { admission: FormalRefundAdmission; profileFor: (operation: RefundOperation, binding: Readonly<RefundBinding>, pinned?: Readonly<{ profileId: string; profileSha256: string; keyVersionRef: string }>) => BoundRefundProfile; keyFor: (ref: string) => string };
+export type RefundSourceOptions = { admission: FormalRefundAdmission; profileFor: (operation: RefundOperation, binding: Readonly<RefundWireBinding>, pinned?: Readonly<{ profileId: string; profileSha256: string; keyVersionRef: string }>) => BoundRefundProfile; keyFor: (ref: string) => string };
 export type NativeRefundTerminalFact = Readonly<{ evidenceId: string; intentId: string; postingId: string | null; orderId: string; paymentConfirmationId: string;
   basisKind?: "POSTING" | "REVIEW_CONFIRMATION" | "PRESTART_TERMINATION"; abnormalConfirmationId?: string | null;
   renterUserId: string; merchantIdentityId: string; originalPaymentTrxNo: string; originalPaymentOrderNo: string; responsibilityVersionHash: string;

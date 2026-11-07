@@ -135,6 +135,8 @@ test("unit amount solver reproduces settlement cents exactly and never goes belo
   assert.equal(solved.achievedCents, 2n);
   assert.ok(BigInt(solved.unitAmount.replace(".", "")) >= 1_000_000n);
   assert.deepEqual(unitAmountForCents(1n, 1n, "0.01000000", 1n, 1n), { unitAmount: "0.01000000", achievedCents: 1n });
+  // A displayed unit can round to a different subtotal than the original exact percent calculation.
+  assert.equal(unitAmountForCents(3999998n, 3999998n, "0.01333333", 3000000n, 1n), null);
   assert.equal(unitAmountForCents(1n, 0n, "0.00000000", 0n, 1n), null);
 });
 

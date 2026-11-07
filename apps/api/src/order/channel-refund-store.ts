@@ -7,6 +7,8 @@ import { assertSyntheticChannelRequestCapability, assertSyntheticChannelRequestO
 import { localFinancialSandboxRegistration } from "../finance/local-financial-sandbox-resource";
 import { verifyPrestartRefundLiability } from "../finance/prestart-refund-liability";
 import type { PrestartPaymentBasis } from "./prestart-termination";
+import { lockRefundOrderNo } from "./payment-original-lock";
+export { lockRefundOrderNo } from "./payment-original-lock";
 import { readFormalRefundAdmission, describeRefundProfile, assertFormalRefundProfile, assertRefundStart, assertInitialRefundAdmission, assertRefundBinding,
   type BoundRefundProfile, type FormalRefundAdmission, type RefundBinding } from "./joinpay-refund-profile";
 
@@ -313,11 +315,8 @@ export async function readFormalRefundRow(client: PoolClient, admission: FormalR
 export async function lockFormalRefundContext(client: PoolClient, admission: FormalRefundAdmission, id: string): Promise<FormalRefundRow> {
   const original = await readFormalRefundRow(client, admission, id);
   await lockRefundFunds(client, "JOINPAY", original.merchant_identity_id, original.original_payment_trx_no);
-  // 与异常创建共用 funds → order-no → user → intent 顺序；只对REVIEW basis取原号锁。
-  if (original.basis_kind === "REVIEW_CONFIRMATION" || original.basis_kind === "PRESTART_TERMINATION") {
-    await client.query(`SELECT pg_advisory_xact_lock(hashtextextended(jsonb_build_array(
-      'zzsh:refund-order-no:v1',$1::text,$2::text)::text,0))`, [original.merchant_identity_id, original.original_payment_order_no]);
-  }
+  // All formal refund paths share funds → original order number → user → intent.
+  await lockRefundOrderNo(client,original.merchant_identity_id,original.original_payment_order_no);
   if (!(await client.query(`SELECT id FROM zzsh_auth_user."user" WHERE id=$1 FOR UPDATE`, [original.renter_user_id])).rows[0]) throw notFound();
   if (!(await client.query(`SELECT ledger_revision FROM zzsh_order.wallet_revision WHERE user_id=$1`, [original.renter_user_id])).rows[0]) throw conflict("Original refund wallet revision unavailable");
   const row = (await client.query<FormalRefundRow>(`SELECT ${FORMAL_REFUND_COLUMNS} FROM zzsh_order.channel_refund_intent WHERE id=$1 AND payment_source='JOINPAY' FOR UPDATE`, [id])).rows[0];
@@ -333,6 +332,7 @@ export async function createFormalRefundIntent(client: PoolClient, input: Formal
   if (!basis || basis.renter_user_id !== input.renterUserId) throw notFound();
   if (basis.source !== "JOINPAY" || basis.currency !== "CNY") throw conflict("Native refund original JOINPAY payment unavailable");
   await lockRefundFunds(client, basis.source, basis.merchant_scope_id, basis.provider_transaction_id);
+  await lockRefundOrderNo(client, basis.merchant_scope_id, basis.merchant_order_no);
   const fingerprint = fingerprintRequest("rental.refund.intent", input.postingId, { amountCents: input.amountCents, reason:input.reason??null });
   const old = (await client.query<FormalRefundRow>(`SELECT ${FORMAL_REFUND_COLUMNS} FROM zzsh_order.channel_refund_intent WHERE posting_id=$1 AND idempotency_key=$2`, [input.postingId, key])).rows[0];
   if (old) {

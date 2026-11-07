@@ -17,6 +17,7 @@ test("price line parser distinguishes omitted tier from null and invalid values"
   for (const customerTier of [null,0,false,{},[],["STANDARD"],"","standard","UNKNOWN"]) {
     assert.throws(()=>parseDeltaPriceLines([{...line,customerTier}],"SPREAD"),(error: any)=>error.status===400 && error.code==="INVALID_ARGUMENT");
   }
+  assert.throws(()=>parseDeltaPriceLines([{...line,buyerUnitAmount:"1".repeat(17)}],"SPREAD"),/Unit amount is invalid/);
 });
 
 function compatInput(base: string, selection: RentalPricingSelection, tier: CustomerTier = "STANDARD"): QuoteInput {
@@ -28,18 +29,46 @@ function compatInput(base: string, selection: RentalPricingSelection, tier: Cust
 
 // Pure writer models only: these fixture IDs and price amounts are not an installed catalog.
 const TURTLE_FIXTURE = { id: "fixture_item_turtle45", gameId: "fixture_game_delta", code: "df_billable_turtle_backpack_45", unit: "PIECE", quantityScale: 0 };
-function resourceWriterClient(item = TURTLE_FIXTURE) {
+function resourceWriterClient(item = TURTLE_FIXTURE, precision: { draft?: readonly unknown[]; current?: readonly unknown[] } = {}) {
   const calls: Array<{ sql: string; values: unknown[] }> = [];
   const client = { query: async (sql: string, values: unknown[] = []) => {
     calls.push({ sql, values });
     if (sql.startsWith("SELECT *") && sql.includes('"price_version"')) return { rows: [{ id: "fixture_price", game_id: item.gameId, status: "DRAFT", revision: "1", mode: "SPREAD", haff_rule: compatRule() }], rowCount: 1 };
     if (sql.startsWith("SELECT *") && sql.includes('"billable_item"')) return { rows: [{ ...item, game_id: item.gameId, quantity_scale: item.quantityScale }], rowCount: 1 };
+    if (sql.includes("/* existing precision in draft */")) return { rows: precision.draft ?? [], rowCount: (precision.draft ?? []).length };
+    if (sql.includes("/* current precision source for empty draft */")) return { rows: precision.current ?? [], rowCount: (precision.current ?? []).length };
     if (sql.includes('FROM "zzsh_supply"."billable_item"') && sql.includes("ANY($1::text[])")) return { rows: [item], rowCount: 1 };
     if (sql.includes('FROM "zzsh_supply"."game"')) return { rows: [{ id: item.gameId, catalogRevision: "1" }], rowCount: 1 };
     return { rows: [], rowCount: 1 };
   }} as never;
   return { calls, client };
 }
+
+test("new or changed unit prices use cents while an exact inherited high-precision price is preserved", async () => {
+  const old={itemId:TURTLE_FIXTURE.id,customerTier:"STANDARD",pricingKind:"FIXED_UNIT",unitQuantity:"1",buyerUnitAmount:"1.23400000",ownerUnitAmount:"0.56700000",mode:"SPREAD"};
+  const line={itemId:old.itemId,customerTier:"STANDARD",pricingKind:"FIXED_UNIT",unitQuantity:"1",buyerUnitAmount:"1.234",ownerUnitAmount:"0.567"};
+  for(const precision of [{draft:[old]}, {current:[old]}]){
+    const f=resourceWriterClient(TURTLE_FIXTURE,precision);
+    await updatePriceDraft(f.client,"fixture_admin",true,"fixture_price",{expectedRevision:"1",lines:[line]});
+    const inserted=f.calls.find(call=>call.sql.includes('INSERT INTO "zzsh_supply"."price_line"'))!;
+    assert.deepEqual(inserted.values.slice(4,7),["1","1.234","0.567"]);
+  }
+  for(const [precision,patch] of [
+    [{},{}], [{},{buyerUnitAmount:"1.23000000",ownerUnitAmount:"0.56"}], [{draft:[old]},{buyerUnitAmount:"1.235"}], [{draft:[old]},{ownerUnitAmount:"0.568"}],
+    [{draft:[old]},{unitQuantity:"2"}], [{draft:[{...old,mode:"PERCENT"}]},{}],
+    [{draft:[{...old,customerTier:"VIP"}]},{}], [{draft:[{...old,buyerUnitAmount:"1.235"}],current:[old]},{}],
+  ] as const){
+    const f=resourceWriterClient(TURTLE_FIXTURE,precision);
+    await assert.rejects(()=>updatePriceDraft(f.client,"fixture_admin",true,"fixture_price",{expectedRevision:"1",lines:[{...line,...patch}]}),/最多两位小数/);
+    assert(!f.calls.some(call=>/^(UPDATE|DELETE|INSERT)\b/.test(call.sql.trim())));
+  }
+  const cents=resourceWriterClient();
+  await updatePriceDraft(cents.client,"fixture_admin",true,"fixture_price",{expectedRevision:"1",lines:[{...line,buyerUnitAmount:"1.23",ownerUnitAmount:"0.56"}]});
+  assert(!cents.calls.some(call=>call.sql.includes("precision in draft")));
+  const padded={...old,buyerUnitAmount:"1.23000000",ownerUnitAmount:"0.56000000"};
+  const inherited=resourceWriterClient(TURTLE_FIXTURE,{current:[padded]});
+  await updatePriceDraft(inherited.client,"fixture_admin",true,"fixture_price",{expectedRevision:"1",lines:[{...line,buyerUnitAmount:padded.buyerUnitAmount,ownerUnitAmount:padded.ownerUnitAmount}]});
+});
 
 test("current insurance renames through its existing identity without changing frozen history or DAY units", async () => {
   const item = { ...TURTLE_FIXTURE, id: "fixture_existing_insurance", code: "df_billable_top_insure_card", unit: "DAY" };

@@ -4,7 +4,7 @@ import type {PoolClient} from "pg";
 import {computeDeltaQuote,projectDeltaQuote,type InternalQuote,type QuoteInput} from "../src/supply/pricing";
 import {quoteToGrowthOfferPlan,type OfferBinding} from "../src/auth/membership-growth";
 import {selectPersonalGrowthOffer,frozenPersonalGrowthV4Valid,type GrowthConfirmationKnown} from "../src/order/personal-growth-confirmation";
-import {readPersonalPriceProjection,rebuildPersonalConfirmation,type PersonalConfirmationOptions} from "../src/order/personal-confirmation";
+import {freezeSettlementPricing,readPersonalPriceProjection,rebuildPersonalConfirmation,type PersonalConfirmationOptions} from "../src/order/personal-confirmation";
 import {computeContentHash,normalizeContentPayload} from "../src/supply/content-hash";
 import {compatRule} from "./pricing-compat-fixture";
 import {legacyPayload} from "./legacy-listed-fixture";
@@ -39,6 +39,21 @@ test("unknown metadata, stale asOf, wrong subject and synthetic candidate amount
 test("frozen v4 validation binds separate sources and cannot reclassify old v3 or a mismatched deposit",()=>{
  const s=selectPersonalGrowthOffer(known(),binding,asOf,quote()),expected={...binding,listingHash:"b".repeat(64)},personal={schema:"personal-quote-v4",...expected,membershipGrowth:s.growth};
  assert(frozenPersonalGrowthV4Valid(personal,expected,"0"));assert(!frozenPersonalGrowthV4Valid(personal,expected,"30000"));assert(!frozenPersonalGrowthV4Valid({...personal,schema:"personal-quote-v3"},expected,"0"));assert(!frozenPersonalGrowthV4Valid({...personal,membership:{tier:"STANDARD"}},expected,"0"));
+});
+test("selected total discount is verified against the original quote before it is frozen",()=>{
+ const base=quote("47","0"),discounted=applyTotalDiscountToQuote(base,"0.99");assert(discounted);
+ const data:GrowthConfirmationKnown={knowledge:"KNOWN",effectiveTier:"GOLD",policyTier:"GOLD",asOfUtc:asOf,policyVersion:"1",entitlementIds:[],candidates:[{quote:discounted.quote,payableRatio:"0.99",plan:quoteToGrowthOfferPlan(discounted.quote,{source:"GROWTH",benefitVersion:"1",binding})}]};
+ assert.equal(selectPersonalGrowthOffer(data,binding,asOf,base).payableRatio,"0.99");
+ data.candidates[0]!.payableRatio="0.5";assert.throws(()=>selectPersonalGrowthOffer(data,binding,asOf,base));
+});
+test("settlement pricing freezes the selected discount and all enabled sealed item prices",()=>{
+ const base=quote(),basis=freezeSettlementPricing(base,"0.99000000",[
+  {item_id:"bullet",pricing_kind:"FIXED_UNIT",unit_quantity:"60",buyer_unit_amount:"4.00000000",owner_unit_amount:"2.00000000",item_unit:"ROUND",item_name:"6级子弹",item_enabled:true},
+  {item_id:"disabled",pricing_kind:"FIXED_UNIT",unit_quantity:null,buyer_unit_amount:null,owner_unit_amount:null,item_unit:"PIECE",item_enabled:false},
+ ]);
+ assert.equal(basis.payableRatio,"0.99");assert.equal(basis.haff.itemId,"haff");
+ assert.deepEqual(basis.items,[{itemId:"bullet",name:"6级子弹",unit:"ROUND",unitQuantity:"60",buyerUnitAmount:"4",ownerUnitAmount:"2"}]);
+ assert.throws(()=>freezeSettlementPricing(base,"0.99",[{item_id:"bad",pricing_kind:"FIXED_UNIT",unit_quantity:"1",buyer_unit_amount:"1",owner_unit_amount:"2",item_unit:"PIECE"}]));
 });
 test("T deposit provenance keeps a still-active same-millisecond waiver using normalized microseconds; E choice is an explicit fixture",t=>{
  const shared:typeof import("../src/auth/membership-growth")=require("../src/auth/membership-growth");
@@ -88,7 +103,7 @@ test("legacy confirmation uses its frozen base with new growth and rejects missi
   if(unknown)return {knowledge:"UNKNOWN",reason:"GROWTH_UNKNOWN"};
   const discounted=applyTotalDiscountToQuote(i.baseQuote,"0.95");assert(discounted);
   const planBinding={userId:i.userId,ownerUserId:i.ownerUserId,accountId:i.accountId,listingVersionId:i.listingVersionId,ruleReleaseId:i.ruleReleaseId,quantityDigest:i.quantityDigest};
-  return {knowledge:"KNOWN",effectiveTier:"GOLD",policyTier:"GOLD",asOfUtc:i.asOfUtc,policyVersion:"1",entitlementIds:[],candidates:[{quote:discounted.quote,plan:quoteToGrowthOfferPlan(discounted.quote,{source:"GROWTH",benefitVersion:"1",binding:planBinding})}]};
+  return {knowledge:"KNOWN",effectiveTier:"GOLD",policyTier:"GOLD",asOfUtc:i.asOfUtc,policyVersion:"1",entitlementIds:[],candidates:[{quote:discounted.quote,payableRatio:"0.95",plan:quoteToGrowthOfferPlan(discounted.quote,{source:"GROWTH",benefitVersion:"1",binding:planBinding})}]};
  };
  const terms={termsVersionId:"terms-1",termsDigest:"e".repeat(64),disclosureVersion:"v1",policyRef:"fixture-policy",policyVersion:"1",title:"Fixture terms",body:"Synthetic terms"};
  let withTerms=false;
@@ -96,6 +111,8 @@ test("legacy confirmation uses its frozen base with new growth and rejects missi
  const user={userId:"user-1",sessionId:"session-1"},request={accountId:"legacy-account",versionId:"version-1",releaseId:"release"};
  const result=await rebuildPersonalConfirmation(client,user,request,options);
  assert.equal(result.snapshot.schema,"personal-quote-v4");assert.equal(result.snapshot.quote.schemaVersion,3);
+ assert("settlementPricing" in result.snapshot);assert.equal(result.snapshot.settlementPricing?.payableRatio,"0.95");
+ assert(!Object.hasOwn(result.projection,"settlementPricing"));
  assert.equal(result.snapshot.quote.resourceTotal.amount,"384.75");assert.equal(result.snapshot.quote.ownerTotal.amount,"349.00");
  assert.equal(result.projection.quote.baseRenterHaffRatioWanPerYuan,"37");assert.equal(result.snapshot.quote.legacyQuote?.ownerRatio,"43");
  unknown=true;await assert.rejects(()=>rebuildPersonalConfirmation(client,user,request,options),(e:unknown)=>(e as {code:string}).code==="MEMBERSHIP_UNKNOWN");

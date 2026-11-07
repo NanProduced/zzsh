@@ -19,8 +19,10 @@ import {
   type ChannelPaymentView,
   type ChannelPaymentMethod,
   type OrderSettlement,
+  type SettlementLine,
   type SettlementOpening,
   type SettlementPreview,
+  type SettlementQuantityInput,
   type SettlementVersion,
 } from "@/lib/order-client";
 import { clearIntent, inspectIntent, isIntentStale, loadIntent, saveIntent, type IntentKind } from "@/lib/order-intents";
@@ -550,10 +552,14 @@ function OpeningPanel({ opening, order, party, onChanged }: { opening: Settlemen
   }, [userId, order.id]);
   const myParty = party.toUpperCase();
   const acks = opening.acks ?? [];
-  const acked = acks.some((ack) => ack.party === myParty);
-  const otherAcked = acks.some((ack) => ack.party !== myParty);
+  const myAck = acks.find((ack) => ack.party === myParty), otherAck = acks.find((ack) => ack.party !== myParty);
+  const acked = Boolean(myAck), otherAcked = Boolean(otherAck);
   const confirmed = opening.status === "CONFIRMED";
-  const tag = confirmed ? "双方已确认" : acked && otherAcked ? "双方已确认" : acked ? "你已确认 · 对方未记录" : otherAcked ? `${partyLabel(acks.find((ack) => ack.party !== myParty)?.party ?? "")}已确认 · 你未记录` : "待双方确认";
+  const ackText = (ack: typeof myAck, own: boolean) => !ack ? "" : ack.source === "PARTY" ? `${own ? "你" : partyLabel(ack.party)}已确认`
+    : ack.source === "ON_BEHALF" ? `客服已协助${own ? "你" : partyLabel(ack.party)}确认`
+    : ack.source === "AUTO" ? `${own ? "你的" : partyLabel(ack.party) + "的"}期初已自动确认` : `${own ? "你的" : partyLabel(ack.party) + "的"}确认已记录`;
+  const bothPartyConfirmed = acked && otherAcked && acks.every(ack => ack.source === "PARTY");
+  const tag = confirmed || acked && otherAcked ? bothPartyConfirmed ? "双方已确认" : "期初已确认" : acked ? `${ackText(myAck, true)} · 对方未记录` : otherAcked ? `${ackText(otherAck, false)} · 你未记录` : "待双方确认";
   const apply = (acting: string, outcome: WriteOutcome<OrderSettlement>) => {
     if (outcome.status === "ok") { onChanged(); return; }
     if (outcome.status === "unknown") { setUnknown(outcome.message); return; }
@@ -576,11 +582,11 @@ function OpeningPanel({ opening, order, party, onChanged }: { opening: Settlemen
       const authority = await orderApi.settlement(order.id);
       if (!isCurrent(acting)) return;
       const target = authority.openings.find((candidate) => candidate.id === targetId);
-      const myAck = target?.acks?.some((ack) => ack.party === myParty) ?? false;
-      if (target && myAck) {
+      const originalPartyAck = target?.acks?.some((ack) => ack.party === myParty && ack.source === "PARTY") ?? false;
+      if (target && originalPartyAck) {
         clearIntent(acting, "opening.confirm", order.id);
         setUnknown(null);
-        setError({ message: target.status === "CONFIRMED" ? "服务端已记录双方确认，期初已生效。" : "服务端已记录你的期初确认，等待对方确认。", retryable: false });
+        setError({ message: target.status === "CONFIRMED" ? "服务端已记录你的期初确认，期初已生效。" : "服务端已记录你的期初确认，等待对方确认。", retryable: false });
         onChanged();
         return;
       }
@@ -621,30 +627,34 @@ function OpeningPanel({ opening, order, party, onChanged }: { opening: Settlemen
   };
   return <div className="order-trade-block">
     <h3>{confirmed ? "已确认期初库存" : "期初库存确认"} <span className="order-trade-tag">第{opening.versionNo}版</span> <span className="order-trade-tag is-accent">{tag}</span></h3>
-    <p className="order-muted">{confirmed ? "以下为双方确认的开租库存，开租后按结算记录核对消耗。" : "期初数量由客服按交付时的实际库存代录；与预付款一致并双方确认同一版本后才开始计租。付款、建群与沟通都不等于已开租。"}</p>
+    <p className="order-muted">{confirmed ? "以下为已生效的开租库存，确认方式见下方记录；开租后按结算记录核对消耗。" : "期初数量由客服按交付时的实际库存代录；请双方核对同一版本，当事人无法操作时可联系客服协助。付款、建群与沟通都不等于已开租。"}</p>
     <OpeningLines order={order} opening={opening} heading={confirmed ? "开租时数量" : "期初数量"} />
     {unknown ? <UnknownNotice label="期初确认结果未知" message={unknown} onQuery={() => void query()} onOpenOrder={onChanged} /> : null}
     {error ? <p className="order-inline-notice" role="alert">{error.message}</p> : null}
     {!confirmed && !acked && !unknown ? <button type="button" className="button" onClick={() => void confirm()} disabled={busy}>{busy ? "确认中…" : "确认期初并开租"}</button> : null}
-    {!confirmed && acked ? <p className="order-muted"><Clock3 size={14} aria-hidden="true" /> 已提交确认；等待对方确认后正式开租。</p> : null}
-    <RecordList title="确认记录" records={acks.map((ack) => ({ label: `${partyLabel(ack.party)}确认期初`, time: ack.createdAt ?? null }))} />
+    {!confirmed && acked ? <p className="order-muted"><Clock3 size={14} aria-hidden="true" /> {ackText(myAck, true)}；等待对方确认后正式开租。</p> : null}
+    <RecordList title="确认记录" records={acks.map((ack) => ({ label: ack.source === "PARTY" ? `${partyLabel(ack.party)}确认期初` : ack.source === "ON_BEHALF" ? `客服协助${partyLabel(ack.party)}确认期初` : ack.source === "AUTO" ? `${partyLabel(ack.party)}期初自动确认` : `${partyLabel(ack.party)}期初确认已记录`, time: ack.createdAt ?? null }))} />
     {opening.confirmedAt ? <p className="order-muted">开租时间：{formatOrderTime(opening.confirmedAt)}</p> : null}
   </div>;
 }
 
-function ConsumedTable({ order, opening, remaining, consumed }: { order: Order; opening: SettlementOpening; remaining: Record<string, string>; consumed?: { haff?: unknown; items?: Array<{ itemId: string; consumed: string; remaining: string }> } | null }) {
+function settlementDecisionLabel(action:string):string{return action==="CONFIRM"?"已确认":action==="REJECT"?"已拒绝":action==="REVIEW"?"已复核":action==="FINALIZE"?"已确认结算":"状态待核";}
+
+function ConsumedTable({ order, lines, values, actual, consumed }: { order: Order; lines: SettlementLine[]; values: Record<string, string>; actual: boolean; consumed?: { haff?: unknown; items?: Array<{ itemId: string; consumed: string; remaining: string }> } | null }) {
   return <table className="order-trade-lines"><thead><tr><th scope="col">资源</th><th scope="col">期初</th><th scope="col">期末剩余</th><th scope="col">本次实耗</th></tr></thead>
-    <tbody>{opening.lines.map((line) => {
+    <tbody>{lines.map((line) => {
       const open = line.quantity ?? "0";
-      const rest = remaining[line.itemId] ?? "";
-      const valid = /^\d+$/.test(rest) && BigInt(rest) <= BigInt(open);
-      const derived = valid ? (BigInt(open) - BigInt(rest)).toString() : null;
+      const value = values[line.itemId] ?? "";
+      const valid = /^\d+$/.test(value);
+      const rest = valid && actual ? (BigInt(value)<BigInt(open)?BigInt(open)-BigInt(value):0n).toString() : value;
+      const derived = valid && actual ? value : valid && BigInt(rest) <= BigInt(open) ? (BigInt(open) - BigInt(rest)).toString() : null;
       const serverLine = consumed?.items?.find((item) => item.itemId === line.itemId);
       const used = line.pricingKind === "HAFF_RATIO" && consumed?.haff !== undefined && consumed.haff !== null
         ? String(consumed.haff)
         : serverLine?.consumed ?? derived;
+      const name=line.name??resourceName(order,line.itemId);
       return <tr key={line.itemId}>
-        <td>{resourceName(order, line.itemId)}<span className="order-trade-unit">{unitHint(resourceName(order, line.itemId), line.unit)}</span></td>
+        <td>{name}<span className="order-trade-unit">{unitHint(name, line.unit)}</span></td>
         <td>{quantityText(line.unit, open)}</td>
         <td>{rest === "" ? "未记录" : quantityText(line.unit, rest)}</td>
         <td>{used === null || used === undefined ? "未记录" : quantityText(line.unit, used)}</td>
@@ -652,8 +662,8 @@ function ConsumedTable({ order, opening, remaining, consumed }: { order: Order; 
     })}</tbody></table>;
 }
 
-function ConsumptionTable({ order, opening, version }: { order: Order; opening: SettlementOpening | null; version: SettlementVersion | null | undefined }) {
-  const rows = consumptionRows(order, opening, version);
+function ConsumptionTable({ order, opening, version, extraResources }: { order: Order; opening: SettlementOpening | null; version: SettlementVersion | null | undefined; extraResources?:SettlementLine[] }) {
+  const rows = consumptionRows(order, opening, version, extraResources);
   if (rows.length === 0) return null;
   return <table className="order-trade-lines"><thead><tr><th scope="col">资源</th><th scope="col">期初</th><th scope="col">期末剩余</th><th scope="col">实际消耗</th></tr></thead>
     <tbody>{rows.map((row) => <tr key={row.itemId}>
@@ -664,13 +674,18 @@ function ConsumptionTable({ order, opening, version }: { order: Order; opening: 
     </tr>)}</tbody></table>;
 }
 
-function EndingForm({ opening, order, party, onChanged }: { opening: SettlementOpening; order: Order; party: OrderParty; onChanged: () => void }) {
+function EndingForm({ opening, order, party, onChanged, consumptionMode, extraResources=[] }: { opening: SettlementOpening; order: Order; party: OrderParty; onChanged: () => void; consumptionMode?: OrderSettlement["consumptionMode"]; extraResources?: SettlementLine[] }) {
   const session = useUserSession();
+  const actual=consumptionMode==="ACTUAL";
+  const extra=actual?extraResources.filter(line=>!opening.lines.some(item=>item.itemId===line.itemId)).map(line=>({...line,quantity:"0"})):[];
+  const lines=[...opening.lines,...extra];
+  const extraKey=extra.map(line=>line.itemId).join("|");
+  const initialValues=()=>Object.fromEntries(lines.map(line=>[line.itemId,extra.some(item=>item.itemId===line.itemId)?"0":""]));
   // The ending quantities are the user's own input: they start empty so that "unknown" is never
   // silently submitted as the opening quantity (i.e. as zero consumption).
-  const [raw, setRaw] = useState<Record<string, string>>(() => Object.fromEntries(opening.lines.map((line) => [line.itemId, ""])));
+  const [raw, setRaw] = useState<Record<string, string>>(initialValues);
   const [expanded, setExpanded] = useState(false);
-  const [checked, setChecked] = useState<{ lines: Array<{ itemId: string; remainingQuantity: string }>; versionHash: string; snapshot: string; preview: SettlementPreview } | null>(null);
+  const [checked, setChecked] = useState<{ lines: SettlementQuantityInput[]; versionHash: string; snapshot: string; preview: SettlementPreview } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [unknown, setUnknown] = useState<string | null>(null);
@@ -683,8 +698,8 @@ function EndingForm({ opening, order, party, onChanged }: { opening: SettlementO
     setChecked(null);
     setError(null);
     setTermsAccepted(false);
-    setRaw(Object.fromEntries(opening.lines.map((line) => [line.itemId, ""])));
-  }, [opening.id, opening.versionNo, order.id, order.status]);
+    setRaw(initialValues());
+  }, [opening.id, opening.versionNo, order.id, order.status, actual, extraKey]);
   useEffect(() => { setTermsAccepted(false); }, [checked?.versionHash]);
   useEffect(() => {
     if (!userId) return;
@@ -704,17 +719,18 @@ function EndingForm({ opening, order, party, onChanged }: { opening: SettlementO
     setBusy(false);
     setRaw((current) => ({ ...current, [itemId]: value }));
   };
-  const validate = (): { lines?: Array<{ itemId: string; remainingQuantity: string }>; error?: string } => {
-    const lines: Array<{ itemId: string; remainingQuantity: string }> = [];
-    for (const line of opening.lines) {
+  const validate = (): { lines?: SettlementQuantityInput[]; error?: string } => {
+    const selected: SettlementQuantityInput[] = [];
+    for (const line of lines) {
       const value = (raw[line.itemId] ?? "").trim();
-      const name = resourceName(order, line.itemId);
-      if (value === "") return { error: `请填写「${name}」的期末剩余数量；留空表示未知，不能按 0 处理。` };
-      if (!/^(0|[1-9]\d{0,18})$/.test(value)) return { error: `「${name}」的期末数量必须是 0 或正整数（不接受负数、小数、空格或科学计数法）。` };
-      if (BigInt(value) > BigInt(line.quantity ?? "0")) return { error: `「${name}」的期末数量不能大于期初数量（${line.quantity}）；异常数量请联系客服核实，不会自动裁剪。` };
-      lines.push({ itemId: line.itemId, remainingQuantity: value });
+      const name = line.name??resourceName(order, line.itemId);
+      const label=actual?"实际消耗数量":"期末剩余数量";
+      if (value === "") return { error: `请填写「${name}」的${label}；留空表示未知，不能按 0 处理。` };
+      if (!/^(0|[1-9]\d{0,18})$/.test(value)) return { error: `「${name}」的${label}必须是 0 或正整数。` };
+      if (!actual&&BigInt(value) > BigInt(line.quantity ?? "0")) return { error: `「${name}」的期末数量不能大于期初数量（${line.quantity}）；异常数量请联系客服核实。` };
+      selected.push(actual?{itemId:line.itemId,consumedQuantity:value}:{itemId:line.itemId,remainingQuantity:value});
     }
-    return { lines };
+    return { lines:selected };
   };
   const runPreview = async () => {
     if (locked) return;
@@ -779,7 +795,7 @@ function EndingForm({ opening, order, party, onChanged }: { opening: SettlementO
     const outcome = await performGuardedWrite(acting, "settlement.submit", order.id,
       { lines: checked.lines, acceptedHash: checked.versionHash, ...(early && order.earlySettlementDisclosure ? { termsAccepted: true } : {}) },
       { openingId: opening.id, openingVersion: opening.versionNo },
-      (key, body) => orderApi.submitSettlement(order.id, body as { lines: Array<{ itemId: string; remainingQuantity: string }>; acceptedHash: string; termsAccepted?: boolean }, key));
+      (key, body) => orderApi.submitSettlement(order.id, body as { lines: SettlementQuantityInput[]; acceptedHash: string; termsAccepted?: boolean }, key));
     if (!isCurrent(acting)) return;
     setBusy(false);
     apply(acting, outcome as WriteOutcome<OrderSettlement>);
@@ -790,32 +806,33 @@ function EndingForm({ opening, order, party, onChanged }: { opening: SettlementO
     if (!loadIntent(acting, "settlement.submit", order.id)) { setUnknown(null); onChanged(); return; }
     setBusy(true);
     const outcome = await performGuardedWrite(acting, "settlement.submit", order.id, {}, undefined,
-      (key, body) => orderApi.submitSettlement(order.id, body as { lines: Array<{ itemId: string; remainingQuantity: string }>; acceptedHash: string }, key));
+      (key, body) => orderApi.submitSettlement(order.id, body as { lines: SettlementQuantityInput[]; acceptedHash: string }, key));
     if (!isCurrent(acting)) return;
     setBusy(false);
     apply(acting, outcome as WriteOutcome<OrderSettlement>);
   };
   const amounts = settlementAmountRows(party, previewAmounts(checked?.preview ?? null));
+  if(consumptionMode==="UNAVAILABLE")return <div className="order-trade-block"><h3>发起结束租用</h3><p className="order-inline-notice" role="alert">本单结算价格资料暂不可用，请联系客服核实。</p></div>;
   if (!open) return <div className="order-trade-block">
     <h3>发起结束租用</h3>
-    <p className="order-muted">填写归还时的剩余数量，先预览结算金额，再确认提交。留空或负数不会被当作 0。</p>
+    <p className="order-muted">{actual?"填写实际消耗数量，先预览结算金额，再确认提交。":"填写归还时的剩余数量，先预览结算金额，再确认提交。留空或负数不会被当作 0。"}</p>
     <div className="order-trade-actions"><button type="button" className="button" onClick={() => setExpanded(true)}>发起结束租用</button></div>
   </div>;
   return <div className="order-trade-block">
     <div className="order-trade-heading"><h3>发起结束租用</h3>{!locked && checked === null ? <button type="button" className="button quiet button--sm" onClick={() => setExpanded(false)} disabled={busy}>收起</button> : null}</div>
-    <p className="order-muted">填写归还时账号内的剩余库存。哈夫币按净差计算消耗；物品按件/张差额计算，未耗部分按预付时价格退回。留空或负数不会被当作 0；提交结果未知期间输入与提交全部锁定，只允许查询原请求。</p>
-    <table className="order-trade-lines order-trade-input"><thead><tr><th scope="col">资源</th><th scope="col">期初数量</th><th scope="col">期末剩余</th></tr></thead>
-      <tbody>{opening.lines.map((line) => <tr key={line.itemId}>
-        <td>{resourceName(order, line.itemId)}<span className="order-trade-unit">{unitHint(resourceName(order, line.itemId), line.unit)}</span></td>
+    <p className="order-muted">{actual?"按实际使用量填写；超出期初的部分按本单价格与会员规则计算。未在期初申报的物资默认 0，请核对后修改。":"填写归还时账号内的剩余库存。留空不会被当作 0。"}</p>
+    <table className="order-trade-lines order-trade-input"><thead><tr><th scope="col">资源</th><th scope="col">期初数量</th><th scope="col">{actual?"实际消耗":"期末剩余"}</th></tr></thead>
+      <tbody>{lines.map((line) => <tr key={line.itemId}>
+        <td>{line.name??resourceName(order, line.itemId)}<span className="order-trade-unit">{unitHint(line.name??resourceName(order, line.itemId), line.unit)}</span></td>
         <td>{quantityText(line.unit, line.quantity ?? "0")}</td>
-        <td><input type="text" inputMode="numeric" autoComplete="off" value={raw[line.itemId] ?? ""} placeholder={`填写整数，单位：${resourceName(order, line.itemId)}`} disabled={locked || busy} aria-label={`${resourceName(order, line.itemId)} 期末剩余数量`} aria-invalid={error ? true : undefined} onChange={(event) => update(line.itemId, event.target.value)} /></td>
+        <td><input type="text" inputMode="numeric" autoComplete="off" value={raw[line.itemId] ?? ""} placeholder="填写整数" disabled={locked || busy} aria-label={`${line.name??resourceName(order, line.itemId)} ${actual?"实际消耗":"期末剩余"}数量`} aria-invalid={error ? true : undefined} onChange={(event) => update(line.itemId, event.target.value)} /></td>
       </tr>)}</tbody></table>
     {error ? <p className="order-inline-notice" role="alert">{error}</p> : null}
     {unknown ? <UnknownNotice label="结束提交结果未知" message={unknown} onQuery={() => void querySubmit()} onOpenOrder={onChanged} /> : null}
     {checked && !locked ? <div className="order-trade-preview">
-      <p className="order-muted">{checked.preview.reasons?.includes("EARLY_REASON_REQUIRED") ? "本次消耗低于 70%，属于提前结束：提交后由受权客服核实原因并复核，双方确认后生效，退款在复核生效后 7 天发起。" : "消耗比例满足正常结算条件：对方确认后自动生效，无需客服审核。"}</p>
-      {checked.preview.reasons?.includes("EARLY_REASON_REQUIRED") && order.earlySettlementDisclosure ? <><p>{order.earlySettlementDisclosure.body}</p><label className="order-trade-consent"><input type="checkbox" checked={termsAccepted} disabled={busy} onChange={(event) => setTermsAccepted(event.target.checked)} /><span>我已核对并接受本次提前结束的费用与退款安排</span></label></> : null}
-      <ConsumedTable order={order} opening={opening} remaining={Object.fromEntries(checked.lines.map((line) => [line.itemId, line.remainingQuantity]))} consumed={checked.preview.consumed} />
+      <p className="order-muted">{checked.preview.reasons?.includes("EARLY_REASON_REQUIRED") ? "本次消耗低于 70%，属于提前结束。提交后客服会核实原因并生成结算方案，请按方案核对费用和退款安排。" : "消耗比例满足正常结算条件：对方确认后自动生效，无需客服审核。"}</p>
+      {checked.preview.reasons?.includes("EARLY_REASON_REQUIRED") && order.earlySettlementDisclosure ? <><p>{order.earlySettlementDisclosure.body}</p><label className="order-trade-consent"><input type="checkbox" checked={termsAccepted} disabled={busy} onChange={(event) => setTermsAccepted(event.target.checked)} /><span>我已阅读并同意上述提前结束规则，具体金额以结算方案为准</span></label></> : null}
+      <ConsumedTable order={order} lines={lines} values={Object.fromEntries(checked.lines.map((line) => [line.itemId,"consumedQuantity" in line?line.consumedQuantity:line.remainingQuantity]))} actual={actual} consumed={checked.preview.consumed} />
       <AmountTable rows={amounts} caption={`本版结算金额明细（${party === "renter" ? "租客口径" : "号主口径"}，服务端计算）`} />
       <div className="order-trade-actions">
         <button type="button" className="button" onClick={() => void submit()} disabled={busy}>{busy ? "提交中…" : checked.preview.reasons?.includes("EARLY_REASON_REQUIRED") ? "提交结束申请" : "提交结算"}</button>
@@ -1003,7 +1020,7 @@ function PostingResult({ data, order, party, posting }: { data: OrderSettlement;
   const amountRows = postingAmountRows(party, posting);
   const captured = typeof posting.capturedCents === "string" && /^\d+$/.test(posting.capturedCents) ? moneyCents(posting.capturedCents) : "未记录";
   const charge = amountRows.find((row) => row.label === chargeRowLabel(Boolean(posting.manualAdjustment))) ?? null;
-  const records = (version?.decisions ?? []).map((decision) => ({ label: `${partyLabel(decision.party)}${decision.action === "CONFIRM" ? "已确认" : "已拒绝"}`, time: decision.createdAt ?? null }));
+  const records = (version?.decisions ?? []).map((decision) => ({ label: `${partyLabel(decision.party)}${settlementDecisionLabel(decision.action)}`, time: decision.createdAt ?? null }));
   if (posting.postedAt) records.push({ label: "结算生效", time: posting.postedAt });
   return <>
     <div className="order-trade-block">
@@ -1029,7 +1046,7 @@ function PostingResult({ data, order, party, posting }: { data: OrderSettlement;
         </dl>
         <p className="order-muted">调整说明：{adjustment.reason ?? "服务端未返回说明"}</p>
       </div> : null}
-      <ConsumptionTable order={order} opening={opening} version={version} />
+      <ConsumptionTable order={order} opening={opening} version={version} extraResources={data.extraResources} />
       <RecordList title="结算记录" records={records} />
     </div>
     <div className="order-trade-block">
@@ -1048,7 +1065,7 @@ function VersionHistory({ versions, current }: { versions: SettlementVersion[]; 
       <span className="order-version-no">第{version.versionNo}版</span>
       <span className="order-version-kind">{version.early ? "提前结算" : version.kind === "MANUAL_ADJUSTMENT" ? "人工调整" : "正常结算"}</span>
       {version.supersededAt ? <span className="order-version-state">已被替换 · {formatOrderTime(version.supersededAt)}</span> : <span className="order-version-state">当前版本</span>}
-      {decisions.length ? <span className="order-version-decisions">{decisions.map((decision) => `${partyLabel(decision.party)}${decision.action === "CONFIRM" ? "已确认" : "已拒绝"}${decision.createdAt ? ` ${formatOrderTime(decision.createdAt)}` : ""}`).join(" · ")}</span> : null}
+      {decisions.length ? <span className="order-version-decisions">{decisions.map((decision) => `${partyLabel(decision.party)}${settlementDecisionLabel(decision.action)}${decision.createdAt ? ` ${formatOrderTime(decision.createdAt)}` : ""}`).join(" · ")}</span> : null}
       {reason ? <span className="order-version-reason">说明：{reason}</span> : null}
       {version.supersededAt ? <span className="order-version-readonly">历史版本只读，不能再对其确认。</span> : null}
     </li>;
@@ -1106,9 +1123,9 @@ function SettlementAction({ order, party, onChanged, onStageFacts }: { order: Or
             </div> : current && !myDecision ? <DecisionPanel version={current} party={party} order={order} onChanged={refresh} /> :
               current && myDecision ? <div className="order-trade-block"><h3>等待对方确认 <span className="order-trade-tag">第{current.versionNo}版</span></h3><p className="order-muted">你已在这一版结算上完成操作；金额变化会生成新版本并要求重新确认。</p>
                 <AmountTable rows={decisionAmountRows(party, current)} caption={`当前版本金额明细（${party === "renter" ? "租客口径" : "号主口径"}${isAdjustedVersion(current) ? "，含人工调整" : ""}）`} />
-                <RecordList title="结算记录" records={(current.decisions ?? []).map((decision) => ({ label: `${partyLabel(decision.party)}${decision.action === "CONFIRM" ? "已确认" : "已拒绝"}`, time: decision.createdAt ?? null }))} />
+                <RecordList title="结算记录" records={(current.decisions ?? []).map((decision) => ({ label: `${partyLabel(decision.party)}${settlementDecisionLabel(decision.action)}`, time: decision.createdAt ?? null }))} />
               </div> :
-                <EndingForm opening={opening} order={order} party={party} onChanged={refresh} />}
+                <EndingForm opening={opening} order={order} party={party} onChanged={refresh} consumptionMode={data.consumptionMode} extraResources={data.extraResources} />}
     </> : null}
     {opening && !posting && data.versions.length > 1 ? <div className="order-trade-block"><h3>历史结算版本</h3><VersionHistory versions={data.versions} current={current} /></div> : null}
   </section>;

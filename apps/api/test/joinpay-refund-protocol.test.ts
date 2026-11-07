@@ -141,6 +141,16 @@ test("金额使用整数分与严格两位小数，出站上限和原支付号�
   assert.equal(new Map(buildJoinpayRefundRequest(base, KEY).fields).get("p2_OrderNo"), ORIGINAL);
 });
 
+test("legacy refund protocol uses the old merchant payment number without inventing a channel transaction number",()=>{
+  const legacy={merchantNo:MER,originalPaymentOrderNo:"20000101000000000001",refundOrderNo:"LRF_SYNTH_0001",amountCents:"3000",currency:"CNY" as const,notifyUrl:"https://example.invalid/refund"};
+  const request=buildJoinpayRefundRequest(legacy,KEY),fields=new Map(request.fields);
+  assert.equal(fields.get("p2_OrderNo"),legacy.originalPaymentOrderNo);
+  assert.equal(fields.get("p3_RefundOrderNo"),legacy.refundOrderNo);
+  assert.equal(fields.get("p4_RefundAmount"),"30.00");
+  assert.equal(fields.has("originalPaymentTrxNo"),false);
+  assert.equal(request.sendable,false,"synthetic signing is not a real channel dispatch");
+});
+
 test("新退款号/URL/备注有界，原号过长不截断、不换号", () => {
   const base = { ...binding, notifyUrl: "https://example.invalid/refund" };
   assert.throws(() => buildJoinpayRefundQuery({ ...binding, refundOrderNo: "A".repeat(31) }, KEY));

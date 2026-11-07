@@ -53,6 +53,37 @@ test("first imported 8/9 confirms without a head, derives complete facts and cre
     t.mock.restoreAll();
   }
 });
+test("staff confirms the existing proposal only with a reason and known finance state, under the staff identity", async t => {
+  const source = legacySource({ orderStatus: "8", quantities: legacyQuantities("10.00"), saleEarnings: "13.00", returnOrderMoney: "87.00" });
+  const p = arrange(t, source), who = actor("admin"), input = mutation(source, "confirm", who);
+  await assert.rejects(() => applyLegacyContinuationCommand(p.client, who, legacyBinding.id, input, async () => "NONE"), /recorded reason/);
+  const withReason = { ...input, reason: "已核对双方情况" };
+  await assert.rejects(() => applyLegacyContinuationCommand(p.client, who, legacyBinding.id, withReason, async () => "UNKNOWN"), /FINANCE_FACT_UNKNOWN/);
+  assert(!p.calls.some(q => /INSERT|UPDATE/.test(q.sql)));
+  const result = await applyLegacyContinuationCommand(p.client, who, legacyBinding.id, withReason, async () => "NONE");
+  assert.equal(result.body.stage, "4"); assert.equal(result.body.channelState, "UNKNOWN");
+  const version = p.calls.find(q => q.sql.startsWith("INSERT INTO zzsh_order.legacy_continuation_version"))!;
+  assert.equal(JSON.parse(String(version.values[4])).realm, "admin");
+  const audit = p.calls.find(q => q.sql.includes('INSERT INTO "zzsh_iam"."audit_event"') && q.values[4] === "order.legacy.continuation.confirm")!;
+  assert.equal(audit.values[2], who.userId); assert.equal(JSON.parse(String(audit.values[10])).supportReason, "已核对双方情况");
+});
+test("staff can return a legacy proposal for correction without pretending to be either party", async t => {
+  const source=legacySource({orderStatus:"8",quantities:legacyQuantities("10"),saleEarnings:"13.00",returnOrderMoney:"87.00"});
+  const p=arrange(t,source),who=actor("admin"),input=mutation(source,"reject",who);
+  await assert.rejects(()=>applyLegacyContinuationCommand(p.client,who,legacyBinding.id,input,async()=>"NONE"),/recorded reason/);
+  const decision={...input,reason:"双方确认数量需重核"};
+  await assert.rejects(()=>applyLegacyContinuationCommand(p.client,who,legacyBinding.id,decision,async()=>"POSTED_POSITIVE_REFUND"),/DEPOSIT_ALREADY_SETTLED/);
+  assert(!p.calls.some(q=>/INSERT|UPDATE/.test(q.sql)));
+  const result=await applyLegacyContinuationCommand(p.client,who,legacyBinding.id,decision,async()=>"NONE");assert.equal(result.body.stage,"3");
+  const version=p.calls.find(q=>q.sql.startsWith("INSERT INTO zzsh_order.legacy_continuation_version"))!;assert.equal(JSON.parse(String(version.values[4])).realm,"admin");
+  const audit=p.calls.find(q=>q.sql.includes('INSERT INTO "zzsh_iam"."audit_event"')&&q.values[4]==="order.legacy.continuation.reject")!;
+  assert.equal(JSON.parse(String(audit.values[10])).supportReason,"双方确认数量需重核");assert(!p.calls.some(q=>/INSERT INTO zzsh_order.legacy_order_duty/.test(q.sql)));
+});
+test("support reason length matches PostgreSQL character count for supplementary Unicode",()=>{
+ const body={expectedRevision:null,inputEvidenceId:"fixture_evidence",planFingerprint:"a".repeat(64)};
+ assert.throws(()=>parseLegacyMutation("reject",{...body,reason:"😀😀"}),/Invalid support reason/);
+ assert.equal(parseLegacyMutation("reject",{...body,reason:"😀😀😀"}).reason,"😀😀😀");
+});
 test("CAS and exact preview fingerprint reject before mutation; first proposal carries full source and delta", async t => {
   const p = arrange(t), who = actor("user"), input = mutation(legacySource(), "propose", who);
   await assert.rejects(() => applyLegacyContinuationCommand(p.client, who, legacyBinding.id, { ...input, expectedRevision: "1" }), /CONTINUATION_REVISION_CONFLICT/);
@@ -61,6 +92,24 @@ test("CAS and exact preview fingerprint reject before mutation; first proposal c
   await applyLegacyContinuationCommand(p.client, who, legacyBinding.id, input);
   const version = p.calls.find(q => q.sql.startsWith("INSERT INTO zzsh_order.legacy_continuation_version")); assert(version);
   assert.equal(version.values[7], "8"); assert.equal(version.values[5], "fixture_evidence");
+});
+test("staff initiates a legacy settlement with explicit party, reason and unchanged finance evidence", async t => {
+  for (const onBehalf of ["renter", "owner"] as const) {
+    const source=legacySource(), p=arrange(t,source), who=actor("admin"), quantities=legacyQuantities("0.10");
+    const plan=planLegacyContinuation(p.facts.evidence,{kind:"propose",caller:{role:"admin",legacyUserId:"",onBehalf},quantities});assert(plan.ok);
+    const input=parseLegacyMutation("propose",{expectedRevision:null,inputEvidenceId:"fixture_evidence",planFingerprint:plan.fingerprint,quantities,reason:"双方已沟通核实",onBehalf});
+    await assert.rejects(()=>applyLegacyContinuationCommand(p.client,who,legacyBinding.id,{...input,reason:undefined},async()=>"NONE"),/recorded reason/);
+    await assert.rejects(()=>applyLegacyContinuationCommand(p.client,who,legacyBinding.id,input,async()=>"UNKNOWN"),/FINANCE_FACT_UNKNOWN/);
+    await assert.rejects(()=>applyLegacyContinuationCommand(p.client,who,legacyBinding.id,{...input,onBehalf:onBehalf==="renter"?"owner":"renter"},async()=>"NONE"),/PLAN_FINGERPRINT_MISMATCH/);
+    assert(!p.calls.some(q=>/INSERT|UPDATE/.test(q.sql)));
+    const result=await applyLegacyContinuationCommand(p.client,who,legacyBinding.id,input,async()=>"NONE");
+    assert.equal(result.body.stage,onBehalf==="renter"?"8":"9");
+    const version=p.calls.find(q=>q.sql.startsWith("INSERT INTO zzsh_order.legacy_continuation_version"))!;
+    assert.equal(JSON.parse(String(version.values[4])).userId,who.userId);
+    const audit=p.calls.find(q=>q.sql.includes('INSERT INTO "zzsh_iam"."audit_event"') && q.values[4]==="order.legacy.continuation.propose")!;
+    assert.equal(JSON.parse(String(audit.values[10])).supportOnBehalf,onBehalf);assert.equal(JSON.parse(String(audit.values[10])).supportReason,"双方已沟通核实");
+    assert(!p.calls.some(q=>/INSERT INTO zzsh_order.legacy_order_duty|ledger_entry/.test(q.sql)));t.mock.restoreAll();
+  }
 });
 test("finance UNKNOWN refuses deposit operations; positive refund blocks, absent resolver cannot imply no payment", async t => {
   const source = legacySource({ orderStatus: "4", isSettle: "2", quantities: legacyQuantities("10.00"), saleEarnings: "13.00", returnOrderMoney: "87.00" });
@@ -81,6 +130,13 @@ test("definitive business refusal rolls all action effects back before retaining
   assert.deepEqual(p.calls.slice(0, 4).map(q => q.sql), ["SAVEPOINT legacy_continuation_action", "INSERT ACTION_EFFECT", "ROLLBACK TO SAVEPOINT legacy_continuation_action", "RELEASE SAVEPOINT legacy_continuation_action"]);
   assert(p.calls[4]!.sql.includes("audit_event"));
   await assert.rejects(() => legacyCommandOutcome(p.client, actor("user"), legacyBinding.id, async () => { throw new Error("database disconnected"); }), /database disconnected/);
+});
+test("known settlement refusal exposes a safe reason for support without exposing arbitrary diagnostics",async()=>{
+ const p=clientFor(),who=actor("admin");
+ const short=await legacyCommandOutcome(p.client,who,legacyBinding.id,async()=>{throw conflict("DEPOSIT_SHORT");});
+ assert.equal((short.body as any).error.reason,"DEPOSIT_SHORT");
+ const unknown=await legacyCommandOutcome(p.client,who,legacyBinding.id,async()=>{throw conflict("PRIVATE_INTERNAL_DIAGNOSTIC");});
+ assert.equal(Object.hasOwn((unknown.body as any).error,"reason"),false);
 });
 test("beneficiary-set drift under common order lock refuses before writes rather than taking a late third-party user lock",async t=>{
  const p=arrange(t),who=actor("user"),input=mutation(legacySource(),"propose",who);let reads=0;
@@ -145,7 +201,7 @@ function reviewedCommissionFixture(t: import("node:test").TestContext, stage: "8
     if (sql.includes(' AS "voidAudit"')) { const current = structuredClone(proof); mutate?.(current); return { rows: duplicateProof ? [current, current] : [current], rowCount: duplicateProof ? 2 : 1 }; }
     if (sql.includes("SELECT 1 FROM zzsh_iam.audit_event")) return { rows: [{}], rowCount: 1 };
     if (sql.includes("maturityAt") && sql.includes("SELECT to_char")) return { rows: [{ at: "2026-10-16T02:03:04.123456Z", maturityAt: "2026-10-23T02:03:04.123456Z" }], rowCount: 1 };
-    if (sql.startsWith("UPDATE zzsh_order.legacy_order_duty SET amount_cents")) { duty.amountCents = String(values[2]); duty.maturityAt = String(values[3]); duty.revision = (BigInt(duty.revision) + 1n).toString(); return { rows: [{ revision: duty.revision }], rowCount: 1 }; }
+    if (sql.startsWith("UPDATE zzsh_order.legacy_order_duty SET amount_cents")) { duty.amountCents = String(values[2]); duty.maturityAt = String(values[3]); duty.continuationVersionId=String(values[5]); duty.revision = (BigInt(duty.revision) + 1n).toString(); return { rows: [{ revision: duty.revision }], rowCount: 1 }; }
     if (sql.startsWith("UPDATE zzsh_order.legacy_order_duty SET status")) { duty.status = values[2] as LegacyDutyRow["status"]; duty.revision = (BigInt(duty.revision) + 1n).toString(); proof.decidedBy = JSON.parse(String(values[3])); proof.decisionReason = String(values[4]); proof.decisionEvidenceRef = values[5] as string; return { rows: [{ ...duty }], rowCount: 1 }; }
     if (sql.includes('INSERT INTO "zzsh_iam"."audit_event"')) { const audit: VoidAudit = { id: String(values[0]), actorType: String(values[1]), actorId: String(values[2]), sessionId: String(values[3]), action: String(values[4]), objectType: String(values[5]), objectId: String(values[6]), outcome: String(values[7]), requestId: String(values[8]), details: JSON.parse(String(values[10])) }; audits.push(audit); if (audit.action === "order.legacy.duty.void") proof.voidAudit = audit; }
     return sql.startsWith("INSERT INTO zzsh_iam.membership_growth_contribution") ? { rows: [], rowCount: 1 } : empty;
@@ -209,7 +265,7 @@ test("VOID status alone cannot bypass exact reviewed fact, actor, source, benefi
 test("ordinary PENDING commission still revises; MATURED, SETTLED and settled provenance remain rejected", async t => {
   for (const status of ["PENDING", "MATURED", "SETTLED"] as const) {
     const p = reviewedCommissionFixture(t, "8"); p.duty.status = status;
-    if (status === "PENDING") { await p.confirm(); assert.equal(p.duty.amountCents, "70"); assert.equal(p.duty.revision, "2"); }
+    if (status === "PENDING") { const result=await p.confirm(); assert.equal(p.duty.amountCents, "70"); assert.equal(p.duty.revision, "2"); assert.equal(p.duty.continuationVersionId,result.body.versionId); }
     else await assert.rejects(p.confirm, /DUTY_REVISION_CONFLICT/);
     t.mock.restoreAll();
   }

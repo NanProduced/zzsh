@@ -6,7 +6,7 @@ import type { Pool, PoolClient } from "pg";
 import { withTransaction } from "../src/auth/security-core";
 import { assertBusinessRuntimeIdentity, BusinessDatabaseService, createBusinessPool } from "../src/database/business";
 import { closeResource, finishDatabaseTest } from "./database-test-support";
-import { applyRuntimePrivileges, configureSkinIdentityPrivileges } from "../src/database/business-migrations";
+import { applyRuntimePrivileges, configureSettlementRefundPolicyPrivileges, configureSkinIdentityPrivileges } from "../src/database/business-migrations";
 
 test('directory pool is single-use within the existing ten business connection slots and both pools close',async()=>{
   const config={database:{host:'127.0.0.1',port:1,name:'offline',user:'offline',password:'offline'}},shared=createBusinessPool(config,{max:8}),directory=createBusinessPool(config,{max:2,maxUses:1});
@@ -69,13 +69,14 @@ test("cleanup failure still closes both pools and preserves the primary error", 
 
 const skinMetadataColumns = ["rarity_evidence", "is_collectible", "default_state", "media_source"];
 
-function skinAclFixture(metadata: readonly string[]) {
+function skinAclFixture(metadata: readonly string[], category: { column: boolean; table: boolean } = { column: true, table: true }) {
   const writes: string[] = [];
   const pool = { query: async (sql: string, args: unknown[] = []) => {
     if (sql.includes("count(*)")) {
       const names = args[0] as string[];
       return { rows: [{ count: names.includes("owner_kind") ? 7 : names.filter(name => metadata.includes(name)).length }] };
     }
+    if (sql.includes("attname='category_id'")) return { rows: [{ column_present: category.column, table_present: category.table }] };
     if (sql.includes("AS present")) return { rows: [{ present: true }] };
     writes.push(sql); return { rows: [] };
   } } as unknown as Parameters<typeof configureSkinIdentityPrivileges>[0];
@@ -107,6 +108,18 @@ test("skin ACL grants new metadata only for the complete schema and keeps derive
   }
 });
 
+test("skin ACL supports retired categories and rejects a half-retired schema", async () => {
+  const retired = skinAclFixture(skinMetadataColumns, { column: false, table: false });
+  await configureSkinIdentityPrivileges(retired.pool, "fixture_runtime");
+  assert.equal(retired.writes.length, 1);
+  assert.doesNotMatch(retired.writes[0]!, /category_id/);
+  for (const category of [{ column: true, table: false }, { column: false, table: true }]) {
+    const partial = skinAclFixture(skinMetadataColumns, category);
+    await assert.rejects(configureSkinIdentityPrivileges(partial.pool, "fixture_runtime"), /Skin category schema is incomplete/);
+    assert.deepEqual(partial.writes, []);
+  }
+});
+
 test("skin ACL refuses every partial metadata schema before issuing an ACL write", async () => {
   for (const metadata of [skinMetadataColumns.slice(0, 1), skinMetadataColumns.slice(0, 2), skinMetadataColumns.slice(0, 3), ["media_source"]]) {
     const f = skinAclFixture(metadata);
@@ -119,6 +132,7 @@ function fundingAclFixture(present: readonly unknown[], incompleteInventory = fa
   const seen: string[] = [];
   const pool = { query: async (sql: string, args: unknown[] = []) => {
     seen.push(sql);
+    if (sql.includes("guard_settlement_refund_policy")) return { rows: [{ present: false, guard: false, posting_columns: 0 }] };
     if (sql.startsWith("SELECT name,to_regprocedure(name)")) return { rows: (args[0] as string[]).slice(0, incompleteInventory ? 1 : 2).map((name, index) => ({ name, present: present[index] })) };
     if (sql.startsWith("SELECT name,to_regclass")) return { rows: (args[0] as string[]).map(name => ({ name, present: false })) };
     if (sql.includes("count(*)")) return { rows: [{ count: 0, ready: false }] };
@@ -126,6 +140,20 @@ function fundingAclFixture(present: readonly unknown[], incompleteInventory = fa
   } } as unknown as Parameters<typeof applyRuntimePrivileges>[0];
   return { pool, seen, grants: () => seen.filter(sql => sql.includes("GRANT EXECUTE ON FUNCTION zzsh_supply.valid_funding_policy_legacy_v1")) };
 }
+
+test("settlement refund policy ACL rejects partial installations before granting access", async () => {
+  for (const shape of [
+    { present: true, guard: false, posting_columns: 2 },
+    { present: false, guard: false, posting_columns: 1 },
+    { present: true, guard: true, posting_columns: 0 },
+  ]) {
+    const seen: string[] = [];
+    const pool = { query: async (sql: string) => { seen.push(sql); return { rows: [shape] }; } } as unknown as Pool;
+    await assert.rejects(configureSettlementRefundPolicyPrivileges(pool, "fixture_runtime"), /partially deployed/);
+    assert.equal(seen.length, 1);
+    assert.doesNotMatch(seen[0]!, /\bGRANT\b/);
+  }
+});
 
 test("funding validator ACL leaves the old prefix alone and explicitly grants only the complete v2 function set", async () => {
   const old = fundingAclFixture([false, false]);

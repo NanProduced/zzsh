@@ -80,7 +80,12 @@ export function allocateCombinedDiscount(lines: readonly DiscountLineFact[], pay
 /** Smallest 8-decimal unit amount whose settlement formula (`quantity × unit / unitQuantity`, HALF_UP) yields exactly `targetCents`. */
 export function unitAmountForCents(targetCents: bigint, ownerCents: bigint, ownerUnitAmount: string, quantity: bigint, unitQuantity: bigint): { unitAmount: string; achievedCents: bigint } | null {
   if (targetCents < 0n || quantity < 0n || unitQuantity <= 0n) return null;
-  if (targetCents === ownerCents) return { unitAmount: ownerUnitAmount, achievedCents: ownerCents };
+  if (targetCents === ownerCents) {
+    try {
+      const rounded = divideToScale(multiplyDecimal({ value: quantity, scale: 0 }, parseNonNegativeDecimal(ownerUnitAmount, 8, "owner unit")), { value: unitQuantity, scale: 0 }, 2).value;
+      return rounded === targetCents ? { unitAmount: ownerUnitAmount, achievedCents: rounded } : null;
+    } catch { return null; }
+  }
   if (quantity === 0n) return targetCents === 0n ? { unitAmount: "0", achievedCents: 0n } : null;
   const achieved = (unit: bigint) => divideToScale(multiplyDecimal({ value: quantity, scale: 0 }, { value: unit, scale: 8 }), { value: unitQuantity, scale: 0 }, 2).value;
   // Half-up to `targetCents` means unit ∈ ((2C−1)·uQ·1e6 / 2q, (2C+1)·uQ·1e6 / 2q); pick the smallest integer inside.

@@ -12,8 +12,9 @@ import { AdminApiError, adminRequest } from "../api";
  */
 
 export type FulfillmentLine = { itemId: string; quantity: string };
-export type RemainingLine = { itemId: string; remainingQuantity: string };
+export type RemainingLine = { itemId: string; remainingQuantity: string } | { itemId: string; consumedQuantity: string };
 export type EarlyEndReason = "TENANT_VOLUNTARY_EARLY" | "OWNER_OR_ACCOUNT_EARLY";
+export type SettlementEndReason = "NORMAL" | EarlyEndReason;
 
 export type SettlementAmount = { currency?: string; unit?: string; scale?: number; amount?: string };
 export type FrozenInventoryLine = { itemId: string; quantity: string; unit: string; pricingKind: string; name: string | null };
@@ -26,7 +27,7 @@ export type SettlementVersionView = {
   early?: boolean;
   versionHash?: string;
   supersededAt?: string | null;
-  inputSnapshot?: { lines?: Array<{ itemId?: string; openingQuantity?: string; remainingQuantity?: string }> } | null;
+  inputSnapshot?: { lines?: Array<{ itemId?: string; openingQuantity?: string; remainingQuantity?: string; consumedQuantity?: string }> } | null;
   computation?: { ok?: boolean; reasons?: string[]; early?: boolean; amounts?: Record<string, SettlementAmount>; consumed?: { haff?: unknown; items?: Array<{ itemId?: string; consumed?: unknown; remaining?: unknown }> } } | null;
   decisions?: Array<{ party?: string; action?: string; reason?: string | null; versionHash?: string; createdAt?: string }>;
 };
@@ -35,11 +36,14 @@ export type SettlementReadView = {
   orderId?: string;
   revision?: string;
   rentalStarted?: boolean;
+  consumptionMode?: "REMAINING" | "ACTUAL" | "UNAVAILABLE";
+  extraResources?: Array<{itemId:string;name:string|null;unit:string;pricingKind:string}>;
+  intakes?: Array<{status:string;lines?:Array<{itemId:string;remainingQuantity?:string;consumedQuantity?:string}>}>;
   ready?: boolean;
   reasons?: string[];
   currentRequest?: { kind?: string; id?: string; versionNo?: number; status?: string } | null;
   settlement?: SettlementVersionView | null;
-  openings?: Array<{ id?: string; versionNo?: number; status?: string; confirmedAt?: string | null; createdAt?: string; lines?: Array<{ itemId?: string; quantity?: string; unit?: string; pricingKind?: string }>; acks?: Array<{ party?: string; createdAt?: string }> }>;
+  openings?: Array<{ id?: string; versionNo?: number; status?: string; confirmedAt?: string | null; createdAt?: string; lines?: Array<{ itemId?: string; quantity?: string; unit?: string; pricingKind?: string }>; acks?: Array<{ party?: string; source?: string; createdAt?: string }> }>;
   posting?: { id?: string; versionHash?: string; early?: boolean; postedAt?: string; refundDueAt?: string | null; amounts?: Record<string, SettlementAmount> } | null;
   amounts?: Record<string, SettlementAmount>;
   consumed?: { haff?: unknown; items?: Array<{ itemId?: string; consumed?: unknown; remaining?: unknown }> };
@@ -53,9 +57,11 @@ export type SettlementReadView = {
 
 export type FulfillmentCommand =
   | { kind: "record-opening"; lines: FulfillmentLine[] }
+  | { kind: "confirm-opening"; openingId: string; versionNo: number; party: "RENTER" | "OWNER"; reason: string }
   | { kind: "preview"; lines: RemainingLine[]; endReason?: EarlyEndReason; proposedOwnerNet?: string; proposedRenterRefund?: string; reason?: string }
-  | { kind: "classify"; lines: RemainingLine[]; endReason: EarlyEndReason; acceptedHash: string }
+  | { kind: "classify"; lines: RemainingLine[]; endReason: SettlementEndReason; acceptedHash: string }
   | { kind: "review"; versionId: string; versionHash: string }
+  | { kind: "finalize"; versionId: string; versionHash: string; reason: string }
   | { kind: "adjust"; lines: RemainingLine[]; endReason?: EarlyEndReason; proposedOwnerNet: string; proposedRenterRefund: string; reason: string; acceptedHash: string };
 
 export type FulfillmentIntent = {
@@ -138,6 +144,30 @@ export async function sendSupportCancel(orderId: string, expectedOrderRevision: 
   }
 }
 
+export type SupportUnpaidCancelView = {
+  contractVersion: "admin-support-unpaid-cancel.v1"; orderId: string; orderRevision: string; orderStatus: string;
+  cancelReason: string | null; eligibility: { allowed: boolean; reason: string | null };
+};
+export async function readSupportUnpaidCancel(orderId: string): Promise<SupportUnpaidCancelView> {
+  return adminRequest<SupportUnpaidCancelView>(`${orderBase(orderId)}/support-unpaid-cancel`);
+}
+export async function sendSupportUnpaidCancel(orderId: string, expectedOrderRevision: string, reason: string, key: string): Promise<
+  { kind: "accepted" } | { kind: "blocked"; reason: string | null } | { kind: "unknown" }
+> {
+  try {
+    const raw = await adminRequest<Record<string, unknown>>(`${orderBase(orderId)}/support-unpaid-cancel`,
+      { expectedOrderRevision, reason }, "POST", { "idempotency-key": key });
+    if (!/^[1-9]\d{0,18}$/.test(expectedOrderRevision) || raw.orderRevision !== (BigInt(expectedOrderRevision) + 1n).toString()
+      || raw.contractVersion !== "admin-support-unpaid-cancel.v1" || raw.orderId !== orderId || raw.outcome !== "CANCELLED"
+      || raw.orderStatus !== "CANCELLED" || raw.cancelReason !== "SUPPORT_UNPAID" || raw.channelClosed !== false) return { kind: "unknown" };
+    return { kind: "accepted" };
+  } catch (error) {
+    if (error instanceof AdminApiError && error.status >= 400 && error.status < 500 && error.status !== 429)
+      return { kind: "blocked", reason: error.reasons[0] ?? null };
+    return { kind: "unknown" };
+  }
+}
+
 export type FulfillmentOutcome =
   | { kind: "accepted"; status: number; body: SettlementReadView }
   | { kind: "blocked"; status: number; reasons: readonly string[]; message: string }
@@ -153,9 +183,11 @@ function commandPath(orderId: string, command: FulfillmentCommand): string {
   const base = orderBase(orderId);
   switch (command.kind) {
     case "record-opening": return `${base}/openings`;
+    case "confirm-opening": return `${base}/openings/${encodeURIComponent(command.openingId)}/confirm`;
     case "preview": return `${base}/settlement-preview`;
     case "classify": return `${base}/settlements/classify`;
     case "review": return `${base}/settlements/${encodeURIComponent(command.versionId)}/review`;
+    case "finalize": return `${base}/settlements/${encodeURIComponent(command.versionId)}/finalize`;
     case "adjust": return `${base}/settlements/adjustments`;
   }
 }
@@ -164,6 +196,8 @@ function commandBody(command: FulfillmentCommand): Record<string, unknown> {
   switch (command.kind) {
     case "record-opening":
       return { lines: command.lines };
+    case "confirm-opening":
+      return { party: command.party, versionNo: command.versionNo, reason: command.reason };
     case "preview":
       return {
         lines: command.lines,
@@ -176,6 +210,8 @@ function commandBody(command: FulfillmentCommand): Record<string, unknown> {
       return { lines: command.lines, endReason: command.endReason, acceptedHash: command.acceptedHash };
     case "review":
       return { versionHash: command.versionHash };
+    case "finalize":
+      return { versionHash: command.versionHash, reason: command.reason };
     case "adjust":
       return {
         lines: command.lines,

@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import type { Pool, PoolClient } from "pg";
 import { recordAudit, withTransaction } from "../auth/security-core";
 import { conflict, invalid, notFound } from "../supply/supply-util";
-import { createCollectionPaymentRequest, claimCollectionPaymentRequestLease, bindFormalJoinpayTransaction, type PaymentActor, type PaymentRequestView } from "./channel-payment-store";
+import { assertLegacyPaymentNumberAvailable, createCollectionPaymentRequest, claimCollectionPaymentRequestLease, bindFormalJoinpayTransaction, type PaymentActor, type PaymentRequestView } from "./channel-payment-store";
 import { evaluateJoinpayTransportFailure, joinpayTransition, type JoinpayEvent, type RequestState } from "./joinpay-protocol";
 import { JoinpayCollectionProfileError, describeCollectionProfile, assertCollectionRequestBinding, readCollectionProfileEvidence, produceJoinpayCollectionRequest, inspectJoinpayCollectionResponse,
   assertFormalCollectionProfile, assertFormalCollectionStart, readFormalCollectionAdmission,
@@ -120,6 +120,7 @@ async function prepare(options: JoinpayCollectionExecution, id: string, workerId
     if (operation === "SUBMIT") {
       const payable = (await client.query(`SELECT status,hold_until>clock_timestamp() AS open FROM zzsh_order.rental_order WHERE id=$1`, [request.orderId])).rows[0];
       if (payable?.status !== "PENDING_PAYMENT" || payable.open !== true) return null;
+      await assertLegacyPaymentNumberAvailable(client,request.merchantIdentityId,request.originalOrderNo);
     }
     const lease = await claimCollectionPaymentRequestLease(client, { requestId: id, owner: workerId, ttlSeconds: 30 });
     if (!lease) return null;

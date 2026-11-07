@@ -1,4 +1,5 @@
 "use client";
+import { formatReferenceYuan } from "@zzsh/ui/display-money";
 import { BusinessUpdateNotices } from "@/components/content/platform-update-notices";
 import { CatalogItemArt } from "@/components/supply/catalog-item-art";
 import { LegacyAccountImage } from "@zzsh/ui/legacy-account-image";
@@ -300,15 +301,17 @@ export function entitlementExpiryLabel(
 
 export function formatItemUnitPrice(line: ResourceLine): string {
   const full = unitPriceText(line);
-  const match = full.match(/^(¥\d+(?:\.\d+)?)/);
+  const match = full.match(/^(约?¥\d+(?:\.\d+)?(?:（不足1分）)?)/);
   return match ? match[1]! : full;
 }
 
 export function unitPriceText(line: ResourceLine): string {
   if (!line.unitPriceLabel) return "未确认";
-  const match = line.unitPriceLabel.match(/^(¥\d+(?:\.\d+)?)\s*\/\s*(\d+)\s+(.+)$/);
+  const match = line.unitPriceLabel.match(/^(约?¥\d+(?:\.\d+)?(?:（不足1分）)?)\s*\/\s*(\d+)\s+(.+)$/);
   if (!match) return line.unitPriceLabel;
-  const amount = match[1]!.replace(/(\.\d*?[1-9])0+$|\.0+$/, "$1");
+  const formatted = formatReferenceYuan(match[1]);
+  if (!formatted) return "未确认";
+  const amount = formatted.replace(/(\.\d*?[1-9])0+$|\.0+$/, "$1");
   const grouped = canonicalResourceCode(line.code) === "df_billable_level6_bullet" && match[2] === "60" && match[3] === "发";
   return `${amount} / ${grouped ? "组" : `${match[2] === "1" ? "" : match[2]}${match[3]}`}`;
 }

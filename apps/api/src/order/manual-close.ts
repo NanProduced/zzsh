@@ -15,7 +15,7 @@ export type ManualCloseActor = { userId: string; sessionId: string; settlementAd
 
 /**
  * Shared support command boundary: active admin with order settlement write,
- * game scope, and a joined STAFF identity on this order's READY team.
+ * and the order's game scope. IM group membership controls chat, not order handling.
  */
 export async function assertSupportOrderAccess(client: PoolClient, orderId: string, actor: ManualCloseActor): Promise<void> {
   await assertAdminContextInTransaction(client, CONTEXT(actor));
@@ -26,16 +26,7 @@ export async function assertSupportOrderAccess(client: PoolClient, orderId: stri
   const scope = await readAdminGameScope(client, actor.userId);
   assertGameScopeUsable(scope, access.isBoss);
   if (!access.isBoss && !scopeAllowsGame(scope, false, order.gameId)) throw forbidden();
-  const joined = (await client.query(
-    `SELECT 1 FROM zzsh_order.im_order_member mm
-      JOIN zzsh_iam.im_identity_mapping m ON m.id = mm.identity_id AND m.app_id = mm.app_id
-      JOIN zzsh_order.im_order_group g ON g.order_id = mm.order_id AND g.app_id = mm.app_id
-     WHERE mm.order_id = $1 AND mm.party = 'STAFF' AND mm.state = 'JOINED'
-       AND m.realm = 'admin' AND m.identity_kind = 'ADMIN' AND m.status = 'READY'
-       AND m.platform_subject_id = $2 AND g.team_state = 'READY' LIMIT 1`,
-    [orderId, actor.userId],
-  )).rowCount;
-  if (!joined) throw forbidden("Only joined support can handle this order");
+  // Operational fallback follows order permission and game scope even when IM is unavailable.
 }
 
 export async function assertManualCloseAccess(client: PoolClient, orderId: string, actor: ManualCloseActor): Promise<void> {

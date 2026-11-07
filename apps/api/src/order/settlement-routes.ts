@@ -14,6 +14,7 @@ import {
   confirmOpening,
   confirmOpeningOnBehalf,
   decideSettlement,
+  finalizeSettlementBySupport,
   previewSettlement,
   previewStaffSettlement,
   projectSettlementResponse,
@@ -43,16 +44,18 @@ function idOf(value: string): string {
   return id;
 }
 
-function linesOf(body: Record<string, unknown>, field: "quantity" | "remainingQuantity"): Array<{ itemId: string; quantity: string }> {
+function linesOf(body: Record<string, unknown>, field: "quantity" | "remainingQuantity"): Array<{ itemId: string; quantity: string; quantityKind?: "CONSUMED" }> {
   const lines = body.lines;
   if (!Array.isArray(lines) || lines.length < 1 || lines.length > 64) throw invalid("Lines are invalid", "lines");
   return lines.map((line) => {
     if (!line || typeof line !== "object" || Array.isArray(line)) throw invalid("Lines are invalid", "lines");
     const row = line as Record<string, unknown>;
-    ensureOnlyFields(row, ["itemId", field]);
+    const consumed=field==="remainingQuantity"&&Object.hasOwn(row,"consumedQuantity");
+    const key=consumed?"consumedQuantity":field;
+    ensureOnlyFields(row, ["itemId", key]);
     if (typeof row.itemId !== "string" || !ID.test(row.itemId)) throw invalid("Invalid identifier", "itemId");
-    if (typeof row[field] !== "string" || !/^(0|[1-9]\d{0,18})$/.test(row[field])) throw invalid("Quantity is invalid", field);
-    return { itemId: row.itemId, quantity: row[field] };
+    if (typeof row[key] !== "string" || !/^(0|[1-9]\d{0,18})$/.test(row[key])) throw invalid("Quantity is invalid", key);
+    return { itemId: row.itemId, quantity: row[key], ...(consumed?{quantityKind:"CONSUMED" as const}:{}) };
   });
 }
 
@@ -149,15 +152,16 @@ export async function handleSettlementAdminRoute(request: Request, response: Sup
   const openingConfirm = /^\/([A-Za-z0-9._:-]+)\/openings\/([A-Za-z0-9._:-]+)\/confirm$/.exec(path);
   const classify = /^\/([A-Za-z0-9._:-]+)\/settlements\/classify$/.exec(path);
   const review = /^\/([A-Za-z0-9._:-]+)\/settlements\/([A-Za-z0-9._:-]+)\/review$/.exec(path);
+  const finalize = /^\/([A-Za-z0-9._:-]+)\/settlements\/([A-Za-z0-9._:-]+)\/finalize$/.exec(path);
   const adjust = /^\/([A-Za-z0-9._:-]+)\/settlements\/adjustments$/.exec(path);
-  if (!read && !preview && !openings && !openingConfirm && !classify && !review && !adjust) return false;
+  if (!read && !preview && !openings && !openingConfirm && !classify && !review && !finalize && !adjust) return false;
   if (!(method==="GET"&&read)&&!settlementSurfaceOpen(options.settlementRecordingEnabled, options.settlementAdmission,options.localFinancialSandbox)) throw notFound();
   const requestId = ensureApiV1RequestId(request);
   response.setHeader("X-Request-Id", requestId);
   if (method !== "GET" && !requireOrigin(request, response, options, requestId)) return true;
   const context = await readAdminContext(request, options);
   const actor = { realm: "admin" as const, userId: context.userId, sessionId: context.sessionId, settlementAdmission: options.settlementAdmission,settlementReadIdentity:settlementReadIdentity(options.pool),localFinancialSandbox:options.localFinancialSandbox };
-  const orderId = idOf((read ?? preview ?? openings ?? openingConfirm ?? classify ?? review ?? adjust)![1]!);
+  const orderId = idOf((read ?? preview ?? openings ?? openingConfirm ?? classify ?? review ?? finalize ?? adjust)![1]!);
   if (method === "POST" && preview) {
     const body = bodyOf(request);
     ensureOnlyFields(body, ["lines", "endReason", "proposedOwnerNet", "proposedRenterRefund", "reason"]);
@@ -193,29 +197,43 @@ export async function handleSettlementAdminRoute(request: Request, response: Sup
   if (method === "POST" && openingConfirm) {
     const openingId = idOf(openingConfirm[2]!);
     const body = bodyOf(request);
-    ensureOnlyFields(body, ["party", "versionNo"]);
+    ensureOnlyFields(body, ["party", "versionNo", "reason"]);
     if (body.party !== "RENTER" && body.party !== "OWNER") throw invalid("Party is invalid", "party");
     if (typeof body.versionNo !== "number" || !Number.isInteger(body.versionNo) || body.versionNo < 1) throw invalid("Version is invalid", "versionNo");
+    if (body.reason !== undefined && (typeof body.reason !== "string" || body.reason.trim().length < 3 || body.reason.length > 500)) throw invalid("Reason is invalid", "reason");
     const party = body.party;
+    const reason = typeof body.reason === "string" ? body.reason.trim() : undefined;
     await runIdempotentWrite(options, request, response, requestId,
       { principalId: actor.userId, operation: "order.opening.confirm_on_behalf", resourceId: `${openingId}:${party}` },
-      { realm: "admin", id: actor.userId, sessionId: actor.sessionId }, { party, versionNo: body.versionNo },
+      { realm: "admin", id: actor.userId, sessionId: actor.sessionId }, { party, versionNo: body.versionNo, ...(reason === undefined ? {} : { reason }) },
       async (client) => { await recheckSettlement(client, orderId, actor); },
-      (client) => confirmOpeningOnBehalf(client, orderId, openingId, body.versionNo as number, party, actor, requestId),
+      (client) => confirmOpeningOnBehalf(client, orderId, openingId, body.versionNo as number, party, actor, requestId, reason),
       (client, result) => projectSettlementResponse(client, actor, result, orderId));
     return true;
   }
   if (method === "POST" && classify) {
     const body = bodyOf(request);
     ensureOnlyFields(body, ["lines", "endReason", "acceptedHash"]);
-    if (body.endReason !== "TENANT_VOLUNTARY_EARLY" && body.endReason !== "OWNER_OR_ACCOUNT_EARLY") throw invalid("End reason is invalid", "endReason");
+    if (body.endReason !== "NORMAL" && body.endReason !== "TENANT_VOLUNTARY_EARLY" && body.endReason !== "OWNER_OR_ACCOUNT_EARLY") throw invalid("End reason is invalid", "endReason");
     const remaining = linesOf(body, "remainingQuantity");
     const acceptedHash = hashOf(body, "acceptedHash");
     await runIdempotentWrite(options, request, response, requestId, { principalId: actor.userId, operation: "order.settlement.classify", resourceId: orderId },
       { realm: "admin", id: actor.userId, sessionId: actor.sessionId }, { lines: remaining, endReason: body.endReason, acceptedHash },
       async (client) => { await recheckSettlement(client, orderId, actor); },
-      (client) => classifySettlement(client, orderId, actor, remaining, body.endReason as "TENANT_VOLUNTARY_EARLY" | "OWNER_OR_ACCOUNT_EARLY", acceptedHash, requestId),
+      (client) => classifySettlement(client, orderId, actor, remaining, body.endReason as "NORMAL" | "TENANT_VOLUNTARY_EARLY" | "OWNER_OR_ACCOUNT_EARLY", acceptedHash, requestId),
       (client, result) => projectSettlementResponse(client, actor, result, orderId));
+    return true;
+  }
+  if(method==="POST"&&finalize){
+    const versionId=idOf(finalize[2]!),body=bodyOf(request);ensureOnlyFields(body,["versionHash","reason"]);
+    const versionHash=hashOf(body,"versionHash");
+    if(typeof body.reason!=="string"||body.reason.trim().length<3||body.reason.length>500)throw invalid("A finalization reason is required","reason");
+    const reason=body.reason.trim();
+    await runIdempotentWrite(options,request,response,requestId,{principalId:actor.userId,operation:"order.settlement.support-finalize",resourceId:versionId},
+      {realm:"admin",id:actor.userId,sessionId:actor.sessionId},{versionHash,reason},
+      async(client,replay)=>{await recheckSettlement(client,orderId,actor,replay!==null);},
+      client=>finalizeSettlementBySupport(client,orderId,versionId,actor,versionHash,reason,requestId),
+      (client,result)=>projectSettlementResponse(client,actor,result,orderId),settlementPostCommit(options,orderId,actor,requestId));
     return true;
   }
   if (method === "POST" && review) {

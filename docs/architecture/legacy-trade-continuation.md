@@ -19,20 +19,34 @@
 | 路径（相对 `/api/v1/orders`；管理端相对 `/api/v1/admin/orders`） | 方法和用途 |
 | --- | --- |
 | `/legacy/:mappedOrderId/continuation` | GET 当前有效完整事实、权限、责任及服务端命令指纹 |
-| `/legacy/:mappedOrderId/continuation/preview` | POST 数量预估，仅当事人，无资金或状态写入 |
-| `/legacy/:mappedOrderId/continuation/propose` | POST 当事人提议 |
-| `/legacy/:mappedOrderId/continuation/confirm`、`reject` | POST 对方确认或驳回 |
+| `/legacy/:mappedOrderId/continuation/preview` | POST 数量预估；当事人或受权客服可用，无资金或状态写入 |
+| `/legacy/:mappedOrderId/continuation/propose` | POST 当事人提议；受权客服可选定原租客或号主发起口径并说明原因 |
+| `/legacy/:mappedOrderId/continuation/confirm`、`reject` | POST 对方确认或驳回；受权客服核对后亦可说明原因确认或退回 |
 | `/legacy/:mappedOrderId/continuation/hold`、`release`、`confiscate` | POST 仅受权管理身份的押金处置 |
 | `/legacy/:mappedOrderId/continuation/duties/:dutyId/mature`、`void` | POST 仅受权管理身份的佣金成熟或已核来源作废 |
+| `/legacy/:mappedOrderId/continuation/duties/:dutyId/owner-credit` | POST 受权客服核对后将旧在途单号主收益记入平台可用余额 |
+| `/legacy/:mappedOrderId/continuation/duties/:dutyId/commission-credit` | POST 受权人员核对后将已成熟的旧分销佣金记入收益人可用余额 |
 | `/legacy/:mappedOrderId/continuation/receipt?command=…&key=…` | GET 原请求回执；责任命令额外带 dutyId |
 
 Web BFF沿 `/api/orders/legacy/…`，管理 BFF沿 `/api/bff/admin/orders/legacy/…`。管理BFF必须精确放行上述管理命令，不扩大原生订单写范围。所有写命令保留 Idempotency-Key、原 actor/body 指纹；原成功回执仍复核当前身份、会话、冻结、权限、对象和游戏范围，仅跳过已完成的业务前置。400/409业务拒绝在回滚本次所有命令副作用后保留原键拒绝回执；数据库/通信异常不能伪装为已拒绝。
 
-普通命令体为 `expectedRevision`（首条可null）、`inputEvidenceId`、`planFingerprint`；propose另带完整八项 quantities。每次输入为当前 head.result，结果继承全部有效事实后合并本次delta。命令/证据/责任/CAS/审计同事务。解除暂扣不清 detain，不增加扣留部分退款；87−5仍为82。完成、财账终定和渠道到账独立，渠道未知保持 UNKNOWN。
+普通命令体为 `expectedRevision`（首条可null）、`inputEvidenceId`、`planFingerprint`；propose另带完整八项 quantities。客服预览和提议还须选择 `onBehalf`（`renter` 或 `owner`），写入时提供处理原因；客服确认或退回同样须提供原因。计算口径、客服真实身份、审计和方案版本分别留存，不伪造用户本人操作。客服写入仍须 `order.legacy.continue` 与订单游戏范围，且资金处置状态须可核对。每次输入为当前 head.result，结果继承全部有效事实后合并本次delta。命令/证据/责任/CAS/审计同事务。解除暂扣不清 detain，不增加扣留部分退款；87−5仍为82。完成、财账终定和渠道到账独立，渠道未知保持 UNKNOWN；旧单责任写入不代表已原路退款。
 
-责任经济键为 `(order_id,kind,source_record_id)`。在途佣金先PENDING、成熟为空；confirm按原逐条佣金证据重算终金额，时点为同一次服务端confirm时间+7天。已完成父单佣金走独立不可变admission，保留原行canonical/digest、稳定受益映射、终金额、cutoff、原时间单位和UTC微秒；COMPLETED_AT加旧7天，MATURES_AT直接使用，双证据须一致，不要求旧账号分母或新head。
+迁移一次性为客服预设角色补充 `order.legacy.continue`；后续角色调整、个人 DENY 和游戏范围仍按实际授权生效。授权只使客服能够办理旧单续办，不自动证明资金已入账或退款已到账。
+
+号主收益的客服入账同时要求 `order.legacy.continue`、`order.settlement.write` 和游戏范围，并记录实际经办人与原因。服务端复核确认版本、受益人和期初覆盖；不能排除旧收益已入账时拒绝处理。成功只表示号主平台余额增加，不表示已提现或银行卡到账；重试按原责任和账本引用核对。
+
+旧单由用户或受权客服确认时，系统在确认事务中核对旧来源及期初覆盖，符合条件则自动将号主收益记入平台余额；来源待核时保留待核对责任并留痕，由客服处理。客服确认须具备结算权限；用户自动路径只接受当前事务中真实确认人的有效会话，不允许事后冒用确认人发起入账。
+
+旧在途佣金在订单确认时绑定本次确认版本和成熟时间；迁入时已完结的旧单按原佣金与到期证据保留独立来源。分销到期任务启用时，系统按来源、受益人与期初覆盖核对后自动入账；未到期、依据不完整或历史重复情况无法核清时保持待处理。受权人员也可手动核对入账，另要求 `finance.document.read`；任务使用原责任幂等处理，系统执行身份单独留痕。
+
+旧站售方收入、应退和包赔费的存储字段精确到分。新发起的旧单方案若有不足一分的中间结果，按原字段分别四舍五入，再以入账数重算号主净额和价差并检查守恒；无法守恒时不提交。已接受的方案保留原值和指纹，预览只显示两位金额。
+
+责任经济键为 `(order_id,kind,source_record_id)`。在途佣金先PENDING、成熟为空；confirm按原逐条佣金证据重算终金额，时点为同一次服务端confirm时间+7天。新确认的旧单按正常/提前结算读取当前退款等待政策，在确认版本上固定修订和最早处理时间；后续改政策不追溯修改。升级前已确认但没有截止时间的旧版本保持未知，不能按零天处理。最早处理时间不表示渠道受理或到账。已完成父单佣金走独立不可变admission，保留原行canonical/digest、稳定受益映射、终金额、cutoff、原时间单位和UTC微秒；COMPLETED_AT加旧7天，MATURES_AT直接使用，双证据须一致，不要求旧账号分母或新head。
 
 历史完成未退与暂扣均保留经核净额的PENDING退款责任；暂扣由HELD阻断执行，解除后消费同一责任，保留detain且不追加退款。旧侧已没收保留LEGACY_RECORDS终态及空新财账ref，不再次支付；既有退款记录仅作防重复依据，不等于到账。完整来源缺失逐行隔离，不能以0代替未知；具体批次行数不是业务全量。
+
+对于迁入时仍在履约的订单，旧支付的历史退款金额无法从迁移数据确认时，客服核对原汇聚支付单并留下依据，再由新平台按原付款发起退款。核对需区分原付款此前全部已退金额，以及其中已冲抵本次结算责任的金额；新发退款不得超过本次责任剩余或原支付剩余可退额度。退款等待期、处理中的旧退款、原商户/原支付单和重复请求必须单独核对；人工核对不等于系统取得了渠道回执。该执行链仍待接入及验证。
 
 共同占用读取新订单、旧订单有效阶段与隔离登记。OCCUPIED优先，其次UNKNOWN，再FREE；缺schema/查询异常不可回退FREE。本人账号列表仅在唯一在途单与当前号主均已绑定时显示旧原单号和跳转；占用事实可成立而无可见订单。供给/新建单与维护导入遵循用户→game→account前缀；续办与财务使用同一稳定mapped order advisory→head→按id排序duty。纯续办仅保持占用或释放，不复开终态；财务先锁全部资金受益人并在共同锁后复核集合，不能持head后补锁user/account。
 

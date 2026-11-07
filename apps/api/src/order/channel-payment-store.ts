@@ -12,6 +12,7 @@ import {
   type JoinpayTransportFailure,
 } from "./joinpay-protocol";
 import { confirmOrderPayment, type PaymentResult } from "./payment-confirmation";
+import { lockRefundOrderNo } from "./payment-original-lock";
 import { describeCollectionProfile, type BoundCollectionProfile } from "./joinpay-collection-profile";
 import { readVerifiedJoinpayFactScope, type FormalJoinpayPaymentFact } from "./joinpay-collection-source";
 import { createControlledRegressionResource, assertControlledRegressionResource, type ControlledRegressionBinding, type ControlledRegressionResource } from "../finance/controlled-regression-resource";
@@ -112,6 +113,29 @@ function requestFailure(paymentReason: PaymentRequestFailureReason, message: str
   return Object.assign(new SecurityApiError(disabled ? 503 : 409, disabled ? API_V1_ERROR_CODES.EVIDENCE_UNAVAILABLE : API_V1_ERROR_CODES.CONFLICT, message), { paymentReason });
 }
 const closed = () => requestFailure("PAYMENT_CHANNEL_NOT_ENABLED", "Channel payment capability is closed");
+
+/** The immutable imported originals must be loaded before collection is enabled. */
+export async function assertLegacyPaymentNumberAvailable(client:PoolClient,merchantIdentityId:string,channelOrderNo:string,syntheticOnly=false) {
+  const guard = (await client.query<{ready:boolean}>(`SELECT EXISTS(SELECT 1 FROM pg_index
+      WHERE indexrelid=to_regclass('zzsh_order.legacy_continuation_paid_order_no_idx')
+        AND indrelid=to_regclass('zzsh_order.legacy_continuation_evidence') AND indisvalid AND indisready)
+    AND EXISTS(SELECT 1 FROM pg_index WHERE indexrelid=to_regclass('zzsh_order.legacy_payment_observation_number_idx')
+      AND indrelid=to_regclass('zzsh_order.personal_finance_observation') AND indisvalid AND indisready)
+    AND EXISTS(SELECT 1 FROM pg_index WHERE indexrelid=to_regclass('zzsh_order.legacy_refund_observation_number_idx')
+      AND indrelid=to_regclass('zzsh_order.personal_finance_observation') AND indisvalid AND indisready)
+    AND EXISTS(SELECT 1 FROM pg_trigger WHERE tgrelid=to_regclass('zzsh_order.payment_request')
+      AND tgname='legacy_payment_order_number_guard' AND tgenabled IN ('O','A') AND NOT tgisinternal
+      AND tgfoid=to_regprocedure('zzsh_order.guard_legacy_payment_order_number()')) AS ready`)).rows[0];
+  if (guard?.ready !== true) { if (syntheticOnly) return; throw closed(); }
+  await lockRefundOrderNo(client, merchantIdentityId, channelOrderNo);
+  const legacy = (await client.query<{found:boolean}>(`SELECT EXISTS(SELECT 1 FROM zzsh_order.legacy_continuation_evidence e
+    WHERE e.source_kind='SOURCE_IMPORT' AND e.facts #> '{evidence,source,paidPay}' @> jsonb_build_array(jsonb_build_object('payOrderSn',$1::text)))
+    OR EXISTS(SELECT 1 FROM zzsh_order.personal_finance_observation o WHERE o.source_type='LEGACY_MYSQL' AND o.source_kind='HISTORICAL_PAYMENT'
+      AND o.source_system='legacy_mysql_restore' AND o.source_entity='la_pay_order' AND o.snapshot->>'sourceNumber'=$1)
+    OR EXISTS(SELECT 1 FROM zzsh_order.personal_finance_observation o WHERE o.source_type='LEGACY_MYSQL' AND o.source_kind='HISTORICAL_REFUND'
+      AND o.source_system='legacy_mysql_restore' AND o.source_entity='la_refund_record' AND o.snapshot->>'sourceNumber'=$1) AS found`, [channelOrderNo])).rows[0];
+  if (legacy?.found !== false) throw requestFailure("ORDER_NOT_PAYABLE", "当前订单暂不能付款，请联系客服处理。");
+}
 
 export async function assertSyntheticChannelRequestCapability(client: PoolClient, capability: unknown): Promise<SyntheticRequestCapability["evidenceLevel"]> {
   const scope = capability && typeof capability === "object" ? requestCapabilities.get(capability) : undefined;
@@ -237,6 +261,9 @@ async function createRequest(client: PoolClient, input: {
       throw error;
     }
     await xactLock(client, ["zzsh:payment-channel-order-no:v1", binding.channel, binding.merchantIdentityId, channelOrderNo]);
+    if (binding.channel === "JOINPAY") {
+      await assertLegacyPaymentNumberAvailable(client,binding.merchantIdentityId,channelOrderNo,evidenceLevel === "SYNTHETIC_PROTOCOL");
+    }
     const taken = (await client.query(`SELECT 1 FROM zzsh_order.payment_request WHERE channel=$1 AND merchant_identity_id=$2 AND channel_order_no=$3`,
       [binding.channel, binding.merchantIdentityId, channelOrderNo])).rowCount;
     if (taken) throw conflict("Channel order number collision");

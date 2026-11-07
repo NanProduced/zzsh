@@ -159,7 +159,7 @@ export type AuthRuntimeOptions = AuthRuntimeConfig & {
   /** Server-only composition. Read scope remains available when new reservations are disabled. */
   withdrawalBankBinding?: WithdrawalBankBindingOptions;
   joinpayWithdrawal?: { routes: NativeWithdrawalOptions; execution?: Omit<PayoutExecution,'pool'>; notifications?: boolean; recovery?: JoinpayFundsRecoverySettings };
-  joinpayRefund?: Omit<RefundExecution,'pool'> & { recovery?: JoinpayFundsRecoverySettings };
+  joinpayRefund?: Omit<RefundExecution,'pool'> & { recovery?: JoinpayFundsRecoverySettings; legacyRefundsEnabled?:boolean; legacyInitialProfile?:import('../order/joinpay-refund-profile').BoundRefundProfile };
   joinpayAccountRead?: JoinpayAccountReadAccess;
   joinpayAccountObservation?: Omit<JoinpayAccountObservationOptions, "pool">;
   confirmationKey?: ConfirmationKey;
@@ -951,6 +951,8 @@ export async function mountAuthHandlers(
     }
     app.get(JoinpayFundsRecoveryLifecycle).start({
       ...(refundRecovery !== undefined ? { refund: { ...refundRecovery, execution: { ...refund!, pool: options.pool } } } : {}),
+      ...(refundRecovery !== undefined && typeof refund?.legacyRefundsEnabled === 'boolean'
+        ? {legacyRefund:{...refundRecovery,execution:{...refund,pool:options.pool,legacyRefundsEnabled:refund.legacyRefundsEnabled}}} : {}),
       ...(payoutRecovery !== undefined ? { payout: { ...payoutRecovery, execution: { ...payout!.execution!, pool: options.pool } } } : {}),
     });
   }
@@ -1371,6 +1373,7 @@ export async function mountAuthHandlers(
     distributionEarnings: options.distributionEarnings,
     orderHoldSeconds,
     legacyDutyFinalizationReader: readLegacyDutyFinalization,
+    ...(options.joinpayRefund ? {legacyRefund:options.joinpayRefund} : {}),
     supplyGateReader,
     legacyPublicAdmission,
     legacyPublicAdmissionDetail,
@@ -1393,6 +1396,7 @@ export async function mountAuthHandlers(
   { const queryCollection = collection?.routes?.execution?.formal && collection.notifications?.admission === collection.routes.execution.formal.admission ? collection.routes.execution : undefined;
     mountAdminJoinpayQuery(app, securityOptions, { ...(options.joinpayRefund ? { refund: options.joinpayRefund } : {}), ...(queryCollection ? { collection: queryCollection } : {}), ...(options.joinpayWithdrawal?.execution ? { payout: options.joinpayWithdrawal.execution } : {}),
       workerStatus: () => { const funds = app.get(JoinpayFundsRecoveryLifecycle).status(); return { ...(options.joinpayRefund ? { refund: funds.refund } : {}),
+        ...(options.joinpayRefund?.recovery && typeof options.joinpayRefund.legacyRefundsEnabled==='boolean' ? {legacyRefund:funds.legacyRefund} : {}),
         ...(options.joinpayWithdrawal?.execution ? { payout: funds.payout } : {}), ...(queryCollection ? { collection: app.get(JoinpayCollectionRecoveryLifecycle).status() } : {}) }; } }); }
   mountAdminBffHandlers(app, {
     apiOrigin: options.apiOrigin,

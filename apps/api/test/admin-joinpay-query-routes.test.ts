@@ -4,6 +4,8 @@ import { test } from "node:test";
 import * as authSecurity from "../src/auth/auth-security";
 import * as command from "../src/order/native-refund-command";
 import * as refundAttempt from "../src/order/joinpay-refund-attempt";
+import * as legacyRefund from '../src/order/legacy-refund-attempt';
+import * as legacyReview from '../src/order/legacy-refund-review-store';
 import * as collectionAttempt from "../src/order/joinpay-collection-attempt";
 import * as payoutAttempt from "../src/finance/joinpay-payout-attempt";
 import * as payoutProfile from "../src/finance/joinpay-payout-profile";
@@ -55,6 +57,81 @@ test("退款补查在claim内按订单授权；SKIPPED原因透出，渠道到�
   assert.equal(f.s.result.contractVersion, "admin-joinpay-query.v1");
   assert.deepEqual(f.s.result.outcome, { kind: "SKIPPED", reason: "THROTTLED", state: "SUBMITTED" });
   assert.equal(f.s.result.channelArrival, "UNKNOWN");
+});
+test('旧单补查只查询已派发原号，按订单授权并记录实际客服',async t=>{
+  const f=fixture(t),audits:any[]=[];let sent=0,allowed=true;
+  t.mock.method(legacyReview,'authorizeLegacyRefundReviewAccess',async(...[_c,actor,orderId]:Parameters<typeof legacyReview.authorizeLegacyRefundReviewAccess>)=>{assert.equal(actor.userId,'admin_1');assert.equal(orderId,'legacy_order_1');if(!allowed)throw new SecurityApiError(403,'FORBIDDEN','no');return {} as never;});
+  t.mock.method(securityCore,'recordAudit',async(...[_client,value]:Parameters<typeof securityCore.recordAudit>)=>{audits.push(value);});
+  t.mock.method(legacyRefund,'executeLegacyRefund',async(...[_o,id,_owner,opts]:Parameters<typeof legacyRefund.executeLegacyRefund>)=>{
+    assert.equal(opts?.queryOnly,true);assert.equal(opts?.minimumIntervalSeconds,30);
+    await opts!.authorize!({query:async()=>({rows:[{order_id:'legacy_order_1'}]})} as never,id);sent++;
+    return {kind:'OBSERVED',intentId:id,observationId:'o1',event:'PROCESSING',terminal:null,ack:'fail'} as never;
+  });
+  await f.invoke('/legacy-refunds/legacy_intent_1/query-only',{}, {refund:{legacyRefundsEnabled:false}});
+  assert.equal(f.s.status,200);assert.equal(f.s.result.operation,'LEGACY_REFUND_QUERY');assert.equal(f.s.result.channelArrival,'UNKNOWN');assert.equal(sent,1);
+  assert.equal(audits[0].actorId,'admin_1');assert.equal(audits[0].objectType,'legacy_refund_intent');
+  allowed=false;await f.invoke('/legacy-refunds/legacy_intent_1/query-only',{}, {refund:{legacyRefundsEnabled:false}});assert.equal(f.s.status,403);assert.equal(sent,1);
+  await f.invoke('/legacy-refunds/legacy_intent_1/query-only',{}, {refund:{}});assert.equal(f.s.status,503);assert.equal(sent,1);
+});
+test('客服可处理原退款任务，未启用首派时不发送且不能扩展到其他资金域',async t=>{
+  const f=fixture(t),audits:any[]=[];let invoked=0;
+  t.mock.method(legacyReview,'authorizeLegacyRefundReviewAccess',async()=>({} as never));
+  t.mock.method(securityCore,'recordAudit',async(...[_client,value]:Parameters<typeof securityCore.recordAudit>)=>{audits.push(value);});
+  t.mock.method(legacyRefund,'executeLegacyRefund',async(...[_o,id,_owner,opts]:Parameters<typeof legacyRefund.executeLegacyRefund>)=>{
+    invoked++;assert.equal(opts?.queryOnly,false);await opts!.authorize!({query:async()=>({rows:[{order_id:'legacy_order_1'}]})} as never,id);
+    return {kind:'SKIPPED',intentId:id,state:'READY',reason:'NEW_REFUND_DISABLED'} as never;
+  });
+  await f.invoke('/legacy-refunds/legacy_intent_1/submit',{}, {refund:{legacyRefundsEnabled:false}});
+  assert.equal(f.s.status,200);assert.equal(f.s.result.operation,'LEGACY_REFUND_SUBMIT');assert.equal(f.s.result.outcome.reason,'NEW_REFUND_DISABLED');
+  assert.equal(audits[0].action,'joinpay.admin.refund.submit.authorized');assert.equal(audits[0].details.firstDispatchRequested,true);assert.equal(invoked,1);
+  assert.equal(await f.invoke('/refunds/refund_1/submit'),false);
+});
+test('已复核的旧退款仅恢复原号查询，不发起退款',async t=>{
+  const f=fixture(t),audits:any[]=[];let invoked=0;
+  t.mock.method(legacyReview,'authorizeLegacyRefundReviewAccess',async()=>({} as never));
+  t.mock.method(securityCore,'recordAudit',async(...[_client,value]:Parameters<typeof securityCore.recordAudit>)=>{audits.push(value);});
+  t.mock.method(legacyRefund,'resumeLegacyRefundReview',async(...[_o,id,actor,_rid,reason,authorize]:Parameters<typeof legacyRefund.resumeLegacyRefundReview>)=>{
+    invoked++;assert.equal(actor.userId,'admin_1');assert.equal(reason,'已核对汇聚记录');await authorize({query:async()=>({rows:[{order_id:'legacy_order_1'}]})} as never,id);
+    return {intentId:id,resumed:true,state:'UNKNOWN',resolutionId:'review_1'};
+  });
+  await f.invoke('/legacy-refunds/legacy_intent_1/resume',{body:{reason:'已核对汇聚记录'}},{refund:{legacyRefundsEnabled:false}});
+  assert.equal(f.s.status,200);assert.equal(f.s.result.operation,'LEGACY_REFUND_RESUME');assert.equal(f.s.result.outcome.kind,'RESUMED');
+  assert.equal(audits[0].details.firstDispatchAllowed,false);assert.equal(invoked,1);
+  await f.invoke('/legacy-refunds/legacy_intent_1/resume',{body:{reason:'已核对汇聚记录',force:true}},{refund:{legacyRefundsEnabled:false}});assert.equal(f.s.status,400);assert.equal(invoked,1);
+  assert.equal(await f.invoke('/refunds/refund_1/resume'),false);
+});
+test('仅核清历史退款后可创建旧退款的下一次尝试，拒绝越权与额外字段',async t=>{
+  const f=fixture(t),audits:any[]=[];let invoked=0,allowed=true;
+  t.mock.method(legacyReview,'authorizeLegacyRefundReviewAccess',async()=>{if(!allowed)throw new SecurityApiError(403,'FORBIDDEN','no');return {} as never;});
+  t.mock.method(securityCore,'recordAudit',async(...[_client,value]:Parameters<typeof securityCore.recordAudit>)=>{audits.push(value);});
+  t.mock.method(legacyRefund,'retryLegacyRefund',async(...[_o,id,actor,_rid,input,authorize]:Parameters<typeof legacyRefund.retryLegacyRefund>)=>{
+    assert.equal(actor.userId,'admin_1');assert.equal(input.previouslyRefundedCents,'2000');assert.equal(input.noUnresolvedRefunds,true);
+    await authorize({query:async()=>({rows:[{order_id:'legacy_order_1'}]})} as never,id);invoked++;
+    return {intentId:'retry_1',refundOrderNo:'LR'+'a'.repeat(28),state:'READY',created:true};
+  });
+  const body={reason:'已核对原付款及失败记录',previouslyRefundedCents:'2000',noUnresolvedRefunds:true},opts={refund:{legacyRefundsEnabled:true}};
+  await f.invoke('/legacy-refunds/legacy_intent_1/retry',{body},opts);assert.equal(f.s.status,200);assert.equal(f.s.result.outcome.kind,'RETRY_CREATED');
+  assert.equal(audits[0].action,'joinpay.admin.refund.retry.authorized');assert.equal(invoked,1);
+  allowed=false;await f.invoke('/legacy-refunds/legacy_intent_1/retry',{body},opts);assert.equal(f.s.status,403);assert.equal(invoked,1);
+  await f.invoke('/legacy-refunds/legacy_intent_1/retry',{body:{...body,amount:'999'}},opts);assert.equal(f.s.status,400);assert.equal(invoked,1);
+  assert.equal(await f.invoke('/refunds/refund_1/retry'),false);
+});
+test('旧退款终态冲突仅允许授权客服按原退款号查询核对',async t=>{
+  const f=fixture(t),audits:any[]=[];let allowed=true,invoked=0;
+  t.mock.method(legacyReview,'authorizeLegacyRefundReviewAccess',async()=>{if(!allowed)throw new SecurityApiError(403,'FORBIDDEN','no');return {} as never;});
+  t.mock.method(securityCore,'recordAudit',async(...[_client,value]:Parameters<typeof securityCore.recordAudit>)=>{audits.push(value);});
+  t.mock.method(legacyRefund,'resolveLegacyRefundTerminal',async(...[_o,id,actor,_rid,reason,_owner,authorize]:Parameters<typeof legacyRefund.resolveLegacyRefundTerminal>)=>{
+    assert.equal(actor.userId,'admin_1');assert.equal(reason,'已核对原退款');
+    await authorize({query:async()=>({rows:[{order_id:'legacy_order_1'}]})} as never,id);invoked++;
+    return {kind:'OBSERVED',intentId:id,observationId:'observation_1',event:'REVIEW_RESOLVED',terminal:null,ack:'fail'} as never;
+  });
+  const opts={refund:{legacyRefundsEnabled:false}};
+  await f.invoke('/legacy-refunds/legacy_intent_1/resolve',{body:{reason:'已核对原退款'}},opts);
+  assert.equal(f.s.status,200);assert.equal(f.s.result.operation,'LEGACY_REFUND_RESOLVE');assert.equal(f.s.result.localFundsEffect,'NONE');
+  assert.equal(f.s.result.outcome.event,'REVIEW_RESOLVED');assert.equal(audits[0].details.firstDispatchAllowed,false);assert.equal(invoked,1);
+  allowed=false;await f.invoke('/legacy-refunds/legacy_intent_1/resolve',{body:{reason:'已核对原退款'}},opts);assert.equal(f.s.status,403);assert.equal(invoked,1);
+  await f.invoke('/legacy-refunds/legacy_intent_1/resolve',{body:{reason:'已核对原退款',force:true}},opts);assert.equal(f.s.status,400);assert.equal(invoked,1);
+  assert.equal(await f.invoke('/refunds/refund_1/resolve'),false);
 });
 
 test("授权失败不进入渠道；提交后未知返回202 UNKNOWN", async t => {

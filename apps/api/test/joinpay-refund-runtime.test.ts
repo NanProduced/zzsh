@@ -87,6 +87,17 @@ test("新分配必须明确初始profile与恢复配置，返回同一准入内�
   const closed = loadJoinpayRefundRuntime(context, env(d))!; assert.equal(closed.initialProfile, undefined); assert.equal(readFormalRefundAdmission(closed.admission).sha256, before);
 });
 
+test("旧单首派独立开关，不会开启新单分配，关闭后仍保留通知恢复能力", () => {
+  const d=document();d.legacyRefundsEnabled=true;
+  rejected(()=>loadJoinpayRefundRuntime(context,env(d)),"JOINPAY_REFUND_CONFIG_UNAVAILABLE");
+  d.recovery={workerId:"unit_worker",batchLimit:2,minimumIntervalSeconds:60};
+  const a=loadJoinpayRefundRuntime(context,env(d))!;
+  assert.equal(a.initialProfile,undefined);assert(a.legacyInitialProfile);assert.equal(a.legacyRefundsEnabled,true);
+  d.legacyRefundsEnabled=false;const closed=loadJoinpayRefundRuntime(context,env(d))!;
+  assert.equal(closed.legacyInitialProfile,undefined);assert.equal(closed.legacyRefundsEnabled,false);
+  assert.equal(closed.profileFor("NOTIFY",original()).kind,"BOUND_JOINPAY_REFUND_PROFILE");
+});
+
 test("QUERY/NOTIFY型恢复无需SUBMIT selector，历史准入仍显式接受，不能首次SUBMIT", () => {
   const full = loadJoinpayRefundRuntime(context, env())!, prior = readFormalRefundAdmission(full.admission), d = document();
   d.profiles = d.profiles.filter(p => p.operation !== "SUBMIT"); delete d.submitProfileId;

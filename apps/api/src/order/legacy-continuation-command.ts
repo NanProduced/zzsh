@@ -5,11 +5,11 @@ import { conflict, ensureOnlyFields, invalid, newSupplyId, notFound, sha256Hex }
 import { canonicalize } from "../supply/content-hash";
 import { planLegacyContinuation, type LegacyCommand, type LegacyQuantities } from "./legacy-continuation-calc";
 import { authorizeLegacyContinuation, LEGACY_DUTY_FIELDS, legacyBeneficiaryUserId, lockLegacyContinuationOrder, readLegacyContinuationBinding, readLegacyContinuationEvidence,readLegacyContinuationUserIds } from "./legacy-continuation-evidence";
-import { deriveLegacyFacts, legacyContinuationRole, legacyDecimalEquals, legacyEconomicDutyId, legacyPlanYuanToCents, readSealedLegacyFacts, sealLegacyFacts,
+import { deriveLegacyFacts, legacyContinuationRole, legacyDecimalEquals, legacyEconomicDutyId, legacyPlanYuanToCents, readSealedLegacyFacts, sealLegacyFacts, visibleLegacyReason,
   type LegacyContinuationActor, type LegacyDutyFinalizationReader, type LegacyDutyKind, type LegacyDutyRow, type LegacyHeadRow, type LegacyOrderBinding } from "./legacy-continuation-model";
 
 export type LegacyMutationKind = "propose" | "confirm" | "reject" | "hold" | "release" | "confiscate";
-export type LegacyMutationInput = { kind: LegacyMutationKind; expectedRevision: string | null; inputEvidenceId: string; planFingerprint: string; quantities?: LegacyQuantities };
+export type LegacyMutationInput = { kind: LegacyMutationKind; expectedRevision: string | null; inputEvidenceId: string; planFingerprint: string; quantities?: LegacyQuantities; reason?: string; onBehalf?: "renter" | "owner" };
 const QUANTITIES = ["expendHaff", "barrett", "bullet", "awm", "armor", "helmet", "coffee", "card"] as const;
 export function parseLegacyQuantities(value: unknown): LegacyQuantities {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw invalid("QUANTITY_INVALID");
@@ -23,13 +23,18 @@ export function parseLegacyQuantities(value: unknown): LegacyQuantities {
   return result as LegacyQuantities;
 }
 export function parseLegacyMutation(kind: LegacyMutationKind, body: Record<string, unknown>): LegacyMutationInput {
-  ensureOnlyFields(body, ["expectedRevision", "inputEvidenceId", "planFingerprint", ...(kind === "propose" ? ["quantities"] : [])]);
+  ensureOnlyFields(body, ["expectedRevision", "inputEvidenceId", "planFingerprint", ...(kind === "propose" ? ["quantities", "onBehalf", "reason"] : []), ...(["confirm", "reject"].includes(kind) ? ["reason"] : [])]);
   if (body.expectedRevision !== null && (typeof body.expectedRevision !== "string" || !/^[1-9]\d{0,17}$/.test(body.expectedRevision))) throw invalid("Invalid continuation revision");
   if (typeof body.inputEvidenceId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(body.inputEvidenceId)) throw invalid("Invalid evidence identifier");
   if (typeof body.planFingerprint !== "string" || !/^[a-f0-9]{64}$/.test(body.planFingerprint)) throw invalid("Invalid plan fingerprint");
-  return { kind, expectedRevision: body.expectedRevision as string | null, inputEvidenceId: body.inputEvidenceId, planFingerprint: body.planFingerprint, ...(kind === "propose" ? { quantities: parseLegacyQuantities(body.quantities) } : {}) };
+  if (body.reason !== undefined && (typeof body.reason !== "string" || [...body.reason.trim()].length < 3 || body.reason.length > 500)) throw invalid("Invalid support reason", "reason");
+  if (body.onBehalf !== undefined && body.onBehalf !== "renter" && body.onBehalf !== "owner") throw invalid("STAFF_ROLE_INVALID");
+  return { kind, expectedRevision: body.expectedRevision as string | null, inputEvidenceId: body.inputEvidenceId, planFingerprint: body.planFingerprint,
+    ...(kind === "propose" ? { quantities: parseLegacyQuantities(body.quantities) } : {}), ...(typeof body.reason === "string" ? { reason: body.reason.trim() } : {}), ...(body.onBehalf === "renter" || body.onBehalf === "owner" ? { onBehalf: body.onBehalf } : {}) };
 }
 export type LegacyMutationAuthority={binding:LegacyOrderBinding;userIds:readonly string[];actor:LegacyContinuationActor};
+export type LegacyOwnerCreditOnConfirm=(client:PoolClient,actor:LegacyContinuationActor,orderId:string,
+  input:{dutyId:string;expectedRevision:string},authority:LegacyMutationAuthority)=>Promise<unknown>;
 export async function authorizeLegacyMutation(client: PoolClient, actor: LegacyContinuationActor, orderId: string, replay=false):Promise<LegacyMutationAuthority> {
   const binding = await readLegacyContinuationBinding(client, orderId);
   if(actor.realm==="user" && actor.userId!==binding.ownerUserId && actor.userId!==binding.renterUserId)throw notFound();
@@ -50,7 +55,8 @@ export async function legacyCommandOutcome(client: PoolClient, actor: LegacyCont
     await client.query("ROLLBACK TO SAVEPOINT legacy_continuation_action"); await client.query("RELEASE SAVEPOINT legacy_continuation_action");
     if (!(error instanceof SecurityApiError) || ![400, 409].includes(error.status)) throw error;
     await recordAudit(client, { actorType: actor.realm, actorId: actor.userId, sessionId: actor.sessionId, requestId: actor.requestId, action: "order.legacy.command_refused", objectType: "rental_order", objectId: orderId, outcome: "FAILURE", details: { reason: error.message, status: error.status } });
-    return { status: error.status, body: { error: { code: error.code, message: error.message, requestId: actor.requestId }, outcome: "REJECTED" } };
+    const reason = visibleLegacyReason(error.message);
+    return { status: error.status, body: { error: { code: error.code, message: error.message, requestId: actor.requestId, ...(reason ? { reason } : {}) }, outcome: "REJECTED" } };
   }
 }
 async function createDuty(client: PoolClient, binding: LegacyOrderBinding, versionId: string, kind: LegacyDutyKind, sourceId: string, beneficiary: string | null, amountYuan: string, extra?: { level: string; ratio: string; maturityAt: string }) {
@@ -63,8 +69,8 @@ async function createDuty(client: PoolClient, binding: LegacyOrderBinding, versi
 async function reviseCommission(client: PoolClient, actor: LegacyContinuationActor, existing: LegacyDutyRow, versionId: string, amountYuan: string, maturityAt: string) {
   if (existing.status !== "PENDING" || existing.settledBy !== null || existing.settledRefId !== null) throw conflict("DUTY_REVISION_CONFLICT");
   const amountCents = legacyPlanYuanToCents(amountYuan);
-  const updated = await client.query(`UPDATE zzsh_order.legacy_order_duty SET amount_cents=$3,maturity_at=$4,revision=revision+1,revised_at=clock_timestamp(),revised_by=$5::jsonb,revision_reason='CONFIRM_FINAL_AMOUNT'
-    WHERE id=$1 AND revision=$2 AND status='PENDING' AND settled_by IS NULL RETURNING revision::text`, [existing.id, existing.revision, amountCents, maturityAt, JSON.stringify(actor)]);
+  const updated = await client.query(`UPDATE zzsh_order.legacy_order_duty SET amount_cents=$3,maturity_at=$4,revision=revision+1,revised_at=clock_timestamp(),revised_by=$5::jsonb,revision_reason='CONFIRM_FINAL_AMOUNT',continuation_version_id=$6
+    WHERE id=$1 AND revision=$2 AND status='PENDING' AND settled_by IS NULL AND continuation_version_id IS NULL RETURNING revision::text`, [existing.id, existing.revision, amountCents, maturityAt, JSON.stringify(actor),versionId]);
   if (updated.rowCount !== 1) throw conflict("DUTY_REVISION_CONFLICT");
   await client.query(`INSERT INTO zzsh_order.legacy_order_duty_revision(id,duty_id,revision,before_values,after_values,actor,source_command_version_id,reason)
     VALUES($1,$2,$3,$4::jsonb,$5::jsonb,$6::jsonb,$7,'CONFIRM_FINAL_AMOUNT')`,
@@ -109,15 +115,20 @@ async function readReviewedCommissionVoid(client: PoolClient, binding: LegacyOrd
   return { dutyId: duty.id, sourceRecordId: source.id, revision: duty.revision, sourceFactAuditId: fact.id };
 }
 /** Caller owns transaction and wraps this action with the existing withIdempotency/runIdempotentWrite. */
-export async function applyLegacyContinuationCommand(client: PoolClient, actor: LegacyContinuationActor, orderId: string, input: LegacyMutationInput, finance?: LegacyDutyFinalizationReader,authority?:LegacyMutationAuthority) {
-  const a=authority??await authorizeLegacyMutation(client,actor,orderId),binding=a.binding,locked=await lockLegacyContinuationOrder(client,orderId);
+export async function applyLegacyContinuationCommand(client: PoolClient, actor: LegacyContinuationActor, orderId: string, input: LegacyMutationInput, finance?: LegacyDutyFinalizationReader,authority?:LegacyMutationAuthority,ownerCredit?:LegacyOwnerCreditOnConfirm) {
+  const a=authority??await authorizeLegacyMutation(client,actor,orderId),binding=a.binding;
+  if(input.kind==="confirm" && ownerCredit
+    && !(await client.query(`SELECT id FROM zzsh_supply.rental_account WHERE id=$1 FOR SHARE`,[binding.accountId])).rowCount)throw conflict("OWNER_CREDIT_ACCOUNT_UNAVAILABLE");
+  const locked=await lockLegacyContinuationOrder(client,orderId);
   await assertUserPrefix(client,actor,orderId,a);
   if ((locked.head?.revision ?? null) !== input.expectedRevision) throw conflict("CONTINUATION_REVISION_CONFLICT");
   const row = await readLegacyContinuationEvidence(client, orderId, locked.head);
   if (!row) throw conflict("NOT_IMPORTED");
   if (row.id !== input.inputEvidenceId) throw conflict("EVIDENCE_RELATION");
   const facts = readSealedLegacyFacts(row), role = legacyContinuationRole(binding, actor);
-  if (["hold", "release", "confiscate"].includes(input.kind)) {
+  if (["confirm", "reject"].includes(input.kind) && (role === "admin" ? !input.reason : input.reason !== undefined)) throw invalid("Support decision requires a recorded reason");
+  if (input.kind === "propose" && (role === "admin" ? !input.reason || !input.onBehalf : input.reason !== undefined || input.onBehalf !== undefined)) throw invalid("Support proposal requires a role and recorded reason");
+  if (["hold", "release", "confiscate"].includes(input.kind) || ["confirm", "reject", "propose"].includes(input.kind) && role === "admin") {
     if (role !== "admin") throw conflict("DEPOSIT_ACTOR_INVALID");
     if (!finance) throw conflict("FINANCE_FACT_UNAVAILABLE");
     const disposition = await finance(client, orderId, locked.duties);
@@ -125,7 +136,7 @@ export async function applyLegacyContinuationCommand(client: PoolClient, actor: 
     if (disposition === "POSTED_POSITIVE_REFUND") throw conflict("DEPOSIT_ALREADY_SETTLED");
     if (!["NONE", "FINALIZED_ZERO"].includes(disposition)) throw conflict("FINANCE_FACT_UNKNOWN");
   }
-  const caller = { role, legacyUserId: role === "owner" ? binding.legacyOwnerId : role === "renter" ? binding.legacyRenterId : "" };
+  const caller = { role, legacyUserId: role === "owner" ? binding.legacyOwnerId : role === "renter" ? binding.legacyRenterId : "", ...(input.onBehalf ? { onBehalf: input.onBehalf } : {}) };
   const command: LegacyCommand = input.kind === "propose" ? { kind: "propose", caller, quantities: input.quantities! } : { kind: input.kind, caller };
   const plan = planLegacyContinuation(facts.evidence, command);
   if (!plan.ok) throw conflict(plan.code);
@@ -155,14 +166,14 @@ export async function applyLegacyContinuationCommand(client: PoolClient, actor: 
   await client.query(`INSERT INTO zzsh_order.legacy_continuation_evidence(id,order_id,evidence_version,source_kind,derived_from_command_version_id,source_as_of,evidence_ref,source_digest,parameter_digest,admission,reasons,facts,facts_canonical,facts_digest)
     VALUES($1,$2,$3,'DERIVED',$4,clock_timestamp(),$5,$6,$7,$8,$9::jsonb,$10::jsonb,$11,$12)`,
     [resultId, orderId, (BigInt(row.evidenceVersion) + 1n).toString(), versionId, "continuation:" + versionId, binding.sourceDigest, resultFacts.evidence.parameterDigest, resultFacts.evidence.admission, JSON.stringify(resultFacts.evidence.reasons), JSON.stringify(resultFacts), sealed.canonical, sealed.digest]);
-  const dutyIds: string[] = [], isolated: Array<{ sourceRecordId: string; reason: string }> = [];
+  const dutyIds: string[] = [], isolated: Array<{ sourceRecordId: string; reason: string }> = []; let ownerDutyId:string|undefined;
   if (input.kind === "confirm") {
     await recordLegacyConfirmGrowth(client, { binding, subjectUserId: binding.renterUserId, recordedAt: clock.at, origin: {
       kind: "CONTINUATION_CONFIRM", command: { id: versionId, revision, createdAt: clock.at, inputEvidenceId: row.id, resultEvidenceId: resultId, planFingerprint: plan.fingerprint, actor }, input: row,
       result: { id: resultId, orderId, evidenceVersion: (BigInt(row.evidenceVersion) + 1n).toString(), sourceKind: "DERIVED", sourceDigest: binding.sourceDigest, factsDigest: sealed.digest, factsCanonical: sealed.canonical, facts: resultFacts },
     } });
     dutyIds.push(await createDuty(client, binding, versionId, "RENTER_REFUND", versionId, binding.renterUserId, plan.amounts.refundNet!));
-    dutyIds.push(await createDuty(client, binding, versionId, "OWNER_CREDIT", versionId, binding.ownerUserId, plan.amounts.ownerNet!));
+    ownerDutyId=await createDuty(client, binding, versionId, "OWNER_CREDIT", versionId, binding.ownerUserId, plan.amounts.ownerNet!);dutyIds.push(ownerDutyId);
     const now = clock.maturityAt;
     for (const commission of plan.commissionRevisions) {
       if (!commission.recalculable) continue;
@@ -179,7 +190,17 @@ export async function applyLegacyContinuationCommand(client: PoolClient, actor: 
     }
   }
   if (input.kind === "confiscate") dutyIds.push(await createDuty(client, binding, versionId, "DEPOSIT_COMPENSATION", versionId, binding.ownerUserId, plan.amounts.depositCompensation!));
-  await recordAudit(client, { actorType: actor.realm, actorId: actor.userId, sessionId: actor.sessionId, requestId: actor.requestId, action: "order.legacy.continuation." + input.kind, objectType: "rental_order", objectId: orderId, outcome: "SUCCESS", details: { inputEvidenceId: row.id, resultEvidenceId: resultId, versionId, before: { revision: locked.head?.revision ?? null, stage: facts.evidence.source.orderStatus }, after: { revision, stage: resultFacts.evidence.source.orderStatus }, dutyIds, isolated, amountsDigest: sha256Hex(canonicalize(resultFacts.amounts)), ...(reviewedVoidCommissions.length ? { reviewedVoidCommissions } : {}) } });
+  await recordAudit(client, { actorType: actor.realm, actorId: actor.userId, sessionId: actor.sessionId, requestId: actor.requestId, action: "order.legacy.continuation." + input.kind, objectType: "rental_order", objectId: orderId, outcome: "SUCCESS", details: { inputEvidenceId: row.id, resultEvidenceId: resultId, versionId, before: { revision: locked.head?.revision ?? null, stage: facts.evidence.source.orderStatus }, after: { revision, stage: resultFacts.evidence.source.orderStatus }, dutyIds, isolated, amountsDigest: sha256Hex(canonicalize(resultFacts.amounts)), ...(input.reason ? { supportReason: input.reason } : {}), ...(input.onBehalf ? { supportOnBehalf: input.onBehalf } : {}), ...(reviewedVoidCommissions.length ? { reviewedVoidCommissions } : {}) } });
+  if(input.kind==="confirm" && ownerCredit && ownerDutyId){
+    await client.query("SAVEPOINT legacy_owner_auto_credit");
+    try { await ownerCredit(client,actor,orderId,{dutyId:ownerDutyId,expectedRevision:"1"},a);await client.query("RELEASE SAVEPOINT legacy_owner_auto_credit"); }
+    catch(error){
+      await client.query("ROLLBACK TO SAVEPOINT legacy_owner_auto_credit");await client.query("RELEASE SAVEPOINT legacy_owner_auto_credit");
+      const deferred=error instanceof SecurityApiError && ["WALLET_CREDIT_BASIS_UNAVAILABLE","WALLET_CREDIT_HISTORY_UNPROVEN","Legacy owner credit is unavailable","Legacy funding immutable source witness is inconsistent"].includes(error.message);
+      if(!deferred)throw error;
+      await recordAudit(client,{actorType:actor.realm,actorId:actor.userId,sessionId:actor.sessionId,requestId:actor.requestId,action:"order.legacy.owner_credit.deferred",objectType:"legacy_order_duty",objectId:ownerDutyId,outcome:"FAILURE",reason:"SOURCE_REVIEW_REQUIRED",details:{orderId,versionId}});
+    }
+  }
   await client.query("SET CONSTRAINTS ALL IMMEDIATE");
   return { status: 200, body: { orderId, command: input.kind, revision, versionId, inputEvidenceId: row.id, resultEvidenceId: resultId, stage: resultFacts.evidence.source.orderStatus, channelState: "UNKNOWN" } };
 }

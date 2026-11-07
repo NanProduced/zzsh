@@ -2,8 +2,9 @@ import { DynamicModule, Inject, Injectable, Module, OnApplicationShutdown, OnMod
 import type { Pool, PoolClient } from 'pg';
 import { businessFeatureEnabled, ConfigurationError } from '../config/config';
 import type { DistributionEarningStore, MaintenanceOperator } from './distribution-earning-store';
+import { LegacyCommissionCommitUnknown, runLegacyCommissionDuePage, type LegacyCommissionCursor } from './legacy-commission-due-worker';
 
-export type DistributionDueModuleOptions = { pool: Pool; store: DistributionEarningStore; intervalMs: number; batchLimit: number; workerId: string };
+export type DistributionDueModuleOptions = { pool: Pool; store: DistributionEarningStore; intervalMs: number; batchLimit: number; workerId: string; legacyDue?:boolean };
 const LOCK_KEY = '806007';
 const ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 export function loadDistributionDueRuntime(pool: Pool | undefined, store: DistributionEarningStore | undefined, env: NodeJS.ProcessEnv = process.env): DistributionDueModuleOptions | undefined {
@@ -14,7 +15,7 @@ export function loadDistributionDueRuntime(pool: Pool | undefined, store: Distri
   if (!Number.isSafeInteger(intervalMs) || intervalMs < 60000 || intervalMs > 3600000) throw new ConfigurationError('DISTRIBUTION_DUE_INTERVAL_MS must be 60000-3600000');
   if (!Number.isSafeInteger(batchLimit) || batchLimit < 1 || batchLimit > 100) throw new ConfigurationError('DISTRIBUTION_DUE_BATCH_LIMIT must be 1-100');
   if (!ID.test(workerId)) throw new ConfigurationError('DISTRIBUTION_DUE_WORKER_ID must be a bounded identifier');
-  return { pool, store, intervalMs, batchLimit, workerId };
+  return { pool, store, intervalMs, batchLimit, workerId, legacyDue:true };
 }
 @Injectable()
 export class DistributionDueService implements OnModuleInit, OnApplicationShutdown {
@@ -24,6 +25,7 @@ export class DistributionDueService implements OnModuleInit, OnApplicationShutdo
   private running = false;
   private stopping = false;
   private inFlight: Promise<void> | null = null;
+  private legacyCursor:LegacyCommissionCursor|null = null;
   constructor(@Inject('DISTRIBUTION_DUE_OPTIONS') private readonly options: DistributionDueModuleOptions) {}
   private get operator(): MaintenanceOperator {
     return { userId: `distribution-due-${this.options.workerId}`, sessionId: 'system', system: true, authorize: async () => {} };
@@ -84,10 +86,16 @@ export class DistributionDueService implements OnModuleInit, OnApplicationShutdo
           : await this.options.store.runDueBatch(this.options.pool, { limit: this.options.batchLimit, requestId: `due_${this.options.workerId}_${Date.now()}`, operator, client });
         if (result.batch.state === 'UNKNOWN') console.error(JSON.stringify({ event: 'distribution.due.unknown', requestId: result.batch.requestId, notAttempted: result.batch.notAttempted, recovery: 'RESUME_ORIGINAL_KEY' }));
         else if (result.batch.state === 'COMPLETE' && result.batch.results.length && !unfinished) console.log(JSON.stringify({ event: 'distribution.due.complete', requestId: result.batch.requestId, attempted: result.batch.results.length }));
+        if(this.options.legacyDue && !this.stopping && this.locking===client){
+          const legacy=await runLegacyCommissionDuePage(client,this.legacyCursor,this.options.batchLimit,()=>this.stopping||this.locking!==client);
+          this.legacyCursor=legacy.cursor;
+          if(!legacy.available)console.error(JSON.stringify({event:'distribution.legacy.schema_unavailable'}));
+          if(legacy.scanned)console.log(JSON.stringify({event:'distribution.legacy.due',scanned:legacy.scanned,posted:legacy.posted,deferred:legacy.deferred}));
+        }
       } catch (error) {
         // An exception may sit after the money commit, so the key is never replaced here; the next tick resumes it.
         console.error(JSON.stringify({ event: 'distribution.due.failed', reason: error instanceof Error ? error.message : String(error), recovery: 'RESUME_ORIGINAL_KEY' }));
-        if (this.stopping) await this.releaseLock();
+        if (this.stopping || error instanceof LegacyCommissionCommitUnknown) await this.releaseLock();
       } finally { this.running = false; }
     })();
     await this.inFlight;

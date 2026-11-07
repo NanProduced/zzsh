@@ -35,6 +35,8 @@ class PoolFixture {
     else if (sql.includes('FROM "zzsh_iam"."admin_security"')) rows = [{ status: this.status, isBoss: this.isBoss, passwordChangeRequired: false }];
     else if (sql.startsWith("WITH role_permissions")) rows = [{ permissionCode: "content.platform.read" }];
     else if (sql.includes('FROM "zzsh_supply"."media_asset"')) rows = this.sample ? [{ publicStorageKey: KEY }] : [];
+    else if (sql.includes("to_regclass('zzsh_order.settlement_refund_policy')")) rows = [{ available: true }];
+    else if (sql.includes("FROM zzsh_order.settlement_refund_policy")) rows = [{ normalDays: 0, earlyDays: 7, revision: "1" }];
     else throw new Error("Unexpected fixture query: " + sql);
     return { rows, rowCount: rows.length };
   }
@@ -121,6 +123,26 @@ test("an authenticated non-Boss content operator cannot inspect system settings"
   assert.ok(!f.pool.queries.some(q => q.includes("media_asset")));
 });
 
+test("settlement refund policy is Boss-only and rejects cross-origin or invalid changes", async () => {
+  const f = setup();
+  const read = await f.run("/settlement-refund-policy");
+  assert.equal(read.code, 200);
+  assert.deepEqual(read.body, { normalDays: 0, earlyDays: 7, revision: "1", available: true });
+  f.pool.isBoss = false;
+  assert.equal((await f.run("/settlement-refund-policy")).code, 403);
+  f.pool.isBoss = true;
+  const denied = f.request("/settlement-refund-policy", "PUT", { origin: "https://attacker.invalid" });
+  denied.body = { normalDays: 0, earlyDays: 7, expectedRevision: "1" };
+  const deniedResponse = new ResponseFixture();
+  await handleSystemConfiguration(denied, deniedResponse as SupplyResponse, f.options);
+  assert.equal(deniedResponse.code, 403);
+  const invalidRequest = f.request("/settlement-refund-policy", "PUT");
+  invalidRequest.body = { normalDays: -1, earlyDays: 7, expectedRevision: "1" };
+  const invalidResponse = new ResponseFixture();
+  await handleSystemConfiguration(invalidRequest, invalidResponse as SupplyResponse, f.options);
+  assert.equal(invalidResponse.code, 400);
+});
+
 test("missing authentication is denied before any configuration or database access", async () => {
   const f = setup(); f.options.adminAuth.api.getSession = async () => null;
   const result = await f.run();
@@ -196,4 +218,16 @@ test("real Admin BFF dispatch reaches the same guarded GET route and rejects wri
     await handleAdminBff(request, response as never, options);
     assert.equal(response.code, status);
   }
+});
+
+test("Admin BFF dispatches the refund wait policy without bypassing validation", async () => {
+  const f = setup();
+  const options = { apiOrigin: API, adminOrigin: ORIGIN, adminSecurityOptions: f.options, supply: f.options } as unknown as AdminBffOptions;
+  const read = f.request("/settlement-refund-policy"); read.originalUrl = "/api/bff/admin/system/settlement-refund-policy";
+  const response = new ResponseFixture(); await handleAdminBff(read, response as never, options);
+  assert.equal(response.code, 200); assert.equal(response.body.earlyDays, 7);
+  const invalid = f.request("/settlement-refund-policy", "PUT"); invalid.originalUrl = "/api/bff/admin/system/settlement-refund-policy";
+  invalid.body = { normalDays: 1, earlyDays: -1, expectedRevision: "1" };
+  const rejected = new ResponseFixture(); await handleAdminBff(invalid, rejected as never, options);
+  assert.equal(rejected.code, 400);
 });

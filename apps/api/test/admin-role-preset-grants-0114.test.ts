@@ -4,7 +4,7 @@ import { test } from "node:test";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { ADMIN_PERMISSION, ADMIN_PERMISSION_CODES, hasPermission, loadEffectiveAdminAccess } from "../src/auth/admin-authorization";
-import { assertNoNewBossOnlyPersonalAllows, assertNoNewBossOnlyRoleGrants, isBossOnlyPermission, BOSS_ONLY_PERMISSIONS, OPS_PRESET_0118_ADDITIONS, OPS_PRESET_DISTRIBUTION_MANAGEMENT_ADDITIONS, OPS_PRESET_PERMISSIONS, ROLE_PRESET_GRANTS, SUPPORT_PRESET_PERMISSIONS } from "../src/auth/admin-role-presets";
+import { assertNoNewBossOnlyPersonalAllows, assertNoNewBossOnlyRoleGrants, isBossOnlyPermission, BOSS_ONLY_PERMISSIONS, OPS_PRESET_0118_ADDITIONS, OPS_PRESET_DISTRIBUTION_MANAGEMENT_ADDITIONS, OPS_PRESET_PERMISSIONS, ROLE_PRESET_GRANTS, SUPPORT_PRESET_LEGACY_CONTINUATION_ADDITIONS, SUPPORT_PRESET_PERMISSIONS } from "../src/auth/admin-role-presets";
 
 const sql = readFileSync(resolve("migrations/business/0114_admin_role_preset_grants.sql"), "utf8");
 const pairs = [...sql.matchAll(/\('(role_preset_\w+)',\s*'([a-z0-9_.]+)'\)/g)].map((m) => [m[1], m[2]] as const);
@@ -14,7 +14,8 @@ const pairs0118 = [...sql0118.matchAll(/\('(role_preset_\w+)',\s*'([a-z0-9_.]+)'
 const later = new Set<string>([...OPS_PRESET_0118_ADDITIONS,...OPS_PRESET_DISTRIBUTION_MANAGEMENT_ADDITIONS]);
 
 test("0114 + 0118 seed rows equal the code constants exactly", () => {
-  const expected = Object.entries(ROLE_PRESET_GRANTS).flatMap(([role, codes]) => codes.filter((c) => role !== "role_preset_ops" || !later.has(c)).map((c) => [role, c] as const));
+  const supportLater = new Set<string>(SUPPORT_PRESET_LEGACY_CONTINUATION_ADDITIONS);
+  const expected = Object.entries(ROLE_PRESET_GRANTS).flatMap(([role, codes]) => codes.filter((c) => role === "role_preset_ops" ? !later.has(c) : !supportLater.has(c)).map((c) => [role, c] as const));
   assert.deepEqual(pairs, expected);
   assert.deepEqual(pairs0118, OPS_PRESET_0118_ADDITIONS.map((c) => ["role_preset_ops", c] as const));
   assert.match(sql0118, /ON CONFLICT \(role_id, permission_code\) DO NOTHING/);
@@ -34,10 +35,19 @@ test('distribution management migration grants only the three dedicated addition
  assert.doesNotMatch(migration,/SELECT 'role_preset_ops',code[^;]*finance\.read/s);
 });
 
+test("support legacy continuation addition is narrow, additive and never Boss-only",()=>{
+ const addition=readFileSync(resolve("migrations/business/0167_support_legacy_continuation.sql"),"utf8");
+ assert.deepEqual([...SUPPORT_PRESET_LEGACY_CONTINUATION_ADDITIONS],[ADMIN_PERMISSION.orderLegacyContinue]);
+ assert.match(addition,/VALUES \('role_preset_support','order\.legacy\.continue'\)/);
+ assert.match(addition,/ON CONFLICT \(role_id, permission_code\) DO NOTHING/);
+ assert.doesNotMatch(addition.replace(/--.*$/gm,""),/\b(DELETE|UPDATE|DROP|TRUNCATE)\b/i);
+ assert.equal(isBossOnlyPermission(ADMIN_PERMISSION.orderLegacyContinue),false);
+});
+
 test("presets only use defined, non-Boss-only codes and exclude the order.read baseline", () => {
   const defined = new Set<string>(ADMIN_PERMISSION_CODES);
   const bossOnly = new Set<string>(BOSS_ONLY_PERMISSIONS);
-  for (const code of [...SUPPORT_PRESET_PERMISSIONS, ...OPS_PRESET_PERMISSIONS]) {
+  for (const code of [...SUPPORT_PRESET_PERMISSIONS, ...SUPPORT_PRESET_LEGACY_CONTINUATION_ADDITIONS, ...OPS_PRESET_PERMISSIONS]) {
     assert.ok(defined.has(code), code);
     assert.ok(!bossOnly.has(code), code);
     assert.notEqual(code, ADMIN_PERMISSION.orderRead);
@@ -46,8 +56,9 @@ test("presets only use defined, non-Boss-only codes and exclude the order.read b
 });
 
 test("Owner decisions: support scope", () => {
-  const s = new Set<string>(SUPPORT_PRESET_PERMISSIONS);
+  const s = new Set<string>([...SUPPORT_PRESET_PERMISSIONS, ...SUPPORT_PRESET_LEGACY_CONTINUATION_ADDITIONS]);
   assert.ok(s.has(ADMIN_PERMISSION.orderSettlementWrite));
+  assert.ok(s.has(ADMIN_PERMISSION.orderLegacyContinue));
   assert.ok(!s.has(ADMIN_PERMISSION.userRentalMembershipManage));
   assert.ok(!s.has(ADMIN_PERMISSION.supplyGuaranteeVerify));
   // 客服可发起会员礼遇申请，但不能审批、执行、决定或撤销

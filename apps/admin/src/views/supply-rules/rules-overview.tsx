@@ -11,7 +11,7 @@ import { SupplySelect } from "../../components/supply/supply-select";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "../../components/ui/table";
 import {
   asHaffV2, boundText, centsYuan, compatTierCount, haffCount, makeupShare, num, payoutRef, perMillion,
-  agreementDiff, priceDiff, safeBoxLabel, spread, standardItemRows, termDiff, unitLabel, unitYuan, yuan, type RuleDiffRow,
+  agreementDiff, priceDiff, referenceUnitYuan, safeBoxLabel, spread, standardItemRows, termDiff, unitLabel, unitYuan, yuan, type RuleDiffRow,
 } from "./rules-model";
 import { TrialWindow } from "./rules-trial-window";
 import { activePriceDraft, pendingSealedPrice, MutedDetails, priceDiff as draftDiff } from "./publish-flow";
@@ -374,8 +374,8 @@ export function RulesOverview({ rules, command, isBoss, canPreview, canEdit = fa
                             {!item.enabled ? <Badge variant="secondary" className="ml-1 text-[10px] text-muted-foreground">已停用</Badge> : null}
                           </TableCell>
                           <TableCell className="text-muted-foreground">{line?.unitQuantity && line.unitQuantity !== "1" ? `每 ${line.unitQuantity} ${unitLabel(item.unit, item.code)}` : `每${unitLabel(item.unit, item.code)}`}</TableCell>
-                          <TableCell className="text-right tabular-nums text-foreground">{V(`item.${item.id}.buyer`, unitYuan(line?.buyerUnitAmount), { unit: "元" })}</TableCell>
-                          <TableCell className="text-right tabular-nums text-muted-foreground">{V(`item.${item.id}.owner`, unitYuan(line?.ownerUnitAmount), { unit: "元" })}</TableCell>
+                          <TableCell className="text-right tabular-nums text-foreground">{V(`item.${item.id}.buyer`, referenceUnitYuan(line?.buyerUnitAmount), { unit: "元" })}</TableCell>
+                          <TableCell className="text-right tabular-nums text-muted-foreground">{V(`item.${item.id}.owner`, referenceUnitYuan(line?.ownerUnitAmount), { unit: "元" })}</TableCell>
                           <TableCell className={`text-right tabular-nums ${isPositive ? "font-semibold text-emerald-600 dark:text-emerald-400" : ""}`}>
                             {sp}
                           </TableCell>

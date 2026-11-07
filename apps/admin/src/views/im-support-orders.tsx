@@ -351,17 +351,7 @@ export function OrderWorkbenchPane({ identity, adminUserId, operatorName, client
   };
 
   const renderConversation = (view: OrderTeamConversationView) => {
-    const { info, messages, refreshAccess } = view;
-    // 代确认只对负责客服开放；boss/其他客服即使看得到卡片也不渲染该动作，服务端仍会复核。
-    const viewerResponsible = info.members.some((member) => member.accountId === info.viewerAccountId && member.party === "STAFF" && member.responsible);
-    const confirmOnBehalf = canManualClose === true && viewerResponsible
-      ? async (target: OrderTeamAccess, party: "RENTER" | "OWNER") => {
-          if (!target.openingId || !Number.isInteger(target.openingVersion)) throw new Error("期初信息未就绪，请刷新后重试");
-          await request(`/orders/${encodeURIComponent(target.orderId)}/openings/${encodeURIComponent(target.openingId)}/confirm`,
-            { party, versionNo: target.openingVersion });
-          await refreshAccess();
-        }
-      : undefined;
+    const { info, messages } = view;
     const jumpToMessage = (messageId: string) => {
       const target = messages.find((message) => message.id === messageId || message.messageClientId === messageId || message.messageServerId === messageId);
       if (!target) return;
@@ -413,7 +403,7 @@ export function OrderWorkbenchPane({ identity, adminUserId, operatorName, client
           <MessageAvatar className="im-wb-av" aria-hidden="true">{author.role === "机器人" ? <img src="/art/zhouzhou/avatar.webp" alt="" /> : <ProfileImage src={author.avatar} fallback={initialOf(author.name)} />}</MessageAvatar>
           <MessageContent className="im-wb-msg-body" data-card={card ? "true" : undefined}>
             {grouped ? null : <MessageHeader className="im-wb-msg-meta"><b>{author.name}</b>{author.role ? <span className="im-wb-role-tag" data-role={author.role}>{author.role}</span> : null}{self ? null : <time>{formatTime(message.createTime)}</time>}</MessageHeader>}
-            {card && !revoked ? <OrderCardMessage message={message} info={info} onConfirmOpeningOnBehalf={confirmOnBehalf} onOpenOrder={() => { if (onOpenPath) { onOpenPath(`/orders/${encodeURIComponent(info.orderId)}`, `订单 ${info.displayNo ?? info.orderId}`); } else { window.location.assign(`/orders/${encodeURIComponent(info.orderId)}`); } }} /> : <SupportMessageBody message={message} image={image ? {url:image.url,thumbnailUrl:image.thumbnailUrl,name:image.name} : null}
+            {card && !revoked ? <OrderCardMessage message={message} info={info} onOpenOrder={() => { if (onOpenPath) { onOpenPath(`/orders/${encodeURIComponent(info.orderId)}`, `订单 ${info.displayNo ?? info.orderId}`); } else { window.location.assign(`/orders/${encodeURIComponent(info.orderId)}`); } }} /> : <SupportMessageBody message={message} image={image ? {url:image.url,thumbnailUrl:image.thumbnailUrl,name:image.name} : null}
               replySenderName={info.members.find((member) => member.accountId === message.reply?.senderId)?.name?.trim() || null}
               onJump={jumpToMessage} align={self ? "end" : "start"} />}
             {self && !card && !revoked ? <MessageFooter className="im-wb-msg-status"><time>{formatTime(message.createTime)}</time><span>已发送</span></MessageFooter> : null}

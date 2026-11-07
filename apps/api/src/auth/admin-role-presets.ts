@@ -17,7 +17,7 @@ export const SUPPORT_PRESET_PERMISSIONS = [
   P.imSupportTransfer,
   P.imSupportComplaint,
   P.imSupportPresence,
-  // 订单结算（含代确认收货）；服务端另要求本人是该订单群 STAFF 成员
+  // 订单结算（含代确认开租）；服务端另校验会话、订单和游戏范围
   P.orderSettlementWrite,
   // 定位用户、写备注
   P.userDirectoryRead,
@@ -35,6 +35,9 @@ export const SUPPORT_PRESET_PERMISSIONS = [
   P.membershipEntitlementRequest,
   P.membershipGrowthSummaryRead,
 ] as const;
+
+/** Added once by 0167; later Boss edits and personal DENY remain effective. */
+export const SUPPORT_PRESET_LEGACY_CONTINUATION_ADDITIONS = [P.orderLegacyContinue] as const;
 
 /**
  * 迁移 0118 追加到 role_preset_ops 的能力（Owner 2026-10-31）。护栏在服务端：
@@ -117,7 +120,7 @@ export const OPS_PRESET_PERMISSIONS = [
 ] as const;
 
 export const ROLE_PRESET_GRANTS = {
-  role_preset_support: SUPPORT_PRESET_PERMISSIONS,
+  role_preset_support: [...SUPPORT_PRESET_PERMISSIONS, ...SUPPORT_PRESET_LEGACY_CONTINUATION_ADDITIONS],
   role_preset_ops: OPS_PRESET_PERMISSIONS,
 } as const;
 /**

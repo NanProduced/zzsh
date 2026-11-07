@@ -264,7 +264,7 @@ test("50/70 adjacent points and spread-ratio guard", () => {
   assert.ok(unsafe.reasons.includes("HAFF_SPREAD_RATIO_UNSAFE"));
 });
 
-test("unknown remaining, negative, over-opening and insufficient funds block without deposit offset", () => {
+test("unknown remaining, negative, over-opening and mismatched capture are blocked", () => {
   assert.ok(computeSettlement(baseInput({ remainingHaff: null, remainingItems: "8", endReason: "NORMAL" })).reasons.includes("HAFF_REMAINING_UNKNOWN"));
   assert.ok(computeSettlement(baseInput({ remainingHaff: "110000000", remainingItems: "8", endReason: "NORMAL" })).reasons.includes("HAFF_REMAINING_EXCEEDS_OPENING"));
   assert.ok(computeSettlement(baseInput({ remainingHaff: "20000000", remainingItems: "11", endReason: "NORMAL" })).reasons.includes("ITEM_kit_REMAINING_EXCEEDS_OPENING"));
@@ -365,6 +365,13 @@ test("confirmation: stale or rejected versions cannot reuse old acks", () => {
   assert.ok(rejected.reasons.includes("PARTY_REJECTED"));
 });
 
+test("an authorized support finalization is bound to the current system version and does not fake user confirmation",()=>{
+ const base=confirm({early:true,renterConfirmedVersionId:null,ownerConfirmedVersionId:null,renterRejectedVersionId:"set_v1"});
+ assert.equal(settlementConfirmationReady({...base,supportFinalizedVersionId:"set_v1"}).ready,true);
+ assert.equal(settlementConfirmationReady({...base,supportFinalizedVersionId:"set_old"}).ready,false);
+ assert.equal(settlementConfirmationReady({...base,kind:"MANUAL_ADJUSTMENT",supportFinalizedVersionId:"set_v1"}).ready,false);
+});
+
 test("confirmation: manual adjustment needs non-self ops approval bound to current hash", () => {
   const missing = settlementConfirmationReady(confirm({ kind: "MANUAL_ADJUSTMENT" }));
   assert.equal(missing.ready, false);
@@ -416,7 +423,7 @@ test("F1: haff consume uses frozen exactRatios, not rounded prepaid", () => {
   assert.equal(blocked.amounts, null);
 });
 
-test("F2: charge cannot eat deposit; capture must match frozen prepaid", () => {
+test("F2: charges may use the actual deposit; capture must match frozen prepaid", () => {
   const expensive = baseInput({ remainingHaff: "50000000", remainingItems: "0", endReason: "TENANT_VOLUNTARY_EARLY" });
   expensive.capturedAmount = "1301.00";
   expensive.haff.prepaidBuyerAmount = "1.00";
@@ -440,9 +447,28 @@ test("F2: charge cannot eat deposit; capture must match frozen prepaid", () => {
     prepaidOwnerAmount: "900.00",
   }];
   const deposit = computeSettlement(expensive);
-  assert.equal(deposit.ok, false);
-  assert.ok(deposit.reasons.includes("CHARGE_EXCEEDS_RESOURCE_PREPAYMENT"));
-  assert.equal(deposit.amounts, null);
+  assert.equal(deposit.ok, true, deposit.reasons.join(","));
+  assert.equal(money(deposit, "renterCharge"), "1072.66");
+  assert.equal(money(deposit, "renterRefund"), "228.34");
+  assert.equal(money(deposit, "depositRefund"), "228.34");
+  assert.equal(money(deposit, "ownerNet"), "900.40");
+  assert.equal(money(deposit, "platformContribution"), "172.26");
+
+  const depositExact = structuredClone(expensive);
+  depositExact.depositAmount = "71.66";
+  depositExact.capturedAmount = "1072.66";
+  const exactDepositUse = computeSettlement(depositExact);
+  assert.equal(exactDepositUse.ok, true, exactDepositUse.reasons.join(","));
+  assert.equal(money(exactDepositUse, "renterRefund"), "0.00");
+  assert.equal(money(exactDepositUse, "depositRefund"), "0.00");
+
+  const depositShort = structuredClone(expensive);
+  depositShort.depositAmount = "71.65";
+  depositShort.capturedAmount = "1072.65";
+  const insufficient = computeSettlement(depositShort);
+  assert.equal(insufficient.ok, false);
+  assert.ok(insufficient.reasons.includes("INSUFFICIENT_PREPAYMENT"));
+  assert.equal(insufficient.amounts, null);
 
   const mismatch = computeSettlement(baseInput({ remainingHaff: "50000000", remainingItems: "8", endReason: "TENANT_VOLUNTARY_EARLY", capturedAmount: "400.00" }));
   assert.equal(mismatch.ok, false);
@@ -472,6 +498,173 @@ test("F2: charge cannot eat deposit; capture must match frozen prepaid", () => {
   assert.equal(prepaidMismatch.ok, false);
   assert.ok(prepaidMismatch.reasons.includes("ITEM_kit_PREPAID_MISMATCH"));
   assert.equal(prepaidMismatch.amounts, null);
+});
+
+test("excess consumption uses frozen prices and the original membership ratio across the order", () => {
+  const input = baseInput({ remainingHaff: "20000000", remainingItems: "0", endReason: "NORMAL", fullPayout: "NOT_SELECTED",
+    capturedAmount: "135.00", depositAmount: "0.00", haffBuyer: "90.00", haffOwner: "80.00" });
+  input.haff.baseHaffBuyerRatio={numerator:"100",denominator:"1"};input.pricingMode="ACTUAL_TOTAL_DISCOUNT_V1";
+  input.items = [{ itemId: "kit", unit: "PIECE", pricingKind: "FIXED_UNIT", openingQuantity: "5", remainingQuantity: "0",
+    consumedQuantity: "6", unitQuantity: "1", buyerUnitAmount: "9", ownerUnitAmount: "6", prepaidBuyerAmount: "45.00",
+    prepaidOwnerAmount: "30.00", baseBuyerUnitAmount: "10" }];
+  input.totalPayableRatio = "0.9";
+  const result = computeSettlement(input);
+  assert.equal(result.ok, true, result.reasons.join(","));
+  assert.equal(money(result, "haffConsumedBuyer"), "72.00");
+  assert.equal(money(result, "itemConsumedBuyer"), "54.00");
+  assert.equal(money(result, "ownerNet"), "100.00");
+  assert.equal(money(result, "renterRefund"), "9.00");
+  assert.equal(money(result, "platformContribution"), "26.00");
+  assert.deepEqual(result.consumed!.items, [{ itemId: "kit", consumed: "6", remaining: "0" }]);
+
+  const exact = structuredClone(input);
+  exact.haff.remainingQuantity = "0";
+  exact.depositAmount = "9.00";
+  exact.capturedAmount = "144.00";
+  const exactResult = computeSettlement(exact);
+  assert.equal(exactResult.ok, true, exactResult.reasons.join(","));
+  assert.equal(money(exactResult, "renterRefund"), "0.00");
+  assert.equal(money(exactResult, "depositRefund"), "0.00");
+  exact.depositAmount = "8.99";
+  exact.capturedAmount = "143.99";
+  assert.ok(computeSettlement(exact).reasons.includes("INSUFFICIENT_PREPAYMENT"));
+});
+
+test("excess haff and zero-opening items require a frozen original price", () => {
+  const input = baseInput({ remainingHaff: "0", remainingItems: "5", endReason: "NORMAL", fullPayout: "NOT_SELECTED",
+    capturedAmount: "135.00", depositAmount: "0.00", haffBuyer: "90.00", haffOwner: "80.00" });
+  input.pricingMode="ACTUAL_TOTAL_DISCOUNT_V1";
+  input.haff.consumedQuantity = "105000000";
+  input.haff.baseHaffBuyerRatio = { numerator: "100", denominator: "1" };
+  input.items = [{ itemId: "kit", unit: "PIECE", pricingKind: "FIXED_UNIT", openingQuantity: "5", remainingQuantity: "5",
+    unitQuantity: "1", buyerUnitAmount: "9", ownerUnitAmount: "6", prepaidBuyerAmount: "45.00", prepaidOwnerAmount: "30.00",baseBuyerUnitAmount:"10" }];
+  input.totalPayableRatio = "0.9";
+  const result = computeSettlement(input);
+  assert.equal(result.ok, true, result.reasons.join(","));
+  assert.equal(money(result, "haffConsumedBuyer"), "94.50");
+  assert.equal(money(result, "haffConsumedOwner"), "84.00");
+  assert.equal(money(result, "renterRefund"), "40.50");
+  const missing = structuredClone(input);
+  delete missing.haff.baseHaffBuyerRatio;
+  assert.ok(computeSettlement(missing).reasons.includes("HAFF_BASE_PRICE_MISSING"));
+
+  input.haff.consumedQuantity = "80000000";
+  input.haff.remainingQuantity = "20000000";
+  input.items = [{ itemId: "kit", unit: "PIECE", pricingKind: "FIXED_UNIT", openingQuantity: "0", remainingQuantity: "0",
+    consumedQuantity: "1", unitQuantity: "1", buyerUnitAmount: "10", ownerUnitAmount: "6", prepaidBuyerAmount: "0.00",
+    prepaidOwnerAmount: "0.00", baseBuyerUnitAmount: "10" }];
+  input.capturedAmount = "90.00";
+  const zero = computeSettlement(input);
+  assert.equal(zero.ok, true, zero.reasons.join(","));
+  assert.equal(money(zero, "renterCharge"), "81.00");
+  assert.equal(money(zero, "renterRefund"), "9.00");
+  delete input.items[0]!.baseBuyerUnitAmount;
+  assert.ok(computeSettlement(input).reasons.includes("ITEM_kit_BASE_PRICE_MISSING"));
+});
+
+test("excess discount may use other resource margin, but cannot invent funding or a discount", () => {
+  const input = baseInput({ remainingHaff: "0", remainingItems: "0", endReason: "NORMAL", fullPayout: "NOT_SELECTED",
+    capturedAmount: "109.00", depositAmount: "10.00", haffBuyer: "89.00", haffOwner: "70.00" });
+  input.haff.baseHaffBuyerRatio={numerator:"100",denominator:"1"};input.pricingMode="ACTUAL_TOTAL_DISCOUNT_V1";
+  input.items = [{ itemId: "kit", unit: "PIECE", pricingKind: "FIXED_UNIT", openingQuantity: "1", remainingQuantity: "0",
+    consumedQuantity: "2", unitQuantity: "1", buyerUnitAmount: "10", ownerUnitAmount: "10", prepaidBuyerAmount: "10.00",
+    prepaidOwnerAmount: "10.00", baseBuyerUnitAmount: "10" }];
+  input.totalPayableRatio = "0.9";
+  const result = computeSettlement(input);
+  assert.equal(result.ok, true, result.reasons.join(","));
+  assert.equal(money(result, "renterCharge"), "108.00");
+  assert.equal(money(result, "ownerNet"), "90.00");
+  assert.equal(money(result, "platformContribution"), "18.00");
+  assert.equal(money(result, "renterRefund"), "1.00");
+  delete input.totalPayableRatio;
+  assert.ok(computeSettlement(input).reasons.includes("TOTAL_DISCOUNT_UNKNOWN"));
+  input.totalPayableRatio = "0.9";
+  input.haff.prepaidOwnerAmount = "89.00";
+  input.haff.exactRatio!.ownerNumerator = "89.00";
+  input.haff.baseHaffBuyerRatio={numerator:"89",denominator:"1"};
+  assert.ok(computeSettlement(input).reasons.includes("DISCOUNT_OWNER_FUNDING_INSUFFICIENT"));
+});
+
+test("excess unit charges round the complete consumption once instead of rounding each portion twice",()=>{
+ const input=baseInput({remainingHaff:"0",remainingItems:"0",endReason:"NORMAL",fullPayout:"NOT_SELECTED",
+  capturedAmount:"100.07",depositAmount:"0.00",haffBuyer:"100.00",haffOwner:"80.00"});
+ input.pricingMode="ACTUAL_TOTAL_DISCOUNT_V1";input.haff.baseHaffBuyerRatio={numerator:"100",denominator:"1"};
+ input.items=[{itemId:"round",unit:"ROUND",pricingKind:"FIXED_UNIT",openingQuantity:"1",remainingQuantity:"0",consumedQuantity:"2",
+  unitQuantity:"60",buyerUnitAmount:"4",ownerUnitAmount:"2",prepaidBuyerAmount:"0.07",prepaidOwnerAmount:"0.03",baseBuyerUnitAmount:"4"}];
+ input.totalPayableRatio="1";input.depositAmount="0.06";input.capturedAmount="100.13";
+ const result=computeSettlement(input);assert.equal(result.ok,true,result.reasons.join(","));
+ assert.equal(money(result,"itemConsumedBuyer"),"0.13");assert.equal(money(result,"itemConsumedOwner"),"0.07");
+ assert.equal(money(result,"renterRefund"),"0.00");
+});
+
+test("percent item settlement uses the exact frozen owner unit and rounds the final amount to cents",()=>{
+ const input=baseInput({remainingHaff:"0",remainingItems:"0",endReason:"NORMAL",fullPayout:"NOT_SELECTED",
+  capturedAmount:"60259.97",depositAmount:"10.00",haffBuyer:"250.00",haffOwner:"166.67"});
+ input.haff.exactRatio={buyerNumerator:"250",buyerDenominator:"1",ownerNumerator:"166.6666675",ownerDenominator:"1"};
+ input.haff.baseHaffBuyerRatio={numerator:"250",denominator:"1"};input.pricingMode="ACTUAL_TOTAL_DISCOUNT_V1";input.totalPayableRatio="1";
+ input.items=[{itemId:"kit",unit:"PIECE",pricingKind:"FIXED_UNIT",openingQuantity:"3000000",remainingQuantity:"0",consumedQuantity:"3000000",unitQuantity:"1",
+  buyerUnitAmount:"0.01999999",ownerUnitAmount:"0.01333333",baseBuyerUnitAmount:"0.01999999",baseOwnerUnitAmount:"0.0133333267333333",
+  prepaidBuyerAmount:"59999.97",prepaidOwnerAmount:"39999.98"},
+  {itemId:"extra",unit:"PIECE",pricingKind:"FIXED_UNIT",openingQuantity:"0",remainingQuantity:null,consumedQuantity:"2",unitQuantity:"1",
+  buyerUnitAmount:"1.23",ownerUnitAmount:"0.82",baseBuyerUnitAmount:"1.23",baseOwnerUnitAmount:"0.8200000041",prepaidBuyerAmount:"0.00",prepaidOwnerAmount:"0.00"}];
+ const result=computeSettlement(input);assert.equal(result.ok,true,result.reasons.join(","));
+ assert.equal(money(result,"itemConsumedOwner"),"40001.62");assert.equal(money(result,"itemConsumedBuyer"),"60002.43");
+ assert.equal(money(result,"renterRefund"),"7.54");
+ const tampered=structuredClone(input);tampered.items[0]!.baseOwnerUnitAmount="0.01333335";
+ assert.equal(computeSettlement(tampered).ok,false);
+});
+
+test("a discount that cannot cover the owner's actual income blocks settlement even when the original order was profitable",()=>{
+ const input=baseInput({remainingHaff:"0",remainingItems:"1",endReason:"NORMAL",fullPayout:"NOT_SELECTED",
+  capturedAmount:"180.00",depositAmount:"0.00",haffBuyer:"98.00",haffOwner:"98.00"});
+ input.pricingMode="ACTUAL_TOTAL_DISCOUNT_V1";input.totalPayableRatio="0.9";input.haff.baseHaffBuyerRatio={numerator:"100",denominator:"1"};
+ input.items=[{itemId:"kit",unit:"PIECE",pricingKind:"FIXED_UNIT",openingQuantity:"1",remainingQuantity:"1",unitQuantity:"1",
+  buyerUnitAmount:"82",ownerUnitAmount:"50",prepaidBuyerAmount:"82.00",prepaidOwnerAmount:"50.00",baseBuyerUnitAmount:"100"}];
+ const partial=computeSettlement(input);assert.equal(partial.ok,false);assert.ok(partial.reasons.includes("DISCOUNT_OWNER_FUNDING_INSUFFICIENT"));assert.equal(partial.amounts,null);
+ input.items[0]!.remainingQuantity="0";
+ const full=computeSettlement(input);assert.equal(full.ok,true,full.reasons.join(","));
+ assert.equal(money(full,"renterCharge"),"180.00");assert.equal(money(full,"ownerNet"),"148.00");assert.equal(money(full,"platformContribution"),"32.00");
+});
+
+test("actual discounted consumption conserves captured funds across partial and excess quantities", () => {
+  for (const millions of [70, 75, 90, 100, 110, 125]) for (let count = 0; count <= 10; count++) {
+    const input = baseInput({ remainingHaff: "0", remainingItems: "0", endReason: "NORMAL", fullPayout: "NOT_SELECTED",
+      capturedAmount: "185.00", depositAmount: "50.00", haffBuyer: "90.00", haffOwner: "80.00" });
+    input.pricingMode = "ACTUAL_TOTAL_DISCOUNT_V1"; input.totalPayableRatio = "0.9";
+    input.haff.remainingQuantity = null; input.haff.consumedQuantity = String(millions * 1000000);
+    input.haff.baseHaffBuyerRatio = { numerator: "100", denominator: "1" };
+    input.items = [{ itemId: "kit", unit: "PIECE", pricingKind: "FIXED_UNIT", openingQuantity: "5", remainingQuantity: null,
+      consumedQuantity: String(count), unitQuantity: "1", buyerUnitAmount: "9", ownerUnitAmount: "6",
+      prepaidBuyerAmount: "45.00", prepaidOwnerAmount: "30.00", baseBuyerUnitAmount: "10" }];
+    const result = computeSettlement(input), expectedCharge = (millions * 100 + count * 1000) * 9 / 10;
+    if (expectedCharge > 18500) { assert.equal(result.ok, false); assert.ok(result.reasons.includes("INSUFFICIENT_PREPAYMENT")); continue; }
+    assert.equal(result.ok, true, JSON.stringify(result.reasons));
+    const cents = (key: "renterCharge" | "renterRefund" | "ownerNet" | "platformContribution" | "depositRefund") => BigInt(money(result, key).replace(".", ""));
+    assert.equal(cents("renterCharge"), BigInt(expectedCharge));
+    assert.equal(cents("renterRefund") + cents("renterCharge"), 18500n);
+    assert.equal(cents("ownerNet") + cents("renterRefund") + cents("platformContribution"), 18500n);
+    assert.equal(cents("depositRefund"), cents("renterRefund") < 5000n ? cents("renterRefund") : 5000n);
+  }
+});
+
+test("normal and early settlement preserve the full paid amount with either fee payer", () => {
+  const cents = (s: string) => BigInt(s.replace(".", ""));
+  for (const consumed of [0, 25, 50, 69, 70, 99, 100]) for (const remainingItems of [0, 5, 10]) {
+    for (const fullPayout of ["SELECTED", "NOT_SELECTED"] as const) {
+      const input = baseInput({ remainingHaff: String((100-consumed)*1000000), remainingItems: String(remainingItems),
+        endReason: consumed < 70 ? "TENANT_VOLUNTARY_EARLY" : "NORMAL", fullPayout });
+      const result = computeSettlement(input);
+      assert.equal(result.ok, true, JSON.stringify({ consumed, remainingItems, fullPayout, reasons: result.reasons }));
+      const captured = cents(input.capturedAmount);
+      const charge = cents(money(result,"renterCharge")), refund = cents(money(result,"renterRefund"));
+      const owner = cents(money(result,"ownerNet")), platform = cents(money(result,"platformContribution"));
+      assert.equal(charge + refund, captured);
+      assert.equal(owner + platform + refund, captured);
+      assert.ok(refund >= 0n && owner >= 0n && platform >= 0n);
+      if (fullPayout === "SELECTED") assert.equal(result.amounts!.feePayer, consumed < 70 ? "RENTER" : "OWNER");
+      else assert.equal(result.amounts!.feePayer, "NONE");
+    }
+  }
 });
 
 test("F3: cancel facts must match rental start and zero consume", () => {

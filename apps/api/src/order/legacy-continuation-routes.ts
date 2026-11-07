@@ -1,66 +1,185 @@
 import type { AuthSecurityOptions } from "../auth/auth-security";
 import { readAdminContext } from "../auth/auth-security";
 import { readUserContext } from "../auth/user-identity";
-import { withTransaction } from "../auth/security-core";
+import { SecurityApiError, withTransaction } from "../auth/security-core";
 import { ensureApiV1RequestId, validateIdempotencyKey } from "../contracts/api-v1";
 import { bodyOf, ensureOnlyFields, invalid, notFound, sendJson, type SupplyNodeRequest } from "../supply/supply-util";
 import { decodeId, requireOrigin, requestPath, runIdempotentWrite, type SupplyResponse } from "../supply/supply-routes";
-import { authorizeLegacyContinuation, readLegacyContinuation, readLegacyContinuationBinding, readLegacyContinuationEvidence, readLegacyContinuationHead } from "./legacy-continuation-evidence";
+import { authorizeLegacyContinuation, readLegacyContinuation, readLegacyContinuationBinding, readLegacyContinuationDuties, readLegacyContinuationEvidence, readLegacyContinuationHead } from "./legacy-continuation-evidence";
 import { applyLegacyContinuationCommand, applyLegacyDutyCommand, authorizeLegacyMutation, legacyCommandOutcome, parseLegacyMutation, parseLegacyQuantities, type LegacyMutationKind,type LegacyMutationAuthority } from "./legacy-continuation-command";
-import { legacyOrderAdvisoryKey, previewLegacyContinuation, projectLegacyCommandReceipt, readSealedLegacyFacts, type LegacyContinuationActor, type LegacyDutyFinalizationReader } from "./legacy-continuation-model";
+import { legacyOrderAdvisoryKey, legacyPlanYuanToCents, previewLegacyContinuation, projectLegacyCommandReceipt, readSealedLegacyFacts, visibleLegacyReason, type LegacyContinuationActor, type LegacyDutyFinalizationReader } from "./legacy-continuation-model";
+import { authorizeLegacyFinanceDuty, postLegacyFinanceDuty, postLegacyOwnerCreditOnConfirmation, projectLegacyFinanceDutyReceipt, type LegacyFinanceDutyAuthority, type LegacyFinanceDutyKind } from "./legacy-finance-duty";
+import {authorizeLegacyRefundReviewAccess} from './legacy-refund-review-store';
+import {createLegacyRefundCase,readLegacyRefundCaseForStatus,readLegacyRefundCaseReceipt} from './legacy-refund-case-command';
+import {describeRefundProfile,RefundProfileError,type BoundRefundProfile} from './joinpay-refund-profile';
+import type {RefundSourceOptions} from './joinpay-refund-source';
+import {readLegacyRefundProgress} from './legacy-refund-attempt';
 
-export type LegacyContinuationRouteOptions = AuthSecurityOptions & { legacyDutyFinalizationReader?: LegacyDutyFinalizationReader };
+export type LegacyContinuationRouteOptions = AuthSecurityOptions & { legacyDutyFinalizationReader?: LegacyDutyFinalizationReader;
+  legacyRefund?:RefundSourceOptions & {legacyRefundsEnabled?:boolean;legacyInitialProfile?:BoundRefundProfile} };
 export function parseLegacyContinuationPath(path: string) {
-  const match = /^\/legacy\/([^/]+)\/continuation(?:\/(receipt|preview|propose|confirm|reject|hold|release|confiscate)|\/duties\/([^/]+)\/(mature|void))?$/.exec(path);
+  const match = /^\/legacy\/([^/]+)\/continuation(?:\/(receipt|preview|propose|confirm|reject|hold|release|confiscate)|\/duties\/([^/]+)\/(mature|void|owner-credit|commission-credit|refund-case))?$/.exec(path);
   if (!match) return null;
   const orderId = decodeId(match[1]!); legacyOrderAdvisoryKey(orderId);
   const dutyId = match[3] ? decodeId(match[3]) : null;
-  return { orderId, command: match[2] ?? null, dutyId, dutyCommand: match[4] as "mature" | "void" | undefined };
+  return { orderId, command: match[2] ?? null, dutyId, dutyCommand: match[4] as "mature" | "void" | "owner-credit" | "commission-credit" | "refund-case" | undefined };
 }
 export async function handleLegacyContinuationRoute(request: SupplyNodeRequest, response: SupplyResponse, options: LegacyContinuationRouteOptions, realm: "user" | "admin"): Promise<boolean> {
   const prefix = realm === "user" ? "/api/v1/orders" : "/api/v1/admin/orders";
   const { path, query } = requestPath(request, prefix), parsed = parseLegacyContinuationPath(path);
   if (!parsed) return false;
   const method = (request.method ?? "GET").toUpperCase(), requestId = ensureApiV1RequestId(request);
-  if ((parsed.command !== "receipt" && query.size) || method !== (parsed.command && parsed.command !== "receipt" || parsed.dutyId ? "POST" : "GET")) throw notFound();
+  if ((parsed.command !== "receipt" && query.size) || (parsed.dutyCommand==='refund-case'
+    ? !['GET','POST'].includes(method) : method !== (parsed.command && parsed.command !== "receipt" || parsed.dutyId ? "POST" : "GET"))) throw notFound();
   if (method !== "GET" && !requireOrigin(request, response, options, requestId)) return true;
   const context = realm === "user" ? await readUserContext(request, options) : await readAdminContext(request, options);
   const actor: LegacyContinuationActor = { realm, ...context, requestId };
+  if(method==='GET' && parsed.dutyId && parsed.dutyCommand==='refund-case'){
+    if(realm!=='admin')throw notFound();
+    const data=await withTransaction(options.pool,async client=>{
+      const binding=await authorizeLegacyRefundReviewAccess(client,actor,parsed.orderId);
+      const head=await readLegacyContinuationHead(client,parsed.orderId),duty=(await readLegacyContinuationDuties(client,parsed.orderId)).find(item=>item.id===parsed.dutyId);
+      if(!duty||duty.kind!=='RENTER_REFUND')throw notFound();
+      const imported=await readLegacyContinuationEvidence(client,parsed.orderId,null),facts=imported?readSealedLegacyFacts(imported):null;
+      const source=facts?.evidence.source,payments=source?.paidPay;
+      let paymentOrderNo:string|null=null;
+      if(facts?.evidence.admission==='PARAMETER_COMPLETE' && Array.isArray(payments) && payments.length===1 && typeof payments[0]?.payOrderSn==='string'
+        && /^[A-Za-z0-9_-]{1,50}$/.test(payments[0].payOrderSn) && typeof payments[0].payMoney==='string' && typeof binding.paidCents==='string'){
+        try{if(legacyPlanYuanToCents(payments[0].payMoney)===binding.paidCents)paymentOrderNo=payments[0].payOrderSn;}catch{/* Missing original must stay unknown. */}
+      }
+      const table=(await client.query<{available:boolean}>(`SELECT to_regclass('zzsh_order.legacy_refund_case') IS NOT NULL AS available`)).rows[0];
+      if(typeof table?.available!=='boolean')throw new SecurityApiError(503,'EVIDENCE_UNAVAILABLE','Legacy refund unavailable');
+      const cases=table.available?(await client.query<{id:string}>(`SELECT id FROM zzsh_order.legacy_refund_case WHERE order_id=$1 AND duty_id=$2 LIMIT 2`,[parsed.orderId,parsed.dutyId])).rows:[];
+      if(cases.length>1)throw new SecurityApiError(503,'EVIDENCE_UNAVAILABLE','Legacy refund unavailable');
+      const receipt=cases[0]?await readLegacyRefundCaseReceipt(client,actor,parsed.orderId,parsed.dutyId!,cases[0].id):null;
+      const current=cases[0]?await readLegacyRefundCaseForStatus(client,parsed.orderId,parsed.dutyId!,cases[0].id):null;
+      const execution=options.legacyRefund;
+      const progress=current?.intentId && execution ? await readLegacyRefundProgress(client,{...execution,pool:options.pool,legacyRefundsEnabled:execution.legacyRefundsEnabled===true},current.intentId) : null;
+      const configured=!!execution?.legacyRefundsEnabled && !!execution.legacyInitialProfile;
+      const merchantNo=configured?describeRefundProfile(execution!.legacyInitialProfile!,'SUBMIT').merchantNo:null;
+      const due=head?.refundDueAt ? (await client.query<{due:boolean}>('SELECT $1::timestamptz<=clock_timestamp() AS due',[head.refundDueAt])).rows[0]?.due===true:false;
+      return {orderId:parsed.orderId,dutyId:parsed.dutyId,headRevision:head?.revision??null,dutyRevision:duty.revision,dutyCents:duty.amountCents,
+        paidCents:binding.paidCents,paymentOrderNo,merchantNo,refundDueAt:head?.refundDueAt??null,receipt,current,progress,
+        canStart:table.available && configured && !!paymentOrderNo && !!binding.paidCents && !receipt && due && String(head?.stage)==='4' && ['PENDING','MATURED'].includes(duty.status)};
+    });
+    sendJson(response,200,data,requestId);return true;
+  }
   if (parsed.command === "receipt") {
     for (const key of query.keys()) if (!["key", "command", "dutyId"].includes(key) || query.getAll(key).length !== 1) throw invalid("Invalid receipt query");
     const key = validateIdempotencyKey(query.get("key") ?? undefined), command = query.get("command") ?? "", dutyId = query.get("dutyId");
-    if (!["propose", "confirm", "reject", "hold", "release", "confiscate", "mature", "void"].includes(command)) throw invalid("Invalid original command");
-    if (realm === "user" && ["hold", "release", "confiscate", "mature", "void"].includes(command)) throw notFound();
-    const duty = command === "mature" || command === "void";
+    if (!["propose", "confirm", "reject", "hold", "release", "confiscate", "mature", "void", "owner-credit", "commission-credit", "refund-case"].includes(command)) throw invalid("Invalid original command");
+    if (realm === "user" && ["hold", "release", "confiscate", "mature", "void", "owner-credit", "commission-credit", "refund-case"].includes(command)) throw notFound();
+    const refundCase=command==='refund-case';
+    const walletKind:LegacyFinanceDutyKind|null=command==="owner-credit"?"OWNER_CREDIT":command==="commission-credit"?"COMMISSION":null;
+    const duty = command === "mature" || command === "void" || walletKind!==null || refundCase;
     if (duty ? realm !== "admin" || !dutyId || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(dutyId) : dutyId !== null) throw invalid("Invalid original duty");
     const data = await withTransaction(options.pool, async client => {
-      const authority = await authorizeLegacyMutation(client, actor, parsed.orderId,true);
+      const authority = refundCase ? null : walletKind || realm==="admin" && command==="confirm" ? await authorizeLegacyFinanceDuty(client,actor,parsed.orderId,walletKind??"OWNER_CREDIT",true) : await authorizeLegacyMutation(client, actor, parsed.orderId,true);
+      if(refundCase)await authorizeLegacyRefundReviewAccess(client,actor,parsed.orderId);
       if (duty && !(await client.query(`SELECT 1 FROM zzsh_order.legacy_order_duty WHERE id=$1 AND order_id=$2`, [dutyId, parsed.orderId])).rowCount) throw notFound();
       const operation = duty ? "order.legacy.duty." + command : "order.legacy.continuation." + command;
       const row = (await client.query<{ status: number; body: unknown; fingerprint: string }>(`SELECT response_status AS status,response_body AS body,request_fingerprint AS fingerprint FROM zzsh_supply.idempotency_record WHERE scope_key=$1 AND key=$2`, [JSON.stringify([realm, actor.userId, operation, duty ? dutyId : parsed.orderId]), key])).rows[0];
-      return row ? { state: row.status >= 200 && row.status < 300 ? "KNOWN_SUCCESS" : "KNOWN_REJECTED", status: row.status, receipt: projectLegacyCommandReceipt(authority.binding, actor, row.body), fingerprint: row.fingerprint } : { state: "UNKNOWN" };
+      let receipt:unknown=null;
+      if(row && refundCase && row.status>=200 && row.status<300){
+        const caseId=(row.body as {caseId?:unknown})?.caseId;
+        if(typeof caseId!=='string' || !dutyId)throw invalid('Legacy refund receipt unavailable');
+        receipt=await readLegacyRefundCaseReceipt(client,actor,parsed.orderId,dutyId,caseId);
+      }else if(row && walletKind && row.status>=200 && row.status<300)receipt=await projectLegacyFinanceDutyReceipt(client,parsed.orderId,walletKind,row.body);
+      else if(row && authority)receipt=projectLegacyCommandReceipt(authority.binding,actor,row.body);
+      else if(row)receipt=row.body;
+      return row ? { state: row.status >= 200 && row.status < 300 ? "KNOWN_SUCCESS" : "KNOWN_REJECTED", status: row.status, receipt, fingerprint: row.fingerprint } : { state: "UNKNOWN" };
     });
     sendJson(response, 200, data, requestId); return true;
   }
   if (method === "GET") {
-    const data = await withTransaction(options.pool, client => readLegacyContinuation(client, actor, parsed.orderId, options.legacyDutyFinalizationReader));
+    const data = await withTransaction(options.pool, async client => {
+      const data=await readLegacyContinuation(client,actor,parsed.orderId,options.legacyDutyFinalizationReader);
+      if(realm!=='user')return data;
+      const duties=data.continuation.duties.filter(d=>d.kind==='RENTER_REFUND' && d.status==='SETTLED' && d.settledBy==='FINANCE');
+      if(!duties.length)return data;
+      const ready=(await client.query<{ready:boolean}>(`SELECT to_regclass('zzsh_order.legacy_refund_case') IS NOT NULL AS ready`)).rows[0]?.ready;
+      if(ready!==true)return data;
+      const mapped=new Map<string,string>();
+      for(const duty of duties){
+        const cases=(await client.query<{id:string}>(`SELECT id FROM zzsh_order.legacy_refund_case WHERE order_id=$1 AND duty_id=$2 LIMIT 2`,[parsed.orderId,duty.id])).rows;
+        if(cases.length!==1)continue;
+        await client.query('SAVEPOINT legacy_refund_user_read');
+        try{
+          const record=await readLegacyRefundCaseForStatus(client,parsed.orderId,duty.id,cases[0]!.id);
+          let status='UNKNOWN';
+          if(!record.intentId && record.amountCents==='0')status=record.dutyCents==='0'?'NO_REFUND_DUE':'NO_NEW_REFUND';
+          else if(record.intentId && options.legacyRefund){
+            const progress=await readLegacyRefundProgress(client,{...options.legacyRefund,pool:options.pool,legacyRefundsEnabled:options.legacyRefund.legacyRefundsEnabled===true},record.intentId);
+            status=progress.state==='REVIEW_REQUIRED'?'REVIEW_REQUIRED':progress.terminal==='SUCCEEDED'?'CHANNEL_SUCCEEDED'
+              :progress.terminal==='FAILED_NO_EXECUTION'?'FAILED':['READY','SUBMITTING','PROCESSING'].includes(progress.state)?'PROCESSING':'UNKNOWN';
+          }
+          mapped.set(duty.id,status);await client.query('RELEASE SAVEPOINT legacy_refund_user_read');
+        }catch(error){
+          await client.query('ROLLBACK TO SAVEPOINT legacy_refund_user_read');await client.query('RELEASE SAVEPOINT legacy_refund_user_read');
+          if(!(error instanceof RefundProfileError) && (!(error instanceof SecurityApiError) || ![404,409,503].includes(error.status)))throw error;
+        }
+      }
+      return {...data,continuation:{...data.continuation,duties:data.continuation.duties.map(d=>mapped.has(d.id)?{...d,refundProgress:mapped.get(d.id)}:d)}};
+    });
     sendJson(response, 200, data, requestId); return true;
   }
   const body = bodyOf(request);
   if (parsed.command === "preview") {
-    ensureOnlyFields(body, ["quantities"]);
+    ensureOnlyFields(body, ["quantities", "onBehalf"]);
+    if (body.onBehalf !== undefined && body.onBehalf !== "renter" && body.onBehalf !== "owner") throw invalid("STAFF_ROLE_INVALID");
     const quantities = parseLegacyQuantities(body.quantities);
-    const data = await withTransaction(options.pool, async client => {
+    let data;
+    try { data = await withTransaction(options.pool, async client => {
       const binding = await readLegacyContinuationBinding(client, parsed.orderId);
-      await authorizeLegacyContinuation(client, actor, binding);
+      const access = await authorizeLegacyContinuation(client, actor, binding);
+      if (realm === "admin" && !access.canOperate) throw notFound();
       const head = await readLegacyContinuationHead(client, parsed.orderId), row = await readLegacyContinuationEvidence(client, parsed.orderId, head);
       if (!row) throw invalid("NOT_IMPORTED");
-      return { ...previewLegacyContinuation(readSealedLegacyFacts(row), binding, actor, quantities), revision: head?.revision ?? null, inputEvidenceId: row.id };
-    });
+      return { ...previewLegacyContinuation(readSealedLegacyFacts(row), binding, actor, quantities, body.onBehalf as "renter" | "owner" | undefined), revision: head?.revision ?? null, inputEvidenceId: row.id };
+    }); } catch (error) {
+      const reason = error instanceof SecurityApiError && error.status === 409 ? visibleLegacyReason(error.message) : undefined;
+      if (!reason || !(error instanceof SecurityApiError)) throw error;
+      sendJson(response, error.status, { error: { code: error.code, message: reason, reason, requestId } }, requestId); return true;
+    }
     sendJson(response, 200, data, requestId); return true;
   }
   if (parsed.dutyId && parsed.dutyCommand) {
     if (realm !== "admin") throw notFound();
+    if(parsed.dutyCommand==='refund-case'){
+      ensureOnlyFields(body,['expectedDutyRevision','expectedHeadRevision','paymentOrderNo','confirmedMerchantNo','paidCents','previouslyRefundedCents','priorAppliedToDutyCents','noUnresolvedRefunds','evidenceRef']);
+      const names=['expectedDutyRevision','expectedHeadRevision','paymentOrderNo','confirmedMerchantNo','paidCents','previouslyRefundedCents','priorAppliedToDutyCents','evidenceRef'] as const;
+      if(names.some(name=>typeof body[name]!=='string') || typeof body.noUnresolvedRefunds!=='boolean')throw invalid('Invalid legacy refund review');
+      const input={orderId:parsed.orderId,dutyId:parsed.dutyId,expectedDutyRevision:body.expectedDutyRevision as string,expectedHeadRevision:body.expectedHeadRevision as string,
+        paymentOrderNo:body.paymentOrderNo as string,confirmedMerchantNo:body.confirmedMerchantNo as string,paidCents:body.paidCents as string,
+        previouslyRefundedCents:body.previouslyRefundedCents as string,priorAppliedToDutyCents:body.priorAppliedToDutyCents as string,
+        noUnresolvedRefunds:body.noUnresolvedRefunds as boolean,evidenceRef:body.evidenceRef as string};
+      await runIdempotentWrite(options,request,response,requestId,{principalId:actor.userId,operation:'order.legacy.duty.refund-case',resourceId:parsed.dutyId},
+        {realm,id:actor.userId,sessionId:actor.sessionId},input,async client=>{await authorizeLegacyRefundReviewAccess(client,actor,parsed.orderId);},
+        client=>legacyCommandOutcome(client,actor,parsed.orderId,()=>{
+          const execution=options.legacyRefund;
+          if(!execution?.legacyRefundsEnabled || !execution.legacyInitialProfile)throw new SecurityApiError(503,'EVIDENCE_UNAVAILABLE','Legacy refund unavailable');
+          return createLegacyRefundCase(client,actor,input,{admission:execution.admission,profile:execution.legacyInitialProfile});
+        }),async(client,result)=>{
+          if(result.status<200||result.status>=300)return result;
+          const caseId=(result.body as {caseId?:unknown})?.caseId;if(typeof caseId!=='string')throw invalid('Legacy refund receipt unavailable');
+          return {...result,body:await readLegacyRefundCaseReceipt(client,actor,parsed.orderId,parsed.dutyId!,caseId)};
+        });
+      return true;
+    }
+    if(parsed.dutyCommand==="owner-credit" || parsed.dutyCommand==="commission-credit"){
+      ensureOnlyFields(body,["expectedRevision","reason"]);
+      if(typeof body.expectedRevision!=="string" || !/^[1-9]\d{0,17}$/.test(body.expectedRevision)
+        || typeof body.reason!=="string" || [...body.reason.trim()].length<3 || body.reason.length>500)throw invalid("Invalid owner credit request");
+      const input={dutyId:parsed.dutyId,kind:parsed.dutyCommand,expectedRevision:body.expectedRevision,reason:body.reason.trim()};
+      const walletKind:LegacyFinanceDutyKind=input.kind==="owner-credit"?"OWNER_CREDIT":"COMMISSION";
+      let authority:LegacyFinanceDutyAuthority|undefined;
+      await runIdempotentWrite(options,request,response,requestId,{principalId:actor.userId,operation:"order.legacy.duty."+input.kind,resourceId:input.dutyId},
+        {realm,id:actor.userId,sessionId:actor.sessionId},input,
+        async(client,replay)=>{authority=await authorizeLegacyFinanceDuty(client,actor,parsed.orderId,walletKind,!!replay);},
+        client=>legacyCommandOutcome(client,actor,parsed.orderId,()=>postLegacyFinanceDuty(client,actor,parsed.orderId,walletKind,input,authority!)),
+        async(client,result)=>result.status>=200&&result.status<300?{...result,body:await projectLegacyFinanceDutyReceipt(client,parsed.orderId,walletKind,result.body)}:result);
+      return true;
+    }
     ensureOnlyFields(body, ["expectedRevision", "sourceFactAuditId", "reason"]);
     if (typeof body.expectedRevision !== "string" || !/^[1-9]\d{0,17}$/.test(body.expectedRevision)) throw invalid("Invalid duty revision");
     if (body.sourceFactAuditId !== undefined && (typeof body.sourceFactAuditId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(body.sourceFactAuditId))) throw invalid("Invalid source evidence reference");
@@ -75,7 +194,7 @@ export async function handleLegacyContinuationRoute(request: SupplyNodeRequest, 
   const input = parseLegacyMutation(parsed.command as LegacyMutationKind, body);
   let authority:LegacyMutationAuthority|undefined;
   await runIdempotentWrite(options, request, response, requestId, { principalId: actor.userId, operation: "order.legacy.continuation." + input.kind, resourceId: parsed.orderId }, { realm, id: actor.userId, sessionId: actor.sessionId }, input,
-    async(client,replay)=>{authority=await authorizeLegacyMutation(client,actor,parsed.orderId,!!replay);}, client => legacyCommandOutcome(client, actor, parsed.orderId, () => applyLegacyContinuationCommand(client, actor, parsed.orderId, input, options.legacyDutyFinalizationReader,authority)),
+    async(client,replay)=>{authority=realm==="admin" && input.kind==="confirm" ? await authorizeLegacyFinanceDuty(client,actor,parsed.orderId,"OWNER_CREDIT",!!replay) : await authorizeLegacyMutation(client,actor,parsed.orderId,!!replay);}, client => legacyCommandOutcome(client, actor, parsed.orderId, () => applyLegacyContinuationCommand(client, actor, parsed.orderId, input, options.legacyDutyFinalizationReader,authority,postLegacyOwnerCreditOnConfirmation)),
     async (_client, result) => { if (!authority) throw invalid("Legacy authorization unavailable"); return { ...result, body: projectLegacyCommandReceipt(authority.binding, actor, result.body) }; });
   return true;
 }

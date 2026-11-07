@@ -4,7 +4,6 @@ import { assertAdminContextInTransaction } from '../auth/auth-security';
 import { ADMIN_PERMISSION, loadEffectiveAdminAccess } from "../auth/admin-authorization";
 import { assertGameScopeUsable, readAdminGameScope, scopeAllowsGame } from "../auth/admin-scope";
 import { recordAudit, SecurityApiError, withTransaction } from "../auth/security-core";
-import { readOrderTeamAccess } from "../im/order-team-access";
 import { API_V1_ERROR_CODES, validateIdempotencyKey } from "../contracts/api-v1";
 import { conflict, forbidden, invalid, notFound } from "../supply/supply-util";
 import { createFormalRefundIntent, createNativeRefundIntent, createSandboxPrestartRefundIntent, type FormalRefundCreateInput } from "./channel-refund-store";
@@ -41,9 +40,7 @@ export async function authorizeAdminNativeRefund(client: PoolClient, actor: Admi
     assertGameScopeUsable(scope, false);
     if (!scopeAllowsGame(scope, false, order.game_id)) throw forbidden();
   }
-  // 对齐既有结算命令的订单对象边界；游戏权限不自动授予全游戏退款权。
-  const team = await readOrderTeamAccess(client, { ...actor, realm: "admin" }, orderId, "read");
-  if (team.teamState !== "READY" || team.canRead !== true) throw forbidden();
+  // IM group availability does not block an authorized operator from handling this order.
 }
 
 function localExecution(execution:AdminNativeRefundExecution){
@@ -89,10 +86,12 @@ export async function requestAdminNativeRefund(pool: Pool, execution: AdminNativ
     const receipt = local ? await createNativeRefundIntent(client,{postingId:posting.id,amountCents:input.amountCents,idempotencyKey:key,requestId:input.requestId,capability:local.capability})
       .then(r=>({replayed:r.replayed,intentId:r.intent.intentId,refundOrderNo:r.intent.refundOrderNo,state:r.intent.state,budgetDisposition:r.intent.budgetDisposition}))
       :await createFormalRefundIntent(client, create);
+    // Old same-key requests remain recoverable; a new manual request must record why.
+    if (!receipt.replayed && (!input.reason || input.reason.trim().length < 3)) throw invalid("Refund reason is required");
     if (!receipt.replayed) await recordAudit(client, { actorType: "admin", actorId: input.actor.userId, sessionId: input.actor.sessionId,
       action: local?'order.refund.local.requested':"order.refund.native.requested", objectType: "channel_refund_intent", objectId: receipt.intentId, outcome: "SUCCESS",
       requestId: input.requestId, details: { postingId: posting.id, amountCents: input.amountCents, currency: "CNY",
-        reasonProvided: input.reason !== undefined, channelResult: "NOT_SUBMITTED" } });
+        reasonProvided: input.reason !== undefined, supportReason: input.reason?.trim() ?? null, channelResult: "NOT_SUBMITTED" } });
     const result = { contractVersion: "admin-native-refund.v1" as const, replayed: receipt.replayed,
       intentId: receipt.intentId, refundOrderNo: receipt.refundOrderNo, amountCents: input.amountCents, currency: "CNY" as const,
       state: receipt.state, budgetDisposition: receipt.budgetDisposition,

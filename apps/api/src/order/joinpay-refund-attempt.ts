@@ -69,7 +69,9 @@ async function prepare(o: RefundExecution, intentId: string, owner: string, mini
     if (authorize) await authorize(c, intentId);
     const row = await lockFormalRefundContext(c, o.admission, intentId), state = row.state;
     if (["SUCCEEDED", "FAILED"].includes(state)) return { kind: "SKIPPED", state, reason: "TERMINAL" };
-    if (queryOnly && (row.requires_review || state === "REVIEW_REQUIRED")) return { kind: "SKIPPED", state, reason: "REVIEW_REQUIRED" };
+    // A persisted review flag may be queried after submission, but never cleared by the query.
+    if (queryOnly && (state === "REVIEW_REQUIRED" && !row.requires_review || state === "READY" && row.requires_review))
+      return { kind: "SKIPPED", state, reason: "REVIEW_REQUIRED" };
     const tables = (await c.query(`SELECT to_regclass('zzsh_order.joinpay_refund_attempt') IS NOT NULL AND to_regclass('zzsh_order.joinpay_refund_observation') IS NOT NULL AND to_regclass('zzsh_order.joinpay_refund_evidence') IS NOT NULL AS ready`)).rows[0];
     if (tables?.ready !== true) throw conflict("Native refund schema is not integrated");
     let responsibilityDue = true;
@@ -100,7 +102,7 @@ async function prepare(o: RefundExecution, intentId: string, owner: string, mini
           COALESCE(max(created_at)<=clock_timestamp()-make_interval(secs=>$2::integer),true) AS interval_ok
           FROM zzsh_order.joinpay_refund_attempt WHERE intent_id=$1`, [intentId, minimumIntervalSeconds])).rows[0];
         if (typeof recovery?.queries !== "string" || !/^\d+$/.test(recovery.queries) || typeof recovery?.interval_ok !== "boolean") throw conflict("Refund recovery timing evidence unavailable");
-        if (BigInt(recovery.queries) >= BigInt(JOINPAY_REFUND_MAX_AUTOMATIC_QUERIES)) return { kind: "SKIPPED", state, reason: "BUDGET_EXHAUSTED" };
+        if (BigInt(recovery.queries) >= BigInt(JOINPAY_REFUND_MAX_AUTOMATIC_QUERIES) && !authorize) return { kind: "SKIPPED", state, reason: "BUDGET_EXHAUSTED" };
         if (!recovery.interval_ok) return { kind: "SKIPPED", state, reason: "THROTTLED" };
       }
     }

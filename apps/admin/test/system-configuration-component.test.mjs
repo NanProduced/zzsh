@@ -82,6 +82,40 @@ test("Boss reads deployment target without editable secrets, and GET has no writ
   assert.equal(h.container.querySelector("a").getAttribute("href"), "/content?tab=media");
 });
 
+test("refund wait policy reads lazily and retries an unknown save with the original key and values", async t => {
+  let writes = 0;
+  const h = await harness(t, (url, init) => {
+    if (!url.pathname.endsWith("/settlement-refund-policy")) return response(storage());
+    if (init.method === "GET") return response({ normalDays: 0, earlyDays: 7, revision: "1", available: true });
+    writes++;
+    if (writes === 1) throw new Error("synthetic connection loss");
+    return response({ policy: { normalDays: 1, earlyDays: 7, revision: "2", available: true }, changed: true });
+  });
+  assert.equal(h.requests.length, 1);
+  await h.click("设置退款等待期"); await h.settle();
+  assert.match(h.browser.document.body.textContent, /已结算订单保持原到期时间/);
+  const input = [...h.browser.document.body.querySelectorAll("input")].find(item => item.value === "0");
+  assert.ok(input);
+  await act(async () => {
+    Object.getOwnPropertyDescriptor(h.browser.HTMLInputElement.prototype, "value").set.call(input, "1");
+    input.dispatchEvent(new h.browser.Event("input", { bubbles: true }));
+  });
+  const clickDialog = async text => {
+    const button = [...h.browser.document.body.querySelectorAll("button")].find(item => item.textContent.trim() === text);
+    assert.ok(button && !button.disabled, text);
+    await act(async () => button.click()); await h.settle();
+  };
+  await clickDialog("保存设置");
+  assert.match(h.browser.document.body.textContent, /保存结果暂未确认/);
+  await clickDialog("重试原操作");
+  const requests = h.requests.filter(item => item.init.method === "PUT");
+  assert.equal(requests.length, 2);
+  assert.equal(requests[0].init.headers["idempotency-key"], requests[1].init.headers["idempotency-key"]);
+  assert.equal(requests[0].init.body, requests[1].init.body);
+  assert.deepEqual(JSON.parse(requests[0].init.body), { normalDays: 1, earlyDays: 7, expectedRevision: "1" });
+  assert.match(h.browser.document.body.textContent, /保存操作已确认/);
+});
+
 test("ordinary content reader has no system request or configuration disclosure", async t => {
   const h = await harness(t, () => { throw new Error("request must not occur"); }, snapshot(false));
   assert.equal(h.requests.length, 0); assert.match(h.text(), /仅 Boss/); assert.doesNotMatch(h.text(), /zzsh-staging/);

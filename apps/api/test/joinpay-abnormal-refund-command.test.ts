@@ -46,8 +46,10 @@ test("C04B 异常退款命令复用order.settlement.write与对象范围，finan
   await assert.rejects(requestAdminAbnormalNativeRefund(m.pool, execution, input), /denied|permission|FORBIDDEN/i);
   assert.equal(denied.length, 0);
   t.mock.restoreAll();
-  mocks(t, { team: false });
-  await assert.rejects(requestAdminAbnormalNativeRefund(model().pool, execution, input), error => (error as any).status === 403);
+  const created = mocks(t, { team: false });
+  t.mock.method(securityCore, "recordAudit", async () => {});
+  const result = await requestAdminAbnormalNativeRefund(model().pool, execution, input);
+  assert.equal(created.length, 1);assert.equal(result.channel.result, "NOT_SUBMITTED");
 });
 
 test("C04B 核准只建原责任/意图并返回NOT_SUBMITTED，金额不来自客户端", async t => {
@@ -82,7 +84,7 @@ test("R1 旧键恢复无新准入仍先复核当前Admin身份/对象，COMMIT�
   t.mock.method(securityCore, "recordAudit", async () => {});
   const model0 = model();
   const result = await requestAdminAbnormalNativeRefund(model0.pool, { admission: undefined, initialProfile: undefined }, input);
-  assert.equal(team, 1); assert.equal(creates.length, 1);
+  assert.equal(team, 0); assert.equal(creates.length, 1);
   assert.equal("admission" in creates[0], false); assert.equal("profile" in creates[0], false);
   assert.equal(result.replayed, true); assert.equal(result.state, "SUCCEEDED");
   assert.deepEqual(result.channel, { result: "UNKNOWN", bankArrival: "UNKNOWN" });

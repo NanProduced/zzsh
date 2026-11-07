@@ -82,7 +82,7 @@ test('detail pane renders declaration, catalog resources and quote lines', async
   value.version.declaration.inventory = [{ itemId: 'barrett', quantity: '2' }];
   value.version.presentation.items = [];
   value.version.catalogItems = [{ id: 'barrett', name: '巴雷特', unit: 'ROUND', code: 'df_billable_barrett_bullet' }];
-  value.version.quote.lines = [{ itemId: 'barrett', quantity: '2', unit: 'ROUND', buyerAmount: { amount: '1.00' } }];
+  value.version.quote.lines = [{ itemId: 'barrett', quantity: '2', unit: 'ROUND', unitQuantity:'1', buyerUnitAmount:{amount:'0.00400000'}, buyerAmount: { amount: '1.00' } }];
   value.supervision = { historical: false, facts: { publicVisible: true, newOrders: true, reasons: [], ownerPaused: false, staffRestricted: false, occupancy: 'FREE', publicSource: 'NATIVE_PUBLICATION', sources: [], legacyNumbers: [] }, changes: null, previousVersion: null, restrictionHistory: { state: 'NOT_RECORDED', items: [], limit: 20 }, ownerLink: { state: 'READY', userId: 'owner-a' }, orders: { state: 'READY', items: [], total: 0 } };
   value.contextKey = 'fixture-context';
   const h = await mountHarness(t, { permissions, initialAccountId: 'a', initialQuery: { context: 'archive' }, fetchImpl: async () => json(value) });
@@ -91,6 +91,7 @@ test('detail pane renders declaration, catalog resources and quote lines', async
   assert.match(h.el.textContent, /号主声明有封禁记录/);
   assert.match(h.el.textContent, /巴雷特/);
   assert.match(h.el.textContent, /¥1\.00/);
+  assert.match(h.el.textContent, /约¥0\.00（不足1分）/);
   assert.equal(h.el.querySelectorAll('[data-resource-billing] table').length, 1);
   assert.deepEqual([...h.el.querySelector('[data-resource-billing] thead').querySelectorAll('th')].map(node => node.textContent), ['物资', '数量', '单位', '计价基数', '单价', '行额']);
 });

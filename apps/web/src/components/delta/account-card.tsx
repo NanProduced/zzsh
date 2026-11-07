@@ -783,13 +783,13 @@ export function AccountCard({
                     <button
                       type="button"
                       className="resources-info-trigger"
-                      aria-label="物品资源说明：物品金额先预付，结算按实际使用量核算，未使用部分退还；最终以订单结算为准。"
+                      aria-label="物品资源说明：物品金额先预付，结算按实际消耗核算；剩余预付款与押金以订单结算结果为准。"
                     >
                       <span className="resources-info-icon" aria-hidden="true">!</span>
                     </button>
                   </TooltipTrigger>
                   <TooltipContent side="top" className="resources-info-tooltip">
-                    物品金额先预付，结算按实际使用量核算，未使用部分退还；最终以订单结算为准。
+                    物品金额先预付，结算按实际消耗核算；剩余预付款与押金以订单结算结果为准。
                   </TooltipContent>
                 </Tooltip>
               </div>

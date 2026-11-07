@@ -8,6 +8,7 @@ import {
 } from "../supply/decimal";
 import { centsToYuan } from "./order";
 import type { QuoteAmount } from "../supply/pricing";
+import { allocateCombinedDiscount, payableCentsFor } from "../auth/membership-total-discount";
 
 import { FULL_PAYOUT_FEE_ROUNDING_POLICY, fullPayoutServiceFeeCents } from '../supply/full-payout-fee';
 export { FULL_PAYOUT_RATE } from '../supply/full-payout-fee';
@@ -38,12 +39,18 @@ export type SettlementInventoryLine = {
   pricingKind: "HAFF_RATIO" | "FIXED_UNIT";
   openingQuantity: string;
   remainingQuantity: string | null;
+  consumedQuantity?: string | null;
   unitQuantity: string;
   buyerUnitAmount: string;
   ownerUnitAmount: string;
   prepaidBuyerAmount: string;
   prepaidOwnerAmount: string;
   exactRatio?: SettlementExactRatio | null;
+  /** Undiscounted price from the order's sealed pricing basis, never from request input. */
+  baseBuyerUnitAmount?: string | null;
+  /** PERCENT pricing can have more precision than the displayed owner unit price. */
+  baseOwnerUnitAmount?: string | null;
+  baseHaffBuyerRatio?: { numerator: string; denominator: string } | null;
 };
 
 export type ComputeSettlementInput = {
@@ -62,6 +69,9 @@ export type ComputeSettlementInput = {
   capturedAmount: string;
   fullPayout: FullPayoutSelection;
   fullPayoutPolicyRef: string | null;
+  /** Original order's frozen total-discount ratio. */
+  totalPayableRatio?: string | null;
+  pricingMode?: "ACTUAL_TOTAL_DISCOUNT_V1";
   haff: SettlementInventoryLine;
   items: readonly SettlementInventoryLine[];
 };
@@ -109,6 +119,7 @@ export type SettlementConfirmationFacts = {
   renterRejectedVersionId: string | null;
   ownerRejectedVersionId: string | null;
   supportReviewedVersionId: string | null;
+  supportFinalizedVersionId?: string | null;
   opsApproval: {
     status: "APPROVED" | "PENDING" | "REJECTED";
     requesterId: string;
@@ -174,6 +185,25 @@ function lineConsumed(line: SettlementInventoryLine, reasons: string[], prefix: 
     reasons.push(`${prefix}_OPENING_INVALID`);
     return null;
   }
+  if (line.consumedQuantity !== undefined) {
+    if (typeof line.consumedQuantity !== "string") {
+      reasons.push(`${prefix}_CONSUMED_UNKNOWN`);
+      return null;
+    }
+    try {
+      const consumed = qtyOf(line.consumedQuantity, `${prefix}.consumed`);
+      const remaining = consumed < opening ? opening - consumed : 0n;
+      if (line.remainingQuantity !== null && line.remainingQuantity !== undefined
+          && qtyOf(line.remainingQuantity, `${prefix}.remaining`) !== remaining) {
+        reasons.push(`${prefix}_CONSUMPTION_REMAINING_MISMATCH`);
+        return null;
+      }
+      return { opening, remaining, consumed };
+    } catch {
+      reasons.push(`${prefix}_CONSUMED_INVALID`);
+      return null;
+    }
+  }
   if (line.remainingQuantity === null || line.remainingQuantity === undefined) {
     reasons.push(`${prefix}_REMAINING_UNKNOWN`);
     return null;
@@ -195,10 +225,10 @@ function lineConsumed(line: SettlementInventoryLine, reasons: string[], prefix: 
   return { opening, remaining, consumed: opening - remaining };
 }
 
-function fixedCents(consumed: bigint, unitAmount: string, unitQuantity: string, label: string) {
+function fixedCents(consumed: bigint, unitAmount: string, unitQuantity: string, label: string, maxScale = 8) {
   const unitQty = parseNonNegativeDecimal(unitQuantity, 0, `${label}.unitQuantity`);
   if (unitQty.value <= 0n) throw new DecimalError(`${label} unit quantity must be positive`);
-  const unit = parseNonNegativeDecimal(unitAmount, 8, `${label}.unitAmount`);
+  const unit = parseNonNegativeDecimal(unitAmount, maxScale, `${label}.unitAmount`);
   return divideToScale(multiplyDecimal({ value: consumed, scale: 0 }, unit), unitQty, 2).value;
 }
 
@@ -275,6 +305,10 @@ export function computeSettlement(input: ComputeSettlementInput): SettlementComp
   let unusedHaff = 0n;
   let exactHb = rat(0n);
   let F = rat(0n);
+  const totalPricing=input.pricingMode==="ACTUAL_TOTAL_DISCOUNT_V1";
+  if(input.pricingMode!==undefined&&!totalPricing)reasons.push("PRICING_MODE_INVALID");
+  let haffBase=0n;
+  const itemCharges: Array<{ itemId: string; buyerCents: bigint; ownerCents: bigint }> = [];
   const exact = input.haff ? parseExactRatio(input.haff.exactRatio, "HAFF", reasons) : null;
   try {
     if (input.haff) {
@@ -294,12 +328,22 @@ export function computeSettlement(input: ComputeSettlementInput): SettlementComp
     }
   }
   if (haffQty && exact && Q > 0n) {
-    exactHb = rat(q * exact.buyer.n, Q * exact.buyer.d);
+    const originalConsumed = q < Q ? q : Q;
+    exactHb = rat(originalConsumed * exact.buyer.n, Q * exact.buyer.d);
     const exactHo = rat(q * exact.owner.n, Q * exact.owner.d);
     Hb = rRoundCents(exactHb);
     Ho = rRoundCents(exactHo);
     unusedHaff = B - Hb;
-    if (unusedHaff < 0n) reasons.push("HAFF_CONSUMED_EXCEEDS_PREPAID");
+    if (totalPricing) {
+      try {
+        if (!input.haff.baseHaffBuyerRatio) throw new DecimalError("missing base haff price");
+        const price = yuanRatio(input.haff.baseHaffBuyerRatio.numerator, input.haff.baseHaffBuyerRatio.denominator, "haff.baseBuyer");
+        if(price.n*exact.owner.d<exact.owner.n*price.d)reasons.push("HAFF_BASE_PRICE_INVALID");
+        haffBase=rRoundCents(rat(q * price.n, Q * price.d));
+      } catch {
+        reasons.push("HAFF_BASE_PRICE_MISSING");
+      }
+    } else if(q>Q)reasons.push("HAFF_EXCESS_PRICE_MISSING");
     F = rsub(exact.buyer, exact.owner);
     if (F.n * 5n * exact.buyer.d > exact.buyer.n * 2n * F.d && q * 10n < Q * 7n) reasons.push("HAFF_SPREAD_RATIO_UNSAFE");
   }
@@ -326,16 +370,18 @@ export function computeSettlement(input: ComputeSettlementInput): SettlementComp
     }
     let prepaidB: bigint;
     let prepaidO: bigint;
+    const exactOwner = totalPricing && typeof line.baseOwnerUnitAmount === "string" ? line.baseOwnerUnitAmount : line.ownerUnitAmount;
     try {
       prepaidB = centsOf(line.prepaidBuyerAmount, `${prefix}.prepaidBuyer`);
       prepaidO = centsOf(line.prepaidOwnerAmount, `${prefix}.prepaidOwner`);
       const opening = qtyOf(line.openingQuantity, `${prefix}.opening`);
       const expectedB = fixedCents(opening, line.buyerUnitAmount, line.unitQuantity, prefix);
-      const expectedO = fixedCents(opening, line.ownerUnitAmount, line.unitQuantity, prefix);
+      const expectedO = fixedCents(opening, exactOwner, line.unitQuantity, prefix, 16);
       if (expectedB !== prepaidB || expectedO !== prepaidO) reasons.push(`${prefix}_PREPAID_MISMATCH`);
       const buyerUnit = parseNonNegativeDecimal(line.buyerUnitAmount, 8, `${prefix}.buyerUnit`);
       const ownerUnit = parseNonNegativeDecimal(line.ownerUnitAmount, 8, `${prefix}.ownerUnit`);
       if (decimalToBigInt(ownerUnit, 8) > decimalToBigInt(buyerUnit, 8)) reasons.push(`${prefix}_OWNER_EXCEEDS_BUYER`);
+      if (line.baseOwnerUnitAmount != null && (!totalPricing || divideToScale(parseNonNegativeDecimal(line.baseOwnerUnitAmount,16,`${prefix}.baseOwnerUnit`),{value:1n,scale:0},8).value !== decimalToBigInt(ownerUnit,8))) reasons.push(`${prefix}_BASE_PRICE_INVALID`);
     } catch {
       reasons.push(`${prefix}_AMOUNT_INVALID`);
       continue;
@@ -345,12 +391,22 @@ export function computeSettlement(input: ComputeSettlementInput): SettlementComp
     const qty = lineConsumed(line, reasons, prefix);
     if (!qty) continue;
     try {
-      const consumedB = fixedCents(qty.consumed, line.buyerUnitAmount, line.unitQuantity, prefix);
-      const consumedO = fixedCents(qty.consumed, line.ownerUnitAmount, line.unitQuantity, prefix);
-      if (consumedB > prepaidB) reasons.push(`${prefix}_CONSUMED_EXCEEDS_PREPAID`);
+      const originalConsumed = qty.consumed < qty.opening ? qty.consumed : qty.opening;
+      const consumedB = fixedCents(originalConsumed, line.buyerUnitAmount, line.unitQuantity, prefix);
+      const consumedO = fixedCents(qty.consumed, exactOwner, line.unitQuantity, prefix, 16);
       Gb += consumedB;
       Go += consumedO;
       unusedItems += prepaidB - consumedB;
+      if (totalPricing) {
+        if (typeof line.baseBuyerUnitAmount !== "string") {
+          reasons.push(`${prefix}_BASE_PRICE_MISSING`);
+        } else {
+          const originalBuyer=parseNonNegativeDecimal(line.baseBuyerUnitAmount,8,`${prefix}.baseBuyerUnit`);
+          const originalOwner=parseNonNegativeDecimal(exactOwner,16,`${prefix}.ownerUnit`);
+          if(decimalToBigInt(originalBuyer,16)<decimalToBigInt(originalOwner,16))reasons.push(`${prefix}_BASE_PRICE_INVALID`);
+          itemCharges.push({itemId:line.itemId,buyerCents:fixedCents(qty.consumed,line.baseBuyerUnitAmount,line.unitQuantity,prefix),ownerCents:consumedO});
+        }
+      } else if(qty.consumed>qty.opening)reasons.push(`${prefix}_EXCESS_PRICE_MISSING`);
       if (qty.consumed !== 0n) anyItemConsumed = true;
       itemConsumed.push({ itemId: line.itemId, consumed: qty.consumed.toString(), remaining: qty.remaining.toString() });
     } catch {
@@ -370,8 +426,20 @@ export function computeSettlement(input: ComputeSettlementInput): SettlementComp
   let makeup = rat(0n);
   if (started && early === true && input.endReason === "TENANT_VOLUNTARY_EARLY") makeup = makeupExact(F, q, Q);
 
-  const renterHaffTotal = rRoundCents(radd(exactHb, makeup));
-  const makeupCents = renterHaffTotal - rRoundCents(exactHb);
+  if (totalPricing && !reasons.some(reason => reason.includes("_BASE_PRICE_"))) {
+    const gross=[{itemId:input.haff.itemId,buyerCents:haffBase,ownerCents:Ho},...itemCharges];
+    const base = gross.reduce((total, line) => total + line.buyerCents, 0n);
+    const payable = typeof input.totalPayableRatio === "string" ? payableCentsFor(base, input.totalPayableRatio) : null;
+    if (payable === null) {
+      reasons.push("TOTAL_DISCOUNT_UNKNOWN");
+    } else {
+      const allocated=allocateCombinedDiscount(gross,payable);
+      if(!allocated)reasons.push("DISCOUNT_OWNER_FUNDING_INSUFFICIENT");
+      else{Hb=allocated[0]!;Gb=allocated.slice(1).reduce((sum,value)=>sum+value,0n);}
+    }
+  }
+  const makeupCents = totalPricing?rRoundCents(makeup):rRoundCents(radd(exactHb, makeup)) - rRoundCents(exactHb);
+  const renterHaffTotal = Hb + makeupCents;
   const ownerConsumed = Ho + Go;
 
   let fee = 0n;
@@ -395,7 +463,6 @@ export function computeSettlement(input: ComputeSettlementInput): SettlementComp
   const renterCharge = renterHaffTotal + Gb + (feePayer === "RENTER" ? fee : 0n);
   const renterRefund = captured - renterCharge;
   if (captured !== resourcePrepaid + deposit) reasons.push("CAPTURED_MISMATCH");
-  if (renterCharge > resourcePrepaid) reasons.push("CHARGE_EXCEEDS_RESOURCE_PREPAYMENT");
   if (renterRefund < 0n) reasons.push("INSUFFICIENT_PREPAYMENT");
 
   if (reasons.length > 0) {
@@ -408,7 +475,7 @@ export function computeSettlement(input: ComputeSettlementInput): SettlementComp
     };
   }
 
-  const haffSpread = rRoundCents(exactHb) - Ho;
+  const haffSpread = Hb - Ho;
   const itemSpread = Gb - Go;
   const platformContribution = haffSpread + itemSpread + makeupCents + fee;
   return {
@@ -417,7 +484,7 @@ export function computeSettlement(input: ComputeSettlementInput): SettlementComp
     early,
     consumed: { haff: q.toString(), items: itemConsumed },
     amounts: {
-      haffConsumedBuyer: yuan(rRoundCents(exactHb)),
+      haffConsumedBuyer: yuan(Hb),
       haffConsumedOwner: yuan(Ho),
       haffSpread: yuan(haffSpread),
       itemConsumedBuyer: yuan(Gb),
@@ -434,7 +501,8 @@ export function computeSettlement(input: ComputeSettlementInput): SettlementComp
       ownerNet: yuan(ownerNet),
       renterCharge: yuan(renterCharge),
       renterRefund: yuan(renterRefund),
-      depositRefund: yuan(deposit),
+      // Charges consume the resource prepayment before the tenant's actual deposit.
+      depositRefund: yuan(renterRefund < deposit ? renterRefund : deposit),
       platformHaffSpread: yuan(haffSpread),
       platformItemSpread: yuan(itemSpread),
       platformMakeup: yuan(makeupCents),
@@ -454,12 +522,13 @@ export function settlementConfirmationReady(facts: SettlementConfirmationFacts):
   oneOf(facts.kind, KINDS, "SETTLEMENT_KIND_UNKNOWN", reasons);
   if (facts.early !== true && facts.early !== false) reasons.push("EARLY_FLAG_UNKNOWN");
   oneOf(facts.initiatorParty, PARTIES, "INITIATOR_UNKNOWN", reasons);
-  if (facts.renterRejectedVersionId === facts.settlementVersionId || facts.ownerRejectedVersionId === facts.settlementVersionId) {
-    reasons.push("PARTY_REJECTED");
+  const supportFinalized=facts.kind==="SYSTEM"&&facts.supportFinalizedVersionId===facts.settlementVersionId;
+  if(!supportFinalized){
+    if (facts.renterRejectedVersionId === facts.settlementVersionId || facts.ownerRejectedVersionId === facts.settlementVersionId) reasons.push("PARTY_REJECTED");
+    if (facts.renterConfirmedVersionId !== facts.settlementVersionId) reasons.push("RENTER_CONFIRMATION_MISSING");
+    if (facts.ownerConfirmedVersionId !== facts.settlementVersionId) reasons.push("OWNER_CONFIRMATION_MISSING");
+    if (facts.early === true && facts.supportReviewedVersionId !== facts.settlementVersionId) reasons.push("SUPPORT_REVIEW_MISSING");
   }
-  if (facts.renterConfirmedVersionId !== facts.settlementVersionId) reasons.push("RENTER_CONFIRMATION_MISSING");
-  if (facts.ownerConfirmedVersionId !== facts.settlementVersionId) reasons.push("OWNER_CONFIRMATION_MISSING");
-  if (facts.early === true && facts.supportReviewedVersionId !== facts.settlementVersionId) reasons.push("SUPPORT_REVIEW_MISSING");
   if (facts.kind === "MANUAL_ADJUSTMENT") {
     const ap = facts.opsApproval;
     if (!ap || typeof ap !== "object" || ap.status !== "APPROVED") reasons.push("OPS_APPROVAL_MISSING");

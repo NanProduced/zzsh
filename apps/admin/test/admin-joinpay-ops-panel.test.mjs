@@ -30,9 +30,17 @@ async function setup(t, answer, options = {}) {
   t.after(async () => { await act(async () => root.unmount()); await source.close(); await w.happyDOM.abort(); });
   const input = host.querySelector('[aria-label="退款金额（元）"]');
   await act(async () => { Object.getOwnPropertyDescriptor(w.HTMLInputElement.prototype, 'value').set.call(input, '1.00'); input.dispatchEvent(new w.Event('input', { bubbles: true })); });
+  const reason = host.querySelector('[aria-label="退款原因"]');
+  if (reason && !reason.disabled) await act(async () => { Object.getOwnPropertyDescriptor(w.HTMLInputElement.prototype, 'value').set.call(reason, '已核实退款原因'); reason.dispatchEvent(new w.Event('input', { bubbles: true })); });
   const submit = async () => { await act(async () => host.querySelector('form').dispatchEvent(new w.Event('submit', { bubbles: true, cancelable: true }))); await act(async () => { await new Promise(setImmediate); }); };
   return { host, calls, submit, render, module, storage:w.sessionStorage, pending: () => JSON.parse(w.sessionStorage.getItem(options.binding ? `${storageKey}.${JSON.stringify([options.binding.adminUserId,options.binding.sessionId])}` : storageKey)) };
 }
+
+test('a new manual refund requires a reason before saving a key or making a request', async t => {
+  const ui = await setup(t, () => response(null)); const input = ui.host.querySelector('[aria-label="退款原因"]');
+  await act(async () => { Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set.call(input, ''); input.dispatchEvent(new window.Event('input', { bubbles: true })); });
+  await ui.submit(); assert.equal(ui.calls.length, 0); assert.equal(ui.pending(), null); assert.match(ui.host.textContent, /请填写退款原因/);
+});
 
 test('yuan display retains the original positive sixteen-digit cents command domain', async t => {
   const ui = await setup(t, () => response(null));
@@ -97,6 +105,22 @@ test('unknown or malformed query outcomes are not rendered as an acquired provid
   for(const bad of [null,{},[],{outcome:{}},{outcome:{kind:'NEW_VENDOR_STATE'},channelArrival:'UNKNOWN'},{outcome:{kind:'OBSERVED'},channelArrival:'ARRIVED'}]){
     const text=ui.module.queryOutcomeText(bad);assert.match(text,/未知/);assert.doesNotMatch(text,/已取得/);
   }
+});
+
+test('reviewed refund query keeps the original refund visibly under review',async t=>{
+  const ui=await setup(t,()=>response(null));
+  const receipt={contractVersion:'admin-joinpay-query.v1',operation:'REFUND_QUERY',objectId:'refund_1',channelArrival:'UNKNOWN',outcome:{kind:'OBSERVED',event:'REVIEW'}};
+  const text=ui.module.queryOutcomeText(receipt);assert.match(text,/仍需核对/);assert.match(text,/原退款号/);assert.doesNotMatch(text,/退款成功|到账/);
+});
+
+test('staff can query a reviewed refund without the page presenting it as completed',async t=>{
+  const item={intentId:'refund_1',postingId:'posting_1',refundOrderNo:'RF123',amountCents:'100',state:'UNKNOWN',budgetDisposition:'ALLOCATED',requiresReview:true,
+    completedAt:null,postingResponsibility:{frozenCents:'100',allocatedCents:'100',remainingCents:'0'},latestObservation:null,channelArrival:'UNKNOWN'};
+  const ui=await setup(t,call=>response(call.method==='GET'?{items:[item]}:{contractVersion:'admin-joinpay-query.v1',operation:'REFUND_QUERY',objectId:'refund_1',channelArrival:'UNKNOWN',outcome:{kind:'OBSERVED',event:'UNKNOWN'}}));
+  await act(async()=>{[...ui.host.querySelectorAll('button')].find(button=>button.textContent==='读取退款申请').click();await new Promise(setImmediate);});
+  await act(async()=>{[...ui.host.querySelectorAll('button')].find(button=>button.textContent==='按原号补查').click();await new Promise(setImmediate);});
+  assert.match(ui.host.textContent,/退款仍需核对/);assert.match(ui.host.textContent,/保留原退款号/);assert.doesNotMatch(ui.host.textContent,/退款成功/);
+  assert.equal(ui.calls.filter(call=>call.method==='POST').length,1);
 });
 
 test('owned legacy recovery without optional reason keeps its original key and empty-body meaning', async t=>{

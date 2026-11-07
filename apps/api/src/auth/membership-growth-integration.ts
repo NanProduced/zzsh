@@ -74,7 +74,7 @@ export type AcceptedSettlementSnapshot = {
   effectiveAtUtc: string;
   recordedAtUtc: string;
   inputSnapshot: {
-    schema: "settlement-version-v2";
+    schema: "settlement-version-v2" | "settlement-version-v3";
     renterUserId: string;
     ownerUserId: string;
     listingVersionId: string;
@@ -161,7 +161,7 @@ function legalMinimumBillingCents(snapshot: AcceptedSettlementSnapshot): string 
 
 export function mapAcceptedSettlementToGrowthFacts(snapshot: AcceptedSettlementSnapshot): ContributionMapping {
   const unmapped: ContributionMapping["unmapped"] = [];
-  if (snapshot.supersededAt !== null || snapshot.postingId === null || snapshot.inputSnapshot.schema !== "settlement-version-v2"
+  if (snapshot.supersededAt !== null || snapshot.postingId === null || !["settlement-version-v2","settlement-version-v3"].includes(snapshot.inputSnapshot.schema)
     || snapshot.inputSnapshot.renterUserId !== snapshot.renterUserId) {
     return { facts: [], unmapped: [{ code: "SNAPSHOT_INVALID", detail: "settlement version is not the accepted current posted snapshot" }] };
   }
@@ -546,7 +546,7 @@ function quoteInputForGrowth(base: QuoteInput, contract: GrowthPricingContract):
   return { ...base, customerTier: "STANDARD", lines, haffRule };
 }
 
-function quoteCandidate(base: QuoteInput, contract: Exclude<ModePricingContract, NotPricedParameter>, source: GrowthOfferPlan["source"], benefitVersion: string, binding: OfferBinding, depositWaived: boolean, entitlementId?: string, validUntil?: string, allowanceCents?: string, approvedUniformTier = false, frozenLegacyBase?: InternalQuote): { plan: GrowthOfferPlan; quote: InternalQuote } | null {
+function quoteCandidate(base: QuoteInput, contract: Exclude<ModePricingContract, NotPricedParameter>, source: GrowthOfferPlan["source"], benefitVersion: string, binding: OfferBinding, depositWaived: boolean, entitlementId?: string, validUntil?: string, allowanceCents?: string, approvedUniformTier = false, frozenLegacyBase?: InternalQuote): { plan: GrowthOfferPlan; quote: InternalQuote; payableRatio?: string } | null {
   const depositCents = tenantDepositAfterBenefit(base.deposits?.tenantDepositCents ?? null, depositWaived, allowanceCents);
   base = { ...base, deposits: { ...base.deposits, ...(depositCents === null ? {} : { tenantDepositCents: depositCents }) } };
   const planInput = { source, benefitVersion, binding, ...(entitlementId ? { entitlementId } : {}), ...(validUntil ? { validUntil } : {}) };
@@ -563,7 +563,7 @@ function quoteCandidate(base: QuoteInput, contract: Exclude<ModePricingContract,
     if (!result.quotable) return null;
     const discounted = applyTotalDiscountToQuote(result.quote, contract.payableRatio);
     if (!discounted) return null;
-    return { quote: discounted.quote, plan: quoteToGrowthOfferPlan(discounted.quote, planInput) };
+    return { quote: discounted.quote, plan: quoteToGrowthOfferPlan(discounted.quote, planInput), payableRatio: contract.payableRatio };
   }
   if (frozenLegacyBase) return null;
   const input = quoteInputForGrowth(base, contract);
@@ -884,7 +884,7 @@ export function entitlementStateAtMicro(entitlement: Pick<StoredEntitlement, "st
 
 export type MembershipGrowthQuoteCandidatesInput = Parameters<MembershipGrowthConfirmationReader>[1] & { asOfUtc?: string };
 export type MembershipGrowthQuoteCandidatesResult =
-  | { knowledge: "KNOWN"; policyVersion: string; candidates: Array<{ plan: GrowthOfferPlan; quote: InternalQuote }>; entitlementIds: string[]; effectiveTier: Exclude<NonNullable<GrowthProjectionDto["effectiveTier"]>, "UNKNOWN">; policyTier: NonNullable<ReturnType<typeof policyTierForGrowthProjection>>; asOfUtc: string }
+  | { knowledge: "KNOWN"; policyVersion: string; candidates: Array<{ plan: GrowthOfferPlan; quote: InternalQuote; payableRatio?: string }>; entitlementIds: string[]; effectiveTier: Exclude<NonNullable<GrowthProjectionDto["effectiveTier"]>, "UNKNOWN">; policyTier: NonNullable<ReturnType<typeof policyTierForGrowthProjection>>; asOfUtc: string }
   | { knowledge: "UNKNOWN"; reason: string; asOfUtc?: string; entitlementId?: string };
 
 /**
@@ -938,7 +938,7 @@ export async function readMembershipGrowthQuoteCandidatesAt(client: PoolClient, 
   } catch {
     return { knowledge: "UNKNOWN", reason: "ENTITLEMENT_READ_FAILED", asOfUtc };
   }
-  const candidates: Array<{ plan: GrowthOfferPlan; quote: InternalQuote }> = [growthCandidate];
+  const candidates: Array<{ plan: GrowthOfferPlan; quote: InternalQuote; payableRatio?: string }> = [growthCandidate];
   const entitlementIds: string[] = [];
   for (const entitlement of rows) {
     const state = entitlementStateAtMicro(entitlement, asOfUtc);

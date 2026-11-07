@@ -363,7 +363,8 @@ export type PersonalRentalQuote = {
   confirmationToken: string;
 };
 
-export type SettlementLine = { itemId: string; quantity?: string; unit?: string; pricingKind?: string };
+export type SettlementLine = { itemId: string; name?: string | null; quantity?: string; unit?: string; pricingKind?: string };
+export type SettlementQuantityInput = { itemId: string; remainingQuantity: string } | { itemId: string; consumedQuantity: string };
 export type SettlementOpening = {
   id: string;
   versionNo: string;
@@ -372,7 +373,7 @@ export type SettlementOpening = {
   confirmedAt?: string | null;
   createdAt?: string;
   lines: SettlementLine[];
-  acks?: Array<{ party: string; createdAt?: string }>;
+  acks?: Array<{ party: string; source?: string; createdAt?: string }>;
 };
 export type SettlementVersion = {
   id: string;
@@ -388,7 +389,7 @@ export type SettlementVersion = {
   systemRenterRefund?: string | null;
   proposedOwnerNet?: string | null;
   proposedRenterRefund?: string | null;
-  inputSnapshot?: { lines?: Array<{ itemId: string; openingQuantity?: string; remainingQuantity?: string }>; endReason?: string | null; reason?: string | null } | null;
+  inputSnapshot?: { lines?: Array<{ itemId: string; openingQuantity?: string; remainingQuantity?: string; consumedQuantity?: string }>; endReason?: string | null; reason?: string | null } | null;
   computation?: { ok?: boolean; reasons?: string[]; early?: boolean; consumed?: { haff?: unknown; items?: Array<{ itemId: string; consumed: string; remaining: string }> }; amounts?: Record<string, unknown> } | null;
   decisions?: Array<{ party: string; action: string; reason?: string | null; createdAt?: string }>;
 };
@@ -422,8 +423,10 @@ export type OrderSettlement = {
   orderId: string;
   revision?: string;
   rentalStarted?: boolean;
+  consumptionMode?: "REMAINING" | "ACTUAL" | "UNAVAILABLE";
+  extraResources?: SettlementLine[];
   openings: SettlementOpening[];
-  intakes: Array<{ id: string; versionNo: string; status: string; initiatorParty?: string; settlementVersionId?: string | null; createdAt?: string; lines?: Array<{ itemId: string; remainingQuantity: string }> }>;
+  intakes: Array<{ id: string; versionNo: string; status: string; initiatorParty?: string; settlementVersionId?: string | null; createdAt?: string; lines?: Array<{ itemId: string; remainingQuantity?: string; consumedQuantity?: string }> }>;
   versions: SettlementVersion[];
   /** `status` is only present for an INTAKE request; a settlement-version request omits it entirely. */
   currentRequest?: { kind: string; id: string; versionNo: string; status?: string } | null;
@@ -922,9 +925,9 @@ export const orderApi = {
     requestJson<{ scope: string; knowledge: string; mayReapply: boolean; receipt: unknown }>(`/api/orders/${encodeURIComponent(orderId)}/local-checkouts/receipt?${new URLSearchParams({ key })}`, { signal, expectedUserId: userId }),
   settlement: (orderId: string, signal?: AbortSignal) =>
     requestJson<OrderSettlement>(`/api/orders/${encodeURIComponent(orderId)}/settlement`, { signal }),
-  settlementPreview: (orderId: string, body: { lines: Array<{ itemId: string; remainingQuantity: string }>; endReason?: string }, signal?: AbortSignal) =>
+  settlementPreview: (orderId: string, body: { lines: SettlementQuantityInput[]; endReason?: string }, signal?: AbortSignal) =>
     requestWrite<SettlementPreview>(`/api/orders/${encodeURIComponent(orderId)}/settlement-preview`, { body, signal }),
-  submitSettlement: (orderId: string, body: { lines: Array<{ itemId: string; remainingQuantity: string }>; acceptedHash: string; endReason?: string; termsAccepted?: boolean }, key: string, signal?: AbortSignal) =>
+  submitSettlement: (orderId: string, body: { lines: SettlementQuantityInput[]; acceptedHash: string; endReason?: string; termsAccepted?: boolean }, key: string, signal?: AbortSignal) =>
     requestWrite<OrderSettlement>(`/api/orders/${encodeURIComponent(orderId)}/settlements`, { body, key, signal }),
   decideSettlement: (orderId: string, versionId: string, body: { action: "CONFIRM" | "REJECT"; versionHash: string; reason?: string; termsAccepted?: boolean }, key: string, signal?: AbortSignal) =>
     requestWrite<OrderSettlement>(`/api/orders/${encodeURIComponent(orderId)}/settlements/${encodeURIComponent(versionId)}/decision`, { body, key, signal }),

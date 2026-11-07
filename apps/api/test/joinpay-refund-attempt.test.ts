@@ -60,6 +60,17 @@ test("原始请求固定2.3/原付款与退款号/精确分；QUERY轮换不改�
   const q = model("QUERY"), changed = { ...q.binding, profileId: "ORIGINAL_OLD_PROFILE", initialProfileSha256: "d".repeat(64), keyVersionRef: "old_key" };
   assert.equal(new URLSearchParams(readRefundOutbound(produceRefundRequest(q.profile, "QUERY", changed, KEY)).body).get("p2_RefundOrderNo"), base.refundOrderNo);
 });
+test("旧付款的协议参数不需要虚构新平台付款确认或渠道流水号",()=>{
+ const m=model(),b=m.binding;
+ const wire={merchantNo:b.merchantNo,merchantIdentityId:b.merchantIdentityId,originalPaymentOrderNo:b.originalPaymentOrderNo,
+  refundOrderNo:b.refundOrderNo,amountCents:b.amountCents,currency:b.currency,notifyUrl:b.notifyUrl,profileId:b.profileId,
+  initialProfileSha256:b.initialProfileSha256,keyVersionRef:b.keyVersionRef,reason:'订单结算退款'};
+ const request=produceRefundRequest(m.profile,'SUBMIT',wire,KEY),fields=new URLSearchParams(readRefundOutbound(request).body);
+ assert.equal(fields.get('p2_OrderNo'),b.originalPaymentOrderNo);assert.equal(fields.get('p3_RefundOrderNo'),b.refundOrderNo);
+ assert.equal(fields.get('p5_RefundReason'),'订单结算退款');
+ assert.equal(inspectRefundProfile(m.profile,'SUBMIT',m.responseBody,wire,KEY).signature,'MATCH');
+ assert.throws(()=>produceRefundRequest(m.profile,'SUBMIT',{...wire,merchantIdentityId:'other'},KEY),/BINDING_MISMATCH/);
+});
 test("synthetic目的即使注入真实fetch也永不发送；fake模型响应永不标真实来源", async () => {
   const s = model("SUBMIT", "SYNTHETIC_PROTOCOL"), request = produceRefundRequest(s.profile, "SUBMIT", s.binding, KEY);
   await assert.rejects(exchangeRefundRequest(request, { fetch: globalThis.fetch }), /SYNTHETIC/);
@@ -192,6 +203,23 @@ test("薄通知原URI/GET/精确ACK：坏输入/非GET/未知路径不读钥或�
   assert.equal(connects, 0); assert.equal(body, "fail");
 });
 
+test("旧退款通知按原号定位，关闭首派后仍可恢复；未装配或未知单不取钥",async t=>{
+  const store=require("../src/order/channel-refund-store"),legacy=require("../src/order/legacy-refund-attempt");
+  t.mock.method(store,"assertRefundResource",async()=>"1");let lookups=0,receives=0,found=true;
+  t.mock.method(legacy,"receiveLegacyRefundNotification",async(_o:any,id:string,raw:string)=>{
+    receives++;assert.equal(id,"legacy-intent");assert(raw.includes("r3_RefundOrderNo=LR"));return {ack:"success"};
+  });
+  const client={query:async(sql:string)=>{if(["BEGIN","COMMIT","ROLLBACK"].includes(sql))return {rows:[]};
+    assert(sql.includes("legacy_refund_intent"));lookups++;return {rows:found?[{id:"legacy-intent"}]:[]};},release(){}};
+  const options:any={pool:{connect:async()=>client},admission:{},legacyRefundsEnabled:false};
+  const raw="r1_MerchantNo=12345&r3_RefundOrderNo=LR"+"a".repeat(28);
+  const send=async(o:any)=>{let body="";const res:any={status(){return this;},setHeader(){},send(value:string){body=value;}};
+    await handleJoinpayRefundNotification({method:"GET",url:JOINPAY_REFUND_NOTIFICATION_PATH+"?"+raw} as any,res,o);return body;};
+  assert.equal(await send({...options,legacyRefundsEnabled:undefined}),"fail");assert.equal(lookups,0);
+  assert.equal(await send(options),"success");assert.equal(receives,1);
+  found=false;assert.equal(await send(options),"fail");assert.equal(receives,1);assert.equal(lookups,2);
+});
+
 test("SYNTHETIC_COMPONENT_MODEL：known退款号缺必填schema先拒且0key，保留INVALID原件；完整schema仍走原验签", async t => {
   const m=executionModel(t),n=model("NOTIFY"),store=require("../src/order/channel-refund-store"),source=require("../src/order/joinpay-refund-source");
   t.mock.method(store,"assertRefundResource",async()=>"100");
@@ -252,7 +280,7 @@ test("SYNTHETIC_QUERY_ONLY：终态/复核/活跃lease/未到期/节流/预算�
     budget_disposition: "ALLOCATED" } as any; m.state.attempts = []; m.state.now = 31; m.state.due = true; m.state.intervalOk = true; };
   reset(); m.state.row.state = "SUCCEEDED"; assert.deepEqual(await call(), { kind: "SKIPPED", intentId: id, state: "SUCCEEDED", reason: "TERMINAL" });
   reset(); m.state.row.state = "REVIEW_REQUIRED"; assert.deepEqual(await call(), { kind: "SKIPPED", intentId: id, state: "REVIEW_REQUIRED", reason: "REVIEW_REQUIRED" });
-  reset(); m.state.row.requires_review = true; assert.deepEqual(await call(), { kind: "SKIPPED", intentId: id, state: "UNKNOWN", reason: "REVIEW_REQUIRED" });
+  reset(); m.state.row.requires_review = true; assert.deepEqual(await call(), { kind: "NOT_DISPATCHED", intentId: id, state: "UNKNOWN" });
   reset(); m.state.row.lease_until = 61; assert.deepEqual(await call(), { kind: "SKIPPED", intentId: id, state: "UNKNOWN", reason: "ACTIVE_LEASE" });
   reset(); m.state.row.state = "READY"; m.state.row.lease_version = "0"; m.state.row.lease_owner = null; m.state.row.lease_until = 0; m.state.due = false;
   assert.deepEqual(await call(), { kind: "NOT_DISPATCHED", intentId: id, state: "READY" });
@@ -263,6 +291,26 @@ test("SYNTHETIC_QUERY_ONLY：终态/复核/活跃lease/未到期/节流/预算�
   reset(); m.state.attempts = [["s", id, "SUBMIT"], ...Array.from({ length: 10 }, (_, i) => ["q" + i, id, "QUERY"])]; m.state.intervalOk = true;
   assert.deepEqual(await call(), { kind: "SKIPPED", intentId: id, state: "UNKNOWN", reason: "BUDGET_EXHAUSTED" });
   assert.equal(m.state.keys, 0); assert.equal(m.state.sends.length, 0); assert.equal(m.state.audits.length, 0);
+});
+
+test("SYNTHETIC_QUERY_ONLY：已提交且待核的退款允许查原号，但不清除复核或接纳终态",async t=>{
+  const m=executionModel(t),source=require("../src/order/joinpay-refund-source"),finance=require("../src/finance/native-rental-refund-store");let captured=0,consumed=0;
+  t.mock.method(source,"captureRefundTerminalFact",async()=>{captured++;throw Error("must not capture");});
+  t.mock.method(finance,"consumeNativeRentalRefundTerminal",async()=>{consumed++;throw Error("must not consume");});
+  Object.assign(m.state.row,{state:"UNKNOWN",lease_version:"1",lease_owner:"old",lease_until:1,requires_review:true});
+  m.state.now=31;m.state.attempts.push(["original-submit","refund_model_1","SUBMIT"]);
+  const result=await queryJoinpayRefund(m.options,"refund_model_1","support-query",{minimumIntervalSeconds:60});
+  assert.equal(result.kind,"OBSERVED");assert.equal(m.state.sends.length,1);assert.match(m.state.sends[0]!,/queryRefund$/);
+  assert.equal(m.state.row.requires_review,true);assert.equal(m.state.row.budget_disposition,"ALLOCATED");
+  assert.equal(captured,0);assert.equal(consumed,0);assert.equal(result.terminal,null);
+});
+
+test("SYNTHETIC_QUERY_ONLY：自动次数耗尽后受权客服仍可按频率限制查询原号",async t=>{
+  const m=executionModel(t);Object.assign(m.state.row,{state:"UNKNOWN",lease_version:"1",lease_owner:"old",lease_until:1,requires_review:true});
+  m.state.now=31;m.state.attempts.push(["original-submit","refund_model_1","SUBMIT"],...Array.from({length:10},(_,i)=>[`query-${i}`,"refund_model_1","QUERY"]));
+  let authorized=0;const result=await queryJoinpayRefund(m.options,"refund_model_1","support-query",{minimumIntervalSeconds:60,authorize:async()=>{authorized++;}});
+  assert.equal(authorized,1);assert.equal(result.kind,"OBSERVED");assert.equal(m.state.attempts.filter((a:any[])=>a[2]==="SUBMIT").length,1);
+  assert.equal(m.state.row.requires_review,true);assert.equal(m.state.row.budget_disposition,"ALLOCATED");
 });
 
 test("SYNTHETIC_QUERY_ONLY：authorize拒绝在资金锁前回滚，0lease0attempt0钥0外呼", async t => {

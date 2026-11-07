@@ -27,6 +27,7 @@ function load(relative) {
 // Transaction and picker tests use builtin explanatory content; live reads have separate contract/browser checks.
 export const loadContentFixture = load;
 export function contentFixtureDependency(name) {
+  if (name === "@zzsh/ui/display-money") return load("packages/ui/src/display-money.ts");
   if (name === "@zzsh/ui/account-media-placeholder") return load("packages/ui/src/account-media-placeholder.tsx");
   if (name === "@zzsh/ui/legacy-account-image") return load("packages/ui/src/legacy-account-image.tsx");
   if (name === "@/components/content/platform-update-notices") return { BusinessUpdateNotices: () => null };
