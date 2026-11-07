@@ -10,7 +10,7 @@
 | 容量 | 提供实际CPU/内存/磁盘/带宽配额。构建尽量在CI/独立构建机完成；运行、迁移和压测分别记录峰值，再定容。磁盘须覆盖当前库、源dump、转换中间件、一次可恢复备份与日志余量，不能按压缩dump大小估算数据库空间 |
 | 网络 | 同地域VPC内连接PostgreSQL/Redis/OSS，数据库与Redis不开放公网；入口HTTPS，SSH只对维护者IP。API3102与Next3100只绑定本机/私网；Admin静态资源由反代提供 |
 | 域名/TLS | 用户、Admin、API三个Origin和对应证书、DNS、续期责任；回调URL预留HTTPS。证书主机名与实际数据库/Redis连接地址匹配 |
-| 数据 | 独立 `zzsh_ecs_test*` 目标和独立owner/migration/runtime；生产切换改 `zzsh_prod*`，不改同一库的身份假装换环境。先装已封版initial+尾迁移+runtime ACL，再转换旧源，不能直接对私有IM账本跑canonical全链 |
+| 数据 | 独立 `zzsh_ecs_test*` 目标和独立 owner/migration/runtime；生产切换改 `zzsh_prod*`，不改同一库的身份假装换环境。首版从已核验的完整快照恢复，核对 schema、迁移记录及权限；仅全新初始化时安装 initial 和尾迁移，不对恢复库重复初始化 |
 | 对象存储 | 首版使用现有 `zzsh-dev` Bucket，暂不开 CDN；旧账号截图按约定路径映射，尚未上传的图片允许后续补传。数据库备份放独立受限位置 |
 | 三方 | 按[配置清单](deployment-prerequisites.md)配置短信、实名、云信 dev、OSS 及银行卡保护钥；真实汇聚调用保持关闭，测试资金操作仅使用明确标识的模拟能力 |
 | 恢复与观察 | 数据库自动备份/PITR能力与一次真实恢复验证；日志轮转、磁盘/内存/错误率/延迟告警；备份加密、访问控制、保留周期与恢复负责人 |
