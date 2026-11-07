@@ -4,6 +4,7 @@ import { useEffect, useState } from 'react';
 import { Megaphone, Pause, Play } from 'lucide-react';
 import { updateVisibility, type PublicUpdate, type UpdateSurface } from '@zzsh/content/updates';
 import { parseUpdatesPage, updateTypeLabel } from '@/lib/platform-updates';
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import './platform-update-notices.css';
 
 function useUpdateNotices(surface: 'home' | UpdateSurface, gameId?: string) {
@@ -39,8 +40,17 @@ export function PlatformUpdateTicker() {
   useEffect(() => { if (!running) return; const timer = setInterval(() => setIndex(n => n + 1), 5000); return () => clearInterval(timer); }, [running, items.length]);
   return <div className="platform-update-ticker" data-running={running} onMouseEnter={() => setHovered(true)} onMouseLeave={() => setHovered(false)} onFocusCapture={() => setFocused(true)} onBlurCapture={event => { if (!event.currentTarget.contains(event.relatedTarget)) setFocused(false); }}>
     <span className="platform-update-label"><Megaphone size={19} aria-hidden="true" />平台动态</span>
-    <div className="platform-update-message" aria-live="off">{state === 'loading' ? <span role="status">正在读取…</span> : state === 'error' ? <span role="status">动态暂时无法读取 <button type="button" onClick={retry}>重试</button></span> : current ? <><span className={`ticker-kind ticker-kind--${current.type.toLowerCase()}`}>{updateTypeLabel(current.type)}</span><Link href={`/updates/${encodeURIComponent(current.id)}`} title={current.title}>{current.title}</Link></> : null}</div>
-    {items.length > 1 ? <button className="platform-update-pause" type="button" disabled={reduced} aria-label={reduced ? '减少动态：平台动态已暂停' : paused ? '恢复平台动态轮播' : '暂停平台动态轮播'} onClick={() => setPaused(x => !x)}>{paused || reduced ? <Play size={14} /> : <Pause size={14} />}</button> : null}
+    <div className="platform-update-message" aria-live="off">{state === 'loading' ? <span role="status">正在读取…</span> : state === 'error' ? <span role="status">动态暂时无法读取 <button type="button" onClick={retry}>重试</button></span> : current ? <><span className={`ticker-kind ticker-kind--${current.type.toLowerCase()}`}>{updateTypeLabel(current.type)}</span><Link href={`/updates/${encodeURIComponent(current.id)}`}>{current.title}</Link></> : null}</div>
+    {items.length > 1 ? (
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <button className="platform-update-pause" type="button" disabled={reduced} aria-label={reduced ? '减少动态：平台动态已暂停' : paused ? '恢复平台动态轮播' : '暂停平台动态轮播'} onClick={() => setPaused(x => !x)}>
+            {paused || reduced ? <Play size={14} /> : <Pause size={14} />}
+          </button>
+        </TooltipTrigger>
+        <TooltipContent side="top">{reduced ? '已暂停' : paused ? '恢复轮播' : '暂停轮播'}</TooltipContent>
+      </Tooltip>
+    ) : null}
     <Link className="platform-update-all" href="/updates">查看全部 <span aria-hidden="true">→</span></Link>
   </div>;
 }

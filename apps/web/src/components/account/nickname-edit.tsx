@@ -336,7 +336,16 @@ export function NicknameEditEntry({
               <p className={discardOpen ? 'sec-dialog-desc' : 'sr-only'}>{discardOpen ? '昵称修改尚未保存。放弃后保留当前昵称。' : '修改对外展示的昵称。'}</p>
             </Dialog.Description>
             {discardOpen ? <div className="sec-dialog-actions"><button type="button" className="button secondary" onClick={() => { setDiscardOpen(false); requestAnimationFrame(() => inputRef.current?.focus()); }}>继续编辑</button><button type="button" className="button primary" onClick={discard}>放弃修改</button></div> : <form aria-label="修改昵称" className="auth-fields" onSubmit={submit} noValidate>
-              <FieldGroup id="profile-nickname" label="昵称" helper={<span aria-live="polite">{[...value].length}/64</span>}>
+              <div className="nickname-current-profile">
+                <div className="nickname-profile-avatar" aria-hidden="true">
+                  {serverNickname ? serverNickname.slice(0, 1).toUpperCase() : "U"}
+                </div>
+                <div className="nickname-profile-meta">
+                  <span className="nickname-profile-label">当前名片</span>
+                  <strong className="nickname-profile-name">{serverNickname ?? "暂无昵称"}</strong>
+                </div>
+              </div>
+              <FieldGroup id="profile-nickname" label="新昵称" helper={<span aria-live="polite">{[...value].length}/64</span>}>
                 <input
                   id="profile-nickname"
                   aria-required="true"
@@ -346,6 +355,7 @@ export function NicknameEditEntry({
                   value={value}
                   disabled={formLocked}
                   autoComplete="nickname"
+                  placeholder="请输入 1–64 个字符的昵称"
                   onChange={(event) => {
                     edited.current = true;
                     if (nicknameDraft) nicknameDraft.current = { userId, value: event.target.value };

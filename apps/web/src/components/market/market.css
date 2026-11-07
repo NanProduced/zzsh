@@ -385,6 +385,12 @@ html[data-theme="dark"] .functional-shell.functional-shell--browse .market-secti
 .market-skin-popover .market-skin-panel-footer { position:sticky; bottom:0; z-index:2; background:var(--color-bg-card); }
 .market-skin-panel-footer > span { margin-right:auto; }
 .market-skin-confirm { min-height:34px; padding:4px 24px; border:1px solid var(--color-accent-brand); border-radius:6px; color:var(--color-accent-brand-text); background:var(--color-accent-brand); cursor:pointer; }
+.market-skin-load-more-wrap { display:flex; justify-content:center; width:100%; padding:14px 0 6px; }
+.market-load-catalog-btn { display:inline-flex; align-items:center; justify-content:center; gap:6px; min-height:36px; padding:0 24px; border-radius:8px; font-size:13px; font-weight:500; color:var(--color-text-secondary); background:var(--color-bg-elevated); border:1px solid var(--color-border-default); cursor:pointer; transition:all 140ms ease; }
+.market-load-catalog-btn:hover:not(:disabled) { border-color:var(--color-accent-brand); color:var(--color-text-primary); background:var(--color-bg-card-hover); }
+.market-load-catalog-btn:disabled { opacity:0.65; cursor:not-allowed; }
+.market-load-spin { animation:market-spin 1s linear infinite; }
+@keyframes market-spin { from { transform:rotate(0deg); } to { transform:rotate(360deg); } }
 .market-load-catalog { display:inline-flex; align-items:center; gap:5px; white-space:nowrap; min-height:34px; margin-top:10px; padding:4px 10px; border:1px solid var(--color-border-default); border-radius:6px; cursor:pointer; }
 .market-skin-inline { flex:1 0 100%; min-width:0; margin-top:8px; border:1px solid var(--color-border-default); border-radius:8px; background:var(--color-bg-card); }
 .market-filter-controls,.market-skin-popover,.market-grade-panel,.market-region-popover { font-family:var(--font-sans); line-height:1.5; }
@@ -1345,3 +1351,291 @@ span.detail-shot-image { display:flex; min-height:110px; align-items:center; jus
 .managed-contact-dialog h2 { margin:0; font-size:20px; }
 .managed-contact-dialog p { margin:14px 0; font-size:13px; line-height:1.7; overflow-wrap:anywhere; }
 .managed-contact-qr { display:block; width:min(100%,320px); height:auto; margin:18px auto; background:white; }
+
+/* ─── Market UI/UX Polish: Presets, Skeletons, Active Chips, Empty States ─── */
+.market-clear-filters:disabled,
+.market-clear-filters[disabled] {
+  opacity: .45;
+  cursor: not-allowed;
+  pointer-events: none;
+}
+
+/* Haff Filter Presets */
+.market-haff-presets-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.market-haff-preset-pill {
+  min-height: 32px;
+  padding: 3px 10px;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 500;
+  border: 1px solid var(--color-border-default);
+  background: var(--color-bg-card);
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  transition: all 140ms ease;
+}
+.market-haff-preset-pill:hover {
+  border-color: var(--color-accent-brand);
+  color: var(--color-text-primary);
+  background: var(--color-bg-card-hover);
+}
+.market-haff-preset-pill[data-selected="true"] {
+  background: rgba(245, 158, 11, 0.14);
+  border-color: #f59e0b;
+  color: var(--color-text-primary);
+  font-weight: 600;
+}
+html[data-theme="dark"] .market-haff-preset-pill[data-selected="true"] {
+  background: rgba(245, 158, 11, 0.2);
+  border-color: #fbbf24;
+  color: #fde68a;
+}
+
+/* Structured Resource Quantity Input Card */
+.market-resource-quantity {
+  background: var(--color-bg-elevated);
+  border: 1px solid var(--color-border-subtle);
+  border-radius: 8px;
+  padding: 8px 10px;
+  transition: border-color 0.16s ease, box-shadow 0.16s ease;
+}
+.market-resource-quantity:hover {
+  border-color: var(--color-border-strong);
+}
+.market-resource-quantity:focus-within {
+  border-color: var(--color-accent-brand);
+  box-shadow: 0 0 0 2px rgba(245, 158, 11, 0.15);
+}
+
+/* Clear all filter chip in active chips bar */
+.market-filter-chip--clear-all {
+  border-color: rgba(239, 68, 68, 0.4);
+  color: #dc2626;
+  font-weight: 600;
+  background: rgba(239, 68, 68, 0.06);
+}
+.market-filter-chip--clear-all:hover {
+  background: rgba(239, 68, 68, 0.14);
+  border-color: #dc2626;
+  color: #b91c1c;
+}
+html[data-theme="dark"] .market-filter-chip--clear-all {
+  border-color: rgba(248, 113, 113, 0.45);
+  color: #f87171;
+  background: rgba(239, 68, 68, 0.14);
+}
+html[data-theme="dark"] .market-filter-chip--clear-all:hover {
+  background: rgba(239, 68, 68, 0.22);
+  color: #fca5a5;
+}
+
+/* Skin selected inline chips */
+.market-skin-selected-inline {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-top: 6px;
+  width: 100%;
+}
+.market-skin-chip-selected {
+  font-size: 12px;
+  min-height: 28px;
+  padding: 2px 8px;
+  gap: 6px;
+  background: var(--color-delta-surface);
+  border-color: var(--color-delta-border);
+  color: var(--color-delta-accent-hover);
+}
+.market-skin-chip-remove {
+  background: none;
+  border: none;
+  padding: 0;
+  color: inherit;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  opacity: 0.75;
+}
+.market-skin-chip-remove:hover {
+  opacity: 1;
+}
+
+/* Empty State Card */
+.account-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  padding: 36px 20px;
+  background: var(--color-bg-card);
+  border: 1px dashed var(--color-border-default);
+  border-radius: 12px;
+  margin: 16px 0;
+}
+.account-empty-icon-wrap {
+  width: 56px;
+  height: 56px;
+  border-radius: 50%;
+  background: var(--color-bg-elevated);
+  border: 1px solid var(--color-border-subtle);
+  display: grid;
+  place-items: center;
+  color: var(--color-text-muted);
+  margin-bottom: 8px;
+}
+.account-empty h3 {
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--color-text-primary);
+  margin: 0 0 6px;
+}
+.account-empty p {
+  font-size: 13px;
+  color: var(--color-text-secondary);
+  max-width: 48ch;
+  margin: 0 0 14px;
+}
+.account-empty-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.account-empty-reset-btn {
+  min-height: 38px;
+  padding: 0 18px;
+  font-weight: 600;
+  font-size: 13px;
+}
+
+/* Shimmering Skeletons Matching Real Card Dimensions */
+@keyframes skeleton-shimmer {
+  0% { opacity: 0.45; }
+  50% { opacity: 0.85; }
+  100% { opacity: 0.45; }
+}
+.account-skeleton--grid {
+  display: flex;
+  flex-direction: column;
+  border-radius: 12px;
+  overflow: hidden;
+  background: var(--color-bg-card);
+  border: 1px solid var(--color-border-default);
+  animation: skeleton-shimmer 1.8s ease-in-out infinite;
+  min-height: 400px;
+}
+.account-skeleton--grid .account-skeleton-media {
+  width: 100%;
+  aspect-ratio: 16 / 9.5;
+  background: var(--color-bg-elevated);
+}
+.account-skeleton--grid .account-skeleton-body {
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  flex: 1;
+}
+.account-skeleton--grid .account-skeleton-title {
+  width: 85%;
+  height: 18px;
+  border-radius: 4px;
+  background: var(--color-bg-elevated);
+}
+.account-skeleton--grid .account-skeleton-meta {
+  width: 55%;
+  height: 14px;
+  border-radius: 4px;
+  background: var(--color-bg-elevated);
+}
+.account-skeleton--grid .account-skeleton-subattrs {
+  width: 70%;
+  height: 14px;
+  border-radius: 4px;
+  background: var(--color-bg-elevated);
+}
+.account-skeleton--grid .account-skeleton-skins {
+  width: 60%;
+  height: 20px;
+  border-radius: 4px;
+  background: var(--color-bg-elevated);
+}
+.account-skeleton--grid .account-skeleton-resources {
+  width: 90%;
+  height: 22px;
+  border-radius: 4px;
+  background: var(--color-bg-elevated);
+}
+.account-skeleton--grid .account-skeleton-breakdown {
+  margin-top: auto;
+  height: 72px;
+  border-radius: 8px;
+  background: var(--color-bg-elevated);
+}
+
+.account-skeleton--list {
+  display: grid;
+  grid-template-columns: 200px minmax(0, 1fr) 180px;
+  gap: 16px;
+  padding: 14px;
+  border-radius: 12px;
+  background: var(--color-bg-card);
+  border: 1px solid var(--color-border-default);
+  min-height: 140px;
+  animation: skeleton-shimmer 1.8s ease-in-out infinite;
+}
+.account-skeleton--list .account-skeleton-media {
+  width: 100%;
+  height: 100%;
+  border-radius: 8px;
+  background: var(--color-bg-elevated);
+}
+.account-skeleton--list .account-skeleton-content {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  justify-content: center;
+}
+.account-skeleton--list .account-skeleton-title {
+  width: 75%;
+  height: 20px;
+  border-radius: 4px;
+  background: var(--color-bg-elevated);
+}
+.account-skeleton--list .account-skeleton-meta {
+  width: 45%;
+  height: 14px;
+  border-radius: 4px;
+  background: var(--color-bg-elevated);
+}
+.account-skeleton--list .account-skeleton-matrix {
+  width: 90%;
+  height: 48px;
+  border-radius: 6px;
+  background: var(--color-bg-elevated);
+}
+.account-skeleton--list .account-skeleton-rail {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  justify-content: center;
+  gap: 10px;
+}
+.account-skeleton--list .account-skeleton-price {
+  width: 80px;
+  height: 28px;
+  border-radius: 4px;
+  background: var(--color-bg-elevated);
+}
+.account-skeleton--list .account-skeleton-button {
+  width: 100px;
+  height: 36px;
+  border-radius: 6px;
+  background: var(--color-bg-elevated);
+}

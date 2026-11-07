@@ -35,7 +35,7 @@ export function PortalFooter() {
         </div>
       </div>
       <div className="site-footer-links">
-        {([["使用帮助", footer.help], ["服务支持", footer.support]] as const).map(([title, links]) => links.length || title === "服务支持" ? <nav key={title} aria-label={title}><h2>{title}</h2><ul>{links.map((link, index) => <li key={`${link.label}:${index}`}><a href={link.href}>{link.label}</a></li>)}{title === "服务支持" ? <><li><Link href="/updates">平台动态</Link></li>{footer.complaint ? <li><SupportContactButton type="COMPLAINT">投诉建议</SupportContactButton></li> : null}</> : null}</ul></nav> : null)}
+        {([["使用帮助", footer.help], ["服务支持", footer.support]] as const).map(([title, links]) => links.length || title === "服务支持" ? <nav key={title} aria-label={title}><h2>{title}</h2><ul>{links.map((link, index) => <li key={`${link.label}:${index}`}>{link.href.startsWith("/") ? <Link href={link.href}>{link.label}</Link> : <a href={link.href}>{link.label}</a>}</li>)}{title === "服务支持" ? <><li><Link href="/updates">平台动态</Link></li>{footer.complaint ? <li><SupportContactButton type="COMPLAINT">投诉建议</SupportContactButton></li> : null}</> : null}</ul></nav> : null)}
       </div>
       <div className="site-footer-bottom">
         <div>{footer.copyright ? <span>© {new Date().getFullYear()} {footer.copyright}</span> : null}<Link href="/legal/terms">平台服务协议</Link><Link href="/legal/privacy">用户隐私政策</Link>{footer.licenseUrl ? <a href={footer.licenseUrl}>营业执照</a> : null}</div>

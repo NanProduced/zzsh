@@ -6,7 +6,20 @@ import { AlertCircle, Check, ChevronDown, ChevronRight, Copy, Info, RefreshCw, R
 import { orderItemKey, formatOrderTime as timeText, type FulfillmentAssignment, type Order, type OrderLine, type OrderPage, type OrderParty, type OrderRequestError, type OrderStatusFilter, type OrderSearchFilters } from "@/lib/order-client";
 import { groupedInteger, orderAccountTitle, orderAmountFacts, orderListFulfillmentTag, orderRentalModeLabel, orderSettlementStageLabel, paymentEntryOpen } from "@/lib/order-display";
 import { OrderError, OrderStatusBadge, orderTermLabel, orderUrl, STATUS_LABELS } from "@/components/order/order-presentation";
+import { DatePicker, FormSelect } from "@/components/ui/form-controls";
 import "./order.css";
+
+const STAGE_OPTIONS = [
+  { value: "", label: "全部进度" },
+  { value: "OPENING_PENDING", label: "等待开租确认" },
+  { value: "RENTING", label: "租赁中" },
+  { value: "INTAKE_PENDING", label: "结算受理中" },
+  { value: "DECISION_PENDING", label: "待你确认结算" },
+  { value: "DECISION_WAITING", label: "等待对方或平台确认" },
+  { value: "DECISION_REJECTED", label: "结算方案未达成一致" },
+  { value: "POSTED", label: "已结算" },
+  { value: "UNKNOWN", label: "进度未记录" },
+];
 
 export type OrderListState = {
   page: OrderPage | null;
@@ -19,12 +32,12 @@ export type OrderListState = {
 };
 
 export const ORDER_LIST_FILTERS: Array<{ value: OrderStatusFilter; label: string }> = [
-  { value: "IN_PROGRESS", label: "进行中" },
-  { value: "COMPLETED", label: STATUS_LABELS.COMPLETED },
-  { value: "CANCELLED", label: STATUS_LABELS.CANCELLED },
   { value: "ALL", label: "全部" },
+  { value: "IN_PROGRESS", label: "进行中" },
   { value: "PENDING_PAYMENT", label: STATUS_LABELS.PENDING_PAYMENT },
   { value: "PAID", label: STATUS_LABELS.PAID },
+  { value: "COMPLETED", label: STATUS_LABELS.COMPLETED },
+  { value: "CANCELLED", label: STATUS_LABELS.CANCELLED },
 ];
 
 function fulfillmentText(value: FulfillmentAssignment): string {
@@ -270,9 +283,18 @@ export function OrderListPanel({ party, status, accountId, filters = {}, onApply
           {extraFilter ? <button type="button" className="button quiet order-clear-btn" onClick={()=>onApplyFilters({})} title="清除查找条件"><RotateCcw size={13} aria-hidden="true" /><span>重置</span></button> : null}
         </div>
         <div id="order-more-filters" className="order-search-extra" hidden={!showMoreFilters}>
-          <label className="order-extra-field"><span className="order-field-label">开始日期</span><input type="date" value={draft.createdFrom ?? ""} onChange={event=>setDraft(value=>({...value,createdFrom:event.target.value}))}/></label>
-          <label className="order-extra-field"><span className="order-field-label">结束日期</span><input type="date" value={draft.createdTo ?? ""} onChange={event=>setDraft(value=>({...value,createdTo:event.target.value}))}/></label>
-          <label className="order-extra-field"><span className="order-field-label">订单进度</span><select value={draft.stage ?? ""} onChange={event=>setDraft(value=>({...value,stage:event.target.value}))}><option value="">全部进度</option><option value="OPENING_PENDING">等待开租确认</option><option value="RENTING">租赁中</option><option value="INTAKE_PENDING">结算受理中</option><option value="DECISION_PENDING">待你确认结算</option><option value="DECISION_WAITING">等待对方或平台确认</option><option value="DECISION_REJECTED">结算方案未达成一致</option><option value="POSTED">已结算</option><option value="UNKNOWN">进度未记录</option></select></label>
+          <div className="order-extra-field">
+            <span className="order-field-label">开始日期</span>
+            <DatePicker label="开始日期" value={draft.createdFrom ?? ""} placeholder="年/月/日" onChange={date=>setDraft(value=>({...value,createdFrom:date||undefined}))}/>
+          </div>
+          <div className="order-extra-field">
+            <span className="order-field-label">结束日期</span>
+            <DatePicker label="结束日期" value={draft.createdTo ?? ""} placeholder="年/月/日" onChange={date=>setDraft(value=>({...value,createdTo:date||undefined}))}/>
+          </div>
+          <div className="order-extra-field">
+            <span className="order-field-label">订单进度</span>
+            <FormSelect label="订单进度" value={draft.stage ?? ""} options={STAGE_OPTIONS} placeholder="全部进度" onChange={stage=>setDraft(value=>({...value,stage:stage||undefined}))}/>
+          </div>
         </div>
         {filterError ? <p role="alert" className="order-filter-alert">{filterError}</p> : null}
       </form>

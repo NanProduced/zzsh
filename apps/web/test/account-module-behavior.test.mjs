@@ -58,11 +58,13 @@ async function probe({ rows = [], detail = null, identityStatus = "UNVERIFIED", 
   module.filename = path.join(tree, "account-module-probe.cjs");
   module.paths = Module._nodeModulePaths(tree);
   module.require = (name) => {
+    if (name === "../lib/money-display") return require(path.join(tree, "apps/web/src/lib/money-display.ts"));
     // supply-workspaces.tsx 现在带列表 CSS 副作用导入（my-rental-accounts.css），探针按仓库既有约定桩掉。
     if (name.endsWith(".css")) return {};
     if (name === "next/link") return ({ scroll: _scroll, ...props }) => React.createElement("a", props);
     if (name === "next/navigation") return { useRouter: () => router };
     if (name === "@zzsh/ui/legacy-account-image") return { LegacyAccountImage: props => React.createElement("img", props) };
+    if (name === "@zzsh/ui/account-media-placeholder") return { AccountMediaPlaceholder: props => React.createElement("div", { className: "account-media-placeholder", "data-state": props.state }) };
     if (name === "./auth/auth-overlay-provider") return { useAuthOverlay: () => ({ open() {} }) };
     // This suite tests the parent's identity/data boundary; shared state visuals have separate coverage.
     if (name === "./auth/session-loading") return { SessionLoading: ({ label, layout }) => React.createElement("section", { className: "session-loading", "data-layout": layout, "aria-busy": true }, React.createElement("p", { role: "status" }, label)) };

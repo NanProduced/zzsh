@@ -2,6 +2,7 @@
 import { BusinessUpdateNotices } from "@/components/content/platform-update-notices";
 import { ManagedNoticeSections, ManagedNoticeText } from "@/components/content/managed-notice";
 import { usePublicContent } from "@/components/content/public-content-provider";
+import { formatUnitYuan } from "@/lib/money-display";
 import { FormSelect, FormRadioGroup, Input, IntegerStepper, Textarea, DateTimePicker } from "../ui/form-controls";
 import { ConfirmAlertDialog } from "../ui/alert-dialog";
 import { RecoveryAlert } from "../ui/information";
@@ -139,10 +140,7 @@ function ammoQuantityText(quantity: string): string {
   return `${rounds / 60n}组${remainder ? `另有${remainder}发历史余量` : ""}，共${rounds}发`;
 }
 function formatUnitPrice(amount: string | number | null | undefined): string {
-  if (amount === null || amount === undefined || amount === "") return "";
-  const num = Number(amount);
-  if (Number.isNaN(num)) return String(amount);
-  return num.toFixed(2);
+  return formatUnitYuan(typeof amount === "number" && Number.isFinite(amount) ? String(amount) : amount) ?? "待确认";
 }
 type MediaEntry = {
   id: string;
@@ -204,11 +202,11 @@ function inputsEqual(left: RecommendationInputs, right: RecommendationInputs): b
     [...left.skinIds].sort().join(",") === [...right.skinIds].sort().join(",");
 }
 
-const groupMeta: Record<PublishGroupId, { title: string }> = {
-  account: { title: "账号资料" },
-  assets: { title: "库存与皮肤" },
-  media: { title: "展示图片" },
-  terms: { title: "出租条件" },
+const groupMeta: Record<PublishGroupId, { title: string; hint: string }> = {
+  account: { title: "账号资料", hint: "基础属性与安全箱" },
+  assets: { title: "库存与皮肤", hint: "物资、装备与外观" },
+  media: { title: "展示图片", hint: "游戏截图与封禁记录" },
+  terms: { title: "出租条件", hint: "租金、押金与交付方式" },
 };
 const INSURANCE_EXPERIENCE_CARD = "九格保险体验卡";
 const INVENTORY_ITEM_ART: Record<string, string> = {
@@ -354,12 +352,40 @@ function FieldError({ text, id }: { text?: string; id?: string }) {
   return text ? <span id={id} className="supply-field-error" role="alert">{text}</span> : null;
 }
 
-function Notice({ error, text }: { error?: SupplyRequestError | null; text?: string }) {
-  if (!error && !text) return null;
-  return <div className={`supply-notice ${error ? "is-error" : ""}`} role={error ? "alert" : "status"}>
-    {error ? <AlertCircle size={17} aria-hidden="true" /> : <Check size={17} aria-hidden="true" />}
-    <span>{error ? error.status === 0 || error.status >= 500 ? "暂时未取得结果，请先恢复当前步骤后继续。" : localizedErrorMessage(error.message) : text}</span>
-  </div>;
+function Notice({ error, text, onDismiss }: { error?: SupplyRequestError | null; text?: string; onDismiss?: () => void }) {
+  const [dismissed, setDismissed] = useState(false);
+
+  useEffect(() => {
+    setDismissed(false);
+    if (!text && !error) return;
+    const timer = setTimeout(() => {
+      setDismissed(true);
+      onDismiss?.();
+    }, 5000);
+    return () => clearTimeout(timer);
+  }, [text, error, onDismiss]);
+
+  if (dismissed || (!error && !text)) return null;
+
+  return (
+    <div className={`supply-notice supply-floating-notice ${error ? "is-error" : ""}`} role={error ? "alert" : "status"} aria-live="polite">
+      <div className="supply-notice-content">
+        {error ? <AlertCircle size={18} aria-hidden="true" /> : <Check size={18} aria-hidden="true" />}
+        <span>{error ? (error.status === 0 || error.status >= 500 ? "暂时未取得结果，请先恢复当前步骤后继续。" : localizedErrorMessage(error.message)) : text}</span>
+      </div>
+      <button
+        type="button"
+        className="supply-notice-close"
+        onClick={() => {
+          setDismissed(true);
+          onDismiss?.();
+        }}
+        aria-label="关闭提示"
+      >
+        <X size={15} aria-hidden="true" />
+      </button>
+    </div>
+  );
 }
 
 function AgreementBody({ body }: { body: string }) {
@@ -486,8 +512,32 @@ function PublishingNotice({
         </header>
         <div className="publish-reading-body">
           <ManagedNoticeSections contentKey="placement:PUBLISH_NOTICE" />
-          <p className="publish-reading-unit-note">安全箱填写赛季永久容量，{INSURANCE_EXPERIENCE_CARD}另填可用天数。填写单位：六级子弹 <strong>1 组 = 60 发</strong>，AWM、巴雷特按发，{INSURANCE_EXPERIENCE_CARD}按天。留空表示尚未申报，0 表示明确没有。</p>
-          <p className="publish-reading-tip"><Info size={16} aria-hidden="true" />备注向租客公开，请勿填写密码、验证码等敏感信息。</p>
+          <div className="publish-notice-specs-card">
+            <div className="publish-specs-card-title">
+              <Box size={16} aria-hidden="true" />
+              <h4>物资申报与计量口径</h4>
+            </div>
+            <div className="publish-specs-grid">
+              <div className="publish-spec-item">
+                <span className="publish-spec-label">安全箱与保险</span>
+                <span className="publish-spec-val">安全箱填写赛季永久容量 · {INSURANCE_EXPERIENCE_CARD}另填可用天数</span>
+              </div>
+              <div className="publish-spec-item">
+                <span className="publish-spec-label">计量单位换算</span>
+                <span className="publish-spec-val">六级子弹 <strong>1 组 = 60 发</strong> · AWM/巴雷特<strong>按发</strong> · {INSURANCE_EXPERIENCE_CARD}<strong>按天</strong></span>
+              </div>
+              <div className="publish-spec-item">
+                <span className="publish-spec-label">留空与 0 的区别</span>
+                <span className="publish-spec-val">
+                  <span className="publish-spec-pill">留空</span> 表示尚未申报 · <span className="publish-spec-pill publish-spec-pill--zero">0</span> 表示明确没有该项物资
+                </span>
+              </div>
+            </div>
+          </div>
+          <div className="publish-reading-tip">
+            <Info size={15} aria-hidden="true" />
+            <span>备注向租客公开展示，请勿填写密码、验证码等敏感信息。</span>
+          </div>
         </div>
         <footer className="publish-reading-footer">
           <Dialog.Root open={agreementOpen} onOpenChange={setAgreementOpen}>
@@ -687,6 +737,30 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
   const [busy, setBusy] = useState("");
   const [notice, setNotice] = useState("");
   const [error, setError] = useState<SupplyRequestError | null>(null);
+  const [activeGroup, setActiveGroup] = useState<PublishGroupId>("account");
+
+  useEffect(() => {
+    const groups: PublishGroupId[] = ["account", "assets", "media", "terms"];
+    const handleScroll = () => {
+      const headerOffset = 140;
+      for (let i = groups.length - 1; i >= 0; i--) {
+        const grp = groups[i];
+        if (!grp) continue;
+        const el = document.getElementById(`publish-group-${grp}`);
+        if (el) {
+          const top = el.getBoundingClientRect().top;
+          if (top <= headerOffset + 80) {
+            setActiveGroup(grp);
+            return;
+          }
+        }
+      }
+      setActiveGroup("account");
+    };
+    window.addEventListener("scroll", handleScroll, { passive: true });
+    handleScroll();
+    return () => window.removeEventListener("scroll", handleScroll);
+  }, []);
   const [serverSnapshot, setServerSnapshot] = useState<MySupply | null>(null);
   const [draftDirty, setDraftDirty] = useState(false);
   const [readingNotice, setReadingNotice] = useState(() => {
@@ -1796,8 +1870,10 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
     setError(null);
     requestAnimationFrame(() => {
       const node = (target ? document.getElementById(target) : null) ?? firstFocusable(group);
-      node?.scrollIntoView({ block: "center" });
-      node?.focus({ preventScroll: true });
+      if (node) {
+        node.scrollIntoView({ behavior: "smooth", block: "center" });
+        node.focus({ preventScroll: true });
+      }
     });
   };
 
@@ -2804,9 +2880,9 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
     ? "上传中…"
     : item.status === "failed"
       ? item.error ?? "上传未完成"
-      : item.reviewState
-        ? `${item.bindingSaved ? "已保存" : "已上传，待保存"} · ${mediaReviewLabel(item.reviewState)}${item.publiclyReadable ? " · 当前公开展示" : item.publicDisplayEligible ? " · 图片可展示，账号尚未公开" : ""}`
-        : item.bindingSaved ? "已保存，状态待核" : "已上传，待保存；状态待核";
+      : item.reviewState === "REJECTED" || item.reviewState === "QUARANTINED"
+        ? `${item.bindingSaved ? "已保存" : "已上传"} · ${mediaReviewLabel(item.reviewState)}`
+        : item.bindingSaved ? "已保存" : "已上传，待保存";
 
   const primaryLabel = effectiveQuote ? "确认上架" : busy === "quote" ? "核对中…" : "确认上架";
   const primaryDisabled = readOnly || Boolean(busy) || writePending || Boolean(intentStorageIssue) || identityState !== "confirmed" || !identityRef.current || visibleBlockers.length > 0 || (effectiveQuote ? !agreementChecked || !quoteConsistent || (payoutSelected === true && !payoutAcceptance) : false);
@@ -3008,13 +3084,13 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
         : ownerPreview?.state === "PARTIAL" && ownerPreview.totalExpectedIncome
           ? { label: "预计总收入（部分）", value: `${ownerPreview.totalExpectedIncome.amount} 元`, pending: false }
           : { label: "预计总收入", value: "待核算", pending: true };
-  const sectionActions = () => <div className="publish-section-actions"><a href="#publish-outline">返回分组</a><div><button type="button" className="button quiet" disabled={formDisabled} onClick={() => void save()}>{busy === "save" ? "保存中…" : "保存草稿"}</button><a className="button secondary" href="#publish-quote">查看出租报价</a></div></div>;
+  const sectionActions = () => <div className="publish-section-actions"><div><button type="button" className="button quiet" disabled={formDisabled} onClick={() => void save()}>{busy === "save" ? "保存中…" : "保存草稿"}</button><a className="button secondary" href="#publish-quote">查看出租报价</a></div></div>;
   const noticeReturnFocus = () => {
     if (noticeManualRef.current && noticeTriggerRef.current?.isConnected) {
       noticeManualRef.current = false;
       return noticeTriggerRef.current;
     }
-    return formRef.current?.querySelector<HTMLElement>("[data-publish-entry]") ?? formRef.current?.querySelector<HTMLElement>("#publish-group-account input:not([disabled])") ?? null;
+    return null;
   };
   const agreementConsent = <div className="publish-consent-row publish-agreement-acceptance">
     <label className="supply-check"><input type="checkbox" checked={agreementChecked} disabled={formDisabled || !agreement} aria-label="我已阅读并同意出租协议" onChange={(event) => setAgreementChecked(event.target.checked)} /><span>我已阅读并同意</span></label>
@@ -3068,7 +3144,7 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
     <PublishingNotice open={readingNotice} onClose={handleNoticeClose} agreement={agreement} returnFocus={noticeReturnFocus} manual={noticeManualRef.current} />
     {intentStorageIssue ? <div className="supply-conflict" role="alert"><strong>暂不能提交新的操作</strong><p>{intentStorageIssue}</p><button type="button" className="button secondary" disabled={Boolean(busy)} onClick={() => { restoredSubjectRef.current = null; setIntentRestoreVersion(value => value + 1); }}>重试恢复记录</button></div> : null}
     {authRequired ? <div className="supply-auth-block"><LockKeyhole size={18} /><span>此操作需要登录并确认当前身份。</span><Link className="button secondary" href={`/login?next=${encodeURIComponent(accountId ? `/publish?accountId=${accountId}` : "/publish")}`}>登录 / 注册</Link></div> : null}
-    <Notice error={error} text={notice} />
+    <Notice error={error} text={notice} onDismiss={() => { setNotice(""); setError(null); }} />
     {error?.status === 409 && serverSnapshot ? <div className="supply-conflict" role="alert"><strong>资料状态已变化</strong><p>已保留本页输入，没有自动覆盖。当前资料状态为 {serverSnapshot.version ? stateLabel(serverSnapshot.version.reviewState) : "未创建草稿"}。</p><div className="supply-inline-actions"><button type="button" className="button secondary" onClick={() => void refreshLatest(false)}>重新读取最新状态</button><button type="button" className="button secondary" onClick={() => void refreshLatest(true)}>采用最新资料</button></div></div> : null}
     {writePending ? <div className="supply-conflict" role="alert"><strong>结果未知</strong><p>上次写入已发出但没有收到确认。重新读取只更新服务器展示，不会解除锁定；请重试当前步骤，收到与原请求对应的确定结果后才可继续修改或发起新写入。</p><div className="supply-inline-actions"><button type="button" className="button secondary" disabled={Boolean(busy)} onClick={() => void retryWrite()}>重试当前步骤</button><button type="button" className="button secondary" disabled={Boolean(busy)} onClick={() => void refreshLatest(true)}>重新读取最新状态</button></div></div> : null}
     {!writePending && error?.status === 0 && lastRetry.current ? <div className="supply-conflict"><strong>读取未完成</strong><p>本页没有自动重复操作，请重试本次读取。</p><button type="button" className="button secondary" disabled={Boolean(busy)} onClick={() => void retryLast()}>重试读取</button></div> : null}
@@ -3080,12 +3156,55 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
       <p className="publish-form-guidance"><Info size={15} aria-hidden="true" />可先保存草稿；核对报价前会检查必填项，其余上架条件以本次规则和服务端检查为准。</p>
       <button ref={noticeTriggerRef} type="button" className="button quiet publish-header-notice-btn" onClick={() => { noticeManualRef.current = true; setReadingNotice(true); }}><FileText size={16} aria-hidden="true" />上架须知</button>
     </div>
-    <nav id="publish-outline" className="publish-outline" aria-label="填写分组">
-      <div className="publish-outline-groups">{(Object.keys(groupMeta) as PublishGroupId[]).map(id => <a key={id} href={`#publish-group-${id}`}>{groupMeta[id].title}</a>)}</div>
-    </nav>
 
     <div className="publish-page-layout">
-      <form ref={formRef} className="publish-column" onSubmit={(event: FormEvent<HTMLFormElement>) => { event.preventDefault(); primaryAction(); }} noValidate>
+      <aside id="publish-outline" className="publish-outline publish-timeline-rail" aria-label="步骤导航">
+        <nav className="publish-outline-groups publish-timeline-track">
+          {(Object.keys(groupMeta) as PublishGroupId[]).map((id) => {
+            const isActive = activeGroup === id;
+            const isError = errorGroups.has(id);
+            return (
+              <a
+                key={id}
+                href={`#publish-group-${id}`}
+                className={`publish-timeline-node${isActive ? " is-active" : ""}${isError ? " is-error" : ""}`}
+                aria-current={isActive ? "step" : undefined}
+                onClick={(e) => {
+                  e.preventDefault();
+                  const target = document.getElementById(`publish-group-${id}`);
+                  if (target) {
+                    const headerOffset = 90;
+                    const targetTop = target.getBoundingClientRect().top + window.scrollY - headerOffset;
+                    window.scrollTo({ top: Math.max(0, targetTop), behavior: "smooth" });
+                  }
+                }}
+              >
+                <span className="publish-timeline-marker">
+                  <span className="publish-timeline-dot" />
+                  <span className="publish-timeline-line" />
+                </span>
+                <span className="publish-timeline-title">{groupMeta[id].title}</span>
+                {isError ? <span className="publish-timeline-badge-err" title="有待完善项" /> : null}
+              </a>
+            );
+          })}
+        </nav>
+      </aside>
+
+      <form
+        ref={formRef}
+        className="publish-column"
+        onSubmit={(event: FormEvent<HTMLFormElement>) => {
+          event.preventDefault();
+          primaryAction();
+        }}
+        onKeyDown={(event: React.KeyboardEvent<HTMLFormElement>) => {
+          if (event.key === "Enter" && (event.target as HTMLElement).tagName === "INPUT") {
+            event.preventDefault();
+          }
+        }}
+        noValidate
+      >
         <div className="publish-groups">
           <SectionCard id="account" title={groupMeta.account.title} hasError={errorGroups.has("account")} actions={sectionActions()}>
             <div className="publish-account-flow">
@@ -3217,14 +3336,14 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
                 const inputUnit=grouped?"组":resourceUnitLabel(item.unit??"",itemCode);
                 const line=item.itemId&&ownerPreview?.lines?ownerPreview.lines.find(row=>row.itemId===item.itemId):null;
                 const unpriced=Boolean(item.itemId&&ownerPreview&&(!line||!line.ownerUnitAmount));
-                const help=grouped?"六级子弹按组填写，每组60发；保存时只换算一次。":insuranceExperience?`按天填写${INSURANCE_EXPERIENCE_CARD}的可用天数；历史按张申报保留原单位。`:null;
+                const help=grouped?"六级子弹按组填写，每组60发；保存时只换算一次。":insuranceExperience?`按天填写${INSURANCE_EXPERIENCE_CARD}的可用天数。`:null;
                 const durabilityRequired = ["df_billable_level6_armor", "df_billable_level6_helmet"].includes(canonicalResourceCode(itemCode) ?? "");
                 return <article className="supply-resource-card" key={key} role="listitem" data-resource-code={itemCode??undefined}>
                   <div className="supply-resource-card-head">
                     <span className="supply-resource-art"><CatalogItemArt mediaId={"mediaId" in item ? item.mediaId : null}><InventoryIcon code={itemCode} /></CatalogItemArt></span>
                     <div className="supply-resource-info">
                       <div className="supply-resource-name"><label htmlFor={`quantity-${key}`}>{itemName}</label>{help?<FieldHelp label={itemName}>{help}</FieldHelp>:null}</div>
-                      <div className="publish-owner-rate"><span>单价</span><strong>{line?.ownerUnitAmount ? `¥ ${formatUnitPrice(line.ownerUnitAmount.amount)} / ${inputUnit}` : !item.itemId || unpriced ? "待配置" : ownerIncomePreviewPending ? "读取中…" : "暂未取得"}</strong>{line ? <FieldHelp label={`${itemName}单价`}>按当前规则预估，实际收入以核价和结算为准。</FieldHelp> : null}</div>
+                      <div className="publish-owner-rate"><span>单价</span><strong>{line?.ownerUnitAmount ? `${formatUnitPrice(line.ownerUnitAmount.amount)} / ${inputUnit}` : !item.itemId || unpriced ? "待配置" : ownerIncomePreviewPending ? "读取中…" : "暂未取得"}</strong>{line ? <FieldHelp label={`${itemName}单价`}>按当前规则预估，实际收入以核价和结算为准。</FieldHelp> : null}</div>
                     </div>
                     {item.required?<span className="supply-resource-required">必填</span>:null}
                   </div>
@@ -3481,7 +3600,7 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
                 </details>
                 </div></div>
 
-                <div className="publish-term-row"><label className="publish-term-label" htmlFor="publish-deposit">基础租客押金</label><div className="publish-term-control"><div className="supply-deposit-input-group"><div className="supply-deposit-input-wrap"><Input id="publish-deposit" data-first-field inputMode="decimal" value={depositInput} disabled={formDisabled} onChange={(event) => changeDeposit(event.target.value)} placeholder="填写押金金额" aria-invalid={Boolean(depositProblem())} /><span className="supply-deposit-unit">元</span></div><button type="button" className="button secondary supply-recommend-btn" disabled={formDisabled || recommendationBusy} onClick={() => void recommendDeposit()}>{recommendationBusy ? "计算中…" : "查看推荐押金"}</button></div><div className="publish-deposit-guidance"><Info size={15} aria-hidden="true" /><p>结合账号价值设置押金，不计入你的收入；推荐金额点击“采用”后填入。</p></div><FieldError text={depositProblem()?.message} />{recommendation?.available ? <div className="supply-recommend-result"><small>{recommendationAmountYuan === null ? "推荐金额待确认，请重新读取；不会按零元采用。" : recommendationAdopted && recommendationCatalogFresh ? `已采用推荐 ${moneyText({ amount: recommendationAmountYuan })}。` : recommendationBinding?.mismatch ? "推荐结果与当前账号、版本或规则不匹配，已过期；请重新查看。" : recommendationFresh ? `推荐 ${moneyText({ amount: recommendationAmountYuan })}（依据当前版本资料）。` : `推荐 ${moneyText({ amount: recommendationAmountYuan })}已过期：资料已修改，请重新查看。`}</small><button type="button" className="button quiet" disabled={formDisabled || recommendationBusy || !recommendationFresh || recommendationAdopted} onClick={() => void adoptRecommendation()}>{recommendationBusy ? "核对中…" : recommendationAdopted && recommendationCatalogFresh ? "已采用" : "采用推荐"}</button></div> : recommendation && !recommendation.available ? <small className="supply-recommend-result">{recommendation.reason === "FUNDING_POLICY_UNCONFIGURED" ? "当前规则未配置推荐依据，可自行填写。" : "补全账号能力与皮肤后可查看推荐。"}</small> : null}</div></div>
+                <div className="publish-term-row"><label className="publish-term-label" htmlFor="publish-deposit">基础租客押金</label><div className="publish-term-control"><div className="supply-deposit-input-group"><div className="supply-deposit-input-wrap"><Input id="publish-deposit" data-first-field inputMode="decimal" value={depositInput} disabled={formDisabled} onChange={(event) => changeDeposit(event.target.value)} placeholder="填写押金金额" aria-invalid={Boolean(depositProblem())} /><span className="supply-deposit-unit">元</span></div><button type="button" className="button secondary supply-recommend-btn" disabled={formDisabled || recommendationBusy} onClick={() => void recommendDeposit()}>{recommendationBusy ? "计算中…" : "查看推荐押金"}</button></div><div className="publish-deposit-guidance"><Info size={15} aria-hidden="true" /><p>结合账号价值设置押金，不计入你的收入；推荐金额点击“采用”后填入。</p></div><FieldError text={depositProblem()?.message} />{recommendation?.available ? <div className="supply-recommend-result"><small>{recommendationAmountYuan === null ? "推荐金额待确认，请重新读取；不会按零元采用。" : recommendationAdopted && recommendationCatalogFresh ? `已采用推荐 ${moneyText({ amount: recommendationAmountYuan })}。` : recommendationBinding?.mismatch ? "推荐结果与当前账号、版本或规则不匹配，已过期；请重新查看。" : recommendationFresh ? `推荐 ${moneyText({ amount: recommendationAmountYuan })}（依据当前版本资料）。` : `推荐 ${moneyText({ amount: recommendationAmountYuan })}已过期：资料已修改，请重新查看。`}</small><button type="button" className="button quiet" disabled={formDisabled || recommendationBusy || !recommendationFresh || recommendationAdopted} onClick={() => void adoptRecommendation()}>{recommendationBusy ? "核对中…" : recommendationAdopted && recommendationCatalogFresh ? "已采用" : "采用推荐"}</button></div> : recommendation && !recommendation.available ? <div className="supply-recommend-result supply-recommend-result--unavailable" role="status"><AlertCircle size={14} aria-hidden="true" /><span>{recommendation.reason === "FUNDING_POLICY_UNCONFIGURED" ? "当前规则尚未配置推荐押金依据，可自行填写押金。" : "请先补全安全箱、体力、负重、潜水与皮肤资料后再查看推荐押金。"}</span></div> : null}</div></div>
               </section>
 
               <section className="publish-term-section publish-term-note-section">

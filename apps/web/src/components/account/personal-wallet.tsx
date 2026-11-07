@@ -2,13 +2,14 @@
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
-import { ArrowLeft, ChevronRight, CreditCard, FileText, Info, RefreshCw } from "lucide-react";
+import { ArrowLeft, ChevronRight, CreditCard, Eye, EyeOff, FileText, Info, RefreshCw } from "lucide-react";
 import { useUserSession, useUserSessionStore } from "@/components/session/user-session-provider";
 import { formatOrderTime } from "@/lib/order-client";
 import { walletWithdrawalNote, financeEntryLabel, walletSourceStatus,refundAttemptStatus,walletOriginalType, readMyWallet, readMyWalletEntries, readMyWalletEntry, walletMoney, WalletRequestError, type EntryBucket, type WalletRead, type WalletEntry, type WalletEntryPage, type WalletEntryDetail } from "@/lib/personal-wallet-client";
 import { readBankBinding, type BankBinding } from "@/lib/withdrawal-bank-binding-client";
 import { Amount, LocalRetry, RecordStatus, SkeletonBlock, StatusBadge } from "@/components/ui/information";
 import "./personal-wallet.css";
+import "./financial-primitives.css";
 import {ControlledWithdrawal} from './controlled-withdrawal';
 import {BankBindingWorkspace} from './bank-binding-workspace';
 import {OwnerGuaranteeHistory} from './owner-guarantee-history';
@@ -33,7 +34,7 @@ function useWalletRead(scope: string) {
 
 export function WalletSummary({ scope }: { scope: string }) {
   const read = useWalletRead(scope);
-  return <section className="account-wallet-preview" aria-labelledby="account-wallet-heading" aria-busy={read.loading || undefined}><div className="account-wallet-mark" aria-hidden="true"><CreditCard size={25} /></div><div><h2 id="account-wallet-heading">我的钱包</h2><strong data-testid="wallet-summary-amount">{read.loading ? "正在读取余额" : read.wallet ? walletMoney(read.wallet.buckets.available.amountCents) : "钱包暂时无法读取"}</strong><p>{read.wallet?.buckets.available.knowledge === "UNKNOWN" ? "可用金额尚未确认" : "可用余额与流水统一记录"}</p><Link href="/account?view=wallet" scroll={false}>查看钱包<ChevronRight size={13} aria-hidden="true" /></Link></div></section>;
+  return <section className="account-wallet-preview" aria-labelledby="account-wallet-heading" aria-busy={read.loading || undefined}><div className="account-wallet-mark" aria-hidden="true"><CreditCard size={25} /></div><div><h3 id="account-wallet-heading">我的钱包</h3><strong data-testid="wallet-summary-amount">{read.loading ? "正在读取余额" : read.wallet ? walletMoney(read.wallet.buckets.available.amountCents) : "钱包暂时无法读取"}</strong><p>{read.wallet?.buckets.available.knowledge === "UNKNOWN" ? "可用金额尚未确认" : "可用余额与流水统一记录"}</p><Link href="/account?view=wallet" scroll={false}>查看钱包<ChevronRight size={13} aria-hidden="true" /></Link></div></section>;
 }
 
 const href = (pane = "overview", entry?: string, bucket: EntryBucket = "ALL") => { const q = new URLSearchParams({ view: "wallet" }); if (pane !== "overview") q.set("wallet", pane); if (entry) q.set("entry", entry); if (bucket !== "ALL") q.set("bucket", bucket); return "/account?" + q; };
@@ -212,12 +213,35 @@ export function PersonalWallet({ scope }: { scope: string }) {
     }
     return true;
   });
+  const [balanceMasked, setBalanceMasked] = useState(false);
   return <section ref={root} className="account-module personal-wallet" data-testid="personal-wallet" aria-busy={read.loading || undefined}>
-    <header className="account-module-heading"><div><h2 ref={heading} tabIndex={-1} className="wallet-heading">{title}</h2><p>{pane === "withdraw" ? "管理收款资料，核对提现条件、费用与申请记录。" : pane === "entries" ? "按时间查看余额收入与支出。" : pane === "entry" ? "查看这笔记录的详细信息。" : "查看余额、提现和资金记录。"}</p></div>{pane !== "withdraw" && pane !== "guarantees" ? <button type="button" className="button secondary" disabled={read.loading} onClick={refresh}><RefreshCw size={15} aria-hidden="true" />刷新</button> : null}</header>
-    <nav className="wallet-local-tabs" aria-label="钱包页面">
-      <Link href={href()} scroll={false} aria-current={pane === "overview" ? "page" : undefined}>钱包概览</Link>
-      <Link href={href("entries")} scroll={false} aria-current={pane === "entries" || pane === "entry" ? "page" : undefined}>余额流水</Link>
-      <Link href={href("withdraw")} scroll={false} aria-current={pane === "withdraw" || pane === "withdraw-local" ? "page" : undefined}>提现</Link>
+    <header className="account-module-heading fin-header">
+      <div className="fin-header-copy">
+        <h2 ref={heading} tabIndex={-1} className="wallet-heading fin-header-title">{title}</h2>
+        <p className="fin-header-desc">{pane === "withdraw" ? "管理收款资料，核对提现条件、费用与申请记录。" : pane === "entries" ? "按时间查看余额收入与支出。" : pane === "entry" ? "查看这笔记录的详细信息。" : "查看余额、提现和资金记录。"}</p>
+      </div>
+      {pane !== "withdraw" && pane !== "guarantees" ? (
+        <div className="fin-header-actions">
+          <button type="button" className="button secondary fin-refresh-btn" disabled={read.loading} onClick={refresh}>
+            <RefreshCw size={15} className={read.loading ? "is-spinning" : ""} aria-hidden="true" />
+            <span>{read.loading ? "正在刷新…" : "刷新"}</span>
+          </button>
+        </div>
+      ) : null}
+    </header>
+    <nav className="wallet-local-tabs fin-subtabs" aria-label="钱包页面">
+      <Link className={`fin-tab-item${pane === "overview" ? " is-active" : ""}`} href={href()} scroll={false} aria-current={pane === "overview" ? "page" : undefined}>
+        <span>钱包概览</span>
+        {pane === "overview" ? <span className="fin-tab-indicator" aria-hidden="true" /> : null}
+      </Link>
+      <Link className={`fin-tab-item${pane === "entries" || pane === "entry" ? " is-active" : ""}`} href={href("entries")} scroll={false} aria-current={pane === "entries" || pane === "entry" ? "page" : undefined}>
+        <span>余额流水</span>
+        {pane === "entries" || pane === "entry" ? <span className="fin-tab-indicator" aria-hidden="true" /> : null}
+      </Link>
+      <Link className={`fin-tab-item${pane === "withdraw" || pane === "withdraw-local" ? " is-active" : ""}`} href={href("withdraw")} scroll={false} aria-current={pane === "withdraw" || pane === "withdraw-local" ? "page" : undefined}>
+        <span>提现</span>
+        {pane === "withdraw" || pane === "withdraw-local" ? <span className="fin-tab-indicator" aria-hidden="true" /> : null}
+      </Link>
     </nav>
     {pane === "guarantees" ? <>
       <OwnerGuaranteeHistory scope={scope} />
@@ -236,19 +260,35 @@ export function PersonalWallet({ scope }: { scope: string }) {
 
         <div className="wallet-overview-top-grid">
           {/* Card 1: 账户可用余额 */}
-          <section className="account-module-card wallet-funds-summary wallet-overview-card" aria-label="余额">
-            <div className="wallet-card-header">
-              <div className="wallet-card-title-group">
-                <CreditCard size={18} className="wallet-card-header-icon" aria-hidden="true" />
-                <span className="wallet-card-title">账户可用余额</span>
-              </div>
+          <section className="account-module-card wallet-funds-summary wallet-overview-card fin-balance-hero" aria-label="余额">
+            <div className="fin-balance-top">
+              <span className="fin-balance-label">
+                <CreditCard size={17} aria-hidden="true" />
+                账户可用余额
+              </span>
+              <button
+                type="button"
+                className="fin-privacy-btn"
+                aria-label={balanceMasked ? "显示金额" : "隐藏金额"}
+                onClick={() => setBalanceMasked(prev => !prev)}
+              >
+                {balanceMasked ? <EyeOff size={16} aria-hidden="true" /> : <Eye size={16} aria-hidden="true" />}
+              </button>
             </div>
             <div className="wallet-balance-content">
               <div className="wallet-available">
-                <Amount label={null} size="hero" value={walletMoney(w.buckets.available.amountCents)} knowledge={w.buckets.available.knowledge === "UNKNOWN" ? "UNKNOWN" : "KNOWN"} testId="wallet-available-amount" data-wallet-bucket="available" note={w.buckets.available.knowledge === "UNKNOWN" ? "余额暂未确认，请稍后查看。" : undefined} />
+                <Amount
+                  label={null}
+                  size="hero"
+                  value={balanceMasked ? "••••••" : walletMoney(w.buckets.available.amountCents)}
+                  knowledge={w.buckets.available.knowledge === "UNKNOWN" ? "UNKNOWN" : "KNOWN"}
+                  testId="wallet-available-amount"
+                  data-wallet-bucket="available"
+                  note={w.buckets.available.knowledge === "UNKNOWN" ? "余额暂未确认，请稍后查看。" : undefined}
+                />
               </div>
-              <p className="wallet-balance-subhint" role="status" data-testid="wallet-withdrawal-amount-note">{walletWithdrawalNote(w)}</p>
-              <div className="wallet-card-actions">
+              <p className="wallet-balance-subhint fin-balance-subhint" role="status" data-testid="wallet-withdrawal-amount-note">{walletWithdrawalNote(w)}</p>
+              <div className="wallet-card-actions fin-balance-actions">
                 <Link className="button primary wallet-withdraw-btn" href={href("withdraw")} scroll={false}>提现</Link>
                 <Link className="button secondary wallet-entries-btn" href={href("entries")} scroll={false}>查看流水</Link>
               </div>
@@ -256,15 +296,12 @@ export function PersonalWallet({ scope }: { scope: string }) {
           </section>
 
           {/* Card 2: 收款银行卡 */}
-          <section className="account-module-card wallet-overview-card wallet-bank-card-container" aria-label="收款银行卡">
-            <div className="wallet-card-header">
-              <div className="wallet-card-title-group">
-                <CreditCard size={18} className="wallet-card-header-icon" aria-hidden="true" />
-                <span className="wallet-card-title">收款银行卡</span>
-              </div>
-              <Link href={href("withdraw")} scroll={false} className="wallet-card-header-link">
-                {bankCard.status !== "ready" ? "查看资料" : bankCard.binding ? "管理卡片" : "去绑卡"}
-              </Link>
+          <section className="account-module-card wallet-overview-card wallet-bank-card-container fin-bank-card" aria-label="收款银行卡">
+            <div className="fin-bank-card-top">
+              <div className="fin-chip-emblem" aria-hidden="true" />
+              <StatusBadge tone={bankCard.status === "ready" && bankCard.binding ? "info" : bankCard.status === "unknown" ? "neutral" : "neutral"}>
+                {bankCard.status === "ready" && bankCard.binding ? "资料已保存" : bankCard.status === "unknown" ? "状态待核" : "未绑定"}
+              </StatusBadge>
             </div>
             <div className="wallet-bank-card-body">
               {bankCard.status === "loading" ? (
@@ -272,16 +309,32 @@ export function PersonalWallet({ scope }: { scope: string }) {
                   <SkeletonBlock label="正在核对收款银行卡" lines={2} />
                 </div>
               ) : bankCard.status === "unknown" ? (
-                <div className="wallet-bank-state" role="status">收款资料暂时无法确认，请稍后查看。</div>
+                <div className="wallet-bank-state fin-card-number text-muted" role="status">收款资料暂时无法确认，请稍后查看。</div>
               ) : bankCard.binding ? (
                 <div className="wallet-bank-saved">
-                  <strong>{bankCard.binding.cardMask}</strong>
-                  <p>持卡人 {bankCard.binding.holderNameMask} · 资料已保存</p>
+                  <strong className="fin-card-number">{bankCard.binding.cardMask}</strong>
+                  <div className="fin-bank-card-bottom">
+                    <div className="fin-cardholder-info">
+                      <span className="fin-cardholder-label">持卡人</span>
+                      <span className="fin-cardholder-name">{bankCard.binding.holderNameMask}</span>
+                    </div>
+                    <Link href={href("withdraw")} scroll={false} className="button secondary button--xs">
+                      管理卡片
+                    </Link>
+                  </div>
                 </div>
               ) : (
                 <div className="wallet-bank-state">
-                  <strong>尚未绑定收款银行卡</strong>
-                  <p>保存收款资料后，还需核对提现条件。</p>
+                  <strong className="fin-card-number text-muted">•••• •••• •••• ••••</strong>
+                  <div className="fin-bank-card-bottom">
+                    <div className="fin-cardholder-info">
+                      <span className="fin-cardholder-label">持卡人</span>
+                      <span className="fin-cardholder-name">尚未绑定收款银行卡</span>
+                    </div>
+                    <Link href={href("withdraw")} scroll={false} className="button secondary button--xs">
+                      去绑卡
+                    </Link>
+                  </div>
                 </div>
               )}
             </div>

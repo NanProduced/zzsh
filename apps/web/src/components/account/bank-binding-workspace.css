@@ -1,115 +1,661 @@
-.bank-binding-workspace { display: grid; gap: 22px; min-width: 0; }
-.bank-withdrawal-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 20px; align-items: start; }
-.bank-binding-workspace .account-module-card { min-width: 0; }
-.bank-section-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
-.bank-section-heading h3,.bank-section-heading h4 { display: flex; align-items: center; gap: 8px; min-width: 0; margin: 0; font-size: 17px; font-weight: 650; line-height: 1.5; }
-.bank-section-heading h4 { font-size: 15px; }
-.bank-section-heading h3>svg { flex: none; color: var(--account-accent, var(--color-accent-brand)); }
-.bank-binding-workspace .bank-action { min-height: 44px; padding: 9px 13px; border-radius: 8px; font-family: var(--font-sans); font-size: 14px; font-weight: 600; line-height: 1.5; white-space: normal; }
-.bank-binding-workspace .bank-action>svg { flex: none; }
-.bank-binding-workspace .bank-primary,.bank-withdrawal-confirm .ui-alert-dialog-confirm { background: var(--account-accent, var(--color-accent-brand)); color: var(--color-accent-brand-text); border-color: transparent; }
-.bank-binding-workspace .bank-action:focus-visible,.bank-withdrawal-confirm .ui-alert-dialog-confirm:focus-visible { outline: 2px solid var(--account-accent, var(--color-focus-ring)); outline-offset: 3px; }
-.bank-binding-workspace .bank-action[disabled],.bank-binding-workspace .bank-action[data-disabled] { opacity: .55; cursor: not-allowed; }
-.bank-help { margin: 9px 0 16px; color: var(--color-text-secondary); font-size: 13px; line-height: 1.65; overflow-wrap: anywhere; }
-.bank-meta { margin: 10px 0 16px; color: var(--color-text-secondary); font-size: 12px; line-height: 1.6; }
-
-/* 提现 Onboarding 引导流程条 */
-.bank-onboarding-stepper { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 16px 20px; border: 1px solid var(--color-border-subtle); border-radius: 14px; background: var(--color-bg-card); box-shadow: var(--account-card-shadow, none); }
-.onboarding-step { display: flex; align-items: center; gap: 12px; min-width: 0; flex: 1; }
-.step-badge { display: grid; place-items: center; flex: none; width: 28px; height: 28px; border-radius: 50%; font-size: 13px; font-weight: 700; transition: all 0.2s ease; }
-.onboarding-step.step-done .step-badge { background: var(--account-success, #16a34a); color: #fff; }
-.onboarding-step.step-active .step-badge { background: var(--account-accent, #eab308); color: var(--color-accent-brand-text, #fff); }
-.onboarding-step.step-waiting .step-badge { background: var(--color-bg-elevated); color: var(--color-text-secondary); border: 1px solid var(--color-border-subtle); }
-.step-copy { min-width: 0; }
-.step-copy strong { display: block; font-size: 14px; font-weight: 650; line-height: 1.4; color: var(--color-text-primary); }
-.step-copy small { display: block; margin-top: 2px; font-size: 12px; line-height: 1.4; color: var(--color-text-secondary); }
-.onboarding-step-arrow { flex: none; color: var(--color-text-tertiary, #94a3b8); font-size: 16px; margin-inline: 4px; }
-
-/* 绑卡引导卡片（未绑卡空态引导） */
-.bank-empty { display: flex; flex-direction: column; align-items: center; text-align: center; padding: 24px 18px; border: 1.5px dashed var(--color-border-default); border-radius: 14px; background: var(--color-bg-elevated); margin-top: 10px; }
-.bank-empty-visual { margin-bottom: 12px; }
-.bank-card-ghost { display: grid; place-items: center; width: 56px; height: 56px; border-radius: 14px; background: var(--account-accent-muted, rgba(234,179,8,0.1)); color: var(--account-accent, #eab308); }
-.bank-empty-title { margin: 0 0 6px; font-size: 16px; font-weight: 650; color: var(--color-text-primary); }
-.bank-empty-desc { margin: 0 0 16px; font-size: 13px; line-height: 1.6; color: var(--color-text-secondary); max-width: 420px; }
-.bank-supported-banks { display: flex; flex-wrap: wrap; justify-content: center; gap: 6px; margin-bottom: 20px; }
-.bank-supported-banks span { padding: 3px 9px; border-radius: 6px; font-size: 11px; background: var(--color-bg-card); border: 1px solid var(--color-border-subtle); color: var(--color-text-secondary); }
-.bank-bind-cta { width: 100%; max-width: 280px; min-height: 44px; border-radius: 10px; font-weight: 650; }
-
-/* 已绑卡仿真卡片 */
-.bank-saved { display: flex; flex-direction: column; gap: 14px; margin-top: 10px; }
-.bank-saved .bank-card-realistic { width: 100%; max-width: 380px; }
-.bank-saved strong { font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
-.bank-saved p { margin: 4px 0 0; color: var(--color-text-secondary); font-size: 13px; line-height: 1.5; }
-.bank-saved>.info-status-badge { flex: none; }
-
-.bank-binding-form,.bank-withdraw-form { display: grid; gap: 17px; margin-top: 20px; }
-.bank-binding-form { padding-top: 20px; border-top: 1px solid var(--color-border-subtle); }
-.bank-binding-workspace .form-input { width: 100%; min-height: 46px; font-size: 16px; line-height: 1.5; }
-.bank-binding-workspace .info-field-label { font-size: 14px; font-weight: 600; }
-.bank-binding-workspace .info-field-helper { margin-top: 7px; font-size: 12px; line-height: 1.6; }
-.bank-binding-form>.bank-help { margin: -4px 0 0; }
-.bank-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
-.bank-feedback { margin: 14px 0 0; padding: 10px 0 0; border-top: 1px solid var(--color-border-subtle); color: var(--color-text-secondary); font-size: 13px; line-height: 1.65; }
-.bank-form-error { margin: 0; color: var(--color-status-error-ink); font-size: 13px; line-height: 1.6; }
-
-/* 提现面板 Onboarding 提示与快捷金额 */
-.bank-onboarding-callout { padding: 12px 14px; border-radius: 10px; background: var(--account-accent-muted, rgba(234,179,8,0.08)); border: 1px solid var(--account-accent-border, rgba(234,179,8,0.25)); margin: 12px 0 4px; }
-.bank-onboarding-callout p { margin: 0; font-size: 13px; line-height: 1.5; color: var(--color-text-primary); }
-.bank-onboarding-callout small { display: block; margin-top: 4px; font-size: 12px; line-height: 1.5; color: var(--color-text-secondary); }
-.bank-quick-amounts { display: flex; flex-wrap: wrap; gap: 8px; margin-top: -6px; }
-.bank-quick-chip { min-height: 32px; padding: 4px 10px; font-size: 12px; font-weight: 600; border-radius: 7px; background: var(--color-bg-elevated); border: 1px solid var(--color-border-default); color: var(--color-text-secondary); }
-.bank-quick-chip:hover { border-color: var(--account-accent); color: var(--account-accent); }
-
-.bank-available { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; margin-top: 14px; padding: 14px 16px; border-radius: 10px; background: var(--color-bg-elevated); border: 1px solid var(--color-border-subtle); }
-.bank-available span { color: var(--color-text-secondary); font-size: var(--type-label-size); }
-.bank-available strong { color: var(--color-text-primary); font-size: 22px; font-weight: 700; font-variant-numeric: tabular-nums; }
-.bank-eligibility { margin: 15px 0 0; }
-.bank-eligibility>summary { width: fit-content; min-height: 40px; align-content: center; color: var(--account-accent); cursor: pointer; }
-.bank-eligibility>summary:focus-visible { outline: 2px solid var(--account-accent); outline-offset: 3px; }
-.bank-eligibility .bank-help { margin: 8px 0 0; }
-.bank-quote-note { margin: 0; }
-.bank-policy { display: grid; gap: 7px; margin: 15px 0 0; padding: 12px 0; border-block: 1px solid var(--color-border-subtle); color: var(--color-text-secondary); font-size: 13px; line-height: 1.6; }
-.bank-quote { display: grid; gap: 16px; margin-top: 20px; padding-top: 18px; border-top: 1px solid var(--color-border-subtle); }
-.bank-quote>.bank-primary { width: 100%; }
-.bank-facts { display: grid; gap: 0; margin: 0; font-size: 14px; line-height: 1.6; }
-.bank-facts>div { display: grid; grid-template-columns: minmax(96px, .8fr) minmax(0, 1.2fr); align-items: baseline; gap: 14px; padding: 9px 0; }
-.bank-facts>div+div { border-top: 1px solid var(--color-border-subtle); }
-.bank-facts dt { color: var(--color-text-secondary); }
-.bank-facts dd { margin: 0; text-align: right; font-weight: 600; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
-.bank-result { margin-top: 20px; padding-top: 20px; border-top: 1px solid var(--color-border-subtle); }
-.bank-result .bank-section-heading { margin-bottom: 12px; }
-.bank-history-heading { padding: 6px 0 0; }
-.bank-history-heading h2 { margin: 0; font-size: 20px; line-height: 1.45; font-weight: 650; }
-.bank-history-heading p { margin: 8px 0 0; color: var(--color-text-secondary); font-size: 14px; line-height: 1.6; }
-.bank-history-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(90px, auto) auto; gap: 14px; align-items: center; padding: 17px 0; border-top: 1px solid var(--color-border-subtle); }
-.bank-history-row>div { min-width: 0; }
-.bank-history-row p { margin: 7px 0 4px; color: var(--color-text-secondary); font-size: 13px; line-height: 1.5; }
-.bank-history-row small { display: block; font-size: 12px; line-height: 1.6; color: var(--color-text-secondary); overflow-wrap: anywhere; }
-.bank-history-row>strong { font-size: 18px; line-height: 1.4; font-weight: 650; font-variant-numeric: tabular-nums; text-align: right; overflow-wrap: anywhere; }
-.bank-history-section>.bank-action { margin-top: 14px; }
-.bank-history-detail { margin-top: 18px; padding-top: 16px; border-top: 1px solid var(--color-border-default); }
-.bank-history-detail>.bank-section-heading { margin-bottom: 10px; }
-.bank-binding-workspace .info-alert { margin-top: 15px; }
-.bank-binding-workspace .info-alert .bank-actions { margin-top: 4px; }
-.bank-withdrawal-confirm { max-width: 480px; }
-.bank-withdrawal-confirm .bank-facts { margin-top: 10px; }
-@media(max-width: 980px) {
-  .bank-withdrawal-grid { grid-template-columns: minmax(0, 1fr); }
-  .bank-onboarding-stepper { flex-direction: column; align-items: flex-start; gap: 14px; }
-  .onboarding-step-arrow { display: none; }
+/* 提现单卡聚焦工作台 (Single Focus Card Architecture) - 对齐图 2 与 /impeccable layout */
+.bank-binding-workspace {
+  max-width: 580px;
+  margin: 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  min-width: 0;
 }
+
+.bank-withdrawal-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  width: 100%;
+}
+
+.bank-binding-workspace .account-module-card {
+  min-width: 0;
+  border-radius: 16px;
+  padding: 24px 28px;
+  background: var(--color-bg-surface);
+  border: 1px solid var(--color-border-subtle);
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.04);
+}
+
+.bank-section-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+.bank-section-heading h3, .bank-section-heading h4 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  margin: 0;
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--color-text-primary);
+  line-height: 1.4;
+}
+.bank-section-heading h4 {
+  font-size: 14.5px;
+}
+.bank-section-heading h3>svg {
+  flex: none;
+  color: var(--account-accent, #ca8a04);
+}
+
+.bank-binding-workspace .bank-action {
+  min-height: 38px;
+  padding: 8px 16px;
+  border-radius: 8px;
+  font-family: var(--font-sans);
+  font-size: 13.5px;
+  font-weight: 600;
+  line-height: 1.4;
+  white-space: nowrap;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  transition: all 0.15s ease;
+}
+.bank-binding-workspace .bank-action>svg {
+  flex: none;
+}
+
+.bank-binding-workspace .bank-primary,
+.bank-withdrawal-confirm .ui-alert-dialog-confirm {
+  background: #2563eb;
+  color: #ffffff;
+  border: 1px solid transparent;
+  font-weight: 600;
+}
+.bank-binding-workspace .bank-primary:hover:not(:disabled),
+.bank-withdrawal-confirm .ui-alert-dialog-confirm:hover:not(:disabled) {
+  background: #1d4ed8;
+  color: #ffffff;
+}
+.bank-binding-workspace .bank-action:focus-visible,
+.bank-withdrawal-confirm .ui-alert-dialog-confirm:focus-visible {
+  outline: 2px solid #2563eb;
+  outline-offset: 3px;
+}
+.bank-binding-workspace .bank-action[disabled],
+.bank-binding-workspace .bank-action[data-disabled] {
+  opacity: .55;
+  cursor: not-allowed;
+}
+
+.bank-help {
+  margin: 0 0 12px;
+  color: var(--color-text-secondary);
+  font-size: 13px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+.bank-meta {
+  margin: 8px 0 0;
+  color: var(--color-text-muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+/* 顶部指引流程 - 消除视觉噪音，隐藏但保留可访问性与语义 */
+.bank-onboarding-stepper.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border-width: 0;
+}
+
+/* ============================================================
+   提现主卡片（ChannelWithdrawalPanel）：对齐图 2 极致细节
+   ============================================================ */
+.channel-withdrawal-panel {
+  position: relative;
+}
+
+.bank-refresh-corner {
+  position: absolute;
+  top: 18px;
+  right: 20px;
+  padding: 4px 10px;
+  min-height: 30px;
+  font-size: 12.5px;
+  color: var(--color-text-muted);
+}
+.bank-refresh-corner:hover {
+  color: var(--color-text-primary);
+}
+
+/* Hero 区域：可提现余额与大字排版（图 2 顶部） */
+.bank-available {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 4px;
+}
+.bank-available-caption {
+  font-size: 13.5px;
+  font-weight: 500;
+  color: var(--color-text-secondary);
+}
+.bank-available-sum {
+  font-size: 32px;
+  font-weight: 750;
+  color: var(--color-text-primary);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.02em;
+  line-height: 1.15;
+}
+
+/* 优雅水平分割线（图 2 细横线） */
+.bank-metric-divider {
+  border: 0;
+  border-top: 1px solid var(--color-border-subtle);
+  margin: 20px 0 22px;
+}
+
+/* 表单组 */
+.bank-form-group {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 18px;
+}
+.bank-form-label {
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--color-text-primary);
+}
+
+/* 提现金额一体化输入框（图 2：¥ 前缀 + 大字体输入框 + 全部提现按钮） */
+.bank-amount-input-box {
+  display: flex;
+  align-items: center;
+  position: relative;
+  height: 50px;
+  border-radius: 10px;
+  border: 1px solid var(--color-border-default);
+  background: var(--color-bg-surface);
+  transition: all 0.2s ease;
+  padding: 0 14px;
+  box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.02);
+}
+.bank-amount-input-box:focus-within {
+  border-color: #3b82f6;
+  box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.12);
+  background: var(--color-bg-surface);
+}
+
+.bank-currency-prefix {
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--color-text-secondary);
+  margin-right: 8px;
+  flex: none;
+  user-select: none;
+}
+
+.bank-amount-input-box .bank-amount-input {
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+  border: none;
+  outline: none;
+  background: transparent;
+  box-shadow: none;
+  padding: 0;
+  font-size: 20px;
+  font-weight: 700;
+  color: var(--color-text-primary);
+  font-variant-numeric: tabular-nums;
+}
+.bank-amount-input-box .bank-amount-input:focus {
+  border: none;
+  outline: none;
+  box-shadow: none;
+}
+.bank-amount-input-box .bank-amount-input::placeholder {
+  color: var(--color-text-muted);
+  opacity: 0.6;
+}
+
+/* 一体化“全部提现”文本操作按钮 */
+.bank-quick-max-btn {
+  flex: none;
+  margin-left: 8px;
+  padding: 4px 8px;
+  min-height: 28px;
+  font-size: 13.5px;
+  font-weight: 600;
+  color: #2563eb;
+  background: transparent;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: color 0.15s ease, background 0.15s ease;
+}
+.bank-quick-max-btn:hover:not(:disabled) {
+  color: #1d4ed8;
+  background: rgba(37, 99, 235, 0.08);
+}
+
+/* 收款银行卡选择框（图 2：💳 银行卡 •••• 9407 + ChevronDown） */
+.bank-destination-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: 48px;
+  padding: 0 14px;
+  border-radius: 10px;
+  border: 1px solid var(--color-border-default);
+  background: var(--color-bg-surface);
+  transition: all 0.2s ease;
+}
+.bank-destination-card:hover {
+  border-color: var(--color-border-strong);
+  background: var(--color-bg-elevated);
+}
+.bank-destination-left {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+.bank-destination-icon {
+  flex: none;
+  color: var(--color-text-secondary);
+}
+.bank-destination-name {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--color-text-primary);
+  letter-spacing: 0.02em;
+}
+.bank-destination-chevron {
+  flex: none;
+  color: var(--color-text-muted);
+}
+
+/* 手续费与实际到账核算明细（图 2） */
+.bank-fee-summary {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 14px;
+  padding: 12px 0;
+  border-top: 1px solid var(--color-border-subtle);
+}
+.bank-fee-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 13.5px;
+  line-height: 1.4;
+}
+.bank-fee-name {
+  color: var(--color-text-secondary);
+}
+.bank-fee-val {
+  font-weight: 600;
+  color: var(--color-text-muted);
+  font-variant-numeric: tabular-nums;
+}
+.bank-fee-val.is-highlight {
+  color: var(--color-text-primary);
+  font-weight: 700;
+}
+
+.bank-quote-note {
+  margin: 6px 0 0;
+  font-size: 12px;
+  color: var(--color-text-muted);
+  line-height: 1.5;
+}
+
+/* 主操作按钮提交栏（图 2 底部右对齐蓝色按钮） */
+.bank-submit-container {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 20px;
+}
+.bank-main-submit {
+  min-width: 140px;
+  min-height: 42px;
+  padding: 8px 24px;
+  font-size: 14px;
+  font-weight: 600;
+  border-radius: 8px;
+  background: #2563eb;
+  color: #ffffff;
+}
+.bank-main-submit:hover:not(:disabled) {
+  background: #1d4ed8;
+}
+
+/* 查看提现条件与规则折叠 */
+.bank-policy {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin: 0 0 16px;
+  padding: 10px 0;
+  border-block: 1px solid var(--color-border-subtle);
+  color: var(--color-text-secondary);
+  font-size: 12.5px;
+}
+.bank-eligibility {
+  margin: 16px 0 0;
+}
+.bank-eligibility>summary {
+  width: fit-content;
+  min-height: 32px;
+  display: flex;
+  align-items: center;
+  font-size: 13px;
+  color: #2563eb;
+  cursor: pointer;
+  font-weight: 500;
+}
+.bank-eligibility>summary:focus-visible {
+  outline: 2px solid #2563eb;
+  outline-offset: 3px;
+}
+.bank-facts {
+  display: grid;
+  gap: 0;
+  margin: 10px 0 0;
+  font-size: 13px;
+  line-height: 1.5;
+}
+.bank-facts>div {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  padding: 6px 0;
+}
+.bank-facts>div+div {
+  border-top: 1px solid var(--color-border-subtle);
+}
+.bank-facts dt {
+  color: var(--color-text-secondary);
+}
+.bank-facts dd {
+  margin: 0;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.bank-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin-top: 12px;
+}
+.bank-feedback {
+  margin: 12px 0 0;
+  padding: 8px 0 0;
+  border-top: 1px solid var(--color-border-subtle);
+  color: var(--color-text-secondary);
+  font-size: 13px;
+  line-height: 1.6;
+}
+.bank-form-error {
+  margin: 0;
+  color: var(--color-status-error-ink);
+  font-size: 13px;
+}
+
+/* ============================================================
+   银行卡管理面板（BankBindingPanel）
+   ============================================================ */
+.bank-binding-panel {
+  border-radius: 16px;
+}
+.bank-saved {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-top: 6px;
+}
+.bank-card-realistic {
+  position: relative;
+  width: 100%;
+  min-height: 96px;
+  border-radius: 12px;
+  padding: 16px 20px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%);
+  color: #ffffff;
+  box-shadow: 0 4px 16px rgba(15, 23, 42, 0.12), inset 0 1px 1px rgba(255, 255, 255, 0.12);
+  overflow: hidden;
+  gap: 16px;
+}
+.bank-card-waves {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  opacity: 0.6;
+}
+.bank-card-top {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.bank-card-network {
+  font-size: 12px;
+  font-weight: 600;
+  color: rgba(255, 255, 255, 0.85);
+  letter-spacing: 0.04em;
+}
+.bank-card-number {
+  position: relative;
+  z-index: 1;
+  font-family: var(--font-mono, monospace);
+  font-size: 18px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  color: #ffffff;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.35);
+  margin: 6px 0 2px;
+  font-variant-numeric: tabular-nums;
+}
+.bank-card-bottom {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+.bank-card-holder {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+}
+.bank-card-label {
+  font-size: 11px;
+  font-weight: 500;
+  color: rgba(255, 255, 255, 0.6);
+}
+.bank-card-name {
+  font-size: 13.5px;
+  font-weight: 650;
+  color: #ffffff;
+}
+.bank-card-realistic .info-status-badge {
+  background: rgba(255, 255, 255, 0.16);
+  color: #ffffff;
+  border-color: rgba(255, 255, 255, 0.25);
+  backdrop-filter: blur(4px);
+  font-size: 11.5px;
+}
+
+.bank-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  padding: 24px 20px;
+  border: 1.5px dashed var(--color-border-default);
+  border-radius: 12px;
+  background: var(--color-bg-elevated);
+  margin-top: 6px;
+}
+.bank-empty-visual {
+  margin-bottom: 10px;
+}
+.bank-card-ghost {
+  display: grid;
+  place-items: center;
+  width: 48px;
+  height: 48px;
+  border-radius: 12px;
+  background: rgba(37, 99, 235, 0.1);
+  color: #2563eb;
+}
+.bank-empty-title {
+  margin: 0 0 4px;
+  font-size: 14.5px;
+  font-weight: 650;
+  color: var(--color-text-primary);
+}
+.bank-empty-desc {
+  margin: 0 0 16px;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--color-text-secondary);
+  max-width: 340px;
+}
+.bank-bind-cta {
+  width: 100%;
+  max-width: 220px;
+  min-height: 40px;
+  border-radius: 8px;
+  font-weight: 650;
+}
+
+.bank-binding-form {
+  display: grid;
+  gap: 16px;
+  margin-top: 16px;
+  padding-top: 18px;
+  border-top: 1px solid var(--color-border-subtle);
+}
+
+/* ============================================================
+   提现记录（WithdrawalHistorySection）：默认展示 5 条与步进加载
+   ============================================================ */
+.bank-history-section {
+  width: 100%;
+}
+.bank-history-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 12px;
+}
+.bank-history-row {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--color-border-subtle);
+  border-radius: 10px;
+  background: var(--color-bg-surface);
+  transition: all 0.2s ease;
+}
+.bank-history-row:hover {
+  background: var(--color-bg-elevated);
+  border-color: var(--color-border-default);
+}
+.bank-history-row.is-expanded {
+  background: color-mix(in srgb, var(--color-bg-elevated) 65%, var(--color-bg-surface));
+  border-color: #3b82f6;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.04);
+}
+.bank-history-row-header {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  gap: 14px;
+  align-items: center;
+  padding: 14px 16px;
+}
+.bank-history-row-header>div {
+  min-width: 0;
+}
+.bank-history-row-header p {
+  margin: 4px 0 2px;
+  color: var(--color-text-secondary);
+  font-size: 12.5px;
+}
+.bank-history-row-header small {
+  display: block;
+  font-size: 11.5px;
+  color: var(--color-text-muted);
+  overflow-wrap: anywhere;
+}
+.bank-history-row-header>strong {
+  font-size: 17px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  overflow-wrap: anywhere;
+}
+
+/* 详情行内展开（已完美解决跳到底部问题） */
+.bank-history-detail {
+  margin: 0 16px 14px;
+  padding: 14px 16px;
+  background: var(--color-bg-surface);
+  border: 1px solid var(--color-border-subtle);
+  border-radius: 8px;
+}
+.bank-history-detail>.bank-section-heading {
+  margin-bottom: 10px;
+}
+
+.bank-history-more {
+  margin-top: 14px;
+  width: 100%;
+}
+.bank-empty-text {
+  padding: 24px 0;
+  text-align: center;
+  color: var(--color-text-secondary);
+  font-size: 13px;
+}
+
+.bank-withdrawal-confirm {
+  max-width: 480px;
+}
+.bank-withdrawal-confirm .bank-facts {
+  margin-top: 10px;
+}
+
 @media(max-width: 600px) {
-  .bank-binding-workspace { gap: 16px; }
-  .bank-section-heading { align-items: flex-start; gap: 8px; }
-  .bank-section-heading h3 { padding-top: 9px; font-size: 16px; }
-  .bank-binding-workspace .bank-action { padding-inline: 10px; }
-  .bank-saved { flex-wrap: wrap; gap: 10px; }
-  .bank-saved>.info-status-badge { margin-left: 54px; }
-  .bank-saved strong { font-size: 19px; }
-  .bank-history-row { grid-template-columns: minmax(0, 1fr) auto; gap: 10px; }
-  .bank-history-row>div { grid-column: 1/-1; }
-  .bank-history-row>strong { text-align: left; font-size: 17px; }
-  .bank-history-row>.bank-action { justify-self: end; }
-  .bank-facts>div { grid-template-columns: minmax(88px,.85fr) minmax(0,1.15fr); gap: 10px; }
-  .bank-actions>.bank-primary { flex: 1 1 180px; }
+  .bank-binding-workspace {
+    padding: 0 12px;
+  }
+  .bank-binding-workspace .account-module-card {
+    padding: 20px 16px;
+  }
+  .bank-card-realistic {
+    flex-direction: column;
+    align-items: flex-start;
+  }
 }

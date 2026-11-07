@@ -3,8 +3,11 @@ import Link from "next/link";
 import { useEffect, useId, useRef, useState, type FormEvent, type ReactNode } from "react";
 import * as Dialog from "@radix-ui/react-dialog";
 import {
+  Check,
   ChevronDown,
   ChevronRight,
+  Eye,
+  EyeOff,
   HelpCircle,
   Laptop,
   LockKeyhole,
@@ -17,6 +20,7 @@ import {
   X,
   type LucideIcon,
 } from "lucide-react";
+import { Select } from "@base-ui/react/select";
 import { publishUserSessionChange, useUserSession, useUserSessionStore } from "@/components/session/user-session-provider";
 import { authErrorMessage, webAuthRequest, WebAuthError } from "@/lib/web-auth-request";
 import { webAuthWithCaptcha } from "@/lib/user-captcha";
@@ -500,8 +504,15 @@ export function AccountSecurityControls({ userId, canAct, pendingWrite }: Props)
                 {visibleOverview.email ? <span className="sec-badge sec-badge--success">已验证</span> : null}
               </div>
               <div className="sec-row-side">
-                <button type="button" className="button outline sec-action-btn" disabled={locked} data-security-action="email" onClick={() => choose("email")}>
-                  {visibleOverview.email ? <>更换<span className="sr-only">邮箱</span></> : <>绑定<span className="sr-only">邮箱</span></>}
+                <button
+                  type="button"
+                  className="button outline sec-action-btn"
+                  disabled={true}
+                  data-security-action="email"
+                  aria-label={visibleOverview.email ? "更换邮箱" : "绑定邮箱"}
+                  title="换绑邮箱功能暂未接入，敬请期待"
+                >
+                  敬请期待
                 </button>
               </div>
             </div>
@@ -632,11 +643,71 @@ export function AccountSecurityControls({ userId, canAct, pendingWrite }: Props)
           {!ready ? <>
             {stage === "current" ? <>
               <p className="sec-stage-note">{action === "password" ? "验证现有身份后才能设置新密码。" : "先验证现有身份控制权，再验证新的联系方式。"}</p>
-              {verificationChannels.length ? <FieldGroup id="security-channel" label="验证方式" helper={`验证码将发送至${channel === "phone" ? "当前手机号" : "已绑定邮箱"}。`} required>
-                <select {...fieldAttrs("security-channel")} value={channel} disabled={locked} onChange={event => { clearProof(); setChannel(event.target.value as "phone" | "email"); }}>
-                  {verificationChannels.map(value => <option key={value} value={value}>{value === "phone" ? `当前手机号 ${maskPhone(visibleOverview.phoneNumber ?? "")}` : `已绑定邮箱 ${maskRecoveryEmail(visibleOverview.email ?? "")}`}</option>)}
-                </select>
-              </FieldGroup> : <p className="sec-stage-note" role="note">当前没有可用于验证身份的联系方式。</p>}
+              {verificationChannels.length ? (
+                <FieldGroup id="security-channel" label="验证方式" helper={`验证码将发送至${channel === "phone" ? "当前手机号" : "已绑定邮箱"}。`} required>
+                  <div className="security-channel-select-wrapper">
+                    <Select.Root
+                      value={channel}
+                      onValueChange={next => {
+                        if (next && (next === "phone" || next === "email")) {
+                          clearProof();
+                          setChannel(next);
+                        }
+                      }}
+                      disabled={locked}
+                    >
+                      <Select.Trigger className="security-select-trigger" aria-label="验证方式选择">
+                        <Select.Value>
+                          {channel === "phone"
+                            ? `当前手机号 ${maskPhone(visibleOverview.phoneNumber ?? "")}`
+                            : `已绑定邮箱 ${maskRecoveryEmail(visibleOverview.email ?? "")}`}
+                        </Select.Value>
+                        <Select.Icon className="form-select-chevron">
+                          <ChevronDown size={14} aria-hidden="true" />
+                        </Select.Icon>
+                      </Select.Trigger>
+                      <Select.Portal>
+                        <Select.Positioner sideOffset={6} align="start" className="form-select-positioner">
+                          <Select.Popup className="form-select-popup security-select-popup">
+                            <Select.List>
+                              {verificationChannels.map(value => (
+                                <Select.Item key={value} value={value} className="form-select-option">
+                                  <Select.ItemText>
+                                    {value === "phone"
+                                      ? `当前手机号 ${maskPhone(visibleOverview.phoneNumber ?? "")}`
+                                      : `已绑定邮箱 ${maskRecoveryEmail(visibleOverview.email ?? "")}`}
+                                  </Select.ItemText>
+                                  <Select.ItemIndicator className="form-select-check">
+                                    <Check size={14} />
+                                  </Select.ItemIndicator>
+                                </Select.Item>
+                              ))}
+                            </Select.List>
+                          </Select.Popup>
+                        </Select.Positioner>
+                      </Select.Portal>
+                    </Select.Root>
+                    <select
+                      {...fieldAttrs("security-channel")}
+                      className="sr-only-select"
+                      value={channel}
+                      disabled={locked}
+                      onChange={event => {
+                        clearProof();
+                        setChannel(event.target.value as "phone" | "email");
+                      }}
+                    >
+                      {verificationChannels.map(value => (
+                        <option key={value} value={value}>
+                          {value === "phone"
+                            ? `当前手机号 ${maskPhone(visibleOverview.phoneNumber ?? "")}`
+                            : `已绑定邮箱 ${maskRecoveryEmail(visibleOverview.email ?? "")}`}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                </FieldGroup>
+              ) : <p className="sec-stage-note" role="note">当前没有可用于验证身份的联系方式。</p>}
             </> : <p className="sec-stage-note">原身份已验证。请验证新的联系方式 <strong>{target}</strong>。</p>}
             <FieldGroup id="security-code" label="验证码" helper="请勿向他人透露验证码。">
               <div className="auth-code-row">
@@ -650,12 +721,23 @@ export function AccountSecurityControls({ userId, canAct, pendingWrite }: Props)
               <FieldGroup id="security-password" label="新密码" helper="12–128 位，建议使用密码管理器生成。">
                 <div className="auth-password-row">
                   <input {...fieldAttrs("security-password")} type={showPassword ? "text" : "password"} autoComplete="new-password" value={password} disabled={locked} onChange={event => setPassword(event.target.value)} />
-                  <button type="button" className="auth-password-toggle" aria-label={showPassword ? "隐藏密码" : "显示密码"} aria-pressed={showPassword} disabled={locked} onClick={() => setShowPassword(value => !value)}>{showPassword ? "隐藏" : "显示"}</button>
+                  <button type="button" className="auth-password-toggle" aria-label={showPassword ? "隐藏密码" : "显示密码"} aria-pressed={showPassword} disabled={locked} onClick={() => setShowPassword(value => !value)}>
+                    {showPassword ? <EyeOff size={16} aria-hidden="true" /> : <Eye size={16} aria-hidden="true" />}
+                    <span className="sr-only">{showPassword ? "隐藏密码" : "显示密码"}</span>
+                  </button>
                 </div>
               </FieldGroup>
               <FieldGroup id="security-password-confirm" label="确认新密码">
                 <input {...fieldAttrs("security-password-confirm")} type={showPassword ? "text" : "password"} autoComplete="new-password" value={confirmation} disabled={locked} onChange={event => setConfirmation(event.target.value)} />
               </FieldGroup>
+              <div className="sec-password-hints" aria-live="polite">
+                <span className={`sec-password-hint${password.length >= 12 ? " is-valid" : ""}`}>
+                  <Check size={12} aria-hidden="true" /> 长度至少 12 位（当前 {password.length} 位）
+                </span>
+                <span className={`sec-password-hint${password.length >= 12 && confirmation && password === confirmation ? " is-valid" : ""}`}>
+                  <Check size={12} aria-hidden="true" /> 两次输入一致
+                </span>
+              </div>
             </> : null}
             <Callout tone="neutral" title="本次变更">成功后该账号的其他有效会话都会退出；当前会话继续有效，到期时间不变。</Callout>
             <div className="sec-dialog-actions"><button type="button" className="button quiet" onClick={() => choose(null)}>取消</button><button type="submit" className="button primary" disabled={locked}>确认{action === "password" ? "保存密码" : action === "phone" ? "换绑手机号" : "保存邮箱"}</button></div>
@@ -675,7 +757,30 @@ export function AccountSecurityControls({ userId, canAct, pendingWrite }: Props)
 function StepList({ action, proof, targetProof }: { action: Action; proof: string; targetProof: string }) {
   const steps = action === "password" ? ["验证身份", "设置新密码"] : ["验证现有身份", "验证新联系方式", "完成换绑"];
   const index = action === "password" ? proof ? 1 : 0 : targetProof ? 2 : proof ? 1 : 0;
-  return <ol className="sec-steps">{steps.map((label, position) => <li key={label} aria-current={position === index ? "step" : undefined} data-state={position < index ? "done" : position === index ? "current" : "todo"}><span>{position + 1}</span>{label}</li>)}</ol>;
+  return (
+    <ol className="sec-steps" aria-label="操作步骤">
+      {steps.map((label, position) => {
+        const isDone = position < index;
+        const isCurrent = position === index;
+        return (
+          <li
+            key={label}
+            aria-current={isCurrent ? "step" : undefined}
+            data-state={isDone ? "done" : isCurrent ? "current" : "todo"}
+            className={`sec-step-item${isDone ? " is-done" : isCurrent ? " is-current" : ""}`}
+          >
+            <div className="sec-step-indicator">
+              <span className="sec-step-badge">
+                {isDone ? <Check size={13} strokeWidth={2.5} aria-hidden="true" /> : position + 1}
+              </span>
+              {position < steps.length - 1 ? <span className="sec-step-line" aria-hidden="true" /> : null}
+            </div>
+            <span className="sec-step-label">{label}</span>
+          </li>
+        );
+      })}
+    </ol>
+  );
 }
 
 function RevokeCopy({ scope, count }: { scope: Scope; count: number }) {

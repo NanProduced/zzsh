@@ -86,7 +86,7 @@ function MobileSessionEntry({ onSignIn }: { onSignIn: () => void }) {
         </div>
         <div className="sheet-user-info">
           <div className="sheet-user-name-row">
-            <strong className="sheet-user-name" title={displayName}>
+            <strong className="sheet-user-name">
               {displayName}
             </strong>
           </div>
@@ -95,9 +95,6 @@ function MobileSessionEntry({ onSignIn }: { onSignIn: () => void }) {
               <Crown size={12} aria-hidden="true" />
               <span>{tierLabel}</span>
             </span>
-            {session.userId ? (
-              <span className="sheet-user-uid">ID: {session.userId.replace(/^user_/, "").slice(0, 8)}</span>
-            ) : null}
             {rollingPoints ? (
               <span className="sheet-user-points">
                 {growth.status === "ready" && growth.data.tier === "BLACK_GOLD"

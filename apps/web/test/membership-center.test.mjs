@@ -462,6 +462,22 @@ test("benefits distinguish unpublished policy from read failures and unknown sta
   }
 });
 
+test("membership benefit cards render only the returned policy for current and preview tiers", async () => {
+  const view = await loadView();
+  try {
+    await view.render({ state: ready({ benefits: [{ label: "租赁优惠", value: "本期 7.3 折" }, { label: "租客押金", value: "最高减免 20 元" }], comparison: [{ tier: "银卡会员", pricing: "价格方案未就绪", deposit: "租客押金按账号条件缴纳" }] }) });
+    const current = view.host.querySelector(".mc-benefit-list").textContent;
+    assert.match(current, /本期 7\.3 折/); assert.match(current, /最高减免 20 元/);
+    assert.doesNotMatch(current, /95折|极速租号无需冻结押金|终身保级/);
+    await view.click('.mc-node[data-tier="SILVER"]');
+    const preview = view.host.querySelector(".mc-benefit-list").textContent;
+    assert.match(preview, /价格方案未就绪/); assert.doesNotMatch(preview, /98折/);
+    await view.click('.mc-node[data-tier="BLACK_GOLD"]');
+    assert.match(view.host.textContent, /该档权益暂时无法展示/);
+    assert.doesNotMatch(view.host.textContent, /终身保留最高档资格/);
+  } finally { await view.dispose(); }
+});
+
 
 test("tier dots keep actual identity while previewing and progress uses the accessible primitive", async () => {
   const view = await loadView();

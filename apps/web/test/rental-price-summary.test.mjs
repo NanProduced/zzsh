@@ -42,6 +42,7 @@ function loadSummaryComponent() {
     if (name === "@/lib/order-display") {
       return requireFromTree(path.join(tree, "apps/web/src/lib/order-display.ts"));
     }
+    if (name === "@/lib/money-display") return requireFromTree(path.join(tree, "apps/web/src/lib/money-display.ts"));
     if (name === "@/lib/order-client") {
       return requireFromTree(path.join(tree, "apps/web/src/lib/order-client.ts"));
     }
@@ -144,8 +145,8 @@ test("R3-03: 60-bullet denominator displayed with '组' representation", async (
   });
 });
 
-// Case 5: 8-decimal UnitAmount precision preserved (e.g. ¥0.00400000 / 1 发 -> ¥0.004 / 发)
-test("R3-05: positive 8-decimal UnitAmount preserves decimals and never renders as ¥0.00", async () => {
+// Positive sub-cent prices remain distinguishable from a genuinely free item.
+test("R3-05: positive sub-cent unit price is rounded for display without implying zero", async () => {
   await withDom(async (host, render) => {
     const reference = {
       total: "¥0.04",
@@ -158,7 +159,7 @@ test("R3-05: positive 8-decimal UnitAmount preserves decimals and never renders 
     await render(React.createElement(RentalPriceSummary, { reference, quote: null }));
     const spec = host.querySelector(".account-quote-bill-spec");
     assert.ok(spec);
-    assert.match(spec.textContent, /¥0.004 \/ 发/, "precision preserved without truncation to ¥0.00");
+    assert.match(spec.textContent, /< ¥0\.01 \/ 发/);
     assert.ok(!spec.textContent.includes("¥0.00 /"), "must not be ¥0.00");
   });
 });

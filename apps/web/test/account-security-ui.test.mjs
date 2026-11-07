@@ -291,15 +291,13 @@ test("关闭分步弹窗不丢失恢复责任，也不会建立第二次意图",
   } finally { await p.close(); }
 });
 
-test("改变已暂存的邮箱目标会清空两枚证明且不能提交原目标", async () => {
+test("换绑邮箱暂未接入：按钮置灰且显示敬请期待", async () => {
   const p = await mount();
   try {
-    await emailReady(p);
-    await p.input("security-target", "second@example.invalid");
-    await p.submit('form[aria-label="绑定或更换邮箱"]');
-    assert.equal(writes(p, "/security/email").length, 0);
-    assert.equal(p.host.querySelector("#security-code").value, "");
-    assert.match(p.host.textContent, /先验证现有身份控制权/);
+    const btn = p.host.querySelector('[data-security-action="email"]');
+    assert.ok(btn);
+    assert.equal(btn.disabled, true);
+    assert.match(btn.textContent, /敬请期待/);
   } finally { await p.close(); }
 });
 

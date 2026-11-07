@@ -300,12 +300,14 @@ test("ORDER-A: frozen rental mode labels are read only from the order quote", ()
   assert.equal(display.orderRentalModeLabel({}), null);
 });
 
-test("ORDER-A: unit price keeps eight decimals and the snapshot's real unit pair", () => {
+test("ORDER-A: unit price rounds for display while keeping the snapshot's real unit pair", () => {
   const amount = (value) => ({ currency: "CNY", unit: "yuan", amount: value, scale: 8 });
-  assert.equal(display.orderUnitPriceText(amount("0.12345678"), "1000000", "HAFF_BASE"), "¥0.12345678 / 1,000,000 哈夫币（1 M）");
-  assert.equal(display.orderUnitPriceText(amount("0.00000012"), "60", "ROUND"), "¥0.00000012 / 60 发");
-  assert.equal(display.orderUnitPriceText(amount("1.00000000"), "1", "PIECE"), "¥1.00000000 / 1 件");
-  assert.equal(display.orderUnitPriceText(amount("2.00000000"), null, "DAY"), "¥2.00000000");
+  assert.equal(display.orderUnitPriceText(amount("0.12345678"), "1000000", "HAFF_BASE"), "约 ¥0.12 / 1,000,000 哈夫币（1 M）");
+  assert.equal(display.orderUnitPriceText(amount("0.00000012"), "60", "ROUND"), "< ¥0.01 / 60 发");
+  assert.equal(display.orderUnitPriceText(amount("1.00000000"), "1", "PIECE"), "¥1 / 1 件");
+  assert.equal(display.orderUnitPriceText(amount("2.00000000"), null, "DAY"), "¥2");
+  assert.equal(display.orderUnitPriceText(amount("0.00500000"), "1", "PIECE"), "约 ¥0.01 / 1 件");
+  assert.equal(display.orderUnitPriceText(amount("90071992547409930.015"), null, "DAY"), "约 ¥90071992547409930.02");
   assert.equal(display.orderUnitPriceText(amount("0.123456789"), "1", "PIECE"), null);
   assert.equal(display.orderUnitPriceText(null, "1", "PIECE"), null);
 });

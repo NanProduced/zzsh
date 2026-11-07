@@ -114,7 +114,7 @@ test('unavailable bank information stays unknown in the withdrawal steps', async
 
 test('filling a large balance preserves every cent without promising withdrawal eligibility', async () => {
   const p=await probe({availableBalance:'9007199254740993'});
-  try { await p.render(); await p.click('填写余额'); assert.equal(p.host.querySelector('.bank-withdraw-form input').value,'90071992547409.93'); assert.doesNotMatch(p.host.textContent,/全部提现|随时将账户余额提现到账/); assert.equal(p.calls.filter(call=>call.method==='quote').length,0); } finally { await p.close(); }
+  try { await p.render(); await p.click('全部提现'); assert.equal(p.host.querySelector('.bank-withdraw-form input').value,'90071992547409.93'); assert.doesNotMatch(p.host.textContent,/随时将账户余额提现到账/); assert.equal(p.calls.filter(call=>call.method==='quote').length,0); } finally { await p.close(); }
 });
 
 test('editing never prefills previous name/card and saved data is not bank verification', async () => {
@@ -227,7 +227,7 @@ for(const denialStatus of [401,403]){
   const p=await probe({history:{readWithdrawalHistory:async(_user,query)=>query.source==='JOINPAY'&&query.cursor?later.promise:history(query.source,{items:query.source==='JOINPAY'?items:query.source==='LOCAL_CONTROLLED'?[local]:[],cursor:query.source==='JOINPAY'?'next':null}),readWithdrawalHistoryItem:async()=>{throw new WithdrawalRequestError(denialStatus,denialStatus===401?'UNAUTHENTICATED':'FORBIDDEN');}}});
   try{
    let revalidations=0;p.session.revalidate=()=>{revalidations++;};await p.render();const section=p.host.querySelector('[aria-label="提现记录"]');
-   assert.equal(section.querySelectorAll('.bank-history-row').length,20);await p.click('加载更多记录',section);
+   assert.equal(section.querySelectorAll('.bank-history-row').length, 5); while([...section.querySelectorAll('button')].some(b=>b.textContent.includes('查看更多记录'))){await p.click('查看更多记录',section);} assert.ok(section.querySelectorAll('.bank-history-row').length>=20); await p.click('加载更多记录',section);
    const target=[...section.querySelectorAll('.bank-history-row')].find(row=>row.textContent.includes('0015'));assert(target);await React.act(async()=>target.querySelector('button').click());await p.settle();
    assert.equal([...section.querySelectorAll('.bank-history-row')].filter(row=>row.textContent.includes('0015')).length,0);
    if(denialStatus===403)assert.match(section.textContent,/测试记录，不代表真实到账/);else{assert.equal(section.querySelectorAll('.bank-history-row').length,0);assert.equal(revalidations,1);}
@@ -242,7 +242,7 @@ test('a late detail cannot reappear after its history source is forbidden',async
  const detail=deferred(),items=nativeHistoryPage();
  const p=await probe({history:{readWithdrawalHistory:async(_user,query)=>{if(query.source==='JOINPAY'&&query.cursor)throw new WithdrawalRequestError(403,'FORBIDDEN');return history(query.source,{items:query.source==='JOINPAY'?items:query.source==='LOCAL_CONTROLLED'?[localItem]:[],cursor:query.source==='JOINPAY'?'next':null});},readWithdrawalHistoryItem:async()=>detail.promise}});
  try{
-  await p.render();const section=p.host.querySelector('[aria-label="提现记录"]');const target=[...section.querySelectorAll('.bank-history-row')].find(row=>row.textContent.includes('0015'));assert(target);
+  await p.render(); const section = p.host.querySelector('[aria-label="提现记录"]'); while ([...section.querySelectorAll('button')].some(b => b.textContent.includes('查看更多记录'))) { await p.click('查看更多记录', section); } const target = [...section.querySelectorAll('.bank-history-row')].find(row => row.textContent.includes('0015')); assert(target);
   await React.act(async()=>target.querySelector('button').click());await p.settle();await p.click('加载更多记录',section);
   assert.equal(section.querySelector('.bank-history-detail'),null);
   await React.act(async()=>detail.resolve({contractVersion:'personal-withdrawals.read.v2',subjectId:'user_A',source:'JOINPAY',availability:'AVAILABLE',reasonCodes:[],data:{item:{...nativeItem,merchantOrderNo:'PRIVATE_LATE_DETAIL'},scope:'LOCAL_NATIVE_INTENTS_ONLY'}}));await p.settle();

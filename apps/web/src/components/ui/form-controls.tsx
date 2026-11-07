@@ -116,3 +116,45 @@ export function DateTimePicker({ label, value, disabled, onChange, popupClassNam
     <TimeSelect label={`${label}时间`} value={day ? time : ""} disabled={disabled || !day} popupClassName={popupClassName} onChange={next => onChange(`${day}T${next}`)} />
   </span>;
 }
+
+export function DatePicker({ label, value, disabled, onChange, placeholder = "选择日期", popupClassName = "", className = "" }: {
+  label: string;
+  value: string;
+  disabled?: boolean;
+  onChange: (value: string) => void;
+  placeholder?: string;
+  popupClassName?: string;
+  className?: string;
+}) {
+  const [open, setOpen] = useState(false);
+  const [year, month, date] = (value || "").split("-").map(Number);
+  const selected = (year && month && date) ? new Date(year, month - 1, date, 12) : undefined;
+  return <span className={`form-date-picker ${className}`}>
+    <Popover.Root open={open} onOpenChange={setOpen}>
+      <Popover.Trigger asChild><button type="button" className="form-select-trigger" disabled={disabled} aria-label={label}>
+        <span>{value ? value.replaceAll("-", "/") : placeholder}</span>
+        <CalendarDays size={16} aria-hidden="true" />
+      </button></Popover.Trigger>
+      <Popover.Portal><Popover.Content sideOffset={6} align="start" className={`form-calendar${popupClassName ? ` ${popupClassName}` : ""}`} aria-label={`${label}日历`}>
+        <DayPicker
+          mode="single"
+          locale={zhCN}
+          selected={selected}
+          defaultMonth={selected || new Date()}
+          autoFocus
+          showOutsideDays
+          onSelect={next => {
+            if (!next) {
+              onChange("");
+              setOpen(false);
+              return;
+            }
+            const isoDay = `${next.getFullYear()}-${String(next.getMonth() + 1).padStart(2, "0")}-${String(next.getDate()).padStart(2, "0")}`;
+            onChange(isoDay);
+            setOpen(false);
+          }}
+        />
+      </Popover.Content></Popover.Portal>
+    </Popover.Root>
+  </span>;
+}

@@ -298,6 +298,7 @@ async function probe({ mode = "standard", accountId, editRequested = false, game
   module.filename = path.join(tree, "publish-form-probe.cjs");
   module.paths = Module._nodeModulePaths(tree);
   module.require = (name) => {
+    if (name === "@/lib/money-display") return require(path.join(tree, "apps/web/src/lib/money-display.ts"));
     const contentDependency=contentFixtureDependency(name); if(contentDependency)return contentDependency;
     if (name.endsWith(".css")) return {};
     if (name === "../ui/information" || name === "../auth/session-loading") {

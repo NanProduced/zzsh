@@ -30,6 +30,16 @@ export function accountHref(accountId: string): string {
   return "/accounts/" + encodeURIComponent(accountId);
 }
 
+function HintTooltip({ content, children }: { content?: ReactNode; children: React.ReactElement }) {
+  if (!content) return children;
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>{children}</TooltipTrigger>
+      <TooltipContent side="top">{content}</TooltipContent>
+    </Tooltip>
+  );
+}
+
 function conditionValue(data: Pick<AccountCardData, "conditionLines">, key: string): string | null {
   return data.conditionLines.find((line) => line.key === key)?.value ?? null;
 }
@@ -112,16 +122,32 @@ export function summarizeQuoteResources(
   return { lines, hiddenCount: ranked.length - lines.length };
 }
 
+export function isUnknownMoney(value: string | null | undefined): boolean {
+  const trimmed = value?.trim();
+  return !trimmed || trimmed === "以平台确认为准" || trimmed === "待确认" || trimmed === "null" || trimmed === "undefined";
+}
+
+export function isZeroMoney(value: string | null | undefined): boolean {
+  if (!value) return true;
+  return /^￥?¥?\s*0(?:\.0+)?$/.test(value.trim());
+}
+
 function financeFacts(data: AccountCardData) {
   const historical = Boolean(data.historicalReadOnly);
   const depositKnown = !isUnknownMoney(data.depositLabel);
-  const payableKnown = !isUnknownMoney(data.payableTotalLabel);
-  const depositZero = depositKnown && isZeroMoney(data.depositLabel ?? "");
-  const totalIsPayable = !historical && payableKnown;
-  const totalValue = historical
-    ? moneyValue(data.resourceTotalLabel, "无资源费用")
-    : moneyValue(totalIsPayable ? data.payableTotalLabel : data.resourceTotalLabel, "无资源费用");
+  const depositZero = depositKnown ? isZeroMoney(data.depositLabel) : false;
+  const totalIsPayable = !historical && !isUnknownMoney(data.payableTotalLabel);
+  const totalValue = moneyValue(totalIsPayable ? data.payableTotalLabel : data.resourceTotalLabel, "无资源费用");
   const totalCaption = historical ? "不含押金" : totalIsPayable ? (depositZero ? "" : "含押金") : "押金待核";
+
+  const depositValue = depositKnown
+    ? depositZero
+      ? "无需押金"
+      : moneyValue(data.depositLabel, "无需押金")
+    : historical
+    ? "未提供"
+    : "详情核定";
+
   return {
     historical,
     totalLabel: historical ? "资源费用记录" : "总价",
@@ -129,27 +155,17 @@ function financeFacts(data: AccountCardData) {
     totalCaption,
     totalAria: historical
       ? `资源费用记录 ${totalValue}，不含押金`
-      : totalIsPayable
-        ? `总价 ${totalValue}${depositZero ? "" : "，含押金"}`
-        : `资源费用 ${totalValue}，押金待核`,
+      : totalIsPayable ? `总价 ${totalValue}${depositZero ? "" : "，含押金"}` : `资源费用 ${totalValue}，押金待核`,
     haffLabel: historical ? "哈夫币租金记录" : "哈夫币租金",
     haffValue: moneyValue(data.haffRentLabel, "无租金"),
     itemsLabel: historical ? "物资预付记录" : "物资预付",
     itemsValue: moneyValue(data.itemResourceTotalLabel, "无物品费用"),
     depositLabel: historical ? "押金记录" : "押金",
-    depositValue: depositKnown ? moneyValue(data.depositLabel, "无需押金") : historical ? "未提供" : "详情核定",
+    depositValue,
+    depositZero,
     depositUnknown: !historical && !depositKnown,
     ratio: authoritativeRatioLabel(data.baseRenterHaffRatioWanPerYuan, data.baseRatioReferenceOnly),
   };
-}
-
-function isUnknownMoney(value: string | null | undefined): boolean {
-  const trimmed = value?.trim();
-  return !trimmed || trimmed === "以平台确认为准" || trimmed === "待确认" || trimmed === "null" || trimmed === "undefined";
-}
-
-function isZeroMoney(value: string): boolean {
-  return /^￥?¥?\s*0(?:\.0+)?$/.test(value.replace(/\s+/g, ""));
 }
 
 const COPY_ACTION_TEXT = { idle: "复制", ok: "已复制", error: "复制失败" } as const;
@@ -310,6 +326,35 @@ export function composeListTitle(
     haff: title.haff,
     rest: title.rest,
   };
+}
+
+export function HighlightedTitleRest({ text }: { text: string }) {
+  if (!text) return null;
+  const segments = text.split(" · ");
+  return (
+    <>
+      {segments.map((seg, idx) => {
+        let tone = "default";
+        if (/6甲|六级甲|六级护甲|6级护甲|6级防弹衣/.test(seg)) {
+          tone = "armor6";
+        } else if (/6头|六级头|六级头盔|6级头盔/.test(seg)) {
+          tone = "helmet6";
+        } else if (/6弹|六级弹|六级子弹|6级子弹/.test(seg)) {
+          tone = "bullet6";
+        } else if (/巴雷特|AWM|M98B/.test(seg)) {
+          tone = "weapon";
+        } else if (/\d\s*[*×xX]\s*\d|安全箱/.test(seg)) {
+          tone = "safebox";
+        }
+        return (
+          <span key={idx} className="title-segment-wrap">
+            {idx > 0 ? <span className="title-segment-sep" aria-hidden="true"> · </span> : null}
+            <span className={`title-segment title-segment--${tone}`}>{seg}</span>
+          </span>
+        );
+      })}
+    </>
+  );
 }
 
 export function skinChipTone(tag: SkinTag): "teal" | "purple" | "blue" | "default" {
@@ -585,9 +630,9 @@ export function AccountCard({
       ? "记录不含押金"
       : facts.depositUnknown
       ? "押金待核"
-      : facts.depositValue === "无需押金"
-      ? "无押金"
-      : `含押金 ${facts.depositValue.replace(/\.00$/, "")}`;
+      : facts.depositZero || facts.depositValue === "无需押金"
+      ? "免押金"
+      : `押金 ${facts.depositValue.replace(/\.00$/, "")} (可退)`;
 
     return (
       <article className="account-card account-card--list" data-account-id={data.id}>
@@ -625,10 +670,12 @@ export function AccountCard({
               )}
               <div className="account-list-thumb-badges">
                 {mediaCount > 0 ? (
-                  <span className="thumb-badge thumb-badge--count" title={`共 ${mediaCount} 张图片`}>
-                    <ImageIcon size={11} aria-hidden="true" />
-                    <span>{mediaCount} 张</span>
-                  </span>
+                  <HintTooltip content={`共 ${mediaCount} 张图片`}>
+                    <span className="thumb-badge thumb-badge--count">
+                      <ImageIcon size={11} aria-hidden="true" />
+                      <span>{mediaCount} 张</span>
+                    </span>
+                  </HintTooltip>
                 ) : null}
                 {loginValue ? (
                   <span className="thumb-badge thumb-badge--login">
@@ -650,7 +697,10 @@ export function AccountCard({
               >
                 {accountTitle.haff ? <span className="account-list-haff-lead">{accountTitle.haff}</span> : null}
                 {accountTitle.rest ? (
-                  <span className="account-list-title-rest">{accountTitle.haff ? " · " : ""}{accountTitle.rest}</span>
+                  <span className="account-list-title-rest">
+                    {accountTitle.haff ? <span className="title-segment-sep" aria-hidden="true"> · </span> : null}
+                    <HighlightedTitleRest text={accountTitle.rest} />
+                  </span>
                 ) : null}
                 {accountTitle.secondary ? (
                   <span className="account-list-title-secondary">
@@ -660,12 +710,11 @@ export function AccountCard({
                 ) : null}
               </Link>
               {facts.ratio ? (
-                <span
-                  className="account-tag-pill account-tag-pill--ratio"
-                  title="哈夫币兑换比例（万哈夫币/元），不含会员礼遇与个人优惠"
-                >
-                  {facts.ratio}
-                </span>
+                <HintTooltip content="哈夫币兑换比例（万哈夫币/元），不含会员礼遇与个人优惠">
+                  <span className="account-tag-pill account-tag-pill--ratio">
+                    {facts.ratio}
+                  </span>
+                </HintTooltip>
               ) : null}
               <div className="account-mobile-badges" aria-label="关键属性标签">
                 {safeBoxText ? <span className="account-tag-pill account-tag-pill--safebox">{safeBoxText}</span> : null}
@@ -695,7 +744,7 @@ export function AccountCard({
                 {row1Cells.map((cell) => (
                   <div key={cell.label} className="matrix-col">
                     <span className="matrix-label">{cell.label}</span>
-                    <strong className="matrix-value" title={cell.value}>{cell.value}</strong>
+                    <strong className="matrix-value">{cell.value}</strong>
                   </div>
                 ))}
               </div>
@@ -703,7 +752,7 @@ export function AccountCard({
                 {row2Cells.map((cell) => (
                   <div key={cell.label} className="matrix-col">
                     <span className="matrix-label">{cell.label}</span>
-                    <strong className="matrix-value" title={cell.value}>{cell.value}</strong>
+                    <strong className="matrix-value">{cell.value}</strong>
                   </div>
                 ))}
               </div>
@@ -714,7 +763,7 @@ export function AccountCard({
                   <span className="account-mobile-summary-item" key={item.label}>
                     {index > 0 ? <span className="account-mobile-summary-sep">｜</span> : null}
                     <span className="account-mobile-summary-label">{item.label}</span>
-                    <strong title={item.value}>{item.value}</strong>
+                    <strong>{item.value}</strong>
                   </span>
                 ))}
               </div>
@@ -724,7 +773,7 @@ export function AccountCard({
                     <span className="account-mobile-summary-item" key={item.label}>
                       {index > 0 ? <span className="account-mobile-summary-sep">·</span> : null}
                       <span className="account-mobile-summary-label">{item.label}</span>
-                      <strong title={item.value}>{item.value}</strong>
+                      <strong>{item.value}</strong>
                     </span>
                   ))}
                 </div>
@@ -736,7 +785,7 @@ export function AccountCard({
                       <span className="account-mobile-summary-item" key={item.label}>
                         {index > 0 ? <span className="account-mobile-summary-sep">·</span> : null}
                         <span className="account-mobile-summary-label">{item.label}</span>
-                        <strong title={item.value}>{item.value}</strong>
+                        <strong>{item.value}</strong>
                       </span>
                     ))}
                     {positiveResourceCount > 0 ? (
@@ -806,13 +855,14 @@ export function AccountCard({
                   <div className="resources-grid-2x2">
                     {positiveResources.map((line) => {
                       const formatted = formatSupplyItem(line);
+                      const isTier6 = (line.code?.includes("level6") || line.name.includes("6级") || line.name.includes("六级") || line.code?.includes("barrett") || line.name.includes("巴雷特"));
                       return (
                         <div
                           key={`${line.itemId}-${line.code ?? ""}`}
-                          className={`resources-cell ${formatted.isUnknown ? "resources-cell--unknown" : ""}`}
+                          className={`resources-cell ${isTier6 ? "resources-cell--tier6" : ""} ${formatted.isUnknown ? "resources-cell--unknown" : ""}`}
                         >
-                          <span className="resources-cell-name" title={line.name}>{canonicalResourceCode(line.code) === "df_billable_level6_bullet" ? "六级子弹" : line.name}</span>
-                          <strong className="resources-cell-qty" title={formatted.quantityText}>
+                          <span className="resources-cell-name">{canonicalResourceCode(line.code) === "df_billable_level6_bullet" ? "六级子弹" : line.name}</span>
+                          <strong className="resources-cell-qty">
                             {formatted.quantityText}
                           </strong>
                         </div>
@@ -833,21 +883,23 @@ export function AccountCard({
                   const qualityLabel = skinQualityLabel(tag);
                   const tooltipText = [tag.name, typeLabel, qualityLabel].filter(Boolean).join(" · ");
                   return (
-                    <span
-                      key={`${tag.id}-${idx}`}
-                      className={`account-skin-chip account-skin-chip--${tone}`}
-                      data-skin-id={tag.id}
-                      title={tooltipText}
-                      aria-label={`${tag.name}${typeLabel ? ` (${typeLabel})` : ""}`}
-                    >
-                      <span className="skin-chip-name">{tag.name}</span>
-                    </span>
+                    <HintTooltip key={`${tag.id}-${idx}`} content={tooltipText}>
+                      <span
+                        className={`account-skin-chip account-skin-chip--${tone}`}
+                        data-skin-id={tag.id}
+                        aria-label={`${tag.name}${typeLabel ? ` (${typeLabel})` : ""}`}
+                      >
+                        <span className="skin-chip-name">{tag.name}</span>
+                      </span>
+                    </HintTooltip>
                   );
                 })}
                 {extraSkinCount > 0 ? (
-                  <span className="account-skin-chip account-skin-chip--more" title={`还有 ${extraSkinCount} 款皮肤见详情`}>
-                    +{extraSkinCount}
-                  </span>
+                  <HintTooltip content={`还有 ${extraSkinCount} 款皮肤见详情`}>
+                    <span className="account-skin-chip account-skin-chip--more">
+                      +{extraSkinCount}
+                    </span>
+                  </HintTooltip>
                 ) : null}
               </>
             ) : (
@@ -862,13 +914,14 @@ export function AccountCard({
                 <strong className={`account-mobile-price-main-val ${facts.totalValue === "待确认" ? "account-mobile-price-main-val--unconfirmed" : ""}`}>{facts.totalValue}</strong>
               </div>
               <div className="account-mobile-price-sub">
-                <span
-                  className={`account-mobile-price-deposit-text ${facts.depositUnknown ? "account-price-unknown" : ""}`}
-                  title={facts.historical ? undefined : "基础押金；会员实付以下单时个人报价为准"}
-                  data-deposit-state={facts.depositUnknown ? "unknown" : facts.depositValue === "无需押金" ? "zero" : "known"}
-                >
-                  {depositSummaryText}
-                </span>
+                <HintTooltip content={facts.historical ? undefined : "基础押金；会员实付以下单时个人报价为准"}>
+                  <span
+                    className={`account-mobile-price-deposit-text ${facts.depositUnknown ? "account-price-unknown" : ""}`}
+                    data-deposit-state={facts.depositUnknown ? "unknown" : facts.depositValue === "无需押金" ? "zero" : "known"}
+                  >
+                    {depositSummaryText}
+                  </span>
+                </HintTooltip>
                 <button
                   type="button"
                   className="account-mobile-fee-toggle"
@@ -888,7 +941,9 @@ export function AccountCard({
               {facts.ratio ? (
                 <div className="finance-row finance-row--ratio">
                   <span className="finance-label">哈夫币比例</span>
-                  <span className="finance-val" title="公开哈夫币比例（万哈夫币/元），不含会员礼遇与个人优惠">{facts.ratio}</span>
+                  <HintTooltip content="公开哈夫币比例（万哈夫币/元），不含会员礼遇与个人优惠">
+                    <span className="finance-val">{facts.ratio}</span>
+                  </HintTooltip>
                 </div>
               ) : null}
               <div className="finance-row">
@@ -901,18 +956,23 @@ export function AccountCard({
               </div>
               <div className="finance-row finance-row--deposit">
                 <span className="finance-label">{facts.depositLabel}</span>
-                <span
-                  className={`finance-val ${facts.depositValue === "详情核定" || facts.depositValue === "未提供" ? "finance-val--unconfirmed" : ""}`}
-                  title={facts.historical ? undefined : "基础押金；会员实付以下单时个人报价为准"}
-                  data-deposit-state={facts.depositUnknown ? "unknown" : facts.depositValue === "无需押金" ? "zero" : "known"}
-                >
-                  {facts.depositValue}
-                </span>
+                <HintTooltip content={facts.historical ? undefined : "基础押金；会员实付以下单时个人报价为准，退款按结算结果处理"}>
+                  <span
+                    className={`finance-val ${facts.depositValue === "详情核定" || facts.depositValue === "未提供" ? "finance-val--unconfirmed" : ""}`}
+                    data-deposit-state={facts.depositUnknown ? "unknown" : facts.depositZero ? "zero" : "known"}
+                  >
+                    {facts.depositValue}{!facts.historical && !facts.depositZero && !facts.depositUnknown && facts.depositValue !== "详情核定" ? " (可退)" : ""}
+                  </span>
+                </HintTooltip>
               </div>
               <div className="finance-total-row" aria-label={facts.totalAria}>
                 <span className="finance-total-meta">
                   <span className="finance-total-title">{facts.totalLabel}</span>
-                  {facts.totalCaption ? <span className="finance-total-caption">{facts.totalCaption}</span> : null}
+                  {facts.totalCaption ? (
+                    <span className="finance-total-caption" data-deposit={facts.depositZero ? "free" : "excluded"}>
+                      {facts.totalCaption}
+                    </span>
+                  ) : null}
                 </span>
                 <strong className={`finance-total-val ${facts.totalValue === "待确认" ? "finance-total-val--unconfirmed" : ""}`}>
                   {facts.totalValue}
@@ -935,7 +995,7 @@ export function AccountCard({
                 {facts.ratio ? (
                   <div>
                     <dt>哈夫币比例</dt>
-                    <dd title="公开哈夫币比例（万哈夫币/元），不含会员礼遇与个人优惠">{facts.ratio}</dd>
+                    <dd>{facts.ratio}</dd>
                   </div>
                 ) : null}
                 <div>
@@ -1052,25 +1112,25 @@ export function AccountCard({
                 aria-label={`查看账号 ${accountVisibleTitle}`}
                 onClick={rememberDetail}
               >
-                <strong
-                  className="account-grid-title"
-                  title={[accountTitle.primary, accountTitle.secondary].filter(Boolean).join(" · ")}
-                >
-                  {accountTitle.haff ? (
-                    <span className="account-grid-haff">{accountTitle.haff}</span>
-                  ) : null}
-                  {accountTitle.rest ? (
-                    <span className="account-grid-title-rest">
-                      {accountTitle.haff ? ` · ${accountTitle.rest}` : accountTitle.rest}
-                    </span>
-                  ) : null}
-                  {accountTitle.secondary ? (
-                    <span className="account-grid-title-secondary">
-                      {accountTitle.haff || accountTitle.rest ? " · " : ""}
-                      <span className="account-title-supplies-badge">{accountTitle.secondary}</span>
-                    </span>
-                  ) : null}
-                </strong>
+                <HintTooltip content={[accountTitle.primary, accountTitle.secondary].filter(Boolean).join(" · ")}>
+                  <strong className="account-grid-title">
+                    {accountTitle.haff ? (
+                      <span className="account-grid-haff">{accountTitle.haff}</span>
+                    ) : null}
+                    {accountTitle.rest ? (
+                      <span className="account-grid-title-rest">
+                        {accountTitle.haff ? <span className="title-segment-sep" aria-hidden="true"> · </span> : null}
+                        <HighlightedTitleRest text={accountTitle.rest} />
+                      </span>
+                    ) : null}
+                    {accountTitle.secondary ? (
+                      <span className="account-grid-title-secondary">
+                        {accountTitle.haff || accountTitle.rest ? " · " : ""}
+                        <span className="account-title-supplies-badge">{accountTitle.secondary}</span>
+                      </span>
+                    ) : null}
+                  </strong>
+                </HintTooltip>
               </Link>
             </div>
             <div className="account-card-meta-row">{data.availabilityLabel || data.historicalReadOnly ? <span className="account-history-badge" data-public-availability={data.availabilityState}>{data.availabilityLabel ?? "暂不可租"}</span> : null}
@@ -1080,7 +1140,7 @@ export function AccountCard({
             <ListingFactBadgeRow badges={factBadges} />
 
             {gridAttrs.length > 0 ? (
-              <div className="account-grid-subattrs" title={gridAttrs.join(" · ")}>
+              <div className="account-grid-subattrs">
                 {gridAttrs.join(" · ")}
               </div>
             ) : (
@@ -1095,21 +1155,23 @@ export function AccountCard({
                     const qualityLabel = skinQualityLabel(skin);
                     const tooltipText = [skin.name, typeLabel, qualityLabel].filter(Boolean).join(" · ");
                     return (
-                      <span
-                        key={`${skin.id}-${idx}`}
-                        className={`account-skin-chip account-skin-chip--${skinChipTone(skin)}`}
-                        data-skin-id={skin.id}
-                        title={tooltipText}
-                        aria-label={`${skin.name}${typeLabel ? ` (${typeLabel})` : ""}`}
-                      >
-                        <span className="skin-chip-name">{skin.name}</span>
-                      </span>
+                      <HintTooltip key={`${skin.id}-${idx}`} content={tooltipText}>
+                        <span
+                          className={`account-skin-chip account-skin-chip--${skinChipTone(skin)}`}
+                          data-skin-id={skin.id}
+                          aria-label={`${skin.name}${typeLabel ? ` (${typeLabel})` : ""}`}
+                        >
+                          <span className="skin-chip-name">{skin.name}</span>
+                        </span>
+                      </HintTooltip>
                     );
                   })}
                   {extraSkinCount > 0 ? (
-                    <span className="account-skin-chip account-skin-chip--more" title="更多皮肤见详情">
-                      +{extraSkinCount}
-                    </span>
+                    <HintTooltip content="更多皮肤见详情">
+                      <span className="account-skin-chip account-skin-chip--more">
+                        +{extraSkinCount}
+                      </span>
+                    </HintTooltip>
                   ) : null}
                 </>
               ) : null}
@@ -1121,10 +1183,25 @@ export function AccountCard({
                   {gridSummary.lines.map((line) => {
                     const isBullet = isBulletResource(line);
                     const isArmor = isArmorResource(line);
+                    const isTier6Armor = isArmor && (line.code?.includes("level6") || line.name.includes("6级") || line.name.includes("六级"));
+                    const isTier6Bullet = isBullet && (line.code?.includes("level6") || line.name.includes("6级") || line.name.includes("六级"));
+                    const isSniper = (line.code?.includes("barrett") || line.code?.includes("awm") || line.name.includes("巴雷特") || line.name.includes("AWM"));
                     return (
                       <span
                         key={`${line.itemId}-${line.code ?? ""}`}
-                        className={`account-resource-pill ${isBullet ? "account-resource-pill--bullet" : isArmor ? "account-resource-pill--armor" : ""}`}
+                        className={`account-resource-pill ${
+                          isTier6Armor
+                            ? "account-resource-pill--tier6-armor"
+                            : isTier6Bullet
+                            ? "account-resource-pill--tier6-bullet"
+                            : isSniper
+                            ? "account-resource-pill--weapon"
+                            : isBullet
+                            ? "account-resource-pill--bullet"
+                            : isArmor
+                            ? "account-resource-pill--armor"
+                            : ""
+                        }`}
                       >
                         {isBullet ? (
                           <svg width="9" height="12" viewBox="0 0 9 12" fill="none" aria-hidden="true" className="pill-icon">
@@ -1153,9 +1230,11 @@ export function AccountCard({
               <div className="breakdown-header">
                 <span className="breakdown-title">金额构成</span>
                 {facts.ratio ? (
-                  <span className="breakdown-note" title="公开哈夫币比例（万哈夫币/元），不含会员礼遇与个人优惠">
-                    哈夫币比例 {facts.ratio}
-                  </span>
+                  <HintTooltip content="公开哈夫币比例（万哈夫币/元），不含会员礼遇与个人优惠">
+                    <span className="breakdown-note">
+                      哈夫币比例 {facts.ratio}
+                    </span>
+                  </HintTooltip>
                 ) : null}
               </div>
               <div className="breakdown-rows">
@@ -1169,19 +1248,24 @@ export function AccountCard({
                 </div>
                 <div className="breakdown-row breakdown-row--deposit">
                   <span className="breakdown-label">{facts.depositLabel}</span>
-                  <span
-                    className="breakdown-val"
-                    title={facts.historical ? undefined : "基础押金；会员实付以下单时个人报价为准"}
-                    data-deposit-state={facts.depositUnknown ? "unknown" : facts.depositValue === "无需押金" ? "zero" : "known"}
-                  >
-                    {facts.depositValue}
-                  </span>
+                  <HintTooltip content={facts.historical ? undefined : "基础押金；会员实付以下单时个人报价为准，退款按结算结果处理"}>
+                    <span
+                      className="breakdown-val"
+                      data-deposit-state={facts.depositUnknown ? "unknown" : facts.depositZero ? "zero" : "known"}
+                    >
+                      {facts.depositValue}{!facts.historical && !facts.depositZero && !facts.depositUnknown && facts.depositValue !== "详情核定" ? " (可退)" : ""}
+                    </span>
+                  </HintTooltip>
                 </div>
               </div>
               <div className="breakdown-total-row" aria-label={facts.totalAria}>
                 <span className="finance-total-meta">
                   <span className="finance-total-title">{facts.totalLabel}</span>
-                  {facts.totalCaption ? <span className="finance-total-caption">{facts.totalCaption}</span> : null}
+                  {facts.totalCaption ? (
+                    <span className="finance-total-caption" data-deposit={facts.depositZero ? "free" : "excluded"}>
+                      {facts.totalCaption}
+                    </span>
+                  ) : null}
                 </span>
                 <strong className={`breakdown-total-val ${facts.totalValue === "待确认" ? "breakdown-total-val--unconfirmed" : ""}`}>
                   {facts.totalValue}

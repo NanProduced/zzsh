@@ -22,8 +22,9 @@ import {
   ShieldAlert,
 } from "lucide-react";
 import { LegacyAccountImage } from "@zzsh/ui/legacy-account-image";
+import { AccountMediaPlaceholder } from "@zzsh/ui/account-media-placeholder";
 import { supplyApi } from "@/lib/supply-client";
-import { toListingDetail, type ListingDetailData } from "@/lib/listing-view";
+import { haffMillionsLabel, toListingDetail, type ListingDetailData } from "@/lib/listing-view";
 import type { OrderListingFacts, OrderParty } from "@/lib/order-client";
 
 type DossierState =
@@ -34,12 +35,17 @@ type DossierState =
 export function OrderAccountDossier({
   accountId,
   accountDisplayNo,
+  party,
   listingFacts,
+  orderResources,
+  gameName = "三角洲行动",
 }: {
   accountId?: string | null;
   accountDisplayNo?: string | null;
   party: OrderParty;
   listingFacts?: OrderListingFacts | null;
+  orderResources?: Array<{ code: string; name: string; value: string; quantity?: string | null }> | null;
+  gameName?: string | null;
 }) {
   const [savedState, setState] = useState<DossierState>({ accountId: accountId ?? null, status: "loading" });
   const state: DossierState = savedState.accountId === (accountId ?? null) ? savedState : { accountId: accountId ?? null, status: "loading" };
@@ -97,39 +103,138 @@ export function OrderAccountDossier({
     const safeBox = listingFacts?.attributeDisplay?.safeBox;
     const grading = listingFacts?.attributeDisplay?.grading;
     const loginMethod = listingFacts?.attributeDisplay?.loginMethod;
-    if (!safeBox && !grading && !loginMethod) return null;
+    const rentalMode = listingFacts?.rentalMode;
+    const rentalModeLabel = rentalMode === "fast" ? "极速出租" : rentalMode === "ordinary" ? "普通租赁" : rentalMode === "custom" ? "自定义租赁" : rentalMode ?? null;
+    const termSeconds = listingFacts?.termSeconds;
+    const termDaysLabel = termSeconds ? `${Math.round(Number(termSeconds) / 86400)} 天` : null;
+
+    const validResources = (orderResources ?? []).filter(r => r.value && !/^0(?:\s*天)?$/.test(r.value));
+    const factResources = (listingFacts?.resourceLines ?? [])
+      .filter(l => l.quantity && l.quantity !== "0")
+      .map(l => ({
+        code: l.code,
+        name: l.name || "资源",
+        value: l.unit === "HAFF_BASE"
+          ? (/^\d{1,24}$/.test(l.quantity!) ? `${haffMillionsLabel(l.quantity!)} M 哈夫币` : `${l.quantity} 哈夫币`)
+          : `${l.quantity} ${l.unit === "ROUND" ? "发" : l.unit === "PIECE" ? "件" : l.unit === "DAY" ? "天" : ""}`.trim()
+      }));
+    const displayResources = factResources.length > 0 ? factResources : validResources;
+
+    if (!safeBox && !grading && !loginMethod && !displayResources.length) return null;
+
+    const isWechat = loginMethod?.includes("微信");
 
     return (
-      <section className="account-module-card order-account-dossier-card">
+      <section className="account-module-card order-account-dossier-card" aria-label="关联游戏账号基本规格">
         <div className="account-module-card-header order-dossier-header">
           <div className="order-dossier-header-title">
             <span className="order-dossier-tag">账号档案</span>
-            <h3>关联游戏账号基本规格</h3>
-            <span>{listingFacts?.source === "ORDER_VERSION" ? "下单时账号资料" : listingFacts?.source === "LEGACY_ACCOUNT_SNAPSHOT" ? "当前账号资料（迁入时记录）" : "当前账号资料"}</span>
+            <div className="order-dossier-title-text">
+              <h3>{accountDisplayNo ? `账号 ${accountDisplayNo}` : "关联游戏账号基本规格"}</h3>
+              <span className="order-dossier-game-name">{listingFacts?.source === "ORDER_VERSION" ? "下单时账号资料" : listingFacts?.source === "LEGACY_ACCOUNT_SNAPSHOT" ? "当前账号资料（迁入时记录）" : "当前账号资料"}</span>
+            </div>
           </div>
-          {accountDisplayNo ? (
-            <span className="order-dossier-acc-badge">编号：{accountDisplayNo}</span>
-          ) : null}
+          <div className="order-dossier-header-badges">
+            <span className="mra-game-tag">{gameName}</span>
+            {loginMethod ? (
+              <span className={`account-order-method-badge ${isWechat ? "is-wechat" : "is-qq"}`}>{loginMethod}</span>
+            ) : null}
+            {accountDisplayNo ? (
+              <span className="order-dossier-acc-badge">编号：{accountDisplayNo}</span>
+            ) : null}
+          </div>
         </div>
-        <div className="order-dossier-specs-grid">
-          {safeBox ? (
-            <div className="order-dossier-spec-item">
-              <span className="dossier-spec-label"><Shield size={13} aria-hidden="true" /> 安全箱</span>
-              <strong className="dossier-spec-value">{safeBox}</strong>
+
+        <div className="order-dossier-body">
+          {/* 左侧相册/占位图区域 */}
+          <div className="order-dossier-gallery-col">
+            <div className="order-dossier-gallery-title">
+              <h4>公开截图 (0 张)</h4>
             </div>
-          ) : null}
-          {grading ? (
-            <div className="order-dossier-spec-item">
-              <span className="dossier-spec-label"><Gamepad2 size={13} aria-hidden="true" /> 游戏段位</span>
-              <strong className="dossier-spec-value">{grading}</strong>
+            <div className="order-dossier-no-media">
+              <AccountMediaPlaceholder state="UNAVAILABLE" className="order-dossier-empty-placeholder" />
             </div>
-          ) : null}
-          {loginMethod ? (
-            <div className="order-dossier-spec-item">
-              <span className="dossier-spec-label"><LogIn size={13} aria-hidden="true" /> 上号方式</span>
-              <strong className="dossier-spec-value">{loginMethod}</strong>
+          </div>
+
+          {/* 右侧规格详情区域 */}
+          <div className="order-dossier-info-col">
+            {/* 统一属性规格网格 */}
+            <div className="order-dossier-unified-specs">
+              {safeBox ? (
+                <div className="order-dossier-spec-pill highlight">
+                  <span className="spec-pill-label">安全箱</span>
+                  <strong className="spec-pill-val">{safeBox}</strong>
+                </div>
+              ) : null}
+              {grading ? (
+                <div className="order-dossier-spec-pill">
+                  <span className="spec-pill-label">游戏段位</span>
+                  <strong className="spec-pill-val">{grading}</strong>
+                </div>
+              ) : null}
+              {loginMethod ? (
+                <div className="order-dossier-spec-pill">
+                  <span className="spec-pill-label">上号方式</span>
+                  <strong className="spec-pill-val">{loginMethod}</strong>
+                </div>
+              ) : null}
+              {rentalModeLabel ? (
+                <div className="order-dossier-spec-pill">
+                  <span className="spec-pill-label">租赁模式</span>
+                  <strong className="spec-pill-val">{rentalModeLabel}</strong>
+                </div>
+              ) : null}
+              {termDaysLabel ? (
+                <div className="order-dossier-spec-pill">
+                  <span className="spec-pill-label">约定租期</span>
+                  <strong className="spec-pill-val">{termDaysLabel}</strong>
+                </div>
+              ) : null}
+              <div className="order-dossier-spec-pill">
+                <span className="spec-pill-label">资料来源</span>
+                <strong className="spec-pill-val">
+                  {listingFacts?.source === "LEGACY_ACCOUNT_SNAPSHOT" ? "历史迁入快照" : "下单资料快照"}
+                </strong>
+              </div>
             </div>
-          ) : null}
+
+            {/* 关联在架物资与交付资源 */}
+            {displayResources.length > 0 ? (
+              <div className="order-dossier-spec-section order-dossier-resources-section">
+                <h4 className="order-dossier-section-title">关联在架物资与交付资源 ({displayResources.length})</h4>
+                <div className="order-dossier-resource-chips">
+                  {displayResources.map((res) => {
+                    const isHaff = res.code === "haff_base" || res.name?.includes("哈夫币");
+                    return (
+                      <div key={res.code} className={`order-dossier-resource-chip${isHaff ? " is-haff" : ""}`}>
+                        <span className="resource-chip-name">{res.name}：</span>
+                        <strong className="resource-chip-val">{res.value}</strong>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            ) : null}
+
+            {/* 号主声明与交付保障 */}
+            <div className="order-dossier-spec-section order-dossier-trust-section">
+              <h4 className="order-dossier-section-title">号主声明与服务</h4>
+              <div className="order-dossier-trust-badges">
+                <div className="order-dossier-trust-item">
+                  <Shield size={13} className="trust-icon" aria-hidden="true" />
+                  <span>人脸声明未提供</span>
+                </div>
+                <div className="order-dossier-trust-item">
+                  <Shield size={13} className="trust-icon" aria-hidden="true" />
+                  <span>封禁记录声明未提供</span>
+                </div>
+                <div className="order-dossier-trust-item">
+                  <Clock size={13} className="trust-icon" aria-hidden="true" />
+                  <span>平台实机核验 · 真人客服一单一群交接</span>
+                </div>
+              </div>
+            </div>
+          </div>
         </div>
       </section>
     );
@@ -170,6 +275,10 @@ export function OrderAccountDossier({
   const diveLevel = conditionMap.get("dive_level");
   const serviceWindow = conditionMap.get("service_window");
 
+  const displayResources = (data.resourceLines ?? [])
+    .filter(line => line.quantity && line.quantity !== "0")
+    .map(line => ({ code: line.code ?? line.itemId, name: line.name, value: line.unitLabel === "哈夫币" ? `${line.quantityLabel} 哈夫币` : line.quantityLabel }));
+
   // Public target link
   const publicHref = targetAccId ? `/accounts/${encodeURIComponent(targetAccId)}` : null;
 
@@ -187,12 +296,18 @@ export function OrderAccountDossier({
             <span className="order-dossier-game-name">当前公开资料，不代表下单时快照</span>
           </div>
         </div>
-        {publicHref ? (
-          <Link className="order-dossier-public-link" href={publicHref} scroll={false}>
-            <span>查看账号公开主页</span>
-            <ExternalLink size={13} aria-hidden="true" />
-          </Link>
-        ) : null}
+        <div className="order-dossier-header-badges">
+          <span className="mra-game-tag">{gameName}</span>
+          {loginMethod ? (
+            <span className={`account-order-method-badge ${loginMethod.includes("微信") ? "is-wechat" : "is-qq"}`}>{loginMethod}</span>
+          ) : null}
+          {publicHref ? (
+            <Link className="order-dossier-public-link" href={publicHref} scroll={false}>
+              <span>查看账号公开主页</span>
+              <ExternalLink size={13} aria-hidden="true" />
+            </Link>
+          ) : null}
+        </div>
       </div>
 
       <div className="order-dossier-body">
@@ -285,104 +400,70 @@ export function OrderAccountDossier({
             </div>
           ) : (
             <div className="order-dossier-no-media">
-              <ImageOff size={24} aria-hidden="true" />
-              <span>暂无可展示的公开截图</span>
+              <AccountMediaPlaceholder state="UNAVAILABLE" className="order-dossier-empty-placeholder" />
             </div>
           )}
         </div>
 
         {/* 右侧/下方：账号核心规格与外观 */}
         <div className="order-dossier-info-col">
-          {/* 分组 1：核心游戏参数 */}
-          <div className="order-dossier-spec-section">
-            <h4 className="order-dossier-section-title">核心战力与上号方式</h4>
-            <div className="order-dossier-specs-grid">
-              {safeBox ? (
-                <div className="order-dossier-spec-card">
-                  <div className="dossier-card-icon"><Shield size={14} aria-hidden="true" /></div>
-                  <div className="dossier-card-meta">
-                    <span className="dossier-card-label">安全箱规格</span>
-                    <strong className="dossier-card-val highlight">{safeBox}</strong>
-                  </div>
-                </div>
-              ) : null}
-              {grading ? (
-                <div className="order-dossier-spec-card">
-                  <div className="dossier-card-icon"><Gamepad2 size={14} aria-hidden="true" /></div>
-                  <div className="dossier-card-meta">
-                    <span className="dossier-card-label">游戏段位</span>
-                    <strong className="dossier-card-val">{grading}</strong>
-                  </div>
-                </div>
-              ) : null}
-              {charLevel ? (
-                <div className="order-dossier-spec-card">
-                  <div className="dossier-card-icon"><User size={14} aria-hidden="true" /></div>
-                  <div className="dossier-card-meta">
-                    <span className="dossier-card-label">角色等级</span>
-                    <strong className="dossier-card-val">{charLevel}</strong>
-                  </div>
-                </div>
-              ) : null}
-              {secretKd ? (
-                <div className="order-dossier-spec-card">
-                  <div className="dossier-card-icon"><Crosshair size={14} aria-hidden="true" /></div>
-                  <div className="dossier-card-meta">
-                    <span className="dossier-card-label">绝密 KD</span>
-                    <strong className="dossier-card-val">{secretKd}</strong>
-                  </div>
-                </div>
-              ) : null}
-              {loginMethod ? (
-                <div className="order-dossier-spec-card">
-                  <div className="dossier-card-icon"><LogIn size={14} aria-hidden="true" /></div>
-                  <div className="dossier-card-meta">
-                    <span className="dossier-card-label">上号方式</span>
-                    <strong className="dossier-card-val">{loginMethod}</strong>
-                  </div>
-                </div>
-              ) : null}
-              {regionText ? (
-                <div className="order-dossier-spec-card">
-                  <div className="dossier-card-icon"><MapPin size={14} aria-hidden="true" /></div>
-                  <div className="dossier-card-meta">
-                    <span className="dossier-card-label">游戏地区</span>
-                    <strong className="dossier-card-val">{regionText}</strong>
-                  </div>
-                </div>
-              ) : null}
-            </div>
-          </div>
-
-          {/* 分组 2：体能等级三维属性 */}
-          {(vitLevel || bearLevel || diveLevel) ? (
-            <div className="order-dossier-spec-section">
-              <h4 className="order-dossier-section-title">体能三维等级</h4>
-              <div className="order-dossier-triple-grid">
-                {vitLevel ? (
-                  <div className="order-dossier-subspec-chip">
-                    <Dumbbell size={13} aria-hidden="true" />
-                    <span>体力等级</span>
-                    <strong>{vitLevel}</strong>
-                  </div>
-                ) : null}
-                {bearLevel ? (
-                  <div className="order-dossier-subspec-chip">
-                    <Shield size={13} aria-hidden="true" />
-                    <span>负重等级</span>
-                    <strong>{bearLevel}</strong>
-                  </div>
-                ) : null}
-                {diveLevel ? (
-                  <div className="order-dossier-subspec-chip">
-                    <Sparkles size={13} aria-hidden="true" />
-                    <span>潜水等级</span>
-                    <strong>{diveLevel}</strong>
-                  </div>
-                ) : null}
+          {/* 统一属性网格 */}
+          <div className="order-dossier-unified-specs">
+            {safeBox ? (
+              <div className="order-dossier-spec-pill highlight">
+                <span className="spec-pill-label">安全箱</span>
+                <strong className="spec-pill-val">{safeBox}</strong>
               </div>
-            </div>
-          ) : null}
+            ) : null}
+            {grading ? (
+              <div className="order-dossier-spec-pill">
+                <span className="spec-pill-label">段位</span>
+                <strong className="spec-pill-val">{grading}</strong>
+              </div>
+            ) : null}
+            {charLevel ? (
+              <div className="order-dossier-spec-pill">
+                <span className="spec-pill-label">角色等级</span>
+                <strong className="spec-pill-val">{charLevel.endsWith("级") ? charLevel : `${charLevel} 级`}</strong>
+              </div>
+            ) : null}
+            {secretKd ? (
+              <div className="order-dossier-spec-pill">
+                <span className="spec-pill-label">绝密 KD</span>
+                <strong className="spec-pill-val">{secretKd}</strong>
+              </div>
+            ) : null}
+            {loginMethod ? (
+              <div className="order-dossier-spec-pill">
+                <span className="spec-pill-label">上号方式</span>
+                <strong className="spec-pill-val">{loginMethod}</strong>
+              </div>
+            ) : null}
+            {regionText ? (
+              <div className="order-dossier-spec-pill">
+                <span className="spec-pill-label">地区</span>
+                <strong className="spec-pill-val">{regionText}</strong>
+              </div>
+            ) : null}
+            {vitLevel ? (
+              <div className="order-dossier-spec-pill">
+                <span className="spec-pill-label">体力等级</span>
+                <strong className="spec-pill-val">{vitLevel.endsWith("级") ? vitLevel : `${vitLevel} 级`}</strong>
+              </div>
+            ) : null}
+            {bearLevel ? (
+              <div className="order-dossier-spec-pill">
+                <span className="spec-pill-label">负重等级</span>
+                <strong className="spec-pill-val">{bearLevel.endsWith("级") ? bearLevel : `${bearLevel} 级`}</strong>
+              </div>
+            ) : null}
+            {diveLevel ? (
+              <div className="order-dossier-spec-pill">
+                <span className="spec-pill-label">潜水等级</span>
+                <strong className="spec-pill-val">{diveLevel.endsWith("级") ? diveLevel : `${diveLevel} 级`}</strong>
+              </div>
+            ) : null}
+          </div>
 
           {/* 分组 3：外观与收藏品（若有） */}
           {data.skinTags && data.skinTags.length > 0 ? (
@@ -404,6 +485,24 @@ export function OrderAccountDossier({
                     ) : null}
                   </div>
                 ))}
+              </div>
+            </div>
+          ) : null}
+
+          {/* 分组 4：关联在架物资与资源（若有） */}
+          {displayResources.length > 0 ? (
+            <div className="order-dossier-spec-section order-dossier-resources-section">
+              <h4 className="order-dossier-section-title">当前公开账号资源</h4>
+              <div className="order-dossier-resource-chips">
+                {displayResources.map((res) => {
+                  const isHaff = res.code === "haff_base" || res.name?.includes("哈夫币");
+                  return (
+                    <div key={res.code} className={`order-dossier-resource-chip${isHaff ? " is-haff" : ""}`}>
+                      <span className="resource-chip-name">{res.name}：</span>
+                      <strong className="resource-chip-val">{res.value}</strong>
+                    </div>
+                  );
+                })}
               </div>
             </div>
           ) : null}

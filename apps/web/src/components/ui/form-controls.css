@@ -19,12 +19,14 @@
 .form-select-trigger:disabled,.form-input:disabled {opacity:.55;cursor:not-allowed;}
 .form-select-trigger[aria-invalid=true],.form-input[aria-invalid=true] {border-color:#c73e37;}
 .form-select-positioner {z-index:1000;}
-.form-select-popup {width:var(--anchor-width);min-width:120px;max-height:min(var(--available-height),300px);overflow:auto;padding:5px;border:1px solid var(--color-border-default);border-radius:10px;background:var(--color-bg-surface);color:var(--color-text-primary);box-shadow:0 10px 28px #0002;overscroll-behavior:contain;}
-.form-select-option {position:relative;display:flex;align-items:center;gap:8px;padding:10px 32px 10px 10px;border-radius:6px;font-size:14px;line-height:1.4;cursor:default;outline:none;min-height:40px;}
-.form-select-option[data-highlighted] {background:var(--color-bg-elevated);}
-.form-select-option[data-selected] {background:color-mix(in srgb,var(--color-accent-brand) 12%,var(--color-bg-surface));font-weight:600;}
+.form-select-popup {width:var(--anchor-width);min-width:140px;max-height:min(var(--available-height),320px);overflow:auto;padding:6px;border:1px solid var(--color-border-default);border-radius:10px;background:var(--color-bg-surface);color:var(--color-text-primary);box-shadow:0 10px 28px rgba(0,0,0,0.16);overscroll-behavior:contain;}
+.form-select-group {padding:4px 0;}
+.form-select-group-label {padding:6px 10px 4px;font-size:11.5px;font-weight:600;color:var(--color-text-muted);letter-spacing:0.04em;}
+.form-select-option {position:relative;display:flex;align-items:center;gap:8px;padding:8px 32px 8px 10px;border-radius:6px;font-size:13.5px;line-height:1.4;cursor:default;outline:none;min-height:36px;color:var(--color-text-primary);}
+.form-select-option[data-highlighted] {background:var(--color-bg-elevated);color:var(--color-text-primary);}
+.form-select-option[data-selected] {background:color-mix(in srgb,var(--account-accent, #ca8a04) 14%,var(--color-bg-surface));font-weight:600;color:var(--color-text-primary);}
 .form-select-option[data-disabled] {opacity:.45;}
-.form-select-check {position:absolute;right:10px;display:flex;}
+.form-select-check {position:absolute;right:10px;display:flex;color:var(--account-accent, #ca8a04);}
 .form-radio-group {display:flex;flex-wrap:wrap;gap:8px;}
 .form-radio-choice {display:flex!important;flex-direction:row!important;align-items:center!important;gap:9px!important;padding:11px 14px;border:1px solid var(--color-border-default);border-radius:8px;cursor:pointer;min-height:44px;font-weight:400!important;}
 .form-radio-choice.is-selected {border-color:var(--color-accent-brand);background:color-mix(in srgb,var(--color-accent-brand) 10%,var(--color-bg-surface));}

@@ -763,7 +763,7 @@ export function RentalConfirmPanel({
     autoPreview && previewState.status === "loading" ? "正在读取本人报价" :
     autoPreview && previewState.status === "error" ? "本人报价待确认" :
     stage.kind !== "idle" && stage.kind !== "quoted" ? "请查看订单金额" : undefined;
-  const dockPrice = reference ? <span className="rental-dock-price"><span>{priceQuote ? "本次应付" : pendingLabel ?? "参考费用 · 押金另核"}</span><strong>{priceQuote ? moneyText(priceQuote.quote.tenantPayableTotal) : pendingLabel ? "—" : reference.total}</strong></span> : null;
+  const dockPrice = reference ? <span className="rental-dock-price"><span>{priceQuote ? "本次应付（含押金）" : pendingLabel ?? "参考费用 · 押金另核"}</span><strong>{priceQuote ? moneyText(priceQuote.quote.tenantPayableTotal) : pendingLabel ? "—" : reference.total}</strong></span> : null;
   const renderStage = () => {
     if (!versionId || !releaseId || !gameId) {
       return <p className="detail-stage-note">当前缺少可确认的发布依据，暂不能创建订单。</p>;

@@ -170,7 +170,7 @@ function AvatarEditor({ userId, session, avatar }: { userId: string; session: Re
                   选择默认头像，或上传并裁剪图片。
                 </Dialog.Description>
               </div>
-              <Dialog.Close asChild><button type="button" className="avatar-dialog-close" aria-label="关闭头像设置"><X size={18} /></button></Dialog.Close>
+              <Dialog.Close className="icon-button dialog-close avatar-dialog-close" aria-label="关闭头像设置"><X size={18} /></Dialog.Close>
             </div>
 
             {error ? <p className="avatar-dialog-alert" role="alert">{error}</p> : null}

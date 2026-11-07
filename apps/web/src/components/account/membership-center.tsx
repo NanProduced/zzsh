@@ -4,7 +4,7 @@ import Link from "next/link";
 import { useEffect, useRef, useState, type CSSProperties, type KeyboardEvent } from "react";
 import useEmblaCarousel from "embla-carousel-react";
 import * as Dialog from "@radix-ui/react-dialog";
-import { AlertTriangle, ArrowRight, ChevronLeft, ChevronRight, Clock3, Crown, Lock, Percent, RefreshCw, ShieldCheck, Sparkles } from "lucide-react";
+import { AlertTriangle, ArrowRight, ChevronLeft, ChevronRight, Clock3, Crown, Info, Lock, Percent, RefreshCw, ShieldCheck, Sparkles } from "lucide-react";
 import type { EntitlementKind, EntitlementState, GrowthTier, MembershipGrowthData, MembershipGrowthViewState, MembershipPointEvent } from "@/lib/membership-growth-client";
 import { readMyMembershipGrowthConsumption, MembershipGrowthRequestError, type GrowthConsumptionScope, type MembershipGrowthConsumption } from "../../lib/membership-growth-client";
 import { rentalModeLabel } from "../../lib/publish-derive";
@@ -471,25 +471,31 @@ function TierTrack({ actual, selected, onSelect, reduced, visible }: { actual: T
   );
 }
 
-type BenefitResult = { items: Array<{ title: string; detail: string }> | null; note: string | null };
+type BenefitCardItem = {
+  title: string;
+  badge: string;
+  highlight: string;
+  subtext: string;
+  icon: "pricing" | "deposit" | "crown";
+};
+
+type BenefitResult = { items: BenefitCardItem[] | null; note: string | null };
 
 function benefitItems(selected: TrackTier, actual: TrackTier | null, data: MembershipGrowthData): BenefitResult {
   if (data.benefitsState !== "CONFIGURED") return { items: null, note: "具体政策待公布。" };
   if (selected === actual) {
-    const items = data.benefits.map((item) => ({ title: item.label, detail: item.value }));
+    const items: BenefitCardItem[] = data.benefits.map(item => ({
+      title: item.label, badge: "当前权益", highlight: item.value,
+      subtext: "以当前生效政策及个人报价为准。", icon: item.label.includes("押金") ? "deposit" : "pricing",
+    }));
     return items.length ? { items, note: null } : { items: null, note: "当前档权益暂时无法读取。" };
   }
   const row = data.comparison?.find((item) => COMPARISON_LABEL_TO_TIER[item.tier] === selected);
   if (!row) return { items: null, note: "该档权益暂时无法展示。" };
-  const pricing = row.pricing === "完整方案可比价" ? "按完整报价择优，以下单确认页本人报价为准" : "具体政策待公布。";
-  const deposit = row.deposit === "免租客押金" ? "免租客押金" : "以适用资格为准";
-  return {
-    items: [
-      { title: "租赁优惠", detail: pricing },
-      { title: "租客押金", detail: deposit },
-    ],
-    note: null,
-  };
+  return { items: [
+    { title: "租赁优惠", badge: "等级权益", highlight: row.pricing, subtext: "以个人确认报价为准。", icon: "pricing" },
+    { title: "租客押金", badge: "等级权益", highlight: row.deposit, subtext: "以适用资格和个人报价为准。", icon: "deposit" },
+  ], note: null };
 }
 
 /** 应付比例 × 10^8 ＝ 实付百分比 × 10^6：一次换算，同时给出“折”的简写和精确百分比。 */
@@ -677,24 +683,26 @@ function ConsumptionDetails({ data }: { data: MembershipGrowthData }) {
       <button type="button" className="mc-button" aria-pressed={scope === "LIFETIME"} onClick={() => setScope("LIFETIME")}>累计有效消费</button>
       <button type="button" className="mc-button" aria-pressed={scope === "ROLLING"} onClick={() => setScope("ROLLING")}>近90天有效消费</button>
     </div>
-    <p className="mc-consumption-note">按已确认更正合并消费来源，金额合计后统一折算积分；这里展示消费依据，不是历史积分发放流水。</p>
+    <p className="mc-consumption-note">
+      <Info size={13} aria-hidden="true" />
+      按确认更正合并计算消费依据，金额合计后折算积分（不是历史积分发放流水）。
+    </p>
     {shown.loading && !page ? <p className="mc-quiet-note" role="status">正在读取消费明细…</p> : null}
     {shown.error ? <p className="mc-quiet-note" role="alert">{shown.error}<button type="button" className="mc-button" onClick={() => setRetry((value) => value + 1)}>重新读取明细</button></p> : null}
     {page?.knowledge === "UNKNOWN" ? <div className="mc-consumption-empty" role="status"><p>消费来源尚未完成核验</p><span>暂不展示完整明细，稍后重新读取。</span></div> : null}
     {page?.knowledge === "KNOWN" ? <>
       <div className="mc-consumption-summary" aria-label="有效消费摘要">
         <div className="mc-consumption-metric"><span>{scope === "LIFETIME" ? "累计有效消费" : "近90天有效消费"}</span><strong>{yuanFromCents(page.amountCents!)}</strong></div>
-        <div className="mc-consumption-metric"><span>合计</span><strong> {page.points} 积分</strong></div>
-        <div className="mc-consumption-metric"><span>统计截至</span><strong>{formatBeijingDateTime(page.asOf)}</strong></div>
+        <div className="mc-consumption-metric"><span>折算成长积分</span><strong>合计 {page.points} 积分</strong></div>
       </div>
       {page.total === 0 ? <div className="mc-consumption-empty" role="status"><p>{scope === "LIFETIME" ? "累计没有有效消费记录" : "当前窗口没有有效消费记录"}</p><span>完成结算的有效消费会出现在这里。</span></div> : <ul className="mc-contributions">
         {page.items.map((item) => <li key={item.id} className="mc-contribution-row">
           <span className="mc-contribution-label">{item.label}<em>{item.withinWindow ? "计入近90天" : "仅计入累计"}{item.corrected ? ` · 已更正至第${item.revision}版` : ""}</em></span>
-          <span className="mc-contribution-time">{formatBeijingDateTime(item.effectiveAt)} · 退出窗口 {formatBeijingDate(item.expiresAt)}</span>
+          <span className="mc-contribution-time">{formatBeijingDateTime(item.effectiveAt)}{scope === "ROLLING" ? ` · 退出窗口 ${formatBeijingDate(item.expiresAt)}` : ""}</span>
           <strong className="mc-contribution-amount">{yuanFromCents(item.amountCents)}</strong>
         </li>)}
       </ul>}
-      <p className="mc-consumption-foot">已加载 {page.items.length} / {page.total} 条有效消费依据；源事实 {page.sourceSummary.contributionCount} 版，未结算 {page.sourceSummary.pendingCount} 条、已排除 {page.sourceSummary.excludedCount} 条均不计入。</p>
+      <p className="mc-consumption-foot">已加载 {page.items.length} / {page.total} 条有效消费依据{page.sourceSummary.pendingCount > 0 || page.sourceSummary.excludedCount > 0 ? `（${page.sourceSummary.pendingCount > 0 ? `${page.sourceSummary.pendingCount} 条未结算` : ""}${page.sourceSummary.pendingCount > 0 && page.sourceSummary.excludedCount > 0 ? "，" : ""}${page.sourceSummary.excludedCount > 0 ? `${page.sourceSummary.excludedCount} 条已排除` : ""}均不计入）` : null}。</p>
       {page.nextCursor ? <button type="button" className="mc-button" disabled={shown.loading} onClick={() => { void loadMore(); }}>{shown.loading ? "正在读取…" : "加载更多消费依据"}</button> : null}
     </> : null}
   </div>;
@@ -850,9 +858,18 @@ export function MembershipCenterView({ state, onRetry, pointEvents }: { state: M
               {benefits?.items ? (
                 <ul className="mc-benefit-list">
                   {benefits.items.map((item) => (
-                    <li key={item.title}>
-                      <span className="mc-benefit-icon" aria-hidden="true">{item.title === "租赁优惠" || item.title === "租赁价格" ? <Percent size={18} /> : <ShieldCheck size={18} />}</span>
-                      <div><strong>{item.title}</strong><span>{item.detail}</span></div>
+                    <li key={item.title} className="mc-benefit-card">
+                      <div className="mc-benefit-card-top">
+                        <span className="mc-benefit-icon" aria-hidden="true">
+                          {item.icon === "pricing" ? <Percent size={18} /> : item.icon === "crown" ? <Crown size={18} /> : <ShieldCheck size={18} />}
+                        </span>
+                        <span className="mc-benefit-title">{item.title}</span>
+                        <span className="mc-benefit-pill">{item.badge}</span>
+                      </div>
+                      <div className="mc-benefit-card-body">
+                        <strong className="mc-benefit-highlight">{item.highlight}</strong>
+                        <span className="mc-benefit-subtext">{item.subtext}</span>
+                      </div>
                     </li>
                   ))}
                 </ul>

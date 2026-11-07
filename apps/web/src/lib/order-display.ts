@@ -1,4 +1,5 @@
 import { formatOrderMoney, formatOrderTime } from "./order-client.ts";
+import { formatUnitYuan } from "./money-display.ts";
 import type { Order, OrderImProjection, OrderImStage, OrderLine, OrderParty, PersonalRentalQuote, SettlementOpening, SettlementPosting, SettlementPreview, SettlementVersion } from "./order-client";
 
 export function paymentObservation(payment: { disposition: string } | null): string {
@@ -152,8 +153,8 @@ export function orderUnitPriceText(
   unitQuantity: string | null | undefined,
   unit: string | null | undefined,
 ): string | null {
-  if (!amount || typeof amount.amount !== "string" || !/^-?\d+(?:\.\d{1,8})?$/.test(amount.amount)) return null;
-  const price = `¥${amount.amount}`;
+  const price = formatUnitYuan(amount?.amount);
+  if (!price) return null;
   const quantity = unitQuantity?.trim();
   return quantity ? `${price} / ${quantityText(unit, quantity)}` : price;
 }
