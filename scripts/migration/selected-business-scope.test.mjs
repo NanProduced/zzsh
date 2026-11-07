@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { planSelectedBusinessScope, selectedScopeDigest } from "./selected-business-scope.mjs";
+import { assertSelectedScopeForWrite, planSelectedBusinessScope, selectedScopeDigest } from "./selected-business-scope.mjs";
 
 const account = (id, over = {}) => ({ id, status: "4", is_delete: "0", ...over });
 const order = (id, accountId, over = {}) => ({ id, accounts_id: accountId, pay_is: "0", ...over });
@@ -62,6 +62,8 @@ test("a type-1 payment with a paid marker keeps an order the order row calls unp
   assert.deepEqual(scope.conflictKeys.paymentPaidOrderUnpaid, ["o1"]);
   assert.equal(scope.partition.orders.paymentPaidOrderUnpaid.count, 1);
   assert.equal(scope.partition.orders.orderPaidPaymentUnconfirmed.count, 0);
+  const dataset={population:{mode:'SELECTED_BUSINESS_SCOPE'},selectedScope:scope,selectedScopeSha256:selectedScopeDigest(scope)};
+  assert.throws(()=>assertSelectedScopeForWrite(dataset),/SELECTED_PAID_RECORD_ORDER_FLAG_CONFLICT_REVIEW_REQUIRED/);
 });
 
 test("an order marked paid without a successful rental payment is excluded and counted as a conflict", () => {
@@ -78,6 +80,18 @@ test("an order marked paid without a successful rental payment is excluded and c
   assert.equal(scope.partition.orders.orderPaidPaymentUnconfirmed.count, 1);
   assert.equal(scope.partition.orders.paymentPaidOrderUnpaid.count, 0);
   assert.equal(scope.policy.orderPaidWithoutPayment, "EXCLUDED");
+  const dataset={population:{mode:'SELECTED_BUSINESS_SCOPE'},selectedScope:scope,selectedScopeSha256:selectedScopeDigest(scope)};
+  assert.deepEqual(assertSelectedScopeForWrite(dataset),{retainedPaidOrderFlagConflicts:0,excludedOrderPaidWithoutSuccess:1});
+});
+
+test('selected write gate rejects tampered keys, digests and incomplete partitions',()=>{
+  const scope=planSelectedBusinessScope({accounts:[account('a1')],orders:[order('o1','a1',{pay_is:'1'})],pays:[pay('o1','1')]});
+  const base={population:{mode:'SELECTED_BUSINESS_SCOPE'},selectedScope:scope,selectedScopeSha256:selectedScopeDigest(scope)};
+  assert.deepEqual(assertSelectedScopeForWrite(base),{retainedPaidOrderFlagConflicts:0,excludedOrderPaidWithoutSuccess:0});
+  for(const change of [x=>x.selectedScopeSha256='0'.repeat(64),x=>x.selectedScope.write.orders=[],
+    x=>x.selectedScope.conflictKeys.orders.push('o1'),x=>x.selectedScope.excludedKeys.accounts.push('a1')]){
+    const input=structuredClone(base);change(input);assert.throws(()=>assertSelectedScopeForWrite(input),/SELECTED_SCOPE_/);
+  }
 });
 
 test("a listed account survives an excluded payment conflict, and another paid order keeps its own account", () => {

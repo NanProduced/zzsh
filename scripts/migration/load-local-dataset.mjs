@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import { isStrictRoundReservation, matchesLoadReservation, strictRoundReservation, writeLoadCheckpoint } from "./local-load-checkpoint.mjs";
 import { assertFullExecutionAdmitted } from "./full-source-scope.mjs";
+import { assertSelectedScopeForWrite } from "./selected-business-scope.mjs";
 import { preflightInvitationFile, readBoundInvitationPackets, requiresInvitationCountClosure } from "./local-round-contract.mjs";
 import { advisoryLockSql, assertLiveTarget, loadRegisteredTarget, maintenanceConnection, targetConnection, targetIdentityQuery } from "./local-target-registry.mjs";
 const require = createRequire(import.meta.url), { Client, Pool } = require("pg");
@@ -31,6 +32,7 @@ const manifest = JSON.parse(manifestBytes);
 // A direct invocation must not bypass the runner's full-capture readiness gate.
 const population = manifest.population ?? { mode: manifest.scenarioSelection?.schema === "zzsh.source-scenarios.v1" ? "LEGACY_SCENARIO_SELECTION" : "LEGACY_UNDECLARED" };
 assertFullExecutionAdmitted(population, execute ? "execute" : "recover");
+if (execute) assertSelectedScopeForWrite(manifest);
 if (execute && manifest.population && (manifest.population.schema !== "zzsh.local-population-scope.v1" || sha(JSON.stringify(manifest.population)) !== manifest.populationSha256)) throw new Error("POPULATION_SCOPE_DIGEST_INVALID");
 const schemaBinding = option("--schema-binding");
 const expectedSchema = schemaBinding ? JSON.parse(schemaBinding) : null;

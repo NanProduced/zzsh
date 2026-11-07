@@ -9,6 +9,7 @@ import test from "node:test";
 import { assertSameDirectoryResumeSafe, isRoundReceiptPath, isStrictRoundReservation, matchesLoadReservation, strictRoundReservation } from "./local-load-checkpoint.mjs";
 import { advisoryLockSql, assertLiveTarget, maintenanceConnection, normalizeRegisteredTarget, targetConnection, targetIdentityQuery } from "./local-target-registry.mjs";
 import { assertRoundPopulationBinding, assertFullExecutionAdmitted } from "./full-source-scope.mjs";
+import { assertSelectedScopeForWrite, planSelectedBusinessScope, selectedScopeDigest } from "./selected-business-scope.mjs";
 import { assertRoundBootstrap, assessRoundEvidence, assertGrowthPlanEvidence, assertGrowthPackages, assertResumeLineage, verifyResumeSchema, assessResumeStages, assertNoWriteRetryLineage, preflightInvitationFile, readBoundInvitationPackets, requiresInvitationCountClosure } from "./local-round-contract.mjs";
 
 const sha = bytes => createHash("sha256").update(bytes).digest("hex");
@@ -23,7 +24,7 @@ const ds = path.join(restricted, "dataset"), out = path.join(restricted, "load")
 const credentials = path.join(restricted, "resource", "credentials.json"), registry = path.join(path.dirname(credentials), "resource.json");
 const checkpoint = path.join(out, "checkpoint.json"), users = [{ sourceId: "101", input: { id: 1 } }, { sourceId: "102", input: { id: 2 } }];
 
-async function load({ failure, strict = true, reservation = {}, previous, recover = false, exitAfterUsers = false, populationMode, undeclaredPopulation = false, invalidPopulationDigest = false, instance = null, pendingReset = null } = {}) {
+async function load({ failure, strict = true, reservation = {}, previous, recover = false, exitAfterUsers = false, populationMode, selectedScope, undeclaredPopulation = false, invalidPopulationDigest = false, instance = null, pendingReset = null } = {}) {
   const files = new Map(), directories = new Set(), commands = [], events = [], logs = [], saves = [];
   const put = (file, value) => files.set(file, JSON.stringify(value));
   const get = file => { assert(files.has(file), file); return files.get(file); };
@@ -36,6 +37,7 @@ async function load({ failure, strict = true, reservation = {}, previous, recove
   const manifest = path.join(ds, "manifest.json"), fundsReceipt = path.join(funds, "receipt.json");
   const population = populationMode ? { schema: "zzsh.local-population-scope.v1", mode: populationMode } : null;
   put(manifest, { status: "FULL_SOURCE_DATASET_PREPARED_TARGET_NOT_RUN", gameBindings: {}, files: fileEntries,
+    ...(selectedScope ? {selectedScope,selectedScopeSha256:selectedScopeDigest(selectedScope)} : {}),
     ...(population ? { population, populationSha256: invalidPopulationDigest ? "f".repeat(64) : sha(JSON.stringify(population)) } : undeclaredPopulation ? {} : { scenarioSelection: { schema: "zzsh.source-scenarios.v1" } }) });
   put(fundsReceipt, {});
   const migration = { name: "test_migration", oid: "91", password: "test" }, runtime = { name: "test_runtime", oid: "92" };
@@ -89,7 +91,7 @@ async function load({ failure, strict = true, reservation = {}, previous, recove
   };
   const context = {
     ...path, createHash, isStrictRoundReservation, matchesLoadReservation, strictRoundReservation, process: proc, moduleUrl: "fixture", fileURLToPath: () => "C:\\project\\scripts\\migration\\load-local-dataset.mjs",
-    advisoryLockSql, assertLiveTarget, maintenanceConnection, targetConnection, targetIdentityQuery, assertFullExecutionAdmitted, preflightInvitationFile, readBoundInvitationPackets, requiresInvitationCountClosure,
+    advisoryLockSql, assertLiveTarget, maintenanceConnection, targetConnection, targetIdentityQuery, assertFullExecutionAdmitted, assertSelectedScopeForWrite, preflightInvitationFile, readBoundInvitationPackets, requiresInvitationCountClosure,
     // The loader reads its registry through this sandbox filesystem, not the real disk.
     loadRegisteredTarget: credentialPath => { const file = path.join(path.dirname(credentialPath), "resource.json"); return normalizeRegisteredTarget(JSON.parse(get(file)), file); },    financialFixture: () => ({ applyFinancialDomains: ctx => ctx.runItems("financeEmptyCoverage", failure === "empty-coverage" ? [{ sourceId: "empty-original" }] : Array.from({length:5},(_,i)=>({sourceId:`chunk-${i}`})), row => { if(failure === "empty-coverage" || (failure === "empty-coverage-batch" && row.sourceId === "chunk-1")) throw Object.assign(Error("coverage rejected"), { status: 409 }); return {replayed:false}; }, failure === "empty-coverage" ? 1 : 5) }),
     console: { log: message => logs.push(JSON.parse(message)), error: message => logs.push(JSON.parse(message)) },
@@ -117,6 +119,13 @@ async function load({ failure, strict = true, reservation = {}, previous, recove
   catch (cause) { error = cause; }
   return { commands, directories, error, events, files, logs, saves, exit: proc.exitCode, state: files.has(checkpoint) ? JSON.parse(get(checkpoint)) : null };
 }
+
+test("a retained successful payment conflicting with the order flag stops before any connection or target write",async()=>{
+  const selectedScope=planSelectedBusinessScope({accounts:[{id:'a1',status:'4',is_delete:'0'}],orders:[{id:'o1',accounts_id:'a1',pay_is:'0'}],pays:[{id:'p1',order_id:'o1',order_type:'1',pay_is:'1'}]});
+  const result=await load({populationMode:'SELECTED_BUSINESS_SCOPE',selectedScope,strict:false});
+  assert.match(result.error?.message??'',/SELECTED_PAID_RECORD_ORDER_FLAG_CONFLICT_REVIEW_REQUIRED/);
+  assert.deepEqual(result.commands,[]);assert.equal(result.directories.size,0);assert.equal(result.state,null);
+});
 
 test("strict run commits one batch without savepoints", async () => {
   const r = await load();

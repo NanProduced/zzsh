@@ -123,6 +123,31 @@ export function selectedScopeDigest(scope) {
   }));
 }
 
+/** Keep the owner's selected population, but never import a retained contradictory payment state as normal. */
+export function assertSelectedScopeForWrite(dataset) {
+  if (dataset?.population?.mode !== 'SELECTED_BUSINESS_SCOPE') return null;
+  const scope=dataset.selectedScope,validId=id=>typeof id==='string'&&/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(id);
+  if (!scope || selectedScopeDigest(scope)!==dataset.selectedScopeSha256 || JSON.stringify(scope.policy)!==JSON.stringify(SELECTED_SCOPE_POLICY))
+    throw new Error('SELECTED_SCOPE_BINDING_INVALID');
+  const check=(ids,summary)=>{
+    if(!Array.isArray(ids)||ids.some(id=>!validId(id))||new Set(ids).size!==ids.length || !summary
+      || !Number.isSafeInteger(summary.count)||summary.count!==ids.length||summary.digest!==digestOf(ids)) throw new Error('SELECTED_SCOPE_KEY_SET_INVALID');
+    return new Set(ids);
+  };
+  const keep=check(scope.write?.orders,scope.partition?.orders?.retained),excluded=check(scope.excludedKeys?.orders,scope.partition?.orders?.excluded);
+  const keepAccounts=check(scope.write?.accounts,scope.partition?.accounts?.retained),excludedAccounts=check(scope.excludedKeys?.accounts,scope.partition?.accounts?.excluded);
+  const allConflicts=check(scope.conflictKeys?.orders,scope.partition?.orders?.conflicts);
+  const paidConflict=check(scope.conflictKeys?.paymentPaidOrderUnpaid,scope.partition?.orders?.paymentPaidOrderUnpaid);
+  const excludedConflict=check(scope.conflictKeys?.orderPaidPaymentUnconfirmed,scope.partition?.orders?.orderPaidPaymentUnconfirmed);
+  if([...keep].some(id=>excluded.has(id)) || [...keepAccounts].some(id=>excludedAccounts.has(id))
+    || keep.size+excluded.size!==scope.totals?.orders || keepAccounts.size+excludedAccounts.size!==scope.totals?.accounts
+    || [...paidConflict].some(id=>!keep.has(id)||excludedConflict.has(id)) || [...excludedConflict].some(id=>!excluded.has(id))
+    || allConflicts.size!==paidConflict.size+excludedConflict.size || [...allConflicts].some(id=>!paidConflict.has(id)&&!excludedConflict.has(id)))
+    throw new Error('SELECTED_SCOPE_PARTITION_INVALID');
+  if(paidConflict.size) throw new Error('SELECTED_PAID_RECORD_ORDER_FLAG_CONFLICT_REVIEW_REQUIRED');
+  return {retainedPaidOrderFlagConflicts:0,excludedOrderPaidWithoutSuccess:excludedConflict.size};
+}
+
 /** The prepare stage filters accounts and orders by this scope; every other domain stays whole. */
 export function selectedScopeFilter(scope) {
   if (scope?.schema !== SELECTED_SCOPE_SCHEMA) throw new Error("SELECTED_SCOPE_INVALID");

@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
+import { assertSelectedScopeForWrite } from './selected-business-scope.mjs';
 
 const hex=value=>typeof value==='string'&&/^[a-f0-9]{64}$/.test(value);
 const sha=value=>createHash('sha256').update(value).digest('hex');
@@ -60,7 +61,7 @@ export function assertRoundPopulationBinding(input,dataset,source,verification) 
     assert.deepEqual(Object.keys(p.domains??{}).sort(),Object.keys(source.files??{}).sort(),'SCENARIO_CAPTURED_DOMAIN_SET_CHANGED');
     for(const [name,d] of Object.entries(p.domains))assert(d.captured===source.files[name].rows&&Number.isSafeInteger(d.considered)
       &&d.considered>=0&&d.excluded===d.captured-d.considered&&hex(d.capturedIdsSha256)&&hex(d.consideredIdsSha256),'SCENARIO_SCOPE_INVALID');
-  return {mode:p.mode};
+  return {mode:p.mode,...(p.mode==='SELECTED_BUSINESS_SCOPE'?assertSelectedScopeForWrite(dataset):{})};
   }
   const result=assertCapturedPopulation(dataset,source),p=input.population;
   assert(p?.schema==='zzsh.round-population-binding.v1'&&p.mode==='FULL_CAPTURED_SOURCE'
