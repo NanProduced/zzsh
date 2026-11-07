@@ -56,6 +56,8 @@ docker buildx build --load --resource memory=3g --resource cpu-quota=100000 --re
 
 首版候选归档已在本机隔离 PostgreSQL 16 中验证过保留 owner/ACL 的原生恢复：预先只创建目标三角色，在目标数据库不存在时使用 `pg_restore --exit-on-error --create`，恢复后独立核对角色、权限和数据。`db-setup --roles-only` 只创建角色，供这一受审路径使用；无参数仍创建角色和空数据库。两种方式不能混用；`--create` 不是单事务，失败须保留现场并核对，不能盲目重试或自动删除目标。实际 ECS 连接、部署步骤和权限仍须经 Owner 审核并在目标复核。
 
+恢复归档不包含本地模拟资金登记。`scripts/migration/install-r07-demo-finance.mjs` 仅适用于已固定身份的本地 55434 验收副本，不能用于 ECS。目标恢复后仍须按实际目标身份、管理员及三个 HTTPS 来源单独安装并核对测试扩展、权限和登记，再启用模拟资金；目前这一步尚无已验证的 ECS 安装流程。管理员须使用初始密码登录、自行修改密码并绑定 TOTP，不从本地复制已激活身份或会话。
+
 `deploy/ecs-test/restore_approved_dump.py` 是另一项 Linux/Docker Compose 恢复候选，只接收**已经过 Owner 本地验收和批准的 PostgreSQL 16 自定义格式 dump**，不导出本地数据库，也不是将来 MySQL 全量转换的实现。其采用 `--no-owner --no-acl`，目前未完成 ACL 等价证明，不能把它用于首版应用启动；下列计划/申请格式仅用于该候选后续完善，不适用于上面的原生恢复路径。
 
 当前候选仍有上线阻断：`--no-acl` 不会还原源归档的对象、列、函数及默认权限；现有迁移后的授权收敛也不能证明完整等价。须先完成同快照受审核 ACL 基线、角色映射、目标权限重建和独立读回，才能用于服务器导入或启动应用；隔离数据演练须单独说明此限制。
