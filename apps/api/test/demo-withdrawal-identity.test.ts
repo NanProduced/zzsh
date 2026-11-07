@@ -3,6 +3,7 @@ import { test } from "node:test";
 import type { PoolClient } from "pg";
 import * as resource from "../src/finance/ecs-test-demo-resource";
 import { assertDemoWithdrawalIdentity } from "../src/finance/demo-withdrawal-identity";
+import { legacyOwnerUserId } from "../src/supply/legacy-user-migration";
 
 test("demo withdrawal requires an adult verified identity; fake identity is local only",async t=>{
   const demo={} as resource.DemoFinanceResource, now=new Date("2026-01-02T00:00:00Z");
@@ -19,4 +20,21 @@ test("demo withdrawal requires an adult verified identity; fake identity is loca
   }
   scope="LOCAL_DEMO_SIMULATED";row={...row,provider:"fake",provider_reference:"fake_123"};
   await assert.doesNotReject(assertDemoWithdrawalIdentity(client,"user_1",demo));
+});
+
+test("verified adult migrated identity is accepted only with its bound legacy source in demo scopes",async t=>{
+  const demo={} as resource.DemoFinanceResource,now=new Date("2026-01-02T00:00:00Z"),userId=legacyOwnerUserId("legacy_mysql_restore","la_user","42");
+  let scope:"ECS_TEST_SIMULATED"|"LOCAL_DEMO_SIMULATED"="ECS_TEST_SIMULATED";
+  t.mock.method(resource,"demoFinanceScope",()=>scope);
+  let row:{account_status:string;identity_status:string;age_status:string;provider:string;provider_reference:string|null;verified_at:Date|null;now:Date}=
+    {account_status:"ACTIVE",identity_status:"VERIFIED",age_status:"ADULT",provider:"legacy_mysql_restore",provider_reference:"la_user:42",verified_at:null,now};
+  const client={query:async(_sql:string,values:unknown[])=>{assert.deepEqual(values,[userId]);return{rows:[row]};}} as unknown as PoolClient;
+  for(scope of ["ECS_TEST_SIMULATED","LOCAL_DEMO_SIMULATED"] as const)await assert.doesNotReject(assertDemoWithdrawalIdentity(client,userId,demo));
+  for(const [changed,code] of [[{identity_status:"UNVERIFIED"},"DEMO_WITHDRAW_IDENTITY_REQUIRED"],
+    [{account_status:"FROZEN"},"DEMO_WITHDRAW_IDENTITY_REQUIRED"],[{age_status:"MINOR"},"DEMO_WITHDRAW_ADULT_REQUIRED"],
+    [{provider_reference:"la_user:43"},"DEMO_WITHDRAW_IDENTITY_SOURCE_UNCONFIRMED"],
+    [{provider_reference:"la_user:042"},"DEMO_WITHDRAW_IDENTITY_SOURCE_UNCONFIRMED"],
+    [{verified_at:new Date("2026-01-01T00:00:00Z")},"DEMO_WITHDRAW_IDENTITY_SOURCE_UNCONFIRMED"]] as const){
+    const before=row;row={...row,...changed};await assert.rejects(assertDemoWithdrawalIdentity(client,userId,demo),error=>(error as {code?:string}).code===code);row=before;
+  }
 });

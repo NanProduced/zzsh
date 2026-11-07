@@ -1,5 +1,6 @@
 import type { PoolClient } from "pg";
 import { SecurityApiError } from "../auth/security-core";
+import { legacyOwnerUserId } from "../supply/legacy-user-migration";
 import { demoFinanceScope, type DemoFinanceResource } from "./ecs-test-demo-resource";
 
 /** A test payout is not real KYC; still require an adult identity fact before a new demo request. */
@@ -12,8 +13,12 @@ export async function assertDemoWithdrawalIdentity(client:PoolClient,userId:stri
   if(!row || row.account_status!=="ACTIVE" || row.identity_status!=="VERIFIED")
     throw new SecurityApiError(403,"DEMO_WITHDRAW_IDENTITY_REQUIRED","请先完成本人实名认证");
   if(row.age_status!=="ADULT")throw new SecurityApiError(403,"DEMO_WITHDRAW_ADULT_REQUIRED","请先确认实名信息属于成年人");
-  if(!validProvider || typeof reference!=="string" || !reference || reference.trim()!==reference || Buffer.byteLength(reference)>512
-    || /[\u0000-\u001f\u007f]/.test(reference) || !local&&/SYNTHETIC|MODEL|LOCAL_CONTROLLED|FAKE|MOCK|TEST/i.test(reference)
-    || !(time instanceof Date) || !Number.isFinite(time.getTime()) || !(row.now instanceof Date) || time>row.now)
+  const legacyMatch=typeof reference==="string" ? /^la_user:([1-9][0-9]{0,23})$/.exec(reference) : null;
+  const migrated=row.provider==="legacy_mysql_restore" && legacyMatch!==null && time===null
+    && legacyOwnerUserId("legacy_mysql_restore","la_user",legacyMatch[1]!)===userId;
+  const timestamped=validProvider && typeof reference==="string" && Boolean(reference) && reference.trim()===reference && Buffer.byteLength(reference)<=512
+    && !/[\u0000-\u001f\u007f]/.test(reference) && (local || !/SYNTHETIC|MODEL|LOCAL_CONTROLLED|FAKE|MOCK|TEST/i.test(reference))
+    && time instanceof Date && Number.isFinite(time.getTime()) && row.now instanceof Date && time<=row.now;
+  if(!migrated && !timestamped)
     throw new SecurityApiError(403,"DEMO_WITHDRAW_IDENTITY_SOURCE_UNCONFIRMED","实名信息暂无法核实，请联系客服");
 }
