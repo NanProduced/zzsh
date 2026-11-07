@@ -1,8 +1,11 @@
 import type { AuthSecurityOptions } from "../auth/auth-security";
 import type { LocalFinancialSandbox } from "../finance/local-financial-sandbox-resource";
-import { readAdminContext } from "../auth/auth-security";
-import { readUserContext } from "../auth/user-identity";
-import { withTransaction } from "../auth/security-core";
+import { assertAdminContextInTransaction, readAdminContext } from "../auth/auth-security";
+import { assertUserContextInTransaction, readUserContext } from "../auth/user-identity";
+import { ADMIN_PERMISSION, loadEffectiveAdminAccess, requirePermission } from "../auth/admin-authorization";
+import { SecurityApiError, withTransaction } from "../auth/security-core";
+import { isEcsTestWithoutJoinpay } from "../config/config";
+import { readOrderTeamAccess } from "../im/order-team-access";
 import { ensureApiV1RequestId } from "../contracts/api-v1";
 import { bodyOf, ensureOnlyFields, invalid, notFound, sendJson } from "../supply/supply-util";
 import { decodeId, requireOrigin, requestPath, runIdempotentWrite, type SupplyResponse } from "../supply/supply-routes";
@@ -65,6 +68,35 @@ function hashOf(body: Record<string, unknown>, field: string): string {
   return value;
 }
 
+/** Keep object/role checks before telling an authorized caller this environment cannot settle. */
+async function unavailableSettlement(request: Request, response: SupplyResponse, options: Options, realm: "user" | "admin", rawOrderId: string): Promise<boolean> {
+  const requestId = ensureApiV1RequestId(request);
+  response.setHeader("X-Request-Id", requestId);
+  if (!requireOrigin(request, response, options, requestId)) return true;
+  const context = realm === "user" ? await readUserContext(request, options) : await readAdminContext(request, options);
+  const actor = { ...context, realm };
+  const orderId = idOf(rawOrderId);
+  try {
+    await withTransaction(options.pool, async client => {
+      await client.query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY");
+      if (realm === "user") {
+        await assertUserContextInTransaction(client, actor, "READ");
+        const owned = await client.query(`SELECT 1 FROM zzsh_order.rental_order WHERE id=$1 AND (renter_user_id=$2 OR owner_user_id=$2)`, [orderId, actor.userId]);
+        if (!owned.rowCount) throw notFound();
+      } else {
+        await assertAdminContextInTransaction(client, actor);
+        requirePermission(await loadEffectiveAdminAccess(client, actor.userId), ADMIN_PERMISSION.orderSettlementWrite);
+        const team = await readOrderTeamAccess(client, { ...actor, realm: "admin" }, orderId, "read");
+        if (team.teamState !== "READY" || team.canRead !== true) throw notFound();
+      }
+    });
+  } catch (error) {
+    if (error instanceof SecurityApiError && (error.status === 403 || error.status === 404)) throw notFound();
+    throw error;
+  }
+  throw new SecurityApiError(503, "EVIDENCE_UNAVAILABLE", "当前环境暂未启用订单结算");
+}
+
 export async function handleSettlementUserRoute(request: Request, response: SupplyResponse, options: Options): Promise<boolean> {
   const method = (request.method ?? "GET").toUpperCase();
   const { path } = requestPath(request, "/api/v1/orders");
@@ -74,7 +106,11 @@ export async function handleSettlementUserRoute(request: Request, response: Supp
   const opening = /^\/([A-Za-z0-9._:-]+)\/openings\/([A-Za-z0-9._:-]+)\/confirm$/.exec(path);
   const read = /^\/([A-Za-z0-9._:-]+)\/settlement$/.exec(path);
   if (!preview && !submit && !decision && !opening && !read) return false;
-  if (!(method==="GET"&&read)&&!settlementSurfaceOpen(options.settlementRecordingEnabled, options.settlementAdmission,options.localFinancialSandbox)) throw notFound();
+  if (!(method==="GET"&&read)&&!settlementSurfaceOpen(options.settlementRecordingEnabled, options.settlementAdmission,options.localFinancialSandbox)) {
+    if (method === "POST" && (preview || submit || decision || opening) && isEcsTestWithoutJoinpay(process.env)
+      && !options.settlementAdmission && !options.localFinancialSandbox) return unavailableSettlement(request, response, options, "user", (preview ?? submit ?? decision ?? opening)![1]!);
+    throw notFound();
+  }
   const requestId = ensureApiV1RequestId(request);
   response.setHeader("X-Request-Id", requestId);
   if (method !== "GET" && !requireOrigin(request, response, options, requestId)) return true;
@@ -155,7 +191,11 @@ export async function handleSettlementAdminRoute(request: Request, response: Sup
   const finalize = /^\/([A-Za-z0-9._:-]+)\/settlements\/([A-Za-z0-9._:-]+)\/finalize$/.exec(path);
   const adjust = /^\/([A-Za-z0-9._:-]+)\/settlements\/adjustments$/.exec(path);
   if (!read && !preview && !openings && !openingConfirm && !classify && !review && !finalize && !adjust) return false;
-  if (!(method==="GET"&&read)&&!settlementSurfaceOpen(options.settlementRecordingEnabled, options.settlementAdmission,options.localFinancialSandbox)) throw notFound();
+  if (!(method==="GET"&&read)&&!settlementSurfaceOpen(options.settlementRecordingEnabled, options.settlementAdmission,options.localFinancialSandbox)) {
+    if (method === "POST" && (preview || openings || openingConfirm || classify || review || finalize || adjust) && isEcsTestWithoutJoinpay(process.env)
+      && !options.settlementAdmission && !options.localFinancialSandbox) return unavailableSettlement(request, response, options, "admin", (preview ?? openings ?? openingConfirm ?? classify ?? review ?? finalize ?? adjust)![1]!);
+    throw notFound();
+  }
   const requestId = ensureApiV1RequestId(request);
   response.setHeader("X-Request-Id", requestId);
   if (method !== "GET" && !requireOrigin(request, response, options, requestId)) return true;

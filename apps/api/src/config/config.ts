@@ -17,8 +17,21 @@ export function isDeployedProfile(env: NodeJS.ProcessEnv): boolean {
   return profile === "ecs-test" || profile === "production";
 }
 
-/** 部署运行完整业务；旧开关仅保留给隔离夹具，不作为正式环境的半功能部署方式。 */
+/** The test server must explicitly close every real JoinPay assembly. */
+export function isEcsTestWithoutJoinpay(env: NodeJS.ProcessEnv): boolean {
+  return env.APP_PROFILE?.trim() === "ecs-test" && env.NODE_ENV === "production" && [
+    "JOINPAY_COLLECTION_ENABLED", "JOINPAY_REFUND_ENABLED", "JOINPAY_PAYOUT_ENABLED", "JOINPAY_ACCOUNTS_ENABLED",
+  ].every((key) => env[key] === "false");
+}
+
+/** 部署默认启用业务；显式关闭汇聚的测试服仅停止依赖正式付款的两项任务。 */
 export function businessFeatureEnabled(env: NodeJS.ProcessEnv, key: string, localDefault = false): boolean {
+  // These two workers require formal payment evidence. Reads and unrelated business stay enabled.
+  if ((key === "ORDER_SETTLEMENT_RECORDING_ENABLED" || key === "DISTRIBUTION_DUE_WORKER_ENABLED") && isEcsTestWithoutJoinpay(env)) {
+    const value = env[key]?.trim() ?? "false";
+    if (value !== "false") throw new ConfigurationError(`${key} must be false without JoinPay on ecs-test`);
+    return false;
+  }
   const value = env[key]?.trim() ?? (isDeployedProfile(env) || localDefault ? "true" : "false");
   if (value !== "true" && value !== "false") throw new ConfigurationError(`${key} must be true or false`);
   if (isDeployedProfile(env) && value === "false") throw new ConfigurationError(`${key}=false is only available to local fixtures`);

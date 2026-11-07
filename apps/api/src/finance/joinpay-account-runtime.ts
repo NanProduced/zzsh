@@ -1,4 +1,4 @@
-import { ConfigurationError, readSecret, type AppConfig } from "../config/config";
+import { ConfigurationError, isEcsTestWithoutJoinpay, readSecret, type AppConfig } from "../config/config";
 import type { JoinpayAccountReadAccess } from "./channel-finance-read";
 import { assertJoinpayAccountReadProfile, bindJoinpayAccountProfile, type JoinpayAccountServerProfile } from "./joinpay-account";
 import type { JoinpayAccountObservationOptions } from "./joinpay-account-observer";
@@ -20,6 +20,23 @@ export function loadJoinpayAccountRuntime(context: Context, env: NodeJS.ProcessE
   const enabled = env.JOINPAY_ACCOUNTS_ENABLED ?? "false";
   if (enabled !== "true" && enabled !== "false") return fail("JOINPAY_ACCOUNTS_ENABLED_INVALID");
   if (enabled === "false") return undefined;
+  return loadConfiguredAccountRuntime(context, env, workingDirectory, false);
+}
+
+/** An explicitly requested local snapshot reader cannot assemble an account observer. */
+export function loadEcsTestJoinpayAccountSnapshotRuntime(context: Context, env: NodeJS.ProcessEnv = process.env, workingDirectory = process.cwd()): Assembly | undefined {
+  const enabled = env.JOINPAY_ACCOUNTS_LOCAL_READ_ENABLED ?? "false";
+  if (enabled !== "true" && enabled !== "false") return fail("JOINPAY_ACCOUNTS_LOCAL_READ_ENABLED_INVALID");
+  if (enabled === "false") return undefined;
+  if (!isEcsTestWithoutJoinpay(env) || context.database.target !== "ecs-test" || context.database.targetProfile !== "ecs-test"
+    || !/^zzsh_ecs_test(?:_[a-z0-9_]+)?$/.test(context.database.name) || context.database.name.length > 63
+    || !/^[a-z][a-z0-9_]{0,62}$/.test(context.database.user)) {
+    return fail("JOINPAY_ACCOUNTS_LOCAL_READ_CONTEXT_INVALID");
+  }
+  return loadConfiguredAccountRuntime(context, env, workingDirectory, true);
+}
+
+function loadConfiguredAccountRuntime(context: Context, env: NodeJS.ProcessEnv, workingDirectory: string, localReadOnly: boolean): Assembly {
   if (!context.authEnabled || context.database.user !== context.database.runtimeUser) return fail("JOINPAY_ACCOUNTS_RUNTIME_CONTEXT_INVALID");
   let d: JoinpayAccountRuntimeDocument;
   try {
@@ -36,6 +53,7 @@ export function loadJoinpayAccountRuntime(context: Context, env: NodeJS.ProcessE
   const read: JoinpayAccountReadAccess = { database: d.resource.database, runtimeUser: d.resource.runtimeUser,
     merchantIdsByAdmin: new Map(d.readAdminIds.map(adminId => [adminId, new Set([d.merchantIdentityId])])) };
   const o = d.observation;
+  if (localReadOnly && o !== undefined) return fail("JOINPAY_ACCOUNTS_LOCAL_READ_OBSERVATION_FORBIDDEN");
   if (o === undefined) return { read };
   if (context.provider !== "real") return fail("JOINPAY_ACCOUNTS_OBSERVATION_REQUIRES_REAL_PROVIDER");
   if (!object(o) || Object.keys(o).some(k => !["intervalSeconds", "profiles", "keyVariables"].includes(k))

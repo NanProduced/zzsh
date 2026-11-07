@@ -1,7 +1,7 @@
 import type { AppConfig } from '../config/config';
-import { businessFeatureEnabled, ConfigurationError } from '../config/config';
+import { businessFeatureEnabled, ConfigurationError, isEcsTestWithoutJoinpay } from '../config/config';
 import { readFormalCollectionAdmission, type FormalCollectionAdmission } from '../order/joinpay-collection-profile';
-import { createNativeDistributionPolicyScope } from './distribution-policy-store';
+import { createEcsTestDistributionPolicyScope, createNativeDistributionPolicyScope } from './distribution-policy-store';
 import { createNativeDistributionEarningStore } from './distribution-earning-store';
 
 const nativeBindings = new WeakMap<ReturnType<typeof createNativeDistributionEarningStore>, {
@@ -18,6 +18,22 @@ export function assertNativeDistributionEarningAssembly(
   if (!bound) return false;
   if (bound.scope !== scope || bound.admission !== admission) throw new ConfigurationError('NATIVE_DISTRIBUTION_ASSEMBLY_MISMATCH');
   return true;
+}
+
+/** No payment capability is constructed; business policy/relationship scopes bind to the target runtime. */
+export function loadEcsTestDistributionRuntime(input: {
+  config: Pick<AppConfig, 'provider' | 'database'> & Partial<Pick<AppConfig, 'profile'>>;
+  authEnabled: boolean;
+  admission: FormalCollectionAdmission | undefined;
+  env?: NodeJS.ProcessEnv;
+}) {
+  const env = input.env ?? process.env;
+  if (!isEcsTestWithoutJoinpay(env) || !input.authEnabled || input.admission !== undefined) {
+    throw new ConfigurationError('ECS_TEST_DISTRIBUTION_ASSEMBLY_INVALID');
+  }
+  businessFeatureEnabled(env, 'DISTRIBUTION_NATIVE_ENABLED');
+  const distributionScope = createEcsTestDistributionPolicyScope(input.config, env);
+  return Object.freeze({ auth: Object.freeze({ distributionScope, distributionReadScope: distributionScope }) });
 }
 
 /** Explicit formal NATIVE assembly only. No environment-derived ratio, policy, identity or admission. */

@@ -1,17 +1,17 @@
 import { createApp } from "./app";
 import { loadJoinpayCollectionRuntime } from "./order/joinpay-collection-runtime";
 import { loadJoinpayRefundRuntime } from "./order/joinpay-refund-runtime";
-import { loadJoinpayAccountRuntime } from "./finance/joinpay-account-runtime";
+import { loadEcsTestJoinpayAccountSnapshotRuntime, loadJoinpayAccountRuntime } from "./finance/joinpay-account-runtime";
 import { loadWithdrawalBankBindingRuntime } from "./finance/withdrawal-bank-binding-runtime";
 import { loadJoinpayPayoutRuntime } from "./finance/joinpay-payout-runtime";
-import { businessFeatureEnabled, ConfigurationError, loadConfig } from "./config/config";
+import { businessFeatureEnabled, ConfigurationError, isEcsTestWithoutJoinpay, loadConfig } from "./config/config";
 import {
   createFakeHealthDependencies,
   createRealHealthDependencies,
 } from "./health/readiness";
 import { assertBusinessRuntimeIdentity, createBusinessPool } from "./database/business";
 import { loadAuthRuntimeConfig } from "./auth/auth-runtime";
-import { loadNativeDistributionRuntime } from "./finance/distribution-native-runtime";
+import { loadEcsTestDistributionRuntime, loadNativeDistributionRuntime } from "./finance/distribution-native-runtime";
 import { createProvisionedDistributionManagementResource } from "./finance/distribution-management-resource";
 import { createNativeWalletOriginResource, createProvisionedNativeWalletOriginResource } from "./finance/native-wallet-origin";
 import { loadDistributionDueRuntime } from "./finance/distribution-due.module";
@@ -23,11 +23,16 @@ export async function bootstrap() {
   const withdrawalBankBinding = loadWithdrawalBankBindingRuntime({ database: config.database, authEnabled: authEnabledValue === "true" });
   const joinpayWithdrawal = loadJoinpayPayoutRuntime({ provider: config.provider, database: config.database, authEnabled: authEnabledValue === "true" }, withdrawalBankBinding);
   const joinpayCollection = loadJoinpayCollectionRuntime({ provider: config.provider, database: config.database, authEnabled: authEnabledValue === "true" });
-  const distributionNative = loadNativeDistributionRuntime({ config, authEnabled: authEnabledValue === "true", admission: joinpayCollection?.admission });
+  const withoutJoinpay = isEcsTestWithoutJoinpay(process.env);
+  const distributionNative = withoutJoinpay ? undefined
+    : loadNativeDistributionRuntime({ config, authEnabled: authEnabledValue === "true", admission: joinpayCollection?.admission });
+  const distributionEcsTest = withoutJoinpay
+    ? loadEcsTestDistributionRuntime({ config, authEnabled: authEnabledValue === "true", admission: joinpayCollection?.admission }) : undefined;
   const distributionManagement = ["dev","ecs-test","production"].includes(config.profile) && !/^zzsh_(?:test|provider_test)(?:_|$)/.test(config.database.name)
     ? createProvisionedDistributionManagementResource(config) : undefined;
   const joinpayRefund = loadJoinpayRefundRuntime({ provider: config.provider, database: config.database, authEnabled: authEnabledValue === "true" });
-  const joinpayAccounts = loadJoinpayAccountRuntime({ provider: config.provider, database: config.database, authEnabled: authEnabledValue === "true" });
+  const joinpayAccountSnapshot = loadEcsTestJoinpayAccountSnapshotRuntime({ provider: config.provider, database: config.database, authEnabled: authEnabledValue === "true" });
+  const joinpayAccounts = loadJoinpayAccountRuntime({ provider: config.provider, database: config.database, authEnabled: authEnabledValue === "true" }) ?? joinpayAccountSnapshot;
   const readinessMode = process.env.READINESS_MODE?.trim() || "real";
   if (readinessMode !== "real" && readinessMode !== "fake") {
     throw new ConfigurationError("READINESS_MODE is invalid");
@@ -68,7 +73,7 @@ export async function bootstrap() {
               ...(joinpayRefund ? { joinpayRefund } : {}),
               ...(joinpayAccounts ? { joinpayAccountRead: joinpayAccounts.read, joinpayAccountObservation: joinpayAccounts.observation } : {}),
               directoryReadPool,
-              ...(distributionNative ? distributionNative.auth : {}),
+              ...(distributionNative?.auth ?? distributionEcsTest?.auth ?? {}),
               ...(distributionManagement ? { distributionManagement } : {}),
               ...(config.orderImSdkRouteConfig ? { orderImSdkRouteConfig: config.orderImSdkRouteConfig } : {}),
               ...(config.yunxin.enabled && config.yunxin.appKey && config.yunxin.appSecret

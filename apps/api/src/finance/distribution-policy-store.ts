@@ -3,7 +3,7 @@ import {withTransaction,recordAudit,SecurityApiError} from '../auth/security-cor
 import {canonicalize} from '../supply/content-hash';import {ensureOnlyFields,invalid,conflict,forbidden,withIdempotency,fingerprintRequest} from '../supply/supply-util';
 import {validateDistributionPolicy,type DistributionPolicyConfig} from './distribution-policy';
 import {prepareDistributionPolicyChange,initialDistributionPolicyConfig,isInitialPolicyChange,type DistributionPolicyChange,type DistributionPolicyUpdate,type DistributionPolicyInitial} from './distribution-policy-change';
-import {ConfigurationError,type AppConfig} from '../config/config';
+import {ConfigurationError,isEcsTestWithoutJoinpay,type AppConfig} from '../config/config';
 import {assertBusinessRuntimeIdentity} from '../database/business';
 import {assertControlledRegressionResource,type ControlledRegressionResource} from './controlled-regression-resource';
 import {REGRESSION_DATABASE,REGRESSION_MARKER,REGRESSION_RUNTIME_USER} from '../config/test-resource';
@@ -17,13 +17,22 @@ type DistributionOrigins=Readonly<{apiOrigin:string;userOrigin:string;adminOrigi
 const localName='zzsh_test_order_credit_admin_batch2',localRuntime='zzsh_order_credit_admin_batch2_r',localMigration='zzsh_order_credit_admin_batch2_m',localMarker='zzsh:order-reservation-test:v1';
 const milestoneName='zzsh_test_order_milestone_real_1',milestoneRuntime='zzsh_order_milestone_real_1_r',milestoneMigration='zzsh_order_milestone_real_1_m';
 const localProofs=new WeakMap<LocalDistributionScope,Readonly<CreationReceipt&{readOnly:boolean;origins?:DistributionOrigins;sandbox?:LocalFinancialSandbox;nativeReadNonce?:string;nativeReadPort?:number}>>();
-const nativeProofs=new WeakMap<LocalDistributionScope,Readonly<{kind:'NATIVE';database:string;runtimeUser:string;admissionSha256:string}>>();
+const nativeProofs=new WeakMap<LocalDistributionScope,Readonly<{kind:'NATIVE';database:string;runtimeUser:string;admissionSha256:string|null;withoutJoinpay:boolean}>>();
 type ReviewedDistributionInstance=Readonly<{host:'127.0.0.1';port:55432|55433;systemIdentifier:string}>;
 const reviewedLocalNativeProofs=new WeakMap<LocalDistributionScope,Readonly<{proof:ControlledRegressionResource;owner:string;ownerOid:number;instance?:ReviewedDistributionInstance}>>();
 /** Formal NATIVE scope comes only from the reviewed formal collection admission; no receipt or env shortcut. */
 export function createNativeDistributionPolicyScope(admission:FormalCollectionAdmission):LocalDistributionScope{
  const view=readFormalCollectionAdmission(admission),value=Object.freeze({kind:'NATIVE_DISTRIBUTION' as const});
- nativeProofs.set(value,Object.freeze({kind:'NATIVE' as const,database:view.database,runtimeUser:view.runtimeUser,admissionSha256:view.sha256}));return value;
+ nativeProofs.set(value,Object.freeze({kind:'NATIVE' as const,database:view.database,runtimeUser:view.runtimeUser,admissionSha256:view.sha256,withoutJoinpay:false}));return value;
+}
+/** Business policy and relationships can use the target resource without granting payment authority. */
+export function createEcsTestDistributionPolicyScope(config:Pick<AppConfig,'provider'|'database'>&Partial<Pick<AppConfig,'profile'>>,env:NodeJS.ProcessEnv):LocalDistributionScope{
+ const db=config.database;
+ if(!isEcsTestWithoutJoinpay(env)||config.profile!=='ecs-test'||config.provider!=='real'||db.target!=='ecs-test'||db.targetProfile!=='ecs-test'
+  ||!/^zzsh_ecs_test(?:_[a-z0-9_]+)?$/.test(db.name)||db.name.length>63||!/^[a-z][a-z0-9_]{0,62}$/.test(db.user)||db.user!==db.runtimeUser)
+  throw new ConfigurationError('ECS_TEST_DISTRIBUTION_RESOURCE_INVALID');
+ const value=Object.freeze({kind:'NATIVE_DISTRIBUTION' as const});
+ nativeProofs.set(value,Object.freeze({kind:'NATIVE' as const,database:db.name,runtimeUser:db.user,admissionSha256:null,withoutJoinpay:true}));return value;
 }
 /** Offline migration only; the original regression proof is rechecked on every transaction. */
 export function createReviewedLocalNativeDistributionScope(proof:ControlledRegressionResource,owner:{owner:string;ownerOid:number;instance?:ReviewedDistributionInstance}):LocalDistributionScope{
@@ -116,6 +125,8 @@ export function assertLocalDistributionAssembly(binding:LocalDistributionScope|u
  if(native){
   const https=(origin:string)=>/^https:\/\/[^/]+(?:\/.*)?$/.test(origin)&&!/^https:\/\/(?:localhost|127\.0\.0\.1)(?::|\/|$)/.test(origin);
   if(options.secureCookies!==true||!https(options.apiOrigin)||!https(options.userOrigin)||!https(options.adminOrigin))throw new ConfigurationError('Native distribution scope requires secure non-local production origins');
+  if(native.withoutJoinpay&&(options.testOperationsEnabled||options.settlementRecordingEnabled||options.distributionEarnings||options.joinpayCollection||options.joinpayRefund||options.joinpayWithdrawal||options.joinpayAccountObservation||options.localControlledPayments||options.localFinancialSandbox))
+   throw new ConfigurationError('ECS_TEST_DISTRIBUTION_PAYMENT_ASSEMBLY_FORBIDDEN');
   return;
  }
  const receipt=localProofs.get(binding),port=receipt?.database===milestoneName?4220:4280;
@@ -150,8 +161,9 @@ async function resource(c:PoolClient, allowUnadmitted=false,binding?:LocalDistri
   const shape=(await c.query(`SELECT pg_get_userbyid(d.datdba) AS owner,d.datdba::int AS "ownerOid",r.oid::int AS "roleOid",r.rolsuper,r.rolbypassrls,
    to_regclass('zzsh_order.distribution_participant') IS NOT NULL AND to_regclass('zzsh_order.distribution_invite_code') IS NOT NULL AND to_regclass('zzsh_order.invitation_relation') IS NOT NULL AS complete
    FROM pg_database d JOIN pg_roles r ON r.rolname=current_user WHERE d.datname=current_database()`)).rows[0];
-  if(!shape||shape.rolsuper!==false||shape.rolbypassrls!==false||native.admissionSha256.length!==64)throw new SecurityApiError(503,'EVIDENCE_UNAVAILABLE','Bound native distribution schema or role unavailable');
+  if(!shape||shape.rolsuper!==false||shape.rolbypassrls!==false||(!native.withoutJoinpay&&native.admissionSha256?.length!==64)||(native.withoutJoinpay&&native.admissionSha256!==null))throw new SecurityApiError(503,'EVIDENCE_UNAVAILABLE','Bound native distribution schema or role unavailable');
   if(r.complete!==true||shape.complete!==true){if(allowUnadmitted)return false;throw new SecurityApiError(503,'EVIDENCE_UNAVAILABLE','Bound native distribution structure unavailable');}
+  if(native.withoutJoinpay){try{await assertBusinessRuntimeIdentity(c,{database:{name:native.database,user:native.runtimeUser,runtimeUser:native.runtimeUser}});}catch{throw new SecurityApiError(503,'EVIDENCE_UNAVAILABLE','Bound native distribution runtime identity unavailable');}}
   return true;
  }
  if(binding!==undefined){
