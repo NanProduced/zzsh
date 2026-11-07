@@ -25,6 +25,7 @@ export function projectLegacyGrowthConsumption(input:LegacyGrowthConsumptionInpu
     if(b.sourcePayStatus===0){
       if(input.origin.kind!=="LEGACY_COMPLETED")return unknown("PAID_SOURCE_UNPROVEN");const o=input.origin,row=parsedProof(o.sourceRecord);
       if(row.pay_is!=="0" || row.id!==b.legacyId || row.user_id!==b.legacyRenterId || sha256Hex(canonicalize(o.parentSourceSnapshot))!==b.sourceDigest || Object.keys(o.parentSourceSnapshot).some(k=>row[k]!==o.parentSourceSnapshot[k]))return unknown("LEGACY_SOURCE_BINDING_CONFLICT");
+      const p=parsedProof(o.components);if(p.schema==="legacy-consumption-unresolved.v1" && p.reason==="ORDER_PAYMENT_SOURCE_CONFLICT")return unknown("ORDER_PAYMENT_SOURCE_CONFLICT");
       base.evidence.basisDigest=o.sourceRecord.digest;base.evidence.basisRef=sourceKey(b);return {...base,knowledge:"EXCLUDED",reason:"NOT_PAID",facts:[]};
     }
     if(b.sourcePayStatus!==1 || b.paidCents===null)return unknown("PAID_SOURCE_UNPROVEN");

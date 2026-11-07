@@ -30,6 +30,17 @@ test("historical completed input needs admitted old component proof and original
  const result=projectLegacyGrowthConsumption(input,new Set([input.origin.components.digest]));assert.equal(result.knowledge,"KNOWN",result.reason??"");assert.deepEqual(result.facts.map(f=>f.amountCents),["1000","200","100"]);assert.equal(result.facts[0]!.effectiveAt,"2026-10-01T01:02:03.000000Z");
  const p=JSON.parse(input.origin.components.canonical);p.minimumAgreementRef=null;input.origin.components=proof(p);assert.equal(projectLegacyGrowthConsumption(input,new Set([input.origin.components.digest])).reason,"MINIMUM_BILLING_AGREEMENT_UNPROVEN");
 });
+test("a successful payment conflicting with the legacy order marker leaves growth unknown",()=>{
+ const input=historical();if(input.origin.kind!=="LEGACY_COMPLETED")assert.fail();
+ const raw={...input.origin.parentSourceSnapshot,pay_is:"0"},sourceRecord=proof(raw);
+ input.binding.sourcePayStatus=0;input.binding.sourceDigest=sourceRecord.digest;
+ input.origin.parentSourceSnapshot=raw;input.origin.sourceRecord=sourceRecord;
+ input.origin.components=proof({schema:"legacy-consumption-unresolved.v1",reason:"ORDER_PAYMENT_SOURCE_CONFLICT"});
+ const result=projectLegacyGrowthConsumption(input,new Set([input.origin.components.digest]));
+ assert.equal(result.knowledge,"UNKNOWN");assert.equal(result.reason,"ORDER_PAYMENT_SOURCE_CONFLICT");assert.deepEqual(result.facts,[]);
+ input.origin.components=proof({schema:"legacy-consumption-exclusion.v1",classification:"NOT_PAID"});
+ assert.equal(projectLegacyGrowthConsumption(input).reason,"NOT_PAID");
+});
 test("a price correction preserves original source/time and known previous amount; refund records cannot double subtract the unused gross refund",()=>{
  const base=projectLegacyGrowthConsumption(continuation()).facts[0]!;
  const value={schema:"legacy-growth-correction.v1",originalSourceKey:`${base.component}:${base.settlementId}`,userId:base.userId,originalEffectiveAt:base.effectiveAt,previousAmountCents:base.amountCents,correctedAmountCents:"1100",classification:"EFFECTIVE_PRICE_CORRECTION",alreadyReflectedInGrossReturn:false,sourceSystem:"legacy_mysql_restore",sourceEntity:"fixture_price_correction",sourceId:"93",recordedAt:"2026-10-17T00:00:00.000000Z",revision:3},p=proof(value);

@@ -93,7 +93,7 @@ try {
     const contacts = mod("legacy-load/legacy-contact-projection").planLegacyContactProjections(contactSources);
     report.userContactProjection = { schema: "legacy-contact-projection-v1", sourceSubjects: contacts.size, writtenWithOriginalImport: true, winner: "UNIQUE_NON_CANCELLED_ONLY", frozenRetainsClaim: true, decisions: {} };
     for (const p of contacts.values()) report.userContactProjection.decisions[p.decision] = (report.userContactProjection.decisions[p.decision] ?? 0) + 1;
-    // The seventh round filters accounts and orders by real rental money movement; users and every other
+    // The seventh round filters accounts and orders by successful legacy rental payment records; users and every other
     // independent domain stay whole, so this is a filter, not a cohort shrink.
     const selectedScope = populationMode === 'SELECTED_BUSINESS_SCOPE' ? planSelectedBusinessScope(data) : null;
     const selection = populationMode === 'SCENARIO_SELECTION' ? selectSourceScenarios(data, contacts) : selectedScope ? selectedScopeFilter(selectedScope) : null;

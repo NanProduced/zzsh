@@ -64,17 +64,32 @@ test("a type-1 payment with a paid marker keeps an order the order row calls unp
   assert.equal(scope.partition.orders.orderPaidPaymentUnconfirmed.count, 0);
 });
 
-test("an order marked paid without any paid payment record is kept and flagged as a conflict", () => {
+test("an order marked paid without a successful rental payment is excluded and counted as a conflict", () => {
   const scope = planSelectedBusinessScope({
     accounts: [account("a1")],
     orders: [order("o1", "a1", { pay_is: "1" })],
     pays: [pay("o1", "0")],
   });
-  assert.deepEqual(scope.write.orders, ["o1"]);
+  assert.deepEqual(scope.write.orders, []);
+  assert.deepEqual(scope.excludedKeys.orders, ["o1"]);
+  assert.deepEqual(scope.excludedKeys.accounts, ["a1"]);
   assert.deepEqual(scope.conflictKeys.orders, ["o1"]);
   assert.deepEqual(scope.conflictKeys.orderPaidPaymentUnconfirmed, ["o1"]);
   assert.equal(scope.partition.orders.orderPaidPaymentUnconfirmed.count, 1);
   assert.equal(scope.partition.orders.paymentPaidOrderUnpaid.count, 0);
+  assert.equal(scope.policy.orderPaidWithoutPayment, "EXCLUDED");
+});
+
+test("a listed account survives an excluded payment conflict, and another paid order keeps its own account", () => {
+  const scope = planSelectedBusinessScope({
+    accounts: [account("listed", { status: "3" }), account("mixed")],
+    orders: [order("unpaid-listed", "listed", { pay_is: "1" }), order("unpaid-mixed", "mixed", { pay_is: "1" }), order("paid", "mixed")],
+    pays: [pay("unpaid-listed", "0"), pay("unpaid-mixed", "1", { order_type: "2" }), pay("paid", "1")],
+  });
+  assert.deepEqual(scope.write.accounts, ["listed", "mixed"]);
+  assert.deepEqual(scope.write.orders, ["paid"]);
+  assert.deepEqual(scope.excludedKeys.orders, ["unpaid-listed", "unpaid-mixed"]);
+  assert.deepEqual(scope.conflictKeys.orderPaidPaymentUnconfirmed, ["unpaid-listed", "unpaid-mixed"]);
 });
 
 test("the old listing deposit can never make an order look paid", () => {
@@ -108,9 +123,10 @@ test("the partition is disjoint and covers the source", () => {
 });
 
 test("duplicate or missing source keys are refused instead of silently merged", () => {
-  assert.throws(() => planSelectedBusinessScope({ accounts: [account("a1"), account("a1")], orders: [] }), /ACCOUNT_KEY_DUPLICATE/);
-  assert.throws(() => planSelectedBusinessScope({ accounts: [{ status: "4" }], orders: [] }), /ACCOUNT_KEY_INVALID/);
-  assert.throws(() => planSelectedBusinessScope({ accounts: [], orders: [order("o1", "a1"), order("o1", "a1")] }), /ORDER_KEY_DUPLICATE/);
+  assert.throws(() => planSelectedBusinessScope({ accounts: [account("a1"), account("a1")], orders: [], pays: [] }), /ACCOUNT_KEY_DUPLICATE/);
+  assert.throws(() => planSelectedBusinessScope({ accounts: [{ status: "4" }], orders: [], pays: [] }), /ACCOUNT_KEY_INVALID/);
+  assert.throws(() => planSelectedBusinessScope({ accounts: [], orders: [order("o1", "a1"), order("o1", "a1")], pays: [] }), /ORDER_KEY_DUPLICATE/);
+  assert.throws(() => planSelectedBusinessScope({ accounts: [], orders: [] }), /SELECTED_SCOPE_SOURCE_INVALID/);
 });
 
 test("the digest is stable for the same source and changes with the partition", () => {

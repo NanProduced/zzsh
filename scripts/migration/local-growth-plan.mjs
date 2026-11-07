@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { SELECTED_SCOPE_POLICY } from "./selected-business-scope.mjs";
 
 const sha = value => createHash("sha256").update(value).digest("hex");
 const itemFields = ["barrett_bullet", "level6_bullet", "awm_bullet", "level6_armor", "level6_helmet", "coffee", "top_insure_card"];
@@ -40,13 +41,21 @@ export function legacyCompletedComponents(raw) {
  * selected subset, every source order must be either retained or explicitly excluded, and an excluded
  * order must not have been paid - otherwise the exclusion would silently drop a real consumption fact.
  */
-export function assertGrowthScopePartition(allOrders, scope) {
+export function assertGrowthScopePartition(allOrders, scope, payments) {
   if (!scope) return { orders: allOrders, excluded: [] };
   if (scope.schema !== "zzsh.selected-business-scope.v1") fail("GROWTH_SCOPE_SCHEMA_INVALID");
+  if (!scope.policy || Object.entries(SELECTED_SCOPE_POLICY).some(([key, value]) => scope.policy[key] !== value)) fail("GROWTH_SCOPE_POLICY_CHANGED");
+  if (!Array.isArray(payments)) fail("GROWTH_PAYMENT_SOURCE_MISSING");
+  if (!Array.isArray(scope.write?.orders) || !Array.isArray(scope.excludedKeys?.orders)) fail("GROWTH_SCOPE_PARTITION_INVALID");
   const retained = new Set(scope.write.orders), excluded = new Set(scope.excludedKeys.orders);
-  for (const row of allOrders) if (!retained.has(row.id) && !excluded.has(row.id)) fail("GROWTH_SCOPE_PARTITION_INCOMPLETE:" + row.id);
+  if (retained.size !== scope.write.orders.length || excluded.size !== scope.excludedKeys.orders.length) fail("GROWTH_SCOPE_PARTITION_INVALID");
+  const paid = new Set(payments.filter(row => row.order_type === "1" && row.pay_is === "1").map(row => row.order_id));
+  for (const row of allOrders) {
+    if (retained.has(row.id) === excluded.has(row.id)) fail("GROWTH_SCOPE_PARTITION_INCOMPLETE:" + row.id);
+    if (excluded.has(row.id) && paid.has(row.id)) fail("GROWTH_EXCLUDED_ORDER_WAS_PAID:" + row.id);
+    if (retained.has(row.id) && !paid.has(row.id)) fail("GROWTH_RETAINED_ORDER_HAS_NO_PAID_PAYMENT:" + row.id);
+  }
   if (retained.size + excluded.size !== allOrders.length) fail("GROWTH_SCOPE_PARTITION_INCOMPLETE");
-  for (const row of allOrders) if (excluded.has(row.id) && row.pay_is === "1") fail("GROWTH_EXCLUDED_ORDER_WAS_PAID:" + row.id);
   return { orders: allOrders.filter(row => retained.has(row.id)), excluded: allOrders.filter(row => excluded.has(row.id)).map(row => row.id).sort() };
 }
 
@@ -79,7 +88,11 @@ export function buildLocalGrowthPlan({ modules, cohort, orders, growthExcluded =
         const orderRefunds = refs.get(raw.id) ?? [];
         const refundReviewRefs = [reviewProof.digest, ...orderRefunds.flatMap(row => [proof(row).digest, ...(logs.get(row.id) ?? []).map(log => proof(log).digest)])];
         let kind = "LEGACY_COMPLETED", components, reason = null, componentBasis = null;
-        if (raw.pay_is === "0") components = proof({ schema: "legacy-consumption-exclusion.v1", classification: "NOT_PAID", ...common });
+        if (raw.pay_is === "0" && (pays.get(raw.id) ?? []).length) {
+            reason = "ORDER_PAYMENT_SOURCE_CONFLICT";
+            components = proof({ schema: "legacy-consumption-unresolved.v1", ...common, reason,
+                payment: { sourceSystem: "legacy_mysql_restore", sourceEntity: "la_pay_order", extractSha256: lineage.paymentFileSha256, records: pays.get(raw.id).map(proof) } });
+        } else if (raw.pay_is === "0") components = proof({ schema: "legacy-consumption-exclusion.v1", classification: "NOT_PAID", ...common });
         else if (["2", "3", "6", "7", "8", "9"].includes(raw.order_status)) {
             kind = "LEGACY_PENDING_UNSETTLED";
             components = proof({ schema: "legacy-consumption-exclusion.v1", classification: "PAID_NOT_EFFECTIVELY_SETTLED", ...common });

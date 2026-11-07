@@ -1,21 +1,20 @@
 // The seventh round reads the whole captured source and then keeps a business-selected part of it:
-// the rental accounts listed at the cutoff, plus every account that carries real rental money, and
-// only the orders that carry that money. Neither existing mode expresses this - the full capture
+// the rental accounts listed at the cutoff, plus accounts with a successful legacy rental payment
+// record and their orders. The record is a source marker, not independent channel verification. The full capture
 // demands zero exclusions and the retired scenario sample selects whole subjects - so this module
 // partitions accounts and orders and proves the buckets are disjoint and cover the source.
 //
-// Owner decision (2026-11-05): a legacy order marked unpaid whose type-1 rental payment carries no
-// paid marker is excluded as unpaid, even when it has failed payment attempts. Channel state is not
-// queried and such an order is not isolated. What still needs checking is a source conflict: one
-// marker says paid and the other does not, which must never be silently deleted as unpaid.
+// Owner decision (2026-11-07): only a type-1 rental payment marked paid selects its order. The
+// order's own paid marker is not a substitute; disagreements remain counted as source conflicts.
 import { createHash } from "node:crypto";
 
 const sha = value => createHash("sha256").update(value).digest("hex");
 export const SELECTED_SCOPE_SCHEMA = "zzsh.selected-business-scope.v1";
 export const SELECTED_SCOPE_POLICY = Object.freeze({
   listedStatus: "3",
-  orderPaidMarker: "pay_is=1",
   paymentKind: "order_type=1",
+  paymentPaidMarker: "pay_is=1",
+  orderPaidWithoutPayment: "EXCLUDED",
   unpaidWithFailedAttempts: "EXCLUDED",
   channelLookup: "NOT_PERFORMED",
 });
@@ -25,11 +24,11 @@ const bucket = () => ({ retained: [], excluded: [], conflicts: [] });
 const digestOf = ids => sha([...ids].sort().join("\n"));
 
 /**
- * @param {{accounts: object[], orders: object[], pays?: object[]}} source captured source rows
+ * @param {{accounts: object[], orders: object[], pays: object[]}} source captured source rows
  * @returns a partition whose buckets are disjoint and whose union equals the source key set.
  */
 export function planSelectedBusinessScope(source) {
-  const accounts = source?.accounts ?? [], orders = source?.orders ?? [], pays = source?.pays ?? [];
+  const accounts = source?.accounts, orders = source?.orders, pays = source?.pays;
   if (!Array.isArray(accounts) || !Array.isArray(orders) || !Array.isArray(pays)) throw new Error("SELECTED_SCOPE_SOURCE_INVALID");
 
   const accountIds = new Set(), orderIds = new Set();
@@ -46,13 +45,11 @@ export function planSelectedBusinessScope(source) {
 
   // Only type-1 rental payments prove rental money; type-2 rows are the old listing deposit and are
   // out of scope, so they can never make an order look paid.
-  const paidByOrder = new Set(), attemptsByOrder = new Map();
+  const paidByOrder = new Set();
   for (const pay of pays) {
     if (pay?.order_type !== "1") continue;
     const key = pay?.order_id;
     if (typeof key !== "string" || !key) continue;
-    if (!attemptsByOrder.has(key)) attemptsByOrder.set(key, 0);
-    attemptsByOrder.set(key, attemptsByOrder.get(key) + 1);
     if (pay.pay_is === "1") paidByOrder.add(key);
   }
 
@@ -62,15 +59,13 @@ export function planSelectedBusinessScope(source) {
   const orderDisposition = new Map();
   for (const order of orders) {
     const marked = order?.pay_is === "1", paidRecord = paidByOrder.has(order.id);
-    if (marked || paidRecord) {
+    if (marked !== paidRecord) {
+      partition.orders.conflicts.push(order.id);
+      partition.orders[paidRecord ? "paymentPaidOrderUnpaid" : "orderPaidPaymentUnconfirmed"].push(order.id);
+    }
+    if (paidRecord) {
       partition.orders.retained.push(order.id);
       orderDisposition.set(order.id, "retained");
-      // One side says paid and the other does not: keep the order, but record that the source
-      // disagrees instead of letting the weaker marker decide.
-      if (marked !== paidRecord) {
-        partition.orders.conflicts.push(order.id);
-        partition.orders[paidRecord ? "paymentPaidOrderUnpaid" : "orderPaidPaymentUnconfirmed"].push(order.id);
-      }
       continue;
     }
     partition.orders.excluded.push(order.id);
@@ -101,7 +96,7 @@ export function planSelectedBusinessScope(source) {
   }
   const closure = {};
   for (const domain of ["accounts", "orders"]) {
-    // Conflicts annotate retained orders; only retained and excluded form the partition.
+    // Conflicts annotate either disposition; only retained and excluded form the partition.
     const sum = sealed[domain].retained.count + sealed[domain].excluded.count;
     if (sum !== totals[domain]) throw new Error("SELECTED_SCOPE_PARTITION_INCOMPLETE:" + domain);
     closure[domain] = { source: totals[domain], partitioned: sum, complete: true };

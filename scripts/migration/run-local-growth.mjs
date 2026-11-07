@@ -121,9 +121,9 @@ try {
     const cohort = await checkedRows(dataset, m.files.users), allOrders = await checkedRows(source, capture.files.orders);
     // The seventh round migrates a business-selected subset of the source orders. Growth must close over
     // the orders the target is supposed to hold, and must still account for every order it leaves out.
-    const scoped = assertGrowthScopePartition(allOrders, m.selectedScope);
-    const orders = scoped.orders, growthExcluded = scoped.excluded;
     const [payments, refunds, refundLogs] = await Promise.all([checkedRows(source, capture.files.pays), checkedRows(source, capture.files.refunds), checkedRows(refundDir, refundsReceipt.files.refundLogs)]);
+    const scoped = assertGrowthScopePartition(allOrders, m.selectedScope, payments);
+    const orders = scoped.orders, growthExcluded = scoped.excluded;
     const targetProof = await readonly(async (db, identity, policy) => {
       const users = (await db.query("SELECT user_id FROM zzsh_iam.user_identity_state WHERE provider='legacy_mysql_restore' ORDER BY user_id")).rows.map(r => r.user_id);
       assert.deepEqual(users.sort(), cohort.map(r => r.userId).sort());
