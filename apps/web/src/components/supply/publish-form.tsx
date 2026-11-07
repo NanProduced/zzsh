@@ -77,6 +77,8 @@ import {
   canonicalResourceCode,
   resourceUnitLabel,
   formatServiceWindowMinute,
+  isSkinOwnerKind,
+  skinTypeOptions,
 } from "../../lib/listing-filters";
 import {
   baseFromHaffM,
@@ -115,6 +117,7 @@ import type {
   OwnerIncomePreviewInput,
   OwnerDepositDeclaration,
   RentalMode,
+  SkinOwnerKind,
   SupplyGame,
 } from "../../lib/supply-types";
 import type { PublishMode } from "../../lib/service-navigation";
@@ -158,7 +161,7 @@ type MediaEntry = {
   error?: string;
   context: RequestContext;
 };
-type SkinQuery = { q?: string; categoryId?: string; rarityCode?: string; ownerId?: string; cursor?: string };
+type SkinQuery = { q?: string; categoryId?: string; ownerKind?: SkinOwnerKind; rarityCode?: string; ownerId?: string; cursor?: string };
 type PublishGroupId = "account" | "assets" | "terms" | "media";
 type OptionsAvailability = "pending" | "ready" | "unavailable" | "failed";
 type NavigationIntent = { message: string; label: string; run: () => void; cancel?: () => void };
@@ -1363,7 +1366,7 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
 
   const loadSkinPage = useCallback(async (query: SkinQuery, append: boolean) => {
     if (!gameId) return;
-    const queryKey = JSON.stringify({ q: query.q ?? "", categoryId: query.categoryId ?? "", rarityCode: query.rarityCode ?? "", ownerId: query.ownerId ?? "" });
+    const queryKey = JSON.stringify({ q: query.q ?? "", categoryId: query.categoryId ?? "", ownerKind: query.ownerKind ?? "", rarityCode: query.rarityCode ?? "", ownerId: query.ownerId ?? "" });
     if (append && (skinQueryRef.current.gameId !== gameId || skinQueryRef.current.key !== queryKey)) return;
     const requestId = ++skinRequestRef.current;
     const request = { id: requestId, key: `${gameId}:${queryKey}` };
@@ -1379,16 +1382,18 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
       const params = new URLSearchParams({ limit: "30" });
       if (query.q) params.set("q", query.q);
       if (query.categoryId) params.set("categoryId", query.categoryId);
+      if (query.ownerKind) params.set("ownerKind", query.ownerKind);
       if (query.rarityCode) params.set("rarityCode", query.rarityCode);
       if (query.ownerId) params.set("ownerId", query.ownerId);
       if (query.cursor) params.set("cursor", query.cursor);
       const page = await supplyApi.catalog(gameId, params, controller.signal);
       if (!currentContext(context, controller.signal) || !isCurrent()) return;
-      // The first visible category and every later cursor must share one query.
-      if (!append && !query.categoryId && page.categories[0]) {
-        const categoryId = page.categories[0].id;
-        setSkinCategory(categoryId);
-        await loadSkinPage({ ...query, categoryId }, false);
+      // The first visible type and every later cursor must share one query.
+      const firstKind = page.skinFilters?.ownerKinds.find(isSkinOwnerKind);
+      const firstCategory = page.categories[0]?.id;
+      if (!append && !query.categoryId && !query.ownerKind && (firstKind || firstCategory)) {
+        setSkinCategory(firstKind ?? firstCategory!);
+        await loadSkinPage({ ...query, ...(firstKind ? { ownerKind: firstKind } : { categoryId: firstCategory }) }, false);
         return;
       }
       setCatalog((previous) => {
@@ -2762,11 +2767,12 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
   const resourceRows=[...inventoryRows,...missingResourceRows].sort((a,b)=>resourcePosition(a.code)-resourcePosition(b.code));
   const savedSkinNames = new Map((supply?.version?.presentation?.skins ?? []).map((skin) => [skin.id, skin.name]));
   const skinName = (id: string) => knownSkins[id]?.name ?? savedSkinNames.get(id) ?? "目录名称待加载";
-  const activeSkinCategory = skinCategory || catalog?.categories[0]?.id || "";
-  const activeSkinKind = catalog?.categories.find((category) => category.id === activeSkinCategory)?.ownerKind;
+  const skinTypes = catalog?.skinFilters?.ownerKinds ? skinTypeOptions(catalog.skinFilters.ownerKinds) : catalog?.categories ?? [];
+  const activeSkinCategory = skinCategory || skinTypes[0]?.id || "";
+  const activeSkinKind = skinTypes.find((category) => category.id === activeSkinCategory)?.ownerKind;
   const skinOwners = (catalog?.owners ?? []).filter((owner) => !activeSkinKind || owner.kind === activeSkinKind);
-  const visibleSkinRows = (catalog?.skins ?? []).filter((skin) => !activeSkinCategory || skin.categoryId === activeSkinCategory);
-  const skinFilters = { q: skinQuery.trim(), categoryId: activeSkinCategory, rarityCode: skinRarity, ownerId: skinOwner };
+  const visibleSkinRows = (catalog?.skins ?? []).filter((skin) => !activeSkinCategory || (catalog?.skinFilters ? skin.ownerKind === activeSkinCategory : skin.categoryId === activeSkinCategory));
+  const skinFilters: SkinQuery = { q: skinQuery.trim(), ...(catalog?.skinFilters && isSkinOwnerKind(activeSkinCategory) ? { ownerKind: activeSkinCategory } : { categoryId: activeSkinCategory }), rarityCode: skinRarity, ownerId: skinOwner };
   const showPricingSelect = options?.pricingSchema !== "haff-ratio-v2";
   const disabledPricing = formDisabled || !options;
   const rentalModes = options?.rentalModes;
@@ -3255,8 +3261,8 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
               <div className="publish-assets-heading"><h3><UserRound size={20} aria-hidden="true" />皮肤</h3><FieldHelp label="皮肤">按名称或分类查找，并勾选账号拥有的皮肤。</FieldHelp></div>
               <div className="skin-picker">
                 <div className="skin-category-nav" role="group" aria-label="皮肤分类">
-                  {catalog?.categories.map((category) => (
-                    <button key={category.id} type="button" className={`skin-category-btn${activeSkinCategory === category.id ? " is-active" : ""}`} aria-pressed={activeSkinCategory === category.id} disabled={formDisabled} onClick={() => { setSkinCategory(category.id); setSkinOwner(""); void loadSkinPage({ ...skinFilters, categoryId: category.id, ownerId: "" }, false); }}>{category.name}</button>
+                  {skinTypes.map((category) => (
+                    <button key={category.id} type="button" className={`skin-category-btn${activeSkinCategory === category.id ? " is-active" : ""}`} aria-pressed={activeSkinCategory === category.id} disabled={formDisabled} onClick={() => { setSkinCategory(category.id); setSkinOwner(""); void loadSkinPage({ ...skinFilters, categoryId: catalog?.skinFilters ? undefined : category.id, ownerKind: catalog?.skinFilters && isSkinOwnerKind(category.id) ? category.id : undefined, ownerId: "" }, false); }}>{category.name}</button>
                   ))}
                 </div>
                 <div className="skin-search-row">
@@ -3296,7 +3302,7 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
                 {skinPagePending || (!catalog && loadingCatalog) ? <p className="supply-muted" role="status">正在读取皮肤目录，已选皮肤会保留…</p> : null}
                 {skinPageFailed ? <div className="skin-picker-error" role="alert"><p>{skinPageFailed === "append" ? "更多皮肤加载失败，已加载内容与已选皮肤会保留。" : "皮肤目录加载失败，已选皮肤会保留。"}</p><button type="button" className="button secondary" disabled={formDisabled || loadingCatalog} onClick={() => void loadSkinPage({ ...skinQueryRef.current.query, ...(skinPageFailed === "append" ? { cursor: catalog?.nextCursor ?? undefined } : {}) }, skinPageFailed === "append")}>重试皮肤目录</button></div> : null}
                 {!skinPagePending && skinPageFailed !== "replace" ? (() => {
-                  const isAgentCategory = catalog?.categories.find((c) => c.id === activeSkinCategory)?.code === "agent" || catalog?.categories.find((c) => c.id === activeSkinCategory)?.name?.includes("干员");
+                  const isAgentCategory = activeSkinKind === "AGENT" || skinTypes.find((c) => c.id === activeSkinCategory)?.name?.includes("干员");
                   return (
                     <div className="skin-choices-grid" aria-label="可选皮肤" data-orientation={isAgentCategory ? "vertical" : "horizontal"}>
                       {visibleSkinRows.map((skin) => {

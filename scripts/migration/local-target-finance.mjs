@@ -69,7 +69,7 @@ export async function applyFinancialDomains(ctx) {
         const scope=await module.bindReviewedEmptyFinanceObservationBatch(client,actor,inputs,reviews);
         const result=await module.importReviewedEmptyFinanceObservationBatch(client,actor,inputs,scope);
         return{...result.body,replayed:result.body.created===0};
-    },1);
+    },5);
     // The old listing deposit is out of scope: nothing is written for it, and the exclusion is
     // recorded on the plan so the report can prove it was deliberate.
     const continuations = await arrayOf(ctx, "continuations");

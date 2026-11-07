@@ -41,11 +41,11 @@ export function legacyOrderLifecycleStage(status: number, payStatus: number, par
 type PartyBinding = { userId: string; legacyId: string; businessNo: string | null; sourceDigest: string };
 export type LegacyOrderReadInput = {
   source: { legacyId: string; digest: string; evidenceRef: string; row: Record<string, string | null> };
-  account: { accountId: string; gameId: string; legacyId: string; businessNo: string | null; sourceDigest: string };
+  account: { accountId: string; gameId: string; legacyId: string; businessNo: string | null; sourceDigest: string; metricSourceFields?: { is_full_payout?: string | null } };
   owner: PartyBinding;
   renter: PartyBinding;
 };
-const MONEY_FIELDS = ["money", "goods_money", "expend_pay_money", "need_pay_money", "pay_money", "deposit_amount", "return_order_money", "detain_money", "sale_earnings", "commission_money", "full_payout_money"];
+const MONEY_FIELDS = ["money", "goods_money", "expend_pay_money", "need_pay_money", "pay_money", "deposit_amount", "return_order_money", "detain_money", "sale_earnings", "commission_money", "share_money", "full_payout_money", "compensation"];
 const QUANTITY_FIELDS = ["awm_bullet_num", "level6_bullet_num", "level6_helmet_num", "level6_armor_num", "top_insure_card_num", "barrett_bullet_num", "coffee_num"];
 export const LEGACY_ORDER_READ_SOURCE_FIELDS = ["id", "order_sn", "user_id", "sale_user_id", "accounts_id", "order_type", "order_source", "order_status", "pay_is", "is_settle", "is_delete", "create_time", "update_time", "pay_time", "confirm_time", "cancel_time", "tenancy_deadline", "express_is", "express_time", "expend_haff", ...MONEY_FIELDS, ...QUANTITY_FIELDS, "awm_bullet_price", "level6_bullet_price", "level6_helmet_price", "level6_armor_price", "top_insure_card_price", "barrett_bullet_price", "coffee_price"];
 const MONEY = /^-?(0|[1-9]\d{0,22})\.\d{2}$/;
@@ -69,7 +69,14 @@ export function normalizeLegacyOrderReadInput(input: LegacyOrderReadInput) {
   if (!input || typeof input !== "object" || Array.isArray(input) || [input.source,input.account,input.owner,input.renter].some(value => !value || typeof value !== "object" || Array.isArray(value))) throw invalid("Legacy import binding is invalid");
   ensureOnlyFields(input, ["source", "account", "owner", "renter"]);
   ensureOnlyFields(input.source, ["legacyId", "digest", "evidenceRef", "row"]);
-  ensureOnlyFields(input.account, ["accountId", "gameId", "legacyId", "businessNo", "sourceDigest"]);
+  ensureOnlyFields(input.account, ["accountId", "gameId", "legacyId", "businessNo", "sourceDigest", "metricSourceFields"]);
+  if (input.account.metricSourceFields !== undefined) {
+    const facts = input.account.metricSourceFields;
+    if (!facts || typeof facts !== "object" || Array.isArray(facts)) throw invalid("Legacy account capture facts are invalid");
+    ensureOnlyFields(facts, ["is_full_payout"]);
+    if (Object.hasOwn(facts, "is_full_payout") && facts.is_full_payout !== null
+      && (typeof facts.is_full_payout !== "string" || facts.is_full_payout.length > 255 || /[\x00-\x1f\x7f]/.test(facts.is_full_payout))) throw invalid("Legacy account capture fact is invalid");
+  }
   for (const party of [input.owner, input.renter]) ensureOnlyFields(party, ["userId", "legacyId", "businessNo", "sourceDigest"]);
   const row = input.source.row;
   if (!row || typeof row !== "object" || Array.isArray(row)) throw invalid("Legacy source row is invalid");
@@ -98,6 +105,14 @@ export function normalizeLegacyOrderReadInput(input: LegacyOrderReadInput) {
     dueCents: legacyMoneyCents(row.need_pay_money), paidCents: row.pay_is === "1" ? legacyMoneyCents(row.pay_money) : null, depositCents: legacyMoneyCents(row.deposit_amount) };
 }
 
+/** A related account flag is a same-capture observation, not a payment-time or ledger fact. */
+export function legacyAccountMetricSource(input: LegacyOrderReadInput) {
+  if (input.account.metricSourceFields === undefined) return null;
+  return { schema: "legacy-account-metric-source-v1", sourceSystem: "legacy_mysql_restore", sourceEntity: "la_rental_accounts",
+    legacyId: input.account.legacyId, sourceDigest: input.account.sourceDigest, orderEvidenceRef: input.source.evidenceRef,
+    fields: input.account.metricSourceFields };
+}
+
 /** Caller owns the transaction. No public import route or transaction engine. */
 export async function importLegacyOrderRead(client: PoolClient, input: LegacyOrderReadInput, actor: { id: string; sessionId: string; requestId: string }) {
   const normalized = normalizeLegacyOrderReadInput(input), operation = "order.legacy.read-import";
@@ -124,7 +139,8 @@ export async function importLegacyOrderRead(client: PoolClient, input: LegacyOrd
       [normalized.id,input.source.legacyId,input.source.digest,input.source.evidenceRef,r.order_sn,input.account.accountId,input.account.gameId,input.owner.userId,input.renter.userId,
         input.account.legacyId,input.account.sourceDigest,input.account.businessNo,input.owner.legacyId,input.owner.businessNo,input.owner.sourceDigest,input.renter.legacyId,input.renter.businessNo,input.renter.sourceDigest,
         Number(r.order_status),Number(r.pay_is),normalized.createdAt,normalized.paidAt,normalized.cancelledAt,normalized.completedAt,normalized.dueCents,normalized.paidCents,normalized.depositCents,JSON.stringify(r),normalized.bindingDigest,actor.id]);
-      await recordAudit(client, { actorType: "admin", actorId: actor.id, sessionId: actor.sessionId, requestId: actor.requestId, action: "order.legacy.read_imported", objectType: "rental_order", objectId: normalized.id, outcome: "SUCCESS", details: { sourceSystem: "legacy_mysql_restore", sourceEntity: "la_order", legacyId: input.source.legacyId, sourceDigest: input.source.digest, bindingDigest: normalized.bindingDigest, ruleOrigin: "LEGACY_ORDER", result: "IMPORTED" } });
+      const accountMetricSource = legacyAccountMetricSource(input);
+      await recordAudit(client, { actorType: "admin", actorId: actor.id, sessionId: actor.sessionId, requestId: actor.requestId, action: "order.legacy.read_imported", objectType: "rental_order", objectId: normalized.id, outcome: "SUCCESS", details: { sourceSystem: "legacy_mysql_restore", sourceEntity: "la_order", legacyId: input.source.legacyId, sourceDigest: input.source.digest, bindingDigest: normalized.bindingDigest, ruleOrigin: "LEGACY_ORDER", result: "IMPORTED", ...(accountMetricSource ? { accountMetricSource } : {}) } });
       return { status: 200, body: { orderId: normalized.id } };
     });
   return { ...result.body as { orderId: string }, replayed: result.replayed };

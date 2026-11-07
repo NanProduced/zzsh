@@ -1,10 +1,26 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import { lstatSync, readFileSync } from "node:fs";
+import { dirname, isAbsolute, relative, resolve } from "node:path";
 
 const requiredDatasetStages = ["core-and-funds", "display", "opening", "holdings", "paths", "readback"];
 const requiredGrowthStages = ["growth-prepare", "growth-apply", "growth-readback"];
 const loadPhases = ["users", "accounts", "orders", "invitationFacts", "financeHistory", "financeEmptyCoverage", "guaranteeHistory", "continuationEvidence", "liabilityDuties", "completedCommissions", "accountDisplay", "storedOpening", "skinHoldings"];
 const knownLoadStatuses = new Set(["LOCAL_DATASET_CORE_AND_FINANCIAL_DOMAINS_COMMITTED_REVIEW_REQUIRED", "LOCAL_DATASET_DISPLAY_ENRICHMENT_COMMITTED_REVIEW_REQUIRED", "LOCAL_DATASET_STORED_OPENINGS_COMMITTED_REVIEW_REQUIRED", "LOCAL_DATASET_SKIN_HOLDINGS_COMMITTED_REVIEW_REQUIRED", "FAILED_ROLLED_BACK"]);
+
+/** Growth cannot start until the reviewed, immutable old rule sources are available. */
+export function assertReviewedGrowthRuleFiles(files,{root=resolve("E:/zzsh/analysis"),read=readFileSync,stat=lstatSync}={}) {
+  assert(files&&typeof files==="object"&&!Array.isArray(files),"REVIEWED_OLD_RULE_FILES_REQUIRED");
+  const entries=Object.entries(files),seen=new Set();assert(entries.length>0&&entries.length<=16,"REVIEWED_OLD_RULE_FILES_REQUIRED");
+  for(const [file,digest] of entries){
+    assert(isAbsolute(file)&&/\.java$/i.test(file)&&/^[a-f0-9]{64}$/.test(digest??""),"REVIEWED_OLD_RULE_FILES_INVALID");
+    const absolute=resolve(file),rel=relative(root,absolute),key=absolute.toLowerCase();
+    assert(rel&&!rel.startsWith("..")&&!isAbsolute(rel)&&!seen.has(key),"REVIEWED_OLD_RULE_FILES_INVALID");seen.add(key);
+    for(let at=absolute;at!==dirname(at);at=dirname(at))assert(!stat(at).isSymbolicLink(),"REVIEWED_OLD_RULE_FILE_UNSAFE");
+    assert(stat(absolute).isFile()&&createHash("sha256").update(read(absolute)).digest("hex")===digest,"REVIEWED_OLD_RULE_FILE_CHANGED");
+  }
+  return true;
+}
 
 function buildDigest(buildFiles) {
   if (!buildFiles || typeof buildFiles !== "object" || Array.isArray(buildFiles)) return null;
@@ -75,7 +91,8 @@ export function assertNoWriteRetryLineage({ input, originalInput, originalReceip
 export function assertRoundBootstrap(input, actorProof, evidence) {
   const target = input.target, binding = input.bootstrapEvidence;
     const sameTarget = (value, database = true) => value && String(value.oid ?? value.resourceOid) === target.oid && value.nonce === target.nonce
-    && (!database || value.database === "zzsh_test_regression");
+    && (!database || value.database === "zzsh_test_regression")
+    && (!target.instance || JSON.stringify(value.instance ?? null) === JSON.stringify(target.instance));
   const fail = "ROUND_BOOTSTRAP_TARGET_OR_EVIDENCE_MISMATCH";
     const runtimeEvidence = evidence.runtime ?? {};
     const actualEvidence = runtimeEvidence.actualResource ?? evidence.build?.actualResource;
@@ -102,7 +119,12 @@ export function assertRoundBootstrap(input, actorProof, evidence) {
     && evidence.schema.finalOrdinal >= 157 && evidence.schema.commitAck === true && evidence.schema.migrationExit?.code === 0
     && evidence.schema.readbackRollbackAck === true && evidence.schema.readbackClientClosed === true
     && /^[a-f0-9]{64}$/.test(evidence.schema.journalSha256 ?? "") && /^[a-f0-9]{64}$/.test(evidence.schema.historySha256 ?? "");
-  assert(target.bootstrapReservation === "ROUND06_BOOTSTRAP_RESERVED" ? finalRound06Schema
+  const finalRound07Schema = target.instance && evidence.schema?.status === "CLEAN_SCHEMA_INSTALLED" && sameTarget(evidence.schema, false)
+    && evidence.schema.finalOrdinal >= 160 && evidence.schema.commitAck === true && evidence.schema.migrationAck === true
+    && evidence.schema.readbackRollbackAck === true && evidence.schema.readbackClientClosed === true && evidence.schema.unlockAck === true && evidence.schema.maintenanceClosed === true
+    && /^[a-f0-9]{64}$/.test(evidence.schema.journalSha256 ?? "") && /^[a-f0-9]{64}$/.test(evidence.schema.historySha256 ?? "");
+  assert(target.bootstrapReservation === "ROUND07_BOOTSTRAP_RESERVED" ? finalRound07Schema
+    : target.bootstrapReservation === "ROUND06_BOOTSTRAP_RESERVED" ? finalRound06Schema
     : evidence.schema?.status === "CLEAN_SCHEMA_INSTALLED" && sameTarget(evidence.schema, false), fail + ":schema");
   assert.deepEqual(evidence.schema.hashes, target.schemaHashes, fail + ":schema");
   assert(Array.isArray(evidence.administrators) && evidence.administrators.length === 2, fail + ":administrators");
@@ -114,6 +136,7 @@ export function assertRoundBootstrap(input, actorProof, evidence) {
     const originResource = origin?.resource;
     const originOid = originResource?.oid ?? originResource?.resourceOid, originNonce = originResource?.nonce ?? origin?.initialization?.nonce;
     assert(originResource?.database === "zzsh_test_regression" && String(originOid) === target.oid && originNonce === target.nonce
+      && (!target.instance || JSON.stringify(originResource?.instance ?? null) === JSON.stringify(target.instance))
       && (!reference?.serverBinding || origin?.initialization?.imProvisioner === false && origin.initialization.imIdentityRepository === false && origin.initialization.imAppId === null)
       && row.status === "FORMAL_INITIALIZATION_COMPLETED" && sameTarget(row.target) && row.serverBindingSha256 === originSha256
       && row.finalReadbackRollbackAck === true && row.maintenanceClosed === true && row.unlock === true && row.oldAdminRowsImported === false, fail + ":" + stage);
@@ -146,7 +169,8 @@ export function assertRoundBootstrap(input, actorProof, evidence) {
 /** Offline assessment: historical artifacts prove their recorded run, not current target state. */
 export function assessRoundEvidence({ input, inputSha256, actorProof, receipt, checkpoint, readback, expected, growth, checkpointInput = input, checkpointActorProof = actorProof, requireStageAcks = true, requireReadback = true, requireGrowth = true }) {
   const issues = [], target = input.target;
-  const sameTarget = value => value && String(value.oid) === target.oid && value.nonce === target.nonce;
+  const sameTarget = value => value && String(value.oid) === target.oid && value.nonce === target.nonce
+    && (!target.instance || JSON.stringify(value.instance ?? null) === JSON.stringify(target.instance));
   if (!receipt || receipt.schema !== "zzsh.local-round-receipt.v1" || receipt.inputSha256 !== inputSha256
     || receipt.datasetSha256 !== input.dataset.sha256 || !sameTarget(receipt.target)
     || JSON.stringify(receipt.target?.schemaHashes) !== JSON.stringify(target.schemaHashes)
@@ -179,8 +203,15 @@ export function assessRoundEvidence({ input, inputSha256, actorProof, receipt, c
     || !knownLoadStatuses.has(checkpoint.status)) {
     issues.push("ROUND_CHECKPOINT_UNCONFIRMED");
   } else {
+    const excludedGuarantee = checkpointInput.target?.bootstrapReservation === "ROUND07_BOOTSTRAP_RESERVED"
+      && checkpoint.fundsSupplement?.coverage?.guarantees?.policyExcluded === true
+      && ["selected", "planned", "writer"].every(key => checkpoint.fundsSupplement.coverage.guarantees[key] === 0)
+      && checkpoint.fundsSupplement.coverage.guarantees.listingDeposit?.targetRows === 0
+      && checkpoint.generatedPhases?.guaranteeHistory?.rows === 0
+      && checkpoint.generatedPhases.guaranteeHistory.sha256 === createHash("sha256").update("[]").digest("hex");
     for (const phase of loadPhases) {
       const value = checkpoint.phases?.[phase];
+      if (phase === "guaranteeHistory" && !value && excludedGuarantee) continue;
       if (!value?.complete || value.quarantined !== 0 || !Number.isSafeInteger(value.nextIndex)) issues.push("ROUND_PHASE_INCOMPLETE:" + phase);
     }
     const counts = { users: expected?.dataset?.domains?.users?.ready, accounts: expected?.dataset?.domains?.accounts?.ready,
@@ -200,6 +231,13 @@ export function assessRoundEvidence({ input, inputSha256, actorProof, receipt, c
       holdings: checkpoint?.skinHoldingsPreparation?.ready, paths: expected?.paths?.accounts })) {
       if (!Number.isSafeInteger(count) || readback[domain]?.expected !== count || readback[domain]?.matched !== count) issues.push("ROUND_READBACK_COUNT_DRIFT:" + domain);
     }
+    const empty=checkpoint?.generatedPhases?.financeEmptyCoverage;
+    if(empty?.schema==="zzsh.empty-coverage-chunks.v1" && (readback.emptyFinancialCoverage?.sourceRebuilt!==true
+      ||readback.emptyFinancialCoverage.expected!==empty.rows||readback.emptyFinancialCoverage.readable!==empty.rows
+      ||readback.emptyFinancialCoverage.actual!==empty.rows||readback.emptyFinancialCoverage.chunks!==empty.chunks?.length)) issues.push("ROUND_EMPTY_COVERAGE_READBACK_UNCONFIRMED");
+    const guarantee=checkpoint?.fundsSupplement?.coverage?.guarantees;
+    if(guarantee?.policyExcluded===true && (readback.ownerGuaranteeHistory?.policyExcluded!==true
+      ||readback.ownerGuaranteeHistory.expected!==0||readback.ownerGuaranteeHistory.actual!==0)) issues.push("ROUND_GUARANTEE_EXCLUSION_READBACK_UNCONFIRMED");
   }
   const dataset = issues.length === 0 ? "PASS" : "INCOMPLETE";
   if (!requireGrowth) return { status: issues.length ? "INCOMPLETE" : "COMPLETE", dataset, growth: "NOT_ASSESSED", issues };
@@ -236,12 +274,61 @@ export function assertResumeLineage({ input, previousInput, previousInputSha256,
   }
   assert(previousInput.target?.oid === input.target.oid && previousInput.target?.nonce === input.target.nonce
     && previousInput.target?.migrationRoleOid === input.target.migrationRoleOid
+    && JSON.stringify(previousInput.target?.instance ?? null) === JSON.stringify(input.target?.instance ?? null)
     && JSON.stringify(previousInput.target?.schemaHashes) === JSON.stringify(input.target.schemaHashes)
     && (previousInput.strictBatch === true) === (input.strictBatch === true), fail + ":target");
   const baseline = assessRoundEvidence({ input: previousInput, inputSha256: previousInputSha256, actorProof: previousActorProof,
     receipt: previousReceipt, checkpoint, expected, requireStageAcks: false, requireReadback: false, requireGrowth: false });
   assert(baseline.status === "COMPLETE", "ROUND_RESUME_ORIGINAL_CHECKPOINT_UNCONFIRMED");
   return { status: "ORIGINAL_COMPLETE_CHECKPOINT_BOUND", previousInputSha256, datasetSha256: input.dataset.sha256, oid: input.target.oid, nonce: input.target.nonce };
+}
+
+/** A readback repair may change only the explicitly sealed scripts; every other byte stays original. */
+export function assertReadbackRecoveryOverlay(manifest,{input,previousReceipt,originalFiles,observedFiles,scriptDir,proofSha256}) {
+  const fail="ROUND_READBACK_RECOVERY_OVERLAY_INVALID",changed=["local-funds-plan.mjs","local-round-contract.mjs","readback-local-dataset.mjs","run-local-round.mjs"].sort();
+  assert(input?.target?.bootstrapReservation==="ROUND07_BOOTSTRAP_RESERVED" && input.resume?.schema==="zzsh.local-round-growth-resume.v1"
+    && manifest?.schema==="zzsh.round07-readback-recovery-overlay.v1" && manifest.scriptDir===scriptDir
+    && manifest.previousInputSha256===input.resume.previousInput?.sha256 && manifest.previousReceiptSha256===input.resume.previousReceipt?.sha256
+    && manifest.checkpointSha256===input.resume.checkpoint?.sha256 && manifest.dependencyProofSha256===proofSha256
+    && previousReceipt?.status==="STOPPED_PRESERVE_ORIGINAL_KEYS_AND_RECEIPTS" && previousReceipt.failure?.stage==="readback"
+    && !previousReceipt.stages?.some(row=>row?.name==="growth-apply") && Array.isArray(manifest.changed)
+    && JSON.stringify([...manifest.changed].sort())===JSON.stringify(changed),fail);
+  const expectedStages=["core-and-funds","display","opening","holdings","paths"],stages=previousReceipt.stages??[];
+  assert(stages.length===6&&expectedStages.every((name,index)=>stages[index]?.name===name&&stages[index].status==="ACK"&&stages[index].code===0&&stages[index].signal===null)
+    &&stages[5]?.name==="readback"&&stages[5].status==="INTENT"&&stages[5].code!==0,fail);
+  const names=Object.keys(originalFiles??{}).sort();
+  assert(names.length>0&&JSON.stringify(Object.keys(manifest.files??{}).sort())===JSON.stringify(names)
+    &&JSON.stringify(Object.keys(observedFiles??{}).sort())===JSON.stringify(names),fail);
+  for(const name of names){const row=manifest.files[name],actual=observedFiles[name],original=originalFiles[name];
+    assert(row?.before===original&&row.after===actual&&/^[a-f0-9]{64}$/.test(actual??"")
+      &&(changed.includes(name)?actual!==original:actual===original),fail);
+  }
+  return {status:"READBACK_RECOVERY_OVERLAY_BOUND",changed:changed.length};
+}
+
+/** A failed read-only growth preparation can be retried only with its original evidence intact. */
+export function assertGrowthRuleRetry({input,previousInput,previousReceipt,summary,readback,rulesEvidence}) {
+  const fail="ROUND_GROWTH_RULE_RETRY_UNCONFIRMED",refs=input.resume?.previousRepair;
+  assert(refs&&["input","receipt","summary","readback","rulesEvidence"].every(key=>/^[a-f0-9]{64}$/.test(refs[key]?.sha256??""))
+    &&previousReceipt?.schema==="zzsh.local-round-receipt.v1"&&previousReceipt.mode==="RESUME_GROWTH"
+    &&previousReceipt.status==="STOPPED_PRESERVE_ORIGINAL_KEYS_AND_RECEIPTS"&&previousReceipt.inputSha256===refs.input.sha256
+    &&previousReceipt.failure?.stage==="growth-prepare"&&previousReceipt.stages?.length===3
+    &&["schema-preflight","readback"].every((name,index)=>previousReceipt.stages[index]?.name===name&&previousReceipt.stages[index].status==="ACK"&&previousReceipt.stages[index].code===0&&previousReceipt.stages[index].signal===null)
+    &&previousReceipt.stages[2]?.name==="growth-prepare"&&previousReceipt.stages[2].status==="INTENT"&&previousReceipt.stages[2].code!==0
+    &&previousReceipt.stages[1].metrics?.evidenceSha256===refs.readback.sha256,fail);
+  assert(summary?.schema==="zzsh.local-growth-round-receipt.v1"&&summary.mode==="--prepare"&&summary.inputSha256===refs.input.sha256
+    &&summary.status==="STOPPED_PRESERVE_ORIGINAL_EVIDENCE"&&summary.error?.message==="REVIEWED_OLD_RULE_FILES_REQUIRED"
+    &&summary.readOnlyRollbackAck===true&&summary.readOnlyClientClosed===true&&summary.fundsWrites===0
+    &&summary.oid===input.target.oid&&summary.nonce===input.target.nonce,fail);
+  assert(readback?.schema==="zzsh.local-dataset-readback.v1"&&readback.status==="CORE_SOURCE_TARGET_EXACT_READBACK_PASSED"
+    &&readback.differenceCount===0&&readback.targetWrites===0&&readback.rollbackConfirmed===true&&readback.lockReleased===true&&readback.connectionsClosed===true
+    &&readback.sourceDatasetSha256===input.dataset.sha256&&readback.resource?.oid===input.target.oid&&readback.resource?.nonce===input.target.nonce
+    &&JSON.stringify(readback.resource?.instance??null)===JSON.stringify(input.target.instance??null),fail);
+  assert.deepEqual(input.growth?.oldRuleFiles,rulesEvidence?.growth?.oldRuleFiles,fail);
+  const normalized=structuredClone(input);normalized.out=previousInput.out;normalized.resume.readbackRepair=previousInput.resume?.readbackRepair;
+  delete normalized.resume.previousRepair;delete normalized.growth.oldRuleFiles;
+  assert.deepEqual(normalized,previousInput,fail);
+  return {status:"READ_ONLY_GROWTH_PREPARATION_FAILURE_BOUND",fundsWrites:0};
 }
 
 /** A continuation proves fresh reads and growth stages; it never relabels old INTENTs as ACKs. */
@@ -270,10 +357,11 @@ export async function verifyResumeSchema(client, { target, migrationName }) {
   try {
     await client.connect();
     await client.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY"); begun = true;
-    const identity = (await client.query(`SELECT current_database() database,d.oid::text,pg_get_userbyid(d.datdba) owner,shobj_description(d.oid,'pg_database') marker,current_setting('zzsh.regression_run') nonce,current_user role,r.oid::text role_oid,current_setting('transaction_read_only') read_only,r.rolsuper,r.rolcreatedb,r.rolcreaterole,r.rolbypassrls FROM pg_database d JOIN pg_roles r ON r.rolname=current_user WHERE d.datname=current_database()`)).rows[0];
+    const identity = (await client.query(`SELECT current_database() database,d.oid::text,pg_get_userbyid(d.datdba) owner,shobj_description(d.oid,'pg_database') marker,current_setting('zzsh.regression_run') nonce,current_user role,r.oid::text role_oid,current_setting('transaction_read_only') read_only,r.rolsuper,r.rolcreatedb,r.rolcreaterole,r.rolbypassrls,(SELECT system_identifier::text FROM pg_control_system()) system_identifier FROM pg_database d JOIN pg_roles r ON r.rolname=current_user WHERE d.datname=current_database()`)).rows[0];
     assert(identity?.database === "zzsh_test_regression" && identity.oid === target.oid && identity.nonce === target.nonce
       && identity.owner === "zzsh" && identity.marker === "zzsh:regression-test:v1" && identity.role === migrationName
       && identity.role_oid === target.migrationRoleOid && identity.read_only === "on"
+      && (!target.instance || identity.system_identifier === target.instance.systemIdentifier)
       && identity.rolsuper === false && identity.rolcreatedb === false && identity.rolcreaterole === false && identity.rolbypassrls === false, "ROUND_RESUME_LIVE_TARGET_CHANGED");
     const hashes = (await client.query("SELECT hash FROM zzsh_business_meta.migrations ORDER BY id")).rows.map(row => row.hash);
     assert.deepEqual(hashes, target.schemaHashes, "ROUND_RESUME_LIVE_SCHEMA_CHANGED");

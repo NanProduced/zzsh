@@ -10,8 +10,9 @@ import { matchesLegacyBankSource, prepareLegacyBankBinding, validLegacyBankDetai
 
 type BankRow = Readonly<{ user_id: string; name: string | null; card_no: string | null; create_time: string; update_time: string }>;
 type Source = Readonly<{ sourceReceiptSha256: string; sourceDumpSha256: string; sourceCutoff: string }>;
-export type LocalBankTarget = Readonly<{ round: 6; host: "127.0.0.1"; port: 55432; database: string; databaseOid: number;
-  marker: string; nonce: string; owner: string; ownerOid: number; runtimeUser: string; runtimeRoleOid: number }>;
+export type LocalBankTarget = Readonly<{ round: 6 | 7; host: "127.0.0.1"; port: 55432 | 55433; database: string; databaseOid: number;
+  marker: string; nonce: string; owner: string; ownerOid: number; runtimeUser: string; runtimeRoleOid: number;
+  instance?: Readonly<{host:"127.0.0.1";port:55432|55433;systemIdentifier:string}>; migrationUser?:string; migrationRoleOid?:number }>;
 export type LocalBankOperator = Readonly<{ userId: string; sessionId: string }>;
 type Row = Readonly<{ source: LegacyBankSource; name: string; cardNo: string }>;
 export type LegacyBankImportPlan = Readonly<{ kind: "CONTROLLED_LEGACY_BANK_IMPORT_PLAN" }>;
@@ -28,7 +29,11 @@ export function prepareLegacyBankImport(rows: readonly BankRow[], userSourceDige
   target: LocalBankTarget, operator: LocalBankOperator): LegacyBankImportPlan {
   if (!Array.isArray(rows) || !(userSourceDigests instanceof Map) || !source || !hash(source.sourceReceiptSha256) || !hash(source.sourceDumpSha256)
     || typeof source.sourceCutoff !== "string" || !Number.isFinite(Date.parse(source.sourceCutoff))
-    || !target || target.round !== 6 || target.host !== "127.0.0.1" || ![55432,55433].includes(target.port) || process.env.NODE_ENV === "production"
+    || !target || ![6,7].includes(target.round) || target.host !== "127.0.0.1" || ![55432,55433].includes(target.port) || process.env.NODE_ENV === "production"
+    || target.round === 6 && target.port !== 55432
+    || target.round === 7 && (!target.instance || target.instance.host !== target.host || target.instance.port !== target.port || !/^[0-9]+$/.test(target.instance.systemIdentifier)
+      || typeof target.migrationUser !== "string" || !/^zzsh_[a-z0-9_]{1,55}$/.test(target.migrationUser) || target.migrationUser === target.runtimeUser
+      || !Number.isSafeInteger(target.migrationRoleOid) || target.migrationRoleOid! <= 0 || target.migrationRoleOid! > 4294967295 || target.migrationRoleOid === target.runtimeRoleOid)
     || !/^zzsh_test_[a-z0-9_]{1,48}$/.test(target.database) || !/^zzsh_[a-z0-9_]{1,55}$/.test(target.runtimeUser)
     || !/^zzsh:[a-z0-9-]+:v1$/.test(target.marker) || !/^[a-f0-9]{24}$/.test(target.nonce)
     || !/^zzsh(?:_[a-z0-9_]+)?$/.test(target.owner) || target.owner === target.runtimeUser
@@ -53,7 +58,7 @@ export function prepareLegacyBankImport(rows: readonly BankRow[], userSourceDige
     counts.ready++;
   }
   const token = Object.freeze({ kind: "CONTROLLED_LEGACY_BANK_IMPORT_PLAN" as const });
-  plans.set(token, { target: Object.freeze({ ...target }), operator: Object.freeze({ userId: operator.userId, sessionId: operator.sessionId }), source: Object.freeze({ sourceReceiptSha256: source.sourceReceiptSha256,
+  plans.set(token, { target: Object.freeze({ ...target, ...(target.instance ? {instance:Object.freeze({...target.instance})} : {}) }), operator: Object.freeze({ userId: operator.userId, sessionId: operator.sessionId }), source: Object.freeze({ sourceReceiptSha256: source.sourceReceiptSha256,
     sourceDumpSha256: source.sourceDumpSha256, sourceCutoff: new Date(source.sourceCutoff).toISOString() }), rows: selected, counts: Object.freeze(counts) });
   return token;
 }
@@ -94,7 +99,8 @@ export function legacyBankImportRequestId(plan: LegacyBankImportPlan, legacyUser
     const material = o.protection.keyFor(version); if (!(material instanceof Uint8Array) || material.byteLength !== 32) throw Error();
     secret = Buffer.from(material); derived = createHmac("sha256", secret).update("legacy-bank-import.recovery.key.v1").digest();
     return "bank-import_" + createHmac("sha256", derived).update(JSON.stringify(["legacy-bank-import.recovery.v1", value.target.databaseOid,
-      value.target.nonce, value.source.sourceReceiptSha256, value.source.sourceDumpSha256, legacyUserId])).digest("hex").slice(0, 32);
+      value.target.nonce, value.source.sourceReceiptSha256, value.source.sourceDumpSha256, legacyUserId,
+      ...(value.target.round === 7 ? [value.target.instance!.systemIdentifier] : [])])).digest("hex").slice(0, 32);
   } catch { throw unavailable("LEGACY_BANK_PLAN_KEY_UNAVAILABLE"); } finally { secret?.fill(0); derived?.fill(0); }
 }
 
@@ -108,18 +114,20 @@ export function releaseLegacyBankImportPlan(plan: LegacyBankImportPlan): void { 
 
 async function assertResource(c: PoolClient, plan: Plan, o: WithdrawalBankBindingOptions): Promise<void> {
   const connection = (c as PoolClient & { connectionParameters?: { host?: string; port?: number; database?: string; user?: string } }).connectionParameters;
-  if (c.getTransactionStatus() !== "T" || !connection || connection.host !== "127.0.0.1" || Number(connection.port) !== 55432
+  if (c.getTransactionStatus() !== "T" || !connection || connection.host !== "127.0.0.1" || Number(connection.port) !== plan.target.port
     || connection.database !== plan.target.database || connection.user !== plan.target.runtimeUser
     || o.database !== plan.target.database || o.runtimeUser !== plan.target.runtimeUser || process.env.NODE_ENV === "production") throw unavailable("LEGACY_BANK_RESOURCE_MISMATCH");
   const row = (await c.query(`SELECT d.oid::text AS oid,current_database() AS name,current_user AS role,r.oid::text AS role_oid,
     pg_get_userbyid(d.datdba) AS owner,d.datdba::text AS owner_oid,shobj_description(d.oid,'pg_database') AS marker,
-    current_setting('zzsh.regression_run',true) AS nonce,r.rolsuper,r.rolcreatedb,r.rolcreaterole,r.rolbypassrls,
+    current_setting('zzsh.regression_run',true) AS nonce,r.rolsuper,r.rolcreatedb,r.rolcreaterole,r.rolinherit,r.rolbypassrls,
+    (SELECT system_identifier::text FROM pg_control_system()) AS system_identifier,
     to_regclass('zzsh_order.withdrawal_bank_binding') IS NOT NULL AS ready
     FROM pg_database d JOIN pg_roles r ON r.rolname=current_user WHERE d.datname=current_database()`)).rows[0];
   const t = plan.target;
   if (!row || Number(row.oid) !== t.databaseOid || row.name !== t.database || row.role !== t.runtimeUser || Number(row.role_oid) !== t.runtimeRoleOid
     || row.owner !== t.owner || Number(row.owner_oid) !== t.ownerOid || row.marker !== t.marker || row.nonce !== t.nonce || row.ready !== true
-    || row.rolsuper !== false || row.rolcreatedb !== false || row.rolcreaterole !== false || row.rolbypassrls !== false) throw unavailable("LEGACY_BANK_RESOURCE_MISMATCH");
+    || (t.round === 7 && row.system_identifier !== t.instance?.systemIdentifier)
+    || row.rolsuper !== false || row.rolcreatedb !== false || row.rolcreaterole !== false || row.rolinherit !== false || row.rolbypassrls !== false) throw unavailable("LEGACY_BANK_RESOURCE_MISMATCH");
   await assertBusinessRuntimeIdentity(c, { database: { name: t.database, user: t.runtimeUser, runtimeUser: t.runtimeUser } });
 }
 

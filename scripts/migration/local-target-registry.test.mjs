@@ -6,6 +6,7 @@ import test from "node:test";
 import {
   assertLiveTarget,
   assertRuntimeRoleCompanion,
+  assertReadbackTarget,
   loadRegisteredTarget,
   normalizeRegisteredTarget,
 } from "./local-target-registry.mjs";
@@ -34,6 +35,8 @@ const live = (over = {}) => ({
   is_super: "false",
   can_create_db: "false",
   can_create_role: "false",
+  can_inherit: "false",
+  can_bypass_rls: "false",
   system_identifier: null,
   ...over,
 });
@@ -86,8 +89,15 @@ test("a registry cannot point outside loopback or at an unusable identity", () =
     [{ ...legacy, roles: { migration: "same", runtime: "same" } }, /TARGET_ROLES_MUST_DIFFER/],
     [{ ...legacy, roles: { migration: "zzsh", runtime: "zzsh_regression_runtime" } }, /TARGET_MIGRATION_ROLE_MUST_DIFFER_FROM_OWNER/],
     [{ ...legacy, lockKey: "lock" }, /TARGET_LOCK_KEY_INVALID/],
+    [{ ...legacy, pendingReset: false }, /TARGET_PENDING_RESET_INVALID/],
   ];
   for (const [body, expected] of cases) assert.throws(() => normalizeRegisteredTarget(body), expected);
+});
+
+test("pending reset remains visible to every registered-target caller", () => {
+  const target = normalizeRegisteredTarget({ ...legacy, pendingReset: {oid: "123", at: "2026-11-06T00:00:00Z"} });
+  assert.equal(target.pendingReset.oid, "123");
+  assert.equal(normalizeRegisteredTarget(legacy).pendingReset, null);
 });
 
 test("every live mismatch fails with its own code", () => {
@@ -102,6 +112,9 @@ test("every live mismatch fails with its own code", () => {
     [{ is_super: "true" }, /TARGET_MIGRATION_ROLE_MUST_NOT_BE_SUPERUSER/],
     [{ can_create_db: "true" }, /TARGET_MIGRATION_ROLE_MUST_NOT_CREATE_DB/],
     [{ can_create_role: "true" }, /TARGET_MIGRATION_ROLE_MUST_NOT_CREATE_ROLE/],
+    [{ is_super: undefined }, /TARGET_MIGRATION_ROLE_MUST_NOT_BE_SUPERUSER/],
+    [{ can_inherit: "true" }, /TARGET_MIGRATION_ROLE_MUST_NOT_INHERIT/],
+    [{ can_bypass_rls: "true" }, /TARGET_MIGRATION_ROLE_MUST_NOT_BYPASS_RLS/],
   ];
   for (const [over, expected] of cases) {
     assert.throws(
@@ -109,6 +122,25 @@ test("every live mismatch fails with its own code", () => {
       expected,
     );
   }
+});
+
+test("recorded migration role OID must match the live role", () => {
+  const target = normalizeRegisteredTarget({ ...isolated, roles: { migration: {name:"zzsh_regression_migration",oid:"16389"}, runtime: {name:"zzsh_regression_runtime",oid:"16390"} } });
+  assert.equal(assertLiveTarget(target, live({system_identifier:isolated.instance.systemIdentifier})).oid, "3375850");
+  assert.throws(() => assertLiveTarget(target, live({system_identifier:isolated.instance.systemIdentifier,role_oid:"16390"})), /TARGET_ROLE_OID_MISMATCH/);
+  assert.throws(() => assertLiveTarget(target, live({system_identifier:isolated.instance.systemIdentifier,role_oid:undefined})), /TARGET_ROLE_OID_MISMATCH/);
+  assert.equal(assertLiveTarget(target, live({system_identifier:isolated.instance.systemIdentifier,role:"zzsh_regression_runtime",role_oid:"16390"}), "runtime").role, "zzsh_regression_runtime");
+  assert.throws(() => assertLiveTarget(target, live({system_identifier:isolated.instance.systemIdentifier,role:"zzsh_regression_runtime",role_oid:"16389"}), "runtime"), /TARGET_ROLE_OID_MISMATCH/);
+});
+
+test("readback binds registry, checkpoint instance and the migration credential OID", () => {
+  const target=normalizeRegisteredTarget({...isolated,roles:{migration:{name:'zzsh_regression_migration',oid:'16389'},runtime:{name:'zzsh_regression_runtime',oid:'16390'}}});
+  const binding={database:target.database,oid:target.oid,nonce:target.nonce,instance:target.instance};
+  const credential={migration:{name:target.migrationRole,oid:'16389'}};
+  assert.doesNotThrow(()=>assertReadbackTarget(target,binding,credential));
+  assert.throws(()=>assertReadbackTarget(target,{...binding,instance:{...binding.instance,systemIdentifier:'999'}},credential),/RESOURCE_BINDING_CHANGED/);
+  assert.throws(()=>assertReadbackTarget(target,binding,{migration:{...credential.migration,oid:'16390'}}),/RESOURCE_BINDING_CHANGED/);
+  assert.throws(()=>assertReadbackTarget({...target,pendingReset:{oid:target.oid}},binding,credential),/RESOURCE_BINDING_CHANGED/);
 });
 
 test("the runtime companion role must be a separate non-privileged login", () => {

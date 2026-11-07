@@ -69,13 +69,14 @@ test("cleanup failure still closes both pools and preserves the primary error", 
 
 const skinMetadataColumns = ["rarity_evidence", "is_collectible", "default_state", "media_source"];
 
-function skinAclFixture(metadata: readonly string[]) {
+function skinAclFixture(metadata: readonly string[], categoryPresent = true) {
   const writes: string[] = [];
   const pool = { query: async (sql: string, args: unknown[] = []) => {
     if (sql.includes("count(*)")) {
       const names = args[0] as string[];
       return { rows: [{ count: names.includes("owner_kind") ? 7 : names.filter(name => metadata.includes(name)).length }] };
     }
+    if (sql.includes("attname='category_id'")) return { rows: [{ present: categoryPresent }] };
     if (sql.includes("AS present")) return { rows: [{ present: true }] };
     writes.push(sql); return { rows: [] };
   } } as unknown as Parameters<typeof configureSkinIdentityPrivileges>[0];
@@ -105,6 +106,14 @@ test("skin ACL grants new metadata only for the complete schema and keeps derive
     assert.ok(update.includes("owner_kind"));
     assert.ok(insert.includes("aliases"));
   }
+});
+
+test("skin ACL drops the removed category column but keeps all existing identity restrictions", async () => {
+  const f=skinAclFixture(skinMetadataColumns,false);await configureSkinIdentityPrivileges(f.pool,"fixture_runtime");
+  assert.equal(f.writes.length,1);assert.doesNotMatch(f.writes[0]!,/category_id/);
+  assert.match(f.writes[0]!,/GRANT SELECT ON zzsh_supply\.skin/);
+  assert.match(f.writes[0]!,/REVOKE INSERT,UPDATE,DELETE,TRUNCATE ON zzsh_supply\.skin/);
+  assert.match(f.writes[0]!,/GRANT UPDATE \([^)]*owner_kind/);
 });
 
 test("skin ACL refuses every partial metadata schema before issuing an ACL write", async () => {

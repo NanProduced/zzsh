@@ -4,7 +4,7 @@ import { closeSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, re
 import { dirname, isAbsolute, join, parse, resolve } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
-import { parseSourceCaptureLine, sourceJsonLine, readSourceRows, assertSourceSupplementFields } from "./local-source-adapter.mjs";
+import { parseSourceCaptureLine, sourceJsonLine, readSourceRows, assertSourceSupplementFields, LEGACY_DISTRIBUTION_CAPTURE_FIELDS } from "./local-source-adapter.mjs";
 import { assertAccountExtraColumns } from "./capture-legacy-account-extra.mjs";
 const TABLES = {
     tradePolicy: { table: "la_system_config", fields: ["id", "type", "name", "value"], where: "(type='trade' AND name='advanceOrderSetRatio') OR (type='expendConfig' AND name IN ('barrettBullet','bullet','awm','armor','helmet','coffee','experienceCard','barrettBulletSale','bulletSale','awmSale','armorSale','helmetSale','coffeeSale','experienceCardSale'))" },
@@ -17,19 +17,18 @@ const TABLES = {
     refunds: { table: "la_refund_record", fields: ["id", "user_id", "order_id", "order_sn", "order_type", "sn", "refund_status", "order_amount", "refund_amount", "transaction_id", "refund_way", "create_time", "update_time"] },
     pays: { table: "la_pay_order", fields: ["id", "order_id", "order_type", "pay_is", "pay_way", "pay_money", "pay_order_sn", "pay_time", "transaction_id"] },
     distribution: { table: "la_distribution", fields: ["id", "user_id", "level_id", "is_distribution", "is_freeze", "is_delete"] },
-    distributionOrders: { table: "la_distribution_order", fields: ["id", "user_id", "order_id", "order_type", "sn", "status", "earnings", "ratio", "level_id", "level", "is_delete", "create_time", "update_time", "settle_time"] },
+    distributionOrders: { table: "la_distribution_order", fields: [...LEGACY_DISTRIBUTION_CAPTURE_FIELDS] },
     games: { table: "la_sg_game", fields: ["id", "game_name", "game_status", "is_delete", "type_id"] },
 };
 // Capture display, holdings and business continuation facts in the original snapshot, not a later supplement.
 TABLES.users.fields.push("ancestor_relation", "avatar", "sex", "channel", "delete_time", "commission_rate", "is_deposit_free", "is_checked");
 TABLES.accounts.fields.push("title", "description", "create_time", "agent_skin", "insure_lv", "insure_code", "grading_lv", "login_way", "vit_lv", "bear_lv", "dive_lv", "character_lv", "province", "city", "secret_kd", "processing_time_start", "processing_time_end", "ratio_type", "ban_record", "face_is_self", "level6_helmet_num", "level6_armor_num", "barrett_bullet_num", "coffee_num", "is_demulan", "is_sayyid", "awm_number", "helmet", "armor", "is_next_season_pass", "price_per", "price_vip", "extra_goods_total_price", "extra_goods_total_price_vip", "order_sn", "pay_is", "pay_money", "pay_time", "return_is", "team_id", "service_id", "info_source", "punishment_img_url", "personal_info_screenshot_url", "secret_service_screenshot_url", "advanced_weapon_screenshot_url", "high_risk_owner");
 TABLES.accounts.expressions = { high_risk_owner: "(SELECT is_high_risk FROM la_user WHERE id=la_rental_accounts.user_id)" };
-TABLES.orders.fields.push("leshua_order_id", "yj_order_id", "delete_time", "add_order_sn", "add_transaction_id", "add_money", "is_pay_add", "advance_time", "compensation", "expend_money", "expend_ratio", "extra_haff", "extra_money", "service_id", "is_dismiss", "disagree_count", "form_options", "form_rule", "form_data", "form_data_format", "expend_remark", "user_remark", "shop_remark");
+TABLES.orders.fields.push("leshua_order_id", "yj_order_id", "delete_time", "add_order_sn", "add_transaction_id", "add_money", "is_pay_add", "advance_time", "compensation", "share_money", "expend_money", "expend_ratio", "extra_haff", "extra_money", "service_id", "is_dismiss", "disagree_count", "form_options", "form_rule", "form_data", "form_data_format", "expend_remark", "user_remark", "shop_remark");
 TABLES.distribution.fields.push("distribution_time", "create_time", "update_time", "delete_time");
 TABLES.withdraws.fields.push("update_time", "delete_time", "payment_no", "transfer_time", "global_no");
 TABLES.pays.fields.push("create_time");
 TABLES.refunds.fields.push("refund_type");
-TABLES.distributionOrders.fields.push("order_goods_id", "goods_id", "sku_id", "delete_time");
 TABLES.skinDictionaryTypes = { table: "la_dict_type", fields: ["id", "dict_name", "dict_type", "dict_remark", "dict_status", "is_delete", "create_time", "update_time", "delete_time"] };
 TABLES.skinDictionaryData = { table: "la_dict_data", fields: ["id", "type_id", "name", "value", "remark", "sort", "status", "is_delete", "create_time", "update_time", "delete_time"] };
 TABLES.distributionLevels = { table: "la_distribution_level", fields: ["id", "name", "weights", "self_ratio", "first_ratio", "second_ratio", "update_type", "is_default", "is_delete", "create_time", "update_time", "delete_time"] };

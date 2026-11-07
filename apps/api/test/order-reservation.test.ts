@@ -1,4 +1,4 @@
-import { admitTestDatabase, assertFreshRegressionRun, fixtureAgreementAcceptance, ISOLATED_BUSINESS_DATA_TRUNCATE } from "./database-test-support";
+import { admitTestDatabase, assertEmptyIsolatedBusinessData, assertFreshRegressionRun, fixtureAgreementAcceptance } from "./database-test-support";
 import { lockPublishingAccount, type SupplyGate } from "../src/supply/publishing";
 import { createLocalMediaStorage } from "../src/supply/media";
 import sharp from "sharp";
@@ -386,24 +386,6 @@ function orderKey(): Record<string, string> {
 /** The shared target is reset per suite; nothing is truncated in place. */
 async function requireFreshTarget(pool: Pool): Promise<void> {
   await assertFreshRegressionRun(pool);
-}
-
-async function assertEmptyIsolatedBusinessData(pool: Pool): Promise<void> {
-  const tables = [...ISOLATED_BUSINESS_DATA_TRUNCATE.matchAll(/"([a-z_]+)"\."([A-Za-z0-9_]+)"/g)];
-  assert.ok(tables.length > 0, "isolated cleanup table inventory is missing");
-  const names = tables.map(([, schema, table]) => `"${schema}"."${table}"`);
-  const existing = new Set((await pool.query<{ name: string }>(
-    `SELECT name FROM unnest($1::text[]) AS target(name) WHERE to_regclass(name) IS NOT NULL`, [names],
-  )).rows.map(row => row.name));
-  // Staged migrations may not yet have created every table in the current source inventory.
-  const present = tables.filter((_, index) => existing.has(names[index]!));
-  assert.ok(present.length > 0, "no isolated cleanup tables exist at this migration stage");
-  const counts = await pool.query(present.map(([, schema, table]) =>
-    `SELECT '${schema}.${table}' AS table_name, count(*)::int AS row_count FROM "${schema}"."${table}"`).join(" UNION ALL "));
-  const occupied = counts.rows.filter((row) => row.row_count !== 0);
-  console.log("order cleanup-target preflight", JSON.stringify({ inventory: tables.length, tables: counts.rowCount,
-    notPresentAtStage: names.filter(name => !existing.has(name)), occupied }));
-  assert.deepEqual(occupied, [], "registered test target contains rows the suite would truncate; refusing to continue");
 }
 
 async function activateStaff(base: string, username: string, temporaryPassword: string): Promise<Staff> {

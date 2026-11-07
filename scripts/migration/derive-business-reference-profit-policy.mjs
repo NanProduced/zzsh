@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, statSync, writeFileSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const sha = value => createHash('sha256').update(value).digest('hex');
 const requireThat = (ok, code) => { if (!ok) throw new Error(code); };
@@ -196,7 +196,8 @@ requireThat((args.length===(fresh?14:12)) && ['--private-root','--source','--dec
     timestampBasis:'PACKAGE_SEED_TIME_NOT_TARGET_ACTIVATION_ACK',
     sourceRawUnchanged:false,previousGeneration:built.previousGeneration,generation:built.generation,
     addedPriceVersions:1,addedReleases:1,addedPriceLines:built.addedLines,changedFiles:built.changedFiles,
-    previousPriceAndReleaseRowsPreserved:true,gameCurrentReleasePointerChanged:true,
+    previousPriceAndReleaseRowsPreserved:!fresh,priceHistoryDisposition:fresh?'FRESH_DERIVED_ONLY':'SOURCE_HISTORY_RETAINED',
+    derivationToolSha256:sha(readFileSync(fileURLToPath(import.meta.url))),gameCurrentReleasePointerChanged:true,
     tables:manifest.tables.map((source,i)=>({table:source.schema+'.'+source.table,sourceRows:source.rows,
       derivedRows:derivedDescriptors[i].rows,sourceSha256:source.sha256,derivedSha256:derivedDescriptors[i].sha256})),
     sourceFileWrites:0,dbConnections:0,channelCalls:0};

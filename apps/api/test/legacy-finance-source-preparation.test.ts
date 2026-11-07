@@ -71,6 +71,12 @@ test('completed distribution keeps original order type/level/status and never us
  const p=prepareFrozenFinanceObservation('HISTORICAL_DISTRIBUTION',raw,subject);assert.equal(p.row.sourceStatus,2);assert.equal(p.row.level,2);assert.equal(p.row.orderId,71);assert.equal(p.row.sourceNumber,raw.sn);assert.equal(p.financialSource,'OBSERVATION_ONLY');assert.throws(()=>prepareFrozenFinanceObservation('HISTORICAL_DISTRIBUTION',{...raw,level:'4'},subject));
 });
 
+test('distribution observation keeps every captured field and remains source-only',()=>{
+ const raw={id:'501',sn:'FIXTURE',user_id:'11',order_type:'1',order_id:'71',order_goods_id:'72',goods_id:'73',sku_id:'74',earnings:'1.10',level_id:'1',level:'2',ratio:'5.00',status:'3',settle_time:'0',is_delete:'1',create_time:'1779460000',update_time:'1779469800',delete_time:'1779469900'};
+ const result=prepareFrozenFinanceObservation('HISTORICAL_DISTRIBUTION',raw,subject),evidence=result.row.rawSource as {canonical:string;digest:string};
+ assert.deepEqual(JSON.parse(evidence.canonical),raw);assert.equal(evidence.digest,createHash('sha256').update(canonicalize(raw)).digest('hex'));assert.equal(result.financialSource,'OBSERVATION_ONLY');
+});
+
 test('source-only preview retains the exact numeric frozen distribution and missing ratio without inventing identity audit or import authority',()=>{
  const mapped={userId:subject.userId,legacyUserId:subject.legacyUserId},raw={id:501,sn:'FIXTURE-DIST',user_id:11,order_type:1,order_id:71,earnings:'1.10',level:2,level_id:1,status:2,settle_time:1779469800,is_delete:0,create_time:1779460000,update_time:1779469800};
  const p=previewFrozenFinanceObservation('HISTORICAL_DISTRIBUTION',raw,mapped);assert.equal(p.row.sourceRatio,null);assert.equal(p.row.sourceStatus,2);assert.equal(p.row.amount,'1.10');assert.equal(p.executable,false);assert.equal(p.identityAudit,'UNBOUND');assert.equal((p.row.rawSource as any).canonical,canonicalize(raw));assert.equal((p.row.rawSource as any).digest,createHash('sha256').update(canonicalize(raw)).digest('hex'));

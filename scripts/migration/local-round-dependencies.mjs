@@ -13,8 +13,9 @@ export const ROUND_MODULES = ["auth/identity-subject", "auth/membership-growth",
   "legacy-load/legacy-account-seam", "legacy-load/legacy-skin-holdings", "legacy-load/legacy-path-records", "order/legacy-continuation-evidence", "order/legacy-continuation-model",
   "order/legacy-growth-consumption", "order/legacy-liability-intake", "order/legacy-order-read", "profile/profile-avatar", "profile/profile-avatar-presets",
   "supply/content-hash", "supply/legacy-listing-read", "supply/legacy-observation", "supply/legacy-user-migration"];
-const scriptNames = ["load-local-dataset.mjs", "local-load-checkpoint.mjs", "local-source-adapter.mjs", "local-target-finance.mjs", "local-funds-plan.mjs", "local-target-display.mjs", "local-target-opening.mjs",
-  "local-target-holdings.mjs", "load-legacy-path-accounts.mjs", "readback-local-dataset.mjs", "run-local-growth.mjs", "local-growth-plan.mjs"];
+export const ROUND_SCRIPTS = ["run-local-round.mjs", "local-round-contract.mjs", "local-round-dependencies.mjs", "load-local-dataset.mjs", "local-load-checkpoint.mjs", "full-source-scope.mjs", "local-target-registry.mjs", "local-key-set.mjs", "local-source-adapter.mjs", "local-target-finance.mjs", "local-funds-plan.mjs", "local-opening-proof.mjs", "local-target-display.mjs", "local-target-opening.mjs",
+  "local-target-holdings.mjs", "local-target-contact-append.mjs", "load-legacy-path-accounts.mjs", "readback-local-dataset.mjs", "run-local-growth.mjs", "local-growth-plan.mjs", "../local-auth.mjs"];
+const RUNNER_SCRIPTS = ["run-local-round.mjs", "local-round-contract.mjs", "local-round-dependencies.mjs", "local-load-checkpoint.mjs", "full-source-scope.mjs", "local-target-registry.mjs", "../local-auth.mjs"];
 const sha = value => createHash("sha256").update(value).digest("hex"), fileSha = file => sha(readFileSync(file));
 const childCode = String.raw`const fs=require('fs'),path=require('path'),crypto=require('crypto'),{createRequire}=require('module');
 const api=path.resolve(process.argv[1]),root=path.resolve(process.argv[2]),mods=JSON.parse(process.argv[3]),r=createRequire(path.join(api,'app.js')),sr=createRequire(path.join(root,'scripts/migration/load-local-dataset.mjs'));
@@ -31,7 +32,7 @@ export function inspectRoundDependencyLayout({ apiDist, bundlePath, bundleSha256
   const bundle = JSON.parse(readFileSync(bundlePath)), manifest = JSON.parse(readFileSync(buildManifestPath));
   assert(bundle.finalBuildManifestSha256 === buildManifestSha256 && bundle.finalSourceManifestSha256 === manifest.sourceSnapshotManifestSha256
     && manifest.sourceSnapshotManifestSha256 === sourceManifestSha256 && fileSha(sourceManifestPath) === sourceManifestSha256
-    && manifest.schema === "zzsh.round06-preview-build.v1" && typeof manifest.layout?.apiDistDir === "string" && Array.isArray(manifest.components?.api), "ROUND_DEPENDENCY_BUILD_LINEAGE_CHANGED");
+    && ["zzsh.round06-preview-build.v1", "zzsh.round07-preview-build.v1"].includes(manifest.schema) && typeof manifest.layout?.apiDistDir === "string" && Array.isArray(manifest.components?.api), "ROUND_DEPENDENCY_BUILD_LINEAGE_CHANGED");
   const sourceRoot = resolve(dirname(buildManifestPath), "source"), scriptDir = join(sourceRoot, "scripts/migration"), moduleDirs = [join(sourceRoot, "apps/api/node_modules"), join(sourceRoot, "node_modules")];
   for (const directory of [sourceRoot, scriptDir, ...moduleDirs]) assert(existsSync(directory) && lstatSync(directory).isDirectory() && !lstatSync(directory).isSymbolicLink(), "ROUND_DEPENDENCY_DIRECTORY_REQUIRED");
   const prefix = manifest.layout.apiDistDir.replaceAll("\\", "/") + "/", finalBuild = Object.fromEntries(manifest.components.api.filter(row => row.path?.startsWith(prefix) && row.path.endsWith(".js")).map(row => [row.path.slice(prefix.length), row.sha256]));
@@ -40,17 +41,29 @@ export function inspectRoundDependencyLayout({ apiDist, bundlePath, bundleSha256
   for (const file of ["package-lock.json", "node_modules/.package-lock.json"]) {
     const entry = manifest.components.api.find(row => row.path === file); assert(entry && fileSha(join(sourceRoot, file)) === entry.sha256, "ROUND_DEPENDENCY_LOCK_CHANGED:" + basename(file));
   }
-  const scriptFiles = Object.fromEntries(scriptNames.map(file => [file, fileSha(join(scriptDir, file))]));
-  for (const [file, digest] of Object.entries(scriptFiles)) assert.equal(fileSha(join(sourceSnapshot, "scripts/migration", file)), digest, "ROUND_DEPENDENCY_SNAPSHOT_SCRIPT_CHANGED:" + file);
+  const scriptFiles = Object.fromEntries(ROUND_SCRIPTS.map(file => [file, fileSha(join(scriptDir, file))]));
+  for (const [file, digest] of Object.entries(scriptFiles)) {
+    const source = join(scriptDir,file), snapshot = join(sourceSnapshot, "scripts/migration", file);
+    assert(lstatSync(source).isFile() && !lstatSync(source).isSymbolicLink() && lstatSync(snapshot).isFile() && !lstatSync(snapshot).isSymbolicLink(), "ROUND_DEPENDENCY_SCRIPT_UNSAFE:" + file);
+    assert.equal(fileSha(snapshot), digest, "ROUND_DEPENDENCY_SNAPSHOT_SCRIPT_CHANGED:" + file);
+  }
   return { apiDist: resolve(apiDist), sourceRoot, sourceSnapshot: resolve(sourceSnapshot), sourceManifestSha256, scriptDir, moduleDirs, bundleSha256, buildManifestSha256, scriptFiles };
 }
 
-export function probeRoundDependencies(layout) {
+/** The invoking process must be the sealed runner too, not merely its spawned children. */
+export function assertBoundRunnerScripts(runnerDir,scriptFiles) {
+  for (const file of RUNNER_SCRIPTS) {
+    const path=join(runnerDir,file),stat=lstatSync(path);
+    assert(stat.isFile()&&!stat.isSymbolicLink()&&fileSha(path)===scriptFiles[file],"ROUND_DEPENDENCY_RUNNER_CHANGED:"+file);
+  }
+}
+
+export function probeRoundDependencies(layout, spawn = spawnSync) {
   const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => /^(PATH|PATHEXT|SYSTEMROOT|WINDIR|COMSPEC|TEMP|TMP)$/i.test(key)));
   env.NODE_PATH = layout.moduleDirs.join(process.platform === "win32" ? ";" : ":");
-  const result = spawnSync(process.execPath, ["-e", childCode, layout.apiDist, layout.sourceRoot, JSON.stringify(ROUND_MODULES)], { cwd: layout.sourceRoot, env, encoding: "utf8", windowsHide: true, timeout: 30000, maxBuffer: 2 * 1024 * 1024 });
+  const result = spawn(process.execPath, ["-e", childCode, layout.apiDist, layout.sourceRoot, JSON.stringify(ROUND_MODULES)], { cwd: layout.sourceRoot, env, encoding: "utf8", windowsHide: true, timeout: 30000, maxBuffer: 2 * 1024 * 1024 });
   assert(result.status === 0 && result.signal === null, "ROUND_DEPENDENCY_CLOSURE_NOT_LOADABLE");
-  const output = JSON.parse(result.stdout); assert(Array.isArray(output.files) && output.files.length > 0 && output.entrypoints === modules.length, "ROUND_DEPENDENCY_PROBE_INVALID");
+  const output = JSON.parse(result.stdout); assert(Array.isArray(output.files) && output.files.length > 0 && output.entrypoints === ROUND_MODULES.length, "ROUND_DEPENDENCY_PROBE_INVALID");
   return { ...layout, nodeVersion: process.version, closureFiles: output.files, closureSha256: sha(JSON.stringify(output.files)), entrypoints: output.entrypoints };
 }
 
@@ -71,9 +84,9 @@ async function main() {
   const args = process.argv.slice(2), option = name => { const i = args.indexOf(name); return i < 0 ? undefined : args[i + 1]; };
   if (!args.includes("--probe")) { console.log(JSON.stringify({ status: "PLAN_ONLY", required: ["--probe", "--api-dist", "--bundle", "--bundle-sha", "--build-manifest", "--build-manifest-sha", "--source-snapshot", "--source-manifest", "--source-manifest-sha", "--out"], connections: 0, targetWrites: 0 })); return; }
   const out = resolve(option("--out") ?? ""), restricted = resolve("E:/zzsh-local-state/restricted");
-  assert(dirname(out).toLowerCase() === restricted.toLowerCase() && /^round06-dependency-proof-[a-z0-9-]+$/i.test(basename(out)) && !existsSync(out), "NEW_DEPENDENCY_PROOF_REQUIRED");
+  assert(dirname(out).toLowerCase() === restricted.toLowerCase() && /^round0[67]-dependency-proof-[a-z0-9-]+$/i.test(basename(out)) && !existsSync(out), "NEW_DEPENDENCY_PROOF_REQUIRED");
   const started = performance.now(), startedAt = new Date().toISOString(), layout = inspectRoundDependencyLayout({ apiDist: resolve(option("--api-dist") ?? ""), bundlePath: resolve(option("--bundle") ?? ""), bundleSha256: option("--bundle-sha"), buildManifestPath: resolve(option("--build-manifest") ?? ""), buildManifestSha256: option("--build-manifest-sha"), sourceSnapshot: resolve(option("--source-snapshot") ?? ""), sourceManifestPath: resolve(option("--source-manifest") ?? ""), sourceManifestSha256: option("--source-manifest-sha") });
-  const proof = { schema: "zzsh.round06-dependency-proof.v1", status: "ROUND_DEPENDENCY_CLOSURE_VERIFIED", startedAt, ...probeRoundDependencies(layout), finishedAt: new Date().toISOString(), wallMs: performance.now() - started, connections: 0, targetWrites: 0 };
+  const proof = { schema: basename(out).toLowerCase().startsWith("round07-") ? "zzsh.round07-dependency-proof.v1" : "zzsh.round06-dependency-proof.v1", status: "ROUND_DEPENDENCY_CLOSURE_VERIFIED", startedAt, ...probeRoundDependencies(layout), finishedAt: new Date().toISOString(), wallMs: performance.now() - started, connections: 0, targetWrites: 0 };
   writePrivate(join(out, "proof.json"), proof);
   console.log(JSON.stringify({ status: proof.status, entrypoints: proof.entrypoints, dependencyFiles: proof.closureFiles.length, closureSha256: proof.closureSha256, wallMs: proof.wallMs, proof: join(out, "proof.json"), sha256: fileSha(join(out, "proof.json")), connections: 0, targetWrites: 0 }));
 }

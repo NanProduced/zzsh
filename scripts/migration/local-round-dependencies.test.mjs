@@ -4,8 +4,23 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { assertRoundDependencyProof, ROUND_MODULES } from "./local-round-dependencies.mjs";
+import { assertRoundDependencyProof, assertBoundRunnerScripts, probeRoundDependencies, ROUND_MODULES } from "./local-round-dependencies.mjs";
 const ROUND_MODULE_COUNT = ROUND_MODULES.length;
+
+test("dependency probe validates the actual module count and rejects incomplete results", () => {
+  const layout = { apiDist:"api", sourceRoot:"source", moduleDirs:["a","b"] };
+  const spawn = (_bin,_args) => ({status:0,signal:null,stdout:JSON.stringify({files:[["node_modules/pkg/index.js","a".repeat(64)]],entrypoints:ROUND_MODULE_COUNT})});
+  assert.equal(probeRoundDependencies(layout,spawn).entrypoints,ROUND_MODULE_COUNT);
+  assert.throws(() => probeRoundDependencies(layout,()=>({status:0,signal:null,stdout:JSON.stringify({files:[["x","a"]],entrypoints:0})})),/ROUND_DEPENDENCY_PROBE_INVALID/);
+});
+
+test("the invoking runner and its direct imports match the sealed scripts", t => {
+  const root = mkdtempSync(join(tmpdir(),"round-runner-")), dir=join(root,"migration");t.after(()=>rmSync(root,{recursive:true}));mkdirSync(dir);
+  const files=["run-local-round.mjs","local-round-contract.mjs","local-round-dependencies.mjs","local-load-checkpoint.mjs","full-source-scope.mjs","local-target-registry.mjs","../local-auth.mjs"];
+  const digest={};for(const file of files){writeFileSync(join(dir,file),file);digest[file]=createHash("sha256").update(file).digest("hex");}
+  assert.doesNotThrow(()=>assertBoundRunnerScripts(dir,digest));writeFileSync(join(dir,"local-target-registry.mjs"),"changed");
+  assert.throws(()=>assertBoundRunnerScripts(dir,digest),/ROUND_DEPENDENCY_RUNNER_CHANGED/);
+});
 
 test("dependency proof rejects changed bytes, changed script lineage and path escape", t => {
   const root = mkdtempSync(join(tmpdir(), "round-deps-")); t.after(() => rmSync(root, { recursive: true }));

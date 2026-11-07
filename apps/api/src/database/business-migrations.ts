@@ -555,11 +555,14 @@ export async function configureSkinIdentityPrivileges(pool: Pick<Pool, "query">,
   if (columns === 0 && !owner && metadataCount === 0) return;
   if (columns !== 7 || !owner) throw new Error("Skin identity schema is incomplete; runtime privileges not finalized");
   const metadataColumns = metadataCount === 4 ? ",rarity_evidence,is_collectible,default_state,media_source" : "";
+  const categoryPresent = (await pool.query(`SELECT EXISTS(SELECT 1 FROM pg_attribute WHERE attrelid=to_regclass('zzsh_supply.skin') AND attname='category_id' AND attnum>0 AND NOT attisdropped) AS present`)).rows[0]?.present;
+  if (typeof categoryPresent !== "boolean") throw new Error("Skin category schema inventory is incomplete");
+  const categoryColumn = categoryPresent ? ",category_id" : "";
   await pool.query(`
     REVOKE INSERT,UPDATE,DELETE,TRUNCATE ON zzsh_supply.skin FROM ${role};
     GRANT SELECT ON zzsh_supply.skin TO ${role};
-    GRANT INSERT (id,game_id,code,name,category_id,rarity_code,enabled,form_visible,media_id,sort_order,source_namespace,source_field,source_token,aliases${metadataColumns}) ON zzsh_supply.skin TO ${role};
-    GRANT UPDATE (name,category_id,rarity_code,enabled,form_visible,media_id,sort_order,source_namespace,source_field,source_token,aliases,owner_kind,owner_id,firearm_id,base_name${metadataColumns}) ON zzsh_supply.skin TO ${role};
+    GRANT INSERT (id,game_id,code,name${categoryColumn},rarity_code,enabled,form_visible,media_id,sort_order,source_namespace,source_field,source_token,aliases${metadataColumns}) ON zzsh_supply.skin TO ${role};
+    GRANT UPDATE (name${categoryColumn},rarity_code,enabled,form_visible,media_id,sort_order,source_namespace,source_field,source_token,aliases,owner_kind,owner_id,firearm_id,base_name${metadataColumns}) ON zzsh_supply.skin TO ${role};
     REVOKE INSERT,UPDATE,DELETE,TRUNCATE ON zzsh_supply.skin_owner FROM ${role};
     GRANT SELECT ON zzsh_supply.skin_owner TO ${role};
     GRANT INSERT (id,game_id,kind,code,name,enabled) ON zzsh_supply.skin_owner TO ${role};

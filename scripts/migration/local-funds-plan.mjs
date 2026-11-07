@@ -17,6 +17,32 @@ const pick=(row,fields)=>Object.fromEntries(fields.filter(k=>Object.hasOwn(row,k
  */
 export const EMPTY_COVERAGE_CHUNK_SIZE = 400;
 export function emptyCoverageChunkDigest(rows) { return sha(rows.map(row => row.sourceId).join("\n")); }
+
+/** Compare a newly derived source chunk with the exact immutable bytes the loader consumed. */
+export function assertRebuiltEmptyCoverageChunk(descriptor, rebuilt, savedBytes) {
+  if (!descriptor || !rebuilt || !Buffer.isBuffer(savedBytes) || !Array.isArray(rebuilt.entries)
+    || !/^[a-f0-9]{64}$/.test(descriptor.digest ?? "") || descriptor.digest !== rebuilt.digest
+    || descriptor.sourceId !== "empty-" + descriptor.digest.slice(0, 40) || descriptor.sourceId !== rebuilt.sourceId
+    || !Number.isSafeInteger(descriptor.rows) || descriptor.rows < 1 || descriptor.rows > EMPTY_COVERAGE_CHUNK_SIZE
+    || descriptor.rows !== rebuilt.rows || descriptor.rows !== rebuilt.entries.length
+    || emptyCoverageChunkDigest(rebuilt.entries) !== descriptor.digest
+    || JSON.stringify(Object.entries(descriptor.domains ?? {}).sort()) !== JSON.stringify(Object.entries(rebuilt.domains ?? {}).sort())
+    || sha(savedBytes) !== sha(JSON.stringify(rebuilt.entries))) throw Error("EMPTY_COVERAGE_REBUILT_CHUNK_DIFFERS");
+}
+
+/** Validate both ordered chunk coverage and the frozen aggregate before declaring a readback. */
+export function assertRebuiltEmptyCoverageManifest(saved, rebuilt, checkedChunks) {
+  if (saved?.schema !== "zzsh.empty-coverage-chunks.v1" || rebuilt?.schema !== saved.schema
+    || saved.chunkSize !== EMPTY_COVERAGE_CHUNK_SIZE || rebuilt.chunkSize !== saved.chunkSize
+    || !Array.isArray(saved.chunks) || saved.chunks.length !== checkedChunks || rebuilt.chunks !== checkedChunks
+    || !Number.isSafeInteger(saved.rows) || rebuilt.rows !== saved.rows
+    || !/^[a-f0-9]{64}$/.test(saved.digest ?? "") || rebuilt.digest !== saved.digest
+    || sha(saved.chunks.map(chunk => chunk.digest).join("\n")) !== saved.digest
+    || new Set(saved.chunks.map(chunk => chunk.digest)).size !== saved.chunks.length
+    || saved.chunks.reduce((sum, chunk) => sum + chunk.rows, 0) !== saved.rows
+    || JSON.stringify(Object.entries(saved.domainRows ?? {}).sort()) !== JSON.stringify(Object.entries(rebuilt.domainRows ?? {}).sort()))
+    throw Error("EMPTY_COVERAGE_REBUILT_MANIFEST_DIFFERS");
+}
 export function createEmptyCoverageSink({ onChunk = null } = {}) {
   const buffered = [], chunks = [], collected = [], subjects = new Set(), kinds = {}, domainRows = {};
   const flush = () => {

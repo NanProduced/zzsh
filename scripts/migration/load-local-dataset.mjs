@@ -93,7 +93,7 @@ function createOutput() {
 const registered = loadRegisteredTarget(option("--credentials"));
 
 let state = existsSync(statePath) ? JSON.parse(readFileSync(statePath)) : null;
-const binding = { datasetSha256: sha(manifestBytes), database: registered.database, oid: expectedOid, nonce: expectedNonce, actorId: actor.id, sessionId: actor.sessionId };
+const binding = { datasetSha256: sha(manifestBytes), database: registered.database, oid: expectedOid, nonce: expectedNonce, actorId: actor.id, sessionId: actor.sessionId, ...(registered.instance ? {instance: registered.instance} : {}) };
 function assertCheckpointBinding(checkpoint) {
     if (recover && !checkpoint?.pending) throw new Error("ORIGINAL_PENDING_CHECKPOINT_REQUIRED");
     if (!checkpoint) return;
@@ -138,9 +138,12 @@ const credentialFile = option("--credentials");
 const round06Reservation = "ROUND06_BOOTSTRAP_RESERVED";
 const initialReservation = registered.protectedDataset;
 const round06 = initialReservation?.status === round06Reservation || initialReservation?.bootstrapReservation === round06Reservation;
+const registeredReservation = initialReservation?.bootstrapReservation ?? initialReservation?.status;
 function assertResource(resource, checkpoint) {
     if (resource.database !== binding.database || resource.oid !== expectedOid || resource.nonce !== expectedNonce || resource.pendingReset)
         throw new Error("RES:"+JSON.stringify([resource.database,binding.database,resource.oid,expectedOid,resource.nonce,expectedNonce,resource.pendingReset]));
+    const instance = resource.instance ? {host:resource.instance.host ?? "127.0.0.1",port:Number(resource.instance.port ?? 55432),systemIdentifier:resource.instance.systemIdentifier ?? null} : null;
+    if (JSON.stringify(instance) !== JSON.stringify(registered.instance) || String(resource.lockKey ?? "806006") !== registered.lockKey) throw new Error("REGISTERED_INSTANCE_CHANGED");
     const reservation = resource.protectedDataset;
     const strictRound = status => isStrictRoundReservation(status) || status === round06Reservation;
     if ((strictRound(reservation?.bootstrapReservation) || reservation?.status === round06Reservation) && !strictBatch) throw new Error("CHECKPOINT_STRICT_BATCH_CHANGED");
@@ -160,10 +163,10 @@ function assertRegisteredRole(resource) {
     // The resolved target and the registry file read back for drift both reach here: one carries the
     // role name directly, the other still holds the raw roles block that is written back unchanged.
     const registeredRole = resource.migrationRole ?? resource.roles?.migration?.name;
-    const registeredRoleOid = resource.roles?.migration?.oid;
+    const registeredRoleOid = resource.migrationRoleOid ?? resource.roles?.migration?.oid;
     if (credentials.database !== binding.database || !credentials.migration?.name || !credentials.migration.oid
         || credentials.migration.name !== registeredRole
-        || (registeredRoleOid !== undefined && credentials.migration.oid !== registeredRoleOid))
+        || typeof registeredRoleOid !== "string" || credentials.migration.oid !== registeredRoleOid)
         throw new Error("REGISTERED_MIGRATION_CREDENTIAL_REQUIRED");
 }
 assertRegisteredRole(registered);
@@ -325,7 +328,7 @@ function protectDataset(resourceState, status) {
         resourceState.protectedDataset.additiveReports ??= {};
         resourceState.protectedDataset.additiveReports[state.binding.datasetSha256 + (numberOnly ? ":public-numbers" : ":contact-append")] = { status, report: statePath, sourceReviewRef: option("--source-review-ref") };
     } else resourceState.protectedDataset={manifestSha256:state.binding.datasetSha256,epoch:{oid:expectedOid,nonce:expectedNonce},reason:"REHEARSAL_REVIEW",status,report:statePath,
-        ...(strictBatch ? { bootstrapReservation: round06 ? round06Reservation : strictRoundReservation } : {})};
+        ...(strictBatch ? { bootstrapReservation: isStrictRoundReservation(registeredReservation) ? registeredReservation : strictRoundReservation } : {})};
     return resourceState;
 }
 resetRunCleanup();

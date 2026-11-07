@@ -1,4 +1,4 @@
-import { invalid } from "./supply-util";
+import { invalid,retiredSkinCategory } from "./supply-util";
 import { parsePublicListingSearch } from "./listing-query";
 import { DELTA_GRADING_DIVISIONS } from "./delta-rental";
 
@@ -47,7 +47,7 @@ export function parseListingFilters(v:unknown):ListingFilters {
   for(const key of ["vitality","bear"] as const)if(o[key]!==undefined){const r=checkedObject(o[key],"filters."+key,["min"]);f[key]={min:integer(r.min,"filters."+key+".min")};}
   if(o.regions!==undefined){const a=regions(o.regions,"filters.regions",20);if(a.length)f.regions=a;}
   if(o.serviceWindow!==undefined)f.serviceWindow=parseServiceWindow(o.serviceWindow);
-  if(o.skinGroups!==undefined){const a=unique(array(o.skinGroups,"filters.skinGroups",8).map(x=>{const r=checkedObject(x,"filters.skinGroups",["categoryId","ownerKind","ids","match"]);if(r.match!=="ANY"&&r.match!=="ALL")throw invalid("Invalid skin match","filters.skinGroups.match");if((r.categoryId===undefined)===(r.ownerKind===undefined))throw invalid("Choose one skin type or legacy category","filters.skinGroups");if(r.ownerKind!==undefined&&!["AGENT","MELEE_TYPE","FIREARM"].includes(r.ownerKind as string))throw invalid("Invalid skin type","filters.skinGroups.ownerKind");return {...(r.categoryId!==undefined?{categoryId:checkedId(r.categoryId,"filters.skinGroups.categoryId")}:{ownerKind:r.ownerKind as "AGENT"|"MELEE_TYPE"|"FIREARM"}),ids:ids(r.ids,"filters.skinGroups.ids",50),match:r.match as "ANY"|"ALL"};}),"filters.skinGroups",x=>"categoryId" in x?"category:"+x.categoryId:"type:"+x.ownerKind);const all=a.flatMap(g=>g.ids);if(all.length>50||new Set(all).size!==all.length)throw invalid("Duplicate or excessive skin IDs","filters.skinGroups.ids");const nonempty=a.filter(g=>g.ids.length);if(nonempty.length)f.skinGroups=nonempty;}
+  if(o.skinGroups!==undefined){const a=unique(array(o.skinGroups,"filters.skinGroups",8).map(x=>{const r=checkedObject(x,"filters.skinGroups",["categoryId","ownerKind","ids","match"]);if(r.categoryId!==undefined)throw retiredSkinCategory();if(r.match!=="ANY"&&r.match!=="ALL")throw invalid("Invalid skin match","filters.skinGroups.match");if(!["AGENT","MELEE_TYPE","FIREARM"].includes(r.ownerKind as string))throw invalid("Invalid skin type","filters.skinGroups.ownerKind");return {ownerKind:r.ownerKind as "AGENT"|"MELEE_TYPE"|"FIREARM",ids:ids(r.ids,"filters.skinGroups.ids",50),match:r.match as "ANY"|"ALL"};}),"filters.skinGroups",x=>"type:"+x.ownerKind);const all=a.flatMap(g=>g.ids);if(all.length>50||new Set(all).size!==all.length)throw invalid("Duplicate or excessive skin IDs","filters.skinGroups.ids");const nonempty=a.filter(g=>g.ids.length);if(nonempty.length)f.skinGroups=nonempty;}
   return f;
 }
 export function assertListingUrlBudget(raw:string){if(Buffer.byteLength(raw,"utf8")>LISTING_URL_BYTES)throw invalid("Query URL exceeds 8KiB","url");}

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { createReadStream, existsSync, lstatSync, mkdirSync, readFileSync, writeFileSync, appendFileSync } from "node:fs";
 import { createRequire } from "node:module";
-import { advisoryLockSql, loadRegisteredTarget } from "./local-target-registry.mjs";
+import { advisoryLockSql, assertLiveTarget, loadRegisteredTarget } from "./local-target-registry.mjs";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { writePrivate } from "../local-auth.mjs";
@@ -60,6 +60,7 @@ const credentialsFile = resolve(input.credentials), resource = loadRegisteredTar
 const database = resource.database, marker = resource.marker;
 assert.equal(resource.oid, target.oid);
 assert.equal(resource.nonce, target.nonce);
+assert.deepEqual(target.instance ?? null,resource.instance,"GROWTH_REGISTERED_INSTANCE_CHANGED");
 assert(!resource.pendingReset && resource.protectedDataset?.manifestSha256 === input.dataset.sha256 && resource.protectedDataset.epoch?.oid === target.oid && resource.protectedDataset.epoch?.nonce === target.nonce, "GROWTH_PROTECTED_SOURCE_TARGET_REQUIRED");
 const credentials = read(credentialsFile);
 assert.equal(credentials.database, database);
@@ -70,12 +71,13 @@ for (const role of ["migration", "runtime"]) {
 }
 assert.equal(credentials.migration.oid, target.migrationRoleOid);
 const summaryFile = join(out, "summary.json");
-const result = { schema: "zzsh.local-growth-round-receipt.v1", status: "STARTED", mode, inputSha256, datasetSha256: input.dataset.sha256, oid: target.oid, nonce: target.nonce, startedAt: new Date().toISOString(), queries: 0, retries: 0, fundsWrites: 0 };
+const result = { schema: "zzsh.local-growth-round-receipt.v1", status: "STARTED", mode, inputSha256, datasetSha256: input.dataset.sha256, oid: target.oid, nonce: target.nonce, ...(resource.instance?{instance:resource.instance}:{}), startedAt: new Date().toISOString(), queries: 0, retries: 0, fundsWrites: 0 };
 const save = () => writePrivate(summaryFile, result);
 const base = { host: resource.host, port: resource.port, statement_timeout: 30000, connectionTimeoutMillis: 3000, lock_timeout: 1000, application_name: "zzsh-local-growth-round" };
 const instrument = client => { const query = client.query.bind(client); client.query = (...a) => { result.queries++; return query(...a); }; return client; };
 async function identity(client, role, roleOid) {
-  const i = (await client.query(`SELECT current_database() database,d.oid::text,shobj_description(d.oid,'pg_database') marker,pg_get_userbyid(d.datdba) owner,current_setting('zzsh.regression_run') nonce,current_user role,r.oid::text role_oid,current_setting('transaction_read_only') read_only,pg_get_userbyid(c.relowner) coverage_owner,to_char(transaction_timestamp() AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') as_of FROM pg_database d JOIN pg_roles r ON r.rolname=current_user CROSS JOIN pg_class c WHERE d.datname=current_database() AND c.oid=to_regclass('zzsh_iam.membership_growth_legacy_coverage')`)).rows[0];
+  const i = (await client.query(`SELECT current_database() database,d.oid::text,shobj_description(d.oid,'pg_database') marker,pg_get_userbyid(d.datdba) owner,current_setting('zzsh.regression_run') nonce,current_user role,r.oid::text role_oid,current_setting('transaction_read_only') read_only,r.rolsuper::text is_super,r.rolcreatedb::text can_create_db,r.rolcreaterole::text can_create_role,r.rolinherit::text can_inherit,r.rolbypassrls::text can_bypass_rls,(SELECT system_identifier::text FROM pg_control_system()) system_identifier,pg_get_userbyid(c.relowner) coverage_owner,to_char(transaction_timestamp() AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') as_of FROM pg_database d JOIN pg_roles r ON r.rolname=current_user CROSS JOIN pg_class c WHERE d.datname=current_database() AND c.oid=to_regclass('zzsh_iam.membership_growth_legacy_coverage')`)).rows[0];
+  assertLiveTarget(resource,i,"runtime");
   assert(i && i.database === database && i.oid === target.oid && i.marker === marker && i.nonce === target.nonce && i.owner === "zzsh" && i.role === role && (roleOid === undefined || i.role_oid === roleOid) && i.read_only === "on", "LIVE_GROWTH_RESOURCE_CHANGED");
   return i;
 }
@@ -206,7 +208,7 @@ try {
       assert.equal(sha(bytes), secret.sha256, "GROWTH_MAINTENANCE_SECRET_CHANGED");
       password = bytes.toString("utf8").trim();
     }
-    const migration = { ...base, user, password }, lock = instrument(new Client({ ...migration, database: "postgres" })), pool = new Pool({ ...migration, database, max: 1 });
+    const migration = { ...base, user, password }, lock = instrument(new Client({ ...migration, database: resource.maintenanceDatabase })), pool = new Pool({ ...migration, database, max: 1 });
     pool.on("connect", instrument);
     const cli = mod("auth/membership-growth-legacy-cli"), maintenance = mod("auth/membership-growth-legacy-maintenance"), port = mod("auth/membership-growth-legacy-store").createLegacyGrowthCoveragePort();
     const originalActorId = actor.id;

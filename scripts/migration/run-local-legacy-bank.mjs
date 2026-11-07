@@ -4,8 +4,10 @@ import { createRequire } from "node:module";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { writePrivate } from "../local-auth.mjs";
-import { assertBankNoSymlinkPath, assertFinalLegacyBankSchema, assertWindowsBankAcl, relativeBankSecretPath, requireFinalR06ApiDist } from "./prepare-local-legacy-bank-input.mjs";
+import { assertBankNoSymlinkPath, assertFinalLegacyBankSchema, makeR07UpgradedBankSchemaEvidence, assertLegacyBankKeyringProof, assertLegacyBankSourceProof, assertWindowsBankAcl, relativeBankSecretPath, requireFinalR06ApiDist, requireFinalR07ApiDist } from "./prepare-local-legacy-bank-input.mjs";
 import { bankCleanupPassed, describeLocalLegacyBankRun, executeLocalLegacyBankRun, prepareLocalLegacyBankRun, readbackLocalLegacyBankRun, recordBankCleanup, releaseLocalLegacyBankRun } from "./local-legacy-bank-runner.mjs";
+import { assertLiveTarget, loadRegisteredTarget, targetIdentityQuery } from "./local-target-registry.mjs";
+import { assertDistributionCoreReadback, assertRegisteredDistributionTarget } from "./local-distribution-qualification-plan.mjs";
 
 const args = process.argv.slice(2), option = name => { const i = args.indexOf(name); return i < 0 ? undefined : args[i + 1]; };
 const modes = ["--prepare", "--execute", "--readback"].filter(mode => args.includes(mode));
@@ -39,7 +41,7 @@ function jsFiles(dir, prefix = "") {
 async function main() {
   if (modes.length !== 1 || process.version !== "v24.20.0") fail();
   const mode = modes[0], inputSha256 = option("--input-sha"), input = pinned(protectedPath(option("--input")), inputSha256);
-  if (input.schema !== "zzsh.local-legacy-bank-input.v1" || input.target?.round !== 6 || input.lockId !== 806006
+  if (input.schema !== "zzsh.local-legacy-bank-input.v1" || ![6,7].includes(input.target?.round) || input.lockId !== 806006
     || input.target.database !== "zzsh_test_regression" || !hex(input.buildSha256) || !hex(input.schemaJournalSha256)
     || !hex(input.schemaHistorySha256) || !input.buildFiles || !input.toolFiles) fail();
   const out = protectedPath(option("--out"), true); if (existsSync(out)) fail(); failureOut = out;
@@ -52,22 +54,29 @@ async function main() {
   const operator = { userId: actor.id ?? actor.actorId ?? actor.userId, sessionId: actor.sessionId };
   if (actor.realm !== "admin" || !operator.userId || !operator.sessionId) fail();
 
-  const registryDir = resolve(secretRoot, "local-postgresql/regression_test"), registry = JSON.parse(readFileSync(join(registryDir, "resource.json"))),
-    credentials = JSON.parse(readFileSync(join(registryDir, "credentials.json"))), t = input.target;
+  const r07=input.target.round===7, credentialsPath=r07 ? protectedPath(input.credentials?.path) : join(secretRoot,"local-postgresql/regression_test/credentials.json");
+  if(r07){assertWindowsBankAcl(dirname(credentialsPath));assertWindowsBankAcl(credentialsPath);if(!hex(input.credentials?.sha256)||sha(readFileSync(credentialsPath))!==input.credentials.sha256)fail();}
+  const registryDir = dirname(credentialsPath), registry = JSON.parse(readFileSync(join(registryDir, "resource.json"))),
+    credentials = JSON.parse(readFileSync(credentialsPath)), registered=loadRegisteredTarget(credentialsPath), t = input.target;
   if (registry.database !== t.database || Number(registry.oid) !== t.databaseOid || registry.nonce !== t.nonce || registry.marker !== t.marker
     || registry.pendingReset || credentials.database !== t.database || credentials.runtime?.name !== t.runtimeUser
     || Number(credentials.runtime?.oid) !== t.runtimeRoleOid || credentials.runtime?.name !== registry.roles?.runtime?.name
     || String(credentials.runtime?.oid) !== String(registry.roles?.runtime?.oid) || credentials.migration?.name !== "zzsh_regression_migration"
-    || credentials.migration?.name !== registry.roles?.migration?.name || String(credentials.migration?.oid) !== String(registry.roles?.migration?.oid)) fail();
-  const apiDir = requireFinalR06ApiDist(root, input.apiDist);
+    || credentials.migration?.name !== registry.roles?.migration?.name || String(credentials.migration?.oid) !== String(registry.roles?.migration?.oid)
+    || registered.lockKey!==String(input.lockId) || registered.maintenanceDatabase!=="postgres" || r07 && JSON.stringify(t.instance)!==JSON.stringify(registered.instance)) fail();
+  const apiDir = r07 ? requireFinalR07ApiDist(root,input.apiDist) : requireFinalR06ApiDist(root, input.apiDist);
   const require = createRequire(join(root, "apps/api/package.json"));
   function verifyFiles() {
-    requireFinalR06ApiDist(root, apiDir);
+    const current=loadRegisteredTarget(credentialsPath);
+    if(current.pendingReset || JSON.stringify([current.instance,current.database,current.oid,current.nonce,current.marker,current.owner,current.runtimeRole,current.runtimeRoleOid,current.migrationRole,current.migrationRoleOid,current.lockKey])
+      !==JSON.stringify([registered.instance,registered.database,registered.oid,registered.nonce,registered.marker,registered.owner,registered.runtimeRole,registered.runtimeRoleOid,registered.migrationRole,registered.migrationRoleOid,registered.lockKey])
+      || r07 && sha(readFileSync(credentialsPath))!==input.credentials.sha256)fail();
+    if(r07)requireFinalR07ApiDist(root,apiDir);else requireFinalR06ApiDist(root, apiDir);
     if (!Object.keys(input.buildFiles).length || JSON.stringify(jsFiles(apiDir).sort()) !== JSON.stringify(Object.keys(input.buildFiles).sort())) fail();
     for (const [name, digest] of Object.entries(input.buildFiles)) {
       if (name.startsWith("/") || name.includes("\\") || name.split("/").includes("..") || !name.endsWith(".js") || !hex(digest) || sha(readFileSync(join(apiDir, name))) !== digest) fail();
     }
-    const tools = ["run-local-legacy-bank.mjs", "prepare-local-legacy-bank-input.mjs", "local-legacy-bank-source.mjs", "local-legacy-bank-runner.mjs", "local-source-adapter.mjs", "verify-legacy-listed-policy-dump.mjs", "../local-auth.mjs"];
+    const tools = ["run-local-legacy-bank.mjs", "prepare-local-legacy-bank-input.mjs", "local-legacy-bank-source.mjs", "local-legacy-bank-runner.mjs", "local-source-adapter.mjs", "local-target-registry.mjs", "local-distribution-qualification-plan.mjs", "verify-legacy-listed-policy-dump.mjs", "../local-auth.mjs"];
     if (JSON.stringify(Object.keys(input.toolFiles).sort()) !== JSON.stringify(tools.sort())) fail();
     for (const name of tools) { const path = join(root, "scripts/migration", name); assertBankNoSymlinkPath(path); if (!hex(input.toolFiles[name]) || sha(readFileSync(path)) !== input.toolFiles[name]) fail(); }
     if (sha(readFileSync(join(root, "apps/api/migrations/business/meta/_journal.json"))) !== input.schemaJournalSha256) fail();
@@ -81,19 +90,32 @@ async function main() {
 
   const schemaProof = pinned(protectedPath(input.evidence?.schemaProof?.path), input.evidence?.schemaProof?.sha256);
   const final = pinned(protectedPath(input.evidence?.finalSchemaReceipt?.path), input.evidence?.finalSchemaReceipt?.sha256);
-  const stage = pinned(protectedPath(final.stageReceipt?.path), final.stageReceipt?.sha256);
-  const swap = pinned(protectedPath(final.swapReceipt?.path), final.swapReceipt?.sha256);
+  const stage = r07 ? null : pinned(protectedPath(final.stageReceipt?.path), final.stageReceipt?.sha256);
+  const swap = r07 ? null : pinned(protectedPath(final.swapReceipt?.path), final.swapReceipt?.sha256);
   const sourceProof = pinned(protectedPath(input.evidence?.sourceProof?.path), input.evidence?.sourceProof?.sha256);
   const keyringProof = pinned(protectedPath(input.evidence?.keyringProof?.path), input.evidence?.keyringProof?.sha256);
   assertFinalLegacyBankSchema(schemaProof, final, registry, stage, swap);
+  if(schemaProof.schema==='zzsh.round07-bank-schema-proof.v2'){
+    const refs=schemaProof.upgradeRefs,values=Object.fromEntries(['oldProof','oldFinal','upgradePlan','upgradeExecution','upgradeReadback','liveReadback'].map(k=>[k,pinned(protectedPath(refs?.[k]?.path),refs?.[k]?.sha256)]));
+    const checked=makeR07UpgradedBankSchemaEvidence({...values,registry,refs,finalPath:schemaProof.finalReceipt.path});
+    if(canonicalize(checked.final)!==canonicalize(final)||canonicalize(checked.proof)!==canonicalize(schemaProof))fail();
+  }
+  if(r07){
+    const round=pinned(protectedPath(input.evidence?.roundInput?.path),input.evidence?.roundInput?.sha256),
+      roundReceipt=pinned(protectedPath(input.evidence?.roundReceipt?.path),input.evidence?.roundReceipt?.sha256),
+      readback=pinned(protectedPath(input.evidence?.coreReadback?.path),input.evidence?.coreReadback?.sha256);
+    if(round.target?.oid!==String(t.databaseOid)||round.target?.nonce!==t.nonce||canonicalize(round.target.instance)!==canonicalize(t.instance)
+      ||round.dataset?.sha256!==input.dataset.sha256||canonicalize(schemaProof.roundInput)!==canonicalize(input.evidence.roundInput)
+      ||canonicalize(schemaProof.roundReceipt)!==canonicalize(input.evidence.roundReceipt)||canonicalize(schemaProof.coreReadback)!==canonicalize(input.evidence.coreReadback))fail();
+    assertRegisteredDistributionTarget(round.target,input.dataset.sha256,{...registry,instance:registered.instance});
+    assertDistributionCoreReadback(roundReceipt,readback,{roundInputSha256:input.evidence.roundInput.sha256,readbackSha256:input.evidence.coreReadback.sha256,
+      datasetSha256:input.dataset.sha256,sourceSha256:round.source?.sha256,target:round.target});
+  }
   if (schemaProof.journalSha256 !== input.schemaJournalSha256 || schemaProof.historySha256 !== input.schemaHistorySha256
     || canonicalize(schemaProof.target) !== canonicalize(t) || canonicalize(schemaProof.finalReceipt) !== canonicalize(input.evidence.finalSchemaReceipt)) fail();
-  if (sourceProof.schema !== "zzsh.r06-bank-source-validation.v1" || sourceProof.status !== "SOURCE_VERIFIED_READ_ONLY" || sourceProof.restoreMatchesDump !== true
-    || sourceProof.sourceAccess !== "MYSQL_REPEATABLE_READ_READ_ONLY_ROLLBACK" || sourceProof.plaintextRowsPersisted !== false || sourceProof.postgresConnections !== 0 || sourceProof.writes !== 0
-    || sourceProof.sourceReceiptSha256 !== input.source?.sourceReceiptSha256
-    || sourceProof.sourceBindingSha256 !== input.source?.sourceBindingSha256) fail();
-  if (keyringProof.schema !== "zzsh.r06-bank-keyring-receipt.v1" || keyringProof.status !== "KEYRING_READY" || keyringProof.aclVerified !== true || keyringProof.backupMatches !== true
-    || keyringProof.database !== t.database || keyringProof.runtimeUser !== t.runtimeUser || keyringProof.version !== input.keyring?.version
+  assertLegacyBankSourceProof(sourceProof,t.round,input.source?.sourceReceiptSha256,input.source?.sourceBindingSha256);
+  assertLegacyBankKeyringProof(keyringProof,t);
+  if (keyringProof.version !== input.keyring?.version
     || canonicalize(keyringProof.config) !== canonicalize(input.keyring?.config) || canonicalize(keyringProof.files) !== canonicalize(input.keyring?.files)) fail();
   const backupDir = protectedPath(keyringProof.backupDirectory, false, [restricted, secretRoot]), backupFile = protectedPath(keyringProof.backupFile, false, [backupDir]);
   assertWindowsBankAcl(backupDir, true); assertWindowsBankAcl(backupFile);
@@ -118,8 +140,8 @@ async function main() {
   const bankRuntime = loadWithdrawalBankBindingRuntime(configContext, env, secretWorkingDirectory);
   if (!bankRuntime?.protection) fail();
   const options = { ...bankRuntime, protection: { currentKeyVersion: input.keyring.version, keyFor: bankRuntime.protection.keyFor } };
-  const { Client, Pool } = require("pg"), base = { host: "127.0.0.1", port: 55432, database: t.database,
-    statement_timeout: 30000, lock_timeout: 1000, connectionTimeoutMillis: 3000, application_name: "zzsh-r06-legacy-bank" };
+  const { Client, Pool } = require("pg"), base = { host: registered.host, port: registered.port, database: t.database,
+    statement_timeout: 30000, lock_timeout: 1000, connectionTimeoutMillis: 3000, application_name: "zzsh-local-legacy-bank" };
   const writePool = new Pool({ ...base, user: credentials.runtime.name, password: credentials.runtime.password, max: 1 });
   const readPool = new Pool({ ...base, user: credentials.runtime.name, password: credentials.runtime.password, max: 1 });
   const schemaPool = new Pool({ ...base, user: credentials.migration.name, password: credentials.migration.password, max: 1 });
@@ -137,22 +159,17 @@ async function main() {
     const c = await readPool.connect(); let begun = false, destroy = false;
     try {
       await c.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY"); begun = true;
-      const identity = (await c.query(`SELECT d.oid::text oid,current_database() name,current_user role,r.oid::text role_oid,
-        pg_get_userbyid(d.datdba) owner,d.datdba::text owner_oid,shobj_description(d.oid,'pg_database') marker,
-        current_setting('zzsh.regression_run',true) nonce,r.rolsuper,r.rolcreatedb,r.rolcreaterole,r.rolbypassrls
-        FROM pg_database d JOIN pg_roles r ON r.rolname=current_user WHERE d.datname=current_database()`)).rows[0];
-      if (!identity || Number(identity.oid) !== t.databaseOid || identity.name !== t.database || identity.role !== t.runtimeUser
+      const identity = (await c.query(targetIdentityQuery())).rows[0];assertLiveTarget(registered,identity,"runtime");
+      if (!identity || Number(identity.oid) !== t.databaseOid || identity.database !== t.database || identity.role !== t.runtimeUser
         || Number(identity.role_oid) !== t.runtimeRoleOid || identity.owner !== t.owner || Number(identity.owner_oid) !== t.ownerOid
-        || identity.marker !== t.marker || identity.nonce !== t.nonce || identity.rolsuper || identity.rolcreatedb || identity.rolcreaterole || identity.rolbypassrls) fail();
+        || identity.marker !== t.marker || identity.nonce !== t.nonce) fail();
       check.runtimeRollbackAck = (await c.query("ROLLBACK"))?.command === "ROLLBACK"; if (!check.runtimeRollbackAck) fail(); begun = false;
     } finally { try { if (begun) await c.query("ROLLBACK"); } catch { destroy = true; } finally { c.release(destroy ? true : undefined); } }
     const migration = await schemaPool.connect(); begun = false; destroy = false;
     try {
       await migration.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY"); begun = true;
-      const identity = (await migration.query(`SELECT d.oid::text oid,current_database() name,current_user role,r.oid::text role_oid,
-        pg_get_userbyid(d.datdba) owner,d.datdba::text owner_oid,shobj_description(d.oid,'pg_database') marker,
-        current_setting('zzsh.regression_run',true) nonce FROM pg_database d JOIN pg_roles r ON r.rolname=current_user WHERE d.datname=current_database()`)).rows[0];
-      if (!identity || Number(identity.oid) !== t.databaseOid || identity.name !== t.database || identity.role !== credentials.migration.name
+      const identity = (await migration.query(targetIdentityQuery())).rows[0];assertLiveTarget(registered,identity,"migration");
+      if (!identity || Number(identity.oid) !== t.databaseOid || identity.database !== t.database || identity.role !== credentials.migration.name
         || identity.role_oid !== String(credentials.migration.oid) || identity.owner !== t.owner || Number(identity.owner_oid) !== t.ownerOid
         || identity.marker !== t.marker || identity.nonce !== t.nonce) fail();
       const history = (await migration.query('SELECT hash,created_at::text AS "createdAt" FROM zzsh_business_meta.migrations ORDER BY id')).rows;

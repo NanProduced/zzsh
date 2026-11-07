@@ -1,5 +1,5 @@
 import { runSupplyPoolChecks } from "./supply-pool-checks";
-import { admitTestDatabase, assertFreshRegressionRun } from "./database-test-support";
+import { admitTestDatabase, assertFreshRegressionRun, legacySkinCategoryInstalled } from "./database-test-support";
 import { runPublishingChecks } from "./supply-publishing-checks";
 import { runPricingCompatChecks } from "./supply-pricing-compat-checks";
 import { personalFixture } from "./personal-confirmation-checks";
@@ -551,20 +551,39 @@ test("M3-B foundations and M3-C publication, authorization and review behave und
       return created.body?.id as string;
     };
 
-    // ---------- 非 delta：目录编写仍可用，但不能进入租赁与公开目录 ----------
+    const oldCategoryStorage = await legacySkinCategoryInstalled(maintenanceDataPool!);
+    const legacyCategories = new Map<string, string>();
+    const seedPendingSkin = async (target: string, code: string, name: string, options: { rarityCode?: string; rarityEvidence?: unknown; legacySource?: boolean } = {}): Promise<string> => {
+      const body = { code, name, ...(options.rarityCode ? { rarityCode: options.rarityCode, rarityEvidence: options.rarityEvidence } : {}),
+        ...(options.legacySource ? { sourceNamespace: "legacy_mysql_restore", sourceField: "knifeSkin", sourceToken: "legacy-unknown-token" } : {}) };
+      if (!oldCategoryStorage) return createEntry("skins", body, target);
+      // A pre-0159 database still requires category_id; the current API must refuse categoryless creation.
+      const unavailable = await request(base, `/api/bff/admin/supply/games/${target}/skins`, { ...body, expectedCatalogRevision: await catalogRevision(target) }, operator.jar, ADMIN_ORIGIN, "POST", supplyKey());
+      assert.equal(unavailable.response.status, 503, JSON.stringify(unavailable.body));
+      assert.match(JSON.stringify(unavailable.body), /EVIDENCE_UNAVAILABLE/);
+      let categoryId = legacyCategories.get(target);
+      if (!categoryId) {
+        categoryId = target === gameId ? "supply_category_legacy_delta" : "supply_category_legacy_authoring";
+        await maintenanceDataPool!.query(`INSERT INTO "zzsh_supply"."skin_category" ("id","game_id","code","name") VALUES ($1,$2,'legacy_weapon','武器')`, [categoryId, target]);
+        legacyCategories.set(target, categoryId);
+      }
+      const id = `skin_fixture_${target === gameId ? "delta" : "authoring"}_${code}`;
+      await maintenanceDataPool!.query(
+        `INSERT INTO "zzsh_supply"."skin" ("id","game_id","code","name","category_id","rarity_code","enabled","form_visible","rarity_evidence","source_namespace","source_field","source_token")
+         VALUES ($1,$2,$3,$4,$5,$6,false,false,$7,$8,$9,$10)`,
+        [id, target, code, name, categoryId, options.rarityCode ?? null, options.rarityEvidence ?? null, options.legacySource ? "legacy_mysql_restore" : null, options.legacySource ? "knifeSkin" : null, options.legacySource ? "legacy-unknown-token" : null],
+      );
+      return id;
+    };
+
+    // ---------- 非 delta：按新词条模型编写，但不能进入租赁与公开目录 ----------
     const rarityEvidence = { schema: "skin-rarity-evidence-v1", basis: "PLATFORM_REFERENCE", sourceName: "合成品质参考", references: [{ url: "https://evidence.invalid/rarity/gold", observedAt: "2026-10-30", region: "CN", note: "本地合成夹具" }] };
     await createEntry("rarities", { code: "gold", name: "金色" }, authoringGameId);
-    const weaponRoot = await createEntry("categories", { code: "weapon", name: "武器" }, authoringGameId);
-    const rifle = await createEntry("categories", { code: "rifle", name: "步枪", parentId: weaponRoot }, authoringGameId);
-    const model = await createEntry("categories", { code: "m4a1", name: "M4A1", parentId: rifle }, authoringGameId);
-    const tooDeep = await request(base, `/api/bff/admin/supply/games/${authoringGameId}/categories`, { code: "too_deep", name: "第四级", parentId: model }, operator.jar, ADMIN_ORIGIN, "POST", supplyKey());
-    assert.equal(tooDeep.response.status, 400, JSON.stringify(tooDeep.body));
-    const cycle = await request(base, `/api/bff/admin/supply/categories/${weaponRoot}`, { parentId: model }, operator.jar, ADMIN_ORIGIN, "PUT", supplyKey());
-    assert.equal(cycle.response.status, 400, JSON.stringify(cycle.body));
-    const selfParent = await request(base, `/api/bff/admin/supply/categories/${weaponRoot}`, { parentId: weaponRoot }, operator.jar, ADMIN_ORIGIN, "PUT", supplyKey());
-    assert.equal(selfParent.response.status, 400);
+    const retiredAuthoringCategory = await request(base, `/api/bff/admin/supply/games/${authoringGameId}/categories`, { code: "weapon", name: "武器" }, operator.jar, ADMIN_ORIGIN, "POST", supplyKey());
+    assert.equal(retiredAuthoringCategory.response.status, 410, JSON.stringify(retiredAuthoringCategory.body));
+    assert.match(JSON.stringify(retiredAuthoringCategory.body), /SKIN_CATEGORY_RETIRED/);
 
-    const authoredSkin = await createEntry("skins", { code: "skin_m4_gold", name: "M4A1 金色", categoryId: model, rarityCode: "gold", rarityEvidence, sourceNamespace: "legacy_mysql_restore", sourceField: "knifeSkin", sourceToken: "legacy-unknown-token" }, authoringGameId);
+    const authoredSkin = await seedPendingSkin(authoringGameId, "skin_m4_gold", "M4A1 金色", { rarityCode: "gold", rarityEvidence, legacySource: true });
     const rarityCount = await runtimePool.query<{ count: string }>(`SELECT count(*)::text AS count FROM "zzsh_supply"."skin_rarity" WHERE "game_id" = $1 AND "code" = 'legacy-unknown-token'`, [authoringGameId]);
     assert.equal(rarityCount.rows[0]?.count, "0", "unknown legacy tokens must not be auto-created as valid catalog entries");
     const authoredRename = await request(base, `/api/bff/admin/supply/skins/${authoredSkin}`, { name: "M4A1 金色（改名）", reason: "合成改名", expectedCatalogRevision: await catalogRevision(authoringGameId) }, operator.jar, ADMIN_ORIGIN, "PUT", supplyKey());
@@ -576,38 +595,21 @@ test("M3-B foundations and M3-C publication, authorization and review behave und
     assert.equal(authoredRow.rows[0]?.code, "skin_m4_gold");
     assert.equal(authoredRow.rows[0]?.name, "M4A1 金色（改名）");
     assert.equal(authoredRow.rows[0]?.sourceToken, "legacy-unknown-token");
-    await createEntry("skins", { code: "skin_no_rarity", name: "无稀有度皮肤", categoryId: model }, authoringGameId);
+    await seedPendingSkin(authoringGameId, "skin_no_rarity", "无稀有度皮肤");
     const unsupportedCatalog = await request(base, `/api/v1/supply/games/${authoringGameId}/catalog`, undefined, cookieJar(), API_ORIGIN);
     assert.equal(unsupportedCatalog.response.status, 404, "an unsupported game must not expose a public catalog");
 
-    // ---------- delta：旧分类只读、无分类结构未安装，历史词条由 PENDING fixture 承接 ----------
+    // ---------- delta：旧分类入口退役；新结构经 API 建立待确认皮肤 ----------
     const haffItem = await createEntry("items", { code: "haff_base", name: "哈夫币", unit: "HAFF_BASE", required: true });
     const roundItem = await createEntry("items", { code: "round_item", name: "子弹", unit: "ROUND" });
     await createEntry("rarities", { code: "gold", name: "金色" });
     const retiredCategory = await request(base, `/api/bff/admin/supply/games/${gameId}/categories`, { code: "weapon", name: "武器" }, operator.jar, ADMIN_ORIGIN, "POST", supplyKey());
-    assert.equal(retiredCategory.response.status, 400, JSON.stringify(retiredCategory.body));
-    assert.match(JSON.stringify(retiredCategory.body), /旧皮肤分类只保留历史读取/);
-    const retiredSkin = await request(base, `/api/bff/admin/supply/games/${gameId}/skins`, { code: "skin_legacy_attempt", name: "旧分类皮肤", categoryId: model, expectedCatalogRevision: await catalogRevision() }, operator.jar, ADMIN_ORIGIN, "POST", supplyKey());
-    assert.equal(retiredSkin.response.status, 400, JSON.stringify(retiredSkin.body));
-    const categorylessSkin = await request(base, `/api/bff/admin/supply/games/${gameId}/skins`, { code: "skin_categoryless_attempt", name: "无分类皮肤", expectedCatalogRevision: await catalogRevision() }, operator.jar, ADMIN_ORIGIN, "POST", supplyKey());
-    assert.equal(categorylessSkin.response.status, 503, JSON.stringify(categorylessSkin.body));
-    assert.match(JSON.stringify(categorylessSkin.body), /EVIDENCE_UNAVAILABLE/);
+    assert.equal(retiredCategory.response.status, 410, JSON.stringify(retiredCategory.body));
+    assert.match(JSON.stringify(retiredCategory.body), /SKIN_CATEGORY_RETIRED/);
+    const retiredSkin = await request(base, `/api/bff/admin/supply/games/${gameId}/skins`, { code: "skin_legacy_attempt", name: "旧分类皮肤", categoryId: "legacy_category", expectedCatalogRevision: await catalogRevision() }, operator.jar, ADMIN_ORIGIN, "POST", supplyKey());
+    assert.equal(retiredSkin.response.status, 410, JSON.stringify(retiredSkin.body));
 
-    const legacyCategoryId = "supply_category_legacy_weapon";
-    await maintenanceDataPool!.query(`INSERT INTO "zzsh_supply"."skin_category" ("id","game_id","code","name") VALUES ($1,$2,'legacy_weapon','武器')`, [legacyCategoryId, gameId]);
-    // The API intentionally refuses new delta category bindings; production rows come from the
-    // frozen legacy migration. Insert the pre-identity PENDING row, then use the real rename,
-    // identity-confirmation and media APIs above it.
-    const seedPendingSkin = async (code: string, name: string, options: { rarityCode?: string; rarityEvidence?: unknown; legacySource?: boolean } = {}): Promise<string> => {
-      const id = `skin_fixture_${code}`;
-      await maintenanceDataPool!.query(
-        `INSERT INTO "zzsh_supply"."skin" ("id","game_id","code","name","category_id","rarity_code","enabled","form_visible","rarity_evidence","source_namespace","source_field","source_token")
-         VALUES ($1,$2,$3,$4,$5,$6,false,false,$7,$8,$9,$10)`,
-        [id, gameId, code, name, legacyCategoryId, options.rarityCode ?? null, options.rarityEvidence ?? null, options.legacySource ? "legacy_mysql_restore" : null, options.legacySource ? "knifeSkin" : null, options.legacySource ? "legacy-unknown-token" : null],
-      );
-      return id;
-    };
-    const skin = await seedPendingSkin("skin_m4_gold", "M4A1 金色", { rarityCode: "gold", rarityEvidence, legacySource: true });
+    const skin = await seedPendingSkin(gameId, "skin_m4_gold", "M4A1 金色", { rarityCode: "gold", rarityEvidence, legacySource: true });
     const renamed = await request(base, `/api/bff/admin/supply/skins/${skin}`, { name: "M4A1 金色（改名）", reason: "合成改名", expectedCatalogRevision: await catalogRevision() }, operator.jar, ADMIN_ORIGIN, "PUT", supplyKey());
     assert.equal(renamed.response.status, 200, JSON.stringify(renamed.body));
     const skinRow = await runtimePool.query<{ code: string; name: string; rarityCode: string | null; sourceToken: string | null }>(
@@ -618,10 +620,10 @@ test("M3-B foundations and M3-C publication, authorization and review behave und
     assert.equal(skinRow.rows[0]?.name, "M4A1 金色（改名）");
     assert.equal(skinRow.rows[0]?.sourceToken, "legacy-unknown-token");
 
-    const bareSkin = await seedPendingSkin("skin_no_rarity", "无稀有度皮肤");
+    const bareSkin = await seedPendingSkin(gameId, "skin_no_rarity", "无稀有度皮肤");
     const bareRow = await runtimePool.query<{ rarityCode: string | null }>(`SELECT "rarity_code" AS "rarityCode" FROM "zzsh_supply"."skin" WHERE "id" = $1`, [bareSkin]);
     assert.equal(bareRow.rows[0]?.rarityCode, null, "missing rarity must stay null instead of defaulting to a value");
-    const redSkin = await seedPendingSkin("skin_m4_red", "M4A1 红色");
+    const redSkin = await seedPendingSkin(gameId, "skin_m4_red", "M4A1 红色");
 
     const skinOwner = await createEntry("skin-owners", { kind: "AGENT", code: "owner_luna", name: "露娜", reason: "合成词条", evidenceRefs: [{ url: "https://example.org/official", observedAt: "2026-09-26", region: "CN", note: "离线合成词条" }] });
     const identityEvidence = { reason: "合成身份确认", evidenceRefs: [{ url: "https://example.org/official", observedAt: "2026-09-26", region: "CN", note: "离线合成词条" }] };
@@ -653,8 +655,14 @@ test("M3-B foundations and M3-C publication, authorization and review behave und
 
     const rarityFiltered = await request(base, `/api/v1/supply/games/${gameId}/catalog?rarityCode=gold`, undefined, cookieJar(), API_ORIGIN);
     assert.equal(rarityFiltered.body?.skins.length, 1);
-    const categoryFiltered = await request(base, `/api/v1/supply/games/${gameId}/catalog?categoryId=${legacyCategoryId}`, undefined, cookieJar(), API_ORIGIN);
-    assert.equal(categoryFiltered.body?.skins.length, 2);
+    assert.equal(publicCatalog.body?.skinCategoryModel?.mode, "RETIRED");
+    assert.deepEqual(publicCatalog.body?.categories, []);
+    const ownerFiltered = await request(base, `/api/v1/supply/games/${gameId}/catalog?ownerKind=AGENT&ownerId=${skinOwner}`, undefined, cookieJar(), API_ORIGIN);
+    assert.equal(ownerFiltered.response.status, 200, JSON.stringify(ownerFiltered.body));
+    assert.deepEqual(new Set(ownerFiltered.body?.skins.map((entry: { id: string }) => entry.id)), new Set([skin, redSkin]));
+    const categoryFiltered = await request(base, `/api/v1/supply/games/${gameId}/catalog?categoryId=legacy_category`, undefined, cookieJar(), API_ORIGIN);
+    assert.equal(categoryFiltered.response.status, 410, JSON.stringify(categoryFiltered.body));
+    assert.match(JSON.stringify(categoryFiltered.body), /SKIN_CATEGORY_RETIRED/);
 
     const deleteDenied = await runtimePool.query(`DELETE FROM "zzsh_supply"."billable_item" WHERE "id" = $1`, [roundItem]).then(() => null, (error: unknown) => error);
     assert.ok(deleteDenied, "runtime role must not be able to delete catalog entries");

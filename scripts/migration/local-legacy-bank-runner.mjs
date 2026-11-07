@@ -46,7 +46,8 @@ export function describeLocalLegacyBankRun(token) {
 
 function authorized(authority, data, buildSha256) {
   const now = Date.now();
-  return authority && authority.schema === "zzsh.local-legacy-bank-authority.v1" && authority.purpose === "ROUND_06_BANK_IMPORT"
+  return authority && authority.schema === "zzsh.local-legacy-bank-authority.v1" && [6,7].includes(data.binding?.target?.round)
+    && authority.purpose === (data.binding.target.round === 7 ? "ROUND_07_BANK_IMPORT" : "ROUND_06_BANK_IMPORT")
     && same(authority.binding, data.binding) && authority.commitment === data.commitment && authority.buildSha256 === buildSha256
     && /^[a-f0-9]{64}$/.test(buildSha256 ?? "") && Number.isSafeInteger(authority.maxWrites) && authority.maxWrites >= data.counts.ready
     && Number.isFinite(Date.parse(authority.notBefore)) && Number.isFinite(Date.parse(authority.expiresAt))

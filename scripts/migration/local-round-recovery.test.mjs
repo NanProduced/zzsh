@@ -6,7 +6,7 @@ import { win32 as path } from "node:path";
 import { createInterface } from "node:readline";
 import { Readable } from "node:stream";
 import test from "node:test";
-import { isStrictRoundReservation, matchesLoadReservation, strictRoundReservation } from "./local-load-checkpoint.mjs";
+import { assertSameDirectoryResumeSafe, isRoundReceiptPath, isStrictRoundReservation, matchesLoadReservation, strictRoundReservation } from "./local-load-checkpoint.mjs";
 import { advisoryLockSql, assertLiveTarget, maintenanceConnection, normalizeRegisteredTarget, targetConnection, targetIdentityQuery } from "./local-target-registry.mjs";
 import { assertRoundPopulationBinding, assertFullExecutionAdmitted } from "./full-source-scope.mjs";
 import { assertRoundBootstrap, assessRoundEvidence, assertGrowthPlanEvidence, assertGrowthPackages, assertResumeLineage, verifyResumeSchema, assessResumeStages, assertNoWriteRetryLineage } from "./local-round-contract.mjs";
@@ -23,7 +23,7 @@ const ds = path.join(restricted, "dataset"), out = path.join(restricted, "load")
 const credentials = path.join(restricted, "resource", "credentials.json"), registry = path.join(path.dirname(credentials), "resource.json");
 const checkpoint = path.join(out, "checkpoint.json"), users = [{ sourceId: "101", input: { id: 1 } }, { sourceId: "102", input: { id: 2 } }];
 
-async function load({ failure, strict = true, reservation = {}, previous, recover = false, exitAfterUsers = false, populationMode, undeclaredPopulation = false, invalidPopulationDigest = false } = {}) {
+async function load({ failure, strict = true, reservation = {}, previous, recover = false, exitAfterUsers = false, populationMode, undeclaredPopulation = false, invalidPopulationDigest = false, instance = null, pendingReset = null } = {}) {
   const files = new Map(), directories = new Set(), commands = [], events = [], logs = [], saves = [];
   const put = (file, value) => files.set(file, JSON.stringify(value));
   const get = file => { assert(files.has(file), file); return files.get(file); };
@@ -39,7 +39,7 @@ async function load({ failure, strict = true, reservation = {}, previous, recove
     ...(population ? { population, populationSha256: invalidPopulationDigest ? "f".repeat(64) : sha(JSON.stringify(population)) } : undeclaredPopulation ? {} : { scenarioSelection: { schema: "zzsh.source-scenarios.v1" } }) });
   put(fundsReceipt, {});
   const migration = { name: "test_migration", oid: "91", password: "test" }, runtime = { name: "test_runtime", oid: "92" };
-  const registration = { ...epoch, database: "zzsh_test_regression", marker: "zzsh:regression-test:v1", roles: { migration, runtime }, ...(strict || Object.keys(reservation).length ? { protectedDataset: {
+  const registration = { ...epoch, database: "zzsh_test_regression", marker: "zzsh:regression-test:v1", roles: { migration, runtime }, ...(instance ? {instance} : {}), ...(pendingReset ? {pendingReset} : {}), ...(strict || Object.keys(reservation).length ? { protectedDataset: {
     status: strictRoundReservation, epoch, manifestSha256: sha(get(manifest)), ...reservation,
   } } : {}) };
   files.set(registry, previous?.files.get(registry) ?? JSON.stringify(registration));
@@ -50,17 +50,18 @@ async function load({ failure, strict = true, reservation = {}, previous, recove
   put(credentials, { database: registration.database, migration });
   files.set("test-secret", "fixture");
   const proc = { version: "v24.20.0", env: { DB_PASSWORD_FILE: "test-secret", USER_IDENTITY_SUBJECT_HMAC_KEY_FILE: "test-secret" }, argv: ["node", "script",
-    recover ? "--recover" : "--execute", ...(strict ? ["--strict-round-batch"] : []), ...(failure === "empty-coverage" ? ["--refund-attempts", funds, "--refund-attempts-sha", sha(get(fundsReceipt))] : ["--core-only"]), "--dataset", ds, "--dataset-sha", sha(get(manifest)),
+    recover ? "--recover" : "--execute", ...(strict ? ["--strict-round-batch"] : []), ...(failure?.startsWith("empty-coverage") ? ["--refund-attempts", funds, "--refund-attempts-sha", sha(get(fundsReceipt))] : ["--core-only"]), "--dataset", ds, "--dataset-sha", sha(get(manifest)),
     "--credentials", credentials, "--out", out, "--oid", epoch.oid, "--nonce", epoch.nonce, "--actor-id", "test-user", "--session-id", "test-session",
     "--schema-binding", JSON.stringify(schema), "--execution-window", JSON.stringify(window), "--funds-source", funds, "--funds-source-sha", sha(get(fundsReceipt)),
   ] };
   let commitAck = false, diskFailed = false;
   const client = Object.assign(new EventEmitter(), {
     async query(sql) {
-      if (sql.startsWith("SELECT current_database()")) return { rows: [{ ...epoch, database: registration.database, owner: "zzsh", marker: registration.marker, role: migration.name, role_oid: migration.oid, is_super: "false", can_create_db: "false", can_create_role: "false", system_identifier: null }] };
+      if (sql.startsWith("SELECT current_database()")) return { rows: [{ ...epoch, database: registration.database, owner: "zzsh", marker: registration.marker, role: migration.name, role_oid: migration.oid, is_super: "false", can_create_db: "false", can_create_role: "false", can_inherit: "false", can_bypass_rls: "false", system_identifier: instance?.systemIdentifier ?? null }] };
       if (sql.startsWith("SELECT hash")) return { rows: schema.map(hash => ({ hash })) };
       if (sql.startsWith("SELECT EXISTS")) return { rows: [{ occupied: false }] };
       commands.push(sql);
+      if (sql === "COMMIT" && failure === "empty-coverage-unknown" && events.some(e => e.domain === "financeEmptyCoverage" && e.event === "INTENT")) throw Object.assign(Error("original coverage commit error"), {code:"ECONNRESET"});
       if (sql === "COMMIT" && failure === "lost-commit") {
         const error = Object.assign(Error("original commit error"), { code: "ECONNRESET" });
         this.emit("error", error);
@@ -90,7 +91,7 @@ async function load({ failure, strict = true, reservation = {}, previous, recove
     ...path, createHash, isStrictRoundReservation, matchesLoadReservation, strictRoundReservation, process: proc, moduleUrl: "fixture", fileURLToPath: () => "C:\\project\\scripts\\migration\\load-local-dataset.mjs",
     advisoryLockSql, assertLiveTarget, maintenanceConnection, targetConnection, targetIdentityQuery, assertFullExecutionAdmitted,
     // The loader reads its registry through this sandbox filesystem, not the real disk.
-    loadRegisteredTarget: credentialPath => { const file = path.join(path.dirname(credentialPath), "resource.json"); return normalizeRegisteredTarget(JSON.parse(get(file)), file); },    financialFixture: () => ({ applyFinancialDomains: ctx => ctx.runItems("financeEmptyCoverage", [{ sourceId: "empty-original" }], () => { throw Object.assign(Error("coverage rejected"), { status: 409 }); }) }),
+    loadRegisteredTarget: credentialPath => { const file = path.join(path.dirname(credentialPath), "resource.json"); return normalizeRegisteredTarget(JSON.parse(get(file)), file); },    financialFixture: () => ({ applyFinancialDomains: ctx => ctx.runItems("financeEmptyCoverage", failure === "empty-coverage" ? [{ sourceId: "empty-original" }] : Array.from({length:5},(_,i)=>({sourceId:`chunk-${i}`})), row => { if(failure === "empty-coverage" || (failure === "empty-coverage-batch" && row.sourceId === "chunk-1")) throw Object.assign(Error("coverage rejected"), { status: 409 }); return {replayed:false}; }, failure === "empty-coverage" ? 1 : 5) }),
     console: { log: message => logs.push(JSON.parse(message)), error: message => logs.push(JSON.parse(message)) },
     createInterface, createReadStream: file => Readable.from([Buffer.from(get(file))]),
     existsSync: file => files.has(file) || directories.has(file), mkdirSync: file => directories.add(file), readFileSync: (file, encoding) => encoding ? get(file) : Buffer.from(get(file)),
@@ -132,6 +133,21 @@ test("strict run commits one batch without savepoints", async () => {
   assert.ok(!continued.commands.includes("COMMIT"));
 });
 
+test("a checkpoint refuses another cluster even with the same database OID and nonce", async () => {
+  const firstInstance={host:"127.0.0.1",port:55433,systemIdentifier:"123"};
+  const first=await load({instance:firstInstance});assert.ifError(first.error);
+  assert.deepEqual(first.state.binding.instance,firstInstance);
+  const changed=JSON.parse(first.files.get(registry));changed.instance={...firstInstance,systemIdentifier:"456"};
+  first.files.set(registry,JSON.stringify(changed));
+  const resumed=await load({previous:first,instance:changed.instance});
+  assert.match(resumed.error.message,/CHECKPOINT_BINDING_CHANGED/);assert.deepEqual(resumed.commands,[]);
+});
+
+test("a registered pending reset stops before any database connection", async () => {
+  const result=await load({pendingReset:{oid:"42",at:"2026-11-06T00:00:00Z"}});
+  assert.match(result.error.message,/^RES:/);assert.deepEqual(result.commands,[]);
+});
+
 test("direct loader refuses full captured source before database connection while selected and legacy plans remain compatible", async () => {
   // A full-source dataset that does not declare the bounded empty-coverage path stays refused before
   // any connection or output, and a scenario or legacy dataset keeps working.
@@ -157,6 +173,14 @@ test("R06 strict reservation remains bound across checkpoint continuation", asyn
   assert.equal(continued.exit, undefined);
   assert.equal(JSON.parse(continued.files.get(registry)).protectedDataset.bootstrapReservation, reservation.status);
   assert.ok(!continued.commands.includes("COMMIT"));
+});
+
+test("R07 strict reservation remains R07 across checkpoint continuation", async () => {
+  const reservation={status:"ROUND07_BOOTSTRAP_RESERVED"},instance={host:"127.0.0.1",port:55433,systemIdentifier:"123"};
+  const first=await load({reservation,instance});assert.ifError(first.error);
+  assert.equal(JSON.parse(first.files.get(registry)).protectedDataset.bootstrapReservation,reservation.status);
+  const continued=await load({previous:first,instance});assert.ifError(continued.error);
+  assert.equal(JSON.parse(continued.files.get(registry)).protectedDataset.bootstrapReservation,reservation.status);
 });
 
 test("R06 rejects ordinary mode, other-round markers and source or target drift before connecting", async () => {
@@ -240,8 +264,33 @@ test("ordinary financeEmptyCoverage rolls back the entire chunk on a conflict", 
   assert.deepEqual(r.commands.slice(-7), ["BEGIN", "SAVEPOINT source_row", "ROLLBACK", "RELEASE_CLIENT", "POOL_END", "UNLOCK", "MAINTENANCE_END"]);
 });
 
-async function round({ reservationStatus = strictRoundReservation, action = "execute", drift, strict = true, bootstrapDrift, missingBootstrap = false, withGrowth = false, artifactFault, separateBossBinding = false, resumeCase, dependencyDrift } = {}) {
-  const files = new Map(), directories = [], spawns = [], logs = [], reads = [], liveCommands = [];
+test("five proved-empty chunks roll back together when a later chunk is rejected", async () => {
+  const r=await load({failure:"empty-coverage-batch"});
+  assert.ifError(r.error);assert.equal(r.exit,1);
+  assert.equal(r.state.phases.financeEmptyCoverage.nextIndex,0);
+  assert.equal(r.state.pending,null);
+  assert.equal(r.events.some(e=>e.domain==="financeEmptyCoverage"&&e.event==="COMMIT_ACK"),false);
+  assert.equal(r.state.status,"FAILED_ROLLED_BACK");
+});
+
+test("five proved-empty chunks use one acknowledged transaction and retain each chunk outcome", async () => {
+  const r=await load({failure:"empty-coverage-success"});
+  assert.ifError(r.error);assert.equal(r.exit,undefined);
+  assert.equal(r.state.phases.financeEmptyCoverage.nextIndex,5);
+  assert.equal(r.state.phases.financeEmptyCoverage.created,5);
+  assert.equal(r.events.filter(e=>e.domain==="financeEmptyCoverage"&&e.event==="COMMIT_ACK").length,1);
+});
+
+test("unknown coverage commit keeps all five original chunk keys and stops", async () => {
+  const r=await load({failure:"empty-coverage-unknown"});
+  assert.ifError(r.error);assert.equal(r.exit,1);
+  assert.equal(r.state.status,"COMMIT_UNKNOWN");
+  assert.deepEqual(r.state.pending.sourceIds,["chunk-0","chunk-1","chunk-2","chunk-3","chunk-4"]);
+  assert.equal(r.state.phases.financeEmptyCoverage.nextIndex,0);
+});
+
+async function round({ reservationStatus = strictRoundReservation, action = "execute", drift, strict = true, bootstrapDrift, missingBootstrap = false, withGrowth = false, artifactFault, separateBossBinding = false, resumeCase, dependencyDrift, instance = null, sameOutputStopped = false, sameOutputStages = [{ name: "core-and-funds", status: "INTENT" }], sameOutputArtifacts = [] } = {}) {
+  const files = new Map(), directories = [], spawns = [], logs = [], reads = [], liveCommands = [], logOpens = [];
   const targetSchema = reservationStatus === "ROUND06_BOOTSTRAP_RESERVED" ? ["1", "2", "3", "4", "5"].map(x => x.repeat(64)) : schema;
   const cohort = resumeCase === "bad-package" ? 1 : 0;
   const put = (file, body) => {
@@ -260,7 +309,7 @@ async function round({ reservationStatus = strictRoundReservation, action = "exe
   const apiDist = "C:\\project\\dist", buildFiles = {};
   for (const file of ["database/business-migrations.js", "supply/legacy-user-migration.js", "legacy-load/legacy-account-seam.js", "order/legacy-order-read.js", "finance/personal-finance-maintenance.js", "legacy-load/legacy-path-records.js"]) buildFiles[file] = put(path.join(apiDist, file), {}).sha256;
   const secretRoot = "E:\\zzsh\\zzsh\\apps\\api\\.secrets";
-  const target = { ...epoch, database: "zzsh_test_regression" }, marker = "zzsh:regression-test:v1";
+  const target = { ...epoch, database: "zzsh_test_regression", ...(instance?{instance}:{}) }, marker = "zzsh:regression-test:v1";
   const bundle = put(path.join(restricted, "bundle.json"), { moduleSha256: "c".repeat(64), entries: Object.entries(buildFiles).map(([file, digest]) => ({ path: "api-build/src/" + file, sha256: bootstrapDrift === "bundle" ? "2".repeat(64) : digest })) });
   const runtime = put(path.join(restricted, "runtime.json"), { resource: { ...target, ...(bootstrapDrift === "runtime" ? { oid: "43" } : {}), marker, migrationRoleOid: "91" },
     actualResource: { ...target, marker, migration_role_oid: "91", read_only: "on" }, formalAppMounted: true,
@@ -274,19 +323,20 @@ async function round({ reservationStatus = strictRoundReservation, action = "exe
     return prior ? { ...ref, serverBinding: bossOrigin } : ref;
   };
   const policyId = "growth-policy-1", effectiveAt = "2026-01-01T00:00:00.000Z", approvalId = "approval-1";
-  const evidence = { runtime, bundle, swap: put(path.join(restricted, "swap.json"), { ...epoch, ...(bootstrapDrift === "swap" ? { oid: "43" } : {}), status: "COMMIT_ACK" }),
+  const evidence = { runtime, bundle, swap: put(path.join(restricted, "swap.json"), { ...epoch, ...(instance?{instance}:{}), ...(bootstrapDrift === "swap" ? { oid: "43" } : {}), status: "COMMIT_ACK" }),
     schema: put(path.join(restricted, "schema.json"), reservationStatus === "ROUND06_BOOTSTRAP_RESERVED"
       ? { ...epoch, status: "FINAL_SCHEMA_0157_VERIFIED", target: { ...target, database: "zzsh_test_round06_stage", marker: "zzsh:round06-schema-build:v1", migrationRoleOid: "91" },
         hashes: bootstrapDrift === "schema" ? ["2".repeat(64)] : targetSchema, finalOrdinal: 157, commitAck: true, migrationExit: { code: 0, signal: null },
         readbackRollbackAck: true, readbackClientClosed: true, unlockAck: true, maintenanceClosed: true, journalSha256: "a".repeat(64), historySha256: "b".repeat(64) }
-      : { ...epoch, status: "CLEAN_SCHEMA_INSTALLED", hashes: bootstrapDrift === "schema" ? ["2".repeat(64)] : targetSchema }),
-    administrators: [admin("bosses"), admin("staff")], business: put(path.join(restricted, "business.json"), { ...epoch, ...(bootstrapDrift === "business" ? { oid: "43" } : {}), status: "REFERENCE_BOOTSTRAP_COMMITTED", manifestSha256: "d".repeat(64), tables: [{}], commitAck: true, maintenanceClosed: true, poolClosed: true, unlock: true, maintenanceAdminId: "test-user" }),
+      : { ...epoch, ...(instance?{instance}:{}), status: "CLEAN_SCHEMA_INSTALLED", hashes: bootstrapDrift === "schema" ? ["2".repeat(64)] : targetSchema,
+        ...(reservationStatus === "ROUND07_BOOTSTRAP_RESERVED" ? {finalOrdinal:160,commitAck:true,migrationAck:true,readbackRollbackAck:true,readbackClientClosed:true,unlockAck:true,maintenanceClosed:true,journalSha256:'a'.repeat(64),historySha256:'b'.repeat(64)} : {}) }),
+    administrators: [admin("bosses"), admin("staff")], business: put(path.join(restricted, "business.json"), { ...epoch, ...(instance?{instance}:{}), ...(bootstrapDrift === "business" ? { oid: "43" } : {}), status: "REFERENCE_BOOTSTRAP_COMMITTED", manifestSha256: "d".repeat(64), tables: [{}], commitAck: true, maintenanceClosed: true, poolClosed: true, unlock: true, maintenanceAdminId: "test-user" }),
     readback: put(path.join(restricted, "bootstrap-readback.json"), { identity: { ...target, ...(bootstrapDrift === "readback" ? { oid: "43" } : {}), marker, read_only: "on" }, rollbackAck: true, clientClosed: true, admins: { allActive: true, twoFactor: true, onlyNewUids: true, oldSessions: 0, count: 4 },
       policy: { id: bootstrapDrift === "policy" ? "old-policy" : policyId, status: "APPROVED", effectiveAtUtc: effectiveAt, effectiveNow: true, newApprovalRequestId: approvalId, requestStatus: "EXECUTED", decision: "APPROVED", executionStatus: "SUCCEEDED", onlyNewBossRelations: true } }),
     policy: put(path.join(restricted, "policy.json"), { status: "FORMAL_LOCAL_POLICY_INITIALIZED", executionStatus: "SUCCEEDED", oldApprovalsCopied: false, approvalRequestId: approvalId, policyId, effectiveAtUtc: effectiveAt }) };
   const inputBody = {
     schema: "zzsh.local-round.v1", window: resumeCase ? { notBefore: new Date(Date.now() - 60_000).toISOString(), expiresAt: new Date(Date.now() + 3_600_000).toISOString() } : window,
-    credentials, target: { ...epoch, bootstrapReservation: reservationStatus === "ROUND06_BOOTSTRAP_RESERVED" ? reservationStatus : strictRoundReservation, schemaHashes: targetSchema, migrationRoleOid: "91" },
+    credentials, target: { ...epoch, ...(instance?{instance}:{}), bootstrapReservation: ["ROUND06_BOOTSTRAP_RESERVED","ROUND07_BOOTSTRAP_RESERVED"].includes(reservationStatus) ? reservationStatus : strictRoundReservation, schemaHashes: targetSchema, migrationRoleOid: "91" },
     out, apiDist, buildFiles, strictBatch: strict, dataset, source, pathSourcePlan,
     paths: pinned("paths", { sourcePlanReceiptSha256: pathSourcePlan.sha256, datasetSha256: dataset.sha256, accounts: cohort }, "receipt.json"),
     display: pinned("display", { datasetSha256: dataset.sha256, rows: cohort, notDisplayable: 0 }),
@@ -297,18 +347,20 @@ async function round({ reservationStatus = strictRoundReservation, action = "exe
     ...(withGrowth || resumeCase ? { growth: { policyId, policyEffectiveAt: effectiveAt, approvedBy: "Root", approvalRef: "ROOT-FIXTURE-GROWTH", attempt: 1 } } : {}),
     ...(missingBootstrap ? {} : { bootstrapEvidence: evidence }),
   };
-  if (reservationStatus === "ROUND06_BOOTSTRAP_RESERVED" && dependencyDrift !== "missing") inputBody.dependencyBinding = {
+  if (["ROUND06_BOOTSTRAP_RESERVED","ROUND07_BOOTSTRAP_RESERVED"].includes(reservationStatus) && dependencyDrift !== "missing") inputBody.dependencyBinding = {
     buildManifest: put(path.join(restricted, "dependency-build.json"), {}), sourceManifest: put(path.join(restricted, "dependency-source.json"), {}), sourceSnapshot: "C:\\fixture",
     proof: put(path.join(restricted, "dependency-proof.json"), { status: "ROUND_DEPENDENCY_CLOSURE_VERIFIED", entrypoints: 32, closureFiles: [["fixture", "a".repeat(64)]], closureSha256: "c".repeat(64) }) };
-  let oldCheckpointPath, oldCheckpointBytes;
+  let oldCheckpointPath, oldCheckpointBytes, oldReceiptRef, oldOut;
   if (resumeCase) {
-    const oldOut = path.join(restricted, "original-round"), oldWindow = { notBefore: "2000-01-01T00:00:00.000Z", expiresAt: "2000-01-01T01:00:00.000Z" };
+    oldOut = path.join(restricted, "original-round");
+    const oldWindow = { notBefore: "2000-01-01T00:00:00.000Z", expiresAt: "2000-01-01T01:00:00.000Z" };
     const oldActor = put(path.join(restricted, "old-actor.json"), { id: "test-user", sessionId: "old-session", resourceOid: epoch.oid, nonce: epoch.nonce });
     const oldBody = { ...inputBody, out: oldOut, actor: oldActor, window: oldWindow };
     const oldInput = put(path.join(restricted, "original-input.json"), oldBody);
     const oldReceipt = put(path.join(oldOut, resumeCase === "fabricated-receipt" ? "round-receipt-resumed.json" : "round-receipt.json"), { schema: "zzsh.local-round-receipt.v1", inputSha256: oldInput.sha256,
       datasetSha256: dataset.sha256, target: inputBody.target, strictBatch: strict, status: "STOPPED_PRESERVE_ORIGINAL_KEYS_AND_RECEIPTS",
       stages: [{ name: "opening", status: "INTENT", code: 1, signal: null }, ...(resumeCase === "prior-growth-stage" ? [{ name: "growth-apply", status: "INTENT" }] : [])] });
+    oldReceiptRef = oldReceipt;
     const phaseNames = ["users", "accounts", "orders", "invitationFacts", "financeHistory", "financeEmptyCoverage", "guaranteeHistory", "continuationEvidence", "liabilityDuties", "completedCommissions", "accountDisplay", "storedOpening", "skinHoldings"];
     const oldCheckpoint = { schema: "zzsh.local-legacy-load.v1", binding: { ...epoch, database: "zzsh_test_regression", datasetSha256: dataset.sha256, actorId: "test-user", sessionId: "old-session" },
       strictBatch: strict, schemaHashes: schema, executionWindow: oldWindow, status: resumeCase === "unknown" ? "COMMIT_UNKNOWN" : "LOCAL_DATASET_SKIN_HOLDINGS_COMMITTED_REVIEW_REQUIRED",
@@ -321,7 +373,14 @@ async function round({ reservationStatus = strictRoundReservation, action = "exe
     put(credentials, { database: "zzsh_test_regression", migration: { name: "fixture_m", oid: "91", password: "fixture" } });
   }
   const input = put(path.join(restricted, "round-input.json"), inputBody);
-  put(registry, { ...epoch, database: "zzsh_test_regression", marker: "zzsh:regression-test:v1", roles: { migration: { name: "fixture_m", oid: "91" }, runtime: { name: "fixture_r", oid: "92" } },
+  let sameOutputReceipt;
+  if (sameOutputStopped) {
+    sameOutputReceipt = put(path.join(out, "round-receipt.json"), { schema: "zzsh.local-round-receipt.v1", inputSha256: input.sha256, status: "STOPPED_PRESERVE_ORIGINAL_KEYS_AND_RECEIPTS", stages: sameOutputStages });
+    files.set(path.join(out, "core-and-funds.stdout.log"), Buffer.from("old stdout"));
+    files.set(path.join(out, "core-and-funds.stderr.log"), Buffer.from("old stderr"));
+    for (const name of sameOutputArtifacts) files.set(path.join(out, name), Buffer.from("old " + name));
+  }
+  put(registry, { ...epoch, ...(instance?{instance}:{}), database: "zzsh_test_regression", marker: "zzsh:regression-test:v1", roles: { migration: { name: "fixture_m", oid: "91" }, runtime: { name: "fixture_r", oid: "92" } },
     ...(resumeCase ? { protectedDataset: { status: "LOCAL_DATASET_SKIN_HOLDINGS_COMMITTED_REVIEW_REQUIRED", manifestSha256: dataset.sha256, epoch, report: oldCheckpointPath } }
       : reservationStatus ? { protectedDataset: { status: reservationStatus, manifestSha256: dataset.sha256, epoch, ...drift } } : {}) });
   const attemptPath = path.join(restricted, `growth-resume-attempt-${epoch.oid}-${epoch.nonce}.json`);
@@ -337,10 +396,15 @@ async function round({ reservationStatus = strictRoundReservation, action = "exe
   if (brokenPath) files.set(brokenPath, Buffer.from(artifactFault.kind === "null" ? "null" : artifactFault.kind === "array" ? "[]" : "{"));
   let attemptFile;
   const context = {
-    ...path, assert, createHash, isStrictRoundReservation, matchesLoadReservation, strictRoundReservation, assertRoundBootstrap, assessRoundEvidence, assertGrowthPlanEvidence, assertGrowthPackages, assertResumeLineage, verifyResumeSchema, assessResumeStages, assertNoWriteRetryLineage, assertRoundPopulationBinding, assertFullExecutionAdmitted, process: proc, moduleUrl: "file:///C:/project/scripts/migration/run-local-round.mjs",
+    ...path, assert, createHash, isRoundReceiptPath, isStrictRoundReservation, matchesLoadReservation, strictRoundReservation,
+    assertSameDirectoryResumeSafe,
+    inspectRoundResumeOutput: directory => directory === oldOut && oldReceiptRef ? { sequence: 1, previousReceipt: oldReceiptRef } : directory === out && sameOutputReceipt ? { sequence: 1, previousReceipt: sameOutputReceipt, stageNames: sameOutputStages.map(stage => stage.name) } : null,
+    reserveRoundResumeOutput: directory => { const attempt = path.join(directory, "round-attempt-000001"); directories.push(attempt); return attempt; },
+    assertRoundBootstrap, assessRoundEvidence, assertGrowthPlanEvidence, assertGrowthPackages, assertResumeLineage, verifyResumeSchema, assessResumeStages, assertNoWriteRetryLineage, assertRoundPopulationBinding, assertFullExecutionAdmitted, process: proc, moduleUrl: "file:///C:/project/scripts/migration/run-local-round.mjs",
     targetConnection, loadRegisteredTarget: credentialPath => { const file = path.join(path.dirname(credentialPath), "resource.json"); return normalizeRegisteredTarget(JSON.parse(String(files.get(file))), file); },
     inspectRoundDependencyLayout: () => ({ sourceRoot: "C:\\fixture", scriptDir: "C:\\fixture\\scripts\\migration", moduleDirs: ["C:\\fixture\\node_modules"] }),
     assertRoundDependencyProof: () => { if (dependencyDrift === "proof") throw Error("ROUND_DEPENDENCY_PROOF_CHANGED"); },
+    assertBoundRunnerScripts: () => { if (dependencyDrift === "runner") throw Error("ROUND_DEPENDENCY_RUNNER_CHANGED"); },
     probeRoundDependencies: () => ({ closureSha256: dependencyDrift === "closure" ? "d".repeat(64) : "c".repeat(64), entrypoints: 32 }),
     fileURLToPath: url => path.normalize(String(url).slice("file:///".length)),
     createRequire: () => () => ({ Client: class { async connect() { liveCommands.push("connect"); } async query(sql) {
@@ -349,7 +413,10 @@ async function round({ reservationStatus = strictRoundReservation, action = "exe
       if (sql.startsWith("SELECT hash")) return { rows: (resumeCase.startsWith("schema-drift") ? ["3".repeat(64)] : schema).map(hash => ({ hash })) };
       if (sql === "ROLLBACK" && resumeCase.endsWith("rollback-fail")) throw Error("fixture rollback failure");
       return { command: sql }; } async end() { liveCommands.push("end"); if (resumeCase === "schema-close-fail") throw Error("fixture close failure"); } } }),
-    lstatSync: () => ({ isFile: () => true, isSymbolicLink: () => false }), existsSync: file => files.has(file), mkdirSync: file => directories.push(file),
+    lstatSync: file => {
+      if (sameOutputStopped && path.dirname(file) === out && ["path-execution", "readback.json", "growth-plan", "growth-execution", "growth-readback", "readback-final.json"].includes(path.basename(file)) && !files.has(file)) throw Object.assign(Error("missing fixture output"), { code: "ENOENT" });
+      return { isFile: () => true, isSymbolicLink: () => false };
+    }, existsSync: file => files.has(file), mkdirSync: file => directories.push(file),
     readFileSync(file) { reads.push(file); if (file === brokenPath && artifactFault.kind === "read-error") throw Object.assign(Error("original artifact read failure"), { code: "EIO" }); return files.get(file) ?? Buffer.from("fixture-tool"); }, readdirSync: () => Object.keys(buildFiles),
     spawnSync: () => ({ stdout: "S-1-5-21-1", status: 0 }),
     spawn(_node, args) {
@@ -389,11 +456,12 @@ async function round({ reservationStatus = strictRoundReservation, action = "exe
       }
       return { once(event, callback) { if (event === "close") callback(exit, null); } };
     },
-    openSync(file) {
+    openSync(file, flags) {
       if (file === attemptPath) {
         if (resumeCase === "reservation-race" || files.has(file)) throw Object.assign(Error("already exists"), { code: "EEXIST" });
         attemptFile = file; files.set(file, Buffer.alloc(0)); return 9;
       }
+      logOpens.push({ file, flags });
       return 1;
     },
     writeFileSync(fd, bytes) { if (fd === 9) files.set(attemptFile, Buffer.from(bytes)); },
@@ -413,8 +481,10 @@ async function round({ reservationStatus = strictRoundReservation, action = "exe
     catch (cause) { if (cause !== "EXIT") inspectError = cause; }
     return { error: inspectError, exit: proc.exitCode, report: logs[start] };
   };
-  return { directories, error, exit: proc.exitCode, logs, reads, spawns, liveCommands, oldCheckpointUnchanged: oldCheckpointPath ? Buffer.compare(oldCheckpointBytes, files.get(oldCheckpointPath)) === 0 : undefined,
-    receipt: files.get(path.join(out, "round-receipt.json")), attemptPresent: files.has(attemptPath), inspectCurrent };
+  return { directories, error, exit: proc.exitCode, logs, reads, spawns, liveCommands, logOpens, oldCheckpointUnchanged: oldCheckpointPath ? Buffer.compare(oldCheckpointBytes, files.get(oldCheckpointPath)) === 0 : undefined,
+    receipt: files.get(path.join(out, ...(sameOutputStopped ? ["round-attempt-000001"] : []), "round-receipt.json")),
+    sameOutputOriginal: sameOutputReceipt && { receipt: files.get(sameOutputReceipt.path), sha256: sameOutputReceipt.sha256, stdout: files.get(path.join(out, "core-and-funds.stdout.log")), stderr: files.get(path.join(out, "core-and-funds.stderr.log")), artifacts: Object.fromEntries(sameOutputArtifacts.map(name => [name, files.get(path.join(out, name))])) },
+    attemptPresent: files.has(attemptPath), inspectCurrent };
 }
 
 test("round validation and execution require the exact strict reservation before output", async () => {
@@ -456,9 +526,9 @@ test("R06 round validation accepts its exact reservation and rejects target or s
   assert.deepEqual(nonStrict.spawns, []);
   const wrongSchema = await round({ reservationStatus: "ROUND06_BOOTSTRAP_RESERVED", action: "validate", bootstrapDrift: "schema" });
   assert.match(wrongSchema.error.message, /ROUND_BOOTSTRAP_TARGET_OR_EVIDENCE_MISMATCH:schema/);
-  for (const dependencyDrift of ["missing", "proof", "closure"]) {
+  for (const dependencyDrift of ["missing", "proof", "runner", "closure"]) {
     const invalid = await round({ reservationStatus: "ROUND06_BOOTSTRAP_RESERVED", action: "validate", dependencyDrift });
-    assert.match(invalid.error.message, /ROUND_DEPENDENCY_(BINDING_REQUIRED|PROOF_CHANGED|CLOSURE_CHANGED)/);
+    assert.match(invalid.error.message, /ROUND_DEPENDENCY_(BINDING_REQUIRED|PROOF_CHANGED|RUNNER_CHANGED|CLOSURE_CHANGED)/);
     assert.deepEqual(invalid.spawns, []);
   }
   for (const drift of [{ manifestSha256: "wrong" }, { epoch: { ...epoch, oid: "43" } }, { epoch: { ...epoch, nonce: "wrong" } }]) {
@@ -466,6 +536,16 @@ test("R06 round validation accepts its exact reservation and rejects target or s
     assert.match(r.error.message, /FRESH_REGISTERED_RESOURCE/);
     assert.deepEqual(r.spawns, []);
   }
+});
+
+test("R07 fresh-schema inputs require the same isolated instance and dependency closure", async () => {
+  const instance={host:"127.0.0.1",port:55433,systemIdentifier:"123"};
+  const valid=await round({reservationStatus:"ROUND07_BOOTSTRAP_RESERVED",action:"validate",instance});
+  assert.ifError(valid.error);assert.equal(valid.logs[0].status,"SEALED_INPUTS_VALIDATED_TARGET_NOT_RUN");assert.deepEqual(valid.spawns,[]);
+  const noDependencies=await round({reservationStatus:"ROUND07_BOOTSTRAP_RESERVED",action:"validate",instance,dependencyDrift:"missing"});
+  assert.match(noDependencies.error.message,/ROUND_DEPENDENCY_BINDING_REQUIRED/);assert.deepEqual(noDependencies.spawns,[]);
+  const nonStrict=await round({reservationStatus:"ROUND07_BOOTSTRAP_RESERVED",action:"validate",instance,strict:false});
+  assert.match(nonStrict.error.message,/ROUND07_STRICT_BATCH_REQUIRED/);assert.deepEqual(nonStrict.spawns,[]);
 });
 
 test("round stops at a failed loader and never spawns later stages", async () => {
@@ -479,6 +559,42 @@ test("round stops at a failed loader and never spawns later stages", async () =>
   assert.equal(receipt.failure.stage, "core-and-funds");
   assert.equal(receipt.completion.status, "INCOMPLETE");
   assert.equal(receipt.completion.growth, "NOT_PLANNED");
+});
+
+test("same-directory recovery keeps the prior receipt and writes exclusive attempt logs", async () => {
+  const result = await round({ sameOutputStopped: true });
+  assert.ifError(result.error);
+  assert.equal(result.exit, 1);
+  assert.equal(sha(result.sameOutputOriginal.receipt), result.sameOutputOriginal.sha256);
+  assert.equal(result.sameOutputOriginal.stdout.toString(), "old stdout");
+  assert.equal(result.sameOutputOriginal.stderr.toString(), "old stderr");
+  const resumed = JSON.parse(result.receipt);
+  assert.equal(resumed.sameDirectoryResume.previousReceipt.sha256, result.sameOutputOriginal.sha256);
+  assert.equal(resumed.status, "STOPPED_PRESERVE_ORIGINAL_KEYS_AND_RECEIPTS");
+  assert.equal(result.logOpens.length, 2);
+  assert.ok(result.logOpens.every(item => item.flags === "wx" && item.file.includes("round-attempt-000001")));
+});
+
+test("same-directory recovery stops before any spawn after paths and readback succeeded and growth failed", async () => {
+  const stages = ["core-and-funds", "display", "opening", "holdings", "paths", "readback"].map(name => ({ name, status: "ACK" }));
+  stages.push({ name: "growth-prepare", status: "INTENT" });
+  const result = await round({ sameOutputStopped: true, sameOutputStages: stages, sameOutputArtifacts: ["path-execution", "readback.json", "growth-plan"] });
+  assert.match(result.error.message, /ROUND_SAME_OUTPUT_STAGE_REQUIRES_SEPARATE_RECOVERY/);
+  assert.deepEqual(result.spawns, []);
+  assert.deepEqual(result.directories, []);
+  assert.equal(sha(result.sameOutputOriginal.receipt), result.sameOutputOriginal.sha256);
+  assert.equal(result.sameOutputOriginal.artifacts["readback.json"].toString(), "old readback.json");
+  assert.equal(result.sameOutputOriginal.artifacts["path-execution"].toString(), "old path-execution");
+  assert.equal(result.sameOutputOriginal.stdout.toString(), "old stdout");
+});
+
+test("same-directory recovery refuses an existing later-stage artifact even if the receipt has no later stage", async () => {
+  const result = await round({ sameOutputStopped: true, sameOutputArtifacts: ["readback.json"] });
+  assert.match(result.error.message, /ROUND_SAME_OUTPUT_ARTIFACT_REQUIRES_SEPARATE_RECOVERY:readback\.json/);
+  assert.deepEqual(result.spawns, []);
+  assert.deepEqual(result.directories, []);
+  assert.equal(result.sameOutputOriginal.artifacts["readback.json"].toString(), "old readback.json");
+  assert.equal(sha(result.sameOutputOriginal.receipt), result.sameOutputOriginal.sha256);
 });
 
 test("missing or cross-target bootstrap evidence stops before output and execution", async () => {
@@ -555,6 +671,22 @@ test("full completion requires actual stage acknowledgements, target checkpoints
     assert.equal(result.status, "INCOMPLETE", issue);
     assert.ok(result.issues.includes(issue), `${issue}: ${result.issues}`);
   }
+});
+
+test("R07 accepts an excluded guarantee only with an empty source plan and independent target proof", () => {
+  const d=completedEvidence();d.input.target.bootstrapReservation="ROUND07_BOOTSTRAP_RESERVED";delete d.checkpoint.phases.guaranteeHistory;
+  d.checkpoint.fundsSupplement={coverage:{guarantees:{policyExcluded:true,selected:0,planned:0,writer:0,listingDeposit:{targetRows:0}}}};
+  d.checkpoint.generatedPhases={guaranteeHistory:{rows:0,sha256:sha("[]")},financeEmptyCoverage:{schema:"zzsh.empty-coverage-chunks.v1",rows:2,chunks:[{},{}]}};
+  d.readback.ownerGuaranteeHistory={policyExcluded:true,expected:0,actual:0};
+  d.readback.emptyFinancialCoverage={sourceRebuilt:true,expected:2,readable:2,actual:2,chunks:2};
+  assert.deepEqual(assessRoundEvidence(d),{status:"COMPLETE",dataset:"PASS",growth:"PASS",issues:[]});
+  for(const change of [x=>{x.checkpoint.fundsSupplement.coverage.guarantees.writer=1},x=>{x.checkpoint.generatedPhases.guaranteeHistory.sha256="0".repeat(64)},x=>{x.checkpoint.generatedPhases.guaranteeHistory.rows=1}]){
+    const bad=structuredClone(d);change(bad);assert(assessRoundEvidence(bad).issues.includes("ROUND_PHASE_INCOMPLETE:guaranteeHistory"));
+  }
+  const badReadback=structuredClone(d);badReadback.readback.ownerGuaranteeHistory.actual=1;
+  assert(assessRoundEvidence(badReadback).issues.includes("ROUND_GUARANTEE_EXCLUSION_READBACK_UNCONFIRMED"));
+  const badChunks=structuredClone(d);badChunks.readback.emptyFinancialCoverage.sourceRebuilt=false;
+  assert(assessRoundEvidence(badChunks).issues.includes("ROUND_EMPTY_COVERAGE_READBACK_UNCONFIRMED"));
 });
 
 test("every growth package is checked before apply, including later missing or changed packages", () => {
@@ -634,7 +766,7 @@ test("null and malformed stage entries are incomplete rather than an assessment 
 test("growth-only continuation preserves original failure/checkpoint and proves data before and after new growth", async () => {
   const r = await round({ action: "resume-growth", resumeCase: "success" });
   assert.ifError(r.error);
-  assert.equal(r.exit, undefined);
+  assert.equal(r.exit, undefined, r.receipt?.toString());
   assert.equal(r.oldCheckpointUnchanged, true);
   const receipt = JSON.parse(r.receipt);
   assert.equal(receipt.mode, "RESUME_GROWTH");

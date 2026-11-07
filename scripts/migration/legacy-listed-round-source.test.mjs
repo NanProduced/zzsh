@@ -13,6 +13,12 @@ function fixture(){
 }
 const check=x=>validateRoundSourceProof(x.binding,x.round,x.core,x.audit,x.observed,canonical);
 test('accepts a complete round/source/build/actor binding',()=>assert.equal(check(fixture()),true));
+test('R07 may omit an overlay only when both the round and audit report it absent',()=>{
+ const x=fixture(),instance={host:'127.0.0.1',port:55433,systemIdentifier:'12345'};
+ x.round.target.bootstrapReservation='ROUND07_BOOTSTRAP_RESERVED';x.round.target.instance=instance;x.observed.instance=instance;x.observed.resource.instance=instance;
+ delete x.round.holdingOverlay;delete x.observed.holdingOverlaySha256;delete x.audit.skinOverlaySha256;
+ assert.equal(check(x),true);x.audit.skinOverlaySha256='an-unmatched-overlay';assert.throws(()=>check(x),/LISTED_ROUND_BINDING_CHANGED/);
+});
 test('rejects altered target, role, actor, source, build, policy or guarantee mode',()=>{
  const mutations=[x=>x.observed.oid='999',x=>x.observed.nonce='b'.repeat(24),x=>x.observed.resource.roles.migration.oid='78',x=>x.observed.actorSha256='other',x=>x.observed.sourceReceiptSha256='other',x=>x.observed.accountFileSha256='other',x=>x.observed.userFileSha256='other',x=>x.observed.displayFileSha256='other',x=>x.observed.pathsFileSha256='other',x=>x.observed.holdingOverlaySha256='other',x=>x.observed.compiled['supply/content-hash']='other',x=>x.observed.policyBundleSha256='other',x=>x.observed.policyAuthoritySha256='other',x=>x.observed.helperSha256='other',x=>x.observed.loaderSha256='other',x=>x.observed.creditGuaranteeEnabled=true];
  for(const mutate of mutations){const x=fixture();mutate(x);assert.throws(()=>check(x),/LISTED_ROUND_(BINDING|BUILD)_CHANGED/)}

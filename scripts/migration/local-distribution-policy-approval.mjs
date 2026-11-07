@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 
 /** Directly calls the full security handler; no HTTP listener or alternate approval path is created. */
-export async function runNativeDistributionApproval({ handleAdminSecurity, security, plan, actors, origin, totp, verifyBuild, verifyResource, summary, save }) {
+export async function runNativeDistributionApproval({ handleAdminSecurity, security, plan, actors, origin, totp, verifyBuild, verifyResource, summary, save, recoveringRejectedRequest=false }) {
   const [first, second] = actors;
   assert(first && second && first.userId !== second.userId && first.username.toLowerCase() !== second.username.toLowerCase() && first.cookie && second.cookie, "TWO_DISTINCT_ADMIN_SESSIONS_REQUIRED");
   assert(plan.scope === "NATIVE" && plan.approvalBody?.operationCode === "distribution.policy.publish" && plan.approvalBody?.payload?.config?.scope === "NATIVE", "NATIVE_POLICY_PLAN_REQUIRED");
@@ -41,6 +41,7 @@ export async function runNativeDistributionApproval({ handleAdminSecurity, secur
   };
   let template = await getTemplate();
   if (!template || Array.isArray(template.candidates) && template.candidates.length === 0) {
+    assert(!recoveringRejectedRequest, "RECOVERY_ACKNOWLEDGED_TEMPLATE_MISSING");
     const expectedVersion = template ? template.version : 0;
     assert(Number.isSafeInteger(expectedVersion) && expectedVersion >= 0, "DISTRIBUTION_APPROVAL_TEMPLATE_VERSION_UNKNOWN");
     await call(first, "configure-template", "/templates/update", { operationCode, triggerCondition, candidateUsernames: [second.username], expectedVersion }, key + ":template");

@@ -143,7 +143,21 @@ test('FIN-02 is an alternative original-balance scenario, not a second opening f
  const dir=temp(),r=run(['plan','--manifest',join(FIXTURE_PATH,'manifest-fin02.json'),'--out',dir]);assert.equal(r.status,0,r.stderr);const plan=load(join(dir,'plan.json')),ready=plan.domains.finance.openings.filter(x=>x.status==='READY');assert.equal(ready.length,1);assert.equal(ready[0].availableCents,'110');assert.equal(ready[0].coveredCount,1);assert.equal(ready[0].flowSum,'NOT_COMPUTED');assert.equal(ready[0].openingIdMeaning,'SCENARIO_LABEL_NOT_DATABASE_ID');
 });
 
-import { sourceAdultEvidence, sourceOrderPlan, sourceFinanceObservation, sourceContinuation, assertSourceSupplementFields } from "./local-source-adapter.mjs";
+import { classifyLegacyRegistrationTime, compareLegacyRegistrationFact, sourceAdultEvidence, sourceAccountPlan, sourceOrderPlan, sourceFinanceObservation, sourceContinuation, summarizeLegacyDashboardSources, matchesLegacyAccountMetricAudit, legacyAccountCaptureProof, matchesLegacyAccountCapture, legacyOrderCaptureProof, matchesLegacyOrderCapture, assertSourceSupplementFields } from "./local-source-adapter.mjs";
+
+test("registration source and independent target fact distinguish missing, invalid and mismatched time", () => {
+  const epoch = value => new Date(Number(value) * 1000).toISOString();
+  for (const value of [null,undefined,0,"0"]) assert.equal(classifyLegacyRegistrationTime(value,epoch),"MISSING");
+  for (const value of ["", "-1", "2026-02-30T00:00:00Z", "9999999999999999999999999999"]) assert.equal(classifyLegacyRegistrationTime(value,epoch),"INVALID");
+  assert.equal(classifyLegacyRegistrationTime("1700000000",epoch),"VALID");
+  assert.equal(classifyLegacyRegistrationTime("2026-11-06T00:00:00.000Z",epoch),"VALID");
+  const fact={userId:"user-1",legacyId:"1",registeredAt:new Date("2026-11-06T00:00:00.000Z")};
+  assert.equal(compareLegacyRegistrationFact("2026-11-06T00:00:00.000Z","1",fact),"MATCH");
+  assert.equal(compareLegacyRegistrationFact(null,"1",{...fact,registeredAt:null}),"MATCH");
+  assert.equal(compareLegacyRegistrationFact(null,"1",fact),"TARGET_TIME_MISMATCH");
+  assert.equal(compareLegacyRegistrationFact("2026-11-06T00:00:00.000Z","2",fact),"TARGET_LEGACY_ID_MISMATCH");
+  assert.equal(compareLegacyRegistrationFact(null,"1",null),"TARGET_FACT_MISSING");
+});
 
 test("source adapter: a display supplement must preserve exact base fields, nulls and decimal strings", () => {
   const base={id:"1",amount:"100000000.00000001",nullable:null,updated_at:"100"};
@@ -172,13 +186,51 @@ test("source adapter: source-proven adult and minor remain different facts", () 
 test("source adapter: deleted historical orders keep the flag without becoming a new transaction", () => {
   const users = new Map([["1",{userId:"owner",sourceDigest:"a".repeat(64)}],["2",{userId:"renter",sourceDigest:"b".repeat(64)}]]);
   const accounts = new Map([["3",{sourceDigest:"c".repeat(64),businessNo:null,gameCode:"delta"}]]);
-  const modules = {orderRead:{LEGACY_ORDER_READ_SOURCE_FIELDS:["id","is_delete","pay_money","detain_money"]},contentHash:{canonicalize:JSON.stringify}};
-  const raw = {id:"4",is_delete:"1",sale_user_id:"1",user_id:"2",accounts_id:"3",pay_money:"87.00",detain_money:"5.00",team_id:"PRIVATE_OLD_TEAM"};
+  const modules = {orderRead:{LEGACY_ORDER_READ_SOURCE_FIELDS:["id","is_delete","pay_money","detain_money","compensation"]},contentHash:{canonicalize:JSON.stringify}};
+  const raw = {id:"4",is_delete:"1",sale_user_id:"1",user_id:"2",accounts_id:"3",pay_money:"87.00",detain_money:"5.00",compensation:"12.30",team_id:"PRIVATE_OLD_TEAM"};
   const plan = sourceOrderPlan(raw,users,accounts,modules,"source-proof");
   assert.equal(plan.ready,true);assert.equal(plan.sourceDeleted,true);
   assert.equal(plan.source.row.pay_money,"87.00");assert.equal(plan.source.row.detain_money,"5.00");
+  assert.equal(plan.source.row.compensation,"12.30");
   assert.equal(Object.hasOwn(plan.source.row,"team_id"),false);assert.equal(raw.team_id,"PRIVATE_OLD_TEAM");
   assert.equal(Object.hasOwn(plan,"paymentConfirmed"),false);
+});
+
+test("account metric flag remains a bound capture fact and is not invented when missing", () => {
+  const users = new Map([["1",{userId:"owner",sourceDigest:"a".repeat(64)}],["2",{userId:"renter",sourceDigest:"b".repeat(64)}]]);
+  const games = new Map([["1","delta"]]), modules={contentHash:{canonicalize:JSON.stringify},planner:{listingSnapshot:()=>({snapshot:null,sourceUpdatedAt:null,missing:[]})},orderRead:{LEGACY_ORDER_READ_SOURCE_FIELDS:["id","is_delete","share_money","commission_money","pay_time"]}};
+  const account={id:"3",user_id:"1",game_id:"1",status:"4",is_delete:"0",no:"A",is_full_payout:"1"};
+  const order={id:"4",is_delete:"0",sale_user_id:"1",user_id:"2",accounts_id:"3",share_money:"12.34",commission_money:"5.67",pay_time:"1779469800"};
+  const accountPlan=sourceAccountPlan(account,users,modules,"capture",games), plan=sourceOrderPlan(order,users,new Map([["3",accountPlan]]),modules,"capture");
+  assert.deepEqual(plan.account.metricSourceFields,{is_full_payout:"1"});assert.equal(plan.account.sourceDigest,accountPlan.sourceDigest);
+  assert.deepEqual(plan.source.row,{id:"4",is_delete:"0",share_money:"12.34",commission_money:"5.67",pay_time:"1779469800"});
+  const accountProof=legacyAccountCaptureProof(account,JSON.stringify),orderProof=legacyOrderCaptureProof(order,modules.orderRead.LEGACY_ORDER_READ_SOURCE_FIELDS,JSON.stringify);
+  assert.equal(matchesLegacyAccountCapture(accountProof,accountPlan,JSON.stringify),true);assert.equal(matchesLegacyOrderCapture(orderProof,plan,JSON.stringify),true);
+  assert.equal(matchesLegacyAccountCapture(accountProof,{...accountPlan,metricSourceFields:{is_full_payout:"0"}},JSON.stringify),false);
+  assert.equal(matchesLegacyOrderCapture(orderProof,{...plan,source:{...plan.source,row:{...plan.source.row,share_money:"0.00"}}},JSON.stringify),false);
+  const missing=sourceAccountPlan(Object.fromEntries(Object.entries(account).filter(([key])=>key!=="is_full_payout")),users,modules,"capture",games);
+  assert.deepEqual(missing.metricSourceFields,{});
+  const nullFact=sourceAccountPlan({...account,is_full_payout:null},users,modules,"capture",games);assert.deepEqual(nullFact.metricSourceFields,{is_full_payout:null});
+});
+
+test("dashboard capture report distinguishes null and uncaptured facts; readback rejects changed or duplicate audit",()=>{
+  const receipt={files:{orders:{fields:["pay_time","commission_money"]},accounts:{fields:["is_full_payout"]}},physicalColumns:{la_order:["share_money","commission_money","pay_time"],la_rental_accounts:["is_full_payout"]}};
+  const report=summarizeLegacyDashboardSources([{commission_money:"0.00",pay_time:"0"},{commission_money:null,pay_time:null}],[{is_full_payout:"1"},{}],receipt);
+  assert.deepEqual(report.shareMoney,{captured:false,physical:true,present:0,null:0,missing:2});
+  assert.equal(report.commissionMoney.null,1);assert.equal(report.accountFullPayoutAtCapture.missing,1);
+  assert.equal(report.accountFlagMeaning,"ACCOUNT_STATE_AT_SOURCE_CAPTURE_NOT_PROVEN_AT_ORDER_PAYMENT");
+  const drift=summarizeLegacyDashboardSources([],[],{files:{distributionOrders:{fields:["id","new_unmapped"]}},physicalColumns:{la_distribution_order:["id","new_unmapped","new_uncaptured"]}},[{id:"1"}]);
+  assert.deepEqual(drift.distributionColumns.physicalNotCaptured,["new_uncaptured"]);assert.deepEqual(drift.distributionColumns.capturedNotProjected,["new_unmapped"]);
+  const expected={schema:"legacy-account-metric-source-v1",fields:{is_full_payout:"1"}},audit={bindingDigest:"digest",accountMetricSource:expected};
+  assert.equal(matchesLegacyAccountMetricAudit([audit],expected,"digest",JSON.stringify),true);
+  for(const list of [[],[audit,audit],[{bindingDigest:"wrong",accountMetricSource:expected}],[{bindingDigest:"digest"}],[{bindingDigest:"digest",accountMetricSource:{...expected,fields:{is_full_payout:"0"}}}]])
+    assert.equal(matchesLegacyAccountMetricAudit(list,expected,"digest",JSON.stringify),false);
+});
+
+test("distribution source adapter preserves all captured original columns without computing earnings",()=>{
+ const raw={id:"1",sn:"dist",user_id:"2",order_type:"1",order_id:"3",order_goods_id:"4",goods_id:"5",sku_id:"6",earnings:"7.50",level_id:"8",level:"1",ratio:"9.5",status:"3",settle_time:"0",is_delete:"1",create_time:"10",update_time:"11",delete_time:"12"};
+ const observed=sourceFinanceObservation("distributionOrders",raw);
+ assert.deepEqual(observed.row,raw);assert.equal(observed.kind,"HISTORICAL_DISTRIBUTION");
 });
 
 test("source adapter: missing parties are isolated rather than manufactured", () => {
@@ -216,6 +268,8 @@ test("source capture plans include invitation codes and current seasonal facts w
   const capture=join(HERE,"capture-local-source.mjs");
   const run=(flags=[])=>{const result=spawnSync(process.execPath,[capture,"--plan",...flags],{encoding:"utf8",timeout:5000});assert.equal(result.status,0,result.stderr);return JSON.parse(result.stdout);};
   const base=run();assert.ok(base.fieldsByDomain.users.includes("code"));assert.equal(base.dbConnections,0);
+  for(const field of ["share_money","commission_money","pay_time"])assert.ok(base.fieldsByDomain.orders.includes(field));
+  assert.ok(base.fieldsByDomain.accounts.includes("is_full_payout"));
   assert.deepEqual(base.fieldsByDomain.accounts,base.fieldsByDomain.accountDisplay);
   for(const field of ["agent_skin","is_demulan","is_sayyid","awm_number","helmet","armor","is_next_season_pass","price_per","price_vip","ratio_type","create_time"])assert.ok(base.fieldsByDomain.accounts.includes(field));
   assert.ok(base.fieldsByDomain.skinDictionaryData.includes("type_id"));assert.ok(base.fieldsByDomain.orderAfter.includes("order_id"));

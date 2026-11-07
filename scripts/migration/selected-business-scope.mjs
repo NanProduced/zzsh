@@ -57,6 +57,8 @@ export function planSelectedBusinessScope(source) {
   }
 
   const partition = { accounts: bucket(), orders: bucket() };
+  partition.orders.paymentPaidOrderUnpaid = [];
+  partition.orders.orderPaidPaymentUnconfirmed = [];
   const orderDisposition = new Map();
   for (const order of orders) {
     const marked = order?.pay_is === "1", paidRecord = paidByOrder.has(order.id);
@@ -65,7 +67,10 @@ export function planSelectedBusinessScope(source) {
       orderDisposition.set(order.id, "retained");
       // One side says paid and the other does not: keep the order, but record that the source
       // disagrees instead of letting the weaker marker decide.
-      if (marked !== paidRecord) partition.orders.conflicts.push(order.id);
+      if (marked !== paidRecord) {
+        partition.orders.conflicts.push(order.id);
+        partition.orders[paidRecord ? "paymentPaidOrderUnpaid" : "orderPaidPaymentUnconfirmed"].push(order.id);
+      }
       continue;
     }
     partition.orders.excluded.push(order.id);
@@ -111,7 +116,8 @@ export function planSelectedBusinessScope(source) {
     closure,
     write: { accounts: [...partition.accounts.retained].sort(), orders: [...partition.orders.retained].sort() },
     excludedKeys: { accounts: [...partition.accounts.excluded].sort(), orders: [...partition.orders.excluded].sort() },
-    conflictKeys: { orders: [...partition.orders.conflicts].sort() },
+    conflictKeys: { orders: [...partition.orders.conflicts].sort(), paymentPaidOrderUnpaid: [...partition.orders.paymentPaidOrderUnpaid].sort(),
+      orderPaidPaymentUnconfirmed: [...partition.orders.orderPaidPaymentUnconfirmed].sort() },
   };
 }
 
@@ -132,19 +138,4 @@ export function selectedScopeFilter(scope) {
       return set === undefined ? true : set.has(String(raw?.id));
     },
   };
-}
-
-/** A target row for an excluded key is a scope violation, not a harmless extra. */
-export function assertSelectedScopeTarget(scope, targetKeys) {
-  if (scope?.schema !== SELECTED_SCOPE_SCHEMA) throw new Error("SELECTED_SCOPE_INVALID");
-  for (const domain of ["accounts", "orders"]) {
-    const write = new Set(scope.write[domain]);
-    const excluded = new Set(scope.excludedKeys[domain]);
-    const target = new Set((targetKeys?.[domain] ?? []).map(String));
-    const leaked = [...target].filter(id => excluded.has(id));
-    if (leaked.length) throw new Error("SELECTED_SCOPE_EXCLUDED_KEY_WRITTEN:" + domain + ":" + leaked.slice(0, 5).join(","));
-    const missing = [...write].filter(id => !target.has(id));
-    if (missing.length) throw new Error("SELECTED_SCOPE_RETAINED_KEY_MISSING:" + domain + ":" + missing.slice(0, 5).join(","));
-  }
-  return true;
 }

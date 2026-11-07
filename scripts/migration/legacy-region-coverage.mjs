@@ -55,3 +55,25 @@ export function parseRegionPairsTsv(text) {
   }
   return rows;
 }
+
+/** Keep the approved filter baseline and replace only region vocabulary and retired skin grouping. */
+export function deriveR07FilterConfig(base, wordList) {
+  if (base?.schemaVersion !== 1 || !Array.isArray(base.fields) || !Array.isArray(base.sorts)
+    || !Array.isArray(wordList?.pairs) || !wordList.pairs.length || wordList.pairs.length > 512) throw new Error("FILTER_BASELINE_INVALID");
+  const config=structuredClone(base),keys=config.fields.map(field=>field.key);
+  if(new Set(keys).size!==keys.length || config.fields.some(field=>!Number.isSafeInteger(field.order)||field.order<0||field.order>998)) throw new Error("FILTER_BASELINE_INVALID");
+  const pairs=new Set();for(const pair of wordList.pairs){
+    if(!Array.isArray(pair)||pair.length!==2||pair.some(value=>typeof value!=="string"||!value.trim()))throw new Error("REGION_WORD_LIST_INVALID");
+    const key=JSON.stringify(pair);if(pairs.has(key))throw new Error("REGION_WORD_LIST_DUPLICATE");pairs.add(key);
+  }
+  let next=Math.max(0,...config.fields.map(field=>field.order))+1;
+  let regions=config.fields.find(field=>field.key==="regions");
+  if(!regions){regions={key:"regions",operator:"PAIRS_ANY",label:"地区",enabled:true,order:next++};config.fields.push(regions);}
+  if(regions.operator!=="PAIRS_ANY"||["items","options","levels","categoryIds","ownerKinds"].some(key=>regions[key]!==undefined))throw new Error("REGION_FILTER_INVALID");
+  regions.enabled=true;regions.regions=wordList.pairs.map(([province,city])=>({province,city}));
+  let skins=config.fields.find(field=>field.key==="skinGroups");
+  if(!skins){skins={key:"skinGroups",operator:"GROUPS",label:"皮肤",enabled:true,order:next++};config.fields.push(skins);}
+  if(skins.operator!=="GROUPS"||["items","options","levels","regions"].some(key=>skins[key]!==undefined))throw new Error("SKIN_FILTER_INVALID");
+  delete skins.categoryIds;skins.enabled=true;skins.ownerKinds=["AGENT","FIREARM","MELEE_TYPE"];
+  return config;
+}

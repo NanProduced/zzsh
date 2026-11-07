@@ -26,6 +26,8 @@ import {
   resourceItemDisplayName,
   resourceUnitShort,
   resolveSkinOwner,
+  skinGroupKey,
+  skinGroupOptions,
   toggleSkinId,
   withFilterChange,
   normalizeListingQuery,
@@ -195,8 +197,9 @@ function MarketView({ initialFilters }: { initialFilters: ListingFilters }) {
   const rejectedSharePathRef = useRef<string | null>(null);
   const activeMetadata = metadata.status === "ready" ? metadata.data : null;
   const filterKey = listingFilterKey(filters, activeMetadata);
-  const configuredSkinCategoryIds = new Set(activeMetadata?.fields.find((entry) => entry.key === "skinGroups")?.categoryIds ?? []);
-  const skinCategories = (catalog.data?.categories ?? []).filter((category) => configuredSkinCategoryIds.has(category.id));
+  const skinField = activeMetadata?.fields.find((entry) => entry.key === "skinGroups");
+  const skinCategories = skinGroupOptions(skinField, catalog.data);
+  const skinTypeMode = Boolean(skinField?.ownerKinds);
   const resolvedSkinCategoryId = skinCategories.some((category) => category.id === activeSkinCategoryId)
     ? activeSkinCategoryId
     : skinCategories[0]?.id ?? "";
@@ -328,7 +331,7 @@ function MarketView({ initialFilters }: { initialFilters: ListingFilters }) {
     skinSearchController.current = controller;
     setSkinSearchCatalog({ status: "loading", data: null });
     const timer = window.setTimeout(() => {
-      const params = new URLSearchParams({ limit: "30", categoryId });
+      const params = new URLSearchParams({ limit: "30", [skinTypeMode ? "ownerKind" : "categoryId"]: categoryId });
       if (query) params.set("q", query);
       if (resolvedSkinOwner) params.set("ownerId", resolvedSkinOwner);
       if (resolvedSkinRarity) params.set("rarityCode", resolvedSkinRarity);
@@ -349,7 +352,7 @@ function MarketView({ initialFilters }: { initialFilters: ListingFilters }) {
       if (skinSearchController.current === controller) skinSearchController.current = null;
       if (requestId === skinSearchSequence.current) skinSearchSequence.current += 1;
     };
-  }, [filters.game, normalizedSkinSearch, resolvedSkinCategoryId, resolvedSkinOwner, resolvedSkinRarity, skinSearchAttempt]);
+  }, [filters.game, normalizedSkinSearch, resolvedSkinCategoryId, resolvedSkinOwner, resolvedSkinRarity, skinSearchAttempt, skinTypeMode]);
 
   useEffect(() => {
     const page = skinSearchCatalog.data;
@@ -393,6 +396,9 @@ function MarketView({ initialFilters }: { initialFilters: ListingFilters }) {
     const changed = listingFiltersUrl(reconciled) !== listingFiltersUrl(filters);
     if (changed) {
       rejectedSharePathRef.current = null;
+      if (metadata.data.skinGrouping === "TYPE" && filters.filters.skinGroups?.some((group) => group.categoryId)) {
+        setRecoveryNotice("旧链接中的皮肤分类已停用，请重新选择皮肤；其他有效条件已保留。");
+      }
       setFilters(reconciled);
     }
     if (!initialRestoreDone.current) {
@@ -477,7 +483,7 @@ function MarketView({ initialFilters }: { initialFilters: ListingFilters }) {
     skinSearchBusy.current = true;
     setLoadingMoreSkinSearch(true);
     try {
-      const params = new URLSearchParams({ limit: "30", categoryId, cursor });
+      const params = new URLSearchParams({ limit: "30", [skinTypeMode ? "ownerKind" : "categoryId"]: categoryId, cursor });
       if (query) params.set("q", query);
       if (resolvedSkinOwner) params.set("ownerId", resolvedSkinOwner);
       if (resolvedSkinRarity) params.set("rarityCode", resolvedSkinRarity);
@@ -507,7 +513,7 @@ function MarketView({ initialFilters }: { initialFilters: ListingFilters }) {
         if (skinSearchController.current === controller) skinSearchController.current = null;
       }
     }
-  }, [filters.game, normalizedSkinSearch, resolvedSkinCategoryId, resolvedSkinOwner, resolvedSkinRarity, skinSearchCatalog.data]);
+  }, [filters.game, normalizedSkinSearch, resolvedSkinCategoryId, resolvedSkinOwner, resolvedSkinRarity, skinSearchCatalog.data, skinTypeMode]);
 
   const game = catalog.data?.game ?? games.data?.find((entry) => entry.id === filters.game) ?? null;
   const filterCount = activeListingFilterCount(filters);
@@ -660,7 +666,7 @@ function MarketView({ initialFilters }: { initialFilters: ListingFilters }) {
         tags.push({
           id: `skin-${skinId}`,
           label: `皮肤: ${skinName}`,
-          onRemove: () => navigate(toggleSkinId(filters, group.categoryId, skinId)),
+          onRemove: () => navigate(toggleSkinId(filters, skinGroupKey(group), skinId)),
         });
       }
     }

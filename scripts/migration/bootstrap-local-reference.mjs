@@ -1,10 +1,11 @@
 import { createHash, randomBytes } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { createRequire } from "node:module";
-import { advisoryLockSql, loadRegisteredTarget, maintenanceConnection, targetConnection } from "./local-target-registry.mjs";
+import { advisoryLockSql, assertLiveTarget, loadRegisteredTarget, maintenanceConnection, targetConnection, targetIdentityQuery } from "./local-target-registry.mjs";
 import { execFileSync } from "node:child_process";
 import { LocalSession, localOrigin, totp, validateProfile, writePrivate } from "../local-auth.mjs";
+import { verifySkinRetirementPackage } from "./derive-business-reference-skin-retirement.mjs";
 const processStarted = performance.now(), processStartedAt = new Date().toISOString();
 const require = createRequire(import.meta.url), { Client, Pool } = require("pg");
 const args = process.argv.slice(2), option = name => { const i = args.indexOf(name); return i < 0 ? undefined : args[i + 1]; };
@@ -36,11 +37,14 @@ const source = JSON.parse(bytes);
 const business = source.kind === BUSINESS_KIND;
 if ((!business && source.kind !== "REVIEWED_REFERENCE_SNAPSHOT_NOT_BUSINESS_MIGRATION") || source.transactionRollback !== true)
     throw new Error("REFERENCE_SNAPSHOT_NOT_REVIEWED");
+if (business && source.catalogModel !== undefined && source.catalogModel !== "OWNER_KIND_V2") throw new Error("BUSINESS_CATALOG_PROFILE_UNSUPPORTED");
+const skinV2 = business && source.catalogModel === "OWNER_KIND_V2";
+const expectedBusinessTables = skinV2 ? new Set([...businessTables].filter(key => key !== "zzsh_supply.skin_category")) : businessTables;
 const allowed = new Set(["zzsh_auth_admin.user", "zzsh_auth_admin.account", "zzsh_auth_admin.session", "zzsh_auth_admin.twoFactor", "zzsh_iam.admin_security", "zzsh_iam.admin_role", "zzsh_iam.admin_permission", "zzsh_iam.admin_role_permission", "zzsh_iam.admin_user_role", "zzsh_iam.admin_user_permission", "zzsh_iam.approval_template", "zzsh_iam.approval_template_candidate", "zzsh_iam.approval_request", "zzsh_iam.approval_request_candidate", "zzsh_iam.approval_decision", "zzsh_iam.approval_execution", "zzsh_iam.membership_growth_policy", "zzsh_iam.im_identity_mapping", "zzsh_iam.im_support_settings", "zzsh_supply.profile_avatar", "zzsh_supply.game", "zzsh_supply.game_service_operation", "zzsh_supply.skin_category", "zzsh_supply.firearm_classification", "zzsh_supply.firearm_alias", "zzsh_supply.full_payout_terms_version", "zzsh_supply.billable_item", "zzsh_supply.skin_rarity", "zzsh_supply.skin_owner", "zzsh_supply.firearm", "zzsh_supply.skin", "zzsh_supply.admin_supply_scope", "zzsh_supply.price_version", "zzsh_supply.price_line", "zzsh_supply.term_version", "zzsh_supply.term_option", "zzsh_supply.agreement_version", "zzsh_supply.rule_release", "zzsh_supply.media_upload_intent", "zzsh_supply.media_asset", "zzsh_content.legal_document_version"]);
 const tables = new Map();
 for (const descriptor of source.tables) {
     const key = descriptor.schema + "." + descriptor.table;
-    if (tables.has(key) || !(business ? businessTables : allowed).has(key) || descriptor.file !== basename(descriptor.file))
+    if (tables.has(key) || !(business ? expectedBusinessTables : allowed).has(key) || descriptor.file !== basename(descriptor.file))
         throw new Error("REFERENCE_TABLE_NOT_ALLOWED");
     const raw = readFileSync(join(root, descriptor.file));
     if (sha(raw) !== descriptor.sha256)
@@ -53,7 +57,15 @@ for (const descriptor of source.tables) {
         continue;
     tables.set(key, { ...table, key, sql: q(descriptor.schema) + "." + q(descriptor.table) });
 }
-if (business) validateBusinessPackage(tables, source);
+if (skinV2) verifySkinRetirementPackage(bytes, name => {
+    if (typeof name !== "string" || name !== basename(name)) throw new Error("UNSAFE_REFERENCE_IDENTIFIER");
+    const file = join(root, name), stat = lstatSync(file);
+    if (!stat.isFile() || stat.isSymbolicLink()) throw new Error("UNSAFE_SKIN_LINEAGE_FILE");
+    return readFileSync(file);
+});
+if (business && !skinV2 && tables.get("zzsh_supply.skin")?.columns?.filter(column => column.name === "category_id").length !== 1)
+    throw new Error("BUSINESS_CATALOG_PROFILE_INVALID");
+if (business) validateBusinessPackage(tables, source, expectedBusinessTables);
 else if (tables.get("zzsh_auth_admin.user")?.rows.length !== 5 || tables.get("zzsh_iam.admin_security")?.rows.length !== 5) throw new Error("REVIEWED_FIVE_ADMIN_IDENTITY_CLOSURE_REQUIRED");
 if (args.includes("--verify")) {
     console.log(JSON.stringify({ status: "REFERENCE_FILES_VERIFIED", kind: source.kind, tables: tables.size, rows: [...tables.values()].reduce((sum, table) => sum + table.rows.length, 0), connections: 0, credentialReads: 0, mediaBytesVerified: false, ...(!business ? { applicationStatus: "SUPERSEDED_NOT_FOR_APPLICATION" } : {}) }));
@@ -77,7 +89,7 @@ if (registered.database !== "zzsh_test_regression" || registered.oid !== expecte
 const receiptFile = resolve(option("--receipt") ?? "");
 if (!receiptFile.toLowerCase().startsWith("e:\\zzsh-local-state\\restricted\\") || existsSync(receiptFile))
     throw new Error("NEW_PRIVATE_RECEIPT_REQUIRED");
-const result = { status: "STARTED", kind: source.kind, manifestSha256: sha(bytes), database: registered.database, oid: expectedOid, nonce: expectedNonce, startedAt: processStartedAt, tables: [], expectedDifferences: [], pending: [], sourceIdsPreserved: true, sourceRawUnchanged: true, ...(business ? { maintenanceAdminId, attributionPolicy: "non-null source admin FKs rebound; original attribution remains in sealed source", mediaBytesVerified: false } : {}) };
+const result = { status: "STARTED", kind: source.kind, manifestSha256: sha(bytes), database: registered.database, oid: expectedOid, nonce: expectedNonce, ...(registered.instance ? {instance:registered.instance} : {}), startedAt: processStartedAt, tables: [], expectedDifferences: [], pending: [], sourceIdsPreserved: true, sourceRawUnchanged: true, ...(business ? { maintenanceAdminId, attributionPolicy: "non-null source admin FKs rebound; original attribution remains in sealed source", mediaBytesVerified: false } : {}) };
 const cfg = { connectionTimeoutMillis: 3000, statement_timeout: 15000, lock_timeout: 500 };
 const maintenance = new Client(maintenanceConnection(registered, { ...cfg, user: "zzsh", password: readFileSync(process.env.DB_PASSWORD_FILE ?? join(ROOT, "apps/api/.secrets/postgres_password"), "utf8").trim(), applicationName: "core-reference-bootstrap-lock" }));
 const pool = new Pool(targetConnection(registered, { ...cfg, user: credentials.migration.name, password: credentials.migration.password, max: 1, applicationName: "core-reference-bootstrap" }));
@@ -165,9 +177,15 @@ try {
     if (!held)
         throw new Error("REGRESSION_RESOURCE_BUSY");
     client = await pool.connect();
-    const identity = (await client.query("SELECT d.oid::text,pg_get_userbyid(d.datdba) owner,shobj_description(d.oid,'pg_database') marker,current_user role,r.oid::text role_oid,r.rolsuper,r.rolcreatedb,r.rolcreaterole,r.rolinherit,r.rolbypassrls,current_setting('zzsh.regression_run') nonce FROM pg_database d JOIN pg_roles r ON r.rolname=current_user WHERE d.datname=current_database()")).rows[0];
-    if (identity.oid !== expectedOid || identity.nonce !== expectedNonce || identity.owner !== "zzsh" || identity.marker !== "zzsh:regression-test:v1" || identity.role !== credentials.migration.name || identity.role_oid !== credentials.migration.oid || identity.rolsuper || identity.rolcreatedb || identity.rolcreaterole || identity.rolinherit || identity.rolbypassrls)
+    const identity = (await client.query(targetIdentityQuery())).rows[0];
+    assertLiveTarget(registered, identity);
+    if (identity.oid !== expectedOid || identity.nonce !== expectedNonce || identity.owner !== "zzsh" || identity.marker !== "zzsh:regression-test:v1" || identity.role !== credentials.migration.name || identity.role_oid !== credentials.migration.oid)
         throw new Error("REFERENCE_TARGET_IDENTITY_CHANGED");
+    if (skinV2) {
+        const schema = (await client.query(`SELECT to_regclass('zzsh_supply.skin_category') IS NULL AS "categoryTableAbsent",
+            NOT EXISTS(SELECT 1 FROM pg_attribute WHERE attrelid=to_regclass('zzsh_supply.skin') AND attname='category_id' AND attnum>0 AND NOT attisdropped) AS "categoryColumnAbsent"`)).rows[0];
+        if (schema?.categoryTableAbsent !== true || schema?.categoryColumnAbsent !== true) throw new Error("BUSINESS_CATALOG_PROFILE_SCHEMA_MISMATCH");
+    }
     const admin = tables.get("zzsh_auth_admin.user");
     if (admin) {
         const ids = admin.rows.map(row => JSON.parse(row).id);
@@ -288,8 +306,8 @@ finally {
     console.log(JSON.stringify({ status: result.status, tables: result.tables.length, commitAck: result.commitAck, rollbackAck: result.rollbackAck, unlock: result.unlock, error: result.error }));
 }
 
-function validateBusinessPackage(tables, manifest) {
-    if (manifest.source?.database !== "zzsh_dev_daily" || manifest.source?.oid !== "2400547" || manifest.source?.read_only !== "on" || manifest.clientClosed !== true || !Array.isArray(manifest.foreignKeys) || tables.size !== businessTables.size)
+function validateBusinessPackage(tables, manifest, expectedTables = businessTables) {
+    if (manifest.source?.database !== "zzsh_dev_daily" || manifest.source?.oid !== "2400547" || manifest.source?.read_only !== "on" || manifest.clientClosed !== true || !Array.isArray(manifest.foreignKeys) || tables.size !== expectedTables.size)
         throw new Error("BUSINESS_PACKAGE_SOURCE_OR_CLOSURE_REQUIRED");
     const rows = new Map();
     for (const table of tables.values()) {
@@ -386,7 +404,8 @@ async function captureBusinessPackage() {
 async function initializeFormalAdmins() {
     const stage = option("--stage"), inputFile = option("--input"), credentialFile = option("--credentials"), output = option("--out");
     if (!["bosses", "staff"].includes(stage) || !inputFile || !credentialFile || !output) throw new Error("FORMAL_INITIALIZATION_INPUT_REQUIRED");
-    const input = JSON.parse(readFileSync(inputFile, "utf8"));
+    const inputBytes = readFileSync(inputFile), input = JSON.parse(inputBytes);
+    if (input.target?.instance && (!/^[a-f0-9]{64}$/.test(option("--input-sha") ?? "") || sha(inputBytes) !== option("--input-sha"))) throw new Error("FORMAL_INITIALIZATION_INPUT_SHA_CHANGED");
     if (input.kind !== "FORMAL_LOCAL_ADMIN_INITIALIZATION_V1" || input.numberingDigits !== 5 || input.target?.database !== "zzsh_test_regression" || !input.target.oid || !input.target.nonce || !/^[a-z][a-z0-9_-]{0,63}$/.test(input.resource ?? "")) throw new Error("FORMAL_INITIALIZATION_CONTRACT_REQUIRED");
     const aliases = ["boss-one", "boss-two", "operations", "support"];
     if (Object.keys(input.names ?? {}).sort().join() !== [...aliases].sort().join() || aliases.some(alias => typeof input.names[alias] !== "string" || !input.names[alias].trim() || input.names[alias].length > 120 || input.names[alias].startsWith("ROOT_REQUIRED_"))) throw new Error("EXACT_FOUR_ADMIN_NAMES_REQUIRED");
@@ -396,9 +415,19 @@ async function initializeFormalAdmins() {
     if (["3100", "3101", "3102", "4220", "4221", "4222"].includes(new URL(apiOrigin).port)) throw new Error("ISOLATED_INITIALIZATION_API_REQUIRED");
     const out = resolve(output), restricted = realpathSync("E:/zzsh-local-state/restricted");
     if (dirname(out).toLowerCase() !== restricted.toLowerCase() || !/^data-first-bootstrap-[a-z0-9-]+$/i.test(basename(out)) || existsSync(out)) throw new Error("NEW_RESTRICTED_BOOTSTRAP_DIRECTORY_REQUIRED");
-    const registered = loadRegisteredTarget(credentialFile), credentials = JSON.parse(readFileSync(credentialFile));
+    const registered = loadRegisteredTarget(credentialFile), credentialBytes = readFileSync(credentialFile), credentials = JSON.parse(credentialBytes);
+    if (registered.instance && (input.stage !== stage || !/^[a-f0-9]{64}$/.test(input.credentialsSha256 ?? "") || sha(credentialBytes) !== input.credentialsSha256)) throw new Error("FORMAL_INITIALIZATION_STAGE_OR_CREDENTIAL_CHANGED");
     if (registered.database !== input.target.database || registered.oid !== input.target.oid || registered.nonce !== input.target.nonce || registered.pendingReset || credentials.migration?.name !== registered.migrationRole || (registered.migrationRoleOid !== null && credentials.migration?.oid !== registered.migrationRoleOid)) throw new Error("REGISTERED_RESOURCE_CHANGED");
-    const profile = stage === "bosses" ? { version: 1, localTest: true, resource: input.resource, actors: {} } : validateProfile(JSON.parse(readFileSync(input.bossProfileFile)));
+    if (JSON.stringify(input.target.instance ?? null) !== JSON.stringify(registered.instance)
+      || JSON.stringify(binding.resource?.instance ?? null) !== JSON.stringify(registered.instance)) throw new Error("FORMAL_INITIALIZATION_INSTANCE_CHANGED");
+    if (registered.instance && (binding.status !== "R07_BOOTSTRAP_API_LISTENING" || binding.port !== 4242
+      || JSON.stringify(binding.actualResource?.instance ?? null) !== JSON.stringify(registered.instance) || binding.actualResource?.read_only !== "on"
+      || String(binding.actualResource?.migration_role_oid) !== registered.migrationRoleOid || binding.financialCommandCapabilities !== false
+      || binding.workersEnabled !== false || binding.formalAppMounted !== true || binding.maintenanceLockReleased !== true || binding.maintenanceClosed !== true)) throw new Error("FORMAL_INITIALIZATION_RUNTIME_CHANGED");
+    if (registered.instance && stage === "bosses" && (!/^[a-f0-9]{64}$/.test(input.bootstrapSecretSha256 ?? "") || sha(readFileSync(input.bootstrapSecretFile)) !== input.bootstrapSecretSha256)) throw new Error("FORMAL_INITIALIZATION_SECRET_CHANGED");
+    const profileBytes = stage === "staff" ? readFileSync(input.bossProfileFile) : null;
+    if (registered.instance && stage === "staff" && (!/^[a-f0-9]{64}$/.test(input.bossProfileSha256 ?? "") || sha(profileBytes) !== input.bossProfileSha256)) throw new Error("FORMAL_INITIALIZATION_PROFILE_CHANGED");
+    const profile = stage === "bosses" ? { version: 1, localTest: true, resource: input.resource, actors: {} } : validateProfile(JSON.parse(profileBytes));
     if (stage === "staff" && (profile.resource !== input.resource || Object.keys(profile.actors).sort().join() !== "boss-one,boss-two" || Object.values(profile.actors).some(actor => actor.realm !== "admin" || actor.origin !== adminOrigin))) throw new Error("EXACT_NEW_BOSS_PROFILE_REQUIRED");
     const receipt = { status: "STARTED", stage, target: input.target, serverBindingSha256: sha(bindingBytes), startedAt: processStartedAt, steps: [], credentialsOutput: join(out, "profile.json"), credentialsPrinted: false, oldAdminRowsImported: false, imProvisionerConfigured: false };
     const responses = [];
@@ -451,7 +480,8 @@ async function initializeFormalAdmins() {
         if (!held) throw new Error("REGRESSION_RESOURCE_BUSY");
         await db.connect();
         await db.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY"); begun = true;
-        const identity = (await db.query("SELECT current_database() database,d.oid::text,shobj_description(d.oid,'pg_database') marker,current_setting('zzsh.regression_run') nonce,current_user role,r.oid::text role_oid FROM pg_database d JOIN pg_roles r ON r.rolname=current_user WHERE d.datname=current_database()")).rows[0];
+        const identity = (await db.query(targetIdentityQuery())).rows[0];
+        assertLiveTarget(registered, identity);
         if (identity.database !== input.target.database || identity.oid !== input.target.oid || identity.nonce !== input.target.nonce || identity.marker !== "zzsh:regression-test:v1" || identity.role !== credentials.migration.name || identity.role_oid !== credentials.migration.oid) throw new Error("FORMAL_INITIALIZATION_TARGET_CHANGED");
         const admins = (await db.query('SELECT u.id,u.username,s.is_boss,s.status FROM zzsh_auth_admin."user" u JOIN zzsh_iam.admin_security s ON s.admin_user_id=u.id ORDER BY u.username')).rows;
         if (stage === "bosses" && admins.length !== 0 || stage === "staff" && (admins.length !== 2 || admins.some(row => !row.is_boss || row.status !== "ACTIVE" || !Object.values(profile.actors).some(actor => actor.userId === row.id)))) throw new Error("FORMAL_INITIALIZATION_EXPECTED_ADMIN_STATE_REQUIRED");

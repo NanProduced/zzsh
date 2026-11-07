@@ -1,7 +1,7 @@
 import { strict as assert } from "node:assert";
 import test from "node:test";
 
-import { admitTestDatabase, fixtureAgreementAcceptance, installedBusinessTruncate, type TestDatabaseAdmission } from "./database-test-support";
+import { admitTestDatabase, assertEmptyIsolatedBusinessData, fixtureAgreementAcceptance, installedBusinessTruncate, type TestDatabaseAdmission } from "./database-test-support";
 
 const MARKER = "zzsh:order-reservation-test:v1";
 const base: TestDatabaseAdmission = {
@@ -97,18 +97,60 @@ test("fixture consent uses the exact server-confirmed reference", () => {
   assert.throws(() => fixtureAgreementAcceptance({}));
 });
 
+const legalPresent = { version: "zzsh_content.legal_document_version", acceptance: "zzsh_content.document_acceptance" };
+const legalAbsent = { version: null, acceptance: null };
+const categoryBefore0159 = { skin: "zzsh_supply.skin", category: "zzsh_supply.skin_category", category_column: true };
+const categoryAfter0159 = { skin: "zzsh_supply.skin", category: null, category_column: false };
+function cleanupFixture(skin: Record<string, unknown>, legal: Record<string, unknown> = legalPresent, occupied?: string) {
+  const calls: { sql: string; names?: string[] }[] = [];
+  const pool = { query: async (sql: string, values?: [string[]]) => {
+    calls.push({ sql, names: values?.[0] });
+    assert.match(sql, /^SELECT/);
+    if (sql.includes("AS category_column")) return { rows: [skin] };
+    if (sql.includes("AS acceptance")) return { rows: [legal] };
+    if (sql.includes("FROM unnest")) return { rows: values![0].map(name => ({ name })) };
+    if (sql.includes("AS row_count")) return { rows: occupied ? [{ table_name: occupied, row_count: 1 }] : [{ table_name: "zzsh_supply.skin", row_count: 0 }], rowCount: 1 };
+    throw new Error("UNEXPECTED_CLEANUP_QUERY");
+  } };
+  return { pool: pool as never, calls };
+}
+
 test("latest cleanup includes both immutable legal children before auth parents", async () => {
-  const sql = await installedBusinessTruncate({ query: async () => ({ rows: [{ version: "zzsh_content.legal_document_version", acceptance: "zzsh_content.document_acceptance" }] }) } as never);
+  const sql = await installedBusinessTruncate(cleanupFixture(categoryAfter0159).pool);
   assert.match(sql, /"document_acceptance"/); assert.match(sql, /"legal_document_version"/);
   assert.ok(sql.indexOf('"document_acceptance"') < sql.indexOf('"zzsh_auth_user"'));
+  assert.doesNotMatch(sql, /"skin_category"|legacy_owner_guarantee_(?:observation|coverage)/);
 });
 
 test("historical-prefix cleanup omits tables proven absent", async () => {
-  const sql = await installedBusinessTruncate({ query: async () => ({ rows: [{ version: null, acceptance: null }] }) } as never);
+  const sql = await installedBusinessTruncate(cleanupFixture(categoryBefore0159, legalAbsent).pool);
   assert.doesNotMatch(sql, /"document_acceptance"|"legal_document_version"/);
+  assert.match(sql, /"zzsh_supply"\."skin_category"/);
 });
 
 test("partial or unobserved legal schema cannot be silently cleaned", async () => {
-  await assert.rejects(() => installedBusinessTruncate({ query: async () => ({ rows: [{ version: "present", acceptance: null }] }) } as never));
-  await assert.rejects(() => installedBusinessTruncate({ query: async () => ({ rows: [] }) } as never));
+  await assert.rejects(() => installedBusinessTruncate(cleanupFixture(categoryAfter0159, { version: "present", acceptance: null }).pool), /legal cleanup schema is incomplete/);
+  await assert.rejects(() => installedBusinessTruncate(cleanupFixture(categoryAfter0159, {}).pool), /legal cleanup schema must be observed/);
+});
+
+test("partial or unobserved skin category schema is refused", async () => {
+  for (const skin of [
+    { ...categoryBefore0159, category_column: false }, { ...categoryAfter0159, category_column: true },
+    { ...categoryAfter0159, skin: null }, { skin: "zzsh_supply.skin", category: null }, {},
+  ]) await assert.rejects(() => installedBusinessTruncate(cleanupFixture(skin).pool), /skin (?:category )?cleanup schema/);
+});
+
+test("order empty-target preflight counts the actually installed old and new inventories", async () => {
+  for (const [skin, hasCategory] of [[categoryBefore0159, true], [categoryAfter0159, false]] as const) {
+    const fixture = cleanupFixture(skin);
+    await assertEmptyIsolatedBusinessData(fixture.pool);
+    const names = fixture.calls.find(call => call.sql.includes("FROM unnest"))!.names!;
+    assert.equal(names.includes('"zzsh_supply"."skin_category"'), hasCategory);
+    assert.ok(names.includes('"zzsh_supply"."skin"'));
+    assert.ok(fixture.calls.every(call => !/\b(?:TRUNCATE|DELETE|UPDATE|INSERT)\b/i.test(call.sql)));
+    const countQuery = fixture.calls.find(call => call.sql.includes("AS row_count"))!.sql;
+    assert.equal(countQuery.includes('"zzsh_supply"."skin_category"'), hasCategory);
+  }
+  const occupied = cleanupFixture(categoryBefore0159, legalPresent, "zzsh_supply.skin_category");
+  await assert.rejects(() => assertEmptyIsolatedBusinessData(occupied.pool), /registered test target contains rows/);
 });

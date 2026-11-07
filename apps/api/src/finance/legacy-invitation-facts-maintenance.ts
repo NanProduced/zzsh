@@ -3,7 +3,7 @@ import {recordAudit} from '../auth/security-core';
 import {authorizeFinanceMaintenance,isReviewedFinanceMaintenanceResource} from './personal-finance-maintenance';
 import {canonicalize} from '../supply/content-hash';
 import {ensureOnlyFields,invalid,conflict,forbidden,withIdempotency,fingerprintRequest} from '../supply/supply-util';
-import {prepareLegacyInvitationFacts,invitationFactHash,invitationFactTypes,invitationFactSourceDigest,invitationFactCodeId,legacyInvitationFactsOperation,legacyInvitationCountsOperation,type LegacyInvitationFactsInput} from './legacy-invitation-facts';
+import {prepareLegacyInvitationFacts,invitationFactHash,invitationFactTypes,invitationFactSourceDigest,invitationFactCodeId,legacyInvitationFactsOperation,legacyInvitationCountsOperation,projectLegacyInvitationQualification,type LegacyInvitationFactsInput,type LegacyInvitationRawFact,type LegacyInvitationFactSource} from './legacy-invitation-facts';
 
 import {readLegacyDistributionQualifications} from './admin-distribution-read';
 import {readDistributionPolicyRowInTransaction} from './distribution-policy-store';
@@ -11,7 +11,10 @@ import {readDistributionPolicyRowInTransaction} from './distribution-policy-stor
 type Actor={userId:string;sessionId:string;requestId:string};
 export type LegacyInvitationFactsReview={ref:string;attempt:string;actor:{userId:string;sessionId:string};resource:{host:'127.0.0.1';port:number;database:string;oid:number;owner:string;ownerOid:number;marker:string;role:string;roleOid:number};notBefore:string;expiresAt:string;sourceDigest:string;bodyDigest:string;phase:'IMPORT'|'COUNTS'|'QUALIFY';nonce?:string};
 export type LegacyInvitationFactsAdmission=Readonly<{kind:'REVIEWED_LEGACY_INVITATION_FACTS'}>;
-const admissions=new WeakMap<object,{review:LegacyInvitationFactsReview;recoverOnly:boolean}>(),hex=/^[a-f0-9]{64}$/;
+export type LegacyQualificationIndex=Readonly<{kind:'REVIEWED_LEGACY_QUALIFICATION_INDEX'}>;
+type IndexedFact={sourceDigest:string;projection:ReturnType<typeof projectLegacyInvitationQualification>};
+type QualificationIndexState={client:PoolClient;actor:string;context:string;xid:string;events:string;facts:Map<string,IndexedFact|null>};
+const admissions=new WeakMap<object,{review:LegacyInvitationFactsReview;recoverOnly:boolean;qualificationIndex?:LegacyQualificationIndex}>(),qualificationIndexes=new WeakMap<object,QualificationIndexState>(),hex=/^[a-f0-9]{64}$/;
 const factAction='distribution.legacy_facts.imported',countAction='distribution.legacy_facts.counts_closed';
 function transaction(c:PoolClient){if(c.getTransactionStatus()!=='T')throw conflict('Caller-owned invitation fact transaction required');}
 function reviewShape(r:LegacyInvitationFactsReview){
@@ -38,10 +41,55 @@ async function admitted(c:PoolClient,actor:Actor,input:LegacyInvitationFactsInpu
  const a=admissions.get(scope);if(!a||a.review.phase!==phase||!recover&&a.recoverOnly||a.review.bodyDigest!==invitationFactHash(input)||a.review.sourceDigest!==invitationFactHash(input.source))throw forbidden('Original invitation fact admission differs');
  await resource(c,actor,a.review,recover);await authorizeFinanceMaintenance(c,actor);return a.review;
 }
+function qualificationContext(review:LegacyInvitationFactsReview){const {bodyDigest:_,...context}=review;return canonicalize(context);}
+function qualificationActor(actor:Actor){return canonicalize(actor);}
+async function assertQualificationIndex(c:PoolClient,actor:Actor,review:LegacyInvitationFactsReview,index:LegacyQualificationIndex){
+ transaction(c);const state=qualificationIndexes.get(index);
+ if(!state||state.client!==c||state.actor!==qualificationActor(actor)||state.context!==qualificationContext(review))throw forbidden('Qualification index scope differs');
+ const row=(await c.query(`/* qualification index transaction */ SELECT pg_current_xact_id_if_assigned()::text AS xid,
+  EXISTS(SELECT 1 FROM pg_locks WHERE pid=pg_backend_pid() AND locktype='relation' AND relation='zzsh_iam.audit_event'::regclass AND mode='ShareLock' AND granted) AS source_locked`)).rows[0];
+ if(!row||row.xid!==state.xid||row.source_locked!==true)throw conflict('Qualification index transaction or source lock changed');
+ const events=(await c.query("/* qualification index source versions */ SELECT id,xmin::text AS version FROM zzsh_iam.audit_event WHERE action='distribution.legacy_facts.imported' AND outcome='SUCCESS' ORDER BY id")).rows;
+ if(canonicalize(events)!==state.events)throw conflict('Original qualification audit source changed');
+ return state;
+}
+
 /** Internal maintenance assembly only. This opaque token cannot be supplied through request JSON. */
-export async function bindReviewedLegacyInvitationFacts(c:PoolClient,actor:Actor,review:LegacyInvitationFactsReview,mode:'execute'|'recover'='execute'):Promise<LegacyInvitationFactsAdmission>{
+export async function bindReviewedLegacyInvitationFacts(c:PoolClient,actor:Actor,review:LegacyInvitationFactsReview,mode:'execute'|'recover'='execute',qualificationIndex?:LegacyQualificationIndex):Promise<LegacyInvitationFactsAdmission>{
  reviewShape(review);if(!['execute','recover'].includes(mode))throw invalid('Original invitation admission mode required');await resource(c,actor,review,mode==='recover');await authorizeFinanceMaintenance(c,actor);
- const value=Object.freeze({kind:'REVIEWED_LEGACY_INVITATION_FACTS' as const});admissions.set(value,{review:JSON.parse(canonicalize(review)),recoverOnly:mode==='recover'});return value;
+ if(qualificationIndex){if(mode!=='execute'||review.phase!=='QUALIFY')throw forbidden('Qualification index is limited to reviewed execution');await assertQualificationIndex(c,actor,review,qualificationIndex);}
+ const value=Object.freeze({kind:'REVIEWED_LEGACY_INVITATION_FACTS' as const});admissions.set(value,{review:JSON.parse(canonicalize(review)),recoverOnly:mode==='recover',qualificationIndex});return value;
+}
+
+/** The audit source and graph stay locked until the caller commits or rolls back this local transaction. */
+export async function prepareReviewedLegacyQualificationIndex(c:PoolClient,actor:Actor,scope:LegacyInvitationFactsAdmission):Promise<LegacyQualificationIndex>{
+ const admission=admissions.get(scope);if(!admission||admission.recoverOnly||admission.review.phase!=='QUALIFY'||admission.review.resource.database!=='zzsh_test_regression')throw forbidden('Reviewed local qualification admission required');
+ const review=admission.review;await resource(c,actor,review);await authorizeFinanceMaintenance(c,actor);await lockActor(c,actor);
+ await c.query("SELECT pg_advisory_xact_lock(hashtextextended('zzsh:invitation-graph:v1',0))");
+ await c.query('LOCK TABLE zzsh_iam.audit_event IN SHARE MODE');
+ const xid=(await c.query('/* qualification index pin transaction */ SELECT pg_current_xact_id()::text AS xid')).rows[0]?.xid;
+ if(typeof xid!=='string'||!/^\d+$/.test(xid))throw conflict('Qualification transaction identity unavailable');
+ const events=(await c.query("/* qualification index source versions */ SELECT id,xmin::text AS version FROM zzsh_iam.audit_event WHERE action='distribution.legacy_facts.imported' AND outcome='SUCCESS' ORDER BY id")).rows;
+ if(!events.length||events.some(row=>typeof row.id!=='string'||typeof row.version!=='string'||!/^\d+$/.test(row.version)||BigInt(row.version)===(BigInt(xid)&4294967295n)))throw conflict('Original qualification audit source is not stable');
+ const facts=new Map<string,IndexedFact|null>();let selected=0;
+ for(const event of events){
+  const rows=(await c.query("/* qualification index source packet */ SELECT details->'source' AS source,details->'facts' AS facts,jsonb_typeof(details->'facts') AS facts_type,details#>>'{source,receiptSha256}' AS receipt FROM zzsh_iam.audit_event WHERE id=$1 AND xmin::text=$2",[event.id,event.version])).rows;
+  if(rows.length!==1)throw conflict('Original qualification audit packet changed');const row=rows[0];if(row.receipt!==review.sourceDigest)continue;selected++;
+  if(row.facts_type===null)continue;if(row.facts_type!=='array'||!Array.isArray(row.facts))throw conflict('Original qualification audit facts are invalid');
+  for(const raw of row.facts){const fact=raw as LegacyInvitationRawFact,id=fact?.userId;if(typeof id!=='string')continue;
+   if(facts.has(id)){facts.set(id,null);continue;}
+   try{const source=row.source as LegacyInvitationFactSource,sourceDigest=invitationFactSourceDigest(source,fact);facts.set(id,{sourceDigest,projection:projectLegacyInvitationQualification(source,fact,sourceDigest)});}catch{facts.set(id,null);}
+  }
+ }
+ if(!selected)throw conflict('Original qualification audit source is missing');
+ const index=Object.freeze({kind:'REVIEWED_LEGACY_QUALIFICATION_INDEX' as const});qualificationIndexes.set(index,{client:c,actor:qualificationActor(actor),context:qualificationContext(review),xid,events:canonicalize(events),facts});
+ await assertQualificationIndex(c,actor,review,index);return index;
+}
+
+export async function readReviewedLegacyQualificationIndex(c:PoolClient,actor:Actor,review:LegacyInvitationFactsReview,index:LegacyQualificationIndex,ids:string[]){
+ const state=await assertQualificationIndex(c,actor,review,index),result=new Map<string,ReturnType<typeof projectLegacyInvitationQualification>>();
+ const rows=(await c.query("/* qualification index participants */ SELECT user_id,source_digest FROM zzsh_order.distribution_participant WHERE source_type='LEGACY_MYSQL' AND user_id=ANY($1::text[])",[ids])).rows;
+ for(const row of rows){const fact=state.facts.get(row.user_id);if(fact&&fact.sourceDigest===row.source_digest)result.set(row.user_id,fact.projection);}return result;
 }
 const digestFingerprint=(operation:string,bodyDigest:string)=>fingerprintRequest(operation,undefined,{bodyDigest});
 export type LegacyQualificationBatch={
@@ -66,13 +114,13 @@ export async function qualifyReviewedLegacyParticipants(c:PoolClient,actor:Actor
  await verify();await lockActor(c,actor);
  await c.query("SELECT pg_advisory_xact_lock(hashtextextended('zzsh:invitation-graph:v1',0))");
  const operation='distribution.legacy-qualification.v1',key='legacy-qualification-'+bodyDigest;
- return withIdempotency(c,{realm:'admin',principalId:actor.userId,operation},key,digestFingerprint(operation,bodyDigest),verify,async()=>{
+ const result=await withIdempotency(c,{realm:'admin',principalId:actor.userId,operation},key,digestFingerprint(operation,bodyDigest),verify,async()=>{
   const locked=await c.query('SELECT id FROM zzsh_auth_user."user" WHERE id=ANY($1::text[]) ORDER BY id FOR UPDATE',[ids]);
   if(locked.rowCount!==ids.length)throw conflict('Original qualification subject missing');
   const {policy}=await readDistributionPolicyRowInTransaction(c,true,input.scope);
   if(!policy||policy.versionId!==input.policyId||policy.digest!==input.policyDigest||policy.config.schema!=='distribution-policy.v3'||!policy.config.enabled||policy.config.legacySource.receiptSha256!==review.sourceDigest)throw conflict('Reviewed active legacy policy differs');
   const codes=new Set(policy.config.levels.map(l=>l.code));
-  const original=await readLegacyDistributionQualifications(c,ids,review.sourceDigest);
+  const original=admission.qualificationIndex?await readReviewedLegacyQualificationIndex(c,actor,review,admission.qualificationIndex,ids):await readLegacyDistributionQualifications(c,ids,review.sourceDigest);
   for(const s of input.subjects){const fact=original.get(s.userId);if(!fact||fact.eligibility!=='ELIGIBLE'||fact.commissionFrozen!==s.frozen||s.levelCode!=='legacy_'+fact.levelId||!codes.has(s.levelCode))throw conflict('Original qualification flags or active level differ');}
   const updated=await c.query(`UPDATE zzsh_order.distribution_participant p SET eligibility='ELIGIBLE',level_code=x."levelCode",policy_version_id=$2,revision=p.revision+1
     FROM jsonb_to_recordset($1::jsonb) x("userId" text,"sourceDigest" text,revision bigint,"levelCode" text,frozen boolean)
@@ -84,6 +132,7 @@ export async function qualifyReviewedLegacyParticipants(c:PoolClient,actor:Actor
   await verify();
   return {status:200,body:{bodyDigest,policyId:input.policyId,participants:ids.length,financialEffects:false}};
  });
+ if(admission.qualificationIndex)await assertQualificationIndex(c,actor,review,admission.qualificationIndex);return result;
 }
 
 const fingerprint=(operation:string,input:LegacyInvitationFactsInput)=>digestFingerprint(operation,invitationFactHash(input));

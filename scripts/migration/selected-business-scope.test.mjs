@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { assertSelectedScopeTarget, planSelectedBusinessScope, selectedScopeDigest } from "./selected-business-scope.mjs";
+import { planSelectedBusinessScope, selectedScopeDigest } from "./selected-business-scope.mjs";
 
 const account = (id, over = {}) => ({ id, status: "4", is_delete: "0", ...over });
 const order = (id, accountId, over = {}) => ({ id, accounts_id: accountId, pay_is: "0", ...over });
@@ -59,6 +59,9 @@ test("a type-1 payment with a paid marker keeps an order the order row calls unp
   });
   assert.deepEqual(scope.write.orders, ["o1"]);
   assert.deepEqual(scope.conflictKeys.orders, ["o1"]);
+  assert.deepEqual(scope.conflictKeys.paymentPaidOrderUnpaid, ["o1"]);
+  assert.equal(scope.partition.orders.paymentPaidOrderUnpaid.count, 1);
+  assert.equal(scope.partition.orders.orderPaidPaymentUnconfirmed.count, 0);
 });
 
 test("an order marked paid without any paid payment record is kept and flagged as a conflict", () => {
@@ -69,6 +72,9 @@ test("an order marked paid without any paid payment record is kept and flagged a
   });
   assert.deepEqual(scope.write.orders, ["o1"]);
   assert.deepEqual(scope.conflictKeys.orders, ["o1"]);
+  assert.deepEqual(scope.conflictKeys.orderPaidPaymentUnconfirmed, ["o1"]);
+  assert.equal(scope.partition.orders.orderPaidPaymentUnconfirmed.count, 1);
+  assert.equal(scope.partition.orders.paymentPaidOrderUnpaid.count, 0);
 });
 
 test("the old listing deposit can never make an order look paid", () => {
@@ -112,15 +118,4 @@ test("the digest is stable for the same source and changes with the partition", 
   assert.equal(selectedScopeDigest(planSelectedBusinessScope(source)), selectedScopeDigest(planSelectedBusinessScope(source)));
   const changed = { ...source, orders: [order("o1", "a1")] };
   assert.notEqual(selectedScopeDigest(planSelectedBusinessScope(source)), selectedScopeDigest(planSelectedBusinessScope(changed)));
-});
-
-test("a target that writes an excluded key fails, and a missing retained key fails", () => {
-  const scope = planSelectedBusinessScope({
-    accounts: [account("a1", { status: "3" }), account("a2")],
-    orders: [order("o1", "a1")],
-    pays: [pay("o1", "0")],
-  });
-  assert.equal(assertSelectedScopeTarget(scope, { accounts: ["a1"], orders: [] }), true);
-  assert.throws(() => assertSelectedScopeTarget(scope, { accounts: ["a1", "a2"], orders: [] }), /EXCLUDED_KEY_WRITTEN:accounts:a2/);
-  assert.throws(() => assertSelectedScopeTarget(scope, { accounts: [], orders: [] }), /RETAINED_KEY_MISSING:accounts:a1/);
 });

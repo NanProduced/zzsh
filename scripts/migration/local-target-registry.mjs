@@ -96,6 +96,8 @@ export function normalizeRegisteredTarget(raw, source = RESOURCE_FILE) {
   assert.ok(typeof maintenanceDatabase === "string" && DATABASE.test(maintenanceDatabase), "TARGET_MAINTENANCE_DATABASE_INVALID");
   const protectedDataset = raw.protectedDataset ?? null;
   if (protectedDataset !== null) assert.ok(typeof protectedDataset === "object", "TARGET_PROTECTED_DATASET_INVALID");
+  const pendingReset = raw.pendingReset ?? null;
+  if (pendingReset !== null) assert.ok(typeof pendingReset === "object" && !Array.isArray(pendingReset), "TARGET_PENDING_RESET_INVALID");
   return Object.freeze({
     sourceFile: source,
     instance: hasInstance ? Object.freeze({ host, port, systemIdentifier }) : null,
@@ -113,6 +115,7 @@ export function normalizeRegisteredTarget(raw, source = RESOURCE_FILE) {
     lockKey,
     maintenanceDatabase,
     protectedDataset,
+    pendingReset,
   });
 }
 
@@ -124,11 +127,14 @@ export function targetIdentityQuery() {
 d.datdba::int AS owner_oid,
     shobj_description(d.oid,'pg_database') AS marker,
     current_setting('zzsh.regression_run', true) AS nonce,
+    current_setting('transaction_read_only') AS read_only,
     current_user AS role,
     r.oid::text AS role_oid,
     r.rolsuper::text AS is_super,
     r.rolcreatedb::text AS can_create_db,
     r.rolcreaterole::text AS can_create_role,
+    r.rolinherit::text AS can_inherit,
+    r.rolbypassrls::text AS can_bypass_rls,
     (SELECT system_identifier::text FROM pg_control_system()) AS system_identifier
     FROM pg_database d JOIN pg_roles r ON r.rolname = current_user
     WHERE d.datname = current_database()`;
@@ -138,8 +144,9 @@ d.datdba::int AS owner_oid,
  * Compare a live identity with the registered target. Every mismatch is a distinct code so a wrong
  * instance can never be reported as a wrong database name.
  */
-export function assertLiveTarget(target, identity) {
+export function assertLiveTarget(target, identity, roleKind = "migration") {
   assert.ok(identity && typeof identity === "object", "TARGET_IDENTITY_UNAVAILABLE");
+  assert.ok(roleKind === "migration" || roleKind === "runtime", "TARGET_ROLE_KIND_INVALID");
   assert.equal(identity.database, target.database, "TARGET_DATABASE_MISMATCH");
   assert.equal(String(identity.oid), target.oid, "TARGET_OID_MISMATCH");
   // A registry that names the database owner must match it; one that does not still may not let the
@@ -148,19 +155,24 @@ export function assertLiveTarget(target, identity) {
   else assert.equal(identity.owner, target.owner, "TARGET_OWNER_MISMATCH");
   assert.equal(identity.marker, target.marker, "TARGET_MARKER_MISMATCH");
   assert.equal(identity.nonce, target.nonce, "TARGET_NONCE_MISMATCH");
-  assert.equal(identity.role, target.migrationRole, "TARGET_ROLE_MISMATCH");
+  const roleName = roleKind === "migration" ? target.migrationRole : target.runtimeRole;
+  const roleOid = roleKind === "migration" ? target.migrationRoleOid : target.runtimeRoleOid;
+  assert.equal(identity.role, roleName, "TARGET_ROLE_MISMATCH");
+  if (roleOid !== null) assert.equal(String(identity.role_oid), roleOid, "TARGET_ROLE_OID_MISMATCH");
   if (target.instance !== null) {
     assert.ok(identity.system_identifier !== undefined && identity.system_identifier !== null, "TARGET_SYSTEM_IDENTIFIER_UNAVAILABLE");
     assert.equal(String(identity.system_identifier), target.instance.systemIdentifier, "TARGET_INSTANCE_SYSTEM_IDENTIFIER_MISMATCH");
   }
-  assert.notEqual(identity.is_super, "true", "TARGET_MIGRATION_ROLE_MUST_NOT_BE_SUPERUSER");
-  assert.notEqual(identity.can_create_db, "true", "TARGET_MIGRATION_ROLE_MUST_NOT_CREATE_DB");
-  assert.notEqual(identity.can_create_role, "true", "TARGET_MIGRATION_ROLE_MUST_NOT_CREATE_ROLE");
+  assert.equal(identity.is_super, "false", "TARGET_MIGRATION_ROLE_MUST_NOT_BE_SUPERUSER");
+  assert.equal(identity.can_create_db, "false", "TARGET_MIGRATION_ROLE_MUST_NOT_CREATE_DB");
+  assert.equal(identity.can_create_role, "false", "TARGET_MIGRATION_ROLE_MUST_NOT_CREATE_ROLE");
+  assert.equal(identity.can_inherit, "false", "TARGET_MIGRATION_ROLE_MUST_NOT_INHERIT");
+  assert.equal(identity.can_bypass_rls, "false", "TARGET_MIGRATION_ROLE_MUST_NOT_BYPASS_RLS");
   return Object.freeze({
     database: target.database,
     oid: target.oid,
     marker: target.marker,
-    role: target.migrationRole,
+    role: roleName,
     instance: target.instance === null ? null : { host: target.host, port: target.port, systemIdentifier: target.instance.systemIdentifier },
   });
 }
@@ -175,6 +187,15 @@ export function assertRuntimeRoleCompanion(target, row) {
   assert.equal(row.rolcreaterole, "false", "TARGET_RUNTIME_ROLE_MUST_NOT_CREATE_ROLE");
   assert.equal(row.rolbypassrls, "false", "TARGET_RUNTIME_ROLE_MUST_NOT_BYPASS_RLS");
   return true;
+}
+
+/** Readback must use the same cluster, database epoch and registered migration role as its checkpoint. */
+export function assertReadbackTarget(target, binding, credential) {
+  assert.ok(binding && credential?.migration, "RESOURCE_BINDING_CHANGED");
+  assert.ok(target.oid === binding.oid && target.nonce === binding.nonce && target.database === binding.database
+    && JSON.stringify(binding.instance ?? null) === JSON.stringify(target.instance) && !target.pendingReset
+    && credential.migration.name === target.migrationRole && typeof target.migrationRoleOid === "string"
+    && credential.migration.oid === target.migrationRoleOid, "RESOURCE_BINDING_CHANGED");
 }
 
 /**

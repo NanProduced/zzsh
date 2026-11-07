@@ -74,6 +74,20 @@ export function assertPolicyProfileBinding(content, input, profileBytes) {
       && (!/^[a-f0-9]{64}$/.test(input.profileSha256 ?? "") || sha(profileBytes) !== input.profileSha256)) fail("EXACT_POLICY_ACTOR_PROFILE_SHA_REQUIRED");
 }
 
+/** A seventh-round policy may only use the independently registered local runtime. */
+export function assertPolicyRuntimeBinding(input, binding, bindingBytes) {
+    if (sha(bindingBytes) !== input.serverBinding.sha256 || binding.resource?.database !== input.target.database || String(binding.resource.oid ?? binding.resource.resourceOid) !== input.target.oid || binding.resource.nonce !== input.target.nonce || binding.NoIM !== true || binding.imProvisioner !== false || binding.imIdentityRepository !== false || binding.imAppId !== false) fail("EXACT_OPENED_NO_IM_RUNTIME_BINDING_REQUIRED");
+    if (input.target.instance || binding.status === "R07_BOOTSTRAP_API_LISTENING") {
+        const instance = input.target.instance, equal = value => value?.host === instance.host && value?.port === instance.port && value?.systemIdentifier === instance.systemIdentifier;
+        if (instance?.host !== "127.0.0.1" || instance.port !== 55433 || !/^[0-9]+$/.test(instance.systemIdentifier ?? "") || !/^[1-9][0-9]*$/.test(input.target.migrationRoleOid ?? "")
+          || !equal(binding.resource.instance) || !equal(binding.actualResource?.instance) || binding.status !== "R07_BOOTSTRAP_API_LISTENING"
+          || binding.port !== 4242 || binding.origins?.apiOrigin !== "http://127.0.0.1:4242"
+          || binding.actualResource?.read_only !== "on" || String(binding.actualResource?.migration_role_oid) !== String(input.target.migrationRoleOid)
+          || binding.formalAppMounted !== true || binding.financialCommandCapabilities !== false || binding.workersEnabled !== false
+          || binding.maintenanceLockReleased !== true || binding.maintenanceClosed !== true) fail("R07_POLICY_RUNTIME_BINDING_REQUIRED");
+    }
+}
+
 export function buildPolicyDraft(template, effectiveAtUtc, now = Date.now()) {
     const effective = Date.parse(effectiveAtUtc);
     if (!/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/.test(effectiveAtUtc ?? "") || !Number.isFinite(effective) || Math.abs(effective - now) > 5 * 60_000) fail("ROOT_CURRENT_EFFECTIVE_UTC_REQUIRED");
@@ -180,7 +194,7 @@ async function main() {
     const input = JSON.parse(bytes);
     if (input.kind !== "FORMAL_LOCAL_MEMBERSHIP_POLICY_INITIALIZATION_V1" || input.target?.database !== "zzsh_test_regression" || !input.target.oid || !input.target.nonce) fail("EXACT_POLICY_TARGET_INPUT_REQUIRED");
     const bindingBytes = readFileSync(input.serverBinding.file), binding = JSON.parse(bindingBytes);
-    if (sha(bindingBytes) !== input.serverBinding.sha256 || binding.resource?.database !== input.target.database || String(binding.resource.oid ?? binding.resource.resourceOid) !== input.target.oid || binding.resource.nonce !== input.target.nonce || binding.NoIM !== true || binding.imProvisioner !== false || binding.imIdentityRepository !== false || binding.imAppId !== false) fail("EXACT_OPENED_NO_IM_RUNTIME_BINDING_REQUIRED");
+    assertPolicyRuntimeBinding(input, binding, bindingBytes);
     const contentBytes = readFileSync(input.contentManifest.file); if (sha(contentBytes) !== input.contentManifest.sha256) fail("POLICY_CONTENT_MANIFEST_SHA_MISMATCH");
     const content = JSON.parse(contentBytes), templateFile = join(dirname(resolve(input.contentManifest.file)), "draft-input-template.json"), templateBytes = readFileSync(templateFile);
     const template = validatePolicyContent(content, templateBytes);

@@ -13,7 +13,7 @@ import type { ListingQueryV2 } from "./listing-filter-contract";
 import { SecurityApiError } from "../auth/security-core";
 import { API_V1_ERROR_CODES } from "../contracts/api-v1";
 import { publicAccountNumber } from "./account-number";
-import { publicSkinCategoryCteSql, publicSkinMediaIdSql, publicSkinMetadataSql, publicSkinOwnerNameSql, publicSkinRarityNameSql } from "./catalog";
+import { publicSkinMediaIdSql, publicSkinMetadataSql, publicSkinOwnerNameSql, publicSkinRarityNameSql } from "./catalog";
 
 export type LegacyReadSnapshot = {
   schema: "legacy-listing-read-v1";
@@ -418,9 +418,8 @@ export function withoutLegacyResourceNo<T extends Record<string, unknown>>(row: 
 
 /** Same catalog visibility for the legacy public projection and authenticated holding summary. */
 export async function readLegacyDeclaredSkins(client: PoolClient, versionId: string, gameId: string) {
-  return (await client.query<{id:string;name:string;baseName:string|null;ownerName:string|null;ownerKind:string|null;rarityCode:string|null;rarityName:string|null;rarityBasis:string|null;isCollectible:boolean|null;defaultState:string;mediaKind:"PORTRAIT_CARD"|"MODEL_IMAGE"|"PROMO_POSTER"|null;mediaId:string|null;categoryCode:string|null;categoryName:string|null;isPublic:boolean}>(`WITH RECURSIVE ${publicSkinCategoryCteSql("$2")}
-    SELECT s.id,s.name,s.base_name AS "baseName",${publicSkinOwnerNameSql("s")} AS "ownerName",s.owner_kind AS "ownerKind",s.rarity_code AS "rarityCode",${publicSkinRarityNameSql("s")} AS "rarityName",${publicSkinMetadataSql("s")},${publicSkinMediaIdSql("s")} AS "mediaId",
-    c.code AS "categoryCode",c.name AS "categoryName",(s.game_id=$2 AND s.enabled AND s.form_visible AND ((SELECT code FROM zzsh_supply.game WHERE id=$2)='delta' OR s.category_id IN (SELECT "id" FROM visible))) AS "isPublic"
+  return (await client.query<{id:string;name:string;baseName:string|null;ownerName:string|null;ownerKind:string|null;rarityCode:string|null;rarityName:string|null;rarityBasis:string|null;isCollectible:boolean|null;defaultState:string;mediaKind:"PORTRAIT_CARD"|"MODEL_IMAGE"|"PROMO_POSTER"|null;mediaId:string|null;categoryCode:string|null;categoryName:string|null;isPublic:boolean}>(`SELECT s.id,s.name,s.base_name AS "baseName",${publicSkinOwnerNameSql("s")} AS "ownerName",s.owner_kind AS "ownerKind",s.rarity_code AS "rarityCode",${publicSkinRarityNameSql("s")} AS "rarityName",${publicSkinMetadataSql("s")},${publicSkinMediaIdSql("s")} AS "mediaId",
+    NULL::text AS "categoryCode",NULL::text AS "categoryName",(s.game_id=$2 AND s.enabled AND s.form_visible) AS "isPublic"
     FROM (
       SELECT unnest(h.skin_ids) AS skin_id
       FROM zzsh_supply.legacy_skin_holding h
@@ -433,8 +432,8 @@ export async function readLegacyDeclaredSkins(client: PoolClient, versionId: str
           SELECT 1 FROM zzsh_supply.legacy_skin_holding h2
           WHERE h2.observation_version_id = $1
         )
-    ) ls JOIN zzsh_supply.skin s ON s.id=ls.skin_id LEFT JOIN zzsh_supply.skin_category c ON c.id=s.category_id
-    ORDER BY c.sort_order,c.id,s.sort_order,s.id`,[versionId,gameId])).rows;
+    ) ls JOIN zzsh_supply.skin s ON s.id=ls.skin_id
+    ORDER BY s.sort_order,s.id`,[versionId,gameId])).rows;
 }
 function projectLegacyDeclaredSkin(x: Awaited<ReturnType<typeof readLegacyDeclaredSkins>>[number]) {
   return ({id:x.id,name:x.name,baseName:x.baseName??null,ownerName:x.ownerName??null,ownerKind:x.ownerKind??null,rarityCode:x.rarityCode??null,rarityName:x.rarityName??null,rarityBasis:x.rarityBasis??null,isCollectible:x.isCollectible??null,defaultState:x.defaultState??"UNKNOWN",mediaKind:x.mediaKind??null,mediaId:x.mediaId??null,...(x.categoryCode?{categoryCode:x.categoryCode}:{}),...(x.categoryName?{categoryName:x.categoryName}:{})});

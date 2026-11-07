@@ -4,7 +4,7 @@ import { join, resolve, dirname, basename } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import { createRequire } from "node:module";
-import { sourceUserPlan, sourceContactPlanningRow, sourceAccountPlan, sourceOrderPlan, sourceFinanceObservation, sourceContinuation, sourceInvitationPlan, readSourceRows as rows, sourceJsonLine } from "./local-source-adapter.mjs";
+import { classifyLegacyRegistrationTime, sourceUserPlan, sourceContactPlanningRow, sourceAccountPlan, sourceOrderPlan, sourceFinanceObservation, sourceContinuation, sourceInvitationPlan, summarizeLegacyDashboardSources, readSourceRows as rows, sourceJsonLine } from "./local-source-adapter.mjs";
 import { resolvePopulationMode, selectSourceScenarios, summarizePopulationScope } from "./local-source-scenarios.mjs";
 import { planSelectedBusinessScope, selectedScopeDigest, selectedScopeFilter } from "./selected-business-scope.mjs";
 const require = createRequire(import.meta.url), ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
@@ -50,6 +50,7 @@ const mod = name => require(join(api, name + ".js"));
 const modules = { planner: mod("legacy-load/user-order-offline-plan"), contentHash: mod("supply/content-hash"), orderRead: mod("order/legacy-order-read"), finance: mod("finance/legacy-finance-source-preparation"), financeRead: mod("finance/personal-finance-read"), calc: mod("order/legacy-continuation-calc"), identity: mod("auth/identity-subject") };
 if (!Array.isArray(modules.orderRead.LEGACY_ORDER_READ_SOURCE_FIELDS))
     throw new Error("FORMAL_ORDER_SOURCE_FIELDS_NOT_EXPORTED");
+if (typeof modules.orderRead.legacyEpochTimestamp !== "function") throw new Error("FORMAL_REGISTRATION_TIMESTAMP_CONVERTER_REQUIRED");
 const sidResult = spawnSync("whoami", ["/user", "/fo", "csv", "/nh"], { encoding: "utf8", windowsHide: true, timeout: 5000 });
 const sid = /S-1-5-[0-9-]+/.exec(sidResult.stdout)?.[0];
 if (!sid)
@@ -98,6 +99,7 @@ try {
     const selection = populationMode === 'SCENARIO_SELECTION' ? selectSourceScenarios(data, contacts) : selectedScope ? selectedScopeFilter(selectedScope) : null;
     if (selectedScope) { report.selectedScope = selectedScope; report.selectedScopeSha256 = selectedScopeDigest(selectedScope); }
     const sourceRows = domain => selection ? data[domain].filter(raw => selection.includes(domain, raw)) : data[domain];
+    report.legacyDashboardSources = summarizeLegacyDashboardSources(sourceRows("orders"), sourceRows("accounts"), sourceReceipt, sourceRows("distributionOrders"));
     report.population = summarizePopulationScope(data,populationMode,selection,report.sourceReceiptSha256);
     report.populationSha256 = sha(JSON.stringify(report.population));
     // Only the retired scenario mode carries a summary and an emitted selection file; the business
@@ -136,8 +138,10 @@ try {
             append(commissions, raw.order_id, raw);
     let sourceMoney = 0n, sourceEarnings = 0n, mappedMoney = 0n, mappedEarnings = 0n, readyInvalidBalances = 0;
     report.domains.users = { source: 0, ready: 0, isolated: 0 };
+    report.registrationTimeSource = { VALID: 0, MISSING: 0, INVALID: 0, meaning: "source la_user.create_time, independent of target import time" };
     for (const raw of sourceRows("users")) {
         report.domains.users.source++;
+        report.registrationTimeSource[classifyLegacyRegistrationTime(raw.create_time, modules.orderRead.legacyEpochTimestamp)]++;
         let balance;
         try {
             balance = { money: modules.financeRead.sourceSignedYuanToCents(raw.money), earnings: modules.financeRead.sourceYuanToCents(raw.earnings) };
@@ -177,6 +181,8 @@ try {
             isolate("users", raw.id, error.code ?? "SOURCE_USER_INVALID");
         }
     }
+    if (report.registrationTimeSource.VALID + report.registrationTimeSource.MISSING + report.registrationTimeSource.INVALID !== report.domains.users.source)
+        throw new Error("SOURCE_REGISTRATION_TIME_COUNTS_MISMATCH");
     report.storedBalanceTotals = { selectedSourceMoneyCents: sourceMoney.toString(), selectedSourceEarningsCents: sourceEarnings.toString(), mappedMoneyCents: mappedMoney.toString(), mappedEarningsCents: mappedEarnings.toString(), targetOpening: "NOT_ADMITTED", fullSourceTotalsNotInferredFromSelection: true };
     report.storedBalanceCoverage = { readyUsers: report.domains.users.ready, readyAmounts: fileMeta['stored-balances']?.rows ?? 0, isolatedAmounts: readyInvalidBalances, targetOpening: 'NOT_ADMITTED' };
     const invitation = sourceInvitationPlan(data.users, data.distribution, { ...modules, invitation: mod("finance/legacy-invitation-facts"), migration: mod("supply/legacy-user-migration") }, sourceReceipt, report.sourceReceiptSha256, report.sourceCutoff, new Set(users.keys()));

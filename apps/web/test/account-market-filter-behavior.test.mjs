@@ -287,3 +287,21 @@ test("mobile 皮肤外观 renders the picker inline without the gallery detour",
   assert.match(harness.host.querySelector(".market-mobile-skin-name").textContent, /测试皮肤/);
   await harness.unmount();
 });
+
+test("mobile skin picker uses owner types instead of retired category IDs", async () => {
+  const typedMetadata = { ...metadata, skinGrouping: "TYPE", fields: [...metadata.fields,
+    { key: "skinGroups", operator: "GROUPS", label: "皮肤外观", enabled: true, order: 9, ownerKinds: ["AGENT", "MELEE_TYPE"] }] };
+  const catalog = { game: { id: "game_1", catalogRevision: "1" }, categories: [], owners: [], rarities: [],
+    skins: [{ id: "skin_melee", name: "近战皮肤", categoryId: null, ownerKind: "MELEE_TYPE", mediaId: null }] };
+  const harness = await renderHarness({ mobile: true, metadata: typedMetadata, catalog, catalogStatus: "ready",
+    activeSkinCategoryId: "MELEE_TYPE", skinSearchCatalog: catalog, skinSearchStatus: "ready" });
+  try {
+    const tab = [...harness.host.querySelectorAll(".market-rail-item")].find(node => node.textContent.includes("皮肤外观"));
+    await React.act(async () => { tab.click(); await tick(); });
+    assert.match(harness.host.querySelector(".market-mobile-skin-categories").textContent, /干员外观.*近战外观/);
+    const tile = harness.host.querySelector(".market-mobile-skin-grid button");
+    assert.ok(tile);
+    await React.act(async () => { tile.click(); await tick(); });
+    assert.deepEqual(harness.calls.at(-1).filters.skinGroups, [{ ownerKind: "MELEE_TYPE", ids: ["skin_melee"], match: "ANY" }]);
+  } finally { await harness.unmount(); }
+});

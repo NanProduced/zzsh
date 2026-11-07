@@ -6,6 +6,7 @@ import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:pat
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { LocalSession, localOrigin, validateProfile, writePrivate } from '../local-auth.mjs';
+import { deriveR07FilterConfig, parseRegionWordList } from './legacy-region-coverage.mjs';
 
 // Local R06 formal HTTP initialization only. No DB connection or advisory lock.
 const restricted = 'E:/zzsh-local-state/restricted';
@@ -45,7 +46,7 @@ function within(root, path) {
 function newPrivateDir(path) {
   const out = resolve(path), parent = realpathSync(dirname(out));
   assert.equal(parent.toLowerCase(), realpathSync(restricted).toLowerCase(), 'RESTRICTED_OUTPUT_REQUIRED');
-  assert(/^round06-legal-filter-[a-z0-9-]+$/i.test(basename(out)), 'OUTPUT_NAME_INVALID');
+  assert(/^round0[67]-legal-filter-[a-z0-9-]+$/i.test(basename(out)), 'OUTPUT_NAME_INVALID');
   mkdirSync(out, { mode: 0o700 });
   return out;
 }
@@ -60,20 +61,22 @@ function tableRows(manifest, manifestPath, table) {
 
 /** Validate sealed R06 identity, fresh runtime, source bytes and all seed references. */
 export function validateInputs(plan, read = readPin, { expectedHashes = sourceHashes, tableRead = tableRows } = {}) {
-  assert(plan?.schema === 'zzsh.round06-legal-filter-plan.v1' && plan.refs && token(plan.filterKey), 'INVALID_PLAN');
+  const r07 = plan?.schema === 'zzsh.round07-legal-filter-plan.v1';
+  assert((r07 || plan?.schema === 'zzsh.round06-legal-filter-plan.v1') && plan.refs && token(plan.filterKey), 'INVALID_PLAN');
   const bytes = Object.fromEntries(Object.entries(plan.refs).map(([name, ref]) => [name, read(ref)]));
-  for (const name of Object.keys(expectedHashes)) assert.equal(digest(bytes[name]), expectedHashes[name], 'REVIEWED_SOURCE_CHANGED');
+  const requiredHashes = r07 ? {...expectedHashes, filter:plan.sourceHashes?.filter, businessManifest:plan.sourceHashes?.businessManifest} : expectedHashes;
+  for (const name of Object.keys(requiredHashes)) assert(hash(requiredHashes[name]) && digest(bytes[name]) === requiredHashes[name], 'REVIEWED_SOURCE_CHANGED');
   const round = json(bytes.roundInput), core = json(bytes.roundReceipt), binding = json(bytes.binding);
   const actor = json(bytes.actor), profile = validateProfile(json(bytes.profile)), state = json(bytes.session);
   const business = json(bytes.businessReceipt), manifest = json(bytes.businessManifest), config = json(bytes.filter), registry = json(bytes.registry);
   const build = json(bytes.buildManifest);
   const target = round.target, actual = binding.actualResource, resource = binding.resource;
-  assert(round.schema === 'zzsh.local-round.v1' && target?.bootstrapReservation === 'ROUND06_BOOTSTRAP_RESERVED'
+  assert(round.schema === 'zzsh.local-round.v1' && target?.bootstrapReservation === (r07 ? 'ROUND07_BOOTSTRAP_RESERVED' : 'ROUND06_BOOTSTRAP_RESERVED')
     && /^[1-9]\d*$/.test(target.oid ?? '') && /^[a-f0-9]{24}$/.test(target.nonce ?? ''), 'R06_ROUND_TARGET_REQUIRED');
   assert(core.inputSha256 === plan.refs.roundInput.sha256 && core.datasetSha256 === round.dataset?.sha256
     && ['DATASET_AND_GROWTH_ACK_READBACK_PASS', 'DATASET_AND_GROWTH_REVALIDATED_PASS'].includes(core.status)
     && core.completion?.status === 'COMPLETE' && String(core.target?.oid) === target.oid && core.target?.nonce === target.nonce, 'R06_CORE_RECEIPT_REQUIRED');
-  assert(binding.status === 'R06_MAINTENANCE_API_LISTENING' && binding.roundInputSha256 === plan.refs.roundInput.sha256 && binding.roundReceiptSha256 === plan.refs.roundReceipt.sha256
+  assert(binding.status === (r07 ? 'R07_MAINTENANCE_API_LISTENING' : 'R06_MAINTENANCE_API_LISTENING') && binding.roundInputSha256 === plan.refs.roundInput.sha256 && binding.roundReceiptSha256 === plan.refs.roundReceipt.sha256
     && binding.NoIM === true && binding.financialCommandCapabilities === false && binding.workersEnabled === false
     && binding.formalAppMounted === true && binding.maintenanceLockReleased === true && binding.maintenanceClosed === true
     && binding.finalBuildManifestSha256 === plan.refs.buildManifest.sha256 && Number.isSafeInteger(binding.pid) && binding.pid > 0, 'R06_MAINTENANCE_BINDING_REQUIRED');
@@ -93,6 +96,13 @@ export function validateInputs(plan, read = readPin, { expectedHashes = sourceHa
   assert(registry.database === resource.database && registry.marker === resource.marker && String(registry.oid) === target.oid
     && registry.nonce === target.nonce && !registry.pendingReset && String(registry.roles?.migration?.oid) === String(target.migrationRoleOid)
     && registry.roles?.runtime?.name === actual.runtime_role && String(registry.roles?.runtime?.oid) === String(actual.runtime_role_oid), 'R06_REGISTRY_MISMATCH');
+  if (r07) {
+    const instance = target.instance;
+    assert(instance?.host === '127.0.0.1' && Number.isInteger(instance.port) && /^[0-9]+$/.test(instance.systemIdentifier ?? '')
+      && [registry.instance, core.target?.instance, resource.instance, actual.instance, business.instance].every(value => sameConfig(value, instance))
+      && normalPath(plan.refs.registry.path) === normalPath(join(dirname(round.credentials), 'resource.json')), 'R07_INSTANCE_BINDING_REQUIRED');
+    assert(manifest.catalogModel === 'OWNER_KIND_V2', 'R07_CATALOG_PROFILE_REQUIRED');
+  }
   const apiOrigin = localOrigin(binding.origins?.apiOrigin);
   assert(Number(new URL(apiOrigin).port) === Number(binding.port), 'R06_RUNTIME_PORT_MISMATCH');
   const boss = profile.actors?.['boss-one'];
@@ -143,7 +153,7 @@ function checkDocument(row, spec, effectiveAt, status) {
     && Date.parse(row.effectiveAt) === Date.parse(effectiveAt), 'DOCUMENT_READBACK_MISMATCH');
 }
 const sameConfig = (a, b) => canonical(a) === canonical(b);
-function checkPublicFilters(config, result) {
+export function checkPublicFilters(config, result) {
   assert(result?.available === true && result.reasonCode === null && Array.isArray(result.fields) && Array.isArray(result.sorts), 'PUBLIC_FILTER_UNAVAILABLE');
   const sameKeys = (left,right) => sameConfig([...left].sort(), [...right].sort());
   const fields = config.fields.filter(field => field.enabled), sorts = config.sorts.filter(sort => sort.enabled);
@@ -156,6 +166,7 @@ function checkPublicFilters(config, result) {
     if (field.options) assert(sameKeys(field.options.map(row=>row.value), (displayed.options ?? []).map(row=>row.value)), 'PUBLIC_FILTER_OPTIONS_DIFFER');
     if (field.levels) assert(sameKeys(field.levels, displayed.levels ?? []), 'PUBLIC_FILTER_LEVELS_DIFFER');
     if (field.ownerKinds) assert(sameKeys(field.ownerKinds, displayed.ownerKinds ?? []), 'PUBLIC_FILTER_OWNERS_DIFFER');
+    if (field.regions) assert(sameKeys(field.regions.map(row=>JSON.stringify([row.province,row.city])), (displayed.regions ?? []).map(row=>JSON.stringify([row.province,row.city]))), 'PUBLIC_FILTER_REGIONS_DIFFER');
     if (field.categoryIds) assert(sameKeys(field.categoryIds, displayed.categoryIds ?? []), 'PUBLIC_FILTER_CATEGORIES_DIFFER');
   }
   for (const sort of sorts) if (sort.itemIds) {
@@ -164,8 +175,8 @@ function checkPublicFilters(config, result) {
   }
 }
 function makeReceipt(plan, ctx) {
-  return { schema: 'zzsh.round06-legal-filter-receipt.v1', status: 'STARTED', startedAt: new Date().toISOString(),
-    target: { database: ctx.binding.resource.database, oid: ctx.target.oid, nonce: ctx.target.nonce, marker: ctx.binding.resource.marker },
+  return { schema: receiptSchema(plan), status: 'STARTED', startedAt: new Date().toISOString(),
+    target: { database: ctx.binding.resource.database, oid: ctx.target.oid, nonce: ctx.target.nonce, marker: ctx.binding.resource.marker, ...(ctx.target.instance ? {instance:ctx.target.instance} : {}) },
     roundInputSha256: plan.refs.roundInput.sha256, roundReceiptSha256: plan.refs.roundReceipt.sha256,
     runtimeBindingSha256: plan.refs.binding.sha256, buildManifestSha256: ctx.binding.finalBuildManifestSha256,
     businessManifestSha256: plan.refs.businessManifest.sha256, businessReceiptSha256: plan.refs.businessReceipt.sha256,
@@ -175,6 +186,7 @@ function makeReceipt(plan, ctx) {
       maintenanceLockReleased: true, maintenanceClosed: true, maintenanceEvidence: 'RUNTIME_BINDING_AT_START_ONLY', oldAdminReused: false, userAcceptanceWritten: false },
     writeAcksComplete: false, httpWriteInFlight: false, steps: [], pending: null };
 }
+function receiptSchema(plan) { return plan.schema === 'zzsh.round07-legal-filter-plan.v1' ? 'zzsh.round07-legal-filter-receipt.v1' : 'zzsh.round06-legal-filter-receipt.v1'; }
 export function initialSession(ctx, fetcher) {
   let method, extraHeaders;
   const client = new LocalSession(ctx.apiOrigin, 'admin', ctx.state.cookies, (url, options) => fetcher(url, {
@@ -199,13 +211,14 @@ async function checkSession(call, ctx) {
 
 /** Call only after sealed R06 inputs and live listener proof. Injected calls keep tests offline. */
 export async function executeInitialization({ plan, ctx, call, save, listener, now = Date.now, resumeFilter = null }) {
-  const filterBody = { expectedRevision: '0', config: ctx.config, reason: '第六轮本地测试初始化筛选配置' };
+  const filterBody = { expectedRevision: '0', config: ctx.config, reason: plan.schema === 'zzsh.round07-legal-filter-plan.v1' ? '第七轮本地测试初始化筛选配置' : '第六轮本地测试初始化筛选配置' };
   const filterPath = `/api/v1/admin/supply/games/${ctx.game.id}/listing-filters`;
   if (resumeFilter) {
     const pending = resumeFilter.pending;
-    assert(resumeFilter.schema === 'zzsh.round06-legal-filter-receipt.v1'
+    assert(resumeFilter.schema === receiptSchema(plan)
       && resumeFilter.status === 'STOPPED_MUTATION_RESULT_UNKNOWN_OR_REJECTED' && resumeFilter.steps?.length === 0
       && Object.keys(resumeFilter.legal ?? {}).length === 0 && resumeFilter.target?.oid === ctx.target.oid
+      && sameConfig(resumeFilter.target?.instance ?? null,ctx.target.instance ?? null)
       && resumeFilter.target?.nonce === ctx.target.nonce && resumeFilter.roundInputSha256 === plan.refs.roundInput.sha256
       && resumeFilter.roundReceiptSha256 === plan.refs.roundReceipt.sha256 && resumeFilter.runtimeBindingSha256 === plan.refs.binding.sha256
       && pending?.name === 'filter' && pending.path === filterPath && pending.verb === 'PUT'
@@ -282,14 +295,15 @@ export async function executeInitialization({ plan, ctx, call, save, listener, n
 
 /** An inspection only reports observations; absence cannot prove a timed-out request did not commit. */
 export async function inspectInitialization({ plan, ctx, original, call, listener }) {
-  assert(original?.schema === 'zzsh.round06-legal-filter-receipt.v1' && original.target?.oid === ctx.target.oid
+  assert(original?.schema === receiptSchema(plan) && original.target?.oid === ctx.target.oid
+    && sameConfig(original.target?.instance ?? null,ctx.target.instance ?? null)
     && original.target?.nonce === ctx.target.nonce && original.roundInputSha256 === plan.refs.roundInput.sha256
     && original.runtimeBindingSha256 === plan.refs.binding.sha256, 'ORIGINAL_RECEIPT_MISMATCH');
   await listener(); await checkSession(call, ctx);
   await listener(); const legal = await checkedCall(call, '/api/v1/admin/legal-documents');
   await listener(); const filter = await checkedCall(call, `/api/v1/admin/supply/games/${ctx.game.id}/listing-filters`);
   assert(Array.isArray(legal?.versions) && legal.versions.length < 50 && filter?.gameId === ctx.game.id, 'INSPECTION_READBACK_INCOMPLETE');
-  return { schema:'zzsh.round06-legal-filter-inspection.v1', status:'INSPECTED_NOT_A_SUCCESS_OR_ABSENCE_PROOF',
+  return { schema:plan.schema === 'zzsh.round07-legal-filter-plan.v1' ? 'zzsh.round07-legal-filter-inspection.v1' : 'zzsh.round06-legal-filter-inspection.v1', status:'INSPECTED_NOT_A_SUCCESS_OR_ABSENCE_PROOF',
     target:original.target, originalStatus:original.status, pending:original.pending,
     legal:legal.versions.filter(row=>docSpecs.some(spec=>spec.type===row.docType)).map(row=>({id:row.id,docType:row.docType,status:row.status,digest:row.digest,effectiveAt:row.effectiveAt})),
     filter:{gameId:filter.gameId,revision:filter.revision,configMatches:filter.config !== null && sameConfig(filter.config,ctx.config)},
@@ -297,13 +311,14 @@ export async function inspectInitialization({ plan, ctx, original, call, listene
 }
 
 export async function readbackInitialization({ plan, ctx, original, call, listener, now = Date.now }) {
-  assert(original.schema === 'zzsh.round06-legal-filter-receipt.v1' && original.status === 'SEALED_AWAITING_EFFECTIVE_PUBLIC_READBACK'
+  assert(original.schema === receiptSchema(plan) && original.status === 'SEALED_AWAITING_EFFECTIVE_PUBLIC_READBACK'
     && original.pending === null && original.writeAcksComplete === true && original.httpWriteInFlight === false
     && original.roundInputSha256 === plan.refs.roundInput.sha256
     && original.roundReceiptSha256 === plan.refs.roundReceipt.sha256 && original.runtimeBindingSha256 === plan.refs.binding.sha256
     && original.businessManifestSha256 === plan.refs.businessManifest.sha256 && original.businessReceiptSha256 === plan.refs.businessReceipt.sha256
     && original.buildManifestSha256 === ctx.binding.finalBuildManifestSha256 && original.actorId === ctx.actor.id
     && original.target?.oid === ctx.target.oid && original.target?.nonce === ctx.target.nonce
+    && sameConfig(original.target?.instance ?? null,ctx.target.instance ?? null)
     && original.filter?.idempotencyKey === plan.filterKey && original.filter?.gameId === ctx.game.id
     && original.filter?.revision === '1' && original.filter?.sourceSha256 === plan.refs.filter.sha256
     && original.filter?.configSha256 === digest(canonical(ctx.config)) && original.filter?.matchedItemCount === ctx.items.length,
@@ -324,7 +339,7 @@ export async function readbackInitialization({ plan, ctx, original, call, listen
   const terms = await get('/api/v1/legal-documents/terms');
   const privacy = await get('/api/v1/legal-documents/privacy');
   const admin = await get(`/api/v1/admin/supply/games/${ctx.game.id}/listing-filters`);
-  const publicFilters = await get(`/api/v1/supply/games/${ctx.game.id}/listing-filters`);
+  const publicFilters = await get(`/api/v1/supply/games/${ctx.game.id}/listing-filters?skinGrouping=TYPE`);
   const result = structuredClone(original);
   for (const spec of docSpecs) {
     const value = spec.key === 'terms' ? terms : privacy, entry = result.legal[spec.key];
@@ -355,15 +370,15 @@ function listenerProof(binding, refs) {
 }
 
 function parseOptions(args) {
-  const names = ['round-input','round-receipt','binding','profile','actor','session','business-receipt','business-manifest','build-manifest','terms','privacy','filter','effective-at','input','input-sha','receipt','receipt-sha','out'];
+  const names = ['round-input','round-receipt','binding','profile','actor','session','business-receipt','business-manifest','business-manifest-sha','build-manifest','terms','privacy','filter','filter-sha','filter-baseline','filter-baseline-sha','region-wordlist-sha','registry','effective-at','input','input-sha','receipt','receipt-sha','out'];
   return parseArgs({ args, options: Object.fromEntries([...names.map(name => [name, { type: 'string' }]),
-    ...['prepare','execute','resume-filter','inspect','readback'].map(name => [name, { type: 'boolean' }])]) }).values;
+    ...['derive-filter','prepare','execute','resume-filter','inspect','readback'].map(name => [name, { type: 'boolean' }])]) }).values;
 }
 function requireLocalRefs(refs) {
   for (const name of ['roundInput','roundReceipt','profile','actor','session','businessReceipt','businessManifest','filter'])
     assert(within(restricted, refs[name].path), 'RESTRICTED_REFERENCE_REQUIRED');
   assert(within(runtime, refs.binding.path), 'RUNTIME_REFERENCE_REQUIRED');
-  assert.equal(realpathSync(refs.registry.path).toLowerCase(), realpathSync(defaults.registry).toLowerCase(), 'REGISTERED_RESOURCE_REQUIRED');
+  assert(within(restricted, refs.registry.path) || existsSync(defaults.registry) && realpathSync(refs.registry.path).toLowerCase() === realpathSync(defaults.registry).toLowerCase(), 'REGISTERED_RESOURCE_REQUIRED');
 }
 function assertAttemptReceipt(planFile, planSha, receiptFile, resumedAllowed) {
   const dir = dirname(resolve(planFile)), expected = ['execute-attempt.json', ...(resumedAllowed ? ['resume-filter-attempt.json'] : [])];
@@ -377,20 +392,33 @@ function assertAttemptReceipt(planFile, planSha, receiptFile, resumedAllowed) {
 }
 async function main() {
   const v = parseOptions(process.argv.slice(2));
-  assert([v.prepare, v.execute, v['resume-filter'], v.inspect, v.readback].filter(Boolean).length <= 1, 'ONE_ACTION_REQUIRED');
-  if (!v.prepare && !v.execute && !v['resume-filter'] && !v.inspect && !v.readback) {
-    console.log(JSON.stringify({ status: 'PLAN_ONLY', actions: ['--prepare','--execute','--resume-filter','--inspect','--readback'], databaseConnections: 0, httpCalls: 0 })); return;
+  assert([v['derive-filter'], v.prepare, v.execute, v['resume-filter'], v.inspect, v.readback].filter(Boolean).length <= 1, 'ONE_ACTION_REQUIRED');
+  if (!v['derive-filter'] && !v.prepare && !v.execute && !v['resume-filter'] && !v.inspect && !v.readback) {
+    console.log(JSON.stringify({ status: 'PLAN_ONLY', actions: ['--derive-filter','--prepare','--execute','--resume-filter','--inspect','--readback'], databaseConnections: 0, httpCalls: 0 })); return;
   }
   assert(process.version === 'v24.20.0', 'NODE_BASELINE_MISMATCH');
+  if (v['derive-filter']) {
+    const wordlist=resolve(dirname(fileURLToPath(import.meta.url)),'../../apps/web/src/lib/delta-region-options.ts');
+    assert(v['filter-baseline'] && within(restricted,v['filter-baseline']) && hash(v['filter-baseline-sha']) && hash(v['region-wordlist-sha']) && v.out,'FILTER_DERIVATION_ARGUMENTS_REQUIRED');
+    const baseline=readFileSync(v['filter-baseline']),words=readFileSync(wordlist);
+    assert(digest(baseline)===v['filter-baseline-sha'] && v['filter-baseline-sha']===sourceHashes.filter && digest(words)===v['region-wordlist-sha'],'FILTER_DERIVATION_SOURCE_CHANGED');
+    const wordList=parseRegionWordList(words.toString('utf8')),config=deriveR07FilterConfig(json(baseline),wordList),out=newPrivateDir(v.out);
+    writePrivate(join(out,'config.json'),config);
+    const receipt={status:'R07_FILTER_DERIVED_NOT_APPLIED',baselineSha256:digest(baseline),wordListSha256:digest(words),regionDigest:wordList.digest,regions:wordList.pairs.length,
+      configSha256:digest(readFileSync(join(out,'config.json'))),databaseConnections:0,httpCalls:0};
+    writePrivate(join(out,'receipt.json'),receipt);console.log(JSON.stringify(receipt));return;
+  }
   if (v.prepare) {
     const paths = { roundInput: v['round-input'], roundReceipt: v['round-receipt'], binding: v.binding, profile: v.profile, actor: v.actor,
       session: v.session, businessReceipt: v['business-receipt'], businessManifest: v['business-manifest'] ?? defaults.businessManifest,
       terms: v.terms ?? defaults.terms, privacy: v.privacy ?? defaults.privacy, filter: v.filter ?? defaults.filter,
-      buildManifest: v['build-manifest'] ?? defaults.buildManifest, registry: defaults.registry };
+      buildManifest: v['build-manifest'] ?? defaults.buildManifest, registry: v.registry ?? defaults.registry };
     assert(Object.values(paths).every(Boolean) && v['effective-at'] && v.out, 'PREPARE_ARGUMENTS_REQUIRED');
     const refs = Object.fromEntries(Object.entries(paths).map(([name,path]) => [name,pin(path)])); requireLocalRefs(refs);
-    const requestIds = Object.fromEntries(['filter','draft-terms','draft-privacy','seal-terms','seal-privacy'].map(name => [name,'r06_' + name.replaceAll('-','_') + '_' + randomUUID().replaceAll('-','')]));
-    const plan = { schema: 'zzsh.round06-legal-filter-plan.v1', refs, effectiveAtUtc: v['effective-at'], filterKey: 'r06_filter_' + randomUUID().replaceAll('-',''), requestIds };
+    const r07=Boolean(v.registry),prefix=r07?'r07':'r06';
+    if(r07) assert(v.filter && v['business-manifest'] && v['build-manifest'] && hash(v['filter-sha']) && hash(v['business-manifest-sha']) && refs.filter.sha256===v['filter-sha'] && refs.businessManifest.sha256===v['business-manifest-sha'], 'R07_EXPLICIT_SOURCE_HASHES_REQUIRED');
+    const requestIds = Object.fromEntries(['filter','draft-terms','draft-privacy','seal-terms','seal-privacy'].map(name => [name,prefix+'_' + name.replaceAll('-','_') + '_' + randomUUID().replaceAll('-','')]));
+    const plan = { schema: r07?'zzsh.round07-legal-filter-plan.v1':'zzsh.round06-legal-filter-plan.v1', refs, ...(r07?{sourceHashes:{filter:v['filter-sha'],businessManifest:v['business-manifest-sha']}}:{}), effectiveAtUtc: v['effective-at'], filterKey: prefix+'_filter_' + randomUUID().replaceAll('-',''), requestIds };
     validateInputs(plan); assert(Date.parse(plan.effectiveAtUtc) - Date.now() >= 90_000, 'EFFECTIVE_WINDOW_TOO_SHORT');
     const out = newPrivateDir(v.out); writePrivate(join(out,'plan.json'), plan);
     console.log(JSON.stringify({ status: 'PLAN_SEALED_NOT_APPLIED', path: join(out,'plan.json'), sha256: digest(readFileSync(join(out,'plan.json'))), databaseConnections: 0, httpCalls: 0 })); return;
@@ -425,7 +453,7 @@ async function main() {
     receipt.originalReceiptSha256 = v['receipt-sha']; writePrivate(join(out,'receipt.json'), receipt);
     console.log(JSON.stringify({ status: receipt.status, receipt: join(out,'receipt.json'), sha256: digest(readFileSync(join(out,'receipt.json'))) }));
   } catch (error) {
-    writePrivate(join(out,'receipt.json'), { schema:'zzsh.round06-legal-filter-readback.v1', status:'READBACK_NOT_COMPLETE', originalReceiptSha256:v['receipt-sha'],
+    writePrivate(join(out,'receipt.json'), { schema:plan.schema === 'zzsh.round07-legal-filter-plan.v1' ? 'zzsh.round07-legal-filter-readback.v1' : 'zzsh.round06-legal-filter-readback.v1', status:'READBACK_NOT_COMPLETE', originalReceiptSha256:v['receipt-sha'],
       code:/^[A-Z][A-Z0-9_]+$/.test(error.message ?? '') ? error.message : 'READBACK_FAILED', finishedAt:new Date().toISOString() });
     console.log(JSON.stringify({ status:'READBACK_NOT_COMPLETE', receipt:join(out,'receipt.json') })); process.exitCode = 1;
   }

@@ -18,13 +18,14 @@ function fixture() {
   const source={
     game:[JSON.stringify({id:'game-1',code:'delta',current_release_id:'release-2'})],
     rule_release:[JSON.stringify({id:'release-1',game_id:'game-1',price_version_id:'price-old',generation:1,created_at:time,activated_at:time}),JSON.stringify({id:'release-2',game_id:'game-1',price_version_id:'price-current',generation:2,created_at:time,activated_at:time})],
-    price_version:[JSON.stringify({id:'price-current',game_id:'game-1',mode:'SPREAD',status:'SEALED',revision:3,haff_rule:rule,funding_policy:{policyVersion:'same'},created_at:time,updated_at:time,sealed_at:time})],
+    price_version:[JSON.stringify({id:'price-current',game_id:'game-1',mode:'SPREAD',status:'SEALED',revision:3,haff_rule:rule,funding_policy:{policyVersion:'same'},created_at:time,updated_at:time,sealed_at:time,created_by_admin_id:'admin_'+'a'.repeat(32),sealed_by_admin_id:'admin_'+'a'.repeat(32)})],
     price_line:[JSON.stringify({id:'line-1',price_version_id:'price-current',item_id:'haff',pricing_kind:'HAFF_RATIO',created_at:time}),'{"id":"line-2","price_version_id":"price-current","item_id":"item-1","pricing_kind":"FIXED_UNIT","buyer_unit_amount":123456789012345.67890123,"created_at":"'+time+'"}'],
   };
   const tableBytes=new Map(), descriptors=[];
   for(const key of bootstrapPlan.businessPackage.tables) {
     const [schema,table]=key.split('.'), rows=source[table]??[];
-    const file=`${key}.json`, raw=bytes({schema,table,primaryKey:['id'],columns:[],rows});
+    // This fixture is a V1 package: its empty skin table still has the V1 category column.
+    const file=`${key}.json`, raw=bytes({schema,table,primaryKey:['id'],columns:table==='skin'?[{name:'category_id'}]:[],rows});
     tableBytes.set(file,raw);descriptors.push({schema,table,file,rows:rows.length,sourceRows:String(rows.length),sha256:sha(raw)});
   }
   const manifest=bytes({kind:'BUSINESS_REFERENCE_PACKAGE_V1',gameCode:'delta',sourceRawUnchanged:false,transactionRollback:true,clientClosed:true,
@@ -83,7 +84,7 @@ test('wrong evidence meaning or unconfirmed capture is rejected even with a matc
 
 test('CLI keeps a verifiable upstream chain and refuses replay into an existing output',t=>{
   const root=mkdtempSync(join(tmpdir(),'zzsh-profit-policy-'));t.after(()=>rmSync(root,{recursive:true,force:true}));
-  const x=fixture(),source=join(root,'source'),out=join(root,'out'),out2=join(root,'out2');mkdirSync(source);
+  const x=fixture(),source=join(root,'source'),out=join(root,'out'),out2=join(root,'out2'),freshOut=join(root,'fresh');mkdirSync(source);
   for(const [name,content] of x.tableBytes)writeFileSync(join(source,name),content);
   writeFileSync(join(source,'manifest.json'),x.manifest);writeFileSync(join(source,'media-objects.json'),'{}');
   const parent=bytes({derivedManifestSha256:sha(x.manifest)});writeFileSync(join(source,'derivation-receipt.json'),parent);
@@ -94,7 +95,8 @@ test('CLI keeps a verifiable upstream chain and refuses replay into an existing 
   const runCli=output=>spawnSync(process.execPath,[script,'--private-root',root,'--source',source,'--decision',decisionFile,'--decision-sha',sha(decision),'--evidence',evidenceFile,'--out',output],{encoding:'utf8',timeout:15000});
   const first=runCli(out);assert.equal(first.status,0,first.stderr);
   const receipt=JSON.parse(readFileSync(join(out,'derivation-receipt.json')));
-  assert.equal(receipt.sourceRawUnchanged,false);assert.equal(receipt.previousPriceAndReleaseRowsPreserved,true);
+  assert.equal(receipt.sourceRawUnchanged,false);assert.equal(receipt.previousPriceAndReleaseRowsPreserved,true);assert.equal(receipt.priceHistoryDisposition,'SOURCE_HISTORY_RETAINED');
+  assert.equal(receipt.derivationToolSha256,sha(readFileSync(script)));
   assert.equal(receipt.gameCurrentReleasePointerChanged,true);assert.equal(receipt.sourceFileWrites,0);
   assert.equal(receipt.derivedManifestSha256,sha(readFileSync(join(out,'manifest.json'))));
   assert.deepEqual(readFileSync(join(out,`lineage-${sha(parent)}.json`)),parent);
@@ -106,4 +108,10 @@ test('CLI keeps a verifiable upstream chain and refuses replay into an existing 
   const second=runCli(out2);assert.equal(second.status,0,second.stderr);
   assert.deepEqual(readFileSync(join(out,'manifest.json')),readFileSync(join(out2,'manifest.json')));
   assert.deepEqual(readFileSync(join(source,'manifest.json')),x.manifest);
+  const fresh=spawnSync(process.execPath,[script,'--private-root',root,'--source',source,'--decision',decisionFile,'--decision-sha',sha(decision),'--evidence',evidenceFile,'--out',freshOut,'--fresh-admin-id','admin_'+'b'.repeat(32)],{encoding:'utf8',timeout:15000});
+  assert.equal(fresh.status,0,fresh.stderr);const freshReceipt=JSON.parse(readFileSync(join(freshOut,'derivation-receipt.json')));
+  assert.equal(freshReceipt.previousPriceAndReleaseRowsPreserved,false);assert.equal(freshReceipt.priceHistoryDisposition,'FRESH_DERIVED_ONLY');assert.equal(freshReceipt.derivationToolSha256,sha(readFileSync(script)));
+  assert.equal(JSON.parse(readFileSync(join(freshOut,'zzsh_supply.price_version.json'))).rows.length,1);
+  assert.equal(JSON.parse(readFileSync(join(freshOut,'zzsh_supply.rule_release.json'))).rows.length,1);
+  assert.equal(JSON.parse(readFileSync(join(freshOut,'zzsh_supply.price_line.json'))).rows.length,2);
 });

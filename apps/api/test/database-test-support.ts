@@ -120,7 +120,6 @@ export const ISOLATED_BUSINESS_DATA_TRUNCATE = `TRUNCATE
       "zzsh_supply"."game",
       "zzsh_supply"."billable_item",
       "zzsh_supply"."skin_rarity",
-      "zzsh_supply"."skin_category",
       "zzsh_supply"."skin",
       "zzsh_supply"."entitlement",
       "zzsh_supply"."rental_account",
@@ -169,13 +168,55 @@ export const ISOLATED_BUSINESS_DATA_TRUNCATE = `TRUNCATE
       "zzsh_iam"."admin_security",
       "zzsh_iam"."audit_event"`;
 
+/** Migration 0159 removes the category table and its skin foreign key together. */
+export async function legacySkinCategoryInstalled(pool: Pick<Pool, "query">): Promise<boolean> {
+  const row = (await pool.query(`SELECT to_regclass('zzsh_supply.skin') AS skin,
+    to_regclass('zzsh_supply.skin_category') AS category,
+    EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid=to_regclass('zzsh_supply.skin')
+      AND attname='category_id' AND attnum>0 AND NOT attisdropped) AS category_column`)).rows[0];
+  assert.ok(row && Object.hasOwn(row, "skin") && Object.hasOwn(row, "category") && typeof row.category_column === "boolean", "skin cleanup schema must be observed");
+  assert.ok(row.skin, "skin cleanup schema is missing");
+  assert.equal(Boolean(row.category), row.category_column, "skin category cleanup schema is incomplete");
+  return Boolean(row.category);
+}
+
 export async function installedBusinessTruncate(pool: Pick<Pool, "query">): Promise<string> {
-  const row = (await pool.query("SELECT to_regclass('zzsh_content.legal_document_version') AS version, to_regclass('zzsh_content.document_acceptance') AS acceptance")).rows[0];
+  const [legal, categoryInstalled] = await Promise.all([
+    pool.query("SELECT to_regclass('zzsh_content.legal_document_version') AS version, to_regclass('zzsh_content.document_acceptance') AS acceptance"),
+    legacySkinCategoryInstalled(pool),
+  ]);
+  const row = legal.rows[0];
   assert.ok(row && Object.hasOwn(row, "version") && Object.hasOwn(row, "acceptance"), "legal cleanup schema must be observed");
   assert.equal(Boolean(row.version), Boolean(row.acceptance), "legal cleanup schema is incomplete");
-  return row.version ? ISOLATED_BUSINESS_DATA_TRUNCATE : ISOLATED_BUSINESS_DATA_TRUNCATE
+  let sql = ISOLATED_BUSINESS_DATA_TRUNCATE;
+  if (!row.version) sql = sql
     .replace('      "zzsh_content"."document_acceptance",\n', "")
     .replace('      "zzsh_content"."legal_document_version",\n', "");
+  if (categoryInstalled) {
+    const skin = '      "zzsh_supply"."skin",\n';
+    assert.equal(sql.split(skin).length, 2, "skin cleanup inventory is ambiguous");
+    sql = sql.replace(skin, '      "zzsh_supply"."skin_category",\n' + skin);
+  }
+  return sql;
+}
+
+/** Count the same installed tables that form the isolated cleanup inventory; no writes. */
+export async function assertEmptyIsolatedBusinessData(pool: Pick<Pool, "query">): Promise<void> {
+  const tables = [...(await installedBusinessTruncate(pool)).matchAll(/"([a-z_]+)"\."([A-Za-z0-9_]+)"/g)];
+  assert.ok(tables.length > 0, "isolated cleanup table inventory is missing");
+  const names = tables.map(([, schema, table]) => `"${schema}"."${table}"`);
+  const existing = new Set((await pool.query<{ name: string }>(
+    `SELECT name FROM unnest($1::text[]) AS target(name) WHERE to_regclass(name) IS NOT NULL`, [names],
+  )).rows.map(row => row.name));
+  // Staged migrations may not yet have created every table in the current source inventory.
+  const present = tables.filter((_, index) => existing.has(names[index]!));
+  assert.ok(present.length > 0, "no isolated cleanup tables exist at this migration stage");
+  const counts = await pool.query(present.map(([, schema, table]) =>
+    `SELECT '${schema}.${table}' AS table_name, count(*)::int AS row_count FROM "${schema}"."${table}"`).join(" UNION ALL "));
+  const occupied = counts.rows.filter((row) => row.row_count !== 0);
+  console.log("order cleanup-target preflight", JSON.stringify({ inventory: tables.length, tables: counts.rowCount,
+    notPresentAtStage: names.filter(name => !existing.has(name)), occupied }));
+  assert.deepEqual(occupied, [], "registered test target contains rows the suite would truncate; refusing to continue");
 }
 
 // Covers prepare, create/role maintenance, migrations, the test and cleanup on one maintenance-database

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { compareLegacyRegions, parseRegionPairsTsv, parseRegionWordList } from "./legacy-region-coverage.mjs";
+import { compareLegacyRegions, deriveR07FilterConfig, parseRegionPairsTsv, parseRegionWordList } from "./legacy-region-coverage.mjs";
 
 const list = (pairs) => parseRegionWordList(pairs.map(([province, city]) => `{ "province": "${province}", "city": "${city}" }`).join(","));
 
@@ -45,4 +45,15 @@ test("an unknown value is reported, never dropped and never rewritten", () => {
 test("the source pair file rejects a non-numeric count instead of reading it as zero", () => {
   assert.throws(() => parseRegionPairsTsv("北京市\t东城区\tten\n"), /REGION_PAIR_COUNT_INVALID/);
   assert.deepEqual(parseRegionPairsTsv("北京市\t东城区\t3\n\n"), [{ province: "北京市", city: "东城区", accounts: 3 }]);
+});
+
+test("R07 filter derives all regions and real skin types without mutating other baseline rules",()=>{
+  const base={schemaVersion:1,fields:[{key:'resources',operator:'AND_MIN',label:'资源',enabled:true,order:1,items:[]},
+    {key:'skinGroups',operator:'GROUPS',label:'皮肤',enabled:true,order:2,categoryIds:['old']}],sorts:[{key:'latest',enabled:true,order:1}]};
+  const source=structuredClone(base),words=list([['北京市','东城区'],['上海市','浦东新区']]),derived=deriveR07FilterConfig(base,words);
+  assert.deepEqual(base,source);assert.deepEqual(derived.fields.find(x=>x.key==='regions').regions,[{province:'北京市',city:'东城区'},{province:'上海市',city:'浦东新区'}]);
+  assert.deepEqual(derived.fields.find(x=>x.key==='skinGroups').ownerKinds,['AGENT','FIREARM','MELEE_TYPE']);
+  assert.equal(Object.hasOwn(derived.fields.find(x=>x.key==='skinGroups'),'categoryIds'),false);
+  assert.deepEqual(derived.fields[0],base.fields[0]);assert.deepEqual(derived.sorts,base.sorts);
+  assert.throws(()=>deriveR07FilterConfig(base,{pairs:Array.from({length:513},(_,i)=>['省',String(i)])}),/FILTER_BASELINE_INVALID/);
 });

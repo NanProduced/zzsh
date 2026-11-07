@@ -2097,6 +2097,30 @@ function skin12CatalogPage(categoryId, cursor) {
   return { ...catalog, categories, skins: [{ id: `${selected}_${cursor ? 'second' : 'first'}`, code: 'fixture', name: `${selected} ${cursor ? '第二页' : '第一页'}`, categoryId: selected, mediaId: null }], nextCursor: cursor ? null : `${selected}_next` };
 }
 
+test('type-based publish picker keeps selected skins while changing type and paging', async () => {
+  const requests = [];
+  const p = await probe({ accountId: 'account_1', mine: () => supplyOf(declaration()), catalogValue: async (_game, query) => {
+    requests.push(Object.fromEntries(query));
+    const kind = query.get('ownerKind') || 'FIREARM';
+    const cursor = query.get('cursor');
+    return { ...catalog, categories: [], skinFilters: { ownerKinds: ['AGENT', 'FIREARM', 'MELEE_TYPE'] },
+      skins: [{ id: `${kind}_${cursor ? 'second' : 'first'}`, code: 'fixture', name: `${kind} ${cursor ? '第二页' : '第一页'}`, ownerKind: kind, categoryId: null, mediaId: null }],
+      nextCursor: cursor ? null : `${kind}_next` };
+  } });
+  try {
+    await p.render();
+    assert.equal(await p.waitFor(() => requests.some(q => q.ownerKind === 'AGENT')), true);
+    await p.click('input[aria-label="选择 AGENT 第一页"]');
+    await p.clickButton('近战外观');
+    assert.equal(await p.waitFor(() => requests.some(q => q.ownerKind === 'MELEE_TYPE')), true);
+    assert.ok(p.host.querySelector('.supply-selected-chips [data-skin-id="AGENT_first"]'));
+    await p.clickButton('加载更多皮肤');
+    assert.equal(await p.waitFor(() => requests.some(q => q.ownerKind === 'MELEE_TYPE' && q.cursor === 'MELEE_TYPE_next')), true);
+    assert.equal(requests.some(q => q.categoryId), false);
+    assert.equal(p.host.querySelectorAll('.skin-card').length, 2);
+  } finally { await p.close(); }
+});
+
 test('SKIN12 publish default category requests its own first page before exposing a cursor', async () => {
   const requests = [];
   const p = await probe({ accountId: 'account_1', mine: () => supplyOf(declaration()), catalogValue: async (_game, query) => {

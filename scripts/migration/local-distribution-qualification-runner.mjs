@@ -1,7 +1,42 @@
 import assert from "node:assert/strict";
 
+/** Keep the original R06 default, while R07 must bind the exact registered cluster and port. */
+export function qualificationReviewResource(current,registry,target,{readOnly=false}={}){
+  assert(typeof readOnly==='boolean','DISTRIBUTION_QUALIFICATION_INSTANCE_CHANGED');
+  const instance=target.instance;
+  if(instance){
+    assert(instance.host==='127.0.0.1'&&[55432,55433].includes(instance.port)&&/^[0-9]+$/.test(instance.systemIdentifier??'')
+      &&JSON.stringify(instance)===JSON.stringify(registry.instance??null)&&current.oid===target.oid
+      &&current.system_identifier===instance.systemIdentifier&&current.database===registry.database&&current.owner===registry.owner
+      &&current.marker===registry.marker&&current.role===registry.roles?.migration?.name&&String(current.role_oid)===String(registry.roles?.migration?.oid)
+      &&String(current.role_oid)===String(target.migrationRoleOid)&&current.read_only===(readOnly?'on':'off'),'DISTRIBUTION_QUALIFICATION_INSTANCE_CHANGED');
+  }else assert(!registry.instance,'DISTRIBUTION_QUALIFICATION_INSTANCE_CHANGED');
+  return {host:instance?.host??'127.0.0.1',port:instance?.port??55432,database:registry.database,oid:Number(current.oid),owner:current.owner,ownerOid:current.owner_oid,marker:current.marker,role:current.role,roleOid:Number(current.role_oid)};
+}
+
+/** Recheck every original subject and idempotency key under the write transaction and lock. */
+export async function assertQualificationRecoveryPreimage(client,plan,actor){
+  assert(Array.isArray(plan.accepted)&&Array.isArray(plan.ineligible)&&Array.isArray(plan.unresolved)&&Array.isArray(plan.existing)&&plan.existing.length===0,'DISTRIBUTION_RECOVERY_PREIMAGE_CHANGED');
+  const mismatches={accepted:0,ineligible:0,unresolved:0};
+  for(const [name,items,eligibility] of [['accepted',plan.accepted,'UNKNOWN'],['ineligible',plan.ineligible,'INELIGIBLE'],['unresolved',plan.unresolved,'UNKNOWN']]){
+    for(let i=0;i<items.length;i+=1000){const result=await client.query(`SELECT count(*)::int AS n FROM jsonb_to_recordset($1::jsonb) x("userId" text,"sourceDigest" text,revision text,frozen boolean)
+      LEFT JOIN zzsh_order.distribution_participant p ON p.user_id=x."userId" WHERE p.user_id IS NULL OR p.source_type<>'LEGACY_MYSQL' OR p.source_digest IS DISTINCT FROM x."sourceDigest"
+      OR p.revision::text IS DISTINCT FROM x.revision OR p.eligibility IS DISTINCT FROM $2 OR p.policy_version_id IS NOT NULL OR p.level_code IS NOT NULL OR p.commission_frozen IS DISTINCT FROM x.frozen`,[JSON.stringify(items.slice(i,i+1000)),eligibility]);
+      assert(Number.isSafeInteger(result.rows[0]?.n),'DISTRIBUTION_RECOVERY_PREIMAGE_CHANGED');mismatches[name]+=result.rows[0].n;
+    }
+  }
+  const scope=JSON.stringify(['admin',actor.userId,'distribution.legacy-qualification.v1',null]),keys=plan.batches.map(row=>'legacy-qualification-'+row.bodyDigest);
+  const totals=(await client.query(`SELECT (SELECT count(*)::int FROM zzsh_order.distribution_participant WHERE source_type='LEGACY_MYSQL') participants,
+    (SELECT count(*)::int FROM zzsh_supply.idempotency_record WHERE scope_key=$1 AND key=ANY($2::text[])) receipts,
+    (SELECT count(*)::int FROM zzsh_iam.audit_event WHERE action='distribution.legacy_qualification.admitted' AND object_id=$3 AND outcome='SUCCESS') audits,
+    (SELECT count(*)::int FROM zzsh_order.distribution_policy_head WHERE scope='NATIVE' AND current_version_id=$3) policy_heads`,[scope,keys,plan.policyId])).rows[0];
+  assert(Object.values(mismatches).every(value=>value===0)&&totals?.participants===plan.accepted.length+plan.ineligible.length+plan.unresolved.length
+    &&totals.receipts===0&&totals.audits===0&&totals.policy_heads===1,'DISTRIBUTION_RECOVERY_PREIMAGE_CHANGED');
+  return {status:'ORIGINAL_QUALIFICATION_PREIMAGE_RECHECKED',mismatches,counts:totals};
+}
+
 /** One transaction across the reviewed batches. An uncertain COMMIT is never retried. */
-export async function executeQualification({ pool, lock, identity, plan, authority, actor, registry, target, sourceDigest, bind, qualify, verifyBuild, summary, save, now = Date.now }) {
+export async function executeQualification({ pool, lock, identity, plan, authority, actor, registry, target, sourceDigest, bind, qualify, prepareIndex, verifyBuild, summary, save, verifyRecovery, now = Date.now }) {
   let client, locked = false, started = false, commitSent = false;
   const timings = summary.timings ??= {}, lockAt = performance.now();
   summary.transaction = { status: "NOT_STARTED", plannedBatches: plan.batches.length };
@@ -15,21 +50,32 @@ export async function executeQualification({ pool, lock, identity, plan, authori
     const identityAt = performance.now();
     const current = await identity(client, "migration", false); assert.equal(current.owner_oid, plan.target.ownerOid);
     timings.targetIdentityMs = Math.round(performance.now() - identityAt); save();
-    const resource = { host: "127.0.0.1", port: 55432, database: registry.database, oid: Number(current.oid), owner: current.owner, ownerOid: current.owner_oid, marker: current.marker, role: current.role, roleOid: Number(current.role_oid) };
+    const resource = qualificationReviewResource(current,registry,target);
+    if(verifyRecovery){summary.recoveryPreflight=await verifyRecovery(client);save();}
+    const reviewFor=batch=>({ ref: authority.approvalRef, attempt: authority.attempt, actor: { userId: actor.userId, sessionId: actor.sessionId }, resource, nonce: target.nonce, notBefore: authority.notBefore, expiresAt: authority.expiresAt, sourceDigest, bodyDigest: batch.bodyDigest, phase: "QUALIFY" });
+    let qualificationIndex;
+    if(prepareIndex){
+      assert(plan.batches.length>0,'DISTRIBUTION_QUALIFICATION_BATCH_REQUIRED');
+      const at=performance.now(),seed=await bind(client,actor,reviewFor(plan.batches[0]));
+      qualificationIndex=await prepareIndex(client,actor,seed);timings.qualificationIndexMs=Math.round(performance.now()-at);save();
+    }
     summary.batches = [];
     for (const batch of plan.batches) {
       const batchAt = performance.now(), startedAt = new Date().toISOString();
       try {
         verifyBuild();
-        const review = { ref: authority.approvalRef, attempt: authority.attempt, actor: { userId: actor.userId, sessionId: actor.sessionId }, resource, nonce: target.nonce, notBefore: authority.notBefore, expiresAt: authority.expiresAt, sourceDigest, bodyDigest: batch.bodyDigest, phase: "QUALIFY" };
-        const admission = await bind(client, actor, review), result = await qualify(client, actor, batch.body, admission);
+        const review = reviewFor(batch);
+        const admission = await bind(client, actor, review, "execute", qualificationIndex), result = await qualify(client, actor, batch.body, admission);
         assert(result.status === 200 && result.body.bodyDigest === batch.bodyDigest && result.body.participants === batch.body.subjects.length && result.body.financialEffects === false, "DISTRIBUTION_BATCH_RECEIPT_DIFFERS");
         summary.batches.push({ bodyDigest: batch.bodyDigest, participants: result.body.participants, status: "ACK_IN_OPEN_TRANSACTION", startedAt, finishedAt: new Date().toISOString(), elapsedMs: Math.round(performance.now() - batchAt) }); save();
       } catch (error) {
         summary.failedBatch = { bodyDigest: batch.bodyDigest, startedAt, finishedAt: new Date().toISOString(), elapsedMs: Math.round(performance.now() - batchAt) }; save(); throw error;
       }
     }
-    const verifyAt = performance.now(); verifyBuild(); await client.query("SET CONSTRAINTS ALL IMMEDIATE");
+    const verifyAt = performance.now(); verifyBuild();
+    const remaining=Math.floor(Date.parse(authority.expiresAt)-now());assert(remaining>2000,'DISTRIBUTION_AUTHORITY_EXPIRED_BEFORE_CONSTRAINTS');
+    const constraintBudgetMs=Math.min(120000,remaining-1000);await client.query("SELECT set_config('statement_timeout',$1,true)",[constraintBudgetMs+'ms']);
+    timings.constraintBudgetMs=constraintBudgetMs;save();await client.query("SET CONSTRAINTS ALL IMMEDIATE");
     timings.constraintsMs = Math.round(performance.now() - verifyAt); save();
     assert(now() < Date.parse(authority.expiresAt), "DISTRIBUTION_AUTHORITY_EXPIRED_BEFORE_COMMIT");
     const commitAt = performance.now(); summary.transaction.status = "COMMIT_REQUESTED"; save();

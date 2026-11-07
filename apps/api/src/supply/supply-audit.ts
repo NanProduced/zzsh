@@ -4,8 +4,7 @@ const FIELDS: Record<string, string> = {
   game: "id code name description enabled current_release_id cover_media_id catalog_revision",
   billable_item: "id game_id code name unit quantity_scale required enabled sort_order media_id",
   skin_rarity: "id game_id code name enabled sort_order",
-  skin_category: "id game_id code name parent_id sort_order enabled form_visible",
-  skin: "id game_id code name category_id rarity_code enabled form_visible media_id owner_kind owner_id firearm_id base_name aliases naming_state source_namespace source_field source_token rarity_evidence is_collectible default_state media_source",
+  skin: "id game_id code name rarity_code enabled form_visible media_id owner_kind owner_id firearm_id base_name aliases naming_state source_namespace source_field source_token rarity_evidence is_collectible default_state media_source",
   skin_owner: "id game_id kind code name enabled",
   entitlement: "id game_id code name value_kind expiry_kind enabled",
   price_version: "id game_id mode status commission_rate haff_rule rounding_policy compensation_policy_ref funding_policy full_payout_terms_version_id full_payout_terms_digest full_payout_disclosure_version revision",
@@ -43,7 +42,7 @@ function skinAuditSource(source: unknown): unknown {
 
 export function auditObjectType(operation: string): string {
   if (operation.startsWith("supply.game.")) return "game";
-  if (operation.startsWith("supply.catalog.")) return ({ items: "billable_item", rarities: "skin_rarity", categories: "skin_category", skins: "skin", skin_owners: "skin_owner", entitlements: "entitlement" } as Record<string, string>)[operation.split(".")[2]!]!;
+  if (operation.startsWith("supply.catalog.")) return ({ items: "billable_item", rarities: "skin_rarity", skins: "skin", skin_owners: "skin_owner", entitlements: "entitlement" } as Record<string, string>)[operation.split(".")[2]!]!;
   if (operation.startsWith("supply.rules.")) return operation.includes("release") ? "rule_release" : operation.split(".")[2]!.replace("_draft", "_version");
   if (operation.startsWith("supply.game_service.")) return "game_service_operation";
   if (operation.startsWith("supply.gunsmith.classification.")) return "firearm_classification";
@@ -74,7 +73,7 @@ export async function auditSnapshot(client: PoolClient, table: string, id: strin
   }
   if (table === "price_version") row.lines = (await client.query(`SELECT item_id, customer_tier, pricing_kind, unit_quantity, buyer_unit_amount, owner_unit_amount FROM zzsh_supply.price_line WHERE price_version_id = $1 ORDER BY item_id, customer_tier`, [id])).rows;
   if (table === "term_version") row.options = (await client.query(`SELECT code, name, daily_consumption, duration_rounding FROM zzsh_supply.term_option WHERE version_id = $1 ORDER BY code`, [id])).rows;
-  if (["billable_item", "skin_rarity", "skin_category", "skin", "skin_owner", "entitlement"].includes(table)) row.catalogRevision = (await client.query(`SELECT catalog_revision::text AS revision FROM zzsh_supply.game WHERE id = $1`, [row.game_id])).rows[0]?.revision;
+  if (["billable_item", "skin_rarity", "skin", "skin_owner", "entitlement"].includes(table)) row.catalogRevision = (await client.query(`SELECT catalog_revision::text AS revision FROM zzsh_supply.game WHERE id = $1`, [row.game_id])).rows[0]?.revision;
   if (table === "media_asset") row.bindings = (await client.query(`SELECT 'game' AS object_type, id FROM zzsh_supply.game WHERE cover_media_id = $1 UNION ALL SELECT 'skin' AS object_type, id FROM zzsh_supply.skin WHERE media_id = $1 UNION ALL SELECT 'billable_item' AS object_type, id FROM zzsh_supply.billable_item WHERE media_id = $1 UNION ALL SELECT 'firearm' AS object_type, id FROM zzsh_supply.firearm WHERE media_id = $1 ORDER BY object_type, id`, [id])).rows;
   return row;
 }

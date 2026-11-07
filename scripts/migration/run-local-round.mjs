@@ -1,14 +1,14 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { closeSync, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
-import { basename, delimiter, dirname, isAbsolute, join, resolve } from "node:path";
+import { basename, delimiter, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
 import { spawn, spawnSync } from "node:child_process";
 import { loadRegisteredTarget, targetConnection } from "./local-target-registry.mjs";
-import { isStrictRoundReservation, matchesLoadReservation, strictRoundReservation, writeLoadCheckpoint } from "./local-load-checkpoint.mjs";
-import { assertRoundBootstrap, assessRoundEvidence, assertGrowthPlanEvidence, assertGrowthPackages, assertResumeLineage, verifyResumeSchema, assessResumeStages, assertNoWriteRetryLineage } from "./local-round-contract.mjs";
-import { inspectRoundDependencyLayout, probeRoundDependencies, assertRoundDependencyProof } from "./local-round-dependencies.mjs";
+import { assertSameDirectoryResumeSafe, inspectRoundResumeOutput, isRoundReceiptPath, isStrictRoundReservation, matchesLoadReservation, reserveRoundResumeOutput, strictRoundReservation, writeLoadCheckpoint } from "./local-load-checkpoint.mjs";
+import { assertRoundBootstrap, assessRoundEvidence, assertGrowthPlanEvidence, assertGrowthPackages, assertResumeLineage, verifyResumeSchema, assessResumeStages, assertNoWriteRetryLineage, assertReadbackRecoveryOverlay, assertReviewedGrowthRuleFiles, assertGrowthRuleRetry } from "./local-round-contract.mjs";
+import { inspectRoundDependencyLayout, probeRoundDependencies, assertRoundDependencyProof, assertBoundRunnerScripts } from "./local-round-dependencies.mjs";
 import { assertFullExecutionAdmitted, assertRoundPopulationBinding } from "./full-source-scope.mjs";
 
 const args = process.argv.slice(2), option = name => {
@@ -18,7 +18,7 @@ const args = process.argv.slice(2), option = name => {
 const execute = args.includes("--execute"), validate = args.includes("--validate"), inspect = args.includes("--inspect-receipt"), resumeGrowth = args.includes("--resume-growth");
 assert([execute, validate, inspect, resumeGrowth].filter(Boolean).length <= 1, "ONE_ROUND_ACTION_REQUIRED");
 if (!execute && !validate && !inspect && !resumeGrowth) {
-  console.log(JSON.stringify({ action: "PLAN", required: ["--execute or --resume-growth or --validate or --inspect-receipt", "--input", "--input-sha"], inspectRequired: ["--receipt", "--receipt-sha"], stages: ["core-and-funds", "display", "opening", "holdings", "paths", "readback", "growth-prepare", "growth-apply", "growth-readback"], fullCapturedSource: "VALIDATE_ONLY_EXECUTION_BLOCKED_PENDING_BOUNDED_COVERAGE_AND_TARGET_SET_READBACK", resumeGrowth: "complete original checkpoint + fresh target-bound readbacks + new growth authorization; original checkpoint is not written", prerequisites: ["fresh registered regression database or exact completed checkpoint", "target-bound formal bootstrap evidence", "bound source and derived packages"], connections: 0, credentialReads: 0 }));
+  console.log(JSON.stringify({ action: "PLAN", required: ["--execute or --resume-growth or --validate or --inspect-receipt", "--input", "--input-sha"], inspectRequired: ["--receipt", "--receipt-sha"], stages: ["core-and-funds", "display", "opening", "holdings", "paths", "readback", "growth-prepare", "growth-apply", "growth-readback"], fullCapturedSource: "REQUIRES_BOUNDED_COVERAGE_AND_INDEPENDENT_SCOPE_PROOF", selectedBusinessScope: "FULL_SOURCE_SCAN_SELECTED_ACCOUNTS_AND_PAID_ORDERS", resumeGrowth: "complete original checkpoint + fresh target-bound readbacks + new growth authorization; original checkpoint is not written", prerequisites: ["fresh registered regression database or exact completed checkpoint", "target-bound formal bootstrap evidence", "bound source and derived packages"], connections: 0, credentialReads: 0 }));
   process.exit(0);
 }
 const started = performance.now(), sha = bytes => createHash("sha256").update(bytes).digest("hex");
@@ -42,6 +42,7 @@ function bound(file, expected) {
 }
 const inputSha256 = option("--input-sha"), input = bound(privatePath(option("--input")), inputSha256);
 assert.equal(input.schema, "zzsh.local-round.v1");
+if(!inspect&&input.target?.bootstrapReservation==="ROUND07_BOOTSTRAP_RESERVED"&&input.growth)assertReviewedGrowthRuleFiles(input.growth.oldRuleFiles);
 assert(!(execute && input.resume) && (!resumeGrowth || input.resume), "ROUND_RESUME_MODE_REQUIRED");
 function growthAttemptPath() {
   assert(/^[1-9]\d*$/.test(input.target?.oid ?? "") && /^[a-f0-9]{24}$/.test(input.target?.nonce ?? ""), "ROUND_RESUME_TARGET_INVALID");
@@ -68,9 +69,12 @@ function readResumeLineage(expected) {
   assert(refs?.schema === "zzsh.local-round-growth-resume.v1", "ROUND_RESUME_LINEAGE_REQUIRED");
   const previousInputPath = privatePath(refs.previousInput.path), previousReceiptPath = privatePath(refs.previousReceipt.path), checkpointPath = privatePath(refs.checkpoint.path);
   const previousInput = bound(previousInputPath, refs.previousInput.sha256), previousReceipt = bound(previousReceiptPath, refs.previousReceipt.sha256);
-  const previousOutput = privatePath(previousInput.out), output = resolve(input.out), expectedCheckpoint = join(previousOutput, "loader", "checkpoint.json"), expectedReceipt = join(previousOutput, "round-receipt.json");
-  assert(checkpointPath.toLowerCase() === expectedCheckpoint.toLowerCase() && previousReceiptPath.toLowerCase() === expectedReceipt.toLowerCase()
+  const previousOutput = privatePath(previousInput.out), output = resolve(input.out), expectedCheckpoint = join(previousOutput, "loader", "checkpoint.json");
+  assert(checkpointPath.toLowerCase() === expectedCheckpoint.toLowerCase() && isRoundReceiptPath(previousOutput, previousReceiptPath)
     && output.toLowerCase() !== previousOutput.toLowerCase() && !output.toLowerCase().startsWith(previousOutput.toLowerCase() + "\\"), "ROUND_RESUME_ORIGINAL_PATH_MISMATCH");
+  const latest = inspectRoundResumeOutput(previousOutput, refs.previousInput.sha256, { allowGrowthContinuation: true });
+  assert(latest?.previousReceipt.path.toLowerCase() === previousReceiptPath.toLowerCase()
+    && latest.previousReceipt.sha256 === refs.previousReceipt.sha256, "ROUND_RESUME_RECEIPT_NOT_LATEST");
   const previousActorPath = privatePath(previousInput.actor.path), previousActorProof = bound(previousActorPath, previousInput.actor.sha256);
   const checkpoint = bound(checkpointPath, refs.checkpoint.sha256);
   const proof = assertResumeLineage({ input, previousInput, previousInputSha256: refs.previousInput.sha256, previousReceipt, previousActorProof, checkpoint, expected });
@@ -182,17 +186,16 @@ assert(Date.now() >= Date.parse(input.window.notBefore) && Date.now() < Date.par
 assert(/^[1-9]\d*$/.test(input.target.oid) && /^[a-f0-9]{24}$/.test(input.target.nonce));
 assert(input.target.schemaHashes.length >= 1 && input.target.schemaHashes.every(x => /^[a-f0-9]{64}$/.test(x)));
 const out = privatePath(input.out, true);
-    // A stopped round keeps its output as the resumable checkpoint, so re-entering that same directory is
-    // the recovery path; a completed round must never be overwritten.
-    const priorReceiptPath = join(out, "round-receipt.json");
-    let resumableStop = false;
-    try {
-        const prior = JSON.parse(readFileSync(priorReceiptPath, "utf8"));
-        resumableStop = prior?.status === "STOPPED_PRESERVE_ORIGINAL_KEYS_AND_RECEIPTS" && existsSync(join(out, "loader", "checkpoint.json"));
-    } catch {
-        resumableStop = false;
-    }
-    assert(!existsSync(out) || resumableStop, "PRESERVE_ORIGINAL_ROUND_OUTPUT");
+// A stopped round may resume from its bound checkpoint, but each attempt retains its own receipt and logs.
+const sameDirectoryResume = inspectRoundResumeOutput(out, inputSha256);
+function assertResumeOutputStillSafe() {
+  if (!sameDirectoryResume) return;
+  assertSameDirectoryResumeSafe(sameDirectoryResume, name => {
+    try { lstatSync(join(out, name)); return true; }
+    catch (error) { if (error.code === "ENOENT") return false; throw error; }
+  });
+}
+assertResumeOutputStillSafe();
 const pinned = (entry, name = "manifest.json") => bound(join(privatePath(entry.path), name), entry.sha256);
 const m = pinned(input.dataset), display = pinned(input.display), openings = pinned(input.openings);
 const funds = pinned(input.funds, "receipt.json"), refund = pinned(input.refundAttempts, "receipt.json");
@@ -217,6 +220,15 @@ const actor = { id: actorProof.id ?? actorProof.actorId, sessionId: actorProof.s
 assert(actor.id && actor.sessionId && (!actorProof.actorId || actor.id === actorProof.actorId), "ONE_BOUND_ADMIN_ACTOR_REQUIRED");
 const retryProof = input.retryEvidence ? readNoWriteRetry() : undefined;
 const lineage = input.resume ? readResumeLineage({ dataset: m, display, openings, paths: pathPlan }) : null;
+let previousRepair;
+if(input.resume?.previousRepair){
+  assert(lineage,"ROUND_GROWTH_RULE_RETRY_UNCONFIRMED");const refs=input.resume.previousRepair;
+  const values=Object.fromEntries(["input","receipt","summary","readback","rulesEvidence"].map(key=>[key,bound(privatePath(refs[key]?.path),refs[key]?.sha256)]));
+  const priorOut=privatePath(values.input.out),samePath=(a,b)=>resolve(a??"").toLowerCase()===resolve(b).toLowerCase();
+  assert(samePath(refs.receipt.path,join(priorOut,"round-receipt.json"))&&samePath(refs.summary.path,join(priorOut,"growth-plan","summary.json"))
+    &&samePath(refs.readback.path,join(priorOut,"readback.json")),"ROUND_GROWTH_RULE_RETRY_UNCONFIRMED");
+  previousRepair={refs,proof:assertGrowthRuleRetry({input,previousInput:values.input,previousReceipt:values.receipt,summary:values.summary,readback:values.readback,rulesEvidence:values.rulesEvidence})};
+}
 if (lineage) assert(input.growth?.approvedBy === "Root" && /^[A-Za-z0-9][A-Za-z0-9._:-]{2,127}$/.test(input.growth.approvalRef ?? "")
   && Number.isSafeInteger(input.growth.attempt) && input.growth.attempt >= 1
   && Date.parse(input.window.expiresAt) > Date.parse(input.window.notBefore)
@@ -234,6 +246,8 @@ const registry = loadRegisteredTarget(input.credentials);
 assert.equal(registry.oid, input.target.oid);
 assert.equal(registry.nonce, input.target.nonce);
 assert.equal(registry.migrationRoleOid, input.target.migrationRoleOid);
+assert.deepEqual(input.target.instance ?? null, registry.instance, "ROUND_REGISTERED_INSTANCE_CHANGED");
+assert.equal(registry.pendingReset, null, "ROUND_TARGET_RESET_PENDING");
 const reservation = registry.protectedDataset;
 const reservationStatus = input.target.bootstrapReservation ?? "ROUND02_BOOTSTRAP_RESERVED";
 assert(/^ROUND[0-9]{2}_BOOTSTRAP_RESERVED$/.test(reservationStatus), "ROUND_BOOTSTRAP_RESERVATION_STATUS_INVALID");
@@ -247,7 +261,7 @@ if (lineage) {
 }
 assert(input.strictBatch === undefined || typeof input.strictBatch === "boolean", "ROUND_STRICT_BATCH_INVALID");
 const strictBatch = input.strictBatch === true;
-assert(lineage || strictBatch || reservation?.status !== "ROUND06_BOOTSTRAP_RESERVED", "ROUND06_STRICT_BATCH_REQUIRED");
+assert(lineage || strictBatch || !["ROUND06_BOOTSTRAP_RESERVED","ROUND07_BOOTSTRAP_RESERVED"].includes(reservation?.status), reservation?.status === "ROUND07_BOOTSTRAP_RESERVED" ? "ROUND07_STRICT_BATCH_REQUIRED" : "ROUND06_STRICT_BATCH_REQUIRED");
     assert(lineage || !strictBatch || isStrictRoundReservation(reservation?.status), "STRICT_BATCH_REQUIRES_REGISTERED_ROUND");
 const bootstrapEvidence = bootstrap(actorProof);
 const apiDist = resolve(input.apiDist);
@@ -260,8 +274,9 @@ function assertBuild() {
 const buildModulesVerified = assertBuild();
 for (const file of ["database/business-migrations.js", "supply/legacy-user-migration.js", "legacy-load/legacy-account-seam.js", "order/legacy-order-read.js", "finance/personal-finance-maintenance.js", "legacy-load/legacy-path-records.js"])
   assert(Object.hasOwn(input.buildFiles, file), "ROUND_BUILD_ENTRYPOINT_MISSING:" + file);
-let dependencyLayout, dependencyProof;
-if (input.target.bootstrapReservation === "ROUND06_BOOTSTRAP_RESERVED") {
+let dependencyLayout, dependencyProof, recoveryOverlay;
+const runnerDir=dirname(fileURLToPath(import.meta.url));
+if (["ROUND06_BOOTSTRAP_RESERVED","ROUND07_BOOTSTRAP_RESERVED"].includes(input.target.bootstrapReservation)) {
   const binding = input.dependencyBinding;
   assert(binding?.buildManifest && binding?.sourceManifest && typeof binding.sourceSnapshot === "string" && binding?.proof, "ROUND_DEPENDENCY_BINDING_REQUIRED");
   bootstrapFile(binding.buildManifest); bootstrapFile(binding.sourceManifest);
@@ -270,6 +285,17 @@ if (input.target.bootstrapReservation === "ROUND06_BOOTSTRAP_RESERVED") {
     buildManifestPath: binding.buildManifest.path, buildManifestSha256: binding.buildManifest.sha256, sourceSnapshot: binding.sourceSnapshot,
     sourceManifestPath: binding.sourceManifest.path, sourceManifestSha256: binding.sourceManifest.sha256 });
   dependencyLayout = inspectLayout(); assertRoundDependencyProof(dependencyProof, dependencyLayout);
+  if(input.resume?.readbackRepair){
+    assert(lineage, "ROUND_READBACK_RECOVERY_REQUIRES_LINEAGE");
+    const repair=bound(privatePath(input.resume.readbackRepair.path),input.resume.readbackRepair.sha256),relativeRunner=relative(resolve(apiDist,"../../../.."),runnerDir).replaceAll("\\","/");
+    assert(/^round07-readback-recovery-[a-z0-9-]+\/scripts\/migration$/i.test(relativeRunner),"ROUND_READBACK_RECOVERY_PATH_INVALID");
+    for(let at=runnerDir;at!==dirname(at);at=dirname(at))assert(!lstatSync(at).isSymbolicLink(),"ROUND_READBACK_RECOVERY_FILE_UNSAFE");
+    const observedFiles=()=>Object.fromEntries(Object.keys(dependencyLayout.scriptFiles).map(name=>{const file=join(runnerDir,name),stat=lstatSync(file);
+      assert(stat.isFile()&&!stat.isSymbolicLink(),"ROUND_READBACK_RECOVERY_FILE_UNSAFE");return[name,sha(readFileSync(file))];}));
+    const previousReceipt=bound(lineage.previousReceiptPath,input.resume.previousReceipt.sha256);
+    const verify=()=>assertReadbackRecoveryOverlay(repair,{input,previousReceipt,originalFiles:dependencyLayout.scriptFiles,observedFiles:observedFiles(),scriptDir:runnerDir,proofSha256:binding.proof.sha256});
+    assertBoundRunnerScripts(dependencyLayout.scriptDir,dependencyLayout.scriptFiles);verify();recoveryOverlay={repair,verify};
+  }else assertBoundRunnerScripts(runnerDir, dependencyLayout.scriptFiles);
   const liveProbe = probeRoundDependencies(dependencyLayout);
   assert(liveProbe.closureSha256 === dependencyProof.closureSha256 && liveProbe.entrypoints === dependencyProof.entrypoints, "ROUND_DEPENDENCY_CLOSURE_CHANGED");
 }
@@ -283,16 +309,19 @@ const sid = /S-1-5-[0-9-]+/.exec(spawnSync("whoami", ["/user", "/fo", "csv", "/n
 assert(sid, "ROUND_SID_REQUIRED");
     mkdirSync(out, { recursive: true });
 assert.equal(spawnSync("icacls", [out, "/inheritance:r", "/grant:r", `*${sid}:(OI)(CI)F`, "*S-1-5-18:(OI)(CI)F", "*S-1-5-32-544:(OI)(CI)F"], { windowsHide: true }).status, 0, "ROUND_ACL_FAILED");
-const runnerScripts = dirname(fileURLToPath(import.meta.url)), root = dependencyLayout?.sourceRoot ?? fileURLToPath(new URL("../..", import.meta.url)), scripts = dependencyLayout?.scriptDir ?? runnerScripts;
+const runnerScripts = runnerDir, root = dependencyLayout?.sourceRoot ?? fileURLToPath(new URL("../..", import.meta.url)), scripts = dependencyLayout?.scriptDir ?? runnerScripts;
 const toolNames = ["run-local-round.mjs", "local-round-contract.mjs", ...(dependencyLayout ? ["local-round-dependencies.mjs", "local-source-adapter.mjs"] : []), "load-local-dataset.mjs", "local-load-checkpoint.mjs", "local-target-finance.mjs", "local-funds-plan.mjs", "local-target-display.mjs", "local-target-opening.mjs", "local-target-holdings.mjs", "load-legacy-path-accounts.mjs", "readback-local-dataset.mjs", "run-local-growth.mjs", "local-growth-plan.mjs"];
-const toolPaths = Object.fromEntries(toolNames.map(name => [name, join(["run-local-round.mjs", "local-round-contract.mjs", "local-round-dependencies.mjs"].includes(name) ? runnerScripts : scripts, name)]));
+const toolPaths = Object.fromEntries(toolNames.map(name => [name, join(["run-local-round.mjs", "local-round-contract.mjs", "local-round-dependencies.mjs"].includes(name) || recoveryOverlay && ["readback-local-dataset.mjs","local-funds-plan.mjs"].includes(name) ? runnerScripts : scripts, name)]));
 const toolFiles = Object.fromEntries(toolNames.map(name => [name, sha(readFileSync(toolPaths[name]))]));
 if (dependencyLayout) assert.equal(sha(readFileSync(join(runnerScripts, "local-load-checkpoint.mjs"))), toolFiles["local-load-checkpoint.mjs"], "ROUND_SHARED_CHECKPOINT_TOOL_CHANGED");
+assertResumeOutputStillSafe();
+const attemptOut = sameDirectoryResume ? reserveRoundResumeOutput(out, sameDirectoryResume) : out;
 const receipt = { schema: "zzsh.local-round-receipt.v1", inputSha256, datasetSha256: input.dataset.sha256, sourceReceiptSha256: input.source.sha256, target: input.target, strictBatch, bootstrapEvidence, validationWallMs, buildModulesVerified, toolFiles,
+  ...(sameDirectoryResume ? { sameDirectoryResume } : {}),
   ...(retryProof ? { retryLineage: retryProof } : {}),
-  ...(lineage ? { mode: "RESUME_GROWTH", prior: { previousInput: input.resume.previousInput, previousReceipt: input.resume.previousReceipt, checkpoint: input.resume.checkpoint, proof: lineage.proof } } : {}),
+  ...(lineage ? { mode: "RESUME_GROWTH", prior: { previousInput: input.resume.previousInput, previousReceipt: input.resume.previousReceipt, checkpoint: input.resume.checkpoint, proof: lineage.proof }, ...(recoveryOverlay?{readbackRepair:input.resume.readbackRepair}:{}), ...(previousRepair?{previousRepair}: {}) } : {}),
   status: "RUNNING", startedAt: new Date().toISOString(), stages: [] };
-const receiptFile = join(out, "round-receipt.json"), work = join(out, "loader"), checkpoint = lineage?.checkpointPath ?? join(work, "checkpoint.json");
+const receiptFile = join(attemptOut, "round-receipt.json"), work = join(out, "loader"), checkpoint = lineage?.checkpointPath ?? join(work, "checkpoint.json");
 const save = () => writeLoadCheckpoint(receiptFile, receipt);
 save();
 const load = "load-local-dataset.mjs", base = ["--dataset", input.dataset.path, "--dataset-sha", input.dataset.sha256, "--credentials", input.credentials, "--api-dist", apiDist];
@@ -319,12 +348,15 @@ function closedPhases(names, expected = {}) {
 }
 function assertStageBindings() {
   assertBuild();
+  if (sameDirectoryResume) assert.equal(sha(readFileSync(privatePath(sameDirectoryResume.previousReceipt.path))), sameDirectoryResume.previousReceipt.sha256, "ROUND_PRIOR_ATTEMPT_RECEIPT_CHANGED");
   if (dependencyLayout) {
     const binding = input.dependencyBinding, current = inspectRoundDependencyLayout({ apiDist, bundlePath: input.bootstrapEvidence.bundle.path, bundleSha256: input.bootstrapEvidence.bundle.sha256,
       buildManifestPath: binding.buildManifest.path, buildManifestSha256: binding.buildManifest.sha256, sourceSnapshot: binding.sourceSnapshot,
       sourceManifestPath: binding.sourceManifest.path, sourceManifestSha256: binding.sourceManifest.sha256 });
     assertRoundDependencyProof(dependencyProof, current);
   }
+  if(recoveryOverlay){bound(privatePath(input.resume.readbackRepair.path),input.resume.readbackRepair.sha256);recoveryOverlay.verify();}
+  if(previousRepair){for(const ref of Object.values(previousRepair.refs))bound(privatePath(ref.path),ref.sha256);assertReviewedGrowthRuleFiles(input.growth.oldRuleFiles);}
   assert.equal(sha(readFileSync(actorFile)), input.actor.sha256, "ROUND_ACTOR_CHANGED");
   bootstrap(actorProof);
   for (const name of Object.keys(secretFiles)) {
@@ -352,11 +384,14 @@ async function step(name, script, flags, verify) {
   receipt.stages.push(stage);
   save();
   console.log(JSON.stringify({ stage: name, status: "STARTED" }));
-  const stdoutPath = join(out, name + ".stdout.log"), stderrPath = join(out, name + ".stderr.log");
-    const logFlags = resumableStop ? "w" : "wx";
-    const stdout = openSync(stdoutPath, logFlags), stderr = openSync(stderrPath, logFlags);
+  const stdoutPath = join(attemptOut, name + ".stdout.log"), stderrPath = join(attemptOut, name + ".stderr.log");
+  let stdout, stderr;
   try {
-    const child = spawn(process.execPath, [join(scripts, script), ...flags], {
+    stdout = openSync(stdoutPath, "wx", 0o600);
+    stderr = openSync(stderrPath, "wx", 0o600);
+    stage.logs = { stdout: stdoutPath, stderr: stderrPath };
+    save();
+    const child = spawn(process.execPath, [toolPaths[script] ?? join(scripts, script), ...flags], {
       cwd: root, windowsHide: true, stdio: ["ignore", stdout, stderr],
       env: { ...process.env, ...secretEnv, NODE_PATH: dependencyLayout ? dependencyLayout.moduleDirs.join(delimiter) : [join(root, "apps/api/node_modules"), join(root, "node_modules"), process.env.NODE_PATH].filter(Boolean).join(delimiter) },
     });
@@ -369,8 +404,8 @@ async function step(name, script, flags, verify) {
     stage.metrics = verify(stdoutPath);
     stage.status = "ACK";
   } finally {
-    closeSync(stdout);
-    closeSync(stderr);
+    if (stdout !== undefined) closeSync(stdout);
+    if (stderr !== undefined) closeSync(stderr);
     stage.finishedAt = new Date().toISOString();
     stage.wallMs = performance.now() - before;
     save();
@@ -385,7 +420,7 @@ async function resumeSchemaPreflight() {
     const credentials = read(input.credentials), migration = credentials.migration;
     assert(credentials.database === registry.database && migration?.name === registry.migrationRole
       && migration?.oid === input.target.migrationRoleOid && typeof migration.password === "string" && migration.password.length > 0, "ROUND_RESUME_MIGRATION_ROLE_CHANGED");
-    const { Client } = createRequire(import.meta.url)("pg");
+    const { Client } = createRequire(join(apiDist,"app.js"))("pg");
     const client = new Client(targetConnection(registry, { user: migration.name, password: migration.password,
       connectionTimeoutMillis: 3000, statement_timeout: 15000, lock_timeout: 500, applicationName: "zzsh-round-resume-schema-readonly" }));
     stage.metrics = await verifyResumeSchema(client, { target: input.target, migrationName: migration.name });
@@ -436,7 +471,7 @@ try {
   });
   }
   const readback = join(out, "readback.json");
-  await step("readback", "readback-local-dataset.mjs", ["--readback", ...base, "--checkpoint", checkpoint, ...bind("paths-plan", input.paths), "--out", readback], () => {
+  await step("readback", "readback-local-dataset.mjs", ["--readback", ...base, "--checkpoint", checkpoint, ...bind("paths-plan", input.paths), ...bind("funds-source", input.funds), ...bind("refund-attempts", input.refundAttempts), "--out", readback], () => {
     const result = read(readback);
     assert.equal(result.status, "CORE_SOURCE_TARGET_EXACT_READBACK_PASSED");
     assert.equal(result.differenceCount, 0);
@@ -479,7 +514,7 @@ try {
     });
     if (lineage) {
       const finalReadback = join(out, "readback-final.json");
-      await step("readback-final", "readback-local-dataset.mjs", ["--readback", ...base, "--checkpoint", checkpoint, ...bind("paths-plan", input.paths), "--out", finalReadback], () => {
+      await step("readback-final", "readback-local-dataset.mjs", ["--readback", ...base, "--checkpoint", checkpoint, ...bind("paths-plan", input.paths), ...bind("funds-source", input.funds), ...bind("refund-attempts", input.refundAttempts), "--out", finalReadback], () => {
         const result = read(finalReadback);
         assertStageBindings();
         const evidence = assessRoundEvidence({ input, inputSha256, actorProof, receipt, checkpoint: read(checkpoint), readback: result,
