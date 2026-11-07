@@ -910,6 +910,10 @@
     {
       "file": "NAVIGATION.md",
       "sha256": "7a5f4f243d2311178a02ef5f7ff9319194d1f6416a0f14f594877ecb9aba9686"
+    },
+    {
+      "file": "CANONICAL-SEED-PROOF.json",
+      "sha256": "b46e08de03ca21a0410bfce0c1a5f84d6c90b7c4bc4ca9a1430753688ea7b9fc"
     }
   ],
   "seedCounts": [

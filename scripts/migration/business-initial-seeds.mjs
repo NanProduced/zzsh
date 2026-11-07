@@ -7,6 +7,29 @@ export const INITIAL_SEED_TABLES = new Set([
   'zzsh_iam.approval_template', 'zzsh_supply.profile_avatar_policy',
   'zzsh_order.settlement_refund_policy', 'zzsh_order.legacy_duty_finance_contract',
 ]);
+export const CANONICAL_AUTHORIZATION_TABLES = [
+  'zzsh_iam.admin_permission', 'zzsh_iam.admin_role', 'zzsh_iam.admin_role_permission', 'zzsh_iam.approval_template',
+];
+const canonical = value => JSON.stringify(value, (_, item) => item && typeof item === 'object' && !Array.isArray(item)
+  ? Object.fromEntries(Object.entries(item).sort(([a],[b]) => a < b ? -1 : a > b ? 1 : 0)) : item);
+export function initialSeedRowsDigest(rows) {
+  if (!Array.isArray(rows) || rows.some(row => !row || typeof row !== 'object' || Array.isArray(row)
+    || Object.hasOwn(row,'created_at') || Object.hasOwn(row,'updated_at'))) throw new Error('INITIAL_CANONICAL_SEED_SHAPE_INVALID');
+  return createHash('sha256').update(JSON.stringify(rows.map(canonical).sort())).digest('hex');
+}
+export function assertCanonicalSeedProof(proof, sourceChain) {
+  const digest = createHash('sha256').update(JSON.stringify(sourceChain)).digest('hex');
+  if (!proof || proof.schema!=='zzsh.initial-canonical-seed-proof.v1' || proof.sourceCount!==sourceChain.length || proof.sourceChainSha256!==digest
+    || JSON.stringify(proof.ignoredGeneratedColumns)!==JSON.stringify(['created_at','updated_at'])
+    || !proof.tables || Object.keys(proof.tables).sort().join(',')!==[...CANONICAL_AUTHORIZATION_TABLES].sort().join(',')
+    || CANONICAL_AUTHORIZATION_TABLES.some(name=>!Number.isSafeInteger(proof.tables[name]?.count) || proof.tables[name].count<0 || !/^[a-f0-9]{64}$/.test(proof.tables[name].sha256??'')))
+    throw new Error('INITIAL_CANONICAL_SEED_PROOF_INVALID');
+}
+export function assertCanonicalSeedRows(proof, name, rows) {
+  const expected=proof?.tables?.[name];
+  if (!CANONICAL_AUTHORIZATION_TABLES.includes(name) || !expected || rows.length!==expected.count || initialSeedRowsDigest(rows)!==expected.sha256)
+    throw new Error('INITIAL_CANONICAL_SEED_ROWS_DRIFT:'+name);
+}
 
 export function assertInitialMigrationHistory(applied, expected) {
   if (!Array.isArray(applied) || !Array.isArray(expected) || applied.length !== expected.length ||

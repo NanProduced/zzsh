@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { annotateDump, navigationMarkdown, readmeMarkdown } from './business-initial-notes.mjs';
-import { INITIAL_SEED_TABLES, assertInitialSingleton, assertInitialMigrationHistory } from './business-initial-seeds.mjs';
+import { INITIAL_SEED_TABLES, CANONICAL_AUTHORIZATION_TABLES, assertCanonicalSeedProof, assertCanonicalSeedRows, assertInitialSingleton, assertInitialMigrationHistory } from './business-initial-seeds.mjs';
 const require = createRequire(import.meta.url);
 const { Client } = require('pg');
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
@@ -63,6 +63,10 @@ try {
     if (journal.entries.length < sourceCount)
         throw Error('FROZEN_SOURCE_CHAIN_NOT_AVAILABLE');
     const sourceChain = journal.entries.slice(0, sourceCount).map(e => ({ tag: e.tag, when: e.when, sha256: sha(readFileSync(join(ROOT, 'apps/api/migrations/business', e.tag + '.sql'))) }));
+    const seedProofPath = join(ROOT, 'apps/api/migrations/initial/seed-proofs', sourceChain.at(-1).tag + '.json');
+    if (!existsSync(seedProofPath) || lstatSync(seedProofPath).isSymbolicLink()) throw Error('INITIAL_CANONICAL_SEED_PROOF_REQUIRED');
+    const seedProofBytes=readFileSync(seedProofPath), seedProof=JSON.parse(seedProofBytes);
+    assertCanonicalSeedProof(seedProof,sourceChain);
     const applied = (await c.query('SELECT hash,created_at::text "createdAt" FROM zzsh_business_meta.migrations ORDER BY id')).rows;
     if (sourceBaseline) {
       // Reuse the application's verifier: it checks the selected registered
@@ -90,6 +94,12 @@ try {
             throw Error('BUSINESS_DATA_MUST_NOT_ENTER_INITIAL:' + t.schema + '.' + t.name);
         if (n)
             seedCounts.push({ table: t.schema + '.' + t.name, count: n });
+    }
+    for (const name of CANONICAL_AUTHORIZATION_TABLES) {
+      const [schema,table]=name.split('.');
+      if (!tables.some(row=>row.schema===schema && row.name===table)) throw Error('CANONICAL_SEED_TABLE_MISSING:'+name);
+      const rows=(await c.query(`SELECT to_jsonb(t)-ARRAY['created_at','updated_at'] AS row FROM "${schema}"."${table}" t`)).rows.map(row=>row.row);
+      assertCanonicalSeedRows(seedProof,name,rows);
     }
     const present = name => tables.some(t => t.schema + '.' + t.name === name);
     const dutyInstalled = sourceChain.some(row => row.tag === '0169_legacy_finance_duty_runtime');
@@ -153,6 +163,7 @@ UNION ALL SELECT 'TYPE',format('%I.%I',n.nspname,t.typname),a.privilege_type,a.i
     const documents = [
       ['README.md', production ? productionReadme(baseline, sourceCount, sourceChain.at(-1).tag) : readmeMarkdown(baseline, sourceCount, sourceChain.at(-1).tag)],
       ['NAVIGATION.md', navigationMarkdown(baseline, notes, sections[0][1])],
+      ['CANONICAL-SEED-PROOF.json', seedProofBytes],
     ].map(([file, text]) => { writeFileSync(join(target, file), text, { flag: 'wx' }); return { file, sha256: sha(text) }; });
     const combined = sections.map(([, sql]) => sql).join('\n--> statement-breakpoint\n');
     const journalBytes = readFileSync(join(ROOT, 'apps/api/migrations/business/meta/_journal.json'));

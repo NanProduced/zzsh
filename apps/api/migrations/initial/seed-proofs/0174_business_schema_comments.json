@@ -1,0 +1,12 @@
+{
+  "schema": "zzsh.initial-canonical-seed-proof.v1",
+  "sourceCount": 175,
+  "sourceChainSha256": "87edd2dadd52cd92c506923c6d561a76df15cd8999f93dae7b20e937f08e3fd1",
+  "ignoredGeneratedColumns": ["created_at", "updated_at"],
+  "tables": {
+    "zzsh_iam.admin_permission": { "count": 87, "sha256": "24b9bcd457144b2aa60be8dc50016f50ace1e8f831e28f8de6f87639de25dabf" },
+    "zzsh_iam.admin_role": { "count": 2, "sha256": "c3715dbd1ff7e15f7c371828c3ac10ac59c1eef4ed2e25603dda9afcc4226df9" },
+    "zzsh_iam.admin_role_permission": { "count": 90, "sha256": "69a1aed570fda12434bb90c6a5c2756c9b459c743f231b9fd2420dd6670fe0ce" },
+    "zzsh_iam.approval_template": { "count": 6, "sha256": "41e2ae9ac1d235ce3ff28bf4bc545bfcc0f9eaf9ded857e82c22ab1c8c6d437a" }
+  }
+}
