@@ -40,6 +40,42 @@ export type LocalCheckoutAvailability = {
 /** Only the safe page link is consumed here; signed tickets stay on the API checkout page. */
 export type LocalCheckout = { id: string; displayNo: string; amount: { cents: string; currency: "CNY" }; expiresAt: string; url: string };
 
+export type DemoCheckoutAvailability = {
+  contractVersion: "ecs-test-checkout-availability.v1"; scope: "ECS_TEST_SIMULATED"; orderId: string;
+  checkoutEnabled: boolean; observedAt: string; productionPaymentCapability: false; bankArrival: "UNKNOWN";
+};
+export type DemoCheckoutResult = {
+  contractVersion: "ecs-test-checkout-result.v1"; scope: "ECS_TEST_SIMULATED"; orderId: string;
+  payment: { confirmationId: string; disposition: "APPLIED"; reasonCode: null; replay: boolean }; bankArrival: "UNKNOWN";
+};
+export type DemoCheckoutReceipt = {
+  contractVersion: "ecs-test-checkout-receipt.v1"; scope: "ECS_TEST_SIMULATED"; orderId: string;
+  knowledge: "KNOWN" | "UNKNOWN"; receipt: DemoCheckoutResult | null; observedAt: string; writeAssemblyReady: boolean; mayReapply: false;
+};
+const demoTime = (value: unknown) => typeof value === "string" && Number.isFinite(Date.parse(value));
+export function parseDemoCheckoutAvailability(value: unknown, orderId: string): DemoCheckoutAvailability {
+  const v = value as DemoCheckoutAvailability | null;
+  if (!v || v.contractVersion !== "ecs-test-checkout-availability.v1" || v.scope !== "ECS_TEST_SIMULATED" || v.orderId !== orderId
+    || typeof v.checkoutEnabled !== "boolean" || !demoTime(v.observedAt) || v.productionPaymentCapability !== false || v.bankArrival !== "UNKNOWN") throw new OrderRequestError(502, null);
+  return v;
+}
+export function parseDemoCheckoutResult(value: unknown, orderId: string): DemoCheckoutResult {
+  const v = value as DemoCheckoutResult | null;
+  if (!v || v.contractVersion !== "ecs-test-checkout-result.v1" || v.scope !== "ECS_TEST_SIMULATED" || v.orderId !== orderId || v.bankArrival !== "UNKNOWN"
+    || typeof v.payment?.confirmationId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(v.payment.confirmationId)
+    || v.payment.disposition !== "APPLIED" || v.payment.reasonCode !== null || typeof v.payment.replay !== "boolean") throw new OrderRequestError(502, null);
+  return v;
+}
+export function parseDemoCheckoutReceipt(value: unknown, orderId: string): DemoCheckoutReceipt {
+  const v = value as DemoCheckoutReceipt | null;
+  if (!v || v.contractVersion !== "ecs-test-checkout-receipt.v1" || v.scope !== "ECS_TEST_SIMULATED" || v.orderId !== orderId
+    || !demoTime(v.observedAt) || typeof v.writeAssemblyReady !== "boolean" || v.mayReapply !== false
+    || (v.knowledge !== "KNOWN" && v.knowledge !== "UNKNOWN")) throw new OrderRequestError(502, null);
+  if (v.knowledge === "KNOWN") return { ...v, receipt: parseDemoCheckoutResult(v.receipt, orderId) };
+  if (v.receipt !== null) throw new OrderRequestError(502, null);
+  return v;
+}
+
 export function parseLocalCheckoutAvailability(value: unknown, orderId: string): LocalCheckoutAvailability {
   const v = value as LocalCheckoutAvailability | null;
   if (!v || v.contractVersion !== "local-sandbox-checkout-availability.v1" || v.scope !== "LOCAL_CONTROLLED" || v.orderId !== orderId
@@ -923,6 +959,12 @@ export const orderApi = {
     requestWrite<unknown>(`/api/orders/${encodeURIComponent(orderId)}/local-checkouts`, { body: {}, key, expectedUserId: userId }),
   localCheckoutReceipt: (userId: string, orderId: string, key: string, signal?: AbortSignal) =>
     requestJson<{ scope: string; knowledge: string; mayReapply: boolean; receipt: unknown }>(`/api/orders/${encodeURIComponent(orderId)}/local-checkouts/receipt?${new URLSearchParams({ key })}`, { signal, expectedUserId: userId }),
+  demoCheckoutAvailability: (userId: string, orderId: string, signal?: AbortSignal) =>
+    requestJson<unknown>(`/api/orders/${encodeURIComponent(orderId)}/demo-checkout`, { signal, expectedUserId: userId }).then(value => parseDemoCheckoutAvailability(value, orderId)),
+  confirmDemoCheckout: (userId: string, orderId: string, key: string) =>
+    requestWrite<unknown>(`/api/orders/${encodeURIComponent(orderId)}/demo-checkout/confirm`, { body: {}, key, expectedUserId: userId }).then(value => parseDemoCheckoutResult(value, orderId)),
+  demoCheckoutReceipt: (userId: string, orderId: string, key: string, signal?: AbortSignal) =>
+    requestJson<unknown>(`/api/orders/${encodeURIComponent(orderId)}/demo-checkout/receipt?${new URLSearchParams({ key })}`, { signal, expectedUserId: userId }).then(value => parseDemoCheckoutReceipt(value, orderId)),
   settlement: (orderId: string, signal?: AbortSignal) =>
     requestJson<OrderSettlement>(`/api/orders/${encodeURIComponent(orderId)}/settlement`, { signal }),
   settlementPreview: (orderId: string, body: { lines: SettlementQuantityInput[]; endReason?: string }, signal?: AbortSignal) =>

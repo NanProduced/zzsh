@@ -14,8 +14,8 @@ const apiOrigin =
 const webOrigin =
   process.env.ZZSH_WEB_ORIGIN ?? (local ? "http://127.0.0.1:3100" : "");
 const id = "[A-Za-z0-9][A-Za-z0-9._:-]{0,127}";
-const getPath = new RegExp(`^/(?:legacy(?:/${id}(?:/continuation(?:/receipt)?)?)?|${id}(?:/(?:im|settlement|payment-requests|channel-payment-requests|local-checkouts(?:/receipt)?|refunds|prestart-termination))?)?$`);
-const postPath = new RegExp(`^/(?:legacy/${id}/continuation/(?:preview|propose|confirm|reject)|${id}/(?:cancel|payment-requests|local-checkouts|channel-payment-requests(?:/query)?|prestart-termination/requests|settlement-preview|settlements(?:/${id}/decision)?|openings/${id}/confirm))?$`);
+const getPath = new RegExp(`^/(?:legacy(?:/${id}(?:/continuation(?:/receipt)?)?)?|${id}(?:/(?:im|settlement|payment-requests|channel-payment-requests|local-checkouts(?:/receipt)?|demo-checkout(?:/receipt)?|refunds|prestart-termination))?)?$`);
+const postPath = new RegExp(`^/(?:legacy/${id}/continuation/(?:preview|propose|confirm|reject)|${id}/(?:cancel|payment-requests|local-checkouts|demo-checkout/confirm|channel-payment-requests(?:/query)?|prestart-termination/requests|settlement-preview|settlements(?:/${id}/decision)?|openings/${id}/confirm))?$`);
 const error = (status: number, code: string, requestId: string) =>
   Response.json(
     { error: { code, message: "订单请求未完成", requestId } },
@@ -52,7 +52,8 @@ export async function forwardOrderRequest(
     return error(403, "FORBIDDEN", requestId);
   const channelPayment = resource === "orders" && path.includes("/channel-payment-requests");
   const localCheckout = resource === "orders" && new RegExp(`^/${id}/local-checkouts(?:/receipt)?$`).test(path);
-  if (localCheckout) {
+  const demoCheckout = resource === "orders" && new RegExp(`^/${id}/demo-checkout(?:/receipt|/confirm)?$`).test(path);
+  if (localCheckout || demoCheckout) {
     const query = new URL(request.url).searchParams;
     if (path.endsWith("/receipt")) { if (method !== "GET" || [...query.keys()].some(k => k !== "key") || query.getAll("key").length !== 1 || !new RegExp(`^${id}$`).test(query.get("key") ?? "")) return error(400, "INVALID_ARGUMENT", requestId); }
     else if (new URL(request.url).search) return error(400, "INVALID_ARGUMENT", requestId);
@@ -63,7 +64,7 @@ export async function forwardOrderRequest(
   const legacyTeamRead = resource === "orders" && method === "GET" && (path === "/legacy-im-groups" || /^\/legacy_order_[a-f0-9]{40}\/im$/.test(path));
   if ((refundRead || prestart) && new URL(request.url).search) return error(400, "INVALID_ARGUMENT", requestId);
   const expectedUserId = request.headers.get("x-zzsh-expected-user-id");
-  if ((channelPayment || localCheckout || refundRead || prestart || unifiedList || legacyTeamRead) && (!expectedUserId || !new RegExp(`^${id}$`).test(expectedUserId)))
+  if ((channelPayment || localCheckout || demoCheckout || refundRead || prestart || unifiedList || legacyTeamRead) && (!expectedUserId || !new RegExp(`^${id}$`).test(expectedUserId)))
     return error(400, "INVALID_ARGUMENT", requestId);
   if (resource === "rental-price-preview") {
     const url = new URL(request.url), refs = ["accountId", "versionId", "releaseId"];
@@ -85,9 +86,14 @@ export async function forwardOrderRequest(
       return error(400, "INVALID_ARGUMENT", requestId);
     headers.set("content-type", "application/json");
     const idempotencyKey = request.headers.get("idempotency-key");
+    if (demoCheckout && (!idempotencyKey || !new RegExp(`^${id}$`).test(idempotencyKey))) return error(400, "INVALID_ARGUMENT", requestId);
     if (idempotencyKey) headers.set("idempotency-key", idempotencyKey);
     try {
       body = await readBoundedBody(request, 64 * 1024, deadline);
+      if (demoCheckout) {
+        const parsed = JSON.parse(new TextDecoder().decode(body));
+        if (!parsed || typeof parsed !== "object" || Array.isArray(parsed) || Object.keys(parsed).length) return error(400, "INVALID_ARGUMENT", requestId);
+      }
     } catch (e) {
       return error(
         e instanceof BodyTooLargeError ? 413 : 400,
@@ -98,7 +104,7 @@ export async function forwardOrderRequest(
   }
   let upstream: Response;
   try {
-    if (channelPayment || localCheckout || refundRead || prestart || unifiedList || legacyTeamRead) {
+    if (channelPayment || localCheckout || demoCheckout || refundRead || prestart || unifiedList || legacyTeamRead) {
       const authHeaders = new Headers({ origin: webOrigin, "x-request-id": requestId });
       if (cookies) authHeaders.set("cookie", cookies);
       // 同一份捕获Cookie核身份，旧标签页不能借新账号会话读取私有订单或提交渠道请求。
@@ -139,6 +145,7 @@ export async function forwardOrderRequest(
   try {
     const bytes = await readBoundedBody(upstream, 2 * 1024 * 1024, deadline);
     const payload = JSON.parse(new TextDecoder().decode(bytes));
+    if (demoCheckout && upstream.ok && (payload?.scope !== "ECS_TEST_SIMULATED" || payload?.orderId !== segments?.[0])) return error(502, "INTERNAL_ERROR", requestId);
     if (unifiedList && upstream.ok && (payload?.subjectId !== expectedUserId || !Array.isArray(payload?.items))) return error(502, "INTERNAL_ERROR", requestId);
     if (legacyTeamRead && upstream.ok && (payload?.subjectId !== expectedUserId || (path === "/legacy-im-groups" ? !Array.isArray(payload?.items) : payload?.orderId !== segments?.[0]))) return error(502, "INTERNAL_ERROR", requestId);
     if (refundRead && upstream.ok && (payload?.contractVersion !== "personal-native-refunds.v1" || payload?.subjectId !== expectedUserId || payload?.order?.orderId !== segments?.[0])) return error(502, "INTERNAL_ERROR", requestId);
