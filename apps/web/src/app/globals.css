@@ -2436,13 +2436,15 @@ html[data-theme="light"] .auth-brand-copy .brand-logo { filter: none; }
 .auth-pin-slots {
   position: relative;
   display: flex;
-  flex: 1 1 250px;
+  flex: 0 1 auto;
   min-width: 0;
-  gap: 6px;
+  max-width: 100%;
+  gap: 8px;
   cursor: text;
 }
 .auth-pin-slot {
-  flex: 1 1 0;
+  flex: 0 1 40px;
+  width: 40px;
   min-width: 0;
   height: 42px;
   display: flex;
