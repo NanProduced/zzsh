@@ -34,6 +34,15 @@ function catalog(): TradeCatalogItem[] {
   return DELTA_LEGACY_RESOURCES.map(([field, codes], i) => ({ id: "fixture_item_" + i, code: codes[0], unit: field === "haff" ? "HAFF_BASE" : field.includes("bullet") ? "ROUND" : field === "top_insure_card_num" ? "DAY" : "PIECE", quantityScale: 0 }));
 }
 
+test("captured account ratio does not alter existing listing declaration or frozen price inputs", () => {
+  const old = fixture(), newer = structuredClone(old);
+  newer.display.sourceAccountBaseRatioWanPerYuan = "56";
+  newer.display.sourceAccountFullPayoutSelected = true;
+  const first = buildLegacyTradeDeclaration(old, catalog()), second = buildLegacyTradeDeclaration(newer, catalog());
+  assert.deepEqual(second, first);
+  assert.deepEqual(prepareLegacyTradeIntake(newer,catalog()).draft,prepareLegacyTradeIntake(old,catalog()).draft);
+});
+
 function reviewedMaintenanceFixture(t: TestContext, options: { native?: boolean; selected?: boolean; originalTitle?: string; bumpDraft?: boolean; legacyReference?: boolean } = {}) {
   const publishing: typeof import("../src/supply/publishing") = require("../src/supply/publishing");
   const legacy: typeof import("../src/supply/legacy-observation") = require("../src/supply/legacy-observation");

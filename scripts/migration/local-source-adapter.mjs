@@ -220,14 +220,37 @@ export function matchesLegacyAccountMetricAudit(records, expected, bindingDigest
         && records[0].accountMetricSource && canonicalize(records[0].accountMetricSource) === canonicalize(expected));
 }
 
-/** Retain only the digest and requested original field in memory during independent readback. */
+/** Retain only the digest and requested original fields in memory during independent readback. */
 export function legacyAccountCaptureProof(raw, canonicalize) {
-    return { sourceId: raw.id, sourceDigest: digest(canonicalize(raw)), metricSourceFields:
+    return { sourceId: raw.id, sourceDigest: digest(canonicalize(raw)), sourceBaseRatio: raw.base_bot, metricSourceFields:
         Object.fromEntries(["is_full_payout"].filter(name => Object.hasOwn(raw, name)).map(name => [name, raw[name]])) };
 }
 export function matchesLegacyAccountCapture(proof, planned, canonicalize) {
     return Boolean(proof && proof.sourceId === planned.sourceId && planned.metricSourceFields !== undefined
         && proof.sourceDigest === planned.sourceDigest && canonicalize(proof.metricSourceFields) === canonicalize(planned.metricSourceFields));
+}
+
+/** Independently compare captured base_bot; it is never treated as an order's frozen price. */
+export function matchesCapturedAccountBaseRatio(proof, snapshot, expectedSourceDigest) {
+    if (!proof || proof.sourceDigest !== expectedSourceDigest || !snapshot || !Object.hasOwn(snapshot,"sourceAccountBaseRatioWanPerYuan") || !Array.isArray(snapshot.issues)) return false;
+    const raw = proof.sourceBaseRatio;
+    const text = typeof raw === "string" ? raw : typeof raw === "number" && Number.isSafeInteger(raw) ? String(raw) : null;
+    let expected = null, issue;
+    if (raw === null || raw === undefined || raw === "") issue = "base_bot:MISSING";
+    else if (text === null || !/^(0|[1-9]\d{0,9})(?:\.\d{1,8})?$/.test(text)) issue = "base_bot:INVALID";
+    else if (BigInt(text.replace(".","")) === 0n) issue = "base_bot:NON_POSITIVE";
+    else expected = text;
+    return snapshot.sourceAccountBaseRatioWanPerYuan === expected
+        && (issue ? snapshot.issues.filter(value => value === issue).length === 1 : !snapshot.issues.some(value => value.startsWith("base_bot:")));
+}
+
+export function matchesCapturedAccountFullPayout(proof, snapshot, expectedSourceDigest) {
+    if (!proof || proof.sourceDigest !== expectedSourceDigest || !snapshot || !Object.hasOwn(snapshot,"sourceAccountFullPayoutSelected") || !Array.isArray(snapshot.issues)) return false;
+    const raw=proof.metricSourceFields?.is_full_payout;
+    const expected=raw===true || raw===1 || raw==='1' ? true : raw===false || raw===0 || raw==='0' ? false : null;
+    return snapshot.sourceAccountFullPayoutSelected===expected && (expected===null
+        ? snapshot.issues.filter(value=>value==='is_full_payout:UNKNOWN').length===1
+        : !snapshot.issues.includes('is_full_payout:UNKNOWN'));
 }
 
 /** Order read snapshots remain exactly the whitelisted original la_order projection. */

@@ -1,7 +1,7 @@
 import {assertRebuiltEmptyCoverageChunk,assertRebuiltEmptyCoverageManifest,continuationCommissionEffects,prepareLocalFundsPlan} from "./local-funds-plan.mjs";
 import { advisoryLockSql, assertLiveTarget, assertReadbackTarget, loadRegisteredTarget, maintenanceConnection, targetConnection, targetIdentityQuery } from "./local-target-registry.mjs";
 import { compareKeySets } from "./local-key-set.mjs";
-import { classifyLegacyRegistrationTime, compareLegacyRegistrationFact, matchesLegacyAccountMetricAudit, legacyAccountCaptureProof, matchesLegacyAccountCapture, legacyOrderCaptureProof, matchesLegacyOrderCapture } from "./local-source-adapter.mjs";
+import { classifyLegacyRegistrationTime, compareLegacyRegistrationFact, matchesLegacyAccountMetricAudit, legacyAccountCaptureProof, matchesLegacyAccountCapture, matchesCapturedAccountBaseRatio, matchesCapturedAccountFullPayout, legacyOrderCaptureProof, matchesLegacyOrderCapture } from "./local-source-adapter.mjs";
 import { assessInvitationChildSet, requiresInvitationCountClosure } from "./local-round-contract.mjs";
 import { createHash } from "node:crypto";
 import { createReadStream, readFileSync, writeFileSync, existsSync, lstatSync } from "node:fs";
@@ -194,7 +194,32 @@ try {
       report[name] = { expected, matched };
     }
     const display = state.additiveInputs.display, dm = JSON.parse(readFileSync(await checked(display.directory, "manifest.json", display.manifestSha256)));
-    await compare("display", rows(await checked(display.directory, dm.file, dm.sha256)), async batch => (await query(`SELECT m.legacy_id key,m.version_id,d.observation_version_id,d.extract_sha256,d.base_source_digest,d.snapshot,to_char(d.source_updated_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') updated_at FROM zzsh_supply.legacy_supply_map m JOIN zzsh_supply.legacy_listing_display_snapshot d USING(account_id) WHERE m.source_system='legacy_mysql_restore' AND m.source_entity='la_rental_accounts' AND m.legacy_id=ANY($1::text[])`, [batch.map(r => r.sourceId)])).rows, (r, a) => a && a.version_id === a.observation_version_id && a.extract_sha256 === dm.extractSha256 && a.base_source_digest === r.baseSourceDigest && a.updated_at === r.sourceUpdatedAt && canonical(a.snapshot) === canonical(r.snapshot), dm.rows);
+    const ratio = dm.accountBaseRatio ? { scope: dm.accountBaseRatio.scope, expected: dm.rows, matched: 0, known: 0, unknown: 0 } : null;
+    const payout = dm.accountFullPayout ? { scope: dm.accountFullPayout.scope, expected: dm.rows, matched: 0, selected: 0, unselected: 0, unknown: 0 } : null;
+    if (ratio && (ratio.scope !== "ACCOUNT_AT_CAPTURE_NOT_ORDER_SNAPSHOT" || !originalMetricSources || dm.accountBaseRatio.known + dm.accountBaseRatio.unknown !== dm.rows)) throw new Error("DISPLAY_ACCOUNT_RATIO_SOURCE_PROOF_REQUIRED");
+    if (payout && (payout.scope !== "ACCOUNT_AT_CAPTURE_NOT_ORDER_SNAPSHOT" || !originalMetricSources || dm.accountFullPayout.selected + dm.accountFullPayout.unselected + dm.accountFullPayout.unknown !== dm.rows)) throw new Error("DISPLAY_ACCOUNT_PAYOUT_SOURCE_PROOF_REQUIRED");
+    await compare("display", rows(await checked(display.directory, dm.file, dm.sha256)), async batch => (await query(`SELECT m.legacy_id key,m.version_id,d.observation_version_id,d.extract_sha256,d.base_source_digest,d.snapshot,to_char(d.source_updated_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') updated_at FROM zzsh_supply.legacy_supply_map m JOIN zzsh_supply.legacy_listing_display_snapshot d USING(account_id) WHERE m.source_system='legacy_mysql_restore' AND m.source_entity='la_rental_accounts' AND m.legacy_id=ANY($1::text[])`, [batch.map(r => r.sourceId)])).rows, (r, a) => {
+      if (!a || a.version_id !== a.observation_version_id || a.extract_sha256 !== dm.extractSha256 || a.base_source_digest !== r.baseSourceDigest || a.updated_at !== r.sourceUpdatedAt || canonical(a.snapshot) !== canonical(r.snapshot)) return false;
+      if (ratio) {
+        if (!matchesCapturedAccountBaseRatio(originalMetricSources.accounts.get(r.sourceId), a.snapshot, a.base_source_digest)) return false;
+        ratio.matched++;ratio[a.snapshot.sourceAccountBaseRatioWanPerYuan === null ? "unknown" : "known"]++;
+      }
+      if (payout) {
+        if (!matchesCapturedAccountFullPayout(originalMetricSources.accounts.get(r.sourceId), a.snapshot, a.base_source_digest)) return false;
+        payout.matched++;payout[a.snapshot.sourceAccountFullPayoutSelected === null ? "unknown" : a.snapshot.sourceAccountFullPayoutSelected ? "selected" : "unselected"]++;
+      }
+      return true;
+    }, dm.rows);
+    if (ratio) {
+      ratio.status = ratio.matched === dm.rows && ratio.known === dm.accountBaseRatio.known && ratio.unknown === dm.accountBaseRatio.unknown ? "VERIFIED" : "MISMATCH";
+      if (ratio.status !== "VERIFIED") difference("display", "ACCOUNT_RATIO", "SOURCE_ACCOUNT_RATIO_READBACK_DRIFT");
+      report.display.accountBaseRatio = ratio;
+    }
+    if (payout) {
+      payout.status = payout.matched === dm.rows && ['selected','unselected','unknown'].every(key=>payout[key]===dm.accountFullPayout[key]) ? "VERIFIED" : "MISMATCH";
+      if (payout.status !== "VERIFIED") difference("display", "ACCOUNT_FULL_PAYOUT", "SOURCE_ACCOUNT_PAYOUT_READBACK_DRIFT");
+      report.display.accountFullPayout = payout;
+    }
     const hm = state.generatedPhases.skinHoldings, hp = JSON.parse(readFileSync(await checked(join(dirname(checkpoint), "phases"), "skinHoldings.json", hm.sha256)));
     await compare("holdings", hp.rows, async batch => (await query("SELECT legacy_id key,account_id,observation_version_id,source_digest,holding_digest,skin_ids,evidence_ref FROM zzsh_supply.legacy_skin_holding WHERE source_system='legacy_mysql_restore' AND source_entity='la_rental_accounts' AND legacy_id=ANY($1::text[])", [batch.map(r => r.sourceId)])).rows, (r, a) => a && a.account_id === r.sealedRow.accountId && a.observation_version_id === r.sealedRow.observationVersionId && a.source_digest === r.sealedRow.sourceDigest && a.holding_digest === r.expectedHoldingDigest && a.evidence_ref === r.evidenceRef && canonical([...a.skin_ids].sort()) === canonical([...r.expectedSkinIds].sort()), hm.rows);
     const holdingAudits = new Map((await query("SELECT object_id,details->'sourceAdmission' admission FROM zzsh_iam.audit_event WHERE action='supply.legacy.skin_holdings_recorded' AND outcome='SUCCESS'")).rows.map(r => [r.object_id, r.admission]));

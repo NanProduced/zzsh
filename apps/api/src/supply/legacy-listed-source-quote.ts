@@ -1,6 +1,6 @@
 import { canonicalize, type LegacyQuoteProvenance } from "./content-hash";
 import { calculateDeltaTermSeconds } from "./delta-rental";
-import { convertLegacyDisplayFields, type LegacyDisplaySnapshot } from "./legacy-display-snapshot";
+import { legacyDisplayMatchesSource, type LegacyDisplaySnapshot } from "./legacy-display-snapshot";
 import { DELTA_LEGACY_RESOURCES } from "./legacy-observation";
 import { readLegacyListedPolicy } from "./legacy-listed-policy";
 import { readLegacyListedSource } from "./legacy-listed-source";
@@ -37,7 +37,7 @@ export function buildLegacyListedSourceQuote(input: {
   if (binding.sourceId !== input.source.legacyId || binding.sourceDigest !== input.source.sourceDigest || binding.legacyGameId !== row.game_id)
     throw new Error("LEGACY_POLICY_SOURCE_BINDING_MISMATCH");
   const policy = readLegacyListedPolicy(input.policyCanonical, binding);
-  if (canonicalize(convertLegacyDisplayFields(row)) !== canonicalize(input.display)) throw new Error("LEGACY_DISPLAY_SOURCE_MISMATCH");
+  if (!legacyDisplayMatchesSource(row, input.display)) throw new Error("LEGACY_DISPLAY_SOURCE_MISMATCH");
   if (typeof row.default_consume_type !== "string" || !/^[1-3]$/.test(row.default_consume_type)
     || input.termOption.dailyConsumption !== (BigInt(row.default_consume_type) * 10000000n).toString()) throw new Error("LEGACY_DAILY_CONSUMPTION_MISMATCH");
   const term = calculateDeltaTermSeconds(BigInt(source.haffMillions) * 1000000n, input.termOption);

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { convertLegacyDisplayFields, legacyDisplayDigest, parseLegacyDisplaySnapshot } from "../src/supply/legacy-display-snapshot";
+import { convertLegacyDisplayFields, legacyDisplayDigest, legacyDisplayMatchesSource, parseLegacyDisplaySnapshot } from "../src/supply/legacy-display-snapshot";
 import { recordLegacyDisplaySnapshot, readLegacyListing, buildLegacyListingCandidates, buildMixedListingCandidates, projectLegacyHistoricalRead, loadLegacyHistoricalRead, loadLegacyHistoricalReads, legacyHistoricalReadSql } from "../src/supply/legacy-listing-read";
 import { legacyAdmissionSql, parseLegacyPublicAdmission } from "../src/legacy-load/legacy-public-admission";
 import type { ListingQueryV2 } from "../src/supply/listing-filter-contract";
@@ -39,6 +39,42 @@ test("seasonal boss completion and next-season plans preserve explicit zero, nul
   const missing=structuredClone(before);delete missing.attributes.safe_box_code;
   assert.throws(()=>parseLegacyDisplaySnapshot(missing));
   assert.deepEqual(parseLegacyDisplaySnapshot(before),before);
+});
+test("account ratio is a source-bound capture fact; existing snapshots and hashes stay valid",()=>{
+  const row={...source(),base_bot:"56"}, old=convertLegacyDisplayFields(row), newer=convertLegacyDisplayFields(row,{includeAccountBaseRatio:true});
+  assert.equal(Object.hasOwn(old,"sourceAccountBaseRatioWanPerYuan"),false);
+  assert.deepEqual(parseLegacyDisplaySnapshot(old),old);
+  assert.equal(newer.sourceAccountBaseRatioWanPerYuan,"56");
+  assert.deepEqual(parseLegacyDisplaySnapshot(newer),newer);
+  assert.equal(legacyDisplayMatchesSource(row,old),true);
+  assert.equal(legacyDisplayMatchesSource(row,newer),true);
+  assert.equal(legacyDisplayMatchesSource({...row,base_bot:"57"},newer),false);
+  const binding=input();binding.snapshot=old;const oldDigest=legacyDisplayDigest("a-1",binding);
+  assert.equal(legacyDisplayDigest("a-1",{...binding,snapshot:parseLegacyDisplaySnapshot(old)}),oldDigest);
+  assert.notEqual(legacyDisplayDigest("a-1",{...binding,snapshot:newer}),oldDigest);
+  for(const raw of [null,"","0","-1","NaN","56.123456789"]) {
+    const item=convertLegacyDisplayFields({...row,base_bot:raw},{includeAccountBaseRatio:true});
+    assert.equal(item.sourceAccountBaseRatioWanPerYuan,null);
+    assert(item.issues.some(issue=>issue.startsWith("base_bot:")));
+    assert.deepEqual(parseLegacyDisplaySnapshot(item),item);
+  }
+  assert.equal(convertLegacyDisplayFields({...row,base_bot:"56.25"},{includeAccountBaseRatio:true}).sourceAccountBaseRatioWanPerYuan,"56.25");
+  assert.throws(()=>parseLegacyDisplaySnapshot({...newer,sourceAccountBaseRatioWanPerYuan:"0"}));
+  assert.throws(()=>parseLegacyDisplaySnapshot({...newer,sourceAccountBaseRatioWanPerYuan:"56.123456789"}));
+});
+test("account full-payout selection retains 1, 0 and unknown as distinct capture facts",()=>{
+  for(const [raw,expected] of [["1",true],["0",false],[null,null],["2",null]] as const){
+    const row={...source(),is_full_payout:raw}, old=convertLegacyDisplayFields(row), current=convertLegacyDisplayFields(row,{includeAccountFullPayout:true});
+    assert.equal(Object.hasOwn(old,"sourceAccountFullPayoutSelected"),false);
+    assert.equal(current.sourceAccountFullPayoutSelected,expected);
+    assert.equal(legacyDisplayMatchesSource(row,old),true);
+    assert.equal(legacyDisplayMatchesSource(row,current),true);
+    assert.equal(current.issues.includes("is_full_payout:UNKNOWN"),expected===null);
+    assert.deepEqual(parseLegacyDisplaySnapshot(current),current);
+  }
+  const row={...source(),is_full_payout:"1"},snapshot=convertLegacyDisplayFields(row,{includeAccountFullPayout:true});
+  assert.equal(legacyDisplayMatchesSource({...row,is_full_payout:"0"},snapshot),false);
+  assert.throws(()=>parseLegacyDisplaySnapshot({...snapshot,sourceAccountFullPayoutSelected:"1"}));
 });
 test("missing, out of range, unsafe and ambiguous facts remain unknown; raw private values stay out",()=>{
   const x=convertLegacyDisplayFields({...source(),ratio_type:"future",haff:null,coffee_num:"-1",character_lv:"1954095103",processing_time_start:"8",processing_time_end:"8",province:"微信13800138000",high_risk_owner:null});

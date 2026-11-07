@@ -143,7 +143,7 @@ test('FIN-02 is an alternative original-balance scenario, not a second opening f
  const dir=temp(),r=run(['plan','--manifest',join(FIXTURE_PATH,'manifest-fin02.json'),'--out',dir]);assert.equal(r.status,0,r.stderr);const plan=load(join(dir,'plan.json')),ready=plan.domains.finance.openings.filter(x=>x.status==='READY');assert.equal(ready.length,1);assert.equal(ready[0].availableCents,'110');assert.equal(ready[0].coveredCount,1);assert.equal(ready[0].flowSum,'NOT_COMPUTED');assert.equal(ready[0].openingIdMeaning,'SCENARIO_LABEL_NOT_DATABASE_ID');
 });
 
-import { classifyLegacyRegistrationTime, compareLegacyRegistrationFact, sourceAdultEvidence, sourceAccountPlan, sourceOrderPlan, sourceFinanceObservation, sourceContinuation, summarizeLegacyDashboardSources, matchesLegacyAccountMetricAudit, legacyAccountCaptureProof, matchesLegacyAccountCapture, legacyOrderCaptureProof, matchesLegacyOrderCapture, assertSourceSupplementFields } from "./local-source-adapter.mjs";
+import { classifyLegacyRegistrationTime, compareLegacyRegistrationFact, sourceAdultEvidence, sourceAccountPlan, sourceOrderPlan, sourceFinanceObservation, sourceContinuation, summarizeLegacyDashboardSources, matchesLegacyAccountMetricAudit, legacyAccountCaptureProof, matchesLegacyAccountCapture, matchesCapturedAccountBaseRatio, matchesCapturedAccountFullPayout, legacyOrderCaptureProof, matchesLegacyOrderCapture, assertSourceSupplementFields } from "./local-source-adapter.mjs";
 
 test("registration source and independent target fact distinguish missing, invalid and mismatched time", () => {
   const epoch = value => new Date(Number(value) * 1000).toISOString();
@@ -211,6 +211,28 @@ test("account metric flag remains a bound capture fact and is not invented when 
   const missing=sourceAccountPlan(Object.fromEntries(Object.entries(account).filter(([key])=>key!=="is_full_payout")),users,modules,"capture",games);
   assert.deepEqual(missing.metricSourceFields,{});
   const nullFact=sourceAccountPlan({...account,is_full_payout:null},users,modules,"capture",games);assert.deepEqual(nullFact.metricSourceFields,{is_full_payout:null});
+});
+
+test("account base ratio readback binds raw source and keeps unknown distinct",()=>{
+  const source={id:"3",base_bot:"56"},proof=legacyAccountCaptureProof(source,JSON.stringify);
+  const snapshot={sourceAccountBaseRatioWanPerYuan:"56",issues:[]};
+  assert.equal(matchesCapturedAccountBaseRatio(proof,snapshot,proof.sourceDigest),true);
+  assert.equal(matchesCapturedAccountBaseRatio(proof,{...snapshot,sourceAccountBaseRatioWanPerYuan:"57"},proof.sourceDigest),false);
+  assert.equal(matchesCapturedAccountBaseRatio(proof,snapshot,"a".repeat(64)),false);
+  assert.equal(matchesCapturedAccountBaseRatio(proof,{issues:[]},proof.sourceDigest),false);
+  for(const [value,issue] of [[null,"base_bot:MISSING"],["0","base_bot:NON_POSITIVE"],["-1","base_bot:INVALID"]]) {
+    const p=legacyAccountCaptureProof({...source,base_bot:value},JSON.stringify);
+    assert.equal(matchesCapturedAccountBaseRatio(p,{sourceAccountBaseRatioWanPerYuan:null,issues:[issue]},p.sourceDigest),true);
+    assert.equal(matchesCapturedAccountBaseRatio(p,{sourceAccountBaseRatioWanPerYuan:null,issues:[]},p.sourceDigest),false);
+  }
+});
+test("account payout readback preserves explicit source zero and rejects forged selection",()=>{
+  for(const [raw,selected,issues] of [["1",true,[]],["0",false,[]],[null,null,["is_full_payout:UNKNOWN"]]]){
+    const proof=legacyAccountCaptureProof({id:"3",is_full_payout:raw},JSON.stringify),snapshot={sourceAccountFullPayoutSelected:selected,issues};
+    assert.equal(matchesCapturedAccountFullPayout(proof,snapshot,proof.sourceDigest),true);
+    assert.equal(matchesCapturedAccountFullPayout(proof,{...snapshot,sourceAccountFullPayoutSelected:selected===true?false:true},proof.sourceDigest),false);
+    assert.equal(matchesCapturedAccountFullPayout(proof,snapshot,"a".repeat(64)),false);
+  }
 });
 
 test("dashboard capture report distinguishes null and uncaptured facts; readback rejects changed or duplicate audit",()=>{

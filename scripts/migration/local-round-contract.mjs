@@ -296,6 +296,16 @@ export function assessRoundEvidence({ input, inputSha256, actorProof, receipt, c
         || closure.subjects!==facts.subjects || closure.matched!==facts.subjects
         || !Number.isSafeInteger(closure.known) || !Number.isSafeInteger(closure.unknown) || closure.known+closure.unknown!==facts.subjects)
         issues.push("ROUND_INVITATION_COUNT_READBACK_UNCONFIRMED");
+      const sourceRatio=expected?.display?.accountBaseRatio, ratio=readback?.display?.accountBaseRatio, total=expected?.display?.rows;
+      if(sourceRatio?.scope!=="ACCOUNT_AT_CAPTURE_NOT_ORDER_SNAPSHOT" || !Number.isSafeInteger(sourceRatio.known) || sourceRatio.known<0
+        || !Number.isSafeInteger(sourceRatio.unknown) || sourceRatio.unknown<0 || sourceRatio.known+sourceRatio.unknown!==total
+        || ratio?.scope!==sourceRatio.scope || ratio.status!=="VERIFIED" || ratio.expected!==total || ratio.matched!==total
+        || ratio.known!==sourceRatio.known || ratio.unknown!==sourceRatio.unknown) issues.push("ROUND_ACCOUNT_CAPTURE_RATIO_READBACK_UNCONFIRMED");
+      const sourcePayout=expected?.display?.accountFullPayout,payout=readback?.display?.accountFullPayout;
+      const payoutKeys=['selected','unselected','unknown'];
+      if(sourcePayout?.scope!=="ACCOUNT_AT_CAPTURE_NOT_ORDER_SNAPSHOT" || payoutKeys.some(key=>!Number.isSafeInteger(sourcePayout[key])||sourcePayout[key]<0)
+        || payoutKeys.reduce((sum,key)=>sum+sourcePayout[key],0)!==total || payout?.scope!==sourcePayout.scope || payout.status!=="VERIFIED"
+        || payout.expected!==total || payout.matched!==total || payoutKeys.some(key=>payout[key]!==sourcePayout[key])) issues.push("ROUND_ACCOUNT_CAPTURE_PAYOUT_READBACK_UNCONFIRMED");
     }
     for (const domain of ["users", "accounts", "orders"]) if (!Number.isSafeInteger(expected?.dataset?.domains?.[domain]?.ready) || readback.domains?.[domain]?.expected !== expected.dataset.domains[domain].ready) issues.push("ROUND_READBACK_COUNT_DRIFT:" + domain);
     for (const [domain, count] of Object.entries({ display: expected?.display?.rows, openings: expected?.openings?.stats?.candidate,

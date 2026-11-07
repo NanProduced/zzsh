@@ -17,6 +17,10 @@ const RESOURCES = [
 export type LegacyDisplaySnapshot = {
   schema: typeof LEGACY_DISPLAY_SCHEMA;
   rentalMode: "ordinary" | "custom" | "fast" | null;
+  /** Source account's base_bot at capture; not an order's frozen price or an independently verified quote. */
+  sourceAccountBaseRatioWanPerYuan?: string | null;
+  /** Source account's is_full_payout at capture; not the declaration frozen on an earlier order. */
+  sourceAccountFullPayoutSelected?: boolean | null;
   attributes: Record<string, string | number | boolean | null>;
   resources: Array<{ field: string; code: string; name: string; quantity: string | null; unit: string }>;
   risk: { highRiskOwner: boolean | null; banRecord: boolean | null; faceIsSelf: boolean | null };
@@ -24,7 +28,7 @@ export type LegacyDisplaySnapshot = {
 };
 
 /** Display facts only: source quantities never create native rentable inventory. */
-export function convertLegacyDisplayFields(row: Record<string, unknown>): LegacyDisplaySnapshot {
+export function convertLegacyDisplayFields(row: Record<string, unknown>, options: { includeAccountBaseRatio?: boolean; includeAccountFullPayout?: boolean } = {}): LegacyDisplaySnapshot {
   const issues: string[] = [];
   const integer = (field: string, min: number, max: number): number | null => {
     const value = row[field];
@@ -98,16 +102,34 @@ export function convertLegacyDisplayFields(row: Record<string, unknown>): Legacy
     catch { issues.push(`${field}:INVALID`); return {field,code,name,quantity:null,unit:field==="top_insure_card_num"?"DAY":legacyResourceBaseQuantity(field,null).unit}; }
   });
   const rentalMode = code("ratio_type", {default:"ordinary",custom:"custom",fast:"fast"}) as LegacyDisplaySnapshot["rentalMode"];
-  return {schema:LEGACY_DISPLAY_SCHEMA,rentalMode,attributes,resources,risk:{highRiskOwner:flag("high_risk_owner"),banRecord:flag("ban_record"),faceIsSelf:flag("face_is_self")},issues};
+  const result: LegacyDisplaySnapshot = {schema:LEGACY_DISPLAY_SCHEMA,rentalMode,attributes,resources,risk:{highRiskOwner:flag("high_risk_owner"),banRecord:flag("ban_record"),faceIsSelf:flag("face_is_self")},issues};
+  if (options.includeAccountBaseRatio) {
+    const value = row.base_bot;
+    const text = typeof value === "string" ? value : typeof value === "number" && Number.isSafeInteger(value) ? String(value) : null;
+    result.sourceAccountBaseRatioWanPerYuan = null;
+    if (value === null || value === undefined || value === "") issues.push("base_bot:MISSING");
+    else if (text === null || !/^(0|[1-9]\d{0,9})(?:\.\d{1,8})?$/.test(text)) issues.push("base_bot:INVALID");
+    else if (BigInt(text.replace(".", "")) === 0n) issues.push("base_bot:NON_POSITIVE");
+    else result.sourceAccountBaseRatioWanPerYuan = text;
+  }
+  if (options.includeAccountFullPayout) result.sourceAccountFullPayoutSelected = flag("is_full_payout");
+  return result;
 }
 
 export function parseLegacyDisplaySnapshot(value: unknown): LegacyDisplaySnapshot {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw invalid("Invalid legacy display snapshot");
   const x = value as LegacyDisplaySnapshot;
-  if (Object.keys(x).sort().join(",") !== "attributes,issues,rentalMode,resources,risk,schema" || x.schema !== LEGACY_DISPLAY_SCHEMA || ![null,"ordinary","custom","fast"].includes(x.rentalMode)
+  const required = ["attributes","issues","rentalMode","resources","risk","schema"];
+  const optionalSourceFacts = ["sourceAccountBaseRatioWanPerYuan", "sourceAccountFullPayoutSelected"];
+  if (required.some(key => !Object.hasOwn(x,key)) || Object.keys(x).some(key => !required.includes(key) && !optionalSourceFacts.includes(key)) || x.schema !== LEGACY_DISPLAY_SCHEMA || ![null,"ordinary","custom","fast"].includes(x.rentalMode)
     || !x.attributes || typeof x.attributes !== "object" || Array.isArray(x.attributes) || !x.risk || typeof x.risk !== "object" || Array.isArray(x.risk)
     || Object.keys(x.risk).sort().join(",") !== "banRecord,faceIsSelf,highRiskOwner" || Object.values(x.risk).some(v=>v!==null&&typeof v!=="boolean")
     || !Array.isArray(x.issues) || x.issues.some(v=>typeof v!=="string"||!/^\w+:[A-Z_]+$/.test(v)) || !Array.isArray(x.resources) || x.resources.length!==RESOURCES.length) throw invalid("Invalid legacy display facts");
+  if (Object.hasOwn(x,"sourceAccountBaseRatioWanPerYuan")) {
+    const ratio = x.sourceAccountBaseRatioWanPerYuan;
+    if (ratio !== null && (typeof ratio !== "string" || !/^(0|[1-9]\d{0,9})(?:\.\d{1,8})?$/.test(ratio) || BigInt(ratio.replace(".", "")) === 0n)) throw invalid("Invalid source account base ratio");
+  }
+  if (Object.hasOwn(x,"sourceAccountFullPayoutSelected") && x.sourceAccountFullPayoutSelected!==null && typeof x.sourceAccountFullPayoutSelected!=="boolean") throw invalid("Invalid source account payout selection");
   const allowed = ["safe_box_code","grading_code","login_method_code","vit_level","bear_level","dive_level","character_level","region_province","region_city","secret_kd","service_window_start_minute","service_window_end_minute","service_window_timezone","service_window_cross_midnight"];
   const optional = ["demulan_unlocked", "next_season_pass"];
   if (allowed.some(key=>!Object.hasOwn(x.attributes,key)) || Object.keys(x.attributes).some(key=>!allowed.includes(key)&&!optional.includes(key))) throw invalid("Unexpected legacy display attribute");
@@ -130,6 +152,12 @@ export function parseLegacyDisplaySnapshot(value: unknown): LegacyDisplaySnapsho
     if (!r || Object.keys(r).sort().join(",")!=="code,field,name,quantity,unit" || r.field!==field || r.code!==code || r.name!==name || r.unit!==unit || r.quantity!==null&&(typeof r.quantity!=="string"||!/^(0|[1-9]\d{0,23})$/.test(r.quantity))) throw invalid("Invalid display resource");
   }
   return JSON.parse(JSON.stringify(x)) as LegacyDisplaySnapshot;
+}
+
+/** Old v1 records keep their original bytes; newer records verify the additional captured account fact. */
+export function legacyDisplayMatchesSource(row: Record<string, unknown>, snapshot: LegacyDisplaySnapshot): boolean {
+  const normalized = parseLegacyDisplaySnapshot(snapshot);
+  return canonicalize(convertLegacyDisplayFields(row, {includeAccountBaseRatio:Object.hasOwn(normalized,"sourceAccountBaseRatioWanPerYuan"),includeAccountFullPayout:Object.hasOwn(normalized,"sourceAccountFullPayoutSelected")})) === canonicalize(normalized);
 }
 
 export type LegacyDisplayInput = {

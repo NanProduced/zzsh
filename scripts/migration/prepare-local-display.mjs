@@ -41,11 +41,13 @@ const sid = /S-1-5-[0-9-]+/.exec(spawnSync("whoami", ["/user", "/fo", "csv", "/n
 if (!sid) throw new Error("SID_REQUIRED");
 mkdirSync(out); if (spawnSync("icacls", [out, "/inheritance:r", "/grant:r", `*${sid}:(OI)(CI)F`, "*S-1-5-18:(OI)(CI)F", "*S-1-5-32-544:(OI)(CI)F"], { windowsHide: true }).status !== 0) throw new Error("OUTPUT_ACL_FAILED");
 const output = join(out, "display.jsonl"), fd = openSync(output, "wx"), digest = createHash("sha256");
-const result = { schema: "zzsh.local-display-supplement.v1", datasetSha256: option("--dataset-sha"), supplementSha256: option("--supplement-sha"), extractSha256: captured.files.accountDisplay.sha256, sourceRowsCompared: compared, commonFieldDifferences: 0, rows: 0, notDisplayable: 0, issueCounts: {}, targetWrites: 0, connections: 0, file: "display.jsonl" };
+const result = { schema: "zzsh.local-display-supplement.v1", datasetSha256: option("--dataset-sha"), supplementSha256: option("--supplement-sha"), extractSha256: captured.files.accountDisplay.sha256, sourceRowsCompared: compared, commonFieldDifferences: 0, rows: 0, notDisplayable: 0, issueCounts: {}, accountBaseRatio: { scope: "ACCOUNT_AT_CAPTURE_NOT_ORDER_SNAPSHOT", known: 0, unknown: 0 }, accountFullPayout: { scope: "ACCOUNT_AT_CAPTURE_NOT_ORDER_SNAPSHOT", selected: 0, unselected: 0, unknown: 0 }, targetWrites: 0, connections: 0, file: "display.jsonl" };
 try {
   for await (const account of rows(accountPath)) {
     if (!account.snapshot || !account.sourceUpdatedAt || ![0, 3, 4, 5, 6].includes(Number(account.sourceStatus)) || account.sourceDeleted) { result.notDisplayable++; continue; }
-    const snapshot = display.parseLegacyDisplaySnapshot(display.convertLegacyDisplayFields(displays.get(account.sourceId)));
+    const snapshot = display.parseLegacyDisplaySnapshot(display.convertLegacyDisplayFields(displays.get(account.sourceId), { includeAccountBaseRatio: true, includeAccountFullPayout: true }));
+    result.accountBaseRatio[snapshot.sourceAccountBaseRatioWanPerYuan === null ? "unknown" : "known"]++;
+    result.accountFullPayout[snapshot.sourceAccountFullPayoutSelected === null ? "unknown" : snapshot.sourceAccountFullPayoutSelected ? "selected" : "unselected"]++;
     for (const issue of snapshot.issues) result.issueCounts[issue] = (result.issueCounts[issue] ?? 0) + 1;
     const bytes = Buffer.from(sourceJsonLine({ sourceId: account.sourceId, baseSourceDigest: account.sourceDigest, sourceUpdatedAt: account.sourceUpdatedAt, snapshot }));
     writeSync(fd, bytes); digest.update(bytes); result.rows++;

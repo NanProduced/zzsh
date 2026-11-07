@@ -8,7 +8,7 @@ import { validateDeltaPublicationAttributes } from "./delta-rental";
 import { readFundingPolicyForRelease } from "./funding-authority";
 import { validateOwnerDepositAmount } from "./funding-policy";
 import { DELTA_LEGACY_RESOURCES, lockLegacySource, normalizeResolutionInput, readLegacyMap, resolveLegacyObservationToDraft, type LegacyDraftResolutionInput } from "./legacy-observation";
-import { convertLegacyDisplayFields, legacyDisplayDigest, parseLegacyDisplaySnapshot, type LegacyDisplaySnapshot } from "./legacy-display-snapshot";
+import { legacyDisplayMatchesSource, legacyDisplayDigest, parseLegacyDisplaySnapshot, type LegacyDisplaySnapshot } from "./legacy-display-snapshot";
 import { readLegacyListedSource } from "./legacy-listed-source";
 import { readLegacyListedPolicy } from "./legacy-listed-policy";
 import { readLegacyPublishedReference } from "./legacy-published-reference";
@@ -217,7 +217,7 @@ async function assertLegacyTradeBindings(client: PoolClient, account: Publishing
       || raw.fullPayoutSelected !== (intake.isFullPayout === "1") || raw.rentalMode !== intake.display.rentalMode
       || intake.depositYuan === null || legacyPlanYuanToCents(raw.depositYuan) !== legacyPlanYuanToCents(intake.depositYuan)
       || raw.rentalMode !== "ordinary" && raw.ownerRatio !== intake.ownerRatioB
-      || canonicalize(convertLegacyDisplayFields(rawRow)) !== canonicalize(display)) throw conflict("LEGACY_QUOTE_SOURCE_BINDING_MISMATCH");
+      || !legacyDisplayMatchesSource(rawRow, display)) throw conflict("LEGACY_QUOTE_SOURCE_BINDING_MISMATCH");
     readLegacyListedPolicy(evidence.policyCanonical,binding);
   }
   const observation = (await client.query(`SELECT title,description FROM zzsh_supply.listing_version WHERE id=$1 AND account_id=$2 AND origin='LEGACY_OBSERVATION'`, [mapping.version_id, account.id])).rows[0];
