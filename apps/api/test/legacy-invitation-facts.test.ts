@@ -163,6 +163,19 @@ test('missing original receipt stays UNKNOWN and forged/runtime/wrong owner/expi
  for(const mutation of [(d:typeof db)=>{d.state.owner=false;},(d:typeof db)=>{d.state.mode='I';},(d:typeof db)=>{d.state.now='2026-11-02T16:00:00.000Z';},(d:typeof db)=>{(d.client as any).connectionParameters.user='runtime';}]){const d=database();mutation(d);await assert.rejects(bind(d,packet));assert.equal(d.state.writes,0);}
  const r=review(packet);r.resource.database='zzsh_test_regression';r.resource.oid=2220718;await assert.rejects(bindReviewedLegacyInvitationFacts(db.client,actor,r));assert.equal(db.state.writes,0);
 });
+test('delivery clone admits count closure only with exact independent epoch, role, actor and live system identifier',async()=>{
+ const packet=planned([raw('1')]).packets[0]!,db=database(),r:LegacyInvitationFactsReview={...review(packet,'COUNTS'),
+  nonce:'a'.repeat(24),systemIdentifier:'7705473419326033954',resource:{host:'127.0.0.1',port:55434,database:'zzsh_test_r07_delivery_20261108',oid:16391,
+    owner:'zzsh',ownerOid:16388,marker:'zzsh:r07-delivery-clone:v1',role:'zzsh_regression_migration',roleOid:16389}};
+ const client=db.client as any,query=client.query.bind(client);client.connectionParameters={host:r.resource.host,port:r.resource.port,database:r.resource.database,user:r.resource.role};
+ let actualSystem=r.systemIdentifier;client.query=async(sql:string,args:any[])=>sql.includes('invitation-facts resource')
+  ?{rows:[{...r.resource,systemIdentifier:actualSystem,nonce:r.nonce,now:at,owned:3,complete:true,read_only:'off'}],rowCount:1}:query(sql,args);
+ assert.equal((await bindReviewedLegacyInvitationFacts(client,actor,r)).kind,'REVIEWED_LEGACY_INVITATION_FACTS');
+ for(const mutation of [{phase:'IMPORT' as const},{phase:'QUALIFY' as const},{systemIdentifier:'7704972584346443810'},{nonce:'bad'},
+  {resource:{...r.resource,marker:'zzsh:regression-test:v1'}},{resource:{...r.resource,port:55433}},
+  {resource:{...r.resource,role:'zzsh_regression_runtime'}}])await assert.rejects(bindReviewedLegacyInvitationFacts(client,actor,{...r,...mutation}));
+ actualSystem='9999999999999999999';await assert.rejects(bindReviewedLegacyInvitationFacts(client,actor,r));assert.equal(db.state.writes,0);
+});
 test('original target identity, code collision and missing parent receipt reject before target insertion',async()=>{
  const p=planned(undefined,2);for(const kind of ['identity','code','parent'] as const){const d=database(),packet=kind==='parent'?p.packets[1]!:p.packets[0]!;if(kind==='identity')d.state.identity=false;if(kind==='code')d.state.codeConflict=true;const cap=await bind(d,packet);await assert.rejects(importReviewedLegacyInvitationFacts(d.client,actor,packet,hash(packet),cap));assert.equal(d.state.writes,0);}
 });
