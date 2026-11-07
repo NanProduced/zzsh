@@ -152,6 +152,8 @@ export async function assertEcsTestDemoResource(client: PoolClient, scope: DemoF
       r.rolsuper,r.rolbypassrls,current_setting('zzsh.regression_run',true) AS clone_nonce,
       m.oid::text AS migration_role_oid,m.rolsuper AS migration_super,m.rolbypassrls AS migration_bypass,
       m.rolcreaterole AS migration_createrole,m.rolcreatedb AS migration_createdb,m.rolreplication AS migration_replication,m.rolcanlogin AS migration_login,
+      EXISTS(SELECT 1 FROM pg_auth_members gm WHERE gm.member=own.oid) AS owner_has_membership,
+      EXISTS(SELECT 1 FROM pg_auth_members gm WHERE gm.member=m.oid) AS migration_has_membership,
       (SELECT pg_get_userbyid(nspowner) FROM pg_namespace WHERE nspname='zzsh_order') AS schema_owner,
       EXISTS(SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE p.proowner=r.oid AND n.nspname IN
         ('zzsh_business_meta','zzsh_iam','zzsh_auth_user','zzsh_auth_admin','zzsh_supply','zzsh_content','zzsh_order','zzsh_credit')) AS runtime_owns_business_routine,
@@ -163,9 +165,9 @@ export async function assertEcsTestDemoResource(client: PoolClient, scope: DemoF
       || row.system_identifier !== expected.systemIdentifier || row.marker !== expected.marker
       || row.owner !== expected.owner || Number(row.owner_oid) !== expected.ownerOid
       || row.owner_super!==false || row.owner_bypass!==false || row.owner_createrole!==false || row.owner_createdb!==false
-      || row.owner_replication!==false || row.owner_login!==false
+      || row.owner_replication!==false || row.owner_login!==false || row.owner_has_membership!==false
       || Number(row.migration_role_oid)!==expected.migrationRoleOid || row.schema_owner!==expected.migrationRole
-      || row.migration_super!==false || row.migration_bypass!==false || row.migration_createrole!==false || row.migration_createdb!==false || row.migration_replication!==false
+      || row.migration_super!==false || row.migration_bypass!==false || row.migration_createrole!==false || row.migration_createdb!==false || row.migration_replication!==false || row.migration_has_membership!==false
       || row.runtime_role !== expected.runtimeRole || Number(row.runtime_role_oid) !== expected.runtimeRoleOid
       || row.rolsuper !== false || row.rolbypassrls !== false || row.runtime_owns_business_routine !== false || row.canonical_registration !== proof.canonical
       || row.registration_digest !== proof.digest || typeof row.active !== "boolean" || mode === "WRITE" && row.active !== true

@@ -51,7 +51,7 @@ LANGUAGE sql STABLE SET search_path=pg_catalog,zzsh_order AS $fn$
    AND NOT(r.rolsuper OR r.rolcreaterole OR r.rolcreatedb OR r.rolreplication OR r.rolbypassrls)
    AND NOT(own.rolsuper OR own.rolcreaterole OR own.rolcreatedb OR own.rolreplication OR own.rolbypassrls OR own.rolcanlogin)
    AND NOT(migration.rolsuper OR migration.rolcreaterole OR migration.rolcreatedb OR migration.rolreplication OR migration.rolbypassrls)
-   AND NOT EXISTS(SELECT 1 FROM pg_auth_members m WHERE m.member=r.oid)
+   AND NOT EXISTS(SELECT 1 FROM pg_auth_members m WHERE m.member IN (own.oid,migration.oid,r.oid))
    AND NOT EXISTS(SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE p.proowner=r.oid
      AND n.nspname IN ('zzsh_business_meta','zzsh_iam','zzsh_auth_user','zzsh_auth_admin','zzsh_supply','zzsh_content','zzsh_order','zzsh_credit')))
 $fn$;

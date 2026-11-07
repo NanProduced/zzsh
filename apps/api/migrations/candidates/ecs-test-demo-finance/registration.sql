@@ -70,6 +70,7 @@ BEGIN
     OR doc #>> '{resource,migrationRoleOid}' IS DISTINCT FROM actual_migration.oid
     OR actual_migration.oid IS NULL OR actual_migration.rolsuper OR actual_migration.rolcreaterole OR actual_migration.rolcreatedb
     OR actual_migration.rolreplication OR actual_migration.rolbypassrls
+    OR EXISTS(SELECT 1 FROM pg_auth_members m WHERE m.member::text IN (d.owner_oid,actual_migration.oid,actual_runtime.oid))
     OR doc #>> '{resource,marker}' IS DISTINCT FROM d.marker
     OR doc #>> '{resource,systemIdentifier}' IS DISTINCT FROM (SELECT system_identifier::text FROM pg_control_system())
     OR (d.marker='zzsh:r07-delivery-clone:v1' AND (coalesce(doc->>'nonce','') !~ '^[a-z0-9_]{12,64}$'
