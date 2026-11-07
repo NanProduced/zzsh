@@ -148,7 +148,7 @@ class ContractTests(unittest.TestCase):
         self.assertFalse(any(call[0]=='call' and 'up' in call for call in compose.calls))
 
     def test_target_roles_and_source_readback_fail_closed(self):
-        roles=[{'name':name,'oid':str(i+1),'login':name!=restore.OWNER,'super':False,'createdb':False,
+        roles=[{'name':name,'oid':str(i+1),'login':name!=restore.OWNER,'inherit':name==restore.OWNER,'super':False,'createdb':False,
                 'createrole':False,'replicate':False,'bypass':False,'member':False} for i,name in enumerate((restore.OWNER,restore.MIGRATION,restore.RUNTIME))]
         observed={'target':{'oid':'99','owner':restore.OWNER,'marker':restore.MARKER,'publicPrivileges':False,
                             'migrationConnect':True,'migrationCreate':True,'runtimeConnect':True,'runtimeCreate':False},'roles':roles}
@@ -157,6 +157,8 @@ class ContractTests(unittest.TestCase):
             changed=copy.deepcopy(observed); changed['target'][field]=value
             with self.assertRaises(restore.Refused): restore.target_roles_complete(changed)
         changed=copy.deepcopy(observed);changed['roles'][2]['super']=True
+        with self.assertRaises(restore.Refused): restore.target_roles_complete(changed)
+        changed=copy.deepcopy(observed);changed['roles'][1]['inherit']=True
         with self.assertRaises(restore.Refused): restore.target_roles_complete(changed)
         data=manifest();actual={'journal':data['source']['journalHashes'],'tables':data['expected']['tables'],
             'ledgerDebitCents':'0','ledgerCreditCents':'0','bankVersions':[]}

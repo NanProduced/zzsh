@@ -424,7 +424,7 @@ def inspect_target(compose, *, allow_application=False):
         'runtimeCreate',CASE WHEN EXISTS(SELECT 1 FROM pg_roles WHERE rolname='zzsh_ecs_runtime') THEN has_database_privilege('zzsh_ecs_runtime',d.oid,'CREATE') ELSE NULL END)
         FROM pg_database d WHERE d.datname='zzsh_ecs_test'),
       'otherDatabases',(SELECT count(*) FROM pg_database WHERE datname NOT IN ('postgres','template0','template1','zzsh_ecs_test')),
-      'roles',(SELECT COALESCE(json_agg(json_build_object('name',rolname,'oid',oid::text,'login',rolcanlogin,'super',rolsuper,
+      'roles',(SELECT COALESCE(json_agg(json_build_object('name',rolname,'oid',oid::text,'login',rolcanlogin,'inherit',rolinherit,'super',rolsuper,
         'createdb',rolcreatedb,'createrole',rolcreaterole,'replicate',rolreplication,'bypass',rolbypassrls,
         'member',EXISTS(SELECT 1 FROM pg_auth_members m WHERE m.member=pg_roles.oid)) ORDER BY rolname),'[]'::json)
         FROM pg_roles WHERE rolname IN ('zzsh_ecs_owner','zzsh_ecs_migration','zzsh_ecs_runtime')));"""
@@ -457,7 +457,8 @@ def target_roles_complete(observed):
     by_name = {row['name']: row for row in roles}
     require(set(by_name) == {OWNER, MIGRATION, RUNTIME}, 'TARGET_ROLE_SET_MISMATCH')
     for name, role in by_name.items():
-        require(role['login'] == (name != OWNER) and not any(role[k] for k in ('super','createdb','createrole','replicate','bypass','member')), 'TARGET_ROLE_PRIVILEGES_INVALID')
+        require(role['login'] == (name != OWNER) and role['inherit'] == (name == OWNER)
+                and not any(role[k] for k in ('super','createdb','createrole','replicate','bypass','member')), 'TARGET_ROLE_PRIVILEGES_INVALID')
     return True
 
 
