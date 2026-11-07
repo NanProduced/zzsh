@@ -25,6 +25,19 @@ test('demo checkout BFF binds identity and original key, and never invents provi
  }finally{globalThis.fetch=old;}
 });
 
+test('demo receipt BFF reads only the original key for the captured session',async()=>{
+ const old=globalThis.fetch,calls=[];let subject='user_a',orderId='order_demo';
+ globalThis.fetch=async(url,options)=>{calls.push({url:String(url),options});return String(url).endsWith('/get-session')
+  ?Response.json({user:{id:subject}}):Response.json({contractVersion:'ecs-test-checkout-receipt.v1',scope:'ECS_TEST_SIMULATED',orderId,knowledge:'UNKNOWN',receipt:null,observedAt:'2026-11-08T00:00:00Z',writeAssemblyReady:true,mayReapply:false});};
+ try{
+  const path=['order_demo','demo-checkout','receipt'],headers={'x-zzsh-expected-user-id':'user_a',cookie:'zzsh_user.session_token=user'};
+  const read=()=>GET(input(path,{headers},'?key=original_1'),ctx(path));
+  assert.equal((await read()).status,200);assert.match(calls[1].url,/demo-checkout\/receipt\?key=original_1$/);assert.equal(calls[1].options.method,'GET');
+  subject='user_b';assert.equal((await read()).status,401);assert.equal(calls.length,3);
+  subject='user_a';orderId='other';assert.equal((await read()).status,502);
+ }finally{globalThis.fetch=old;}
+});
+
 test('unified list rejects missing or changed expected identity before reading another user orders',async()=>{
  const before=globalThis.fetch,calls=[];
  globalThis.fetch=async(url,options)=>{calls.push({url:String(url),options});return Response.json({user:{id:'user_b'}});};

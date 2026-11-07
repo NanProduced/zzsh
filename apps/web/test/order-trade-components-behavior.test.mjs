@@ -208,6 +208,15 @@ test('demo checkout absence falls back; unavailable or malformed capability rema
  }
 }));
 
+test('a saved demo request stays locked if its service is no longer installed',async()=>withDom(async window=>{
+ const {DemoCheckoutAction}=loadComponent('apps/web/src/components/order/order-trade-actions.tsx',session('user_A'));let pending=false,posts=0;
+ intents.saveIntent({userId:'user_A',kind:'order.demo-checkout',resourceId:'order_A',key:'original_demo_key',body:{}});
+ const p=createProbe(window,DemoCheckoutAction,localProps({onPendingChange(value){pending=value}}),async(_url,init={})=>{if(init.method==='POST')posts++;return json({error:{code:'NOT_FOUND'}},404)},{exerciseDemo:true});
+ try{await p.render();assert.equal(pending,true);assert.doesNotMatch(p.host.textContent,/旧受控入口/);await p.click('查询原付款结果');
+  assert.equal(posts,0);assert.equal(intents.loadIntent('user_A','order.demo-checkout','order_A').key,'original_demo_key');assert.match(p.host.textContent,/无法读取/);
+ }finally{await p.dispose(()=>intents.clearIntent('user_A','order.demo-checkout','order_A'))}
+}));
+
 test('late demo payment reply never updates a different signed-in user',async()=>withDom(async window=>{
  const actor=session('user_A'),{DemoCheckoutAction}=loadComponent('apps/web/src/components/order/order-trade-actions.tsx',actor),pending=deferred();let changed=0;
  const p=createProbe(window,DemoCheckoutAction,localProps({onChanged(){changed++}}),async(_url,init={})=>{
