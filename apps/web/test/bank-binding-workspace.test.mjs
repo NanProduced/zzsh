@@ -42,7 +42,7 @@ async function probe(overrides = {}) {
   Object.defineProperty(globalThis, 'navigator', { value: window.navigator, configurable: true });
   const session = { status: 'authenticated', userId: 'user_A', identityVersion: 1, revalidate() {} }, store = { getSnapshot: () => session };
   const calls = [], changes = [], commits = [];
-  let pendingBank = overrides.pendingBank ?? null, pendingNative = overrides.pendingNative ?? null;
+  let pendingBank = overrides.pendingBank ?? null, pendingNative = overrides.pendingNative ?? null, pendingDemo = overrides.pendingDemo ?? null;
   const bankApi = {
     validateBankBindingInput, readBankBinding: async () => bank(), pendingBankBinding: () => pendingBank,
     saveBankBinding: async (userId, body, opts) => { calls.push({ method: 'saveBank', userId, body, opts }); pendingBank = null; return bank('2', body.cardNo.slice(-4)); },
@@ -53,6 +53,13 @@ async function probe(overrides = {}) {
     quoteChannelWithdrawal: async (userId, input) => { calls.push({ method: 'quote', userId, input }); return quote; },
     submitChannelWithdrawal: async (userId, value, opts) => { calls.push({ method: 'submit', userId, value, opts }); pendingNative = null; return intent; },
     recoverChannelWithdrawal: async () => ({ knowledge: 'UNKNOWN', receipt: null, current: null }), readChannelWithdrawal: async () => intent, ...overrides.channel,
+  };
+  const demoApi = {
+    pendingDemoWithdrawal: () => pendingDemo,
+    readDemoAvailability: async () => { throw new WithdrawalRequestError(404, 'NOT_FOUND'); },
+    createDemoTarget: async () => { throw Error('unexpected demo target'); }, quoteDemoWithdrawal: async () => { throw Error('unexpected demo quote'); },
+    confirmDemoWithdrawal: async () => { throw Error('unexpected demo confirm'); }, recoverDemoWithdrawal: async () => ({knowledge:'UNKNOWN',pending:pendingDemo,intent:null}),
+    discardDemoTarget: async () => { pendingDemo=null; }, readDemoIntent: async () => { throw Error('unexpected demo read'); }, ...overrides.demo,
   };
   const historyApi = {
     readWithdrawalHistory: async (userId, query) => { calls.push({ method: 'history', userId, query }); return history(query.source); },
@@ -72,6 +79,7 @@ async function probe(overrides = {}) {
     if (name === '@/components/session/user-session-provider') return { useUserSession: () => session, useUserSessionStore: () => store };
     if (name === '@/lib/withdrawal-bank-binding-client') return bankApi;
     if (name === '@/lib/channel-withdrawal-client') return channelApi;
+    if (name === '@/lib/demo-withdrawal-client') return demoApi;
     if (name === '@/lib/withdrawal-history-client') return historyApi;
     if (name === 'next/link') return ({ children, ...props }) => React.createElement('a', props, children);
     if (name.endsWith('.css')) return {};
@@ -82,17 +90,41 @@ async function probe(overrides = {}) {
   const host = window.document.createElement('div'); window.document.body.append(host);
   const root = require('react-dom/client').createRoot(host);
   const settle = async () => { for (let i = 0; i < 3; i++) await React.act(async () => { await new Promise(setImmediate); }); };
-  function Track() { const scope = `${session.userId}:${session.identityVersion}`; React.useLayoutEffect(() => { commits.push({ scope, text: host.textContent }); }); return React.createElement(module.exports.BankBindingWorkspace, { scope, availableBalance: overrides.availableBalance, onWalletChanged: () => changes.push('wallet') }); }
+  function Track() { const scope = `${session.userId}:${session.identityVersion}`; React.useLayoutEffect(() => { commits.push({ scope, text: host.textContent }); }); return React.createElement(module.exports.BankBindingWorkspace, { scope, availableBalance: overrides.availableBalance, ledgerRevision: overrides.ledgerRevision, onWalletChanged: () => changes.push('wallet') }); }
   const render = async () => { await React.act(async () => root.render(React.createElement(Track))); await settle(); };
   const click = async (text, within = host) => { const b = [...within.querySelectorAll('button')].find(x => x.textContent.includes(text)); assert(b, `missing button ${text}`); assert.equal(b.disabled, false, `button ${text} disabled`); await React.act(async () => { b.dispatchEvent(new window.MouseEvent('click', { bubbles: true })); await new Promise(setImmediate); }); await settle(); };
   const fill = async (selector, value) => { const input = host.querySelector(selector); assert(input, selector); await React.act(async () => { Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set.call(input, value); input.dispatchEvent(new window.Event('input', { bubbles: true })); }); await settle(); };
   const submit = async selector => { const form = host.querySelector(selector); assert(form); await React.act(async () => { form.dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true })); await new Promise(setImmediate); }); await settle(); };
-  return { host, session, bankApi, channelApi, historyApi, calls, changes, commits, render, settle, click, fill, submit, setPendingBank: x => { pendingBank = x; }, setPendingNative: x => { pendingNative = x; }, async close() { await React.act(async () => root.unmount()); await window.happyDOM.abort(); } };
+  return { host, session, bankApi, channelApi, demoApi, historyApi, calls, changes, commits, render, settle, click, fill, submit, setPendingBank: x => { pendingBank = x; }, setPendingNative: x => { pendingNative = x; }, setPendingDemo: x => { pendingDemo = x; }, async close() { await React.act(async () => root.unmount()); await window.happyDOM.abort(); } };
 }
 
 test('workspace composes installed controls and never persists raw inputs itself', () => {
   assert.ok(!/<(?:input|select|button|dialog)\b/.test(source));
   assert.ok(!/localStorage\.setItem|sessionStorage\.setItem/.test(source));
+});
+
+test('demo withdrawal keeps test wording and confirms the server quote without claiming bank payout', async()=>{
+ const scope='LOCAL_DEMO_SIMULATED',target={id:'target-1',kind:'BANK_CARD',mask:'**** **** 0015',amountCents:'10000',currency:'CNY',expiresAt:'2026-11-08T08:00:00.000Z',policyVersion:'policy-1'};
+ const body={amountCents:'10000',destinationId:'target-1',policyVersion:'policy-1',expectedWalletVersion:'7'};
+ const demoQuote={destinationId:'target-1',policyVersion:'policy-1',ledgerRevision:'7',acceptedAt:at,currency:'CNY',grossCents:'10000',netCents:'9900',feeCents:'100',requestKey:'demo-key'};
+ const result={id:'intent-demo',state:'SUCCEEDED',fundsDisposition:'PAYOUT_POSTED',amountCents:'10000',netCents:'9900',feeCents:'100',acceptedAt:at};
+ const p=await probe({availableBalance:'15000',ledgerRevision:'7',demo:{readDemoAvailability:async()=>({scope,withdrawalEnabled:true,observedAt:at})}});
+ p.demoApi.createDemoTarget=async(userId,receivedScope,input)=>{assert.equal(receivedScope,scope);const ready={version:1,userId,scope,stage:'target-ready',key:'target-key',body:input,target};p.setPendingDemo(ready);p.calls.push({method:'demo-target'});return ready;};
+ p.demoApi.quoteDemoWithdrawal=async(userId,receivedScope,receivedTarget,walletVersion)=>{assert.equal(receivedScope,scope);assert.equal(receivedTarget.id,target.id);assert.equal(walletVersion,'7');return{body,quote:demoQuote};};
+ p.demoApi.confirmDemoWithdrawal=async(userId,receivedScope,receivedBody,receivedQuote)=>{assert.equal(receivedScope,scope);assert.deepEqual(receivedBody,body);assert.equal(receivedQuote.requestKey,'demo-key');p.calls.push({method:'demo-confirm'});p.setPendingDemo(null);return result;};
+ try {await p.render();assert.match(p.host.textContent,/模拟提现/);assert.match(p.host.textContent,/不会向银行卡打款/);await p.fill('.bank-withdraw-form input','100');await p.submit('.bank-withdraw-form');
+  assert.match(p.host.textContent,/模拟出款金额/);await p.submit('.bank-withdraw-form');await p.click('确认模拟提现',p.host.querySelector('[role="alertdialog"]'));
+  assert.equal(p.calls.filter(x=>x.method==='demo-target').length,1);assert.equal(p.calls.filter(x=>x.method==='demo-confirm').length,1);assert.equal(p.changes.length,1);
+  assert.match(p.host.textContent,/模拟提现完成/);assert.match(p.host.textContent,/没有向银行卡打款/);
+ }finally{await p.close();}
+});
+
+test('an unknown demo write blocks a second request and queries the original result',async()=>{
+ const scope='LOCAL_DEMO_SIMULATED',pending={version:1,userId:'user_A',scope,stage:'target',key:'original-target',body:{bankBindingId:'bank-1',bankBindingRevision:'1',amountCents:'10000'}};
+ const p=await probe({availableBalance:'15000',ledgerRevision:'7',pendingDemo:pending,demo:{readDemoAvailability:async()=>({scope,withdrawalEnabled:true,observedAt:at})}});
+ p.demoApi.recoverDemoWithdrawal=async(userId,receivedScope)=>{assert.equal(userId,'user_A');assert.equal(receivedScope,scope);p.calls.push({method:'demo-recover'});return{knowledge:'UNKNOWN',pending,intent:null};};
+ try{await p.render();assert.match(p.host.textContent,/上次模拟操作结果待确认/);await p.click('查询原申请');assert.match(p.host.textContent,/原申请仍未确认/);assert.equal(p.calls.filter(x=>x.method==='demo-recover').length,1);assert.equal(p.calls.filter(x=>x.method==='demo-target').length,0);}
+ finally{await p.close();}
 });
 
 test('withdrawal shows only the confirmed wallet balance and keeps a missing balance unknown', async () => {
@@ -177,7 +209,7 @@ test('unknown withdrawal recovery stays available when new options fail; ACK is 
 test('the unified timeline follows source cursors and marks unavailable history as partial', async () => {
   const seen = [];
   const p = await probe({ history: { readWithdrawalHistory: async (_user, query) => { seen.push(query); return query.source === 'HISTORICAL' ? history(query.source,{items:[historyItem(query.cursor?'history:h1':'history:h2')],cursor:query.cursor?null:'history-next',snapshot:'h'}) : query.source === 'LOCAL_CONTROLLED' ? history(query.source,{items:[localItem],snapshot:'c'}) : history(query.source,{availability:'NOT_INTEGRATED'}); } } });
-  try { await p.render(); const section = p.host.querySelector('[aria-label="提现记录"]'); assert.match(section.textContent, /当前列表可能不完整/); assert(seen.some(query => query.source === 'HISTORICAL' && query.cursor === 'history-next')); assert.equal(section.querySelectorAll('.bank-history-row').length,3); assert.match(section.textContent,/处理中/); assert.match(section.textContent,/测试记录，不代表真实到账/); } finally { await p.close(); }
+  try { await p.render(); const section = p.host.querySelector('[aria-label="提现记录"]'); assert.match(section.textContent, /当前列表可能不完整/); assert(seen.some(query => query.source === 'HISTORICAL' && query.cursor === 'history-next')); assert.equal(section.querySelectorAll('.bank-history-row').length,3); assert.match(section.textContent,/处理中/); assert.match(section.textContent,/模拟提现，不代表银行到账/); } finally { await p.close(); }
 });
 
 test('historical original destination never falls back to the current bank', async () => {
@@ -230,10 +262,10 @@ for(const denialStatus of [401,403]){
    assert.equal(section.querySelectorAll('.bank-history-row').length, 5); while([...section.querySelectorAll('button')].some(b=>b.textContent.includes('查看更多记录'))){await p.click('查看更多记录',section);} assert.ok(section.querySelectorAll('.bank-history-row').length>=20); await p.click('加载更多记录',section);
    const target=[...section.querySelectorAll('.bank-history-row')].find(row=>row.textContent.includes('0015'));assert(target);await React.act(async()=>target.querySelector('button').click());await p.settle();
    assert.equal([...section.querySelectorAll('.bank-history-row')].filter(row=>row.textContent.includes('0015')).length,0);
-   if(denialStatus===403)assert.match(section.textContent,/测试记录，不代表真实到账/);else{assert.equal(section.querySelectorAll('.bank-history-row').length,0);assert.equal(revalidations,1);}
+   if(denialStatus===403)assert.match(section.textContent,/模拟提现，不代表银行到账/);else{assert.equal(section.querySelectorAll('.bank-history-row').length,0);assert.equal(revalidations,1);}
    await React.act(async()=>later.resolve(history('JOINPAY',{items:[{...nativeItem,id:'joinpay:late',intentId:'late',occurredAt:'2026-10-23T00:00:00.000Z'}]})));await p.settle();
    assert.equal([...section.querySelectorAll('.bank-history-row')].filter(row=>row.textContent.includes('0015')).length,0);
-   if(denialStatus===403)assert.match(section.textContent,/测试记录，不代表真实到账/);else assert.equal(section.querySelectorAll('.bank-history-row').length,0);
+   if(denialStatus===403)assert.match(section.textContent,/模拟提现，不代表银行到账/);else assert.equal(section.querySelectorAll('.bank-history-row').length,0);
   }finally{later.resolve(history('JOINPAY'));await p.close();}
  });
 }

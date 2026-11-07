@@ -3,7 +3,8 @@ import { isHttpOrigin, userCookies, readBoundedBody, BodyTooLargeError } from ".
 import { parseBankBinding, parseBankBindingReceipt, validateBankBindingInput } from "./withdrawal-bank-binding-client.ts";
 import { parseChannelIntent, parseChannelQuote, parseChannelRecovery, parseWithdrawalOptions } from "./channel-withdrawal-client.ts";
 import { parseWithdrawalHistoryDetail, parseWithdrawalHistoryRecovery, projectWithdrawalHistory, withdrawalHistoryQuery } from "./withdrawal-history-client.ts";
-import { WITHDRAWAL_SUBJECT_HEADER, cents, id, key, record, text, type WithdrawalResource } from "./withdrawal-client-core.ts";
+import { parseDemoAvailability, parseDemoTarget, parseDemoQuote, parseDemoResult, parseDemoReceipt } from "./demo-withdrawal-client.ts";
+import { WITHDRAWAL_SUBJECT_HEADER, cents, id, key, record, revision, text, type WithdrawalResource } from "./withdrawal-client-core.ts";
 
 const api = process.env.ZZSH_API_ORIGIN ?? "", web = process.env.ZZSH_WEB_ORIGIN ?? "";
 const failure = (status: number, code: string, requestId: string) => Response.json({ error: { code, message: "资料或申请暂时无法确认，请保留原请求并稍后查询。", requestId } }, { status, headers: { "cache-control": "no-store", "x-request-id": requestId } });
@@ -18,6 +19,18 @@ function nativeIntent(value: unknown, userId: string) {
 }
 function project(resource: WithdrawalResource, path: string, method: string, value: unknown, query: URLSearchParams, expectedUserId: string) {
   if (resource === "withdrawal-bank-binding") return path === "receipt" ? parseBankBindingReceipt(value) : parseBankBinding(value);
+  if (resource === "demo-withdrawal") {
+    if (!path) return {contractVersion:"demo-withdrawal-availability.v1",...parseDemoAvailability(value),productionPayoutCapability:false,bankArrival:"UNKNOWN"};
+    if (path === "target") return {contractVersion:"demo-withdrawal-target.v1",...parseDemoTarget(value),bankArrival:"UNKNOWN"};
+    if (path === "quote") return {contractVersion:"demo-withdrawal-quote.v1",...parseDemoQuote(value),bankArrival:"UNKNOWN"};
+    if (path === "target/receipt" || path === "receipt") {
+      const stage=path === "receipt" ? "confirm" : "target", result=parseDemoReceipt(value,stage), receipt=result.receipt;
+      return {contractVersion:stage === "target" ? "demo-withdrawal-target-receipt.v1" : "demo-withdrawal-receipt.v1",scope:result.scope,knowledge:result.knowledge,
+        receipt:receipt ? {contractVersion:stage === "target" ? "demo-withdrawal-target.v1" : "demo-withdrawal-result.v1",...receipt,bankArrival:"UNKNOWN"} : null,mayReapply:false,bankArrival:"UNKNOWN"};
+    }
+    const result=parseDemoResult(value);if(path.startsWith("intents/")&&result.intent.id!==path.slice("intents/".length))throw Error();
+    return {contractVersion:"demo-withdrawal-result.v1",...result,bankArrival:"UNKNOWN"};
+  }
   const b = record(value);
   if (resource === "withdrawal-history") {
     const userId = subject(b); if (userId !== expectedUserId) throw Error();
@@ -42,12 +55,12 @@ function project(resource: WithdrawalResource, path: string, method: string, val
 
 export async function forwardWithdrawalRequest(request: Request, context: { params: Promise<{ path?: string[] }> }, resource: WithdrawalResource): Promise<Response> {
   const requestId = `req_withdrawal_${randomUUID().replaceAll("-", "")}`;
-  if (!["withdrawal-bank-binding", "channel-withdrawals", "withdrawal-history"].includes(resource)) return failure(404, "NOT_FOUND", requestId);
+  if (!["withdrawal-bank-binding", "channel-withdrawals", "withdrawal-history", "demo-withdrawal"].includes(resource)) return failure(404, "NOT_FOUND", requestId);
   if (!isHttpOrigin(api) || !isHttpOrigin(web)) return failure(503, "EVIDENCE_UNAVAILABLE", requestId);
   if (request.headers.has("authorization") || request.headers.get("sec-fetch-site") === "cross-site" || request.headers.has("origin") && request.headers.get("origin") !== web) return failure(403, "FORBIDDEN", requestId);
   const parts = (await context.params).path ?? [], method = request.method;
-  if (parts.length > 1 || !["GET", "POST"].includes(method)) return failure(404, "NOT_FOUND", requestId);
-  const path = parts[0] ?? "", query = new URL(request.url).searchParams;
+  if (parts.length > (resource === "demo-withdrawal" ? 2 : 1) || !["GET", "POST"].includes(method)) return failure(404, "NOT_FOUND", requestId);
+  const path = parts.join("/"), query = new URL(request.url).searchParams;
   let body: Record<string, unknown> | undefined, originalKey: string | undefined, expectedUserId: string;
   try {
     if (method === "GET" && (request.body || request.headers.has("transfer-encoding") || request.headers.has("content-length") && request.headers.get("content-length") !== "0")) throw Error();
@@ -60,6 +73,12 @@ export async function forwardWithdrawalRequest(request: Request, context: { para
         if (path === "receipt") singleKey(query); else { if (query.size) throw Error(); if (path !== "options") id(path); }
       } else if (!["", "quote"].includes(path)) return failure(404, "NOT_FOUND", requestId);
       else if (query.size) throw Error();
+    } else if (resource === "demo-withdrawal") {
+      if (method === "GET") {
+        if (path === "receipt" || path === "target/receipt") singleKey(query);
+        else {if(query.size)throw Error();if(path && !(parts.length===2 && parts[0]==="intents" && id(parts[1])))return failure(404,"NOT_FOUND",requestId);}
+      } else if (!["target","quote","confirm"].includes(path)) return failure(404,"NOT_FOUND",requestId);
+      else if(query.size)throw Error();
     } else {
       if (method !== "GET") return failure(404, "NOT_FOUND", requestId);
       if (path === "receipt") singleKey(query);
@@ -73,13 +92,17 @@ export async function forwardWithdrawalRequest(request: Request, context: { para
       if (request.headers.get("origin") !== web || request.headers.get("content-type")?.split(";")[0]?.trim() !== "application/json") return failure(403, "FORBIDDEN", requestId);
       const raw = record(JSON.parse(new TextDecoder().decode(await readBoundedBody(request, 4096))));
       if (resource === "withdrawal-bank-binding") { only(raw, ["name", "cardNo", "expectedRevision"]); body = validateBankBindingInput(raw as { name: string; cardNo: string; expectedRevision: string }); }
-      else {
+      else if (resource === "demo-withdrawal") {
+        if(path === "target") {only(raw,["bankBindingId","bankBindingRevision","amountCents"]);body={bankBindingId:id(raw.bankBindingId),bankBindingRevision:revision(raw.bankBindingRevision),amountCents:cents(raw.amountCents)};}
+        else {only(raw,["amountCents","destinationId","policyVersion","expectedWalletVersion"]);body={amountCents:cents(raw.amountCents),destinationId:id(raw.destinationId),policyVersion:id(raw.policyVersion),expectedWalletVersion:revision(raw.expectedWalletVersion)};}
+        if(BigInt(body.amountCents as string)<=0n)throw Error();
+      } else {
         only(raw, path === "quote" ? ["amountCents", "destinationId", "policyVersion"] : ["amountCents", "destinationId", "policyVersion", "expectedWalletVersion"]);
         const amountCents = cents(raw.amountCents); if (BigInt(amountCents) <= 0n) throw Error();
         body = { amountCents, destinationId: id(raw.destinationId), policyVersion: id(raw.policyVersion) };
         if (!path) { const token = text(raw.expectedWalletVersion, 512); if (!/^jwdq1:[a-f0-9]{64}$/.test(token)) throw Error(); body.expectedWalletVersion = token; }
       }
-      if (!path) originalKey = key(request.headers.get("idempotency-key"));
+      if (!path || resource === "demo-withdrawal" && (path === "target" || path === "confirm")) originalKey = key(request.headers.get("idempotency-key"));
     }
     expectedUserId = id(request.headers.get(WITHDRAWAL_SUBJECT_HEADER));
   } catch (error) { return failure(error instanceof BodyTooLargeError ? 413 : 400, "INVALID_ARGUMENT", requestId); }
@@ -87,8 +110,8 @@ export async function forwardWithdrawalRequest(request: Request, context: { para
   const cookie = userCookies(request.headers.get("cookie")); if (cookie) headers.set("cookie", cookie);
   if (body) headers.set("content-type", "application/json");
   if (originalKey) headers.set("idempotency-key", originalKey);
-  const url = new URL(`/api/bff/user/${resource}${path ? "/" + encodeURIComponent(path) : ""}`, api); url.search = query.toString();
-  const isCommand = method === "POST" && !path;
+  const url = new URL(`/api/bff/user/${resource === "demo-withdrawal" ? "me/" : ""}${resource}${parts.length ? "/" + parts.map(encodeURIComponent).join("/") : ""}`, api); url.search = query.toString();
+  const isCommand = method === "POST" && (!path || resource === "demo-withdrawal" && (path === "target" || path === "confirm"));
   try {
     const deadline = AbortSignal.any([request.signal, AbortSignal.timeout(15000)]);
     // 读取同一请求捕获的Cookie所属用户，防止旧页面在跨标签切换后写入另一账号。

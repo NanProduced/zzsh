@@ -1,4 +1,4 @@
-export type WithdrawalResource = "withdrawal-bank-binding" | "channel-withdrawals" | "withdrawal-history";
+export type WithdrawalResource = "withdrawal-bank-binding" | "channel-withdrawals" | "withdrawal-history" | "demo-withdrawal";
 export const WITHDRAWAL_SUBJECT_HEADER = "x-zzsh-expected-user-id";
 export class WithdrawalRequestError extends Error {
   readonly status: number; readonly code: string; readonly requestId?: string; readonly uncertain: boolean;
@@ -45,15 +45,15 @@ export function recoveryStorage(): Storage {
   try { if (typeof window !== "undefined") return window.localStorage; } catch { /* Block writes without a durable recovery marker. */ }
   throw new WithdrawalRequestError(0, "RECOVERY_STORAGE_UNAVAILABLE");
 }
-export async function underWithdrawalLock<T>(scope: "bank-binding" | "channel-withdrawal", userId: string, run: () => Promise<T>): Promise<T> {
+export async function underWithdrawalLock<T>(scope: "bank-binding" | "channel-withdrawal" | "demo-withdrawal", userId: string, run: () => Promise<T>): Promise<T> {
   if (typeof navigator === "undefined" || !navigator.locks) throw new WithdrawalRequestError(409, "WRITE_LOCK_UNAVAILABLE");
   return await navigator.locks.request(`zzsh.${scope}:${id(userId)}`, run);
 }
 export type WithdrawalWriteOptions = { signal?: AbortSignal; isCurrent?: () => boolean };
 export async function withdrawalRequest(resource: WithdrawalResource, path: string, options: { expectedUserId: string; method?: "GET" | "POST"; body?: Record<string, unknown>; key?: string; signal?: AbortSignal }): Promise<unknown> {
-  if (!["withdrawal-bank-binding", "channel-withdrawals", "withdrawal-history"].includes(resource) || path && !/^[/?]/.test(path) || path.includes("\\") || path.includes("#")) throw new WithdrawalRequestError(400, "INVALID_ARGUMENT");
+  if (!["withdrawal-bank-binding", "channel-withdrawals", "withdrawal-history", "demo-withdrawal"].includes(resource) || path && !/^[/?]/.test(path) || path.includes("\\") || path.includes("#")) throw new WithdrawalRequestError(400, "INVALID_ARGUMENT");
   const method = options.method ?? "GET";
-  const isCommand = method === "POST" && path === "";
+  const isCommand = method === "POST" && (path === "" || resource === "demo-withdrawal" && (path === "/target" || path === "/confirm"));
   const headers: Record<string, string> = { [WITHDRAWAL_SUBJECT_HEADER]: id(options.expectedUserId) };
   if (method === "POST") headers["content-type"] = "application/json";
   if (options.key) headers["idempotency-key"] = key(options.key);

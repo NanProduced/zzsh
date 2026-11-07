@@ -71,3 +71,25 @@ test('an upstream receipt for another subject is rejected before reaching the pa
  backend(async()=>json({source:'JOINPAY',knowledge:'KNOWN',receipt:{intent:{...nativeIntent(),userId:'another_user'}},mayResubmit:false}));
  const response=await forwardWithdrawalRequest(req('channel-withdrawals','/receipt?key=original-key'),ctx(['receipt']),'channel-withdrawals');assert.equal(response.status,502);assert.equal((await response.json()).error.code,'EVIDENCE_UNAVAILABLE');
 }));
+
+test('demo withdrawal proxy forwards only the captured user and original target key, stripping extra fields',()=>mocked(async()=>{
+ let seen;const scope='LOCAL_DEMO_SIMULATED',target={id:'demo_target',kind:'BANK_CARD',mask:'**** **** 1234',amountCents:'10000',currency:'CNY',expiresAt:'2026-11-08T08:00:00.000Z',policyVersion:'demo_policy'};
+ backend(async(url,init)=>{seen={url:String(url),init};return json({contractVersion:'demo-withdrawal-target.v1',scope,target:{...target,secret:'SENSITIVE_PAYLOAD'},bankArrival:'UNKNOWN',extra:'SENSITIVE_PAYLOAD'});});
+ const body={bankBindingId:'bank_1',bankBindingRevision:'2',amountCents:'10000'};
+ const response=await forwardWithdrawalRequest(req('demo-withdrawal','/target','POST',body,{cookie:'zzsh_user.session_token=synthetic; zzsh_admin.session_token=drop'}),ctx(['target']),'demo-withdrawal');
+ assert.equal(response.status,200);assert.equal(seen.url,'http://127.0.0.1:3102/api/bff/user/me/demo-withdrawal/target');
+ assert.equal(seen.init.headers.get('idempotency-key'),'original-key');assert.equal(seen.init.headers.get('cookie'),'zzsh_user.session_token=synthetic');
+ const result=await response.json();assert.deepEqual(result.target,target);assert(!JSON.stringify(result).includes('SENSITIVE_PAYLOAD'));
+}));
+
+test('demo withdrawal proxy preserves uncertain writes and rejects unexpected paths and cross-user commands',()=>mocked(async()=>{
+ let commands=0;backend(async()=>{commands++;throw Error('lost response');});
+ const body={amountCents:'10000',destinationId:'demo_target',policyVersion:'demo_policy',expectedWalletVersion:'7'};
+ const failed=await forwardWithdrawalRequest(req('demo-withdrawal','/confirm','POST',body),ctx(['confirm']),'demo-withdrawal');
+ assert.equal(failed.status,502);assert.equal((await failed.json()).error.code,'WRITE_OUTCOME_UNKNOWN');
+ assert.equal((await forwardWithdrawalRequest(req('demo-withdrawal','/receipt?key=a&key=b'),ctx(['receipt']),'demo-withdrawal')).status,400);
+ assert.equal((await forwardWithdrawalRequest(req('demo-withdrawal','/unknown','POST',body),ctx(['unknown']),'demo-withdrawal')).status,404);
+ globalThis.fetch=async url=>String(url).endsWith('/api/auth/user/get-session')?json({user:{id:'another_user'}}):(++commands,json({}));
+ const stale=await forwardWithdrawalRequest(req('demo-withdrawal','/target','POST',{bankBindingId:'bank_1',bankBindingRevision:'1',amountCents:'10000'}),ctx(['target']),'demo-withdrawal');
+ assert.equal(stale.status,401);assert.equal(commands,1);
+}));

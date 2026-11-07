@@ -244,7 +244,7 @@ export function PersonalWallet({ scope }: { scope: string }) {
     </nav>
     {pane === "withdraw" ? <>
       <ControlledWithdrawal key={`controlled:${scope}`} wallet={w} scope={scope} onWalletChanged={refresh} onIdentityFailure={read.invalidate} compact showRecoveryFallback />
-      <BankBindingWorkspace key={scope} scope={scope} availableBalance={w?.buckets.available.amountCents ?? null} onWalletChanged={refresh} />
+      <BankBindingWorkspace key={scope} scope={scope} availableBalance={w?.buckets.available.amountCents ?? null} ledgerRevision={w?.ledgerRevision ?? null} onWalletChanged={refresh} />
     </> : pane === "withdraw-local" ? <>
       <Link className="account-detail-back" href={href("withdraw")} scroll={false}>返回银行卡与提现</Link>
       {!w ? <p role="status">余额暂时无法查看，你仍可查询提现记录。</p> : null}

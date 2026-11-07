@@ -39,8 +39,8 @@ export function ControlledWithdrawal({wallet,scope,onWalletChanged,onIdentityFai
   const hasPendingWork=pending||(Boolean(data)&&unsettled>0);
   if(!hasPendingWork)return showRecoveryFallback&&(error||value.scope===scope&&value.unavailable||data?.pagination?.nextCursor)?<p className="wallet-history-note"><Link className="account-inline-link" href="/account?view=wallet&wallet=withdraw-local" scroll={false}>查看其他提现记录</Link></p>:null;
   return <section className="account-module-card wallet-attention" aria-busy={busy||undefined}>
-    <h3><Clock3 size={17} aria-hidden="true"/>提现处理中</h3>
-    <strong>{pending?'提现申请状态未记录':`${unsettled} 笔提现申请处理中`}</strong>
+     <h3><Clock3 size={17} aria-hidden="true"/>测试提现处理中</h3>
+     <strong>{pending?'测试提现申请状态未记录':`${unsettled} 笔测试提现申请处理中`}</strong>
     <p>请先查看处理进度，避免重复申请。</p>
     <Link className="button secondary" href="/account?view=wallet&wallet=withdraw-local" scroll={false}>查看申请</Link>
   </section>;
