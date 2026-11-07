@@ -8,6 +8,7 @@ import { writePrivate } from '../local-auth.mjs';
 import { advisoryLockSql, assertLiveTarget, loadRegisteredTarget, maintenanceConnection, targetConnection, targetIdentityQuery } from './local-target-registry.mjs';
 import { isolatedDistributionBuild } from './local-distribution-qualification-plan.mjs';
 import { writeLoadCheckpoint } from './local-load-checkpoint.mjs';
+import { INITIAL_SEED_TABLES, CANONICAL_AUTHORIZATION_TABLES, assertCanonicalSeedProof, assertCanonicalSeedRows, assertInitialSingleton } from './business-initial-seeds.mjs';
 
 const sha=value=>createHash('sha256').update(value).digest('hex'),hex=value=>typeof value==='string'&&/^[a-f0-9]{64}$/.test(value);
 const root=resolve(fileURLToPath(new URL('../..',import.meta.url))),privateRoot=resolve('E:/zzsh-local-state/restricted'),secretRoot=resolve('E:/zzsh/zzsh/apps/api/.secrets');
@@ -29,8 +30,56 @@ function files(rootDir,extensions=null){
 }
 function buildPath(value){const api=isolatedDistributionBuild(root,value);for(let x=api;x!==dirname(x);x=dirname(x))assert(!lstatSync(x).isSymbolicLink(),'SCHEMA_LINK_REFUSED');return api;}
 const canonical=value=>JSON.stringify(value,(_,x)=>x&&typeof x==='object'&&!Array.isArray(x)?Object.fromEntries(Object.entries(x).sort(([a],[b])=>a.localeCompare(b))):x);
+const LEGACY_BASELINE='release_production_0153', TEST_SERVER_BASELINE='release_production_0174';
+
+export function schemaInitialBaseline(request){
+  if(request?.initialBaseline===undefined){assert(request?.initialBaselineManifestSha256===undefined,'SCHEMA_BASELINE_BINDING_INVALID');return LEGACY_BASELINE;}
+  assert([LEGACY_BASELINE,TEST_SERVER_BASELINE].includes(request.initialBaseline)&&hex(request.initialBaselineManifestSha256),'SCHEMA_BASELINE_BINDING_INVALID');
+  return request.initialBaseline;
+}
+export function assertSchemaBaselineHistory(history,baseline,last){
+  assert(Array.isArray(history)&&history.length>0&&baseline?.profile==='PRODUCTION'&&hex(baseline.migrationHash)
+    &&history[0]?.hash===baseline.migrationHash&&history[0]?.createdAt===String(baseline.when)
+    &&history.at(-1)?.createdAt===String(last.when),'SCHEMA_BASELINE_HISTORY_MISMATCH');
+}
+/** Read-only proof for the new empty database; no existing operational policy is changed. */
+export async function assertInitialDatabaseReadback(client,baseline,seedProof){
+  assertCanonicalSeedProof(seedProof,baseline.sourceChain);
+  const expected=new Map((baseline.seedCounts??[]).map(row=>[row.table,row.count]));
+  assert(expected.size===INITIAL_SEED_TABLES.size&&[...INITIAL_SEED_TABLES].every(name=>Number.isSafeInteger(expected.get(name))), 'SCHEMA_SEED_MANIFEST_INVALID');
+  const schemas=['zzsh_iam','zzsh_auth_user','zzsh_auth_admin','zzsh_supply','zzsh_content','zzsh_order','zzsh_credit'];
+  const tables=(await client.query(`SELECT n.nspname schema,c.relname name FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+    WHERE n.nspname=ANY($1::text[]) AND c.relkind IN ('r','p') ORDER BY 1,2`,[schemas])).rows;
+  const quote=name=>{assert(/^[A-Za-z_][A-Za-z0-9_]*$/.test(name),'SCHEMA_IDENTIFIER_INVALID');return '"'+name+'"'};
+  const seen=new Set();for(const table of tables){
+    const name=table.schema+'.'+table.name,n=(await client.query(`SELECT count(*)::int n FROM ${quote(table.schema)}.${quote(table.name)}`)).rows[0].n;
+    if(INITIAL_SEED_TABLES.has(name)){assert.equal(n,expected.get(name),'SCHEMA_SEED_COUNT_DRIFT:'+name);seen.add(name);}
+    else assert.equal(n,0,'SCHEMA_UNEXPECTED_INITIAL_BUSINESS_ROWS:'+name);
+  }
+  assert.equal(seen.size,INITIAL_SEED_TABLES.size,'SCHEMA_SEED_TABLE_MISSING');
+  for(const name of CANONICAL_AUTHORIZATION_TABLES){const [schema,table]=name.split('.');
+    const rows=(await client.query(`SELECT to_jsonb(t)-ARRAY['created_at','updated_at'] AS row FROM ${quote(schema)}.${quote(table)} t`)).rows.map(row=>row.row);
+    assertCanonicalSeedRows(seedProof,name,rows);
+  }
+  const singletons=[
+    ['zzsh_supply.profile_avatar_policy','SELECT singleton,requires_review,revision::text,updated_by_admin_id FROM zzsh_supply.profile_avatar_policy'],
+    ['zzsh_order.settlement_refund_policy','SELECT singleton,normal_days,early_days,revision::text,updated_by_admin_id FROM zzsh_order.settlement_refund_policy'],
+    ['zzsh_order.legacy_duty_finance_contract','SELECT singleton,contract_version,enabled,approval_ref,approval_digest FROM zzsh_order.legacy_duty_finance_contract'],
+  ];
+  for(const [name,query] of singletons)assertInitialSingleton(name,(await client.query(query)).rows,true);
+  const obsolete=(await client.query(`SELECT to_regclass('zzsh_order.legacy_owner_guarantee_observation') IS NULL AS observation_absent,
+    to_regclass('zzsh_order.legacy_owner_guarantee_coverage') IS NULL AS coverage_absent`)).rows[0];
+  assert(obsolete?.observation_absent===true&&obsolete?.coverage_absent===true,'SCHEMA_RETIRED_LEGACY_DEPOSIT_PRESENT');
+  const comments=(await client.query(`SELECT CASE WHEN a.attname IS NULL THEN obj_description(c.oid,'pg_class') ELSE col_description(c.oid,a.attnum) END description
+    FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace CROSS JOIN LATERAL
+    (SELECT NULL::name attname,0 attnum UNION ALL SELECT attname,attnum FROM pg_attribute WHERE attrelid=c.oid AND attnum>0 AND NOT attisdropped) a
+    WHERE c.relkind IN ('r','p') AND (n.nspname=ANY($1::text[]) OR (n.nspname='zzsh_business_meta' AND c.relname='migrations'))`,[schemas])).rows;
+  assert(comments.length>0&&comments.every(row=>/\p{Script=Han}/u.test(row.description??'')),'SCHEMA_CHINESE_COMMENTS_INCOMPLETE');
+  return {status:'INITIAL_SEEDS_AND_COMMENTS_VERIFIED',seedTables:seen.size,businessTables:tables.length,commentedObjects:comments.length,otherBusinessRows:0};
+}
 
 export function validateR07SchemaRequest(request,registered){
+  schemaInitialBaseline(request);
   const t=request?.target,protectedData=registered?.protectedDataset;
   assert(request?.schema==='zzsh.round07-schema-install-request.v1'&&hex(request.datasetSha256)&&hex(request.migrationsDigest)&&hex(request.credentialsSha256)&&hex(request.registrySha256)
     && registered?.instance && registered.host==='127.0.0.1'&&registered.port===55433&&registered.database==='zzsh_test_regression'
@@ -69,12 +118,15 @@ async function main(){
     const manifest=JSON.parse(datasetBytes);assert(manifest.status==='FULL_SOURCE_DATASET_PREPARED_TARGET_NOT_RUN'&&manifest.population?.mode==='SELECTED_BUSINESS_SCOPE','SCHEMA_DATASET_SCOPE_REQUIRED');
     const buildFiles=files(api,['.js']),sourceMigrations=files(join(root,'apps/api/migrations')),runtimeMigrations=files(resolve(api,'../../migrations'));
     assert(Object.keys(buildFiles).length>0&&canonical(sourceMigrations)===canonical(runtimeMigrations),'SCHEMA_BUILD_CHANGED');
+    const selected=option('--initial-baseline');
+    if(selected!==undefined)assert([LEGACY_BASELINE,TEST_SERVER_BASELINE].includes(selected),'SCHEMA_BASELINE_BINDING_INVALID');
     const request={schema:'zzsh.round07-schema-install-request.v1',credentials,credentialsSha256:sha(readFileSync(credentials)),registrySha256:sha(readFileSync(registered.sourceFile)),registrationReceipt:{path:registrationPath,sha256:sha(registrationBytes)},datasetPath:dataset,datasetSha256,apiDist:api,buildFiles,migrationsDigest:sha(canonical(sourceMigrations)),
+      ...(selected===undefined?{}:{initialBaseline:selected,initialBaselineManifestSha256:sourceMigrations[`initial/${selected}/manifest.json`]}),
       maintenanceSecret:{path:secretPath,sha256:sha(readFileSync(secretPath))},target:{oid:registered.oid,nonce:registered.nonce,instance:registered.instance,migrationRoleOid:registered.migrationRoleOid,bootstrapReservation:'ROUND07_BOOTSTRAP_RESERVED'}};
     validateR07SchemaRequest(request,registered);writePrivate(join(out,'request.json'),request);
     console.log(JSON.stringify({status:'R07_SCHEMA_REQUEST_SEALED_NOT_EXECUTED',request:join(out,'request.json'),requestSha256:sha(readFileSync(join(out,'request.json'))),connections:0,targetWrites:0}));return;
   }
-  if(!args.includes('--execute')){console.log(JSON.stringify({status:'PLAN_ONLY',prepare:['--prepare','--credentials','--dataset','--dataset-sha','--api-dist','--maintenance-secret','--out'],execute:['--execute','--request','--request-sha','--out'],connections:0,targetWrites:0}));return;}
+  if(!args.includes('--execute')){console.log(JSON.stringify({status:'PLAN_ONLY',prepare:['--prepare','--credentials','--dataset','--dataset-sha','--api-dist','--maintenance-secret','--initial-baseline <explicit production baseline>','--out'],execute:['--execute','--request','--request-sha','--out'],connections:0,targetWrites:0}));return;}
   assert.equal(process.version,'v24.20.0','NODE_BASELINE_MISMATCH');
   const request=pinned({path:option('--request'),sha256:option('--request-sha')}),out=checkedPath(option('--out'),true);
   assert(!existsSync(out),'SCHEMA_OUTPUT_EXISTS');const credentialsPath=checkedPath(request.credentials),registered=loadRegisteredTarget(credentialsPath);
@@ -88,6 +140,11 @@ async function main(){
   assert(Object.keys(build).length>0&&canonical(build)===canonical(request.buildFiles),'SCHEMA_BUILD_CHANGED');
   const sourceMigrations=files(join(root,'apps/api/migrations')),runtimeMigrations=files(resolve(api,'../../migrations'));
   assert(sha(canonical(sourceMigrations))===request.migrationsDigest&&canonical(sourceMigrations)===canonical(runtimeMigrations),'SCHEMA_MIGRATION_FILES_CHANGED');
+  const initialBaseline=schemaInitialBaseline(request),initialManifestPath=join(root,'apps/api/migrations/initial',initialBaseline,'manifest.json');
+  const initialManifestBytes=readFileSync(initialManifestPath),initialManifest=JSON.parse(initialManifestBytes);
+  assert(initialManifest.baseline===initialBaseline&&initialManifest.profile==='PRODUCTION'
+    &&sourceMigrations[`initial/${initialBaseline}/manifest.json`]===sha(initialManifestBytes)
+    &&(request.initialBaseline===undefined||request.initialBaselineManifestSha256===sha(initialManifestBytes)),'SCHEMA_BASELINE_BINDING_INVALID');
   function verifyBoundFiles(){
     assert(sha(readFileSync(credentialsPath))===request.credentialsSha256&&sha(readFileSync(registered.sourceFile))===request.registrySha256
       &&sha(readFileSync(join(datasetPath,'manifest.json')))===request.datasetSha256&&canonical(files(api,['.js']))===canonical(build)
@@ -105,7 +162,7 @@ async function main(){
   const {canonicalize}=require(join(api,'supply/content-hash.js'));
   const common={connectionTimeoutMillis:3000,statement_timeout:120000,lock_timeout:1000},maintenance=new Client(maintenanceConnection(registered,{...common,user:'zzsh',password:secret.toString('utf8').trim(),applicationName:'r07-schema-lock'})),
     pool=new Pool(targetConnection(registered,{...common,user:credentials.migration.name,password:credentials.migration.password,max:1,applicationName:'r07-schema-migration'}));
-  const result={status:'STARTED',...request.target,journalSha256:sha(journalBytes),finalOrdinal:last.idx,startedAt:new Date().toISOString(),targetWrites:0};
+  const result={status:'STARTED',...request.target,initialBaseline,initialBaselineManifestSha256:sha(initialManifestBytes),journalSha256:sha(journalBytes),finalOrdinal:last.idx,startedAt:new Date().toISOString(),targetWrites:0};
   writePrivate(join(out,'receipt.json'),result);const save=()=>writeLoadCheckpoint(join(out,'receipt.json'),result);
   let held=false,client,runtime,begin=false,migrationStarted=false;
   try{
@@ -116,12 +173,18 @@ async function main(){
     assert.equal(empty,0,'SCHEMA_TARGET_NOT_EMPTY');assert.equal((await client.query('ROLLBACK')).command,'ROLLBACK');begin=false;client.release();client=null;
     await assertBusinessMigrationIdentity(pool,{database:{name:registered.database,user:registered.migrationRole,runtimeUser:registered.runtimeRole}});
     verifyBoundFiles();result.status='MIGRATION_INTENT';save();migrationStarted=true;
-    await runBusinessMigrations(pool,{runtimeUser:registered.runtimeRole,initialInstall:true,initialBaseline:'release_production_0153'});
+    await runBusinessMigrations(pool,{runtimeUser:registered.runtimeRole,initialInstall:true,initialBaseline});
     result.commitAck=true;result.migrationAck=true;result.targetWrites=1;result.status='MIGRATION_ACK_READBACK_PENDING';save();
     client=await pool.connect();await client.query('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY');begin=true;
     assertLiveTarget(registered,(await client.query(targetIdentityQuery())).rows[0]);await assertBusinessMigrationPrefix(client);
     const history=(await client.query('SELECT hash,created_at::text AS "createdAt" FROM zzsh_business_meta.migrations ORDER BY id')).rows;
-    assert(history.length>0&&history.at(-1)?.createdAt===String(last.when),'SCHEMA_HISTORY_INCOMPLETE');
+    assertSchemaBaselineHistory(history,initialManifest,last);
+    if(initialBaseline===TEST_SERVER_BASELINE){
+      const doc=(initialManifest.documents??[]).find(row=>row.file==='CANONICAL-SEED-PROOF.json');
+      const proofBytes=readFileSync(join(dirname(initialManifestPath),'CANONICAL-SEED-PROOF.json'));
+      assert(doc&&sha(proofBytes)===doc.sha256,'SCHEMA_SEED_PROOF_CHANGED');
+      result.initialSeedReadback=await assertInitialDatabaseReadback(client,initialManifest,JSON.parse(proofBytes));
+    }
     result.hashes=history.map(row=>row.hash);result.historySha256=sha(canonicalize(history));
     assert.equal((await client.query('ROLLBACK')).command,'ROLLBACK');begin=false;result.readbackRollbackAck=true;client.release();client=null;
     runtime=new Client(targetConnection(registered,{...common,user:credentials.runtime.name,password:credentials.runtime.password,applicationName:'r07-schema-runtime-proof'}));
