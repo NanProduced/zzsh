@@ -5,7 +5,7 @@ DECLARE marker text; schema_owner name;
 BEGIN
   SELECT shobj_description(d.oid,'pg_database'),pg_get_userbyid(n.nspowner)
     INTO marker,schema_owner FROM pg_database d JOIN pg_namespace n ON n.nspname='zzsh_order' WHERE d.datname=current_database();
-  IF (current_database() ~ '^zzsh_ecs_test(_[a-z0-9_]{1,32})?$' AND marker='zzsh:ecs-test-demo-finance:v1'
+  IF (current_database() ~ '^zzsh_ecs_test(_[a-z0-9_]{1,32})?$' AND marker='zzsh:ecs-test:v1'
     OR current_database()='zzsh_test_r07_delivery_20261108' AND marker='zzsh:r07-delivery-clone:v1') IS NOT TRUE
     OR current_user <> schema_owner OR EXISTS(SELECT 1 FROM pg_roles r WHERE r.rolname=current_user
       AND (r.rolsuper OR r.rolbypassrls OR r.rolcreaterole OR r.rolcreatedb OR r.rolreplication)) THEN
@@ -38,7 +38,7 @@ BEGIN
   SELECT db.oid::text AS oid,shobj_description(db.oid,'pg_database') AS marker,
     pg_get_userbyid(db.datdba) AS owner,db.datdba::text AS owner_oid
     INTO d FROM pg_database db WHERE db.datname=current_database();
-  IF (current_database() ~ '^zzsh_ecs_test(_[a-z0-9_]{1,32})?$' AND d.marker='zzsh:ecs-test-demo-finance:v1'
+  IF (current_database() ~ '^zzsh_ecs_test(_[a-z0-9_]{1,32})?$' AND d.marker='zzsh:ecs-test:v1'
     OR current_database()='zzsh_test_r07_delivery_20261108' AND d.marker='zzsh:r07-delivery-clone:v1') IS NOT TRUE
     OR current_user <> pg_get_userbyid((SELECT relowner FROM pg_class WHERE oid='zzsh_order.ecs_test_demo_finance_registration'::regclass)) THEN
     RAISE EXCEPTION 'Only the registered demo schema owner may change enrollment';
@@ -58,7 +58,7 @@ BEGIN
     INTO actual_runtime FROM pg_roles r WHERE r.rolname=doc #>> '{resource,runtimeRole}';
   SELECT r.oid::text AS oid,r.rolsuper,r.rolcreaterole,r.rolcreatedb,r.rolreplication,r.rolbypassrls
     INTO actual_migration FROM pg_roles r WHERE r.rolname=doc #>> '{resource,migrationRole}';
-  IF doc->>'schema' IS DISTINCT FROM (CASE WHEN d.marker='zzsh:ecs-test-demo-finance:v1' THEN 'ecs-test-demo-finance.v1' ELSE 'local-demo-clone-finance.v1' END)
+  IF doc->>'schema' IS DISTINCT FROM (CASE WHEN d.marker='zzsh:ecs-test:v1' THEN 'ecs-test-demo-finance.v1' ELSE 'local-demo-clone-finance.v1' END)
     OR doc->>'reference' IS DISTINCT FROM NEW.reference
     OR coalesce(doc->>'administratorId','') !~ '^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$'
     OR encode(sha256(convert_to(NEW.canonical_registration,'UTF8')),'hex') IS DISTINCT FROM NEW.registration_digest

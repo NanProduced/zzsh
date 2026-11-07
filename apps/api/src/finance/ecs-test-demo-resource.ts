@@ -59,7 +59,7 @@ export function createEcsTestDemoResource(input: {
     || ![resource.owner, resource.migrationRole, resource.runtimeRole].every(id) || new Set([resource.owner, resource.migrationRole, resource.runtimeRole]).size!==3
     || ![resource.databaseOid, resource.ownerOid, resource.migrationRoleOid, resource.runtimeRoleOid].every(oid)
     || new Set([resource.ownerOid,resource.migrationRoleOid,resource.runtimeRoleOid]).size!==3 || !/^[1-9]\d{0,19}$/.test(resource.systemIdentifier)
-    || resource.marker !== "zzsh:ecs-test-demo-finance:v1"
+    || resource.marker !== "zzsh:ecs-test:v1"
     || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(input.reference)
     || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(input.administratorId)
     || ![input.sourceSnapshotSha256, input.restoreReceiptSha256].every(value => /^[a-f0-9]{64}$/.test(value))
@@ -169,7 +169,6 @@ export async function assertEcsTestDemoResource(client: PoolClient, scope: DemoF
       || row.runtime_role !== expected.runtimeRole || Number(row.runtime_role_oid) !== expected.runtimeRoleOid
       || row.rolsuper !== false || row.rolbypassrls !== false || row.runtime_owns_business_routine !== false || row.canonical_registration !== proof.canonical
       || row.registration_digest !== proof.digest || typeof row.active !== "boolean" || mode === "WRITE" && row.active !== true
-      || proof.registration.schema==='ecs-test-demo-finance.v1' && row.migration_login!==false
       || proof.registration.schema==='local-demo-clone-finance.v1' && row.clone_nonce!==proof.registration.nonce) throw unavailable();
     if (mode === "WRITE") {
       const locked = (await client.query(`SELECT canonical_registration,registration_digest,active,pg_current_xact_id()::text AS demo_xid

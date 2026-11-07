@@ -14,7 +14,7 @@ const input = (): Input => ({
     database: { target: "ecs-test", targetProfile: "ecs-test", name: "zzsh_ecs_test_demo", user: "demo_runtime", runtimeUser: "demo_runtime",
       host: "postgres", port: 5432, password: "synthetic", ssl: { rejectUnauthorized: true, ca: "synthetic" } } } as Input["config"],
   resource: { database: "zzsh_ecs_test_demo", databaseOid: 111, systemIdentifier: "1234567890123",
-    marker: "zzsh:ecs-test-demo-finance:v1", owner: "demo_owner", ownerOid: 222, migrationRole:"demo_migration",migrationRoleOid:224, runtimeRole: "demo_runtime", runtimeRoleOid: 333 },
+    marker: "zzsh:ecs-test:v1", owner: "demo_owner", ownerOid: 222, migrationRole:"demo_migration",migrationRoleOid:224, runtimeRole: "demo_runtime", runtimeRoleOid: 333 },
   origins: { apiOrigin: "https://api-test.example.test", userOrigin: "https://test.example.test", adminOrigin: "https://admin-test.example.test", secureCookies: true },
   reference: "synthetic_demo", sourceSnapshotSha256: "a".repeat(64), restoreReceiptSha256: "b".repeat(64), administratorId: "synthetic_admin",
 });
@@ -42,7 +42,7 @@ function clientFor(value: DemoFinanceResource, changed: { identity?: Record<stri
     if (sql.includes("FROM zzsh_order.ecs_test_demo_finance_registration WHERE reference=$1 FOR SHARE")) return { rows: [{
       canonical_registration: proof.canonical, registration_digest: proof.digest, active: true, demo_xid: "100", ...changed.lock }] };
     if (sql.includes("AS database_oid")) return { rows: [{ database: "zzsh_ecs_test_demo", database_oid: "111", system_identifier: "1234567890123",
-      marker: "zzsh:ecs-test-demo-finance:v1", owner: "demo_owner", owner_oid: "222", runtime_role: "demo_runtime", runtime_role_oid: "333",
+      marker: "zzsh:ecs-test:v1", owner: "demo_owner", owner_oid: "222", runtime_role: "demo_runtime", runtime_role_oid: "333",
       owner_super:false,owner_bypass:false,owner_createdb:false,owner_createrole:false,owner_replication:false,owner_login:false,
       migration_role_oid:'224',schema_owner:'demo_migration',migration_super:false,migration_bypass:false,migration_createrole:false,migration_createdb:false,migration_replication:false,migration_login:false,
       rolsuper: false, rolbypassrls: false, runtime_owns_business_routine: false, canonical_registration: proof.canonical,
@@ -119,8 +119,10 @@ test("local clone requires the pinned completed receipt, exact loopback and live
 test("each operation rechecks exact DB, least privilege, active registration and one transaction", async () => {
   const value = scope(), p = clientFor(value); await assertEcsTestDemoResource(p.client, value);
   assert(p.calls.some(sql => sql.includes("FOR SHARE")));
+  // The Compose migration account is a separate, restricted LOGIN role; runtime remains a non-owner non-member.
+  await assertEcsTestDemoResource(clientFor(value, { identity: { migration_login: true } }).client, value);
   for (const identity of [{ database: "zzsh_prod" }, { database_oid: "999" }, { system_identifier: "999" }, { marker: "other" },
-    { owner_oid: "999" }, { runtime_role_oid: "999" }, { rolsuper: true }, { rolbypassrls: true }, { runtime_owns_business_routine: true },
+    { owner_oid: "999" }, { runtime_role_oid: "999" }, { owner_login: true }, { migration_super: true }, { migration_bypass: true }, { rolsuper: true }, { rolbypassrls: true }, { runtime_owns_business_routine: true },
     { active: false }, { canonical_registration: "{}" }, { registration_digest: "f".repeat(64) }]) {
     await assert.rejects(assertEcsTestDemoResource(clientFor(value, { identity }).client, value));
   }

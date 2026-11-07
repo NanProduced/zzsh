@@ -5,7 +5,7 @@ DECLARE s zzsh_order.ecs_test_demo_finance_registration; runtime_role text; d re
 BEGIN
  SELECT db.oid::text AS oid,pg_get_userbyid(n.nspowner) AS owner,shobj_description(db.oid,'pg_database') AS marker
    INTO d FROM pg_database db JOIN pg_namespace n ON n.nspname='zzsh_order' WHERE db.datname=current_database();
- IF (current_database() ~ '^zzsh_ecs_test(_[a-z0-9_]{1,32})?$' AND d.marker='zzsh:ecs-test-demo-finance:v1'
+ IF (current_database() ~ '^zzsh_ecs_test(_[a-z0-9_]{1,32})?$' AND d.marker='zzsh:ecs-test:v1'
    OR current_database()='zzsh_test_r07_delivery_20261108' AND d.marker='zzsh:r07-delivery-clone:v1') IS NOT TRUE OR current_user <> d.owner THEN
    RAISE EXCEPTION 'Exact demo database owner required';
  END IF;

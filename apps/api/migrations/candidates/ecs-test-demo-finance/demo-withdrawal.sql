@@ -3,7 +3,7 @@ DO $guard$
 DECLARE d record;
 BEGIN
  SELECT pg_get_userbyid(n.nspowner) AS owner,shobj_description(db.oid,'pg_database') AS marker INTO d FROM pg_database db JOIN pg_namespace n ON n.nspname='zzsh_order' WHERE db.datname=current_database();
- IF (current_database() ~ '^zzsh_ecs_test(_[a-z0-9_]{1,32})?$' AND d.marker='zzsh:ecs-test-demo-finance:v1' OR current_database()='zzsh_test_r07_delivery_20261108' AND d.marker='zzsh:r07-delivery-clone:v1') IS NOT TRUE
+ IF (current_database() ~ '^zzsh_ecs_test(_[a-z0-9_]{1,32})?$' AND d.marker='zzsh:ecs-test:v1' OR current_database()='zzsh_test_r07_delivery_20261108' AND d.marker='zzsh:r07-delivery-clone:v1') IS NOT TRUE
   OR d.owner<>current_user OR to_regprocedure('zzsh_order.ecs_test_demo_finance_matches(text)') IS NULL THEN RAISE EXCEPTION 'Exact demo resource required';END IF;
 END $guard$;
 DO $guard$ BEGIN IF EXISTS(SELECT 1 FROM unnest(ARRAY['zzsh_order.check_sandbox_withdrawal_target_receipt()','zzsh_order.check_withdrawal_batch()','zzsh_order.check_withdrawal_intent_consistency()','zzsh_order.guard_controlled_operation()','zzsh_order.guard_sandbox_withdrawal_admission()','zzsh_order.guard_sandbox_withdrawal_destination()','zzsh_order.guard_sandbox_withdrawal_intent()','zzsh_order.guard_sandbox_withdrawal_original_provider()','zzsh_order.guard_withdrawal_entry()','zzsh_order.guard_withdrawal_event()','zzsh_order.guard_withdrawal_fact()','zzsh_order.guard_withdrawal_intent()','zzsh_order.guard_withdrawal_referral_recovery()','zzsh_order.guard_withdrawal_root()','zzsh_order.withdrawal_expected_lines(text)']) AS names(signature) WHERE to_regprocedure(signature) IS NOT NULL) THEN RAISE EXCEPTION 'Existing withdrawal function cannot be replaced';END IF;END $guard$;

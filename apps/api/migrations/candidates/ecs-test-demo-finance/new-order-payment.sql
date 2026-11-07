@@ -6,7 +6,7 @@ DECLARE marker text; db_owner name;
 BEGIN
   SELECT shobj_description(d.oid,'pg_database'),pg_get_userbyid(n.nspowner) INTO marker,db_owner
     FROM pg_database d JOIN pg_namespace n ON n.nspname='zzsh_order' WHERE d.datname=current_database();
-  IF (current_database() ~ '^zzsh_ecs_test(_[a-z0-9_]{1,32})?$' AND marker='zzsh:ecs-test-demo-finance:v1'
+  IF (current_database() ~ '^zzsh_ecs_test(_[a-z0-9_]{1,32})?$' AND marker='zzsh:ecs-test:v1'
     OR current_database()='zzsh_test_r07_delivery_20261108' AND marker='zzsh:r07-delivery-clone:v1') IS NOT TRUE OR current_user <> db_owner
     OR to_regclass('zzsh_order.ecs_test_demo_finance_registration') IS NULL
     OR to_regclass('zzsh_order.controlled_payment_declaration') IS NULL THEN
@@ -18,10 +18,10 @@ $guard$;
 -- Existing real-source restrictions remain for all non-demo rows in this copied database.
 ALTER TABLE zzsh_order.distribution_order_admission DROP CONSTRAINT production_native_order_admission,
  ADD CONSTRAINT production_native_order_admission CHECK (mode='NATIVE' OR
-   (mode='LOCAL_CONTROLLED' AND resource_marker IN ('zzsh:ecs-test-demo-finance:v1','zzsh:r07-delivery-clone:v1')));
+   (mode='LOCAL_CONTROLLED' AND resource_marker IN ('zzsh:ecs-test:v1','zzsh:r07-delivery-clone:v1')));
 ALTER TABLE zzsh_order.distribution_order_admission DROP CONSTRAINT distribution_admission_mode_shape,
  ADD CONSTRAINT distribution_admission_mode_shape CHECK (
-   (mode='LOCAL_CONTROLLED' AND resource_marker IN ('zzsh:ecs-test-demo-finance:v1','zzsh:r07-delivery-clone:v1') AND created_by_admin_id IS NOT NULL AND source_admission_ref IS NULL)
+   (mode='LOCAL_CONTROLLED' AND resource_marker IN ('zzsh:ecs-test:v1','zzsh:r07-delivery-clone:v1') AND created_by_admin_id IS NOT NULL AND source_admission_ref IS NULL)
    OR (mode='NATIVE' AND resource_marker='NATIVE_CREATED_ORDER_V1' AND created_by_admin_id IS NULL AND source_admission_ref IS NOT NULL));
 ALTER TABLE zzsh_order.payment_confirmation DROP CONSTRAINT production_real_payment_source,
  ADD CONSTRAINT production_real_payment_source CHECK (source IN('JOINPAY','CONTROLLED'));
@@ -32,7 +32,7 @@ LANGUAGE sql STABLE SET search_path=pg_catalog,zzsh_order AS $fn$
   JOIN pg_database d ON d.datname=current_database() JOIN pg_roles r ON r.rolname=current_user
   JOIN pg_roles own ON own.oid=d.datdba JOIN pg_namespace ns ON ns.nspname='zzsh_order' JOIN pg_roles migration ON migration.oid=ns.nspowner
   WHERE s.registration_digest=digest_value AND s.active
-   AND ((current_database() ~ '^zzsh_ecs_test(_[a-z0-9_]{1,32})?$' AND shobj_description(d.oid,'pg_database')='zzsh:ecs-test-demo-finance:v1'
+   AND ((current_database() ~ '^zzsh_ecs_test(_[a-z0-9_]{1,32})?$' AND shobj_description(d.oid,'pg_database')='zzsh:ecs-test:v1'
       AND s.canonical_registration::jsonb->>'schema'='ecs-test-demo-finance.v1') OR
      (current_database()='zzsh_test_r07_delivery_20261108' AND shobj_description(d.oid,'pg_database')='zzsh:r07-delivery-clone:v1'
       AND s.canonical_registration::jsonb->>'schema'='local-demo-clone-finance.v1'
@@ -51,7 +51,6 @@ LANGUAGE sql STABLE SET search_path=pg_catalog,zzsh_order AS $fn$
    AND NOT(r.rolsuper OR r.rolcreaterole OR r.rolcreatedb OR r.rolreplication OR r.rolbypassrls)
    AND NOT(own.rolsuper OR own.rolcreaterole OR own.rolcreatedb OR own.rolreplication OR own.rolbypassrls OR own.rolcanlogin)
    AND NOT(migration.rolsuper OR migration.rolcreaterole OR migration.rolcreatedb OR migration.rolreplication OR migration.rolbypassrls)
-   AND (s.canonical_registration::jsonb->>'schema'<>'ecs-test-demo-finance.v1' OR NOT migration.rolcanlogin)
    AND NOT EXISTS(SELECT 1 FROM pg_auth_members m WHERE m.member=r.oid)
    AND NOT EXISTS(SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE p.proowner=r.oid
      AND n.nspname IN ('zzsh_business_meta','zzsh_iam','zzsh_auth_user','zzsh_auth_admin','zzsh_supply','zzsh_content','zzsh_order','zzsh_credit')))
@@ -82,10 +81,10 @@ $fn$;
 COMMENT ON FUNCTION zzsh_order.guard_ecs_demo_order_admission() IS '仅允许环境登记之后由租客创建的新订单进入模拟支付。';
 DROP TRIGGER distribution_order_admission_guard ON zzsh_order.distribution_order_admission;
 CREATE TRIGGER distribution_order_admission_guard BEFORE INSERT ON zzsh_order.distribution_order_admission
- FOR EACH ROW WHEN (NEW.resource_marker NOT IN ('zzsh:ecs-test-demo-finance:v1','zzsh:r07-delivery-clone:v1'))
+ FOR EACH ROW WHEN (NEW.resource_marker NOT IN ('zzsh:ecs-test:v1','zzsh:r07-delivery-clone:v1'))
  EXECUTE FUNCTION zzsh_order.guard_distribution_order_admission();
 CREATE TRIGGER ecs_demo_order_admission_guard BEFORE INSERT ON zzsh_order.distribution_order_admission
- FOR EACH ROW WHEN (NEW.resource_marker IN ('zzsh:ecs-test-demo-finance:v1','zzsh:r07-delivery-clone:v1')) EXECUTE FUNCTION zzsh_order.guard_ecs_demo_order_admission();
+ FOR EACH ROW WHEN (NEW.resource_marker IN ('zzsh:ecs-test:v1','zzsh:r07-delivery-clone:v1')) EXECUTE FUNCTION zzsh_order.guard_ecs_demo_order_admission();
 
 CREATE FUNCTION zzsh_order.guard_ecs_demo_payment_declaration() RETURNS trigger
 LANGUAGE plpgsql SET search_path=pg_catalog,zzsh_order AS $fn$

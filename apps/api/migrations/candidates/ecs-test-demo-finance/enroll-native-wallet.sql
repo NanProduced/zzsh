@@ -7,7 +7,7 @@ BEGIN
    pg_get_userbyid(db.datdba) AS db_owner,pg_get_userbyid(n.nspowner) AS schema_owner,
    (SELECT system_identifier::text FROM pg_control_system()) AS system_id
   INTO actual FROM pg_database db JOIN pg_namespace n ON n.nspname='zzsh_order' WHERE db.datname=current_database();
- IF current_user<>actual.schema_owner OR (current_database() ~ '^zzsh_ecs_test(_[a-z0-9_]{1,32})?$' AND actual.marker='zzsh:ecs-test-demo-finance:v1'
+ IF current_user<>actual.schema_owner OR (current_database() ~ '^zzsh_ecs_test(_[a-z0-9_]{1,32})?$' AND actual.marker='zzsh:ecs-test:v1'
    OR current_database()='zzsh_test_r07_delivery_20261108' AND actual.marker='zzsh:r07-delivery-clone:v1') IS NOT TRUE THEN
    RAISE EXCEPTION 'Exact test schema owner required';
  END IF;

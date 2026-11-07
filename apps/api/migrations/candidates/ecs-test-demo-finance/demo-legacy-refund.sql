@@ -4,7 +4,7 @@ DECLARE db record;
 BEGIN
  SELECT pg_get_userbyid(n.nspowner) AS owner,shobj_description(d.oid,'pg_database') AS marker INTO db
  FROM pg_database d JOIN pg_namespace n ON n.nspname='zzsh_order' WHERE d.datname=current_database();
- IF (current_database() ~ '^zzsh_ecs_test(_[a-z0-9_]{1,32})?$' AND db.marker='zzsh:ecs-test-demo-finance:v1'
+ IF (current_database() ~ '^zzsh_ecs_test(_[a-z0-9_]{1,32})?$' AND db.marker='zzsh:ecs-test:v1'
    OR current_database()='zzsh_test_r07_delivery_20261108' AND db.marker='zzsh:r07-delivery-clone:v1') IS NOT TRUE
    OR db.owner<>current_user OR to_regprocedure('zzsh_order.ecs_test_demo_finance_matches(text)') IS NULL
    OR to_regclass('zzsh_order.ecs_demo_legacy_refund') IS NOT NULL THEN RAISE EXCEPTION 'Exact unmodified demo resource required';END IF;
