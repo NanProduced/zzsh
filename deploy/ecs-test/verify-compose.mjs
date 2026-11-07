@@ -1,12 +1,15 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, rmdirSync, unlinkSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmdirSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 // Synthetic config only: never print `docker compose config`, which may contain real env secrets.
 const here = dirname(fileURLToPath(import.meta.url));
+const example = readFileSync(join(here, 'api.env.example'), 'utf8');
+assert.match(example, /^ORDER_HOLD_SECONDS=180\r?$/m);
+assert.match(example, /^ORDER_SWEEP_ENABLED=true\r?$/m);
 const temporary = mkdtempSync(join(tmpdir(), 'zzsh-compose-check-'));
 const apiFile = join(temporary, 'api.env');
 try {
