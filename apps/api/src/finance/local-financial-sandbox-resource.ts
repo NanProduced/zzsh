@@ -153,8 +153,8 @@ export async function ensureLocalSandboxOrderAdmission(client: PoolClient, scope
   if (!exact(actual)) throw conflict("Concurrent order admission has different provenance"); return actual.id as string;
 }
 
-export async function assertLocalSandboxOrderAdmission(client: PoolClient, scope: LocalFinancialSandbox, orderId: string) {
-  const proof = localFinancialSandboxRegistration(scope), { resource } = await assertLocalFinancialSandboxResource(client, scope);
+export async function assertLocalSandboxOrderAdmission(client: PoolClient, scope: LocalFinancialSandbox, orderId: string, mode: "WRITE" | "READ_ORIGINAL" = "WRITE") {
+  const proof = localFinancialSandboxRegistration(scope), { resource } = await assertLocalFinancialSandboxResource(client, scope, mode);
   const row = (await client.query(`SELECT id FROM zzsh_order.distribution_order_admission WHERE order_id=$1 AND mode='LOCAL_CONTROLLED'
     AND resource_oid=$2 AND resource_name=$3 AND resource_marker=$4 AND approval_digest=$5 AND active
     AND admitted_at<=clock_timestamp() AND expires_at>clock_timestamp()`,

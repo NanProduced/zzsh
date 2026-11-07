@@ -6,6 +6,7 @@ import { assertEcsTestDemoAssembly, assertEcsTestDemoResource, createEcsTestDemo
   readEcsTestDemoRegistration, verifyLocalDemoCloneProof, type DemoFinanceResource } from "../src/finance/ecs-test-demo-resource";
 import {assertEcsTestDemoRuntimeAssembly,createEcsTestDemoRuntime} from "../src/finance/ecs-test-demo-runtime";
 import {declareLocalSandboxWithdrawalTarget} from "../src/finance/local-sandbox-withdrawal-target";
+import {assertDistributionOrderScopeResource,assertSandboxDistributionOrder,createEcsDemoDistributionOrderScope,createPaymentDistributionStore} from "../src/finance/distribution-payment-store";
 
 type Input = Parameters<typeof createEcsTestDemoResource>[0];
 const input = (): Input => ({
@@ -64,6 +65,21 @@ function clientFor(value: DemoFinanceResource, changed: { identity?: Record<stri
   return { client: { query, getTransactionStatus:()=> 'T', connectionParameters:{host:'127.0.0.1',port:55434,
     database:proof.registration.resource.database,user:proof.registration.resource.runtimeRole} } as unknown as PoolClient, calls };
 }
+
+test("demo distribution read-only paths verify the original resource without acquiring write locks",async()=>{
+  const demo=scope(),distribution=createEcsDemoDistributionOrderScope(demo),base=clientFor(demo);
+  const client={...base.client,query:async(sql:string,...values:unknown[])=>{
+    if(sql.startsWith('SELECT id FROM zzsh_order.distribution_order_admission'))return {rows:[{id:'admission'}],rowCount:1};
+    if(sql.includes('FROM zzsh_order.payment_confirmation p JOIN'))return {rows:[],rowCount:0};
+    return (base.client.query as (...args:any[])=>Promise<any>)(sql,...values);
+  }} as unknown as PoolClient;
+  await assertDistributionOrderScopeResource(client,distribution,'READ_ORIGINAL');
+  await assertSandboxDistributionOrder(client,distribution,'order_1','READ_ORIGINAL');
+  await assert.rejects(createPaymentDistributionStore(distribution).readOriginal(client,'order_1','payment_1','READ_ORIGINAL'));
+  assert(!base.calls.some(sql=>sql.includes('FOR SHARE')||sql.includes('pg_current_xact_id()')));
+  await assertDistributionOrderScopeResource(client,distribution);
+  assert(base.calls.some(sql=>sql.includes('FOR SHARE')),'writes retain the locked registration gate');
+});
 
 test("demo money capability is explicit, excludes all real Joinpay and copies only public registration fields", () => {
   const disabled = input(); disabled.env.ECS_TEST_DEMO_FINANCE_ENABLED = "false"; assert.equal(createEcsTestDemoResource(disabled), undefined);

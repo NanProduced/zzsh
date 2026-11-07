@@ -71,12 +71,12 @@ function earningStore(resource:Resource):DistributionEarningStore{
  const name=resource.kind==='NATIVE'?resource.database:distributionOrderScopeIdentity(local!).name,role=resource.kind==='NATIVE'?resource.runtimeUser:distributionOrderScopeIdentity(local!).role;
  const payment=resource.kind==='NATIVE'?createNativePaymentDistributionStore(resource.admission):createPaymentDistributionStore(resource.scope);
  if(!approvalDigest)throw invalid('Exact reviewed earning resource required');
- async function ready(c:PoolClient){
+ async function ready(c:PoolClient,mode:'WRITE'|'READ_ORIGINAL'='WRITE'){
   if(resource.kind==='NATIVE'){
    const r=(await c.query(`SELECT current_database() AS name,current_user AS role,to_regclass('zzsh_order.rental_referral_earning') IS NOT NULL AND to_regclass('zzsh_order.rental_referral_transition') IS NOT NULL AND to_regclass('zzsh_order.rental_referral_reversal_source') IS NOT NULL AS complete`)).rows[0];
    if(!r||r.name!==name||r.role!==role||r.complete!==true)throw new SecurityApiError(503,'EVIDENCE_UNAVAILABLE','Typed earning schema/resource not installed');return;
   }
-  if(local!.resourceSet==='regression'||sandbox)await assertDistributionOrderScopeResource(c,local!);
+  if(local!.resourceSet==='regression'||sandbox)await assertDistributionOrderScopeResource(c,local!,mode);
   const r=(await c.query("SELECT d.oid,current_database() AS name,current_user AS role,shobj_description(d.oid,'pg_database') AS marker,to_regclass('zzsh_order.rental_referral_earning') IS NOT NULL AND to_regclass('zzsh_order.rental_referral_transition') IS NOT NULL AS complete FROM pg_database d WHERE d.datname=current_database()")).rows[0];
   if(!r||Number(r.oid)!==local!.resourceOid||r.name!==name||r.role!==role||r.marker!==distributionOrderScopeIdentity(local!).marker||!r.complete)throw new SecurityApiError(503,'EVIDENCE_UNAVAILABLE','Typed earning schema/resource not installed');
  }
@@ -151,7 +151,7 @@ function earningStore(resource:Resource):DistributionEarningStore{
  async function discover(pool:Pool,input:{limit:number;gameIds?:readonly string[]|null;cursor?:string|null}){
   if(!Number.isSafeInteger(input.limit)||input.limit<1||input.limit>100)throw invalid('Bounded accrual discovery required');const games=scopeIds(input.gameIds);const before=input.cursor?decodeScanCursor(input.cursor):null;
   return withTransaction(pool,async c=>{
-   await c.query('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY');await ready(c);
+   await c.query('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY');await ready(c,'READ_ORIGINAL');
    const rows=(await c.query(`SELECT p.id,p.order_id,p.payment_confirmation_id,p.version_hash,p.early,p.manual_reason,p.captured_cents::text,p.owner_net_cents::text,
     p.renter_refund_cents::text,p.platform_contribution_cents::text,p.compensation_fee_cents::text,
     to_char(p.posted_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS posted_at,o.game_id
@@ -166,7 +166,7 @@ function earningStore(resource:Resource):DistributionEarningStore{
     const {game_id,...postingRow}=row;
     const facts=completedFacts(postingRow,row.order_id),base={orderId:row.order_id,postingId:row.id,paymentConfirmationId:row.payment_confirmation_id,postedAt:row.posted_at,gameId:row.game_id};
     try{
-     const original=await payment.readOriginal(c,row.order_id,row.payment_confirmation_id),allocation=prepareAccrualFromFrozenPayment(original.basis,facts);
+     const original=await payment.readOriginal(c,row.order_id,row.payment_confirmation_id,'READ_ORIGINAL'),allocation=prepareAccrualFromFrozenPayment(original.basis,facts);
      if(allocation.knowledge==='UNKNOWN'){orders.push({...base,status:'UNKNOWN',reason:allocation.reason,baseCents:allocation.baseCents,items:[]});continue;}
      if(!allocation.items.length){orders.push({...base,status:'SKIPPED',reason:'NO_ELIGIBLE_REFERRAL',baseCents:allocation.baseCents,items:[]});continue;}
      const items:MissingAccrualItem[]=[];for(const item of allocation.items){
@@ -196,7 +196,7 @@ function earningStore(resource:Resource):DistributionEarningStore{
  }
  async function readOrder(pool:Pool,orderId:string){return withTransaction(pool,async c=>{
   await c.query('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY');
-  await ready(c);if(sandbox)await assertSandboxDistributionOrder(c,local!,orderId);else if(local&&!allowed.has(orderId))throw notFound();
+  await ready(c,'READ_ORIGINAL');if(sandbox)await assertSandboxDistributionOrder(c,local!,orderId,'READ_ORIGINAL');else if(local&&!allowed.has(orderId))throw notFound();
   const rows=(await c.query(`SELECT e.*,to_char(e.due_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS due_exact
    FROM zzsh_order.rental_referral_earning e WHERE order_id=$1 ORDER BY id`,[orderId])).rows;
   const items=[];
