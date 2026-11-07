@@ -37,7 +37,8 @@ export function assertCloneBossGrant({request,requestSha256,grant,registered,exp
   &&/^[A-Za-z0-9._:-]{1,128}$/.test(grant.approvalRef??'')&&grant.financialWrites===false&&grant.providerCalls===false&&grant.recovery==='READ_ONLY_ONLY_NO_RETRY'
   &&grant.attempt===request.attempt&&grant.requestSha256===requestSha256&&grant.exportReceiptSha256===R07_CLEAN_EXPORT_SHA
   &&grant.cloneRestoreVerificationSha256===cloneRestoreVerificationSha256&&equalTarget(grant.target,t)
-  &&Number.isFinite(start)&&Number.isFinite(end)&&end>start&&end-start<=30*60_000&&now>=start&&now<end,'R07_BOSS_WINDOW_INVALID');
+  &&Number.isFinite(start)&&Number.isFinite(end)&&new Date(start).toISOString()===grant.notBefore&&new Date(end).toISOString()===grant.expiresAt
+  &&end>start&&end-start<=30*60_000&&now>=start&&now<end,'R07_BOSS_WINDOW_INVALID');
  return Object.freeze({attempt:request.attempt,expiresAt:end,target:t});
 }
 

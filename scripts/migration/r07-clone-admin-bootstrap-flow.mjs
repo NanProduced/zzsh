@@ -1,5 +1,24 @@
 import assert from 'node:assert/strict';
+import {createServer} from 'node:http';
+import {timingSafeEqual} from 'node:crypto';
 import {totp,validateProfile} from '../local-auth.mjs';
+
+const paths=new Set([
+ 'POST /api/v1/admin/security/bootstrap','POST /api/auth/admin/sign-in/username','POST /api/auth/admin/change-password',
+ 'POST /api/auth/admin/sign-out','POST /api/auth/admin/two-factor/enable','POST /api/auth/admin/two-factor/verify-totp',
+ 'POST /api/v1/admin/security/enrollment/activate','GET /api/auth/admin/get-session',
+]);
+
+// The short-lived local listener exposes only the formal enrollment routes to this process.
+export function createBootstrapGateway(handler,gate){
+ assert.equal(typeof handler,'function');assert(/^[a-f0-9]{64}$/.test(gate??''));const expected=Buffer.from(gate,'ascii');
+ return createServer((request,response)=>{
+  const received=request.headers['x-r07-bootstrap-gate'];const bytes=typeof received==='string'?Buffer.from(received,'ascii'):Buffer.alloc(0);
+  const path=(request.url??'').split('?',1)[0];
+  if(bytes.length!==expected.length||!timingSafeEqual(bytes,expected)||!paths.has(`${request.method} ${path}`)){response.writeHead(404);response.end();return;}
+  delete request.headers['x-r07-bootstrap-gate'];handler(request,response);
+ });
+}
 
 // All secrets in `staged` are kept only in the caller's restricted files.
 // Every command records its intent before the HTTP call; the caller never retries it automatically.

@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';import {createHash,randomBytes} from 'no
 import Module,{createRequire} from 'node:module';import {dirname,isAbsolute,join,relative,resolve} from 'node:path';import {fileURLToPath} from 'node:url';
 import {LocalSession,writePrivate} from '../local-auth.mjs';import {advisoryLockSql,assertLiveTarget,loadRegisteredTarget,maintenanceConnection,targetConnection,targetIdentityQuery} from './local-target-registry.mjs';
 import {assertBootstrapOnlyAuth,assertCloneBossGrant,R07_CLONE_BOSS_TARGET as targetConstant,R07_CLEAN_EXPORT_SHA} from './r07-clone-admin-bootstrap-guard.mjs';
-import {runCloneBossEnrollment} from './r07-clone-admin-bootstrap-flow.mjs';
+import {createBootstrapGateway,runCloneBossEnrollment} from './r07-clone-admin-bootstrap-flow.mjs';
 
 const mainRoot=resolve('D:/CodexWorktrees/main-consolidation-20261028/zzsh'),privateRoot=resolve('E:/zzsh-local-state/restricted');
 const credentialFile=join(privateRoot,'r07-demo-clone-resource-20261108-01/credentials.json');
@@ -79,7 +79,7 @@ async function main(){
  const {Client,Pool}=createRequire(import.meta.url)('pg'),common={connectionTimeoutMillis:3000,statement_timeout:120000,lock_timeout:1000};
  const maintenance=new Client(maintenanceConnection(registered,{...common,user:credentials.migration.name,password:credentials.migration.password,applicationName:'r07-clone-boss-lock'}));
  const reader=new Client(targetConnection(registered,{...common,user:credentials.migration.name,password:credentials.migration.password,applicationName:'r07-clone-boss-readback'}));
- let held=false,app,pool,appClosed=false,poolClosed=false,readerClosed=false,maintenanceClosed=false,unlockAck=false,success=false,before,adminId;
+ let held=false,app,gateway,pool,appClosed=false,gatewayClosed=false,poolClosed=false,readerClosed=false,maintenanceClosed=false,unlockAck=false,success=false,before,adminId;
  const checkWindow=()=>{assert(Date.now()<approval.expiresAt,'R07_BOSS_WINDOW_EXPIRED');verifyTools();assert.equal(readFileSync(join(output,'admin-runtime-secret'),'utf8'),staged.adminSecret+'\n','R07_BOSS_ADMIN_SECRET_CHANGED');};
  try{
   checkWindow();await maintenance.connect();held=(await maintenance.query(advisoryLockSql(registered,'try'))).rows[0]?.ok===true;assert(held,'R07_BOSS_RESOURCE_BUSY');await reader.connect();
@@ -103,10 +103,12 @@ async function main(){
   assertBootstrapOnlyAuth(auth);pool=new Pool(targetConnection(registered,{...common,user:credentials.runtime.name,password:credentials.runtime.password,applicationName:'r07-clone-boss-api',max:3}));
   const probe=await pool.connect();try{await probe.query('BEGIN READ ONLY');const identity=(await probe.query(targetIdentityQuery())).rows[0];assertLiveTarget(registered,identity,'runtime');assert.equal(String(identity.owner_oid),targetConstant.ownerOid);assert.equal((await probe.query('ROLLBACK')).command,'ROLLBACK');}finally{probe.release();}
   app=await createApp({health:{dependencies:{postgres:{check:async()=>{},close:async()=>{}},redis:{check:async()=>{},close:async()=>{}}}},database:{pool},auth:{...auth,pool}});
-  await app.init();await app.listen(4242,'127.0.0.1');verifyTools();let requestId='';
-  const sessionFactory=()=>new LocalSession(request.apiOrigin,'admin',[],(url,opts)=>fetch(url,{...opts,headers:{...opts.headers,'X-Request-Id':requestId}}));
+  await app.init();const gate=randomBytes(32).toString('hex');gateway=createBootstrapGateway(app.getHttpAdapter().getInstance(),gate);
+  await new Promise((resolve,reject)=>{gateway.once('error',reject);gateway.listen(4242,'127.0.0.1',resolve);});verifyTools();let requestId='';
+  const sessionFactory=()=>new LocalSession(request.apiOrigin,'admin',[],(url,opts)=>fetch(url,{...opts,headers:{...opts.headers,'X-Request-Id':requestId,'X-R07-Bootstrap-Gate':gate}}));
   const enrollment=await runCloneBossEnrollment({request,staged,receipt,sessionFactory,setRequestId:id=>requestId=id,save,assertWindow:checkWindow});adminId=enrollment.administratorId;
-  writePrivate(join(output,'profile.json'),enrollment.profile);await app.close();app=undefined;appClosed=true;if(!pool.ended&&!pool.ending)await pool.end();poolClosed=true;
+  writePrivate(join(output,'profile.json'),enrollment.profile);await new Promise((resolve,reject)=>gateway.close(error=>error?reject(error):resolve()));gateway=undefined;gatewayClosed=true;
+  await app.close();app=undefined;appClosed=true;if(!pool.ended&&!pool.ending)await pool.end();poolClosed=true;
   await reader.query('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY');await reader.query("SET LOCAL TIME ZONE 'UTC'");assertLiveTarget(registered,(await reader.query(targetIdentityQuery())).rows[0],'migration');
   const after=await readState(reader,retiredIds);unchanged(before,after);const unchangedRows=await criticalRows(reader);
   assert.deepEqual(unchangedRows,dataReadback.tables.filter(x=>!['retiredAdminUsers','auditCore','idempotencyKeys'].includes(x.name)),'R07_BOSS_CRITICAL_ROWS_CHANGED');
@@ -123,9 +125,10 @@ async function main(){
   receipt.profile=join(output,'profile.json');receipt.adminRuntimeSecret=join(output,'admin-runtime-secret');success=true;
  }catch(error){receipt.status=receipt.pendingStep?'STOPPED_COMMAND_OUTCOME_UNKNOWN':'STOPPED_PRESERVE_ATTEMPT';receipt.failure=/^[A-Z][A-Z0-9_]+$/.test(error.message??'')?error.message:error.code??error.name;process.exitCode=1;}
  finally{
+  try{if(gateway){await new Promise((resolve,reject)=>gateway.close(error=>error?reject(error):resolve()));gatewayClosed=true;}}catch{}
   try{if(app){await app.close();appClosed=true;}}catch{}try{if(pool&&!pool.ended&&!pool.ending)await pool.end();poolClosed=true;}catch{}
   try{await reader.end();readerClosed=true;}catch{}try{if(held)unlockAck=(await maintenance.query(advisoryLockSql(registered,'unlock'))).rows[0]?.ok===true;}catch{}try{await maintenance.end();maintenanceClosed=true;}catch{}
-  receipt.unlockAck=unlockAck;receipt.connectionsClosed=appClosed&&poolClosed&&readerClosed&&maintenanceClosed;receipt.finishedAt=new Date().toISOString();
+  receipt.unlockAck=unlockAck;receipt.connectionsClosed=gatewayClosed&&appClosed&&poolClosed&&readerClosed&&maintenanceClosed;receipt.finishedAt=new Date().toISOString();
   if(success&&receipt.readbackRollbackAck&&receipt.unlockAck&&receipt.connectionsClosed){try{unlinkSync(join(output,'staged-secrets.json'));receipt.temporarySecretsRemoved=true;receipt.status='ACTIVE_AND_VERIFIED';}
    catch{receipt.status='STOPPED_SECRET_CLEANUP_UNCONFIRMED';process.exitCode=1;}}
   else if(success){receipt.status='STOPPED_CLEANUP_UNCONFIRMED';process.exitCode=1;}writePrivate(join(output,'receipt.json'),receipt);
