@@ -1,8 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { applyInvitationDomains } from "./local-target-finance.mjs";
-import { assessInvitationChildSet, assertInvitationCountPackets, requiresInvitationCountClosure } from "./local-round-contract.mjs";
+import { assessInvitationChildSet, assertInvitationCountPackets, preflightInvitationFile, readBoundInvitationPackets, requiresInvitationCountClosure } from "./local-round-contract.mjs";
 
 const hash=value=>createHash("sha256").update(JSON.stringify(value)).digest("hex");
 function fixture(mode="SELECTED_BUSINESS_SCOPE") {
@@ -35,6 +38,25 @@ test("whole-user count closure requires every original subject and packet before
   assert.equal(requiresInvitationCountClosure(fixture("SCENARIO_SELECTION").manifest),false);
 });
 
+test("streamed packets reject replacement, reordering, truncation and a changed file before accepting its changed packet",async t=>{
+  const dir=mkdtempSync(join(tmpdir(),"zzsh-invitation-stream-"));t.after(()=>rmSync(dir,{recursive:true}));
+  const {manifest,packets,invitation}=fixture(),path=join(dir,"packets.jsonl"),bytes=Buffer.from(packets.map(p=>JSON.stringify(p)).join("\n")+"\n");
+  const sha=createHash("sha256").update(bytes).digest("hex");writeFileSync(path,bytes);
+  const hashes=await preflightInvitationFile(path,sha,manifest,invitation), accepted=[];
+  for await(const packet of readBoundInvitationPackets(path,sha,hashes))accepted.push(packet);
+  assert.deepEqual(accepted,packets);
+  const consume=async()=>{const seen=[];try{for await(const packet of readBoundInvitationPackets(path,sha,hashes))seen.push(packet);return {seen,error:null};}catch(error){return {seen,error}}};
+  const changed=structuredClone(packets);changed[1].input.subjects[0].userId="user_tampered";changed[1].bodyDigest=hash(changed[1].input);
+  for(const [content,expected,acceptedCount] of [
+    [changed,/INVITATION_PACKET_CHANGED/,1],[[...packets].reverse(),/INVITATION_PACKET_CHANGED/,0],[[packets[0]],/INVITATION_PACKET_COUNT_CHANGED/,1],
+  ]){
+    writeFileSync(path,content.map(p=>JSON.stringify(p)).join("\n")+"\n");const result=await consume();assert.match(result.error?.message??"",expected);assert.equal(result.seen.length,acceptedCount);
+  }
+  writeFileSync(path,bytes);const iterator=readBoundInvitationPackets(path,sha,hashes);assert.deepEqual((await iterator.next()).value,packets[0]);
+  writeFileSync(path,Buffer.concat([readFileSync(path),Buffer.from("\n")]));
+  await assert.rejects(async()=>{for await(const _ of iterator){}},/INVITATION_FILE_SHA_MISMATCH/);
+});
+
 test("child-set comparison preserves UNKNOWN and rejects missing or changed relations",()=>{
   const child=(a,b)=>({INVITER:{sourceCount:a,knownCount:a,setDigest:hash([["a","x"]])},
     DISTRIBUTION_LEADER:{sourceCount:b,knownCount:b,setDigest:hash([])}});
@@ -52,7 +74,7 @@ function harness({mode="SELECTED_BUSINESS_SCOPE",importQuarantine=false,failCoun
     async importReviewedLegacyInvitationFacts(_c,_a,input,digest,scope){assert.equal(scope.phase,"IMPORT");assert.equal(digest,hash(input));events.push(`import:${input.subjects[0].legacyId}`);return {replayed:false};},
     async closeReviewedLegacyInvitationCounts(_c,_a,input,digest,scope){assert.equal(scope.phase,"COUNTS");assert.equal(digest,hash(input));events.push(`count:${input.subjects[0].legacyId}`);if(failCount)throw Object.assign(Error("source set differs"),{status:409});return {replayed:false};}};
   const ctx={client:{},actor:{userId:"operator"},manifest,state,invitationPackets:packets,mod:()=>backend,
-    async runItems(domain,rows,fn){for(const row of rows)await fn(row);state.phases[domain]={complete:true,nextIndex:rows.length,quarantined:domain==="invitationFacts"&&importQuarantine?1:0};}};
+    async runItems(domain,rows,fn){let count=0;for await(const row of rows){await fn(row);count++;}state.phases[domain]={complete:true,nextIndex:count,quarantined:domain==="invitationFacts"&&importQuarantine?1:0};}};
   return {ctx,events,review:{ref:"test",attempt:"once",actor:{userId:"operator",sessionId:"session"},notBefore:"start",expiresAt:"end"},resource:{port:55433}};
 }
 
@@ -60,6 +82,8 @@ test("count closure begins only after all original invitation batches imported",
   const h=harness();await applyInvitationDomains(h.ctx,h.review,h.resource,JSON.stringify);
   assert.deepEqual(h.events,["bind:IMPORT","import:1","bind:IMPORT","import:2","bind:COUNTS","count:1","bind:COUNTS","count:2"]);
   assert.equal(h.ctx.state.phases.invitationCounts.complete,true);
+  const streamed=harness();let opened=0;streamed.ctx.invitationSource=async function*(){opened++;for(const row of streamed.ctx.invitationPackets)yield row};streamed.ctx.invitationPacketCount=streamed.ctx.invitationPackets.length;
+  await applyInvitationDomains(streamed.ctx,streamed.review,streamed.resource,JSON.stringify);assert.equal(opened,2);assert.deepEqual(streamed.events,h.events);
   const partial=harness({mode:"SCENARIO_SELECTION"});await applyInvitationDomains(partial.ctx,partial.review,partial.resource,JSON.stringify);
   assert.equal(partial.ctx.state.phases.invitationCounts,undefined);
 });

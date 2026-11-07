@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { lstatSync, readFileSync } from "node:fs";
+import { createReadStream, lstatSync, readFileSync } from "node:fs";
+import { createInterface } from "node:readline";
 import { dirname, isAbsolute, relative, resolve } from "node:path";
 
 const requiredDatasetStages = ["core-and-funds", "display", "opening", "holdings", "paths", "readback"];
@@ -23,13 +24,13 @@ export function requiresInvitationCountClosure(manifest) {
 }
 
 /** Check the exact packet population before any target transaction begins. */
-export function assertInvitationCountPackets(manifest, packets, invitation) {
+export function createInvitationCountPacketVerifier(manifest, invitation) {
   if (!requiresInvitationCountClosure(manifest)) return false;
-  if (!Array.isArray(packets) || packets.length !== manifest.invitationFacts.selectedPackets
-    || !invitation || typeof invitation.prepareLegacyInvitationFacts !== "function" || typeof invitation.invitationFactHash !== "function")
+  if (!invitation || typeof invitation.prepareLegacyInvitationFacts !== "function" || typeof invitation.invitationFactHash !== "function")
     throw new Error("INVITATION_PACKET_POPULATION_UNPROVEN");
-  const users = new Set(), legacyIds = [], codes = new Set(), codeFacts = new Map(), sourceHashes = new Set(); let source, qualifications = 0;
-  for (const packet of packets) {
+  const users = new Set(), legacyIds = [], codes = new Set(), codeFacts = new Map(), sourceHashes = new Set(); let source, qualifications = 0, count = 0;
+  const add = packet => {
+    if (++count > manifest.invitationFacts.selectedPackets) throw new Error("INVITATION_PACKET_POPULATION_UNPROVEN");
     if (!packet?.input || packet.input.policy !== null) throw new Error("INVITATION_PACKET_BINDING_INVALID");
     const planned = invitation.prepareLegacyInvitationFacts(packet.input, packet.bodyDigest);
     if (planned.key !== packet.key || planned.relations.length !== packet.relations
@@ -43,14 +44,55 @@ export function assertInvitationCountPackets(manifest, packets, invitation) {
       users.add(fact.userId);legacyIds.push(fact.legacyId);codes.add(code);codeFacts.set(fact.legacyId,[code,invitation.invitationFactHash(fact.codeSource)]);
       if(fact.qualificationSource!==null)qualifications++;
     }
-  }
-  legacyIds.sort();
-  if (users.size !== manifest.domains.users.source || (users.size > 0 && (sourceHashes.size !== 1
-    || qualifications!==source.files.qualification.rows
-    || invitation.invitationFactHash(legacyIds) !== source.subjectSetDigest
-    || invitation.invitationFactHash(legacyIds.map(id=>[id,...codeFacts.get(id)])) !== source.codeSetDigest)))
-    throw new Error("INVITATION_PACKET_POPULATION_UNPROVEN");
-  return true;
+  };
+  const finish = () => {
+    legacyIds.sort();
+    if (count !== manifest.invitationFacts.selectedPackets || users.size !== manifest.domains.users.source || (users.size > 0 && (sourceHashes.size !== 1
+      || qualifications!==source.files.qualification.rows
+      || invitation.invitationFactHash(legacyIds) !== source.subjectSetDigest
+      || invitation.invitationFactHash(legacyIds.map(id=>[id,...codeFacts.get(id)])) !== source.codeSetDigest)))
+      throw new Error("INVITATION_PACKET_POPULATION_UNPROVEN");
+    return true;
+  };
+  return {add,finish};
+}
+export function assertInvitationCountPackets(manifest, packets, invitation) {
+  const verifier=createInvitationCountPacketVerifier(manifest,invitation);
+  if (!verifier) return false;
+  if (!Array.isArray(packets)) throw new Error("INVITATION_PACKET_POPULATION_UNPROVEN");
+  for (const packet of packets) verifier.add(packet);
+  return verifier.finish();
+}
+
+async function* checkedInvitationPackets(file, expectedSha256, expectedPacketHashes) {
+  if (!/^[a-f0-9]{64}$/.test(expectedSha256 ?? "")) throw new Error("INVITATION_FILE_BINDING_REQUIRED");
+  const stream=createReadStream(file), digest=createHash("sha256"), reader=createInterface({input:stream,crlfDelay:Infinity});
+  stream.on("data",chunk=>digest.update(chunk));let count=0;
+  try {
+    for await(const line of reader) if(line) {
+      const packet=JSON.parse(line), packetHash=createHash("sha256").update(JSON.stringify(packet)).digest("hex");
+      if(expectedPacketHashes && packetHash!==expectedPacketHashes[count]) throw new Error("INVITATION_PACKET_CHANGED");
+      count++;yield {packet,packetHash};
+    }
+    if(expectedPacketHashes && count!==expectedPacketHashes.length) throw new Error("INVITATION_PACKET_COUNT_CHANGED");
+    if(digest.digest("hex")!==expectedSha256) throw new Error("INVITATION_FILE_SHA_MISMATCH");
+    // Also re-open the named file: replacement after the stream buffered a valid
+    // packet must still stop the phase, without changing any original packet key.
+    const current=createHash("sha256");for await(const chunk of createReadStream(file))current.update(chunk);
+    if(current.digest("hex")!==expectedSha256) throw new Error("INVITATION_FILE_SHA_MISMATCH");
+  } finally { reader.close();stream.destroy(); }
+}
+
+/** No packet payload survives preflight; each write pass rechecks its preflight digest and file. */
+export async function preflightInvitationFile(file, fileSha256, manifest, invitation) {
+  const verifier=createInvitationCountPacketVerifier(manifest,invitation);
+  if(!verifier) throw new Error("INVITATION_FULL_USER_SCOPE_UNPROVEN");
+  const hashes=[];for await(const {packet,packetHash} of checkedInvitationPackets(file,fileSha256)) {verifier.add(packet);hashes.push(packetHash);}
+  verifier.finish();return hashes;
+}
+export async function* readBoundInvitationPackets(file,fileSha256,packetHashes) {
+  if(!Array.isArray(packetHashes) || packetHashes.some(hash=>!/^[a-f0-9]{64}$/.test(hash))) throw new Error("INVITATION_PACKET_BINDING_REQUIRED");
+  for await(const {packet} of checkedInvitationPackets(file,fileSha256,packetHashes)) yield packet;
 }
 
 export function assessInvitationChildSet(fact, actualByType, hash) {

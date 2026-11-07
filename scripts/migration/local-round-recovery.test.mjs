@@ -9,7 +9,7 @@ import test from "node:test";
 import { assertSameDirectoryResumeSafe, isRoundReceiptPath, isStrictRoundReservation, matchesLoadReservation, strictRoundReservation } from "./local-load-checkpoint.mjs";
 import { advisoryLockSql, assertLiveTarget, maintenanceConnection, normalizeRegisteredTarget, targetConnection, targetIdentityQuery } from "./local-target-registry.mjs";
 import { assertRoundPopulationBinding, assertFullExecutionAdmitted } from "./full-source-scope.mjs";
-import { assertRoundBootstrap, assessRoundEvidence, assertGrowthPlanEvidence, assertGrowthPackages, assertResumeLineage, verifyResumeSchema, assessResumeStages, assertNoWriteRetryLineage, assertInvitationCountPackets, requiresInvitationCountClosure } from "./local-round-contract.mjs";
+import { assertRoundBootstrap, assessRoundEvidence, assertGrowthPlanEvidence, assertGrowthPackages, assertResumeLineage, verifyResumeSchema, assessResumeStages, assertNoWriteRetryLineage, preflightInvitationFile, readBoundInvitationPackets, requiresInvitationCountClosure } from "./local-round-contract.mjs";
 
 const sha = bytes => createHash("sha256").update(bytes).digest("hex");
 const script = name => readFileSync(new URL(name, import.meta.url), "utf8")
@@ -89,7 +89,7 @@ async function load({ failure, strict = true, reservation = {}, previous, recove
   };
   const context = {
     ...path, createHash, isStrictRoundReservation, matchesLoadReservation, strictRoundReservation, process: proc, moduleUrl: "fixture", fileURLToPath: () => "C:\\project\\scripts\\migration\\load-local-dataset.mjs",
-    advisoryLockSql, assertLiveTarget, maintenanceConnection, targetConnection, targetIdentityQuery, assertFullExecutionAdmitted, assertInvitationCountPackets, requiresInvitationCountClosure,
+    advisoryLockSql, assertLiveTarget, maintenanceConnection, targetConnection, targetIdentityQuery, assertFullExecutionAdmitted, preflightInvitationFile, readBoundInvitationPackets, requiresInvitationCountClosure,
     // The loader reads its registry through this sandbox filesystem, not the real disk.
     loadRegisteredTarget: credentialPath => { const file = path.join(path.dirname(credentialPath), "resource.json"); return normalizeRegisteredTarget(JSON.parse(get(file)), file); },    financialFixture: () => ({ applyFinancialDomains: ctx => ctx.runItems("financeEmptyCoverage", failure === "empty-coverage" ? [{ sourceId: "empty-original" }] : Array.from({length:5},(_,i)=>({sourceId:`chunk-${i}`})), row => { if(failure === "empty-coverage" || (failure === "empty-coverage-batch" && row.sourceId === "chunk-1")) throw Object.assign(Error("coverage rejected"), { status: 409 }); return {replayed:false}; }, failure === "empty-coverage" ? 1 : 5) }),
     console: { log: message => logs.push(JSON.parse(message)), error: message => logs.push(JSON.parse(message)) },

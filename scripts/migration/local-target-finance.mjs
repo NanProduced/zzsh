@@ -22,20 +22,22 @@ async function facts(ctx, legacyIds) { const { client, actor } = ctx; const pare
     const current = parents.map(parent => ({ orderId: parent.parentOrderId, readRef: "core-dataset:" + ctx.state.binding.oid + ":" + parent.parentOrderId, headRevision: revisions.get(parent.parentOrderId) ?? null, depositAmountCents: parent.depositAmountCents, duties: dutiesByOrder.get(parent.parentOrderId) ?? [], admissions: admissionsByOrder.get(parent.parentOrderId) ?? [], idempotency: { principalId: actor.userId, records: receiptsByOrder.get(parent.parentOrderId) ?? [] } })); return { parents, current }; }
 export async function applyInvitationDomains(ctx, reviewCommon, resource, canonical) {
     const {client,actor,mod,manifest,state}=ctx;
-    const packets=ctx.invitationPackets??await arrayOf(ctx,"invitation-facts");
+    const packets=ctx.invitationSource ? null : ctx.invitationPackets??await arrayOf(ctx,"invitation-facts");
+    const source=()=>ctx.invitationSource ? ctx.invitationSource() : packets;
+    const packetCount=ctx.invitationSource ? ctx.invitationPacketCount : packets.length;
     const review=(packet,phase)=>({ref:reviewCommon.ref,attempt:reviewCommon.attempt,actor:reviewCommon.actor,
       resource:{...resource,ownerOid:Number(state.resource.owner_oid)},notBefore:reviewCommon.notBefore,expiresAt:reviewCommon.expiresAt,
       sourceDigest:sha(canonical(packet.input.source)),bodyDigest:packet.bodyDigest,phase});
     const module=mod("finance/legacy-invitation-facts-maintenance");
-    await ctx.runItems("invitationFacts",packets,async packet=>{
+    await ctx.runItems("invitationFacts",source(),async packet=>{
         if(packet.input.policy!==null)throw new Error("SOURCE_INVITATION_POLICY_MUST_REMAIN_UNBOUND");
         const scope=await module.bindReviewedLegacyInvitationFacts(client,actor,review(packet,'IMPORT'));
         return module.importReviewedLegacyInvitationFacts(client,actor,packet.input,packet.bodyDigest,scope);
     },1);
     if(requiresInvitationCountClosure(manifest)){
         if(state.phases.invitationFacts?.complete!==true || state.phases.invitationFacts.quarantined!==0
-          || state.phases.invitationFacts.nextIndex!==packets.length)throw new Error("INVITATION_IMPORT_NOT_COMPLETE");
-        await ctx.runItems("invitationCounts",packets,async packet=>{
+          || state.phases.invitationFacts.nextIndex!==packetCount)throw new Error("INVITATION_IMPORT_NOT_COMPLETE");
+        await ctx.runItems("invitationCounts",source(),async packet=>{
             const scope=await module.bindReviewedLegacyInvitationFacts(client,actor,review(packet,'COUNTS'));
             return module.closeReviewedLegacyInvitationCounts(client,actor,packet.input,packet.bodyDigest,scope);
         },1);

@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import { isStrictRoundReservation, matchesLoadReservation, strictRoundReservation, writeLoadCheckpoint } from "./local-load-checkpoint.mjs";
 import { assertFullExecutionAdmitted } from "./full-source-scope.mjs";
-import { assertInvitationCountPackets, requiresInvitationCountClosure } from "./local-round-contract.mjs";
+import { preflightInvitationFile, readBoundInvitationPackets, requiresInvitationCountClosure } from "./local-round-contract.mjs";
 import { advisoryLockSql, assertLiveTarget, loadRegisteredTarget, maintenanceConnection, targetConnection, targetIdentityQuery } from "./local-target-registry.mjs";
 const require = createRequire(import.meta.url), { Client, Pool } = require("pg");
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
@@ -76,13 +76,13 @@ for (const [name, file] of Object.entries(manifest.files)) {
 }
 const api = resolve(option("--api-dist") ?? join(ROOT, "apps/api/dist/src")), mod = name => require(join(api, name + ".js"));
 const canonical = mod("supply/content-hash").canonicalize;
-let invitationPackets;
+let invitationSource, invitationPacketCount;
 if (execute && !["--enrich-display", "--import-openings", "--enrich-holdings", "--contact-append", "--legacy-number-only", "--core-only"].some(flag => args.includes(flag))
     && requiresInvitationCountClosure(manifest)) {
-    invitationPackets = [];
     const file = manifest.files["invitation-facts"];
-    if (file) for await (const packet of readRows(join(dataset, file.file))) invitationPackets.push(packet);
-    assertInvitationCountPackets(manifest, invitationPackets, mod("finance/legacy-invitation-facts"));
+    if (!file) throw new Error("INVITATION_FILE_BINDING_REQUIRED");
+    const path=join(dataset,file.file),hashes=await preflightInvitationFile(path,file.sha256,manifest,mod("finance/legacy-invitation-facts"));
+    invitationPacketCount=hashes.length;invitationSource=()=>readBoundInvitationPackets(path,file.sha256,hashes);
 }
 const actor = { id: option("--actor-id"), userId: option("--actor-id"), realm: "admin", sessionId: option("--session-id"), requestId: "core-legacy-dataset-" + expectedOid };
 if (!actor.id || !actor.sessionId)
@@ -448,7 +448,7 @@ try {
                 state.status="LOCAL_DATASET_CORE_ONLY_COMMITTED_FINANCE_NOT_RUN";
             }else{
                 const { applyFinancialDomains } = await import("./local-target-finance.mjs");
-                await applyFinancialDomains({ client, actor, mod, manifest, state, output, domainFile, readRows, runItems, runBatches, save, event, invitationPackets, targetPort: registered.port ?? registered.instance?.port ?? null, apiDist:api,fundsSource:fundsSourceBinding,refundAttemptsSource:refundAttemptsBinding });
+                await applyFinancialDomains({ client, actor, mod, manifest, state, output, domainFile, readRows, runItems, runBatches, save, event, invitationSource, invitationPacketCount, targetPort: registered.port ?? registered.instance?.port ?? null, apiDist:api,fundsSource:fundsSourceBinding,refundAttemptsSource:refundAttemptsBinding });
                 state.status = "LOCAL_DATASET_CORE_AND_FINANCIAL_DOMAINS_COMMITTED_REVIEW_REQUIRED";
             }
         }

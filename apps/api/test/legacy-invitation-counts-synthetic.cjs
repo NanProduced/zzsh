@@ -1,5 +1,5 @@
 // Explicit isolated synthetic PostgreSQL only; never accepts a real migration resource.
-const assert=require('node:assert/strict'),{Pool}=require('pg'),{createHash}=require('node:crypto');
+const assert=require('node:assert/strict'),{Pool}=require('pg'),{createHash}=require('node:crypto'),{mkdtempSync,writeFileSync,rmSync}=require('node:fs'),{tmpdir}=require('node:os'),{join}=require('node:path');
 const Module=require('node:module'),load=Module._load;
 Module._load=function(name,...args){if(name==='sharp')return function(){throw Error('unused synthetic media')};return load.call(this,name,...args)};
 assert.equal(process.env.R08_INVITATION_SYNTH_OPT_IN,'1');
@@ -81,14 +81,21 @@ async function setup(c){
     await assert.rejects(execute(planned.packets[premature],'COUNTS'));
     assert.equal((await c.query("SELECT count(*)::int n FROM zzsh_iam.audit_event WHERE action='distribution.legacy_facts.counts_closed'")).rows[0].n,0);
     const {applyInvitationDomains}=await import('../../../scripts/migration/local-target-finance.mjs');
-    const packets=planned.packets.map(packet=>({input:packet,bodyDigest:hash(packet)}));
-    const manifest={population:{mode:'SELECTED_BUSINESS_SCOPE'},domains:{users:{source:5,ready:5,isolated:0}},
+    const {preflightInvitationFile,readBoundInvitationPackets}=await import('../../../scripts/migration/local-round-contract.mjs');
+    const packets=planned.packets.map(packet=>{const p=root.prepareLegacyInvitationFacts(packet,hash(packet));return {input:packet,bodyDigest:hash(packet),key:p.key,relations:p.relations.length}});
+    const manifest={population:{mode:'SELECTED_BUSINESS_SCOPE'},sourceReceiptSha256:source.receiptSha256,domains:{users:{source:5,ready:5,isolated:0}},
       invitationFacts:{subjects:5,codes:5,selectedSubjects:5,packets:packets.length,selectedPackets:packets.length,policy:null,financialEffects:false},files:{'invitation-facts':{rows:packets.length}}};
+    const dir=mkdtempSync(join(tmpdir(),'r08-invitation-stream-')),file=join(dir,'packets.jsonl'),bytes=Buffer.from(packets.map(p=>JSON.stringify(p)).join('\n')+'\n'),fileHash=sha(bytes);
+    writeFileSync(file,bytes);const packetHashes=await preflightInvitationFile(file,fileHash,manifest,root);
     const state={resource:{owner_oid:resource.ownerOid},phases:{}};
-    const ctx={client:c,actor,manifest,state,invitationPackets:packets,mod:()=>writer,
+    const ctx={client:c,actor,manifest,state,invitationSource:()=>readBoundInvitationPackets(file,fileHash,packetHashes),invitationPacketCount:packetHashes.length,mod:()=>writer,
       async runItems(domain,items,fn){const phase=state.phases[domain]??={nextIndex:0,created:0,replayed:0,quarantined:0};
-        for(const item of items.slice(phase.nextIndex)){await c.query('BEGIN');try{const result=await fn(item);await c.query('COMMIT');phase.nextIndex++;if(result.replayed)phase.replayed++;else phase.created++;}catch(e){await c.query('ROLLBACK');throw e;}}
+        let index=0;for await(const item of items){if(index++<phase.nextIndex)continue;await c.query('BEGIN');try{const result=await fn(item);await c.query('COMMIT');phase.nextIndex++;if(result.replayed)phase.replayed++;else phase.created++;}catch(e){await c.query('ROLLBACK');throw e;}}
         phase.complete=true;}};
+    const changed=structuredClone(packets);changed[1].input.subjects[0].userId='synthetic-tampered';writeFileSync(file,changed.map(p=>JSON.stringify(p)).join('\n')+'\n');
+    await assert.rejects(()=>applyInvitationDomains(ctx,binding,resource,canonicalize),/INVITATION_PACKET_CHANGED/);
+    assert.equal(state.phases.invitationFacts.nextIndex,1);assert.notEqual(state.phases.invitationFacts.complete,true);assert.equal(state.phases.invitationCounts,undefined);
+    writeFileSync(file,bytes);
     await applyInvitationDomains(ctx,binding,resource,canonicalize);
     assert.equal(state.phases.invitationFacts.replayed,premature+1);assert.equal(state.phases.invitationCounts.nextIndex,packets.length);
     const participants=(await c.query('SELECT user_id,invitees_knowledge FROM zzsh_order.distribution_participant')).rows;
@@ -106,7 +113,8 @@ async function setup(c){
         await writer.recoverReviewedLegacyInvitationFacts(c,actor,packet,hash(packet),scope,'COUNTS');}catch{detected=true;break;}}
       assert.equal(detected,true,'changed relation digest must prevent a known recovery');
     }finally{await c.query('ROLLBACK');}
+    rmSync(dir,{recursive:true});
     console.log(JSON.stringify({status:'SYNTHETIC_PG_COUNTS_PASSED',subjects:facts.length,packets:packets.length,importReplayed:state.phases.invitationFacts.replayed,
-      prematureClosure:'REJECTED',unresolvedSource:'UNKNOWN',sameKeyReplay:'PASSED',tamperedRelation:'REJECTED',realProviderCalls:0}));
+      prematureClosure:'REJECTED',unresolvedSource:'UNKNOWN',sameKeyReplay:'PASSED',tamperedRelation:'REJECTED',changedPacket:'STOPPED_WITH_ORIGINAL_CHECKPOINT',realProviderCalls:0}));
   }finally{if(c)c.release();if(!setupReleased)setupClient.release();await runtime.end();await admin.end();}
 })().catch(e=>{console.error('SYNTHETIC_PG_COUNTS_FAILED',e.stack);process.exitCode=1});

@@ -2,7 +2,7 @@ import {assertRebuiltEmptyCoverageChunk,assertRebuiltEmptyCoverageManifest,conti
 import { advisoryLockSql, assertLiveTarget, assertReadbackTarget, loadRegisteredTarget, maintenanceConnection, targetConnection, targetIdentityQuery } from "./local-target-registry.mjs";
 import { compareKeySets } from "./local-key-set.mjs";
 import { classifyLegacyRegistrationTime, compareLegacyRegistrationFact, matchesLegacyAccountMetricAudit, legacyAccountCaptureProof, matchesLegacyAccountCapture, matchesCapturedAccountBaseRatio, matchesCapturedAccountFullPayout, legacyOrderCaptureProof, matchesLegacyOrderCapture } from "./local-source-adapter.mjs";
-import { assessInvitationChildSet, requiresInvitationCountClosure } from "./local-round-contract.mjs";
+import { assessInvitationChildSet, preflightInvitationFile, readBoundInvitationPackets, requiresInvitationCountClosure } from "./local-round-contract.mjs";
 import { createHash } from "node:crypto";
 import { createReadStream, readFileSync, writeFileSync, existsSync, lstatSync } from "node:fs";
 import { createInterface } from "node:readline";
@@ -70,7 +70,7 @@ if (originalMetricSources) {
 const report = { schema: "zzsh.local-dataset-readback.v1", startedAt: new Date().toISOString(), resource: { oid: state.binding.oid, nonce: state.binding.nonce, database: registration.database, ...(registration.instance ? {instance:registration.instance} : {}) }, sourceDatasetSha256: option("--dataset-sha"), status: "STARTED", queries: 0, domains: {}, differences: [], differenceCount: 0, targetWrites: 0, rollbackConfirmed: false, lockReleased: false, connectionsClosed: false };
 const difference = (domain, id, reason) => { report.differenceCount++; if (report.differences.length < 100) report.differences.push({ domain, id, reason }); };
 const query = async (...args) => { report.queries++; return db.query(...args); };
-async function batched(domain, apply, collect = null) { let batch = [], count = 0; for await (const row of rows(join(dataset, manifest.files[domain].file))) { batch.push(row); if (collect) collect.push(row.sourceId); if (batch.length === 1000) { await apply(batch); count += batch.length; batch = []; } } if (batch.length) { await apply(batch); count += batch.length; } return count; }
+async function batched(domain, apply, collect = null, batchSize = 1000, source = null) { let batch = [], count = 0; for await (const row of source ?? rows(join(dataset, manifest.files[domain].file))) { batch.push(row); if (collect) collect.push(row.sourceId); if (batch.length === batchSize) { await apply(batch); count += batch.length; batch = []; } } if (batch.length) { await apply(batch); count += batch.length; } return count; }
 const started = performance.now(); let held = false, connected = false;
 try {
   await maintenance.connect(); held = (await maintenance.query(advisoryLockSql(registration, "try"))).rows[0].ok;
@@ -334,7 +334,10 @@ try {
     if(closureRequired)for(const row of (await query("SELECT object_id,details FROM zzsh_iam.audit_event WHERE action='distribution.legacy_facts.counts_closed' AND outcome='SUCCESS'")).rows){
       const values=countAudits.get(row.object_id)??[];values.push(row.details);countAudits.set(row.object_id,values);
     }
-    if(manifest.files["invitation-facts"]) await batched("invitation-facts",async packets=>{for(const packet of packets){
+    const invitationFile=manifest.files["invitation-facts"], invitationPath=invitationFile?join(dataset,invitationFile.file):null;
+    if(closureRequired && !invitationFile)throw new Error("INVITATION_FILE_BINDING_REQUIRED");
+    const invitationHashes=closureRequired ? await preflightInvitationFile(invitationPath,invitationFile?.sha256,manifest,module) : null;
+    if(invitationFile) await batched("invitation-facts",async packets=>{for(const packet of packets){
       const plan=module.prepareLegacyInvitationFacts(packet.input,packet.bodyDigest),ids=plan.subjects.map(p=>p.userId);
       const audit = audits.get(plan.bodyDigest);
       if (!audit || canonical(audit.facts) !== canonical(packet.input.subjects) || canonical(audit.source) !== canonical(packet.input.source) || audit.financialEffects !== false) difference("invitationFacts", plan.bodyDigest, "ORIGINAL_CHILD_DENOMINATOR_AUDIT_DRIFT");
@@ -361,7 +364,7 @@ try {
         if(evidence.length!==1||canonical(evidence[0])!==canonical(expected))difference("invitationCounts",plan.bodyDigest,"COUNT_CLOSURE_AUDIT_DRIFT");
         else closure.auditsMatched++;
       }
-    }});
+    }},null,1,invitationHashes ? readBoundInvitationPackets(invitationPath,invitationFile.sha256,invitationHashes) : null);
     if(closureRequired){
       if(closure.packets!==manifest.invitationFacts.selectedPackets||closure.subjects!==manifest.domains.users.source)difference("invitationCounts","POPULATION","COUNT_CLOSURE_DENOMINATOR_DRIFT");
       closure.status=closure.packets===closure.auditsMatched&&closure.subjects===closure.matched&&closure.subjects===manifest.domains.users.source?"VERIFIED":"MISMATCH";
