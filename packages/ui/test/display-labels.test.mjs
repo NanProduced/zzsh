@@ -21,11 +21,13 @@ test("legacy settled amounts preserve exact cents while normalizing padding",()=
 });
 
 test("reference unit money rounds half up to two digits without turning a sub-cent value into free",()=>{
-  assert.equal(formatReferenceYuan("1.005"),"约¥1.01");
-  assert.equal(formatReferenceYuan("0.004"),"约¥0.00（不足1分）");
+  assert.equal(formatReferenceYuan("1.005"),"约 ¥1.01");
+  assert.equal(formatReferenceYuan("0.004"),"< ¥0.01");
   assert.equal(formatReferenceYuan("0.00000000"),"¥0.00");
-  assert.equal(formatReferenceYuan("99999999999999.995",{grouped:true}),"约¥100,000,000,000,000.00");
-  assert.equal(formatReferenceYuan("约¥0.00（不足1分）"),"约¥0.00（不足1分）");
+  assert.equal(formatReferenceYuan("99999999999999.995",{grouped:true}),"约 ¥100,000,000,000,000.00");
+  assert.equal(formatReferenceYuan("约¥0.00（不足1分）"),"< ¥0.01");
+  assert.equal(formatReferenceYuan("< ¥0.01"),"< ¥0.01");
+  assert.equal(formatReferenceYuan("约 ¥1.01"),"约 ¥1.01");
   assert.equal(formatReferenceYuan("not-a-price"),null);
 });
 

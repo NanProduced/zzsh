@@ -40,12 +40,18 @@ function loadComponent(relativePath, session, extra) {
     if (name === "@/components/order/order-detail") return loadComponent("apps/web/src/components/order/order-detail.tsx", session);
     if (name === "@/components/order/order-list") return loadComponent("apps/web/src/components/order/order-list.tsx", session);
     if (name === "./rental-price-summary") return loadComponent("apps/web/src/components/order/rental-price-summary.tsx", session);
+    if (name === "./recommended-accounts") return { RecommendedAccountsSection: () => null };
     if (name === "./legacy-continuation-panel") return {LegacyContinuationPanel:()=>null};
     if (name === './prestart-termination-panel'||name === '@/components/order/prestart-termination-panel') return loadComponent('apps/web/src/components/order/prestart-termination-panel.tsx',session,extra);
     if (name === './order-trade-actions') return loadComponent('apps/web/src/components/order/order-trade-actions.tsx',session,extra);
     if (name === '@/lib/prestart-termination-client') return requireFromTree(path.join(tree,'apps/web/src/lib/prestart-termination-client.ts'));
     if (name === '@/lib/personal-wallet-client') return requireFromTree(path.join(tree,'apps/web/src/lib/personal-wallet-client.ts'));
     if (name === "@/components/ui/tooltip") return { Tooltip: props => React.createElement(React.Fragment, null, props.children), TooltipTrigger: props => React.createElement(React.Fragment, null, props.children), TooltipContent: () => null };
+    if (name === "@/components/ui/form-controls") return {
+      Input: (props) => React.createElement("input", props),
+      FormSelect: ({ label, value, options, onChange, placeholder }) => React.createElement("select", { "aria-label": label, value, onChange: e => onChange(e.target.value) }, (options || []).map(o => React.createElement("option", { key: o.value, value: o.value }, o.label))),
+      DatePicker: ({ label, value, onChange, placeholder }) => React.createElement("input", { type: "text", "aria-label": label, value: value || "", onChange: e => onChange(e.target.value), placeholder }),
+    };
     if (extra && Object.hasOwn(extra, name)) return extra[name];
     if (name === "@/lib/account-title") return loadComponent("apps/web/src/lib/account-title.ts", session);
     if (name === "@/lib/listing-filters" || name === "./listing-filters") return loadComponent("apps/web/src/lib/listing-filters.ts", session);
@@ -677,7 +683,9 @@ test("detail card and dock replace the reference with the SAME personal payable;
       await probe.click("查看我的报价");
       assert.equal(probe.host.querySelector(".account-reference-price").textContent, "¥470.00");
       assert.equal(probe.host.querySelector(".rental-dock-price strong").textContent, "¥470.00");
-      assert.match(probe.host.querySelector(".account-fee-lines").textContent, /¥150.00.*¥20.00.*¥300.00/);
+      assert.match(probe.host.querySelector(".rental-price-summary").textContent, /¥150.00.*¥20.00.*¥300.00/);
+      assert.match(probe.host.querySelector(".account-quote-total-section").textContent, /本次应付（含押金）.*¥470.00/);
+      assert.match(probe.host.querySelector(".rental-dock-price").textContent, /本次应付（含押金）.*¥470.00/);
       assert.ok(!probe.host.textContent.includes("¥256.41"));
       assert.equal(probe.host.querySelectorAll(".rental-confirm-primary").length, 1);
       assert.equal(probe.host.querySelector("del"), null);
@@ -1613,7 +1621,7 @@ test('legacy rental income points to wallet records rather than referral commiss
   const Component=loadComponent('apps/web/src/components/order/legacy-order-workspace.tsx',session('user_A')).LegacyOrderWorkspace;
   for(const known of [true,false]){
    const row={id:'legacy_income',displayNo:'OLD-INCOME',party:'owner',status:'COMPLETED',readOnly:true,source:{origin:'LEGACY',statusLabel:'已完成'},account:{id:null,displayNo:null,readable:false},amounts:{ownerRecordedIncome:money('201.00')},...(known?{ownerIncomeSource:{source:'LEGACY_ORDER_SNAPSHOT',sourceLabel:'原单记录'}}:{}),legacyAmounts:{required:money('470.00'),paid:money('470.00'),deposit:money('100.00'),refund:null}},probe=createProbe(window,Component,{party:'owner',orderId:row.id},async()=>json({order:row}));
-   try{await probe.render();const link=[...probe.host.querySelectorAll('a')].find(node=>node.textContent==='查看钱包记录');assert.ok(link);assert.equal(link.getAttribute('href'),'/account?view=wallet');assert.equal(probe.host.querySelectorAll('a[href*="view=invite"]').length,0);assert.doesNotMatch(probe.host.textContent,/470\.00/);if(known){assert.match(probe.host.textContent,/201\.00/);assert.match(probe.host.textContent,/记录金额仅供查看，余额请以钱包为准/);}else{assert.doesNotMatch(probe.host.textContent,/201\.00/);assert.match(probe.host.textContent,/收益金额未记录/);}}finally{await probe.dispose();}
+   try{await probe.render();const link=[...probe.host.querySelectorAll('a')].find(node=>node.textContent==='查看钱包记录');assert.ok(link);assert.equal(link.getAttribute('href'),'/account?view=wallet');assert.equal(probe.host.querySelectorAll('a[href*="view=invite"]').length,0);assert.doesNotMatch(probe.host.textContent,/470\.00|实收金额|结算入账/);if(known){assert.match(probe.host.textContent,/201\.00/);assert.match(probe.host.textContent,/记录金额仅供查看，余额请以钱包为准/);}else{assert.doesNotMatch(probe.host.textContent,/201\.00/);assert.match(probe.host.textContent,/收益金额未记录/);}}finally{await probe.dispose();}
   }
  });
 });
@@ -1626,7 +1634,7 @@ test('legacy order contact opens ordinary support with the typed order and curre
    const listener=event=>events.push(event.detail);window.addEventListener('zzsh:open-support',listener);
    const row={id,displayNo:'OLD-123',party,status:'COMPLETED',readOnly:true,source:{origin:'LEGACY',statusLabel:'已完成'},account:{id:null,displayNo:null,readable:false},legacyAmounts:{required:money('470.00'),paid:money('470.00'),deposit:null,refund:null}};
    const probe=createProbe(window,Component,{party,orderId:id},async()=>json({order:row}));
-   try{await probe.render();await probe.click('联系客服');assert.equal(events.length,1);assert.equal(events[0].type,'SERVICE');assert.equal(events[0].orderContext.subjectRef,`legacy-order:${id}`);assert.equal(events[0].orderContext.legacyOrder.party,party);assert.equal(events[0].orderContext.legacyOrder.displayNo,'OLD-123');assert.doesNotMatch(JSON.stringify(events[0].orderContext),/470\.00/);}
+   try{await probe.render();assert.doesNotMatch(probe.host.textContent,/打开订单群|一单一群|专属交付群/);await probe.click('联系客服');assert.equal(events.length,1);assert.equal(events[0].type,'SERVICE');assert.equal(events[0].orderContext.subjectRef,`legacy-order:${id}`);assert.equal(events[0].orderContext.legacyOrder.party,party);assert.equal(events[0].orderContext.legacyOrder.displayNo,'OLD-123');assert.doesNotMatch(JSON.stringify(events[0].orderContext),/470\.00/);}
    finally{window.removeEventListener('zzsh:open-support',listener);await probe.dispose();}
   }
  });

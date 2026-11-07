@@ -144,7 +144,8 @@ test("R3-03: 60-bullet denominator displayed with '组' representation", async (
   });
 });
 
-test("R3-05: a nonzero sub-cent reference price is rounded and clearly labelled", async () => {
+// Positive sub-cent prices remain distinguishable from a genuinely free item.
+test("R3-05: positive sub-cent unit price is rounded for display without implying zero", async () => {
   await withDom(async (host, render) => {
     const reference = {
       total: "¥0.04",
@@ -157,7 +158,8 @@ test("R3-05: a nonzero sub-cent reference price is rounded and clearly labelled"
     await render(React.createElement(RentalPriceSummary, { reference, quote: null }));
     const spec = host.querySelector(".account-quote-bill-spec");
     assert.ok(spec);
-    assert.match(spec.textContent, /约¥0.00（不足1分） \/ 发/);
+    assert.match(spec.textContent, /< ¥0\.01 \/ 发/);
+    assert.ok(!spec.textContent.includes("¥0.00 /"), "must not be ¥0.00");
     assert.equal(host.querySelector('.account-quote-bill-subtotal strong').textContent, "¥0.04");
   });
 });

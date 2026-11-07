@@ -2,7 +2,8 @@
 import Link from 'next/link';
 import {useRouter,useSearchParams} from 'next/navigation';
 import {useEffect,useRef,useState} from 'react';
-import {ChevronRight,ArrowLeft} from 'lucide-react';
+import {Select} from '@base-ui/react/select';
+import {ChevronRight,ArrowLeft,Filter,BarChart3,ChevronDown,Check} from 'lucide-react';
 import {useUserSession,useUserSessionStore} from '@/components/session/user-session-provider';
 import {readEarnings,readEarningDetail,earningStates,commissionStateLabel,commissionRecordMoney,type EarningFilter,type EarningsPage,type EarningItem,type CurrentLegacyResponsibility} from '@/lib/distribution-earnings-client';
 import {WalletRequestError} from '@/lib/personal-wallet-client';
@@ -39,6 +40,8 @@ export function PersonalEarnings({scope,refreshNonce=0}:{scope:string;refreshNon
  const routeKey=JSON.stringify([filter,selectedId,invalidId]);
  const session=useUserSession(),store=useUserSessionStore(),live=useRef({scope,routeKey,mounted:false});live.current.scope=scope;live.current.routeKey=routeKey;
  const [reload,setReload]=useState(0),revision=reload+refreshNonce,[view,setView]=useState<View>({scope,filter,reload:revision,page:null,selectedId,detail:null,busy:true,error:null});
+ const [visibleLimit,setVisibleLimit]=useState(8);
+ useEffect(()=>{setVisibleLimit(8);},[filter,scope,revision]);
  const ticket=useRef(0),abort=useRef<AbortController|null>(null),trigger=useRef<HTMLButtonElement|null>(null),backFocus=useRef(false),heading=useRef<HTMLHeadingElement|null>(null),detailHeading=useRef<HTMLHeadingElement|null>(null),previousSelection=useRef(selectedId),listPosition=useRef<{scope:string;filter:EarningFilter;y:number}|null>(null);
  if(previousSelection.current!==selectedId){if(previousSelection.current!==null&&selectedId===null)backFocus.current=true;previousSelection.current=selectedId;}
  const current=()=>{const s=store.getSnapshot();return live.current.mounted&&live.current.scope===scope&&s.status==='authenticated'&&s.userId===session.userId&&scope===s.userId+':'+s.identityVersion;};
@@ -67,14 +70,67 @@ export function PersonalEarnings({scope,refreshNonce=0}:{scope:string;refreshNon
  const retry=()=>setReload(n=>n+1),detail=visible?.detail,page=visible?.page,busy=visible?.busy??true;
  const shown=detail?recordView(detail):null,responsibility=detail?.record?.detail.currentResponsibility??detail?.currentResponsibility,finance=detail?.record?.detail.currentFinance??detail?.currentFinance,summary=page?.recordSummary;
  return <section className="personal-earnings account-module-card" aria-labelledby="personal-earnings-heading" aria-busy={busy||undefined}>
-  <div className="earnings-heading"><div><h3 id="personal-earnings-heading" ref={heading} tabIndex={-1}>佣金记录</h3><p>{summary?.count!==null&&summary?.count!==undefined?BigInt(summary.count).toLocaleString('zh-CN')+' 条记录':summary?'已收录 '+BigInt(summary.mappedRecordCount).toLocaleString('zh-CN')+' 条 · 完整数量待核':page?'已显示 '+page.items.length+' 条 · 完整数量待核':'连续查看佣金记录及当前核对状态'}</p>{summary?<p className="earnings-total">{summary.knowledge==='KNOWN'?'记录金额合计':'已确认的记录金额'} {commissionRecordMoney(summary.knowledge==='KNOWN'?summary.amountCents:summary.knownSubtotalCents)} · 不代表余额</p>:null}</div></div>
+  <div className="earnings-heading">
+    <div className="earnings-header-summary">
+      <div className="earnings-title-row">
+        <h3 id="personal-earnings-heading" ref={heading} tabIndex={-1}>佣金记录</h3>
+        <span className="earnings-count-badge">
+          {summary?.count!==null&&summary?.count!==undefined?BigInt(summary.count).toLocaleString('zh-CN')+' 条记录':summary?'已收录 '+BigInt(summary.mappedRecordCount).toLocaleString('zh-CN')+' 条 · 完整数量待核':page?'已显示 '+page.items.length+' 条 · 完整数量待核':'连续查看佣金记录及当前核对状态'}
+        </span>
+      </div>
+      {summary?<p className="earnings-total"><span className="earnings-total-label">{summary.knowledge==='KNOWN'?'记录金额合计':'已确认的记录金额'}</span> <strong className="earnings-total-amount">{commissionRecordMoney(summary.knowledge==='KNOWN'?summary.amountCents:summary.knownSubtotalCents)}</strong> <small className="earnings-total-tip">不代表余额</small></p>:null}
+    </div>
+  </div>
   {visible?.error?<div role="alert" className="earnings-error"><p>{message(visible.error)}</p><button className="button secondary" type="button" disabled={busy} onClick={retry}>重试读取</button></div>:null}
   <div hidden={Boolean(visible?.selectedId)}>
-   <div className="earnings-filters"><label>记录状态<select aria-label="佣金记录状态" value={filter} disabled={busy} onChange={event=>navigate(null,event.target.value as EarningFilter)}><option value="ALL">{labels.ALL}</option><optgroup label="结算进度">{earningStates.filter(state=>settlementStates.includes(state)).map(state=><option key={state} value={state}>{labels[state]}</option>)}</optgroup><optgroup label="其他状态">{earningStates.filter(state=>state!=='ALL'&&!settlementStates.includes(state)).map(state=><option key={state} value={state}>{labels[state]}</option>)}</optgroup></select></label></div>
-   {summary?.states.length?<details className="earnings-breakdown"><summary>各状态记录</summary><ul>{summary.states.map(group=><li key={group.state}>{labels[group.state]} · {BigInt(group.count).toLocaleString('zh-CN')} 条 · {commissionRecordMoney(group.amountCents)}</li>)}</ul></details>:null}
+   <div className="earnings-filters">
+     <div className="earnings-filter-label">
+       <Filter size={14} aria-hidden="true" />
+       <span>记录状态</span>
+     </div>
+     <Select.Root value={filter} onValueChange={next=>{if(next)navigate(null,next as EarningFilter);}} disabled={busy}>
+       <Select.Trigger className="earnings-shadcn-trigger" aria-label="佣金记录状态选择">
+         <Select.Value>{labels[filter]??labels.ALL}</Select.Value>
+         <Select.Icon><ChevronDown size={14} aria-hidden="true" /></Select.Icon>
+       </Select.Trigger>
+       <Select.Portal>
+         <Select.Positioner sideOffset={6} align="start" className="form-select-positioner">
+           <Select.Popup className="form-select-popup earnings-select-popup">
+             <Select.List>
+               <Select.Item value="ALL" className="form-select-option">
+                 <Select.ItemText>{labels.ALL}</Select.ItemText>
+                 <Select.ItemIndicator className="form-select-check"><Check size={14} /></Select.ItemIndicator>
+               </Select.Item>
+               <Select.Group className="form-select-group">
+                 <Select.GroupLabel className="form-select-group-label">结算进度</Select.GroupLabel>
+                 {earningStates.filter(state=>settlementStates.includes(state)).map(state=><Select.Item key={state} value={state} className="form-select-option">
+                   <Select.ItemText>{labels[state]}</Select.ItemText>
+                   <Select.ItemIndicator className="form-select-check"><Check size={14} /></Select.ItemIndicator>
+                 </Select.Item>)}
+               </Select.Group>
+               <Select.Group className="form-select-group">
+                 <Select.GroupLabel className="form-select-group-label">其他状态</Select.GroupLabel>
+                 {earningStates.filter(state=>state!=='ALL'&&!settlementStates.includes(state)).map(state=><Select.Item key={state} value={state} className="form-select-option">
+                   <Select.ItemText>{labels[state]}</Select.ItemText>
+                   <Select.ItemIndicator className="form-select-check"><Check size={14} /></Select.ItemIndicator>
+                 </Select.Item>)}
+               </Select.Group>
+             </Select.List>
+           </Select.Popup>
+         </Select.Positioner>
+       </Select.Portal>
+     </Select.Root>
+     <select aria-label="佣金记录状态" value={filter} disabled={busy} tabIndex={-1} aria-hidden="true" className="earnings-hidden-select" onChange={event=>navigate(null,event.target.value as EarningFilter)}>
+       <option value="ALL">{labels.ALL}</option>
+       <optgroup label="结算进度">{earningStates.filter(state=>settlementStates.includes(state)).map(state=><option key={state} value={state}>{labels[state]}</option>)}</optgroup>
+       <optgroup label="其他状态">{earningStates.filter(state=>state!=='ALL'&&!settlementStates.includes(state)).map(state=><option key={state} value={state}>{labels[state]}</option>)}</optgroup>
+     </select>
+   </div>
+   {summary?.states.length?<details className="earnings-breakdown"><summary><BarChart3 size={15} aria-hidden="true" className="breakdown-icon" />各状态记录<ChevronDown size={14} className="breakdown-chevron" aria-hidden="true" /></summary><ul className="breakdown-grid">{summary.states.map(group=><li key={group.state} className="breakdown-chip"><span className="chip-state">{labels[group.state]}</span><span className="chip-count">{BigInt(group.count).toLocaleString('zh-CN')} 条</span><strong className="chip-amount">{commissionRecordMoney(group.amountCents)}</strong></li>)}</ul></details>:null}
    {page&&(summary?.knowledge==='UNKNOWN'||!summary)?<p className="earnings-note" role="status">部分记录还在核对，数量与金额暂未确认。{summary?.unclassifiedRecordCount&&summary.unclassifiedRecordCount!=='0'?`${filter==='ALL'||filter==='UNKNOWN'?'其中':'另有'} ${BigInt(summary.unclassifiedRecordCount).toLocaleString('zh-CN')} 条记录状态待确认。`:''}余额请以钱包为准。</p>:null}
-   {page?.items.length?<ul className="earnings-records" aria-label="佣金记录时间线">{page.items.map(item=>{const record=recordView(item);return <li key={record.key}><button className="earning-record" type="button" disabled={busy} onClick={e=>void open(item.id,e.currentTarget)}><span><strong>{roleLabel(item.role)}</strong><small>{timeText(record.occurredAt)}</small></span><span className="earning-record-value"><strong>{commissionRecordMoney(record.amountCents)}</strong><small>{labels[record.state]}</small></span><ChevronRight size={16} aria-hidden="true"/></button></li>;})}</ul>:<p className="earnings-empty">{busy?'正在读取佣金记录…':summary?.knowledge==='KNOWN'?'当前状态暂无佣金记录。':page?'暂未读到匹配记录，完整数量仍待核对。':'佣金记录当前不可用。'}</p>}
-   {page?.nextCursor?<button className="button secondary" type="button" disabled={busy} onClick={()=>void more()}>加载更多收益</button>:null}
+   {page?.items.length?<ul className="earnings-records" aria-label="佣金记录时间线">{(page.items.slice(0,visibleLimit)).map(item=>{const record=recordView(item);return <li key={record.key}><button className="earning-record" type="button" disabled={busy} onClick={e=>void open(item.id,e.currentTarget)}><span><strong>{roleLabel(item.role)}</strong><small>{timeText(record.occurredAt)}</small></span><span className="earning-record-value"><strong>{commissionRecordMoney(record.amountCents)}</strong><small>{labels[record.state]}</small></span><ChevronRight size={16} aria-hidden="true"/></button></li>;})}</ul>:<p className="earnings-empty">{busy?'正在读取佣金记录…':summary?.knowledge==='KNOWN'?'当前状态暂无佣金记录。':page?'暂未读到匹配记录，完整数量仍待核对。':'佣金记录当前不可用。'}</p>}
+   {page&&page.items.length>visibleLimit?<button className="button secondary earnings-show-more" type="button" disabled={busy} onClick={()=>setVisibleLimit(n=>n+8)}>展开更多记录（已显示 {Math.min(visibleLimit,page.items.length)} / {page.items.length} 条）</button>:null}
+   {page?.nextCursor&&visibleLimit>=page.items.length?<button className="button secondary" type="button" disabled={busy} onClick={()=>void more()}>加载更多收益</button>:null}
   </div>
   {visible?.selectedId?<div className="earning-detail"><button type="button" className="button secondary" onClick={back}><ArrowLeft size={15} aria-hidden="true"/>返回收益列表</button>{detail&&shown?<><h4 ref={detailHeading} tabIndex={-1}>{roleLabel(detail.role)}详情</h4><strong className="earning-detail-amount">{commissionRecordMoney(shown.amountCents)}</strong><dl><div><dt>记录状态</dt><dd>{labels[shown.state]}</dd></div><div><dt>记录时间</dt><dd>{timeText(shown.occurredAt)}</dd></div>{responsibility?.knowledge==='KNOWN'?<><div><dt>收益进度</dt><dd>{responsibilityText(responsibility)}</dd></div><div><dt>预计可结算时间</dt><dd>{responsibility.maturityAt===null?'未核定':timeText(responsibility.maturityAt)}</dd></div>{responsibility.revised?<div><dt>金额调整</dt><dd>金额已调整，可在原记录中查看。</dd></div>:null}</>:null}{finance?.knowledge==='KNOWN'?<><div><dt>入账金额</dt><dd>{commissionRecordMoney(finance.amountCents)}</dd></div><div><dt>入账状态</dt><dd>{finance.zeroFinalization?'本次入账金额为零':'已入账'}</dd></div></>:null}{detail.recoveryRequiredCents!==null?<div><dt>待追回金额</dt><dd>{commissionRecordMoney(detail.recoveryRequiredCents)}</dd></div>:null}</dl>
    <details className="earning-record-explanation"><summary>查看原记录和计算方式</summary><dl><div><dt>原记录状态</dt><dd>{labels[(detail.record?.detail.originalState??detail.state) as EarningFilter]}</dd></div><div><dt>原记录金额</dt><dd>{commissionRecordMoney(detail.record?.detail.originalAmountCents??detail.amount.amountCents)}</dd></div><div><dt>记录来源</dt><dd>{detail.origin==='LEGACY_MYSQL'?'历史记录':'当前记录'}</dd></div><div><dt>原预计结算时间</dt><dd>{detail.dueAt===null?'未核定':timeText(detail.dueAt)}</dd></div><div><dt>余额处理</dt><dd>{detail.record?.detail.accountingEffect==='EXISTING_LEDGER_EVENT'||detail.accountingEffect==='EXISTING_LEDGER_EVENT'?'余额请以钱包为准。':'查看记录不会改变余额。'}</dd></div></dl><EarningBasis item={detail}/>{detail.includedInOpening?<p>这笔收益已包含在余额中，不会重复计算。</p>:null}</details>

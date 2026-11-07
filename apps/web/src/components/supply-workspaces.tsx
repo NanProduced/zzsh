@@ -4,7 +4,7 @@ import Link from "next/link";
 import { publishUserSessionChange, useUserSession, useUserSessionStore } from "./session/user-session-provider";
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { AlertCircle, ArrowLeft, Box, Check, ChevronDown, ChevronRight, ClipboardList, Clock3, Copy, CreditCard, Crosshair, Dumbbell, FileText, Gem, House, ImageOff, Images, LockKeyhole, LogIn, Package, Pause, Pencil, Play, ReceiptText, RefreshCw, Shield, ShieldCheck, Shirt, SlidersHorizontal, Sparkles, Undo2, UserRound, Waves, X } from "lucide-react";
+import { AlertCircle, ArrowLeft, Box, Check, ChevronDown, ChevronRight, ClipboardList, Clock3, Copy, CreditCard, Crosshair, Dumbbell, FileText, Gem, HelpCircle, House, ImageOff, Images, Info, LockKeyhole, LogIn, Package, Pause, Pencil, Play, ReceiptText, RefreshCw, Shield, ShieldCheck, Shirt, SlidersHorizontal, Sparkles, Undo2, UserRound, Waves, X } from "lucide-react";
 import { ServiceShell } from "./layout/service-shell";
 import { SessionLoading } from "./auth/session-loading";
 import { RecoveryAlert } from "./ui/information";
@@ -26,6 +26,7 @@ import { AccountSecurityControls, type SecurityNicknameDraft, type SecurityPendi
 import { ConfirmAlertDialog } from "./ui/alert-dialog";
 import { LegacyAccountImage } from "@zzsh/ui/legacy-account-image";
 import { formatReferenceYuan } from "@zzsh/ui/display-money";
+import { AccountMediaPlaceholder } from "@zzsh/ui/account-media-placeholder";
 import { CONDITION_LABELS, booleanDeclarationText, conditionLines, haffMillionsLabel, skinTypeLabel, termLabel, unitLabel, toListingDetail, type ResourceLine } from "../lib/listing-view";
 import { deriveAccountTitle } from "../lib/account-title";
 import { supplyApi, SupplyRequestError, supplyBlockerMessages, uncertainSupplyWriteFailure } from "../lib/supply-client";
@@ -98,7 +99,7 @@ const ACCOUNT_STATE_FILTERS: ReadonlyArray<{ value: AccountStateFilter; label: s
   { value: "UNKNOWN", label: "待核实" },
 ];
 const RENTAL_STATE_LABELS: Record<RentalState, string> = {
-  RENTED: "租赁中",
+  RENTED: "已有订单",
   PENDING_PAYMENT: "待付款占用",
   LISTED: "可出租",
   PAUSED: "已暂停",
@@ -1035,10 +1036,10 @@ function MyAccountsPanel({ mode, accountId: accountIdProp, filterParam }: { mode
       <div className="mra-toolbar">
         <span className="mra-count">已显示 {rows.length} 个</span>
         <div className="mra-filter-rail" role="group" aria-label="按账号状态筛选">
-          {ACCOUNT_STATE_FILTERS.filter(chip => ["ALL", "LISTED", "PENDING_PAYMENT", "RENTED", "COMPLETED"].includes(chip.value)).map(chip => <button key={chip.value} type="button" className="mra-chip" aria-pressed={stateFilter === chip.value} onClick={() => changeStateFilter(chip.value)}>{chip.label}</button>)}
-          <button type="button" className="mra-chip mra-more-toggle" aria-expanded={moreFilters} aria-controls="account-more-filters" onClick={() => setMoreFilters(open => !open)}>更多状态{!["ALL", "LISTED", "PENDING_PAYMENT", "RENTED", "COMPLETED"].includes(stateFilter) ? ` · ${RENTAL_STATE_LABELS[stateFilter as RentalState]}` : ""}<ChevronDown size={14} aria-hidden="true" /></button>
+          {ACCOUNT_STATE_FILTERS.filter(chip => ["ALL", "LISTED", "RENTED", "REVIEWING"].includes(chip.value)).map(chip => <button key={chip.value} type="button" className="mra-chip" aria-pressed={stateFilter === chip.value} onClick={() => changeStateFilter(chip.value)}>{chip.label}</button>)}
+          <button type="button" className="mra-chip mra-more-toggle" aria-expanded={moreFilters} aria-controls="account-more-filters" onClick={() => setMoreFilters(open => !open)}>更多状态{!["ALL", "LISTED", "RENTED", "REVIEWING"].includes(stateFilter) ? ` · ${RENTAL_STATE_LABELS[stateFilter as RentalState]}` : ""}<ChevronDown size={14} aria-hidden="true" /></button>
         </div>
-        <div id="account-more-filters" className="mra-more-filters" role="group" aria-label="更多账号状态" hidden={!moreFilters}>{ACCOUNT_STATE_FILTERS.filter(chip => !["ALL", "LISTED", "PENDING_PAYMENT", "RENTED", "COMPLETED"].includes(chip.value)).map(chip => <button key={chip.value} type="button" className="mra-chip" aria-pressed={stateFilter === chip.value} onClick={() => changeStateFilter(chip.value)}>{chip.label}</button>)}</div>
+        <div id="account-more-filters" className="mra-more-filters" role="group" aria-label="更多账号状态" hidden={!moreFilters}>{ACCOUNT_STATE_FILTERS.filter(chip => !["ALL", "LISTED", "RENTED", "REVIEWING"].includes(chip.value)).map(chip => <button key={chip.value} type="button" className="mra-chip" aria-pressed={stateFilter === chip.value} onClick={() => changeStateFilter(chip.value)}>{chip.label}</button>)}</div>
       </div>
       {loading && rows.length === 0 ? <div className="account-module-card account-empty-state" aria-busy="true" role="status"><House size={28} aria-hidden="true" /><h3>正在读取{pageTitle}</h3><p>请稍候。</p></div> : error && rows.length === 0 ? <div className="account-module-card account-empty-state" role="alert"><House size={28} aria-hidden="true" /><h3>{pageTitle}暂时无法读取</h3><p>{error.message || "请稍后重试。"}</p><button type="button" className="button secondary" onClick={() => void load(accountIdProp, false, undefined, stateFilter)}>重试读取</button></div> : rows.length === 0 ? (!loading && !error
         ? <div className="account-module-card account-empty-art-state" role="status">
@@ -1093,7 +1094,7 @@ function MyAccountsPanel({ mode, accountId: accountIdProp, filterParam }: { mode
                 </Link>
                 <div className="mra-row-state">
                   {row.activeOrder ? <Link className="mra-row-anchor" href={orderUrl("owner", "", row.id, row.activeOrder.id, row.activeOrder.origin)} scroll={false}>订单 {row.activeOrder.displayNo}</Link> : null}
-                  {state ? <span className="mra-badge" data-tone={RENTAL_STATE_TONE[state]}><span className="mra-badge-dot" aria-hidden="true" />{state === "DRAFT" ? row.review_state === "WITHDRAWN" ? "已撤回" : row.review_state === "IMPORTED_UNVERIFIED" ? "历史账号" : row.review_state === "DRAFT" ? "草稿" : "资料待确认" : RENTAL_STATE_LABELS[state]}</span> : <span className="mra-badge" data-tone={row.review_state ? REVIEW_BADGE_TONE[row.review_state] ?? "unknown" : undefined}><span className="mra-badge-dot" aria-hidden="true" />{row.review_state ? stateLabel(row.review_state) : "资料待确认"}</span>}
+                  {state ? <span className="mra-badge" data-tone={RENTAL_STATE_TONE[state]}><span className="mra-badge-dot" aria-hidden="true" />{state === "DRAFT" ? row.review_state === "WITHDRAWN" ? "已撤回" : row.review_state === "IMPORTED_UNVERIFIED" ? "历史资料待核" : row.review_state === "DRAFT" ? "草稿" : "资料待确认" : RENTAL_STATE_LABELS[state]}</span> : <span className="mra-badge" data-tone={row.review_state ? REVIEW_BADGE_TONE[row.review_state] ?? "unknown" : undefined}><span className="mra-badge-dot" aria-hidden="true" />{row.review_state ? stateLabel(row.review_state) : "资料待确认"}</span>}
                   {row.owner_paused && state !== "PAUSED" ? <span className="mra-badge" data-tone="warning"><span className="mra-badge-dot" aria-hidden="true" />已暂停接单</span> : null}
                   {row.staff_restricted && state !== "RESTRICTED" ? <span className="mra-badge" data-tone="warning"><span className="mra-badge-dot" aria-hidden="true" />账号受限</span> : null}
                   {state === "LISTED" && row.available === false ? <span className="mra-badge" data-tone="warning"><span className="mra-badge-dot" aria-hidden="true" />暂不可接单</span> : null}
@@ -1342,7 +1343,25 @@ function AccountDetail({ detail, gameName, latest, busy, identityReady, onAction
     {/* 冲突/阻塞/退回原因提示 */}
     {latest || blockers.length || reasons.length ? <div className="supply-blockers-group" id="blockers" tabIndex={-1} ref={blockersRef}>
       {latest ? <div className="supply-conflict"><strong>资料状态已变化</strong><p>当前状态：{latest.version ? stateLabel(latest.version.reviewState) : "未创建草稿"}。</p><div className="supply-inline-actions"><button type="button" className="button secondary" disabled={!identityReady || busy !== ""} onClick={onRefresh}>重新读取</button><button type="button" className="button secondary" disabled={!identityReady || busy !== ""} onClick={onAdopt}>采用最新状态</button></div></div> : null}
-      {blockers.length ? <div className="supply-blockers" role="alert"><strong>当前限制</strong>{blockers.map((code) => <p key={code}>{blockerText(code)}{code === "STAFF_RESTRICTED" && account.restriction_reason ? <span className="supply-blocker-reason">{account.restriction_reason}</span> : null}</p>)}</div> : null}
+      {blockers.length ? (
+        <div className="supply-blockers supply-blockers--compact" role="alert">
+          <div className="supply-blockers-lead">
+            <AlertCircle size={15} aria-hidden="true" />
+            <strong>当前限制</strong>
+            <span className="supply-blockers-count">{blockers.length}项</span>
+          </div>
+          <div className="supply-blockers-chips">
+            {blockers.map((code) => (
+              <span key={code} className="supply-blocker-chip">
+                {blockerText(code)}
+                {code === "STAFF_RESTRICTED" && account.restriction_reason ? (
+                  <span className="supply-blocker-reason">{account.restriction_reason}</span>
+                ) : null}
+              </span>
+            ))}
+          </div>
+        </div>
+      ) : null}
       {reasons.length ? <div className="supply-decisions"><h3>退回原因</h3>{reasons.map((decision) => <p key={decision.id}>{decision.reason}</p>)}</div> : null}
     </div> : null}
 
@@ -1382,9 +1401,11 @@ function AccountDetail({ detail, gameName, latest, busy, identityReady, onAction
               ) : null}
             </div>
           ) : (
-            <div className="supply-gallery-empty">
-              <ImageOff size={28} aria-hidden="true" />
-              <p>{images.status === "loading" ? "正在读取展示图。" : images.status === "unknown" ? "展示图暂时无法确认。" : "暂无展示图。"}</p>
+            <div className="supply-gallery-empty-art-wrap">
+              <AccountMediaPlaceholder state="UNAVAILABLE" className="supply-gallery-placeholder-art" />
+              <span className="supply-gallery-placeholder-note">
+                {images.status === "loading" ? "正在读取展示图…" : images.status === "unknown" ? "展示图暂未确认" : "暂无公开展示图"}
+              </span>
             </div>
           )}
         </section>
@@ -1396,66 +1417,75 @@ function AccountDetail({ detail, gameName, latest, busy, identityReady, onAction
               <SlidersHorizontal size={17} className="supply-section-icon" aria-hidden="true" />
               <h2 className="supply-section-title">历史属性与资源</h2>
             </div>
-            <span className="supply-section-note">{historicalDisplay ? `更新于 ${displayTime(historicalDisplay.sourceUpdatedAt) ?? "时间待核"}` : "历史记录"}</span>
-          </div>
-          {historicalDisplay ? <>
-            <div className="supply-quad-grid">
-              <div className="supply-quad-cell">
-                <h3 className="supply-quad-title"><Gem size={14} aria-hidden="true" />战力规格</h3>
-                <div className="supply-pill-grid">
-                  {historicalConditions.filter(c => ["safe_box_code", "grading_code", "character_level", "secret_kd"].includes(c.key)).map(item => (
-                    <div key={item.key} className="supply-spec-pill">
-                      <span className="supply-spec-pill-k">{item.label}</span>
-                      <strong className="supply-spec-pill-v">{item.value}</strong>
-                    </div>
-                  ))}
-                </div>
-              </div>
-              <div className="supply-quad-cell">
-                <h3 className="supply-quad-title"><Dumbbell size={14} aria-hidden="true" />体能三维</h3>
-                <div className="supply-pill-grid">
-                  {historicalConditions.filter(c => ["vit_level", "bear_level", "dive_level"].includes(c.key)).map(item => (
-                    <div key={item.key} className="supply-spec-pill">
-                      <span className="supply-spec-pill-k">{item.label}</span>
-                      <strong className="supply-spec-pill-v">{item.value}</strong>
-                    </div>
-                  ))}
-                </div>
-              </div>
-              <div className="supply-quad-cell">
-                <h3 className="supply-quad-title"><LogIn size={14} aria-hidden="true" />上号与履约</h3>
-                <div className="supply-pill-grid">
-                  {historicalConditions.filter(c => ["login_method_code", "region_province", "region_city", "service_window"].includes(c.key)).map(item => (
-                    <div key={item.key} className="supply-spec-pill">
-                      <span className="supply-spec-pill-k">{item.label}</span>
-                      <strong className="supply-spec-pill-v">{item.value}</strong>
-                    </div>
-                  ))}
-                </div>
-              </div>
-              <div className="supply-quad-cell">
-                <h3 className="supply-quad-title"><ShieldCheck size={14} aria-hidden="true" />安全与信用声明</h3>
-                <div className="supply-pill-grid">
-                  <div className="supply-spec-pill">
-                    <span className="supply-spec-pill-k">人脸声明</span>
-                    <strong className="supply-spec-pill-v">{historicalDisplay.attributes.face_is_self === true ? "号主声明本人脸" : historicalDisplay.attributes.face_is_self === false ? "号主声明非本人脸" : "未提供"}</strong>
-                  </div>
-                  <div className="supply-spec-pill">
-                    <span className="supply-spec-pill-k">封禁记录声明</span>
-                    <strong className="supply-spec-pill-v">{historicalDisplay.attributes.ban_record === true ? "号主声明有封禁记录" : historicalDisplay.attributes.ban_record === false ? "号主声明无封禁记录" : "未提供"}</strong>
-                  </div>
-                  {historicalConditions.filter(c => !["safe_box_code", "grading_code", "character_level", "secret_kd", "vit_level", "bear_level", "dive_level", "login_method_code", "region_province", "region_city", "service_window"].includes(c.key)).map(item => (
-                    <div key={item.key} className="supply-spec-pill">
-                      <span className="supply-spec-pill-k">{item.label}</span>
-                      <strong className="supply-spec-pill-v">{item.value}</strong>
-                    </div>
-                  ))}
-                </div>
-              </div>
+            <div className="supply-specs-header-meta">
+              <span className="supply-section-note">{historicalDisplay ? `更新于 ${displayTime(historicalDisplay.sourceUpdatedAt) ?? "时间待核"}` : "历史记录"}</span>
+              <span className="supply-hint-capsule" title="部分属性未提供或尚待核实。历史资料，请以当前上架信息和状态为准。">
+                <Info size={13} aria-hidden="true" />
+                <span>历史资料说明</span>
+                <span className="sr-only">
+                  {historicalDisplay && Object.values(historicalDisplay.attributes).some(value => value === null) ? "部分属性未提供或尚待核实。" : ""}
+                  历史资料，请以当前上架信息和状态为准。
+                </span>
+              </span>
             </div>
-            {Object.values(historicalDisplay.attributes).some(value => value === null) ? <p role="status">部分属性未提供或尚待核实。</p> : null}
-            <p>这些是历史资料，请以当前上架信息和状态为准。</p>
-          </> : <p role="status">部分账号资料暂未确认。</p>}
+          </div>
+          {historicalDisplay ? (() => {
+            const provinceCond = historicalConditions.find(c => c.key === "region_province");
+            const cityCond = historicalConditions.find(c => c.key === "region_city");
+            const regionVal = provinceCond && cityCond
+              ? (provinceCond.value === cityCond.value ? provinceCond.value : `${provinceCond.value} · ${cityCond.value}`)
+              : provinceCond?.value || cityCond?.value || null;
+
+            const nonRegionConditions = historicalConditions.filter(c => c.key !== "region_province" && c.key !== "region_city");
+
+            const orderedKeys = [
+              "safe_box_code", "grading_code", "character_level", "secret_kd",
+              "vit_level", "bear_level", "dive_level", "login_method_code"
+            ];
+            const primaryList = orderedKeys
+              .map(k => nonRegionConditions.find(c => c.key === k))
+              .filter((c): c is (typeof historicalConditions)[number] => Boolean(c));
+
+            const remainingList = nonRegionConditions.filter(c => !orderedKeys.includes(c.key) && c.key !== "service_window");
+            const serviceWindowCond = nonRegionConditions.find(c => c.key === "service_window");
+
+            return (
+              <div className="supply-unified-specs-grid">
+                {primaryList.map(item => (
+                  <div key={item.key} className={`supply-spec-pill${item.key === "safe_box_code" ? " highlight" : ""}`} data-key={item.key}>
+                    <span className="supply-spec-pill-k">{item.label}</span>
+                    <strong className="supply-spec-pill-v">{item.value}</strong>
+                  </div>
+                ))}
+                {regionVal ? (
+                  <div className="supply-spec-pill" data-key="region">
+                    <span className="supply-spec-pill-k">游戏地区</span>
+                    <strong className="supply-spec-pill-v">{regionVal}</strong>
+                  </div>
+                ) : null}
+                {serviceWindowCond ? (
+                  <div className="supply-spec-pill" data-key="service_window">
+                    <span className="supply-spec-pill-k">{serviceWindowCond.label}</span>
+                    <strong className="supply-spec-pill-v">{serviceWindowCond.value}</strong>
+                  </div>
+                ) : null}
+                <div className="supply-spec-pill" data-key="face_declaration">
+                  <span className="supply-spec-pill-k">人脸声明</span>
+                  <strong className="supply-spec-pill-v">{historicalDisplay.attributes.face_is_self === true ? "号主声明本人脸" : historicalDisplay.attributes.face_is_self === false ? "号主声明非本人脸" : "未提供"}</strong>
+                </div>
+                <div className="supply-spec-pill" data-key="ban_declaration">
+                  <span className="supply-spec-pill-k">封禁记录声明</span>
+                  <strong className="supply-spec-pill-v">{historicalDisplay.attributes.ban_record === true ? "号主声明有封禁记录" : historicalDisplay.attributes.ban_record === false ? "号主声明无封禁记录" : "未提供"}</strong>
+                </div>
+                {remainingList.map(item => (
+                  <div key={item.key} className="supply-spec-pill" data-key={item.key}>
+                    <span className="supply-spec-pill-k">{item.label}</span>
+                    <strong className="supply-spec-pill-v">{item.value}</strong>
+                  </div>
+                ))}
+              </div>
+            );
+          })() : <p role="status">部分账号资料暂未确认。</p>}
         </section> : (!historical && conditions.length ? <section className="supply-block account-module-card supply-specs-card">
           <div className="account-module-card-header">
             <div className="supply-section-title-wrap">
@@ -1481,12 +1511,18 @@ function AccountDetail({ detail, gameName, latest, busy, identityReady, onAction
             </div>
             {historicalDisplay.resources.length ? (
               <div className="supply-resources-chips">
-                {historicalDisplay.resources.map(item => (
-                  <div key={item.code} className="supply-resource-chip">
-                    <span className="supply-resource-name">{item.name}：</span>
-                    <strong className="supply-resource-qty">{historicalQuantityText(item.quantity, item.unit)}</strong>
-                  </div>
-                ))}
+                {historicalDisplay.resources.map(item => {
+                  const isHaff = item.code === "haff_base" || item.name?.includes("哈夫币");
+                  return (
+                    <div key={item.code} className={`supply-resource-chip${isHaff ? " is-haff" : ""}`}>
+                      <span className="supply-resource-name">{item.name}：</span>
+                      <strong className="supply-resource-qty">{historicalQuantityText(item.quantity, item.unit)}</strong>
+                      {isHaff && historical.historicalQuote?.haffRentYuan ? (
+                        <span className="supply-resource-chip-price">租金 ¥{historical.historicalQuote.haffRentYuan}</span>
+                      ) : null}
+                    </div>
+                  );
+                })}
               </div>
             ) : (
               <p className="supply-block-empty">本账号暂无在架物资申报。</p>
@@ -1508,7 +1544,7 @@ function AccountDetail({ detail, gameName, latest, busy, identityReady, onAction
           <details className="supply-block supply-block--fold" data-skin-summary-source={legacySkinVersion ? legacySkinAdmitted ? "LEGACY_ADMITTED" : "LEGACY_UNKNOWN" : draftSkinSummary?.source}>
             <summary><strong>{draftSkinSummary ? "草稿已选皮肤" : "皮肤与权益"}</strong><span>{!skinCountKnown ? "皮肤数量待确认" : legacySkinVersion ? `${legacyHolding!.admittedCount} 项皮肤` : draftSkinSummary ? `${skins.length + withheldSkins} 项已选皮肤` : `${skins.length} 项皮肤`}{entitlementCountKnown ? ` · ${entitlements.length} 项权益` : ""}</span><ChevronDown size={16} aria-hidden="true" /></summary>
             <div className="supply-fold-body">
-              {legacySkinVersion ? <p className="supply-block-empty">{legacySkinAdmitted ? "这里显示账号记录，游戏内的皮肤可能有变化。" : "皮肤资料暂未确认。"}</p> : null}
+              {legacySkinVersion ? (legacySkinAdmitted ? null : <p className="supply-block-empty">皮肤资料暂未确认。</p>) : null}
               {draftSkinSummary ? <p className="supply-block-empty">这是草稿中选择的皮肤，尚未公开上架。</p> : unconfirmedNativeDraft ? <p className="supply-block-empty">草稿的皮肤资料暂不可用，请进入编辑查看。</p> : null}
               {withheldSkins > 0 ? <p className="supply-block-empty">{legacySkinVersion ? `另有 ${withheldSkins} 项皮肤暂时无法显示。` : `另有 ${withheldSkins} 项已选皮肤暂时无法显示，请进入编辑查看。`}</p> : null}
               {skins.length ? <ul className="supply-skin-list">{skins.map((skin, index) => <li key={`${skin.id}-${index}`} data-skin-id={skin.id}>
@@ -1594,11 +1630,11 @@ function AccountDetail({ detail, gameName, latest, busy, identityReady, onAction
 
           <div className="supply-revenue-sub-grid">
             <div className="supply-revenue-sub-cell">
-              <span className="supply-rev-sub-k">租期记录</span>
+              <span className="supply-rev-sub-k">约定租期</span>
               <strong className="supply-rev-sub-v">{historical.historicalQuote.termDays} 天</strong>
             </div>
             <div className="supply-revenue-sub-cell">
-              <span className="supply-rev-sub-k">物资金额记录</span>
+              <span className="supply-rev-sub-k">物资金额</span>
               <strong className="supply-rev-sub-v">{historical.historicalQuote.goodsYuan} 元</strong>
             </div>
           </div></> : null}

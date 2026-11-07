@@ -1,0 +1,562 @@
+/* ==========================================================================
+   Financial Primitives CSS - Unified Design System for Account Finance
+   ========================================================================== */
+
+/* 1. Page Header */
+.fin-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 16px;
+  margin-bottom: 20px;
+}
+
+.fin-header-copy {
+  min-width: 0;
+  flex: 1;
+}
+
+.fin-header-title {
+  margin: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: var(--type-section-title-size, 20px);
+  font-weight: var(--type-section-title-weight, 700);
+  line-height: var(--type-section-title-leading, 1.4);
+  color: var(--color-text-primary);
+}
+
+.fin-header-desc {
+  margin: 6px 0 0;
+  font-size: var(--type-helper-size, 13px);
+  line-height: var(--type-helper-leading, 1.6);
+  color: var(--color-text-secondary);
+  max-width: 72ch;
+}
+
+.fin-refresh-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 32px;
+  height: 32px;
+  padding: 0 12px;
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--color-text-secondary);
+  background: var(--color-bg-surface);
+  border: 1px solid var(--color-border-default);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: all 0.15s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.fin-refresh-btn:hover:not(:disabled) {
+  color: var(--color-text-primary);
+  background: var(--color-bg-elevated);
+  border-color: var(--color-border-hover);
+}
+
+.fin-refresh-btn svg.is-spinning {
+  animation: fin-spin 0.8s linear infinite;
+}
+
+@keyframes fin-spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+/* 2. SubTabs Navigation */
+.fin-subtabs {
+  display: flex;
+  align-items: center;
+  gap: 28px;
+  margin: 0 0 24px;
+  padding: 0;
+  border-bottom: 1px solid var(--color-border-subtle);
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.fin-subtabs::-webkit-scrollbar {
+  display: none;
+}
+
+.fin-tab-item {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 44px;
+  padding: 10px 0;
+  border: 0;
+  background: none;
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--color-text-secondary);
+  text-decoration: none;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: color 0.15s ease;
+}
+
+.fin-tab-item:hover {
+  color: var(--color-text-primary);
+}
+
+.fin-tab-item[aria-current="page"],
+.fin-tab-item[aria-pressed="true"],
+.fin-tab-item.is-active {
+  color: var(--account-accent, #ca8a04);
+  font-weight: 650;
+}
+
+.fin-tab-indicator {
+  position: absolute;
+  bottom: -1px;
+  left: 0;
+  right: 0;
+  height: 2px;
+  border-radius: 999px;
+  background: var(--account-accent, #ca8a04);
+}
+
+.fin-tab-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  background: var(--color-bg-elevated);
+  color: var(--color-text-secondary);
+}
+
+/* 3. Filter Pills */
+.fin-filter-pills {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 16px 0 20px;
+}
+
+.fin-filter-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 34px;
+  padding: 6px 14px;
+  border-radius: 999px;
+  border: 1px solid var(--color-border-subtle);
+  background: var(--color-bg-surface, var(--color-bg-card));
+  color: var(--color-text-secondary);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.fin-filter-pill:hover {
+  border-color: var(--color-border-default);
+  color: var(--color-text-primary);
+}
+
+.fin-filter-pill[aria-pressed="true"],
+.fin-filter-pill.is-active {
+  background: color-mix(in srgb, var(--account-accent, #ca8a04) 14%, transparent);
+  border-color: color-mix(in srgb, var(--account-accent, #ca8a04) 40%, transparent);
+  color: var(--account-accent, #ca8a04);
+  font-weight: 650;
+}
+
+/* 4. Balance Hero Card */
+.fin-balance-hero {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  padding: 24px;
+  border-radius: 16px;
+  border: 1px solid var(--color-border-subtle);
+  background: var(--color-bg-card);
+  box-shadow: var(--account-card-shadow, 0 1px 3px rgba(0, 0, 0, 0.05));
+  overflow: hidden;
+}
+
+.fin-balance-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.fin-balance-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--color-text-secondary);
+}
+
+.fin-privacy-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--color-text-muted, #94a3b8);
+  border-radius: 6px;
+  cursor: pointer;
+  transition: color 0.15s ease;
+}
+
+.fin-privacy-btn:hover {
+  color: var(--color-text-primary);
+}
+
+.fin-balance-value-row {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin: 4px 0 14px;
+}
+
+.fin-balance-amount {
+  font-size: 34px;
+  font-weight: 750;
+  letter-spacing: -0.02em;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.2;
+  color: var(--color-text-primary);
+}
+
+.fin-balance-subhint {
+  font-size: 13px;
+  color: var(--color-text-secondary);
+  line-height: 1.6;
+  margin: 0 0 18px;
+  max-width: 60ch;
+}
+
+.fin-balance-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.fin-balance-actions .button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 34px;
+  min-height: 34px;
+  padding: 0 18px;
+  border-radius: 8px;
+  font-size: 13.5px;
+  font-weight: 500;
+  text-decoration: none;
+  box-sizing: border-box;
+  transition: all 0.15s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.fin-balance-actions .button.primary {
+  background: #f59e0b;
+  color: #111827;
+  font-weight: 600;
+  border: 1px solid rgba(217, 119, 6, 0.2);
+  box-shadow: 0 1px 2px rgba(217, 119, 6, 0.12);
+}
+
+.fin-balance-actions .button.primary:hover {
+  background: #d97706;
+  color: #ffffff;
+}
+
+.fin-balance-actions .button.secondary {
+  background: var(--color-bg-surface);
+  color: var(--color-text-primary);
+  border: 1px solid var(--color-border-default);
+}
+
+.fin-balance-actions .button.secondary:hover {
+  background: var(--color-bg-elevated);
+  border-color: var(--color-border-hover);
+}
+
+/* 5. Modern Virtual Bank Card */
+.fin-bank-card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  padding: 22px 24px;
+  border-radius: 16px;
+  border: 1px solid var(--color-border-subtle);
+  background: linear-gradient(135deg, color-mix(in srgb, var(--color-bg-card) 92%, var(--account-accent, #ca8a04)) 0%, var(--color-bg-card) 100%);
+  box-shadow: var(--account-card-shadow, 0 1px 3px rgba(0, 0, 0, 0.05));
+  overflow: hidden;
+}
+
+.fin-bank-card::before {
+  content: "";
+  position: absolute;
+  top: -40px;
+  right: -40px;
+  width: 140px;
+  height: 140px;
+  border-radius: 50%;
+  background: radial-gradient(circle, color-mix(in srgb, var(--account-accent, #ca8a04) 18%, transparent) 0%, transparent 70%);
+  pointer-events: none;
+}
+
+.fin-bank-card-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 20px;
+}
+
+.fin-chip-emblem {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 38px;
+  height: 28px;
+  border-radius: 6px;
+  background: linear-gradient(135deg, #eab308 0%, #ca8a04 100%);
+  box-shadow: inset 0 1px 2px rgba(255, 255, 255, 0.4), 0 1px 3px rgba(0, 0, 0, 0.2);
+  position: relative;
+}
+
+.fin-chip-emblem::after {
+  content: "";
+  position: absolute;
+  inset: 4px 6px;
+  border: 1px solid rgba(0, 0, 0, 0.2);
+  border-radius: 3px;
+}
+
+.fin-card-number {
+  font-family: var(--font-mono, monospace);
+  font-size: 20px;
+  font-weight: 650;
+  letter-spacing: 0.12em;
+  font-variant-numeric: tabular-nums;
+  color: var(--color-text-primary);
+  margin: 12px 0 18px;
+}
+
+.fin-bank-card-bottom {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.fin-cardholder-info {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.fin-cardholder-label {
+  font-size: 11px;
+  font-weight: 500;
+  text-transform: uppercase;
+  color: var(--color-text-muted, #94a3b8);
+  letter-spacing: 0.05em;
+}
+
+.fin-cardholder-name {
+  font-size: 14px;
+  font-weight: 650;
+  color: var(--color-text-primary);
+}
+
+.fin-bank-card-bottom .button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 28px;
+  min-height: 28px;
+  padding: 0 12px;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--color-text-secondary);
+  background: var(--color-bg-surface);
+  border: 1px solid var(--color-border-default);
+  text-decoration: none;
+  transition: all 0.15s ease;
+}
+
+.fin-bank-card-bottom .button:hover {
+  color: var(--color-text-primary);
+  background: var(--color-bg-elevated);
+  border-color: var(--color-border-hover);
+}
+
+/* 6. Transaction / Ledger Record Row */
+.fin-record-list {
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  border-top: 1px solid var(--color-border-subtle);
+}
+
+.fin-record-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1.4fr) minmax(110px, 0.9fr) auto;
+  align-items: center;
+  gap: 16px;
+  padding: 16px 4px;
+  border-bottom: 1px solid var(--color-border-subtle);
+  text-decoration: none;
+  color: var(--color-text-primary);
+  transition: background-color 0.15s ease;
+}
+
+.fin-record-row:hover {
+  background-color: var(--color-bg-elevated);
+}
+
+.fin-record-leading {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+
+.fin-record-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  border-radius: 10px;
+  background: var(--color-bg-elevated);
+  color: var(--account-accent, #ca8a04);
+  flex-shrink: 0;
+}
+
+.fin-record-texts {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.fin-record-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  font-weight: 650;
+  color: var(--color-text-primary);
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.fin-record-sub {
+  font-size: 12px;
+  color: var(--color-text-secondary);
+  font-variant-numeric: tabular-nums;
+  line-height: 1.4;
+}
+
+.fin-record-money-col {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 3px;
+}
+
+.fin-record-amount {
+  font-size: 16px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.35;
+  text-align: right;
+}
+
+.fin-record-amount[data-direction="in"] {
+  color: #16a34a;
+}
+
+.fin-record-amount[data-direction="out"] {
+  color: #dc2626;
+}
+
+.fin-record-status-col {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+/* 7. Empty State */
+.fin-empty-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  padding: 44px 20px;
+  border-radius: 14px;
+  border: 1px dashed var(--color-border-default);
+  background: var(--color-bg-surface, var(--color-bg-card));
+  margin: 12px 0;
+}
+
+.fin-empty-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 52px;
+  height: 52px;
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--account-accent, #ca8a04) 12%, transparent);
+  color: var(--account-accent, #ca8a04);
+  margin-bottom: 14px;
+}
+
+.fin-empty-title {
+  margin: 0 0 6px;
+  font-size: 15px;
+  font-weight: 650;
+  color: var(--color-text-primary);
+}
+
+.fin-empty-desc {
+  margin: 0;
+  font-size: 13px;
+  color: var(--color-text-secondary);
+  line-height: 1.6;
+  max-width: 48ch;
+}
+
+/* Responsive */
+@media (max-width: 768px) {
+  .fin-record-row {
+    grid-template-columns: minmax(0, 1fr) auto auto;
+    gap: 10px;
+    padding: 14px 2px;
+  }
+  .fin-balance-amount {
+    font-size: 28px;
+  }
+}

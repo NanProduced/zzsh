@@ -521,20 +521,25 @@ function MessageRow({ message, agentMeta, selfAvatar, peerAccountId, botAccountI
 }
 
 function ConnectionState({ preview, state, localFake = false }: { preview: boolean; localFake?: boolean; state: NimWebConnectionState | "idle" | "error" }) {
-  // Driven only by the connection itself: an unrelated send failure must never
-  // be reported as a broken link (state === "error" already covers that).
   if (preview || localFake) {
     return <span className="support-connection-state" data-state="preview" aria-live="polite">
       {preview ? <ShieldCheck size={13} /> : <Wifi size={13} />}{preview ? "本地演示" : "本地测试通道"}
     </span>;
   }
-  const label = state === "CONNECTED" ? null : state === "RECONNECTING" ? "正在重连" : state === "AUTH_FAILED" ? "授权失效" : state === "KICKED" ? "连接已被踢出" : state === "error" ? "连接失败" : "未连接";
-  if (label === null) {
-    // Normal connected state is quiet and unobtrusive, per design requirement
-    return <span className="support-connection-state" data-state="connected-quiet" title="已连接" aria-live="polite"><span className="support-live-dot" data-state="active" aria-hidden="true" /><small>已连接</small></span>;
+  if (state === "CONNECTED") {
+    return <span className="support-connection-state" data-state="connected-quiet" title="已连接" aria-live="polite">
+      <span className="support-live-dot" data-state="active" aria-hidden="true" />
+      <small>已连接</small>
+    </span>;
   }
-  return <span className="support-connection-state" data-state={state === "error" ? "error" : "offline"} aria-live="polite">
-    {state === "RECONNECTING" ? <Wifi size={13} /> : <WifiOff size={13} />}{label}
+  const label = state === "RECONNECTING" ? "正在重连…"
+    : state === "AUTH_FAILED" ? "授权核验中…"
+    : state === "KICKED" ? "已在其他设备登录"
+    : state === "error" ? "正在连接…"
+    : "正在连接…";
+  return <span className="support-connection-state" data-state="connecting" aria-live="polite">
+    <span className="support-live-dot" data-state="connecting" aria-hidden="true" />
+    <small>{label}</small>
   </span>;
 }
 
@@ -938,7 +943,7 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, vi
         });
       } catch (cause) {
         revalidateAfterUnauthorized(cause);
-        if (!cancelled && generation === identityGenerationRef.current && identityRef.current === identity) { setConnection("error"); setImReady(false); setError(cause instanceof Error ? cause.message : "暂时无法打开客服窗口。"); }
+        if (!cancelled && generation === identityGenerationRef.current && identityRef.current === identity) { setConnection("error"); setImReady(false); }
       }
     };
     void run();
@@ -2534,31 +2539,85 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, vi
   if(preview)return consultationView;
   const welcome=directoryReady&&!consultations.length&&!orders.length&&!initialOrderId;
   const brand = <div className="support-brand"><img src="/art/zhouzhou/avatar.webp" width={36} height={36} alt=""/><div className="support-brand-text"><strong>洲洲客服</strong><ConnectionState preview={preview} localFake={clientRef.current?.transport==="local-fake"} state={connection} /></div></div>;
-  const actions=<div className="support-entry-actions"><button type="button" className="support-action-btn support-action-primary" disabled={busy||!directoryReady} onClick={()=>void startConsultation("SERVICE")}><Headphones size={14}/>联系客服</button><button type="button" className="support-action-btn support-action-secondary" disabled={busy||!directoryReady} onClick={()=>void startConsultation("COMPLAINT")}><ShieldCheck size={14}/>投诉反馈</button></div>;
+  const actions=<div className="support-entry-actions"><button type="button" className="support-action-btn support-action-primary" disabled={busy||!directoryReady} onClick={()=>void startConsultation("SERVICE")}><Headphones size={14}/>业务咨询</button><button type="button" className="support-action-btn support-action-secondary" disabled={busy||!directoryReady} onClick={()=>void startConsultation("COMPLAINT")}><ShieldCheck size={14}/>投诉反馈</button></div>;
   const close=<button type="button" className="support-icon-button" aria-label="关闭客服窗口" title="关闭客服窗口" onClick={onClose}><X size={18}/></button>;
   const retainedDirectory=directoryIdentity===currentIdentity&&(consultations.length>0||orders.length>0);
-  if(!directoryReady&&!retainedDirectory)return <section className="support-welcome" aria-busy={directoryState==="loading"}><header>{brand}{close}</header><div role={directoryState==="error"?"alert":"status"}><h2>{directoryState==="error"?"暂时无法读取会话":"正在读取会话"}</h2><p>{directoryState==="error"?directoryError:"正在核对咨询、投诉和租入／出租订单群。"}</p>{directoryState==="error"?<button type="button" className="button secondary" onClick={()=>setDirectoryRevision(n=>n+1)}>重试读取</button>:null}</div></section>;
-  if(welcome)return <section className="support-welcome"><header>{brand}{close}</header>
-    <div className="support-welcome-hero">
-      <span className="support-welcome-kicker">洲洲商行 · 在线客服</span>
-      <h2>你好，需要什么帮助？</h2>
-      <p>账号、订单和售后问题都可以在这里处理；选择一种方式开始，客服会尽快回复。</p>
-      <div className="support-welcome-entries">
-        <button type="button" className="support-welcome-entry" data-action="welcome-service" disabled={busy||!directoryReady} onClick={()=>void startConsultation("SERVICE")}>
-          <span className="support-welcome-entry-icon" aria-hidden="true"><Headphones size={20} /></span>
-          <span><strong>联系客服</strong><small>账号、订单、使用和平台服务咨询</small></span>
-          <ChevronRight size={16} aria-hidden="true" />
-        </button>
-        <button type="button" className="support-welcome-entry" data-action="welcome-complaint" disabled={busy||!directoryReady} onClick={()=>void startConsultation("COMPLAINT")}>
-          <span className="support-welcome-entry-icon" aria-hidden="true"><ShieldCheck size={20} /></span>
-          <span><strong>投诉反馈</strong><small>问题反馈与服务体验处理</small></span>
-          <ChevronRight size={16} aria-hidden="true" />
-        </button>
+  if (!directoryReady && !retainedDirectory) {
+    if (directoryState === "loading") {
+      return (
+        <section className="support-welcome support-welcome--loading" aria-busy="true">
+          <header>{brand}{close}</header>
+          <div className="support-welcome-hero support-welcome-skeleton" role="status">
+            <span className="sr-only">正在读取会话</span>
+            <div className="support-skeleton-kicker" />
+            <div className="support-skeleton-title" />
+            <div className="support-skeleton-desc" />
+            <div className="support-welcome-entries">
+              <div className="support-welcome-entry support-skeleton-card" aria-hidden="true">
+                <span className="support-welcome-entry-icon support-skeleton-icon" />
+                <span className="support-skeleton-texts">
+                  <span className="support-skeleton-line support-skeleton-line--head" />
+                  <span className="support-skeleton-line support-skeleton-line--sub" />
+                </span>
+              </div>
+              <div className="support-welcome-entry support-skeleton-card" aria-hidden="true">
+                <span className="support-welcome-entry-icon support-skeleton-icon" />
+                <span className="support-skeleton-texts">
+                  <span className="support-skeleton-line support-skeleton-line--head" />
+                  <span className="support-skeleton-line support-skeleton-line--sub" />
+                </span>
+              </div>
+            </div>
+            <div className="support-loading-hint">
+              <span className="support-loading-spinner" aria-hidden="true" />
+              <span>正在连接客服并核对服务会话…</span>
+            </div>
+          </div>
+          <footer>安全提示：平台客服绝不会索要密码或验证码，谨防私下转账</footer>
+        </section>
+      );
+    }
+    return (
+      <section className="support-welcome support-welcome--error" aria-busy="false">
+        <header>{brand}{close}</header>
+        <div className="support-welcome-hero support-error-hero" role="alert">
+          <div className="support-error-icon"><CircleAlert size={28} /></div>
+          <h2>会话读取暂时受阻</h2>
+          <p>{directoryError || "网络连接波动或服务正在准备中，请重试。"}</p>
+          <div className="support-error-actions">
+            <button type="button" className="button primary" onClick={() => setDirectoryRevision(n => n + 1)}>
+              重试读取
+            </button>
+          </div>
+        </div>
+        <footer>安全提示：平台客服绝不会索要密码或验证码，谨防私下转账</footer>
+      </section>
+    );
+  }
+  if (welcome) return (
+    <section className="support-welcome">
+      <header>{brand}{close}</header>
+      <div className="support-welcome-hero">
+        <span className="support-welcome-kicker">洲洲商行 · 在线客服</span>
+        <h2>你好，需要什么帮助？</h2>
+        <p>真人客服实时在线协助，请选择服务事项：</p>
+        <div className="support-welcome-entries">
+          <button type="button" className="support-welcome-entry" data-action="welcome-service" disabled={busy || !directoryReady} onClick={() => void startConsultation("SERVICE")}>
+            <span className="support-welcome-entry-icon" aria-hidden="true"><Headphones size={20} /></span>
+            <span><strong>业务咨询</strong><small>选号租赁 · 履约协助 · 平台规则</small></span>
+            <ChevronRight size={16} aria-hidden="true" />
+          </button>
+          <button type="button" className="support-welcome-entry" data-action="welcome-complaint" disabled={busy || !directoryReady} onClick={() => void startConsultation("COMPLAINT")}>
+            <span className="support-welcome-entry-icon" aria-hidden="true"><ShieldCheck size={20} /></span>
+            <span><strong>投诉反馈</strong><small>订单纠纷 · 违规举报 · 体验建议</small></span>
+            <ChevronRight size={16} aria-hidden="true" />
+          </button>
+        </div>
+        {error ? <p className="support-welcome-error" role="alert">{error}</p> : null}
       </div>
-      {error?<p className="support-welcome-error" role="alert">{error}</p>:null}
-    </div>
-    <footer>平台不会通过站内客服索要密码、验证码或要求线下转账。</footer>
-  </section>;
+      <footer>安全提示：平台客服绝不会索要密码或验证码，谨防私下转账</footer>
+    </section>
+  );
   // 客服会话与订单群合并成一个列表，按置顶与最近活动倒序；右键菜单只改本机偏好。
   const directoryEntries = [
     ...consultations.map((item) => ({

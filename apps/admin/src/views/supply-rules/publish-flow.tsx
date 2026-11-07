@@ -122,7 +122,7 @@ export function priceDiff(rules: RulesResponse, target: PriceVersionRecord | und
   for (const r of rows) {
     const same = rows.filter(x => x.label === r.label);
     if (out.some(x => x.label === r.label)) continue;
-    const plain = /^(?:约)?-?[\d.,¥]+(?:（不足1分）)?$|^未填$|^\d+ 行$|^将移除$/;
+    const plain = /^(?:(?:约|<)\s*)?-?[\d.,¥]+$|^未填$|^\d+ 行$|^将移除$/;
     if (r.label === "皮肤推荐押金") { out.push({ ...r, before: skinSummary(live?.fundingPolicy?.recommendation), after: skinSummary(target.fundingPolicy?.recommendation) }); continue; }
     if (r.label === "押金政策") { out.push({ ...r, before: "", after: "更新为新版", detail: `版本 ${r.before || "无"} → ${r.after}` }); continue; }
     if (r.after === "将移除") { out.push(r); continue; }

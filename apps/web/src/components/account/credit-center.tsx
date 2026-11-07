@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { RefreshCw } from "lucide-react";
+import { CreditCard, RefreshCw } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { useUserSession, useUserSessionStore } from "../session/user-session-provider";
 import { RecoveryAlert, RecordStatus, SkeletonBlock } from "@/components/ui/information";
@@ -158,7 +158,18 @@ export function CreditCenter({ scope }: { scope: string }) {
   const reloadData = () => setReload((value) => value + 1);
 
   return <section className="account-module credit-center" aria-labelledby="credit-center-heading">
-    <header className="account-module-heading"><div><h2 id="credit-center-heading">信用与保证金</h2><p>查看信用变化和账号保证金。</p></div><button type="button" className="button quiet" disabled={phase === "loading"} onClick={reloadData}><RefreshCw size={15} aria-hidden="true" />刷新</button></header>
+    <header className="account-module-heading fin-header">
+      <div className="fin-header-copy">
+        <h2 id="credit-center-heading" className="fin-header-title">信用与保证金</h2>
+        <p className="fin-header-desc">查看信用变化和出租账号保证金。</p>
+      </div>
+      <div className="fin-header-actions">
+        <button type="button" className="button secondary fin-refresh-btn" disabled={phase === "loading"} onClick={reloadData}>
+          <RefreshCw size={15} className={phase === "loading" ? "is-spinning" : ""} aria-hidden="true" />
+          <span>{phase === "loading" ? "正在刷新…" : "刷新"}</span>
+        </button>
+      </div>
+    </header>
     {identityCurrent && pending?.subject === scope ? <div className="credit-pending" role="status"><strong>{pending.phase === "readback" ? "上次操作已受理，状态待确认" : "上次操作结果待确认"}</strong><span>请先查看处理结果。</span></div> : null}
     {phase === "loading" ? <div className="account-module-card credit-loading"><SkeletonBlock label="正在读取信用状态" lines={4} /></div> : phase === "error" ? <RecoveryAlert tone="error" live title="信用信息暂时无法读取" problem={state.error}
       impact="请稍后重试。"
@@ -171,7 +182,7 @@ export function CreditCenter({ scope }: { scope: string }) {
             <strong className="strip-credit-number">{score}<small>分</small></strong>
           </div> : <p className="credit-score-unknown" role="status">{data.creditState === "NOT_INITIALIZED" ? "信用档案尚未初始化" : "信用分待确认"}</p>}
         </div>
-        <div className="credit-summary-copy"><p>查看信用变化和账号保证金。</p><nav aria-label="信用与保证金快捷入口"><a href="#credit-events-heading">信用记录</a><a href="#credit-guarantees-heading">账号保证金</a></nav></div>
+        <div className="credit-summary-copy"><p>查看信用履约记录和出租账号保证金要求。</p><nav aria-label="信用与保证金快捷入口"><a href="#credit-events-heading">信用记录</a><a href="#credit-guarantees-heading">账号保证金</a></nav></div>
       </section>
       <section className="account-module-card credit-events"><div className="credit-card-heading"><div><h3 id="credit-events-heading">信用变动明细</h3><p>查看信用分的变化。</p></div></div>{data.credit?.events.length ? <ul>{data.credit.events.map((item) => <li key={item.id}><div><strong>{creditEventLabel(item.eventType, "信用事件")}</strong><span>{item.visibleReason}</span><small>{recordTime(item.createdAt)}</small></div><b>{item.scoreBefore} → {item.scoreAfter}</b><em data-state={item.reversed ? "reversed" : "active"}><RecordStatus tone={item.reversed ? "neutral" : "info"}>{item.reversed ? "已撤销" : "已记录"}</RecordStatus></em></li>)}</ul> : <p className="credit-muted">{data.credit ? "暂无信用变动记录。" : data.creditState === "NOT_INITIALIZED" ? "还没有建立你的信用档案，暂时看不到变动记录。" : "信用变动记录暂未确认。"}</p>}</section>
       <section className="account-module-card credit-guarantees"><div className="credit-card-heading"><div><h3 id="credit-guarantees-heading">出租账号保证金</h3><p>按账号查看保证金要求与缴纳状态。</p></div></div>
@@ -213,10 +224,14 @@ export function CreditCenter({ scope }: { scope: string }) {
         </li>)}</ul> : <p className="credit-muted">暂无恢复申请记录。</p>}
       </section>
     </> : null}
-    <section className="credit-history-link" aria-label="保证金记录">
-      <h3>保证金记录</h3>
-      <p className="credit-muted">在钱包中查看保证金记录。</p>
-      <Link href="/account?view=wallet&wallet=guarantees" scroll={false}>查看保证金记录</Link>
+    <section className="credit-history-link account-module-card" aria-label="保证金记录">
+      <div className="credit-card-heading">
+        <div>
+          <h3>保证金记录</h3>
+          <p className="credit-muted">在资金台账中独立查看每笔保证金的缴纳、扣减与原路退还记录。</p>
+        </div>
+        <Link href="/account?view=wallet&wallet=guarantees" scroll={false} className="button secondary">查看保证金记录</Link>
+      </div>
     </section>
   </section>;
 }

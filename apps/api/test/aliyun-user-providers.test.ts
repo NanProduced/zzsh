@@ -3,6 +3,9 @@ import test from "node:test";
 import { SendSmsResponse,SendSmsResponseBody } from "@alicloud/dysmsapi20170525";
 import { Id2MetaVerifyResponse,Id2MetaVerifyResponseBody,Id2MetaVerifyResponseBodyResultObject } from "@alicloud/cloudauth20190307";
 import { createAliyunRealNameProvider,createAliyunUserSmsSender,UserSmsDeliveryError,verifiedMainlandAgeStatus } from "../src/auth/aliyun-user-providers";
+import { isUserVerificationCode,makeUserVerificationCode,USER_SMS_CODE_LENGTH } from "../src/auth/user-verification-code";
+import { buildUserSecurityPlugin } from "../src/auth/user-security";
+import type { Pool } from "pg";
 
 const credentials={accessKeyId:"SYNTHETIC_KEY",accessKeySecret:"SYNTHETIC_SECRET_NOT_REAL_1234"};
 const input={userId:"synthetic-user",fullName:"合成用户",documentNumber:"110105199001011232"};
@@ -10,11 +13,11 @@ const input={userId:"synthetic-user",fullName:"合成用户",documentNumber:"110
 test("Aliyun SMS uses official SDK models, a single submission and no provider call at factory time",async()=>{
  let calls=0;
  const sender=createAliyunUserSmsSender({credentials,signName:"合成签名",templateCode:"SMS_123"},{sendSmsWithOptions:async(request,runtime)=>{
-  calls++;assert.equal(request.phoneNumbers,"+8613800138000");assert.equal(request.templateParam,JSON.stringify({code:"123456"}));
+  calls++;assert.equal(request.phoneNumbers,"+8613800138000");assert.equal(request.templateParam,JSON.stringify({code:"1234"}));
   assert.equal(runtime.autoretry,false);assert.equal(runtime.maxAttempts,1);assert.ok(runtime.readTimeout!>=1000);
   return new SendSmsResponse({body:new SendSmsResponseBody({code:"OK",requestId:"request-1"})});
  }});
- assert.equal(calls,0);await sender("13800138000","123456");assert.equal(calls,1);
+ assert.equal(calls,0);await sender("13800138000","1234");assert.equal(calls,1);
 });
 
 test("Aliyun SMS freezes validated trimmed configuration and rejects control characters",async()=>{
@@ -23,7 +26,7 @@ test("Aliyun SMS freezes validated trimmed configuration and rejects control cha
  const sender=createAliyunUserSmsSender(input,{sendSmsWithOptions:async request=>{
   sent.push({signName:request.signName,templateCode:request.templateCode});return new SendSmsResponse({body:new SendSmsResponseBody({code:"OK"})});
  }});
- input.signName="外部已修改";input.templateCode="SMS_456";await sender("13800138000","123456");
+ input.signName="外部已修改";input.templateCode="SMS_456";await sender("13800138000","1234");
  assert.deepEqual(sent,[{signName:"合成签名",templateCode:"SMS_123"}]);
  for(const signName of ["合成\n签名","合成\u0000签名","合成\r签名"]){
   assert.throws(()=>createAliyunUserSmsSender({credentials,signName,templateCode:"SMS_123"}));
@@ -35,13 +38,76 @@ test("Aliyun SMS distinguishes known rejection from unknown delivery without lea
  const rejected=createAliyunUserSmsSender({credentials,signName:"合成签名",templateCode:"SMS_123"},{sendSmsWithOptions:async()=>{
   calls++;return new SendSmsResponse({body:new SendSmsResponseBody({code:"isv.BUSINESS_LIMIT_CONTROL",message:"SYNTHETIC_PII_SHOULD_NOT_ESCAPE"})});
  }});
- await assert.rejects(rejected("13800138000","123456"),(error:unknown)=>error instanceof UserSmsDeliveryError&&error.outcome==="REJECTED"&&!JSON.stringify(error).includes("PII"));
+ await assert.rejects(rejected("13800138000","1234"),(error:unknown)=>error instanceof UserSmsDeliveryError&&error.outcome==="REJECTED"&&!JSON.stringify(error).includes("PII"));
  const lost=createAliyunUserSmsSender({credentials,signName:"合成签名",templateCode:"SMS_123"},{sendSmsWithOptions:async()=>{
   calls++;throw new Error("SIGNED_URL AK OTP NAME ID SYNTHETIC_PII_SHOULD_NOT_ESCAPE");
  }});
- await assert.rejects(lost("13800138000","123456"),(error:unknown)=>error instanceof UserSmsDeliveryError&&error.outcome==="UNKNOWN"&&!JSON.stringify(error).includes("PII")&&!error.message.includes("AK"));
+ await assert.rejects(lost("13800138000","1234"),(error:unknown)=>error instanceof UserSmsDeliveryError&&error.outcome==="UNKNOWN"&&!JSON.stringify(error).includes("PII")&&!error.message.includes("AK"));
  assert.equal(calls,2);
  await assert.rejects(lost("13800138000","bad"));assert.equal(calls,2);
+ await assert.rejects(lost("13800138000","123456"));assert.equal(calls,2);
+});
+
+test("contact verification keeps SMS four digits and email six digits",()=>{
+ assert.equal(USER_SMS_CODE_LENGTH,4);
+ for(const channel of ["phone","email"] as const){
+  for(let n=0;n<100;n++) assert.equal(isUserVerificationCode(channel,makeUserVerificationCode(channel)),true);
+  assert.equal(isUserVerificationCode(channel,makeUserVerificationCode(channel,true)),true);
+ }
+ assert.equal(isUserVerificationCode("phone","123456"),false);
+ assert.equal(isUserVerificationCode("email","1234"),false);
+ assert.equal(isUserVerificationCode("phone","12x4"),false);
+ assert.equal(isUserVerificationCode("phone","0001"),true);
+});
+
+test("offline security endpoints send and verify per channel, with cooldown and attempt limits",async()=>{
+ const user={id:"fixture",name:"fixture",phoneNumber:"+8613800138000",email:"fixture@example.invalid",emailVerified:true,suspended:false,accountStatus:"ACTIVE",securityVersion:1};
+ const records=new Map<string,{id:string;value:string;expiresAt:Date;createdAt:Date}>();
+ const client={
+  async query(sql:string,params:unknown[]=[]){
+   if(/^(BEGIN|COMMIT|ROLLBACK)$/.test(sql))return{rows:[]};
+   if(sql.includes("pg_advisory_xact_lock"))return{rows:[]};
+   if(sql.includes("SELECT u.id,u.name"))return{rows:[user]};
+   if(sql.includes("FROM zzsh_auth_user.account"))return{rows:[]};
+   if(sql.includes("FROM zzsh_auth_user.\"user\" WHERE"))return{rows:[{id:user.id}]};
+   if(sql.includes("legacy_phone"))return{rows:[{blocked:false}]};
+   if(sql.startsWith("SELECT \"createdAt\" FROM zzsh_auth_user.verification")){const row=records.get(String(params[0]));return{rows:row?[row]:[]};}
+   if(sql.startsWith("DELETE FROM zzsh_auth_user.verification")){records.delete(String(params[0]));return{rows:[]};}
+   if(sql.startsWith("INSERT INTO zzsh_auth_user.verification")){
+    const hasValue=sql.includes("$3,$4,$5,$5"),id=String(params[0]),identifier=String(params[1]);
+    records.set(identifier,{id,value:hasValue?String(params[2]):"{}",expiresAt:params[hasValue?3:2] as Date,createdAt:params[hasValue?4:3] as Date});return{rows:[]};
+   }
+   if(sql.startsWith("SELECT id,value,\"expiresAt\" FROM zzsh_auth_user.verification")){const row=records.get(String(params[0]));return{rows:row?[row]:[]};}
+   if(sql.startsWith("UPDATE zzsh_auth_user.verification SET value=")){const row=[...records.values()].find(item=>item.id===params[0]);assert.ok(row);row.value=String(params[1]);return{rows:[]};}
+   throw new Error("Unexpected fixture query");
+  },release(){}
+ };
+ const pool={connect:async()=>client} as unknown as Pool;
+ const outbox=new Map();let smsCode="";
+ const plugin=await buildUserSecurityPlugin({pool,outbox,localMock:false,smsSender:async(_phone,code)=>{smsCode=code;}});
+ const invoke=async(name:"userSecuritySend"|"userSecurityVerify",body:Record<string,unknown>)=>
+  (plugin.endpoints[name] as unknown as (input:unknown)=>Promise<any>)({method:"POST",body,headers:new Headers(),context:{}});
+ for(const channel of ["phone","email"] as const){
+  const sent=await invoke("userSecuritySend",{purpose:"recovery",channel,stage:"current",contact:channel==="phone"?user.phoneNumber:user.email});
+  const code=channel==="phone"?smsCode:outbox.get(sent.challengeId)?.code;
+  assert.equal(isUserVerificationCode(channel,code),true);
+  await assert.rejects(invoke("userSecuritySend",{purpose:"recovery",channel,stage:"current",contact:channel==="phone"?user.phoneNumber:user.email}));
+  await assert.rejects(invoke("userSecurityVerify",{challengeId:sent.challengeId,code:channel==="phone"?"123456":"1234"}));
+  const verified=await invoke("userSecurityVerify",{challengeId:sent.challengeId,code});
+  assert.equal(verified.status,true);
+  const saved=JSON.parse(records.get(`user-security:${sent.challengeId}`)!.value);
+  assert.equal(saved.verified,true);assert.equal(saved.attempts,1);
+ }
+ records.clear();
+ const locked=await invoke("userSecuritySend",{purpose:"recovery",channel:"phone",stage:"current",contact:user.phoneNumber});
+ const valid=smsCode,wrong=valid==="0000"?"0001":"0000";
+ for(let i=0;i<3;i++)await assert.rejects(invoke("userSecurityVerify",{challengeId:locked.challengeId,code:wrong}));
+ await assert.rejects(invoke("userSecurityVerify",{challengeId:locked.challengeId,code:valid}));
+ assert.equal(JSON.parse(records.get(`user-security:${locked.challengeId}`)!.value).attempts,3);
+ records.clear();
+ const expired=await invoke("userSecuritySend",{purpose:"recovery",channel:"phone",stage:"current",contact:user.phoneNumber});
+ records.get(`user-security:${expired.challengeId}`)!.expiresAt=new Date(0);
+ await assert.rejects(invoke("userSecurityVerify",{challengeId:expired.challengeId,code:smsCode}));
 });
 
 test("verified identity age is based on a valid birth calendar in China time, never assumed adult",()=>{

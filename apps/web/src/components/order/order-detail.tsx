@@ -7,7 +7,7 @@ import { ArrowLeft, Check, CheckCircle2, CircleSlash, Clock3, Copy, Gamepad2, Me
 import { formatOrderMoney, formatOrderTime as timeText, orderApi, OrderRequestError, type Order, type OrderImProjection, type OrderParty, type OrderStatusFilter, type OrderSearchFilters, type PersonalAbnormalResponsibility, type PersonalRefundIntent, type PersonalRefundRead } from "@/lib/order-client";
 import { useUserSession } from "@/components/session/user-session-provider";
 import { useIdentityReset } from "@/components/session/identity-reset";
-import { ORDER_FULFILLMENT_STEPS, orderFulfillmentStepStates, orderFulfillmentSummary, orderLineQuantityText, orderLinesTotalLabel, orderListingSourceLabel, orderRentalModeLabel, orderSettlementStageLabel, orderUnitPriceText, unitLabel, orderAccountTitle } from "@/lib/order-display";
+import { ORDER_FULFILLMENT_STEPS, orderFulfillmentStepStates, orderFulfillmentSummary, orderLineQuantityText, orderLinesTotalLabel, orderListingSourceLabel, orderRentalModeLabel, orderSettlementStageLabel, orderUnitPriceText, unitLabel, orderAccountTitle, orderResourceLines } from "@/lib/order-display";
 import { OrderTradeActions, type OrderStageFacts } from "@/components/order/order-trade-actions";
 import { OrderAftersale } from "./order-aftersale";
 import { PrestartTerminationPanel } from "@/components/order/prestart-termination-panel";
@@ -547,6 +547,7 @@ export function OrderDetail({ party, status, accountId, orderId, filters, state,
           accountDisplayNo={order.accountDisplayNo}
           party={party}
           listingFacts={order.listingFacts}
+          orderResources={orderResourceLines(order)}
         />
         <OrderEntitlements order={order} />
         <OrderTimeline order={order} facts={facts} party={party} />

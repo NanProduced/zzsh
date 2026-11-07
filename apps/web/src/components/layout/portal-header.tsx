@@ -110,9 +110,14 @@ export function PortalHeader({ query, onQueryChange, onSearch, home=true, search
           onBlur={() => { setSearchFocused(false); setSearchPinned(false); }}
         />
         {query && (
-          <button className="site-search-clear" type="button" aria-label="清空搜索" onClick={() => onQueryChange("")}>
-            <X size={14} />
-          </button>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <button className="site-search-clear" type="button" aria-label="清空搜索" onClick={() => onQueryChange("")}>
+                <X size={14} />
+              </button>
+            </TooltipTrigger>
+            <TooltipContent side="bottom">清空搜索</TooltipContent>
+          </Tooltip>
         )}
         <button className="site-search-submit" type="submit" onClick={() => setSearchPinned(false)}>
           <Search size={13} strokeWidth={2.5} />

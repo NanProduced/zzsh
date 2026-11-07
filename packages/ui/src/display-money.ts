@@ -26,15 +26,16 @@ export function formatExactYuan(value: unknown): string | null {
 /** 仅格式化参考单价，不用于重新计算应付或结算。 */
 export function formatReferenceYuan(value: unknown, options?: { grouped?: boolean }): string | null {
   if (typeof value !== "string") return null;
-  const match = /^(约?)¥?(\d+)(?:\.(\d{1,16}))?(（不足1分）)?$/.exec(value);
+  if (value === "< ¥0.01") return value;
+  const match = /^(约\s*)?¥?(\d{1,40})(?:\.(\d{1,16}))?(（不足1分）)?$/.exec(value);
   if (!match) return null;
   const fraction = match[3] ?? "", digits = fraction.padEnd(3, "0");
   const cents = BigInt(match[2]!) * 100n + BigInt(digits.slice(0, 2)) + (digits[2]! >= "5" ? 1n : 0n);
-  const rounded = match[1] === "约" || /[1-9]/.test(fraction.slice(2));
+  const rounded = Boolean(match[1]) || /[1-9]/.test(fraction.slice(2));
   const nonzero = BigInt(match[2]!) !== 0n || /[1-9]/.test(fraction) || Boolean(match[4]);
   const whole=(cents / 100n).toString(), display=options?.grouped?whole.replace(/\B(?=(\d{3})+(?!\d))/g,","):whole;
-  const label = `${rounded ? "约" : ""}¥${display}.${(cents % 100n).toString().padStart(2, "0")}`;
-  return nonzero && cents === 0n ? `${label}（不足1分）` : label;
+  const label = `${rounded ? "约 " : ""}¥${display}.${(cents % 100n).toString().padStart(2, "0")}`;
+  return nonzero && cents === 0n ? "< ¥0.01" : label;
 }
 
 /** 输入框说明：依据与输入必须同单位；`maxYuan` 由调用方用本端格式化器给出。 */

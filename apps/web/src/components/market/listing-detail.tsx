@@ -66,6 +66,7 @@ import {
 } from "@/lib/listing-view";
 import { supplyApi, SupplyRequestError } from "@/lib/supply-client";
 import { RentalConfirmPanel } from "@/components/order/rental-confirm-panel";
+import { RecommendedAccountsSection } from "./recommended-accounts";
 import { useUserSession } from "@/components/session/user-session-provider";
 import { SkinMediaPreview, SkinMetadata, skinCardTitle } from "@/components/supply/skin-media-thumb";
 import "./account-detail.css";
@@ -301,14 +302,13 @@ export function entitlementExpiryLabel(
 
 export function formatItemUnitPrice(line: ResourceLine): string {
   const full = unitPriceText(line);
-  const match = full.match(/^(约?¥\d+(?:\.\d+)?(?:（不足1分）)?)/);
-  return match ? match[1]! : full;
+  return full.split(" / ")[0] ?? full;
 }
 
 export function unitPriceText(line: ResourceLine): string {
   if (!line.unitPriceLabel) return "未确认";
-  const match = line.unitPriceLabel.match(/^(约?¥\d+(?:\.\d+)?(?:（不足1分）)?)\s*\/\s*(\d+)\s+(.+)$/);
-  if (!match) return line.unitPriceLabel;
+  const match = line.unitPriceLabel.match(/^(.+?)\s*\/\s*(\d+)\s+(.+)$/);
+  if (!match) return "未确认";
   const formatted = formatReferenceYuan(match[1]);
   if (!formatted) return "未确认";
   const amount = formatted.replace(/(\.\d*?[1-9])0+$|\.0+$/, "$1");
@@ -960,6 +960,7 @@ function ReadyDetail({ data }: { data: ListingDetailData }) {
                     total: moneyValue(data.resourceTotalLabel),
                     haff: moneyValue(data.haffRentLabel),
                     items: moneyValue(data.itemResourceTotalLabel),
+                    deposit: data.depositLabel ? moneyValue(data.depositLabel) : null,
                     lines: data.resourceLines,
                     unitAmountsInformational: data.unitAmountsInformational,
                     ...(data.baseRenterHaffRatioWanPerYuan ? { baseRenterHaffRatioWanPerYuan: data.baseRenterHaffRatioWanPerYuan } : {}),
@@ -972,6 +973,12 @@ function ReadyDetail({ data }: { data: ListingDetailData }) {
           <FavoriteNotice />
         </aside>
       </div>
+
+      <RecommendedAccountsSection
+        currentAccountId={data.id}
+        gameId={data.gameId}
+        gameName={data.gameName}
+      />
 
       {/* Penalty Modal Dialog */}
       <Dialog.Root open={penaltyModalOpen} onOpenChange={setPenaltyModalOpen}>

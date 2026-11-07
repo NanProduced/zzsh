@@ -3,7 +3,7 @@ import { useEffect, useId, useMemo, useRef, useState, type ReactNode } from "rea
 import * as Popover from "@radix-ui/react-popover";
 import { ListBox } from "@heroui/react/list-box";
 import { Select as UiSelect } from "@heroui/react/select";
-import { Check, ChevronDown, MapPin, Minus, Plus, Search, X, ZoomIn } from "lucide-react";
+import { Check, ChevronDown, MapPin, Minus, Plus, RotateCw, Search, X, ZoomIn } from "lucide-react";
 import { SkinMediaThumb, SkinMediaPreview, SkinMetadata } from "@/components/supply/skin-media-thumb";
 import {
   buildServiceWindow,
@@ -513,9 +513,23 @@ function HaffFilter({ item, bounds, current, rangeSupported, gameCode, onChange,
   const selected = current?.maxQuantity ? null : currentMin ?? "";
   return <FilterRow label={resourceItemDisplayName(item, { gameCode })} id={id}>
     <div className="market-haff-filter">
-      <span role="radiogroup" aria-labelledby={`${id}-label`} className="market-filter-row-radios">
-        {options.map(({ value, label }) => <MarketChoice key={value} type="radio" className={`market-filter-choice ${value === "" ? "market-choice--default" : ""}`} name={`${id}-haff`} value={value} checked={selected === value} onChange={() => onChange(value ? { minQuantity: value } : null)}>{label}</MarketChoice>)}
-      </span>
+      <div role="radiogroup" aria-labelledby={`${id}-label`} className="market-haff-presets-row">
+        {options.map(({ value, label }) => {
+          const isSelected = selected === value;
+          return (
+            <button
+              key={value}
+              type="button"
+              className="market-haff-preset-pill"
+              data-selected={isSelected}
+              aria-pressed={isSelected}
+              onClick={() => onChange(value ? { minQuantity: value } : null)}
+            >
+              {label}
+            </button>
+          );
+        })}
+      </div>
       <ResourceQuantityInput item={item} bounds={bounds} committed={current ?? null} rangeSupported={rangeSupported} onCommit={onChange} gameCode={gameCode} showLabel={false} resetToken={resetToken} flushDrafts={flushDrafts} />
     </div>
   </FilterRow>;
@@ -715,7 +729,28 @@ function SkinFilters({
             {skins.length === 0 && <p className="market-filter-hint">没有匹配的皮肤；已选条件仍保留。</p>}
           </> : null}
         </>}
-        {nextCursor && skinResultsStatus === "ready" && <button type="button" className="market-load-catalog" onClick={onLoadMoreSkins} disabled={loadingMoreSkins}>{loadingMoreSkins ? "正在加载…" : "加载更多皮肤"}<Plus size={14} /></button>}
+        {nextCursor && skinResultsStatus === "ready" ? (
+          <div className="market-skin-load-more-wrap">
+            <button
+              type="button"
+              className="market-load-catalog-btn"
+              onClick={onLoadMoreSkins}
+              disabled={loadingMoreSkins}
+            >
+              {loadingMoreSkins ? (
+                <>
+                  <RotateCw size={14} className="market-load-spin" aria-hidden="true" />
+                  <span>正在加载更多皮肤…</span>
+                </>
+              ) : (
+                <>
+                  <span>加载更多皮肤</span>
+                  <ChevronDown size={14} aria-hidden="true" />
+                </>
+              )}
+            </button>
+          </div>
+        ) : null}
         </div>
         <aside className="market-skin-selected" aria-label="已选皮肤">
           <strong>已选 {totalSelected} 款</strong>
@@ -784,6 +819,26 @@ function SkinFilters({
         </Popover.Content>
       </Popover.Portal>
     </Popover.Root>}
+    {committedCount > 0 ? (
+      <div className="market-skin-selected-inline" aria-label="已选皮肤">
+        {(committedFilters.filters.skinGroups ?? []).flatMap((g) => g.ids.map((skinId) => {
+          const skinName = knownSkins[skinId]?.name ?? "已选皮肤";
+          return (
+            <span key={skinId} className="market-filter-chip market-skin-chip-selected">
+              <span>{skinName}</span>
+              <button
+                type="button"
+                className="market-skin-chip-remove"
+                onClick={() => commitFilters(toggleSkinId(committedFilters, skinGroupKey(g), skinId))}
+                aria-label={`移除已选皮肤 ${skinName}`}
+              >
+                <X size={12} aria-hidden="true" />
+              </button>
+            </span>
+          );
+        }))}
+      </div>
+    ) : null}
   </FilterRow>;
 }
 
@@ -1184,15 +1239,26 @@ export function MarketFilterControls(props: Props) {
                     <p className="market-filter-hint">没有匹配的皮肤；已选条件仍保留。</p>
                   ) : null}
                   {props.skinSearchCatalog?.nextCursor ? (
-                    <button
-                      type="button"
-                      className="market-load-catalog market-mobile-load-skins"
-                      onClick={props.onLoadMoreSkins}
-                      disabled={props.loadingMoreSkins}
-                    >
-                      {props.loadingMoreSkins ? "正在加载…" : "加载更多皮肤"}
-                      <Plus size={14} />
-                    </button>
+                    <div className="market-skin-load-more-wrap">
+                      <button
+                        type="button"
+                        className="market-load-catalog-btn market-mobile-load-skins"
+                        onClick={props.onLoadMoreSkins}
+                        disabled={props.loadingMoreSkins}
+                      >
+                        {props.loadingMoreSkins ? (
+                          <>
+                            <RotateCw size={14} className="market-load-spin" aria-hidden="true" />
+                            <span>正在加载更多皮肤…</span>
+                          </>
+                        ) : (
+                          <>
+                            <span>加载更多皮肤</span>
+                            <ChevronDown size={14} aria-hidden="true" />
+                          </>
+                        )}
+                      </button>
+                    </div>
                   ) : null}
                 </>
               ) : null}

@@ -41,7 +41,8 @@ import type { ConfirmationFundingReader } from "../order/personal-confirmation";
 import { readPublicListing, readPublishingAccount, unknownSupplyGate, type SupplyGateReader } from "../supply/publishing";
 import { createProductionConfirmationFundingReader, createProductionSupplyGateReader, readFormalSupplyGate } from "../supply/funding-authority";
 import type { INestApplication } from "@nestjs/common";
-import { createHash, randomInt, randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
+import { isUserVerificationCode, makeUserVerificationCode, USER_SMS_CODE_LENGTH } from "./user-verification-code";
 import { join } from "node:path";
 import type { Pool } from "pg";
 import { drizzle } from "drizzle-orm/node-postgres";
@@ -296,9 +297,6 @@ function phoneRegistrationIdentifier(phoneNumber: string): string {
   return `${PHONE_REGISTRATION_IDENTIFIER_PREFIX}${phoneNumber}`;
 }
 
-function registrationOtp(): string {
-  return String(randomInt(0, 1_000_000)).padStart(6, "0");
-}
 function headerValue(value: string | string[] | undefined): string | undefined {
   return Array.isArray(value) ? value[0] : value;
 }
@@ -534,12 +532,13 @@ function buildFakePhoneNumberPlugin(
   signIn: ReturnType<typeof buildTransactionalPhoneSignIn>,
 ) {
   const plugin = phoneNumber({
+    otpLength: USER_SMS_CODE_LENGTH,
     phoneNumberValidator: (value) => Boolean(normalizeMainlandPhone(value)),
     sendOTP: async ({ phoneNumber: target, code }: { phoneNumber: string; code: string }) => {
-      outbox.set(target, { code: localSmsMock ? "888888" : code, sentAt: new Date().toISOString(), purpose: "phone-verification" });
+      outbox.set(target, { code: localSmsMock ? makeUserVerificationCode("phone", true) : code, sentAt: new Date().toISOString(), purpose: "phone-verification" });
     },
     sendPasswordResetOTP: async ({ phoneNumber: target, code }: { phoneNumber: string; code: string }) => {
-      outbox.set(`${target}-request-password-reset`, { code: localSmsMock ? "888888" : code, sentAt: new Date().toISOString(), purpose: "password-reset" });
+      outbox.set(`${target}-request-password-reset`, { code: localSmsMock ? makeUserVerificationCode("phone", true) : code, sentAt: new Date().toISOString(), purpose: "password-reset" });
     },
   });
   return { ...plugin, endpoints: { ...plugin.endpoints, signInPhoneNumber: signIn } };
@@ -587,7 +586,7 @@ function buildPhoneRegistrationPlugin(
     return body.password;
   };
   const codeFrom = (body: Record<string, unknown>): string => {
-    if (typeof body.code !== "string" || !/^\d{6}$/.test(body.code)) {
+    if (!isUserVerificationCode("phone", body.code)) {
       throw new APIError("BAD_REQUEST", { message: "Invalid verification code" });
     }
     return body.code;
@@ -614,7 +613,7 @@ function buildPhoneRegistrationPlugin(
         if (!fakeSmsEnabled && !smsSender) throw new APIError("NOT_IMPLEMENTED", { message: "SMS provider is not configured" });
         const phoneNumber = phoneFrom(bodyOf(ctx.body, ["phoneNumber"]));
         const identifier = phoneRegistrationIdentifier(phoneNumber);
-        const code = localSmsMock ? "888888" : registrationOtp();
+        const code = makeUserVerificationCode("phone", localSmsMock);
         const now = new Date();
         let phoneHold: string | undefined;
         let phoneRejection: { action: string; purpose: string; subject: string; outcome: string } | undefined;
@@ -700,7 +699,7 @@ function buildPhoneRegistrationPlugin(
               await client.query(`DELETE FROM "zzsh_auth_user"."verification" WHERE "identifier" = $1`, [identifier]);
               return true;
             }
-            if (!/^\d{6}$/.test(storedCode ?? "") || !Number.isSafeInteger(attempts)) {
+            if (!isUserVerificationCode("phone", storedCode) || !Number.isSafeInteger(attempts)) {
               await client.query(`DELETE FROM "zzsh_auth_user"."verification" WHERE "identifier" = $1`, [identifier]);
               return true;
             }
@@ -1124,7 +1123,7 @@ export async function mountAuthHandlers(
           before: async (data) => {
             // Only user phone challenges; admin TOTP and other verification records are untouched.
             if (options.localSmsMock && /^\+86\d{11}(?:-request-password-reset)?$/.test(data.identifier)) {
-              return { data: { ...data, value: "888888:0" } };
+              return { data: { ...data, value: `${makeUserVerificationCode("phone", true)}:0` } };
             }
             return { data };
           },

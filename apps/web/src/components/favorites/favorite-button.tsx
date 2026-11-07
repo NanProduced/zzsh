@@ -30,10 +30,16 @@ export function FavoriteButton({ accountId, title, variant = "card" }: { account
     <Heart size={17} strokeWidth={1.8} fill={pressed ? "currentColor" : "none"} aria-hidden="true" />
     {variant === "inline" && <span>{busy ? "处理中…" : pressed ? "已收藏" : needsConfirmation ? "确认收藏状态" : "收藏"}</span>}
   </button>;
-  return needsConfirmation ? (
+  const tooltipText = needsConfirmation
+    ? "收藏状态待确认，点击刷新"
+    : variant === "card"
+    ? (pressed ? "取消收藏" : "收藏账号")
+    : null;
+
+  return tooltipText ? (
     <Tooltip>
       <TooltipTrigger asChild>{button}</TooltipTrigger>
-      <TooltipContent side="top">收藏状态待确认，点击刷新</TooltipContent>
+      <TooltipContent side="top">{tooltipText}</TooltipContent>
     </Tooltip>
   ) : button;
 }

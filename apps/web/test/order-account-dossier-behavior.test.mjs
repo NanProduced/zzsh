@@ -19,8 +19,9 @@ async function probe(read, initial) {
  m.require=name=>{
   if(name==='next/link')return({children,scroll:_scroll,...props})=>React.createElement('a',props,children);
   if(name==='@zzsh/ui/legacy-account-image')return{LegacyAccountImage:props=>React.createElement('img',props)};
+   if(name==='@zzsh/ui/account-media-placeholder')return{AccountMediaPlaceholder:props=>React.createElement('div',{'data-state':props.state})};
   if(name==='@/lib/supply-client')return{supplyApi:{listing:(id,signal)=>{calls.push(id);return read(id,signal);},lookupListing:()=>{throw Error('unlinked display number must not be looked up');}}};
-  if(name==='@/lib/listing-view')return{toListingDetail:value=>value};
+  if(name==='@/lib/listing-view')return{toListingDetail:value=>value,haffMillionsLabel:require(tree+'/apps/web/src/lib/listing-view.ts').haffMillionsLabel};
   return require(name);
  };
  m._compile(compiled,file);
@@ -40,6 +41,17 @@ test('current public account facts preserve declarations and unknown values',asy
 test('unlinked legacy order uses only its own snapshot and never searches a display number',async()=>{
  const p=await probe(async()=>{throw Error('unexpected listing read');},{accountId:null,accountDisplayNo:'123',party:'renter',listingFacts:{source:'LEGACY_ACCOUNT_SNAPSHOT',attributeDisplay:{safeBox:'旧箱'}}});
  try{await p.render();assert.equal(p.calls.length,0);assert.match(p.host.textContent,/旧箱/);assert.match(p.host.textContent,/当前账号资料（迁入时记录）/);}finally{await p.close();}
+});
+
+test('historical snapshot retains fractional million haff quantity',async()=>{
+ const p=await probe(async()=>{throw Error('unexpected listing read');},{accountId:null,party:'renter',listingFacts:{source:'LEGACY_ACCOUNT_SNAPSHOT',attributeDisplay:{},resourceLines:[{code:'df_billable_haff',name:'哈夫币',unit:'HAFF_BASE',quantity:'1550000'}]}});
+ try{await p.render();assert.match(p.host.textContent,/1\.55 M 哈夫币/);assert.doesNotMatch(p.host.textContent,/2 M 哈夫币/);}finally{await p.close();}
+});
+
+test('current public dossier displays current public resources rather than old order resources',async()=>{
+ const current={...listing('A',null,null),resourceLines:[{itemId:'h',code:'df_billable_haff',name:'哈夫币',quantity:'3000000',quantityLabel:'3 M',unitLabel:'哈夫币'}]};
+ const p=await probe(async()=>current,{accountId:'A',party:'renter',orderResources:[{code:'haff',name:'哈夫币',value:'90 M 哈夫币'}]});
+ try{await p.render();assert.match(p.host.textContent,/当前公开账号资源/);assert.match(p.host.textContent,/3 M 哈夫币/);assert.doesNotMatch(p.host.textContent,/90 M 哈夫币/);}finally{await p.close();}
 });
 
 test('a different listing response cannot replace the order account',async()=>{

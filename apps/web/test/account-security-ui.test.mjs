@@ -24,8 +24,8 @@ function handler(options = {}) {
   };
 }
 const mount = (options = {}, props = {}) => mountAuthComponent(file, "AccountSecurityControls", { userId: "user_A", canAct: () => true, ...props }, { initialStatus: "authenticated", fetch: handler(options) });
-async function passwordReady(p) { await p.click("设置密码"); await p.click("获取验证码"); await p.input("security-code", "123456"); await p.click("验证现有身份"); await p.input("security-password", "new-valid-password"); await p.input("security-password-confirm", "new-valid-password"); }
-async function emailReady(p, address = "first@example.invalid") { await p.click("绑定邮箱"); await p.input("security-target", address); await p.click("获取验证码"); await p.input("security-code", "123456"); await p.click("验证现有身份"); await p.click("获取验证码"); await p.input("security-code", "123456"); await p.click("验证新联系方式"); }
+async function passwordReady(p) { await p.click("设置密码"); await p.click("获取验证码"); await p.input("security-code", "1234"); await p.click("验证现有身份"); await p.input("security-password", "new-valid-password"); await p.input("security-password-confirm", "new-valid-password"); }
+async function emailReady(p, address = "first@example.invalid") { await p.click("绑定邮箱"); await p.input("security-target", address); await p.click("获取验证码"); await p.input("security-code", "1234"); await p.click("验证现有身份"); await p.click("获取验证码"); await p.input("security-code", "123456"); await p.click("验证新联系方式"); }
 const writes = (p, path) => p.calls.filter(item => item.url.endsWith(path));
 const dialog = p => p.host.querySelector('[role="dialog"]');
 /** 本机浏览器 UA 在真实环境由浏览器提供；测试里改写 happy-dom 的 navigator.userAgent 后重渲染。 */
@@ -36,6 +36,34 @@ async function localAgent(p, value) {
 }
 const currentCard = p => p.host.querySelector('[aria-labelledby="sec-current-session-heading"]');
 function responseWithStatus(status) { return Response.json({ error: { code: status === 401 ? "UNAUTHENTICATED" : status === 403 ? "FORBIDDEN" : "INTERNAL_ERROR" } }, { status }); }
+
+test("security challenge follows the delivery channel without conflating SMS and email", async () => {
+  for (const channel of ["phone", "email"]) {
+    const p = await mount({ read: async () => response(channel === "phone" ? overview : { ...overview, phoneNumber: null, email: "bound@example.invalid" }) });
+    try {
+      await p.click("设置密码"); await p.click("获取验证码");
+      const expected = channel === "phone" ? "1234" : "123456";
+      assert.equal(p.host.querySelector("#security-code").maxLength, expected.length);
+      assert.equal(writes(p, "/security/challenge/send").at(-1).body.channel, channel);
+      await p.input("security-code", "123"); await p.click("验证现有身份");
+      assert.equal(writes(p, "/security/challenge/verify").length, 0);
+      await p.input("security-code", expected); await p.click("验证现有身份");
+      assert.equal(writes(p, "/security/challenge/verify").at(-1).body.code, expected);
+    } finally { await p.close(); }
+  }
+});
+
+test("phone rebinding uses four digits for both current and target phone", async () => {
+  const p = await mount();
+  try {
+    await p.click("更换手机号"); await p.input("security-target", "13900139000"); await p.click("获取验证码");
+    await p.input("security-code", "1234"); await p.click("验证现有身份");
+    assert.equal(p.host.querySelector("#security-code").maxLength, 4);
+    await p.click("获取验证码"); await p.input("security-code", "5678"); await p.click("验证新联系方式");
+    assert.deepEqual(writes(p, "/security/challenge/send").map(call => call.body.channel), ["phone", "phone"]);
+    assert.deepEqual(writes(p, "/security/challenge/verify").map(call => call.body.code), ["1234", "5678"]);
+  } finally { await p.close(); }
+});
 
 test("登录与找回区分密码未知与未设置，且不展示 UUID 或占位邮箱", async () => {
   const p = await mount({ read: async () => response({ ...overview, passwordState: "unavailable" }) });
@@ -291,15 +319,13 @@ test("关闭分步弹窗不丢失恢复责任，也不会建立第二次意图",
   } finally { await p.close(); }
 });
 
-test("改变已暂存的邮箱目标会清空两枚证明且不能提交原目标", async () => {
+test("换绑邮箱暂未接入：按钮置灰且显示敬请期待", async () => {
   const p = await mount();
   try {
-    await emailReady(p);
-    await p.input("security-target", "second@example.invalid");
-    await p.submit('form[aria-label="绑定或更换邮箱"]');
-    assert.equal(writes(p, "/security/email").length, 0);
-    assert.equal(p.host.querySelector("#security-code").value, "");
-    assert.match(p.host.textContent, /先验证现有身份控制权/);
+    const btn = p.host.querySelector('[data-security-action="email"]');
+    assert.ok(btn);
+    assert.equal(btn.disabled, true);
+    assert.match(btn.textContent, /敬请期待/);
   } finally { await p.close(); }
 });
 
@@ -336,7 +362,7 @@ for (const path of ["overview", "sessions", "challenge/send", "challenge/verify"
     if (path === "overview") { reject = true; await p.click("刷新"); }
     else if (path === "sessions") { reject = true; await p.click("刷新会话列表"); }
     else if (path === "password") { await passwordReady(p); reject = true; await p.submit('form[aria-label="设置或修改密码"]'); }
-    else { await p.click("设置密码"); if (path.endsWith("verify")) { await p.click("获取验证码"); await p.input("security-code", "123456"); } reject = true; await p.click(path.endsWith("send") ? "获取验证码" : "验证现有身份"); }
+    else { await p.click("设置密码"); if (path.endsWith("verify")) { await p.click("获取验证码"); await p.input("security-code", "1234"); } reject = true; await p.click(path.endsWith("send") ? "获取验证码" : "验证现有身份"); }
     assert.equal(p.confirmations, 1);
     assert.doesNotMatch(p.host.textContent, /user_A|自己的昵称|138|iPhone/);
     assert.match(p.host.textContent, /确认登录身份/);

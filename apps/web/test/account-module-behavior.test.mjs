@@ -63,6 +63,7 @@ async function probe({ rows = [], detail = null, identityStatus = "UNVERIFIED", 
     if (name === "next/link") return ({ scroll: _scroll, ...props }) => React.createElement("a", props);
     if (name === "next/navigation") return { useRouter: () => router };
     if (name === "@zzsh/ui/legacy-account-image") return { LegacyAccountImage: props => React.createElement("img", props) };
+    if (name === "@zzsh/ui/account-media-placeholder") return { AccountMediaPlaceholder: props => React.createElement("div", { className: "account-media-placeholder", "data-state": props.state }) };
     if (name === "./auth/auth-overlay-provider") return { useAuthOverlay: () => ({ open() {} }) };
     // This suite tests the parent's identity/data boundary; shared state visuals have separate coverage.
     if (name === "./auth/session-loading") return { SessionLoading: ({ label, layout }) => React.createElement("section", { className: "session-loading", "data-layout": layout, "aria-busy": true }, React.createElement("p", { role: "status" }, label)) };

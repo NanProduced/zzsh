@@ -754,7 +754,7 @@ function MarketView({ initialFilters }: { initialFilters: ListingFilters }) {
               ? <span className="market-filter-summary-count">已选 {filterCount} 项{filtersOpen ? " · 点击收起" : " · 展开调整"}</span>
               : <span className="market-filter-summary-count">{filtersOpen ? "点击收起筛选条件" : "展开选择资源、属性与皮肤"}</span>}</summary>
             <MarketFilterControls resetToken={resetToken} filters={filters} metadata={activeMetadata} gameCode={game?.code} catalog={catalog.data} catalogStatus={catalog.status} skinSearch={skinSearch} skinOwner={resolvedSkinOwner} skinRarity={resolvedSkinRarity} onSkinOwnerChange={setSkinOwner} onSkinRarityChange={setSkinRarity} activeSkinCategoryId={resolvedSkinCategoryId} skinSearchCatalog={skinSearchCatalog.data} skinSearchStatus={skinSearchCatalog.status} onChange={onFilterChange} onRetryCatalog={() => setCatalogAttempt((value) => value + 1)} onRetrySkinSearch={() => setSkinSearchAttempt((value) => value + 1)} onSkinSearchChange={setSkinSearch} onSkinCategoryChange={(categoryId) => { setActiveSkinCategoryId(categoryId); setSkinOwner(""); }} onLoadMoreSkins={() => void loadMoreSkinSearch()} loadingMoreSkins={loadingMoreSkinSearch} />
-            <button type="button" className="market-clear-filters market-clear-top" onClick={resetFilters}>清空筛选</button>
+            <button type="button" className="market-clear-filters market-clear-top" onClick={resetFilters} disabled={filterCount === 0} aria-disabled={filterCount === 0}>清空筛选</button>
           </details>}
         </>}
 
@@ -839,11 +839,14 @@ function MarketView({ initialFilters }: { initialFilters: ListingFilters }) {
                 {chipsExpanded ? "收起" : `还有 ${activeTags.length - 6} 项`}
               </button>
             ) : null}
+            <button type="button" className="market-filter-chip market-filter-chip--clear-all" onClick={resetFilters} aria-label="清空全部已选筛选条件">
+              <span>清空全部</span>
+            </button>
           </div>
         ) : null}
         {filters.q && <div className="market-search-summary" role="status">搜索“{filters.q}” · {lookupNumber ? "按完整编号精确查找" : "按账号标题关键词筛选"}<button type="button" onClick={clearSearch}>清除搜索</button></div>}
         <div className="market-results" aria-busy={feed.status === "loading" || feed.isLoadingMore}>
-          {feed.status === "loading" && !listingNotOpen && metadata.status !== "error" ? <div className={`account-grid account-grid--${effectiveViewMode}`}>{Array.from({ length: 5 }, (_, index) => <AccountCardSkeleton key={index} />)}</div> : null}
+          {feed.status === "loading" && !listingNotOpen && metadata.status !== "error" ? <div className={`account-grid account-grid--${effectiveViewMode}`}>{Array.from({ length: effectiveViewMode === "grid" ? 8 : 4 }, (_, index) => <AccountCardSkeleton key={index} viewMode={effectiveViewMode} />)}</div> : null}
           {feed.status === "error" && feed.items.length === 0 && currentError ? <div className="market-inline-state" role={currentError.kind === "adjust" ? "alert" : "status"}>
             <h3>{currentError.title}</h3><p>{currentError.description}</p>
             {currentError.kind === "retry" ? <button type="button" className="button secondary" onClick={feed.reload}><RotateCw size={15} />重试</button> : <button type="button" className="button secondary" onClick={lookupNumber ? clearSearch : resetFilters}>{lookupNumber ? "清除编号" : "清空筛选条件"}</button>}

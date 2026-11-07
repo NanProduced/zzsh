@@ -6,6 +6,7 @@ import type { AgeStatus, RealNameProvider } from "./user-identity";
 import { normalizeMainlandPhone } from "./phone-number";
 import { normalizeIdentityDocument } from "./identity-subject";
 import { ConfigurationError } from "../config/config";
+import { isUserVerificationCode } from "./user-verification-code";
 
 export type UserSmsSender = (phoneNumber: string, code: string) => Promise<void>;
 export type AliyunUserCredentials = { accessKeyId: string; accessKeySecret: string; securityToken?: string };
@@ -34,7 +35,7 @@ export function createAliyunUserSmsSender(input: { credentials: AliyunUserCreden
   const sdk = client ?? new DysmsClient(clientConfig(input.credentials,"dysmsapi.aliyuncs.com"));
   return async(phoneNumber,code) => {
     const phone = normalizeMainlandPhone(phoneNumber);
-    if (!phone || !/^\d{6}$/.test(code)) throw new UserSmsDeliveryError("REJECTED");
+    if (!phone || !isUserVerificationCode("phone", code)) throw new UserSmsDeliveryError("REJECTED");
     try {
       const response=await sdk.sendSmsWithOptions(new SendSmsRequest({ phoneNumbers:phone,signName,
         templateCode,templateParam:JSON.stringify({code}) }),noRetry());

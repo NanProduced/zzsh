@@ -91,7 +91,7 @@ test('detail pane renders declaration, catalog resources and quote lines', async
   assert.match(h.el.textContent, /号主声明有封禁记录/);
   assert.match(h.el.textContent, /巴雷特/);
   assert.match(h.el.textContent, /¥1\.00/);
-  assert.match(h.el.textContent, /约¥0\.00（不足1分）/);
+  assert.match(h.el.textContent, /< ¥0\.01/);
   assert.equal(h.el.querySelectorAll('[data-resource-billing] table').length, 1);
   assert.deepEqual([...h.el.querySelector('[data-resource-billing] thead').querySelectorAll('th')].map(node => node.textContent), ['物资', '数量', '单位', '计价基数', '单价', '行额']);
 });

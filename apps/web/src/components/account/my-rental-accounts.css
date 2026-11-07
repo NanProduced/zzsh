@@ -250,6 +250,51 @@ html[data-theme="light"] .mra-row-anchor, html:not(.dark) .mra-row-anchor { colo
 /* 客服限制的服务端原因承接为限制文案的补充行。 */
 .supply-blocker-reason { display: block; margin-top: 3px; overflow-wrap: anywhere; }
 
+/* 紧凑横向条带限制展示 */
+.supply-blockers--compact {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px 14px;
+  padding: 10px 14px;
+  border-radius: 8px;
+  margin-bottom: 12px;
+}
+.supply-blockers-lead {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  font-weight: 650;
+  color: var(--color-danger, #ef4444);
+  white-space: nowrap;
+}
+.supply-blockers-count {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 1px 6px;
+  border-radius: 10px;
+  background: rgba(239, 68, 68, 0.12);
+}
+.supply-blockers-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  flex: 1 1 auto;
+}
+.supply-blocker-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  padding: 3px 8px;
+  border-radius: 6px;
+  background: rgba(239, 68, 68, 0.08);
+  border: 1px solid rgba(239, 68, 68, 0.2);
+  color: var(--color-danger, #ef4444);
+  line-height: 1.4;
+}
+
 /* 保证金两时点①：报价记录行的时点副注。 */
 .supply-fee-list dd small {
   display: block;
@@ -735,23 +780,27 @@ html.dark .supply-revenue-num {
 }
 .supply-revenue-sub-cell {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 3px;
   padding: 8px 12px;
   border-radius: 8px;
   background: var(--color-bg-surface);
   border: 1px solid var(--color-border-subtle);
+  min-width: 0;
 }
 .supply-rev-sub-k {
   font-family: var(--font-sans);
   font-size: 12px;
   color: var(--color-text-muted);
+  white-space: nowrap;
 }
 .supply-rev-sub-v {
   font-family: var(--font-sans);
   font-size: 13px;
   font-weight: 600;
   color: var(--color-text-primary);
+  white-space: nowrap;
 }
 .supply-revenue-foot {
   margin-top: 6px;
@@ -841,12 +890,63 @@ html.dark .supply-duty-v.is-safe {
   text-decoration: underline;
 }
 
+.supply-gallery-empty-art-wrap {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  min-height: 200px;
+  padding: 28px 20px;
+  border-radius: 10px;
+  background: var(--color-bg-elevated);
+  border: 1px dashed var(--color-border-default);
+}
+.supply-gallery-placeholder-art {
+  max-width: 160px;
+  height: auto;
+  opacity: 0.9;
+}
+.supply-gallery-placeholder-note {
+  font-family: var(--font-sans);
+  font-size: 12.5px;
+  color: var(--color-text-muted);
+}
+
 /* 6. 账号核心战力与参数矩阵 (Specs Quad Card) */
 .supply-specs-card {
   padding: 16px 18px;
   border: 1px solid var(--color-border-subtle);
   border-radius: 12px;
   background: var(--color-bg-surface);
+}
+.supply-specs-header-meta {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.supply-hint-capsule {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11.5px;
+  color: var(--color-text-muted);
+  background: var(--color-bg-elevated);
+  padding: 2px 8px;
+  border-radius: 12px;
+  border: 1px solid var(--color-border-subtle);
+  cursor: help;
+}
+.supply-unified-specs-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(170px, 1fr));
+  gap: 8px;
+  margin-top: 4px;
+}
+@media (max-width: 600px) {
+  .supply-unified-specs-grid {
+    grid-template-columns: 1fr 1fr;
+  }
 }
 .supply-quad-grid {
   display: grid;
@@ -857,8 +957,8 @@ html.dark .supply-duty-v.is-safe {
   .supply-quad-grid { grid-template-columns: 1fr; }
 }
 .supply-quad-cell {
-  padding: 12px 14px;
-  border-radius: 8px;
+  padding: 14px 16px;
+  border-radius: 10px;
   border: 1px solid var(--color-border-subtle);
   background: var(--color-bg-elevated);
 }
@@ -869,24 +969,28 @@ html.dark .supply-duty-v.is-safe {
   margin: 0 0 10px 0;
   font-family: var(--font-sans);
   font-size: 13px;
-  font-weight: 600;
+  font-weight: 650;
   color: var(--color-text-primary);
 }
 .supply-quad-title svg { color: var(--color-accent-brand-ink); }
 .supply-pill-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
-  gap: 6px;
+  grid-template-columns: repeat(auto-fit, minmax(115px, 1fr));
+  gap: 8px;
 }
 .supply-spec-pill {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 6px;
-  padding: 5px 8px;
-  border-radius: 6px;
+  gap: 8px;
+  padding: 6px 10px;
+  border-radius: 7px;
   border: 1px solid var(--color-border-subtle);
   background: var(--color-bg-surface);
+  transition: border-color 0.12s ease;
+}
+.supply-spec-pill:hover {
+  border-color: var(--color-border-default);
 }
 .supply-spec-pill-k {
   font-family: var(--font-sans);
@@ -896,11 +1000,17 @@ html.dark .supply-duty-v.is-safe {
 }
 .supply-spec-pill-v {
   font-family: var(--font-sans);
-  font-size: 12px;
+  font-size: 12.5px;
   font-weight: 600;
   color: var(--color-text-primary);
   text-align: right;
   overflow-wrap: anywhere;
+  font-variant-numeric: tabular-nums;
+}
+.supply-spec-pill.highlight .supply-spec-pill-v,
+.supply-spec-pill[data-key="safe_box_code"] .supply-spec-pill-v {
+  color: var(--color-accent-brand-ink, #d97706);
+  font-weight: 700;
 }
 .supply-spec-pill.is-safe {
   border-color: rgba(22, 163, 74, 0.25);
@@ -928,15 +1038,23 @@ html.dark .supply-spec-pill.is-safe .supply-spec-pill-v {
 .supply-resource-chip {
   display: inline-flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
   padding: 6px 12px;
   border-radius: 8px;
   border: 1px solid var(--color-border-subtle);
-  background: var(--color-bg-elevated);
-  transition: border-color 0.15s;
+  background: var(--color-bg-surface);
+  transition: all 0.15s ease;
 }
 .supply-resource-chip:hover {
   border-color: var(--color-border-default);
+}
+.supply-resource-chip.is-haff {
+  background: rgba(245, 158, 11, 0.08);
+  border-color: rgba(245, 158, 11, 0.28);
+}
+.supply-resource-chip.is-haff .supply-resource-qty {
+  color: var(--color-accent-brand-ink, #d97706);
+  font-weight: 750;
 }
 .supply-resource-name {
   font-family: var(--font-sans);
@@ -948,6 +1066,15 @@ html.dark .supply-spec-pill.is-safe .supply-spec-pill-v {
   font-size: 12.5px;
   font-weight: 700;
   color: var(--color-accent-brand-ink);
+}
+.supply-resource-chip-price {
+  font-family: var(--font-sans);
+  font-size: 11.5px;
+  font-weight: 700;
+  color: var(--color-accent-brand-ink, #d97706);
+  margin-left: 4px;
+  padding-left: 6px;
+  border-left: 1px solid var(--color-border-subtle);
 }
 
 /* 7. 全屏 Lightbox 大图预览弹窗 */
