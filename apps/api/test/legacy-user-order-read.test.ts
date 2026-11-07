@@ -27,10 +27,19 @@ test("user historical projection preserves paid cancellation, unknown refund and
   assert.equal(result.status,"CANCELLED");assert.equal(result.party,"renter");assert.equal(result.payment.state,"RECORDED_PAID");
   assert.equal(result.payment.recordedAmount!.amount,"66.00");assert.equal(result.paidAt,null);assert.equal(result.amounts.rental!.amount,"66.00");
   assert.equal(result.legacyAmounts!.refund,null);assert.equal(result.legacyAmounts!.refundChannelState,"NOT_RECORDED_BY_SOURCE");
+  assert.equal(result.legacyAmounts!.goods!.amount,"60.00");assert.equal(result.legacyAmounts!.items!.amount,"6.00");
+  assert.equal(projectUserLegacyOrder(row,"owner").legacyAmounts,null,"owner role does not receive renter price splits");
   assert.equal(result.account.id,null);assert.equal(result.account.displayNo,null);assert.equal(result.account.readable,false);
   assert.equal(result.readOnly,true);assert.equal(result.paymentOpen,false);assert.equal(result.cancelOpen,false);assert.equal(result.continuationCount,0);assert.deepEqual(result.actions,[]);
   for(const key of ["ownerUserId","renterUserId","source_snapshot","evidence_ref","owner_phone","quote","accountId"])assert.equal(Object.hasOwn(result,key),false);
   assert.ok(!JSON.stringify(result).includes("private"));
+});
+test("sample 793+199=992 exposes renter goods and item components without inventing an owner split",()=>{
+  const sample={...row,goodsYuan:"793.00",itemsYuan:"199.00",dueCents:"99200",paidCents:"99200"};
+  const renter=projectUserLegacyOrder(sample,"renter");
+  assert.equal(renter.legacyAmounts!.goods!.amount,"793.00");assert.equal(renter.legacyAmounts!.items!.amount,"199.00");
+  assert.equal(renter.legacyAmounts!.paid!.amount,"992.00");assert.equal(renter.amounts.rental!.amount,"992.00");
+  assert.equal(projectUserLegacyOrder(sample,"owner").legacyAmounts,null);
 });
 test("shared normalization covers completed, in-flight, unpaid and unknown without granting actions",()=>{
   for(const [status,pay,expected] of [[4,1,"COMPLETED"],[3,1,"PAID"],[8,1,"PAID"],[9,1,"PAID"],[1,0,"PENDING_PAYMENT"],[9,0,"UNKNOWN"],[77,9,"UNKNOWN"]] as const){
@@ -40,6 +49,13 @@ test("shared normalization covers completed, in-flight, unpaid and unknown witho
     if(pay!==1)assert.equal(result.payment.recordedAmount,null);
   }
   const refunded=projectUserLegacyOrder({...row,refundYuan:"12.34"},"renter");assert.equal(refunded.legacyAmounts!.refund!.amount,"12.34");assert.equal(refunded.legacyAmounts!.refundChannelState,"NOT_RECORDED_BY_SOURCE");
+});
+test("sample 20260804205138763692 keeps paid cancellation distinct from an unpaid cancellation",()=>{
+  const paid=projectUserLegacyOrder({...row,displayNo:"20260804205138763692",sourceOrderStatus:5,sourcePayStatus:1},"renter");
+  assert.equal(paid.status,"CANCELLED");assert.equal(paid.payment.state,"RECORDED_PAID");assert.equal(paid.payment.recordedAmount!.amount,"66.00");
+  const unpaid=projectUserLegacyOrder({...row,displayNo:"20260804205138763692",sourceOrderStatus:5,sourcePayStatus:0},"renter");
+  assert.equal(unpaid.status,"CANCELLED");assert.equal(unpaid.payment.state,"RECORDED_UNPAID");assert.equal(unpaid.payment.recordedAmount,null);
+  assert.equal(unpaid.legacyAmounts!.paidState,"NOT_PAID");assert.equal(unpaid.legacyAmounts!.paid!.amount,"0.00");
 });
 test("channel evidence separates 'the source never recorded it' from 'this platform still owes a result'",()=>{
   // la_* carries transfer_time only; with no local settlement document the source simply has no receipt.
@@ -174,8 +190,8 @@ test("API projection feeds the shared web display with honest titles and record-
   const chainRow = { ...row, accountReadable: true, title: null, expendHaff: "12.50", topInsureCardNum: "7", refundYuan: "87.00", depositCents: "5700" };
   const projection = projectUserLegacyOrder(chainRow, "owner");
   assert.equal(projection.title, null);
-  assert.equal(display.orderResourceSummary(projection), "哈夫币 12.50 · 顶级保险卡 7 天");
-  assert.equal(display.orderAccountTitle(projection), "哈夫币 12.50 · 顶级保险卡 7 天");
+  assert.equal(display.orderResourceSummary(projection), "哈夫币消耗 12.50 · 顶级保险卡 7 天");
+  assert.equal(display.orderAccountTitle(projection), "哈夫币消耗 12.50 · 顶级保险卡 7 天");
   assert.equal(display.orderUsesResourceSummary(projection), true);
   // U5-R1-02 counterexample: gross 87 / detain 5 / verified net 82 — only the source record exists here.
   for (const party of ["renter", "owner"] as const) {
@@ -188,12 +204,12 @@ test("API projection feeds the shared web display with honest titles and record-
   assert.equal(Object.hasOwn(projection, "duty"), false);
   assert.ok(!JSON.stringify(projection).includes("82.00"));
   // A bare title is not the new account-display contract; use authorized listingFacts.
-  assert.equal(display.orderAccountTitle(projectUserLegacyOrder({ ...chainRow, title: "不应回退的裸标题" }, "owner")), "哈夫币 12.50 · 顶级保险卡 7 天");
+  assert.equal(display.orderAccountTitle(projectUserLegacyOrder({ ...chainRow, title: "不应回退的裸标题" }, "owner")), "哈夫币消耗 12.50 · 顶级保险卡 7 天");
   // Cross-subject guard: without account read authorization the current title never reaches the display.
   const hidden = projectUserLegacyOrder({ ...chainRow, title: "真实当前标题", accountReadable: false }, "renter");
   assert.equal(hidden.title, null);
   assert.ok(!JSON.stringify(hidden).includes("真实当前标题"));
-  assert.equal(display.orderAccountTitle(hidden), "哈夫币 12.50 · 顶级保险卡 7 天");
+  assert.equal(display.orderAccountTitle(hidden), "哈夫币消耗 12.50 · 顶级保险卡 7 天");
   // No frozen facts at all: the display stays honestly empty instead of inventing a title.
   assert.equal(display.orderAccountTitle(projectUserLegacyOrder({ ...row, accountReadable: true, title: null }, "owner")), "租赁账号");
 });

@@ -314,7 +314,7 @@ export type LegacyOrder = {
   amountsPerspective?: "OWNER" | "RENTER";
   ownerIncomeSource?: { source: "LEGACY_ORDER_SNAPSHOT"; sourceLabel: string };
   payment: { state: "RECORDED_PAID" | "RECORDED_UNPAID" | "UNKNOWN"; recordedAt: string | null; recordedAmount: Money | null };
-  legacyAmounts: { required: Money | null; paid: Money | null; deposit: Money | null; refund: Money | null; refundChannelState: "UNKNOWN" } | null;
+  legacyAmounts: { required: Money | null; paid: Money | null; deposit: Money | null; goods?: Money | null; items?: Money | null; refund: Money | null; refundChannelState: "NOT_RECORDED_BY_SOURCE" | "PENDING" | "UNKNOWN" } | null;
   account: { id: string | null; displayNo: string | null; readable: boolean };
   orderFacts?: LegacyOrderFacts;
   readOnly: true; paymentOpen: false; cancelOpen: false; continuationCount: 0; actions: never[];

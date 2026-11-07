@@ -172,6 +172,27 @@ test("authorized private projection reuses frozen display facts without public v
   assert.match(legacyHistoricalReadSql(), /d.schema_version=1/);
 });
 
+test("captured ratio and payout retain true, false, unknown and old-v1 absence after source verification", () => {
+  const old = projectLegacyHistoricalRead(historicalRow(), "a-1");
+  assert.equal(old.display.state, "KNOWN");
+  if (old.display.state !== "KNOWN") return;
+  assert.equal(Object.hasOwn(old.display.facts, "sourceAccountBaseRatioWanPerYuan"), false);
+  assert.equal(Object.hasOwn(old.display.facts, "sourceAccountFullPayoutSelected"), false);
+  for (const selected of [true, false, null] as const) {
+    const row = historicalRow();
+    row.display_snapshot = { ...row.display_snapshot, sourceAccountBaseRatioWanPerYuan: "56", sourceAccountFullPayoutSelected: selected };
+    row.display_digest = legacyDisplayDigest("a-1", { ...input(), snapshot: row.display_snapshot });
+    const result = projectLegacyHistoricalRead(row, "a-1");
+    assert.equal(result.display.state, "KNOWN");
+    if (result.display.state !== "KNOWN") continue;
+    assert.equal(result.display.facts.sourceAccountBaseRatioWanPerYuan, "56");
+    assert.equal(result.display.facts.sourceAccountFullPayoutSelected, selected);
+    assert.equal(result.quote, null, "captured account facts do not create a current quote");
+    row.display_digest = "0".repeat(64);
+    assert.throws(() => projectLegacyHistoricalRead(row, "a-1"), { status: 503 });
+  }
+});
+
 test("no base, no display and corrupt display remain distinct", async () => {
   const calls: string[] = [];
   const absent = await loadLegacyHistoricalRead({ query: async (sql: string) => { calls.push(sql); return { rows: [] }; } } as never, "a-1");

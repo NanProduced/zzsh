@@ -451,8 +451,10 @@ export async function readOrderAccountViews(client: PoolClient, accountIds: stri
         const versionId = usePublic ? String((facts.publicBasis as Record<string, any>).id) : String(detail.version.id);
         const source = s.displaySource === "LEGACY_SNAPSHOT" ? "LEGACY_ACCOUNT_SNAPSHOT" : "ACCOUNT_PUBLIC_VERSION";
         const historical = source === "LEGACY_ACCOUNT_SNAPSHOT" ? legacyAccountDisplay(facts.historicalRead, versionId) : null;
+        const captured = historical && facts.historicalRead?.display.state === "KNOWN" ? facts.historicalRead.display.facts : null;
         result.set(account.id, {
             source, versionId, ...(historical ? { sourceUpdatedAt: historical.sourceUpdatedAt } : {}),
+            ...(captured ? { sourceAccountBaseRatioWanPerYuan: captured.sourceAccountBaseRatioWanPerYuan ?? null, sourceAccountFullPayoutSelected: captured.sourceAccountFullPayoutSelected ?? null } : {}),
             haff: s.haff ? { itemId: String(s.haff.itemId ?? ""), quantity: s.haff.quantity } : null,
             materials: historical?.materials ?? s.materials, materialsVisibleTotal: historical?.materials.length ?? s.materialsVisibleTotal,
             safeBoxText: s.config?.safeBox ?? null, gradingText: s.config?.grading ?? null, loginMethodText: s.login?.displayName ?? null,

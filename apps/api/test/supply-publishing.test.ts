@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { assertCurrentRelease, evaluatePublication, freezePresentationSkin, orderAccountTitleFact, publicListingAttributes, publicListingBasis, publicationBlockers, quoteListing, readDraftSkinSummary, readPresentation, readResourceIncomePreview } from "../src/supply/publishing";
+import { assertCurrentRelease, evaluatePublication, freezePresentationSkin, orderAccountTitleFact, publicListingAttributes, publicListingBasis, publicationBlockers, quoteListing, readDraftSkinSummary, readPresentation, readResourceIncomePreview, setOwnerPaused } from "../src/supply/publishing";
 import { createCatalogEntry, updateCatalogEntry } from "../src/supply/catalog";
 import { updatePriceDraft } from "../src/supply/rules";
 import { assertDeltaResourceUnit, DELTA_RESOURCE_UNITS, validateDeltaPublicationAttributes } from "../src/supply/delta-rental";
@@ -292,6 +292,28 @@ test("the three migration account states keep their server-side listing rules", 
   assert.equal(paused.includes("ACCOUNT_NOT_PUBLISHABLE"), false, "pausing is a runtime state, not a hold");
   const settled = await publicationBlockers(nativeGateClient() as never, { ...nativeAccount, legacy_hold: "NONE" } as never, draft as never, async () => ({ ...await nativeGate(), rentalCompleted: true }), "WRITE");
   assert.equal(settled.includes("RENTAL_COMPLETED"), true, "a settled rental must not return to a listing");
+});
+
+test("historical observations cannot bypass publication gates when resuming", async () => {
+  const calls: string[] = [];
+  const client = (origin: string, reviewState: string) => ({ query: async (sql: string) => {
+    calls.push(sql);
+    if (sql.includes("FROM zzsh_supply.listing_version")) return { rows: [{ id: "v", account_id: "a", origin, review_state: reviewState, rule_release_id: null, content_hash: null }], rowCount: 1 };
+    if (sql.includes("FROM zzsh_supply.listing_publication")) return { rows: [], rowCount: 0 };
+    if (sql.includes("SET owner_paused=")) return { rows: [], rowCount: 1 };
+    if (sql.includes("SET revision=revision+1")) return { rows: [{ revision: "2" }], rowCount: 1 };
+    throw new Error("Unexpected SQL: " + sql.slice(0, 80));
+  } });
+  const historical = { ...nativeAccount, current_version_id: "v", owner_paused: true, revision: "1" };
+  await assert.rejects(() => setOwnerPaused(client("LEGACY_OBSERVATION", "IMPORTED_UNVERIFIED") as never, historical as never, { expectedRevision: "1" }, false, nativeGate), /请先完成资料审核或处理客服限制/);
+  assert.equal(historical.owner_paused, true);
+  assert.equal(calls.some(sql => sql.includes("SET owner_paused=")), false, "historical resume must not alter paused state without admission");
+  const unpausedHistorical = { ...historical, owner_paused: false };
+  await assert.rejects(() => setOwnerPaused(client("LEGACY_OBSERVATION", "IMPORTED_UNVERIFIED") as never, unpausedHistorical as never, { expectedRevision: "1" }, true, nativeGate), /历史账号记录不可修改接单状态/);
+  assert.equal(unpausedHistorical.owner_paused, false, "the owner cannot trap a read-only account in a paused state");
+  const native = { ...nativeAccount, current_version_id: "v", owner_paused: true, revision: "1" };
+  await assert.rejects(() => setOwnerPaused(client("NATIVE", "DRAFT") as never, native as never, { expectedRevision: "1" }, false, nativeGate), /请先完成资料审核或处理客服限制/);
+  assert.equal(native.owner_paused, true, "native resume gates are unchanged");
 });
 
 test("native empty title is not a write blocker; a legacy placeholder still is", async () => {

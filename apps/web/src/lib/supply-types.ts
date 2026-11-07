@@ -538,6 +538,8 @@ export type LegacyHistoricalRead = {
   display?: { state: "NOT_IMPORTED"; facts: null } | { state: "KNOWN"; facts: {
     schema: "legacy-listing-display-v1";
     rentalMode: "ordinary" | "custom" | "fast" | null;
+    sourceAccountBaseRatioWanPerYuan?: string | null;
+    sourceAccountFullPayoutSelected?: boolean | null;
     attributes: Record<string, string | number | boolean | null>;
     resources: Array<{ code: string; name: string; quantity: string | null; unit: string }>;
     attributeDisplay: PublicAttributeDisplay;
@@ -582,6 +584,7 @@ export type MyAccountRow = {
   owner_paused: boolean;
   staff_restricted: boolean;
   historicalRead?: MySupply["historicalRead"];
+  historicalReadOnly?: boolean;
   rentalState?: RentalState;
   accountDisplay?: AccountDisplay | null;
   activeOrder?: AccountActiveOrder | null;

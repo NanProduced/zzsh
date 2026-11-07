@@ -79,10 +79,10 @@ test('document shows raw fee, net and old balance separately from channels and k
 test('payment history hides unrelated empty withdrawal and distribution fields but keeps applicable evidence',async t=>{
   const paymentHistory={...historical,changeType:null,purposeCode:'PAYMENT_RECORD',purposeLabel:'旧平台付款记录',originalLogNumber:null,balanceAfterCents:null,feeCents:null,netCents:null,originalStatus:'0',originalStatusLabel:'旧平台未付款',association:{...association,state:'UNRESOLVED',kind:'UNKNOWN',number:null,documentRef:null,path:null}};
   const paymentDoc={...debit,ref:'HISTORY_PAYMENT:payment',kind:'PAYMENT',historical:paymentHistory};
-  const evidence={originalReference:'123',originalStatus:'0',originalOrderType:'1',originalNumber:'OLD-PAY',originalRatio:null,originalLevel:null,originalBankName:null,originalRecipientMask:null,originalMobileMask:null,originalDestinationMask:null,originalOperatorSourceId:null,originalNetCents:null,originalFeeCents:null,historicalBalanceAfterCents:null,dueAt:null,policyVersion:null,channelArrival:'UNKNOWN'};
+  const evidence={originalReference:'123',originalStatus:'0',originalPayWay:'2',originalOrderType:'1',originalNumber:'OLD-PAY',originalRatio:null,originalLevel:null,originalBankName:null,originalRecipientMask:null,originalMobileMask:null,originalDestinationMask:null,originalOperatorSourceId:null,originalNetCents:null,originalFeeCents:null,historicalBalanceAfterCents:null,dueAt:null,policyVersion:null,channelArrival:'UNKNOWN'};
   const ui=await mount(t,{mode:'document',doc:paymentDoc,lines:[{...entry,documentRef:paymentDoc.ref,kind:'PAYMENT',historical:paymentHistory}],evidence});await waitFor(()=>ui.host.textContent.includes('旧平台付款记录'));
   const facts=ui.host.querySelector('[data-historical-finance]');assert.match(facts.textContent,/原金额/);assert.doesNotMatch(facts.textContent,/原流水号|变动后余额|手续费|净额/);
-  await click(button('原始来源字段',ui.host));assert.match(ui.host.textContent,/原编号[\s\S]*OLD-PAY/);assert.match(ui.host.textContent,/渠道到账[\s\S]*未取得依据/);assert.doesNotMatch(ui.host.textContent,/原分销比例|原分销层级|旧收款银行|原净额|原手续费|历史记录后余额|计划转可用时间/);
+  await click(button('原始来源字段',ui.host));assert.match(ui.host.textContent,/原编号[\s\S]*OLD-PAY/);assert.match(ui.host.textContent,/原状态[\s\S]*旧平台未付款/);assert.match(ui.host.textContent,/支付方式（原记录）[\s\S]*微信（原记录）/);assert.match(ui.host.textContent,/渠道到账[\s\S]*未取得依据/);assert.doesNotMatch(ui.host.textContent,/原分销比例|原分销层级|旧收款银行|原净额|原手续费|历史记录后余额|计划转可用时间/);
   await click([...ui.host.querySelectorAll('button')].find(b=>b.textContent.startsWith('资金来源与版本')));assert.match(ui.host.textContent,/历史记录未纳入期初覆盖/);assert.doesNotMatch(ui.host.textContent,/历史未记录，未入当前余额/);
 });
 
@@ -151,9 +151,24 @@ test('finance detail only offers the order channel shortcut for a native order',
   await click(button('在汇聚对账查看本单',nativeUi.host));const target=new URL(nativeUi.opened.at(-1)[0],browser.location.href);assert.equal(target.pathname,'/finance/channels');assert.equal(target.searchParams.get('fromOrderId'),'native');
 });
 
-test('an applicable but unknown historical payment status remains visible',()=>{
-  const payment={...historical,changeType:null,purposeCode:'PAYMENT_RECORD',originalLogNumber:null,balanceAfterCents:null,feeCents:null,netCents:null,originalStatus:null};
-  assert.ok(formats.historicalFinanceFacts(payment).some(([label,value])=>label==='原状态码'&&value==='未取得'));
+test('an applicable but unknown historical payment status remains visible without a raw code',()=>{
+  const payment={...historical,changeType:null,purposeCode:'PAYMENT_RECORD',originalLogNumber:null,balanceAfterCents:null,feeCents:null,netCents:null,originalStatus:null,originalStatusLabel:null};
+  assert.ok(formats.historicalFinanceFacts(payment).some(([label,value])=>label==='原状态'&&value==='状态未记录'));
+  const labelled={...payment,originalStatus:'1',originalStatusLabel:'旧平台已付款'};
+  assert.ok(formats.historicalFinanceFacts(labelled).some(([label,value])=>label==='原状态'&&value==='旧平台已付款'));
+  assert.equal(formats.historicalFinanceFacts(labelled).some(([label])=>label==='原状态码'),false);
+  const unknownCode={...payment,originalStatus:'9',originalStatusLabel:null};
+  assert.ok(formats.historicalFinanceFacts(unknownCode).some(([label,value])=>label==='原状态'&&value==='未知'));
+});
+test('payment method is per original record and unknown or missing stay distinct',()=>{
+  const payment={...historical,changeType:null,purposeCode:'PAYMENT_RECORD',payWay:'2',payWayLabel:'微信（原记录）'};
+  assert.ok(formats.historicalFinanceFacts(payment).some(([label,value])=>label==='支付方式（原记录）'&&value==='微信（原记录）'));
+  const unknown={...payment,payWay:'9',payWayLabel:null};
+  assert.ok(formats.historicalFinanceFacts(unknown).some(([label,value])=>label==='支付方式（原记录）'&&value==='未知'));
+  const missing={...payment,payWay:null,payWayLabel:null};
+  assert.ok(formats.historicalFinanceFacts(missing).some(([label,value])=>label==='支付方式（原记录）'&&value==='未记录'));
+  const unverified={...missing,amountSemantics:'UNVERIFIED'};
+  assert.ok(formats.historicalFinanceFacts(unverified).some(([label,value])=>label==='支付方式（原记录）'&&value==='来源未核对'));
 });
 
 test('unknown legacy purpose does not hide potentially applicable empty fields',async t=>{
@@ -227,18 +242,16 @@ test('related finance-document navigation retains its entry and a source origin 
   for(const [key,value]of Object.entries(sourceQuery))assert.equal(back.searchParams.get(key),value,`restored ${key}`);
 });
 
-test('user-finance table shares the same historical facts while the current wallet stays unchanged',async t=>{
-  const payment={...debit,ref:'HISTORY_PAYMENT:user-payment',kind:'PAYMENT',number:'USER-PAYMENT',amounts:[{bucket:'AVAILABLE',knownNetCents:'-66450',unknownCount:0}],historical:{...historical,amountSemantics:'BUSINESS_RECORD',purposeCode:'PAYMENT_RECORD',purposeLabel:'旧平台付款记录',originalLogNumber:null,recordedAmountCents:'66450'}};
-  const suspect={...application,ref:'HISTORY_WITHDRAWAL:user-unverified',requestedAmountCents:'66450',historical:{...application.historical,amountSemantics:'UNVERIFIED',recordedAmountCents:'66450'}};
-  const permissions=['finance.read','finance.document.read','order.read'],opened=[],adapter={snapshot:{authenticated:true,adminUserId:`user-history-${++serial}`,session:{id:`user-history-session-${serial}`,locked:false},security:{status:'ACTIVE',isBoss:false,passwordChangeRequired:false},permissions},has:code=>permissions.includes(code),
-    finance:async()=>({documents:[debit,application,payment,suspect]}),consumption:async()=>({knowledge:'UNKNOWN',amountCents:null,knownAmountCents:'0',components:{haffRentCents:null,itemConsumptionCents:null,earlyMakeupCents:null,renterFeeCents:null},total:0,unknownCount:0,page:1,pageSize:20,items:[]})};
+test('user finance keeps current channel records separate from the historical entry and wallet balance',async t=>{
+  const requests=[],permissions=['finance.read','finance.document.read','order.read'],opened=[],adapter={snapshot:{authenticated:true,adminUserId:`user-history-${++serial}`,session:{id:`user-history-session-${serial}`,locked:false},security:{status:'ACTIVE',isBoss:false,passwordChangeRequired:false},permissions},has:code=>permissions.includes(code),
+    financeActivity:async(userId,_signal,from,to)=>{requests.push({userId,from,to});return {total:1,items:[{id:'native-payment',kind:'PAYMENT',number:'NATIVE-1',subjectRole:'RENTER',state:'SUCCEEDED',amountCents:'66450',amountLabel:'提交金额',occurredAt:'2026-11-06T00:00:00Z',documentRef:'PAYMENT:native-payment'}]};},consumption:async()=>({knowledge:'UNKNOWN',amountCents:null,knownAmountCents:'0',components:{haffRentCents:null,itemConsumptionCents:null,earlyMakeupCents:null,renterFeeCents:null},total:0,unknownCount:0,page:1,pageSize:20,items:[]})};
   const host=browser.document.createElement('div');browser.document.body.append(host);const root=createRoot(host);await act(async()=>root.render(createElement(UserDetailFinance,{adapter,user:{id:'synthetic-user',name:'用户一',walletSummary:{state:'ready',amountCents:'15000'}},refreshNonce:0,onOpenPath:(...args)=>opened.push(args)})));t.after(async()=>{await act(async()=>root.unmount());host.remove();});
-  await waitFor(()=>host.querySelector('[aria-label="用户资金单据"]')?.textContent.includes('提现申请扣款'));
-  assert.match(host.textContent,/150\.00 元/);const table=host.querySelector('[aria-label="用户资金单据"]');assert.match(table.textContent,/原流水号 SYNTHETIC-LOG-11437/);assert.match(table.textContent,/历史变动 −734\.00 元/);assert.doesNotMatch(table.textContent,/用户可用 −734/);
-  const applicationRow=table.querySelectorAll('tbody tr')[1];assert.match(applicationRow.textContent,/原申请 734\.00 元/);assert.doesNotMatch(applicationRow.textContent,/历史变动/,'the application is not presented as another wallet debit');
-  const paymentRow=table.querySelectorAll('tbody tr')[2];assert.match(paymentRow.textContent,/记录金额 664\.50 元/);assert.doesNotMatch(paymentRow.textContent,/历史变动|−664\.50/);
-  const suspectRow=table.querySelectorAll('tbody tr')[3];assert.match(suspectRow.textContent,/记录金额待核实/);assert.doesNotMatch(suspectRow.textContent,/原申请 664\.50/);
-  await click(table.querySelector('[data-historical-association] button'));const target=new URL(opened.at(-1)[0],browser.location.href);assert.equal(target.pathname,association.path);assert.ok(target.searchParams.get('origin'));
+  await waitFor(()=>host.querySelector('[aria-label="用户资金记录"]')?.textContent.includes('NATIVE-1'));
+  assert.match(host.textContent,/150\.00 元/);const table=host.querySelector('[aria-label="用户资金记录"]');
+  assert.match(table.textContent,/收款/);assert.match(table.textContent,/租客/);assert.match(table.textContent,/664\.50 元/);
+  assert.doesNotMatch(table.textContent,/历史变动|SYNTHETIC-LOG/);assert.equal(requests[0].userId,'synthetic-user');
+  await click(button('查看旧平台记录',host));const target=new URL(opened.at(-1)[0],browser.location.href);
+  assert.equal(target.pathname,'/finance/users/synthetic-user');assert.equal(target.searchParams.get('financeView'),'finance-record-history');assert.ok(target.searchParams.get('origin'));
 });
 
 test('withdrawal application points to its balance debit, while debit points to the application',async t=>{

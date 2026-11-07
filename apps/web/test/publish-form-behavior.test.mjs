@@ -12,6 +12,7 @@ const React = require("react");
 const { Window } = require("happy-dom");
 const ts = require("typescript");
 const actualSupply = require(path.join(tree, "apps/web/src/lib/supply-client.ts"));
+const publicationRequired = require(path.join(tree, "apps/web/src/lib/supply-publication-required.ts"));
 const compiled = ts.transpileModule(fs.readFileSync(path.join(tree, "apps/web/src/components/supply/publish-form.tsx"), "utf8"), {
   compilerOptions: { module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX, target: ts.ScriptTarget.ES2022, esModuleInterop: true },
 }).outputText;
@@ -121,6 +122,17 @@ function declaration(overrides = {}) {
     termOptionCode: "daily-10m", pricingOptionCode: "standard", inventory: [], skins: [], entitlements: [], mediaBindings: [],
     ...overrides,
   };
+}
+const requiredAccountFacts = {
+  safe_box_code: "safe_box_2x2", grading_code: "4", grading_division: 3, character_level: 30,
+  secret_kd: "1.85", vit_level: 4, bear_level: 7, dive_level: 0, login_method_code: "login_qq_qr",
+  region_province: "上海市", region_city: "上海市", service_window_start_minute: 540,
+  service_window_end_minute: 1380, service_window_timezone: "Asia/Shanghai",
+  service_window_cross_midnight: false, ban_record: false, face_is_self: true,
+};
+function completeDeclaration(overrides = {}) {
+  const base = declaration(overrides);
+  return { ...base, attributes: { ...requiredAccountFacts, ...(overrides.attributes ?? {}) } };
 }
 function supplyOf(declarationValue, { quote = null, reviewState = "DRAFT", revision = "5", versionId = "version_1", schemaVersion = 1, versionRevision = "1" } = {}) {
   return {
@@ -429,6 +441,86 @@ test("availability stays undeclared until chosen, and help opens by click", asyn
   } finally { await p.close(); }
 });
 
+test("new-account required matrix mirrors server publication facts and keeps legacy references relaxed", () => {
+  const options = {
+    gradingOptions: [{ code: "4", displayName: "黄金", divisions: [3, 2, 1] }],
+    loginMethodOptions: [{ code: "login_qq_qr", displayName: "QQ扫码" }],
+  };
+  const complete = {
+    safe_box_code: "safe_box_2x2", grading_code: "4", grading_division: 3, character_level: 30,
+    secret_kd: "1.85", vit_level: 4, bear_level: 7, dive_level: 0, login_method_code: "login_qq_qr",
+    region_province: "上海市", region_city: "上海市",
+    service_window_start_minute: 540, service_window_end_minute: 1380,
+    service_window_timezone: "Asia/Shanghai", service_window_cross_midnight: false,
+    ban_record: false, face_is_self: true,
+  };
+  assert.equal(publicationRequired.requiredAccountFactsProblem(complete, options), null);
+  assert.equal(publicationRequired.requiredAccountFactsProblem({ ...complete, secret_kd: 1.85 }, options), null);
+  assert.equal(publicationRequired.requiredAccountFactsProblem({ ...complete, grading_division: 5 }, options)?.field, "attributes.grading_division");
+  for (const [field, value, target] of [
+    ["safe_box_code", null, "publish-attribute-safe-box"],
+    ["grading_code", null, "publish-attribute-grading"],
+    ["grading_division", null, "publish-attribute-grading"],
+    ["character_level", null, "publish-character-level"],
+    ["secret_kd", "", "publish-secret-kd"],
+    ["vit_level", null, "publish-attribute-vit"],
+    ["bear_level", null, "publish-attribute-bear"],
+    ["dive_level", null, "publish-attribute-dive"],
+    ["login_method_code", "unknown", "publish-attribute-login"],
+    ["region_province", null, "publish-region"],
+    ["region_city", null, "publish-region"],
+    ["service_window_start_minute", null, "publish-service-window"],
+    ["service_window_timezone", null, "publish-service-window"],
+    ["ban_record", null, "publish-attribute-ban"],
+    ["face_is_self", null, "publish-attribute-face"],
+  ]) {
+    const problem = publicationRequired.requiredAccountFactsProblem({ ...complete, [field]: value }, options);
+    assert.equal(problem?.field, `attributes.${field}`, field);
+    assert.equal(problem?.target, target, field);
+  }
+  assert.equal(publicationRequired.requiredAccountFactsProblem({ ...complete, legacy_published_reference: "source-proof" }, options), null);
+});
+
+test("new-account quote names the first missing required profile fact and focuses it", async () => {
+  const p = await probe({
+    accountId: "account_1",
+    mine: () => supplyOf(declaration({ inventory: [{ itemId: "item_haff", quantity: "60000000" }] })),
+  });
+  try {
+    await p.render();
+    await p.click('.publish-rail-actions input[type="checkbox"]');
+    await p.clickButton("确认上架");
+    assert.match(p.text(), /请选择安全箱档位/);
+    assert.equal(p.calls.some(call => call.op === "quote"), false);
+    assert.equal(p.window.document.activeElement?.getAttribute("role"), "radio");
+    assert.ok(p.host.querySelector("#publish-attribute-safe-box").contains(p.window.document.activeElement));
+  } finally { await p.close(); }
+});
+
+test("the quote button focuses the missing field without saving or quoting", async () => {
+  const declared = declaration({ inventory: [{ itemId: "item_haff", quantity: "60000000" }] });
+  const p = await probe({ accountId: "account_1", mine: () => ({ ...supplyOf(declared), blockers: ["QUOTE_REQUIRED"] }) });
+  try {
+    await p.render();
+    await p.clickButton("核对报价");
+    assert.match(p.text(), /请选择安全箱档位/);
+    assert.equal(p.calls.some(call => ["saveDraft", "quote"].includes(call.op)), false);
+    assert.ok(p.host.querySelector("#publish-attribute-safe-box").contains(p.window.document.activeElement));
+    assert.equal(p.window.document.activeElement?.getAttribute("role"), "radio");
+  } finally { await p.close(); }
+});
+
+test("legacy takeover does not mark exempt facts as required", async () => {
+  const declared = completeDeclaration({ attributes: { legacy_published_reference: "a".repeat(64) } });
+  const p = await probe({ accountId: "account_1", mine: () => supplyOf(declared) });
+  try {
+    await p.render();
+    for (const selector of ["#publish-attribute-safe-box", "#publish-character-level", ".publish-kd-field", "#publish-region", "#publish-service-window", "#publish-attribute-ban", "#publish-attribute-face"])
+      assert.equal(p.host.querySelector(selector)?.querySelector(".publish-required-mark"), null, selector);
+    assert.equal(p.host.querySelector('#publish-attribute-vit [role="radiogroup"]')?.getAttribute("aria-required"), "true");
+  } finally { await p.close(); }
+});
+
 test("large ammo counts require one explicit check before saving and preserve base rounds", async () => {
   const p = await probe({ accountId: "account_1", mine: () => supplyOf(declaration({ inventory: [{ itemId: "item_round", quantity: "1200" }] })) });
   const dialog = () => p.window.document.querySelector('[role="alertdialog"]');
@@ -535,7 +627,7 @@ test("ammo blur stays quiet inside its stepper and never survives an identity sw
 });
 
 test("ammo review resumes quote once despite duplicate confirmation clicks", async () => {
-  const declared = declaration({ inventory: [{ itemId: "item_haff", quantity: "60000000" }, { itemId: "item_round", quantity: "3600" }] });
+  const declared = completeDeclaration({ inventory: [{ itemId: "item_haff", quantity: "60000000" }, { itemId: "item_round", quantity: "3600" }] });
   const p = await probe({ accountId: "account_1", mine: () => supplyOf(declared), quote: () => supplyOf(declared, { quote: ownerQuote }) });
   try {
     await p.render();
@@ -1730,7 +1822,7 @@ test("quote help explains gross income without opening terms or consenting", asy
 test("unsupplied title does not block quote and missing inventory locates the inventory group", async () => {
   const p = await probe({
     accountId: "account_1",
-    mine: () => supplyOf(declaration({ title: "", inventory: [] })),
+    mine: () => supplyOf(completeDeclaration({ title: "", inventory: [] })),
   });
   try {
     await p.render();
@@ -1746,7 +1838,7 @@ test("unsupplied title does not block quote and missing inventory locates the in
 test("unsupplied title successfully quotes when declaration is complete", async () => {
   const p = await probe({
     accountId: "account_1",
-    mine: () => supplyOf(declaration({ title: "", inventory: [{ itemId: "item_haff", quantity: "60000000" }] })),
+    mine: () => supplyOf(completeDeclaration({ title: "", inventory: [{ itemId: "item_haff", quantity: "60000000" }] })),
   });
   try {
     await p.render();
@@ -1790,7 +1882,7 @@ test("legacy agreement markup renders readable inert text while retaining the or
    try {await p.render();await p.clickButton('出租协议');assert.equal(p.host.querySelector('.publish-agreement-acceptance input').checked,false,'opening the agreement does not grant consent');const node=p.window.document.querySelector('.publish-agreement-dialog .publish-terms-body');assert.match(node.textContent,/真实条款\n请阅读条件/);assert.match(node.textContent,/物品\t金额/);assert.doesNotMatch(node.textContent,/<h3>|bad/);assert.equal(node.querySelector('script'),null);assert.equal(data.agreement.body,body);}finally{await p.close();}
 });
 
-const selectedPayoutDeclaration = () => declaration({ title: "包赔声明", inventory: [{ itemId: "item_haff", quantity: "60000000" }], attributes: { full_payout_declaration: { schema: "full-payout-declaration-v1", selected: true }, owner_deposit_declaration: { schema: "owner-deposit-declaration-v1", amountCents: "30000", declarationVersion: "test" } } });
+const selectedPayoutDeclaration = () => completeDeclaration({ title: "包赔声明", inventory: [{ itemId: "item_haff", quantity: "60000000" }], attributes: { full_payout_declaration: { schema: "full-payout-declaration-v1", selected: true }, owner_deposit_declaration: { schema: "owner-deposit-declaration-v1", amountCents: "30000", declarationVersion: "test" } } });
 const ownerPayoutTerms = { termsVersionId: "payout_v1", termsDigest: "a".repeat(64), disclosureVersion: "disclosure_v1", policyRef: "policy_v1", policyVersion: "1", title: "本次包赔条款", body: "本次保障条件与责任。" };
 
 test("owner selected payout requires its separate acceptance and sends exact sealed refs only to accept-rules", async () => {
@@ -2405,7 +2497,7 @@ test('owner-income-preview: PARTIAL state displays partial subtotal and does not
 });
 
 test('owner-income-preview: primary submission pipeline runs save -> quote -> accept -> submit on unquoted draft', async () => {
-  const declared = declaration({
+  const declared = completeDeclaration({
     inventory: [
       { itemId: "item_haff", quantity: "60000000" },
       { itemId: "item_round", quantity: "60" },
@@ -2803,7 +2895,7 @@ test('the publish group map is visible and provides a real focus-return target w
 });
 
 test("unquoted draft can request a quote before the guarantee gate is resolved", async () => {
-  const declared = declaration({
+  const declared = completeDeclaration({
     inventory: [{ itemId: "item_haff", quantity: "60000000" }, { itemId: "item_round", quantity: "60" }],
     termOptionCode: "legacy_daily_10m",
   });

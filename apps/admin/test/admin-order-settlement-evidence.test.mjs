@@ -149,7 +149,19 @@ test('business funds keep old order payment singular while preserving attempts a
  assert.match(card.textContent,/first-refund原状态退款成功20\.00 元[\s\S]*second-refund原状态退款成功30\.00 元/);
  assert.match(ui.node.textContent,/旧渠道依据尚未接入/);
  assert(![...ui.node.querySelectorAll('button')].some(b=>b.textContent.includes('在汇聚对账查看本单')));
- assert.equal(ui.node.querySelector('aside.oc-related'),null);
+ const support=ui.node.querySelector('aside.oc-related');
+ assert.ok(support, 'legacy orders retain their customer-service group section');
+ assert.match(support.textContent,/订单群/);
+});
+
+test('legacy account capture is labelled separately from the order frozen facts',async t=>{
+ const legacy={...native,id:'legacy_order_capture',source:{...native.source,origin:'LEGACY'},
+  haffRatio:{source:'LEGACY_ORIGINAL_ORDER',state:'NOT_RECORDED',wanPerYuan:null,customerTier:null},
+  accountView:{source:'LEGACY_ACCOUNT_SNAPSHOT',sourceAccountBaseRatioWanPerYuan:'56',sourceAccountFullPayoutSelected:true}};
+ globalThis.fetch=async url=>response(String(url).includes('/finance/')?finance(url):{order:legacy});
+ const ui=await setup(t,['order.read','supply.rental_account.read']);ui.props.initialOrderId=legacy.id;await ui.render();
+ await until(()=>ui.node.textContent.includes('迁入时账号：'));
+ assert.match(ui.node.textContent,/迁入时账号：比例 1元=56万哈夫币 · 包赔已选择；不是本单冻结记录/);
 });
 
 test('native order keeps the authorized channel reconciliation entry and order group section',async t=>{

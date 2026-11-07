@@ -1085,6 +1085,7 @@ async function validatePublicationAttributes(client: PoolClient, a: PublishingAc
     requireGradingDivision: legacy === undefined && (!reference || reference.gradingCode !== attributes.grading_code),
     requireSupplementalDeclarations: legacy === undefined && !reference,
     requireServiceWindow: !reference,
+    requireNewAccountFacts: legacy === undefined && !reference,
   });
 }
 export async function quoteListing(
@@ -1632,6 +1633,8 @@ export async function setOwnerPaused(
   gate: SupplyGateReader,
 ): Promise<void> {
   checkAccountRevision(a, body.expectedRevision);
+  if (paused && a.current_version_id && (await currentVersion(client, a)).origin === "LEGACY_OBSERVATION")
+    throw conflict("历史账号记录不可修改接单状态，请联系客服");
   if (!paused) {
     const v = await currentVersion(client, a);
     const publication = await readListingPublication(client, a, v);

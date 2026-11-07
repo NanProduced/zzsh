@@ -740,8 +740,11 @@ export function inventoryRows(
 export function haffRateText(value: string | null | undefined): string {
   if (typeof value !== "string" || !/^\d{1,24}(?:\.\d{1,8})?$/.test(value) || BigInt(value.replace(".", "")) === 0n) return "兑换比例未提供";
   const [whole, fraction = ""] = value.split(".");
-  const tail = fraction.replace(/0+$/, "");
-  return `1元=${BigInt(whole!)}${tail ? "." + tail : ""}万哈夫币`;
+  const digits = fraction.padEnd(3, "0");
+  const rounded = BigInt(whole!) * 100n + BigInt(digits.slice(0, 2)) + (digits[2]! >= "5" ? 1n : 0n);
+  const tail = (rounded % 100n).toString().padStart(2, "0").replace(/0+$/, "");
+  const text = rounded === 0n ? "<0.01" : `${rounded / 100n}${tail ? "." + tail : ""}`;
+  return `1元=${/[1-9]/.test(fraction.slice(2)) && rounded !== 0n ? "约" : ""}${text}万哈夫币`;
 }
 
 export function resourceBillingRows(version: Version) {

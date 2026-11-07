@@ -90,6 +90,8 @@ function projectHistoricalDisplay(row: HistoricalReadRow, accountId?: string) {
   const attributes: typeof snapshot.attributes = { ...snapshot.attributes, face_is_self: snapshot.risk.faceIsSelf, ban_record: snapshot.risk.banRecord };
   return { state: "KNOWN" as const, facts: {
     schema: snapshot.schema, rentalMode: snapshot.rentalMode, attributes,
+    ...(Object.hasOwn(snapshot, "sourceAccountBaseRatioWanPerYuan") ? { sourceAccountBaseRatioWanPerYuan: snapshot.sourceAccountBaseRatioWanPerYuan } : {}),
+    ...(Object.hasOwn(snapshot, "sourceAccountFullPayoutSelected") ? { sourceAccountFullPayoutSelected: snapshot.sourceAccountFullPayoutSelected } : {}),
     resources: snapshot.resources.map(({ code, name, quantity, unit }) => ({ code, name, quantity, unit })),
     attributeDisplay: projectPublicAttributeDisplay(attributes), sourceUpdatedAt,
   } };

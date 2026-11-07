@@ -397,7 +397,7 @@ export function paymentEntryOpen(order: Order): boolean {
 }
 
 const LEGACY_RESOURCE_NAMES: Record<string, string> = {
-  df_billable_haff: "哈夫币",
+  df_billable_haff: "哈夫币消耗",
   df_billable_awm_bullet: "AWM子弹",
   df_billable_level6_bullet: "6级子弹",
   df_billable_level6_helmet: "6级头盔",

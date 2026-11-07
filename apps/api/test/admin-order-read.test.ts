@@ -1,7 +1,7 @@
 import {test} from "node:test";
 import assert from "node:assert/strict";
 import type {PoolClient} from "pg";
-import {getAdminReadOrder,projectAdminReadOrder,queryAdminReadOrders,orderReadRelation,orderReadKeyRelation,parseOrderOrigin,readNativeFrozenAccounts,NATIVE_FROZEN_ACCOUNT_SQL,legacyOrderResources,orderHaffRatio,LIST_MATERIALS_LIMIT,restrictListMoney,accountViewFrozen} from "../src/order/admin-order-read";
+import {getAdminReadOrder,projectAdminReadOrder,queryAdminReadOrders,orderReadRelation,orderReadKeyRelation,parseOrderOrigin,readNativeFrozenAccounts,NATIVE_FROZEN_ACCOUNT_SQL,legacyOrderResources,legacyOrderSource,orderHaffRatio,LIST_MATERIALS_LIMIT,restrictListMoney,accountViewFrozen} from "../src/order/admin-order-read";
 import {LEGACY_ORDER_STATUS_SQL} from "../src/order/legacy-order-read";
 import {parseAdminOrderPageQuery} from "../src/order/order-routes";
 const viewer={adminId:"test-reader",isBoss:false,internalQuote:false,authorizationKey:"a".repeat(64)};
@@ -77,6 +77,19 @@ test('the narrow key relation keeps every filter column and drops only the recor
  }
 });
 const record={id:"legacy-1",original_order_no:"OLD-1",source_order_status:5,source_pay_status:1,due_amount_cents:"6600",recorded_paid_amount_cents:"6600",deposit_amount_cents:"0",source_snapshot:{goods_money:"36.00",expend_pay_money:"0.00",return_order_money:null},source_created_at:null,source_paid_at:null,source_cancelled_at:null,source_completed_at:null,owner_name:"Owner",renter_name:"Renter",owner_user_id:"owner",renter_user_id:"renter",account_id:"account",game_id:"game",legacy_account_no:"A1"};
+test('order source uses the old admin ClientEnum, keeps code 1 as website and never guesses unknown terminals',()=>{
+ assert.deepEqual(legacyOrderSource(1),{code:'1',label:'网站',state:'KNOWN'});
+ assert.deepEqual(legacyOrderSource('2'),{code:'2',label:'微信公众号',state:'KNOWN'});
+ assert.deepEqual(legacyOrderSource(3),{code:'3',label:'手机H5',state:'KNOWN'});
+ assert.deepEqual(legacyOrderSource(4),{code:'4',label:'电脑PC',state:'KNOWN'});
+ assert.deepEqual(legacyOrderSource(5),{code:'5',label:'苹果APP',state:'KNOWN'});
+ assert.deepEqual(legacyOrderSource(6),{code:'6',label:'安卓APP',state:'KNOWN'});
+ assert.deepEqual(legacyOrderSource(99),{code:'99',label:null,state:'UNKNOWN'});
+ assert.deepEqual(legacyOrderSource(null),{code:null,label:null,state:'NOT_RECORDED'});
+ assert.equal(projectAdminReadOrder('LEGACY',{...record,source_snapshot:{...record.source_snapshot,order_source:'1'}},viewer).source.orderSource.label,'网站');
+ assert.equal(projectAdminReadOrder('LEGACY',{...record,source_snapshot:{...record.source_snapshot,order_source:99}},viewer).source.orderSource.state,'UNKNOWN');
+ assert.equal(projectAdminReadOrder('LEGACY',record,viewer).source.orderSource.state,'NOT_RECORDED');
+});
 const amount={currency:"CNY",unit:"yuan",amount:"90071992547409931234.56",scale:2},zero={...amount,amount:"0.00"};
 const native={id:"native-1",display_no:"NEW-1",account_id:"account",account_no:"A1",listing_version_id:"version",owner_user_id:"owner",renter_user_id:"renter",owner_name:"Owner",renter_name:"Renter",game_id:"game",rule_release_id:"native-release",content_hash:"a".repeat(64),term_option_code:"day",status:"COMPLETED",rental_amount_cents:"9007199254740993123456",deposit_amount_cents:"0",currency:"CNY",term_seconds:"86400",title:"Native order",hold_until:"2026-09-30T00:00:00.000000Z",paid_at:null,created_at:"2026-09-29T00:00:00.000000Z",revision:"1",quote_snapshot:{schemaVersion:1,currency:"CNY",lines:[],resourceTotal:amount,tenantDeposit:zero,ownerTotal:amount,platformFullProfit:zero,termSeconds:"86400",expiryDisclosures:[],unitAmountsInformational:true}};
 const paymentRequest={id:"request-1",order_id:native.id,channel:"JOINPAY",state:"UNKNOWN",method:"ALIPAY_NATIVE",amount_cents:"12345",currency:"CNY",
@@ -118,6 +131,12 @@ function orderClient(options:{keys?:Key[];total?:string;records?:Array<{origin:s
  }} as unknown as PoolClient;
  return {client,statements};
 }
+test('old order 793+199=992 keeps source components separate from rent and deposit labels',()=>{
+ const sample={...record,source_pay_status:1,due_amount_cents:'99200',recorded_paid_amount_cents:'99200',deposit_amount_cents:'0',source_snapshot:{...record.source_snapshot,goods_money:'793.00',expend_pay_money:'199.00'}};
+ const row=projectAdminReadOrder('LEGACY',sample,{...viewer,financeReadable:true}) as any;
+ assert.deepEqual(row.prepaymentBreakdown,{basis:'LEGACY_ORIGINAL_ORDER',completeness:'COMPLETE',haffRental:{currency:'CNY',unit:'yuan',amount:'793.00',scale:2},materialsPrepay:{currency:'CNY',unit:'yuan',amount:'199.00',scale:2}});
+ assert.equal(row.amounts.rental.amount,'992.00');assert.equal(row.payment.recordedAmount.amount,'992.00');assert.equal(row.amounts.deposit.amount,'0.00');
+});
 test("authorized order readers retain contractual paid amounts without global finance permission",()=>{
  for(const financeReadable of [undefined,false]){const row=projectAdminReadOrder("LEGACY",record,{...viewer,financeReadable});assert.equal(row.payment.state,"RECORDED_PAID");assert.equal(row.payment.recordedAmount.amount,"66.00");assert.equal(row.legacyAmounts.paid.amount,"66.00");}
  const ok=projectAdminReadOrder("LEGACY",record,{...viewer,financeReadable:true});assert.equal(ok.payment.recordedAmount.amount,"66.00");assert.equal(ok.legacyAmounts.paid.amount,"66.00");
@@ -719,7 +738,7 @@ test('clarity: 旧单原单资源复用旧用户资源校验，单位未记录�
  const raw={expend_haff:'98.08',awm_bullet_num:'61',level6_armor_num:'0',top_insure_card_num:'2',coffee_num:null};
  const resources=legacyOrderResources(raw);
  assert.equal(resources.state,'KNOWN');
- assert.deepEqual(resources.items.map(i=>[i.name,i.quantity,i.unit,i.zero]),[['哈夫币','98.08',null,false],['AWM子弹','61',null,false],['6级护甲','0',null,true],['顶级保险','2','DAY',false]]);
+ assert.deepEqual(resources.items.map(i=>[i.name,i.quantity,i.unit,i.zero]),[['哈夫币消耗','98.08',null,false],['AWM子弹','61',null,false],['6级护甲','0',null,true],['顶级保险','2','DAY',false]]);
  const row=projectAdminReadOrder('LEGACY',{...record,source_snapshot:{...record.source_snapshot,...raw}},viewer);
  assert.equal(row.accountTitle.neutralSummary,null,'原单资源只留在 legacyResources 结构');
  assert.deepEqual(row.haffRatio,{source:'LEGACY_ORIGINAL_ORDER',state:'NOT_RECORDED',wanPerYuan:null,customerTier:null},'旧单无比例字段，不推算');

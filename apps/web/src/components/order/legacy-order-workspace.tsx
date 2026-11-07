@@ -145,6 +145,8 @@ export function LegacyOrderWorkspace({ party, orderId, page: pageText, accountId
             <div className="order-renter-bill-block">
               <dl className="order-facts order-bill-facts">
                 <div><dt>应付金额</dt><dd>{formatOrderMoney(data.legacyAmounts?.required)}</dd></div>
+                <div><dt>商品金额（原）</dt><dd>{formatOrderMoney(data.legacyAmounts?.goods)}</dd></div>
+                <div><dt>额外物品金额（原）</dt><dd>{formatOrderMoney(data.legacyAmounts?.items)}</dd></div>
                 <div><dt>已付金额</dt><dd>{formatOrderMoney(data.legacyAmounts?.paid)}</dd></div>
                 <div><dt>押金</dt><dd>{formatOrderMoney(data.legacyAmounts?.deposit)}</dd></div>
                 <div><dt>退款记录金额</dt><dd>{formatOrderMoney(data.legacyAmounts?.refund)}</dd></div>
@@ -159,7 +161,7 @@ export function LegacyOrderWorkspace({ party, orderId, page: pageText, accountId
           <section className="account-module-card order-legacy-assets-card">
             <div className="account-module-card-header">
               <h3>本单资源记录</h3>
-              <span className="order-assets-hint">下单包含在架物资</span>
+              <span className="order-assets-hint" title="旧平台原单的消耗数量，不代表当前账号库存或下单时在架库存">原单消耗记录</span>
             </div>
             <dl className="order-legacy-resources-grid">
               {resources.map(resource => (
@@ -169,6 +171,7 @@ export function LegacyOrderWorkspace({ party, orderId, page: pageText, accountId
                 </div>
               ))}
             </dl>
+            <p className="order-muted">以上为旧平台订单记录的消耗数量，不是当前账号库存。</p>
           </section>
         ) : null}
       </div>

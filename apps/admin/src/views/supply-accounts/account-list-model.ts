@@ -248,13 +248,13 @@ export function rowBaseFeeRows(row: SupplyWorkItem): { haff: string; materials: 
     const historical = row.facts.historicalRead?.historicalQuote;
     if (historical) {
       const cents = (value: unknown) => typeof value === "string" ? depositCentsFromYuan(value).value || null : null;
-      const rent = cents(historical.haffRentYuan), materials = cents(historical.goodsYuan), oldDeposit = cents(historical.depositYuan);
+      const rent = cents(historical.haffRentYuan), materials = cents(historical.goodsYuan);
       return {
-        haff: rent === null ? "未提供" : `历史 ${formatFundingCents(rent)}`,
-        materials: materials === null ? "未提供" : `历史 ${formatFundingCents(materials)}`,
+        haff: rent === null ? "未提供" : formatFundingCents(rent),
+        materials: materials === null ? "未提供" : formatFundingCents(materials),
         deposit,
-        total: rent === null || materials === null || oldDeposit === null ? "未提供" : formatFundingCents((BigInt(rent) + BigInt(materials) + BigInt(oldDeposit)).toString()),
-        note: "迁入时账号记录，不是订单实付或当前报价",
+        total: "未提供",
+        note: "迁入时账号记录，分项不合并；押金可退，不是订单实付或当前报价",
       };
     }
     return { haff: "未提供", materials: "未提供", deposit, total: "未提供", note: "资料未提供" };
@@ -372,7 +372,11 @@ export function rowGuaranteeProofText(row: SupplyWorkItem): string {
 
 /** 全额包赔三态：选中、未选、缺记录分开，绝不从标题推断。 */
 export function rowFullPayout(row: SupplyWorkItem): { label: string; state: SupplyListSummary["fullPayout"] | "UNASSEMBLED" } {
-  if (row.summary?.displaySource === "LEGACY_SNAPSHOT") return { label: "未提供", state: "UNASSEMBLED" };
+  if (row.summary?.displaySource === "LEGACY_SNAPSHOT") {
+    const read = row.facts.historicalRead;
+    const selected = read?.observationVersionId === row.summary.versionId && read.display?.state === "KNOWN" ? read.display.facts.sourceAccountFullPayoutSelected : null;
+    return selected === true ? { label: "已选", state: "SELECTED" } : selected === false ? { label: "未选", state: "NOT_SELECTED" } : { label: "未提供", state: "UNASSEMBLED" };
+  }
   const state = row.summary?.fullPayout;
   if (!state) return { label: "未提供", state: "UNASSEMBLED" };
   return { label: state === "SELECTED" ? "已选" : state === "NOT_SELECTED" ? "未选" : "未申报", state };

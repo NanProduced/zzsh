@@ -22,7 +22,8 @@ export type AdminOrderSettlementEvidence={
 type OrderFinanceTransaction={
  documentRef:string;number:string;kind:'PAYMENT'|'REFUND';source:'NATIVE'|'LEGACY_MYSQL';state:string;
  amountCents:string|null;occurredAt:string|null;channelArrival:'UNKNOWN';
- originalStatus?:string|null;refundAttempts?:HistoricalRefundAttempt[];sourceRefundFlags?:string[];
+ originalStatus?:string|null;payWay?:string|null;payWayLabel?:string|null;
+ refundAttempts?:HistoricalRefundAttempt[];sourceRefundFlags?:string[];
 };
 type OrderFinanceBusiness={
  payment:{state:'SITE_ACCEPTED'|'LEGACY_RECORDED_PAID'|'UNPAID'|'REVIEW_REQUIRED'|'UNKNOWN';amount:OrderSettlementMoney;occurredAt:string|null};
@@ -91,7 +92,7 @@ export function projectAdminOrderFinanceBusiness(order:FinanceOrderFact,receipt:
    if(row.sourceEntity!=='payment_request'&&row.sourceEntity!=='channel_refund_intent')continue;
    transactions.push({documentRef:row.documentRef,number:row.documentNumber,kind:row.sourceEntity==='payment_request'?'PAYMENT':'REFUND',
     source:'NATIVE',state:row.state,amountCents:money(row.evidence.requestedAmountCents,'ORDER_TRANSACTION_AMOUNT_UNAVAILABLE').cents,
-    occurredAt:row.occurredAt,channelArrival:'UNKNOWN'});
+    occurredAt:row.occurredAt,channelArrival:'UNKNOWN',payWay:null,payWayLabel:null});
   }
  }
  const paymentAttempts=transactions.filter(row=>row.kind==='PAYMENT'),refundOrders=transactions.filter(row=>row.kind==='REFUND');

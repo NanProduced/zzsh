@@ -71,6 +71,7 @@ import { freezeRequest, IdentityPauseGate, isCurrentQuery } from "../../lib/supp
 import { loadSupplyIntent, prepareSupplyIntent, acceptSupplyIntent, retainUncertainSupplyIntent, clearSupplyIntent, sameSupplyIntent, SupplyIntentStorageError, type SupplyWriteIntent, type SupplyWriteAction, type SupplyWriteReceipt } from "../../lib/supply-write-intent";
 import { MEDIA_ACCEPT_ATTRIBUTE, mediaUploadFailureHint } from "../../lib/media-upload";
 import { selectDeltaGame } from "../../lib/supply-games";
+import { requiredAccountFactsProblem } from "../../lib/supply-publication-required";
 import { DELTA_REGION_OPTIONS } from "../../lib/delta-region-options";
 import {
   SERVICE_WINDOW_END_OPTIONS,
@@ -612,12 +613,14 @@ function RegionPicker({
   city,
   options,
   disabled,
+  required = false,
   onChange,
 }: {
   province: string;
   city: string;
   options: ReadonlyArray<RegionOption>;
   disabled: boolean;
+  required?: boolean;
   onChange: (province: string | null, city: string | null) => void;
 }) {
   const [open, setOpen] = useState(false);
@@ -636,8 +639,8 @@ function RegionPicker({
     if (province) setActiveProvince(province);
   }, [province]);
 
-  return <div className="publish-region-field">
-    <span className="publish-region-label">地区选择</span>
+  return <div id="publish-region" tabIndex={-1} className="publish-region-field">
+    <span className="publish-region-label">地区选择{required ? <span className="publish-required-mark">必填</span> : null}</span>
     <div className="publish-region-control">
       <Popover.Root open={open} onOpenChange={setOpen}>
         <Popover.Trigger asChild>
@@ -1874,7 +1877,11 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
       const node = (target ? document.getElementById(target) : null) ?? firstFocusable(group);
       if (node) {
         node.scrollIntoView({ behavior: "smooth", block: "center" });
-        node.focus({ preventScroll: true });
+        const focusTarget = node.matches('input, textarea, button, [role="radio"], [role="combobox"]')
+          ? node
+          : node.querySelector<HTMLElement>('[role="radio"]:not([aria-disabled="true"]), [role="combobox"]:not([aria-disabled="true"]), input:not([type="hidden"]):not([disabled]), textarea:not([disabled])')
+            ?? node.querySelector<HTMLElement>('button:not([disabled])') ?? node;
+        focusTarget.focus({ preventScroll: true });
       }
     });
   };
@@ -1898,6 +1905,8 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
     if (optionsAvailability === "failed") return { group: "terms", message: "出租规则读取失败，请重试读取后再核价。" };
     const declaration = declarationProblem();
     if (declaration) return declaration;
+    const required = requiredAccountFactsProblem(draftRef.current.attributes, options);
+    if (required) return { group: "account", message: required.message, target: required.target };
     if (catalogAvailability === "pending") return { group: "assets", message: "发布目录正在读取，请稍候再核对报价。" };
     if (catalogAvailability === "failed") return { group: "assets", message: "发布目录读取失败，请重试后再核价。" };
     const missing = (catalog?.items ?? []).filter((item) => item.required && !draftRef.current.inventory.some((row) => row.itemId === item.id && row.quantity !== null));
@@ -1967,7 +1976,7 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
 
   const quote = async () => {
     const problem = quoteProblem();
-    if (problem) { locate(problem.group, problem.message); return; }
+    if (problem) { locate(problem.group, problem.message, problem.target); return; }
     if (requireAmmoReview(() => { void quote(); })) return;
     const context = captureContext();
     setBusy("quote");
@@ -2782,6 +2791,7 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
   const agreement = supply?.agreement ?? options?.agreement ?? null;
   const readOnly = Boolean(accountId && !editing);
   const formDisabled = identityState !== "confirmed" || !identityRef.current || readOnly || Boolean(busy) || writePending || Boolean(intentStorageIssue);
+  const requireNewAccountFacts = !(typeof draft.attributes.legacy_published_reference === "string" && draft.attributes.legacy_published_reference.trim());
   const declarationOptions = options?.declarationOptions;
   const infoSourceOptions = declarationOptions?.info_source;
   const infoSourceValue = typeof draft.attributes.info_source === "string" ? draft.attributes.info_source : "";
@@ -3225,8 +3235,8 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
                   <small>仅显示已开放出租的游戏。</small>
                 </label>
               ) : null}
-              <fieldset className="supply-radio-field publish-choice-field publish-safe-box-field supply-wide"><legend><span className="publish-account-label">安全箱档位<FieldHelp label="安全箱档位"><ManagedNoticeText contentKey="placement:PUBLISH_SAFE_BOX" /></FieldHelp></span></legend>
-                {safeBoxChoiceOptions.length ? <FormRadioGroup variant="segmented" name="safe_box_code" label="安全箱档位" error={fieldError("attributes.safe_box_code")} value={currentSafeBox} options={safeBoxChoiceOptions} disabled={formDisabled || !options} onChange={(value) => changeAttribute("safe_box_code", value)} /> : <small className="publish-choice-empty">{options ? "当前规则未配置安全箱档位。" : "正在读取安全箱档位…"}</small>}
+              <fieldset id="publish-attribute-safe-box" tabIndex={-1} className="supply-radio-field publish-choice-field publish-safe-box-field supply-wide"><legend><span className="publish-account-label">安全箱档位{requireNewAccountFacts ? <span className="publish-required-mark">必填</span> : null}<FieldHelp label="安全箱档位"><ManagedNoticeText contentKey="placement:PUBLISH_SAFE_BOX" /></FieldHelp></span></legend>
+                {safeBoxChoiceOptions.length ? <FormRadioGroup variant="segmented" name="safe_box_code" label="安全箱档位" required={requireNewAccountFacts} error={fieldError("attributes.safe_box_code")} value={currentSafeBox} options={safeBoxChoiceOptions} disabled={formDisabled || !options} onChange={(value) => changeAttribute("safe_box_code", value)} /> : <small className="publish-choice-empty">{options ? "当前规则未配置安全箱档位。" : "正在读取安全箱档位…"}</small>}
               </fieldset>
               {(["next_season_pass", "demulan_unlocked"] as const).some(key => declarationOptions?.[key]?.enabled || typeof draft.attributes[key] === "boolean") ? <div className="publish-safety-row supply-wide">
                 {(["next_season_pass", "demulan_unlocked"] as const).map(key => {
@@ -3242,10 +3252,10 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
                 })}
               </div> : null}
               <div className="publish-performance-row supply-wide">
-                <div className="publish-account-integer-field"><span className="publish-account-label">账号等级</span><IntegerStepper label="账号等级" value={String(draft.attributes.character_level??"")} max="60" disabled={formDisabled} onChange={raw=>changeAttribute("character_level",raw===""?null:Number(raw))} />{typeof draft.attributes.character_level==="number"&&draft.attributes.character_level>60?<small className="publish-legacy-choice-note">已保留历史{draft.attributes.character_level}级原值；请核对后填写0–60级。</small>:null}</div>
-                <label className="publish-grading-field"><span className="publish-account-label">段位</span>
+                <div id="publish-character-level" tabIndex={-1} className="publish-account-integer-field"><span className="publish-account-label">账号等级{requireNewAccountFacts ? <span className="publish-required-mark">必填</span> : null}</span><IntegerStepper label="账号等级" required={requireNewAccountFacts} value={String(draft.attributes.character_level??"")} max="60" disabled={formDisabled} onChange={raw=>changeAttribute("character_level",raw===""?null:Number(raw))} />{typeof draft.attributes.character_level==="number"&&draft.attributes.character_level>60?<small className="publish-legacy-choice-note">已保留历史{draft.attributes.character_level}级原值；请核对后填写0–60级。</small>:null}</div>
+                <label id="publish-attribute-grading" tabIndex={-1} className="publish-grading-field"><span className="publish-account-label">段位<span className="publish-required-mark">必填</span></span>
                   <div className="publish-grading-group">
-                    <FormSelect label="账号段位"
+                    <FormSelect label="账号段位" required
                       value={currentGrading}
                       disabled={formDisabled || !options}
                       placeholder="请选择段位"
@@ -3283,21 +3293,21 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
                     ) : null}
                   </div>
                 </label>
-                <label className="publish-kd-field" htmlFor="publish-secret-kd"><span className="publish-account-label">绝密KD<FieldHelp label="绝密KD">填写当前赛季绝密模式显示的KD，可填写小数，例如1.85。</FieldHelp></span><Input id="publish-secret-kd" data-publish-entry aria-label="绝密KD" type="text" inputMode="decimal" maxLength={32} autoComplete="off" value={String(draft.attributes.secret_kd ?? "")} disabled={formDisabled} aria-invalid={Boolean(kdProblem())} aria-describedby={kdProblem() ? "publish-secret-kd-error" : undefined} onChange={(event) => changeAttribute("secret_kd", event.target.value === "" ? null : event.target.value)} placeholder="例如 1.85" /><FieldError id="publish-secret-kd-error" text={kdProblem()?.message} /></label>
+                <label className="publish-kd-field" htmlFor="publish-secret-kd"><span className="publish-account-label">绝密KD{requireNewAccountFacts ? <span className="publish-required-mark">必填</span> : null}<FieldHelp label="绝密KD">填写当前赛季绝密模式显示的KD，可填写小数，例如1.85。</FieldHelp></span><Input id="publish-secret-kd" data-publish-entry aria-label="绝密KD" aria-required={requireNewAccountFacts || undefined} type="text" inputMode="decimal" maxLength={32} autoComplete="off" value={String(draft.attributes.secret_kd ?? "")} disabled={formDisabled} aria-invalid={Boolean(kdProblem())} aria-describedby={kdProblem() ? "publish-secret-kd-error" : undefined} onChange={(event) => changeAttribute("secret_kd", event.target.value === "" ? null : event.target.value)} placeholder="例如 1.85" /><FieldError id="publish-secret-kd-error" text={kdProblem()?.message} /></label>
               </div>
               <div className="publish-vitality-matrix supply-wide">
-                <fieldset className="supply-radio-field publish-choice-field publish-compact-level-field publish-vitality-field"><legend>体力等级</legend><FormRadioGroup variant="segmented" name="vit_level" label="体力等级" error={fieldError("attributes.vit_level")} value={currentVitality} options={vitalityChoiceOptions} disabled={formDisabled || !options} onChange={(value) => changeAttribute("vit_level", Number(value))} />{vitalityChoiceNote ? <small className="publish-legacy-choice-note">{vitalityChoiceNote}</small> : null}</fieldset>
-                <fieldset className="supply-radio-field publish-choice-field publish-compact-level-field publish-bear-field"><legend>负重等级</legend><FormRadioGroup variant="segmented" name="bear_level" label="负重等级" error={fieldError("attributes.bear_level")} value={currentBear} options={bearChoiceOptions} disabled={formDisabled || !options} onChange={(value) => changeAttribute("bear_level", Number(value))} />{bearChoiceNote ? <small className="publish-legacy-choice-note">{bearChoiceNote}</small> : null}</fieldset>
-                <fieldset className="supply-radio-field publish-choice-field publish-compact-level-field publish-dive-field"><legend>潜水等级</legend><FormRadioGroup variant="segmented" name="dive_level" label="潜水等级" error={fieldError("attributes.dive_level")} value={currentDive} options={diveChoiceOptions} disabled={formDisabled} onChange={(value) => changeAttribute("dive_level", Number(value))} />{diveChoiceNote ? <small className="publish-legacy-choice-note">{diveChoiceNote}</small> : null}</fieldset>
+                <fieldset id="publish-attribute-vit" tabIndex={-1} className="supply-radio-field publish-choice-field publish-compact-level-field publish-vitality-field"><legend>体力等级<span className="publish-required-mark">必填</span></legend><FormRadioGroup variant="segmented" name="vit_level" label="体力等级" required error={fieldError("attributes.vit_level")} value={currentVitality} options={vitalityChoiceOptions} disabled={formDisabled || !options} onChange={(value) => changeAttribute("vit_level", Number(value))} />{vitalityChoiceNote ? <small className="publish-legacy-choice-note">{vitalityChoiceNote}</small> : null}</fieldset>
+                <fieldset id="publish-attribute-bear" tabIndex={-1} className="supply-radio-field publish-choice-field publish-compact-level-field publish-bear-field"><legend>负重等级<span className="publish-required-mark">必填</span></legend><FormRadioGroup variant="segmented" name="bear_level" label="负重等级" required error={fieldError("attributes.bear_level")} value={currentBear} options={bearChoiceOptions} disabled={formDisabled || !options} onChange={(value) => changeAttribute("bear_level", Number(value))} />{bearChoiceNote ? <small className="publish-legacy-choice-note">{bearChoiceNote}</small> : null}</fieldset>
+                <fieldset id="publish-attribute-dive" tabIndex={-1} className="supply-radio-field publish-choice-field publish-compact-level-field publish-dive-field"><legend>潜水等级<span className="publish-required-mark">必填</span></legend><FormRadioGroup variant="segmented" name="dive_level" label="潜水等级" required error={fieldError("attributes.dive_level")} value={currentDive} options={diveChoiceOptions} disabled={formDisabled} onChange={(value) => changeAttribute("dive_level", Number(value))} />{diveChoiceNote ? <small className="publish-legacy-choice-note">{diveChoiceNote}</small> : null}</fieldset>
               </div>
-              <fieldset className="supply-radio-field publish-choice-field publish-login-field supply-wide"><legend><span className="publish-account-label">上号方式<FieldHelp label="上号方式">选择租客上号时，你可以配合的登录方式。</FieldHelp></span></legend>
-                {loginChoiceOptions.length ? <FormRadioGroup variant="segmented" className="publish-login-segmented" name="login_method_code" label="上号方式" error={fieldError("attributes.login_method_code")} value={currentLoginMethod} options={loginChoiceOptions} disabled={formDisabled || !options} onChange={(value) => changeAttribute("login_method_code", value)} /> : <small className="publish-choice-empty">{options ? "当前规则未配置上号方式。" : "正在读取上号方式…"}</small>}
+              <fieldset id="publish-attribute-login" tabIndex={-1} className="supply-radio-field publish-choice-field publish-login-field supply-wide"><legend><span className="publish-account-label">上号方式<span className="publish-required-mark">必填</span><FieldHelp label="上号方式">选择租客上号时，你可以配合的登录方式。</FieldHelp></span></legend>
+                {loginChoiceOptions.length ? <FormRadioGroup variant="segmented" className="publish-login-segmented" name="login_method_code" label="上号方式" required error={fieldError("attributes.login_method_code")} value={currentLoginMethod} options={loginChoiceOptions} disabled={formDisabled || !options} onChange={(value) => changeAttribute("login_method_code", value)} /> : <small className="publish-choice-empty">{options ? "当前规则未配置上号方式。" : "正在读取上号方式…"}</small>}
               </fieldset>
               <div className="publish-service-row supply-wide">
-                <RegionPicker province={String(draft.attributes.region_province ?? "")} city={String(draft.attributes.region_city ?? "")} options={DELTA_REGION_OPTIONS} disabled={formDisabled} onChange={(province, city) => setDraft((previous) => ({ ...previous, attributes: { ...previous.attributes, region_province: province, region_city: city } }))} />
-                <div className="publish-service-window">
-                  <span className="publish-account-label"><Clock3 size={16} aria-hidden="true" />可配合上号时间<span className="publish-timezone">北京时间</span><FieldHelp label="可配合上号时间">填写你能协助上号的时间。支持跨日时段，例如22:00至次日02:00。</FieldHelp></span>
-                  <FormRadioGroup variant="segmented" className="publish-window-mode" name="service_window_mode" label="可配合上号时间" value={serviceWindowMode} options={[{value:"allDay",label:"全天可配合"},{value:"window",label:"按时段配合"}]} disabled={formDisabled} onChange={value => changeAllDay(value === "allDay")} />
+                <RegionPicker province={String(draft.attributes.region_province ?? "")} city={String(draft.attributes.region_city ?? "")} options={DELTA_REGION_OPTIONS} disabled={formDisabled} required={requireNewAccountFacts} onChange={(province, city) => setDraft((previous) => ({ ...previous, attributes: { ...previous.attributes, region_province: province, region_city: city } }))} />
+                <div id="publish-service-window" tabIndex={-1} className="publish-service-window">
+                  <span className="publish-account-label"><Clock3 size={16} aria-hidden="true" />可配合上号时间{requireNewAccountFacts ? <span className="publish-required-mark">必填</span> : null}<span className="publish-timezone">北京时间</span><FieldHelp label="可配合上号时间">填写你能协助上号的时间。支持跨日时段，例如22:00至次日02:00。</FieldHelp></span>
+                  <FormRadioGroup variant="segmented" className="publish-window-mode" name="service_window_mode" label="可配合上号时间" required={requireNewAccountFacts} value={serviceWindowMode} options={[{value:"allDay",label:"全天可配合"},{value:"window",label:"按时段配合"}]} disabled={formDisabled} onChange={value => changeAllDay(value === "allDay")} />
                   {serviceWindowMode === "window" ? <span className="supply-time-range">
                     <FormSelect label="开始时间" value={serviceWindowStart === null ? "" : String(serviceWindowStart)} disabled={formDisabled} placeholder="开始时间" popupClassName="publish-select-popup" options={serviceTimeOptions(SERVICE_WINDOW_START_OPTIONS, serviceWindowStart)} onChange={(value) => changeServiceWindow("service_window_start_minute", value === "" ? "" : minutesToTimeValue(Number(value)))} />
                     <span aria-hidden="true" className="supply-time-separator">至</span>
@@ -3309,14 +3319,14 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
                 </div>
               </div>
               <div className="publish-safety-row supply-wide">
-                <fieldset className="supply-radio-field"><legend>封禁记录</legend>
+                <fieldset id="publish-attribute-ban" tabIndex={-1} className="supply-radio-field"><legend>封禁记录{requireNewAccountFacts ? <span className="publish-required-mark">必填</span> : null}</legend>
                   <div className="supply-radio-group">
-                    <FormRadioGroup variant="segmented" name="ban_record" label="封禁记录" value={draft.attributes.ban_record as boolean | null} options={[{value:false,label:"无封禁记录"},{value:true,label:"有封禁记录"}]} disabled={formDisabled} onChange={value => changeAttribute("ban_record",value)} />
+                    <FormRadioGroup variant="segmented" name="ban_record" label="封禁记录" required={requireNewAccountFacts} value={draft.attributes.ban_record as boolean | null} options={[{value:false,label:"无封禁记录"},{value:true,label:"有封禁记录"}]} disabled={formDisabled} onChange={value => changeAttribute("ban_record",value)} />
                   </div>
                 </fieldset>
-                <fieldset className="supply-radio-field"><legend><span className="publish-account-label">人脸归属<FieldHelp label="人脸归属">请选择账号人脸认证是否属于号主本人；该信息由号主申报。</FieldHelp></span></legend>
+                <fieldset id="publish-attribute-face" tabIndex={-1} className="supply-radio-field"><legend><span className="publish-account-label">人脸归属{requireNewAccountFacts ? <span className="publish-required-mark">必填</span> : null}<FieldHelp label="人脸归属">请选择账号人脸认证是否属于号主本人；该信息由号主申报。</FieldHelp></span></legend>
                   <div className="supply-radio-group">
-                    <FormRadioGroup variant="segmented" name="face_is_self" label="人脸归属" value={draft.attributes.face_is_self as boolean | null} options={[{value:true,label:"号主本人"},{value:false,label:"非号主本人"}]} disabled={formDisabled} onChange={value => changeAttribute("face_is_self",value)} />
+                    <FormRadioGroup variant="segmented" name="face_is_self" label="人脸归属" required={requireNewAccountFacts} value={draft.attributes.face_is_self as boolean | null} options={[{value:true,label:"号主本人"},{value:false,label:"非号主本人"}]} disabled={formDisabled} onChange={value => changeAttribute("face_is_self",value)} />
                   </div>
                 </fieldset>
               </div>

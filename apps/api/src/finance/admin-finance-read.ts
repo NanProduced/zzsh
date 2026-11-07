@@ -205,7 +205,7 @@ export function projectAdminFinanceObservation(row: Raw): FinanceEntry {
     state: "HISTORICAL_OBSERVED", classification: row.included_in_opening ? "HISTORICAL_COVERED" : "HISTORICAL_UNCOVERED", affectsCurrentWallet: false, affectsCurrentLedger: false,
     occurredAt: row.at, importedAt: row.imported_at, sourceType: row.source_type, sourceSystem: row.source_system ?? "SOURCE_SYSTEM_UNKNOWN", sourceEntity: row.source_entity, sourceId: row.source_id, sourceDigest: row.source_digest, basisId: row.basis_id,
     reasonCodes: [...(row.included_in_opening ? [] : ["HISTORICAL_NOT_ADMITTED"]), ...(!earnings ? ["HISTORICAL_STATUS_NOT_CHANNEL_RESULT"] : []), ...(amount === null ? ["AMOUNT_OR_DIRECTION_UNKNOWN"] : [])], accountCode: null,
-    evidence: { originalReference: row.reference_id ?? null, originalStatus: row.source_status ?? null, originalOrderType:row.extra_evidence?.snapshot?.sourceOrderType??null, originalNumber:row.reference_no??row.extra_evidence?.snapshot?.sourceNumber??null, originalRatio:row.extra_evidence?.snapshot?.sourceRatio??null, originalLevel:row.extra_evidence?.snapshot?.level==null?null:String(row.extra_evidence.snapshot.level), channelArrival:'UNKNOWN',
+    evidence: { originalReference: row.reference_id ?? null, originalStatus: row.source_status ?? null, originalPayWay: historical.payWay, originalOrderType:row.extra_evidence?.snapshot?.sourceOrderType??null, originalNumber:row.reference_no??row.extra_evidence?.snapshot?.sourceNumber??null, originalRatio:row.extra_evidence?.snapshot?.sourceRatio??null, originalLevel:row.extra_evidence?.snapshot?.level==null?null:String(row.extra_evidence.snapshot.level), channelArrival:'UNKNOWN',
       originalDestinationMask:row.extra_evidence?.snapshot?.legacyDestination?.cardLast4?'**** '+row.extra_evidence.snapshot.legacyDestination.cardLast4:row.extra_evidence?.snapshot?.legacyDestination?.accountMasked??null,originalBankName:row.extra_evidence?.snapshot?.legacyDestination?.bankName??null,originalRecipientMask:row.extra_evidence?.snapshot?.legacyDestination?.nameMasked??null,originalMobileMask:row.extra_evidence?.snapshot?.legacyDestination?.phoneMasked??null,originalOperatorSourceId:row.extra_evidence?.snapshot?.legacyOperatorId??null,originalNetCents: signedSourceCents(row.net), originalFeeCents: signedSourceCents(row.fee), historicalBalanceAfterCents: signedSourceCents(row.balance_after), dueAt: null, policyVersion: null }, related: [],historical };
 }
 const LOCAL_SOURCE_LIMIT = 64;
@@ -335,6 +335,7 @@ function projectLegacyOrderFinanceObservations(rows:Raw[],order:FinanceOrderFact
     documentRef:entry.documentRef,number:entry.documentNumber,kind:entry.kind,
     amountCents:entry.historical!.recordedAmountCents,occurredAt:entry.occurredAt,
     originalStatus:entry.historical!.originalStatus,originalStatusLabel:entry.historical!.originalStatusLabel,
+    payWay:entry.historical!.payWay,payWayLabel:entry.historical!.payWayLabel,
     refundAttempts:entry.historical!.refundAttempts,sourceRefundFlags:entry.historical!.sourceRefundFlags,
     channelArrival:'UNKNOWN' as const,
   }));

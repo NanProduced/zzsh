@@ -89,6 +89,9 @@ test('typed order finance edges preserve independent source amounts and deny sam
   }
   assert.equal(enrich(refund(),[],[{...parent,renterId:'other'}]).historical!.association.state,'UNRESOLVED');
   assert.equal(enrich(refund(),[],[{...parent,objectReadable:false}]).historical!.association.state,'DENIED');
+  const wrongOrder=rawObservation('HISTORICAL_PAYMENT',{id:'20',userId:'11',order_type:'1',order_id:'33',pay_order_sn:'PAY-20',pay_money:'685.00',pay_is:'1',pay_way:3,pay_time:'0',create_time:String(at),relationship:'VERIFIED'});
+  assert.equal(enrich(wrongOrder,[],[parent]).historical!.association.state,'UNRESOLVED','a payment attempt never attaches to another order');
+  assert.equal(projectAdminFinanceObservation(wrongOrder).historical!.payWay,'3','its own verified method stays on its own record');
   const commission=distribution({order_id:'32',status:1,earnings:'3.40'});
   const links=resolveHistoricalReverseLinks(parent.ref,[refund(),payment('1'),payment('2'),commission],[parent],access);
   assert.deepEqual(links.related.map(link=>link.ref.split(':')[0]),['HISTORY_REFUND','HISTORY_PAYMENT','HISTORY_DISTRIBUTION']);
@@ -118,6 +121,20 @@ test('only a proved original earnings log receives balance-record amount semanti
   for(const row of [badDigest,badTime,rewrite('action',9),rewrite('amount','invalid')]){
     const projected=projectAdminFinanceObservation(row);assert.equal(projected.historical!.amountSemantics,'UNVERIFIED');assert.equal(projected.affectsCurrentWallet,false);assert.equal(projected.affectsCurrentLedger,false);
   }
+});
+
+test('verified payment observations expose attempt-level pay_way and never infer arrival or an unknown terminal',()=>{
+  const payment=(pay_way:unknown)=>rawObservation('HISTORICAL_PAYMENT',{id:'19',userId:'11',order_type:'1',order_id:'32',pay_order_sn:'PAY-19',pay_money:'685.00',pay_is:'1',pay_way,pay_time:'0',create_time:String(at),relationship:'VERIFIED'});
+  const wechat=projectAdminFinanceObservation(payment(2)).historical!;
+  assert.equal(wechat.payWay,'2');assert.equal(wechat.payWayLabel,'微信（原记录）');assert.equal(wechat.channelState,'UNVERIFIED');
+  const alipay=projectAdminFinanceObservation(payment('3')).historical!;
+  assert.equal(alipay.payWay,'3');assert.equal(alipay.payWayLabel,'支付宝（原记录）');
+  const unknown=projectAdminFinanceObservation(payment(9)).historical!;
+  assert.equal(unknown.payWay,'9');assert.equal(unknown.payWayLabel,null);
+  const missing=projectAdminFinanceObservation(payment(undefined)).historical!;
+  assert.equal(missing.payWay,null);assert.equal(missing.payWayLabel,null);
+  const broken=payment(2);broken.source_digest='0'.repeat(64);
+  assert.equal(projectAdminFinanceObservation(broken).historical!.payWay,null,'unverified bytes never expose a payment mode');
 });
 
 test('every legacy business observation requires original source proof before its amount is presented as recorded',()=>{

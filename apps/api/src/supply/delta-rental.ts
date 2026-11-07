@@ -82,7 +82,7 @@ export function deltaPublicationLevels(map: Record<string, unknown> | undefined)
 }
 
 // New quote/publication validation is separate from historical normalization.
-export function validateDeltaPublicationAttributes(attributes: Record<string, unknown>, options: { requireGradingDivision?: boolean; requireSupplementalDeclarations?: boolean; requireServiceWindow?: boolean } = {}): void {
+export function validateDeltaPublicationAttributes(attributes: Record<string, unknown>, options: { requireGradingDivision?: boolean; requireSupplementalDeclarations?: boolean; requireServiceWindow?: boolean; requireNewAccountFacts?: boolean } = {}): void {
   validateDeltaGradingAttributes(attributes, options.requireGradingDivision !== false);
   if (!(DELTA_LOGIN_METHOD_CODES as readonly unknown[]).includes(attributes.login_method_code))
     throw invalid("请选择有效登录方式", "attributes.login_method_code");
@@ -106,6 +106,19 @@ export function validateDeltaPublicationAttributes(attributes: Record<string, un
   for (const field of DELTA_OPTIONAL_BOOLEAN_FIELDS) {
     if (typeof attributes[field] !== "boolean" && (options.requireSupplementalDeclarations !== false || attributes[field] != null))
       throw invalid(field === "next_season_pass" ? "请明确选择下赛季是否计划购买通行证" : "请明确选择是否已解锁德穆兰", `attributes.${field}`);
+  }
+  if (options.requireNewAccountFacts === true) {
+    const hasText = (value: unknown): boolean => typeof value === "string" && value.trim().length > 0;
+    if (!hasText(attributes.safe_box_code)) throw invalid("请选择安全箱档位", "attributes.safe_box_code");
+    if (!Number.isSafeInteger(attributes.character_level) || Number(attributes.character_level) < 0 || Number(attributes.character_level) > 60)
+      throw invalid("请填写0–60的账号等级", "attributes.character_level");
+    if (!hasText(attributes.region_province)) throw invalid("请选择省份", "attributes.region_province");
+    if (!hasText(attributes.region_city)) throw invalid("请选择城市", "attributes.region_city");
+    const kd = typeof attributes.secret_kd === "number" ? String(attributes.secret_kd) : attributes.secret_kd;
+    if (typeof kd !== "string" || !/^\d+(?:\.\d+)?$/.test(kd) || Number(kd) > 100)
+      throw invalid("请填写0–100的绝密KD", "attributes.secret_kd");
+    if (typeof attributes.ban_record !== "boolean") throw invalid("请选择封禁记录", "attributes.ban_record");
+    if (typeof attributes.face_is_self !== "boolean") throw invalid("请选择人脸归属", "attributes.face_is_self");
   }
 }
 

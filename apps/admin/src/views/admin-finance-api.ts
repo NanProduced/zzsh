@@ -62,7 +62,7 @@ export type HistoricalFinanceDisplay = {refundAttempts?:{source:{type:'LEGACY_MY
   amountSemantics?: 'BALANCE_RECORD' | 'BUSINESS_RECORD' | 'UNVERIFIED';
   changeType: string | null; purposeCode: HistoricalFinancePurpose; purposeLabel: string; originalLogNumber: string | null;
   recordedAmountCents: string | null; balanceAfterCents: string | null; feeCents: string | null; netCents: string | null;
-  originalStatus: string | null; originalStatusLabel: string | null; channelState: 'UNVERIFIED';
+  originalStatus: string | null; originalStatusLabel: string | null; payWay: string | null; payWayLabel: string | null; channelState: 'UNVERIFIED';
   association: { state: 'MATCHED' | 'UNRESOLVED' | 'AMBIGUOUS' | 'DENIED'; kind: 'ORDER' | 'WITHDRAWAL' | 'DISTRIBUTION' | 'TASK' | 'UNKNOWN'; documentRef: string | null; number: string | null; path: string | null; role: 'OWNER' | 'RENTER' | 'BENEFICIARY' | 'WITHDRAWER' | null; originalStatus: string | null; originalStatusLabel: string | null };
 };
 type FinanceRecord = { kind: string; state: string; ref?: string; documentRef?: string; sourceEntity?: string; historical?: HistoricalFinanceDisplay };
@@ -104,7 +104,8 @@ export function historicalFinanceFacts(historical: HistoricalFinanceDisplay): [s
     ...(withdrawal || historical.feeCents !== null ? [[historical.amountSemantics==='UNVERIFIED'?'手续费（待核）':'手续费', financeMoney(historical.feeCents)] as [string, string]] : []),
     ...(withdrawal || historical.netCents !== null ? [[historical.amountSemantics==='UNVERIFIED'?'净额（待核）':'净额', financeMoney(historical.netCents)] as [string, string]] : []),
     ...(historical.changeType !== null ? [['原用途码', historical.changeType] as [string, string]] : []),
-    ...(statusApplies || historical.originalStatus !== null ? [[historical.amountSemantics==='UNVERIFIED'?'原状态码（待核）':'原状态码', historical.originalStatus ?? '未取得'] as [string, string]] : [])];
+    ...(historical.purposeCode === 'PAYMENT_RECORD' ? [['支付方式（原记录）', historical.amountSemantics === 'UNVERIFIED' ? '来源未核对' : historical.payWayLabel ?? (historical.payWay ? '未知' : '未记录')] as [string, string]] : []),
+    ...(statusApplies || historical.originalStatus !== null ? [[historical.amountSemantics==='UNVERIFIED'?'原状态（待核）':'原状态', historical.originalStatusLabel ?? (historical.originalStatus !== null ? '未知' : '状态未记录')] as [string, string]] : [])];
 }
 export type FinanceEntry = { id: string; documentRef: string; documentNumber: string; subjectId: string; subjectName: string; bucket: string; direction: string; deltaCents: string | null; knowledge: string; kind: string; state: string; classification: string; affectsCurrentWallet: boolean; affectsCurrentLedger: boolean; occurredAt: string | null; importedAt: string; sourceType: string; sourceEntity: string; sourceSystem: string; sourceId: string; sourceDigest: string | null; basisId: string | null; reasonCodes: string[]; accountCode: string | null; evidence: Record<string, string | null>; historical?: HistoricalFinanceDisplay };
 export type FinanceOrderLifecycle = { origin: 'NATIVE' | 'LEGACY_MYSQL'; orderStatus: string; payment: { state: 'SITE_ACCEPTED' | 'REVIEW_REQUIRED' | 'NO_ACCEPTED_PAYMENT' | 'LEGACY_RECORDED' | 'UNAVAILABLE'; amountCents: string | null; confirmedAt: string | null; source?: string | null; hasReviewPayment: boolean | null }; postingState: 'POSTED' | 'NOT_POSTED' | 'LEGACY_OBSERVATION' | 'UNAVAILABLE' };
@@ -127,6 +128,7 @@ export type FinancePlatformComponent = { code: string; cents: string; payer: 'OW
 export type OrderFinanceTransaction = {
   documentRef: string; number: string; kind: 'PAYMENT' | 'REFUND'; source: 'NATIVE' | 'LEGACY_MYSQL';
   state: string; amountCents: string | null; occurredAt: string | null; channelArrival: 'UNKNOWN';
+  payWay: string | null; payWayLabel: string | null;
   refundAttempts?: HistoricalFinanceDisplay['refundAttempts']; sourceRefundFlags?: string[];
 };
 export type OrderFinanceBusiness = {
@@ -154,8 +156,8 @@ export type FinanceResponse = {
   distributionCalculation?: { knowledge: 'KNOWN' | 'UNKNOWN'; policyVersion: string | null; levelCode: string | null; percent: string | null; baseCents: string | null; formula: string | null; reasonCodes: string[] };
   orderSettlement?: OrderSettlementEvidence;
   legacyOrderObservations?: { documentRef: string; number: string; kind: string; amountCents: string | null; occurredAt: string | null;
-    originalStatus: string | null; originalStatusLabel: string | null; refundAttempts?: HistoricalFinanceDisplay['refundAttempts'];
-    sourceRefundFlags?: string[]; channelArrival: 'UNKNOWN' }[];
+    originalStatus: string | null; originalStatusLabel: string | null; payWay: string | null; payWayLabel: string | null;
+    refundAttempts?: HistoricalFinanceDisplay['refundAttempts']; sourceRefundFlags?: string[]; channelArrival: 'UNKNOWN' }[];
   platform?: { postedComponents: { accountCode: string | null; deltaCents: string | null; payer: string | null; feeBase: string | null; feeRate: string | null }[]; beforeDistributionCents: string | null; distributionExpenseCents: string | null; retainedCents: string | null; channelCostCents: string | null; netProfitCents: string | null; reasonCodes: string[] };
   documentCount?: number; subjectCount?: number; entryCount?: number; page?: number; pageSize?: number; hasMore?: boolean; reasonCodes?: string[]; gaps?: string[];
   reconciliation?: { bucket: string; openingBalance: string | null; knownInflows: string; knownOutflows: string; migrationMovement: string; closingBalance: string | null; difference: string | null; ledgerOpeningBalance?: string | null; ledgerClosingBalance?: string | null; ledgerDifference?: string | null; balanceBasis?: { knowledge: 'KNOWN' | 'UNKNOWN'; origin: string | null; sourceCutoff: string | null; openingPostedAt: string | null; reasonCodes: string[] }; knowledge: string; reasonCodes: string[]; unknownCount: number; unknownTimeCount: number; coveredHistoricalCount: number; uncoveredHistoricalCount: number }[];

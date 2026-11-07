@@ -20,8 +20,8 @@ export function Textarea({ className = "", ...props }: ComponentProps<"textarea"
   return <textarea data-slot="textarea" className={`form-input ${className}`} {...props} />;
 }
 
-export function IntegerStepper({ label, value, onChange, disabled = false, max = "999999999999999999999999", unit, id, invalid = false, describedBy, className = "" }: {
-  label: string; value: string; onChange: (value: string) => void; disabled?: boolean; max?: string; unit?: string; id?: string; invalid?: boolean; describedBy?: string; className?: string;
+export function IntegerStepper({ label, value, onChange, disabled = false, max = "999999999999999999999999", unit, id, invalid = false, describedBy, required = false, className = "" }: {
+  label: string; value: string; onChange: (value: string) => void; disabled?: boolean; max?: string; unit?: string; id?: string; invalid?: boolean; describedBy?: string; required?: boolean; className?: string;
 }) {
   const valid = /^(0|[1-9]\d*)$/.test(value), limit = BigInt(max);
   const change = (raw: string) => {
@@ -32,21 +32,21 @@ export function IntegerStepper({ label, value, onChange, disabled = false, max =
   };
   return <div className={`form-integer-stepper${className ? ` ${className}` : ""}${invalid ? " is-invalid" : ""}`} data-invalid={invalid || undefined}>
     <button type="button" aria-label={`减少${label}`} disabled={disabled || !valid || BigInt(value) === 0n || BigInt(value)>limit} onClick={() => change((BigInt(value) - 1n).toString())}><Minus size={16} aria-hidden="true" /></button>
-    <Input id={id} inputMode="numeric" pattern="[0-9]*" maxLength={24} aria-label={label} aria-invalid={invalid || undefined} aria-describedby={describedBy} value={value} disabled={disabled} onChange={event => change(event.target.value)} />
+    <Input id={id} inputMode="numeric" pattern="[0-9]*" maxLength={24} aria-label={label} aria-required={required || undefined} aria-invalid={invalid || undefined} aria-describedby={describedBy} value={value} disabled={disabled} onChange={event => change(event.target.value)} />
     {unit ? <span className="form-integer-unit">{unit}</span> : null}
     <button type="button" aria-label={`增加${label}`} disabled={disabled || (value !== "" && !valid) || (valid && BigInt(value) >= limit)} onClick={() => change((BigInt(value || "0") + 1n).toString())}><Plus size={16} aria-hidden="true" /></button>
   </div>;
 }
 
 export type SelectOption = { value: string; label: string; hint?: string; disabled?: boolean };
-export function FormSelect({ label, value, options, placeholder = "请选择", disabled = false, hasError = false, onChange, className = "", id, firstField = false, popupClassName = "", describedBy }: {
+export function FormSelect({ label, value, options, placeholder = "请选择", disabled = false, hasError = false, onChange, className = "", id, firstField = false, popupClassName = "", describedBy, required = false }: {
   label: string; value: string; options: SelectOption[]; placeholder?: string; disabled?: boolean; hasError?: boolean;
-  onChange: (value: string) => void; className?: string; id?: string; firstField?: boolean; popupClassName?: string; describedBy?: string;
+  onChange: (value: string) => void; className?: string; id?: string; firstField?: boolean; popupClassName?: string; describedBy?: string; required?: boolean;
 }) {
   const generatedId = useId();
   const items = options.filter(option => option.value !== "");
   return <Select.Root value={value || null} onValueChange={next => onChange(next ?? "")} disabled={disabled} items={items}>
-    <Select.Trigger id={id ?? generatedId} aria-label={label} aria-invalid={hasError || undefined} aria-describedby={describedBy} data-first-field={firstField || undefined} className={`form-select-trigger ${className}`}>
+    <Select.Trigger id={id ?? generatedId} aria-label={label} aria-required={required || undefined} aria-invalid={hasError || undefined} aria-describedby={describedBy} data-first-field={firstField || undefined} className={`form-select-trigger ${className}`}>
       <Select.Value placeholder={placeholder}>{items.find(option => option.value === value)?.label ?? placeholder}</Select.Value>
       <Select.Icon><ChevronDown size={16} aria-hidden="true" /></Select.Icon>
     </Select.Trigger>
@@ -62,12 +62,12 @@ export function FormSelect({ label, value, options, placeholder = "请选择", d
   </Select.Root>;
 }
 
-export function FormRadioGroup<T extends string | number | boolean | null>({ name, label, error, errorId: externalErrorId, value, options, disabled = false, onChange, className = "", variant = "default" }: {
-  name: string; label: string; error?: string; errorId?: string; value: T; options: { value: T; label: string; icon?: ReactNode; description?: string; badge?: string; disabled?: boolean }[]; disabled?: boolean; onChange: (value: T) => void; className?: string; variant?: "default" | "segmented";
+export function FormRadioGroup<T extends string | number | boolean | null>({ name, label, error, errorId: externalErrorId, value, options, disabled = false, required = false, onChange, className = "", variant = "default" }: {
+  name: string; label: string; error?: string; errorId?: string; value: T; options: { value: T; label: string; icon?: ReactNode; description?: string; badge?: string; disabled?: boolean }[]; disabled?: boolean; required?: boolean; onChange: (value: T) => void; className?: string; variant?: "default" | "segmented";
 }) {
   const autoErrorId = useId();
   const errorId = externalErrorId ?? autoErrorId;
-  return <RadioGroup name={name} aria-label={label} aria-invalid={Boolean(error) || undefined} aria-describedby={error ? errorId : undefined} tabIndex={error ? -1 : undefined} value={value === null ? null : String(value)} disabled={disabled} onValueChange={next => {
+  return <RadioGroup name={name} aria-label={label} aria-required={required || undefined} aria-invalid={Boolean(error) || undefined} aria-describedby={error ? errorId : undefined} tabIndex={error ? -1 : undefined} value={value === null ? null : String(value)} disabled={disabled} onValueChange={next => {
     const option = options.find(item => String(item.value) === next);
     if (option) onChange(option.value);
   }} className={`form-radio-group${variant === "segmented" ? " form-radio-group--segmented" : ""} ${className}`}>

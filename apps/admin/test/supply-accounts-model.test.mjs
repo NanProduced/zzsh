@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { suggestKind, kindHint, lookupNeedsDirectory, groupConditions, liftSummary, conditionHeadline, newOrdersReasonText, independentFacts, parseSavedViews, serializeSavedViews, rowListingStatus, nextStep, primaryReason, haffBaseFromM, haffMFromBase, depositCentsFromYuan, depositYuanFromCents, rowBaseFeeRows, rowAccountTitle, rowDisplaySourceText } from '../src/views/supply-accounts/account-list-model.ts';
-import { feeSummaryRows, formatTermDays, publicBasisVersion } from '../src/views/supply-review/model.ts';
+import { feeSummaryRows, formatTermDays, publicBasisVersion, haffRateText } from '../src/views/supply-review/model.ts';
 import { rowVisibleMaterials } from '../src/views/supply-accounts/account-list-model.ts';
 
 test('neutral account titles do not promote an unmapped code into the visible name', () => {
@@ -222,6 +222,25 @@ test('declared payout and frozen amounts keep their exact three states and decim
   assert.equal(rowDepositText(money), '¥50.00');
 });
 
+test('legacy account payout uses only the bound capture and keeps absence distinct', () => {
+  const row = rowOf({ summary: { displaySource: 'LEGACY_SNAPSHOT', versionId: 'v-1', fullPayout: 'NOT_DECLARED' }, facts: facts({ historicalRead: { observationVersionId: 'v-1', display: { state: 'KNOWN', facts: {} } } }) });
+  const source = row.facts.historicalRead.display.facts;
+  assert.equal(rowFullPayout(row).label, '未提供');
+  source.sourceAccountFullPayoutSelected = true;
+  assert.equal(rowFullPayout(row).label, '已选');
+  source.sourceAccountFullPayoutSelected = false;
+  assert.equal(rowFullPayout(row).label, '未选');
+  source.sourceAccountFullPayoutSelected = null;
+  assert.equal(rowFullPayout(row).label, '未提供');
+  source.sourceAccountFullPayoutSelected = true;
+  row.facts.historicalRead.observationVersionId = 'another-version';
+  assert.equal(rowFullPayout(row).label, '未提供');
+  assert.equal(haffRateText('56'), '1元=56万哈夫币');
+  assert.equal(haffRateText('41.005'), '1元=约41.01万哈夫币');
+  assert.equal(haffRateText('41.999'), '1元=约42万哈夫币');
+  assert.equal(haffRateText(null), '兑换比例未提供');
+});
+
 const historicalRead = {
   resourceNo: 'OLD-7', canCreateOrder: false, trade: 'UNKNOWN', quote: null,
   historicalQuote: { haffRentYuan: '125.30', goodsYuan: '0.00', depositYuan: '0.00', termDays: '10', dailyHaffBase: '10000000' },
@@ -295,16 +314,16 @@ test('fee rows keep an explicit zero, mark a partial split and never infer the m
 test('historical-only rows keep old fees separately and never show the old number in the first column', () => {
   const historicalRead = { resourceNo: 'OLD-7', display: { state: 'KNOWN', facts: { attributeDisplay: { safeBox: { displayName: '基础安全箱' }, grading: null, loginMethod: null, serviceWindow: null }, resources: [{ code: 'haff', name: '哈夫币', quantity: '97000000', unit: 'HAFF_BASE' }] } }, historicalQuote: { haffRentYuan: '125.30', goodsYuan: '0.00', depositYuan: '0.00', termDays: '10' } };
   const row = rowOf({ versionId: null, sequence: null, summary: null, displayNo: 'ZZ-NEW', facts: { ...facts(), historicalRead } });
-  assert.deepEqual(rowBaseFeeRows(row), { haff: '历史 ¥125.30', materials: '历史 ¥0.00', deposit: '历史 ¥0.00', total: '¥125.30', note: '迁入时账号记录，不是订单实付或当前报价' });
+  assert.deepEqual(rowBaseFeeRows(row), { haff: '¥125.30', materials: '¥0.00', deposit: '历史 ¥0.00', total: '未提供', note: '迁入时账号记录，分项不合并；押金可退，不是订单实付或当前报价' });
   assert.match(rowCoreAssetsText(row), /97 M 哈夫币 · 基础安全箱/);
   assert.equal(rowDisplaySourceText(row), '历史资料');
   assert.equal(rowAccountTitle(row), 'g账号');
 });
 
-test('historical recorded total uses exact yuan cents and stays unknown if a component is absent', () => {
+test('historical recorded components keep exact yuan cents without merging refundable deposit into a total', () => {
   const historicalRead = { historicalQuote: { haffRentYuan: '96.00', goodsYuan: '0.00', depositYuan: '100.00', termDays: '2' } };
   const row = rowOf({ summary: null, facts: { ...facts(), historicalRead } });
-  assert.equal(rowBaseFeeRows(row).total, '¥196.00');
+  assert.deepEqual(rowBaseFeeRows(row), { haff: '¥96.00', materials: '¥0.00', deposit: '历史 ¥100.00', total: '未提供', note: '迁入时账号记录，分项不合并；押金可退，不是订单实付或当前报价' });
   historicalRead.historicalQuote.goodsYuan = undefined;
   assert.equal(rowBaseFeeRows(row).total, '未提供');
   assert.equal(rowBaseFeeRows(row).materials, '未提供');

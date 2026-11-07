@@ -11,7 +11,7 @@ export type HistoricalFinanceDisplay = {refundAttempts?:HistoricalRefundAttempt[
   changeType:string|null; purposeCode:HistoricalFinancePurpose; purposeLabel:string; originalLogNumber:string|null;
   amountSemantics:'BALANCE_RECORD'|'BUSINESS_RECORD'|'UNVERIFIED';
   recordedAmountCents:string|null; balanceAfterCents:string|null; feeCents:string|null; netCents:string|null;
-  originalStatus:string|null; originalStatusLabel:string|null; channelState:'UNVERIFIED';
+  originalStatus:string|null; originalStatusLabel:string|null; payWay:string|null; payWayLabel:string|null; channelState:'UNVERIFIED';
   association:{state:'MATCHED'|'UNRESOLVED'|'AMBIGUOUS'|'DENIED';kind:'ORDER'|'WITHDRAWAL'|'DISTRIBUTION'|'TASK'|'UNKNOWN';
     documentRef:string|null;number:string|null;path:string|null;role:'OWNER'|'RENTER'|'BENEFICIARY'|'WITHDRAWER'|null;
     originalStatus:string|null;originalStatusLabel:string|null};
@@ -31,6 +31,8 @@ const purposes:Record<string,[HistoricalFinancePurpose,string]>={
 };
 const withdrawalStates:Record<string,string>={'1':'旧平台待提现','2':'旧平台提现中','3':'旧平台记为成功','4':'旧平台记为失败','5':'旧平台转账中'};
 const distributionStates:Record<string,string>={'1':'旧平台待结算','2':'旧平台已结算','3':'旧平台已失效'};
+/** The old Joinpay payment mode is an attempt-level fact, never a channel-arrival proof. */
+const payWayLabels:Record<string,string>={'2':'微信（原记录）','3':'支付宝（原记录）'};
 const snapshot=(row:Raw):Raw=>row.extra_evidence?.snapshot??{};
 export function historicalObservationDisplay(row:Raw):HistoricalFinanceDisplay {
   const source=snapshot(row),changeType=row.source_entity==='la_log_earnings'?code(source.legacyChangeType):null;
@@ -39,13 +41,14 @@ export function historicalObservationDisplay(row:Raw):HistoricalFinanceDisplay {
     row.source_entity==='la_pay_order'?['PAYMENT_RECORD','旧平台付款记录'] as const:row.source_entity==='la_refund_record'?['REFUND_RECORD','旧平台退款记录'] as const:purposes[changeType??'']??['UNKNOWN','用途待核'];
   const originalStatus=code(row.source_status);
   const original=originalSource(row),originalLog=row.source_entity==='la_log_earnings'?original:null;
+  const payWay=row.source_entity==='la_pay_order'&&original?code(original.pay_way):null;
   const originalLogAt=originalLog?epoch(originalLog.createdAt):null;
   const verifiedBalance=originalLog&&['1','2'].includes(String(originalLog.action))&&money(originalLog.amount)!==null&&originalLogAt!==null&&Date.parse(row.at??'')===originalLogAt;
   return {...(row.source_entity==='la_refund_record'?{refundAttempts:projectHistoricalRefundAttempts(source.sourceAttempts,row.source_id),sourceRefundFlags:source.sourceRefundFlags??[]}:{}),changeType,purposeCode,purposeLabel,originalLogNumber:row.source_entity==='la_log_earnings'?text(source.legacyLogNumber):null,
     amountSemantics:row.source_entity==='la_log_earnings'?verifiedBalance?'BALANCE_RECORD':'UNVERIFIED':original?'BUSINESS_RECORD':'UNVERIFIED',
     recordedAmountCents:money(row.amount),balanceAfterCents:money(row.balance_after,true),feeCents:money(row.fee,true),netCents:money(row.net,true),
     originalStatus,originalStatusLabel:row.source_entity==='la_withdraw_apply'?withdrawalStates[originalStatus??'']??null:row.source_entity==='la_distribution_order'?distributionStates[originalStatus??'']??null:row.source_entity==='la_pay_order'?({'0':'旧平台未付款','1':'旧平台已付款'}[originalStatus??'']??null):row.source_entity==='la_refund_record'&&originalStatus!==null?({'0':'旧平台退款中','1':'旧平台记为退款成功','2':'旧平台记为退款失败'}[originalStatus]??'旧平台退款状态 '+originalStatus):null,
-    channelState:'UNVERIFIED',association:emptyAssociation()};
+    payWay,payWayLabel:payWay?payWayLabels[payWay]??null:null,channelState:'UNVERIFIED',association:emptyAssociation()};
 }
 
 /** Only immutable source bytes close a relationship; decoded IDs alone never do. */

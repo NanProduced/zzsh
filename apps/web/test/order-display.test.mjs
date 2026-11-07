@@ -191,11 +191,11 @@ test("frozen legacy order resources form a labelled summary without a private ti
       { code: "df_billable_coffee", quantity: "1", unit: null },
     ], rentalDeadlineAt: "2025-10-09T08:53:20.000Z" },
   };
-  assert.equal(display.orderResourceSummary(order), "哈夫币 12.50 · 6级子弹 60 · 顶级保险卡 7 天 · +1项");
-  assert.equal(display.orderAccountTitle(order), "哈夫币 12.50 · 6级子弹 60 · 顶级保险卡 7 天 · +1项");
+  assert.equal(display.orderResourceSummary(order), "哈夫币消耗 12.50 · 6级子弹 60 · 顶级保险卡 7 天 · +1项");
+  assert.equal(display.orderAccountTitle(order), "哈夫币消耗 12.50 · 6级子弹 60 · 顶级保险卡 7 天 · +1项");
   assert.equal(display.orderUsesResourceSummary(order), true);
   assert.ok(!display.orderAccountTitle(order).includes("PRIVATE_CURRENT_ACCOUNT_TITLE"));
-  assert.equal(display.orderAccountTitle({ ...order, account: { readable: true } }), "哈夫币 12.50 · 6级子弹 60 · 顶级保险卡 7 天 · +1项");
+  assert.equal(display.orderAccountTitle({ ...order, account: { readable: true } }), "哈夫币消耗 12.50 · 6级子弹 60 · 顶级保险卡 7 天 · +1项");
 });
 
 test("a short order summary names omitted nonzero resources and detail retains every frozen quantity", () => {
@@ -206,9 +206,9 @@ test("a short order summary names omitted nonzero resources and detail retains e
     { code: 'df_billable_level6_armor', quantity: '7', unit: null },
     { code: 'df_billable_coffee', quantity: '0', unit: null },
   ] } };
-  assert.equal(display.orderResourceSummary(order), '哈夫币 64.00 · AWM子弹 46 · 6级头盔 4 · +1项');
+  assert.equal(display.orderResourceSummary(order), '哈夫币消耗 64.00 · AWM子弹 46 · 6级头盔 4 · +1项');
   assert.deepEqual(display.orderResourceLines(order).map(({name, value}) => [name, value]), [
-    ['哈夫币', '64.00'], ['AWM子弹', '46'], ['6级头盔', '4'], ['6级护甲', '7'], ['咖啡豆', '0'],
+    ['哈夫币消耗', '64.00'], ['AWM子弹', '46'], ['6级头盔', '4'], ['6级护甲', '7'], ['咖啡豆', '0'],
   ]);
 });
 
@@ -280,16 +280,16 @@ test("a reader placeholder never blocks the frozen resource summary", () => {
       { code: "df_billable_top_insure_card", quantity: "7", unit: "DAY" },
     ], rentalDeadlineAt: null },
   };
-  assert.equal(display.orderResourceSummary(order), "哈夫币 12.50 · 顶级保险卡 7 天");
-  assert.equal(display.orderAccountTitle(order), "哈夫币 12.50 · 顶级保险卡 7 天");
+  assert.equal(display.orderResourceSummary(order), "哈夫币消耗 12.50 · 顶级保险卡 7 天");
+  assert.equal(display.orderAccountTitle(order), "哈夫币消耗 12.50 · 顶级保险卡 7 天");
   assert.equal(display.orderUsesResourceSummary(order), true);
   // an empty/null current title behaves the same way
-  assert.equal(display.orderAccountTitle({ ...order, title: null }), "哈夫币 12.50 · 顶级保险卡 7 天");
-  assert.equal(display.orderAccountTitle({ ...order, title: "   " }), "哈夫币 12.50 · 顶级保险卡 7 天");
+  assert.equal(display.orderAccountTitle({ ...order, title: null }), "哈夫币消耗 12.50 · 顶级保险卡 7 天");
+  assert.equal(display.orderAccountTitle({ ...order, title: "   " }), "哈夫币消耗 12.50 · 顶级保险卡 7 天");
   // a stored title never overrides the frozen resource facts
-  assert.equal(display.orderAccountTitle({ ...order, title: "真实当前标题" }), "哈夫币 12.50 · 顶级保险卡 7 天");
+  assert.equal(display.orderAccountTitle({ ...order, title: "真实当前标题" }), "哈夫币消耗 12.50 · 顶级保险卡 7 天");
   assert.equal(display.orderUsesResourceSummary({ ...order, title: "真实当前标题" }), true);
-  assert.equal(display.orderAccountTitle({ ...order, account: { readable: false }, title: "PRIVATE_CURRENT_ACCOUNT_TITLE" }), "哈夫币 12.50 · 顶级保险卡 7 天");
+  assert.equal(display.orderAccountTitle({ ...order, account: { readable: false }, title: "PRIVATE_CURRENT_ACCOUNT_TITLE" }), "哈夫币消耗 12.50 · 顶级保险卡 7 天");
   assert.ok(!JSON.stringify(display.orderAccountTitle({ ...order, account: { readable: false } })).includes("PRIVATE"));
   // without any frozen fact the display stays honestly empty
   const bare = { source: { origin: "LEGACY" }, account: { readable: true }, title: null, orderFacts: { resources: [], rentalDeadlineAt: null } };

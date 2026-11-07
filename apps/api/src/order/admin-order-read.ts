@@ -148,7 +148,7 @@ function legacyReconciliation(goods:ReturnType<typeof legacyPrepaymentPart>,item
 }
 /** 旧单原单资源：复用 legacyUserOrderResources 的字段与校验；单位未记录时保持 null，不猜测 M。 */
 const LEGACY_RESOURCE_RAW_KEYS=[["expend_haff","expendHaff"],["awm_bullet_num","awmBulletNum"],["level6_bullet_num","level6BulletNum"],["level6_helmet_num","level6HelmetNum"],["level6_armor_num","level6ArmorNum"],["top_insure_card_num","topInsureCardNum"],["barrett_bullet_num","barrettBulletNum"],["coffee_num","coffeeNum"]] as const;
-const LEGACY_RESOURCE_NAMES:Record<string,string>={df_billable_haff:"哈夫币",df_billable_awm_bullet:"AWM子弹",df_billable_level6_bullet:"6级子弹",df_billable_level6_helmet:"6级头盔",df_billable_level6_armor:"6级护甲",df_billable_top_insure_card:"顶级保险",df_billable_barrett_bullet:"巴雷特子弹",df_billable_coffee:"咖啡豆"};
+const LEGACY_RESOURCE_NAMES:Record<string,string>={df_billable_haff:"哈夫币消耗",df_billable_awm_bullet:"AWM子弹",df_billable_level6_bullet:"6级子弹",df_billable_level6_helmet:"6级头盔",df_billable_level6_armor:"6级护甲",df_billable_top_insure_card:"顶级保险",df_billable_barrett_bullet:"巴雷特子弹",df_billable_coffee:"咖啡豆"};
 export type LegacyOrderResources={source:'LEGACY_ORIGINAL_ORDER';state:'KNOWN'|'NONE'|'INVALID';items:Array<{code:string;name:string;quantity:string;unit:string|null;zero:boolean}>};
 export function legacyOrderResources(raw:unknown):LegacyOrderResources{
  const none:LegacyOrderResources={source:'LEGACY_ORIGINAL_ORDER',state:'NONE',items:[]};
@@ -181,6 +181,15 @@ export function orderHaffRatio(quote:unknown):AdminOrderHaffRatio{
  try{const ratio=parseNonNegativeDecimal(den.buyer,8,'order buyer ratio');return ratio.value>0n?{...unknown,state:'KNOWN',wanPerYuan:formatDecimalExact(ratio),customerTier}:{...unknown,customerTier};}catch{return {...unknown,customerTier};}
 }
 const LEGACY_HAFF_RATIO:AdminOrderHaffRatio={source:'LEGACY_ORIGINAL_ORDER',state:'NOT_RECORDED',wanPerYuan:null,customerTier:null};
+/** The old admin page resolved order_source through this exact ClientEnum table. */
+const LEGACY_ORDER_SOURCE_LABELS:Record<string,string>={'1':'网站','2':'微信公众号','3':'手机H5','4':'电脑PC','5':'苹果APP','6':'安卓APP'};
+export type LegacyOrderSource={code:string|null;label:string|null;state:'KNOWN'|'UNKNOWN'|'NOT_RECORDED'};
+export function legacyOrderSource(value:unknown):LegacyOrderSource{
+ const code=typeof value==='number'&&Number.isSafeInteger(value)?String(value):typeof value==='string'&&/^-?\d{1,24}$/.test(value)?value:null;
+ if(code===null)return{code:null,label:null,state:'NOT_RECORDED'};
+ const label=LEGACY_ORDER_SOURCE_LABELS[code]??null;
+ return{code,label,state:label?'KNOWN':'UNKNOWN'};
+}
 function frozenQuoteSummary(quote: unknown): string | null {
   if (!quote || typeof quote !== "object" || Array.isArray(quote)) return null;
   const lines = (quote as { lines?: unknown }).lines;
@@ -224,7 +233,7 @@ export function projectAdminReadOrder(origin:string,r:Record<string,any>,viewer:
   createdAt:r.source_created_at,paidAt:r.source_paid_at,cancelledAt:r.source_cancelled_at,completedAt:r.source_completed_at,holdUntil:null,expiredAwaitingCancel:false,paymentOpen:false,cancelOpen:false,
   ownerUserId:r.owner_user_id,renterUserId:r.renter_user_id,ownerName:r.owner_name,renterName:r.renter_name,ownerBusinessNo:r.legacy_owner_no,renterBusinessNo:r.legacy_renter_no,
   payment:{state:paid?'RECORDED_PAID':unpaid?'RECORDED_UNPAID':'UNKNOWN',recordedAt:r.source_paid_at,recordedAmount:paid?money(r.recorded_paid_amount_cents):null},
-  source:{origin:'LEGACY',ruleOrigin:'LEGACY_ORDER',originalStatus:r.source_order_status,statusLabel:state.statusLabel,originalPayStatus:r.source_pay_status},
+  source:{origin:'LEGACY',ruleOrigin:'LEGACY_ORDER',originalStatus:r.source_order_status,statusLabel:state.statusLabel,originalPayStatus:r.source_pay_status,orderSource:legacyOrderSource(raw.order_source)},
   legacyAmounts:{required:money(r.due_amount_cents),paid:paid?money(r.recorded_paid_amount_cents):null,deposit:money(r.deposit_amount_cents),refund:money(legacyMoneyCents(raw.return_order_money)),refundChannelState:'UNKNOWN'},quote:null};
 }
 export type AdminOrderProgress={
@@ -317,6 +326,7 @@ export type AdminOrderFrozenAccount={
 };
 /** 当前关联账号资料与供给页同源；导入观察单独标记，不能当作本单冻结资料。 */
 export type OrderAccountView={source:'ACCOUNT_PUBLIC_VERSION'|'LEGACY_ACCOUNT_SNAPSHOT';sourceUpdatedAt?:string|null;versionId:string;haff:{itemId:string;quantity:string|null}|null;
+ sourceAccountBaseRatioWanPerYuan?:string|null;sourceAccountFullPayoutSelected?:boolean|null;
  materials:Array<{itemId:string;code:string|null;name:string|null;quantity:string|null;unit:string|null}>;materialsVisibleTotal:number;
  safeBoxText:string|null;gradingText:string|null;loginMethodText:string|null;term:{name:string|null;termSeconds:string|null;dailyConsumption:string|null};
  fullPayout:'SELECTED'|'NOT_SELECTED'|'NOT_DECLARED';haffRatioWanPerYuan:string|null;

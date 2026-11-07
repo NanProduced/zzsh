@@ -9,7 +9,7 @@ import { fundingPolicyFixture } from "./funding-authority-fixtures";
 // Synthetic SQL responses; the real quote, policy validator and snapshot writer execute.
 function fixture(amount: string | null = "10000", mode: "NOT_REQUIRED" | "FIXED_CENTS" = "FIXED_CENTS") {
   const account: any = { id: "account", game_id: "game", owner_user_id: "owner", revision: "1", current_version_id: "draft", lifecycle: "ACTIVE" };
-  const attributes: Record<string, unknown> = { safe_box_code: "box-a", vit_level: 6, bear_level: 6, dive_level: 0, grading_code: "4", grading_division: 3, login_method_code: "login_qq_qr", next_season_pass: false, demulan_unlocked: false, service_window_start_minute: 540, service_window_end_minute: 1380, service_window_cross_midnight: false, service_window_timezone: "Asia/Shanghai", rentalPricing: { rentalMode: "ordinary" } };
+  const attributes: Record<string, unknown> = { safe_box_code: "box-a", vit_level: 6, bear_level: 6, dive_level: 0, grading_code: "4", grading_division: 3, character_level: 30, secret_kd: "1.50", ban_record: false, face_is_self: true, region_province: "上海市", region_city: "上海市", login_method_code: "login_qq_qr", next_season_pass: false, demulan_unlocked: false, service_window_start_minute: 540, service_window_end_minute: 1380, service_window_cross_midnight: false, service_window_timezone: "Asia/Shanghai", rentalPricing: { rentalMode: "ordinary" } };
   if (amount !== null) attributes.owner_deposit_declaration = { schema: "owner-deposit-declaration-v1", amountCents: amount, declarationVersion: "fixture-v1" };
   const version: any = { id: "draft", account_id: account.id, origin: "NATIVE", review_state: "DRAFT", title: "合成测试", description: null, attributes, term_option_code: "daily-10m", pricing_option_code: "" };
   const policy = fundingPolicyFixture(mode);
@@ -22,7 +22,7 @@ function fixture(amount: string | null = "10000", mode: "NOT_REQUIRED" | "FIXED_
     if (sql.includes('"game_service_operation"')) return result([{ id: "service", gameCode: "delta", gameEnabled: true, enabled: true }]);
     if (sql.startsWith("SELECT * FROM zzsh_supply.listing_version")) return result([version]);
     if (sql.startsWith('SELECT item_id AS "itemId"')) return result([{ itemId: "haff", quantity: "100000000" }]);
-    if (sql.startsWith("SELECT skin_id FROM") || sql.startsWith("SELECT entitlement_id AS") || sql.startsWith("SELECT m.asset_id AS") || sql.startsWith("SELECT 1 FROM zzsh_supply.billable_item")) return result([]);
+    if (sql.startsWith("SELECT skin_id FROM") || sql.startsWith("SELECT s.id,s.name") || sql.startsWith("SELECT entitlement_id AS") || sql.startsWith("SELECT m.asset_id AS") || sql.startsWith("SELECT 1 FROM zzsh_supply.billable_item")) return result([]);
     if (sql.startsWith("SELECT r.*,g.catalog_revision")) return result([{ id: "release", catalogRevision: "1", price_version_id: "price", term_version_id: "term", agreement_version_id: "agreement", digest: "a".repeat(64), mode: "SPREAD", commission_rate: null, haff_rule: compatRule(), rounding_policy: "HALF_UP_CENT_V1" }]);
     if (sql.startsWith("SELECT code,daily_consumption")) return result([{ code: "daily-10m", dailyConsumption: "10000000", durationRounding: "CEIL_DAY" }]);
     if (sql.startsWith("SELECT l.item_id AS")) return result([{ itemId: "haff", code: "HAFF", name: "哈夫币", quantity: "100000000", unit: "HAFF_BASE", enabled: true, pricingKind: "HAFF_RATIO", unitQuantity: null, buyerUnitAmount: null, ownerUnitAmount: null }]);

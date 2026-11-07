@@ -1094,10 +1094,11 @@ function MyAccountsPanel({ mode, accountId: accountIdProp, filterParam }: { mode
                 </Link>
                 <div className="mra-row-state">
                   {row.activeOrder ? <Link className="mra-row-anchor" href={orderUrl("owner", "", row.id, row.activeOrder.id, row.activeOrder.origin)} scroll={false}>订单 {row.activeOrder.displayNo}</Link> : null}
+                  {row.historicalReadOnly ? <span className="mra-badge" data-tone="unknown"><span className="mra-badge-dot" aria-hidden="true" />历史只读</span> : null}
                   {state ? <span className="mra-badge" data-tone={RENTAL_STATE_TONE[state]}><span className="mra-badge-dot" aria-hidden="true" />{state === "DRAFT" ? row.review_state === "WITHDRAWN" ? "已撤回" : row.review_state === "IMPORTED_UNVERIFIED" ? "历史资料待核" : row.review_state === "DRAFT" ? "草稿" : "资料待确认" : RENTAL_STATE_LABELS[state]}</span> : <span className="mra-badge" data-tone={row.review_state ? REVIEW_BADGE_TONE[row.review_state] ?? "unknown" : undefined}><span className="mra-badge-dot" aria-hidden="true" />{row.review_state ? stateLabel(row.review_state) : "资料待确认"}</span>}
-                  {row.owner_paused && state !== "PAUSED" ? <span className="mra-badge" data-tone="warning"><span className="mra-badge-dot" aria-hidden="true" />已暂停接单</span> : null}
+                  {!row.historicalReadOnly && row.owner_paused && state !== "PAUSED" ? <span className="mra-badge" data-tone="warning"><span className="mra-badge-dot" aria-hidden="true" />已暂停接单</span> : null}
                   {row.staff_restricted && state !== "RESTRICTED" ? <span className="mra-badge" data-tone="warning"><span className="mra-badge-dot" aria-hidden="true" />账号受限</span> : null}
-                  {state === "LISTED" && row.available === false ? <span className="mra-badge" data-tone="warning"><span className="mra-badge-dot" aria-hidden="true" />暂不可接单</span> : null}
+                  {!row.historicalReadOnly && state === "LISTED" && row.available === false ? <span className="mra-badge" data-tone="warning"><span className="mra-badge-dot" aria-hidden="true" />暂不可接单</span> : null}
                   {row.accountDisplay?.titleFacts === null && row.accountDisplay?.unknownReason ? <span className="mra-badge" data-tone="unknown">资料待核实</span> : null}
                   {row.review_state === "REJECTED" ? <Link className="mra-row-anchor" href={`${accountListHref(mode, stateFilter, row.id)}#blockers`} scroll={false}>查看退回原因</Link> : null}
                 </div>
@@ -1174,6 +1175,7 @@ const UNCERTAIN_BLOCKERS = new Set(["PUBLISHER_BAIL_UNCONFIRMED", "FUNDING_UNKNO
  * The client never recombines pause flags, restrictions and coverage into its own boolean.
  */
 function availabilityView(detail: MySupply): { tone: "open" | "blocked" | "uncertain"; label: string } {
+  if (detail.version?.origin === "LEGACY_OBSERVATION") return { tone: "uncertain", label: "历史只读，不接新单" };
   const reasons = [...new Set([...(detail.blockers ?? []), ...(detail.account.staff_restricted ? ["STAFF_RESTRICTED"] : [])])];
   if (detail.available === true) return { tone: "open", label: "当前可接新单" };
   if (detail.available === false) {
@@ -1224,10 +1226,12 @@ function historicalQuantityText(quantity: string | null, unit: string): string {
 function AccountDetail({ detail, gameName, latest, busy, identityReady, onAction, onRefresh, onAdopt }: { detail: MySupply; gameName?: string | null; latest: MySupply | null; busy: string; identityReady: boolean; onAction: (action: "withdraw" | "pause" | "resume") => Promise<void>; onRefresh: () => void; onAdopt: () => void }) {
   const account = detail.account;
   const version = detail.version;
+  const historicalReadOnly = version?.origin === "LEGACY_OBSERVATION";
   // DTO 降级（S16）：historicalRead 缺子对象按「不渲染该块」处理，不整页崩。
   const historical = detail.historicalRead?.historicalQuote ? detail.historicalRead : null;
   const savedDisplay = historical?.display?.state === "KNOWN" ? historical.display.facts : null;
   const historicalDisplay = savedDisplay?.attributes && Array.isArray(savedDisplay.resources) ? savedDisplay : null;
+  const historicalRatio = historicalDisplay?.sourceAccountBaseRatioWanPerYuan ? formatReferenceYuan(historicalDisplay.sourceAccountBaseRatioWanPerYuan)?.replace("¥", "") : null;
   const historicalConditions = historicalDisplay ? conditionLines(historicalDisplay.attributes, { attributeDisplay: historicalDisplay.attributeDisplay }) : [];
   const history = Array.isArray(detail.history) ? detail.history : [];
   // 列表「查看退回原因」锚链：详情异步插入后自行把 #blockers 滚入视野并接管焦点。
@@ -1243,8 +1247,8 @@ function AccountDetail({ detail, gameName, latest, busy, identityReady, onAction
   const quote = version?.quote ?? null;
   const publication = version?.publication ?? null;
   const publishedAt = displayTime(publication?.publishedAt);
-  const reasons = detail.decisions?.filter((decision) => decision.decision === "REJECT") ?? [];
-  const blockers = [...new Set([...(detail.blockers ?? []), ...(account.staff_restricted ? ["STAFF_RESTRICTED"] : [])])];
+  const reasons = historicalReadOnly ? [] : detail.decisions?.filter((decision) => decision.decision === "REJECT") ?? [];
+  const blockers = [...new Set([...(detail.blockers ?? []), ...(account.staff_restricted ? ["STAFF_RESTRICTED"] : [])])].filter(code => !historicalReadOnly || code === "STAFF_RESTRICTED");
   const availability = availabilityView(detail);
   const conditions = conditionRows(version);
   const resources = resourceRows(version);
@@ -1329,14 +1333,16 @@ function AccountDetail({ detail, gameName, latest, busy, identityReady, onAction
         </div>
       </div>
       <div className="supply-detail-actions">
-        {account.owner_paused
-          ? <button type="button" className="button secondary button--sm" disabled={!identityReady || busy !== ""} onClick={() => void onAction("resume")}><Play size={15} aria-hidden="true" />{busy === "resume" ? "恢复中…" : "恢复接单"}</button>
-          : version ? <button type="button" className="button secondary button--sm" disabled={!identityReady || busy !== ""} onClick={() => void onAction("pause")}><Pause size={15} aria-hidden="true" />{busy === "pause" ? "暂停中…" : "暂停接单"}</button> : null}
-        {version?.reviewState === "SUBMITTED" ? (
-          <button type="button" className="button secondary" disabled={!identityReady || busy !== ""} onClick={() => void onAction("withdraw")}><Undo2 size={16} aria-hidden="true" />{busy === "withdraw" ? "撤回中…" : "撤回审核"}</button>
-        ) : (
-          <Link href={editHref} className="button primary"><Pencil size={15} aria-hidden="true" />{editLabel}</Link>
-        )}
+        {historicalReadOnly ? <p className="supply-detail-actions-hint">历史只读记录，不参与当前接单或编辑；如需处理请联系客服。</p> : <>
+          {account.owner_paused
+            ? <button type="button" className="button secondary button--sm" disabled={!identityReady || busy !== ""} onClick={() => void onAction("resume")}><Play size={15} aria-hidden="true" />{busy === "resume" ? "恢复中…" : "恢复接单"}</button>
+            : version ? <button type="button" className="button secondary button--sm" disabled={!identityReady || busy !== ""} onClick={() => void onAction("pause")}><Pause size={15} aria-hidden="true" />{busy === "pause" ? "暂停中…" : "暂停接单"}</button> : null}
+          {version?.reviewState === "SUBMITTED" ? (
+            <button type="button" className="button secondary" disabled={!identityReady || busy !== ""} onClick={() => void onAction("withdraw")}><Undo2 size={16} aria-hidden="true" />{busy === "withdraw" ? "撤回中…" : "撤回审核"}</button>
+          ) : (
+            <Link href={editHref} className="button primary"><Pencil size={15} aria-hidden="true" />{editLabel}</Link>
+          )}
+        </>}
       </div>
     </div>
 
@@ -1636,6 +1642,14 @@ function AccountDetail({ detail, gameName, latest, busy, identityReady, onAction
             <div className="supply-revenue-sub-cell">
               <span className="supply-rev-sub-k">物资金额</span>
               <strong className="supply-rev-sub-v">{historical.historicalQuote.goodsYuan} 元</strong>
+            </div>
+            <div className="supply-revenue-sub-cell">
+              <span className="supply-rev-sub-k">迁入时账号比例</span>
+              <strong className="supply-rev-sub-v">{historicalRatio ? `1 元 = ${historicalRatio} 万哈夫币` : "未记录"}</strong>
+            </div>
+            <div className="supply-revenue-sub-cell">
+              <span className="supply-rev-sub-k">迁入时包赔选择</span>
+              <strong className="supply-rev-sub-v">{historicalDisplay?.sourceAccountFullPayoutSelected === true ? "已选择" : historicalDisplay?.sourceAccountFullPayoutSelected === false ? "未选择" : "未记录"}</strong>
             </div>
           </div></> : null}
 

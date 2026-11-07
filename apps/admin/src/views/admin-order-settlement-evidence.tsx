@@ -73,6 +73,7 @@ function Transactions({ rows, label, onOpenDocument }: { rows: OrderFinanceTrans
           <span>{transactionLabels[row.state] ?? stateLabels[row.state] ?? '状态未记录'}</span>
           <span className="tabular-nums">{financeMoney(row.amountCents)}</span>
           <time className="text-muted-foreground">{financeTime(row.occurredAt)}</time>
+          {row.kind === 'PAYMENT' ? <span>{row.payWayLabel ?? (row.payWay ? '支付方式未知' : '支付方式未记录')}</span> : null}
         </div>
         {row.refundAttempts?.length ? <ul className="pl-4 text-xs text-muted-foreground">{row.refundAttempts.map(attempt => <li key={attempt.source.id}>退款尝试 {attempt.originalNumber ?? '原号未记录'} · {financeMoney(attempt.recordedAmountCents)} · {financeTime(attempt.occurredAt)} · {legacyRefundAttemptLabels[attempt.originalStatus ?? ''] ?? '原状态未记录'}</li>)}</ul> : null}
         {row.sourceRefundFlags?.length ? <p className="text-xs text-muted-foreground">原退款记录或金额需要核对。</p> : null}

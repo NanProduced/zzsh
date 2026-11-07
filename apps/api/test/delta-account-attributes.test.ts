@@ -13,6 +13,7 @@ import { publicListingAttributes } from "../src/supply/publishing";
 import * as deltaRental from "../src/supply/delta-rental";
 
 const publicationAttributes = { next_season_pass: false, demulan_unlocked: false, grading_code: "4", grading_division: 3, login_method_code: "login_qq_qr", vit_level: 4, bear_level: 7, dive_level: 0,
+  safe_box_code: "safe_box_2x2", character_level: 30, region_province: "上海市", region_city: "上海市", secret_kd: "1.50", ban_record: false, face_is_self: true,
   service_window_start_minute: 540, service_window_end_minute: 1380, service_window_cross_midnight: false, service_window_timezone: "Asia/Shanghai" };
 const legacyAttributes = { ...publicationAttributes, grading_division: null, login_method_code: "legacy_login_qq" };
 const query = (filters: unknown) => parseListingQueryV2(new URLSearchParams({ queryVersion: "2", gameId: "game", filters: JSON.stringify(filters) }), "/listings");
@@ -46,6 +47,36 @@ test("supplements: new publication needs both explicit answers while verified le
   }
   const old = { ...complete } as Record<string, unknown>; delete old.next_season_pass; delete old.demulan_unlocked;
   assert.doesNotThrow(() => validateDeltaPublicationAttributes(old, { requireSupplementalDeclarations: false } as never));
+});
+
+test("new-account publication requires the old-site profile facts while legacy takeover keeps its captured path", () => {
+  const complete = {
+    ...publicationAttributes,
+    safe_box_code: "safe_box_2x2",
+    character_level: 30,
+    region_province: "上海市",
+    region_city: "上海市",
+    secret_kd: "1.85",
+    ban_record: false,
+    face_is_self: true,
+  };
+  assert.doesNotThrow(() => validateDeltaPublicationAttributes(complete, { requireNewAccountFacts: true }));
+  for (const [field, value] of [
+    ["safe_box_code", undefined],
+    ["character_level", null],
+    ["region_province", ""],
+    ["region_city", null],
+    ["secret_kd", "100.01"],
+    ["ban_record", null],
+    ["face_is_self", undefined],
+  ] as const) {
+    assert.throws(
+      () => validateDeltaPublicationAttributes({ ...complete, [field]: value }, { requireNewAccountFacts: true }),
+      (error: any) => error.status === 400 && error.details?.[0]?.path === `attributes.${field}`,
+      field,
+    );
+  }
+  assert.doesNotThrow(() => validateDeltaPublicationAttributes(publicationAttributes, { requireNewAccountFacts: false }));
 });
 
 test("supplements: authoring term guard trusts bound daily consumption, not option names or client hints", () => {
@@ -145,9 +176,9 @@ test("configured options expose exact ranks and QQ QR without auto-enabling an o
   await validateListingQuery(noQueries, query({ gradingRanks: ["4:3"], loginMethodCodes: ["login_qq_qr"] }), state);
   await assert.rejects(validateListingQuery(noQueries, query({ gradingRanks: ["6:2"] }), state), { status: 400 });
   await assert.rejects(validateListingQuery(noQueries, query({ gradingRanks: ["4:3"] }), { ...state, config: { ...config, fields: [] } }), { status: 400 });
-  const metadata = publicFilterMetadata(state, true);
+  const metadata = publicFilterMetadata(state, true, "TYPE");
   assert.equal(metadata.fields.find(f => f.key === "gradingRanks")?.options?.length, 2);
-  assert.equal(publicFilterMetadata({ ...state, config: { ...config, fields: [] } }, true).fields.length, 0);
+  assert.equal(publicFilterMetadata({ ...state, config: { ...config, fields: [] } }, true, "TYPE").fields.length, 0);
 });
 
 function publishingFixture(attributes: Record<string, unknown>, submitted = false) {

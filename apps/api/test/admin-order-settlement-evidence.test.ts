@@ -4,6 +4,7 @@ import {createHash} from 'node:crypto';
 import {canonicalize} from '../src/supply/content-hash';
 import {loadAdminFinanceFacts,projectAdminFinanceLedger,projectUnpostedFinanceSource,readAdminFinanceDocument,type FinanceFacts} from '../src/finance/admin-finance-read';
 import type {FinanceOrderFact} from '../src/finance/admin-finance-order-read';
+import {projectAdminOrderFinanceBusiness,projectAdminOrderSettlementEvidence} from '../src/finance/admin-order-settlement-evidence';
 import * as dutyStore from '../src/finance/legacy-duty-finance-store';
 import {planLegacyDutyFinalization,type LegacyFinanceDuty,type LegacyDutyFinalBasis,type LegacyDutyFundingProof} from '../src/finance/legacy-duty-finance';
 
@@ -69,6 +70,19 @@ test('legacy history remains a source observation, not captured funds or a curre
  const read=evidence(facts(true));assert.equal(read.historicalRefund.cents,'8200');assert.equal(read.historicalRefund.knowledge,'KNOWN');
  assert.equal(read.captured.cents,null);assert.equal(read.refundPayable.cents,null);assert.equal(read.refunded.cents,null);assert.equal(read.readiness,'UNAVAILABLE');
  assert.equal(read.platformContribution.cents,null);assert.equal(read.platformContribution.knowledge,'UNKNOWN','legacy has no verified platform component');
+});
+test('legacy order payment attempts keep each verified pay_way and flag multiple recorded paid attempts without assuming duplicate charge',()=>{
+ const original=order(true);original.originalOrderStatus='4';original.originalPaymentStatus='1';
+ const attempt=(id:string,way:string,label:string)=>({documentRef:'HISTORY_PAYMENT:'+id,number:'PAY-'+id,kind:'PAYMENT',amountCents:'68500',occurredAt:at,originalStatus:'1',originalStatusLabel:'旧平台已付款',payWay:way,payWayLabel:label,channelArrival:'UNKNOWN' as const});
+ const f:any={...facts(true),legacyOrderObservations:[attempt('wechat','2','微信（原记录）'),attempt('alipay','3','支付宝（原记录）')],orderSettlementFacts:{legacyDutyReady:false,duties:[]}};
+ const receipt=projectAdminOrderSettlementEvidence(original,[],f.orderSettlementFacts);
+ const business=projectAdminOrderFinanceBusiness(original,receipt,f);
+ assert.deepEqual(business.paymentAttempts.map(row=>[row.documentRef,row.payWay,row.payWayLabel,row.channelArrival]),[
+  ['HISTORY_PAYMENT:wechat','2','微信（原记录）','UNKNOWN'],
+  ['HISTORY_PAYMENT:alipay','3','支付宝（原记录）','UNKNOWN'],
+ ]);
+ assert(business.reasonCodes.includes('LEGACY_MULTIPLE_RECORDED_PAID_ATTEMPTS'));
+ assert.equal(business.paymentAttempts.some(row=>row.state==='RECORDED_PAID'),true);
 });
 
 function legacyFixture(amount='8200',suffix='b',kind:LegacyFinanceDuty['kind']='RENTER_REFUND'){

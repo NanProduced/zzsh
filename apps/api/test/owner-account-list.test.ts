@@ -7,7 +7,7 @@ const key = { keyId: "k1", secret: "x".repeat(40) };
 const haffItem = { id: "it-haff", code: "df_billable_haff", name: "哈夫币", unit: "HAFF_BASE" };
 const base = {
   id: "acc-1", display_no: "AC0000000001", game_id: "g", revision: "3", owner_paused: false, staff_restricted: false,
-  version_id: "v1", title: "t", review_state: "PUBLISHED", sequence: "2", owner_name: "o", game_name: "三角洲",
+  version_id: "v1", version_origin: "NATIVE", title: "t", review_state: "PUBLISHED", sequence: "2", owner_name: "o", game_name: "三角洲",
   payload: { schemaVersion: 2, declaration: { attributes: { safe_box_code: "unknown_code", grading_code: "zz", character_level: 30, vit_level: 5, bear_level: 6, rentalPricing: { rentalMode: "fast" } }, inventory: [{ itemId: "it-haff", quantity: "50000000" }] }, quoteValues: { ownerTotal: { currency: "CNY", unit: "yuan", amount: "88.00", scale: 2 } } },
   presentation_items: [haffItem], rule_current: true,
   ao_id: null, ao_display_no: null, ao_status: null, ao_renter_name: null, ao_term_seconds: null, ao_started_at: null, ao_deadline_at: null, ao_owner_amount: null,
@@ -40,6 +40,8 @@ test("B1 rentalState precedence lives in SQL and filters server-side", () => {
 test("B1 projection: titleFacts, available, blockers; unquoted owner total is null not 0", () => {
   const listed = projectOwnerAccount({ ...base } as any) as any;
   assert.equal(listed.available, true); assert.deepEqual(listed.blockers, []);
+  assert.equal(listed.historicalReadOnly, false); assert.equal("version_origin" in listed, false);
+  assert.equal((projectOwnerAccount({ ...base, version_origin: "LEGACY_OBSERVATION" } as any) as any).historicalReadOnly, true);
   assert.equal(listed.accountDisplay.displayNo, "AC0000000001");
   assert.equal(listed.accountDisplay.titleFacts.haffBase, "50000000");
   assert.equal(listed.accountDisplay.titleFacts.level, 30);

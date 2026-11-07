@@ -249,6 +249,7 @@ export type LegacyHistoricalRead = {
   historicalQuote: { haffRentYuan: string; goodsYuan: string; depositYuan: string; termDays: string; dailyHaffBase: string };
   display?: { state: "NOT_IMPORTED"; facts: null } | { state: "KNOWN"; facts: {
     schema: "legacy-listing-display-v1"; rentalMode: "ordinary" | "custom" | "fast" | null;
+    sourceAccountBaseRatioWanPerYuan?: string | null; sourceAccountFullPayoutSelected?: boolean | null;
     attributes: Record<string, string | number | boolean | null>;
     resources: Array<{ code: string; name: string; quantity: string | null; unit: string }>;
     attributeDisplay: { safeBox: HistoricalDisplayCode | null; grading: HistoricalDisplayCode | null; loginMethod: HistoricalDisplayCode | null; serviceWindow: { startMinute: number; endMinute: number; displayName: string } | null };

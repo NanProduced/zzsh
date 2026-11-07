@@ -571,6 +571,28 @@ test("R03: recovery conflicts and current paused state cannot clear another orig
     assert.equal(calls.filter(call=>call.method!=="GET").length,0);
   }finally{await p.close();}
 });
+test("historical-only legacy observations show a read-only business state without pause/edit or internal publish chores", async () => {
+  const supply = detailOf("acc-historical");
+  supply.account.owner_paused = true;
+  supply.version.origin = "LEGACY_OBSERVATION";
+  supply.historicalRead = { historicalQuote: { haffRentYuan: "12.50", goodsYuan: "0.00", depositYuan: "0.00", termDays: "2" }, display: { state: "UNKNOWN", facts: null } };
+  supply.blockers = ["RULE_CHANGED", "QUOTE_REQUIRED", "PUBLISHER_BAIL_UNCONFIRMED", "FUNDING_UNKNOWN", "CURRENT_VERSION_MISSING"];
+  const row = { ...accountRow("acc-historical"), historicalReadOnly: true, staff_restricted: true, rentalState: "PAUSED", historicalRead: supply.historicalRead };
+  const p = await probe({ viaFetch: async (url) => {
+    if (url.includes("/me/accounts")) return Response.json({ items: [row], nextCursor: null });
+    return Response.json(supply);
+  } });
+  try {
+    await p.render("accounts");
+    assert.equal(p.host.querySelector('[data-account-row="acc-historical"]')?.textContent.includes("历史只读"), true);
+    assert.match(p.host.querySelector('[data-account-row="acc-historical"]').textContent, /账号受限/);
+    await p.render("accounts", "acc-historical");
+    assert.match(p.host.textContent, /历史只读记录，不参与当前接单或编辑/);
+    assert.equal([...p.host.querySelectorAll("button")].some(button => ["暂停接单", "恢复接单", "修改账号资料", "开始修改"].includes(button.textContent.trim())), false);
+    assert.doesNotMatch(p.host.textContent, /RULE_CHANGED|QUOTE_REQUIRED|PUBLISHER_BAIL_UNCONFIRMED|FUNDING_UNKNOWN|CURRENT_VERSION_MISSING/);
+    assert.doesNotMatch(p.host.textContent, /规则变更|未报价|保证金未知|资料不能发布/);
+  } finally { await p.close(); }
+});
 const rowIds = (p) => [...p.host.querySelectorAll("[data-account-row]")].map((node) => node.getAttribute("data-account-row"));
 const { SupplyRequestError } = require(path.join(tree, "apps/web/src/lib/supply-client.ts"));
 
@@ -815,6 +837,23 @@ test("historical account detail renders saved display facts and refreshes its li
     assert.equal(p.calls.mine.length, 1);
     assert.equal(p.writes, 0);
   } finally { await p.close(); }
+});
+
+test("historical account facts show captured ratio and three payout states without inventing a quote", async () => {
+  for (const [selected, label] of [[true, "已选择"], [false, "未选择"], [null, "未记录"]]) {
+    const historicalRead = historicalAccount();
+    historicalRead.display.facts.sourceAccountBaseRatioWanPerYuan = "56";
+    historicalRead.display.facts.sourceAccountFullPayoutSelected = selected;
+    const detail = { ...detailOf("history-1"), historicalRead };
+    const p = await probe({ detail });
+    try {
+      await p.render("accounts", "history-1");
+      const revenue = p.host.querySelector(".supply-side-revenue-card");
+      assert.match(revenue.textContent, /迁入时账号比例1 元 = 56\.00 万哈夫币/);
+      assert.ok(revenue.textContent.includes(`迁入时包赔选择${label}`));
+      assert.equal(p.writes, 0);
+    } finally { await p.close(); }
+  }
 });
 
 test("account quote keeps owner total and guarantee separate and never invents unavailable values", async () => {

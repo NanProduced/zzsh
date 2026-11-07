@@ -171,12 +171,14 @@ export function AccountIdentity({ row, onOpenOwner }: { row: SupplyWorkItem; onO
 /** Compact display only: zero stock remains available in the full account record. */
 export function AccountResources({ row }: { row: SupplyWorkItem }) {
   const historical = !row.summary && row.facts.historicalRead?.display?.state === "KNOWN" ? row.facts.historicalRead.display.facts : null;
+  const read = row.facts.historicalRead;
+  const capturedRatio = (!row.summary || row.summary.displaySource === "LEGACY_SNAPSHOT" && read?.observationVersionId === row.summary.versionId) && read?.display?.state === "KNOWN" ? read.display.facts.sourceAccountBaseRatioWanPerYuan : null;
   const config = row.summary?.config ?? (historical ? { safeBox: historical.attributeDisplay?.safeBox?.displayName, grading: historical.attributeDisplay?.grading?.displayName } : null);
   const materials = row.summary ? rowVisibleMaterials(row) : (historical?.resources ?? []).filter(item => item.unit !== "HAFF_BASE" && !(typeof item.quantity === "string" && /^0+$/.test(item.quantity))).map(item => ({ itemId: item.code, code: item.code, name: item.name, quantity: item.quantity ?? null, unit: item.unit }));
   const total = row.summary?.materialsVisibleTotal ?? materials.length;
   const unit = (item: typeof materials[number]) => item.unit === "ROUND" ? "发" : item.unit === "DAY" ? "天" : item.unit === "PIECE" ? "件" : "";
   return <div className="space-y-1 text-xs" data-account-resources>
-    <p className="flex flex-wrap items-baseline gap-x-2 gap-y-1"><span className="font-semibold tabular-nums text-amber-900 dark:text-amber-300">{rowHaffText(row)}</span><span className="text-xs text-muted-foreground" title="租客基础比例，会员优惠前；金额以冻结报价为准">{haffRateText(row.summary?.quote?.baseRenterHaffRatioWanPerYuan)}</span></p>
+    <p className="flex flex-wrap items-baseline gap-x-2 gap-y-1"><span className="font-semibold tabular-nums text-amber-900 dark:text-amber-300">{rowHaffText(row)}</span><span className="text-xs text-muted-foreground" title={capturedRatio ? "迁入时账号记录，不代表订单冻结比例或当前报价" : "租客基础比例，会员优惠前；金额以冻结报价为准"}>{capturedRatio ? `迁入时 ${haffRateText(capturedRatio)}` : haffRateText(row.summary?.quote?.baseRenterHaffRatioWanPerYuan)}</span></p>
     {config && [config.safeBox, config.grading].some(value => readableConfigName(value)) ? <p className="text-muted-foreground">{[config.safeBox, config.grading].map(value => readableConfigName(value)).filter(Boolean).join(" · ")}</p> : null}
     <p className="max-w-[310px] break-words leading-relaxed text-muted-foreground">{materials.length ? materials.slice(0, 3).map(item => `${item.name ?? "物资"} ${item.quantity ?? "数量未知"}${unit(item)}`).join(" · ") : row.summary?.materialsVisibleTotal === 0 && row.summary.materialsTotal ? "物资数量均为 0" : row.summary?.versionId ? "暂无物资申报" : "资源待完善"}{total > 3 ? ` · 另 ${total - 3} 项` : ""}</p>
   </div>;
@@ -197,11 +199,16 @@ export function AccountTerms({ row }: { row: SupplyWorkItem }) {
 export function AccountFees({ row }: { row: SupplyWorkItem }) {
   const fees = rowBaseFeeRows(row), hasQuote = [fees.total, fees.haff, fees.materials, fees.resources ?? ""].some(value => value.includes("¥"));
   const historical = Boolean((!row.summary || row.summary.displaySource === "LEGACY_SNAPSHOT") && row.facts.historicalRead);
+  if (historical) return <div className="min-w-[150px] space-y-1 text-xs tabular-nums" data-account-fees>
+    <div className="flex justify-between gap-3 text-muted-foreground"><span>迁入时租金</span><span>{fees.haff}</span></div>
+    <div className="flex justify-between gap-3 text-muted-foreground"><span>迁入时物资费</span><span>{fees.materials}</span></div>
+    <div className="flex justify-between gap-3 text-muted-foreground"><span>租客基础押金</span><span className="font-medium text-foreground">{fees.deposit}</span></div>
+    <span className="text-[11px] text-muted-foreground" title={fees.note}>迁入时记录 · 分项不合并</span>
+  </div>;
   return <div className="min-w-[150px] space-y-1 text-xs tabular-nums" data-account-fees>
-    {hasQuote ? <><div className="flex items-baseline justify-between gap-3"><span className="text-muted-foreground" title={historical ? fees.note : undefined}>{historical ? "迁入记录合计" : "基础总价"}</span><strong className="text-base font-semibold text-sky-900 dark:text-sky-300">{fees.total}</strong></div><div className="flex justify-between gap-3 text-muted-foreground"><span>哈夫币租金</span><span>{fees.haff}</span></div><div className="flex justify-between gap-3 text-muted-foreground"><span>物资预付</span><span>{fees.materials}</span></div></> : <p className="font-medium text-muted-foreground">{historical ? "迁入金额待核" : "报价待完善"}</p>}
+    {hasQuote ? <><div className="flex items-baseline justify-between gap-3"><span className="text-muted-foreground">基础总价</span><strong className="text-base font-semibold text-sky-900 dark:text-sky-300">{fees.total}</strong></div><div className="flex justify-between gap-3 text-muted-foreground"><span>哈夫币租金</span><span>{fees.haff}</span></div><div className="flex justify-between gap-3 text-muted-foreground"><span>物资预付</span><span>{fees.materials}</span></div></> : <p className="font-medium text-muted-foreground">报价待完善</p>}
     <div className="flex justify-between gap-3 pt-1.5 text-muted-foreground"><span>租客基础押金</span><span className="font-medium text-foreground">{fees.deposit}</span></div>
     {fees.resources && fees.resources !== "未提供" && (fees.total === "未提供" || !fees.haff.startsWith("¥") || !fees.materials.startsWith("¥")) ? <div className="flex justify-between gap-3 text-muted-foreground"><span>资源费合计</span><span>{fees.resources}</span></div> : null}
-    {(!row.summary || row.summary.displaySource === "LEGACY_SNAPSHOT") && row.facts.historicalRead ? <span className="text-[11px] text-muted-foreground">迁入时记录</span> : null}
   </div>;
 }
 
@@ -306,6 +313,7 @@ export function QuickView({ row, canRead, onClose, onOpenFull }: QuickProps) {
   const releaseId = v?.releaseId ?? null;
   const ratio = v?.quote?.baseRenterHaffRatioWanPerYuan ?? null;
   const fees = v ? versionBaseFeeRows(v, publicDefault?.baseDeposit?.amountCents) : rowBaseFeeRows(viewed);
+  const historicalFees = Boolean((!viewed.summary || viewed.summary.displaySource === "LEGACY_SNAPSHOT") && viewed.facts.historicalRead);
   const termSeconds = publicDefault ? publicDefault.quote?.termSeconds ?? null : v?.quote?.termSeconds ?? null;
   const declared = v?.declaration.attributes ?? {};
   const payout = declared.full_payout_declaration as Record<string, unknown> | undefined;
@@ -340,19 +348,19 @@ export function QuickView({ row, canRead, onClose, onOpenFull }: QuickProps) {
       {!detail && !error ? <p className="mb-3 text-sm text-muted-foreground" aria-busy="true">正在读取当前资料…</p> : null}
 
       {(!v || imported) && detail && historical ? <ImportedAccountView read={historical}/> : <>
-      <section className="border-b border-border pb-4" aria-label="基础报价速览">
-        <div className="mb-3 flex flex-wrap items-baseline justify-between gap-3"><h3 className="text-sm font-semibold">基础报价</h3><strong className="text-xl font-semibold tabular-nums text-sky-900 dark:text-sky-300"><span className="mr-2 text-xs font-normal text-muted-foreground">基础总价</span>{fees.total}</strong></div>
+      <section className="border-b border-border pb-4" aria-label={historicalFees ? "迁入时记录速览" : "基础报价速览"}>
+        <div className="mb-3 flex flex-wrap items-baseline justify-between gap-3"><h3 className="text-sm font-semibold">{historicalFees ? "迁入时记录" : "基础报价"}</h3>{historicalFees ? null : <strong className="text-xl font-semibold tabular-nums text-sky-900 dark:text-sky-300"><span className="mr-2 text-xs font-normal text-muted-foreground">基础总价</span>{fees.total}</strong>}</div>
         <dl className="grid grid-cols-2 gap-x-5 gap-y-3 text-sm sm:grid-cols-3">
-          <div><dt className="text-xs text-muted-foreground">哈夫币租金</dt><dd className="mt-1 tabular-nums">{fees.haff}</dd></div>
-          <div><dt className="text-xs text-muted-foreground">物资预付</dt><dd className="mt-1 tabular-nums">{fees.materials}</dd></div>
+          <div><dt className="text-xs text-muted-foreground">{historicalFees ? "迁入时租金" : "哈夫币租金"}</dt><dd className="mt-1 tabular-nums">{fees.haff}</dd></div>
+          <div><dt className="text-xs text-muted-foreground">{historicalFees ? "迁入时物资费" : "物资预付"}</dt><dd className="mt-1 tabular-nums">{fees.materials}</dd></div>
           <div><dt className="text-xs text-muted-foreground">租客基础押金</dt><dd className="mt-1 font-medium tabular-nums">{fees.deposit}</dd></div>
           {fees.resources && fees.resources !== "未提供" && (fees.total === "未提供" || !fees.haff.startsWith("¥") || !fees.materials.startsWith("¥")) ? <div><dt className="text-xs text-muted-foreground">资源费合计</dt><dd className="mt-1 tabular-nums">{fees.resources}</dd></div> : null}
           <div><dt className="text-xs text-muted-foreground">预计租期</dt><dd className="mt-1">{termSeconds ? formatTermDays(termSeconds) : "未提供"}</dd></div>
           <div><dt className="text-xs text-muted-foreground">全额包赔</dt><dd className="mt-1">{payoutLabel}</dd></div>
           <div><dt className="text-xs text-muted-foreground">租客基础比例</dt><dd className="mt-1">{haffRateText(ratio)}</dd></div>
         </dl>
-        <p className="mt-3 text-xs text-muted-foreground">基础总价含哈夫币租金、物资预付和基础押金；租客实际费用按本人报价核定。</p>
-        {fees.note ? <p className="mt-1 text-xs text-muted-foreground">{fees.note}</p> : null}
+        <p className="mt-3 text-xs text-muted-foreground">{historicalFees ? "迁入时记录，分项不合并；押金可退，不是订单实付或当前报价。" : "基础总价含哈夫币租金、物资预付和基础押金；租客实际费用按本人报价核定。"}</p>
+        {fees.note && !historicalFees ? <p className="mt-1 text-xs text-muted-foreground">{fees.note}</p> : null}
       </section>
 
       <div className="mt-4 space-y-3">

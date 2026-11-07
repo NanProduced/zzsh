@@ -193,7 +193,7 @@ export function OrderAccountDossier({
               <div className="order-dossier-spec-pill">
                 <span className="spec-pill-label">资料来源</span>
                 <strong className="spec-pill-val">
-                  {listingFacts?.source === "LEGACY_ACCOUNT_SNAPSHOT" ? "历史迁入快照" : "下单资料快照"}
+                  {!listingFacts ? "旧平台原单资源记录" : listingFacts.source === "LEGACY_ACCOUNT_SNAPSHOT" ? "迁入时账号资料（非下单快照）" : "下单资料快照"}
                 </strong>
               </div>
             </div>
@@ -201,7 +201,7 @@ export function OrderAccountDossier({
             {/* 关联在架物资与交付资源 */}
             {displayResources.length > 0 ? (
               <div className="order-dossier-spec-section order-dossier-resources-section">
-                <h4 className="order-dossier-section-title">关联在架物资与交付资源 ({displayResources.length})</h4>
+                <h4 className="order-dossier-section-title">{factResources.length > 0 ? (listingFacts?.source === "LEGACY_ACCOUNT_SNAPSHOT" ? "迁入时账号库存（非下单快照）" : "下单时账号资料") : "原单资源消耗记录（非当前库存）"} ({displayResources.length})</h4>
                 <div className="order-dossier-resource-chips">
                   {displayResources.map((res) => {
                     const isHaff = res.code === "haff_base" || res.name?.includes("哈夫币");

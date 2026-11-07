@@ -559,6 +559,7 @@ for (const observationVersion of [false, true]) test(`historical list, mobile ca
     historicalQuote: { haffRentYuan: '125.30', goodsYuan: '0.00', depositYuan: '0.00', termDays: '10', dailyHaffBase: '10000000' },
     display: { state: 'KNOWN', facts: {
       schema: 'legacy-listing-display-v1', rentalMode: 'custom', attributes: { vit_level: 0 },
+      sourceAccountBaseRatioWanPerYuan: '56', sourceAccountFullPayoutSelected: true,
       resources: [{ code: 'haff', name: '哈夫币', quantity: '97000000', unit: 'HAFF_BASE' }, { code: 'ammo', name: '弹药', quantity: null, unit: 'ROUND' }],
       attributeDisplay: { safeBox: { code: 'box', displayName: '基础安全箱', mappingStatus: 'CONFIRMED', issueCode: null }, grading: null, loginMethod: { code: 'wechat', displayName: '微信扫码', mappingStatus: 'CONFIRMED', issueCode: null }, serviceWindow: null },
       sourceUpdatedAt: '2026-09-09T10:38:00Z',
@@ -581,13 +582,15 @@ for (const observationVersion of [false, true]) test(`historical list, mobile ca
   await tick(h);
   for (const selector of ['#supply-open-a', '#supply-card-a']) {
     const text = h.el.querySelector(selector).textContent;
-    assert.match(text, /哈夫币租金\s*历史 ¥125.30/);
-    assert.match(text, /物资预付\s*历史 ¥0.00/);
-    assert.match(text, /基础押金\s*历史 ¥0.00/);
-    assert.match(text, /迁入记录合计\s*¥125.30/);
+    assert.match(text, /迁入时租金\s*¥125.30/);
+    assert.match(text, /迁入时物资费\s*¥0.00/);
+    assert.match(text, /租客基础押金\s*历史 ¥0.00/);
+    assert.doesNotMatch(text, /迁入记录合计/);
     assert.match(text, /订单进行中/); assert.match(text, /当前账号资料暂不能发布/);
     assert.doesNotMatch(text, /账号不可发布\(历史\/归档\)/);
     assert.match(text, /97 M 哈夫币/);
+    assert.match(text, /迁入时 1元=56万哈夫币/);
+    if (observationVersion) assert.match(text, /已选包赔/);
     assert.match(text, /基础安全箱/);
     assert.equal(text.includes('OLD-7'), false, 'the old source number stays in the detail trace, not the first column');
     assert.doesNotMatch(text, /旧平台迁入/);
@@ -600,6 +603,8 @@ for (const observationVersion of [false, true]) test(`historical list, mobile ca
   assert.match(section.textContent, /物资费.*¥0.00/);
   assert.match(section.textContent, /押金.*¥0.00/);
   assert.match(section.textContent, /租期.*10 天/);
+  assert.match(section.textContent, /迁入时账号比例.*1元=56万哈夫币/);
+  assert.match(section.textContent, /迁入时包赔选择.*已选择/);
   assert.match(section.textContent, /历史编号 OLD-7/);
   assert.match(section.textContent, /来源更新：/);
   assert.equal(h.el.querySelectorAll('[data-imported-account]').length, 1, 'the sole historical record is shown without duplication');

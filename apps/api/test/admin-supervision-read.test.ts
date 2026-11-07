@@ -697,7 +697,7 @@ function summaryHarness(viewerPermissions: string[], options: { policy?: unknown
 
 test("bound legacy display supplies real list facts without becoming a native quote or leaking private fields", async t => {
     t.mock.method(publishing, "readPublicListing", async () => { throw Object.assign(new Error("hidden"), { status: 404 }); });
-    const snapshot = convertLegacyDisplayFields({ haff: "101", awm_bullet_num: "30", level6_bullet_num: null, insure_lv: "2", grading_lv: "5", login_way: "1", character_lv: "60", login_password: "PRIVATE_LOGIN", owner_ratio: "PRIVATE_RATIO" });
+    const snapshot = convertLegacyDisplayFields({ haff: "101", awm_bullet_num: "30", level6_bullet_num: null, insure_lv: "2", grading_lv: "5", login_way: "1", character_lv: "60", base_bot: "56", is_full_payout: "1", login_password: "PRIVATE_LOGIN", owner_ratio: "PRIVATE_RATIO" }, { includeAccountBaseRatio: true, includeAccountFullPayout: true });
     const binding = { observationVersionId: "version-a-1", baseSourceDigest: "b".repeat(64), extractSha256: "a".repeat(64), sourceUpdatedAt: "2026-09-13T00:00:00.000Z", evidenceRef: `legacy-display-v1:${"a".repeat(64)}:1`, snapshot };
     const historical = { account_id: "a-1", observation_version_id: binding.observationVersionId, source_status: 4, legacy_id: "1", owner_user_id: "u-1", source_digest: binding.baseSourceDigest, base_updated_at: new Date(binding.sourceUpdatedAt), snapshot: { ...historicalSnapshot, termDays: "11" },
         display_account_id: "a-1", display_version_id: binding.observationVersionId, base_source_digest: binding.baseSourceDigest, extract_sha256: binding.extractSha256, display_updated_at: new Date(binding.sourceUpdatedAt), display_evidence_ref: binding.evidenceRef, display_snapshot: snapshot, display_digest: legacyDisplayDigest("a-1", binding) };
@@ -717,6 +717,8 @@ test("bound legacy display supplies real list facts without becoming a native qu
     assert.equal(summary.materials.find((item: any) => item.code === "level6_round").quantity, null, "unknown is not zero or omitted");
     assert.equal(summary.quote, null); assert.equal(summary.baseDeposit, null); assert.equal(summary.fullPayout, "NOT_DECLARED");
     assert.equal(row.facts.historicalRead.canCreateOrder, false); assert.notEqual(row.facts.newOrders, true);
+    assert.equal(row.facts.historicalRead.display.facts.sourceAccountBaseRatioWanPerYuan, "56");
+    assert.equal(row.facts.historicalRead.display.facts.sourceAccountFullPayoutSelected, true);
     assert.equal(JSON.stringify(row).includes("PRIVATE_"), false); assert.equal(row.ownerLink.state, "DENIED");
     const native: any = (await run(base)).items[0];
     assert.equal(native.summary.displaySource, "CURRENT_VERSION"); assert.equal(native.summary.haff.quantity, "12500000");
@@ -729,6 +731,9 @@ test("bound legacy display supplies real list facts without becoming a native qu
     t.mock.method(publishing, "listingDetail", async () => ({ version: { id: binding.observationVersionId, origin: "LEGACY_OBSERVATION", declaration: { attributes: {}, inventory: [] }, quote: null }, blockers: ["QUOTE_REQUIRED"], available: false }));
     const associated = await readOrderAccountViews(f.client, ["a-1"], async () => ({ publisherBail: "UNKNOWN", occupancy: "FREE", reference: null }));
     assert.equal(associated.get("a-1")?.source, "LEGACY_ACCOUNT_SNAPSHOT", "current source facts are not a native public or order-frozen version");
+    assert.equal(associated.get("a-1")?.sourceAccountBaseRatioWanPerYuan, "56");
+    assert.equal(associated.get("a-1")?.sourceAccountFullPayoutSelected, true);
+    assert.equal(associated.get("a-1")?.haffRatioWanPerYuan, null, "capture never fills an order or public quote ratio");
     assert.equal(associated.get("a-1")?.haff?.quantity, summary.haff.quantity);
     assert.equal(associated.get("a-1")?.term.termSeconds, summary.term.termSeconds);
     assert.equal(associated.get("a-1")?.sourceUpdatedAt, summary.sourceUpdatedAt);
