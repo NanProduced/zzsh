@@ -40,6 +40,18 @@ test('balance page defaults to current movements and offers separate history and
  ui.props.snapshot={...ui.props.snapshot,permissions:[]};await ui.render();assert.match(ui.host.textContent,/没有完整资金读取权限/);assert.doesNotMatch(ui.host.textContent,/提现扣除/);
 });
 
+test('balance rows distinguish proved simulated entries from unknown or ordinary records',async t=>{
+ const base={source:'NATIVE',subjectId:'u1',subjectName:'用户一',documentRef:null,amountCents:'100',occurredAt:null};
+ const ui=await mount(t,'finance-balances',[
+  {...base,id:'demo',label:'号主租赁收入',dataOrigin:'ECS_TEST_SIMULATED',bankArrival:'UNKNOWN'},
+  {...base,id:'uncertain',label:'提现扣除',dataOrigin:'UNKNOWN',bankArrival:'UNKNOWN'},
+  {...base,id:'invalid',label:'提现退回',dataOrigin:'LOCAL_DEMO_SIMULATED'},
+  {...base,id:'plain',label:'分销收入'},
+ ]);
+ const rows=ui.host.querySelectorAll('tbody tr');assert.match(rows[0].textContent,/号主租赁收入.*模拟/);assert.match(rows[1].textContent,/提现扣除.*来源待核/);
+ assert.match(rows[2].textContent,/提现退回.*来源待核/);assert.doesNotMatch(rows[3].textContent,/模拟|来源待核/);
+});
+
 test('history page shows the old recorded balance as trace data',async t=>{
  const history=await mount(t,'finance-balance-history',[{id:'old',source:'LEGACY',label:'号主租赁收入',subjectId:'u1',subjectName:'用户一',documentRef:'HISTORY_EARNINGS:one',amountCents:'1000',occurredAt:null,balanceAfterCents:'9000'}]);
  assert.match(history.requests[0],/view=HISTORY/);assert.match(history.host.textContent,/旧站记录余额/);assert.match(history.host.textContent,/90\.00 元/);assert.match(history.host.textContent,/不重复计入当前余额/);

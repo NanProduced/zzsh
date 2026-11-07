@@ -93,6 +93,18 @@ test('historical records retain source meaning without claiming a new balance cr
  }finally{await p.close();}
 });
 
+test('wallet list and detail label only server-proved simulated activity',async()=>{
+ const simulated={...entry,id:'ledger:demo',sourceKind:'NATIVE_SETTLEMENT',dataOrigin:'LOCAL_DEMO_SIMULATED',bankArrival:'UNKNOWN'};
+ const uncertain={...entry,id:'ledger:uncertain',sourceKind:'CONTROLLED_WITHDRAWAL_RESERVE',dataOrigin:'UNKNOWN',bankArrival:'UNKNOWN'};
+ const ordinary={...entry,id:'ledger:ordinary',sourceKind:'NATIVE_SETTLEMENT'};
+ const value={...page(),items:[simulated,uncertain,ordinary],nextCursor:null,totals:{...page().totals,count:'3'}};
+ const p=await probe(async url=>reply(String(url).includes('/entries/')?{...ctx(),entry:simulated}:String(url).includes('/entries?')?value:wallet()),'wallet=entries');
+ try{await p.render();const rows=[...p.host.querySelectorAll('.wallet-record')];assert.equal(rows.length,3);
+  assert.match(rows[0].textContent,/模拟/);assert.match(rows[1].textContent,/来源待核/);assert.doesNotMatch(rows[1].textContent,/模拟/);assert.doesNotMatch(rows[2].textContent,/模拟|来源待核/);
+  await p.setQuery('wallet=entry&entry=ledger%3Ademo');assert.match(p.host.querySelector('.wallet-entry-detail').textContent,/模拟资金记录/);assert.match(p.host.textContent,/不会产生真实收款或打款/);
+ }finally{await p.close();}
+});
+
 test('the overview keeps the opening out of recent activity',async()=>{
  const movement={...entry,id:'ledger:movement',sourceKind:'NATIVE_SETTLEMENT'};
  const p=await probe(async url=>reply(String(url).includes('/entries?')?{...page(),items:[entry,movement]}:wallet()),'');

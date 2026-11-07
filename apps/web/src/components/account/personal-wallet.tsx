@@ -110,6 +110,7 @@ function EntryRows({ items, bucket, onOpen }: { items: WalletEntry[]; bucket: En
             <div className="wallet-record-copy">
               <div className="wallet-record-title-row">
                 <strong>{financeEntryLabel(e)}</strong>
+                {e.dataOrigin ? <span className="wallet-type-tag reference-tag">{e.dataOrigin === "UNKNOWN" ? "来源待核" : "模拟"}</span> : null}
               </div>
               {reference ? <small>单号 {reference}</small> : null}
               {e.sourceDetails?.attempts?.map(a => (
@@ -432,9 +433,11 @@ function EntryDetail({ detail }: { detail: WalletEntryDetail }) {
    <div className="wallet-entry-detail-header">
      {status?<StatusBadge tone={e.kind === "HISTORICAL" ? "neutral" : "success"}>{status}</StatusBadge>:null}
      <span className={`wallet-type-tag ${e.kind === "HISTORICAL" || nature.reference ? "reference-tag" : "balance-tag"}`}>{nature.label}</span>
+     {e.dataOrigin?<StatusBadge tone="neutral">{e.dataOrigin==='UNKNOWN'?'来源待核':'模拟'}</StatusBadge>:null}
    </div>
    <h3>{financeEntryLabel(e)}</h3>
    <strong className="wallet-main-amount">{e.historicalAmountSemantics==='UNVERIFIED'?'金额待核':walletMoney(e.sourceDetails?.recordedAmountCents??e.deltaCents, !e.sourceDetails)}</strong>
+   {e.dataOrigin?<p className="wallet-detail-nature-hint">{e.dataOrigin==='UNKNOWN'?'这笔记录的资金来源尚待核实。':'这是一笔模拟资金记录，不会产生真实收款或打款。'}</p>:null}
    {e.sourceDetails ? <p className="wallet-detail-nature-hint">这是旧平台的业务记录，金额没有计入当前余额。</p> : null}
    <dl className="account-fact-list">
      <div><dt>记录类型</dt><dd>{e.historicalAmountSemantics==='UNVERIFIED'?'待核实':e.kind==='HISTORICAL'?'旧平台余额变动':bucketLabel(e.bucket)}</dd></div>

@@ -572,7 +572,7 @@ function DemoWithdrawalPanel({scope,refreshKey,bindingLocked,availableBalance,le
   const labels:Record<DemoIntent["state"],string>={RESERVED:"金额已暂留",SUBMITTING:"模拟处理中",PROCESSING:"模拟处理中",UNKNOWN:"结果待确认",SUCCEEDED:"模拟提现完成",FAILED:"模拟提现未完成",RECONCILIATION_REQUIRED:"需要客服核对"};
   return <section className="account-module-card channel-withdrawal-panel" data-testid="demo-withdrawal-panel" aria-labelledby={`${field}-title`}>
     <div className="bank-section-heading"><h3 id={`${field}-title`}>模拟提现</h3><StatusBadge tone="neutral">测试环境</StatusBadge></div>
-    <p className="bank-help">用于测试提现流程，余额会按测试记录变动，不会向银行卡打款。</p>
+    <p className="bank-help">使用演示规则测试提现，余额会按测试记录变动，不会向银行卡打款。</p>
     <div className="bank-available" aria-label="可提现余额"><span className="bank-available-caption">可提现余额</span><strong className="bank-available-sum">{walletMoney(availableBalance)}</strong></div>
     <hr className="bank-metric-divider" />
     {loading?<SkeletonBlock label="正在读取收款资料" lines={2}/>:null}

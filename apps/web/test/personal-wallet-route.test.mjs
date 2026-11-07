@@ -7,6 +7,17 @@ test('actual wallet BFF preserves safe source-only facts and never forwards priv
  globalThis.fetch=async()=>Response.json({...page,projectionVersion:2,entry:{schemaVersion:1,id:'history:source',occurredAt:page.asOf,importedAt:page.asOf,postedAt:null,recordedAt:page.asOf,bucket:'AVAILABLE',deltaCents:'0',kind:'HISTORICAL',includedInOpening:false,sourceKind:'HISTORICAL_REFUND',source:{type:'LEGACY_MYSQL',system:'legacy_mysql_restore',entity:'la_refund_record',id:'11'},businessReference:{type:'LEGACY_UNRESOLVED',id:null,number:null},balanceAfterCents:null,sourceDetails:{...sourceDetails,remark:'PRIVATE'},rawSource:'PRIVATE'}});
  try{const r=await GET(new Request(root+'/entries/history%3Asource?projectionVersion=2'),context(['entries','history:source'])),b=await r.json();assert.equal(r.status,200);assert.deepEqual(b.entry.sourceDetails,sourceDetails);assert.equal(b.entry.deltaCents,'0');assert.equal(b.entry.businessReference.id,null);assert(!JSON.stringify(b).includes('PRIVATE'));}finally{globalThis.fetch=previous;}
 });
+test('wallet BFF carries only proved or explicitly unknown demo origins for posted entries',async()=>{
+ const previous=globalThis.fetch,at=page.asOf,base={schemaVersion:1,id:'ledger:demo',occurredAt:at,importedAt:at,bucket:'AVAILABLE',deltaCents:'100',kind:'POSTED',includedInOpening:false,sourceKind:'NATIVE_SETTLEMENT',source:{type:'NATIVE',system:'zzsh',entity:'settlement_posting',id:'p'},businessReference:{type:'UNKNOWN',id:null,number:null},balanceAfterCents:null};
+ try{
+  for(const origin of ['LOCAL_DEMO_SIMULATED','ECS_TEST_SIMULATED','UNKNOWN']){globalThis.fetch=async()=>Response.json({...page,projectionVersion:2,entry:{...base,dataOrigin:origin,bankArrival:'UNKNOWN',privateEvidence:'SECRET'}});
+   const r=await GET(new Request(root+'/entries/ledger%3Ademo?projectionVersion=2'),context(['entries','ledger:demo'])),body=await r.json();assert.equal(r.status,200);assert.equal(body.entry.dataOrigin,origin);assert.equal(body.entry.bankArrival,'UNKNOWN');assert(!JSON.stringify(body).includes('SECRET'));}
+  for(const patch of [{dataOrigin:'JOINPAY',bankArrival:'UNKNOWN'},{dataOrigin:'LOCAL_DEMO_SIMULATED'},{dataOrigin:'LOCAL_DEMO_SIMULATED',bankArrival:'ARRIVED'},{kind:'HISTORICAL',dataOrigin:'LOCAL_DEMO_SIMULATED',bankArrival:'UNKNOWN'}]){
+   globalThis.fetch=async()=>Response.json({...page,projectionVersion:2,entry:{...base,...patch}});assert.equal((await GET(new Request(root+'/entries/ledger%3Ademo?projectionVersion=2'),context(['entries','ledger:demo']))).status,502);
+  }
+  globalThis.fetch=async()=>Response.json({...page,projectionVersion:2,entry:base});const old=await GET(new Request(root+'/entries/ledger%3Ademo?projectionVersion=2'),context(['entries','ledger:demo']));assert.equal('dataOrigin' in (await old.json()).entry,false);
+ }finally{globalThis.fetch=previous;}
+});
 test('wallet actual BFF carries exact list coverage, safe old default and only realm user cookies',async()=>{
  const original=globalThis.fetch;let received;try{
   for(const known of [false,true]){globalThis.fetch=async(url,options)=>{received={url:String(url),options};return Response.json({...page,privateSource:'SECRET',...(known?{listCoverage:{knowledge:'KNOWN',count:'0',mappedRecordCount:'0',reason:'SOURCE_COMPLETE_THROUGH_CUTOFF',cutoff:'2026-10-04T00:00:00.000Z',version:'proof-v1'}}:{})});};
