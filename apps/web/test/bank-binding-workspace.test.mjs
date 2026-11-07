@@ -136,6 +136,13 @@ test('demo withdrawal refuses a newly pending bank save before declaring a targe
  }finally{await p.close();}
 });
 
+test('demo withdrawal explains only the identity reason returned by the server',async()=>{
+ for(const [code,expected] of [['DEMO_WITHDRAW_IDENTITY_REQUIRED',/请先完成本人实名认证/],['DEMO_WITHDRAW_ADULT_REQUIRED',/确认已成年后/],['DEMO_WITHDRAW_IDENTITY_SOURCE_UNCONFIRMED',/实名信息来源暂时无法确认/]]){
+  const scope='LOCAL_DEMO_SIMULATED',p=await probe({availableBalance:'15000',ledgerRevision:'7',demo:{readDemoAvailability:async()=>({scope,withdrawalEnabled:true,observedAt:at}),createDemoTarget:async()=>{throw new WithdrawalRequestError(403,code);}}});
+  try{await p.render();await p.fill('.bank-withdraw-form input','100');await p.submit('.bank-withdraw-form');assert.match(p.host.textContent,expected);assert.doesNotMatch(p.host.textContent,/实名认证已过期/);}finally{await p.close();}
+ }
+});
+
 test('withdrawal shows only the confirmed wallet balance and keeps a missing balance unknown', async () => {
   for (const [amount, expected] of [['123456', /¥1,234\.56/], [null, /未记录/]]) {
     const p=await probe({availableBalance:amount});

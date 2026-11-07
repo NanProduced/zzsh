@@ -546,7 +546,8 @@ function DemoWithdrawalPanel({scope,refreshKey,bindingLocked,availableBalance,le
   },[scope,identity.ready,identity.userId,refreshKey,demoScope]);
   useEffect(()=>{if(quote&&quote.body.expectedWalletVersion!==ledgerRevision){setQuote(null);setConfirmOpen(false);}},[ledgerRevision,quote]);
   const run=async(action:()=>Promise<void>)=>{if(!identity.current()||busyRef.current)return;busyRef.current=true;setBusy(true);setMessage("");
-    try{await action();}catch(error){if(identity.current()){const e=asError(error);identity.identityFailure(e);const original=sync();setMessage(e.status===401?"登录状态已变化，请重新进入页面。":original?.stage==="target"||original?.stage==="confirm"?"操作暂未确认，请先查询原申请。":"提现信息暂时无法核对，请稍后重试。");}}
+    try{await action();}catch(error){if(identity.current()){const e=asError(error);identity.identityFailure(e);const original=sync(),identityMessage:Record<string,string>={DEMO_WITHDRAW_IDENTITY_REQUIRED:"请先完成本人实名认证。",DEMO_WITHDRAW_ADULT_REQUIRED:"确认已成年后才能进行模拟提现。",DEMO_WITHDRAW_IDENTITY_SOURCE_UNCONFIRMED:"实名信息来源暂时无法确认，请联系客服核对。"};
+      setMessage(e.status===401?"登录状态已变化，请重新进入页面。":original?.stage==="target"||original?.stage==="confirm"?"操作暂未确认，请先查询原申请。":identityMessage[e.code]??"提现信息暂时无法核对，请稍后重试。");}}
     finally{if(identity.current())setBusy(false);busyRef.current=false;}};
   const preview=()=>void run(async()=>{
     if(!identity.userId||!ledgerRevision||!binding?.binding||bindingLocked||!enabled)return;
