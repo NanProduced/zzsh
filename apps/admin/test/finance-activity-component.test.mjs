@@ -66,6 +66,18 @@ test('native channel page shows request fields and provides paginated access to 
  const request=new URL(ui.requests.at(-1),browser.location.href);assert.equal(request.searchParams.get('page'),'4');assert.equal(request.searchParams.get('asOf'),'2026-11-06T01:00:00.000Z');
 });
 
+test('simulated payments are clearly separated from channel facts and offer no fabricated detail',async t=>{
+ const ui=await mount(t,'finance-records',[
+  {id:'demo',source:'NATIVE',kind:'PAYMENT',dataOrigin:'ECS_TEST_SIMULATED',bankArrival:'UNKNOWN',subjectId:'u1',subjectName:'用户一',documentRef:null,number:'demo-1',relatedNumber:'order-1',relatedNumberLabel:'关联订单',state:'SIMULATED',amountCents:'1250',amountLabel:'模拟金额（未发生汇聚收款）',occurredAt:null},
+  {id:'uncertain',source:'NATIVE',kind:'PAYMENT',dataOrigin:'ECS_TEST_SIMULATED',subjectId:'u1',subjectName:'用户一',documentRef:null,number:'demo-2',state:'SIMULATED',amountCents:'100',occurredAt:null},
+ ]);
+ const rows=ui.host.querySelectorAll('tbody tr');assert.equal(rows.length,2);
+ assert.match(rows[0].textContent,/模拟收款/);assert.match(rows[0].textContent,/模拟成功/);assert.match(rows[0].textContent,/模拟金额（未发生汇聚收款）/);
+ assert.match(rows[0].textContent,/模拟编号 demo-1/);assert.equal(rows[0].querySelector('button')?.textContent.trim(),'用户一');
+ assert.match(rows[1].textContent,/模拟结果待核/);assert.doesNotMatch(rows[1].textContent,/模拟成功|渠道成功|到账/);
+ assert.equal(ui.opened.length,0);
+});
+
 test('historical channel page uses old fields and keeps original status separate from channel proof',async t=>{
  const ui=await mount(t,'finance-record-history',[{id:'old',source:'LEGACY',kind:'REFUND',subjectId:'u1',subjectName:'用户一',documentRef:'HISTORY_REFUND:one',number:'R123',state:'旧平台记为退款成功',amountCents:'1000',amountLabel:'旧平台记录金额',occurredAt:null}]);
  assert.match(ui.requests[0],/source=LEGACY/);assert.match(ui.host.textContent,/旧平台状态为原系统记录/);assert.match(ui.host.textContent,/旧平台记为退款成功/);assert.equal(ui.host.querySelector('[aria-label="请求类型"]'),null);assert.match(ui.host.textContent,/返回资金记录/);
