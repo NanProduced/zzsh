@@ -939,14 +939,18 @@ function SupportCancelCard({ orderId, displayNo }: { orderId: string; displayNo:
     setError("");
     const outcome = await sendSupportCancel(orderId, preview.orderRevision, trimmed, keyRef.current);
     if (outcome.kind === "accepted") {
+      if (outcome.view.simulationScope !== preview.simulationScope) {
+        setPhase("UNKNOWN");
+        setError(SUPPORT_CANCEL_UNKNOWN);
+        return;
+      }
       setResult(outcome.view);
       setPreview(outcome.view);
       setOpen(false);
       setPhase("IDLE");
       try {
         const fresh = await readSupportCancel(orderId);
-        setResult(fresh);
-        setPreview(fresh);
+        if (fresh.simulationScope === outcome.view.simulationScope) { setResult(fresh); setPreview(fresh); }
       } catch { /* the accepted receipt is already durable; a failed read must not undo it */ }
       return;
     }

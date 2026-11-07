@@ -179,6 +179,23 @@ test("提交回执的模拟范围格式错误时保留原请求，不显示成�
   assert.equal(posts,1);assert.doesNotMatch(host.textContent,/已取消并登记全额退款/);
 });
 
+test("提交回执来自另一演示环境时保留原请求", async (t) => {
+  const keys=[];
+  globalThis.fetch=async(input,init={})=>{
+    const url=String(input);
+    if(url.endsWith('/orders/order-A/settlement'))return response(settlement);
+    if(url.endsWith('/orders/order-A/support-cancel')&&(init.method??'GET')==='GET')return response({...preview,simulationScope:'ECS_TEST_SIMULATED'});
+    if(url.endsWith('/orders/order-A/support-cancel')&&init.method==='POST'){keys.push(new Headers(init.headers).get('idempotency-key'));return response({...success,simulationScope:'LOCAL_DEMO_SIMULATED'});}
+    throw new Error(`unexpected request ${url}`);
+  };
+  const {host,root}=mount();t.after(async()=>{await act(async()=>root.unmount());host.remove();});
+  await render(root,host);await click(button(host,'取消订单'));await waitFor(()=>document.body.querySelector('[aria-label="取消订单确认"]'));
+  await typeReason('客服核实后取消');await click([...document.body.querySelectorAll('button')].find(item=>item.textContent.includes('确认取消并模拟退款')));
+  await waitFor(()=>document.body.textContent.includes('取消结果未确认'));
+  await click([...document.body.querySelectorAll('button')].find(item=>item.textContent.includes('重试同一请求')));
+  assert.equal(keys.length,2);assert.equal(keys[0],keys[1]);assert.doesNotMatch(host.textContent,/已取消并登记全额退款/);
+});
+
 test("结算已落账的409显示真实原因并保持弹窗，不出现成功文案", async (t) => {
   globalThis.fetch = async (input, init = {}) => {
     const url = String(input);
