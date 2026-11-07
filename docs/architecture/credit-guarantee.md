@@ -2,6 +2,8 @@
 
 信用/保证金纯读在认证应用中常态挂载。部署profile默认装配信用/保证金命令与新用户初始化；`CREDIT_GUARANTEE_ENABLED=false`仅供隔离本地夹具。能力装配不代表有已发布政策、可用资金或渠道授权；供给仍核原G0政策/proof门禁，既有责任不会因预览关闭命令而消失。
 
+Owner 已核实旧平台当前没有未退的上架保证金；按[迁移范围](legacy-data-mapping.md#已确认的旧数据迁移范围)，旧上架保证金及其收退记录不迁入新平台。新目标要移除旧上架保证金专属运行逻辑、接口、表和字段；源数据筛选仍须识别并跳过该专项，既有历史迁移须保持可重放。此为待实施目标，既有代码和旧测试库仍可能包含旧保证金观察；不能将“不迁入”解释为源库从未有记录，也不能因去除旧专项而停用新平台信用、号主保证金或租客押金。
+
 正式应用必须已完成迁移`0067_credit_guarantee_contract`和`applyRuntimePrivileges`。启动始终检查七张表可读、`zzsh_credit.runtime_contract_version()=1`及runtime不能CREATE该schema；缺失/部分部署/权限错误阻止启动，不因命令关闭而跳过。运行中依赖故障维持UNKNOWN并拒绝新发布/确认/建单，不退回免缴；读取装配不执行迁移、赋权或回填。
 
 本人信用overview使用`readCreditSnapshot(...,false)`，不建立100分状态或INITIALIZED事件。返回`creditState=INITIALIZED|NOT_INITIALIZED`，缺档案时`credit=null`并保留原保证金/恢复申请/收退尝试的读取；不能据缺档案或空责任列表推断免缴、零信用或历史资金已清。客户端遇旧服务缺少creditState时保留UNKNOWN。读取保持身份、session、对象/游戏权限及原事务复核锁，不开放恢复申请、支付、退款或管理员决策；这些命令仍要求原部署能力与正式权限。

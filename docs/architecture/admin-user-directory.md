@@ -29,7 +29,7 @@
 - `POST /admin/credit/users/{id}/deductions/{eventId}/reverse`：追加该笔实际扣分的更正，不删除历史或任意加分。
 - 两者需要 `credit.decide`、用户对象及游戏范围、必需幂等键。未知初始分拒绝处理；不自动初始化100分，不扣负数，过期 revision 返回409。
 - 事件为 `MANUAL_DEDUCTION/MANUAL_DEDUCTION_REVERSED`，来源为 `USER_MANUAL`，不伪造订单。用户端可见说明，不返回内部依据和管理员身份。
-- 这两个非资金命令独立开放；不因此开启旧保证金收退、违约或恢复命令门禁。
+- 这两个非资金命令独立开放；不因此改变号主保证金收退、违约或信用恢复的命令门禁。
 
 ## 单用户资金
 

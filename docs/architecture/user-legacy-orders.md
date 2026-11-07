@@ -1,5 +1,7 @@
 # 用户历史订单与统一读取
 
+新批次按[迁移范围](legacy-data-mapping.md#已确认的旧数据迁移范围)只承接有成功租赁付款记录的旧订单，包含已付款后取消；没有成功付款记录的订单不迁，即使订单自身标记已付。以下是读取能力合同，不表示既有测试库已按新范围重建，也不表示筛选后的列表等于旧站全部历史创建订单。
+
 `GET /api/v1/orders/unified`在服务端对原生与历史订单统一筛选、排序及游标分页，返回subjectId/items/nextCursor/limit，subjectId取真实认证主体。Web经`/api/orders/unified`读取，携带页面预期主体`x-zzsh-expected-user-id`；Web BFF用同一份捕获Cookie核身份并校验响应主体，不匹配时不返回订单正文。API与Web须同版，旧响应缺主体不降级放行；客户端不能拼接两种来源各自的一页冒充统一分页。原生订单入口保持原合同。
 
 统一列表支持party、status、accountId、orderNo字面匹配、createdFrom/createdTo北京日期及stage；日期含起止两天。阶段过滤每次最多检查500条，未穷尽仍返回nextCursor和scanIncomplete，未知阶段不按成功或无记录处理。游标绑定真实主体、角色及筛选指纹，不代替服务端身份和对象授权。切换租入/出租时清除旧筛选；同页返回保留来源、筛选和详情上下文。
