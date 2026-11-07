@@ -7,6 +7,22 @@ const { GET, POST } = await import("../src/app/api/auth/user/[...path]/route.ts"
 const WEB_ORIGIN = "http://127.0.0.1:3100";
 const routeContext = (path) => ({ params: Promise.resolve({ path }) });
 
+test("verification codes are forwarded unchanged in non-production", async () => {
+  const original = globalThis.fetch;
+  const bodies = [];
+  globalThis.fetch = async (_url, init) => { bodies.push(new TextDecoder().decode(init.body)); return Response.json({ status: true }); };
+  try {
+    for (const path of [["phone-registration", "complete"], ["security", "challenge", "verify"]]) {
+      for (const code of ["8888", "1234", "123456"]) {
+        const body = JSON.stringify({ code, challengeId: "fixture" });
+        const response = await POST(request(path, { method: "POST", body, headers: { "content-type": "application/json" } }), routeContext(path));
+        assert.equal(response.status, 200);
+        assert.equal(bodies.at(-1), body);
+      }
+    }
+  } finally { globalThis.fetch = original; }
+});
+
 test("username/email and legacy SDK change bypasses are rejected by the BFF without forwarding", async () => {
   const original = globalThis.fetch; let calls = 0;
   globalThis.fetch = async () => { calls++; return Response.json({ status: true }); };

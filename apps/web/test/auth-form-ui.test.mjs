@@ -11,7 +11,29 @@ const mountLogin = (props = {}, options = {}) => mountAuthComponent(file, "AuthF
     ? options.legalResponse?.() ?? Response.json({terms, privacy})
     : options.fetch?.(url, body, init) ?? reply(),
 });
-async function fillSms(p) { await p.input("auth-identifier", "13800138000"); await p.input("auth-terms", true); await p.click("获取验证码"); await p.input("phone-registration-code", "123456"); }
+async function fillSms(p) { await p.input("auth-identifier", "13800138000"); await p.input("auth-terms", true); await p.click("获取验证码"); await p.input("phone-registration-code", "1234"); }
+
+test("phone login and recovery use four digits while email recovery stays six", async () => {
+  for (const mode of ["login", "phone-recovery", "email-recovery"]) {
+    const p = await mountLogin({}, { fetch: async url => url.endsWith("/challenge/send") ? reply({ challengeId: "a".repeat(32) }) : url.endsWith("/challenge/verify") ? reply({ proofId: "b".repeat(32) }) : reply() });
+    try {
+      const recovery = mode !== "login", email = mode === "email-recovery", valid = email ? "123456" : "1234";
+      if (recovery) { await p.click("密码登录"); await p.click("忘记密码"); if (email) await p.click("邮箱验证"); }
+      await p.input("auth-identifier", email ? "bound@example.invalid" : "13800138000");
+      if (!recovery) await p.input("auth-terms", true);
+      await p.click("获取验证码");
+      assert.equal(p.host.querySelectorAll(".auth-pin-slot").length, valid.length);
+      await p.input("phone-registration-code", "123"); await p.submit();
+      assert.match(p.host.textContent, new RegExp(`填写 ${valid.length} 位数字`));
+      const endpoint = recovery ? "/challenge/verify" : "/phone-registration/complete";
+      assert.equal(p.calls.filter(call => call.url.endsWith(endpoint)).length, 0);
+      await p.input("phone-registration-code", valid);
+      assert.equal([...p.host.querySelectorAll(".auth-pin-slot")].map(slot => slot.textContent).join(""), valid);
+      await p.submit();
+      assert.equal(p.calls.find(call => call.url.endsWith(endpoint))?.body.code, valid);
+    } finally { await p.close(); }
+  }
+});
 
 test("rejected password login uses credential copy, associates the field and focuses it", async () => {
   const p = await mountLogin( {}, { fetch: async () => Response.json({ error: { code: "UNAUTHENTICATED" } }, { status: 401 }) });
@@ -30,7 +52,7 @@ test("real React phone OTP registration logs in without a password step; consent
     await p.input("auth-identifier", "13800138000"); await p.click("获取验证码"); assert.equal(p.calls.filter(item => String(item.url).endsWith("/phone-registration/send-otp")).length, 0);
     assert.match(p.host.querySelector(".auth-consent [role='alert']").textContent, /请勾选同意协议/);
     assert.equal(p.host.querySelector("#auth-terms").getAttribute("aria-describedby"), "auth-consent-error");
-    await p.input("auth-terms", true); await p.click("获取验证码"); await p.input("phone-registration-code", "123456"); await p.submit();
+    await p.input("auth-terms", true); await p.click("获取验证码"); await p.input("phone-registration-code", "1234"); await p.submit();
     assert.equal(p.successes, 1); assert.equal(p.confirmations, 1);
     assert.ok(p.calls.find(item => item.url.endsWith("/complete"))?.body.password === undefined);
     assert.doesNotMatch(p.host.textContent, /账号名|用户名|强制|设置新密码/);
@@ -182,7 +204,7 @@ test("recovery keeps an unknown result locked on 403 and only restarts after a c
     return reply();
   } });
   try {
-    await p.click("密码登录"); await p.click("忘记密码"); await p.input("auth-identifier", "13800138000"); await p.click("获取验证码"); await p.input("phone-registration-code", "123456"); await p.submit();
+    await p.click("密码登录"); await p.click("忘记密码"); await p.input("auth-identifier", "13800138000"); await p.click("获取验证码"); await p.input("phone-registration-code", "1234"); await p.submit();
     await p.input("auth-password", "new-valid-password"); await p.input("auth-password-confirm", "new-valid-password"); await p.submit(); await p.click("重新确认结果"); assert.ok(p.findButton("重置密码").disabled); assert.equal(p.host.querySelector("#auth-password").value, "");
     expired = true; await p.click("重新确认结果"); assert.equal(p.host.querySelector("#auth-password"), null); assert.equal(p.host.querySelector("#auth-identifier").value, "13800138000"); assert.ok(!p.findButton("获取验证码").disabled); assert.equal(p.calls.filter(c => c.url.endsWith("/recovery/complete")).length, 1);
   } finally { await p.close(); }

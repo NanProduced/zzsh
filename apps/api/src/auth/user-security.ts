@@ -1,4 +1,4 @@
-import { createHash, createHmac, randomInt, randomUUID, timingSafeEqual } from "node:crypto";
+import { createHash, createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 import type { Pool, PoolClient } from "pg";
 import { z } from "zod";
 import { normalizeMainlandPhone } from "./phone-number";
@@ -7,6 +7,7 @@ import { createTransactionalUserSession } from "./user-auth-session";
 import { hasLegacyPhoneConflict, readUserPasswordState } from "./legacy-login";
 import { ThrottleDependencyError, type UserAuthThrottle } from "./user-auth-throttle";
 import type { UserSmsSender } from "./aliyun-user-providers";
+import { isUserVerificationCode, makeUserVerificationCode } from "./user-verification-code";
 
 export type UserSecurityDelivery = { code: string; target: string; channel: "phone" | "email"; purpose: string; sentAt: string };
 type Purpose = "password" | "email" | "phone" | "recovery";
@@ -83,7 +84,7 @@ export async function buildUserSecurityPlugin(options: { pool: Pool; outbox?: Ma
     const { purpose, channel, stage } = ctx.body;
     if (!options.outbox && !options.localMock && !(channel === "phone" && options.smsSender)) reject("NOT_IMPLEMENTED", "Verification delivery unavailable");
     const id = proofId();
-    const code = options.localMock ? "888888" : String(randomInt(0, 1_000_000)).padStart(6, "0");
+    const code = makeUserVerificationCode(channel, options.localMock);
     const now = new Date();
     let phoneHold: string | undefined;
     let phoneRejection: { action: string; purpose: string; subject: string; outcome: string } | undefined;
@@ -169,7 +170,7 @@ export async function buildUserSecurityPlugin(options: { pool: Pool; outbox?: Ma
   });
 
   const verify = createAuthEndpoint("/security/challenge/verify", {
-    ...endpointOptions, method: "POST", body: z.object({ challengeId: idSchema, code: z.string().regex(/^\d{6}$/) }).strict(),
+    ...endpointOptions, method: "POST", body: z.object({ challengeId: idSchema, code: z.string().regex(/^(?:\d{4}|\d{6})$/) }).strict(),
   }, async (ctx) => {
     const accepted = await withTransaction(options.pool, async (client) => {
       // Find the subject before row lock; all operations acquire user -> credential -> proof.
@@ -180,6 +181,9 @@ export async function buildUserSecurityPlugin(options: { pool: Pool; outbox?: Ma
       const current = hinted.purpose === "recovery" ? { user: await subject(client, hinted.userId), session: null } : await lockContext(client, ctx);
       const { row, data } = await readProof(client, ctx.body.challengeId, current.user.id);
       if (data.userId !== current.user.id || data.stamp !== current.user.stamp || data.sessionId !== (current.session?.id ?? null) || data.completed || data.attempts >= 3) return false;
+      if ((data.channel !== "phone" && data.channel !== "email") || !isUserVerificationCode(data.channel, ctx.body.code)) {
+        data.attempts += 1; await save(client, row, data); return false;
+      }
       const incoming = sha(ctx.body.challengeId + ctx.body.code);
       if (!timingSafeEqual(Buffer.from(incoming), Buffer.from(data.codeHash))) {
         data.attempts += 1; await save(client, row, data); return false;

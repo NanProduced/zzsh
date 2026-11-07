@@ -306,8 +306,10 @@ export function AccountSecurityControls({ userId, canAct, pendingWrite }: Props)
     finally { if (active(request.id)) setBusy(false); }
   };
 
+  const activeCodeChannel = stage === "target" ? action === "phone" ? "phone" : "email" : channel;
+  const codeLength = activeCodeChannel === "phone" ? 4 : 6;
   const verify = async () => {
-    if (!challenge || !/^\d{6}$/.test(code) || busy || writeLock.current || !canAct() || blockedByForeignWrite()) { rejectField("security-code", "请先获取验证码并填写 6 位数字。"); return; }
+    if (!challenge || code.length !== codeLength || !/^\d+$/.test(code) || busy || writeLock.current || !canAct() || blockedByForeignWrite()) { rejectField("security-code", `请先获取验证码并填写 ${codeLength} 位数字。`); return; }
     const request = start(); setBusy(true); setError(""); setInvalidField("");
     try {
       const result = await webAuthRequest<{ status: boolean; proofId: string }>("/security/challenge/verify", { challengeId: challenge, code }, request.abort.signal);
@@ -711,7 +713,7 @@ export function AccountSecurityControls({ userId, canAct, pendingWrite }: Props)
             </> : <p className="sec-stage-note">原身份已验证。请验证新的联系方式 <strong>{target}</strong>。</p>}
             <FieldGroup id="security-code" label="验证码" helper="请勿向他人透露验证码。">
               <div className="auth-code-row">
-                <input {...fieldAttrs("security-code")} autoComplete="one-time-code" inputMode="numeric" maxLength={6} placeholder="输入 6 位验证码" value={code} disabled={locked} onChange={event => setCode(event.target.value)} />
+                <input {...fieldAttrs("security-code")} autoComplete="one-time-code" inputMode="numeric" maxLength={codeLength} placeholder={`输入 ${codeLength} 位验证码`} value={code} disabled={locked} onChange={event => setCode(event.target.value)} />
                 <button type="button" className="button secondary" disabled={locked || remaining > 0 || stage === "current" && !verificationChannels.length} onClick={() => void send()}>{remaining > 0 ? remaining + "s 后重发" : "获取验证码"}</button>
               </div>
             </FieldGroup>

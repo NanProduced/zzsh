@@ -19,6 +19,7 @@ export async function runUserSecurityChecks(o: {
   assert.equal((await call("/phone-registration/send-otp", { phoneNumber: phone })).response.status, 200);
   const code = o.sms.get("phone-registration:" + phone)?.code;
   assert.ok(code);
+  assert.match(code, /^\d{4}$/);
   assert.equal((await call("/phone-registration/complete", { phoneNumber: phone, code, loginOrRegister: true }, jar)).response.status, 400);
   const registered = await call("/phone-registration/complete", { phoneNumber: phone, code, acceptedTerms: true, loginOrRegister: true }, jar);
   assert.equal(registered.response.status, 200);
@@ -47,6 +48,9 @@ export async function runUserSecurityChecks(o: {
     const id = sent.body?.challengeId as string;
     const delivery = o.security.get(id);
     assert.ok(delivery, "test delivery remains in the restricted test outbox");
+    assert.match(delivery.code, channel === "phone" ? /^\d{4}$/ : /^\d{6}$/);
+    const wrongLength = channel === "phone" ? "123456" : "1234";
+    assert.equal((await call("/security/challenge/verify", { challengeId: id, code: wrongLength }, sessionJar)).response.status, 400);
     const verified = await call("/security/challenge/verify", { challengeId: id, code: delivery.code }, sessionJar);
     assert.equal(verified.response.status, 200, "challenge should verify");
     return id;
@@ -177,7 +181,7 @@ export async function runUserSecurityChecks(o: {
   const challengeResponse = await call("/security/challenge/send", { purpose: "password", channel: "phone" }, proofJar);
   const challengeId = challengeResponse.body?.challengeId as string;
   const delivery = o.security.get(challengeId)!;
-  const wrongCode = delivery.code === "000000" ? "000001" : "000000";
+  const wrongCode = delivery.code === "0000" ? "0001" : "0000";
   for (let n = 0; n < 3; n++) assert.equal((await call("/security/challenge/verify", { challengeId, code: wrongCode }, proofJar)).response.status, 400);
   assert.equal((await call("/security/challenge/verify", { challengeId, code: delivery.code }, proofJar)).response.status, 400);
   assert.equal((await call("/security/challenge/send", { purpose: "password", channel: "phone" }, proofJar)).response.status, 429);
