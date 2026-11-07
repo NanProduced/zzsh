@@ -10,7 +10,7 @@ export type LegacyContinuation = {
   capabilities: string[]; commandFingerprints: Record<string, string>; reasons: string[];
   settlementKind: "EARLY" | "NORMAL" | null; earlyFee: string | null; refundDueAt: string | null;
   duties: Array<{ id: string; kind: string; amountCents: string; currency: "CNY"; status: string; maturityAt: string | null; sourceStatus: string | null; revision: string; settledBy: string | null; financeVerified:boolean;
-    refundProgress:'UNKNOWN'|'NO_REFUND_DUE'|'NO_NEW_REFUND'|'CHANNEL_SUCCEEDED'|'FAILED'|'PROCESSING'|'REVIEW_REQUIRED' }>;
+    refundProgress:'UNKNOWN'|'NO_REFUND_DUE'|'NO_NEW_REFUND'|'CHANNEL_SUCCEEDED'|'FAILED'|'PROCESSING'|'REVIEW_REQUIRED'|'SIMULATED';refundSimulationScope?:'LOCAL_DEMO_SIMULATED'|'ECS_TEST_SIMULATED' }>;
   channelState: "UNKNOWN";
 };
 export type LegacyProposal = { revision: string | null; inputEvidenceId: string; proposalFingerprint: string; previewAmounts: Record<string, string | null>; proposalAmounts: Record<string, string | null>; settlementKind?: "EARLY" | "NORMAL"; earlyFee?: string | null };
@@ -44,9 +44,11 @@ export function parseLegacyContinuation(value: unknown): LegacyContinuation {
     if (!record(d) || typeof d.id !== "string" || !id.test(d.id) || !["RENTER_REFUND", "OWNER_CREDIT", "COMMISSION", "DEPOSIT_COMPENSATION"].includes(String(d.kind)) || typeof d.amountCents !== "string" || !cents.test(d.amountCents) || d.currency !== "CNY" || !["PENDING", "MATURED", "SETTLED", "VOID"].includes(String(d.status)) || typeof d.revision !== "string" || !/^[1-9]\d{0,17}$/.test(d.revision)
       || d.maturityAt !== null && (typeof d.maturityAt !== "string" || !Number.isFinite(Date.parse(d.maturityAt))) || d.sourceStatus !== null && typeof d.sourceStatus !== "string" || ![null, "FINANCE", "LEGACY_RECORDS"].includes(d.settledBy as string | null)
       || d.financeVerified!==undefined && typeof d.financeVerified!=="boolean" || d.refundProgress!==undefined
-        && (d.kind!=='RENTER_REFUND'||!['UNKNOWN','NO_REFUND_DUE','NO_NEW_REFUND','CHANNEL_SUCCEEDED','FAILED','PROCESSING','REVIEW_REQUIRED'].includes(String(d.refundProgress)))) throw new Error("结算责任暂不可用");
+        && (d.kind!=='RENTER_REFUND'||!['UNKNOWN','NO_REFUND_DUE','NO_NEW_REFUND','CHANNEL_SUCCEEDED','FAILED','PROCESSING','REVIEW_REQUIRED','SIMULATED'].includes(String(d.refundProgress)))
+      || d.refundProgress==='SIMULATED'&&!['LOCAL_DEMO_SIMULATED','ECS_TEST_SIMULATED'].includes(String(d.refundSimulationScope))
+      || d.refundProgress!=='SIMULATED'&&d.refundSimulationScope!==undefined) throw new Error("结算责任暂不可用");
     return { id: d.id, kind: String(d.kind), amountCents: d.amountCents, currency: "CNY" as const, status: String(d.status), maturityAt: d.maturityAt as string | null, sourceStatus: d.sourceStatus as string | null, revision: d.revision, settledBy: d.settledBy as string | null, financeVerified:d.financeVerified===true,
-      refundProgress:(d.refundProgress??'UNKNOWN') as LegacyContinuation['duties'][number]['refundProgress'] };
+      refundProgress:(d.refundProgress??'UNKNOWN') as LegacyContinuation['duties'][number]['refundProgress'],...(d.refundProgress==='SIMULATED'?{refundSimulationScope:d.refundSimulationScope as 'LOCAL_DEMO_SIMULATED'|'ECS_TEST_SIMULATED'}:{}) };
   });
   const quantities = value.quantities === null ? null : parseLegacyQuantitiesInput(value.quantities);
   return { schema: "legacy-continuation.v1", availability: value.availability as LegacyContinuation["availability"], revision: value.revision as string | null, evidenceId: value.evidenceId as string | null, stage: value.stage as string | null, isSettle: value.isSettle as string | null,

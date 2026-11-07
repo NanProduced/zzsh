@@ -2,12 +2,14 @@ import { adminRequest } from "../api";
 import { formatExactYuan } from "@zzsh/ui/display-money";
 import { withSupplyWriteLock } from "./supply-write-lock";
 
-export type LegacyAdminAction = "propose" | "confirm" | "reject" | "hold" | "release" | "confiscate" | "mature" | "void" | "owner-credit" | "commission-credit" | "refund-case";
+export type LegacyAdminAction = "propose" | "confirm" | "reject" | "hold" | "release" | "confiscate" | "mature" | "void" | "owner-credit" | "commission-credit" | "refund-case" | "demo-refund";
+export type LegacyDemoScope = "LOCAL_DEMO_SIMULATED" | "ECS_TEST_SIMULATED";
+export type LegacyDemoRefund = {contractVersion:'demo-legacy-refund.v1';scope:LegacyDemoScope;orderId:string;dutyId:string;operationId:string;amountCents:string;paidCents:string;assumption:'SIMULATION_ASSUME_NO_PRIOR_REFUND';simulatedAt:string;state:'SIMULATED';bankArrival:'UNKNOWN'};
 export type LegacyAdminQuantities = Record<"expendHaff" | "barrett" | "bullet" | "awm" | "armor" | "helmet" | "coffee" | "card", string>;
 export type LegacyAdminProposal = { revision: string | null; inputEvidenceId: string; proposalFingerprint: string; settlementKind: "EARLY" | "NORMAL"; proposalAmounts: Record<string, string | null> };
 export type LegacyAdminDuty = { id: string; kind: string; amountCents: string; currency: "CNY"; status: string; maturityAt: string | null; revision: string; settledBy: string | null; sourceStatus: string | null; financeVerified:boolean; beneficiary: {userId:string;name:string|null}|null };
 export type LegacyAdminView = { schema: "legacy-continuation.v1"; availability: "KNOWN" | "NOT_IMPORTED" | "ISOLATED"; revision: string | null; evidenceId: string | null; stage: string | null; isSettle: string | null; refundDueAt: string | null; amounts: Record<string, { cents: string; yuan: string } | null>; confirmationAmounts: { ownerNet: { cents: string; yuan: string }; refundNet: { cents: string; yuan: string } } | null; capabilities: string[]; commandFingerprints: Record<string, string>; duties: LegacyAdminDuty[]; reasons: string[]; channelState: "UNKNOWN" };
-export type LegacyAdminIntent = { schema: 1; subject: string; orderId: string; command: LegacyAdminAction; dutyId: string | null; key: string; body: Record<string, unknown>; at: string };
+export type LegacyAdminIntent = { schema: 1; subject: string; orderId: string; command: LegacyAdminAction; dutyId: string | null; key: string; body: Record<string, unknown>; at: string;demoScope?:LegacyDemoScope };
 export type LegacyAdminReceipt = { state: "UNKNOWN" } | { state: "KNOWN_SUCCESS" | "KNOWN_REJECTED"; status: number; fingerprint: string; receipt: unknown };
 export type LegacyAdminPending = { state: "NONE" | "UNREADABLE"; intent: null } | { state: "VALID"; intent: LegacyAdminIntent };
 const PREFIX = "zzsh.admin.legacy-continuation.v1:", TOKEN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/, DIGEST = /^[a-f0-9]{64}$/;
@@ -17,7 +19,26 @@ export function legacyAdminSubject(actorId: string, orderId: string) { return ac
 function base(orderId: string) { if (!/^legacy_order_[a-f0-9]{40}$/.test(orderId)) throw new Error("订单引用无效"); return "/orders/legacy/" + encodeURIComponent(orderId) + "/continuation"; }
 function storage(): Storage | null { try { return typeof sessionStorage === "undefined" ? null : sessionStorage; } catch { return null; } }
 function key(subject: string) { return PREFIX + encodeURIComponent(subject); }
+function demoRefundResult(value:unknown,orderId:string,dutyId:string,scope:LegacyDemoScope):LegacyDemoRefund {
+  if(!object(value)||value.contractVersion!=='demo-legacy-refund.v1'||value.scope!==scope||value.orderId!==orderId||value.dutyId!==dutyId
+    ||typeof value.operationId!=='string'||!TOKEN.test(value.operationId)||typeof value.amountCents!=='string'||!/^[1-9]\d{0,23}$/.test(value.amountCents)
+    ||typeof value.paidCents!=='string'||!/^[1-9]\d{0,23}$/.test(value.paidCents)||BigInt(value.amountCents)>BigInt(value.paidCents)
+    ||value.assumption!=='SIMULATION_ASSUME_NO_PRIOR_REFUND'||typeof value.simulatedAt!=='string'||!Number.isFinite(Date.parse(value.simulatedAt))
+    ||value.state!=='SIMULATED'||value.bankArrival!=='UNKNOWN')throw new Error('模拟退款结果尚待核对');
+  return value as LegacyDemoRefund;
+}
+export async function readLegacyAdminDemoRefund(orderId:string,dutyId:string,signal?:AbortSignal){
+  if(!TOKEN.test(dutyId))throw new Error('退款责任资料暂不可用');
+  const value=await adminRequest<unknown>(base(orderId)+'/duties/'+encodeURIComponent(dutyId)+'/demo-refund',undefined,'GET',{},signal);
+  if(!object(value)||!['LOCAL_DEMO_SIMULATED','ECS_TEST_SIMULATED'].includes(String(value.scope))||value.bankArrival!=='UNKNOWN'||!Object.hasOwn(value,'receipt')
+    ||value.headRevision!==null&&(typeof value.headRevision!=='string'||!/^(0|[1-9]\d{0,17})$/.test(value.headRevision))
+    ||typeof value.dutyRevision!=='string'||!/^[1-9]\d{0,17}$/.test(value.dutyRevision)||typeof value.canSubmit!=='boolean'
+    ||value.reason!==null&&(typeof value.reason!=='string'||value.reason.length>120)||value.canSubmit&&(value.headRevision===null||value.reason!==null||value.receipt!==null))throw new Error('模拟退款资料暂不可用');
+  const scope=value.scope as LegacyDemoScope;return {scope,headRevision:value.headRevision as string|null,dutyRevision:value.dutyRevision,canSubmit:value.canSubmit,reason:value.reason as string|null,
+    receipt:value.receipt===null?null:demoRefundResult(value.receipt,orderId,dutyId,scope)};
+}
 function validateResult(intent:LegacyAdminIntent,result:unknown) {
+  if(intent.command==='demo-refund')return demoRefundResult(result,intent.orderId,intent.dutyId!,intent.demoScope!);
   if(intent.command==='refund-case'){
     if(!object(result)||result.orderId!==intent.orderId||result.dutyId!==intent.dutyId||typeof result.caseId!=='string'||!TOKEN.test(result.caseId)
       || typeof result.dutyCents!=='string'||!/^(0|[1-9]\d{0,23})$/.test(result.dutyCents)||typeof result.priorAppliedCents!=='string'
@@ -37,10 +58,15 @@ function validateResult(intent:LegacyAdminIntent,result:unknown) {
   return result;
 }
 function validIntent(value: unknown, subject: string, orderId: string): value is LegacyAdminIntent {
-  if (!object(value) || value.schema !== 1 || value.subject !== subject || value.orderId !== orderId || !["propose", "confirm", "reject", "hold", "release", "confiscate", "mature", "void", "owner-credit", "commission-credit", "refund-case"].includes(String(value.command)) || typeof value.key !== "string" || !/^legacy_[a-f0-9]{32}$/.test(value.key) || !object(value.body) || typeof value.at !== "string" || !Number.isFinite(Date.parse(value.at))) return false;
-  if (Object.keys(value).some(x => !["schema", "subject", "orderId", "command", "dutyId", "key", "body", "at"].includes(x))) return false;
-  const duty = value.command === "mature" || value.command === "void" || value.command === "owner-credit" || value.command === "commission-credit" || value.command==='refund-case', body = value.body;
+  if (!object(value) || value.schema !== 1 || value.subject !== subject || value.orderId !== orderId || !["propose", "confirm", "reject", "hold", "release", "confiscate", "mature", "void", "owner-credit", "commission-credit", "refund-case", "demo-refund"].includes(String(value.command)) || typeof value.key !== "string" || !/^legacy_[a-f0-9]{32}$/.test(value.key) || !object(value.body) || typeof value.at !== "string" || !Number.isFinite(Date.parse(value.at))) return false;
+  if (Object.keys(value).some(x => !["schema", "subject", "orderId", "command", "dutyId", "key", "body", "at", "demoScope"].includes(x))) return false;
+  if(value.command==='demo-refund'?!['LOCAL_DEMO_SIMULATED','ECS_TEST_SIMULATED'].includes(String(value.demoScope)):value.demoScope!==undefined)return false;
+  const duty = value.command === "mature" || value.command === "void" || value.command === "owner-credit" || value.command === "commission-credit" || value.command==='refund-case'||value.command==='demo-refund', body = value.body;
   if (duty ? typeof value.dutyId !== "string" || !TOKEN.test(value.dutyId) : value.dutyId !== null) return false;
+  if(value.command==='demo-refund')return Object.keys(body).sort().join()===['assumption','expectedDutyRevision','expectedHeadRevision','reason'].sort().join()
+    &&typeof body.expectedDutyRevision==='string'&&/^[1-9]\d{0,17}$/.test(body.expectedDutyRevision)
+    &&typeof body.expectedHeadRevision==='string'&&/^(0|[1-9]\d{0,17})$/.test(body.expectedHeadRevision)
+    &&body.assumption==='SIMULATION_ASSUME_NO_PRIOR_REFUND'&&typeof body.reason==='string'&&[...body.reason.trim()].length>=3&&body.reason.length<=500;
   if(value.command==='refund-case'){
     const fields=['expectedDutyRevision','expectedHeadRevision','paymentOrderNo','confirmedMerchantNo','paidCents','previouslyRefundedCents','priorAppliedToDutyCents','noUnresolvedRefunds','evidenceRef'];
     return Object.keys(body).length===fields.length+(body.historicalDueVerified===true?1:0)+(body.historicalReleaseVerified===true?1:0)
@@ -76,11 +102,11 @@ export function inspectLegacyAdminIntent(subject: string, orderId: string): Lega
     return validIntent(parsed, subject, orderId) ? { state: "VALID", intent: parsed } : { state: "UNREADABLE", intent: null };
   } catch { return { state: "UNREADABLE", intent: null }; }
 }
-export async function retainLegacyAdminIntent(subject: string, orderId: string, command: LegacyAdminAction, body: Record<string, unknown>, dutyId: string | null = null): Promise<LegacyAdminIntent> {
+export async function retainLegacyAdminIntent(subject: string, orderId: string, command: LegacyAdminAction, body: Record<string, unknown>, dutyId: string | null = null, demoScope?:LegacyDemoScope): Promise<LegacyAdminIntent> {
   return withSupplyWriteLock(key(subject), async () => {
     if (inspectLegacyAdminIntent(subject, orderId).state !== "NONE") throw new Error("原请求尚未核清，不能覆盖");
     const nonce = globalThis.crypto?.randomUUID?.(); if (!nonce) throw new Error("无法保全请求标识，尚未提交");
-    const intent: LegacyAdminIntent = { schema: 1, subject, orderId, command, dutyId, key: "legacy_" + nonce.replaceAll("-", ""), body: structuredClone(body), at: new Date().toISOString() };
+    const intent: LegacyAdminIntent = { schema: 1, subject, orderId, command, dutyId, key: "legacy_" + nonce.replaceAll("-", ""), body: structuredClone(body), at: new Date().toISOString(),...(demoScope?{demoScope}:{}) };
     if (!validIntent(intent, subject, orderId)) throw new Error("办理请求信息不完整");
     const target = storage(); if (!target) throw new Error("无法保全原请求，尚未提交");
     target.setItem(key(subject), JSON.stringify(intent));
@@ -222,7 +248,8 @@ export async function recoverLegacyAdminIntent(intent: LegacyAdminIntent): Promi
   if (!result || !["UNKNOWN", "KNOWN_SUCCESS", "KNOWN_REJECTED"].includes(result.state)) throw new Error("原请求结果尚待核对");
   if (result.state === "UNKNOWN") return result;
   const body = intent.body, operation = intent.dutyId ? "order.legacy.duty." + intent.command : "order.legacy.continuation." + intent.command;
-  const input = intent.command==='refund-case' ? {orderId:intent.orderId,dutyId:intent.dutyId,expectedDutyRevision:body.expectedDutyRevision,expectedHeadRevision:body.expectedHeadRevision,
+  const input = intent.command==='demo-refund'?{dutyId:intent.dutyId,expectedDutyRevision:body.expectedDutyRevision,expectedHeadRevision:body.expectedHeadRevision,assumption:body.assumption,reason:body.reason}:
+    intent.command==='refund-case' ? {orderId:intent.orderId,dutyId:intent.dutyId,expectedDutyRevision:body.expectedDutyRevision,expectedHeadRevision:body.expectedHeadRevision,
     paymentOrderNo:body.paymentOrderNo,confirmedMerchantNo:body.confirmedMerchantNo,paidCents:body.paidCents,previouslyRefundedCents:body.previouslyRefundedCents,
     priorAppliedToDutyCents:body.priorAppliedToDutyCents,noUnresolvedRefunds:body.noUnresolvedRefunds,evidenceRef:body.evidenceRef}
     : intent.dutyId ? { dutyId: intent.dutyId, kind: intent.command, expectedRevision: body.expectedRevision, sourceFactAuditId: body.sourceFactAuditId, reason: body.reason } : { kind: intent.command, expectedRevision: body.expectedRevision, inputEvidenceId: body.inputEvidenceId, planFingerprint: body.planFingerprint, ...(intent.command === "propose" ? { quantities: body.quantities } : {}), ...(body.reason === undefined ? {} : { reason: body.reason }), ...(body.onBehalf === undefined ? {} : { onBehalf: body.onBehalf }) };

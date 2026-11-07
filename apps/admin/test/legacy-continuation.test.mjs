@@ -41,6 +41,63 @@ test("owner credit recovery stays bound to the original duty, reason and ledger 
  reply={...reply,receipt:{...receipt,dutyId:"other"}};await assert.rejects(c.recoverLegacyAdminIntent(intent),/待核对/);
  assert.equal(c.inspectLegacyAdminIntent(subject,orderId).state,"VALID");
 });
+test('simulated legacy refund recovery preserves original key, duty, assumption and environment',async t=>{
+ storage(t);let reply={state:'UNKNOWN'};const c=client(async()=>reply),subject=c.legacyAdminSubject('staff',orderId);
+ const body={expectedDutyRevision:'1',expectedHeadRevision:'2',assumption:'SIMULATION_ASSUME_NO_PRIOR_REFUND',reason:'演示核对'},intent=await c.retainLegacyAdminIntent(subject,orderId,'demo-refund',body,'duty_1','LOCAL_DEMO_SIMULATED');
+ const input={dutyId:'duty_1',...body},bytes=new TextEncoder().encode(JSON.stringify(['order.legacy.duty.demo-refund','duty_1',input]));
+ const fingerprint=Buffer.from(await crypto.subtle.digest('SHA-256',bytes)).toString('hex');
+ const receipt={contractVersion:'demo-legacy-refund.v1',scope:'LOCAL_DEMO_SIMULATED',orderId,dutyId:'duty_1',operationId:'demo_refund_1',amountCents:'4000',paidCents:'10000',assumption:body.assumption,simulatedAt:'2026-11-08T00:00:00Z',state:'SIMULATED',bankArrival:'UNKNOWN'};
+ assert.equal((await c.recoverLegacyAdminIntent(intent)).state,'UNKNOWN');assert.equal(c.inspectLegacyAdminIntent(subject,orderId).intent.key,intent.key);
+ reply={state:'KNOWN_SUCCESS',status:200,fingerprint,receipt};assert.equal((await c.recoverLegacyAdminIntent(intent)).state,'KNOWN_SUCCESS');
+ reply={...reply,receipt:{...receipt,scope:'ECS_TEST_SIMULATED'}};await assert.rejects(c.recoverLegacyAdminIntent(intent),/待核对/);
+ assert.equal(c.inspectLegacyAdminIntent(subject,orderId).intent.key,intent.key);
+});
+test('demo refund requires the explicit test assumption and uses server revisions',async t=>{
+ const w=storage(t),{createRoot}=require('react-dom/client'),host=document.createElement('div');document.body.append(host);const root=createRoot(host);t.after(async()=>React.act(async()=>root.unmount()));
+ let selected;const availability={scope:'LOCAL_DEMO_SIMULATED',headRevision:'8',dutyRevision:'2',canSubmit:true,reason:null,receipt:null};
+ const {LegacyRefundChoice}=load('apps/admin/src/views/legacy-refund-choice.tsx',{
+  '../api':{friendlyError:()=> '暂不可用'},'../components/ui-elements':{Button:({variant:_,size:__,...props})=>React.createElement('button',props)},
+  '../components/ui/checkbox':{Checkbox:({onCheckedChange,...props})=>React.createElement('input',{...props,type:'checkbox',onChange:e=>onCheckedChange(e.target.checked)})},
+  '../components/ui/textarea':{Textarea:html('textarea')},'../lib/legacy-continuation-client':{readLegacyAdminDemoRefund:async()=>availability},
+  './legacy-refund-review-panel':{LegacyRefundReviewPanel:()=>React.createElement('div',null,'正式退款核对')},
+ });
+ const props={orderId,dutyId:'duty_1',dutyRevision:'2',amountCents:'4000',refresh:'1',disabled:false,money:v=>`¥${v}`,onReview:()=>assert.fail('formal'),onDemoReview:(body,scope)=>{selected={body,scope};},onRefresh:()=>{}};
+ await React.act(async()=>{root.render(React.createElement(LegacyRefundChoice,props));await tick();});
+ assert.match(host.textContent,/不会调用汇聚/);const button=[...host.querySelectorAll('button')].find(x=>x.textContent==='核对模拟退款');assert(button.disabled);
+ const input=host.querySelector('textarea');await React.act(async()=>{Object.getOwnPropertyDescriptor(w.HTMLTextAreaElement.prototype,'value').set.call(input,'演示核对');input.dispatchEvent(new w.Event('input',{bubbles:true}));host.querySelector('input[type=checkbox]').click();await tick();});
+ assert.equal(button.disabled,false);await React.act(async()=>{button.click();await tick();});
+ assert.deepEqual(selected,{scope:'LOCAL_DEMO_SIMULATED',body:{expectedDutyRevision:'2',expectedHeadRevision:'8',assumption:'SIMULATION_ASSUME_NO_PRIOR_REFUND',reason:'演示核对'}});
+});
+test('demo refund availability is server-scoped and cannot claim readiness with missing revisions',async()=>{
+ let value={scope:'LOCAL_DEMO_SIMULATED',headRevision:'8',dutyRevision:'2',canSubmit:true,reason:null,receipt:null,bankArrival:'UNKNOWN'};const c=client(async()=>value);
+ assert.equal((await c.readLegacyAdminDemoRefund(orderId,'duty_1')).headRevision,'8');
+ for(const patch of [{headRevision:null},{reason:'REFUND_NOT_DUE'},{bankArrival:'SUCCEEDED'},{scope:'JOINPAY'}]){value={...value,...patch};await assert.rejects(c.readLegacyAdminDemoRefund(orderId,'duty_1'),/暂不可用/);value={scope:'LOCAL_DEMO_SIMULATED',headRevision:'8',dutyRevision:'2',canSubmit:true,reason:null,receipt:null,bankArrival:'UNKNOWN'};}
+});
+test('admin confirmation retains the simulated refund environment and never presents a real refund',async t=>{
+ storage(t);const {createRoot}=require('react-dom/client'),host=document.createElement('div');document.body.append(host);const root=createRoot(host);t.after(async()=>React.act(async()=>root.unmount()));
+ const source=view({stage:'4',isSettle:'0',capabilities:[],duties:[{id:'duty_1',kind:'RENTER_REFUND',amountCents:'4000',currency:'CNY',status:'PENDING',maturityAt:null,revision:'2',settledBy:null,sourceStatus:null}]});
+ const api=client(async()=>source);api.readLegacyAdminContinuation=async()=>api.parseLegacyAdminView(source);let sent;api.sendLegacyAdminIntent=async intent=>{sent=intent;return {};};
+ const body={expectedDutyRevision:'2',expectedHeadRevision:'8',assumption:'SIMULATION_ASSUME_NO_PRIOR_REFUND',reason:'演示核对'};
+ const {LegacyAdminContinuationPanel}=load('apps/admin/src/views/legacy-continuation-panel.tsx',{...sharedUi,
+  './legacy-refund-choice':{LegacyRefundChoice:({onDemoReview})=>React.createElement('button',{onClick:()=>onDemoReview(body,'LOCAL_DEMO_SIMULATED')},'核对模拟退款')},
+  '../api':{friendlyError:e=>e.message,formatDate:x=>x},'../components/ui-elements':{Button:({variant:_,size:__,...props})=>React.createElement('button',props)},'../lib/legacy-continuation-client':api});
+ const authorized={...snapshot,permissions:[...snapshot.permissions,'order.settlement.write']};
+ await React.act(async()=>{root.render(React.createElement(LegacyAdminContinuationPanel,{snapshot:authorized,orderId}));await tick();});
+ await React.act(async()=>{[...host.querySelectorAll('button')].find(x=>x.textContent==='核对模拟退款').click();await tick();});assert.match(host.textContent,/不会调用汇聚，也不代表真实退款或到账/);
+ await React.act(async()=>{[...host.querySelectorAll('button')].find(x=>x.textContent==='确认模拟退款').click();await tick();});
+ assert.equal(sent.command,'demo-refund');assert.equal(sent.demoScope,'LOCAL_DEMO_SIMULATED');assert.deepEqual(sent.body,body);
+});
+test('an absent demo route keeps formal refund review, but an unavailable demo route never guesses',async t=>{
+ storage(t);const {createRoot}=require('react-dom/client'),host=document.createElement('div');document.body.append(host);const root=createRoot(host);t.after(async()=>React.act(async()=>root.unmount()));
+ let status=404;const {LegacyRefundChoice}=load('apps/admin/src/views/legacy-refund-choice.tsx',{
+  '../api':{friendlyError:()=> '读取失败'},'../components/ui-elements':{Button:({variant:_,size:__,...props})=>React.createElement('button',props)},
+  '../components/ui/checkbox':{Checkbox:html('input')},'../components/ui/textarea':{Textarea:html('textarea')},
+  '../lib/legacy-continuation-client':{readLegacyAdminDemoRefund:async()=>{throw {status};}},'./legacy-refund-review-panel':{LegacyRefundReviewPanel:()=>React.createElement('div',null,'正式退款核对')},
+ });
+ const props={orderId,dutyId:'duty_1',dutyRevision:'2',amountCents:'4000',refresh:'1',disabled:false,money:v=>`¥${v}`,onReview:()=>{},onDemoReview:()=>{},onRefresh:()=>{}};
+ await React.act(async()=>{root.render(React.createElement(LegacyRefundChoice,props));await tick();});assert.match(host.textContent,/正式退款核对/);
+ status=503;await React.act(async()=>{root.render(React.createElement(LegacyRefundChoice,{...props,refresh:'2'}));await tick();});assert.match(host.textContent,/退款处理方式暂时无法确认/);assert.doesNotMatch(host.textContent,/正式退款核对|核对模拟退款/);
+});
 test("admin sees credited income only when the financial record was verified",async t=>{
  storage(t);const {createRoot}=require("react-dom/client"),host=document.createElement("div");document.body.append(host);const root=createRoot(host);t.after(async()=>React.act(async()=>root.unmount()));
  const duty={id:"owner-duty",kind:"OWNER_CREDIT",amountCents:"1000",currency:"CNY",status:"SETTLED",maturityAt:null,revision:"2",settledBy:"FINANCE",sourceStatus:null};
@@ -72,7 +129,7 @@ function view(patch={}){return {schema:"legacy-continuation.v1",availability:"KN
 const snapshot={authenticated:true,adminUserId:"admin_A",session:{id:"session_A"},security:{isBoss:false},permissions:["order.read","order.legacy.continue"]};
 const tick=()=>new Promise(resolve=>setImmediate(resolve));
 const html=(tag)=>(props)=>React.createElement(tag,props);
-const sharedUi={"./legacy-refund-review-panel":{LegacyRefundReviewPanel:()=>null},"../components/ui/input":{Input:html("input")},"../components/ui/textarea":{Textarea:html("textarea")},
+const sharedUi={"./legacy-refund-review-panel":{LegacyRefundReviewPanel:()=>null},"./legacy-refund-choice":{LegacyRefundChoice:()=>null},"../components/ui/input":{Input:html("input")},"../components/ui/textarea":{Textarea:html("textarea")},
  "../components/ui/select":{Select:({value,onValueChange,disabled})=>React.createElement("select",{value,disabled,"aria-label":"结算发起方",onChange:e=>onValueChange(e.target.value)},...["NONE","renter","owner"].map(v=>React.createElement("option",{key:v,value:v},v))),SelectContent:()=>null,SelectItem:()=>null,SelectTrigger:()=>null,SelectValue:()=>null},
  "../components/ui/table":{Table:html("table"),TableBody:html("tbody"),TableCell:html("td"),TableHead:html("th"),TableHeader:html("thead"),TableRow:html("tr")}};
 test("legacy refund request recovery remains bound to the original amounts and duty",async t=>{

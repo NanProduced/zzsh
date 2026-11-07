@@ -9,7 +9,7 @@ const labels: Record<string, string> = { payMoney: "订单实付", saleEarnings:
 const names = { expendHaff: "哈夫币消耗（M）", barrett: "巴雷特子弹（发）", bullet: "6级子弹（组）", awm: "AWM 子弹（发）", armor: "6级护甲（个）", helmet: "6级头盔（个）", coffee: "咖啡豆（个）", card: "保险卡（天）" };
 const actions: Record<LegacyCommandName, string> = { propose: "提交结算方案", confirm: "确认结算方案", reject: "拒绝结算方案", hold: "暂扣押金", release: "解除暂扣", confiscate: "没收押金" };
 const stageName: Record<string, string> = { "3": "租赁中", "8": "待号主确认", "9": "待租客确认", "4": "租赁已结束" };
-const refundProgressName:Record<string,string>={UNKNOWN:'退款状态待核对',NO_REFUND_DUE:'无需退款',NO_NEW_REFUND:'旧退款已抵扣本次应退',CHANNEL_SUCCEEDED:'渠道已确认退款',FAILED:'退款未完成，请联系客服',PROCESSING:'退款处理中',REVIEW_REQUIRED:'退款状态待核对'};
+const refundProgressName:Record<string,string>={UNKNOWN:'退款状态待核对',NO_REFUND_DUE:'无需退款',NO_NEW_REFUND:'旧退款已抵扣本次应退',CHANNEL_SUCCEEDED:'渠道已确认退款',FAILED:'退款未完成，请联系客服',PROCESSING:'退款处理中',REVIEW_REQUIRED:'退款状态待核对',SIMULATED:'模拟退款已记录，不代表真实退款或到账'};
 const reasons: Record<string, string> = { NOT_IMPORTED: "订单资料未记录，请联系客服。", EVIDENCE_ISOLATED: "订单资料需要核对，暂时无法办理。", MISSING_STORED_SETTLEMENT: "结算信息不完整，请联系客服。", FINANCE_FACT_UNAVAILABLE: "押金处理暂不可用，请稍后再试。", FINANCE_FACT_UNKNOWN: "资金处理结果未记录，请联系客服。", DEPOSIT_ALREADY_SETTLED: "退款已记录，押金不能重复处理。", CONTINUATION_REVISION_CONFLICT: "订单已有新结果，请刷新后核对。", PLAN_FINGERPRINT_MISMATCH: "本次预估已变化，请重新核对。", DUTY_REVISION_CONFLICT: "处理状态已更新，请刷新后查看。", DEPOSIT_SHORT: "消耗超过本单可结算范围，请核对数量。", RETURN_NEGATIVE: "退款结果不符合原订单规则，请核对消耗。", PRECISION_UNSUPPORTED: "本单金额需要进一步核对，请联系客服协助结算。", CONFIRM_POOL_NEGATIVE: "本单结算金额需要核对，请联系客服协助处理。", OWNER_NET_NEGATIVE: "本单结算金额需要核对，请联系客服协助处理。" };
 function message(error: unknown): string {
   if (error instanceof OrderRequestError && error.status === 401) return "登录状态已失效，请重新登录后查看。";

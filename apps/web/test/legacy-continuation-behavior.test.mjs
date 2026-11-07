@@ -47,6 +47,18 @@ test("wire parsing strips private source, refuses inconsistent money and does no
   assert.throws(()=>parseLegacyQuantitiesInput({expendHaff:"1"}));
   assert.equal(parseLegacyContinuation(view({availability:"NOT_IMPORTED",quantities:null,capabilities:[],amounts:{}})).quantities,null);
 });
+test('legacy simulated refund requires an explicit demo scope and remains distinct from channel success',()=>{
+ const {parseLegacyContinuation}=load('apps/web/src/lib/legacy-continuation-client.ts',{'./order-client.ts':{}});
+ const duty={id:'refund',kind:'RENTER_REFUND',amountCents:'8200',currency:'CNY',status:'SETTLED',maturityAt:null,sourceStatus:null,revision:'1',settledBy:'FINANCE',financeVerified:true,refundProgress:'SIMULATED',refundSimulationScope:'LOCAL_DEMO_SIMULATED'};
+ assert.equal(parseLegacyContinuation(view({stage:'4',capabilities:[],duties:[duty]})).duties[0].refundProgress,'SIMULATED');
+ assert.throws(()=>parseLegacyContinuation(view({stage:'4',capabilities:[],duties:[{...duty,refundSimulationScope:undefined}]})));
+ assert.throws(()=>parseLegacyContinuation(view({stage:'4',capabilities:[],duties:[{...duty,refundProgress:'CHANNEL_SUCCEEDED'}]})));
+});
+test('renter sees a simulated old-order refund without a bank-arrival claim',async t=>{
+ const duty={id:'refund',kind:'RENTER_REFUND',amountCents:'8200',status:'SETTLED',settledBy:'FINANCE',refundProgress:'SIMULATED'};
+ const p=await setup(t,{read:async()=>view({stage:'4',capabilities:[],duties:[duty]})});await p.render(React.createElement(p.LegacyContinuationPanel,{orderId:id,party:'renter'}));
+ assert.match(p.host.textContent,/模拟退款已记录，不代表真实退款或到账/);assert.doesNotMatch(p.host.textContent,/渠道已确认退款/);
+});
 test("legacy in-flight renter sees units, explicit zero items and the disclosed early fee before submitting",async t=>{
  let submitted;
  const p=await setup(t,{read:async()=>view({stage:"3",quantities:null,capabilities:["propose"],amounts:{},commandFingerprints:{}}),
