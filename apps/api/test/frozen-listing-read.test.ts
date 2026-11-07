@@ -31,7 +31,8 @@ test("B2 entitlements: frozen name, then catalog, else UNKNOWN; non-array ⇒ nu
 
 test("B2 page read: one query per origin + one catalog query; legacy hides versionId from renter", async () => {
   const calls: string[] = [];
-  const client = { query: async (sql: string) => { calls.push(sql);
+  const client = { query: async (sql: string) => {
+        if (sql.includes("to_regclass('zzsh_supply.legacy_listing_capture_fact')")) return { rows: [{ ready: false }], rowCount: 1 }; calls.push(sql);
     if (sql.includes("user-order-frozen-listing")) return { rows: [nativeRow] };
     if (sql.includes("user-legacy-order-current-listing")) return { rows: [{ ...nativeRow, orderId: "L1", presentationEntitlements: null, disclosures: null, termSeconds: null }] };
     return { rows: [{ id: "e2", name: "目录名", expiryKind: "TIMED" }] }; } } as unknown as PoolClient;
@@ -58,6 +59,7 @@ for (const [orderId, termDays, haff, ammo] of [["closed-order32", "13", "130", "
   let rows = [{ ...nativeRow, orderId: orderId!, accountId, currentVersionId: versionId, currentOrigin: "LEGACY_OBSERVATION", versionId: null, attributes: {}, resources: [], disclosures: null, presentationEntitlements: null, termSeconds: null }] as any[];
   let historicalReads = 0;
   const client = { query: async (sql: string) => {
+        if (sql.includes("to_regclass('zzsh_supply.legacy_listing_capture_fact')")) return { rows: [{ ready: false }], rowCount: 1 };
     if (sql.includes("user-legacy-order-current-listing")) return { rows };
     if (sql.includes("source_status::int")) { historicalReads++; return { rows: [historicalRow] }; }
     return { rows: [] };

@@ -70,7 +70,7 @@ test("owner historical projection omits old identifiers without changing the adm
 });
 
 test("legacy read metadata exposes the configured fields, real revision and plain sort labels", () => {
-  const metadata = publicFilterMetadata(legacyState, true) as ReturnType<typeof publicFilterMetadata> & { readMode?: string };
+  const metadata = publicFilterMetadata(legacyState, true, "TYPE") as ReturnType<typeof publicFilterMetadata> & { readMode?: string };
   assert.equal(metadata.readMode, "LEGACY_READ_ONLY");
   assert.equal(metadata.available, true);
   assert.equal(metadata.filterRevision, "3");
@@ -79,7 +79,7 @@ test("legacy read metadata exposes the configured fields, real revision and plai
   assert.deepEqual(metadata.fields.map((field) => field.key), ["resources", "safeBoxCodes", "vitality", "serviceWindow"]);
   assert.deepEqual(metadata.sorts.map((sort) => [sort.key, sort.label]), [["latest", "更新时间"], ["resourceTotal", "资源费用"], ["coreQuantity", "核心数量"]]);
   assert.equal(metadata.defaultSort.label, "更新时间");
-  const unavailable = publicFilterMetadata({ ...legacyState, config: null } as typeof legacyState, true);
+  const unavailable = publicFilterMetadata({ ...legacyState, config: null } as typeof legacyState, true, "TYPE");
   assert.equal(unavailable.available, false);
   assert.equal(unavailable.reasonCode, "FILTERS_UNCONFIGURED");
   assert.deepEqual(unavailable.fields, []);
@@ -173,7 +173,7 @@ test("configured legacy mode survives zero visible rows and still returns an aut
   }) as unknown as PoolClient;
   for (const visibleRows of [true, false]) {
     const state = await readListingState(stub(visibleRows), "game_x");
-    const metadata = publicFilterMetadata(state, true) as ReturnType<typeof publicFilterMetadata> & { readMode?: string };
+    const metadata = publicFilterMetadata(state, true, "TYPE") as ReturnType<typeof publicFilterMetadata> & { readMode?: string };
     assert.equal(state.legacyReadOnly, true, `legacy mode must not depend on visibility (${visibleRows})`);
     assert.equal(metadata.available, true);
     assert.equal(metadata.reasonCode, null);

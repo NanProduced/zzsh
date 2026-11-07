@@ -6,6 +6,7 @@ import { canonicalize } from "./content-hash";
 import { isAccountMediaBinding, listingSearchPattern, projectPublicAttributeDisplay } from "./listing-query";
 import { assertGameScope, conflict, fingerprintRequest, invalid, notFound, sha256Hex, withIdempotency } from "./supply-util";
 import { legacyDisplayDigest, parseLegacyDisplaySnapshot, type LegacyDisplayInput } from "./legacy-display-snapshot";
+import { legacyAccountCaptureFactDigest, parseLegacyAccountCaptureFact } from "./legacy-account-capture-fact";
 import { decodeListingCursor, encodeListingCursor, type ListingCursorBinding, type ListingCursorKey } from "./listing-cursor";
 import { candidatePredicates, PUBLIC_CANDIDATE_FROM, PUBLIC_CANDIDATE_WHERE, PUBLIC_STANDARD_TIER_GUARD, type ListingPosition } from "./listing-candidates";
 import { admissionForAccount, evaluatePublicDisplayGuard, legacyAdmissionSql, legacyAdmissionRevision, type LegacyPublicAdmission, type LegacyPublicAdmissionDetailIndex } from "../legacy-load/legacy-public-admission";
@@ -49,15 +50,20 @@ export function legacySnapshotReplaySql(): string {
 }
 
 /** Authorized admin or owner read. This is not the public VISIBLE predicate. */
-export function legacyHistoricalReadSql(many = false): string {
+export function legacyHistoricalReadSql(many = false, captureInstalled = true): string {
   return `SELECT h.account_id, h.observation_version_id, h.source_digest, h.source_updated_at AS base_updated_at,
       h.source_status::int AS source_status, h.legacy_id, h.snapshot, a.owner_user_id,
       d.account_id AS display_account_id, d.observation_version_id AS display_version_id,
       d.base_source_digest, d.extract_sha256, d.source_updated_at AS display_updated_at,
-      d.evidence_ref AS display_evidence_ref, d.snapshot AS display_snapshot, d.display_digest
+      d.evidence_ref AS display_evidence_ref, d.snapshot AS display_snapshot, d.display_digest${captureInstalled ? `,
+      c.account_id AS capture_account_id,c.observation_version_id AS capture_version_id,
+      c.base_source_digest AS capture_source_digest,c.display_digest AS capture_display_digest,
+      c.capture_sha256,c.source_updated_at AS capture_updated_at,c.base_ratio_wan_per_yuan,
+      c.ratio_issue,c.full_payout_selected,c.payout_issue,c.evidence_digest AS capture_evidence_digest` : ""}
     FROM zzsh_supply.legacy_listing_read_snapshot h
     JOIN zzsh_supply.rental_account a ON a.id=h.account_id
     LEFT JOIN zzsh_supply.legacy_listing_display_snapshot d ON d.account_id=h.account_id AND d.schema_version=1
+    ${captureInstalled ? "LEFT JOIN zzsh_supply.legacy_listing_capture_fact c ON c.account_id=h.account_id" : ""}
     WHERE ${many ? "h.account_id = ANY($1::text[])" : "h.account_id=$1"}`;
 }
 
@@ -67,11 +73,17 @@ type HistoricalReadRow = {
   display_account_id?: string | null; display_version_id?: string | null;
   base_source_digest?: string | null; extract_sha256?: string | null; display_updated_at?: Date | null;
   display_evidence_ref?: string | null; display_snapshot?: unknown; display_digest?: string | null;
+  capture_account_id?: string | null; capture_version_id?: string | null; capture_source_digest?: string | null;
+  capture_display_digest?: string | null; capture_sha256?: string | null; capture_updated_at?: Date | null;
+  base_ratio_wan_per_yuan?: string | null; ratio_issue?: string | null; full_payout_selected?: boolean | null;
+  payout_issue?: string | null; capture_evidence_digest?: string | null;
 };
 
 function projectHistoricalDisplay(row: HistoricalReadRow, accountId?: string) {
   if (row.display_account_id == null) {
-    if ([row.display_version_id, row.base_source_digest, row.extract_sha256, row.display_updated_at, row.display_evidence_ref, row.display_snapshot, row.display_digest].some(value => value != null)) throw invalid("Historical display binding is incomplete");
+    if ([row.display_version_id, row.base_source_digest, row.extract_sha256, row.display_updated_at, row.display_evidence_ref, row.display_snapshot, row.display_digest,
+      row.capture_account_id,row.capture_version_id,row.capture_source_digest,row.capture_display_digest,row.capture_sha256,row.capture_updated_at,
+      row.base_ratio_wan_per_yuan,row.ratio_issue,row.full_payout_selected,row.payout_issue,row.capture_evidence_digest].some(value => value != null)) throw invalid("Historical display binding is incomplete");
     return { state: "NOT_IMPORTED" as const, facts: null };
   }
   if (!accountId || row.account_id !== accountId || row.display_account_id !== accountId
@@ -87,11 +99,32 @@ function projectHistoricalDisplay(row: HistoricalReadRow, accountId?: string) {
     observationVersionId: row.display_version_id, baseSourceDigest: row.base_source_digest!,
     extractSha256: row.extract_sha256!, sourceUpdatedAt, evidenceRef: row.display_evidence_ref, snapshot,
   })) throw invalid("Historical display digest is invalid");
+  let captureRatio = snapshot.sourceAccountBaseRatioWanPerYuan ?? null;
+  let capturePayout = snapshot.sourceAccountFullPayoutSelected ?? null;
+  if (row.capture_account_id != null) {
+    if (row.capture_account_id !== accountId || row.capture_version_id !== row.observation_version_id
+      || row.capture_source_digest !== row.source_digest || row.capture_display_digest !== row.display_digest
+      || !(row.capture_updated_at instanceof Date) || row.capture_updated_at.getTime() !== row.base_updated_at.getTime())
+      throw invalid("Captured account fact binding is invalid");
+    const captured = parseLegacyAccountCaptureFact({ schema:"legacy-account-capture-fact-v1", accountId, legacyId:row.legacy_id,
+      observationVersionId:row.capture_version_id, baseSourceDigest:row.capture_source_digest, displayDigest:row.capture_display_digest,
+      captureSha256:row.capture_sha256, sourceUpdatedAt:row.capture_updated_at.toISOString(),
+      sourceAccountBaseRatioWanPerYuan:row.base_ratio_wan_per_yuan, ratioIssue:row.ratio_issue,
+      sourceAccountFullPayoutSelected:row.full_payout_selected, payoutIssue:row.payout_issue });
+    if (row.capture_evidence_digest !== legacyAccountCaptureFactDigest(captured)
+      || Object.hasOwn(snapshot,"sourceAccountBaseRatioWanPerYuan") && captureRatio !== captured.sourceAccountBaseRatioWanPerYuan
+      || Object.hasOwn(snapshot,"sourceAccountFullPayoutSelected") && capturePayout !== captured.sourceAccountFullPayoutSelected)
+      throw invalid("Captured account fact digest or prior value differs");
+    captureRatio = captured.sourceAccountBaseRatioWanPerYuan; capturePayout = captured.sourceAccountFullPayoutSelected;
+  } else if ([row.capture_version_id,row.capture_source_digest,row.capture_display_digest,row.capture_sha256,row.capture_updated_at,
+    row.base_ratio_wan_per_yuan,row.ratio_issue,row.full_payout_selected,row.payout_issue,row.capture_evidence_digest].some(value => value != null)) {
+    throw invalid("Captured account fact is incomplete");
+  }
   const attributes: typeof snapshot.attributes = { ...snapshot.attributes, face_is_self: snapshot.risk.faceIsSelf, ban_record: snapshot.risk.banRecord };
   return { state: "KNOWN" as const, facts: {
     schema: snapshot.schema, rentalMode: snapshot.rentalMode, attributes,
-    ...(Object.hasOwn(snapshot, "sourceAccountBaseRatioWanPerYuan") ? { sourceAccountBaseRatioWanPerYuan: snapshot.sourceAccountBaseRatioWanPerYuan } : {}),
-    ...(Object.hasOwn(snapshot, "sourceAccountFullPayoutSelected") ? { sourceAccountFullPayoutSelected: snapshot.sourceAccountFullPayoutSelected } : {}),
+    ...(row.capture_account_id != null || Object.hasOwn(snapshot, "sourceAccountBaseRatioWanPerYuan") ? { sourceAccountBaseRatioWanPerYuan: captureRatio } : {}),
+    ...(row.capture_account_id != null || Object.hasOwn(snapshot, "sourceAccountFullPayoutSelected") ? { sourceAccountFullPayoutSelected: capturePayout } : {}),
     resources: snapshot.resources.map(({ code, name, quantity, unit }) => ({ code, name, quantity, unit })),
     attributeDisplay: projectPublicAttributeDisplay(attributes), sourceUpdatedAt,
   } };
@@ -136,8 +169,15 @@ export function legacyAccountDisplay(historical: LegacyHistoricalRead | null, ve
   };
 }
 
+async function legacyCaptureFactInstalled(client:PoolClient):Promise<boolean> {
+  const row=(await client.query("SELECT to_regclass('zzsh_supply.legacy_listing_capture_fact') IS NOT NULL AS ready")).rows[0];
+  if(typeof row?.ready!=="boolean")throw new SecurityApiError(503,API_V1_ERROR_CODES.EVIDENCE_UNAVAILABLE,"Historical account capture schema is unavailable");
+  return row.ready;
+}
+
 export async function loadLegacyHistoricalRead(client: PoolClient, accountId: string) {
-  const row = (await client.query(legacyHistoricalReadSql(), [accountId])).rows[0];
+  const installed=await legacyCaptureFactInstalled(client);
+  const row = (await client.query(legacyHistoricalReadSql(false,installed), [accountId])).rows[0];
   return row ? projectLegacyHistoricalRead(row, accountId) : null;
 }
 
@@ -145,7 +185,8 @@ export async function loadLegacyHistoricalRead(client: PoolClient, accountId: st
 export async function loadLegacyHistoricalReads(client: PoolClient, accountIds: string[]) {
   const result = new Map<string, LegacyHistoricalRead>();
   if (!accountIds.length) return result;
-  const rows = (await client.query<HistoricalReadRow>(legacyHistoricalReadSql(true), [[...new Set(accountIds)]])).rows;
+  const installed=await legacyCaptureFactInstalled(client);
+  const rows = (await client.query<HistoricalReadRow>(legacyHistoricalReadSql(true,installed), [[...new Set(accountIds)]])).rows;
   for (const row of rows) {
     if (!row.account_id || !accountIds.includes(row.account_id)) throw new SecurityApiError(503, API_V1_ERROR_CODES.EVIDENCE_UNAVAILABLE, "Historical account binding is unavailable");
     result.set(row.account_id, projectLegacyHistoricalRead(row, row.account_id));

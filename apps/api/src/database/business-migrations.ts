@@ -281,6 +281,7 @@ export async function applyRuntimePrivileges(pool: Pick<Pool, "query">, runtimeR
   if ((await pool.query(`SELECT to_regclass('zzsh_supply.legacy_listing_display_snapshot') AS relation`)).rows[0]?.relation) {
     await pool.query(`REVOKE ALL ON zzsh_supply.legacy_listing_display_snapshot FROM PUBLIC; GRANT SELECT,INSERT ON zzsh_supply.legacy_listing_display_snapshot TO ${runtimeUser}; REVOKE UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER ON zzsh_supply.legacy_listing_display_snapshot FROM ${runtimeUser}`);
   }
+  await configureLegacyCaptureFactPrivileges(pool, runtimeRole);
   if ((await pool.query(`SELECT to_regclass('zzsh_supply.legacy_account_media_paths') AS relation`)).rows[0]?.relation) {
     await pool.query(`REVOKE ALL ON zzsh_supply.legacy_account_media_paths FROM PUBLIC, ${runtimeUser}; GRANT SELECT ON zzsh_supply.legacy_account_media_paths TO ${runtimeUser}`);
   }
@@ -654,6 +655,24 @@ async function resetRuntimeTablePrivileges(pool: Pick<Pool, "query">, table: str
     await pool.query(`REVOKE ALL ON TABLE ${table} FROM ${role};
       REVOKE SELECT (${list}), INSERT (${list}), UPDATE (${list}), REFERENCES (${list}) ON TABLE ${table} FROM ${role};
       ${options.select === false ? "" : `GRANT SELECT ON TABLE ${table} TO ${role}`}`);
+}
+
+/** Supplemental account capture is maintenance-only; reject a partially installed contract. */
+export async function configureLegacyCaptureFactPrivileges(pool: Pick<Pool, "query">, runtimeRole: string): Promise<void> {
+  const table = "zzsh_supply.legacy_listing_capture_fact", role = quoteIdentifier(runtimeRole);
+  const row = (await pool.query(`SELECT to_regclass($1) IS NOT NULL AS present,
+    to_regprocedure('zzsh_supply.guard_legacy_listing_capture_fact()') IS NOT NULL AS guard,
+    (SELECT count(*)::integer FROM pg_trigger WHERE tgrelid=to_regclass($1)
+      AND NOT tgisinternal AND tgname IN ('legacy_capture_insert','legacy_capture_immutable')) AS triggers`, [table])).rows[0];
+  if (!row || typeof row.present !== "boolean" || typeof row.guard !== "boolean" || !Number.isInteger(row.triggers)) throw new Error("Legacy capture fact inventory is unavailable");
+  if (!row.present && !row.guard && row.triggers === 0) return;
+  if (!row.present || !row.guard || row.triggers !== 2) throw new Error("Legacy capture fact contract is incomplete");
+  const columns = (await pool.query("SELECT attname FROM pg_attribute WHERE attrelid=$1::regclass AND attnum>0 AND NOT attisdropped ORDER BY attnum", [table])).rows.map(value => value.attname as string);
+  const expected = ["account_id","observation_version_id","base_source_digest","display_digest","capture_sha256","source_updated_at","base_ratio_wan_per_yuan","ratio_issue","full_payout_selected","payout_issue","evidence_digest","created_by_admin_id","created_at"];
+  if (columns.length !== expected.length || new Set(columns).size !== columns.length || expected.some(name => !columns.includes(name))) throw new Error("Legacy capture fact columns differ");
+  await resetRuntimeTablePrivileges(pool, table, "PUBLIC", { columns, select: false });
+  await resetRuntimeTablePrivileges(pool, table, role, { columns });
+  await pool.query(`REVOKE ALL ON FUNCTION zzsh_supply.guard_legacy_listing_capture_fact() FROM PUBLIC, ${role}`);
 }
 
 /** The refund wait policy is optional until its migration is installed. */

@@ -25,6 +25,7 @@ function batchVersionRows(ids: readonly string[]) {
     return ids.map(id => ({ id, account_id: id.replace(/^version-/, ""), sequence: "1", origin: "NATIVE", review_state: "DRAFT", title: "标题", description: null, attributes: {}, term_option_code: "", pricing_option_code: "", rule_release_id: null, content_hash: null, payload: null, presentation: {}, revision: "1", submitted_at: null, schema_version: 1 }));
 }
 const fixtureClient = { query: async (sql: string) => {
+        if (sql.includes("to_regclass('zzsh_supply.legacy_listing_capture_fact')")) return { rows: [{ ready: false }], rowCount: 1 };
     assert.match(sql, /^\s*SELECT/, "occupancy projection remains read-only");
     return { rows: sql.includes('"game_service_operation"') ? [{ id: "fixture-service", gameCode: "delta", gameEnabled: true, enabled: true }] : [] };
 } } as never;
@@ -72,6 +73,7 @@ function rentalDetailFixture() {
     const queries: Array<{ sql: string; values: unknown[] }> = [];
     const state = { scope: [account.game_id], includePublicMedia: true };
     const client = { query: async (sql: string, values: unknown[] = []) => {
+        if (sql.includes("to_regclass('zzsh_supply.legacy_listing_capture_fact')")) return { rows: [{ ready: false }], rowCount: 1 };
         queries.push({ sql, values });
         let rows: any[] = [];
         if (sql.includes('s."game_scope_mode" AS "mode"')) rows = [{ mode: "SELECTED_GAMES", gameIds: state.scope }];
@@ -253,6 +255,7 @@ test("only the v3 single-account GET accepts rental reading and keeps active ide
 async function captureListQuery(params: URLSearchParams) {
     let captured: { sql: string; values: unknown[] } | undefined;
     await listSupervision({ query: async (sql: string, values: unknown[]) => {
+        if (sql.includes("to_regclass('zzsh_supply.legacy_listing_capture_fact')")) return { rows: [{ ready: false }], rowCount: 1 };
         if (sql.startsWith("SELECT a.id,")) captured = { sql, values };
         return { rows: [] };
     } } as never, queryViewer, parseSupervisionQuery(params), async () => { throw Error("empty page has no gate reads"); }, queryKey);
@@ -472,6 +475,7 @@ test("bounded filtering never gates a whole no-match source range and stops resi
     t.mock.method(legacy, "loadLegacyHistoricalReads", async () => new Map());
     t.mock.method(directory, "readDirectoryUserSummaries", async () => new Map());
     const client = { query: async (sql: string, values: any[] = []) => {
+        if (sql.includes("to_regclass('zzsh_supply.legacy_listing_capture_fact')")) return { rows: [{ ready: false }], rowCount: 1 };
         if (sql.startsWith("SELECT a.id,")) {
             const after = sql.includes("::timestamptz,") ? values.at(-2) : null, limit = Number(values.at(-1));
             const start = after === null ? 0 : rows.findIndex(row => row.id === after) + 1;
@@ -586,6 +590,7 @@ test("historical projection stays off public visibility for an empty row and a s
     let historicalRows: unknown[] = [];
     let historicalQueries = 0;
     const client = { query: async (sql: string, values?: unknown[]) => {
+        if (sql.includes("to_regclass('zzsh_supply.legacy_listing_capture_fact')")) return { rows: [{ ready: false }], rowCount: 1 };
         assert.match(sql, /^\s*SELECT/);
         if (sql.includes("source_status::int")) { historicalQueries++; return { rows: historicalRows }; }
         if (sql.startsWith("SELECT a.id,")) return { rows: [{ id: fixtureAccount.id, sortAt: "2026-10-03T00:00:00.000000Z" }] };
@@ -621,6 +626,7 @@ test("account route lets the owner read history and stops another user first", a
     const account = { ...fixtureAccount, id: "acc-1", owner_user_id: "owner-1", current_version_id: null };
     const historicalSql: string[] = [];
     const client = { query: async (sql: string) => {
+        if (sql.includes("to_regclass('zzsh_supply.legacy_listing_capture_fact')")) return { rows: [{ ready: false }], rowCount: 1 };
         if (sql.includes("source_status::int")) {
             historicalSql.push(sql);
             return { rows: [{ source_status: 4, legacy_id: "1", owner_user_id: "owner-1", snapshot: historicalSnapshot }] };
@@ -667,6 +673,7 @@ function summaryVersion(id: string) {
 function summaryHarness(viewerPermissions: string[], options: { policy?: unknown | null; proof?: unknown | null; users?: boolean; version?: ReturnType<typeof summaryVersion>; historical?: unknown } = {}) {
     const sql: string[] = [], ownerRequests: unknown[][] = [];
     const client = { query: async (text: string, values?: unknown[]) => {
+        if (text.includes("to_regclass('zzsh_supply.legacy_listing_capture_fact')")) return { rows: [{ ready: false }], rowCount: 1 };
         sql.push(text);
         if (text.startsWith("SELECT a.id,")) return { rows: [summaryRow, { ...summaryRow, id: "a-2", accountId: "a-2", ownerId: "u-2" }] };
         if (text.includes("FROM zzsh_supply.rental_account WHERE id = ANY")) return { rows: [...batchAccounts((values?.[0] ?? []) as string[]).values()] };
@@ -745,6 +752,7 @@ test("pagination total uses the same SQL filters and scope, excludes cursor and 
     const fixture = summaryHarness(["supply.review.read"]), seen: Array<{ sql: string; values: unknown[] }> = [];
     const original = (fixture.client as any).query;
     const client = { query: async (sql: string, values: unknown[] = []) => {
+        if (sql.includes("to_regclass('zzsh_supply.legacy_listing_capture_fact')")) return { rows: [{ ready: false }], rowCount: 1 };
         if (sql.startsWith("SELECT count(*)::text AS total")) { seen.push({ sql, values }); return { rows: [{ total: "41" }] }; }
         return original(sql, values);
     } } as never;
@@ -787,6 +795,7 @@ test("admin attribution binds the displayed public version and hash without muta
     t.mock.method(publishing, 'listingDetail', async () => ({ account, available: true, blockers: [], decisions: [], version: { id: 'draft-3', contentHash: 'draft-hash', declaration: { attributes: { info_source: '抖音' }, mediaBindings: [] }, quote: null } } as never));
     const captured: unknown[][] = []; let found = true;
     const client = { query: async (sql: string, values: unknown[] = []) => {
+        if (sql.includes("to_regclass('zzsh_supply.legacy_listing_capture_fact')")) return { rows: [{ ready: false }], rowCount: 1 };
         if (sql.startsWith("SELECT attributes->'info_source'")) { captured.push(values); return { rows: found ? [{ source: '朋友介绍' }] : [] }; }
         return { rows: [], rowCount: 0 };
     } } as never;
@@ -974,6 +983,7 @@ test("R1 the guarantee requirement follows the enabled mechanism, never the stal
 test("admin supervision keeps the old businessNo while public projections drop it", async t => {
     t.mock.method(publishing, "readPublicListing", async () => { throw Object.assign(new Error("hidden"), { status: 404 }); });
     const client = { query: async (sql: string) => {
+        if (sql.includes("to_regclass('zzsh_supply.legacy_listing_capture_fact')")) return { rows: [{ ready: false }], rowCount: 1 };
         assert.match(sql, /^\s*SELECT/);
         if (sql.includes("legacy_supply_map")) return { rows: [{ sourceSystem: "legacy_mysql_restore", sourceEntity: "la_rental_accounts", sourceId: "34418", businessNo: "OLD-42" }] };
         return { rows: [] };
@@ -987,6 +997,7 @@ test("admin supervision source SQL still reads the old resourceNo as businessNo 
     t.mock.method(publishing, "readPublicListing", async () => { throw Object.assign(new Error("hidden"), { status: 404 }); });
     const seen: string[] = [];
     const client = { query: async (sql: string) => {
+        if (sql.includes("to_regclass('zzsh_supply.legacy_listing_capture_fact')")) return { rows: [{ ready: false }], rowCount: 1 };
         seen.push(sql);
         if (sql.includes("legacy_supply_map") && /h\.snapshot->>'resourceNo' AS "businessNo"/.test(sql)) return { rows: [{ sourceSystem: "legacy_mysql_restore", sourceEntity: "la_rental_accounts", sourceId: "34418", businessNo: "OLD-42" }] };
         return { rows: [] };
@@ -1005,6 +1016,7 @@ const detailVersion = { schema_version: 1, id: "version-1", account_id: "account
  *  the readiness check cannot answer without. */
 function detailClient(onQuery?: (sql: string) => void) {
     return { query: async (sql: string) => {
+        if (sql.includes("to_regclass('zzsh_supply.legacy_listing_capture_fact')")) return { rows: [{ ready: false }], rowCount: 1 };
         onQuery?.(sql);
         if (sql.includes("FROM zzsh_supply.listing_version WHERE id=$1")) return { rows: [detailVersion] };
         if (sql.includes('"game_service_operation"')) return { rows: [{ id: "fixture-service", gameCode: "delta", gameEnabled: true, enabled: true }] };
@@ -1037,6 +1049,7 @@ test("the supervision page reads its accounts, versions, publication probe and l
     t.mock.method(publishing, "readPublicListing", async () => ({ source: "NATIVE_PUBLICATION" }));
     const sql: string[] = [];
     const client = { query: async (text: string, values?: unknown[]) => {
+        if (text.includes("to_regclass('zzsh_supply.legacy_listing_capture_fact')")) return { rows: [{ ready: false }], rowCount: 1 };
         sql.push(text);
         if (text.startsWith("SELECT a.id,")) return { rows: [summaryRow, { ...summaryRow, id: "a-2", accountId: "a-2", ownerId: "u-2" }] };
         if (text.includes("FROM zzsh_supply.rental_account WHERE id = ANY")) return { rows: [...batchAccounts((values?.[0] ?? []) as string[]).values()] };
@@ -1068,6 +1081,7 @@ test("saved unquoted draft stock is one page read and keeps 0, unknown and undec
     let inventoryReads = 0;
     const ids = ["a-9", "a-0", "a-u", "a-n"];
     const client = { query: async (text: string, values?: unknown[]) => {
+        if (text.includes("to_regclass('zzsh_supply.legacy_listing_capture_fact')")) return { rows: [{ ready: false }], rowCount: 1 };
         if (text.startsWith("SELECT a.id,")) return { rows: ids.map(id => ({ ...summaryRow, id, accountId: id, ownerId: "u-1", versionId: `version-${id}` })) };
         if (text.includes("FROM zzsh_supply.rental_account WHERE id = ANY")) return { rows: [...batchAccounts((values?.[0] ?? []) as string[]).values()] };
         if (text.includes("FROM zzsh_supply.listing_version WHERE id = ANY")) return { rows: ((values?.[0] ?? []) as string[]).map(id => ({ ...summaryVersion(id), payload: null, content_hash: null, rule_release_id: null, review_state: "DRAFT", origin: "NATIVE" })) };
@@ -1096,6 +1110,7 @@ test("the batch read keeps the first-read version tuple when current moves twice
     let versionReads = 0, movedReads = 0;
     t.mock.method(publishing, "readPublicListing", async () => ({ source: "NATIVE_PUBLICATION" }));
     const client = { query: async (text: string, values?: unknown[]) => {
+        if (text.includes("to_regclass('zzsh_supply.legacy_listing_capture_fact')")) return { rows: [{ ready: false }], rowCount: 1 };
         if (text.startsWith("SELECT a.id,")) return { rows: [summaryRow] };
         if (text.includes("FROM zzsh_supply.rental_account WHERE id = ANY")) return { rows: [...batchAccounts((values?.[0] ?? []) as string[]).values()] };
         if (text.includes("FROM zzsh_supply.listing_version WHERE id = ANY")) { versionReads++; return { rows: ((values?.[0] ?? []) as string[]).map(summaryVersion) }; }
@@ -1117,6 +1132,7 @@ test("the supervision detail reads one public projection for the viewed, current
     const account: PublishingAccount = { ...detailAccount, current_version_id: "version-1" };
     const oldVersion = { ...detailVersion, id: "version-old", sequence: "1" };
     const client = { query: async (sql: string, values?: unknown[]) => {
+        if (sql.includes("to_regclass('zzsh_supply.legacy_listing_capture_fact')")) return { rows: [{ ready: false }], rowCount: 1 };
         // Only the public projection runs this join; it is the public listing's own probe.
         if (sql.includes("JOIN zzsh_supply.listing_publication p ON p.version_id=v.id")) publicProjections++;
         if (sql.startsWith("SELECT 1 FROM zzsh_supply.listing_version WHERE id=$1 AND account_id=$2")) return { rows: [{ "1": 1 }], rowCount: 1 };

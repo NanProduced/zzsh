@@ -38,6 +38,7 @@ export class DirectorySqlFixture extends EventEmitter {
   async connect(){return this;} release(){}
   getTransactionStatus(){return "I" as const;}
   async query(sql:string,values:unknown[]=[]):Promise<any> {
+    if(sql.includes("to_regclass('zzsh_supply.legacy_listing_capture_fact')"))return {rows:[{ready:false}],rowCount:1};
     if(sql.includes("to_regclass('zzsh_order.legacy_order_read_snapshot')")&&!sql.includes('legacy-growth-schema'))return {rows:[{present:false}],rowCount:1};
     this.queries.push({sql,values});
     const result=(rows:unknown[])=>({rows,rowCount:rows.length});

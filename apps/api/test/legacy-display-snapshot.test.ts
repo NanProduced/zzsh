@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { convertLegacyDisplayFields, legacyDisplayDigest, legacyDisplayMatchesSource, parseLegacyDisplaySnapshot } from "../src/supply/legacy-display-snapshot";
+import { legacyAccountCaptureFactDigest, legacyAccountCaptureFactFromSource, parseLegacyAccountCaptureFact } from "../src/supply/legacy-account-capture-fact";
+import { canonicalize } from "../src/supply/content-hash";
+import { sha256Hex } from "../src/supply/supply-util";
 import { recordLegacyDisplaySnapshot, readLegacyListing, buildLegacyListingCandidates, buildMixedListingCandidates, projectLegacyHistoricalRead, loadLegacyHistoricalRead, loadLegacyHistoricalReads, legacyHistoricalReadSql } from "../src/supply/legacy-listing-read";
 import { legacyAdmissionSql, parseLegacyPublicAdmission } from "../src/legacy-load/legacy-public-admission";
 import type { ListingQueryV2 } from "../src/supply/listing-filter-contract";
@@ -154,6 +157,50 @@ function historicalRow(accountId = "a-1", legacyId = "1") {
   };
 }
 
+test("supplementary capture is source-bound and preserves the immutable v1 and historical quote", () => {
+  const raw={...source(),id:"1",base_bot:"56",is_full_payout:"0"}, row=historicalRow();
+  const baseSourceDigest=sha256Hex(canonicalize(raw));
+  row.source_digest=baseSourceDigest; row.base_source_digest=baseSourceDigest;
+  row.display_digest=legacyDisplayDigest("a-1",{...input(),baseSourceDigest,snapshot:row.display_snapshot});
+  const binding={accountId:"a-1",legacyId:"1",observationVersionId:row.observation_version_id,baseSourceDigest,
+    displayDigest:row.display_digest,captureSha256:"c".repeat(64),sourceUpdatedAt:row.base_updated_at.toISOString()};
+  const fact=legacyAccountCaptureFactFromSource(binding,raw), digest=legacyAccountCaptureFactDigest(fact);
+  assert.equal(fact.sourceAccountBaseRatioWanPerYuan,"56");
+  assert.equal(fact.sourceAccountFullPayoutSelected,false);
+  assert.throws(()=>legacyAccountCaptureFactFromSource(binding,{...raw,base_bot:"57"}));
+  const supplemental={...row,capture_account_id:"a-1",capture_version_id:binding.observationVersionId,
+    capture_source_digest:baseSourceDigest,capture_display_digest:row.display_digest,capture_sha256:binding.captureSha256,
+    capture_updated_at:new Date(binding.sourceUpdatedAt),base_ratio_wan_per_yuan:"56",ratio_issue:null,
+    full_payout_selected:false,payout_issue:null,capture_evidence_digest:digest};
+  const original=projectLegacyHistoricalRead(row), result=projectLegacyHistoricalRead(supplemental);
+  assert.deepEqual(result.historicalQuote,original.historicalQuote);
+  assert.equal(result.display.state==="KNOWN"&&result.display.facts.sourceAccountBaseRatioWanPerYuan,"56");
+  assert.equal(result.display.state==="KNOWN"&&result.display.facts.sourceAccountFullPayoutSelected,false);
+  assert.equal(Object.hasOwn(row.display_snapshot,"sourceAccountBaseRatioWanPerYuan"),false);
+  assert.doesNotMatch(JSON.stringify(result),/captureSha256|capture_evidence_digest|baseSourceDigest/);
+  for(const bad of [{capture_source_digest:"d".repeat(64)},{capture_display_digest:"d".repeat(64)},
+    {base_ratio_wan_per_yuan:"57"},{full_payout_selected:true},{capture_sha256:"d".repeat(64)},
+    {capture_account_id:null},{capture_updated_at:new Date("2026-09-14T00:00:00Z")}])
+    assert.throws(()=>projectLegacyHistoricalRead({...supplemental,...bad}),{status:503,code:"EVIDENCE_UNAVAILABLE"});
+});
+
+test("capture values distinguish missing, false, true and invalid without inventing zero", () => {
+  for(const [ratio,payout,ratioIssue,payoutIssue,expectedPayout] of [
+    ["0","0","base_bot:NON_POSITIVE",null,false],[null,"1","base_bot:MISSING",null,true],
+    ["bad",null,"base_bot:INVALID","is_full_payout:UNKNOWN",null],["56.25","0",null,null,false],
+  ] as const){
+    const raw={id:"1",base_bot:ratio,is_full_payout:payout};
+    const binding={accountId:"a-1",legacyId:"1",observationVersionId:"v-1",baseSourceDigest:sha256Hex(canonicalize(raw)),
+      displayDigest:"d".repeat(64),captureSha256:"c".repeat(64),sourceUpdatedAt:"2026-09-13T00:00:00.000Z"};
+    const fact=legacyAccountCaptureFactFromSource(binding,raw);
+    assert.equal(fact.ratioIssue,ratioIssue);assert.equal(fact.payoutIssue,payoutIssue);
+    assert.equal(fact.sourceAccountFullPayoutSelected,expectedPayout);
+    assert.equal(fact.sourceAccountBaseRatioWanPerYuan,ratioIssue===null?ratio:null);
+    assert.deepEqual(parseLegacyAccountCaptureFact(fact),fact);
+    assert.throws(()=>parseLegacyAccountCaptureFact({...fact,payoutIssue:"wrong"}));
+  }
+});
+
 test("authorized private projection reuses frozen display facts without public visibility or private risk data", () => {
   const result = projectLegacyHistoricalRead(historicalRow(), "a-1");
   assert.equal(result.sourceStatus, 4);
@@ -195,7 +242,7 @@ test("captured ratio and payout retain true, false, unknown and old-v1 absence a
 
 test("no base, no display and corrupt display remain distinct", async () => {
   const calls: string[] = [];
-  const absent = await loadLegacyHistoricalRead({ query: async (sql: string) => { calls.push(sql); return { rows: [] }; } } as never, "a-1");
+  const absent = await loadLegacyHistoricalRead({ query: async (sql: string) => { calls.push(sql); return { rows: sql.startsWith("SELECT to_regclass") ? [{ready:false}] : [] }; } } as never, "a-1");
   assert.equal(absent, null);
   const row = historicalRow();
   const withoutDisplay = { ...row, display_account_id: null, display_version_id: null, base_source_digest: null, extract_sha256: null, display_updated_at: null, display_evidence_ref: null, display_snapshot: null, display_digest: null };
@@ -212,21 +259,34 @@ test("no base, no display and corrupt display remain distinct", async () => {
     { display_snapshot: { ...row.display_snapshot, private: "injected" } }, { display_account_id: null },
     { snapshot: { ...row.snapshot, depositYuan: 0 } },
   ]) assert.throws(() => projectLegacyHistoricalRead({ ...row, ...patch }, "a-1"), { status: 503, code: "EVIDENCE_UNAVAILABLE" });
-  assert.equal(calls.length, 1);
+  assert.equal(calls.length, 2);
   assert(calls.every(sql => !/INSERT|UPDATE|DELETE|ensure/.test(sql)));
 });
 
 test("authorized page IDs load in one bounded batch and empty pages issue no historical query", async () => {
   const calls: Array<{ sql: string; values: unknown[] }> = [];
-  const client = { query: async (sql: string, values: unknown[]) => { calls.push({ sql, values }); return { rows: [historicalRow(), historicalRow("a-2", "2")] }; } };
+  const client = { query: async (sql: string, values: unknown[]) => { calls.push({ sql, values }); return { rows: sql.startsWith("SELECT to_regclass") ? [{ready:true}] : [historicalRow(), historicalRow("a-2", "2")] }; } };
   assert.equal((await loadLegacyHistoricalReads(client as never, [])).size, 0);
   assert.equal(calls.length, 0);
   const result = await loadLegacyHistoricalReads(client as never, ["a-1", "a-2"]);
   assert.equal(result.size, 2);
-  assert.deepEqual(calls[0]!.values, [["a-1", "a-2"]]);
-  assert.match(calls[0]!.sql, /h.account_id = ANY/);
-  assert.equal(calls.length, 1);
+  assert.deepEqual(calls[1]!.values, [["a-1", "a-2"]]);
+  assert.match(calls[1]!.sql, /h.account_id = ANY/);
+  assert.equal(calls.length, 2);
   const single = projectLegacyHistoricalRead(historicalRow(), "a-1");
   assert.deepEqual(result.get("a-1"), single);
   await assert.rejects(() => loadLegacyHistoricalReads(client as never, ["other"]), { status: 503, code: "EVIDENCE_UNAVAILABLE" });
+});
+
+test("pre-0175 historical reads remain available and do not fabricate captured facts", async () => {
+  const calls:string[]=[];
+  const client={query:async(sql:string)=>{calls.push(sql);return {rows:sql.startsWith("SELECT to_regclass")?[{ready:false}]:[historicalRow()]};}};
+  const result=await loadLegacyHistoricalRead(client as never,"a-1");
+  assert.equal(result?.display.state,"KNOWN");
+  if(result?.display.state!=="KNOWN")return;
+  assert.equal(result.display.facts.sourceAccountBaseRatioWanPerYuan ?? null,null);
+  assert.equal(result.display.facts.sourceAccountFullPayoutSelected ?? null,null);
+  assert.doesNotMatch(calls[1]!,/legacy_listing_capture_fact/);
+  assert.match(legacyHistoricalReadSql(false,true),/legacy_listing_capture_fact/);
+  await assert.rejects(()=>loadLegacyHistoricalRead({query:async()=>({rows:[]})} as never,"a-1"),{status:503,code:"EVIDENCE_UNAVAILABLE"});
 });

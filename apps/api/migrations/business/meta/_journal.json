@@ -1226,6 +1226,13 @@
       "when": 1793730640495,
       "tag": "0174_business_schema_comments",
       "breakpoints": true
+    },
+    {
+      "idx": 175,
+      "version": "7",
+      "when": 1793730640496,
+      "tag": "0175_legacy_account_capture_facts",
+      "breakpoints": true
     }
   ]
 }

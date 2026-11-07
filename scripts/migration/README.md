@@ -89,3 +89,16 @@ readiness核对应plan摘要，合成对账仅标FIXTURE_PASS。缺证种子随p
 参考包承接与真实旧业务转换分别对账：旧支付标记只能形成历史记录，不生成原生PAID/渠道证据；已没收只保留`LEGACY_RECORDS`终态，不再支付；已有退款记录不重退。钱包期初必须另有正式经济根/覆盖证明，历史展示成功不能当作可提现余额。媒体只保留来源、ID、storageKey和字节摘要，未核验的字节明确待处理。
 
 这些脚本不调用真实支付、短信、实名、云信或银行渠道；本地通过不代替线上迁移及到账验收。新环境数据库initial入口见[数据库基线说明](../../docs/operations/database-initial.md)，字段及业务映射见[旧数据转换契约](../../docs/architecture/legacy-data-mapping.md)。
+
+### 第七轮独立副本：账号采集事实补充（候选）
+
+`complete-r07-account-capture.mjs` 默认只打印 plan，不读取凭据或连接数据库。它针对已经导入 V1 且不可变的 R07 历史账号，补充同一来源采集时的 `base_bot` 与 `is_full_payout`；不会将它们当作旧订单创建时的冻结值，也不会修改 V1、原价、钱包、库存或上架权限。先在独立副本应用经过审查的 `0174` 与 `0175`，实际 PostgreSQL journal、触发器、约束及 runtime 只读权限必须与本地代码一致。原 R07 system identifier 和原回归 marker 均拒绝。
+
+受限输入 JSON 约定为 `schema: "zzsh.r07-capture-fact-input.v1"`，`sourceReceipt`、`datasetManifest`、`actor` 各为 `{path,sha256}`；`credentialsPath` 指向已登记副本的受限凭据文件，同目录 `resource.json` 需具备独立 cluster system identifier、OID、marker `zzsh:r07-delivery-clone:v1`、nonce、owner/migration/runtime 角色及其 OID、锁、与原 dataset manifest SHA 相等的 `protectedDataset.manifestSha256`。actor 必须在副本的正式认证流程中取得，包含 admin ID、session ID 和相同资源 OID/nonce。资源、输入、输出都只放受限路径；不要把密码/Token/个人数据写入命令或 Git。
+
+1. `node scripts/migration/complete-r07-account-capture.mjs --prepare --input <input.json> --input-sha <sha256> --out <新受限目录>`：只读快照逐个核源文件、已选账号与目标锚点，要求目标无已有补充事实；输出带目标、代码依赖闭包和逐账号摘要的受限 plan，成功必须确认 rollback、锁释放及连接关闭。
+2. 维护者按已审 plan 准备 `zzsh.r07-capture-fact-authority.v1` 受限文件，绑定 `planSha256`、完全相同的 `target`、准确 `maxAccounts`、`APPEND_SOURCE_BOUND_ACCOUNT_CAPTURE`、`allowFinancialWrites:false`、`approvalRef`、`attempt` 及不超过 30 分钟的 `notBefore`/`expiresAt`。这是本地任务范围和来源/资源绑定，不替代 Owner 对服务器部署的审核。
+3. `node scripts/migration/complete-r07-account-capture.mjs --execute --input <input.json> --input-sha <sha256> --plan <plan.json> --plan-sha <sha256> --authority <authority.json> --authority-sha <sha256> --out <另一新受限目录>`：持专用锁、在单一事务内按 400 条使用正式受限 writer 和原键追加并记录批次审计；逐批核文件包对应的原账号摘要。过期、来源漂移或目标变化回滚；COMMIT UNKNOWN 保留原 key/receipt，禁止换键盲重试。
+4. `node scripts/migration/complete-r07-account-capture.mjs --readback --input <input.json> --input-sha <sha256> --plan <plan.json> --plan-sha <sha256> --apply-receipt <receipt.json> --apply-sha <sha256> --out <另一新受限目录>`：只读重新比对全部源/目标键与值、V1 锚点、事实摘要、每个批次原幂等回执与审计；完成后仍需实际页面、原在架报价和订单回归。输出中的已知/未知数量只说明账号采集事实，不证明渠道到账。
+
+这是一份候选接线；在独立真实数据交付副本完成完整 prepare / execute / readback 前，不应称其已完成 R07 修复。环境角色、授权窗口、文件身份和实际输出摘要均由执行阶段另行登记。
