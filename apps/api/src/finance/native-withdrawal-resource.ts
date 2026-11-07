@@ -5,6 +5,7 @@ import { conflict, invalid } from '../supply/supply-util';
 import { REGRESSION_MARKER } from '../config/test-resource';
 import { createControlledRegressionResource, assertControlledRegressionResource, type ControlledRegressionBinding, type ControlledRegressionResource } from './controlled-regression-resource';
 import { assertLocalFinancialSandboxResource, localFinancialSandboxRegistration, type LocalFinancialSandbox } from './local-financial-sandbox-resource';
+import { assertEcsTestDemoResource, readEcsTestDemoRegistration, type DemoFinanceResource } from './ecs-test-demo-resource';
 
 export type NativeWithdrawalBinding = Readonly<{
   userId: string;
@@ -14,7 +15,7 @@ export type NativeWithdrawalBinding = Readonly<{
   payoutKey: string;
 }>;
 export type NativeWithdrawalScope = Readonly<{ kind: 'NATIVE_LOCAL_CONTROLLED_WITHDRAWAL' }>;
-type Proof = Readonly<{ name: string; role: string; oid: number; bindings: readonly NativeWithdrawalBinding[]; regression?: ControlledRegressionResource; sandbox?: LocalFinancialSandbox }>;
+type Proof = Readonly<{ name: string; role: string; oid: number; bindings: readonly NativeWithdrawalBinding[]; regression?: ControlledRegressionResource; sandbox?: LocalFinancialSandbox; demo?:DemoFinanceResource }>;
 const proofs = new WeakMap<object, Proof>();
 const id = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const marker = 'zzsh:order-reservation-test:v1';
@@ -27,7 +28,23 @@ export function createSandboxNativeWithdrawalScope(sandbox: LocalFinancialSandbo
   const token = Object.freeze({ kind: 'NATIVE_LOCAL_CONTROLLED_WITHDRAWAL' as const });
   proofs.set(token, Object.freeze({ name: r.database, role: r.runtimeRole, oid: r.resourceOid, bindings: Object.freeze([]), sandbox })); return token;
 }
-export function nativeWithdrawalSandbox(scope: NativeWithdrawalScope): LocalFinancialSandbox | undefined { return proof(scope).sandbox; }
+export type RegisteredWithdrawalResource=LocalFinancialSandbox|DemoFinanceResource;
+export function nativeWithdrawalSandbox(scope: NativeWithdrawalScope): RegisteredWithdrawalResource | undefined { const p=proof(scope);return p.sandbox??p.demo; }
+export function withdrawalRegistration(resource:RegisteredWithdrawalResource){
+ if(resource.kind==='REGISTERED_LOCAL_FINANCIAL_SANDBOX')return localFinancialSandboxRegistration(resource);
+ const p=readEcsTestDemoRegistration(resource),r=p.registration.resource;
+ return {digest:p.digest,registration:{reference:p.registration.reference,approvedByAdminId:p.registration.administratorId,
+   resource:{database:r.database,resourceOid:r.databaseOid,marker:r.marker,runtimeRole:r.runtimeRole}}};
+}
+export async function assertRegisteredWithdrawalResource(c:PoolClient,resource:RegisteredWithdrawalResource,purpose:'WRITE'|'READ_ORIGINAL'='WRITE'){
+ if(resource.kind==='REGISTERED_LOCAL_FINANCIAL_SANDBOX')return assertLocalFinancialSandboxResource(c,resource,purpose);
+ const p=await assertEcsTestDemoResource(c,resource,purpose),r=p.resource;
+ return {active:p.active,reference:p.reference,approvedByAdminId:p.administratorId,resource:{database:r.database,resourceOid:r.databaseOid,marker:r.marker,runtimeRole:r.runtimeRole}};
+}
+export function createDemoNativeWithdrawalScope(demo:DemoFinanceResource):NativeWithdrawalScope{
+ const r=readEcsTestDemoRegistration(demo).registration.resource,token=Object.freeze({kind:'NATIVE_LOCAL_CONTROLLED_WITHDRAWAL' as const});
+ proofs.set(token,Object.freeze({name:r.database,role:r.runtimeRole,oid:r.databaseOid,bindings:Object.freeze([]),demo}));return token;
+}
 
 /** Explicit local assembly only. No environment fallback and no HTTP constructor. */
 export function createNativeWithdrawalScope(options: {
@@ -71,8 +88,8 @@ function proof(scope: NativeWithdrawalScope): Proof {
 
 export async function assertNativeWithdrawalResource(client: PoolClient, scope: NativeWithdrawalScope, purpose: 'WRITE' | 'READ_ORIGINAL' = 'WRITE') {
   const expected = proof(scope);
-  if (expected.sandbox) {
-    const r = await assertLocalFinancialSandboxResource(client, expected.sandbox, purpose);
+  if (expected.sandbox || expected.demo) {
+    const r = await assertRegisteredWithdrawalResource(client, (expected.sandbox??expected.demo)!, purpose);
     const ready = (await client.query(`SELECT to_regclass('zzsh_order.withdrawal_intent') IS NOT NULL
       AND to_regclass('zzsh_order.withdrawal_admission') IS NOT NULL AND to_regclass('zzsh_order.withdrawal_destination') IS NOT NULL
       AND to_regclass('zzsh_order.withdrawal_provider_fact') IS NOT NULL AND to_regclass('zzsh_order.controlled_payout_operation') IS NOT NULL AS complete`)).rows[0];
@@ -96,7 +113,7 @@ export async function assertNativeWithdrawalResource(client: PoolClient, scope: 
 }
 
 export function nativeWithdrawalBindings(scope: NativeWithdrawalScope, userId: string): readonly NativeWithdrawalBinding[] {
-  if (proof(scope).sandbox) throw conflict('Registered withdrawal objects require their transaction reader');
+  if (proof(scope).sandbox || proof(scope).demo) throw conflict('Registered withdrawal objects require their transaction reader');
   const bindings = proof(scope).bindings.filter(b => b.userId === userId);
   if (bindings.length === 0) throw unavailable('NATIVE_WITHDRAWAL_SUBJECT_NOT_ADMITTED');
   return bindings.map(b => ({ ...b }));
@@ -104,7 +121,7 @@ export function nativeWithdrawalBindings(scope: NativeWithdrawalScope, userId: s
 
 /** Read projection only; false must not suppress the subject's ordinary wallet. */
 export function nativeWithdrawalSubjectInScope(scope: NativeWithdrawalScope, userId: string): boolean {
-  if (proof(scope).sandbox) return typeof userId === 'string' && id.test(userId);
+  if (proof(scope).sandbox || proof(scope).demo) return typeof userId === 'string' && id.test(userId);
   return proof(scope).bindings.some(b => b.userId === userId);
 }
 
@@ -125,25 +142,26 @@ export function assertNativeWithdrawalIntent(scope: NativeWithdrawalScope, row: 
 
 export async function assertNativeWithdrawalDestinationInTransaction(client: PoolClient, scope: NativeWithdrawalScope,
   target: { userId: string; admissionId: string; destinationId: string }, purpose: 'WRITE' | 'READ_ORIGINAL' = 'WRITE'): Promise<void> {
-  const sandbox = proof(scope).sandbox;
+  const sandbox = proof(scope).sandbox??proof(scope).demo;
   if (!sandbox) return assertNativeWithdrawalDestination(scope, target);
-  const p = localFinancialSandboxRegistration(sandbox);
-  const row = (await client.query(`SELECT d.id FROM zzsh_order.withdrawal_destination d
+  const p = withdrawalRegistration(sandbox);
+  const row = (await client.query(`SELECT d.id,${purpose==='WRITE'?`EXISTS(SELECT 1 FROM zzsh_order.withdrawal_bank_binding b
+    WHERE b.id=d.bank_binding_id AND b.user_id=d.user_id AND b.revision=d.bank_binding_revision)`:'true'} AS binding_current FROM zzsh_order.withdrawal_destination d
     JOIN zzsh_order.withdrawal_admission a ON a.id=d.admission_id AND a.user_id=d.user_id
-    ${purpose==='WRITE'?'JOIN zzsh_order.withdrawal_bank_binding b ON b.id=d.bank_binding_id AND b.user_id=d.user_id AND b.revision=d.bank_binding_revision':''}
     WHERE d.id=$1 AND d.user_id=$2 AND a.id=$3 AND d.sandbox_registration_ref=$4 AND a.sandbox_registration_ref=$4
       AND a.resource_oid=$5 AND a.resource_name=$6 AND a.resource_marker=$7 AND d.mode='LOCAL_CONTROLLED'`,
   [target.destinationId,target.userId,target.admissionId,p.registration.reference,p.registration.resource.resourceOid,p.registration.resource.database,p.registration.resource.marker])).rows[0];
   if (!row) throw unavailable('NATIVE_WITHDRAWAL_DESTINATION_NOT_ADMITTED');
-  if (purpose === 'WRITE') await assertLocalFinancialSandboxResource(client, sandbox);
+  if (purpose === 'WRITE' && row.binding_current !== true) throw conflict('银行卡信息已变化，请重新选择银行卡');
+  if (purpose === 'WRITE') await assertRegisteredWithdrawalResource(client, sandbox);
 }
 
 export async function assertNativeWithdrawalIntentInTransaction(client: PoolClient, scope: NativeWithdrawalScope, row: {
   id: string; user_id: string; admission_id: string; destination_id: string; payout_key: string;
 }, purpose: 'WRITE' | 'READ_ORIGINAL' = 'WRITE'): Promise<void> {
-  const sandbox = proof(scope).sandbox;
+  const sandbox = proof(scope).sandbox??proof(scope).demo;
   if (!sandbox) return assertNativeWithdrawalIntent(scope,row);
-  const p = localFinancialSandboxRegistration(sandbox);
+  const p = withdrawalRegistration(sandbox);
   const original = (await client.query(`SELECT i.id FROM zzsh_order.withdrawal_intent i
     JOIN zzsh_order.withdrawal_admission a ON a.id=i.admission_id AND a.user_id=i.user_id
     JOIN zzsh_order.withdrawal_destination d ON d.id=i.destination_id AND d.admission_id=a.id AND d.user_id=i.user_id
@@ -152,5 +170,5 @@ export async function assertNativeWithdrawalIntentInTransaction(client: PoolClie
       AND a.resource_oid=$7 AND a.resource_name=$8 AND a.resource_marker=$9 AND i.mode='LOCAL_CONTROLLED'`,
   [row.id,row.user_id,row.admission_id,row.destination_id,row.payout_key,p.registration.reference,p.registration.resource.resourceOid,p.registration.resource.database,p.registration.resource.marker])).rows[0];
   if (!original) throw unavailable('NATIVE_WITHDRAWAL_INTENT_NOT_ADMITTED');
-  if (purpose === 'WRITE') await assertLocalFinancialSandboxResource(client,sandbox);
+  if (purpose === 'WRITE') await assertRegisteredWithdrawalResource(client,sandbox);
 }

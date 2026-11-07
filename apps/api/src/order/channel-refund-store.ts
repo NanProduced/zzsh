@@ -3,8 +3,9 @@ import type { PoolClient } from "pg";
 import { recordAudit, SecurityApiError } from "../auth/security-core";
 import { API_V1_ERROR_CODES, validateIdempotencyKey } from "../contracts/api-v1";
 import { conflict, fingerprintRequest, invalid, notFound } from "../supply/supply-util";
-import { assertSyntheticChannelRequestCapability, assertSyntheticChannelRequestOrder, assertSandboxOriginalPayment, sandboxForChannelRequestCapability, wireAmountForCents } from "./channel-payment-store";
+import { assertSyntheticChannelRequestCapability, assertSyntheticChannelRequestOrder, assertSandboxOriginalPayment, sandboxForChannelRequestCapability, demoForChannelRequestCapability, wireAmountForCents } from "./channel-payment-store";
 import { localFinancialSandboxRegistration } from "../finance/local-financial-sandbox-resource";
+import { readEcsTestDemoRegistration } from "../finance/ecs-test-demo-resource";
 import { verifyPrestartRefundLiability } from "../finance/prestart-refund-liability";
 import type { PrestartPaymentBasis } from "./prestart-termination";
 import { lockRefundOrderNo } from "./payment-original-lock";
@@ -47,7 +48,7 @@ const view = (r: RefundRow): RefundIntent => ({
 });
 
 async function admitted(client: PoolClient, capability: unknown): Promise<void> {
-  if (await assertSyntheticChannelRequestCapability(client, capability) !== "CONTROLLED_TEST") {
+  if (await assertSyntheticChannelRequestCapability(client, capability, "REFUND") !== "CONTROLLED_TEST") {
     throw new SecurityApiError(503, API_V1_ERROR_CODES.EVIDENCE_UNAVAILABLE, "Controlled refund admission unavailable");
   }
   const row = (await client.query(`SELECT current_setting('transaction_isolation') AS isolation`)).rows[0];
@@ -128,7 +129,8 @@ export async function createNativeRefundIntent(client: PoolClient, input: {
   }
   await assertRefundBudget(client,basis,input.postingId,input.amountCents);
   const refundNo = refundNumber(basis,input.postingId,key);
-  const sandbox=sandboxForChannelRequestCapability(input.capability),reference=sandbox?localFinancialSandboxRegistration(sandbox).registration.reference:undefined;
+  const sandbox=sandboxForChannelRequestCapability(input.capability),demo=demoForChannelRequestCapability(input.capability),
+    reference=sandbox?localFinancialSandboxRegistration(sandbox).registration.reference:demo?readEcsTestDemoRegistration(demo).registration.reference:undefined;
   const row = (await client.query<RefundRow>(`INSERT INTO zzsh_order.channel_refund_intent
     (id,posting_id,order_id,payment_confirmation_id,renter_user_id,payment_source,merchant_identity_id,
      original_payment_trx_no,original_payment_order_no,responsibility_version_hash,refund_order_no,
@@ -190,9 +192,9 @@ export async function createSandboxPrestartRefundIntent(client:PoolClient,input:
 
 async function lockControlledRefundContext(client: PoolClient, capability: unknown, intentId: string): Promise<RefundRow> {
   const sql = `SELECT ${COLUMNS} FROM zzsh_order.channel_refund_intent WHERE id=$1 AND payment_source='CONTROLLED'`;
-  const sandbox = sandboxForChannelRequestCapability(capability);
-  const original = sandbox ? (await client.query<RefundRow>(sql, [intentId])).rows[0] : undefined;
-  if (sandbox) {
+  const sandbox = sandboxForChannelRequestCapability(capability), demo = demoForChannelRequestCapability(capability);
+  const original = sandbox || demo ? (await client.query<RefundRow>(sql, [intentId])).rows[0] : undefined;
+  if (sandbox || demo) {
     if (!original) throw notFound();
     assertSyntheticChannelRequestOrder(capability, original.order_id);
     assertSandboxOriginalPayment(capability, { source: original.payment_source, merchant_scope_id: original.merchant_identity_id });

@@ -53,16 +53,16 @@ async function lockedPolicy(c:PoolClient,expectedPolicyId:string,expectedRevisio
 }
 
 async function currentPolicy(c:PoolClient,binding?:LocalDistributionScope,resource?:DistributionManagementResource){
- if(resource){await assertDistributionManagementResource(c,resource);return readDistributionPolicyRowInTransaction(c,false,'NATIVE');}
- return readInvitationPolicyInTransaction(c,binding);
+ if(resource){const writeAssemblyReady=await assertDistributionManagementResource(c,resource);return{...await readDistributionPolicyRowInTransaction(c,false,'NATIVE'),writeAssemblyReady};}
+ return{...await readInvitationPolicyInTransaction(c,binding),writeAssemblyReady:false};
 }
 export async function readManagementPolicy(pool:Pool,actor:Actor,binding?:LocalDistributionScope,resource?:DistributionManagementResource){
  const result=await withTransaction(pool,async c=>{
  await c.query('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY');const access=await authorizePolicyRead(c,actor);
  if(!access)throw new SecurityApiError(403,'FORBIDDEN','Active administrator required');
  const result=await currentPolicy(c,binding,resource),scope=resource?'NATIVE':distributionPolicyScopeOf(binding);
- const body=result.knowledge==='KNOWN'?{knowledge:'KNOWN' as const,policy:{...result.policy,managed:managedDistributionPolicy(result.policy.config)},scope,writeAssemblyReady:!!resource}:
-  {knowledge:'UNKNOWN' as const,policy:null,reason:result.reason,scope,writeAssemblyReady:!!resource};
+ const body=result.knowledge==='KNOWN'?{knowledge:'KNOWN' as const,policy:{...result.policy,managed:managedDistributionPolicy(result.policy.config)},scope,writeAssemblyReady:result.writeAssemblyReady}:
+  {knowledge:'UNKNOWN' as const,policy:null,reason:result.reason,scope,writeAssemblyReady:result.writeAssemblyReady};
  return{body,key:accessKey(access,actor)};
  });await recheckRead(pool,actor,result.key,'policy');return result.body;
 }
@@ -87,8 +87,8 @@ export async function readManagementParticipants(pool:Pool,actor:Actor,query:{q:
  const managed=policy.knowledge==='KNOWN'?managedDistributionPolicy(policy.policy.config):null;
  const body={items:rows.map(r=>({userId:r.user_id,name:r.name??null,eligibility:r.eligibility,frozen:r.commission_frozen,revision:r.revision,
   levelCode:r.level_code,levelName:r.level_code?managed?.levelNames[r.level_code]??null:null,inviteCode:r.display_code??null,inviteCodeId:r.code_id??null})),
-  total:rows.length?String(rows[0].total):null,page:query.page,hasMore:rows.length===20,writeAssemblyReady:!!resource,
-  freezeWriteReady:!!resource&&marker&&readiness?.freeze_ready===true&&hasPermission(access,ADMIN_PERMISSION.distributionParticipantManage),
+  total:rows.length?String(rows[0].total):null,page:query.page,hasMore:rows.length===20,writeAssemblyReady:policy.writeAssemblyReady,
+  freezeWriteReady:policy.writeAssemblyReady&&marker&&readiness?.freeze_ready===true&&hasPermission(access,ADMIN_PERMISSION.distributionParticipantManage),
   policy:policy.knowledge==='KNOWN'?{versionId:policy.policy.versionId,revision:policy.policy.revision,schema:policy.policy.config.schema,levels:managed!.levels.map(l=>({code:l.code,name:managed!.levelNames[l.code]}))}:null};
  return{body,key:accessKey(access,actor)};
  });await recheckRead(pool,actor,result.key,'participants');return result.body;
@@ -99,7 +99,7 @@ export async function changeDistributionLevelPolicy(pool:Pool,actor:Actor,body:R
  if(typeof body.expectedPolicyId!=='string'||!idPattern.test(body.expectedPolicyId)||!body.command||typeof body.command!=='object'||Array.isArray(body.command))throw invalid('Exact policy and command required');
  const expectedRevision=revision(body.expectedRevision),why=reason(body.reason),command=parseLevelCommand(body.command as Record<string,unknown>),expectedPolicyId=body.expectedPolicyId;
  return withTransaction(pool,async c=>{
-  await authorize(c,actor,ADMIN_PERMISSION.distributionLevelManage,true);await assertDistributionManagementResource(c,resource);
+  await authorize(c,actor,ADMIN_PERMISSION.distributionLevelManage,true);await assertDistributionManagementResource(c,resource,'WRITE');
   return withIdempotency(c,{realm:'admin',principalId:actor.userId,operation:'distribution.level.change'},key,fingerprintRequest('distribution.level.change',undefined,body),
    ()=>authorize(c,actor,ADMIN_PERMISSION.distributionLevelManage,true).then(()=>{}),async()=>{
     const previous=await lockedPolicy(c,expectedPolicyId,expectedRevision),scope='NATIVE';
@@ -124,7 +124,7 @@ export async function changeParticipantLevel(pool:Pool,actor:Actor,userId:string
  if(typeof body.expectedPolicyId!=='string'||!idPattern.test(body.expectedPolicyId)||typeof body.levelCode!=='string')throw invalid('Exact policy and level required');
  const policyId=body.expectedPolicyId,policyRevision=revision(body.expectedPolicyRevision),participantRevision=revision(body.expectedParticipantRevision),levelCode=body.levelCode,why=reason(body.reason);
  return withTransaction(pool,async c=>{
-  await authorize(c,actor,ADMIN_PERMISSION.distributionParticipantManage,true);await assertDistributionManagementResource(c,resource);
+  await authorize(c,actor,ADMIN_PERMISSION.distributionParticipantManage,true);await assertDistributionManagementResource(c,resource,'WRITE');
   return withIdempotency(c,{realm:'admin',principalId:actor.userId,operation:'distribution.participant.level',resourceId:userId},key,fingerprintRequest('distribution.participant.level',userId,body),
    ()=>authorize(c,actor,ADMIN_PERMISSION.distributionParticipantManage,true).then(()=>{}),async()=>{
     const previous=await lockedPolicy(c,policyId,policyRevision);
@@ -147,7 +147,7 @@ export async function setParticipantCommissionFrozen(pool:Pool,actor:Actor,userI
  const expectedRevision=revision(body.expectedParticipantRevision),why=reason(body.reason);
  if(typeof body.frozen!=='boolean')throw invalid('Explicit frozen state required');const frozen=body.frozen;
  return withTransaction(pool,async c=>{
-  await authorize(c,actor,ADMIN_PERMISSION.distributionParticipantManage,true);await assertDistributionManagementResource(c,resource);
+  await authorize(c,actor,ADMIN_PERMISSION.distributionParticipantManage,true);await assertDistributionManagementResource(c,resource,'WRITE');
   return withIdempotency(c,{realm:'admin',principalId:actor.userId,operation:'distribution.participant.freeze',resourceId:userId},key,fingerprintRequest('distribution.participant.freeze',userId,body),
    ()=>authorize(c,actor,ADMIN_PERMISSION.distributionParticipantManage,true).then(()=>{}),async()=>{
     const available=(await c.query("SELECT has_column_privilege(current_user,'zzsh_order.distribution_participant','commission_frozen','UPDATE') AS allowed")).rows[0]?.allowed;
@@ -173,7 +173,7 @@ export async function rotateParticipantInviteCode(pool:Pool,actor:Actor,userId:s
  if(typeof body.expectedCodeId!=='string'||!idPattern.test(body.expectedCodeId)||typeof body.code!=='string'||!/^[A-Za-z0-9_-]{1,30}$/.test(body.code))throw invalid('Current and replacement invite codes required');
  const expectedCodeId=body.expectedCodeId,code=body.code,why=reason(body.reason);
  return withTransaction(pool,async c=>{
-  await authorize(c,actor,ADMIN_PERMISSION.distributionParticipantManage,true);await assertDistributionManagementResource(c,resource);
+  await authorize(c,actor,ADMIN_PERMISSION.distributionParticipantManage,true);await assertDistributionManagementResource(c,resource,'WRITE');
   return withIdempotency(c,{realm:'admin',principalId:actor.userId,operation:'distribution.participant.invite_code',resourceId:userId},key,fingerprintRequest('distribution.participant.invite_code',userId,body),
    ()=>authorize(c,actor,ADMIN_PERMISSION.distributionParticipantManage,true).then(()=>{}),async()=>{
     await c.query("SELECT pg_advisory_xact_lock(hashtextextended('zzsh:invitation-graph:v1',0))");

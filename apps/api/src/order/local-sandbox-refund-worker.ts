@@ -4,9 +4,9 @@ import { SecurityApiError, withTransaction } from "../auth/security-core";
 import { canonicalize } from "../supply/content-hash";
 import { conflict, invalid, notFound } from "../supply/supply-util";
 import { claimRefundIntent, lockRefundFunds, recordRefundTransportFailure, type RefundLease } from "./channel-refund-store";
-import { assertLocalSandboxRefundResource, captureLocalSandboxRefundTerminalFact, type LocalSandboxRefundOptions } from "./local-sandbox-refund-source";
+import { assertLocalSandboxRefundResource, captureLocalSandboxRefundTerminalFact, localRefundRegistration, type LocalSandboxRefundOptions } from "./local-sandbox-refund-source";
 import { consumeLocalSandboxRentalRefundTerminal } from "../finance/native-rental-refund-store";
-import { localFinancialSandboxRegistration } from "../finance/local-financial-sandbox-resource";
+import { demoFinanceScope } from "../finance/ecs-test-demo-resource";
 const sha=(value:string)=>createHash('sha256').update(value).digest('hex'),ID=/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 export class LocalSandboxRefundCommitUnknown extends SecurityApiError{
   constructor(readonly intentId:string,readonly phase:'CLAIM'|'OPERATION'|'RESULT'){super(503,'EVIDENCE_UNAVAILABLE','Local refund result is unknown; query its original refund number');}
@@ -20,7 +20,7 @@ async function confirmed<T>(pool:Pool,intentId:string,phase:LocalSandboxRefundCo
 }
 
 async function submitOriginalOperation(c:PoolClient,options:LocalSandboxRefundOptions,lease:RefundLease){
-  const r=await assertLocalSandboxRefundResource(c,options),p=localFinancialSandboxRegistration(options.sandbox),i=lease.intent;
+  const r=await assertLocalSandboxRefundResource(c,options),p=localRefundRegistration(options),i=lease.intent;
   await lockRefundFunds(c,'CONTROLLED',i.originalPayment.merchantIdentityId,i.originalPayment.transactionNo);
   await c.query('SELECT id FROM zzsh_auth_user."user" WHERE id=$1 FOR UPDATE',[i.renterUserId]);
   const row=(await c.query(`SELECT id,refund_order_no,original_payment_trx_no,amount_cents::text,currency,
@@ -39,7 +39,30 @@ async function submitOriginalOperation(c:PoolClient,options:LocalSandboxRefundOp
   await c.query(`INSERT INTO zzsh_order.local_controlled_refund_operation(id,intent_id,sandbox_registration_ref,scenario,
     refund_order_no,original_payment_trx_no,amount_cents,currency,final_canonical,final_digest,original_lease_version,original_lease_owner)
     VALUES($1,$2,$3,'TIMEOUT_THEN_SUCCEED',$4,$5,$6,'CNY',$7,$8,$9,$10)`,
-  [id,i.intentId,p.registration.reference,row.refund_order_no,row.original_payment_trx_no,row.amount_cents,canonical,sha(canonical),lease.version,lease.owner]);
+  [id,i.intentId,p.reference,row.refund_order_no,row.original_payment_trx_no,row.amount_cents,canonical,sha(canonical),lease.version,lease.owner]);
+}
+
+/** ECS demo: persist one simulated operation and consume its original liability atomically.
+ * It never calls a provider; after an uncertain commit only the original intent may be read. */
+export async function runEcsDemoRefundStep(pool:Pool,options:Extract<LocalSandboxRefundOptions,{demo:unknown}>,intentId:string,workerId='demo_refund_'+randomUUID().replaceAll('-','')){
+  if(typeof intentId!=='string'||!ID.test(intentId)||typeof workerId!=='string'||!ID.test(workerId))throw invalid();
+  const lease=await confirmed(pool,intentId,'CLAIM',async c=>{
+    await assertLocalSandboxRefundResource(c,options);
+    return claimRefundIntent(c,{intentId,owner:workerId,ttlSeconds:30,requestId:workerId,capability:options.capability});
+  });
+  if(!lease)return{action:'NONE' as const,scope:demoFinanceScope(options.demo),bankArrival:'UNKNOWN' as const};
+  return confirmed(pool,intentId,'RESULT',async c=>{
+    await assertLocalSandboxRefundResource(c,options);
+    if(lease.operation==='SUBMIT')await submitOriginalOperation(c,options,lease);
+    const existing=(await c.query('SELECT id FROM zzsh_order.local_controlled_refund_operation WHERE intent_id=$1',[intentId])).rows[0];
+    if(!existing){
+      const observation=await recordRefundTransportFailure(c,{intentId,owner:lease.owner,version:lease.version,reason:'LOCAL_FAILURE',requestId:workerId,capability:options.capability});
+      return{action:'QUERY' as const,scope:demoFinanceScope(options.demo),observation,bankArrival:'UNKNOWN' as const};
+    }
+    const fact=await captureLocalSandboxRefundTerminalFact(c,options,{intentId,owner:lease.owner,version:lease.version});
+    const terminal=await consumeLocalSandboxRentalRefundTerminal(c,{fact,requestId:workerId});
+    return{action:lease.operation,scope:demoFinanceScope(options.demo),terminal,bankArrival:'UNKNOWN' as const};
+  });
 }
 
 /** One bounded local step: the first ACK is lost after durable fake-channel truth. Only QUERY of

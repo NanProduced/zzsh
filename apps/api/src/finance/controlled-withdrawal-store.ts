@@ -1,6 +1,6 @@
-import {assertNativeWithdrawalResource,nativeWithdrawalBindings,nativeWithdrawalSandbox,assertNativeWithdrawalDestinationInTransaction,assertNativeWithdrawalIntent,assertNativeWithdrawalIntentInTransaction,type NativeWithdrawalScope} from './native-withdrawal-resource';
-import {localFinancialSandboxRegistration} from './local-financial-sandbox-resource';
+import {assertNativeWithdrawalResource,nativeWithdrawalBindings,nativeWithdrawalSandbox,withdrawalRegistration,assertNativeWithdrawalDestinationInTransaction,assertNativeWithdrawalIntent,assertNativeWithdrawalIntentInTransaction,type NativeWithdrawalScope} from './native-withdrawal-resource';
 import {assertNoReferralRecoveryForWithdrawal} from './distribution-recovery-gate';
+import {assertDemoWithdrawalIdentity} from './demo-withdrawal-identity';
 import {readNativeReservationStatus} from './native-wallet-projection';
 import type { Pool, PoolClient } from 'pg';
 import {createHash,randomUUID} from 'node:crypto';
@@ -34,10 +34,11 @@ async function quoteInTransaction(client:PoolClient,actor:Actor,body:Record<stri
  if(scope)await assertNativeWithdrawalDestinationInTransaction(client,scope,{userId:actor.userId,admissionId:destination.admission_id,destinationId:destination.id});
  const clock=(await client.query(`SELECT date_trunc('milliseconds',clock_timestamp()) AS now`)).rows[0].now,now=new Date(clock).toISOString();
  const sandbox=scope?nativeWithdrawalSandbox(scope):undefined;
+ if(sandbox&&sandbox.kind!=='REGISTERED_LOCAL_FINANCIAL_SANDBOX')await assertDemoWithdrawalIdentity(client,actor.userId,sandbox);
  const expired=sandbox&&(destination.expires_at===Infinity||destination.expires_at==='infinity')?false:clock>=destination.expires_at;
  if(!destination.cohort_active||clock<destination.admitted_at||expired||Number(destination.resource_oid)!==resource.oid||destination.resource_name!==resource.name||destination.resource_marker!==resource.marker)throw unavailable('CONTROLLED_LOCAL_ADMISSION_UNAVAILABLE');
  if(sandbox){const until=new Date(destination.valid_until).getTime();if(!Number.isFinite(until))throw unavailable('CONTROLLED_LOCAL_TARGET_UNAVAILABLE');
-  if(until<=new Date(clock).getTime())throw conflict('Local target declaration expired; declare the current masked binding for a new quote');}
+  if(until<=new Date(clock).getTime())throw conflict('提现目标已过期，请重新选择银行卡并确认金额');}
  const w=await readPersonalWallet(client,actor.userId),policy=ownerLocalWithdrawalPolicy(destination.kind,[actor.userId]);
  const rows=(await client.query('SELECT state,accepted_at FROM zzsh_order.withdrawal_intent WHERE user_id=$1',[actor.userId])).rows;
  const quote=quoteControlledWithdrawal(body,policy,{userId:actor.userId,active:true,localAdmissionEligible:true,coverageKnown:w.coverage.knowledge==='KNOWN',availableCents:w.buckets.available.amountCents,ledgerRevision:w.ledgerRevision,now,destination:{id:destination.id,userId:destination.user_id,mode:destination.mode,kind:destination.kind,active:destination.active},usage:countLocalWithdrawalQuota(rows.map(r=>({state:r.state,acceptedAt:new Date(r.accepted_at).toISOString()})),policy,now)});
@@ -57,7 +58,7 @@ async function appendMoney(client:PoolClient,row:Row,plan:WithdrawalLedgerPlan){
 }
 export async function createControlledWithdrawal(pool:Pool,actor:Actor,body:Record<string,unknown>,key:string,scope?:NativeWithdrawalScope){return withTransaction(pool,async client=>{
  await assertControlledWithdrawalResource(client,scope);await assertUserContextInTransaction(client,actor);
- const sandbox=scope?nativeWithdrawalSandbox(scope):undefined,registration=sandbox?localFinancialSandboxRegistration(sandbox).registration:undefined;
+ const sandbox=scope?nativeWithdrawalSandbox(scope):undefined,registration=sandbox?withdrawalRegistration(sandbox).registration:undefined;
  if(scope&&!sandbox)nativeWithdrawalBindings(scope,actor.userId);
  const result=await withIdempotency(client,{realm:'user',principalId:actor.userId,operation:'controlled.withdrawal.reserve'},key,fingerprintRequest('controlled.withdrawal.reserve',undefined,body),()=>assertUserContextInTransaction(client,actor),async()=>{
   const {quote,destination}=await quoteInTransaction(client,actor,body,scope);if(key!==localWithdrawalRequestKey(destination.admission_id,String(destination.cohort_revision),destination.id,String(destination.revision)))throw conflict('Use the original server-declared local request key');
@@ -80,7 +81,7 @@ export async function isUnadmittedControlledWithdrawalRead(client:PoolClient,err
 }
 export async function readControlledWithdrawals(pool:Pool,actor:Actor,id?:string,scope?:NativeWithdrawalScope){return withTransaction(pool,client=>readControlledWithdrawalsInTransaction(client,actor,id,scope));}
 export async function readControlledWithdrawalsInTransaction(client:PoolClient,actor:Actor,id?:string,scope?:NativeWithdrawalScope,page?:ControlledWithdrawalReadPage){
- const sandbox=scope?nativeWithdrawalSandbox(scope):undefined,reference=sandbox?localFinancialSandboxRegistration(sandbox).registration.reference:undefined;
+ const sandbox=scope?nativeWithdrawalSandbox(scope):undefined,reference=sandbox?withdrawalRegistration(sandbox).registration.reference:undefined;
  const resource=await assertControlledWithdrawalResource(client,scope,sandbox?'READ_ORIGINAL':'WRITE');await assertUserContextInTransaction(client,actor,sandbox?'READ':'WRITE');
  const bindings=scope&&!sandbox?nativeWithdrawalBindings(scope,actor.userId):null,intentIds=bindings?.map(b=>b.intentId),admissionIds=bindings?.map(b=>b.admissionId),destinationIds=bindings?.map(b=>b.destinationId);
  if(id){const row=(await client.query('SELECT * FROM zzsh_order.withdrawal_intent WHERE id=$1 AND user_id=$2',[id,actor.userId])).rows[0];if(!row)throw notFound();if(scope)await checkNativeIntent(client,scope,row,'READ_ORIGINAL');return{scope:'LOCAL_CONTROLLED',intent:publicIntent(row)};}

@@ -4,7 +4,7 @@ import { recordAudit, SecurityApiError } from "../auth/security-core";
 import { assertJoinpayRefundTerminalFact, type NativeRefundTerminalFact } from "../order/joinpay-refund-source";
 import { verifyPrestartRefundLiability } from "./prestart-refund-liability";
 import type { PrestartPaymentBasis } from "../order/prestart-termination";
-import { assertLocalSandboxRefundTerminalFact, persistLocalSandboxRefundTerminalFact } from "../order/local-sandbox-refund-source";
+import { assertLocalSandboxRefundTerminalFact, persistLocalSandboxRefundTerminalFact, isEcsDemoRefundTerminalFact } from "../order/local-sandbox-refund-source";
 
 const ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,179}$/;
 const SHA = /^[a-f0-9]{64}$/;
@@ -51,7 +51,7 @@ type IntentRow = {
 const columns = `id,posting_id,order_id,payment_confirmation_id,renter_user_id,merchant_identity_id,
   original_payment_trx_no,original_payment_order_no,responsibility_version_hash,refund_order_no,
   amount_cents::text,currency,payment_source,evidence_level,state,budget_disposition,requires_review,
-  terminal_evidence_id,terminal_root_id,terminal_event_id,provider_refund_trx_no,completed_at::text,revision::text,
+  COALESCE(terminal_evidence_id,to_jsonb(channel_refund_intent)->>'demo_terminal_evidence_id') AS terminal_evidence_id,terminal_root_id,terminal_event_id,provider_refund_trx_no,completed_at::text,revision::text,
   basis_kind,liability_root_id,liability_event_id`;
 
 function assertBinding(row: IntentRow, fact: NativeRefundTerminalFact, local: boolean) {
@@ -216,8 +216,9 @@ async function consumeRentalRefundTerminal(client:PoolClient,input:{fact:NativeR
       VALUES($1,$2,$3,$4,$5,$6,$7,$8::jsonb)`,
     [line.id, plan.eventId, line.line, line.account, line.debit, line.credit, line.subject, JSON.stringify(line.details)]);
   }
+  const evidenceColumn=local&&isEcsDemoRefundTerminalFact(fact)?'demo_terminal_evidence_id':'terminal_evidence_id';
   const updated = await client.query(`UPDATE zzsh_order.channel_refund_intent SET state=$2,budget_disposition=$3,
-    terminal_evidence_id=$4,terminal_root_id=$5,terminal_event_id=$6,provider_refund_trx_no=$7,completed_at=$8,revision=revision+1
+    ${evidenceColumn}=$4,terminal_root_id=$5,terminal_event_id=$6,provider_refund_trx_no=$7,completed_at=$8,revision=revision+1
     WHERE id=$1 AND revision=$9 AND budget_disposition='ALLOCATED' AND NOT requires_review`,
   [row.id, succeeded ? "SUCCEEDED" : "FAILED", succeeded ? "CONSUMED" : "RELEASED", fact.evidenceId,
     succeeded ? plan.rootId : null, succeeded ? plan.eventId : null, fact.refundTransactionNo, fact.completedAt, row.revision]);

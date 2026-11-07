@@ -4,10 +4,11 @@ import {type AppConfig,ConfigurationError} from '../config/config';
 import {REGRESSION_DATABASE,REGRESSION_MARKER,REGRESSION_MIGRATION_USER,REGRESSION_RUNTIME_USER} from '../config/test-resource';
 import {assertBusinessRuntimeIdentity} from '../database/business';
 import {SecurityApiError} from '../auth/security-core';
-import {assertLocalNativeDistributionReadOnlyAssembly,assertRegisteredLocalNativeDistributionReadBinding,assertRegisteredLocalNativeDistributionReadResource,isRegisteredLocalNativeDistributionReadScope,type LocalDistributionScope,type RegisteredLocalNativeDistributionBinding} from './distribution-policy-store';
+import {assertDemoNativeDistributionBinding,assertLocalNativeDistributionReadOnlyAssembly,assertRegisteredLocalNativeDistributionReadBinding,assertRegisteredLocalNativeDistributionReadResource,isRegisteredLocalNativeDistributionReadScope,type LocalDistributionScope,type RegisteredLocalNativeDistributionBinding} from './distribution-policy-store';
+import {assertEcsTestDemoAssembly,assertEcsTestDemoResource,type DemoFinanceResource} from './ecs-test-demo-resource';
 
-export type DistributionManagementResource=Readonly<{kind:'PROVISIONED_DISTRIBUTION_MANAGEMENT'|'REGISTERED_R06_DISTRIBUTION_MANAGEMENT_PREVIEW'}>;
-type Proof={kind:'PROVISIONED';database:string;runtimeUser:string}|{kind:'R06_PREVIEW';readScope:LocalDistributionScope};
+export type DistributionManagementResource=Readonly<{kind:'PROVISIONED_DISTRIBUTION_MANAGEMENT'|'REGISTERED_R06_DISTRIBUTION_MANAGEMENT_PREVIEW'|'DEMO_DISTRIBUTION_MANAGEMENT'}>;
+type Proof={kind:'PROVISIONED';database:string;runtimeUser:string}|{kind:'R06_PREVIEW';readScope:LocalDistributionScope}|{kind:'DEMO';readScope:LocalDistributionScope;demo:DemoFinanceResource};
 const resources=new WeakMap<DistributionManagementResource,Proof>();
 type Origins={apiOrigin:string;userOrigin:string;adminOrigin:string;secureCookies:boolean};
 type R06SwapProof={bytes:Uint8Array;sha256:string};
@@ -35,6 +36,13 @@ export function createProvisionedDistributionManagementResource(config:AppConfig
  resources.set(value,{kind:'PROVISIONED',database:config.database.name,runtimeUser:config.database.runtimeUser});return value;
 }
 
+/** The management resource must share the exact registered demo and NATIVE policy scope. */
+export function createDemoDistributionManagementResource(demo:DemoFinanceResource,readScope:LocalDistributionScope):DistributionManagementResource{
+ assertDemoNativeDistributionBinding(readScope,demo);
+ const value=Object.freeze({kind:'DEMO_DISTRIBUTION_MANAGEMENT' as const});
+ resources.set(value,{kind:'DEMO',readScope,demo});return value;
+}
+
 /** Explicit local preview only. The binding must come from the verified R06 registry + swap receipt. */
 export function createRegisteredR06DistributionManagementPreview(input:{enabled?:boolean;config:AppConfig;binding:RegisteredLocalNativeDistributionBinding;readScope:LocalDistributionScope;origins:Origins;swapProof:R06SwapProof}):DistributionManagementResource|undefined{
  if(input.enabled===undefined||input.enabled===false)return undefined;
@@ -59,7 +67,7 @@ export function createRegisteredR06DistributionManagementPreview(input:{enabled?
 export function assertDistributionManagementAssembly(resource:DistributionManagementResource|undefined,readScope:LocalDistributionScope|undefined,options:Origins&{
  testOperationsEnabled:boolean;distributionScope?:LocalDistributionScope;settlementRecordingEnabled?:boolean;distributionEarnings?:unknown;
  joinpayCollection?:unknown;joinpayRefund?:unknown;joinpayWithdrawal?:unknown;joinpayAccountRead?:unknown;joinpayAccountObservation?:unknown;
- localControlledPayments?:unknown;localFinancialSandbox?:unknown;nativeWithdrawalScope?:unknown;distributionDue?:unknown;
+ localControlledPayments?:unknown;localFinancialSandbox?:unknown;nativeWithdrawalScope?:unknown;distributionDue?:unknown;ecsTestDemo?:{demo:DemoFinanceResource};
 }):void{
  if(resource===undefined)return;
  const proof=resources.get(resource);if(!proof)throw new ConfigurationError('DISTRIBUTION_MANAGEMENT_ASSEMBLY_INVALID');
@@ -67,15 +75,23 @@ export function assertDistributionManagementAssembly(resource:DistributionManage
   if(isRegisteredLocalNativeDistributionReadScope(readScope))throw new ConfigurationError('R06_DISTRIBUTION_MANAGEMENT_PREVIEW_REQUIRED');
   return;
  }
+ if(proof.kind==='DEMO'){
+  if(readScope!==proof.readScope||options.distributionScope!==proof.readScope||options.ecsTestDemo?.demo!==proof.demo
+    ||options.testOperationsEnabled||options.localControlledPayments||options.localFinancialSandbox)
+   throw new ConfigurationError('DEMO_DISTRIBUTION_MANAGEMENT_ASSEMBLY_MISMATCH');
+  assertDemoNativeDistributionBinding(readScope,proof.demo);assertEcsTestDemoAssembly(proof.demo,options);return;
+ }
  if(process.env.NODE_ENV==='production'||readScope!==proof.readScope||options.apiOrigin!=='http://127.0.0.1:4232'
   ||options.userOrigin!=='http://127.0.0.1:4230'||options.adminOrigin!=='http://127.0.0.1:4231'||options.secureCookies!==false)
   throw new ConfigurationError('R06_DISTRIBUTION_MANAGEMENT_PREVIEW_ASSEMBLY_INVALID');
  assertLocalNativeDistributionReadOnlyAssembly(readScope,options.distributionScope,options);
 }
-export async function assertDistributionManagementResource(c:PoolClient,resource?:DistributionManagementResource){
+export async function assertDistributionManagementResource(c:PoolClient,resource?:DistributionManagementResource,mode:'READ_ORIGINAL'|'WRITE'='READ_ORIGINAL'){
  const proof=resource&&resources.get(resource);
  if(!proof)throw new SecurityApiError(503,'EVIDENCE_UNAVAILABLE','Distribution management write resource is not assembled');
- if(proof.kind==='R06_PREVIEW')await assertRegisteredLocalNativeDistributionReadResource(c,proof.readScope);
+ let active=true;
+ if(proof.kind==='DEMO')active=(await assertEcsTestDemoResource(c,proof.demo,mode)).active;
+ else if(proof.kind==='R06_PREVIEW')await assertRegisteredLocalNativeDistributionReadResource(c,proof.readScope);
  else await assertBusinessRuntimeIdentity(c,{database:{name:proof.database,user:proof.runtimeUser,runtimeUser:proof.runtimeUser}});
  const row=(await c.query("SELECT to_regprocedure('zzsh_order.distribution_management_contract_version()') IS NOT NULL AS ready")).rows[0];
  if(row?.ready!==true||(await c.query('SELECT zzsh_order.distribution_management_contract_version() AS version')).rows[0]?.version!==1)
@@ -89,4 +105,5 @@ export async function assertDistributionManagementResource(c:PoolClient,resource
   (SELECT bool_and(has_column_privilege(current_user,'zzsh_order.distribution_invite_code',name,'INSERT')) FROM unnest(ARRAY['id','user_id','display_code','source_type','source_system','source_entity','source_id','source_digest']) name) AS code_insert,
   has_column_privilege(current_user,'zzsh_order.distribution_invite_code','active','UPDATE') AS code_update`)).rows[0];
  if(!privileges||Object.values(privileges).some(value=>value!==true))throw new SecurityApiError(503,'EVIDENCE_UNAVAILABLE','Distribution management runtime grants are incomplete');
+ return active;
 }

@@ -647,7 +647,7 @@ export async function handleAdminBff(request: NodeRequest, response: NodeRespons
   }
   if (path === "/orders" || path.startsWith("/orders/")) {
     const settlementPath = /^\/orders\/[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\/(openings|settlements|settlement-preview|settlement)(\/|$)/.test(path);
-    const legacyContinuationPath = /^\/orders\/legacy\/legacy_order_[a-f0-9]{40}\/continuation\/(?:preview|propose|confirm|reject|hold|release|confiscate|duties\/[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\/(?:mature|void|owner-credit|commission-credit|refund-case))$/.test(path);
+    const legacyContinuationPath = /^\/orders\/legacy\/legacy_order_[a-f0-9]{40}\/continuation\/(?:preview|propose|confirm|reject|hold|release|confiscate|duties\/[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\/(?:mature|void|owner-credit|commission-credit|refund-case|demo-refund))$/.test(path);
     const prestartReviewPath=/^\/orders\/[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\/prestart-termination\/[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\/review$/.test(path);
     const manualClosePath=/^\/orders\/[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\/manual-close$/.test(path);
     const supportCancelPath=/^\/orders\/[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\/support-cancel$/.test(path);

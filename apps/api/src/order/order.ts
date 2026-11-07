@@ -49,6 +49,8 @@ export type OrderRow = {
   title: string;
   holdUntil: string;
   paidAt: string | null;
+  /** Only the bound APPLIED confirmation; absent is not evidence of a provider payment. */
+  paymentSource?: string | null;
   dispatchState: "WAITING" | "ASSIGNED" | null;
   dispatchWaitReason: string | null;
   assignedAt: string | null;
@@ -77,6 +79,7 @@ export const ORDER_FIELDS = `
   o.currency, o.term_seconds::text AS "termSeconds", o.quote_snapshot AS "quoteSnapshot", o.title,
   to_char(o.hold_until AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "holdUntil",
   to_char(o.paid_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "paidAt",
+  pay_fact.source AS "paymentSource",
   g.provision_state AS "dispatchState", g.wait_reason AS "dispatchWaitReason",
   g.team_state AS "teamState",
   to_jsonb(g)->>'first_response_at' AS "firstResponseAt",
@@ -93,6 +96,8 @@ export const ORDER_FIELDS = `
   (o.status = 'PENDING_PAYMENT' AND o.hold_until <= clock_timestamp()) AS "expiredAwaitingCancel",
   owner_u.name AS "ownerName", renter_u.name AS "renterName"`;
 export const ORDER_FROM = `FROM zzsh_order.rental_order o
+  LEFT JOIN zzsh_order.payment_confirmation pay_fact ON pay_fact.id=o.paid_confirmation_id
+    AND pay_fact.order_id=o.id AND pay_fact.disposition='APPLIED' AND pay_fact.currency=o.currency
   LEFT JOIN zzsh_order.im_order_group g ON g.order_id=o.id
   LEFT JOIN zzsh_order.im_order_activity act ON act.order_id=o.id
   JOIN zzsh_auth_user."user" owner_u ON owner_u.id = o.owner_user_id
@@ -171,6 +176,10 @@ export function projectOrder(
     paymentOpen: row.status === ORDER_STATUS.PENDING_PAYMENT && !expired,
     cancelOpen: row.status === ORDER_STATUS.PENDING_PAYMENT,
     ...(orderHasPaidState(row.status, row.cancelReason) ? { paidAt: row.paidAt } : {}),
+    ...(orderHasPaidState(row.status, row.cancelReason) ? { paymentProvenance: {
+      source: row.paymentSource === 'CONTROLLED' ? 'SIMULATED' : row.paymentSource === 'JOINPAY' ? 'JOINPAY' : 'UNKNOWN',
+      channelArrival: 'UNKNOWN',
+    } } : {}),
     ...(row.dispatchState ? { fulfillmentAssignment: { state: row.dispatchState, waitingReason: row.dispatchWaitReason,
       assignedAt: row.assignedAt, teamReady: row.teamState === "READY", teamState: row.teamState } } : {}),
     ...(row.status === ORDER_STATUS.CANCELLED

@@ -10,9 +10,10 @@ import { createFormalRefundIntent, createNativeRefundIntent, createSandboxPresta
 import { createAbnormalFormalRefundIntent } from "./joinpay-abnormal-refund-store";
 import { createPrestartFormalRefundIntent } from "./prestart-refund-store";
 import { describeRefundProfile, type BoundRefundProfile, type FormalRefundAdmission } from "./joinpay-refund-profile";
-import type {LocalSandboxRefundOptions} from './local-sandbox-refund-source';
-import {sandboxForChannelRequestCapability} from './channel-payment-store';
-import {assertLocalFinancialSandboxResource,localFinancialSandboxRegistration} from '../finance/local-financial-sandbox-resource';
+import {localRefundRegistration,type LocalSandboxRefundOptions} from './local-sandbox-refund-source';
+import {sandboxForChannelRequestCapability,demoForChannelRequestCapability} from './channel-payment-store';
+import {assertLocalFinancialSandboxResource} from '../finance/local-financial-sandbox-resource';
+import {assertEcsTestDemoResource} from '../finance/ecs-test-demo-resource';
 
 const ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const CENTS = /^[1-9][0-9]{0,15}$/;
@@ -45,8 +46,9 @@ export async function authorizeAdminNativeRefund(client: PoolClient, actor: Admi
 
 function localExecution(execution:AdminNativeRefundExecution){
   const local=execution.localSandbox;
-  const sandbox=local?sandboxForChannelRequestCapability(local.capability):undefined;
-  if(local&&(!sandbox||execution.admission||execution.initialProfile||sandbox!==local.sandbox))throw invalid('Local and formal refund assemblies are exclusive');
+  const matched=!local?true:'sandbox' in local?sandboxForChannelRequestCapability(local.capability)===local.sandbox
+    :demoForChannelRequestCapability(local.capability)===local.demo;
+  if(local&&(!matched||execution.admission||execution.initialProfile))throw invalid('Test and formal refund assemblies are exclusive');
   return local;
 }
 async function selectPosting(client: PoolClient, orderId: string, postingId: string | undefined,source:'JOINPAY'|'CONTROLLED'='JOINPAY'): Promise<Posting> {
@@ -150,6 +152,7 @@ type RefundRow = { id: string; posting_id: string | null; refund_order_no: strin
 /** 未开租核准后的全额原款分配/失败释放重提；授权和原键恢复先于新渠道资格。 */
 export async function requestAdminPrestartNativeRefund(pool:Pool,execution:AdminNativeRefundExecution,input:{actor:AdminNativeRefundActor;orderId:string;terminationId:string;idempotencyKey:unknown;requestId:string}){
  const local=localExecution(execution);
+ if(local&&'demo' in local)throw new SecurityApiError(503,'EVIDENCE_UNAVAILABLE','Test prestart refund is not available');
  if(!ID.test(input.orderId)||!ID.test(input.terminationId)||!ID.test(input.requestId))throw invalid();
  const key=validateIdempotencyKey(input.idempotencyKey);let completed=false;
  try{return await withTransaction(pool,async c=>{
@@ -173,7 +176,8 @@ export async function readAdminNativeRefunds(pool: Pool, input: { actor: AdminNa
   return withTransaction(pool, async client => {
     await client.query('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY');
     await authorizeAdminNativeRefund(client, input.actor, input.orderId,true);
-    if(local)await assertLocalFinancialSandboxResource(client,local.sandbox,'READ_ORIGINAL');
+    if(local){if('sandbox' in local)await assertLocalFinancialSandboxResource(client,local.sandbox,'READ_ORIGINAL');
+      else await assertEcsTestDemoResource(client,local.demo,'READ_ORIGINAL');}
     const rows = (await client.query<RefundRow>(`SELECT i.id,i.posting_id,i.refund_order_no,i.amount_cents::text,i.state,i.budget_disposition,
         i.requires_review,i.provider_refund_trx_no,i.completed_at::text,
         (SELECT p.renter_refund_cents::text FROM zzsh_order.settlement_posting p WHERE p.id=i.posting_id) AS frozen_cents,
@@ -185,7 +189,7 @@ export async function readAdminNativeRefunds(pool: Pool, input: { actor: AdminNa
       LEFT JOIN LATERAL (SELECT x.event,${local?"'CONTROLLED_TEST' AS evidence_level":'x.evidence_level'},x.created_at FROM zzsh_order.${local?'channel_refund_observation':'joinpay_refund_observation'} x
         WHERE x.intent_id=i.id ORDER BY x.created_at DESC,x.id DESC LIMIT 1) o ON true
       WHERE i.order_id=$1 AND i.payment_source='${source}'${local?' AND i.sandbox_registration_ref=$2':''}
-      ORDER BY i.created_at DESC,i.id DESC LIMIT 100`, [input.orderId,...(local?[localFinancialSandboxRegistration(local.sandbox).registration.reference]:[])])).rows;
+      ORDER BY i.created_at DESC,i.id DESC LIMIT 100`, [input.orderId,...(local?[localRefundRegistration(local).reference]:[])])).rows;
     return { contractVersion: "admin-native-refunds.v1" as const, orderId: input.orderId,...(local?{dataOrigin:'LOCAL_CONTROLLED' as const,formalRefund:false}:{}),
       items: rows.map(row => {
         const frozen = row.frozen_cents === null || !/^(0|[1-9][0-9]*)$/.test(row.frozen_cents) ? null : row.frozen_cents;

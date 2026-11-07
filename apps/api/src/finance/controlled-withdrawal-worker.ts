@@ -1,5 +1,4 @@
-import {assertNativeWithdrawalIntentInTransaction,nativeWithdrawalSandbox,type NativeWithdrawalScope} from './native-withdrawal-resource';
-import {localFinancialSandboxRegistration} from './local-financial-sandbox-resource';
+import {assertNativeWithdrawalIntentInTransaction,nativeWithdrawalSandbox,withdrawalRegistration,type NativeWithdrawalScope} from './native-withdrawal-resource';
 import type {Pool} from 'pg';import {createHash,randomBytes} from 'node:crypto';import {withTransaction} from '../auth/security-core';import {canonicalize} from '../supply/content-hash';import {conflict,notFound} from '../supply/supply-util';
 import {assertControlledWithdrawalResource,claimWithdrawal,applyWithdrawalResult} from './controlled-withdrawal-store';import type {ControlledPayoutEvidence} from './controlled-withdrawal';
 import {invalid} from '../supply/supply-util';
@@ -27,7 +26,7 @@ export async function runControlledWithdrawalStep(pool:Pool,id:string,scope?:Nat
 /** One host-driven registered-resource batch, not a public outcome endpoint or a startup timer. */
 export async function runRegisteredControlledWithdrawalBatch(pool:Pool,scope:NativeWithdrawalScope,limit:number){
  const sandbox=nativeWithdrawalSandbox(scope);if(!sandbox||!Number.isSafeInteger(limit)||limit<1||limit>10)throw invalid('Bounded registered local withdrawal batch required');
- const reference=localFinancialSandboxRegistration(sandbox).registration.reference;
+ const reference=withdrawalRegistration(sandbox).registration.reference;
  const ids=await withTransaction(pool,async c=>{await assertControlledWithdrawalResource(c,scope);
   return(await c.query<{id:string}>(`SELECT id FROM zzsh_order.withdrawal_intent WHERE sandbox_registration_ref=$1
     AND state IN('RESERVED','SUBMITTING','PROCESSING','UNKNOWN') AND(lease_until IS NULL OR lease_until<=clock_timestamp())

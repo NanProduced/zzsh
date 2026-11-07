@@ -7,6 +7,7 @@ import { ADMIN_FINANCE_OBSERVATION_SQL, adminFinanceLedgerSql, displayName, pars
 import { readWalletHistoricalPurposes } from './personal-wallet-purpose';
 import { loadFinanceOrderFacts } from './admin-finance-order-read';
 import { enrichHistoricalObservations } from './legacy-observation-display';
+import { readDemoLedgerOrigins } from './demo-ledger-provenance';
 
 type Source = 'ALL' | 'NATIVE' | 'LEGACY';
 type ChannelKind = 'ALL' | 'PAYMENT' | 'REFUND' | 'WITHDRAWAL';
@@ -126,6 +127,7 @@ export async function readAdminBalanceActivity(client: PoolClient, q: ActivityQu
   const historyIds = page.rows.filter(row => row.family === 'history').map(row => row.id);
   const ledgerSql = adminFinanceLedgerSql(true, true).replace(/\s+ORDER BY l\.id COLLATE "C" LIMIT \$1\s*$/, ' WHERE l.id=ANY($1::text[])');
   const ledgerRows = ledgerIds.length ? (await client.query(ledgerSql, [ledgerIds])).rows as Raw[] : [];
+  const demoOrigins=await readDemoLedgerOrigins(client,ledgerRows.map(row=>row.id));
   const historicalRows = await historyRows(client, historyIds);
   const byUser = new Map<string,Raw[]>();
   for (const row of historicalRows) {
@@ -145,7 +147,9 @@ export async function readAdminBalanceActivity(client: PoolClient, q: ActivityQu
     const entry = projectAdminFinanceLedger(row);
     const commission = row.source_kind === 'NATIVE_RENTAL_REFERRAL' || row.source_kind === 'LEGACY_CONTINUATION_DUTY' && row.beneficiary_role === 'COMMISSION';
     const label = commission ? entry.direction === 'OUT' ? '分销收益冲回' : '分销收入' : ['withdrawal_intent','joinpay_withdrawal_intent'].includes(row.source_entity) ? (['RELEASE','JOINPAY_WITHDRAWAL_RELEASED'].includes(row.event_kind) ? '提现退回' : '提现扣除') : row.source_kind === 'LEGACY_CONTINUATION_DUTY' && row.beneficiary_role === 'DEPOSIT_COMPENSATION' ? '押金补偿' : row.posting_id || row.source_kind === 'LEGACY_CONTINUATION_DUTY' && row.beneficiary_role === 'OWNER_CREDIT' ? '号主租赁收入' : '余额变动';
-    mapped.set(`ledger:${row.id}`, { id:entry.id, source:'NATIVE', subjectId:entry.subjectId, subjectName:entry.subjectName, label, amountCents:entry.deltaCents, occurredAt:entry.occurredAt, documentRef:entry.documentRef });
+    const dataOrigin=demoOrigins.get(row.id);
+    mapped.set(`ledger:${row.id}`, { id:entry.id, source:'NATIVE', subjectId:entry.subjectId, subjectName:entry.subjectName, label, amountCents:entry.deltaCents, occurredAt:entry.occurredAt, documentRef:entry.documentRef,
+      ...(dataOrigin?{dataOrigin,bankArrival:'UNKNOWN' as const}:{}) });
   }
   for (const row of historicalRows) {
     const entry = projectAdminFinanceObservation(row), evidence = purposes.get(entry.id), verified = evidence?.amountSemantics === 'BALANCE_RECORD';
@@ -159,6 +163,17 @@ export async function readAdminChannelActivity(client: PoolClient, q: ActivityQu
   if (q.source==='ALL') throw invalid('Channel source must be selected');
   if (exact && !q.q) throw invalid('A document lookup reference is required');
   const parts: string[] = [];
+  const demoState = q.source === 'NATIVE'
+    ? (await client.query<{ exists:boolean; readable:boolean; refundReady:boolean; legacyRefundReady:boolean; withdrawalReady:boolean }>(`SELECT to_regclass('zzsh_order.ecs_test_demo_finance_registration') IS NOT NULL AS exists,
+      COALESCE(has_table_privilege(to_regclass('zzsh_order.ecs_test_demo_finance_registration'),'SELECT'),false) AS readable,
+      COALESCE(has_table_privilege(to_regclass('zzsh_order.local_controlled_refund_operation'),'SELECT'),false) AS "refundReady",
+      COALESCE(has_table_privilege(to_regclass('zzsh_order.ecs_demo_legacy_refund'),'SELECT'),false) AS "legacyRefundReady",
+      COALESCE(has_table_privilege(to_regclass('zzsh_order.controlled_payout_operation'),'SELECT'),false)
+        AND COALESCE(has_table_privilege(to_regclass('zzsh_order.withdrawal_intent'),'SELECT'),false) AS "withdrawalReady"`)).rows[0] : undefined;
+  if (demoState?.exists && !demoState.readable) throw new SecurityApiError(503,'EVIDENCE_UNAVAILABLE','Test payment classification is unavailable');
+  if (demoState?.exists && ((q.kind==='ALL'||q.kind==='REFUND') && (!demoState.refundReady||!demoState.legacyRefundReady)
+    || (q.kind==='ALL'||q.kind==='WITHDRAWAL') && !demoState.withdrawalReady))
+    throw new SecurityApiError(503,'EVIDENCE_UNAVAILABLE','Test finance classification is unavailable');
   if (q.source !== 'NATIVE') {
     const kinds = q.kind === 'ALL' ? "'HISTORICAL_PAYMENT','HISTORICAL_REFUND','HISTORICAL_WITHDRAWAL'" : `'HISTORICAL_${q.kind}'`;
     parts.push(`SELECT 'history' AS family,o.id,${utc('COALESCE(o.source_event_at,o.imported_at)')} AS at
@@ -177,14 +192,62 @@ export async function readAdminChannelActivity(client: PoolClient, q: ActivityQu
       JOIN zzsh_order.rental_order ord ON ord.id=p.order_id LEFT JOIN zzsh_auth_user."user" u ON u.id=ord.renter_user_id
       WHERE p.channel='JOINPAY' AND a.operation='SUBMIT' AND a.created_at <= $2::timestamptz AND ${during('a.created_at')}
       ${q.subjectUserId?`AND (ord.renter_user_id=$12 OR (ord.owner_user_id=$12 AND ${orderVisible('ord')}))`:''} AND ${match(['p.channel_order_no','p.platform_order_no',orderTerm('ord','ord.display_no')],exact)}`);
+    if ((q.kind === 'ALL' || q.kind === 'PAYMENT') && demoState?.exists) parts.push(`SELECT 'demo_payment' AS family,p.id,${utc('p.accepted_at')} AS at
+      FROM zzsh_order.payment_confirmation p JOIN zzsh_order.rental_order ord ON ord.id=p.order_id AND ord.paid_confirmation_id=p.id
+      JOIN zzsh_order.controlled_payment_declaration d ON d.order_id=p.order_id AND d.merchant_scope_id=p.merchant_scope_id
+        AND d.provider_transaction_id=p.provider_transaction_id AND d.merchant_order_no=p.merchant_order_no
+      JOIN zzsh_order.ecs_test_demo_finance_registration s ON s.registration_digest=d.approval_digest
+      LEFT JOIN zzsh_auth_user."user" u ON u.id=ord.renter_user_id
+      WHERE p.source='CONTROLLED' AND p.disposition='APPLIED' AND d.mode='LOCAL_CONTROLLED_DECLARED_PAYMENT'
+        AND d.payment_digest=encode(sha256(convert_to(d.canonical_payment,'UTF8')),'hex')
+        AND d.canonical_payment::jsonb->>'orderId'=p.order_id AND d.canonical_payment::jsonb->>'amountCents'=p.amount_cents::text
+        AND d.canonical_payment::jsonb->>'currency'=p.currency AND d.canonical_payment::jsonb->>'providerTransactionId'=p.provider_transaction_id
+        AND s.registration_digest=encode(sha256(convert_to(s.canonical_registration,'UTF8')),'hex')
+        AND s.canonical_registration::jsonb->>'schema' IN ('ecs-test-demo-finance.v1','local-demo-clone-finance.v1')
+        AND d.resource_oid::text=(s.canonical_registration::jsonb #>> '{resource,databaseOid}')
+        AND p.accepted_at <= $2::timestamptz AND ${during('p.accepted_at')}
+      ${q.subjectUserId?`AND (ord.renter_user_id=$12 OR (ord.owner_user_id=$12 AND ${orderVisible('ord')}))`:''}
+      AND ${match(['d.id','p.merchant_order_no',orderTerm('ord','ord.display_no')],exact)}`);
     if (q.kind === 'ALL' || q.kind === 'REFUND') parts.push(`SELECT 'refund' AS family,a.id,${utc('a.created_at')} AS at
       FROM zzsh_order.joinpay_refund_attempt a JOIN zzsh_order.channel_refund_intent i ON i.id=a.intent_id
       LEFT JOIN zzsh_order.rental_order ord ON ord.id=i.order_id LEFT JOIN zzsh_auth_user."user" u ON u.id=i.renter_user_id
       WHERE a.operation='SUBMIT' AND a.created_at <= $2::timestamptz AND ${during('a.created_at')}
       ${q.subjectUserId?`AND (i.renter_user_id=$12 OR (ord.owner_user_id=$12 AND ord.renter_user_id=i.renter_user_id AND ${orderVisible('ord')}))`:''} AND ${match(['i.refund_order_no','i.provider_refund_trx_no','i.original_payment_order_no',orderTerm('ord','ord.display_no')],exact)}`);
+    if ((q.kind==='ALL'||q.kind==='REFUND') && demoState?.exists) parts.push(`SELECT 'demo_refund' AS family,a.id,${utc('a.created_at')} AS at
+      FROM zzsh_order.local_controlled_refund_operation a JOIN zzsh_order.channel_refund_intent i ON i.id=a.intent_id AND i.payment_source='CONTROLLED'
+      JOIN zzsh_order.rental_order ord ON ord.id=i.order_id AND ord.renter_user_id=i.renter_user_id
+      JOIN zzsh_order.ecs_test_demo_finance_registration s ON s.reference=a.sandbox_registration_ref AND s.reference=i.sandbox_registration_ref
+      LEFT JOIN zzsh_auth_user."user" u ON u.id=i.renter_user_id
+      WHERE a.refund_order_no=i.refund_order_no AND a.original_payment_trx_no=i.original_payment_trx_no AND a.amount_cents=i.amount_cents
+        AND a.final_digest=encode(sha256(convert_to(a.final_canonical,'UTF8')),'hex')
+        AND s.registration_digest=encode(sha256(convert_to(s.canonical_registration,'UTF8')),'hex')
+        AND s.canonical_registration::jsonb->>'schema' IN ('ecs-test-demo-finance.v1','local-demo-clone-finance.v1')
+        AND a.created_at<=$2::timestamptz AND ${during('a.created_at')}
+      ${q.subjectUserId?`AND (i.renter_user_id=$12 OR (ord.owner_user_id=$12 AND ${orderVisible('ord')}))`:''}
+      AND ${match(['a.id','i.refund_order_no',orderTerm('ord','ord.display_no')],exact)}`);
+    if ((q.kind==='ALL'||q.kind==='REFUND') && demoState?.exists) parts.push(`SELECT 'demo_legacy_refund' AS family,x.id,${utc('x.created_at')} AS at
+      FROM zzsh_order.ecs_demo_legacy_refund x JOIN zzsh_order.legacy_order_read_snapshot lo ON lo.id=x.order_id AND lo.renter_user_id=x.renter_user_id
+      JOIN zzsh_order.ecs_test_demo_finance_registration s ON s.reference=x.registration_ref
+      LEFT JOIN zzsh_auth_user."user" u ON u.id=x.renter_user_id
+      WHERE s.registration_digest=encode(sha256(convert_to(s.canonical_registration,'UTF8')),'hex')
+        AND s.canonical_registration::jsonb->>'schema' IN ('ecs-test-demo-finance.v1','local-demo-clone-finance.v1')
+        AND x.created_at<=$2::timestamptz AND ${during('x.created_at')}
+      ${q.subjectUserId?`AND (x.renter_user_id=$12 OR (lo.owner_user_id=$12 AND ${orderVisible('lo')}))`:''}
+      AND ${match(['x.id',orderTerm('lo','lo.original_order_no')],exact)}`);
     if (q.kind === 'ALL' || q.kind === 'WITHDRAWAL') parts.push(`SELECT 'withdrawal' AS family,a.id,${utc('a.created_at')} AS at
       FROM zzsh_order.joinpay_payout_attempt a JOIN zzsh_order.joinpay_withdrawal_intent w ON w.id=a.intent_id LEFT JOIN zzsh_auth_user."user" u ON u.id=w.user_id
       WHERE a.operation='SUBMIT' AND a.created_at <= $2::timestamptz AND ${during('a.created_at')} ${q.subjectUserId?'AND w.user_id=$12':''} AND ${match(['w.merchant_order_no','w.platform_serial_no'],exact)}`);
+    if ((q.kind==='ALL'||q.kind==='WITHDRAWAL') && demoState?.exists) parts.push(`SELECT 'demo_withdrawal' AS family,a.id,${utc('a.recorded_at')} AS at
+      FROM zzsh_order.controlled_payout_operation a JOIN zzsh_order.withdrawal_intent w ON w.id=a.intent_id AND w.payout_key=a.payout_key
+      JOIN zzsh_order.withdrawal_admission d ON d.id=w.admission_id AND d.user_id=w.user_id AND d.sandbox_registration_ref=w.sandbox_registration_ref
+      JOIN zzsh_order.ecs_test_demo_finance_registration s ON s.reference=w.sandbox_registration_ref
+      LEFT JOIN zzsh_auth_user."user" u ON u.id=w.user_id
+      WHERE a.mode='LOCAL_CONTROLLED' AND a.final_evidence_digest=encode(sha256(convert_to(a.final_evidence_canonical,'UTF8')),'hex')
+        AND s.registration_digest=encode(sha256(convert_to(s.canonical_registration,'UTF8')),'hex')
+        AND s.canonical_registration::jsonb->>'schema' IN ('ecs-test-demo-finance.v1','local-demo-clone-finance.v1')
+        AND d.resource_oid::text=(s.canonical_registration::jsonb #>> '{resource,databaseOid}')
+        AND a.recorded_at<=$2::timestamptz AND ${during('a.recorded_at')}
+      ${q.subjectUserId?'AND w.user_id=$12':''} AND ${match(['a.id','w.id'],exact)}`);
   }
   const page = await pageCandidates(client, parts, q, access, exact), mapped = new Map<string,unknown>();
   const oldRows=await historyRows(client,page.rows.filter(row=>row.family==='history').map(row=>row.id));
@@ -207,6 +270,68 @@ export async function readAdminChannelActivity(client: PoolClient, q: ActivityQu
   for (const family of families) {
     const ids = page.rows.filter(row=>row.family===family.key).map(row=>row.id); if (!ids.length) continue;
     for (const row of (await client.query(family.sql,[ids])).rows) mapped.set(`${family.key}:${row.id}`, { id:`${family.key}:${row.id}`, source:'NATIVE', kind:family.kind, subjectId:row.user_id, subjectName:displayName(row.name,row.user_id), ...(q.subjectUserId?{subjectRole:family.kind==='WITHDRAWAL'?'WITHDRAWER':row.user_id===q.subjectUserId?'RENTER':'OWNER'}:{}), number:row.number, relatedNumber:row.related_number??null, relatedNumberLabel:family.kind==='PAYMENT'?'平台订单号':family.kind==='REFUND'?'原支付单号':null, method:row.method??null, grossCents:row.gross_cents??null, feeCents:row.fee_cents??null, amountCents:row.amount, amountLabel:family.kind==='WITHDRAWAL'?'渠道出款金额':family.kind==='REFUND'?'退款申请金额':'收款申请金额', occurredAt:row.at, state:row.state, documentRef:`${family.prefix}:${row.business_id}` });
+  }
+  const demoIds = page.rows.filter(row=>row.family==='demo_payment').map(row=>row.id);
+  if (demoIds.length) {
+    const records = await client.query(`SELECT p.id,${utc('p.accepted_at')} AS at,d.id AS number,ord.display_no AS order_number,
+      CASE s.canonical_registration::jsonb->>'schema' WHEN 'ecs-test-demo-finance.v1' THEN 'ECS_TEST_SIMULATED'
+        WHEN 'local-demo-clone-finance.v1' THEN 'LOCAL_DEMO_SIMULATED' END AS demo_origin,
+      p.amount_cents::text AS amount,ord.renter_user_id AS user_id,u.name FROM zzsh_order.payment_confirmation p
+      JOIN zzsh_order.rental_order ord ON ord.id=p.order_id AND ord.paid_confirmation_id=p.id
+      JOIN zzsh_order.controlled_payment_declaration d ON d.order_id=p.order_id AND d.merchant_scope_id=p.merchant_scope_id
+        AND d.provider_transaction_id=p.provider_transaction_id
+      JOIN zzsh_order.ecs_test_demo_finance_registration s ON s.registration_digest=d.approval_digest
+      LEFT JOIN zzsh_auth_user."user" u ON u.id=ord.renter_user_id WHERE p.id=ANY($1::text[]) AND p.source='CONTROLLED'`,[demoIds]);
+    for (const row of records.rows) mapped.set(`demo_payment:${row.id}`, { id:`demo_payment:${row.id}`, source:'NATIVE', kind:'PAYMENT',
+      dataOrigin:row.demo_origin, bankArrival:'UNKNOWN', subjectId:row.user_id, subjectName:displayName(row.name,row.user_id),
+      ...(q.subjectUserId?{subjectRole:row.user_id===q.subjectUserId?'RENTER':'OWNER'}:{}), number:row.number, relatedNumber:row.order_number,
+      relatedNumberLabel:'订单号', amountCents:row.amount, amountLabel:'模拟金额（未发生汇聚收款）', occurredAt:row.at,
+      state:'SIMULATED', documentRef:null });
+  }
+  const demoRefundIds=page.rows.filter(row=>row.family==='demo_refund').map(row=>row.id);
+  if(demoRefundIds.length){
+    const records=await client.query(`SELECT a.id,${utc('a.created_at')} AS at,i.refund_order_no AS number,ord.display_no AS order_number,
+      i.amount_cents::text AS amount,i.renter_user_id AS user_id,u.name,
+      CASE s.canonical_registration::jsonb->>'schema' WHEN 'ecs-test-demo-finance.v1' THEN 'ECS_TEST_SIMULATED' ELSE 'LOCAL_DEMO_SIMULATED' END AS demo_origin,
+      (i.state='SUCCEEDED' AND e.id IS NOT NULL AND e.operation_id=a.id AND e.facts_digest=encode(sha256(convert_to(e.facts_canonical,'UTF8')),'hex')) AS completed
+      FROM zzsh_order.local_controlled_refund_operation a JOIN zzsh_order.channel_refund_intent i ON i.id=a.intent_id
+      JOIN zzsh_order.rental_order ord ON ord.id=i.order_id JOIN zzsh_order.ecs_test_demo_finance_registration s ON s.reference=a.sandbox_registration_ref
+      LEFT JOIN zzsh_order.local_controlled_refund_evidence e ON e.id=i.demo_terminal_evidence_id
+      LEFT JOIN zzsh_auth_user."user" u ON u.id=i.renter_user_id WHERE a.id=ANY($1::text[])`,[demoRefundIds]);
+    for(const row of records.rows)mapped.set(`demo_refund:${row.id}`,{id:`demo_refund:${row.id}`,source:'NATIVE',kind:'REFUND',dataOrigin:row.demo_origin,
+      bankArrival:'UNKNOWN',subjectId:row.user_id,subjectName:displayName(row.name,row.user_id),...(q.subjectUserId?{subjectRole:row.user_id===q.subjectUserId?'RENTER':'OWNER'}:{}),
+      number:row.number,relatedNumber:row.order_number,relatedNumberLabel:'订单号',amountCents:row.amount,amountLabel:'模拟金额（未发生汇聚退款）',
+      occurredAt:row.at,state:row.completed?'SIMULATED':'UNKNOWN',documentRef:null});
+  }
+  const demoLegacyRefundIds=page.rows.filter(row=>row.family==='demo_legacy_refund').map(row=>row.id);
+  if(demoLegacyRefundIds.length){
+    const records=(await client.query(`SELECT x.id,${utc('x.created_at')} AS at,x.amount_cents::text AS amount,x.renter_user_id AS user_id,u.name,
+      CASE WHEN $4::boolean AND ${gameScopeSql('lo.game_id','$2','$3')} THEN lo.original_order_no END AS order_number,l.id AS ledger_id
+      FROM zzsh_order.ecs_demo_legacy_refund x JOIN zzsh_order.legacy_order_read_snapshot lo ON lo.id=x.order_id
+      LEFT JOIN zzsh_order.settlement_ledger_entry l ON l.finance_event_id=x.event_id AND l.line_no=1
+      LEFT JOIN zzsh_auth_user."user" u ON u.id=x.renter_user_id WHERE x.id=ANY($1::text[])
+        AND $2::text IS NOT NULL AND $3::boolean IS NOT NULL AND $4::boolean IS NOT NULL`,[demoLegacyRefundIds,access.adminId,access.isBoss,access.isBoss||access.orderRead])).rows;
+    const origins=await readDemoLedgerOrigins(client,records.flatMap(row=>typeof row.ledger_id==='string'?[row.ledger_id]:[]));
+    for(const row of records){const dataOrigin=origins.get(row.ledger_id)??'UNKNOWN';
+      mapped.set(`demo_legacy_refund:${row.id}`,{id:`demo_legacy_refund:${row.id}`,source:'NATIVE',kind:'REFUND',dataOrigin,
+        bankArrival:'UNKNOWN',subjectId:row.user_id,subjectName:displayName(row.name,row.user_id),...(q.subjectUserId?{subjectRole:row.user_id===q.subjectUserId?'RENTER':'OWNER'}:{}),
+        number:row.id,relatedNumber:row.order_number,relatedNumberLabel:'旧订单号',amountCents:row.amount,amountLabel:'模拟金额（未发生汇聚退款）',
+        occurredAt:row.at,state:dataOrigin==='UNKNOWN'?'UNKNOWN':'SIMULATED',documentRef:null});
+    }
+  }
+  const demoWithdrawalIds=page.rows.filter(row=>row.family==='demo_withdrawal').map(row=>row.id);
+  if(demoWithdrawalIds.length){
+    const records=await client.query(`SELECT a.id,${utc('a.recorded_at')} AS at,w.id AS number,w.gross_cents::text AS gross_cents,
+      w.net_cents::text AS amount,w.fee_cents::text AS fee_cents,w.user_id,u.name,
+      CASE s.canonical_registration::jsonb->>'schema' WHEN 'ecs-test-demo-finance.v1' THEN 'ECS_TEST_SIMULATED' ELSE 'LOCAL_DEMO_SIMULATED' END AS demo_origin,
+      (w.state='SUCCEEDED' AND w.funds_disposition='PAYOUT_POSTED' AND w.terminal->>'reference'=a.id) AS completed
+      FROM zzsh_order.controlled_payout_operation a JOIN zzsh_order.withdrawal_intent w ON w.id=a.intent_id AND w.payout_key=a.payout_key
+      JOIN zzsh_order.ecs_test_demo_finance_registration s ON s.reference=w.sandbox_registration_ref
+      LEFT JOIN zzsh_auth_user."user" u ON u.id=w.user_id WHERE a.id=ANY($1::text[])`,[demoWithdrawalIds]);
+    for(const row of records.rows)mapped.set(`demo_withdrawal:${row.id}`,{id:`demo_withdrawal:${row.id}`,source:'NATIVE',kind:'WITHDRAWAL',dataOrigin:row.demo_origin,
+      bankArrival:'UNKNOWN',subjectId:row.user_id,subjectName:displayName(row.name,row.user_id),...(q.subjectUserId?{subjectRole:'WITHDRAWER'}:{}),
+      number:row.number,relatedNumber:null,amountCents:row.amount,grossCents:row.gross_cents,feeCents:row.fee_cents,
+      amountLabel:'模拟金额（未发生汇聚出款）',occurredAt:row.at,state:row.completed?'SIMULATED':'UNKNOWN',documentRef:null});
   }
   return { version:'admin.finance-channel-activity.v1', asOf:page.asOf, page:q.page, pageSize:q.pageSize, total:page.total, hasMore:page.hasMore, items:page.rows.map(row=>mapped.get(`${row.family}:${row.id}`)).filter(Boolean) };
 }

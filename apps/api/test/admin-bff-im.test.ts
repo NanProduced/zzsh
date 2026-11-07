@@ -69,14 +69,14 @@ test('Admin BFF仅放行准确的未开租审核命令，保持原body/key并交
 test('Admin BFF forwards the exact legacy settlement operations and retains their original request',async t=>{
  const calls:any[]=[];t.mock.method(orderRoutes,'handleOrderAdminRoute',async(req:any,res:any)=>{calls.push(req);res.status(200).json({outcome:'DOMAIN_CHECKED'});});
  const orderId='legacy_order_'+'a'.repeat(40),body={expectedRevision:'1',reason:'双方已核对'};
- for(const action of ['preview','propose','confirm','reject','duties/duty_1/owner-credit','duties/duty_1/commission-credit','duties/duty_1/refund-case']){
+ for(const action of ['preview','propose','confirm','reject','duties/duty_1/owner-credit','duties/duty_1/commission-credit','duties/duty_1/refund-case','duties/duty_1/demo-refund']){
   const path=`/orders/legacy/${orderId}/continuation/${action}`,output=capture();
   await handleAdminBff({method:'POST',url:path,originalUrl:path,headers:{origin:ADMIN_ORIGIN,'idempotency-key':'original_key'},body} as any,output.response as never,options());
   assert.equal(output.result().status,200);assert.equal(calls.at(-1).originalUrl,`/api/v1/admin${path}`);assert.equal(calls.at(-1).body,body);assert.equal(calls.at(-1).headers['idempotency-key'],'original_key');
  }
  assert.equal((await route(`/orders/legacy/${orderId}/continuation/approve-all`,'POST')).status,404);
  assert.equal((await route(`/orders/legacy/${orderId}/continuation/confirm/extra`,'POST')).status,404);
- assert.equal((await route(`/orders/legacy/${orderId}/continuation/confirm`,'DELETE')).status,404);assert.equal(calls.length,7);
+ assert.equal((await route(`/orders/legacy/${orderId}/continuation/confirm`,'DELETE')).status,404);assert.equal(calls.length,8);
 });
 test('Admin BFF reaches real legacy calculation and returns an actionable shortfall',async t=>{
  t.mock.method(authSecurity,'readAdminContext',async()=>({userId:'fixture_admin',sessionId:'fixture_session'}));

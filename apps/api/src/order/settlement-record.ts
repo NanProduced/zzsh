@@ -24,6 +24,7 @@ import { readFormalCollectionAdmission, type FormalCollectionAdmission } from ".
 import { assertControlledSettlementResource } from "./payment-confirmation";
 import { assertBusinessRuntimeIdentity } from "../database/business";
 import { assertLocalSandboxOrderAdmission, localFinancialSandboxRegistration, type LocalFinancialSandbox } from "../finance/local-financial-sandbox-resource";
+import { assertEcsTestDemoOrderAdmission, readEcsTestDemoRegistration, type DemoFinanceResource } from "../finance/ecs-test-demo-resource";
 import {
   computeSettlement,
   settlementConfirmationReady,
@@ -42,7 +43,7 @@ const EARLY_REASONS = ["TENANT_VOLUNTARY_EARLY", "OWNER_OR_ACCOUNT_EARLY"] as co
 type EarlyReason = (typeof EARLY_REASONS)[number];
 type SupportSettlementReason = EarlyReason | "NORMAL";
 type SettlementReadIdentity=Readonly<{database:string;runtimeUser:string}>;
-type Actor = { realm: "user" | "admin"; userId: string; sessionId: string; settlementAdmission?: FormalCollectionAdmission; controlledPaymentFact?: unknown;settlementReadIdentity?:SettlementReadIdentity;localFinancialSandbox?:LocalFinancialSandbox };
+type Actor = { realm: "user" | "admin"; userId: string; sessionId: string; settlementAdmission?: FormalCollectionAdmission; controlledPaymentFact?: unknown;settlementReadIdentity?:SettlementReadIdentity;localFinancialSandbox?:LocalFinancialSandbox;ecsTestDemo?:DemoFinanceResource };
 export type SettlementActor = Actor;
 type LineQty = { itemId: string; quantity: string; quantityKind?: "CONSUMED" };
 type Command = { status: number; body: Record<string, unknown> };
@@ -62,8 +63,9 @@ type LockedOrder = {
   revision: string;
 };
 
-export function settlementSurfaceOpen(flag: boolean | undefined, admission?: FormalCollectionAdmission, sandbox?:LocalFinancialSandbox): boolean {
+export function settlementSurfaceOpen(flag: boolean | undefined, admission?: FormalCollectionAdmission, sandbox?:LocalFinancialSandbox, demo?:DemoFinanceResource): boolean {
   if (flag !== true) return false;
+  if(demo!==undefined){if(admission!==undefined||sandbox!==undefined)throw invalid('Test and other settlement admissions are exclusive');readEcsTestDemoRegistration(demo);return true;}
   if(sandbox!==undefined){if(admission!==undefined)throw invalid('Local sandbox and formal settlement admissions are exclusive');localFinancialSandboxRegistration(sandbox);return true;}
   if (admission !== undefined) { readFormalCollectionAdmission(admission); return true; }
   return process.env.ZZSH_SETTLEMENT_RECORDING === "controlled" && process.env.NODE_ENV !== "production";
@@ -128,9 +130,10 @@ export async function assertSettlementDatabase(client: PoolClient, admission?: F
  * Dispatch gate, then the acting admin, then party users, then game, account and order.
  * Admin before users matches restoreDeactivatedUserAccount, which locks the actor and then the user. */
 export async function lockSettlement(client: PoolClient, orderId: string, actor: Actor, write: boolean | "PRESTART_TERMINATION", allowCompletedReplay = false): Promise<LockedOrder> {
-  if(actor.localFinancialSandbox!==undefined&&actor.settlementAdmission!==undefined)throw invalid('Local sandbox and formal settlement admissions are exclusive');
+  if([actor.localFinancialSandbox,actor.settlementAdmission,actor.ecsTestDemo].filter(value=>value!==undefined).length>1)throw invalid('Settlement admissions are exclusive');
   if(!write&&actor.settlementReadIdentity!==undefined)await assertSettlementReadDatabase(client,actor.settlementReadIdentity);
   else if(actor.localFinancialSandbox!==undefined)await assertLocalSandboxOrderAdmission(client,actor.localFinancialSandbox,orderId);
+  else if(actor.ecsTestDemo!==undefined)await assertEcsTestDemoOrderAdmission(client,actor.ecsTestDemo,orderId);
   else if (actor.controlledPaymentFact !== undefined) await assertControlledSettlementResource(client,actor.controlledPaymentFact,orderId);
   else await assertSettlementDatabase(client, actor.settlementAdmission);
   const located = (await client.query<{ renterUserId: string; ownerUserId: string; accountId: string; gameId: string; appId: string | null }>(

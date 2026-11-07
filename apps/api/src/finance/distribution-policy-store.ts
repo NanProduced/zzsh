@@ -9,6 +9,7 @@ import {assertControlledRegressionResource,type ControlledRegressionResource} fr
 import {REGRESSION_DATABASE,REGRESSION_MARKER,REGRESSION_RUNTIME_USER} from '../config/test-resource';
 import {readFormalCollectionAdmission,type FormalCollectionAdmission} from '../order/joinpay-collection-profile';
 import {assertLocalFinancialSandboxAssembly,assertLocalFinancialSandboxResource,localFinancialSandboxRegistration,type LocalFinancialSandbox} from './local-financial-sandbox-resource';
+import {assertEcsTestDemoAssembly,assertEcsTestDemoResource,readEcsTestDemoRegistration,type DemoFinanceResource} from './ecs-test-demo-resource';
 export type LocalDistributionScope=Readonly<{kind:'LOCAL_CONTROLLED_DISTRIBUTION'|'NATIVE_DISTRIBUTION'}>;
 export type DistributionPolicyScopeKind='LOCAL_CONTROLLED'|'NATIVE';
 type CreationReceipt={database:string;resourceOid:number;owner:string;marker:string;migrationRole:string;runtimeRole:string;ownerOid?:number;migrationRoleOid?:number;runtimeRoleOid?:number};
@@ -18,6 +19,7 @@ const localName='zzsh_test_order_credit_admin_batch2',localRuntime='zzsh_order_c
 const milestoneName='zzsh_test_order_milestone_real_1',milestoneRuntime='zzsh_order_milestone_real_1_r',milestoneMigration='zzsh_order_milestone_real_1_m';
 const localProofs=new WeakMap<LocalDistributionScope,Readonly<CreationReceipt&{readOnly:boolean;origins?:DistributionOrigins;sandbox?:LocalFinancialSandbox;nativeReadNonce?:string;nativeReadPort?:number}>>();
 const nativeProofs=new WeakMap<LocalDistributionScope,Readonly<{kind:'NATIVE';database:string;runtimeUser:string;admissionSha256:string|null;withoutJoinpay:boolean}>>();
+const demoNativeProofs=new WeakMap<LocalDistributionScope,DemoFinanceResource>();
 type ReviewedDistributionInstance=Readonly<{host:'127.0.0.1';port:55432|55433;systemIdentifier:string}>;
 const reviewedLocalNativeProofs=new WeakMap<LocalDistributionScope,Readonly<{proof:ControlledRegressionResource;owner:string;ownerOid:number;instance?:ReviewedDistributionInstance}>>();
 /** Formal NATIVE scope comes only from the reviewed formal collection admission; no receipt or env shortcut. */
@@ -34,6 +36,14 @@ export function createEcsTestDistributionPolicyScope(config:Pick<AppConfig,'prov
  const value=Object.freeze({kind:'NATIVE_DISTRIBUTION' as const});
  nativeProofs.set(value,Object.freeze({kind:'NATIVE' as const,database:db.name,runtimeUser:db.user,admissionSha256:null,withoutJoinpay:true}));return value;
 }
+/** The demo's own registered resource may manage NATIVE policy without granting a provider capability. */
+export function createDemoNativeDistributionScope(demo:DemoFinanceResource):LocalDistributionScope{
+ readEcsTestDemoRegistration(demo);
+ const value=Object.freeze({kind:'NATIVE_DISTRIBUTION' as const});demoNativeProofs.set(value,demo);return value;
+}
+export function assertDemoNativeDistributionBinding(scope:LocalDistributionScope|undefined,demo:DemoFinanceResource):void{
+ if(!scope||demoNativeProofs.get(scope)!==demo)throw new ConfigurationError('DEMO_DISTRIBUTION_SCOPE_MISMATCH');
+}
 /** Offline migration only; the original regression proof is rechecked on every transaction. */
 export function createReviewedLocalNativeDistributionScope(proof:ControlledRegressionResource,owner:{owner:string;ownerOid:number;instance?:ReviewedDistributionInstance}):LocalDistributionScope{
  if(!owner||!/^[a-z][a-z0-9_]{0,62}$/.test(owner.owner)||owner.owner===REGRESSION_RUNTIME_USER||!Number.isSafeInteger(owner.ownerOid)||owner.ownerOid<=0||owner.ownerOid>4294967295)
@@ -42,7 +52,7 @@ export function createReviewedLocalNativeDistributionScope(proof:ControlledRegre
  if(instance&&(instance.host!=='127.0.0.1'||![55432,55433].includes(instance.port)||!/^[0-9]+$/.test(instance.systemIdentifier)))throw new ConfigurationError('REVIEWED_LOCAL_NATIVE_DISTRIBUTION_INSTANCE_INVALID');
  const value=Object.freeze({kind:'NATIVE_DISTRIBUTION' as const});reviewedLocalNativeProofs.set(value,Object.freeze({proof,owner:owner.owner,ownerOid:owner.ownerOid,...(instance?{instance:Object.freeze({...instance})}:{})}));return value;
 }
-export function distributionPolicyScopeOf(binding:LocalDistributionScope|undefined):DistributionPolicyScopeKind{return binding!==undefined&&(nativeProofs.has(binding)||reviewedLocalNativeProofs.has(binding)||localProofs.get(binding)?.nativeReadNonce!==undefined)?'NATIVE':'LOCAL_CONTROLLED';}
+export function distributionPolicyScopeOf(binding:LocalDistributionScope|undefined):DistributionPolicyScopeKind{return binding!==undefined&&(nativeProofs.has(binding)||demoNativeProofs.has(binding)||reviewedLocalNativeProofs.has(binding)||localProofs.get(binding)?.nativeReadNonce!==undefined)?'NATIVE':'LOCAL_CONTROLLED';}
 /** Explicit server assembly from the resource creation receipt; never HTTP or environment input. */
 export function createLocalDistributionScope(config:AppConfig,receipt:CreationReceipt):LocalDistributionScope{
  return createScope(config,receipt,false);
@@ -118,9 +128,15 @@ function createScope(config:AppConfig,receipt:CreationReceipt,readOnly:boolean):
   ||[793252,878001,893390,881699,820148,833000,869754].includes(receipt.resourceOid))throw new ConfigurationError('Exact local test/fake distribution creation receipt required');
  const value=Object.freeze({kind:'LOCAL_CONTROLLED_DISTRIBUTION' as const});localProofs.set(value,Object.freeze({...receipt,readOnly,origins:undefined,sandbox:undefined}));return value;
 }
-export function assertLocalDistributionAssembly(binding:LocalDistributionScope|undefined,options:{testOperationsEnabled:boolean;secureCookies:boolean;apiOrigin:string;userOrigin:string;adminOrigin:string;joinpayCollection?:unknown;joinpayRefund?:unknown;joinpayWithdrawal?:unknown;joinpayAccountObservation?:unknown;localControlledPayments?:unknown;localFinancialSandbox?:unknown;distributionEarnings?:unknown;settlementRecordingEnabled?:boolean}){
+export function assertLocalDistributionAssembly(binding:LocalDistributionScope|undefined,options:{testOperationsEnabled:boolean;secureCookies:boolean;apiOrigin:string;userOrigin:string;adminOrigin:string;joinpayCollection?:unknown;joinpayRefund?:unknown;joinpayWithdrawal?:unknown;joinpayAccountObservation?:unknown;localControlledPayments?:unknown;localFinancialSandbox?:unknown;distributionEarnings?:unknown;settlementRecordingEnabled?:boolean;ecsTestDemo?:{demo:DemoFinanceResource}}){
  if(binding===undefined)return;
  if(reviewedLocalNativeProofs.has(binding))throw new ConfigurationError('REVIEWED_LOCAL_NATIVE_DISTRIBUTION_IS_OFFLINE_ONLY');
+ const demo=demoNativeProofs.get(binding);
+ if(demo){
+  if(options.ecsTestDemo?.demo!==demo||options.testOperationsEnabled||options.localControlledPayments||options.localFinancialSandbox)
+   throw new ConfigurationError('DEMO_DISTRIBUTION_ASSEMBLY_MISMATCH');
+  assertEcsTestDemoAssembly(demo,options);return;
+ }
  const native=nativeProofs.get(binding);
  if(native){
   const https=(origin:string)=>/^https:\/\/[^/]+(?:\/.*)?$/.test(origin)&&!/^https:\/\/(?:localhost|127\.0\.0\.1)(?::|\/|$)/.test(origin);
@@ -139,6 +155,17 @@ export const DISTRIBUTION_POLICY_PERMISSION={read:'personal.distribution.policy.
 type Actor={userId:string;sessionId:string;requestId:string};const sha=(s:string)=>createHash('sha256').update(s).digest('hex'),scope='LOCAL_CONTROLLED';
 async function authorize(c:PoolClient,actor:Actor,write=false){await assertAdminContextInTransaction(c,actor);const user=(await c.query('SELECT suspended FROM zzsh_auth_admin."user" WHERE id=$1',[actor.userId])).rows[0];if(!user||user.suspended)throw forbidden('Policy operator unavailable');const access=await loadEffectiveAdminAccess(c,actor.userId);if(write)requirePermission(access,DISTRIBUTION_POLICY_PERMISSION.manage);else if(!hasPermission(access,DISTRIBUTION_POLICY_PERMISSION.read)&&!hasPermission(access,DISTRIBUTION_POLICY_PERMISSION.manage))throw forbidden('Policy read permission required');return access;}
 async function resource(c:PoolClient, allowUnadmitted=false,binding?:LocalDistributionScope,maintenanceOwner=false,readOnly=false){
+ const demo=binding&&demoNativeProofs.get(binding);
+ if(demo){
+  if(maintenanceOwner||c.getTransactionStatus()!=='T')throw new SecurityApiError(503,'EVIDENCE_UNAVAILABLE','Demo distribution transaction required');
+  const tx=(await c.query("SELECT current_setting('transaction_read_only') AS state")).rows[0]?.state;
+  if(tx!=='on'&&tx!=='off')throw new SecurityApiError(503,'EVIDENCE_UNAVAILABLE','Demo distribution transaction mode unavailable');
+  const registration=await assertEcsTestDemoResource(c,demo,tx==='on'?'READ_ORIGINAL':'WRITE');
+  if((allowUnadmitted||readOnly)&&!registration.active)return false;
+  const complete=(await c.query("SELECT to_regclass('zzsh_order.distribution_policy_version') IS NOT NULL AND to_regclass('zzsh_order.distribution_policy_head') IS NOT NULL AND to_regclass('zzsh_order.distribution_participant') IS NOT NULL AND to_regclass('zzsh_order.distribution_invite_code') IS NOT NULL AND to_regclass('zzsh_order.invitation_relation') IS NOT NULL AS ready")).rows[0]?.ready;
+  if(complete!==true){if(allowUnadmitted)return false;throw new SecurityApiError(503,'EVIDENCE_UNAVAILABLE','Demo distribution structure unavailable');}
+  return true;
+ }
  const reviewed=binding&&reviewedLocalNativeProofs.get(binding);
  if(reviewed){
   const connection=(c as PoolClient&{connectionParameters?:{host?:string;port?:number;database?:string;user?:string}}).connectionParameters;
@@ -201,7 +228,7 @@ function decode(row:Record<string,any>,expectedScope:'LOCAL_CONTROLLED'|'NATIVE'
 /** Caller has verified its resource. Payment and relation writers may pin the immutable head. */
 export async function readDistributionPolicyRowInTransaction(c:PoolClient,lockHead=false,policyScope:'LOCAL_CONTROLLED'|'NATIVE'=scope){if(policyScope!=='LOCAL_CONTROLLED'&&policyScope!=='NATIVE')throw invalid('Unsupported distribution policy scope');const row=(await c.query(`SELECT v.* FROM zzsh_order.distribution_policy_head h JOIN zzsh_order.distribution_policy_version v ON v.id=h.current_version_id AND v.scope=h.scope AND v.revision=h.revision WHERE h.scope=$1${lockHead?' FOR SHARE OF h':''}`,[policyScope])).rows[0];return row?{knowledge:'KNOWN' as const,policy:decode(row,policyScope)}:{knowledge:'UNKNOWN' as const,policy:null,reason:'POLICY_NOT_CONFIGURED'};}
 const read=readDistributionPolicyRowInTransaction;
-export async function readDistributionPolicy(pool:Pool,actor:Actor,binding?:LocalDistributionScope,writeBinding?:LocalDistributionScope){return withTransaction(pool,async c=>{await c.query('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY');const access=await authorize(c,actor);await resource(c,false,binding,false,true);const changeContext=await readDistributionChangeContext(c,actor.userId,access?.isBoss===true||access?.permissions.has('approval.request.read')===true,writeBinding!==undefined&&(nativeProofs.has(writeBinding)||localProofs.get(writeBinding)?.readOnly===false));return{...await read(c,false,distributionPolicyScopeOf(binding)),scope:distributionPolicyScopeOf(binding),...(changeContext.contractReady?{semanticsVersion:'distribution-policy.lifecycle.v2' as const}:{}),changeContext};});}
+export async function readDistributionPolicy(pool:Pool,actor:Actor,binding?:LocalDistributionScope,writeBinding?:LocalDistributionScope){return withTransaction(pool,async c=>{await c.query('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY');const access=await authorize(c,actor);const admitted=await resource(c,false,binding,false,true);const changeContext=await readDistributionChangeContext(c,actor.userId,access?.isBoss===true||access?.permissions.has('approval.request.read')===true,admitted&&writeBinding!==undefined&&(nativeProofs.has(writeBinding)||demoNativeProofs.has(writeBinding)||localProofs.get(writeBinding)?.readOnly===false));return{...await read(c,false,distributionPolicyScopeOf(binding)),scope:distributionPolicyScopeOf(binding),...(changeContext.contractReady?{semanticsVersion:'distribution-policy.lifecycle.v2' as const}:{}),changeContext};});}
 async function readDistributionChangeContext(c:PoolClient,adminId:string,canReadRequests:boolean,writeAssemblyReady:boolean){
  const marker=(await c.query("SELECT to_regclass('zzsh_iam.approval_request') IS NOT NULL AS requests_ready,to_regprocedure('zzsh_order.distribution_policy_contract_version()') IS NOT NULL AS contract_ready")).rows[0];
  const base={schema:'distribution-policy-change-context.v1' as const,state:'UNAVAILABLE' as 'UNAVAILABLE'|'EMPTY'|'PENDING',request:null as null|{requestId:string;status:string;requestedBy:string;requesterName:string|null;createdAt:string;deciderName:string|null;decidedAt:string|null;expectedPolicyId:string|null;expectedRevision:string|null;expectedPolicyDigest:string|null;changes:unknown},contractReady:false,writeAssemblyReady,reasonCodes:[] as string[]};

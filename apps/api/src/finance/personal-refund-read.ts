@@ -3,6 +3,7 @@ import { assertUserContextInTransaction, type UserContext } from "../auth/user-i
 import { SecurityApiError } from "../auth/security-core";
 import { invalid, notFound } from "../supply/supply-util";
 import {assertLocalFinancialSandboxResource,localFinancialSandboxRegistration,type LocalFinancialSandbox} from './local-financial-sandbox-resource';
+import {assertEcsTestDemoResource,readEcsTestDemoRegistration,type DemoFinanceResource} from './ecs-test-demo-resource';
 
 export const PERSONAL_REFUND_READ_VERSION = "personal-native-refunds.v1";
 const INTENT_LIMIT = 50;
@@ -229,7 +230,7 @@ const INTENT_SQL = `SELECT i.id,i.posting_id,i.order_id,i.renter_user_id,i.payme
     i.amount_cents::text AS amount_cents,i.currency,i.state,i.budget_disposition,i.requires_review,
     i.basis_kind,i.payment_confirmation_id,i.liability_root_id,i.liability_event_id,i.responsibility_version_hash,i.merchant_identity_id,
     i.original_payment_trx_no,i.original_payment_order_no,
-    i.terminal_evidence_id,i.terminal_root_id,i.terminal_event_id,i.provider_refund_trx_no,to_char(i.completed_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS completed_at,
+    COALESCE(i.terminal_evidence_id,to_jsonb(i)->>'demo_terminal_evidence_id') AS terminal_evidence_id,i.terminal_root_id,i.terminal_event_id,i.provider_refund_trx_no,to_char(i.completed_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS completed_at,
     to_char(i.due_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS due_at,
     to_char(i.created_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS created_at,
     to_char(i.updated_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS updated_at,
@@ -976,7 +977,7 @@ function mergeAbnormalProjection(base: PersonalRefundReadProjection, abnormal: A
 
 /** 只读本人原生订单的本地退款投影；不重验渠道原件、不读商户钥、不执行退款或资金动作。 */
 export async function readPersonalNativeRefunds(client: PoolClient, actor: UserContext,
-  input: { orderId: unknown },sandbox?:LocalFinancialSandbox): Promise<PersonalRefundReadProjection> {
+  input: { orderId: unknown },sandbox?:LocalFinancialSandbox|DemoFinanceResource): Promise<PersonalRefundReadProjection> {
   if (!input || typeof input.orderId !== "string" || !ORDER_ID.test(input.orderId)) throw invalid("Invalid order identifier");
   await assertUserContextInTransaction(client, actor, "READ");
   const { asOf } = await preflight(client);
@@ -1039,8 +1040,9 @@ export async function readPersonalNativeRefunds(client: PoolClient, actor: UserC
   const rawRows = (await client.query<Row>(INTENT_SQL, [postingId])).rows;
   const localTerminals=new Set<string>();
   if(sandbox){
-    await assertLocalFinancialSandboxResource(client,sandbox,'READ_ORIGINAL');
-    const reference=localFinancialSandboxRegistration(sandbox).registration.reference;
+    const reference=sandbox.kind!=='REGISTERED_LOCAL_FINANCIAL_SANDBOX'
+      ? (await assertEcsTestDemoResource(client,sandbox,'READ_ORIGINAL'),readEcsTestDemoRegistration(sandbox).registration.reference)
+      : (await assertLocalFinancialSandboxResource(client,sandbox,'READ_ORIGINAL'),localFinancialSandboxRegistration(sandbox).registration.reference);
     const local=(await client.query<{id:string;complete:boolean}>(`SELECT i.id,zzsh_order.local_controlled_refund_terminal_complete(i.id) AS complete
       FROM zzsh_order.channel_refund_intent i WHERE i.order_id=$1 AND i.renter_user_id=$2 AND i.sandbox_registration_ref=$3
        AND i.payment_source='CONTROLLED' AND i.evidence_level='CONTROLLED_TEST' AND i.state='SUCCEEDED' LIMIT 51`,[orderId,actor.userId,reference])).rows;

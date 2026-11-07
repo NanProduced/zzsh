@@ -2,6 +2,7 @@ import { readOrderPaymentSummary, type ChannelPaymentReadOptions } from "./chann
 import type { INestApplication } from "@nestjs/common";
 import type { DistributionEarningStore } from "../finance/distribution-earning-store";
 import type {LocalFinancialSandbox} from '../finance/local-financial-sandbox-resource';
+import type {DemoFinanceResource} from '../finance/ecs-test-demo-resource';
 import { listUnifiedUserOrders, parseUnifiedOrderQuery } from "./unified-user-order-read";
 import { getUserLegacyOrder, listUserLegacyOrders, parseLegacyUserOrderQuery } from "./legacy-user-order-read";
 import type { OrderImSdkRouteBindings } from "../config/config";
@@ -71,6 +72,7 @@ const orderAccountViews=(options:OrderRuntimeOptions):OrderAccountViewReader=>(c
 export type OrderRuntimeOptions = AuthSecurityOptions & {
   /** Explicit server-only local capability; never parsed from client actors/bodies. */
   localFinancialSandbox?:LocalFinancialSandbox;
+  ecsTestDemo?:DemoFinanceResource;
   channelPaymentReadOptions?: ChannelPaymentReadOptions;
   distributionEarnings?: DistributionEarningStore;
   legacyDutyFinalizationReader?: LegacyDutyFinalizationReader;
@@ -317,7 +319,7 @@ export async function handleOrderUserRoute(
         )).rows[0];
         if (!party) throw notFound();
         if (party.owner === context.userId) return readOwnerRefundMinimalSummary(client, context, { orderId });
-        return readPersonalNativeRefunds(client, context, { orderId }, options.localFinancialSandbox);
+        return readPersonalNativeRefunds(client, context, { orderId }, options.localFinancialSandbox ?? options.ecsTestDemo);
       });
       sendJson(response, 200, data, requestId); return;
     }

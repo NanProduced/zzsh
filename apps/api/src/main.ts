@@ -12,10 +12,12 @@ import {
 import { assertBusinessRuntimeIdentity, createBusinessPool } from "./database/business";
 import { loadAuthRuntimeConfig } from "./auth/auth-runtime";
 import { loadEcsTestDistributionRuntime, loadNativeDistributionRuntime } from "./finance/distribution-native-runtime";
-import { createProvisionedDistributionManagementResource } from "./finance/distribution-management-resource";
-import { createNativeWalletOriginResource, createProvisionedNativeWalletOriginResource } from "./finance/native-wallet-origin";
+import { createDemoDistributionManagementResource, createProvisionedDistributionManagementResource } from "./finance/distribution-management-resource";
+import { createDemoNativeDistributionScope } from "./finance/distribution-policy-store";
+import { createDemoNativeWalletOriginResource, createNativeWalletOriginResource, createProvisionedNativeWalletOriginResource } from "./finance/native-wallet-origin";
 import { loadDistributionDueRuntime } from "./finance/distribution-due.module";
 import { loadOrderSweepRuntime } from "./order/order-sweep.module";
+import { loadDemoFinanceRuntime } from "./finance/ecs-test-demo-loader";
 
 export async function bootstrap() {
   const config = loadConfig();
@@ -24,12 +26,6 @@ export async function bootstrap() {
   const joinpayWithdrawal = loadJoinpayPayoutRuntime({ provider: config.provider, database: config.database, authEnabled: authEnabledValue === "true" }, withdrawalBankBinding);
   const joinpayCollection = loadJoinpayCollectionRuntime({ provider: config.provider, database: config.database, authEnabled: authEnabledValue === "true" });
   const withoutJoinpay = isEcsTestWithoutJoinpay(process.env);
-  const distributionNative = withoutJoinpay ? undefined
-    : loadNativeDistributionRuntime({ config, authEnabled: authEnabledValue === "true", admission: joinpayCollection?.admission });
-  const distributionEcsTest = withoutJoinpay
-    ? loadEcsTestDistributionRuntime({ config, authEnabled: authEnabledValue === "true", admission: joinpayCollection?.admission }) : undefined;
-  const distributionManagement = ["dev","ecs-test","production"].includes(config.profile) && !/^zzsh_(?:test|provider_test)(?:_|$)/.test(config.database.name)
-    ? createProvisionedDistributionManagementResource(config) : undefined;
   const joinpayRefund = loadJoinpayRefundRuntime({ provider: config.provider, database: config.database, authEnabled: authEnabledValue === "true" });
   const joinpayAccountSnapshot = loadEcsTestJoinpayAccountSnapshotRuntime({ provider: config.provider, database: config.database, authEnabled: authEnabledValue === "true" });
   const joinpayAccounts = loadJoinpayAccountRuntime({ provider: config.provider, database: config.database, authEnabled: authEnabledValue === "true" }) ?? joinpayAccountSnapshot;
@@ -48,11 +44,24 @@ export async function bootstrap() {
   const directoryReadPool = businessPool ? createBusinessPool(config, { max: 2, maxUses: 1 }) : undefined;
   let app: Awaited<ReturnType<typeof createApp>> | undefined;
   try {
+    const authConfig=businessPool?loadAuthRuntimeConfig(undefined,undefined,{testOperationsEnabled:config.testOperationsEnabled}):undefined;
+    if(!authConfig&&(process.env.LOCAL_DEMO_CLONE_FINANCE_ENABLED==='true'||process.env.ECS_TEST_DEMO_FINANCE_ENABLED==='true'))
+      throw new ConfigurationError('DEMO_FINANCE_REQUIRES_AUTH');
+    const demo=authConfig?loadDemoFinanceRuntime({config,origins:authConfig}):undefined;
+    const distributionNative = !demo && !withoutJoinpay
+      ? loadNativeDistributionRuntime({ config, authEnabled: authEnabledValue === "true", admission: joinpayCollection?.admission }) : undefined;
+    const distributionEcsTest = !demo && withoutJoinpay
+      ? loadEcsTestDistributionRuntime({ config, authEnabled: authEnabledValue === "true", admission: joinpayCollection?.admission }) : undefined;
+    const demoDistributionScope = demo ? createDemoNativeDistributionScope(demo.demo) : undefined;
+    const distributionManagement = demo && demoDistributionScope
+      ? createDemoDistributionManagementResource(demo.demo, demoDistributionScope)
+      : ["dev","ecs-test","production"].includes(config.profile) && !/^zzsh_(?:test|provider_test)(?:_|$)/.test(config.database.name)
+        ? createProvisionedDistributionManagementResource(config) : undefined;
     const orderSweep = loadOrderSweepRuntime(businessPool);
     const distributionDue = loadDistributionDueRuntime(businessPool, distributionNative?.auth.distributionEarnings);
     if (businessPool) await assertBusinessRuntimeIdentity(businessPool, config);
     // New-user zero origin trusts the owner's exact resource admission, not a merchant account.
-    const nativeWalletOrigin = !businessPool ? undefined
+    const nativeWalletOrigin = !businessPool ? undefined : demo ? createDemoNativeWalletOriginResource(demo.demo)
       : config.profile === "dev" || config.profile === "ecs-test" || config.profile === "production"
         ? createProvisionedNativeWalletOriginResource(config)
         : joinpayCollection?.admission ? createNativeWalletOriginResource(joinpayCollection.admission) : undefined;
@@ -64,7 +73,7 @@ export async function bootstrap() {
         ? {
             database: { pool: businessPool, directoryReadPool },
             auth: {
-              ...loadAuthRuntimeConfig(undefined, undefined, { testOperationsEnabled: config.testOperationsEnabled }),
+              ...authConfig!,
               pool: businessPool,
               ...(withdrawalBankBinding ? { withdrawalBankBinding } : {}),
               ...(joinpayWithdrawal ? { joinpayWithdrawal } : {}),
@@ -73,7 +82,9 @@ export async function bootstrap() {
               ...(joinpayRefund ? { joinpayRefund } : {}),
               ...(joinpayAccounts ? { joinpayAccountRead: joinpayAccounts.read, joinpayAccountObservation: joinpayAccounts.observation } : {}),
               directoryReadPool,
-              ...(distributionNative?.auth ?? distributionEcsTest?.auth ?? {}),
+              ...(demoDistributionScope ? { distributionScope:demoDistributionScope, distributionReadScope:demoDistributionScope }
+                : distributionNative?.auth ?? distributionEcsTest?.auth ?? {}),
+              ...(demo ? { ecsTestDemo:demo, distributionEarnings:demo.earnings, nativeWithdrawalScope:demo.withdrawal.scope, settlementRecordingEnabled:true } : {}),
               ...(distributionManagement ? { distributionManagement } : {}),
               ...(config.orderImSdkRouteConfig ? { orderImSdkRouteConfig: config.orderImSdkRouteConfig } : {}),
               ...(config.yunxin.enabled && config.yunxin.appKey && config.yunxin.appSecret

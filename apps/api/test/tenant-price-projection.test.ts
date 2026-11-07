@@ -108,6 +108,17 @@ test("owner quote and order expose own frozen income without renter private pric
   assert.equal(JSON.stringify(internal), before);
 });
 
+test("order payment provenance distinguishes a simulated confirmation and never asserts bank arrival", () => {
+  const base = { id: "order-1", quoteSnapshot: quote(), status: "PAID", rentalAmountCents: "100", depositAmountCents: "0" } as OrderRow;
+  for (const party of ["renter", "owner", "admin"] as const) {
+    for (const [input,source] of [["CONTROLLED","SIMULATED"],["JOINPAY","JOINPAY"],["OTHER","UNKNOWN"],[null,"UNKNOWN"]] as const) {
+      const row = { ...base, paymentSource: input };
+      assert.deepEqual(projectOrder(row, party).paymentProvenance, { source, channelArrival: "UNKNOWN" });
+    }
+    assert.equal("paymentProvenance" in projectOrder({ ...base, status: "PENDING_PAYMENT" }, party), false);
+  }
+});
+
 
 test("listing fee display reads sealed tenant money without promoting unknown deposit or missing components", () => {
   const internal = quote(), projected = projectTenantPriceQuote(internal, internal);

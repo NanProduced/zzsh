@@ -53,6 +53,16 @@ test("defaults to fake providers with a valid dev target", () => {
   assert.equal(config.database.target, "local-compose");
 });
 
+test("only the exact loopback R07 clone accepts the dedicated local demo configuration",()=>{
+  const env={...validEnv(),NODE_ENV:'development',LOCAL_DEMO_CLONE_FINANCE_ENABLED:'true',PORT:'4232',DB_PORT:'55434',
+    DB_NAME:'zzsh_test_r07_delivery_20261108',JOINPAY_COLLECTION_ENABLED:'false',JOINPAY_REFUND_ENABLED:'false',
+    JOINPAY_PAYOUT_ENABLED:'false',JOINPAY_ACCOUNTS_ENABLED:'false'};
+  assert.equal(loadConfig(env).database.name,'zzsh_test_r07_delivery_20261108');
+  for(const patch of [{NODE_ENV:'production'},{APP_PROFILE:'ecs-test'},{DB_HOST:'192.0.2.1'},{DB_PORT:'55433'},
+    {DB_NAME:'zzsh_test_regression'},{PORT:'4233'},{JOINPAY_REFUND_ENABLED:'true'},{LOCAL_DEMO_CLONE_FINANCE_ENABLED:'false'}])
+    assert.throws(()=>loadConfig({...env,...patch}),ConfigurationError);
+});
+
 test("keeps the non-funding test executor opt-in and isolated to test/fake", () => {
   assert.equal(loadConfig(validEnv("test")).testOperationsEnabled, false);
   assert.equal(loadConfig({ ...validEnv("test"), ENABLE_TEST_OPERATIONS: "true" }).testOperationsEnabled, true);

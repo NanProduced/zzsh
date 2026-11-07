@@ -5,7 +5,8 @@ import {assertUserContextInTransaction,type UserContext} from '../auth/user-iden
 import {conflict,invalid,notFound} from '../supply/supply-util';
 import {canonicalize} from '../supply/content-hash';
 import type {ListingCursorKey} from '../supply/listing-cursor';
-import type {NativeWithdrawalScope} from './native-withdrawal-resource';
+import {nativeWithdrawalSandbox,type NativeWithdrawalScope} from './native-withdrawal-resource';
+import {demoFinanceScope} from './ecs-test-demo-resource';
 import {readControlledWithdrawalsInTransaction,isUnadmittedControlledWithdrawalRead} from './controlled-withdrawal-store';
 import {prepareHistoricalObservation,sourceYuanToCents,sourceSignedYuanToCents,encodeFinanceCursor,decodeFinanceCursor,OPENING_OBSERVATION_JOIN} from './personal-finance-read';
 import {hasProvedNativeHistoryAbsence,readObservationCoverage} from './personal-finance-coverage';
@@ -64,13 +65,15 @@ async function historicalRead(client:PoolClient,actor:Actor,query:PersonalWithdr
 export async function readPersonalWithdrawals(pool:Pool,actor:Actor,query:PersonalWithdrawalQuery,key:ListingCursorKey|undefined,scope?:NativeWithdrawalScope,detailId?:string){
  const match=detailId===undefined?null:/^(history|controlled):([A-Za-z0-9_-]{1,180})$/.exec(detailId);
  if(detailId!==undefined&&!match)throw notFound();
+ const registered=scope?nativeWithdrawalSandbox(scope):undefined;
+ const simulationScope=registered&&registered.kind!=='REGISTERED_LOCAL_FINANCIAL_SANDBOX'?demoFinanceScope(registered):undefined;
  return withTransaction(pool,async client=>{
   await assertUserContextInTransaction(client,actor);
   if(match){
    if(match[1]==='history')return{contractVersion:PERSONAL_WITHDRAWAL_READ_VERSION,subjectId:actor.userId,...await historicalRead(client,actor,{source:'HISTORICAL',state:'ALL',limit:20,cursor:null},key,match[2])};
    const body=await readControlledWithdrawalsInTransaction(client,actor,match[2],scope);
    if(!('intent' in body))throw unavailable();
-   return{contractVersion:PERSONAL_WITHDRAWAL_READ_VERSION,subjectId:actor.userId,source:'LOCAL_CONTROLLED' as const,item:{id:detailId!,source:'LOCAL_CONTROLLED' as const,intent:body.intent}};
+   return{contractVersion:PERSONAL_WITHDRAWAL_READ_VERSION,subjectId:actor.userId,source:'LOCAL_CONTROLLED' as const,item:{id:detailId!,source:'LOCAL_CONTROLLED' as const,intent:body.intent,...(simulationScope?{simulationScope}:{})}};
   }
   const historical=query.source==='LOCAL_CONTROLLED'?null:await historicalRead(client,actor,query,key);
   let controlled:{availability:'AVAILABLE'|'NOT_ADMITTED'|'NOT_CONFIGURED'|'NOT_IN_SCOPE'|'NOT_REQUESTED';reason:string|null;data:Awaited<ReturnType<typeof readControlledWithdrawalsInTransaction>>|null}={availability:'NOT_REQUESTED',reason:null,data:null};
@@ -85,6 +88,7 @@ export async function readPersonalWithdrawals(pool:Pool,actor:Actor,query:Person
    else throw error;
    if(query.cursor)throw conflict('Withdrawal source changed; reload first page');
   }
-  return{contractVersion:PERSONAL_WITHDRAWAL_READ_VERSION,subjectId:actor.userId,source:query.source,state:query.state,historical,controlled};
+  return{contractVersion:PERSONAL_WITHDRAWAL_READ_VERSION,subjectId:actor.userId,source:query.source,state:query.state,historical,
+   controlled:simulationScope?{...controlled,simulationScope}:controlled};
  });
 }

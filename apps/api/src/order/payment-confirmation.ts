@@ -13,6 +13,7 @@ import { REGRESSION_DATABASE, REGRESSION_MARKER, REGRESSION_RUNTIME_USER } from 
 import { assertLocalSandboxOrderAdmission, localFinancialSandboxRegistration, type LocalFinancialSandbox } from "../finance/local-financial-sandbox-resource";
 import { canonicalize } from "../supply/content-hash";
 import { localSandboxPaymentAnchor } from "./local-sandbox-checkout-crypto";
+import { assertEcsTestDemoOrderAdmission, ecsTestDemoPaymentAnchor, readEcsTestDemoRegistration, type DemoFinanceResource } from "../finance/ecs-test-demo-resource";
 
 export type PaymentInput = Readonly<{
   orderId: string;
@@ -25,7 +26,7 @@ export type PaymentInput = Readonly<{
 }>;
 type ControlledPaymentFact = PaymentInput & { readonly source: "CONTROLLED"; readonly merchantScopeId: string };
 type VerifiedPaymentFact = ControlledPaymentFact | FormalJoinpayPaymentFact;
-type ControlledScope = { appId: string; database: string; runtimeUser: string; regressionOid?: number; sandbox?: LocalFinancialSandbox; payerUserId?: string; payerSessionId?: string; checkoutExpiresAt?: string };
+type ControlledScope = { appId: string; database: string; runtimeUser: string; regressionOid?: number; sandbox?: LocalFinancialSandbox; demo?: DemoFinanceResource; payerUserId?: string; payerSessionId?: string; checkoutExpiresAt?: string };
 const verifiedFacts = new WeakMap<object, ControlledScope>();
 const ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const INPUT_KEYS = ["orderId", "merchantOrderNo", "providerTransactionId", "amountCents", "currency", "providerPaidAt", "requestId"];
@@ -70,6 +71,18 @@ export function createSandboxControlledPaymentSource(options: { sandbox: LocalFi
     checkoutExpiresAt: options.checkoutExpiresAt }, "local_sandbox_" + proof.digest.slice(0, 32));
 }
 
+/** Separate ECS-test capability; no provider or historical payment can be supplied by the caller. */
+export function createEcsDemoControlledPaymentSource(options: { demo: DemoFinanceResource; payerUserId: string; payerSessionId: string; checkoutExpiresAt: string; appId: string }): (input: PaymentInput) => ControlledPaymentFact {
+  const proof = readEcsTestDemoRegistration(options.demo), resource = proof.registration.resource;
+  if (![options.payerUserId,options.payerSessionId,options.appId].every(value=>typeof value==='string'&&ID.test(value))
+    || typeof options.checkoutExpiresAt !== 'string' || !/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/.test(options.checkoutExpiresAt)
+    || !Number.isFinite(Date.parse(options.checkoutExpiresAt)) || new Date(options.checkoutExpiresAt).toISOString() !== options.checkoutExpiresAt)
+    throw invalid("Original test payer, session and deadline required");
+  return controlledPaymentIssuer({ appId: options.appId, database: resource.database, runtimeUser: resource.runtimeRole,
+    demo: options.demo, payerUserId: options.payerUserId, payerSessionId: options.payerSessionId,
+    checkoutExpiresAt: options.checkoutExpiresAt }, (options.demo.kind==='ECS_TEST_DEMO_FINANCE'?'ecs_demo_':'local_demo_') + proof.digest.slice(0, 32));
+}
+
 function controlledPaymentIssuer(scope: ControlledScope, merchantScopeId: string, allowed?: ReadonlySet<string>): (input: PaymentInput) => ControlledPaymentFact {
   return (input) => {
     if (!input || Object.keys(input).some((key) => !INPUT_KEYS.includes(key))
@@ -91,6 +104,7 @@ function controlledPaymentIssuer(scope: ControlledScope, merchantScopeId: string
 export async function assertControlledSettlementResource(client: PoolClient, fact: unknown, orderId: string): Promise<void> {
   const scope = fact && typeof fact === "object" ? verifiedFacts.get(fact) : undefined;
   if (scope?.sandbox && (fact as PaymentInput).orderId === orderId) { await assertLocalSandboxOrderAdmission(client, scope.sandbox, orderId); return; }
+  if (scope?.demo && (fact as PaymentInput).orderId === orderId) { await assertEcsTestDemoOrderAdmission(client, scope.demo, orderId); return; }
   if (!scope?.regressionOid || (fact as PaymentInput).orderId !== orderId || process.env.NODE_ENV === "production") throw invalid("Controlled settlement fact is not bound");
   await assertRegressionPaymentResource(client,scope);
 }
@@ -136,6 +150,26 @@ async function sandboxPaymentDeclaration(client: PoolClient, scope: ControlledSc
     || Number(original.resource_oid) !== proof.registration.resource.resourceOid || original.app_id !== scope.appId) throw invalid("Original local sandbox payment event unavailable");
 }
 
+async function ecsDemoPaymentDeclaration(client: PoolClient, scope: ControlledScope, fact: VerifiedPaymentFact, create = false) {
+  if (!scope.demo) throw invalid("Original test scope required");
+  const admissionId = await assertEcsTestDemoOrderAdmission(client, scope.demo, fact.orderId);
+  const proof = readEcsTestDemoRegistration(scope.demo), anchor = ecsTestDemoPaymentAnchor(scope.demo, fact.orderId);
+  if (fact.source !== "CONTROLLED" || fact.merchantScopeId !== anchor.merchantScopeId || fact.providerTransactionId !== anchor.providerTransactionId
+    || fact.requestId !== anchor.requestId) throw invalid("Original test payment anchor differs");
+  const input = Object.fromEntries(INPUT_KEYS.map(key => [key, Reflect.get(fact,key)])), canonical = canonicalize(input);
+  const digest = createHash('sha256').update(canonical).digest('hex');
+  if (create) await client.query(`INSERT INTO zzsh_order.controlled_payment_declaration(id,mode,source_event_key,resource_oid,app_id,merchant_scope_id,
+    admission_id,admission_revision,order_id,merchant_order_no,provider_transaction_id,canonical_payment,payment_digest,approval_digest,created_by_admin_id,reason)
+    VALUES($1,'LOCAL_CONTROLLED_DECLARED_PAYMENT',$2,$3,$4,$5,$6,1,$7,$8,$9,$10,$11,$12,$13,'ECS test simulation; no bank transfer') ON CONFLICT(id) DO NOTHING`,
+  [anchor.declarationId,'ecs-demo-payment:'+anchor.declarationId,proof.registration.resource.databaseOid,scope.appId,anchor.merchantScopeId,
+    admissionId,fact.orderId,fact.merchantOrderNo,anchor.providerTransactionId,canonical,digest,proof.digest,proof.registration.administratorId]);
+  const original = (await client.query(`SELECT canonical_payment,payment_digest,approval_digest,resource_oid,app_id
+    FROM zzsh_order.controlled_payment_declaration WHERE order_id=$1 AND merchant_scope_id=$2 AND provider_transaction_id=$3`,
+  [fact.orderId,fact.merchantScopeId,fact.providerTransactionId])).rows[0];
+  if (!original || original.canonical_payment !== canonical || original.payment_digest !== digest || original.approval_digest !== proof.digest
+    || Number(original.resource_oid) !== proof.registration.resource.databaseOid || original.app_id !== scope.appId) throw invalid("Original test payment event unavailable");
+}
+
 /** Caller owns one transaction; audit failure rolls back the entire acceptance. */
 export async function confirmOrderPayment(client: PoolClient, fact: VerifiedPaymentFact, distribution?: PaymentDistributionStore): Promise<PaymentResult> {
   const formalScope = fact?.source === "JOINPAY" ? await readVerifiedJoinpayFactScope(client, fact) : null;
@@ -143,8 +177,9 @@ export async function confirmOrderPayment(client: PoolClient, fact: VerifiedPaym
   const scope = formalScope ?? controlledScope;
   if (!scope) throw invalid("Payment fact is not verified");
   if (controlledScope?.regressionOid !== undefined) await assertRegressionPaymentResource(client,controlledScope);
-  if (controlledScope?.sandbox) {
-    await assertLocalSandboxOrderAdmission(client, controlledScope.sandbox, fact.orderId);
+  if (controlledScope?.sandbox || controlledScope?.demo) {
+    if (controlledScope.sandbox) await assertLocalSandboxOrderAdmission(client, controlledScope.sandbox, fact.orderId);
+    else await assertEcsTestDemoOrderAdmission(client, controlledScope.demo!, fact.orderId);
     const payer = (await client.query("SELECT renter_user_id FROM zzsh_order.rental_order WHERE id=$1", [fact.orderId])).rows[0];
     if (!payer || payer.renter_user_id !== controlledScope.payerUserId) throw notFound();
     await assertUserContextInTransaction(client, { userId: controlledScope.payerUserId!, sessionId: controlledScope.payerSessionId! }, "READ");
@@ -170,6 +205,7 @@ export async function confirmOrderPayment(client: PoolClient, fact: VerifiedPaym
   [fact.source, fact.merchantScopeId, fact.providerTransactionId])).rows[0];
   if (existing) {
     if (controlledScope?.sandbox) await sandboxPaymentDeclaration(client, controlledScope, fact);
+    if (controlledScope?.demo) await ecsDemoPaymentDeclaration(client, controlledScope, fact);
     const differences = (["orderId", "merchantOrderNo", "amountCents", "currency", "providerPaidAt"] as const)
       .filter((key) => existing[key] !== fact[key]);
     if (differences.length) {
@@ -192,7 +228,7 @@ export async function confirmOrderPayment(client: PoolClient, fact: VerifiedPaym
   const located = (await client.query(`SELECT account_id, renter_user_id, owner_user_id FROM zzsh_order.rental_order WHERE id=$1`, [fact.orderId])).rows[0];
   if (!located) throw notFound();
   await lockOrderPartiesInOrder(client, located.renter_user_id, located.owner_user_id);
-  if (controlledScope?.sandbox) await assertUserContextInTransaction(client,
+  if (controlledScope?.sandbox || controlledScope?.demo) await assertUserContextInTransaction(client,
     { userId: controlledScope.payerUserId!, sessionId: controlledScope.payerSessionId! }, "READ");
   await client.query(`SELECT id FROM zzsh_supply.rental_account WHERE id=$1 FOR UPDATE`, [located.account_id]);
   const order = (await client.query(`SELECT status, display_no, currency,
@@ -201,14 +237,15 @@ export async function confirmOrderPayment(client: PoolClient, fact: VerifiedPaym
       FROM zzsh_order.rental_order WHERE id=$1 FOR UPDATE`, [fact.orderId])).rows[0];
   // Capture the decision clock AFTER waiting for row locks. Provider time never revives an expired hold.
   const timing = (await client.query(`SELECT to_char(t AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS accepted,
-      t < $1::timestamptz AS open${controlledScope?.sandbox ? ",t < $2::timestamptz AS checkout_open" : ""}
-      FROM (SELECT clock_timestamp() AS t) clock`, controlledScope?.sandbox ? [order.hold,controlledScope.checkoutExpiresAt] : [order.hold])).rows[0];
+      t < $1::timestamptz AS open${controlledScope?.sandbox || controlledScope?.demo ? ",t < $2::timestamptz AS checkout_open" : ""}
+      FROM (SELECT clock_timestamp() AS t) clock`, controlledScope?.sandbox || controlledScope?.demo ? [order.hold,controlledScope.checkoutExpiresAt] : [order.hold])).rows[0];
   const mismatch = (formalScope ? formalScope.merchantOrderNo : order.display_no) !== fact.merchantOrderNo || order.currency !== fact.currency || order.total !== fact.amountCents;
   const reasonCode = mismatch ? "BINDING_MISMATCH" : order.status === "PAID" ? "DUPLICATE_PAYMENT"
     : order.status !== "PENDING_PAYMENT" || !timing.open ? "LATE_PAYMENT" : null;
-  if (controlledScope?.sandbox) {
+  if (controlledScope?.sandbox || controlledScope?.demo) {
     if (timing.checkout_open !== true || reasonCode !== null) throw conflict("Signed local checkout is no longer payable; read original payment status");
-    await sandboxPaymentDeclaration(client, controlledScope, fact, true);
+    if (controlledScope.sandbox) await sandboxPaymentDeclaration(client, controlledScope, fact, true);
+    else await ecsDemoPaymentDeclaration(client, controlledScope, fact, true);
   }
   if (order.status === "PENDING_PAYMENT" && !timing.open) {
     await cancelExpiredReservation(client, fact.orderId, order.hold, fact.requestId);

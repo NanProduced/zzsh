@@ -11,6 +11,7 @@ import { OrderTeamLifecycle } from "./im/order-team";
 import { JoinpayCollectionRecoveryLifecycle } from "./order/joinpay-collection-recovery";
 import { JoinpayFundsRecoveryLifecycle } from "./finance/joinpay-funds-recovery";
 import { JoinpayAccountObservationLifecycle } from "./finance/joinpay-account-observer";
+import { EcsDemoRefundLifecycle } from "./order/ecs-demo-refund-lifecycle";
 
 @Module({})
 export class AppModule {
@@ -25,7 +26,7 @@ export class AppModule {
         ...(orderSweep ? [OrderSweepModule.register(orderSweep)] : []),
         ...(distributionDue ? [DistributionDueModule.register(distributionDue)] : []),
       ],
-      providers: [MessageScopeRecoveryLifecycle, OrderDispatchLifecycle, OrderTeamLifecycle, OrderImEventRecoveryLifecycle, JoinpayCollectionRecoveryLifecycle, JoinpayFundsRecoveryLifecycle, JoinpayAccountObservationLifecycle],
+      providers: [MessageScopeRecoveryLifecycle, OrderDispatchLifecycle, OrderTeamLifecycle, OrderImEventRecoveryLifecycle, JoinpayCollectionRecoveryLifecycle, JoinpayFundsRecoveryLifecycle, JoinpayAccountObservationLifecycle, EcsDemoRefundLifecycle],
     };
   }
 }

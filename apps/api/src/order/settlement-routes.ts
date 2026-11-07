@@ -1,5 +1,6 @@
 import type { AuthSecurityOptions } from "../auth/auth-security";
 import type { LocalFinancialSandbox } from "../finance/local-financial-sandbox-resource";
+import type { DemoFinanceResource } from "../finance/ecs-test-demo-resource";
 import { assertAdminContextInTransaction, readAdminContext } from "../auth/auth-security";
 import { assertUserContextInTransaction, readUserContext } from "../auth/user-identity";
 import { ADMIN_PERMISSION, loadEffectiveAdminAccess, requirePermission } from "../auth/admin-authorization";
@@ -30,7 +31,7 @@ import {
   submitSettlement,
 } from "./settlement-record";
 
-type Options = AuthSecurityOptions & { settlementRecordingEnabled?: boolean; distributionEarnings?: DistributionEarningStore; localFinancialSandbox?:LocalFinancialSandbox };
+type Options = AuthSecurityOptions & { settlementRecordingEnabled?: boolean; distributionEarnings?: DistributionEarningStore; localFinancialSandbox?:LocalFinancialSandbox;ecsTestDemo?:DemoFinanceResource };
 type Request = Parameters<typeof requestPath>[0];
 const ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 
@@ -106,16 +107,16 @@ export async function handleSettlementUserRoute(request: Request, response: Supp
   const opening = /^\/([A-Za-z0-9._:-]+)\/openings\/([A-Za-z0-9._:-]+)\/confirm$/.exec(path);
   const read = /^\/([A-Za-z0-9._:-]+)\/settlement$/.exec(path);
   if (!preview && !submit && !decision && !opening && !read) return false;
-  if (!(method==="GET"&&read)&&!settlementSurfaceOpen(options.settlementRecordingEnabled, options.settlementAdmission,options.localFinancialSandbox)) {
+  if (!(method==="GET"&&read)&&!settlementSurfaceOpen(options.settlementRecordingEnabled, options.settlementAdmission,options.localFinancialSandbox,options.ecsTestDemo)) {
     if (method === "POST" && (preview || submit || decision || opening) && isEcsTestWithoutJoinpay(process.env)
-      && !options.settlementAdmission && !options.localFinancialSandbox) return unavailableSettlement(request, response, options, "user", (preview ?? submit ?? decision ?? opening)![1]!);
+      && !options.settlementAdmission && !options.localFinancialSandbox && !options.ecsTestDemo) return unavailableSettlement(request, response, options, "user", (preview ?? submit ?? decision ?? opening)![1]!);
     throw notFound();
   }
   const requestId = ensureApiV1RequestId(request);
   response.setHeader("X-Request-Id", requestId);
   if (method !== "GET" && !requireOrigin(request, response, options, requestId)) return true;
   const context = await readUserContext(request, options);
-  const actor = { realm: "user" as const, userId: context.userId, sessionId: context.sessionId, settlementAdmission: options.settlementAdmission,settlementReadIdentity:settlementReadIdentity(options.pool),localFinancialSandbox:options.localFinancialSandbox };
+  const actor = { realm: "user" as const, userId: context.userId, sessionId: context.sessionId, settlementAdmission: options.settlementAdmission,settlementReadIdentity:settlementReadIdentity(options.pool),localFinancialSandbox:options.localFinancialSandbox,ecsTestDemo:options.ecsTestDemo };
   if (method === "GET" && read) {
     const result = await withTransaction(options.pool, async (client) => projectSettlementResponse(client, actor, await readSettlement(client, idOf(read[1]!), actor), idOf(read[1]!)));
     sendJson(response, result.status, result.body, requestId);
@@ -191,16 +192,16 @@ export async function handleSettlementAdminRoute(request: Request, response: Sup
   const finalize = /^\/([A-Za-z0-9._:-]+)\/settlements\/([A-Za-z0-9._:-]+)\/finalize$/.exec(path);
   const adjust = /^\/([A-Za-z0-9._:-]+)\/settlements\/adjustments$/.exec(path);
   if (!read && !preview && !openings && !openingConfirm && !classify && !review && !finalize && !adjust) return false;
-  if (!(method==="GET"&&read)&&!settlementSurfaceOpen(options.settlementRecordingEnabled, options.settlementAdmission,options.localFinancialSandbox)) {
+  if (!(method==="GET"&&read)&&!settlementSurfaceOpen(options.settlementRecordingEnabled, options.settlementAdmission,options.localFinancialSandbox,options.ecsTestDemo)) {
     if (method === "POST" && (preview || openings || openingConfirm || classify || review || finalize || adjust) && isEcsTestWithoutJoinpay(process.env)
-      && !options.settlementAdmission && !options.localFinancialSandbox) return unavailableSettlement(request, response, options, "admin", (preview ?? openings ?? openingConfirm ?? classify ?? review ?? finalize ?? adjust)![1]!);
+      && !options.settlementAdmission && !options.localFinancialSandbox && !options.ecsTestDemo) return unavailableSettlement(request, response, options, "admin", (preview ?? openings ?? openingConfirm ?? classify ?? review ?? finalize ?? adjust)![1]!);
     throw notFound();
   }
   const requestId = ensureApiV1RequestId(request);
   response.setHeader("X-Request-Id", requestId);
   if (method !== "GET" && !requireOrigin(request, response, options, requestId)) return true;
   const context = await readAdminContext(request, options);
-  const actor = { realm: "admin" as const, userId: context.userId, sessionId: context.sessionId, settlementAdmission: options.settlementAdmission,settlementReadIdentity:settlementReadIdentity(options.pool),localFinancialSandbox:options.localFinancialSandbox };
+  const actor = { realm: "admin" as const, userId: context.userId, sessionId: context.sessionId, settlementAdmission: options.settlementAdmission,settlementReadIdentity:settlementReadIdentity(options.pool),localFinancialSandbox:options.localFinancialSandbox,ecsTestDemo:options.ecsTestDemo };
   const orderId = idOf((read ?? preview ?? openings ?? openingConfirm ?? classify ?? review ?? finalize ?? adjust)![1]!);
   if (method === "POST" && preview) {
     const body = bodyOf(request);

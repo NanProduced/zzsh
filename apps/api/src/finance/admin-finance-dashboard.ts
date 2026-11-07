@@ -47,14 +47,17 @@ async function bounds(client: PoolClient, query: DashboardQuery) {
 }
 
 async function sourceAccess(client: PoolClient) {
-  const row = (await client.query<{ legacy: boolean; continuation_exists: boolean; continuation_readable: boolean; continuation_evidence: boolean; opening: boolean }>(`SELECT
+  const row = (await client.query<{ legacy: boolean; continuation_exists: boolean; continuation_readable: boolean; continuation_evidence: boolean; opening: boolean; demo_exists: boolean; demo_readable: boolean }>(`SELECT
     COALESCE(has_table_privilege(to_regclass('zzsh_order.legacy_order_read_snapshot'),'SELECT'),false) AS legacy,
     to_regclass('zzsh_order.legacy_continuation_version') IS NOT NULL AS continuation_exists,
     COALESCE(has_table_privilege(to_regclass('zzsh_order.legacy_continuation_version'),'SELECT'),false) AS continuation_readable,
     COALESCE(has_table_privilege(to_regclass('zzsh_order.legacy_continuation_evidence'),'SELECT'),false) AS continuation_evidence,
-    COALESCE(has_table_privilege(to_regclass('zzsh_order.finance_opening_basis'),'SELECT'),false) AS opening`)).rows[0];
+    COALESCE(has_table_privilege(to_regclass('zzsh_order.finance_opening_basis'),'SELECT'),false) AS opening,
+    to_regclass('zzsh_order.ecs_test_demo_finance_registration') IS NOT NULL AS demo_exists,
+    COALESCE(has_table_privilege(to_regclass('zzsh_order.ecs_test_demo_finance_registration'),'SELECT'),false) AS demo_readable`)).rows[0];
+  if (row?.demo_exists === true && row.demo_readable !== true) throw new SecurityApiError(503,'EVIDENCE_UNAVAILABLE','Test data classification is unavailable');
   return { legacy: row?.legacy === true, continuationReadable: row?.continuation_exists !== true || row?.continuation_readable === true,
-    continuationExists: row?.continuation_exists === true, continuationEvidence: row?.continuation_evidence === true, opening: row?.opening === true };
+    continuationExists: row?.continuation_exists === true, continuationEvidence: row?.continuation_evidence === true, opening: row?.opening === true, demo: row?.demo_exists === true };
 }
 
 const inPeriod = (column: string) => `($1::date IS NULL OR ${column} >= ($1::date::timestamp AT TIME ZONE 'Asia/Shanghai')) AND ${column} < (($2::date+1)::timestamp AT TIME ZONE 'Asia/Shanghai') AND ${column} <= transaction_timestamp()`;
@@ -73,9 +76,12 @@ export const continuationGross = () => {
   return `CASE WHEN ${pay}=l.recorded_paid_amount_cents AND ${owner}>=0 AND ${refund}>=0 AND ${pay}>=${owner}+${refund}
     THEN ${pay}-${owner}-${refund} END`;
 };
-const continuationFrom = `FROM zzsh_order.legacy_order_read_snapshot l
+const nonDemoContinuation = (access: Awaited<ReturnType<typeof sourceAccess>>, alias: string) => access.demo
+  ? `AND NOT EXISTS(SELECT 1 FROM zzsh_order.ecs_test_demo_finance_registration demo WHERE ${alias}.created_at>=demo.registered_at)` : '';
+const continuationFrom = (access: Awaited<ReturnType<typeof sourceAccess>>) => `FROM zzsh_order.legacy_order_read_snapshot l
   JOIN zzsh_order.legacy_continuation_version h ON h.order_id=l.id AND h.command='CONFIRM' AND h.stage=4
-    AND h.id=(SELECT h2.id FROM zzsh_order.legacy_continuation_version h2 WHERE h2.order_id=l.id AND h2.command='CONFIRM' ORDER BY h2.revision DESC LIMIT 1)
+    ${nonDemoContinuation(access,'h')}
+    AND h.id=(SELECT h2.id FROM zzsh_order.legacy_continuation_version h2 WHERE h2.order_id=l.id AND h2.command='CONFIRM' ${nonDemoContinuation(access,'h2')} ORDER BY h2.revision DESC LIMIT 1)
   JOIN zzsh_order.legacy_continuation_evidence e ON e.id=h.result_evidence_id AND e.order_id=l.id AND e.source_kind='DERIVED'
     AND e.derived_from_command_version_id=h.id AND e.admission='PARAMETER_COMPLETE' AND e.source_digest=l.source_digest
     AND e.facts_canonical::jsonb=e.facts AND e.facts_digest=encode(sha256(convert_to(e.facts_canonical,'UTF8')),'hex') AND h.amounts=e.facts->'amounts'`;
@@ -84,12 +90,13 @@ function settlementFactsSql(query: DashboardQuery, access: Awaited<ReturnType<ty
   const oldTime = basis === 'settled' ? 'l.source_completed_at' : 'l.source_paid_at';
   const newTime = basis === 'settled' ? 'p.posted_at' : 'o.paid_at';
   const continuationTime = basis === 'settled' ? 'h.created_at' : 'l.source_paid_at';
-  const untouched = access.continuationExists ? `AND NOT EXISTS (SELECT 1 FROM zzsh_order.legacy_continuation_version h WHERE h.order_id=l.id AND h.command='CONFIRM')` : '';
+  const untouched = access.continuationExists ? `AND NOT EXISTS (SELECT 1 FROM zzsh_order.legacy_continuation_version h WHERE h.order_id=l.id AND h.command='CONFIRM' ${nonDemoContinuation(access,'h')})` : '';
   const oldOwner = safeMoney('sale_earnings'), oldFee = safeMoney('full_payout_money'), oldRefund = safeMoney('return_order_money');
   const ids = (alias:string) => idsParameter ? `AND ${alias}.id=ANY(${idsParameter}::text[])` : '';
   return `SELECT o.id AS order_id,o.display_no AS number,o.renter_user_id AS user_id,${newTime} AS at,
     p.captured_cents AS paid,${includeEvidence ? 'p.owner_net_cents' : 'NULL::numeric'} AS owner,${includeEvidence ? 'p.renter_refund_cents' : 'NULL::numeric'} AS refund,p.platform_contribution_cents AS contribution,'NATIVE'::text AS source,NULL::numeric AS compensation
     FROM zzsh_order.settlement_posting p JOIN zzsh_order.rental_order o ON o.id=p.order_id
+    ${access.demo ? "JOIN zzsh_order.payment_confirmation actual ON actual.id=p.payment_confirmation_id AND actual.order_id=o.id AND actual.source='JOINPAY' AND actual.disposition='APPLIED'" : ''}
     WHERE ${query.source === 'legacy' ? 'false AND' : ''} ${nativeScope} AND ${inPeriod(newTime)} ${ids('o')}
     ${access.legacy && access.continuationReadable && query.source !== 'new' ? `UNION ALL
       SELECT l.id,l.original_order_no,l.renter_user_id,${oldTime},l.recorded_paid_amount_cents,
@@ -101,7 +108,7 @@ function settlementFactsSql(query: DashboardQuery, access: Awaited<ReturnType<ty
         ${includeEvidence ? continuationMoney('ownerNet') : 'NULL::numeric'},
         ${includeEvidence ? continuationMoney('refundNet') : 'NULL::numeric'},
         ${continuationGross()},'LEGACY',${safeMoney('compensation')}
-      ${continuationFrom} WHERE ${historical} AND ${legacyScope} AND ${inPeriod(continuationTime)} ${ids('l')}` : ''}`;
+      ${continuationFrom(access)} WHERE ${historical} AND ${legacyScope} AND ${inPeriod(continuationTime)} ${ids('l')}` : ''}`;
 }
 
 /** Paid orders are business facts; neither old source status nor a local confirmation proves channel arrival. */
@@ -109,7 +116,9 @@ export async function readFinanceDashboardTrend(client: PoolClient, query: Dashb
   const period = await bounds(client, query), access = await sourceAccess(client);
   const nativeScope = gameScopeSql('o.game_id', '$3', '$4'), legacyScope = gameScopeSql('l.game_id', '$3', '$4');
   const values = [period.from, period.to, viewer.adminId, viewer.isBoss, period.granularity];
-  const head = access.continuationExists && access.continuationReadable ? `LEFT JOIN zzsh_order.legacy_continuation_version current_head ON current_head.order_id=l.id AND current_head.superseded_at IS NULL` : '';
+  const head = access.continuationExists && access.continuationReadable ? access.demo
+    ? `LEFT JOIN zzsh_order.legacy_continuation_version current_head ON current_head.id=(SELECT candidate.id FROM zzsh_order.legacy_continuation_version candidate WHERE candidate.order_id=l.id ${nonDemoContinuation(access,'candidate')} ORDER BY candidate.revision DESC LIMIT 1)`
+    : `LEFT JOIN zzsh_order.legacy_continuation_version current_head ON current_head.order_id=l.id AND current_head.superseded_at IS NULL` : '';
   const stage = head ? 'COALESCE(current_head.stage,l.source_order_status)' : 'l.source_order_status';
   const quote = quoteCentsSql('o'), resource = quoteAmountCentsSql('o','resourceTotal'), owner = quoteAmountCentsSql('o','ownerTotal');
   const legacyPaid = access.legacy && query.source !== 'new' ? `SELECT l.source_paid_at AS at,l.recorded_paid_amount_cents AS amount,l.renter_user_id AS user_id,
@@ -126,7 +135,7 @@ export async function readFinanceDashboardTrend(client: PoolClient, query: Dashb
       ${viewer.quoteRead ? `CASE WHEN o.status IN('PAID','COMPLETED') AND ${resource}-${owner}=${quote} THEN ${quote} END` : 'NULL::numeric'} AS estimate,
       false AS estimate_discrepant
       FROM zzsh_order.payment_confirmation p JOIN zzsh_order.rental_order o ON o.id=p.order_id AND o.paid_confirmation_id=p.id
-      WHERE p.disposition='APPLIED' AND p.currency='CNY' AND ${query.source === 'legacy' ? 'false AND' : ''} ${nativeScope} AND ${inPeriod('o.paid_at')}
+      WHERE p.disposition='APPLIED' AND p.currency='CNY' ${access.demo ? "AND p.source='JOINPAY'" : ''} AND ${query.source === 'legacy' ? 'false AND' : ''} ${nativeScope} AND ${inPeriod('o.paid_at')}
     UNION ALL SELECT at,CASE WHEN amount>=0 THEN amount END,'LEGACY',user_id,
       CASE WHEN stage=4 THEN 'COMPLETED' WHEN stage=5 THEN 'CANCELLED' WHEN stage IN(2,3,6,7,8,9) THEN 'ACTIVE' ELSE 'UNKNOWN' END,
       CASE WHEN stage IN(2,3,4,6,7,8,9) THEN estimated END,

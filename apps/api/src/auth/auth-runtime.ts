@@ -98,6 +98,10 @@ import { initializeNativeWalletOrigin, assertNativeWalletOriginAssembly, type Na
 import { assertLocalControlledPaymentAssembly, mountLocalControlledPayments, type LocalControlledPaymentOptions } from "../order/local-payment-routes";
 import { assertLocalFinancialSandboxRuntimeAssembly, preflightLocalFinancialSandboxRuntime, type LocalFinancialSandboxAssembly } from "../finance/local-financial-sandbox-runtime";
 import { mountLocalFinancialSandboxRoutes } from "../finance/local-financial-sandbox-routes";
+import { assertEcsTestDemoRuntimeAssembly, preflightEcsTestDemoRuntime, type EcsTestDemoRuntime } from "../finance/ecs-test-demo-runtime";
+import { mountEcsDemoCheckoutRoutes } from "../order/ecs-demo-checkout-routes";
+import { mountEcsDemoWithdrawalRoutes } from "../finance/ecs-demo-withdrawal-routes";
+import { EcsDemoRefundLifecycle } from "../order/ecs-demo-refund-lifecycle";
 import { mountChannelPayments, channelPaymentReadOptions, type ChannelPaymentCollectionAssembly } from "../order/channel-payment-routes";
 import { mountAdminNativeRefunds } from "../order/native-refund-routes";
 import { mountAdminJoinpayQuery } from "../order/admin-joinpay-query-routes";
@@ -137,6 +141,8 @@ export type AuthRuntimeCapabilities = {
 export type AuthRuntimeOptions = AuthRuntimeConfig & {
   /** Explicit branded dev/fake local composition; no environment or HTTP installer. */
   localFinancialSandbox?: LocalFinancialSandboxAssembly;
+  /** Explicit ECS-test-only capability; never installed by a request body. */
+  ecsTestDemo?: EcsTestDemoRuntime;
   /** Explicit formal resource capability and deployment switch; does not enable collection requests. */
   settlementRecordingEnabled?: boolean;
   /** Explicit local capability only; never read from environment or HTTP. */
@@ -928,10 +934,15 @@ export async function mountAuthHandlers(
     assertLocalFinancialSandboxRuntimeAssembly(options.localFinancialSandbox, options);
     await preflightLocalFinancialSandboxRuntime(options.pool, options.localFinancialSandbox);
   }
+  if (options.ecsTestDemo) {
+    assertEcsTestDemoRuntimeAssembly(options.ecsTestDemo, options);
+    await preflightEcsTestDemoRuntime(options.pool, options.ecsTestDemo);
+    app.get(EcsDemoRefundLifecycle).start(options.pool, options.ecsTestDemo);
+  }
   if (options.localControlledPayments && options.joinpayCollection) {
     throw new ConfigurationError("Controlled and formal collection assemblies are exclusive");
   }
-  assertNativeWalletOriginAssembly(options.nativeWalletOrigin, options.joinpayCollection?.admission);
+  assertNativeWalletOriginAssembly(options.nativeWalletOrigin, options.joinpayCollection?.admission, options.ecsTestDemo?.demo);
   const recovery = options.joinpayCollection?.recovery;
   if (recovery !== undefined) {
     const collection = options.joinpayCollection, execution = collection?.routes?.execution;
@@ -955,7 +966,7 @@ export async function mountAuthHandlers(
       ...(payoutRecovery !== undefined ? { payout: { ...payoutRecovery, execution: { ...payout!.execution!, pool: options.pool } } } : {}),
     });
   }
-  if(options.distributionEarnings && !options.localFinancialSandbox && !assertNativeDistributionEarningAssembly(
+  if(options.distributionEarnings && !options.localFinancialSandbox && !options.ecsTestDemo && !assertNativeDistributionEarningAssembly(
     options.distributionEarnings, options.distributionScope, options.joinpayCollection?.admission,
   )){
     if(!options.localControlledPayments||!options.distributionScope)throw new ConfigurationError('Distribution earnings require explicit local payment and distribution capabilities');
@@ -1360,7 +1371,7 @@ export async function mountAuthHandlers(
   const paymentReadOptions = channelPaymentReadOptions(collection?.routes, Boolean(collection?.notifications
     && collection.notifications.admission === collection.routes?.initial?.admission
     && collection.notifications.admission === collection.routes?.execution?.formal?.admission));
-  if (options.settlementRecordingEnabled === true && !options.joinpayCollection?.admission && !options.localFinancialSandbox) {
+  if (options.settlementRecordingEnabled === true && !options.joinpayCollection?.admission && !options.localFinancialSandbox && !options.ecsTestDemo) {
     throw new ConfigurationError("Formal settlement recording requires the bound collection resource admission");
   }
   const settlementRecordingEnabled = options.settlementRecordingEnabled === true || (options.testOperationsEnabled === true
@@ -1369,6 +1380,7 @@ export async function mountAuthHandlers(
     ...securityOptions,
     channelPaymentReadOptions: paymentReadOptions,
     localFinancialSandbox: options.localFinancialSandbox?.sandbox,
+    ecsTestDemo: options.ecsTestDemo?.demo,
     distributionEarnings: options.distributionEarnings,
     orderHoldSeconds,
     legacyDutyFinalizationReader: readLegacyDutyFinalization,
@@ -1388,8 +1400,8 @@ export async function mountAuthHandlers(
   // generic BFF fallbacks, which otherwise turn unknown credit paths into 404.
   mountCreditGuaranteeRoutes(app, { ...securityOptions, listingCursorKey: options.listingCursorKey }, options.creditGuaranteeEnabled === true);
   // 退款路径先于通用Admin BFF挂载：只接管/refunds，其余请求仍交给BFF。
-  mountAdminNativeRefunds(app, securityOptions, { pool: options.pool, ...(options.localFinancialSandbox
-    ? { refund: { localSandbox: options.localFinancialSandbox.refund } }
+  mountAdminNativeRefunds(app, securityOptions, { pool: options.pool, ...(options.localFinancialSandbox || options.ecsTestDemo
+    ? { refund: { localSandbox: (options.localFinancialSandbox ?? options.ecsTestDemo!).refund } }
     : options.joinpayRefund ? { refund: options.joinpayRefund } : {}) });
   // QUERY-only仅显式装配可用，提现仍须finance.withdrawal.query；状态不把默认空生命周期当成已装配。
   { const queryCollection = collection?.routes?.execution?.formal && collection.notifications?.admission === collection.routes.execution.formal.admission ? collection.routes.execution : undefined;
@@ -1397,6 +1409,8 @@ export async function mountAuthHandlers(
       workerStatus: () => { const funds = app.get(JoinpayFundsRecoveryLifecycle).status(); return { ...(options.joinpayRefund ? { refund: funds.refund } : {}),
         ...(options.joinpayRefund?.recovery && typeof options.joinpayRefund.legacyRefundsEnabled==='boolean' ? {legacyRefund:funds.legacyRefund} : {}),
         ...(options.joinpayWithdrawal?.execution ? { payout: funds.payout } : {}), ...(queryCollection ? { collection: app.get(JoinpayCollectionRecoveryLifecycle).status() } : {}) }; } }); }
+  if (options.ecsTestDemo) mountEcsDemoCheckoutRoutes(app, { ...securityOptions, secureCookies: options.secureCookies }, options.ecsTestDemo.checkout);
+  if (options.ecsTestDemo) mountEcsDemoWithdrawalRoutes(app, { ...securityOptions, secureCookies: options.secureCookies }, options.ecsTestDemo.withdrawal);
   mountAdminBffHandlers(app, {
     apiOrigin: options.apiOrigin,
     adminOrigin: options.adminOrigin,

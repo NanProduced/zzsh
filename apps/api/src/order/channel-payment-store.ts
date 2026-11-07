@@ -17,6 +17,7 @@ import { describeCollectionProfile, type BoundCollectionProfile } from "./joinpa
 import { readVerifiedJoinpayFactScope, type FormalJoinpayPaymentFact } from "./joinpay-collection-source";
 import { createControlledRegressionResource, assertControlledRegressionResource, type ControlledRegressionBinding, type ControlledRegressionResource } from "../finance/controlled-regression-resource";
 import { assertLocalFinancialSandboxResource, ensureLocalSandboxOrderAdmission, localFinancialSandboxRegistration, type LocalFinancialSandbox } from "../finance/local-financial-sandbox-resource";
+import { assertEcsTestDemoResource, readEcsTestDemoRegistration, type DemoFinanceResource } from "../finance/ecs-test-demo-resource";
 
 /**
  * PAY-03A：持久请求、只追加观察与资金归属锚点（payment_request / payment_channel_observation /
@@ -63,7 +64,7 @@ export function wireAmountForCents(amountCents: string): string {
 }
 
 // ---------- 合成请求能力：仅显式 test/fake 隔离资源，进程内对象，无环境开关 ----------
-const requestCapabilities = new WeakMap<object, { database: string; runtimeUser: string; regression?: ControlledRegressionResource; orderIds?: ReadonlySet<string>; sandbox?: LocalFinancialSandbox }>();
+const requestCapabilities = new WeakMap<object, { database: string; runtimeUser: string; regression?: ControlledRegressionResource; orderIds?: ReadonlySet<string>; sandbox?: LocalFinancialSandbox; demo?: DemoFinanceResource }>();
 export type SyntheticRequestCapability = Readonly<{ evidenceLevel: "SYNTHETIC_PROTOCOL" | "CONTROLLED_TEST" }>;
 
 export function createSyntheticChannelRequestCapability(options: { config: AppConfig; resourceSet: string; evidenceLevel: SyntheticRequestCapability["evidenceLevel"]; regression?: ControlledRegressionBinding; allowedOrderIds?: readonly string[] }): SyntheticRequestCapability {
@@ -90,6 +91,11 @@ export function createSandboxChannelRequestCapability(sandbox: LocalFinancialSan
   requestCapabilities.set(capability, { database: proof.registration.resource.database, runtimeUser: proof.registration.resource.runtimeRole, sandbox }); return capability;
 }
 
+export function createEcsDemoRefundCapability(demo: DemoFinanceResource): SyntheticRequestCapability {
+  const proof = readEcsTestDemoRegistration(demo), capability = Object.freeze({ evidenceLevel: "CONTROLLED_TEST" as const });
+  requestCapabilities.set(capability, { database: proof.registration.resource.database, runtimeUser: proof.registration.resource.runtimeRole, demo }); return capability;
+}
+
 export function sandboxChannelBinding(capability: unknown): ChannelBinding | null {
   const sandbox = capability && typeof capability === "object" ? requestCapabilities.get(capability)?.sandbox : undefined;
   if (!sandbox) return null;
@@ -100,10 +106,15 @@ export function sandboxChannelBinding(capability: unknown): ChannelBinding | nul
 export function sandboxForChannelRequestCapability(capability:unknown):LocalFinancialSandbox|undefined{
   return capability&&typeof capability==='object'?requestCapabilities.get(capability)?.sandbox:undefined;
 }
+export function demoForChannelRequestCapability(capability:unknown):DemoFinanceResource|undefined{
+  return capability&&typeof capability==='object'?requestCapabilities.get(capability)?.demo:undefined;
+}
 
 export function assertSandboxOriginalPayment(capability: unknown, payment: { source: string; merchant_scope_id: string }): void {
   const binding = sandboxChannelBinding(capability);
   if (binding && (payment.source !== "CONTROLLED" || payment.merchant_scope_id !== binding.merchantIdentityId)) throw closed();
+  const demo = demoForChannelRequestCapability(capability);
+  if (demo && (payment.source !== "CONTROLLED" || payment.merchant_scope_id !== (demo.kind==='ECS_TEST_DEMO_FINANCE'?'ecs_demo_':'local_demo_') + readEcsTestDemoRegistration(demo).digest.slice(0, 32))) throw closed();
 }
 
 export type PaymentRequestFailureReason = "PAYMENT_CHANNEL_NOT_ENABLED" | "PAYMENT_REQUEST_EXISTS" | "ORDER_NOT_PAYABLE";
@@ -137,11 +148,13 @@ export async function assertLegacyPaymentNumberAvailable(client:PoolClient,merch
   if (legacy?.found !== false) throw requestFailure("ORDER_NOT_PAYABLE", "当前订单暂不能付款，请联系客服处理。");
 }
 
-export async function assertSyntheticChannelRequestCapability(client: PoolClient, capability: unknown): Promise<SyntheticRequestCapability["evidenceLevel"]> {
+export async function assertSyntheticChannelRequestCapability(client: PoolClient, capability: unknown, purpose: "COLLECTION" | "REFUND" = "COLLECTION"): Promise<SyntheticRequestCapability["evidenceLevel"]> {
   const scope = capability && typeof capability === "object" ? requestCapabilities.get(capability) : undefined;
   if (!scope) throw closed();
+  if (scope.demo && purpose !== "REFUND") throw closed();
   if (scope.regression) await assertControlledRegressionResource(client, scope.regression, "CHANNEL_REQUEST");
   if (scope.sandbox) await assertLocalFinancialSandboxResource(client, scope.sandbox);
+  if (scope.demo) await assertEcsTestDemoResource(client, scope.demo);
   const identity = (await client.query(`SELECT current_database() AS db, current_user AS actor`)).rows[0];
   if (identity?.db !== scope.database || identity?.actor !== scope.runtimeUser) throw closed();
   return (capability as SyntheticRequestCapability).evidenceLevel;

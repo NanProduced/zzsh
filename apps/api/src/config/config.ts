@@ -511,7 +511,16 @@ export function loadConfig(
   const databaseName = required(env, databaseNameKey).trim();
   const databaseUserKey = profile === "migration" ? "MIGRATION_DB_USER" : "DB_USER";
   const databaseUser = required(env, databaseUserKey).trim();
-  assertDatabaseName(targetProfile, databaseName, databaseNameKey);
+  const localDemoFlag=env.LOCAL_DEMO_CLONE_FINANCE_ENABLED?.trim()??"false";
+  if(!['true','false'].includes(localDemoFlag))throw new ConfigurationError('LOCAL_DEMO_CLONE_FINANCE_ENABLED is invalid');
+  const localDemo=localDemoFlag==='true';
+  if(localDemo && (profile!=='dev'||env.NODE_ENV!=='development'||provider!=='fake'||host!=='127.0.0.1'||port!==4232
+    ||target!=='local-compose'||databaseHost!=='127.0.0.1'||databasePort!==55434||databaseName!=='zzsh_test_r07_delivery_20261108'
+    ||env.ECS_TEST_DEMO_FINANCE_ENABLED==='true'||env.ENABLE_TEST_OPERATIONS==='true'
+    ||['JOINPAY_COLLECTION_ENABLED','JOINPAY_REFUND_ENABLED','JOINPAY_PAYOUT_ENABLED','JOINPAY_ACCOUNTS_ENABLED'].some(key=>env[key]!=='false')))
+    throw new ConfigurationError('LOCAL_DEMO_CLONE_TARGET_INVALID');
+  if(!localDemo)assertDatabaseName(targetProfile, databaseName, databaseNameKey);
+  else assertIdentifier(databaseName,databaseNameKey);
   assertIdentifier(databaseUser, databaseUserKey);
   const runtimeUser = profile === "migration"
     ? required(env, "MIGRATION_RUNTIME_USER").trim()
@@ -555,7 +564,7 @@ export function loadConfig(
     if (databaseHost !== LOCAL_HOST || redisHost !== LOCAL_HOST) {
       throw new ConfigurationError("local-compose databases must use 127.0.0.1");
     }
-    if (!LOCAL_DB_PORTS.includes(databasePort) || redisPort !== LOCAL_REDIS_PORT) {
+    if (!(localDemo ? databasePort===55434 : LOCAL_DB_PORTS.includes(databasePort)) || redisPort !== LOCAL_REDIS_PORT) {
       throw new ConfigurationError("local-compose ports are outside the zzsh boundary");
     }
   }

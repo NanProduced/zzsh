@@ -3,10 +3,16 @@ import {readFormalCollectionAdmission,type FormalCollectionAdmission} from '../o
 import {assertBusinessRuntimeIdentity} from '../database/business';
 import {type AppConfig,ConfigurationError} from '../config/config';
 import {REGRESSION_DATABASE,REGRESSION_MARKER,REGRESSION_RUNTIME_USER} from '../config/test-resource';
-export type NativeOriginResource=Readonly<{resourceSet:string;resourceOid:number}>|Readonly<{kind:'NATIVE_WALLET_ORIGIN'|'CONTROLLED_NATIVE_WALLET_ORIGIN'|'PROVISIONED_NATIVE_WALLET_ORIGIN'}>;
+import {assertEcsTestDemoResource,readEcsTestDemoRegistration,type DemoFinanceResource} from './ecs-test-demo-resource';
+export type NativeOriginResource=Readonly<{resourceSet:string;resourceOid:number}>|Readonly<{kind:'NATIVE_WALLET_ORIGIN'|'CONTROLLED_NATIVE_WALLET_ORIGIN'|'PROVISIONED_NATIVE_WALLET_ORIGIN'|'DEMO_NATIVE_WALLET_ORIGIN'}>;
 const formalOrigins=new WeakMap<NativeOriginResource,{admission:FormalCollectionAdmission;database:string;runtimeUser:string}>();
 const controlledOrigins=new WeakMap<NativeOriginResource,{oid:number;nonce:string;runtimeRoleOid:number}>();
 const provisionedOrigins=new WeakMap<NativeOriginResource,{database:string;runtimeUser:string}>();
+const demoOrigins=new WeakMap<NativeOriginResource,DemoFinanceResource>();
+/** Only a branded demo resource may initialize an actually new native user. */
+export function createDemoNativeWalletOriginResource(demo:DemoFinanceResource):NativeOriginResource{
+ readEcsTestDemoRegistration(demo);const resource=Object.freeze({kind:'DEMO_NATIVE_WALLET_ORIGIN' as const});demoOrigins.set(resource,demo);return resource;
+}
 /** Validated application configuration, not merchant authority. SQL still requires the owner's current exact admission row. */
 export function createProvisionedNativeWalletOriginResource(config:AppConfig):NativeOriginResource{
  if(!['dev','ecs-test','production'].includes(config.profile)||config.database.targetProfile!==config.profile
@@ -39,7 +45,9 @@ export function createNativeWalletOriginResource(admission:FormalCollectionAdmis
  const view=readFormalCollectionAdmission(admission),resource=Object.freeze({kind:'NATIVE_WALLET_ORIGIN' as const});
  formalOrigins.set(resource,{admission,database:view.database,runtimeUser:view.runtimeUser});return resource;
 }
-export function assertNativeWalletOriginAssembly(resource:NativeOriginResource|undefined,admission:FormalCollectionAdmission|undefined):boolean{
+export function assertNativeWalletOriginAssembly(resource:NativeOriginResource|undefined,admission:FormalCollectionAdmission|undefined,demo?:DemoFinanceResource):boolean{
+ const bound=resource&&demoOrigins.get(resource);
+ if(bound){if(admission!==undefined||demo!==bound)throw invalid('Demo native origin admission is cross-wired');return false;}
  if(resource&&controlledOrigins.has(resource)){if(admission!==undefined||process.env.NODE_ENV==='production')throw invalid('Controlled native origin cannot cross formal/production assembly');return false;}
  const provisioned=resource&&provisionedOrigins.get(resource);
  if(provisioned){if(admission!==undefined){const view=readFormalCollectionAdmission(admission);if(view.database!==provisioned.database||view.runtimeUser!==provisioned.runtimeUser)throw invalid('Provisioned native origin admission is cross-wired');}return false;}
@@ -58,14 +66,18 @@ export async function initializeNativeWalletOrigin(c:PoolClient,userId:string,re
  const formal=resource&&formalOrigins.get(resource);
  const controlled=resource&&controlledOrigins.get(resource);
  const provisioned=resource&&provisionedOrigins.get(resource);
- const admitted=formal?row.name===formal.database&&row.role===formal.runtimeUser
+ const demo=resource&&demoOrigins.get(resource);
+ if(demo)await assertEcsTestDemoResource(c,demo);
+ const demoBinding=demo?readEcsTestDemoRegistration(demo).registration.resource:undefined;
+ const admitted=demoBinding?row.name===demoBinding.database&&row.role===demoBinding.runtimeRole&&Number(row.oid)===demoBinding.databaseOid&&row.marker===demoBinding.marker
+  :formal?row.name===formal.database&&row.role===formal.runtimeUser
   :controlled?process.env.NODE_ENV!=='production'&&Number(row.oid)===controlled.oid&&row.name===REGRESSION_DATABASE&&row.role===REGRESSION_RUNTIME_USER
     &&Number(row.role_oid)===controlled.runtimeRoleOid&&row.marker===REGRESSION_MARKER&&row.nonce===controlled.nonce
   :provisioned?row.name===provisioned.database&&row.role===provisioned.runtimeUser
   :resource&&'resourceSet'in resource&&/^[a-z][a-z0-9_]{0,20}$/.test(resource.resourceSet)&&Number.isSafeInteger(resource.resourceOid)&&resource.resourceOid>0
     &&Number(row.oid)===resource.resourceOid&&row.name===`zzsh_test_order_${resource.resourceSet}`&&row.role===`zzsh_order_${resource.resourceSet}_r`&&row.marker===marker;
  if(!admitted)return{knowledge:'UNKNOWN' as const,reason:'NATIVE_ORIGIN_RESOURCE_NOT_ADMITTED'};
- if(formal||controlled||provisioned)await assertBusinessRuntimeIdentity(c,{database:{name:row.name,user:row.role,runtimeUser:row.role}});
+ if(formal||controlled||provisioned||demo)await assertBusinessRuntimeIdentity(c,{database:{name:row.name,user:row.role,runtimeUser:row.role}});
  const proof=(await c.query(`SELECT u.id,s.version::text AS identity_version,p.insert_xid::text AS insertion_xid
  FROM zzsh_auth_user."user" u JOIN zzsh_iam.user_identity_state s ON s.user_id=u.id
  JOIN zzsh_order.native_user_insert_proof p ON p.user_id=u.id

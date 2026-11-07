@@ -8,7 +8,8 @@ import { canonicalize } from "../supply/content-hash";
 import { conflict, ensureOnlyFields, fingerprintRequest, invalid, notFound, withIdempotency } from "../supply/supply-util";
 import { readWithdrawalBankBinding } from "./withdrawal-bank-binding";
 import { localWithdrawalDayWindow, ownerLocalWithdrawalPolicy } from "./controlled-withdrawal";
-import { assertLocalFinancialSandboxResource, localFinancialSandboxRegistration, type LocalFinancialSandbox } from "./local-financial-sandbox-resource";
+import { assertRegisteredWithdrawalResource, withdrawalRegistration, type RegisteredWithdrawalResource } from "./native-withdrawal-resource";
+import { assertDemoWithdrawalIdentity } from "./demo-withdrawal-identity";
 
 type Actor = UserContext & { requestId: string };
 type TargetInput = Readonly<{ bankBindingId: string; bankBindingRevision: string; amountCents: string }>;
@@ -26,8 +27,8 @@ export class LocalSandboxTargetCommitUnknown extends SecurityApiError {
   constructor(readonly originalKey: string) { super(503, "EVIDENCE_UNAVAILABLE", "Local target result is unknown; recover the original key"); }
 }
 
-async function originalTarget(c: PoolClient, sandbox: LocalFinancialSandbox, userId: string, receipt: unknown): Promise<void> {
-  const p = localFinancialSandboxRegistration(sandbox), r = receipt as { target?: { id?: unknown } } | null;
+async function originalTarget(c: PoolClient, sandbox: RegisteredWithdrawalResource, userId: string, receipt: unknown): Promise<void> {
+  const p = withdrawalRegistration(sandbox), r = receipt as { target?: { id?: unknown } } | null;
   if (typeof r?.target?.id !== "string") throw unavailable();
   const found = (await c.query(`SELECT d.id FROM zzsh_order.withdrawal_destination d
     JOIN zzsh_order.withdrawal_admission a ON a.id=d.admission_id AND a.user_id=d.user_id
@@ -40,13 +41,13 @@ async function originalTarget(c: PoolClient, sandbox: LocalFinancialSandbox, use
 
 /** Declares one immutable local target from the authenticated subject's existing masked bank binding.
  * It does not reserve a cent, establish coverage/KYC, change the binding, or call a bank/provider. */
-export async function declareLocalSandboxWithdrawalTarget(pool: Pool, actor: Actor, body: Record<string, unknown>, keyValue: unknown, sandbox: LocalFinancialSandbox) {
-  const input = targetInput(body), key = validateIdempotencyKey(keyValue), p = localFinancialSandboxRegistration(sandbox);
+export async function declareLocalSandboxWithdrawalTarget(pool: Pool, actor: Actor, body: Record<string, unknown>, keyValue: unknown, sandbox: RegisteredWithdrawalResource) {
+  const input = targetInput(body), key = validateIdempotencyKey(keyValue), p = withdrawalRegistration(sandbox);
   const policy = ownerLocalWithdrawalPolicy("BANK_CARD", [actor.userId]);
   if (BigInt(input.amountCents) < BigInt(policy.minCents) || BigInt(input.amountCents) > BigInt(policy.maxCents)) throw conflict("Withdrawal limit reached");
   let completed = false;
   try { return await withTransaction(pool, async c => {
-    await assertLocalFinancialSandboxResource(c, sandbox, "READ_ORIGINAL");
+    await assertRegisteredWithdrawalResource(c, sandbox, "READ_ORIGINAL");
     const result = await withIdempotency(c, { realm: "user", principalId: actor.userId, operation: OP, resourceId: p.registration.reference }, key,
       fingerprintRequest(OP, p.registration.reference, input), async replay => {
         await assertUserContextInTransaction(c, actor);
@@ -56,7 +57,8 @@ export async function declareLocalSandboxWithdrawalTarget(pool: Pool, actor: Act
           if (!old) throw unavailable(); await originalTarget(c, sandbox, actor.userId, old.body);
         }
       }, async () => {
-        const registration = await assertLocalFinancialSandboxResource(c, sandbox);
+        const registration = await assertRegisteredWithdrawalResource(c, sandbox);
+        if(sandbox.kind!=="REGISTERED_LOCAL_FINANCIAL_SANDBOX")await assertDemoWithdrawalIdentity(c,actor.userId,sandbox);
         // Uses only the existing public masked projection. No protection key or sealed_details read.
         const current = await readWithdrawalBankBinding(c, actor, { database: registration.resource.database, runtimeUser: registration.resource.runtimeRole });
         if (current.integration !== "INTEGRATED" || !current.binding) throw notFound();
@@ -89,11 +91,11 @@ export async function declareLocalSandboxWithdrawalTarget(pool: Pool, actor: Act
 }
 
 /** Pure original-key read, no implicit target creation/reservation and no provider action. */
-export async function readLocalSandboxWithdrawalTargetReceipt(pool: Pool, actor: Actor, keyValue: unknown, sandbox: LocalFinancialSandbox) {
-  const key = validateIdempotencyKey(keyValue), p = localFinancialSandboxRegistration(sandbox);
+export async function readLocalSandboxWithdrawalTargetReceipt(pool: Pool, actor: Actor, keyValue: unknown, sandbox: RegisteredWithdrawalResource) {
+  const key = validateIdempotencyKey(keyValue), p = withdrawalRegistration(sandbox);
   return withTransaction(pool, async c => {
     await c.query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY");
-    await assertLocalFinancialSandboxResource(c, sandbox, "READ_ORIGINAL"); await assertUserContextInTransaction(c, actor, "READ");
+    await assertRegisteredWithdrawalResource(c, sandbox, "READ_ORIGINAL"); await assertUserContextInTransaction(c, actor, "READ");
     const row = (await c.query("SELECT response_body AS body FROM zzsh_supply.idempotency_record WHERE scope_key=$1 AND key=$2",
       [JSON.stringify(["user", actor.userId, OP, p.registration.reference]), key])).rows[0];
     if (row) await originalTarget(c, sandbox, actor.userId, row.body);
