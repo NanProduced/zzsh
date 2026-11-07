@@ -12,7 +12,7 @@ API参考模板为 `apps/api/.env.deployment.example`，Next参考 `apps/web/.en
 | PostgreSQL | PostgreSQL16兼容目标、准确库名、独立owner/migration/runtime角色、账号与CA证书、备份恢复位置 | `DB_HOST/PORT/NAME/USER/PASSWORD_FILE`、`DB_TLS_MODE=verify-full`、可选 `DB_TLS_CA_FILE`。runtime无DDL/审计改删；migration单独运行后退出，不交给API |
 | Redis | Redis7兼容目标、私网地址、专用ACL用户、密码与CA | `REDIS_HOST/PORT/USER/PASSWORD_FILE`、`REDIS_TLS_MODE=verify-full`、可选 `REDIS_TLS_CA_FILE`。目前用于依赖健康检查；不能宣称业务缓存已搭好 |
 | 图片OSS | 独立团队测试Bucket、地域/HTTPS Endpoint、对象前缀、限定该Bucket/前缀的运行身份 | `MEDIA_STORAGE=oss`、`OSS_BUCKET/REGION/ENDPOINT/OBJECT_PREFIX`；当前读取进程 `ALIBABA_CLOUD_ACCESS_KEY_ID/SECRET`、可选 `ALIBABA_CLOUD_SECURITY_TOKEN`。保持private，API授权中继；历史图与4个默认头像先初始化并逐键核SHA/MIME |
-| 网易云信 | 团队测试AppKey/AppSecret、已开能力/团队容量、客服与系统身份、HTTPS回调地址和验证方式 | `YUNXIN_APP_KEY`、`YUNXIN_APP_SECRET_FILE`、`ORDER_TEAMS_MEMBERS_LIMIT`。真实App配置与本地fake证据分开；85等暂缓能力不自动开放 |
+| 网易云信 | 团队测试AppKey/AppSecret、已开能力/团队容量、客服与系统身份、HTTPS回调地址和验证方式 | `YUNXIN_APP_KEY`、`YUNXIN_APP_SECRET_FILE`、`ORDER_TEAMS_MEMBERS_LIMIT`；订单群事件另配 `ORDER_IM_EVENTS_ENABLED`、同一 App 的 `ORDER_IM_EVENTS_APP_KEY/APP_SECRET_FILE`。真实App配置与本地fake证据分开；85等暂缓能力不自动开放 |
 | 短信 | 已开通账号、审核通过的签名/模板、模板变量、调用权限与费用告警 | `USER_SMS_PROVIDER=aliyun`、`USER_SMS_SIGN_NAME/TEMPLATE_CODE`、独立 `USER_SMS_ACCESS_KEY_ID/SECRET_FILE`；可选同前缀 `SECURITY_TOKEN_FILE`。不借用OSS凭据，无固定验证码回退 |
 | 实名 | 阿里云二要素服务权限、调用凭据、单人每日次数与最小间隔、已发布隐私/传输披露正文 | `USER_REAL_NAME_PROVIDER=aliyun-id2meta`、`USER_REAL_NAME_ACCESS_KEY_ID/SECRET_FILE`、`USER_REAL_NAME_DAILY_LIMIT`、`USER_REAL_NAME_MIN_INTERVAL_SECONDS`。服务响应成功不等于身份匹配；超时按原键恢复，不能盲重发付费调用 |
 | 汇聚收款/退款 | 商户/产品权限、官方接口文档版本和签名样例、签名/验签密钥版本、通知URL、QR允许host、查询/通知与退役原钥保留策略 | `JOINPAY_COLLECTION_CONFIG_FILE`、`JOINPAY_REFUND_CONFIG_FILE`；JSON分别引用 `JOINPAY_COLLECTION_KEY_*(_FILE)`、`JOINPAY_REFUND_KEY_*(_FILE)`。当前渠道没有沙盒，测试账号也不等于无真实资金风险 |
