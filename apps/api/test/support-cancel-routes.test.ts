@@ -22,6 +22,7 @@ function fixture(t: any) {
   });
   t.mock.method(domain, "supportCancelOrder", async (_c: any, actor: any, input: any) => {
     seen.push("action:" + actor.userId + ":" + input.expectedOrderRevision + ":" + input.reason);
+    if(actor.ecsTestDemo===options.ecsTestDemo && options.ecsTestDemo)seen.push('demo:write');
     return { status: 200, body: { contractVersion: "admin-support-cancel.v1", orderId: input.orderId, orderRevision: "2",
       eligibility: { allowed: false, reason: "ALREADY_CANCELLED", refundCents: "15908" }, orderStatus: "CANCELLED",
       cancelReason: "SUPPORT_CANCELLED_REFUND", cancelledAt: "2026-10-30T00:00:00.000000Z", supportCancellation: null,
@@ -29,6 +30,7 @@ function fixture(t: any) {
   });
   t.mock.method(domain, "readSupportCancellation", async (_c: any, actor: any, id: string) => {
     seen.push("read:" + id + ":" + actor.userId);
+    if(actor.ecsTestDemo===options.ecsTestDemo && options.ecsTestDemo)seen.push('demo:read');
     return { contractVersion: "admin-support-cancel.v1", orderId: id, orderRevision: "1", eligibility: { allowed: true, reason: null, refundCents: "15908" } };
   });
   t.mock.method(routes, "runIdempotentWrite", async (_o: any, request: any, res: any, requestId: string, scope: any, actor: any, frozen: any, authorize: any, action: any) => {
@@ -70,6 +72,13 @@ test("GET只读预检；query字段与非GET/POST拒绝", async (t) => {
     f.options, "order_1", new URLSearchParams("amountCents=1"), "GET"), (e: any) => e.status === 400);
   await assert.rejects(handleSupportCancelAdminRoute(f.request("PUT"), f.response, f.options, "order_1", new URLSearchParams(), "PUT"),
     (e: any) => e.status === 404);
+});
+
+test("测试资源只由服务端装配并原样交给预检和命令",async t=>{
+ const f=fixture(t);f.options.ecsTestDemo={kind:'SYNTHETIC_ONLY'};
+ await handleSupportCancelAdminRoute(f.request('GET'),f.response,f.options,'order_1',new URLSearchParams(),'GET');
+ await handleSupportCancelAdminRoute(f.request('POST'),f.response,f.options,'order_1',new URLSearchParams(),'POST');
+ assert(f.seen.includes('demo:read'));assert(f.seen.includes('demo:write'));
 });
 
 test("领域提交后commit响应未知返回202原键恢复，不伪造成取消成功", async (t) => {

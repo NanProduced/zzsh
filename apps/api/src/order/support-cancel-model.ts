@@ -48,14 +48,14 @@ export type SupportCancelEligibility = Readonly<{
  * 订单 PAID、原 APPLIED 付款完整、无结算/结算草稿/待处理调整、无未冲销佣金、
  * 无未完成退款、无其他未处理终止申请；金额固定为原支付金额。
  */
-export function supportCancelEligibility(facts: SupportCancelFacts): SupportCancelEligibility {
+export function supportCancelEligibility(facts: SupportCancelFacts, allowControlled = false): SupportCancelEligibility {
   const blocked = (reason: SupportCancelReason): SupportCancelEligibility =>
     ({ allowed: false, reason, refundCents: null, openingConfirmed: facts?.openingConfirmed === true });
   if (!facts || !["paymentBound", "openingConfirmed", "hasPosting", "pendingSettlement", "pendingAdjustment", "otherTermination"]
     .every(key => typeof (facts as unknown as Record<string, unknown>)[key] === "boolean")
     || typeof facts.monetaryEarningCount !== "string" || typeof facts.activeRefundCount !== "string") return blocked("PAYMENT_BASIS_UNAVAILABLE");
   if (facts.orderState !== "PAID") return blocked(facts.orderState === "COMPLETED" ? "ORDER_COMPLETED" : "ORDER_NOT_PAID");
-  if (!facts.paymentBound || facts.paymentSource !== "JOINPAY" || facts.paymentDisposition !== "APPLIED"
+  if (!facts.paymentBound || !(facts.paymentSource === "JOINPAY" || allowControlled && facts.paymentSource === "CONTROLLED") || facts.paymentDisposition !== "APPLIED"
     || facts.currency !== "CNY" || typeof facts.paidCents !== "string" || !CENTS.test(facts.paidCents) || facts.paidCents !== facts.orderCents)
     return blocked("PAYMENT_BASIS_UNAVAILABLE");
   if (facts.openingConfirmed) return blocked("OPENING_ALREADY_CONFIRMED");

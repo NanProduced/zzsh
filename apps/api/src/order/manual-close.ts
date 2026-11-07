@@ -5,13 +5,14 @@ import { ADMIN_PERMISSION, hasPermission, loadEffectiveAdminAccess } from "../au
 import { assertGameScopeUsable, readAdminGameScope, scopeAllowsGame } from "../auth/admin-scope";
 import { recordAudit, SecurityApiError } from "../auth/security-core";
 import type { FormalCollectionAdmission } from "./joinpay-collection-profile";
+import type { DemoFinanceResource } from "../finance/ecs-test-demo-resource";
 
 const conflict = (message: string) => new SecurityApiError(409, "CONFLICT", message);
 const forbidden = (message = "Access denied") => new SecurityApiError(403, "FORBIDDEN", message);
 const missing = () => new SecurityApiError(404, "NOT_FOUND", "Order not found");
 const CONTEXT = (actor: { userId: string; sessionId: string }) => ({ realm: "admin" as const, userId: actor.userId, sessionId: actor.sessionId });
 
-export type ManualCloseActor = { userId: string; sessionId: string; settlementAdmission?: FormalCollectionAdmission };
+export type ManualCloseActor = { userId: string; sessionId: string; settlementAdmission?: FormalCollectionAdmission; ecsTestDemo?: DemoFinanceResource };
 
 /**
  * Shared support command boundary: active admin with order settlement write,

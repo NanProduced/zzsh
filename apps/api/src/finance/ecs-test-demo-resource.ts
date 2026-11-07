@@ -221,8 +221,9 @@ export async function ensureEcsTestDemoOrderAdmission(client: PoolClient, scope:
   return actual.id as string;
 }
 
-export async function assertEcsTestDemoOrderAdmission(client: PoolClient, scope: DemoFinanceResource, orderId: string) {
-  const proof = readEcsTestDemoRegistration(scope), { resource } = await assertEcsTestDemoResource(client, scope);
+export async function assertEcsTestDemoOrderAdmission(client: PoolClient, scope: DemoFinanceResource, orderId: string, mode:'WRITE'|'READ_ORIGINAL'='WRITE') {
+  const proof = readEcsTestDemoRegistration(scope), { resource, active } = await assertEcsTestDemoResource(client, scope, mode);
+  if (!active && mode === 'WRITE') throw unavailable();
   const row = (await client.query(`SELECT id FROM zzsh_order.distribution_order_admission WHERE order_id=$1 AND mode='LOCAL_CONTROLLED'
     AND resource_oid=$2 AND resource_name=$3 AND resource_marker=$4 AND approval_digest=$5 AND active
     AND admitted_at<=clock_timestamp() AND expires_at>clock_timestamp()`,

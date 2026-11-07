@@ -89,6 +89,15 @@ test("未开租允许全额原款应退；已开租/结算/草稿/佣金/退款/
   for (const [patch, reason] of cases) assert.equal(supportCancelEligibility({ ...excellent, ...patch }).reason, reason);
 });
 
+test("CONTROLLED 仅在服务端已确认演示准入时通过纯资格判断，金额和其他门禁不变",()=>{
+  const demo={...excellent,paymentSource:'CONTROLLED'};
+  assert.equal(supportCancelEligibility(demo).reason,'PAYMENT_BASIS_UNAVAILABLE');
+  assert.equal(supportCancelEligibility(demo,true).allowed,true);
+  assert.equal(supportCancelEligibility({...demo,paidCents:'1'},true).reason,'PAYMENT_BASIS_UNAVAILABLE');
+  assert.equal(supportCancelEligibility({...demo,openingConfirmed:true},true).reason,'OPENING_ALREADY_CONFIRMED');
+  assert.equal(supportCancelEligibility({...demo,activeRefundCount:'1'},true).reason,'REFUND_PENDING');
+});
+
 test("客服取消复用全额责任链：SUPPORT申请方、独立取消原因、不提交渠道、不伪造到账", async (t) => {
   const h = fixture(t);
   const result = await supportCancelOrder(h.client, actor, input);

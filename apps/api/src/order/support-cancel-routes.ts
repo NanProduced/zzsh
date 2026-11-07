@@ -7,6 +7,7 @@ import { requireOrigin, runIdempotentWrite, type SupplyResponse } from "../suppl
 import { assertSupportOrderAccess } from "./manual-close";
 import { assertSupportCancelInput } from "./support-cancel-model";
 import { readSupportCancellation, supportCancelOrder } from "./support-cancel";
+import type { DemoFinanceResource } from "../finance/ecs-test-demo-resource";
 
 const ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 
@@ -14,7 +15,7 @@ const ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 export async function handleSupportCancelAdminRoute(
   request: SupplyNodeRequest,
   response: SupplyResponse,
-  options: AuthSecurityOptions,
+  options: AuthSecurityOptions & { ecsTestDemo?: DemoFinanceResource },
   orderId: string,
   query: URLSearchParams,
   method: string,
@@ -25,7 +26,7 @@ export async function handleSupportCancelAdminRoute(
   response.setHeader("X-Request-Id", requestId);
   if (method === "GET") {
     const context = await readAdminContext(request, options);
-    const actor = { userId: context.userId, sessionId: context.sessionId, settlementAdmission: options.settlementAdmission };
+    const actor = { userId: context.userId, sessionId: context.sessionId, settlementAdmission: options.settlementAdmission, ecsTestDemo: options.ecsTestDemo };
     const body = await withTransaction(options.pool, async client => {
       await client.query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY");
       return readSupportCancellation(client, actor, orderId);
@@ -36,7 +37,7 @@ export async function handleSupportCancelAdminRoute(
   if (method !== "POST") throw notFound();
   if (!requireOrigin(request, response, options, requestId)) return true;
   const context = await readAdminContext(request, options);
-  const actor = { userId: context.userId, sessionId: context.sessionId, settlementAdmission: options.settlementAdmission };
+  const actor = { userId: context.userId, sessionId: context.sessionId, settlementAdmission: options.settlementAdmission, ecsTestDemo: options.ecsTestDemo };
   const body = bodyOf(request);
   ensureOnlyFields(body, ["expectedOrderRevision", "reason"]);
   const frozen = assertSupportCancelInput(body);

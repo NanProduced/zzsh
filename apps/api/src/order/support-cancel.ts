@@ -6,6 +6,7 @@ import { recognizePrestartRefundLiability, verifyPrestartRefundLiability } from 
 import { assertSupportOrderAccess, type ManualCloseActor } from "./manual-close";
 import { lockSettlement } from "./settlement-record";
 import { readPrestartRefundProgress } from "./prestart-refund-store";
+import { assertEcsTestDemoOrderAdmission, assertEcsTestDemoResource, demoFinanceScope } from "../finance/ecs-test-demo-resource";
 import type { PrestartPaymentBasis } from "./prestart-termination";
 import {
   supportCancelEligibility, supportCancelConflict, type SupportCancelFacts, type SupportCancelReason,
@@ -59,7 +60,7 @@ async function factsOf(client: PoolClient, orderId: string): Promise<SupportFact
     EXISTS(SELECT 1 FROM zzsh_order.settlement_version v WHERE v.order_id=o.id AND v.superseded_at IS NULL) AS pending_settlement,
     EXISTS(SELECT 1 FROM zzsh_order.settlement_version v WHERE v.order_id=o.id AND v.kind='MANUAL_ADJUSTMENT' AND v.superseded_at IS NULL) AS pending_adjustment,
     (SELECT count(*) FROM zzsh_order.rental_referral_earning e WHERE e.order_id=o.id AND e.amount_cents>0 AND e.state<>'REVOKED')::text AS earning_count,
-    (SELECT count(*) FROM zzsh_order.channel_refund_intent i WHERE i.order_id=o.id AND i.payment_source='JOINPAY'
+    (SELECT count(*) FROM zzsh_order.channel_refund_intent i WHERE i.order_id=o.id
       AND i.budget_disposition<>'RELEASED')::text AS active_refund_count,
     EXISTS(SELECT 1 FROM zzsh_order.prestart_termination t WHERE t.order_id=o.id AND t.state<>'REJECTED'
       AND t.requested_by_party<>'SUPPORT') AS other_termination
@@ -84,15 +85,22 @@ function modelFacts(row: SupportFactsRow): SupportCancelFacts {
   };
 }
 
-function paymentBasis(row: SupportFactsRow): PrestartPaymentBasis {
-  if (!row.confirmation_id || row.payment_source !== "JOINPAY" || row.disposition !== "APPLIED" || row.currency !== "CNY"
+function paymentBasis(row: SupportFactsRow, allowControlled: boolean): PrestartPaymentBasis {
+  if (!row.confirmation_id || !(row.payment_source === "JOINPAY" || allowControlled && row.payment_source === "CONTROLLED") || row.disposition !== "APPLIED" || row.currency !== "CNY"
     || !row.amount_cents || !row.merchant_identity_id || !row.merchant_order_no || !row.channel_trx_no)
     throw unavailable("Original applied payment is unavailable");
   const value = { orderId: row.id, renterUserId: row.renter_user_id, ownerUserId: row.owner_user_id,
-    paymentConfirmationId: row.confirmation_id, source: "JOINPAY" as const,
+    paymentConfirmationId: row.confirmation_id, source: row.payment_source as "JOINPAY" | "CONTROLLED",
     merchantIdentityId: row.merchant_identity_id, merchantOrderNo: row.merchant_order_no, channelTrxNo: row.channel_trx_no,
     amountCents: row.amount_cents, currency: "CNY" as const };
   return { ...value, digest: hashApprovalPayload({ schema: "prestart-payment-basis.v1", ...value }).hash };
+}
+
+async function demoForFacts(client:PoolClient,actor:ManualCloseActor,facts:SupportFactsRow,mode:'WRITE'|'READ_ORIGINAL') {
+  if(facts.payment_source!=='CONTROLLED'||!actor.ecsTestDemo)return null;
+  const registration=await assertEcsTestDemoResource(client,actor.ecsTestDemo,mode);
+  await assertEcsTestDemoOrderAdmission(client,actor.ecsTestDemo,facts.id,mode);
+  return {resource:actor.ecsTestDemo,active:registration.active};
 }
 
 async function latestSupportTermination(client: PoolClient, orderId: string, lock = false): Promise<SupportTerminationRow | null> {
@@ -118,11 +126,11 @@ function channelResultOf(progress: Awaited<ReturnType<typeof readPrestartRefundP
   return states.some(state => state === "READY") ? "NOT_SUBMITTED" : "UNKNOWN";
 }
 
-async function existingResult(client: PoolClient, row: SupportTerminationRow, facts: SupportFactsRow, existing: boolean) {
+async function existingResult(client: PoolClient, row: SupportTerminationRow, facts: SupportFactsRow, existing: boolean, demo:Awaited<ReturnType<typeof demoForFacts>>) {
   if (row.state !== "APPROVED" || !row.liability_root_id || !row.liability_event_id) throw unavailable("Support cancellation is inconsistent");
   if (facts.status !== "CANCELLED" || facts.cancel_reason !== "SUPPORT_CANCELLED_REFUND") throw unavailable("Support cancellation order state is inconsistent");
   await verifyPrestartRefundLiability(client, row.id, row.payment_basis, row.liability_root_id, row.liability_event_id);
-  const refund = await readPrestartRefundProgress(client, row.id, row.payment_basis, true);
+  const refund = await readPrestartRefundProgress(client, row.id, row.payment_basis, true,undefined,demo?.resource);
   return { status: 200, body: {
     contractVersion: SUPPORT_CANCEL_VERSION, orderId: facts.id, orderRevision: facts.revision, existing,
     orderStatus: "CANCELLED", cancelReason: "SUPPORT_CANCELLED_REFUND", cancelledAt: facts.cancelled_at,
@@ -130,7 +138,8 @@ async function existingResult(client: PoolClient, row: SupportTerminationRow, fa
     eligibility: { allowed: false, reason: "ALREADY_CANCELLED" as SupportCancelReason,
       refundCents: row.payment_basis?.amountCents ?? null, openingConfirmed: facts.opening_confirmed },
     openingConfirmed: facts.opening_confirmed,
-    channel: { result: existing ? channelResultOf(refund) : "NOT_SUBMITTED", bankArrival: "UNKNOWN" as const },
+    channel: { result: existing && !demo ? channelResultOf(refund) : "NOT_SUBMITTED", bankArrival: "UNKNOWN" as const },
+    ...(demo?{simulationScope:demoFinanceScope(demo.resource)}:{}),
   } };
 }
 
@@ -145,14 +154,15 @@ export async function supportCancelOrder(client: PoolClient, actor: ManualCloseA
   await lockSettlement(client, input.orderId, { ...actor, realm: "admin" }, "PRESTART_TERMINATION", true);
   await assertSupportCancelSchema(client);
   let facts = await factsOf(client, input.orderId);
+  const demo=await demoForFacts(client,actor,facts,'WRITE');
   const current = await latestSupportTermination(client, input.orderId, true);
-  if (current && current.state !== "REJECTED") return existingResult(client, current, facts, true);
+  if (current && current.state !== "REJECTED") return existingResult(client, current, facts, true,demo);
   if (facts.revision !== input.expectedOrderRevision) {
     const changed = supportCancelConflict(input.orderId, "ORDER_CHANGED"); changed.body.orderRevision = facts.revision; return changed;
   }
-  const eligibility = supportCancelEligibility(modelFacts(facts));
+  const eligibility = supportCancelEligibility(modelFacts(facts),demo?.active===true);
   if (!eligibility.allowed) return supportCancelConflict(input.orderId, eligibility.reason!);
-  const basis = paymentBasis(facts);
+  const basis = paymentBasis(facts,demo?.active===true);
   const terminationId = `pterm_${randomUUID().replaceAll("-", "")}`;
   const inserted = await client.query(`INSERT INTO zzsh_order.prestart_termination
     (id,order_id,requested_by_user_id,requested_by_party,requested_by_admin_user_id,reason,basis_digest,payment_basis,request_id)
@@ -187,7 +197,7 @@ export async function supportCancelOrder(client: PoolClient, actor: ManualCloseA
     FROM zzsh_order.prestart_termination WHERE id=$1`, [terminationId])).rows[0]!;
   facts = { ...facts, status: "CANCELLED", cancel_reason: "SUPPORT_CANCELLED_REFUND", revision: cancelled.revision,
     cancelled_at: cancelled.cancelledAt };
-  const refund = await readPrestartRefundProgress(client, terminationId, basis, true);
+  const refund = await readPrestartRefundProgress(client, terminationId, basis, true,undefined,demo?.resource);
   return { status: 200, body: {
     contractVersion: SUPPORT_CANCEL_VERSION, orderId: input.orderId, orderRevision: cancelled.revision, existing: false,
     orderStatus: "CANCELLED", cancelReason: "SUPPORT_CANCELLED_REFUND", cancelledAt: cancelled.cancelledAt,
@@ -196,6 +206,7 @@ export async function supportCancelOrder(client: PoolClient, actor: ManualCloseA
       refundCents: basis.amountCents, openingConfirmed: facts.opening_confirmed },
     openingConfirmed: facts.opening_confirmed,
     channel: { result: "NOT_SUBMITTED" as const, bankArrival: "UNKNOWN" as const },
+    ...(demo?{simulationScope:demoFinanceScope(demo.resource)}:{}),
   } };
 }
 
@@ -205,25 +216,28 @@ export async function readSupportCancellation(client: PoolClient, actor: ManualC
   await assertSupportOrderAccess(client, orderId, actor);
   await assertSupportCancelSchema(client);
   const facts = await factsOf(client, orderId);
+  const demo=await demoForFacts(client,actor,facts,'READ_ORIGINAL');
   const current = await latestSupportTermination(client, orderId);
   if (current) {
     if (current.state !== "REJECTED") {
-      const result = await existingResult(client, current, facts, true);
+      const result = await existingResult(client, current, facts, true,demo);
       return { ...result.body, eligibility: { allowed: false, reason: "ALREADY_CANCELLED" as SupportCancelReason,
         refundCents: current.payment_basis?.amountCents ?? null, openingConfirmed: facts.opening_confirmed } };
     }
     if (current.state === "REJECTED") {
-      const eligibility = supportCancelEligibility(modelFacts(facts));
+      const eligibility = supportCancelEligibility(modelFacts(facts),demo?.active===true);
       return { contractVersion: SUPPORT_CANCEL_VERSION, orderId, orderRevision: facts.revision, orderStatus: facts.status,
         cancelReason: facts.cancel_reason, cancelledAt: facts.cancelled_at, eligibility: { ...eligibility, refundCents: facts.amount_cents },
-        openingConfirmed: facts.opening_confirmed, supportCancellation: null, refund: null, existing: false, channel: null };
+        openingConfirmed: facts.opening_confirmed, supportCancellation: null, refund: null, existing: false, channel: null,
+        ...(demo?{simulationScope:demoFinanceScope(demo.resource)}:{}) };
     }
   }
-  const eligibility = supportCancelEligibility(modelFacts(facts));
+  const eligibility = supportCancelEligibility(modelFacts(facts),demo?.active===true);
   return { contractVersion: SUPPORT_CANCEL_VERSION, orderId, orderRevision: facts.revision, orderStatus: facts.status,
     cancelReason: facts.cancel_reason, cancelledAt: facts.cancelled_at,
     eligibility: { ...eligibility, refundCents: facts.amount_cents },
-    openingConfirmed: facts.opening_confirmed, supportCancellation: null, refund: null, existing: false, channel: null };
+    openingConfirmed: facts.opening_confirmed, supportCancellation: null, refund: null, existing: false, channel: null,
+    ...(demo?{simulationScope:demoFinanceScope(demo.resource)}:{}) };
 }
 
 export type { SupportCancelFacts, SupportCancelReason } from "./support-cancel-model";
