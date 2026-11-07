@@ -847,13 +847,14 @@ export async function adminRequest<T>(path: string, body?: Record<string, unknow
     if (altcha) body = { ...body, altcha };
   }
   const idempotencyKey = verb === "GET" ? undefined : `idem_${(globalThis.crypto?.randomUUID?.() ?? `${Date.now()}_${Math.random().toString(16).slice(2)}`).replaceAll("-", "")}`;
+  const hasIdempotencyKey = Object.keys(extraHeaders).some(name => name.toLowerCase() === "idempotency-key");
   try {
     response = await fetch(`${API_ROOT}${path}`, {
       method: verb,
       credentials: "include",
       headers: verb === "GET"
         ? (Object.keys(extraHeaders).length ? extraHeaders : undefined)
-        : { "content-type": "application/json", ...(idempotencyKey ? { "idempotency-key": idempotencyKey } : {}), ...extraHeaders },
+        : { "content-type": "application/json", ...(idempotencyKey && !hasIdempotencyKey ? { "idempotency-key": idempotencyKey } : {}), ...extraHeaders },
       body: verb === "GET" ? undefined : JSON.stringify(body ?? {}),
       signal,
     });

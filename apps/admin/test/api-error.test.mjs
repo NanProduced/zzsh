@@ -48,6 +48,18 @@ test('result recovery GET forwards the original key without generating a new key
   assert.equal(calls[2].init.headers['idempotency-key'],'explicit-write-key');
 });
 
+test('write idempotency keys honor explicit header names regardless of case', async t => {
+  const calls=[];
+  t.mock.method(globalThis,'fetch',async (url,init)=>{ calls.push(init); return Response.json({ok:true}); });
+  await adminRequest('/orders/legacy_order_test/create-team',{},'POST',{'Idempotency-Key':'original-key'});
+  assert.equal(new Headers(calls[0].headers).get('idempotency-key'),'original-key');
+  assert.equal(Object.keys(calls[0].headers).filter(name=>name.toLowerCase()==='idempotency-key').length,1);
+  await adminRequest('/orders/legacy_order_test/create-team',{},'POST',{'Idempotency-Key':''});
+  assert.equal(new Headers(calls[1].headers).get('idempotency-key'),'');
+  await adminRequest('/orders/legacy_order_test/create-team',{},'POST');
+  assert.match(new Headers(calls[2].headers).get('idempotency-key'),/^idem_/);
+});
+
 test('security command errors carry one controlled reason beside the existing envelope', async t => {
   t.mock.method(globalThis,'fetch',async()=>new Response(JSON.stringify({error:{code:'FORBIDDEN',requestId:'req-9',reason:'invalid_pin'},reasons:['other']}),{status:403,headers:{'content-type':'application/json'}}));
   await assert.rejects(adminRequest('/security/pin/change',{currentPin:'x',newPin:'y'}),e=>{
