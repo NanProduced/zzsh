@@ -290,3 +290,16 @@ test('a refund projection with the wrong contract, subject or order never reache
     assert.equal((await GET(input(path,{headers:{'x-zzsh-expected-user-id':'user_a'}}),ctx(path))).status,502);
   }finally{globalThis.fetch=old;}
 });
+
+test('owner refund summary is forwarded only for the captured subject and requested order',async()=>{
+  const old=globalThis.fetch,path=['order_r','refunds'];
+  const valid={contractVersion:'owner-refund-minimal.v1',subjectId:'user_a',orderId:'order_r',progress:'DONE'};
+  try{
+    for(const [payload,status] of [[valid,200],[{...valid,subjectId:'user_b'},502],[{...valid,orderId:'order_other'},502]]){
+      globalThis.fetch=async(url)=>String(url).endsWith('/get-session')?Response.json({user:{id:'user_a'}}):Response.json(payload);
+      const response=await GET(input(path,{headers:{'x-zzsh-expected-user-id':'user_a'}}),ctx(path));
+      assert.equal(response.status,status);
+      if(status===200)assert.deepEqual(await response.json(),valid);
+    }
+  }finally{globalThis.fetch=old;}
+});

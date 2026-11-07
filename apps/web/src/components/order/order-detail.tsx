@@ -332,8 +332,9 @@ function AbnormalResponsibilityCard({ item }: { item: PersonalAbnormalResponsibi
 }
 
 function RefundIntentCard({ intent }: { intent: PersonalRefundIntent }) {
+  const stateLabel = intent.source === "LOCAL_CONTROLLED" && intent.state === "SUCCEEDED" ? "模拟退款已记录" : refundIntentStateLabel[intent.state];
   return <li className="order-refund-intent">
-    <div className="order-refund-intent-head"><strong>{intent.refundOrderNo ?? "退款申请"}</strong><span className="order-refund-state">{refundIntentStateLabel[intent.state]}</span></div>
+    <div className="order-refund-intent-head"><strong>{intent.refundOrderNo ?? "退款申请"}</strong><span className="order-refund-state">{stateLabel}</span></div>
     <dl className="order-facts order-refund-intent-facts">
       <div><dt>申请金额</dt><dd>{intent.amount ? refundMoney(intent.amount.cents) : "未记录"}</dd></div>
       {intent.createdAt ? <div><dt>申请时间</dt><dd>{timeText(intent.createdAt, { timeZoneName: false })}</dd></div> : null}
@@ -423,9 +424,12 @@ function OrderRefundSection({ order }: { order: Order }) {
   }
   const read = visible.read;
   if (!read) return null;
-  const outcome = refundOutcomeCopy[read.outcome], responsibility = read.responsibility;
+  const responsibility = read.responsibility;
   const attentionRequired = ["UNKNOWN", "REVIEW_REQUIRED", "TRUNCATED", "CONFLICT"].includes(read.outcome);
   const incomplete = read.responsibilitiesTruncated || read.intentsTruncated || !read.coverage.intentsComplete || Boolean(read.responsibilityTotals && !read.responsibilityTotals.totalsComplete) || responsibility.state === "POSTED" && !responsibility.totalsComplete;
+  const simulated = read.outcome === "FULLY_CONSUMED" && !incomplete && read.intents.length > 0
+    && read.intents.every(intent => intent.source === "LOCAL_CONTROLLED" && intent.state === "SUCCEEDED" && intent.budgetDisposition === "CONSUMED");
+  const outcome = simulated ? { label: "模拟退款已记录", note: "测试记录，不代表实际退款或到账。" } : refundOutcomeCopy[read.outcome];
   return <section className="order-detail-section order-refund-block" aria-label="退款进度" data-outcome={read.outcome}>
     <div className="order-refund-heading"><h2 className="order-section-title">退款进度</h2>{refresh}</div>
     <details className="order-secondary-details order-refund-details" open={attentionRequired}>

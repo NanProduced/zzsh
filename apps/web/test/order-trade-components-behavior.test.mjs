@@ -2480,6 +2480,21 @@ test("C02: renter refund section separates frozen responsibility, local write-of
   });
 });
 
+test("a completed local simulated refund is labeled without claiming channel arrival", async () => {
+  await withDom(async window => {
+    const read=refundRead("order_A",{status:"AVAILABLE",outcome:"FULLY_CONSUMED",
+      responsibility:{state:"POSTED",postingId:"posting_1",originalCents:"28000",allocatedCents:"28000",consumedCents:"28000",releasedCents:"0",remainingCents:"0",totalsComplete:true,dueAt:"2026-10-19T04:30:00Z",dueState:"DUE"},
+      intents:[refundIntent({source:"LOCAL_CONTROLLED",evidenceLevel:"LOCAL_CONTROLLED",savedChannelEvidence:null})],returnedIntentCount:1});
+    const probe=await detailProbe(window,{...paidOrder,status:"COMPLETED"},"renter",postedSettlement,read);
+    try {
+      const section=probe.host.querySelector('.order-refund-block');
+      assert.match(section.textContent,/模拟退款已记录/);
+      assert.match(section.textContent,/不代表实际退款或到账/);
+      assert.doesNotMatch(section.textContent,/退款已到账|银行已到账/);
+    } finally {await probe.dispose();}
+  });
+});
+
 test("refund due time never promises processing when no application is present", async () => {
   await withDom(async window => {
     for (const [dueState,outcome,expected] of [["NOT_DUE","NOT_DUE","未到期"],["DUE","NO_INTENT","已到期"],["UNKNOWN","UNKNOWN","状态未记录"]]) {
