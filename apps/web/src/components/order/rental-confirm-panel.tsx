@@ -39,7 +39,6 @@ type Stage =
   | { kind: "creating"; quote: PersonalRentalQuote | null }
   | { kind: "create-unknown"; context: StoredContext; message: string; stale: boolean }
   | { kind: "created"; quote: PersonalRentalQuote; orderId: string }
-  | { kind: "paying"; orderId: string }
   | { kind: "pay-unknown"; orderId: string; message: string }
   | { kind: "paid"; orderId: string }
   | { kind: "review"; orderId: string; reason: string | null }
@@ -730,15 +729,6 @@ export function RentalConfirmPanel({
     }
   }, [isCurrent]);
 
-  const pay = useCallback(async (orderId: string) => {
-    if (!userId) return;
-    const acting = userId;
-    setStage({ kind: "paying", orderId });
-    const outcome = await performGuardedWrite(acting, "order.payment", orderId, {}, undefined, (key) => orderApi.pay(orderId, key));
-    if (!isCurrent(acting)) return;
-    applyPayment(acting, outcome as WriteOutcome<{ payment: { confirmationId: string; disposition: string; reasonCode?: string | null; replay: boolean } }>, orderId);
-  }, [userId, isCurrent, applyPayment]);
-
   const recoverPayment = useCallback(async (orderId: string) => {
     if (!userId) return;
     const acting = userId;
@@ -901,16 +891,14 @@ export function RentalConfirmPanel({
       <p className="detail-stage-note">{stage.quote ? "正在创建订单并占用账号；若网络中断，本页会保留原请求供你查询。" : "正在查询原创建请求…"}</p>
     </div>;
 
-    if (stage.kind === "created" || stage.kind === "paying") {
+    if (stage.kind === "created") {
       const orderId = stage.orderId;
       return <div className="rental-confirm rental-confirm--quote">
         <div className="rental-confirm-head"><strong>订单已创建</strong><span className="rental-confirm-tier">{orderId}</span></div>
-        {stage.kind === "created" ? <p className="rental-confirm-total-line">预计合计 {formatMoneyLabel(stage.quote.quote?.tenantPayableTotal ?? null) ?? "以服务端确认为准"}</p> : null}
-        <p className="detail-stage-note">请在订单中选择当前可用的支付方式。下方本地测试支付只生成本地收款依据，不代表真实渠道到账；付款不等于交付或开租。</p>
+        <p className="rental-confirm-total-line">预计合计 {formatMoneyLabel(stage.quote.quote?.tenantPayableTotal ?? null) ?? "以服务端确认为准"}</p>
+        <p className="detail-stage-note">请在订单中选择可用的支付方式。付款后还需客服协助确认开租。</p>
         <div className="rental-confirm-actions">
-          <div className="rental-confirm-primary-action">{dockPrice}<Link className="button rental-confirm-primary" href={orderHref(orderId)}>前往订单支付</Link><button type="button" className="button secondary button--sm" onClick={() => void pay(orderId)} disabled={stage.kind === "paying"}>
-            {stage.kind === "paying" ? "提交支付请求…" : "提交本地测试支付"}
-          </button></div>
+          <div className="rental-confirm-primary-action">{dockPrice}<Link className="button rental-confirm-primary" href={orderHref(orderId)}>前往订单支付</Link></div>
         </div>
       </div>;
     }

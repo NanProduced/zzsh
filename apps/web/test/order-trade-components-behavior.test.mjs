@@ -694,6 +694,28 @@ function loadPanel(sessionUser, optionsResponder) {
 const referenceFees = { total: "¥295.91", haff: "¥256.41", items: "¥39.50" };
 const detailPanelProps = { accountId: "detail_price", gameId: "game_1", versionId: "listing_1", releaseId: "release_1", reference: referenceFees };
 
+test("a created order directs payment to its order page without a legacy test-payment action", async () => {
+  await withDom(async window => {
+    const log = [], accountId = "account_created_payment_entry";
+    const fetchImpl = router([
+      { match: "/api/order-confirmations", method: "POST", respond: () => json(confirmation) },
+      { match: "/api/v2/orders", method: "POST", respond: () => json({ order: { id: "order_created", status: "PENDING_PAYMENT" } }) },
+    ], log);
+    const probe = createProbe(window, loadPanel("user_A", async () => publishingOptions), { ...detailPanelProps, accountId }, fetchImpl);
+    try {
+      await probe.render();
+      await probe.click("查看我的报价");
+      await probe.acceptAgreement();
+      await probe.click("确认并创建订单");
+      assert.match(probe.host.textContent, /订单已创建/);
+      const link = [...probe.host.querySelectorAll("a")].find(node => node.textContent?.includes("前往订单支付"));
+      assert.ok(link?.getAttribute("href")?.includes("order_created"));
+      assert.doesNotMatch(probe.host.textContent, /提交本地测试支付/);
+      assert.equal(log.filter(entry => entry.url.includes("payment-requests")).length, 0);
+    } finally { await probe.dispose(() => intents.clearIntent("user_A", "order.create.v2", accountId)); }
+  });
+});
+
 test("R03: invalid confirmation uses actionable Chinese copy and only explicitly requotes", async () => {
   await withDom(async window => {
     const log = [];
