@@ -113,7 +113,9 @@ test('demo withdrawal keeps test wording and confirms the server quote without c
  p.demoApi.quoteDemoWithdrawal=async(userId,receivedScope,receivedTarget,walletVersion)=>{assert.equal(receivedScope,scope);assert.equal(receivedTarget.id,target.id);assert.equal(walletVersion,'7');return{body,quote:demoQuote};};
  p.demoApi.confirmDemoWithdrawal=async(userId,receivedScope,receivedBody,receivedQuote)=>{assert.equal(receivedScope,scope);assert.deepEqual(receivedBody,body);assert.equal(receivedQuote.requestKey,'demo-key');p.calls.push({method:'demo-confirm'});p.setPendingDemo(null);return result;};
  try {await p.render();assert.match(p.host.textContent,/模拟提现/);assert.match(p.host.textContent,/不会向银行卡打款/);await p.fill('.bank-withdraw-form input','100');await p.submit('.bank-withdraw-form');
-  assert.match(p.host.textContent,/模拟出款金额/);await p.submit('.bank-withdraw-form');await p.click('确认模拟提现',p.host.querySelector('[role="alertdialog"]'));
+  assert.match(p.host.textContent,/模拟出款金额/);await p.submit('.bank-withdraw-form');p.setPendingBank({userId:'user_A',key:'bank-original',expectedRevision:'1'});
+  await p.click('确认模拟提现',p.host.querySelector('[role="alertdialog"]'));assert.match(p.host.textContent,/请先确认收款资料的保存结果/);assert.equal(p.calls.filter(x=>x.method==='demo-confirm').length,0);
+  p.setPendingBank(null);await p.submit('.bank-withdraw-form');await p.click('确认模拟提现',p.host.querySelector('[role="alertdialog"]'));
   assert.equal(p.calls.filter(x=>x.method==='demo-target').length,1);assert.equal(p.calls.filter(x=>x.method==='demo-confirm').length,1);assert.equal(p.changes.length,1);
   assert.match(p.host.textContent,/模拟提现完成/);assert.match(p.host.textContent,/没有向银行卡打款/);
  }finally{await p.close();}
@@ -125,6 +127,13 @@ test('an unknown demo write blocks a second request and queries the original res
  p.demoApi.recoverDemoWithdrawal=async(userId,receivedScope)=>{assert.equal(userId,'user_A');assert.equal(receivedScope,scope);p.calls.push({method:'demo-recover'});return{knowledge:'UNKNOWN',pending,intent:null};};
  try{await p.render();assert.match(p.host.textContent,/上次模拟操作结果待确认/);await p.click('查询原申请');assert.match(p.host.textContent,/原申请仍未确认/);assert.equal(p.calls.filter(x=>x.method==='demo-recover').length,1);assert.equal(p.calls.filter(x=>x.method==='demo-target').length,0);}
  finally{await p.close();}
+});
+
+test('demo withdrawal refuses a newly pending bank save before declaring a target',async()=>{
+ const scope='LOCAL_DEMO_SIMULATED',p=await probe({availableBalance:'15000',ledgerRevision:'7',demo:{readDemoAvailability:async()=>({scope,withdrawalEnabled:true,observedAt:at})}});
+ try {await p.render();await p.fill('.bank-withdraw-form input','100');p.setPendingBank({userId:'user_A',key:'bank-original',expectedRevision:'1'});
+  await p.submit('.bank-withdraw-form');assert.match(p.host.textContent,/请先确认收款资料的保存结果/);assert.equal(p.calls.filter(x=>x.method==='demo-target').length,0);
+ }finally{await p.close();}
 });
 
 test('withdrawal shows only the confirmed wallet balance and keeps a missing balance unknown', async () => {

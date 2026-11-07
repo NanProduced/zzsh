@@ -550,6 +550,7 @@ function DemoWithdrawalPanel({scope,refreshKey,bindingLocked,availableBalance,le
     finally{if(identity.current())setBusy(false);busyRef.current=false;}};
   const preview=()=>void run(async()=>{
     if(!identity.userId||!ledgerRevision||!binding?.binding||bindingLocked||!enabled)return;
+    try{if(pendingBankBinding(identity.userId)){setMessage("请先确认收款资料的保存结果。");return;}}catch{setMessage("收款资料的保存状态无法确认，请联系客服。");return;}
     let original=sync();if(original===undefined||original?.stage==="target"||original?.stage==="confirm")return;
     if(!original){let amountCents:string;try{amountCents=yuanToCents(amount);if(BigInt(amountCents)<=0n)throw Error();}catch{setMessage("请输入大于 0、最多两位小数的金额。");return;}
       original=await createDemoTarget(identity.userId,demoScope,{bankBindingId:binding.binding.id,bankBindingRevision:binding.binding.revision,amountCents},{isCurrent:identity.current});setPending(original);}
@@ -561,7 +562,8 @@ function DemoWithdrawalPanel({scope,refreshKey,bindingLocked,availableBalance,le
     setPending(recovered.pending);if(recovered.knowledge==="UNKNOWN")setMessage("原申请仍未确认，请稍后再次查询，或联系客服。");
     else if(recovered.intent){setResult(recovered.intent);setQuote(null);onWalletChanged();setMessage("已找到原模拟提现记录。");}
     else if(recovered.pending?.stage==="target-ready"){const n=BigInt(recovered.pending.body.amountCents);setAmount(`${n/100n}.${(n%100n).toString().padStart(2,"0")}`);setMessage("已找到原收款目标，请继续核对提现信息。");}});
-  const submit=()=>void run(async()=>{if(!identity.userId||!quote)return;const intent=await confirmDemoWithdrawal(identity.userId,demoScope,quote.body,quote.quote,{isCurrent:identity.current});
+  const submit=()=>void run(async()=>{if(!identity.userId||!quote)return;try{if(pendingBankBinding(identity.userId)){setMessage("请先确认收款资料的保存结果。");setConfirmOpen(false);return;}}catch{setMessage("收款资料的保存状态无法确认，请联系客服。");setConfirmOpen(false);return;}
+    const intent=await confirmDemoWithdrawal(identity.userId,demoScope,quote.body,quote.quote,{isCurrent:identity.current});
     if(identity.current()){setPending(null);setQuote(null);setConfirmOpen(false);setResult(intent);onWalletChanged();}});
   const refresh=()=>void run(async()=>{if(!identity.userId||!result)return;const intent=await readDemoIntent(identity.userId,demoScope,result.id);if(identity.current()){setResult(intent);onWalletChanged();}});
   const resetTarget=()=>void run(async()=>{if(!identity.userId)return;await discardDemoTarget(identity.userId,demoScope);if(identity.current()){setPending(null);setQuote(null);setAmount("");}});
