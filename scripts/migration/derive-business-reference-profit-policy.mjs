@@ -30,14 +30,38 @@ function withChanges(raw, changes) {
   return result;
 }
 
+// Replace only the enabled fast-mode object, preserving every other source byte.
+// There is also a separate compatibility.fast price lane, so match by its
+// validated object value rather than assuming key order or JSON whitespace.
+function withFastRatioMaximum(raw, expectedMode, maximum) {
+  const matches = [];
+  for (const match of raw.matchAll(/"fast"\s*:\s*\{/g)) {
+    const start = match.index + match[0].lastIndexOf('{');
+    let depth = 0, quoted = false, escaped = false, end = -1;
+    for (let i = start; i < raw.length; i++) {
+      const char = raw[i];
+      if (quoted) { if (escaped) escaped = false; else if (char === '\\') escaped = true; else if (char === '"') quoted = false; continue; }
+      if (char === '"') quoted = true;
+      else if (char === '{') depth++;
+      else if (char === '}' && --depth === 0) { end = i + 1; break; }
+    }
+    if (end < 0) continue;
+    try { if (JSON.stringify(JSON.parse(raw.slice(start, end))) === JSON.stringify(expectedMode)) matches.push({ start, end }); } catch { /* not an object value */ }
+  }
+  requireThat(matches.length === 1, 'FAST_MODE_SOURCE_NOT_UNIQUE');
+  const next = { ...expectedMode, max: { base: 'ABSOLUTE', value: maximum } };
+  const { start, end } = matches[0];
+  return raw.slice(0, start) + JSON.stringify(next) + raw.slice(end);
+}
+
 /** Pure transformation: all prior rows remain byte-identical; only the game pointer and new immutable rows differ. */
 export function deriveProfitPolicy(manifestBytes, tableBytes, decision, decisionSha256, evidenceBytes, options = {}) {
   const freshAdminId = options.freshAdminId ?? null;
   requireThat(digest(decisionSha256) && sha(manifestBytes) === decision?.sourceManifestSha256, 'SOURCE_MANIFEST_SHA_MISMATCH');
-  requireThat(decision.kind === 'ZZSH_BUSINESS_PROFIT_POLICY_DECISION_V1'
+  requireThat(decision.kind === 'ZZSH_BUSINESS_PROFIT_POLICY_DECISION_V2'
     && decision.authorization === 'OWNER_DIRECTED_FRESH_INITIALIZATION'
     && decision.gameCode === 'delta' && decision.expectedOldOrdinary === '8'
-    && decision.ordinarySpread === '6' && decision.fastSpread === '12'
+    && decision.ordinarySpread === '6' && decision.fastSpread === '12' && decision.fastRatioMaxWanPerYuan === '99'
     && /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/.test(decision.derivedAt ?? '')
     && Number.isFinite(Date.parse(decision.derivedAt)) && digest(decision.policyEvidenceSha256)
     && sha(evidenceBytes) === decision.policyEvidenceSha256, 'POLICY_DECISION_NOT_BOUND');
@@ -81,6 +105,12 @@ export function deriveProfitPolicy(manifestBytes, tableBytes, decision, decision
     && rule.compatibility?.fast?.spreadDelta === decision.fastSpread
     && rule.compatibility?.modes?.ordinary?.enabled === true && rule.compatibility?.modes?.custom?.enabled === true
     && rule.compatibility?.modes?.fast?.enabled === true, 'SOURCE_POLICY_CHANGED');
+  const fastMode = rule.compatibility.modes.fast;
+  const exactBound = (bound, base, value) => bound && typeof bound === 'object' && !Array.isArray(bound)
+    && Object.keys(bound).length === 2 && bound.base === base && bound.value === value;
+  requireThat(Object.keys(fastMode).every(key => ['enabled', 'min', 'max'].includes(key))
+    && exactBound(fastMode.min, 'C', '6')
+    && (fastMode.max === undefined || exactBound(fastMode.max, 'ABSOLUTE', '99')), 'SOURCE_FAST_BOUNDS_CHANGED');
   const currentLines = lines.table.rows.filter(raw => JSON.parse(raw).price_version_id === version.id);
   requireThat(currentLines.length > 0 && currentLines.some(raw => JSON.parse(raw).pricing_kind === 'HAFF_RATIO'), 'SOURCE_PRICE_LINES_REQUIRED');
   const seed = sha(JSON.stringify(['profit-policy-v1', decision.sourceManifestSha256, decisionSha256]));
@@ -96,7 +126,9 @@ export function deriveProfitPolicy(manifestBytes, tableBytes, decision, decision
     ['created_at', version.created_at, decision.derivedAt], ['updated_at', version.updated_at, decision.derivedAt],
     ['sealed_at', version.sealed_at, decision.derivedAt]]);
   newVersion = scalar(newVersion, 'spreadDelta', decision.expectedOldOrdinary, decision.ordinarySpread);
+  newVersion = withFastRatioMaximum(newVersion, fastMode, decision.fastRatioMaxWanPerYuan);
   const expectedRule = structuredClone(rule); expectedRule.compatibility.ordinary.spreadDelta = decision.ordinarySpread;
+  expectedRule.compatibility.modes.fast.max = { base: 'ABSOLUTE', value: decision.fastRatioMaxWanPerYuan };
   requireThat(JSON.stringify(JSON.parse(newVersion).haff_rule) === JSON.stringify(expectedRule), 'UNEXPECTED_POLICY_CHANGE');
   // Only the newly derived row is re-sealed; the source rows keep their original sealer and are
   // dropped in fresh mode rather than rewritten.
@@ -123,9 +155,9 @@ export function deriveProfitPolicy(manifestBytes, tableBytes, decision, decision
   derivedManifest.tables = derivedManifest.tables.map(descriptor => changed.has(descriptor.file)
     ? { ...descriptor, rows: changed.get(descriptor.file).rows.length, sha256: sha(output.get(descriptor.file)) } : descriptor);
   derivedManifest.derivationLineage = [...(Array.isArray(manifest.derivationLineage) ? manifest.derivationLineage : []), {
-    kind: 'OWNER_DIRECTED_FRESH_PROFIT_POLICY_V1', sourceManifestSha256: decision.sourceManifestSha256,
+    kind: 'OWNER_DIRECTED_FRESH_PROFIT_POLICY_V2', sourceManifestSha256: decision.sourceManifestSha256,
     decisionSha256, policyEvidenceSha256: decision.policyEvidenceSha256,
-    sourceRuntimeCache: 'UNKNOWN', ordinarySpread: '6', fastSpread: '12', derivedAt: decision.derivedAt,
+    sourceRuntimeCache: 'UNKNOWN', ordinarySpread: '6', fastSpread: '12', fastRatioMaxWanPerYuan: '99', derivedAt: decision.derivedAt,
     timestampBasis: 'PACKAGE_SEED_TIME_NOT_TARGET_ACTIVATION_ACK',
   }];
   const resultManifest = Buffer.from(JSON.stringify(derivedManifest, null, 2) + '\n');
@@ -192,7 +224,7 @@ requireThat((args.length===(fresh?14:12)) && ['--private-root','--source','--dec
   const derivedDescriptors=JSON.parse(built.manifest).tables;
   const receipt={kind:'BUSINESS_REFERENCE_PROFIT_POLICY_DERIVATION_V1',status:'DERIVED_READBACK_VERIFIED',
     sourceManifestSha256:sha(manifestBytes),derivedManifestSha256:sha(built.manifest),decisionSha256,
-    policyEvidenceSha256:sha(evidence),sourceRuntimeCache:'UNKNOWN',ownerAuthorization:decision.authorization,
+    policyEvidenceSha256:sha(evidence),sourceRuntimeCache:'UNKNOWN',ownerAuthorization:decision.authorization,fastRatioMaxWanPerYuan:decision.fastRatioMaxWanPerYuan,
     timestampBasis:'PACKAGE_SEED_TIME_NOT_TARGET_ACTIVATION_ACK',
     sourceRawUnchanged:false,previousGeneration:built.previousGeneration,generation:built.generation,
     addedPriceVersions:1,addedReleases:1,addedPriceLines:built.addedLines,changedFiles:built.changedFiles,

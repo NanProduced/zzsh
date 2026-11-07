@@ -1,10 +1,10 @@
 # 派生初始化价目
 
-此工具只生成私有业务参考包，不连接数据库或渠道。它适用于已审核的单游戏封签包，供新目标库初始化之前审阅；不能用它替换已使用中的规则或原地修改 SEALED 版本。当前候选以 Owner 明确选择的普通/自定义价差 6、极速价差 12 为准，要求上游现价分别为 8/12，并绑定已核的 R06 旧 MySQL 来源比较回执。旧站同截点 Redis 值仍为 UNKNOWN，该证据不是生产切换证明。
+此工具只生成私有业务参考包，不连接数据库或渠道。它适用于已审核的单游戏封签包，供新目标库初始化之前审阅；不能用它替换已使用中的规则或原地修改 SEALED 版本。当前候选以 Owner 明确选择的普通/自定义价差 6、极速价差 12、极速号主比例范围 `C+6` 至 `99` 万哈夫币/元为准，要求上游现价分别为 8/12 且极速下限为 `C+6`，并绑定已核的 R06 旧 MySQL 来源比较回执。旧站同截点 Redis 值仍为 UNKNOWN，该证据不是生产切换证明。
 
 工具保留上游全部封存价格版本、规则版本和物资价目行；追加一个价格版本、对应物资行和一个规则版本，切换派生包中的游戏当前版本指针。旧封存行按原始字符串保留，物资数值不经 JavaScript 浮点重算。新版本创建和激活时间为明确标记的**包内种子时间**，不代表已向目标库执行或生效的回执。新会员政策须之后绑定新规则版本；旧在架承接使用自己的来源冻结价。
 
-调用前准备私有 decision JSON，明确 `kind: "ZZSH_BUSINESS_PROFIT_POLICY_DECISION_V1"`、`authorization: "OWNER_DIRECTED_FRESH_INITIALIZATION"`、`gameCode: "delta"`、`expectedOldOrdinary: "8"`、`ordinarySpread: "6"`、`fastSpread: "12"`、`derivedAt`（UTC 毫秒精度的包种子时间）、`sourceManifestSha256` 与 `policyEvidenceSha256`。上游为派生包时，另提供其 `derivation-receipt.json` 的 `parentReceiptSha256`；工具核验上游回执中派生 manifest 摘要，并把必要回执、决策与策略证据按摘要复制进新包。
+调用前准备私有 decision JSON，明确 `kind: "ZZSH_BUSINESS_PROFIT_POLICY_DECISION_V2"`、`authorization: "OWNER_DIRECTED_FRESH_INITIALIZATION"`、`gameCode: "delta"`、`expectedOldOrdinary: "8"`、`ordinarySpread: "6"`、`fastSpread: "12"`、`fastRatioMaxWanPerYuan: "99"`、`derivedAt`（UTC 毫秒精度的包种子时间）、`sourceManifestSha256` 与 `policyEvidenceSha256`。缺失新上限或仍使用 V1 决策会拒绝，须基于当前来源重新生成绑定文件。上游为派生包时，另提供其 `derivation-receipt.json` 的 `parentReceiptSha256`；工具核验上游回执中派生 manifest 摘要，并把必要回执、决策与策略证据按摘要复制进新包。
 
 ```text
 node scripts/migration/derive-business-reference-profit-policy.mjs \

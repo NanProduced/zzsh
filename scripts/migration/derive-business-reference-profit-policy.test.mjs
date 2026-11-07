@@ -14,7 +14,7 @@ const time = '2026-11-05T01:02:03.000Z';
 const bootstrap=fileURLToPath(new URL('./bootstrap-local-reference.mjs',import.meta.url));
 const bootstrapPlan=JSON.parse(spawnSync(process.execPath,[bootstrap,'--plan'],{encoding:'utf8',timeout:5000}).stdout);
 function fixture() {
-  const rule={schema:'haff-ratio-v2',compatibility:{ordinary:{spreadDelta:'8',discounts:{STANDARD:'0'}},fast:{spreadDelta:'12',discounts:{STANDARD:'0'}},modes:{ordinary:{enabled:true},custom:{enabled:true},fast:{enabled:true}}}};
+  const rule={schema:'haff-ratio-v2',compatibility:{ordinary:{spreadDelta:'8',discounts:{STANDARD:'0'}},fast:{spreadDelta:'12',discounts:{STANDARD:'0'}},modes:{ordinary:{enabled:true},custom:{enabled:true},fast:{enabled:true,min:{base:'C',value:'6'}}}}};
   const source={
     game:[JSON.stringify({id:'game-1',code:'delta',current_release_id:'release-2'})],
     rule_release:[JSON.stringify({id:'release-1',game_id:'game-1',price_version_id:'price-old',generation:1,created_at:time,activated_at:time}),JSON.stringify({id:'release-2',game_id:'game-1',price_version_id:'price-current',generation:2,created_at:time,activated_at:time})],
@@ -31,7 +31,7 @@ function fixture() {
   const manifest=bytes({kind:'BUSINESS_REFERENCE_PACKAGE_V1',gameCode:'delta',sourceRawUnchanged:false,transactionRollback:true,clientClosed:true,
     source:{database:'zzsh_dev_daily',oid:'2400547',read_only:'on'},foreignKeys:[],tables:descriptors});
   const evidence=bytes({schema:'zzsh.r06-pricing-source-comparison.v1',status:'READ_ONLY_COMPARISON_COMPLETE',source:'MYSQL_DUMP_AND_RESTORE_CAPTURE',sourceRuntimeCache:'UNKNOWN',sourceQuoteScope:'ORDINARY_USER',spreads:{ordinary:{source:'6',current:'8'},fast:{source:'12',current:'12'}},targetWrites:0,rollbackAcknowledged:true,clientClosed:true});
-  const decision={kind:'ZZSH_BUSINESS_PROFIT_POLICY_DECISION_V1',authorization:'OWNER_DIRECTED_FRESH_INITIALIZATION',gameCode:'delta',expectedOldOrdinary:'8',ordinarySpread:'6',fastSpread:'12',derivedAt:'2026-11-05T02:03:04.000Z',policyEvidenceSha256:sha(evidence),sourceManifestSha256:sha(manifest)};
+  const decision={kind:'ZZSH_BUSINESS_PROFIT_POLICY_DECISION_V2',authorization:'OWNER_DIRECTED_FRESH_INITIALIZATION',gameCode:'delta',expectedOldOrdinary:'8',ordinarySpread:'6',fastSpread:'12',fastRatioMaxWanPerYuan:'99',derivedAt:'2026-11-05T02:03:04.000Z',policyEvidenceSha256:sha(evidence),sourceManifestSha256:sha(manifest)};
   return {manifest,tableBytes,decision,evidence,decisionSha:sha(bytes(decision)),source};
 }
 const run=x=>deriveProfitPolicy(x.manifest,x.tableBytes,x.decision,x.decisionSha,x.evidence);
@@ -43,12 +43,15 @@ test('new release is appended; sealed versions, exact prices, terms and funding 
   const old=JSON.parse(x.source.price_version[0]), created=JSON.parse(rows(result,'price_version').at(-1));
   assert.equal(created.haff_rule.compatibility.ordinary.spreadDelta,'6');
   assert.equal(created.haff_rule.compatibility.fast.spreadDelta,'12');
+  assert.deepEqual(created.haff_rule.compatibility.modes.fast,{enabled:true,min:{base:'C',value:'6'},max:{base:'ABSOLUTE',value:'99'}});
+  assert.deepEqual(old.haff_rule.compatibility.modes.fast,{enabled:true,min:{base:'C',value:'6'}});
   assert.deepEqual(created.funding_policy,old.funding_policy);
   assert.equal(JSON.parse(rows(result,'rule_release').at(-1)).generation,3);
   assert.equal(JSON.parse(rows(result,'game')[0]).current_release_id,result.releaseId);
   assert.match(rows(result,'price_line').at(-1),/123456789012345\.67890123/);
   assert.equal(result.addedLines,2);assert.equal(manifest.sourceRawUnchanged,false);
   assert.equal(manifest.derivationLineage[0].sourceRuntimeCache,'UNKNOWN');
+  assert.equal(manifest.derivationLineage[0].fastRatioMaxWanPerYuan,'99');
   assert.deepEqual(run(x).manifest,result.manifest);
 });
 
@@ -60,6 +63,9 @@ test('source manifest, table, policy evidence and owner decision are independent
     x=>x.decision.authorization='UNKNOWN',
     x=>x.decision.ordinarySpread='7',
     x=>x.decision.fastSpread='13',
+    x=>x.decision.fastRatioMaxWanPerYuan='100',
+    x=>delete x.decision.fastRatioMaxWanPerYuan,
+    x=>x.decision.kind='ZZSH_BUSINESS_PROFIT_POLICY_DECISION_V1',
   ]) {const x=fixture();change(x);assert.throws(()=>run(x));}
 });
 
@@ -67,6 +73,8 @@ test('incorrect old policy, foreign game and duplicate current release stop befo
   for(const modify of [
     t=>{const row=JSON.parse(t.price_version[0]);row.haff_rule.compatibility.ordinary.spreadDelta='7';t.price_version[0]=JSON.stringify(row)},
     t=>{const row=JSON.parse(t.price_version[0]);row.haff_rule.compatibility.fast.spreadDelta='11';t.price_version[0]=JSON.stringify(row)},
+    t=>{const row=JSON.parse(t.price_version[0]);row.haff_rule.compatibility.modes.fast.min.value='7';t.price_version[0]=JSON.stringify(row)},
+    t=>{const row=JSON.parse(t.price_version[0]);row.haff_rule.compatibility.modes.fast.max={base:'ABSOLUTE',value:'120'};t.price_version[0]=JSON.stringify(row)},
     t=>{const row=JSON.parse(t.price_version[0]);row.game_id='other';t.price_version[0]=JSON.stringify(row)},
     t=>{t.rule_release.push(t.rule_release[1])},
   ]){
@@ -98,6 +106,7 @@ test('CLI keeps a verifiable upstream chain and refuses replay into an existing 
   assert.equal(receipt.sourceRawUnchanged,false);assert.equal(receipt.previousPriceAndReleaseRowsPreserved,true);assert.equal(receipt.priceHistoryDisposition,'SOURCE_HISTORY_RETAINED');
   assert.equal(receipt.derivationToolSha256,sha(readFileSync(script)));
   assert.equal(receipt.gameCurrentReleasePointerChanged,true);assert.equal(receipt.sourceFileWrites,0);
+  assert.equal(receipt.fastRatioMaxWanPerYuan,'99');
   assert.equal(receipt.derivedManifestSha256,sha(readFileSync(join(out,'manifest.json'))));
   assert.deepEqual(readFileSync(join(out,`lineage-${sha(parent)}.json`)),parent);
   assert.deepEqual(readFileSync(join(out,`profit-decision-${sha(decision)}.json`)),decision);

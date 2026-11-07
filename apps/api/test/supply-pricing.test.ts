@@ -699,6 +699,8 @@ test("FAST-RULES-ADMIN-1：极速仅下限 C+6、无上限且不造大值；禁�
   const nullMax = compatRule("47"); (nullMax.compatibility!.modes.fast as { max?: unknown }).max = null;
   assert.throws(() => validateDeltaHaffRule(nullMax, "SPREAD"));
   // 有界旧规则仍按原上限拒绝。
+  assert.equal(computeQuote(compatInput("47", { rentalMode: "fast", ownerRatioB: "99" })).quotable, true);
+  assert.equal(computeQuote(compatInput("47", { rentalMode: "fast", ownerRatioB: "99.00000001" })).quotable, false);
   assert.equal(computeQuote(compatInput("47", { rentalMode: "fast", ownerRatioB: "100" })).quotable, false);
   const off = compatRule("47");
   delete (off.compatibility as { fast?: unknown }).fast;
