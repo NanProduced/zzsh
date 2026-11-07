@@ -392,7 +392,7 @@ def verify_source_keys(env, secret_root, manifest):
         require(config.get('database') == DATABASE and config.get('runtimeUser') == RUNTIME and config.get('writeEnabled') is True,
                 'BANK_KEYRING_TARGET_MISMATCH')
         mapping = config.get('keyVariables')
-        require(isinstance(mapping, dict) and set(mapping) == set(versions) and config.get('currentKeyVersion') in mapping,
+        require(isinstance(mapping, dict) and set(versions).issubset(mapping) and config.get('currentKeyVersion') in mapping,
                 'BANK_KEYRING_VERSIONS_MISMATCH')
         for variable in mapping.values():
             require(isinstance(variable, str) and re.fullmatch(r'WITHDRAWAL_BANK_KEY_[A-Z0-9_]+', variable), 'BANK_KEY_REFERENCE_INVALID')

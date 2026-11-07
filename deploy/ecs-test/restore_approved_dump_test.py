@@ -67,6 +67,17 @@ class ContractTests(unittest.TestCase):
                 'currentKeyVersion':'fixture-v1','keyVariables':{'fixture-v1':'WITHDRAWAL_BANK_KEY_R06_V1'}})); bankcfg.chmod(0o600)
             env.update(WITHDRAWAL_BANK_BINDING_ENABLED='true',WITHDRAWAL_BANK_BINDING_CONFIG_FILE='.secrets/bank.json')
             restore.verify_source_keys(env,root,data)
+            newbank=root/'newbank';newbank.write_text(base64.urlsafe_b64encode(bytes([8])*32).decode().rstrip('='));newbank.chmod(0o600)
+            env['WITHDRAWAL_BANK_KEY_TEST_V1_FILE']='.secrets/newbank'
+            data['keys']['WITHDRAWAL_BANK_KEY_TEST_V1_FILE']=hashlib.sha256(newbank.read_bytes()).hexdigest()
+            cfg={'database':restore.DATABASE,'runtimeUser':restore.RUNTIME,'writeEnabled':True,'currentKeyVersion':'test-v1',
+                 'keyVariables':{'fixture-v1':'WITHDRAWAL_BANK_KEY_R06_V1','test-v1':'WITHDRAWAL_BANK_KEY_TEST_V1'}}
+            bankcfg.write_text(json.dumps(cfg));restore.verify_source_keys(env,root,data)
+            no_old=copy.deepcopy(cfg);del no_old['keyVariables']['fixture-v1'];bankcfg.write_text(json.dumps(no_old))
+            with self.assertRaisesRegex(restore.Refused,'BANK_KEYRING_VERSIONS_MISMATCH'): restore.verify_source_keys(env,root,data)
+            bankcfg.write_text(json.dumps(cfg))
+            no_new_proof=copy.deepcopy(data);del no_new_proof['keys']['WITHDRAWAL_BANK_KEY_TEST_V1_FILE']
+            with self.assertRaisesRegex(restore.Refused,'SOURCE_BANK_KEY_FINGERPRINT_MISSING'): restore.verify_source_keys(env,root,no_new_proof)
             bad=copy.deepcopy(data);bad['keys'][keyname]='0'*64
             with self.assertRaisesRegex(restore.Refused,'SOURCE_KEY_FINGERPRINT_MISMATCH'): restore.verify_source_keys(env,root,bad)
             bad=copy.deepcopy(data);bad['bankVersions']=['wrong']
