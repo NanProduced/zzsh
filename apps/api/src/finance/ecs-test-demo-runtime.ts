@@ -89,6 +89,8 @@ export async function preflightEcsTestDemoRuntime(pool: Pool, assembly: EcsTestD
       AND NOT has_table_privilege(current_user,'zzsh_order.controlled_payment_declaration','UPDATE')
       AND NOT has_table_privilege(current_user,'zzsh_order.controlled_payment_declaration','DELETE')
       AND to_regprocedure('zzsh_order.local_controlled_refund_terminal_complete(text)') IS NOT NULL
+      AND EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid=to_regclass('zzsh_order.channel_refund_intent')
+        AND conname='sandbox_refund_source_reference' AND convalidated AND position('PRESTART_TERMINATION' IN pg_get_constraintdef(oid))>0)
       AND COALESCE(has_column_privilege(current_user,to_regclass('zzsh_order.local_controlled_refund_operation'),'final_canonical','INSERT'),false)
       AND COALESCE(has_column_privilege(current_user,to_regclass('zzsh_order.local_controlled_refund_evidence'),'facts_canonical','INSERT'),false)
       AND NOT COALESCE(has_table_privilege(current_user,to_regclass('zzsh_order.local_controlled_refund_operation'),'UPDATE'),false)

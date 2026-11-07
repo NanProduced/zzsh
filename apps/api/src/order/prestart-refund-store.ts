@@ -9,23 +9,26 @@ import { assertFormalRefundProfile,assertRefundStart,assertRefundBinding,describ
 import type { PrestartPaymentBasis } from "./prestart-termination";
 import type { RefundExecution } from "./joinpay-refund-attempt";
 import {assertLocalFinancialSandboxResource,localFinancialSandboxRegistration,type LocalFinancialSandbox} from '../finance/local-financial-sandbox-resource';
+import {assertEcsTestDemoResource,demoFinanceScope,readEcsTestDemoRegistration,type DemoFinanceResource} from '../finance/ecs-test-demo-resource';
 
 const ID=/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 type Term={id:string;order_id:string;state:string;requested_by_party:string;payment_basis:PrestartPaymentBasis;basis_digest:string;approved_at:string;liability_root_id:string;liability_event_id:string};
 const unavailable=()=>new SecurityApiError(503,"EVIDENCE_UNAVAILABLE","Original prestart refund admission unavailable");
 
 /** 只投影持久原责任和退款结果；saved evidence未重新验签，不推断银行到账。 */
-export async function readPrestartRefundProgress(client:PoolClient,terminationId:string,b:PrestartPaymentBasis,moneyReadable:boolean,sandbox?:LocalFinancialSandbox){
- const controlled=b.source==='CONTROLLED'&&sandbox!==undefined;
- if(controlled)await assertLocalFinancialSandboxResource(client,sandbox,'READ_ORIGINAL');
- const reference=controlled?localFinancialSandboxRegistration(sandbox).registration.reference:undefined;
+export async function readPrestartRefundProgress(client:PoolClient,terminationId:string,b:PrestartPaymentBasis,moneyReadable:boolean,sandbox?:LocalFinancialSandbox,demo?:DemoFinanceResource){
+ if(sandbox&&demo)throw invalid('Refund read resources are exclusive');
+ const controlled=b.source==='CONTROLLED'&&(sandbox!==undefined||demo!==undefined);
+ if(controlled&&sandbox)await assertLocalFinancialSandboxResource(client,sandbox,'READ_ORIGINAL');
+ if(controlled&&demo)await assertEcsTestDemoResource(client,demo,'READ_ORIGINAL');
+ const reference=controlled&&sandbox?localFinancialSandboxRegistration(sandbox).registration.reference:controlled&&demo?readEcsTestDemoRegistration(demo).registration.reference:undefined;
  const ready=(await client.query(`SELECT to_regprocedure('zzsh_order.${controlled?'local_controlled_refund_terminal_complete':'native_prestart_refund_terminal_complete'}(text)') IS NOT NULL
   AND to_regprocedure('zzsh_order.${controlled?'local_controlled_refund_liability_complete':'native_prestart_refund_liability_complete'}(text)') IS NOT NULL AS ready`)).rows[0]?.ready;
  if(ready!==true)return {integration:'NOT_INTEGRATED' as const,intents:null,truncated:false,totals:null,reason:'REFUND_SCHEMA_NOT_DEPLOYED' as const,
   completedLocallyAt:null,channelRecordsChecked:false as const,bankArrival:'UNKNOWN' as const};
  const rows=(await client.query(`SELECT i.id,i.order_id,i.renter_user_id,i.payment_confirmation_id,i.basis_kind,i.payment_source,i.evidence_level,
    i.merchant_identity_id,i.original_payment_order_no,i.original_payment_trx_no,i.amount_cents::text,i.currency,i.responsibility_version_hash,
-   i.refund_order_no,i.state,i.budget_disposition,i.requires_review,i.terminal_evidence_id,i.terminal_root_id,i.terminal_event_id,
+   i.refund_order_no,i.state,i.budget_disposition,i.requires_review,COALESCE(i.terminal_evidence_id,to_jsonb(i)->>'demo_terminal_evidence_id') AS terminal_evidence_id,i.terminal_root_id,i.terminal_event_id,
    to_char(i.updated_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS updated_at,
    CASE WHEN i.state IN('SUCCEEDED','FAILED') THEN zzsh_order.${controlled?'local_controlled_refund_terminal_complete':'native_prestart_refund_terminal_complete'}(i.id)
      ELSE zzsh_order.${controlled?'local_controlled_refund_liability_complete':'native_prestart_refund_liability_complete'}(i.id) END AS complete,
@@ -36,7 +39,7 @@ export async function readPrestartRefundProgress(client:PoolClient,terminationId
    to_char(le.created_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS local_written_off_at,
    to_char(e.completed_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS saved_completed_at,
    to_char(e.created_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS saved_at
-  FROM zzsh_order.channel_refund_intent i LEFT JOIN zzsh_order.${controlled?'local_controlled_refund_evidence':'joinpay_refund_evidence'} e ON e.id=i.terminal_evidence_id AND e.intent_id=i.id
+  FROM zzsh_order.channel_refund_intent i LEFT JOIN zzsh_order.${controlled?'local_controlled_refund_evidence':'joinpay_refund_evidence'} e ON e.id=${demo?"COALESCE(i.terminal_evidence_id,to_jsonb(i)->>'demo_terminal_evidence_id')":'i.terminal_evidence_id'} AND e.intent_id=i.id
   LEFT JOIN zzsh_order.finance_event le ON le.id=i.terminal_event_id AND le.kind='REFUND_PAID'
   WHERE i.payment_confirmation_id=$1 AND i.basis_kind='PRESTART_TERMINATION'${controlled?' AND i.sandbox_registration_ref=$2':''}
   ORDER BY i.created_at,i.id COLLATE "C" LIMIT 51`,[b.paymentConfirmationId,...(reference?[reference]:[])])).rows;
@@ -69,7 +72,8 @@ export async function readPrestartRefundProgress(client:PoolClient,terminationId
     releasedCents:released.toString(),remainingCents:(BigInt(b.amountCents)-allocated).toString(),totalsComplete:true}:null,
   reason:!valid?'REFUND_BINDING_CONFLICT' as const:budgetConflict?'REFUND_BUDGET_CONFLICT' as const:rows.length>50?'REFUND_LIST_TRUNCATED' as const:b.source==='CONTROLLED'&&!controlled?'LOCAL_CONTROLLED_ONLY' as const:null,
   completedLocallyAt:complete&&consumed===BigInt(b.amountCents)?intents.find(i=>i.localWriteOff==='RECORDED')?.localWrittenOffAt??null:null,
-  channelRecordsChecked:false as const,bankArrival:'UNKNOWN' as const,...(controlled?{dataOrigin:'LOCAL_CONTROLLED' as const}:{})};
+  channelRecordsChecked:false as const,bankArrival:'UNKNOWN' as const,...(controlled?{dataOrigin:'LOCAL_CONTROLLED' as const}:{}),
+  ...(controlled&&demo?{simulationScope:demoFinanceScope(demo)}:{})};
 }
 
 /** 调用方已持有共同资金→原号→用户→intent锁；首派前再次核同原号唯一性。 */

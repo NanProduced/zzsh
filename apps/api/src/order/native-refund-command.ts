@@ -152,7 +152,6 @@ type RefundRow = { id: string; posting_id: string | null; refund_order_no: strin
 /** 未开租核准后的全额原款分配/失败释放重提；授权和原键恢复先于新渠道资格。 */
 export async function requestAdminPrestartNativeRefund(pool:Pool,execution:AdminNativeRefundExecution,input:{actor:AdminNativeRefundActor;orderId:string;terminationId:string;idempotencyKey:unknown;requestId:string}){
  const local=localExecution(execution);
- if(local&&'demo' in local)throw new SecurityApiError(503,'EVIDENCE_UNAVAILABLE','Test prestart refund is not available');
  if(!ID.test(input.orderId)||!ID.test(input.terminationId)||!ID.test(input.requestId))throw invalid();
  const key=validateIdempotencyKey(input.idempotencyKey);let completed=false;
  try{return await withTransaction(pool,async c=>{

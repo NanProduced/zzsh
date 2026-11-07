@@ -34,6 +34,17 @@ test('GET只做本人/管理读取事务，明确RR READ ONLY；不进入命令'
  assert.equal(f.seen.some(s=>s.action==='idempotency'),false);
  assert.equal(await handlePrestartTerminationRoute(f.req('user','order_1/prestart-termination/term/review','POST'),f.response,f.options,'user'),false);
 });
+test('模拟环境沿用服务端身份和同一资源处理未开租申请、审核及只读查询',async t=>{
+ const f=fixture(t),demo={kind:'SYNTHETIC_DEMO_RESOURCE'};
+ f.options.ecsTestDemo=demo;f.options.pool.options={database:'zzsh_ecs_test',user:'zzsh_ecs_runtime'};
+ await handlePrestartTerminationRoute(f.req(),f.response,f.options,'user');
+ const reader=f.seen.find(s=>s.action==='read')?.value.actor;
+ assert.equal(reader.ecsTestDemo,demo);assert.deepEqual(reader.settlementReadIdentity,{database:'zzsh_ecs_test',runtimeUser:'zzsh_ecs_runtime'});
+ await handlePrestartTerminationRoute(f.req('user','order_1/prestart-termination/requests','POST',{expectedOrderRevision:'1',reason:'未开租取消'}),f.response,f.options,'user');
+ assert.equal(f.seen.find(s=>s.action==='request')?.value.actor.ecsTestDemo,demo);
+ await handlePrestartTerminationRoute(f.req('admin','order_1/prestart-termination/term_1/review','POST',{expectedRevision:'1',decision:'APPROVE',assessment:'NO_USE_NO_DISPUTE',reason:'核实无争议'}),f.response,f.options,'admin');
+ assert.equal(f.seen.find(s=>s.action==='review')?.value.actor.ecsTestDemo,demo);
+});
 test('申请/审核锁定幂等scope与原body；不收客户端金额、目标或供应商状态',async t=>{
  const f=fixture(t);
  await handlePrestartTerminationRoute(f.req('user','order_1/prestart-termination/requests','POST',{expectedOrderRevision:'1',reason:'未交付申请结束'}),f.response,f.options,'user');

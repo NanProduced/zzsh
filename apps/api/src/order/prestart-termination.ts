@@ -141,7 +141,7 @@ export async function readPrestartTermination(client: PoolClient, actor: Settlem
   const moneyReadable = actor.realm === "user" ? actor.userId === facts.renter_user_id : adminMoney;
   const allowed = eligibility(facts);
   if (request?.state === "APPROVED") await verifyPrestartRefundLiability(client,request.id,request.payment_basis,request.liability_root_id,request.liability_event_id);
-  const refund=request?.state==='APPROVED'?await readPrestartRefundProgress(client,request.id,request.payment_basis,moneyReadable,actor.localFinancialSandbox):null;
+  const refund=request?.state==='APPROVED'?await readPrestartRefundProgress(client,request.id,request.payment_basis,moneyReadable,actor.localFinancialSandbox,actor.ecsTestDemo):null;
   return { contractVersion: PRESTART_TERMINATION_VERSION, orderId, orderRevision: facts.revision,
     eligibility: {...allowed,refundCents: moneyReadable ? allowed.refundCents : null}, request: projection(request,moneyReadable),refund,
     coverage:"LOCAL_REGISTERED_ONLY" as const,canReview,asOf:facts.as_of??null,localAcceptanceObservedAt:facts.accepted_at??null,

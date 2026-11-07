@@ -5,7 +5,7 @@ import { API_V1_ERROR_CODES, validateIdempotencyKey } from "../contracts/api-v1"
 import { conflict, fingerprintRequest, invalid, notFound } from "../supply/supply-util";
 import { assertSyntheticChannelRequestCapability, assertSyntheticChannelRequestOrder, assertSandboxOriginalPayment, sandboxForChannelRequestCapability, demoForChannelRequestCapability, wireAmountForCents } from "./channel-payment-store";
 import { localFinancialSandboxRegistration } from "../finance/local-financial-sandbox-resource";
-import { readEcsTestDemoRegistration } from "../finance/ecs-test-demo-resource";
+import { assertEcsTestDemoOrderAdmission, readEcsTestDemoRegistration } from "../finance/ecs-test-demo-resource";
 import { verifyPrestartRefundLiability } from "../finance/prestart-refund-liability";
 import type { PrestartPaymentBasis } from "./prestart-termination";
 import { lockRefundOrderNo } from "./payment-original-lock";
@@ -146,15 +146,16 @@ export async function createNativeRefundIntent(client: PoolClient, input: {
 /** Reuses the original approved CONTROLLED prestart liability and shared funds budget. There is
  * no client amount/provider target and no formal admission/profile fallback in this branch. */
 export async function createSandboxPrestartRefundIntent(client:PoolClient,input:{terminationId:string;idempotencyKey:unknown;requestId:string;capability:unknown}){
-  const key=validateIdempotencyKey(input.idempotencyKey),sandbox=sandboxForChannelRequestCapability(input.capability);
-  if(!sandbox||!validId(input.terminationId)||!validId(input.requestId))throw invalid();
+  const key=validateIdempotencyKey(input.idempotencyKey),sandbox=sandboxForChannelRequestCapability(input.capability),demo=demoForChannelRequestCapability(input.capability);
+  if((!sandbox&&!demo)||sandbox&&demo||!validId(input.terminationId)||!validId(input.requestId))throw invalid();
   await admitted(client,input.capability);
-  const p=localFinancialSandboxRegistration(sandbox);
+  const reference=sandbox?localFinancialSandboxRegistration(sandbox).registration.reference:readEcsTestDemoRegistration(demo!).registration.reference;
   const term=(await client.query<{id:string;payment_basis:PrestartPaymentBasis;basis_digest:string;approved_at:string;liability_root_id:string;liability_event_id:string}>(
     `SELECT id,payment_basis,basis_digest,approved_at::text,liability_root_id,liability_event_id FROM zzsh_order.prestart_termination WHERE id=$1 AND state='APPROVED'`,[input.terminationId])).rows[0];
   if(!term)throw notFound();const b=term.payment_basis;
   if(!b||b.source!=='CONTROLLED'||b.digest!==term.basis_digest)throw invalid('Original local prestart payment differs');
   assertSyntheticChannelRequestOrder(input.capability,b.orderId);
+  if(demo)await assertEcsTestDemoOrderAdmission(client,demo,b.orderId);
   assertSandboxOriginalPayment(input.capability,{source:b.source,merchant_scope_id:b.merchantIdentityId});
   await lockRefundFunds(client,'CONTROLLED',b.merchantIdentityId,b.channelTrxNo);
   if((await client.query('SELECT id FROM zzsh_auth_user."user" WHERE id=$1 FOR UPDATE',[b.renterUserId])).rowCount!==1)throw notFound();
@@ -165,7 +166,7 @@ export async function createSandboxPrestartRefundIntent(client:PoolClient,input:
     `SELECT ${COLUMNS}${extra} FROM zzsh_order.channel_refund_intent WHERE payment_confirmation_id=$1 AND idempotency_key=$2`,[b.paymentConfirmationId,key])).rows[0];
   if(old){
     if(old.payment_source!=='CONTROLLED'||old.basis_kind!=='PRESTART_TERMINATION'||old.request_fingerprint!==fingerprint
-      ||old.sandbox_registration_ref!==p.registration.reference||old.posting_id!==null||old.order_id!==b.orderId||old.amount_cents!==b.amountCents
+      ||old.sandbox_registration_ref!==reference||old.posting_id!==null||old.order_id!==b.orderId||old.amount_cents!==b.amountCents
       ||old.liability_root_id!==term.liability_root_id||old.liability_event_id!==term.liability_event_id)throw conflict('Original local refund key has different facts');
     return{kind:'REPLAYED' as const,intentId:old.id,refundOrderNo:old.refund_order_no,state:old.state,budgetDisposition:old.budget_disposition??'ALLOCATED'};
   }
@@ -184,7 +185,7 @@ export async function createSandboxPrestartRefundIntent(client:PoolClient,input:
       responsibility_version_hash,refund_order_no,amount_cents,currency,idempotency_key,request_fingerprint,due_at,basis_kind,liability_root_id,liability_event_id,sandbox_registration_ref)
     VALUES($1,NULL,$2,$3,$4,'CONTROLLED',$5,$6,$7,$8,$9,$10,'CNY',$11,$12,$13,'PRESTART_TERMINATION',$14,$15,$16) RETURNING ${COLUMNS}`,
   [freshId('refund'),b.orderId,b.paymentConfirmationId,b.renterUserId,b.merchantIdentityId,b.channelTrxNo,b.merchantOrderNo,b.digest,number,
-    b.amountCents,key,fingerprint,term.approved_at,term.liability_root_id,term.liability_event_id,p.registration.reference])).rows[0];
+    b.amountCents,key,fingerprint,term.approved_at,term.liability_root_id,term.liability_event_id,reference])).rows[0];
   if(!row)throw conflict('Local prestart refund allocation unavailable');
   await audit(client,row.id,'order.refund.prestart.allocated',input.requestId,{terminationId:term.id,paymentConfirmationId:b.paymentConfirmationId,amountCents:b.amountCents,currency:'CNY',channelResult:'NOT_SUBMITTED'});
   return{kind:'ALLOCATED' as const,intentId:row.id,refundOrderNo:row.refund_order_no,state:row.state,budgetDisposition:row.budget_disposition??'ALLOCATED'};
