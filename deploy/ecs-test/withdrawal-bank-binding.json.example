@@ -4,6 +4,7 @@
   "writeEnabled": true,
   "currentKeyVersion": "test-v1",
   "keyVariables": {
-    "test-v1": "WITHDRAWAL_BANK_KEY_TEST_V1"
+    "test-v1": "WITHDRAWAL_BANK_KEY_TEST_V1",
+    "r06-bank-20261105-v1": "WITHDRAWAL_BANK_KEY_R06_V1"
   }
 }
