@@ -399,6 +399,15 @@ test("admin BFF forwards only the exact POST member invite path", async t => {
   assert.equal(extra.result().status, 404);
 });
 
+test("admin BFF admits the legacy group create path only for the exact legacy order ID",async t=>{
+ let forwarded="";t.mock.method(orderRoutes,"handleOrderAdminRoute",async(req:any,res:any)=>{forwarded=req.originalUrl;res.status(200).json({created:true});});
+ const legacy="legacy_order_"+"a".repeat(40),ok=capture();
+ await handleAdminBff({method:"POST",url:`/orders/${legacy}/create-team`,originalUrl:`/orders/${legacy}/create-team`,headers:{origin:ADMIN_ORIGIN},body:{}} as never,ok.response as never,bffOptions());
+ assert.equal(ok.result().status,200);assert.equal(forwarded,`/api/v1/admin/orders/${legacy}/create-team`);
+ const bad=capture();await handleAdminBff({method:"POST",url:`/orders/${ORDER}/create-team`,originalUrl:`/orders/${ORDER}/create-team`,headers:{origin:ADMIN_ORIGIN},body:{}} as never,bad.response as never,bffOptions());
+ assert.equal(bad.result().status,404);
+});
+
 test("terminal orders may invite an operator only inside the authoritative communication window",async t=>{
   mockAccess(t);
   let allowed=true,checks=0;

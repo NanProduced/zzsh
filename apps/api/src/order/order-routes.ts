@@ -9,7 +9,8 @@ import type { ImMessageTransport } from "../im/im-contract";
 import type { YunxinOrderTeamApi } from "../im/yunxin-provider";
 import { assertOrderTeamInviteAccess, inviteOrderTeamAdmin, listOrderTeamInviteTargets } from "../im/order-team-invite";
 import { assertManualCloseAccess, manualCloseOrder } from "./manual-close";
-import { readOrderTeamAccess, listJoinedOrderTeams } from "../im/order-team-access";
+import { listJoinedOrderTeams } from "../im/order-team-access";
+import { assertLegacyOrderTeamRequest, requestLegacyOrderTeam, listJoinedLegacyOrderTeams, readAnyOrderTeamAccess as readOrderTeamAccess } from "../im/legacy-order-team";
 import { parseRfc3339Timestamp } from "../content/content";
 import { queryAdminReadOrders, getAdminReadOrder, parseOrderOrigin, type OrderReadFilters } from "./admin-order-read";
 
@@ -81,7 +82,7 @@ export type OrderRuntimeOptions = AuthSecurityOptions & {
   legacyPublicAdmissionDetail?: LegacyPublicAdmissionDetailIndex;
   orderImSdkRouteBindings?: OrderImSdkRouteBindings;
   /** Present only when order Teams are configured; the invite path never creates a Team. */
-  orderTeamMembers?: { appId: string; provider: Pick<YunxinOrderTeamApi, "readOrderTeam"|"addSupportTeamMember"> };
+  orderTeamMembers?: { appId: string; provider: Pick<YunxinOrderTeamApi, "readOrderTeam"|"addSupportTeamMember">; wake?:()=>void };
   /** Explicit controlled-test switch. Production leaves it unset. */
   settlementRecordingEnabled?: boolean;
   /** Local/test system text seam; a production NIM implementation remains later work. */
@@ -175,6 +176,15 @@ export async function handleOrderUserRoute(
       });
       sendJson(response, 200, data, requestId);
       return;
+    }
+    if(method==="GET"&&path==="/legacy-im-groups"){
+      const team=options.orderTeamMembers;if(!team)throw new SecurityApiError(503,API_V1_ERROR_CODES.IM_UNAVAILABLE,"客服群暂不可用");
+      for(const key of query.keys())if(!["party","cursor","limit"].includes(key)||query.getAll(key).length!==1)throw invalid("Query is invalid",key);
+      const party=query.get("party");if(party!=="renter"&&party!=="owner")throw invalid("Party is invalid","party");
+      const cursor=query.get("cursor");if(cursor&&!/^legacy_order_[a-f0-9]{40}$/.test(cursor))throw invalid("Cursor is invalid","cursor");
+      const context=await readUserContext(request,options);
+      const data=await withTransaction(options.pool,c=>listJoinedLegacyOrderTeams(c,{...context,realm:"user"},team.appId,party,cursor,parseLimit(query.get("limit"))));
+      sendJson(response,200,data,requestId);return;
     }
     const legacyMatch = /^\/legacy(?:\/([A-Za-z0-9._:-]+))?$/.exec(path);
     if (legacyMatch) {
@@ -349,6 +359,20 @@ export async function handleOrderAdminRoute(
     const supportCancel = /^\/([A-Za-z0-9._:-]+)\/support-cancel$/.exec(path);
     if (supportCancel) {
       await handleSupportCancelAdminRoute(request, response, options, decodeId(supportCancel[1]!), query, method);
+      return;
+    }
+    const legacyTeam = /^\/(legacy_order_[a-f0-9]{40})\/create-team$/.exec(path);
+    if(method==="POST"&&legacyTeam){
+      if(!requireOrigin(request,response,options,requestId))return;
+      const team=options.orderTeamMembers;if(!team)throw new SecurityApiError(503,API_V1_ERROR_CODES.IM_UNAVAILABLE,"客服群暂不可用");
+      const body=bodyOf(request);ensureOnlyFields(body,[]);
+      const context=await readAdminContext(request,options),actor={userId:context.userId,sessionId:context.sessionId},orderId=legacyTeam[1]!;
+      await runIdempotentWrite(options,request,response,requestId,
+        {principalId:actor.userId,operation:"im.order.legacy_team.create",resourceId:orderId},
+        {realm:"admin",id:actor.userId,sessionId:actor.sessionId},{orderId},
+        async client=>{await assertLegacyOrderTeamRequest(client,actor,orderId);},
+        async client=>({status:200,body:await requestLegacyOrderTeam(client,actor,team.appId,orderId,requestId)}),
+        undefined,async()=>{team.wake?.();});
       return;
     }
     const memberInvite = /^\/([A-Za-z0-9._:-]+)\/members$/.exec(path);

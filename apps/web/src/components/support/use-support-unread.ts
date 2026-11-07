@@ -15,8 +15,8 @@ import {
 
 /** 入口轮询比窗口内的 5 秒目录慢一档：它是“有没有新消息”的提示，不是会话读条。 */
 const ENTRY_POLL_MS = 20_000;
-/** 与窗口目录同样的两页预算；没读完也只发布读到的部分，不假装后面没有未读。 */
-const ORDER_PAGE_BUDGET = 2;
+/** 首轮覆盖新旧订单及双方；没读完只发布已读取的部分。 */
+const ORDER_PAGE_BUDGET = 4;
 
 function httpStatus(error: unknown): number | undefined {
   return error && typeof error === "object" && "status" in error && typeof (error as { status?: unknown }).status === "number"
@@ -50,9 +50,9 @@ async function readConsultationUnread(signal: AbortSignal): Promise<SupportUnrea
     }));
 }
 
-async function readOrderUnread(signal: AbortSignal): Promise<SupportUnreadOrder[]> {
+async function readOrderUnread(signal: AbortSignal,userId:string): Promise<SupportUnreadOrder[]> {
   const scan = readSupportOrders(async <T,>(path: string): Promise<T> => {
-    const response = await fetch(path, { credentials: "same-origin", cache: "no-store", signal });
+    const response = await fetch(path, { credentials: "same-origin", cache: "no-store", signal, headers:{"x-zzsh-expected-user-id":userId} });
     return await readJson(response, "暂时无法读取订单群未读。") as T;
   }, signal);
   let page: { items: SupportUnreadOrder[]; complete: boolean } | undefined;
@@ -64,6 +64,7 @@ async function readOrderUnread(signal: AbortSignal): Promise<SupportUnreadOrder[
   return (page?.items ?? []).map((item) => ({
     id: item.id,
     status: item.status ?? null,
+    origin: item.origin,
     unreadCount: typeof item.unreadCount === "number" ? item.unreadCount : 0,
   }));
 }
@@ -72,10 +73,10 @@ async function readOrderUnread(signal: AbortSignal): Promise<SupportUnreadOrder[
  * 客服入口未读。窗口关着时才轮询：窗口开着时它自己的目录轮询会发布同一份快照，这里停手，
  * 一个页面只跑一条未读链路。隐藏标签页不发请求；重新可见立刻补一次。
  */
-export function useSupportUnread(identity: string | null, enabled: boolean): SupportUnreadSummary | null {
+export function useSupportUnread(identity: string | null, enabled: boolean,userId:string|null): SupportUnreadSummary | null {
   const summary = useSyncExternalStore(subscribeSupportUnread, getSupportUnreadSnapshot, () => null);
   useEffect(() => {
-    if (!enabled || !identity) return;
+    if (!enabled || !identity || !userId) return;
     let cancelled = false;
     let pending = false;
     let controller = new AbortController();
@@ -85,7 +86,7 @@ export function useSupportUnread(identity: string | null, enabled: boolean): Sup
       pending = true;
       const signal = controller.signal;
       try {
-        const [consultations, orders] = await Promise.all([readConsultationUnread(signal), readOrderUnread(signal)]);
+        const [consultations, orders] = await Promise.all([readConsultationUnread(signal), readOrderUnread(signal,userId)]);
         if (cancelled || signal.aborted) return;
         publishSupportUnread(computeSupportUnread(consultations, orders, readDirectoryPreferences(identity)));
       } catch (cause) {
@@ -115,6 +116,6 @@ export function useSupportUnread(identity: string | null, enabled: boolean): Sup
       document.removeEventListener("visibilitychange", onVisibility);
       window.clearInterval(timer);
     };
-  }, [enabled, identity]);
+  }, [enabled, identity,userId]);
   return summary;
 }

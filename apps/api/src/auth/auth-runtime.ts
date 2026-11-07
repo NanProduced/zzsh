@@ -1379,7 +1379,7 @@ export async function mountAuthHandlers(
     settlementRecordingEnabled,
     ...(orderImSdkRouteBindings ? { orderImSdkRouteBindings } : {}),
     ...(options.orderTeams && orderTeamProvider
-      ? { orderTeamMembers: { appId: options.yunxin!.appId, provider: orderTeamProvider } } : {}),
+      ? { orderTeamMembers: { appId: options.yunxin!.appId, provider: orderTeamProvider, wake:()=>app.get(OrderTeamLifecycle).wake() } } : {}),
     ...(options.testImMessageTransport
       ? { systemMessageTransport: { sendText: options.testImMessageTransport.sendText.bind(options.testImMessageTransport) } }
       : teamTextSender ? { systemMessageTransport: createYunxinSystemMessageTransport(teamTextSender) } : {}),

@@ -30,8 +30,8 @@ import "@zzsh/ui/message-actions.css";
 import "@zzsh/ui/message-media.css";
 import {messageScopeUserLabel} from "@zzsh/ui/display-im";
 
-async function orderRequest<T>(path:string, signal?: AbortSignal):Promise<T>{
-  const response=await fetch(path,{credentials:"same-origin",cache:"no-store",signal});return readJson<T>(response,"订单请求未完成");
+async function orderRequest<T>(path:string, signal?: AbortSignal, expectedUserId?:string):Promise<T>{
+  const response=await fetch(path,{credentials:"same-origin",cache:"no-store",signal,...(expectedUserId?{headers:{"x-zzsh-expected-user-id":expectedUserId}}:{})});return readJson<T>(response,"订单请求未完成");
 }
 
 type Consultation = {
@@ -667,7 +667,7 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, vi
     if (!visible || preview || session.status !== "authenticated" || identityRef.current !== currentIdentity) return;
     const known = directoryIdentity === currentIdentity ? orders.find((order) => order.id === orderId) : undefined;
     if (known && (known.party === "owner" || known.party === "renter")) {
-      window.location.assign(orderUrl(known.party, "", undefined, orderId));
+      window.location.assign(orderUrl(known.party, "", undefined, orderId,known.origin));
       return;
     }
     if (orderNavigationRef.current && !orderNavigationRef.current.signal.aborted) return;
@@ -964,7 +964,7 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, vi
     let cancelled=false, pending=false;
     const generation=identityGenerationRef.current;
     let controller = new AbortController();
-    let scan = readSupportOrders(<T,>(path: string) => orderRequest<T>(path, controller.signal), controller.signal);
+    let scan = readSupportOrders(<T,>(path: string) => orderRequest<T>(path, controller.signal,session.userId??undefined), controller.signal);
     const refresh=async()=>{
       if(cancelled || pending || document.visibilityState === "hidden")return;
       pending=true;
@@ -972,7 +972,7 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, vi
       try {
         const [list,orderPage]=await Promise.all([fetchConsultations(signal),(async()=>{
           let page;
-          for (let count = 0; count < 2; count++) {
+          for (let count = 0; count < 4; count++) {
             signal.throwIfAborted();
             page = (await scan.next()).value;
             if (page?.complete) break;
@@ -983,12 +983,12 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, vi
         setConsultations(list);setDirectoryIdentity(currentIdentity);setDirectoryError("");
         if (orderPage?.complete) {
           setOrders(orderPage.items.filter(isDirectoryOrderGroup));setDirectoryState("ready");
-          scan = readSupportOrders(<T,>(path: string) => orderRequest<T>(path, controller.signal), controller.signal);
+          scan = readSupportOrders(<T,>(path: string) => orderRequest<T>(path, controller.signal,session.userId??undefined), controller.signal);
         }
       } catch(cause) {
         if(cancelled||signal.aborted||generation!==identityGenerationRef.current)return;
         controller.abort();controller = new AbortController();
-        scan = readSupportOrders(<T,>(path: string) => orderRequest<T>(path, controller.signal), controller.signal);
+        scan = readSupportOrders(<T,>(path: string) => orderRequest<T>(path, controller.signal,session.userId??undefined), controller.signal);
         revalidateAfterUnauthorized(cause);setDirectoryState("error");setDirectoryError(httpStatus(cause)===403?"当前会话目录不可访问，请重新确认权限。":cause instanceof Error?cause.message:"暂时无法读取会话目录。");
         if(httpStatus(cause)===401||httpStatus(cause)===403){setDirectoryIdentity("");setConsultations([]);setOrders([]);setMessages({});setDrafts({});setActiveId(null);setSelectedOrder(null);}
       } finally {pending=false;}
@@ -997,7 +997,7 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, vi
       if (document.visibilityState === "hidden") controller.abort();
       else {
         controller = new AbortController();
-        scan = readSupportOrders(<T,>(path: string) => orderRequest<T>(path, controller.signal), controller.signal);
+        scan = readSupportOrders(<T,>(path: string) => orderRequest<T>(path, controller.signal,session.userId??undefined), controller.signal);
         void refresh();
       }
     };
@@ -2788,7 +2788,7 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, vi
     <div className="support-unified-chat">
       {directoryState==="error"?<div className="support-inline-error" role="alert">{directoryError}<button type="button" onClick={()=>setDirectoryRevision(n=>n+1)}>重试读取</button></div>:null}
       <div className="support-pane" hidden={section!=="consultation"}>{consultationView}</div>
-      <div className="support-order-pane" hidden={section!=="orders"}><div className="support-order-actions"><button type="button" className="support-back" onClick={()=>setPanelView("list")}>返回会话</button>{close}</div><OrderTeamPanel key={currentIdentity} identity={currentIdentity} realm="user" client={clientRef.current} connection={connection} active={section==="orders"} visible={visible} polling={visible} initialParty={selectedOrder?.party??initialOrderParty} selectedOrderId={selectedOrder?.id} compact request={orderRequest} onAuthError={()=>{void session.confirm();}} onConfirmOpening={confirmOpening} onRequestAfterSales={requestAfterSales}/></div>
+      <div className="support-order-pane" hidden={section!=="orders"}><div className="support-order-actions"><button type="button" className="support-back" onClick={()=>setPanelView("list")}>返回会话</button>{close}</div><OrderTeamPanel key={currentIdentity} identity={currentIdentity} realm="user" client={clientRef.current} connection={connection} active={section==="orders"} visible={visible} polling={visible} initialParty={selectedOrder?.party??initialOrderParty} selectedOrderId={selectedOrder?.id} compact request={<T,>(path:string)=>orderRequest<T>(path,undefined,session.userId??undefined)} onAuthError={()=>{void session.confirm();}} onConfirmOpening={confirmOpening} onRequestAfterSales={requestAfterSales}/></div>
     </div>
   </div>;
 }

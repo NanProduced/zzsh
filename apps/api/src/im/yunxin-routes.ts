@@ -6,7 +6,8 @@ import { readCopySettings } from "./read-copy";
 import { aftersaleId, createAftersale, listAftersales, claimAftersale, resolveAftersale, parseAftersaleClaim, readAftersaleForAdmin, assertAftersaleUserActive } from "./aftersale";
 import { withTransaction } from "../auth/security-core";
 import { parseImSendIntent, parseImReceipt, imFactId, storeImHiddenFact, insertImSentFact, planImRevoke, finishImRevoke, readImHistoryFilters, type ImReceiptActor, type ImReceiptMessage } from "./message-receipts";
-import { markOrderGroupRead, readOrderTeamAccess, recordOrderGroupMessage } from "./order-team-access";
+import { markOrderGroupRead, recordOrderGroupMessage } from "./order-team-access";
+import { readAnyOrderTeamAccess as readOrderTeamAccess } from "./legacy-order-team";
 
 import { ADMIN_PERMISSION, requireDirectoryPermission } from "../auth/admin-directory";
 import { hasPermission, loadEffectiveAdminAccess } from "../auth/admin-authorization";

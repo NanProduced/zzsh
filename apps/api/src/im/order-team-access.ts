@@ -13,6 +13,7 @@ import { readPrestartRefundProgress } from "../order/prestart-refund-store";
 import type { PrestartPaymentBasis } from "../order/prestart-termination";
 import type { StageCardKind } from "./order-stage-cards";
 import { isLegacyListedQuote } from "../supply/legacy-listed-quote";
+import { LEGACY_ORDER_STATUS_SQL } from "../order/legacy-order-read";
 
 export type OrderTeamActor={realm:"user"|"admin";userId:string;sessionId:string};
 const denied=()=>new SecurityApiError(403,"FORBIDDEN","Order Team access denied");
@@ -520,7 +521,7 @@ export async function listJoinedOrderTeams(c:PoolClient,actor:OrderTeamActor,cur
   const access=await loadEffectiveAdminAccess(c,actor.userId);
   if(!hasPermission(access,"im.support.read"))throw denied();
   assertGameScopeUsable(await readAdminGameScope(c,actor.userId),access?.isBoss===true);
-  const rows=(await c.query<Record<string,any>>(`SELECT o.id,o.display_no AS "displayNo",o.title,o.status,o.created_at AS "createdAt",
+  const rows=(await c.query<Record<string,any>>(`SELECT o.id,o.display_no AS "displayNo",o.title,o.status,o.created_at AS "createdAt",'NATIVE'::text AS origin,
       g.team_state AS "teamState",g.provision_state AS "provisionState",
       latest_opening.status AS "openingStatus",latest_opening.confirmed_at AS "openingConfirmedAt",
       EXISTS(SELECT 1 FROM zzsh_order.rental_opening_ack a WHERE a.opening_id=latest_opening.id) AS "openingAcked",
@@ -567,8 +568,24 @@ export async function listJoinedOrderTeams(c:PoolClient,actor:OrderTeamActor,cur
     ) stage_count ON TRUE
     WHERE mm.party='STAFF' AND mm.state='JOINED' AND m.realm='admin' AND m.identity_kind='ADMIN' AND m.status='READY'
       AND m.platform_subject_id=$1 AND m.app_id=$5 AND g.app_id=$5 AND ${gameScopeSql("o.game_id","$1","$2")}
-      AND ($3::text IS NULL OR o.id<$3) ORDER BY o.id DESC LIMIT $4`,[actor.userId,access!.isBoss,cursor,limit+1,appId??null])).rows;
+      AND ($3::text IS NULL OR o.id<$3)
+    UNION ALL
+    SELECT l.id,l.original_order_no AS "displayNo",'迁入账号'::text AS title,${LEGACY_ORDER_STATUS_SQL} AS status,l.source_created_at AS "createdAt",'LEGACY'::text AS origin,
+      g.team_state,g.provision_state,NULL::text,NULL::timestamptz,false,NULL::text,false,false,NULL::timestamptz,
+      g.first_response_at,g.remind_due_at,COALESCE(g.add_round,0),COALESCE(g.escalation_state,'NOT_STARTED'),false,
+      act.last_message_at,act.last_message_preview,COALESCE(unread.unread_count,0),game.name,NULL::jsonb,NULL::jsonb
+    FROM zzsh_order.im_order_member mm JOIN zzsh_iam.im_identity_mapping m ON m.id=mm.identity_id AND m.app_id=mm.app_id
+    JOIN zzsh_order.im_order_group g ON g.order_id=mm.order_id AND g.app_id=mm.app_id
+    JOIN zzsh_order.legacy_order_read_snapshot l ON l.id=g.legacy_order_id JOIN zzsh_supply.game game ON game.id=l.game_id
+    LEFT JOIN zzsh_order.legacy_continuation_version h ON h.order_id=l.id AND h.superseded_at IS NULL
+    LEFT JOIN zzsh_order.im_order_activity act ON act.order_id=l.id
+    LEFT JOIN zzsh_order.im_order_unread unread ON unread.order_id=l.id AND unread.identity_id=m.id
+    WHERE mm.party='STAFF' AND mm.state='JOINED' AND m.realm='admin' AND m.identity_kind='ADMIN' AND m.status='READY'
+      AND m.platform_subject_id=$1 AND m.app_id=$5 AND g.app_id=$5 AND ${gameScopeSql("l.game_id","$1","$2")}
+      AND COALESCE(l.source_snapshot->>'is_delete','0')='0' AND ($3::text IS NULL OR l.id<$3)
+    ORDER BY id DESC LIMIT $4`,[actor.userId,access!.isBoss,cursor,limit+1,appId??null])).rows;
   const items=rows.slice(0,limit).map(({openingStatus,openingConfirmedAt,openingAcked,termSeconds,intakeOpen,settlementCurrent,postedAt,provisionState,stageCard,stageCardCounts,...row})=>{
+    if(row.origin==="LEGACY")return {...row,stageCards:projectStageCardQueue(null,null)};
     const fulfillment=projectOrderFulfillment({orderStatus:row.status,hasGroup:true,provisionState,teamState:row.teamState,
       openingStatus,openingConfirmedAt,openingAcked:openingAcked===true,termSeconds,intakeOpen:Boolean(intakeOpen),
       currentSettlement:Boolean(settlementCurrent),posted:postedAt!==null});

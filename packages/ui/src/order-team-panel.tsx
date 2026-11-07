@@ -35,7 +35,7 @@ export type OrderTeamTermsLine={itemId:string;name:string|null;quantity:string;u
 export type OrderTeamTermsStaff={buyerRentalAmount:string|null;ownerRentalAmount:string|null;buyerTotal:string|null;ownerTotal:string|null;platformContribution:string|null};
 export type OrderTeamTerms={viewerParty:OrderTeamTermsViewerParty;basis:"QUOTE"|"UNKNOWN";currency:"CNY";scale:2;version:string|null;
   rentalAmount:string|null;depositAmount:string|null;paidTotal:string|null;lines:OrderTeamTermsLine[];staff?:OrderTeamTermsStaff};
-export type OrderTeamAccess={orderId:string;displayNo:string;orderStatus:string;
+export type OrderTeamAccess={orderId:string;displayNo:string;orderStatus:string;origin?:"NATIVE"|"LEGACY";legacyStatusLabel?:string;
   cancelReason?:string|null;refundPending?:boolean;refundCompletedAt?:string|null;
   stage?:OrderTeamFulfillmentStage;rentalStartedAt?:string|null;dueAt?:string|null;
   openingState?:"NONE"|"DRAFT"|"PARTIAL"|"CONFIRMED";endState?:"NONE"|"REQUESTED"|"POSTED";
@@ -159,7 +159,7 @@ function stageStepState(stage:OrderTeamFulfillmentStage,index:number):Fulfillmen
   const current=stageStepIndex(stage);
   return index<current?"done":index===current?"current":"pending";
 }
-const orderDetailPath=(order:{orderId:string},party:"renter"|"owner")=>`/account?view=${party==="owner"?"leased":"rentals"}&orderId=${encodeURIComponent(order.orderId)}`;
+const orderDetailPath=(order:{orderId:string;origin?:"NATIVE"|"LEGACY"},party:"renter"|"owner")=>`/account?view=${party==="owner"?"leased":"rentals"}&orderId=${encodeURIComponent(order.orderId)}${order.origin==="LEGACY"?"&source=legacy":""}`;
 function stageOf(info:OrderTeamAccess):OrderTeamFulfillmentStage{
   return info.stage??(info.orderStatus==="PENDING_PAYMENT"?"PENDING_PAYMENT":info.orderStatus==="COMPLETED"?"SETTLED":info.orderStatus==="CANCELLED"?"CANCELLED":info.teamState==="READY"?(info.openingState==="CONFIRMED"?"RENTING":"OPENING_CONFIRM"):"WAITING_STAFF");
 }
@@ -207,6 +207,7 @@ function stageCollapsedText(info:OrderTeamAccess):string{
 /** Compact six-step bar. Collapsed it is one line; the steps stay available without becoming a dashboard. */
 export function FulfillmentStageBar({info,transport,connection}:{info:OrderTeamAccess;transport?:"nim"|"local-fake";connection?:string}){
   const [open,setOpen]=useState(false);
+  if(info.origin==="LEGACY")return <section className="order-team-stage" aria-label="订单状态"><div className="order-team-stage-toggle"><span className="order-team-stage-now">迁入订单 · {info.legacyStatusLabel??"状态待核实"}</span></div></section>;
   const stage=stageOf(info);
   const tone=stage==="CANCELLED"?"warn":stage==="SETTLED"?"done":stage==="ENDING"?"active":"active";
   return <section className="order-team-stage" data-open={open} data-stage={stage} data-tone={tone} aria-label="订单阶段">
@@ -230,10 +231,10 @@ export function OrderTeamChatEmptyState({info,reading,orderDetailHref}:{info:Ord
     <span className="order-team-empty-mark" aria-hidden="true"/>
     <strong>{reading?"正在读取消息…":"还没有消息"}</strong>
     <span className="order-team-chat-empty-copy">{reading?"请稍候":"本单暂时还没有消息。"}{orderDetailHref?<a className="order-team-chat-empty-link" href={orderDetailHref}>查看订单详情</a>:null}</span>
-    <ol className="order-team-stage-steps" aria-label="订单阶段时间线">
+    {info.origin!=="LEGACY"?<ol className="order-team-stage-steps" aria-label="订单阶段时间线">
       {FULFILLMENT_STEPS.map((step,index)=>{const state=stageStepState(stage,index);
         return <li key={step.key} data-state={state} {...(index===current&&state==="current"?{"aria-current":"step" as const}:{})}><span className="order-team-stage-step-mark" aria-hidden="true"/><span>{step.label}</span></li>;})}
-    </ol>
+    </ol>:<span className="order-team-chat-empty-copy">这是客服为迁入订单创建的新群，旧消息不会显示在这里。</span>}
   </div>;
 }
 // Read-only formatter adapted from the reviewed order Web candidate; no write flow imported.
@@ -641,12 +642,12 @@ export function OrderTeamPanel({identity,realm,client,connection,active,visible=
   const choose=(id:string|null)=>{accessSequence.current++;setInfo(null);setSelected(id);setError("");onSelectedOrderChange?.(id);};
   const visibleItems=itemsScope.current===listScope?items:[],visibleNext=itemsScope.current===listScope?next:null;
   const orderHeader=info&&!renderConversation?<header className="order-team-head">
-    <div className="order-team-head-row"><h3>订单 {info.displayNo}</h3><span className="order-team-head-chip">{stageOf(info)==="CANCELLED"&&info.cancelReason==="PRESTART_TERMINATED"?"未开租终止":stageOf(info)==="CANCELLED"&&info.cancelReason==="MANUAL_CLOSE"?"客服手动结束":fulfillmentStageLabel(stageOf(info))}</span><a className="order-team-head-link" href={orderDetailPath(info,party)}>订单详情</a></div>
+    <div className="order-team-head-row"><h3>订单 {info.displayNo}</h3><span className="order-team-head-chip">{info.origin==="LEGACY"?info.legacyStatusLabel??"迁入订单":stageOf(info)==="CANCELLED"&&info.cancelReason==="PRESTART_TERMINATED"?"未开租终止":stageOf(info)==="CANCELLED"&&info.cancelReason==="MANUAL_CLOSE"?"客服手动结束":fulfillmentStageLabel(stageOf(info))}</span><a className="order-team-head-link" href={orderDetailPath(info,party)}>订单详情</a></div>
     <p className="order-team-head-sub">{info.gameName} · {info.account.title?.trim()||"账号"}</p>
     <p className="order-team-head-members">{info.members.map(member=>`${role(member)} ${member.name?.trim()||"未署名"}`).join(" · ")}</p>
   </header>:null;
   const orderEscalation=info?(compact?<details className="support-order-summary"><summary>{orderTeamLabel(info)} · 查看订单摘要</summary><p>{info.gameName} · {info.account.title?.trim()||"账号"}</p><a href={orderDetailPath(info,party)}>前往订单核对</a><OrderTeamEscalation value={info.supportEscalation}/></details>:<OrderTeamEscalation value={info.supportEscalation}/>):null;
-  const orderFulfillment=info&&realm==="admin"&&renderFulfillment?<div className="order-team-fulfillment-slot">{renderFulfillment({orderId:info.orderId,displayNo:info.displayNo,teamState:info.teamState,canSend:info.canSend,...(info.frozenInventory?{frozenInventory:info.frozenInventory}:{})})}</div>:null;
+  const orderFulfillment=info&&info.origin!=="LEGACY"&&realm==="admin"&&renderFulfillment?<div className="order-team-fulfillment-slot">{renderFulfillment({orderId:info.orderId,displayNo:info.displayNo,teamState:info.teamState,canSend:info.canSend,...(info.frozenInventory?{frozenInventory:info.frozenInventory}:{})})}</div>:null;
   const orderMembers=info?<ul className="order-team-members" aria-label="群成员">{info.members.map(m=><li key={m.accountId}><ProfileImage src={m.avatar} fallback={<span aria-hidden="true">{Array.from(m.name?.trim()||role(m))[0]||"用"}</span>} width={28} height={28}/><span>{m.name?.trim()||role(m)}<small>{role(m)}</small>{realm==="admin"&&m.party!=="STAFF"?<small>用户编号 {m.platformId} · 会员：未知 · 实名：未知</small>:null}</span></li>)}</ul>:null;
   const orderAsideNodes=info?<>{realm==="admin"?orderEscalation:null}{orderFulfillment}{orderMembers}</>:null;
   const orderAside=info?(renderAside?renderAside({info,fulfillment:orderFulfillment,escalation:orderEscalation,members:orderMembers}):<aside className="order-team-aside">{orderAsideNodes}</aside>):null;

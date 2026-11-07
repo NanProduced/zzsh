@@ -10,13 +10,21 @@ async function readAll(request) {
 }
 test('both roles and later pages participate; unpaid orders alone are not conversations',async()=>{
  const paths=[];
- const rows=await readAll(async path=>{paths.push(path);return path.includes('party=owner')?{items:[{id:'owned',fulfillmentAssignment:{state:'WAITING'}}],nextCursor:null}:path.includes('cursor=next')?{items:[{id:'rented',fulfillmentAssignment:{state:'ASSIGNED'}}],nextCursor:null}:{items:[{id:'unpaid'}],nextCursor:'next'};});
- assert.deepEqual(rows.map(x=>x.id),['rented','owned']);assert.equal(paths.length,3);assert.equal(rows[1].party,'owner');
+ const rows=await readAll(async path=>{paths.push(path);if(path.includes('legacy-im-groups'))return path.includes('party=renter')?{items:[{id:'legacy',origin:'LEGACY',status:'PENDING_PAYMENT',fulfillmentAssignment:{state:'ASSIGNED',teamState:'READY'}}],nextCursor:null}:{items:[],nextCursor:null};return path.includes('party=owner')?{items:[{id:'owned',fulfillmentAssignment:{state:'WAITING'}}],nextCursor:null}:path.includes('cursor=next')?{items:[{id:'rented',fulfillmentAssignment:{state:'ASSIGNED'}}],nextCursor:null}:{items:[{id:'unpaid'}],nextCursor:'next'};});
+ assert.deepEqual(rows.map(x=>x.id).sort(),['legacy','owned','rented']);assert.equal(paths.length,5);assert.equal(rows.find(x=>x.id==='owned').party,'owner');
+});
+
+test('a long native history does not starve either legacy group directory',async()=>{
+ const paths=[],scan=readSupportOrders(async path=>{paths.push(path);return{items:[],nextCursor:path.includes('party=renter')&&!path.includes('legacy-im-groups')?'more':null};},new AbortController().signal);
+ for(let i=0;i<4;i++)await scan.next();
+ assert(paths.some(p=>p.includes('legacy-im-groups')&&p.includes('party=renter')));
+ assert(paths.some(p=>p.includes('legacy-im-groups')&&p.includes('party=owner')));
 });
 test('partial failure and invalid pagination cannot prove an empty directory',async()=>{
  await assert.rejects(readAll(async path=>{if(path.includes('party=owner'))throw Error('403');return{items:[],nextCursor:null};}),/403/);
  await assert.rejects(readAll(async()=>({items:[],nextCursor:'same'})),/分页未完成/);
  await assert.rejects(readAll(async()=>({items:[]})),/格式无效/);
+ await assert.rejects(readAll(async path=>{if(path.includes('legacy-im-groups'))throw Error('legacy failed');return{items:[],nextCursor:null};}),/legacy failed/);
 });
 
 // 入口未读：窗口关着时用户只能靠常驻入口知道有新消息，所以计数规则必须自己站得住——

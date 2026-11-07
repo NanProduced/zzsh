@@ -285,6 +285,9 @@ function Detail({snapshot,id,onOpenPath,refreshNonce,financeOrigin,financeReturn
  const [paymentSummary,setPaymentSummary]=useState<PaymentSummary|null>();
  const [refundSummary,setRefundSummary]=useState<RefundSummary|null>();
  const [fundsNonce,retryFunds]=useState(0),[teamNonce,retryTeam]=useState(0);
+ const [teamSubmitting,setTeamSubmitting]=useState(false),[teamMessage,setTeamMessage]=useState("");
+ const teamRequest=useRef<{orderId:string;key:string}|null>(null);
+ const currentTeamOrder=useRef(id);currentTeamOrder.current=id;
  const [funds,setFunds]=useState<{state:OrderSettlementReadState;evidence?:OrderSettlementEvidence;legacyObservations?:FinanceResponse['legacyOrderObservations'];requestId?:string}>({state:'loading'});
  const [team,setTeam]=useState<{state:string;data?:{teamState:string|null;canRead:boolean;name?:string}}>({state:"loading"});
  useEffect(()=>{
@@ -308,13 +311,16 @@ function Detail({snapshot,id,onOpenPath,refreshNonce,financeOrigin,financeReturn
  useEffect(()=>{
   const controller=new AbortController();setTeam({state:"loading"});
   if(!order)return()=>controller.abort();
-  if(order.source.origin==="LEGACY"){setTeam({state:"legacy"});return()=>controller.abort();}
-  if(!snapshot.permissions.includes("im.support.read")){setTeam({state:"forbidden"});return()=>controller.abort();}
+  if(!snapshot.security.isBoss&&!snapshot.permissions.includes("im.support.read")){setTeam({state:"forbidden"});return()=>controller.abort();}
   void adminRequest<{teamState:string|null;canRead:boolean;name?:string}>(`/orders/${encodeURIComponent(id)}/im?operation=read`,undefined,"GET",{},controller.signal).then(data=>{
    if(!controller.signal.aborted)setTeam({state:"ready",data});
   }).catch(e=>{if(!controller.signal.aborted)setTeam({state:e instanceof AdminApiError&&e.status===403?"forbidden":e instanceof AdminApiError&&e.status===404?"missing":"unavailable"});});
   return()=>controller.abort();
  },[order?.id,id,keyOf(snapshot),refreshNonce,teamNonce]);
+ useEffect(()=>{setTeamMessage("");setTeamSubmitting(false);teamRequest.current=null;},[id]);
+ useEffect(()=>{if(team.state!=="ready"||!team.data?.teamState||["READY","NEEDS_REVIEW"].includes(team.data.teamState))return;
+  const timer=window.setTimeout(()=>retryTeam(n=>n+1),3000);return()=>window.clearTimeout(timer);
+ },[team]);
  const returnFinance=financeOriginPath(financeOrigin,snapshot,financeReturn);
  const back=<div className="flex flex-wrap gap-3">{returnFinance&&snapshot.permissions.includes('finance.read')?<Button variant="secondary" onClick={()=>onOpenPath(returnFinance)}>返回来源资金</Button>:null}<Button variant="secondary" onClick={()=>onOpenPath("/orders")}><ArrowLeft size={15}/>返回订单列表</Button></div>;
  if(error)return <>{back}<ErrorState error={error} retry={()=>setNonce(n=>n+1)}/></>;if(!order)return <>{back}<div className="oc-empty" aria-busy="true">正在读取订单主体…</div></>;
@@ -332,6 +338,14 @@ function Detail({snapshot,id,onOpenPath,refreshNonce,financeOrigin,financeReturn
   return `/users/${encodeURIComponent(userId)}?${query}`;
  }
  const o=order,canUser=snapshot.security.isBoss||snapshot.permissions.includes("user.directory.read"),canResource=snapshot.security.isBoss||snapshot.permissions.includes("supply.rental_account.read")||snapshot.permissions.includes("supply.review.read");
+ async function createLegacyTeam(){
+  if(teamSubmitting)return;
+  if(teamRequest.current?.orderId!==o.id)teamRequest.current={orderId:o.id,key:crypto.randomUUID()};
+  setTeamSubmitting(true);setTeamMessage("");
+  try{const result=await adminRequest<{created:boolean;teamState:string;assignedToCurrentOperator:boolean}>(`/orders/${encodeURIComponent(o.id)}/create-team`,{},"POST",{"Idempotency-Key":teamRequest.current.key});
+   if(currentTeamOrder.current===o.id){setTeamMessage(result.assignedToCurrentOperator?"已提交建群，准备完成后可进入沟通。":"本单已有客服群，请联系已有接待客服。");retryTeam(n=>n+1);}
+  }catch(e){if(currentTeamOrder.current===o.id){setTeamMessage(friendlyError(e));retryTeam(n=>n+1);}}finally{if(currentTeamOrder.current===o.id)setTeamSubmitting(false);}
+ }
  const openAccount=()=>onOpenPath(`/supply/reviews/${encodeURIComponent(o.accountId)}?fromOrderId=${encodeURIComponent(o.id)}`,accountNumberLabel(o.accountDisplayNo));
  const partySection=<section className="oc-section oc-related"><h2>本单账号和双方</h2><div className="oc-party-grid">
   <div className="oc-related-person"><small>查看当前账号</small><EntityPreviewTrigger touchLabel={`预览账号 ${accountNumberLabel(o.accountDisplayNo)}`} trigger={canResource?<Link onClick={openAccount}>{accountNumberLabel(o.accountDisplayNo)}</Link>:<span>关联资源需要独立读取权限</span>} content={<AccountPreviewCard displayNo={o.accountDisplayNo} legacy={legacyAccount(o)} accountId={o.accountId} title={accountBasic(o)||null} priceTitle={isLegacy(o)?"原单金额":"本单成交价（下单冻结）"} priceRows={[["哈夫币数量",frozenHaff(o.frozenAccount)??"未提供"],["哈夫币比例",ratioText(o)],["哈夫币租金",o.prepaymentBreakdown?.haffRental?money(o.prepaymentBreakdown.haffRental):"分项未记录"],["物品资源费",o.prepaymentBreakdown?.materialsPrepay?money(o.prepaymentBreakdown.materialsPrepay):"分项未记录"],[isLegacy(o)?"押金":"本单租客押金",money(o.amounts.deposit)]]} haffText={null} materialsText={frozenMaterials(o.frozenAccount)} termText={frozenTerm(o.frozenAccount)} loginMethodText={o.frozenAccount?.loginMethodText??null} safeBoxText={o.frozenAccount?.safeBoxText??null} rankText={o.frozenAccount?.gradingText??null} sourceText={o.frozenAccount?o.frozenAccount.source==="ORDER_VERSION"?"本单冻结版本":frozenSourceText(o.frozenAccount):o.source.origin==="LEGACY"?"旧平台订单":"新平台订单"} canOpen={canResource} onOpen={openAccount} deniedReason="关联资源需要独立读取权限"/>}/></div>
@@ -375,9 +389,11 @@ function Detail({snapshot,id,onOpenPath,refreshNonce,financeOrigin,financeReturn
   </TabsContent><TabsContent value="records" keepMounted>
 <section className="oc-section"><h2>资金凭证与来源记录</h2><p className="oc-fact-note">资金凭证读取沿用独立权限；未取得渠道到账、退款出款或结算依据时保持未知。普通刷新只重读本地记录；按原号补查需要独立命令授权，可能推进本站账务处理，不代表银行到账。</p><div className="flex flex-wrap gap-2">{snapshot.permissions.includes('finance.read')?<Button size="sm" variant="secondary" onClick={()=>openFundsDocument((o.source.origin==='LEGACY'?'LEGACY_ORDER:':'ORDER:')+o.id,`${o.displayNo} · 资金凭证`)}>查看资金凭证<ArrowUpRight size={14}/></Button>:null}</div><details className="oc-section oc-trace"><summary>来源与技术追溯</summary><p>订单ID：{o.id}</p><p>来源：{o.source.origin} · 游戏：{o.gameId}</p></details>
  </section></TabsContent></Tabs>
-</main>{o.source.origin==='NATIVE'?<aside className="oc-related"><section className="oc-section"><h2>订单群</h2><p className="oc-fact-note">{team.state==="loading"?"正在独立核对本单群授权…":team.state==="forbidden"?"当前身份无权读取本单群；订单读取权限不包含群消息权限。":team.state==="missing"?"未找到可读取的本单群记录。":team.state==="ready"?team.data?.teamState==="READY"?team.data.canRead?"本单群已就绪，当前身份可进入核对。":"本单群已就绪，当前身份无消息访问权。":"本单群尚未就绪；群就绪不证明开租成功。":"本单群读取暂不可用，订单主体已读取。"}</p>
+</main><aside className="oc-related"><section className="oc-section"><h2>订单群</h2><p className="oc-fact-note">{team.state==="loading"?"正在核对订单群…":team.state==="forbidden"?"当前身份无权读取本单群。":team.state==="missing"?"未找到可读取的本单群记录。":team.state==="ready"?team.data?.teamState==="READY"?team.data.canRead?"本单群已就绪。":"本单已有客服群，当前身份未加入。":team.data?.teamState==="NEEDS_REVIEW"?"建群结果待核对，请勿重复发起。":team.data?.teamState?"正在准备订单群…":o.source.origin==='LEGACY'?"尚未为这笔旧订单建立新群。":"尚未建立订单群。":"本单群读取暂不可用，请重试。"}</p>
+ {o.source.origin==='LEGACY'&&team.state==='ready'&&team.data?.teamState===null&&(snapshot.security.isBoss||(snapshot.permissions.includes('im.support.read')&&snapshot.permissions.includes('im.support.accept')))?<><p className="oc-fact-note">将由当前客服与租客、号主组成新群；旧聊天记录不会恢复。</p><Button size="sm" disabled={teamSubmitting} onClick={()=>void createLegacyTeam()}>{teamSubmitting?"正在提交…":"创建订单群"}</Button></>:null}
+ {teamMessage?<p role="status" className="oc-fact-note">{teamMessage}</p>:null}
  {team.state==="unavailable"?<Button size="sm" variant="secondary" onClick={()=>retryTeam(n=>n+1)}>重试群读取</Button>:null}
- {(snapshot.security.isBoss||snapshot.permissions.includes("im.support.read"))&&team.state==="ready"&&team.data?.canRead?<Link onClick={()=>onOpenPath(`/support?fromOrderId=${encodeURIComponent(o.id)}&section=orders&order=${encodeURIComponent(o.id)}`)}>{o.status==="PAID"?"进入客服工作台处理本单":"进入本单客服工作台"}</Link>:null}</section></aside>:null}</div></div>;
+ {(snapshot.security.isBoss||snapshot.permissions.includes("im.support.read"))&&team.state==="ready"&&team.data?.canRead?<Link onClick={()=>onOpenPath(`/support?fromOrderId=${encodeURIComponent(o.id)}&section=orders&order=${encodeURIComponent(o.id)}`)}>{o.status==="PAID"?"进入客服工作台处理本单":"进入本单客服工作台"}</Link>:null}</section></aside></div></div>;
 }
 export function AdminOrderChainView({snapshot,initialOrderId,objectOnly,initialQuery,onOpenPath,onQueryChange,refreshNonce=0}:{snapshot:Snapshot;initialOrderId?:string;objectOnly?:boolean;initialQuery?:Record<string,string>;onOpenPath:(path:string,title?:string)=>void;onQueryChange:(q:Record<string,string>)=>void;refreshNonce?:number}){
  if(!snapshot.security.isBoss&&!snapshot.permissions.includes("order.read")){saved.clear();currentIdentity="";return <div className="oc-empty"><h1>当前没有订单查询权限</h1></div>;}

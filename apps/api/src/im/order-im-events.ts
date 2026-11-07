@@ -10,6 +10,8 @@ import { SecurityApiError, recordAudit, withTransaction } from "../auth/security
 import { assertActiveInTransaction } from "../auth/user-identity";
 import { requireSupportAccess, type SupportType } from "./consultation";
 import type { YunxinServerApi, YunxinTeamMessageFact } from "./yunxin-provider";
+import { legacyOrderReadState } from "../order/legacy-order-read";
+import { legacyTeamSendWindow } from "./legacy-order-team-window";
 
 /**
  * OIM-4B supplier event ingress: signed copy and pre-send callbacks, minimal
@@ -200,11 +202,20 @@ type OrderScope = {
   renterUserId: string;
   ownerUserId: string;
   gameId: string;
+  legacyStatus:string|null;
+  legacyEndedAt:Date|null;
 };
 
 const ORDER_SCOPE_SELECT = `SELECT g.order_id, g.app_id, g.team_id, g.team_state, g.team_ready_at, g.first_response_state, g.first_response_at,
-    o.status AS order_status, o.renter_user_id, o.owner_user_id, o.game_id
-  FROM zzsh_order.im_order_group g JOIN zzsh_order.rental_order o ON o.id = g.order_id`;
+    CASE WHEN g.legacy_order_id IS NULL THEN o.status ELSE 'LEGACY' END AS order_status,
+    COALESCE(o.renter_user_id,l.renter_user_id) AS renter_user_id,COALESCE(o.owner_user_id,l.owner_user_id) AS owner_user_id,
+    COALESCE(o.game_id,l.game_id) AS game_id,l.source_order_status,l.source_pay_status,h.stage AS continuation_stage,
+    CASE WHEN COALESCE(h.stage,l.source_order_status)=5 THEN l.source_cancelled_at ELSE COALESCE(
+      (SELECT v.created_at FROM zzsh_order.legacy_continuation_version v WHERE v.order_id=l.id AND v.command='CONFIRM' ORDER BY v.revision DESC LIMIT 1),l.source_completed_at) END AS legacy_ended_at,
+    g.legacy_order_id
+  FROM zzsh_order.im_order_group g LEFT JOIN zzsh_order.rental_order o ON o.id=g.order_id AND g.legacy_order_id IS NULL
+  LEFT JOIN zzsh_order.legacy_order_read_snapshot l ON l.id=g.legacy_order_id
+  LEFT JOIN zzsh_order.legacy_continuation_version h ON h.order_id=l.id AND h.superseded_at IS NULL`;
 
 async function loadOrderScope(db: PoolClient, appId: string, teamId: string, lock: boolean): Promise<OrderScope | null> {
   const row = (await db.query(`${ORDER_SCOPE_SELECT} WHERE g.app_id=$1 AND g.team_id=$2${lock ? " FOR UPDATE OF g" : ""}`, [appId, teamId])).rows[0];
@@ -213,6 +224,8 @@ async function loadOrderScope(db: PoolClient, appId: string, teamId: string, loc
     orderId: row.order_id, appId: row.app_id, teamId: row.team_id, teamState: row.team_state,
     teamReadyAt: row.team_ready_at ?? null, firstResponseState: row.first_response_state, firstResponseAt: row.first_response_at ?? null,
     orderStatus: row.order_status, renterUserId: row.renter_user_id, ownerUserId: row.owner_user_id, gameId: row.game_id,
+    legacyStatus:row.legacy_order_id?legacyOrderReadState(row.continuation_stage??row.source_order_status,row.source_pay_status).status:null,
+    legacyEndedAt:row.legacy_ended_at??null,
   };
 }
 
@@ -547,6 +560,8 @@ type ScopeDecision = { allow: boolean; reason: string; orderId: string | null; s
 
 async function decideOrderPreSend(db: PoolClient, options: OrderImEventOptions, scope: OrderScope, event: SupplierMessageEvent): Promise<ScopeDecision> {
   if (event.msgType !== "TEXT" && event.msgType !== "PICTURE") return { allow: false, reason: "UNSUPPORTED_MESSAGE_TYPE", orderId: scope.orderId };
+  if(scope.legacyStatus&&!legacyTeamSendWindow(scope.legacyStatus,scope.teamReadyAt,scope.legacyEndedAt,(options.now??Date.now)()).terminalSendAllowed)
+    return {allow:false,reason:"SEND_WINDOW_CLOSED",orderId:scope.orderId};
   const mapping = await loadMapping(db, options.appId, event.fromAccount);
   if (!mapping || mapping.status !== "READY") return { allow: false, reason: "UNKNOWN_SENDER", orderId: scope.orderId };
   const member = (await db.query(`SELECT party, state, joined_at FROM zzsh_order.im_order_member WHERE order_id=$1 AND identity_id=$2`, [scope.orderId, mapping.id])).rows[0];

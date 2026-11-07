@@ -126,12 +126,13 @@ export async function applyReadCopy(db: PoolClient, appId: string, event: ReadCo
     scopeKind = "SUPPORT"; scopeId = thread.id;
   } else {
     const order = (await db.query<{ order_id: string; game_id: string; party: string }>(
-      `SELECT g.order_id,o.game_id,mm.party FROM zzsh_order.im_order_group g
-        JOIN zzsh_order.rental_order o ON o.id=g.order_id
+      `SELECT g.order_id,COALESCE(o.game_id,l.game_id) AS game_id,mm.party FROM zzsh_order.im_order_group g
+        LEFT JOIN zzsh_order.rental_order o ON o.id=g.order_id AND g.legacy_order_id IS NULL
+        LEFT JOIN zzsh_order.legacy_order_read_snapshot l ON l.id=g.legacy_order_id
         JOIN zzsh_order.im_order_member mm ON mm.order_id=g.order_id AND mm.app_id=g.app_id AND mm.identity_id=$3 AND mm.state='JOINED'
         WHERE g.app_id=$1 AND g.team_id=$2 AND g.team_state='READY' AND mm.joined_at<=to_timestamp($4::double precision/1000)
           AND (($5='admin' AND mm.party='STAFF') OR ($5='user' AND
-            ((mm.party='RENTER' AND o.renter_user_id=$6) OR (mm.party='OWNER' AND o.owner_user_id=$6))))`,
+            ((mm.party='BUYER' AND COALESCE(o.renter_user_id,l.renter_user_id)=$6) OR (mm.party='OWNER' AND COALESCE(o.owner_user_id,l.owner_user_id)=$6))))`,
       [appId, event.teamId, mapping.id, event.readMessageTime, mapping.realm, mapping.platform_subject_id])).rows[0];
     if (!order) return "IGNORED";
     if (mapping.realm === "admin" && !scopeAllowsGame(await readAdminGameScope(db, mapping.platform_subject_id), adminAccess!.isBoss, order.game_id)) return "IGNORED";

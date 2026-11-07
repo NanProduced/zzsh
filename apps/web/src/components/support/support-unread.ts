@@ -24,6 +24,7 @@ export type SupportUnreadConsultation = {
 export type SupportUnreadOrder = {
   id: string;
   status?: string | null;
+  origin?: "NATIVE" | "LEGACY";
   unreadCount?: number;
 };
 
@@ -46,8 +47,8 @@ export type SupportUnreadSummary = {
 export const DIRECTORY_PREFS_PREFIX = "zzsh.support.directory-prefs";
 
 /** 目录与入口必须用同一条可见性规则：草稿与未付款样本不算会话，规则只写这一份。 */
-export function isDirectoryOrderGroup(order: Pick<SupportUnreadOrder, "status">): boolean {
-  return order.status !== "DRAFT" && order.status !== "PENDING_PAYMENT";
+export function isDirectoryOrderGroup(order: Pick<SupportUnreadOrder, "status" | "origin">): boolean {
+  return order.origin === "LEGACY" || order.status !== "DRAFT" && order.status !== "PENDING_PAYMENT";
 }
 
 /** 对话目录行的本机偏好键；咨询按线程、订单群按订单号，和窗口里的键一致。 */

@@ -65,7 +65,7 @@ export function SupportRail(){
   // 用户不点开窗口也能看到客服回复和订单群消息。投诉建议复用同一个窗口，所以角标只挂一处，不重复计数。
   const session = useUserSession();
   const unreadIdentity = session.status === "authenticated" && session.userId ? `${session.userId}:${session.identityVersion}` : null;
-  const unread = useSupportUnread(unreadIdentity, Boolean(unreadIdentity) && !supportOpen && !preview);
+  const unread = useSupportUnread(unreadIdentity, Boolean(unreadIdentity) && !supportOpen && !preview,session.status==="authenticated"?session.userId:null);
   const unreadBadge = supportUnreadBadge(unread);
   const supportEntryLabel = supportUnreadAriaLabel("联系客服", unread);
   // The window is non-modal, so Radix leaves focus on the entry button and Tab would walk

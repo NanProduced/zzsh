@@ -93,6 +93,27 @@ const settle = () => act(async () => { await new Promise((resolve) => setTimeout
 const until = async (predicate) => { for (let i = 0; i < 120; i += 1) { if (predicate()) return; await settle(); } throw new Error("admin orders component condition timed out"); };
 const snapshotFor = (id) => ({ ...snapshot, adminUserId: id, user: { ...snapshot.user, username: `ZZ-${id}` }, session: { ...snapshot.session, id: `session-${id}` } });
 
+test('a permitted operator can request one new legacy order group with a clear pending state',async t=>{
+ const {root,node,AdminOrderChainView}=await setup(t),id='legacy_order_'+'a'.repeat(40),calls=[];
+ const permitted={...snapshot,permissions:['order.read','im.support.read','im.support.accept']};
+ const old={...chainOrder,id,displayNo:'LEGACY-GROUP',source:{origin:'LEGACY',statusLabel:'进行中'}};
+ let state=null;
+ globalThis.fetch=async(input,init={})=>{const url=String(input);calls.push({url,init});
+  if(url.includes('readMode=combined'))return response({order:old});
+  if(url.includes('/create-team')){state='PENDING';return response({created:true,teamState:state,assignedToCurrentOperator:true});}
+  if(url.includes('/im?operation=read'))return response({teamState:state,canRead:false});
+  return response({});};
+ await act(async()=>root.render(createElement(AdminOrderChainView,{...chainProps('legacy-group'),snapshot:permitted,objectOnly:true,initialOrderId:id})));
+ await until(()=>[...node.querySelectorAll('button')].some(button=>button.textContent.includes('创建订单群')));
+ assert.match(node.textContent,/当前客服与租客、号主组成新群/);assert.match(node.textContent,/旧聊天记录不会恢复/);
+ const button=[...node.querySelectorAll('button')].find(item=>item.textContent.includes('创建订单群'));
+ await act(async()=>button.dispatchEvent(new Event('click',{bubbles:true})));
+ await until(()=>node.textContent.includes('正在准备订单群'));
+ const posts=calls.filter(item=>item.url.includes('/create-team'));assert.equal(posts.length,1);
+ assert(new Headers(posts[0].init.headers).get('idempotency-key'));assert.equal(posts[0].init.body,'{}');
+ assert.doesNotMatch(node.textContent,/建群已成功|已加入旧群/);
+});
+
 test("order read list sends exact filters without persisting sensitive inputs and opens an object tab", async (t) => {
   const { browser, root, node, AdminOrdersView } = await setup(t);
   const calls = [];

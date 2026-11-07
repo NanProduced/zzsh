@@ -16,7 +16,7 @@ test("order Team scanning stops on a global database failure instead of trying e
   const failure=Object.assign(new Error("private connection detail"),{code:"08006"});
   let attempted=0;
   const pool={query:async(sql:string)=>{
-    if(sql.includes("SELECT g.*,o.renter_user_id")){attempted++;throw failure;}
+    if(sql.includes("SELECT g.*,COALESCE(o.renter_user_id")){attempted++;throw failure;}
     return {rows:sql.includes("SELECT g.order_id,op.id")?[{order_id:"a",id:null},{order_id:"b",id:null}]:[]};
   }};
   await assert.rejects(scanOrderTeams({pool,appId:"unavailable"} as never),error=>error===failure);

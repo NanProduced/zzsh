@@ -28,6 +28,7 @@ type Db = Pool | PoolClient;
 type Member = { identity_id:string; party:"BUYER"|"OWNER"|"STAFF"; state:string; account_id:string; platform_subject_id:string; realm:string; identity_kind:"USER"|"ADMIN"; status:string; identity_marker:string };
 type Plan = { order_id:string; app_id:string; assigned_admin_id:string; provision_state:string; team_state:string; team_name:string|null;
   members_limit:number|null; team_id:string|null; system_identity_id:string|null; version:string;
+  legacy_order_id:string|null;
   renter_user_id:string; owner_user_id:string; account_id:string; game_id:string; display_no:string; game_name:string; order_status:string;
   system_account:string|null; system_status:string|null; system_marker:string|null; system_subject:string|null; members:Member[] };
 type Operation = { id:string;order_id:string;app_id:string;state:string;version:string;candidate_team_id:string|null;sent_at:Date|null;failure_class:string|null;next_retry_at:Date };
@@ -45,9 +46,13 @@ const hash=(value:string)=>createHash("sha256").update(value).digest("hex");
 const key=(appId:string,kind:"USER"|"ADMIN"|"SYSTEM",subject:string):ImIdentityKey=>({provider:"yunxin",appId,realm:kind.toLowerCase(),kind,platformSubjectId:subject});
 
 async function plan(db:Db,appId:string,id:string):Promise<Plan|null> {
-  const row=(await db.query<Omit<Plan,"members">>(`SELECT g.*,o.renter_user_id,o.owner_user_id,o.account_id,o.game_id,o.display_no,o.status AS order_status,game.name AS game_name,
+  const row=(await db.query<Omit<Plan,"members">>(`SELECT g.*,COALESCE(o.renter_user_id,l.renter_user_id) AS renter_user_id,COALESCE(o.owner_user_id,l.owner_user_id) AS owner_user_id,
+    COALESCE(o.account_id,l.account_id) AS account_id,COALESCE(o.game_id,l.game_id) AS game_id,COALESCE(o.display_no,l.original_order_no) AS display_no,
+    CASE WHEN g.legacy_order_id IS NOT NULL THEN 'LEGACY' ELSE o.status END AS order_status,game.name AS game_name,
     m.account_id AS system_account,m.status AS system_status,m.identity_marker AS system_marker,m.platform_subject_id AS system_subject
-    FROM zzsh_order.im_order_group g JOIN zzsh_order.rental_order o ON o.id=g.order_id JOIN zzsh_supply.game game ON game.id=o.game_id
+    FROM zzsh_order.im_order_group g LEFT JOIN zzsh_order.rental_order o ON o.id=g.order_id AND g.legacy_order_id IS NULL
+    LEFT JOIN zzsh_order.legacy_order_read_snapshot l ON l.id=g.legacy_order_id
+    JOIN zzsh_supply.game game ON game.id=COALESCE(o.game_id,l.game_id)
     LEFT JOIN zzsh_iam.im_identity_mapping m ON m.id=g.system_identity_id WHERE g.order_id=$1 AND g.app_id=$2`,[id,appId])).rows[0];
   if(!row)return null;
   const members=(await db.query<Member>(`SELECT mm.*,m.account_id,m.platform_subject_id,m.realm,m.identity_kind,m.status,m.identity_marker
@@ -55,7 +60,7 @@ async function plan(db:Db,appId:string,id:string):Promise<Plan|null> {
   return {...row,members};
 }
 function inputFor(p:Plan):YunxinOrderTeamInput {
-  if(p.provision_state!=="ASSIGNED"||p.order_status!=="PAID"||!p.team_name||!p.members_limit||!p.system_account||p.system_status!=="READY"
+  if(p.provision_state!=="ASSIGNED"||(!p.legacy_order_id&&p.order_status!=="PAID")||!p.team_name||!p.members_limit||!p.system_account||p.system_status!=="READY"
     ||p.system_subject!=="support-manager"||p.system_account!==deriveYunxinAccountId(key(p.app_id,"SYSTEM","support-manager"))
     ||p.system_marker!==buildYunxinIdentityMarker(key(p.app_id,"SYSTEM","support-manager"))||p.members.length!==3)throw new OrderTeamError("IDENTITY_PENDING");
   for(const party of ["BUYER","OWNER","STAFF"] as const){
@@ -67,10 +72,11 @@ function inputFor(p:Plan):YunxinOrderTeamInput {
   const input={appId:p.app_id,orderId:p.order_id,name:p.team_name,ownerAccountId:p.system_account,memberAccountIds:p.members.map(m=>m.account_id),membersLimit:p.members_limit};
   validateOrderTeamInput(input);return input;
 }
-async function lockGroup(client:PoolClient,p:Pick<Plan,"game_id"|"account_id"|"order_id">):Promise<void>{
+async function lockGroup(client:PoolClient,p:Pick<Plan,"game_id"|"account_id"|"order_id"> & {legacy_order_id?:string|null}):Promise<void>{
   await client.query(`SELECT id FROM zzsh_supply.game WHERE id=$1 FOR SHARE`,[p.game_id]);
   await client.query(`SELECT id FROM zzsh_supply.rental_account WHERE id=$1 FOR UPDATE`,[p.account_id]);
-  await client.query(`SELECT id FROM zzsh_order.rental_order WHERE id=$1 FOR UPDATE`,[p.order_id]);
+  if(p.legacy_order_id) await client.query(`SELECT id FROM zzsh_order.legacy_order_read_snapshot WHERE id=$1`,[p.legacy_order_id]);
+  else await client.query(`SELECT id FROM zzsh_order.rental_order WHERE id=$1 FOR UPDATE`,[p.order_id]);
   await client.query(`SELECT order_id FROM zzsh_order.im_order_group WHERE order_id=$1 FOR UPDATE`,[p.order_id]);
 }
 async function assertBuildParticipants(c:PoolClient,p:Plan):Promise<void>{
@@ -93,7 +99,7 @@ async function markWaiting(options:OrderTeamOptions,id:string,code:string):Promi
 /** Account provisioning owns its own transactions; it is never run under a Team mutex. */
 export async function prepareOrderTeam(options:OrderTeamOptions,id:string):Promise<string|null>{
   const discovered=await plan(options.pool,options.appId,id);
-  if(!discovered||discovered.provision_state!=="ASSIGNED"||discovered.order_status!=="PAID")return null;
+  if(!discovered||discovered.provision_state!=="ASSIGNED"||(!discovered.legacy_order_id&&discovered.order_status!=="PAID"))return null;
   const existing=(await options.pool.query<Operation>(`SELECT * FROM zzsh_order.im_order_operation WHERE order_id=$1 AND kind='CREATE'`,[id])).rows[0];
   if(existing)return existing.id;
   const name=`${discovered.game_name}|订单:${discovered.display_no}`;
@@ -113,7 +119,7 @@ export async function prepareOrderTeam(options:OrderTeamOptions,id:string):Promi
       if(!row||row.status!=="READY"||row.account_id!==deriveYunxinAccountId(k)||row.identity_marker!==buildYunxinIdentityMarker(k))throw new OrderTeamError("IDENTITY_PENDING");mappings.push(row);
     }
     const current=await plan(c,options.appId,id);
-    if(!current||current.provision_state!=="ASSIGNED"||current.order_status!=="PAID"||current.assigned_admin_id!==discovered.assigned_admin_id)throw new OrderTeamError("STALE_OPERATION");
+    if(!current||current.provision_state!=="ASSIGNED"||(!current.legacy_order_id&&current.order_status!=="PAID")||current.assigned_admin_id!==discovered.assigned_admin_id)throw new OrderTeamError("STALE_OPERATION");
     await c.query(`UPDATE zzsh_order.im_order_group SET team_state='CREATING',system_identity_id=$2,team_name=$3,members_limit=$4,team_failure=NULL,version=version+1 WHERE order_id=$1`,[id,mappings[0]!.id,name,options.membersLimit]);
     for(let i=1;i<4;i++)await c.query(`INSERT INTO zzsh_order.im_order_member(order_id,app_id,identity_id,party) VALUES($1,$2,$3,$4)`,[id,options.appId,mappings[i]!.id,["BUYER","OWNER","STAFF"][i-1]]);
     const opId=`im_order_op_${randomUUID().replaceAll("-","")}`;
@@ -176,8 +182,8 @@ async function finish(options:OrderTeamOptions,op:Claim,team:YunxinOrderTeamStat
     await c.query(`UPDATE zzsh_order.im_order_member SET state='JOINED',joined_at=clock_timestamp() WHERE order_id=$1 AND state='PLANNED'`,[op.order_id]);
     // The new fields are only referenced when explicitly enabled; this preserves the
     // staged 0043/0044 CREATE acceptance path before migration 0045 is applied.
-    const firstResponseActivation=options.firstResponseEnabled?",first_response_state='RUNNING'":"";
-    const escalationActivation=options.escalationEnabled
+    const firstResponseActivation=options.firstResponseEnabled&&!current.legacy_order_id?",first_response_state='RUNNING'":"";
+    const escalationActivation=options.escalationEnabled&&!current.legacy_order_id
       ? ",remind_due_at=statement_timestamp()+interval '2 minutes',next_add_due_at=statement_timestamp()+interval '4 minutes',escalation_state='RUNNING'"
       : "";
     await c.query(`UPDATE zzsh_order.im_order_group SET team_state='READY',team_id=$2,team_ready_at=statement_timestamp(),team_failure=NULL${firstResponseActivation}${escalationActivation},version=version+1 WHERE order_id=$1`,[op.order_id,team.teamId]);
@@ -344,7 +350,7 @@ function assertOrderRouteReady(options:OrderTeamOptions,p:{app_id:string;order_i
 }
 
 function validateRestoredOrderTeam(p:Plan,team:YunxinOrderTeamState|null):void{
-  if(p.provision_state!=="ASSIGNED"||p.order_status!=="PAID"||p.team_state!=="READY"||!p.team_id||!p.team_name||!p.members_limit)
+  if(p.provision_state!=="ASSIGNED"||(!p.legacy_order_id&&p.order_status!=="PAID")||p.team_state!=="READY"||!p.team_id||!p.team_name||!p.members_limit)
     throw new OrderTeamError("BINDING_MISMATCH");
   const buyers=p.members.filter(member=>member.party==="BUYER"),owners=p.members.filter(member=>member.party==="OWNER");
   const staff=p.members.filter(member=>member.party==="STAFF"&&member.state==="JOINED");
