@@ -24,7 +24,7 @@ const canonical='{}',digest=createHash('sha256').update(canonical).digest('hex')
    WHERE id='synthetic-refund' RETURNING state,requires_review,budget_disposition,lease_version::text`)).rows[0];
   assert.deepEqual(claim,{state:'UNKNOWN',requires_review:true,budget_disposition:'ALLOCATED',lease_version:'2'});
   await c.query('SAVEPOINT invalid_clear');
-  await assert.rejects(c.query("UPDATE refund_guard_probe SET requires_review=false,revision=revision+1 WHERE id='synthetic-refund'"),e=>e.code==='40001');
+  await assert.rejects(c.query("UPDATE refund_guard_probe SET requires_review=false,revision=revision+1 WHERE id='synthetic-refund'"),e=>['23514','40001'].includes(e.code));
   await c.query('ROLLBACK TO SAVEPOINT invalid_clear');
   await c.query('SAVEPOINT invalid_terminal');
   await assert.rejects(c.query("UPDATE refund_guard_probe SET state='SUCCEEDED',revision=revision+1 WHERE id='synthetic-refund'"),e=>['23514','40001'].includes(e.code));

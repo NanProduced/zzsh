@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { Pool, PoolClient } from "pg";
-import { recordAudit, withTransaction } from "../auth/security-core";
-import { conflict, invalid } from "../supply/supply-util";
+import { SecurityApiError, recordAudit, setAuditContext, withTransaction } from "../auth/security-core";
+import { conflict, forbidden, invalid } from "../supply/supply-util";
 import { consumeNativeRentalRefundTerminal } from "../finance/native-rental-refund-store";
 import { assertRefundResource, createFormalRefundIntent, createPostedNativeRefundIntent, postedRefundAllocationKey, formalRefundBinding, lockFormalRefundContext, FORMAL_REFUND_COLUMNS,
   type FormalRefundCreateInput, type FormalRefundRow, type NativeRefundState } from "./channel-refund-store";
@@ -21,6 +21,30 @@ async function confirmed<T>(pool: Pool, id: string, phase: "CLAIM" | "RESULT", c
 }
 export const createJoinpayNativeRefund = (pool: Pool, input: FormalRefundCreateInput) => withTransaction(pool, c => createFormalRefundIntent(c, input));
 export type RefundExecution = RefundSourceOptions & { pool: Pool; fetch?: typeof globalThis.fetch; initialProfile?: BoundRefundProfile };
+
+/** An authorized operator may resume queries of the original dispatched refund, without a new payment. */
+export async function resumeNativeRefundReview(execution:RefundExecution,id:string,actor:{userId:string;sessionId:string},requestId:string,reason:string,
+  authorize:(client:PoolClient,id:string)=>Promise<void>){
+  if(![id,actor?.userId,actor?.sessionId,requestId].every(value=>typeof value==='string'&&ID.test(value))
+    ||typeof reason!=='string'||reason.trim().length<3||reason.length>200||/[\u0000-\u001f\u007f]/.test(reason)||typeof authorize!=='function')throw invalid('Invalid native refund review');
+  return confirmed(execution.pool,id,'RESULT',async client=>{
+    await authorize(client,id);await setAuditContext(client,'admin',actor.userId,actor.sessionId,requestId);
+    const ready=(await client.query<{ready:boolean}>(`SELECT EXISTS(SELECT 1 FROM pg_proc p JOIN pg_class c ON c.oid=to_regclass('zzsh_order.native_refund_review_resolution')
+      WHERE p.oid=to_regprocedure('zzsh_order.resume_native_refund_review(text,text)') AND p.proowner=c.relowner AND p.prosecdef
+        AND p.proconfig=ARRAY['search_path=pg_catalog'] AND has_function_privilege(current_user,p.oid,'EXECUTE'))
+      AND EXISTS(SELECT 1 FROM pg_trigger t WHERE t.tgrelid=to_regclass('zzsh_order.native_refund_review_resolution')
+        AND t.tgname='native_refund_review_resolution_immutable' AND NOT t.tgisinternal AND t.tgenabled IN('O','A')
+        AND t.tgfoid=to_regprocedure('zzsh_order.finance_immutable()')) AS ready`)).rows[0]?.ready;
+    if(ready!==true)throw new SecurityApiError(503,'EVIDENCE_UNAVAILABLE','Native refund review is unavailable');
+    await lockFormalRefundContext(client,execution.admission,id);
+    let result:{intentId:string;resumed:boolean;state:string;resolutionId:string}|undefined;
+    try{result=(await client.query<{result:{intentId:string;resumed:boolean;state:string;resolutionId:string}}>(
+      'SELECT zzsh_order.resume_native_refund_review($1,$2) AS result',[id,reason.trim()])).rows[0]?.result;}
+    catch(error){const code=(error as {code?:string}).code;if(code==='42501')throw forbidden();if(code==='23514'||code==='40001')throw conflict('NATIVE_REFUND_REVIEW_BLOCKED');throw error;}
+    if(!result||result.intentId!==id||typeof result.resumed!=='boolean'||typeof result.state!=='string'||typeof result.resolutionId!=='string')throw conflict('NATIVE_REFUND_REVIEW_INVALID');
+    return result;
+  });
+}
 export type RefundQuerySkipReason = "TERMINAL" | "REVIEW_REQUIRED" | "ACTIVE_LEASE" | "NOT_DUE" | "THROTTLED" | "BUDGET_EXHAUSTED" | "INELIGIBLE" | "ABNORMAL_BASIS_REVIEW" | "PRESTART_BASIS_REVIEW";
 export type RefundQueryOptions = Readonly<{ minimumIntervalSeconds: number; authorize?: (client: PoolClient, intentId: string) => Promise<void> }>;
 export type RefundQueryOutcome =

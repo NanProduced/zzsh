@@ -98,7 +98,29 @@ test('已复核的旧退款仅恢复原号查询，不发起退款',async t=>{
   assert.equal(f.s.status,200);assert.equal(f.s.result.operation,'LEGACY_REFUND_RESUME');assert.equal(f.s.result.outcome.kind,'RESUMED');
   assert.equal(audits[0].details.firstDispatchAllowed,false);assert.equal(invoked,1);
   await f.invoke('/legacy-refunds/legacy_intent_1/resume',{body:{reason:'已核对汇聚记录',force:true}},{refund:{legacyRefundsEnabled:false}});assert.equal(f.s.status,400);assert.equal(invoked,1);
-  assert.equal(await f.invoke('/refunds/refund_1/resume'),false);
+  assert.equal(await f.invoke('/withdrawals/withdrawal_1/resume'),false);
+});
+test('新单退款核对后仅恢复原号查询，必须具备本单权限并保留经办人',async t=>{
+  const f=fixture(t),audits:any[]=[];let allowed=true,invoked=0;
+  t.mock.method(command,'authorizeAdminNativeRefund',async()=>{if(!allowed)throw new SecurityApiError(403,'FORBIDDEN','no');});
+  t.mock.method(securityCore,'recordAudit',async(...[_client,value]:Parameters<typeof securityCore.recordAudit>)=>{audits.push(value);});
+  t.mock.method(refundAttempt,'resumeNativeRefundReview',async(...[_o,id,actor,_rid,reason,authorize]:Parameters<typeof refundAttempt.resumeNativeRefundReview>)=>{
+    assert.equal(actor.userId,'admin_1');assert.equal(reason,'已核对汇聚记录');
+    await authorize({query:async()=>({rows:[{order_id:'order_1'}]})} as never,id);invoked++;
+    return {intentId:id,resumed:true,state:'UNKNOWN',resolutionId:'review_1'};
+  });
+  await f.invoke('/refunds/refund_1/resume',{body:{reason:'已核对汇聚记录'}});
+  assert.equal(f.s.status,200);assert.equal(f.s.result.operation,'REFUND_RESUME');assert.equal(f.s.result.localFundsEffect,'NONE');
+  assert.equal(audits[0].details.firstDispatchAllowed,false);assert.equal(invoked,1);
+  allowed=false;await f.invoke('/refunds/refund_1/resume',{body:{reason:'已核对汇聚记录'}});assert.equal(f.s.status,403);assert.equal(invoked,1);
+  await f.invoke('/refunds/refund_1/resume',{body:{reason:'已核对汇聚记录',force:true}});assert.equal(f.s.status,400);assert.equal(invoked,1);
+});
+test('新单退款恢复提交结果未知时保留 UNKNOWN，不假定已恢复',async t=>{
+  const f=fixture(t);
+  t.mock.method(refundAttempt,'resumeNativeRefundReview',async()=>{throw new refundAttempt.RefundAttemptCommitUnknown('refund_1','RESULT');});
+  await f.invoke('/refunds/refund_1/resume',{body:{reason:'已核对汇聚记录'}});
+  assert.equal(f.s.status,202);assert.equal(f.s.result.operation,'REFUND_RESUME');assert.deepEqual(f.s.result.outcome,{kind:'UNKNOWN',phase:'RESULT'});
+  assert.equal(f.s.result.localFundsEffect,'UNKNOWN');
 });
 test('仅核清历史退款后可创建旧退款的下一次尝试，拒绝越权与额外字段',async t=>{
   const f=fixture(t),audits:any[]=[];let invoked=0,allowed=true;

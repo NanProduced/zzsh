@@ -10,8 +10,8 @@ test('R07 forward migrations are registered after the existing distribution migr
   assert.deepEqual(tail.map(row=>row.idx),[158,159,160,161]);
   assert(tail.every((row,i)=>i===0||tail[i-1].when<row.when));
   for(const row of tail)assert(file(row.tag+'.sql').length>0);
-  const settlement=journal.entries.filter(row=>row.idx>=162&&row.idx<=171);
-  assert.equal(settlement.length,10);
+  const settlement=journal.entries.filter(row=>row.idx>=162&&row.idx<=172);
+  assert.equal(settlement.length,11);
   assert(settlement.every((row,i)=>row.idx===162+i&&row.tag.startsWith(String(row.idx).padStart(4,'0')+'_')&&row.when>(i?settlement[i-1].when:tail.at(-1).when)));
   for(const row of settlement)assert(file(row.tag+'.sql').length>0);
 });

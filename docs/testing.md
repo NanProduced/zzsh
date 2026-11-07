@@ -122,6 +122,8 @@
 
 待核退款的查单租约守卫可运行 `npm run test:refund-review-query:synthetic -w @zzsh/api`，须提供 `REFUND_REVIEW_SYNTH_OPT_IN=1`、`REFUND_REVIEW_SYNTH_OID` 和 `REFUND_REVIEW_SYNTH_SYSTEM_ID`。测试在临时表运行真实退款更新守卫并回滚，不调用渠道、不验证真实权限或退款终态。
 
+新单退款核对后恢复原号查询可运行 `npm run test:native-refund-review:synthetic -w @zzsh/api`，须提供 `NATIVE_REVIEW_SYNTH_OPT_IN=1`、`NATIVE_REVIEW_SYNTH_OID` 和 `NATIVE_REVIEW_SYNTH_SYSTEM_ID`。默认仅在既有隔离合成库回滚；校验权限、游戏范围、会话、租约、原请求和审计，渠道准入为替身。另设 `NATIVE_REVIEW_SYNTH_CONCURRENCY=1` 时，只允许已登记且 marker 匹配的 `zzsh_native_review_concurrency` 专用合成库；该模式提交合成夹具以验证双事务锁等待，结束后按资源登记清理。两种模式均不证明真实退款或到账。
+
 
 这里的批准可由原任务或资源使用约定一次覆盖，无需每轮重复申请；仅登记资源名称不等于获准重置或执行任意写入。隔离也不等于授权。退役守卫前，在原变更说明中简述“原风险→现有替代→拒绝证据”：资源身份、持续有效的锁/租约（若原合同要求）、权限、越界写和未知责任要有等效保护。标准进程工具不自动提供这些边界；GET也可能含ensure写，不能只凭HTTP方法认定只读。
 

@@ -454,6 +454,7 @@ export async function applyRuntimePrivileges(pool: Pick<Pool, "query">, runtimeR
   await configureContinuityFinancePrivileges(pool, runtimeRole);
   await configureChannelRefundPrivileges(pool, runtimeRole);
   await configureJoinpayFinancialPrivileges(pool, runtimeRole);
+  await configureNativeRefundReviewPrivileges(pool, runtimeRole);
   await configureProfileAvatarPolicyPrivileges(pool, runtimeRole);
   await configureSettlementRefundPolicyPrivileges(pool, runtimeRole);
   await configureLocalFinancialSandboxPrivileges(pool, runtimeRole);
@@ -914,6 +915,24 @@ export async function configureContinuityFinancePrivileges(pool: Pick<Pool, "que
       zzsh_order.certify_legacy_withdrawal_link(text) FROM PUBLIC,${role};
     REVOKE ALL ON FUNCTION zzsh_order.legacy_withdrawal_row_fingerprint(zzsh_order.personal_finance_observation) FROM PUBLIC;
     GRANT EXECUTE ON FUNCTION zzsh_order.legacy_withdrawal_row_fingerprint(zzsh_order.personal_finance_observation) TO ${role}`);
+}
+
+/** Native refund review keeps its immutable decision table writable only by the authorized function. */
+export async function configureNativeRefundReviewPrivileges(pool:Pick<Pool,"query">,runtimeRole:string):Promise<void>{
+  const role=quoteIdentifier(runtimeRole),state=(await pool.query(`SELECT to_regclass('zzsh_order.native_refund_review_resolution') IS NOT NULL AS present,
+    to_regprocedure('zzsh_order.resume_native_refund_review(text,text)') IS NOT NULL AS function_present,
+    EXISTS(SELECT 1 FROM pg_proc p JOIN pg_class c ON c.oid=to_regclass('zzsh_order.native_refund_review_resolution')
+      WHERE p.oid=to_regprocedure('zzsh_order.resume_native_refund_review(text,text)') AND p.proowner=c.relowner AND p.prosecdef
+       AND p.proconfig=ARRAY['search_path=pg_catalog']) AS function_ready,
+    EXISTS(SELECT 1 FROM pg_trigger t WHERE t.tgrelid=to_regclass('zzsh_order.native_refund_review_resolution')
+      AND t.tgname='native_refund_review_resolution_immutable' AND NOT t.tgisinternal AND t.tgenabled IN('O','A')
+      AND t.tgfoid=to_regprocedure('zzsh_order.finance_immutable()')) AS trigger_ready`)).rows[0];
+  if(!state||typeof state.present!=='boolean'||typeof state.function_present!=='boolean')throw new Error('Native refund review inventory is incomplete');
+  if(!state.present&&!state.function_present)return;
+  if(!state.present||!state.function_present||state.function_ready!==true||state.trigger_ready!==true)throw new Error('Native refund review schema is partially deployed');
+  await pool.query(`REVOKE ALL ON TABLE zzsh_order.native_refund_review_resolution FROM ${role};
+    REVOKE ALL ON FUNCTION zzsh_order.resume_native_refund_review(text,text) FROM PUBLIC;
+    GRANT EXECUTE ON FUNCTION zzsh_order.resume_native_refund_review(text,text) TO ${role}`);
 }
 
 /** 退款可选表在宽授权之后重新收窄；调用方保有原ACL事务，不在旧前缀创建对象。 */

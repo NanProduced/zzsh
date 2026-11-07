@@ -6,7 +6,7 @@ import type { Pool, PoolClient } from "pg";
 import { withTransaction } from "../src/auth/security-core";
 import { assertBusinessRuntimeIdentity, BusinessDatabaseService, createBusinessPool } from "../src/database/business";
 import { closeResource, finishDatabaseTest } from "./database-test-support";
-import { applyRuntimePrivileges, configureSettlementRefundPolicyPrivileges, configureSkinIdentityPrivileges } from "../src/database/business-migrations";
+import { applyRuntimePrivileges, configureNativeRefundReviewPrivileges, configureSettlementRefundPolicyPrivileges, configureSkinIdentityPrivileges } from "../src/database/business-migrations";
 
 test('directory pool is single-use within the existing ten business connection slots and both pools close',async()=>{
   const config={database:{host:'127.0.0.1',port:1,name:'offline',user:'offline',password:'offline'}},shared=createBusinessPool(config,{max:8}),directory=createBusinessPool(config,{max:2,maxUses:1});
@@ -136,6 +136,7 @@ function fundingAclFixture(present: readonly unknown[], incompleteInventory = fa
   const pool = { query: async (sql: string, args: unknown[] = []) => {
     seen.push(sql);
     if (sql.includes("guard_settlement_refund_policy")) return { rows: [{ present: false, guard: false, posting_columns: 0 }] };
+    if (sql.includes("resume_native_refund_review")) return { rows: [{ present: false, function_present: false, function_ready: false, trigger_ready: false }] };
     if (sql.startsWith("SELECT name,to_regprocedure(name)")) return { rows: (args[0] as string[]).slice(0, incompleteInventory ? 1 : 2).map((name, index) => ({ name, present: present[index] })) };
     if (sql.startsWith("SELECT name,to_regclass")) return { rows: (args[0] as string[]).map(name => ({ name, present: false })) };
     if (sql.includes("count(*)")) return { rows: [{ count: 0, ready: false }] };
@@ -156,6 +157,21 @@ test("settlement refund policy ACL rejects partial installations before granting
     assert.equal(seen.length, 1);
     assert.doesNotMatch(seen[0]!, /\bGRANT\b/);
   }
+});
+
+test("native refund review ACL rejects partial installation and only grants the guarded function",async()=>{
+  for(const shape of [
+    {present:true,function_present:false,function_ready:false,trigger_ready:true},
+    {present:true,function_present:true,function_ready:true,trigger_ready:false},
+    {present:true,function_present:true,function_ready:false,trigger_ready:true},
+  ]){
+    const writes:string[]=[];const pool={query:async(sql:string)=>{writes.push(sql);return{rows:[shape]};}} as unknown as Pool;
+    await assert.rejects(configureNativeRefundReviewPrivileges(pool,'fixture_runtime'),/partially deployed/);assert.equal(writes.length,1);
+  }
+  const writes:string[]=[];const pool={query:async(sql:string)=>{writes.push(sql);return{rows:[{present:true,function_present:true,function_ready:true,trigger_ready:true}]};}} as unknown as Pool;
+  await configureNativeRefundReviewPrivileges(pool,'fixture_runtime');assert.equal(writes.length,2);
+  assert.match(writes[1]!,/REVOKE ALL ON TABLE zzsh_order\.native_refund_review_resolution/);
+  assert.match(writes[1]!,/GRANT EXECUTE ON FUNCTION zzsh_order\.resume_native_refund_review/);
 });
 
 test("funding validator ACL leaves the old prefix alone and explicitly grants only the complete v2 function set", async () => {

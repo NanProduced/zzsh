@@ -30,6 +30,7 @@
     "test:legacy-commission-link:synthetic": "npm run build && node test/legacy-commission-link-synthetic.cjs",
     "test:legacy-commission-page:synthetic": "npm run build && node test/legacy-commission-page-synthetic.cjs",
     "test:refund-review-query:synthetic": "npm run build && node test/refund-review-query-guard-synthetic.cjs",
+    "test:native-refund-review:synthetic": "npm run build && node test/native-refund-review-synthetic.cjs",
     "test:legacy-observation:pg": "node --env-file-if-exists=.env -e \"require('node:assert/strict').ok(Boolean(process.env.REAL_SOURCE_5_CREDENTIALS_FILE),'Required PG opt-in: REAL_SOURCE_5_CREDENTIALS_FILE')\" && npm run build && node --env-file-if-exists=.env --test dist/test/legacy-observation-postgres.test.js",
     "test:credit-guarantee:pg": "node --env-file-if-exists=.env -e \"require('node:assert/strict').ok(Boolean(process.env.CREDIT_GUARANTEE_PASSWORD?.trim()),'Required PG opt-in/credential missing for test:credit-guarantee:pg')\" && npm run build && node --env-file-if-exists=.env --test dist/test/credit-guarantee-postgres.test.js",
     "test:credit-guarantee:recovery:pg": "node --env-file-if-exists=.env -e \"require('node:assert/strict').ok(process.env.CREDIT_GUARANTEE_RUN_RECOVERY==='1','Required PG opt-in/credential missing for test:credit-guarantee:recovery:pg')\" && npm run build && node --env-file-if-exists=.env --test dist/test/credit-guarantee-recovery-postgres.test.js",
