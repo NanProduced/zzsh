@@ -1,3 +1,33 @@
+/** A source-bound pending record is known; the caller separately counts only positive amounts. */
+export function legacyPendingContributorProofSql():string {
+  return `EXISTS(SELECT 1 FROM zzsh_order.legacy_order_duty pending
+    JOIN zzsh_order.legacy_order_read_snapshot lo ON lo.id=pending.order_id
+    JOIN zzsh_order.legacy_continuation_evidence ev ON ev.order_id=lo.id AND ev.source_kind='SOURCE_IMPORT'
+    WHERE pending.kind='COMMISSION' AND pending.order_id=p.allowed_order_id AND pending.source_record_id=p.source_id
+      AND pending.counterparty_user_id=p.user_id AND pending.status='PENDING' AND pending.source='LEGACY_IMPORT'
+      AND pending.source_status='1' AND pending.amount_cents>=0 AND pending.admission_id IS NULL
+      AND pending.continuation_version_id IS NULL AND pending.maturity_at IS NULL AND pending.settled_by IS NULL
+      AND lo.source_pay_status=1 AND lo.source_order_status IN(3,8,9)
+      AND COALESCE((SELECT h.stage FROM zzsh_order.legacy_continuation_version h WHERE h.order_id=lo.id AND h.superseded_at IS NULL),lo.source_order_status) IN(3,8,9)
+      AND ev.source_digest=lo.source_digest AND pending.source_digest=ev.source_digest
+      AND ev.facts_canonical::jsonb=ev.facts AND encode(sha256(convert_to(ev.facts_canonical,'UTF8')),'hex')=ev.facts_digest
+      AND ev.facts#>>'{evidence,source,legacyOrderId}'=lo.legacy_id
+      AND ev.facts#>>'{evidence,source,renterId}'=lo.legacy_renter_id AND ev.facts#>>'{evidence,source,ownerId}'=lo.legacy_owner_id
+      AND p.original->>'id'=p.source_id AND p.original->>'user_id'=p.legacy_user_id
+      AND p.original->>'order_id'=lo.legacy_id AND p.original->>'order_type'='1' AND p.original->>'is_delete'='0'
+      AND p.original->>'status'='1' AND p.original->>'level'=pending.level::text
+      AND p.original->>'earnings'=p.snapshot->>'amount' AND pending.amount_cents=round((p.snapshot->>'amount')::numeric*100)
+      AND EXISTS(SELECT 1 FROM jsonb_array_elements(CASE WHEN jsonb_typeof(ev.facts#>'{evidence,source,paidPay}')='array'
+        THEN ev.facts#>'{evidence,source,paidPay}' ELSE '[]'::jsonb END) pay WHERE pay->>'orderId'=lo.legacy_id
+          AND COALESCE(pay->>'id','')~'^[1-9][0-9]*$' AND COALESCE(pay->>'payOrderSn','')<>''
+          AND CASE WHEN COALESCE(pay->>'payMoney','')~'^(0|[1-9][0-9]*)([.][0-9]+)?$' THEN (pay->>'payMoney')::numeric>0 ELSE false END)
+      AND EXISTS(SELECT 1 FROM jsonb_array_elements(CASE WHEN jsonb_typeof(ev.facts#>'{evidence,source,commissions}')='array'
+        THEN ev.facts#>'{evidence,source,commissions}' ELSE '[]'::jsonb END) co WHERE co->>'id'=pending.source_record_id
+          AND co->>'beneficiaryId'=p.legacy_user_id AND co->>'level'=pending.level::text AND co->>'status'='1'
+          AND co->>'storedEarnings'=p.snapshot->>'amount'
+          AND CASE WHEN COALESCE(co->>'ratio','')~'^(0|[1-9][0-9]*)(\\.[0-9]+)?$' THEN (co->>'ratio')::numeric=pending.ratio ELSE false END))`;
+}
+
 /** Same record/responsibility rules as distribution-earning-read v2. Never posts or advances a duty. */
 export function unifiedDistributionSourceSql(legacy: boolean, duties: boolean, nativeScope: string, directoryRead: boolean, beneficiaryParameter?: string, beneficiaryListParameter?: string, includeSettledAt = true, recordScope?:{nativeIds:string;legacyIds:string}) {
   const beneficiary = (column: string) => beneficiaryParameter ? ` AND ${column}=${beneficiaryParameter}::text` : beneficiaryListParameter ? ` AND ${column}=ANY(${beneficiaryListParameter}::text[])` : "";
@@ -65,7 +95,7 @@ export function unifiedDistributionSourceSql(legacy: boolean, duties: boolean, n
       AND ${original}->>'earnings'=p.snapshot->>'amount' AND ${original}->>'level'=p.snapshot->>'level'
       AND ${original}->>'status'=p.snapshot->>'sourceStatus' AND ${original}->>'order_type'=p.snapshot->>'sourceOrderType'
       AND ${original}->>'order_id'=p.snapshot->>'orderId' AND ${original}->>'is_delete'='0',false) source_valid,
-    CASE WHEN d.n=1 AND d.valid THEN d.finalized ELSE p.snapshot->>'sourceStatus'='2' END contributor_confirmed
+    CASE WHEN d.n=1 AND d.valid THEN (d.finalized OR ${beneficiaryListParameter ? legacyPendingContributorProofSql() : 'false'}) ELSE p.snapshot->>'sourceStatus'='2' END contributor_confirmed
     FROM legacy_input p
     LEFT JOIN zzsh_auth_user."user" u ON u.id=p.user_id
     LEFT JOIN legacy_duties d ON d.counterparty_user_id=p.user_id AND d.source_record_id=p.source_id AND d.order_id=p.allowed_order_id

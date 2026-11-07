@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   bucketFlow,
+  contributorSourceSql,
   dashboardVersion,
   distributionSnapshot,
   legacyStock,
@@ -19,9 +20,19 @@ import {
   stockMetrics,
   type DashboardFilters,
 } from "../src/finance/admin-distribution-dashboard";
+import { unifiedDistributionSourceSql } from "../src/finance/admin-distribution-unified-read";
 import { auditLegacyInvitationPacket } from "../src/finance/legacy-invitation-audit";
 import { prepareHistoricalObservation } from "../src/finance/personal-finance-read";
 import { legacyOwnerUserId } from "../src/supply/legacy-user-migration";
+
+test("proven positive pending legacy accrual only affects invited contributor counts",()=>{
+ const counts=contributorSourceSql(true,true,"TRUE","$1"),ordinary=unifiedDistributionSourceSql(true,true,"TRUE",false);
+ assert.match(counts,/pending\.source='LEGACY_IMPORT'/);assert.match(counts,/lo\.source_pay_status=1/);
+ assert.match(counts,/pending\.status='PENDING'/);assert.match(counts,/pending\.amount_cents>=0/);
+ assert.match(counts,/r\.type='INVITER'/);assert.match(counts,/amount_cents>0 AND state IN\('PENDING','MATURED','SETTLED'\)/);
+ assert.match(counts,/legacy_continuation_version h/);assert.doesNotMatch(ordinary,/pending\.source='LEGACY_IMPORT'/);
+ assert.doesNotMatch(counts,/\b(INSERT|UPDATE|DELETE)\s+(INTO|zzsh_)/i);
+});
 
 const legacy = (id: string, code: string, patch: Record<string, unknown> = {}) => {
   const userId = legacyOwnerUserId("legacy_mysql_restore", "la_user", id);
