@@ -1,6 +1,6 @@
 -- Extend the existing support-cancel predicate only in an installed demo copy.
 DO $guard$
-DECLARE d record; definition text;
+DECLARE d record; definition text; predicate_owner name;
 BEGIN
  SELECT pg_get_userbyid(n.nspowner) AS owner,shobj_description(db.oid,'pg_database') AS marker INTO d
  FROM pg_database db JOIN pg_namespace n ON n.nspname='zzsh_order' WHERE db.datname=current_database();
@@ -9,9 +9,10 @@ BEGIN
    OR current_user<>d.owner OR to_regprocedure('zzsh_order.ecs_test_demo_finance_matches(text)') IS NULL
  THEN RAISE EXCEPTION 'Exact installed demo resource required'; END IF;
  SELECT pg_get_functiondef(to_regprocedure('zzsh_order.support_cancel_payment_basis_valid(jsonb)')) INTO definition;
- IF definition IS NULL OR position('prestart_payment_basis_valid' IN definition)=0
-   OR position('SUPPORT_FULL_REFUND' IN definition)>0 OR position('CONTROLLED' IN definition)>0
-   OR position('JOINPAY' IN definition)=0 OR position('settlement_intake' IN definition)=0
+ SELECT pg_get_userbyid(p.proowner) INTO predicate_owner FROM pg_proc p
+  WHERE p.oid=to_regprocedure('zzsh_order.support_cancel_payment_basis_valid(jsonb)');
+ IF encode(sha256(convert_to(definition,'UTF8')),'hex') IS DISTINCT FROM 'd99d63862d968f5b90aa0a9b044f65c61e0af6319a1fdb9eb9a41b3dcb2f2730'
+   OR predicate_owner IS DISTINCT FROM d.owner
  THEN RAISE EXCEPTION 'Original support cancellation predicate differs'; END IF;
 END $guard$;
 
