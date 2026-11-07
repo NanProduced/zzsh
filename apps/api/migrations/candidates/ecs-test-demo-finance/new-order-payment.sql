@@ -113,7 +113,9 @@ BEGIN
   OR doc->>'amountCents'<>(o.rental_amount_cents+o.deposit_amount_cents)::text
   OR doc->>'providerTransactionId'<>'demo_pay_'||anchor OR NEW.provider_transaction_id<>doc->>'providerTransactionId'
   OR doc->>'requestId'<>'demo_payment_'||anchor
-  OR doc->>'providerPaidAt'<>to_char(o.created_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+  OR NOT (CASE WHEN doc->>'providerPaidAt' ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}Z$'
+    THEN (doc->>'providerPaidAt')::timestamptz BETWEEN date_trunc('milliseconds',transaction_timestamp()) AND date_trunc('milliseconds',clock_timestamp())
+    ELSE false END)
  THEN RAISE EXCEPTION 'demo payment amount or original order differs' USING ERRCODE='23514'; END IF;
  NEW.declared_at:=clock_timestamp(); RETURN NEW;
 END

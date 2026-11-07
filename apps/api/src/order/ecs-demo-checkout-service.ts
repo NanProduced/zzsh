@@ -89,7 +89,7 @@ export async function confirmEcsDemoCheckout(pool: Pool, actor: Actor, orderId: 
         const expiresAt = new Date(Math.min(Date.parse(order.hold_until), Date.parse(at) + 120000)).toISOString();
         const anchor = ecsTestDemoPaymentAnchor(options.demo, orderId);
         const input: PaymentInput = { orderId, merchantOrderNo: order.display_no, amountCents: order.amount_cents, currency: order.currency,
-          providerTransactionId: anchor.providerTransactionId, providerPaidAt: order.created_at, requestId: anchor.requestId };
+          providerTransactionId: anchor.providerTransactionId, providerPaidAt: at, requestId: anchor.requestId };
         const source = createEcsDemoControlledPaymentSource({ demo: options.demo, payerUserId: actor.userId,
           payerSessionId: actor.sessionId, checkoutExpiresAt: expiresAt, appId: options.appId });
         const payment = await confirmOrderPayment(c, source(input), options.distribution);
