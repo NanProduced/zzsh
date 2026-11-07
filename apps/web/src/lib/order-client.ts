@@ -306,6 +306,7 @@ export type Order = {
   readOnly?: boolean;
   legacyAmounts?: LegacyOrder["legacyAmounts"];
   payment?: LegacyOrder["payment"];
+  paymentProvenance?: { source: "SIMULATED" | "JOINPAY" | "UNKNOWN"; channelArrival: "UNKNOWN" } | null;
   id: string;
   displayNo?: string | null;
   status: string;

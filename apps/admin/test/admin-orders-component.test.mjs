@@ -278,6 +278,15 @@ const chainOrder = { ...order, accountDisplayNo: 'A-001', ownerBusinessNo: 'U-OW
   legacyAmounts: { refund: null, refundChannelState: 'UNKNOWN' } };
 const chainPage = (items = [chainOrder], overrides = {}) => ({ items, page: 1, pageSize: 20, total: 1, contextKey: 'a'.repeat(64), ...overrides });
 const chainProps = id => ({ snapshot: snapshotFor(id), onOpenPath: () => {}, onQueryChange: () => {}, refreshNonce: 0 });
+test('admin list and detail label only a proved simulated payment',async t=>{
+ const {root,node,AdminOrderChainView}=await setup(t);
+ const demo={...chainOrder,id:'sim_order',displayNo:'SIM-ORDER',status:'PAID',source:{origin:'NATIVE'},paymentProvenance:{source:'SIMULATED',channelArrival:'UNKNOWN'}};
+ globalThis.fetch=async url=>String(url).includes('readMode=combined')?response({order:demo}):response(chainPage([demo]));
+ await act(async()=>root.render(createElement(AdminOrderChainView,chainProps('demo-list'))));await until(()=>node.textContent.includes('SIM-ORDER'));
+ assert.match(node.querySelector('tbody tr').textContent,/模拟付款/);
+ await act(async()=>root.render(createElement(AdminOrderChainView,{...chainProps('demo-detail'),objectOnly:true,initialOrderId:'sim_order'})));await until(()=>node.textContent.includes('模拟付款已记录'));
+ assert.doesNotMatch(node.textContent,/汇聚已收款|渠道已到账/);
+});
 async function changeField(browser, node, label, value) {
   const field = node.querySelector(`[aria-label="${label}"]`);
   if (field.tagName === 'BUTTON' || field.getAttribute('role') === 'combobox') {

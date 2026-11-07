@@ -1939,6 +1939,18 @@ async function detailProbe(window, order, party, data = settlementBody, refund =
   return probe;
 }
 
+test('simulated payment remains visible in order list and detail without claiming channel arrival',async()=>withDom(async window=>{
+ const simulated={...paidOrder,paymentProvenance:{source:'SIMULATED',channelArrival:'UNKNOWN'}};
+ const OrderListPanel=loadComponent('apps/web/src/components/order/order-list.tsx',session('user_A')).OrderListPanel;
+ const state={page:{items:[simulated],nextCursor:null,limit:20},loading:false,refreshing:false,loadingMore:false,error:null,moreError:null,notice:''};
+ const list=createProbe(window,OrderListPanel,{party:'renter',status:'',state,onRefresh(){},onRetryList(){},onLoadMore(){},onLogin(){},onReauthorize(){},onOpen(){}},async()=>{throw Error('unexpected list fetch')});
+ try{await list.render();assert.match(list.host.textContent,/模拟付款/)}finally{await list.dispose()}
+ const detail=await detailProbe(window,simulated,'renter');
+ try{assert.match(detail.host.textContent,/模拟付款，未发生真实扣款/);assert.doesNotMatch(detail.host.textContent,/渠道已到账/)}finally{await detail.dispose()}
+ const unknown=await detailProbe(window,{...paidOrder,paymentProvenance:{source:'UNKNOWN',channelArrival:'UNKNOWN'}},'renter');
+ try{assert.doesNotMatch(unknown.host.textContent,/模拟付款，未发生真实扣款/)}finally{await unknown.dispose()}
+}));
+
 const tableRow = (host, label) => [...host.querySelectorAll("tr")].find((row) => row.querySelector("th")?.textContent === label);
 
 test("M3-F1: a manual version discloses the amount confirmation would settle", async () => {
