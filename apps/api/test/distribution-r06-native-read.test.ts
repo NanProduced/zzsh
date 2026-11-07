@@ -33,6 +33,19 @@ const policy = { schema: 'distribution-policy.v2', scope: 'NATIVE', enabled: tru
 const canonical = canonicalize(policy), digest = createHash('sha256').update(canonical).digest('hex');
 const scope = () => createRegisteredLocalNativeDistributionReadScope(config, receipt, origins);
 
+test('registered native distribution reads bind the configured local database port', async () => {
+  const r07 = createRegisteredLocalNativeDistributionReadScope(
+    { ...config, database: { ...config.database, port: 55433 } } as AppConfig, receipt, origins,
+  );
+  const matching = probe({ connection: { port: 55433 } });
+  const policy = await readInvitationPolicyInTransaction(matching.client, r07);
+  assert.equal(policy.knowledge, 'KNOWN');
+  assert.equal(policy.writeResourceAdmitted, false);
+  const otherInstance = probe({ connection: { port: 55432 } });
+  await assert.rejects(readInvitationPolicyInTransaction(otherInstance.client, r07));
+  assert.deepEqual(otherInstance.policyScopes, []);
+});
+
 function probe(patch: { identity?: Record<string, unknown>; shape?: Record<string, unknown>; connection?: Record<string, unknown>;
   transaction?: string; unsafe?: string; permission?: boolean; suspended?: boolean; ownerUser?: string } = {}) {
   const sql: string[] = [], policyScopes: unknown[] = [];
