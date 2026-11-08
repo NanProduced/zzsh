@@ -1,4 +1,4 @@
-import {test} from 'node:test';import {strict as assert} from 'node:assert';import type {Pool} from 'pg';import type {AppConfig} from '../src/config/config';import {runControlledWithdrawalStep,queryOriginalControlledPayout} from '../src/finance/controlled-withdrawal-worker';import {createNativeWithdrawalScope} from '../src/finance/native-withdrawal-resource';
+import {test} from 'node:test';import {strict as assert} from 'node:assert';import {createHash} from 'node:crypto';import type {Pool} from 'pg';import type {AppConfig} from '../src/config/config';import {runControlledWithdrawalStep,queryOriginalControlledPayout,submitDeclaredControlledPayout} from '../src/finance/controlled-withdrawal-worker';import {createNativeWithdrawalScope} from '../src/finance/native-withdrawal-resource';
 import {createSandboxNativeWithdrawalScope} from '../src/finance/native-withdrawal-resource';
 import {sandboxFixture,sandboxClient} from './local-financial-sandbox-fixture';
 function fixture(registered=false){
@@ -33,6 +33,12 @@ test('registered sandbox retains UNKNOWN after simulated lost ACK and queries th
  assert.equal(f.sqls.filter(sql=>sql.startsWith('INSERT INTO zzsh_order.controlled_payout_operation')).length,1);
  assert.equal(f.events.length,1);assert.equal(f.events[0]![2],'PAYOUT');assert.deepEqual(f.ledger.map(v=>[v[3],v[4],v[5]]),[['WALLET_RESERVED','200','0'],['PAYOUT_CLEARING','0','100'],['WITHDRAW_FEE','0','100']]);
  assert.equal((await runControlledWithdrawalStep(f.pool,'intent',f.scope)).action,'NONE');assert.equal(f.events.length,1);
+});
+test('immediate success cannot be selected in the ordinary local financial sandbox',async()=>{
+ const f=fixture(true),token='synthetic-lease';f.row.scenario='IMMEDIATE_SUCCESS';f.row.state='SUBMITTING';
+ f.row.lease_token_hash=createHash('sha256').update(token).digest('hex');f.row.lease_until=new Date(Date.now()+60000);
+ await assert.rejects(submitDeclaredControlledPayout(f.pool,'intent',token,'1',f.scope),/Demo payout scope required/);
+ assert(!f.sqls.some(sql=>sql.startsWith('INSERT INTO zzsh_order.controlled_payout_operation')));
 });
 test('registered worker never drives restored/cross-registration intents and revocation keeps pending reserve UNKNOWN',async()=>{
  for(const reference of [null,'foreign']){const f=fixture(true);f.row.sandbox_registration_ref=reference;await assert.rejects(runControlledWithdrawalStep(f.pool,'intent',f.scope));assert(!f.sqls.some(sql=>sql.startsWith('UPDATE')||sql.startsWith('INSERT')));}

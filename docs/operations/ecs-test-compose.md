@@ -72,6 +72,8 @@ docker buildx build --load --resource memory=3g --resource cpu-quota=100000 --re
 
 使用共用支付请求的测试收银台时，还须在隔离测试库完成原测试资金登记后，由该库 schema owner 安装 `apps/api/migrations/candidates/ecs-test-demo-finance/common-payment-request.sql`。安装前核对目标库名称、OID、实例标识、marker、schema owner、已登记 runtime 及脚本摘要，暂停该库的相关写入并保留可恢复备份；整个 SQL 必须在**单个事务**中执行（例如使用 `psql --single-transaction --set ON_ERROR_STOP=1`），失败时保留原始错误并确认回滚，不对部分状态盲目重试。随后核对约束、触发器和有效权限，再启动 API；该候选只允许匹配测试库身份，不能用于生产。启动前检查测试守卫和窄权限，缺失时拒绝启用；原正式收款校验和真实渠道开关不因测试收银台放宽。
 
+新版测试提现还需在同一测试库安装 `apps/api/migrations/candidates/ecs-test-demo-finance/immediate-payout.sql`，同样先核对目标与备份并暂停相关写入，再由 schema owner 在单个事务中执行。脚本校验旧守卫摘要，不覆盖旧提现；已提交的旧模拟提现继续按原状态恢复，新模拟提现按正常成功路径处理。API 启动前检查新守卫，未安装时拒绝启动。模拟成功仅代表测试账内处理，不代表真实汇聚出款或银行到账。
+
 ## 首次导入与启动（仅审核后执行）
 
 首版候选归档已在本机隔离 PostgreSQL 16 中验证过保留 owner/ACL 的原生恢复：预先只创建目标三角色，在目标数据库不存在时使用 `pg_restore --exit-on-error --create`，恢复后独立核对角色、权限和数据。`db-setup --roles-only` 只创建角色，供这一受审路径使用；无参数仍创建角色和空数据库。两种方式不能混用；`--create` 不是单事务，失败须保留现场并核对，不能盲目重试或自动删除目标。实际 ECS 连接、部署步骤和权限仍须经 Owner 审核并在目标复核。

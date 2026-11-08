@@ -8,6 +8,7 @@ import {assertEcsTestDemoRuntimeAssembly,createEcsTestDemoRuntime,preflightEcsTe
 import {declareLocalSandboxWithdrawalTarget} from "../src/finance/local-sandbox-withdrawal-target";
 import { createDemoNativeWithdrawalScope } from "../src/finance/native-withdrawal-resource";
 import { localWithdrawalDayWindow, quoteControlledWithdrawal, withdrawalPolicyForScope } from "../src/finance/controlled-withdrawal";
+import { submitDeclaredControlledPayout } from "../src/finance/controlled-withdrawal-worker";
 import { TEAM_TEST_WITHDRAWAL_POLICY } from "../src/finance/withdrawal-business-policy";
 import {assertDistributionOrderScopeResource,assertSandboxDistributionOrder,createEcsDemoDistributionOrderScope,createPaymentDistributionStore} from "../src/finance/distribution-payment-store";
 import { assertSyntheticChannelRequestCapability, createEcsDemoCollectionCapability, createEcsDemoRefundCapability, createPaymentRequest, demoForChannelRequestCapability, markDemoPaymentActionReady, readDemoPaymentRequestMatch, readDemoPaymentRequestForAcceptance } from "../src/order/channel-payment-store";
@@ -95,6 +96,33 @@ function clientFor(value: DemoFinanceResource, changed: { identity?: Record<stri
   return { client: { query, getTransactionStatus:()=> 'T', connectionParameters:{host:'127.0.0.1',port:55434,
     database:proof.registration.resource.database,user:proof.registration.resource.runtimeRole} } as unknown as PoolClient, calls };
 }
+
+test("demo payout succeeds on its first submission and reuses the original controlled operation",async()=>{
+  const demo=scope(),bound=createDemoNativeWithdrawalScope(demo),base=clientFor(demo),token="synthetic-lease";
+  const row={id:"intent",user_id:"user",admission_id:"admission",destination_id:"destination",payout_key:"payout",
+    state:"SUBMITTING",operation_version:"1",lease_token_hash:createHash("sha256").update(token).digest("hex"),
+    lease_until:new Date(Date.now()+60000),scenario:"IMMEDIATE_SUCCESS",net_cents:"400",fee_cents:"100"};
+  let operation:Record<string,unknown>|undefined,insertions=0;
+  const client={...base.client,release(){},query:async(sql:string,values:unknown[]=[])=>{
+    if(["BEGIN","COMMIT","ROLLBACK"].includes(sql))return {rows:[]};
+    if(sql.startsWith("SELECT to_regclass('zzsh_order.withdrawal_intent')"))return {rows:[{complete:true}]};
+    if(sql.startsWith("SELECT user_id FROM zzsh_order.withdrawal_intent"))return {rows:[{user_id:row.user_id}]};
+    if(sql.startsWith('SELECT id FROM zzsh_auth_user'))return {rows:[{id:row.user_id}]};
+    if(sql.startsWith("SELECT i.*,d.scenario"))return {rows:[row]};
+    if(sql.startsWith("SELECT i.id FROM zzsh_order.withdrawal_intent"))return {rows:[{id:row.id}]};
+    if(sql.startsWith("SELECT * FROM zzsh_order.controlled_payout_operation"))return {rows:operation?[operation]:[]};
+    if(sql.startsWith("INSERT INTO zzsh_order.controlled_payout_operation")){
+      insertions++;operation={id:values[0],payout_key:values[2],scenario:values[3],final_evidence_canonical:values[4]};return {rows:[]};
+    }
+    return (base.client.query as (...args:any[])=>Promise<any>)(sql,values);
+  }} as unknown as PoolClient;
+  const pool={connect:async()=>client} as unknown as Pool;
+  const first=await submitDeclaredControlledPayout(pool,row.id,token,"1",bound);
+  assert.equal(first.evidence.outcome,"SUCCEEDED");assert.equal(first.evidence.mode,"LOCAL_CONTROLLED");
+  assert.equal(first.operationReplayed,false);assert.equal(operation?.scenario,"IMMEDIATE_SUCCESS");
+  const replay=await submitDeclaredControlledPayout(pool,row.id,token,"1",bound);
+  assert.equal(replay.operationReplayed,true);assert.deepEqual(replay.evidence,first.evidence);assert.equal(insertions,1);
+});
 
 test("demo runtime refuses a partial cashier schema before exposing test payments",async()=>{
   const runtime=createEcsTestDemoRuntime({...input(),appId:"synthetic_app"});assert(runtime);

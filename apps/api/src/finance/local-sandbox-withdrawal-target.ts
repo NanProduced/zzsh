@@ -80,8 +80,9 @@ export async function declareLocalSandboxWithdrawalTarget(pool: Pool, actor: Act
           input.amountCents, at, 'infinity', registration.approvedByAdminId, registration.reference]);
         await c.query(`INSERT INTO zzsh_order.withdrawal_destination(id,user_id,admission_id,mode,kind,scenario,display_mask,
           revision,active,sandbox_registration_ref,bank_binding_id,bank_binding_revision,valid_until)
-          VALUES($1,$2,$3,'LOCAL_CONTROLLED','BANK_CARD','TIMEOUT_THEN_SUCCEED',$4,1,true,$5,$6,$7,$8)`,
-        [destinationId, actor.userId, admissionId, current.binding.cardMask, registration.reference, current.binding.id, current.binding.revision,expiresAt]);
+          VALUES($1,$2,$3,'LOCAL_CONTROLLED','BANK_CARD',$9,$4,1,true,$5,$6,$7,$8)`,
+        [destinationId, actor.userId, admissionId, current.binding.cardMask, registration.reference, current.binding.id, current.binding.revision,expiresAt,
+          sandbox.kind === "REGISTERED_LOCAL_FINANCIAL_SANDBOX" ? "TIMEOUT_THEN_SUCCEED" : "IMMEDIATE_SUCCESS"]);
         await recordAudit(c, { actorType: "user", actorId: actor.userId, sessionId: actor.sessionId, requestId: actor.requestId,
           action: "controlled.withdrawal.target.declared", objectType: "withdrawal_destination", objectId: destinationId, outcome: "SUCCESS",
           details: { sandboxDigest: p.digest, bankBindingId: current.binding.id, bankBindingRevision: current.binding.revision,
