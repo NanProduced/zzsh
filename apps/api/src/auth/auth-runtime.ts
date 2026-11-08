@@ -80,7 +80,7 @@ import { composeSupplyGateWithOrderOccupancy } from "../order/order";
 import { businessFeatureEnabled, isDeployedProfile, ConfigurationError, OrderImSdkRouteBindings, readSecret, type OrderImSdkRouteConfig } from "../config/config";
 import { API_V1_ERROR_CODES, ensureApiV1RequestId } from "../contracts/api-v1";
 import { SecurityApiError, setAuditContext, recordAudit, withTransaction } from "./security-core";
-import { createUserAuthThrottle, readUserThrottleHmacKey, readUserThrottleMode, ThrottleDependencyError, withUserAuthThrottle, type UserAuthThrottle, type UserThrottleMode } from "./user-auth-throttle";
+import { createUserAuthThrottle, preflightPostgresUserAuthThrottle, readUserThrottleHmacKey, readUserThrottleMode, ThrottleDependencyError, withUserAuthThrottle, type UserAuthThrottle, type UserThrottleMode } from "./user-auth-throttle";
 import { parseUserClientIpConfig, resolveUserClientIp, USER_CLIENT_IP_FORWARD_HEADER, type UserClientIpConfig } from "./user-client-ip";
 import { ImIdentityProvisioner, YunxinDynamicTokenService } from "../im/identity-lifecycle";
 import { MessageScopeRecoveryLifecycle, autoAssignWaitingConsultations, scanSupportFirstResponseBreaches, supportManagerIdentityKey, type ConsultationRouteOptions } from "../im/consultation";
@@ -996,6 +996,7 @@ export async function mountAuthHandlers(
     || options.userThrottleHmacKey === options.userSecret || options.userThrottleHmacKey === options.adminSecret)) {
     throw new ConfigurationError("Postgres user authentication throttle requires a stable independent HMAC key");
   }
+  if (options.userAuthThrottleStore === "postgres" && !options.userAuthThrottle) await preflightPostgresUserAuthThrottle(options.pool);
   const throttleKey = options.userThrottleHmacKey ?? randomUUID() + randomUUID();
   const userThrottle = options.userAuthThrottle ?? createUserAuthThrottle({
     hmacKey: throttleKey,

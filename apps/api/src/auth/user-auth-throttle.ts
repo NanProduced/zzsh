@@ -351,6 +351,24 @@ export function createMemoryUserAuthThrottle(options: {
 const EVENT_TABLE = `"zzsh_iam"."user_auth_throttle_event"`;
 const CAPTCHA_TABLE = `"zzsh_iam"."user_auth_captcha_used"`;
 
+/** The deployed auth service must not report ready when its persistent limiter cannot run. */
+export async function preflightPostgresUserAuthThrottle(pool: Pick<Pool, "query">): Promise<void> {
+  try {
+    const row = (await pool.query(`WITH objects AS (SELECT to_regclass('zzsh_iam.user_auth_throttle_event') AS event,
+      to_regclass('zzsh_iam.user_auth_captcha_used') AS captcha,to_regclass('zzsh_iam.user_auth_throttle_event_id_seq') AS sequence)
+      SELECT CASE WHEN event IS NULL OR captcha IS NULL OR sequence IS NULL THEN false ELSE
+        has_schema_privilege(current_user,'zzsh_iam','USAGE')
+        AND has_table_privilege(current_user,event,'SELECT') AND has_table_privilege(current_user,event,'INSERT')
+        AND has_table_privilege(current_user,event,'UPDATE') AND has_table_privilege(current_user,event,'DELETE')
+        AND has_sequence_privilege(current_user,sequence,'USAGE') AND has_sequence_privilege(current_user,sequence,'SELECT')
+        AND has_table_privilege(current_user,captcha,'SELECT') AND has_table_privilege(current_user,captcha,'INSERT')
+        AND has_table_privilege(current_user,captcha,'DELETE') AND has_column_privilege(current_user,captcha,'expires_at','UPDATE')
+      END AS ready FROM objects`)).rows[0];
+    if (row?.ready === true) return;
+  } catch { /* A missing or unreadable dependency must fail closed. */ }
+  throw new ConfigurationError("USER_AUTH_THROTTLE_SCHEMA_NOT_READY");
+}
+
 async function postgresNow(client: PoolClient): Promise<number> {
   const result = await client.query<{ now: string }>("SELECT floor(extract(epoch FROM clock_timestamp()) * 1000)::text AS now");
   const at = Number(result.rows[0]?.now);

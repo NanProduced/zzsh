@@ -1233,6 +1233,13 @@
       "when": 1793730640496,
       "tag": "0175_legacy_account_capture_facts",
       "breakpoints": true
+    },
+    {
+      "idx": 176,
+      "version": "7",
+      "when": 1793730640497,
+      "tag": "0176_user_auth_throttle",
+      "breakpoints": true
     }
   ]
 }

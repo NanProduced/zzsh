@@ -77,7 +77,10 @@ const lastMigration=readFileSync(resolve('migrations/business/0079_owner_guarant
 const names=['legacy_continuation_evidence','legacy_continuation_version','legacy_order_duty','legacy_order_duty_revision','legacy_order_duty_admission','legacy_inflight_register','personal_finance_observation_coverage','finance_stored_opening_review','legacy_duty_finance_contract','legacy_duty_finance_fact','legacy_owner_guarantee_observation','legacy_owner_guarantee_coverage'].map(n=>'zzsh_order.'+n);
 // The old listing deposit is retired: runtime no longer declares an ACL profile for it.
 const retiredNames=['legacy_owner_guarantee_observation','legacy_owner_guarantee_coverage'].map(n=>'zzsh_order.'+n);
-const withdrawalLinkNames=['legacy_withdrawal_subject_revision','legacy_withdrawal_link_evidence'].map(n=>'zzsh_order.'+n),allNames=[...names,...withdrawalLinkNames],profiledNames=allNames.filter(n=>!retiredNames.includes(n));
+const withdrawalLinkNames=['legacy_withdrawal_subject_revision','legacy_withdrawal_link_evidence'].map(n=>'zzsh_order.'+n),allNames=[...names,...withdrawalLinkNames];
+const refundNames=['legacy_refund_case','legacy_refund_intent','legacy_refund_attempt','legacy_refund_observation','legacy_refund_terminal_evidence',
+ 'legacy_refund_review_resolution','legacy_refund_terminal_resolution','legacy_refund_retry_authorization'].map(n=>'zzsh_order.'+n);
+const profiledNames=[...allNames.filter(n=>!retiredNames.includes(n)),...refundNames];
 const continuityStart=runnerSource.indexOf('export async function configureContinuityFinancePrivileges(');
 const continuityEnd=runnerSource.indexOf('\nexport async function ',continuityStart+1);
 assert(continuityStart>=0&&continuityEnd>continuityStart);
@@ -121,6 +124,10 @@ function fixture(options:{failAcl?:boolean;failLinkGuard?:boolean;rollbackFails?
   seen.push({via,sql});
   if(sql==="SELECT to_regclass('zzsh_business_meta.migrations') IS NOT NULL AS present")return{rows:[{present:migrated}]};
   if(sql.startsWith('SELECT hash,created_at::text'))return{rows:readMigrationFiles({migrationsFolder:resolve('migrations/business')}).map(m=>({hash:m.hash,createdAt:String(m.folderMillis)}))};
+  if(sql.includes("to_regclass('zzsh_iam.user_auth_throttle_event')"))return{rows:[{event:false,captcha:false,sequence:false}]};
+  if(sql.includes("to_regprocedure('zzsh_supply.guard_legacy_listing_capture_fact()')"))return{rows:[{present:false,guard:false,triggers:0}]};
+  if(sql.includes("to_regprocedure('zzsh_order.guard_settlement_refund_policy()')"))return{rows:[{present:false,guard:false,posting_columns:0}]};
+  if(sql.includes("to_regclass('zzsh_order.native_refund_review_resolution')"))return{rows:[{present:false,function_present:false,function_ready:false,trigger_ready:false}]};
   if(sql==='BEGIN'){assert.equal(pending,null);pending=copy(durable);return{rows:[]};}
   if(sql==='ROLLBACK'){if(options.rollbackFails)throw rollbackFault;pending=null;return{rows:[]};}
   if(sql==='COMMIT'){assert(pending);if(options.commitFailure==='before')throw commitFault;durable=pending;pending=null;if(options.commitFailure==='after')throw commitFault;return{rows:[]};}
@@ -148,7 +155,7 @@ function fixture(options:{failAcl?:boolean;failLinkGuard?:boolean;rollbackFails?
  const client={query:(sql:string,args:any[])=>query('client',sql,args),release:(discard?:unknown)=>releases.push(discard)};
  const pool={query:(sql:string,args:any[])=>query('pool',sql,args),connect:async()=>{connects++;if(options.connectFails)throw connectFault;return client;}};
  const exports:Record<string,any>={},nativeRequire=createRequire(runnerPath);
- const require=(id:string)=>id==='drizzle-orm/node-postgres'?{drizzle:(input:unknown)=>{assert.equal(input,pool);return input;}}:id==='drizzle-orm/node-postgres/migrator'?{migrate:async(input:unknown)=>{assert.equal(input,pool);if(options.migrationFails)throw migrationFault;if(!migrated){seed();modelInitialCleanup();migrated=true;}migrationVisibility.push(copy(durable));}}:nativeRequire(id);
+ const require=(id:string)=>id==='drizzle-orm/node-postgres'?{drizzle:(input:unknown)=>{assert.equal(input,pool);return input;}}:id==='drizzle-orm/node-postgres/migrator'?{migrate:async(input:unknown)=>{assert.equal(input,pool);if(options.migrationFails)throw migrationFault;if(!migrated){seed();modelInitialCleanup();migrated=true;}migrationVisibility.push(copy(durable));}}:id==='./business-migration-compat'?{matchesKnown0155LineEndings:()=>false}:nativeRequire(id);
  runInNewContext(transpileModule(runnerSource,{compilerOptions:{module:ModuleKind.CommonJS,target:ScriptTarget.ES2022}}).outputText,{exports,require,__dirname:resolve('src/database')});
  const run=()=>exports.runBusinessMigrations(pool,{runtimeUser:runtime,migrationsFolder:resolve('migrations/business')}) as Promise<void>;
  return{run,apply:()=>exports.applyRuntimePrivileges(client,runtime) as Promise<void>,fault,rollbackFault,commitFault,migrationFault,connectFault,can,seen,releases,migrationVisibility,get durable(){return durable;},get connects(){return connects;}};

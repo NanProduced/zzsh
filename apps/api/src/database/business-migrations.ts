@@ -6,6 +6,7 @@ import { drizzle } from "drizzle-orm/node-postgres";
 import { migrate } from "drizzle-orm/node-postgres/migrator";
 import { readMigrationFiles } from "drizzle-orm/migrator";
 import type { Pool, PoolClient } from "pg";
+import { matchesKnown0155LineEndings } from "./business-migration-compat";
 
 const IDENTIFIER = /^[a-z][a-z0-9_]{0,62}$/;
 const BUSINESS_SCHEMAS = ["zzsh_iam", "zzsh_auth_user", "zzsh_auth_admin", "zzsh_supply", "zzsh_content", "zzsh_order"] as const;
@@ -46,20 +47,11 @@ export class BusinessMigrationHistoryError extends Error {
 
 // R05 applied this exact SQL from a CRLF checkout; Git's canonical file uses LF. The only
 // accepted alternate bytes are the independently checked historical pair for this one tag/time.
-const LISTED_0155_EOL = {
-  tag: "0155_legacy_rental_distribution_policy", when: "1793730640476",
-  lf: "99de6809f28ad8fcc4e1fb16e1d80ed2b616d6085ff075cfcf2ee3fac9db0f61",
-  crlf: "794c7f9f5680d1e9d925abb6a5693ab98954e21198cdd6ca0ec45ee4d92f33b0",
-} as const;
 function accepted0155LineEndingVariant(folder: string, tag: string | undefined, localHash: string, installedHash: string, when: string): boolean {
-  const allowed: readonly string[] = [LISTED_0155_EOL.lf, LISTED_0155_EOL.crlf];
-  if (tag !== LISTED_0155_EOL.tag || when !== LISTED_0155_EOL.when || !allowed.includes(localHash) || !allowed.includes(installedHash)) return false;
   try {
-    const bytes=readFileSync(join(folder,`${LISTED_0155_EOL.tag}.sql`)), text=bytes.toString("utf8"), normalized=text.replace(/\r\n/g,"\n");
-    if (normalized.includes("\r")) return false;
-    const digest=(value:string|Buffer)=>createHash("sha256").update(value).digest("hex");
-    return digest(bytes)===localHash && digest(normalized)===LISTED_0155_EOL.lf
-      && digest(normalized.replace(/\n/g,"\r\n"))===LISTED_0155_EOL.crlf;
+    if (!tag || !/^[a-zA-Z0-9_-]+$/.test(tag)) return false;
+    const bytes=readFileSync(join(folder,`${tag}.sql`));
+    return createHash("sha256").update(bytes).digest("hex")===localHash && matchesKnown0155LineEndings(tag,when,bytes,installedHash);
   } catch { return false; }
 }
 
@@ -479,6 +471,30 @@ export async function applyRuntimePrivileges(pool: Pick<Pool, "query">, runtimeR
   await configureProfileAvatarPolicyPrivileges(pool, runtimeRole);
   await configureSettlementRefundPolicyPrivileges(pool, runtimeRole);
   await configureLocalFinancialSandboxPrivileges(pool, runtimeRole);
+  await configureUserAuthThrottlePrivileges(pool, runtimeRole);
+}
+
+/** User authentication must not silently fall back when its persistent rate-limit store is incomplete. */
+export async function configureUserAuthThrottlePrivileges(pool: Pick<Pool, "query">, runtimeRole: string): Promise<void> {
+  const present = (await pool.query(`SELECT to_regclass('zzsh_iam.user_auth_throttle_event') IS NOT NULL AS event,
+    to_regclass('zzsh_iam.user_auth_captcha_used') IS NOT NULL AS captcha,
+    to_regclass('zzsh_iam.user_auth_throttle_event_id_seq') IS NOT NULL AS sequence`)).rows[0];
+  if (!present || [present.event, present.captcha, present.sequence].some(value => typeof value !== "boolean")) {
+    throw new Error("User authentication throttle schema state unavailable");
+  }
+  if (!present.event && !present.captcha && !present.sequence) return;
+  if (!present.event || !present.captcha || !present.sequence) throw new Error("User authentication throttle schema is incomplete");
+  const runtime = quoteIdentifier(runtimeRole);
+  await pool.query(`
+    REVOKE ALL ON TABLE zzsh_iam.user_auth_throttle_event, zzsh_iam.user_auth_captcha_used FROM PUBLIC, ${runtime};
+    REVOKE ALL (id, realm, purpose, subject, kind, ticket, occurred_at, expires_at) ON TABLE zzsh_iam.user_auth_throttle_event FROM PUBLIC, ${runtime};
+    REVOKE ALL (realm, signature, expires_at) ON TABLE zzsh_iam.user_auth_captcha_used FROM PUBLIC, ${runtime};
+    REVOKE ALL ON SEQUENCE zzsh_iam.user_auth_throttle_event_id_seq FROM PUBLIC, ${runtime};
+    GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE zzsh_iam.user_auth_throttle_event TO ${runtime};
+    GRANT USAGE, SELECT ON SEQUENCE zzsh_iam.user_auth_throttle_event_id_seq TO ${runtime};
+    GRANT SELECT, INSERT, DELETE ON TABLE zzsh_iam.user_auth_captcha_used TO ${runtime};
+    -- The bounded sweep locks expired rows with FOR UPDATE SKIP LOCKED.
+    GRANT UPDATE (expires_at) ON TABLE zzsh_iam.user_auth_captcha_used TO ${runtime};`);
 }
 
 export async function configureIdentitySubjectPrivileges(pool: Pick<Pool, "query">, runtimeRole: string): Promise<void> {

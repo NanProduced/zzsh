@@ -7,6 +7,7 @@ import { createRequire } from "node:module";
 import { runInNewContext } from "node:vm";
 import { ModuleKind, ScriptTarget, transpileModule } from "typescript";
 import { readMigrationFiles } from "drizzle-orm/migrator";
+import { matchesKnown0155LineEndings } from "../src/database/business-migration-compat";
 
 const runnerPath = resolve("src/database/business-migrations.ts");
 const source = transpileModule(readFileSync(runnerPath, "utf8"), { compilerOptions: { module: ModuleKind.CommonJS, target: ScriptTarget.ES2022 } }).outputText;
@@ -22,7 +23,8 @@ function fixture(rows: unknown[], present: unknown = true) {
   };
   const exports: Record<string, any> = {}, native = createRequire(runnerPath);
   const require = (id: string) => id === "drizzle-orm/node-postgres" ? { drizzle: () => pool }
-    : id === "drizzle-orm/node-postgres/migrator" ? { migrate: async () => { ddlCalls++; } } : native(id);
+    : id === "drizzle-orm/node-postgres/migrator" ? { migrate: async () => { ddlCalls++; } }
+    : id === "./business-migration-compat" ? { matchesKnown0155LineEndings } : native(id);
   runInNewContext(source, { exports, require, __dirname: resolve("src/database") });
   return { queries, prefix: (dir = folder) => exports.assertBusinessMigrationPrefix(pool, dir),
     run: () => exports.runBusinessMigrations(pool, { runtimeUser: "runtime", migrationsFolder: folder }),

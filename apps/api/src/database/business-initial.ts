@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { copyFileSync, existsSync, lstatSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
+import { matchesKnown0155LineEndings } from "./business-migration-compat";
 
 type ChainEntry = { tag: string; when: number; sha256: string };
 export type BusinessInitialManifest = {
@@ -60,7 +61,9 @@ export function prepareBusinessInitial(canonicalFolder: string, initialFolder: s
   if (manifest.format !== "zzsh.business-initial.v1" || !Number.isSafeInteger(manifest.sourceCount) || manifest.sourceCount < 1 || manifest.sourceCount > journal.entries.length || manifest.sourceChain.length !== manifest.sourceCount || !Array.isArray(manifest.parts) || manifest.parts.length !== 4 || !/^[a-zA-Z0-9_-]+$/.test(manifest.migrationTag)) reject();
   for (const [index, item] of manifest.sourceChain.entries()) {
     const actual = journal.entries[index];
-    if (!actual || actual.tag !== item.tag || actual.when !== item.when || !leaf(item.tag + ".sql") || sha(readFileSync(join(canonicalFolder, item.tag + ".sql"))) !== item.sha256) reject();
+    if (!actual || actual.tag !== item.tag || actual.when !== item.when || !leaf(item.tag + ".sql")) reject();
+    const bytes = readFileSync(join(canonicalFolder, item.tag + ".sql"));
+    if (sha(bytes) !== item.sha256 && !matchesKnown0155LineEndings(item.tag, String(item.when), bytes, item.sha256)) reject();
   }
   if (manifest.when !== manifest.sourceChain.at(-1)?.when) reject();
   const journalSha = (manifest as { journalSha256?: string }).journalSha256;
