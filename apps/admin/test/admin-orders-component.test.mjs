@@ -108,6 +108,9 @@ test('a permitted operator can request one new legacy order group with a clear p
  assert.match(node.textContent,/当前客服与租客、号主组成新群/);assert.match(node.textContent,/旧聊天记录不会恢复/);
  const button=[...node.querySelectorAll('button')].find(item=>item.textContent.includes('创建订单群'));
  await act(async()=>button.dispatchEvent(new Event('click',{bubbles:true})));
+ assert.equal(calls.filter(item=>item.url.includes('/create-team')).length,0);
+ const confirm=[...node.querySelectorAll('button')].find(item=>item.textContent==='确认建群');assert(confirm);
+ await act(async()=>confirm.dispatchEvent(new Event('click',{bubbles:true})));
  await until(()=>node.textContent.includes('正在准备订单群'));
  const posts=calls.filter(item=>item.url.includes('/create-team'));assert.equal(posts.length,1);
  assert(new Headers(posts[0].init.headers).get('idempotency-key'));assert.equal(posts[0].init.body,'{}');
@@ -278,6 +281,48 @@ const chainOrder = { ...order, accountDisplayNo: 'A-001', ownerBusinessNo: 'U-OW
   legacyAmounts: { refund: null, refundChannelState: 'UNKNOWN' } };
 const chainPage = (items = [chainOrder], overrides = {}) => ({ items, page: 1, pageSize: 20, total: 1, contextKey: 'a'.repeat(64), ...overrides });
 const chainProps = id => ({ snapshot: snapshotFor(id), onOpenPath: () => {}, onQueryChange: () => {}, refreshNonce: 0 });
+test('order detail separates recorded payment from order amount and estimates',async t=>{
+ const {root,node,AdminOrderChainView}=await setup(t);
+ const amount=value=>({currency:'CNY',unit:'yuan',amount:value,scale:2});
+ const current={...chainOrder,id:'amount_order',displayNo:'AMOUNT-ORDER',status:'PENDING_PAYMENT',source:{origin:'NATIVE'},
+  amounts:{...order.amounts,totalDue:amount('100.00')},payment:{state:'RECORDED_UNPAID',recordedAt:null,recordedAmount:null},
+  quote:{ownerTotal:amount('60.00'),platformFullProfit:amount('20.00')}};
+ globalThis.fetch=async url=>String(url).includes('readMode=combined')?response({order:current}):response({});
+ await act(async()=>root.render(createElement(AdminOrderChainView,{...chainProps('amount-detail'),objectOnly:true,initialOrderId:current.id})));
+ await until(()=>node.querySelector('[data-side="renter"]'));
+ const renter=node.querySelector('[data-side="renter"]'),owner=node.querySelector('[data-side="owner"]');
+ assert.match(renter.textContent,/租客付款记录.*未记录付款/);assert.doesNotMatch(renter.textContent,/100\.00/);
+ assert.match(owner.textContent,/号主全量预计收入（扣费前）.*60\.00/);assert.match(owner.textContent,/非结算收益/);
+ current.payment={state:'RECORDED_PAID',recordedAt:null,recordedAmount:amount('65.00')};current.status='PAID';
+ await act(async()=>root.render(createElement(AdminOrderChainView,{...chainProps('amount-detail'),refreshNonce:1,objectOnly:true,initialOrderId:current.id})));
+ await until(()=>node.querySelector('[data-side="renter"] strong')?.textContent.includes('65.00'));
+ assert.doesNotMatch(node.querySelector('[data-side="renter"]').textContent,/100\.00/);
+});
+test('estimated expiry requires a valid native opening and never uses legacy payment time',async t=>{
+ const {root,node,AdminOrderChainView}=await setup(t);
+ const cases=[
+  {id:'legacy-due',source:{origin:'LEGACY'},paidAt:'2026-10-25T01:00:00Z',progress:null,expected:false},
+  {id:'invalid-due',source:{origin:'NATIVE'},progress:{opening:{state:'CONFIRMED',confirmedAtUtc:'invalid'},ending:{state:'NOT_STARTED',postedAtUtc:null}},expected:false},
+  {id:'native-due',source:{origin:'NATIVE'},progress:{opening:{state:'CONFIRMED',confirmedAtUtc:'2026-10-25T01:00:00Z'},ending:{state:'NOT_STARTED',postedAtUtc:null}},expected:true},
+ ];
+ for(const item of cases){
+  const value={...chainOrder,...item,displayNo:item.id,termSeconds:'86400',status:'PAID'};
+  globalThis.fetch=async()=>response({order:value});
+  await act(async()=>root.render(createElement(AdminOrderChainView,{...chainProps(item.id),objectOnly:true,initialOrderId:item.id})));
+  await until(()=>node.querySelector('h1')?.textContent===item.id);
+  assert.equal(node.querySelector('.oc-lifecycle').textContent.includes('预计到期'),item.expected,item.id);
+ }
+});
+test('legacy account insurance is labeled as captured account configuration',async t=>{
+ const {root,node,AdminOrderChainView}=await setup(t);
+ const value={...chainOrder,id:'legacy-payout-source',displayNo:'LEGACY-PAYOUT-SOURCE',
+  accountView:{source:'LEGACY_ACCOUNT_SNAPSHOT',rentalMode:'fast',sourceAccountFullPayoutSelected:true}};
+ globalThis.fetch=async()=>response({order:value});
+ await act(async()=>root.render(createElement(AdminOrderChainView,{...chainProps('legacy-payout-source'),objectOnly:true,initialOrderId:value.id})));
+ await until(()=>node.querySelector('h1')?.textContent===value.displayNo);
+ assert.match(node.querySelector('.oc-heading').textContent,/迁入账号配置：极速比例/);
+ assert.match(node.querySelector('.oc-heading').textContent,/迁入账号配置：全额包赔/);
+});
 test('admin list and detail use normal payment wording without claiming channel arrival',async t=>{
  const {root,node,AdminOrderChainView}=await setup(t);
  const demo={...chainOrder,id:'sim_order',displayNo:'SIM-ORDER',status:'PAID',source:{origin:'NATIVE'},paymentProvenance:{source:'SIMULATED',channelArrival:'UNKNOWN'}};
@@ -698,14 +743,14 @@ test('CHAIN order detail separates fulfillment, business funds, JoinPay evidence
   await act(async()=>root.render(createElement(AdminOrderChainView,{...chainProps('chain-order-detail'),objectOnly:true,initialOrderId:value.id})));await until(()=>node.textContent.includes('本单账号和双方'));
   const text=node.textContent;
   const headings=[...node.querySelectorAll('main h2')].map(item=>item.textContent);
-  assert(headings.indexOf('当前情况')<headings.indexOf('本单账号和双方'));
+  assert(node.querySelector('.oc-lifecycle [aria-label="订单进度"]'),'lifecycle remains independently visible');
   assert(headings.indexOf('本单账号和双方')<headings.indexOf('关键费用'));
   assert(headings.indexOf('关键费用')<headings.indexOf('履约与处理记录'));
   assert(headings.indexOf('履约与处理记录')<headings.indexOf('结算与退款依据'));
   assert(headings.indexOf('结算与退款依据')<headings.indexOf('汇聚渠道证据'));
-  assert(headings.indexOf('汇聚渠道证据')<headings.indexOf('资金凭证与来源记录'));
+  assert([...node.querySelectorAll('summary')].some(item=>item.textContent.includes('记录与依据')));
   assert.equal((text.match(/本单账号和双方/g)??[]).length,1,'account/parties are not duplicated in the aside');
-  await act(async()=>[...node.querySelectorAll('[role=tab]')].find(tab=>tab.textContent==='资金与退款').click());
+  await act(async()=>[...node.querySelectorAll('[role=tab]')].find(tab=>tab.textContent==='资金').click());
   const channel=[...node.querySelectorAll('summary')].find(summary=>summary.textContent==='本单付款渠道状态');
   await act(async()=>channel.click());
   const toggle=[...channel.parentElement.querySelectorAll('button')].find(button=>button.textContent.includes('查看付款依据'));
@@ -789,6 +834,7 @@ test('current account links require supply reading and keep the order frozen ver
   const props={...chainProps('canonical-only-order'),objectOnly:true,initialOrderId:value.id,onOpenPath:(path,title)=>opened.push({path,title})};
   await act(async()=>root.render(createElement(AdminOrderChainView,props)));await until(()=>node.textContent.includes('本单账号和双方'));
   assert.equal([...node.querySelectorAll('.oc-related button')].some(button=>button.textContent.includes('账号')),false);
+  assert.equal([...node.querySelectorAll('button')].some(button=>button.textContent.includes('查看账号详情')),false);
   await act(async()=>root.render(createElement(AdminOrderChainView,{...props,snapshot:{...props.snapshot,permissions:['order.read','supply.rental_account.read']}})));await until(()=>node.querySelector('.oc-related button'));
   await act(async()=>node.querySelector('.oc-related button').click());
   assert.equal(opened.at(-1).path,'/supply/reviews/account-current?fromOrderId=frozen-canonical');
@@ -963,7 +1009,7 @@ test('compact order progress keeps only the furthest key stage while detail keep
  assert.deepEqual(compact,['创建','支付','已过账']);
  assert.match(node.querySelector('.oc-compact-meta').textContent,/已开租 · 已过账/);
  await act(async()=>root.render(createElement(AdminOrderChainView,{...chainProps('compact-progress-detail'),objectOnly:true,initialOrderId:value.id})));await until(()=>node.textContent.includes('关键费用'));
- const detail=[...node.querySelectorAll('.oc-main-facts>.oc-section:first-child .oc-stage-name')].map(item=>item.textContent);
+ const detail=[...node.querySelectorAll('.oc-lifecycle .oc-stage-name')].map(item=>item.textContent);
  assert.deepEqual(detail,['创建','支付','已开租','已过账']);
 });
 

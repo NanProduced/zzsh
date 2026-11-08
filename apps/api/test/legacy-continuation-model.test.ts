@@ -49,6 +49,7 @@ test("authorized staff can return a pending legacy scheme even when amounts cann
  const facts=initialLegacyFacts(legacySource({orderStatus:"8",saleEarnings:null,returnOrderMoney:null})),row=legacyEvidence(facts);
  const staff={realm:"admin" as const,userId:"staff",sessionId:"fixture",requestId:"fixture"};
  const view=projectLegacyContinuation(b,staff,row,null,[],true,"NONE");
+ assert.equal(Object.hasOwn(view,"basis"),false);
  assert(view.capabilities.includes("reject"));assert(!view.capabilities.includes("confirm"));assert.match(view.commandFingerprints.reject!,/^[a-f0-9]{64}$/);
  assert(!projectLegacyContinuation(b,staff,row,null,[],true,"UNKNOWN").capabilities.includes("reject"));
 });

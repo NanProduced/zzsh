@@ -209,7 +209,7 @@ export function projectLegacyContinuation(binding: LegacyOrderBinding, actor: Le
   });
   const settlementKind = ["8", "9", "4"].includes(source.orderStatus) ? source.isAdvanceSet === "1" ? "EARLY" : source.isAdvanceSet === "0" ? "NORMAL" : null : null;
   return { ...base, availability: facts.evidence.admission === "PARAMETER_COMPLETE" ? "KNOWN" : "ISOLATED", stage: source.orderStatus, isSettle: source.isSettle, amounts, quantities: structuredClone(source.quantities), capabilities, commandFingerprints, reasons,
-    settlementKind, ...(role === "renter" && settlementKind === "EARLY" ? { earlyFee: legacyEarlyFee(facts.amounts) } : {}), ...(role === "renter" || role === "admin" ? { refundDueAt: head?.refundDueAt ?? null } : {}), ...(role === "admin" ? { confirmationAmounts, basis: { orderPrices: source.orderPrices, accountPrices: source.accountPrices, isFullPayout: source.isFullPayout, isAdvanceSet: source.isAdvanceSet, note: "旧单单价来自旧平台建单时价目；号主单价为迁移截点账号配置，不是下单时冻结值" } } : {}) };
+    settlementKind, ...(role === "renter" && settlementKind === "EARLY" ? { earlyFee: legacyEarlyFee(facts.amounts) } : {}), ...(role === "renter" || role === "admin" ? { refundDueAt: head?.refundDueAt ?? null } : {}), ...(role === "admin" ? { confirmationAmounts } : {}) };
 }
 export type CompletedCommissionTime = { kind: "COMPLETED_AT" | "MATURES_AT"; at: string; evidenceDigest: string };
 export function legacyTimeMicros(value: string): bigint {
