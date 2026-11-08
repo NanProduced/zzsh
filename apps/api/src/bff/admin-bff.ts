@@ -624,7 +624,7 @@ export async function handleAdminBff(request: NodeRequest, response: NodeRespons
     }
     return;
   }
-  if (path === "/system/storage" || path === "/system/storage/check" || path === "/system/settlement-refund-policy") {
+  if (path === "/system/storage" || path === "/system/storage/check" || path === "/system/sms" || path === "/system/settlement-refund-policy") {
     await handleSystemConfiguration(request, response, options.supply);
     return;
   }

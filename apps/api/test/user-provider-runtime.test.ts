@@ -2,7 +2,9 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { ConfigurationError } from "../src/config/config";
 import { loadUserProviderRuntime } from "../src/auth/user-provider-runtime";
-import { loadAuthRuntimeConfig } from "../src/auth/auth-runtime";
+import { loadAuthRuntimeConfig, resolvePhoneLoginSmsScene } from "../src/auth/auth-runtime";
+import { securitySmsScene } from "../src/auth/user-security";
+import type { PoolClient } from "pg";
 
 const auth = { AUTH_USER_SECRET: "u".repeat(32), AUTH_ADMIN_SECRET: "a".repeat(32) };
 const sms = { USER_SMS_PROVIDER: "aliyun", USER_SMS_ACCESS_KEY_ID: "offline-test-id", USER_SMS_ACCESS_KEY_SECRET: "s".repeat(40), USER_SMS_SIGN_NAME: "测试签名", USER_SMS_TEMPLATE_CODE: "SMS_OFFLINE" };
@@ -15,8 +17,13 @@ test("user channels are default closed and never inherit media credentials", () 
 
 test("explicit SMS construction performs no send and cannot combine with a fixed mock", () => {
   assert.equal(typeof loadUserProviderRuntime(sms).userSmsSender, "function");
+  const configured=loadUserProviderRuntime({...sms,USER_SMS_TEMPLATE_LOGIN:"SMS_LOGIN",USER_SMS_TEMPLATE_OWNER_ORDER_PAID:"SMS_OWNER"});
+  assert.equal(configured.userSmsConfiguration?.scenes.LOGIN.source,"SCENE");
+  assert.equal(configured.userSmsConfiguration?.scenes.REGISTER.source,"SHARED");
+  assert.equal(configured.userSmsConfiguration?.scenes.OWNER_ORDER_PAID.templateCode,"SMS_OWNER");
   assert.throws(() => loadUserProviderRuntime({ ...sms, AUTH_LOCAL_SMS_MOCK: "true" }), /exclusive/);
   assert.throws(() => loadUserProviderRuntime({ ...sms, USER_SMS_TEMPLATE_CODE: "invalid" }), /OTP template/);
+  assert.throws(() => loadUserProviderRuntime({ ...sms, USER_SMS_TEMPLATE_LOGIN: "invalid" }), /Invalid SMS template/);
 });
 
 test("marketplace identity uses an independently configured AppCode", () => {
@@ -24,6 +31,17 @@ test("marketplace identity uses an independently configured AppCode", () => {
   assert.equal(loadUserProviderRuntime(market).realNameProvider?.provider,"aliyun-market-id2");
   assert.throws(()=>loadUserProviderRuntime({...market,USER_REAL_NAME_APPCODE:""}),ConfigurationError);
   assert.throws(()=>loadUserProviderRuntime({...identity,USER_REAL_NAME_PROVIDER:"aliyun-market-id2"}),ConfigurationError);
+});
+
+test("SMS login and security scenes come from server-side account state",async()=>{
+  for(const [registered,conflict,expected] of [[true,false,"LOGIN"],[false,true,"LOGIN"],[false,false,"REGISTER"]] as const){
+    const client={query:async(sql:string)=>({rows:[sql.includes('AS registered')?{registered}:{blocked:conflict}]})} as unknown as PoolClient;
+    assert.equal(await resolvePhoneLoginSmsScene(client,"+8613800138000"),expected);
+  }
+  const unavailable={query:async()=>({rows:[]})} as unknown as PoolClient;
+  await assert.rejects(resolvePhoneLoginSmsScene(unavailable,"+8613800138000"));
+  assert.equal(securitySmsScene("phone","target"),"BIND");
+  for(const purpose of ["phone","password","email","recovery"] as const)assert.equal(securitySmsScene(purpose,"current"),"IDENTITY");
 });
 
 test("unknown provider modes are rejected rather than silently falling back", () => {

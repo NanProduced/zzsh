@@ -82,6 +82,18 @@ test("Boss reads deployment target without editable secrets, and GET has no writ
   assert.equal(h.container.querySelector("a").getAttribute("href"), "/content?tab=media");
 });
 
+test("Boss can inspect SMS scene configuration without exposing credentials",async t=>{
+  const scenes=['IDENTITY','REGISTER','LOGIN','BIND','RENTAL_EXPIRY','OWNER_ORDER_PAID'].map((scene,index)=>({
+    scene,templateCode:index===4?null:'SMS_FIXTURE',source:index===4?'NOT_CONFIGURED':index===2?'SCENE':'SHARED',
+    trigger:index>=4?'NOT_CONNECTED':'CONNECTED',
+  }));
+  const h=await harness(t,url=>response(url.pathname.endsWith('/sms')?{provider:'aliyun',signName:'测试签名',providerVerification:'NOT_RUN',scenes,accessKey:'must-not-render'}:storage()));
+  assert.equal(h.requests.length,1);await h.click('查看短信配置');
+  assert.equal(h.requests.at(-1).url.pathname,'/api/bff/admin/system/sms');
+  assert.match(h.text(),/登录/);assert.match(h.text(),/租期到期提醒/);assert.match(h.text(),/共用验证码模板/);
+  assert.match(h.text(),/模板已审核或短信已送达/);assert.doesNotMatch(h.text(),/must-not-render/);
+});
+
 test("refund wait policy reads lazily and retries an unknown save with the original key and values", async t => {
   let writes = 0;
   const h = await harness(t, (url, init) => {

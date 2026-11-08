@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { SendSmsResponse,SendSmsResponseBody } from "@alicloud/dysmsapi20170525";
 import { Id2MetaVerifyResponse,Id2MetaVerifyResponseBody,Id2MetaVerifyResponseBodyResultObject } from "@alicloud/cloudauth20190307";
-import { createAliyunRealNameProvider,createAliyunUserSmsSender,UserSmsDeliveryError,verifiedMainlandAgeStatus } from "../src/auth/aliyun-user-providers";
+import { createAliyunRealNameProvider,createAliyunSmsChannel,createAliyunUserSmsSender,UserSmsDeliveryError,verifiedMainlandAgeStatus } from "../src/auth/aliyun-user-providers";
 import { isUserVerificationCode,makeUserVerificationCode,USER_SMS_CODE_LENGTH } from "../src/auth/user-verification-code";
 import { buildUserSecurityPlugin } from "../src/auth/user-security";
 import type { Pool } from "pg";
@@ -17,7 +17,7 @@ test("Aliyun SMS uses official SDK models, a single submission and no provider c
   assert.equal(runtime.autoretry,false);assert.equal(runtime.maxAttempts,1);assert.ok(runtime.readTimeout!>=1000);
   return new SendSmsResponse({body:new SendSmsResponseBody({code:"OK",requestId:"request-1"})});
  }});
- assert.equal(calls,0);await sender("13800138000","1234");assert.equal(calls,1);
+ assert.equal(calls,0);await sender("13800138000","1234","LOGIN");assert.equal(calls,1);
 });
 
 test("Aliyun SMS freezes validated trimmed configuration and rejects control characters",async()=>{
@@ -26,7 +26,7 @@ test("Aliyun SMS freezes validated trimmed configuration and rejects control cha
  const sender=createAliyunUserSmsSender(input,{sendSmsWithOptions:async request=>{
   sent.push({signName:request.signName,templateCode:request.templateCode});return new SendSmsResponse({body:new SendSmsResponseBody({code:"OK"})});
  }});
- input.signName="外部已修改";input.templateCode="SMS_456";await sender("13800138000","1234");
+ input.signName="外部已修改";input.templateCode="SMS_456";await sender("13800138000","1234","LOGIN");
  assert.deepEqual(sent,[{signName:"合成签名",templateCode:"SMS_123"}]);
  for(const signName of ["合成\n签名","合成\u0000签名","合成\r签名"]){
   assert.throws(()=>createAliyunUserSmsSender({credentials,signName,templateCode:"SMS_123"}));
@@ -38,14 +38,30 @@ test("Aliyun SMS distinguishes known rejection from unknown delivery without lea
  const rejected=createAliyunUserSmsSender({credentials,signName:"合成签名",templateCode:"SMS_123"},{sendSmsWithOptions:async()=>{
   calls++;return new SendSmsResponse({body:new SendSmsResponseBody({code:"isv.BUSINESS_LIMIT_CONTROL",message:"SYNTHETIC_PII_SHOULD_NOT_ESCAPE"})});
  }});
- await assert.rejects(rejected("13800138000","1234"),(error:unknown)=>error instanceof UserSmsDeliveryError&&error.outcome==="REJECTED"&&!JSON.stringify(error).includes("PII"));
+ await assert.rejects(rejected("13800138000","1234","LOGIN"),(error:unknown)=>error instanceof UserSmsDeliveryError&&error.outcome==="REJECTED"&&!JSON.stringify(error).includes("PII"));
  const lost=createAliyunUserSmsSender({credentials,signName:"合成签名",templateCode:"SMS_123"},{sendSmsWithOptions:async()=>{
   calls++;throw new Error("SIGNED_URL AK OTP NAME ID SYNTHETIC_PII_SHOULD_NOT_ESCAPE");
  }});
- await assert.rejects(lost("13800138000","1234"),(error:unknown)=>error instanceof UserSmsDeliveryError&&error.outcome==="UNKNOWN"&&!JSON.stringify(error).includes("PII")&&!error.message.includes("AK"));
+ await assert.rejects(lost("13800138000","1234","LOGIN"),(error:unknown)=>error instanceof UserSmsDeliveryError&&error.outcome==="UNKNOWN"&&!JSON.stringify(error).includes("PII")&&!error.message.includes("AK"));
  assert.equal(calls,2);
- await assert.rejects(lost("13800138000","bad"));assert.equal(calls,2);
- await assert.rejects(lost("13800138000","123456"));assert.equal(calls,2);
+ await assert.rejects(lost("13800138000","bad","LOGIN"));assert.equal(calls,2);
+ await assert.rejects(lost("13800138000","123456","LOGIN"));assert.equal(calls,2);
+});
+
+test("SMS verification scenes select separate templates; business notices stay unconnected",async()=>{
+ const requests:Array<{template:string|undefined;params:string|undefined}>=[];
+ const channel=createAliyunSmsChannel({credentials,signName:"合成签名",templateCode:"SMS_FALLBACK",templates:{
+  IDENTITY:"SMS_99",REGISTER:"SMS_100",LOGIN:"SMS_101",BIND:"SMS_102",RENTAL_EXPIRY:"SMS_201",OWNER_ORDER_PAID:"SMS_202",
+ }},{sendSmsWithOptions:async(request)=>{requests.push({template:request.templateCode,params:request.templateParam});return new SendSmsResponse({body:new SendSmsResponseBody({code:"OK"})});}});
+ for(const scene of ["IDENTITY","REGISTER","LOGIN","BIND"] as const)await channel.sendVerification("13800138000","1234",scene);
+ assert.deepEqual(requests.map(r=>r.template),["SMS_99","SMS_100","SMS_101","SMS_102"]);
+ assert.deepEqual(requests.map(r=>JSON.parse(r.params!)),[{code:"1234"},{code:"1234"},{code:"1234"},{code:"1234"}]);
+ assert.equal(channel.configuration.scenes.LOGIN.source,"SCENE");
+ await assert.rejects(channel.sendVerification("13800138000","1234","OWNER_ORDER_PAID" as never));
+ assert.equal(channel.configuration.scenes.RENTAL_EXPIRY.templateCode,"SMS_201");assert.equal(requests.length,4);
+ const shared=createAliyunSmsChannel({credentials,signName:"合成签名",templateCode:"SMS_SHARED"},{sendSmsWithOptions:async()=>{throw Error("must not send");}});
+ assert.equal(shared.configuration.scenes.LOGIN.source,"SHARED");assert.equal(shared.configuration.scenes.OWNER_ORDER_PAID.source,"NOT_CONFIGURED");
+ assert.equal("sendNotice" in shared,false);
 });
 
 test("contact verification keeps SMS four digits and email six digits",()=>{
@@ -83,13 +99,14 @@ test("offline security endpoints send and verify per channel, with cooldown and 
   },release(){}
  };
  const pool={connect:async()=>client} as unknown as Pool;
- const outbox=new Map();let smsCode="";
- const plugin=await buildUserSecurityPlugin({pool,outbox,localMock:false,smsSender:async(_phone,code)=>{smsCode=code;}});
+ const outbox=new Map();let smsCode="",smsScene="";
+ const plugin=await buildUserSecurityPlugin({pool,outbox,localMock:false,smsSender:async(_phone,code,scene)=>{smsCode=code;smsScene=scene;}});
  const invoke=async(name:"userSecuritySend"|"userSecurityVerify",body:Record<string,unknown>)=>
   (plugin.endpoints[name] as unknown as (input:unknown)=>Promise<any>)({method:"POST",body,headers:new Headers(),context:{}});
  for(const channel of ["phone","email"] as const){
   const sent=await invoke("userSecuritySend",{purpose:"recovery",channel,stage:"current",contact:channel==="phone"?user.phoneNumber:user.email});
   const code=channel==="phone"?smsCode:outbox.get(sent.challengeId)?.code;
+  if(channel==="phone")assert.equal(smsScene,"IDENTITY");
   assert.equal(isUserVerificationCode(channel,code),true);
   await assert.rejects(invoke("userSecuritySend",{purpose:"recovery",channel,stage:"current",contact:channel==="phone"?user.phoneNumber:user.email}));
   await assert.rejects(invoke("userSecurityVerify",{challengeId:sent.challengeId,code:channel==="phone"?"123456":"1234"}));

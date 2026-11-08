@@ -9,6 +9,7 @@ import { createOssMediaStorage, type OssMediaStorageOptions } from "../src/suppl
 import { createLocalMediaStorage, createUnavailableMediaStorage, type MediaStorage } from "../src/supply/media";
 import type { SupplyRuntimeOptions, SupplyResponse } from "../src/supply/supply-routes";
 import type { SupplyNodeRequest } from "../src/supply/supply-util";
+import { resolveSmsTemplates } from "../src/auth/sms-templates";
 
 const ORIGIN = "http://127.0.0.1:3101";
 const API = "http://127.0.0.1:3102";
@@ -123,6 +124,19 @@ test("an authenticated non-Boss content operator cannot inspect system settings"
   assert.ok(!f.pool.queries.some(q => q.includes("media_asset")));
 });
 
+test("SMS configuration is Boss-only, distinguishes shared templates and never exposes credentials",async()=>{
+  const f=setup();f.options.userSmsConfiguration=resolveSmsTemplates({signName:"合成签名",templateCode:"SMS_SHARED",templates:{LOGIN:"SMS_LOGIN",OWNER_ORDER_PAID:"SMS_OWNER"}});
+  const result=await f.run("/sms");assert.equal(result.code,200);assert.equal(result.body.provider,"aliyun");
+  assert.equal(result.body.providerVerification,"NOT_RUN");assert.equal(result.body.scenes.length,6);
+  assert.equal(result.body.scenes.find((row:{scene:string})=>row.scene==="LOGIN").source,"SCENE");
+  assert.equal(result.body.scenes.find((row:{scene:string})=>row.scene==="REGISTER").source,"SHARED");
+  assert.equal(result.body.scenes.find((row:{scene:string})=>row.scene==="RENTAL_EXPIRY").source,"NOT_CONFIGURED");
+  assert.doesNotMatch(JSON.stringify(result.body),/private-ak|private-secret|accessKey|AppCode/);
+  f.pool.isBoss=false;assert.equal((await f.run("/sms")).code,403);
+  f.pool.isBoss=true;delete f.options.userSmsConfiguration;const disabled=await f.run("/sms");
+  assert.equal(disabled.body.provider,"disabled");assert.ok(disabled.body.scenes.every((row:{source:string})=>row.source==="NOT_CONFIGURED"));
+});
+
 test("settlement refund policy is Boss-only and rejects cross-origin or invalid changes", async () => {
   const f = setup();
   const read = await f.run("/settlement-refund-policy");
@@ -218,6 +232,17 @@ test("real Admin BFF dispatch reaches the same guarded GET route and rejects wri
     await handleAdminBff(request, response as never, options);
     assert.equal(response.code, status);
   }
+});
+
+test("Admin BFF exposes SMS configuration only through the guarded read route",async()=>{
+  const f=setup();f.options.userSmsConfiguration=resolveSmsTemplates({signName:"合成签名",templateCode:"SMS_SHARED"});
+  const options={apiOrigin:API,adminOrigin:ORIGIN,adminSecurityOptions:f.options,supply:f.options} as unknown as AdminBffOptions;
+  for(const [method,status] of [["GET",200],["POST",404]] as const){
+    const request=f.request("/sms",method);request.originalUrl="/api/bff/admin/system/sms";
+    const response=new ResponseFixture();await handleAdminBff(request,response as never,options);assert.equal(response.code,status);
+  }
+  f.pool.isBoss=false;const request=f.request("/sms");request.originalUrl="/api/bff/admin/system/sms";
+  const response=new ResponseFixture();await handleAdminBff(request,response as never,options);assert.equal(response.code,403);
 });
 
 test("Admin BFF dispatches the refund wait policy without bypassing validation", async () => {

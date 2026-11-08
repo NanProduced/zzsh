@@ -44,7 +44,7 @@ import type { INestApplication } from "@nestjs/common";
 import { createHash, randomUUID } from "node:crypto";
 import { isUserVerificationCode, makeUserVerificationCode, USER_SMS_CODE_LENGTH } from "./user-verification-code";
 import { join } from "node:path";
-import type { Pool } from "pg";
+import type { Pool, PoolClient } from "pg";
 import { drizzle } from "drizzle-orm/node-postgres";
 
 import { createAuthSchema } from "./auth-schema";
@@ -66,6 +66,7 @@ import { mountAdminDashboard } from "./admin-dashboard";
 import { deriveIdentitySubjectKey } from "./identity-subject";
 import { loadUserProviderRuntime } from "./user-provider-runtime";
 import type { UserSmsSender } from "./aliyun-user-providers";
+import type { SmsTemplateConfiguration } from "./sms-templates";
 import { loadLegacyPublicAdmission, loadLegacyPublicAdmissionManifest, parseLegacyPublicAdmission, assertLegacyPublicAdmissionTarget, assertLegacyPublicAdmissionManifestTarget, type LegacyPublicAdmission, type LegacyPublicAdmissionManifest } from "../legacy-load/legacy-public-admission";
 import { mountSupplyHandlers } from "../supply/supply-routes";
 import { mountProfileAvatarHandlers } from "../profile/profile-avatar-routes";
@@ -122,6 +123,7 @@ type AuthRuntimeConfig = {
   userSecret: string;
   userIdentitySubjectKey?: Buffer;
   userSmsSender?: UserSmsSender;
+  userSmsConfiguration?: SmsTemplateConfiguration;
   userRealNamePolicy?: { dailyLimit: number; minIntervalSeconds: number };
   adminSecret: string;
   adminBootstrapSecret?: string;
@@ -550,6 +552,13 @@ function buildFakePhoneNumberPlugin(
   return { ...plugin, endpoints: { ...plugin.endpoints, signInPhoneNumber: signIn } };
 }
 
+/** The combined login/register flow keeps its response identical for both cases. */
+export async function resolvePhoneLoginSmsScene(client:PoolClient,phoneNumber:string):Promise<"LOGIN"|"REGISTER">{
+  const registered=(await client.query<{registered:boolean}>(`SELECT EXISTS(SELECT 1 FROM zzsh_auth_user."user" WHERE "phoneNumber"=$1) AS registered`,[phoneNumber])).rows[0]?.registered;
+  if(typeof registered!=="boolean")throw new SecurityApiError(503,"EVIDENCE_UNAVAILABLE","Authentication dependency unavailable");
+  return registered||await hasLegacyPhoneConflict(client,phoneNumber)?"LOGIN":"REGISTER";
+}
+
 function buildPhoneRegistrationPlugin(
   createAuthEndpoint: typeof import("better-auth/api").createAuthEndpoint,
   APIError: typeof import("better-auth/api").APIError,
@@ -621,6 +630,7 @@ function buildPhoneRegistrationPlugin(
         const identifier = phoneRegistrationIdentifier(phoneNumber);
         const code = makeUserVerificationCode("phone", localSmsMock);
         const now = new Date();
+        let smsScene:"LOGIN"|"REGISTER" = "REGISTER";
         let phoneHold: string | undefined;
         let phoneRejection: { action: string; purpose: string; subject: string; outcome: string } | undefined;
         try {
@@ -645,6 +655,9 @@ function buildPhoneRegistrationPlugin(
             }
             if (held.decision === "allow" && !held.durable && held.ticket) phoneHold = held.ticket;
           }
+          if(smsSender){
+            try{smsScene=await resolvePhoneLoginSmsScene(client,phoneNumber);}catch(error){return authDomainError(error);}
+          }
           await client.query(`DELETE FROM "zzsh_auth_user"."verification" WHERE "identifier" = $1`, [identifier]);
           await client.query(
             `INSERT INTO "zzsh_auth_user"."verification" ("id", "identifier", "value", "expiresAt", "createdAt", "updatedAt") VALUES ($1, $2, $3, $4, $5, $5)`,
@@ -657,7 +670,7 @@ function buildPhoneRegistrationPlugin(
           throw error;
         }
         if (smsSender) {
-          try { await smsSender(phoneNumber, code); }
+          try { await smsSender(phoneNumber, code, smsScene); }
           catch { throw new APIError("SERVICE_UNAVAILABLE", { code: "AUTH_DEPENDENCY_UNAVAILABLE", message: "SMS delivery is not confirmed; keep the original challenge and cooldown" }); }
         } else outbox.set(identifier, { code, sentAt: now.toISOString(), purpose: "phone-registration" });
         return ctx.json({ status: true, cooldownUntil: new Date(now.getTime() + PHONE_REGISTRATION_OTP_COOLDOWN_MS).toISOString() });
@@ -1267,6 +1280,7 @@ export async function mountAuthHandlers(
     realNameProvider: options.realNameProvider ?? { ...createFakeRealNameProvider("UNKNOWN"), available: false },
     userIdentitySubjectKey: options.userIdentitySubjectKey,
     userRealNamePolicy: options.userRealNamePolicy,
+    userSmsConfiguration: options.userSmsConfiguration,
     settlementAdmission: options.joinpayCollection?.admission,
     userObligationReader: async (userId,client) => {
       const pending=await client.query("SELECT 1 FROM zzsh_supply.rental_account a JOIN zzsh_supply.listing_version v ON v.id=a.current_version_id WHERE a.owner_user_id=$1 AND v.review_state IN ('SUBMITTED','APPROVED','PUBLISHED') LIMIT 1",[userId]);

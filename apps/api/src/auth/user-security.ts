@@ -11,6 +11,9 @@ import { isUserVerificationCode, makeUserVerificationCode } from "./user-verific
 
 export type UserSecurityDelivery = { code: string; target: string; channel: "phone" | "email"; purpose: string; sentAt: string };
 type Purpose = "password" | "email" | "phone" | "recovery";
+export function securitySmsScene(purpose:Purpose,stage:"current"|"target"):"BIND"|"IDENTITY"{
+  return purpose==="phone"&&stage==="target"?"BIND":"IDENTITY";
+}
 type Subject = { id: string; name: string; phoneNumber: string | null; email: string; emailVerified: boolean; suspended: boolean; accountStatus: string; securityVersion: number; stamp: string };
 type Proof = {
   version: 1; userId: string | null; sessionId: string | null; stamp: string; purpose: Purpose;
@@ -160,7 +163,7 @@ export async function buildUserSecurityPlugin(options: { pool: Pool; outbox?: Ma
       throw error;
     });
     if(channel==="phone"&&options.smsSender&&delivery.data.userId){
-      try{await options.smsSender(delivery.data.recipient,code);}
+      try{await options.smsSender(delivery.data.recipient,code,securitySmsScene(purpose,stage));}
       catch{
         ctx.setHeader("Retry-After",String(Math.max(1,Math.ceil((now.getTime()+COOLDOWN-Date.now())/1000))));
         throw new APIError("SERVICE_UNAVAILABLE",{code:"AUTH_DEPENDENCY_UNAVAILABLE",message:"Verification delivery is uncertain; keep the current challenge and wait for its cooldown"});

@@ -6,6 +6,7 @@ import { Badge } from "../components/ui/badge";
 import { StatusMessage } from "../components/ui-elements";
 import { contentTime } from "./content-resources-model";
 import { SettlementRefundPolicyPanel } from "./settlement-refund-policy-panel";
+import { SystemSmsConfigurationPanel } from "./system-sms-configuration-panel";
 
 export type SystemStorageConfiguration = {
   backend: "local" | "oss" | "unavailable";
@@ -85,6 +86,7 @@ export function SystemConfigurationView({ snapshot, refreshNonce = 0 }: {
       <div><h2 id="settlement-refund-settings-title" className="text-base font-semibold">订单结算</h2><p className="mt-1 text-sm text-muted-foreground">分别设置正常和提前结算的退款等待期。</p></div>
       <SettlementRefundPolicyPanel actorId={snapshot.adminUserId} sessionId={snapshot.session.id} />
     </section>
+    <SystemSmsConfigurationPanel key={owner} refreshNonce={refreshNonce}/>
     <div className="mt-5"><StatusMessage error={current.error} /></div>
     {current.busy ? <p className="mt-4 text-sm text-muted-foreground" role="status">正在读取存储配置…</p> : null}
     {data ? <div className="mt-6 max-w-5xl space-y-8">

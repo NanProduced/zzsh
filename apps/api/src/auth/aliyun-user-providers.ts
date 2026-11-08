@@ -7,8 +7,9 @@ import { normalizeMainlandPhone } from "./phone-number";
 import { normalizeIdentityDocument } from "./identity-subject";
 import { ConfigurationError } from "../config/config";
 import { isUserVerificationCode } from "./user-verification-code";
+import { resolveSmsTemplates, type SmsTemplateScene, type SmsVerificationScene } from "./sms-templates";
 
-export type UserSmsSender = (phoneNumber: string, code: string) => Promise<void>;
+export type UserSmsSender = (phoneNumber: string, code: string, scene: SmsVerificationScene) => Promise<void>;
 export type AliyunUserCredentials = { accessKeyId: string; accessKeySecret: string; securityToken?: string };
 export class UserSmsDeliveryError extends Error {
   constructor(readonly outcome: "REJECTED" | "UNKNOWN") { super("SMS_DELIVERY_UNAVAILABLE"); }
@@ -26,19 +27,17 @@ function clientConfig(credentials: AliyunUserCredentials, endpoint: string) {
 const noRetry = () => new RuntimeOptions({ autoretry:false,maxAttempts:1,connectTimeout:3000,readTimeout:8000 });
 
 /** A configured client is a capability, never evidence that a message reached a phone. */
-export function createAliyunUserSmsSender(input: { credentials: AliyunUserCredentials; signName: string; templateCode: string },
-  client?: Pick<DysmsClient,"sendSmsWithOptions">): UserSmsSender {
-  const signName=input.signName?.trim(),templateCode=input.templateCode?.trim();
-  if (!signName || signName.length>64 || /[\p{Cc}\p{Cs}]/u.test(signName) || !/^SMS_[A-Za-z0-9]+$/.test(templateCode)) {
-    throw new ConfigurationError("Approved SMS sign and OTP template are required");
-  }
+export function createAliyunSmsChannel(input: { credentials: AliyunUserCredentials; signName: string; templateCode?: string; templates?:Partial<Record<SmsTemplateScene,string>> },
+  client?: Pick<DysmsClient,"sendSmsWithOptions">) {
+  const configuration=resolveSmsTemplates(input),signName=configuration.signName;
   const sdk = client ?? new DysmsClient(clientConfig(input.credentials,"dysmsapi.aliyuncs.com"));
-  return async(phoneNumber,code) => {
+  const send=async(phoneNumber:string,scene:SmsTemplateScene,params:Record<string,string>)=>{
     const phone = normalizeMainlandPhone(phoneNumber);
-    if (!phone || !isUserVerificationCode("phone", code)) throw new UserSmsDeliveryError("REJECTED");
+    const templateCode=configuration.scenes[scene]?.templateCode;
+    if (!phone || !templateCode) throw new UserSmsDeliveryError("REJECTED");
     try {
       const response=await sdk.sendSmsWithOptions(new SendSmsRequest({ phoneNumbers:phone,signName,
-        templateCode,templateParam:JSON.stringify({code}) }),noRetry());
+        templateCode,templateParam:JSON.stringify(params) }),noRetry());
       if(response.body?.code!=="OK")throw new UserSmsDeliveryError("REJECTED");
     } catch(error) {
       if(error instanceof UserSmsDeliveryError)throw error;
@@ -46,6 +45,16 @@ export function createAliyunUserSmsSender(input: { credentials: AliyunUserCreden
       throw new UserSmsDeliveryError("UNKNOWN");
     }
   };
+  const sendVerification:UserSmsSender=async(phoneNumber,code,scene)=>{
+    if(!["IDENTITY","REGISTER","LOGIN","BIND"].includes(scene)||!isUserVerificationCode("phone",code))throw new UserSmsDeliveryError("REJECTED");
+    await send(phoneNumber,scene,{code});
+  };
+  return {configuration,sendVerification};
+}
+
+export function createAliyunUserSmsSender(input: { credentials: AliyunUserCredentials; signName: string; templateCode?: string; templates?:Partial<Record<SmsTemplateScene,string>> },
+  client?: Pick<DysmsClient,"sendSmsWithOptions">): UserSmsSender {
+  return createAliyunSmsChannel(input,client).sendVerification;
 }
 
 export function verifiedMainlandAgeStatus(documentNumber: string,asOf:Date):AgeStatus {

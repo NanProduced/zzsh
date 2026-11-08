@@ -9,6 +9,7 @@ import { ALLOWED_IMAGE_MIMES, MAX_MEDIA_BYTES } from "../supply/media";
 import { requireAdminAccess, runIdempotentWrite, safely, type SupplyResponse, type SupplyRuntimeOptions } from "../supply/supply-routes";
 import { bodyOf, ensureOnlyFields, forbidden, headerValue, invalid, notFound, sendJson, type SupplyNodeRequest } from "../supply/supply-util";
 import { readSettlementRefundPolicy, updateSettlementRefundPolicy, validateSettlementRefundPolicy, type SettlementRefundPolicyInput } from "../order/settlement-refund-policy";
+import { SMS_TEMPLATE_SCENES } from "../auth/sms-templates";
 
 type StorageCheck = {
   state: "NOT_RUN" | "NO_PUBLIC_SAMPLE" | "PASS" | "FAILED";
@@ -27,7 +28,9 @@ export async function handleSystemConfiguration(
   await safely(response, requestId, async () => {
     const url = new URL(request.originalUrl ?? request.url ?? "", options.apiOrigin);
     const policy = /^\/api\/(?:v1\/admin|bff\/admin)\/system\/settlement-refund-policy$/.test(url.pathname);
+    const sms = /^\/api\/(?:v1\/admin|bff\/admin)\/system\/sms$/.test(url.pathname);
     if (!(request.method === "GET" && /^\/api\/(?:v1\/admin|bff\/admin)\/system\/storage(?:\/check)?$/.test(url.pathname))
+      && !(request.method === "GET" && sms)
       && !(policy && (request.method === "GET" || request.method === "PUT"))) throw notFound();
     if (url.searchParams.size) throw invalid("System configuration does not accept query parameters");
     const origin = headerValue(request.headers.origin);
@@ -40,6 +43,15 @@ export async function handleSystemConfiguration(
       await assertAdminContextInTransaction(client, context);
       if (!(await requireAdminAccess(client, context.userId)).isBoss) throw forbidden();
     };
+    if(sms){
+      await withTransaction(options.pool,authorize);
+      const config=options.userSmsConfiguration;
+      sendJson(response,200,{provider:config?"aliyun":"disabled",configurationSource:"DEPLOYMENT_ENVIRONMENT",
+        signName:config?.signName??null,scenes:SMS_TEMPLATE_SCENES.map(scene=>({scene,...(config?.scenes[scene]??{templateCode:null,source:"NOT_CONFIGURED"}),
+          trigger:scene==="RENTAL_EXPIRY"||scene==="OWNER_ORDER_PAID"?"NOT_CONNECTED":"CONNECTED"})),
+        providerVerification:"NOT_RUN"},requestId);
+      return;
+    }
     if (policy) {
       if (request.method === "GET") {
         const data = await withTransaction(options.pool, async client => { await authorize(client); return readSettlementRefundPolicy(client); });
