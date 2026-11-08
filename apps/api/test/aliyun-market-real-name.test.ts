@@ -6,7 +6,7 @@ const input={userId:"synthetic-user",fullName:"合成姓名",documentNumber:"110
 const appCode="synthetic_appcode_123456789";
 const clock=()=>new Date("2026-11-02T00:00:00Z");
 
-test("marketplace provider posts the documented fields once and interprets match and mismatch",async()=>{
+test("marketplace provider posts the legacy fields once and interprets match and mismatch",async()=>{
   for(const [value,status] of [[1,"VERIFIED"],[2,"REJECTED"],[9,"UNKNOWN"]] as const){
     let calls=0;
     const send:typeof fetch=async(url,init)=>{
@@ -21,6 +21,12 @@ test("marketplace provider posts the documented fields once and interprets match
     assert.equal(calls,1);assert.equal(result.status,status);assert.equal(result.provider,"aliyun-market-id2");
     assert.equal(result.providerReference,"market-request-1");assert.equal(result.ageStatus,status==="VERIFIED"?"ADULT":"UNKNOWN");
   }
+});
+
+test("marketplace mismatch example is rejected while preserving the request reference",async()=>{
+  const provider=createAliyunMarketRealNameProvider(appCode,async()=>Response.json({code:200,requestid:"1400000000000000000",message:"成功",data:{result:2,msg:"核验不一致"}}),clock);
+  const result=await provider.verify(input);
+  assert.equal(result.status,"REJECTED");assert.equal(result.providerReference,"1400000000000000000");assert.equal(result.ageStatus,"UNKNOWN");
 });
 
 test("marketplace provider fails closed without retrying or exposing identity and credentials",async()=>{
