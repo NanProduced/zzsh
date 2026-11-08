@@ -160,6 +160,10 @@ export function OrderStages({
   const paymentText = orderPaymentLabel(p, o.source?.origin);
   const refundText = o.status === 'CANCELLED' && pState === 'RECORDED_PAID' ? ' · 退款进度另行查看' : '';
   const cancelText = o.status === 'CANCELLED' && o.cancelReason ? ` · ${cancelReasonText(o.cancelReason)}` : '';
+  const cancellationDetail = o.status === 'CANCELLED' && progress ? `${OPENING_STATE_LABELS[progress.opening.state]} · ${ENDING_STATE_LABELS[progress.ending.state]}` : '';
+  const detailSummary = showTimes
+    ? [cancellationDetail, refundText.replace(/^ · /, ''), cancelText.replace(/^ · /, '')].filter(Boolean).join(' · ')
+    : `${sourceLabel}${cancellationDetail ? `${cancellationDetail} · ` : ''}${paymentText}${refundText}${cancelText}${progress?.ending.postedAtUtc ? ` · 过账时间 ${orderTime(progress.ending.postedAtUtc)}` : ''}${progress?.opening.confirmedAtUtc ? ` · 开租时间 ${orderTime(progress.opening.confirmedAtUtc)}` : ''}`;
   const compactText = o.status === 'CANCELLED' ? null : progress
     ? `${OPENING_STATE_LABELS[progress.opening.state]} · ${ENDING_STATE_LABELS[progress.ending.state]}`
     : legacy
@@ -196,15 +200,7 @@ export function OrderStages({
           </li>
         ))}
       </ol>
-      <small>
-        {sourceLabel}
-        {o.status === 'CANCELLED' && progress ? `${OPENING_STATE_LABELS[progress.opening.state]} · ${ENDING_STATE_LABELS[progress.ending.state]} · ` : ''}
-        {paymentText}
-        {refundText}
-        {cancelText}
-        {progress?.ending.postedAtUtc ? ` · 过账时间 ${orderTime(progress.ending.postedAtUtc)}` : ''}
-        {progress?.opening.confirmedAtUtc ? ` · 开租时间 ${orderTime(progress.opening.confirmedAtUtc)}` : ''}
-      </small>
+      {detailSummary ? <small>{detailSummary}</small> : null}
     </div></TooltipProvider>
   );
 }

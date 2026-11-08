@@ -110,7 +110,7 @@
 .oc-design .oc-lifecycle-head h2{font-size:16px;font-weight:600;margin:0}
 .oc-design .oc-lifecycle .oc-stages ol{gap:24px;flex-wrap:wrap;row-gap:14px}
 .oc-design .oc-lifecycle .oc-stage-node{width:30px;height:30px}
-.oc-design .oc-lifecycle .oc-stage-line{left:36px;top:15px;width:18px}
+.oc-design .oc-lifecycle .oc-stage-line{left:30px;right:-12px;top:15px;width:auto;pointer-events:none}
 .oc-design .oc-lifecycle .oc-stage-name{font-size:12px;color:var(--foreground)}
 .oc-design .oc-lifecycle .oc-stages .active .oc-stage-node{color:#fcd34d;border-color:#d9770670;background:#78350f22}
 .oc-design .oc-lifecycle .oc-stages ol{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}
@@ -119,7 +119,12 @@
 .oc-design .oc-lifecycle .oc-stage-time{font-size:12px;line-height:1.5;color:var(--muted-foreground)}
 .oc-design .oc-next-step{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;font-size:12px;line-height:1.6;color:var(--foreground);margin:12px 0 0}
 [data-theme=light] .oc-design .oc-lifecycle .oc-stages .active .oc-stage-node{color:#92400e;background:#fef3c755}
-@media(max-width:760px){.oc-design .oc-lifecycle .oc-stages ol{grid-template-columns:repeat(2,minmax(0,1fr));gap:18px}.oc-design .oc-lifecycle .oc-stage-line{display:none}}
+@media(max-width:760px){
+ .oc-design .oc-lifecycle .oc-stages ol{display:flex;flex-direction:column;gap:18px}
+ .oc-design .oc-lifecycle .oc-stage-trigger{flex-direction:row;gap:12px}
+ .oc-design .oc-lifecycle .oc-stage-time{margin-left:42px}
+ .oc-design .oc-lifecycle .oc-stage-line{top:30px;bottom:-18px;left:15px;right:auto;width:1px;height:auto}
+}
 @media(max-width:1100px){.oc-design .oc-axes{grid-template-columns:repeat(2,minmax(0,1fr))}}
 @media(max-width:760px){.oc-design .oc-axes{grid-template-columns:minmax(0,1fr)}}
 /* 主区生命周期：四节点横向排列，节点字段在节点下方 */

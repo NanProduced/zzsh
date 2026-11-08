@@ -340,7 +340,8 @@ test('estimated expiry requires a valid native opening and never uses legacy pay
   globalThis.fetch=async()=>response({order:value});
   await act(async()=>root.render(createElement(AdminOrderChainView,{...chainProps(item.id),objectOnly:true,initialOrderId:item.id})));
   await until(()=>node.querySelector('h1')?.textContent===item.id);
-  assert.equal(node.querySelector('.oc-lifecycle').textContent.includes('预计到期'),item.expected,item.id);
+  assert.equal(node.querySelector('.oc-heading').textContent.includes('预计到期'),item.expected,item.id);
+  assert.equal(node.querySelector('.oc-lifecycle').textContent.includes('预计到期'),false,item.id);
  }
 });
 test('legacy account insurance is labeled as captured account configuration',async t=>{
@@ -968,11 +969,14 @@ test('FLOW02 visual: progress timestamps use the same display formatter as order
   const value={...chainOrder,status:'COMPLETED',source:{origin:'NATIVE'},createdAt:instant,progress:{asOfUtc:instant,opening:{state:'CONFIRMED',confirmedAtUtc:instant},ending:{state:'POSTED',currentVersionNo:1,postedAtUtc:instant}}};
   globalThis.fetch=async()=>response({order:value});
   await act(async()=>root.render(createElement(AdminOrderChainView,{...chainProps('visual-dates'),objectOnly:true,initialOrderId:value.id})));
-  await until(()=>node.textContent.includes('过账时间'));
+  await until(()=>node.querySelectorAll('.oc-lifecycle .oc-stage-time').length===4);
   const expected=new Intl.DateTimeFormat('zh-CN',{timeZone:'Asia/Shanghai',dateStyle:'medium',timeStyle:'short'}).format(new Date(instant));
-  assert(node.querySelector('.oc-stages').textContent.includes('过账时间 '+expected));
-  assert(node.querySelector('.oc-stages').textContent.includes('开租时间 '+expected));
-  assert(!node.querySelector('.oc-stages').textContent.includes(instant));
+  const stages=node.querySelector('.oc-lifecycle .oc-stages');
+  assert.equal(stages.querySelectorAll('.oc-stage-time')[2].textContent,expected);
+  assert.equal(stages.querySelectorAll('.oc-stage-time')[3].textContent,expected);
+  assert.equal(stages.querySelectorAll('.oc-stage-line').length,3);
+  assert.doesNotMatch(stages.textContent,/过账时间|开租时间/);
+  assert(!stages.textContent.includes(instant));
 });
 
 
