@@ -159,6 +159,16 @@ test("document and subject digests ignore unrelated rows and still change when t
   assert.doesNotMatch(readFileSync("src/finance/admin-finance-export.ts","utf8"),/financeScopedVersionSql/);
   assert.match(readFileSync("src/finance/admin-finance-export.ts","utf8"),/readFinanceSourceVersion\(client\)/);
   assert.doesNotMatch(readFileSync("src/finance/admin-finance-routes.ts","utf8"),/SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY/);
+  fixture.db.exec(`CREATE TABLE zzsh_order.legacy_withdrawal_subject_revision(source_system TEXT,user_id TEXT,revision TEXT);
+    CREATE TABLE zzsh_order.legacy_withdrawal_link_evidence(parent_id TEXT,revision TEXT,debit_id TEXT,return_id TEXT,source_system TEXT,user_id TEXT,
+      parent_digest TEXT,debit_digest TEXT,return_digest TEXT,parent_fingerprint TEXT,debit_fingerprint TEXT,return_fingerprint TEXT);
+    INSERT INTO zzsh_order.legacy_withdrawal_subject_revision VALUES('old','other','1');`);
+  const scopedWithLinks=()=>financeScopedVersionSql({...ready,legacy_withdrawal_links:true},{mode:"document",documentRef:"ORDER:order-1"});
+  assert.ok(scopedWithLinks());const beforeLinks=digest(scopedWithLinks());
+  fixture.db.exec("UPDATE zzsh_order.legacy_withdrawal_subject_revision SET revision='2'");
+  assert.equal(digest(scopedWithLinks()),beforeLinks,'an unrelated legacy withdrawal must not invalidate a native order');
+  fixture.db.exec("UPDATE zzsh_order.settlement_posting SET version_hash='hash-4' WHERE id='post-1'");
+  assert.notEqual(digest(scopedWithLinks()),beforeLinks,'the original posting must still invalidate its own order');
   const full={withdrawals:true,native_orders:true,legacy_orders:true,native_distribution:true,history_coverage:true,legacy_duty_finance:true,guarantee_history:true,payment_requests:true,refund_intents:true,joinpay_withdrawals:true};
   assert.ok(financeScopedVersionSql(full,{mode:"document",documentRef:"ORDER:order-1"}));
   assert.ok(financeScopedVersionSql(full,{mode:"subject",subjectId:"u1"}));

@@ -126,6 +126,13 @@ test("finance-authorized staff sees the commission beneficiary before crediting 
 });
 function storage(t){const w=new Window({url:"http://fixture.invalid/orders"});Object.assign(globalThis,{window:w,document:w.document,HTMLElement:w.HTMLElement,Node:w.Node,Event:w.Event,sessionStorage:w.sessionStorage,IS_REACT_ACT_ENVIRONMENT:true});t.after(()=>w.happyDOM.abort());return w;}
 function view(patch={}){return {schema:"legacy-continuation.v1",availability:"KNOWN",revision:"2",evidenceId:"evidence_result",stage:"4",isSettle:"2",amounts:{refundNet:{cents:"8200",yuan:"82.00"}},capabilities:["release","confiscate"],commandFingerprints:{release:digest,confiscate:digest},duties:[],reasons:[],channelState:"UNKNOWN",...patch};}
+test('legacy read keeps only validated recorded quantities without inventing zero',()=>{
+ const c=client(async()=>({}));
+ const result=c.parseLegacyAdminView(view({quantities:{expendHaff:'178.00',bullet:'0',awm:'-1',card:'1e2',secret:'do-not-copy'}}));
+ assert.equal(result.quantities.expendHaff,'178.00');assert.equal(result.quantities.bullet,'0');
+ assert.equal(result.quantities.awm,null);assert.equal(result.quantities.card,null);assert.equal(result.quantities.helmet,null);
+ assert.equal('secret' in result.quantities,false);assert.equal(c.parseLegacyAdminView(view()).quantities,null);
+});
 const snapshot={authenticated:true,adminUserId:"admin_A",session:{id:"session_A"},security:{isBoss:false},permissions:["order.read","order.legacy.continue"]};
 const tick=()=>new Promise(resolve=>setImmediate(resolve));
 const html=(tag)=>(props)=>React.createElement(tag,props);

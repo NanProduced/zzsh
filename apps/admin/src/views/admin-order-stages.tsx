@@ -106,12 +106,14 @@ export function OrderStages({
   progress,
   variant = 'detail',
   className,
+  showTimes = false,
 }: {
   order: OrderStagesInput;
   rentalStarted?: unknown;
   progress?: OrderProgress | null;
   variant?: 'compact' | 'detail';
   className?: string;
+  showTimes?: boolean;
 }) {
   const p = o.payment;
   const pState = p?.state;
@@ -134,7 +136,7 @@ export function OrderStages({
       ? [
           { name: '创建', Icon: FileText, state: o.createdAt ? 'done' : 'unknown', time: o.createdAt },
           paid,
-          { name: o.source?.statusLabel || ORDER_STATUS_LABELS[o.status] || '原来源阶段未记录', Icon: Flag, state: o.status === 'COMPLETED' && o.completedAt ? 'done' : 'active', time: o.status === 'COMPLETED' ? (o.completedAt ?? null) : null },
+          { name: o.source?.statusLabel || ORDER_STATUS_LABELS[o.status] || '原来源阶段未记录', Icon: Flag, state: o.status === 'COMPLETED' ? (o.completedAt ? 'done' : 'unknown') : o.status === 'UNKNOWN' ? 'unknown' : 'active', time: o.status === 'COMPLETED' ? (o.completedAt ?? null) : null },
         ]
       : [
           { name: '创建', Icon: FileText, state: o.createdAt ? 'done' : 'unknown', time: o.createdAt },
@@ -156,7 +158,7 @@ export function OrderStages({
 
   const sourceLabel = legacy ? `${o.source?.statusLabel ?? '历史状态未记录'} · ` : '';
   const paymentText = orderPaymentLabel(p, o.source?.origin);
-  const refundText = o.status === 'CANCELLED' && pState === 'RECORDED_PAID' ? ' · 退款未记录' : '';
+  const refundText = o.status === 'CANCELLED' && pState === 'RECORDED_PAID' ? ' · 退款进度另行查看' : '';
   const cancelText = o.status === 'CANCELLED' && o.cancelReason ? ` · ${cancelReasonText(o.cancelReason)}` : '';
   const compactText = o.status === 'CANCELLED' ? null : progress
     ? `${OPENING_STATE_LABELS[progress.opening.state]} · ${ENDING_STATE_LABELS[progress.ending.state]}`
@@ -189,7 +191,7 @@ export function OrderStages({
       <ol aria-label="订单进度">
         {facts.map((f, i) => (
           <li key={f.name} className={f.state}>
-            <StageNode fact={f} size={13} omitted={[]} />
+            <StageNode fact={f} size={13} omitted={[]} showTime={showTimes} />
             {i < facts.length - 1 ? <span className="oc-stage-line" /> : null}
           </li>
         ))}
@@ -210,11 +212,11 @@ export function OrderStages({
 type StageFact = { name: string; Icon: ComponentType<{ size?: number }>; state: string; time?: string | null };
 const stageStateText: Record<string, string> = { done: '已完成', active: '进行中', cancel: '已终止', none: '未发生', unknown: '未记录' };
 /** 单个进度节点：悬停/聚焦显示北京时间；触屏点按打开；折叠节点的时间一并列出。 */
-function StageNode({ fact: f, size, omitted }: { fact: StageFact; size: number; omitted: StageFact[] }) {
+function StageNode({ fact: f, size, omitted, showTime = false }: { fact: StageFact; size: number; omitted: StageFact[]; showTime?: boolean }) {
   const [open, setOpen] = useState(false);
   const line = (x: StageFact) => `${x.name}：${x.state === 'none' ? '未发生' : orderTime(x.time)}`;
   const label = [line(f), ...omitted.map(line)].join('；');
-  return <Tooltip open={open} onOpenChange={setOpen}>
+  return <><Tooltip open={open} onOpenChange={setOpen}>
     <TooltipTrigger render={<button type="button" className="oc-stage-trigger" aria-label={`${label}（北京时间）`} onClick={() => setOpen(true)} />}>
       <span className="oc-stage-node"><f.Icon size={size} /></span>
       <span className="oc-stage-name">{f.name}</span>
@@ -225,5 +227,5 @@ function StageNode({ fact: f, size, omitted }: { fact: StageFact; size: number; 
         <span className="opacity-70">北京时间</span>
       </div>
     </TooltipContent>
-  </Tooltip>;
+  </Tooltip>{showTime ? <span className="oc-stage-time">{f.state === 'none' ? '未发生' : f.state === 'active' && !f.time ? f.name === '进行中' ? '履约中' : '待处理' : orderTime(f.time)}</span> : null}</>;
 }

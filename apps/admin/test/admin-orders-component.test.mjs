@@ -281,6 +281,36 @@ const chainOrder = { ...order, accountDisplayNo: 'A-001', ownerBusinessNo: 'U-OW
   legacyAmounts: { refund: null, refundChannelState: 'UNKNOWN' } };
 const chainPage = (items = [chainOrder], overrides = {}) => ({ items, page: 1, pageSize: 20, total: 1, contextKey: 'a'.repeat(64), ...overrides });
 const chainProps = id => ({ snapshot: snapshotFor(id), onOpenPath: () => {}, onQueryChange: () => {}, refreshNonce: 0 });
+test('upper overview uses the posted version and labels ledger contribution and fee',async t=>{
+ const {root,node,AdminOrderChainView}=await setup(t),id='native-posted-upper',calls=[];
+ const value={...chainOrder,id,displayNo:'NATIVE-POSTED-UPPER',status:'COMPLETED',source:{origin:'NATIVE'},completedAt:'2026-11-08T01:00:00Z',frozenAccount:{source:'ORDER_VERSION',haff:{itemId:'haff-id',code:'df_billable_haff',name:'哈夫币',quantity:'150000000',unit:'HAFF_BASE'},materials:[{itemId:'bullet-id',code:'df_billable_level6_bullet',name:'6级子弹',quantity:'120',unit:'ROUND'}],termDays:'10',termSeconds:'864000',loginMethodText:'QQ账密'}};
+ const known=cents=>({knowledge:'KNOWN',cents,reasonCodes:[]}),unknown={knowledge:'UNKNOWN',cents:null,reasonCodes:[]};
+ globalThis.fetch=async url=>{const p=String(url);calls.push(p);if(p.includes('readMode=combined'))return response({order:value});
+  if(p.includes('/settlement'))return response({orderId:id,posting:{settlementVersionId:'v2',versionHash:'hash2'},versions:[{id:'v1',versionHash:'hash1',computation:{ok:true,consumed:{haff:'1',items:[]}}},{id:'v2',versionHash:'hash2',computation:{ok:true,consumed:{haff:'75000000',items:[{itemId:'bullet-id',consumed:'0'}]}}}]});
+  if(p.includes('/finance/documents/'))return response({document:{ref:'ORDER:'+id},orderSettlement:{schema:'admin-order-settlement-evidence.v1',documentRef:'ORDER:'+id,readiness:'READY',posting:{state:'POSTED',ref:null,postedAt:null},captured:known('308421'),ownerNet:known('227240'),refundPayable:known('38966'),refunded:unknown,historicalRefund:unknown,platformContribution:known('42215'),platformComponents:[{code:'PLATFORM_COMPENSATION_FEE',cents:'19760',payer:'OWNER'}],channel:{state:'UNKNOWN',reference:null},reasonCodes:[]}});
+  return response({error:{code:'NOT_FOUND'}},404);};
+ const snap={...snapshotFor(id),permissions:['order.read','finance.read']};
+ await act(async()=>root.render(createElement(AdminOrderChainView,{...chainProps(id),snapshot:snap,objectOnly:true,initialOrderId:id})));
+ await until(()=>node.querySelector('.oc-overview-grid')?.textContent.includes('平台结算贡献（非净利润）')&&node.querySelector('.oc-overview-grid')?.textContent.includes('75 M 哈夫币'));
+ assert.match(node.querySelector('.oc-overview-grid').textContent,/0组（0发）/);assert.match(node.querySelector('.oc-overview-grid').textContent,/全额包赔服务费（号主承担）¥197\.60/);
+ assert.doesNotMatch(node.textContent,/平台收益（价差\+包赔费）|汇聚已收款/);
+ assert.equal(calls.filter(url=>url.includes('/settlement')).length,1);
+});
+test('legacy upper overview reuses original facts and a single continuation read',async t=>{
+ const {root,node,AdminOrderChainView}=await setup(t),id='legacy_order_'+'b'.repeat(40),calls=[];
+ const value={...chainOrder,id,displayNo:'LEGACY-UPPER',status:'COMPLETED',completedAt:'2026-10-23T05:11:36Z',source:{origin:'LEGACY',statusLabel:'已完成',originalStatus:'4',originalPayStatus:'1'},legacyResources:{source:'LEGACY_ORIGINAL_ORDER',state:'KNOWN',items:[{code:'df_billable_haff',name:'哈夫币',quantity:'365.00',unit:null},{code:'df_billable_level6_bullet',name:'6级子弹',quantity:'3',unit:null}]}};
+ const known=cents=>({knowledge:'KNOWN',cents,reasonCodes:[]}),unknown={knowledge:'UNKNOWN',cents:null,reasonCodes:[]};
+ globalThis.fetch=async url=>{const p=String(url);calls.push(p);if(p.includes('readMode=combined'))return response({order:value});
+  if(p.includes('/continuation'))return response({continuation:{schema:'legacy-continuation.v1',availability:'NOT_IMPORTED',revision:null,evidenceId:null,stage:null,isSettle:null,amounts:{},quantities:null,capabilities:[],commandFingerprints:{},duties:[],reasons:[],channelState:'UNKNOWN'}});
+  if(p.includes('/finance/documents/'))return response({document:{ref:'LEGACY_ORDER:'+id},orderSettlement:{schema:'admin-order-settlement-evidence.v1',documentRef:'LEGACY_ORDER:'+id,readiness:'READY',posting:{state:'UNKNOWN',ref:null,postedAt:null},captured:unknown,ownerNet:unknown,refundPayable:unknown,refunded:unknown,historicalRefund:known('11480'),channel:{state:'UNKNOWN',reference:null},reasonCodes:[],business:{payment:{state:'LEGACY_RECORDED_PAID',amount:known('99200'),occurredAt:null},settlementState:'LEGACY_RECORDED_COMPLETE',legacyCompletedAmounts:{ownerEarnings:known('71000'),refundAmount:known('11480')},paymentAttempts:[],refundOrders:[],reasonCodes:[]}}});
+  return response({error:{code:'NOT_FOUND'}},404);};
+ const snap={...snapshotFor(id),permissions:['order.read','finance.read']};
+ await act(async()=>root.render(createElement(AdminOrderChainView,{...chainProps(id),snapshot:snap,objectOnly:true,initialOrderId:id})));
+ await until(()=>node.querySelector('.oc-overview-grid')?.textContent.includes('365.00 M 哈夫币')&&node.querySelector('.oc-overview-grid')?.textContent.includes('¥710.00'));
+ assert.match(node.querySelector('.oc-overview-grid').textContent,/3组（180发）/);assert.match(node.querySelector('.oc-overview-grid').textContent,/退款金额（旧站原记）¥114\.80/);
+ assert.doesNotMatch(node.textContent,/退款已到账|汇聚已收款/);
+ assert.equal(calls.filter(url=>url.includes('/continuation')).length,1);
+});
 test('order detail separates recorded payment from order amount and estimates',async t=>{
  const {root,node,AdminOrderChainView}=await setup(t);
  const amount=value=>({currency:'CNY',unit:'yuan',amount:value,scale:2});
@@ -514,7 +544,7 @@ test('master: order detail separates lack of permission, unknown parts and verif
   assert.match(node.textContent,/无权查看/);assert.match(node.textContent,/哈夫租金未知（依据未提供）/);assert.match(node.textContent,/物资预付未知（依据未提供）/);
   value={...value,id:'clarity-legacy',displayNo:'CLARITY-LEGACY',source:{origin:'LEGACY',statusLabel:'已取消'},payment:{state:'RECORDED_UNPAID',recordedAt:null,recordedAmount:null},prepaymentReconciliation:{state:'MISMATCH',arithmetic:'MISMATCH',closed:false},legacyResources:{state:'KNOWN',source:'LEGACY_ORIGINAL_ORDER',items:[{code:'x',name:'原单物资',quantity:'4',unit:null,zero:false}]},frozenAccount:{source:'ACCOUNT_PUBLIC_VERSION',haff:null,materials:[],termDays:null,termSeconds:null,loginMethodText:null}};
   await act(async()=>root.render(createElement(AdminOrderChainView,{...chainProps('clarity-legacy'),objectOnly:true,initialOrderId:value.id})));await until(()=>node.textContent.includes('CLARITY-LEGACY'));
-  assert.match(node.textContent,/账号资料（与账号页一致）/);assert.doesNotMatch(node.textContent,/历史账号|旧单资源数量/);
+  assert.match(node.textContent,/账号资料（公开版本参考）/);assert.doesNotMatch(node.textContent,/历史账号|旧单资源数量/);
   assert.match(node.textContent,/原单记录，合计尚未核对/);assert.match(node.textContent,/完整构成仍未确认/);assert.match(node.textContent,/未记录付款/);assert.doesNotMatch(node.textContent,/本单冻结账号摘要 · 历史/);
 });
 
@@ -715,7 +745,7 @@ test('legacy frozen account is a historical reference, not an order-frozen inven
   globalThis.fetch=async()=>response({order:value});
   await act(async()=>root.render(createElement(AdminOrderChainView,{...chainProps('legacy-frozen-detail'),objectOnly:true,initialOrderId:value.id})));
   await until(()=>node.textContent.includes('关键费用'));
-  assert.match(node.textContent,/账号资料（与账号页一致）/);
+  assert.match(node.textContent,/账号资料（公开版本参考）/);
   assert.match(node.textContent,/6 天/);
 });
 
@@ -731,7 +761,7 @@ for(const [status,days,haff,total]of [['CANCELLED','13','130000000','685.00'],['
   globalThis.fetch=async()=>response({order:value});
   await act(async()=>root.render(createElement(AdminOrderChainView,{...chainProps(`source-detail-${status}`),objectOnly:true,initialOrderId:value.id})));
   await until(()=>node.textContent.includes('关键费用'));
-  assert.match(node.textContent,/当前账号资料（迁入时记录，与账号页一致）/);assert.match(node.textContent,/QQ账密/);assert.ok(node.textContent.includes(total));
+  assert.match(node.textContent,/当前账号资料（迁入时记录）/);assert.match(node.textContent,/QQ账密/);assert.ok(node.textContent.includes(total));
   assert.equal(node.textContent.includes('本单冻结账号摘要'),false);
 });
 

@@ -8,7 +8,7 @@ import { projectPublicAttributeDisplay } from "../supply/listing-query";
 import { frozenResourceLines } from "./frozen-listing-read";
 import { conflict, invalid, notFound } from "../supply/supply-util";
 import { escapeLike } from "../supply/catalog";
-import { legacyContinuationReady, legacyMoneyCents, legacyOrderReadState, LEGACY_CONTINUATION_COMPLETED_AT_SQL, LEGACY_ORDER_STATUS_SQL } from "./legacy-order-read";
+import { legacyContinuationReady, legacyEpochTimestamp, legacyMoneyCents, legacyOrderReadState, LEGACY_CONTINUATION_COMPLETED_AT_SQL, LEGACY_ORDER_STATUS_SQL } from "./legacy-order-read";
 import { formatDecimalExact, parseNonNegativeDecimal } from "../supply/decimal";
 import { settlementConfirmationReady, type SettlementConfirmationFacts } from "./settlement";
 import { readDirectoryUserSummaries, type DirectoryUserSummary } from "../auth/user-directory-summary";
@@ -88,6 +88,9 @@ export function orderReadKeyRelation(continuationReady: boolean, restrict?: Orde
  return orderReadSql(continuationReady, NATIVE_HEAD + "," + NATIVE_FILTER, LEGACY_HEAD + "," + LEGACY_ORDER_STATUS_SQL + "," + LEGACY_FILTER,restrict);
 }
 function money(value:unknown){return typeof value==='string'?centsToYuan(value):null;}
+function legacyDueTime(value:unknown):string|null {
+ try{return legacyEpochTimestamp(typeof value==='number'&&Number.isSafeInteger(value)?String(value):value);}catch{return null;}
+}
 type PrepaymentBreakdown = {
  basis:'NATIVE_FROZEN_ORDER_QUOTE'|'LEGACY_ORIGINAL_ORDER';completeness:'COMPLETE'|'PARTIAL'|'UNKNOWN';
  haffRental:ReturnType<typeof centsToYuan>|null;materialsPrepay:ReturnType<typeof centsToYuan>|null;
@@ -232,7 +235,7 @@ export function projectAdminReadOrder(origin:string,r:Record<string,any>,viewer:
  return {id:r.id,displayNo:r.original_order_no,status,title:titles.title,accountTitle:titles.accountTitle,accountId:r.account_id,accountDisplayNo:r.account_no??null,legacyAccountNo:r.legacy_account_no??null,gameId:r.game_id,versionId:null,releaseId:null,contentHash:null,revision:'1',termOptionCode:null,termSeconds:null,
   amounts:{rental:goods!==null&&items!==null?centsToYuan(BigInt(goods)+BigInt(items)):null,deposit:money(r.deposit_amount_cents),totalDue:money(r.due_amount_cents),currency:'CNY'},
   haffRatio:LEGACY_HAFF_RATIO,prepaymentBreakdown:legacyPrepaymentBreakdown(goodsRead,itemsRead),prepaymentReconciliation:legacyReconciliation(goodsRead,itemsRead,r.deposit_amount_cents,r.due_amount_cents),legacyResources:resources,
-  createdAt:r.source_created_at,paidAt:r.source_paid_at,cancelledAt:r.source_cancelled_at,legacyDueAt:(()=>{const v=raw.tenancy_deadline;if(v===null||v===undefined||v==="")return null;const n=Number(v);if(!Number.isInteger(n)||n<=0||n>253402300799)return null;try{return new Date(n*1000).toISOString();}catch{return null;}})(),completedAt:r.source_completed_at,holdUntil:null,expiredAwaitingCancel:false,paymentOpen:false,cancelOpen:false,
+  createdAt:r.source_created_at,paidAt:r.source_paid_at,cancelledAt:r.source_cancelled_at,legacyDueAt:legacyDueTime(raw.tenancy_deadline),completedAt:r.source_completed_at,holdUntil:null,expiredAwaitingCancel:false,paymentOpen:false,cancelOpen:false,
   ownerUserId:r.owner_user_id,renterUserId:r.renter_user_id,ownerName:r.owner_name,renterName:r.renter_name,ownerBusinessNo:r.legacy_owner_no,renterBusinessNo:r.legacy_renter_no,
   payment:{state:paid?'RECORDED_PAID':unpaid?'RECORDED_UNPAID':'UNKNOWN',recordedAt:r.source_paid_at,recordedAmount:paid?money(r.recorded_paid_amount_cents):null},
   source:{origin:'LEGACY',ruleOrigin:'LEGACY_ORDER',originalStatus:r.source_order_status,statusLabel:state.statusLabel,originalPayStatus:r.source_pay_status,orderSource:legacyOrderSource(raw.order_source)},

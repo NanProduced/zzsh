@@ -213,6 +213,7 @@ export function financeScopedVersionSql(ready: FinanceVersionReady, scope: Finan
   let clause: Record<string, string> | null = null;
   if (kind === "ORDER" && ready.native_orders) clause = {
     user: orderUsers, ledger: orderLedger, observation: none, wallet_revision: none, wallet_coverage: none, opening: none,
+    withdrawal_link_revision: none, withdrawal_link_evidence: none,
     root: `id IN (SELECT e.economic_root_id FROM zzsh_order.finance_event e WHERE e.id IN (${orderEvents}))${ready.native_distribution ? " OR id IN (SELECT economic_root_id FROM zzsh_order.rental_referral_earning WHERE order_id=$1)" : ""}${abnormalRootPart}`,
     event: `id IN (${orderEvents})${ready.native_distribution ? " OR economic_root_id IN (SELECT economic_root_id FROM zzsh_order.rental_referral_earning WHERE order_id=$1)" : ""}${abnormalEventPart}`,
     posting: "order_id=$1", native_order: "id=$1", legacy_order: "id=$1", earning: "order_id=$1", basis: "order_id=$1",

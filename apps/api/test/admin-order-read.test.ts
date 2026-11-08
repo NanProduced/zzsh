@@ -77,6 +77,12 @@ test('the narrow key relation keeps every filter column and drops only the recor
  }
 });
 const record={id:"legacy-1",original_order_no:"OLD-1",source_order_status:5,source_pay_status:1,due_amount_cents:"6600",recorded_paid_amount_cents:"6600",deposit_amount_cents:"0",source_snapshot:{goods_money:"36.00",expend_pay_money:"0.00",return_order_money:null},source_created_at:null,source_paid_at:null,source_cancelled_at:null,source_completed_at:null,owner_name:"Owner",renter_name:"Renter",owner_user_id:"owner",renter_user_id:"renter",account_id:"account",game_id:"game",legacy_account_no:"A1"};
+test('legacy deadline keeps valid seconds and isolates malformed source values',()=>{
+ const project=(value:unknown)=>projectAdminReadOrder('LEGACY',{...record,source_snapshot:{...record.source_snapshot,tenancy_deadline:value}},viewer).legacyDueAt;
+ assert.equal(project('1794899049'),'2026-11-17T07:04:09.000Z');
+ assert.equal(project(1794899049),'2026-11-17T07:04:09.000Z');
+ for(const value of [null,undefined,'','0','-1','1.0','1e3','Infinity','253402300800',{},true])assert.equal(project(value),null,String(value));
+});
 test('order source uses the old admin ClientEnum, keeps code 1 as website and never guesses unknown terminals',()=>{
  assert.deepEqual(legacyOrderSource(1),{code:'1',label:'网站',state:'KNOWN'});
  assert.deepEqual(legacyOrderSource('2'),{code:'2',label:'微信公众号',state:'KNOWN'});

@@ -8,7 +8,8 @@
 .oc-design .oc-refund-summary{margin-top:8px}
 .oc-design .oc-overview-grid{display:grid;grid-template-columns:minmax(0,1.1fr) minmax(0,1fr);align-items:start;gap:16px;margin-bottom:18px}
 .oc-design .oc-overview-grid>.oc-section{margin:0}
-.oc-design .oc-party-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+.oc-design .oc-party-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+.oc-design .oc-party-grid .oc-related-person:first-child{grid-column:1 / -1}
 .oc-design .oc-party-grid .oc-related-person{min-width:0;padding:0;border:0;overflow-wrap:anywhere}
 .oc-design .oc-party-grid .oc-related-person>small{margin-bottom:5px}
 .oc-design .oc-overview-grid .oc-fact-note{margin:12px 0 0}
@@ -112,8 +113,13 @@
 .oc-design .oc-lifecycle .oc-stage-line{left:36px;top:15px;width:18px}
 .oc-design .oc-lifecycle .oc-stage-name{font-size:12px;color:var(--foreground)}
 .oc-design .oc-lifecycle .oc-stages .active .oc-stage-node{color:#fcd34d;border-color:#d9770670;background:#78350f22}
+.oc-design .oc-lifecycle .oc-stages ol{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}
+.oc-design .oc-lifecycle .oc-stages li{align-items:flex-start;min-width:0}
+.oc-design .oc-lifecycle .oc-stage-trigger{align-items:flex-start;text-align:left}
+.oc-design .oc-lifecycle .oc-stage-time{font-size:12px;line-height:1.5;color:var(--muted-foreground)}
+.oc-design .oc-next-step{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;font-size:12px;line-height:1.6;color:var(--foreground);margin:12px 0 0}
 [data-theme=light] .oc-design .oc-lifecycle .oc-stages .active .oc-stage-node{color:#92400e;background:#fef3c755}
-@media(max-width:760px){.oc-design .oc-lifecycle .oc-stages ol{gap:18px}.oc-design .oc-lifecycle .oc-stage-line{display:none}}
+@media(max-width:760px){.oc-design .oc-lifecycle .oc-stages ol{grid-template-columns:repeat(2,minmax(0,1fr));gap:18px}.oc-design .oc-lifecycle .oc-stage-line{display:none}}
 @media(max-width:1100px){.oc-design .oc-axes{grid-template-columns:repeat(2,minmax(0,1fr))}}
 @media(max-width:760px){.oc-design .oc-axes{grid-template-columns:minmax(0,1fr)}}
 /* 主区生命周期：四节点横向排列，节点字段在节点下方 */

@@ -44,7 +44,8 @@ export type SettlementReadView = {
   currentRequest?: { kind?: string; id?: string; versionNo?: number; status?: string } | null;
   settlement?: SettlementVersionView | null;
   openings?: Array<{ id?: string; versionNo?: number; status?: string; confirmedAt?: string | null; createdAt?: string; lines?: Array<{ itemId?: string; quantity?: string; unit?: string; pricingKind?: string }>; acks?: Array<{ party?: string; source?: string; createdAt?: string }> }>;
-  posting?: { id?: string; versionHash?: string; early?: boolean; postedAt?: string; refundDueAt?: string | null; amounts?: Record<string, SettlementAmount> } | null;
+  posting?: { id?: string; settlementVersionId?: string; versionHash?: string; early?: boolean; postedAt?: string; refundDueAt?: string | null; amounts?: Record<string, SettlementAmount> } | null;
+  versions?: SettlementVersionView[];
   amounts?: Record<string, SettlementAmount>;
   consumed?: { haff?: unknown; items?: Array<{ itemId?: string; consumed?: unknown; remaining?: unknown }> };
   versionHash?: string;

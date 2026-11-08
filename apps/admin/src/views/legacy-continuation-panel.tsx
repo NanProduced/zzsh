@@ -32,7 +32,7 @@ const haffM = (quantity: string | null | undefined) => {
   return rest === 0n ? `${whole}M` : `${whole}.${rest.toString().padStart(6, "0").replace(/0+$/, "")}M`;
 };
 const materialUnit = (unit: string | null | undefined) => unit === "ROUND" ? "发" : unit === "PIECE" ? "件" : unit === "DAY" ? "天" : "";
-export function LegacyAdminContinuationPanel({ snapshot, orderId, frozenAccount, refreshNonce = 0 }: { snapshot: Snapshot; orderId: string; frozenAccount?: LegacyResourceSnapshot | null; refreshNonce?: number }) {
+export function LegacyAdminContinuationPanel({ snapshot, orderId, frozenAccount, refreshNonce = 0, onViewChange }: { snapshot: Snapshot; orderId: string; frozenAccount?: LegacyResourceSnapshot | null; refreshNonce?: number; onViewChange?: (view: LegacyAdminView | null) => void }) {
   const subject = legacyAdminSubject(snapshot.adminUserId, orderId), scope = subject + "|" + snapshot.session.id + "|" + snapshot.permissions.slice().sort().join(",") + "|" + snapshot.security.isBoss;
   const live = useRef({ scope, ticket: 0 }); if (live.current.scope !== scope) live.current = { scope, ticket: live.current.ticket + 1 };
   const [view, setView] = useState<Scoped<LegacyAdminView | null>>({ scope, value: null }), [error, setError] = useState<Scoped<string>>({ scope, value: "" });
@@ -46,6 +46,8 @@ export function LegacyAdminContinuationPanel({ snapshot, orderId, frozenAccount,
   const [proposeOpen, setProposeOpen] = useState(false);
   // 详情页只读：结算表单收进弹窗，页面本身不放输入框。
   const current = () => live.current.scope === scope, data = view.scope === scope ? view.value : null, p = pending.scope === scope ? pending.value : { state: "NONE" as const, intent: null }, loading = busy.scope === scope && busy.value;
+  const reportView = useRef(onViewChange); reportView.current = onViewChange;
+  useEffect(() => { reportView.current?.(data); }, [scope, data]);
   const form = proposalForm.scope === scope ? proposalForm.value : { onBehalf: "" as const, quantities: emptyQuantities() }, preview = proposal.scope === scope ? proposal.value : null;
   const canOperate = snapshot.security.isBoss || snapshot.permissions.includes("order.legacy.continue"), canCredit=canOperate && (snapshot.security.isBoss || snapshot.permissions.includes("order.settlement.write")), canCommissionCredit=canCredit && (snapshot.security.isBoss || snapshot.permissions.includes("finance.document.read")), locked = loading || p.state !== "NONE";
   useEffect(() => {

@@ -5,6 +5,7 @@ import { OrderChannelEvidence } from './admin-channel-evidence-panel';
 import type { AdminOrderPaymentSummary as PaymentSummary } from '../api';
 import { SupplyListingReviewView } from "./supply-listing-review-view";
 import { accountNumberLabel, formatFundingCents, formatTermDays, haffRateText, quantityText, unitText } from "./supply-review/model";
+import { formatExactYuan } from "@zzsh/ui/display-money";
 import { useCallback,useEffect,useLayoutEffect,useRef,useState } from "react";
 import { ArrowLeft,ArrowUpRight,CalendarDays,CircleAlert,CreditCard,FileText,Flag,KeyRound,X } from "lucide-react";
 import { ListPagination, ListToolbar, ListToolbarSearch, ListToolbarEnumSelect, ListToolbarApplied } from "@/components/admin-list";
@@ -18,6 +19,9 @@ import { BEIJING_TIME_ZONE } from "../workspace/beijing-time";
 import { AdminOrderSettlementEvidence, type OrderSettlementReadState } from './admin-order-settlement-evidence';
 import { defaultFinanceFilters, financeRead, type FinanceResponse, type OrderSettlementEvidence } from './admin-finance-api';
 import { LegacyAdminContinuationPanel } from "./legacy-continuation-panel";
+import type { LegacyAdminView } from "../lib/legacy-continuation-client";
+import type { SettlementReadView } from "../lib/order-fulfillment-client";
+import { orderUpperResources } from "./admin-order-upper-resources";
 import { OrderFulfillmentSection, SupportUnpaidCancelCard } from "./im-support-fulfillment";
 import { AdminCollectionQueryBox, AdminNativeRefundPanel, normalRefundBasis } from "./admin-joinpay-ops-panel";
 import { AdminPrestartTerminationPanel } from "./admin-prestart-termination-panel";
@@ -63,7 +67,7 @@ type FrozenAccount={source:"ORDER_VERSION"|"ACCOUNT_PUBLIC_VERSION"|"LEGACY_ACCO
 type HaffRatio={source:string;state:"KNOWN"|"UNKNOWN"|"NOT_RECORDED";wanPerYuan:string|null;customerTier:string|null;referenceOnly?:boolean};
 type CapturedAccountView={source:string;sourceAccountBaseRatioWanPerYuan?:string|null;sourceAccountFullPayoutSelected?:boolean|null};
 type OrderSource={code:string|null;label:string|null;state:"KNOWN"|"UNKNOWN"|"NOT_RECORDED"};
-type Order={fundsResolution?:{status:"REVIEW_REQUIRED";code:"HISTORICAL_MANUAL_CLOSE";sourceLabel:string};haffRatio?:HaffRatio|null;accountView?:CapturedAccountView|null;paymentProvenance?:{source:"SIMULATED"|"JOINPAY"|"UNKNOWN";channelArrival:"UNKNOWN"}|null;id:string;displayNo:string;status:string;title:string|null;accountTitle?:{source?:string;title?:string|null;neutralSummary?:string|null}|null;accountId:string;accountDisplayNo?:string|null;gameId:string;ownerUserId:string;renterUserId:string;ownerName:string;renterName:string;ownerBusinessNo?:string|null;renterBusinessNo?:string|null;createdAt:string|null;paidAt:string|null;cancelledAt?:string|null;completedAt?:string|null;expiredAwaitingCancel?:boolean;payment:Payment;amounts:{totalDue:AdminOrderMoney|null;rental:AdminOrderMoney|null;deposit:AdminOrderMoney|null};fulfillmentAssignment?:AdminOrder["fulfillmentAssignment"];source:{origin:"NATIVE"|"LEGACY";statusLabel?:string;orderSource?:OrderSource};legacyAmounts?:{refund:AdminOrderMoney|null;refundChannelState:string};prepaymentBreakdown?:PrepaymentBreakdown|null;progress?:OrderProgress|null;ownerSummary?:PartySummary|null;renterSummary?:PartySummary|null;frozenAccount?:(FrozenAccount&{materialsTotal?:number;materialsTruncated?:boolean})|null;prepaymentReconciliation?:PrepaymentReconciliation|null;legacyResources?:LegacyResources|null};
+type Order={fundsResolution?:{status:"REVIEW_REQUIRED";code:"HISTORICAL_MANUAL_CLOSE";sourceLabel:string};haffRatio?:HaffRatio|null;accountView?:CapturedAccountView|null;paymentProvenance?:{source:"SIMULATED"|"JOINPAY"|"UNKNOWN";channelArrival:"UNKNOWN"}|null;id:string;displayNo:string;status:string;title:string|null;accountTitle?:{source?:string;title?:string|null;neutralSummary?:string|null}|null;accountId:string;accountDisplayNo?:string|null;gameId:string;ownerUserId:string;renterUserId:string;ownerName:string;renterName:string;ownerBusinessNo?:string|null;renterBusinessNo?:string|null;createdAt:string|null;paidAt:string|null;cancelledAt?:string|null;completedAt?:string|null;legacyDueAt?:string|null;expiredAwaitingCancel?:boolean;payment:Payment;amounts:{totalDue:AdminOrderMoney|null;rental:AdminOrderMoney|null;deposit:AdminOrderMoney|null};fulfillmentAssignment?:AdminOrder["fulfillmentAssignment"];source:{origin:"NATIVE"|"LEGACY";statusLabel?:string;originalStatus?:string;originalPayStatus?:string;orderSource?:OrderSource};legacyAmounts?:{refund:AdminOrderMoney|null;refundChannelState:string};prepaymentBreakdown?:PrepaymentBreakdown|null;progress?:OrderProgress|null;ownerSummary?:PartySummary|null;renterSummary?:PartySummary|null;frozenAccount?:(FrozenAccount&{materialsTotal?:number;materialsTruncated?:boolean})|null;prepaymentReconciliation?:PrepaymentReconciliation|null;legacyResources?:LegacyResources|null};
 // 预付核对：旧单算术相等也不等于闭合，只有原生冻结报价闭合才算 RECONCILED
 type PrepaymentReconciliation={state:"RECONCILED"|"MISMATCH"|"NOT_VERIFIED";basis:string;arithmetic:"MATCH"|"MISMATCH"|"UNKNOWN";closed:boolean};
 // 旧单原单资源记录：保留零值项，单位缺失时不推定
@@ -95,7 +99,7 @@ const ratioText=(o:Order)=>{
  return captured?`迁入账号 ${haffRateText(captured)}`:"比例未知";
 };
 const tierText=(o:Order)=>o.haffRatio?.customerTier?TIER_LABELS[o.haffRatio.customerTier]??"档位未记录":null;
-const money=(v:AdminOrderMoney|null|undefined)=>v?`¥${v.amount}`:"未知",time=(v:string|null|undefined)=>v&&Number.isFinite(Date.parse(v))?new Intl.DateTimeFormat("zh-CN",{timeZone:BEIJING_TIME_ZONE,dateStyle:"medium",timeStyle:"short"}).format(new Date(v)):"时间未提供";
+const money=(v:AdminOrderMoney|null|undefined)=>{const amount=formatExactYuan(v?.amount);return amount===null?"未知":`¥${amount}`;},time=(v:string|null|undefined)=>v&&Number.isFinite(Date.parse(v))?new Intl.DateTimeFormat("zh-CN",{timeZone:BEIJING_TIME_ZONE,dateStyle:"medium",timeStyle:"short"}).format(new Date(v)):"时间未提供";
 const estimatedNativeEnd=(o:Order)=>{
  if(o.source.origin!=="NATIVE"||o.progress?.opening.state!=="CONFIRMED"||!o.progress.opening.confirmedAtUtc)return null;
  const seconds=Number((o as any).termSeconds),start=Date.parse(o.progress.opening.confirmedAtUtc),end=start+seconds*1000;
@@ -148,7 +152,7 @@ const reconciliationNote=(o:Order)=>{
 };
 const nextStepText=(o:Order)=>{
  if(o.fundsResolution?.code==="HISTORICAL_MANUAL_CLOSE")return "原人工关闭，资金处理未确认；核对原付款、结算与退款责任，不能当作资金完单";
- if(o.source.origin==="LEGACY")return o.source.statusLabel?"按原单阶段继续办理；需要结单时在「履约与处理」发起结算":"旧来源阶段未记录；不套原生开租节点";
+ if(o.source.origin==="LEGACY")return o.status==="COMPLETED"?"旧站记录已完成；退款到账需单独核对":o.status==="CANCELLED"?"旧站记录已取消；退款情况需单独核对":o.source.statusLabel?"按原单阶段继续办理，可在下方履约区处理":"旧来源阶段未记录，请核对原订单";
  if(o.status==="CANCELLED")return o.payment.state==="RECORDED_PAID"?"租赁结算不适用；退款与迟到付款独立核对":"订单已取消；租赁结算不适用；迟到付款/退款核对独立";
  if(o.status==="PENDING_PAYMENT")return o.expiredAwaitingCancel?"占用到期，待系统取消":"等待租客支付；未支付前不开始履约";
  const p=o.progress;
@@ -292,6 +296,7 @@ function Detail({snapshot,id,onOpenPath,refreshNonce,financeOrigin,financeReturn
  const openPath=useRef(onOpenPath);openPath.current=(path,title)=>{const query=new URLSearchParams();if(initialSection==='finance')query.set('section','finance');if(financeOrigin)query.set('financeOrigin',financeOrigin);const fallback=sanitizeFinanceReturn(financeReturn);if(fallback)query.set('financeReturn',fallback);onOpenPath(path+(query.size?`?${query}`:''),title);};
  const [error,setError]=useState<string>(),[nonce,setNonce]=useState(0);
  const [detailTab,setDetailTab]=useState(initialSection==='finance'?'finance':'fulfillment'),[nativeAttention,setNativeAttention]=useState(false),[originalAttention,setOriginalAttention]=useState(false);
+ const detailSection=useRef<HTMLDivElement>(null);
  const orderReadKey=JSON.stringify([id,keyOf(snapshot),refreshNonce,nonce]);
  const [loadedOrder,setLoadedOrder]=useState<{key:string;value:Order}>();
  const order=loadedOrder?.key===orderReadKey?loadedOrder.value:undefined;
@@ -301,19 +306,21 @@ function Detail({snapshot,id,onOpenPath,refreshNonce,financeOrigin,financeReturn
  const [teamSubmitting,setTeamSubmitting]=useState(false),[teamMessage,setTeamMessage]=useState("");
   // 建群不可撤销：先确认再执行，不做一点即生效
   const [teamArm,setTeamArm]=useState(false);
-  // 结算实际消耗（仅原生单）：放在所有提前 return 之前，避免 hooks 顺序错乱
-  const [consumed,setConsumed]=useState<{haff:string|null;items:Record<string,string>;fee:string|null;feePayer:string|null;basis?:boolean;legacy?:{sale:string|null;refund:string|null;detain:string|null}}|null>(null);
-  useEffect(()=>{if(!order)return;const c=new AbortController();
-   const url=order.source.origin==="LEGACY"?`/orders/legacy/${encodeURIComponent(order.id)}/continuation`:`/orders/${encodeURIComponent(order.id)}/settlement`;
-   void adminRequest<any>(url,undefined,"GET",{},c.signal).then((d:any)=>{if(c.signal.aborted)return;
-     if(order.source.origin==="LEGACY"){const q=d?.continuation?.quantities??{};const a=d?.continuation?.amounts??{};const hasBasis=a?.saleEarnings!=null||a?.returnOrderMoney!=null;const items:Record<string,string>={};if(hasBasis)for(const k of ["awm","barrett","bullet","armor","helmet","coffee","card"])if(q[k]!=null&&q[k]!=="")items[k]=String(q[k]);setConsumed({haff:hasBasis&&q.expendHaff!=null&&q.expendHaff!==""?String(q.expendHaff):null,items,fee:null,feePayer:null,basis:hasBasis,legacy:{sale:a?.saleEarnings?.yuan??null,refund:a?.returnOrderMoney?.yuan??null,detain:a?.detainMoney?.yuan??null}});return;}
-     const v=d?.versions?.[0];const lines:any[]=(v?.inputSnapshot?.lines??[]);const items:Record<string,string>={};for(const l of lines)if(l?.itemId&&l.consumedQuantity!=null)items[String(l.itemId)]=String(l.consumedQuantity);
-     setConsumed({haff:lines.find((l:any)=>String(l?.itemId??"").includes("e8c36a89"))?.consumedQuantity??null,items,fee:v?.amounts?.feeAmount??null,feePayer:v?.amounts?.feePayer??null});})
-     .catch(()=>{if(!c.signal.aborted)setConsumed(null);});
-   return()=>c.abort();},[order?.id,order?.source.origin]);
+ const [settlement,setSettlement]=useState<{key:string;value:SettlementReadView|null}>();
+ const [legacyRead,setLegacyRead]=useState<{key:string;value:LegacyAdminView|null}>();
+ const onLegacyRead=useCallback((value:LegacyAdminView|null)=>setLegacyRead({key:orderReadKey,value}),[orderReadKey]);
+ useEffect(()=>{
+  if(!order||order.source.origin!=="NATIVE"||order.status!=="COMPLETED"&&order.progress?.ending.state!=="POSTED")return;
+  const controller=new AbortController();setSettlement({key:orderReadKey,value:null});
+  void adminRequest<SettlementReadView>(`/orders/${encodeURIComponent(order.id)}/settlement`,undefined,"GET",{},controller.signal)
+   .then(value=>{if(!controller.signal.aborted)setSettlement({key:orderReadKey,value:value.orderId===order.id?value:null});})
+   .catch(()=>{if(!controller.signal.aborted)setSettlement({key:orderReadKey,value:null});});
+  return()=>controller.abort();
+ },[order?.id,order?.source.origin,order?.status,order?.progress?.ending.state,orderReadKey]);
  const teamRequest=useRef<{orderId:string;key:string}|null>(null);
  const currentTeamOrder=useRef(id);currentTeamOrder.current=id;
- const [funds,setFunds]=useState<{state:OrderSettlementReadState;evidence?:OrderSettlementEvidence;legacyObservations?:FinanceResponse['legacyOrderObservations'];requestId?:string}>({state:'loading'});
+ const [fundsRead,setFunds]=useState<{key:string;state:OrderSettlementReadState;evidence?:OrderSettlementEvidence;legacyObservations?:FinanceResponse['legacyOrderObservations'];requestId?:string}>({key:orderReadKey,state:'loading'});
+ const funds:typeof fundsRead=fundsRead.key===orderReadKey?fundsRead:{key:orderReadKey,state:'loading'};
  const [team,setTeam]=useState<{state:string;data?:{teamState:string|null;canRead:boolean;name?:string}}>({state:"loading"});
  useEffect(()=>{
   const controller=new AbortController();setLoadedOrder(undefined);setPaymentSummary(undefined);setRefundSummary(undefined);setError(undefined);
@@ -321,18 +328,18 @@ function Detail({snapshot,id,onOpenPath,refreshNonce,financeOrigin,financeReturn
   }).catch(e=>{if(!controller.signal.aborted)setError(friendlyError(e));});return()=>controller.abort();
  },[id,keyOf(snapshot),refreshNonce,nonce]);
  useEffect(()=>{
-  const controller=new AbortController();setFunds({state:'loading'});
+  const controller=new AbortController();setFunds({key:orderReadKey,state:'loading'});
   // 订单页统一以 finance.read 作为资金可读权限；后端单据接口若仍拒绝(403)则显示无权
-  if(!snapshot.permissions.includes('finance.read')){setFunds({state:'forbidden'});return()=>controller.abort();}
+  if(!snapshot.permissions.includes('finance.read')){setFunds({key:orderReadKey,state:'forbidden'});return()=>controller.abort();}
   if(!order)return()=>controller.abort();
   const ref=(order.source.origin==='LEGACY'?'LEGACY_ORDER:':'ORDER:')+order.id;
   void financeRead(`documents/${encodeURIComponent(ref)}`,defaultFinanceFilters(false),controller.signal).then(data=>{
    if(controller.signal.aborted)return;
    if(data.document?.ref!==ref||data.orderSettlement&&(data.orderSettlement.documentRef!==ref||data.orderSettlement.schema!=='admin-order-settlement-evidence.v1'))throw new Error('ORDER_FINANCE_REFERENCE_MISMATCH');
-   setFunds({state:'ready',evidence:data.orderSettlement,legacyObservations:data.legacyOrderObservations});
-  }).catch(e=>{if(!controller.signal.aborted)setFunds({state:e instanceof AdminApiError?e.status===403?'forbidden':e.status===404?'missing':e.status===409?'conflict':'unavailable':'unavailable',requestId:e instanceof AdminApiError?e.requestId:undefined});});
+   setFunds({key:orderReadKey,state:'ready',evidence:data.orderSettlement,legacyObservations:data.legacyOrderObservations});
+  }).catch(e=>{if(!controller.signal.aborted)setFunds({key:orderReadKey,state:e instanceof AdminApiError?e.status===403?'forbidden':e.status===404?'missing':e.status===409?'conflict':'unavailable':'unavailable',requestId:e instanceof AdminApiError?e.requestId:undefined});});
   return()=>controller.abort();
- },[order?.id,order?.source.origin,id,keyOf(snapshot),refreshNonce,fundsNonce]);
+ },[order?.id,order?.source.origin,id,keyOf(snapshot),refreshNonce,fundsNonce,orderReadKey]);
  useEffect(()=>{
   const controller=new AbortController();setTeam({state:"loading"});
   if(!order)return()=>controller.abort();
@@ -363,6 +370,11 @@ function Detail({snapshot,id,onOpenPath,refreshNonce,financeOrigin,financeReturn
   return `/users/${encodeURIComponent(userId)}?${query}`;
  }
  const o=order,canUser=snapshot.security.isBoss||snapshot.permissions.includes("user.directory.read"),canResource=snapshot.security.isBoss||snapshot.permissions.includes("supply.rental_account.read")||snapshot.permissions.includes("supply.review.read");
+ const legacy=legacyRead?.key===orderReadKey?legacyRead.value:null;
+ const resources=orderUpperResources({origin:o.source.origin,frozen:o.frozenAccount,settlement:settlement?.key===orderReadKey?settlement.value:null,legacy,original:o.legacyResources,originalCompleted:String(o.source.originalStatus)==="4"&&String(o.source.originalPayStatus)==="1"&&Number.isFinite(Date.parse(o.completedAt??""))});
+ const financeMoney=(value:{knowledge:string;cents:string|null}|null|undefined)=>value?.knowledge==="KNOWN"&&value.cents!==null?formatFundingCents(value.cents):"—";
+ const originalAmounts=funds.state==='ready'?funds.evidence?.business?.legacyCompletedAmounts:null;
+ const compensation=funds.state==='ready'&&funds.evidence?.posting.state==='POSTED'?funds.evidence.platformComponents?.filter(item=>item.code==='PLATFORM_COMPENSATION_FEE'):undefined;
  async function createLegacyTeam(){
   if(teamSubmitting)return;
   if(teamRequest.current?.orderId!==o.id)teamRequest.current={orderId:o.id,key:crypto.randomUUID()};
@@ -375,42 +387,39 @@ function Detail({snapshot,id,onOpenPath,refreshNonce,financeOrigin,financeReturn
    const partySection=<section className="oc-section oc-related"><h2>本单账号和双方</h2><div className="oc-party-grid">
   <div className="oc-related-person"><small>查看当前账号</small><EntityPreviewTrigger touchLabel={`预览账号 ${accountNumberLabel(o.accountDisplayNo)}`} trigger={canResource?<Link onClick={openAccount}>{accountNumberLabel(o.accountDisplayNo)}</Link>:<span>关联资源需要独立读取权限</span>} content={<AccountPreviewCard displayNo={o.accountDisplayNo} legacy={legacyAccount(o)} accountId={o.accountId} title={accountBasic(o)||null} priceTitle={isLegacy(o)?"原单金额":"本单成交价（下单冻结）"} priceRows={[["哈夫币数量",frozenHaff(o.frozenAccount)??"未提供"],["哈夫币比例",ratioText(o)],[isLegacy(o)?"商品金额（原）":"哈夫币租金",o.prepaymentBreakdown?.haffRental?money(o.prepaymentBreakdown.haffRental):"分项未记录"],[isLegacy(o)?"额外物品金额（原）":"物品资源费",o.prepaymentBreakdown?.materialsPrepay?money(o.prepaymentBreakdown.materialsPrepay):"分项未记录"],[isLegacy(o)?"押金":"本单租客押金",money(o.amounts.deposit)]]} haffText={null} materialsText={frozenMaterials(o.frozenAccount)} termText={frozenTerm(o.frozenAccount)} loginMethodText={o.frozenAccount?.loginMethodText??null} safeBoxText={o.frozenAccount?.safeBoxText??null} rankText={o.frozenAccount?.gradingText??null} sourceText={o.frozenAccount?o.frozenAccount.source==="ORDER_VERSION"?"本单冻结版本":frozenSourceText(o.frozenAccount):o.source.origin==="LEGACY"?"旧平台订单":"新平台订单"} canOpen={canResource} onOpen={openAccount} deniedReason="关联资源需要独立读取权限"/>}/></div>
   {(["renter","owner"] as const).map(role=>{const summary=role==="renter"?o.renterSummary:o.ownerSummary,name=role==="renter"?o.renterName:o.ownerName,userId=role==="renter"?o.renterUserId:o.ownerUserId;const openUser=()=>onOpenPath(relatedUserPath(userId),name);return <div className="oc-related-person" key={role}><small>{partyLabel(o,role)}{partyNumberText(role==="renter"?o.renterBusinessNo:o.ownerBusinessNo)?` · ${partyNumberText(role==="renter"?o.renterBusinessNo:o.ownerBusinessNo)}`:""}</small><EntityPreviewTrigger touchLabel={`预览${partyLabel(o,role)} ${name}`} trigger={canUser?<Link onClick={openUser}>{name}</Link>:<span>{name}</span>} content={<UserPreviewCard name={name} userId={userId} image={summary?.image} maskedPhone={summary?.maskedPhone} currentName={summary?.name} businessNo={role==="renter"?o.renterBusinessNo:o.ownerBusinessNo} membershipSummary={summary?.membershipSummary} creditSummary={summary?.creditSummary} riskFlag={summary?.riskFlag} canOpen={canUser} onOpen={openUser} deniedReason="无用户目录权限"/>}/></div>;})}
- </div>{o.frozenAccount?<div className="oc-res-wrap">{(()=>{const showActual=!isLegacy(o)||consumed?.basis===true;return <><table className="oc-res"><thead><tr><th>物品</th><th>预付</th>{showActual?<th>实际消耗</th>:<th>实际消耗</th>}</tr></thead><tbody>
-  <tr><td>哈夫币</td><td>{(()=>{const q=o.frozenAccount.haff?.quantity;if(!q||!/^\d+$/.test(q))return "未记录";const n=BigInt(q),w=n/1000000n,r=n%1000000n;return r===0n?`${w}M`:`${w}.${r.toString().padStart(6,"0").replace(/0+$/,"")}M`;})()}</td><td>{(()=>{const v=consumed?.haff;if(!v||!/^\d+$/.test(v))return "—";const n=BigInt(v),w=n/1000000n,r=n%1000000n;return r===0n?`${w}M`:`${w}.${r.toString().padStart(6,"0").replace(/0+$/,"")}M`;})()}</td></tr>
-  {o.frozenAccount.materials.map(item=>{const tok=/awm/.test(item.code)?"awm":/barrett/.test(item.code)?"barrett":(/level6/.test(item.code)&&/round|bullet/.test(item.code))?"bullet":/helmet/.test(item.code)?"helmet":/armor/.test(item.code)?"armor":/coffee/.test(item.code)?"coffee":/insurance|day/.test(item.code)?"card":(item.itemId??"");const used=consumed?.items[tok];const grouped=/level6/.test(item.code)&&/bullet/.test(item.code)&&item.unit==="ROUND";const fmt=(v:string|null|undefined)=>{if(v==null||v==="")return "—";if(!grouped)return `${v}${unitText(item.unit,item.code)}`;const n=Number(v);if(!Number.isFinite(n))return `${v}${unitText(item.unit,item.code)}`;return `${Math.floor(n/60)}组（${v}发）`;};return <tr key={item.code}><td>{item.name??"名称未记录"}</td><td>{fmt(item.quantity)}</td><td>{used!=null?fmt(used):"—"}</td></tr>;})}
-  </tbody></table>{isLegacy(o)&&consumed?.basis!==true?<p className="oc-fact-note">本单未记录结算实际消耗（无续办依据）。</p>:null}</>;})()}</div>:null}{isLegacy(o)&&o.accountView?.source==="LEGACY_ACCOUNT_SNAPSHOT"&&(o.accountView.sourceAccountBaseRatioWanPerYuan||typeof o.accountView.sourceAccountFullPayoutSelected==="boolean")?<p className="oc-fact-note">迁入时账号：{o.accountView.sourceAccountBaseRatioWanPerYuan?`比例 ${haffRateText(o.accountView.sourceAccountBaseRatioWanPerYuan)}`:""}{o.accountView.sourceAccountBaseRatioWanPerYuan&&typeof o.accountView.sourceAccountFullPayoutSelected==="boolean"?" · ":""}{typeof o.accountView.sourceAccountFullPayoutSelected==="boolean"?`包赔${o.accountView.sourceAccountFullPayoutSelected?"已选择":"未选择"}`:""}；不是本单冻结记录。</p>:null}<p className="oc-fact-note">{isLegacy(o)?"迁入时账号资料仅供参考，不代表下单时快照。":""}</p></section>;
+ </div>{o.frozenAccount?<p className="oc-fact-note">{o.frozenAccount.source==='ORDER_VERSION'?'本单冻结账号摘要':o.frozenAccount.source==='LEGACY_ACCOUNT_SNAPSHOT'?'当前账号资料（迁入时记录）':'账号资料（公开版本参考）'}</p>:null}{resources.rows.length?<div className="oc-res-wrap"><table className="oc-res"><thead><tr><th>物品</th><th>{resources.recordedLabel}</th><th>{resources.consumedLabel}</th></tr></thead><tbody>
+  {resources.rows.map(row=><tr key={row.key}><td>{row.name}</td><td>{row.recorded}</td><td>{row.consumed}</td></tr>)}
+  </tbody></table></div>:<p className="oc-fact-note">尚无可展示的物品资源记录。</p>}{isLegacy(o)&&o.accountView?.source==="LEGACY_ACCOUNT_SNAPSHOT"&&(o.accountView.sourceAccountBaseRatioWanPerYuan||typeof o.accountView.sourceAccountFullPayoutSelected==="boolean")?<p className="oc-fact-note">迁入时账号：{o.accountView.sourceAccountBaseRatioWanPerYuan?`比例 ${haffRateText(o.accountView.sourceAccountBaseRatioWanPerYuan)}`:""}{o.accountView.sourceAccountBaseRatioWanPerYuan&&typeof o.accountView.sourceAccountFullPayoutSelected==="boolean"?" · ":""}{typeof o.accountView.sourceAccountFullPayoutSelected==="boolean"?`包赔${o.accountView.sourceAccountFullPayoutSelected?"已选择":"未选择"}`:""}；不是本单冻结记录。</p>:null}{o.frozenAccount&&o.frozenAccount.source!=="ORDER_VERSION"?<p className="oc-fact-note">账号资料仅供参考，不代表下单时快照。</p>:null}</section>;
  const refundList=o.source.origin==='LEGACY'?null:refundSummary?(refundSummary.integration==="FORBIDDEN"?<p className="oc-fact-note">当前无权读取退款明细；不能据此认定没有退款。</p>:refundSummary.integration==="INTEGRATED"?<>{refundSummary.intents?.length||!refundSummary.abnormalResponsibilities?.length?(refundSummary.intents?.length?<ul className="oc-refund-intents space-y-1 text-sm">{refundSummary.intents.map(intent=><li key={intent.intentId}><div><span>{intent.refundOrderNo} · 申请 {formatFundingCents(intent.amount.cents)}</span><small className="ml-2 text-xs text-muted-foreground">{refundLocalStateText(intent.localState)}{intent.requiresReview?" · 需复核":""}{intent.budgetDisposition==="CONSUMED"?" · 预算已用":intent.budgetDisposition==="RELEASED"?" · 预算释放":" · 预算分配未记录"}</small></div><small className="ml-2 text-xs text-muted-foreground">覆盖：本笔本地退款意图；渠道到账未记录，不能升级为银行到账{intent.mayResubmit?" · 按原流程核对重提条件":" · 不重复提交"}</small></li>)}</ul>:<p className="oc-fact-note">已接入退款查询，当前没有本单退款记录；不能据此认定无需退款。</p>):null}<AbnormalRefundBlock summary={refundSummary}/><p className="oc-fact-note">退款责任来自结算依据，逐笔意图只证明本地范围；不把本地成功或受控状态当成渠道到账。</p></>:<p className="oc-fact-note">退款摘要不可用；不能据此认定没有退款或已到账。</p>):<p className="oc-fact-note">本次未读取退款摘要；退款核对独立于订单主体。</p>;
- return <div className="oc-design">{back}<div className="oc-heading"><div><div className="oc-title-line"><h1>{o.displayNo}</h1></div><p>{accountNumberLabel(o.accountDisplayNo)} · {o.frozenAccount?[frozenHaff(o.frozenAccount),ratioText(o),frozenTerm(o.frozenAccount),o.frozenAccount.loginMethodText].filter(Boolean).join(" · "):"账号资料未记录"}{(()=>{const q=(o as any).quote,av=(o as any).accountView;const mode=q?.rentalMode??av?.rentalMode;const modeLabel=mode==="custom"?"自定义比例":mode==="fast"?"极速比例":mode==="ordinary"?"普通比例":null;const payout=q?.fullPayoutSelected??av?.sourceAccountFullPayoutSelected??(av?.fullPayout==="SELECTED");const accountSource=o.source.origin==="LEGACY";return <>{modeLabel?<span className="oc-badge">{accountSource?"迁入账号配置：":""}{modeLabel}</span>:null}{payout?<span className="oc-badge oc-badge-accent">{accountSource?"迁入账号配置：":""}全额包赔</span>:null}</>})()}</p></div><span className="oc-scope">{o.source.origin==="LEGACY"?"旧平台订单":"新平台订单"}</span></div>
+ return <div className="oc-design">{back}<div className="oc-heading"><div><div className="oc-title-line"><h1>{o.displayNo}</h1><span className="oc-badge">{statusLabel[o.status]??"状态未记录"}</span></div><p>{accountNumberLabel(o.accountDisplayNo)} · {o.frozenAccount?[frozenHaff(o.frozenAccount),ratioText(o),frozenTerm(o.frozenAccount),o.frozenAccount.loginMethodText].filter(Boolean).join(" · "):"账号资料未记录"}{(()=>{const q=(o as any).quote,av=(o as any).accountView;const mode=q?.rentalMode??av?.rentalMode;const modeLabel=mode==="custom"?"自定义比例":mode==="fast"?"极速比例":mode==="ordinary"?"普通比例":null;const payout=q?.fullPayoutSelected??av?.sourceAccountFullPayoutSelected??(av?.fullPayout==="SELECTED");const accountSource=o.source.origin==="LEGACY";return <>{modeLabel?<span className="oc-badge">{accountSource?"迁入账号配置：":""}{modeLabel}</span>:null}{payout?<span className="oc-badge oc-badge-accent">{accountSource?"迁入账号配置：":""}全额包赔</span>:null}</>})()}</p></div><span className="oc-scope">{o.source.origin==="LEGACY"?"旧平台订单":"新平台订单"}</span></div>
   <section className="oc-lifecycle" aria-label="订单生命周期">
-    <div className="oc-lifecycle-head"><h2>订单生命周期</h2><span className="oc-fact-note">按原来源阶段推进；时间均为北京时间</span></div>
-    <ol className="oc-timeline">
-      <li data-state="done"><span className="oc-tl-node"><FileText size={14}/></span><strong>创建</strong><small>{time(o.createdAt)}</small></li>
-      <li data-state={o.payment.state==="RECORDED_PAID"?"done":"pending"}><span className="oc-tl-node"><CreditCard size={14}/></span><strong>支付</strong><small>{o.payment.state==="RECORDED_PAID"?(o.payment.recordedAt?time(o.payment.recordedAt):"时间未记录"):paymentLabel(o)}</small></li>
-      <li data-state={o.source.origin==="LEGACY"?(o.status==="COMPLETED"?"done":"active"):(o.progress?.opening.state==="CONFIRMED"?"done":"active")}><span className="oc-tl-node"><KeyRound size={14}/></span><strong>{o.source.origin==="LEGACY"?(o.source.statusLabel??"原阶段未记录"):(o.progress?.opening.state==="CONFIRMED"?"已开租":"待开租确认")}</strong><small>{o.source.origin==="LEGACY"?"原单记录为准":(o.progress?.opening.confirmedAtUtc?time(o.progress.opening.confirmedAtUtc):"等待租客与号主确认")}</small></li>
-      <li data-state={o.status==="COMPLETED"?"done":(o.progress?.ending.state==="POSTED"?"done":"none")}><span className="oc-tl-node"><Flag size={14}/></span><strong>{o.source.origin==="LEGACY"?"结单":"结算"}</strong><small>{(o.completedAt??o.progress?.ending.postedAtUtc)?time((o.completedAt??o.progress!.ending.postedAtUtc)!):"未结单"}</small></li>
-    </ol>
-    {estimatedNativeEnd(o)?<p className="oc-fact-note">预计到期 {time(estimatedNativeEnd(o))}</p>:null}
-    {isLegacy(o)&&(o as any).legacyDueAt?<p className="oc-fact-note">原单到期 {(o as any).legacyDueAt?time((o as any).legacyDueAt):"未记录"}（原单租期截止，非按付款时间推算）</p>:null}
+    <div className="oc-lifecycle-head"><h2>订单生命周期</h2><span className="oc-fact-note">按已记录事实展示 · 北京时间</span></div>
+    <Stages order={o} progress={o.progress} variant="detail" showTimes />
+    {estimatedNativeEnd(o)?<p className="oc-fact-note">{o.status==="COMPLETED"?"原约定到期":"预计到期"} {time(estimatedNativeEnd(o))}</p>:null}
+    {isLegacy(o)&&o.legacyDueAt?<p className="oc-fact-note">原单约定到期 {time(o.legacyDueAt)}</p>:null}
+    <div className="oc-next-step"><span>{nextStepText(o)}</span><Button size="sm" variant="secondary" onClick={()=>{setDetailTab('fulfillment');detailSection.current?.scrollIntoView({behavior:'smooth',block:'start'});}}>查看履约与处理</Button></div>
   </section>
  <div className="oc-detail-grid"><main className="oc-main-facts">
 <div className="oc-overview-grid">{partySection}
 <section className="oc-section"><h2>关键费用</h2><div className="oc-price-pair">
    <div data-side="renter"><small>租客付款记录</small><strong>{paidSlotText(o,snapshot.security.isBoss||snapshot.permissions.includes("finance.read"))}</strong><span>订单押金 {money(o.amounts.deposit)}</span></div>
-   {isLegacy(o)?null:<div data-side="owner"><small>号主全量预计收入（扣费前）</small><strong>{(o as any).quote?.ownerTotal?.amount?`¥${(o as any).quote.ownerTotal.amount}`:"未记录（本单无报价记录）"}</strong><span>{(o as any).quote?.platformFullProfit?.amount?`报价价差 ¥${(o as any).quote.platformFullProfit.amount}（非结算收益）`:"按下单时全量资源估算"}</span></div>}
+   {isLegacy(o)?null:<div data-side="owner"><small>号主全量预计收入（扣费前）</small><strong>{formatExactYuan((o as any).quote?.ownerTotal?.amount)===null?"未记录（本单无有效报价）":money((o as any).quote.ownerTotal)}</strong><span>{formatExactYuan((o as any).quote?.platformFullProfit?.amount)!==null?`报价价差 ${money((o as any).quote.platformFullProfit)}（非结算收益）`:"按下单时全量资源估算"}</span></div>}
    </div><div className="oc-money-list">
    <div><span>{isLegacy(o)?"商品金额 + 额外物品金额（原）":"原资源合计"}</span><strong>{money(o.amounts.rental)}</strong></div>
    <div><span>{isLegacy(o)?"商品金额（原）":"哈夫租金"}</span><strong>{slotMoney(o.prepaymentBreakdown?.haffRental)}</strong></div>
    <div><span>{isLegacy(o)?"额外物品金额（原）":"物资预付"}</span><strong>{slotMoney(o.prepaymentBreakdown?.materialsPrepay)}</strong></div>
    <div><span>订单押金</span><strong>{slotMoney(o.amounts.deposit)}</strong></div>
    <div><span>{o.status==="CANCELLED"?"原单合计（已取消）":"原单合计"}</span><strong>{money(o.amounts.totalDue)}</strong></div>
-  {detailTab !== 'finance' || !funds.evidence?.business ? <div><span>支付记录</span><strong>{paidSlotText(o,snapshot.security.isBoss||snapshot.permissions.includes("finance.read"))}</strong></div> : null}
-  {isLegacy(o)?(consumed?.legacy&&(consumed.legacy.sale!=null||consumed.legacy.refund!=null)?<><div><span>号主应结（原单口径）</span><strong>{consumed.legacy.sale?`¥${consumed.legacy.sale}`:"—"}</strong></div><div><span>租客应退（原单口径）</span><strong>{consumed.legacy.refund?`¥${consumed.legacy.refund}`:"—"}</strong></div><div><span>扣留金额</span><strong>{consumed.legacy.detain?`¥${consumed.legacy.detain}`:"—"}</strong></div></>:<p className="oc-fact-note">本单无续办结算依据，结算金额不可得。</p>):((funds.state==='ready'&&funds.evidence)?(()=>{const e:any=funds.evidence;const m=(v:any)=>v&&v.knowledge==='KNOWN'&&v.cents!=null?formatFundingCents(v.cents):"—";const any=m(e.ownerNet)!=="—"||m(e.refundPayable)!=="—"||m(e.refunded)!=="—"||m(e.platformContribution)!=="—";if(!any)return <p className="oc-fact-note">未取得结算依据，结算金额不可得。</p>;return <><div><span>号主结算净额</span><strong>{m(e.ownerNet)}</strong></div><div><span>租客应退</span><strong>{m(e.refundPayable)}</strong></div><div><span>退款出款</span><strong>{m(e.refunded)}</strong></div><div><span>平台收益（价差+包赔费）</span><strong>{m(e.platformContribution)}</strong></div></>;})():null)}
-{consumed?.fee?<div><span>全额包赔手续费{consumed.feePayer==="RENTER"?"（租客承担）":consumed.feePayer==="OWNER"?"（号主承担）":""}</span><strong>{`¥${consumed.fee}`}</strong></div>:null}
+  {isLegacy(o)?<>
+    {originalAmounts?<><div><span>号主收益（旧站原记，扣减前）</span><strong>{financeMoney(originalAmounts.ownerEarnings)}</strong></div><div><span>退款金额（旧站原记）</span><strong>{financeMoney(originalAmounts.refundAmount)}</strong></div></>:null}
+    {legacy?.evidenceId&&["8","9","4"].includes(legacy.stage??"")?<><div><span>{legacy.stage==="4"?"续办号主收益（扣减前）":"申报号主收益（扣减前，待确认）"}</span><strong>{legacy.amounts.saleEarnings?formatFundingCents(legacy.amounts.saleEarnings.cents):"—"}</strong></div><div><span>{legacy.stage==="4"?"续办退款金额（扣减前）":"申报退款金额（扣减前，待确认）"}</span><strong>{legacy.amounts.returnOrderMoney?formatFundingCents(legacy.amounts.returnOrderMoney.cents):"—"}</strong></div></>:null}
+    {!originalAmounts&&!legacy?.evidenceId?<p className="oc-fact-note">尚未取得结算金额记录。</p>:null}
+  </>:funds.state==='ready'&&funds.evidence?(()=>{const e=funds.evidence;if(e.posting.state!=="POSTED"&&e.posting.state!=="FINALIZED_ZERO")return <p className="oc-fact-note">本单尚无可展示的结算过账金额。</p>;return <><div><span>号主结算净额</span><strong>{financeMoney(e.ownerNet)}</strong></div><div><span>租客应退</span><strong>{financeMoney(e.refundPayable)}</strong></div><div><span>退款出款记录</span><strong>{financeMoney(e.refunded)}</strong></div><div><span>平台结算贡献（非净利润）</span><strong>{financeMoney(e.platformContribution)}</strong></div>{compensation?.length===1?<div><span>全额包赔服务费{compensation[0]?.payer==="OWNER"?"（号主承担）":compensation[0]?.payer==="RENTER"?"（租客承担）":""}</span><strong>{formatFundingCents(compensation[0]!.cents)}</strong></div>:null}</>;})():<p className="oc-fact-note">{funds.state==='loading'?"正在读取结算记录…":funds.state==='forbidden'?"当前账号无权查看结算记录。":"结算记录暂不可用。"}</p>}
 </div><p className="oc-fact-note">{reconciliationNote(o)}</p></section></div>
   {(nativeAttention||originalAttention||refundSummary?.intents?.some(intent=>intent.localState==='UNKNOWN'||intent.requiresReview))?<div className="oc-attention" role="status"><span>本单有退款记录或原请求需要核对。</span><Button size="sm" variant="secondary" onClick={()=>setDetailTab('finance')}>查看资金与退款</Button></div>:null}
-  <Tabs value={detailTab} onValueChange={value=>setDetailTab(String(value))} className="oc-detail-tabs"><TabsList aria-label="订单详情分区"><TabsTrigger value="fulfillment">履约</TabsTrigger><TabsTrigger value="finance">资金</TabsTrigger><TabsTrigger value="records">账号资料</TabsTrigger></TabsList>
+  <div ref={detailSection}><Tabs value={detailTab} onValueChange={value=>setDetailTab(String(value))} className="oc-detail-tabs"><TabsList aria-label="订单详情分区"><TabsTrigger value="fulfillment">履约</TabsTrigger><TabsTrigger value="finance">资金</TabsTrigger><TabsTrigger value="records">账号资料</TabsTrigger></TabsList>
   <TabsContent value="fulfillment" keepMounted>
-  {o.source.origin==="LEGACY"?<LegacyAdminContinuationPanel snapshot={snapshot} orderId={o.id} frozenAccount={o.frozenAccount} refreshNonce={refreshNonce}/>:null}
+  {o.source.origin==="LEGACY"?<LegacyAdminContinuationPanel snapshot={snapshot} orderId={o.id} frozenAccount={o.frozenAccount} refreshNonce={refreshNonce} onViewChange={onLegacyRead}/>:null}
   {o.source.origin==="NATIVE"&&o.status==="PENDING_PAYMENT"&&(snapshot.security.isBoss||snapshot.permissions.includes('order.settlement.write'))?<section className="oc-section"><h2>客服处理订单</h2><SupportUnpaidCancelCard orderId={o.id} displayNo={o.displayNo} onReviewPayment={()=>setDetailTab('finance')}/></section>:null}
   {o.source.origin==="NATIVE"&&o.status==="PAID"&&(snapshot.security.isBoss||snapshot.permissions.includes('order.settlement.write'))?<section className="oc-section"><h2>客服处理订单</h2><p className="oc-fact-note">可在此核对开租与结算；订单群不可用时也能按权限办理。</p><OrderFulfillmentSection orderId={o.id} displayNo={o.displayNo} viewerId={snapshot.adminUserId} orderStatus={o.status} frozenInventory={frozenFulfillmentInventory(o)} canManualClose /></section>:null}
   {o.source.origin==='NATIVE'&&['PAID','CANCELLED'].includes(o.status)?<AdminPrestartTerminationPanel orderId={o.id} binding={{adminUserId:snapshot.adminUserId,sessionId:snapshot.session.id}} canWrite={snapshot.security.isBoss||snapshot.permissions.includes('order.settlement.write')}/>:null}
@@ -431,7 +440,7 @@ function Detail({snapshot,id,onOpenPath,refreshNonce,financeOrigin,financeReturn
   </section>
   </TabsContent><TabsContent value="records" keepMounted>
 <section className="oc-section"><h2>账号资料</h2>{o.frozenAccount?<><p className="oc-fact-note">{o.frozenAccount.source==="ORDER_VERSION"?"本单冻结版本":o.frozenAccount.source==="LEGACY_ACCOUNT_SNAPSHOT"?"迁移截点账号资料（不是下单时冻结快照）":"账号资料"}</p><dl className="oc-fact-list"><dt>哈夫币</dt><dd>{o.frozenAccount.haff?quantityText(o.frozenAccount.haff.quantity):"未记录"}</dd><dt>租期</dt><dd>{o.frozenAccount.termDays?`${o.frozenAccount.termDays} 天`:o.frozenAccount.termSeconds?formatTermDays(o.frozenAccount.termSeconds):"未记录"}</dd><dt>安全箱</dt><dd>{o.frozenAccount.safeBoxText??"未记录"}</dd><dt>段位</dt><dd>{o.frozenAccount.gradingText??"未记录"}</dd><dt>登录方式</dt><dd>{o.frozenAccount.loginMethodText??"未记录"}</dd><dt>物资</dt><dd>{o.frozenAccount.materials.length?o.frozenAccount.materials.map(item=>`${item.name??"名称未记录"} ${item.quantity??"数量未知"}${unitText(item.unit,item.code)}`).join(" · "):"未记录"}</dd></dl></>:<p className="oc-fact-note">本单未记录账号资料。</p>}{canResource?<div className="flex flex-wrap gap-2"><Button size="sm" variant="secondary" onClick={openAccount}>查看账号详情<ArrowUpRight size={14}/></Button></div>:<p className="oc-fact-note">关联账号详情需要独立读取权限。</p>}</section>
-</TabsContent></Tabs>
+</TabsContent></Tabs></div>
 <details className="oc-section oc-records-fold"><summary>记录与依据（资金凭证 · 来源追溯）</summary><div className="oc-fold-body"><p className="oc-fact-note">资金凭证读取沿用独立权限；未取得渠道到账、退款出款或结算依据时保持未知。</p><div className="flex flex-wrap gap-2">{snapshot.permissions.includes('finance.read')?<Button size="sm" variant="secondary" onClick={()=>openFundsDocument((o.source.origin==='LEGACY'?'LEGACY_ORDER:':'ORDER:')+o.id,`${o.displayNo} · 资金凭证`)}>查看资金凭证<ArrowUpRight size={14}/></Button>:null}</div><p>订单 ID：{o.id}</p><p>来源：{o.source.origin} · 游戏：{o.gameId}</p>{isLegacy(o)&&o.source.orderSource?.code?<p>原订单来源码：{o.source.orderSource.code}</p>:null}</div></details>
 <p className="oc-reading"><strong>读法</strong>实付 ≠ 结算完成；应退 ≠ 渠道到账；过账 ≠ 银行到账。三项分别核对，缺依据时保持"未记录"。</p>
 </main><aside className="oc-related"><section className="oc-section"><h2>订单群</h2><p className="oc-fact-note">{team.state==="loading"?"正在核对订单群…":team.state==="forbidden"?"当前身份无权读取本单群。":team.state==="missing"?"未找到可读取的本单群记录。":team.state==="ready"?team.data?.teamState==="READY"?team.data.canRead?"本单群已就绪。":"本单已有客服群，当前身份未加入。":team.data?.teamState==="NEEDS_REVIEW"?"建群结果待核对，请勿重复发起。":team.data?.teamState?"正在准备订单群…":o.source.origin==='LEGACY'?"尚未为这笔旧订单建立新群。":"尚未建立订单群。":"本单群读取暂不可用，请重试。"}</p>

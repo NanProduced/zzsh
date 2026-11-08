@@ -52,6 +52,16 @@ test("C04B-02-R1 order scope includes abnormal roots/events/confirmation without
   assert.match(text, /order\.refund\.abnormal\.first_submit\.blocked/);
 });
 
+test("native order finance keeps a scoped version when legacy withdrawal links exist", () => {
+  const scope = { mode: "document", documentRef: "ORDER:order_1" } as const;
+  const scoped = financeScopedVersionSql({ ...ready, legacy_withdrawal_links: true }, scope);
+  assert.ok(scoped);
+  assert.match(scoped.text, /legacy_withdrawal_subject_revision WHERE 1=0/);
+  assert.match(scoped.text, /legacy_withdrawal_link_evidence WHERE 1=0/);
+  assert.match(scoped.text, /settlement_posting WHERE order_id=\$1/);
+  assert.deepEqual(scoped.values, ["order_1"]);
+});
+
 test("C04B-02-R1 missing attempt/audit/confirmation readiness does not query new sources", () => {
   const safe = financeScopedVersionSql({ ...ready, refund_read_dependencies: false }, { mode: "document", documentRef: "REFUND_INTENT:rfi_1" });
   assert.notEqual(safe, null);
