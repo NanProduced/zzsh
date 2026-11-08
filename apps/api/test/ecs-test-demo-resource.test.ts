@@ -4,9 +4,14 @@ import type { Pool, PoolClient } from "pg";
 import { createHash } from "node:crypto";
 import { assertEcsTestDemoAssembly, assertEcsTestDemoResource, createEcsTestDemoResource, createLocalDemoCloneResource, demoFinanceScope,
   readEcsTestDemoRegistration, verifyLocalDemoCloneProof, type DemoFinanceResource } from "../src/finance/ecs-test-demo-resource";
-import {assertEcsTestDemoRuntimeAssembly,createEcsTestDemoRuntime} from "../src/finance/ecs-test-demo-runtime";
+import {assertEcsTestDemoRuntimeAssembly,createEcsTestDemoRuntime,preflightEcsTestDemoRuntime} from "../src/finance/ecs-test-demo-runtime";
 import {declareLocalSandboxWithdrawalTarget} from "../src/finance/local-sandbox-withdrawal-target";
+import { createDemoNativeWithdrawalScope } from "../src/finance/native-withdrawal-resource";
+import { localWithdrawalDayWindow, quoteControlledWithdrawal, withdrawalPolicyForScope } from "../src/finance/controlled-withdrawal";
+import { TEAM_TEST_WITHDRAWAL_POLICY } from "../src/finance/withdrawal-business-policy";
 import {assertDistributionOrderScopeResource,assertSandboxDistributionOrder,createEcsDemoDistributionOrderScope,createPaymentDistributionStore} from "../src/finance/distribution-payment-store";
+import { assertSyntheticChannelRequestCapability, createEcsDemoCollectionCapability, createEcsDemoRefundCapability, createPaymentRequest, demoForChannelRequestCapability, markDemoPaymentActionReady, readDemoPaymentRequestMatch, readDemoPaymentRequestForAcceptance } from "../src/order/channel-payment-store";
+import { assertLocalSandboxRefundResource } from "../src/order/local-sandbox-refund-source";
 
 type Input = Parameters<typeof createEcsTestDemoResource>[0];
 const input = (): Input => ({
@@ -26,11 +31,36 @@ test("demo amount rejection occurs before a target or balance write",async()=>{
   let connections=0;
   const pool={connect:async()=>{connections++;throw Error("unexpected connection");}} as unknown as Pool;
   const actor={userId:"user_fixture",sessionId:"session_fixture",requestId:"request_fixture"};
+  const demo=scope(),withdrawalScope=createDemoNativeWithdrawalScope(demo);
   for(const amountCents of ["100","1000001"]){
-    await assert.rejects(declareLocalSandboxWithdrawalTarget(pool,actor,{bankBindingId:"bank_"+"a".repeat(32),bankBindingRevision:"1",amountCents},"target-key",scope()),
+    await assert.rejects(declareLocalSandboxWithdrawalTarget(pool,actor,{bankBindingId:"bank_"+"a".repeat(32),bankBindingRevision:"1",amountCents},"target-key",demo,withdrawalScope),
       (error:unknown)=>(error as {status?:number;code?:string}).status===422&&(error as {code?:string}).code==="DEMO_WITHDRAW_AMOUNT_OUT_OF_RANGE");
   }
   assert.equal(connections,0);
+});
+
+test("demo withdrawal uses the shared rule and rejects values not supported by its database guards",async()=>{
+  const demo=scope(),policy={...TEAM_TEST_WITHDRAWAL_POLICY};
+  const bound=createDemoNativeWithdrawalScope(demo,policy),applied=withdrawalPolicyForScope(bound,"BANK_CARD",["user_fixture"]);
+  const runtime=createEcsTestDemoRuntime({...input(),appId:"synthetic_app",withdrawalPolicy:policy});assert(runtime);
+  assert.equal(withdrawalPolicyForScope(runtime.withdrawal.scope,"BANK_CARD",["user_fixture"]).version,applied.version);
+  assert.equal(applied.minCents,"200");assert.equal(applied.maxCents,"1000000");assert.equal(applied.maxAcceptedPerWindow,2);
+  assert.deepEqual(applied.fee,{kind:"FIXED",cents:"100"});
+  const at="2026-11-08T00:00:00.000Z",body={amountCents:"500",destinationId:"bank_fixture",policyVersion:applied.version,expectedWalletVersion:"1"};
+  const facts={userId:"user_fixture",active:true,localAdmissionEligible:true,coverageKnown:true,availableCents:"1000",ledgerRevision:"1",now:at,
+    destination:{id:"bank_fixture",userId:"user_fixture",mode:"LOCAL_CONTROLLED" as const,kind:"BANK_CARD" as const,active:true},
+    usage:{...localWithdrawalDayWindow(at),quotaCount:0}};
+  const quote=quoteControlledWithdrawal(body,applied,facts);
+  assert.deepEqual([quote.grossCents,quote.netCents,quote.feeCents],["500","400","100"]);
+  for(const change of [{fee:{kind:"FIXED" as const,cents:"50"}},{minCents:"500"},{maxIntents:3},{version:"other"}])
+    assert.throws(()=>createDemoNativeWithdrawalScope(demo,{...policy,...change}),/DEMO_WITHDRAWAL_POLICY_SCHEMA_MISMATCH/);
+  const pool={connect:async()=>{throw Error("unexpected connection");}} as unknown as Pool;
+  const actor={userId:"user_fixture",sessionId:"session_fixture",requestId:"request_fixture"};
+  await assert.rejects(declareLocalSandboxWithdrawalTarget(pool,actor,{bankBindingId:"bank_"+"a".repeat(32),bankBindingRevision:"1",amountCents:"199"},"target-key",demo,bound),
+    (error:unknown)=>(error as {code?:string}).code==="DEMO_WITHDRAW_AMOUNT_OUT_OF_RANGE");
+  await assert.rejects(declareLocalSandboxWithdrawalTarget(pool,actor,{bankBindingId:"bank_"+"a".repeat(32),bankBindingRevision:"1",amountCents:"500"},"target-key",scope(),bound),/Matching withdrawal scope required/);
+  assert.throws(()=>createDemoNativeWithdrawalScope(demo,{...policy,quotaUtcOffsetMinutes:0}),/DEMO_WITHDRAWAL_POLICY_TIMEZONE_UNSUPPORTED/);
+  assert.throws(()=>createDemoNativeWithdrawalScope(demo,{...policy,reviewStrategy:"MERCHANT_REVIEW_REQUIRED"}),/DEMO_WITHDRAWAL_REVIEW_UNSUPPORTED/);
 });
 
 test("demo withdrawal runtime must use the same branded payment resource",()=>{
@@ -65,6 +95,112 @@ function clientFor(value: DemoFinanceResource, changed: { identity?: Record<stri
   return { client: { query, getTransactionStatus:()=> 'T', connectionParameters:{host:'127.0.0.1',port:55434,
     database:proof.registration.resource.database,user:proof.registration.resource.runtimeRole} } as unknown as PoolClient, calls };
 }
+
+test("demo runtime refuses a partial cashier schema before exposing test payments",async()=>{
+  const runtime=createEcsTestDemoRuntime({...input(),appId:"synthetic_app"});assert(runtime);
+  for(const [baseReady,cashierReady,expected] of [[false,true,"ECS_TEST_DEMO_FINANCE_SCHEMA_NOT_READY"],[true,false,"TEST_CASHIER_SCHEMA_NOT_READY"],[true,true,null]] as const){
+    const base=clientFor(runtime.demo),calls:string[]=[];
+    const client={...base.client,release(){},query:async(sql:string,...values:unknown[])=>{
+      calls.push(sql);
+      if(["BEGIN","COMMIT","ROLLBACK","SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY"].includes(sql))return {rows:[]};
+      if(sql.includes("test_channel_request_guard"))return {rows:[{ready:cashierReady}]};
+      if(sql.includes("guard_ecs_test_demo_finance_registration"))return {rows:[{ready:baseReady}]};
+      return (base.client.query as (...args:any[])=>Promise<any>)(sql,...values);
+    }} as unknown as PoolClient;
+    const pool={connect:async()=>client} as unknown as Pool;
+    if(expected)await assert.rejects(preflightEcsTestDemoRuntime(pool,runtime),error=>error instanceof Error&&error.message===expected);
+    else await preflightEcsTestDemoRuntime(pool,runtime);
+    assert.equal(calls.some(sql=>/^(INSERT|UPDATE|DELETE|ALTER|CREATE|TRUNCATE)\b/i.test(sql)),false);
+    if(!baseReady)assert.equal(calls.some(sql=>sql.includes("test_channel_request_guard")),false);
+  }
+});
+
+test("demo collection capability is bound to the test resource and cannot be used for refunds", async()=>{
+  const demo=scope(), base=clientFor(demo), collection=createEcsDemoCollectionCapability(demo), refund=createEcsDemoRefundCapability(demo);
+  const client={...base.client,query:async(sql:string,...values:unknown[])=>{
+    if(sql.includes("current_database() AS db, current_user AS actor"))return {rows:[{db:"zzsh_ecs_test_demo",actor:"demo_runtime"}]};
+    return (base.client.query as (...args:any[])=>Promise<any>)(sql,...values);
+  }} as unknown as PoolClient;
+  assert.equal(await assertSyntheticChannelRequestCapability(client,collection,"COLLECTION"),"CONTROLLED_TEST");
+  assert.equal(await assertSyntheticChannelRequestCapability(client,refund,"REFUND"),"CONTROLLED_TEST");
+  await assert.rejects(assertSyntheticChannelRequestCapability(client,collection,"REFUND"));
+  await assert.rejects(assertSyntheticChannelRequestCapability(client,refund,"COLLECTION"));
+  await assert.rejects(assertSyntheticChannelRequestCapability(client,{...collection},"COLLECTION"));
+  assert.equal(demoForChannelRequestCapability(collection),undefined);
+  assert.equal(demoForChannelRequestCapability(refund),demo);
+  assert.equal(demoForChannelRequestCapability(collection,"COLLECTION"),demo);
+  assert.equal(demoForChannelRequestCapability(refund,"COLLECTION"),undefined);
+  const noQuery={query:async()=>{throw Error("unexpected refund query");}} as unknown as PoolClient;
+  await assert.rejects(assertLocalSandboxRefundResource(noQuery,{demo,capability:collection}),/Registered test refund capabilities differ/);
+  const refundClient={...base.client,query:async(sql:string,...values:unknown[])=>{
+    if(sql.startsWith("SELECT to_regclass('zzsh_order.local_controlled_refund_operation')"))return {rows:[{complete:true}]};
+    return (base.client.query as (...args:any[])=>Promise<any>)(sql,...values);
+  }} as unknown as PoolClient;
+  await assert.doesNotReject(assertLocalSandboxRefundResource(refundClient,{demo,capability:refund}));
+});
+
+test("test cashier only reads and accepts its own original ready request",async()=>{
+  const demo=scope(),base=clientFor(demo),capability=createEcsDemoCollectionCapability(demo),merchant='ecs_demo_'+readEcsTestDemoRegistration(demo).digest.slice(0,32);
+  let row:Record<string,string>|null={id:'payreq_1',order_id:'order_1',channel:'CONTROLLED',evidence_level:'CONTROLLED_TEST',state:'ACTION_READY',merchant_identity_id:merchant,config_profile_id:merchant,protocol_version:'TEST_CASHIER_V1',key_version_ref:'NO_REAL_PROVIDER'};
+  const client={...base.client,query:async(sql:string,...values:unknown[])=>{
+    if(sql.includes('current_database() AS db, current_user AS actor'))return {rows:[{db:'zzsh_ecs_test_demo',actor:'demo_runtime'}]};
+    if(sql.includes('pg_advisory_xact_lock'))return {rows:[]};
+    if(sql.includes('FROM zzsh_order.payment_request WHERE order_id=$1'))return {rows:row?[row]:[]};
+    return (base.client.query as (...args:any[])=>Promise<any>)(sql,...values);
+  }} as unknown as PoolClient;
+  assert.equal(await readDemoPaymentRequestMatch(client,{orderId:'order_1',capability}),true);
+  assert.equal(await readDemoPaymentRequestForAcceptance(client,{orderId:'order_1',capability}),'payreq_1');
+  row={...row!,merchant_identity_id:'other_scope'};
+  assert.equal(await readDemoPaymentRequestMatch(client,{orderId:'order_1',capability}),false);
+  await assert.rejects(readDemoPaymentRequestForAcceptance(client,{orderId:'order_1',capability}));
+  row=null;assert.equal(await readDemoPaymentRequestMatch(client,{orderId:'order_1',capability}),null);
+});
+
+test("test cashier readiness is attached once to its original controlled request",async()=>{
+  const demo=scope(),base=clientFor(demo),capability=createEcsDemoCollectionCapability(demo),merchant='ecs_demo_'+readEcsTestDemoRegistration(demo).digest.slice(0,32);
+  const row:Record<string,string>={id:'payreq_1',order_id:'order_1',channel:'CONTROLLED',evidence_level:'CONTROLLED_TEST',state:'SUBMITTING',revision:'1',merchant_identity_id:merchant,config_profile_id:merchant,protocol_version:'TEST_CASHIER_V1',key_version_ref:'NO_REAL_PROVIDER',channel_order_no:'ZZ-1',amount_cents:'125',method:'WEIXIN_NATIVE'};
+  let observations=0,updates=0;
+  const client={...base.client,query:async(sql:string,values:unknown[]=[])=>{
+    if(sql.includes('current_database() AS db, current_user AS actor'))return {rows:[{db:'zzsh_ecs_test_demo',actor:'demo_runtime'}]};
+    if(sql.includes('FROM zzsh_order.payment_request WHERE id=$1 FOR UPDATE'))return {rows:[{...row}]};
+    if(sql.startsWith('UPDATE zzsh_order.payment_request SET state=')){assert.equal(values[1],'ACTION_READY');updates++;row.state='ACTION_READY';row.revision='2';return {rows:[],rowCount:1};}
+    if(sql.startsWith('INSERT INTO zzsh_order.payment_channel_observation')){observations++;assert.equal(values[11],'CONTROLLED_TEST');assert.equal(values[12],'E1');return {rows:[]};}
+    return (base.client.query as (...args:any[])=>Promise<any>)(sql,values);
+  }} as unknown as PoolClient;
+  await markDemoPaymentActionReady(client,{orderId:'order_1',requestId:'payreq_1',capability});
+  await markDemoPaymentActionReady(client,{orderId:'order_1',requestId:'payreq_1',capability});
+  assert.equal(updates,1);assert.equal(observations,1);
+  await assert.rejects(markDemoPaymentActionReady(client,{orderId:'order_other',requestId:'payreq_1',capability}));
+  assert.equal(updates,1);assert.equal(observations,1);
+});
+
+test("demo collection creates the ordinary payment request with a controlled source", async t=>{
+  const demo=scope(), base=clientFor(demo), capability=createEcsDemoCollectionCapability(demo), statements:string[]=[];
+  const resource:typeof import('../src/finance/ecs-test-demo-resource')=require('../src/finance/ecs-test-demo-resource');
+  const util:typeof import('../src/supply/supply-util')=require('../src/supply/supply-util');
+  let admitted=false;
+  t.mock.method(resource,'ensureEcsTestDemoOrderAdmission',async()=>{admitted=true;return 'synthetic_admission';});
+  t.mock.method(util,'withIdempotency',async(...[_client,_scope,_key,_fingerprint,authorize,action]:Parameters<typeof util.withIdempotency>)=>{
+    await authorize(null);return {replayed:false,...await action()};
+  });
+  const client={...base.client,query:async(sql:string,values:unknown[]=[])=>{
+    statements.push(sql);
+    if(sql.includes('current_database() AS db, current_user AS actor'))return {rows:[{db:'zzsh_ecs_test_demo',actor:'demo_runtime'}]};
+    if(sql.includes('pg_advisory_xact_lock'))return {rows:[]};
+    if(sql.startsWith('SELECT renter_user_id FROM zzsh_order.rental_order'))return {rows:[{renter_user_id:'renter'}]};
+    if(sql.includes('FROM zzsh_order.payment_request WHERE order_id=$1'))return {rows:[]};
+    if(sql.startsWith('SELECT renter_user_id, status, display_no'))return {rows:[{renter_user_id:'renter',status:'PENDING_PAYMENT',display_no:'ZZ-1',currency:'CNY',total:'125'}]};
+    if(sql.startsWith('SELECT hold_until > clock_timestamp()'))return {rows:[{open:true,has_confirmation:false}]};
+    if(sql.startsWith('SELECT 1 FROM zzsh_order.payment_request WHERE channel='))return {rows:[],rowCount:0};
+    if(sql.startsWith('INSERT INTO zzsh_order.payment_request'))return {rows:[{id:values[0],order_id:values[1],channel:values[2],merchant_identity_id:values[3],config_profile_id:values[4],protocol_version:values[5],key_version_ref:values[6],platform_order_no:values[7],channel_order_no:values[8],amount_cents:values[9],currency:'CNY',wire_amount_yuan:values[10],method:values[11],evidence_level:values[12],state:'SUBMITTING',created_at:'2026-01-01T00:00:00.000Z',updated_at:'2026-01-01T00:00:00.000Z'}]};
+    return (base.client.query as (...args:any[])=>Promise<any>)(sql,values);
+  }} as unknown as PoolClient;
+  const result=await createPaymentRequest(client,{actor:{userId:'renter'},orderId:'order_1',idempotencyKey:'request_key',method:'WEIXIN_NATIVE',capability});
+  assert.equal(admitted,true);assert.equal(result.status,202);
+  assert.equal((result.body as {channel:string}).channel,'CONTROLLED');assert.equal((result.body as {evidenceLevel:string}).evidenceLevel,'CONTROLLED_TEST');
+  assert.equal((result.body as {amountCents:string}).amountCents,'125');assert.equal((result.body as {method:string}).method,'WEIXIN_NATIVE');
+  assert.equal(statements.filter(sql=>sql.startsWith('INSERT INTO zzsh_order.payment_request')).length,1);
+});
 
 test("demo distribution read-only paths verify the original resource without acquiring write locks",async()=>{
   const demo=scope(),distribution=createEcsDemoDistributionOrderScope(demo),base=clientFor(demo);

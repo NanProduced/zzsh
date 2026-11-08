@@ -11,6 +11,7 @@ import { configuration, verified, bound } from "./fixtures/joinpay-withdrawal-ba
 import { quoteNativeWithdrawalInTransaction, reserveNativeWithdrawalInTransaction, readNativeWithdrawalRecovery } from "../src/finance/native-withdrawal-store";
 import * as wallet from "../src/finance/personal-finance-read";
 import * as recovery from "../src/finance/distribution-recovery-gate";
+import { localWithdrawalDayWindow, ownerLocalWithdrawalPolicy, quoteControlledWithdrawal } from "../src/finance/controlled-withdrawal";
 
 test("without payout assembly, options preserve local masked bank/identity but never invent a policy, quota or authority",async()=>{
  const {f}=await bound(),keys=f.keys(),before=f.state.queries.length;
@@ -153,6 +154,14 @@ test("实际原生报价消费新绑定来源；改卡后原报价不能创建�
   };
   const body = { amountCents: "10000", destinationId: id, policyVersion: "unit_policy" };
   const first = await withTransaction(f.pool, c => quoteNativeWithdrawalInTransaction(c, actor, body, o)); assert.equal(first.destination.mask, "**** **** 0015");
+  const formal=readWithdrawalAdmission(await withTransaction(f.pool,async c=>o.loadAdmission!(c,actor.userId,{destinationId:id,policyVersion:"unit_policy"}))).policy;
+  const local=ownerLocalWithdrawalPolicy("BANK_CARD",[actor.userId]);
+  assert.deepEqual([formal.minCents,formal.maxCents,formal.fee,formal.frequencyBasis,formal.maxIntents],
+    [local.minCents,local.maxCents,local.fee,local.frequencyBasis,local.maxAcceptedPerWindow]);
+  const at="2026-10-25T00:00:00.000Z",simulated=quoteControlledWithdrawal({amountCents:body.amountCents,destinationId:id,policyVersion:local.version,expectedWalletVersion:"8"},local,
+    {userId:actor.userId,active:true,localAdmissionEligible:true,coverageKnown:true,availableCents:"50000",ledgerRevision:"8",now:at,
+      destination:{id,userId:actor.userId,mode:"LOCAL_CONTROLLED",kind:"BANK_CARD",active:true},usage:{...localWithdrawalDayWindow(at),quotaCount:0}});
+  assert.deepEqual([simulated.grossCents,simulated.netCents,simulated.feeCents],[first.grossCents,first.netCents,first.feeCents]);
   await saveWithdrawalBankBinding(f.pool, actor, { ...input, cardNo: "0000000000000023", expectedRevision: "1" }, "unit_new_bank", f.options);
   const next = await withTransaction(f.pool, c => quoteNativeWithdrawalInTransaction(c, actor, body, o)); assert.equal(next.destination.mask, "**** **** 0023");
   assert.notEqual(next.expectedWalletVersion, first.expectedWalletVersion);

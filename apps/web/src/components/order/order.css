@@ -325,6 +325,10 @@
 .order-channel-code { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; margin: 0; }
 .order-channel-code svg { display: block; flex: none; max-width: 100%; height: auto; }
 .order-channel-code figcaption { flex: 1 1 180px; max-width: 32ch; }
+.order-cashier-dialog { position: fixed; z-index: 101; left: 50%; top: 50%; transform: translate(-50%, -50%); width: min(400px, calc(100vw - 32px)); max-height: calc(100dvh - 32px); overflow-y: auto; display: grid; justify-items: center; gap: 16px; padding: 28px; border: 1px solid var(--color-border-default); border-radius: 16px; background: var(--color-bg-surface); color: var(--color-text-primary); box-shadow: var(--shadow-lg); text-align: center; }
+.order-cashier-dialog h2, .order-cashier-dialog p { margin: 0; }
+.order-cashier-dialog .order-local-checkout { display: grid; justify-items: center; gap: 10px; width: 100%; }
+.order-cashier-code { width: 176px; height: 176px; max-width: 100%; border: 1px dashed var(--color-border-default); border-radius: 12px; background: var(--color-bg-card); }
 .order-trade-confirm, .order-trade-reject { display: inline-flex; align-items: center; flex-wrap: wrap; gap: 7px; color: var(--color-text-secondary); font-size: 12px; }
 .order-trade-reject input { min-height: 38px; min-width: 220px; padding: 7px 9px; border: 1px solid var(--color-border-default); border-radius: 7px; color: var(--color-text-primary); background: var(--color-bg-card); font-size: 12px; }
 .order-trade-preview { display: grid; gap: 10px; }

@@ -17,7 +17,7 @@ import { describeCollectionProfile, type BoundCollectionProfile } from "./joinpa
 import { readVerifiedJoinpayFactScope, type FormalJoinpayPaymentFact } from "./joinpay-collection-source";
 import { createControlledRegressionResource, assertControlledRegressionResource, type ControlledRegressionBinding, type ControlledRegressionResource } from "../finance/controlled-regression-resource";
 import { assertLocalFinancialSandboxResource, ensureLocalSandboxOrderAdmission, localFinancialSandboxRegistration, type LocalFinancialSandbox } from "../finance/local-financial-sandbox-resource";
-import { assertEcsTestDemoResource, readEcsTestDemoRegistration, type DemoFinanceResource } from "../finance/ecs-test-demo-resource";
+import { assertEcsTestDemoResource, ensureEcsTestDemoOrderAdmission, readEcsTestDemoRegistration, type DemoFinanceResource } from "../finance/ecs-test-demo-resource";
 
 /**
  * PAY-03A：持久请求、只追加观察与资金归属锚点（payment_request / payment_channel_observation /
@@ -64,7 +64,7 @@ export function wireAmountForCents(amountCents: string): string {
 }
 
 // ---------- 合成请求能力：仅显式 test/fake 隔离资源，进程内对象，无环境开关 ----------
-const requestCapabilities = new WeakMap<object, { database: string; runtimeUser: string; regression?: ControlledRegressionResource; orderIds?: ReadonlySet<string>; sandbox?: LocalFinancialSandbox; demo?: DemoFinanceResource }>();
+const requestCapabilities = new WeakMap<object, { database: string; runtimeUser: string; regression?: ControlledRegressionResource; orderIds?: ReadonlySet<string>; sandbox?: LocalFinancialSandbox; demo?: DemoFinanceResource; demoPurpose?: "COLLECTION" | "REFUND" }>();
 export type SyntheticRequestCapability = Readonly<{ evidenceLevel: "SYNTHETIC_PROTOCOL" | "CONTROLLED_TEST" }>;
 
 export function createSyntheticChannelRequestCapability(options: { config: AppConfig; resourceSet: string; evidenceLevel: SyntheticRequestCapability["evidenceLevel"]; regression?: ControlledRegressionBinding; allowedOrderIds?: readonly string[] }): SyntheticRequestCapability {
@@ -93,7 +93,12 @@ export function createSandboxChannelRequestCapability(sandbox: LocalFinancialSan
 
 export function createEcsDemoRefundCapability(demo: DemoFinanceResource): SyntheticRequestCapability {
   const proof = readEcsTestDemoRegistration(demo), capability = Object.freeze({ evidenceLevel: "CONTROLLED_TEST" as const });
-  requestCapabilities.set(capability, { database: proof.registration.resource.database, runtimeUser: proof.registration.resource.runtimeRole, demo }); return capability;
+  requestCapabilities.set(capability, { database: proof.registration.resource.database, runtimeUser: proof.registration.resource.runtimeRole, demo, demoPurpose: "REFUND" }); return capability;
+}
+
+export function createEcsDemoCollectionCapability(demo: DemoFinanceResource): SyntheticRequestCapability {
+  const proof = readEcsTestDemoRegistration(demo), capability = Object.freeze({ evidenceLevel: "CONTROLLED_TEST" as const });
+  requestCapabilities.set(capability, { database: proof.registration.resource.database, runtimeUser: proof.registration.resource.runtimeRole, demo, demoPurpose: "COLLECTION" }); return capability;
 }
 
 export function sandboxChannelBinding(capability: unknown): ChannelBinding | null {
@@ -106,8 +111,17 @@ export function sandboxChannelBinding(capability: unknown): ChannelBinding | nul
 export function sandboxForChannelRequestCapability(capability:unknown):LocalFinancialSandbox|undefined{
   return capability&&typeof capability==='object'?requestCapabilities.get(capability)?.sandbox:undefined;
 }
-export function demoForChannelRequestCapability(capability:unknown):DemoFinanceResource|undefined{
-  return capability&&typeof capability==='object'?requestCapabilities.get(capability)?.demo:undefined;
+// 旧调用方均处理退款；收款能力必须显式指定用途，不能借退款入口使用。
+export function demoForChannelRequestCapability(capability:unknown,purpose:"COLLECTION"|"REFUND"="REFUND"):DemoFinanceResource|undefined{
+  const scope=capability&&typeof capability==='object'?requestCapabilities.get(capability):undefined;
+  return scope?.demoPurpose===purpose?scope.demo:undefined;
+}
+
+function demoChannelBinding(demo: DemoFinanceResource): ChannelBinding {
+  const digest = readEcsTestDemoRegistration(demo).digest;
+  const merchantIdentityId = (demo.kind === "ECS_TEST_DEMO_FINANCE" ? "ecs_demo_" : "local_demo_") + digest.slice(0, 32);
+  return { channel: "CONTROLLED", merchantIdentityId, configProfileId: merchantIdentityId,
+    protocolVersion: "TEST_CASHIER_V1", keyVersionRef: "NO_REAL_PROVIDER" };
 }
 
 export function assertSandboxOriginalPayment(capability: unknown, payment: { source: string; merchant_scope_id: string }): void {
@@ -151,7 +165,7 @@ export async function assertLegacyPaymentNumberAvailable(client:PoolClient,merch
 export async function assertSyntheticChannelRequestCapability(client: PoolClient, capability: unknown, purpose: "COLLECTION" | "REFUND" = "COLLECTION"): Promise<SyntheticRequestCapability["evidenceLevel"]> {
   const scope = capability && typeof capability === "object" ? requestCapabilities.get(capability) : undefined;
   if (!scope) throw closed();
-  if (scope.demo && purpose !== "REFUND") throw closed();
+  if (scope.demo && purpose !== scope.demoPurpose) throw closed();
   if (scope.regression) await assertControlledRegressionResource(client, scope.regression, "CHANNEL_REQUEST");
   if (scope.sandbox) await assertLocalFinancialSandboxResource(client, scope.sandbox);
   if (scope.demo) await assertEcsTestDemoResource(client, scope.demo);
@@ -213,6 +227,12 @@ export async function createPaymentRequest(client: PoolClient, input: {
       if (input.binding && JSON.stringify(input.binding) !== JSON.stringify(local)) throw closed();
       return { binding: local, evidenceLevel, afterOrderLock: async () => { await ensureLocalSandboxOrderAdmission(client, sandbox, input.orderId); } };
     }
+    const demo = demoForChannelRequestCapability(input.capability, "COLLECTION");
+    if (demo) {
+      const binding = demoChannelBinding(demo);
+      if (input.binding && JSON.stringify(input.binding) !== JSON.stringify(binding)) throw closed();
+      return { binding, evidenceLevel, afterOrderLock: async () => { await ensureEcsTestDemoOrderAdmission(client, demo, input.orderId); } };
+    }
     checkBinding(input.binding);
     if ((input.binding.channel === "JOINPAY") !== (evidenceLevel === "SYNTHETIC_PROTOCOL")) throw closed();
     return { binding: input.binding, evidenceLevel };
@@ -248,7 +268,7 @@ async function createRequest(client: PoolClient, input: {
     if (!row || row.renter_user_id !== actor.userId) throw notFound();
   };
   const result = await withIdempotency(client, scope, key, fingerprint, ownsOrder, async () => {
-    await xactLock(client, ["zzsh:payment-request:v1", orderId]);
+    await lockPaymentRequestOrder(client, orderId);
     const existing = (await client.query<RequestRow>(`SELECT ${REQUEST_COLUMNS} FROM zzsh_order.payment_request WHERE order_id=$1`, [orderId])).rows[0];
     if (existing) {
       if (!allowedEvidence.includes(existing.evidence_level)) throw closed();
@@ -415,6 +435,57 @@ async function writeState(client: PoolClient, row: RequestRow, next: RequestStat
 
 const lockRequest = async (client: PoolClient, sql: string, params: unknown[]) =>
   (await client.query<RequestRow & { lease_current?: boolean }>(sql, params)).rows[0];
+
+async function lockPaymentRequestOrder(client: PoolClient, orderId: string): Promise<void> {
+  await xactLock(client, ["zzsh:payment-request:v1", orderId]);
+}
+
+/** Read-only origin check prevents another controlled environment becoming this cashier. */
+export async function readDemoPaymentRequestMatch(client: PoolClient, input: { orderId: string; capability: unknown }): Promise<boolean | null> {
+  const scope = input.capability && typeof input.capability === "object" ? requestCapabilities.get(input.capability) : undefined;
+  if (!scope?.demo || scope.demoPurpose !== "COLLECTION" || !ID.test(input.orderId)) throw closed();
+  await assertEcsTestDemoResource(client, scope.demo, "READ_ORIGINAL");
+  const row = (await client.query<RequestRow>(`SELECT ${REQUEST_COLUMNS} FROM zzsh_order.payment_request WHERE order_id=$1`, [input.orderId])).rows[0];
+  if (!row) return null;
+  const binding = demoChannelBinding(scope.demo);
+  return row.channel === binding.channel && row.evidence_level === "CONTROLLED_TEST"
+    && row.merchant_identity_id === binding.merchantIdentityId && row.config_profile_id === binding.configProfileId
+    && row.protocol_version === binding.protocolVersion && row.key_version_ref === binding.keyVersionRef;
+}
+
+/** Serialize old test checkouts with request creation so neither can strand the other. */
+export async function readDemoPaymentRequestForAcceptance(client: PoolClient, input: { orderId: string; capability: unknown }): Promise<string | null> {
+  await assertSyntheticChannelRequestCapability(client, input.capability, "COLLECTION");
+  const demo = demoForChannelRequestCapability(input.capability, "COLLECTION");
+  if (!demo || !ID.test(input.orderId)) throw closed();
+  await lockPaymentRequestOrder(client, input.orderId);
+  const row = await lockRequest(client, `SELECT ${REQUEST_COLUMNS} FROM zzsh_order.payment_request WHERE order_id=$1 FOR UPDATE`, [input.orderId]);
+  if (!row) return null;
+  const binding = demoChannelBinding(demo);
+  if (row.channel !== binding.channel || row.evidence_level !== "CONTROLLED_TEST" || row.state !== "ACTION_READY"
+    || row.merchant_identity_id !== binding.merchantIdentityId || row.config_profile_id !== binding.configProfileId
+    || row.protocol_version !== binding.protocolVersion || row.key_version_ref !== binding.keyVersionRef) throw closed();
+  return row.id;
+}
+
+/** A test cashier has no provider response; its readiness is bound to the original request. */
+export async function markDemoPaymentActionReady(client: PoolClient, input: { orderId: string; requestId: string; capability: unknown }): Promise<void> {
+  await assertSyntheticChannelRequestCapability(client, input.capability, "COLLECTION");
+  const demo = demoForChannelRequestCapability(input.capability, "COLLECTION");
+  if (!demo || !ID.test(input.orderId) || !ID.test(input.requestId)) throw closed();
+  const row = await lockRequest(client, `SELECT ${REQUEST_COLUMNS} FROM zzsh_order.payment_request WHERE id=$1 FOR UPDATE`, [input.requestId]);
+  const binding = demoChannelBinding(demo);
+  if (!row || row.order_id !== input.orderId || row.channel !== binding.channel || row.evidence_level !== "CONTROLLED_TEST"
+    || row.merchant_identity_id !== binding.merchantIdentityId || row.config_profile_id !== binding.configProfileId
+    || row.protocol_version !== binding.protocolVersion || row.key_version_ref !== binding.keyVersionRef) throw closed();
+  if (row.state !== "SUBMITTING") return;
+  await writeState(client, row, "ACTION_READY");
+  await appendObservation(client, { requestId: row.id, channel: "CONTROLLED", merchantIdentityId: row.merchant_identity_id,
+    channelOrderNo: row.channel_order_no, configProfileId: row.config_profile_id, protocolVersion: row.protocol_version, keyVersionRef: row.key_version_ref,
+    operation: "SYNC_RESPONSE", source: "EXECUTOR", evidenceLevel: "CONTROLLED_TEST", event: "E1", result: "ACTION_READY",
+    rawSha256: sha256(JSON.stringify(["TEST_CASHIER_V1", row.id, row.order_id, row.amount_cents, row.method])), rawRef: `test-cashier:${row.id}`,
+    stateBefore: row.state, stateAfter: "ACTION_READY" });
+}
 
 export type ChannelObservationResult = Readonly<{
   observationId: string; outcome: JoinpayOutcome; stateBefore: RequestState | "NONE"; stateAfter: RequestState | "NONE";

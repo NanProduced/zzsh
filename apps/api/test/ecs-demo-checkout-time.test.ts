@@ -9,8 +9,9 @@ test("demo confirmation uses transaction time once and same-key replay preserves
  const resource:typeof import('../src/finance/ecs-test-demo-resource')=require('../src/finance/ecs-test-demo-resource');
  const policy:typeof import('../src/finance/distribution-policy-store')=require('../src/finance/distribution-policy-store');
  const payment:typeof import('../src/order/payment-confirmation')=require('../src/order/payment-confirmation');
+ const channel:typeof import('../src/order/channel-payment-store')=require('../src/order/channel-payment-store');
  const util:typeof import('../src/supply/supply-util')=require('../src/supply/supply-util');
- let now='2026-01-02T00:00:00.000Z',paid=false,calls=0,captured='';let saved:{status:number;body:unknown}|undefined;
+ let now='2026-01-02T00:00:00.000Z',paid=false,calls=0,admissions=0,captured='';let saved:{status:number;body:unknown}|undefined;
  const client={query:async(sql:string)=>{
   if(sql.includes("to_char(clock_timestamp()"))return{rows:[{at:now}]};
   if(sql.includes('FROM zzsh_order.rental_order WHERE id='))return{rows:[{id:'order_1',display_no:'ORDER1',status:paid?'PAID':'PENDING_PAYMENT',currency:'CNY',amount_cents:'200',created_at:'2026-01-01T00:00:00.000Z',hold_until:'2026-01-03T00:00:00.000Z'}]};
@@ -20,7 +21,7 @@ test("demo confirmation uses transaction time once and same-key replay preserves
  t.mock.method(security,'recordAudit',async()=>{});
  t.mock.method(identity,'assertUserContextInTransaction',async()=>{});
  t.mock.method(resource,'assertEcsTestDemoResource',async()=>({} as never));
- t.mock.method(resource,'ensureEcsTestDemoOrderAdmission',async()=> 'admission_1');
+ t.mock.method(resource,'ensureEcsTestDemoOrderAdmission',async()=> {admissions++;return 'admission_1';});
  t.mock.method(resource,'ecsTestDemoPaymentAnchor',()=>({declarationId:'d1',providerTransactionId:'demo_tx',requestId:'demo_request',merchantScopeId:'demo_scope'}));
  t.mock.method(resource,'demoFinanceScope',()=> 'LOCAL_DEMO_SIMULATED');
  t.mock.method(policy,'readDistributionPolicyRowInTransaction',async()=>({knowledge:'KNOWN',policy:{} as never}));
@@ -32,7 +33,18 @@ test("demo confirmation uses transaction time once and same-key replay preserves
  });
  const options={demo:{} as never,appId:'demo_app',distribution:{} as never},actor={userId:'renter_1',sessionId:'session_1',requestId:'request_1'};
  const first=await confirmEcsDemoCheckout({} as Pool,actor,'order_1','original_key',options);
- assert.equal(captured,'2026-01-02T00:00:00.000Z');assert.equal(calls,1);
+ assert.equal(captured,'2026-01-02T00:00:00.000Z');assert.equal(calls,1);assert.equal(admissions,1);
  now='2026-01-02T00:01:00.000Z';const replay=await confirmEcsDemoCheckout({} as Pool,actor,'order_1','original_key',options);
  assert.equal(replay.replayed,true);assert.deepEqual(replay.body,first.body);assert.equal(calls,1);assert.equal(captured,'2026-01-02T00:00:00.000Z');
+ saved=undefined;paid=false;let sharedCalls=0;
+ t.mock.method(channel,'readDemoPaymentRequestForAcceptance',async()=> 'payreq_fixture');
+ t.mock.method(channel,'acceptControlledPayment',async(...[_c,input]:Parameters<typeof channel.acceptControlledPayment>)=>{sharedCalls++;assert.equal(input.requestId,'payreq_fixture');paid=true;return {payment:{confirmationId:'payment_2',disposition:'APPLIED',reasonCode:null,replay:false},anchor:null,requestState:'ACCEPTED'};});
+ const fromRequest=await confirmEcsDemoCheckout({} as Pool,actor,'order_1','channel_key',{...options,capability:{} as never});
+ assert.equal((fromRequest.body as {payment:{confirmationId:string}}).payment.confirmationId,'payment_2');assert.equal(sharedCalls,1);assert.equal(calls,1,'the original payment kernel is not invoked twice');assert.equal(admissions,1);
+ const requestReplay=await confirmEcsDemoCheckout({} as Pool,actor,'order_1','channel_key',{...options,capability:{} as never});
+ assert.equal(requestReplay.replayed,true);assert.equal(sharedCalls,1);
+ saved=undefined;paid=false;
+ t.mock.method(channel,'readDemoPaymentRequestForAcceptance',async()=>null);
+ await assert.rejects(confirmEcsDemoCheckout({} as Pool,actor,'order_1','missing_request_key',{...options,capability:{} as never}),/请先选择支付方式/);
+ assert.equal(sharedCalls,1);assert.equal(calls,1);assert.equal(admissions,1,'missing original request must not create an admission');
 });

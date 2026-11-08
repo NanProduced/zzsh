@@ -4,6 +4,7 @@ import { test } from "node:test";
 import type { AppConfig } from "../src/config/config";
 import type { INestApplication } from "@nestjs/common";
 import { loadJoinpayPayoutRuntime, type JoinpayPayoutRuntimeDocument } from "../src/finance/joinpay-payout-runtime";
+import { TEAM_TEST_WITHDRAWAL_POLICY } from "../src/finance/withdrawal-business-policy";
 import { bindPayoutProfile, describePayoutProfile, readPayoutScope, type PayoutBinding } from "../src/finance/joinpay-payout-profile";
 import { mountChannelWithdrawalRoutes } from "../src/finance/controlled-withdrawal-routes";
 import * as identity from "../src/auth/user-identity";
@@ -21,6 +22,20 @@ function document(enabled = false): JoinpayPayoutRuntimeDocument {
 }
 const environment = (d = document()): NodeJS.ProcessEnv => ({ JOINPAY_PAYOUT_ENABLED: "true", JOINPAY_PAYOUT_CONFIG: JSON.stringify(d), JOINPAY_PAYOUT_KEY_01: "SYNTHETIC_PAYOUT_KEY_ONLY" });
 const rejected = (f: () => unknown, message: string) => assert.throws(f, { name: "ConfigurationError", message });
+test("configured shared business policy must match the reviewed payout policy",()=>{
+  const d=document(true),p=d.userWithdrawal!.policy;
+  const shared={version:p.version,minCents:p.minCents,maxCents:p.maxCents,fee:p.fee,
+    frequencyBasis:p.frequencyBasis,maxIntents:p.maxIntents,reviewStrategy:p.reviewStrategy,quotaUtcOffsetMinutes:p.quotaUtcOffsetMinutes};
+  const env={...environment(d),USER_WITHDRAWAL_POLICY:JSON.stringify(shared)};
+  assert(loadJoinpayPayoutRuntime(context,fixture().options,env));
+  rejected(()=>loadJoinpayPayoutRuntime(context,fixture().options,{...env,USER_WITHDRAWAL_POLICY:JSON.stringify({...shared,maxIntents:3})}),"USER_WITHDRAWAL_POLICY_MISMATCH");
+});
+test("test-server real payout cannot silently diverge from the approved default test rules",()=>{
+  const d=document(true),testContext={...context,database:{...context.database,targetProfile:"ecs-test"} as AppConfig["database"]};
+  rejected(()=>loadJoinpayPayoutRuntime(testContext,fixture().options,environment(d)),"USER_WITHDRAWAL_POLICY_MISMATCH");
+  d.userWithdrawal!.policy={...d.userWithdrawal!.policy,...TEAM_TEST_WITHDRAWAL_POLICY};
+  assert(loadJoinpayPayoutRuntime(testContext,fixture().options,environment(d)));
+});
 function original(d = document(true)): PayoutBinding {
   const raw = d.profiles.find(p => p.operation === "SUBMIT") ?? profile("SUBMIT"), p = describePayoutProfile(bindPayoutProfile(raw)), { binding: _binding, ...rules } = raw.targetRules;
   return { intentId: "unit_original_intent", userId: actor.userId, merchantIdentityId: raw.merchantIdentityId, userNo: raw.userNo, merchantOrderNo: "UNITWITHDRAW20261025", receiverAccountNoEnc: input.cardNo,

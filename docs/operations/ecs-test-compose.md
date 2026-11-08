@@ -60,6 +60,18 @@ docker buildx build --load --resource memory=3g --resource cpu-quota=100000 --re
 
 首版关闭汇聚的真实收款、退款、出款和账户查询；测试环境可接入明确标识来源的模拟付款、退款和提现，沿用正常业务与账务约束。已迁入且状态为已实名、成年的旧用户可使用原绑定银行卡做模拟提现；这不改变实名来源或银行卡验证状态，也不会向银行打款。模拟结果不是汇聚或银行到账。真实商户联调和渠道对账后续单独安排。未支付订单占用时长须配置 `ORDER_HOLD_SECONDS` 并启用到期清理；模板的 180 秒取自 2026-11-03 旧库快照的 3 分钟设置，上线前按当前策略核对。
 
+银行卡提现的业务规则可通过 `USER_WITHDRAWAL_POLICY_FILE` 提供，文件位于 API 的受限 `.secrets/` 目录；也可二选一使用 `USER_WITHDRAWAL_POLICY`。已登记的测试模拟环境未配置时使用已确认的测试值：单笔 200–1,000,000 分、固定手续费 100 分、按北京时间每日最多两笔；处理中及成功计数，明确失败后释放次数。测试服如将来启用真实出款，其已审核的 `JOINPAY_PAYOUT_CONFIG.userWithdrawal.policy` 必须与同一业务规则一致，缺少共享配置时核对这组测试默认值；不一致则拒绝装配。正式生产未配置共享规则时保留原渠道配置的兼容路径，不自动采用测试值。
+
+共享策略 JSON 只包含 `version`、`minCents`、`maxCents`、`fee`、`frequencyBasis`、`maxIntents`、`reviewStrategy` 和 `quotaUtcOffsetMinutes`。当前测试库守卫固定上述测试规则，配置其他金额、次数、审核方式或时区时拒绝启用；更换测试规则须先更新并验证数据库守卫。运营改动须更新版本，原提现申请继续按已冻结金额处理。该配置本身不包含商户凭据，也不授予出款能力。
+
+例如，这份文件表达上述测试规则：
+
+```json
+{"version":"OWNER_LOCAL_RESTORED_20261003_v1_BANK_CARD","minCents":"200","maxCents":"1000000","fee":{"kind":"FIXED","cents":"100"},"frequencyBasis":"ACTIVE_OR_SUCCEEDED","maxIntents":2,"reviewStrategy":"VERIFIED_DIRECT_EXECUTION","quotaUtcOffsetMinutes":480}
+```
+
+使用共用支付请求的测试收银台时，还须在隔离测试库完成原测试资金登记后，由该库 schema owner 安装 `apps/api/migrations/candidates/ecs-test-demo-finance/common-payment-request.sql`。安装前核对目标库名称、OID、实例标识、marker、schema owner、已登记 runtime 及脚本摘要，暂停该库的相关写入并保留可恢复备份；整个 SQL 必须在**单个事务**中执行（例如使用 `psql --single-transaction --set ON_ERROR_STOP=1`），失败时保留原始错误并确认回滚，不对部分状态盲目重试。随后核对约束、触发器和有效权限，再启动 API；该候选只允许匹配测试库身份，不能用于生产。启动前检查测试守卫和窄权限，缺失时拒绝启用；原正式收款校验和真实渠道开关不因测试收银台放宽。
+
 ## 首次导入与启动（仅审核后执行）
 
 首版候选归档已在本机隔离 PostgreSQL 16 中验证过保留 owner/ACL 的原生恢复：预先只创建目标三角色，在目标数据库不存在时使用 `pg_restore --exit-on-error --create`，恢复后独立核对角色、权限和数据。`db-setup --roles-only` 只创建角色，供这一受审路径使用；无参数仍创建角色和空数据库。两种方式不能混用；`--create` 不是单事务，失败须保留现场并核对，不能盲目重试或自动删除目标。实际 ECS 连接、部署步骤和权限仍须经 Owner 审核并在目标复核。

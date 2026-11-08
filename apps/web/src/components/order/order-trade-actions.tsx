@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import Link from "next/link";
 import { QRCodeSVG } from "qrcode.react";
+import * as Dialog from "@radix-ui/react-dialog";
 import { AlertCircle, CheckCircle2, CircleSlash, Clock3, RefreshCw, WalletCards } from "lucide-react";
 import { useUserSession } from "@/components/session/user-session-provider";
 import { useIdentityReset } from "@/components/session/identity-reset";
@@ -174,9 +175,13 @@ function channelPaymentUrl(value: unknown): string | null {
 }
 function channelApplied(view: ChannelPaymentView | null): boolean {
   const payment = view?.payment;
-  return view?.dataOrigin === "JOINPAY_PROVIDER" && payment?.disposition === "APPLIED" && typeof payment.confirmationId === "string" && payment.confirmationId.length > 0
+  const acceptedSource = view?.dataOrigin === "JOINPAY_PROVIDER" || view?.dataOrigin === "LOCAL_CONTROLLED"
+    && view.capability?.evidenceProfile === "CONTROLLED_TEST" && view.capability.productionPaymentCapability === false;
+  return acceptedSource && payment?.disposition === "APPLIED" && typeof payment.confirmationId === "string" && payment.confirmationId.length > 0
     && payment.amount?.currency === "CNY" && typeof payment.amount.cents === "string" && /^[1-9][0-9]{0,15}$/.test(payment.amount.cents);
 }
+
+const ignoreDemoMode = () => {};
 
 /** 新渠道独立保留原键；普通刷新只读本地状态，不把旧受控请求当作渠道付款。 */
 function ChannelPaymentAction({ order, blocked, onChanged, onModeChange, onPendingChange, children }: {
@@ -186,10 +191,11 @@ function ChannelPaymentAction({ order, blocked, onChanged, onModeChange, onPendi
   const [snapshot, setSnapshot] = useState<{ userId: string; orderId: string; view: ChannelPaymentView } | null>(null);
   const [readError, setReadError] = useState<string | null>(null), [notice, setNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState(false), [reading, setReading] = useState(true);
+  const [cashierOpen, setCashierOpen] = useState(false), [cashierPending, setCashierPending] = useState(false);
   const [method, setMethod] = useState<ChannelPaymentMethod>("ALIPAY_NATIVE");
   const autoOpenedGroup = useRef(false);
   const latest = useRef({ orderId: order.id, onChanged }); latest.current = { orderId: order.id, onChanged };
-  const reset = useCallback(() => { setSnapshot(null); setReadError(null); setNotice(null); setBusy(false); setReading(true); setMethod("ALIPAY_NATIVE"); }, []);
+  const reset = useCallback(() => { setSnapshot(null); setReadError(null); setNotice(null); setBusy(false); setReading(true); setMethod("ALIPAY_NATIVE"); setCashierOpen(false); setCashierPending(false); }, []);
   const { userId, isCurrent } = useIdentityReset(session, reset);
   const identity = useRef(isCurrent); identity.current = isCurrent;
   const mounted = useRef(false);
@@ -198,9 +204,13 @@ function ChannelPaymentAction({ order, blocked, onChanged, onModeChange, onPendi
   if (visibleOrder !== order.id) { setVisibleOrder(order.id); reset(); }
   const view = snapshot?.userId === userId && snapshot.orderId === order.id ? snapshot.view : null;
   const pending = userId ? inspectIntent(userId, "order.channel-payment", order.id) : { state: "NONE" as const, intent: null };
-  const active = pending.state === "VALID" || !!view && view.dataOrigin !== "LOCAL_CONTROLLED" && (view.capability?.channelEnabled === true && view.capability.productionPaymentCapability === true
-    || ["JOINPAY_CANDIDATE", "JOINPAY_PROVIDER"].includes(view.dataOrigin));
-  const unsettled = busy || pending.state === "VALID" || active && (pending.state === "UNREADABLE" || view?.payment != null
+  const previousDemoPending = userId ? inspectIntent(userId, "order.demo-checkout", order.id) : { state: "NONE" as const, intent: null };
+  const conflictingIntents = pending.state !== "NONE" && previousDemoPending.state !== "NONE";
+  const testMode = view?.dataOrigin === "LOCAL_CONTROLLED" && view.capability?.productionPaymentCapability === false;
+  const active = conflictingIntents || pending.state === "VALID" || !!view && (testMode && (previousDemoPending.state === "NONE" || cashierPending) && view.capability.channelEnabled === true
+    || view.dataOrigin !== "LOCAL_CONTROLLED" && (view.capability?.channelEnabled === true && view.capability.productionPaymentCapability === true
+      || ["JOINPAY_CANDIDATE", "JOINPAY_PROVIDER"].includes(view.dataOrigin)));
+  const unsettled = busy || cashierPending || conflictingIntents || pending.state === "VALID" || active && (pending.state === "UNREADABLE" || view?.payment != null
     || view?.request != null && !["ACTION_READY", "REJECTED_BY_CHANNEL"].includes(view.request.state));
   useEffect(() => { onModeChange(active); onPendingChange(unsettled); }, [active, unsettled, onModeChange, onPendingChange]);
   useEffect(() => () => { onModeChange(false); onPendingChange(false); }, [onModeChange, onPendingChange]);
@@ -236,7 +246,7 @@ function ChannelPaymentAction({ order, blocked, onChanged, onModeChange, onPendi
       if (body.method !== "ALIPAY_NATIVE" && body.method !== "WEIXIN_NATIVE") throw new OrderRequestError(400, null);
       const receipt = await orderApi.requestChannelPayment(acting, expected, body.method, key);
       const amount = receipt?.request?.amount;
-      if (receipt?.contractVersion !== "order-payment-request.v1" || receipt.dataOrigin !== "JOINPAY_CANDIDATE" || typeof receipt.replay !== "boolean"
+      if (receipt?.contractVersion !== "order-payment-request.v1" || receipt.dataOrigin !== (testMode ? "LOCAL_CONTROLLED" : "JOINPAY_CANDIDATE") || typeof receipt.replay !== "boolean"
         || receipt.request?.orderId !== expected || receipt.request.method !== body.method || typeof receipt.request.id !== "string" || !receipt.request.id
         || typeof receipt.request.createdAt !== "string" || !Number.isFinite(Date.parse(receipt.request.createdAt)) || typeof receipt.request.updatedAt !== "string" || !Number.isFinite(Date.parse(receipt.request.updatedAt))
         || amount?.currency !== "CNY" || typeof amount.cents !== "string" || !/^[1-9][0-9]{0,15}$/.test(amount.cents)
@@ -278,14 +288,22 @@ function ChannelPaymentAction({ order, blocked, onChanged, onModeChange, onPendi
     }
   };
   const applied = channelApplied(view);
+  const cashier = testMode && view?.capability.channelEnabled === true && view.payment === null
+    && view.request?.state === "ACTION_READY" && view.request.amount?.currency === "CNY"
+    && /^[1-9][0-9]{0,15}$/.test(view.request.amount.cents) && view.paymentAction?.kind === "TEST_CASHIER"
+    && ["ECS_TEST_SIMULATED", "LOCAL_DEMO_SIMULATED"].includes(view.paymentAction.scope) ? view.paymentAction : null;
+  const cashierRequestId = cashier ? view?.request?.id : null;
+  useEffect(() => { if (cashierRequestId) setCashierOpen(true); }, [cashierRequestId]);
   // 付款成功是用户此刻最关心的事件：付款页直接打开本单群。每个浏览器会话只主动开一次。
-  useEffect(() => {
-    if (!applied || autoOpenedGroup.current) return;
+  const openPaidOrderGroup = useCallback(() => {
+    if (autoOpenedGroup.current) return;
     autoOpenedGroup.current = true;
     const key = `zzsh:order-group-autopen:${order.id}`;
     try { if (window.sessionStorage.getItem(key)) return; window.sessionStorage.setItem(key, "1"); } catch { /* sessionStorage is optional */ }
     window.dispatchEvent(new CustomEvent("zzsh:order-groups", { detail: { party: "renter", orderId: order.id } }));
-  }, [applied, order.id]);
+  }, [order.id]);
+  useEffect(() => { if (applied) openPaidOrderGroup(); }, [applied, openPaidOrderGroup]);
+  if (conflictingIntents) return <p className="order-inline-notice" role="alert">本单有待核对的原支付请求，请联系客服协助处理。</p>;
   if (!active) return <>{reading ? <p className="order-muted" role="status">正在读取支付方式…</p> : children}</>;
   const methods = (view?.capability?.methods ?? []).filter(m => m === "ALIPAY_NATIVE" || m === "WEIXIN_NATIVE");
   const selected = view?.request?.method ?? pending.intent?.body?.method ?? method;
@@ -297,7 +315,7 @@ function ChannelPaymentAction({ order, blocked, onChanged, onModeChange, onPendi
     && view.paymentAction?.kind === "QR_URL" ? channelPaymentUrl(view.paymentAction.url) : null;
   const queryOpen = !!view?.request && !applied && view.dataOrigin === "JOINPAY_CANDIDATE"
     && ["SUBMITTING", "UNKNOWN", "PROCESSING_UNCONFIRMED", "ACTION_READY"].includes(view.request.state);
-  const mayStart = payable && view?.capability.channelEnabled === true && view.capability.productionPaymentCapability === true
+  const mayStart = payable && view?.capability.channelEnabled === true && (view.capability.productionPaymentCapability === true || testMode)
     && view.payment === null && view.request === null && pending.state === "NONE" && methods.includes(method) && !blocked;
   const capabilityOff = Boolean(view?.dataOrigin === "JOINPAY_CANDIDATE" && view.payment === null && !view.request
     && (view.capability.channelEnabled !== true || view.capability.productionPaymentCapability !== true));
@@ -306,7 +324,7 @@ function ChannelPaymentAction({ order, blocked, onChanged, onModeChange, onPendi
     && view.dataOrigin === "JOINPAY_CANDIDATE" && view.capability.channelEnabled === true && view.capability.productionPaymentCapability === true
     && ["ACTION_READY", "PROCESSING_UNCONFIRMED"].includes(view.request.state) && view.projection?.actionBlockedReason === null && !url);
   return <div className="order-channel-payment" aria-busy={busy || reading}>
-    <p role="status">{applied ? "渠道付款已接纳" : view?.dataOrigin === "LOCAL_CONTROLLED" ? "当前付款记录属于本地测试支付" : view?.request && view.dataOrigin === "SYNTHETIC_PROTOCOL" ? "协议测试记录，不代表真实付款" : view?.payment?.disposition === "REVIEW_REQUIRED" ? "支付需要人工核对" : view?.payment?.disposition === "APPLIED" ? "付款依据未记录" : view?.request ? channelStateLabels[view.request.state] ?? "支付状态未记录" : "请选择支付方式"}</p>
+    <p role="status">{applied ? testMode ? "付款已记录" : "渠道付款已接纳" : testMode ? view?.request ? "等待付款" : "请选择支付方式" : view?.request && view.dataOrigin === "SYNTHETIC_PROTOCOL" ? "协议测试记录，不代表真实付款" : view?.payment?.disposition === "REVIEW_REQUIRED" ? "支付需要人工核对" : view?.payment?.disposition === "APPLIED" ? "付款依据未记录" : view?.request ? channelStateLabels[view.request.state] ?? "支付状态未记录" : "请选择支付方式"}</p>
     {view?.request ? <p className="order-muted">本次请求金额：{channelMoneyText(view.request.amount)}。支付方式与原请求保持一致。</p> : null}
     {url ? <figure className="order-channel-code"><QRCodeSVG value={url} size={176} level="M" marginSize={4} role="img" aria-label="本单支付二维码" /><figcaption className="order-muted">请使用{view?.request?.method === "WEIXIN_NATIVE" ? "微信" : "支付宝"}扫描本单二维码。二维码有效期未确认，请以渠道提示为准。</figcaption></figure> : null}
     {capabilityOff ? <p className="order-inline-notice" role="status">当前环境未开放真实渠道支付；本页不会生成支付参数，也不会自动改用其他收款方式。</p> : null}
@@ -317,12 +335,23 @@ function ChannelPaymentAction({ order, blocked, onChanged, onModeChange, onPendi
     </select></label> : null}
     {pending.state === "UNREADABLE" || notice || readError ? <p className="order-inline-notice" role="alert">{pending.state === "UNREADABLE" ? "原支付请求恢复记录无法读取，已停止提交；请刷新状态或联系平台核对。" : notice ?? readError}</p> : null}
     <div className="order-trade-actions">
-      {mayStart ? <button type="button" className="button" disabled={busy || reading} onClick={() => void submit()}>获取支付参数</button> : null}
+      {mayStart ? <button type="button" className="button" disabled={busy || reading} onClick={() => void submit()}>{testMode ? "去支付" : "获取支付参数"}</button> : null}
+      {cashier ? <button type="button" className="button" disabled={busy || reading} onClick={() => setCashierOpen(true)}>打开支付</button> : null}
     {queryOpen ? <button type="button" className="button secondary button--sm" disabled={busy || reading || blocked} onClick={() => void queryChannel()}>{busy ? "查询渠道结果…" : "查询渠道结果"}</button> : null}
       {url ? <a className="button" href={url} target="_blank" rel="noopener noreferrer" referrerPolicy="no-referrer">打开支付页面</a> : null}
       <button type="button" className="button secondary button--sm" disabled={busy || reading || !userId} onClick={() => userId && void refresh(userId, undefined, true)}>刷新支付状态</button>
       {pending.state === "VALID" && !applied ? <button type="button" className="button secondary button--sm" disabled={busy || reading || blocked} onClick={() => void submit(true)}>恢复原请求回执</button> : null}
     </div>
+    {cashier ? <Dialog.Root open={cashierOpen} onOpenChange={open => { if (!open && cashierPending) return; setCashierOpen(open); }}>
+      <Dialog.Portal><Dialog.Overlay className="modal-overlay" /><Dialog.Content className="order-cashier-dialog">
+        <Dialog.Title>扫码支付</Dialog.Title>
+        <Dialog.Description>订单金额 {channelMoneyText(view?.request?.amount ?? null)} · {selected === "WEIXIN_NATIVE" ? "微信支付" : "支付宝"}</Dialog.Description>
+        <div className="order-cashier-code" aria-label="测试二维码区域，不可扫码" />
+        <p className="order-muted">测试环境无需真实扫码，点击下方按钮模拟付款。</p>
+        <DemoCheckoutAction order={order} blocked={blocked} onChanged={onChanged} onAccepted={openPaidOrderGroup} onModeChange={ignoreDemoMode} onPendingChange={setCashierPending} embedded expectedScope={cashier.scope}>{null}</DemoCheckoutAction>
+        <Dialog.Close asChild><button type="button" className="button secondary" disabled={cashierPending}>稍后支付</button></Dialog.Close>
+      </Dialog.Content></Dialog.Portal>
+    </Dialog.Root> : null}
     <p className="order-trade-note">打开支付页面不代表付款成功；付款状态以平台接纳记录为准，支付后仍须完成交付与开租确认。</p>
   </div>;
 }
@@ -404,8 +433,9 @@ export function LocalSandboxPaymentAction({ order, blocked, onChanged, onModeCha
   </div>;
 }
 
-export function DemoCheckoutAction({ order, blocked, onChanged, onModeChange, onPendingChange, children }: {
+export function DemoCheckoutAction({ order, blocked, onChanged, onAccepted, onModeChange, onPendingChange, children, embedded = false, expectedScope }: {
   order: Order; blocked: boolean; onChanged: () => void; onModeChange: (active: boolean) => void; onPendingChange: (pending: boolean) => void; children: ReactNode;
+  embedded?: boolean; expectedScope?: "ECS_TEST_SIMULATED" | "LOCAL_DEMO_SIMULATED"; onAccepted?: () => void;
 }) {
   const session = useUserSession();
   const [discovery, setDiscovery] = useState<"CHECKING" | "AVAILABLE" | "NOT_INSTALLED" | "FAILED">("CHECKING");
@@ -428,13 +458,16 @@ export function DemoCheckoutAction({ order, blocked, onChanged, onModeChange, on
     const controller = new AbortController(), acting = userId, expected = order.id;
     setDiscovery("CHECKING"); setView(null);
     void orderApi.demoCheckoutAvailability(acting, expected, controller.signal).then(next => {
-      if (!controller.signal.aborted && mounted.current && latest.current.isCurrent(acting) && latest.current.orderId === expected) { setView(next); setDiscovery("AVAILABLE"); }
+      if (!controller.signal.aborted && mounted.current && latest.current.isCurrent(acting) && latest.current.orderId === expected) {
+        if (expectedScope && next.scope !== expectedScope) { setDiscovery("FAILED"); return; }
+        setView(next); setDiscovery("AVAILABLE");
+      }
     }).catch(error => {
       if (!controller.signal.aborted && mounted.current && latest.current.isCurrent(acting) && latest.current.orderId === expected)
         setDiscovery(error instanceof OrderRequestError && error.status === 404 ? "NOT_INSTALLED" : "FAILED");
     });
     return () => controller.abort();
-  }, [userId, order.id, retry]);
+  }, [userId, order.id, retry, expectedScope]);
   const submit = async () => {
     if (!userId || busy || blocked || !view?.checkoutEnabled || pending.state !== "NONE" || !paymentEntryOpen(order)) return;
     const acting = userId, expected = order.id; setBusy(true); setNotice(null);
@@ -447,7 +480,7 @@ export function DemoCheckoutAction({ order, blocked, onChanged, onModeChange, on
     });
     if (!mounted.current || !isCurrent(acting) || latest.current.orderId !== expected) return;
     setBusy(false);
-    if (outcome.status === "ok") { setCompleted(true); setNotice("模拟付款已完成，不会真实扣款。"); latest.current.onChanged(); }
+    if (outcome.status === "ok") { setCompleted(true); setNotice("模拟付款已完成，不会真实扣款。"); onAccepted?.(); latest.current.onChanged(); }
     else if (outcome.status === "blocked") setNotice(BLOCKED_MESSAGE);
     else if (outcome.status === "unauthorized") { setNotice(AUTH_MESSAGE); void session.confirm(); }
     else if (outcome.status === "unknown" || outcome.status === "recovery-unresolved") setNotice("模拟付款结果尚未确认；请查询原请求，不要重复提交。");
@@ -462,7 +495,7 @@ export function DemoCheckoutAction({ order, blocked, onChanged, onModeChange, on
       if (!mounted.current || !isCurrent(acting) || latest.current.orderId !== expected) return;
       if (result.scope !== original.context?.scope) throw new OrderRequestError(502, null);
       if (result.knowledge !== "KNOWN" || !result.receipt) { setNotice("原模拟付款结果尚未确认，请稍后再次查询或联系客服。"); return; }
-      clearIntent(acting, "order.demo-checkout", expected); setCompleted(true); setNotice("模拟付款已完成，不会真实扣款。"); latest.current.onChanged();
+      clearIntent(acting, "order.demo-checkout", expected); setCompleted(true); setNotice("模拟付款已完成，不会真实扣款。"); onAccepted?.(); latest.current.onChanged();
     } catch { if (mounted.current && isCurrent(acting) && latest.current.orderId === expected) setNotice("原模拟付款结果暂时无法读取，请稍后再查询或联系客服。"); }
     finally { if (mounted.current && isCurrent(acting) && latest.current.orderId === expected) setBusy(false); }
   };
@@ -470,14 +503,13 @@ export function DemoCheckoutAction({ order, blocked, onChanged, onModeChange, on
   if (discovery === "CHECKING" && pending.state !== "VALID") return <p className="order-muted" role="status">正在读取付款方式…</p>;
   if (discovery === "FAILED" && pending.state !== "VALID") return <div className="order-inline-notice" role="alert">付款方式暂时无法确认，请重试或联系平台。 <button type="button" className="button secondary button--sm" onClick={() => setRetry(value => value + 1)}>重试</button></div>;
   return <div className="order-local-checkout" aria-label="测试付款" aria-busy={busy || discovery === "CHECKING"}>
-    <strong>测试付款</strong>
-    <p className="order-inline-notice">这是模拟付款，不会向支付机构或银行发起扣款。</p>
+    {!embedded ? <><strong>测试付款</strong><p className="order-inline-notice">这是模拟付款，不会向支付机构或银行发起扣款。</p></> : null}
     {discovery === "CHECKING" ? <p role="status">正在确认本单是否可以模拟付款…</p> : null}
     {discovery === "FAILED" || discovery === "NOT_INSTALLED" ? <p role="alert">模拟付款暂时无法确认，请重试或联系平台。</p> : null}
     {discovery === "AVAILABLE" && !view?.checkoutEnabled && pending.state === "NONE" && !completed ? <p role="status">本单当前不能模拟付款，请刷新订单查看最新状态。</p> : null}
     {pending.state === "UNREADABLE" ? <p role="alert">原请求记录无法读取，请保留本页并联系客服核对。</p> : notice ? <p role="status">{notice}</p> : null}
     <div className="order-trade-actions">
-      {view?.checkoutEnabled && pending.state === "NONE" && !completed && paymentEntryOpen(order) ? <button type="button" className="button" disabled={busy || blocked} onClick={() => void submit()}>{busy ? "处理中…" : "确认模拟付款"}</button> : null}
+      {view?.checkoutEnabled && pending.state === "NONE" && !completed && paymentEntryOpen(order) ? <button type="button" className="button" disabled={busy || blocked} onClick={() => void submit()}>{busy ? "处理中…" : embedded ? "模拟付款" : "确认模拟付款"}</button> : null}
       {pending.state === "VALID" ? <button type="button" className="button secondary" disabled={busy || blocked} onClick={() => void recover()}>查询原付款结果</button> : null}
       {discovery === "FAILED" ? <button type="button" className="button secondary" disabled={busy} onClick={() => setRetry(value => value + 1)}>重试</button> : null}
     </div>

@@ -3,6 +3,7 @@ import type { AuthRuntimeOptions } from "../auth/auth-runtime";
 import { assertPayoutProfile, bindPayoutProfile, createPayoutScope, describePayoutProfile, type PayoutProfileInput, type PayoutProfileOperation } from "./joinpay-payout-profile";
 import { createBankBoundWithdrawalOptions, type WithdrawalBankPolicy } from "./joinpay-withdrawal-bank-source";
 import type { WithdrawalBankBindingOptions } from "./withdrawal-bank-binding";
+import { assertWithdrawalBusinessPolicyMatches, loadWithdrawalBusinessPolicy, TEAM_TEST_WITHDRAWAL_POLICY } from "./withdrawal-business-policy";
 
 type Assembly = NonNullable<AuthRuntimeOptions["joinpayWithdrawal"]>;
 type Context = Pick<AppConfig, "provider" | "database"> & { authEnabled: boolean };
@@ -54,6 +55,9 @@ export function loadJoinpayPayoutRuntime(context: Context, bankBinding?: Withdra
     if (d.newRequestsEnabled) {
       if (!bankBinding?.protection || !id(d.submitProfileId) || !r || !d.userWithdrawal || !object(d.userWithdrawal)
         || !id(d.userWithdrawal.identityProvider) || Object.keys(d.userWithdrawal).some(k => !["policy", "identityProvider", "targetEncoding", "destinationAuthorization"].includes(k))) return fail("JOINPAY_PAYOUT_USER_SOURCE_UNAVAILABLE");
+      const businessPolicy=loadWithdrawalBusinessPolicy(env,workingDirectory)
+        ?? (context.database.targetProfile==="ecs-test"?TEAM_TEST_WITHDRAWAL_POLICY:undefined);
+      if(businessPolicy)assertWithdrawalBusinessPolicyMatches(businessPolicy,d.userWithdrawal.policy);
       routes = createBankBoundWithdrawalOptions({ scope, profile: selected("SUBMIT", d.submitProfileId), bankBinding, ...d.userWithdrawal });
     }
     const profileFor: NonNullable<Assembly["execution"]>["profileFor"] = (operation, original, pinned) => {

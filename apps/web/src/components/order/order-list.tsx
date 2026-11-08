@@ -4,7 +4,7 @@ import Link from "next/link";
 import { useEffect, useState, type FormEvent, type MouseEvent as ReactMouseEvent } from "react";
 import { AlertCircle, Check, ChevronDown, ChevronRight, Copy, Info, RefreshCw, RotateCcw, Search } from "lucide-react";
 import { orderItemKey, formatOrderTime as timeText, type FulfillmentAssignment, type Order, type OrderLine, type OrderPage, type OrderParty, type OrderRequestError, type OrderStatusFilter, type OrderSearchFilters } from "@/lib/order-client";
-import { groupedInteger, isSimulatedOrderPayment, orderAccountTitle, orderAmountFacts, orderListFulfillmentTag, orderRentalModeLabel, orderSettlementStageLabel, paymentEntryOpen } from "@/lib/order-display";
+import { groupedInteger, orderAccountTitle, orderAmountFacts, orderListFulfillmentTag, orderRentalModeLabel, orderSettlementStageLabel, paymentEntryOpen } from "@/lib/order-display";
 import { OrderError, OrderStatusBadge, orderTermLabel, orderUrl, STATUS_LABELS } from "@/components/order/order-presentation";
 import { DatePicker, FormSelect } from "@/components/ui/form-controls";
 import "./order.css";
@@ -162,7 +162,6 @@ function ListRow({ party, order, status, accountId, filters, onOpen }: { party: 
         {loginMethod ? <span className="order-row-tag order-row-login">{loginMethod}</span> : null}
         <Link className="order-row-title" href={orderUrl(party, status, accountId, order.id, order.source?.origin, filters)} scroll={false} data-order-id={order.id} data-order-key={orderItemKey(order)} aria-label={[action, order.displayNo ? `订单号 ${order.displayNo}` : null, title].filter(Boolean).join("，")} onClick={(event) => onOpen(orderItemKey(order), event)}>{title}</Link>
         {stageTag ? <span className="order-row-tag order-row-stage" data-fulfillment-stage={stageTag.code}>{stageTag.label}</span> : null}
-        {isSimulatedOrderPayment(order) ? <span className="order-row-tag">模拟付款</span> : null}
         {modeLabel ? <span className="order-row-tag" data-mode={order.quote?.rentalMode}>{modeLabel}</span> : null}
         {!order.listingFacts && order.listingFactsUnknownReason ? <span className="order-row-tag">资料未确认</span> : null}
       </div>

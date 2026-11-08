@@ -8,9 +8,10 @@ import type { PaymentDistributionStore } from "../finance/distribution-payment-s
 import { readDistributionPolicyRowInTransaction } from "../finance/distribution-policy-store";
 import { conflict, fingerprintRequest, invalid, notFound, withIdempotency } from "../supply/supply-util";
 import { confirmOrderPayment, createEcsDemoControlledPaymentSource, type PaymentInput } from "./payment-confirmation";
+import { acceptControlledPayment, readDemoPaymentRequestForAcceptance, type SyntheticRequestCapability } from "./channel-payment-store";
 
 type Actor = UserContext & { requestId: string };
-export type EcsDemoCheckoutOptions = Readonly<{ demo: DemoFinanceResource; appId: string; distribution: PaymentDistributionStore }>;
+export type EcsDemoCheckoutOptions = Readonly<{ demo: DemoFinanceResource; appId: string; distribution: PaymentDistributionStore; capability?: SyntheticRequestCapability }>;
 type Order = { id: string; display_no: string; status: string; currency: string; amount_cents: string; created_at: string; hold_until: string };
 const operation = "ecs-demo.checkout.confirm.v1";
 const validId = (value: unknown): value is string => typeof value === "string" && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(value);
@@ -65,9 +66,9 @@ export async function readEcsDemoCheckoutAvailability(pool: Pool, actor: Actor, 
 export async function confirmEcsDemoCheckout(pool: Pool, actor: Actor, orderId: string, keyValue: unknown, options: EcsDemoCheckoutOptions) {
   if (!validId(orderId) || !validId(options.appId)) throw invalid();
   const key = validateIdempotencyKey(keyValue);
-  // The admission's FK must commit before the payment kernel takes invitation-graph locks.
-  // This first transaction contains no payment or money movement.
-  await command(pool, key, async c => {
+  // The legacy direct checkout must commit its admission before payment locks.
+  // A common payment request already committed that admission when it was created.
+  if (!options.capability) await command(pool, key, async c => {
     await assertEcsTestDemoResource(c, options.demo); await assertUserContextInTransaction(c, actor, "READ");
     const order = await ownOrder(c, actor, orderId, true), at = await now(c);
     if ((await readDistributionPolicyRowInTransaction(c, false, "NATIVE")).knowledge !== "KNOWN") throw unavailable();
@@ -92,7 +93,11 @@ export async function confirmEcsDemoCheckout(pool: Pool, actor: Actor, orderId: 
           providerTransactionId: anchor.providerTransactionId, providerPaidAt: at, requestId: anchor.requestId };
         const source = createEcsDemoControlledPaymentSource({ demo: options.demo, payerUserId: actor.userId,
           payerSessionId: actor.sessionId, checkoutExpiresAt: expiresAt, appId: options.appId });
-        const payment = await confirmOrderPayment(c, source(input), options.distribution);
+        const request = options.capability ? await readDemoPaymentRequestForAcceptance(c, { orderId, capability: options.capability }) : null;
+        if (options.capability && !request) throw conflict("请先选择支付方式并打开收银台");
+        const fact = source(input);
+        const payment = request ? (await acceptControlledPayment(c, { fact, distribution: options.distribution, requestId: request })).payment
+          : await confirmOrderPayment(c, fact, options.distribution);
         if (payment.disposition !== "APPLIED" || payment.reasonCode !== null) throw conflict("测试付款未完成，请查询原请求");
         await recordAudit(c, { actorType: "user", actorId: actor.userId, sessionId: actor.sessionId, requestId: actor.requestId,
           action: "ecs.demo.checkout.confirmed", objectType: "rental_order", objectId: orderId, outcome: "SUCCESS",

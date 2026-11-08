@@ -7,8 +7,8 @@ import { validateIdempotencyKey } from "../contracts/api-v1";
 import { canonicalize } from "../supply/content-hash";
 import { conflict, ensureOnlyFields, fingerprintRequest, invalid, notFound, withIdempotency } from "../supply/supply-util";
 import { readWithdrawalBankBinding } from "./withdrawal-bank-binding";
-import { localWithdrawalDayWindow, ownerLocalWithdrawalPolicy } from "./controlled-withdrawal";
-import { assertRegisteredWithdrawalResource, withdrawalRegistration, type RegisteredWithdrawalResource } from "./native-withdrawal-resource";
+import { localWithdrawalDayWindow, withdrawalPolicyForScope } from "./controlled-withdrawal";
+import { assertRegisteredWithdrawalResource, nativeWithdrawalSandbox, withdrawalRegistration, type NativeWithdrawalScope, type RegisteredWithdrawalResource } from "./native-withdrawal-resource";
 import { assertDemoWithdrawalIdentity } from "./demo-withdrawal-identity";
 
 type Actor = UserContext & { requestId: string };
@@ -41,9 +41,10 @@ async function originalTarget(c: PoolClient, sandbox: RegisteredWithdrawalResour
 
 /** Declares one immutable local target from the authenticated subject's existing masked bank binding.
  * It does not reserve a cent, establish coverage/KYC, change the binding, or call a bank/provider. */
-export async function declareLocalSandboxWithdrawalTarget(pool: Pool, actor: Actor, body: Record<string, unknown>, keyValue: unknown, sandbox: RegisteredWithdrawalResource) {
+export async function declareLocalSandboxWithdrawalTarget(pool: Pool, actor: Actor, body: Record<string, unknown>, keyValue: unknown, sandbox: RegisteredWithdrawalResource, scope?:NativeWithdrawalScope) {
   const input = targetInput(body), key = validateIdempotencyKey(keyValue), p = withdrawalRegistration(sandbox);
-  const policy = ownerLocalWithdrawalPolicy("BANK_CARD", [actor.userId]);
+  if((scope&&nativeWithdrawalSandbox(scope)!==sandbox)||(sandbox.kind!=="REGISTERED_LOCAL_FINANCIAL_SANDBOX"&&!scope))throw invalid("Matching withdrawal scope required");
+  const policy = withdrawalPolicyForScope(scope,"BANK_CARD", [actor.userId]);
   if (BigInt(input.amountCents) < BigInt(policy.minCents) || BigInt(input.amountCents) > BigInt(policy.maxCents)) {
     if (sandbox.kind !== "REGISTERED_LOCAL_FINANCIAL_SANDBOX") throw new SecurityApiError(422, "DEMO_WITHDRAW_AMOUNT_OUT_OF_RANGE", "模拟提现金额超出允许范围");
     throw conflict("Withdrawal limit reached");

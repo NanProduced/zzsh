@@ -11,7 +11,7 @@ const root=resolve(fileURLToPath(new URL('../..',import.meta.url))),require=crea
 const modules=require(join(root,'apps/api/dist/src/finance/ecs-test-demo-resource')),runtime=require(join(root,'apps/api/dist/src/finance/ecs-test-demo-runtime'));
 const id='admin_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',nonce='a11111111111111111111111',db='zzsh_test_r07_delivery_20261108';
 const opts={host:'127.0.0.1',port:55434,database:db,max:1},superPool=new Pool({...opts,user:'postgres'}),migration=new Pool({...opts,user:'zzsh_regression_migration'}),runtimePool=new Pool({...opts,user:'zzsh_regression_runtime'});
-const names=['registration.sql','controlled-payment-schema.sql','new-order-payment.sql','demo-refund.sql','demo-withdrawal.sql','demo-legacy-refund.sql','demo-prestart-refund.sql','demo-support-cancel.sql','grant-runtime.sql','enroll-native-wallet.sql'];
+const names=['registration.sql','controlled-payment-schema.sql','new-order-payment.sql','demo-refund.sql','demo-withdrawal.sql','demo-legacy-refund.sql','demo-prestart-refund.sql','demo-support-cancel.sql','grant-runtime.sql','enroll-native-wallet.sql','common-payment-request.sql'];
 const sql=Object.fromEntries(names.map(n=>[n,readFileSync(join(root,'apps/api/migrations/candidates/ecs-test-demo-finance',n),'utf8')]));
 const sha=x=>createHash('sha256').update(x).digest('hex');
 async function test(){const proxy=net.createServer(s=>{const t=net.connect(5432,'127.0.0.1');s.pipe(t);t.pipe(s);s.on('error',()=>t.destroy());t.on('error',()=>s.destroy())});await new Promise((ok,fail)=>{proxy.once('error',fail);proxy.listen(55434,'127.0.0.1',ok)});
@@ -45,13 +45,15 @@ async function test(){const proxy=net.createServer(s=>{const t=net.connect(5432,
    assert.equal(commitSent,true); // Do not retry or issue ROLLBACK after an unknown commit.
    const row=(await c.query(`SELECT registration_digest,active FROM zzsh_order.ecs_test_demo_finance_registration WHERE reference='synthetic_install'`)).rows;assert.deepEqual(row,[{registration_digest:registration.digest,active:true}]);
    const audit=(await c.query(`SELECT count(*)::int n FROM zzsh_iam.audit_event WHERE action='demo.finance.installed' AND request_id='synthetic_attempt'`)).rows[0];assert.equal(audit.n,1);
+   // The historical installer stays unchanged; the cashier upgrade is a separate atomic step.
+   await c.query('BEGIN');await c.query(sql['common-payment-request.sql']);await c.query('COMMIT');
    await runtime.preflightEcsTestDemoRuntime(runtimePool,assembly);
    await c.query('BEGIN READ ONLY');assert.equal(await verifyDemoInstallGuardReadback(c),9);await c.query('ROLLBACK');
    await c.query('BEGIN');await c.query(`CREATE OR REPLACE FUNCTION zzsh_order.support_cancel_payment_basis_valid(b jsonb) RETURNS boolean LANGUAGE sql AS $$ SELECT false $$`);
    await assert.rejects(verifyDemoInstallGuardReadback(c),/DEMO_INSTALL_GUARD_READBACK_MISMATCH/);await c.query('ROLLBACK');
    await c.query('BEGIN READ ONLY');assert.equal(await verifyDemoInstallGuardReadback(c),9);await c.query('ROLLBACK');
    await c.query('BEGIN READ ONLY');await assert.rejects(readDemoInstallPreimage(c,id),/DEMO_INSTALL_PREIMAGE_CHANGED/);await c.query('ROLLBACK');
-   console.log(JSON.stringify({status:'PASS',scope:'independent synthetic PG16 with fictitious Boss',assertions:['exact synthetic resource','wrong identity no write','expired window rollback','DDL failure rollback','eight DDL registration/ACL single transaction','commit ACK intentionally lost','same original registration and one audit verified','nine guard hashes and tamper refusal','runtime preflight','second install refused'],notRun:['CLI restricted files','real 55434','ECS','real providers']}));
+   console.log(JSON.stringify({status:'PASS',scope:'independent synthetic PG16 with fictitious Boss',assertions:['exact synthetic resource','wrong identity no write','expired window rollback','DDL failure rollback','eight DDL registration/ACL single transaction','commit ACK intentionally lost','same original registration and one audit verified','common cashier upgrade transaction','nine guard hashes and tamper refusal','runtime preflight','second install refused'],notRun:['CLI restricted files','real 55434','ECS','real providers']}));
   }finally{c.release();}
  }finally{await Promise.all([migration.end(),runtimePool.end()]);await new Promise(ok=>proxy.close(ok));}}
 test().catch(e=>{console.error(e);process.exitCode=1});

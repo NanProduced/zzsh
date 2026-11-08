@@ -4,6 +4,8 @@ import { conflict, ensureOnlyFields, forbidden, invalid, notFound, requiredStrin
 import { canonicalize } from '../supply/content-hash';
 import { exactCents } from './personal-finance-read';
 import { calculateWithdrawalAmounts, planWithdrawalLedger, type WithdrawalLedgerPlan } from './withdrawal-ledger';
+import { demoNativeWithdrawalPolicy, type NativeWithdrawalScope } from './native-withdrawal-resource';
+import { TEAM_TEST_WITHDRAWAL_POLICY } from './withdrawal-business-policy';
 export type { WithdrawalLedgerPlan } from './withdrawal-ledger';
 
 export type ControlledWithdrawalPolicy = {
@@ -107,8 +109,16 @@ export function quoteControlledWithdrawal(body: Record<string, unknown>, policy:
 export function ownerLocalWithdrawalPolicy(destinationKind: 'BANK_CARD' | 'PAYMENT_CODE', admittedSubjectIds: readonly string[]): ControlledWithdrawalPolicy {
   if (!['BANK_CARD', 'PAYMENT_CODE'].includes(destinationKind)) throw invalid('Controlled destination kind required');
   return { mode: 'LOCAL_CONTROLLED', destinationKind, version: 'OWNER_LOCAL_RESTORED_20261003_v1_' + destinationKind,
-    admittedSubjectIds: [...admittedSubjectIds], minCents: '200', maxCents: '1000000', maxAcceptedPerWindow: 2, frequencyBasis: 'ACTIVE_OR_SUCCEEDED',
-    fee: destinationKind === 'BANK_CARD' ? { kind: 'FIXED', cents: '100' } : { kind: 'RATIO', numerator: '2', denominator: '100', rounding: 'HALF_UP_CENT' } };
+    admittedSubjectIds: [...admittedSubjectIds], minCents: TEAM_TEST_WITHDRAWAL_POLICY.minCents, maxCents: TEAM_TEST_WITHDRAWAL_POLICY.maxCents,
+    maxAcceptedPerWindow: TEAM_TEST_WITHDRAWAL_POLICY.maxIntents, frequencyBasis: TEAM_TEST_WITHDRAWAL_POLICY.frequencyBasis,
+    fee: destinationKind === 'BANK_CARD' ? TEAM_TEST_WITHDRAWAL_POLICY.fee : { kind: 'RATIO', numerator: '2', denominator: '100', rounding: 'HALF_UP_CENT' } };
+}
+export function withdrawalPolicyForScope(scope:NativeWithdrawalScope|undefined,destinationKind:'BANK_CARD'|'PAYMENT_CODE',admittedSubjectIds:readonly string[]):ControlledWithdrawalPolicy {
+  const policy=scope?demoNativeWithdrawalPolicy(scope):undefined;
+  if(!policy)return ownerLocalWithdrawalPolicy(destinationKind,admittedSubjectIds);
+  if(destinationKind!=='BANK_CARD')throw invalid('Bank withdrawal policy required');
+  return {mode:'LOCAL_CONTROLLED',destinationKind,version:policy.version,admittedSubjectIds:[...admittedSubjectIds],
+    minCents:policy.minCents,maxCents:policy.maxCents,fee:policy.fee,frequencyBasis:policy.frequencyBasis,maxAcceptedPerWindow:policy.maxIntents};
 }
 export function localWithdrawalDayWindow(now: string) {
   const offset = 8 * 60 * 60 * 1000, day = 24 * 60 * 60 * 1000;

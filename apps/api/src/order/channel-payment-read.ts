@@ -35,12 +35,13 @@ type Snapshot = {
 export type OrderPaymentRequestView = {
   contractVersion: "order-payment-request.v1";
   dataOrigin: DataOrigin;
-  capability: { channelEnabled: boolean; methods: ["ALIPAY_NATIVE", "WEIXIN_NATIVE"]; evidenceProfile: "JOINPAY_AGG_2_6_MD5"; productionPaymentCapability: boolean };
+  capability: { channelEnabled: boolean; methods: ["ALIPAY_NATIVE", "WEIXIN_NATIVE"]; evidenceProfile: "JOINPAY_AGG_2_6_MD5" | "CONTROLLED_TEST"; productionPaymentCapability: boolean };
   order: { id: string; displayNo: string; status: string; paidAt: string | null };
   request: { id: string; state: string; method: string; amount: Money | null; updatedAt: string;
     recovery: { mode: "ORIGINAL_NUMBER_QUERY"; nextAttemptAt: null; manualQueryOpen: false } | null } | null;
   projection: Projection;
-  paymentAction: null | { kind: "QR_URL"; url: string; expiresAt: null; expiryKnown: false };
+  paymentAction: null | { kind: "QR_URL"; url: string; expiresAt: null; expiryKnown: false }
+    | { kind: "TEST_CASHIER"; scope: "ECS_TEST_SIMULATED" | "LOCAL_DEMO_SIMULATED" };
   payment: { confirmationId: string; disposition: "APPLIED" | "REVIEW_REQUIRED"; reasonCode: string | null; amount: Money | null; acceptedAt: string } | null;
 };
 

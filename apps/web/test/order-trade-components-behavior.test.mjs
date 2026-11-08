@@ -377,6 +377,86 @@ const refundIntent=(over={})=>({intentId:"intent_refund_1",refundOrderNo:"RF"+"a
   channelFacts:{actualAmountCents:null,channelRefundTrxNo:null,completedAt:null,destination:null,bankArrival:"UNKNOWN",reasonCodes:[]},reasonCodes:[],...over});
 async function chooseChannel(window,probe,value){const select=probe.host.querySelector('select[aria-label="支付方式"]');assert.ok(select);await React.act(async()=>{select.value=value;select.dispatchEvent(new window.Event("change",{bubbles:true}));await tick();});}
 
+test("test cashier uses the ordinary payment request and an empty QR before simulation",async()=>withDom(async window=>{
+ let phase='NEW',confirmations=0,changed=0;const calls=[],opened=[];
+ window.addEventListener('zzsh:order-groups',event=>opened.push(event.detail));
+ const Component=loadComponent('apps/web/src/components/order/order-trade-actions.tsx',session('user_A')).OrderTradeActions;
+ const view=()=>channelView('order_A',{dataOrigin:'LOCAL_CONTROLLED',capability:{channelEnabled:true,productionPaymentCapability:false,methods:['ALIPAY_NATIVE','WEIXIN_NATIVE'],evidenceProfile:'CONTROLLED_TEST'},
+  ...(phase==='NEW'?{}:{request:channelRequest(),projection:{displayState:'AWAITING_PAYMENT',actionBlockedReason:null},paymentAction:{kind:'TEST_CASHIER',scope:'ECS_TEST_SIMULATED'}})});
+ const probe=createProbe(window,Component,{order:channelOrder,party:'renter',onChanged(){changed++;}},async(url,init={})=>{
+  calls.push({url:String(url),method:init.method??'GET'});
+  if(String(url).includes('channel-payment-requests')){
+   if(init.method==='POST'){assert.deepEqual(JSON.parse(init.body),{method:'WEIXIN_NATIVE'});phase='ACTION';return json({...channelReceipt('WEIXIN_NATIVE'),dataOrigin:'LOCAL_CONTROLLED'},202);}
+   return json(view());
+  }
+  if(String(url).endsWith('/demo-checkout/confirm')){confirmations++;return json(demoResult());}
+  if(String(url).endsWith('/demo-checkout'))return json(demoAvailability());
+  throw Error('unexpected request');
+ },{exerciseDemo:true});
+ try{
+  await probe.render();await chooseChannel(window,probe,'WEIXIN_NATIVE');await probe.click('去支付');
+  for(let i=0;i<20&&!window.document.querySelector('[role="dialog"] button');i++)await React.act(async()=>{await tick();});
+  const dialog=window.document.querySelector('[role="dialog"]');assert.ok(dialog);assert.match(dialog.textContent,/扫码支付/);assert.match(dialog.textContent,/微信支付/);
+  assert.ok(dialog.querySelector('[aria-label="测试二维码区域，不可扫码"]'));assert.equal(Boolean(dialog.querySelector('svg[aria-label="本单支付二维码"]')),false);
+  let button;for(let i=0;i<20&&!(button=[...dialog.querySelectorAll('button')].find(b=>b.textContent==='模拟付款'));i++)await React.act(async()=>{await tick();});
+  assert.ok(button);assert.equal(opened.length,0);await React.act(async()=>{button.click();await tick();});
+  assert.equal(confirmations,1);assert.equal(changed,1);assert.equal(calls.filter(c=>c.method==='POST'&&c.url.includes('channel-payment-requests')).length,1);
+  assert.deepEqual(opened,[{party:'renter',orderId:'order_A'}]);
+  assert.equal(intents.loadIntent('user_A','order.demo-checkout','order_A'),null);
+ }finally{await probe.dispose(()=>{intents.clearIntent('user_A','order.channel-payment','order_A');intents.clearIntent('user_A','order.demo-checkout','order_A');});}
+}));
+
+test("unknown test payment keeps its original key and locks cancellation until recovery",async()=>withDom(async window=>{
+ let key,confirmations=0,recoveries=0,changed=0;const opened=[];window.addEventListener('zzsh:order-groups',event=>opened.push(event.detail));
+ const Component=loadComponent('apps/web/src/components/order/order-trade-actions.tsx',session('user_A')).OrderTradeActions;
+ const view=channelView('order_A',{dataOrigin:'LOCAL_CONTROLLED',capability:{channelEnabled:true,productionPaymentCapability:false,methods:['ALIPAY_NATIVE','WEIXIN_NATIVE'],evidenceProfile:'CONTROLLED_TEST'},request:channelRequest(),projection:{displayState:'AWAITING_PAYMENT',actionBlockedReason:null},paymentAction:{kind:'TEST_CASHIER',scope:'ECS_TEST_SIMULATED'}});
+ const probe=createProbe(window,Component,{order:channelOrder,party:'renter',onChanged(){changed++;}},async(url,init={})=>{
+  if(String(url).includes('channel-payment-requests'))return json(view);
+  if(String(url).endsWith('/demo-checkout/confirm')){confirmations++;key=new Headers(init.headers).get('idempotency-key');throw Error('simulated lost response');}
+  if(String(url).includes('/demo-checkout/receipt?')){recoveries++;assert.equal(new URL(String(url),'https://local').searchParams.get('key'),key);return json(demoReceipt(true));}
+  if(String(url).endsWith('/demo-checkout'))return json(demoAvailability());throw Error('unexpected request');
+ },{exerciseDemo:true});
+ try{
+  await probe.render();let dialog,button;
+  for(let i=0;i<30&&!(button=[...(dialog=window.document.querySelector('[role="dialog"]'))?.querySelectorAll('button')??[]].find(b=>b.textContent==='模拟付款'));i++)await React.act(async()=>{await tick();});
+  assert.ok(button);await React.act(async()=>{button.click();await tick();});
+  assert.equal(confirmations,1);assert.equal(intents.loadIntent('user_A','order.demo-checkout','order_A').key,key);
+  assert.equal(opened.length,0);
+  assert.equal([...probe.host.querySelectorAll('button')].find(b=>b.textContent==='取消订单')?.disabled,true);
+  button=[...dialog.querySelectorAll('button')].find(b=>b.textContent==='查询原付款结果');assert.ok(button);
+  await React.act(async()=>{button.click();await tick();});
+  assert.equal(recoveries,1);assert.equal(confirmations,1);assert.equal(changed,1);assert.equal(intents.loadIntent('user_A','order.demo-checkout','order_A'),null);
+  assert.deepEqual(opened,[{party:'renter',orderId:'order_A'}]);
+ }finally{await probe.dispose(()=>{intents.clearIntent('user_A','order.channel-payment','order_A');intents.clearIntent('user_A','order.demo-checkout','order_A');});}
+}));
+
+test("an older unresolved test checkout is recovered before creating a new payment request",async()=>withDom(async window=>{
+ intents.saveIntent({userId:'user_A',kind:'order.demo-checkout',resourceId:'order_A',key:'original_demo_key',body:{},context:{scope:'ECS_TEST_SIMULATED'}});
+ let requests=0;const Component=loadComponent('apps/web/src/components/order/order-trade-actions.tsx',session('user_A')).OrderTradeActions;
+ const probe=createProbe(window,Component,{order:channelOrder,party:'renter',onChanged(){}},async(url,init={})=>{
+  if(String(url).includes('channel-payment-requests')){if(init.method==='POST')requests++;return json(channelView('order_A',{dataOrigin:'LOCAL_CONTROLLED',capability:{channelEnabled:true,productionPaymentCapability:false,methods:['ALIPAY_NATIVE','WEIXIN_NATIVE'],evidenceProfile:'CONTROLLED_TEST'}}));}
+  if(String(url).endsWith('/demo-checkout'))return json(demoAvailability());
+  if(String(url).includes('/demo-checkout/receipt?'))return json(demoReceipt(false));
+  throw Error('unexpected request');
+ },{exerciseDemo:true});
+ try{
+  await probe.render();assert.equal(requests,0);assert.equal([...probe.host.querySelectorAll('button')].some(b=>b.textContent==='去支付'),false);
+  assert.ok([...probe.host.querySelectorAll('button')].some(b=>b.textContent==='查询原付款结果'));
+  assert.equal(intents.loadIntent('user_A','order.demo-checkout','order_A').key,'original_demo_key');
+ }finally{await probe.dispose(()=>intents.clearIntent('user_A','order.demo-checkout','order_A'));}
+}));
+
+test("conflicting unresolved checkout intents never trigger a new payment",async()=>withDom(async window=>{
+ intents.saveIntent({userId:'user_A',kind:'order.demo-checkout',resourceId:'order_A',key:'old_demo_key',body:{},context:{scope:'ECS_TEST_SIMULATED'}});
+ intents.saveIntent({userId:'user_A',kind:'order.channel-payment',resourceId:'order_A',key:'old_channel_key',body:{method:'WEIXIN_NATIVE'}});
+ let posts=0;const Component=loadComponent('apps/web/src/components/order/order-trade-actions.tsx',session('user_A')).OrderTradeActions;
+ const probe=createProbe(window,Component,{order:channelOrder,party:'renter',onChanged(){}},async(_url,init={})=>{if(init.method==='POST')posts++;return json(channelView('order_A',{dataOrigin:'LOCAL_CONTROLLED',capability:{channelEnabled:true,productionPaymentCapability:false,methods:['ALIPAY_NATIVE','WEIXIN_NATIVE'],evidenceProfile:'CONTROLLED_TEST'}}));},{exerciseDemo:true});
+ try{await probe.render();assert.match(probe.host.textContent,/本单有待核对的原支付请求/);assert.equal(posts,0);
+  assert.equal([...probe.host.querySelectorAll('button')].find(b=>b.textContent==='取消订单')?.disabled,true);
+  assert.equal(intents.loadIntent('user_A','order.demo-checkout','order_A').key,'old_demo_key');assert.equal(intents.loadIntent('user_A','order.channel-payment','order_A').key,'old_channel_key');
+ }finally{await probe.dispose(()=>{intents.clearIntent('user_A','order.channel-payment','order_A');intents.clearIntent('user_A','order.demo-checkout','order_A');});}
+}));
+
 test("Native UI selects method, persists a request, reads its action and waits for an actual APPLIED projection",async()=>{
  await withDom(async window=>{
   let phase="NEW",changed=0;const calls=[];
@@ -2000,14 +2080,14 @@ async function detailProbe(window, order, party, data = settlementBody, refund =
   return probe;
 }
 
-test('simulated payment remains visible in order list and detail without claiming channel arrival',async()=>withDom(async window=>{
+test('order list and detail do not repeat cashier simulation labels or claim channel arrival',async()=>withDom(async window=>{
  const simulated={...paidOrder,paymentProvenance:{source:'SIMULATED',channelArrival:'UNKNOWN'}};
  const OrderListPanel=loadComponent('apps/web/src/components/order/order-list.tsx',session('user_A')).OrderListPanel;
  const state={page:{items:[simulated],nextCursor:null,limit:20},loading:false,refreshing:false,loadingMore:false,error:null,moreError:null,notice:''};
  const list=createProbe(window,OrderListPanel,{party:'renter',status:'',state,onRefresh(){},onRetryList(){},onLoadMore(){},onLogin(){},onReauthorize(){},onOpen(){}},async()=>{throw Error('unexpected list fetch')});
- try{await list.render();assert.match(list.host.textContent,/模拟付款/)}finally{await list.dispose()}
+ try{await list.render();assert.doesNotMatch(list.host.textContent,/模拟付款/)}finally{await list.dispose()}
  const detail=await detailProbe(window,simulated,'renter');
- try{assert.match(detail.host.textContent,/模拟付款，未发生真实扣款/);assert.doesNotMatch(detail.host.textContent,/渠道已到账/)}finally{await detail.dispose()}
+ try{assert.doesNotMatch(detail.host.textContent,/模拟付款，未发生真实扣款/);assert.doesNotMatch(detail.host.textContent,/渠道已到账/)}finally{await detail.dispose()}
  const unknown=await detailProbe(window,{...paidOrder,paymentProvenance:{source:'UNKNOWN',channelArrival:'UNKNOWN'}},'renter');
  try{assert.doesNotMatch(unknown.host.textContent,/模拟付款，未发生真实扣款/)}finally{await unknown.dispose()}
 }));

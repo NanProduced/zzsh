@@ -8,8 +8,10 @@ import { bodyOf, ensureOnlyFields, forbidden, invalid, notFound, sendJson, type 
 import { safely, type SupplyResponse } from "../supply/supply-routes";
 import { assertReplayAuthorization } from "./order";
 import { readChannelPaymentRequest, type ChannelPaymentReadOptions } from "./channel-payment-read";
-import { createPaymentRequest, type PaymentRequestView } from "./channel-payment-store";
+import { createPaymentRequest, markDemoPaymentActionReady, readDemoPaymentRequestMatch, type PaymentRequestView, type SyntheticRequestCapability } from "./channel-payment-store";
 import { readFormalPaymentEvidence } from "./channel-payment-formal-read";
+import { readEcsDemoCheckoutAvailability, type EcsDemoCheckoutOptions } from "./ecs-demo-checkout-service";
+import { readDistributionPolicyRowInTransaction } from "../finance/distribution-policy-store";
 import { CollectionAttemptCommitUnknown, createJoinpayCollectionRequestInTransaction, executeJoinpayCollectionAttempt, queryJoinpayCollectionForUser,
   type JoinpayCollectionRequestInput, type JoinpayCollectionExecution } from "./joinpay-collection-attempt";
 
@@ -18,6 +20,7 @@ export type ChannelPaymentCollectionAssembly = {
   execution?: Omit<JoinpayCollectionExecution, "pool">;
   /** Trusted local metadata may remain available after new collection is disabled. */
   read?: Omit<ChannelPaymentReadOptions, "formalWriteRouteReady">;
+  demo?: EcsDemoCheckoutOptions & { capability: SyntheticRequestCapability };
 };
 
 /** Composition-only metadata; no key, profile resolver, environment or network reads. */
@@ -107,12 +110,23 @@ export async function handleChannelPaymentRoute(request: SupplyNodeRequest, resp
       return;
     }
     if (method === "GET") {
-      const data = await withTransaction(security.pool, async client => {
+      const { data, demoMatch } = await withTransaction(security.pool, async client => {
         await assertReplayAuthorization(client, actor);
-        return readChannelPaymentRequest(client, { orderId, origin: "NATIVE", actor }, readOptions ?? channelPaymentReadOptions(collection));
+        const data = await readChannelPaymentRequest(client, { orderId, origin: "NATIVE", actor }, readOptions ?? channelPaymentReadOptions(collection));
+        const demoMatch = data.available && collection?.demo ? await readDemoPaymentRequestMatch(client, { orderId, capability: collection.demo.capability }) : undefined;
+        return { data, demoMatch };
       });
       if (!data.available) throw new SecurityApiError(503, "EVIDENCE_UNAVAILABLE", "Payment request schema is not deployed");
-      sendJson(response, 200, data.view, requestId);
+      const demo = collection?.demo;
+      if (demo && demoMatch !== false && (data.view.dataOrigin === "LOCAL_CONTROLLED" || !data.view.request && !data.view.payment)) {
+        const availability = await readEcsDemoCheckoutAvailability(security.pool, { ...actor, requestId }, orderId, demo);
+        const enabled = availability.checkoutEnabled;
+        const action = enabled && data.view.request?.state === "ACTION_READY" ? { kind: "TEST_CASHIER", scope: availability.scope } : null;
+        sendJson(response, 200, { ...data.view, dataOrigin: "LOCAL_CONTROLLED",
+          capability: { ...data.view.capability, channelEnabled: enabled, evidenceProfile: "CONTROLLED_TEST", productionPaymentCapability: false },
+          projection: action ? { ...data.view.projection, actionBlockedReason: null } : data.view.projection,
+          paymentAction: action }, requestId);
+      } else sendJson(response, 200, data.view, requestId);
       return;
     }
     const key = validateIdempotencyKey(request.headers["idempotency-key"]);
@@ -125,6 +139,14 @@ export async function handleChannelPaymentRoute(request: SupplyNodeRequest, resp
         const readiness = (await readChannelPaymentRequest(client, { orderId, origin: "NATIVE", actor })).available;
         if (!readiness) return null;
         const prior = (await client.query("SELECT evidence_level FROM zzsh_order.payment_request WHERE order_id=$1", [orderId])).rows[0];
+        if (collection?.demo) {
+          if (collection.initial || collection.execution || prior && prior.evidence_level !== "CONTROLLED_TEST") return null;
+          if (!prior && (await readDistributionPolicyRowInTransaction(client, false, "NATIVE")).knowledge !== "KNOWN") return null;
+          const result = await createPaymentRequest(client, { actor, orderId, idempotencyKey: key, method: body.method as string, capability: collection.demo.capability });
+          const original = result.body as PaymentRequestView;
+          await markDemoPaymentActionReady(client, { orderId, requestId: original.requestId, capability: collection.demo.capability });
+          return { status: result.status, body: channelPaymentCommandReceipt(original), collectionStart: null };
+        }
         if (prior?.evidence_level === "JOINPAY_CANDIDATE" || (!prior && collection?.initial)) {
           if (!prior) {
             // Only a new request reads current readiness; original-key recovery must not touch current configuration.

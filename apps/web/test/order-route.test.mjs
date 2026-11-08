@@ -183,6 +183,25 @@ test('channel payment GET forwards the v1 local projection, user session and nul
   }finally{globalThis.fetch=old;}
 });
 
+test('test cashier action survives the user BFF without adding a real payment URL or leaking tokens',async()=>{
+  const old=globalThis.fetch;
+  const projection={contractVersion:'order-payment-request.v1',dataOrigin:'LOCAL_CONTROLLED',
+    capability:{channelEnabled:true,productionPaymentCapability:false,evidenceProfile:'CONTROLLED_TEST'},
+    paymentAction:{kind:'TEST_CASHIER',scope:'ECS_TEST_SIMULATED'},payment:null,accessToken:'not-for-browser'};
+  globalThis.fetch=async(url)=>String(url).endsWith('/get-session')?Response.json({user:{id:'user_a'}}):Response.json(projection);
+  try{
+    const path=['order_channel','channel-payment-requests'];
+    const response=await GET(input(path,{headers:{cookie:'zzsh_user.session_token=user','x-zzsh-expected-user-id':'user_a'}}),ctx(path));
+    assert.equal(response.status,200);
+    const body=await response.json();
+    assert.deepEqual(body.paymentAction,{kind:'TEST_CASHIER',scope:'ECS_TEST_SIMULATED'});
+    assert.equal(body.capability.evidenceProfile,'CONTROLLED_TEST');
+    assert.equal(body.capability.productionPaymentCapability,false);
+    assert.equal('url' in body.paymentAction,false);
+    assert.equal('accessToken' in body,false);
+  }finally{globalThis.fetch=old;}
+});
+
 test('channel payment POST keeps method, frozen key, pending receipt and upstream status instead of manufacturing paid',async()=>{
   const old=globalThis.fetch;let seen;
   const receipt={contractVersion:'order-payment-request.v1',replay:false,request:{id:'payreq_channel',state:'SUBMITTING'},paymentAction:null,payment:null};

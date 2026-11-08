@@ -546,7 +546,7 @@ function DemoWithdrawalPanel({scope,refreshKey,bindingLocked,availableBalance,le
   },[scope,identity.ready,identity.userId,refreshKey,demoScope]);
   useEffect(()=>{if(quote&&quote.body.expectedWalletVersion!==ledgerRevision){setQuote(null);setConfirmOpen(false);}},[ledgerRevision,quote]);
   const run=async(action:()=>Promise<void>)=>{if(!identity.current()||busyRef.current)return;busyRef.current=true;setBusy(true);setMessage("");
-    try{await action();}catch(error){if(identity.current()){const e=asError(error);identity.identityFailure(e);const original=sync(),identityMessage:Record<string,string>={DEMO_WITHDRAW_IDENTITY_REQUIRED:"请先完成本人实名认证。",DEMO_WITHDRAW_ADULT_REQUIRED:"确认已成年后才能进行模拟提现。",DEMO_WITHDRAW_IDENTITY_SOURCE_UNCONFIRMED:"实名信息来源暂时无法确认，请联系客服核对。",DEMO_WITHDRAW_AMOUNT_OUT_OF_RANGE:`模拟提现金额需在 ${walletMoney(limits.minCents)} 至 ${walletMoney(limits.maxCents)} 之间。`};
+    try{await action();}catch(error){if(identity.current()){const e=asError(error);identity.identityFailure(e);const original=sync(),identityMessage:Record<string,string>={DEMO_WITHDRAW_IDENTITY_REQUIRED:"请先完成本人实名认证。",DEMO_WITHDRAW_ADULT_REQUIRED:"确认已成年后才能提现。",DEMO_WITHDRAW_IDENTITY_SOURCE_UNCONFIRMED:"实名信息来源暂时无法确认，请联系客服核对。",DEMO_WITHDRAW_AMOUNT_OUT_OF_RANGE:`提现金额需在 ${walletMoney(limits.minCents)} 至 ${walletMoney(limits.maxCents)} 之间。`};
       setMessage(e.status===401?"登录状态已变化，请重新进入页面。":original?.stage==="target"||original?.stage==="confirm"?"操作暂未确认，请先查询原申请。":identityMessage[e.code]??"提现信息暂时无法核对，请稍后重试。");}}
     finally{if(identity.current())setBusy(false);busyRef.current=false;}};
   const preview=()=>void run(async()=>{
@@ -554,7 +554,7 @@ function DemoWithdrawalPanel({scope,refreshKey,bindingLocked,availableBalance,le
     try{if(pendingBankBinding(identity.userId)){setMessage("请先确认收款资料的保存结果。");return;}}catch{setMessage("收款资料的保存状态无法确认，请联系客服。");return;}
     let original=sync();if(original===undefined||original?.stage==="target"||original?.stage==="confirm")return;
     if(!original){let amountCents:string;try{amountCents=yuanToCents(amount);if(BigInt(amountCents)<=0n)throw Error();}catch{setMessage("请输入大于 0、最多两位小数的金额。");return;}
-      if(BigInt(amountCents)<BigInt(limits.minCents)||BigInt(amountCents)>BigInt(limits.maxCents)){setMessage(`模拟提现金额需在 ${walletMoney(limits.minCents)} 至 ${walletMoney(limits.maxCents)} 之间。`);return;}setResult(null);
+      if(BigInt(amountCents)<BigInt(limits.minCents)||BigInt(amountCents)>BigInt(limits.maxCents)){setMessage(`提现金额需在 ${walletMoney(limits.minCents)} 至 ${walletMoney(limits.maxCents)} 之间。`);return;}setResult(null);
       original=await createDemoTarget(identity.userId,demoScope,{bankBindingId:binding.binding.id,bankBindingRevision:binding.binding.revision,amountCents},{isCurrent:identity.current});setPending(original);}
     if(original.stage!=="target-ready")return;
     try {const next=await quoteDemoWithdrawal(identity.userId,demoScope,original.target,ledgerRevision);if(identity.current())setQuote(next);}
@@ -562,7 +562,7 @@ function DemoWithdrawalPanel({scope,refreshKey,bindingLocked,availableBalance,le
   });
   const recover=()=>void run(async()=>{if(!identity.userId)return;const recovered=await recoverDemoWithdrawal(identity.userId,demoScope,{isCurrent:identity.current});if(!identity.current())return;
     setPending(recovered.pending);if(recovered.knowledge==="UNKNOWN")setMessage("原申请仍未确认，请稍后再次查询，或联系客服。");
-    else if(recovered.intent){setResult(recovered.intent);setQuote(null);onWalletChanged();setMessage("已找到原模拟提现记录。");}
+    else if(recovered.intent){setResult(recovered.intent);setQuote(null);onWalletChanged();setMessage("已找到原提现申请。");}
     else if(recovered.pending?.stage==="target-ready"){const n=BigInt(recovered.pending.body.amountCents);setAmount(`${n/100n}.${(n%100n).toString().padStart(2,"0")}`);setMessage("已找到原收款目标，请继续核对提现信息。");}});
   const submit=()=>void run(async()=>{if(!identity.userId||!quote)return;try{if(pendingBankBinding(identity.userId)){setMessage("请先确认收款资料的保存结果。");setConfirmOpen(false);return;}}catch{setMessage("收款资料的保存状态无法确认，请联系客服。");setConfirmOpen(false);return;}
     const intent=await confirmDemoWithdrawal(identity.userId,demoScope,quote.body,quote.quote,{isCurrent:identity.current});
@@ -571,29 +571,29 @@ function DemoWithdrawalPanel({scope,refreshKey,bindingLocked,availableBalance,le
   const resetTarget=()=>void run(async()=>{if(!identity.userId)return;await discardDemoTarget(identity.userId,demoScope);if(identity.current()){setPending(null);setQuote(null);setAmount("");}});
   const readyTarget=pending?.stage==="target-ready"?pending.target:null,unknown=pending?.stage==="target"||pending?.stage==="confirm";
   const blocked=!identity.ready||loading||busy||storageBlocked||bindingLocked||!enabled||!binding?.binding||ledgerRevision===null||availableBalance===null||Boolean(unknown);
-  const labels:Record<DemoIntent["state"],string>={RESERVED:"金额已暂留",SUBMITTING:"模拟处理中",PROCESSING:"模拟处理中",UNKNOWN:"结果待确认",SUCCEEDED:"模拟提现完成",FAILED:"模拟提现未完成",RECONCILIATION_REQUIRED:"需要客服核对"};
+  const labels:Record<DemoIntent["state"],string>={RESERVED:"金额已暂留",SUBMITTING:"处理中",PROCESSING:"处理中",UNKNOWN:"结果待确认",SUCCEEDED:"处理完成",FAILED:"提现未完成",RECONCILIATION_REQUIRED:"需要客服核对"};
   return <section className="account-module-card channel-withdrawal-panel" data-testid="demo-withdrawal-panel" aria-labelledby={`${field}-title`}>
-    <div className="bank-section-heading"><h3 id={`${field}-title`}>模拟提现</h3><StatusBadge tone="neutral">测试环境</StatusBadge></div>
-    <p className="bank-help">使用演示规则测试提现，余额会按测试记录变动，不会向银行卡打款。单笔范围 {walletMoney(limits.minCents)} 至 {walletMoney(limits.maxCents)}。</p>
+    <div className="bank-section-heading"><h3 id={`${field}-title`}>银行卡提现</h3><StatusBadge tone="neutral">测试环境</StatusBadge></div>
+    <p className="bank-help">测试环境不会向银行卡打款，余额会按测试记录变动。单笔范围 {walletMoney(limits.minCents)} 至 {walletMoney(limits.maxCents)}。</p>
     <div className="bank-available" aria-label="可提现余额"><span className="bank-available-caption">可提现余额</span><strong className="bank-available-sum">{walletMoney(availableBalance)}</strong></div>
     <hr className="bank-metric-divider" />
     {loading?<SkeletonBlock label="正在读取收款资料" lines={2}/>:null}
-    {!enabled?<RecoveryAlert tone="unknown" title="模拟提现暂不可用" problem="请稍后重试或联系客服。"/>:null}
-    {!loading&&binding?.integration==="INTEGRATED"&&!binding.binding?<RecoveryAlert tone="info" title="请先绑定收款银行卡" problem="保存收款资料后即可核对测试提现。"/>:null}
-    {storageBlocked?<RecoveryAlert tone="unknown" title="原申请信息暂时无法读取" problem="请保留当前浏览器状态并联系客服。"/>:unknown?<RecoveryAlert tone="unknown" title="上次模拟操作结果待确认" problem="请先查询原申请，确认前不能发起新的模拟提现。" action={<Button variant="secondary" className="bank-action" isDisabled={busy} onPress={recover}>查询原申请</Button>}/>:null}
+    {!enabled?<RecoveryAlert tone="unknown" title="提现暂不可用" problem="请稍后重试或联系客服。"/>:null}
+    {!loading&&binding?.integration==="INTEGRATED"&&!binding.binding?<RecoveryAlert tone="info" title="请先绑定收款银行卡" problem="保存收款资料后即可核对提现信息。"/>:null}
+    {storageBlocked?<RecoveryAlert tone="unknown" title="原申请信息暂时无法读取" problem="请保留当前浏览器状态并联系客服。"/>:unknown?<RecoveryAlert tone="unknown" title="上次提现结果待确认" problem="请先查询原申请，确认前不能发起新的提现。" action={<Button variant="secondary" className="bank-action" isDisabled={busy} onPress={recover}>查询原申请</Button>}/>:null}
     <form className="bank-withdraw-form" onSubmit={event=>{event.preventDefault();if(quote)setConfirmOpen(true);else preview();}} noValidate>
       <div className="bank-form-group"><label className="bank-form-label" htmlFor={`${field}-amount`}>提现金额</label><div className="bank-amount-input-box">
         <span className="bank-currency-prefix" aria-hidden="true">¥</span><Input {...fieldControlProps({id:`${field}-amount`,helper:false})} inputMode="decimal" autoComplete="off" placeholder="0.00" value={amount} disabled={blocked||Boolean(readyTarget)} className="bank-amount-input" onChange={event=>{setAmount(event.target.value);setQuote(null);setMessage("");}} />
         {!blocked&&!readyTarget&&availableBalance&&BigInt(availableBalance)>0n?<Button type="button" variant="tertiary" className="bank-quick-max-btn" onPress={()=>{const n=BigInt(availableBalance)>BigInt(limits.maxCents)?BigInt(limits.maxCents):BigInt(availableBalance);setAmount(`${n/100n}.${(n%100n).toString().padStart(2,"0")}`);setQuote(null);}}>{BigInt(availableBalance)>BigInt(limits.maxCents)?"本次最多":"全部提现"}</Button>:null}
       </div></div>
-      <div className="bank-form-group"><span className="bank-form-label">收款银行卡</span><div className="bank-destination-card" role="group" aria-label="模拟提现使用的银行卡"><div className="bank-destination-left"><CreditCard size={18} className="bank-destination-icon" aria-hidden="true"/><span className="bank-destination-name">{readyTarget?`银行卡 •••• ${readyTarget.mask.slice(-4)}`:binding?.binding?`银行卡 •••• ${binding.binding.cardMask.slice(-4)}`:binding?.integration==="INTEGRATED"?"尚未绑定收款银行卡":"收款资料暂时无法确认"}</span></div></div></div>
-      {quote?<div className="bank-fee-summary has-quote" aria-label="模拟提现费用"><div className="bank-fee-row"><span>手续费</span><span>{walletMoney(quote.quote.feeCents)}</span></div><div className="bank-fee-row"><span>模拟出款金额</span><span>{walletMoney(quote.quote.netCents)}</span></div></div>:null}
+      <div className="bank-form-group"><span className="bank-form-label">收款银行卡</span><div className="bank-destination-card" role="group" aria-label="当前收款银行卡"><div className="bank-destination-left"><CreditCard size={18} className="bank-destination-icon" aria-hidden="true"/><span className="bank-destination-name">{readyTarget?`银行卡 •••• ${readyTarget.mask.slice(-4)}`:binding?.binding?`银行卡 •••• ${binding.binding.cardMask.slice(-4)}`:binding?.integration==="INTEGRATED"?"尚未绑定收款银行卡":"收款资料暂时无法确认"}</span></div></div></div>
+      {quote?<div className="bank-fee-summary has-quote" aria-label="提现费用核算"><div className="bank-fee-row"><span>手续费</span><span>{walletMoney(quote.quote.feeCents)}</span></div><div className="bank-fee-row"><span>提现净额</span><span>{walletMoney(quote.quote.netCents)}</span></div></div>:null}
       {readyTarget?<Button type="button" variant="tertiary" className="bank-action" isDisabled={busy} onPress={resetTarget}>重新填写金额</Button>:null}
-      <div className="bank-submit-container"><Button type="submit" variant="primary" className="bank-action bank-primary bank-main-submit" isDisabled={blocked||!amount}>{busy?"正在核对…":quote?"确认模拟提现":"核对提现信息"}</Button></div>
+      <div className="bank-submit-container"><Button type="submit" variant="primary" className="bank-action bank-primary bank-main-submit" isDisabled={blocked||!amount}>{busy?"正在核对…":quote?"确认提现申请":"核对提现信息"}</Button></div>
     </form>
     {message?<p className="bank-feedback" role="status">{message}</p>:null}
-    {result?<section className="bank-result" aria-label="模拟提现记录"><div className="bank-section-heading"><h4>模拟提现记录</h4><StatusBadge tone="neutral">{labels[result.state]}</StatusBadge></div><dl className="bank-facts"><div><dt>申请金额</dt><dd>{walletMoney(result.amountCents)}</dd></div><div><dt>手续费</dt><dd>{walletMoney(result.feeCents)}</dd></div><div><dt>模拟出款金额</dt><dd>{walletMoney(result.netCents)}</dd></div></dl><p className="bank-help">本次为模拟操作，没有向银行卡打款。</p><Button variant="secondary" className="bank-action" isDisabled={busy} onPress={refresh}>刷新处理进度</Button></section>:null}
-    <ConfirmAlertDialog open={confirmOpen&&Boolean(quote)&&identity.ready} onOpenChange={setConfirmOpen} title="确认模拟提现？" description="测试余额将按模拟结果变动，不会实际打款。" confirmLabel={busy?"正在提交…":"确认模拟提现"} cancelLabel="返回核对" onConfirm={submit} busy={busy} confirmDisabled={blocked||!quote} className="bank-withdrawal-confirm" consequences={quote?<dl className="bank-facts"><div><dt>申请金额</dt><dd>{walletMoney(quote.quote.grossCents)}</dd></div><div><dt>手续费</dt><dd>{walletMoney(quote.quote.feeCents)}</dd></div><div><dt>模拟出款金额</dt><dd>{walletMoney(quote.quote.netCents)}</dd></div><div><dt>收款银行卡</dt><dd>{readyTarget?.mask??"未记录"}</dd></div></dl>:null}/>
+    {result?<section className="bank-result" aria-label="申请记录"><div className="bank-section-heading"><h4>申请记录</h4><StatusBadge tone="neutral">{labels[result.state]}</StatusBadge></div><dl className="bank-facts"><div><dt>申请金额</dt><dd>{walletMoney(result.amountCents)}</dd></div><div><dt>手续费</dt><dd>{walletMoney(result.feeCents)}</dd></div><div><dt>提现净额</dt><dd>{walletMoney(result.netCents)}</dd></div></dl><Button variant="secondary" className="bank-action" isDisabled={busy} onPress={refresh}>刷新处理进度</Button></section>:null}
+    <ConfirmAlertDialog open={confirmOpen&&Boolean(quote)&&identity.ready} onOpenChange={setConfirmOpen} title="确认这笔提现申请？" description="测试环境不会实际打款，余额会按测试记录变动。" confirmLabel={busy?"正在提交申请…":"确认提交申请"} cancelLabel="返回核对" onConfirm={submit} busy={busy} confirmDisabled={blocked||!quote} className="bank-withdrawal-confirm" consequences={quote?<dl className="bank-facts"><div><dt>申请金额</dt><dd>{walletMoney(quote.quote.grossCents)}</dd></div><div><dt>手续费</dt><dd>{walletMoney(quote.quote.feeCents)}</dd></div><div><dt>提现净额</dt><dd>{walletMoney(quote.quote.netCents)}</dd></div><div><dt>收款银行卡</dt><dd>{readyTarget?.mask??"未记录"}</dd></div></dl>:null}/>
   </section>;
 }
 
@@ -622,7 +622,7 @@ function historyView(source: HistorySource, reply: WithdrawalHistoryRead): Histo
   }
   if (source === "LOCAL_CONTROLLED") {
     const part = reply.sections.controlled, data = part.data;
-    return { availability: part.availability, rows: data?.items.map(item => ({ source, id: `controlled:${item.id}`, amount: item.amountCents, at: item.acceptedAt, label: item.state === "SUCCEEDED" ? "模拟提现完成" : channelStateLabel[item.state] ?? "状态未确认", note: "模拟提现，不代表银行到账" })) ?? [], cursor: data?.pagination?.nextCursor ?? null, snapshot: data?.pagination?.snapshotVersion ?? null, asOf: data?.pagination?.asOf ?? null, coverageKnown: Boolean(data?.pagination) };
+    return { availability: part.availability, rows: data?.items.map(item => ({ source, id: `controlled:${item.id}`, amount: item.amountCents, at: item.acceptedAt, label: item.state === "SUCCEEDED" ? "处理完成" : channelStateLabel[item.state] ?? "状态未确认", note: "测试记录，未实际打款" })) ?? [], cursor: data?.pagination?.nextCursor ?? null, snapshot: data?.pagination?.snapshotVersion ?? null, asOf: data?.pagination?.asOf ?? null, coverageKnown: Boolean(data?.pagination) };
   }
   const part = reply.sections.joinpay, data = part.data;
   return { availability: part.availability, rows: data?.items.map(item => ({ source, id: item.id, amount: item.amountCents, at: item.occurredAt, label: item.requiresReview ? "需要人工核对" : channelStateLabel[item.state] ?? "状态未确认", note: "到账情况未记录", mask: item.originalDestination?.cardMask ?? null })) ?? [], cursor: data?.nextCursor ?? null, snapshot: data?.snapshotVersion ?? null, asOf: data?.asOf ?? null, coverageKnown: Boolean(data) };
@@ -632,7 +632,7 @@ function HistoryDetail({ value }: { value: WithdrawalHistoryDetail }) {
   const item = value.source === "LOCAL_CONTROLLED" ? value.item.intent : value.source === "JOINPAY" ? value.data.item : value.item;
   const joinpay = value.source === "JOINPAY" ? value.data.item : null;
   const historical = value.source === "HISTORICAL_WITHDRAWAL" ? value.item : null;
-  return <><dl className="bank-facts"><div><dt>申请金额</dt><dd>{walletMoney(item.amountCents)}</dd></div><div><dt>提现净额</dt><dd>{walletMoney(item.netCents)}</dd></div><div><dt>手续费</dt><dd>{walletMoney(item.feeCents)}</dd></div>{historical ? <div><dt>原提现单号</dt><dd>{historical.originalNumber ?? "未记录或未记录"}</dd></div> : null}{joinpay ? <><div><dt>原收款银行卡</dt><dd>{joinpay.originalDestination?.cardMask ?? "原收款目标未提供"}</dd></div><div><dt>申请单号</dt><dd>{joinpay.merchantOrderNo}</dd></div><div><dt>交易流水号</dt><dd>{joinpay.platformSerialNo ?? "尚未提供"}</dd></div></> : null}<div><dt>到账情况</dt><dd>未记录</dd></div></dl><p className="bank-help">{value.source === "LOCAL_CONTROLLED" ? "这是模拟提现，没有向银行卡打款。" : <>{historical ? "金额按原记录展示；" : "金额按申请记录展示；"}到账情况请以收款记录为准。</>}</p></>;
+  return <><dl className="bank-facts"><div><dt>申请金额</dt><dd>{walletMoney(item.amountCents)}</dd></div><div><dt>提现净额</dt><dd>{walletMoney(item.netCents)}</dd></div><div><dt>手续费</dt><dd>{walletMoney(item.feeCents)}</dd></div>{historical ? <div><dt>原提现单号</dt><dd>{historical.originalNumber ?? "未记录"}</dd></div> : null}{joinpay ? <><div><dt>原收款银行卡</dt><dd>{joinpay.originalDestination?.cardMask ?? "原收款目标未提供"}</dd></div><div><dt>申请单号</dt><dd>{joinpay.merchantOrderNo}</dd></div><div><dt>交易流水号</dt><dd>{joinpay.platformSerialNo ?? "尚未提供"}</dd></div></> : null}<div><dt>到账情况</dt><dd>未记录</dd></div></dl><p className="bank-help">{value.source === "LOCAL_CONTROLLED" ? "这是测试记录，未向银行卡打款。" : <>{historical ? "金额按原记录展示；" : "金额按申请记录展示；"}到账情况请以收款记录为准。</>}</p></>;
 }
 
 

@@ -113,12 +113,12 @@ test('demo withdrawal keeps test wording and confirms the server quote without c
  p.demoApi.createDemoTarget=async(userId,receivedScope,input)=>{assert.equal(receivedScope,scope);const ready={version:1,userId,scope,stage:'target-ready',key:'target-key',body:input,target};p.setPendingDemo(ready);p.calls.push({method:'demo-target'});return ready;};
  p.demoApi.quoteDemoWithdrawal=async(userId,receivedScope,receivedTarget,walletVersion)=>{assert.equal(receivedScope,scope);assert.equal(receivedTarget.id,target.id);assert.equal(walletVersion,'7');return{body,quote:demoQuote};};
  p.demoApi.confirmDemoWithdrawal=async(userId,receivedScope,receivedBody,receivedQuote)=>{assert.equal(receivedScope,scope);assert.deepEqual(receivedBody,body);assert.equal(receivedQuote.requestKey,'demo-key');p.calls.push({method:'demo-confirm'});p.setPendingDemo(null);return result;};
- try {await p.render();assert.match(p.host.textContent,/模拟提现/);assert.match(p.host.textContent,/不会向银行卡打款/);await p.fill('.bank-withdraw-form input','100');await p.submit('.bank-withdraw-form');
-  assert.match(p.host.textContent,/模拟出款金额/);await p.submit('.bank-withdraw-form');p.setPendingBank({userId:'user_A',key:'bank-original',expectedRevision:'1'});
-  await p.click('确认模拟提现',p.host.querySelector('[role="alertdialog"]'));assert.match(p.host.textContent,/请先确认收款资料的保存结果/);assert.equal(p.calls.filter(x=>x.method==='demo-confirm').length,0);
-  p.setPendingBank(null);await p.submit('.bank-withdraw-form');await p.click('确认模拟提现',p.host.querySelector('[role="alertdialog"]'));
+ try {await p.render();assert.match(p.host.textContent,/银行卡提现/);assert.match(p.host.textContent,/不会向银行卡打款/);await p.fill('.bank-withdraw-form input','100');await p.submit('.bank-withdraw-form');
+  assert.match(p.host.textContent,/提现净额/);await p.submit('.bank-withdraw-form');p.setPendingBank({userId:'user_A',key:'bank-original',expectedRevision:'1'});
+  await p.click('确认提交申请',p.host.querySelector('[role="alertdialog"]'));assert.match(p.host.textContent,/请先确认收款资料的保存结果/);assert.equal(p.calls.filter(x=>x.method==='demo-confirm').length,0);
+  p.setPendingBank(null);await p.submit('.bank-withdraw-form');await p.click('确认提交申请',p.host.querySelector('[role="alertdialog"]'));
   assert.equal(p.calls.filter(x=>x.method==='demo-target').length,1);assert.equal(p.calls.filter(x=>x.method==='demo-confirm').length,1);assert.equal(p.changes.length,1);
-  assert.match(p.host.textContent,/模拟提现完成/);assert.match(p.host.textContent,/没有向银行卡打款/);
+  assert.match(p.host.textContent,/处理完成/);assert.match(p.host.textContent,/不会向银行卡打款/);
  }finally{await p.close();}
 });
 
@@ -126,7 +126,7 @@ test('an unknown demo write blocks a second request and queries the original res
  const scope='LOCAL_DEMO_SIMULATED',pending={version:1,userId:'user_A',scope,stage:'target',key:'original-target',body:{bankBindingId:'bank-1',bankBindingRevision:'1',amountCents:'10000'}};
  const p=await probe({availableBalance:'15000',ledgerRevision:'7',pendingDemo:pending,demo:{readDemoAvailability:async()=>({scope,withdrawalEnabled:true,limits:demoLimits,observedAt:at})}});
  p.demoApi.recoverDemoWithdrawal=async(userId,receivedScope)=>{assert.equal(userId,'user_A');assert.equal(receivedScope,scope);p.calls.push({method:'demo-recover'});return{knowledge:'UNKNOWN',pending,intent:null};};
- try{await p.render();assert.match(p.host.textContent,/上次模拟操作结果待确认/);await p.click('查询原申请');assert.match(p.host.textContent,/原申请仍未确认/);assert.equal(p.calls.filter(x=>x.method==='demo-recover').length,1);assert.equal(p.calls.filter(x=>x.method==='demo-target').length,0);}
+ try{await p.render();assert.match(p.host.textContent,/上次提现结果待确认/);await p.click('查询原申请');assert.match(p.host.textContent,/原申请仍未确认/);assert.equal(p.calls.filter(x=>x.method==='demo-recover').length,1);assert.equal(p.calls.filter(x=>x.method==='demo-target').length,0);}
  finally{await p.close();}
 });
 
@@ -149,7 +149,7 @@ test('demo amount limits are shown and invalid amounts never create a target',as
  try{
   await p.render();assert.match(p.host.textContent,/单笔范围.*2\.00.*10,000\.00/);
   await p.fill('.bank-withdraw-form input','1');await p.submit('.bank-withdraw-form');
-  assert.match(p.host.textContent,/模拟提现金额需在/);assert.equal(p.calls.filter(x=>x.method==='demo-target').length,0);
+  assert.match(p.host.textContent,/提现金额需在/);assert.equal(p.calls.filter(x=>x.method==='demo-target').length,0);
   await p.click('本次最多');assert.equal(p.host.querySelector('.bank-withdraw-form input').value,'10000.00');
  }finally{await p.close();}
 });
@@ -236,7 +236,7 @@ test('unknown withdrawal recovery stays available when new options fail; ACK is 
 test('the unified timeline follows source cursors and marks unavailable history as partial', async () => {
   const seen = [];
   const p = await probe({ history: { readWithdrawalHistory: async (_user, query) => { seen.push(query); return query.source === 'HISTORICAL' ? history(query.source,{items:[historyItem(query.cursor?'history:h1':'history:h2')],cursor:query.cursor?null:'history-next',snapshot:'h'}) : query.source === 'LOCAL_CONTROLLED' ? history(query.source,{items:[localItem],snapshot:'c'}) : history(query.source,{availability:'NOT_INTEGRATED'}); } } });
-  try { await p.render(); const section = p.host.querySelector('[aria-label="提现记录"]'); assert.match(section.textContent, /当前列表可能不完整/); assert(seen.some(query => query.source === 'HISTORICAL' && query.cursor === 'history-next')); assert.equal(section.querySelectorAll('.bank-history-row').length,3); assert.match(section.textContent,/处理中/); assert.match(section.textContent,/模拟提现，不代表银行到账/); } finally { await p.close(); }
+  try { await p.render(); const section = p.host.querySelector('[aria-label="提现记录"]'); assert.match(section.textContent, /当前列表可能不完整/); assert(seen.some(query => query.source === 'HISTORICAL' && query.cursor === 'history-next')); assert.equal(section.querySelectorAll('.bank-history-row').length,3); assert.match(section.textContent,/处理中/); assert.match(section.textContent,/测试记录，未实际打款/); } finally { await p.close(); }
 });
 
 test('historical original destination never falls back to the current bank', async () => {
@@ -289,10 +289,10 @@ for(const denialStatus of [401,403]){
    assert.equal(section.querySelectorAll('.bank-history-row').length, 5); while([...section.querySelectorAll('button')].some(b=>b.textContent.includes('查看更多记录'))){await p.click('查看更多记录',section);} assert.ok(section.querySelectorAll('.bank-history-row').length>=20); await p.click('加载更多记录',section);
    const target=[...section.querySelectorAll('.bank-history-row')].find(row=>row.textContent.includes('0015'));assert(target);await React.act(async()=>target.querySelector('button').click());await p.settle();
    assert.equal([...section.querySelectorAll('.bank-history-row')].filter(row=>row.textContent.includes('0015')).length,0);
-   if(denialStatus===403)assert.match(section.textContent,/模拟提现，不代表银行到账/);else{assert.equal(section.querySelectorAll('.bank-history-row').length,0);assert.equal(revalidations,1);}
+   if(denialStatus===403)assert.match(section.textContent,/测试记录，未实际打款/);else{assert.equal(section.querySelectorAll('.bank-history-row').length,0);assert.equal(revalidations,1);}
    await React.act(async()=>later.resolve(history('JOINPAY',{items:[{...nativeItem,id:'joinpay:late',intentId:'late',occurredAt:'2026-10-23T00:00:00.000Z'}]})));await p.settle();
    assert.equal([...section.querySelectorAll('.bank-history-row')].filter(row=>row.textContent.includes('0015')).length,0);
-   if(denialStatus===403)assert.match(section.textContent,/模拟提现，不代表银行到账/);else assert.equal(section.querySelectorAll('.bank-history-row').length,0);
+   if(denialStatus===403)assert.match(section.textContent,/测试记录，未实际打款/);else assert.equal(section.querySelectorAll('.bank-history-row').length,0);
   }finally{later.resolve(history('JOINPAY'));await p.close();}
  });
 }

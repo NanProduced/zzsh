@@ -169,6 +169,7 @@ test('synthetic authenticated startup mounts ordinary routes but no JoinPay call
     const pool = { query: async (text: string) => {
       if (text.includes('FROM unnest')) return { rows: CREDIT_TABLES.map(name => ({ name, present: true, readable: true })) };
       if (text.includes('runtime_contract_version')) return { rows: [{ version: 1, schemaCreate: false }] };
+      if (text.includes("zzsh_iam.user_auth_throttle_event")) return { rows: [{ ready: true }] };
       throw new Error('unexpected startup database query');
     }, connect: async () => { throw new Error('unexpected startup connection'); } };
     const scope = loadEcsTestDistributionRuntime({ config, authEnabled: true, admission: undefined, env: noChannel });

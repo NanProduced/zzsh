@@ -1473,7 +1473,7 @@ export async function mountAuthHandlers(
   });
   if (options.localFinancialSandbox) mountLocalFinancialSandboxRoutes(app, { ...securityOptions, secureCookies: options.secureCookies }, options.localFinancialSandbox.checkout);
   if (options.localControlledPayments) mountLocalControlledPayments(app, securityOptions, options.localControlledPayments);
-  else mountChannelPayments(app, securityOptions, collection?.routes, paymentReadOptions);
+  else mountChannelPayments(app, securityOptions, options.ecsTestDemo ? { demo: options.ecsTestDemo.checkout } : collection?.routes, paymentReadOptions);
   if (collection?.notifications) mountJoinpayCollectionNotifications(app, { pool: options.pool, source: collection.notifications });
   mountAdminDomainSummary(app, securityOptions);
   mountOrderHandlers(app, orderOptions);

@@ -6,6 +6,7 @@ import { REGRESSION_MARKER } from '../config/test-resource';
 import { createControlledRegressionResource, assertControlledRegressionResource, type ControlledRegressionBinding, type ControlledRegressionResource } from './controlled-regression-resource';
 import { assertLocalFinancialSandboxResource, localFinancialSandboxRegistration, type LocalFinancialSandbox } from './local-financial-sandbox-resource';
 import { assertEcsTestDemoResource, readEcsTestDemoRegistration, type DemoFinanceResource } from './ecs-test-demo-resource';
+import { assertWithdrawalBusinessPolicyMatches, parseWithdrawalBusinessPolicy, TEAM_TEST_WITHDRAWAL_POLICY, type WithdrawalBusinessPolicy } from './withdrawal-business-policy';
 
 export type NativeWithdrawalBinding = Readonly<{
   userId: string;
@@ -15,7 +16,7 @@ export type NativeWithdrawalBinding = Readonly<{
   payoutKey: string;
 }>;
 export type NativeWithdrawalScope = Readonly<{ kind: 'NATIVE_LOCAL_CONTROLLED_WITHDRAWAL' }>;
-type Proof = Readonly<{ name: string; role: string; oid: number; bindings: readonly NativeWithdrawalBinding[]; regression?: ControlledRegressionResource; sandbox?: LocalFinancialSandbox; demo?:DemoFinanceResource }>;
+type Proof = Readonly<{ name: string; role: string; oid: number; bindings: readonly NativeWithdrawalBinding[]; regression?: ControlledRegressionResource; sandbox?: LocalFinancialSandbox; demo?:DemoFinanceResource; businessPolicy?:WithdrawalBusinessPolicy }>;
 const proofs = new WeakMap<object, Proof>();
 const id = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const marker = 'zzsh:order-reservation-test:v1';
@@ -30,6 +31,7 @@ export function createSandboxNativeWithdrawalScope(sandbox: LocalFinancialSandbo
 }
 export type RegisteredWithdrawalResource=LocalFinancialSandbox|DemoFinanceResource;
 export function nativeWithdrawalSandbox(scope: NativeWithdrawalScope): RegisteredWithdrawalResource | undefined { const p=proof(scope);return p.sandbox??p.demo; }
+export function demoNativeWithdrawalPolicy(scope:NativeWithdrawalScope):WithdrawalBusinessPolicy|undefined { const p=proof(scope);return p.demo?p.businessPolicy:undefined; }
 export function withdrawalRegistration(resource:RegisteredWithdrawalResource){
  if(resource.kind==='REGISTERED_LOCAL_FINANCIAL_SANDBOX')return localFinancialSandboxRegistration(resource);
  const p=readEcsTestDemoRegistration(resource),r=p.registration.resource;
@@ -41,9 +43,15 @@ export async function assertRegisteredWithdrawalResource(c:PoolClient,resource:R
  const p=await assertEcsTestDemoResource(c,resource,purpose),r=p.resource;
  return {active:p.active,reference:p.reference,approvedByAdminId:p.administratorId,resource:{database:r.database,resourceOid:r.databaseOid,marker:r.marker,runtimeRole:r.runtimeRole}};
 }
-export function createDemoNativeWithdrawalScope(demo:DemoFinanceResource):NativeWithdrawalScope{
- const r=readEcsTestDemoRegistration(demo).registration.resource,token=Object.freeze({kind:'NATIVE_LOCAL_CONTROLLED_WITHDRAWAL' as const});
- proofs.set(token,Object.freeze({name:r.database,role:r.runtimeRole,oid:r.databaseOid,bindings:Object.freeze([]),demo}));return token;
+export function createDemoNativeWithdrawalScope(demo:DemoFinanceResource,businessPolicy:WithdrawalBusinessPolicy=TEAM_TEST_WITHDRAWAL_POLICY):NativeWithdrawalScope{
+ const r=readEcsTestDemoRegistration(demo).registration.resource,policy=parseWithdrawalBusinessPolicy(businessPolicy);
+ // 现有测试目标的到期守卫采用北京时间日界，其他时区不能假装已支持。
+ if(policy.quotaUtcOffsetMinutes!==480)throw new ConfigurationError('DEMO_WITHDRAWAL_POLICY_TIMEZONE_UNSUPPORTED');
+ if(policy.reviewStrategy!=='VERIFIED_DIRECT_EXECUTION')throw new ConfigurationError('DEMO_WITHDRAWAL_REVIEW_UNSUPPORTED');
+ // shortcut: 旧测试库守卫固定这组规则；调整前须更新并验证数据库守卫。
+ try{assertWithdrawalBusinessPolicyMatches(TEAM_TEST_WITHDRAWAL_POLICY,policy);}catch{throw new ConfigurationError('DEMO_WITHDRAWAL_POLICY_SCHEMA_MISMATCH');}
+ const token=Object.freeze({kind:'NATIVE_LOCAL_CONTROLLED_WITHDRAWAL' as const});
+ proofs.set(token,Object.freeze({name:r.database,role:r.runtimeRole,oid:r.databaseOid,bindings:Object.freeze([]),demo,businessPolicy:policy}));return token;
 }
 
 /** Explicit local assembly only. No environment fallback and no HTTP constructor. */

@@ -16,7 +16,7 @@ API参考模板为 `apps/api/.env.deployment.example`，Next参考 `apps/web/.en
 | 短信 | 已开通账号、审核通过的签名/模板、模板变量、调用权限与费用告警 | `USER_SMS_PROVIDER=aliyun`、`USER_SMS_SIGN_NAME`、独立 `USER_SMS_ACCESS_KEY_ID/SECRET_FILE`；身份验证、注册、登录、绑定分别配置 `USER_SMS_TEMPLATE_IDENTITY/REGISTER/LOGIN/BIND`，未单独设置时使用原 `USER_SMS_TEMPLATE_CODE` 共用模板。管理端系统配置可查看场景与模板来源，不展示密钥；配置存在不代表审核或送达成功。 |
 | 实名 | 已订购的阿里云市场二要素服务、独立 AppCode、单人每日次数与最小间隔、已发布隐私/传输披露正文 | 旧站同款设置 `USER_REAL_NAME_PROVIDER=aliyun-market-id2` 与 `USER_REAL_NAME_APPCODE_FILE`；也保留官方直连 `aliyun-id2meta` 及其独立 AccessKey 配置。两者来源单独记录；`USER_REAL_NAME_DAILY_LIMIT`、`USER_REAL_NAME_MIN_INTERVAL_SECONDS` 必填。服务响应成功不等于身份匹配；超时按原键恢复，不能盲重发付费调用 |
 | 汇聚收款/退款 | 商户/产品权限、官方接口文档版本和签名样例、签名/验签密钥版本、通知URL、QR允许host、查询/通知与退役原钥保留策略 | `JOINPAY_COLLECTION_CONFIG_FILE`、`JOINPAY_REFUND_CONFIG_FILE`；JSON分别引用 `JOINPAY_COLLECTION_KEY_*(_FILE)`、`JOINPAY_REFUND_KEY_*(_FILE)`。当前渠道没有沙盒，测试账号也不等于无真实资金风险 |
-| 汇聚提现/账户查询 | 对应商户产品、原目标与银行编码合同、官方证据/签名版本、通知URL及查询能力 | `JOINPAY_PAYOUT_CONFIG_FILE`、`JOINPAY_ACCOUNTS_CONFIG_FILE`，钥引用 `JOINPAY_PAYOUT_KEY_*(_FILE)`、`JOINPAY_ACCOUNT_KEY_*(_FILE)`（ACCOUNT为单数）；具体JSON见各 `*-runtime.ts` 导出类型与[资金规格](../architecture/payments-and-funds.md) |
+| 汇聚提现/账户查询 | 对应商户产品、原目标与银行编码合同、官方证据/签名版本、通知URL及查询能力 | `JOINPAY_PAYOUT_CONFIG_FILE`、`JOINPAY_ACCOUNTS_CONFIG_FILE`，钥引用 `JOINPAY_PAYOUT_KEY_*(_FILE)`、`JOINPAY_ACCOUNT_KEY_*(_FILE)`（ACCOUNT为单数）。设置 `USER_WITHDRAWAL_POLICY(_FILE)` 时，真实出款的已审核策略须与共享业务规则一致；具体JSON见各 `*-runtime.ts` 导出类型与[资金规格](../architecture/payments-and-funds.md) |
 | 银行资料保护 | 独立AES-GCM保护钥、当前keyVersion与历史keyring、恢复保管人 | `WITHDRAWAL_BANK_BINDING_CONFIG_FILE`、`WITHDRAWAL_BANK_KEY_*(_FILE)`。不得换钥后丢弃旧版本；资料保存不证明银行实名或代付到账 |
 | 经营政策与文书 | 平台经营主体、联系方式；平台服务/隐私/出租/包赔/提前结束正文；真实分销比例、最低计提、期限及审批主体 | 通过正式Admin草稿→封存→生效/双人审批；不在 `.env` 填默认比例、不从本地fixture当正式政策，不修改旧订单快照 |
 

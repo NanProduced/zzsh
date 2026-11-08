@@ -12,12 +12,13 @@ type ChannelPaymentMoney = { cents: string; currency: string };
 export type ChannelPaymentView = {
   contractVersion: "order-payment-request.v1";
   dataOrigin: ChannelPaymentDataOrigin;
-  capability: { channelEnabled: boolean; methods: ChannelPaymentMethod[]; evidenceProfile: "JOINPAY_AGG_2_6_MD5"; productionPaymentCapability: boolean };
+  capability: { channelEnabled: boolean; methods: ChannelPaymentMethod[]; evidenceProfile: "JOINPAY_AGG_2_6_MD5" | "CONTROLLED_TEST"; productionPaymentCapability: boolean };
   order: { id: string; displayNo: string; status: string; paidAt: string | null };
   request: { id: string; state: string; method: string; amount: ChannelPaymentMoney | null; updatedAt: string;
     recovery: { mode: "ORIGINAL_NUMBER_QUERY"; nextAttemptAt: null; manualQueryOpen: false } | null } | null;
   projection: { displayState: string; actionBlockedReason: string | null };
-  paymentAction: { kind: "QR_URL"; url: string; expiresAt: null; expiryKnown: false } | null;
+  paymentAction: { kind: "QR_URL"; url: string; expiresAt: null; expiryKnown: false }
+    | { kind: "TEST_CASHIER"; scope: "ECS_TEST_SIMULATED" | "LOCAL_DEMO_SIMULATED" } | null;
   payment: { confirmationId: string; disposition: "APPLIED" | "REVIEW_REQUIRED"; reasonCode: string | null; amount: ChannelPaymentMoney | null; acceptedAt: string } | null;
 };
 // POST只确认请求已持久化；支付参数和付款事实须从独立的本地GET读取。

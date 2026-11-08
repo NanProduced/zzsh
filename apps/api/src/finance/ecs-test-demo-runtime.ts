@@ -5,27 +5,28 @@ import { assertEcsTestDemoAssembly, assertEcsTestDemoResource, createEcsTestDemo
   type DemoFinanceResource, type DemoOrigins } from "./ecs-test-demo-resource";
 import { createEcsDemoDistributionOrderScope, createPaymentDistributionStore } from "./distribution-payment-store";
 import { createDistributionEarningStore } from "./distribution-earning-store";
-import { createEcsDemoRefundCapability } from "../order/channel-payment-store";
+import { createEcsDemoCollectionCapability, createEcsDemoRefundCapability } from "../order/channel-payment-store";
 import { createDemoNativeWithdrawalScope } from "./native-withdrawal-resource";
+import type { WithdrawalBusinessPolicy } from "./withdrawal-business-policy";
 
 const assemblies = new WeakSet<object>();
 export type EcsTestDemoRuntime = NonNullable<ReturnType<typeof createEcsTestDemoRuntime>>;
 
 /** Creates process-local capabilities only; enrollment and database installation are separate owner steps. */
-export function createEcsTestDemoRuntime(input: Parameters<typeof createEcsTestDemoResource>[0] & { appId: string }) {
+export function createEcsTestDemoRuntime(input: Parameters<typeof createEcsTestDemoResource>[0] & { appId: string; withdrawalPolicy?:WithdrawalBusinessPolicy }) {
   const demo = createEcsTestDemoResource(input); if (!demo) return undefined;
-  return assemble(demo,input.appId);
+  return assemble(demo,input.appId,input.withdrawalPolicy);
 }
-export function createLocalDemoCloneRuntime(input:Parameters<typeof createLocalDemoCloneResource>[0] & {appId:string}) {
-  return assemble(createLocalDemoCloneResource(input),input.appId);
+export function createLocalDemoCloneRuntime(input:Parameters<typeof createLocalDemoCloneResource>[0] & {appId:string;withdrawalPolicy?:WithdrawalBusinessPolicy}) {
+  return assemble(createLocalDemoCloneResource(input),input.appId,input.withdrawalPolicy);
 }
-function assemble(demo:DemoFinanceResource,appId:string) {
+function assemble(demo:DemoFinanceResource,appId:string,withdrawalPolicy?:WithdrawalBusinessPolicy) {
   if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(appId)) throw new ConfigurationError("ECS_TEST_DEMO_IM_APP_INVALID");
   const orderScope = createEcsDemoDistributionOrderScope(demo);
-  const checkout = Object.freeze({ demo, appId, distribution: createPaymentDistributionStore(orderScope) });
+  const checkout = Object.freeze({ demo, appId, distribution: createPaymentDistributionStore(orderScope), capability: createEcsDemoCollectionCapability(demo) });
   const earnings = createDistributionEarningStore(orderScope);
   const refund = Object.freeze({ demo, capability: createEcsDemoRefundCapability(demo) });
-  const withdrawal = Object.freeze({ demo, scope:createDemoNativeWithdrawalScope(demo) });
+  const withdrawal = Object.freeze({ demo, scope:createDemoNativeWithdrawalScope(demo,withdrawalPolicy) });
   const assembly = Object.freeze({ demo, checkout, earnings, refund, withdrawal }); assemblies.add(assembly); return assembly;
 }
 
@@ -113,5 +114,25 @@ export async function preflightEcsTestDemoRuntime(pool: Pool, assembly: EcsTestD
       AND NOT EXISTS (SELECT 1 FROM required r LEFT JOIN pg_trigger t ON t.tgrelid=to_regclass(r.relation_name) AND t.tgname=r.trigger_name
         WHERE t.oid IS NULL OR t.tgenabled NOT IN ('O','A') OR t.tgfoid IS DISTINCT FROM to_regprocedure(r.function_name)) AS ready`)).rows[0];
     if (row?.ready !== true) throw new ConfigurationError("ECS_TEST_DEMO_FINANCE_SCHEMA_NOT_READY");
+    const cashier = (await c.query(`WITH required(relation_name,trigger_name,function_name) AS (VALUES
+      ('zzsh_order.payment_request','test_channel_request_guard','zzsh_order.guard_test_channel_operation()'),
+      ('zzsh_order.payment_channel_observation','test_channel_observation_guard','zzsh_order.guard_test_channel_operation()'),
+      ('zzsh_order.payment_channel_transaction','test_channel_transaction_guard','zzsh_order.guard_test_channel_operation()'),
+      ('zzsh_order.payment_request','test_channel_transition_guard','zzsh_order.check_test_channel_transition()'))
+      SELECT NOT EXISTS(SELECT 1 FROM required r LEFT JOIN pg_trigger t ON t.tgrelid=to_regclass(r.relation_name) AND t.tgname=r.trigger_name
+          WHERE t.oid IS NULL OR t.tgenabled NOT IN ('O','A') OR t.tgfoid IS DISTINCT FROM to_regprocedure(r.function_name))
+        AND has_column_privilege(current_user,'zzsh_order.payment_request','state','UPDATE')
+        AND has_column_privilege(current_user,'zzsh_order.payment_request','method','INSERT')
+        AND has_column_privilege(current_user,'zzsh_order.payment_channel_observation','event','INSERT')
+        AND has_column_privilege(current_user,'zzsh_order.payment_channel_transaction','confirmation_id','INSERT')
+        AND NOT has_table_privilege(current_user,'zzsh_order.payment_request','DELETE')
+        AND NOT has_table_privilege(current_user,'zzsh_order.payment_request','TRUNCATE')
+        AND NOT has_any_column_privilege(current_user,'zzsh_order.payment_channel_observation','UPDATE')
+        AND NOT has_table_privilege(current_user,'zzsh_order.payment_channel_observation','DELETE')
+        AND NOT has_table_privilege(current_user,'zzsh_order.payment_channel_observation','TRUNCATE')
+        AND NOT has_any_column_privilege(current_user,'zzsh_order.payment_channel_transaction','UPDATE')
+        AND NOT has_table_privilege(current_user,'zzsh_order.payment_channel_transaction','DELETE')
+        AND NOT has_table_privilege(current_user,'zzsh_order.payment_channel_transaction','TRUNCATE') AS ready`)).rows[0];
+    if (cashier?.ready !== true) throw new ConfigurationError("TEST_CASHIER_SCHEMA_NOT_READY");
   });
 }

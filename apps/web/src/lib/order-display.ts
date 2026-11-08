@@ -3,10 +3,6 @@ import { formatReferenceYuan } from "@zzsh/ui/display-money";
 export { formatReferenceYuan } from "@zzsh/ui/display-money";
 import type { Order, OrderImProjection, OrderImStage, OrderLine, OrderParty, PersonalRentalQuote, SettlementLine, SettlementOpening, SettlementPosting, SettlementPreview, SettlementVersion } from "./order-client";
 
-export function isSimulatedOrderPayment(order: Pick<Order, "paymentProvenance">): boolean {
-  return order.paymentProvenance?.source === "SIMULATED";
-}
-
 export function paymentObservation(payment: { disposition: string } | null): string {
   if (!payment) return "暂未查到付款记录";
   const status = payment.disposition === "APPLIED" ? "已记入订单" : payment.disposition === "REVIEW_REQUIRED" ? "需要人工核对" : "状态未记录";
