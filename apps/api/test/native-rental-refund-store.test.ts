@@ -3,7 +3,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { Pool, PoolClient } from "pg";
 import { withTransaction } from "../src/auth/security-core";
-import { consumeNativeRentalRefundTerminal, planAbnormalNativeRentalRefundJournal, planNativeRentalRefundJournal } from "../src/finance/native-rental-refund-store";
+import { consumeNativeRentalRefundTerminal, planAbnormalNativeRentalRefundJournal, planLocalSandboxRentalRefundJournal, planNativeRentalRefundJournal } from "../src/finance/native-rental-refund-store";
 
 const input = () => ({ intentId: "refund_synthetic_1", postingId: "posting_synthetic_1", paymentConfirmationId: "paid_synthetic_1",
   renterUserId: "renter_synthetic_1", refundOrderNo: "RF0123456789abcdef0123456789ab", amountCents: "15908", factsDigest: "a".repeat(64) });
@@ -23,6 +23,16 @@ test('未开租终止复用同一核销清算计划但不伪造posting；其他�
  assert.equal(p.lines[0]!.details.postingId,null);assert.equal(p.lines[1]!.account,'PAYOUT_CLEARING');
  assert.throws(()=>planNativeRentalRefundJournal({...input(),postingId:null}));
  assert.throws(()=>planNativeRentalRefundJournal({...input(),postingId:null,basisKind:'REVIEW_CONFIRMATION'} as any));
+});
+
+test('模拟与正式退款对相同责任产生相同金额分录，来源仍分开',()=>{
+ for(const basis of [input(),{...input(),postingId:null,basisKind:'PRESTART_TERMINATION' as const}]){
+  const formal=planNativeRentalRefundJournal(basis),simulated=planLocalSandboxRentalRefundJournal({...basis,orderId:'order_synthetic_1'});
+  const money=(lines:typeof formal.lines)=>lines.map(line=>[line.account,line.debit,line.credit,line.subject]);
+  assert.deepEqual(money(simulated.lines),money(formal.lines));assert.notEqual(simulated.rootId,formal.rootId);
+  assert.equal(simulated.lines[0]!.details.dataOrigin,'LOCAL_CONTROLLED');
+  assert.equal('dataOrigin' in formal.lines[0]!.details,false);
+ }
 });
 
 test("异常REVIEW原款终态计划只核销未分配收款负债，不借正常posting清算", () => {
