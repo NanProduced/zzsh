@@ -9,7 +9,7 @@ import { ALLOWED_IMAGE_MIMES, MAX_MEDIA_BYTES } from "../supply/media";
 import { requireAdminAccess, runIdempotentWrite, safely, type SupplyResponse, type SupplyRuntimeOptions } from "../supply/supply-routes";
 import { bodyOf, ensureOnlyFields, forbidden, headerValue, invalid, notFound, sendJson, type SupplyNodeRequest } from "../supply/supply-util";
 import { readSettlementRefundPolicy, updateSettlementRefundPolicy, validateSettlementRefundPolicy, type SettlementRefundPolicyInput } from "../order/settlement-refund-policy";
-import { SMS_TEMPLATE_SCENES } from "../auth/sms-templates";
+import { SMS_ADDITIONAL_SCENES, SMS_CONFIGURATION_V1_SCENES, type SmsTemplateScene } from "../auth/sms-templates";
 
 type StorageCheck = {
   state: "NOT_RUN" | "NO_PUBLIC_SAMPLE" | "PASS" | "FAILED";
@@ -46,9 +46,10 @@ export async function handleSystemConfiguration(
     if(sms){
       await withTransaction(options.pool,authorize);
       const config=options.userSmsConfiguration;
+      const describe=(scene:SmsTemplateScene)=>({scene,...(config?.scenes[scene]??{templateCode:null,source:"NOT_CONFIGURED"}),
+        trigger:scene==="RENTAL_EXPIRY"||scene==="OWNER_ORDER_PAID"?"NOT_CONNECTED":"CONNECTED"});
       sendJson(response,200,{provider:config?"aliyun":"disabled",configurationSource:"DEPLOYMENT_ENVIRONMENT",
-        signName:config?.signName??null,scenes:SMS_TEMPLATE_SCENES.map(scene=>({scene,...(config?.scenes[scene]??{templateCode:null,source:"NOT_CONFIGURED"}),
-          trigger:scene==="RENTAL_EXPIRY"||scene==="OWNER_ORDER_PAID"?"NOT_CONNECTED":"CONNECTED"})),
+        signName:config?.signName??null,scenes:SMS_CONFIGURATION_V1_SCENES.map(describe),additionalScenes:SMS_ADDITIONAL_SCENES.map(describe),
         providerVerification:"NOT_RUN"},requestId);
       return;
     }

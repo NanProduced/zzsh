@@ -7,12 +7,15 @@ import { createTransactionalUserSession } from "./user-auth-session";
 import { hasLegacyPhoneConflict, readUserPasswordState } from "./legacy-login";
 import { ThrottleDependencyError, type UserAuthThrottle } from "./user-auth-throttle";
 import type { UserSmsSender } from "./aliyun-user-providers";
+import type { SmsVerificationScene } from "./sms-templates";
 import { isUserVerificationCode, makeUserVerificationCode } from "./user-verification-code";
 
 export type UserSecurityDelivery = { code: string; target: string; channel: "phone" | "email"; purpose: string; sentAt: string };
 type Purpose = "password" | "email" | "phone" | "recovery";
-export function securitySmsScene(purpose:Purpose,stage:"current"|"target"):"BIND"|"IDENTITY"{
-  return purpose==="phone"&&stage==="target"?"BIND":"IDENTITY";
+export function securitySmsScene(purpose:Purpose,stage:"current"|"target",hasCurrentPhone:boolean):SmsVerificationScene{
+  if(purpose==="recovery")return "FORGOT_PASSWORD";
+  if(purpose==="phone"&&stage==="target")return hasCurrentPhone?"CHANGE_MOBILE":"BIND";
+  return "IDENTITY";
 }
 type Subject = { id: string; name: string; phoneNumber: string | null; email: string; emailVerified: boolean; suspended: boolean; accountStatus: string; securityVersion: number; stamp: string };
 type Proof = {
@@ -156,14 +159,14 @@ export async function buildUserSecurityPlugin(options: { pool: Pool; outbox?: Ma
       await client.query(`INSERT INTO zzsh_auth_user.verification (id,identifier,value,"expiresAt","createdAt","updatedAt") VALUES ($1,$2,'{}',$3,$4,$4)`, [proofId(), sendKey, new Date(now.getTime() + COOLDOWN), now]);
       const data: Proof & { sendKey: string } = { version: 1, userId: user?.id ?? null, sessionId, stamp: user?.stamp ?? "", purpose, stage, channel, target, recipient: recipient!, parentProofId, codeHash: sha(id + code), attempts: 0, verified: false, completed: null, sendKey };
       await client.query(`INSERT INTO zzsh_auth_user.verification (id,identifier,value,"expiresAt","createdAt","updatedAt") VALUES ($1,$2,$3,$4,$5,$5)`, [id, prefix + id, JSON.stringify(data), expiresAt, now]);
-      return { data, expiresAt };
+      return { data, expiresAt, smsScene:securitySmsScene(purpose,stage,Boolean(user?.phoneNumber)) };
     }).catch(async (error: unknown) => {
       if (phoneHold && options.smsThrottle) await options.smsThrottle.releaseSmsPhone(phoneHold).catch(() => undefined);
       if (phoneRejection && options.smsThrottle) await options.smsThrottle.recordRejection(phoneRejection).catch(() => undefined);
       throw error;
     });
     if(channel==="phone"&&options.smsSender&&delivery.data.userId){
-      try{await options.smsSender(delivery.data.recipient,code,securitySmsScene(purpose,stage));}
+      try{await options.smsSender(delivery.data.recipient,code,delivery.smsScene);}
       catch{
         ctx.setHeader("Retry-After",String(Math.max(1,Math.ceil((now.getTime()+COOLDOWN-Date.now())/1000))));
         throw new APIError("SERVICE_UNAVAILABLE",{code:"AUTH_DEPENDENCY_UNAVAILABLE",message:"Verification delivery is uncertain; keep the current challenge and wait for its cooldown"});

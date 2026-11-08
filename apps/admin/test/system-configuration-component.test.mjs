@@ -92,6 +92,25 @@ test("Boss can inspect SMS scene configuration without exposing credentials",asy
   assert.equal(h.requests.at(-1).url.pathname,'/api/bff/admin/system/sms');
   assert.match(h.text(),/登录/);assert.match(h.text(),/租期到期提醒/);assert.match(h.text(),/共用验证码模板/);
   assert.match(h.text(),/模板已审核或短信已送达/);assert.doesNotMatch(h.text(),/must-not-render/);
+  assert.match(h.text(),/更新 API 后可查看更换手机号和找回密码模板/);
+});
+
+test("SMS configuration displays new scenes and their actual fallback sources",async t=>{
+  const scenes=['IDENTITY','REGISTER','LOGIN','BIND','RENTAL_EXPIRY','OWNER_ORDER_PAID'].map(scene=>({
+    scene,templateCode:scene==='RENTAL_EXPIRY'||scene==='OWNER_ORDER_PAID'?null:'SMS_FIXTURE',
+    source:scene==='RENTAL_EXPIRY'||scene==='OWNER_ORDER_PAID'?'NOT_CONFIGURED':'SCENE',
+    trigger:scene==='RENTAL_EXPIRY'||scene==='OWNER_ORDER_PAID'?'NOT_CONNECTED':'CONNECTED',
+  }));
+  const additionalScenes=[
+    {scene:'CHANGE_MOBILE',templateCode:'SMS_BIND',source:'RELATED',trigger:'CONNECTED'},
+    {scene:'FORGOT_PASSWORD',templateCode:'SMS_FORGOT',source:'SCENE',trigger:'CONNECTED'},
+  ];
+  const h=await harness(t,url=>response(url.pathname.endsWith('/sms')?{provider:'aliyun',signName:'测试签名',providerVerification:'NOT_RUN',scenes,additionalScenes}:storage()));
+  await h.click('查看短信配置');
+  const rows=[...h.container.querySelectorAll('tr')].map(row=>row.textContent);
+  assert(rows.some(row=>/更换手机号.*SMS_BIND.*复用绑定手机模板.*已支持/.test(row)));
+  assert(rows.some(row=>/找回密码.*SMS_FORGOT.*场景专用.*已支持/.test(row)));
+  assert.doesNotMatch(h.text(),/更新 API 后可查看/);
 });
 
 test("refund wait policy reads lazily and retries an unknown save with the original key and values", async t => {

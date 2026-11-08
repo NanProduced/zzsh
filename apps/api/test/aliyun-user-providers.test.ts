@@ -51,16 +51,20 @@ test("Aliyun SMS distinguishes known rejection from unknown delivery without lea
 test("SMS verification scenes select separate templates; business notices stay unconnected",async()=>{
  const requests:Array<{template:string|undefined;params:string|undefined}>=[];
  const channel=createAliyunSmsChannel({credentials,signName:"合成签名",templateCode:"SMS_FALLBACK",templates:{
-  IDENTITY:"SMS_99",REGISTER:"SMS_100",LOGIN:"SMS_101",BIND:"SMS_102",RENTAL_EXPIRY:"SMS_201",OWNER_ORDER_PAID:"SMS_202",
+  IDENTITY:"SMS_99",REGISTER:"SMS_100",LOGIN:"SMS_101",BIND:"SMS_102",CHANGE_MOBILE:"SMS_103",FORGOT_PASSWORD:"SMS_104",RENTAL_EXPIRY:"SMS_201",OWNER_ORDER_PAID:"SMS_202",
  }},{sendSmsWithOptions:async(request)=>{requests.push({template:request.templateCode,params:request.templateParam});return new SendSmsResponse({body:new SendSmsResponseBody({code:"OK"})});}});
- for(const scene of ["IDENTITY","REGISTER","LOGIN","BIND"] as const)await channel.sendVerification("13800138000","1234",scene);
- assert.deepEqual(requests.map(r=>r.template),["SMS_99","SMS_100","SMS_101","SMS_102"]);
- assert.deepEqual(requests.map(r=>JSON.parse(r.params!)),[{code:"1234"},{code:"1234"},{code:"1234"},{code:"1234"}]);
+ for(const scene of ["IDENTITY","REGISTER","LOGIN","BIND","CHANGE_MOBILE","FORGOT_PASSWORD"] as const)await channel.sendVerification("13800138000","1234",scene);
+ assert.deepEqual(requests.map(r=>r.template),["SMS_99","SMS_100","SMS_101","SMS_102","SMS_103","SMS_104"]);
+ assert.deepEqual(requests.map(r=>JSON.parse(r.params!)),Array.from({length:6},()=>({code:"1234"})));
  assert.equal(channel.configuration.scenes.LOGIN.source,"SCENE");
  await assert.rejects(channel.sendVerification("13800138000","1234","OWNER_ORDER_PAID" as never));
- assert.equal(channel.configuration.scenes.RENTAL_EXPIRY.templateCode,"SMS_201");assert.equal(requests.length,4);
+ assert.equal(channel.configuration.scenes.RENTAL_EXPIRY.templateCode,"SMS_201");assert.equal(requests.length,6);
  const shared=createAliyunSmsChannel({credentials,signName:"合成签名",templateCode:"SMS_SHARED"},{sendSmsWithOptions:async()=>{throw Error("must not send");}});
  assert.equal(shared.configuration.scenes.LOGIN.source,"SHARED");assert.equal(shared.configuration.scenes.OWNER_ORDER_PAID.source,"NOT_CONFIGURED");
+ assert.equal(shared.configuration.scenes.CHANGE_MOBILE.source,"SHARED");assert.equal(shared.configuration.scenes.FORGOT_PASSWORD.source,"SHARED");
+ const related=createAliyunSmsChannel({credentials,signName:"合成签名",templates:{IDENTITY:"SMS_ID",REGISTER:"SMS_REG",LOGIN:"SMS_LOGIN",BIND:"SMS_BIND"}},{sendSmsWithOptions:async()=>{throw Error("must not send");}});
+ assert.deepEqual(related.configuration.scenes.CHANGE_MOBILE,{templateCode:"SMS_BIND",source:"RELATED"});
+ assert.deepEqual(related.configuration.scenes.FORGOT_PASSWORD,{templateCode:"SMS_ID",source:"RELATED"});
  assert.equal("sendNotice" in shared,false);
 });
 
@@ -106,7 +110,7 @@ test("offline security endpoints send and verify per channel, with cooldown and 
  for(const channel of ["phone","email"] as const){
   const sent=await invoke("userSecuritySend",{purpose:"recovery",channel,stage:"current",contact:channel==="phone"?user.phoneNumber:user.email});
   const code=channel==="phone"?smsCode:outbox.get(sent.challengeId)?.code;
-  if(channel==="phone")assert.equal(smsScene,"IDENTITY");
+  if(channel==="phone")assert.equal(smsScene,"FORGOT_PASSWORD");
   assert.equal(isUserVerificationCode(channel,code),true);
   await assert.rejects(invoke("userSecuritySend",{purpose:"recovery",channel,stage:"current",contact:channel==="phone"?user.phoneNumber:user.email}));
   await assert.rejects(invoke("userSecurityVerify",{challengeId:sent.challengeId,code:channel==="phone"?"123456":"1234"}));

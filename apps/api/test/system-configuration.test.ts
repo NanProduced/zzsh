@@ -128,6 +128,8 @@ test("SMS configuration is Boss-only, distinguishes shared templates and never e
   const f=setup();f.options.userSmsConfiguration=resolveSmsTemplates({signName:"合成签名",templateCode:"SMS_SHARED",templates:{LOGIN:"SMS_LOGIN",OWNER_ORDER_PAID:"SMS_OWNER"}});
   const result=await f.run("/sms");assert.equal(result.code,200);assert.equal(result.body.provider,"aliyun");
   assert.equal(result.body.providerVerification,"NOT_RUN");assert.equal(result.body.scenes.length,6);
+  assert.deepEqual(result.body.additionalScenes.map((row:{scene:string})=>row.scene),["CHANGE_MOBILE","FORGOT_PASSWORD"]);
+  assert.ok(result.body.additionalScenes.every((row:{source:string;trigger:string})=>row.source==="SHARED"&&row.trigger==="CONNECTED"));
   assert.equal(result.body.scenes.find((row:{scene:string})=>row.scene==="LOGIN").source,"SCENE");
   assert.equal(result.body.scenes.find((row:{scene:string})=>row.scene==="REGISTER").source,"SHARED");
   assert.equal(result.body.scenes.find((row:{scene:string})=>row.scene==="RENTAL_EXPIRY").source,"NOT_CONFIGURED");
@@ -135,6 +137,7 @@ test("SMS configuration is Boss-only, distinguishes shared templates and never e
   f.pool.isBoss=false;assert.equal((await f.run("/sms")).code,403);
   f.pool.isBoss=true;delete f.options.userSmsConfiguration;const disabled=await f.run("/sms");
   assert.equal(disabled.body.provider,"disabled");assert.ok(disabled.body.scenes.every((row:{source:string})=>row.source==="NOT_CONFIGURED"));
+  assert.ok(disabled.body.additionalScenes.every((row:{source:string})=>row.source==="NOT_CONFIGURED"));
 });
 
 test("settlement refund policy is Boss-only and rejects cross-origin or invalid changes", async () => {

@@ -7,7 +7,7 @@ import { normalizeMainlandPhone } from "./phone-number";
 import { normalizeIdentityDocument } from "./identity-subject";
 import { ConfigurationError } from "../config/config";
 import { isUserVerificationCode } from "./user-verification-code";
-import { resolveSmsTemplates, type SmsTemplateScene, type SmsVerificationScene } from "./sms-templates";
+import { resolveSmsTemplates, SMS_VERIFICATION_SCENES, type SmsTemplateScene, type SmsVerificationScene } from "./sms-templates";
 
 export type UserSmsSender = (phoneNumber: string, code: string, scene: SmsVerificationScene) => Promise<void>;
 export type AliyunUserCredentials = { accessKeyId: string; accessKeySecret: string; securityToken?: string };
@@ -46,7 +46,7 @@ export function createAliyunSmsChannel(input: { credentials: AliyunUserCredentia
     }
   };
   const sendVerification:UserSmsSender=async(phoneNumber,code,scene)=>{
-    if(!["IDENTITY","REGISTER","LOGIN","BIND"].includes(scene)||!isUserVerificationCode("phone",code))throw new UserSmsDeliveryError("REJECTED");
+    if(!(SMS_VERIFICATION_SCENES as readonly string[]).includes(scene)||!isUserVerificationCode("phone",code))throw new UserSmsDeliveryError("REJECTED");
     await send(phoneNumber,scene,{code});
   };
   return {configuration,sendVerification};

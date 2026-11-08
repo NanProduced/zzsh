@@ -17,10 +17,12 @@ test("user channels are default closed and never inherit media credentials", () 
 
 test("explicit SMS construction performs no send and cannot combine with a fixed mock", () => {
   assert.equal(typeof loadUserProviderRuntime(sms).userSmsSender, "function");
-  const configured=loadUserProviderRuntime({...sms,USER_SMS_TEMPLATE_LOGIN:"SMS_LOGIN",USER_SMS_TEMPLATE_OWNER_ORDER_PAID:"SMS_OWNER"});
+  const configured=loadUserProviderRuntime({...sms,USER_SMS_TEMPLATE_LOGIN:"SMS_LOGIN",USER_SMS_TEMPLATE_CHANGE_MOBILE:"SMS_CHANGE",USER_SMS_TEMPLATE_FORGOT_PASSWORD:"SMS_FORGOT",USER_SMS_TEMPLATE_OWNER_ORDER_PAID:"SMS_OWNER"});
   assert.equal(configured.userSmsConfiguration?.scenes.LOGIN.source,"SCENE");
   assert.equal(configured.userSmsConfiguration?.scenes.REGISTER.source,"SHARED");
   assert.equal(configured.userSmsConfiguration?.scenes.OWNER_ORDER_PAID.templateCode,"SMS_OWNER");
+  assert.equal(configured.userSmsConfiguration?.scenes.CHANGE_MOBILE.templateCode,"SMS_CHANGE");
+  assert.equal(configured.userSmsConfiguration?.scenes.FORGOT_PASSWORD.templateCode,"SMS_FORGOT");
   assert.throws(() => loadUserProviderRuntime({ ...sms, AUTH_LOCAL_SMS_MOCK: "true" }), /exclusive/);
   assert.throws(() => loadUserProviderRuntime({ ...sms, USER_SMS_TEMPLATE_CODE: "invalid" }), /OTP template/);
   assert.throws(() => loadUserProviderRuntime({ ...sms, USER_SMS_TEMPLATE_LOGIN: "invalid" }), /Invalid SMS template/);
@@ -40,8 +42,10 @@ test("SMS login and security scenes come from server-side account state",async()
   }
   const unavailable={query:async()=>({rows:[]})} as unknown as PoolClient;
   await assert.rejects(resolvePhoneLoginSmsScene(unavailable,"+8613800138000"));
-  assert.equal(securitySmsScene("phone","target"),"BIND");
-  for(const purpose of ["phone","password","email","recovery"] as const)assert.equal(securitySmsScene(purpose,"current"),"IDENTITY");
+  assert.equal(securitySmsScene("phone","target",true),"CHANGE_MOBILE");
+  assert.equal(securitySmsScene("phone","target",false),"BIND");
+  assert.equal(securitySmsScene("recovery","current",true),"FORGOT_PASSWORD");
+  for(const purpose of ["phone","password","email"] as const)assert.equal(securitySmsScene(purpose,"current",true),"IDENTITY");
 });
 
 test("unknown provider modes are rejected rather than silently falling back", () => {
