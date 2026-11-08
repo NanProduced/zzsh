@@ -223,7 +223,7 @@ export function projectAdminReadOrder(origin:string,r:Record<string,any>,viewer:
   const result=projectOrder(row,'admin',{internalQuote:viewer.internalQuote});const paid=orderHasPaidState(r.status,r.cancel_reason);
   const titles = accountTitleFact(r.title, null, frozenQuoteSummary(r.quote_snapshot));
   const breakdown=nativePrepaymentBreakdown(r,result.amounts);
-  return {...result,...titles,haffRatio:orderHaffRatio(r.quote_snapshot),prepaymentBreakdown:breakdown,prepaymentReconciliation:nativeReconciliation(breakdown),source:{origin:'NATIVE',ruleOrigin:'NATIVE_ORDER'},accountDisplayNo:r.account_no,payment:{state:paid?'RECORDED_PAID':'RECORDED_UNPAID',recordedAt:r.paid_at,recordedAmount:nativeRecordedAmount(r)}};
+  return {...result,...titles,haffRatio:orderHaffRatio(r.quote_snapshot),prepaymentBreakdown:breakdown,prepaymentReconciliation:nativeReconciliation(breakdown),source:{origin:'NATIVE',ruleOrigin:'NATIVE_ORDER'},accountDisplayNo:r.account_no,payment:{state:paid?'RECORDED_PAID':'RECORDED_UNPAID',recordedAt:r.paid_at,recordedAmount:nativeRecordedAmount(r)},completedAt:r.postedAt??null};
  }
  const raw=r.source_snapshot,paid=r.source_pay_status===1,unpaid=r.source_pay_status===0;
  const state=legacyOrderReadState(r.continuation_stage??r.source_order_status,r.source_pay_status),status=state.status;

@@ -63,3 +63,66 @@
 .oc-design .oc-search-group>:last-child{flex:1 1 auto;min-width:0}
 .oc-design .oc-search-group>:last-child input{border-top-left-radius:0;border-bottom-left-radius:0}
 .oc-design .oc-search-main{align-items:center}
+/* U1：四条状态轴并排，避免"已支付/进行中/已完成/未结算"混轴 */
+.oc-design .oc-axes{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin:0 0 16px;padding:12px 16px;border:1px solid var(--border);border-radius:8px;background:var(--surface)}
+.oc-design .oc-axes>span{display:flex;flex-direction:column;gap:4px;min-width:0}
+.oc-design .oc-axes small{font-size:11px;color:var(--muted-foreground)}
+.oc-design .oc-axes strong{font-size:13px;font-weight:600;overflow-wrap:anywhere}
+.oc-design .oc-price-pair>div[data-side=renter]{border-left:2px solid #38bdf880}
+.oc-design .oc-price-pair>div[data-side=owner]{border-left:2px solid #a78bfa80}
+.oc-design .oc-price-pair>div[data-side=renter] strong{color:#7dd3fc}
+.oc-design .oc-price-pair>div[data-side=owner] strong{color:#c4b5fd}
+[data-theme=light] .oc-design .oc-price-pair>div[data-side=renter] strong{color:#0369a1}
+[data-theme=light] .oc-design .oc-price-pair>div[data-side=owner] strong{color:#6d28d9}
+/* 标题下标记：计价方式 / 全额包赔 */
+.oc-design .oc-badge{display:inline-flex;align-items:center;margin-left:8px;padding:0 7px;height:18px;border-radius:999px;border:1px solid var(--border);font-size:11px;line-height:1;color:var(--muted-foreground);background:var(--surface-raised);vertical-align:1px}
+.oc-design .oc-badge-accent{border-color:#a78bfa80;color:#c4b5fd;background:#a78bfa14}
+[data-theme=light] .oc-design .oc-badge-accent{color:#6d28d9;background:#ede9fe}
+/* 统一折叠控件外观：原生 details 与 chip 折叠视觉一致，避免三种展开语言 */
+.oc-design .oc-detail-tabs details>summary,.oc-design .oc-records-fold>summary{display:inline-flex;align-items:center;gap:5px;width:fit-content;cursor:pointer;font-size:12px;color:var(--muted-foreground);padding:2px 0}
+.oc-design .oc-detail-tabs details>summary:hover,.oc-design .oc-records-fold>summary:hover{color:var(--foreground)}
+.oc-design .oc-detail-tabs details[open]>summary{color:var(--foreground)}
+/* 无输入操作的二次确认：就地展开，必须显式点"确认"才执行 */
+.oc-design .oc-inline-confirm{display:grid;gap:8px;padding:10px 12px;border:1px solid var(--border);border-radius:6px;background:var(--surface-raised)}
+.oc-design .oc-inline-confirm p{margin:0;font-size:12px;color:var(--muted-foreground)}
+.oc-design .oc-inline-confirm>button{justify-self:start}
+/* 四级字号：22（单号/主金额）· 16（区块标题/关键金额）· 13（正文）· 11（注释） */
+.oc-design .oc-section h2{font-size:16px;line-height:1.4;letter-spacing:.01em}
+.oc-design .oc-money-list strong{font-size:16px}
+.oc-design .oc-fact-list dt{font-size:12px}
+.oc-design .oc-fact-list dd{font-size:13px}
+.oc-design .oc-reading{margin:14px 0 0;padding:10px 14px;border-left:2px solid var(--border);font-size:11px;line-height:1.7;color:var(--muted-foreground);max-width:88ch}
+.oc-design .oc-reading strong{margin-right:8px;font-weight:600;color:var(--foreground)}
+.oc-design .oc-records-fold{margin-top:16px}
+.oc-design .oc-records-fold>summary{cursor:pointer;font-size:13px;font-weight:600}
+.oc-design .oc-records-fold .oc-fold-body{margin-top:12px;font-size:12px;color:var(--muted-foreground);line-height:1.7;overflow-wrap:anywhere}
+/* 要点条：一行三段，状态只在时间线与此处各出现一次，不再重复 */
+.oc-design .oc-summary{display:flex;flex-wrap:wrap;gap:8px 28px;margin:0 0 14px;padding:10px 16px;border:1px solid var(--border);border-radius:8px;background:var(--surface);font-size:12px;color:var(--muted-foreground)}
+.oc-design .oc-summary>span{display:inline-flex;gap:6px;align-items:baseline}
+.oc-design .oc-summary strong{font-size:13px;font-weight:600;color:var(--foreground)}
+/* 关键费用：租客 / 号主 双视角对照，客服对账时一眼比对 */
+.oc-design .oc-price-pair{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;margin:0 0 14px}
+.oc-design .oc-price-pair>div{display:grid;gap:2px;padding:10px 12px;border:1px solid var(--border);border-radius:6px;background:var(--surface-raised)}
+.oc-design .oc-price-pair small{font-size:11px;color:var(--muted-foreground)}
+.oc-design .oc-price-pair strong{font-size:16px;font-weight:600;font-variant-numeric:tabular-nums}
+.oc-design .oc-price-pair span{font-size:11px;color:var(--muted-foreground)}
+@media(max-width:760px){.oc-design .oc-price-pair{grid-template-columns:minmax(0,1fr)}}
+/* 主区生命周期：节点在左，节点字段挂在节点下方，横向阅读动线 */
+.oc-design .oc-lifecycle{margin:0 0 16px;padding:16px 20px;border:1px solid var(--border);border-radius:8px;background:var(--surface)}
+.oc-design .oc-lifecycle-head{display:flex;flex-wrap:wrap;align-items:baseline;justify-content:space-between;gap:8px;margin-bottom:14px}
+.oc-design .oc-lifecycle-head h2{font-size:16px;font-weight:600;margin:0}
+.oc-design .oc-timeline{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:0;list-style:none;margin:0;padding:0}
+.oc-design .oc-timeline>li{position:relative;display:flex;flex-direction:column;gap:4px;padding-right:16px;min-width:0}
+.oc-design .oc-timeline>li:not(:last-child):after{content:"";position:absolute;left:26px;right:0;top:13px;height:1px;background:var(--border)}
+.oc-design .oc-timeline>li>strong{font-size:13px;font-weight:600}
+.oc-design .oc-timeline>li>small{font-size:11px;color:var(--muted-foreground);overflow-wrap:anywhere}
+.oc-design .oc-tl-node{width:26px;height:26px;display:grid;place-items:center;border-radius:50%;border:1px solid var(--border);background:var(--surface-raised);margin-bottom:2px;z-index:1}
+.oc-design .oc-timeline>li[data-state=done] .oc-tl-node{color:#6ee7b7;border-color:#10b98180;background:#064e3b22}
+.oc-design .oc-timeline>li[data-state=active] .oc-tl-node{color:#fcd34d;border-color:#d9770670;background:#78350f22}
+.oc-design .oc-timeline>li[data-state=none] .oc-tl-node,.oc-design .oc-timeline>li[data-state=pending] .oc-tl-node{opacity:.55;border-style:dashed}
+@media(max-width:1100px){.oc-design .oc-timeline{grid-template-columns:repeat(2,minmax(0,1fr));row-gap:16px}.oc-design .oc-timeline>li:not(:last-child):after{display:none}}
+@media(max-width:760px){.oc-design .oc-timeline{grid-template-columns:minmax(0,1fr)}}
+[data-theme=light] .oc-design .oc-timeline>li[data-state=done] .oc-tl-node{color:#047857;background:#d1fae555}
+[data-theme=light] .oc-design .oc-timeline>li[data-state=active] .oc-tl-node{color:#92400e;background:#fef3c755}
+@media(max-width:1100px){.oc-design .oc-axes{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media(max-width:760px){.oc-design .oc-axes{grid-template-columns:minmax(0,1fr)}}

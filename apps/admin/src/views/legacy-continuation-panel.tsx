@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { friendlyError, formatDate, type SessionSnapshot } from "../api";
 import { Button } from "../components/ui-elements";
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from "../components/ui/dialog";
 import { Input } from "../components/ui/input";
 import { Textarea } from "../components/ui/textarea";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../components/ui/select";
@@ -20,8 +21,18 @@ legacyErrors.WALLET_CREDIT_BASIS_UNAVAILABLE = "结算依据不完整，暂不�
 function legacyError(error: unknown) { const reason = error && typeof error === "object" && "reason" in error ? (error as { reason?: unknown }).reason : undefined; return typeof reason === "string" && legacyErrors[reason] ? legacyErrors[reason] : friendlyError(error); }
 type Scoped<T> = { scope: string; value: T };
 const quantityLabels: Record<keyof LegacyAdminQuantities, string> = { expendHaff: "哈夫币（M）", barrett: "巴雷特子弹（发）", bullet: "6级子弹（组，60发/组）", awm: "AWM子弹（发）", armor: "6级甲（件）", helmet: "6级头盔（件）", coffee: "咖啡（件）", card: "保险体验卡（天）" };
-const emptyQuantities = (): LegacyAdminQuantities => ({ expendHaff: "", barrett: "0", bullet: "0", awm: "0", armor: "0", helmet: "0", coffee: "0", card: "0" });
-export function LegacyAdminContinuationPanel({ snapshot, orderId, refreshNonce = 0 }: { snapshot: Snapshot; orderId: string; refreshNonce?: number }) {
+// 未核对的消耗不能默认成 0：所有项目保持空白，由经办人逐项确认后再预览。
+const emptyQuantities = (): LegacyAdminQuantities => ({ expendHaff: "", barrett: "", bullet: "", awm: "", armor: "", helmet: "", coffee: "", card: "" });
+const quantityKeys = Object.keys(quantityLabels) as Array<keyof LegacyAdminQuantities>;
+const quantitiesComplete = (value: LegacyAdminQuantities) => quantityKeys.every((key) => value[key].trim() !== "");
+type LegacyResourceSnapshot = { source?: string; haff?: { quantity: string | null } | null; materials: Array<{ name: string | null; quantity: string | null; unit: string | null }>; termDays?: string | null; safeBoxText?: string | null; gradingText?: string | null; loginMethodText?: string | null };
+const haffM = (quantity: string | null | undefined) => {
+  if (!quantity || !/^\d+$/.test(quantity)) return "未记录";
+  const value = BigInt(quantity), whole = value / 1000000n, rest = value % 1000000n;
+  return rest === 0n ? `${whole}M` : `${whole}.${rest.toString().padStart(6, "0").replace(/0+$/, "")}M`;
+};
+const materialUnit = (unit: string | null | undefined) => unit === "ROUND" ? "发" : unit === "PIECE" ? "件" : unit === "DAY" ? "天" : "";
+export function LegacyAdminContinuationPanel({ snapshot, orderId, frozenAccount, refreshNonce = 0 }: { snapshot: Snapshot; orderId: string; frozenAccount?: LegacyResourceSnapshot | null; refreshNonce?: number }) {
   const subject = legacyAdminSubject(snapshot.adminUserId, orderId), scope = subject + "|" + snapshot.session.id + "|" + snapshot.permissions.slice().sort().join(",") + "|" + snapshot.security.isBoss;
   const live = useRef({ scope, ticket: 0 }); if (live.current.scope !== scope) live.current = { scope, ticket: live.current.ticket + 1 };
   const [view, setView] = useState<Scoped<LegacyAdminView | null>>({ scope, value: null }), [error, setError] = useState<Scoped<string>>({ scope, value: "" });
@@ -32,6 +43,8 @@ export function LegacyAdminContinuationPanel({ snapshot, orderId, refreshNonce =
   const [commissionReasons,setCommissionReasons]=useState<Scoped<Record<string,string>>>({scope,value:{}});
   const [proposalForm, setProposalForm] = useState<Scoped<{ onBehalf: "renter" | "owner" | ""; quantities: LegacyAdminQuantities }>>({ scope, value: { onBehalf: "", quantities: emptyQuantities() } });
   const [proposal, setProposal] = useState<Scoped<{ data: LegacyAdminProposal; formKey: string } | null>>({ scope, value: null });
+  const [proposeOpen, setProposeOpen] = useState(false);
+  // 详情页只读：结算表单收进弹窗，页面本身不放输入框。
   const current = () => live.current.scope === scope, data = view.scope === scope ? view.value : null, p = pending.scope === scope ? pending.value : { state: "NONE" as const, intent: null }, loading = busy.scope === scope && busy.value;
   const form = proposalForm.scope === scope ? proposalForm.value : { onBehalf: "" as const, quantities: emptyQuantities() }, preview = proposal.scope === scope ? proposal.value : null;
   const canOperate = snapshot.security.isBoss || snapshot.permissions.includes("order.legacy.continue"), canCredit=canOperate && (snapshot.security.isBoss || snapshot.permissions.includes("order.settlement.write")), canCommissionCredit=canCredit && (snapshot.security.isBoss || snapshot.permissions.includes("finance.document.read")), locked = loading || p.state !== "NONE";
@@ -112,15 +125,22 @@ export function LegacyAdminContinuationPanel({ snapshot, orderId, refreshNonce =
       {data.stage === "4" && data.duties.some(d => d.kind === "RENTER_REFUND" && ["PENDING", "MATURED"].includes(d.status)) ? <p className="oc-fact-note">{data.refundDueAt ? `退款最早处理时间：${formatDate(data.refundDueAt)}。` : "退款处理时间待核。"} 具体到账状态以渠道记录为准。</p> : null}
       {data.reasons.some(code => code.startsWith("FINANCE_FACT")) ? <p className="oc-fact-note">原资金处理结果尚未确认，暂时无法协助结算或处理押金。</p> : null}
       <div className="lc-actions">{(["hold", "release", "confiscate"] as const).filter(kind => data.capabilities.includes(kind)).map(kind => <Button key={kind} variant={kind === "confiscate" ? "danger" : "secondary"} disabled={locked || !canOperate} onClick={() => choose(kind)}>{commandName[kind]}</Button>)}</div>
-      {canOperate && data.capabilities.includes("propose") ? <div className="mt-4 space-y-4 rounded-xl border border-border p-4">
+      {canOperate && data.capabilities.includes("propose") ? <div className="mt-4"><Button variant="secondary" onClick={() => setProposeOpen(true)}>协助发起结算</Button><Dialog open={proposeOpen} onOpenChange={setProposeOpen}><DialogContent className="sm:max-w-2xl"><DialogHeader><DialogTitle>协助发起结算</DialogTitle></DialogHeader><div className="space-y-4">
         <div><h3 className="text-sm font-semibold">协助发起结算</h3><p className="mt-1 text-sm text-muted-foreground">与双方核实实际消耗后，选择发起方并预览旧单结算方案；提交后由另一方确认。</p></div>
+        {frozenAccount ? <div className="rounded-lg border border-border bg-muted/30 p-3 text-sm">
+          <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1"><strong>可读取的账号资源（迁移截点资料）</strong><span className="text-xs text-muted-foreground">不是下单时冻结快照</span></div>
+          <p className="mt-1">哈夫币 {haffM(frozenAccount.haff?.quantity)} · 租期 {frozenAccount.termDays ? `${frozenAccount.termDays} 天` : "未记录"}{frozenAccount.safeBoxText ? ` · ${frozenAccount.safeBoxText}` : ""}{frozenAccount.gradingText ? ` · ${frozenAccount.gradingText}` : ""}{frozenAccount.loginMethodText ? ` · 登录 ${frozenAccount.loginMethodText}` : ""}</p>
+          <p className="mt-1">{frozenAccount.materials.length ? frozenAccount.materials.map((item) => `${item.name ?? "名称未记录"} ${item.quantity ?? "数量未记录"}${materialUnit(item.unit)}`).join(" · ") : "物资数量未记录"}</p>
+          <p className="mt-2 text-xs text-muted-foreground">按迁移截点账号资料与旧单单价核对；实际消耗由经办人逐项填写，留空不等于 0，预览与提交以服务端计算结果为准。</p>
+        </div> : null}
         <div className="space-y-1 text-sm"><span>结算发起方</span><Select value={form.onBehalf || "NONE"} disabled={locked} onValueChange={value => { setProposalForm({ scope, value: { ...form, onBehalf: value === "renter" || value === "owner" ? value : "" } }); setProposal({ scope, value: null }); }} items={[{ value: "NONE", label: "请选择" }, { value: "renter", label: "租客" }, { value: "owner", label: "号主" }]}><SelectTrigger aria-label="结算发起方" className="w-full sm:w-56"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="NONE">请选择</SelectItem><SelectItem value="renter">租客</SelectItem><SelectItem value="owner">号主</SelectItem></SelectContent></Select></div>
         <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">{(Object.entries(quantityLabels) as Array<[keyof LegacyAdminQuantities, string]>).map(([key, label]) => <label className="block space-y-1 text-sm" key={key}><span>{label}</span><Input aria-label={label} inputMode="decimal" value={form.quantities[key]} disabled={locked} onChange={event => { setProposalForm({ scope, value: { ...form, quantities: { ...form.quantities, [key]: event.target.value.trim() } } }); setProposal({ scope, value: null }); }} /></label>)}</div>
-        <Button variant="secondary" disabled={locked || !form.onBehalf || !form.quantities.expendHaff} onClick={() => void estimate()}>预览结算方案</Button>
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-2"><p className="text-xs text-muted-foreground">哈夫币以 M 为单位；6 级子弹按组填写（1 组 = 60 发）。未核对的项目不要填 0。</p><Button type="button" variant="ghost" size="sm" disabled={locked} onClick={() => setProposalForm({ scope, value: { ...form, quantities: { ...form.quantities, barrett: "0", bullet: "0", awm: "0", armor: "0", helmet: "0", coffee: "0", card: "0" } } })}>其余物资本次无消耗（填 0）</Button></div>
+        <Button variant="secondary" disabled={locked || !form.onBehalf || !quantitiesComplete(form.quantities)} onClick={() => void estimate()}>预览结算方案</Button>
         {preview ? <div className="space-y-3 rounded-lg bg-muted/50 p-4"><p className="text-sm font-medium">{preview.data.settlementKind === "EARLY" ? "提前结算" : "正常结算"}</p><dl className="grid gap-3 sm:grid-cols-2"><div><dt className="text-xs text-muted-foreground">号主预计结算</dt><dd className="mt-1 font-medium tabular-nums">{preview.data.proposalAmounts.ownerNet == null ? "未记录" : `¥${preview.data.proposalAmounts.ownerNet}`}</dd></div><div><dt className="text-xs text-muted-foreground">租客退款方案金额（未扣暂扣）</dt><dd className="mt-1 font-medium tabular-nums">{preview.data.proposalAmounts.returnOrderMoney == null ? "未记录" : `¥${preview.data.proposalAmounts.returnOrderMoney}`}</dd></div></dl><p className="text-xs text-muted-foreground">此处为结算方案，提交不代表资金已入账或退款到账。</p></div> : null}
         <label className="block space-y-1 text-sm">处理原因<Textarea aria-label="客服发起结算原因" value={supportReason.scope === scope ? supportReason.value : ""} disabled={locked} maxLength={500} onChange={e => setSupportReason({ scope, value: e.target.value })} /></label>
         <Button disabled={locked || !preview || supportReason.scope !== scope || [...supportReason.value.trim()].length < 3} onClick={() => choose("propose")}>核对并提交方案</Button>
-      </div> : null}
+      </div></DialogContent></Dialog></div> : null}
       {canOperate && (data.capabilities.includes("confirm") || data.capabilities.includes("reject")) ? <div className="mt-4 space-y-3 rounded-xl border border-border p-4">
         <div><h3 className="text-sm font-semibold">客服协助处理结算方案</h3><p className="mt-1 text-sm text-muted-foreground">订单已有待确认方案；核实后可确认，或退回并重新核对。操作会记录客服身份，不代表退款已到账。</p></div>
         {data.confirmationAmounts ? <dl className="grid gap-3 sm:grid-cols-2"><div><dt className="text-xs text-muted-foreground">号主应结</dt><dd className="mt-1 font-medium tabular-nums">¥{data.confirmationAmounts.ownerNet.yuan}</dd></div><div><dt className="text-xs text-muted-foreground">租客应退</dt><dd className="mt-1 font-medium tabular-nums">¥{data.confirmationAmounts.refundNet.yuan}</dd></div></dl> : <p className="text-sm text-muted-foreground">{canCredit ? "方案金额不完整，暂不能确认；可退回后重新核对。" : "当前账号没有确认结算的权限，可退回方案或联系有权限的同事。"}</p>}
