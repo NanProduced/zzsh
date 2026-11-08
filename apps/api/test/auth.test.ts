@@ -926,7 +926,7 @@ test("M2 business migration and Better Auth realms enforce the basic boundary", 
     assert.equal(firstBootstrap.response.status, 200);
     const initialAdminId = firstBootstrap.body?.adminUserId as string;
     const initialAdminUsername = firstBootstrap.body?.username as string;
-    assert.match(initialAdminUsername, /^zz\d{5,}$/);
+    assert.equal(initialAdminUsername, "zz00001");
     assert.equal(firstBootstrap.body?.displayUsername, initialAdminUsername.toUpperCase());
     assert.equal(firstBootstrap.body?.passwordChangeRequired, true);
     const secondBootstrap = await request(base, "/api/v1/admin/security/bootstrap", {
@@ -936,6 +936,7 @@ test("M2 business migration and Better Auth realms enforce the basic boundary", 
       password: BOSS_TWO_TEMP_PASSWORD,
     }, cookieJar(), ADMIN_ORIGIN);
     assert.equal(secondBootstrap.response.status, 200);
+    assert.equal(secondBootstrap.body?.username, "zz00002");
     const adminTwoId = secondBootstrap.body?.adminUserId as string;
     assert.notEqual(initialAdminId, adminTwoId);
     await runtimePool.query(`UPDATE "zzsh_iam"."admin_security" SET "bootstrap_expires_at" = clock_timestamp() - interval '1 second' WHERE "admin_user_id" = $1`, [initialAdminId]);
@@ -954,8 +955,7 @@ test("M2 business migration and Better Auth realms enforce the basic boundary", 
     const adminId = reinitializedBootstrap.body?.adminUserId as string;
     assert.notEqual(adminId, initialAdminId);
     const adminUsername = reinitializedBootstrap.body?.username as string;
-    assert.match(adminUsername, /^zz\d{5,}$/);
-    assert.notEqual(adminUsername, initialAdminUsername);
+    assert.equal(adminUsername, initialAdminUsername);
     assert.equal(reinitializedBootstrap.body?.passwordChangeRequired, true);
     const thirdBootstrap = await request(base, "/api/v1/admin/security/bootstrap", {
       bootstrapSecret: ADMIN_BOOTSTRAP_SECRET,
@@ -1242,8 +1242,12 @@ test("M2 business migration and Better Auth realms enforce the basic boundary", 
     }, adminOneActive, ADMIN_ORIGIN);
     assert.equal(readerRole.response.status, 200);
 
-    const occupiedSequence = await runtimePool.query<{ value: string }>(`SELECT nextval('"zzsh_iam"."admin_login_number_seq"')::text AS value`);
-    const occupiedUsername = `zz${occupiedSequence.rows[0]!.value.padStart(5, "0")}`;
+    let occupiedValue: string;
+    do {
+      const occupiedSequence = await runtimePool.query<{ value: string }>(`SELECT nextval('"zzsh_iam"."admin_login_number_seq"')::text AS value`);
+      occupiedValue = occupiedSequence.rows[0]!.value;
+    } while (Number(occupiedValue) <= 2);
+    const occupiedUsername = `zz${occupiedValue.padStart(5, "0")}`;
     const occupiedNow = new Date();
     await runtimePool.query(
       `INSERT INTO "zzsh_auth_admin"."user" ("id", "name", "email", "createdAt", "updatedAt", "username", "displayUsername", "twoFactorEnabled", "suspended")

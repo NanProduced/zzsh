@@ -486,7 +486,7 @@ async function initializeFormalAdmins() {
         const admins = (await db.query('SELECT u.id,u.username,s.is_boss,s.status FROM zzsh_auth_admin."user" u JOIN zzsh_iam.admin_security s ON s.admin_user_id=u.id ORDER BY u.username')).rows;
         if (stage === "bosses" && admins.length !== 0 || stage === "staff" && (admins.length !== 2 || admins.some(row => !row.is_boss || row.status !== "ACTIVE" || !Object.values(profile.actors).some(actor => actor.userId === row.id)))) throw new Error("FORMAL_INITIALIZATION_EXPECTED_ADMIN_STATE_REQUIRED");
         const sequence = (await db.query("SELECT last_value::text,is_called FROM zzsh_iam.admin_login_number_seq")).rows[0];
-        if (stage === "bosses" && (sequence.last_value !== "1" || sequence.is_called) || stage === "staff" && (sequence.last_value !== "2" || !sequence.is_called)) throw new Error("FORMAL_INITIALIZATION_LOGIN_SEQUENCE_NOT_FRESH");
+        if (stage === "bosses" && (sequence.last_value !== "1" || sequence.is_called) || stage === "staff" && !((sequence.last_value === "1" && !sequence.is_called) || (sequence.last_value === "2" && sequence.is_called))) throw new Error("FORMAL_INITIALIZATION_LOGIN_SEQUENCE_NOT_FRESH");
         let deltaId;
         if (stage === "staff") {
             deltaId = (await db.query("SELECT id FROM zzsh_supply.game WHERE code='delta'")).rows[0]?.id;

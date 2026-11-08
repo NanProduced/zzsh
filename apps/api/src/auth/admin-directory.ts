@@ -54,6 +54,18 @@ type DirectoryOptions = Pick<AuthSecurityOptions, "pool" | "hashPassword"> & {
   imAppId?: string;
 };
 
+const BOSS_USERNAMES = ["zz00001", "zz00002"] as const;
+
+export function nextBossLogin(usernames: readonly (string | null)[]): { username: string; displayUsername: string } {
+  const existing = usernames.map((username) => username?.toLowerCase() ?? "");
+  if (new Set(existing).size !== existing.length || existing.some((username) => !BOSS_USERNAMES.some((boss) => boss === username))) {
+    throw new SecurityApiError(409, API_V1_ERROR_CODES.CONFLICT, "Existing Boss accounts must use the two reserved logins");
+  }
+  const username = BOSS_USERNAMES.find((boss) => !existing.includes(boss));
+  if (!username) throw new SecurityApiError(409, API_V1_ERROR_CODES.CONFLICT, "The two boss accounts already exist");
+  return { username, displayUsername: username.toUpperCase() };
+}
+
 export async function nextAdminLogin(client: PoolClient): Promise<{ username: string; displayUsername: string }> {
   for (;;) {
     const sequence = await client.query<{ value: string }>(
@@ -62,6 +74,7 @@ export async function nextAdminLogin(client: PoolClient): Promise<{ username: st
     const value = sequence.rows[0]?.value;
     if (!value) throw new Error("administrator login sequence is unavailable");
     const username = `zz${value.padStart(5, "0")}`;
+    if (BOSS_USERNAMES.some((boss) => boss === username)) continue;
     const existing = await client.query(`SELECT 1 FROM "zzsh_auth_admin"."user" WHERE "username" = $1`, [username]);
     if (existing.rows.length === 0) return { username, displayUsername: username.toUpperCase() };
   }

@@ -21,7 +21,7 @@ import {
   listAdministrators,
   listRolesAndCatalog,
   lockActor,
-  nextAdminLogin,
+  nextBossLogin,
   readAdministratorDetail,
   readAdministratorGameScope,
   requireDirectoryPermission,
@@ -810,11 +810,11 @@ async function bootstrapAdmin(request: NodeRequest, response: NodeResponse, requ
         await client.query(`DELETE FROM "zzsh_auth_admin"."user" WHERE "id" = $1`, [boss.id]);
       }
     }
-    const remainingBosses = await client.query<{ id: string }>(
-      `SELECT "admin_user_id" AS id FROM "zzsh_iam"."admin_security" WHERE "is_boss" = true FOR UPDATE`,
+    const remainingBosses = await client.query<{ id: string; username: string | null }>(
+      `SELECT s."admin_user_id" AS id, u."username" AS username FROM "zzsh_iam"."admin_security" s
+       LEFT JOIN "zzsh_auth_admin"."user" u ON u."id" = s."admin_user_id" WHERE s."is_boss" = true FOR UPDATE OF s`,
     );
-    if (remainingBosses.rows.length >= 2) throw new SecurityApiError(409, API_V1_ERROR_CODES.CONFLICT, "The two boss accounts already exist");
-    const login = await nextAdminLogin(client);
+    const login = nextBossLogin(remainingBosses.rows.map((boss) => boss.username));
     const loginEmail = email ?? `${login.username}@admin.zzsh.invalid`;
     const duplicate = await client.query(
       `SELECT "id" FROM "zzsh_auth_admin"."user" WHERE "email" = $1 OR "username" = $2 LIMIT 1`,
