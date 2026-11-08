@@ -17,7 +17,7 @@ function loadOrderView(probe){
  const button=({children,onClick,...props})=>React.createElement('button',{onClick,disabled:props.disabled},children);
  const ui=new Proxy({}, {get:(_target,key)=>key==='Button'?button:box});
  const modules={
-  '../api':{adminRequest:async p=>p.includes('/im?')?{teamState:'READY',canRead:true}:{order:probe.order},friendlyError:e=>String(e),AdminApiError:class extends Error{}},
+  '../api':{adminRequest:async p=>p.includes('/im?')?(probe.order.source.origin==='LEGACY'?{teamState:null,canRead:false}:{teamState:'READY',canRead:true}):{order:probe.order},friendlyError:e=>String(e),AdminApiError:class extends Error{}},
   './admin-finance-api':{defaultFinanceFilters:()=>({}),financeRead:async p=>({document:{ref:decodeURIComponent(p.slice('documents/'.length))},legacyOrderObservations:[]})},
   './admin-finance-view':{financeContextIdentity:()=>({}),financeOriginPath:()=>null,registerFinanceOrigin:()=> 'origin'},
   '../workspace/tab-model':{sanitizeFinanceReturn:()=>null},
@@ -30,6 +30,7 @@ function loadOrderView(probe){
   './admin-order-payment-summary':{AdminOrderPaymentSummary:empty},
   './admin-channel-evidence-panel':{OrderChannelEvidence:empty},
   './legacy-continuation-panel':{LegacyAdminContinuationPanel:empty},
+  './im-support-fulfillment':{OrderFulfillmentSection:empty,SupportUnpaidCancelCard:empty},
   './admin-joinpay-ops-panel':{AdminCollectionQueryBox:empty,AdminNativeRefundPanel:empty,normalRefundBasis:()=>({})},
   './admin-prestart-termination-panel':{AdminPrestartTerminationPanel:empty},
   './admin-original-refund-panel':{AdminOriginalRefundPanel:empty},
@@ -50,7 +51,7 @@ function loadOrderView(probe){
  return m.exports.AdminOrderChainView;
 }
 
-test('legacy detail has neither group nor native channel entry; native detail retains both',async t=>{
+test('legacy detail offers a new group without a native channel entry; native detail retains its own entries',async t=>{
  const browser=new Window({url:'http://127.0.0.1:4311'});
  Object.assign(globalThis,{window:browser,document:browser.document,HTMLElement:browser.HTMLElement,Element:browser.Element,Node:browser.Node,Event:browser.Event,
   CustomEvent:browser.CustomEvent,MutationObserver:browser.MutationObserver,ResizeObserver:browser.ResizeObserver,CSS:browser.CSS,
@@ -58,12 +59,19 @@ test('legacy detail has neither group nor native channel entry; native detail re
  Object.defineProperty(globalThis,'navigator',{value:browser.navigator,configurable:true});
  const probe={order:null},View=loadOrderView(probe),host=browser.document.createElement('div'),root=createRoot(host),opened=[];browser.document.body.append(host);
  t.after(async()=>{await React.act(async()=>root.unmount());host.remove();await browser.happyDOM.abort();});
- const snapshot={authenticated:true,adminUserId:'admin',session:{id:'session'},security:{isBoss:false},permissions:['order.read','finance.read','im.support.read']};
+ const snapshot={authenticated:true,adminUserId:'admin',session:{id:'session'},security:{isBoss:false},permissions:['order.read','finance.read','im.support.read','im.support.accept']};
  const base={id:'order_native',displayNo:'ORDER-1',status:'PAID',title:'账号',accountId:'account',accountDisplayNo:'A1',gameId:'game',ownerUserId:'owner',renterUserId:'renter',ownerName:'号主',renterName:'租客',createdAt:null,paidAt:null,
   payment:{state:'RECORDED_PAID',recordedAt:null,recordedAmount:null},amounts:{totalDue:null,rental:null,deposit:null},source:{origin:'NATIVE'}};
- async function render(order){probe.order=order;await React.act(async()=>root.render(React.createElement(View,{snapshot,initialOrderId:order.id,objectOnly:true,initialQuery:{section:'finance'},onOpenPath:(...args)=>opened.push(args),refreshNonce:0})));for(let i=0;i<25&&!host.textContent.includes(order.displayNo);i++)await React.act(async()=>new Promise(resolve=>setTimeout(resolve,5)));}
- await render({...base,id:'legacy_order_test',displayNo:'OLD-1',source:{origin:'LEGACY'}});
- assert.match(host.textContent,/旧渠道依据尚未接入/);assert.equal(host.querySelector('aside.oc-related'),null);assert(![...host.querySelectorAll('button')].some(b=>b.textContent.includes('在汇聚对账查看本单')));
- await render(base);const entry=[...host.querySelectorAll('button')].find(b=>b.textContent.includes('在汇聚对账查看本单'));assert.ok(entry);assert.match(host.querySelector('aside.oc-related').textContent,/订单群/);
+ async function render(order,actor=snapshot){probe.order=order;await React.act(async()=>root.render(React.createElement(View,{snapshot:actor,initialOrderId:order.id,objectOnly:true,initialQuery:{section:'finance'},onOpenPath:(...args)=>opened.push(args),refreshNonce:0})));for(let i=0;i<25&&!host.textContent.includes(order.displayNo);i++)await React.act(async()=>new Promise(resolve=>setTimeout(resolve,5)));}
+ async function waitForText(text){for(let i=0;i<25&&!host.textContent.includes(text);i++)await React.act(async()=>new Promise(resolve=>setTimeout(resolve,5)));assert.match(host.textContent,new RegExp(text));}
+ const legacy={...base,id:'legacy_order_test',displayNo:'OLD-1',source:{origin:'LEGACY'}};
+ await render(legacy,{...snapshot,permissions:snapshot.permissions.filter(p=>p!=='im.support.accept')});
+ await waitForText('尚未为这笔旧订单建立新群');
+ assert(![...host.querySelectorAll('button')].some(b=>b.textContent.includes('创建订单群')));
+ await render(legacy);
+ await waitForText('尚未为这笔旧订单建立新群');assert.match(host.textContent,/旧渠道依据尚未接入/);
+ assert([...host.querySelectorAll('button')].some(b=>b.textContent.includes('创建订单群')));
+ assert(![...host.querySelectorAll('button')].some(b=>b.textContent.includes('在汇聚对账查看本单')));
+ await render(base);await waitForText('本单群已就绪');const entry=[...host.querySelectorAll('button')].find(b=>b.textContent.includes('在汇聚对账查看本单'));assert.ok(entry);assert.match(host.querySelector('aside.oc-related').textContent,/订单群/);
  await React.act(async()=>entry.click());const target=new URL(opened.at(-1)[0],'http://example.invalid');assert.equal(target.pathname,'/finance/channels');assert.equal(target.searchParams.get('fromOrderId'),'order_native');
 });
