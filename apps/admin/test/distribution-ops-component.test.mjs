@@ -14,6 +14,7 @@ test('effective legacy policy shows current names and separate purchase/listing 
   await click(button(ui.host,'当前按分销档位计佣'));
   assert.match(ui.host.textContent,/青铜会员.*20%.*30%/);
   await click(button(ui.host,'申请调整计佣规则'));
+  assert.match(h.browser.document.querySelector('[aria-label="申请后的分销状态"]').textContent,/开启新计佣/);
   assert.equal(h.browser.document.querySelector('[aria-label="推荐租客奖励比例"]'),null);
   assert.deepEqual(model.buildDistributionPolicyPayload(response.policy,{enabled:false,renter:'',owner:'',reason:'暂停新增计佣'}).changes,{enabled:false});
   const delay=h.browser.document.querySelector('[aria-label="分销佣金等待天数"]');assert.equal(delay.value,'7');assert.equal(delay.disabled,false);
