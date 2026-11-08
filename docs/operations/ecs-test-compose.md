@@ -1,6 +1,6 @@
 # 香港内部测试服：Compose 运行说明
 
-状态：部署候选准备中，尚未部署。Owner 已选择香港 Ubuntu 22.04 x86_64 ECS（2 核、8 GiB、40 GiB 系统盘），并指定 `test.nanproduced.cloud`、`admin-test.nanproduced.cloud`、`api-test.nanproduced.cloud`；首次启动平台或导入数据库必须等 Owner 完成本地实测审核。地址、DNS、证书、代码版本和容量以操作前实查为准。
+本说明适用于香港 Ubuntu 22.04 x86_64 ECS（2 核、8 GiB、40 GiB 系统盘）的团队测试环境，用户、管理和 API 域名分别为 `test.nanproduced.cloud`、`admin-test.nanproduced.cloud`、`api-test.nanproduced.cloud`。首次启动平台或导入数据库须经 Owner 本地实测审核；实际代码版本、数据截止、证书和容量以操作前核对为准。
 
 ## 管理连接与文件传输
 
@@ -18,7 +18,15 @@ Caddy 自动申请并续期公网 HTTPS 证书，证书与配置放在独立持�
 
 PG 和 Redis 使用本环境独立 CA 和与 `postgres` / `redis` 主机名匹配的证书；API 强制 `DB_TLS_MODE=verify-full`、`REDIS_TLS_MODE=verify-full`。PG 拒绝非 TLS TCP 连接；Redis 关闭明文端口，使用单独 ACL 用户。Redis 当前只服务依赖健康检查，ACL 仅授连接和 PING；扩展用途时先补充精确权限与测试。不要用跳过证书校验代替部署。
 
-Compose 把汇聚收款、退款、提现和账户查询四个 `JOINPAY_*_ENABLED` 固定为 `false`，不读取商户配置。云信、短信、实名、OSS 按 Owner 配置的真实测试环境装配；启动时的配置不等于外部服务验收，也不等于汇聚或银行到账。受控测试支付与真实资金事实保持分开。
+Compose 把汇聚收款、退款、提现和账户查询四个 `JOINPAY_*_ENABLED` 固定为 `false`，不读取商户配置。云信 dev、短信和 OSS 按 Owner 配置的测试环境装配；首版用户实名二要素关闭，管理员 TOTP 保持启用。启动时的配置不等于外部服务验收，也不等于汇聚或银行到账。受控测试支付与真实资金事实保持分开。
+
+## 服务器目录
+
+- `/srv/zzsh-test/releases/<版本>/`：固定代码版本及 Compose、Caddy 配置；镜像由该版本构建。
+- `/srv/zzsh-test/restricted/`：仅维护者可读的 `compose.env`、`api.env`、待恢复归档和核对回执。数据库归档含用户数据，不作为公开文件分发。
+- `/srv/zzsh-test/secrets/`：应用认证、数据库、内部 TLS 和银行卡保护材料。升级不得重新生成既有身份摘要或历史银行卡密钥；按受限备份策略保存。
+- `/srv/zzsh-test/bootstrap/`：首次准备基础密钥的辅助脚本，不能在已有密钥目录上重复初始化。
+- PostgreSQL、Redis 和 Caddy 的持久内容在 Compose 数据卷，不在代码目录；清理镜像或替换代码不应删除数据卷。覆盖测试库前须单独确认管理员 TOTP、保护钥和模拟资金登记的保留或重建方式。
 
 ## 云信事件回调
 
@@ -56,7 +64,7 @@ docker buildx build --load --resource memory=3g --resource cpu-quota=100000 --re
 
 首版候选归档已在本机隔离 PostgreSQL 16 中验证过保留 owner/ACL 的原生恢复：预先只创建目标三角色，在目标数据库不存在时使用 `pg_restore --exit-on-error --create`，恢复后独立核对角色、权限和数据。`db-setup --roles-only` 只创建角色，供这一受审路径使用；无参数仍创建角色和空数据库。两种方式不能混用；`--create` 不是单事务，失败须保留现场并核对，不能盲目重试或自动删除目标。实际 ECS 连接、部署步骤和权限仍须经 Owner 审核并在目标复核。
 
-恢复归档不包含本地模拟资金登记。`scripts/migration/install-r07-demo-finance.mjs` 仅适用于已固定身份的本地 55434 验收副本，不能用于 ECS。目标恢复后仍须按实际目标身份、管理员及三个 HTTPS 来源单独安装并核对测试扩展、权限和登记，再启用模拟资金；目前这一步尚无已验证的 ECS 安装流程。管理员须使用初始密码登录、自行修改密码并绑定 TOTP，不从本地复制已激活身份或会话。
+恢复归档不包含本地模拟资金登记。`scripts/migration/install-r07-demo-finance.mjs` 仅适用于已固定身份的本地 55434 验收副本，不能用于 ECS。目标恢复后须按实际目标身份、管理员及三个 HTTPS 来源单独安装并核对测试扩展、权限和登记，再启用模拟资金；当前没有可直接复用的一键 ECS 安装工具。管理员须使用初始密码登录、自行修改密码并绑定 TOTP，不从本地复制已激活身份或会话。
 
 `deploy/ecs-test/restore_approved_dump.py` 是另一项 Linux/Docker Compose 恢复候选，只接收**已经过 Owner 本地验收和批准的 PostgreSQL 16 自定义格式 dump**，不导出本地数据库，也不是将来 MySQL 全量转换的实现。其采用 `--no-owner --no-acl`，目前未完成 ACL 等价证明，不能把它用于首版应用启动；下列计划/申请格式仅用于该候选后续完善，不适用于上面的原生恢复路径。
 
