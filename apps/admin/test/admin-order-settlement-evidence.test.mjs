@@ -13,7 +13,7 @@ const facts=(ref='ORDER:order_native',extra={})=>({schema:'admin-order-settlemen
 const finance=(url,orderSettlement=facts(),extra={})=>{const q=new URL(String(url),'http://localhost').searchParams;return{contractVersion:'admin-finance.read.v1',applied:{scope:q.get('scope')??'ALL',from:q.get('from'),to:q.get('to'),period:q.get('period')==='1',bucket:'ALL',kind:'ALL',state:'ALL',q:''},snapshot:'snapshot-1',contextKey:'context-1',snapshotVersion:'version-1',asOf:'2026-10-01T02:00:00Z',document:{ref:orderSettlement.documentRef,number:'ORDER-NATIVE',kind:'REFUND',state:'REFUND_PAYABLE_RECORDED',occurredAt:null,requestedAmountCents:null,subjects:[],entryCount:0,amounts:[]},entries:[],orderSettlement,...extra};};
 const settle=()=>act(async()=>{await new Promise(resolve=>setTimeout(resolve,5));});
 async function until(predicate){for(let i=0;i<120;i++){if(predicate())return;await settle();}throw Error('Settlement evidence condition timed out');}
-async function setup(t,permissions=['order.read','finance.read']){
+async function setup(t,permissions=['order.read','finance.read','finance.document.read']){
  const browser=new Window({url:'http://127.0.0.1:4311/orders/order_native'});
  Object.assign(globalThis,{window:browser,document:browser.document,HTMLElement:browser.HTMLElement,Element:browser.Element,Node:browser.Node,Event:browser.Event,CustomEvent:browser.CustomEvent,MutationObserver:browser.MutationObserver,ResizeObserver:browser.ResizeObserver,CSS:browser.CSS,FormData:browser.FormData,IS_REACT_ACT_ENVIRONMENT:true});
  Object.defineProperty(globalThis,'navigator',{value:browser.navigator,configurable:true});globalThis.getComputedStyle=browser.getComputedStyle.bind(browser);globalThis.requestAnimationFrame=browser.requestAnimationFrame.bind(browser);globalThis.cancelAnimationFrame=browser.cancelAnimationFrame.bind(browser);
@@ -64,11 +64,11 @@ test('settlement explanations are readable and deduplicated while raw codes rema
 
 test('ordinary order without financial permission makes no finance or controlled settlement request',async t=>{
  const calls=[];globalThis.fetch=async(url,init={})=>{calls.push({url:String(url),method:init.method??'GET'});return response({order:native});};const ui=await setup(t,['order.read']);await ui.render();await until(()=>ui.node.textContent.includes(native.displayNo));await settle();
- ui.props.snapshot={...ui.props.snapshot,permissions:['order.read','finance.document.read']};await ui.render();await until(()=>ui.node.textContent.includes(native.displayNo));await settle();assert.equal(calls.filter(c=>c.url.includes('/finance/')||c.url.includes('/settlement')).length,0);assert(calls.every(c=>c.method==='GET'));assert.match(ui.node.textContent,/开租未记录/);
+ ui.props.snapshot={...ui.props.snapshot,permissions:['order.read','finance.read']};await ui.render();await until(()=>ui.node.textContent.includes(native.displayNo));await settle();assert.equal(calls.filter(c=>c.url.includes('/finance/')||c.url.includes('/settlement')).length,0);assert(calls.every(c=>c.method==='GET'));assert.match(ui.node.textContent,/开租未记录/);
 });
 test('order body renders before financial evidence and a failed read never becomes no posting',async t=>{
- let finish;const calls=[];globalThis.fetch=async url=>{calls.push(String(url));return String(url).includes('/finance/')?new Promise(resolve=>{finish=resolve;}):response({order:native});};const ui=await setup(t);await ui.render();await until(()=>!!finish&&ui.node.textContent.includes(native.displayNo));assert.match(ui.node.textContent,/正在读取资金依据/);assert(!calls.some(p=>p.includes('/settlement')));
- await act(async()=>finish(response({error:{code:'EVIDENCE_UNAVAILABLE',requestId:'req-settlement-503'}},503)));await until(()=>ui.node.textContent.includes('资金依据暂不可用'));assert.match(ui.node.textContent,/req-settlement-503/);assert.doesNotMatch(ui.node.textContent,/已证实无过账|已退款|已开租/);
+ let finish;const calls=[];globalThis.fetch=async url=>{calls.push(String(url));return String(url).includes('/finance/')?new Promise(resolve=>{finish=resolve;}):response({order:native});};const ui=await setup(t);await ui.render();await until(()=>!!finish&&ui.node.textContent.includes(native.displayNo));assert.match(ui.node.textContent,/正在读取本单资金记录/);assert(!calls.some(p=>p.includes('/settlement')));
+ await act(async()=>finish(response({error:{code:'EVIDENCE_UNAVAILABLE',requestId:'req-settlement-503'}},503)));await until(()=>ui.node.textContent.includes('资金资料暂不可用'));assert.match(ui.node.textContent,/req-settlement-503/);assert.doesNotMatch(ui.node.textContent,/已证实无过账|已退款|已开租/);
 });
 test('source-qualified native evidence preserves exact zero and keeps refund and channel unknown',async t=>{
  const calls=[];globalThis.fetch=async url=>{calls.push(String(url));return response(String(url).includes('/finance/')?finance(url):{order:native});};const ui=await setup(t);await ui.render();await until(()=>ui.node.textContent.includes('159.08 元'));
@@ -76,12 +76,12 @@ test('source-qualified native evidence preserves exact zero and keeps refund and
 });
 test('403 404 and 503 are distinct from a successfully proved NOT_POSTED fact',async t=>{
  const ui=await setup(t);let code=403;globalThis.fetch=async url=>response(String(url).includes('/finance/')?{error:{code:'EVIDENCE_UNAVAILABLE',requestId:'req-'+code}}:{order:native},String(url).includes('/finance/')?code:200);
- for(const [status,text]of[[403,'当前无权读取本单资金依据'],[404,'未找到当前范围内可读的资金单据'],[503,'资金依据暂不可用']]){code=status;ui.props.refreshNonce++;await ui.render();await until(()=>ui.node.textContent.includes(text));assert.doesNotMatch(ui.node.textContent,/已证实无过账/);}
+ for(const [status,text]of[[403,'当前身份无权查看本单资金凭证'],[404,'未找到本单资金凭证'],[503,'资金资料暂不可用']]){code=status;ui.props.refreshNonce++;await ui.render();await until(()=>ui.node.textContent.includes(text));assert.doesNotMatch(ui.node.textContent,/已证实无过账/);}
  globalThis.fetch=async url=>response(String(url).includes('/finance/')?finance(url,facts(undefined,{posting:{state:'NOT_POSTED',ref:null,postedAt:null},captured:unknown(),ownerNet:unknown(),refundPayable:unknown()})):{order:native});ui.props.refreshNonce++;await ui.render();await until(()=>ui.node.textContent.includes('当前未查到过账记录'));assert.doesNotMatch(ui.node.querySelector('[data-order-settlement-evidence]').textContent,/0\.00 元/);
 });
 test('409 clears prior proof and a late financial response cannot survive order or permission changes',async t=>{
  const ui=await setup(t);let mode='ready',finish;globalThis.fetch=async url=>{if(String(url).includes('/finance/'))return mode==='slow'?new Promise(resolve=>{finish=resolve;}):mode==='conflict'?response({error:{code:'CONFLICT'}},409):response(finance(url));return response({order:{...native,id:ui.props.initialOrderId,displayNo:ui.props.initialOrderId==='order_next'?'NEXT-ORDER':native.displayNo}});};
- await ui.render();await until(()=>ui.node.textContent.includes('159.08 元'));mode='conflict';ui.props.refreshNonce++;await ui.render();await until(()=>ui.node.textContent.includes('资金依据已变化'));assert(!ui.node.textContent.includes('90.00 元'));
+ await ui.render();await until(()=>ui.node.textContent.includes('159.08 元'));mode='conflict';ui.props.refreshNonce++;await ui.render();await until(()=>ui.node.textContent.includes('资金资料已变化'));assert(!ui.node.textContent.includes('90.00 元'));
  mode='slow';ui.props.refreshNonce++;await ui.render();await until(()=>!!finish);const stale=finish;ui.props.initialOrderId='order_next';ui.props.snapshot={...ui.props.snapshot,permissions:['order.read']};await ui.render();await until(()=>ui.node.textContent.includes('NEXT-ORDER'));await act(async()=>stale(response(finance('/finance',facts()))));assert(!ui.node.textContent.includes('90.00 元'));assert(!ui.node.textContent.includes('ORDER-NATIVE'));
 });
 test('legacy refund observations and nullable duties never pretend channel success; verified duty has a reloadable return',async t=>{
@@ -96,11 +96,11 @@ test('finance detail reuses the already fetched evidence, hides duplicate flat f
 });
 test('partial and absent projections preserve unknown, and a response bound to another root is discarded',async t=>{
  const ui=await setup(t);let mode='partial';globalThis.fetch=async url=>{if(!String(url).includes('/finance/'))return response({order:native});if(mode==='absent')return response(finance(url,facts(),{orderSettlement:undefined}));if(mode==='foreign')return response(finance(url,facts('LEGACY_ORDER:foreign',{ownerNet:known('87654321')})));return response(finance(url,facts(undefined,{readiness:'UNAVAILABLE',refundPayable:{knowledge:'UNKNOWN',cents:'0',reasonCodes:[]}})));};await ui.render();await until(()=>ui.node.textContent.includes('部分资金依据暂未就绪'));const card=ui.node.querySelector('[data-order-settlement-evidence]');assert.match(card.textContent,/90\.00 元/);await act(async()=>button(card,'尚未取得依据的金额').click());const refundRow=[...card.querySelectorAll('dl > div')].find(row=>row.querySelector('dt')?.textContent==='租客应退责任');assert.equal(refundRow.querySelector('dd').textContent,'未记录');
- mode='absent';ui.props.refreshNonce++;await ui.render();await until(()=>ui.node.textContent.includes('尚未提供受权订单资金依据'));assert(!ui.node.textContent.includes('90.00 元'));
- mode='foreign';ui.props.refreshNonce++;await ui.render();await until(()=>ui.node.textContent.includes('资金依据暂不可用'));assert.doesNotMatch(ui.node.textContent,/876,543\.21|foreign/);
+ mode='absent';ui.props.refreshNonce++;await ui.render();await until(()=>ui.node.textContent.includes('尚未提供本单资金依据'));assert(!ui.node.textContent.includes('90.00 元'));
+ mode='foreign';ui.props.refreshNonce++;await ui.render();await until(()=>ui.node.textContent.includes('资金资料暂不可用'));assert.doesNotMatch(ui.node.textContent,/876,543\.21|foreign/);
 });
 test('finance to order to user retains a safe reloadable finance source alongside the order origin',async t=>{
- globalThis.fetch=async url=>response(String(url).includes('/finance/')?finance(url):{order:native});const ui=await setup(t,['order.read','finance.read','user.directory.read']);const source='/finance?scope=renter&from=2026-10-01&to=2026-10-02&period=1';const token=ui.funds.registerFinanceOrigin(source,ui.funds.financeContextIdentity(ui.props.snapshot));ui.props.initialQuery={financeOrigin:token,financeReturn:source};await ui.render();await until(()=>ui.node.textContent.includes('159.08 元'));await act(async()=>button(ui.node,'租客').click());const target=new URL(ui.opened.at(-1)[0],'http://localhost');assert.equal(target.pathname,'/users/renter');assert.equal(target.searchParams.get('fromOrderId'),native.id);assert.equal(target.searchParams.get('financeReturn'),source);ui.funds.clearFinanceContexts();assert.equal(ui.funds.financeOriginPath(target.searchParams.get('financeOrigin'),ui.props.snapshot,target.searchParams.get('financeReturn')),source);
+ globalThis.fetch=async url=>response(String(url).includes('/finance/')?finance(url):{order:native});const ui=await setup(t,['order.read','finance.read','finance.document.read','user.directory.read']);const source='/finance?scope=renter&from=2026-10-01&to=2026-10-02&period=1';const token=ui.funds.registerFinanceOrigin(source,ui.funds.financeContextIdentity(ui.props.snapshot));ui.props.initialQuery={financeOrigin:token,financeReturn:source};await ui.render();await until(()=>ui.node.textContent.includes('159.08 元'));await act(async()=>button(ui.node,'租客').click());const target=new URL(ui.opened.at(-1)[0],'http://localhost');assert.equal(target.pathname,'/users/renter');assert.equal(target.searchParams.get('fromOrderId'),native.id);assert.equal(target.searchParams.get('financeReturn'),source);ui.funds.clearFinanceContexts();assert.equal(ui.funds.financeOriginPath(target.searchParams.get('financeOrigin'),ui.props.snapshot,target.searchParams.get('financeReturn')),source);
 });
 test('CHAIN unpaid cancelled order does not grow an unknown settlement wall and keeps channel not applicable',async t=>{
  const cancelled={...native,status:'CANCELLED',payment:{state:'RECORDED_UNPAID',recordedAt:null,recordedAmount:null}};
@@ -136,17 +136,15 @@ test('business funds keep old order payment singular while preserving attempts a
  globalThis.fetch=async url=>response(String(url).includes('/finance/')?finance(url,evidence,{legacyOrderObservations:[...evidence.business.paymentAttempts,...evidence.business.refundOrders]}):{order:legacy});
  const ui=await setup(t,['order.read','finance.read','finance.document.read']);ui.props.initialOrderId=legacy.id;ui.props.initialQuery={section:'finance'};
  await ui.render();await until(()=>ui.node.textContent.includes('923.45 元'));
- const card=ui.node.querySelector('[data-order-settlement-evidence]');
- assert.equal(card.textContent.split('923.45 元').length-1,1);
- assert.match(card.textContent,/订单实付923\.45 元旧平台记录已付/);
+ const card=ui.node.querySelector('[data-order-finance-tab]');
+ const payments=card.querySelector('[aria-label="付款记录"]');
+ assert.equal(payments.querySelectorAll('.oc-finance-primary .oc-finance-amount').length,1);
+ assert.match(payments.textContent,/旧平台记录已付款[\s\S]*923\.45 元/);
+ assert.match(payments.textContent,/first-attempt[\s\S]*原记录未付款[\s\S]*second-attempt[\s\S]*原记录已付款/);
+ assert.match(payments.textContent,/不与订单实付重复相加/);
  assert.match(card.textContent,/未结算/);
- assert.doesNotMatch(card.textContent,/first-attempt|first-refund|银行已到账|0\.00 元/);
- await act(async()=>[...card.querySelectorAll('button')].find(b=>b.textContent.includes('付款尝试')).click());
- await until(()=>card.textContent.includes('second-attempt'));
- assert.match(card.textContent,/first-attempt原状态未付款[\s\S]*second-attempt原状态已付款/);
- await act(async()=>[...card.querySelectorAll('button')].find(b=>b.textContent.includes('退款单据')).click());
- await until(()=>card.textContent.includes('second-refund'));
- assert.match(card.textContent,/first-refund原状态退款成功20\.00 元[\s\S]*second-refund原状态退款成功30\.00 元/);
+ assert.match(card.textContent,/first-refund[\s\S]*20\.00 元[\s\S]*second-refund[\s\S]*30\.00 元/);
+ assert.doesNotMatch(card.textContent,/银行已到账/);
  assert.match(ui.node.textContent,/旧渠道依据尚未接入/);
  assert(![...ui.node.querySelectorAll('button')].some(b=>b.textContent.includes('在汇聚对账查看本单')));
  const support=ui.node.querySelector('aside.oc-related');

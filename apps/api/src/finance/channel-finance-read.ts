@@ -233,6 +233,7 @@ export async function readAdminOrderRefundSummary(c: PoolClient, input: { orderI
     contractVersion: 'admin-order-refund-summary.v1' as const, integration, intents: null, abnormalResponsibilities: null,
     bankArrival: 'UNKNOWN' as const, reasonCodes: [reason], limit: null as number | null, truncated: false, maySubmit: false as const,
     coverage: null as 'COMPLETE_WITHIN_LIMIT' | 'TRUNCATED' | null,
+    coverageScope: null as 'JOINPAY_ONLY' | null,
     budget: null as { allocatedCents: string; consumedCents: string; releasedCents: string } | null,
     responsibilityBudget: null as null | { originalCents: string | null; allocatedCents: string | null; consumedCents: string | null;
       releasedCents: string | null; remainingCents: string | null; totalsComplete: boolean; postingOriginalCents: string | null;
@@ -322,7 +323,7 @@ export async function readAdminOrderRefundSummary(c: PoolClient, input: { orderI
       && psAllocated!==null && psConsumed!==null && psReleased!==null && originalCents >= normalActive + abnormalAllocated+psAllocated;
     return { contractVersion: 'admin-order-refund-summary.v1' as const, integration: 'INTEGRATED' as const, intents,
       abnormalResponsibilities: abnormal.responsibilities,...(prestart?{prestartTermination:prestart}:{}), limit: 64, truncated: false, maySubmit: false as const,
-      coverage: 'COMPLETE_WITHIN_LIMIT' as const,
+      coverage: 'COMPLETE_WITHIN_LIMIT' as const, coverageScope: 'JOINPAY_ONLY' as const,
       budget: abnormalAllocated !== null && abnormalConsumed !== null && abnormalReleased !== null&&psAllocated!==null&&psConsumed!==null&&psReleased!==null ? {
         allocatedCents: (normalAllocatedPartition + abnormalAllocated - abnormalConsumed+psAllocated-psConsumed).toString(),
         consumedCents: (normalConsumed + abnormalConsumed+psConsumed).toString(), releasedCents: (normalReleased + abnormalReleased+psReleased).toString() } : null,

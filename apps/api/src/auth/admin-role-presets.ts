@@ -39,6 +39,10 @@ export const SUPPORT_PRESET_PERMISSIONS = [
 /** Added once by 0167; later Boss edits and personal DENY remain effective. */
 export const SUPPORT_PRESET_LEGACY_CONTINUATION_ADDITIONS = [P.orderLegacyContinue] as const;
 
+/** 订单包赔申请与审批分别授权；已有角色配置可继续由 Boss 调整。 */
+export const SUPPORT_PRESET_COMPENSATION_ADDITIONS = [P.orderCompensationRequest] as const;
+export const OPS_PRESET_COMPENSATION_ADDITIONS = [P.orderCompensationRequest, P.orderCompensationApprove] as const;
+
 /**
  * 迁移 0118 追加到 role_preset_ops 的能力（Owner 2026-10-31）。护栏在服务端：
  * 非 Boss 永远不能以 Boss 账号或自己为目标；创建仍受 assertDelegable 约束且
@@ -120,8 +124,8 @@ export const OPS_PRESET_PERMISSIONS = [
 ] as const;
 
 export const ROLE_PRESET_GRANTS = {
-  role_preset_support: [...SUPPORT_PRESET_PERMISSIONS, ...SUPPORT_PRESET_LEGACY_CONTINUATION_ADDITIONS],
-  role_preset_ops: OPS_PRESET_PERMISSIONS,
+  role_preset_support: [...SUPPORT_PRESET_PERMISSIONS, ...SUPPORT_PRESET_LEGACY_CONTINUATION_ADDITIONS, ...SUPPORT_PRESET_COMPENSATION_ADDITIONS],
+  role_preset_ops: [...OPS_PRESET_PERMISSIONS, ...OPS_PRESET_COMPENSATION_ADDITIONS],
 } as const;
 /**
  * 只留 Boss 的能力不能通过角色授予（Boss 自己也不行）。只拦新增，

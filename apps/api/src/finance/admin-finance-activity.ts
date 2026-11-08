@@ -24,7 +24,7 @@ export function parseActivityQuery(params: URLSearchParams, wallet: boolean): Ac
   const page = params.get('page') ?? '1', size = params.get('pageSize') ?? '20', asOf = params.get('asOf');
   const from=params.get('from')??'',to=params.get('to')??'',balanceType=params.get('type')??'ALL',nonzero=params.get('nonzero')??'0',subjectUserId=params.get('subjectUserId');
   const validDay=(value:string)=>/^\d{4}-\d{2}-\d{2}$/.test(value)&&Number.isFinite(Date.parse(`${value}T00:00:00Z`))&&new Date(`${value}T00:00:00Z`).toISOString().slice(0,10)===value;
-  const liveTypes=['ALL','OWNER_INCOME','COMMISSION_INCOME','COMMISSION_REVERSAL','WITHDRAWAL','WITHDRAWAL_RETURN','DEPOSIT_COMPENSATION','OTHER'];
+  const liveTypes=['ALL','OWNER_INCOME','COMMISSION_INCOME','COMMISSION_REVERSAL','WITHDRAWAL','WITHDRAWAL_RETURN','DEPOSIT_COMPENSATION','FULL_PAYOUT_COMPENSATION','OTHER'];
   const historyTypes=['ALL','SETTLEMENT','WITHDRAWAL','WITHDRAWAL_RETURN','PLATFORM_ADJUSTMENT','DEPOSIT_COMPENSATION','TASK_SETTLEMENT','OTHER'];
   if (!(wallet?['ALL','NATIVE','LEGACY']:['NATIVE','LEGACY']).includes(source) || !(wallet ? ['ALL'] : ['ALL','PAYMENT','REFUND','WITHDRAWAL']).includes(kind)
     || !['LIVE','HISTORY','OPENING'].includes(view) || !wallet && params.has('view') || wallet && params.has('view') && source !== 'ALL'
@@ -54,6 +54,7 @@ const orderVisible = (alias: string) => `($7::boolean AND ${gameScopeSql(`${alia
 const orderTerm = (alias: string, number: string) => `(CASE WHEN ${orderVisible(alias)} THEN ${number} ELSE NULL END)`;
 const during = (value:string) => `($8::timestamptz IS NULL OR (${value}>=$8::timestamptz AND ${value}<$9::timestamptz))`;
 const liveType = `CASE WHEN root.source_kind='NATIVE_RENTAL_REFERRAL' OR root.source_kind='LEGACY_CONTINUATION_DUTY' AND root.beneficiary_role='COMMISSION' THEN CASE WHEN l.credit_cents-l.debit_cents<0 THEN 'COMMISSION_REVERSAL' ELSE 'COMMISSION_INCOME' END
+ WHEN root.source_kind='ORDER_COMPENSATION' THEN 'FULL_PAYOUT_COMPENSATION'
  WHEN root.source_entity IN('withdrawal_intent','joinpay_withdrawal_intent') THEN CASE WHEN e.kind IN('RELEASE','JOINPAY_WITHDRAWAL_RELEASED') THEN 'WITHDRAWAL_RETURN' ELSE 'WITHDRAWAL' END
  WHEN root.source_kind='LEGACY_CONTINUATION_DUTY' AND root.beneficiary_role='DEPOSIT_COMPENSATION' THEN 'DEPOSIT_COMPENSATION'
  WHEN l.posting_id IS NOT NULL OR root.source_kind='LEGACY_CONTINUATION_DUTY' AND root.beneficiary_role='OWNER_CREDIT' THEN 'OWNER_INCOME' ELSE 'OTHER' END`;
@@ -146,9 +147,9 @@ export async function readAdminBalanceActivity(client: PoolClient, q: ActivityQu
   for (const row of ledgerRows) {
     const entry = projectAdminFinanceLedger(row);
     const commission = row.source_kind === 'NATIVE_RENTAL_REFERRAL' || row.source_kind === 'LEGACY_CONTINUATION_DUTY' && row.beneficiary_role === 'COMMISSION';
-    const label = commission ? entry.direction === 'OUT' ? '分销收益冲回' : '分销收入' : ['withdrawal_intent','joinpay_withdrawal_intent'].includes(row.source_entity) ? (['RELEASE','JOINPAY_WITHDRAWAL_RELEASED'].includes(row.event_kind) ? '提现退回' : '提现扣除') : row.source_kind === 'LEGACY_CONTINUATION_DUTY' && row.beneficiary_role === 'DEPOSIT_COMPENSATION' ? '押金补偿' : row.posting_id || row.source_kind === 'LEGACY_CONTINUATION_DUTY' && row.beneficiary_role === 'OWNER_CREDIT' ? '号主租赁收入' : '余额变动';
+    const label = commission ? entry.direction === 'OUT' ? '分销收益冲回' : '分销收入' : row.source_kind === 'ORDER_COMPENSATION' ? '包赔赔偿' : ['withdrawal_intent','joinpay_withdrawal_intent'].includes(row.source_entity) ? (['RELEASE','JOINPAY_WITHDRAWAL_RELEASED'].includes(row.event_kind) ? '提现退回' : '提现扣除') : row.source_kind === 'LEGACY_CONTINUATION_DUTY' && row.beneficiary_role === 'DEPOSIT_COMPENSATION' ? '押金补偿' : row.posting_id || row.source_kind === 'LEGACY_CONTINUATION_DUTY' && row.beneficiary_role === 'OWNER_CREDIT' ? '号主租赁收入' : '余额变动';
     const dataOrigin=demoOrigins.get(row.id);
-    mapped.set(`ledger:${row.id}`, { id:entry.id, source:'NATIVE', subjectId:entry.subjectId, subjectName:entry.subjectName, label, amountCents:entry.deltaCents, occurredAt:entry.occurredAt, documentRef:entry.documentRef,
+    mapped.set(`ledger:${row.id}`, { id:entry.id, source:'NATIVE', subjectId:entry.subjectId, subjectName:entry.subjectName, label, amountCents:entry.deltaCents, occurredAt:entry.occurredAt, documentRef:row.source_kind==='ORDER_COMPENSATION'?null:entry.documentRef,
       ...(dataOrigin?{dataOrigin,bankArrival:'UNKNOWN' as const}:{}) });
   }
   for (const row of historicalRows) {

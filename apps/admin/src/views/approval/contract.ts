@@ -42,6 +42,7 @@ export function receiptEnvelopeIssue(result: RecoveryResult, bound: { key: strin
       return status === "PENDING" ? null : "创建回执缺少待审批状态";
     case "approval.request.decide": {
       // 决定命令的返回是 APPROVED / REJECTED；PENDING 或未知值都不是终态。
+      if (status === 'EXECUTED') return receipt.decision === 'APPROVED' && receipt.executionStatus === 'SUCCEEDED' && receipt.resultCode === 'ORDER_COMPENSATION_POSTED' && typeof receipt.businessResultRef === 'string' && /^comp_[a-f0-9]{40}$/.test(receipt.businessResultRef) ? null : '审批入账回执不完整';
       if (status !== "APPROVED" && status !== "REJECTED") return "决定回执不是已生效的批准或驳回终态";
       if (receipt.decision !== undefined && receipt.decision !== status) return "决定回执的决定与状态互相矛盾";
       return null;
@@ -151,7 +152,8 @@ export type BusinessView = {
   costBasis?: { priceVersionId: string | null; ruleReleaseId: string | null };
   /** 分销申请的冻结改动，不是当前全局政策或完整原值。 */
   policyChange?: { schema?: string; initial?: boolean; expectedPolicyId: string | null; expectedRevision: string | null; expectedPolicyDigest: string | null; changes?: Record<string, unknown>; reason: string | null };
-  result?: { knowledge: string; policyVersionId?: string | null };
+  compensation?: { orderId:string;origin:'NATIVE'|'LEGACY';gameId:string;ownerUserId:string;amountCents:string;caseRef:string;reason:string;evidenceRef:string;sourceDigest:string };
+  result?: { knowledge: string; policyVersionId?: string | null; caseId?:string|null };
 };
 
 export type RequestSummary = {
@@ -379,6 +381,7 @@ export const OBJECT_REF_LABELS: Record<string, string> = {
   membership_growth_policy: "会员成长政策",
   membership_entitlement: "会员礼遇权益",
   rental_order: "租赁订单",
+  legacy_order: "旧平台订单",
   settlement_version: "结算版本",
   settlement_posting: "结算过账",
 };
@@ -391,7 +394,7 @@ export function objectRefLabel(type: string): string {
 export function objectRefPath(ref: ObjectRef): string | null {
   if (!ref.id) return null;
   const id = encodeURIComponent(ref.id);
-  if (ref.type === "rental_order") return `/orders/${id}`;
+  if (ref.type === "rental_order" || ref.type === "legacy_order") return `/orders/${id}`;
   if (ref.type === "membership_entitlement" || ref.type === "membership_growth_policy") return `/membership-growth`;
   return null;
 }

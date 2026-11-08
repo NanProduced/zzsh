@@ -77,6 +77,8 @@ import { parsePlatformLegalAcceptance, recordPlatformAcceptances, verifyPlatform
 import { mountOrderHandlers, mountUserOrderBff, type OrderRuntimeOptions } from "../order/order-routes";
 import { createTradePublicActivityReaders, loadTradePublicActivityBindings, type TradeActivityBindings } from "../order/public-trade-activity";
 import { readLegacyDutyFinalization } from "../finance/legacy-duty-finance-store";
+import { executeOrderCompensation } from '../finance/order-compensation-approval';
+import { ORDER_COMPENSATION_OPERATION } from '../finance/order-compensation-contract';
 import { composeSupplyGateWithOrderOccupancy } from "../order/order";
 import { businessFeatureEnabled, isDeployedProfile, ConfigurationError, OrderImSdkRouteBindings, readSecret, type OrderImSdkRouteConfig } from "../config/config";
 import { API_V1_ERROR_CODES, ensureApiV1RequestId } from "../contracts/api-v1";
@@ -1302,7 +1304,9 @@ export async function mountAuthHandlers(
       ? createDistributionPolicyApprovalExecutor(options.distributionScope)(client, input, actor, requestId)
       : input.operationCode === DISTRIBUTION_REVERSAL_OPERATION
         ? createDistributionReversalApprovalExecutor()(client, input, actor, requestId)
-        : executeMembershipGrowthOperation(client, input, actor, requestId),
+        : input.operationCode === ORDER_COMPENSATION_OPERATION
+          ? executeOrderCompensation(client,input,actor,requestId)
+          : executeMembershipGrowthOperation(client, input, actor, requestId),
     ...(yunxinRuntime ? {
       imProvisioner: yunxinRuntime.provisioner,
       imIdentityRepository: yunxinRuntime.repository,

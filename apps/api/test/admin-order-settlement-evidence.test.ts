@@ -34,7 +34,7 @@ test('native business payment is independent of settlement and uses only the ren
  original.postingState='NOT_POSTED';
  const request={id:'p1',order_id:original.id,renter_user_id:original.renterId,amount_cents:'15908',state:'PAID',at};
  f.entries=[projectUnpostedFinanceSource(request,'PAYMENT_REQUEST'),
-  projectUnpostedFinanceSource({...request,id:'r1',amount_cents:'1000',state:'PENDING'},'REFUND_INTENT'),
+  projectUnpostedFinanceSource({...request,id:'r1',amount_cents:'1000',state:'PENDING',payment_source:'CONTROLLED'},'REFUND_INTENT'),
   projectUnpostedFinanceSource({...request,id:'wrong-subject',renter_user_id:'other'},'REFUND_INTENT'),
   projectUnpostedFinanceSource({...request,id:'wrong-order',order_id:'other'},'PAYMENT_REQUEST')];
  const read=evidence(f);
@@ -42,6 +42,7 @@ test('native business payment is independent of settlement and uses only the ren
  assert.equal(read.business.settlementState,'NOT_SETTLED');
  assert.deepEqual(read.business.paymentAttempts.map((row:{documentRef:string})=>row.documentRef),['PAYMENT_REQUEST:p1']);
  assert.deepEqual(read.business.refundOrders.map((row:{documentRef:string;channelArrival:string})=>[row.documentRef,row.channelArrival]),[['REFUND_INTENT:r1','UNKNOWN']]);
+ assert.equal(read.business.refundOrders[0].paymentSource,'CONTROLLED');
  assert.equal(read.refundPayable.cents,null);assert.equal(read.refunded.cents,null);
  original.postingState='POSTED';assert.equal(evidence(f).business.settlementState,'UNKNOWN');
 });
@@ -117,6 +118,7 @@ test('legacy wrong source, missing fact, conflicting row or mismatched original 
 test('legacy proved owner credit and zero refund stay separate from source refund and channel payment',async()=>{
  const owner=legacyFixture('7700','d','OWNER_CREDIT'),refund=legacyFixture('0','e'),read=await readBatch({query:async()=>({rows:[owner.row,refund.row]})} as any,{orderId:oldOrderId}),f=facts(true) as any;
  f.orderSettlementFacts={legacyDutyReady:true,duties:[...read.values()]};const projected=evidence(f);assert.equal(projected.posting.state,'POSTED');assert.equal(projected.ownerNet.cents,'7700');assert.equal(projected.refundPayable.cents,'0');assert.equal(projected.refundPayable.knowledge,'KNOWN');assert.equal(projected.historicalRefund.cents,'8200');assert.equal(projected.refunded.cents,null);assert.equal(projected.refundDueAt,null);assert.equal(projected.channel.state,'UNKNOWN');
+ assert.equal(projected.dutyRefs.find((d:{kind:string})=>d.kind==='OWNER_CREDIT').finalization,'POSTED');
  f.orderSettlementFacts.duties=[{...read.get(owner.duty.id),kind:'DEPOSIT_COMPENSATION'}];assert.equal(evidence(f).ownerNet.knowledge,'UNKNOWN');
 });
 test('r1 proved zero responsibility is FINALIZED_ZERO, never POSTED, and NONE or absence does not prove zero',async()=>{

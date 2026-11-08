@@ -773,6 +773,17 @@ test("eligibility covers business permission, game scope and executor assembly",
   assert.equal(evaluateApprovalActions({ ...base, includeStatePreconditions: false, access: grantedAccess }).find((item) => item.action === "execute")?.reasonCode, "OK", "replay authorization must not re-apply state preconditions");
 });
 
+test('self approval is allowed only for scoped compensation with its dedicated permission',()=>{
+  const row=requestFixture({operationCode:'order.compensation.grant',operationPayload:{gameId:'game_a'},status:'PENDING',requestedBy:CANDIDATE.id});
+  const access={status:'ACTIVE' as const,isBoss:false,passwordChangeRequired:false,permissions:new Set(['approval.request.approve','order.compensation.approve'])};
+  const base={row,userId:CANDIDATE.id,access,twoFactorEnabled:true,gameScope:{mode:'ALL_GAMES' as const,gameIds:[]},isCandidate:true,testOperationsEnabled:false,executorAssembled:true};
+  assert.equal(evaluateApprovalActions(base).find(action=>action.action==='approve')?.allowed,true);
+  assert.equal(evaluateApprovalActions({...base,access:{...access,permissions:new Set(['approval.request.approve'])}}).find(action=>action.action==='approve')?.reasonCode,'BUSINESS_PERMISSION_REQUIRED');
+  assert.equal(evaluateApprovalActions({...base,isCandidate:false}).find(action=>action.action==='approve')?.reasonCode,'NOT_CANDIDATE');
+  assert.equal(evaluateApprovalActions({...base,gameScope:{mode:'SELECTED_GAMES',gameIds:['other']}}).find(action=>action.action==='approve')?.reasonCode,'GAME_SCOPE_DENIED');
+  assert.equal(evaluateApprovalActions({...base,row:{...row,operationCode:'membership.entitlement.grant'}}).find(action=>action.action==='approve')?.reasonCode,'SELF_REQUEST_NOT_ALLOWED');
+});
+
 test("business projection trims by permission and keeps money and result refs exact", async () => {
   const settlementPayload = {
     schema: "settlement-version-v2",

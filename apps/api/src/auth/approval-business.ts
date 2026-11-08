@@ -3,6 +3,7 @@ import type { Pool, PoolClient } from "pg";
 import { ADMIN_PERMISSION, hasPermission, type EffectiveAdminAccess } from "./admin-authorization";
 import { isAllGamesScope, scopeAllowsGame, type AdminGameScope } from "./admin-scope";
 import { entitlementPricingSummary, entitlementStateAt, isTotalDiscountContract } from "./membership-growth";
+import { ORDER_COMPENSATION_OPERATION, parseCompensationPayload } from '../finance/order-compensation-contract';
 
 export const APPROVAL_TEST_OPERATION = "approval.test.execute";
 export const SETTLEMENT_ADJUST_OPERATION = "order.settlement.adjust";
@@ -16,7 +17,7 @@ export const APPROVAL_EXECUTION_MODE = {
 } as const;
 
 export type ApprovalExecutionMode = (typeof APPROVAL_EXECUTION_MODE)[keyof typeof APPROVAL_EXECUTION_MODE];
-export type ApprovalBusinessType = "membership" | "distribution" | "settlement" | "test";
+export type ApprovalBusinessType = "membership" | "distribution" | "settlement" | "compensation" | "test";
 
 export type ApprovalOperationRegistration = {
   operationCode: string;
@@ -40,6 +41,7 @@ const REGISTRATIONS: readonly ApprovalOperationRegistration[] = [
   { operationCode: "membership.entitlement.replace", businessType: "membership", title: "替换会员礼遇权益", executionMode: GENERIC, testOnly: false, permissionStage: "EXECUTE" },
   { operationCode: "membership.entitlement.revoke", businessType: "membership", title: "撤销会员礼遇权益", executionMode: GENERIC, testOnly: false, permissionStage: "EXECUTE" },
   { operationCode: SETTLEMENT_ADJUST_OPERATION, businessType: "settlement", title: "人工调整订单结算", executionMode: SOURCE, testOnly: false, permissionStage: null },
+  { operationCode: ORDER_COMPENSATION_OPERATION, businessType: "compensation", title: "订单全额包赔赔偿", executionMode: GENERIC, testOnly: false, permissionStage: "DECIDE" },
   { operationCode: APPROVAL_TEST_OPERATION, businessType: "test", title: "本地非资金测试动作", executionMode: GENERIC, testOnly: true, permissionStage: null },
 ];
 
@@ -57,6 +59,7 @@ export function approvalRegistration(operationCode: string): ApprovalOperationRe
  * 避免预检与实际执行各写一份而漂移。
  */
 export function membershipBusinessPermission(operationCode: string, stage: "REQUEST" | "DECIDE" | "EXECUTE"): string | null {
+  if (operationCode === ORDER_COMPENSATION_OPERATION) return stage === 'REQUEST' ? ADMIN_PERMISSION.orderCompensationRequest : ADMIN_PERMISSION.orderCompensationApprove;
   if (operationCode === "distribution.policy.publish" || operationCode === "distribution.earning.reverse") return "personal.distribution.policy.manage";
   if (!operationCode.startsWith("membership.")) return null;
   if (operationCode === "membership.benefit.policy.publish") return ADMIN_PERMISSION.membershipPolicyPublish;
@@ -589,6 +592,15 @@ export type ApprovalProjection = {
   objectStates: Map<string, ApprovalObjectState>;
 };
 
+async function loadCompensationProofs(client: Pool | PoolClient, rows: readonly ApprovalRequestFacts[]): Promise<Map<string,string>> {
+  if (!rows.length) return new Map();
+  const ready=(await client.query("SELECT to_regclass('zzsh_order.order_compensation_posting') IS NOT NULL AND to_regprocedure('zzsh_order.order_compensation_posting_complete(text)') IS NOT NULL AS ready")).rows[0]?.ready;
+  if (ready !== true) return new Map();
+  const result=await client.query<{requestId:string;caseId:string}>(`SELECT approval_request_id AS "requestId",id AS "caseId" FROM zzsh_order.order_compensation_posting
+    WHERE approval_request_id=ANY($1::text[]) AND zzsh_order.order_compensation_posting_complete(id)`,[rows.map(row=>row.id)]);
+  return new Map(result.rows.map(row=>[row.requestId,row.caseId]));
+}
+
 export async function projectApprovalBusinesses(
   client: Pool | PoolClient,
   rows: readonly ApprovalRequestFacts[],
@@ -604,12 +616,13 @@ export async function projectApprovalBusinesses(
     return !registration || (registration.businessType !== "membership" && registration.businessType !== "settlement");
   });
 
-  const [entitlements, policies, settlementRows, executions, reversalEarnings] = await Promise.all([
+  const [entitlements, policies, settlementRows, executions, reversalEarnings, compensationProofs] = await Promise.all([
     loadEntitlements(client, membership),
     loadPolicies(client, membership),
     loadSettlements(client, settlements),
-    loadExecutionReceipts(client, rows.filter(row => ["membership", "distribution"].includes(approvalRegistration(row.operationCode)?.businessType ?? ""))),
+    loadExecutionReceipts(client, rows.filter(row => ["membership", "distribution", "compensation"].includes(approvalRegistration(row.operationCode)?.businessType ?? ""))),
     loadReversalEarnings(client, unknown.filter(row => row.operationCode === "distribution.earning.reverse")),
+    loadCompensationProofs(client, unknown.filter(row => row.operationCode === ORDER_COMPENSATION_OPERATION)),
   ]);
   const gameIds = new Set<string>();
   for (const row of membership) {
@@ -638,6 +651,20 @@ export async function projectApprovalBusinesses(
       operationCode: row.operationCode,
       executionMode: registration?.executionMode ?? APPROVAL_EXECUTION_MODE.unsupported,
     };
+    if (row.operationCode === ORDER_COMPENSATION_OPERATION) {
+      const payload = parseCompensationPayload(row.operationPayload);
+      if (!payload || !viewer.access.isBoss && !hasPermission(viewer.access, ADMIN_PERMISSION.orderRead)) { views.set(row.id, restricted(base, 'BUSINESS_PERMISSION_REQUIRED')); continue; }
+      if (!viewer.access.isBoss && !isAllGamesScope(viewer.gameScope) && !scopeAllowsGame(viewer.gameScope, false, payload.gameId)) { views.set(row.id, restricted(base, 'GAME_SCOPE_DENIED')); continue; }
+      const receipt = executions.get(row.id);
+      const posted = receipt?.status === 'SUCCEEDED' && receipt.resultCode === 'ORDER_COMPENSATION_POSTED' && !!receipt.resultDetail && compensationProofs.get(row.id)===receipt.resultDetail;
+      views.set(row.id, { ...base, summaryAvailable:true, detailsAvailable:true, changeSummary:row.summary,
+        compensation:{ orderId:payload.orderId, origin:payload.origin, gameId:payload.gameId, ownerUserId:payload.ownerUserId,
+          amountCents:payload.amountCents, caseRef:payload.caseRef, reason:payload.reason, evidenceRef:payload.evidenceRef, sourceDigest:payload.sourceDigest },
+        objectRefs:[{type:payload.origin === 'NATIVE' ? 'rental_order' : 'legacy_order',id:payload.orderId}],
+        resultAvailability:posted?'KNOWN':row.status==='EXECUTED'?'UNRESOLVED':'NOT_APPLICABLE',
+        result:posted ? {knowledge:'KNOWN',caseId:receipt!.resultDetail} : {knowledge:'UNKNOWN'}, restrictedReasonCodes:[] });
+      continue;
+    }
     if (row.operationCode === "distribution.earning.reverse") {
       const readable = viewer.access.isBoss || hasPermission(viewer.access, "personal.distribution.policy.read") || hasPermission(viewer.access, "personal.distribution.policy.manage");
       if (!readable) { views.set(row.id, restricted(base, "BUSINESS_PERMISSION_REQUIRED")); continue; }

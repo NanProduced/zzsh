@@ -5,7 +5,9 @@ import { adminRequest, AdminApiError, formatDate, hasPermission, type SessionSna
 import { directoryScopeOf } from '../workspace/admin-directory-read';
 import { DistributionPolicyPanel, distributionPolicyAccess } from './distribution-policy-panel';
 import { DistributionMaintenancePanel } from './distribution-maintenance-panel';
-import { distributionCentsLabel, parseDistributionPercent } from './distribution-policy-model';
+import { distributionCentsLabel } from './distribution-policy-model';
+import { distributionState, parseDistributionOrder, type OrderRead } from './distribution-order-model';
+export { distributionState, parseDistributionOrder } from './distribution-order-model';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -13,29 +15,17 @@ import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible';
-import { commissionRoleLabel, commissionStateLabel, commissionTransitionLabel } from '@zzsh/ui/display-distribution';
+import { commissionRoleLabel, commissionTransitionLabel } from '@zzsh/ui/display-distribution';
 
 type Snapshot=Extract<SessionSnapshot,{authenticated:true}>;
 type Origin='NATIVE'|'LEGACY';
-type Item={id:string;origin:'NATIVE'|'LEGACY_MYSQL';beneficiary:{userId:string|null;name:string|null};role:string;amountCents:string;state:string;fundsDisposition:string;occurredAt:string;dueAt:string|null;calculation:{knowledge:'KNOWN'|'UNKNOWN';policyVersion:string|null;levelCode:string|null;rateMode?:'UNIFORM';percent:string|null;baseCents:string|null;formula:string|null;reasonCodes:string[]};channelArrival:'UNKNOWN';documentRef:string|null;recoveryRequiredCents:string|null;events:Array<{eventId:string;knowledge:'KNOWN'|'UNKNOWN';action:string|null;occurredAt:string|null}>};
-type OrderRead={schema:'admin-distribution-order.v1';knowledge:'KNOWN'|'UNAVAILABLE';contextKey:string;order:{id:string;origin:Origin;number:string|null};items:Item[];truncated:boolean;coverage:'THIS_AUTHORIZED_ORDER_ONLY';currentLegacyCommissions:Array<{dutyId:string;subjectId:string|null;amountCents:string|null;knowledge:'KNOWN'|'UNKNOWN';state:string;finalization:'POSTED'|'FINALIZED_ZERO'|'UNKNOWN';documentRef:string|null}>;reasonCodes:string[]};
 type Relations={schema:'admin-distribution-relations.v1';knowledge:'KNOWN'|'UNAVAILABLE';subjectId:string;participant:{knowledge:'KNOWN'|'UNKNOWN';eligibility:string;commissionFrozen:boolean|null;legacyLevelCode:string|null};relations:Array<{type:'INVITER'|'DISTRIBUTION_LEADER';knowledge:'KNOWN_PARENT'|'KNOWN_NONE'|'UNKNOWN';parentUserId:string|null;parentName:string|null;sourceType:string|null;policyVersion:string|null}>;reasonCodes:string[]};
 type Match={id:string;displayNo:string;source:{origin:Origin}};
-const id=/^[A-Za-z0-9][A-Za-z0-9._:-]{0,179}$/,money=/^(0|[1-9]\d{0,23})$/;
+const id=/^[A-Za-z0-9][A-Za-z0-9._:-]{0,179}$/;
 const fail=():never=>{throw new AdminApiError(502,'DISTRIBUTION_READ_CONTRACT_REQUIRED');};
-export function parseDistributionOrder(value:unknown):OrderRead{
- const v=value as OrderRead;if(!v||v.schema!=='admin-distribution-order.v1'||!['KNOWN','UNAVAILABLE'].includes(v.knowledge)||v.coverage!=='THIS_AUTHORIZED_ORDER_ONLY'||!v.order||!id.test(v.order.id)||!['NATIVE','LEGACY'].includes(v.order.origin)||!Array.isArray(v.items)||v.items.length>100||typeof v.truncated!=='boolean'||!Array.isArray(v.currentLegacyCommissions)||v.currentLegacyCommissions.length>100)return fail();
- for(const item of v.items){if(!item||typeof item.id!=='string'||!['NATIVE','LEGACY_MYSQL'].includes(item.origin)||(typeof item.amountCents!=='string'||!money.test(item.amountCents))||!item.beneficiary||!item.calculation||!['KNOWN','UNKNOWN'].includes(item.calculation.knowledge)||item.calculation.baseCents!==null&&(typeof item.calculation.baseCents!=='string'||!money.test(item.calculation.baseCents))||item.channelArrival!=='UNKNOWN'||!Array.isArray(item.events)||item.events.length>500)return fail();if(item.origin==='NATIVE'&&(['PENDING','SETTLED','REVOKED'].includes(item.state)&&item.fundsDisposition!==item.state||item.state==='RECOVERY_REQUIRED'&&item.fundsDisposition!=='SETTLED')||item.origin==='LEGACY_MYSQL'&&item.fundsDisposition!=='HISTORICAL_STATUS_ONLY')return fail();if(item.calculation.percent!==null)try{parseDistributionPercent(item.calculation.percent);}catch{return fail();}}
- return v;
-}
 export function parseDistributionRelations(value:unknown):Relations{const v=value as Relations;if(!v||v.schema!=='admin-distribution-relations.v1'||!['KNOWN','UNAVAILABLE'].includes(v.knowledge)||!id.test(v.subjectId)||!v.participant||!Array.isArray(v.relations)||v.relations.length>2||v.relations.some(r=>!['INVITER','DISTRIBUTION_LEADER'].includes(r.type)||!['KNOWN_PARENT','KNOWN_NONE','UNKNOWN'].includes(r.knowledge)))return fail();return v;}
 const roles:Record<string,string>={RENTER_REFERRAL:commissionRoleLabel('RENTER_REFERRAL'),OWNER_REFERRAL:commissionRoleLabel('OWNER_REFERRAL'),TASK_REFERRAL:commissionRoleLabel('TASK_REFERRAL')};
 const actions:Record<string,string>={ACCRUE:`已${commissionTransitionLabel('ACCRUE')}`,SETTLE:`已${commissionTransitionLabel('SETTLE')}`,REVOKE:`已${commissionTransitionLabel('REVOKE')}`,RECOVER:'追回处理'};
-export function distributionState(item:Pick<Item,'origin'|'state'|'fundsDisposition'>){
- // A recorded pending state alone does not prove a current payable responsibility.
- if(item.fundsDisposition==='HISTORICAL_STATUS_ONLY'&&item.state==='PENDING')return commissionStateLabel('UNKNOWN');
- return commissionStateLabel(item.state);
-}
 const failure=(e:unknown)=>e instanceof AdminApiError?(e.status===404||e.status===503?'分销记录暂时无法读取或对象不在可读范围，不能据此判断没有佣金':e.status===403?'当前身份无权查看这项分销记录':e.status===409?'可见范围已变化，请重新查询':'读取暂未完成，原输入保留'):'读取暂未完成，原输入保留';
 
 export function DistributionWorkspace({snapshot,onOpenPath,onDirtyChange,onQueryChange,query={}}:{snapshot:Snapshot;onOpenPath:(path:string,title?:string)=>void;onDirtyChange?:(dirty:boolean)=>void;onQueryChange?:(query:Record<string,string>)=>void;query?:Record<string,string>}){

@@ -7,6 +7,7 @@ import { migrate } from "drizzle-orm/node-postgres/migrator";
 import { readMigrationFiles } from "drizzle-orm/migrator";
 import type { Pool, PoolClient } from "pg";
 import { matchesKnown0155LineEndings } from "./business-migration-compat";
+import { compensationTriggersSql, compensationFunctionsSafeSql, compensationIncidentIndexSafeSql } from '../finance/order-compensation-schema';
 
 const IDENTIFIER = /^[a-z][a-z0-9_]{0,62}$/;
 const BUSINESS_SCHEMAS = ["zzsh_iam", "zzsh_auth_user", "zzsh_auth_admin", "zzsh_supply", "zzsh_content", "zzsh_order"] as const;
@@ -472,6 +473,21 @@ export async function applyRuntimePrivileges(pool: Pick<Pool, "query">, runtimeR
   await configureSettlementRefundPolicyPrivileges(pool, runtimeRole);
   await configureLocalFinancialSandboxPrivileges(pool, runtimeRole);
   await configureUserAuthThrottlePrivileges(pool, runtimeRole);
+  await configureOrderCompensationPrivileges(pool, runtimeRole);
+}
+
+/** An absent contract is allowed on older databases; a partial one must not receive money-write privileges. */
+export async function configureOrderCompensationPrivileges(pool: Pick<Pool, 'query'>, runtimeRole: string): Promise<void> {
+  const table='zzsh_order.order_compensation_posting',role=quoteIdentifier(runtimeRole);
+  const row=(await pool.query(`SELECT to_regclass($1) IS NOT NULL AS present,to_regprocedure('zzsh_order.post_order_compensation(text)') IS NOT NULL AS executor,
+    to_regprocedure('zzsh_order.order_compensation_posting_complete(text)') IS NOT NULL AS verifier,
+    (${compensationTriggersSql}) AS triggers,(${compensationFunctionsSafeSql}) AS functions_safe,(${compensationIncidentIndexSafeSql}) AS incident_index`,[table])).rows[0];
+  if (!row || typeof row.present!=='boolean' || typeof row.executor!=='boolean' || typeof row.verifier!=='boolean' || !Number.isInteger(row.triggers) || typeof row.functions_safe!=='boolean' || typeof row.incident_index!=='boolean') throw new Error('Order compensation contract inventory unavailable');
+  if (!row.present && !row.executor && !row.verifier && row.triggers===0) return;
+  if (!row.present || !row.executor || !row.verifier || row.triggers!==11 || !row.functions_safe || !row.incident_index) throw new Error('Order compensation contract incomplete');
+  await resetRuntimeTablePrivileges(pool,table,'PUBLIC',{select:false});
+  await resetRuntimeTablePrivileges(pool,table,role);
+  await pool.query(`REVOKE ALL ON FUNCTION zzsh_order.post_order_compensation(text),zzsh_order.order_compensation_posting_complete(text) FROM PUBLIC, ${role}; GRANT EXECUTE ON FUNCTION zzsh_order.post_order_compensation(text),zzsh_order.order_compensation_posting_complete(text) TO ${role}`);
 }
 
 /** User authentication must not silently fall back when its persistent rate-limit store is incomplete. */

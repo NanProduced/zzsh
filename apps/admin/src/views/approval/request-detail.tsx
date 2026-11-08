@@ -17,6 +17,8 @@ import { Textarea } from "../../components/ui/textarea";
 import { Tooltip, TooltipContent, TooltipTrigger } from "../../components/ui/tooltip";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../../components/ui/select";
 import { Alert, AlertDescription, AlertTitle } from "../../components/ui/alert";
+import { ConfirmAlertDialog } from '../../components/ui/alert-dialog';
+import { financeMoney } from '../admin-finance-api';
 import {
   Timeline, TimelineContent, TimelineDate, TimelineHeader, TimelineIndicator,
   TimelineItem, TimelineSeparator, TimelineTitle,
@@ -225,6 +227,7 @@ function DecisionDialog({
   const [reason, setReason] = useState("");
   const [password, setPassword] = useState("");
   const [totpCode, setTotpCode] = useState("");
+  const [confirmCompensation, setConfirmCompensation] = useState(false);
   const passwordId = useId();
   const totpId = useId();
   const stepUpReady = password.length >= 12 && /^\d{6}$/.test(totpCode);
@@ -250,7 +253,9 @@ function DecisionDialog({
   const change = detail.business?.changeSummary ?? detail.summary;
   const recallTarget = detail.summary.slice(0, 8);
   const rejectRequiresReason = kind === "reject";
-  const disabled = Boolean(editError) || !stepUpReady || (kind === null
+  const compensationAmount = detail.business?.compensation?.amountCents;
+  const compensationReady = detail.operation.code !== 'order.compensation.grant' || kind !== 'approve' || typeof compensationAmount === 'string' && /^[1-9]\d{0,15}$/.test(compensationAmount);
+  const disabled = Boolean(editError) || !stepUpReady || !compensationReady || (kind === null
     ? true
     : rejectRequiresReason
       ? reason.trim().length < 3
@@ -268,12 +273,12 @@ function DecisionDialog({
     } else {
       setDepositAllowanceInput("");
     }
-    if (kind === null) { setReason(""); setRecall(""); setPassword(""); setTotpCode(""); }
+    if (kind === null) { setReason(""); setRecall(""); setPassword(""); setTotpCode(""); setConfirmCompensation(false); }
   }, [kind, detail.requestId, detail.entitlementAmendment?.editablePayload]);
 
   const title = kind === "approve" ? "确认批准" : kind === "reject" ? "确认驳回" : kind === "withdraw" ? "确认撤回申请" : "确认执行";
   const consequence = kind === "approve"
-    ? (detail.business?.executionMode === "SOURCE_BUSINESS"
+    ? detail.operation.code === 'order.compensation.grant' ? '确认批准后，系统将在同一事务内将赔偿记入该订单号主的可用余额。' : (detail.business?.executionMode === "SOURCE_BUSINESS"
       ? "批准后本申请进入待执行；本业务由来源流程完成双方确认、客服复核与过账，审批页不会代为到账。"
       : "批准后本申请进入待执行；执行是独立步骤，批准不代表执行完成或资金到账。")
     : kind === "reject"
@@ -282,7 +287,25 @@ function DecisionDialog({
         ? "撤回后申请关闭（已撤回），审批人不能再处理；撤回动作写入审计，如需再次办理请重新发起。"
       : "执行结果单独记录，不可撤销。执行成功只代表本次执行完成，业务对象是否生效以领域结果为准。";
 
-  return (
+  const submitDecision = () => {
+    if (!kind || disabled) return;
+    const amendment = canEdit && editRequested && finalPayload ? {
+      expectedPayloadHash: detail.entitlementAmendment!.expectedPayloadHash,
+      finalPayload: (() => {
+        const base = { ...finalPayload }, trimmed = depositAllowanceInput.trim();
+        if (base.depositWaived) { if (base.depositAllowanceCents !== undefined) base.depositAllowanceCents = "0"; }
+        else if (trimmed && /^(0|[1-9]\d*)(\.\d{1,2})?$/.test(trimmed)) {
+          const [whole = "0", fraction = ""] = trimmed.split(".");
+          base.depositAllowanceCents = (BigInt(whole) * 100n + BigInt(fraction.padEnd(2, "0"))).toString(); base.depositWaived = false;
+        } else if (base.depositAllowanceCents !== undefined) base.depositAllowanceCents = "0";
+        return base;
+      })()
+    } : undefined;
+    const stepUp = { password, totpCode }; setPassword(""); setTotpCode("");
+    onSubmit(kind, reason.trim(), stepUp, amendment);
+  };
+
+  return (<>
     <Dialog open={kind !== null} onOpenChange={(open) => { if (!open) onClose(); }}>
       <DialogContent>
         <DialogTitle>{title}</DialogTitle>
@@ -370,35 +393,16 @@ function DecisionDialog({
         </div>
         <DialogFooter>
           <DialogClose render={<Button variant="secondary" size="sm" />}>取消</DialogClose>
-          <Button type="button" size="sm" variant={kind === "approve" ? "primary" : kind === "withdraw" ? "secondary" : "danger"} disabled={disabled} onClick={() => {
-            if (!kind) return;
-            const amendment = canEdit && editRequested && finalPayload ? {
-              expectedPayloadHash: detail.entitlementAmendment!.expectedPayloadHash,
-              finalPayload: (() => {
-                const base = { ...finalPayload };
-                const trimmed = depositAllowanceInput.trim();
-                if (base.depositWaived) {
-                  if (base.depositAllowanceCents !== undefined) base.depositAllowanceCents = "0";
-                } else if (trimmed && /^(0|[1-9]\d*)(\.\d{1,2})?$/.test(trimmed)) {
-                  const [whole = "0", fraction = ""] = trimmed.split(".");
-                  base.depositAllowanceCents = (BigInt(whole) * 100n + BigInt(fraction.padEnd(2, "0"))).toString();
-                  base.depositWaived = false;
-                } else {
-                  if (base.depositAllowanceCents !== undefined) base.depositAllowanceCents = "0";
-                }
-                return base;
-              })()
-            } : undefined;
-            const stepUp = { password, totpCode };
-            setPassword(""); setTotpCode("");
-            onSubmit(kind, reason.trim(), stepUp, amendment);
-          }}>
+          <Button type="button" size="sm" variant={kind === "approve" ? "primary" : kind === "withdraw" ? "secondary" : "danger"} disabled={disabled} onClick={() => { if (kind === 'approve' && detail.operation.code === 'order.compensation.grant') setConfirmCompensation(true); else submitDecision(); }}>
             {kind === "approve" ? "确认批准" : kind === "reject" ? "确认驳回" : kind === "withdraw" ? "确认撤回" : "确认执行"}
           </Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>
-  );
+    <ConfirmAlertDialog open={confirmCompensation} onOpenChange={setConfirmCompensation} contentLabel="确认包赔入账" title="确认批准并入账？"
+      description={`赔偿 ${financeMoney(detail.business?.compensation?.amountCents)} 将记入本单号主余额；请核对事故与依据。`}
+      confirmLabel="确认批准并入账" cancelLabel="返回核对" onConfirm={()=>{setConfirmCompensation(false);submitDecision();}}/>
+  </>);
 }
 
 function ActionButton({ eligibility, busy, blocked, onClick }: { eligibility: ActionEligibility; busy: boolean; blocked: boolean; onClick: () => void }) {

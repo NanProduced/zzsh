@@ -61,6 +61,7 @@ const CREATE_OPERATION = "approval.request.create";
 const MEMBERSHIP_OPERATIONS = new Set(["membership.benefit.policy.publish", "membership.entitlement.grant", "membership.entitlement.replace", "membership.entitlement.revoke"]);
 const POLICY_OPERATIONS = new Set(["membership.benefit.policy.publish"]);
 const ENTITLEMENT_OPERATIONS = new Set(["membership.entitlement.grant", "membership.entitlement.replace", "membership.entitlement.revoke"]);
+const COMPENSATION_OPERATIONS = new Set(["order.compensation.grant"]);
 const PENDING_EVENT = "zzsh:membership-approval-pending";
 export type VerifiedPolicyDraftReference = { policyDraftId: string; policyDraftVersion: string; policyDraftHash: string };
 export function policyDraftReferenceOf(body: Record<string, unknown>): VerifiedPolicyDraftReference | null {
@@ -71,8 +72,8 @@ export function policyDraftReferenceOf(body: Record<string, unknown>): VerifiedP
   const hash = payload && typeof payload.policyDraftHash === "string" ? payload.policyDraftHash : "";
   return id && version && hash ? { policyDraftId: id, policyDraftVersion: version, policyDraftHash: hash } : null;
 }
-export type MembershipApprovalBusiness = "policy" | "entitlement";
-const BUSINESS_OPERATIONS: Record<MembershipApprovalBusiness, Set<string>> = { policy: POLICY_OPERATIONS, entitlement: ENTITLEMENT_OPERATIONS };
+export type MembershipApprovalBusiness = "policy" | "entitlement" | "compensation";
+const BUSINESS_OPERATIONS: Record<MembershipApprovalBusiness, Set<string>> = { policy: POLICY_OPERATIONS, entitlement: ENTITLEMENT_OPERATIONS, compensation: COMPENSATION_OPERATIONS };
 
 function notifyPendingChanged() {
   if (typeof window !== "undefined") window.dispatchEvent(new Event(PENDING_EVENT));
@@ -135,6 +136,11 @@ export function useMembershipApprovalRequest(snapshot: Snapshot, business: Membe
     if (detail.requestId !== id) throw new Error("审批详情与申请号不一致；原记录保留");
     if (typeof operationCode !== "string" || !operationCode) throw new Error("原请求缺少业务类型，无法自动解除；原记录保留，请到审批中心核对");
     if (actualOperation !== operationCode) throw new Error("审批详情的业务类型与原请求不一致；原记录保留");
+    if (operationCode === 'order.compensation.grant') {
+      const submitted = body.payload && typeof body.payload === 'object' && !Array.isArray(body.payload) ? body.payload as Record<string,unknown> : null;
+      const actual = detail.business?.compensation;
+      if (!submitted || !actual || ['orderId','origin','gameId','ownerUserId','amountCents','caseRef','reason','evidenceRef','sourceDigest'].some(key => submitted[key] !== (actual as unknown as Record<string,unknown>)[key])) throw new Error('赔偿申请的冻结资料与原请求不一致；原记录保留');
+    }
     dropPendingWrite(subject, key);
     notifyPendingChanged();
     update({ pending: refreshPending(), requestId: id, detailStatus: typeof detail.status === "string" ? detail.status : null, verifiedReference: policyDraftReferenceOf(body), error: null });
@@ -144,7 +150,7 @@ export function useMembershipApprovalRequest(snapshot: Snapshot, business: Membe
   async function submit(body: Record<string, unknown>): Promise<string | null> {
     if (inFlight.current || !current()) return null;
     if (snapshot.session.locked || snapshot.security.status !== "ACTIVE" || snapshot.security.passwordChangeRequired || !snapshot.security.isBoss && !hasPermission(snapshot, "approval.request.create")) { update({ error: "当前身份不能提交审批" }); return null; }
-    if (typeof body.operationCode !== "string" || !MEMBERSHIP_OPERATIONS.has(body.operationCode)) { update({ error: "不支持的会员审批操作" }); return null; }
+    if (typeof body.operationCode !== "string" || !(MEMBERSHIP_OPERATIONS.has(body.operationCode) || COMPENSATION_OPERATIONS.has(body.operationCode)) || !operations.has(body.operationCode)) { update({ error: "不支持的审批操作" }); return null; }
     const existing = refreshPending();
     if (existing.state !== "absent") {
       const foreign = foreignPending(existing);

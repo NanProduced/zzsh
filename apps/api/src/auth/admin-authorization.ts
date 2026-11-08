@@ -76,6 +76,8 @@ export const ADMIN_PERMISSION = {
   orderRead: "order.read",
   orderLegacyContinue: "order.legacy.continue",
   orderSettlementWrite: "order.settlement.write",
+  orderCompensationRequest: "order.compensation.request",
+  orderCompensationApprove: "order.compensation.approve",
   financeDocumentRead: "finance.document.read",
   financeRead: "finance.read",
   financeWithdrawalQuery: "finance.withdrawal.query",

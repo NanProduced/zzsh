@@ -32,14 +32,25 @@ async function setup(t, answer, options = {}) {
   await act(async () => { Object.getOwnPropertyDescriptor(w.HTMLInputElement.prototype, 'value').set.call(input, '1.00'); input.dispatchEvent(new w.Event('input', { bubbles: true })); });
   const reason = host.querySelector('[aria-label="退款原因"]');
   if (reason && !reason.disabled) await act(async () => { Object.getOwnPropertyDescriptor(w.HTMLInputElement.prototype, 'value').set.call(reason, '已核实退款原因'); reason.dispatchEvent(new w.Event('input', { bubbles: true })); });
-  const submit = async () => { await act(async () => host.querySelector('form').dispatchEvent(new w.Event('submit', { bubbles: true, cancelable: true }))); await act(async () => { await new Promise(setImmediate); }); };
-  return { host, calls, submit, render, module, storage:w.sessionStorage, pending: () => JSON.parse(w.sessionStorage.getItem(options.binding ? `${storageKey}.${JSON.stringify([options.binding.adminUserId,options.binding.sessionId])}` : storageKey)) };
+  const confirmAction=async()=>{const dialog=w.document.querySelector('[role="alertdialog"]');if(dialog)await act(async()=>{[...dialog.querySelectorAll('button')].find(b=>b.textContent==='确认处理').click();await new Promise(setImmediate);});};
+  const submit = async () => { await act(async () => host.querySelector('form').dispatchEvent(new w.Event('submit', { bubbles: true, cancelable: true }))); await confirmAction(); await act(async () => { await new Promise(setImmediate); }); };
+  return { host, calls, submit, confirmAction, render, module, storage:w.sessionStorage, pending: () => JSON.parse(w.sessionStorage.getItem(options.binding ? `${storageKey}.${JSON.stringify([options.binding.adminUserId,options.binding.sessionId])}` : storageKey)) };
 }
 
 test('a new manual refund requires a reason before saving a key or making a request', async t => {
   const ui = await setup(t, () => response(null)); const input = ui.host.querySelector('[aria-label="退款原因"]');
   await act(async () => { Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set.call(input, ''); input.dispatchEvent(new window.Event('input', { bubbles: true })); });
   await ui.submit(); assert.equal(ui.calls.length, 0); assert.equal(ui.pending(), null); assert.match(ui.host.textContent, /请填写退款原因/);
+});
+
+test('refund registration requires a second confirmation and cancel preserves the draft', async t => {
+  const ui=await setup(t,()=>response(null));
+  await act(async()=>ui.host.querySelector('form').dispatchEvent(new window.Event('submit',{bubbles:true,cancelable:true})));
+  assert.equal(ui.calls.filter(call=>call.method==='POST').length,0);assert.equal(ui.pending(),null);
+  const dialog=document.querySelector('[role="alertdialog"]');assert(dialog);
+  await act(async()=>[...dialog.querySelectorAll('button')].find(button=>button.textContent==='返回核对').click());
+  assert.equal(ui.host.querySelector('[aria-label="退款金额（元）"]').value,'1.00');assert.equal(ui.calls.length,0);
+  await ui.submit();assert.equal(ui.calls.filter(call=>call.method==='POST').length,1);
 });
 
 test('yuan display retains the original positive sixteen-digit cents command domain', async t => {
@@ -119,6 +130,7 @@ test('staff can query a reviewed refund without the page presenting it as comple
   const ui=await setup(t,call=>response(call.method==='GET'?{items:[item]}:{contractVersion:'admin-joinpay-query.v1',operation:'REFUND_QUERY',objectId:'refund_1',channelArrival:'UNKNOWN',outcome:{kind:'OBSERVED',event:'UNKNOWN'}}));
   await act(async()=>{[...ui.host.querySelectorAll('button')].find(button=>button.textContent==='读取退款申请').click();await new Promise(setImmediate);});
   await act(async()=>{[...ui.host.querySelectorAll('button')].find(button=>button.textContent==='按原号补查').click();await new Promise(setImmediate);});
+  assert.equal(ui.calls.filter(call=>call.method==='POST').length,0);await ui.confirmAction();
   assert.match(ui.host.textContent,/退款仍需核对/);assert.match(ui.host.textContent,/保留原退款号/);assert.doesNotMatch(ui.host.textContent,/退款成功/);
   assert.equal(ui.calls.filter(call=>call.method==='POST').length,1);
 });
@@ -133,6 +145,7 @@ test('staff records a reason to resume the original refund query without another
   const input=ui.host.querySelector('[aria-label="退款核对说明"]');
   await act(async()=>{Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype,'value').set.call(input,'已核对汇聚原退款');input.dispatchEvent(new window.Event('input',{bubbles:true}));});
   await act(async()=>{confirm.click();await new Promise(setImmediate);});
+  assert.equal(ui.calls.filter(call=>call.method==='POST').length,0);await ui.confirmAction();
   const posts=ui.calls.filter(call=>call.method==='POST');assert.equal(posts.length,1);assert.match(posts[0].url,/\/joinpay\/refunds\/refund_1\/resume$/);
   assert.deepEqual(JSON.parse(posts[0].body),{reason:'已核对汇聚原退款'});assert.match(ui.host.textContent,/不会重新发起退款/);
 });
@@ -146,6 +159,7 @@ test('terminal conflict keeps its status and records a staff explanation when ev
   const input=ui.host.querySelector('[aria-label="退款核对说明"]');
   await act(async()=>{Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype,'value').set.call(input,'汇聚记录待财务核对');input.dispatchEvent(new window.Event('input',{bubbles:true}));});
   await act(async()=>{[...ui.host.querySelectorAll('button')].find(button=>button.textContent==='确认核对').click();await new Promise(setImmediate);});
+  assert.equal(ui.calls.filter(call=>call.method==='POST').length,0);await ui.confirmAction();
   assert.match(ui.host.textContent,/仍有矛盾或无法验证/);
   const posts=ui.calls.filter(call=>call.method==='POST');assert.equal(posts.length,1);assert.match(posts[0].url,/\/joinpay\/refunds\/refund_1\/resolve$/);
   assert.deepEqual(JSON.parse(posts[0].body),{reason:'汇聚记录待财务核对'});

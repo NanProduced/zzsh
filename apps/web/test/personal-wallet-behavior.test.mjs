@@ -10,7 +10,7 @@ async function probe(fetcher,query=''){const w=new Window({url:'http://127.0.0.1
 test('exact large amounts and UNKNOWN are distinct from known zero',()=>{assert.equal(client.walletMoney('999999999999999999999999'),'¥9,999,999,999,999,999,999,999.99');assert.equal(client.walletMoney(null),'未记录');assert.equal(client.walletMoney('0'),'¥0.00');assert.equal(client.walletMoney('-1',true),'− ¥0.01');assert.throws(()=>client.walletMoney('-0'));});
 
 test('native wallet labels distinguish settlement, referral and withdrawal without claiming bank arrival',()=>{
- for(const [sourceKind,label] of [['NATIVE_SETTLEMENT','出租结算'],['NATIVE_REFERRAL_EARNING_SETTLED','分销收益'],['JOINPAY_WITHDRAWAL_RESERVED','提现申请扣款'],['JOINPAY_WITHDRAWAL_RELEASED','提现资金退回'],['CONTROLLED_WITHDRAWAL_RESERVE','提现申请扣款']])
+ for(const [sourceKind,label] of [['NATIVE_SETTLEMENT','出租结算'],['NATIVE_REFERRAL_EARNING_SETTLED','分销收益'],['ORDER_COMPENSATION_PAID','包赔赔偿'],['JOINPAY_WITHDRAWAL_RESERVED','提现申请扣款'],['JOINPAY_WITHDRAWAL_RELEASED','提现资金退回'],['CONTROLLED_WITHDRAWAL_RESERVE','提现申请扣款']])
   assert.equal(client.financeEntryLabel({...entry,sourceKind}),label);
  assert.equal(client.financeEntryLabel({...entry,sourceKind:'UNRECOGNIZED'}),'资金记录');
 });

@@ -25,7 +25,7 @@ const states:Record<string,string> = { SUBMITTING:'提交中', UNKNOWN:'结果�
 export const financeActivityState = (state:string|null|undefined) => states[state??'']??'状态待核';
 const signed = (cents:string|null) => cents !== null && /^\d+$/.test(cents) && BigInt(cents)>0n ? `+${financeMoney(cents)}` : financeMoney(cents);
 const requestUserProfile = <T,>(path:string) => adminRequest<T>(path);
-const liveTypes:Array<[string,string]> = [['OWNER_INCOME','号主租赁收入'],['COMMISSION_INCOME','分销收入'],['COMMISSION_REVERSAL','分销收益冲回'],['WITHDRAWAL','提现扣除'],['WITHDRAWAL_RETURN','提现退回'],['DEPOSIT_COMPENSATION','押金补偿'],['OTHER','其他余额变动']];
+const liveTypes:Array<[string,string]> = [['OWNER_INCOME','号主租赁收入'],['COMMISSION_INCOME','分销收入'],['COMMISSION_REVERSAL','分销收益冲回'],['WITHDRAWAL','提现扣除'],['WITHDRAWAL_RETURN','提现退回'],['DEPOSIT_COMPENSATION','押金补偿'],['FULL_PAYOUT_COMPENSATION','包赔赔偿'],['OTHER','其他余额变动']];
 const historyTypes:Array<[string,string]> = [['SETTLEMENT','结算收入（号主/分销）'],['WITHDRAWAL','提现扣除'],['WITHDRAWAL_RETURN','提现退回'],['PLATFORM_ADJUSTMENT','平台加扣款'],['DEPOSIT_COMPENSATION','押金补偿'],['TASK_SETTLEMENT','任务结算'],['OTHER','其他 / 未分类']];
 const isoDay = (date:Date|undefined) => date ? `${date.getFullYear()}-${String(date.getMonth()+1).padStart(2,'0')}-${String(date.getDate()).padStart(2,'0')}` : '';
 const draftQuery = (value:Draft):Record<string,string> => Object.fromEntries(Object.entries({q:value.q,kind:value.kind,from:value.from,to:value.to,type:value.type,...(value.nonzero?{nonzero:'1'}:{})}).filter(([,item])=>item));

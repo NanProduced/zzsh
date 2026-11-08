@@ -915,6 +915,14 @@ test("the template receipt branch accepts only the backend's CONFIGURED projecti
   assert.equal(receiptEnvelopeIssue(envelope({ status: "PENDING", templateVersion: 1 }), bound), "模板回执不是已配置完成的终态");
 });
 
+test('compensation approval recovery requires both the decision and its matching posting receipt',()=>{
+ const bound={key:'idem_c',operation:'approval.request.decide',target:'approval_req_comp'};
+ const receipt={approvalRequestId:bound.target,status:'EXECUTED',decision:'APPROVED',executionStatus:'SUCCEEDED',resultCode:'ORDER_COMPENSATION_POSTED',businessResultRef:'comp_'+'a'.repeat(40)};
+ const envelope=r=>({knowledge:'KNOWN',operation:bound.operation,key:bound.key,targetRequestId:bound.target,originalResponseStatus:200,outcome:'ACCEPTED',receipt:r});
+ assert.equal(approvalContract.receiptEnvelopeIssue(envelope(receipt),bound),null);
+ for(const change of [{resultCode:'OTHER'},{executionStatus:'FAILED'},{businessResultRef:null},{decision:'REJECTED'}])assert.equal(approvalContract.receiptEnvelopeIssue(envelope({...receipt,...change}),bound),'审批入账回执不完整');
+});
+
 // ── C2：核清之后能继续办理，刷新是真读回 ───────────────────────────────────
 
 test("a resolved request unblocks the next action once the latest state is read back", async () => {

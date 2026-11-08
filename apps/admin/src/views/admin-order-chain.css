@@ -164,3 +164,33 @@
 .oc-design .oc-order-actions .oc-action-card{margin:14px 0 0;padding:0;border:0;border-radius:0;background:transparent;box-shadow:none}
 .oc-design .oc-order-actions .oc-action-card+.oc-action-card{padding-top:14px;border-top:1px solid var(--border)}
 .oc-design .oc-order-actions .oc-action-card [data-slot=card-content]{padding:0}
+
+/* 订单资金按事件分组；同一事件的业务、账本与渠道状态并列阅读。 */
+.oc-design .oc-finance-story{display:grid;gap:0}
+.oc-design .oc-finance-story-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;padding-bottom:18px}
+.oc-design .oc-finance-story-head h2{margin:0;font-size:16px}
+.oc-design .oc-finance-story-head p,.oc-design .oc-finance-muted{margin:5px 0 0;color:var(--muted-foreground);font-size:13px;line-height:1.65}
+.oc-design .oc-finance-section{min-width:0;padding:20px 0;border-top:1px solid var(--border)}
+.oc-design .oc-finance-section:last-child{padding-bottom:0}
+.oc-design .oc-finance-section-title{display:flex;align-items:center;gap:9px;margin-bottom:14px}
+.oc-design .oc-finance-section-title svg{color:var(--muted-foreground);flex:none}
+.oc-design .oc-finance-section-title h3{margin:0;font-size:15px;font-weight:600}
+.oc-design .oc-finance-primary,.oc-design .oc-finance-row{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;padding:10px 0;font-size:14px}
+.oc-design .oc-finance-primary p,.oc-design .oc-finance-row small{display:block;margin:3px 0 0;color:var(--muted-foreground);font-size:12px;line-height:1.5}
+.oc-design .oc-finance-amount,.oc-design .oc-finance-row>strong,.oc-design .oc-finance-row>span{font-variant-numeric:tabular-nums;text-align:right;overflow-wrap:anywhere}
+.oc-design .oc-finance-allocation{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;padding:14px;border:1px solid var(--border);border-radius:10px}
+.oc-design .oc-finance-allocation dt,.oc-design .oc-finance-facts dt{color:var(--muted-foreground);font-size:12px;line-height:1.5}
+.oc-design .oc-finance-allocation dd,.oc-design .oc-finance-facts dd{margin:5px 0 0;font-size:14px;font-weight:600;font-variant-numeric:tabular-nums;overflow-wrap:anywhere}
+.oc-design .oc-finance-facts{display:grid;gap:10px}
+.oc-design .oc-finance-facts>div{display:flex;justify-content:space-between;gap:16px}
+.oc-design .oc-finance-facts dd{margin:0;text-align:right}
+.oc-design .oc-finance-sublist{display:grid;gap:8px;margin:10px 0 0;padding:0;list-style:none;font-size:13px}
+.oc-design .oc-finance-sublist li{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:8px}
+.oc-design .oc-finance-note{display:grid;gap:6px;margin-top:14px;padding:12px 14px;border:1px solid var(--border);border-radius:8px;font-size:13px}
+.oc-design .oc-finance-note p{margin:0;color:var(--muted-foreground)}
+.oc-design .oc-finance-warning{margin:10px 0 0;color:var(--destructive);font-size:13px}
+.oc-design .oc-finance-section table{font-size:13px}
+.oc-design .oc-finance-section th,.oc-design .oc-finance-section td{white-space:normal;vertical-align:top}
+.oc-design .oc-finance-section td:last-child{min-width:110px;overflow-wrap:anywhere}
+@media(max-width:760px){.oc-design .oc-finance-allocation{grid-template-columns:repeat(2,minmax(0,1fr))}.oc-design .oc-finance-story-head{flex-wrap:wrap}}
+@media(max-width:420px){.oc-design .oc-finance-allocation{grid-template-columns:minmax(0,1fr)}}

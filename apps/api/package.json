@@ -27,6 +27,7 @@
     "test:legacy-payment-guard:synthetic": "npm run build && node test/legacy-payment-order-guard-synthetic.cjs",
     "test:legacy-owner-finance:synthetic": "npm run build && node test/legacy-owner-finance-synthetic.cjs",
     "test:legacy-completion:synthetic": "npm run build && node test/legacy-completion-synthetic.cjs",
+    "test:order-compensation:synthetic": "npm run build && node test/order-compensation-synthetic.cjs",
     "test:legacy-commission-link:synthetic": "npm run build && node test/legacy-commission-link-synthetic.cjs",
     "test:legacy-commission-page:synthetic": "npm run build && node test/legacy-commission-page-synthetic.cjs",
     "test:refund-review-query:synthetic": "npm run build && node test/refund-review-query-guard-synthetic.cjs",

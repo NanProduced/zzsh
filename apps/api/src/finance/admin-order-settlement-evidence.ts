@@ -17,11 +17,12 @@ export type AdminOrderSettlementEvidence={
  platformContribution:OrderSettlementMoney;
  platformComponents?:{code:string;cents:string;payer:'OWNER'|'RENTER'|'NONE'|null;feeBase:string|null;feeRate:string|null}[];
  refundDueAt:string|null;channel:{state:'UNKNOWN';reference:null};
- dutyRefs:{documentRef:string|null;kind:string;state:string;amount:OrderSettlementMoney}[];reasonCodes:string[];
+ dutyRefs:{documentRef:string|null;kind:string;state:string;amount:OrderSettlementMoney;finalization:'POSTED'|'FINALIZED_ZERO'|'UNKNOWN';postedAt:string|null}[];reasonCodes:string[];
 };
 type OrderFinanceTransaction={
  documentRef:string;number:string;kind:'PAYMENT'|'REFUND';source:'NATIVE'|'LEGACY_MYSQL';state:string;
  amountCents:string|null;occurredAt:string|null;channelArrival:'UNKNOWN';
+ paymentSource?:'JOINPAY'|'CONTROLLED'|'UNKNOWN';
  originalStatus?:string|null;payWay?:string|null;payWayLabel?:string|null;
  refundAttempts?:HistoricalRefundAttempt[];sourceRefundFlags?:string[];
 };
@@ -90,9 +91,10 @@ export function projectAdminOrderFinanceBusiness(order:FinanceOrderFact,receipt:
    if(row.classification!=='LOCAL_SOURCE_WITHOUT_POSTING'||row.sourceType!=='NATIVE'||row.subjectId!==order.renterId||
     !row.related.some(link=>link.ref===order.ref))continue;
    if(row.sourceEntity!=='payment_request'&&row.sourceEntity!=='channel_refund_intent')continue;
+   const paymentSource=row.evidence.productFamily==='JOINPAY'||row.evidence.productFamily==='CONTROLLED'?row.evidence.productFamily:'UNKNOWN';
    transactions.push({documentRef:row.documentRef,number:row.documentNumber,kind:row.sourceEntity==='payment_request'?'PAYMENT':'REFUND',
     source:'NATIVE',state:row.state,amountCents:money(row.evidence.requestedAmountCents,'ORDER_TRANSACTION_AMOUNT_UNAVAILABLE').cents,
-    occurredAt:row.occurredAt,channelArrival:'UNKNOWN',payWay:null,payWayLabel:null});
+    occurredAt:row.occurredAt,channelArrival:'UNKNOWN',...(row.sourceEntity==='channel_refund_intent'?{paymentSource}:{}),payWay:null,payWayLabel:null});
   }
  }
  const paymentAttempts=transactions.filter(row=>row.kind==='PAYMENT'),refundOrders=transactions.filter(row=>row.kind==='REFUND');
@@ -138,7 +140,7 @@ export function projectAdminOrderSettlementEvidence(order:FinanceOrderFact,entri
   const party=duty.kind==='RENTER_REFUND'?order.renterId:duty.kind==='OWNER_CREDIT'||duty.kind==='DEPOSIT_COMPENSATION'?order.ownerId:null;
   return duty.orderId===order.id&&(!party||party===duty.subjectId)&&duty.parentSourceId===order.sourceId&&duty.parentSourceDigest===order.sourceDigest?duty:{...duty,knowledge:'UNKNOWN' as const,amountCents:null,reference:null,reasonCodes:['LEGACY_DUTY_ORDER_BINDING_UNAVAILABLE']};
  });
- base.dutyRefs=duties.map(duty=>({documentRef:duty.knowledge==='KNOWN'?`LEGACY_DUTY:${duty.dutyId}`:null,kind:duty.kind,state:duty.state,amount:duty.knowledge==='KNOWN'?money(duty.amountCents,'ORIGINAL_DUTY_AMOUNT_INVALID'):unknown(duty.reasonCodes[0]??'ORIGINAL_DUTY_FINANCE_UNAVAILABLE')}));
+ base.dutyRefs=duties.map(duty=>({documentRef:duty.knowledge==='KNOWN'?`LEGACY_DUTY:${duty.dutyId}`:null,kind:duty.kind,state:duty.state,amount:duty.knowledge==='KNOWN'?money(duty.amountCents,'ORIGINAL_DUTY_AMOUNT_INVALID'):unknown(duty.reasonCodes[0]??'ORIGINAL_DUTY_FINANCE_UNAVAILABLE'),finalization:duty.knowledge==='KNOWN'?duty.finalization:'UNKNOWN',postedAt:duty.knowledge==='KNOWN'?duty.postedAt:null}));
  const component=(kind:AdminLegacyDutyFinance['kind'],reason:string)=>{const matching=duties.filter(duty=>duty.kind===kind);return matching.length===1&&matching[0]!.knowledge==='KNOWN'?money(matching[0]!.amountCents,reason):unknown(matching.length>1?'ORIGINAL_DUTY_RESPONSIBILITY_AMBIGUOUS':reason);};
  base.ownerNet=component('OWNER_CREDIT','ORIGINAL_OWNER_NET_EVIDENCE_UNAVAILABLE');base.refundPayable=component('RENTER_REFUND','ORIGINAL_REFUND_RESPONSIBILITY_UNAVAILABLE');
  if(duties.length&&duties.every(duty=>duty.knowledge==='KNOWN')){

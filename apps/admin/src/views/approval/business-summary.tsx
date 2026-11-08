@@ -2,6 +2,7 @@ import { Info, TriangleAlert } from "lucide-react";
 import { Alert, AlertDescription, AlertTitle } from "../../components/ui/alert";
 import { Badge } from "../../components/ui/badge";
 import { formatDiscountLabel } from "../membership-entitlement-form";
+import { financeMoney } from '../admin-finance-api';
 import {
   BUSINESS_NOT_CONNECTED,
   entitlementStateView,
@@ -316,6 +317,7 @@ export function BusinessSummary({ business, operationCode }: { business: Busines
   const distributionOperation = operationCode === "distribution.policy.publish";
   const entitlementOperation = ["membership.entitlement.grant", "membership.entitlement.replace", "membership.entitlement.revoke"].includes(operationCode);
   const settlementOperation = operationCode === "order.settlement.adjust";
+  const compensationOperation = operationCode === 'order.compensation.grant';
   const structuredOperation = policyOperation || entitlementOperation || settlementOperation;
 
   return (
@@ -333,6 +335,12 @@ export function BusinessSummary({ business, operationCode }: { business: Busines
       </Section>
 
       {distributionOperation && business.summaryAvailable !== false ? <DistributionSummary business={business} /> : null}
+
+      {compensationOperation && business.summaryAvailable !== false && business.compensation ? <Section title="包赔赔偿申请" hint="审批通过后，赔偿将计入本单号主的可用余额。">
+        <FactGrid><Fact label="赔偿金额" value={financeMoney(business.compensation.amountCents)}/><Fact label="事故或工单编号" value={business.compensation.caseRef}/><Fact label="订单来源" value={business.compensation.origin === 'LEGACY' ? '旧平台订单' : '新平台订单'}/><Fact label="处理原因" value={business.compensation.reason}/><Fact label="核对依据" value={business.compensation.evidenceRef}/></FactGrid>
+        {business.compensation.origin === 'LEGACY' ? <p className="text-sm text-muted-foreground">旧单保障按所填依据由经办人员核对，迁入账号资料不作为下单保障证明。</p> : null}
+        <p className="text-sm text-muted-foreground">{business.resultAvailability === 'KNOWN' && business.result?.caseId ? '已核实赔偿入账号主余额。' : business.resultAvailability === 'UNRESOLVED' ? '入账结果待核对，请勿重复办理。' : '尚未形成赔偿入账。'}</p>
+      </Section> : null}
 
       {!distributionOperation && business.summaryAvailable !== false && summary ? (
         <Section title="申请时快照">

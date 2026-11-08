@@ -290,7 +290,7 @@ test('upper overview uses the posted version and labels ledger contribution and 
   if(p.includes('/settlement'))return response({orderId:id,posting:{settlementVersionId:'v2',versionHash:'hash2'},versions:[{id:'v1',versionHash:'hash1',computation:{ok:true,consumed:{haff:'1',items:[]}}},{id:'v2',versionHash:'hash2',computation:{ok:true,consumed:{haff:'75000000',items:[{itemId:'bullet-id',consumed:'0'}]}}}]});
   if(p.includes('/finance/documents/'))return response({document:{ref:'ORDER:'+id},orderSettlement:{schema:'admin-order-settlement-evidence.v1',documentRef:'ORDER:'+id,readiness:'READY',posting:{state:'POSTED',ref:null,postedAt:null},captured:known('308421'),ownerNet:known('227240'),refundPayable:known('38966'),refunded:unknown,historicalRefund:unknown,platformContribution:known('42215'),platformComponents:[{code:'PLATFORM_COMPENSATION_FEE',cents:'19760',payer:'OWNER'}],channel:{state:'UNKNOWN',reference:null},reasonCodes:[]}});
   return response({error:{code:'NOT_FOUND'}},404);};
- const snap={...snapshotFor(id),permissions:['order.read','finance.read']};
+ const snap={...snapshotFor(id),permissions:['order.read','finance.read','finance.document.read']};
  await act(async()=>root.render(createElement(AdminOrderChainView,{...chainProps(id),snapshot:snap,objectOnly:true,initialOrderId:id})));
  await until(()=>node.querySelector('.oc-overview-grid')?.textContent.includes('平台结算贡献（非净利润）')&&node.querySelector('.oc-overview-grid')?.textContent.includes('75 M 哈夫币'));
  assert.match(node.querySelector('.oc-overview-grid').textContent,/0组（0发）/);assert.match(node.querySelector('.oc-overview-grid').textContent,/全额包赔服务费（号主承担）¥197\.60/);
@@ -306,7 +306,7 @@ test('legacy upper overview reuses original facts and a single continuation read
   if(p.includes('/continuation'))return response({continuation:{schema:'legacy-continuation.v1',availability:'NOT_IMPORTED',revision:null,evidenceId:null,stage:null,isSettle:null,amounts:{},quantities:null,capabilities:[],commandFingerprints:{},duties:[],reasons:[],channelState:'UNKNOWN'}});
   if(p.includes('/finance/documents/'))return response({document:{ref:'LEGACY_ORDER:'+id},orderSettlement:{schema:'admin-order-settlement-evidence.v1',documentRef:'LEGACY_ORDER:'+id,readiness:'READY',posting:{state:'UNKNOWN',ref:null,postedAt:null},captured:unknown,ownerNet:unknown,refundPayable:unknown,refunded:unknown,historicalRefund:known('11480'),channel:{state:'UNKNOWN',reference:null},reasonCodes:[],business:{payment:{state:'LEGACY_RECORDED_PAID',amount:known('99200'),occurredAt:null},settlementState:'LEGACY_RECORDED_COMPLETE',legacyCompletedAmounts:{ownerEarnings:known('71000'),refundAmount:known('11480')},paymentAttempts:[],refundOrders:[],reasonCodes:[]}}});
   return response({error:{code:'NOT_FOUND'}},404);};
- const snap={...snapshotFor(id),permissions:['order.read','finance.read']};
+ const snap={...snapshotFor(id),permissions:['order.read','finance.read','finance.document.read']};
  await act(async()=>root.render(createElement(AdminOrderChainView,{...chainProps(id),snapshot:snap,objectOnly:true,initialOrderId:id})));
  await until(()=>node.querySelector('.oc-overview-grid')?.textContent.includes('365.00 M 哈夫币')&&node.querySelector('.oc-overview-grid')?.textContent.includes('¥710.00'));
  assert.match(node.querySelector('.oc-overview-grid').textContent,/3组（180发）/);assert.match(node.querySelector('.oc-overview-grid').textContent,/退款金额（旧站原记）¥114\.80/);
@@ -498,21 +498,21 @@ test('U3 order fee label follows the stage while the split stays visible and pay
   assert.equal(node.querySelector('.oc-table td.oc-amount').textContent,'订单金额—见详情');
 });
 
-// 订单页资金依据统一按 finance.read 判定：仅有 finance.document.read 不再请求；finance.read 请求，后端 403 显示无权
-test('order page funds evidence is gated by finance.read only', async t => {
+// 资金凭证使用其独立权限，不能用资金列表权限替代。
+test('order page funds evidence requires finance.document.read and respects server denial', async t => {
   const {root,node,AdminOrderChainView}=await setup(t);
   const value={...order,id:'fin-gate',displayNo:'FIN-GATE',status:'PAID',payment:{state:'RECORDED_PAID',recordedAt:null,recordedAmount:null},source:{origin:'NATIVE'}};
   const evidence={schema:'admin-order-settlement-evidence.v1',documentRef:'ORDER:fin-gate',readiness:'READY',posting:{state:'NOT_POSTED',ref:null,postedAt:null},captured:{knowledge:'UNKNOWN',cents:null,reasonCodes:[]},ownerNet:{knowledge:'UNKNOWN',cents:null,reasonCodes:[]},refundPayable:{knowledge:'KNOWN',cents:'0',reasonCodes:[]},refunded:{knowledge:'UNKNOWN',cents:null,reasonCodes:[]},historicalRefund:{knowledge:'UNKNOWN',cents:null,reasonCodes:[]},refundDueAt:null,channel:{state:'UNKNOWN',reference:null},dutyRefs:[],reasonCodes:[]};
   let calls=[],deny=false;
   globalThis.fetch=async url=>{const p=String(url);calls.push(p);if(p.includes('/finance/'))return deny?response({error:{code:'FORBIDDEN'}},403):response({document:{ref:'ORDER:fin-gate'},orderSettlement:evidence});return response({order:value});};
   const run=async(id,permissions,nonce)=>{calls=[];await act(async()=>root.render(createElement(AdminOrderChainView,{...chainProps(id),snapshot:{...snapshotFor(id),permissions},objectOnly:true,initialOrderId:value.id,refreshNonce:nonce})));await until(()=>node.textContent.includes('FIN-GATE'));};
-  await run('fg-doc',['order.read','finance.document.read'],1);
-  await until(()=>node.textContent.includes('当前无权读取本单资金依据'));
+  await run('fg-read',['order.read','finance.read'],1);
+  await until(()=>node.textContent.includes('当前身份无权查看本单资金凭证'));
   assert.equal(calls.some(p=>p.includes('/finance/')),false);
-  await run('fg-read',['order.read','finance.read'],2);
-  await until(()=>calls.some(p=>p.includes('/finance/documents/'))&&!node.textContent.includes('当前无权读取本单资金依据'));
-  deny=true;await run('fg-403',['order.read','finance.read'],3);
-  await until(()=>calls.some(p=>p.includes('/finance/documents/'))&&node.textContent.includes('当前无权读取本单资金依据'));
+  await run('fg-doc',['order.read','finance.document.read'],2);
+  await until(()=>calls.some(p=>p.includes('/finance/documents/'))&&node.textContent.includes('当前未查到过账记录'));
+  deny=true;await run('fg-403',['order.read','finance.document.read'],3);
+  await until(()=>calls.some(p=>p.includes('/finance/documents/'))&&node.textContent.includes('当前身份无权查看本单资金凭证'));
 });
 
 test('progress nodes expose Beijing times by keyboard/aria and never mark unevidenced completion done', async t => {
@@ -609,9 +609,9 @@ test('CHAIN refund intents keep their own coverage, budget and review facts apar
   await until(()=>node.textContent.includes('REFUND-INTENTS'));
   const text=node.textContent;
   assert.match(text,/RF-1[\s\S]*10\.00/);assert.match(text,/RF-2[\s\S]*25\.00/);
-  assert.match(text,/本地退款成功记录/);assert.doesNotMatch(text,/本地受控成功/);assert.match(text,/需人工复核/);
-  assert.match(text,/预算已用/);assert.match(text,/预算释放/);
-  assert.match(text,/渠道到账未记录/);assert.equal(text.includes('银行已到账'),false);
+  assert.match(text,/本地记录成功/);assert.doesNotMatch(text,/本地受控成功/);assert.match(text,/需人工核对/);
+  assert.match(text,/预算已使用/);assert.match(text,/预算已释放/);
+  assert.match(text,/渠道到账未取得依据/);assert.equal(text.includes('银行已到账'),false);
 });
 test('CHAIN abnormal refund shows readable reasons without claiming channel arrival', async t => {
   const {root,node,AdminOrderChainView}=await setup(t);
@@ -630,11 +630,11 @@ test('optional finance/group reads are independent and never call controlled set
   const native={...chainOrder,id:'native-old',displayNo:'NATIVE-OLD',status:'PAID',source:{origin:'NATIVE'}};
   const proof=p=>({document:{ref:'ORDER:'+decodeURIComponent(p).match(/ORDER:([^?]+)/)[1]},orderSettlement:undefined});
   globalThis.fetch=async url=>{const p=String(url);calls.push(p);if(p.includes('/finance/'))return mode==='slow'?new Promise(resolve=>{finishFinance=resolve;}):response(proof(p));if(p.includes('/im?'))return response({error:{code:'FORBIDDEN'}},403);return response({order:p.includes('native-current')?{...native,id:'native-current',displayNo:'NATIVE-CURRENT'}:native});};
-  const props={...chainProps('chain-optional'),snapshot:{...snapshotFor('chain-optional'),permissions:['order.read','finance.read','im.support.read']},objectOnly:true,initialOrderId:native.id};
+  const props={...chainProps('chain-optional'),snapshot:{...snapshotFor('chain-optional'),permissions:['order.read','finance.read','finance.document.read','im.support.read']},objectOnly:true,initialOrderId:native.id};
   await act(async () => root.render(createElement(AdminOrderChainView,props)));await until(()=>node.textContent.includes('关键费用')&&node.textContent.includes('当前身份无权读取本单群'));
   assert(node.textContent.includes(native.displayNo));assert.equal(node.querySelectorAll('[aria-busy="true"]').length,1);
-  await act(async () => finishFinance(response({error:{code:'NOT_FOUND'}},404)));await until(()=>node.textContent.includes('未找到当前范围内可读的资金单据'));
-  const bodyReads=calls.filter(p=>p.includes('readMode')).length;mode='ready';await act(async () => buttonNamed(node,'重新读取资金依据').click());await until(()=>node.textContent.includes('尚未提供受权订单资金依据'));
+  await act(async () => finishFinance(response({error:{code:'NOT_FOUND'}},404)));await until(()=>node.textContent.includes('未找到本单资金凭证'));
+  const bodyReads=calls.filter(p=>p.includes('readMode')).length;mode='ready';await act(async () => buttonNamed(node,'重新读取').click());await until(()=>node.textContent.includes('尚未提供本单资金依据'));
   assert.equal(calls.filter(p=>p.includes('readMode')).length,bodyReads);assert(node.textContent.includes('开租未记录'));
   mode='slow';await act(async () => root.render(createElement(AdminOrderChainView,{...props,refreshNonce:1})));await until(()=>node.textContent.includes('关键费用'));const stale=finishFinance;
   mode='ready';await act(async () => root.render(createElement(AdminOrderChainView,{...props,initialOrderId:'native-current'})));await until(()=>node.textContent.includes('NATIVE-CURRENT'));
@@ -697,7 +697,7 @@ test('legacy finance links preserve original attempts and clear on finance permi
     return response({error:{code:'NOT_FOUND'}},404);
   };
   const props={...chainProps('legacy-observations'),objectOnly:true,initialOrderId:legacy.id,onOpenPath:(path)=>opened.push(path)};
-  await act(async()=>root.render(createElement(AdminOrderChainView,{...props,snapshot:{...props.snapshot,permissions:['order.read','finance.read']}})));
+  await act(async()=>root.render(createElement(AdminOrderChainView,{...props,snapshot:{...props.snapshot,permissions:['order.read','finance.read','finance.document.read']}})));
   await until(()=>node.textContent.includes('ORIGINAL-ATTEMPT'));
   assert.match(node.textContent,/ORIGINAL-REFUND[\s\S]*685\.00[\s\S]*ORIGINAL-ATTEMPT[\s\S]*渠道到账未记录/);
   assert.doesNotMatch(node.textContent,/退款已到账|旧来源退款未接入/);
@@ -780,8 +780,8 @@ test('CHAIN order detail separates fulfillment, business funds, JoinPay evidence
   assert(node.querySelector('.oc-lifecycle [aria-label="订单进度"]'),'lifecycle remains independently visible');
   assert(headings.indexOf('本单账号和双方')<headings.indexOf('关键费用'));
   assert(headings.indexOf('关键费用')<headings.indexOf('履约与处理记录'));
-  assert(headings.indexOf('履约与处理记录')<headings.indexOf('结算与退款依据'));
-  assert(headings.indexOf('结算与退款依据')<headings.indexOf('汇聚渠道证据'));
+  assert(headings.indexOf('履约与处理记录')<headings.indexOf('订单资金'));
+  assert(headings.indexOf('订单资金')<headings.indexOf('汇聚渠道证据'));
   assert([...node.querySelectorAll('summary')].some(item=>item.textContent.includes('记录与依据')));
   assert.equal((text.match(/本单账号和双方/g)??[]).length,1,'account/parties are not duplicated in the aside');
   await act(async()=>[...node.querySelectorAll('[role=tab]')].find(tab=>tab.textContent==='资金').click());
@@ -1017,19 +1017,18 @@ test('order list renders the frozen source label once and keeps missing party nu
  assert.match(row.textContent,/编号 RENTER-BIZ/);
 });
 
-test('order detail separates unformed payment from missing time and sums refund duty from evidence', async t => {
+test('order detail separates unformed payment from missing time and shows refund duty without claiming arrival', async t => {
  const {root,node,AdminOrderChainView}=await setup(t);
  const value={...chainOrder,id:'refund-duty',displayNo:'REFUND-DUTY',status:'CANCELLED',source:{origin:'NATIVE'},payment:{state:'RECORDED_UNPAID',recordedAt:null,recordedAmount:null}};
  const money=cents=>({knowledge:'KNOWN',cents,reasonCodes:[]}),unknown=()=>({knowledge:'UNKNOWN',cents:null,reasonCodes:['ORIGINAL_BASIS_UNAVAILABLE']});
- const evidence={schema:'admin-order-settlement-evidence.v1',documentRef:'ORDER:refund-duty',readiness:'READY',posting:{state:'NOT_POSTED',ref:null,postedAt:null},captured:unknown(),ownerNet:unknown(),refundPayable:money('5000'),refunded:unknown(),historicalRefund:unknown(),refundDueAt:null,channel:{state:'UNKNOWN',reference:null},dutyRefs:[],reasonCodes:[]};
+ const evidence={schema:'admin-order-settlement-evidence.v1',documentRef:'ORDER:refund-duty',readiness:'READY',posting:{state:'NOT_POSTED',ref:null,postedAt:null},captured:unknown(),ownerNet:unknown(),refundPayable:money('5000'),refunded:unknown(),historicalRefund:unknown(),refundDueAt:null,channel:{state:'UNKNOWN',reference:null},dutyRefs:[],reasonCodes:[],business:{payment:{state:'UNPAID',amount:unknown(),occurredAt:null},settlementState:'UNKNOWN',legacyCompletedAmounts:null,paymentAttempts:[],refundOrders:[],reasonCodes:[]}};
  const refundSummary={contractVersion:'admin-order-refund-summary.v1',integration:'INTEGRATED',intents:[],bankArrival:'UNKNOWN',reasonCodes:[]};
  globalThis.fetch=async url=>String(url).includes('readMode=combined')?response({order:value,refundSummary}):String(url).includes('/finance/')?response({document:{ref:'ORDER:refund-duty'},orderSettlement:evidence}):response({});
- await act(async()=>root.render(createElement(AdminOrderChainView,{...chainProps('refund-duty'),snapshot:{...snapshotFor('refund-duty'),permissions:['order.read','finance.read']},objectOnly:true,initialOrderId:value.id})));
- await until(()=>node.textContent.includes('退款记录')&&node.textContent.includes('本单应退责任'));
+ await act(async()=>root.render(createElement(AdminOrderChainView,{...chainProps('refund-duty'),snapshot:{...snapshotFor('refund-duty'),permissions:['order.read','finance.read','finance.document.read']},objectOnly:true,initialOrderId:value.id})));
+ await until(()=>node.textContent.includes('本次未读取到可关联的退款记录')&&node.textContent.includes('本单应退责任'));
  const text=node.textContent;
- assert.match(text,/本单应退责任：¥50\.00/);
- assert.match(text,/逐笔退款申请：0 笔/);
- assert.match(text,/银行到账：未记录/);
+ assert.match(text,/本单应退责任[\s\S]*50\.00 元/);
+ assert.doesNotMatch(text,/银行已到账|退款已到账/);
  const record=node.querySelector('.oc-fulfillment-timeline').textContent;
  assert.match(record,/本站尚未确认付款/);
  assert.match(record,/暂无已接纳付款时间/);

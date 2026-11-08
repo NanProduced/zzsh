@@ -24,6 +24,8 @@ import type { AdminContext, AuthSecurityNodeRequest, AuthSecurityNodeResponse, A
 import { validateMembershipEntitlementPayload, validateUnifiedMembershipPolicySubmission } from "./membership-growth-approval";
 import { validateDistributionPolicySubmission } from "../finance/distribution-policy-approval";
 import { DISTRIBUTION_REVERSAL_OPERATION, reversalObjectGameId, validateDistributionReversalSubmission } from "../finance/distribution-reversal-approval";
+import { ORDER_COMPENSATION_OPERATION } from '../finance/order-compensation-contract';
+import { validateCompensationSubmission } from '../finance/order-compensation-approval';
 import { isUnifiedTotalDiscountContract } from "./membership-growth";
 import { normalizeGrowthInstant } from "./membership-growth-integration";
 
@@ -311,7 +313,7 @@ export function evaluateApprovalActions(input: ApprovalActionContext): ApprovalA
     if (unregistered) return build(action, "OPERATION_UNREGISTERED", approvePermission);
     if (!input.twoFactorEnabled) return build(action, "TWO_FACTOR_REQUIRED", approvePermission);
     if (!input.isCandidate) return build(action, "NOT_CANDIDATE", approvePermission);
-    if (selfRequester) return build(action, "SELF_REQUEST_NOT_ALLOWED", approvePermission);
+    if (selfRequester && row.operationCode !== ORDER_COMPENSATION_OPERATION) return build(action, "SELF_REQUEST_NOT_ALLOWED", approvePermission);
     if (membershipDecisionRequiresBoss(row.operationCode) && !access.isBoss) return build(action, "BUSINESS_PERMISSION_REQUIRED", businessPermission, "BOSS_REVIEW_REQUIRED");
     if (businessPermission && !access.isBoss && !hasPermission(access, businessPermission)) return build(action, "BUSINESS_PERMISSION_REQUIRED", businessPermission);
     if (scopeDenied) return build(action, "GAME_SCOPE_DENIED", businessPermission);
@@ -801,6 +803,7 @@ async function createRequest(request: AuthSecurityNodeRequest, response: AuthSec
   const summary = requiredString(body, "summary", 240).trim();
   if (summary.length < 3) invalid("Summary is required");
   const supersedes = optionalString(body, "supersedesRequestId", 128);
+  if (op === ORDER_COMPENSATION_OPERATION && supersedes) invalid('请先撤回原赔偿申请，再提交新的申请');
   await runApprovalWrite(request, response, requestId, options, context, {
     operation: APPROVAL_WRITE_OPERATIONS.create,
     fingerprint: approvalFingerprint([op, trigger, version, payload.hash, summary, supersedes]),
@@ -813,6 +816,17 @@ async function createRequest(request: AuthSecurityNodeRequest, response: AuthSec
       if (op === "membership.benefit.policy.publish") await validateUnifiedMembershipPolicySubmission(client, payload.value as Record<string, unknown>);
       if (op === "distribution.policy.publish") await validateDistributionPolicySubmission(client, payload.value as Record<string, unknown>, options.distributionPolicyWriteScope);
       if (op === "distribution.earning.reverse") await validateDistributionReversalSubmission(client, payload.value as Record<string, unknown>, context.userId);
+      if (op === ORDER_COMPENSATION_OPERATION) {
+        const compensation = await validateCompensationSubmission(client, payload.value);
+        const expired = await client.query<{id:string}>(`SELECT a.id FROM zzsh_iam.approval_request a
+          WHERE a.operation_code=$1 AND a.operation_payload->>'origin'=$2 AND a.operation_payload->>'orderId'=$3
+            AND lower(a.operation_payload->>'caseRef')=lower($4) AND a.status='PENDING' AND a.expires_at<=clock_timestamp()
+            AND NOT EXISTS(SELECT 1 FROM zzsh_iam.approval_decision d WHERE d.request_id=a.id)
+            AND NOT EXISTS(SELECT 1 FROM zzsh_iam.approval_execution x WHERE x.request_id=a.id)
+          FOR UPDATE`,[op,compensation.origin,compensation.orderId,compensation.caseRef]);
+        for (const item of expired.rows) await expireRequest(client,await readRequestForUpdate(client,item.id),context,requestId);
+        await validateCompensationSubmission(client, compensation, true);
+      }
       const templateResult = await client.query<TemplateRow>(
         `SELECT "id", "operation_code" AS "operationCode", "trigger_condition" AS "triggerCondition", "version", "created_at" AS "createdAt", "updated_at" AS "updatedAt"
            FROM "zzsh_iam"."approval_template" WHERE "operation_code" = $1 AND "trigger_condition" = $2 FOR UPDATE`,
@@ -824,7 +838,19 @@ async function createRequest(request: AuthSecurityNodeRequest, response: AuthSec
         `SELECT "admin_user_id" AS "adminUserId" FROM "zzsh_iam"."approval_template_candidate" WHERE "template_id" = $1 ORDER BY "admin_user_id"`,
         [template.id],
       );
-      if (candidates.rows.length < 1) conflict("Approval template has no candidate");
+      const candidateIds = new Set(candidates.rows.map(row => row.adminUserId));
+      if (op === ORDER_COMPENSATION_OPERATION) {
+        const extra = await client.query<{ adminUserId:string }>(`SELECT DISTINCT s.admin_user_id AS "adminUserId" FROM zzsh_iam.admin_security s
+          JOIN zzsh_auth_admin."user" u ON u.id=s.admin_user_id
+          WHERE s.status='ACTIVE' AND NOT s.password_change_required AND NOT u.suspended AND u."twoFactorEnabled" IS TRUE
+          AND (s.is_boss OR EXISTS(SELECT 1 FROM zzsh_iam.admin_user_permission p WHERE p.admin_user_id=s.admin_user_id AND p.permission_code=$1 AND p.effect='ALLOW')
+            OR EXISTS(SELECT 1 FROM zzsh_iam.admin_user_role ur JOIN zzsh_iam.admin_role r ON r.id=ur.role_id AND r.status='ACTIVE'
+              JOIN zzsh_iam.admin_role_permission p ON p.role_id=r.id WHERE ur.admin_user_id=s.admin_user_id AND p.permission_code=$1))
+          ORDER BY s.admin_user_id LIMIT 501`, [ADMIN_PERMISSION.orderCompensationApprove]);
+        if (extra.rows.length > 500) conflict('Too many compensation approval candidates');
+        for (const candidate of extra.rows) candidateIds.add(candidate.adminUserId);
+      }
+      if (candidateIds.size < 1) conflict("Approval template has no candidate");
       const newRequestId = `approval_req_${randomUUID().replaceAll("-", "")}`;
       let previous: RequestRow | undefined;
       if (supersedes) {
@@ -835,15 +861,20 @@ async function createRequest(request: AuthSecurityNodeRequest, response: AuthSec
         if (requestFingerprint(previous) === nextFingerprint) conflict("Replacement must change the operation request");
       }
       const expiresAt = new Date(Date.now() + REQUEST_TTL_MS);
-      await client.query(
-        `INSERT INTO "zzsh_iam"."approval_request" ("id", "template_id", "template_version", "operation_code", "trigger_condition", "payload_version", "operation_payload", "operation_payload_hash", "summary", "requested_by", "status", "expires_at", "supersedes_request_id")
-         VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9, $10, 'PENDING', $11, $12)`,
-        [newRequestId, template.id, template.version, op, trigger, version, payload.raw, payload.hash, summary, context.userId, expiresAt, supersedes ?? null],
-      );
-      for (const candidate of candidates.rows) {
+      try {
+        await client.query(
+          `INSERT INTO "zzsh_iam"."approval_request" ("id", "template_id", "template_version", "operation_code", "trigger_condition", "payload_version", "operation_payload", "operation_payload_hash", "summary", "requested_by", "status", "expires_at", "supersedes_request_id")
+           VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9, $10, 'PENDING', $11, $12)`,
+          [newRequestId, template.id, template.version, op, trigger, version, payload.raw, payload.hash, summary, context.userId, expiresAt, supersedes ?? null],
+        );
+      } catch (error) {
+        if (op === ORDER_COMPENSATION_OPERATION && (error as {constraint?:string})?.constraint === 'order_compensation_incident_once') conflict('此事故已有赔偿申请，请先核对原申请');
+        throw error;
+      }
+      for (const candidateId of candidateIds) {
         await client.query(
           `INSERT INTO "zzsh_iam"."approval_request_candidate" ("request_id", "admin_user_id", "source", "template_version") VALUES ($1, $2, 'TEMPLATE', $3)`,
-          [newRequestId, candidate.adminUserId, template.version],
+          [newRequestId, candidateId, template.version],
         );
       }
       if (previous) {
@@ -861,7 +892,7 @@ async function createRequest(request: AuthSecurityNodeRequest, response: AuthSec
         actorType: "admin", actorId: context.userId, sessionId: context.sessionId,
         action: "approval.request.created", objectType: "approval_request", objectId: newRequestId,
         outcome: "SUCCESS", requestId,
-        details: { operationCode: op, triggerCondition: trigger, payloadVersion: version, operationPayloadHash: payload.hash, templateVersion: template.version, candidateCount: candidates.rows.length, summary },
+        details: { operationCode: op, triggerCondition: trigger, payloadVersion: version, operationPayloadHash: payload.hash, templateVersion: template.version, candidateCount: candidateIds.size, summary },
       });
       return {
         status: 200,
@@ -870,7 +901,7 @@ async function createRequest(request: AuthSecurityNodeRequest, response: AuthSec
           approvalRequestId: newRequestId,
           approvalRequestKind: "approval_request",
           templateVersion: template.version,
-          candidateCount: candidates.rows.length,
+          candidateCount: candidateIds.size,
           expiresAt: expiresAt.toISOString(),
           status: "PENDING",
         },
@@ -984,6 +1015,21 @@ async function decideRequest(request: AuthSecurityNodeRequest, response: AuthSec
         objectType: "approval_request", objectId: row.id, outcome: "SUCCESS", requestId, reason,
         details: { decision: finalStatus, summary: row.summary, operationCode: row.operationCode, requestPayloadHash: row.operationPayloadHash, finalPayloadHash: final?.hash ?? null, approvedPayloadHash: final?.hash ?? row.operationPayloadHash },
       });
+      if (decision === 'APPROVE' && row.operationCode === ORDER_COMPENSATION_OPERATION) {
+        if (!options.approvalOperationExecutor) throw new SecurityApiError(503, 'EVIDENCE_UNAVAILABLE', '赔偿入账能力暂不可用');
+        const executed = await options.approvalOperationExecutor(client, {
+          requestId:row.id, operationCode:row.operationCode, payloadVersion:row.payloadVersion, operationPayload:row.operationPayload,
+          operationPayloadHash:row.operationPayloadHash, requestedBy:row.requestedBy, decidedBy:context.userId, expiresAt:row.expiresAt,
+        }, {userId:context.userId,sessionId:context.sessionId}, requestId);
+        if (executed.resultCode !== 'ORDER_COMPENSATION_POSTED' || !executed.resultDetail) conflict('Compensation posting receipt is unavailable');
+        await client.query(`INSERT INTO zzsh_iam.approval_execution(id,request_id,operation_code,status,result_code,result_detail,executed_by)
+          VALUES($1,$2,$3,'SUCCEEDED',$4,$5,$6)`, [`approval_exec_${randomUUID().replaceAll('-','')}`,row.id,row.operationCode,executed.resultCode,executed.resultDetail,context.userId]);
+        const updated=await client.query(`UPDATE zzsh_iam.approval_request SET status='EXECUTED',status_reason='审批通过并已入账号主余额' WHERE id=$1 AND status='APPROVED'`,[row.id]);
+        if (updated.rowCount !== 1) conflict('Compensation approval changed');
+        await recordAudit(client,{actorType:'admin',actorId:context.userId,sessionId:context.sessionId,action:'approval.execution.completed',objectType:'approval_request',objectId:row.id,
+          outcome:'SUCCESS',requestId,details:{operationCode:row.operationCode,executionStatus:'SUCCEEDED',resultCode:executed.resultCode,summary:row.summary,requestPayloadHash:row.operationPayloadHash,approvedPayloadHash:row.operationPayloadHash}});
+        return {status:200,body:{requestId:row.id,approvalRequestId:row.id,decision:'APPROVED',status:'EXECUTED',executionStatus:'SUCCEEDED',resultCode:executed.resultCode,businessResultRef:executed.resultDetail}};
+      }
       return { status: 200, body: { requestId: row.id, approvalRequestId: row.id, decision: finalStatus, status: finalStatus, ...(final || expectedHash !== undefined ? { requestPayloadHash: row.operationPayloadHash, finalPayloadHash: final?.hash ?? null, approvedPayloadHash: final?.hash ?? row.operationPayloadHash } : {}) } };
     },
   });
@@ -1019,7 +1065,7 @@ async function appendCandidate(request: AuthSecurityNodeRequest, response: AuthS
         return approvalErrorReceipt(409, API_V1_ERROR_CODES.CONFLICT, "Approval request expired before the candidate was added", requestId, "EXPIRED");
       }
       const target = (await adminsByUsernames(client, [targetUsername]))[0]!;
-      if (target.id === row.requestedBy) throw new SecurityApiError(403, API_V1_ERROR_CODES.FORBIDDEN, "The requester cannot be added as an approver");
+      if (target.id === row.requestedBy && row.operationCode !== ORDER_COMPENSATION_OPERATION) throw new SecurityApiError(403, API_V1_ERROR_CODES.FORBIDDEN, "The requester cannot be added as an approver");
       const [candidateState] = await candidateAccessStates(client, [target.id]).then((map) => [map.get(target.id)]);
       if (!candidateState || candidateReasonCode(candidateState, row) !== "OK") {
         throw new SecurityApiError(409, API_V1_ERROR_CODES.CONFLICT, "The additional candidate is not currently eligible");
@@ -1190,7 +1236,7 @@ async function listRequests(request: AuthSecurityNodeRequest, response: AuthSecu
   }
   const values: unknown[] = [limit + 1];
   const conditions = pending
-    ? [`c."admin_user_id" = $${values.push(context.userId)}`, `r."status" = 'PENDING'`, `r."expires_at" > clock_timestamp()`, `r."requested_by" <> $${values.push(context.userId)}`]
+    ? [`c."admin_user_id" = $${values.push(context.userId)}`, `r."status" = 'PENDING'`, `r."expires_at" > clock_timestamp()`, `(r."requested_by" <> $${values.push(context.userId)} OR r."operation_code" = 'order.compensation.grant')`]
     : [`r."requested_by" = $${values.push(context.userId)}`];
   if (cursorValues) {
     values.push(cursorValues[0], cursorValues[1]);
@@ -1341,7 +1387,7 @@ function businessScopeDenied(state: { isBoss: boolean; gameScope: AdminGameScope
   if (!membershipOperationRequiresGameScope(operationCode)) return false;
   const gameId = payloadGameId(payload) ?? (typeof objectGameId === "string" && objectGameId ? objectGameId : null);
   // A reversal whose original order cannot be resolved fails closed; it must never read as unscoped money.
-  if (!gameId) return operationCode === DISTRIBUTION_REVERSAL_OPERATION;
+  if (!gameId) return operationCode === DISTRIBUTION_REVERSAL_OPERATION || operationCode === ORDER_COMPENSATION_OPERATION;
   if (state.isBoss || isAllGamesScope(state.gameScope)) return false;
   return !scopeAllowsGame(state.gameScope, false, gameId);
 }
@@ -1413,7 +1459,7 @@ async function approvalReadViews(
     const state = states.get(item.adminUserId);
     if (!entry || !row || !state) continue;
     entry.total += 1;
-    if (item.adminUserId !== row.requestedBy && candidateCanDecideRequest(state, row)) entry.eligible += 1;
+    if ((item.adminUserId !== row.requestedBy || row.operationCode === ORDER_COMPENSATION_OPERATION) && candidateCanDecideRequest(state, row)) entry.eligible += 1;
   }
   for (const entry of candidates.values()) {
     if (entry.total === 0) entry.blockingReasonCode = "NO_CANDIDATE_SNAPSHOT";

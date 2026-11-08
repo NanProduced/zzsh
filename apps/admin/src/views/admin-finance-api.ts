@@ -96,16 +96,14 @@ export function historicalAssociationPath(historical: HistoricalFinanceDisplay |
   return association.documentRef && access.documentRead ? `/finance/documents/${encodeURIComponent(association.documentRef)}` : null;
 }
 export function historicalFinanceFacts(historical: HistoricalFinanceDisplay): [string, string][] {
-  const earnings = historical.purposeCode === 'UNKNOWN' || historical.changeType !== null || historical.originalLogNumber !== null;
-  const withdrawal = historical.purposeCode === 'UNKNOWN' || ['WITHDRAWAL_APPLICATION','WITHDRAWAL_DEBIT','WITHDRAWAL_REJECTED_RETURN','TRANSFER_FAILED_RETURN','WECHAT_WITHDRAWAL_FAILED_RETURN'].includes(historical.purposeCode);
   const statusApplies = ['PAYMENT_RECORD','REFUND_RECORD','WITHDRAWAL_APPLICATION'].includes(historical.purposeCode);
-  return [...(earnings ? [['原流水号', historical.originalLogNumber || '未取得'] as [string, string]] : []), [historical.amountSemantics==='UNVERIFIED'?'原金额（待核）':'原金额', financeMoney(historical.recordedAmountCents)],
-    ...(earnings || historical.balanceAfterCents !== null ? [[historical.amountSemantics==='UNVERIFIED'?'原记录后余额（待核）':'变动后余额（旧）', financeMoney(historical.balanceAfterCents)] as [string, string]] : []),
-    ...(withdrawal || historical.feeCents !== null ? [[historical.amountSemantics==='UNVERIFIED'?'手续费（待核）':'手续费', financeMoney(historical.feeCents)] as [string, string]] : []),
-    ...(withdrawal || historical.netCents !== null ? [[historical.amountSemantics==='UNVERIFIED'?'净额（待核）':'净额', financeMoney(historical.netCents)] as [string, string]] : []),
-    ...(historical.changeType !== null ? [['原用途码', historical.changeType] as [string, string]] : []),
+  return [...(historical.originalLogNumber ? [['原流水号', historical.originalLogNumber] as [string, string]] : []), [historical.amountSemantics==='UNVERIFIED'?'原金额（待核）':'原金额', financeMoney(historical.recordedAmountCents)],
+    ...(historical.balanceAfterCents !== null ? [[historical.amountSemantics==='UNVERIFIED'?'原记录后余额（待核）':'变动后余额（旧）', financeMoney(historical.balanceAfterCents)] as [string, string]] : []),
+    ...(historical.feeCents !== null || historical.purposeCode === 'UNKNOWN' ? [[historical.amountSemantics==='UNVERIFIED'?'手续费（待核）':'手续费', financeMoney(historical.feeCents)] as [string, string]] : []),
+    ...(historical.netCents !== null ? [[historical.amountSemantics==='UNVERIFIED'?'净额（待核）':'净额', financeMoney(historical.netCents)] as [string, string]] : []),
     ...(historical.purposeCode === 'PAYMENT_RECORD' ? [['支付方式（原记录）', historical.amountSemantics === 'UNVERIFIED' ? '来源未核对' : historical.payWayLabel ?? (historical.payWay ? '未知' : '未记录')] as [string, string]] : []),
-    ...(statusApplies || historical.originalStatus !== null ? [[historical.amountSemantics==='UNVERIFIED'?'原状态（待核）':'原状态', historical.originalStatusLabel ?? (historical.originalStatus !== null ? '未知' : '状态未记录')] as [string, string]] : [])];
+    ...(statusApplies || historical.originalStatus !== null ? [[historical.amountSemantics==='UNVERIFIED'?'原状态（待核）':'原状态', historical.originalStatusLabel ?? (historical.originalStatus !== null ? '未知' : '状态未记录')] as [string, string]] : []),
+    ...(historical.purposeCode === 'UNKNOWN' && historical.changeType ? [['原类型', historical.changeType] as [string, string]] : [])];
 }
 export type FinanceEntry = { id: string; documentRef: string; documentNumber: string; subjectId: string; subjectName: string; bucket: string; direction: string; deltaCents: string | null; knowledge: string; kind: string; state: string; classification: string; affectsCurrentWallet: boolean; affectsCurrentLedger: boolean; occurredAt: string | null; importedAt: string; sourceType: string; sourceEntity: string; sourceSystem: string; sourceId: string; sourceDigest: string | null; basisId: string | null; reasonCodes: string[]; accountCode: string | null; evidence: Record<string, string | null>; historical?: HistoricalFinanceDisplay };
 export type FinanceOrderLifecycle = { origin: 'NATIVE' | 'LEGACY_MYSQL'; orderStatus: string; payment: { state: 'SITE_ACCEPTED' | 'REVIEW_REQUIRED' | 'NO_ACCEPTED_PAYMENT' | 'LEGACY_RECORDED' | 'UNAVAILABLE'; amountCents: string | null; confirmedAt: string | null; source?: string | null; hasReviewPayment: boolean | null }; postingState: 'POSTED' | 'NOT_POSTED' | 'LEGACY_OBSERVATION' | 'UNAVAILABLE' };
@@ -128,6 +126,7 @@ export type FinancePlatformComponent = { code: string; cents: string; payer: 'OW
 export type OrderFinanceTransaction = {
   documentRef: string; number: string; kind: 'PAYMENT' | 'REFUND'; source: 'NATIVE' | 'LEGACY_MYSQL';
   state: string; amountCents: string | null; occurredAt: string | null; channelArrival: 'UNKNOWN';
+  paymentSource?: 'JOINPAY' | 'CONTROLLED' | 'UNKNOWN';
   payWay: string | null; payWayLabel: string | null;
   refundAttempts?: HistoricalFinanceDisplay['refundAttempts']; sourceRefundFlags?: string[];
 };
@@ -145,7 +144,7 @@ export type OrderSettlementEvidence = {
   platformContribution?: OrderSettlementMoney; platformComponents?: FinancePlatformComponent[];
   refunded: OrderSettlementMoney; historicalRefund: OrderSettlementMoney; refundDueAt: string | null;
   channel: { state: 'UNKNOWN'; reference: null };
-  dutyRefs: { documentRef: string | null; kind: string; state: string; amount: OrderSettlementMoney }[];
+  dutyRefs: { documentRef: string | null; kind: string; state: string; amount: OrderSettlementMoney; finalization?: 'POSTED' | 'FINALIZED_ZERO' | 'UNKNOWN'; postedAt?: string | null }[];
   reasonCodes: string[];
 };
 export type FinanceResponse = {

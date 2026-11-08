@@ -886,7 +886,7 @@ export function ApprovalAuditView({
     const current = detail;
     if (!current) return;
     const successMessage = decision === "APPROVE"
-      ? "已记录首个有效批准。执行仍是独立步骤，批准不代表执行完成或资金到账。"
+      ? current.operation.code === 'order.compensation.grant' ? '已批准赔偿，入账结果以本次回执和订单记录为准。' : "已记录首个有效批准。执行仍是独立步骤，批准不代表执行完成或资金到账。"
       : "已驳回；原申请关闭且不会复活，如需再次办理请由来源业务重新发起。";
     void submitWrite(makeWriteIntent(
       "/security/approvals/requests/decision",
@@ -1053,7 +1053,7 @@ export function ApprovalAuditView({
               <div>
                 <h3>{tab === "pending" ? "待我处理" : "我的申请"}</h3>
                 <p>{tab === "pending"
-                  ? "只呈现当前仍具备资格、未冻结且不属于自审的候选申请；已批准、已驳回与已过期记录在「我的申请」与审计记录中查看。"
+                  ? "呈现当前候选申请；包赔赔偿允许具备权限的申请人自行审批，其他业务仍按原规则处理。"
                   : "仅显示当前账号发起的申请，按创建时间倒序分页读取。"}</p>
               </div>
             </div>
@@ -1448,7 +1448,7 @@ export function ApprovalAuditView({
                 <Fact label="候选审批人" value={`${candidateUsernames.length} 人（${candidateUsernames.join("、") || "无"}）`} />
               </FactGrid>
               <p className="leading-relaxed text-muted-foreground">
-                候选组内任一合格人的首个有效批准或驳回即生效；申请人不能审批自己发起的申请。
+                候选组内任一合格人的首个有效决定生效；包赔赔偿允许具备权限的申请人审批自己的申请，其他业务仍不允许自审。
               </p>
             </div>
             <DialogFooter>

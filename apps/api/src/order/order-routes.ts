@@ -5,6 +5,7 @@ import type {LocalFinancialSandbox} from '../finance/local-financial-sandbox-res
 import type {DemoFinanceResource} from '../finance/ecs-test-demo-resource';
 import { listUnifiedUserOrders, parseUnifiedOrderQuery } from "./unified-user-order-read";
 import { getUserLegacyOrder, listUserLegacyOrders, parseLegacyUserOrderQuery } from "./legacy-user-order-read";
+import { compensationOrderBasis, readCompensationCases } from '../finance/order-compensation-approval';
 import type { OrderImSdkRouteBindings } from "../config/config";
 import type { ImMessageTransport } from "../im/im-contract";
 import type { YunxinOrderTeamApi } from "../im/yunxin-provider";
@@ -15,7 +16,7 @@ import { assertLegacyOrderTeamRequest, requestLegacyOrderTeam, listJoinedLegacyO
 import { parseRfc3339Timestamp } from "../content/content";
 import { queryAdminReadOrders, getAdminReadOrder, parseOrderOrigin, type OrderReadFilters } from "./admin-order-read";
 
-import { ADMIN_PERMISSION, requirePermission } from "../auth/admin-authorization";
+import { ADMIN_PERMISSION, hasPermission, requirePermission } from "../auth/admin-authorization";
 import { assertGameScopeUsable, gameScopeSignature, readAdminGameScope } from "../auth/admin-scope";
 import { readAdminContext, assertAdminContextInTransaction, type AuthSecurityOptions } from "../auth/auth-security";
 import { readUserContext } from "../auth/user-identity";
@@ -472,6 +473,15 @@ export async function handleOrderAdminRoute(
         permissions: access.permissions,
         authorizationKey: sha256Hex(JSON.stringify([context.userId,context.sessionId,access.isBoss,[...access.permissions].sort(),gameScopeSignature(gameScope)])),
       };
+      const compensationMatch=/^\/([A-Za-z0-9][A-Za-z0-9._:-]{0,127})\/compensation$/.exec(path);
+      if (compensationMatch) {
+        if (!access.isBoss && !hasPermission(access,ADMIN_PERMISSION.orderCompensationRequest) && !hasPermission(access,ADMIN_PERMISSION.orderCompensationApprove)) throw notFound();
+        if ([...query.keys()].some(key=>key!=='origin') || query.getAll('origin').length!==1 || !['NATIVE','LEGACY'].includes(query.get('origin') ?? '')) throw invalid('Order origin is required');
+        const origin=query.get('origin') as 'NATIVE'|'LEGACY',orderId=decodeId(compensationMatch[1]!);
+        const basis=await compensationOrderBasis(client,origin,orderId);if(!basis)throw notFound();
+        await assertGameScope(client,context.userId,access.isBoss,basis.gameId);
+        sendJson(response,200,{schema:'admin-order-compensation.v1',basis,...await readCompensationCases(client,origin,orderId)},requestId);return;
+      }
       if (path === "/") {
         if (query.has("page")) {
           sendJson(response,200,await queryAdminReadOrders(client,admin,parseAdminOrderPageQuery(query),orderAccountViews(options)),requestId);return;

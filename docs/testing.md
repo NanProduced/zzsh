@@ -156,6 +156,8 @@
 
 条件性PG/资金套件未进入时必须记NOT_RUN，根命令或CI通过不能替代它。改动影响的资金、事务、并发或权限边界必须有相符的真实验证；缺失则阻塞对应能力验收，不能用一句“豁免”替代。独立默认关闭代码可按下述规则评审合入。
 
+订单包赔赔款的 `npm run test:order-compensation:synthetic -w @zzsh/api` 只用于已登记、一次性的独立空 PostgreSQL 实例：先安装生产 initial 基线及其尾迁移，库名和 marker 为 `zzsh_order_comp_synth` / `zzsh:order-compensation-synth:v1`，显式提供 `ORDER_COMPENSATION_SYNTH_OPT_IN=1`、现场 `ORDER_COMPENSATION_SYNTH_SYSTEM_ID` 与 `ORDER_COMPENSATION_SYNTH_OID`。脚本写入虚构夹具并创建专用无登录角色；禁止对 R07、开发或线上业务库运行。该测试验证事务和并发，不覆盖真实登录或渠道。
+
 复用结果必须匹配被测源码、相关依赖、配置/schema与证据等级；只看HEAD相同不够。环境失败保留原结果，定位后只补受影响检查，并解释是否使旧证据失效。不以任意覆盖率、固定用例数量或必须跑满多少分钟作为门槛。
 
 同次候选可复用一次已绑定构建，避免API test后再无变化重建API；不能跳过必要编译使用旧dist。无关历史失败须用来源和差异证据证明不在本次影响面，单列追踪，不自动豁免，也不冒称整套PASS。
