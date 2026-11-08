@@ -34,6 +34,7 @@ test("旧完成单展示原记录，账号数量是迁入时参考；未完单�
   assert.equal(completed.consumedLabel, "旧站记录消耗");
   assert.equal(completed.rows[0].consumed, "365.00 M 哈夫币");
   assert.equal(completed.rows[1].consumed, "3组（180发）");
+  assert.equal(orderUpperResources({ origin: "LEGACY", frozen: { ...reference, source: "ACCOUNT_PUBLIC_VERSION" }, originalCompleted: false }).recordedLabel, "公开账号资料参考");
   const pending = orderUpperResources({ origin: "LEGACY", frozen: reference, original, originalCompleted: false });
   assert.ok(pending.rows.every(row => row.consumed === "—"));
   assert.equal(orderUpperResources({ origin: "LEGACY", original, originalCompleted: true }).rows.length, 2);

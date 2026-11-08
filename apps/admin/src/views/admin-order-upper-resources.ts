@@ -77,5 +77,5 @@ export function orderUpperResources(input: { origin: "NATIVE" | "LEGACY"; frozen
     if (usedLegacy.has(field) || legacy!.quantities![field] == null) continue;
     rows.push({ key: `legacy-${field}`, name: legacyNames[field], recorded: "—", consumed: legacyQuantity(field, legacy!.quantities![field]) });
   }
-  return { rows, recordedLabel: frozen?.source === "ORDER_VERSION" ? "下单时数量" : origin === "LEGACY" ? "迁入时账号参考" : "账号资料参考", consumedLabel: isLegacyContinuation ? legacy!.stage === "4" ? "续办记录消耗" : "申报消耗（待确认）" : origin === "LEGACY" && originalItems.length ? "旧站记录消耗" : "结算实际消耗" };
+  return { rows, recordedLabel: frozen?.source === "ORDER_VERSION" ? "下单时数量" : frozen?.source === "LEGACY_ACCOUNT_SNAPSHOT" ? "迁入时账号参考" : "公开账号资料参考", consumedLabel: isLegacyContinuation ? legacy!.stage === "4" ? "续办记录消耗" : "申报消耗（待确认）" : origin === "LEGACY" && originalItems.length ? "旧站记录消耗" : "结算实际消耗" };
 }
