@@ -12,7 +12,12 @@ import { submitDeclaredControlledPayout } from "../src/finance/controlled-withdr
 import { TEAM_TEST_WITHDRAWAL_POLICY } from "../src/finance/withdrawal-business-policy";
 import {assertDistributionOrderScopeResource,assertSandboxDistributionOrder,createEcsDemoDistributionOrderScope,createPaymentDistributionStore} from "../src/finance/distribution-payment-store";
 import { assertSyntheticChannelRequestCapability, createEcsDemoCollectionCapability, createEcsDemoRefundCapability, createPaymentRequest, demoForChannelRequestCapability, markDemoPaymentActionReady, readDemoPaymentRequestMatch, readDemoPaymentRequestForAcceptance } from "../src/order/channel-payment-store";
-import { assertLocalSandboxRefundResource } from "../src/order/local-sandbox-refund-source";
+import { assertLocalSandboxRefundResource, captureLocalSandboxRefundTerminalFact } from "../src/order/local-sandbox-refund-source";
+import { canonicalize } from "../src/supply/content-hash";
+import * as refundSource from "../src/order/local-sandbox-refund-source";
+import * as refundStore from "../src/order/channel-refund-store";
+import * as rentalRefund from "../src/finance/native-rental-refund-store";
+import { runEcsDemoRefundStep } from "../src/order/local-sandbox-refund-worker";
 
 type Input = Parameters<typeof createEcsTestDemoResource>[0];
 const input = (): Input => ({
@@ -122,6 +127,52 @@ test("demo payout succeeds on its first submission and reuses the original contr
   assert.equal(first.operationReplayed,false);assert.equal(operation?.scenario,"IMMEDIATE_SUCCESS");
   const replay=await submitDeclaredControlledPayout(pool,row.id,token,"1",bound);
   assert.equal(replay.operationReplayed,true);assert.deepEqual(replay.evidence,first.evidence);assert.equal(insertions,1);
+});
+
+test("demo refunds admit immediate or original timeout evidence, but not an unrelated scenario",async()=>{
+  const demo=scope(),capability=createEcsDemoRefundCapability(demo),base=clientFor(demo);
+  const terminal={mode:"LOCAL_CONTROLLED",intentId:"refund",refundOrderNo:"refund-no",originalPaymentTrxNo:"payment-no",
+    amountCents:"200",currency:"CNY",terminal:"SUCCEEDED",refundTransactionNo:"local-refund-no",completedAt:"2026-11-08T00:00:00.000Z"};
+  const canonical=canonicalize(terminal),digest=createHash("sha256").update(canonical).digest("hex");let scenario="IMMEDIATE_SUCCESS";
+  const row={id:"refund",posting_id:"posting",order_id:"order",payment_confirmation_id:"payment",renter_user_id:"user",
+    merchant_identity_id:"merchant",original_payment_trx_no:"payment-no",original_payment_order_no:"order-no",responsibility_version_hash:"a".repeat(64),
+    refund_order_no:"refund-no",amount_cents:"200",currency:"CNY",basis_kind:"POSTING",operation_id:"operation",final_canonical:canonical,final_digest:digest};
+  const client={...base.client,query:async(sql:string,values:unknown[]=[])=>{
+    if(sql.startsWith("SELECT to_regclass('zzsh_order.local_controlled_refund_operation')"))return {rows:[{complete:true}]};
+    if(sql.startsWith("SELECT i.id,i.posting_id"))return {rows:[{...row,scenario}]};
+    if(sql==="SELECT pg_current_xact_id()::text AS xid")return {rows:[{xid:"101"}]};
+    return (base.client.query as (...args:any[])=>Promise<any>)(sql,values);
+  }} as unknown as PoolClient;
+  const input={intentId:"refund",owner:"worker",version:"1"};
+  assert.equal((await captureLocalSandboxRefundTerminalFact(client,{demo,capability},input)).terminal,"SUCCEEDED");
+  scenario="TIMEOUT_THEN_SUCCEED";assert.equal((await captureLocalSandboxRefundTerminalFact(client,{demo,capability},input)).terminal,"SUCCEEDED");
+  scenario="UNREVIEWED";await assert.rejects(captureLocalSandboxRefundTerminalFact(client,{demo,capability},input));
+  await assert.rejects(captureLocalSandboxRefundTerminalFact(client,{demo,capability:createEcsDemoCollectionCapability(demo)},input));
+});
+
+test("demo refund records its immediate result once and uses the original liability",async t=>{
+  const demo=scope(),capability=createEcsDemoRefundCapability(demo),seen:unknown[][]=[];let claimed=false,operation=false;
+  const lease={owner:"worker",version:"1",operation:"SUBMIT" as const,intent:{intentId:"refund",renterUserId:"user",
+    originalPayment:{merchantIdentityId:"merchant",transactionNo:"payment-no"}}};
+  t.mock.method(refundSource,"assertLocalSandboxRefundResource",async()=>({reference:"demo"}) as never);
+  t.mock.method(refundSource,"localRefundRegistration",()=>({reference:"demo"}) as never);
+  t.mock.method(refundStore,"claimRefundIntent",async()=>{if(claimed)return null;claimed=true;return lease as never;});
+  t.mock.method(refundStore,"lockRefundFunds",async()=>{});
+  t.mock.method(refundSource,"captureLocalSandboxRefundTerminalFact",async()=>({intentId:"refund"}) as never);
+  t.mock.method(rentalRefund,"consumeLocalSandboxRentalRefundTerminal",async()=>({event:"CONSUMED"}) as never);
+  const client={release(){},query:async(sql:string,values:unknown[]=[])=>{
+    if(["BEGIN","COMMIT","ROLLBACK","SET CONSTRAINTS ALL IMMEDIATE"].includes(sql)||sql.startsWith("SELECT set_config"))return {rows:[]};
+    if(sql.startsWith('SELECT id FROM zzsh_auth_user'))return {rows:[{id:"user"}]};
+    if(sql.startsWith("SELECT id,refund_order_no"))return {rows:[{id:"refund",refund_order_no:"refund-no",original_payment_trx_no:"payment-no",amount_cents:"200",currency:"CNY",live:true}]};
+    if(sql.startsWith("SELECT id FROM zzsh_order.local_controlled_refund_operation"))return {rows:operation?[{id:"operation"}]:[]};
+    if(sql.startsWith("SELECT to_char(clock_timestamp()"))return {rows:[{at:"2026-11-08T00:00:00.000Z"}]};
+    if(sql.startsWith("INSERT INTO zzsh_order.local_controlled_refund_operation")){seen.push(values);operation=true;return {rows:[]};}
+    throw Error("Unexpected demo refund query");
+  }} as unknown as PoolClient;
+  const pool={connect:async()=>client} as unknown as Pool;
+  const first=await runEcsDemoRefundStep(pool,{demo,capability},"refund","worker");
+  assert.equal(first.action,"SUBMIT");assert.equal(first.bankArrival,"UNKNOWN");assert.equal(seen.length,1);assert.equal(seen[0]![10],"IMMEDIATE_SUCCESS");
+  const replay=await runEcsDemoRefundStep(pool,{demo,capability},"refund","worker");assert.equal(replay.action,"NONE");assert.equal(seen.length,1);
 });
 
 test("demo runtime refuses a partial cashier schema before exposing test payments",async()=>{

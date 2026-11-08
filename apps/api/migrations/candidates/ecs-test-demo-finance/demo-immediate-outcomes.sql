@@ -1,4 +1,4 @@
--- Test databases only. Apply in one transaction after the registered demo finance installation.
+-- Test databases only. Apply atomically after the registered demo finance installation.
 DO $upgrade$
 DECLARE marker text; schema_owner name; item record; definition text;
 BEGIN
@@ -15,7 +15,8 @@ BEGIN
   FOR item IN SELECT * FROM (VALUES
     ('zzsh_order.guard_controlled_operation()','2110d40f95ecf35f01fc1836a9c91337ea9d0432732169aaf66300f397c3d5df'),
     ('zzsh_order.guard_sandbox_withdrawal_destination()','361809167b88123409b92cc80feb0f942226f1e22d0a6ac064602b102b055016'),
-    ('zzsh_order.guard_sandbox_withdrawal_intent()','48ba919efd477d3fcddd4961ffe2efe09b3c11e9191d43df9ce421b62d8c26dd')
+    ('zzsh_order.guard_sandbox_withdrawal_intent()','48ba919efd477d3fcddd4961ffe2efe09b3c11e9191d43df9ce421b62d8c26dd'),
+    ('zzsh_order.guard_local_refund_source()','24c4be8edb81a5735456cf3e197afa9d1e4e2f3b9cf4f22d2242163d30381f2c')
   ) AS expected(signature,digest) LOOP
     SELECT replace(pg_get_functiondef(p.oid),E'\r\n',E'\n') INTO definition FROM pg_proc p
       WHERE p.oid=to_regprocedure(item.signature) AND pg_get_userbyid(p.proowner)=current_user;
@@ -33,12 +34,20 @@ BEGIN
       RAISE EXCEPTION 'Unexpected payout scenario constraint: %',item.constraint_name;
     END IF;
   END LOOP;
+  IF NOT EXISTS(SELECT 1 FROM pg_constraint c WHERE c.conrelid=to_regclass('zzsh_order.local_controlled_refund_operation')
+    AND c.conname='local_controlled_refund_operation_scenario_check' AND c.convalidated
+    AND pg_get_constraintdef(c.oid)=$check$CHECK ((scenario = 'TIMEOUT_THEN_SUCCEED'::text))$check$) THEN
+    RAISE EXCEPTION 'Unexpected refund scenario constraint';
+  END IF;
   EXECUTE $ddl$ALTER TABLE zzsh_order.withdrawal_destination DROP CONSTRAINT withdrawal_destination_scenario_check,
     ADD CONSTRAINT withdrawal_destination_scenario_check CHECK (scenario IN ('FAIL_UNPAID','TIMEOUT_THEN_SUCCEED','IMMEDIATE_SUCCESS'))$ddl$;
   EXECUTE $ddl$ALTER TABLE zzsh_order.controlled_payout_operation DROP CONSTRAINT controlled_payout_operation_scenario_check,
     ADD CONSTRAINT controlled_payout_operation_scenario_check CHECK (scenario IN ('FAIL_UNPAID','TIMEOUT_THEN_SUCCEED','IMMEDIATE_SUCCESS'))$ddl$;
+  EXECUTE $ddl$ALTER TABLE zzsh_order.local_controlled_refund_operation DROP CONSTRAINT local_controlled_refund_operation_scenario_check,
+    ADD CONSTRAINT local_controlled_refund_operation_scenario_check CHECK (scenario IN ('TIMEOUT_THEN_SUCCEED','IMMEDIATE_SUCCESS'))$ddl$;
   EXECUTE $ddl$COMMENT ON CONSTRAINT withdrawal_destination_scenario_check ON zzsh_order.withdrawal_destination IS '限定受控提现测试场景，首次成功仅用于已登记的演示环境。'$ddl$;
   EXECUTE $ddl$COMMENT ON CONSTRAINT controlled_payout_operation_scenario_check ON zzsh_order.controlled_payout_operation IS '限定受控出款测试场景，模拟结果不代表真实渠道到账。'$ddl$;
+  EXECUTE $ddl$COMMENT ON CONSTRAINT local_controlled_refund_operation_scenario_check ON zzsh_order.local_controlled_refund_operation IS '限定受控退款测试场景，模拟结果不代表真实渠道到账。'$ddl$;
 
   FOR item IN SELECT * FROM (VALUES
     ('zzsh_order.guard_controlled_operation()',
@@ -49,7 +58,10 @@ BEGIN
       $new$NEW.scenario NOT IN ('TIMEOUT_THEN_SUCCEED','IMMEDIATE_SUCCESS')$new$),
     ('zzsh_order.guard_sandbox_withdrawal_intent()',
       $old$d.scenario<>'TIMEOUT_THEN_SUCCEED'$old$,
-      $new$d.scenario NOT IN ('TIMEOUT_THEN_SUCCEED','IMMEDIATE_SUCCESS')$new$)
+      $new$d.scenario NOT IN ('TIMEOUT_THEN_SUCCEED','IMMEDIATE_SUCCESS')$new$),
+    ('zzsh_order.guard_local_refund_source()',
+      $old$NEW.scenario<>'TIMEOUT_THEN_SUCCEED'$old$,
+      $new$NEW.scenario NOT IN ('TIMEOUT_THEN_SUCCEED','IMMEDIATE_SUCCESS')$new$)
   ) AS changes(signature,old_text,new_text) LOOP
     SELECT pg_get_functiondef(to_regprocedure(item.signature)) INTO definition;
     IF position(item.old_text IN definition)=0 OR position(item.old_text IN replace(definition,item.old_text,''))<>0 THEN

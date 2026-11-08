@@ -54,7 +54,8 @@ export async function captureLocalSandboxRefundTerminalFact(client:PoolClient,op
   try{
     terminal=JSON.parse(row.final_canonical);
     if(!terminal||Array.isArray(terminal)||Object.keys(terminal).sort().join(',')!=='amountCents,completedAt,currency,intentId,mode,originalPaymentTrxNo,refundOrderNo,refundTransactionNo,terminal'
-      ||canonicalize(terminal)!==row.final_canonical||sha(row.final_canonical)!==row.final_digest||row.scenario!=='TIMEOUT_THEN_SUCCEED'
+      ||canonicalize(terminal)!==row.final_canonical||sha(row.final_canonical)!==row.final_digest
+      ||!(row.scenario==='TIMEOUT_THEN_SUCCEED'||row.scenario==='IMMEDIATE_SUCCESS'&&'demo' in options)
       ||terminal.mode!=='LOCAL_CONTROLLED'||terminal.terminal!=='SUCCEEDED'||terminal.intentId!==row.id||terminal.refundOrderNo!==row.refund_order_no
       ||terminal.originalPaymentTrxNo!==row.original_payment_trx_no||terminal.amountCents!==row.amount_cents||terminal.currency!=='CNY'
       ||typeof terminal.refundTransactionNo!=='string'||!ID.test(terminal.refundTransactionNo)||typeof terminal.completedAt!=='string'

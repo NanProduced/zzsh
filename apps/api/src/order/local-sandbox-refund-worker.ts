@@ -38,8 +38,9 @@ async function submitOriginalOperation(c:PoolClient,options:LocalSandboxRefundOp
   const canonical=canonicalize(terminal);
   await c.query(`INSERT INTO zzsh_order.local_controlled_refund_operation(id,intent_id,sandbox_registration_ref,scenario,
     refund_order_no,original_payment_trx_no,amount_cents,currency,final_canonical,final_digest,original_lease_version,original_lease_owner)
-    VALUES($1,$2,$3,'TIMEOUT_THEN_SUCCEED',$4,$5,$6,'CNY',$7,$8,$9,$10)`,
-  [id,i.intentId,p.reference,row.refund_order_no,row.original_payment_trx_no,row.amount_cents,canonical,sha(canonical),lease.version,lease.owner]);
+    VALUES($1,$2,$3,$11,$4,$5,$6,'CNY',$7,$8,$9,$10)`,
+  [id,i.intentId,p.reference,row.refund_order_no,row.original_payment_trx_no,row.amount_cents,canonical,sha(canonical),lease.version,lease.owner,
+    'demo' in options?'IMMEDIATE_SUCCESS':'TIMEOUT_THEN_SUCCEED']);
 }
 
 /** ECS demo: persist one simulated operation and consume its original liability atomically.

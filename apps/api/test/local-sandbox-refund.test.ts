@@ -51,6 +51,7 @@ function fixture(){
   if(sql.startsWith("SELECT to_char(clock_timestamp()"))return one({at:'2026-11-02T10:00:00.000Z'});
   if(sql.startsWith('INSERT INTO zzsh_order.local_controlled_refund_operation')){
    assert.equal(controls.operationPresent,false);assert.equal(args[1],row.id);assert.equal(args[2],p.registration.reference);
+   assert.equal(args[10],'TIMEOUT_THEN_SUCCEED');
    controls.operationPresent=true;Object.assign(operation,{id:args[0],final_canonical:args[6],final_digest:args[7]});return one();
   }
   if(sql.includes('FROM zzsh_order.channel_refund_intent WHERE id=$1')&&(sql.includes('FOR UPDATE')||sql.startsWith('SELECT id, posting_id')))return one(structuredClone(state.row));
@@ -95,9 +96,10 @@ test('local refund fact comes from original durable operation, grants no formal 
 });
 
 test('local source rejects amount/operation tampering, caller-selected unpaid release and replaced worker lease before any evidence/money write',async()=>{
- for(const change of ['DIGEST','AMOUNT','FAILED','LEASE']){
+ for(const change of ['DIGEST','AMOUNT','FAILED','LEASE','DEMO_ONLY_SCENARIO']){
   const f=fixture();
   if(change==='DIGEST')f.operation.final_digest='0'.repeat(64);
+  if(change==='DEMO_ONLY_SCENARIO')f.operation.scenario='IMMEDIATE_SUCCESS';
   if(change==='AMOUNT'||change==='FAILED'){const doc=JSON.parse(f.operation.final_canonical);if(change==='AMOUNT')doc.amountCents='201';else doc.terminal='FAILED_NO_EXECUTION';f.operation.final_canonical=canonicalize(doc);f.operation.final_digest=sha(f.operation.final_canonical);}
   if(change==='LEASE'){
    const fact=await f.capture();f.state.row.lease_version='4';await assert.rejects(consumeLocalSandboxRentalRefundTerminal(f.client,{fact,requestId:'request_fixture'}));

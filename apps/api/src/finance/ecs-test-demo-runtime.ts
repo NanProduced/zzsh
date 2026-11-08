@@ -105,7 +105,8 @@ export async function preflightEcsTestDemoRuntime(pool: Pool, assembly: EcsTestD
       AND NOT EXISTS(SELECT 1 FROM (VALUES
         ('zzsh_order.guard_controlled_operation()','2a746e49329750525137238bf901240e65202fb30438fb73de0f2bca7fcf8254'),
         ('zzsh_order.guard_sandbox_withdrawal_destination()','81e3335ebfeb2cb77ea95f5652eefe64bffa4cf6b4ae177b305d307e5193f3b2'),
-        ('zzsh_order.guard_sandbox_withdrawal_intent()','42e8ca7dd1f2ea9a72c65d11420c5af5753ec1e78c88937a1f3d41aa7ab16d4b')) expected(signature,digest)
+        ('zzsh_order.guard_sandbox_withdrawal_intent()','42e8ca7dd1f2ea9a72c65d11420c5af5753ec1e78c88937a1f3d41aa7ab16d4b'),
+        ('zzsh_order.guard_local_refund_source()','ef171dfa5ec8d0ccba1fdbe23613f96af7c11e02794afc1e8b7c76afa4203d8b')) expected(signature,digest)
         LEFT JOIN pg_proc p ON p.oid=to_regprocedure(expected.signature)
         WHERE p.oid IS NULL OR p.proowner IS DISTINCT FROM (SELECT nspowner FROM pg_namespace WHERE nspname='zzsh_order')
           OR encode(sha256(convert_to(replace(pg_get_functiondef(p.oid),chr(13)||chr(10),chr(10)),'UTF8')),'hex') IS DISTINCT FROM expected.digest)
@@ -114,6 +115,9 @@ export async function preflightEcsTestDemoRuntime(pool: Pool, assembly: EcsTestD
         WHERE NOT EXISTS(SELECT 1 FROM pg_constraint p WHERE p.conrelid=to_regclass(expected.relation_name)
           AND p.conname=expected.name AND p.convalidated AND pg_get_constraintdef(p.oid)=
           $$CHECK ((scenario = ANY (ARRAY['FAIL_UNPAID'::text, 'TIMEOUT_THEN_SUCCEED'::text, 'IMMEDIATE_SUCCESS'::text])))$$))
+      AND EXISTS(SELECT 1 FROM pg_constraint p WHERE p.conrelid=to_regclass('zzsh_order.local_controlled_refund_operation')
+        AND p.conname='local_controlled_refund_operation_scenario_check' AND p.convalidated AND pg_get_constraintdef(p.oid)=
+        $$CHECK ((scenario = ANY (ARRAY['TIMEOUT_THEN_SUCCEED'::text, 'IMMEDIATE_SUCCESS'::text])))$$)
       AND NOT COALESCE(has_table_privilege(current_user,to_regclass('zzsh_order.withdrawal_intent'),'DELETE'),true)
       AND to_regclass('zzsh_order.controlled_payout_notice') IS NULL
       AND has_function_privilege(current_user,to_regprocedure('zzsh_order.withdrawal_expected_lines(text)'),'EXECUTE')

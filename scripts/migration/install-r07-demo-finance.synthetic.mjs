@@ -11,7 +11,7 @@ const root=resolve(fileURLToPath(new URL('../..',import.meta.url))),require=crea
 const modules=require(join(root,'apps/api/dist/src/finance/ecs-test-demo-resource')),runtime=require(join(root,'apps/api/dist/src/finance/ecs-test-demo-runtime'));
 const id='admin_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',nonce='a11111111111111111111111',db='zzsh_test_r07_delivery_20261108';
 const opts={host:'127.0.0.1',port:55434,database:db,max:1},superPool=new Pool({...opts,user:'postgres'}),migration=new Pool({...opts,user:'zzsh_regression_migration'}),runtimePool=new Pool({...opts,user:'zzsh_regression_runtime'});
-const names=['registration.sql','controlled-payment-schema.sql','new-order-payment.sql','demo-refund.sql','demo-withdrawal.sql','demo-legacy-refund.sql','demo-prestart-refund.sql','demo-support-cancel.sql','grant-runtime.sql','enroll-native-wallet.sql','common-payment-request.sql','immediate-payout.sql'];
+const names=['registration.sql','controlled-payment-schema.sql','new-order-payment.sql','demo-refund.sql','demo-withdrawal.sql','demo-legacy-refund.sql','demo-prestart-refund.sql','demo-support-cancel.sql','grant-runtime.sql','enroll-native-wallet.sql','common-payment-request.sql','demo-immediate-outcomes.sql'];
 const sql=Object.fromEntries(names.map(n=>[n,readFileSync(join(root,'apps/api/migrations/candidates/ecs-test-demo-finance',n),'utf8')]));
 const sha=x=>createHash('sha256').update(x).digest('hex');
 async function test(){const proxy=net.createServer(s=>{const t=net.connect(5432,'127.0.0.1');s.pipe(t);t.pipe(s);s.on('error',()=>t.destroy());t.on('error',()=>s.destroy())});await new Promise((ok,fail)=>{proxy.once('error',fail);proxy.listen(55434,'127.0.0.1',ok)});
@@ -47,7 +47,7 @@ async function test(){const proxy=net.createServer(s=>{const t=net.connect(5432,
    const audit=(await c.query(`SELECT count(*)::int n FROM zzsh_iam.audit_event WHERE action='demo.finance.installed' AND request_id='synthetic_attempt'`)).rows[0];assert.equal(audit.n,1);
    // The historical installer stays unchanged; the cashier upgrade is a separate atomic step.
    await c.query('BEGIN');await c.query(sql['common-payment-request.sql']);await c.query('COMMIT');
-   await c.query('BEGIN');await c.query(sql['immediate-payout.sql']);await c.query('COMMIT');
+   await c.query('BEGIN');await c.query(sql['demo-immediate-outcomes.sql']);await c.query('COMMIT');
    await runtime.preflightEcsTestDemoRuntime(runtimePool,assembly);
    await c.query('BEGIN READ ONLY');assert.equal(await verifyDemoInstallGuardReadback(c),9);await c.query('ROLLBACK');
    await c.query('BEGIN');await c.query(`CREATE OR REPLACE FUNCTION zzsh_order.support_cancel_payment_basis_valid(b jsonb) RETURNS boolean LANGUAGE sql AS $$ SELECT false $$`);

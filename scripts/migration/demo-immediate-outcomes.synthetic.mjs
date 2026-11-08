@@ -10,7 +10,7 @@ const expectedSystem=process.env.DEMO_PAYOUT_SYNTHETIC_SYSTEM_ID;
 assert(/^[0-9]+$/.test(expectedSystem??'')&&!['7683455772595376163','7704972584346443810','7705473419326033954'].includes(expectedSystem),'SYNTHETIC_IDENTITY_REQUIRED');
 const root=resolve(fileURLToPath(new URL('../..',import.meta.url))),require=createRequire(join(root,'apps/api/package.json')),{Client}=require('pg');
 const dir=join(root,'apps/api/migrations/candidates/ecs-test-demo-finance');
-const original=readFileSync(join(dir,'demo-withdrawal.sql'),'utf8'),upgrade=readFileSync(join(dir,'immediate-payout.sql'),'utf8');
+const original=readFileSync(join(dir,'demo-withdrawal.sql'),'utf8'),originalRefund=readFileSync(join(dir,'demo-refund.sql'),'utf8'),upgrade=readFileSync(join(dir,'demo-immediate-outcomes.sql'),'utf8');
 const settings={host:'127.0.0.1',port:5432,user:'postgres',database:'postgres'};
 const admin=new Client(settings);await admin.connect();
 const identity=(await admin.query("SELECT (pg_control_system()).system_identifier::text AS id,current_setting('zzsh.synthetic_task',true) AS task")).rows[0];
@@ -40,14 +40,27 @@ try {
       lease_token_hash text,lease_until timestamptz,net_cents bigint,fee_cents bigint,mode text,sandbox_registration_ref text);
     CREATE TABLE zzsh_order.controlled_payout_operation(id text PRIMARY KEY,intent_id text UNIQUE,payout_key text UNIQUE,scenario text,
       original_lease_hash text,final_evidence_canonical text,
-      CONSTRAINT controlled_payout_operation_scenario_check CHECK (scenario IN ('FAIL_UNPAID','TIMEOUT_THEN_SUCCEED')));`);
+      CONSTRAINT controlled_payout_operation_scenario_check CHECK (scenario IN ('FAIL_UNPAID','TIMEOUT_THEN_SUCCEED')));
+    CREATE TABLE zzsh_order.channel_refund_intent(id text PRIMARY KEY,sandbox_registration_ref text,payment_source text,evidence_level text,
+      merchant_identity_id text,original_payment_trx_no text,renter_user_id text,due_at timestamptz,requires_review boolean,budget_disposition text,
+      lease_until timestamptz,state text,lease_version bigint,lease_owner text,refund_order_no text,amount_cents numeric,currency text,created_at timestamptz);
+    CREATE TABLE zzsh_order.local_controlled_refund_operation(id text PRIMARY KEY,intent_id text UNIQUE,sandbox_registration_ref text,
+      scenario text CONSTRAINT local_controlled_refund_operation_scenario_check CHECK(scenario='TIMEOUT_THEN_SUCCEED'),
+      refund_order_no text,original_payment_trx_no text,amount_cents numeric,currency text,final_canonical text,final_digest text,
+      original_lease_version bigint,original_lease_owner text,created_xid xid8,created_at timestamptz);
+    CREATE TABLE zzsh_order.local_controlled_refund_evidence(id text,intent_id text,operation_id text,sandbox_registration_ref text);
+    CREATE FUNCTION zzsh_order.local_controlled_refund_liability_complete(text) RETURNS boolean LANGUAGE sql AS $$ SELECT true $$;
+    CREATE FUNCTION zzsh_order.canonical_finance_json(jsonb) RETURNS text LANGUAGE sql AS $$ SELECT $1::text $$;`);
   for(const name of ['guard_controlled_operation','guard_sandbox_withdrawal_destination','guard_sandbox_withdrawal_intent']){
     const match=original.match(new RegExp(`CREATE OR REPLACE FUNCTION zzsh_order\\.${name}\\(\\)[\\s\\S]*?END \\$function\\$\\s*;`));
     assert(match,`ORIGINAL_GUARD_MISSING: ${name}`);await c.query(match[0]);
   }
+  const refundGuard=originalRefund.match(/CREATE FUNCTION zzsh_order\.guard_local_refund_source\(\)[\s\S]*?END \$\$\s*;/);
+  assert(refundGuard,'ORIGINAL_REFUND_GUARD_MISSING');await c.query(refundGuard[0]);
   await c.query(`CREATE TRIGGER destination_guard BEFORE INSERT ON zzsh_order.withdrawal_destination FOR EACH ROW EXECUTE FUNCTION zzsh_order.guard_sandbox_withdrawal_destination();
     CREATE TRIGGER intent_guard BEFORE INSERT OR UPDATE ON zzsh_order.withdrawal_intent FOR EACH ROW EXECUTE FUNCTION zzsh_order.guard_sandbox_withdrawal_intent();
-    CREATE TRIGGER operation_guard BEFORE INSERT ON zzsh_order.controlled_payout_operation FOR EACH ROW EXECUTE FUNCTION zzsh_order.guard_controlled_operation();`);
+    CREATE TRIGGER operation_guard BEFORE INSERT ON zzsh_order.controlled_payout_operation FOR EACH ROW EXECUTE FUNCTION zzsh_order.guard_controlled_operation();
+    CREATE TRIGGER refund_guard BEFORE INSERT ON zzsh_order.local_controlled_refund_operation FOR EACH ROW EXECUTE FUNCTION zzsh_order.guard_local_refund_source();`);
 
   await c.query('BEGIN');await c.query("COMMENT ON DATABASE zzsh_test_r07_delivery_20261108 IS 'wrong'");
   await assert.rejects(c.query(upgrade),/Exact registered test database/);await c.query('ROLLBACK');
@@ -63,9 +76,10 @@ try {
   await c.query('BEGIN');await assert.rejects(c.query(upgrade),/Unexpected payout guard/);await c.query('ROLLBACK');
   const guards=(await c.query(`SELECT signature,encode(sha256(convert_to(replace(pg_get_functiondef(to_regprocedure(signature)),chr(13)||chr(10),chr(10)),'UTF8')),'hex') AS digest
     FROM unnest(ARRAY['zzsh_order.guard_controlled_operation()','zzsh_order.guard_sandbox_withdrawal_destination()',
-      'zzsh_order.guard_sandbox_withdrawal_intent()']) signature`)).rows;
+      'zzsh_order.guard_sandbox_withdrawal_intent()','zzsh_order.guard_local_refund_source()']) signature`)).rows;
   assert.deepEqual(guards.map(row=>row.digest),['2a746e49329750525137238bf901240e65202fb30438fb73de0f2bca7fcf8254',
-    '81e3335ebfeb2cb77ea95f5652eefe64bffa4cf6b4ae177b305d307e5193f3b2','42e8ca7dd1f2ea9a72c65d11420c5af5753ec1e78c88937a1f3d41aa7ab16d4b']);
+    '81e3335ebfeb2cb77ea95f5652eefe64bffa4cf6b4ae177b305d307e5193f3b2','42e8ca7dd1f2ea9a72c65d11420c5af5753ec1e78c88937a1f3d41aa7ab16d4b',
+    'ef171dfa5ec8d0ccba1fdbe23613f96af7c11e02794afc1e8b7c76afa4203d8b']);
   const runtime=readFileSync(join(root,'apps/api/src/finance/ecs-test-demo-runtime.ts'),'utf8').replaceAll('\r\n','\n');
   const start=runtime.indexOf("      AND NOT EXISTS(SELECT 1 FROM (VALUES\n        ('zzsh_order.guard_controlled_operation()'");
   const end=runtime.indexOf("\n      AND NOT COALESCE(has_table_privilege",start);
@@ -98,6 +112,19 @@ try {
   await addOperation('old-operation','old-intent','TIMEOUT_THEN_SUCCEED');await addOperation('new-operation','new-intent','IMMEDIATE_SUCCESS');
   await c.query('SAVEPOINT duplicate');await assert.rejects(addOperation('new-operation-2','new-intent','IMMEDIATE_SUCCESS'),error=>error.code==='23505');await c.query('ROLLBACK TO SAVEPOINT duplicate');
   assert.equal((await c.query('SELECT count(*)::int n FROM zzsh_order.controlled_payout_operation')).rows[0].n,2);
+  await c.query(`INSERT INTO zzsh_order.channel_refund_intent VALUES ('refund','demo','CONTROLLED','CONTROLLED_TEST','local_demo_fixture-digest',
+    'pay-trx','user',clock_timestamp()-interval '1 day',false,'ALLOCATED',clock_timestamp()+interval '1 minute','SUBMITTING',1,'worker','refund-no',200,'CNY',clock_timestamp()-interval '1 day')`);
+  const refundOperation=async(scenario,amount=200)=>c.query(`WITH data AS (SELECT jsonb_build_object(
+    'mode','LOCAL_CONTROLLED','intentId','refund','refundOrderNo','refund-no','originalPaymentTrxNo','pay-trx','amountCents','200','currency','CNY',
+    'terminal','SUCCEEDED','refundTransactionNo','local_refund_trx_'||substr(encode(sha256(convert_to('refund','UTF8')),'hex'),1,40),
+    'completedAt',to_char(date_trunc('milliseconds',clock_timestamp()) AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')) AS doc)
+    INSERT INTO zzsh_order.local_controlled_refund_operation(id,intent_id,sandbox_registration_ref,scenario,refund_order_no,original_payment_trx_no,
+      amount_cents,currency,final_canonical,final_digest,original_lease_version,original_lease_owner)
+    SELECT 'local_refund_op_'||substr(encode(sha256(convert_to('refund','UTF8')),'hex'),1,40),'refund','demo',$1,'refund-no','pay-trx',$2,'CNY',
+      zzsh_order.canonical_finance_json(doc),encode(sha256(convert_to(zzsh_order.canonical_finance_json(doc),'UTF8')),'hex'),1,'worker' FROM data`,[scenario,amount]);
+  await c.query('SAVEPOINT bad_refund_amount');await assert.rejects(refundOperation('IMMEDIATE_SUCCESS',201),/original server-only simulated submit/);await c.query('ROLLBACK TO SAVEPOINT bad_refund_amount');
+  await refundOperation('IMMEDIATE_SUCCESS');
+  assert.equal((await c.query("SELECT scenario FROM zzsh_order.local_controlled_refund_operation WHERE intent_id='refund'")).rows[0].scenario,'IMMEDIATE_SUCCESS');
   await c.query('ROLLBACK');
-  console.log(JSON.stringify({status:'PASS',scope:'synthetic PostgreSQL only',systemIdentifier:system,assertions:['wrong database marker refused','changed guard refused','autocommit and transaction rollback','one upgrade only','old timeout preserved','immediate success allowed','wrong binding refused','wrong amount refused','duplicate payout refused'],notRun:['real R07','ECS','real channels']}));
+  console.log(JSON.stringify({status:'PASS',scope:'synthetic PostgreSQL only',systemIdentifier:system,assertions:['wrong database marker refused','changed guard refused','autocommit and transaction rollback','one upgrade only','old timeout preserved','immediate refund and payout allowed','wrong binding refused','wrong amount refused','duplicate payout refused'],notRun:['real R07','ECS','real channels']}));
 } finally {await c.end();}
