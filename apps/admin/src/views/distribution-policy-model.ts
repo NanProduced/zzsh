@@ -4,9 +4,9 @@ export type DistributionLevel={code:string;rank:number;default:boolean;renterPer
 type CommonPolicy={scope:'LOCAL_CONTROLLED'|'NATIVE';enabled:boolean;participation:'AUTO_AT_REGISTRATION';depth:1;selfRebate:false;accountModes:('ordinary'|'custom')[];minimumAccrualCents:string;settlementDelayDays:number};
 export type DistributionPolicyConfig=CommonPolicy&({schema:'distribution-policy.v1';levels:DistributionLevel[]}|{schema:'distribution-policy.v3';levels:DistributionLevel[];legacySource:{receiptSha256:string;configurationSha256:string;levelsSha256:string;levelNames:Record<string,string>}}|{schema:'distribution-policy.v2';rateMode:'UNIFORM';renterPercent:string;ownerPercent:string;levels:[]}|{schema:'distribution-policy.v4';levels:DistributionLevel[];levelNames:Record<string,string>;baseMode:'LEGACY_RENTAL'|'PLATFORM_CONTRIBUTION'});
 export type PolicyHead={versionId:string;revision:string;digest:string;config:DistributionPolicyConfig;createdAt:string};
-export type ChangeContext={schema:'distribution-policy-change-context.v1';state:'EMPTY'|'PENDING'|'UNAVAILABLE';contractReady:boolean;writeAssemblyReady:boolean;request:null|{requestId:string;status:string;requestedBy:string;requesterName?:string|null;createdAt:string;deciderName?:string|null;decidedAt?:string|null;expectedPolicyId:string|null;expectedRevision:string|null;expectedPolicyDigest:string|null;changes:unknown};reasonCodes:string[]};
+export type ChangeContext={schema:'distribution-policy-change-context.v1';state:'EMPTY'|'PENDING'|'UNAVAILABLE';contractReady:boolean;writeAssemblyReady:boolean;settlementDelayChangeSupported?:boolean;request:null|{requestId:string;status:string;requestedBy:string;requesterName?:string|null;createdAt:string;deciderName?:string|null;decidedAt?:string|null;expectedPolicyId:string|null;expectedRevision:string|null;expectedPolicyDigest:string|null;changes:unknown};reasonCodes:string[]};
 export type DistributionPolicyRead=({knowledge:'KNOWN';policy:PolicyHead}|{knowledge:'UNKNOWN';policy:null;reason:string;scope?:'LOCAL_CONTROLLED'|'NATIVE'})&{scope?:'LOCAL_CONTROLLED'|'NATIVE';changeContext?:ChangeContext;semanticsVersion?:'distribution-policy.lifecycle.v2'};
-export type DistributionPolicyUpdatePayload={schema:'distribution-policy-change.v1';expectedPolicyId:string;expectedRevision:string;expectedPolicyDigest:string;changes:{enabled?:boolean;renterPercent?:string;ownerPercent?:string};reason:string};
+export type DistributionPolicyUpdatePayload={schema:'distribution-policy-change.v1';expectedPolicyId:string;expectedRevision:string;expectedPolicyDigest:string;changes:{enabled?:boolean;renterPercent?:string;ownerPercent?:string;settlementDelayDays?:number};reason:string};
 export type DistributionPolicyInitialPayload={schema:'distribution-policy-initialize.v1';config:{enabled:boolean;accountModes:('ordinary'|'custom')[];minimumAccrualCents:string;settlementDelayDays:number;renterPercent:string;ownerPercent:string};reason:string};
 export type DistributionPolicyPayload=DistributionPolicyUpdatePayload|DistributionPolicyInitialPayload;
 const fail=():never=>{throw new AdminApiError(502,'DISTRIBUTION_POLICY_CONTRACT_REQUIRED');};
@@ -23,7 +23,7 @@ export function distributionCentsLabel(value:string|null|undefined){
 }
 export function parseDistributionPolicyRead(value:unknown):DistributionPolicyRead{
  if(!object(value))return fail();let context:ChangeContext|undefined;
- if(value.changeContext!==undefined){const c=value.changeContext;if(!object(c)||c.schema!=='distribution-policy-change-context.v1'||!['EMPTY','PENDING','UNAVAILABLE'].includes(c.state)||typeof c.contractReady!=='boolean'||typeof c.writeAssemblyReady!=='boolean'||!Array.isArray(c.reasonCodes)||c.reasonCodes.some((r:unknown)=>typeof r!=='string'))return fail();if(c.state==='EMPTY'&&c.request!==null)return fail();if(c.request!==null&&(!object(c.request)||typeof c.request.requestId!=='string'||typeof c.request.status!=='string'||typeof c.request.requestedBy!=='string'||typeof c.request.createdAt!=='string'))return fail();context=c as ChangeContext;}
+ if(value.changeContext!==undefined){const c=value.changeContext;if(!object(c)||c.schema!=='distribution-policy-change-context.v1'||!['EMPTY','PENDING','UNAVAILABLE'].includes(c.state)||typeof c.contractReady!=='boolean'||typeof c.writeAssemblyReady!=='boolean'||c.settlementDelayChangeSupported!==undefined&&typeof c.settlementDelayChangeSupported!=='boolean'||!Array.isArray(c.reasonCodes)||c.reasonCodes.some((r:unknown)=>typeof r!=='string'))return fail();if(c.state==='EMPTY'&&c.request!==null)return fail();if(c.request!==null&&(!object(c.request)||typeof c.request.requestId!=='string'||typeof c.request.status!=='string'||typeof c.request.requestedBy!=='string'||typeof c.request.createdAt!=='string'))return fail();context=c as ChangeContext;}
  if(value.knowledge==='UNKNOWN'&&value.policy===null&&typeof value.reason==='string'){const readScope=value.scope??value.config?.scope;if(readScope!==undefined&&!['LOCAL_CONTROLLED','NATIVE'].includes(readScope))return fail();return{knowledge:'UNKNOWN',policy:null,reason:value.reason,...(readScope?{scope:readScope}:{}),...(context?{changeContext:context}:{}),...(value.semanticsVersion==='distribution-policy.lifecycle.v2'?{semanticsVersion:'distribution-policy.lifecycle.v2' as const}:{})};}
  const p=value.policy,c=p?.config;if(value.knowledge!=='KNOWN'||!object(p)||typeof p.versionId!=='string'||typeof p.revision!=='string'||!/^[1-9]\d{0,18}$/.test(p.revision)||typeof p.digest!=='string'||!/^[a-f0-9]{64}$/.test(p.digest)||!object(c)||!['LOCAL_CONTROLLED','NATIVE'].includes(c.scope)||typeof c.enabled!=='boolean'||c.participation!=='AUTO_AT_REGISTRATION'||c.depth!==1||c.selfRebate!==false||!Array.isArray(c.accountModes)||!c.accountModes.length||new Set(c.accountModes).size!==c.accountModes.length||c.accountModes.some((m:unknown)=>m!=='ordinary'&&m!=='custom')||!cents(c.minimumAccrualCents)||!Number.isInteger(c.settlementDelayDays)||c.settlementDelayDays<0||c.settlementDelayDays>999999||typeof p.createdAt!=='string')return fail();
  try{
@@ -40,18 +40,27 @@ export function sameDistributionProposal(actual:unknown,expected:unknown){
  if(!object(actual.changes)||!object(expected.changes))return false;
  const a=Object.keys(actual.changes).sort(),b=Object.keys(expected.changes).sort();return a.join('|')===b.join('|')&&a.every(k=>actual.changes[k]===expected.changes[k]);
 }
-export function buildDistributionPolicyPayload(head:PolicyHead,draft:{enabled:boolean;renter:string;owner:string;reason:string}):DistributionPolicyUpdatePayload{
+export function buildDistributionPolicyPayload(head:PolicyHead,draft:{enabled:boolean;renter:string;owner:string;reason:string;settlementDelayDays?:string}):DistributionPolicyUpdatePayload{
+ const rawDelay=draft.settlementDelayDays;
+ if(rawDelay!==undefined&&!/^(0|[1-9]\d{0,5})$/.test(rawDelay))throw Error('等待期请输入 0 至 999999 的整数天数');
+ const delay=rawDelay===undefined?head.config.settlementDelayDays:Number(rawDelay);
  if(head.config.schema==='distribution-policy.v3'||head.config.schema==='distribution-policy.v4'){
   const reason=draft.reason.trim();
   if(reason.length<3||reason.length>500)throw Error('请填写至少3个字的变更原因');
-  if(draft.enabled===head.config.enabled)throw Error('请选择新的计佣状态');
-  return{schema:'distribution-policy-change.v1',expectedPolicyId:head.versionId,expectedRevision:head.revision,expectedPolicyDigest:head.digest,changes:{enabled:draft.enabled},reason};
+  const changes:DistributionPolicyUpdatePayload['changes']={};if(draft.enabled!==head.config.enabled)changes.enabled=draft.enabled;if(delay!==head.config.settlementDelayDays)changes.settlementDelayDays=delay;
+  if(!Object.keys(changes).length)throw Error('当前没有需要提交的变更');
+  return{schema:'distribution-policy-change.v1',expectedPolicyId:head.versionId,expectedRevision:head.revision,expectedPolicyDigest:head.digest,changes,reason};
+ }
+ if(head.config.schema==='distribution-policy.v1'&&delay!==head.config.settlementDelayDays&&!draft.renter.trim()&&!draft.owner.trim()){
+  if(draft.reason.trim().length<3||draft.reason.length>500)throw Error('请填写至少3个字的变更原因');
+  return{schema:'distribution-policy-change.v1',expectedPolicyId:head.versionId,expectedRevision:head.revision,expectedPolicyDigest:head.digest,changes:{...(draft.enabled===head.config.enabled?{}:{enabled:draft.enabled}),settlementDelayDays:delay},reason:draft.reason.trim()};
  }
  const renter=parseDistributionPercent(draft.renter.trim()),owner=parseDistributionPercent(draft.owner.trim());
  const scaled=(v:string)=>{const [a,b='']=v.split('.');return BigInt(a!)*100000000n+BigInt(b.padEnd(8,'0'));};
  if(scaled(renter)+scaled(owner)>10000000000n)throw Error('邀请租客与邀请号主两类比例合计不能超过100%');
  if(draft.reason.trim().length<3||draft.reason.length>500)throw Error('请填写至少3个字的变更原因');
  const changes:DistributionPolicyUpdatePayload['changes']={};if(draft.enabled!==head.config.enabled)changes.enabled=draft.enabled;
+ if(delay!==head.config.settlementDelayDays)changes.settlementDelayDays=delay;
  if(head.config.schema==='distribution-policy.v1'||renter!==head.config.renterPercent)changes.renterPercent=renter;
  if(head.config.schema==='distribution-policy.v1'||owner!==head.config.ownerPercent)changes.ownerPercent=owner;
  if(!Object.keys(changes).length)throw Error('当前没有需要提交的变更');

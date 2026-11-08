@@ -1,9 +1,10 @@
 import { canonicalize } from '../supply/content-hash';
 import { ensureOnlyFields, invalid, conflict } from '../supply/supply-util';
 import { referralPercent, validateDistributionPolicy, type DistributionPolicyConfig } from './distribution-policy';
+import { managedDistributionPolicy } from './distribution-level-management';
 
 export const DISTRIBUTION_POLICY_OPERATION='distribution.policy.publish';
-export type DistributionPolicyUpdate={schema:'distribution-policy-change.v1';expectedPolicyId:string;expectedRevision:string;expectedPolicyDigest:string;changes:{enabled?:boolean;renterPercent?:string;ownerPercent?:string};reason:string};
+export type DistributionPolicyUpdate={schema:'distribution-policy-change.v1';expectedPolicyId:string;expectedRevision:string;expectedPolicyDigest:string;changes:{enabled?:boolean;renterPercent?:string;ownerPercent?:string;settlementDelayDays?:number};reason:string};
 export type DistributionPolicyInitial=
  {schema:'distribution-policy-initialize.v1';config:{enabled:boolean;accountModes:('ordinary'|'custom')[];minimumAccrualCents:string;settlementDelayDays:number;renterPercent:string;ownerPercent:string};reason:string}|
  {schema:'distribution-policy-initialize.v2';config:Extract<DistributionPolicyConfig,{schema:'distribution-policy.v3'}>;reason:string};
@@ -31,11 +32,11 @@ export function parseDistributionPolicyChange(value:Record<string,unknown>):Dist
  ensureOnlyFields(value,['schema','expectedPolicyId','expectedRevision','expectedPolicyDigest','changes','reason']);
  if(value.schema!=='distribution-policy-change.v1'||typeof value.expectedPolicyId!=='string'||!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(value.expectedPolicyId)||typeof value.expectedRevision!=='string'||!/^[1-9]\d{0,18}$/.test(value.expectedRevision)||typeof value.expectedPolicyDigest!=='string'||!/^[a-f0-9]{64}$/.test(value.expectedPolicyDigest)||typeof value.reason!=='string'||value.reason.trim().length<3||value.reason.length>500)throw invalid('Original policy reference and reason required');
  if(!value.changes||typeof value.changes!=='object'||Array.isArray(value.changes))throw invalid('Explicit distribution policy changes required');
- const c=value.changes as Record<string,unknown>;ensureOnlyFields(c,['enabled','renterPercent','ownerPercent']);
- if(!Object.keys(c).length||c.enabled!==undefined&&typeof c.enabled!=='boolean')throw invalid('Explicit distribution state/rates required');
- return{schema:'distribution-policy-change.v1',expectedPolicyId:value.expectedPolicyId,expectedRevision:value.expectedRevision,expectedPolicyDigest:value.expectedPolicyDigest,changes:{...(c.enabled===undefined?{}:{enabled:c.enabled as boolean}),...(c.renterPercent===undefined?{}:{renterPercent:referralPercent(c.renterPercent).percent}),...(c.ownerPercent===undefined?{}:{ownerPercent:referralPercent(c.ownerPercent).percent})},reason:value.reason.trim()};
+ const c=value.changes as Record<string,unknown>;ensureOnlyFields(c,['enabled','renterPercent','ownerPercent','settlementDelayDays']);
+ if(!Object.keys(c).length||c.enabled!==undefined&&typeof c.enabled!=='boolean'||c.settlementDelayDays!==undefined&&(typeof c.settlementDelayDays!=='number'||!Number.isInteger(c.settlementDelayDays)||c.settlementDelayDays<0||c.settlementDelayDays>999999))throw invalid('Explicit distribution state/rates or whole delay days required');
+ return{schema:'distribution-policy-change.v1',expectedPolicyId:value.expectedPolicyId,expectedRevision:value.expectedRevision,expectedPolicyDigest:value.expectedPolicyDigest,changes:{...(c.enabled===undefined?{}:{enabled:c.enabled as boolean}),...(c.renterPercent===undefined?{}:{renterPercent:referralPercent(c.renterPercent).percent}),...(c.ownerPercent===undefined?{}:{ownerPercent:referralPercent(c.ownerPercent).percent}),...(c.settlementDelayDays===undefined?{}:{settlementDelayDays:c.settlementDelayDays as number})},reason:value.reason.trim()};
 }
-/** Only the approved two rates and on/off state may change. Other economics stay on the pinned head. */
+/** Only approved changes are applied to the pinned policy; existing payment bases remain frozen. */
 export function initialDistributionPolicyConfig(input:DistributionPolicyInitial,scope:'LOCAL_CONTROLLED'|'NATIVE'):DistributionPolicyConfig{
  if(!['LOCAL_CONTROLLED','NATIVE'].includes(scope))throw invalid('Policy scope is required');
  if(input.schema==='distribution-policy-initialize.v2')return validateDistributionPolicy(input.config,scope);
@@ -48,11 +49,19 @@ export function prepareDistributionPolicyChange(head:PolicyHead,input:Distributi
  if(head.versionId!==input.expectedPolicyId||head.revision!==input.expectedRevision||head.digest!==input.expectedPolicyDigest)throw conflict('Distribution policy baseline changed');
  const original=head.config,c=input.changes;
  if(original.schema==='distribution-policy.v3'||original.schema==='distribution-policy.v4'){
-  if(c.renterPercent!==undefined||c.ownerPercent!==undefined||c.enabled===undefined||c.enabled===original.enabled)throw invalid('Graded policy requires an explicit state change; uniform rates cannot replace its source');
-  return {...original,enabled:c.enabled};
+  if(c.renterPercent!==undefined||c.ownerPercent!==undefined)throw invalid('Uniform rates cannot replace the graded policy source');
+  const basis=original.schema==='distribution-policy.v3'&&c.settlementDelayDays!==undefined&&c.settlementDelayDays!==original.settlementDelayDays?managedDistributionPolicy(original):original;
+  const config=validateDistributionPolicy({...basis,enabled:c.enabled??original.enabled,settlementDelayDays:c.settlementDelayDays??original.settlementDelayDays},original.scope);
+  if(canonicalize(config)===canonicalize(original))throw invalid('Distribution policy change is empty');
+  return config;
+ }
+ if(original.schema==='distribution-policy.v1'&&c.settlementDelayDays!==undefined&&c.renterPercent===undefined&&c.ownerPercent===undefined){
+  const config=validateDistributionPolicy({...original,enabled:c.enabled??original.enabled,settlementDelayDays:c.settlementDelayDays},original.scope);
+  if(canonicalize(config)===canonicalize(original))throw invalid('Distribution policy change is empty');
+  return config;
  }
  if(original.schema==='distribution-policy.v1'&&(c.renterPercent===undefined||c.ownerPercent===undefined))throw invalid('Adopting uniform policy requires both explicit rates; no historical grade fallback');
- const config=validateDistributionPolicy({schema:'distribution-policy.v2',scope:original.scope,enabled:c.enabled??original.enabled,participation:original.participation,depth:original.depth,selfRebate:original.selfRebate,accountModes:[...original.accountModes],minimumAccrualCents:original.minimumAccrualCents,settlementDelayDays:original.settlementDelayDays,rateMode:'UNIFORM',renterPercent:c.renterPercent??(original.schema==='distribution-policy.v2'?original.renterPercent:undefined),ownerPercent:c.ownerPercent??(original.schema==='distribution-policy.v2'?original.ownerPercent:undefined)},original.scope);
+ const config=validateDistributionPolicy({schema:'distribution-policy.v2',scope:original.scope,enabled:c.enabled??original.enabled,participation:original.participation,depth:original.depth,selfRebate:original.selfRebate,accountModes:[...original.accountModes],minimumAccrualCents:original.minimumAccrualCents,settlementDelayDays:c.settlementDelayDays??original.settlementDelayDays,rateMode:'UNIFORM',renterPercent:c.renterPercent??(original.schema==='distribution-policy.v2'?original.renterPercent:undefined),ownerPercent:c.ownerPercent??(original.schema==='distribution-policy.v2'?original.ownerPercent:undefined)},original.scope);
  if(canonicalize(config)===canonicalize(original))throw invalid('Distribution policy change is empty');
  return config;
 }

@@ -96,6 +96,25 @@ const legacyEffectiveConfig=validateDistributionPolicy({
  legacySource:{receiptSha256:'a'.repeat(64),configurationSha256:'b'.repeat(64),levelsSha256:'c'.repeat(64),levelNames:{legacy_1:'青铜会员',legacy_2:'白银会员',legacy_3:'黄金会员',legacy_4:'秋水'}},
 });
 
+test('waiting-period changes preserve policy economics and previously frozen payment timing',()=>{
+ const original=legacyEffectiveConfig,originalHead={...head,digest:hash(original),config:original};
+ const input=parseDistributionPolicyChange({...change(),expectedPolicyDigest:originalHead.digest,changes:{settlementDelayDays:14}}) as DistributionPolicyUpdate;
+ const updated=prepareDistributionPolicyChange(originalHead,input);
+ if(original.schema!=='distribution-policy.v3'||updated.schema!=='distribution-policy.v4')throw new Error('Expected preserved legacy policy and managed successor');
+ assert.equal(updated.settlementDelayDays,14);assert.equal(updated.baseMode,'LEGACY_RENTAL');
+ assert.deepEqual(updated.levels,original.levels);assert.deepEqual(updated.levelNames,original.legacySource.levelNames);assert.equal(original.settlementDelayDays,7);
+ const before=freezePaymentDistributionBasis(paymentInput(original,'legacy_1'));
+ const after=freezePaymentDistributionBasis(paymentInput(updated,'legacy_1'));
+ const posting:CompletedDistributionFacts={origin:'NATIVE',orderId:'order_1',confirmationId:'payment_1',postingId:'post_1',postingDigest:'a'.repeat(64),postedAt:'2026-11-03T08:00:00.000Z',classification:'NORMAL',calculationMode:'SYSTEM',capturedCents:'30000',ownerNetCents:'16000',renterRefundCents:'4000',platformContributionCents:'10000',compensationFeeCents:'100'};
+ assert.equal(prepareAccrualFromFrozenPayment(before,posting).items[0]?.dueAt,'2026-11-10T08:00:00.000000Z');
+ assert.equal(prepareAccrualFromFrozenPayment(after,posting).items[0]?.dueAt,'2026-11-17T08:00:00.000000Z');
+ for(const bad of [-1,1.5,1000000,'7',null])assert.throws(()=>parseDistributionPolicyChange({...input,changes:{settlementDelayDays:bad}}));
+ assert.throws(()=>prepareDistributionPolicyChange(originalHead,{...input,changes:{settlementDelayDays:7}}),/empty/);
+ assert.throws(()=>prepareDistributionPolicyChange(originalHead,{...input,expectedRevision:'5'}),/baseline changed/);
+ const v1=prepareDistributionPolicyChange(head,{...input,expectedPolicyDigest:head.digest,changes:{settlementDelayDays:3}});
+ assert.equal(v1.schema,'distribution-policy.v1');assert.equal(v1.settlementDelayDays,3);
+});
+
 test('reviewed legacy initial request binds scope, level names and rates and cannot switch to uniform through a state change',()=>{
  const input=parseDistributionPolicyChange({schema:'distribution-policy-initialize.v2',config:legacyEffectiveConfig,reason:'承接原档位'}) as DistributionPolicyInitial;
  assert.deepEqual(initialDistributionPolicyConfig(input,'LOCAL_CONTROLLED'),legacyEffectiveConfig);

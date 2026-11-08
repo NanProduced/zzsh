@@ -7,15 +7,20 @@ const button=(root,text)=>[...root.querySelectorAll('button')].find(b=>b.textCon
 test('effective legacy policy shows current names and separate purchase/listing rates and submits only an explicit state change',async()=>{
  const h=await setup();try{
   const config={...known.policy.config,schema:'distribution-policy.v3',enabled:true,levels:[{code:'legacy_1',rank:1,default:true,renterPercent:'20',ownerPercent:'30',upgrade:null}],legacySource:{receiptSha256:'a'.repeat(64),configurationSha256:'b'.repeat(64),levelsSha256:'c'.repeat(64),levelNames:{legacy_1:'青铜会员'}}};
-  const response={...known,policy:{...known.policy,config},changeContext:context};
+  const response={...known,policy:{...known.policy,config},changeContext:{...context,settlementDelayChangeSupported:true}};
   globalThis.fetch=h.browser.fetch=async url=>json(String(url).endsWith('/operations')?operations:response);
   const m=await h.loader.ssrLoadModule('/src/views/distribution-policy-panel.tsx'),model=await h.loader.ssrLoadModule('/src/views/distribution-policy-model.ts');
   const ui=await h.mount(m.DistributionPolicyPanel,{snapshot:snap(manager)});
   await click(button(ui.host,'当前按分销档位计佣'));
   assert.match(ui.host.textContent,/青铜会员.*20%.*30%/);
-  await click(button(ui.host,'申请调整计佣状态'));
+  await click(button(ui.host,'申请调整计佣规则'));
   assert.equal(h.browser.document.querySelector('[aria-label="推荐租客奖励比例"]'),null);
   assert.deepEqual(model.buildDistributionPolicyPayload(response.policy,{enabled:false,renter:'',owner:'',reason:'暂停新增计佣'}).changes,{enabled:false});
+  const delay=h.browser.document.querySelector('[aria-label="分销佣金等待天数"]');assert.equal(delay.value,'7');assert.equal(delay.disabled,false);
+  await input(h.browser,delay,'14');await input(h.browser,h.browser.document.querySelector('[aria-label="分销政策变更原因"]'),'调整佣金入账时间');
+  assert.match(h.browser.document.body.textContent,/结算后等待入账：14 天/);
+  assert.deepEqual(model.buildDistributionPolicyPayload(response.policy,{enabled:true,renter:'',owner:'',reason:'调整佣金入账时间',settlementDelayDays:'14'}).changes,{settlementDelayDays:14});
+  for(const value of ['-1','1.5','1000000','01'])assert.throws(()=>model.buildDistributionPolicyPayload(response.policy,{enabled:true,renter:'',owner:'',reason:'调整佣金入账时间',settlementDelayDays:value}));
  }finally{await h.close();}
 });
 

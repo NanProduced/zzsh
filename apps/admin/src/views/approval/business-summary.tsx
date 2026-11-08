@@ -81,13 +81,14 @@ function DistributionSummary({ business }: { business: BusinessView }) {
   const levels = Array.isArray(changes.levels) ? changes.levels : [];
   const changed = (key: string) => Object.prototype.hasOwnProperty.call(changes, key);
   const percent = (key: string) => changed(key) ? text(changes, key) === null ? null : `${text(changes, key)}%` : "本次未变更";
+  const delay = Number.isInteger(changes.settlementDelayDays) && Number(changes.settlementDelayDays) >= 0 ? `${changes.settlementDelayDays} 天` : null;
   const version = business.result?.knowledge === "KNOWN" && typeof business.result.policyVersionId === "string" && business.result.policyVersionId.trim() ? business.result.policyVersionId : null;
   return <Section title="分销政策变更快照">
     <FactGrid>
       <Fact label={initial ? "首版计佣状态" : "新增计佣"} value={typeof changes.enabled === "boolean" ? changes.enabled ? "启用" : "暂停" : null} />
       {legacy ? null : <Fact label="租客来源佣金比例" value={initial ? (text(changes, "renterPercent") === null ? null : `${text(changes, "renterPercent")}%`) : percent("renterPercent")} />}
       {legacy ? null : <Fact label="号主来源佣金比例" value={initial ? (text(changes, "ownerPercent") === null ? null : `${text(changes, "ownerPercent")}%`) : percent("ownerPercent")} />}
-      {initial ? <Fact label="最低计提 / 结算等待" value={`${text(changes, "minimumAccrualCents") ?? "未知"} 分 / ${text(changes, "settlementDelayDays") ?? "未知"} 天`} /> : null}
+      {initial ? <Fact label="最低计提 / 结算等待" value={`${text(changes, "minimumAccrualCents") ?? "未知"} 分 / ${delay ?? "未知"}`} /> : changed("settlementDelayDays") ? <Fact label="结算后等待入账" value={delay} /> : null}
       <Fact label="申请理由" value={change.reason} />
     </FactGrid>
     {legacy ? <dl className="space-y-2 text-sm">{levels.map(level => <div key={level.code}><dt>{legacySource?.levelNames?.[level.code] ?? level.code}</dt><dd>购买 {level.renterPercent}% · 上架 {level.ownerPercent}%</dd></div>)}</dl> : null}
