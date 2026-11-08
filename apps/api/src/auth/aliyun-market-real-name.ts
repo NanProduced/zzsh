@@ -21,8 +21,12 @@ export function createAliyunMarketRealNameProvider(appCode: string, send: typeof
       if (response.status !== 200) throw new Error();
       const payload: unknown = await response.json();
       if (!payload || typeof payload !== "object" || Array.isArray(payload)) throw new Error();
-      const body = payload as Record<string, unknown>, reference = body.requestid;
-      if ((body.code !== 200 && body.code !== "200") || typeof reference !== "string" || !/^[A-Za-z0-9._:-]{1,256}$/.test(reference)
+      const body = payload as Record<string, unknown>, rawReference = body.requestid;
+      const gatewayReference = response.headers.get("x-ca-request-id");
+      const reference = rawReference === undefined || rawReference === null
+        ? typeof gatewayReference === "string" && /^[A-Za-z0-9._:-]{1,248}$/.test(gatewayReference) ? `gateway:${gatewayReference}` : null
+        : typeof rawReference === "string" && /^[A-Za-z0-9._:-]{1,256}$/.test(rawReference) ? rawReference : null;
+      if ((body.code !== 200 && body.code !== "200") || !reference
         || !body.data || typeof body.data !== "object" || Array.isArray(body.data)) throw new Error();
       const result = (body.data as Record<string, unknown>).result;
       if (result === 1 || result === "1") return { status: "VERIFIED", ageStatus: verifiedMainlandAgeStatus(document, clock()), provider, providerReference: reference };

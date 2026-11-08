@@ -29,11 +29,19 @@ test("marketplace mismatch example is rejected while preserving the request refe
   assert.equal(result.status,"REJECTED");assert.equal(result.providerReference,"1400000000000000000");assert.equal(result.ageStatus,"UNKNOWN");
 });
 
+test("missing product request id uses the explicitly labeled API Gateway request id",async()=>{
+  const provider=createAliyunMarketRealNameProvider(appCode,async()=>Response.json({code:200,data:{result:1}},{headers:{"X-Ca-Request-Id":"gateway-fixture-123"}}),clock);
+  const result=await provider.verify(input);
+  assert.equal(result.status,"VERIFIED");assert.equal(result.providerReference,"gateway:gateway-fixture-123");
+});
+
 test("marketplace provider fails closed without retrying or exposing identity and credentials",async()=>{
   for(const reply of [
     ()=>new Response("unavailable",{status:503}),
     ()=>Response.json({code:400,requestid:"market-request",data:{result:1}}),
     ()=>Response.json({code:200,data:{result:1}}),
+    ()=>Response.json({code:200,requestid:"bad id",data:{result:1}},{headers:{"X-Ca-Request-Id":"gateway-fixture-123"}}),
+    ()=>Response.json({code:200,data:{result:1}},{headers:{"X-Ca-Request-Id":"x".repeat(249)}}),
     ()=>Response.json({code:200,requestid:"market-request",data:null}),
     ()=>{throw new Error("synthetic identity and appcode must not escape");},
   ]){
