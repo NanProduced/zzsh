@@ -644,10 +644,25 @@ export async function configureDistributionFinancialPrivileges(pool: Pick<Pool, 
       AND conname='production_no_local_controlled_root' AND contype='c' AND convalidated) AS production`)).rows[0]?.production !== true)) {
     throw new Error("Financial schema is incomplete; runtime privileges not finalized");
   }
+  let controlledFunctions = "";
+  if (!missing.length) {
+    const guards = (await pool.query(`/* distribution payment guard */ SELECT
+      to_regprocedure('zzsh_order.guard_controlled_payment_declaration()') IS NOT NULL AS standard,
+      to_regprocedure('zzsh_order.guard_withdrawal_referral_recovery()') IS NOT NULL AS withdrawal,
+      EXISTS(SELECT 1 FROM pg_database d JOIN pg_namespace n ON n.nspname='zzsh_order'
+        JOIN pg_class c ON c.oid=to_regclass('zzsh_order.controlled_payment_declaration') AND c.relowner=n.nspowner
+        JOIN pg_trigger t ON t.tgrelid=c.oid AND t.tgname='ecs_demo_payment_declaration_guard' AND NOT t.tgisinternal AND t.tgenabled IN('O','A')
+        JOIN pg_proc p ON p.oid=t.tgfoid AND p.oid=to_regprocedure('zzsh_order.guard_ecs_demo_payment_declaration()') AND p.proowner=n.nspowner
+        WHERE d.datname=current_database() AND to_regclass('zzsh_order.ecs_test_demo_finance_registration') IS NOT NULL
+          AND ((d.datname='zzsh_test_r07_delivery_20261108' AND shobj_description(d.oid,'pg_database')='zzsh:r07-delivery-clone:v1')
+            OR (d.datname ~ '^zzsh_ecs_test(_[a-z0-9_]{1,32})?$' AND shobj_description(d.oid,'pg_database')='zzsh:ecs-test:v1'))) AS demo`)).rows[0];
+    if (!guards || typeof guards.standard !== 'boolean' || typeof guards.withdrawal !== 'boolean' || typeof guards.demo !== 'boolean' ||
+        !guards.withdrawal || (!guards.standard && !guards.demo)) throw new Error('Controlled payment guard schema is incomplete');
+    controlledFunctions = `,${guards.standard ? 'zzsh_order.guard_controlled_payment_declaration()' : 'zzsh_order.guard_ecs_demo_payment_declaration()'},zzsh_order.guard_withdrawal_referral_recovery()`;
+  }
   for (const table of names) {
     if (!missing.some(row => row.name === table)) await resetRuntimeTablePrivileges(pool, table, role);
   }
-  const controlledFunctions = missing.length ? "" : ",zzsh_order.guard_controlled_payment_declaration(),zzsh_order.guard_withdrawal_referral_recovery()";
   await pool.query(`
     GRANT INSERT(id,order_id,payment_confirmation_id,admission_id,admission_revision,canonical_basis,basis_digest)
       ON zzsh_order.payment_distribution_basis TO ${role};
@@ -1048,7 +1063,23 @@ export async function configureChannelRefundPrivileges(pool: Pick<Pool, "query">
   `);
 }
 
-/** Optional collection/refund/payout/account/bank groups; verify every metadata group before changing ACL. */
+async function readDemoRefundSchema(pool: Pick<Pool, "query">) {
+  return (await pool.query(`/* demo refund guard */ SELECT
+      EXISTS(SELECT 1 FROM pg_database d JOIN pg_namespace n ON n.nspname='zzsh_order'
+        JOIN pg_class c ON c.oid=to_regclass('zzsh_order.ecs_test_demo_finance_registration') AND c.relowner=n.nspowner
+        WHERE d.datname=current_database() AND ((d.datname='zzsh_test_r07_delivery_20261108' AND shobj_description(d.oid,'pg_database')='zzsh:r07-delivery-clone:v1')
+          OR (d.datname ~ '^zzsh_ecs_test(_[a-z0-9_]{1,32})?$' AND shobj_description(d.oid,'pg_database')='zzsh:ecs-test:v1')))
+      AND NOT EXISTS(SELECT 1 FROM (VALUES
+        ('zzsh_order.ecs_test_demo_finance_registration','guard_ecs_test_demo_finance_registration','zzsh_order.guard_ecs_test_demo_finance_registration()'),
+        ('zzsh_order.local_controlled_refund_operation','local_refund_operation_guard','zzsh_order.guard_local_refund_source()'),
+        ('zzsh_order.local_controlled_refund_evidence','local_refund_evidence_guard','zzsh_order.guard_local_refund_source()')
+      ) required(relation,name,fn) WHERE NOT EXISTS(SELECT 1 FROM pg_trigger t JOIN pg_class c ON c.oid=t.tgrelid
+        JOIN pg_namespace n ON n.oid=c.relnamespace JOIN pg_proc p ON p.oid=t.tgfoid
+        WHERE t.tgrelid=to_regclass(required.relation) AND t.tgname=required.name AND NOT t.tgisinternal AND t.tgenabled IN('O','A')
+          AND p.oid=to_regprocedure(required.fn) AND p.proowner=n.nspowner AND c.relowner=n.nspowner)) AS ready,
+      to_regclass('zzsh_order.ecs_demo_legacy_refund') IS NOT NULL AS legacy`)).rows[0];
+}
+
 /** Local metadata is never a real-channel capability; registration mutations remain owner-only. */
 export async function configureLocalFinancialSandboxPrivileges(pool: Pick<Pool, "query">, runtimeRole: string): Promise<void> {
   const role = quoteIdentifier(runtimeRole);
@@ -1059,6 +1090,16 @@ export async function configureLocalFinancialSandboxPrivileges(pool: Pick<Pool, 
   if (found.length !== tables.length || new Set(found.map(row => row.name)).size !== tables.length
     || found.some(row => !tables.includes(row.name) || typeof row.present !== "boolean")) throw new Error("Local financial sandbox inventory is incomplete");
   if (found.every(row => !row.present)) return;
+  if (!found.find(row => row.name === tables[0])?.present && found.filter(row => row.name !== tables[0]).every(row => row.present)) {
+    const demo=await readDemoRefundSchema(pool);
+    if (!demo || demo.ready !== true || typeof demo.legacy !== 'boolean') throw new Error('Demo financial sandbox guard is incomplete');
+    // A later, explicitly checked demo grant restores only its narrow test privileges.
+    for (const table of ['zzsh_order.ecs_test_demo_finance_registration',tables[1]!,tables[2]!,...(demo.legacy?['zzsh_order.ecs_demo_legacy_refund']:[])]) {
+      await resetRuntimeTablePrivileges(pool,table,'PUBLIC',{select:false});
+      await resetRuntimeTablePrivileges(pool,table,role);
+    }
+    return;
+  }
   if (found.some(row => !row.present)) throw new Error("Local financial sandbox is partially deployed");
   const functions = ["zzsh_order.local_financial_sandbox_matches(text,text,boolean)", "zzsh_order.local_controlled_refund_liability_complete(text)", "zzsh_order.local_controlled_refund_terminal_complete(text)"];
   const routines = (await pool.query<{ name: string; present: boolean }>(
@@ -1120,7 +1161,12 @@ export async function configureJoinpayFinancialPrivileges(pool: Pick<Pool, "quer
   const complete = (tables: Table[]) => { const rows = tables.map(t => found.find(r => r.name === t.name)!); if (rows.every(r => !r.present)) return false; if (rows.some(r => !r.present)) throw new Error("JoinPay financial group is partially deployed"); return true; };
   const hasCollection = complete(collection.slice(0,7)), hasRefund = complete(refund.slice(1)), hasPayout = complete(payout), hasAccount = complete(account), hasBank = complete(bank),hasPrestart=complete(prestart);
   const sandboxRows = found.filter(row => sandboxNames.includes(row.name));
-  if (sandboxRows.some(row => row.present) && sandboxRows.some(row => !row.present)) throw new Error("Local financial sandbox is partially deployed");
+  let hasDemoSandbox = false;
+  if (sandboxRows.some(row => row.present) && sandboxRows.some(row => !row.present)) {
+    const demoShape=!sandboxRows.find(row=>row.name===sandboxNames[0])?.present && sandboxRows.filter(row=>row.name!==sandboxNames[0]).every(row=>row.present);
+    if (!demoShape || (await readDemoRefundSchema(pool))?.ready !== true) throw new Error("Local financial sandbox is partially deployed");
+    hasDemoSandbox = true;
+  }
   const hasSandbox = sandboxRows.every(row => row.present);
   if (!hasCollection && !hasRefund && !hasPayout && !hasAccount && !hasBank&&!hasPrestart) return;
   if (hasPayout && !hasRefund) throw new Error("JoinPay payout requires the complete formal refund parent");
@@ -1151,7 +1197,8 @@ export async function configureJoinpayFinancialPrivileges(pool: Pick<Pool, "quer
   if(basisCount!==0&&basisCount!==3||hasPrestart&&basisCount!==3)throw new Error('Refund liability extension is partially deployed');
   if(basisCount===3){refund[0]!.insert+=' '+basisColumns.join(' ');functions.push('zzsh_order.native_abnormal_refund_liability_complete(text)','zzsh_order.native_abnormal_refund_terminal_complete(text)');}
   // This column belongs to the separately checked local group, not the formal provider's write surface.
-  if (hasSandbox) refund[0]!.metadata += ' sandbox_registration_ref';
+  if (hasSandbox || hasDemoSandbox) refund[0]!.metadata += ' sandbox_registration_ref';
+  if (hasDemoSandbox) refund[0]!.metadata += ' demo_terminal_evidence_id';
   const identity = (await pool.query(`/* joinpay financial runtime role */ SELECT r.oid::text AS "roleOid",r.rolsuper AS superuser,r.rolbypassrls AS "bypassRls",r.rolcreaterole AS "createRole",r.rolcreatedb AS "createDb",r.rolreplication AS replication,
     EXISTS(SELECT 1 FROM pg_auth_members m WHERE m.member=r.oid) AS "memberRights",
     EXISTS(SELECT 1 FROM (SELECT c.relowner AS owner_id FROM pg_class c WHERE c.oid IN(SELECT to_regclass(name) FROM unnest($2::text[]) AS t(name))

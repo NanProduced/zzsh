@@ -47,6 +47,9 @@ function fixture(present = true) {
   const pool = { query: async (sql: string, args: unknown[] = []) => {
     seen.push({ sql, args });
     if (state.failAt && sql.includes(state.failAt)) throw Error("SYNTHETIC_METADATA_FAILURE");
+    if (sql.includes('guard_legacy_listing_capture_fact()')) return { rows: [{ present: false, guard: false, triggers: 0 }] };
+    if (sql.includes('post_order_compensation(text)')) return { rows: [{ present: false, executor: false, verifier: false, triggers: 0, functions_safe: false, incident_index: false }] };
+    if (sql.includes('user_auth_throttle_event_id_seq')) return { rows: [{ event: false, captcha: false, sequence: false }] };
     if (sql.startsWith("SELECT name,to_regclass")) {
       const names = args[0] as string[];
       return { rows: names.includes(INTENT) ? state.inventory : names.map(name => ({ name, present: false })) };
@@ -143,5 +146,23 @@ test('sandbox ACL keeps owner-only enrollment while admitting row locks and immu
  const tables=['zzsh_order.local_financial_sandbox_registration','zzsh_order.local_controlled_refund_operation','zzsh_order.local_controlled_refund_evidence'];
  for(const mode of ['absent','partial','missing-routine','installed'] as const){const seen:string[]=[],pool={query:async(sql:string,args:unknown[]=[])=>{seen.push(sql);const names=args[0] as string[];if(sql.startsWith('SELECT name,to_regclass'))return{rows:names.map((name,i)=>({name,present:mode==='absent'?false:mode==='partial'?i===0:true}))};if(sql.startsWith('SELECT name,to_regprocedure'))return{rows:names.map((name,i)=>({name,present:mode!=='missing-routine'||i!==1}))};if(sql.startsWith('SELECT attname'))return{rows:['id','reference','active','canonical_registration'].map(attname=>({attname}))};return{rows:[]};}} as unknown as Pick<Pool,'query'>;
  if(mode==='partial'||mode==='missing-routine'){await assert.rejects(configureLocalFinancialSandboxPrivileges(pool,'runtime_role'),/incomplete|partially/);assert(!seen.some(sql=>/^(GRANT|REVOKE)/.test(sql.trim())));continue;}await configureLocalFinancialSandboxPrivileges(pool,'runtime_role');if(mode==='absent'){assert.equal(seen.length,1);continue;}const grants=seen.filter(sql=>sql.includes('GRANT')).join('\n');assert.match(grants,/GRANT UPDATE\(active\) ON zzsh_order\.local_financial_sandbox_registration/);assert.doesNotMatch(grants,/GRANT INSERT[^;]* ON zzsh_order\.local_financial_sandbox_registration/);assert(grants.includes('GRANT INSERT(sandbox_registration_ref) ON zzsh_order.channel_refund_intent'));assert(grants.includes('local_controlled_refund_terminal_complete(text)'));assert(grants.includes('local_controlled_refund_liability_complete(text)'));for(const table of tables)assert(seen.some(sql=>sql.includes('REVOKE ALL ON TABLE '+table)));
+ }
+});
+
+test('registered demo refund tables are narrowed until explicit demo grants are restored',async()=>{
+ for(const valid of [true,false]){
+  const seen:string[]=[],pool={query:async(sql:string,args:unknown[]=[])=>{seen.push(sql);
+   if(sql.startsWith('SELECT name,to_regclass'))return{rows:(args[0] as string[]).map((name,i)=>({name,present:i!==0}))};
+   if(sql.includes('/* demo refund guard */'))return{rows:[{ready:valid,legacy:true}]};
+   if(sql.startsWith('SELECT attname'))return{rows:['id','active','source_ref'].map(attname=>({attname}))};
+   return{rows:[]};
+  }} as unknown as Pick<Pool,'query'>;
+  if(!valid){await assert.rejects(configureLocalFinancialSandboxPrivileges(pool,'runtime_role'),/guard is incomplete/);assert(!seen.some(sql=>sql.startsWith('REVOKE ALL ON TABLE')));continue;}
+  await configureLocalFinancialSandboxPrivileges(pool,'runtime_role');
+  const inventory=seen.find(sql=>sql.includes('/* demo refund guard */'))!;assert.match(inventory,/shobj_description/);assert.match(inventory,/t\.tgenabled/);assert.match(inventory,/p\.oid=to_regprocedure/);
+  for(const name of ['ecs_test_demo_finance_registration','local_controlled_refund_operation','local_controlled_refund_evidence','ecs_demo_legacy_refund']){
+   const revokes=seen.filter(sql=>sql.startsWith(`REVOKE ALL ON TABLE zzsh_order.${name} `));assert.equal(revokes.length,2,name);
+   assert(revokes.some(sql=>sql.includes('FROM PUBLIC')));assert(revokes.some(sql=>sql.includes('FROM "runtime_role"')));assert(revokes.every(sql=>!sql.includes('GRANT INSERT')));
+  }
  }
 });

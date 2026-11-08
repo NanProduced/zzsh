@@ -25,13 +25,14 @@ function fixture(groups=['REFUND','PAYOUT','ACCOUNT']){
   const present=new Set([intent,oldObservation,...(groups.includes('REFUND')?refund:[]),...(groups.includes('PAYOUT')?payout:[]),...(groups.includes('ACCOUNT')?[account]:[]),...(groups.includes('COLLECTION')?collection:[]),...(groups.includes('BANK')?[bank]:[])]),catalog=new Map([...allColumns].map(([n,c])=>[n,[...c]]));
   if(!groups.includes('REFUND'))catalog.set(intent,columns(old,intent));
   const seen:{sql:string;args:any[]}[]=[],rights=new Map<string,Rights>();for(const principal of ['runtime_role','PUBLIC'])for(const [name,cols]of catalog)rights.set(principal+':'+name,{table:new Set(['SELECT','INSERT','UPDATE','DELETE','TRUNCATE','REFERENCES','TRIGGER']),columns:new Map(ops.map(op=>[op,new Set(cols)])),grantOption:true});
-  const state={present,catalog,functions:new Set([...functions,collectionEffect,bankGuard]),bankGuard:true as unknown,identity:{roleOid:'10001',superuser:false,bypassRls:false,createRole:false,createDb:false,replication:false,memberRights:false,ownerRights:false} as any,badInventory:false,badColumns:false,permissionError:null as Error|null};
+  const state={present,catalog,functions:new Set([...functions,collectionEffect,bankGuard]),bankGuard:true as unknown,demoReady:false,identity:{roleOid:'10001',superuser:false,bypassRls:false,createRole:false,createDb:false,replication:false,memberRights:false,ownerRights:false} as any,badInventory:false,badColumns:false,permissionError:null as Error|null};
   function emitted(sql:string){for(const raw of sql.split(';')){const text=raw.replace(/\s+/g,' ').trim(),m=/^(GRANT|REVOKE) (.+?) ON (?:TABLE )?([a-z_]+\.[a-z_]+) (?:TO|FROM) (.+)$/.exec(text);if(!m)continue;const principals=m[4]!.split(',').map(p=>p.trim().replaceAll('"',''));for(const principal of principals){const r=rights.get(principal+':'+m[3]);if(!r)continue;if(m[2]==='ALL'){assert.equal(m[1],'REVOKE');r.table.clear();r.grantOption=false;continue;}const grants=[...m[2]!.matchAll(/(SELECT|INSERT|UPDATE|REFERENCES)\s*\(([^)]*)\)/g)];if(grants.length){for(const [,op,list]of grants)for(const col of list!.split(',').map(s=>s.trim().replaceAll('"',''))){if(m[1]==='GRANT')r.columns.get(op!)!.add(col);else r.columns.get(op!)!.delete(col);}}else for(const op of m[2]!.split(',').map(s=>s.trim()))if(m[1]==='GRANT')r.table.add(op);else r.table.delete(op);}}}
   const pool={query:async(sql:string,args:any[]=[])=>{seen.push({sql,args});
     if(sql.includes('joinpay financial optional tables')||sql.startsWith('SELECT name,to_regclass')){const rows=args[0].map((name:string)=>({name,present:present.has(name)}));return{rows:state.badInventory?rows.slice(1):rows};}
     if(sql.includes('joinpay financial runtime role'))return{rows:state.identity?[state.identity]:[]};
     if(sql.includes('joinpay financial columns')){const rows=args[0].flatMap((name:string)=>(catalog.get(name)??[]).map(attname=>({name,attname})));return{rows:state.badColumns?[...rows,{name:'zzsh_order.other',attname:'id'}]:rows};}
     if(sql.includes('joinpay financial functions'))return{rows:args[0].map((name:string)=>({name,present:state.functions.has(name)}))};
+    if(sql.includes('demo refund guard'))return{rows:[{ready:state.demoReady,legacy:false}]};
     if(sql.includes('withdrawal bank binding guard'))return{rows:state.bankGuard===null?[]:[{ready:state.bankGuard}]};
     if(sql.startsWith('SELECT attname FROM pg_attribute'))return{rows:(catalog.get(args[0])??[]).map(attname=>({attname}))};
     if(/^\s*(REVOKE|GRANT)/.test(sql)){if(state.permissionError)throw state.permissionError;emitted(sql);return{rows:[]};}
@@ -208,4 +209,12 @@ test('sandbox extension is accepted only as a complete optional group and never 
  const partial=fixture(['REFUND']);partial.state.present.add(names[0]!);partial.state.catalog.get(intent)!.push('sandbox_registration_ref');await assert.rejects(configure(partial.pool),/partially deployed/);assert.equal(mutations(partial).length,0);
  const unsupported=fixture(['REFUND']);unsupported.state.catalog.get(intent)!.push('sandbox_registration_ref');await assert.rejects(configure(unsupported.pool),/column inventory differs/);assert.equal(mutations(unsupported).length,0);
  const missingColumn=fixture(['REFUND']);for(const name of names)missingColumn.state.present.add(name);await assert.rejects(configure(missingColumn.pool),/column inventory differs/);assert.equal(mutations(missingColumn).length,0);
+});
+
+test('a registered demo refund schema is accepted without granting sandbox insert columns',async()=>{
+ const names=['zzsh_order.local_controlled_refund_operation','zzsh_order.local_controlled_refund_evidence'];
+ const demo=fixture(['REFUND']);for(const name of names)demo.state.present.add(name);demo.state.demoReady=true;demo.state.catalog.get(intent)!.push('sandbox_registration_ref','demo_terminal_evidence_id');await configure(demo.pool);
+ assert(demo.seen.some(row=>row.sql.includes('demo refund guard')));
+ assert.equal(demo.can(intent,'INSERT','sandbox_registration_ref'),false);assert.equal(demo.can(intent,'UPDATE','demo_terminal_evidence_id'),false);
+ const rejected=fixture(['REFUND']);for(const name of names)rejected.state.present.add(name);await assert.rejects(configure(rejected.pool),/partially deployed/);assert.equal(mutations(rejected).length,0);
 });

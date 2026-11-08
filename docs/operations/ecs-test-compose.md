@@ -74,6 +74,8 @@ docker buildx build --load --resource memory=3g --resource cpu-quota=100000 --re
 
 新版测试退款和提现还需在同一测试库安装 `apps/api/migrations/candidates/ecs-test-demo-finance/demo-immediate-outcomes.sql`，同样先核对目标与备份并暂停相关写入，再由 schema owner 在单个事务中执行。脚本校验旧守卫摘要，不覆盖既有请求；已提交的旧模拟请求继续按原状态恢复，新模拟退款及提现按正常成功路径处理。API 启动前检查新守卫，未安装时拒绝启动。模拟成功仅代表测试账内处理，不代表真实汇聚退款、出款或银行到账。
 
+已登记的测试库执行标准业务迁移后，标准权限收敛会撤销模拟资金的写权限。重新启用模拟功能前，由该库 schema owner 在单个事务中执行同目录 `grant-runtime.sql`，核对登记、守卫和有效权限后再启动 API；失败时保留错误和事务结果，不向正式渠道扩权。
+
 ## 首次导入与启动（仅审核后执行）
 
 首版候选归档已在本机隔离 PostgreSQL 16 中验证过保留 owner/ACL 的原生恢复：预先只创建目标三角色，在目标数据库不存在时使用 `pg_restore --exit-on-error --create`，恢复后独立核对角色、权限和数据。`db-setup --roles-only` 只创建角色，供这一受审路径使用；无参数仍创建角色和空数据库。两种方式不能混用；`--create` 不是单事务，失败须保留现场并核对，不能盲目重试或自动删除目标。实际 ECS 连接、部署步骤和权限仍须经 Owner 审核并在目标复核。

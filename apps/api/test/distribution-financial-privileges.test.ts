@@ -1,6 +1,12 @@
 import {test} from 'node:test';import {strict as assert} from 'node:assert';import type {Pool} from 'pg';
 import {applyRuntimePrivileges,configureDistributionFinancialPrivileges,configureMembershipGrowthPrivileges} from '../src/database/business-migrations';
-function probe(present:boolean|boolean[]=true,production=false){const seen:string[]=[],pool={query:async(sql:string,args:any[]=[])=>{seen.push(sql);
+function probe(present:boolean|boolean[]=true,production=false,guards={standard:true,withdrawal:true,demo:false}){const seen:string[]=[],pool={query:async(sql:string,args:any[]=[])=>{seen.push(sql);
+ if(sql.includes('/* distribution payment guard */'))return{rows:[guards]};
+ if(sql.includes('guard_legacy_listing_capture_fact()'))return{rows:[{present:false,guard:false,triggers:0}]};
+ if(sql.includes('post_order_compensation(text)'))return{rows:[{present:false,executor:false,verifier:false,triggers:0,functions_safe:false,incident_index:false}]};
+ if(sql.includes('user_auth_throttle_event_id_seq'))return{rows:[{event:false,captcha:false,sequence:false}]};
+ if(sql.startsWith("SELECT to_regclass('zzsh_order.native_refund_review_resolution')"))return{rows:[{present:false,function_present:false}]};
+ if(sql.includes('guard_settlement_refund_policy()'))return{rows:[{present:false,guard:false,posting_columns:0}]};
  if(sql.includes('joinpay financial optional tables'))return{rows:args[0].map((name:string)=>({name,present:false}))};
  if(sql.startsWith('SELECT name,to_regprocedure(name)'))return{rows:args[0].map((name:string)=>({name,present:false}))};
  if(sql.startsWith('SELECT name,to_regclass'))return{rows:args[0].map((name:string,i:number)=>({name,present:args[0].some((n:string)=>['zzsh_order.legacy_duty_finance_contract','zzsh_order.channel_refund_intent','zzsh_order.local_financial_sandbox_registration','zzsh_iam.membership_growth_legacy_read_admission'].includes(n))?false:Array.isArray(present)?present[i]:present}))};
@@ -28,6 +34,14 @@ test('convergence clears every discovered column privilege before granting only 
  const p=probe();await configureDistributionFinancialPrivileges(p.pool,'runtime_role');const revokes=p.seen.filter(s=>s.startsWith('REVOKE ALL ON TABLE'));assert.equal(revokes.length,6);
  for(const sql of revokes){assert(sql.includes('"unlisted_column"'));for(const op of ['SELECT','INSERT','UPDATE','REFERENCES'])assert(sql.includes(op+' ('));assert(sql.includes('FROM "runtime_role"'));}
  const grants=p.seen.at(-1)!;assert(!grants.includes('GRANT INSERT(id) ON zzsh_order.distribution_order_admission'));assert(!grants.includes('GRANT INSERT(id) ON zzsh_order.controlled_payment_declaration'));assert(!grants.includes('unlisted_column'));assert(grants.includes('GRANT UPDATE(state,funds_disposition,recovery_required_cents,version)'));assert(!grants.includes('zzsh_order_personal_finance_r'));
+});
+test('registered demo payment guard is accepted but a missing or unverifiable guard fails before grants',async()=>{
+ const demo=probe(true,false,{standard:false,withdrawal:true,demo:true});await configureDistributionFinancialPrivileges(demo.pool,'runtime_role');
+ const inspected=demo.seen.find(sql=>sql.includes('/* distribution payment guard */'))!;assert.match(inspected,/shobj_description/);assert.match(inspected,/t\.tgfoid/);assert.match(inspected,/t\.tgenabled/);
+ assert(demo.seen.at(-1)?.includes('zzsh_order.guard_ecs_demo_payment_declaration()'));
+ const invalid=probe(true,false,{standard:false,withdrawal:true,demo:false});await assert.rejects(configureDistributionFinancialPrivileges(invalid.pool,'runtime_role'),/guard schema is incomplete/);
+ assert(!invalid.seen.some(sql=>sql.startsWith('REVOKE ALL ON TABLE')));
+ const missingWithdrawal=probe(true,false,{standard:false,withdrawal:false,demo:true});await assert.rejects(configureDistributionFinancialPrivileges(missingWithdrawal.pool,'runtime_role'),/guard schema is incomplete/);
 });
 test('the real common authorization entry converges after broad order grants on every invocation',async()=>{
  const p=probe();await applyRuntimePrivileges(p.pool,'runtime_role');const first=[...p.seen];p.seen.length=0;await applyRuntimePrivileges(p.pool,'runtime_role');assert.deepEqual(p.seen,first);
