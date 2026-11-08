@@ -117,18 +117,25 @@ CREATE TRIGGER order_compensation_event_guard BEFORE INSERT ON zzsh_order.financ
 CREATE TRIGGER order_compensation_wallet_revision AFTER INSERT ON zzsh_order.finance_event FOR EACH ROW
  WHEN(NEW.kind='ORDER_COMPENSATION_PAID') EXECUTE FUNCTION zzsh_order.withdrawal_wallet_revision();
 
-DROP TRIGGER finance_entry_guard ON zzsh_order.settlement_ledger_entry;
-CREATE TRIGGER finance_entry_guard BEFORE INSERT ON zzsh_order.settlement_ledger_entry FOR EACH ROW
- WHEN(NEW.finance_event_id IS NOT NULL AND NOT(NEW.details?'intentId') AND NOT(NEW.details?'earningId') AND NOT(NEW.details?'guaranteeId')
- AND NOT(NEW.details?'legacyDutyId') AND NOT(NEW.details?'nativeRefundIntentId') AND NOT(NEW.details?'joinpayWithdrawalIntentId')
- AND NOT(NEW.details?'abnormalRefundLiabilityId') AND NOT(NEW.details?'prestartTerminationId') AND NOT(NEW.details?'localRefundIntentId')
- AND NOT(NEW.details?'legacyRefundCaseId') AND NOT(NEW.details?'legacyRefundIntentId') AND NOT(NEW.details?'compensationCaseId')) EXECUTE FUNCTION zzsh_order.guard_finance_entry();
-DROP TRIGGER finance_entry_batch_guard ON zzsh_order.settlement_ledger_entry;
-CREATE CONSTRAINT TRIGGER finance_entry_batch_guard AFTER INSERT ON zzsh_order.settlement_ledger_entry DEFERRABLE INITIALLY DEFERRED FOR EACH ROW
- WHEN(NEW.finance_event_id IS NOT NULL AND NOT(NEW.details?'intentId') AND NOT(NEW.details?'earningId') AND NOT(NEW.details?'guaranteeId')
- AND NOT(NEW.details?'legacyDutyId') AND NOT(NEW.details?'nativeRefundIntentId') AND NOT(NEW.details?'joinpayWithdrawalIntentId')
- AND NOT(NEW.details?'abnormalRefundLiabilityId') AND NOT(NEW.details?'prestartTerminationId') AND NOT(NEW.details?'localRefundIntentId')
- AND NOT(NEW.details?'legacyRefundCaseId') AND NOT(NEW.details?'legacyRefundIntentId') AND NOT(NEW.details?'compensationCaseId')) EXECUTE FUNCTION zzsh_order.check_finance_batch();
+-- Preserve installed product-specific exclusions while adding the new event's own guard.
+DO $extend_entry_guards$
+DECLARE item record;original text;updated text;enabled "char";
+BEGIN
+ FOR item IN SELECT * FROM (VALUES
+   ('finance_entry_guard','zzsh_order.guard_finance_entry()',false),
+   ('finance_entry_batch_guard','zzsh_order.check_finance_batch()',true)
+ ) AS required(name,fn,deferred) LOOP
+  SELECT pg_get_triggerdef(t.oid),t.tgenabled INTO STRICT original,enabled FROM pg_trigger t
+   WHERE t.tgrelid='zzsh_order.settlement_ledger_entry'::regclass AND t.tgname=item.name AND NOT t.tgisinternal
+    AND t.tgfoid=to_regprocedure(item.fn) AND t.tgdeferrable=item.deferred AND t.tginitdeferred=item.deferred AND t.tgenabled IN('O','A');
+  IF position('compensationCaseId' IN original)>0 THEN RAISE EXCEPTION 'compensation entry guard already present';END IF;
+  updated:=regexp_replace(original,' WHEN \((.*)\) EXECUTE FUNCTION ',' WHEN ((\1) AND NOT (NEW.details ? ''compensationCaseId'')) EXECUTE FUNCTION ');
+  IF updated=original THEN RAISE EXCEPTION 'finance entry guard shape unavailable';END IF;
+  EXECUTE format('DROP TRIGGER %I ON zzsh_order.settlement_ledger_entry',item.name);
+  EXECUTE updated;
+  IF enabled='A' THEN EXECUTE format('ALTER TABLE zzsh_order.settlement_ledger_entry ENABLE ALWAYS TRIGGER %I',item.name);END IF;
+ END LOOP;
+END $extend_entry_guards$;
 CREATE FUNCTION zzsh_order.guard_order_compensation_entry() RETURNS trigger LANGUAGE plpgsql AS $$
 DECLARE p zzsh_order.order_compensation_posting;e zzsh_order.finance_event;
 BEGIN

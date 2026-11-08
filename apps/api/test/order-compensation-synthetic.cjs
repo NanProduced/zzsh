@@ -22,6 +22,8 @@ async function call(method,path,body,key){let statusCode=0,result;const response
  const c=await raw.connect();try{
   const identity=(await c.query(`SELECT current_database() AS db,current_user AS role,inet_server_addr()::text AS host,(pg_control_system()).system_identifier::text AS system_id,d.oid::text AS oid,shobj_description(d.oid,'pg_database') AS marker FROM pg_database d WHERE d.datname=current_database()`)).rows[0];
   assert.deepEqual(identity,{db:'zzsh_order_comp_synth',role:'postgres',host:'127.0.0.1/32',system_id:process.env.ORDER_COMPENSATION_SYNTH_SYSTEM_ID,oid:process.env.ORDER_COMPENSATION_SYNTH_OID,marker:'zzsh:order-compensation-synth:v1'});
+  const guards=(await c.query(`SELECT pg_get_triggerdef(oid) AS definition FROM pg_trigger WHERE tgrelid='zzsh_order.settlement_ledger_entry'::regclass AND tgname IN('finance_entry_guard','finance_entry_batch_guard')`)).rows;
+  assert.equal(guards.length,2);for(const guard of guards){assert.match(guard.definition,/compensationCaseId/);if(process.env.ORDER_COMPENSATION_SYNTH_EXPECT_DEMO==='1')assert.match(guard.definition,/demoLegacyRefundId/);}
   assert.equal((await c.query("SELECT count(*)::int AS n FROM pg_roles WHERE rolname='synth_comp_runtime'")).rows[0].n,0,'a fresh synthetic instance is required');
   await c.query(readFileSync(join(__dirname,'order-compensation-synthetic-seed.sql'),'utf8').replace(/^\\set ON_ERROR_STOP on\s*/,''));
   await c.query('BEGIN');await applyRuntimePrivileges(c,'synth_comp_runtime');await c.query('COMMIT');
