@@ -119,6 +119,15 @@ async function click(host, text) {
   assert.ok(button, `button available: ${text}`);
   await act(async () => { button.click(); });
   await settle();
+  const label = {"期初代录":"确认提交期初清单","按原请求重放":"确认重试原请求","确认复核":"确认复核结算方案"}[text];
+  if (label) {
+    const dialog = document.body.querySelector('[role="alertdialog"]');
+    assert.ok(dialog, `${text} requires a confirmation`);
+    const confirm = [...dialog.querySelectorAll("button")].find(item => item.textContent.trim() === label);
+    assert.ok(confirm && !confirm.disabled, `confirmation available: ${label}`);
+    await act(async () => { confirm.click(); });
+    await settle();
+  }
 }
 // 数量与版本核对在专用面板里；右栏只留当前任务与入口。
 async function openPanel(host) {
@@ -145,7 +154,13 @@ test("first opening reads the slot's frozen inventory, not the settlement respon
   assert.equal(inputs.length, 2, "frozen inventory slot projection seeds the first opening");
   assert.equal(inputs[0].value, "5000");
   assert.match(document.body.textContent, /哈夫币/);
-  await click(host, "期初代录");
+  await act(async () => { find(host, "期初代录").click(); });
+  assert.equal(requests.filter(request => request.method === "POST").length, 0, "opening confirmation has not written");
+  await click(host, "返回核对");
+  assert.equal(requests.filter(request => request.method === "POST").length, 0, "dismissing confirmation does not write");
+  assert.equal(inputs[0].value, "5000", "dismissing confirmation keeps the draft");
+  await act(async () => { find(host, "期初代录").click(); });
+  await click(host, "确认提交期初清单");
   const write = requests.find((request) => request.method === "POST");
   assert.ok(write, "opening write submitted");
   assert.deepEqual(JSON.parse(write.body), { lines: [{ itemId: "item_haff", quantity: "5000" }, { itemId: "item_ammo", quantity: "120" }] });
@@ -198,7 +213,7 @@ test("staff can confirm a missing opening acknowledgement with a recorded reason
   assert.match(document.body.textContent,/不会显示为当事人本人确认/);
   const reason=document.body.querySelector('textarea[aria-label="协助确认期初原因"]');assert.ok(reason);
   await act(async()=>{Object.getOwnPropertyDescriptor(browser.HTMLTextAreaElement.prototype,"value").set.call(reason,"已与租客核实");reason.dispatchEvent(new Event("input",{bubbles:true}));});
-  await click(host,"确认协助");
+  await click(host,"核对并继续");assert.equal(writes.length,0);await click(host,"确认协助确认期初");
   assert.equal(writes.length,1);assert.match(writes[0].path,/\/orders\/order-A\/openings\/opening_1\/confirm$/);
   assert.deepEqual(writes[0].body,{party:"RENTER",versionNo:1,reason:"已与租客核实"});assert.ok(writes[0].headers["idempotency-key"]);
   assert.match(document.body.textContent,/客服协助确认/);
@@ -515,6 +530,7 @@ test("editing while the write is in flight cannot lose the original responsibili
   t.after(async () => { await act(async () => root.unmount()); host.remove(); });
   await render(root, host);
   await act(async () => { find(host, "期初代录").click(); });
+  await act(async () => { find(host, "确认提交期初清单").click(); });
   await settle();
   const input = document.body.querySelector(".im-support-fulfillment-lines input");
   assert.equal(input.disabled, true, "edits are locked while sending");
@@ -669,8 +685,9 @@ test("support finalization records the exact version, reason, and original inten
   const reason=document.body.querySelector('textarea[placeholder="说明与双方核实的情况"]');assert.ok(reason);
   const setter=Object.getOwnPropertyDescriptor(browser.HTMLTextAreaElement.prototype,"value").set;
   await act(async()=>{setter.call(reason,"双方已沟通确认");reason.dispatchEvent(new Event("input",{bubbles:true}));});
-  const button=[...document.body.querySelectorAll("button")].find(item=>item.textContent.trim()==="确认结算");assert.ok(button&&!button.disabled);
-  await act(async()=>button.click());await settle();
+  const button=[...document.body.querySelectorAll("button")].find(item=>item.textContent.trim()==="核对并继续");assert.ok(button&&!button.disabled);
+  await act(async()=>button.click());await settle();assert.equal(requests.filter(row=>row.method==="POST").length,0);
+  await click(host,"确认按当前方案结算");
   const request=requests.find(row=>row.method==="POST");assert.ok(request);assert.deepEqual(JSON.parse(request.body),{versionHash:hash,reason:"双方已沟通确认"});
   assert.ok(String(request.headers["idempotency-key"]??"").startsWith("im_ful_finalize_order-A_"));
 });

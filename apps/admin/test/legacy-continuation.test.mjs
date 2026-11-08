@@ -137,6 +137,7 @@ const snapshot={authenticated:true,adminUserId:"admin_A",session:{id:"session_A"
 const tick=()=>new Promise(resolve=>setImmediate(resolve));
 const html=(tag)=>(props)=>React.createElement(tag,props);
 const sharedUi={"./legacy-refund-review-panel":{LegacyRefundReviewPanel:()=>null},"./legacy-refund-choice":{LegacyRefundChoice:()=>null},"../components/ui/input":{Input:html("input")},"../components/ui/textarea":{Textarea:html("textarea")},
+ "../components/ui/alert-dialog":{ConfirmAlertDialog:({open,onOpenChange,title,description,children,cancelLabel,confirmLabel,onConfirm,busy,confirmDisabled,contentLabel})=>open?React.createElement("div",{role:"alertdialog","aria-label":contentLabel},title,description,children,React.createElement("button",{disabled:busy,onClick:()=>onOpenChange(false)},cancelLabel),React.createElement("button",{disabled:busy||confirmDisabled,onClick:onConfirm},confirmLabel)):null},
  "../components/ui/select":{Select:({value,onValueChange,disabled})=>React.createElement("select",{value,disabled,"aria-label":"结算发起方",onChange:e=>onValueChange(e.target.value)},...["NONE","renter","owner"].map(v=>React.createElement("option",{key:v,value:v},v))),SelectContent:()=>null,SelectItem:()=>null,SelectTrigger:()=>null,SelectValue:()=>null},
  "../components/ui/table":{Table:html("table"),TableBody:html("tbody"),TableCell:html("td"),TableHead:html("th"),TableHeader:html("thead"),TableRow:html("tr")}};
 test("legacy refund request recovery remains bound to the original amounts and duty",async t=>{
@@ -179,9 +180,10 @@ test('legacy refund review requires explicit amounts and distinguishes pending f
    resumeLegacyAdminRefund:async(id,reason)=>{assert.equal(id,'intent_1');assert.equal(reason,'已核对汇聚记录');resumes++;return{kind:'RESUMED'};},
    resolveLegacyAdminRefund:async(id,reason)=>{assert.equal(id,'intent_1');assert.equal(reason,'已核对汇聚记录');resolutions++;return{kind:'OBSERVED',event:'REVIEW_RESOLVED'};},
    retryLegacyAdminRefund:async(id,input)=>{assert.equal(id,'intent_1');assert.equal(input.previouslyRefundedCents,'2000');assert.equal(input.noUnresolvedRefunds,true);retries++;return{kind:'RETRY_CREATED'};}},
-  '../components/ui-elements':{Button:({variant:_,size:__,...p})=>React.createElement('button',p)},'../components/ui/input':{Input:html('input')},
+  '../components/ui-elements':{Button:({variant:_,size:__,...p})=>React.createElement('button',p)},'../components/ui/input':{Input:html('input')},'../components/ui/alert-dialog':sharedUi['../components/ui/alert-dialog'],
   '../components/ui/checkbox':{Checkbox:({onCheckedChange,...p})=>React.createElement('input',{...p,type:'checkbox',onChange:e=>onCheckedChange(e.target.checked)})}});
  const money=value=>`¥${BigInt(value)/100n}.${(BigInt(value)%100n).toString().padStart(2,'0')}`;
+ const confirm=async()=>{const alert=host.querySelector('[role="alertdialog"]');assert(alert);await React.act(async()=>{[...alert.querySelectorAll('button')].find(x=>x.textContent==='确认处理').click();await tick();});};
  const render=refresh=>React.act(async()=>{root.render(React.createElement(LegacyRefundReviewPanel,{orderId,dutyId:'duty_1',refresh,disabled:false,money,onReview:body=>{sent=body;}}));await tick();});
  await render('1');assert.match(host.textContent,/原付款历史已退总额/);
  const button=[...host.querySelectorAll('button')].find(x=>x.textContent==='核对并创建退款任务');assert(button.disabled);
@@ -196,26 +198,26 @@ test('legacy refund review requires explicit amounts and distinguishes pending f
  basis={...basis,canStart:false,receipt:{caseId:'case_1',intentId:'intent_1',refundOrderNo:'LR'+'a'.repeat(28),amountCents:'4000',dutyCents:'5000',priorAppliedCents:'1000'},
   current:{intentId:'intent_1',refundOrderNo:'LR'+'a'.repeat(28),generation:1,amountCents:'4000',dutyCents:'5000',priorAppliedCents:'1000',previouslyRefundedCents:'2000',chainReview:false,blockedBy:null},progress:{state:'UNKNOWN',terminal:null,completedAt:null,bankArrival:'UNKNOWN'}};
  await render('2');assert.match(host.textContent,/结果待核对/);assert.doesNotMatch(host.textContent,/渠道已确认退款/);
- await React.act(async()=>{[...host.querySelectorAll('button')].find(x=>x.textContent==='查询汇聚退款结果').click();await tick();});assert.equal(queries,1);assert.match(host.textContent,/已查询原退款/);
+ await React.act(async()=>{[...host.querySelectorAll('button')].find(x=>x.textContent==='查询汇聚退款结果').click();await tick();});assert.equal(queries,0);await confirm();assert.equal(queries,1);assert.match(host.textContent,/已查询原退款/);
  basis={...basis,progress:{state:'READY',terminal:null,completedAt:null,bankArrival:'UNKNOWN'}};await render('3');
  await React.act(async()=>{[...host.querySelectorAll('button')].find(x=>x.textContent==='提交退款任务').click();await tick();});assert.equal(submits,0);
- await React.act(async()=>{[...host.querySelectorAll('button')].find(x=>x.textContent==='确认提交').click();await tick();});assert.equal(submits,1);assert.match(host.textContent,/未启用退款提交/);
+ await confirm();assert.equal(submits,1);assert.match(host.textContent,/未启用退款提交/);
  basis={...basis,progress:{state:'REVIEW_REQUIRED',terminal:null,completedAt:null,bankArrival:'UNKNOWN'}};await render('4');
  await React.act(async()=>{const reason=host.querySelector('input[placeholder="填写核对结果或依据"]');Object.getOwnPropertyDescriptor(w.HTMLInputElement.prototype,'value').set.call(reason,'已核对汇聚记录');reason.dispatchEvent(new w.Event('input',{bubbles:true}));await tick();});
- await React.act(async()=>{[...host.querySelectorAll('button')].find(x=>x.textContent==='核对后恢复查询').click();await tick();});assert.equal(resumes,1);assert.match(host.textContent,/不会重新发起退款/);
+ await React.act(async()=>{[...host.querySelectorAll('button')].find(x=>x.textContent==='核对后恢复查询').click();await tick();});assert.equal(resumes,0);await confirm();assert.equal(resumes,1);assert.match(host.textContent,/不会重新发起退款/);
  basis={...basis,progress:{state:'REVIEW_REQUIRED',terminal:'FAILED_NO_EXECUTION',completedAt:null,bankArrival:'UNKNOWN'}};await render('4-terminal');
  await React.act(async()=>{const reason=host.querySelector('input[placeholder="填写核对结果或依据"]');Object.getOwnPropertyDescriptor(w.HTMLInputElement.prototype,'value').set.call(reason,'已核对汇聚记录');reason.dispatchEvent(new w.Event('input',{bubbles:true}));await tick();});
- await React.act(async()=>{[...host.querySelectorAll('button')].find(x=>x.textContent==='查询并核对汇聚结果').click();await tick();});assert.equal(resolutions,1);assert.match(host.textContent,/渠道最新结果与原记录一致/);
+ await React.act(async()=>{[...host.querySelectorAll('button')].find(x=>x.textContent==='查询并核对汇聚结果').click();await tick();});assert.equal(resolutions,0);await confirm();assert.equal(resolutions,1);assert.match(host.textContent,/渠道最新结果与原记录一致/);
  const firstCurrent=basis.current;
  basis={...basis,current:{...firstCurrent,intentId:'intent_2',refundOrderNo:'LR'+'b'.repeat(28),generation:2,chainReview:true,
   blockedBy:{intentId:'intent_1',refundOrderNo:firstCurrent.refundOrderNo,generation:1}},progress:{state:'REVIEW_REQUIRED',terminal:null,completedAt:null,bankArrival:'UNKNOWN'}};
  await render('4-ancestor');assert.match(host.textContent,/第 1 次退款存在冲突/);assert.doesNotMatch(host.textContent,/核对后恢复查询/);
  await React.act(async()=>{const reason=host.querySelector('input[placeholder="填写核对结果或依据"]');Object.getOwnPropertyDescriptor(w.HTMLInputElement.prototype,'value').set.call(reason,'已核对汇聚记录');reason.dispatchEvent(new w.Event('input',{bubbles:true}));await tick();});
- await React.act(async()=>{[...host.querySelectorAll('button')].find(x=>x.textContent==='查询并核对汇聚结果').click();await tick();});assert.equal(resolutions,2);
+ await React.act(async()=>{[...host.querySelectorAll('button')].find(x=>x.textContent==='查询并核对汇聚结果').click();await tick();});await confirm();assert.equal(resolutions,2);
  basis={...basis,current:firstCurrent,progress:{state:'FAILED',terminal:'FAILED_NO_EXECUTION',completedAt:null,bankArrival:'UNKNOWN'}};await render('5');
  await React.act(async()=>{const inputs=host.querySelectorAll('input');for(const [i,value] of [[0,'20'],[1,'已核对失败及原款']]){Object.getOwnPropertyDescriptor(w.HTMLInputElement.prototype,'value').set.call(inputs[i],value);inputs[i].dispatchEvent(new w.Event('input',{bubbles:true}));}inputs[2].click();await tick();});
  await React.act(async()=>{[...host.querySelectorAll('button')].find(x=>x.textContent==='核对并重试退款').click();await tick();});assert.equal(retries,0);
- await React.act(async()=>{[...host.querySelectorAll('button')].find(x=>x.textContent==='确认重试').click();await tick();});assert.equal(retries,1);
+ await confirm();assert.equal(retries,1);
  basis={...basis,receipt:{caseId:'case_1',intentId:null,refundOrderNo:null,amountCents:'0',dutyCents:'0',priorAppliedCents:'0'},
   current:{intentId:null,refundOrderNo:null,generation:null,amountCents:'0',dutyCents:'0',priorAppliedCents:'0',previouslyRefundedCents:'0',chainReview:false,blockedBy:null},progress:null};await render('6');
  assert.match(host.textContent,/本次无需退款/);assert.doesNotMatch(host.textContent,/本次责任已由旧退款抵扣/);
@@ -240,8 +242,8 @@ test("admin identity or permission change hides details/confirmation in the firs
  const {LegacyAdminContinuationPanel}=load("apps/admin/src/views/legacy-continuation-panel.tsx",{...sharedUi,"../api":{friendlyError:()=>"暂不可用",formatDate:x=>x},"../components/ui-elements":{Button:({variant:_,size:__,...p})=>React.createElement("button",p)},"../lib/legacy-continuation-client":api});
  const commits=[];function Probe({s}){React.useLayoutEffect(()=>{commits.push({id:s.adminUserId,text:host.textContent});},[s]);return React.createElement(LegacyAdminContinuationPanel,{snapshot:s,orderId});}
  const render=async s=>React.act(async()=>{root.render(React.createElement(Probe,{s}));await tick();});await render(snapshot);assert(host.textContent.includes("1234.56"));
- await React.act(async()=>{[...host.querySelectorAll("button")].find(b=>b.textContent==="解除暂扣").click();await tick();});assert(host.textContent.includes("请核对当前版本与来源责任"));
- const b={...snapshot,adminUserId:"admin_B",session:{id:"session_B"},permissions:["order.read"]};await render(b);assert(!commits.find(c=>c.id==="admin_B").text.includes("1234.56"));assert(!host.textContent.includes("请核对当前版本与来源责任"));
+ await React.act(async()=>{[...host.querySelectorAll("button")].find(b=>b.textContent==="解除暂扣").click();await tick();});assert(host.querySelector('[role="alertdialog"]'));
+ const b={...snapshot,adminUserId:"admin_B",session:{id:"session_B"},permissions:["order.read"]};await render(b);assert(!commits.find(c=>c.id==="admin_B").text.includes("1234.56"));assert.equal(host.querySelector('[role="alertdialog"]'),null);
  await render({...b,adminUserId:"admin_C",session:{id:"session_C"}});await React.act(async()=>{resolveLate(view({amounts:{refundNet:{cents:"999999",yuan:"9999.99"}}}));await tick();});assert(!host.textContent.includes("9999.99"));assert.equal(w.sessionStorage.length,0);
 });
 
@@ -324,6 +326,12 @@ test("staff can preview a legacy settlement and submit the exact reviewed party,
  assert(!host.textContent.includes("87.00"),"filling blanks invalidates the old preview");
  await React.act(async()=>{[...host.querySelectorAll("button")].find(b=>b.textContent==="预览结算方案").click();await tick();});
  await React.act(async()=>{const reason=host.querySelector('textarea[aria-label="客服发起结算原因"]');Object.getOwnPropertyDescriptor(w.HTMLTextAreaElement.prototype,"value").set.call(reason,"双方已沟通核实");reason.dispatchEvent(new w.Event("input",{bubbles:true}));await tick();});
+ await React.act(async()=>{[...host.querySelectorAll("button")].find(b=>b.textContent==="核对并提交方案").click();await tick();});
+ assert.equal(sent,undefined,"the first click only opens confirmation");
+ assert.match(host.querySelector('[role="alertdialog"]').textContent,/13\.00.*87\.00/);
+ await React.act(async()=>{[...host.querySelectorAll("button")].find(b=>b.textContent==="返回核对").click();await tick();});
+ assert.equal(host.querySelector('[role="alertdialog"]'),null);assert.equal(sent,undefined);
+ assert.equal(host.querySelector('input[aria-label="6级甲（件）"]').value,"3");
  await React.act(async()=>{[...host.querySelectorAll("button")].find(b=>b.textContent==="核对并提交方案").click();await tick();});
  await React.act(async()=>{[...host.querySelectorAll("button")].find(b=>b.textContent.includes("确认协助提交结算方案")).click();await tick();});
  assert.equal(sent.command,"propose");assert.equal(sent.body.onBehalf,"renter");assert.equal(sent.body.reason,"双方已沟通核实");assert.equal(sent.body.quantities.expendHaff,"10");assert.equal(sent.body.quantities.armor,"3");assert.equal(sent.body.planFingerprint,digest);

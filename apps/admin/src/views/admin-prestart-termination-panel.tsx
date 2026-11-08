@@ -3,6 +3,8 @@ import { adminRequest,AdminApiError,friendlyError } from "../api";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Textarea } from "@/components/ui/textarea";
+import { Dialog,DialogContent,DialogDescription,DialogHeader,DialogTitle } from "@/components/ui/dialog";
+import { ConfirmAlertDialog } from "@/components/ui/alert-dialog";
 import { formatFundingCents } from "./supply-review/model";
 import { AdminOriginalRefundPanel } from './admin-original-refund-panel';
 
@@ -54,7 +56,8 @@ export function AdminPrestartTerminationPanel({orderId,binding,canWrite}:{orderI
  const scope=`${binding.adminUserId}:${binding.sessionId}:${orderId}`,ref=useRef(scope);ref.current=scope;
  const[state,setState]=useState<{scope:string;read:Context|null;error:unknown}>({scope:'',read:null,error:null}),[reason,setReason]=useState(''),[assessed,setAssessed]=useState(false),[busy,setBusy]=useState(false),[note,setNote]=useState(''),[nonce,reload]=useState(0);
  const[pending,setPending]=useState<Pending|null>(null),[storageBlocked,setStorageBlocked]=useState(false),storageKey=`zzsh.admin.prestart.${scope}`;
- useEffect(()=>{const controller=new AbortController();setState({scope,read:null,error:null});setReason('');setAssessed(false);setNote('');setBusy(false);setPending(null);setStorageBlocked(false);
+ const[reviewOpen,setReviewOpen]=useState(false),[confirmation,setConfirmation]=useState<{scope:string;decision:Pending['body']['decision']}|null>(null);
+ useEffect(()=>{const controller=new AbortController();setState({scope,read:null,error:null});setReason('');setAssessed(false);setNote('');setBusy(false);setPending(null);setStorageBlocked(false);setReviewOpen(false);setConfirmation(null);
   try{const raw=sessionStorage.getItem(storageKey);if(raw){const p=obj(JSON.parse(raw)),b=obj(p.body);
    if(p.version!==1||p.scope!==scope||typeof p.key!=='string'||!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(p.key)||typeof p.terminationId!=='string'
     ||!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(p.terminationId)||typeof b.reason!=='string'||b.reason.trim().length<3||typeof b.expectedRevision!=='string'||!/^[1-9][0-9]{0,18}$/.test(b.expectedRevision)
@@ -67,9 +70,10 @@ export function AdminPrestartTerminationPanel({orderId,binding,canWrite}:{orderI
   return()=>controller.abort();
  },[scope,orderId,nonce,storageKey]);
  const visible=state.scope===scope?state:null,read=visible?.read,r=read?.request;
+ const decision=confirmation?.scope===scope?confirmation.decision:null;
  if(read&&!r&&!read.eligibility.allowed&&read.eligibility.reason==='ORDER_NOT_PAID')return null;
  const run=async(decision:Pending['body']['decision'])=>{
-  if(!r||busy||storageBlocked)return;const recovering=pending!==null;
+  if(!r||busy||storageBlocked||!canWrite||!read?.canReview)return;const recovering=pending!==null;
   const operation:Pending=pending??{version:1,scope,key:`prestart_${crypto.randomUUID().replaceAll('-','')}`,terminationId:r.id,
    body:{expectedRevision:r.revision,decision,reason:reason.trim(),...(decision==='APPROVE'?{assessment:'NO_USE_NO_DISPUTE'}:{})}};
   try{sessionStorage.setItem(storageKey,JSON.stringify(operation));}catch{setStorageBlocked(true);setNote('无法保存原请求，已阻止审核提交');return;}
@@ -96,14 +100,20 @@ export function AdminPrestartTerminationPanel({orderId,binding,canWrite}:{orderI
     {r.dataOrigin==='JOINPAY_LOCAL_ACCEPTANCE'?<AdminOriginalRefundPanel orderId={orderId} basis="PRESTART_TERMINATION" reference={r.id}
       canWrite={canWrite&&read?.canReview===true} binding={binding} onRecorded={()=>reload(n=>n+1)}/>:<p>本地受控责任未接真实渠道。</p>}
    </div>:null}
-   {(canWrite&&read?.canReview&&(r.state==='REQUESTED'||r.state==='REVIEW_REQUIRED')||pending)?<div className="space-y-2">
+   {(canWrite&&read?.canReview&&(r.state==='REQUESTED'||r.state==='REVIEW_REQUIRED')||pending)?<><Button size="sm" variant="secondary" onClick={()=>setReviewOpen(true)} disabled={busy}>处理结束申请</Button><Dialog open={reviewOpen} onOpenChange={open=>{if(!busy)setReviewOpen(open);}}><DialogContent><DialogHeader><DialogTitle>处理未开租结束申请</DialogTitle><DialogDescription>核对订单和双方情况后选择处理方式。</DialogDescription></DialogHeader><div className="space-y-3">
+    <p>原申请：{r.reason} · 原款全额 {r.fullRefundCents===null?'未知':formatFundingCents(r.fullRefundCents)}</p>
     <label className="block">核实记录<Textarea aria-label="未开租核实记录" value={reason} maxLength={150} disabled={busy||!!pending} onChange={e=>setReason(e.target.value)} rows={2} className="min-h-16 text-xs mt-1" /></label>
     <label className="flex gap-2 items-center cursor-pointer select-none"><Checkbox name="assessed" checked={assessed} disabled={busy||!!pending} onCheckedChange={checked=>setAssessed(checked===true)}/><span>已核实未交付/使用、无争议且无其他受审金额调整；本次全额原路应退</span></label>
-    {pending?<Button size="sm" disabled={busy||storageBlocked} onClick={()=>void run(pending.body.decision)}>恢复原审核请求</Button>:<div className="flex flex-wrap gap-2">
-     <Button size="sm" disabled={busy||!assessed||reason.trim().length<3||storageBlocked||!read?.eligibility.allowed||r.fullRefundCents===null} onClick={()=>void run('APPROVE')}>核准终止并记录全额应退</Button>
-     <Button size="sm" variant="secondary" disabled={busy||reason.trim().length<3||storageBlocked} onClick={()=>void run('REVIEW_REQUIRED')}>转争议/依据复核</Button>
-     <Button size="sm" variant="secondary" disabled={busy||reason.trim().length<3||storageBlocked} onClick={()=>void run('REJECT')}>驳回申请</Button></div>}
-   </div>:null}</>:read?<p>本地未登记未开租结束申请；不能据此判断已经退款。</p>:null}
+    {pending?<Button size="sm" disabled={busy||storageBlocked||!canWrite||!read?.canReview} onClick={()=>setConfirmation({scope,decision:pending.body.decision})}>恢复原审核请求</Button>:<div className="flex flex-wrap gap-2">
+     <Button size="sm" disabled={busy||!assessed||reason.trim().length<3||storageBlocked||!read?.eligibility.allowed||r.fullRefundCents===null} onClick={()=>setConfirmation({scope,decision:'APPROVE'})}>核准终止并记录全额应退</Button>
+     <Button size="sm" variant="secondary" disabled={busy||reason.trim().length<3||storageBlocked} onClick={()=>setConfirmation({scope,decision:'REVIEW_REQUIRED'})}>转争议/依据复核</Button>
+     <Button size="sm" variant="secondary" disabled={busy||reason.trim().length<3||storageBlocked} onClick={()=>setConfirmation({scope,decision:'REJECT'})}>驳回申请</Button></div>}
+    {note?<p role="status">{note}</p>:null}</div></DialogContent></Dialog>
+    <ConfirmAlertDialog open={decision!==null} onOpenChange={open=>{if(!open&&!busy)setConfirmation(null);}} contentLabel="确认未开租申请处理" title="确认处理结束申请？"
+     description={pending?'将按原请求恢复处理，不会更换原操作内容。':decision==='APPROVE'?'确认后终止订单并记录全额退款责任；渠道到账需另行核对。':'确认后记录本次审核结果。'}
+     confirmLabel="确认处理" cancelLabel="返回核对" busy={busy} confirmDisabled={!canWrite||!read?.canReview} confirmVariant={decision==='REJECT'?'destructive':'default'} onConfirm={()=>{if(decision){setConfirmation(null);void run(decision);}}}>
+     <p className="text-sm">处理方式：{decision==='APPROVE'?'核准终止并记录应退':decision==='REJECT'?'驳回申请':'转争议/依据复核'}</p><p className="text-sm">核实记录：{pending?.body.reason??reason.trim()}</p>
+    </ConfirmAlertDialog></>:null}</>:read?<p>本地未登记未开租结束申请；不能据此判断已经退款。</p>:null}
   {note?<p role="status">{note}</p>:null}<Button size="sm" variant="secondary" disabled={busy} onClick={()=>reload(n=>n+1)}>重读本地记录</Button>
   <p className="text-xs text-muted-foreground">核准只办理合法终止与退款责任，不伪造开租或正常结算，不在此发起渠道出款。</p>
  </section>;

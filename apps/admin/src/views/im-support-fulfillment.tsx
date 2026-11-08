@@ -141,6 +141,7 @@ export function OrderFulfillmentSection({ orderId, displayNo, viewerId, orderSta
   const [finalizeTarget,setFinalizeTarget]=useState<{id:string;hash:string;versionNo:number|undefined;early:boolean;amounts:Record<string,unknown>|null;parties:string[]}|null>(null);
   const [openingTarget,setOpeningTarget]=useState<{id:string;versionNo:number;party:"RENTER"|"OWNER"}|null>(null);
   const [openingReason,setOpeningReason]=useState("");
+  const [confirmation, setConfirmation] = useState<{scope:string; generation:number; action:"opening"|"opening-party"|"classify"|"review"|"finalize"|"adjust"|"replay"} | null>(null);
   const [panelOpen, setPanelOpen] = useState(false);
   const [loading, setLoading] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -568,6 +569,22 @@ export function OrderFulfillmentSection({ orderId, displayNo, viewerId, orderSta
     {currentAmounts?.unusedItemRefund || currentAmounts?.unusedHaffRefund ? <small>未消耗预付款按下单时分配计算；实际应退会重新计算会员折扣和费用。</small> : null}
   </div> : null;
 
+  const action = confirmation?.scope === scope ? confirmation.action : null;
+  const armConfirmation = (action: NonNullable<typeof confirmation>["action"]) => setConfirmation({scope, generation:generationRef.current, action});
+  const confirmationTitle = { opening:"提交期初清单", "opening-party":"协助确认期初", classify:"生成结算方案", review:"复核结算方案", finalize:"按当前方案结算", adjust:"提交人工调整", replay:"重试原请求" } as const;
+  const confirmAction = () => {
+    if (!action || busy || loading) return;
+    setConfirmation(null);
+    if (confirmation?.generation !== generationRef.current) { setError("订单资料已变化，请重新核对后再操作。"); return; }
+    if ((action === "opening-party" || action === "finalize") && !canManualClose) { setError("当前账号无权执行此操作，请联系有权限的同事。"); return; }
+    if (action === "opening") recordOpening();
+    else if (action === "opening-party") confirmOpeningForParty();
+    else if (action === "classify") classify();
+    else if (action === "review") review();
+    else if (action === "finalize") finalize();
+    else if (action === "adjust") adjust();
+    else void replay();
+  };
   const statusMessages = <>
     {error ? <Alert variant="destructive"><CircleAlert /><AlertDescription>{error}</AlertDescription></Alert> : null}
     {notice ? <Alert variant="info" role="status"><Info /><AlertDescription>{notice}</AlertDescription></Alert> : null}
@@ -576,8 +593,17 @@ export function OrderFulfillmentSection({ orderId, displayNo, viewerId, orderSta
       {phase === "SENDING" ? "请求尚未返回，请勿重复提交。" : phase === "AUTH" ? "原操作记录仍保留。" : phase === "ACCEPTED_READBACK_PENDING" ? "操作已受理，等待读取最新状态；不会重复提交。" : "原操作记录与责任已保留。"}
     </AlertDescription><AlertAction>
       <Button variant="outline" size="xs" onClick={() => void observeCurrent()} disabled={loading || busy}>查看当前状态</Button>
-      {phase !== "SENDING" && phase !== "ACCEPTED_READBACK_PENDING" ? <Button variant="outline" size="xs" onClick={() => void replay()} disabled={busy || loading}>按原请求重放</Button> : null}
+      {phase !== "SENDING" && phase !== "ACCEPTED_READBACK_PENDING" ? <Button variant="outline" size="xs" onClick={() => armConfirmation("replay")} disabled={busy || loading}>按原请求重放</Button> : null}
     </AlertAction></Alert> : null}
+    <ConfirmAlertDialog open={action !== null} onOpenChange={open => { if (!open && !busy) setConfirmation(null); }}
+      title={action ? `确认${confirmationTitle[action]}？` : "确认操作"} contentLabel="确认订单操作"
+      description={action === "replay" ? "只会重试同一笔原请求；请先核对当前状态，重试不代表上一次未执行。" : action === "finalize" ? "确认后将按本版结算并登记应退责任，退款到账以渠道结果为准。" : "请核对本次处理内容，确认后才会提交并记录经办人。"}
+      confirmLabel={action ? `确认${confirmationTitle[action]}` : "确认"} cancelLabel="返回核对" confirmVariant="default"
+      busy={busy} confirmDisabled={loading} onConfirm={confirmAction}>
+      {action === "opening-party" ? <p className="text-sm">确认方：{partyLabel(openingTarget?.party)} · 原因：{openingReason.trim()}</p> : null}
+      {action === "finalize" ? <><p className="text-sm">{finalizeTarget?.parties.join(" · ")} · {finalizeTarget?.early ? "提前结算" : "正常结算"}</p><dl className="text-sm">{amountRows(finalizeTarget?.amounts??null).filter(row=>row.key==="ownerNet"||row.key==="renterRefund"||finalizeTarget?.early&&row.key==="earlyMakeup").map(row=><div key={row.key} className="flex justify-between gap-4"><dt>{row.label}</dt><dd>{row.text}</dd></div>)}</dl><p className="text-sm">处理原因：{finalizeReason.trim()}</p></> : null}
+      {(action === "classify" || action === "adjust") && preview ? <dl className="text-sm">{amountRows(previewAmounts).map(row=><div key={row.key} className="flex justify-between gap-4"><dt>{row.label}</dt><dd>{row.text}</dd></div>)}</dl> : null}
+    </ConfirmAlertDialog>
   </>;
 
   const readButton = <Button variant="ghost" size="icon-sm" onClick={() => void load()} disabled={loading || busy} aria-label="重新读取本单进度"><RefreshCw /></Button>;
@@ -668,14 +694,14 @@ export function OrderFulfillmentSection({ orderId, displayNo, viewerId, orderSta
               <ItemActions><Badge variant={row.confirmed ? "secondary" : "destructive"} data-state={row.confirmed ? "confirmed" : "pending"}>{row.confirmed ? row.source === "ON_BEHALF" ? "客服协助确认" : row.source === "AUTO" ? "自动确认" : "已确认" : "待确认"}</Badge></ItemActions>
             </Item>)}
           </ItemGroup>
-          <p className="px-3 py-2 text-xs text-muted-foreground">{supportReviewed ? "客服已复核本版本。" : "当事人无法操作时，客服可在核实后协助处理并记录原因。"}</p>
+          <p className="px-3 py-2 text-xs text-muted-foreground">{supportReviewed ? "客服已复核本版本。" : canManualClose ? "当事人无法操作时，客服可在核实后协助处理并记录原因。" : "请等待双方确认。"}</p>
         </div> : null}
 
       {stage.key === "needs-opening" ? <div className="im-support-fulfillment-stage-panel">
         <strong>第一步：期初代录</strong>
         <small>按订单冻结库存填写期初数量；数量必须与已付款订单的报价一致。</small>
         {renderInventory("opening")}
-        <div className="im-support-fulfillment-actions"><Button type="button" onClick={recordOpening} disabled={primaryDisabled || lines.length === 0}>期初代录</Button></div>
+        <div className="im-support-fulfillment-actions"><Button type="button" onClick={() => armConfirmation("opening")} disabled={primaryDisabled || lines.length === 0}>期初代录</Button></div>
       </div> : null}
 
       {stage.key === "opening-pending" ? <div className="im-support-fulfillment-stage-panel">
@@ -690,7 +716,7 @@ export function OrderFulfillmentSection({ orderId, displayNo, viewerId, orderSta
           <div className="space-y-4"><div><DialogTitle>协助{partyLabel(openingTarget?.party)}确认期初</DialogTitle><DialogDescription>请先核实该方及期初清单。操作记录为客服协助，不会显示为当事人本人确认。</DialogDescription></div>
             {error ? <Alert variant="destructive"><CircleAlert /><AlertDescription>{error}</AlertDescription></Alert> : null}
             <label className="block space-y-1 text-sm">处理原因<Textarea aria-label="协助确认期初原因" value={openingReason} maxLength={500} onChange={e=>setOpeningReason(e.target.value)} /></label>
-            <div className="flex justify-end gap-2"><Button type="button" variant="outline" onClick={()=>setOpeningTarget(null)}>返回核对</Button><Button type="button" disabled={primaryDisabled||openingReason.trim().length<3} onClick={confirmOpeningForParty}>确认协助</Button></div>
+            <div className="flex justify-end gap-2"><Button type="button" variant="outline" onClick={()=>setOpeningTarget(null)}>返回核对</Button><Button type="button" disabled={primaryDisabled||openingReason.trim().length<3} onClick={()=>armConfirmation("opening-party")}>核对并继续</Button></div>
           </div>
         </DialogContent></Dialog>
       </div> : null}
@@ -732,7 +758,7 @@ export function OrderFulfillmentSection({ orderId, displayNo, viewerId, orderSta
         </div>
         <div className="im-support-fulfillment-actions">
           <Button type="button" onClick={previewSettlement} disabled={primaryDisabled || lines.length === 0}>预览结算方案</Button>
-          {preview && !preview.adjustArmed && preview.versionHash ? <Button type="button" onClick={classify} disabled={primaryDisabled}>生成结算方案</Button> : null}
+          {preview && !preview.adjustArmed && preview.versionHash ? <Button type="button" onClick={()=>armConfirmation("classify")} disabled={primaryDisabled}>生成结算方案</Button> : null}
         </div>
       </div> : null}
 
@@ -747,7 +773,7 @@ export function OrderFulfillmentSection({ orderId, displayNo, viewerId, orderSta
         <strong>待客服复核</strong>
         <small>双方已确认；请核对本版本数量与金额后复核。</small>
         {renderCurrentFacts()}
-        <div className="im-support-fulfillment-actions"><Button type="button" onClick={review} disabled={primaryDisabled || !current?.id || !current.versionHash}>确认复核</Button></div>
+        <div className="im-support-fulfillment-actions"><Button type="button" onClick={()=>armConfirmation("review")} disabled={primaryDisabled || !current?.id || !current.versionHash}>确认复核</Button></div>
       </div> : null}
 
       {stage.key === "reviewed" || stage.key === "normal-version" || stage.key === "posted" ? <div className="im-support-fulfillment-stage-panel">
@@ -772,7 +798,7 @@ export function OrderFulfillmentSection({ orderId, displayNo, viewerId, orderSta
             <p className="text-sm text-muted-foreground">{finalizeTarget?.parties.join(" · ")} · {finalizeTarget?.early ? "提前结算" : "正常结算"}</p>
             <dl>{amountRows(finalizeTarget?.amounts??null).filter(row=>row.key==="ownerNet"||row.key==="renterRefund"||finalizeTarget?.early&&row.key==="earlyMakeup").map(row=><div key={row.key} className="flex justify-between gap-4"><dt>{row.label}</dt><dd>{row.text}</dd></div>)}</dl>
             <label className="block space-y-2"><span>处理原因</span><Textarea value={finalizeReason} maxLength={500} disabled={locked||busy} onChange={event=>setFinalizeReason(event.target.value)} placeholder="说明与双方核实的情况" /></label>
-            <div className="flex justify-end gap-2"><Button variant="outline" onClick={()=>setFinalizeOpen(false)} disabled={busy}>返回</Button><Button onClick={finalize} disabled={primaryDisabled||finalizeReason.trim().length<3}>确认结算</Button></div>
+            <div className="flex justify-end gap-2"><Button variant="outline" onClick={()=>setFinalizeOpen(false)} disabled={busy}>返回</Button><Button onClick={()=>armConfirmation("finalize")} disabled={primaryDisabled||finalizeReason.trim().length<3}>核对并继续</Button></div>
           </div>
         </DialogContent></Dialog>
       </div>:null}
@@ -791,13 +817,13 @@ export function OrderFulfillmentSection({ orderId, displayNo, viewerId, orderSta
       <div className="im-support-fulfillment-adjust">
         <Button type="button" variant="ghost" className="im-support-quiet-action" aria-expanded={adjustOpen} onClick={() => setAdjustOpen((value) => !value)}>人工调整（例外）</Button>
         {adjustOpen ? <div className="im-support-fulfillment-controls">
-          <label>号主拟净额<input value={ownerNet} inputMode="decimal" disabled={locked} onChange={(event) => { invalidate(); setOwnerNet(event.target.value); }} placeholder="元，如 123.45" /></label>
-          <label>租客拟退款<input value={renterRefund} inputMode="decimal" disabled={locked} onChange={(event) => { invalidate(); setRenterRefund(event.target.value); }} placeholder="元，如 12.00" /></label>
-          <label>原因说明<input value={reason} maxLength={500} disabled={locked} onChange={(event) => { invalidate(); setReason(event.target.value); }} placeholder="不少于3字" /></label>
+          <label>号主拟净额<Input value={ownerNet} inputMode="decimal" disabled={locked} onChange={(event) => { invalidate(); setOwnerNet(event.target.value); }} placeholder="元，如 123.45" /></label>
+          <label>租客拟退款<Input value={renterRefund} inputMode="decimal" disabled={locked} onChange={(event) => { invalidate(); setRenterRefund(event.target.value); }} placeholder="元，如 12.00" /></label>
+          <label>原因说明<Input value={reason} maxLength={500} disabled={locked} onChange={(event) => { invalidate(); setReason(event.target.value); }} placeholder="不少于3字" /></label>
         </div> : null}
         {adjustOpen ? <div className="im-support-fulfillment-actions">
           <Button type="button" onClick={previewAdjustment} disabled={primaryDisabled}>生成调整预览</Button>
-          {preview?.adjustArmed && preview.versionHash ? <Button type="button" onClick={adjust} disabled={primaryDisabled}>提交人工调整</Button> : null}
+          {preview?.adjustArmed && preview.versionHash ? <Button type="button" onClick={()=>armConfirmation("adjust")} disabled={primaryDisabled}>提交人工调整</Button> : null}
         </div> : null}
       </div>
 

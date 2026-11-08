@@ -29,6 +29,7 @@ import { AdminOriginalRefundPanel } from "./admin-original-refund-panel";
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Alert, AlertAction, AlertDescription, AlertTitle } from "../components/ui/alert";
+import { ConfirmAlertDialog } from "../components/ui/alert-dialog";
 import { OrderStages as Stages, ORDER_STATUS_LABELS, type OrderProgress } from "./admin-order-stages";
 import { EntityPreviewTrigger, AccountPreviewCard, UserPreviewCard } from "../components/admin-preview";
 import { financeContextIdentity, financeOriginPath, registerFinanceOrigin } from "./admin-finance-view";
@@ -381,7 +382,7 @@ function Detail({snapshot,id,onOpenPath,refreshNonce,financeOrigin,financeReturn
   setTeamSubmitting(true);setTeamMessage("");
   try{const result=await adminRequest<{created:boolean;teamState:string;assignedToCurrentOperator:boolean}>(`/orders/${encodeURIComponent(o.id)}/create-team`,{},"POST",{"Idempotency-Key":teamRequest.current.key});
    if(currentTeamOrder.current===o.id){setTeamMessage(result.assignedToCurrentOperator?"已提交建群，准备完成后可进入沟通。":"本单已有客服群，请联系已有接待客服。");retryTeam(n=>n+1);}
-  }catch(e){if(currentTeamOrder.current===o.id){setTeamMessage(friendlyError(e));retryTeam(n=>n+1);}}finally{if(currentTeamOrder.current===o.id)setTeamSubmitting(false);}
+  }catch(e){if(currentTeamOrder.current===o.id){setTeamMessage(friendlyError(e));retryTeam(n=>n+1);}}finally{if(currentTeamOrder.current===o.id){setTeamSubmitting(false);setTeamArm(false);}}
  }
  const openAccount=()=>onOpenPath(`/supply/reviews/${encodeURIComponent(o.accountId)}?fromOrderId=${encodeURIComponent(o.id)}`,accountNumberLabel(o.accountDisplayNo));
    const partySection=<section className="oc-section oc-related"><h2>本单账号和双方</h2><div className="oc-party-grid">
@@ -442,7 +443,7 @@ function Detail({snapshot,id,onOpenPath,refreshNonce,financeOrigin,financeReturn
 <details className="oc-section oc-records-fold"><summary>记录与依据（资金凭证 · 来源追溯）</summary><div className="oc-fold-body"><p className="oc-fact-note">资金凭证读取沿用独立权限；未取得渠道到账、退款出款或结算依据时保持未知。</p><div className="flex flex-wrap gap-2">{snapshot.permissions.includes('finance.read')?<Button size="sm" variant="secondary" onClick={()=>openFundsDocument((o.source.origin==='LEGACY'?'LEGACY_ORDER:':'ORDER:')+o.id,`${o.displayNo} · 资金凭证`)}>查看资金凭证<ArrowUpRight size={14}/></Button>:null}</div><p>订单 ID：{o.id}</p><p>来源：{o.source.origin} · 游戏：{o.gameId}</p>{isLegacy(o)&&o.source.orderSource?.code?<p>原订单来源码：{o.source.orderSource.code}</p>:null}</div></details>
 <p className="oc-reading"><strong>读法</strong>实付 ≠ 结算完成；应退 ≠ 渠道到账；过账 ≠ 银行到账。三项分别核对，缺依据时保持"未记录"。</p>
 </main><aside className="oc-related"><section className="oc-section"><h2>订单群</h2><p className="oc-fact-note">{team.state==="loading"?"正在核对订单群…":team.state==="forbidden"?"当前身份无权读取本单群。":team.state==="missing"?"未找到可读取的本单群记录。":team.state==="ready"?team.data?.teamState==="READY"?team.data.canRead?"本单群已就绪。":"本单已有客服群，当前身份未加入。":team.data?.teamState==="NEEDS_REVIEW"?"建群结果待核对，请勿重复发起。":team.data?.teamState?"正在准备订单群…":o.source.origin==='LEGACY'?"尚未为这笔旧订单建立新群。":"尚未建立订单群。":"本单群读取暂不可用，请重试。"}</p>
- {o.source.origin==='LEGACY'&&team.state==='ready'&&team.data?.teamState===null&&(snapshot.security.isBoss||(snapshot.permissions.includes('im.support.read')&&snapshot.permissions.includes('im.support.accept')))?<><p className="oc-fact-note">将由当前客服与租客、号主组成新群；旧聊天记录不会恢复。</p>{teamArm?<div className="oc-inline-confirm" role="group" aria-label="确认创建订单群"><p>将为这笔旧订单新建客服群，旧聊天记录不会恢复。</p><Button size="sm" variant="secondary" onClick={()=>setTeamArm(false)}>取消</Button><Button size="sm" onClick={()=>{setTeamArm(false);void createLegacyTeam();}}>确认建群</Button></div>:<Button size="sm" disabled={teamSubmitting} onClick={()=>setTeamArm(true)}>{teamSubmitting?"正在提交…":"创建订单群"}</Button>}</>:null}
+ {o.source.origin==='LEGACY'&&team.state==='ready'&&team.data?.teamState===null&&(snapshot.security.isBoss||(snapshot.permissions.includes('im.support.read')&&snapshot.permissions.includes('im.support.accept')))?<><p className="oc-fact-note">将由当前客服与租客、号主组成新群；旧聊天记录不会恢复。</p><Button size="sm" disabled={teamSubmitting} onClick={()=>setTeamArm(true)}>创建订单群</Button><ConfirmAlertDialog open={teamArm} onOpenChange={setTeamArm} title="确认创建订单群？" contentLabel="确认创建订单群" description="将为这笔旧订单新建客服群，由当前客服、租客和号主沟通；旧聊天记录不会恢复。" confirmLabel="确认建群" confirmVariant="default" busy={teamSubmitting} onConfirm={()=>void createLegacyTeam()}/></>:null}
  {teamMessage?<p role="status" className="oc-fact-note">{teamMessage}</p>:null}
  {team.state==="unavailable"?<Button size="sm" variant="secondary" onClick={()=>retryTeam(n=>n+1)}>重试群读取</Button>:null}
  {(snapshot.security.isBoss||snapshot.permissions.includes("im.support.read"))&&team.state==="ready"&&team.data?.canRead?<Link onClick={()=>onOpenPath(`/support?fromOrderId=${encodeURIComponent(o.id)}&section=orders&order=${encodeURIComponent(o.id)}`)}>{o.status==="PAID"?"进入客服工作台处理本单":"进入本单客服工作台"}</Link>:null}</section></aside></div></div>;

@@ -4,6 +4,8 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Textarea } from "@/components/ui/textarea";
+import { Dialog,DialogContent,DialogDescription,DialogHeader,DialogTitle } from "@/components/ui/dialog";
+import { ConfirmAlertDialog } from "@/components/ui/alert-dialog";
 
 type Basis='REVIEW_CONFIRMATION'|'PRESTART_TERMINATION';
 type Pending={scope:string;key:string;reference:string;body:Record<string,string>};
@@ -32,7 +34,8 @@ export function AdminOriginalRefundPanel({orderId,basis,reference,canWrite,bindi
  const store=`zzsh.admin.original-refund.${scope}`;
  const[id,setId]=useState(reference??''),[reason,setReason]=useState(''),[reviewed,setReviewed]=useState(false),[pending,setPending]=useState<Pending|null>(null),
   [busy,setBusy]=useState(false),[blocked,setBlocked]=useState(false),[note,setNote]=useState('');
- useEffect(()=>{setId(reference??'');setReason('');setReviewed(false);setBusy(false);setPending(null);setBlocked(false);setNote('');
+ const[open,setOpen]=useState(false),[confirmScope,setConfirmScope]=useState<string|null>(null);
+ useEffect(()=>{setId(reference??'');setReason('');setReviewed(false);setBusy(false);setPending(null);setBlocked(false);setNote('');setOpen(false);setConfirmScope(null);
   try{const raw=sessionStorage.getItem(store);if(raw){const p=JSON.parse(raw) as Pending;
    if(!p||p.scope!==scope||typeof p.key!=='string'||!ID.test(p.key)||typeof p.reference!=='string'||!ID.test(p.reference)||!p.body||typeof p.body!=='object'||Array.isArray(p.body)
     ||basis==='PRESTART_TERMINATION'&&Object.keys(p.body).length!==0
@@ -62,11 +65,19 @@ export function AdminOriginalRefundPanel({orderId,basis,reference,canWrite,bindi
  if(!canWrite)return null;
  return <div className="space-y-2 text-sm" aria-label={basis==='REVIEW_CONFIRMATION'?'异常原款退款复核':'未开租全额原路退款'}>
   <p>{basis==='REVIEW_CONFIRMATION'?'异常款仅支持人工复核后的全额原笔退款；同原商户号多流水时保持复核。':'只分配核准的全额原款责任；已有活跃意图时禁止重复分配，明确失败释放后才可新键重提。'}</p>
+  <Button size="sm" variant="secondary" onClick={()=>setOpen(true)} disabled={busy||blocked}>{pending?'恢复原退款登记':'核对退款责任'}</Button>
+  <Dialog open={open} onOpenChange={next=>{if(!busy)setOpen(next);}}><DialogContent><DialogHeader><DialogTitle>核对原路退款责任</DialogTitle><DialogDescription>核对原付款和已处理记录后，登记退款意图。</DialogDescription></DialogHeader><div className="space-y-3">
   {!reference?<label className="block text-xs text-muted-foreground">原付款确认编号<Input aria-label="异常原付款确认编号" value={id} onChange={e=>setId(e.target.value)} disabled={busy||!!pending} maxLength={128} className="h-8 mt-1 text-xs font-mono" /></label>:null}
   {basis==='REVIEW_CONFIRMATION'?<label className="block">复核依据<Textarea aria-label="异常原款复核依据" value={reason} onChange={e=>setReason(e.target.value)} disabled={busy||!!pending} maxLength={150} rows={2} className="min-h-16 text-xs mt-1" /></label>:null}
   <label className="flex gap-2 items-center cursor-pointer select-none"><Checkbox name="reviewed" checked={reviewed} onCheckedChange={checked=>setReviewed(checked===true)} disabled={busy||!!pending}/><span>{basis==='REVIEW_CONFIRMATION'?'已核实本单重复/迟到原款，只全额原路退回，不改收款人。':'已核对本单核准终止责任与原退款记录；不覆盖结果未记录的原记录。'}</span></label>
-  <Button size="sm" disabled={busy||blocked||!pending&&(!reviewed||!ID.test(id)||basis==='REVIEW_CONFIRMATION'&&reason.trim().length<3)} onClick={()=>void submit()}>
+  <Button size="sm" disabled={busy||blocked||!pending&&(!reviewed||!ID.test(id)||basis==='REVIEW_CONFIRMATION'&&reason.trim().length<3)} onClick={()=>setConfirmScope(scope)}>
    {busy?'正在登记…':pending?'按原键恢复退款登记':'登记全额原路退款意图'}</Button>
+  {note?<p role="status">{note}</p>:null}</div></DialogContent></Dialog>
+  <ConfirmAlertDialog open={confirmScope===scope} onOpenChange={next=>{if(!next&&!busy)setConfirmScope(null);}} contentLabel="确认登记退款" title="确认登记原路退款意图？"
+   description={pending?'将按原请求恢复登记，保留原引用和原请求内容。':'确认后登记本单原路退款意图；渠道提交与银行到账需另行核对。'}
+   confirmLabel="确认登记" cancelLabel="返回核对" busy={busy} confirmVariant="default" onConfirm={()=>{setConfirmScope(null);void submit();}}>
+   {basis==='REVIEW_CONFIRMATION'?<p className="text-sm">核对依据：{pending?.body.reason??reason.trim()}</p>:null}
+  </ConfirmAlertDialog>
   {note?<p role="status">{note}</p>:null}
  </div>;
 }

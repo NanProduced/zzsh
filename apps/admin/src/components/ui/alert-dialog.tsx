@@ -14,7 +14,7 @@ import { Button } from "@/components/ui/button";
  */
 export function ConfirmAlertDialog({
   open, onOpenChange, title, description, children, cancelLabel = "取消", confirmLabel, onConfirm,
-  busy = false, confirmDisabled = false, className, contentLabel,
+  busy = false, confirmDisabled = false, className, contentLabel, confirmVariant = "destructive",
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -28,6 +28,7 @@ export function ConfirmAlertDialog({
   confirmDisabled?: boolean;
   className?: string;
   contentLabel: string;
+  confirmVariant?: "default" | "destructive";
 }) {
   const cancelRef = useRef<HTMLButtonElement | null>(null);
   const requestClose = (next: boolean) => {
@@ -57,7 +58,7 @@ export function ConfirmAlertDialog({
             <Button ref={cancelRef} type="button" variant="ghost" size="sm" disabled={busy} onClick={() => requestClose(false)}>
               {cancelLabel}
             </Button>
-            <Button type="button" variant="destructive" size="sm" disabled={busy || confirmDisabled} onClick={onConfirm}>
+            <Button type="button" variant={confirmVariant} size="sm" disabled={busy || confirmDisabled} onClick={onConfirm}>
               {confirmLabel}
             </Button>
           </div>

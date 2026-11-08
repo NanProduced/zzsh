@@ -109,7 +109,8 @@ test('a permitted operator can request one new legacy order group with a clear p
  const button=[...node.querySelectorAll('button')].find(item=>item.textContent.includes('创建订单群'));
  await act(async()=>button.dispatchEvent(new Event('click',{bubbles:true})));
  assert.equal(calls.filter(item=>item.url.includes('/create-team')).length,0);
- const confirm=[...node.querySelectorAll('button')].find(item=>item.textContent==='确认建群');assert(confirm);
+ const dialog=document.body.querySelector('[role="alertdialog"]');assert(dialog);
+ const confirm=[...dialog.querySelectorAll('button')].find(item=>item.textContent==='确认建群');assert(confirm);
  await act(async()=>confirm.dispatchEvent(new Event('click',{bubbles:true})));
  await until(()=>node.textContent.includes('正在准备订单群'));
  const posts=calls.filter(item=>item.url.includes('/create-team'));assert.equal(posts.length,1);

@@ -33,24 +33,26 @@ async function setup(t,component,props,answer,seedStorage){
  return{host,calls,w,render,click,root,module};
 }
 const originalProps={componentName:'AdminOriginalRefundPanel',orderId:'order_1',basis:'PRESTART_TERMINATION',reference:'term_1',canWrite:true,binding};
+const button=(ui,label)=>[...ui.w.document.querySelectorAll('button')].find(item=>item.textContent.trim()===label);
+async function confirm(ui){const alert=ui.w.document.querySelector('[role="alertdialog"]');assert(alert);await ui.click([...alert.querySelectorAll('button')].find(item=>item.textContent.trim()==='确认登记'));}
 test('未开租退款按固定原引用登记；缺复核确认与无权时按钮关闭',async t=>{
  const ui=await setup(t,'/apps/admin/src/views/admin-original-refund-panel.tsx',originalProps,()=>response({contractVersion:'admin-prestart-native-refund.v1',orderId:'order_1',terminationId:'term_1',outcome:'ALLOCATED',replayed:false,
   intentId:'refund_1',refundOrderNo:'RF'+'a'.repeat(28),state:'READY',budgetDisposition:'ALLOCATED',channel:{result:'NOT_SUBMITTED',bankArrival:'UNKNOWN'}}));
- let button=ui.host.querySelector('button');assert.equal(button.disabled,true);await ui.click(ui.host.querySelector('input[type=checkbox]'));button=ui.host.querySelector('button');assert.equal(button.disabled,false);await ui.click(button);
+ await ui.click(button(ui,'核对退款责任'));let submit=button(ui,'登记全额原路退款意图');assert.equal(submit.disabled,true);await ui.click(ui.w.document.querySelector('input[type=checkbox]'));submit=button(ui,'登记全额原路退款意图');assert.equal(submit.disabled,false);await ui.click(submit);assert.equal(ui.calls.length,0);await confirm(ui);
  assert.equal(ui.calls.length,1);assert.match(ui.calls[0].url,/term_1\/refund-requests$/);assert.deepEqual(JSON.parse(ui.calls[0].body),{});
  assert.match(ui.host.textContent,/渠道提交与银行到账未记录/);
  await ui.render({...originalProps,canWrite:false});assert.equal(ui.host.textContent,'');
 });
 test('坏2xx回执保留原键/body；重复点击只恢复原退款，不覆盖UNKNOWN',async t=>{
  const ui=await setup(t,'/apps/admin/src/views/admin-original-refund-panel.tsx',originalProps,()=>response({wrong:'shape'}));
- await ui.click(ui.host.querySelector('input[type=checkbox]'));await ui.click(ui.host.querySelector('button'));
- assert.match(ui.host.textContent,/原引用、原内容和原键已保留/);await ui.click(ui.host.querySelector('button'));
+ await ui.click(button(ui,'核对退款责任'));await ui.click(ui.w.document.querySelector('input[type=checkbox]'));await ui.click(button(ui,'登记全额原路退款意图'));await confirm(ui);
+ assert.match(ui.host.textContent,/原引用、原内容和原键已保留/);await ui.click(button(ui,'按原键恢复退款登记'));await confirm(ui);
  assert.equal(ui.calls.length,2);assert.equal(new Headers(ui.calls[0].headers).get('idempotency-key'),new Headers(ui.calls[1].headers).get('idempotency-key'));
  assert.equal(ui.calls[0].body,ui.calls[1].body);assert.deepEqual(JSON.parse(ui.calls[0].body),{});
 });
 test('退款需要复核时展示可理解原因，不暴露内部码',async t=>{
  const ui=await setup(t,'/apps/admin/src/views/admin-original-refund-panel.tsx',originalProps,()=>response({contractVersion:'admin-prestart-native-refund.v1',orderId:'order_1',terminationId:'term_1',replayed:false,outcome:'REVIEW_REQUIRED',reason:'ORIGINAL_ORDER_NO_AMBIGUOUS',channel:{result:'NOT_SUBMITTED',bankArrival:'UNKNOWN'}}));
- await ui.click(ui.host.querySelector('input[type=checkbox]'));await ui.click(ui.host.querySelector('button'));
+ await ui.click(button(ui,'核对退款责任'));await ui.click(ui.w.document.querySelector('input[type=checkbox]'));await ui.click(button(ui,'登记全额原路退款意图'));await confirm(ui);
  assert.match(ui.host.textContent,/原订单号不明确/);assert.doesNotMatch(ui.host.textContent,/ORIGINAL_ORDER_NO_AMBIGUOUS/);
 });
 test('审核读取只GET，责任/本地核销/未知与原号并列，零默认渠道命令',async t=>{
@@ -85,10 +87,13 @@ test('未开租审核遇202 UNKNOWN按原键/原体恢复；更换主体不串�
  const ui=await setup(t,'/apps/admin/src/views/admin-prestart-termination-panel.tsx',props,c=>c.method==='POST'?response({outcome:'UNKNOWN',originalKeyRequired:true},{status:202}):response(draft),
   storage=>storage.setItem('zzsh.admin.prestart.'+scope,JSON.stringify({version:1,scope,key,terminationId:'term_1',body})));
  assert.equal(ui.calls.filter(c=>c.method==='POST').length,0);
- const recovery=()=>[...ui.host.querySelectorAll('button')].find(b=>b.textContent==='恢复原审核请求');
- await ui.click(recovery());assert.match(ui.host.textContent,/原键及原审核内容已保留/);await ui.click(recovery());
+ await ui.click(button(ui,'处理结束申请'));
+ const recovery=()=>button(ui,'恢复原审核请求');
+ await ui.click(recovery());assert.equal(ui.calls.filter(c=>c.method==='POST').length,0);await ui.click(button(ui,'确认处理'));
+ assert.match(ui.host.textContent,/原键及原审核内容已保留/);await ui.click(recovery());await ui.click(button(ui,'确认处理'));
  const writes=ui.calls.filter(c=>c.method==='POST');assert.equal(writes.length,2);
  for(const w of writes){assert.equal(new Headers(w.headers).get('idempotency-key'),key);assert.deepEqual(JSON.parse(w.body),body);}
+ await ui.render({...props,canWrite:false});assert.equal(recovery()?.disabled,true,'pending request remains visible but cannot be replayed after permission loss');
  await ui.render({...props,binding:{adminUserId:'other_admin',sessionId:'other_session'}});assert.equal(recovery(),undefined);
  assert.equal(ui.calls.filter(c=>c.method==='POST').length,2);
 });

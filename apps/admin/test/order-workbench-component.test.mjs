@@ -20,6 +20,7 @@ Object.assign(globalThis, {
   requestAnimationFrame: browser.requestAnimationFrame.bind(browser), cancelAnimationFrame: browser.cancelAnimationFrame.bind(browser), IS_REACT_ACT_ENVIRONMENT: true,
 });
 Object.defineProperty(globalThis, "navigator", { value: browser.navigator, configurable: true });
+Object.defineProperty(browser.navigator, "locks", { configurable: true, value: { request: async (_name, _options, callback) => callback({}) } });
 globalThis.getComputedStyle = browser.getComputedStyle.bind(browser);
 const { createRoot } = await import("react-dom/client");
 const adminRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -170,7 +171,7 @@ test("party confirmation binds to the same version only", async (t) => {
   const first = await openPanel(oneAck);
   const parties = (root) => [...root.querySelectorAll(".im-order-parties [data-slot=item]")].map((row) => row.textContent.replace(/\s+/g, ""));
   assert.deepEqual(parties(first), ["租客待确认", "号主已确认"], "opening acks are per party on the same version");
-  assert.match(first.querySelector(".im-order-parties").textContent, /客服不能代替/, "the operator is never offered a proxy confirmation");
+  assert.match(first.querySelector(".im-order-parties").textContent, /请等待双方确认/, "an operator without permission is not offered proxy confirmation");
   assert.match(first.textContent, /等待双方确认期初/);
   assert.match(first.textContent, /期初 v1/);
   await closePanel(oneAck.until);
@@ -250,6 +251,8 @@ test("the check panel is opened from the task card and writes the frozen quantit
   const inputs = [...document.body.querySelectorAll(".im-support-fulfillment-lines input")];
   assert.deepEqual(inputs.map((input) => input.value), ["10000000", "3"], "the opening is seeded from the frozen projection");
   await click(byText(document.body, "期初代录"));
+  assert.equal(deps.writes.length, 0, "opening waits for confirmation");
+  await click(byText(document.body, "确认提交期初清单"));
   await until(() => deps.writes.length === 1, "opening written");
   assert.equal(deps.writes[0].path.endsWith("/orders/order-8842/openings"), true);
   assert.deepEqual(deps.writes[0].body, { lines: [{ itemId: "item_haff", quantity: "10000000" }, { itemId: "item_case", quantity: "3" }] });
