@@ -53,6 +53,9 @@ try {
   await assert.rejects(c.query(upgrade),/Exact registered test database/);await c.query('ROLLBACK');
   await c.query('BEGIN');await c.query("CREATE OR REPLACE FUNCTION zzsh_order.guard_controlled_operation() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END $$");
   await assert.rejects(c.query(upgrade),/Unexpected payout guard/);await c.query('ROLLBACK');
+  const afterDdl=upgrade.lastIndexOf('  FOR item IN SELECT * FROM (VALUES');assert(afterDdl>0);
+  await assert.rejects(c.query(upgrade.slice(0,afterDdl)+"  RAISE EXCEPTION 'SYNTHETIC_AFTER_DDL';\n"+upgrade.slice(afterDdl)),/SYNTHETIC_AFTER_DDL/);
+  assert(!(await c.query("SELECT pg_get_constraintdef(oid) d FROM pg_constraint WHERE conname='withdrawal_destination_scenario_check'")).rows[0].d.includes('IMMEDIATE_SUCCESS'));
   await c.query('BEGIN');await c.query(upgrade);await assert.rejects(c.query('SELECT 1/0'));await c.query('ROLLBACK');
   const before=(await c.query("SELECT pg_get_constraintdef(oid) d FROM pg_constraint WHERE conname='withdrawal_destination_scenario_check'")).rows[0].d;
   assert(!before.includes('IMMEDIATE_SUCCESS'),'FAILED_UPGRADE_DID_NOT_ROLL_BACK');
@@ -96,5 +99,5 @@ try {
   await c.query('SAVEPOINT duplicate');await assert.rejects(addOperation('new-operation-2','new-intent','IMMEDIATE_SUCCESS'),error=>error.code==='23505');await c.query('ROLLBACK TO SAVEPOINT duplicate');
   assert.equal((await c.query('SELECT count(*)::int n FROM zzsh_order.controlled_payout_operation')).rows[0].n,2);
   await c.query('ROLLBACK');
-  console.log(JSON.stringify({status:'PASS',scope:'synthetic PostgreSQL only',systemIdentifier:system,assertions:['wrong database marker refused','changed guard refused','transaction rollback','one upgrade only','old timeout preserved','immediate success allowed','wrong binding refused','wrong amount refused','duplicate payout refused'],notRun:['real R07','ECS','real channels']}));
+  console.log(JSON.stringify({status:'PASS',scope:'synthetic PostgreSQL only',systemIdentifier:system,assertions:['wrong database marker refused','changed guard refused','autocommit and transaction rollback','one upgrade only','old timeout preserved','immediate success allowed','wrong binding refused','wrong amount refused','duplicate payout refused'],notRun:['real R07','ECS','real channels']}));
 } finally {await c.end();}

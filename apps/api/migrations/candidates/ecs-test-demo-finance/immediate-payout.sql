@@ -1,5 +1,5 @@
 -- Test databases only. Apply in one transaction after the registered demo finance installation.
-DO $guard$
+DO $upgrade$
 DECLARE marker text; schema_owner name; item record; definition text;
 BEGIN
   SELECT shobj_description(d.oid,'pg_database'),pg_get_userbyid(n.nspowner)
@@ -33,19 +33,13 @@ BEGIN
       RAISE EXCEPTION 'Unexpected payout scenario constraint: %',item.constraint_name;
     END IF;
   END LOOP;
-END
-$guard$;
+  EXECUTE $ddl$ALTER TABLE zzsh_order.withdrawal_destination DROP CONSTRAINT withdrawal_destination_scenario_check,
+    ADD CONSTRAINT withdrawal_destination_scenario_check CHECK (scenario IN ('FAIL_UNPAID','TIMEOUT_THEN_SUCCEED','IMMEDIATE_SUCCESS'))$ddl$;
+  EXECUTE $ddl$ALTER TABLE zzsh_order.controlled_payout_operation DROP CONSTRAINT controlled_payout_operation_scenario_check,
+    ADD CONSTRAINT controlled_payout_operation_scenario_check CHECK (scenario IN ('FAIL_UNPAID','TIMEOUT_THEN_SUCCEED','IMMEDIATE_SUCCESS'))$ddl$;
+  EXECUTE $ddl$COMMENT ON CONSTRAINT withdrawal_destination_scenario_check ON zzsh_order.withdrawal_destination IS '限定受控提现测试场景，首次成功仅用于已登记的演示环境。'$ddl$;
+  EXECUTE $ddl$COMMENT ON CONSTRAINT controlled_payout_operation_scenario_check ON zzsh_order.controlled_payout_operation IS '限定受控出款测试场景，模拟结果不代表真实渠道到账。'$ddl$;
 
-ALTER TABLE zzsh_order.withdrawal_destination DROP CONSTRAINT withdrawal_destination_scenario_check,
-  ADD CONSTRAINT withdrawal_destination_scenario_check CHECK (scenario IN ('FAIL_UNPAID','TIMEOUT_THEN_SUCCEED','IMMEDIATE_SUCCESS'));
-ALTER TABLE zzsh_order.controlled_payout_operation DROP CONSTRAINT controlled_payout_operation_scenario_check,
-  ADD CONSTRAINT controlled_payout_operation_scenario_check CHECK (scenario IN ('FAIL_UNPAID','TIMEOUT_THEN_SUCCEED','IMMEDIATE_SUCCESS'));
-COMMENT ON CONSTRAINT withdrawal_destination_scenario_check ON zzsh_order.withdrawal_destination IS '限定受控提现测试场景，首次成功仅用于已登记的演示环境。';
-COMMENT ON CONSTRAINT controlled_payout_operation_scenario_check ON zzsh_order.controlled_payout_operation IS '限定受控出款测试场景，模拟结果不代表真实渠道到账。';
-
-DO $upgrade$
-DECLARE item record; definition text;
-BEGIN
   FOR item IN SELECT * FROM (VALUES
     ('zzsh_order.guard_controlled_operation()',
       $old$NEW.scenario='TIMEOUT_THEN_SUCCEED' AND doc IS DISTINCT FROM$old$,
