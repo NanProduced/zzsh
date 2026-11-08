@@ -293,6 +293,7 @@ test('upper overview uses the posted version and labels ledger contribution and 
  await act(async()=>root.render(createElement(AdminOrderChainView,{...chainProps(id),snapshot:snap,objectOnly:true,initialOrderId:id})));
  await until(()=>node.querySelector('.oc-overview-grid')?.textContent.includes('平台结算贡献（非净利润）')&&node.querySelector('.oc-overview-grid')?.textContent.includes('75 M 哈夫币'));
  assert.match(node.querySelector('.oc-overview-grid').textContent,/0组（0发）/);assert.match(node.querySelector('.oc-overview-grid').textContent,/全额包赔服务费（号主承担）¥197\.60/);
+ assert.equal(node.querySelector('[role="region"][aria-label="本单物品资源表"]')?.tabIndex,0);
  assert.doesNotMatch(node.textContent,/平台收益（价差\+包赔费）|汇聚已收款/);
  assert.equal(calls.filter(url=>url.includes('/settlement')).length,1);
 });

@@ -65,11 +65,12 @@
 [data-theme=light] .oc-design .oc-price-pair>div[data-side=renter] strong{color:#0369a1}
 [data-theme=light] .oc-design .oc-price-pair>div[data-side=owner] strong{color:#6d28d9}
 /* 物品资源表：预付 / 实际消耗两列，已结单才有实际值 */
-.oc-design .oc-res-wrap{margin-top:14px}
+.oc-design .oc-res-wrap{margin-top:14px;overflow-x:auto}
 .oc-design .oc-res{width:100%;border-collapse:collapse;font-size:12px}
-.oc-design .oc-res th{text-align:left;font-weight:500;color:var(--muted-foreground);padding:6px 8px;border-bottom:1px solid var(--border)}
+.oc-design .oc-res th{text-align:left;font-weight:500;line-height:1.5;white-space:nowrap;color:var(--muted-foreground);padding:8px;border-bottom:1px solid var(--border)}
 .oc-design .oc-res td{padding:6px 8px;border-bottom:1px solid var(--border);font-variant-numeric:tabular-nums}
-.oc-design .oc-res th+th,.oc-design .oc-res td+td{text-align:right;width:96px}
+.oc-design .oc-res th+th,.oc-design .oc-res td+td{text-align:right;white-space:nowrap}
+.oc-design .oc-res-wrap:focus-visible{outline:2px solid var(--ring);outline-offset:3px;border-radius:4px}
 .oc-design .oc-res tbody tr:last-child td{border-bottom:0}
 /* 标题下标记：计价方式 / 全额包赔 */
 .oc-design .oc-badge{display:inline-flex;align-items:center;margin-left:8px;padding:0 7px;height:18px;border-radius:999px;border:1px solid var(--border);font-size:11px;line-height:1;color:var(--muted-foreground);background:var(--surface-raised);vertical-align:1px}
