@@ -26,6 +26,21 @@ def manifest():
 
 
 class ContractTests(unittest.TestCase):
+    def test_compose_accepts_only_the_two_explicit_real_identity_providers(self):
+        env={'APP_PROFILE':'ecs-test','DB_TARGET':'ecs-test','DB_NAME':restore.DATABASE,'DB_USER':restore.RUNTIME,
+             'DB_TLS_MODE':'verify-full','REDIS_TLS_MODE':'verify-full','USER_SMS_PROVIDER':'aliyun',
+             'MEDIA_STORAGE':'oss','ORDER_IM_EVENTS_ENABLED':'true','YUNXIN_APP_KEY':'fixture','ORDER_IM_EVENTS_APP_KEY':'fixture'}
+        env.update({name:'false' for name in ('JOINPAY_COLLECTION_ENABLED','JOINPAY_REFUND_ENABLED','JOINPAY_PAYOUT_ENABLED','JOINPAY_ACCOUNTS_ENABLED')})
+        services={name:{} for name in ('api','web','proxy','postgres','redis','db-setup','migration')}
+        services['api']={'environment':env,'volumes':[{'type':'bind','source':'/fixture/secrets','target':'/workspace/apps/api/.secrets','read_only':True}]}
+        services['proxy']={'ports':[{'published':'80'},{'published':'443'}]}
+        config={'services':services,'networks':{'data_private':{'internal':True}}}
+        for provider in ('aliyun-id2meta','aliyun-market-id2'):
+            env['USER_REAL_NAME_PROVIDER']=provider
+            self.assertEqual(restore.validate_compose(config)[0]['USER_REAL_NAME_PROVIDER'],provider)
+        env['USER_REAL_NAME_PROVIDER']='other'
+        with self.assertRaisesRegex(restore.Refused,'COMPOSE_RUNTIME_GATES_INVALID'): restore.validate_compose(config)
+
     def test_pg_restore_header_accepts_real_spacing_and_rejects_missing_source(self):
         self.assertEqual(restore.dump_source_major(';     Dumped from database version: 16.13\n'), 16)
         self.assertEqual(restore.dump_source_major('; Dumped from database version: 16\n'), 16)
@@ -46,7 +61,7 @@ class ContractTests(unittest.TestCase):
 
     def test_source_key_fingerprints_bank_versions_and_provider_files(self):
         with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp); os.chmod(root,0o700); data = manifest(); env = {}
+            root = Path(tmp); os.chmod(root,0o700); data = manifest(); env = {'USER_REAL_NAME_PROVIDER':'aliyun-id2meta'}
             for index, name in enumerate(sorted(restore.REQUIRED_KEYS)):
                 file = root / ('key'+str(index)); file.write_text(chr(65+index)*40); file.chmod(0o600)
                 env[name] = '.secrets/'+file.name; data['keys'][name] = hashlib.sha256(file.read_bytes()).hexdigest()
@@ -73,6 +88,11 @@ class ContractTests(unittest.TestCase):
             cfg={'database':restore.DATABASE,'runtimeUser':restore.RUNTIME,'writeEnabled':True,'currentKeyVersion':'test-v1',
                  'keyVariables':{'fixture-v1':'WITHDRAWAL_BANK_KEY_R06_V1','test-v1':'WITHDRAWAL_BANK_KEY_TEST_V1'}}
             bankcfg.write_text(json.dumps(cfg));restore.verify_source_keys(env,root,data)
+            market=dict(env, USER_REAL_NAME_PROVIDER='aliyun-market-id2', USER_REAL_NAME_APPCODE_FILE='.secrets/provider')
+            market.pop('USER_REAL_NAME_ACCESS_KEY_ID_FILE');market.pop('USER_REAL_NAME_ACCESS_KEY_SECRET_FILE')
+            restore.verify_source_keys(market,root,data)
+            missing_market=dict(market);missing_market.pop('USER_REAL_NAME_APPCODE_FILE')
+            with self.assertRaises(restore.Refused): restore.verify_source_keys(missing_market,root,data)
             no_old=copy.deepcopy(cfg);del no_old['keyVariables']['fixture-v1'];bankcfg.write_text(json.dumps(no_old))
             with self.assertRaisesRegex(restore.Refused,'BANK_KEYRING_VERSIONS_MISMATCH'): restore.verify_source_keys(env,root,data)
             bankcfg.write_text(json.dumps(cfg))

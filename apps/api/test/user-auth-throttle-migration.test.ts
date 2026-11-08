@@ -44,7 +44,10 @@ test("production initial installation includes the authentication throttle migra
   const prepared = prepareBusinessInitial(BUSINESS_MIGRATIONS_FOLDER, baseline.folder);
   try {
     const journal = JSON.parse(readFileSync(join(prepared.folder, "meta/_journal.json"), "utf8")) as { entries: Array<{ tag: string }> };
-    assert.deepEqual(journal.entries.slice(-2).map(entry => entry.tag), ["0175_legacy_account_capture_facts", "0176_user_auth_throttle"]);
+    const tags=journal.entries.map(entry=>entry.tag);
+    assert.ok(tags.includes("0175_legacy_account_capture_facts"));
+    assert.equal(tags.indexOf("0176_user_auth_throttle"),tags.indexOf("0175_legacy_account_capture_facts")+1);
+    assert.ok(tags.indexOf("0177_market_identity_provider")>tags.indexOf("0176_user_auth_throttle"));
     assert.ok(readFileSync(join(prepared.folder, "0176_user_auth_throttle.sql"), "utf8").includes("user_auth_captcha_used"));
   } finally { prepared.cleanup(); }
 });

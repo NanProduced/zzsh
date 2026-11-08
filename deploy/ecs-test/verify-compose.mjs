@@ -16,7 +16,7 @@ try {
   writeFileSync(apiFile, [
     'JOINPAY_COLLECTION_ENABLED=true', 'JOINPAY_REFUND_ENABLED=true',
     'JOINPAY_PAYOUT_ENABLED=true', 'JOINPAY_ACCOUNTS_ENABLED=true',
-    'USER_SMS_PROVIDER=aliyun', 'USER_REAL_NAME_PROVIDER=aliyun-id2meta',
+    'USER_SMS_PROVIDER=aliyun', 'USER_REAL_NAME_PROVIDER=aliyun-market-id2',
     'YUNXIN_APP_KEY=synthetic', 'MEDIA_STORAGE=oss',
   ].join('\n') + '\n', { mode: 0o600 });
   const env = { ...process.env, ZZSH_TEST_IMAGE_TAG: 'synthetic-check',
@@ -33,7 +33,7 @@ try {
   assert.equal(services.api.environment.DB_TLS_MODE, 'verify-full');
   assert.equal(services.api.environment.REDIS_TLS_MODE, 'verify-full');
   assert.equal(services.api.environment.USER_SMS_PROVIDER, 'aliyun');
-  assert.equal(services.api.environment.USER_REAL_NAME_PROVIDER, 'aliyun-id2meta');
+  assert.equal(services.api.environment.USER_REAL_NAME_PROVIDER, 'aliyun-market-id2');
   assert.equal(services.api.environment.YUNXIN_APP_KEY, 'synthetic');
   for (const name of ['api', 'web', 'postgres', 'redis', 'migration', 'db-setup']) assert.equal(services[name].ports, undefined, `${name} must not publish a host port`);
   assert.deepEqual(services.proxy.ports.map(port => Number(port.published)).sort((a, b) => a - b), [80, 443]);

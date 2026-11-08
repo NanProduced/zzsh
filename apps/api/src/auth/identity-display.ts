@@ -1,6 +1,7 @@
 import type { Pool, PoolClient } from "pg";
 import {createHmac} from "node:crypto";
 import {SecurityApiError} from "./security-core";
+import type {NativeRealNameProvider} from "./identity-provider";
 
 /** B5: read-only masked identity display. Full values never leave this module and are never logged. */
 export const IDENTITY_MASKING_VERSION = "identity-mask-v1" as const;
@@ -47,7 +48,7 @@ export function pgIdentityDisplayStore(db: Pool | PoolClient): IdentityDisplaySt
       const r = await db.query<{ realName: string; idCardNo: string }>(
         `/* identity-display-read */ SELECT d.real_name AS "realName", d.id_card_no AS "idCardNo"
            FROM zzsh_iam.user_identity_display_source d JOIN zzsh_iam.user_identity_state s ON s.user_id=d.user_id
-           WHERE d.user_id = $1 AND s.identity_status='VERIFIED' AND s.provider<>'aliyun-id2meta'`, [userId]);
+           WHERE d.user_id = $1 AND s.identity_status='VERIFIED' AND s.provider NOT IN ('aliyun-id2meta','aliyun-market-id2')`, [userId]);
         if(transactional)await db.query("RELEASE SAVEPOINT identity_display_read");
         return r.rows[0]?{...r.rows[0],source:"RECORDED_SOURCE" as const}:null;
       }catch(error){
@@ -74,18 +75,25 @@ export async function readIdentityDisplay(store: IdentityDisplayStore, userId: s
 }
 
 /** Verified provider response only; hashes/masks are written in the same state/subject transaction, never full PII. */
-export async function assertNativeIdentityDisplayReady(client:PoolClient):Promise<void>{
+export async function assertNativeIdentityDisplayReady(client:PoolClient,provider?:string):Promise<void>{
   const ready=(await client.query(`SELECT to_regclass('zzsh_iam.user_identity_verified_profile') IS NOT NULL AND NOT EXISTS(
     SELECT 1 FROM (VALUES('user_id','INSERT'),('subject_digest','INSERT'),('name_hmac','INSERT'),('name_mask','INSERT'),
       ('document_mask','INSERT'),('provider','INSERT'),('provider_reference','INSERT'),('verified_at','INSERT'),
       ('subject_digest','UPDATE'),('name_hmac','UPDATE'),('name_mask','UPDATE'),('document_mask','UPDATE'),
       ('provider','UPDATE'),('provider_reference','UPDATE'),('verified_at','UPDATE'),('recorded_at','UPDATE')) p(column_name,privilege)
     WHERE NOT COALESCE(has_column_privilege(current_user,to_regclass('zzsh_iam.user_identity_verified_profile'),p.column_name,p.privilege),false)
-  ) AS ready`)).rows[0]?.ready;
+  ) AND ($1::text IS DISTINCT FROM 'aliyun-market-id2' OR (
+    EXISTS(SELECT 1 FROM pg_constraint c WHERE c.conrelid=to_regclass('zzsh_iam.user_identity_verified_profile')
+      AND c.conname='user_identity_verified_profile_provider_check' AND c.convalidated
+      AND position('aliyun-market-id2' IN pg_get_constraintdef(c.oid))>0)
+    AND EXISTS(SELECT 1 FROM pg_constraint c WHERE c.conrelid=to_regclass('zzsh_iam.user_identity_verification_attempt')
+      AND c.conname='user_identity_verification_attempt_disclosure_version_check' AND c.convalidated
+      AND position('identity-provider-transfer-market-v1' IN pg_get_constraintdef(c.oid))>0)
+  )) AS ready`,[provider??null])).rows[0]?.ready;
   if(ready!==true)throw new SecurityApiError(503,"IDENTITY_DEPENDENCY_UNAVAILABLE","Verified identity profile storage is unavailable");
 }
 
-export async function recordNativeIdentityDisplay(client:PoolClient,input:{userId:string;subjectDigest:string;fullName:string;documentNumber:string;provider:"aliyun-id2meta";providerReference:string},key:Buffer|undefined):Promise<void>{
+export async function recordNativeIdentityDisplay(client:PoolClient,input:{userId:string;subjectDigest:string;fullName:string;documentNumber:string;provider:NativeRealNameProvider;providerReference:string},key:Buffer|undefined):Promise<void>{
   if(!key||key.length<32||!input.providerReference||!/^[a-f0-9]{64}$/.test(input.subjectDigest))throw new SecurityApiError(503,"IDENTITY_DEPENDENCY_UNAVAILABLE","Verified identity profile is unavailable");
   const nameHmac=createHmac("sha256",key).update("zzsh:verified-real-name:v1\0").update(input.fullName.trim().normalize("NFC")).digest("hex");
   const saved=await client.query(`INSERT INTO zzsh_iam.user_identity_verified_profile(user_id,subject_digest,name_hmac,name_mask,document_mask,provider,provider_reference,verified_at)

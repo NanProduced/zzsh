@@ -12,6 +12,7 @@ test("demo withdrawal requires an adult verified identity; fake identity is loca
   let row={account_status:"ACTIVE",identity_status:"VERIFIED",age_status:"ADULT",provider:"aliyun-id2meta",provider_reference:"real-ref-1",verified_at:new Date("2026-01-01T00:00:00Z"),now};
   const client={query:async(_sql:string,values:unknown[])=>{assert.deepEqual(values,["user_1"]);return{rows:[row]};}} as unknown as PoolClient;
   await assert.doesNotReject(assertDemoWithdrawalIdentity(client,"user_1",demo));
+  row.provider="aliyun-market-id2";await assert.doesNotReject(assertDemoWithdrawalIdentity(client,"user_1",demo));row.provider="aliyun-id2meta";
   for(const [changed,code] of [[{identity_status:"UNVERIFIED"},"DEMO_WITHDRAW_IDENTITY_REQUIRED"],
     [{age_status:"MINOR"},"DEMO_WITHDRAW_ADULT_REQUIRED"],[{age_status:"UNKNOWN"},"DEMO_WITHDRAW_ADULT_REQUIRED"],
     [{account_status:"FROZEN"},"DEMO_WITHDRAW_IDENTITY_REQUIRED"],[{provider:"fake",provider_reference:"fake_123"},"DEMO_WITHDRAW_IDENTITY_SOURCE_UNCONFIRMED"],

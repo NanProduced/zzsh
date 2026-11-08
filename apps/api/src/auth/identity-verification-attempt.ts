@@ -8,18 +8,25 @@ import {legalDigest,parseLegalAcceptanceRef,readCurrentPlatformDocuments} from "
 export type RealNameVerificationPolicy={dailyLimit:number;minIntervalSeconds:number};
 export type IdentityVerificationReceipt={status:"VERIFIED"|"REJECTED"|"UNKNOWN";ageStatus:"ADULT"|"MINOR"|"UNKNOWN";version:number;
   message:string;previousIdentityPreserved?:true;currentIdentity?:{status:"VERIFIED";ageStatus:"ADULT"|"MINOR"|"UNKNOWN"}};
-export type IdentityVerificationConsent={accepted:true;versionId:string;digest:string;disclosureVersion:"identity-provider-transfer-v1"};
-export type IdentityVerificationAttempt={userId:string;keyDigest:string;requestDigest:string;consent?:IdentityVerificationConsent};
 export const IDENTITY_PROVIDER_DISCLOSURE={versionId:"identity-provider-transfer-v1" as const,
   body:"为完成本次实名认证，您同意将本次填写的姓名、身份证号码提交至阿里云二要素核验服务。结果用于实名认证与交易资格判断，平台仅保存受保护的摘要和脱敏展示记录。"};
+export const MARKET_IDENTITY_PROVIDER_DISCLOSURE={versionId:"identity-provider-transfer-market-v1" as const,
+  body:"为完成本次实名认证，您同意将本次填写的姓名、身份证号码提交至阿里云云市场实名认证服务商杭州优必信科技有限公司进行二要素核验。结果用于实名认证与交易资格判断，平台仅保存受保护的摘要和脱敏展示记录。"};
+type IdentityProviderDisclosure=typeof IDENTITY_PROVIDER_DISCLOSURE|typeof MARKET_IDENTITY_PROVIDER_DISCLOSURE;
+export type IdentityVerificationConsent={accepted:true;versionId:string;digest:string;disclosureVersion:IdentityProviderDisclosure["versionId"]};
+export type IdentityVerificationAttempt={userId:string;keyDigest:string;requestDigest:string;consent?:IdentityVerificationConsent};
 
-export function parseIdentityVerificationConsent(value:unknown):IdentityVerificationConsent{
+export function identityProviderDisclosure(provider:unknown):IdentityProviderDisclosure{
+  return provider==="aliyun-market-id2"?MARKET_IDENTITY_PROVIDER_DISCLOSURE:IDENTITY_PROVIDER_DISCLOSURE;
+}
+
+export function parseIdentityVerificationConsent(value:unknown,disclosure:IdentityProviderDisclosure=IDENTITY_PROVIDER_DISCLOSURE):IdentityVerificationConsent{
   if(!value||typeof value!=="object"||Array.isArray(value))throw new SecurityApiError(400,"INVALID_ARGUMENT","请阅读隐私政策并明确同意本次实名资料核验");
   const input=value as Record<string,unknown>;
-  if(Object.keys(input).some(key=>!["accepted","versionId","digest","disclosureVersion"].includes(key))||input.accepted!==true||input.disclosureVersion!==IDENTITY_PROVIDER_DISCLOSURE.versionId)
+  if(Object.keys(input).some(key=>!["accepted","versionId","digest","disclosureVersion"].includes(key))||input.accepted!==true||input.disclosureVersion!==disclosure.versionId)
     throw new SecurityApiError(400,"INVALID_ARGUMENT","请明确同意当前版本的本次实名资料核验说明");
   const ref=parseLegalAcceptanceRef({versionId:input.versionId,digest:input.digest},"privacyAcceptance");
-  return{...ref,accepted:true,disclosureVersion:IDENTITY_PROVIDER_DISCLOSURE.versionId};
+  return{...ref,accepted:true,disclosureVersion:disclosure.versionId};
 }
 
 export async function readIdentityVerificationPrivacy(client:PoolClient){
@@ -75,10 +82,11 @@ export async function beginIdentityVerification(client:PoolClient,attempt:Identi
     const privacy=await readIdentityVerificationPrivacy(client);
     if(!privacy)throw new SecurityApiError(503,"IDENTITY_DEPENDENCY_UNAVAILABLE","平台隐私政策尚未发布，实名资料核验暂未开放");
     if(privacy.versionId!==attempt.consent.versionId||privacy.digest!==attempt.consent.digest)throw new SecurityApiError(409,"CONFLICT","隐私政策已更新，请重新阅读并确认本次核验");
+    const disclosure=attempt.consent.disclosureVersion===MARKET_IDENTITY_PROVIDER_DISCLOSURE.versionId?MARKET_IDENTITY_PROVIDER_DISCLOSURE:IDENTITY_PROVIDER_DISCLOSURE;
     await client.query(`INSERT INTO zzsh_iam.user_identity_verification_attempt(user_id,key_digest,request_digest,state,
       privacy_version_id,privacy_digest,disclosure_version,disclosure_digest,consented_at)
       VALUES($1,$2,$3,'PENDING',$4,$5,$6,$7,clock_timestamp())`,[attempt.userId,attempt.keyDigest,attempt.requestDigest,
-      privacy.versionId,privacy.digest,IDENTITY_PROVIDER_DISCLOSURE.versionId,legalDigest(IDENTITY_PROVIDER_DISCLOSURE.body)]);
+      privacy.versionId,privacy.digest,disclosure.versionId,legalDigest(disclosure.body)]);
     return{fresh:true};
   }catch(error){if(error instanceof SecurityApiError)throw error;throw unavailable();}
 }

@@ -34,7 +34,7 @@ export function identityCapabilityReady(capability: Capability): boolean {
   if (capability.real !== true) return true;
   return capability.idempotencyRequired === true && Boolean(typeof capability.privacy?.versionId === "string" && capability.privacy.versionId.length > 0
     && /^[a-f0-9]{64}$/.test(capability.privacy.digest) && typeof capability.privacy.title === "string"
-    && capability.disclosure?.versionId === "identity-provider-transfer-v1" && /^[a-f0-9]{64}$/.test(capability.disclosure.digest)
+    && (capability.disclosure?.versionId === "identity-provider-transfer-v1" || capability.disclosure?.versionId === "identity-provider-transfer-market-v1") && /^[a-f0-9]{64}$/.test(capability.disclosure.digest)
     && typeof capability.disclosure.body === "string" && capability.disclosure.body.trim().length > 0 && capability.disclosure.body.length <= 4000);
 }
 export function parseIdentityVerificationReceipt(value: unknown, attemptRequired: boolean): Receipt {
@@ -134,7 +134,7 @@ export function IdentityVerificationForm({ userId, identityStatus, capability, c
           {capability?.real ? <><p className="account-module-note identity-verification-disclosure">{capability.disclosure?.body}</p><a href={`/legal/privacy?version=${encodeURIComponent(capability.privacy!.versionId)}`} target="_blank" rel="noopener noreferrer">阅读《{capability.privacy!.title || "隐私政策"}》（新窗口）</a></> : <p className="account-module-note">仅用于本地模拟，不代表真实身份核验。请勿填写真实姓名或身份证。</p>}
           <label className="identity-verification-field" htmlFor="identity-full-name">本人姓名<input id="identity-full-name" name="fullName" value={fullName} maxLength={64} disabled={visible.busy} onChange={event => setFullName(event.target.value)} autoComplete="off" /></label>
           <label className="identity-verification-field" htmlFor="identity-document-number">身份证号码<input id="identity-document-number" name="documentNumber" value={documentNumber} maxLength={18} disabled={visible.busy} onChange={event => setDocumentNumber(event.target.value)} autoComplete="off" spellCheck={false} /></label>
-          <label className="identity-verification-consent"><input id="identity-verification-consent" type="checkbox" checked={consented} disabled={visible.busy} onChange={event => setAcceptedFor(event.target.checked ? consentContext : "")} /><span>{capability?.real ? "我已阅读上述本次核验说明和当前隐私政策，同意本次将本人姓名和身份证号提交给阿里云二要素实名核验服务。" : "我确认这是用于本地模拟的测试资料。"}</span></label>
+          <label className="identity-verification-consent"><input id="identity-verification-consent" type="checkbox" checked={consented} disabled={visible.busy} onChange={event => setAcceptedFor(event.target.checked ? consentContext : "")} /><span>{capability?.real ? "我已阅读本次核验说明和隐私政策，同意按说明提交本人姓名和身份证号。" : "我确认这是用于本地模拟的测试资料。"}</span></label>
           <button type="submit" className="button primary" disabled={visible.busy || retryAt !== null}>{visible.busy ? "正在提交…" : capability?.real ? "提交本次实名核验" : "提交模拟校验"}</button>
         </form>}
     {retryAt !== null ? <p className="account-module-note">请求受到频率限制，请稍后再操作；不会自动重新发起核验。</p> : null}

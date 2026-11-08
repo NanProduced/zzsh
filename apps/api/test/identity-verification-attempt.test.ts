@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type {AuthSecurityOptions,AuthSecurityNodeRequest,AuthSecurityNodeResponse} from "../src/auth/auth-security";
 import {handleUserIdentityRoute,identityAllowsProtectedTrade,type RealNameProvider,type RealNameVerificationResult,type UserIdentityState} from "../src/auth/user-identity";
-import {identityVerificationAttempt,identityVerificationKey} from "../src/auth/identity-verification-attempt";
+import {identityVerificationAttempt,identityVerificationKey,MARKET_IDENTITY_PROVIDER_DISCLOSURE} from "../src/auth/identity-verification-attempt";
 import {legalDigest} from "../src/legal/legal-documents";
 
 const key=Buffer.alloc(32,6),documentNumber="110105199001011232",privacyBody="SYNTHETIC privacy policy for offline provider tests only";
@@ -14,7 +14,7 @@ const legacy:UserIdentityState={accountStatus:"ACTIVE",identityStatus:"VERIFIED"
 function fixture(provider:RealNameProvider,initial:UserIdentityState={accountStatus:"ACTIVE",identityStatus:"UNVERIFIED",ageStatus:"UNKNOWN",provider:"none",version:0}){
  let state={...initial},snapshot:UserIdentityState|null=null,attempts=new Map<string,Record<string,unknown>>(),savedAttempts:Map<string,Record<string,unknown>>|null=null;
  const statements:Array<{sql:string;values:unknown[]}>=[];
- const control={failProfile:false,failCommitAfterState:false,commitAppliedButAckLost:false,dailyCount:"0",elapsed:null as string|null,privacyAvailable:true,privacyVersion:"privacy-synthetic-v1",subjectDigest:null as string|null,legacyMatches:true};
+ const control={failProfile:false,profileReady:true,failCommitAfterState:false,commitAppliedButAckLost:false,dailyCount:"0",elapsed:null as string|null,privacyAvailable:true,privacyVersion:"privacy-synthetic-v1",subjectDigest:null as string|null,legacyMatches:true};
  const query=async(sql:string,values:unknown[]=[])=>{
   statements.push({sql,values});
   if(sql==="BEGIN"){snapshot={...state};savedAttempts=new Map([...attempts].map(([k,v])=>[k,{...v}]));}
@@ -42,7 +42,7 @@ function fixture(provider:RealNameProvider,initial:UserIdentityState={accountSta
    return{rows:[],rowCount:1};
   }
   if(sql.includes("identity-subject-capacity"))return{rows:[{alreadyBound:initial.identityStatus==="VERIFIED",occupied:"0"}],rowCount:1};
-  if(sql.includes(" AS ready"))return{rows:[{ready:true}],rowCount:1};
+  if(sql.includes(" AS ready"))return{rows:[{ready:control.profileReady}],rowCount:1};
   if(sql.startsWith('INSERT INTO "zzsh_iam"."user_identity_state"')){
    state={...state,identityStatus:values[1] as UserIdentityState["identityStatus"],ageStatus:values[2] as UserIdentityState["ageStatus"],provider:String(values[3]),version:state.version+1};
    return{rows:[{...state}],rowCount:1};
@@ -85,6 +85,37 @@ test("real provider requires a key, persists before one call and completed repla
  const claim=receipt.find(row=>row.sql.startsWith("INSERT INTO zzsh_iam.user_identity_verification_attempt"))!;
  assert.deepEqual(claim.values.slice(3,6),[privacyAcceptance.versionId,privacyAcceptance.digest,"identity-provider-transfer-v1"]);
  assert.match(claim.sql,/consented_at[\s\S]*clock_timestamp/);
+});
+
+test("marketplace verification requires its own disclosure and records the actual provider",async()=>{
+ let calls=0;const market={...verified,provider:"aliyun-market-id2" as const};
+ const f=fixture({provider:"aliyun-market-id2",verify:async()=>{calls++;return market;}});
+ const capability=await f.request({},null,"status");
+ assert.equal(capability.result.verificationCapability.real,true);
+ assert.equal(capability.result.verificationCapability.disclosure.versionId,MARKET_IDENTITY_PROVIDER_DISCLOSURE.versionId);
+ assert.equal((await f.request()).status,400);assert.equal(calls,0);
+ const marketBody={...body,privacyAcceptance:{...privacyAcceptance,disclosureVersion:MARKET_IDENTITY_PROVIDER_DISCLOSURE.versionId}};
+ assert.equal((await f.request(marketBody)).status,200);assert.equal(calls,1);assert.equal(f.state.provider,"aliyun-market-id2");
+ assert.equal((await f.request(marketBody)).status,200);assert.equal(calls,1);
+ const saved=f.statements.find(row=>row.sql.startsWith("INSERT INTO zzsh_iam.user_identity_verification_attempt"));
+ assert.equal(saved?.values[5],MARKET_IDENTITY_PROVIDER_DISCLOSURE.versionId);
+ assert.equal(saved?.values[6],legalDigest(MARKET_IDENTITY_PROVIDER_DISCLOSURE.body));
+});
+
+test("a provider identity mismatch remains unresolved and cannot create a verified subject",async()=>{
+ let calls=0;const f=fixture({provider:"aliyun-market-id2",verify:async()=>{calls++;return verified;}});
+ const marketBody={...body,privacyAcceptance:{...privacyAcceptance,disclosureVersion:MARKET_IDENTITY_PROVIDER_DISCLOSURE.versionId}};
+ assert.equal((await f.request(marketBody)).status,202);assert.equal(f.state.identityStatus,"UNVERIFIED");
+ assert.equal((await f.request(marketBody)).status,202);assert.equal(calls,1);
+});
+
+test("marketplace schema must be ready before a paid provider request",async()=>{
+ let calls=0;const f=fixture({provider:"aliyun-market-id2",verify:async()=>{calls++;return {...verified,provider:"aliyun-market-id2"};}});
+ f.control.profileReady=false;
+ const marketBody={...body,privacyAcceptance:{...privacyAcceptance,disclosureVersion:MARKET_IDENTITY_PROVIDER_DISCLOSURE.versionId}};
+ assert.equal((await f.request(marketBody)).status,503);assert.equal(calls,0);assert.equal(f.attempts.size,0);
+ const preflight=f.statements.find(row=>row.sql.includes("identity-provider-transfer-market-v1")&&row.sql.includes("pg_get_constraintdef"));
+ assert.equal(preflight?.values[0],"aliyun-market-id2");
 });
 
 test("in-flight duplicate and unknown provider/commit remain read-only without a second paid request",async()=>{

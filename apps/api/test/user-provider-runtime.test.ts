@@ -19,6 +19,13 @@ test("explicit SMS construction performs no send and cannot combine with a fixed
   assert.throws(() => loadUserProviderRuntime({ ...sms, USER_SMS_TEMPLATE_CODE: "invalid" }), /OTP template/);
 });
 
+test("marketplace identity uses an independently configured AppCode", () => {
+  const market={USER_REAL_NAME_PROVIDER:"aliyun-market-id2",USER_REAL_NAME_APPCODE:"synthetic_appcode_123456789"};
+  assert.equal(loadUserProviderRuntime(market).realNameProvider?.provider,"aliyun-market-id2");
+  assert.throws(()=>loadUserProviderRuntime({...market,USER_REAL_NAME_APPCODE:""}),ConfigurationError);
+  assert.throws(()=>loadUserProviderRuntime({...identity,USER_REAL_NAME_PROVIDER:"aliyun-market-id2"}),ConfigurationError);
+});
+
 test("unknown provider modes are rejected rather than silently falling back", () => {
   assert.throws(() => loadUserProviderRuntime({ USER_SMS_PROVIDER: "auto" }), /USER_SMS_PROVIDER/);
   assert.throws(() => loadUserProviderRuntime({ USER_REAL_NAME_PROVIDER: "fake-success" }), /USER_REAL_NAME_PROVIDER/);

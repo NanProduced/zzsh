@@ -8,7 +8,7 @@ npm run migrate:business -w @zzsh/api -- --initial --baseline release_production
 
 四个 SQL 段依次安装结构、`02-initial_data.sql` 中的必要静态种子、约束和触发器、PUBLIC 权限。静态种子只包含权限与角色、审批模板、头像审核默认策略、退款等待期默认 0/7 天，以及旧订单资金责任运行合同；不包含管理员、TOTP、旧上架保证金或用户交易数据。游戏目录、价目、会员和分销政策、信用档案与法律文书仍须单独按各自来源初始化和验证。runtime 窄权由 `applyRuntimePrivileges` 安装。manifest 校验源迁移、覆盖前缀、各段及组合的原始字节；保留函数正文的换行，不格式化已封签的 SQL。
 
-该基线之后的 canonical 尾迁移包含 `0175_legacy_account_capture_facts` 和 `0176_user_auth_throttle`。后者安装用户认证限流及挑战防重放结构，运行角色的表、序列和清理所需列权限由 `applyRuntimePrivileges` 收敛；使用 PostgreSQL 限流时，新版 API 启动前会核验依赖，旧版 API 不具备该检查。已有同名结构仅在完整结构指纹和所有者一致时承接。基线源文件校验只对已独立确认的 `0155` LF/CRLF 固定字节对兼容，其他内容或换行变化仍拒绝。
+该基线之后的 canonical 尾迁移包含 `0175_legacy_account_capture_facts`、`0176_user_auth_throttle` 和 `0177_market_identity_provider`。`0176` 安装用户认证限流及挑战防重放结构，运行角色的表、序列和清理所需列权限由 `applyRuntimePrivileges` 收敛；使用 PostgreSQL 限流时，新版 API 启动前会核验依赖，旧版 API 不具备该检查。`0177` 扩展实名提供方约束，保留原有来源，新供应商的实名调用在请求前检查结构是否就绪。已有同名结构仅在完整结构指纹和所有者一致时承接。基线源文件校验只对已独立确认的 `0155` LF/CRLF 固定字节对兼容，其他内容或换行变化仍拒绝。
 
 生产投影省略已下线的管理工作台布局、纯本地模拟支付声明、退款沙箱、模拟提现及其辅助对象，也不安装独立的 `zzsh_meta` 测试元数据。保留 `zzsh_business_meta.migrations` 业务版本账、正式汇聚收款／退款／出款、绑卡、钱包及旧来源和审计。通用 `payment_channel_observation` 保留作兼容观察读取，生产约束仅接受未验证的汇聚观察；正式收款观察保存在 `joinpay_collection_observation`，任何单条观察均不代表已收款或到账。
 

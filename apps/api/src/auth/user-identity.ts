@@ -1,6 +1,7 @@
 import { pgIdentityDisplayStore, readIdentityDisplay,recordNativeIdentityDisplay,assertNativeIdentityDisplayReady } from "./identity-display";
 import { identityAllowsProtectedTrade } from "./identity-eligibility";
 import { assertIdentitySubjectCapacity, assertPublicIdentitySubjectContinuity,normalizeIdentityDocument, recordVerifiedIdentitySubject } from "./identity-subject";
+import { isNativeRealNameProvider, type NativeRealNameProvider } from "./identity-provider";
 export { identityAllowsProtectedTrade } from "./identity-eligibility";
 import { createHash } from "node:crypto";
 import type { UserObligationFinding, UserObligationKind } from "./user-obligation-reader";
@@ -13,7 +14,7 @@ import { recordAudit, SecurityApiError, setAuditContext, withTransaction } from 
 import { resetAvatarOnCancellation } from "../profile/profile-avatar";
 import type { AuthSecurityNodeRequest, AuthSecurityNodeResponse, AuthSecurityOptions } from "./auth-security";
 import {beginIdentityVerification,completeIdentityVerification,identityVerificationAttempt,identityVerificationKey,IdentityVerificationRateError,
-  observeIdentityVerification,readIdentityVerification,readIdentityVerificationPrivacy,parseIdentityVerificationConsent,IDENTITY_PROVIDER_DISCLOSURE,type AttemptRead,type IdentityVerificationReceipt} from "./identity-verification-attempt";
+  observeIdentityVerification,readIdentityVerification,readIdentityVerificationPrivacy,parseIdentityVerificationConsent,identityProviderDisclosure,type AttemptRead,type IdentityVerificationReceipt} from "./identity-verification-attempt";
 import {legalDigest} from "../legal/legal-documents";
 
 export const FAKE_REAL_NAME_SCENARIOS = [
@@ -38,13 +39,13 @@ export type RealNameProviderInput = {
 export type RealNameVerificationResult = {
   status: "VERIFIED" | "REJECTED" | "UNKNOWN";
   ageStatus: AgeStatus;
-  provider: "fake" | "aliyun-id2meta";
+  provider: "fake" | NativeRealNameProvider;
   providerReference: string | null;
   reasonCode?: "provider_rejected" | "provider_unknown";
 };
 
 export type RealNameProvider = {
-  provider?:"fake"|"aliyun-id2meta";
+  provider?:"fake"|NativeRealNameProvider;
   available?:boolean;
   verify: (input: RealNameProviderInput) => Promise<RealNameVerificationResult>;
 };
@@ -291,15 +292,15 @@ async function verifyIdentity(
   }
   const fullName = stringField(body, "fullName", 120).trim().normalize("NFC");
   const documentNumber = normalizeIdentityDocument(stringField(body, "documentNumber", 64));
-  const native=options.realNameProvider.provider==="aliyun-id2meta";
+  const native=isNativeRealNameProvider(options.realNameProvider.provider);
   if(native&&(!fullName||fullName.length>64||/[\p{Cc}\p{Cs}]/u.test(fullName)||!/^\d{17}[0-9X]$/.test(documentNumber)))throw new SecurityApiError(400,"INVALID_ARGUMENT","实名资料格式不正确");
-  const attempt=native?identityVerificationAttempt(context.userId,identityVerificationKey(request.headers),fullName,documentNumber,options.userIdentitySubjectKey,parseIdentityVerificationConsent(body.privacyAcceptance)):null;
+  const attempt=native?identityVerificationAttempt(context.userId,identityVerificationKey(request.headers),fullName,documentNumber,options.userIdentitySubjectKey,parseIdentityVerificationConsent(body.privacyAcceptance,identityProviderDisclosure(options.realNameProvider.provider))):null;
   const preflight=await withTransaction(options.pool, async client => {
     await assertActiveInTransaction(client, context.userId);
     const checks=async()=>{
       if(native)await assertPublicIdentitySubjectContinuity(client,context.userId,documentNumber,options.userIdentitySubjectKey);
       await assertIdentitySubjectCapacity(client, context.userId, documentNumber, options.userIdentitySubjectKey, false);
-      if(native)await assertNativeIdentityDisplayReady(client);
+      if(native)await assertNativeIdentityDisplayReady(client,options.realNameProvider.provider);
     };
     if(attempt)return beginIdentityVerification(client,attempt,options.userRealNamePolicy,checks);
     await checks();return{fresh:true as const};
@@ -308,6 +309,7 @@ async function verifyIdentity(
   let result: RealNameVerificationResult;
   try {
     result = await options.realNameProvider.verify({ userId: context.userId, fullName, documentNumber });
+    if(native&&result.provider!==options.realNameProvider.provider)throw new Error("IDENTITY_PROVIDER_MISMATCH");
   } catch {
     if(attempt){
       await withTransaction(options.pool,client=>observeIdentityVerification(client,attempt,null)).catch(()=>undefined);
@@ -368,7 +370,7 @@ async function verifyIdentity(
       [context.userId, result.status, result.ageStatus, result.provider, result.providerReference, verifiedAt],
     );
     if (subjectDigest) await recordVerifiedIdentitySubject(client, context.userId, subjectDigest, "NATIVE_VERIFICATION");
-    if(subjectDigest&&result.provider==="aliyun-id2meta"){
+    if(subjectDigest&&isNativeRealNameProvider(result.provider)){
       if(!result.providerReference)throw new SecurityApiError(503,"IDENTITY_DEPENDENCY_UNAVAILABLE","Verified identity reference is missing");
       await recordNativeIdentityDisplay(client,{userId:context.userId,subjectDigest,fullName,documentNumber,provider:result.provider,
         providerReference:result.providerReference},options.userIdentitySubjectKey);
@@ -593,7 +595,7 @@ export async function handleUserIdentityRoute(
   try {
     const context = await readUserContext(request, options);
     if(path==="/identity/verification-attempt"){
-      if(options.realNameProvider.provider!=="aliyun-id2meta")throw new SecurityApiError(404,"NOT_FOUND","实名请求读取未开放");
+      if(!isNativeRealNameProvider(options.realNameProvider.provider))throw new SecurityApiError(404,"NOT_FOUND","实名请求读取未开放");
       sendIdentityAttempt(response,await readIdentityVerification(options.pool,context.userId,identityVerificationKey(request.headers),options.userIdentitySubjectKey),requestId);
       return true;
     }
@@ -601,7 +603,8 @@ export async function handleUserIdentityRoute(
       const state = await readState(options.pool, context.userId);
       // B5: self-only masked display, derived from the session userId only (no client-supplied id).
       const display = await readIdentityDisplay(pgIdentityDisplayStore(options.pool), context.userId, state?.identityStatus);
-      const real=options.realNameProvider.provider==="aliyun-id2meta";
+      const real=isNativeRealNameProvider(options.realNameProvider.provider);
+      const disclosure=identityProviderDisclosure(options.realNameProvider.provider);
       const privacy=real?await withTransaction(options.pool,readIdentityVerificationPrivacy):null;
       response.setHeader("Cache-Control", "no-store");
       sendJson(response, 200, {
@@ -615,7 +618,7 @@ export async function handleUserIdentityRoute(
           available:options.realNameProvider.available===true&&(options.userIdentitySubjectKey?.length??0)>=32
             &&(real?Boolean(options.userRealNamePolicy)&&privacy!==null:options.testOperationsEnabled),
           real,idempotencyRequired:real,privacy,
-          ...(real?{disclosure:{...IDENTITY_PROVIDER_DISCLOSURE,digest:legalDigest(IDENTITY_PROVIDER_DISCLOSURE.body)}}:{}),
+          ...(real?{disclosure:{...disclosure,digest:legalDigest(disclosure.body)}}:{}),
         },
       }, requestId);
       return true;

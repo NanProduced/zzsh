@@ -11,6 +11,17 @@ const storage = 'zzsh.identity-verification.user_A';
 const mount = (options = {}, props = {}) => mountAuthComponent(file, 'IdentityVerificationForm', { userId: 'user_A', identityStatus: 'UNVERIFIED', capability: capability(), canAct: () => true, onCompleted() {}, ...props }, { initialStatus: 'authenticated', ...options });
 async function fill(p, agree = true) { await p.input('identity-full-name', '合成姓名'); await p.input('identity-document-number', '110101200001010000'); if (agree) await p.input('identity-verification-consent', true); }
 
+test('marketplace disclosure is shown and submitted as its own consent version', async () => {
+  const seen = [], current = capability();
+  current.disclosure = { ...current.disclosure, versionId: 'identity-provider-transfer-market-v1', body: '本次将姓名和身份证号码提交至云市场实名认证服务商。' };
+  const p = await mount({ fetch: async (_url, body) => { seen.push(body); return Response.json(completed()); } }, { capability: current });
+  try {
+    assert.match(p.host.textContent, /云市场实名认证服务商/);
+    await fill(p); await p.submit();
+    assert.equal(seen[0].privacyAcceptance.disclosureVersion, 'identity-provider-transfer-market-v1');
+  } finally { await p.close(); }
+});
+
 test('real verification needs current published privacy and separate per-attempt consent', async () => {
   const seen = [];
   const p = await mount({ fetch: async (_url, body, init) => { seen.push({ body, init }); return Response.json(completed()); } });

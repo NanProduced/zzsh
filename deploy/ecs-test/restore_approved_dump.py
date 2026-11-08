@@ -333,9 +333,10 @@ def validate_compose(config):
     env = s['api'].get('environment', {})
     expected = {'APP_PROFILE': 'ecs-test', 'DB_TARGET': 'ecs-test', 'DB_NAME': DATABASE, 'DB_USER': RUNTIME,
                 'DB_TLS_MODE': 'verify-full', 'REDIS_TLS_MODE': 'verify-full', 'USER_SMS_PROVIDER': 'aliyun',
-                'USER_REAL_NAME_PROVIDER': 'aliyun-id2meta', 'MEDIA_STORAGE': 'oss', 'ORDER_IM_EVENTS_ENABLED': 'true'}
+                'MEDIA_STORAGE': 'oss', 'ORDER_IM_EVENTS_ENABLED': 'true'}
     expected.update({key: 'false' for key in ('JOINPAY_COLLECTION_ENABLED', 'JOINPAY_REFUND_ENABLED', 'JOINPAY_PAYOUT_ENABLED', 'JOINPAY_ACCOUNTS_ENABLED')})
     require(all(env.get(k) == v for k, v in expected.items()), 'COMPOSE_RUNTIME_GATES_INVALID')
+    require(env.get('USER_REAL_NAME_PROVIDER') in ('aliyun-id2meta', 'aliyun-market-id2'), 'COMPOSE_RUNTIME_GATES_INVALID')
     require(env.get('YUNXIN_APP_KEY') and not str(env['YUNXIN_APP_KEY']).startswith('REPLACE_')
             and env.get('ORDER_IM_EVENTS_APP_KEY') == env.get('YUNXIN_APP_KEY'), 'YUNXIN_APP_BINDING_INVALID')
     require(all(not s[name].get('ports') for name in ('api', 'web', 'postgres', 'redis', 'db-setup', 'migration')), 'COMPOSE_PRIVATE_PORTS_INVALID')
@@ -397,8 +398,11 @@ def verify_source_keys(env, secret_root, manifest):
         for variable in mapping.values():
             require(isinstance(variable, str) and re.fullmatch(r'WITHDRAWAL_BANK_KEY_[A-Z0-9_]+', variable), 'BANK_KEY_REFERENCE_INVALID')
             require(variable + '_FILE' in manifest['keys'], 'SOURCE_BANK_KEY_FINGERPRINT_MISSING')
+    identity_provider = env.get('USER_REAL_NAME_PROVIDER')
+    require(identity_provider in ('aliyun-id2meta', 'aliyun-market-id2'), 'PROVIDER_CONFIGURATION_MISSING')
+    identity_files = ('USER_REAL_NAME_APPCODE_FILE',) if identity_provider == 'aliyun-market-id2' else ('USER_REAL_NAME_ACCESS_KEY_ID_FILE', 'USER_REAL_NAME_ACCESS_KEY_SECRET_FILE')
     provider_files = ('YUNXIN_APP_SECRET_FILE', 'ORDER_IM_EVENTS_APP_SECRET_FILE', 'USER_SMS_ACCESS_KEY_ID_FILE',
-                      'USER_SMS_ACCESS_KEY_SECRET_FILE', 'USER_REAL_NAME_ACCESS_KEY_ID_FILE', 'USER_REAL_NAME_ACCESS_KEY_SECRET_FILE')
+                      'USER_SMS_ACCESS_KEY_SECRET_FILE') + identity_files
     for name in provider_files:
         require(secret_path(root, env.get(name)).stat().st_size > 0, 'PROVIDER_SECRET_FILE_MISSING')
     require(digest_file(secret_path(root, env['YUNXIN_APP_SECRET_FILE'])) == digest_file(secret_path(root, env['ORDER_IM_EVENTS_APP_SECRET_FILE'])),

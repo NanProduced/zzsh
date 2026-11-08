@@ -1,5 +1,6 @@
 import type { PoolClient } from "pg";
 import { SecurityApiError } from "../auth/security-core";
+import { isNativeRealNameProvider } from "../auth/identity-provider";
 import { legacyOwnerUserId } from "../supply/legacy-user-migration";
 import { demoFinanceScope, type DemoFinanceResource } from "./ecs-test-demo-resource";
 
@@ -8,7 +9,7 @@ export async function assertDemoWithdrawalIdentity(client:PoolClient,userId:stri
   const row=(await client.query<{account_status:string;identity_status:string;age_status:string;provider:string;provider_reference:string|null;verified_at:Date|null;now:Date}>(
     `SELECT account_status,identity_status,age_status,provider,provider_reference,verified_at,clock_timestamp() AS now
       FROM zzsh_iam.user_identity_state WHERE user_id=$1`,[userId])).rows[0];
-  const local=demoFinanceScope(demo)==="LOCAL_DEMO_SIMULATED", validProvider=row?.provider==="aliyun-id2meta" || local&&row?.provider==="fake";
+  const local=demoFinanceScope(demo)==="LOCAL_DEMO_SIMULATED", validProvider=isNativeRealNameProvider(row?.provider) || local&&row?.provider==="fake";
   const reference=row?.provider_reference, time=row?.verified_at;
   if(!row || row.account_status!=="ACTIVE" || row.identity_status!=="VERIFIED")
     throw new SecurityApiError(403,"DEMO_WITHDRAW_IDENTITY_REQUIRED","请先完成本人实名认证");
