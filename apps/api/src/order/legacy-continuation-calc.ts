@@ -263,11 +263,17 @@ export function planLegacyContinuation(evidence: LegacyContinuationEvidence, com
   if (calculationRole !== "renter" && calculationRole !== "owner") return refuse("NOT_PARTY");
   const quantities = command.quantities;
   let haff: Decimal;
+  const usedItems: PriceName[] = [];
   try {
     if (quantities.expendHaff === null) return refuse("MISSING_QUANTITY");
     haff = dec(quantities.expendHaff, "haff");
-    for (const name of NAMES) qtyOf(name, quantities);
+    for (const name of NAMES) if (qtyOf(name, quantities)) usedItems.push(name);
   } catch { return refuse("QUANTITY_INVALID"); }
+  for (const name of usedItems) {
+    const raw = source.orderPrices?.[name], orderPrice = raw ? parsed(raw) : null, accountPrice = source.accountPrices?.[name];
+    // A later common price cannot establish the member price agreed on this old order.
+    if (!orderPrice || !gt(orderPrice, zero()) || accountPrice == null || accountPrice === "") return refuse("EVIDENCE_ISOLATED");
+  }
   try {
     const pay = dec(source.payMoney!, "pay");
     const goods = dec(source.goodsMoney!, "goods");

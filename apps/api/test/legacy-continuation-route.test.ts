@@ -154,6 +154,18 @@ test("legacy support preview exposes deposit shortage as a safe actionable reaso
  assert.equal(out.statusCode,409);assert.equal((out.payload as any).error.reason,"DEPOSIT_SHORT");
 });
 
+test("legacy preview refuses an unproven used price before exposing a quote",async t=>{
+ const admin:typeof import("../src/auth/auth-security")=require("../src/auth/auth-security");
+ t.mock.method(admin,"readAdminContext",async()=>({userId:"fixture_admin",sessionId:"fixture_session"}));
+ t.mock.method(e,"readLegacyContinuationBinding",async()=>legacyBinding);t.mock.method(e,"authorizeLegacyContinuation",async()=>({canOperate:true,canReadCommission:false}));
+ const source=legacySource();source.orderPrices.awm=null;
+ t.mock.method(e,"readLegacyContinuationHead",async()=>null);t.mock.method(e,"readLegacyContinuationEvidence",async()=>legacyEvidence(initialLegacyFacts(source)));
+ const pool={connect:async()=>({release(){},query:async()=>({rows:[],rowCount:0})})} as unknown as Pool;
+ const out=response(),request={method:"POST",originalUrl:`/api/v1/admin/orders/legacy/${legacyBinding.id}/continuation/preview`,headers:{origin:"http://admin.invalid"},body:{quantities:{...legacyQuantities("1"),awm:"1"},onBehalf:"renter"}};
+ assert.equal(await handleLegacyContinuationRoute(request as never,out as never,{pool,apiOrigin:"http://api.invalid",adminOrigin:"http://admin.invalid"} as never,"admin"),true);
+ assert.equal(out.statusCode,409);assert.equal((out.payload as any).error.reason,"EVIDENCE_ISOLATED");assert.equal((out.payload as any).proposalAmounts,undefined);
+});
+
 test("mounted legacy parties receive filtered fresh/replay/race/receipt output without changing original stored bodies",async parent=>{
  for(const who of ["owner","renter"] as const)await parent.test(who,async t=>{
   const user:typeof import("../src/auth/user-identity")=require("../src/auth/user-identity");let currentUser=who==="owner"?legacyBinding.ownerUserId:legacyBinding.renterUserId;

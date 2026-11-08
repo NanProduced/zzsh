@@ -87,6 +87,38 @@ test("illegal role, status, quantity, and deposit are refused without a zero fil
   if (!short.ok) assert.equal(short.code, "DEPOSIT_SHORT");
 });
 
+test("old used items require original prices even when a common fallback exists", () => {
+  for (const orderPrice of [null, "", "0", "0.00"]) for (const caller of [renter, owner]) {
+    const patch = { orderPrices: { ...prices("8.00"), barrett: orderPrice } };
+    for (const kind of ["preview", "propose"] as const) {
+      const result = plan(patch, { kind, caller, quantities: qty("1.00", "1") });
+      assert.equal(result.ok, false);
+      if (!result.ok) assert.equal(result.code, "EVIDENCE_ISOLATED");
+    }
+    assert.equal(plan(patch, { kind: "propose", caller, quantities: qty("1.00", "0") }).ok, true);
+  }
+  const missingOwnerPrice = { accountPrices: { ...prices("8.00"), barrett: null } };
+  const missing = plan(missingOwnerPrice, { kind: "propose", caller: renter, quantities: qty("1.00", "1") });
+  assert.equal(missing.ok, false);
+  if (!missing.ok) assert.equal(missing.code, "EVIDENCE_ISOLATED");
+  assert.equal(plan({ accountPrices: { ...prices("8.00"), barrett: "0.00" } }, { kind: "propose", caller: renter, quantities: qty("1.00", "1") }).ok, true);
+  const invalidQuantity = plan({ orderPrices: { ...prices("8.00"), barrett: null } }, { kind: "preview", caller: renter, quantities: { ...qty("1.00", "1"), bullet: "-1" } });
+  assert.equal(invalidQuantity.ok, false);
+  if (!invalidQuantity.ok) assert.equal(invalidQuantity.code, "QUANTITY_INVALID");
+  const existing = plan({ orderStatus: "8", saleEarnings: "10.00", returnOrderMoney: "87.00", orderPrices: { ...prices("8.00"), barrett: null }, ...missingOwnerPrice }, { kind: "confirm", caller: owner });
+  assert.equal(existing.ok, true, "a previously submitted old proposal keeps its saved amounts");
+});
+
+test("legacy in-flight settlement uses the recorded customer price and account owner price", () => {
+  const patch: Partial<LegacyContinuationSource> = { baseBot: "42", profitDot: "4", payMoney: "722.70", goodsMoney: "355.00", depositAmount: "0.00", storedCommissionMoney: "34.00",
+    paidPay: [{ id: "9", payOrderSn: "FIXTURE_P7", payMoney: "722.70" }], policy: { ...policy, advanceOrderSetRatio: "70" },
+    orderPrices: { ...prices("8.00"), awm: "0.70" }, accountPrices: { ...prices("8.00"), awm: "0.50" } };
+  const result = plan(patch, { kind: "propose", caller: renter, quantities: { ...qty("100"), awm: "10" } });
+  assert(result.ok);
+  assert.equal(result.isAdvanceSet, 0);
+  assert.deepEqual([result.amounts.divide, result.amounts.expendOrder, result.amounts.returnOrderMoney, result.amounts.ownerNet], ["263", "7.00", "452.70", "243.00"]);
+});
+
 test("reject returns to 3, and hold keeps the recognized return", () => {
   const kept = admitLegacyEvidence(source({ orderStatus: "8" }));
   const rejected = planLegacyContinuation(kept, { kind: "reject", caller: owner });
