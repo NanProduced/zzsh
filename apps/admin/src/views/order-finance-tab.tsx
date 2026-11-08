@@ -59,7 +59,7 @@ function Allocation({ evidence }: { evidence: OrderSettlementEvidence }) {
 }
 
 function DocumentLink({ refId, label, onOpenDocument }: { refId: string | null; label: string; onOpenDocument?: Props['onOpenDocument'] }) {
-  return refId && onOpenDocument ? <Button variant="link" size="sm" className="h-auto px-0" onClick={() => onOpenDocument(refId, label)}>{label}<ArrowUpRight aria-hidden size={13}/></Button> : null;
+  return refId && onOpenDocument ? <Button variant="link" size="sm" className="ml-2 h-auto whitespace-nowrap px-0" onClick={() => onOpenDocument(refId, label)}>{label}<ArrowUpRight aria-hidden size={13}/></Button> : null;
 }
 
 function DistributionEntries({ distribution, onOpenDocument }: { distribution: OrderDistributionState; onOpenDocument?: Props['onOpenDocument'] }) {
