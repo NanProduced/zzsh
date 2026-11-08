@@ -15,6 +15,7 @@ import { Button } from "../components/ui/button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../components/ui/select";
 import { Card, CardContent, CardDescription, CardTitle } from "../components/ui/card";
 import { Item, ItemActions, ItemContent, ItemGroup, ItemMedia, ItemTitle } from "../components/ui/item";
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "../components/ui/table";
 import { formatFundingCents } from "./supply-review/model";
 import { SupplyWriteLockError, withSupplyWriteLock } from "../lib/supply-write-lock";
 import {
@@ -74,6 +75,19 @@ const AMOUNT_LABELS: Record<string, string> = {
 const AMOUNT_ORDER = Object.keys(AMOUNT_LABELS);
 const UNIT_LABELS: Record<string, string> = { HAFF_BASE: "哈夫币", ROUND: "发", PIECE: "件", DAY: "天" };
 
+function quantityForDisplay(value:string,unit:string):string {
+  if(unit!=="HAFF_BASE"||!/^(0|[1-9]\d{0,18})$/.test(value))return value;
+  const n=BigInt(value),whole=n/1000000n,fraction=(n%1000000n).toString().padStart(6,"0").replace(/0+$/,"");
+  return fraction?`${whole}.${fraction}`:String(whole);
+}
+function quantityForSubmit(value:string,unit:string):string|null {
+  if(unit!=="HAFF_BASE")return /^(0|[1-9]\d{0,18})$/.test(value)?value:null;
+  const match=/^(0|[1-9]\d{0,12})(?:\.(\d{1,6}))?$/.exec(value);
+  if(!match)return null;
+  const n=BigInt(match[1]!)*1000000n+BigInt((match[2]??"").padEnd(6,"0"));
+  return n<=9999999999999999999n?n.toString():null;
+}
+
 function amountText(value: unknown, monetary: boolean): string | null {
   if (monetary) {
     const raw = typeof value === "string" ? value : value && typeof value === "object" && !Array.isArray(value)
@@ -122,7 +136,7 @@ function storageKeyFor(viewerId: string, orderId: string): string {
  * Frozen order inventory arrives through the authorized IM slot projection;
  * the section never computes money and never writes an order/ledger row.
  */
-export function OrderFulfillmentSection({ orderId, displayNo, viewerId, orderStatus, frozenInventory, canManualClose }: { orderId: string; displayNo: string; viewerId: string; orderStatus?: string; frozenInventory?: InventoryLine[]; canManualClose?: boolean }) {
+export function OrderFulfillmentSection({ orderId, displayNo, viewerId, orderStatus, frozenInventory, canManualClose, compact=false, onViewChange }: { orderId: string; displayNo: string; viewerId: string; orderStatus?: string; frozenInventory?: InventoryLine[]; canManualClose?: boolean; compact?:boolean; onViewChange?:(view:SettlementReadView|null)=>void }) {
   const [view, setView] = useState<SettlementReadView | null>(null);
   const [readState, setReadState] = useState<FulfillmentReadState>("idle");
   const [readDetail, setReadDetail] = useState("");
@@ -153,9 +167,12 @@ export function OrderFulfillmentSection({ orderId, displayNo, viewerId, orderSta
   const scopeRef = useRef("");
   scopeRef.current = `${viewerId}:${orderId}`;
   const scope = scopeRef.current;
+  const reportView=useRef(onViewChange),viewOwner=useRef<string|null>(null);reportView.current=onViewChange;
+  useEffect(()=>{reportView.current?.(viewOwner.current===scope?view:null);},[scope,view]);
 
   /** Session loss hides every private projection immediately; the intent/phase survive. */
   const hidePrivate = () => {
+    viewOwner.current=null;
     setView(null);
     setLines([]);
     setPreview(null);
@@ -190,7 +207,7 @@ export function OrderFulfillmentSection({ orderId, displayNo, viewerId, orderSta
           const frozen = inventoryByName.get(line.itemId);
           const recorded=saved.get(line.itemId);
           return { itemId: line.itemId, name: frozen?.name ?? null, unit: line.unit ?? frozen?.unit ?? "",
-            value:actual?recorded?.consumedQuantity??"":recorded?.remainingQuantity??line.quantity??"" };
+            value:quantityForDisplay(actual?recorded?.consumedQuantity??"":recorded?.remainingQuantity??line.quantity??"",line.unit ?? frozen?.unit ?? "") };
         });
       const extra=actual?(next.extraResources??[]).filter(line=>!declared.some(item=>item.itemId===line.itemId))
         .map(line=>({itemId:line.itemId,name:line.name,unit:line.unit,value:saved.get(line.itemId)?.consumedQuantity??"0"})):[];
@@ -198,7 +215,7 @@ export function OrderFulfillmentSection({ orderId, displayNo, viewerId, orderSta
       return;
     }
     if (frozenInventory && frozenInventory.length > 0) {
-      setLines(frozenInventory.map((line) => ({ itemId: line.itemId, name: line.name, unit: line.unit, value: line.quantity })));
+      setLines(frozenInventory.map((line) => ({ itemId: line.itemId, name: line.name, unit: line.unit, value: quantityForDisplay(line.quantity,line.unit) })));
       return;
     }
     setLines([]);
@@ -228,6 +245,7 @@ export function OrderFulfillmentSection({ orderId, displayNo, viewerId, orderSta
   };
 
   const applyView = (next: SettlementReadView) => {
+    viewOwner.current=scope;
     setView(next);
     seed(next);
     invalidate();
@@ -429,9 +447,9 @@ export function OrderFulfillmentSection({ orderId, displayNo, viewerId, orderSta
     }
   };
 
-  const linesForOpening = () => lines.map((line) => ({ itemId: line.itemId, quantity: line.value }));
+  const linesForOpening = () => lines.map((line) => ({ itemId: line.itemId, quantity: quantityForSubmit(line.value,line.unit) ?? "" }));
   const linesForRemaining = () => lines.map((line) => view?.consumptionMode==="ACTUAL"
-    ?{ itemId:line.itemId,consumedQuantity:line.value }:{ itemId:line.itemId,remainingQuantity:line.value });
+    ?{ itemId:line.itemId,consumedQuantity:quantityForSubmit(line.value,line.unit) ?? "" }:{ itemId:line.itemId,remainingQuantity:quantityForSubmit(line.value,line.unit) ?? "" });
 
   const latestOpening = view?.openings?.[view.openings.length - 1];
   const openingConfirmed = Boolean(view?.openings?.some((opening) => opening.status === "CONFIRMED"));
@@ -443,10 +461,11 @@ export function OrderFulfillmentSection({ orderId, displayNo, viewerId, orderSta
 
   const stage = useMemo(() => {
     if (posting) return { key: "posted", label: "已生效" } as const;
-    if (!openingConfirmed && latestOpening) return { key: "opening-pending", label: "等待双方确认期初" } as const;
-    if (!openingConfirmed) return { key: "needs-opening", label: "待期初代录" } as const;
+    if (!openingConfirmed && latestOpening) return { key: "opening-pending", label: "等待双方确认开租" } as const;
+    if (!openingConfirmed) return { key: "needs-opening", label: "待发起开租确认" } as const;
     if (view?.currentRequest?.kind === "INTAKE") return { key: "intake-pending", label: "有结算申请待处理" } as const;
     if (!current) return { key: "needs-settlement", label: "履约中 · 待结算" } as const;
+    if (current.decisions?.some(d=>d.action==="REJECT"&&d.versionHash===current.versionHash)) return {key:"decision-rejected",label:"结算方案有争议"} as const;
     if (current.early && !partyConfirmed) return { key: "awaiting-decision", label: "等待双方确认结算" } as const;
     if (current.early && partyConfirmed && !supportReviewed) return { key: "needs-review", label: "待客服复核" } as const;
     if (current.early) return { key: "reviewed", label: "已复核" } as const;
@@ -455,11 +474,12 @@ export function OrderFulfillmentSection({ orderId, displayNo, viewerId, orderSta
 
   const task = useMemo(() => {
     switch (stage.key) {
-      case "needs-opening": return { title: "待核对期初", action: "核对并录入期初" };
-      case "opening-pending": return { title: "等待双方确认期初", action: "查看期初清单" };
+      case "needs-opening": return { title: "发起开租确认", action: "发起开租确认" };
+      case "opening-pending": return { title: "等待双方确认开租", action: "查看开租清单" };
       case "intake-pending": return { title: "有结束申请待处理", action: "打开核对面板" };
       case "needs-settlement": return { title: "履约中 · 等待结算", action: "打开核对面板" };
       case "awaiting-decision": return { title: "等待双方确认结算", action: "查看本版明细" };
+      case "decision-rejected": return { title: "结算方案有争议", action: "处理结算方案" };
       case "needs-review": return { title: "待客服复核", action: "打开复核面板" };
       case "reviewed": return { title: "已复核，等待生效", action: "查看结算明细" };
       case "normal-version": return { title: "正常结算版本", action: "查看结算明细" };
@@ -470,7 +490,7 @@ export function OrderFulfillmentSection({ orderId, displayNo, viewerId, orderSta
   // 确认状态只认同一版本上的 ack/decision：新版本会让旧确认失效。
   const partyFacts = useMemo(() => {
     if (stage.key === "opening-pending") {
-      return { version: `期初清单 v${latestOpening?.versionNo ?? "?"}`, rows: (["RENTER", "OWNER"] as const).map((party) => {
+      return { version: `开租清单 v${latestOpening?.versionNo ?? "?"}`, rows: (["RENTER", "OWNER"] as const).map((party) => {
         const ack=latestOpening?.acks?.find(item=>item.party===party);
         return { party, confirmed: Boolean(ack), source: ack?.source };
       }) };
@@ -491,15 +511,15 @@ export function OrderFulfillmentSection({ orderId, displayNo, viewerId, orderSta
   const postingRows = amountRows((posting?.amounts ?? null) as Record<string, unknown> | null);
 
   const recordOpening = () => {
-    if (lines.length === 0 || lines.some((line) => !/^(0|[1-9]\d{0,18})$/.test(line.value))) {
-      setError("请填写有效的期初数量（非负整数）。");
+    if (lines.length === 0 || lines.some((line) => quantityForSubmit(line.value,line.unit)===null)) {
+      setError("请核对资源数量；哈夫币按 M 填写，其他资源填写非负整数。");
       return;
     }
     void beginIntent({ kind: "record-opening", lines: linesForOpening() });
   };
   const previewSettlement = () => {
-    if (lines.length === 0 || lines.some((line) => !/^(0|[1-9]\d{0,18})$/.test(line.value))) {
-      setError(view?.consumptionMode==="ACTUAL"?"请填写有效的实际消耗数量（非负整数）。":"请填写有效的剩余数量（非负整数）。");
+    if (lines.length === 0 || lines.some((line) => quantityForSubmit(line.value,line.unit)===null)) {
+      setError("请核对资源数量；哈夫币按 M 填写，其他资源填写非负整数。");
       return;
     }
     void beginIntent({ kind: "preview", lines: linesForRemaining(), ...(endReason?{endReason}:{}) });
@@ -553,16 +573,20 @@ export function OrderFulfillmentSection({ orderId, displayNo, viewerId, orderSta
     setLines((currentLines) => currentLines.map((line, itemIndex) => itemIndex === index ? { ...line, value } : line));
   };
 
-  const renderInventory = (mode: "opening" | "remaining") => lines.length > 0 ? <div className="im-support-fulfillment-lines" role="group" aria-label={mode === "opening" ? "期初库存" : view?.consumptionMode==="ACTUAL"?"实际消耗":"剩余库存"}>
-    {lines.map((line, index) => <label key={line.itemId}><span>{line.name ?? "物资"}{line.unit ? ` · ${UNIT_LABELS[line.unit] ?? line.unit}` : ""}</span><Input value={line.value} inputMode="numeric" disabled={locked} onChange={(event) => setLineValue(index, event.target.value)} aria-label={`${line.name ?? line.itemId} ${mode === "opening" ? "期初数量" : view?.consumptionMode==="ACTUAL"?"实际消耗数量":"剩余数量"}`} /></label>)}
-  </div> : <p className="im-support-fulfillment-empty">服务端未返回订单冻结库存投影，无法代录期初；请核对订单状态。</p>;
+  const renderInventory = (mode: "opening" | "remaining") => lines.length > 0 ? <div className="im-support-fulfillment-lines overflow-x-auto rounded-lg border" role="group" aria-label={mode === "opening" ? "开租资源清单" : view?.consumptionMode==="ACTUAL"?"实际消耗":"剩余库存"}>
+    <Table><TableHeader><TableRow><TableHead>资源</TableHead><TableHead>{mode==="opening"?"下单冻结数量":"开租数量"}</TableHead><TableHead>{mode==="opening"?"确认数量":view?.consumptionMode==="ACTUAL"?"实际消耗":"剩余数量"}</TableHead></TableRow></TableHeader><TableBody>
+    {lines.map((line,index)=>{const reference=mode==="opening"?inventoryByName.get(line.itemId)?.quantity:latestOpening?.lines?.find(item=>item.itemId===line.itemId)?.quantity;const unit=line.unit==="HAFF_BASE"?"M":UNIT_LABELS[line.unit]??line.unit;
+      return <TableRow key={line.itemId}><TableCell>{line.name??"资源未记录"}</TableCell><TableCell className="tabular-nums">{reference===undefined?"未记录":`${quantityForDisplay(reference,line.unit)} ${unit}`}</TableCell><TableCell><div className="flex items-center gap-2"><Input value={line.value} inputMode={line.unit==="HAFF_BASE"?"decimal":"numeric"} disabled={locked} onChange={(event)=>setLineValue(index,event.target.value)} aria-label={`${line.name??line.itemId} ${mode==="opening"?"期初数量":view?.consumptionMode==="ACTUAL"?"实际消耗数量":"剩余数量"}`} /><span className="shrink-0 text-muted-foreground">{unit}</span></div></TableCell></TableRow>;})}
+    </TableBody></Table>
+  </div> : <p className="im-support-fulfillment-empty">未取得本单冻结资源清单，暂不能发起开租确认。</p>;
 
   const renderCurrentFacts = () => current ? <div className="im-support-fulfillment-preview" aria-label="当前结算版本事实">
     <strong>当前结算版本 v{current.versionNo ?? "?"}{current.early ? " · 提前" : ""}（双方核对依据）</strong>
     {currentInputLines.length > 0 ? <div className="im-support-fulfillment-lines" role="group" aria-label="当前版本数量">
       {currentInputLines.map((line) => {
         const facts = line.itemId ? inventoryName(line.itemId) : { name: null, unit: "" };
-        return <label key={line.itemId ?? "line"}><span>{facts.name ?? "物资"}{facts.unit ? ` · ${UNIT_LABELS[facts.unit] ?? facts.unit}` : ""}{line.consumedQuantity===undefined?" · 期末剩余":" · 实际消耗"}</span><output>{line.consumedQuantity??line.remainingQuantity ?? line.openingQuantity ?? "—"}</output></label>;
+        const quantity=line.consumedQuantity??line.remainingQuantity??line.openingQuantity;
+        return <label key={line.itemId ?? "line"}><span>{facts.name ?? "物资"}{facts.unit ? ` · ${facts.unit==="HAFF_BASE"?"M":UNIT_LABELS[facts.unit] ?? facts.unit}` : ""}{line.consumedQuantity===undefined?" · 期末剩余":" · 实际消耗"}</span><output>{quantity===undefined?"—":quantityForDisplay(quantity,facts.unit)}</output></label>;
       })}
     </div> : null}
     {amountRows(currentAmounts).length > 0 ? <dl>{amountRows(currentAmounts).map((row) => <div key={row.key}><dt>{row.label}</dt><dd>{row.text}</dd></div>)}</dl> : <small>暂无金额明细。</small>}
@@ -571,7 +595,7 @@ export function OrderFulfillmentSection({ orderId, displayNo, viewerId, orderSta
 
   const action = confirmation?.scope === scope ? confirmation.action : null;
   const armConfirmation = (action: NonNullable<typeof confirmation>["action"]) => setConfirmation({scope, generation:generationRef.current, action});
-  const confirmationTitle = { opening:"提交期初清单", "opening-party":"协助确认期初", classify:"生成结算方案", review:"复核结算方案", finalize:"按当前方案结算", adjust:"提交人工调整", replay:"重试原请求" } as const;
+  const confirmationTitle = { opening:"发起开租确认", "opening-party":"协助确认开租", classify:"生成结算方案", review:"复核结算方案", finalize:"按当前方案结算", adjust:"提交人工调整", replay:"重试原请求" } as const;
   const confirmAction = () => {
     if (!action || busy || loading) return;
     setConfirmation(null);
@@ -667,12 +691,12 @@ export function OrderFulfillmentSection({ orderId, displayNo, viewerId, orderSta
   }
 
   // 右栏只留任务入口：阶段、订单状态与版本确认由顶部阶段条与本核对面板承担，避免重复。
-  return <><Card className="im-support-fulfillment im-order-card" data-stage={stage.key} aria-label="本单当前任务">
-    <CardContent className="grid gap-2.5 p-4">
+  return <><Card className={`im-support-fulfillment im-order-card${compact?" oc-action-card":""}`} data-stage={stage.key} aria-label="本单当前任务">
+    <CardContent className={compact?"grid gap-2.5 p-0":"grid gap-2.5 p-4"}>
       <div className="flex items-start gap-3">
         <div className="grid min-w-0 flex-1 gap-1">
-          <CardTitle className="flex items-start gap-2 text-sm"><ClipboardList className="mt-0.5 size-4 shrink-0 text-primary" />履约核对</CardTitle>
-          <CardDescription className="text-xs leading-relaxed">在此核对开租清单和结算金额。聊天记录不会自动改变订单状态。</CardDescription>
+          <CardTitle className="flex items-start gap-2 text-sm"><ClipboardList className="mt-0.5 size-4 shrink-0 text-primary" />{compact?task.title:"履约核对"}</CardTitle>
+          <CardDescription className="text-xs leading-relaxed">{stage.key==="needs-opening"?"核对资源后发起，等待双方确认。":"核对本单履约进度及结算方案。"}</CardDescription>
         </div>
         <div className="flex shrink-0 flex-col items-stretch gap-1.5">
           <Button size="sm" data-action="open-fulfillment-panel" onClick={() => setPanelOpen(true)}>{task.action}</Button>
@@ -683,8 +707,8 @@ export function OrderFulfillmentSection({ orderId, displayNo, viewerId, orderSta
     </CardContent>
 
     <Dialog open={panelOpen} onOpenChange={setPanelOpen}>
-      <DialogContent className="im-order-panel" aria-label={task.title} showCloseButton={false}>
-        <div className="im-wb-dialog-head"><div><strong>{task.title}</strong><span>订单 {displayNo} · {stage.label}</span></div><Button type="button" variant="ghost" size="icon" onClick={() => setPanelOpen(false)} aria-label="关闭核对面板"><X size={14} /></Button></div>
+      <DialogContent size="lg" className="im-order-panel" aria-label={task.title} showCloseButton={false}>
+        <div className="im-wb-dialog-head"><div><DialogTitle>{task.title}</DialogTitle><DialogDescription>订单 {displayNo} · {stage.label}</DialogDescription></div><Button type="button" variant="ghost" size="icon" onClick={() => setPanelOpen(false)} aria-label="关闭核对面板"><X size={14} /></Button></div>
         {statusMessages}
         {partyFacts ? <div className="im-order-parties overflow-hidden rounded-lg border">
           <div className="bg-muted/60 px-3 py-2 text-xs font-semibold text-muted-foreground">双方确认 · {partyFacts.version}</div>
@@ -698,22 +722,22 @@ export function OrderFulfillmentSection({ orderId, displayNo, viewerId, orderSta
         </div> : null}
 
       {stage.key === "needs-opening" ? <div className="im-support-fulfillment-stage-panel">
-        <strong>第一步：期初代录</strong>
-        <small>按订单冻结库存填写期初数量；数量必须与已付款订单的报价一致。</small>
+        <strong>核对开租资源</strong>
+        <small>确认数量须与本单冻结清单一致。提交后等待租客和号主确认，双方确认后开始计算租期；订单群提示由系统另行发送。</small>
         {renderInventory("opening")}
-        <div className="im-support-fulfillment-actions"><Button type="button" onClick={() => armConfirmation("opening")} disabled={primaryDisabled || lines.length === 0}>期初代录</Button></div>
+        <div className="im-support-fulfillment-actions"><Button type="button" onClick={() => armConfirmation("opening")} disabled={primaryDisabled || lines.length === 0}>提交开租清单</Button></div>
       </div> : null}
 
       {stage.key === "opening-pending" ? <div className="im-support-fulfillment-stage-panel">
-        <strong>等待买卖双方确认期初</strong>
-        <small>期初 v{latestOpening?.versionNo ?? "?"} · {latestOpening?.acks?.map((ack) => partyLabel(ack.party)).join("、") || "暂无确认"}</small>
+        <strong>等待双方确认开租</strong>
+        <small>开租清单 v{latestOpening?.versionNo ?? "?"} · {latestOpening?.acks?.map((ack) => partyLabel(ack.party)).join("、") || "暂无确认"}</small>
         {renderInventory("opening")}
         <p className="im-support-fulfillment-empty">双方确认后进入履约；客服可在核实后协助未确认的一方。</p>
         {canManualClose && latestOpening?.status === "DRAFT" && latestOpening.id && Number.isInteger(latestOpening.versionNo) ? <div className="im-support-fulfillment-actions">
           {(["RENTER","OWNER"] as const).filter(party=>!latestOpening.acks?.some(ack=>ack.party===party)).map(party=><Button key={party} type="button" variant="outline" disabled={primaryDisabled} onClick={()=>{setOpeningReason("");setOpeningTarget({id:latestOpening.id!,versionNo:latestOpening.versionNo!,party});}}>协助{partyLabel(party)}确认</Button>)}
         </div> : null}
         <Dialog open={openingTarget!==null} onOpenChange={open=>{if(!open)setOpeningTarget(null);}}><DialogContent>
-          <div className="space-y-4"><div><DialogTitle>协助{partyLabel(openingTarget?.party)}确认期初</DialogTitle><DialogDescription>请先核实该方及期初清单。操作记录为客服协助，不会显示为当事人本人确认。</DialogDescription></div>
+          <div className="space-y-4"><div><DialogTitle>协助{partyLabel(openingTarget?.party)}确认开租</DialogTitle><DialogDescription>请先核实该方及开租清单。操作记录为客服协助，不会显示为当事人本人确认。</DialogDescription></div>
             {error ? <Alert variant="destructive"><CircleAlert /><AlertDescription>{error}</AlertDescription></Alert> : null}
             <label className="block space-y-1 text-sm">处理原因<Textarea aria-label="协助确认期初原因" value={openingReason} maxLength={500} onChange={e=>setOpeningReason(e.target.value)} /></label>
             <div className="flex justify-end gap-2"><Button type="button" variant="outline" onClick={()=>setOpeningTarget(null)}>返回核对</Button><Button type="button" disabled={primaryDisabled||openingReason.trim().length<3} onClick={()=>armConfirmation("opening-party")}>核对并继续</Button></div>
@@ -762,8 +786,8 @@ export function OrderFulfillmentSection({ orderId, displayNo, viewerId, orderSta
         </div>
       </div> : null}
 
-      {stage.key === "awaiting-decision" ? <div className="im-support-fulfillment-stage-panel">
-        <strong>等待买卖双方确认结算</strong>
+      {stage.key === "awaiting-decision" || stage.key === "decision-rejected" ? <div className="im-support-fulfillment-stage-panel">
+        <strong>{stage.key==="decision-rejected"?"结算方案有争议":"等待买卖双方确认结算"}</strong>
         <small>{current?.decisions?.filter((d) => d.party !== "SUPPORT").map(decisionLabel).join(" · ") || "暂无确认记录"}</small>
         {renderCurrentFacts()}
         <p className="im-support-fulfillment-empty">双方确认后由客服复核；拒绝或争议走人工调整。</p>
@@ -814,30 +838,30 @@ export function OrderFulfillmentSection({ orderId, displayNo, viewerId, orderSta
         <dl>{postingRows.map((row) => <div key={row.key}><dt>{row.label}</dt><dd>{row.text}</dd></div>)}</dl>
       </div> : null}
 
-      <div className="im-support-fulfillment-adjust">
+      {canManualClose&&openingConfirmed&&!posting?<div className="im-support-fulfillment-adjust">
         <Button type="button" variant="ghost" className="im-support-quiet-action" aria-expanded={adjustOpen} onClick={() => setAdjustOpen((value) => !value)}>人工调整（例外）</Button>
-        {adjustOpen ? <div className="im-support-fulfillment-controls">
-          <label>号主拟净额<Input value={ownerNet} inputMode="decimal" disabled={locked} onChange={(event) => { invalidate(); setOwnerNet(event.target.value); }} placeholder="元，如 123.45" /></label>
-          <label>租客拟退款<Input value={renterRefund} inputMode="decimal" disabled={locked} onChange={(event) => { invalidate(); setRenterRefund(event.target.value); }} placeholder="元，如 12.00" /></label>
+        {adjustOpen ? <><p className="text-sm text-muted-foreground">双方对系统方案有争议时，填写协商后的拟结算金额；提交后仍须按现有流程审批与确认。</p><div className="im-support-fulfillment-controls">
+          <label>拟结给号主<Input value={ownerNet} inputMode="decimal" disabled={locked} onChange={(event) => { invalidate(); setOwnerNet(event.target.value); }} placeholder="元，如 123.45" /></label>
+          <label>拟退给租客<Input value={renterRefund} inputMode="decimal" disabled={locked} onChange={(event) => { invalidate(); setRenterRefund(event.target.value); }} placeholder="元，如 12.00" /></label>
           <label>原因说明<Input value={reason} maxLength={500} disabled={locked} onChange={(event) => { invalidate(); setReason(event.target.value); }} placeholder="不少于3字" /></label>
-        </div> : null}
+        </div></> : null}
         {adjustOpen ? <div className="im-support-fulfillment-actions">
           <Button type="button" onClick={previewAdjustment} disabled={primaryDisabled}>生成调整预览</Button>
           {preview?.adjustArmed && preview.versionHash ? <Button type="button" onClick={()=>armConfirmation("adjust")} disabled={primaryDisabled}>提交人工调整</Button> : null}
         </div> : null}
-      </div>
+      </div>:null}
 
       <p className="im-support-fulfillment-hint">聊天和已读不会改变订单状态；金额以系统结果为准，"应退"不等于退款已到账。</p>
       </DialogContent>
     </Dialog>
   </Card>
-  {canManualClose && orderStatus === "PAID" ? <ManualCloseCard orderId={orderId} displayNo={displayNo} onSettlement={() => { void load(); setPanelOpen(true); }} /> : null}
-  {canManualClose && orderStatus === "PAID" ? <SupportCancelCard orderId={orderId} displayNo={displayNo} /> : null}
+  {canManualClose && !compact && orderStatus === "PAID" ? <ManualCloseCard orderId={orderId} displayNo={displayNo} onSettlement={() => { void load(); setPanelOpen(true); }} /> : null}
+  {canManualClose && orderStatus === "PAID" && view.rentalStarted===false ? <SupportCancelCard orderId={orderId} displayNo={displayNo} compact={compact} /> : null}
   </>;
 }
 
 /** The pending-order path never creates a refund or claims the channel is closed. */
-export function SupportUnpaidCancelCard({ orderId, displayNo, onReviewPayment }: { orderId: string; displayNo: string; onReviewPayment?: () => void }) {
+export function SupportUnpaidCancelCard({ orderId, displayNo, onReviewPayment, compact=false }: { orderId: string; displayNo: string; onReviewPayment?: () => void; compact?:boolean }) {
   const [open, setOpen] = useState(false), [reason, setReason] = useState(""), [error, setError] = useState("");
   const [phase, setPhase] = useState<"IDLE" | "LOADING" | "SENDING" | "UNKNOWN">("IDLE");
   const [view, setView] = useState<SupportUnpaidCancelView | null>(null), [done, setDone] = useState(false);
@@ -864,8 +888,8 @@ export function SupportUnpaidCancelCard({ orderId, displayNo, onReviewPayment }:
     setError(outcome.reason === "PAYMENT_REVIEW_REQUIRED" ? "发现付款记录或请求，请先核对付款情况。" : "订单状态已变化或当前无权处理，请刷新后核对。");
   };
   const blocked = view && !view.eligibility.allowed;
-  return <Card className="im-support-fulfillment im-order-card" data-support-unpaid-cancel="true">
-    <CardContent className="grid gap-2 p-4">
+  return <Card className={`im-support-fulfillment im-order-card${compact?" oc-action-card":""}`} data-support-unpaid-cancel="true">
+    <CardContent className={compact?"grid gap-2 p-0":"grid gap-2 p-4"}>
       <CardTitle className="text-sm">取消待付款订单</CardTitle>
       <CardDescription className="text-xs leading-relaxed">仅可处理尚未发起付款的订单。若已有付款请求或付款记录，请先核对资金状态。</CardDescription>
       {done ? <Alert><ShieldCheck /><AlertTitle>订单已取消</AlertTitle><AlertDescription>账号占用已解除；此操作未向支付渠道发送关单请求。</AlertDescription></Alert>
@@ -925,7 +949,7 @@ function supportCancelRefundText(view: SupportCancelView | null): string {
   return "退款待处理；银行到账未知。";
 }
 
-function SupportCancelCard({ orderId, displayNo }: { orderId: string; displayNo: string }) {
+function SupportCancelCard({ orderId, displayNo, compact=false }: { orderId: string; displayNo: string; compact?:boolean }) {
   const [open, setOpen] = useState(false);
   const [reason, setReason] = useState("");
   const [phase, setPhase] = useState<"IDLE" | "LOADING" | "SENDING" | "UNKNOWN">("IDLE");
@@ -997,8 +1021,8 @@ function SupportCancelCard({ orderId, displayNo }: { orderId: string; displayNo:
   const refundCents = result?.supportCancellation?.refundCents ?? preview?.eligibility.refundCents ?? null;
   const blocked = preview !== null && !preview.eligibility.allowed && !preview.supportCancellation;
   const simulated = preview?.simulationScope !== undefined;
-  return <Card id={`support-cancel-${orderId}`} tabIndex={-1} className="im-support-fulfillment im-order-card" data-support-cancel="true" aria-label="客服取消订单退款">
-    <CardContent className="grid gap-2 p-4">
+  return <Card id={`support-cancel-${orderId}`} tabIndex={-1} className={`im-support-fulfillment im-order-card${compact?" oc-action-card":""}`} data-support-cancel="true" aria-label="客服取消订单退款">
+    <CardContent className={compact?"grid gap-2 p-0":"grid gap-2 p-4"}>
       <CardTitle className="flex items-center gap-2 text-sm"><TriangleAlert className="size-4 shrink-0 text-destructive" />取消未开租订单</CardTitle>
       <CardDescription className="text-xs leading-relaxed">仅限尚未确认开租的订单，核实未使用且无争议后登记全额退款责任。已开租订单请使用正常或提前结算。</CardDescription>
       {result ? <Alert><ShieldCheck /><AlertTitle>已取消并登记全额退款</AlertTitle><AlertDescription>

@@ -316,13 +316,13 @@ test("staff can preview a legacy settlement and submit the exact reviewed party,
  await React.act(async()=>{const select=host.querySelector('select[aria-label="结算发起方"]');select.value="renter";select.dispatchEvent(new w.Event("change",{bubbles:true}));const input=host.querySelector('input[aria-label="哈夫币（M）"]');Object.getOwnPropertyDescriptor(w.HTMLInputElement.prototype,"value").set.call(input,"10");input.dispatchEvent(new w.Event("input",{bubbles:true}));await tick();});
  await React.act(async()=>{const input=host.querySelector('input[aria-label="6级甲（件）"]');Object.getOwnPropertyDescriptor(w.HTMLInputElement.prototype,"value").set.call(input,"3");input.dispatchEvent(new w.Event("input",{bubbles:true}));await tick();});
  assert.equal([...host.querySelectorAll("button")].find(b=>b.textContent==="预览结算方案").disabled,true);
- await React.act(async()=>{[...host.querySelectorAll("button")].find(b=>b.textContent==="其余物资本次无消耗（填 0）").click();await tick();});
+ await React.act(async()=>{[...host.querySelectorAll("button")].find(b=>b.textContent==="其他项填 0").click();await tick();});
  assert.equal(host.querySelector('input[aria-label="6级甲（件）"]').value,"3");
  await React.act(async()=>{[...host.querySelectorAll("button")].find(b=>b.textContent==="预览结算方案").click();await tick();});
  assert.match(host.textContent,/本单已付金额不足以覆盖实际消耗/);
  await React.act(async()=>{[...host.querySelectorAll("button")].find(b=>b.textContent==="预览结算方案").click();await tick();});
  assert.equal(previewRequest[2],"renter");assert.equal(previewRequest[1].expendHaff,"10");assert.equal(previewRequest[1].armor,"3");assert.match(host.textContent,/提前结算/);assert.match(host.textContent,/87\.00/);
- await React.act(async()=>{[...host.querySelectorAll("button")].find(b=>b.textContent==="其余物资本次无消耗（填 0）").click();await tick();});
+ await React.act(async()=>{[...host.querySelectorAll("button")].find(b=>b.textContent==="其他项填 0").click();await tick();});
  assert(!host.textContent.includes("87.00"),"filling blanks invalidates the old preview");
  await React.act(async()=>{[...host.querySelectorAll("button")].find(b=>b.textContent==="预览结算方案").click();await tick();});
  await React.act(async()=>{const reason=host.querySelector('textarea[aria-label="客服发起结算原因"]');Object.getOwnPropertyDescriptor(w.HTMLTextAreaElement.prototype,"value").set.call(reason,"双方已沟通核实");reason.dispatchEvent(new w.Event("input",{bubbles:true}));await tick();});
@@ -335,6 +335,18 @@ test("staff can preview a legacy settlement and submit the exact reviewed party,
  await React.act(async()=>{[...host.querySelectorAll("button")].find(b=>b.textContent==="核对并提交方案").click();await tick();});
  await React.act(async()=>{[...host.querySelectorAll("button")].find(b=>b.textContent.includes("确认协助提交结算方案")).click();await tick();});
  assert.equal(sent.command,"propose");assert.equal(sent.body.onBehalf,"renter");assert.equal(sent.body.reason,"双方已沟通核实");assert.equal(sent.body.quantities.expendHaff,"10");assert.equal(sent.body.quantities.armor,"3");assert.equal(sent.body.planFingerprint,digest);
+});
+test('legacy actions are rendered in the requested sidebar without a second read',async t=>{
+ const w=storage(t),{createRoot}=require('react-dom/client'),host=document.createElement('div'),sidebar=document.createElement('aside');document.body.append(host,sidebar);const root=createRoot(host);t.after(async()=>React.act(async()=>root.unmount()));
+ const source=view({stage:'3',isSettle:'0',capabilities:['preview','propose'],commandFingerprints:{},confirmationAmounts:null});let reads=0;
+ const api=client(async()=>source);api.readLegacyAdminContinuation=async()=>{reads++;return api.parseLegacyAdminView(source);};
+ const {LegacyAdminContinuationPanel}=load('apps/admin/src/views/legacy-continuation-panel.tsx',{...sharedUi,'../api':{friendlyError:()=>'',formatDate:x=>x},'../components/ui-elements':{Button:({variant:_,size:__,...p})=>React.createElement('button',p)},'../lib/legacy-continuation-client':api});
+ await React.act(async()=>{root.render(React.createElement(LegacyAdminContinuationPanel,{snapshot,orderId,actionsTarget:sidebar}));await tick();});
+ assert.equal(reads,1);assert(![...host.querySelectorAll('button')].some(b=>b.textContent==='协助发起结算'));assert([...sidebar.querySelectorAll('button')].some(b=>b.textContent==='协助发起结算'));
+ await React.act(async()=>{sidebar.querySelector('button').click();await tick();});
+ const blank=host.querySelector('input[aria-label="哈夫币（M）"]');assert.equal(blank.value,'');
+ await React.act(async()=>{[...host.querySelectorAll('button')].find(b=>b.textContent==='其他项填 0').click();await tick();});
+ assert.equal(blank.value,'0');assert.equal(host.querySelector('input[aria-label="6级甲（件）"]').value,'0');assert.equal(reads,1);
 });
 test("staff proposal recovery is bound to party, reason, quantities and the expected next stage",async t=>{
  storage(t);let reply={state:"UNKNOWN"};const c=client(async()=>reply),subject=c.legacyAdminSubject("a",orderId);

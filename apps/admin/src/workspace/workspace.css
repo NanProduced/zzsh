@@ -561,8 +561,16 @@
 .workspace-root .im-order-role[data-role="租客"],.workspace-root .im-order-role[data-role="号主"] { color:var(--im-accent); border-color:color-mix(in oklab,var(--im-accent) 34%,var(--border)); background:color-mix(in oklab,var(--im-accent) 10%,transparent); }
 .workspace-root .im-order-role[data-role="负责客服"],.workspace-root .im-order-role[data-role="协作客服"] { color:var(--im-warn); border-color:color-mix(in oklab,var(--im-warn) 36%,var(--border)); background:color-mix(in oklab,var(--im-warn) 12%,transparent); }
 .workspace-root .im-order-parties [data-slot="badge"][data-state="confirmed"] { color:var(--ring); background:color-mix(in oklab,var(--ring) 12%,transparent); }
-.workspace-root .im-order-panel { display:grid; gap:12px; width:min(620px,94vw); max-height:calc(100svh - 48px); overflow-y:auto; padding:16px; }
+.workspace-root .im-order-panel { display:grid; gap:16px; width:min(760px,calc(100vw - 32px)); max-height:calc(100svh - 48px); overflow-y:auto; padding:20px; }
 .workspace-root .im-order-panel .im-support-fulfillment-stage-panel { background:var(--background); }
+.workspace-root .im-order-panel .im-support-fulfillment-lines { display:block; }
+.workspace-root .im-order-panel .im-support-fulfillment-lines th { font-size:12px; white-space:nowrap; }
+.workspace-root .im-order-panel .im-support-fulfillment-lines td { font-size:14px; vertical-align:middle; }
+.workspace-root .im-order-panel .im-support-fulfillment-lines input { width:100%; min-width:76px; min-height:36px; font-size:14px; font-variant-numeric:tabular-nums; }
+.workspace-root .im-order-panel .im-support-fulfillment-lines td:first-child { min-width:100px; white-space:normal; overflow-wrap:anywhere; }
+.workspace-root .im-order-panel .im-support-fulfillment-lines td:nth-child(2) { white-space:nowrap; }
+.workspace-root .im-order-panel .im-support-fulfillment-controls label { font-size:13px; line-height:1.5; }
+.workspace-root .im-order-panel .im-support-fulfillment-controls input { min-height:36px; font-size:14px; }
 .workspace-root .order-team-fulfillment-slot { margin:0; }
 
 /* Responsive. The sidebar width is fixed, so viewport breakpoints are the honest

@@ -38,12 +38,12 @@ export type SettlementReadView = {
   rentalStarted?: boolean;
   consumptionMode?: "REMAINING" | "ACTUAL" | "UNAVAILABLE";
   extraResources?: Array<{itemId:string;name:string|null;unit:string;pricingKind:string}>;
-  intakes?: Array<{status:string;lines?:Array<{itemId:string;remainingQuantity?:string;consumedQuantity?:string}>}>;
+  intakes?: Array<{status:string;versionNo?:number;initiatorParty?:string;createdAt?:string;lines?:Array<{itemId:string;remainingQuantity?:string;consumedQuantity?:string}>}>;
   ready?: boolean;
   reasons?: string[];
   currentRequest?: { kind?: string; id?: string; versionNo?: number; status?: string } | null;
   settlement?: SettlementVersionView | null;
-  openings?: Array<{ id?: string; versionNo?: number; status?: string; confirmedAt?: string | null; createdAt?: string; lines?: Array<{ itemId?: string; quantity?: string; unit?: string; pricingKind?: string }>; acks?: Array<{ party?: string; source?: string; createdAt?: string }> }>;
+  openings?: Array<{ id?: string; versionNo?: number; status?: string; confirmedAt?: string | null; confirmSource?:string|null; createdAt?: string; lines?: Array<{ itemId?: string; quantity?: string; unit?: string; pricingKind?: string }>; acks?: Array<{ party?: string; source?: string; createdAt?: string }> }>;
   posting?: { id?: string; settlementVersionId?: string; versionHash?: string; early?: boolean; postedAt?: string; refundDueAt?: string | null; amounts?: Record<string, SettlementAmount> } | null;
   versions?: SettlementVersionView[];
   amounts?: Record<string, SettlementAmount>;

@@ -660,11 +660,12 @@ test('authorized staff can open fulfillment from the order even when its IM grou
   if(path.includes('/settlement'))return response({orderId:native.id,rentalStarted:false,openings:[],settlement:null,ready:false,reasons:['SETTLEMENT_VERSION_MISSING']});
   return response({error:{code:'NOT_FOUND'}},404);};
  const props={...chainProps('fallback-admin'),snapshot:{...snapshotFor('fallback-admin'),permissions:['order.read','order.settlement.write','supply.rental_account.read']},objectOnly:true,initialOrderId:native.id};
- await act(async()=>root.render(createElement(AdminOrderChainView,props)));await until(()=>node.textContent.includes('客服处理订单'));
- assert.match(node.textContent,/订单群不可用时也能按权限办理/);
+ await act(async()=>root.render(createElement(AdminOrderChainView,props)));await until(()=>node.textContent.includes('订单操作'));
+ assert.match(node.textContent,/按本单状态和当前权限显示可用操作/);
  const entry=node.querySelector('[data-action="open-fulfillment-panel"]');assert.ok(entry);
+ assert.ok(entry.closest('aside'),'fulfillment action is in the order sidebar');
  await act(async()=>entry.click());await until(()=>browser.document.querySelector('.im-order-panel'));
- assert.match(browser.document.body.textContent,/哈夫币/);assert.equal(browser.document.body.querySelector('.im-support-fulfillment-lines input').value,'5000');
+ assert.match(browser.document.body.textContent,/哈夫币/);assert.equal(browser.document.body.querySelector('.im-support-fulfillment-lines input').value,'0.005');
  assert(!calls.some(call=>call.method==='POST'));
 });
 
@@ -1029,7 +1030,7 @@ test('order detail separates unformed payment from missing time and sums refund 
  assert.match(text,/本单应退责任：¥50\.00/);
  assert.match(text,/逐笔退款申请：0 笔/);
  assert.match(text,/银行到账：未记录/);
- const record=node.querySelector('.oc-records').textContent;
+ const record=node.querySelector('.oc-fulfillment-timeline').textContent;
  assert.match(record,/本站尚未确认付款/);
  assert.match(record,/暂无已接纳付款时间/);
  assert.doesNotMatch(record,/未形成支付|未支付事实/);
@@ -1060,8 +1061,8 @@ test('payment absence labels distinguish unaccepted native pointers, old source 
     const value = { ...chainOrder, id: 'payment-language', displayNo: 'PAYMENT-LANGUAGE', source: { origin, statusLabel: '原记录状态' }, status: state === 'RECORDED_PAID' ? 'PAID' : 'CANCELLED', payment: { state, recordedAt: null, recordedAmount: null } };
     globalThis.fetch = async url => String(url).includes('readMode=combined') ? response({ order: value }) : response({});
     await act(async () => root.render(createElement(AdminOrderChainView, { ...chainProps('payment-language'), objectOnly: true, initialOrderId: value.id })));
-    await until(() => node.querySelector('.oc-records'));
-    const record = node.querySelector('.oc-records').textContent;
+    await until(() => node.querySelector('.oc-fulfillment-timeline'));
+    const record = node.querySelector('.oc-fulfillment-timeline').textContent;
     assert.match(record, new RegExp(expected)); assert.equal(record.includes(forbidden), false);
     if (state === 'RECORDED_UNPAID' && origin === 'NATIVE') assert.match(record, /暂无已接纳付款时间/);
     if (state === 'RECORDED_PAID') assert.match(record, /支付时间未记录/);
@@ -1074,8 +1075,8 @@ test('unknown payment time does not imply an observed payment occurred', async t
  const value={...chainOrder,id:'unknown-payment-time',displayNo:'UNKNOWN-PAYMENT-TIME',status:'PAID',source:{origin:'NATIVE'},payment:{state:'UNKNOWN',recordedAt:null,recordedAmount:null}};
  globalThis.fetch=async url=>String(url).includes('readMode=combined')?response({order:value}):response({});
  await act(async()=>root.render(createElement(AdminOrderChainView,{...chainProps('unknown-payment-time'),objectOnly:true,initialOrderId:value.id})));
- await until(()=>node.querySelector('.oc-records'));
- const record=node.querySelector('.oc-records').textContent;
+ await until(()=>node.querySelector('.oc-fulfillment-timeline'));
+ const record=node.querySelector('.oc-fulfillment-timeline').textContent;
  assert.match(record,/支付事实与时间未记录/);assert.equal(record.includes('支付发生时间未记录'),false);
 });
 

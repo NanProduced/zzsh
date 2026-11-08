@@ -6,8 +6,8 @@ import type { AdminOrderPaymentSummary as PaymentSummary } from '../api';
 import { SupplyListingReviewView } from "./supply-listing-review-view";
 import { accountNumberLabel, formatFundingCents, formatTermDays, haffRateText, quantityText, unitText } from "./supply-review/model";
 import { formatExactYuan } from "@zzsh/ui/display-money";
-import { useCallback,useEffect,useLayoutEffect,useRef,useState } from "react";
-import { ArrowLeft,ArrowUpRight,CalendarDays,CircleAlert,CreditCard,FileText,Flag,KeyRound,X } from "lucide-react";
+import { useCallback,useEffect,useLayoutEffect,useMemo,useRef,useState } from "react";
+import { ArrowLeft,ArrowUpRight,CalendarDays,CircleAlert } from "lucide-react";
 import { ListPagination, ListToolbar, ListToolbarSearch, ListToolbarEnumSelect, ListToolbarApplied } from "@/components/admin-list";
 import { Field } from "@/components/ui/field";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -31,6 +31,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Alert, AlertAction, AlertDescription, AlertTitle } from "../components/ui/alert";
 import { ConfirmAlertDialog } from "../components/ui/alert-dialog";
 import { OrderStages as Stages, ORDER_STATUS_LABELS, type OrderProgress } from "./admin-order-stages";
+import { OrderFulfillmentTimeline } from "./admin-order-fulfillment-timeline";
 import { EntityPreviewTrigger, AccountPreviewCard, UserPreviewCard } from "../components/admin-preview";
 import { financeContextIdentity, financeOriginPath, registerFinanceOrigin } from "./admin-finance-view";
 import { sanitizeFinanceReturn } from '../workspace/tab-model';
@@ -309,7 +310,10 @@ function Detail({snapshot,id,onOpenPath,refreshNonce,financeOrigin,financeReturn
   const [teamArm,setTeamArm]=useState(false);
  const [settlement,setSettlement]=useState<{key:string;value:SettlementReadView|null}>();
  const [legacyRead,setLegacyRead]=useState<{key:string;value:LegacyAdminView|null}>();
+ const [actionsTarget,setActionsTarget]=useState<HTMLDivElement|null>(null);
  const onLegacyRead=useCallback((value:LegacyAdminView|null)=>setLegacyRead({key:orderReadKey,value}),[orderReadKey]);
+ const onNativeRead=useCallback((value:SettlementReadView|null)=>setSettlement({key:orderReadKey,value}),[orderReadKey]);
+ const fulfillmentInventory=useMemo(()=>order?frozenFulfillmentInventory(order):undefined,[order]);
  useEffect(()=>{
   if(!order||order.source.origin!=="NATIVE"||order.status!=="COMPLETED"&&order.progress?.ending.state!=="POSTED")return;
   const controller=new AbortController();setSettlement({key:orderReadKey,value:null});
@@ -418,11 +422,9 @@ function Detail({snapshot,id,onOpenPath,refreshNonce,financeOrigin,financeReturn
   {(nativeAttention||originalAttention||refundSummary?.intents?.some(intent=>intent.localState==='UNKNOWN'||intent.requiresReview))?<div className="oc-attention" role="status"><span>本单有退款记录或原请求需要核对。</span><Button size="sm" variant="secondary" onClick={()=>setDetailTab('finance')}>查看资金与退款</Button></div>:null}
   <div ref={detailSection}><Tabs value={detailTab} onValueChange={value=>setDetailTab(String(value))} className="oc-detail-tabs"><TabsList aria-label="订单详情分区"><TabsTrigger value="fulfillment">履约</TabsTrigger><TabsTrigger value="finance">资金</TabsTrigger><TabsTrigger value="records">账号资料</TabsTrigger></TabsList>
   <TabsContent value="fulfillment" keepMounted>
-  {o.source.origin==="LEGACY"?<LegacyAdminContinuationPanel snapshot={snapshot} orderId={o.id} frozenAccount={o.frozenAccount} refreshNonce={refreshNonce} onViewChange={onLegacyRead}/>:null}
-  {o.source.origin==="NATIVE"&&o.status==="PENDING_PAYMENT"&&(snapshot.security.isBoss||snapshot.permissions.includes('order.settlement.write'))?<section className="oc-section"><h2>客服处理订单</h2><SupportUnpaidCancelCard orderId={o.id} displayNo={o.displayNo} onReviewPayment={()=>setDetailTab('finance')}/></section>:null}
-  {o.source.origin==="NATIVE"&&o.status==="PAID"&&(snapshot.security.isBoss||snapshot.permissions.includes('order.settlement.write'))?<section className="oc-section"><h2>客服处理订单</h2><p className="oc-fact-note">可在此核对开租与结算；订单群不可用时也能按权限办理。</p><OrderFulfillmentSection orderId={o.id} displayNo={o.displayNo} viewerId={snapshot.adminUserId} orderStatus={o.status} frozenInventory={frozenFulfillmentInventory(o)} canManualClose /></section>:null}
-  {o.source.origin==='NATIVE'&&['PAID','CANCELLED'].includes(o.status)?<AdminPrestartTerminationPanel orderId={o.id} binding={{adminUserId:snapshot.adminUserId,sessionId:snapshot.session.id}} canWrite={snapshot.security.isBoss||snapshot.permissions.includes('order.settlement.write')}/>:null}
-  <section className="oc-section"><h2>履约与处理记录</h2><ol className="oc-records"><li><FileText size={15}/><div><strong>订单创建</strong><small>{time(o.createdAt)}</small></div></li><li><CreditCard size={15}/><div><strong>{paymentLabel(o)}</strong><small>{paymentRecordTime(o)}</small></div></li>{o.progress?.opening.state==="CONFIRMED"&&o.progress.opening.confirmedAtUtc?<li><KeyRound size={15}/><div><strong>开租已确认</strong><small>{time(o.progress.opening.confirmedAtUtc)}</small></div></li>:null}{o.progress?.ending.state==="POSTED"&&o.progress.ending.postedAtUtc?<li><Flag size={15}/><div><strong>结算已过账</strong><small>{time(o.progress.ending.postedAtUtc)}</small></div></li>:null}{o.status==="CANCELLED"?<li><X size={15}/><div><strong>订单已取消</strong><small>{o.cancelledAt?time(o.cancelledAt):"取消时间未记录"}</small></div></li>:o.status==="COMPLETED"?<li><Flag size={15}/><div><strong>订单完成记录</strong><small>{(o.completedAt??o.progress?.ending.postedAtUtc)?time(o.completedAt??o.progress!.ending.postedAtUtc!):"完成时间未记录"}</small></div></li>:null}</ol><p className="oc-fact-note">{o.source.origin==='LEGACY'?"时间和进度以原订单记录为准。":"群存在、PAID 与订单更新时间都不等于开租或完成；完整节点见上方进度。"}</p></section>
+  <OrderFulfillmentTimeline order={o} settlement={settlement?.key===orderReadKey?settlement.value:null} legacy={legacy} paymentTitle={paymentLabel(o)} paymentTimeText={paymentRecordTime(o)} formatTime={time}/>
+  {o.source.origin==="LEGACY"?<LegacyAdminContinuationPanel snapshot={snapshot} orderId={o.id} frozenAccount={o.frozenAccount} refreshNonce={refreshNonce} onViewChange={onLegacyRead} actionsTarget={actionsTarget}/>:null}
+  {o.source.origin==='NATIVE'&&['PAID','CANCELLED'].includes(o.status)?<AdminPrestartTerminationPanel orderId={o.id} binding={{adminUserId:snapshot.adminUserId,sessionId:snapshot.session.id}} canWrite={snapshot.security.isBoss||snapshot.permissions.includes('order.settlement.write')} actionsTarget={actionsTarget}/>:null}
   </TabsContent><TabsContent value="finance" keepMounted>
 <section className="oc-section"><AdminOrderSettlementEvidence embedded state={funds.state} evidence={funds.evidence} requestId={funds.requestId} paymentState={o.payment.state} onRetry={()=>retryFunds(n=>n+1)} onOpenDocument={openFundsDocument}/>
    {o.source.origin==='LEGACY'&&funds.state==='ready'&&funds.legacyObservations?<><h3 className="mt-3 text-sm font-semibold">{funds.evidence?.business ? '原分销佣金单据' : '原付款、退款与分销佣金'}</h3><LegacyOrderFinanceObservations rows={funds.evidence?.business ? funds.legacyObservations.filter(row => row.kind === 'DISTRIBUTION') : funds.legacyObservations} onOpen={openFundsDocument}/></>:null}
@@ -446,7 +448,10 @@ function Detail({snapshot,id,onOpenPath,refreshNonce,financeOrigin,financeReturn
  {o.source.origin==='LEGACY'&&team.state==='ready'&&team.data?.teamState===null&&(snapshot.security.isBoss||(snapshot.permissions.includes('im.support.read')&&snapshot.permissions.includes('im.support.accept')))?<><p className="oc-fact-note">将由当前客服与租客、号主组成新群；旧聊天记录不会恢复。</p><Button size="sm" disabled={teamSubmitting} onClick={()=>setTeamArm(true)}>创建订单群</Button><ConfirmAlertDialog open={teamArm} onOpenChange={setTeamArm} title="确认创建订单群？" contentLabel="确认创建订单群" description="将为这笔旧订单新建客服群，由当前客服、租客和号主沟通；旧聊天记录不会恢复。" confirmLabel="确认建群" confirmVariant="default" busy={teamSubmitting} onConfirm={()=>void createLegacyTeam()}/></>:null}
  {teamMessage?<p role="status" className="oc-fact-note">{teamMessage}</p>:null}
  {team.state==="unavailable"?<Button size="sm" variant="secondary" onClick={()=>retryTeam(n=>n+1)}>重试群读取</Button>:null}
- {(snapshot.security.isBoss||snapshot.permissions.includes("im.support.read"))&&team.state==="ready"&&team.data?.canRead?<Link onClick={()=>onOpenPath(`/support?fromOrderId=${encodeURIComponent(o.id)}&section=orders&order=${encodeURIComponent(o.id)}`)}>{o.status==="PAID"?"进入客服工作台处理本单":"进入本单客服工作台"}</Link>:null}</section></aside></div></div>;
+ {(snapshot.security.isBoss||snapshot.permissions.includes("im.support.read"))&&team.state==="ready"&&team.data?.canRead?<Link onClick={()=>onOpenPath(`/support?fromOrderId=${encodeURIComponent(o.id)}&section=orders&order=${encodeURIComponent(o.id)}`)}>{o.status==="PAID"?"进入客服工作台处理本单":"进入本单客服工作台"}</Link>:null}</section><section className="oc-section oc-order-actions"><h2>订单操作</h2><p className="oc-fact-note">按本单状态和当前权限显示可用操作。</p><div ref={setActionsTarget} className="oc-action-portals"/>
+ {o.source.origin==="NATIVE"&&o.status==="PENDING_PAYMENT"&&(snapshot.security.isBoss||snapshot.permissions.includes('order.settlement.write'))?<SupportUnpaidCancelCard orderId={o.id} displayNo={o.displayNo} onReviewPayment={()=>setDetailTab('finance')} compact/>:null}
+ {o.source.origin==="NATIVE"&&o.status==="PAID"&&(snapshot.security.isBoss||snapshot.permissions.includes('order.settlement.write'))?<OrderFulfillmentSection orderId={o.id} displayNo={o.displayNo} viewerId={snapshot.adminUserId} orderStatus={o.status} frozenInventory={fulfillmentInventory} onViewChange={onNativeRead} canManualClose compact/>:null}
+ {o.source.origin==="NATIVE"&&o.status==="COMPLETED"?<p className="oc-fact-note">订单已完成，履约操作已结束。</p>:null}</section></aside></div></div>;
 }
 export function AdminOrderChainView({snapshot,initialOrderId,objectOnly,initialQuery,onOpenPath,onQueryChange,refreshNonce=0}:{snapshot:Snapshot;initialOrderId?:string;objectOnly?:boolean;initialQuery?:Record<string,string>;onOpenPath:(path:string,title?:string)=>void;onQueryChange:(q:Record<string,string>)=>void;refreshNonce?:number}){
  if(!snapshot.security.isBoss&&!snapshot.permissions.includes("order.read")){saved.clear();currentIdentity="";return <div className="oc-empty"><h1>当前没有订单查询权限</h1></div>;}

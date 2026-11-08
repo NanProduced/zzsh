@@ -1,4 +1,5 @@
 import { useEffect,useRef,useState } from "react";
+import { createPortal } from "react-dom";
 import { adminRequest,AdminApiError,friendlyError } from "../api";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -28,8 +29,8 @@ export function originalRefundReceipt(value:unknown,basis:Basis,expected:{orderI
 }
 
 /** 全额原笔命令没有客户端金额/目标；未知时冻结原引用、原body与原键。 */
-export function AdminOriginalRefundPanel({orderId,basis,reference,canWrite,binding,onRecorded,onAttentionChange}:{orderId:string;basis:Basis;reference?:string;
- canWrite:boolean;binding:{adminUserId:string;sessionId:string};onRecorded?:()=>void;onAttentionChange?:(attention:boolean)=>void}){
+export function AdminOriginalRefundPanel({orderId,basis,reference,canWrite,binding,onRecorded,onAttentionChange,actionsTarget}:{orderId:string;basis:Basis;reference?:string;
+ canWrite:boolean;binding:{adminUserId:string;sessionId:string};onRecorded?:()=>void;onAttentionChange?:(attention:boolean)=>void;actionsTarget?:HTMLElement|null}){
  const scope=JSON.stringify([binding.adminUserId,binding.sessionId,orderId,basis,reference??null]),live=useRef(scope);live.current=scope;
  const store=`zzsh.admin.original-refund.${scope}`;
  const[id,setId]=useState(reference??''),[reason,setReason]=useState(''),[reviewed,setReviewed]=useState(false),[pending,setPending]=useState<Pending|null>(null),
@@ -65,7 +66,7 @@ export function AdminOriginalRefundPanel({orderId,basis,reference,canWrite,bindi
  if(!canWrite)return null;
  return <div className="space-y-2 text-sm" aria-label={basis==='REVIEW_CONFIRMATION'?'异常原款退款复核':'未开租全额原路退款'}>
   <p>{basis==='REVIEW_CONFIRMATION'?'异常款仅支持人工复核后的全额原笔退款；同原商户号多流水时保持复核。':'只分配核准的全额原款责任；已有活跃意图时禁止重复分配，明确失败释放后才可新键重提。'}</p>
-  <Button size="sm" variant="secondary" onClick={()=>setOpen(true)} disabled={busy||blocked}>{pending?'恢复原退款登记':'核对退款责任'}</Button>
+  {actionsTarget===undefined?<Button size="sm" variant="secondary" onClick={()=>setOpen(true)} disabled={busy||blocked}>{pending?'恢复原退款登记':'核对退款责任'}</Button>:actionsTarget?createPortal(<Button size="sm" variant="secondary" onClick={()=>setOpen(true)} disabled={busy||blocked}>{pending?'恢复原退款登记':'核对退款责任'}</Button>,actionsTarget):null}
   <Dialog open={open} onOpenChange={next=>{if(!busy)setOpen(next);}}><DialogContent><DialogHeader><DialogTitle>核对原路退款责任</DialogTitle><DialogDescription>核对原付款和已处理记录后，登记退款意图。</DialogDescription></DialogHeader><div className="space-y-3">
   {!reference?<label className="block text-xs text-muted-foreground">原付款确认编号<Input aria-label="异常原付款确认编号" value={id} onChange={e=>setId(e.target.value)} disabled={busy||!!pending} maxLength={128} className="h-8 mt-1 text-xs font-mono" /></label>:null}
   {basis==='REVIEW_CONFIRMATION'?<label className="block">复核依据<Textarea aria-label="异常原款复核依据" value={reason} onChange={e=>setReason(e.target.value)} disabled={busy||!!pending} maxLength={150} rows={2} className="min-h-16 text-xs mt-1" /></label>:null}

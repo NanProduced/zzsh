@@ -172,8 +172,8 @@ test("party confirmation binds to the same version only", async (t) => {
   const parties = (root) => [...root.querySelectorAll(".im-order-parties [data-slot=item]")].map((row) => row.textContent.replace(/\s+/g, ""));
   assert.deepEqual(parties(first), ["租客待确认", "号主已确认"], "opening acks are per party on the same version");
   assert.match(first.querySelector(".im-order-parties").textContent, /请等待双方确认/, "an operator without permission is not offered proxy confirmation");
-  assert.match(first.textContent, /等待双方确认期初/);
-  assert.match(first.textContent, /期初 v1/);
+  assert.match(first.textContent, /等待双方确认开租/);
+  assert.match(first.textContent, /开租清单 v1/);
   await closePanel(oneAck.until);
 
   const stale = await mount(t, "stale-decision");
@@ -249,10 +249,10 @@ test("the check panel is opened from the task card and writes the frozen quantit
   await click(node.querySelector('[data-action="open-fulfillment-panel"]'));
   await until(() => document.body.querySelector(".im-order-panel"), "panel opened");
   const inputs = [...document.body.querySelectorAll(".im-support-fulfillment-lines input")];
-  assert.deepEqual(inputs.map((input) => input.value), ["10000000", "3"], "the opening is seeded from the frozen projection");
-  await click(byText(document.body, "期初代录"));
+  assert.deepEqual(inputs.map((input) => input.value), ["10", "3"], "the opening is seeded from the frozen projection");
+  await click(byText(document.body, "提交开租清单"));
   assert.equal(deps.writes.length, 0, "opening waits for confirmation");
-  await click(byText(document.body, "确认提交期初清单"));
+  await click(byText(document.body, "确认发起开租确认"));
   await until(() => deps.writes.length === 1, "opening written");
   assert.equal(deps.writes[0].path.endsWith("/orders/order-8842/openings"), true);
   assert.deepEqual(deps.writes[0].body, { lines: [{ itemId: "item_haff", quantity: "10000000" }, { itemId: "item_case", quantity: "3" }] });

@@ -119,7 +119,7 @@ async function click(host, text) {
   assert.ok(button, `button available: ${text}`);
   await act(async () => { button.click(); });
   await settle();
-  const label = {"期初代录":"确认提交期初清单","按原请求重放":"确认重试原请求","确认复核":"确认复核结算方案"}[text];
+  const label = {"提交开租清单":"确认发起开租确认","按原请求重放":"确认重试原请求","确认复核":"确认复核结算方案"}[text];
   if (label) {
     const dialog = document.body.querySelector('[role="alertdialog"]');
     assert.ok(dialog, `${text} requires a confirmation`);
@@ -152,20 +152,32 @@ test("first opening reads the slot's frozen inventory, not the settlement respon
 
   const inputs = [...document.body.querySelectorAll(".im-support-fulfillment-lines input")];
   assert.equal(inputs.length, 2, "frozen inventory slot projection seeds the first opening");
-  assert.equal(inputs[0].value, "5000");
+  assert.equal(inputs[0].value, "0.005");
   assert.match(document.body.textContent, /哈夫币/);
-  await act(async () => { find(host, "期初代录").click(); });
+  await act(async () => { find(host, "提交开租清单").click(); });
   assert.equal(requests.filter(request => request.method === "POST").length, 0, "opening confirmation has not written");
   await click(host, "返回核对");
   assert.equal(requests.filter(request => request.method === "POST").length, 0, "dismissing confirmation does not write");
-  assert.equal(inputs[0].value, "5000", "dismissing confirmation keeps the draft");
-  await act(async () => { find(host, "期初代录").click(); });
-  await click(host, "确认提交期初清单");
+  assert.equal(inputs[0].value, "0.005", "dismissing confirmation keeps the draft");
+  await act(async () => { find(host, "提交开租清单").click(); });
+  await click(host, "确认发起开租确认");
   const write = requests.find((request) => request.method === "POST");
   assert.ok(write, "opening write submitted");
   assert.deepEqual(JSON.parse(write.body), { lines: [{ itemId: "item_haff", quantity: "5000" }, { itemId: "item_ammo", quantity: "120" }] });
   assert.ok(String(write.headers["idempotency-key"] ?? "").startsWith("im_ful_record-opening_order-A_"), "stable intent key attached");
   assert.match(document.body.textContent, /期初已提交/);
+});
+
+test("Haff amounts display in M and round-trip to exact base units",async t=>{
+ const writes=[];globalThis.fetch=async(input,init={})=>{if(init.method==='POST')writes.push(JSON.parse(init.body));return response(paidNoOpening);};
+ const {host,root}=mount();t.after(async()=>{await act(async()=>root.unmount());host.remove();});
+ await render(root,host,{frozenInventory:[{...frozenInventory[0],quantity:'394000001'}]});
+ const input=document.body.querySelector('.im-support-fulfillment-lines input');assert.equal(input.value,'394.000001');
+ const setter=Object.getOwnPropertyDescriptor(browser.HTMLInputElement.prototype,'value').set;
+ await act(async()=>{setter.call(input,'394.0000001');input.dispatchEvent(new Event('input',{bubbles:true}));});
+ await click(host,'提交开租清单');assert.equal(writes.length,0);assert.match(document.body.textContent,/请核对资源数量/);
+ await act(async()=>{setter.call(input,'394.000001');input.dispatchEvent(new Event('input',{bubbles:true}));});
+ await click(host,'提交开租清单');assert.deepEqual(writes[0].lines,[{itemId:'item_haff',quantity:'394000001'}]);
 });
 
 test("without the slot projection the section refuses to fake an opening", async (t) => {
@@ -174,8 +186,8 @@ test("without the slot projection the section refuses to fake an opening", async
   t.after(async () => { await act(async () => root.unmount()); host.remove(); });
   await render(root, host, { frozenInventory: undefined });
   assert.equal(document.body.querySelectorAll(".im-support-fulfillment-lines input").length, 0);
-  assert.match(document.body.textContent, /未返回订单冻结库存投影/);
-  assert.equal(find(host, "期初代录").disabled, true);
+  assert.match(document.body.textContent, /未取得本单冻结资源清单/);
+  assert.equal(find(host, "提交开租清单").disabled, true);
 });
 
 test("a stale second page preserves an existing order intent instead of overwriting it", async t => {
@@ -185,7 +197,7 @@ test("a stale second page preserves an existing order intent instead of overwrit
   await render(root,host);
   const key="zzsh.im-support.fulfillment.admin-A.order-A", original={subject:"admin-A",intent:{id:"prior-intent",orderId:"order-A",kind:"record-opening"}};
   browser.localStorage.setItem(key,JSON.stringify(original));
-  await click(host,"期初代录");
+  await click(host,"提交开租清单");
   assert.equal(writes,0);assert.deepEqual(JSON.parse(browser.localStorage.getItem(key)),original);
   assert.match(document.body.textContent,/另一页面已有本单操作/);
 });
@@ -196,7 +208,7 @@ test("a concurrently held order lock refuses another submit", async t => {
   const {host,root}=mount();t.after(async()=>{await act(async()=>root.unmount());host.remove();});
   await render(root,host);
   heldLocks.add("zzsh:supply-write:zzsh.im-support.fulfillment.admin-A.order-A");
-  await click(host,"期初代录");assert.equal(writes,0);assert.match(document.body.textContent,/另一页面正在处理本单/);
+  await click(host,"提交开租清单");assert.equal(writes,0);assert.match(document.body.textContent,/另一页面正在处理本单/);
 });
 
 test("staff can confirm a missing opening acknowledgement with a recorded reason", async t => {
@@ -213,7 +225,7 @@ test("staff can confirm a missing opening acknowledgement with a recorded reason
   assert.match(document.body.textContent,/不会显示为当事人本人确认/);
   const reason=document.body.querySelector('textarea[aria-label="协助确认期初原因"]');assert.ok(reason);
   await act(async()=>{Object.getOwnPropertyDescriptor(browser.HTMLTextAreaElement.prototype,"value").set.call(reason,"已与租客核实");reason.dispatchEvent(new Event("input",{bubbles:true}));});
-  await click(host,"核对并继续");assert.equal(writes.length,0);await click(host,"确认协助确认期初");
+  await click(host,"核对并继续");assert.equal(writes.length,0);await click(host,"确认协助确认开租");
   assert.equal(writes.length,1);assert.match(writes[0].path,/\/orders\/order-A\/openings\/opening_1\/confirm$/);
   assert.deepEqual(writes[0].body,{party:"RENTER",versionNo:1,reason:"已与租客核实"});assert.ok(writes[0].headers["idempotency-key"]);
   assert.match(document.body.textContent,/客服协助确认/);
@@ -231,10 +243,10 @@ test("an unknown write keeps the intent; an old identical opening and another ve
   const { host, root } = mount();
   t.after(async () => { await act(async () => root.unmount()); host.remove(); });
   await render(root, host);
-  await click(host, "期初代录");
+  await click(host, "提交开租清单");
   assert.match(document.body.textContent, /操作结果未确认/);
   const firstKey = requests.find((request) => request.method === "POST").headers["idempotency-key"];
-  assert.equal(find(host, "期初代录").disabled, true, "primary write stays locked while the result is unknown");
+  assert.equal(find(host, "提交开租清单").disabled, true, "primary write stays locked while the result is unknown");
 
   // A plain GET is observation only: even a historical identical opening must not confirm the request.
   globalThis.fetch = async (input, init = {}) => {
@@ -281,7 +293,7 @@ test("a replay precondition rejection never pretends the original request did no
   const { host, root } = mount();
   t.after(async () => { await act(async () => root.unmount()); host.remove(); });
   await render(root, host);
-  await click(host, "期初代录");
+  await click(host, "提交开租清单");
   assert.match(document.body.textContent, /操作结果未确认/);
   // 403 and a bare 409 CONFLICT come from the replay's own recheck: they say nothing about the original write.
   for (const [status, body] of [[403, { error: { code: "FORBIDDEN" } }], [409, { error: { code: "CONFLICT", message: "ORDER_NOT_SETTLEABLE" } }]]) {
@@ -308,10 +320,10 @@ test("a business rejection is shown as blocked, not as success", async (t) => {
   const { host, root } = mount();
   t.after(async () => { await act(async () => root.unmount()); host.remove(); });
   await render(root, host);
-  await click(host, "期初代录");
+  await click(host, "提交开租清单");
   assert.match(document.body.textContent, /ORDER_NOT_PAID/);
   assert.doesNotMatch(document.body.textContent, /期初已提交/);
-  assert.equal(find(host, "期初代录").disabled, false, "a definitive rejection releases the intent");
+  assert.equal(find(host, "提交开租清单").disabled, false, "a definitive rejection releases the intent");
 });
 
 test("an accepted write with a failed readback locks writes until the authoritative state is read", async (t) => {
@@ -332,15 +344,15 @@ test("an accepted write with a failed readback locks writes until the authoritat
   const { host, root } = mount();
   t.after(async () => { await act(async () => root.unmount()); host.remove(); });
   await render(root, host);
-  await click(host, "期初代录");
+  await click(host, "提交开租清单");
   assert.match(document.body.textContent, /期初已提交/);
   assert.match(document.body.textContent, /读取最新状态失败/);
-  assert.equal(find(host, "期初代录").disabled, true, "no fresh write while readback is pending");
+  assert.equal(find(host, "提交开租清单").disabled, true, "no fresh write while readback is pending");
   assert.equal(find(host, "按原请求重放"), undefined, "accepted writes are never replayed");
   assert.equal(requests.filter((request) => request.method === "POST").length, 1, "no second write after an accepted receipt");
   await click(host, "查看当前状态");
   assert.equal(requests.filter((request) => request.method === "POST").length, 1, "observation still never posts");
-  assert.equal(find(host, "期初代录").disabled, false, "authoritative state observed, work resumes");
+  assert.equal(find(host, "提交开租清单").disabled, false, "authoritative state observed, work resumes");
 });
 
 test("accepted-marker storage failure keeps its warning through failed reads without suggesting refresh", async (t) => {
@@ -368,7 +380,7 @@ test("accepted-marker storage failure keeps its warning through failed reads wit
   const { host, root } = mount();
   t.after(async () => { await act(async () => root.unmount()); host.remove(); });
   await render(root, host);
-  await click(host, "期初代录");
+  await click(host, "提交开租清单");
   assert.equal(acceptedStorageAttempts, 1, "the original intent persisted, only its accepted marker failed");
   const warning = () => {
     assert.match(document.body.textContent, /请勿刷新或离开页面，先查看当前状态或联系维护处理/);
@@ -377,7 +389,7 @@ test("accepted-marker storage failure keeps its warning through failed reads wit
     assert.equal(posts, 1);
   };
   warning();
-  assert.equal(find(host, "期初代录").disabled, true, "the accepted responsibility keeps new writes locked");
+  assert.equal(find(host, "提交开租清单").disabled, true, "the accepted responsibility keeps new writes locked");
   for (const status of [500, 401, 423]) {
     readFailureStatus = status;
     await click(host, "查看当前状态");
@@ -400,7 +412,7 @@ test("an accepted receipt survives unmount and only a GET clears it", async (t) 
   };
   let { host, root } = mount();
   await render(root, host);
-  await click(host, "期初代录");
+  await click(host, "提交开租清单");
   assert.match(document.body.textContent, /期初已提交/);
   assert.match(document.body.textContent, /读取最新状态失败/);
   assert.equal(find(host, "按原请求重放"), undefined);
@@ -413,11 +425,11 @@ test("an accepted receipt survives unmount and only a GET clears it", async (t) 
   await render(root, host);
   assert.match(document.body.textContent, /上次操作已受理/);
   assert.equal(find(host, "按原请求重放"), undefined, "accepted never offers replay after remount");
-  assert.equal(find(host, "期初代录").disabled, true, "accepted keeps the write lock");
+  assert.equal(find(host, "提交开租清单").disabled, true, "accepted keeps the write lock");
   assert.equal(posts, 1, "remount issues no second POST");
   await click(host, "查看当前状态");
   assert.equal(posts, 1, "observation still never posts");
-  assert.equal(find(host, "期初代录").disabled, false, "the authoritative GET releases the accepted lock");
+  assert.equal(find(host, "提交开租清单").disabled, false, "the authoritative GET releases the accepted lock");
 });
 
 test("a 401/423 readback hides private projections and keeps the accepted receipt", async (t) => {
@@ -435,7 +447,7 @@ test("a 401/423 readback hides private projections and keeps the accepted receip
     };
     let { host, root } = mount();
     await render(root, host);
-    await click(host, "期初代录");
+    await click(host, "提交开租清单");
     assert.doesNotMatch(document.body.textContent, /哈夫币/, `${status} hides the private projection immediately`);
     assert.equal(document.body.querySelectorAll(".im-support-fulfillment-lines input").length, 0);
     assert.ok(find(host, "查看当前状态"), `${status} keeps the accepted responsibility`);
@@ -448,7 +460,7 @@ test("a 401/423 readback hides private projections and keeps the accepted receip
     await render(root, host, { viewerId: "admin-B" });
     assert.equal(find(host, "查看当前状态"), undefined, `${status} other subject sees no receipt`);
     assert.equal(find(host, "按原请求重放"), undefined);
-    assert.equal(find(host, "期初代录").disabled, false, "the other subject starts from their own fresh state");
+    assert.equal(find(host, "提交开租清单").disabled, false, "the other subject starts from their own fresh state");
     assert.equal(posts, 1);
     await act(async () => root.unmount());
     host.remove();
@@ -457,10 +469,10 @@ test("a 401/423 readback hides private projections and keeps the accepted receip
     await render(root, host);
     assert.equal(find(host, "按原请求重放"), undefined, `${status} remount stays accepted, never UNKNOWN`);
     assert.ok(find(host, "查看当前状态"));
-    assert.equal(find(host, "期初代录").disabled, true);
+    assert.equal(find(host, "提交开租清单").disabled, true);
     await click(host, "查看当前状态");
     assert.equal(posts, 1, `${status} recovery is GET-only`);
-    assert.equal(find(host, "期初代录").disabled, false);
+    assert.equal(find(host, "提交开租清单").disabled, false);
     await act(async () => root.unmount());
     host.remove();
   }
@@ -483,7 +495,7 @@ test("plain and observational reads also hide private projections on 401/423", a
   t.after(async () => { await act(async () => root.unmount()); host.remove(); });
   await render(root, host);
   assert.match(document.body.textContent, /哈夫币/, "initial read shows the private projection");
-  await click(host, "期初代录");
+  await click(host, "提交开租清单");
   assert.match(document.body.textContent, /操作结果未确认/);
   await click(host, "查看当前状态");
   assert.match(document.body.textContent, /哈夫币/, "a successful observation may show current facts");
@@ -515,7 +527,7 @@ test("a late settlement read never refills private data across an order switch",
   assert.match(panel().textContent, /履约中 · 等待结算/, "order-B's stage is in the check panel");
   await act(async () => { resolveA(response(paidNoOpening)); await settle(); });
   assert.match(panel().textContent, /履约中 · 等待结算/, "the late order-A response cannot replace order-B facts");
-  assert.doesNotMatch(panel().textContent, /待核对期初/, "a superseded order's stage never refills the current panel");
+  assert.doesNotMatch(panel().textContent, /待发起开租确认/, "a superseded order's stage never refills the current panel");
 });
 
 test("editing while the write is in flight cannot lose the original responsibility", async (t) => {
@@ -529,8 +541,8 @@ test("editing while the write is in flight cannot lose the original responsibili
   const { host, root } = mount();
   t.after(async () => { await act(async () => root.unmount()); host.remove(); });
   await render(root, host);
-  await act(async () => { find(host, "期初代录").click(); });
-  await act(async () => { find(host, "确认提交期初清单").click(); });
+  await act(async () => { find(host, "提交开租清单").click(); });
+  await act(async () => { find(host, "确认发起开租确认").click(); });
   await settle();
   const input = document.body.querySelector(".im-support-fulfillment-lines input");
   assert.equal(input.disabled, true, "edits are locked while sending");
@@ -541,7 +553,7 @@ test("editing while the write is in flight cannot lose the original responsibili
   await settle();
   assert.match(document.body.textContent, /操作结果未确认/);
   assert.ok(find(host, "按原请求重放"), "late response still leaves the original responsibility");
-  assert.equal(find(host, "期初代录").disabled, true);
+  assert.equal(find(host, "提交开租清单").disabled, true);
 });
 
 test("an unknown intent survives unmount and remounts under the same key", async (t) => {
@@ -554,7 +566,7 @@ test("an unknown intent survives unmount and remounts under the same key", async
   };
   let { host, root } = mount();
   await render(root, host);
-  await click(host, "期初代录");
+  await click(host, "提交开租清单");
   await act(async () => root.unmount());
   host.remove();
 
@@ -562,7 +574,7 @@ test("an unknown intent survives unmount and remounts under the same key", async
   t.after(async () => { await act(async () => root.unmount()); host.remove(); });
   await render(root, host);
   assert.match(document.body.textContent, /未确认/);
-  assert.equal(find(host, "期初代录").disabled, true, "remount cannot start a fresh write");
+  assert.equal(find(host, "提交开租清单").disabled, true, "remount cannot start a fresh write");
   await click(host, "按原请求重放");
   assert.equal(writes.length, 2);
   assert.equal(writes[1], writes[0], "remount replay keeps the original idempotency key");
@@ -583,7 +595,7 @@ test("auth failure keeps the intent for the same subject and is never consumed b
   };
   let { host, root } = mount();
   await render(root, host);
-  await click(host, "期初代录");
+  await click(host, "提交开租清单");
   assert.match(document.body.textContent, /登录状态已变化/);
   assert.doesNotMatch(document.body.textContent, /哈夫币/, "401/423 hides private projections immediately");
   assert.ok(find(host, "按原请求重放"), "401/423 keeps the original responsibility");
@@ -594,7 +606,7 @@ test("auth failure keeps the intent for the same subject and is never consumed b
   ({ host, root } = mount());
   await render(root, host, { viewerId: "admin-B" });
   assert.equal(find(host, "按原请求重放"), undefined, "cross-identity replay is forbidden");
-  assert.equal(find(host, "期初代录").disabled, false, "the other admin keeps their own fresh write");
+  assert.equal(find(host, "提交开租清单").disabled, false, "the other admin keeps their own fresh write");
   assert.equal(writes.length, 1);
   await act(async () => root.unmount());
   host.remove();
@@ -660,7 +672,7 @@ test("staff preview keeps the customer's actual consumption and includes a zero-
   const {host,root}=mount();t.after(async()=>{await act(async()=>root.unmount());host.remove();});
   await render(root,host);
   const inputs=[...document.body.querySelectorAll(".im-support-fulfillment-lines input")];
-  assert.deepEqual(inputs.map(input=>input.value),["6000","180","2"]);
+  assert.deepEqual(inputs.map(input=>input.value),["0.006","180","2"]);
   assert.match(document.body.textContent,/核对实际消耗/);
   await pickOption(document,document.body.querySelector('.im-support-fulfillment-controls [aria-label="提前原因"]'),"租客自愿提前");
   await click(host,"预览结算方案");
@@ -740,8 +752,8 @@ test("confirmed opening lines borrow names from the frozen projection instead of
   const { host, root } = mount();
   t.after(async () => { await act(async () => root.unmount()); host.remove(); });
   await render(root, host);
-  const labels = [...document.body.querySelectorAll(".im-support-fulfillment-lines label span")].map((node) => node.textContent);
-  assert.deepEqual(labels, ["哈夫币 · 哈夫币", "六级弹 · 发"]);
+  const labels = [...document.body.querySelectorAll(".im-support-fulfillment-lines tbody tr td:first-child")].map((node) => node.textContent);
+  assert.deepEqual(labels, ["哈夫币", "六级弹"]);
   assert.doesNotMatch(document.body.textContent, /物资 · 件/);
 });
 
@@ -796,7 +808,7 @@ test("a completed order shows read-only ended facts and no write commands", asyn
   assert.equal(host.querySelector('[data-action="open-fulfillment-panel"]'), null, "ended orders offer no write entry");
   assert.equal(document.body.querySelector(".im-order-panel"), null, "no check panel is mounted");
   assert.equal(host.querySelectorAll(".im-support-fulfillment-lines input").length, 0);
-  assert.doesNotMatch(card.textContent, /期初代录|预览结算方案|确认复核|人工调整/);
+  assert.doesNotMatch(card.textContent, /提交开租清单|预览结算方案|确认复核|人工调整/);
 });
 
 test("a cancelled order stays neutral even when settlement recording is unavailable", async (t) => {
@@ -833,11 +845,11 @@ test("the rail card keeps the action and leaves stage and status facts to the he
   await waitFor(() => Boolean(host.querySelector('[data-action="open-fulfillment-panel"]')));
   const card = host.querySelector(".im-support-fulfillment");
   assert.match(card.textContent, /履约核对/, "the rail card speaks about the action, not the stage");
-  assert.doesNotMatch(card.textContent, /待核对期初|未开租|已开租|有结算申请待处理|已过账|双方确认/, "the rail card does not repeat stage or status facts");
-  assert.match(card.querySelector('[data-action="open-fulfillment-panel"]').textContent, /期初/, "the stage-specific action stays available");
+  assert.doesNotMatch(card.textContent, /待核对期初|未开租|已开租|有结算申请待处理|已过账/, "the rail card does not repeat stage or status facts");
+  assert.match(card.querySelector('[data-action="open-fulfillment-panel"]').textContent, /发起开租确认/, "the stage-specific action stays available");
   await act(async () => { card.querySelector('[data-action="open-fulfillment-panel"]').click(); });
   await waitFor(() => Boolean(document.body.querySelector(".im-order-panel")));
-  assert.match(document.body.querySelector(".im-order-panel").textContent, /待核对期初/, "the check panel owns the stage facts");
+  assert.match(document.body.querySelector(".im-order-panel").textContent, /待发起开租确认/, "the check panel owns the stage facts");
 });
 
 test("an original manual-close receipt stays readable without claiming settlement or refund", async (t) => {

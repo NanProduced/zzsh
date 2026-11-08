@@ -1,4 +1,5 @@
 import { useEffect,useRef,useState } from "react";
+import { createPortal } from "react-dom";
 import { adminRequest,AdminApiError,friendlyError } from "../api";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -52,7 +53,7 @@ const labels={REQUESTED:'待客服核实',REVIEW_REQUIRED:'存在争议/依据�
 const refundStates:Record<string,string>={READY:'待提交',SUBMITTING:'提交中',UNKNOWN:'结果未记录',PROCESSING:'处理中',REVIEW_REQUIRED:'需复核',SUCCEEDED:'本地处理成功',FAILED:'处理失败',CONFLICT:'记录冲突'};
 type Pending={version:1;scope:string;key:string;terminationId:string;body:{expectedRevision:string;decision:'APPROVE'|'REJECT'|'REVIEW_REQUIRED';reason:string;assessment?:string}};
 
-export function AdminPrestartTerminationPanel({orderId,binding,canWrite}:{orderId:string;binding:{adminUserId:string;sessionId:string};canWrite:boolean}){
+export function AdminPrestartTerminationPanel({orderId,binding,canWrite,actionsTarget}:{orderId:string;binding:{adminUserId:string;sessionId:string};canWrite:boolean;actionsTarget?:HTMLElement|null}){
  const scope=`${binding.adminUserId}:${binding.sessionId}:${orderId}`,ref=useRef(scope);ref.current=scope;
  const[state,setState]=useState<{scope:string;read:Context|null;error:unknown}>({scope:'',read:null,error:null}),[reason,setReason]=useState(''),[assessed,setAssessed]=useState(false),[busy,setBusy]=useState(false),[note,setNote]=useState(''),[nonce,reload]=useState(0);
  const[pending,setPending]=useState<Pending|null>(null),[storageBlocked,setStorageBlocked]=useState(false),storageKey=`zzsh.admin.prestart.${scope}`;
@@ -98,9 +99,9 @@ export function AdminPrestartTerminationPanel({orderId,binding,canWrite}:{orderI
     {read?.refund?.intents?.map((i,n)=><p key={i.intentId??`unknown-${n}`}>{i.refundOrderNo??'原退款号未知'} · {i.state==='SUCCEEDED'&&read.refund?.simulationScope?'模拟退款已完成':refundStates[i.state]??'状态未记录'} · {i.firstSubmit==='DISPATCHED'?'已有提交尝试':i.firstSubmit==='NEVER_DISPATCHED'?'尚无提交尝试':'提交状态未记录'}{i.blockedReason?' · 原号歧义，需复核':''} · {i.localWriteOff==='RECORDED'?'本站核销已记录':i.localWriteOff==='NOT_RECORDED'?'本站尚未核销':'核销状态未记录'}</p>)}
     {read?.refund?.truncated?<p>记录已截断，合计未知。</p>:null}
     {r.dataOrigin==='JOINPAY_LOCAL_ACCEPTANCE'?<AdminOriginalRefundPanel orderId={orderId} basis="PRESTART_TERMINATION" reference={r.id}
-      canWrite={canWrite&&read?.canReview===true} binding={binding} onRecorded={()=>reload(n=>n+1)}/>:<p>本地受控责任未接真实渠道。</p>}
+      canWrite={canWrite&&read?.canReview===true} binding={binding} onRecorded={()=>reload(n=>n+1)} actionsTarget={actionsTarget}/>:<p>本地受控责任未接真实渠道。</p>}
    </div>:null}
-   {(canWrite&&read?.canReview&&(r.state==='REQUESTED'||r.state==='REVIEW_REQUIRED')||pending)?<><Button size="sm" variant="secondary" onClick={()=>setReviewOpen(true)} disabled={busy}>处理结束申请</Button><Dialog open={reviewOpen} onOpenChange={open=>{if(!busy)setReviewOpen(open);}}><DialogContent><DialogHeader><DialogTitle>处理未开租结束申请</DialogTitle><DialogDescription>核对订单和双方情况后选择处理方式。</DialogDescription></DialogHeader><div className="space-y-3">
+   {(canWrite&&read?.canReview&&(r.state==='REQUESTED'||r.state==='REVIEW_REQUIRED')||pending)?<>{actionsTarget===undefined?<Button size="sm" variant="secondary" onClick={()=>setReviewOpen(true)} disabled={busy}>处理结束申请</Button>:actionsTarget?createPortal(<Button size="sm" variant="secondary" onClick={()=>setReviewOpen(true)} disabled={busy}>处理结束申请</Button>,actionsTarget):null}<Dialog open={reviewOpen} onOpenChange={open=>{if(!busy)setReviewOpen(open);}}><DialogContent><DialogHeader><DialogTitle>处理未开租结束申请</DialogTitle><DialogDescription>核对订单和双方情况后选择处理方式。</DialogDescription></DialogHeader><div className="space-y-3">
     <p>原申请：{r.reason} · 原款全额 {r.fullRefundCents===null?'未知':formatFundingCents(r.fullRefundCents)}</p>
     <label className="block">核实记录<Textarea aria-label="未开租核实记录" value={reason} maxLength={150} disabled={busy||!!pending} onChange={e=>setReason(e.target.value)} rows={2} className="min-h-16 text-xs mt-1" /></label>
     <label className="flex gap-2 items-center cursor-pointer select-none"><Checkbox name="assessed" checked={assessed} disabled={busy||!!pending} onCheckedChange={checked=>setAssessed(checked===true)}/><span>已核实未交付/使用、无争议且无其他受审金额调整；本次全额原路应退</span></label>
