@@ -3,7 +3,7 @@ import { ADMIN_PERMISSION, hasPermission, loadEffectiveAdminAccess } from "../au
 import { orderDispatchLockKey } from "../order/payment-confirmation";
 import { buildYunxinIdentityMarker, deriveYunxinAccountId } from "./identity-lifecycle";
 
-export type SupportCandidate = { adminUserId: string; adminName: string; accountId: string; allGames: boolean; gameIds: string[] };
+export type SupportCandidate = { adminUserId: string; adminName: string; accountId: string; allGames: boolean; gameIds: string[]; complaint: boolean };
 
 /**
  * 每客服同时占用的接待上限默认值。
@@ -83,47 +83,34 @@ export async function readEligibleSupport(client: PoolClient, appId: string, loc
     if (![ADMIN_PERMISSION.imSupportRead, ADMIN_PERMISSION.imSupportAccept].every((p) => hasPermission(access, p))) continue;
     const scopes = locked.scopes.filter((s) => s.admin_user_id === row.adminUserId);
     const allGames = access!.isBoss || locked.scopeModes.some((s) => s.admin_user_id === row.adminUserId && s.mode === "ALL_GAMES");
-    result.push({ ...row, allGames, gameIds: scopes.map((s) => s.game_id) });
+    const complaint = Boolean(access?.isBoss || hasPermission(access, ADMIN_PERMISSION.imSupportComplaint));
+    result.push({ ...row, allGames, gameIds: scopes.map((s) => s.game_id), complaint });
   }
   return result;
 }
-
-/** 在租订单群也算占位：订单由同一客服真实履约，不计入则上限会被订单悄悄吃光。*/
-const supportOrderLoad = (alias: string) => `(SELECT count(*) FROM zzsh_order.im_order_group g
-    JOIN zzsh_order.rental_order o ON o."id" = g."order_id"
-   WHERE g."app_id" = $1 AND o."status" = 'PAID'
-     AND COALESCE(g."responsible_admin_id", g."assigned_admin_id") = ${alias}."admin_user_id")`;
 
 /** 与 readEligibleSupport 同一在线口径；候选名单之外的 presence 不参与排队原因统计。 */
 const SUPPORT_READY_PRESENCE = `p."availability" = 'AVAILABLE' AND p."connection_state" = 'CONNECTED'
     AND p."last_connected_at" > clock_timestamp() - interval '2 minutes'`;
 
 /**
- * 满载的客服不进入候选：候选必须有空位（咨询接待数 + 在租订单群 < 上限）。
- * 返回结构同时给出“为什么没选到”，因为满载排队不能被当成无人接待触发兜底文案。
- * ponytail: 上限来自服务端配置（默认 3），不新增 presence.capacity 列，也不改 order-team/order-dispatch 调用方。
+ * Online, eligible and (for complaints) complaint-authorized agents are candidates.
+ * There is deliberately no hard workload cap; active_load remains a statistic.
+ * A missing candidate is always NO_ONLINE_STAFF.
  */
 export async function reserveSupportCandidateOutcome(client: PoolClient, appId: string, kind: "ORDER" | "SERVICE" | "COMPLAINT",
-  candidates: SupportCandidate[], targetAdminId?: string, concurrencyLimit?: number | null,
-  enforceCapacity = true): Promise<SupportReserveOutcome> {
-  const limit = resolveSupportConcurrencyLimit(concurrencyLimit);
-  // COMPLAINT 仅作为旧数据读类型保留；分配与 SERVICE 同权限，无投诉候选或排除规则。
-  const eligible = candidates.filter((c) => !targetAdminId || c.adminUserId === targetAdminId);
+  candidates: SupportCandidate[], targetAdminId?: string, _concurrencyLimit?: number | null,
+  _enforceCapacity = false): Promise<SupportReserveOutcome> {
+  // No hard capacity gate: the business assigns every paid order/new consultation
+  // to an online eligible agent and keeps active_load as a display statistic only.
+  const eligible = candidates.filter((c) => (!targetAdminId || c.adminUserId === targetAdminId)
+    && (kind !== "COMPLAINT" || c.complaint));
   const field = kind === "ORDER" ? "last_order_assigned_at" : "last_consultation_assigned_at";
-  // 容量门禁只挡“新接待”；管理接管（TAKEOVER）替换现负责客服，系统总负载不增加，不应被挡。
-  const capacityClause = enforceCapacity ? `AND p."active_load" + ${supportOrderLoad("p")} < $3` : "";
-  const params: unknown[] = enforceCapacity ? [appId, eligible.map((c) => c.adminUserId), limit] : [appId, eligible.map((c) => c.adminUserId)];
   const selected = (await client.query<{ admin_user_id: string }>(`SELECT p."admin_user_id" FROM zzsh_iam.im_support_presence p
     WHERE p."app_id" = $1 AND p."admin_user_id" = ANY($2::text[]) AND ${SUPPORT_READY_PRESENCE}
-      ${capacityClause}
     ORDER BY p."${field}" ASC NULLS FIRST, p."admin_user_id" LIMIT 1`,
-  params)).rows[0];
-  if (!selected) {
-    const online = (await client.query<{ count: string | number }>(`SELECT count(*)::int AS "count" FROM zzsh_iam.im_support_presence p
-      WHERE p."app_id" = $1 AND p."admin_user_id" = ANY($2::text[]) AND ${SUPPORT_READY_PRESENCE}`,
-    [appId, eligible.map((c) => c.adminUserId)])).rows[0];
-    return { candidate: null, reason: Number(online?.count ?? 0) === 0 ? "NO_ONLINE_STAFF" : "ALL_AT_CAPACITY" };
-  }
+  [appId, eligible.map((c) => c.adminUserId)])).rows[0];
+  if (!selected) return { candidate: null, reason: "NO_ONLINE_STAFF" };
   await client.query(`UPDATE zzsh_iam.im_support_presence SET ${field}=clock_timestamp(),"updated_at"=clock_timestamp()
     ${kind === "ORDER" ? "" : ",active_load=active_load+1"} WHERE app_id=$1 AND admin_user_id=$2`, [appId, selected.admin_user_id]);
   return { candidate: eligible.find((c) => c.adminUserId === selected.admin_user_id)!, reason: null };

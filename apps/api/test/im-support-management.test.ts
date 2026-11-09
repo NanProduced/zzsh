@@ -63,7 +63,11 @@ function adminAccess(permissions: string[], boss = false) {
 }
 
 const TRANSACTION_SQL = new Set(["BEGIN", "COMMIT", "ROLLBACK", "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY"]);
-const emptyQueue = { queued: 0, oldestQueuedAt: null, oldestWaitSeconds: 0, onDuty: 0, withFreeSlot: 0, atCapacity: 0 };
+const emptyQueue = { queued: 0, serviceQueued: 0, complaintQueued: 0, oldestQueuedAt: null, oldestWaitSeconds: 0 };
+const eligibleAdmin = (adminUserId = "admin_a") => {
+  const key = { provider: "yunxin" as const, appId: APP_ID, realm: "admin" as const, kind: "ADMIN" as const, platformSubjectId: adminUserId };
+  return { adminUserId, accountId: deriveYunxinAccountId(key), identityMarker: buildYunxinIdentityMarker(key) };
+};
 
 function adminContextHandler(input: {
   boss?: boolean;
@@ -102,7 +106,7 @@ test("monthly overview applies one interval to historical metrics and keeps queu
   assert.equal(data.reportDate,"2026-10-31");assert.equal(data.totals.todayUsers,1);assert.equal(data.trend.reduce((sum,p)=>sum+p.users,0),2);
   const metrics=f.calls.filter(c=>c.sql.includes('"currentOrderGroups"')||c.sql.includes('"waitingConsultations"')||c.sql.includes('generate_series(')||c.sql.includes('"im_support_round_rating"')||c.sql.includes('AS "askedAt"')||c.sql.includes('FROM lifecycle l'));
   assert.ok(metrics.length>=8);for(const call of metrics)assert.deepEqual(call.values,[APP_ID,"2026-10-01","2026-10-31"]);
-  const queue=f.calls.find(c=>c.sql.includes('FROM queued q'))!;assert.deepEqual(queue.values,[APP_ID,3]);
+  const queue=f.calls.find(c=>c.sql.includes('FROM queued q'))!;assert.deepEqual(queue.values,[APP_ID]);
   assert.ok(f.calls.some(c=>c.sql.includes('COUNT(DISTINCT c."user_id")')));
   const invalid=fakePool(()=>{throw new Error('must not connect');});
   await assert.rejects(readSupportOverview({pool:invalid.pool,appId:APP_ID} as never,adminContext,"2026-10-31",{},"2026-10-01"),{status:400});assert.equal(invalid.calls.length,0);
@@ -264,6 +268,7 @@ test("heartbeat only advances an open interval while the admin is available and 
 
 function overviewHandler(state: {
   onDuty: unknown[];
+  eligible?: unknown[];
   totals: unknown;
   trend: unknown[];
   hourly: unknown[];
@@ -271,9 +276,10 @@ function overviewHandler(state: {
   resolution?: unknown;
   firstResponseRounds?: unknown[];
   firstResponseFacts?: unknown[];
-}) {
+}, permissions: string[] = [], boss = true) {
   return adminContextHandler({
-    boss: true,
+    boss,
+    permissions,
     extras: (sql) => {
       if (sql.includes('"currentOrderGroups"')) {
         assert.match(sql, /o\."status" = 'PAID'/);
@@ -287,6 +293,7 @@ function overviewHandler(state: {
         return { rows: [{ count: 0, average: null, score1: 0, score2: 0, score3: 0, score4: 0, score5: 0 }] };
       }
       if (sql.includes('r."assigned_admin_id" AS "adminUserId"')) return { rows: [] };
+      if (sql.includes(`m."status" = 'READY'`)) return { rows: state.eligible ?? [] };
       if (sql.includes('FROM queued q')) return { rows: [state.queue ?? emptyQueue] };
       if (sql.includes('AS "askedAt"')) return { rows: state.firstResponseRounds ?? [] };
       if (sql.includes('FROM "zzsh_iam"."audit_event" a')) return { rows: state.firstResponseFacts ?? [] };
@@ -299,10 +306,11 @@ function overviewHandler(state: {
 test("overview keeps zeros out of fabricated trends and exposes the documented fields", async () => {
   const f = fakePool(overviewHandler({
     onDuty: [{ adminUserId: "admin_a", name: "客服甲", availability: "AVAILABLE", connectionState: "CONNECTED", activeLoad: 2, todaySeconds: "3600", todaySessions: 3, todayUsers: 2, currentOrderGroups: 1, totalLoad: 3 }],
+    eligible: [eligibleAdmin("admin_a")],
     totals: { onDutyCount: 1, waitingConsultations: 2, todaySessions: 3, todayUsers: 2, transfersToday: 4, handoversToday: 6 },
     trend: Array.from({ length: 7 }, (_, index) => ({ date: `2026-10-2${index + 3}`, sessions: 0, users: 0 })),
     hourly: Array.from({ length: 24 }, (_, hour) => ({ hour, sessions: 0 })),
-    queue: { queued: 2, oldestQueuedAt: "2026-10-29T08:00:00.000000Z", oldestWaitSeconds: "300", onDuty: 1, withFreeSlot: 0, atCapacity: 1 },
+    queue: { queued: 2, serviceQueued: 2, complaintQueued: 0, oldestQueuedAt: "2026-10-29T08:00:00.000000Z", oldestWaitSeconds: "300" },
     resolution: { closed: "3", averageSeconds: "1830.4" },
   }));
   const overview = await readSupportOverview({ pool: f.pool, appId: APP_ID } as never, adminContext, "2026-10-29");
@@ -310,8 +318,9 @@ test("overview keeps zeros out of fabricated trends and exposes the documented f
     reportDate:"2026-10-29", serverNow:"2026-11-01T00:00:00.000000Z",
     period:{dateFrom:"2026-10-29",dateTo:"2026-10-29",days:1,timeZone:"Asia/Shanghai",trendFrom:"2026-10-23",trendTo:"2026-10-29"},
     queue: {
-      queued: 2, oldestQueuedAt: "2026-10-29T08:00:00.000000Z", oldestWaitSeconds: 300,
-      onDuty: 1, withFreeSlot: 0, atCapacity: 1, capacityLimit: 3, reason: "ALL_AT_CAPACITY",
+      queued: 2, serviceQueued: 2, complaintQueued: 0, serviceEligible: 1, complaintEligible: 1,
+      oldestQueuedAt: "2026-10-29T08:00:00.000000Z", oldestWaitSeconds: 300,
+      onDuty: 1, withFreeSlot: 1, atCapacity: 0, capacityLimit: null, reason: "CAPACITY_AVAILABLE",
     },
     quality: {
       firstResponse: { slaSeconds: 120, askedCount:0, averageSeconds: null, sampleCount: 0, breached: 0, pending: 0, overdue: 0 },
@@ -320,7 +329,7 @@ test("overview keeps zeros out of fabricated trends and exposes the documented f
     onDuty: [{
       adminUserId: "admin_a", name: "客服甲", availability: "AVAILABLE", connectionState: "CONNECTED",
       activeLoad: 2, todaySeconds: 3600, todaySessions: 3, todayUsers: 2, currentOrderGroups: 1,
-      capacityLimit: 3, totalLoad: 3, atCapacity: true,
+      capacityLimit: null, totalLoad: 3, atCapacity: false,
     }],
     totals: { onDutyCount: 1, waitingConsultations: 2, todaySessions: 3, todayUsers: 2, transfersToday: 4, handoversToday: 6 },
     trend: [],
@@ -524,6 +533,43 @@ test("patrol read allows another admin's consultation and writes a silent audit"
   assert.ok(audit!.values.includes("im_consult_1"));
 });
 
+test("complaint message reads require the complaint grant for assignee and patrol alike", async () => {
+  const key = { provider: "yunxin" as const, appId: APP_ID, realm: "admin" as const, kind: "ADMIN" as const, platformSubjectId: "admin_a" };
+  const handler = (permissions: string[], granted = false) => fakePool(adminContextHandler({
+    boss: false, permissions,
+    extras: (sql) => {
+      if (sql.includes('FROM "zzsh_iam"."im_identity_mapping"')) {
+        return { rows: [{ accountId: deriveYunxinAccountId(key), identityMarker: buildYunxinIdentityMarker(key), status: "READY" }] };
+      }
+      if (sql.includes('"im_complaint_handover_grant"')) return { rows: granted ? [{ admin_user_id: "admin_a" }] : [], rowCount: granted ? 1 : 0 };
+      if (sql.includes('FROM "zzsh_iam"."im_consultation" c')) {
+        return { rows: [{
+          id: "im_consult_1", userId: "user_a", kind: "COMPLAINT", state: "ACTIVE", userAccountId: "user_im_a",
+          peerAccountId: deriveYunxinAccountId(key), assignedAdminId: "admin_a", subjectRef: null, version: 2,
+          lastMessageAt: null, createdAt: new Date(0), updatedAt: new Date(0), userName: "用户甲", userUsername: null,
+          adminName: "客服甲", appId: APP_ID, messageScopeType: "TEAM", messageScopeId: "900001",
+          messageScopeState: "READY", messageScopeVersion: 1,
+          threadId: "im_thread_1", roundSeq: 1, threadState: "ACTIVE", threadScopeId: "900001",
+          threadScopeState: "READY", threadPeerAccountId: "staff_im_a",
+        }] };
+      }
+      if (sql.includes('INSERT INTO "zzsh_iam"."audit_event"')) return { rows: [] };
+      return null;
+    },
+  }));
+  const denied = handler(["im.support.read", "im.support.accept", "im.support.management.read"]);
+  await assert.rejects(
+    readAdminMessageAccess({ pool: denied.pool, appId: APP_ID } as never, adminContext, `${deriveYunxinAccountId(key)}|2|900001`),
+    (error: { status?: number }) => error.status === 403,
+  );
+  const allowed = handler(["im.support.read", "im.support.accept", "im.support.management.read", "im.support.complaint"]);
+  await assert.doesNotReject(readAdminMessageAccess({ pool: allowed.pool, appId: APP_ID } as never, adminContext, `${deriveYunxinAccountId(key)}|2|900001`));
+  const handover = handler(["im.support.read", "im.support.accept", "im.support.management.read"], true);
+  await assert.doesNotReject(readAdminMessageAccess({ pool: handover.pool, appId: APP_ID } as never, adminContext, `${deriveYunxinAccountId(key)}|2|900001`));
+  const grant = handover.calls.find(({ sql }) => sql.includes('"im_complaint_handover_grant"'))!;
+  assert.match(grant.sql, /"effect" = 'DENY'/, "a personal denial is never overridden by the object grant");
+});
+
 test("patrol order-team read accepts a non-member but requires the manager's own conversation id", async () => {
   const key = { provider: "yunxin" as const, appId: APP_ID, realm: "admin" as const, kind: "ADMIN" as const, platformSubjectId: "admin_a" };
   const account = (() => ({ accountId: deriveYunxinAccountId(key), identityMarker: buildYunxinIdentityMarker(key) }))();
@@ -640,27 +686,70 @@ test("admin BFF forwards the new support-management routes with strict methods",
   assert.equal((await run("/im/audit/consultations/im_consult_1/other", "POST")).status, 404);
 });
 
-test("queue reason separates no online staff from an all-full roster", async () => {
-  const state = (queue: unknown) => ({
-    onDuty: [],
+test("queue reason uses the same service/complaint eligibility as dispatch", async () => {
+  const state = (queue: unknown, onDuty: unknown[] = [], eligible: unknown[] = []) => ({
+    onDuty, eligible,
     totals: { onDutyCount: 0, waitingConsultations: 3, todaySessions: 0, todayUsers: 0, transfersToday: 0, handoversToday: 0 },
     trend: [], hourly: [], queue,
   });
-  const empty = fakePool(overviewHandler(state({ queued: 3, oldestQueuedAt: "2026-10-29T08:00:00.000000Z", oldestWaitSeconds: "3600", onDuty: 0, withFreeSlot: 0, atCapacity: 0 })));
+  const empty = fakePool(overviewHandler(state({ queued: 3, serviceQueued: 3, complaintQueued: 0, oldestQueuedAt: "2026-10-29T08:00:00.000000Z", oldestWaitSeconds: "3600" })));
   const noStaff = await readSupportOverview({ pool: empty.pool, appId: APP_ID } as never, adminContext, null);
   assert.equal(noStaff.queue.reason, "NO_ONLINE_STAFF");
   assert.equal(noStaff.queue.oldestWaitSeconds, 3600);
-  assert.equal(noStaff.queue.capacityLimit, 3);
+  assert.equal(noStaff.queue.capacityLimit, null);
 
-  const free = fakePool(overviewHandler(state({ queued: 1, oldestQueuedAt: null, oldestWaitSeconds: "5", onDuty: 2, withFreeSlot: 1, atCapacity: 1 })));
+  const free = fakePool(overviewHandler(state({ queued: 1, serviceQueued: 1, complaintQueued: 0, oldestQueuedAt: null, oldestWaitSeconds: "5" },
+    [{ adminUserId: "admin_a" }, { adminUserId: "admin_b" }], [eligibleAdmin("admin_a"), eligibleAdmin("admin_b")])));
   const available = await readSupportOverview({ pool: free.pool, appId: APP_ID } as never, adminContext, null, { capacityLimit: 5 });
   assert.equal(available.queue.reason, "CAPACITY_AVAILABLE");
-  assert.equal(available.queue.capacityLimit, 5);
+  assert.equal(available.queue.capacityLimit, null);
+  assert.equal(available.queue.atCapacity, 0);
+  assert.equal(available.queue.serviceEligible, 2);
+  assert.equal(available.totals.onDutyCount, 2, "the headline count uses the same dispatch eligibility");
 
-  const idle = fakePool(overviewHandler(state({ queued: 0, oldestQueuedAt: null, oldestWaitSeconds: "0", onDuty: 1, withFreeSlot: 1, atCapacity: 0 })));
+  const idle = fakePool(overviewHandler(state({ queued: 0, serviceQueued: 0, complaintQueued: 0, oldestQueuedAt: null, oldestWaitSeconds: "0" },
+    [{ adminUserId: "admin_a" }])));
   const none = await readSupportOverview({ pool: idle.pool, appId: APP_ID } as never, adminContext, null);
   assert.equal(none.queue.reason, null);
   assert.equal(none.queue.oldestWaitSeconds, null);
+});
+
+test("queue eligibility uses the dispatch online predicate and rejects a mismatched identity", async () => {
+  const f = fakePool(overviewHandler({
+    onDuty: [{ adminUserId: "admin_a" }],
+    eligible: [{ ...eligibleAdmin("admin_a"), identityMarker: "wrong-marker" }],
+    totals: { onDutyCount: 1, waitingConsultations: 1, todaySessions: 0, todayUsers: 0, transfersToday: 0, handoversToday: 0 },
+    trend: [], hourly: [],
+    queue: { queued: 1, serviceQueued: 1, complaintQueued: 0, oldestQueuedAt: null, oldestWaitSeconds: "60" },
+  }));
+  const overview = await readSupportOverview({ pool: f.pool, appId: APP_ID } as never, adminContext, null);
+  assert.equal(overview.queue.serviceEligible, 0);
+  assert.equal(overview.queue.withFreeSlot, 0);
+  assert.equal(overview.queue.reason, "NO_ONLINE_STAFF");
+  assert.equal(overview.totals.onDutyCount, 0, "an online presence without a valid identity/permission is not counted");
+  const eligibleSql = f.calls.find(({ sql }) => sql.includes('m."status" = \'READY\''))!.sql;
+  assert.match(eligibleSql, /p\."availability" = 'AVAILABLE'/);
+  assert.match(eligibleSql, /p\."connection_state" = 'CONNECTED'/);
+  assert.match(eligibleSql, /p\."last_connected_at" > clock_timestamp\(\) - interval '2 minutes'/);
+  assert.match(eligibleSql, /s\."status" = 'ACTIVE'/);
+  assert.match(eligibleSql, /NOT u\."suspended"/);
+});
+
+test("a complaint queue is not reported as staffed by online service-only agents", async () => {
+  const key = { provider: "yunxin" as const, appId: APP_ID, realm: "admin" as const, kind: "ADMIN" as const, platformSubjectId: "admin_a" };
+  const f = fakePool(overviewHandler({
+    onDuty: [{ adminUserId: "admin_a", name: "客服甲", availability: "AVAILABLE", connectionState: "CONNECTED",
+      activeLoad: 0, todaySeconds: 0, todaySessions: 0, todayUsers: 0, currentOrderGroups: 0, totalLoad: 0 }],
+    eligible: [eligibleAdmin("admin_a")],
+    totals: { onDutyCount: 1, waitingConsultations: 1, todaySessions: 0, todayUsers: 0, transfersToday: 0, handoversToday: 0 },
+    trend: [], hourly: [],
+    queue: { queued: 1, serviceQueued: 0, complaintQueued: 1, oldestQueuedAt: null, oldestWaitSeconds: "60" },
+  }, ["im.support.read", "im.support.accept", "im.support.management.read"], false));
+  const overview = await readSupportOverview({ pool: f.pool, appId: APP_ID } as never, adminContext, null);
+  assert.equal(overview.queue.complaintQueued, 1);
+  assert.equal(overview.queue.complaintEligible, 0);
+  assert.equal(overview.queue.withFreeSlot, 0);
+  assert.equal(overview.queue.reason, "NO_ONLINE_STAFF");
 });
 
 test("first response quality is derived from the single fact reader and reports no sample as null", async () => {

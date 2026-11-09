@@ -13,10 +13,12 @@ const sql0118 = readFileSync(resolve("migrations/business/0118_ops_preset_accoun
 const pairs0118 = [...sql0118.matchAll(/\('(role_preset_\w+)',\s*'([a-z0-9_.]+)'\)/g)].map((m) => [m[1], m[2]] as const);
 const later = new Set<string>([...OPS_PRESET_0118_ADDITIONS,...OPS_PRESET_DISTRIBUTION_MANAGEMENT_ADDITIONS,...OPS_PRESET_COMPENSATION_ADDITIONS]);
 
-test("0114 + 0118 seed rows equal the code constants exactly", () => {
+test("0114 + 0118 seed rows equal the code constants after the 0179 complaint preset change", () => {
   const supportLater = new Set<string>([...SUPPORT_PRESET_LEGACY_CONTINUATION_ADDITIONS,...SUPPORT_PRESET_COMPENSATION_ADDITIONS]);
+  const seeded = pairs.filter(([role, code]) => !(role === "role_preset_support" && code === "im.support.complaint"));
   const expected = Object.entries(ROLE_PRESET_GRANTS).flatMap(([role, codes]) => codes.filter((c) => role === "role_preset_ops" ? !later.has(c) : !supportLater.has(c)).map((c) => [role, c] as const));
-  assert.deepEqual(pairs, expected);
+  const sort = (rows: readonly (readonly [string | undefined, string | undefined])[]) => [...rows].sort((a, b) => `${a[0]}|${a[1]}`.localeCompare(`${b[0]}|${b[1]}`));
+  assert.deepEqual(sort(seeded), sort(expected));
   assert.deepEqual(pairs0118, OPS_PRESET_0118_ADDITIONS.map((c) => ["role_preset_ops", c] as const));
   assert.match(sql0118, /ON CONFLICT \(role_id, permission_code\) DO NOTHING/);
   assert.doesNotMatch(sql0118.replace(/--.*$/gm, "").replace(/'[^']*'/g, "''"), /\b(DELETE|UPDATE|DROP|TRUNCATE|GRANT)\b|admin_user_/i);
@@ -24,6 +26,35 @@ test("0114 + 0118 seed rows equal the code constants exactly", () => {
   assert.equal(journal.entries[118].tag, "0118_ops_preset_account_admin");
   for (const c of OPS_PRESET_0118_ADDITIONS) assert.ok(!isBossOnlyPermission(c), c);
   assert.equal(new Set(pairs.map((p) => p.join("|"))).size, pairs.length);
+});
+
+test('0179 gives complaint handling to ops and removes it from the support default preset',()=>{
+  const migration=readFileSync(resolve('migrations/business/0179_complaint_preset_permission.sql'),'utf8');
+  assert.match(migration,/DELETE FROM zzsh_iam\.admin_role_permission[\s\S]*role_preset_support[\s\S]*im\.support\.complaint/);
+  assert.match(migration,/SELECT 'role_preset_ops', 'im\.support\.complaint'/);
+  const support=new Set<string>(SUPPORT_PRESET_PERMISSIONS);
+  assert.ok(!support.has(ADMIN_PERMISSION.imSupportComplaint));
+  assert.ok(OPS_PRESET_PERMISSIONS.includes(ADMIN_PERMISSION.imSupportComplaint));
+});
+
+test('0181 protects only the specific assigned complaint rows via an object grant',()=>{
+  const migration=readFileSync(resolve('migrations/business/0181_complaint_active_handover.sql'),'utf8');
+  assert.match(migration,/"kind" = 'COMPLAINT'/);
+  assert.match(migration,/"state" IN \('WAITING', 'ACTIVE'\)/);
+  assert.match(migration,/"effect" = 'DENY'/);
+  assert.match(migration,/role_id" <> 'role_preset_support'/);
+  assert.match(migration,/CREATE TABLE IF NOT EXISTS "zzsh_iam"\."im_complaint_handover_grant"/);
+  assert.match(migration,/ON CONFLICT \("consultation_id"\) DO NOTHING/);
+  assert.doesNotMatch(migration,/INSERT INTO "zzsh_iam"\."admin_user_permission"/, "no global complaint ALLOW");
+});
+
+test('0182 repairs only the active-role gap and still writes object grants',()=>{
+  const migration=readFileSync(resolve('migrations/business/0182_complaint_handover_role_status.sql'),'utf8');
+  assert.match(migration,/support_role\."status" = 'ACTIVE'/);
+  assert.match(migration,/other\."status" = 'ACTIVE'/);
+  assert.match(migration,/"effect" = 'DENY'/);
+  assert.match(migration,/ON CONFLICT \("consultation_id"\) DO NOTHING/);
+  assert.doesNotMatch(migration,/INSERT INTO "zzsh_iam"\."admin_user_permission"/);
 });
 
 test('compensation migration grants support request and ops request/approval only',()=>{

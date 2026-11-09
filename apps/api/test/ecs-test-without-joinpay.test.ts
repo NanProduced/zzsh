@@ -43,7 +43,7 @@ const env: NodeJS.ProcessEnv = {
   USER_AUTH_THROTTLE_HMAC_KEY: 't'.repeat(32), USER_IDENTITY_SUBJECT_HMAC_KEY: 'i'.repeat(32), ADMIN_ALTCHA_HMAC_KEY: 'h'.repeat(32),
 };
 const config = loadConfig(env);
-const context = { provider: config.provider, database: config.database, authEnabled: true };
+const context = { provider: config.provider, database: config.database, authEnabled: true, settlementRecordingEnabled: false };
 const authAssembly = { testOperationsEnabled: false, secureCookies: true, settlementRecordingEnabled: false,
   apiOrigin: 'https://api.example.invalid', userOrigin: 'https://user.example.invalid', adminOrigin: 'https://admin.example.invalid' };
 const policy = { schema: 'distribution-policy.v2', scope: 'NATIVE', enabled: true, participation: 'AUTO_AT_REGISTRATION', depth: 1,

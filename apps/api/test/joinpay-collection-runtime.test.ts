@@ -8,7 +8,7 @@ import type { AppConfig } from "../src/config/config";
 
 // 全部为SYNTHETIC_ASSEMBLY_ONLY：OFFICIAL字段只是受信装配假设，不是官方证据、准入或付款事实。
 const KEY = "fixture_key_for_runtime_test_only";
-const context = { authEnabled: true, provider: "real" as const, database: {
+const context = { authEnabled: true, provider: "real" as const, settlementRecordingEnabled: true, database: {
   name: "zzsh_provider_test_runtime_fixture", user: "runtime_fixture_r", runtimeUser: "runtime_fixture_r",
 } as AppConfig["database"] };
 function profile(operation: CollectionProfileOperation, version = "01"): CollectionServerProfile {
@@ -62,6 +62,16 @@ test("启用值及身份/provider/runtime角色不符时，在配置/密钥读�
     } });
     rejected(() => loadJoinpayCollectionRuntime(ctx, env), "JOINPAY_COLLECTION_RUNTIME_CONTEXT_INVALID");
   }
+});
+
+test("结算关闭时保留回调恢复但不再接纳新支付，回调仍自动生成开租", () => {
+  const d = document(); d.newRequestsEnabled = true;
+  const closed = loadJoinpayCollectionRuntime({ ...context, settlementRecordingEnabled: false }, environment(d))!;
+  assert.equal(closed.routes?.initial, undefined);
+  assert.ok(closed.notifications, "existing callbacks stay assembled");
+  assert.equal(closed.notifications!.autoOpening, true);
+  const open = loadJoinpayCollectionRuntime(context, environment(d))!;
+  assert.ok(open.routes?.initial, "new requests return when settlement is open");
 });
 
 test("配置错误只返回固定码，不回显JSON、路径或secret内容", () => {

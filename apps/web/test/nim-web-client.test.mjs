@@ -11,7 +11,24 @@ import {
   oldestNimMessage,
   resolveNimSdkModule,
   validateNimMediaFile,
+  encodeOrderStageCard,
+  parseOrderStageCard,
+  nimMessageView,
 } from "../src/lib/nim-web-client.ts";
+
+test("NIM custom message type 100 maps only the platform order-card shape", () => {
+  const card = { kind: "ORDER_OPENING", orderId: "order-1", cardId: "card-1" };
+  const raw = encodeOrderStageCard(card);
+  assert.deepEqual(parseOrderStageCard(raw), card);
+  assert.deepEqual(parseOrderStageCard({ raw }), card);
+  assert.equal(parseOrderStageCard({ raw: JSON.stringify({ schema: "zzsh.order-card", version: 2, ...card }) }), null);
+  assert.equal(parseOrderStageCard({ raw: JSON.stringify({ ...card, amount: "1" }) }), null);
+  assert.equal(parseOrderStageCard({ raw: JSON.stringify({ ...card, orderId: "../private" }) }), null);
+  const base = { messageClientId: "m1", messageServerId: "s1", conversationId: "bot|2|team", senderId: "bot", receiverId: "team", createTime: 1, messageType: 100, text: "开租确认卡" };
+  assert.deepEqual(nimMessageView({ ...base, attachment: { raw } })?.card, card);
+  assert.equal(nimMessageView({ ...base, attachment: { raw: "{\"unknown\":true}" } })?.card, undefined);
+  assert.equal(nimMessageView({ ...base, revoked: true, attachment: { raw } })?.card, undefined);
+});
 
 test("history anchor keeps adjacent 64-bit IDs in order when their millisecond timestamps tie",()=>{
   const newer={messageClientId:"newer",messageServerId:"4301644928884146185",createTime:1000};

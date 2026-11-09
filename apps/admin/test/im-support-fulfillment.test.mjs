@@ -34,9 +34,9 @@ const vite = await createServer({
   resolve: { alias: { "@": path.join(adminRoot, "src") } },
   server: { middlewareMode: true, hmr: false },
 });
-const { OrderFulfillmentSection, SupportUnpaidCancelCard } = await vite.ssrLoadModule("/src/views/im-support-fulfillment.tsx");
+const { OrderFulfillmentSection, StageCardAttentionNotice, SupportUnpaidCancelCard } = await vite.ssrLoadModule("/src/views/im-support-fulfillment.tsx");
 after(async () => { await vite.close(); });
-beforeEach(() => { browser.localStorage.clear(); heldLocks.clear(); });
+beforeEach(() => { browser.localStorage.clear(); browser.sessionStorage.clear(); heldLocks.clear(); });
 
 function response(body, status = 200) {
   return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
@@ -852,70 +852,131 @@ test("the rail card keeps the action and leaves stage and status facts to the he
   assert.match(document.body.querySelector(".im-order-panel").textContent, /待发起开租确认/, "the check panel owns the stage facts");
 });
 
-test("an original manual-close receipt stays readable without claiming settlement or refund", async (t) => {
-  let posted = null;
-  globalThis.fetch = async (url, init) => {
-    if (String(url).includes("/manual-close")) {
-      posted = { url: String(url), method: init?.method, key: new Headers(init?.headers).get("idempotency-key"), body: JSON.parse(String(init?.body)) };
-      return response({ orderId: "order-A", status: "CANCELLED", cancelReason: "MANUAL_CLOSE", cancelledAt: "2026-10-29T13:30:00.000Z", localFundsEffect: "NONE", financeHandling: "OFFLINE_REQUIRED", alreadyClosed: true });
+test("the support workbench no longer offers the routine manual-close entry but keeps the unopened cancel", async (t) => {
+  globalThis.fetch = async () => response(paidNoOpening);
+  const { host, root } = mount();
+  t.after(async () => { await act(async () => root.unmount()); host.remove(); });
+  await render(root, host, { orderStatus: "PAID", canManualClose: true });
+  assert.equal(host.querySelector('[data-action="manual-close-open"]'), null, "anomaly handling is not a routine support entry");
+  assert.equal(host.querySelector('[data-manual-close="true"]'), null);
+  assert.ok(host.querySelector('[data-support-cancel="true"]'), "the legitimate unopened cancellation remains available");
+  assert.doesNotMatch(host.textContent, /核对结束方式|异常处理/);
+});
+
+test("a progress reminder is stage-derived, sends one idempotent request, and never writes an opening", async (t) => {
+  const writes = [];
+  const openingPending = {
+    ...paidNoOpening,
+    openingGeneration: { state: "CREATED", reason: null },
+    openings: [{ id: "opening_1", versionNo: 1, status: "DRAFT", autoConfirmDueAt: "2026-11-09T08:40:00.000Z", lines: frozenInventory.map((line) => ({ itemId: line.itemId, quantity: line.quantity, unit: line.unit, pricingKind: line.pricingKind })), acks: [] }],
+  };
+  globalThis.fetch = async (url, init = {}) => {
+    if (init.method === "POST") {
+      writes.push({ url: String(url), key: new Headers(init.headers).get("idempotency-key"), body: JSON.parse(String(init.body)) });
+      return response({ reminderId: "reminder_1", orderId: "order-A", stage: "OPENING_PENDING", targets: ["RENTER", "OWNER"], state: "SENT", messageClientId: "reminder_1" });
     }
-    return response(confirmedOpening);
+    return response(openingPending);
+  };
+  const { host, root } = mount();
+  t.after(async () => { await act(async () => root.unmount()); host.remove(); });
+  await render(root, host);
+  assert.match(document.body.textContent, /等待双方确认开租/);
+  await click(host, "发送进度提醒");
+  assert.equal(writes.length, 1);
+  assert.match(writes[0].url, /\/orders\/order-A\/progress-reminders$/);
+  assert.ok(writes[0].key, "the request keeps its own idempotency key");
+  assert.deepEqual(writes[0].body, {});
+  assert.match(document.body.textContent, /已发送进度提醒（OPENING_PENDING）/);
+  assert.equal(writes.some(write => /openings$/.test(write.url)), false, "a reminder never creates an opening");
+});
+
+test("an unknown reminder keeps its request key across remount", async (t) => {
+  const openingPending = {
+    ...paidNoOpening,
+    openingGeneration: { state: "CREATED", reason: null },
+    openings: [{ id: "opening_1", versionNo: 1, status: "DRAFT", autoConfirmDueAt: "2026-11-09T08:40:00.000Z", lines: frozenInventory.map((line) => ({ itemId: line.itemId, quantity: line.quantity, unit: line.unit, pricingKind: line.pricingKind })), acks: [] }],
+  };
+  const keys = [];
+  globalThis.fetch = async (url, init = {}) => {
+    if (init.method === "POST") {
+      keys.push(new Headers(init.headers).get("idempotency-key"));
+      return response({ error: { code: "IM_UNAVAILABLE", message: "unknown" }, state: "UNKNOWN" }, 502);
+    }
+    return response(openingPending);
+  };
+  const first = mount();
+  await render(first.root, first.host);
+  await click(first.host, "发送进度提醒");
+  await waitFor(() => Boolean(browser.sessionStorage.getItem(`zzsh.im-support.reminder.admin-A.order-A`)));
+  const saved = browser.sessionStorage.getItem(`zzsh.im-support.reminder.admin-A.order-A`);
+  assert.ok(saved && /^support_reminder_/.test(saved));
+  await act(async () => first.root.unmount());
+  first.host.remove();
+
+  const second = mount();
+  t.after(async () => { await act(async () => second.root.unmount()); second.host.remove(); });
+  await render(second.root, second.host);
+  assert.equal(find(second.host, "核对原提醒")?.textContent, "核对原提醒", "the remount reuses the pending request");
+  await click(second.host, "核对原提醒");
+  assert.deepEqual(keys, [saved, saved], "the same original key is retried");
+});
+
+test("a missing generation record with the recovery marker still exposes the retry path", async (t) => {
+  const writes = [];
+  globalThis.fetch = async (url, init = {}) => {
+    if (init.method === "POST") {
+      writes.push(String(url));
+      return response({ orderId: "order-A", state: "REVIEW_REQUIRED", reason: "42P01" });
+    }
+    return response({ ...paidNoOpening, openingGeneration: null, openingGenerationRecoveryRequired: true });
   };
   const { host, root } = mount();
   t.after(async () => { await act(async () => root.unmount()); host.remove(); });
   await render(root, host, { orderStatus: "PAID", canManualClose: true });
-  await waitFor(() => host.querySelector('[data-action="manual-close-open"]'));
-
-  const card = host.querySelector('[data-manual-close="true"]');
-  assert.match(card.textContent, /不能跳过结算与退款/);
-  assert.match(card.textContent, /原人工关闭记录仍须核对资金/);
-  await click(host, "核对结束方式");
-  await waitFor(() => document.body.querySelector('[aria-label="手动结单"]'));
-  assert.match(document.body.textContent, /先核对本单办理路径/);
-
-  assert.equal(document.body.querySelector('[data-action="manual-close-submit"]').disabled, true, "an empty remark cannot submit");
-  const textarea = document.body.querySelector('textarea[aria-label="手动结单处理备注"]');
-  const setter = Object.getOwnPropertyDescriptor(browser.HTMLTextAreaElement.prototype, "value").set;
-  setter.call(textarea, "异常订单，线下核对资金");
-  await act(async () => { textarea.dispatchEvent(new browser.Event("input", { bubbles: true })); });
-  await settle();
-  await click(host, "核对办理路径");
-  await waitFor(() => host.querySelector('[data-manual-close="true"]').textContent.includes("已手动结单"));
-
-  assert.equal(posted.method, "POST");
-  assert.match(posted.url, /\/orders\/order-A\/manual-close$/);
-  assert.equal(posted.body.remark, "异常订单，线下核对资金");
-  assert.ok(posted.key, "the idempotency key is sent");
-  assert.equal(host.querySelector('[data-action="manual-close-open"]'), null, "a closed order hides the action");
-  assert.match(host.textContent, /原记录未自动结算或退款/);
+  assert.equal(find(host, "提交开租清单"), undefined, "a marked new order cannot fall back to legacy manual creation without the marker");
+  assert.match(document.body.textContent, /自动开租记录写入失败/);
+  await click(host, "重新核对开租依据");
+  await click(host, "确认重新核对");
+  assert.deepEqual(writes, ["/api/bff/admin/orders/order-A/opening-generation/retry"]);
 });
 
-for (const code of ['PRESTART_REFUND_REQUIRED', 'SETTLEMENT_REQUIRED']) test(`manual close ${code} routes to the existing formal flow without closing or dispatching funds`, async t => {
-  const posts = [];
+test("a new-order review state explains the missing opening and never offers a fake manual list", async (t) => {
+  const writes = [];
   globalThis.fetch = async (url, init = {}) => {
-    if (init.method === 'POST') {
-      posts.push(String(url));
-      return response({ error: { code: 'CONFLICT', reason: code }, status: 'PAID', orderUnchanged: true, resolution: { code, readPath: '/api/v1/admin/orders/order-A/' + (code === 'PRESTART_REFUND_REQUIRED' ? 'support-cancel' : 'settlement') } }, 409);
+    if (init.method === "POST") {
+      writes.push(String(url));
+      return response({ orderId: "order-A", state: "REVIEW_REQUIRED", reason: "FULL_PAYOUT_UNKNOWN" });
     }
-    return response(code === 'PRESTART_REFUND_REQUIRED' ? paidNoOpening : confirmedOpening);
+    return response({
+      ...paidNoOpening,
+      openingGeneration: { state: "REVIEW_REQUIRED", reason: "QUOTE_BASIS_INVALID" },
+    });
   };
-  const { host, root } = mount(); t.after(async () => { await act(async () => root.unmount()); host.remove(); });
-  await render(root, host, { orderStatus: 'PAID', canManualClose: true });
-  await act(async () => document.body.querySelector('[aria-label="关闭核对面板"]').click());
-  await click(host, '核对结束方式');
-  const textarea = document.body.querySelector('textarea[aria-label="手动结单处理备注"]');
-  Object.getOwnPropertyDescriptor(browser.HTMLTextAreaElement.prototype, 'value').set.call(textarea, '按实际开租状态处理');
-  await act(async () => textarea.dispatchEvent(new browser.Event('input', { bubbles: true })));
-  await click(host, '核对办理路径');
-  await waitFor(() => host.textContent.includes('订单未关闭，请完成正式处理'));
-  assert.deepEqual(posts, ['/api/bff/admin/orders/order-A/manual-close']);
-  assert.doesNotMatch(host.textContent, /已手动结单（原办理记录）|已取消并登记全额退款/);
-  if (code === 'PRESTART_REFUND_REQUIRED') {
-    assert.equal(host.querySelector('[data-manual-close="true"] a').getAttribute('href'), '#support-cancel-order-A');
-    assert.match(host.textContent, /尚未确认开租/);
-  } else {
-    await click(host, '前往结算处理');
-    await waitFor(() => document.body.querySelector('.im-order-panel'));
-    assert.equal(posts.length, 1, 'opening the settlement form does not submit a money command');
-  }
+  const { host, root } = mount();
+  t.after(async () => { await act(async () => root.unmount()); host.remove(); });
+  await render(root, host, { orderStatus: "PAID", canManualClose: true });
+  assert.match(document.body.textContent, /开租资料待客服核对/);
+  assert.match(document.body.textContent, /冻结报价或资源清单不完整/);
+  assert.equal(find(host, "提交开租清单"), undefined, "a reviewed order cannot fabricate a list");
+  await click(host, "重新核对开租依据");
+  assert.equal(writes.length, 0, "active retry requires explicit confirmation");
+  await click(host, "确认重新核对");
+  assert.deepEqual(writes, ["/api/bff/admin/orders/order-A/opening-generation/retry"]);
+  assert.match(document.body.textContent, /仍不能生成开租清单/);
+});
+
+test("an UNKNOWN automatic stage card notice is independent of settlement and terminal actions", async (t) => {
+  const { host, root } = mount();
+  t.after(async () => { await act(async () => root.unmount()); host.remove(); });
+  const stageCards = [{ kind: "ORDER_OPENING", kindLabel: "开租确认", state: "UNKNOWN" }];
+  await act(async () => { root.render(createElement(StageCardAttentionNotice, { stageCards })); });
+  assert.match(host.textContent, /自动卡发送结果待核对/);
+  assert.match(host.textContent, /开租确认可能已发出/);
+  assert.match(host.textContent, /先在订单群核对/);
+  assert.match(host.textContent, /再按当前阶段使用“发送进度提醒”/);
+  assert.equal(find(host, "查询云信"), undefined, "no channel query contract is implied");
+  await act(async () => { root.render(createElement(StageCardAttentionNotice, { stageCards, terminal: true })); });
+  assert.match(host.textContent, /订单已结束/);
+  assert.match(host.textContent, /本页不开放补发或写操作/);
+  assert.equal(find(host, "发送进度提醒"), undefined, "a terminal order never reopens a write entry");
 });

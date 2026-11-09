@@ -66,6 +66,15 @@ function kernelProbe(options: { freezeAtPartyLock?: boolean; revokeAtPartyLock?:
     if (sql.includes('FROM zzsh_order.controlled_payment_declaration')) return one(declaration);
     if (sql.startsWith('INSERT INTO zzsh_order.payment_confirmation')) { confirmation = { id: values[0], ...input, disposition: 'APPLIED', reasonCode: null }; return one(); }
     if (sql.startsWith('UPDATE zzsh_order.rental_order') || sql.startsWith('INSERT INTO zzsh_order.im_order_group')) return one({ ok: 1 });
+    if (sql.includes('FROM zzsh_order.payment_confirmation') && sql.includes('WHERE id = $1 AND order_id = $2')) {
+      return one({ id: values[0], amountCents: input.amountCents, currency: 'CNY', disposition: 'APPLIED' });
+    }
+    if (sql.includes('FROM zzsh_order.rental_opening WHERE order_id = $1')) return { rows: [], rowCount: 0 };
+    if (sql.includes('FROM zzsh_order.rental_order o')) {
+      return one({ id: 'order', renterUserId: actor.userId, ownerUserId: 'owner', accountId: 'account', listingVersionId: 'listing',
+        gameId: 'game', status: 'PAID', depositCents: '0', contentHash: 'hash', ruleReleaseId: 'release', quote: null, revision: '1', appId: 'app' });
+    }
+    if (sql.includes('INSERT INTO zzsh_order.rental_opening_generation')) return one({ ok: 1 });
     if (sql.includes('INSERT INTO "zzsh_iam"."audit_event"')) { if (options.auditFailure) throw Error('synthetic audit unavailable'); return one({ ok: 1 }); }
     return base.query(sql, values);
   };

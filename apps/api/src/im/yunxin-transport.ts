@@ -1,4 +1,4 @@
-import type { ImTransportMessage } from "./im-contract";
+import type { ImTransportCard, ImTransportMessage } from "./im-contract";
 import type { DueReminderTransport } from "./order-due-reminders";
 import type { StageCardTransport } from "./order-stage-cards";
 
@@ -16,11 +16,12 @@ import type { StageCardTransport } from "./order-stage-cards";
  */
 export type YunxinTeamTextSender = {
   sendSupportTeamText(input: { teamId: string; senderAccountId: string; text: string; messageClientId: string }): Promise<void>;
+  sendSupportTeamCard?(input: { teamId: string; senderAccountId: string; card: ImTransportCard; text: string; messageClientId: string }): Promise<{ messageServerId: string; createTime: number }>;
 };
 
 const TEAM_CONVERSATION = /^[A-Za-z0-9][A-Za-z0-9_@.-]{0,31}\|2\|([0-9]{1,19})$/;
 
-/** The NIM custom-message type for stage cards is not verified on the real App yet, so each card is delivered as the same sentence the offline dataset shows. */
+/** Readable fallback/push text paired with the NIM custom-message card payload. */
 const CARD_TEXT: Record<string, string> = {
   ORDER_OPENING: "【开租确认卡】请在订单群内确认账号信息并确认开租，双方确认后开始计算租期。",
   ORDER_ENDING: "【结束确认卡】请确认本单已经结束，确认后进入结算。",
@@ -61,11 +62,13 @@ async function sendText(
     text: input.text,
     messageClientId,
   });
-  // The supplier call returns no server id; callers record the local ledger row
-  // themselves, so a stable local id is enough to keep the seam honest.
+  // The supplier text call returns no server id; keep the local/client id in
+  // messageServerId for the existing ledger seam and advertise the provider id
+  // separately so it is never mistaken for a queryable Cloud message id.
   return {
     messageClientId,
     messageServerId: messageClientId,
+    serverMessageId: null,
     conversationId: input.conversationId,
     senderId: input.senderAccountId,
     receiverId: teamId,
@@ -75,19 +78,64 @@ async function sendText(
   };
 }
 
+async function sendCard(
+  provider: YunxinTeamTextSender,
+  input: {
+    conversationId: string;
+    senderAccountId: string;
+    receiverAccountId: string;
+    card: ImTransportCard;
+    text?: string;
+    messageClientId: string;
+  },
+  now: () => number,
+): Promise<ImTransportMessage> {
+  const teamId = teamIdOf(input.conversationId);
+  const text = input.text ?? CARD_TEXT[input.card.kind] ?? CARD_FALLBACK;
+  if (!provider.sendSupportTeamCard) {
+    return sendText(provider, {
+      conversationId: input.conversationId,
+      senderAccountId: input.senderAccountId,
+      receiverAccountId: input.receiverAccountId,
+      text,
+      messageClientId: input.messageClientId,
+    }, now);
+  }
+  const sent = await provider.sendSupportTeamCard({
+    teamId,
+    senderAccountId: input.senderAccountId,
+    card: input.card,
+    text,
+    messageClientId: input.messageClientId,
+  });
+  return {
+    messageClientId: input.messageClientId,
+    messageServerId: sent.messageServerId,
+    serverMessageId: sent.messageServerId,
+    conversationId: input.conversationId,
+    senderId: input.senderAccountId,
+    receiverId: teamId,
+    createTime: sent.createTime,
+    text,
+    messageType: 100,
+    card: input.card,
+  };
+}
+
 export function createYunxinStageCardTransport(
   provider: YunxinTeamTextSender,
   now: () => number = Date.now,
 ): StageCardTransport {
   return {
     text: (input) => sendText(provider, input, now),
-    card: (input) => sendText(
+    card: (input) => sendCard(
       provider,
       {
         conversationId: input.conversationId,
         senderAccountId: input.senderAccountId,
         receiverAccountId: input.receiverAccountId,
-        text: CARD_TEXT[input.card.kind] ?? CARD_FALLBACK,
+        card: input.card,
+        ...(input.text ? { text: input.text } : {}),
         messageClientId: input.card.cardId,
       },
       now,

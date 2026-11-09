@@ -6,7 +6,9 @@ import {
 } from "./im-client-lifecycle.ts";
 import { createNimReceiptReporter, type NimReceiptStatus } from "./message-receipts.ts";
 import { orderReferenceSummary } from "./order-reference.ts";
+import { parseOrderStageCard, type OrderStageCard } from "./order-stage-card.ts";
 export { encodeOrderReference, parseOrderReference, orderReferenceSummary, type OrderReference } from "./order-reference.ts";
+export { encodeOrderStageCard, parseOrderStageCard, type OrderStageCard, type OrderStageCardKind } from "./order-stage-card.ts";
 export { NIM_RECEIPT_PENDING, NimReceiptActionError, type NimReceiptStatus } from "./message-receipts.ts";
 
 export type NimWebConnectionState = "DISCONNECTED" | "CONNECTING" | "CONNECTED" | "RECONNECTING" | "KICKED" | "AUTH_FAILED";
@@ -91,7 +93,7 @@ export type NimMessageLike = {
   sendingState?: number;
   reply?: NimMessageReplySummary;
   revoked?: boolean;
-  card?: { kind: "ORDER_OPENING"|"ORDER_ENDING"|"ORDER_SETTLED"|"ORDER_PRICE_CHANGE"; orderId: string; cardId: string };
+  card?: OrderStageCard;
 };
 
 export const NIM_IMAGE_MAX_BYTES = 10 * 1024 * 1024;
@@ -511,6 +513,13 @@ function replySummary(value: unknown): NimMessageReplySummary | undefined {
   };
 }
 
+function customAttachmentPayload(value: unknown): unknown {
+  if (typeof value === "string") return value;
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const raw = (value as { raw?: unknown }).raw;
+  return typeof raw === "string" ? raw : value;
+}
+
 export function nimMessageView(value: unknown): NimMessageLike | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const message = value as NimMessageLike & Record<string, unknown>;
@@ -526,11 +535,17 @@ export function nimMessageView(value: unknown): NimMessageLike | null {
   const media = envelope ?? (realKind === undefined ? undefined : nimMediaFromAttachment(realKind, message.attachment, message.messageClientId));
   const hasMedia = hasEnvelope || media !== undefined;
   const stripAttachment = realKind !== undefined && media === undefined;
-  if (!revoked && !reply && !hasMedia && !stripAttachment) return message;
+  // Custom messages are opaque to NIM; only the platform-owned card shape is
+  // projected. Everything else stays ordinary text/unsupported content.
+  const card = !revoked && message.messageType === 100 && !message.card
+    ? parseOrderStageCard(customAttachmentPayload(message.attachment))
+    : null;
+  if (!revoked && !reply && !hasMedia && !stripAttachment && !card) return message;
   // Keep the SDK message object intact for later SDK calls; only replace the
   // neutral summary fields and strip content from a revoked message.
   const view: NimMessageLike & Record<string, unknown> = { ...message };
   if (reply) view.reply = reply;
+  if (card) view.card = card;
   if (media) {
     view.media = media;
     if (realKind !== undefined) view.attachment = nimMediaAttachmentView(media);
@@ -544,6 +559,7 @@ export function nimMessageView(value: unknown): NimMessageLike | null {
     delete view.reply;
     delete view.threadReply;
     delete view.isRevoked;
+    delete view.card;
   }
   return view;
 }

@@ -416,6 +416,9 @@ export type SettlementOpening = {
   /** Authoritative "rental started" time for a confirmed opening; never inferred from payment or the client clock. */
   confirmedAt?: string | null;
   createdAt?: string;
+  createdBySource?: "ADMIN" | "SYSTEM" | null;
+  autoConfirmDueAt?: string | null;
+  autoConfirmWaitMinutes?: number | null;
   lines: SettlementLine[];
   acks?: Array<{ party: string; source?: string; createdAt?: string }>;
 };
@@ -470,6 +473,8 @@ export type OrderSettlement = {
   consumptionMode?: "REMAINING" | "ACTUAL" | "UNAVAILABLE";
   extraResources?: SettlementLine[];
   openings: SettlementOpening[];
+  openingGeneration?: { state: "CREATED" | "REVIEW_REQUIRED"; reason?: string | null; createdAt?: string; updatedAt?: string } | null;
+  openingGenerationRecoveryRequired?: boolean;
   intakes: Array<{ id: string; versionNo: string; status: string; initiatorParty?: string; settlementVersionId?: string | null; createdAt?: string; lines?: Array<{ itemId: string; remainingQuantity?: string; consumedQuantity?: string }> }>;
   versions: SettlementVersion[];
   /** `status` is only present for an INTAKE request; a settlement-version request omits it entirely. */

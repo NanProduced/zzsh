@@ -152,6 +152,12 @@ export function OrderCardMessage({ message, info, onOpenOrder, onConfirmOpening,
   const [confirmSubmittedFor, setConfirmSubmittedFor] = useState<string | null>(null);
   const card = message.card;
   if (!card) return null;
+  // Stage cards are Bot-owned. Requiring the current group's bot sender (when the
+  // projection provides one) keeps a user-forged custom message from changing the
+  // headline; the facts below still come only from the authorized order read.
+  if (card.orderId !== info.orderId || (info.botAccountId && message.senderId !== info.botAccountId)) {
+    return <p className="order-team-message-revoked" role="status">订单卡片来源待核对，请到订单详情处理。</p>;
+  }
   const heading = HEADINGS[card.kind] ?? HEADINGS.ORDER_PRICE_CHANGE;
   const terms = info.terms;
   const basis = basisOf(terms);
@@ -300,7 +306,7 @@ export function OrderCardMessage({ message, info, onOpenOrder, onConfirmOpening,
         </span>
       </div>
     </div> : null}
-    {showAcks && openingConfirmed && info.openingConfirmSource === "AUTO" ? <p className="order-card-ack-note">双方未确认，已按 40 分钟规则由系统自动确认；租期自确认时起算。</p> : null}
+    {showAcks && openingConfirmed && info.openingConfirmSource === "AUTO" ? <p className="order-card-ack-note">双方未确认，已按平台设置的等待期由系统自动确认；租期自确认时起算。</p> : null}
     {showAcks && openingConfirmed && info.openingConfirmSource === "ON_BEHALF" ? <p className="order-card-ack-note">客服已代未确认方完成确认；租期自确认时起算。</p> : null}
     <div className="order-card-subject">
       <strong className="order-card-account">{accountTitle}</strong>
@@ -364,7 +370,7 @@ export function OrderCardMessage({ message, info, onOpenOrder, onConfirmOpening,
         <strong className="order-card-dialog-title">{confirmTarget.mode === "PARTY" ? "确认开租" : `代${partyText(confirmTarget.party)}确认开租`}</strong>
         <p className="order-card-dialog-order">订单 {info.displayNo} · {accountTitle}</p>
         <p className="order-card-dialog-copy">{confirmTarget.mode === "PARTY"
-          ? "请核对账号、押金与物品清单。提交确认后等待另一方确认；双方确认或 40 分钟到期后开始租期，起租时间以平台确认信息为准。"
+          ? "请核对账号、押金与物品清单。提交确认后等待另一方确认；双方确认或平台设置的等待期到期后开始租期，起租时间以平台确认信息为准。"
           : `将以客服身份代${partyText(confirmTarget.party)}确认；该操作会记录审计，且只补齐未确认方，不会覆盖已确认记录。`}</p>
         {confirmError ? <p className="order-card-dialog-error" role="alert">{confirmError}</p> : null}
         <div className="order-card-dialog-actions">

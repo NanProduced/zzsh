@@ -451,7 +451,7 @@ function subjectRefFromLocation(): string | null {
 }
 
 function SupportTypePicker({ value, onChange, disabled = false, onSelect }: { value: SupportType; onChange: (value: SupportType) => void; disabled?: boolean; onSelect?: (value: SupportType) => void }) {
-  // 投诉反馈入口保留，但两种入口进入同一个客服线程：创建时统一归一为 SERVICE。
+  // 业务咨询与投诉反馈各自一条持久线程；这里只负责选择入口类型。
   const pick = (next: SupportType) => { onChange(next); onSelect?.(next); };
   return <div className="support-type-picker" role="radiogroup" aria-label="客服类型">
     <button type="button" role="radio" aria-checked={value === "SERVICE"} className="support-type-option" data-active={value === "SERVICE"} disabled={disabled} onClick={() => pick("SERVICE")}><Headphones size={17} /><span><strong>在线客服</strong><small>商品、使用和平台服务咨询</small></span></button>
@@ -776,7 +776,7 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, vi
   useEffect(() => {
     if (preview) return;
     const type = normalizeSupportType(initialType);
-    // 入口意图保留在 picker 上（投诉反馈/在线客服），线程仍按归一后的 SERVICE 线程复用。
+    // 入口意图保留在 picker 上（投诉反馈/在线客服），并复用同类型持久线程。
     setSelectedType(initialType);
     if (initialOrderId && initialOrderParty) return;
     const existing = consultationsRef.current.find((item) => item.type === type);
@@ -1016,7 +1016,7 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, vi
 
   useEffect(() => {
     if (preview || activeId || consultations.length === 0) return;
-    // 入口意图（投诉/客服）共享 SERVICE 线程：优先选统一线程，只有不存在时才退回旧 COMPLAINT 行。
+    // 入口意图对应各自的持久线程：SERVICE 与 COMPLAINT 分开选中，互不覆盖。
     const wanted = normalizeSupportType(selectedType);
     const existing = consultations.find((item) => item.type === wanted) ?? consultations.find((item) => item.type === selectedType);
     if (existing) setActiveId(threadKeyOf(existing));
@@ -2235,7 +2235,7 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, vi
     const sessionError = session.status === "error";
     return <section className={`support-gate${embedded ? " support-gate-embedded" : ""}`} aria-busy={session.status === "loading"}>
       {session.status !== "loading" ? sessionError ? <CircleAlert size={28} aria-hidden="true" /> : <Headphones size={28} aria-hidden="true" /> : null}
-      <div className="support-gate-heading"><div><h2>{sessionError ? "暂时无法打开客服" : "联系客服"}</h2>{session.status !== "loading" ? <p>{sessionError ? "登录状态读取失败，请重试。" : "投诉与咨询使用同一个客服会话，登录后继续。"}</p> : null}</div>{embedded ? <button type="button" className="support-icon-button" onClick={onClose} aria-label="关闭客服窗口" title="关闭客服窗口"><X size={18} /></button> : null}</div>
+      <div className="support-gate-heading"><div><h2>{sessionError ? "暂时无法打开客服" : "联系客服"}</h2>{session.status !== "loading" ? <p>{sessionError ? "登录状态读取失败，请重试。" : "投诉与咨询分别保留会话，登录后继续。"}</p> : null}</div>{embedded ? <button type="button" className="support-icon-button" onClick={onClose} aria-label="关闭客服窗口" title="关闭客服窗口"><X size={18} /></button> : null}</div>
       {session.status === "loading" ? <SessionLoading layout="compact" label="正在加载客服…" /> : null}
       {!sessionError && session.status !== "loading" ? <SupportTypePicker value={selectedType} onChange={setSelectedType} /> : null}
       {sessionError ? <button type="button" className="button secondary" onClick={session.revalidate}>重试身份确认</button> : session.status === "guest" ? <button type="button" className="button primary" onClick={() => void startConsultation()}><Headphones size={15} />登录并联系客服</button> : null}

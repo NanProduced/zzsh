@@ -98,24 +98,30 @@ test("order dispatcher stays off by default and reports only sanitized failure c
 test("consultation input accepts only the supported type and safe subject reference", () => {
   assert.deepEqual(parseConsultationBody({ type: "SERVICE", subjectRef: "listing_01" }),
     { type: "SERVICE", entryIntent: "SERVICE", subjectRef: "listing_01" });
-  // 投诉入口并入普通咨询：旧 body 仍合法，但服务端只创建/复用 SERVICE 线程；
-  // 原始入口意图单独保留，只用于欢迎语文案。
+  // 投诉与业务咨询各自保留持久线程；入口意图仍用于欢迎语文案。
   assert.deepEqual(parseConsultationBody({ type: "COMPLAINT", subjectRef: "listing_01" }),
-    { type: "SERVICE", entryIntent: "COMPLAINT", subjectRef: "listing_01" });
+    { type: "COMPLAINT", entryIntent: "COMPLAINT", subjectRef: "listing_01" });
   assert.deepEqual(parseConsultationBody({ type: "COMPLAINT" }),
-    { type: "SERVICE", entryIntent: "COMPLAINT", subjectRef: null });
-  assert.equal(parseSupportType("COMPLAINT"), "COMPLAINT", "legacy rows keep the read-only type");
+    { type: "COMPLAINT", entryIntent: "COMPLAINT", subjectRef: null });
+  assert.equal(parseSupportType("COMPLAINT"), "COMPLAINT");
   assert.throws(() => parseConsultationBody({ type: "SERVICE", subjectRef: "../private" }), /Subject reference is invalid/);
   assert.throws(() => parseConsultationBody({ type: "SERVICE", extra: true }), /unknown field/);
   assert.throws(() => parseSupportType("CHAT"), /Support type is invalid/);
 });
 
-test("legacy COMPLAINT access uses the same accept/transfer grants as SERVICE", () => {
-  const access = { status: "ACTIVE", isBoss: false, passwordChangeRequired: false, permissions: new Set(["im.support.accept"]) } as never;
-  assert.doesNotThrow(() => requireSupportAccess(access, "COMPLAINT"), "send/claim/read no longer need im.support.complaint");
-  assert.doesNotThrow(() => requireSupportAccess(access, "SERVICE"));
-  assert.throws(() => requireSupportAccess(access, "COMPLAINT", "transfer"), /Permission required/);
-  assert.throws(() => requireSupportAccess({ status: "ACTIVE", isBoss: false, passwordChangeRequired: false, permissions: new Set() } as never, "COMPLAINT"), /Permission required/);
+test("COMPLAINT additionally requires im.support.complaint", () => {
+  const serviceOnly = { status: "ACTIVE", isBoss: false, passwordChangeRequired: false, permissions: new Set(["im.support.accept"]) } as never;
+  assert.throws(() => requireSupportAccess(serviceOnly, "COMPLAINT"), /Permission required/);
+  assert.doesNotThrow(() => requireSupportAccess(serviceOnly, "SERVICE"));
+  const complaint = { status: "ACTIVE", isBoss: false, passwordChangeRequired: false, permissions: new Set(["im.support.accept", "im.support.complaint"]) } as never;
+  assert.doesNotThrow(() => requireSupportAccess(complaint, "COMPLAINT"));
+  assert.throws(() => requireSupportAccess(complaint, "COMPLAINT", "transfer"), /Permission required/);
+  const complaintTransfer = { status: "ACTIVE", isBoss: false, passwordChangeRequired: false, permissions: new Set(["im.support.accept", "im.support.complaint", "im.support.transfer"]) } as never;
+  assert.doesNotThrow(() => requireSupportAccess(complaintTransfer, "COMPLAINT", "transfer"));
+  // Object-level handover grant covers only the exact pre-upgrade conversation,
+  // not new complaint queues or dispatch eligibility.
+  assert.doesNotThrow(() => requireSupportAccess(serviceOnly, "COMPLAINT", "accept", true));
+  assert.throws(() => requireSupportAccess(serviceOnly, "COMPLAINT", "transfer", true), /Permission required/);
 });
 
 test("presence and queue limits reject values outside the server contract", () => {
@@ -304,6 +310,7 @@ function consultationReadFixture() {
     if (sql.includes('FROM "zzsh_iam"."im_consultation" c') && sql.includes('ORDER BY CASE WHEN c."assigned_admin_id" = $2')) {
       const row = { ...state.row, userImage: state.image };
       const visible = row.appId === values[0] && row.state !== "CLOSED"
+        && (row.kind !== "COMPLAINT" || Boolean(values[4]))
         && (row.assignedAdminId === values[1] || (!row.assignedAdminId && Boolean(values[2])));
       return { rows: visible ? [row] : [] };
     }
@@ -313,7 +320,8 @@ function consultationReadFixture() {
       const row = { ...state.row, userImage: state.image };
       const own = row.assignedAdminId === values[2];
       const unassigned = !row.assignedAdminId && Boolean(values[3]);
-      return { rows: row.appId === values[0] && row.id === values[1] && row.state !== "CLOSED" && (own || unassigned) ? [row] : [] };
+      return { rows: row.appId === values[0] && row.id === values[1] && row.state !== "CLOSED"
+        && (row.kind !== "COMPLAINT" || Boolean(values[4])) && (own || unassigned) ? [row] : [] };
     }
     if (sql.includes('FROM "zzsh_iam"."im_consultation_event"')) {
       assert.match(sql, /ORDER BY "created_at" DESC, "id" DESC/);
@@ -494,26 +502,33 @@ test("read projections recheck session and current read/object grants inside the
   }
 });
 
-test("legacy COMPLAINT rows stay readable with only read+accept and no exclusion evidence", async () => {
+test("COMPLAINT rows require the complaint grant and never read exclusion evidence", async () => {
   for (const assigned of [true, false]) {
     const f = consultationReadFixture();
     f.state.row.kind = "COMPLAINT";
     f.state.row.assignedAdminId = assigned ? "admin_a" : "";
-    // 旧 COMPLAINT 行按普通会话读取；排除证据与投诉权限都不再参与。
+    f.state.permissions.push("im.support.complaint");
     assert.equal((await readConsultationContext(f.options, f.actor, "cons_a")).service.type, "COMPLAINT");
     assert.equal((await listConsultationEvents(f.options, f.actor, "cons_a", null, null)).events.length, 3);
     assert.ok(!f.calls.some(({ sql }) => sql.includes("SELECT details FROM zzsh_iam.im_consultation_event")));
   }
 
+  const denied = consultationReadFixture();
+  denied.state.row.kind = "COMPLAINT";
+  denied.state.row.assignedAdminId = "";
+  assert.equal((await listAdminConsultations({ pool: denied.pool, appId: "app_a" } as never, denied.actor, null as never, 10)).consultations.length, 0);
+  await assert.rejects(readConsultationContext(denied.options, denied.actor, "cons_a"), /Consultation not found/);
+
   const f = consultationReadFixture();
   f.state.row.kind = "COMPLAINT";
   f.state.row.assignedAdminId = "";
+  f.state.permissions.push("im.support.complaint");
   const queue = await listAdminConsultations({ pool: f.pool, appId: "app_a" } as never, f.actor, null as never, 10);
-  assert.equal(queue.consultations.length, 1, "unassigned legacy complaint rows join the normal queue");
+  assert.equal(queue.consultations.length, 1, "an authorized unassigned complaint joins the queue");
   assert.equal(queue.consultations[0]!.type, "COMPLAINT");
   const listQuery = f.calls.find(({ sql }) => sql.includes('ORDER BY CASE WHEN c."assigned_admin_id" = $2'));
   assert.ok(listQuery);
-  assert.doesNotMatch(listQuery!.sql, /'COMPLAINT'|im\.support\.complaint/);
+  assert.match(listQuery!.sql, /c2\."kind" <> 'COMPLAINT' OR \$5::boolean/);
 });
 
 test("new consultation reads traverse the real BFF and handler with strict methods and queries", async () => {
@@ -553,8 +568,8 @@ test("new consultation reads traverse the real BFF and handler with strict metho
   assert.equal((await run("/im/consultations/cons_a/context?userId=other")).status, 400);
 });
 
-test("support concurrency caps candidates, counts order occupancy and explains the queue reason", async () => {
-  const staff = (id: string) => ({ adminUserId: id, adminName: id, accountId: `im_${id}`, allGames: true, gameIds: [] as string[] });
+test("support dispatch has no hard workload cap and filters complaint candidates", async () => {
+  const staff = (id: string, complaint = true) => ({ adminUserId: id, adminName: id, accountId: `im_${id}`, allGames: true, gameIds: [] as string[], complaint });
   const calls: Array<{ sql: string; values: unknown[] }> = [];
   const client = (rows: (sql: string) => unknown[]) => ({
     query: async (sql: string, values: unknown[] = []) => {
@@ -564,31 +579,36 @@ test("support concurrency caps candidates, counts order occupancy and explains t
   });
 
   calls.length = 0;
-  const full = client((sql) => (sql.includes('count(*)::int AS "count"') ? [{ count: "1" }] : []));
-  assert.deepEqual(await reserveSupportCandidateOutcome(full as never, "app_a", "SERVICE", [staff("admin_a")], undefined, 2),
-    { candidate: null, reason: "ALL_AT_CAPACITY" });
+  const picked = client((sql) => (sql.includes('SELECT p."admin_user_id" FROM') ? [{ admin_user_id: "admin_a" }] : []));
+  assert.equal((await reserveSupportCandidateOutcome(picked as never, "app_a", "SERVICE", [staff("admin_a")], undefined, 2)).candidate?.adminUserId, "admin_a");
   const select = calls[0]!;
-  assert.match(select.sql, /o\."status" = 'PAID'/);
-  assert.match(select.sql, /COALESCE\(g\."responsible_admin_id", g\."assigned_admin_id"\) = p\."admin_user_id"/);
-  assert.match(select.sql, /p\."active_load" \+ \(SELECT count\(\*\)/);
-  assert.match(select.sql, /< \$3/);
-  assert.deepEqual(select.values, ["app_a", ["admin_a"], 2]);
+  assert.doesNotMatch(select.sql, /active_load|responsible_admin_id|ORDER BY CASE/);
+  assert.deepEqual(select.values, ["app_a", ["admin_a"]]);
 
-  // 没有在线客服是另一种业务事实，兜底文案不同。
-  const offline = client((sql) => (sql.includes('count(*)::int AS "count"') ? [{ count: 0 }] : []));
+  // 没有在线客服是唯一的空候选原因。
+  const offline = client(() => []);
   assert.deepEqual(await reserveSupportCandidateOutcome(offline as never, "app_a", "SERVICE", [staff("admin_a")]),
     { candidate: null, reason: "NO_ONLINE_STAFF" });
 
   // 选中后咨询占用 +1；订单只推进轮换时间，不把订单当第二份咨询占用。
   calls.length = 0;
-  const picked = client((sql) => (sql.includes('SELECT p."admin_user_id" FROM') ? [{ admin_user_id: "admin_a" }] : []));
-  assert.equal((await reserveSupportCandidateOutcome(picked as never, "app_a", "SERVICE", [staff("admin_a")])).candidate?.adminUserId, "admin_a");
+  const service = client((sql) => (sql.includes('SELECT p."admin_user_id" FROM') ? [{ admin_user_id: "admin_a" }] : []));
+  await reserveSupportCandidateOutcome(service as never, "app_a", "SERVICE", [staff("admin_a")]);
   assert.match(calls[1]!.sql, /active_load=active_load\+1/);
   calls.length = 0;
   const order = client((sql) => (sql.includes('SELECT p."admin_user_id" FROM') ? [{ admin_user_id: "admin_a" }] : []));
-  assert.equal((await reserveSupportCandidateOutcome(order as never, "app_a", "ORDER", [staff("admin_a")])).candidate?.adminUserId, "admin_a");
+  await reserveSupportCandidateOutcome(order as never, "app_a", "ORDER", [staff("admin_a")]);
   assert.doesNotMatch(calls[1]!.sql, /active_load=active_load\+1/);
   assert.match(calls[1]!.sql, /last_order_assigned_at=clock_timestamp\(\)/);
+
+  // 投诉候选必须单独持有 im.support.complaint。
+  const complaintPicked = {
+    query: async (sql: string, values: unknown[] = []) => ({
+      rows: sql.includes('SELECT p."admin_user_id" FROM') && (values[1] as string[]).length ? [{ admin_user_id: "admin_a" }] : [],
+    }),
+  };
+  assert.deepEqual(await reserveSupportCandidateOutcome(complaintPicked as never, "app_a", "COMPLAINT", [staff("admin_a", false)]),
+    { candidate: null, reason: "NO_ONLINE_STAFF" });
 });
 
 test("support concurrency limit keeps the historical default and rejects out-of-range values", () => {
@@ -638,8 +658,8 @@ test("admin view exposes queue facts for a waiting round but never to the user",
   // 已接起的轮次不再算排队。
   assert.equal(toView({ ...row, state: "ACTIVE" as const, assignedAdminId: "admin_a" }, "staff_im_a", true, "admin_a").queued, false);
 });
-test("manual takeover bypasses the capacity gate while transfers still respect it", async () => {
-  const staff = (id: string) => ({ adminUserId: id, adminName: id, accountId: `im_${id}`, allGames: true, gameIds: [] as string[] });
+test("manual takeover and transfers have no capacity SQL gate", async () => {
+  const staff = (id: string) => ({ adminUserId: id, adminName: id, accountId: `im_${id}`, allGames: true, gameIds: [] as string[], complaint: true });
   const calls: Array<{ sql: string; values: unknown[] }> = [];
   const client = { query: async (sql: string, values: unknown[] = []) => {
     calls.push({ sql, values });

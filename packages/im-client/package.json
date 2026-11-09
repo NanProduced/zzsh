@@ -7,6 +7,7 @@
     "./lifecycle": "./src/im-client-lifecycle.ts",
     "./nim-web-client": "./src/nim-web-client.ts",
     "./message-state": "./src/message-state.ts",
+    "./order-stage-card": "./src/order-stage-card.ts",
     "./aftersale": "./src/aftersale.ts"
   },
   "dependencies": {

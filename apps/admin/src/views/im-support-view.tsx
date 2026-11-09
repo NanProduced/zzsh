@@ -107,6 +107,8 @@ type UnifiedRow = {
   stateTone: "good" | "warn" | "neutral" | "attention" | "live" | "done" | "danger";
   /** 订单群的到期等次要事实，用 icon+短标签显示，不占时间列。 */
   meta?: string;
+  /** UNKNOWN 自动卡只提示核对，不表示已发送或未发送。 */
+  stageCardUnknown?: boolean;
   unreadCount: number;
   sortAt: number;
   time: string;
@@ -320,7 +322,20 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
   const [orderQueue, setOrderQueue] = useState<OrderTeamListItem[]>([]);
   const [orderQueueLoaded, setOrderQueueLoaded] = useState(false);
   const [orderSelection, setOrderSelection] = useState<string | null>(null);
+  const [orderQueueScope, setOrderQueueScope] = useState<string | null>(null);
+  const [orderNextCursor, setOrderNextCursor] = useState<string | null>(null);
+  const [orderLoadingMore, setOrderLoadingMore] = useState(false);
+  const [orderRefreshing, setOrderRefreshing] = useState(false);
+  const [orderQueueNotice, setOrderQueueNotice] = useState<string | undefined>();
+  const orderScopeRef = useRef(readClientKey);
+  const orderEpochRef = useRef(0);
+  const orderNextCursorRef = useRef<string | null>(null);
+  const orderPagesLoadedRef = useRef(1);
+  const orderLoadingMoreRef = useRef(false);
+  const orderRefreshInFlightRef = useRef(false);
+  orderScopeRef.current = readClientKey;
   const [groupPrefs, setGroupPrefs] = useState<OrderGroupPreferenceMap>(() => readOrderGroupPreferences(snapshot.adminUserId));
+  const [groupPrefsScope, setGroupPrefsScope] = useState(snapshot.adminUserId);
   const [unifiedOrderMenu, setUnifiedOrderMenu] = useState<{ x: number; y: number; orderId: string; preference: OrderGroupPreference; row: HTMLElement | null } | null>(null);
   const [unifiedQuery, setUnifiedQuery] = useState("");
   const [unifiedType, setUnifiedType] = useState<"ALL" | "SERVICE" | "COMPLAINT" | "ORDER">(initialUnifiedType);
@@ -333,6 +348,11 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
   const [quickReplyDrafts, setQuickReplyDrafts] = useState<QuickReplyItem[]>([]);
   const [quickReplyError, setQuickReplyError] = useState("");
   useEffect(() => { setQuickReplies(readSupportQuickReplies(snapshot.adminUserId)); }, [snapshot.adminUserId]);
+  useEffect(() => {
+    setGroupPrefs(readOrderGroupPreferences(snapshot.adminUserId));
+    setGroupPrefsScope(snapshot.adminUserId);
+    setUnifiedOrderMenu(null);
+  }, [snapshot.adminUserId]);
   // Below this width a third column leaves the chat unusable, so the case column
 // starts collapsed and the operator opens it deliberately.
   const [detailsOpen, setDetailsOpen] = useState(() => !(typeof window !== "undefined" && typeof window.matchMedia === "function" && window.matchMedia("(max-width:1439px)").matches));
@@ -540,6 +560,19 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
     readyOperatorRef.current = null;
     setQueue([]);
     setQueueLoaded(false);
+    setOrderQueue([]);
+    setOrderQueueLoaded(false);
+    setOrderQueueScope(null);
+    setOrderSelection(null);
+    setOrderNextCursor(null);
+    orderNextCursorRef.current = null;
+    orderPagesLoadedRef.current = 1;
+    orderLoadingMoreRef.current = false;
+    orderRefreshInFlightRef.current = false;
+    orderEpochRef.current += 1;
+    setOrderQueueNotice(undefined);
+    setOrderRefreshing(false);
+    setOrderLoadingMore(false);
     setMessages({});
     setDrafts({});
     setSelectedId(null);
@@ -702,29 +735,140 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
 
   // Unified inbox: order groups share the same left directory as consultations.
   useEffect(() => {
-    if (!canRead) return;
+    if (!canRead || snapshot.session.locked) return;
+    const scope = readClientKey;
     let cancelled = false;
     let loading = false;
-    const refreshOrders = () => {
-      if (cancelled || loading) return;
+    const refreshOrders = async () => {
+      if (cancelled || loading || orderLoadingMoreRef.current || orderRefreshInFlightRef.current) return;
       loading = true;
-      void adminRequest<{ items?: OrderTeamListItem[] }>("/orders/im-groups?limit=50")
-        .then((value) => { if (!cancelled) { setOrderQueue(Array.isArray(value.items) ? value.items : []); setOrderQueueLoaded(true); } })
-        .catch(() => undefined)
-        .finally(() => { loading = false; });
+      orderRefreshInFlightRef.current = true;
+      setOrderRefreshing(true);
+      const epoch = ++orderEpochRef.current;
+      const targetPages = Math.max(1, orderPagesLoadedRef.current);
+      const pages: OrderTeamListItem[] = [];
+      let cursor: string | null = null;
+      let next: string | null = null;
+      let fetched = 0;
+      try {
+        for (let page = 0; page < targetPages; page += 1) {
+          const pageResult: { items?: OrderTeamListItem[]; nextCursor?: string | null } = await adminRequest<{
+            items?: OrderTeamListItem[]; nextCursor?: string | null;
+          }>(`/orders/im-groups?limit=50${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`);
+          if (cancelled || orderScopeRef.current !== scope || orderEpochRef.current !== epoch) return;
+          const items = Array.isArray(pageResult.items) ? pageResult.items : [];
+          pages.push(...items);
+          fetched += 1;
+          next = typeof pageResult.nextCursor === "string" ? pageResult.nextCursor : null;
+          cursor = next;
+          if (!cursor) break;
+        }
+        const seen = new Set<string>();
+        const fresh = pages.filter((row) => { if (seen.has(row.id)) return false; seen.add(row.id); return true; });
+        setOrderQueue(fresh);
+        // A missing row implies removal only after the complete authorized directory was read.
+        if (!next) setOrderSelection((current) => current && !seen.has(current) ? null : current);
+        orderNextCursorRef.current = next;
+        setOrderNextCursor(next);
+        orderPagesLoadedRef.current = Math.max(1, fetched);
+        setOrderQueueScope(scope);
+        setOrderQueueLoaded(true);
+        setOrderQueueNotice(undefined);
+      } catch (error) {
+        if (cancelled || orderScopeRef.current !== scope || orderEpochRef.current !== epoch) return;
+        const status = httpStatus(error);
+        if (status === 401 || status === 403 || status === 423) {
+          setOrderQueue([]);
+          setOrderSelection(null);
+          orderNextCursorRef.current = null;
+          setOrderNextCursor(null);
+          orderPagesLoadedRef.current = 1;
+          setOrderQueueScope(scope);
+          setOrderQueueLoaded(true);
+          setOrderQueueNotice("订单群读取权限已变化，列表已隐藏。");
+        } else if (pages.length > 0) {
+          const seen = new Set<string>();
+          const fresh = pages.filter((row) => { if (seen.has(row.id)) return false; seen.add(row.id); return true; });
+          setOrderQueue(fresh);
+          orderNextCursorRef.current = cursor;
+          setOrderNextCursor(cursor);
+          orderPagesLoadedRef.current = targetPages;
+          setOrderQueueScope(scope);
+          setOrderQueueLoaded(true);
+          setOrderQueueNotice("部分订单群刷新失败，已显示最新读取页；稍后自动重试。");
+        } else {
+          setOrderQueueNotice("订单群列表刷新失败，当前显示上次成功结果，可能已过期；稍后自动重试。");
+        }
+      } finally {
+        if (orderScopeRef.current === scope && orderEpochRef.current === epoch) {
+          loading = false;
+          orderRefreshInFlightRef.current = false;
+          setOrderRefreshing(false);
+        }
+      }
     };
-    refreshOrders();
-    const timer = window.setInterval(refreshOrders, 15_000);
+    void refreshOrders();
+    const timer = window.setInterval(() => { void refreshOrders(); }, 15_000);
     return () => { cancelled = true; window.clearInterval(timer); };
-  }, [canRead]);
+  }, [canRead, readClientKey, snapshot.session.locked]);
+
+  const visibleOrderQueue = orderQueueScope === readClientKey ? orderQueue : [];
+  const orderQueueReady = orderQueueScope === readClientKey && orderQueueLoaded;
+  const visibleGroupPrefs = groupPrefsScope === snapshot.adminUserId ? groupPrefs : {};
+  const loadMoreOrders = useCallback(async () => {
+    const cursor = orderNextCursorRef.current;
+    if (!cursor || orderLoadingMoreRef.current || orderRefreshInFlightRef.current) return;
+    const scope = readClientKey;
+    const epoch = orderEpochRef.current;
+    orderLoadingMoreRef.current = true;
+    setOrderLoadingMore(true);
+    try {
+      const value = await adminRequest<{ items?: OrderTeamListItem[]; nextCursor?: string | null }>(
+        `/orders/im-groups?limit=50&cursor=${encodeURIComponent(cursor)}`,
+      );
+      if (orderScopeRef.current !== scope || orderEpochRef.current !== epoch) return;
+      const items = Array.isArray(value.items) ? value.items : [];
+      setOrderQueue((current) => {
+        const seen = new Set(current.map((row) => row.id));
+        return [...current, ...items.filter((row) => !seen.has(row.id))];
+      });
+      orderPagesLoadedRef.current += 1;
+      orderNextCursorRef.current = typeof value.nextCursor === "string" ? value.nextCursor : null;
+      setOrderNextCursor(orderNextCursorRef.current);
+      setOrderQueueScope(scope);
+      setOrderQueueLoaded(true);
+      setOrderQueueNotice(undefined);
+    } catch (error) {
+      if (orderScopeRef.current !== scope || orderEpochRef.current !== epoch) return;
+      const status = httpStatus(error);
+      if (status === 401 || status === 403 || status === 423) {
+        setOrderQueue([]);
+        setOrderSelection(null);
+        orderNextCursorRef.current = null;
+        setOrderNextCursor(null);
+        orderPagesLoadedRef.current = 1;
+        setOrderQueueNotice("订单群读取权限已变化，列表已隐藏。");
+      } else {
+        setOrderQueueNotice("加载更多订单群失败，已保留已加载页；请重试。");
+      }
+    } finally {
+      if (orderScopeRef.current === scope && orderEpochRef.current === epoch) {
+        orderLoadingMoreRef.current = false;
+        setOrderLoadingMore(false);
+      }
+    }
+  }, [readClientKey]);
   useEffect(() => {
     const onSync = (event: Event) => {
-      const detail = (event as CustomEvent<{ snapshot?: OrderGroupPreferenceMap }>).detail;
-      if (detail?.snapshot) setGroupPrefs(detail.snapshot);
+      const detail = (event as CustomEvent<{ snapshot?: OrderGroupPreferenceMap; adminUserId?: string }>).detail;
+      if (!detail?.snapshot) return;
+      if (detail.adminUserId !== undefined && detail.adminUserId !== snapshot.adminUserId) return;
+      setGroupPrefs(detail.snapshot);
+      setGroupPrefsScope(snapshot.adminUserId);
     };
     window.addEventListener(ORDER_GROUP_PREF_EVENT, onSync);
     return () => window.removeEventListener(ORDER_GROUP_PREF_EVENT, onSync);
-  }, []);
+  }, [snapshot.adminUserId]);
 
   const restoredSelectionRef = useRef(false);
   const restoreConsultation = () => {
@@ -738,7 +882,7 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
   };
   const restoreOrder = () => {
     if (!initialOrderId) return false;
-    const target = orderQueue.find((item) => item.id === initialOrderId);
+    const target = visibleOrderQueue.find((item) => item.id === initialOrderId);
     if (!target) return false;
     setSection("orders");
     setOrderSelection(target.id);
@@ -750,7 +894,7 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
     // 只恢复当前 section 的选中，等该 section 的目录首次加载完成再判断；
     // 否则先到的另一侧会把视图抢到错误的 section。
     if (initialSection === "orders") {
-      if (!orderQueueLoaded) return;
+      if (!orderQueueReady) return;
       if (restoreOrder()) return;
       restoredSelectionRef.current = true;
       return;
@@ -758,14 +902,14 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
     if (!queueLoaded) return;
     if (restoreConsultation()) return;
     restoredSelectionRef.current = true;
-  }, [initialConsultationId, initialSection, orderQueueLoaded, queueLoaded, queue]);
+  }, [initialConsultationId, initialSection, orderQueueReady, queueLoaded, queue]);
 
   // 内部切换 section 时也可以回到该 section 上次选中的会话；用户新点一条则不会被覆盖。
   useEffect(() => {
     if (!restoredSelectionRef.current) return;
     if (section === "orders" && !orderSelection && initialOrderId) restoreOrder();
     else if (section === "consultation" && !selectedId && initialConsultationId) restoreConsultation();
-  }, [section, orderSelection, selectedId, initialOrderId, initialConsultationId, orderQueue, queue]);
+  }, [section, orderSelection, selectedId, initialOrderId, initialConsultationId, visibleOrderQueue, queue]);
 
   useEffect(() => {
     if (!canPresence || readyOperatorRef.current !== readClientKey || connection !== "CONNECTED") return;
@@ -819,7 +963,7 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
   const selected = queue.find((item) => item.id === selectedId) ?? null;
   const selectedMessages = messages[selectedId ?? ""] ?? [];
   // 订单群未读按成员身份计数；只有该群聊真的在屏幕上时才清自己的未读。
-  const selectedOrderRow = orderSelection ? orderQueue.find((item) => item.id === orderSelection) ?? null : null;
+  const selectedOrderRow = orderSelection ? visibleOrderQueue.find((item) => item.id === orderSelection) ?? null : null;
   useEffect(() => {
     if (section !== "orders" || !selectedOrderRow || (selectedOrderRow.unreadCount ?? 0) <= 0) return;
     const narrow = typeof window !== "undefined" && typeof window.matchMedia === "function" && window.matchMedia("(max-width: 760px)").matches;
@@ -957,10 +1101,10 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
         unreadCount: row.unreadCount, sortAt: row.sortAt, time: row.time,
       }))
       .filter(matches);
-    const orders: UnifiedRow[] = (unifiedType === "ALL" || unifiedType === "ORDER" ? orderQueue : [])
-      .filter((row) => !groupPreferenceOf(groupPrefs, row.id).hidden)
+    const orders: UnifiedRow[] = (unifiedType === "ALL" || unifiedType === "ORDER" ? visibleOrderQueue : [])
+      .filter((row) => !groupPreferenceOf(visibleGroupPrefs, row.id).hidden)
       .map((row): UnifiedRow => {
-        const preference = groupPreferenceOf(groupPrefs, row.id);
+        const preference = groupPreferenceOf(visibleGroupPrefs, row.id);
         const state = stageLabelOf(row);
         // 没有消息的订单群用建群时间兜底，列表不留“—”这种无法排序的空时间。
         const sortAt = Date.parse(row.lastMessageAt ?? row.createdAt ?? "") || 0;
@@ -974,6 +1118,7 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
             ? supportMessageSummary(row.lastMessagePreview).trim()
             : row.lastMessageAt ? "有新消息" : "暂无消息",
           state, stateTone: orderStageTone(row),
+          stageCardUnknown: (row.stageCards?.unknown ?? 0) > 0 || row.stageCards?.attention?.state === "UNKNOWN",
           // 到期只对正在租用/待结束的订单有意义；已完成的历史群不再占用列表宽度。
           meta: row.dueAt && (row.stage === "RENTING" || row.stage === "ENDING") ? `到期 ${formatMonthDay(row.dueAt)}` : undefined,
           unreadCount: Math.max(0, row.unreadCount ?? 0),
@@ -987,22 +1132,24 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
     // 置顶优先，其余一律按最后一条消息倒序；咨询与订单群在同一条时间轴上。
     return [...consultations, ...orders].sort((a, b) =>
       Number(Boolean(b.pinned)) - Number(Boolean(a.pinned)) || b.sortAt - a.sortAt);
-  }, [displayQueue, groupPrefs, orderQueue, unifiedQuery, unifiedType]);
+  }, [displayQueue, visibleGroupPrefs, visibleOrderQueue, unifiedQuery, unifiedType]);
   const applyGroupPreference = (orderId: string, patch: Partial<OrderGroupPreference>) => {
-    const next = withGroupPreference(groupPrefs, orderId, patch);
+    const next = withGroupPreference(visibleGroupPrefs, orderId, patch);
     setGroupPrefs(next);
+    setGroupPrefsScope(snapshot.adminUserId);
     storeOrderGroupPreferences(snapshot.adminUserId, next);
-    window.dispatchEvent(new CustomEvent(ORDER_GROUP_PREF_EVENT, { detail: { orderId, patch } }));
+    window.dispatchEvent(new CustomEvent(ORDER_GROUP_PREF_EVENT, { detail: { orderId, patch, adminUserId: snapshot.adminUserId } }));
   };
-  const unifiedTotal = displayQueue.length + orderQueue.filter((row) => !groupPreferenceOf(groupPrefs, row.id).hidden).length;
-  const hiddenOrderCount = orderQueue.filter((row) => groupPreferenceOf(groupPrefs, row.id).hidden).length;
+  const unifiedTotal = displayQueue.length + visibleOrderQueue.filter((row) => !groupPreferenceOf(visibleGroupPrefs, row.id).hidden).length;
+  const hiddenOrderCount = visibleOrderQueue.filter((row) => groupPreferenceOf(visibleGroupPrefs, row.id).hidden).length;
   const restoreHiddenOrders = () => {
     const next: OrderGroupPreferenceMap = {};
-    for (const [orderId, preference] of Object.entries(groupPrefs)) next[orderId] = { ...preference, hidden: false };
+    for (const [orderId, preference] of Object.entries(visibleGroupPrefs)) next[orderId] = { ...preference, hidden: false };
     setGroupPrefs(next);
+    setGroupPrefsScope(snapshot.adminUserId);
     storeOrderGroupPreferences(snapshot.adminUserId, next);
-    for (const [orderId, preference] of Object.entries(groupPrefs)) {
-      if (preference.hidden) window.dispatchEvent(new CustomEvent(ORDER_GROUP_PREF_EVENT, { detail: { orderId, patch: { hidden: false } } }));
+    for (const [orderId, preference] of Object.entries(visibleGroupPrefs)) {
+      if (preference.hidden) window.dispatchEvent(new CustomEvent(ORDER_GROUP_PREF_EVENT, { detail: { orderId, patch: { hidden: false }, adminUserId: snapshot.adminUserId } }));
     }
   };
   const handleUnifiedOrderMenuAction = (action: MessageActionId) => {
@@ -2238,18 +2385,22 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
       {clientRef.current?.transport === "local-fake" ? <span className="im-wb-state im-wb-local">本地测试</span> : null}
     </nav>
     <div className="im-wb-unified">
-      <aside className="im-wb-unified-queue" aria-label="全部会话" onContextMenu={(event) => { const rowEl = (event.target as Element).closest(".im-wb-row") as HTMLElement | null; event.preventDefault(); if (!rowEl || rowEl.dataset.unifiedKind !== "order") { setUnifiedOrderMenu(null); return; } event.stopPropagation(); const orderId = rowEl.dataset.orderId; if (!orderId) return; setUnifiedOrderMenu({ x: event.clientX, y: event.clientY, orderId, preference: groupPreferenceOf(groupPrefs, orderId), row: rowEl }); }}>
+      <aside className="im-wb-unified-queue" aria-label="全部会话" onContextMenu={(event) => { const rowEl = (event.target as Element).closest(".im-wb-row") as HTMLElement | null; event.preventDefault(); if (!rowEl || rowEl.dataset.unifiedKind !== "order") { setUnifiedOrderMenu(null); return; } event.stopPropagation(); const orderId = rowEl.dataset.orderId; if (!orderId) return; setUnifiedOrderMenu({ x: event.clientX, y: event.clientY, orderId, preference: groupPreferenceOf(visibleGroupPrefs, orderId), row: rowEl }); }}>
         <div className="im-wb-unified-head"><strong>全部会话</strong><span>{unifiedRows.length < unifiedTotal ? `${unifiedRows.length} / ${unifiedTotal}` : unifiedTotal}</span></div>
         <label className="im-wb-search"><Search size={13} /><input value={unifiedQuery} onChange={(event) => setUnifiedQuery(event.target.value)} placeholder="搜索用户、订单号或内容" aria-label="搜索全部会话" /></label>
+        <p className="im-wb-filter-note">仅搜索已加载会话；更多订单群请使用“加载更多”。</p>
         <div className="im-wb-unified-types" role="group" aria-label="会话类型">
           {([["ALL", "全部"], ["SERVICE", "咨询"], ["COMPLAINT", "投诉"], ["ORDER", "订单群"]] as const).map(([value, label]) =>
             <button key={value} type="button" aria-pressed={unifiedType === value} onClick={() => { setUnifiedType(value); persistQuery({ type: value === "ALL" ? null : value }); }}>{label}</button>)}
         </div>
+        {orderQueueNotice && (unifiedType === "ALL" || unifiedType === "ORDER")
+          ? <p className="im-wb-order-notice" data-tone="warn" role="status" data-action="order-queue-notice">{orderQueueNotice}</p>
+          : null}
         <div className="im-wb-rows">
           {unifiedRows.length ? unifiedRows.map((row) => {
             const active = row.kind === "consultation" ? section === "consultation" && selectedId === row.id : section === "orders" && orderSelection === row.id;
             return <button type="button" key={`${row.kind}:${row.id}`} className="im-wb-row" data-unified-kind={row.kind} data-order-id={row.kind === "order" ? row.id : undefined} data-active={active} aria-current={active ? "page" : undefined}
-              onContextMenu={row.kind === "order" ? (event) => { event.preventDefault(); event.stopPropagation(); setUnifiedOrderMenu({ x: event.clientX, y: event.clientY, orderId: row.id, preference: groupPreferenceOf(groupPrefs, row.id), row: event.currentTarget }); } : undefined}
+              onContextMenu={row.kind === "order" ? (event) => { event.preventDefault(); event.stopPropagation(); setUnifiedOrderMenu({ x: event.clientX, y: event.clientY, orderId: row.id, preference: groupPreferenceOf(visibleGroupPrefs, row.id), row: event.currentTarget }); } : undefined}
               onClick={() => {
                 restoredSelectionRef.current = true;
                 if (row.kind === "consultation") {
@@ -2269,6 +2420,7 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
                 <span className="im-wb-row-top">
                   <b>{row.title}</b>
                   {row.tag ? <i className="im-wb-tag" data-tone={row.tone}>{row.tag}</i> : null}
+                  {row.stageCardUnknown ? <i className="im-wb-tag" data-tone="warn">自动卡待核对</i> : null}
                   {row.pinned ? <Pin size={11} className="im-wb-row-flag" aria-label="已置顶" /> : null}
                 </span>
                 <span className="im-wb-row-snip">
@@ -2287,6 +2439,10 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
               </span>
             </button>;
           }) : <div className="im-wb-list-empty"><strong>暂无会话</strong><span>新的咨询、投诉和订单群会出现在这里。</span></div>}
+          {orderNextCursor && (unifiedType === "ALL" || unifiedType === "ORDER")
+            ? <button type="button" className="im-wb-more" data-action="load-more-orders" disabled={orderLoadingMore || orderRefreshing}
+                onClick={() => void loadMoreOrders()}>{orderRefreshing ? "刷新中…" : orderLoadingMore ? "正在读取…" : "加载更多订单群"}</button>
+            : null}
           {hiddenOrderCount ? <button type="button" className="im-wb-more im-og-restore" onClick={restoreHiddenOrders}>已隐藏 {hiddenOrderCount} 个订单群 · 恢复显示</button> : null}
         </div>
       </aside>
@@ -2301,7 +2457,7 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
       <div className="im-wb-unified-detail">
         <div className="im-wb-pane" hidden={section !== "consultation"}>{consultationPane}</div>
         {canRead ? <div className="im-wb-pane im-wb-pane--orders" hidden={section !== "orders"}><OrderWorkbenchPane identity={readClientKey} adminUserId={snapshot.adminUserId} operatorName={operatorName}
-          client={clientRef.current} connection={connection} active={section === "orders"} sendAllowed={canAccept} selectedOrderId={orderSelection}
+          client={clientRef.current} connection={connection} active={section === "orders"} sendAllowed={canAccept} selectedOrderId={orderSelection} onSelectedOrderChange={setOrderSelection}
           canManualClose={snapshot.security.isBoss || snapshot.permissions.includes("order.settlement.write")} request={adminRequest} onAuthError={() => { void onRefresh(); }}
           onOpenProfile={profileScope.profile ? (id) => onOpenPath?.(`/users/${encodeURIComponent(id)}`, "用户资料") : undefined} onOpenPath={onOpenPath} /></div> : null}
       </div>

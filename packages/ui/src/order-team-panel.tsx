@@ -46,14 +46,15 @@ export type OrderTeamAccess={orderId:string;displayNo:string;orderStatus:string;
   orderEndedAt?:string|null;sendUntil?:string|null;assignmentState:string|null;teamState:string|null;
   appId?:string;teamId?:string;name?:string;gameName:string;account:{id:string;title:string};viewerAccountId?:string;botAccountId?:string|null;conversationId?:string;messageRoute?:MessageRouteGrant;canRead:boolean;canSend:boolean;members:Member[];supportEscalation:SupportEscalation;
   terms?:OrderTeamTerms;terminalSendAllowed?:boolean;serverNow?:string;
+  stageCards?:Array<{kind:string;kindLabel?:string;state:string;failureClass?:string|null;failureLabel?:string|null;updatedAt?:string|null}>;
   frozenInventory?:Array<{itemId:string;quantity:string;unit:string;pricingKind:string;name:string|null}>};
-type OrderItem={id:string;displayNo:string;title:string;status:string;stage?:OrderTeamFulfillmentStage;dueAt?:string|null;todo?:string|null;firstResponseOverdue?:boolean;teamState?:string|null;firstResponseAt?:string|null;remindDueAt?:string|null;lastMessageAt?:string|null;lastMessagePreview?:string|null;createdAt?:string|null;unreadCount?:number;addRound?:number;escalationState?:string;fulfillmentAssignment?:{state:string;teamState:string|null}|null};
+type OrderItem={id:string;displayNo:string;title:string;status:string;stage?:OrderTeamFulfillmentStage;dueAt?:string|null;todo?:string|null;firstResponseOverdue?:boolean;teamState?:string|null;firstResponseAt?:string|null;remindDueAt?:string|null;lastMessageAt?:string|null;lastMessagePreview?:string|null;createdAt?:string|null;unreadCount?:number;addRound?:number;escalationState?:string;stageCards?:{pending:number;failed:number;skipped:number;unknown?:number;attention?:{state?:string}|null};fulfillmentAssignment?:{state:string;teamState:string|null}|null};
 type OrderPage={items:OrderItem[];nextCursor:string|null};
 type ListRefresh={scope:string;targetPages:number;pagesRead:number;cursor:string|null|undefined;items:OrderItem[]};
 const REFRESH_PAGE_BUDGET=2;
 type Requester=<T>(path:string)=>Promise<T>;
 type FulfillmentSlotContext={orderId:string;displayNo:string;teamState:string|null;canSend:boolean;frozenInventory?:OrderTeamAccess["frozenInventory"]};
-type Props={identity:string;realm:"user"|"admin";client:NimWebClientLike|null;connection:NimWebConnectionState|"idle"|"error";active:boolean;visible?:boolean;polling?:boolean;selectedOrderId?:string;compact?:boolean;initialParty?:"renter"|"owner";sendAllowed?:boolean;layout?:"inline"|"aside";
+type Props={identity:string;realm:"user"|"admin";client:NimWebClientLike|null;connection:NimWebConnectionState|"idle"|"error";active:boolean;visible?:boolean;polling?:boolean;selectedOrderId?:string|null;controlledSelection?:boolean;compact?:boolean;initialParty?:"renter"|"owner";sendAllowed?:boolean;layout?:"inline"|"aside";
   request:Requester;onAuthError:(status:number)=>void;renderFulfillment?:(context:FulfillmentSlotContext)=>ReactNode;
   renderList?:(view:OrderTeamListView)=>ReactNode;renderAside?:(view:OrderTeamAsideView)=>ReactNode;renderConversation?:(view:OrderTeamConversationView)=>ReactNode;
   /** Group-level actions appended to the message menu (pin/mute/hide/settings). */
@@ -345,7 +346,7 @@ function OrderMessageImage({attachment}:{attachment:ImageAttachment}){
 }
 
 /** Both platforms pass their existing client. This component never logs in or creates a Team. */
-export function OrderTeamPanel({identity,realm,client,connection,active,visible=true,polling=true,selectedOrderId,compact=false,initialParty="renter",sendAllowed=true,layout="inline",request,onAuthError,renderFulfillment,renderList,renderAside,renderConversation,extraMenuItems,onExtraMenuAction,onConfirmOpening,onRequestAfterSales,onBlankContextMenu,onSelectedOrderChange,gridPane,gridDetailsOpen}:Props){
+export function OrderTeamPanel({identity,realm,client,connection,active,visible=true,polling=true,selectedOrderId,controlledSelection=false,compact=false,initialParty="renter",sendAllowed=true,layout="inline",request,onAuthError,renderFulfillment,renderList,renderAside,renderConversation,extraMenuItems,onExtraMenuAction,onConfirmOpening,onRequestAfterSales,onBlankContextMenu,onSelectedOrderChange,gridPane,gridDetailsOpen}:Props){
   const [party,setParty]=useState(initialParty),[items,setItems]=useState<OrderItem[]>([]),[next,setNext]=useState<string|null>(null);
   const [selected,setSelected]=useState<string|null>(null),[info,setInfo]=useState<OrderTeamAccess|null>(null),[error,setError]=useState("");
   // 「重新确认授权」只在真的失权（401/403/423）时才是恢复动作；正常列表不该常驻一个
@@ -638,7 +639,7 @@ export function OrderTeamPanel({identity,realm,client,connection,active,visible=
     void refresh();const timer=setInterval(()=>{void refresh();},5000);
     return()=>{cancelled=true;clearInterval(timer);accessSequence.current++;};
   },[identity,party,selected,active,revision,compact,polling]);
-  useEffect(()=>{if(selectedOrderId){accessSequence.current++;setInfo(null);setSelected(selectedOrderId);setError("");onSelectedOrderChange?.(selectedOrderId);}},[selectedOrderId]);
+  useEffect(()=>{if(controlledSelection||selectedOrderId){const next=selectedOrderId??null;accessSequence.current++;setInfo(null);setSelected(next);setError("");onSelectedOrderChange?.(next);}},[selectedOrderId,controlledSelection]);
   const choose=(id:string|null)=>{accessSequence.current++;setInfo(null);setSelected(id);setError("");onSelectedOrderChange?.(id);};
   const visibleItems=itemsScope.current===listScope?items:[],visibleNext=itemsScope.current===listScope?next:null;
   const orderHeader=info&&!renderConversation?<header className="order-team-head">
@@ -676,6 +677,7 @@ export function OrderTeamPanel({identity,realm,client,connection,active,visible=
     mediaDraft={mediaByOrder[draftKey]??null} isMediaSending={()=>mediaAttempts.current.has(draftKey)}
     stageMedia={stageMedia} removeMedia={removeMedia} beginPendingMedia={beginPendingMedia} settlePendingMedia={settlePendingMedia}
     setMediaFor={setMediaFor} render={renderConversation}/></>:<p role="status">聊天连接正在准备中，订单与付款状态不受影响。</p>;
+  if(controlledSelection&&(selectedOrderId??null)!==selected)return <section className="order-team-panel" hidden={!active} aria-label={realm==="admin"?"我参与的订单群":"我的订单群"}><p role="status">{selectedOrderId?"正在核对订单授权…":"选择订单查看群状态和沟通记录。"}</p></section>;
   return <section className="order-team-panel" data-compact={compact} hidden={!active} aria-label={realm==="admin"?"我参与的订单群":"我的订单群"} onContextMenu={onBlankContextMenu}>
     <header className="order-team-toolbar"><strong>{realm==="admin"?"我参与的订单群":"我的订单群"}</strong>{realm==="user"?<div className="order-team-role-switch" role="group" aria-label="订单身份"><button type="button" aria-pressed={party==="renter"} onClick={()=>{if(party==="renter")return;choose(null);setItems([]);setParty("renter");}}>租入</button><button type="button" aria-pressed={party==="owner"} onClick={()=>{if(party==="owner")return;choose(null);setItems([]);setParty("owner");}}>出租</button></div>:null}{/* 正常时这只是重新读取，不是让用户"重新授权"；只有真的 401/403/423 才换成授权语义。 */}<button type="button" data-action="refresh-order-panel" onClick={()=>setRevision(n=>n+1)}>{unauthorized?"重新确认授权":"刷新"}</button></header>
     {/* 已经选中某个订单（含从订单页直接跳进来）时，列表区不可用时不能把原因藏起来：

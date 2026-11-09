@@ -15,7 +15,6 @@ export const SUPPORT_PRESET_PERMISSIONS = [
   P.imSupportRead,
   P.imSupportAccept,
   P.imSupportTransfer,
-  P.imSupportComplaint,
   P.imSupportPresence,
   // 订单结算（含代确认开租）；服务端另校验会话、订单和游戏范围
   P.orderSettlementWrite,
@@ -65,6 +64,8 @@ export const OPS_PRESET_DISTRIBUTION_MANAGEMENT_ADDITIONS = [
 
 export const OPS_PRESET_PERMISSIONS = [
   ...SUPPORT_PRESET_PERMISSIONS,
+  // 投诉反馈独立线程；默认只授予运营，可由运营单独配置给指定客服。
+  P.imSupportComplaint,
   // 订单
   P.orderLegacyContinue,
   // 用户

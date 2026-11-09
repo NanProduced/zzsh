@@ -6,6 +6,12 @@
 
 开租与结算默认关闭。正式装配须显式设置 `ORDER_SETTLEMENT_RECORDING_ENABLED=true`，并由受信服务端注入已品牌化的收款资源 admission；仅有配置字符串或序列化对象不能授权。每次操作核对 admission 绑定的数据库与 runtime 身份，拒绝超级用户、bypass、数据库 owner/其成员以及业务表或函数 owner。历史订单结算不依赖新收款是否开放；装配本身不发送渠道请求。原受控测试入口仍要求 `ENABLE_TEST_OPERATIONS=true`、`ZZSH_SETTLEMENT_RECORDING=controlled`、非生产，并限定 `zzsh_test_order_*`/`zzsh_order_*_r`，不以正式准入替换或放宽该入口。
 
+付款被服务端接纳（`payment_confirmation.disposition=APPLIED`）时，同一事务从本单冻结报价生成唯一 `DRAFT` 开租清单，不等待客服点击或订单群创建；来源记录为 `SYSTEM`，不伪造管理员。重复通知、迟到付款和重放不会生成第二份清单。冻结资料不足时保留付款与订单事实，写入 `rental_opening_generation.state=REVIEW_REQUIRED` 和可恢复原因，订单页与客服工作台显示待核对，绝不补零或伪造数量。自动生成和失败记录均写失败时，订单级 `opening_generation_recovery_required` 兜底；读取侧还会对“已付款、无清单、无生成结论且有已接纳付款”的事实给出同一恢复入口，不依赖标记写入成功。订单群 READY 后仍由阶段卡 worker 发送开租确认卡；群或发卡失败不影响订单页确认。
+
+新平台的成功自动开租链是 v2 个性化确认订单（含 `personal` 资金/包赔依据）。v1 标准报价缺少该依据：生产环境在付款前以 `LEGACY_ORDER_FLOW_RETIRED` 拒绝新建订单；已存在的 v1 订单付款后只记录 `LEGACY_V1_QUOTE_REVIEW`，不生成清单，客服按未开租取消/退款或引导使用新版下单处理，不能把它宣传为自动开租订单。
+
+开租清单生成后等待双方确认；超时后现有 worker 补齐未确认方并记录 `AUTO`。等待分钟数由 Boss 在系统配置 `GET/PUT /api/v1/admin/system/opening-auto-confirm` 管理，初始 40，范围 1–10080；每份清单在 INSERT 时冻结配置修订号、分钟数和截止时间，改配置只影响之后的新清单，迁移也不重算历史 DRAFT。旧平台迁入且已有履约事实的订单不经过付款接纳入口，继续旧单续办。
+
 `ready: true` 只表示这一版结算单具备提交生效的条件，不是永久过账许可。最后一方确认正常结算时，或客服复核已确认的提前结算时，服务端在同一事务内重新核验当前订单、收款、开租、费用版本、intake、确认和所需批准，并写入唯一过账记录及平衡账务批次、号主可用余额和租客退款应付款，随后将订单置为 `COMPLETED`，归档本单稳定账号并记录冻结订单关联审计。归档或审计失败使整个生效事务失败；完单释放活跃占用不代表账号可再次出租。`postingAuthorized` 与 `feeDeducted` 只反映已记录的生效事实；相同幂等键和请求体重放原成功回执，不重复记账。
 
 新已付订单不能通过 `manual-close` 仅改取消状态。服务端保留PAID并返回409：未确认开租为 `PRESTART_REFUND_REQUIRED`，已确认开租为 `SETTLEMENT_REQUIRED`，分别读取现有客服取消或结算入口。不会代填原因、消耗和退款金额。历史已记录 `MANUAL_CLOSE` 仍保留原付款及回执，其 `fundsResolution=REVIEW_REQUIRED` 不是退款已完成；相关队列需核对原资金事实，不反向恢复PAID或篡改旧账。
@@ -22,7 +28,9 @@ Boss 可在系统配置中管理等待期，接口为 `GET/PUT /api/v1/admin/sys
 
 列表与详情的结算阶段共用服务端投影：付款但未确认开租是 `OPENING_PENDING`，不能显示成租赁中；当前版本任一方拒绝时是 `DECISION_REJECTED`，保留拒绝记录并等待重新处理，不显示“等待确认”。状态、下一步和金额各有独立事实；`POSTED` 表示本地结算生效，不表示退款或银行到账。
 
-- 客服 `POST .../openings` 提交期初数量。数量必须与已付款订单的冻结报价行一致，否则不保存。受权 `GET .../settlement` 返回每一版清单的数量、冻结报价上的单位和计价类型，以及报价/收款摘要。买卖双方凭读到的版本号 `POST .../openings/:openingId/confirm`。付款、建群、首响和消息不会开租。已确认清单不能覆盖。
+- `REVIEW_REQUIRED` 时客服可在本单权限、原付款绑定、幂等键和审计下调用 `POST .../opening-generation/retry` 重新核对；依据仍不足时保持待处理，不伪造清单，并提供未开租取消/退款兜底。依据恢复后只生成同一份清单，重复调用返回已有清单或同一待核对结果。
+- 新订单的开租清单由付款接纳事务自动生成，数量必须与冻结报价行一致；管理员 `POST .../openings` 只保留给迁移前已付款、没有自动生成结论的历史订单，已有清单时返回 `OPENING_ALREADY_RECORDED`。受权 `GET .../settlement` 返回每一版清单的数量、冻结报价上的单位和计价类型、自动确认截止时间及来源，以及报价/收款摘要。买卖双方凭读到的版本号 `POST .../openings/:openingId/confirm`。付款、建群、首响和消息不会自行开租。已确认清单不能覆盖。
+- 客服“发起开租确认”改为 `POST /api/v1/admin/orders/:orderId/progress-reminders`，请求键相同只复用一条提醒，并以提醒 ID 作为云信客户端消息 ID。服务端按真实阶段选择：待开租只提醒未确认方；已开租有待确认结算时提醒未决定方；无结算版本时提醒双方处理结算。提醒不创建/确认清单、不提交结算或退款；群未就绪、已过账或无待办时返回明确原因而不发消息。
 - `POST .../settlement-preview` 返回服务端明细和 `versionHash`。这个 hash 绑定当前结算版本、决定进展，以及最新 intake 的 `id`、单调 `versionNo`、状态和关联费用版；没有申请时绑定 `null`。因此同数量的新申请、`OPEN` 转为 `CLASSIFIED`/`SUPERSEDED` 或新申请替代旧申请都会使旧 hash 失效。`POST .../settlements` 必须带回刚读到的 hash。正常结算由服务端按消耗比例判定；发起方这次提交就是自己的确认，另一方 `POST .../settlements/:versionId/decision`。
 - 消耗低于 70% 时，当事人用预览返回的数量凭据提交开租后的剩余量。服务端记下发起人，不生成费用版本，也不写成任一方已经确认。客服 `POST .../settlements/classify` 指定 `TENANT_VOLUNTARY_EARLY` 或 `OWNER_OR_ACCOUNT_EARLY` 后才生成可展示的费用版本。双方确认之后，客服才能 `POST .../review`。
 - 有 `OPEN` intake 时，读取的 `currentRequest` 指向该申请，`settlement` 返回 `null`，`ready=false` 且包含 `SETTLEMENT_INTAKE_PENDING`；旧费用版和确认仍保留在 `versions`，但不是当前可过账依据。没有待处理申请时，`currentRequest` 指向当前结算版本。

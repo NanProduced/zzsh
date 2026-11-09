@@ -506,10 +506,10 @@ test(
       assert.equal(boundaryComplaint.consultation.conversationId, `${boundaryUserAccountId}|2|900002`);
       assert.equal(boundaryComplaint.consultation.messageScopeState, "READY");
       await migration.query(`UPDATE "zzsh_iam"."admin_security" SET "is_boss" = false WHERE "admin_user_id" = $1`, [adminId]);
-      // 投诉已并入普通咨询：旧 COMPLAINT 行只需要 read + accept，不再要求 im.support.complaint。
+      // 投诉使用独立线程，接待/读取/结束都需要 im.support.complaint。
       await migration.query(
         `INSERT INTO "zzsh_iam"."admin_user_permission" ("admin_user_id", "permission_code", "effect")
-         VALUES ($1, 'im.support.read', 'ALLOW'), ($1, 'im.support.accept', 'ALLOW')
+         VALUES ($1, 'im.support.read', 'ALLOW'), ($1, 'im.support.accept', 'ALLOW'), ($1, 'im.support.complaint', 'ALLOW')
          ON CONFLICT ("admin_user_id", "permission_code") DO UPDATE SET "effect" = EXCLUDED."effect"`,
         [adminId],
       );

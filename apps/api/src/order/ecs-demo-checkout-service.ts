@@ -9,6 +9,7 @@ import { readDistributionPolicyRowInTransaction } from "../finance/distribution-
 import { conflict, fingerprintRequest, invalid, notFound, withIdempotency } from "../supply/supply-util";
 import { confirmOrderPayment, createEcsDemoControlledPaymentSource, type PaymentInput } from "./payment-confirmation";
 import { acceptControlledPayment, readDemoPaymentRequestForAcceptance, type SyntheticRequestCapability } from "./channel-payment-store";
+import { automaticOpeningAcceptance } from "./settlement-record";
 
 type Actor = UserContext & { requestId: string };
 export type EcsDemoCheckoutOptions = Readonly<{ demo: DemoFinanceResource; appId: string; distribution: PaymentDistributionStore; capability?: SyntheticRequestCapability }>;
@@ -96,8 +97,9 @@ export async function confirmEcsDemoCheckout(pool: Pool, actor: Actor, orderId: 
         const request = options.capability ? await readDemoPaymentRequestForAcceptance(c, { orderId, capability: options.capability }) : null;
         if (options.capability && !request) throw conflict("请先选择支付方式并打开收银台");
         const fact = source(input);
-        const payment = request ? (await acceptControlledPayment(c, { fact, distribution: options.distribution, requestId: request })).payment
-          : await confirmOrderPayment(c, fact, options.distribution);
+        const payment = request
+          ? (await acceptControlledPayment(c, { fact, distribution: options.distribution, requestId: request, acceptance: automaticOpeningAcceptance })).payment
+          : await confirmOrderPayment(c, fact, options.distribution, automaticOpeningAcceptance);
         if (payment.disposition !== "APPLIED" || payment.reasonCode !== null) throw conflict("测试付款未完成，请查询原请求");
         await recordAudit(c, { actorType: "user", actorId: actor.userId, sessionId: actor.sessionId, requestId: actor.requestId,
           action: "ecs.demo.checkout.confirmed", objectType: "rental_order", objectId: orderId, outcome: "SUCCESS",

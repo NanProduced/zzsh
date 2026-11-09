@@ -778,3 +778,20 @@ test("automatic Team text forwards its stable id through the official message fi
   await api.sendSupportTeamText(input);await api.sendSupportTeamText(input);
   assert.deepEqual(bodies,[{message:{message_type:0,text:input.text,message_client_id:input.messageClientId}},{message:{message_type:0,text:input.text,message_client_id:input.messageClientId}}]);
 });
+
+test("automatic Team cards use a type-100 custom message with a minimal raw payload",async()=>{
+  const bodies:unknown[]=[];
+  const api=new YunxinServerApiClient({appKey:APP_KEY,appSecret:APP_SECRET,fetch:async(_url,init)=>{
+    bodies.push(JSON.parse(String(init?.body)));
+    return new Response(JSON.stringify({code:200,data:{message_server_id:"4301644928884146190",sender_id:"review_sender",conversation_type:2,message_type:100,create_time:1793447398308,receiver_id:"900001"}}),{status:200});
+  }});
+  const card={kind:"ORDER_OPENING" as const,orderId:"order_stage_1",cardId:"im_card_event_1"};
+  await api.sendSupportTeamCard({teamId:"900001",senderAccountId:"review_sender",card,text:"开租确认卡",messageClientId:"im_card_event_1"});
+  assert.equal(bodies.length,1);
+  const message=(bodies[0] as {message:Record<string,unknown>}).message;
+  assert.equal(message.message_type,100);
+  assert.equal(message.text,"开租确认卡");
+  assert.equal(message.message_client_id,"im_card_event_1");
+  assert.deepEqual(JSON.parse(String((message.attachment as {raw:string}).raw)),{schema:"zzsh.order-card",version:1,...card});
+  await assert.rejects(api.sendSupportTeamCard({teamId:"900001",senderAccountId:"review_sender",card:{...card,orderId:"../private"},text:"开租确认卡",messageClientId:"im_card_event_1"}));
+});

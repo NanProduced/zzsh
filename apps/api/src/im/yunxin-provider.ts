@@ -1,4 +1,5 @@
 import { createHash, randomBytes } from "node:crypto";
+import type { ImTransportCard } from "./im-contract";
 
 const DEFAULT_V1_ENDPOINT = "https://api.yunxinapi.com";
 const DEFAULT_V2_ENDPOINT = "https://open.yunxinapi.com";
@@ -164,6 +165,8 @@ export type YunxinSupportScopeApi = {
   readSupportTeamExistence(input: { appId: string; consultationId: string; ownerAccountId: string; teamId: string }): Promise<YunxinSupportTeamExistenceLookup>;
   /** Server-side text as the manager or an assigned agent; absent on local fakes that use the in-memory transport. */
   sendSupportTeamText?(input: { teamId: string; senderAccountId: string; text: string; messageClientId: string }): Promise<void>;
+  /** Platform order-stage card carried by a NIM custom message (type 100). */
+  sendSupportTeamCard?(input: { teamId: string; senderAccountId: string; card: ImTransportCard; text: string; messageClientId: string }): Promise<{ messageServerId: string; createTime: number }>;
 };
 
 export type YunxinCreateAccountInput = {
@@ -752,6 +755,41 @@ export class YunxinServerApiClient implements YunxinServerApi, YunxinSupportScop
       || (field(data, "receiver_id", "team_id") !== undefined && String(field(data, "receiver_id", "team_id")) !== team)) {
       throw new YunxinApiError("send-support-team-text", null, false);
     }
+  }
+
+  async sendSupportTeamCard(input: { teamId: string; senderAccountId: string; card: ImTransportCard; text: string; messageClientId: string }): Promise<{ messageServerId: string; createTime: number }> {
+    const team = normalizeTeamId(input.teamId);
+    const sender = normalizeAccountId(input.senderAccountId);
+    const kinds = ["ORDER_OPENING", "ORDER_ENDING", "ORDER_SETTLED", "ORDER_PRICE_CHANGE"];
+    const id = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+    const text = input.text.trim();
+    if (!kinds.includes(input.card.kind) || !id.test(input.card.orderId) || !id.test(input.card.cardId)
+      || !text || text.length > 5000 || !id.test(input.messageClientId)) {
+      throw new Error("Invalid support team card");
+    }
+    const raw = JSON.stringify({ schema: "zzsh.order-card", version: 1, kind: input.card.kind, orderId: input.card.orderId, cardId: input.card.cardId });
+    if (raw.length > 4096) throw new Error("Invalid support team card");
+    const conversationId = `${sender}|2|${team}`;
+    const data = responseData(await this.request("send-support-team-card", "POST",
+      `/im/v2/conversations/${encodeURIComponent(conversationId)}/messages`, {
+        message: {
+          message_type: 100,
+          text,
+          message_client_id: input.messageClientId,
+          attachment: { raw },
+        },
+      }, "", "v2"));
+    const returnedSender = asString(field(data, "sender_id"));
+    const conversationType = asNumber(field(data, "conversation_type"));
+    const messageType = asNumber(field(data, "message_type"));
+    const createTime = asNumber(field(data, "create_time"));
+    const messageServerId = messageIdFromUnknown(field(data, "message_server_id"));
+    if (!returnedSender || normalizeAccountId(returnedSender) !== sender || conversationType !== 2 || messageType !== 100
+      || createTime === undefined || !Number.isFinite(createTime) || !messageServerId
+      || (field(data, "receiver_id", "team_id") !== undefined && String(field(data, "receiver_id", "team_id")) !== team)) {
+      throw new YunxinApiError("send-support-team-card", null, false);
+    }
+    return { messageServerId, createTime };
   }
 
   async sendOrderTeamNotice(teamId: string, operatorAccountId: string, routeConfig?: YunxinMessageRouteConfig): Promise<void> {

@@ -150,10 +150,10 @@ export async function runDispatchAcceptance(t: TestContext, o: Parameters<typeof
       await pool.query(`UPDATE zzsh_iam.admin_security SET game_scope_mode='ALL_GAMES' WHERE admin_user_id=$1`,[a]);
       await pool.query(`INSERT INTO zzsh_supply.admin_supply_scope(admin_user_id,game_id,granted_by_admin_id) VALUES($1,$2,$1)`,[a,gameId]);
       await pool.query(`UPDATE zzsh_iam.admin_user_permission SET effect='DENY' WHERE admin_user_id=$1 AND permission_code='im.support.complaint'`,[a]);
-      // 投诉不再有专属权限门禁：缺少 im.support.complaint 仍按普通咨询分配。
+      // 投诉有独立权限门禁：缺少 im.support.complaint 时不进入候选。
       const complaint=await createOrResumeUserConsultation(options,await user(),"COMPLAINT",null,`req_${run}_denied_complaint`);
-      assert.equal(complaint.consultation.state,"ACTIVE");
-      assert.equal(complaint.consultation.assignedAdmin?.id,a);
+      assert.equal(complaint.consultation.state,"WAITING");
+      assert.equal(complaint.consultation.assignedAdmin,null);
       await pool.query(`UPDATE zzsh_iam.admin_user_permission SET effect='ALLOW' WHERE admin_user_id=$1 AND permission_code='im.support.complaint'`,[a]);
     });
 

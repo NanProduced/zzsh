@@ -3,7 +3,8 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { test } from "node:test";
 
-import { settledNoticeText, stageCardDeliveryBlock, stageCardWindowReason } from "../src/im/order-stage-cards";
+import { scanOrderStageCards, settledNoticeText, stageCardDeliveryBlock, stageCardWindowReason } from "../src/im/order-stage-cards";
+import { buildYunxinIdentityMarker, deriveYunxinAccountId } from "../src/im/identity-lifecycle";
 import {
   projectStageCardAttention, projectStageCardQueue, readStageCardFailures, readStageCardsByOrderIds, requeueStageCard,
 } from "../src/im/order-team-access";
@@ -124,12 +125,15 @@ test("the settlement notice names the Beijing posting time and never an amount",
 
 test("stage-card attention keeps an unknown failure code verbatim", () => {
   const base = { kind: "ORDER_SETTLED", state: "PENDING", attemptCount: "2", nextAttemptAt: POSTED, sentAt: null, updatedAt: POSTED };
-  const known = projectStageCardAttention({ ...base, failureClass: "SEND_FAILED" });
+  const known = projectStageCardAttention({ ...base, state: "UNKNOWN", failureClass: "SEND_FAILED" });
   assert.equal(known.kindLabel, "结算完成");
-  assert.equal(known.failureLabel, "通道发送失败（云信返回失败或超时）");
+  assert.equal(known.failureLabel, "发送结果未知（可能已发出，请先在群里核对）");
   assert.equal(known.attemptCount, 2);
-  assert.equal(known.retryable, true, "the worker keeps retrying a retryable code");
+  assert.equal(known.retryable, false, "an unknown send result is never retried by the worker");
   assert.equal(known.needsAttention, true);
+
+  const retryable = projectStageCardAttention({ ...base, failureClass: "IDENTITY_PENDING" });
+  assert.equal(retryable.retryable, true, "only a provably pre-send failure stays retryable");
 
   const unknown = projectStageCardAttention({ ...base, failureClass: "WEIRD_UPSTREAM_CODE" });
   assert.equal(unknown.failureClass, "WEIRD_UPSTREAM_CODE");
@@ -148,10 +152,10 @@ test("stage-card attention keeps an unknown failure code verbatim", () => {
 });
 
 test("the queue badge degrades to zeros when the roster predates stage cards", () => {
-  assert.deepEqual(projectStageCardQueue(undefined, undefined), { pending: 0, failed: 0, skipped: 0, attention: null });
+  assert.deepEqual(projectStageCardQueue(undefined, undefined), { pending: 0, failed: 0, skipped: 0, unknown: 0, attention: null });
   const card = { kind: "ORDER_ENDING", state: "SKIPPED", failureClass: "ORDER_CANCELLED", attemptCount: 1 };
-  assert.deepEqual(projectStageCardQueue(card, { pending: "0", failed: "1", skipped: "2" }), {
-    pending: 0, failed: 1, skipped: 2, attention: projectStageCardAttention(card),
+  assert.deepEqual(projectStageCardQueue(card, { pending: "0", failed: "1", skipped: "2", unknown: "3" }), {
+    pending: 0, failed: 1, skipped: 2, unknown: 3, attention: projectStageCardAttention(card),
   });
 });
 
@@ -187,7 +191,7 @@ test("the failure list pages by updated_at with a bounded App scope", async () =
     return { rows: [first, second] }; } };
   const page = await readStageCardFailures(client as never, { appId: "app_live", limit: 1 });
   assert.equal(page.items.length, 1);
-  assert.equal(page.items[0]!.failureLabel, "通道发送失败（云信返回失败或超时）");
+  assert.equal(page.items[0]!.failureLabel, "发送结果未知（可能已发出，请先在群里核对）");
   assert.match(seen[0]!.sql, /WHERE sc\.app_id=\$1 AND sc\.state<>'SENT'/);
   assert.deepEqual(seen[0]!.params, ["app_live", 2, null, null]);
   assert.equal(page.nextCursor, POSTED + "|im_card_b");
@@ -201,19 +205,149 @@ test("the failure list pages by updated_at with a bounded App scope", async () =
 });
 
 test("a human retry only requeues cards the worker still owns", async () => {
-  const script = (rowCount: number, state?: string) => ({ query: async (sql: string) => {
-    if (sql.startsWith("UPDATE") && sql.includes("failure_class IS NOT NULL")) return { rowCount };
+  const script = (rowCount: number, state?: string, failureClass: string | null = null) => ({ query: async (sql: string) => {
+    if (sql.startsWith("UPDATE") && sql.includes("failure_class IN")) return { rowCount };
     if (sql.startsWith("UPDATE")) return { rowCount: 0 };
-    return { rows: state ? [{ state }] : [] }; } });
+    return { rows: state ? [{ state, failureClass }] : [] }; } });
   const target = { appId: "app_live", orderId: "o1", kind: "ORDER_SETTLED" };
   assert.deepEqual(await requeueStageCard(script(1) as never, target), { requeued: true, outcome: "RETRY_SCHEDULED" });
   assert.deepEqual(await requeueStageCard(script(0, "SENT") as never, target), { requeued: false, outcome: "ALREADY_SENT" });
   assert.deepEqual(await requeueStageCard(script(0, "SKIPPED") as never, target), { requeued: false, outcome: "SKIPPED_TERMINAL" });
   assert.deepEqual(await requeueStageCard(script(0, "PENDING") as never, target), { requeued: false, outcome: "ALREADY_PENDING" });
+  assert.deepEqual(await requeueStageCard(script(0, "PENDING", "IDENTITY_PENDING") as never, target), { requeued: false, outcome: "ALREADY_PENDING" });
+  assert.deepEqual(await requeueStageCard(script(0, "PENDING", "SEND_FAILED") as never, target), { requeued: false, outcome: "UNSAFE_PENDING_REVIEW_REQUIRED" });
+  assert.deepEqual(await requeueStageCard(script(0, "SENDING") as never, target), { requeued: false, outcome: "SENDING_IN_PROGRESS" });
+  assert.deepEqual(await requeueStageCard(script(0, "UNKNOWN") as never, target), { requeued: false, outcome: "UNKNOWN_REVIEW_REQUIRED" });
   assert.deepEqual(await requeueStageCard(script(0) as never, target), { requeued: false, outcome: "NOT_FOUND" });
   const seen: string[] = [];
   await requeueStageCard({ query: async (sql: string) => { seen.push(sql); return { rowCount: 0, rows: [] }; } } as never, target);
   assert.match(seen[0]!, /WHERE app_id=\$1 AND order_id=\$2 AND kind=\$3/);
   assert.match(seen[0]!, /state='PENDING'/);
+  assert.match(seen[0]!, /failure_class IN \('IDENTITY_PENDING','TEXT_TRANSPORT_UNAVAILABLE'\)/);
   assert.doesNotMatch(seen[0]!, /state='SENT'/, "a sent card is never rewritten");
+  assert.equal(seen.filter((sql) => sql.includes("UPDATE")).length, 1, "no SENDING reclaim path survives");
+});
+
+const SCAN_APP = "app_scan";
+function scanRow(overrides: Record<string, unknown> = {}) {
+  const key = { provider: "yunxin" as const, appId: SCAN_APP, realm: "system" as const, kind: "SYSTEM" as const, platformSubjectId: "support-manager" };
+  return {
+    id: "im_card_1", order_id: "order_1", kind: "ORDER_OPENING", card_id: "im_card_1", attempt_count: 0,
+    team_id: "900001", order_status: "PAID", posted_at: null, has_activity: false,
+    system_account: deriveYunxinAccountId(key), system_status: "READY",
+    system_marker: buildYunxinIdentityMarker(key), system_subject: "support-manager",
+    ...overrides,
+  };
+}
+
+function scanFixture(options: { transportError?: unknown; failSentOnce?: boolean; identityPending?: boolean; unsafePending?: boolean } = {}) {
+  let state: "PENDING" | "SENDING" | "UNKNOWN" | "SENT" = "PENDING";
+  let finishFailed = false;
+  const writes: Array<{ sql: string; params: unknown[] }> = [];
+  const row = scanRow({
+    ...(options.identityPending ? { system_status: "PENDING" } : {}),
+    ...(options.unsafePending ? { failure_class: "SEND_FAILED" } : {}),
+  });
+  const safeFailure = (() => { const failureClass = (row as { failure_class?: string }).failure_class;
+    return failureClass == null || ["IDENTITY_PENDING", "TEXT_TRANSPORT_UNAVAILABLE"].includes(failureClass); })();
+  const pool = { query: async (sql: string, params: unknown[] = []) => {
+    writes.push({ sql, params });
+    if (sql.includes("WITH facts AS")) return { rows: [], rowCount: 0 };
+    if (sql.includes("failure_class = 'LEASE_EXPIRED'") && sql.includes("SET state = 'UNKNOWN'")) return { rows: [], rowCount: 0 };
+    if (sql.includes("state = 'PENDING'") && sql.includes("NOT (failure_class IS NULL OR failure_class IN")) {
+      if (safeFailure) return { rows: [], rowCount: 0 };
+      state = "UNKNOWN";
+      return { rows: [], rowCount: 1 };
+    }
+    if (sql.includes("WHERE sc.app_id = $1 AND sc.state = 'PENDING'")) {
+      const selected = state === "PENDING" && safeFailure;
+      return { rows: selected ? [row] : [], rowCount: selected ? 1 : 0 };
+    }
+    if (sql.includes("SET state = 'SENDING'")) {
+      if (state !== "PENDING") return { rows: [], rowCount: 0 };
+      state = "SENDING";
+      return { rows: [], rowCount: 1 };
+    }
+    if (sql.includes("SET state = 'PENDING'")) {
+      state = "PENDING";
+      return { rows: [], rowCount: 1 };
+    }
+    if (sql.includes("SET state = $3")) {
+      if (params[2] === "SENT") {
+        if (options.failSentOnce && !finishFailed) { finishFailed = true; throw new Error("synthetic SENT write failure"); }
+        state = "SENT";
+      }
+      return { rows: [], rowCount: 1 };
+    }
+    if (sql.includes("SET state = 'UNKNOWN'")) {
+      state = "UNKNOWN";
+      return { rows: [], rowCount: 1 };
+    }
+    throw new Error(`unexpected SQL ${sql}`);
+  } } as never;
+  const calls = { card: 0 };
+  const transport = { card: async () => {
+    calls.card += 1;
+    if ("transportError" in options) throw options.transportError;
+    return {} as never;
+  } };
+  return { pool, transport, calls, writes, state: () => state };
+}
+
+test("an ambiguous stage-card send is frozen as UNKNOWN and never called again", async () => {
+  const fixture = scanFixture({ transportError: Object.assign(new Error("timeout"), { code: "ETIMEDOUT" }) });
+  await scanOrderStageCards({ pool: fixture.pool, appId: SCAN_APP, transport: fixture.transport }, 10);
+  assert.equal(fixture.calls.card, 1);
+  assert.equal(fixture.state(), "UNKNOWN");
+  assert.ok(fixture.writes.some(({ sql, params }) => sql.includes("SET state = 'UNKNOWN'") && params[2] === "ETIMEDOUT"));
+  await scanOrderStageCards({ pool: fixture.pool, appId: SCAN_APP, transport: fixture.transport }, 10);
+  assert.equal(fixture.calls.card, 1, "the next worker tick does not resend an unknown result");
+});
+
+test("a successful card send with a failed SENT write is not resent", async () => {
+  const fixture = scanFixture({ failSentOnce: true });
+  await scanOrderStageCards({ pool: fixture.pool, appId: SCAN_APP, transport: fixture.transport }, 10);
+  assert.equal(fixture.calls.card, 1);
+  assert.equal(fixture.state(), "UNKNOWN");
+  assert.ok(fixture.writes.some(({ sql, params }) => sql.includes("SET state = 'UNKNOWN'") && params[2] === "SENT_RECORD_FAILED"));
+  await scanOrderStageCards({ pool: fixture.pool, appId: SCAN_APP, transport: fixture.transport }, 10);
+  assert.equal(fixture.calls.card, 1, "only the successful send is counted; nothing is replayed");
+});
+
+test("identity readiness is checked before the transport and stays retryable", async () => {
+  const fixture = scanFixture({ identityPending: true });
+  await scanOrderStageCards({ pool: fixture.pool, appId: SCAN_APP, transport: fixture.transport }, 10);
+  assert.equal(fixture.calls.card, 0, "no channel call happens for a pre-send identity failure");
+  assert.equal(fixture.state(), "PENDING");
+  assert.ok(fixture.writes.some(({ sql, params }) => sql.includes("SET state = 'PENDING'") && params[2] === "IDENTITY_PENDING"));
+});
+
+test("unsafe PENDING failures are frozen for review and never selected or claimed", async () => {
+  const unsafe = scanFixture({ unsafePending: true });
+  await scanOrderStageCards({ pool: unsafe.pool, appId: SCAN_APP, transport: unsafe.transport }, 10);
+  assert.equal(unsafe.calls.card, 0, "a dirty PENDING failure never reaches the channel");
+  assert.equal(unsafe.state(), "UNKNOWN", "the dirty failure is kept as reviewable state");
+  const cleanup = unsafe.writes.find(({ sql }) => sql.includes("state = 'PENDING'") && sql.includes("NOT (failure_class IS NULL OR failure_class IN"))!;
+  assert.doesNotMatch(cleanup.sql, /failure_class\s*=/, "the original failure reason is preserved");
+  const due = unsafe.writes.find(({ sql }) => sql.includes("WHERE sc.app_id = $1 AND sc.state = 'PENDING'"))!;
+  assert.match(due.sql, /\(sc\.failure_class IS NULL OR sc\.failure_class IN \('IDENTITY_PENDING','TEXT_TRANSPORT_UNAVAILABLE'\)\)/);
+
+  const safe = scanFixture();
+  await scanOrderStageCards({ pool: safe.pool, appId: SCAN_APP, transport: safe.transport }, 10);
+  const claim = safe.writes.find(({ sql }) => sql.includes("SET state = 'SENDING'"))!;
+  assert.match(claim.sql, /\(failure_class IS NULL OR failure_class IN \('IDENTITY_PENDING','TEXT_TRANSPORT_UNAVAILABLE'\)\)/,
+    "the claim repeats the safety predicate atomically");
+});
+
+test("0183 adds UNKNOWN, clears expired leases and freezes previously retryable failures", () => {
+  const sql = readFileSync(resolve("migrations/business/0183_order_stage_card_unknown.sql"), "utf8");
+  const normalized = sql.replace(/\s+/g, " ");
+  assert.match(normalized, /'PENDING', 'SENDING', 'SENT', 'SKIPPED', 'UNKNOWN'/);
+  assert.match(normalized, /SET "state" = 'UNKNOWN', "lease_until" = NULL, "lease_token_hash" = NULL, "failure_class" = 'LEASE_EXPIRED'/,
+    "the cleanup must satisfy the old SENDING lease shape");
+  assert.match(normalized, /WHERE "state" = 'SENDING' AND "lease_until" <= clock_timestamp\(\)/);
+  assert.match(normalized, /"failure_class" NOT IN \('IDENTITY_PENDING', 'TEXT_TRANSPORT_UNAVAILABLE'\)/);
+  const journal = JSON.parse(readFileSync(resolve("migrations/business/meta/_journal.json"), "utf8")) as { entries: Array<{ idx: number; tag: string }> };
+  assert.ok(journal.entries.some((entry) => entry.idx === 183 && entry.tag === "0183_order_stage_card_unknown"));
+  assert.ok(journal.entries.some((entry) => entry.idx === 182 && entry.tag === "0182_complaint_handover_role_status"));
 });

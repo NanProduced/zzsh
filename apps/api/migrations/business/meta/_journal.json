@@ -1254,6 +1254,41 @@
       "when": 1793730640499,
       "tag": "0178_order_compensation",
       "breakpoints": true
+    },
+    {
+      "idx": 179,
+      "version": "7",
+      "when": 1793730640500,
+      "tag": "0179_complaint_preset_permission",
+      "breakpoints": true
+    },
+    {
+      "idx": 180,
+      "version": "7",
+      "when": 1793730640501,
+      "tag": "0180_opening_auto_generation",
+      "breakpoints": true
+    },
+    {
+      "idx": 181,
+      "version": "7",
+      "when": 1793730640502,
+      "tag": "0181_complaint_active_handover",
+      "breakpoints": true
+    },
+    {
+      "idx": 182,
+      "version": "7",
+      "when": 1793730640503,
+      "tag": "0182_complaint_handover_role_status",
+      "breakpoints": true
+    },
+    {
+      "idx": 183,
+      "version": "7",
+      "when": 1793730640504,
+      "tag": "0183_order_stage_card_unknown",
+      "breakpoints": true
     }
   ]
 }

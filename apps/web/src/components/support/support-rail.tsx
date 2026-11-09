@@ -50,7 +50,7 @@ export function SupportRail(){
   useEffect(()=>{
     // 页面内的客服/投诉入口（帮助中心、403 页）复用同一条触发链：先过登录门，再开窗，
     // 关闭时焦点回到原触发钮。事件名与 support-dialog-request.ts 的 SUPPORT_OPEN_EVENT 一致。
-    // 投诉保留入口意图，服务端仍统一到SERVICE线程。
+    // 投诉保留独立入口意图，服务端使用 COMPLAINT 持久线程。
     // 不自动开窗——客服只有一个容器，就是本 rail 的弹窗，没有独立 /support 路由。
     // 这些入口自己带 data-support-trigger，onPointerDownOutside 的既有豁免才会放过它们，
     // 否则真实的按下-抬起-点击序列会被当成“点了弹窗外面”而立刻把窗口关掉。

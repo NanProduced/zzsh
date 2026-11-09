@@ -49,7 +49,7 @@ import {
 } from "./support-management";
 
 export type SupportType = "SERVICE" | "COMPLAINT";
-/** 用户进入咨询页的入口场景；仅用于欢迎语，线程 kind 仍归一 SERVICE。 */
+/** 用户进入咨询页的入口场景；决定欢迎语，并对应 SERVICE/COMPLAINT 两类持久线程。 */
 export type ConsultationEntryIntent = SupportType;
 export type ConsultationState = "WAITING" | "ACTIVE" | "CLOSED";
 export type SupportThreadState = "IDLE" | "WAITING" | "ACTIVE";
@@ -299,9 +299,8 @@ export function parseConsultationBody(value: unknown): { type: SupportType; entr
   const allowed = new Set(["type", "subjectRef"]);
   if (Object.keys(value).some((key) => !allowed.has(key))) throw invalid("Request body contains an unknown field");
   const entryIntent = parseSupportType(value.type);
-  // 投诉入口已并入普通咨询：旧客户端仍可传 COMPLAINT，新建请求只落到 SERVICE 线程；
-  // 原始入口意图只决定欢迎语文案，不改变线程 kind。
-  return { type: entryIntent === "COMPLAINT" ? "SERVICE" : entryIntent, entryIntent, subjectRef: parseSubjectRef(value.subjectRef) };
+  // 投诉与业务咨询各自保留持久线程；入口意图只决定欢迎语，不再改写线程 kind。
+  return { type: entryIntent, entryIntent, subjectRef: parseSubjectRef(value.subjectRef) };
 }
 
 export function parsePresenceBody(value: unknown): { availability: SupportAvailability; connectionState: SupportConnectionState; version?: number } {
@@ -644,14 +643,47 @@ async function wakeAutoAssign(options: ConsultationRouteOptions, limit = 5): Pro
   await autoAssignWaitingConsultations(options, limit).catch(() => undefined);
 }
 
-export function requireSupportAccess(access: EffectiveAdminAccess | null, _type: SupportType, action: "accept" | "transfer" = "accept"): void {
-  // 投诉已并入普通咨询：旧 COMPLAINT 行同样只要求接待权限，不再追加 im.support.complaint。
-  const required = action === "transfer"
+export function requireSupportAccess(
+  access: EffectiveAdminAccess | null,
+  type: SupportType,
+  action: "accept" | "transfer" = "accept",
+  objectGrant = false,
+): void {
+  const required: string[] = action === "transfer"
     ? [ADMIN_PERMISSION.imSupportAccept, ADMIN_PERMISSION.imSupportTransfer]
     : [ADMIN_PERMISSION.imSupportAccept];
+  if (type === "COMPLAINT" && !objectGrant) required.push(ADMIN_PERMISSION.imSupportComplaint);
   if (!required.every((permission) => hasPermission(access, permission))) {
     throw new SecurityApiError(403, "FORBIDDEN", "Permission required");
   }
+}
+
+const complaintObjectGrantSql = (consultationColumn: string, adminParameter: string) => `EXISTS (
+  SELECT 1 FROM "zzsh_iam"."im_complaint_handover_grant" h
+   WHERE h."consultation_id" = ${consultationColumn} AND h."admin_user_id" = ${adminParameter}
+     AND NOT EXISTS (SELECT 1 FROM "zzsh_iam"."admin_user_permission" d
+       WHERE d."admin_user_id" = ${adminParameter} AND d."permission_code" = 'im.support.complaint' AND d."effect" = 'DENY'))`;
+
+async function complaintHandoverGranted(client: PoolClient, consultationId: string, adminUserId: string): Promise<boolean> {
+  return ((await client.query(
+    `SELECT 1 WHERE ${complaintObjectGrantSql("$1", "$2")}`,
+    [consultationId, adminUserId],
+  )).rowCount ?? 0) === 1;
+}
+
+/** Object-level exception only for the exact pre-upgrade complaint assigned to this admin. */
+async function requireSupportAccessFor(
+  client: PoolClient,
+  access: EffectiveAdminAccess | null,
+  adminUserId: string,
+  row: { id: string; kind: SupportType; assignedAdminId: string | null },
+  action: "accept" | "transfer" = "accept",
+): Promise<void> {
+  const objectGrant = row.kind === "COMPLAINT"
+    && row.assignedAdminId === adminUserId
+    && !hasPermission(access, ADMIN_PERMISSION.imSupportComplaint)
+    && await complaintHandoverGranted(client, row.id, adminUserId);
+  requireSupportAccess(access, row.kind, action, objectGrant);
 }
 
 type Candidate = {
@@ -852,7 +884,7 @@ export async function markConsultationRead(
     if (row.state !== "ACTIVE" || row.assignedAdminId !== context.userId) {
       throw new SecurityApiError(403, "FORBIDDEN", "Consultation is not assigned to the current administrator");
     }
-    requireSupportAccess(access, row.kind);
+    await requireSupportAccessFor(client, access, context.userId, row);
     const updated = await client.query<{ adminReadAt: Date | string | null }>(
       `UPDATE "zzsh_iam"."im_consultation"
           SET "admin_read_at" = clock_timestamp(), "admin_unread_count" = 0
@@ -2026,7 +2058,7 @@ async function claimCloseReconciliation(
     if (!hasPermission(access, ADMIN_PERMISSION.imSupportTransfer)) throw new SecurityApiError(403, "FORBIDDEN", "Permission required");
     const row = await readConsultation(client, options.appId, consultationId, true);
     if (row.assignedAdminId !== context.userId) throw new SecurityApiError(403, "FORBIDDEN", "Consultation is not assigned to the current administrator");
-    requireSupportAccess(access, row.kind);
+    await requireSupportAccessFor(client, access, context.userId, row);
     const latest = (await client.query<{ id: string }>(
       `SELECT "id" FROM "zzsh_iam"."im_consultation_scope_operation"
          WHERE "app_id" = $1 AND "consultation_id" = $2 ORDER BY "created_at" DESC, "id" DESC LIMIT 1 FOR UPDATE`,
@@ -2447,6 +2479,14 @@ export async function readAdminMessageAccess(
     const access = await loadEffectiveAdminAccess(client, context.userId);
     const assigned = matching.assignedAdminId === context.userId;
     if(!hasPermission(access,ADMIN_PERMISSION.imSupportRead)&&!hasPermission(access,ADMIN_PERMISSION.imSupportManagementRead))throw new SecurityApiError(403,"FORBIDDEN","Permission required");
+    // Complaint threads require the separate grant for reads too; the object-level
+    // 0181 handover grant only covers the exact pre-upgrade assigned conversation.
+    const complaintObjectGrant = matching.kind === "COMPLAINT" && assigned
+      && !hasPermission(access, ADMIN_PERMISSION.imSupportComplaint)
+      && await complaintHandoverGranted(client, matching.id, context.userId);
+    if (matching.kind === "COMPLAINT" && !hasPermission(access, ADMIN_PERMISSION.imSupportComplaint) && !complaintObjectGrant) {
+      throw new SecurityApiError(403, "FORBIDDEN", "Permission required");
+    }
     if (assigned) {
       if (matching.peerAccountId !== viewerAccountId) throw new SecurityApiError(403, "FORBIDDEN", "Consultation is not authorized");
       // One responsible agent per round: only the ACTIVE assignee may send.
@@ -2471,7 +2511,7 @@ export async function readAdminMessageAccess(
     // History remains readable under the directory/read contract; every send
     // rechecks the current type-specific reception grant in this transaction.
     if (requireSendPermission) {
-      requireSupportAccess(access, matching.kind);
+      await requireSupportAccessFor(client, access, context.userId, matching);
       if (intent && matching.threadId) await storeImSendIntent(client,{...intent,appId:options.appId,threadId:matching.threadId,roundId:matching.id,conversationId,accountId:viewerAccountId,actorId:context.userId,realm:"admin"},{...context,realm:"admin"});
     }
     return { viewerAccountId, peerAccountId: matching.userAccountId };
@@ -2613,8 +2653,9 @@ export async function listAdminConsultations(
     const access = await loadEffectiveAdminAccess(client, context.userId);
     const accountId = await readyAccount(client, identityKey(options.appId, "admin", "ADMIN", context.userId));
     const serviceQueue = hasPermission(access, ADMIN_PERMISSION.imSupportAccept);
+    const canComplaint = hasPermission(access, ADMIN_PERMISSION.imSupportComplaint);
     const adminThreadRead = Boolean(access?.isBoss || hasPermission(access, ADMIN_PERMISSION.imSupportManagementRead));
-    // 旧 COMPLAINT 行按普通会话进入同一队列；不再按 kind 或 im.support.complaint 分流。
+    // SERVICE/COMPLAINT 各自成线程；没有投诉权限的客服不看投诉队列。
     // 用户还没说话的 WAITING 空会话不进队列；每个线程只保留一行：优先有用户消息的开放轮，
     // 其次本人处理过的最近已结束轮，保证轮次结束后仍能从同一会话打开历史。
     const rows = (await client.query<ConsultationRow>(
@@ -2623,6 +2664,7 @@ export async function listAdminConsultations(
           AND c."id" = (
             SELECT c2."id" FROM "zzsh_iam"."im_consultation" c2
              WHERE c2."app_id" = c."app_id" AND c2."thread_id" = c."thread_id"
+               AND (c2."kind" <> 'COMPLAINT' OR $5::boolean OR ${complaintObjectGrantSql('c2."id"', "$2")})
                AND (c2."assigned_admin_id" = $2
                  OR (c2."assigned_admin_id" IS NULL AND $3::boolean AND c2."state" = 'WAITING'))
                AND (c2."state" <> 'CLOSED' OR NOT EXISTS (
@@ -2634,12 +2676,13 @@ export async function listAdminConsultations(
                       c2."created_at" DESC, c2."id" DESC
              LIMIT 1
           )
+          AND (c."kind" <> 'COMPLAINT' OR $5::boolean OR ${complaintObjectGrantSql('c."id"', "$2")})
           AND (c."assigned_admin_id" = $2
             OR (c."assigned_admin_id" IS NULL AND $3::boolean AND c."state" = 'WAITING'))
           AND NOT (c."state" = 'WAITING' AND c."assigned_admin_id" IS NULL AND c."first_user_message_at" IS NULL)
         ORDER BY CASE WHEN c."assigned_admin_id" = $2 THEN 0 ELSE 1 END, c."updated_at", c."id"
         LIMIT $4`,
-      [options.appId, context.userId, serviceQueue, limit],
+      [options.appId, context.userId, serviceQueue, limit, canComplaint],
     )).rows;
     return { consultations: rows.map((row) => ({ ...toView(row, accountId, true, context.userId, adminThreadRead), botAccountId: supportBotAccountId(options) })) };
   });
@@ -2850,7 +2893,7 @@ async function beginClaimMembership(options: ConsultationRouteOptions, context: 
     const currentAccess = await loadEffectiveAdminAccess(client, context.userId);
     if (!hasPermission(currentAccess, ADMIN_PERMISSION.imSupportRead)) throw new SecurityApiError(403, "FORBIDDEN", "Permission required");
     const row = await readConsultation(client, options.appId, consultationId);
-    requireSupportAccess(currentAccess, row.kind);
+    await requireSupportAccessFor(client, currentAccess, context.userId, row);
     if(aftersaleId){
       const record=(await client.query<{requester_user_id:string;handler_admin_id:string|null}>(`SELECT requester_user_id,handler_admin_id FROM zzsh_iam.im_aftersale_record WHERE app_id=$1 AND id=$2 AND state='PENDING' FOR UPDATE`,[options.appId,aftersaleId])).rows[0];
       if(!record||row.kind!=="SERVICE"||record.requester_user_id!==row.userId||record.handler_admin_id!==context.userId)throw new SecurityApiError(403,"FORBIDDEN","Aftersale contact is not assigned to this agent");
@@ -3088,7 +3131,7 @@ async function beginTransfer(
     if (kind === "TAKEOVER") {
       if (takeoverDecision(row, context.userId) === "NOOP") return { alreadyAssigned: true } as const;
     } else {
-      requireSupportAccess(currentAccess, row.kind, "transfer");
+      await requireSupportAccessFor(client, currentAccess, context.userId, row, "transfer");
       if (row.state !== "ACTIVE" || row.assignedAdminId !== context.userId) throw new SecurityApiError(403, "FORBIDDEN", "Consultation is not assigned to the current administrator");
       if (targetAdminId === context.userId) throw invalid("Target administrator must be different");
     }
@@ -3207,14 +3250,14 @@ export async function listTransferTargets(
     const access = await loadEffectiveAdminAccess(client, context.userId);
     if (!hasPermission(access, ADMIN_PERMISSION.imSupportRead)) throw new SecurityApiError(403, "FORBIDDEN", "Permission required");
     const row = await readConsultation(client, options.appId, consultationId);
-    requireSupportAccess(access, row.kind, "transfer");
+    await requireSupportAccessFor(client, access, context.userId, row, "transfer");
     if (row.state !== "ACTIVE" || row.assignedAdminId !== context.userId) {
       throw new SecurityApiError(403, "FORBIDDEN", "Consultation is not assigned to the current administrator");
     }
     if (row.messageScopeState !== "READY" || !row.messageScopeId) return { targets: [], transferReady: false };
     const candidates = await readEligibleSupport(client, options.appId, locked);
     const targets = candidates
-      .filter((candidate) => candidate.adminUserId !== context.userId)
+      .filter((candidate) => candidate.adminUserId !== context.userId && (row.kind !== "COMPLAINT" || candidate.complaint))
       .map((candidate) => ({ adminUserId: candidate.adminUserId, displayName: candidate.adminName }));
     return { targets, transferReady: true };
   });
@@ -3231,7 +3274,7 @@ async function beginClose(options: ConsultationRouteOptions, context: AdminConte
     if (!hasPermission(access, ADMIN_PERMISSION.imSupportRead)) throw new SecurityApiError(403, "FORBIDDEN", "Permission required");
     const row = await readConsultation(client, options.appId, consultationId, true);
     if (row.state !== "ACTIVE" || row.assignedAdminId !== context.userId) throw new SecurityApiError(403, "FORBIDDEN", "Consultation is not assigned to the current administrator");
-    requireSupportAccess(access, row.kind);
+    await requireSupportAccessFor(client, access, context.userId, row);
     if (!row.threadId) throw conflict("Consultation has no support thread");
     const latestOperation = (await client.query<{ id: string; operationType: MessageScopeOperationType; state: MessageScopeOperationState }>(
       `SELECT "id", "operation_type" AS "operationType", "state" FROM "zzsh_iam"."im_consultation_scope_operation"
@@ -3294,7 +3337,7 @@ async function completeLocalClose(options: ConsultationRouteOptions, context: Ad
     const row = await readConsultation(client, options.appId, consultationId, true);
     const access = await loadEffectiveAdminAccess(client, context.userId);
     if (!hasPermission(access, ADMIN_PERMISSION.imSupportRead)) throw new SecurityApiError(403, "FORBIDDEN", "Permission required");
-    requireSupportAccess(access, row.kind);
+    await requireSupportAccessFor(client, access, context.userId, row);
     if (row.state !== "ACTIVE" || row.assignedAdminId !== context.userId) throw conflict("Consultation changed during close");
     if (row.messageScopeId) throw conflict("IM message scope requires remote close");
     // No Team ever existed: close the business object without claiming remote revocation.
@@ -3425,7 +3468,7 @@ async function retryOwnClaimOperation(
     const detail = await readScopeOperation(client, options.appId, operation.id, true);
     if (detail.operationType !== "ADD_MEMBER" || detail.targetAdminId !== context.userId) return null;
     if (detail.state !== "FAILED" && detail.state !== "NEEDS_REVIEW") return null;
-    requireSupportAccess(access, row.kind);
+    await requireSupportAccessFor(client, access, context.userId, row);
     if (row.messageScopeState !== "READY" || row.messageScopeId !== detail.providerTeamId) {
       throw conflict("IM claim scope changed during recovery");
     }
@@ -3598,13 +3641,16 @@ async function readAuthorizedAdminConsultation(
   const access = await loadEffectiveAdminAccess(client, context.userId);
   if (!hasPermission(access, ADMIN_PERMISSION.imSupportRead)) throw new SecurityApiError(403, "FORBIDDEN", "Permission required");
   const serviceQueue = hasPermission(access, ADMIN_PERMISSION.imSupportAccept);
+  const canComplaint = hasPermission(access, ADMIN_PERMISSION.imSupportComplaint);
   const result = await client.query<ConsultationRow>(
     `${CONSULTATION_SELECT}
-      WHERE c."app_id" = $1 AND c."id" = $2 AND c."state" <> 'CLOSED' AND (
-        c."assigned_admin_id" = $3
-        OR (c."assigned_admin_id" IS NULL AND $4::boolean)
-      )`,
-    [appId, consultationId, context.userId, serviceQueue],
+      WHERE c."app_id" = $1 AND c."id" = $2 AND c."state" <> 'CLOSED'
+        AND (c."kind" <> 'COMPLAINT' OR $5::boolean OR ${complaintObjectGrantSql('c."id"', "$3")})
+        AND (
+          c."assigned_admin_id" = $3
+          OR (c."assigned_admin_id" IS NULL AND $4::boolean)
+        )`,
+    [appId, consultationId, context.userId, serviceQueue, canComplaint],
   );
   const row = result.rows[0];
   // Identical rejection for "does not exist", "other app", "closed" and "not yours":

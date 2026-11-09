@@ -11,6 +11,7 @@ import { exchangeJoinpayCollection } from "./joinpay-collection-transport";
 import { captureJoinpayCollectionEvidence, readFormalJoinpayPaymentFact, readFormalCollectionRequest, type FormalCollectionSourceOptions } from "./joinpay-collection-source";
 import { createNativePaymentDistributionAdmission, createNativePaymentDistributionStore } from "../finance/distribution-payment-store";
 import { confirmOrderPayment } from "./payment-confirmation";
+import { automaticOpeningAcceptance } from "./settlement-record";
 
 const collectionLeaseConflict = Symbol("collection lease conflict");
 // 本地自动恢复预算；耗尽仍保留未知，不据此认定渠道失败或换号付款。
@@ -311,7 +312,10 @@ export async function acceptJoinpayCollectionEvidence(pool: Pool, options: Forma
     await client.query("SET CONSTRAINTS zzsh_order.payment_channel_transaction_native_order_id_fkey DEFERRED");
     const anchor = await bindFormalJoinpayTransaction(client, fact);
     let payment: Awaited<ReturnType<typeof confirmOrderPayment>> | null = null;
-    if (anchor.binding !== "OWNED_ELSEWHERE") payment = await confirmOrderPayment(client, fact, createNativePaymentDistributionStore(options.admission));
+    if (anchor.binding !== "OWNED_ELSEWHERE") payment = await confirmOrderPayment(
+      client, fact, createNativePaymentDistributionStore(options.admission),
+      options.autoOpening ? automaticOpeningAcceptance : undefined,
+    );
     else await recordAudit(client, { actorType: "system", action: "order.payment.collection.transaction.conflict", objectType: "payment_request",
       objectId: fact.paymentRequestId, requestId: commandId, outcome: "FAILURE", reason: "TRANSACTION_OWNED_ELSEWHERE", details: { evidenceId: fact.evidenceId, anchorId: anchor.anchorId } });
     const next = payment?.disposition === "APPLIED" ? "ACCEPTED" : "REVIEW_REQUIRED";

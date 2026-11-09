@@ -456,7 +456,21 @@ function Detail({snapshot,id,onOpenPath,refreshNonce,financeOrigin,financeReturn
   {refundSummary?.abnormalResponsibilities?.length?<section className="oc-section"><h2>异常付款及退款责任</h2><AbnormalRefundBlock summary={refundSummary}/></section>:null}
   {o.source.origin==='LEGACY'&&funds.state==='ready'&&funds.legacyObservations?.length&&(!funds.evidence?.business||distribution.state!=='ready'&&funds.legacyObservations.some(row=>row.kind==='DISTRIBUTION'))?<section className="oc-section"><h2>{funds.evidence?.business?'旧分销记录':'旧资金原记录'}</h2><LegacyOrderFinanceObservations rows={funds.evidence?.business?funds.legacyObservations.filter(row=>row.kind==='DISTRIBUTION'):funds.legacyObservations} onOpen={openFundsDocument}/></section>:null}
   {o.source.origin==='NATIVE'?<AdminNativeRefundPanel orderId={o.id} canWrite={snapshot.security.isBoss||snapshot.permissions.includes("order.settlement.write")} basis={normalRefundBasis(funds.state,funds.evidence,false)} binding={{adminUserId:snapshot.adminUserId,sessionId:snapshot.session.id}} onAttentionChange={setNativeAttention} actionsTarget={actionsTarget}/>:null}
-  {o.source.origin==='NATIVE'&&(snapshot.security.isBoss||snapshot.permissions.includes('order.settlement.write'))?<details className="oc-section oc-exception" open={originalAttention||undefined}><summary>异常原款退款依据</summary><AdminOriginalRefundPanel orderId={o.id} basis="REVIEW_CONFIRMATION" canWrite binding={{adminUserId:snapshot.adminUserId,sessionId:snapshot.session.id}} onAttentionChange={setOriginalAttention} actionsTarget={actionsTarget}/></details>:null}
+  {o.source.origin==='NATIVE'&&(snapshot.security.isBoss||snapshot.permissions.includes('order.settlement.write'))
+    ? (() => {
+      // The panel stays mounted so a sessionStorage recovery request can raise attention;
+      // it is only visible with abnormal evidence, a review-required payment or that request.
+      const showAbnormalRefund = Boolean(originalAttention || refundSummary?.abnormalResponsibilities?.length || paymentSummary?.acceptance?.state === 'REVIEW_REQUIRED');
+      return <>
+        <div className={showAbnormalRefund ? undefined : 'hidden'} aria-hidden={!showAbnormalRefund}>
+          <details className="oc-section oc-exception" open={originalAttention||undefined}><summary>异常原款退款依据</summary><AdminOriginalRefundPanel orderId={o.id} basis="REVIEW_CONFIRMATION" canWrite binding={{adminUserId:snapshot.adminUserId,sessionId:snapshot.session.id}} onAttentionChange={setOriginalAttention} actionsTarget={actionsTarget}/></details>
+        </div>
+        {!showAbnormalRefund&&(refundSummary===undefined||paymentSummary===undefined)
+          ? <section className="oc-section"><h2>异常原款退款依据</h2><p className="oc-fact-note">付款与退款依据尚未读取完成；在取得异常依据前，不能据此认定本单没有异常原款。</p></section>
+          : null}
+      </>;
+    })()
+    : null}
   <section className="oc-section"><h2>{o.source.origin==='LEGACY'?'渠道记录':'汇聚渠道证据'}</h2>
     {o.source.origin==='LEGACY'?<p className="oc-fact-note">旧渠道依据尚未接入。</p>:snapshot.permissions.includes('finance.read') && (snapshot.security.isBoss || snapshot.permissions.includes('order.read')) ? <Button size="sm" variant="outline" onClick={()=>{
       const source = '/orders/' + encodeURIComponent(o.id) + '?section=finance';

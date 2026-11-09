@@ -42,7 +42,7 @@ test("server opening and renting stages stay distinct, while rejection stays exp
   assert.equal(display.orderSettlementStageLabel({ stage: { code: "DECISION_REJECTED", label: "结算方案未达成一致" } }), "结算方案未达成一致");
   assert.match(display.orderFulfillmentSummary({ stage: "ENDING" }, { ending: "REJECTED" }), /本版已拒绝/);
   const opening = { stage: "OPENING_CONFIRM", openingState: "NONE", openingAcks: { renter: false, owner: false } };
-  assert.equal(display.orderFulfillmentSummary(opening), "账号与开租确认 · 待客服录入开租清单");
+  assert.equal(display.orderFulfillmentSummary(opening), "账号与开租确认 · 待生成或核对开租清单");
   assert.equal(display.orderFulfillmentSummary({ ...opening, openingState: "DRAFT" }), "账号与开租确认 · 租客未记录 · 号主未记录");
   assert.equal(display.orderFulfillmentSummary({ ...opening, openingState: "PARTIAL", openingAcks: { renter: true, owner: false } }), "账号与开租确认 · 租客确认已记录 · 号主未记录");
 });

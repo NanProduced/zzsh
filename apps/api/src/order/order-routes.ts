@@ -10,8 +10,12 @@ import type { OrderImSdkRouteBindings } from "../config/config";
 import type { ImMessageTransport } from "../im/im-contract";
 import type { YunxinOrderTeamApi } from "../im/yunxin-provider";
 import { assertOrderTeamInviteAccess, inviteOrderTeamAdmin, listOrderTeamInviteTargets } from "../im/order-team-invite";
-import { assertManualCloseAccess, manualCloseOrder } from "./manual-close";
-import { listJoinedOrderTeams } from "../im/order-team-access";
+import { assertManualCloseAccess, assertSupportOrderAccess, manualCloseOrder } from "./manual-close";
+import { recordAutomaticOpening } from "./settlement-record";
+import {
+  isOpeningReminderRequestKey, markOpeningProgressReminder, prepareOpeningProgressReminder, reminderDeliveryDisposition, reminderFailureClass,
+} from "./opening-progress-reminder";
+import { listJoinedOrderTeams, recordOrderGroupMessage } from "../im/order-team-access";
 import { assertLegacyOrderTeamRequest, requestLegacyOrderTeam, listJoinedLegacyOrderTeams, readAnyOrderTeamAccess as readOrderTeamAccess } from "../im/legacy-order-team";
 import { parseRfc3339Timestamp } from "../content/content";
 import { queryAdminReadOrders, getAdminReadOrder, parseOrderOrigin, readAdminOrderSchedule, type OrderReadFilters } from "./admin-order-read";
@@ -22,7 +26,7 @@ import { readAdminContext, assertAdminContextInTransaction, type AuthSecurityOpt
 import { readUserContext } from "../auth/user-identity";
 import { readPersonalNativeRefunds } from "../finance/personal-refund-read";
 import { readOwnerRefundMinimalSummary } from "../finance/owner-refund-summary-read";
-import { withTransaction, SecurityApiError } from "../auth/security-core";
+import { recordAudit, withTransaction, SecurityApiError } from "../auth/security-core";
 import { ensureApiV1RequestId, API_V1_ERROR_CODES } from "../contracts/api-v1";
 import { humanText } from "../supply/content-hash";
 import { unknownSupplyGate, type SupplyGateReader } from "../supply/publishing";
@@ -33,6 +37,7 @@ import {
   assertGameScope,
   bodyOf,
   ensureOnlyFields,
+  headerValue,
   invalid,
   notFound,
   optionalTrimmedString,
@@ -90,6 +95,8 @@ export type OrderRuntimeOptions = AuthSecurityOptions & {
   settlementRecordingEnabled?: boolean;
   /** Local/test system text seam; a production NIM implementation remains later work. */
   systemMessageTransport?: Pick<ImMessageTransport, "sendText">;
+  /** NIM custom order card seam used by stage cards and support progress reminders. */
+  cardTransport?: import("../im/order-stage-cards").StageCardTransport;
 };
 
 export type OrderResponse = SupplyResponse;
@@ -400,6 +407,145 @@ export async function handleOrderAdminRoute(
         { orderId, adminUserId: targetAdminId },
         async (client) => { await assertOrderTeamInviteAccess(client, actor, teamMembers.appId, orderId); },
         async (client) => ({ status: 200, body: await inviteOrderTeamAdmin(client, teamMembers, actor, orderId, targetAdminId, requestId) }));
+      return;
+    }
+    const openingGenerationRetry = /^\/([A-Za-z0-9._:-]+)\/opening-generation\/retry$/.exec(path);
+    if (method === "POST" && openingGenerationRetry) {
+      if (!requireOrigin(request, response, options, requestId)) return;
+      const orderId = decodeId(openingGenerationRetry[1]!);
+      const body = bodyOf(request);
+      ensureOnlyFields(body, []);
+      const context = await readAdminContext(request, options);
+      const actor = { userId: context.userId, sessionId: context.sessionId };
+      await runIdempotentWrite(options, request, response, requestId,
+        { principalId: actor.userId, operation: "order.opening.generation.retry", resourceId: orderId },
+        { realm: "admin", id: actor.userId, sessionId: actor.sessionId }, { orderId },
+        async (client) => { await assertSupportOrderAccess(client, orderId, actor); },
+        async (client) => {
+          const generation = (await client.query<{ paymentConfirmationId: string }>(
+            `SELECT payment_confirmation_id AS "paymentConfirmationId"
+               FROM zzsh_order.rental_opening_generation WHERE order_id=$1`, [orderId],
+          )).rows[0];
+          const paymentConfirmationId = generation?.paymentConfirmationId
+            ?? (await client.query<{ id: string }>(
+              `SELECT id FROM zzsh_order.payment_confirmation
+                WHERE order_id=$1 AND disposition='APPLIED' ORDER BY accepted_at DESC, id DESC LIMIT 1`, [orderId],
+            )).rows[0]?.id;
+          if (!paymentConfirmationId) {
+            return { status: 409, body: { error: { code: "CONFLICT", message: "PAYMENT_BASIS_MISSING" }, reasons: ["PAYMENT_BASIS_MISSING"], orderId } };
+          }
+          const result = await recordAutomaticOpening(client, orderId, paymentConfirmationId, requestId);
+          await recordAudit(client, {
+            actorType: "admin", actorId: actor.userId, sessionId: actor.sessionId, requestId,
+            action: "order.opening.generation.retry", objectType: "rental_order", objectId: orderId,
+            outcome: result.state === "CREATED" ? "SUCCESS" : result.state === "EXISTS" ? "SUCCESS" : "FAILURE",
+            ...(result.state === "REVIEW_REQUIRED" ? { reason: result.reason } : {}),
+            details: { paymentConfirmationId, result: result.state, openingId: result.state === "CREATED" ? result.openingId : undefined },
+          });
+          return { status: 200, body: { orderId, ...result } };
+        });
+      return;
+    }
+    const progressReminder = /^\/([A-Za-z0-9._:-]+)\/progress-reminders$/.exec(path);
+    if (method === "POST" && progressReminder) {
+      if (!requireOrigin(request, response, options, requestId)) return;
+      const orderId = decodeId(progressReminder[1]!);
+      const body = bodyOf(request);
+      ensureOnlyFields(body, []);
+      const requestKey = headerValue(request.headers["idempotency-key"]);
+      if (!isOpeningReminderRequestKey(requestKey)) throw invalid("Idempotency-Key is invalid", "Idempotency-Key");
+      const context = await readAdminContext(request, options);
+      const actor = { userId: context.userId, sessionId: context.sessionId };
+      const transport = options.systemMessageTransport;
+      const cardTransport = options.cardTransport;
+      // Check capability before prepare claims SENDING; a missing transport did not
+      // call the channel and must not leave a lease that later looks unknown.
+      if (!cardTransport && !transport) throw new SecurityApiError(503, API_V1_ERROR_CODES.IM_UNAVAILABLE, "IM transport is unavailable");
+      const prepared = await prepareOpeningProgressReminder(options.pool, orderId, actor, requestKey, requestId);
+      if (prepared.kind !== "SEND") {
+        const reason = prepared.kind === "SENT" ? "SENT"
+          : prepared.kind === "IN_PROGRESS" ? "REMINDER_IN_PROGRESS"
+            : prepared.kind === "UNKNOWN" ? "REMINDER_UNKNOWN"
+              : prepared.reason;
+        if (prepared.kind === "SENT") {
+          sendJson(response, 200, {
+            reminderId: prepared.id, orderId, stage: prepared.stage, targets: prepared.targets,
+            state: "SENT", messageClientId: prepared.id, messageServerId: prepared.messageServerId,
+          }, requestId);
+          return;
+        }
+        sendJson(response, 409, {
+          error: { code: "CONFLICT", message: reason },
+          reasons: [reason], orderId,
+          ...(prepared.kind === "IN_PROGRESS" || prepared.kind === "UNKNOWN" || prepared.kind === "STALE"
+            ? { reminderId: prepared.id } : {}),
+          ...(prepared.kind === "UNKNOWN" ? { failureClass: prepared.failureClass } : {}),
+          ...(prepared.kind === "STALE" ? { currentStage: prepared.currentStage } : {}),
+        }, requestId);
+        return;
+      }
+      const receipt = {
+        reminderId: prepared.id, orderId, stage: prepared.stage, targets: prepared.targets,
+        messageClientId: prepared.id,
+      };
+      const conversationId = `${prepared.systemAccount}|2|${prepared.teamId}`;
+      const cardKind: "ORDER_OPENING" | "ORDER_ENDING" = prepared.stage === "OPENING_PENDING" ? "ORDER_OPENING" : "ORDER_ENDING";
+      const preview = prepared.stage === "OPENING_PENDING" ? "洲洲助手：开租确认提醒" : "洲洲助手：结算进度提醒";
+      let sentMessage: { messageServerId: string; serverMessageId?: string | null } | undefined;
+      try {
+        sentMessage = cardTransport
+          ? await cardTransport.card({
+            conversationId, senderAccountId: prepared.systemAccount, receiverAccountId: prepared.teamId,
+            card: { kind: cardKind, orderId, cardId: prepared.id },
+          })
+          : await transport!.sendText({
+            conversationId, senderAccountId: prepared.systemAccount, receiverAccountId: prepared.teamId,
+            text: prepared.text, messageClientId: prepared.id,
+          });
+      } catch (error) {
+        const disposition = reminderDeliveryDisposition(error);
+        const failureClass = reminderFailureClass(error);
+        try {
+          await markOpeningProgressReminder(options.pool, prepared, actor, disposition, requestId, failureClass);
+        } catch { /* keep the claim; the next retry observes it as unknown */ }
+        sendJson(response, 502, {
+          error: {
+            code: API_V1_ERROR_CODES.IM_UNAVAILABLE,
+            message: disposition === "FAILED" ? "提醒发送被明确拒绝，可按原请求重试" : "提醒投递结果未确认，请先在群内核对是否已发送",
+          },
+          ...receipt, state: disposition, failureClass,
+        }, requestId);
+        return;
+      }
+      // The message is already out; projection and receipt failures must never be
+      // reported as a channel failure or trigger a blind resend.
+      try { await recordOrderGroupMessage(options.pool, prepared.appId, conversationId, preview); }
+      catch (error) {
+        // The channel message is already out; keep a trace but never turn the local
+        // preview/unread projection failure into a false "send failed" claim.
+        console.error(JSON.stringify({ event: "order.opening.reminder.preview_failed", orderId,
+          code: typeof (error as { code?: unknown }).code === "string" ? (error as { code: string }).code : "UNKNOWN" }));
+      }
+      try {
+        const recorded = await markOpeningProgressReminder(options.pool, prepared, actor, "SENT", requestId, null,
+          sentMessage?.serverMessageId ?? null);
+        if (!recorded) {
+          sendJson(response, 502, {
+            error: { code: API_V1_ERROR_CODES.IM_UNAVAILABLE, message: "提醒已发出但结果登记未确认，请先在群内核对" },
+            ...receipt, state: "UNKNOWN", failureClass: "SENT_MARK_LOST",
+          }, requestId);
+          return;
+        }
+        sendJson(response, 200, { ...receipt, state: "SENT", messageServerId: sentMessage?.serverMessageId ?? null }, requestId);
+      } catch {
+        // Attempt a non-terminal unknown state; if even that write fails, the lease
+        // expires as UNKNOWN and the UI requires a manual check before a new key.
+        try { await markOpeningProgressReminder(options.pool, prepared, actor, "UNKNOWN", requestId, "SENT_MARK_LOST"); } catch { /* lease expiry remains unknown */ }
+        sendJson(response, 502, {
+          error: { code: API_V1_ERROR_CODES.IM_UNAVAILABLE, message: "提醒已发出但结果登记未确认，请先在群内核对" },
+          ...receipt, state: "UNKNOWN", failureClass: "SENT_MARK_LOST",
+        }, requestId);
+      }
       return;
     }
     const manualClose = /^\/([A-Za-z0-9._:-]+)\/manual-close$/.exec(path);

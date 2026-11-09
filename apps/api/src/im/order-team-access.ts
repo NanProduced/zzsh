@@ -11,6 +11,7 @@ import { supportManagerIdentityKey } from "./consultation";
 import { OrderImSdkRouteError, type OrderImSdkRoute, type OrderImSdkRouteBindings } from "../config/config";
 import { readPrestartRefundProgress } from "../order/prestart-refund-store";
 import type { PrestartPaymentBasis } from "../order/prestart-termination";
+import { STAGE_CARD_PRE_SEND_FAILURES } from "./order-stage-card-retry";
 import type { StageCardKind } from "./order-stage-cards";
 import { isLegacyListedQuote } from "../supply/legacy-listed-quote";
 import { LEGACY_ORDER_STATUS_SQL } from "../order/legacy-order-read";
@@ -332,8 +333,9 @@ export const STAGE_CARD_KIND_LABEL: Record<StageCardKind, string> = {
 
 const STAGE_CARD_FAILURE_LABEL: Record<string, string> = {
   IDENTITY_PENDING: "系统账号未就绪（云信账号仍在创建或校验）",
-  SEND_FAILED: "通道发送失败（云信返回失败或超时）",
-  LEASE_EXPIRED: "发送中断（租约过期，等待重新领取）",
+  SEND_FAILED: "发送结果未知（可能已发出，请先在群里核对）",
+  LEASE_EXPIRED: "发送中断（租约过期，结果未知，请先人工核对）",
+  SENT_RECORD_FAILED: "渠道已接受，但发送记录失败（请勿自动重发）",
   TEXT_TRANSPORT_UNAVAILABLE: "文本通道不可用（本 App 未配置发送通道）",
   INVALID_STAGE_KIND: "卡片类型非法（数据异常，需人工核查）",
   ORDER_ENDED: "订单已离开付款状态，卡片不再发送",
@@ -345,7 +347,7 @@ const STAGE_CARD_FAILURE_LABEL: Record<string, string> = {
   WELCOME_SUPERSEDED: "群内已有更早的消息，欢迎语不再补发",
 };
 /** Worker 会自己重试的失败；其余都是终态事实。 */
-const STAGE_CARD_RETRYABLE: ReadonlySet<string> = new Set(["IDENTITY_PENDING", "SEND_FAILED", "LEASE_EXPIRED", "TEXT_TRANSPORT_UNAVAILABLE"]);
+const STAGE_CARD_RETRYABLE: ReadonlySet<string> = new Set(["IDENTITY_PENDING", "TEXT_TRANSPORT_UNAVAILABLE"]);
 
 export type StageCardAttention = {
   kind: string;
@@ -363,7 +365,7 @@ export type StageCardAttention = {
   displayNo?: string | null;
   orderStatus?: string | null;
 };
-export type StageCardQueueSummary = { pending: number; failed: number; skipped: number; attention: StageCardAttention | null };
+export type StageCardQueueSummary = { pending: number; failed: number; skipped: number; unknown: number; attention: StageCardAttention | null };
 
 type StageCardRow = {
   id?: string; orderId?: string | null; displayNo?: string | null; orderStatus?: string | null;
@@ -408,11 +410,12 @@ export function projectStageCardAttention(row: StageCardRow): StageCardAttention
 
 /** The queue badge for one order: counts plus the single card an operator should look at first. */
 export function projectStageCardQueue(card: unknown, counts: unknown): StageCardQueueSummary {
-  const source = (counts ?? {}) as { pending?: unknown; failed?: unknown; skipped?: unknown };
+  const source = (counts ?? {}) as { pending?: unknown; failed?: unknown; skipped?: unknown; unknown?: unknown };
   const row = card !== null && typeof card === "object" && !Array.isArray(card) && typeof (card as { kind?: unknown }).kind === "string"
     ? projectStageCardAttention(card as StageCardRow)
     : null;
-  return { pending: stageCardCount(source.pending), failed: stageCardCount(source.failed), skipped: stageCardCount(source.skipped), attention: row };
+  return { pending: stageCardCount(source.pending), failed: stageCardCount(source.failed), skipped: stageCardCount(source.skipped),
+    unknown: stageCardCount(source.unknown), attention: row };
 }
 
 const STAGE_CARD_COLUMNS = `sc.id,sc.order_id AS "orderId",sc.kind,sc.state,sc.attempt_count AS "attemptCount",
@@ -472,26 +475,28 @@ export async function readStageCardFailures(c:Pick<PoolClient,"query">,input:{ap
   };
 }
 
-export type StageCardRequeueOutcome="RETRY_SCHEDULED"|"ALREADY_SENT"|"SKIPPED_TERMINAL"|"ALREADY_PENDING"|"NOT_FOUND";
+export type StageCardRequeueOutcome="RETRY_SCHEDULED"|"ALREADY_SENT"|"SKIPPED_TERMINAL"|"ALREADY_PENDING"|"SENDING_IN_PROGRESS"|"UNSAFE_PENDING_REVIEW_REQUIRED"|"UNKNOWN_REVIEW_REQUIRED"|"NOT_FOUND";
+
+const STAGE_CARD_PRE_SEND_SQL = STAGE_CARD_PRE_SEND_FAILURES.map((code) => `'${code}'`).join(",");
 
 /**
- * 人工“立即重试”：只对 worker 还会重试的卡生效（把退避拉到当前，保留 attempt_count）。
- * 已发送/已跳过的卡不重发——跳过是订单事实，补发会把过期话术塞回群里；那类交客服在群里说明。
+ * 人工“立即重试”：只对仍可证明未调用渠道的 PENDING 卡生效（把退避拉到当前，保留 attempt_count）。
+ * 已发送/已跳过的卡不重发；UNKNOWN、仍在发送中的卡和不安全的 PENDING 原因都必须先核对，不能从这里绕回 PENDING。
  */
 export async function requeueStageCard(c:Pick<PoolClient,"query">,input:{appId:string;orderId:string;kind:string}):Promise<{requeued:boolean;outcome:StageCardRequeueOutcome}>{
   const rescheduled=await c.query(`UPDATE zzsh_order.im_order_stage_card
       SET next_attempt_at=clock_timestamp(),failure_class=NULL,updated_at=clock_timestamp()
-    WHERE app_id=$1 AND order_id=$2 AND kind=$3 AND state='PENDING' AND failure_class IS NOT NULL`,[input.appId,input.orderId,input.kind]);
+    WHERE app_id=$1 AND order_id=$2 AND kind=$3 AND state='PENDING' AND failure_class IN (${STAGE_CARD_PRE_SEND_SQL})`,[input.appId,input.orderId,input.kind]);
   if((rescheduled.rowCount??0)>0)return {requeued:true,outcome:"RETRY_SCHEDULED"};
-  const reclaimed=await c.query(`UPDATE zzsh_order.im_order_stage_card
-      SET state='PENDING',lease_until=NULL,lease_token_hash=NULL,next_attempt_at=clock_timestamp(),
-          failure_class='LEASE_EXPIRED',updated_at=clock_timestamp()
-    WHERE app_id=$1 AND order_id=$2 AND kind=$3 AND state='SENDING' AND lease_until<=clock_timestamp()`,[input.appId,input.orderId,input.kind]);
-  if((reclaimed.rowCount??0)>0)return {requeued:true,outcome:"RETRY_SCHEDULED"};
-  const row=(await c.query<{state:string}>(`SELECT state FROM zzsh_order.im_order_stage_card WHERE app_id=$1 AND order_id=$2 AND kind=$3`,[input.appId,input.orderId,input.kind])).rows[0];
+  const row=(await c.query<{state:string;failureClass:string|null}>(`SELECT state,failure_class AS "failureClass" FROM zzsh_order.im_order_stage_card WHERE app_id=$1 AND order_id=$2 AND kind=$3`,[input.appId,input.orderId,input.kind])).rows[0];
   if(!row)return {requeued:false,outcome:"NOT_FOUND"};
   if(row.state==="SENT")return {requeued:false,outcome:"ALREADY_SENT"};
   if(row.state==="SKIPPED")return {requeued:false,outcome:"SKIPPED_TERMINAL"};
+  if(row.state==="UNKNOWN")return {requeued:false,outcome:"UNKNOWN_REVIEW_REQUIRED"};
+  if(row.state==="SENDING")return {requeued:false,outcome:"SENDING_IN_PROGRESS"};
+  if(row.failureClass!==null && !(STAGE_CARD_PRE_SEND_FAILURES as readonly string[]).includes(row.failureClass)) {
+    return {requeued:false,outcome:"UNSAFE_PENDING_REVIEW_REQUIRED"};
+  }
   return {requeued:false,outcome:"ALREADY_PENDING"};
 }
 /** Short queue todo derived from the same stage facts; it never replaces the detail projection. */
@@ -562,6 +567,7 @@ export async function listJoinedOrderTeams(c:PoolClient,actor:OrderTeamActor,cur
     LEFT JOIN LATERAL (
       SELECT count(*) FILTER (WHERE sc.state='SKIPPED') AS "skipped",
              count(*) FILTER (WHERE sc.state IN ('PENDING','SENDING')) AS "pending",
+             count(*) FILTER (WHERE sc.state='UNKNOWN') AS "unknown",
              count(*) FILTER (WHERE sc.failure_class IS NOT NULL AND sc.state<>'SENT') AS "failed"
         FROM zzsh_order.im_order_stage_card sc
        WHERE sc.order_id=g.order_id AND sc.app_id=g.app_id

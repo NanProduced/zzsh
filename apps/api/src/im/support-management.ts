@@ -11,7 +11,7 @@ import { assertAdminContextInTransaction, type AdminContext } from "../auth/auth
 import { recordAudit, SecurityApiError, withTransaction } from "../auth/security-core";
 import { buildYunxinIdentityMarker, deriveYunxinAccountId } from "./identity-lifecycle";
 import type { SupportAvailability, SupportConnectionState } from "./consultation";
-import { resolveSupportConcurrencyLimit } from "./support-dispatch";
+
 import { managedProfileImagePath } from "../profile/profile-avatar";
 
 export const SUPPORT_HANDOVER_NOTE_MAX = 200;
@@ -66,9 +66,9 @@ export type SupportOverviewRow = {
   todaySessions: number;
   todayUsers: number;
   currentOrderGroups: number;
-  /** 服务端接待上限；与 support-dispatch.ts 同一常量来源，不是 UI 关注线。 */
-  capacityLimit: number;
-  /** 当前占用 = 咨询接待数 + 在租订单群数。 */
+  /** 业务不设接待硬上限；保留 null 表示“无上限”，仅 totalLoad 作统计。 */
+  capacityLimit: number | null;
+  /** 当前占用 = 咨询接待数 + 在租订单群数（只展示，不拦截）。 */
   totalLoad: number;
   atCapacity: boolean;
 };
@@ -84,12 +84,17 @@ export type SupportQueueReasonView = "NO_ONLINE_STAFF" | "ALL_AT_CAPACITY" | "CA
  */
 export type SupportQueueView = {
   queued: number;
+  /** Waiting rounds split by the permission cohort each one actually needs. */
+  serviceQueued: number;
+  complaintQueued: number;
+  serviceEligible: number;
+  complaintEligible: number;
   oldestQueuedAt: string | null;
   oldestWaitSeconds: number | null;
   onDuty: number;
   withFreeSlot: number;
   atCapacity: number;
-  capacityLimit: number;
+  capacityLimit: number | null;
   reason: SupportQueueReasonView | null;
 };
 
@@ -384,6 +389,18 @@ export async function readLatestHandoverNote(
   return row?.note ?? null;
 }
 
+const SUPPORT_OVERVIEW_ELIGIBLE_SQL = `
+  SELECT p."admin_user_id" AS "adminUserId", m."account_id" AS "accountId", m."identity_marker" AS "identityMarker"
+    FROM "zzsh_iam"."im_support_presence" p
+    JOIN "zzsh_iam"."admin_security" s ON s."admin_user_id" = p."admin_user_id"
+    JOIN "zzsh_auth_admin"."user" u ON u."id" = p."admin_user_id"
+    JOIN "zzsh_iam"."im_identity_mapping" m
+      ON m."provider" = 'yunxin' AND m."app_id" = p."app_id" AND m."realm" = 'admin'
+     AND m."identity_kind" = 'ADMIN' AND m."platform_subject_id" = p."admin_user_id" AND m."status" = 'READY'
+   WHERE p."app_id" = $1 AND s."status" = 'ACTIVE' AND NOT u."suspended"
+     AND p."availability" = 'AVAILABLE' AND p."connection_state" = 'CONNECTED'
+     AND p."last_connected_at" > clock_timestamp() - interval '2 minutes'`;
+
 const SUPPORT_OVERVIEW_ON_DUTY_SQL = `
   WITH bounds AS (${dayBounds("$2", "$3")}),
   day_sessions AS (
@@ -490,9 +507,6 @@ const SUPPORT_OVERVIEW_TOTALS_SQL = `
        AND e."created_at" >= b.day_start AND e."created_at" < b.day_end
   )
   SELECT
-    (SELECT COUNT(*)::int FROM "zzsh_iam"."im_support_presence" p
-      WHERE p."app_id" = $1 AND p."availability" = 'AVAILABLE' AND p."connection_state" = 'CONNECTED'
-        AND p."last_connected_at" > clock_timestamp() - interval '2 minutes') AS "onDutyCount",
     (SELECT COUNT(*)::int FROM "zzsh_iam"."im_consultation" c
       WHERE c."app_id" = $1 AND c."state" = 'WAITING' AND c."assigned_admin_id" IS NULL
         AND c."first_user_message_at" IS NOT NULL) AS "waitingConsultations",
@@ -615,28 +629,18 @@ const SUPPORT_OVERVIEW_RESOLUTION_SQL = `
 
 const SUPPORT_OVERVIEW_QUEUE_SQL = `
   WITH queued AS (
-    SELECT count(*)::int AS "queued", min(c."first_user_message_at") AS "oldestQueuedAt",
+    SELECT count(*)::int AS "queued",
+           count(*) FILTER (WHERE c."kind" <> 'COMPLAINT')::int AS "serviceQueued",
+           count(*) FILTER (WHERE c."kind" = 'COMPLAINT')::int AS "complaintQueued",
+           min(c."first_user_message_at") AS "oldestQueuedAt",
            EXTRACT(EPOCH FROM (clock_timestamp() - min(c."first_user_message_at"))) AS "oldestWaitSeconds"
       FROM "zzsh_iam"."im_consultation" c
      WHERE c."app_id" = $1 AND c."state" = 'WAITING' AND c."assigned_admin_id" IS NULL
        AND c."first_user_message_at" IS NOT NULL
-  ),
-  duty AS (
-    SELECT p."admin_user_id",
-           p."active_load" + COALESCE((SELECT count(*) FROM "zzsh_order"."im_order_group" g
-             JOIN "zzsh_order"."rental_order" o ON o."id" = g."order_id"
-            WHERE g."app_id" = $1 AND o."status" = 'PAID'
-              AND COALESCE(g."responsible_admin_id", g."assigned_admin_id") = p."admin_user_id"), 0) AS "load"
-      FROM "zzsh_iam"."im_support_presence" p
-     WHERE p."app_id" = $1 AND p."availability" = 'AVAILABLE' AND p."connection_state" = 'CONNECTED'
-       AND p."last_connected_at" > clock_timestamp() - interval '2 minutes'
   )
-  SELECT q."queued",
+  SELECT q."queued", q."serviceQueued", q."complaintQueued",
          to_char(q."oldestQueuedAt" AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "oldestQueuedAt",
-         floor(COALESCE(q."oldestWaitSeconds", 0))::int AS "oldestWaitSeconds",
-         (SELECT count(*)::int FROM duty) AS "onDuty",
-         (SELECT count(*)::int FROM duty WHERE "load" < $2) AS "withFreeSlot",
-         (SELECT count(*)::int FROM duty WHERE "load" >= $2) AS "atCapacity"
+         floor(COALESCE(q."oldestWaitSeconds", 0))::int AS "oldestWaitSeconds"
     FROM queued q`;
 
 /** 首响质量聚合：事实统一经 readConsultationFirstResponse，不在这里另写跨表 join。 */
@@ -687,7 +691,8 @@ export async function readSupportOverview(
 ): Promise<SupportOverview> {
   const range = parseSupportRange(dateValue, dateToValue);
   const date = range.dateFrom, endDate = range.dateTo;
-  const capacityLimit = resolveSupportConcurrencyLimit(limits.capacityLimit);
+  // No hard capacity: all fresh online agents are reported as able to take work.
+  const capacityLimit = null;
   const firstResponseSeconds = resolveFirstResponseSeconds(limits.firstResponseSeconds);
   return withTransaction(options.pool, async (client) => {
     await client.query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY");
@@ -710,10 +715,26 @@ export async function readSupportOverview(
       currentOrderGroups: integer(row.currentOrderGroups),
       capacityLimit,
       totalLoad: integer(row.totalLoad),
-      atCapacity: integer(row.totalLoad) >= capacityLimit,
+      atCapacity: false,
     }));
+    // Queue eligibility mirrors dispatch: AVAILABLE/CONNECTED/fresh presence with a
+    // READY admin identity, read+accept grants, plus complaint for COMPLAINT queues.
+    const eligibleRows = (await client.query<{ adminUserId: string; accountId: string; identityMarker: string }>(
+      SUPPORT_OVERVIEW_ELIGIBLE_SQL, [options.appId],
+    )).rows;
+    const eligibleAccess = await Promise.all(eligibleRows.map((row) => loadEffectiveAdminAccess(client, row.adminUserId)));
+    const eligible = eligibleRows.flatMap((row, index) => {
+      const access = eligibleAccess[index] ?? null;
+      const key = { provider: "yunxin" as const, appId: options.appId, realm: "admin" as const, kind: "ADMIN" as const, platformSubjectId: row.adminUserId };
+      const matches = row.accountId === deriveYunxinAccountId(key) && row.identityMarker === buildYunxinIdentityMarker(key)
+        && hasPermission(access, ADMIN_PERMISSION.imSupportRead)
+        && hasPermission(access, ADMIN_PERMISSION.imSupportAccept);
+      return matches ? [{ row, access }] : [];
+    });
+    const serviceEligible = eligible.length;
+    const complaintEligible = eligible.filter(({ access }) => hasPermission(access, ADMIN_PERMISSION.imSupportComplaint)).length;
     const totalsRow = (await client.query<{
-      onDutyCount: string | number; waitingConsultations: string | number;
+      waitingConsultations: string | number;
       todaySessions: string | number; todayUsers: string | number;
       transfersToday: string | number; handoversToday: string | number;
     }>(SUPPORT_OVERVIEW_TOTALS_SQL, [options.appId, date, endDate])).rows[0];
@@ -735,23 +756,32 @@ export async function readSupportOverview(
     });
     // 排队、首响、解决时长都是只读聚合：没有事实就返回 null/0，不伪造。
     const queueRow = (await client.query<{
-      queued: string | number; oldestQueuedAt: string | null; oldestWaitSeconds: string | number;
-      onDuty: string | number; withFreeSlot: string | number; atCapacity: string | number;
-    }>(SUPPORT_OVERVIEW_QUEUE_SQL, [options.appId, capacityLimit])).rows[0];
+      queued: string | number; serviceQueued: string | number; complaintQueued: string | number;
+      oldestQueuedAt: string | null; oldestWaitSeconds: string | number;
+    }>(SUPPORT_OVERVIEW_QUEUE_SQL, [options.appId])).rows[0];
     const queued = integer(queueRow?.queued);
-    const withFreeSlot = integer(queueRow?.withFreeSlot);
-    const atCapacity = integer(queueRow?.atCapacity);
+    const serviceQueued = integer(queueRow?.serviceQueued);
+    const complaintQueued = integer(queueRow?.complaintQueued);
+    const eligibleForQueuedTypes = eligible.filter(({ access }) =>
+      (serviceQueued > 0 && hasPermission(access, ADMIN_PERMISSION.imSupportAccept))
+      || (complaintQueued > 0 && hasPermission(access, ADMIN_PERMISSION.imSupportAccept)
+        && hasPermission(access, ADMIN_PERMISSION.imSupportComplaint))).length;
     const queue: SupportQueueView = {
       queued,
+      serviceQueued,
+      complaintQueued,
+      serviceEligible,
+      complaintEligible,
       oldestQueuedAt: queueRow?.oldestQueuedAt ?? null,
       oldestWaitSeconds: queued > 0 ? integer(queueRow?.oldestWaitSeconds) : null,
-      onDuty: integer(queueRow?.onDuty),
-      withFreeSlot,
-      atCapacity,
-      capacityLimit,
+      onDuty: serviceEligible,
+      withFreeSlot: eligibleForQueuedTypes,
+      atCapacity: 0,
+      capacityLimit: null,
       reason: queued === 0 ? null
-        : withFreeSlot > 0 ? "CAPACITY_AVAILABLE"
-        : atCapacity > 0 ? "ALL_AT_CAPACITY" : "NO_ONLINE_STAFF",
+        : (serviceQueued > 0 && serviceEligible === 0) || (complaintQueued > 0 && complaintEligible === 0)
+          ? "NO_ONLINE_STAFF"
+          : "CAPACITY_AVAILABLE",
     };
     const firstResponse = await readSupportFirstResponseQuality(client, options.appId, date, endDate, firstResponseSeconds);
     const resolutionRow = (await client.query<{ closed: string | number; averageSeconds: string | number | null }>(
@@ -767,7 +797,7 @@ export async function readSupportOverview(
       quality,
       onDuty,
       totals: {
-        onDutyCount: integer(totalsRow?.onDutyCount),
+        onDutyCount: serviceEligible,
         waitingConsultations: integer(totalsRow?.waitingConsultations),
         todaySessions: integer(totalsRow?.todaySessions),
         todayUsers: integer(totalsRow?.todayUsers),

@@ -202,7 +202,7 @@ export function SupportDashboard({ active, request, demo = false }: { active: bo
 
       {overview ? <>
         <div className="im-wb-mgmt-totals" aria-label="统计概况">
-          <MetricCard label="当前可接待客服" value={overview.totals.onDutyCount} hint="已开始接待、连接正常，且最近 2 分钟有响应的客服。" />
+          <MetricCard label="当前可接待客服" value={overview.totals.onDutyCount} hint="在线、已连接、最近 2 分钟有响应、云信身份就绪且具备接待权限的客服。" />
           <MetricCard label="当前排队咨询" value={overview.totals.waitingConsultations} hint="当前未分配且用户已留言的等待咨询；实时事实，不是所选期间的历史排队。" />
           <MetricCard label={`${scopeWord}接待咨询`} value={overview.totals.todaySessions} hint="期间发生分配、接入、转交或结束的咨询，同一咨询只计一次。" />
           <MetricCard label={`${scopeWord}接待用户`} value={overview.totals.todayUsers} hint="所选期间去重用户；同一用户跨天只计 1 人。" />

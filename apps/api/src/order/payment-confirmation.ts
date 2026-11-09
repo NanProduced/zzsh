@@ -170,8 +170,21 @@ async function ecsDemoPaymentDeclaration(client: PoolClient, scope: ControlledSc
     || Number(original.resource_oid) !== proof.registration.resource.databaseOid || original.app_id !== scope.appId) throw invalid("Original test payment event unavailable");
 }
 
+export type PaymentAcceptanceOptions = {
+  /** Runs after the payment is APPLIED and the order is PAID, inside the same transaction.
+   * Used by production acceptance paths to generate the order's opening without an admin. */
+  onApplied?: (input: { client: PoolClient; orderId: string; confirmationId: string; requestId: string }) => Promise<void>;
+  /** Best-effort durable review fact after `onApplied` threw. The payment itself still commits. */
+  onAppliedFailure?: (input: { client: PoolClient; orderId: string; confirmationId: string; requestId: string }, error: unknown) => Promise<void>;
+};
+
 /** Caller owns one transaction; audit failure rolls back the entire acceptance. */
-export async function confirmOrderPayment(client: PoolClient, fact: VerifiedPaymentFact, distribution?: PaymentDistributionStore): Promise<PaymentResult> {
+export async function confirmOrderPayment(
+  client: PoolClient,
+  fact: VerifiedPaymentFact,
+  distribution?: PaymentDistributionStore,
+  options?: PaymentAcceptanceOptions,
+): Promise<PaymentResult> {
   const formalScope = fact?.source === "JOINPAY" ? await readVerifiedJoinpayFactScope(client, fact) : null;
   const controlledScope = fact && verifiedFacts.get(fact);
   const scope = formalScope ?? controlledScope;
@@ -271,6 +284,47 @@ export async function confirmOrderPayment(client: PoolClient, fact: VerifiedPaym
     await client.query(`INSERT INTO zzsh_order.im_order_group(order_id,payment_confirmation_id,app_id) VALUES ($1,$2,$3)`,
       [fact.orderId, confirmationId, scope.appId]);
     if (distribution && prepared) await distribution.record(client, prepared, confirmationId, fact.requestId);
+    if (options?.onApplied) {
+      const input = { client, orderId: fact.orderId, confirmationId, requestId: fact.requestId };
+      // Opening generation is recoverable bookkeeping, not part of the provider payment
+      // fact. A table/permission/lock error must not roll back an accepted payment.
+      await client.query("SAVEPOINT automatic_opening");
+      try {
+        await options.onApplied(input);
+        await client.query("RELEASE SAVEPOINT automatic_opening");
+      } catch (error) {
+        await client.query("ROLLBACK TO SAVEPOINT automatic_opening");
+        await client.query("RELEASE SAVEPOINT automatic_opening");
+        let failureRecorded = false;
+        if (options.onAppliedFailure) {
+          await client.query("SAVEPOINT automatic_opening_failure");
+          try {
+            await options.onAppliedFailure(input, error);
+            await client.query("RELEASE SAVEPOINT automatic_opening_failure");
+            failureRecorded = true;
+          } catch (failure) {
+            await client.query("ROLLBACK TO SAVEPOINT automatic_opening_failure");
+            await client.query("RELEASE SAVEPOINT automatic_opening_failure");
+            console.error(JSON.stringify({ event: "order.opening.auto_generation.failed", orderId: fact.orderId,
+              code: typeof (failure as { code?: unknown }).code === "string" ? (failure as { code: string }).code : "UNKNOWN" }));
+          }
+        }
+        if (!failureRecorded) {
+          // Last durable, discoverable fallback on the order itself; no opening is
+          // fabricated, and the support retry endpoint can be reached later.
+          await client.query("SAVEPOINT automatic_opening_recovery_marker");
+          try {
+            await client.query(`UPDATE zzsh_order.rental_order SET opening_generation_recovery_required=true WHERE id=$1`, [fact.orderId]);
+            await client.query("RELEASE SAVEPOINT automatic_opening_recovery_marker");
+          } catch (markerFailure) {
+            await client.query("ROLLBACK TO SAVEPOINT automatic_opening_recovery_marker");
+            await client.query("RELEASE SAVEPOINT automatic_opening_recovery_marker");
+            console.error(JSON.stringify({ event: "order.opening.auto_generation.marker_failed", orderId: fact.orderId,
+              code: typeof (markerFailure as { code?: unknown }).code === "string" ? (markerFailure as { code: string }).code : "UNKNOWN" }));
+          }
+        }
+      }
+    }
   }
   await recordAudit(client, {
     actorType: "system", action: "order.payment.confirmed", objectType: "rental_order", objectId: fact.orderId,

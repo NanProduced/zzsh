@@ -78,6 +78,17 @@ const openGroupSettings = async (node, until) => {
   return [...document.querySelectorAll('[data-settings-drawer="true"]')].at(-1);
 };
 
+test("the order list marks an automatic stage-card review without opening any write path", async (t) => {
+  const base = fixtureById("ready-three");
+  const fixture = { ...base, info: { ...base.info, stageCards: [{ kind: "ORDER_OPENING", kindLabel: "开租确认", state: "UNKNOWN" }] } };
+  const { node, until } = await mount(t, "stage-card-unknown", { fixture, select: false });
+  await until(() => rows(node).length === 3, "three loaded groups");
+  const marked = node.querySelector('.im-wb-queue .im-wb-row[data-order-id="order-8842"]');
+  assert.match(marked.textContent, /自动卡待核对/);
+  const other = node.querySelector('.im-wb-queue .im-wb-row[data-order-id="order-7710"]');
+  assert.doesNotMatch(other.textContent, /自动卡待核对/, "only the order with an UNKNOWN card is marked");
+});
+
 test("READY group list, role-attributed chat and the complementary order rail come from the loaded projections", async (t) => {
   const { node, until } = await mount(t, "ready-three");
   await until(() => rows(node).length === 3, "three loaded groups");

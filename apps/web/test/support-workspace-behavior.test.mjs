@@ -395,7 +395,7 @@ test("nonpreview fifty conversations restore selection and draft in the real hos
   assert.equal(browser.document.activeElement === items[49], true, 'return focuses the selected last item, not the first');
 });
 
-test('directory refresh has a two-page budget and stops when the window is hidden or unmounted',async(t)=>{
+test('directory refresh scans its four order sources and stops when the window is hidden or unmounted',async(t)=>{
  const oldFetch=globalThis.fetch,oldInterval=window.setInterval,oldClear=window.clearInterval;
  let tick,orderCalls=0,release;
  window.setInterval=callback=>{tick=callback;return 1;};window.clearInterval=()=>{};
@@ -404,18 +404,18 @@ test('directory refresh has a two-page budget and stops when the window is hidde
   if(url.includes('/im/token'))return new Response('{}',{status:503});
   if(url.includes('/im/consultations'))return new Response('{"consultations":[]}');
   orderCalls++;
-  if(orderCalls===5)await new Promise(resolve=>release=resolve);
+  if(orderCalls===9)await new Promise(resolve=>release=resolve);
   return new Response(JSON.stringify({items:[],nextCursor:'page-'+orderCalls}));
  };
  const host=document.createElement('div');document.body.append(host);const root=createRoot(host);
  t.after(async()=>{await act(async()=>root.unmount());host.remove();globalThis.fetch=oldFetch;window.setInterval=oldInterval;window.clearInterval=oldClear;});
  const render=visible=>root.render(renderPreview({preview:false,embedded:true,visible}));
- await act(async()=>render(true));await settle();assert.equal(orderCalls,2);assert.doesNotMatch(host.textContent,/你好，需要/);
- await act(async()=>tick());await settle();assert.equal(orderCalls,4);
+ await act(async()=>render(true));await settle();assert.equal(orderCalls,4);assert.doesNotMatch(host.textContent,/你好，需要/);
+ await act(async()=>tick());await settle();assert.equal(orderCalls,8);
  const oldTick=tick;
- await act(async()=>render(false));await act(async()=>oldTick());assert.equal(orderCalls,4);
- await act(async()=>render(true));await settle();assert.equal(orderCalls,5);
- await act(async()=>root.unmount());await act(async()=>release());await settle();assert.equal(orderCalls,5,'no follow-up page after unmount');
+ await act(async()=>render(false));await act(async()=>oldTick());assert.equal(orderCalls,8);
+ await act(async()=>render(true));await settle();assert.equal(orderCalls,9);
+ await act(async()=>root.unmount());await act(async()=>release());await settle();assert.equal(orderCalls,9,'no follow-up page after unmount');
 });
 
 test("F1 requires complete directory success; failures never become empty and creation is single-flight", async(t)=>{
@@ -1469,7 +1469,7 @@ async function mountSupportDirectory(t, consultations, props = {}) {
       if ((init.method ?? "GET") === "POST") {
         const body = JSON.parse(String(init.body));
         creates.push(body);
-        return new Response(JSON.stringify({ consultation: { id: "created-1", type: body.type==="COMPLAINT"?"SERVICE":body.type, state: "WAITING", conversationId: null, assignedAdmin: null, messageScopeState: "READY" } }));
+        return new Response(JSON.stringify({ consultation: { id: "created-1", type: body.type, state: "WAITING", conversationId: null, assignedAdmin: null, messageScopeState: "READY" } }));
       }
       return new Response(JSON.stringify({ consultations }));
     }
@@ -1502,28 +1502,27 @@ test("opening with SERVICE never presents or creates a live COMPLAINT conversati
   assert.equal(creates.length, 0, "opening the window never creates a consultation");
 });
 
-test("opening with COMPLAINT reuses the existing SERVICE thread", async (t) => {
+test("opening with COMPLAINT selects the existing COMPLAINT thread", async (t) => {
   const { host, creates, until } = await mountSupportDirectory(t, [
     { id: "service-1", type: "SERVICE", state: "ACTIVE", conversationId: "team-service", messageScopeState: "READY", assignedAdmin: { id: "a-1", name: "客服甲" } },
     { id: "complaint-1", type: "COMPLAINT", state: "ACTIVE", conversationId: "team-complaint", messageScopeState: "READY", assignedAdmin: { id: "a-2", name: "专员乙" } },
   ], { initialType: "COMPLAINT" });
-  await until(() => host.querySelector('.support-directory .support-conversation-item[data-active="true"]'), "SERVICE selection");
+  await until(() => host.querySelector('.support-directory .support-conversation-item[data-active="true"]'), "COMPLAINT selection");
   const active = host.querySelector('.support-directory .support-conversation-item[data-active="true"]');
-  assert.match(active.textContent, /平台客服/, "the legacy COMPLAINT entry lands on the SERVICE thread");
-  assert.doesNotMatch(active.textContent, /投诉反馈/);
-  assert.match(host.querySelector(".support-conversation-identity h3").textContent, /平台客服/);
-  assert.equal(host.querySelector('.support-start-panel[data-state="initial"]'), null, "the existing SERVICE thread replaces the start panel");
+  assert.match(active.textContent, /投诉反馈/, "the complaint entry selects its own thread");
+  assert.match(host.querySelector(".support-conversation-identity h3").textContent, /投诉反馈/);
+  assert.equal(host.querySelector('.support-start-panel[data-state="initial"]'), null, "the existing complaint thread replaces the start panel");
   assert.equal(creates.length, 0, "opening never creates a second thread");
 });
 
-test("the complaint entry stays visible and starts the unified SERVICE chat directly", async (t) => {
+test("the complaint entry starts the complaint thread directly", async (t) => {
   const { host, creates, until } = await mountSupportDirectory(t, [], { initialType: "COMPLAINT" });
   await until(() => /你好，需要什么帮助/.test(host.textContent), "welcome entry");
   const complaint = host.querySelector('[data-action="welcome-complaint"]');
   assert.ok(complaint, "the complaint entry is not removed");
   await act(async () => { complaint.click(); });
   await until(() => creates.length === 1, "complaint entry starts the consultation");
-  assert.equal(creates[0].type, "COMPLAINT", "the request preserves complaint intent; the API returns the unified SERVICE thread");
+  assert.equal(creates[0].type, "COMPLAINT", "the request and returned thread keep the complaint type");
 });
 
 test("opening selects the live SERVICE consultation", async (t) => {
@@ -1538,15 +1537,15 @@ test("opening selects the live SERVICE consultation", async (t) => {
   assert.equal(host.querySelector('.support-start-panel[data-state="initial"]'), null, "a live consultation replaces the start panel");
 });
 
-test("a legacy COMPLAINT login intent creates the SERVICE thread", async (t) => {
+test("a legacy COMPLAINT login intent creates the COMPLAINT thread", async (t) => {
   const storageKey = "zzsh-support-intent-v1";
   window.sessionStorage.setItem(storageKey, JSON.stringify({ type: "COMPLAINT", source: "/help/rental-getting-started", createdAt: Date.now() }));
   t.after(() => window.sessionStorage.removeItem(storageKey));
   const { host, creates, until } = await mountSupportDirectory(t, []);
   await until(() => creates.length === 1, "legacy intent creates one consultation");
-  assert.equal(creates[0].type, "COMPLAINT", "the POST preserves entry intent; the API unifies the thread");
-  await until(() => host.querySelector('.support-unified'), "the created SERVICE thread opens");
-  assert.match(host.querySelector(".support-conversation-identity h3").textContent, /平台客服/);
+  assert.equal(creates[0].type, "COMPLAINT", "the POST keeps the complaint type");
+  await until(() => host.querySelector('.support-unified'), "the created COMPLAINT thread opens");
+  assert.match(host.querySelector(".support-conversation-identity h3").textContent, /投诉反馈/);
   assert.equal(window.sessionStorage.getItem(storageKey), null, "a submitted intent is cleared");
 });
 
@@ -3213,4 +3212,22 @@ test("closing a support view prevents a late order detail from navigating", asyn
   await act(async () => { finish(new Response(JSON.stringify({ order: { id: "order-reference", viewerParty: "owner" } }))); });
   await settle();
   assert.deepEqual(paths, []);
+});
+
+test("an initially selected user order keeps the role switch usable", async (t) => {
+  const host = document.createElement("div"); document.body.appendChild(host); const root = createRoot(host);
+  t.after(async () => { await act(async () => root.unmount()); host.remove(); });
+  const access = { orderId: "order-a", displayNo: "ZZ-A", orderStatus: "PAID", assignmentState: "ASSIGNED", teamState: "READY", appId: "synth", teamId: "12345",
+    gameName: "SYNTH", account: { id: "a", title: "SYNTH-A" }, viewerAccountId: "test-user", conversationId: "test-user|2|12345", canRead: true, canSend: true,
+    members: [{ platformId: "u-a", accountId: "test-user", party: "USER", name: "租客", avatar: null }],
+    supportEscalation: { firstResponseAt: null, remindDueAt: null, addRound: 0, state: "STOPPED", needsManualReview: false, noEligibleStaff: false } };
+  const client = { accountId: "test-user", transport: "local-fake", getConnectionState: () => "CONNECTED", getMessageHistory: async () => [], onMessages: () => () => {}, onConnectionStateChange: () => () => {} };
+  const request = async (path) => path.includes('/im?') ? access : { items: [], nextCursor: null };
+  await act(async () => root.render(createElement(OrderTeamPanel, { identity: "user-a", realm: "user", client, connection: "CONNECTED", active: true, selectedOrderId: "order-a", compact: true, request, onAuthError: () => {} })));
+  for (let i = 0; i < 40 && !host.querySelector('.order-team-role-switch'); i++) await settle();
+  const role = [...host.querySelectorAll('.order-team-role-switch button')].find(x => x.textContent.includes("出租"));
+  assert.ok(role);
+  await act(async () => role.click()); await settle();
+  assert.ok(host.querySelector('.order-team-role-switch'));
+  assert.doesNotMatch(host.textContent, /正在核对订单授权/);
 });

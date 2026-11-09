@@ -274,6 +274,7 @@
 .workspace-root .im-wb-filters button[aria-pressed="true"] { color:var(--im-accent-strong); background:color-mix(in oklab,var(--im-accent) 12%,var(--card)); font-weight:600; }
 .workspace-root .im-wb-filters b { color:inherit; font-size:10px; font-weight:500; opacity:.8; }
 .workspace-root .im-wb-filter-note { flex:none; margin:0 12px 8px; color:var(--muted-foreground); font-size:10px; line-height:1.5; }
+.workspace-root .im-wb-order-notice { flex:none; margin:0 8px 6px; padding:6px 8px; border:1px solid color-mix(in oklab,var(--im-warn) 35%,var(--border)); border-radius:6px; color:var(--im-warn); background:color-mix(in oklab,var(--im-warn) 8%,var(--card)); font-size:11px; line-height:1.5; }
 .workspace-root .im-wb-rows { flex:1; min-height:0; overflow-y:auto; overscroll-behavior:contain; }
 .workspace-root .im-wb-row { display:grid; grid-template-columns:38px minmax(0,1fr) auto; align-items:center; gap:8px; width:100%; min-height:66px; padding:9px 12px; border:0; border-bottom:1px solid var(--border); color:var(--foreground); background:transparent; text-align:left; cursor:pointer; }
 .workspace-root .im-wb-row:hover { background:color-mix(in oklab,var(--ring) 6%,transparent); }
@@ -647,11 +648,11 @@
   .workspace-root .im-wb[data-details="true"] .im-wb-details .im-wb-details-back { display:inline-flex; }
   .workspace-root .order-team-grid { position:relative; }
   .workspace-root .order-team-grid[data-details="true"] { grid-template-columns:minmax(0,1fr) !important; }
-  .workspace-root .order-team-grid[data-details="true"] > .im-wb-details {
+  .workspace-root .order-team-grid[data-details="true"] .order-team-detail > .im-wb-details {
     position:absolute; inset:0 0 0 auto; z-index:20; display:flex; width:min(400px,92%);
     border-left:1px solid var(--border); box-shadow:-18px 0 40px rgb(0 0 0 / .28);
   }
-  .workspace-root .order-team-grid[data-details="true"] > .im-wb-details .im-wb-details-back { display:inline-flex; }
+  .workspace-root .order-team-grid[data-details="true"] .order-team-detail > .im-wb-details .im-wb-details-back { display:inline-flex; }
 }
 @media (prefers-reduced-motion:no-preference) { .workspace-root .im-wb-jump { transition:opacity .18s,transform .18s; } }
 .workspace-root .order-team-fulfillment-slot { margin:0; }

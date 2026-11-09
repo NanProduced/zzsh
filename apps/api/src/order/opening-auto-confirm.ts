@@ -3,9 +3,11 @@ import type { Pool, PoolClient } from "pg";
 
 import { recordAudit, withTransaction } from "../auth/security-core";
 
-/** Owner-approved 2026-10-31: an unconfirmed opening is auto-confirmed 40 minutes
- * after the DRAFT was recorded. This is deliberately not the older 15-minute draft. */
-export const OPENING_AUTO_CONFIRM_MS = 40 * 60 * 1_000;
+/** Owner-approved initial value: 40 minutes after the DRAFT was recorded. The
+ * runtime value is frozen on each opening by the platform policy; this constant
+ * remains the default/legacy fallback used by pure helpers and tests. */
+export const OPENING_AUTO_CONFIRM_DEFAULT_MINUTES = 40;
+export const OPENING_AUTO_CONFIRM_MS = OPENING_AUTO_CONFIRM_DEFAULT_MINUTES * 60 * 1_000;
 export const OPENING_AUTO_CONFIRM_ACTION = "order.opening.auto_confirmed";
 
 export type OpeningConfirmParty = "RENTER" | "OWNER";
@@ -18,15 +20,17 @@ export type OpeningConfirmStep =
   | { kind: "ACK"; parties: OpeningConfirmParty[]; completes: boolean };
 
 /** Server-side deadline for one DRAFT opening; null when the timestamp is unusable. */
-export function openingAutoConfirmDueAt(createdAt: string | Date): string | null {
+export function openingAutoConfirmDueAt(createdAt: string | Date, waitMinutes = OPENING_AUTO_CONFIRM_DEFAULT_MINUTES): string | null {
   const ms = createdAt instanceof Date ? createdAt.getTime() : new Date(createdAt).getTime();
-  return Number.isFinite(ms) ? new Date(ms + OPENING_AUTO_CONFIRM_MS).toISOString() : null;
+  if (!Number.isSafeInteger(waitMinutes) || waitMinutes < 1 || waitMinutes > 10080) return null;
+  return Number.isFinite(ms) ? new Date(ms + waitMinutes * 60_000).toISOString() : null;
 }
 
-/** Boundary is inclusive: exactly 40 minutes after creation is due. */
-export function isOpeningAutoConfirmDue(createdAt: string | Date, nowMs: number): boolean {
+/** Boundary is inclusive: exactly the frozen wait is due. */
+export function isOpeningAutoConfirmDue(createdAt: string | Date, nowMs: number, waitMinutes = OPENING_AUTO_CONFIRM_DEFAULT_MINUTES): boolean {
   const ms = createdAt instanceof Date ? createdAt.getTime() : new Date(createdAt).getTime();
-  return Number.isFinite(ms) && Number.isFinite(nowMs) && nowMs >= ms + OPENING_AUTO_CONFIRM_MS;
+  return Number.isFinite(ms) && Number.isFinite(nowMs) && Number.isSafeInteger(waitMinutes)
+    && waitMinutes >= 1 && waitMinutes <= 10080 && nowMs >= ms + waitMinutes * 60_000;
 }
 
 /**
@@ -104,11 +108,13 @@ async function confirmDueOpening(
   if (!order || order.status !== "PAID") return "SKIPPED";
   const opening = (await client.query<{
     id: string; versionNo: number; status: string; latestVersionNo: number | null;
-    due: boolean;
+    due: boolean; policyRevision: string | null; waitMinutes: number | null;
   }>(
     `SELECT op.id, op.version_no AS "versionNo", op.status,
             (SELECT max(x.version_no) FROM zzsh_order.rental_opening x WHERE x.order_id = op.order_id) AS "latestVersionNo",
-            op.auto_confirm_due_at <= clock_timestamp() AS "due"
+            op.auto_confirm_due_at <= clock_timestamp() AS "due",
+            op.auto_confirm_policy_revision::text AS "policyRevision",
+            op.auto_confirm_wait_minutes AS "waitMinutes"
        FROM zzsh_order.rental_opening op
       WHERE op.id = $1 AND op.order_id = $2
       FOR UPDATE`,
@@ -160,7 +166,11 @@ async function confirmDueOpening(
       openingId: opening.id,
       versionNo: opening.versionNo,
       confirmedParties: missing,
-      confirmedAtRule: "AUTO_CONFIRM_40_MINUTES",
+      confirmedAtRule: opening.policyRevision === null ? "LEGACY_FROZEN_DUE_AT" : "FROZEN_POLICY_DUE_AT",
+      ...(opening.policyRevision === null ? {} : {
+        policyRevision: opening.policyRevision,
+        waitMinutes: opening.waitMinutes,
+      }),
     },
   });
   return "CONFIRMED";

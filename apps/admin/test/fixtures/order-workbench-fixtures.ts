@@ -35,10 +35,14 @@ function access(over: Partial<OrderTeamAccess> = {}): OrderTeamAccess {
   };
 }
 
-function listItems(orderIds: string[]) {
-  return orderIds.map((id) => {
-    const row = access(orderIdIndex.get(id) ?? {});
-    return { id, displayNo: row.displayNo, title: row.account.title, status: row.orderStatus, teamState: row.teamState, firstResponseAt: row.supportEscalation.firstResponseAt, remindDueAt: row.supportEscalation.remindDueAt, addRound: row.supportEscalation.addRound, escalationState: row.supportEscalation.state };
+function listItems(orderIds: string[], firstInfo?: OrderTeamAccess) {
+  return orderIds.map((id, index) => {
+    const row = index === 0 && firstInfo ? firstInfo : access(orderIdIndex.get(id) ?? {});
+    const cards = row.stageCards ?? [];
+    return { id, displayNo: row.displayNo, title: row.account.title, status: row.orderStatus, teamState: row.teamState,
+      stageCards: { pending: 0, failed: cards.filter((card) => card.state !== "SENT").length,
+        skipped: cards.filter((card) => card.state === "SKIPPED").length, unknown: cards.filter((card) => card.state === "UNKNOWN").length },
+      firstResponseAt: row.supportEscalation.firstResponseAt, remindDueAt: row.supportEscalation.remindDueAt, addRound: row.supportEscalation.addRound, escalationState: row.supportEscalation.state };
   });
 }
 const orderIdIndex = new Map<string, Partial<OrderTeamAccess>>();
@@ -233,7 +237,7 @@ export function createFixtureDeps(item: OrderFixture) {
       if (item.list.items.includes(requested)) return access(orderIdIndex.get(requested) ?? {}) as T;
       fail(404);
     }
-    return { items: item.list.mode === "empty" ? [] : listItems(item.list.items), nextCursor: null } as T;
+    return { items: item.list.mode === "empty" ? [] : listItems(item.list.items, item.info), nextCursor: null } as T;
   };
   const sendMode = item.sendMode ?? "ok";
   let counter = 0;

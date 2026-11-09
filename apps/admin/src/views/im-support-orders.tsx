@@ -20,7 +20,7 @@ import { MediaDraftBar, mediaMessageOf } from "@zzsh/ui/message-media";
 import "@zzsh/ui/message-media.css";
 import { OrderCardMessage } from "@zzsh/ui/order-card";
 import { EntityPreviewTrigger, UserProfilePreview } from "../components/admin-preview";
-import { OrderFulfillmentSection } from "./im-support-fulfillment";
+import { OrderFulfillmentSection, StageCardAttentionNotice } from "./im-support-fulfillment";
 import {
   AdminOrderGroupSettingsDrawer, groupPreferenceOf, readOrderGroupPreferences, storeOrderGroupPreferences, withGroupPreference,
   ORDER_GROUP_PREF_EVENT, ORDER_GROUP_SETTINGS_EVENT,
@@ -117,7 +117,7 @@ function PartyRow({ role, member, request, onOpenProfile }: { role: string; memb
  * authorization, draft and send decision; this module only decides how the
  * loaded facts are presented in the three-column case workspace.
  */
-export function OrderWorkbenchPane({ identity, adminUserId, operatorName, client, connection, active, sendAllowed, canManualClose, request, onAuthError, inviteGroupMember, selectedOrderId, onOpenProfile, onOpenPath }: {
+export function OrderWorkbenchPane({ identity, adminUserId, operatorName, client, connection, active, sendAllowed, canManualClose, request, onAuthError, inviteGroupMember, selectedOrderId, onSelectedOrderChange, onOpenProfile, onOpenPath }: {
   identity: string;
   adminUserId: string;
   operatorName: string;
@@ -131,6 +131,7 @@ export function OrderWorkbenchPane({ identity, adminUserId, operatorName, client
   /** Typed invite port. The BFF member endpoint is not shipped yet, so the drawer stays explicitly 未就绪 until a caller provides this. */
   inviteGroupMember?: InviteOrderGroupMember;
   selectedOrderId?: string | null;
+  onSelectedOrderChange?: (orderId: string | null) => void;
   onOpenProfile?: (userId: string) => void;
   onOpenPath?: (path: string, title?: string) => void;
 }) {
@@ -138,11 +139,16 @@ export function OrderWorkbenchPane({ identity, adminUserId, operatorName, client
   const [emojiOpen, setEmojiOpen] = useState(false);
   const orderComposerRef = useRef<HTMLTextAreaElement | null>(null);
   const [detailsOpen, setDetailsOpen] = useState(() => !(typeof window !== "undefined" && typeof window.matchMedia === "function" && window.matchMedia("(max-width:1439px)").matches));
-  const [pane, setPane] = useState<"list" | "chat" | "details">("list");
+  const [pane, setPane] = useState<"list" | "chat" | "details">(selectedOrderId ? "chat" : "list");
   const [groupSettingsOpen, setGroupSettingsOpen] = useState(false);
   const [listMenu, setListMenu] = useState<{ x: number; y: number; orderId: string; preference: OrderGroupPreference; row: HTMLElement | null } | null>(null);
   const [activeOrderId, setActiveOrderId] = useState<string | null>(selectedOrderId ?? null);
-  useEffect(() => { if (selectedOrderId) setActiveOrderId(selectedOrderId); }, [selectedOrderId]);
+  useEffect(() => {
+    if (selectedOrderId === undefined) return;
+    setActiveOrderId(selectedOrderId);
+    setPane(selectedOrderId ? "chat" : "list");
+    if (!selectedOrderId) setGroupSettingsOpen(false);
+  }, [selectedOrderId]);
   const [groupPrefs, setGroupPrefs] = useState<OrderGroupPreferenceMap>(() => readOrderGroupPreferences(adminUserId));
   const groupPrefsRef = useRef(groupPrefs); groupPrefsRef.current = groupPrefs;
   const groupTriggerRef = useRef<HTMLButtonElement | null>(null);
@@ -183,7 +189,7 @@ export function OrderWorkbenchPane({ identity, adminUserId, operatorName, client
     groupPrefsRef.current = next;
     setGroupPrefs(next);
     storeOrderGroupPreferences(adminUserId, next);
-    window.dispatchEvent(new CustomEvent(ORDER_GROUP_PREF_EVENT, { detail: { snapshot: next } }));
+    window.dispatchEvent(new CustomEvent(ORDER_GROUP_PREF_EVENT, { detail: { snapshot: next, adminUserId } }));
   };
   const changeGroupPreference = (orderId: string, patch: Partial<OrderGroupPreference>) => {
     persistGroupPrefs(withGroupPreference(groupPrefsRef.current, orderId, patch));
@@ -235,8 +241,9 @@ export function OrderWorkbenchPane({ identity, adminUserId, operatorName, client
   // The unified directory owns its own row menu; it bridges local prefs/settings here.
   useEffect(() => {
     const onPreference = (event: Event) => {
-      const detail = (event as CustomEvent<{ orderId?: string; patch?: Partial<OrderGroupPreference>; snapshot?: OrderGroupPreferenceMap }>).detail;
+      const detail = (event as CustomEvent<{ orderId?: string; patch?: Partial<OrderGroupPreference>; snapshot?: OrderGroupPreferenceMap; adminUserId?: string }>).detail;
       if (!detail?.orderId || !detail.patch || detail.snapshot) return;
+      if (detail.adminUserId !== undefined && detail.adminUserId !== adminUserId) return;
       if (detail.patch.hidden === true) hideOrderGroup(detail.orderId);
       else changeGroupPreference(detail.orderId, detail.patch);
     };
@@ -321,7 +328,7 @@ export function OrderWorkbenchPane({ identity, adminUserId, operatorName, client
                 onContextMenu={(event) => { event.preventDefault(); event.stopPropagation(); setListMenu({ x: event.clientX, y: event.clientY, orderId: row.id, preference, row: event.currentTarget }); }}>
                 <span className="im-wb-row-av" data-kind="order" aria-hidden="true"><ReceiptText size={15} /></span>
                 <span className="im-wb-row-copy">
-                  <span className="im-wb-row-top"><b>{row.displayNo}</b>{preference.pinned ? <i className="im-wb-tag im-og-list-tag" data-tone="pinned">置顶</i> : null}{preference.muted ? <i className="im-wb-tag im-og-list-tag" data-tone="muted">免打扰</i> : null}{(row.unreadCount ?? 0) > 0 && !preference.muted ? <i className="im-wb-unread" aria-label={`${row.unreadCount} 条未读`}>{row.unreadCount! > 99 ? "99+" : row.unreadCount}</i> : null}</span>
+                  <span className="im-wb-row-top"><b>{row.displayNo}</b>{row.stageCards && ((row.stageCards.unknown ?? 0) > 0 || row.stageCards.attention?.state === "UNKNOWN") ? <i className="im-wb-tag" data-tone="warn">自动卡待核对</i> : null}{preference.pinned ? <i className="im-wb-tag im-og-list-tag" data-tone="pinned">置顶</i> : null}{preference.muted ? <i className="im-wb-tag im-og-list-tag" data-tone="muted">免打扰</i> : null}{(row.unreadCount ?? 0) > 0 && !preference.muted ? <i className="im-wb-unread" aria-label={`${row.unreadCount} 条未读`}>{row.unreadCount! > 99 ? "99+" : row.unreadCount}</i> : null}</span>
                   <span className="im-wb-row-snip"><em className="im-wb-order-state" data-tone={orderStageTone(row)}>{orderStageLabel(row)}</em><span className="im-wb-row-preview">{preview}</span></span>
                   {due || fact ? <span className="im-wb-row-foot">
                     {due ? <small>{due}</small> : null}
@@ -609,6 +616,7 @@ export function OrderWorkbenchPane({ identity, adminUserId, operatorName, client
           </RailSection>
 
           {/* 已结束订单的进度与终态只在顶部阶段条呈现；右栏不再重复状态卡。 */}
+          <StageCardAttentionNotice stageCards={Array.isArray(info.stageCards) ? info.stageCards : []} terminal={ended} />
           {ended ? null : <OrderFulfillmentSection key={info.orderId} orderId={info.orderId} displayNo={info.displayNo} viewerId={adminUserId} orderStatus={info.orderStatus} canManualClose={canManualClose === true && info.members.some((member) => member.party === "STAFF" && member.platformId === adminUserId)} {...(info.frozenInventory ? { frozenInventory: info.frozenInventory } : {})} />}
         </div>
         <Dialog open={groupSettingsOpen} onOpenChange={(open) => { if (!open) closeGroupSettings(); }}>
@@ -625,7 +633,7 @@ export function OrderWorkbenchPane({ identity, adminUserId, operatorName, client
   return (
     <OrderTeamPanel
       key={identity} identity={identity} realm="admin" layout="aside" client={client} connection={connection} active={active}
-      selectedOrderId={selectedOrderId ?? undefined}
+      selectedOrderId={selectedOrderId} controlledSelection={Boolean(onSelectedOrderChange)}
       sendAllowed={sendAllowed} request={request} onAuthError={onAuthError}
       gridPane={pane} gridDetailsOpen={detailsOpen}
       renderList={renderList} renderAside={renderAside} renderConversation={renderConversation}
@@ -634,7 +642,7 @@ export function OrderWorkbenchPane({ identity, adminUserId, operatorName, client
         event.preventDefault();
         setListMenu(null);
       }}
-      extraMenuItems={messageGroupItems} onExtraMenuAction={onMessageGroupAction} onSelectedOrderChange={setActiveOrderId}
+      extraMenuItems={messageGroupItems} onExtraMenuAction={onMessageGroupAction} onSelectedOrderChange={(orderId) => { setActiveOrderId(orderId); onSelectedOrderChange?.(orderId); }}
     />
   );
 }

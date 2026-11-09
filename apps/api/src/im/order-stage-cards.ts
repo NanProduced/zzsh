@@ -4,6 +4,7 @@ import type { Pool } from "pg";
 import { buildYunxinIdentityMarker, deriveYunxinAccountId, type ImIdentityKey } from "./identity-lifecycle";
 import type { ImTransportCard, ImTransportMessage } from "./im-contract";
 import { recordOrderGroupMessage } from "./order-team-access";
+import { stageCardSafeSendSql } from "./order-stage-card-retry";
 
 /**
  * O-01 stage cards. A card is an ordinary chat message; the order facts stay in
@@ -11,7 +12,7 @@ import { recordOrderGroupMessage } from "./order-team-access";
  * This worker turns committed order facts into at most one message per stage.
  */
 export type StageCardTransport = {
-  card(input: { conversationId: string; senderAccountId: string; receiverAccountId: string; card: ImTransportCard }): Promise<ImTransportMessage>;
+  card(input: { conversationId: string; senderAccountId: string; receiverAccountId: string; card: ImTransportCard; text?: string }): Promise<ImTransportMessage>;
   text?(input: { conversationId: string; senderAccountId: string; receiverAccountId: string; text: string; messageClientId?: string }): Promise<ImTransportMessage>;
 };
 
@@ -56,15 +57,11 @@ function isStageKind(value: string): value is StageCardKind {
   return (STAGE_KINDS as readonly string[]).includes(value);
 }
 
-function codedError(code: string): Error {
-  return Object.assign(new Error(code), { code });
-}
-
-function systemAccountOf(appId: string, row: DueRow): string {
+function systemAccountOf(appId: string, row: DueRow): string | null {
   const expected: ImIdentityKey = { provider: "yunxin", appId, realm: "system", kind: "SYSTEM", platformSubjectId: SYSTEM_SUBJECT };
   if (!row.system_account || row.system_status !== "READY" || row.system_subject !== SYSTEM_SUBJECT
     || row.system_account !== deriveYunxinAccountId(expected) || row.system_marker !== buildYunxinIdentityMarker(expected)) {
-    throw codedError("IDENTITY_PENDING");
+    return null;
   }
   return row.system_account;
 }
@@ -192,6 +189,7 @@ async function dueRows(options: OrderStageCardOptions, limit: number): Promise<D
        ) posting ON TRUE
        LEFT JOIN zzsh_iam.im_identity_mapping m ON m.id = g.system_identity_id
       WHERE sc.app_id = $1 AND sc.state = 'PENDING' AND sc.next_attempt_at <= clock_timestamp()
+        AND ${stageCardSafeSendSql("sc.failure_class")}
         AND g.team_state = 'READY' AND g.team_id IS NOT NULL
       ORDER BY CASE sc.kind WHEN 'ORDER_WELCOME' THEN 0 WHEN 'ORDER_OPENING' THEN 1 WHEN 'ORDER_ENDING' THEN 2 ELSE 3 END, sc.created_at, sc.id
       LIMIT $2`,
@@ -205,7 +203,8 @@ async function claim(options: OrderStageCardOptions, row: DueRow, tokenHash: str
         SET state = 'SENDING', attempt_count = attempt_count + 1,
             lease_until = clock_timestamp() + ($2::bigint * interval '1 millisecond'),
             lease_token_hash = $3, updated_at = clock_timestamp()
-      WHERE id = $1 AND app_id = $4 AND state = 'PENDING' AND next_attempt_at <= clock_timestamp()`,
+      WHERE id = $1 AND app_id = $4 AND state = 'PENDING' AND next_attempt_at <= clock_timestamp()
+        AND ${stageCardSafeSendSql("failure_class")}`,
     [row.id, options.leaseMs ?? 30_000, tokenHash, options.appId],
   );
   return changed.rowCount === 1;
@@ -233,28 +232,46 @@ async function retry(options: OrderStageCardOptions, row: DueRow, tokenHash: str
   );
 }
 
-async function deliver(options: OrderStageCardOptions, row: DueRow): Promise<void> {
-  if (!isStageKind(row.kind)) throw codedError("INVALID_STAGE_KIND");
+/** The channel may have accepted the message; only an operator may decide to send again. */
+async function unknown(options: OrderStageCardOptions, row: DueRow, tokenHash: string, reason: string): Promise<void> {
+  await options.pool.query(
+    `UPDATE zzsh_order.im_order_stage_card
+        SET state = 'UNKNOWN', lease_until = NULL, lease_token_hash = NULL, failure_class = $3,
+            updated_at = clock_timestamp()
+      WHERE id = $1 AND app_id = $2 AND state = 'SENDING' AND lease_token_hash = $4`,
+    [row.id, options.appId, reason, tokenHash],
+  );
+}
+
+type DeliveryPreparation =
+  | { kind: "SEND"; stageKind: StageCardKind; conversationId: string; systemAccount: string }
+  | { kind: "RETRY"; reason: "IDENTITY_PENDING" | "TEXT_TRANSPORT_UNAVAILABLE" | "INVALID_STAGE_KIND" };
+
+/** Everything that can fail before a transport call returns a value; no transport error is inspected. */
+function prepareStageCardDelivery(options: OrderStageCardOptions, row: DueRow): DeliveryPreparation {
+  if (!isStageKind(row.kind)) return { kind: "RETRY", reason: "INVALID_STAGE_KIND" };
   const systemAccount = systemAccountOf(options.appId, row);
-  const conversationId = `${systemAccount}|2|${row.team_id}`;
+  if (!systemAccount) return { kind: "RETRY", reason: "IDENTITY_PENDING" };
+  if (row.kind === "ORDER_WELCOME" && !options.transport.text) return { kind: "RETRY", reason: "TEXT_TRANSPORT_UNAVAILABLE" };
+  return { kind: "SEND", stageKind: row.kind, conversationId: `${systemAccount}|2|${row.team_id}`, systemAccount };
+}
+
+async function deliver(options: OrderStageCardOptions, row: DueRow, prepared: { stageKind: StageCardKind; conversationId: string; systemAccount: string }): Promise<void> {
   // Retries reuse cardId; a card-capable supplier must key delivery idempotency on it.
-  if (row.kind === "ORDER_WELCOME") {
-    if (!options.transport.text) throw codedError("TEXT_TRANSPORT_UNAVAILABLE");
-    await options.transport.text({ conversationId, senderAccountId: systemAccount, receiverAccountId: row.team_id, text: WELCOME_TEXT, messageClientId: row.card_id });
-  } else if (row.kind === "ORDER_SETTLED" && options.transport.text) {
-    // The NIM custom card type is not verified on the real App, so the settlement notice is a
-    // plain text message; it carries the posting time, which a bare card cannot.
-    await options.transport.text({ conversationId, senderAccountId: systemAccount, receiverAccountId: row.team_id, text: settledNoticeText(row.posted_at), messageClientId: row.card_id });
+  if (prepared.stageKind === "ORDER_WELCOME") {
+    await options.transport.text!({ conversationId: prepared.conversationId, senderAccountId: prepared.systemAccount,
+      receiverAccountId: row.team_id, text: WELCOME_TEXT, messageClientId: row.card_id });
   } else {
     await options.transport.card({
-      conversationId,
-      senderAccountId: systemAccount,
+      conversationId: prepared.conversationId,
+      senderAccountId: prepared.systemAccount,
       receiverAccountId: row.team_id,
-      card: { kind: row.kind, orderId: row.order_id, cardId: row.card_id },
+      card: { kind: prepared.stageKind, orderId: row.order_id, cardId: row.card_id },
+      ...(prepared.stageKind === "ORDER_SETTLED" ? { text: settledNoticeText(row.posted_at) } : {}),
     });
   }
   // The message is already out; a failed list projection must not make the sender retry it.
-  try { await recordOrderGroupMessage(options.pool, options.appId, conversationId, PREVIEWS[row.kind]); } catch { /* next real message refreshes the preview */ }
+  try { await recordOrderGroupMessage(options.pool, options.appId, prepared.conversationId, PREVIEWS[prepared.stageKind]); } catch { /* next real message refreshes the preview */ }
 }
 
 export async function scanOrderStageCards(options: OrderStageCardOptions, limit = 10): Promise<void> {
@@ -262,9 +279,16 @@ export async function scanOrderStageCards(options: OrderStageCardOptions, limit 
   await materialize(options);
   await options.pool.query(
     `UPDATE zzsh_order.im_order_stage_card
-        SET state = 'PENDING', lease_until = NULL, lease_token_hash = NULL,
+        SET state = 'UNKNOWN', lease_until = NULL, lease_token_hash = NULL,
             failure_class = 'LEASE_EXPIRED', updated_at = clock_timestamp()
       WHERE app_id = $1 AND state = 'SENDING' AND lease_until <= clock_timestamp()`,
+    [options.appId],
+  );
+  // Dirty PENDING rows with an unsafe failure reason must be reviewable, never sent.
+  await options.pool.query(
+    `UPDATE zzsh_order.im_order_stage_card
+        SET state = 'UNKNOWN', updated_at = clock_timestamp()
+      WHERE app_id = $1 AND state = 'PENDING' AND NOT ${stageCardSafeSendSql("failure_class")}`,
     [options.appId],
   );
   const now = (options.now ?? Date.now)();
@@ -281,11 +305,24 @@ export async function scanOrderStageCards(options: OrderStageCardOptions, limit 
       await finish(options, row, tokenHash, "SKIPPED", blocked);
       continue;
     }
+    const delivery = prepareStageCardDelivery(options, row);
+    if (delivery.kind === "RETRY") {
+      await retry(options, row, tokenHash, delivery.reason);
+      continue;
+    }
     try {
-      await deliver(options, row);
-      await finish(options, row, tokenHash, "SENT", null);
+      await deliver(options, row, delivery);
     } catch (error) {
-      await retry(options, row, tokenHash, failureClass(error));
+      // Any throw from here is a channel call result; it may already be visible.
+      await unknown(options, row, tokenHash, failureClass(error));
+      continue;
+    }
+    // The channel accepted the message. A failed SENT write must never cause a
+    // blind re-send; it becomes an operator-visible unknown instead.
+    try {
+      await finish(options, row, tokenHash, "SENT", null);
+    } catch {
+      await unknown(options, row, tokenHash, "SENT_RECORD_FAILED");
     }
   }
 }

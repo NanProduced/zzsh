@@ -59,9 +59,9 @@ const DUE_BUCKETS = ["到期前 24 小时", "订单已到期", "超期 1 天", "
 
 const SCENES: readonly Scene[] = [
   { key: "SERVICE_WELCOME", group: "welcome", label: "在线咨询欢迎消息", when: "新一轮在线咨询创建并完成建群后", sender: "洲洲助手（系统）", note: "只在新轮次开场发送；当前接待中的轮次沿用原消息。", status: "editable", field: "serviceMessage" },
-  { key: "COMPLAINT_WELCOME", group: "welcome", label: "投诉入口欢迎消息", when: "从投诉入口发起新一轮咨询后", sender: "洲洲助手（系统）", note: "投诉仍复用在线咨询线程，不另建工单或投诉群。", status: "editable", field: "complaintMessage" },
-  { key: "QUEUE_NO_STAFF", group: "reception", label: "暂无可用客服", when: "用户已留言，自动派单没有合格候选且不是满载", sender: "洲洲助手（系统）", note: "每轮最多一次；发送失败不会反复重试。", status: "builtin" },
-  { key: "QUEUE_BUSY", group: "reception", label: "客服繁忙排队", when: "自动派单发现客服在线但均已满载", sender: "洲洲助手（系统）", note: "与“暂无可用客服”共用一轮一次标记，不重复轮播。", status: "builtin" },
+  { key: "COMPLAINT_WELCOME", group: "welcome", label: "投诉入口欢迎消息", when: "从投诉入口发起新一轮咨询后", sender: "洲洲助手（系统）", note: "投诉使用独立持久线程；不另建工单或投诉群。", status: "editable", field: "complaintMessage" },
+  { key: "QUEUE_NO_STAFF", group: "reception", label: "暂无可用客服", when: "用户已留言，自动派单没有合格候选", sender: "洲洲助手（系统）", note: "每轮最多一次；发送失败不会反复重试。", status: "builtin" },
+  { key: "QUEUE_BUSY", group: "reception", label: "客服繁忙排队（已停用）", when: "历史上客服在线但均已满载时使用", sender: "洲洲助手（系统）", note: "业务不设客服接待硬上限，当前不会再触发；保留历史说明。", status: "builtin" },
   { key: "AGENT_GREETING", group: "reception", label: "客服接入问候", when: "自动分配或手动接入成功，客服成为本轮接待人", sender: "接待客服身份（系统代发）", note: "客服名称由服务端填入；不代表客服已手动输入首条回复。", status: "builtin" },
   { key: "TRANSFER_RECEIVED", group: "reception", label: "转交成功提示", when: "转交完成并确认新的接待客服后", sender: "洲洲助手（系统）", note: "只用于主动转交；新客服名称由服务端填入。", status: "builtin" },
   { key: "ORDER_WELCOME", group: "orders", label: "订单群欢迎", when: "付款后订单群准备就绪，且群内还没有更早的发言", sender: "洲洲助手（系统）", note: "群内已有沟通时跳过晚到的欢迎；每个订单阶段只发一次。", status: "builtin" },

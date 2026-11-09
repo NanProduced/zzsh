@@ -624,7 +624,7 @@ export async function handleAdminBff(request: NodeRequest, response: NodeRespons
     }
     return;
   }
-  if (path === "/system/storage" || path === "/system/storage/check" || path === "/system/sms" || path === "/system/settlement-refund-policy") {
+  if (path === "/system/storage" || path === "/system/storage/check" || path === "/system/sms" || path === "/system/settlement-refund-policy" || path === "/system/opening-auto-confirm") {
     await handleSystemConfiguration(request, response, options.supply);
     return;
   }
@@ -650,11 +650,13 @@ export async function handleAdminBff(request: NodeRequest, response: NodeRespons
     const legacyContinuationPath = /^\/orders\/legacy\/legacy_order_[a-f0-9]{40}\/continuation\/(?:preview|propose|confirm|reject|hold|release|confiscate|duties\/[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\/(?:mature|void|owner-credit|commission-credit|refund-case|demo-refund))$/.test(path);
     const prestartReviewPath=/^\/orders\/[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\/prestart-termination\/[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\/review$/.test(path);
     const manualClosePath=/^\/orders\/[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\/manual-close$/.test(path);
+    const progressReminderPath=/^\/orders\/[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\/progress-reminders$/.test(path);
+    const openingGenerationRetryPath=/^\/orders\/[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\/opening-generation\/retry$/.test(path);
     const supportCancelPath=/^\/orders\/[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\/support-cancel$/.test(path);
     const supportUnpaidCancelPath=/^\/orders\/[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\/support-unpaid-cancel$/.test(path);
     const memberInvitePath=/^\/orders\/[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\/members$/.test(path);
     const legacyTeamCreatePath=/^\/orders\/legacy_order_[a-f0-9]{40}\/create-team$/.test(path);
-    if (method !== "GET" && !(method === "POST" && (settlementPath || legacyContinuationPath||prestartReviewPath||manualClosePath||supportCancelPath||supportUnpaidCancelPath||memberInvitePath||legacyTeamCreatePath))) {
+    if (method !== "GET" && !(method === "POST" && (settlementPath || legacyContinuationPath||prestartReviewPath||manualClosePath||progressReminderPath||openingGenerationRetryPath||supportCancelPath||supportUnpaidCancelPath||memberInvitePath||legacyTeamCreatePath))) {
       sendError(response, 404, API_V1_ERROR_CODES.NOT_FOUND, "Resource not found", requestId);
       return;
     }

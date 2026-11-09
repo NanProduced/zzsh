@@ -741,12 +741,13 @@ function OpeningPanel({ opening, order, party, onChanged }: { opening: Settlemen
   };
   return <div className="order-trade-block">
     <h3>{confirmed ? "已确认期初库存" : "期初库存确认"} <span className="order-trade-tag">第{opening.versionNo}版</span> <span className="order-trade-tag is-accent">{tag}</span></h3>
-    <p className="order-muted">{confirmed ? "以下为已生效的开租库存，确认方式见下方记录；开租后按结算记录核对消耗。" : "期初数量由客服按交付时的实际库存代录；请双方核对同一版本，当事人无法操作时可联系客服协助。付款、建群与沟通都不等于已开租。"}</p>
+    <p className="order-muted">{confirmed ? "以下为已生效的开租库存，确认方式见下方记录；开租后按结算记录核对消耗。" : "期初数量取自本单冻结报价；请双方核对同一版本，资料异常时联系客服处理。付款、建群与沟通都不等于已开租。"}</p>
     <OpeningLines order={order} opening={opening} heading={confirmed ? "开租时数量" : "期初数量"} />
     {unknown ? <UnknownNotice label="期初确认结果未知" message={unknown} onQuery={() => void query()} onOpenOrder={onChanged} /> : null}
     {error ? <p className="order-inline-notice" role="alert">{error.message}</p> : null}
     {!confirmed && !acked && !unknown ? <button type="button" className="button" onClick={() => void confirm()} disabled={busy}>{busy ? "确认中…" : "确认期初并开租"}</button> : null}
     {!confirmed && acked ? <p className="order-muted"><Clock3 size={14} aria-hidden="true" /> {ackText(myAck, true)}；等待对方确认后正式开租。</p> : null}
+    {!confirmed && opening.status === "DRAFT" && opening.autoConfirmDueAt ? <p className="order-muted">双方未确认时，将于 {formatOrderTime(opening.autoConfirmDueAt)} 自动确认并开始租期。</p> : null}
     <RecordList title="确认记录" records={acks.map((ack) => ({ label: ack.source === "PARTY" ? `${partyLabel(ack.party)}确认期初` : ack.source === "ON_BEHALF" ? `客服协助${partyLabel(ack.party)}确认期初` : ack.source === "AUTO" ? `${partyLabel(ack.party)}期初自动确认` : `${partyLabel(ack.party)}期初确认已记录`, time: ack.createdAt ?? null }))} />
     {opening.confirmedAt ? <p className="order-muted">开租时间：{formatOrderTime(opening.confirmedAt)}</p> : null}
   </div>;
@@ -1225,7 +1226,11 @@ function SettlementAction({ order, party, onChanged, onStageFacts }: { order: Or
   const rejected = current?.decisions?.some(decision => decision.action === "REJECT") === true;
   return <section className="order-detail-section order-trade-panel" aria-label="开租与结算">
     <div className="order-trade-heading"><h2 className="order-section-title">开租与结算</h2><button type="button" className="button quiet button--sm" onClick={refresh}><RefreshCw size={14} aria-hidden="true" />刷新</button></div>
-    {!opening ? <div className="order-trade-block"><h3>期初库存</h3><p className="order-muted">等待受权客服按实际交付录入期初库存后，双方在同一条目上确认并开始计租。付款与建群都不会自动开租。</p></div>
+    {!opening ? <div className="order-trade-block"><h3>期初库存</h3><p className="order-muted">{data.openingGeneration?.state === "REVIEW_REQUIRED" || data.openingGenerationRecoveryRequired
+      ? data.openingGeneration?.reason === "LEGACY_V1_QUOTE_REVIEW"
+        ? "本单使用旧版建单，缺少个性化资金/包赔依据，系统不会自动生成开租清单；请联系客服按未开租取消退款或使用新版重新下单。"
+        : "付款已接纳，但本单冻结资料不足或自动生成记录暂不可用，开租清单正在等待客服核对。订单页与聊天不受影响。"
+      : "付款接纳后系统会按本单冻结报价生成开租清单；当前尚未读取到清单，请稍后刷新或联系客服核对。"}</p></div>
       : <OpeningPanel opening={opening} order={order} party={party} onChanged={refresh} />}
     {opening && data.rentalStarted ? <>
       {posting ? <PostingResult data={data} order={order} party={party} posting={posting} /> :

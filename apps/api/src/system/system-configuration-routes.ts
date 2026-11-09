@@ -9,6 +9,10 @@ import { ALLOWED_IMAGE_MIMES, MAX_MEDIA_BYTES } from "../supply/media";
 import { requireAdminAccess, runIdempotentWrite, safely, type SupplyResponse, type SupplyRuntimeOptions } from "../supply/supply-routes";
 import { bodyOf, ensureOnlyFields, forbidden, headerValue, invalid, notFound, sendJson, type SupplyNodeRequest } from "../supply/supply-util";
 import { readSettlementRefundPolicy, updateSettlementRefundPolicy, validateSettlementRefundPolicy, type SettlementRefundPolicyInput } from "../order/settlement-refund-policy";
+import {
+  readOpeningAutoConfirmPolicy, updateOpeningAutoConfirmPolicy, validateOpeningAutoConfirmPolicy,
+  type OpeningAutoConfirmPolicyInput,
+} from "../order/opening-auto-confirm-policy";
 import { SMS_ADDITIONAL_SCENES, SMS_CONFIGURATION_V1_SCENES, type SmsTemplateScene } from "../auth/sms-templates";
 
 type StorageCheck = {
@@ -28,10 +32,12 @@ export async function handleSystemConfiguration(
   await safely(response, requestId, async () => {
     const url = new URL(request.originalUrl ?? request.url ?? "", options.apiOrigin);
     const policy = /^\/api\/(?:v1\/admin|bff\/admin)\/system\/settlement-refund-policy$/.test(url.pathname);
+    const openingPolicy = /^\/api\/(?:v1\/admin|bff\/admin)\/system\/opening-auto-confirm$/.test(url.pathname);
     const sms = /^\/api\/(?:v1\/admin|bff\/admin)\/system\/sms$/.test(url.pathname);
     if (!(request.method === "GET" && /^\/api\/(?:v1\/admin|bff\/admin)\/system\/storage(?:\/check)?$/.test(url.pathname))
       && !(request.method === "GET" && sms)
-      && !(policy && (request.method === "GET" || request.method === "PUT"))) throw notFound();
+      && !(policy && (request.method === "GET" || request.method === "PUT"))
+      && !(openingPolicy && (request.method === "GET" || request.method === "PUT"))) throw notFound();
     if (url.searchParams.size) throw invalid("System configuration does not accept query parameters");
     const origin = headerValue(request.headers.origin);
     if (request.method !== "GET" && origin === undefined
@@ -68,6 +74,23 @@ export async function handleSystemConfiguration(
         { realm: "admin", id: context.userId, sessionId: context.sessionId }, input,
         async client => authorize(client),
         async client => ({ status: 200, body: await updateSettlementRefundPolicy(client, { id: context.userId, sessionId: context.sessionId }, input, requestId) }));
+      return;
+    }
+    if (openingPolicy) {
+      if (request.method === "GET") {
+        const data = await withTransaction(options.pool, async client => { await authorize(client); return readOpeningAutoConfirmPolicy(client); });
+        sendJson(response, 200, data, requestId);
+        return;
+      }
+      const body = bodyOf(request);
+      ensureOnlyFields(body, ["waitMinutes", "expectedRevision"]);
+      const input = body as OpeningAutoConfirmPolicyInput;
+      validateOpeningAutoConfirmPolicy(input);
+      await runIdempotentWrite(options, request, response, requestId,
+        { principalId: context.userId, operation: "order.opening.auto_confirm.policy.update", resourceId: "global" },
+        { realm: "admin", id: context.userId, sessionId: context.sessionId }, input,
+        async client => authorize(client),
+        async client => ({ status: 200, body: await updateOpeningAutoConfirmPolicy(client, { id: context.userId, sessionId: context.sessionId }, input, requestId) }));
       return;
     }
     const checking = url.pathname.endsWith("/check");

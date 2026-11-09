@@ -385,6 +385,8 @@ test("collapsing details in the unified inbox leaves a single conversation colum
   assert.ok(consultationRule > desktop, "the consultation pane collapses to one column from 1100px up");
   assert.match(css.slice(consultationRule, consultationRule + 160), /grid-template-columns:\s*minmax\(0,\s*1fr\)/, "no 400-460px empty track remains");
   assert.ok(css.indexOf('.im-wb-root[data-unified="true"] .im-wb-pane--orders .order-team-grid[data-details="false"]') > desktop, "the order grid keeps its own single-column rule");
+  assert.ok(css.includes('.order-team-grid[data-details="true"] .order-team-detail > .im-wb-details'), "the 1280 overlay target includes the display-contents wrapper");
+  assert.doesNotMatch(css, /\.order-team-grid\[data-details="true"\] > \.im-wb-details/, "the overlay never targets a non-existent direct child");
 });
 
 for (const scenario of ["connected", "no-permission", "disconnected"]) {

@@ -14,7 +14,7 @@ IM功能正式追加为0125–0141；0000–0124历史字节不改。带旧私�
 
 ## 管理端咨询上下文只读接口
 
-`GET /api/v1/im/admin/consultations/:id/events` 与 `GET /api/v1/im/admin/consultations/:id/context` 经管理 BFF 同路径转发，仅允许 GET。在只读、可重复读事务中重验会话/PIN、最新 `im.support.read` 和 App/咨询归属；范围为本人负责或有接待资格的未分配咨询，不依赖 SDK 在线、不建立云信身份。投诉入口沿统一咨询接待权限；CLOSED、跨 App、他人咨询和不存在对象统一404。
+`GET /api/v1/im/admin/consultations/:id/events` 与 `GET /api/v1/im/admin/consultations/:id/context` 经管理 BFF 同路径转发，仅允许 GET。在只读、可重复读事务中重验会话/PIN、最新 `im.support.read` 和 App/咨询归属；范围为本人负责或有接待资格的未分配咨询，不依赖 SDK 在线、不建立云信身份。投诉线程另要求 `im.support.complaint`；CLOSED、跨 App、他人咨询和不存在对象统一404。
 
 - `events` 接受 `limit`（默认20、1–50）和 `cursor`。首屏为最近一页、页内升序，`nextCursor` 指向更早页；游标绑定咨询并保留数据库微秒精度，按 `(created_at,id)` 翻页。非法/重复/未知参数返回400。仅输出 `id/type/occurredAt/actor{kind,displayName}/from/to`，不输出事件原始 details 或云信账号。系统事件显示“系统”，姓名为当前投影而非历史姓名快照，缺失管理员名降级“客服”。
 - `context` 不接受查询参数，输出 `consultationId/version/service/user/subject/membership`。用户仅包含本咨询已授权的主体 ID（`publicId`）、展示名和安全 HTTP(S) 头像；不含联系方式、证件或账户金额。无关联引用为 `subject.status=absent`；显式 order/account/listing 前缀优先；旧裸引用只在受控来源唯一命中且通过对象关系/公开可见性后解析，否则 `unresolved`。已关联订单可返回用户在该订单的 `party=RENTER|OWNER`，不按用户全局角色推断。本树会员投影未集成时返回 `membership.status=unavailable`，不能解释为普通会员。
@@ -22,7 +22,7 @@ IM功能正式追加为0125–0141；0000–0124历史字节不改。带旧私�
 - `GET /api/v1/im/admin/consultations/:id/legacy-orders/:legacyOrderId` 经管理 BFF 同路径转发，只接受 GET；在只读事务内重验会话、咨询接待权限、App 归属，以及该咨询用户与旧单的当事人关系，仅返回旧单业务号、用户在本单的身份及站内目标，不含金额。消息文本中的订单字段不作为核验依据；打开完整订单和资金仍按独立订单、游戏范围与财务权限检查。接口实现与隔离测试不代表真实云信或部署验收。
 - 这些读取不产生业务事件、派单、建群或供应商调用。事件接口不是聊天历史归档或关闭操作结果查询；不能用目录缺席或事件缺席判断原关闭是否完成。实现不代表运行环境已装配或真实 PostgreSQL/Auth/HTTP 已验收。
 
-用户端通过全站共享客服容器进入在线客服或投诉咨询；管理员通过客服工作台处理受权队列。咨询与支付后的订单履约群是不同业务对象。订单群已有受控后端建群闭环及买家/号主/客服文字及图片入口，三方已完成local-fake浏览器联验；独立非生产App的订单群文字/图片与历史恢复已验证，完整履约及生产渠道尚未验收。
+用户端通过全站共享客服容器进入在线客服或投诉咨询；业务咨询与投诉反馈各自保留一条持久线程，历史分别保留。管理员通过客服工作台处理受权队列，管理端按 `kind=SERVICE|COMPLAINT` 分开筛选；投诉另要求 `im.support.complaint`，默认只授予运营预设角色，可由运营配置给指定客服。迁移 `0181` 为升级前仍负责 `WAITING/ACTIVE` 投诉、且仅依赖客服预设的客服写入对象级 `im_complaint_handover_grant`，只保护具体会话，不扩大未分配投诉或新派单；个人 `DENY` 优先。`0181/0182` 必须在同一 pending 迁移批次和停写窗口执行，迁移预检拒绝两者分批，避免跨批新投诉或转交获得对象授权。投诉读取（含消息、事件、上下文和巡检只读）统一要求该权限。咨询与支付后的订单履约群是不同业务对象。订单群已有受控后端建群闭环及买家/号主/客服文字及图片入口，三方已完成local-fake浏览器联验；独立非生产App的订单群文字/图片与历史恢复已验证，完整履约及生产渠道尚未验收。
 
 订单付款接纳具备隔离受控入口：成功事实、PAID与按服务端App绑定的唯一WAITING记录同事务提交，不开放普通HTTP付款成功入口。本地派单可将WAITING转为ASSIGNED并记录负责人、时刻和审计；ASSIGNED与群READY分别表达，也不开始租用或首响计时。买卖双方IM身份尚未就绪不影响本地付款/分配事实。
 
@@ -44,7 +44,7 @@ IM功能正式追加为0125–0141；0000–0124历史字节不改。带旧私�
 - 先持久化计划与发送标记，再在事务外请求云信。合法候选Team ID先保存，精确读回归属、类型、名称、成员额度、控制配置及全部成员后，READY、JOINED、操作成功和审计同事务提交。建群失败不撤销付款、释放占用或重复推进派单轮转。
 - 响应丢失、已发送后租约失效和写回未知禁止再次CREATE。有候选ID时只核验原操作绑定的同一群；无ID或不匹配时保留NEEDS_REVIEW。只读收敛是服务能力，无任意改群/重建HTTP入口。咨询与订单附着群时共用App+Team绑定锁并互查，避免跨业务重复绑定。
 - 订单与咨询共用窄租约/远端互斥助手：持锁连接承担续租和候选回写，短事务期间不插入定时续租；网络等待不持App事务闸门。租约与本地锁不能对已发往云信的请求提供fencing。
-- `AuthRuntimeOptions.orderTeams`显式配置成员额度、周期与批次，依赖现有provider和身份生命周期；缺省关闭，不自动注入假成功。已分配订单扫描补漏，派单提交后唤醒，Nest关闭等待在途后才关池。订单与咨询共用客服个人接待容量，实际阈值来自服务配置；供应商真实App额度仍需单独核验。
+- `AuthRuntimeOptions.orderTeams`显式配置成员额度、周期与批次，依赖现有provider和身份生命周期；缺省关闭，不自动注入假成功。已分配订单扫描补漏，派单提交后唤醒，Nest关闭等待在途后才关池。订单与咨询不再设客服个人接待硬上限，`active_load` 仅用于负载展示；供应商真实App额度仍需单独核验。
 - 扫描的过期处理、首次建群和候选只读核验各有独立的有界循环窗口；单项锁忙或对象状态冲突记录安全分类并继续，回绕后重试，首窗口全锁也不阻断窗口外订单。游标按连接池/App保存在内存，重启从头开始；数据库/连接池全局故障终止本轮，已发送CREATE的未知结果始终不得重建。
 - `GET /api/v1/orders/:id/im?operation=read|send`及对应Admin订单接口返回最小状态与成员投影，用户Web经`/api/orders/:id/im`薄转发。买家/号主按当前会话与订单归属；客服按当前会话、游戏范围、同单JOINED及im.support.read授权，发送另需accept。所有JOINED客服平权，负责人不是排他授权；普通订单DTO不返回Team ID，群外管理员不能凭order.read访问。
 
@@ -61,18 +61,30 @@ IM功能正式追加为0125–0141；0000–0124历史字节不改。带旧私�
 ## 首次接待提醒与同群补派
 
 - 通过既有订单worker显式启用，且须同App首响入口生效；默认关闭，历史群保持NOT_STARTED。新READY群按数据库时钟设2分钟提醒、4分钟补派，提醒只记录一次；不把付款/ASSIGNED或前端倒计时当READY时间。
-- 补派在原Team添加尚未JOINED的合格客服，不重建群、不移除原客服。assigned_admin_id/assigned_at保留首次分配事实，responsible_admin_id仅在运行中ADD精确读回成功后更新。无候选进入EXHAUSTED，容量/归属冲突或未知结果进入待复核；不放宽资格或凭轮次自动判成功。
+- 补派在原Team添加尚未JOINED的合格客服，不重建群、不移除原客服。assigned_admin_id/assigned_at保留首次分配事实，responsible_admin_id仅在运行中ADD精确读回成功后更新。无候选进入EXHAUSTED，归属冲突或未知结果进入待复核；不放宽资格或凭轮次自动判成功。
 - CREATE每单终身唯一；ADD_MEMBER/BOT_NOTICE按单与轮次留独立操作和审计。已发送ADD结果未知只读核验原Team，不盲目重发；BOT未知不重发，也不阻下一轮合法ADD。取消且未发送的ADD保留历史，目标恢复资格后可用新轮次重选并复用PLANNED成员绑定。
 - 可信客服首响停止后续提醒/补派，只取消未发送操作；已发送的迟到结果保留实际成员/操作事实，不重启补派、不覆盖已停止的负责人。扫描的五阶段使用有界窗口，小批次余数跨轮轮转；Nest关闭等待在途结束后再关池。
 - 只读投影复用订单IM授权、JOINED群目录及受权订单摘要，暴露首响、提醒时间、轮次、负责人/协作与需复核标记。负责人不形成新的排他权限；普通客服不能读取未参与群，order.read摘要权限也不等于聊天权限。
 
 结算属于订单领域：正常结算由买卖双方确认同一版本后自动生效，提前结算另需客服复核；客服改单须重新确认，特殊人工金额调整沿既有受审流程。云信的首响、接待提醒、补派、机器人消息和已读不构成任何结算确认、责任认定或资金指令。本包不实现这些交易流程，也不因消息送达自动启动退款、入账或72小时归档。
 
+## 订单阶段卡自定义消息
+
+订单阶段卡（开租确认、结束确认、结算完成）由服务端以 NIM 自定义消息（`message_type=100`）发送，`attachment.raw` 只承载 `{schema:"zzsh.order-card",version:1,kind,orderId,cardId}`。NIM 只负责存储和投递；卡片 UI、按钮动作和权限校验仍由 Web/Admin 客户端及订单接口完成。
+
+- 客户端只解析平台自有的严格形状；未知版本、额外字段、非法 ID 或伪造内容按普通文本/不支持消息处理。
+- 卡片金额、双方、开租/结算状态一律来自受权订单读取，不信任消息体。
+- 自定义消息带可读文本 preview；旧客户端显示该文本或“暂不支持此消息类型，请到订单详情处理”，不阻断订单详情兜底。
+- 发送异常、发送后 `SENT` 落库失败和过期发送租约均保留为 `UNKNOWN`，worker 不自动重发；只有身份未就绪、文本通道缺失等待发前检查结果才退避重试，判定发生在 transport 调用之前，不靠捕获错误码区分。查询与领取 SQL 都只接受失败原因为空或 `IDENTITY_PENDING`/`TEXT_TRANSPORT_UNAVAILABLE` 的 PENDING 卡，其他 PENDING 原因保留待核对；人工重排复用同一安全集合。阶段卡账本记录尝试、跳过、未知和失败原因；客服工作台在统一会话列表、订单群列表和详情明确提示“自动卡发送结果待核对”，要求先在群内核对，确认未发送后再按当前阶段手动发送进度提醒；终态订单只提示核对，不重新开放写操作。
+- 真实 App 的 type 100 投递、客户端解析和旧版本表现须在目标环境单独验收；local-fake 的卡片结果不扩大真实验收范围。
+
+客服工作台的常规“异常处理/核对结束方式”入口已移除，保留未开租取消和既有 `MANUAL_CLOSE` 历史只读记录；“发起开租确认”改为阶段进度提醒。`POST /api/v1/admin/orders/:orderId/progress-reminders` 要求本单结算写权限与游戏范围，服务端按真实状态选择待开租、待结算确认或租期中提醒，只提醒未确认/未决定方；同一 `Idempotency-Key` 复用同一提醒记录和云信客户端消息 ID；发送用租约认领，成功后落 `SENT` 并记录服务端消息 ID，迟到失败不能覆盖成功。明确拒绝可同键重试；超时/传输错误记为 `UNKNOWN`，不假设相同客户端 ID 一定去重，前端按账号和订单保存待恢复键，要求先在群内核对，确认未发送后再新建提醒。原键重试前复核当前阶段：阶段或接收方已变化时结束旧请求并返回 `STAGE_CHANGED`，不发送旧阶段文案。提醒发送使用订单状态卡而非固定文本，并登记群预览/未读投影；投影失败不回滚或谎称渠道发送失败。提醒不创建清单、不替人确认、不提交结算或退款。群未就绪、无待办或已过账时返回原因而不发消息。新平台订单的开租清单在付款接纳事务内自动生成，客服不再需要手工录入；仅迁移前没有自动生成结论的历史已付款单保留原有手工入口。
+
 ## 订单文字入口
 
-- 买家/号主从个人中心租入/出租订单打开共享客服容器的“我的订单群”；客服工作台提供“我参与的订单群”。Admin的`GET /api/v1/admin/orders/im-groups`按JOINED、当前read权限及游戏范围分页，独立于order.read管理目录；群外Boss不因此获得群访问权。
+- 买家/号主从个人中心租入/出租订单打开共享客服容器的“我的订单群”；客服工作台提供“我参与的订单群”。Admin的`GET /api/v1/admin/orders/im-groups`按JOINED、当前read权限及游戏范围分页，独立于order.read管理目录；群外Boss不因此获得群访问权。统一会话列表的订单队列按管理员/会话绑定，身份变化立即隐藏旧列表并丢弃旧响应；每页50条，刷新按已加载页链重新读取（最多10页）并替换旧快照，翻页与刷新不混用旧cursor；失败/部分失败保留可重试提示，搜索仅覆盖已加载会话。
 - 两个容器复用原NIM连接，订单面板没有另一套登录或连接管理器。订单与咨询的上下文、授权、消息与草稿分别处理；订单发送和历史操作前请求订单IM授权，等待结束再次检查身份、App、订单、Team及客户端代次。收起或切换对象不触发付款、分配或建群。
-- 固定摘要只展示订单编号/群名、游戏、账号摘要及平台成员昵称头像/身份；内部accid不作默认昵称，会员/实名暂无受权投影时显示未知。没有电话、密码或验证码摘要，也没有新增可发送卡片协议。
+- 固定摘要只展示订单编号/群名、游戏、账号摘要及平台成员昵称头像/身份；内部accid不作默认昵称，会员/实名暂无受权投影时显示未知。没有电话、密码或验证码摘要。订单阶段卡使用 NIM 自定义消息（type 100）承载最小 `schema/version/kind/orderId/cardId`；客户端只解析平台自有形状，金额/身份/状态仍从受权订单读取。用户分享的“关联订单卡”仍走版本化文本标记，两者不混用。
 - 本包提供文字发送、实时合并、锚点历史分页及重连后的历史读取。send-only撤权保留合法历史与草稿；read撤权清除当前敏感状态，401/423交回既有认证刷新。订单授权请求按当前上下文单飞，过期结果不能恢复权限。
 - `local-fake`仅为显式测试transport：消息仍先经Cookie/BFF/API对象授权，再进入受控内存传输；它不是云信真实消息验收。独立非生产App的实际验收范围见下方说明；本地替身结果不扩大真实验收范围。
 
@@ -86,8 +98,8 @@ IM功能正式追加为0125–0141；0000–0124历史字节不改。带旧私�
 
 ## 本地派单
 
-- 客服需ACTIVE、未停用、同App的READY身份映射、手动AVAILABLE、CONNECTED且2分钟内心跳新鲜，当前有im.support.read/accept；订单另按游戏范围，Boss按既有范围规则豁免。容量按当前咨询负载加负责的在租订单群数计算，默认3，分配、领取、转交与管理接管共用实际配置。
-- 订单/咨询分别按last_order_assigned_at、last_consultation_assigned_at最早优先，NULL先、管理员ID打平；成功分配同事务更新时间，presence连接version不变。投诉入口保留独立意图以选择欢迎消息，新轮次仍复用 SERVICE 线程和 read/accept 权限；历史 COMPLAINT 可读，继续咨询不新建投诉线程。
+- 客服需ACTIVE、未停用、同App的READY身份映射、手动AVAILABLE、CONNECTED且2分钟内心跳新鲜，当前有im.support.read/accept；订单另按游戏范围，Boss按既有范围规则豁免。业务不设客服接待硬上限；咨询与订单群均按在线合格客服分配，`active_load` 只作统计，不再以“咨询数 + 负责订单群数”阻断派单。
+- 订单/咨询分别按last_order_assigned_at、last_consultation_assigned_at最早优先，NULL先、管理员ID打平；成功分配同事务更新时间，presence连接version不变。投诉是独立持久线程：新轮次复用同一用户投诉线程，需 `im.support.complaint`；历史 SERVICE 线程中的合并期消息不自动拆分。
 - 付款发布、订单分配及咨询分配使用同App事务闸门；可派订单按付款接纳时间/订单ID先处理。单批未处理完时咨询保持等待，手动接入/转交提示重试；已先完成的咨询不追溯转走。没有合格订单客服的项保留WAITING/NO_ELIGIBLE_STAFF，不堵住其他可派业务。
 - 派单及咨询关闭/转交恢复在对象锁前有序锁定资格与presence；资格行/角色/范围锁忙使整轮延期，不跳到另一客服。供应商调用不占App事务闸门；未知结果仍按原租约/CAS隔离。
 - 本地调度仅通过AuthRuntimeOptions.supportDispatch显式传入appId/batchLimit/intervalMs开启，缺省关闭，无环境变量兜底。启动扫描、presence提交后唤醒与周期扫描共用有界消费者，防重叠，Nest关闭时先等在途再关池。主环境不会因合入自动启动。
@@ -138,7 +150,7 @@ read客户端身份与send能力分离：只撤接待权限时保留合法连接
 
 已完成咨询基础的共同迁移、平台Cookie/BFF与受控替身联验，以及独立非生产App的动态Token、真实NIM登录、SYSTEM群主咨询Team、双向文字、当前成员参与期间历史与网络重连验证。Server API按V1/V2分别使用官方端点，返回结构和成员归属严格校验。测试中已知创建成功后的人工修复不代表通用未知结果自动恢复能力。
 
-独立非生产App已验证SERVICE咨询正常关闭及一次旧CLOSE只读对账、平台PIN/会话失效与SERVICE发送权限拒绝；本地测试覆盖客户端清理、迟到响应隔离、presence竞争、再次咨询入口和当前页授权恢复。订单群CREATE已在独立非生产App验证；未知结果收敛及对象权限的完整负向矩阵仍以受控provider和隔离PG验证为主。真实同页权限热恢复完整链路、COMPLAINT独立Team、订单履约其他真实能力、远端在线撤权和进程中断后供应商对账仍须单独验收；回调、生产图片渠道、语音、商品卡和完整转交协作未完成。默认关闭，代码合入不启用主环境、不运行主库迁移，也不表示生产客服上线。
+独立非生产App已验证SERVICE咨询正常关闭及一次旧CLOSE只读对账、平台PIN/会话失效与SERVICE发送权限拒绝；本地测试覆盖客户端清理、迟到响应隔离、presence竞争、再次咨询入口、COMPLAINT 独立线程与投诉权限门禁和当前页授权恢复。订单群CREATE已在独立非生产App验证；未知结果收敛及对象权限的完整负向矩阵仍以受控provider和隔离PG验证为主。真实同页权限热恢复完整链路、COMPLAINT 独立 Team 的真实云信建群/收发、NIM 自定义订单卡的真实 App 投递与解析、订单履约其他真实能力、远端在线撤权和进程中断后供应商对账仍须单独验收；回调、生产图片渠道、语音和完整转交协作未完成。默认关闭，代码合入不启用主环境、不运行主库迁移，也不表示生产客服上线。
 
 首响事件入口、发送批准与投递关联、恢复游标及数据库守卫已完成本地API和隔离PostgreSQL验收。0043/0044仅在专用回归库应用；真实回调/抄送配置、公网接入和供应商验签尚未验收，不能以合成签名证据替代。
 
@@ -146,8 +158,8 @@ read客户端身份与send能力分离：只撤接待权限时保留合法连接
 
 ## 巡视、统计与最小售后记录
 
-- `GET /api/v1/im/admin/audit/conversations` 要求 `im.support.management.read`，支持 limit/cursor、type（SERVICE、历史 COMPLAINT、ORDER）及 adminUserId。省略过滤表示全部；过滤条件变更须丢弃旧游标。订单活动时间优先消息活动，再建群/建单时间。historyState 区分 AVAILABLE、NOT_ESTABLISHED、LEGACY_UNAVAILABLE、RECOVERING，不把缺历史当零消息。巡视不改已读或派单；旧轮次保留的独立 Team 按精确 App/轮次绑定与远端标记复核读取，不借当前线程替代历史。
-- `GET /api/v1/im/admin/support-overview` 要求管理读取，支持下述时间范围，默认北京时间今天。reportDate/serverNow 来自服务器。期间接待次数/用户只计发生接待动作的咨询，不含订单群；hourly为期间CREATED/REOPENED新轮次的小时分布。排队只统计当前有用户首条消息、未指派的WAITING；可接待须AVAILABLE、CONNECTED且2分钟内心跳新鲜。首响askedCount为期间首次提问的咨询数，sampleCount为已人工首答数，pending/overdue和关闭未答不能冒充已答样本。
+- `GET /api/v1/im/admin/audit/conversations` 要求 `im.support.management.read`，支持 limit/cursor、type（SERVICE、COMPLAINT、ORDER）及 adminUserId。省略过滤表示全部；过滤条件变更须丢弃旧游标。订单活动时间优先消息活动，再建群/建单时间。historyState 区分 AVAILABLE、NOT_ESTABLISHED、LEGACY_UNAVAILABLE、RECOVERING，不把缺历史当零消息。巡视不改已读或派单；旧轮次保留的独立 Team 按精确 App/轮次绑定与远端标记复核读取，不借当前线程替代历史。
+- `GET /api/v1/im/admin/support-overview` 要求管理读取，支持下述时间范围，默认北京时间今天。reportDate/serverNow 来自服务器。期间接待次数/用户只计发生接待动作的咨询，不含订单群；hourly为期间CREATED/REOPENED新轮次的小时分布。排队只统计当前有用户首条消息、未指派的WAITING；可接待须AVAILABLE、CONNECTED、2分钟内心跳新鲜、云信身份READY且具备读取/接待权限，顶部“当前可接待客服”与派单资格同口径。首响askedCount为期间首次提问的咨询数，sampleCount为已人工首答数，pending/overdue和关闭未答不能冒充已答样本。
 - `GET /api/v1/im/admin/my-support-statistics` 经管理BFF转发，仅GET，支持下述时间范围，要求 `im.support.read`；身份固定为当前管理员，不接受指定员工。返回reportDate/serverNow/period、today{seconds,sessions,users}、current{consultations,orderGroups,unread,oldestPendingAt}、ratings{count,average,distribution}和firstResponse{sampleCount,averageSeconds}。个人首响只计本人是首次人工回复者且回复发生在期间的样本，不按最终接待人代计，可含跨期提问。oldestPendingAt是当前仍有未读的接待轮次之首次用户提问时间，不是最后一条未读消息的等待时长。
 - 最小售后记录仅绑定 NATIVE 已确认 POSTED 结算订单，租客/号主各自可提交；结算后即可提交，不另等72小时。用户 `GET/POST /api/v1/im/user/aftersales`（GET 必须 orderSource=NATIVE、orderId）只返回本人记录。管理 `GET /api/v1/im/admin/aftersales` 和 `POST /:id/claim|contact|resolve` 复核读取/接待及责任范围。描述/结果上限1000字，同人同单至多一条 PENDING；处理后可新提交，仅 PENDING/RESOLVED 两状态。创建/处理用稳定操作 ID，领取/处理核版本；处理完成保留历史处理人。
 - 售后沟通复用已有 SERVICE 咨询和转交机制，没有新工单消息系统。待处理记录随当前咨询责任变更，已处理记录不跟随；contact 只有 ACTIVE、本人接待、READY、可发送时才成功，否则保留记录并返回可恢复结果。记录处理状态不代表退款/到账，不创建资金事实。

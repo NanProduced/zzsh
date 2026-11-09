@@ -126,7 +126,7 @@ export function centsToYuan(cents: string | bigint): QuoteAmount {
   };
 }
 
-function orderConflict(code: "OCCUPIED" | "RULE_CHANGED" | "VERSION_CHANGED" | "DEPOSIT_UNCONFIGURED" | "PRICING_SCHEMA_UNSUPPORTED", message: string): SecurityApiError {
+function orderConflict(code: "OCCUPIED" | "RULE_CHANGED" | "VERSION_CHANGED" | "DEPOSIT_UNCONFIGURED" | "PRICING_SCHEMA_UNSUPPORTED" | "LEGACY_ORDER_FLOW_RETIRED", message: string): SecurityApiError {
   return new SecurityApiError(409, API_V1_ERROR_CODES[code], message);
 }
 
@@ -394,6 +394,12 @@ export async function createReservation(
   const quote = normalizeQuote(version.payload.quoteValues);
   if (quote.pricingInputs.depositPolicy !== "CONFIGURED" || !quote.tenantDeposit) {
     throw orderConflict("DEPOSIT_UNCONFIGURED", "押金规则未配置，暂不能创建可付款订单");
+  }
+  // v1 standard quotes have no personalized funding/guarantee basis, so a paid
+  // order could only enter opening review. Refuse new production orders before
+  // payment; existing v1 orders keep the review + unopened refund path.
+  if (process.env.NODE_ENV === "production" && !(quote as Record<string, unknown>).personal) {
+    throw orderConflict("LEGACY_ORDER_FLOW_RETIRED", "旧版下单流程已停用，请刷新并使用新版个性化确认下单");
   }
   return insertReservationSnapshot(client,{context:input.context,account,version,snapshot:{...quote,contentHash:version.content_hash!},holdSeconds:input.holdSeconds as number,requestId:input.requestId});
 }

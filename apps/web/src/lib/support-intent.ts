@@ -5,9 +5,9 @@ const MAX_AGE_MS = 10 * 60 * 1_000;
 
 export type SupportType = "SERVICE" | "COMPLAINT";
 
-/** Thread lookup is unified; the separately stored entry intent still chooses the welcome. */
+/** Service and complaint keep separate persistent threads; the entry intent still chooses the welcome. */
 export function normalizeSupportType(type: SupportType): SupportType {
-  return type === "COMPLAINT" ? "SERVICE" : type;
+  return type;
 }
 
 export type SupportIntent = {

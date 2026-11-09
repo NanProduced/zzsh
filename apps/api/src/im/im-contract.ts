@@ -85,12 +85,14 @@ export type ImTransportMedia = {
 export type ImTransportMessage = {
   messageClientId: string;
   messageServerId: string;
+  /** Provider-issued server ID only; locally generated/client IDs never belong here. */
+  serverMessageId?: string | null;
   conversationId: string;
   senderId: string;
   receiverId: string;
   createTime: number;
   text?: string;
-  messageType: 0 | 1 | 2 | 3 | 6;
+  messageType: 0 | 1 | 2 | 3 | 6 | 100;
   reply?: ImTransportReply;
   revoked?: boolean;
   card?: ImTransportCard;

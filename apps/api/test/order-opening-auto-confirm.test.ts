@@ -24,10 +24,13 @@ test("the auto-confirm rule is 40 minutes from DRAFT creation, inclusive at the 
   assert.equal(OPENING_AUTO_CONFIRM_MS, 40 * MINUTE, "Owner-approved rule is 40 minutes, not 15");
   const created = "2026-10-31T00:00:00.000Z";
   assert.equal(openingAutoConfirmDueAt(created), "2026-10-31T00:40:00.000Z");
+  assert.equal(openingAutoConfirmDueAt(created, 75), "2026-10-31T01:15:00.000Z", "a frozen custom wait is honored");
+  assert.equal(openingAutoConfirmDueAt(created, 0), null, "0 never means off or immediate");
   assert.equal(openingAutoConfirmDueAt("not-a-time"), null);
   assert.equal(isOpeningAutoConfirmDue(created, Date.parse(created) + 40 * MINUTE - 1), false, "one millisecond before is not due");
   assert.equal(isOpeningAutoConfirmDue(created, Date.parse(created) + 40 * MINUTE), true, "exactly 40 minutes is due");
   assert.equal(isOpeningAutoConfirmDue(created, Date.parse(created) + 41 * MINUTE), true);
+  assert.equal(isOpeningAutoConfirmDue(created, Date.parse(created) + 75 * MINUTE, 75), true);
   assert.equal(isOpeningAutoConfirmDue("not-a-time", Date.now()), false);
 });
 
