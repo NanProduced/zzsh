@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 const { formatOrderMoney, formatOrderTime, mergeOrderItems, orderApi, OrderRequestError } = await import("../src/lib/order-client.ts");
+const { registerOrderExpectedUserId } = await import("../src/lib/order-subject.ts");
 
 test("order times use the declared timezone and refuse missing or invalid dates", () => {
   assert.match(formatOrderTime("2026-10-01T00:30:00Z"), /08:30/);
@@ -81,10 +82,40 @@ test("historical order client uses independent read routes and keeps failures vi
   } finally { globalThis.fetch=old; }
 });
 
-test("unified browsing has its own read endpoint and never changes native recovery reads", async () => {
+test("unified browsing has its own read endpoint and every order read carries the page subject", async () => {
  const before=globalThis.fetch;const calls=[];
+ registerOrderExpectedUserId("user_page");
  globalThis.fetch=async(url,init)=>{calls.push({url:String(url),init});return Response.json({items:[],nextCursor:null,limit:20});};
- try{await orderApi.listUnified("user_a",{party:"renter"});await orderApi.list({party:"renter"});assert.deepEqual(calls.map(call=>call.url),["/api/orders/unified?party=renter&limit=20","/api/orders?party=renter&limit=20"]);assert.equal(new Headers(calls[0].init.headers).get("x-zzsh-expected-user-id"),"user_a");assert.equal(new Headers(calls[1].init.headers).has("x-zzsh-expected-user-id"),false);}finally{globalThis.fetch=before;}
+ try{await orderApi.listUnified("user_a",{party:"renter"});await orderApi.list({party:"renter"});assert.deepEqual(calls.map(call=>call.url),["/api/orders/unified?party=renter&limit=20","/api/orders?party=renter&limit=20"]);assert.equal(new Headers(calls[0].init.headers).get("x-zzsh-expected-user-id"),"user_a","an explicit per-call subject wins");assert.equal(new Headers(calls[1].init.headers).get("x-zzsh-expected-user-id"),"user_page","other order reads use the registered page subject");}finally{globalThis.fetch=before;registerOrderExpectedUserId(null);}
+});
+
+test("non-order endpoints keep their own contracts and never receive the order identity header",async()=>{
+ const before=globalThis.fetch;const calls=[];
+ registerOrderExpectedUserId("user_page");
+ globalThis.fetch=async(url,init)=>{calls.push({url:String(url),init});return Response.json({ok:true});};
+ try{
+  await orderApi.previewRentalPrice({accountId:"a",versionId:"v",releaseId:"r"});
+  await orderApi.confirmRental({accountId:"a",versionId:"v",releaseId:"r"});
+  await orderApi.createOrder("signed-token","original_key");
+  assert.deepEqual(calls.map(call=>call.url),["/api/rental-price-preview?accountId=a&versionId=v&releaseId=r","/api/order-confirmations","/api/v2/orders"]);
+  for(const call of calls)assert.equal(new Headers(call.init.headers).has("x-zzsh-expected-user-id"),false);
+ }finally{globalThis.fetch=before;registerOrderExpectedUserId(null);}
+});
+
+test("settlement, opening and detail requests all carry the registered page subject",async()=>{
+ const before=globalThis.fetch;const calls=[];
+ registerOrderExpectedUserId("user_page");
+ globalThis.fetch=async(url,init)=>{calls.push({url:String(url),init});return Response.json({ok:true});};
+ try{
+  await orderApi.detail("order_1");
+  await orderApi.settlement("order_1");
+  await orderApi.settlementPreview("order_1",{lines:[]});
+  await orderApi.submitSettlement("order_1",{lines:[],acceptedHash:"hash_1"},"key_1");
+  await orderApi.decideSettlement("order_1","version_1",{action:"CONFIRM",versionHash:"hash_1"},"key_2");
+  await orderApi.confirmOpening("order_1","opening_1",1,"key_3");
+  assert.equal(calls.length,6);
+  for(const call of calls)assert.equal(new Headers(call.init.headers).get("x-zzsh-expected-user-id"),"user_page",call.url);
+ }finally{globalThis.fetch=before;registerOrderExpectedUserId(null);}
 });
 test("order pagination retains equal ids from different internal sources", () => {
  const current={id:"same",source:{origin:"NATIVE"}},old={id:"same",source:{origin:"LEGACY"},readOnly:true};

@@ -18,6 +18,7 @@ import {
   performSignOut,
   publishUserSessionChange,
 } from "@/lib/user-session-client";
+import { registerOrderExpectedUserId } from "@/lib/order-subject";
 
 export { USER_SESSION_CHANNEL, publishUserSessionChange };
 const PROFILE_NOTICE = 'zzsh-profile-update-notice';
@@ -58,6 +59,15 @@ export function UserSessionProvider({ children }: { children: ReactNode }) {
   if (!storeRef.current) storeRef.current = createBrowserUserSessionStore();
   const store = storeRef.current;
   const snapshot = useSyncExternalStore(store.subscribe, store.getSnapshot, store.getSnapshot);
+  // Register synchronously during render: child order components may issue their first request
+  // from an effect, and child effects run before parent effects. Re-validation temporarily sets
+  // status to "loading" with a null userId, so keep the last confirmed subject in that window;
+  // only a confirmed guest transition clears it.
+  if (snapshot.status === "authenticated" && snapshot.userId) {
+    registerOrderExpectedUserId(snapshot.userId);
+  } else if (snapshot.status === "guest") {
+    registerOrderExpectedUserId(null);
+  }
   const [profileNotice, setProfileNotice] = useState<{ userId: string; kind: 'avatar' | 'nickname' } | null>(null);
   useEffect(() => {
     const show = (event: Event) => {

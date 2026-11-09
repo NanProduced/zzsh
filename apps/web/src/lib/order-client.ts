@@ -1,4 +1,5 @@
 import type { Money, UnitAmount, PublicQuote, FullPayoutTerms, FullPayoutTermsAcceptance, RentalMode } from "./supply-types";
+import { currentOrderExpectedUserId } from "./order-subject.ts";
 export type { FullPayoutTerms, FullPayoutTermsAcceptance } from "./supply-types";
 
 export type OrderParty = "renter" | "owner";
@@ -813,13 +814,26 @@ export class OrderRequestError extends Error {
 
 type ReadOptions = { signal?: AbortSignal; expectedUserId?: string };
 
+/**
+ * An explicit per-call `expectedUserId` (payments, refunds, unified list, prestart) wins;
+ * otherwise every `/api/orders` request carries the identity the page rendered, registered
+ * synchronously by UserSessionProvider. The BFF compares it with the captured Cookie session,
+ * so an old tab showing user A cannot submit a write under a Cookie that is now user B.
+ * Non-order endpoints (price preview, confirmation, v2 creation) keep their own contracts.
+ */
+function expectedUserFor(path: string, explicit: string | undefined): string | undefined {
+  if (!path.startsWith("/api/orders")) return undefined;
+  return explicit ?? currentOrderExpectedUserId() ?? undefined;
+}
+
 async function requestJson<T>(path: string, options: ReadOptions = {}): Promise<T> {
   if (!path.startsWith("/") || path.startsWith("//") || path.includes("://")) {
     throw new Error("Order path must be relative");
   }
+  const expectedUserId = expectedUserFor(path, options.expectedUserId);
   let response: Response;
   try {
-    response = await fetch(path, { credentials: "same-origin", cache: "no-store", signal: options.signal, ...(options.expectedUserId === undefined ? {} : { headers: { "x-zzsh-expected-user-id": options.expectedUserId } }) });
+    response = await fetch(path, { credentials: "same-origin", cache: "no-store", signal: options.signal, ...(expectedUserId === undefined ? {} : { headers: { "x-zzsh-expected-user-id": expectedUserId } }) });
   } catch (error) {
     if (options.signal?.aborted) throw error;
     throw new OrderRequestError(0, null);
@@ -845,7 +859,8 @@ async function requestWrite<T>(path: string, options: WriteOptions): Promise<T> 
   }
   const headers = new Headers({ "content-type": "application/json" });
   if (options.key) headers.set("idempotency-key", options.key);
-  if (options.expectedUserId !== undefined) headers.set("x-zzsh-expected-user-id", options.expectedUserId);
+  const expectedUserId = expectedUserFor(path, options.expectedUserId);
+  if (expectedUserId !== undefined) headers.set("x-zzsh-expected-user-id", expectedUserId);
   let response: Response;
   try {
     response = await fetch(path, {
