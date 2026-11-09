@@ -1,10 +1,30 @@
 import {test} from "node:test";
 import assert from "node:assert/strict";
 import type {PoolClient} from "pg";
-import {getAdminReadOrder,projectAdminReadOrder,queryAdminReadOrders,orderReadRelation,orderReadKeyRelation,parseOrderOrigin,readNativeFrozenAccounts,NATIVE_FROZEN_ACCOUNT_SQL,legacyOrderResources,legacyOrderSource,orderHaffRatio,LIST_MATERIALS_LIMIT,restrictListMoney,accountViewFrozen} from "../src/order/admin-order-read";
+import {getAdminReadOrder,projectAdminReadOrder,queryAdminReadOrders,orderReadRelation,orderReadKeyRelation,parseOrderOrigin,readNativeFrozenAccounts,NATIVE_FROZEN_ACCOUNT_SQL,legacyOrderResources,legacyOrderSource,orderHaffRatio,LIST_MATERIALS_LIMIT,restrictListMoney,accountViewFrozen,adminOrderScheduleExpression,readAdminOrderSchedule} from "../src/order/admin-order-read";
 import {LEGACY_ORDER_STATUS_SQL} from "../src/order/legacy-order-read";
 import {parseAdminOrderPageQuery} from "../src/order/order-routes";
 const viewer={adminId:"test-reader",isBoss:false,internalQuote:false,authorizationKey:"a".repeat(64)};
+
+test('schedule filters distinguish due and posted facts with bounded exclusive ranges',async()=>{
+ const from='2026-11-08T16:00:00.000Z',to='2026-11-09T16:00:00.000Z';
+ for(const mode of ['DUE','SETTLED'] as const){const filters=parseAdminOrderPageQuery(new URLSearchParams({schedule:mode,scheduleFrom:from,scheduleTo:to}));const f=orderClient({keys:[],total:'0'});await queryAdminReadOrders(f.client,viewer,filters);const row=f.statements.find(x=>x.sql.includes('AS keys'))!;assert(row.values.includes(from)&&row.values.includes(to));assert.match(row.sql,/admin_supply_scope/);assert(row.sql.includes(adminOrderScheduleExpression(false,mode)));}
+ const overdue=parseAdminOrderPageQuery(new URLSearchParams({schedule:'DUE',scheduleTo:to}));assert.equal(overdue.scheduleFrom,undefined);
+ const micro=parseAdminOrderPageQuery(new URLSearchParams({schedule:'SETTLED',scheduleFrom:'2026-11-09T00:00:00.000001Z',scheduleTo:'2026-11-09T00:00:00.000002Z'}));assert.equal(micro.scheduleFrom,'2026-11-09T00:00:00.000001Z');
+ for(const bad of ['schedule=DUE','scheduleFrom=2026-11-09T00:00:00Z','schedule=SETTLED&scheduleTo=2026-11-09T00:00:00Z','schedule=OTHER&scheduleTo=2026-11-09T00:00:00Z','schedule=DUE&scheduleFrom=&scheduleTo=2026-11-09T00:00:00Z','schedule=DUE&scheduleTo=2026-11-09T00:00:00.0000001Z',`schedule=DUE&scheduleFrom=${encodeURIComponent(to)}&scheduleTo=${encodeURIComponent(from)}`])assert.throws(()=>parseAdminOrderPageQuery(new URLSearchParams(bad)));
+ assert.match(adminOrderScheduleExpression(true,'DUE'),/confirmed_at\+o\.term_seconds/);
+ assert.match(adminOrderScheduleExpression(true,'DUE'),/tenancy_deadline/);
+ assert.match(adminOrderScheduleExpression(true,'DUE'),/jsonb_typeof\(l\.source_snapshot->'tenancy_deadline'\)='number'/);
+ assert.match(adminOrderScheduleExpression(true,'SETTLED'),/settlement_posting/);
+ assert.match(adminOrderScheduleExpression(true,'SETTLED'),/legacy_continuation_version/);
+ assert.doesNotMatch(adminOrderScheduleExpression(false,'SETTLED'),/legacy_continuation_version/);
+});
+
+test('schedule overview uses the same due expression and game authorization as the list',async()=>{
+ const seen:Array<{sql:string;values:unknown[]}>=[];const client={query:async(sql:string,values:unknown[]=[])=>{seen.push({sql,values});if(sql.includes('to_regclass'))return{rows:[{ready:true}]};if(sql.includes('transaction_timestamp() AS'))return{rows:[{asOf:new Date('2026-11-09T06:00:00Z'),start:new Date('2026-11-08T16:00:00Z')}]};return{rows:[{overdue:'2',unknown:'1',d0:'3',d1:'4',d2:'0',d3:'0',d4:'0',d5:'0',d6:'0'}]};}} as unknown as PoolClient;
+ const result=await readAdminOrderSchedule(client,viewer);assert.equal(result.days.length,7);assert.equal(result.days[0]!.count,'3');assert.equal(result.todayFrom,'2026-11-08T16:00:00.000Z');
+ const {sql,values}=seen.at(-1)!;assert(sql.includes(adminOrderScheduleExpression(true,'DUE')));assert.match(sql,/admin_supply_scope/);assert.match(sql,/status='PAID' AND due_at IS NULL AND NOT posted/);assert.match(sql,/due_at < \$11::timestamptz/);assert.equal(values.at(-1),result.asOf);
+});
 
 test('overview drilldowns bind APPLIED native payment events and open holds before counting',async()=>{
  const from='2026-11-01T00:00:00.000000Z',to='2026-11-02T00:00:00.123457Z';

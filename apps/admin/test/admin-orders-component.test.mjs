@@ -442,15 +442,59 @@ test('U1 order filters use shared controls, send exact server predicates and res
   assert.equal(calls.at(-1).searchParams.has('qValue'),false);
   assert.equal(node.textContent.includes('共 45 条'),true);
 });
+
+test('bare order list defaults to the Beijing calendar day and can show all dates', async t => {
+  const {root,node,AdminOrderChainView}=await setup(t),calls=[],changed=[];
+  globalThis.fetch=async input=>{const url=new URL(String(input),'http://localhost');if(url.pathname.endsWith('/overview-stats'))return response({error:{code:'EVIDENCE_UNAVAILABLE'}},503);calls.push(url);return response(chainPage([],{total:0}));};
+  await act(async()=>root.render(createElement(AdminOrderChainView,{...chainProps('today-default'),initialQuery:{},onQueryChange:q=>changed.push(q)})));
+  await until(()=>calls.length&&node.textContent.includes('查看全部下单日期'));
+  const day=new Intl.DateTimeFormat('en-CA',{timeZone:'Asia/Shanghai',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date());
+  const tomorrow=new Date(`${day}T00:00:00Z`);tomorrow.setUTCDate(tomorrow.getUTCDate()+1);
+  assert.equal(calls.at(-1).searchParams.get('createdFrom'),`${day}T00:00:00+08:00`);
+  assert.equal(calls.at(-1).searchParams.get('createdTo'),`${tomorrow.toISOString().slice(0,10)}T00:00:00+08:00`);
+  await act(async()=>buttonNamed(node,'查看全部下单日期').click());
+  await until(()=>calls.length>1&&!calls.at(-1).searchParams.has('createdFrom'));
+  assert.equal(changed.at(-1).range,'all','the explicit all-dates selection survives URL restoration');
+  await act(async()=>root.render(createElement(AdminOrderChainView,{...chainProps('explicit-all'),initialQuery:{range:'all'}})));
+  await until(()=>!calls.at(-1).searchParams.has('createdFrom')&&node.textContent.includes('暂无订单'));
+});
+
+test('due overview and settled shortcut clear the default creation date and keep separate server filters', async t => {
+ const {root,node,AdminOrderChainView}=await setup(t),calls=[];const first=new Date('2026-11-08T16:00:00.000Z');
+ const days=Array.from({length:7},(_,i)=>({from:new Date(first.getTime()+i*86400000).toISOString(),to:new Date(first.getTime()+(i+1)*86400000).toISOString(),count:String(i+1)}));
+ const schedule={schema:'admin-order-schedule.v1',asOf:'2026-11-09T02:00:00.000Z',todayFrom:days[0].from,todayTo:days[0].to,overdue:'2',unknown:'1',days};
+ globalThis.fetch=async input=>{const url=new URL(String(input),'http://localhost');if(url.pathname.endsWith('/schedule-overview'))return response(schedule);calls.push(url);return response(chainPage([chainOrder]));};
+ await act(async()=>root.render(createElement(AdminOrderChainView,{...chainProps('order-schedule'),initialQuery:{}})));
+ await until(()=>node.textContent.includes('今天到期')&&node.textContent.includes(chainOrder.displayNo));
+ const click=async text=>{const button=[...node.querySelectorAll('button')].find(b=>b.textContent.includes(text));assert(button,text);await act(async()=>button.click());};
+ await click('今天到期');await until(()=>calls.at(-1)?.searchParams.get('schedule')==='DUE');
+ assert.equal(calls.at(-1).searchParams.get('scheduleFrom'),days[0].from);assert.equal(calls.at(-1).searchParams.get('scheduleTo'),days[0].to);assert.equal(calls.at(-1).searchParams.has('createdFrom'),false);
+ await click('今日已结算');await until(()=>calls.at(-1)?.searchParams.get('schedule')==='SETTLED');
+ assert.equal(calls.at(-1).searchParams.get('scheduleFrom'),days[0].from);assert.equal(calls.at(-1).searchParams.get('scheduleTo'),days[0].to);assert.equal(calls.at(-1).searchParams.has('createdFrom'),false);
+ await click('逾期未结算');await until(()=>calls.at(-1)?.searchParams.get('schedule')==='DUE'&&!calls.at(-1)?.searchParams.has('scheduleFrom'));
+ assert.equal(calls.at(-1).searchParams.get('scheduleTo'),schedule.asOf,'overdue is measured at the same instant as its count');
+});
+
+test('schedule links preserve microsecond bounds and never reinterpret a malformed start as overdue', async t => {
+ const {root,node,AdminOrderChainView}=await setup(t),calls=[];
+ globalThis.fetch=async input=>{const url=new URL(String(input),'http://localhost');if(url.pathname.endsWith('/schedule-overview'))return response({error:{code:'EVIDENCE_UNAVAILABLE'}},503);calls.push(url);return response(chainPage([chainOrder]));};
+ const query={schedule:'SETTLED',scheduleFrom:'2026-11-09T00:00:00.000001Z',scheduleTo:'2026-11-09T00:00:00.000002Z'};
+ await act(async()=>root.render(createElement(AdminOrderChainView,{...chainProps('schedule-micro'),initialQuery:query})));await until(()=>calls.length&&node.textContent.includes(chainOrder.displayNo));
+ assert.equal(calls.at(-1).searchParams.get('scheduleFrom'),query.scheduleFrom);assert.equal(calls.at(-1).searchParams.get('scheduleTo'),query.scheduleTo);
+ await act(async()=>root.render(createElement(AdminOrderChainView,{...chainProps('schedule-invalid'),initialQuery:{schedule:'DUE',scheduleFrom:'bad',scheduleTo:'2026-11-09T00:00:00Z'}})));
+ await until(()=>!calls.at(-1).searchParams.has('schedule'));assert.equal(calls.at(-1).searchParams.has('scheduleTo'),false);
+});
 test('numbered lookup, later pages and invalid dates retain the executed query and expose a correct current page', async t => {
   const {browser,root,node,AdminOrderChainView} = await setup(t); const calls=[],changed=[];
-  globalThis.fetch = async url => {if(String(url).includes('/orders/overview-stats'))return response({error:{code:'EVIDENCE_UNAVAILABLE'}},503); calls.push(new URL(String(url),browser.location.href)); return response(chainPage([chainOrder],{total:200})); };
+  globalThis.fetch = async url => {if(String(url).includes('/orders/schedule-overview'))return response({error:{code:'EVIDENCE_UNAVAILABLE'}},503); calls.push(new URL(String(url),browser.location.href)); return response(chainPage([chainOrder],{total:200})); };
   await act(async () => root.render(createElement(AdminOrderChainView,{...chainProps('chain-pages'),onQueryChange:q=>changed.push(q)})));
   await until(() => node.textContent.includes(chainOrder.displayNo));
   await changeField(browser,node,'查找方式','交易双方'); await changeField(browser,node,'查找线索','测试用户线索');
   await act(async () => node.querySelector('.oc-search').dispatchEvent(new Event('submit',{bubbles:true,cancelable:true})));
   await until(() => calls.at(-1).searchParams.get('qValue')==='测试用户线索' && node.textContent.includes(chainOrder.displayNo));
-  assert.equal(calls.at(-1).searchParams.get('qKind'),'party'); assert.deepEqual(changed,[]); assert.equal(browser.location.search,'');
+  assert.equal(calls.at(-1).searchParams.get('qKind'),'party'); assert(changed.every(q=>!('qValue' in q)&&!('qKind' in q))); assert.equal(browser.location.search,'');
+  assert.equal(calls.at(-1).searchParams.has('createdFrom'),false,'search is not silently limited by the default day');
+  assert.match(node.textContent,/已按全部下单日期查找/);
   await changeField(browser,node,'跳转页码','9');
   await act(async () => node.querySelector('.admin-list-pagination-jump-form').dispatchEvent(new Event('submit',{bubbles:true,cancelable:true})));
   await until(() => calls.at(-1).searchParams.get('page')==='9');
@@ -522,19 +566,20 @@ test('progress nodes expose Beijing times by keyboard/aria and never mark unevid
   await act(async()=>root.render(createElement(AdminOrderChainView,chainProps('stage-time'))));
   await until(()=>node.textContent.includes('STAGE-1'));
   const triggers=[...node.querySelectorAll('.oc-table .oc-stage-trigger')];
-  assert.equal(triggers.length,3,'compact view keeps three nodes');
+  assert.equal(triggers.length,4,'compact view keeps the same facts as the detail view');
   assert.match(triggers[0].getAttribute('aria-label'),/创建：.*10:00.*北京时间/);
   assert.match(triggers[1].getAttribute('aria-label'),/支付：.*11:30/);
-  const last=triggers[2].getAttribute('aria-label');
-  assert.match(last,/时间未记录/);assert.match(last,/开租未记录/,'omitted middle node is listed in the tooltip');
-  assert.equal(triggers[2].closest('li').className,'unknown','completion without evidence is not shown as done');
+  assert.match(triggers[2].getAttribute('aria-label'),/开租未记录.*时间未记录/);
+  const last=triggers[3].getAttribute('aria-label');
+  assert.match(last,/时间未记录/);
+  assert.equal(triggers[3].closest('li').className,'unknown','completion without evidence is not shown as done');
   assert.equal(triggers[0].tagName,'BUTTON');
 });
 
 test('master: list requests the bounded projection and keeps the true material count', async t => {
   const {root,node,AdminOrderChainView}=await setup(t),calls=[];
   const item={...chainOrder,id:'bounded-materials',displayNo:'BOUNDED-MATERIALS',frozenAccount:{source:'ORDER_VERSION',haff:null,materials:[{code:'one',name:'物资甲',quantity:'1',unit:'PIECE'},{code:'two',name:'物资乙',quantity:'2',unit:'PIECE'},{code:'three',name:'物资丙',quantity:'3',unit:'PIECE'}],materialsTotal:6,materialsTruncated:true,termDays:null,termSeconds:null,loginMethodText:null}};
-  globalThis.fetch=async url=>{if(String(url).includes('/orders/overview-stats'))return response({error:{code:'EVIDENCE_UNAVAILABLE'}},503);calls.push(new URL(String(url),'http://localhost'));return response(chainPage([item]));};
+  globalThis.fetch=async url=>{if(String(url).includes('/orders/schedule-overview'))return response({error:{code:'EVIDENCE_UNAVAILABLE'}},503);calls.push(new URL(String(url),'http://localhost'));return response(chainPage([item]));};
   await act(async()=>root.render(createElement(AdminOrderChainView,chainProps('bounded-materials'))));await until(()=>node.textContent.includes('BOUNDED-MATERIALS'));
   assert.equal(calls[0].searchParams.get('view'),'list');assert.match(node.textContent,/等 6 项/);assert.equal(calls.length,1);
 });
@@ -571,7 +616,7 @@ test('order detail exposes pending original-refund recovery above tabs and keeps
 });
 test('first, refresh and page read errors remain failures; expired restore context rereads page one', async t => {
   const {root,node,AdminOrderChainView} = await setup(t);const calls=[];let mode='first-failure';
-  globalThis.fetch = async url => {if(String(url).includes('/orders/overview-stats'))return response({error:{code:'EVIDENCE_UNAVAILABLE'}},503);const parsed=new URL(String(url),'http://localhost');calls.push(parsed);return mode.endsWith('failure')?response({error:{code:'INTERNAL_ERROR'}},500):mode==='conflict'&&parsed.searchParams.has('restoreKey')?response({error:{code:'CONFLICT'}},409):response(chainPage([chainOrder],{total:50}));};
+  globalThis.fetch = async url => {if(String(url).includes('/orders/schedule-overview'))return new Promise(()=>{});const parsed=new URL(String(url),'http://localhost');calls.push(parsed);return mode.endsWith('failure')?response({error:{code:'INTERNAL_ERROR'}},500):mode==='conflict'&&parsed.searchParams.has('restoreKey')?response({error:{code:'CONFLICT'}},409):response(chainPage([chainOrder],{total:50}));};
   const props=chainProps('chain-failures');await act(async () => root.render(createElement(AdminOrderChainView,props)));
   await until(() => node.textContent.includes('读取暂不可用'));assert(!node.textContent.includes('暂无订单'));
   mode='ready';await act(async () => buttonNamed(node,'重试').click());await until(() => node.textContent.includes(chainOrder.displayNo));
@@ -584,7 +629,7 @@ test('first, refresh and page read errors remain failures; expired restore conte
 
 test('session change and permission revocation discard private lookup state and ignore late results', async t => {
   const {browser,root,node,AdminOrderChainView} = await setup(t);let finish;const calls=[];
-  globalThis.fetch = async url => {calls.push(String(url));return calls.length===1?new Promise(resolve=>{finish=resolve;}):response(chainPage([{...chainOrder,displayNo:'CURRENT-IDENTITY'}]));};
+  globalThis.fetch = async url => {if(String(url).includes('/orders/schedule-overview'))return new Promise(()=>{});calls.push(String(url));return calls.length===1?new Promise(resolve=>{finish=resolve;}):response(chainPage([{...chainOrder,displayNo:'CURRENT-IDENTITY'}]));};
   const old=chainProps('chain-old');await act(async () => root.render(createElement(AdminOrderChainView,old)));
   const current=chainProps('chain-current');await act(async () => root.render(createElement(AdminOrderChainView,current)));await until(()=>node.textContent.includes('CURRENT-IDENTITY'));
   await act(async () => finish(response(chainPage([{...chainOrder,displayNo:'STALE-IDENTITY'}]))));assert(!node.textContent.includes('STALE-IDENTITY'));
@@ -712,7 +757,7 @@ test('frozen account summary is displayed from the existing order payload withou
   const {root,node,AdminOrderChainView}=await setup(t); let calls=0;
   const frozen={source:'ORDER_VERSION',haff:{code:'haff',name:'哈夫币',quantity:'98080000',unit:'HAFF_BASE'},materials:[{code:'barrett',name:'巴雷特子弹',quantity:'2',unit:'ROUND'}],termDays:'1',termSeconds:'86400',loginMethodText:'QQ扫码'};
   const item={...chainOrder,id:'frozen-order',displayNo:'FROZEN-ORDER',source:{origin:'NATIVE'},frozenAccount:frozen};
-  globalThis.fetch=async url=>{if(String(url).includes('/orders/overview-stats'))return response({error:{code:'EVIDENCE_UNAVAILABLE'}},503);calls++;return response(chainPage([item]));};
+  globalThis.fetch=async url=>{if(String(url).includes('/orders/schedule-overview'))return response({error:{code:'EVIDENCE_UNAVAILABLE'}},503);calls++;return response(chainPage([item]));};
   await act(async()=>root.render(createElement(AdminOrderChainView,chainProps('frozen'))));
   await until(()=>node.textContent.includes('FROZEN-ORDER'));
   assert(node.textContent.includes('本单冻结'));
@@ -1036,17 +1081,25 @@ test('order detail separates unformed payment from missing time and shows refund
  assert.equal(record.includes('未支付未支付'),false);
 });
 
-test('compact order progress keeps only the furthest key stage while detail keeps the full sequence', async t => {
+test('compact and detail order progress show the same recorded stages', async t => {
  const {root,node,AdminOrderChainView}=await setup(t);
  const value={...chainOrder,id:'compact-progress',displayNo:'COMPACT-PROGRESS',status:'COMPLETED',source:{origin:'NATIVE'},payment:{state:'RECORDED_PAID',recordedAt:null,recordedAmount:null},progress:{asOfUtc:'2026-10-25T00:00:00.000000Z',opening:{state:'CONFIRMED',confirmedAtUtc:'2026-10-25T01:00:00.000000Z'},ending:{state:'POSTED',currentVersionNo:1,postedAtUtc:'2026-10-25T02:00:00.000000Z'}}};
  globalThis.fetch=async url=>String(url).includes('readMode=combined')?response({order:value}):response(chainPage([value]));
  await act(async()=>root.render(createElement(AdminOrderChainView,chainProps('compact-progress'))));await until(()=>node.querySelector('.oc-stages-compact'));
  const compact=[...node.querySelectorAll('.oc-table .oc-stages-compact li .oc-stage-name')].map(item=>item.textContent);
- assert.deepEqual(compact,['创建','支付','已过账']);
+ assert.deepEqual(compact,['创建','支付','已开租','已过账']);
  assert.match(node.querySelector('.oc-compact-meta').textContent,/已开租 · 已过账/);
  await act(async()=>root.render(createElement(AdminOrderChainView,{...chainProps('compact-progress-detail'),objectOnly:true,initialOrderId:value.id})));await until(()=>node.textContent.includes('关键费用'));
  const detail=[...node.querySelectorAll('.oc-lifecycle .oc-stage-name')].map(item=>item.textContent);
  assert.deepEqual(detail,['创建','支付','已开租','已过账']);
+});
+
+test('posted evidence takes precedence over a stale paid status in the list time label', async t => {
+ const {root,node,AdminOrderChainView}=await setup(t);
+ const item={...chainOrder,id:'posted-paid',displayNo:'POSTED-PAID',status:'PAID',termSeconds:'86400',source:{origin:'NATIVE'},progress:{asOfUtc:'2026-11-09T03:00:00Z',opening:{state:'CONFIRMED',confirmedAtUtc:'2026-11-01T03:00:00Z'},ending:{state:'POSTED',currentVersionNo:1,postedAtUtc:'2026-11-02T03:00:00Z'}}};
+ globalThis.fetch=async url=>String(url).includes('/schedule-overview')?response({error:{code:'EVIDENCE_UNAVAILABLE'}},503):response(chainPage([item]));
+ await act(async()=>root.render(createElement(AdminOrderChainView,chainProps('posted-paid'))));await until(()=>node.textContent.includes('POSTED-PAID'));
+ const dateCell=node.querySelector('.oc-table tbody tr td:first-child').textContent;assert.match(dateCell,/结算完成/);assert.doesNotMatch(dateCell,/预计到期/);
 });
 
 test('payment absence labels distinguish unaccepted native pointers, old source records and unknown facts', async t => {
@@ -1104,6 +1157,7 @@ test('overview order drilldowns keep exact creation/payment periods and effectiv
     await until(() => node.textContent.includes(chainOrder.displayNo));
     const request = calls.at(-1);
     for (const [key, value] of Object.entries(query)) assert.equal(request.searchParams.get(key), value, key);
+    if (mode !== 'created') assert.equal(request.searchParams.has('createdFrom'),false,'explicit drilldowns are not restricted to today');
     if (mode === 'payment') assert.match(node.textContent, /收款确认时段/);
     if (mode === 'recorded') { assert.match(node.textContent, /经营概览付款时段/);assert.equal(request.searchParams.get('origin'),null); }
     if (mode === 'pending') assert.match(node.textContent, /仅有效待付款/);

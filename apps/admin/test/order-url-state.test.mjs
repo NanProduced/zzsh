@@ -127,14 +127,15 @@ test("订单列表把状态/时间/页码写入地址栏，查找线索不落 UR
 
   await mount(undefined);
   await until(() => node.textContent.includes(order.displayNo));
-  assert.deepEqual(queries, [], "默认无筛选时不写地址栏");
+  const today=new Intl.DateTimeFormat('en-CA',{timeZone:'Asia/Shanghai',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date());
+  assert.deepEqual(queries.at(-1), {from:today,to:today}, "默认按北京时间今天查询并写入地址栏");
 
   // 状态筛选 → 写入 URL 并随请求发出
   const statusSelect = selectNamed(node, "主状态");
   await chooseOption(browser, statusSelect, "已支付");
   await act(async () => buttonNamed(node, "查询").click());
   await until(() => queries.at(-1)?.status === "PAID");
-  assert.deepEqual(queries.at(-1), { status: "PAID" }, "状态筛选写入地址栏");
+  assert.deepEqual(queries.at(-1), { status: "PAID",from:today,to:today }, "状态筛选保留默认日期");
   await until(() => urls.at(-1).includes("status=PAID"));
 
   // 来源筛选 → 写入 URL、随请求发出并在翻页时保留
@@ -142,7 +143,7 @@ test("订单列表把状态/时间/页码写入地址栏，查找线索不落 UR
   await chooseOption(browser, originSelect, "旧平台订单");
   await act(async () => buttonNamed(node, "查询").click());
   await until(() => queries.at(-1)?.origin === "LEGACY" && urls.at(-1).includes("origin=LEGACY"));
-  assert.deepEqual(queries.at(-1), { status: "PAID", origin: "LEGACY" }, "来源筛选写入地址栏");
+  assert.deepEqual(queries.at(-1), { status: "PAID", origin: "LEGACY",from:today,to:today }, "来源筛选保留默认日期");
 
   // 查找线索 → 不写入 URL
   const clue = [...node.querySelectorAll("input")].find((input) => input.getAttribute("aria-label") === "查找线索");
@@ -156,6 +157,7 @@ test("订单列表把状态/时间/页码写入地址栏，查找线索不落 UR
   assert.equal(queries.at(-1).qValue, undefined, "查找线索不写入地址栏");
   assert.equal(queries.at(-1).status, "PAID", "线索查询保留已选状态");
   assert.equal(queries.at(-1).origin, "LEGACY", "线索查询保留已选来源");
+  assert.equal(queries.at(-1).range, "all", "按线索查询会解除隐式默认日期");
 
   // 刷新/重开：按地址栏恢复状态、来源，线索需重输且如实提示
   await mount({ status: "CANCELLED", origin: "LEGACY" });

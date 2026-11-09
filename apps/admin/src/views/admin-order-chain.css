@@ -1,4 +1,24 @@
 /* Order chain readability only; shared workspace, table and dialog styles stay untouched. */
+.oc-design .oc-schedule{padding:18px 20px;margin-bottom:14px;border:1px solid var(--border);border-radius:10px;background:var(--admin-surface)}
+.oc-design .oc-schedule-head{display:flex;justify-content:space-between;align-items:flex-start;gap:16px;flex-wrap:wrap}
+.oc-design .oc-schedule-head h2{display:flex;align-items:center;gap:8px;margin:0;font-size:15px;line-height:1.4}
+.oc-design .oc-schedule-head h2 svg{color:var(--chart-receipts)}
+.oc-design .oc-schedule-head p,.oc-design .oc-schedule-foot{margin:6px 0 0;color:var(--muted-foreground);font-size:12px;line-height:1.55}
+.oc-design .oc-schedule-actions{display:flex;align-items:center;gap:4px;flex-wrap:wrap}
+.oc-design .oc-schedule-actions button[aria-pressed=true]{border-color:var(--chart-receipts)}
+.oc-design .oc-schedule-chart{margin-top:16px;overflow-x:auto}
+.oc-design .oc-schedule-chart>[data-slot=chart],.oc-design .oc-schedule-axis{min-width:490px}
+.oc-design .oc-schedule-axis{display:grid;grid-template-columns:repeat(7,minmax(0,1fr))}
+.oc-design .oc-schedule-chart [role=application]:focus:not(:focus-visible){outline:none}
+.oc-design .oc-schedule-chart [role=application]:focus-visible{outline:2px solid var(--ring);outline-offset:2px}
+.oc-design .oc-schedule-tick{height:auto;min-width:0;display:flex;flex-direction:column;gap:2px;padding:7px 2px;text-align:center;white-space:nowrap;border-radius:0}
+.oc-design .oc-schedule-tick[aria-pressed=true]{box-shadow:inset 0 -2px var(--chart-receipts)}
+.oc-design .oc-schedule-tick>span{font-size:12px;line-height:1.4;color:var(--muted-foreground)}
+.oc-design .oc-schedule-tick .oc-schedule-tick-short{display:none}
+.oc-design .oc-schedule-tick>strong{font-size:14px;line-height:1.2;font-weight:650;font-variant-numeric:tabular-nums}
+.oc-design .oc-schedule-tick small{font-size:12px;font-weight:400;color:var(--muted-foreground)}
+.oc-design .oc-schedule-empty{margin-top:14px;color:var(--muted-foreground);font-size:13px}
+@media(max-width:600px){.oc-design .oc-schedule-chart>[data-slot=chart],.oc-design .oc-schedule-axis{min-width:315px}.oc-design .oc-schedule-tick .oc-schedule-tick-long{display:none}.oc-design .oc-schedule-tick .oc-schedule-tick-short{display:inline}.oc-design .oc-schedule-tick>strong{font-size:13px}}
 .oc-design .oc-table-compact td{vertical-align:top}
 .oc-design .oc-mobile-list footer{flex-wrap:wrap}
 .oc-design .oc-mobile-list footer>button{flex-shrink:0;white-space:nowrap}
@@ -166,31 +186,40 @@
 .oc-design .oc-order-actions .oc-action-card [data-slot=card-content]{padding:0}
 
 /* 订单资金按事件分组；同一事件的业务、账本与渠道状态并列阅读。 */
-.oc-design .oc-finance-story{display:grid;gap:0}
-.oc-design .oc-finance-story-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;padding-bottom:18px}
-.oc-design .oc-finance-story-head h2{margin:0;font-size:16px}
-.oc-design .oc-finance-story-head p,.oc-design .oc-finance-muted{margin:5px 0 0;color:var(--muted-foreground);font-size:13px;line-height:1.65}
-.oc-design .oc-finance-section{min-width:0;padding:20px 0;border-top:1px solid var(--border)}
-.oc-design .oc-finance-section:last-child{padding-bottom:0}
-.oc-design .oc-finance-section-title{display:flex;align-items:center;gap:9px;margin-bottom:14px}
-.oc-design .oc-finance-section-title svg{color:var(--muted-foreground);flex:none}
-.oc-design .oc-finance-section-title h3{margin:0;font-size:15px;font-weight:600}
-.oc-design .oc-finance-primary,.oc-design .oc-finance-row{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;padding:10px 0;font-size:14px}
-.oc-design .oc-finance-primary p,.oc-design .oc-finance-row small{display:block;margin:3px 0 0;color:var(--muted-foreground);font-size:12px;line-height:1.5}
-.oc-design .oc-finance-amount,.oc-design .oc-finance-row>strong,.oc-design .oc-finance-row>span{font-variant-numeric:tabular-nums;text-align:right;overflow-wrap:anywhere}
-.oc-design .oc-finance-allocation{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;padding:14px;border:1px solid var(--border);border-radius:10px}
-.oc-design .oc-finance-allocation dt,.oc-design .oc-finance-facts dt{color:var(--muted-foreground);font-size:12px;line-height:1.5}
-.oc-design .oc-finance-allocation dd,.oc-design .oc-finance-facts dd{margin:5px 0 0;font-size:14px;font-weight:600;font-variant-numeric:tabular-nums;overflow-wrap:anywhere}
-.oc-design .oc-finance-facts{display:grid;gap:10px}
-.oc-design .oc-finance-facts>div{display:flex;justify-content:space-between;gap:16px}
-.oc-design .oc-finance-facts dd{margin:0;text-align:right}
-.oc-design .oc-finance-sublist{display:grid;gap:8px;margin:10px 0 0;padding:0;list-style:none;font-size:13px}
-.oc-design .oc-finance-sublist li{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:8px}
-.oc-design .oc-finance-note{display:grid;gap:6px;margin-top:14px;padding:12px 14px;border:1px solid var(--border);border-radius:8px;font-size:13px}
-.oc-design .oc-finance-note p{margin:0;color:var(--muted-foreground)}
-.oc-design .oc-finance-warning{margin:10px 0 0;color:var(--destructive);font-size:13px}
-.oc-design .oc-finance-section table{font-size:13px}
-.oc-design .oc-finance-section th,.oc-design .oc-finance-section td{white-space:normal;vertical-align:top}
-.oc-design .oc-finance-section td:last-child{min-width:110px;overflow-wrap:anywhere}
-@media(max-width:760px){.oc-design .oc-finance-allocation{grid-template-columns:repeat(2,minmax(0,1fr))}.oc-design .oc-finance-story-head{flex-wrap:wrap}}
-@media(max-width:420px){.oc-design .oc-finance-allocation{grid-template-columns:minmax(0,1fr)}}
+:is(.oc-design,.finance-page) .oc-finance-story{display:grid;gap:0}
+:is(.oc-design,.finance-page) .oc-finance-story-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;padding-bottom:20px}
+:is(.oc-design,.finance-page) .oc-finance-story-head h2{margin:0;font-size:17px;line-height:1.4}
+:is(.oc-design,.finance-page) .oc-finance-story-head p,:is(.oc-design,.finance-page) .oc-finance-muted{margin:6px 0 0;color:var(--muted-foreground);font-size:13px;line-height:1.7;text-wrap:pretty}
+:is(.oc-design,.finance-page) .oc-finance-section{min-width:0;padding:22px 0;border-top:1px solid var(--border)}
+:is(.oc-design,.finance-page) .oc-finance-section:last-child{padding-bottom:0}
+:is(.oc-design,.finance-page) .oc-finance-section[aria-label="付款记录"]{--finance-section-accent:var(--chart-receipts)}
+:is(.oc-design,.finance-page) .oc-finance-section[aria-label="结算记录"]{--finance-section-accent:var(--chart-quoted)}
+:is(.oc-design,.finance-page) .oc-finance-section[aria-label="余额入账"]{--finance-section-accent:var(--chart-settled)}
+:is(.oc-design,.finance-page) .oc-finance-section[aria-label="退款记录"]{--finance-section-accent:var(--chart-orders)}
+:is(.oc-design,.finance-page) .oc-finance-section-title{display:flex;align-items:center;gap:10px;margin-bottom:14px}
+:is(.oc-design,.finance-page) .oc-finance-section-title svg{box-sizing:content-box;flex:none;padding:6px;border-radius:7px;color:var(--finance-section-accent,var(--muted-foreground));background:color-mix(in srgb,var(--finance-section-accent,var(--muted-foreground)) 12%,transparent)}
+:is(.oc-design,.finance-page) .oc-finance-section-title h3{margin:0;font-size:15px;line-height:1.45;font-weight:650}
+:is(.oc-design,.finance-page) .oc-finance-primary,:is(.oc-design,.finance-page) .oc-finance-row{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;padding:10px 0;font-size:14px;line-height:1.6}
+:is(.oc-design,.finance-page) .oc-finance-primary p,:is(.oc-design,.finance-page) .oc-finance-row small{display:block;margin:3px 0 0;color:var(--muted-foreground);font-size:12px;line-height:1.55}
+:is(.oc-design,.finance-page) .oc-finance-amount,:is(.oc-design,.finance-page) .oc-finance-row>strong,:is(.oc-design,.finance-page) .oc-finance-row>span{font-variant-numeric:tabular-nums;text-align:right;overflow-wrap:anywhere}
+:is(.oc-design,.finance-page) .oc-finance-amount{font-size:17px;line-height:1.4;white-space:nowrap}
+:is(.oc-design,.finance-page) .oc-finance-allocation{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;padding:14px;border:1px solid var(--border);border-radius:10px;background:var(--admin-surface-soft)}
+:is(.oc-design,.finance-page) .oc-finance-allocation dt,:is(.oc-design,.finance-page) .oc-finance-facts dt{color:var(--muted-foreground);font-size:12px;line-height:1.5}
+:is(.oc-design,.finance-page) .oc-finance-allocation dd,:is(.oc-design,.finance-page) .oc-finance-facts dd{margin:5px 0 0;font-size:15px;font-weight:600;font-variant-numeric:tabular-nums;overflow-wrap:anywhere}
+:is(.oc-design,.finance-page) .oc-finance-facts{display:grid;gap:10px}
+:is(.oc-design,.finance-page) .oc-finance-facts>div{display:flex;justify-content:space-between;gap:16px}
+:is(.oc-design,.finance-page) .oc-finance-facts dd{margin:0;text-align:right}
+:is(.oc-design,.finance-page) .oc-finance-sublist{display:grid;gap:8px;margin:10px 0 0;padding:0;list-style:none;font-size:13px}
+:is(.oc-design,.finance-page) .oc-finance-sublist li{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:8px}
+:is(.oc-design,.finance-page) .oc-finance-note{display:grid;gap:6px;margin-top:14px;padding:12px 14px;border:1px solid var(--border);border-radius:8px;font-size:13px}
+:is(.oc-design,.finance-page) .oc-finance-note p{margin:0;color:var(--muted-foreground)}
+:is(.oc-design,.finance-page) .oc-finance-story .oc-finance-note[data-slot=collapsible]{display:block;margin-top:10px;padding:0;border:0}
+:is(.oc-design,.finance-page) .oc-finance-story .oc-finance-note [data-slot=collapsible-trigger]{justify-content:flex-start;white-space:normal;text-align:left}
+:is(.oc-design,.finance-page) .oc-finance-warning{margin:10px 0 0;color:var(--destructive);font-size:13px}
+:is(.oc-design,.finance-page) .oc-finance-section table{font-size:13px}
+:is(.oc-design,.finance-page) .oc-finance-section th,:is(.oc-design,.finance-page) .oc-finance-section td{vertical-align:top}
+:is(.oc-design,.finance-page) .oc-finance-section th{white-space:nowrap}
+:is(.oc-design,.finance-page) .oc-finance-section td{white-space:normal}
+:is(.oc-design,.finance-page) .oc-finance-section td:last-child{min-width:110px;overflow-wrap:anywhere}
+@media(max-width:760px){:is(.oc-design,.finance-page) .oc-finance-allocation{grid-template-columns:repeat(2,minmax(0,1fr))}:is(.oc-design,.finance-page) .oc-finance-story-head{flex-wrap:wrap}:is(.oc-design,.finance-page) .oc-finance-row>strong{white-space:nowrap}}
+@media(max-width:420px){:is(.oc-design,.finance-page) .oc-finance-allocation{grid-template-columns:minmax(0,1fr)}}

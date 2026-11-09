@@ -14,7 +14,7 @@ import { assertManualCloseAccess, manualCloseOrder } from "./manual-close";
 import { listJoinedOrderTeams } from "../im/order-team-access";
 import { assertLegacyOrderTeamRequest, requestLegacyOrderTeam, listJoinedLegacyOrderTeams, readAnyOrderTeamAccess as readOrderTeamAccess } from "../im/legacy-order-team";
 import { parseRfc3339Timestamp } from "../content/content";
-import { queryAdminReadOrders, getAdminReadOrder, parseOrderOrigin, type OrderReadFilters } from "./admin-order-read";
+import { queryAdminReadOrders, getAdminReadOrder, parseOrderOrigin, readAdminOrderSchedule, type OrderReadFilters } from "./admin-order-read";
 
 import { ADMIN_PERMISSION, hasPermission, requirePermission } from "../auth/admin-authorization";
 import { assertGameScopeUsable, gameScopeSignature, readAdminGameScope } from "../auth/admin-scope";
@@ -113,15 +113,15 @@ function parseLimit(raw: string | null): number {
   return limit;
 }
 
-const ORDER_PAGE_QUERY_KEYS = ["page","pageSize","status","origin","createdFrom","createdTo","paymentConfirmedFrom","paymentConfirmedTo","paidFrom","paidTo","paymentOpen","qKind","qValue","restoreKey","view","fundsResolution"] as const;
+const ORDER_PAGE_QUERY_KEYS = ["page","pageSize","status","origin","createdFrom","createdTo","paymentConfirmedFrom","paymentConfirmedTo","paidFrom","paidTo","schedule","scheduleFrom","scheduleTo","paymentOpen","qKind","qValue","restoreKey","view","fundsResolution"] as const;
+function timestampMicros(point:NonNullable<ReturnType<typeof parseRfc3339Timestamp>>){
+  const fraction=point.text.match(/\.(\d+)(?:Z|[+-]\d{2}:\d{2})$/)?.[1]??"";
+  if(fraction.length>6)throw invalid("Timestamp precision exceeds microseconds");
+  return BigInt(point.date.getTime())*1000n+BigInt(fraction.padEnd(6,"0").slice(3));
+}
 function parseRecordedPaymentRange(query: URLSearchParams) {
   const from=parseRfc3339Timestamp(query.get("paidFrom"),"paidFrom"),to=parseRfc3339Timestamp(query.get("paidTo"),"paidTo");
-  const micros=(point:NonNullable<typeof from>)=>{
-    const fraction=point.text.match(/\.(\d+)(?:Z|[+-]\d{2}:\d{2})$/)?.[1]??"";
-    if(fraction.length>6)throw invalid("Paid range precision exceeds microseconds");
-    return BigInt(point.date.getTime())*1000n+BigInt(fraction.padEnd(6,"0").slice(3));
-  };
-  const start=from?micros(from):null,end=to?micros(to):null;
+  const start=from?timestampMicros(from):null,end=to?timestampMicros(to):null;
   if(start!==null&&end!==null&&start>=end)throw invalid("Paid range is invalid");
   return {...(from?{paidFrom:from.text}:{}),...(to?{paidTo:to.text}:{})};
 }
@@ -135,13 +135,18 @@ export function parseAdminOrderPageQuery(query: URLSearchParams): OrderReadFilte
   const view=query.get("view");if(view!==null&&view!=="list")throw invalid("View is invalid","view");
   const fundsResolution=query.get("fundsResolution");if(fundsResolution!==null&&fundsResolution!=="MANUAL_CLOSE")throw invalid("Funds resolution is invalid","fundsResolution");
   const paymentOpen=query.get("paymentOpen");if(paymentOpen!==null&&paymentOpen!=="true")throw invalid("Payment-open filter is invalid","paymentOpen");
+  const schedule=query.get('schedule'),scheduleFrom=query.get('scheduleFrom'),scheduleTo=query.get('scheduleTo');
+  if((schedule!==null||scheduleFrom!==null||scheduleTo!==null)&&(!schedule||!['DUE','SETTLED'].includes(schedule)||!scheduleTo||scheduleFrom===''||schedule==='SETTLED'&&!scheduleFrom))throw invalid('Order schedule filter is invalid','schedule');
+  const scheduledFrom=scheduleFrom?parseRfc3339Timestamp(scheduleFrom,'scheduleFrom'):null,scheduledTo=scheduleTo?parseRfc3339Timestamp(scheduleTo,'scheduleTo'):null;
+  const scheduledStart=scheduledFrom?timestampMicros(scheduledFrom):null,scheduledEnd=scheduledTo?timestampMicros(scheduledTo):null;
+  if(scheduledStart!==null&&scheduledEnd!==null&&scheduledStart>=scheduledEnd)throw invalid('Order schedule range is invalid','scheduleFrom');
   const paidFromRaw=query.get("paymentConfirmedFrom"),paidToRaw=query.get("paymentConfirmedTo");
   const paidFrom=paidFromRaw===null?undefined:parseRfc3339Timestamp(paidFromRaw,"paymentConfirmedFrom");
   const paidTo=paidToRaw===null?undefined:parseRfc3339Timestamp(paidToRaw,"paymentConfirmedTo");
   if(paidFrom&&paidTo&&paidFrom.date.getTime()>=paidTo.date.getTime())throw invalid("Payment-confirmed range is invalid");
   if(query.get("origin")==="LEGACY"&&(paymentOpen||paidFrom||paidTo))throw invalid("Payment filters apply to native orders only");
   const restoreKey=query.get("restoreKey");if(restoreKey!==null&&!/^[a-f0-9]{64}$/.test(restoreKey))throw invalid("Restore key is invalid");
-  return {page:positive("page",1,1000000),pageSize:positive("pageSize",20,100),qKind:qKind as OrderReadFilters["qKind"],...(qValue!==null?{qValue:qValue.trim()}:{}),...parseCreatedRange(query),...parseRecordedPaymentRange(query),...(query.has("status")?{status:parseStatus(query.get("status"))}:{}),...(query.has("origin")?{origin:parseOrderOrigin(query)}:{}) ,...(restoreKey?{restoreKey}:{}),...(view==="list"?{view:"list" as const}:{}),...(fundsResolution?{fundsResolution:"MANUAL_CLOSE" as const}:{}),...(paymentOpen?{paymentOpen:true as const}:{}),...(paidFrom?{paymentConfirmedFrom:paidFrom.text}:{}),...(paidTo?{paymentConfirmedTo:paidTo.text}:{})};
+  return {page:positive("page",1,1000000),pageSize:positive("pageSize",20,100),qKind:qKind as OrderReadFilters["qKind"],...(qValue!==null?{qValue:qValue.trim()}:{}),...parseCreatedRange(query),...parseRecordedPaymentRange(query),...(query.has("status")?{status:parseStatus(query.get("status"))}:{}),...(query.has("origin")?{origin:parseOrderOrigin(query)}:{}) ,...(restoreKey?{restoreKey}:{}),...(view==="list"?{view:"list" as const}:{}),...(fundsResolution?{fundsResolution:"MANUAL_CLOSE" as const}:{}),...(paymentOpen?{paymentOpen:true as const}:{}),...(paidFrom?{paymentConfirmedFrom:paidFrom.text}:{}),...(paidTo?{paymentConfirmedTo:paidTo.text}:{}),...(schedule&&scheduledTo?{schedule:schedule as 'DUE'|'SETTLED',...(scheduledFrom?{scheduleFrom:scheduledFrom.text}:{}),scheduleTo:scheduledTo.text}:{})};
 }
 function parseCreatedRange(query: URLSearchParams): { createdFrom?: string; createdTo?: string } {
   const fromRaw = query.get("createdFrom");
@@ -481,6 +486,10 @@ export async function handleOrderAdminRoute(
         const basis=await compensationOrderBasis(client,origin,orderId);if(!basis)throw notFound();
         await assertGameScope(client,context.userId,access.isBoss,basis.gameId);
         sendJson(response,200,{schema:'admin-order-compensation.v1',basis,...await readCompensationCases(client,origin,orderId)},requestId);return;
+      }
+      if(path==='/schedule-overview'){
+        if([...query.keys()].length)throw invalid('Unsupported schedule overview argument');
+        sendJson(response,200,await readAdminOrderSchedule(client,admin),requestId);return;
       }
       if (path === "/") {
         if (query.has("page")) {

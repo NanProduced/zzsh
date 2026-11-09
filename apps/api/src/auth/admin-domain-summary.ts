@@ -116,8 +116,8 @@ export async function readAdminDomainSummaryInTransaction(client: PoolClient, co
   }
   const filter = request.filter;
   const viewer: OrderReadViewer = { adminId: context.userId, isBoss: access.isBoss, internalQuote: false, authorizationKey };
-  const { values, where } = adminOrderReadPredicatePlan(viewer, filter);
   const continuation = await legacyContinuationReady(client);
+  const { values, where } = adminOrderReadPredicatePlan(viewer, filter, continuation);
   const statuses = [...ORDER_STATUSES, "UNKNOWN"];
   const counts = ORDER_STATUSES.map(status => `count(*) FILTER (WHERE x.status='${status}')::text AS "${status}"`);
   counts.push(`count(*) FILTER (WHERE x.status IS NULL OR x.status NOT IN ('PENDING_PAYMENT','PAID','COMPLETED','CANCELLED'))::text AS "UNKNOWN"`);

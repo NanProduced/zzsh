@@ -171,18 +171,14 @@ export function OrderStages({
       : o.status === 'COMPLETED' ? '开租未记录 · 已完成' : '开租未记录';
 
   if (variant === 'compact') {
-    // 列表只保留关键阶段：创建、支付与最远已发生/待处理节点；完整节点留在详情。
-    const furthest = [...facts].reverse().find(f => f.state !== 'none') ?? facts[facts.length - 1];
-    const compactFacts = facts.length > 3 ? [facts[0]!, facts[1]!, furthest!].filter((f, index, all) => all.indexOf(f) === index) : facts;
+    // 列表和详情展示同一组事实，不能把已发生的开租节点隐藏。
     return <TooltipProvider delay={150}><div className={`oc-stages oc-stages-compact ${className ?? ''}`.trim()}>
       <div className="oc-compact-meta"><strong className="oc-stage-label">{ORDER_STATUS_LABELS[o.status] ?? '状态未记录'}</strong>{/* 列表禁止噪音文案：紧凑说明不显示退款未记录等未记录提示，详情保留 */}<small>{compactText ? `${compactText} · ` : ''}{paymentText}{cancelText}</small></div>
       <ol aria-label="订单进度">
-        {compactFacts.map((f, i) => {
-          // 被折叠的中间节点并入最远节点的提示中，保证时间不丢
-          const omitted = f === furthest ? facts.filter(x => !compactFacts.includes(x)) : [];
+        {facts.map((f, i) => {
           return <li key={f.name} className={f.state}>
-            <StageNode fact={f} size={12} omitted={omitted} />
-            {i < compactFacts.length - 1 ? <span className="oc-stage-line" /> : null}
+            <StageNode fact={f} size={12} />
+            {i < facts.length - 1 ? <span className="oc-stage-line" /> : null}
           </li>;
         })}
       </ol>
@@ -195,7 +191,7 @@ export function OrderStages({
       <ol aria-label="订单进度">
         {facts.map((f, i) => (
           <li key={f.name} className={f.state}>
-            <StageNode fact={f} size={13} omitted={[]} showTime={showTimes} />
+            <StageNode fact={f} size={13} showTime={showTimes} />
             {i < facts.length - 1 ? <span className="oc-stage-line" /> : null}
           </li>
         ))}
@@ -207,11 +203,10 @@ export function OrderStages({
 
 type StageFact = { name: string; Icon: ComponentType<{ size?: number }>; state: string; time?: string | null };
 const stageStateText: Record<string, string> = { done: '已完成', active: '进行中', cancel: '已终止', none: '未发生', unknown: '未记录' };
-/** 单个进度节点：悬停/聚焦显示北京时间；触屏点按打开；折叠节点的时间一并列出。 */
-function StageNode({ fact: f, size, omitted, showTime = false }: { fact: StageFact; size: number; omitted: StageFact[]; showTime?: boolean }) {
+/** 单个进度节点：悬停/聚焦显示北京时间；触屏点按打开。 */
+function StageNode({ fact: f, size, showTime = false }: { fact: StageFact; size: number; showTime?: boolean }) {
   const [open, setOpen] = useState(false);
-  const line = (x: StageFact) => `${x.name}：${x.state === 'none' ? '未发生' : orderTime(x.time)}`;
-  const label = [line(f), ...omitted.map(line)].join('；');
+  const label = `${f.name}：${f.state === 'none' ? '未发生' : orderTime(f.time)}`;
   return <><Tooltip open={open} onOpenChange={setOpen}>
     <TooltipTrigger render={<button type="button" className="oc-stage-trigger" aria-label={`${label}（北京时间）`} onClick={() => setOpen(true)} />}>
       <span className="oc-stage-node"><f.Icon size={size} /></span>
@@ -219,7 +214,7 @@ function StageNode({ fact: f, size, omitted, showTime = false }: { fact: StageFa
     </TooltipTrigger>
     <TooltipContent>
       <div className="grid gap-0.5">
-        {[f, ...omitted].map(x => <span key={x.name}>{x.name} · {stageStateText[x.state] ?? '未记录'} · {x.state === 'none' ? '未发生' : orderTime(x.time)}</span>)}
+        <span>{f.name} · {stageStateText[f.state] ?? '未记录'} · {f.state === 'none' ? '未发生' : orderTime(f.time)}</span>
         <span className="opacity-70">北京时间</span>
       </div>
     </TooltipContent>

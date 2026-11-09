@@ -24,6 +24,7 @@ function loadOrderView(probe){
   '../workspace/beijing-time':{BEIJING_TIME_ZONE:'Asia/Shanghai'},
   './supply-review/model':{accountNumberLabel:v=>v??'未记录',formatFundingCents:v=>v??'未知',formatTermDays:()=>'',quantityText:v=>v??'',unitText:()=>''},
   './admin-order-stages':{OrderStages:empty,ORDER_STATUS_LABELS:{PAID:'进行中',COMPLETED:'已完成'}},
+  './admin-order-schedule':{AdminOrderSchedule:empty},
   '../components/admin-preview':{EntityPreviewTrigger:({trigger})=>trigger,AccountPreviewCard:empty,UserPreviewCard:empty},
   '@/hooks/use-mobile':{useIsMobile:()=>false},
   './admin-order-settlement-evidence':{AdminOrderSettlementEvidence:empty},

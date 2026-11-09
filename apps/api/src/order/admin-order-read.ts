@@ -16,7 +16,7 @@ import { legacyUserOrderResources } from "./legacy-user-order-read";
 import { legacyListedSourceRatio } from "../supply/legacy-listed-quote";
 
 export type OrderReadViewer = { adminId: string; isBoss: boolean; internalQuote: boolean; authorizationKey: string; financeReadable?: boolean; permissions?: ReadonlySet<string> };
-export type OrderReadFilters = { page: number; pageSize: number; status?: string; origin?: "NATIVE" | "LEGACY"; displayNo?: string; accountId?: string; renterUserId?: string; ownerUserId?: string; createdFrom?: string; createdTo?: string; paymentConfirmedFrom?: string; paymentConfirmedTo?: string; paidFrom?: string; paidTo?: string; paymentOpen?: true; qKind?: "order" | "account" | "party" | "renter" | "owner"; qValue?: string; restoreKey?: string; view?: "list"; fundsResolution?: "MANUAL_CLOSE" };
+export type OrderReadFilters = { page: number; pageSize: number; status?: string; origin?: "NATIVE" | "LEGACY"; displayNo?: string; accountId?: string; renterUserId?: string; ownerUserId?: string; createdFrom?: string; createdTo?: string; paymentConfirmedFrom?: string; paymentConfirmedTo?: string; paidFrom?: string; paidTo?: string; schedule?: "DUE" | "SETTLED"; scheduleFrom?: string; scheduleTo?: string; paymentOpen?: true; qKind?: "order" | "account" | "party" | "renter" | "owner"; qValue?: string; restoreKey?: string; view?: "list"; fundsResolution?: "MANUAL_CLOSE" };
 /** Strict source filter: omitted means both; repeated or unknown values are rejected, never coerced. */
 export function parseOrderOrigin(query: URLSearchParams): "NATIVE" | "LEGACY" | undefined {
  const values = query.getAll("origin");
@@ -419,13 +419,29 @@ export function restrictListMoney(item:Record<string,any>){
  for(const k of Object.keys(item))item[k]=sweep(item[k]);
  item.amountsRestricted='FINANCE_PERMISSION_REQUIRED';
 }
-export function adminOrderReadPredicatePlan(viewer:OrderReadViewer,filter:OrderReadFilters):{values:unknown[];where:string[]}{
+/** Due is an agreed deadline, while settled is a recorded posting/completion. */
+export function adminOrderScheduleExpression(continuationReady:boolean,mode:'DUE'|'SETTLED'):string{
+ if(mode==='DUE')return `CASE WHEN x.origin='NATIVE' AND x.status='PAID' THEN
+  (SELECT op.confirmed_at+o.term_seconds*interval '1 second' FROM zzsh_order.rental_order o
+   JOIN zzsh_order.rental_opening op ON op.order_id=o.id AND op.status='CONFIRMED' AND op.confirmed_at IS NOT NULL
+   WHERE o.id=x.id AND o.term_seconds BETWEEN 1 AND 253402300799 AND NOT EXISTS(SELECT 1 FROM zzsh_order.settlement_posting p WHERE p.order_id=o.id))
+ WHEN x.origin='LEGACY' AND x.status='PAID' THEN
+  (SELECT CASE WHEN jsonb_typeof(l.source_snapshot->'tenancy_deadline')='number' THEN
+    CASE WHEN (l.source_snapshot->>'tenancy_deadline')::numeric BETWEEN 1 AND 253402300799 AND trunc((l.source_snapshot->>'tenancy_deadline')::numeric)=(l.source_snapshot->>'tenancy_deadline')::numeric THEN to_timestamp((l.source_snapshot->>'tenancy_deadline')::double precision) END
+   WHEN jsonb_typeof(l.source_snapshot->'tenancy_deadline')='string' AND l.source_snapshot->>'tenancy_deadline' ~ '^[1-9][0-9]{0,11}$' THEN
+    CASE WHEN (l.source_snapshot->>'tenancy_deadline')::numeric<=253402300799 THEN to_timestamp((l.source_snapshot->>'tenancy_deadline')::double precision) END END
+   FROM zzsh_order.legacy_order_read_snapshot l WHERE l.id=x.id) END`;
+ return `CASE WHEN x.origin='NATIVE' THEN (SELECT p.posted_at FROM zzsh_order.settlement_posting p WHERE p.order_id=x.id)
+ WHEN x.origin='LEGACY' AND x.status='COMPLETED' THEN (SELECT ${continuationReady ? LEGACY_CONTINUATION_COMPLETED_AT_SQL : 'l.source_completed_at'} FROM zzsh_order.legacy_order_read_snapshot l WHERE l.id=x.id) END`;
+}
+export function adminOrderReadPredicatePlan(viewer:OrderReadViewer,filter:OrderReadFilters,continuationReady=false):{values:unknown[];where:string[]}{
  if(filter.restoreKey&&filter.restoreKey!==viewer.authorizationKey)throw conflict('Authorization context changed');
  const values:unknown[]=[viewer.isBoss,viewer.adminId],where=[gameScopeSql("x.game_id","$2","$1")];
  if(filter.fundsResolution==='MANUAL_CLOSE')where.push("x.origin='NATIVE' AND x.status='CANCELLED' AND x.cancel_reason='MANUAL_CLOSE'");
  const exact=(field:string,value:string|undefined)=>{if(value!==undefined)where.push(`${field}=$${values.push(value)}`);};
  exact('x.status',filter.status);exact('x.origin',filter.origin);exact('x.display_no',filter.displayNo);exact('x.account_id',filter.accountId);exact('x.renter_user_id',filter.renterUserId);exact('x.owner_user_id',filter.ownerUserId);
  if(filter.createdFrom)where.push(`x.created_at>=$${values.push(filter.createdFrom)}::timestamptz`);if(filter.createdTo)where.push(`x.created_at<$${values.push(filter.createdTo)}::timestamptz`);
+ if(filter.schedule||filter.scheduleFrom||filter.scheduleTo){if(!filter.schedule||!['DUE','SETTLED'].includes(filter.schedule)||!filter.scheduleTo||filter.schedule==='SETTLED'&&!filter.scheduleFrom)throw invalid('Order schedule filter is invalid','schedule');const expression=adminOrderScheduleExpression(continuationReady,filter.schedule);if(filter.scheduleFrom)where.push(`(${expression})>=$${values.push(filter.scheduleFrom)}::timestamptz`);where.push(`(${expression})<$${values.push(filter.scheduleTo)}::timestamptz`);}
  if(filter.paymentOpen)where.push("x.origin='NATIVE' AND EXISTS(SELECT 1 FROM zzsh_order.rental_order payable WHERE payable.id=x.id AND payable.status='PENDING_PAYMENT' AND payable.hold_until>transaction_timestamp())");
  if(filter.paymentConfirmedFrom||filter.paymentConfirmedTo){
   const paid=["paid.id=x.id","p.id=paid.paid_confirmation_id","p.order_id=paid.id","p.disposition='APPLIED'","p.currency='CNY'"];
@@ -450,9 +466,9 @@ export function adminOrderReadPredicatePlan(viewer:OrderReadViewer,filter:OrderR
  return {values,where};
 }
 export async function queryAdminReadOrders(client:PoolClient,viewer:OrderReadViewer,filter:OrderReadFilters,accountViews?:OrderAccountViewReader){
- const {values,where}=adminOrderReadPredicatePlan(viewer,filter);
- const pageSize='$'+values.push(filter.pageSize),offset='$'+values.push((filter.page-1)*filter.pageSize);
  const continuationReady=await legacyContinuationReady(client);
+ const {values,where}=adminOrderReadPredicatePlan(viewer,filter,continuationReady);
+ const pageSize='$'+values.push(filter.pageSize),offset='$'+values.push((filter.page-1)*filter.pageSize);
  // Authorization, filtering, counting and key selection run on the narrow
  // relation; only this page's own keys are read again for their full record.
  const page=(await client.query<{total:string;keys:Array<{origin:string;id:string}>}>(`WITH all_orders AS(${orderReadKeyRelation(continuationReady)}),filtered AS(SELECT * FROM all_orders x WHERE ${where.map(w=>'('+w+')').join(' AND ')}),paged AS(SELECT origin,id,created_at FROM filtered ORDER BY created_at DESC NULLS LAST,id DESC,origin DESC LIMIT ${pageSize} OFFSET ${offset}) SELECT (SELECT count(*)::text FROM filtered) AS total,COALESCE((SELECT jsonb_agg(jsonb_build_object('origin',p.origin,'id',p.id) ORDER BY p.created_at DESC NULLS LAST,p.id DESC,p.origin DESC) FROM paged p),'[]'::jsonb) AS keys`,values)).rows[0]!;
@@ -472,6 +488,23 @@ export async function queryAdminReadOrders(client:PoolClient,viewer:OrderReadVie
  await attachAdminOrderExtras(client,items,viewer,accountViews);
  if(filter.view==='list')for(const item of items)slimListItem(item);
  return {items,page:filter.page,pageSize:filter.pageSize,total:Number(page.total),contextKey:viewer.authorizationKey};
+}
+
+/** The same due expression powers overview counts and the list filter. */
+export async function readAdminOrderSchedule(client:PoolClient,viewer:OrderReadViewer){
+ const continuationReady=await legacyContinuationReady(client),clock=(await client.query<{asOf:Date;start:Date}>(`SELECT transaction_timestamp() AS "asOf",date_trunc('day',transaction_timestamp() AT TIME ZONE 'Asia/Shanghai') AT TIME ZONE 'Asia/Shanghai' AS start`)).rows[0];
+ if(!clock||!(clock.asOf instanceof Date)||!(clock.start instanceof Date))throw new Error('Order schedule clock unavailable');
+ const bounds=Array.from({length:8},(_,i)=>new Date(clock.start.getTime()+i*86400000).toISOString());
+ const counts=bounds.slice(0,7).map((_,i)=>`count(*) FILTER (WHERE due_at >= $${i+3}::timestamptz AND due_at < $${i+4}::timestamptz)::text AS d${i}`);
+ const row=(await client.query<Record<string,string>>(`WITH all_orders AS(${orderReadKeyRelation(continuationReady)}), scoped AS MATERIALIZED (
+  SELECT x.status,${adminOrderScheduleExpression(continuationReady,'DUE')} AS due_at,
+   CASE WHEN x.origin='NATIVE' AND x.status='PAID' THEN EXISTS(SELECT 1 FROM zzsh_order.settlement_posting p WHERE p.order_id=x.id) ELSE false END AS posted
+  FROM all_orders x WHERE ${gameScopeSql('x.game_id','$2','$1')}
+ ) SELECT count(*) FILTER (WHERE due_at < $11::timestamptz)::text AS overdue,
+ count(*) FILTER (WHERE status='PAID' AND due_at IS NULL AND NOT posted)::text AS unknown,${counts.join(',')} FROM scoped`,[viewer.isBoss,viewer.adminId,...bounds,clock.asOf.toISOString()])).rows[0];
+ if(!row||!['overdue','unknown',...counts.map((_,i)=>`d${i}`)].every(k=>/^(0|[1-9]\d*)$/.test(row[k]??'')))throw new Error('Order schedule counts unavailable');
+ return {schema:'admin-order-schedule.v1',asOf:clock.asOf.toISOString(),todayFrom:bounds[0],todayTo:bounds[1],overdue:row.overdue,unknown:row.unknown,
+  days:bounds.slice(0,7).map((from,i)=>({from,to:bounds[i+1],count:row[`d${i}`]}))};
 }
 export async function getAdminReadOrder(client:PoolClient,viewer:OrderReadViewer,id:string,paymentReadOptions?:ChannelPaymentReadOptions,accountViews?:OrderAccountViewReader){
  const relation=orderReadRelation(await legacyContinuationReady(client),false,{nativeIds:'$1',legacyIds:'$1'});
