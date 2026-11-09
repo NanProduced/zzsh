@@ -21,7 +21,7 @@ import { OrderReferenceMessage } from "@zzsh/ui/order-card";
 import { computeSupportUnread, isDirectoryOrderGroup, publishSupportUnread, readDirectoryPreferences, writeDirectoryPreferences, type DirectoryPreference } from "./support-unread";
 import { SupportRoundRating, type RoundRatingResolution } from "./support-round-rating";
 import { OrderTeamPanel, orderStageTone, orderTeamLabel, type OrderTeamAccess } from "@zzsh/ui/order-team-panel";
-import { orderApi, orderIntentKey } from "@/lib/order-client";
+import { isOrderSubjectCurrent, orderApi, orderIntentKey } from "@/lib/order-client";
 import { orderUrl } from "@/components/order/order-presentation";
 import { CHAT_EMOJIS, MessageActionMenu, MessageQuoted, MessageReplyQuote, useMessageLongPress, type MessageActionId, type MessageActionItem } from "@zzsh/ui/message-actions";
 import { MediaDraftBar, MediaMessage, MessageImage, mediaMessageOf, mediaSummaryOf, type MessageMediaDraft } from "@zzsh/ui/message-media";
@@ -554,6 +554,8 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, vi
   const createFlight=useRef(false);
   useEffect(()=>{if(initialOrderId&&initialOrderParty){setSelectedOrder({id:initialOrderId,party:initialOrderParty});setSection("orders");setPanelView("chat");}},[initialOrderId,initialOrderParty,requestSerial]);
   const session = useUserSession();
+  const sessionRef = useRef(session);
+  sessionRef.current = session;
   const auth = useAuthOverlay();
   const [selectedType, setSelectedType] = useState<SupportType>("SERVICE");
   const [consultations, setConsultations] = useState<Consultation[]>([]);
@@ -1438,12 +1440,12 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, vi
       throw Object.assign(new Error("登录状态已变化，请刷新后按原请求核对"), { status: 401 });
     }
     const subject = { userId: acting, identityVersion: session.identityVersion };
-    const isCurrent = () => session.status === "authenticated" && session.userId === subject.userId && session.identityVersion === subject.identityVersion;
+    const isCurrent = () => isOrderSubjectCurrent(subject, sessionRef.current);
     // The card persists the SAME `opening.confirm` intent as the order detail, so an unknown
     // result can be recovered by the original key there instead of minting a new key here.
     // Server owns the ack; the panel re-reads access after this resolves.
     await orderApi.confirmOpeningWithOriginalIntent(subject, target.orderId, target.openingId, Number(target.openingVersion), orderIntentKey, isCurrent);
-  }, [session.userId, session.status]);
+  }, [session.userId, session.status, session.identityVersion]);
 
   /**
    * 已结束订单群只读时进入普通客服线程：复用同一条 SERVICE 线程与历史，

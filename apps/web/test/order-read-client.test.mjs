@@ -114,7 +114,7 @@ test("non-order endpoints keep their own contracts and never receive the order i
 
 test("a frozen subject is never re-derived from a later registration, including A→B→A",async()=>{
  const before=globalThis.fetch;const calls=[];
- globalThis.fetch=async(url,init)=>{calls.push({url:String(url),init});return Response.json({ok:true});};
+ globalThis.fetch=async(url,init)=>{calls.push({url:String(url),init});return Response.json(String(url).includes('/openings/')?{orderId:'order_1',openings:[{id:'opening_1',versionNo:1}]}:{ok:true});};
  try{
   const frozenA = captureOrderSubject("user_a", 1);
   registerOrderExpectedUserId("user_b");

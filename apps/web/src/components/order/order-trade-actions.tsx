@@ -800,7 +800,7 @@ function OpeningPanel({ opening, order, party, onChanged, readOnly = false }: { 
     {!readOnly && !confirmed && !acked && !unknown ? <button type="button" className="button primary" onClick={() => void confirm()} disabled={busy}>{busy ? "确认中…" : "确认期初并开租"}</button> : null}
     {readOnly && !confirmed && !acked && !unknown ? <p className="order-muted">订单主状态已完成，本页不再提供新的期初确认；如有一笔结果未知的申请，请用下方「查询原请求」按原键核对。</p> : null}
     {!confirmed && acked ? <p className="order-muted"><Clock3 size={14} aria-hidden="true" /> {ackText(myAck, true)}；等待对方确认后正式开租。</p> : null}
-    {!confirmed && opening.status === "DRAFT" && opening.autoConfirmDueAt ? <p className="order-muted">双方未确认时，将于 {formatOrderTime(opening.autoConfirmDueAt)} 自动确认并开始租期。</p> : null}
+    {!confirmed && opening.status === "DRAFT" && opening.autoConfirmDueAt && Number.isFinite(Date.parse(opening.autoConfirmDueAt)) ? <p className="order-muted">双方未确认时，将于 {formatOrderTime(opening.autoConfirmDueAt)} 自动确认并开始租期。</p> : null}
     <RecordList title="确认记录" records={acks.map((ack) => ({ label: ack.source === "PARTY" ? `${partyLabel(ack.party)}确认期初` : ack.source === "ON_BEHALF" ? `客服协助${partyLabel(ack.party)}确认期初` : ack.source === "AUTO" ? `${partyLabel(ack.party)}期初自动确认` : `${partyLabel(ack.party)}期初确认已记录`, time: ack.createdAt ?? null }))} />
     {opening.confirmedAt ? <p className="order-muted">开租时间：{formatOrderTime(opening.confirmedAt)}</p> : null}
   </div>;

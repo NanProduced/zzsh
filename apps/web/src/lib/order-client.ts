@@ -907,6 +907,16 @@ async function requestWrite<T>(path: string, options: WriteOptions): Promise<T> 
 
 export { requestJson as requestOrderJson, requestWrite as requestOrderWrite };
 
+async function requestOpeningConfirmation(subject: OrderSubjectInput, orderId: string, openingId: string, versionNo: number, key: string, signal?: AbortSignal): Promise<OrderSettlement> {
+  const result = await requestWrite<unknown>(`/api/orders/${encodeURIComponent(orderId)}/openings/${encodeURIComponent(openingId)}/confirm`, { body: { versionNo }, key, signal, subject });
+  if (!result || typeof result !== "object" || Array.isArray(result)) throw new OrderRequestError(502, null);
+  const body = result as Record<string, unknown>;
+  if (body.orderId !== orderId || !Array.isArray(body.openings) || body.openings.filter(opening =>
+    opening && typeof opening === "object" && opening.id === openingId && (opening.versionNo === versionNo || opening.versionNo === String(versionNo))).length !== 1)
+    throw new OrderRequestError(502, null);
+  return result as OrderSettlement;
+}
+
 export function orderIntentKey(): string {
   return "op_" + crypto.randomUUID().replaceAll("-", "");
 }
@@ -1030,7 +1040,7 @@ export const orderApi = {
   decideSettlement: (subject: OrderSubjectInput, orderId: string, versionId: string, body: { action: "CONFIRM" | "REJECT"; versionHash: string; reason?: string; termsAccepted?: boolean }, key: string, signal?: AbortSignal) =>
     requestWrite<OrderSettlement>(`/api/orders/${encodeURIComponent(orderId)}/settlements/${encodeURIComponent(versionId)}/decision`, { body, key, signal, subject }),
   confirmOpening: (subject: OrderSubjectInput, orderId: string, openingId: string, versionNo: number, key: string, signal?: AbortSignal) =>
-    requestWrite<OrderSettlement>(`/api/orders/${encodeURIComponent(orderId)}/openings/${encodeURIComponent(openingId)}/confirm`, { body: { versionNo }, key, signal, subject }),
+    requestOpeningConfirmation(subject, orderId, openingId, versionNo, key, signal),
   /**
    * The customer-support order card and the order detail panel share one `opening.confirm`
    * original-request contract. The frozen subject, key, version and opening id are persisted
@@ -1060,9 +1070,8 @@ export const orderApi = {
       refuseExisting: true,
       pendingCode: "OPENING_CONFIRM_PENDING",
       pendingMessage: "已有一笔结果未确认的开租申请；原申请与原键已保留，请到订单详情按原请求查询/恢复，不要重复提交。",
-      request: (key, frozen, frozenContext, frozenSubject) => requestWrite<OrderSettlement>(
-        `/api/orders/${encodeURIComponent(orderId)}/openings/${encodeURIComponent(String(frozenContext?.openingId ?? openingId))}/confirm`,
-        { body: { versionNo: frozen.versionNo ?? versionNo }, key, subject: frozenSubject },
+      request: (key, frozen, frozenContext, frozenSubject) => requestOpeningConfirmation(
+        frozenSubject, orderId, String(frozenContext?.openingId ?? openingId), Number(frozen.versionNo ?? versionNo), key,
       ),
     });
     if (result.status === "ok") return;

@@ -2969,19 +2969,21 @@ test("master review: a progress primary action focuses the matching control, nev
   } finally { await probe.dispose(); }
 }));
 
-test("master review: no frozen auto-confirm deadline means no auto-confirm promise", async () => withDom(async window => {
+test("master review: missing or invalid auto-confirm deadlines never promise auto-confirm", async () => withDom(async window => {
   const OrderDetail = loadComponent("apps/web/src/components/order/order-detail.tsx", session("user_A")).OrderDetail;
-  const draft = { ...opening, status: "DRAFT", confirmedAt: null, autoConfirmDueAt: null, acks: [{ party: "RENTER", source: "PARTY" }] };
-  const data = { ...settlementBody, rentalStarted: false, openings: [draft] };
-  const probe = createProbe(window, OrderDetail, detailProps(paidOrder), async url => String(url).includes("/settlement") ? json(data) : json({}));
-  try {
-    await probe.render();
-    await settle(window, probe, "等待对方确认期初清单");
-    const card = probe.host.querySelector(".order-progress-card");
-    assert.doesNotMatch(card.textContent, /按本单冻结的截止时间由系统自动确认/);
-    assert.match(card.textContent, /不会承诺系统会自动确认/);
-    assert.doesNotMatch(probe.host.querySelector("#order-trade-actions").textContent, /将于.*自动确认/);
-  } finally { await probe.dispose(); }
+  for (const autoConfirmDueAt of [null, "invalid"]) {
+    const draft = { ...opening, status: "DRAFT", confirmedAt: null, autoConfirmDueAt, acks: [{ party: "RENTER", source: "PARTY" }] };
+    const data = { ...settlementBody, rentalStarted: false, openings: [draft] };
+    const probe = createProbe(window, OrderDetail, detailProps(paidOrder), async url => String(url).includes("/settlement") ? json(data) : json({}));
+    try {
+      await probe.render();
+      await settle(window, probe, "等待对方确认期初清单");
+      const card = probe.host.querySelector(".order-progress-card");
+      assert.doesNotMatch(card.textContent, /按本单冻结的截止时间由系统自动确认/);
+      assert.match(card.textContent, /不会承诺系统会自动确认/);
+      assert.doesNotMatch(probe.host.querySelector("#order-trade-actions").textContent, /将于.*自动确认/);
+    } finally { await probe.dispose(); }
+  }
 }));
 
 test("master review: legacy terminal pages never promise unconditional continuation", async () => withDom(async window => {
@@ -3096,7 +3098,7 @@ test("master review: a delayed A intent keeps A's subject and the original key a
   globalThis.fetch = async (_url, init) => {
     const headers = new Headers(init.headers);
     sent.push({ subject: headers.get("x-zzsh-expected-user-id"), key: headers.get("idempotency-key"), body: JSON.parse(init.body) });
-    return json({});
+    return json({ orderId, openings: [{ id: "opening_1", versionNo: 1 }] });
   };
   try {
     let live = "user_B";
@@ -3241,10 +3243,10 @@ test("an opening card without a recorded deadline does not promise automatic con
 /* ---- Master third review: the customer-support card shares the opening.confirm original request ---- */
 
 /** Extracts the REAL customer-support callback so the test exercises production wiring. */
-function cardConfirmCallback(mutableSession) {
+function cardConfirmCallback(mutableSession, sessionRef = { current: mutableSession }) {
   const source = fs.readFileSync(path.join(tree, "apps/web/src/components/support/customer-support-workspace.tsx"), "utf8");
   const begin = source.indexOf("  const confirmOpening = useCallback(async (target: OrderTeamAccess) => {");
-  const marker = "}, [session.userId, session.status]);";
+  const marker = "}, [session.userId, session.status, session.identityVersion]);";
   const end = source.indexOf(marker, begin);
   assert.ok(begin >= 0 && end > begin, "the real customer-support confirmOpening callback must stay extractable");
   const fnSource = source.slice(begin, end + marker.length);
@@ -3252,11 +3254,12 @@ function cardConfirmCallback(mutableSession) {
   module.filename = path.join(tree, "card-confirm-regression.cjs");
   module.paths = Module._nodeModulePaths(tree);
   const compiled = typescript.transpileModule(
-    "const useCallback=(fn)=>fn; exports.create=(session,orderApi,orderIntentKey)=>{\n" + fnSource + "\nreturn confirmOpening;};",
+    "const useCallback=(fn)=>fn; exports.create=(session,orderApi,orderIntentKey,sessionRef,isOrderSubjectCurrent)=>{\n" + fnSource + "\nreturn confirmOpening;};",
     { compilerOptions: { module: typescript.ModuleKind.CommonJS, target: typescript.ScriptTarget.ES2022 } },
   ).outputText;
   module._compile(compiled, module.filename);
-  return module.exports.create(mutableSession, orderApi, orderIntentKey);
+  const { isOrderSubjectCurrent } = requireFromTree(path.join(tree, "apps/web/src/lib/order-subject.ts"));
+  return module.exports.create(mutableSession, orderApi, orderIntentKey, sessionRef, isOrderSubjectCurrent);
 }
 const cardInfo = (over = {}) => ({ orderId: "order_card", displayNo: "CARD-1", orderStatus: "PAID", account: { title: "账号" }, members: [],
   terms: { viewerParty: "RENTER", basis: "QUOTE", lines: [] }, openingId: "opening_1", openingVersion: 1,
@@ -3354,11 +3357,44 @@ test("master review: a re-entry, identity switch and corrupted storage never min
   } finally { globalThis.fetch = previousFetch; clearCardIntent(); window.sessionStorage.removeItem("zzsh.order-intent.v1:user_A:opening.confirm:order_card"); }
 }));
 
+test("a stale support-card callback cannot write after a session change or A→B→A", async () => withDom(async () => {
+  const original = session("user_A"), ref = { current: original }, callback = cardConfirmCallback(original, ref);
+  const previousFetch = globalThis.fetch;
+  let writes = 0;
+  globalThis.fetch = async () => { writes++; return json({ orderId: "order_card", openings: [{ id: "opening_1", versionNo: 1 }] }); };
+  try {
+    ref.current = { ...original, status: "loading", userId: null };
+    await assert.rejects(() => callback(cardTarget), e => e.code === "ORDER_SUBJECT_CHANGED");
+    ref.current = { ...original, userId: "user_B", identityVersion: original.identityVersion + 1 };
+    await assert.rejects(() => callback(cardTarget), e => e.code === "ORDER_SUBJECT_CHANGED");
+    ref.current = { ...original, identityVersion: original.identityVersion + 2 };
+    await assert.rejects(() => callback(cardTarget), e => e.code === "ORDER_SUBJECT_CHANGED");
+    assert.equal(writes, 0);
+    assert.equal(intents.inspectIntent("user_A", "opening.confirm", "order_card").state, "NONE");
+    await cardConfirmCallback(ref.current, ref)(cardTarget);
+    assert.equal(writes, 1, "a newly rendered callback for the confirmed user may proceed");
+  } finally { globalThis.fetch = previousFetch; clearCardIntent(); }
+}));
+
+test("a malformed successful card response keeps the original confirmation intent", async () => withDom(async () => {
+  const callback = cardConfirmCallback(session("user_A"));
+  const previousFetch = globalThis.fetch;
+  let key = null;
+  globalThis.fetch = async (_url, init) => {
+    key = new Headers(init.headers).get("idempotency-key");
+    return json({ orderId: "another_order", openings: [] });
+  };
+  try {
+    await assert.rejects(() => callback(cardTarget), e => e.code === "OPENING_CONFIRM_UNKNOWN");
+    assert.equal(intents.inspectIntent("user_A", "opening.confirm", "order_card").intent?.key, key);
+  } finally { globalThis.fetch = previousFetch; clearCardIntent(); }
+}));
+
 test("master review: a successful or already-confirmed card confirmation leaves no dangling intent", async () => withDom(async window => {
   const callback = cardConfirmCallback(session("user_A"));
   const previousFetch = globalThis.fetch;
   const keys = [];
-  globalThis.fetch = async (_url, init) => { keys.push(new Headers(init.headers).get("idempotency-key")); return json({ ok: true }); };
+  globalThis.fetch = async (_url, init) => { keys.push(new Headers(init.headers).get("idempotency-key")); return json({ orderId: "order_card", openings: [{ id: "opening_1", versionNo: 1 }] }); };
   try {
     await callback(cardTarget);
     assert.equal(keys.length, 1);

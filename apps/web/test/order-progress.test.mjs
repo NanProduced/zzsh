@@ -131,6 +131,10 @@ test("opening checklist: each party confirms independently; due time is the froz
   assert.doesNotMatch(noDue.note, /按本单冻结的截止时间由系统自动确认/);
   assert.match(noDue.note, /不会承诺系统会自动确认/);
   assert.ok(noDue.known.some(line => line.includes("本单未记录自动确认截止时间")));
+  const invalidDue = view({}, { facts: facts({ openingVersionNo: "1", myAck: true, autoConfirmDueAt: "invalid" }) });
+  assert.doesNotMatch(invalidDue.note, /按本单冻结的截止时间由系统自动确认/);
+  assert.match(invalidDue.note, /不会承诺系统会自动确认/);
+  assert.ok(invalidDue.known.some(line => line.includes("本单未记录自动确认截止时间")));
 });
 
 test("renting: the end-rental form uses server pricing, never a browser calculation", () => {

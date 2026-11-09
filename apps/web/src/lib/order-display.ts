@@ -740,7 +740,7 @@ export function orderProgressView({ order, party, facts, readFailed, payment = n
           primary: progressSupport, secondary: [progressOrderGroups, progressRefresh],
           known: [...known, generationPending ? "服务端记录：开租清单生成待客服核对" : "本次结算读取没有返回开租清单"] };
       }
-      const due = facts.autoConfirmDueAt ?? null;
+      const due = typeof facts.autoConfirmDueAt === "string" && Number.isFinite(Date.parse(facts.autoConfirmDueAt)) ? facts.autoConfirmDueAt : null;
       if (!facts.myAck) {
         return { ...base, tone: "active", title: "确认期初清单并开租", owner: "你",
           note: `期初数量取自本单冻结报价，双方各自确认同一版本；确认来源会区分本人、客服代操作与系统自动确认，截止时间取本单冻结值。${due ? "" : "本单未记录自动确认截止时间，页面不会承诺系统自动确认。"}付款、建群与沟通都不等于已开租。`,
