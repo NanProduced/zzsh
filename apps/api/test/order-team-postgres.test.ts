@@ -26,12 +26,12 @@ export async function runOrderTeamAcceptance(t:TestContext,o:Parameters<typeof r
   await seedAdmin(pool,staff,`${staff}_s`,run,false);await seedIdentity(pool,identityKey("ADMIN",staff),run);
   for(const permission of ["im.support.read","im.support.accept","im.support.presence","im.support.transfer","order.settlement.write"])
     await pool.query(`INSERT INTO zzsh_iam.admin_user_permission(admin_user_id,permission_code,effect) VALUES($1,$2,'ALLOW')`,[staff,permission]);
-  await pool.query(`INSERT INTO zzsh_iam.im_support_presence(app_id,admin_user_id,availability,connection_state,last_connected_at) VALUES($1,$2,'AVAILABLE','CONNECTED',clock_timestamp())`,[appId,staff]);
+  await pool.query(`INSERT INTO zzsh_iam.im_support_presence(app_id,admin_user_id,availability,connection_state,last_connected_at,auth_session_id) VALUES($1,$2,'AVAILABLE','CONNECTED',clock_timestamp(),(SELECT id FROM zzsh_auth_admin."session" WHERE "userId"=$2 AND "expiresAt">clock_timestamp() ORDER BY "createdAt" DESC LIMIT 1))`,[appId,staff]);
   let gameId="";const fixtureApps=new Set([appId]);
   const makePaid=async(label:string,app=appId)=>{
     const f=await o.fixture(label);const row=(await pool.query(`SELECT * FROM zzsh_order.rental_order WHERE id=$1`,[f.orderId])).rows[0];
     if(!gameId){gameId=row.game_id;await pool.query(`INSERT INTO zzsh_supply.admin_supply_scope(admin_user_id,game_id,granted_by_admin_id) VALUES($1,$2,$1)`,[staff,gameId]);}
-    if(!fixtureApps.has(app)){await seedIdentity(pool,identityKey("ADMIN",staff,app),run);await pool.query(`INSERT INTO zzsh_iam.im_support_presence(app_id,admin_user_id,availability,connection_state,last_connected_at) VALUES($1,$2,'AVAILABLE','CONNECTED',clock_timestamp())`,[app,staff]);fixtureApps.add(app);}
+    if(!fixtureApps.has(app)){await seedIdentity(pool,identityKey("ADMIN",staff,app),run);await pool.query(`INSERT INTO zzsh_iam.im_support_presence(app_id,admin_user_id,availability,connection_state,last_connected_at,auth_session_id) VALUES($1,$2,'AVAILABLE','CONNECTED',clock_timestamp(),(SELECT id FROM zzsh_auth_admin."session" WHERE "userId"=$2 AND "expiresAt">clock_timestamp() ORDER BY "createdAt" DESC LIMIT 1))`,[app,staff]);fixtureApps.add(app);}
     const fact=createControlledPaymentSource({config:o.config,resourceSet:o.resourceSet,appId:app,merchantScopeId:"team_test",allowedOrderIds:[f.orderId]})({orderId:f.orderId,merchantOrderNo:row.display_no,providerTransactionId:`tx_${randomUUID()}`,amountCents:(BigInt(row.rental_amount_cents)+BigInt(row.deposit_amount_cents)).toString(),currency:"CNY",providerPaidAt:new Date().toISOString(),requestId:`req_${randomUUID()}`});
     await withTransaction(pool,c=>confirmOrderPayment(c,fact));await dispatchPaidOrders(pool,app);
     return {...f,renter:row.renter_user_id as string,owner:row.owner_user_id as string,appId:app};

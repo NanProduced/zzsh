@@ -217,7 +217,7 @@
    The case column participates in the grid — it must never overlay the chat or the send button. */
 .workspace-root .im-wb-root { --im-accent:#38bdf8; --im-accent-strong:#7dd3fc; --im-accent-soft:rgba(56,189,248,.14); --im-bubble-bg:#1b6fae; --im-bubble-fg:#f2f8fd; --im-warn:#f59e0b; --im-live:#34d399; --im-live-soft:rgba(16,185,129,.14); --im-attention:#fbbf24; --im-attention-soft:rgba(245,158,11,.14); --im-done:var(--muted-foreground); --im-done-soft:color-mix(in oklab,var(--muted) 70%,transparent); --im-danger:#f87171; --im-danger-soft:rgba(248,113,113,.14); --border-strong:color-mix(in oklab,var(--border) 100%,var(--foreground) 15%);
   display:flex; flex-direction:column; gap:6px; min-width:0; min-height:0; height:calc(100svh - 112px); }
-.workspace-root .workspace-page:has(.im-wb-root) { padding-top:8px; padding-bottom:8px; }
+.workspace-root .workspace-page.im-wb-active { padding-top:8px; padding-bottom:8px; }
 .workspace-root .im-wb-pane { display:flex; flex-direction:column; flex:1; min-height:0; container-type:inline-size; }
 .workspace-root .im-wb-pane[hidden] { display:none; }
 

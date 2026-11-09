@@ -44,6 +44,7 @@ import {
   type UserObligationReader,
 } from "./user-identity";
 import type { ImIdentityIntentRepository, ImIdentityProvisioner } from "../im/identity-lifecycle";
+import { clearSupportPresenceForSession } from "../im/support-presence-session";
 import { assertAdminCommandAuthorizedInTransaction } from "./admin-auth-session";
 import { ADMIN_BRUTE_FORCE_POLICY, ADMIN_CAPTCHA_REQUIRED_REASON, adminAuthSubjects, clearAdminAuthFailures, gateAdminAuth, recordAdminAuthFailure, type AdminBruteForce } from "./admin-brute-force";
 import { resolveAdminClientIp } from "./admin-client-ip";
@@ -1090,7 +1091,15 @@ async function lockPin(request: NodeRequest, response: NodeResponse, requestId: 
     if (!row || !row.pinHash) throw new SecurityApiError(409, API_V1_ERROR_CODES.CONFLICT, "PIN is not configured");
     if (row.locked) throw new SecurityApiError(409, API_V1_ERROR_CODES.CONFLICT, "Session is already locked");
     await client.query(`UPDATE "zzsh_auth_admin"."session" SET "locked" = true, "updatedAt" = clock_timestamp() WHERE "id" = $1`, [context.sessionId]);
-    await recordAudit(client, { actorType: "admin", actorId: context.userId, sessionId: context.sessionId, action: "admin.pin.locked", objectType: "admin_session", objectId: context.sessionId, outcome: "SUCCESS", requestId });
+    // Clearing presence in the same transaction makes dispatch stop immediately; the
+    // client cannot call an authenticated presence endpoint once this session is locked.
+    const support = await clearSupportPresenceForSession(client, context.userId, context.sessionId);
+    await recordAudit(client, {
+      actorType: "admin", actorId: context.userId, sessionId: context.sessionId,
+      action: "admin.pin.locked", objectType: "admin_session", objectId: context.sessionId,
+      outcome: "SUCCESS", requestId,
+      details: { supportPresenceCleared: support.presence, supportSessionsClosed: support.sessions },
+    });
   });
   sendSuccess(response, { status: "LOCKED" }, requestId);
 }

@@ -15,6 +15,7 @@ import {
   claimConsultation,
   closeConsultation,
   createOrResumeUserConsultation,
+  heartbeatOwnPresence,
   listAdminConsultations,
   listUserConsultations,
   reconcileMessageScopes,
@@ -229,16 +230,17 @@ test(
 
       runtime = pool(DATABASE, RUNTIME_USER, guard.runtimePassword, "zzsh-yunxin-consultation-runtime", 8);
       await assertBusinessRuntimeIdentity(runtime, { database: { name: DATABASE, user: RUNTIME_USER, runtimeUser: RUNTIME_USER } });
-      const privileges = await runtime.query<{ consultationDelete: boolean; eventDelete: boolean; presenceUpdate: boolean; rotationUpdate: boolean; operationDelete: boolean; operationUpdateOwner: boolean; operationUpdateState: boolean }>(
+      const privileges = await runtime.query<{ consultationDelete: boolean; eventDelete: boolean; presenceUpdate: boolean; presenceSessionBinding: boolean; rotationUpdate: boolean; operationDelete: boolean; operationUpdateOwner: boolean; operationUpdateState: boolean }>(
         `SELECT has_table_privilege(current_user, 'zzsh_iam.im_consultation', 'DELETE') AS "consultationDelete",
                 has_table_privilege(current_user, 'zzsh_iam.im_consultation_event', 'DELETE') AS "eventDelete",
                 has_column_privilege(current_user, 'zzsh_iam.im_support_presence', 'availability', 'UPDATE') AS "presenceUpdate",
+                has_column_privilege(current_user, 'zzsh_iam.im_support_presence', 'auth_session_id', 'UPDATE') AS "presenceSessionBinding",
                 has_column_privilege(current_user, 'zzsh_iam.im_support_presence', 'last_order_assigned_at', 'UPDATE') AS "rotationUpdate",
                 has_table_privilege(current_user, 'zzsh_iam.im_consultation_scope_operation', 'DELETE') AS "operationDelete",
                 has_column_privilege(current_user, 'zzsh_iam.im_consultation_scope_operation', 'owner_account_id', 'UPDATE') AS "operationUpdateOwner",
                 has_column_privilege(current_user, 'zzsh_iam.im_consultation_scope_operation', 'state', 'UPDATE') AS "operationUpdateState"`,
       );
-      assert.deepEqual(privileges.rows[0], { consultationDelete: false, eventDelete: false, presenceUpdate: true, rotationUpdate: true, operationDelete: false, operationUpdateOwner: false, operationUpdateState: true });
+      assert.deepEqual(privileges.rows[0], { consultationDelete: false, eventDelete: false, presenceUpdate: true, presenceSessionBinding: true, rotationUpdate: true, operationDelete: false, operationUpdateOwner: false, operationUpdateState: true });
 
       await seedUser(runtime, userId, userSessionId, runId);
       await seedUser(runtime, boundaryUserId, boundaryUserSessionId, runId);
@@ -360,7 +362,7 @@ test(
       const raceNewOnline = await writePresence(
         options,
         presenceRaceNewAdmin,
-        { availability: "AVAILABLE", connectionState: "CONNECTED" },
+        { availability: "AVAILABLE", connectionState: "CONNECTED", takeover: true },
         `${prefix}presence-race-new-online`,
         raceOldOnline.version,
       );
@@ -375,6 +377,34 @@ test(
       assert.equal(racePresenceAfterLateWrite.availability, "AVAILABLE");
       assert.equal(racePresenceAfterLateWrite.connectionState, "CONNECTED");
       assert.equal(racePresenceAfterLateWrite.version, raceNewOnline.version);
+      assert.equal((await runtime.query<{ sessionId: string }>(
+        `SELECT "auth_session_id" AS "sessionId" FROM "zzsh_iam"."im_support_presence" WHERE "app_id" = $1 AND "admin_user_id" = $2`,
+        [APP_ID, presenceRaceAdminId],
+      )).rows[0]?.sessionId, presenceRaceNewSessionId, "the latest live session owns presence");
+      assert.equal((await heartbeatOwnPresence(options, presenceRaceOldAdmin)).ok, false, "a stale window cannot keep presence alive");
+
+      // A stale window cannot pause or periodically re-sync the owner's presence even
+      // after it reads the current version; only an explicit takeover may change hands.
+      await assert.rejects(
+        updateOwnPresence(options, presenceRaceOldAdmin, { availability: "OFF_DUTY", connectionState: "CONNECTED", version: raceNewOnline.version }, `${prefix}presence-old-pause`),
+        /owned by another session/,
+      );
+      await assert.rejects(
+        updateOwnPresence(options, presenceRaceOldAdmin, { availability: "AVAILABLE", connectionState: "CONNECTED", version: raceNewOnline.version }, `${prefix}presence-old-sync`),
+        /owned by another session/,
+      );
+      const oldTakeover = await updateOwnPresence(options, presenceRaceOldAdmin, {
+        availability: "AVAILABLE", connectionState: "CONNECTED", version: raceNewOnline.version, takeover: true,
+      }, `${prefix}presence-old-takeover`);
+      assert.equal((await readOwnPresence(options, presenceRaceNewAdmin)).ownedByAnotherSession, true);
+      await assert.rejects(
+        updateOwnPresence(options, presenceRaceNewAdmin, { availability: "AVAILABLE", connectionState: "CONNECTED", version: oldTakeover.version }, `${prefix}presence-new-sync-after-old-takeover`),
+        /owned by another session/,
+      );
+      await updateOwnPresence(options, presenceRaceNewAdmin, {
+        availability: "AVAILABLE", connectionState: "CONNECTED", version: oldTakeover.version, takeover: true,
+      }, `${prefix}presence-new-takeover-back`);
+      assert.equal((await heartbeatOwnPresence(options, presenceRaceOldAdmin)).ok, false, "ownership stays with the explicit takeover winner");
 
       const service = await createOrResumeUserConsultation(options, user, "SERVICE", "listing_demo_01", `${prefix}service-create`);
       assert.equal(service.consultation.state, "ACTIVE");

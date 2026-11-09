@@ -92,7 +92,7 @@ type SupportMessage = {
 };
 type ImToken = { appKey: string; accountId: string; token: string; transport: "nim" | "local-fake" };
 type PresenceToday = { seconds: number; sessions: number; users: number };
-type Presence = { adminUserId: string; availability: "OFF_DUTY" | "AVAILABLE" | "PAUSED"; connectionState: string; activeLoad: number; version: number; today?: PresenceToday };
+type Presence = { adminUserId: string; availability: "OFF_DUTY" | "AVAILABLE" | "PAUSED"; connectionState: string; activeLoad: number; version: number; ownedByAnotherSession?: boolean; unbound?: boolean; today?: PresenceToday };
 type SupportSection = "consultation" | "orders";
 type QueueRow = { id: string; type: SupportType; title: string; snippet: string; time: string; sortAt: number; state: "待接入" | "接待中" | "已结束" | "通道异常"; unreadCount: number; consultation?: Consultation };
 type UnifiedRow = {
@@ -212,6 +212,55 @@ function stageToneOf(state: string): "good" | "warn" | "neutral" {
 function connectionForPresence(state: NimWebConnectionState | "idle" | "error"): Presence["connectionState"] {
   return state === "idle" ? "DISCONNECTED" : state === "error" ? "AUTH_FAILED" : state;
 }
+/** Keep the runtime label, tone and action consistent when the IM channel is not CONNECTED. */
+export function presenceRuntimeState(
+  availability: Presence["availability"],
+  connection: NimWebConnectionState | "idle" | "error",
+  busy: boolean,
+  ownedByAnotherSession = false,
+  unbound = false,
+): { connected: boolean; tone: "good" | "warn" | "neutral"; label: string; toggleDisabled: boolean; toggleTitle: string | undefined; toggleLabel: string } {
+  const connected = connection === "CONNECTED";
+  const owned = ownedByAnotherSession === true;
+  const needsExplicitStart = unbound === true;
+  return {
+    connected,
+    tone: owned || needsExplicitStart ? "warn" : availability === "AVAILABLE" && !connected ? "warn" : availability === "AVAILABLE" ? "good" : "neutral",
+    label: needsExplicitStart
+      ? connected ? "需重新开始接待" : connection === "idle" || connection === "CONNECTING" ? "需重新开始接待 · 连接中" : "需重新开始接待 · 连接异常"
+      : connection === "idle" || connection === "CONNECTING"
+        ? "连接中"
+        : !connected
+          ? availability === "AVAILABLE" ? "连接异常 · 接待中" : "连接异常"
+          : owned ? "其他窗口接待中" : availability === "AVAILABLE" ? "可接待" : availability === "PAUSED" ? "已暂停" : "未上线",
+    toggleDisabled: owned || needsExplicitStart ? busy || !connected : availability === "AVAILABLE" ? busy : busy || !connected,
+    toggleTitle: owned
+      ? connected ? "接管当前接待窗口" : "消息服务异常，暂不可接管"
+      : needsExplicitStart
+        ? connected ? "重新开始接待" : "消息服务异常，暂不可开始接待"
+        : availability === "AVAILABLE"
+          ? connected ? undefined : "消息服务异常，可先结束接待"
+          : connection === "idle" || connection === "CONNECTING" ? "消息通道连接中，请稍候" : !connected ? "消息服务异常，暂不可接待" : undefined,
+    toggleLabel: owned ? "接管接待" : needsExplicitStart ? "开始接待" : availability === "AVAILABLE" ? "暂停接待" : "开始接待",
+  };
+}
+/**
+ * Reconnecting is written immediately so dispatch stops, while the server keeps the
+ * reception interval open for a short reconnect. A terminal disconnect gets a short
+ * grace before closing; auth failures and kicks are written immediately.
+ */
+export function presenceDisconnectGraceMs(state: NimWebConnectionState): number | null {
+  if (state === "CONNECTED" || state === "AUTH_FAILED" || state === "KICKED") return null;
+  return state === "DISCONNECTED" ? 10_000 : 0;
+}
+/** Only this write's authoritative response may count as a successful presence change. */
+export function presenceWriteSucceeded(value: Presence | undefined, availability: Presence["availability"]): boolean {
+  return Boolean(value && value.availability === availability && value.ownedByAnotherSession !== true && value.unbound !== true);
+}
+/** Read/unread decisions require the workbench tab, the browser page and keyboard focus. */
+function supportPageVisible(): boolean {
+  return typeof document === "undefined" || (document.visibilityState === "visible" && document.hasFocus());
+}
 function imageOf(message: NimMessageLike): SupportMessage["image"] | undefined {
   if (message.messageType !== 1 || !message.attachment || typeof message.attachment !== "object") return undefined;
   const attachment = message.attachment;
@@ -274,7 +323,7 @@ async function readConsultations(): Promise<Consultation[]> {
   return value.consultations as Consultation[];
 }
 
-export function ImSupportView({ snapshot, initialSection = "consultation", initialConsultationId, initialOrderId, initialUnifiedType = "ALL", workspaceQuery = {}, onQueryChange, onRefresh, onOpenPath, onDirtyChange }: {
+export function ImSupportView({ snapshot, initialSection = "consultation", initialConsultationId, initialOrderId, initialUnifiedType = "ALL", workspaceQuery = {}, onQueryChange, onRefresh, onOpenPath, onDirtyChange, active = true }: {
   snapshot: Extract<SessionSnapshot, { authenticated: true }>;
   initialSection?: "consultation" | "orders";
   initialConsultationId?: string;
@@ -283,13 +332,15 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
   workspaceQuery?: Record<string, string>;
   onQueryChange?: (query: Record<string, string>) => void;
   onRefresh: () => Promise<SessionSnapshot>;
-  onOpenPath?: (path: string, title?: string) => void;
+  onOpenPath?: (path: string, title?: string, afterOpen?: () => void) => boolean | void;
   onDirtyChange?: (dirty:boolean)=>void;
+  /** False while the workspace tab is hidden; hidden views must not advance unread state or suppress alerts. */
+  active?: boolean;
 }) {
   const [section, setSection] = useState<SupportSection>(initialSection);
   useEffect(() => setSection(initialSection), [initialSection]);
-  // 工作台只渲染当前 Tab，切换会卸载本视图；把选中与筛选留在工作区 tab query，
-  // 切回/刷新后按持久线程（或订单 id）恢复，而不是重新从空状态开始。
+  // 工作台常驻挂载，切 Tab 只隐藏；把选中与筛选留在工作区 tab query，
+  // 刷新后按持久线程（或订单 id）恢复，而不是重新从空状态开始。
   const persistQuery = useCallback((patch: Record<string, string | null>) => {
     if (!onQueryChange) return;
     const next = { ...workspaceQuery };
@@ -308,6 +359,21 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
   const canTransfer = hasPermission(snapshot, "im.support.transfer");
   const canPresence = canRead && hasPermission(snapshot, "im.support.presence");
   const readClientKey = createReadClientKey({ adminUserId: snapshot.adminUserId, sessionId: snapshot.session.id, locked: snapshot.session.locked, canRead });
+  // Reads are an explicit "user is looking at this" claim: a hidden workspace tab or
+  // background browser page must never advance unread state on its own.
+  const [pageVisible, setPageVisible] = useState(supportPageVisible);
+  useEffect(() => {
+    const sync = () => setPageVisible(supportPageVisible());
+    document.addEventListener("visibilitychange", sync);
+    window.addEventListener("focus", sync);
+    window.addEventListener("blur", sync);
+    sync();
+    return () => {
+      document.removeEventListener("visibilitychange", sync);
+      window.removeEventListener("focus", sync);
+      window.removeEventListener("blur", sync);
+    };
+  }, []);
   const aftersaleScope=`${readClientKey}:${snapshot.security.isBoss}:${snapshot.permissions.slice().sort().join("|")}`;
   const aftersaleScopeRef=useRef(aftersaleScope);aftersaleScopeRef.current=aftersaleScope;
   const [aftersaleOpen,setAftersaleOpen]=useState(false),[aftersaleDirty,setAftersaleDirty]=useState(false);
@@ -357,6 +423,10 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
 // starts collapsed and the operator opens it deliberately.
   const [detailsOpen, setDetailsOpen] = useState(() => !(typeof window !== "undefined" && typeof window.matchMedia === "function" && window.matchMedia("(max-width:1439px)").matches));
   const [mobilePane, setMobilePane] = useState<"queue" | "chat" | "details">("queue");
+  const narrowScreen = typeof window !== "undefined" && typeof window.matchMedia === "function" && window.matchMedia("(max-width: 760px)").matches;
+  const viewing = active && pageVisible;
+  const chatViewing = viewing && section === "consultation" && (!narrowScreen || mobilePane === "chat");
+  const orderViewing = viewing && section === "orders" && (!narrowScreen || mobilePane === "chat");
   const [notice, setNotice] = useState<string>();
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState<"waiting" | "mine">("mine");
@@ -504,14 +574,14 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
     setPresence(value);
   }, []);
 
-  const writePresence = useCallback((availability: Presence["availability"], state: ReturnType<typeof connectionForPresence>) => {
+  const writePresence = useCallback((availability: Presence["availability"], state: ReturnType<typeof connectionForPresence>, options?: { takeover?: boolean }) => {
     const key = readClientKey;
     const generation = operatorGenerationRef.current;
+    const current = () => canPresenceRef.current && operatorRef.current === key && operatorGenerationRef.current === generation;
+    if (!canPresence || !current()) return Promise.resolve<Presence | undefined>(undefined);
     availabilityRef.current = availability;
-    if (!canPresence || !canPresenceRef.current) return Promise.resolve<Presence | undefined>(undefined);
     const operation = presenceWriteRef.current.then(async () => {
-      if (!canPresenceRef.current) return undefined;
-      if (operatorRef.current !== key || operatorGenerationRef.current !== generation) return undefined;
+      if (!current()) return undefined;
       let version = presenceVersionRef.current;
       if (version === null) {
         // 本操作员本次会话的第一次写入：先向服务端要当前版本，再写。
@@ -519,15 +589,24 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
         // 首屏就变成“未上线 + 一次失败”，而这不是并发冲突。
         try {
           const existing = await adminRequest<Presence>("/im/presence");
+          if (!current()) return undefined;
           rememberPresence(existing);
           version = presenceVersionRef.current;
         } catch {
+          if (!current()) return undefined;
           // 读不到就保持 null，让服务端按“无行则插入”的规则自行裁决。
         }
       }
+      if (!current()) return undefined;
       try {
-        const value = await adminRequest<Presence>("/im/presence", { availability, connectionState: state, ...(version === null ? {} : { version }) }, "PUT");
-        if (canPresenceRef.current && operatorRef.current === key && operatorGenerationRef.current === generation) rememberPresence(value);
+        const value = await adminRequest<Presence>("/im/presence", {
+          availability,
+          connectionState: state,
+          ...(version === null ? {} : { version }),
+          ...(options?.takeover ? { takeover: true } : {}),
+        }, "PUT");
+        if (!current()) return undefined;
+        rememberPresence(value);
         return value;
       } catch (cause) {
         if (!canPresenceRef.current || operatorRef.current !== key || operatorGenerationRef.current !== generation) return undefined;
@@ -582,6 +661,7 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
     setHistoryMore({});
     setHistoryState({});
     markedReadSignaturesRef.current.clear();
+    markedOrderReadRef.current.clear();
     readInFlightRef.current.clear();
     setHistoryLoading(false);
     setFailedText({});
@@ -660,6 +740,8 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
       return factory(context);
     });
     lifecycleRef.current = lifecycle;
+    let graceTimer: number | undefined;
+    let graceState: NimWebConnectionState = "DISCONNECTED";
     const run = async () => {
       try {
         setConnection("CONNECTING");
@@ -676,12 +758,25 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
         if (presenceResult.status === "fulfilled" && presenceResult.value) rememberPresence(presenceResult.value);
         if (queueResult.status === "fulfilled") { setQueue(queueResult.value); setQueueLoaded(true); }
         else setNotice(friendlyError(queueResult.reason));
-        if (canPresence) void writePresence(availabilityRef.current, connectionForPresence(client.getConnectionState()));
+        if (canPresence && !presenceRef.current.ownedByAnotherSession && !presenceRef.current.unbound) void writePresence(availabilityRef.current, connectionForPresence(client.getConnectionState()));
         client.onConnectionStateChange((state) => {
           if (cancelled || generation !== operatorGenerationRef.current || operatorRef.current !== operator || clientRef.current !== client) return;
           setConnection(state);
-          // 失败由 writePresence 统一转成可见提示，这里不再静默吞掉。
-          if (canPresence) void writePresence(availabilityRef.current, connectionForPresence(state));
+          if (!canPresence || presenceRef.current.ownedByAnotherSession || presenceRef.current.unbound) return;
+          const delay = presenceDisconnectGraceMs(state);
+          if (delay === null || delay === 0) {
+            if (graceTimer !== undefined) { window.clearTimeout(graceTimer); graceTimer = undefined; }
+            void writePresence(availabilityRef.current, connectionForPresence(state));
+            return;
+          }
+          graceState = state;
+          // 同一次断线只给一次宽限；SDK 反复重试不续期，宽限内恢复则保留原 session。
+          if (graceTimer !== undefined) return;
+          graceTimer = window.setTimeout(() => {
+            graceTimer = undefined;
+            if (cancelled || generation !== operatorGenerationRef.current || operatorRef.current !== operator || clientRef.current !== client) return;
+            void writePresence(availabilityRef.current, connectionForPresence(graceState));
+          }, delay);
         });
         client.onMessages((incoming) => {
           if (cancelled || generation !== operatorGenerationRef.current || operatorRef.current !== operator || clientRef.current !== client) return;
@@ -703,6 +798,7 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
     void run();
     return () => {
       cancelled = true;
+      if (graceTimer !== undefined) window.clearTimeout(graceTimer);
       clientRef.current = null;
       if (generation === operatorGenerationRef.current && operatorRef.current === operator) readyOperatorRef.current = null;
       if (lifecycleRef.current === lifecycle) lifecycleRef.current = null;
@@ -916,20 +1012,32 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
     const generation = operatorGenerationRef.current;
     const operator = readClientKey;
     const timer = window.setInterval(() => {
-      if (generation === operatorGenerationRef.current && operatorRef.current === operator) void writePresence(availabilityRef.current, connectionForPresence(connection));
+      if (generation === operatorGenerationRef.current && operatorRef.current === operator && !presenceRef.current.ownedByAnotherSession && !presenceRef.current.unbound) {
+        void writePresence(availabilityRef.current, connectionForPresence(connection));
+      }
     }, 30_000);
     return () => window.clearInterval(timer);
   }, [canPresence, connection, readClientKey, writePresence]);
 
-  // 接待心跳：只在页面可见且确实处于“可接待 + 可收发消息”时发送；失败不影响 UI。
+  // 接待心跳：页面隐藏、切换管理 tab 时仍保持在线；恢复可见/网络/前台时立即补发，
+  // 避免浏览器后台定时器节流造成今日接待断档。失败不影响 UI。
   useEffect(() => {
-    if (!canPresence || presence.availability !== "AVAILABLE" || connection !== "CONNECTED" || snapshot.session.locked) return;
-    const timer = window.setInterval(() => {
-      if (typeof document !== "undefined" && document.visibilityState === "hidden") return;
-      void adminRequest("/im/presence/heartbeat", {}, "POST").catch(() => undefined);
-    }, 60_000);
-    return () => window.clearInterval(timer);
-  }, [canPresence, connection, presence.availability, snapshot.session.locked]);
+    if (!canPresence || presence.ownedByAnotherSession || presence.unbound || presence.availability !== "AVAILABLE" || connection !== "CONNECTED" || snapshot.session.locked) return;
+    const heartbeat = () => { void adminRequest("/im/presence/heartbeat", {}, "POST").catch(() => undefined); };
+    const timer = window.setInterval(heartbeat, 30_000);
+    const onVisible = () => { if (document.visibilityState === "visible") heartbeat(); };
+    document.addEventListener("visibilitychange", onVisible);
+    window.addEventListener("focus", onVisible);
+    window.addEventListener("online", heartbeat);
+    window.addEventListener("pageshow", heartbeat);
+    return () => {
+      window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", onVisible);
+      window.removeEventListener("focus", onVisible);
+      window.removeEventListener("online", heartbeat);
+      window.removeEventListener("pageshow", heartbeat);
+    };
+  }, [canPresence, connection, presence.availability, presence.ownedByAnotherSession, presence.unbound, snapshot.session.locked]);
 
   // 日常流不代选：首次加载或队列刷新不替客服打开会话，否则未读会在没被看到时就上报。
   // 只有显式选择（点行、铃铛通知、交接清单）会设置 selectedId；选中的一轮消失时才清空。
@@ -965,16 +1073,14 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
   // 订单群未读按成员身份计数；只有该群聊真的在屏幕上时才清自己的未读。
   const selectedOrderRow = orderSelection ? visibleOrderQueue.find((item) => item.id === orderSelection) ?? null : null;
   useEffect(() => {
-    if (section !== "orders" || !selectedOrderRow || (selectedOrderRow.unreadCount ?? 0) <= 0) return;
-    const narrow = typeof window !== "undefined" && typeof window.matchMedia === "function" && window.matchMedia("(max-width: 760px)").matches;
-    if (narrow && mobilePane !== "chat") return;
+    if (!orderViewing || !selectedOrderRow || (selectedOrderRow.unreadCount ?? 0) <= 0) return;
     const signature = `${selectedOrderRow.id}:${selectedOrderRow.lastMessageAt ?? ""}:${selectedOrderRow.unreadCount}`;
     if (markedOrderReadRef.current.has(signature)) return;
     markedOrderReadRef.current.add(signature);
     void adminRequest(`/im/order-teams/${encodeURIComponent(selectedOrderRow.id)}/read`, {}, "POST")
       .then(() => setOrderQueue((current) => current.map((item) => item.id === selectedOrderRow.id ? { ...item, unreadCount: 0 } : item)))
       .catch(() => markedOrderReadRef.current.delete(signature));
-  }, [section, selectedOrderRow, mobilePane]);
+  }, [orderViewing, selectedOrderRow]);
   const rowOfMessage = (target: EventTarget | null): HTMLElement | null => {
     const element = target as { closest?: (selector: string) => HTMLElement | null } | null;
     return element && typeof element.closest === "function" ? element.closest("[data-message-id]") : null;
@@ -1078,14 +1184,27 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
     enabled: notifyEnabled && notifyPermission === "granted",
     loaded: queueLoaded,
     rows: notificationRows,
-    selectedId,
+    visible: viewing,
+    // Only a conversation actually on screen suppresses its own notification.
+    selectedId: chatViewing ? selectedId : null,
     onOpen: (id) => {
-      restoredSelectionRef.current = true;
-      setSection("consultation");
-      setSelectedId(id);
-      setMobilePane("chat");
       const row = queue.find((item) => item.id === id);
-      persistQuery({ section: "consultation", consultation: row?.threadId ?? id });
+      const path = `/support?section=consultation&consultation=${encodeURIComponent(row?.threadId ?? id)}`;
+      let selected = false;
+      const select = () => {
+        selected = true;
+        restoredSelectionRef.current = true;
+        setSection("consultation");
+        setSelectedId(id);
+        setMobilePane("chat");
+        persistQuery({ section: "consultation", consultation: row?.threadId ?? id });
+      };
+      // Bring the hidden support tab forward through the existing workspace guard
+      // (permission, dirty form, write lock). A queued discard still runs this
+      // callback after confirmation; a refused open never mutates the hidden view.
+      const opened = onOpenPath?.(path, undefined, select);
+      if (opened === false) return;
+      if (!selected) select();
     },
   });
   const unifiedRows = useMemo<UnifiedRow[]>(() => {
@@ -1376,12 +1495,9 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
   // 非负责、非 ACTIVE、历史失败或会话不在前台都不发。失败静默，已读只能来自服务端。
   const selectedReadSignature = selected ? `${selectedMessages.length}:${selectedMessages.at(-1)?.id ?? ""}` : "";
   useEffect(() => {
-    if (!canRead || section !== "consultation" || !selected || !selectedMessages.length) return;
+    if (!canRead || !chatViewing || !selected || !selectedMessages.length) return;
     if (selected.state !== "ACTIVE" || selected.assignedAdmin?.id !== snapshot.adminUserId) return;
     if (historyState[selected.id] !== "ready") return;
-    // 窄屏三栏互斥：队列/详情在前台时，聊天并没有被看到。
-    if (typeof window !== "undefined" && typeof window.matchMedia === "function"
-      && window.matchMedia("(max-width: 760px)").matches && mobilePane !== "chat") return;
     const roundId = selected.roundId || selected.id;
     const signature = selectedReadSignature;
     if (!roundId || !signature) return;
@@ -1394,7 +1510,7 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
     }).catch(() => {
       if (readInFlightRef.current.get(roundId) === signature) readInFlightRef.current.delete(roundId);
     });
-  }, [canRead, section, mobilePane, snapshot.adminUserId, selected?.id, selected?.state, selected?.roundId, selected?.assignedAdmin?.id, historyState[selected?.id ?? ""], selectedReadSignature]);
+  }, [canRead, chatViewing, snapshot.adminUserId, selected?.id, selected?.state, selected?.roundId, selected?.assignedAdmin?.id, historyState[selected?.id ?? ""], selectedReadSignature]);
 
   const reloadHistory = async (consultationId: string) => {
     setHistoryRetryToken((token) => token + 1);
@@ -1427,6 +1543,7 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
   const claim = async (afterReception = false) => {
     if (!canManageSupport) { setNotice("当前会话由系统自动分配；需要人工接管请联系管理岗。"); return; }
     if (!selected || selected.state !== "WAITING" || !canOperateSupportType(selected.type, canAccept, canComplaint)) return;
+    if (operatorRef.current !== readClientKey || selectedIdRef.current !== selected.id) return;
     // Claim is only valid for an AVAILABLE + CONNECTED support presence. Do not
     // send the request while off duty and then surface an opaque 503.
     if (!afterReception && (presence.availability !== "AVAILABLE" || connection !== "CONNECTED")) {
@@ -1453,7 +1570,7 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
     } finally { endBusy(busyOwner); }
   };
   const startReceptionAndClaim = async () => {
-    const started = await applyPresence("AVAILABLE");
+    const started = await applyPresence("AVAILABLE", { takeover: true });
     if (!started) return;
     setReceptionOpen(false);
     if (connectionForPresence(connection) !== "CONNECTED") { setNotice("消息服务未连接，暂不能接入会话。"); return; }
@@ -1569,22 +1686,28 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
       if (current && isCurrentImRequest(requestKey, current)) setTransferError(friendlyError(cause));
     } finally { setTransferBusy(false); }
   };
-  const applyPresence = async (availability: Presence["availability"]): Promise<boolean> => {
+  const applyPresence = async (availability: Presence["availability"], options?: { takeover?: boolean }): Promise<boolean> => {
     if (!canPresence) return false;
     const busyOwner = beginBusy();
     setNotice(undefined);
     const generation = operatorGenerationRef.current;
     const operator = readClientKey;
-    try { await writePresence(availability, connectionForPresence(connection)); return availabilityRef.current === availability; }
+    try {
+      const value = await writePresence(availability, connectionForPresence(connection), options);
+      return canPresenceRef.current && generation === operatorGenerationRef.current && operatorRef.current === operator
+        && presenceWriteSucceeded(value, availability);
+    }
     catch (cause) { if (canPresenceRef.current && generation === operatorGenerationRef.current && operatorRef.current === operator) setNotice(friendlyError(cause)); return false; }
     finally { endBusy(busyOwner); }
   };
   const togglePresence = async () => {
     if (!canPresence) return;
-    const next = presence.availability === "AVAILABLE" ? "OFF_DUTY" : "AVAILABLE";
+    // Another window owns presence: an explicit "接管接待" is the only action here.
+    const takeover = presence.ownedByAnotherSession === true || presence.unbound === true || presence.availability !== "AVAILABLE";
+    const next = takeover ? "AVAILABLE" : "OFF_DUTY";
     // 暂停/下线前把未完成会话摆出来；用户可以继续暂停，也可以逐条去交接，不强制阻断。
     if (next === "OFF_DUTY" && myOpenConsultations.length) { setNotice(undefined); setOffDutyOpen(true); return; }
-    await applyPresence(next);
+    await applyPresence(next, takeover ? { takeover: true } : undefined);
   };
   const goTransferFromChecklist = (consultationId: string) => {
     setOffDutyOpen(false);
@@ -2351,6 +2474,11 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
       persistQuery({section:"consultation",consultation:threadId});
     }).catch(cause=>{if(aftersaleScopeRef.current===expected)setNotice(friendlyError(cause));});
   };
+  // Availability is the server's reception intent; the label must still show a broken
+  // message channel instead of claiming "可接待". Ending presence stays available so
+  // the operator can clear a stale AVAILABLE row even while the IM channel reconnects.
+  const runtime = presenceRuntimeState(presence.availability, connection, busy, presence.ownedByAnotherSession === true, presence.unbound === true);
+
   return <div className="im-wb-root" data-unified="true">
     <AftersaleInbox key={aftersaleScope} open={aftersaleOpen&&canRead} onOpenChange={setAftersaleOpen} scope={aftersaleScope} adminId={snapshot.adminUserId} canHandle={canRead&&canAccept} canTakeover={Boolean(snapshot.security.isBoss||snapshot.permissions.includes("im.support.audit.takeover"))} onContact={contactedAftersale} onDirtyChange={setAftersaleDirty}/>
     <nav className="im-wb-bar" aria-label="沟通类型">
@@ -2372,10 +2500,10 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
         </button>
         <span className="im-wb-runtime-divider" aria-hidden="true" />
         {canPresence ? <>
-          <span className="im-wb-state im-wb-runtime-state" data-tone={presence.availability === "AVAILABLE" ? "good" : "neutral"}><i className={presence.availability === "AVAILABLE" ? "on" : ""} />{connection === "idle" || connection === "CONNECTING" ? "连接中" : presence.availability === "AVAILABLE" ? "可接待" : presence.availability === "PAUSED" ? "已暂停" : "未上线"}</span>
+          <span className="im-wb-state im-wb-runtime-state" data-tone={runtime.tone}><i className={presence.availability === "AVAILABLE" && runtime.connected ? "on" : ""} />{runtime.label}</span>
           <span className="im-wb-runtime-divider" aria-hidden="true" />
           <span className="im-wb-state im-wb-today" data-action="today-duty" title="今日接待时长（仅统计可接待且可收发消息的时间）">今日接待 <b>{formatDuration(presence.today?.seconds)}</b></span>
-          <button type="button" className="im-wb-btn im-wb-btn-outline im-wb-presence-toggle im-wb-runtime-action" data-action="toggle-presence" onClick={() => void togglePresence()} disabled={busy || connection !== "CONNECTED"} title={connection === "idle" || connection === "CONNECTING" ? "消息通道连接中，请稍候" : connection !== "CONNECTED" ? "消息服务异常，暂不可接待" : undefined}>{presence.availability === "AVAILABLE" ? "暂停接待" : "开始接待"}</button>
+          <button type="button" className="im-wb-btn im-wb-btn-outline im-wb-presence-toggle im-wb-runtime-action" data-action="toggle-presence" onClick={() => void togglePresence()} disabled={runtime.toggleDisabled} title={runtime.toggleTitle}>{runtime.toggleLabel}</button>
         </> : <span className="im-wb-state">无在线状态权限</span>}
         {connection !== "CONNECTED" ? <>
           <span className="im-wb-runtime-divider" aria-hidden="true" />

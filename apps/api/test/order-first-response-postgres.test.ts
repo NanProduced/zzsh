@@ -165,13 +165,13 @@ export async function runOrderFirstResponseAcceptance(t: TestContext, o: Options
   await seedAdmin(pool, staff, `${staff}_s`, run, false);
   await seedIdentity(pool, identityKey("ADMIN", staff), run);
   await grantPermissions(staff, ["im.support.read", "im.support.accept"]);
-  await pool.query(`INSERT INTO zzsh_iam.im_support_presence(app_id,admin_user_id,availability,connection_state,last_connected_at) VALUES($1,$2,'OFF_DUTY','DISCONNECTED',NULL)`, [appId, staff]);
+  await pool.query(`INSERT INTO zzsh_iam.im_support_presence(app_id,admin_user_id,availability,connection_state,last_connected_at,auth_session_id) VALUES($1,$2,'OFF_DUTY','DISCONNECTED',NULL,(SELECT id FROM zzsh_auth_admin."session" WHERE "userId"=$2 AND "expiresAt">clock_timestamp() ORDER BY "createdAt" DESC LIMIT 1))`, [appId, staff]);
   await seedAdmin(pool, stranger, `${stranger}_s`, run, false);
   await grantPermissions(stranger, ["im.support.read", "im.support.accept"]);
   await seedAdmin(pool, consultAdmin, `${consultAdmin}_s`, run, false);
   await seedIdentity(pool, identityKey("ADMIN", consultAdmin), run);
   await grantPermissions(consultAdmin, ["im.support.read", "im.support.accept"]);
-  await pool.query(`INSERT INTO zzsh_iam.im_support_presence(app_id,admin_user_id,availability,connection_state,last_connected_at) VALUES($1,$2,'AVAILABLE','CONNECTED',clock_timestamp())`, [appId, consultAdmin]);
+  await pool.query(`INSERT INTO zzsh_iam.im_support_presence(app_id,admin_user_id,availability,connection_state,last_connected_at,auth_session_id) VALUES($1,$2,'AVAILABLE','CONNECTED',clock_timestamp(),(SELECT id FROM zzsh_auth_admin."session" WHERE "userId"=$2 AND "expiresAt">clock_timestamp() ORDER BY "createdAt" DESC LIMIT 1))`, [appId, consultAdmin]);
   await seedUser(pool, consultUser, `${consultUser}_s`, run);
   await seedIdentity(pool, identityKey("USER", consultUser), run);
 
@@ -513,8 +513,8 @@ export async function runOrderFirstResponseAcceptance(t: TestContext, o: Options
     await seedAdmin(pool,id,`${id}_s`,run,false);
     await seedIdentity(pool,identityKey("ADMIN",id),run);
     await grantPermissions(id,["im.support.read","im.support.accept"]);
-    await pool.query(`INSERT INTO zzsh_iam.im_support_presence(app_id,admin_user_id,availability,connection_state,last_connected_at)
-      VALUES($1,$2,'OFF_DUTY','DISCONNECTED',NULL)`,[appId,id]);
+    await pool.query(`INSERT INTO zzsh_iam.im_support_presence(app_id,admin_user_id,availability,connection_state,last_connected_at,auth_session_id)
+      VALUES($1,$2,'OFF_DUTY','DISCONNECTED',NULL,(SELECT id FROM zzsh_auth_admin."session" WHERE "userId"=$2 AND "expiresAt">clock_timestamp() ORDER BY "createdAt" DESC LIMIT 1))`,[appId,id]);
     await pool.query(`INSERT INTO zzsh_supply.admin_supply_scope(admin_user_id,game_id,granted_by_admin_id) VALUES($1,$2,$1)`,[id,gameId]);
   }
   const escalationOptions:OrderTeamOptions={pool,appId,provider:wire.client,identities,membersLimit:200,firstResponseEnabled:true,escalationEnabled:true};

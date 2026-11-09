@@ -490,7 +490,7 @@ export async function runSettlementAcceptance(t: TestContext, o: Base & {
     await pool.query(`INSERT INTO zzsh_supply.admin_supply_scope(admin_user_id, game_id, granted_by_admin_id) VALUES ($1,$2,$3) ON CONFLICT (admin_user_id, game_id) DO NOTHING`, [adminId, gameId, o.boss.id]);
   }
   await seedIdentity(pool, { provider: "yunxin", appId, realm: "admin", kind: "ADMIN", platformSubjectId: staff.id }, run);
-  await pool.query(`INSERT INTO zzsh_iam.im_support_presence(app_id, admin_user_id, availability, connection_state, last_connected_at) VALUES ($1,$2,'AVAILABLE','CONNECTED',clock_timestamp())`, [appId, staff.id]);
+  await pool.query(`INSERT INTO zzsh_iam.im_support_presence(app_id, admin_user_id, availability, connection_state, last_connected_at, auth_session_id) VALUES ($1,$2,'AVAILABLE','CONNECTED',clock_timestamp(),(SELECT id FROM zzsh_auth_admin."session" WHERE "userId"=$2 AND "expiresAt">clock_timestamp() ORDER BY "createdAt" DESC LIMIT 1))`, [appId, staff.id]);
 
   const successAudits = async (orderId: string, action: string) => Number((await pool.query(
     `SELECT count(*)::int AS n FROM zzsh_iam.audit_event WHERE object_id = $1 AND action = $2 AND outcome = 'SUCCESS'`,

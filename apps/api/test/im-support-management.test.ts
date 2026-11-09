@@ -19,6 +19,7 @@ import {
   takeoverDecision,
 } from "../src/im/consultation";
 import { reapStaleSupportSessions } from "../src/im/support-dispatch";
+import { clearSupportPresenceForSession } from "../src/im/support-presence-session";
 import {
   decodeSupportAuditCursor,
   encodeSupportAuditCursor,
@@ -173,7 +174,8 @@ test("management read and takeover permissions stay separate", () => {
 
 test("presence session transitions classify every end reason without double-opening", () => {
   assert.equal(presenceSessionAction("AVAILABLE", "CONNECTED"), "OPEN");
-  assert.equal(presenceSessionAction("AVAILABLE", "RECONNECTING"), "CLOSE");
+  assert.equal(presenceSessionAction("AVAILABLE", "RECONNECTING"), "KEEP");
+  assert.equal(presenceSessionAction("AVAILABLE", "CONNECTING"), "KEEP");
   assert.equal(presenceSessionAction("PAUSED", "CONNECTED"), "CLOSE");
   assert.equal(presenceSessionAction("OFF_DUTY", "DISCONNECTED"), "CLOSE");
   assert.equal(presenceSessionEndReason("PAUSED", "CONNECTED"), "PAUSED");
@@ -181,6 +183,7 @@ test("presence session transitions classify every end reason without double-open
   assert.equal(presenceSessionEndReason("OFF_DUTY", "CONNECTED"), "OFF_DUTY");
   assert.equal(presenceSessionEndReason("AVAILABLE", "KICKED"), "DISCONNECTED");
   assert.equal(presenceSessionEndReason("AVAILABLE", "CONNECTED"), null);
+  assert.equal(presenceSessionEndReason("AVAILABLE", "RECONNECTING"), null);
   assert.match(PRESENCE_SESSION_OPEN_SQL, /ON CONFLICT \("app_id", "admin_user_id"\) WHERE "ended_at" IS NULL DO NOTHING/);
   assert.match(PRESENCE_SESSION_CLOSE_SQL, /"ended_at" = clock_timestamp\(\), "end_reason" = \$3/);
   assert.match(PRESENCE_SESSION_CLOSE_SQL, /"ended_at" IS NULL/);
@@ -201,6 +204,10 @@ test("0125 creates one open interval per admin and records both permissions", ()
   assert.match(acl, /GRANT SELECT, INSERT ON TABLE "zzsh_iam"\."im_support_presence_session"/);
   assert.match(acl, /GRANT UPDATE \("ended_at", "end_reason", "last_heartbeat_at"\) ON TABLE "zzsh_iam"\."im_support_presence_session"/);
   assert.match(acl, /REVOKE UPDATE, DELETE, TRUNCATE ON TABLE "zzsh_iam"\."im_support_presence_session"/);
+  assert.match(acl, /"auth_session_id"\) ON TABLE "zzsh_iam"\."im_support_presence"/);
+  const presenceBinding = readFileSync(resolve("migrations/business/0184_support_presence_auth_session.sql"), "utf8");
+  assert.match(presenceBinding, /ADD COLUMN IF NOT EXISTS "auth_session_id" text/);
+  assert.ok(entries.some((entry: { idx: number; tag: string }) => entry.idx === 184 && entry.tag === "0184_support_presence_auth_session"));
   assert.match(acl, /GRANT SELECT, INSERT ON TABLE "zzsh_iam"\."im_support_handover"/);
   assert.match(acl, /REVOKE UPDATE, DELETE, TRUNCATE ON TABLE "zzsh_iam"\."im_support_handover"/);
   assert.doesNotMatch(acl, /GRANT[^;\n]*DELETE[^;\n]*"im_support_(presence_session|handover)"/);
@@ -237,7 +244,7 @@ test("presence read extends the existing projection with today's counts", async 
     boss: true,
     extras: (sql) => {
       if (sql.includes('FROM "zzsh_iam"."im_support_presence" WHERE "app_id"')) {
-        return { rows: [{ adminUserId: "admin_a", availability: "AVAILABLE", connectionState: "CONNECTED", lastConnectedAt: "2026-10-29T01:00:00.000Z", activeLoad: 2, version: 7 }] };
+        return { rows: [{ adminUserId: "admin_a", availability: "AVAILABLE", connectionState: "CONNECTED", lastConnectedAt: "2026-10-29T01:00:00.000Z", activeLoad: 2, version: 7, authSessionId: "session_a" }] };
       }
       if (sql.includes("im_support_presence_session") && sql.includes("LEAST")) {
         return { rows: [{ seconds: 120, sessions: 2, users: 1 }] };
@@ -249,15 +256,61 @@ test("presence read extends the existing projection with today's counts", async 
   assert.deepEqual(presence, {
     adminUserId: "admin_a", availability: "AVAILABLE", connectionState: "CONNECTED",
     lastConnectedAt: "2026-10-29T01:00:00.000Z", activeLoad: 2, version: 7,
+    ownedByAnotherSession: false, unbound: false,
     today: { seconds: 120, sessions: 2, users: 1 },
   });
+});
+
+test("locking a session clears only its own presence and closes its reception interval", async () => {
+  const f = fakePool((sql, values) => {
+    assert.match(sql, /"auth_session_id" = \$2/);
+    assert.match(sql, /"auth_session_id" = NULL/);
+    assert.match(sql, /"end_reason" = 'FORCED'/);
+    assert.deepEqual(values, ["admin_a", "session_a"]);
+    return { rows: [{ presence: "1", sessions: "1" }] };
+  });
+  assert.deepEqual(await clearSupportPresenceForSession(f.pool as never, "admin_a", "session_a"), { presence: true, sessions: 1 });
+});
+
+test("presence exposes that another browser session owns the single row", async () => {
+  const f = fakePool(adminContextHandler({
+    boss: true,
+    extras: (sql) => {
+      if (sql.includes('FROM "zzsh_iam"."im_support_presence" WHERE "app_id"')) {
+        return { rows: [{ adminUserId: "admin_a", availability: "AVAILABLE", connectionState: "CONNECTED", lastConnectedAt: "2026-10-29T01:00:00.000Z", activeLoad: 0, version: 8, authSessionId: "session_b" }] };
+      }
+      if (sql.includes("im_support_presence_session") && sql.includes("LEAST")) return { rows: [{ seconds: 0, sessions: 0, users: 0 }] };
+      return null;
+    },
+  }));
+  const presence = await readOwnPresence({ pool: f.pool, appId: APP_ID } as never, adminContext);
+  assert.equal(presence.ownedByAnotherSession, true);
+});
+
+test("a pre-0184 presence row is exposed as unbound instead of auto-online", async () => {
+  const f = fakePool(adminContextHandler({
+    boss: true,
+    extras: (sql) => {
+      if (sql.includes('FROM "zzsh_iam"."im_support_presence" WHERE "app_id"')) {
+        return { rows: [{ adminUserId: "admin_a", availability: "AVAILABLE", connectionState: "CONNECTED", lastConnectedAt: "2026-10-29T01:00:00.000Z", activeLoad: 0, version: 9, authSessionId: null }] };
+      }
+      if (sql.includes("im_support_presence_session") && sql.includes("LEAST")) return { rows: [{ seconds: 0, sessions: 0, users: 0 }] };
+      return null;
+    },
+  }));
+  const presence = await readOwnPresence({ pool: f.pool, appId: APP_ID } as never, adminContext);
+  assert.equal(presence.availability, "AVAILABLE");
+  assert.equal(presence.unbound, true);
+  assert.equal(presence.ownedByAnotherSession, false);
 });
 
 test("heartbeat only advances an open interval while the admin is available and connected", async () => {
   const f = fakePool(adminContextHandler({
     boss: true,
-    extras: (sql) => {
+    extras: (sql, values) => {
       assert.match(sql, /"availability" = 'AVAILABLE' AND "connection_state" = 'CONNECTED'/);
+      assert.match(sql, /"auth_session_id" = \$3/);
+      assert.equal((values as unknown[])[2], "session_a");
       assert.match(sql, /AND EXISTS \(SELECT 1 FROM p\)/);
       return { rows: [{ presence: true, session: true, serverTime: "2026-10-29T08:00:00.000000Z" }] };
     },

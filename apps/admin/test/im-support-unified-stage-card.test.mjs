@@ -19,6 +19,7 @@ Object.assign(globalThis, {
 Object.defineProperty(globalThis, "navigator", { value: browser.navigator, configurable: true });
 globalThis.getComputedStyle = browser.getComputedStyle.bind(browser);
 const orderIntervals = [];
+const supportIntervals = [];
 const realSetInterval = browser.setInterval.bind(browser);
 const realClearInterval = browser.clearInterval.bind(browser);
 browser.setInterval = (callback, ms) => {
@@ -27,10 +28,15 @@ browser.setInterval = (callback, ms) => {
     orderIntervals.push({ id, callback, active: true });
     return id;
   }
+  if (ms === 30_000) {
+    const id = `support-tick-${supportIntervals.length}`;
+    supportIntervals.push({ id, callback, active: true });
+    return id;
+  }
   return realSetInterval(callback, ms);
 };
 browser.clearInterval = (id) => {
-  const entry = orderIntervals.find((item) => item.id === id);
+  const entry = orderIntervals.find((item) => item.id === id) ?? supportIntervals.find((item) => item.id === id);
   if (entry) entry.active = false;
   else realClearInterval(id);
 };
@@ -45,7 +51,7 @@ const vite = await createServer({
   resolve: { alias: { "@": path.join(adminRoot, "src") } },
   server: { middlewareMode: true, hmr: false },
 });
-const { ImSupportView } = await vite.ssrLoadModule("/src/views/im-support-view.tsx");
+const { ImSupportView, presenceDisconnectGraceMs, presenceRuntimeState, presenceWriteSucceeded } = await vite.ssrLoadModule("/src/views/im-support-view.tsx");
 const { WorkspaceApp } = await vite.ssrLoadModule("/src/workspace/app-shell.tsx");
 after(async () => { await vite.close(); });
 
@@ -76,12 +82,16 @@ function deferred() {
 }
 
 let api = { admin: "A", orders: [], page2: [], nextCursor: null, requests: [], hold: null, holdMore: null, failMoreOnce: false };
+let heartbeatRequests = 0;
+let readRequests = [];
 globalThis.fetch = async (input) => {
   const url = new URL(String(input), browser.location.href);
   if (url.pathname.endsWith("/im/token")) return response({ appKey: "test-app", accountId: "admin-a", token: "test-token", transport: "local-fake" });
   if (url.pathname.endsWith("/im/consultations")) return response({ consultations: [] });
   if (url.pathname.endsWith("/im/presence")) return response({ availability: "AVAILABLE", connectionState: "CONNECTED", version: 1 });
-  if (url.pathname.endsWith("/im/presence/heartbeat")) return response({});
+  if (url.pathname.endsWith("/im/presence/heartbeat")) { heartbeatRequests += 1; return response({}); }
+  if (url.pathname.includes("/im/order-teams/") && url.pathname.endsWith("/read")) { readRequests.push({ kind: "order", id: url.pathname.split("/").at(-2) }); return response({}); }
+  if (/\/im\/consultations\/[^/]+\/read$/.test(url.pathname)) { readRequests.push({ kind: "consultation" }); return response({}); }
   if (url.pathname.endsWith("/orders/order-a/im")) {
     api.accessRequests = (api.accessRequests ?? 0) + 1;
     if (api.holdAccess) { const held = api.holdAccess; api.holdAccess = null; return held.promise; }
@@ -375,12 +385,12 @@ function syntheticOrderAccess() {
     supportEscalation: { state: "STOPPED", firstResponseAt: null, remindDueAt: null, addRound: 0, needsManualReview: false, noEligibleStaff: false } };
 }
 
-async function mountWorkspace(t, route, narrow = false) {
+async function mountWorkspace(t, route, narrow = false, grants = permissions) {
   browser.history.replaceState(null, "", route);
   browser.localStorage.clear();
   const previousMatchMedia = browser.matchMedia;
   browser.matchMedia = (query) => ({ matches: narrow && /max-width:\s*(760|1024|1439)px/.test(String(query)), media: query, onchange: null, addEventListener() {}, removeEventListener() {}, addListener() {}, removeListener() {}, dispatchEvent() { return false; } });
-  const snap = snapshot(permissions), host = document.createElement("div"); document.body.appendChild(host); const root = createRoot(host);
+  const snap = snapshot(grants), host = document.createElement("div"); document.body.appendChild(host); const root = createRoot(host);
   t.after(async () => { await act(async () => root.unmount()); host.remove(); browser.matchMedia = previousMatchMedia; browser.history.replaceState(null, "", "/workspace/support"); });
   const props = { theme: "light", idleMinutes: 15, onIdleMinutes: () => {}, onLock: () => {}, onSignOut: () => {}, onRefresh: async () => snap, onRecoveryCompleted: () => {} };
   await act(async () => root.render(createElement(WorkspaceApp, { ...props, snapshot: snap })));
@@ -425,4 +435,87 @@ test("a late successful order detail response cannot restore revoked content", a
   assert.doesNotMatch(host.querySelector('.im-wb-pane--orders')?.textContent ?? "", /SYNTH-A-ACCOUNT/);
   await act(async () => { held.resolve(response(api.orderAccess)); await new Promise(resolve => setTimeout(resolve, 80)); });
   assert.doesNotMatch(host.querySelector('.im-wb-pane--orders')?.textContent ?? "", /SYNTH-A-ACCOUNT/);
+});
+
+test("switching workspace tabs keeps the support workbench mounted and heartbeating while hidden", async (t) => {
+  const host = await mountWorkspace(t, "/support", false, [...permissions, "im.support.presence"]);
+  await waitFor(() => host.querySelector(".im-wb-root") !== null);
+  await waitFor(() => supportIntervals.filter((item) => item.active).length >= 2, 4000);
+  const root = host.querySelector(".im-wb-root");
+  await act(async () => host.querySelector('[data-tab-id="workbench"]').click());
+  assert.equal(root.isConnected, true, "the support workbench stays mounted after switching tabs");
+  assert.equal(root.parentElement.hidden, true, "the inactive support tab is hidden, not unmounted");
+  assert.equal(host.querySelector('[data-tab-id="workbench"]').getAttribute("aria-selected"), "true");
+
+  Object.defineProperty(browser.document, "visibilityState", { configurable: true, value: "hidden" });
+  t.after(() => { delete browser.document.visibilityState; });
+  const before = heartbeatRequests;
+  await act(async () => {
+    for (const item of supportIntervals.filter((entry) => entry.active)) item.callback();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  });
+  await waitFor(() => heartbeatRequests > before, 2000);
+});
+
+test("a hidden support tab does not mark an order group read until it is visible again", async (t) => {
+  readRequests = [];
+  const card = { pending: 0, failed: 0, skipped: 0, unknown: 0 };
+  const row = order("order-a", "ZZ-A", "RENTING", card);
+  api = { admin: "A", requests: [], nextCursor: null, page2: [], orders: [{ ...row, lastMessageAt: "2026-10-01T00:00:00.000Z", unreadCount: 0 }], orderAccess: syntheticOrderAccess() };
+  const host = await mountWorkspace(t, "/support?section=orders&order=order-a");
+  await waitFor(() => host.querySelector('.im-wb-pane--orders .im-wb-details')?.textContent.includes('SYNTH-A-ACCOUNT'), 4000);
+  await act(async () => host.querySelector('[data-tab-id="workbench"]').click());
+  api.orders = [{ ...row, lastMessageAt: "2026-10-01T00:01:00.000Z", unreadCount: 2 }];
+  await triggerOrderRefresh();
+  await settle();
+  assert.equal(readRequests.filter((request) => request.kind === "order").length, 0, "a hidden tab never marks the newly received order messages read");
+  await act(async () => host.querySelector('[data-tab-id="support"]').click());
+  await waitFor(() => readRequests.filter((request) => request.kind === "order").length === 1);
+  assert.equal(readRequests.find((request) => request.kind === "order").id, "order-a");
+});
+
+test("transient reconnects get a grace window before the reception session closes", () => {
+  assert.equal(presenceDisconnectGraceMs("CONNECTED"), null);
+  assert.equal(presenceDisconnectGraceMs("CONNECTING"), 0);
+  assert.equal(presenceDisconnectGraceMs("RECONNECTING"), 0);
+  assert.equal(presenceDisconnectGraceMs("DISCONNECTED"), 10_000);
+  assert.equal(presenceDisconnectGraceMs("AUTH_FAILED"), null);
+  assert.equal(presenceDisconnectGraceMs("KICKED"), null);
+});
+
+test("reconnecting presence never looks like dispatchable reception", () => {
+  const reconnecting = presenceRuntimeState("AVAILABLE", "RECONNECTING", false);
+  assert.equal(reconnecting.connected, false);
+  assert.equal(reconnecting.tone, "warn");
+  assert.match(reconnecting.label, /连接异常/);
+  assert.equal(reconnecting.toggleDisabled, false, "the operator can still end a stale AVAILABLE presence");
+  assert.match(reconnecting.toggleTitle ?? "", /可先结束接待/);
+
+  const connected = presenceRuntimeState("AVAILABLE", "CONNECTED", false);
+  assert.equal(connected.label, "可接待");
+  assert.equal(connected.toggleDisabled, false);
+
+  const offDuty = presenceRuntimeState("OFF_DUTY", "RECONNECTING", false);
+  assert.equal(offDuty.toggleDisabled, true, "starting reception still requires a connected channel");
+
+  const otherWindow = presenceRuntimeState("AVAILABLE", "CONNECTED", false, true);
+  assert.equal(otherWindow.label, "其他窗口接待中");
+  assert.equal(otherWindow.tone, "warn");
+  assert.equal(otherWindow.toggleLabel, "接管接待");
+  assert.equal(otherWindow.toggleDisabled, false, "the other window can explicitly take over");
+
+  const unbound = presenceRuntimeState("AVAILABLE", "CONNECTED", false, false, true);
+  assert.equal(unbound.label, "需重新开始接待");
+  assert.equal(unbound.toggleLabel, "开始接待");
+  assert.equal(unbound.toggleDisabled, false, "an unbound old row needs an explicit start");
+
+  const unboundReconnecting = presenceRuntimeState("AVAILABLE", "RECONNECTING", false, false, true);
+  assert.match(unboundReconnecting.label, /需重新开始接待/);
+  assert.doesNotMatch(unboundReconnecting.label, /接待中|可接待/, "an unbound old row is not on duty while reconnecting");
+  assert.equal(unboundReconnecting.toggleDisabled, true);
+
+  assert.equal(presenceWriteSucceeded(undefined, "AVAILABLE"), false);
+  assert.equal(presenceWriteSucceeded({ availability: "AVAILABLE", ownedByAnotherSession: true }, "AVAILABLE"), false, "another window's AVAILABLE is not this write's success");
+  assert.equal(presenceWriteSucceeded({ availability: "AVAILABLE", unbound: true }, "AVAILABLE"), false);
+  assert.equal(presenceWriteSucceeded({ availability: "AVAILABLE", ownedByAnotherSession: false, unbound: false }, "AVAILABLE"), true);
 });

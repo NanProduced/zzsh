@@ -93,6 +93,10 @@ export type SupportPresence = {
   lastConnectedAt: string | null;
   activeLoad: number;
   version: number;
+  /** Another browser session currently owns this admin's single presence row. */
+  ownedByAnotherSession: boolean;
+  /** Pre-0184 row with no auth session owner; requires an explicit start to bind. */
+  unbound: boolean;
   today: SupportDayCounts;
 };
 
@@ -247,6 +251,7 @@ type PresenceRow = {
   lastConnectedAt: Date | string | null;
   activeLoad: number;
   version: string | number;
+  authSessionId: string | null;
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -303,16 +308,18 @@ export function parseConsultationBody(value: unknown): { type: SupportType; entr
   return { type: entryIntent, entryIntent, subjectRef: parseSubjectRef(value.subjectRef) };
 }
 
-export function parsePresenceBody(value: unknown): { availability: SupportAvailability; connectionState: SupportConnectionState; version?: number } {
+export function parsePresenceBody(value: unknown): { availability: SupportAvailability; connectionState: SupportConnectionState; version?: number; takeover?: boolean } {
   if (!isRecord(value)) throw invalid("Request body is invalid");
-  if (Object.keys(value).some((key) => key !== "availability" && key !== "connectionState" && key !== "version")) throw invalid("Request body contains an unknown field");
+  if (Object.keys(value).some((key) => key !== "availability" && key !== "connectionState" && key !== "version" && key !== "takeover")) throw invalid("Request body contains an unknown field");
   if (typeof value.availability !== "string" || !AVAILABILITY.has(value.availability as SupportAvailability)) throw invalid("Availability is invalid");
   if (typeof value.connectionState !== "string" || !CONNECTION_STATES.has(value.connectionState as SupportConnectionState)) throw invalid("Connection state is invalid");
   if (value.version !== undefined && (!Number.isSafeInteger(value.version) || (value.version as number) < 0)) throw invalid("Presence version is invalid");
+  if (value.takeover !== undefined && typeof value.takeover !== "boolean") throw invalid("Presence takeover flag is invalid");
   return {
     availability: value.availability as SupportAvailability,
     connectionState: value.connectionState as SupportConnectionState,
     ...(value.version === undefined ? {} : { version: value.version as number }),
+    ...(value.takeover === undefined ? {} : { takeover: value.takeover as boolean }),
   };
 }
 
@@ -2693,20 +2700,21 @@ export async function readOwnPresence(options: ConsultationRouteOptions, context
     await assertAdminContextInTransaction(client, context);
     const row = (await client.query<PresenceRow>(
       `SELECT "admin_user_id" AS "adminUserId", "availability", "connection_state" AS "connectionState",
-              "last_connected_at" AS "lastConnectedAt", "active_load" AS "activeLoad", "version"
+              "last_connected_at" AS "lastConnectedAt", "active_load" AS "activeLoad", "version",
+              "auth_session_id" AS "authSessionId"
          FROM "zzsh_iam"."im_support_presence" WHERE "app_id" = $1 AND "admin_user_id" = $2`,
       [options.appId, context.userId],
     )).rows[0];
     const today = await readSupportToday(client, options.appId, context.userId);
-    return row ? { ...presenceView(row), today } : { ...defaultPresence(context.userId), today };
+    return row ? { ...presenceView(row, context.sessionId), today } : { ...defaultPresence(context.userId), today };
   });
 }
 
 function defaultPresence(adminUserId: string): Omit<SupportPresence, "today"> {
-  return { adminUserId, availability: "OFF_DUTY", connectionState: "DISCONNECTED", lastConnectedAt: null, activeLoad: 0, version: 0 };
+  return { adminUserId, availability: "OFF_DUTY", connectionState: "DISCONNECTED", lastConnectedAt: null, activeLoad: 0, version: 0, ownedByAnotherSession: false, unbound: false };
 }
 
-function presenceView(row: PresenceRow): Omit<SupportPresence, "today"> {
+function presenceView(row: PresenceRow, currentSessionId: string): Omit<SupportPresence, "today"> {
   return {
     adminUserId: row.adminUserId,
     availability: row.availability,
@@ -2714,15 +2722,22 @@ function presenceView(row: PresenceRow): Omit<SupportPresence, "today"> {
     lastConnectedAt: iso(row.lastConnectedAt),
     activeLoad: row.activeLoad,
     version: numberValue(row.version),
+    ownedByAnotherSession: row.authSessionId !== null && row.authSessionId !== currentSessionId,
+    unbound: row.authSessionId === null,
   };
 }
 
-/** 开区间只在 AVAILABLE + CONNECTED 成立；所有其他组合都结束区间。 */
+/**
+ * CONNECTED opens/keeps the reception interval. A short transport reconnect keeps it
+ * open but is already excluded from dispatch by the connection-state predicate.
+ */
 export function presenceSessionAction(
   availability: SupportAvailability,
   connectionState: SupportConnectionState,
-): "OPEN" | "CLOSE" {
-  return availability === "AVAILABLE" && connectionState === "CONNECTED" ? "OPEN" : "CLOSE";
+): "OPEN" | "KEEP" | "CLOSE" {
+  if (availability === "AVAILABLE" && connectionState === "CONNECTED") return "OPEN";
+  if (availability === "AVAILABLE" && (connectionState === "RECONNECTING" || connectionState === "CONNECTING")) return "KEEP";
+  return "CLOSE";
 }
 
 export function presenceSessionEndReason(
@@ -2731,8 +2746,8 @@ export function presenceSessionEndReason(
 ): "PAUSED" | "OFF_DUTY" | "DISCONNECTED" | null {
   if (availability === "PAUSED") return "PAUSED";
   if (availability === "OFF_DUTY") return "OFF_DUTY";
-  if (connectionState !== "CONNECTED") return "DISCONNECTED";
-  // AVAILABLE + CONNECTED is the open interval, not an end reason.
+  if (connectionState !== "CONNECTED" && connectionState !== "RECONNECTING" && connectionState !== "CONNECTING") return "DISCONNECTED";
+  // AVAILABLE + (CONNECTED | reconnecting) is not an end reason.
   return null;
 }
 
@@ -2746,10 +2761,12 @@ export const PRESENCE_SESSION_CLOSE_SQL = `UPDATE "zzsh_iam"."im_support_presenc
   WHERE "app_id" = $1 AND "admin_user_id" = $2 AND "ended_at" IS NULL`;
 
 async function syncPresenceSession(client: PoolClient, appId: string, adminUserId: string, row: PresenceRow): Promise<void> {
-  if (presenceSessionAction(row.availability, row.connectionState) === "OPEN") {
+  const action = presenceSessionAction(row.availability, row.connectionState);
+  if (action === "OPEN") {
     await client.query(PRESENCE_SESSION_OPEN_SQL, [`im_presence_${randomUUID().replaceAll("-", "")}`, appId, adminUserId]);
     return;
   }
+  if (action === "KEEP") return;
   const reason = presenceSessionEndReason(row.availability, row.connectionState);
   if (!reason) return;
   await client.query(PRESENCE_SESSION_CLOSE_SQL, [appId, adminUserId, reason]);
@@ -2768,6 +2785,7 @@ export async function heartbeatOwnPresence(
             SET "last_connected_at" = clock_timestamp()
           WHERE "app_id" = $1 AND "admin_user_id" = $2
             AND "availability" = 'AVAILABLE' AND "connection_state" = 'CONNECTED'
+            AND "auth_session_id" = $3
           RETURNING "admin_user_id"
        ), s AS (
          UPDATE "zzsh_iam"."im_support_presence_session"
@@ -2779,7 +2797,7 @@ export async function heartbeatOwnPresence(
        SELECT EXISTS (SELECT 1 FROM p) AS "presence",
               EXISTS (SELECT 1 FROM s) AS "session",
               to_char(clock_timestamp() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "serverTime"`,
-      [options.appId, context.userId],
+      [options.appId, context.userId, context.sessionId],
     )).rows[0];
     return {
       ok: row?.presence === true && row?.session === true,
@@ -2791,7 +2809,7 @@ export async function heartbeatOwnPresence(
 export async function updateOwnPresence(
   options: ConsultationRouteOptions,
   context: AdminContext,
-  input: { availability: SupportAvailability; connectionState: SupportConnectionState; version?: number },
+  input: { availability: SupportAvailability; connectionState: SupportConnectionState; version?: number; takeover?: boolean },
   requestId: string,
 ): Promise<SupportPresence> {
   const result = await withTransaction(options.pool, async (client) => {
@@ -2801,9 +2819,21 @@ export async function updateOwnPresence(
     if (!hasPermission(access, ADMIN_PERMISSION.imSupportPresence)) {
       throw new SecurityApiError(403, "FORBIDDEN", "Permission required");
     }
+    // Hold the caller's session row until the presence write commits. This serializes
+    // presence with /pin/lock (session -> presence) and closes the race where a
+    // takeover that passed the earlier plain session check could write after lock.
+    const session = await client.query<{ locked: boolean }>(
+      `SELECT "locked" FROM "zzsh_auth_admin"."session"
+        WHERE "id" = $1 AND "userId" = $2 AND "expiresAt" > clock_timestamp()
+        FOR UPDATE`,
+      [context.sessionId, context.userId],
+    );
+    if (!session.rows[0]) throw new SecurityApiError(401, "UNAUTHENTICATED", "Session is not available");
+    if (session.rows[0].locked) throw new SecurityApiError(423, "FORBIDDEN", "Account locked");
     const current = (await client.query<PresenceRow>(
       `SELECT "admin_user_id" AS "adminUserId", "availability", "connection_state" AS "connectionState",
-              "last_connected_at" AS "lastConnectedAt", "active_load" AS "activeLoad", "version"
+              "last_connected_at" AS "lastConnectedAt", "active_load" AS "activeLoad", "version",
+              "auth_session_id" AS "authSessionId"
          FROM "zzsh_iam"."im_support_presence"
         WHERE "app_id" = $1 AND "admin_user_id" = $2`,
       [options.appId, context.userId],
@@ -2815,17 +2845,30 @@ export async function updateOwnPresence(
     if (!current && input.version !== undefined && input.version !== 0) {
       throw conflict("Presence version is stale");
     }
+    const explicitStart = input.takeover === true && input.availability === "AVAILABLE" && input.connectionState === "CONNECTED";
+    if (input.takeover === true && !explicitStart) {
+      throw conflict("Presence takeover requires an explicit connected start");
+    }
+    if (current?.authSessionId && current.authSessionId !== context.sessionId && !explicitStart) {
+      throw conflict("Presence is owned by another session");
+    }
+    // A pre-0184 row has no owner. A passive CONNECTED sync must not turn its old
+    // AVAILABLE state back into dispatchable reception; only an explicit start may bind.
+    if (current?.authSessionId === null && input.availability === "AVAILABLE" && !explicitStart) {
+      throw conflict("Presence is unbound; explicit start required");
+    }
     await options.testPresenceBarrier?.(context);
     let persisted: PresenceRow | undefined;
     if (!current) {
       const inserted = await client.query<PresenceRow>(
         `INSERT INTO "zzsh_iam"."im_support_presence"
-          ("app_id", "admin_user_id", "availability", "connection_state", "last_connected_at")
-         VALUES ($1,$2,$3,$4,CASE WHEN $4 = 'CONNECTED' THEN clock_timestamp() ELSE NULL END)
+          ("app_id", "admin_user_id", "availability", "connection_state", "last_connected_at", "auth_session_id")
+         VALUES ($1,$2,$3,$4,CASE WHEN $4 = 'CONNECTED' THEN clock_timestamp() ELSE NULL END,$5)
          ON CONFLICT ("app_id", "admin_user_id") DO NOTHING
          RETURNING "admin_user_id" AS "adminUserId", "availability", "connection_state" AS "connectionState",
-                   "last_connected_at" AS "lastConnectedAt", "active_load" AS "activeLoad", "version"`,
-        [options.appId, context.userId, input.availability, input.connectionState],
+                   "last_connected_at" AS "lastConnectedAt", "active_load" AS "activeLoad", "version",
+                   "auth_session_id" AS "authSessionId"`,
+        [options.appId, context.userId, input.availability, input.connectionState, context.sessionId],
       );
       persisted = inserted.rows[0];
     } else {
@@ -2834,12 +2877,17 @@ export async function updateOwnPresence(
             SET "availability" = $3,
                 "connection_state" = $4,
                 "last_connected_at" = CASE WHEN $4 = 'CONNECTED' THEN clock_timestamp() ELSE NULL END,
+                "auth_session_id" = $6,
                 "version" = "version" + 1,
                 "updated_at" = clock_timestamp()
           WHERE "app_id" = $1 AND "admin_user_id" = $2 AND "version" = $5
+            AND ("auth_session_id" = $6
+                 OR ($7::boolean AND $3 = 'AVAILABLE' AND $4 = 'CONNECTED')
+                 OR ("auth_session_id" IS NULL AND $3 <> 'AVAILABLE'))
           RETURNING "admin_user_id" AS "adminUserId", "availability", "connection_state" AS "connectionState",
-                    "last_connected_at" AS "lastConnectedAt", "active_load" AS "activeLoad", "version"`,
-        [options.appId, context.userId, input.availability, input.connectionState, currentVersion],
+                    "last_connected_at" AS "lastConnectedAt", "active_load" AS "activeLoad", "version",
+                    "auth_session_id" AS "authSessionId"`,
+        [options.appId, context.userId, input.availability, input.connectionState, currentVersion, context.sessionId, input.takeover === true],
       );
       persisted = updated.rows[0];
     }
@@ -2857,7 +2905,7 @@ export async function updateOwnPresence(
       requestId,
       details: { availability: input.availability, connectionState: input.connectionState, appId: options.appId },
     });
-    return { ...presenceView(persisted), today };
+    return { ...presenceView(persisted, context.sessionId), today };
   });
   if (result.availability === "AVAILABLE" && result.connectionState === "CONNECTED") {
     options.wakeDispatch?.();

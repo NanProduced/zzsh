@@ -1289,6 +1289,13 @@
       "when": 1793730640504,
       "tag": "0183_order_stage_card_unknown",
       "breakpoints": true
+    },
+    {
+      "idx": 184,
+      "version": "7",
+      "when": 1794224569862,
+      "tag": "0184_support_presence_auth_session",
+      "breakpoints": true
     }
   ]
 }

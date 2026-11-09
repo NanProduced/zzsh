@@ -394,6 +394,9 @@ const SUPPORT_OVERVIEW_ELIGIBLE_SQL = `
     FROM "zzsh_iam"."im_support_presence" p
     JOIN "zzsh_iam"."admin_security" s ON s."admin_user_id" = p."admin_user_id"
     JOIN "zzsh_auth_admin"."user" u ON u."id" = p."admin_user_id"
+    JOIN "zzsh_auth_admin"."session" a
+      ON a."id" = p."auth_session_id" AND a."userId" = p."admin_user_id"
+     AND a.locked = false AND a."expiresAt" > clock_timestamp()
     JOIN "zzsh_iam"."im_identity_mapping" m
       ON m."provider" = 'yunxin' AND m."app_id" = p."app_id" AND m."realm" = 'admin'
      AND m."identity_kind" = 'ADMIN' AND m."platform_subject_id" = p."admin_user_id" AND m."status" = 'READY'

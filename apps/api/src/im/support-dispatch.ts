@@ -71,6 +71,8 @@ export async function readEligibleSupport(client: PoolClient, appId: string, loc
     `SELECT p.admin_user_id AS "adminUserId",u.name AS "adminName",m.account_id AS "accountId",m.identity_marker AS "identityMarker"
      FROM zzsh_iam.im_support_presence p JOIN zzsh_iam.admin_security s ON s.admin_user_id=p.admin_user_id
      JOIN zzsh_auth_admin."user" u ON u.id=p.admin_user_id
+     JOIN zzsh_auth_admin."session" a ON a."id"=p.auth_session_id AND a."userId"=p.admin_user_id
+       AND a.locked=false AND a."expiresAt">clock_timestamp()
      JOIN zzsh_iam.im_identity_mapping m ON m.provider='yunxin' AND m.app_id=p.app_id AND m.realm='admin'
        AND m.identity_kind='ADMIN' AND m.platform_subject_id=p.admin_user_id AND m.status='READY'
      WHERE p.app_id=$1 AND p.admin_user_id=ANY($2::text[]) AND s.status='ACTIVE' AND NOT u.suspended AND p.availability='AVAILABLE'
@@ -91,7 +93,10 @@ export async function readEligibleSupport(client: PoolClient, appId: string, loc
 
 /** 与 readEligibleSupport 同一在线口径；候选名单之外的 presence 不参与排队原因统计。 */
 const SUPPORT_READY_PRESENCE = `p."availability" = 'AVAILABLE' AND p."connection_state" = 'CONNECTED'
-    AND p."last_connected_at" > clock_timestamp() - interval '2 minutes'`;
+    AND p."last_connected_at" > clock_timestamp() - interval '2 minutes'
+    AND EXISTS (SELECT 1 FROM zzsh_auth_admin."session" a
+                 WHERE a."id" = p."auth_session_id" AND a."userId" = p."admin_user_id"
+                   AND a.locked = false AND a."expiresAt" > clock_timestamp())`;
 
 /**
  * Online, eligible and (for complaints) complaint-authorized agents are candidates.
@@ -144,7 +149,7 @@ export async function reapStaleSupportSessions(
           SET "connection_state" = 'DISCONNECTED',
               "version" = p."version" + 1,
               "updated_at" = clock_timestamp()
-        WHERE p."app_id" = $1 AND p."connection_state" = 'CONNECTED'
+        WHERE p."app_id" = $1 AND p."connection_state" IN ('CONNECTED','RECONNECTING')
           AND p."admin_user_id" IN (SELECT "admin_user_id" FROM stale)
           AND NOT EXISTS (
             SELECT 1 FROM "zzsh_iam"."im_support_presence_session" s

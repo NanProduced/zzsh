@@ -126,9 +126,11 @@ test("COMPLAINT additionally requires im.support.complaint", () => {
 
 test("presence and queue limits reject values outside the server contract", () => {
   assert.deepEqual(parsePresenceBody({ availability: "AVAILABLE", connectionState: "CONNECTED" }), { availability: "AVAILABLE", connectionState: "CONNECTED" });
+  assert.deepEqual(parsePresenceBody({ availability: "AVAILABLE", connectionState: "CONNECTED", takeover: true }), { availability: "AVAILABLE", connectionState: "CONNECTED", takeover: true });
   assert.equal(parseLimit(undefined), 50);
   assert.equal(parseLimit("100"), 100);
   assert.throws(() => parsePresenceBody({ availability: "AVAILABLE", connectionState: "CONNECTED", adminUserId: "other" }), /unknown field/);
+  assert.throws(() => parsePresenceBody({ availability: "AVAILABLE", connectionState: "CONNECTED", takeover: "yes" }), /takeover flag is invalid/);
   assert.throws(() => parsePresenceBody({ availability: "AVAILABLE", connectionState: "ONLINE" }), /Connection state is invalid/);
   assert.throws(() => parseLimit("101"), /Limit is invalid/);
 });
