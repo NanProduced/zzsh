@@ -36,9 +36,11 @@ export type LegacyContinuationReport = {
   error: string;
   pending: string;
 };
-export function LegacyContinuationPanel({ orderId, party, onOrderChanged, onContinuation }: { orderId: string; party: "renter" | "owner"; onOrderChanged?: () => void; onContinuation?: (report: LegacyContinuationReport) => void }) {
+export function LegacyContinuationPanel({ orderId, party, onOrderChanged, onContinuation, readOnly = false }: { orderId: string; party: "renter" | "owner"; onOrderChanged?: () => void; onContinuation?: (report: LegacyContinuationReport) => void; readOnly?: boolean }) {
   const session = useUserSession(), scope = `${session.status}:${session.userId}:${session.identityVersion}:${orderId}:${party}`;
   const live = useRef({ scope, read: 0, operation: 0 });
+  const readOnlyRef = useRef(readOnly);
+  readOnlyRef.current = readOnly;
   if (live.current.scope !== scope) live.current = { scope, read: live.current.read + 1, operation: live.current.operation + 1 };
   const [result, setResult] = useState<Scoped<LegacyContinuation | null>>({ scope, value: null });
   const [error, setError] = useState<Scoped<string>>({ scope, value: "" });
@@ -64,25 +66,30 @@ export function LegacyContinuationPanel({ orderId, party, onOrderChanged, onCont
     const abort = new AbortController(), ticket = ++live.current.read;
     setResult({ scope, value: null }); setPreview({ scope, value: null }); setConfirmation({ scope, value: null }); setResolved({ scope, value: null });
     if (session.status !== "authenticated" || !session.userId) return () => abort.abort();
-    setPending({ scope, value: safePending(session.userId, orderId) });
-    void legacyContinuationApi.read(orderId, abort.signal).then(value => {
+    const acting = session.userId;
+    setPending({ scope, value: safePending(acting, orderId) });
+    void legacyContinuationApi.read(acting, orderId, abort.signal).then(value => {
       if (!current() || abort.signal.aborted || live.current.read !== ticket) return;
       setResult({ scope, value }); setError({ scope, value: "" });
       setForm({ scope, value: Object.fromEntries(Object.keys(names).map(key => [key, value.quantities?.[key as keyof typeof names] ?? (key === "expendHaff" ? "" : "0")])) });
     }).catch(e => { if (!current() || abort.signal.aborted || live.current.read !== ticket) return; setError({ scope, value: message(e) }); if (e instanceof OrderRequestError && e.status === 401) session.revalidate(); });
     return () => abort.abort();
   }, [scope, nonce]);
+  useEffect(() => {
+    if (readOnly) { setPreview({ scope, value: null }); setConfirmation({ scope, value: null }); }
+  }, [readOnly, scope]);
   async function estimate() {
-    if (blocked || !data?.capabilities.includes("propose")) return;
+    const acting = session.userId;
+    if (readOnly || blocked || !acting || !data?.capabilities.includes("propose")) return;
     const ticket = ++live.current.operation;
     setBusy({ scope, value: true }); setError({ scope, value: "" });
     try { const quantities = parseLegacyQuantitiesInput(Object.fromEntries(Object.keys(names).map(k => [k, fields[k]?.trim() || null]))), serialized = JSON.stringify(quantities);
-      const body = await legacyContinuationApi.preview(orderId, quantities); if (current() && live.current.operation === ticket) setPreview({ scope, value: { body, quantities: serialized } }); }
+      const body = await legacyContinuationApi.preview(acting, orderId, quantities); if (!readOnlyRef.current && current() && live.current.operation === ticket) setPreview({ scope, value: { body, quantities: serialized } }); }
     catch (e) { if (current() && live.current.operation === ticket) setError({ scope, value: message(e) }); }
     finally { if (current() && live.current.operation === ticket) setBusy({ scope, value: false }); }
   }
   function prepare(kind: LegacyCommandName) {
-    if (blocked || !data?.evidenceId || !data.capabilities.includes(kind)) return;
+    if (readOnly || blocked || !data?.evidenceId || !data.capabilities.includes(kind)) return;
     if (kind === "propose") {
       const p = preview.scope === scope ? preview.value : null;
       if (!p) return;
@@ -96,9 +103,15 @@ export function LegacyContinuationPanel({ orderId, party, onOrderChanged, onCont
   }
   async function send(intent: PendingIntent) {
     const kind = intent.context!.command as LegacyCommandName, ticket = ++live.current.operation;
+    // The frozen intent owner, never a later session value. A delayed intent for A must not be
+    // replayed while B is live: keep the original key/body and ask the user to refresh.
+    if (session.status !== "authenticated" || session.userId !== intent.userId) {
+      setError({ scope, value: "登录身份已变化；原申请已保留，请刷新后按原请求核对，不会重新提交。" });
+      return;
+    }
     setBusy({ scope, value: true }); setConfirmation({ scope, value: null });
     try {
-      const receipt = await legacyContinuationApi.write(orderId, kind, intent.body, intent.key);
+      const receipt = await legacyContinuationApi.write(intent.userId, orderId, kind, intent.body, intent.key);
       if (!current() || live.current.operation !== ticket) return;
       recordIntentReceipt(intent.userId, "legacy.continuation", orderId, receipt); clearIntent(intent.userId, "legacy.continuation", orderId);
       setPending({ scope, value: { state: "NONE", intent: null } }); setError({ scope, value: "" });
@@ -108,7 +121,7 @@ export function LegacyContinuationPanel({ orderId, party, onOrderChanged, onCont
   }
   function submit() {
     const c = confirmation.scope === scope ? confirmation.value : null;
-    if (!c || !session.userId || blocked || !current()) return;
+    if (readOnly || !c || !session.userId || blocked || !current()) return;
     if (safePending(session.userId, orderId).state !== "NONE") { setPending({ scope, value: safePending(session.userId, orderId) }); return; }
     const saved = saveIntent({ userId: session.userId, kind: "legacy.continuation", resourceId: orderId, key: orderIntentKey(), body: structuredClone(c.body), context: { command: c.kind } });
     if (!saved.persisted) { setPending({ scope, value: { state: "UNREADABLE", intent: null } }); setError({ scope, value: "暂时无法提交，请保留当前页面并联系客服。" }); return; }
@@ -118,7 +131,7 @@ export function LegacyContinuationPanel({ orderId, party, onOrderChanged, onCont
     const intent = pendingValue.intent; if (!intent || loading || !current()) return;
     const ticket = ++live.current.operation; setBusy({ scope, value: true });
     try {
-      const receipt = await legacyContinuationApi.receipt(orderId, intent.context!.command as LegacyCommandName, intent.key, intent.body);
+      const receipt = await legacyContinuationApi.receipt(intent.userId, orderId, intent.context!.command as LegacyCommandName, intent.key, intent.body);
       if (!current() || live.current.operation !== ticket) return;
       setResolved({ scope, value: receipt });
       if (receipt.state === "KNOWN_SUCCESS") {
@@ -141,10 +154,10 @@ export function LegacyContinuationPanel({ orderId, party, onOrderChanged, onCont
       {party === "renter" && data.stage === "4" && data.duties.some(d => d.kind === "RENTER_REFUND" && ["PENDING", "MATURED"].includes(d.status)) ? <p className="order-muted">{data.refundDueAt ? `退款最早可在 ${formatOrderTime(data.refundDueAt)} 后处理，到账以实际退款进度为准。` : "退款处理时间待核，请联系客服。"}</p> : null}
       {data.isSettle === "2" ? <p className="order-muted">本单有暂扣款项；解除暂扣后仍需核对退款处理情况。</p> : null}
       {data.duties.length ? <ul className="legacy-duty-list">{data.duties.map(d => <li key={d.id}><span>{{ RENTER_REFUND: "租客退款", OWNER_CREDIT: "出租收益", COMMISSION: "佣金", DEPOSIT_COMPENSATION: "押金补偿" }[d.kind] ?? "结算"}</span><strong>¥{(BigInt(d.amountCents) / 100n).toString()}.{(BigInt(d.amountCents) % 100n).toString().padStart(2, "0")}</strong><span>{d.kind === "RENTER_REFUND" && d.status === "SETTLED" ? refundProgressName[d.refundProgress]??'退款状态待核对' : d.settledBy === "LEGACY_RECORDS" ? "已处理" : d.kind === "OWNER_CREDIT" && d.status === "SETTLED" && d.settledBy === "FINANCE" ? (d.financeVerified ? d.amountCents === "0" ? "无需入账" : "已入平台余额" : "账目待核对") : d.kind === "OWNER_CREDIT" && d.status === "PENDING" ? "待核对" : { PENDING: "待处理", MATURED: "待结算", SETTLED: "处理已记录", VOID: "已取消" }[d.status] ?? "未记录"}</span></li>)}</ul> : null}
-      {data.capabilities.includes("propose") ? <div className="legacy-consumption"><h4>填写本次实际消耗</h4><p className="order-muted">请核对实际使用数量；未使用的物资填 0。6级子弹按组填写，1 组为 60 发。</p><div className="legacy-consumption-grid">{Object.entries(names).map(([key, label]) => <label key={key}>{label}<input inputMode="decimal" value={fields[key] ?? ""} placeholder={key === "expendHaff" ? "填写消耗" : "0"} disabled={blocked} onChange={event => { setForm({ scope, value: { ...fields, [key]: event.target.value } }); setPreview({ scope, value: null }); setConfirmation({ scope, value: null }); }}/></label>)}</div><button className="button secondary" type="button" disabled={blocked} onClick={() => void estimate()}>核对结算结果</button>
+      {!readOnly && data.capabilities.includes("propose") ? <div className="legacy-consumption"><h4>填写本次实际消耗</h4><p className="order-muted">请核对实际使用数量；未使用的物资填 0。6级子弹按组填写，1 组为 60 发。</p><div className="legacy-consumption-grid">{Object.entries(names).map(([key, label]) => <label key={key}>{label}<input inputMode="decimal" value={fields[key] ?? ""} placeholder={key === "expendHaff" ? "填写消耗" : "0"} disabled={blocked} onChange={event => { setForm({ scope, value: { ...fields, [key]: event.target.value } }); setPreview({ scope, value: null }); setConfirmation({ scope, value: null }); }}/></label>)}</div><button className="button secondary" type="button" disabled={blocked} onClick={() => void estimate()}>核对结算结果</button>
         {proposed ? <div className="legacy-proposal"><h4>结算方案</h4>{proposed.body.settlementKind === "EARLY" ? <p className="order-inline-notice"><strong>本次为提前结算。</strong>{proposed.body.earlyFee != null ? ` 按旧订单规则产生提前结算费用 ¥${proposed.body.earlyFee}，已计入下方退款金额。` : " 将按旧订单规则计算应收和应退，请核对下方金额。"}</p> : null}<dl className="order-facts">{Object.entries(proposed.body.proposalAmounts).filter(([key, value]) => labels[key] && value !== null).map(([key, value]) => <div key={key}><dt>{labels[key]}</dt><dd>¥{value}</dd></div>)}</dl><button className="button primary" type="button" disabled={blocked} onClick={() => prepare("propose")}>提交结算方案</button></div> : null}</div> : null}
-      <div className="order-trade-actions">{(["confirm", "reject"] as const).filter(kind => data.capabilities.includes(kind)).map(kind => <button className={kind === "confirm" ? "button primary" : "button secondary"} type="button" key={kind} disabled={blocked} onClick={() => prepare(kind)}>{actions[kind]}</button>)}</div>
-      {confirm ? <div className="order-feedback" role="group" aria-label="核对本次操作"><p>{confirm.kind === "reject" ? "拒绝后订单继续进行，原方案仍可查看。" : "请核对上方结算金额。本次操作不会重新收款，也不代表退款到账。"}</p><button className="button primary" type="button" disabled={loading} onClick={submit}>确认提交</button><button className="button secondary" type="button" disabled={loading} onClick={() => setConfirmation({ scope, value: null })}>返回核对</button></div> : null}
+      {!readOnly ? <div className="order-trade-actions">{(["confirm", "reject"] as const).filter(kind => data.capabilities.includes(kind)).map(kind => <button className={kind === "confirm" ? "button primary" : "button secondary"} type="button" key={kind} disabled={blocked} onClick={() => prepare(kind)}>{actions[kind]}</button>)}</div> : null}
+      {!readOnly && confirm ? <div className="order-feedback" role="group" aria-label="核对本次操作"><p>{confirm.kind === "reject" ? "拒绝后订单继续进行，原方案仍可查看。" : "请核对上方结算金额。本次操作不会重新收款，也不代表退款到账。"}</p><button className="button primary" type="button" disabled={loading} onClick={submit}>确认提交</button><button className="button secondary" type="button" disabled={loading} onClick={() => setConfirmation({ scope, value: null })}>返回核对</button></div> : null}
     </>}
     {pendingValue.state === "UNREADABLE" ? <p role="status">暂时无法确认上次操作，请保留当前页面并联系客服。</p> : pendingValue.intent ? <div role="status" className="order-feedback"><p>上次操作结果未记录，请先查询进度，勿重复提交。</p><button className="button secondary" type="button" disabled={loading} onClick={() => void recover()}>查询处理进度</button>{recovery?.state === "UNKNOWN" ? <button className="button secondary" type="button" disabled={loading} onClick={() => void send(pendingValue.intent!)}>继续提交上次申请</button> : null}{recovery?.state === "KNOWN_REJECTED" ? <><p>上次申请未通过，请刷新后重新核对。</p><button className="button secondary" type="button" disabled={loading} onClick={() => { clearIntent(pendingValue.intent!.userId, "legacy.continuation", orderId); setPending({ scope, value: { state: "NONE", intent: null } }); setNonce(n => n + 1); }}>刷新后重新核对</button></> : null}</div> : null}
   </section>;

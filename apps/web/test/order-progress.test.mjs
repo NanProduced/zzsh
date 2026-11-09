@@ -24,7 +24,7 @@ const view = (over = {}, options = {}) => orderProgressView({
   party: options.party ?? "renter",
   facts: Object.hasOwn(options, "facts") ? options.facts : null,
   readFailed: options.readFailed ?? false,
-  payment: options.payment ?? null,
+  payment: Object.hasOwn(options, "payment") ? options.payment : { state: null, displayState: null, blockedReason: null, readFailed: false },
 });
 
 const opened = facts({ rentalStarted: true, openingConfirmedAt: "2026-11-09T02:00:00Z", openingVersionNo: "1" });
@@ -351,4 +351,12 @@ test("legacy stage owner and pending refund records stay visible", () => {
   const refund = legacyProgressView(legacyReport({ refundProgress: ["PROCESSING"] }));
   assert.ok(refund.known.some(line => line.includes("退款处理中")));
   assert.match(refund.note, /待处理的退款记录/);
+});
+
+test("pending renter payment does not invite payment before the channel read settles", () => {
+  const loading = view({ status: "PENDING_PAYMENT" }, { party: "renter", payment: null });
+  assert.equal(loading.pendingRead, true);
+  assert.doesNotMatch(JSON.stringify(loading), /去支付|完成支付/);
+  const ready = view({ status: "PENDING_PAYMENT" }, { party: "renter", payment: { state: null, displayState: null, blockedReason: null, readFailed: false } });
+  assert.equal(ready.primary.label, "去支付");
 });

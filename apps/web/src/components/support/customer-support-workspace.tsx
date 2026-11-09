@@ -664,7 +664,8 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, vi
     return () => { orderNavigationRef.current?.abort(); };
   }, [currentIdentity, visible]);
   const openReferencedOrder = async (orderId: string) => {
-    if (!visible || preview || session.status !== "authenticated" || identityRef.current !== currentIdentity) return;
+    if (!visible || preview || session.status !== "authenticated" || !session.userId || identityRef.current !== currentIdentity) return;
+    const acting = session.userId;
     const known = directoryIdentity === currentIdentity ? orders.find((order) => order.id === orderId) : undefined;
     if (known && (known.party === "owner" || known.party === "renter")) {
       window.location.assign(orderUrl(known.party, "", undefined, orderId,known.origin));
@@ -676,14 +677,14 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, vi
     const generation = identityGenerationRef.current;
     try {
       if (/^legacy_order_[a-f0-9]{40}$/.test(orderId)) {
-        const order = await orderApi.legacyDetail(orderId, controller.signal);
+        const order = await orderApi.legacyDetail(acting, orderId, controller.signal);
         if (controller.signal.aborted || generation !== identityGenerationRef.current || identityRef.current !== currentIdentity) return;
         if (order.id !== orderId || order.source?.origin !== "LEGACY" || !["renter", "owner"].includes(order.party)) {
           setError("暂时无法确认你的订单身份，请从个人中心的订单列表查看。"); return;
         }
         window.location.assign(orderUrl(order.party, "", undefined, orderId, "LEGACY")); return;
       }
-      const order = await orderApi.detail(orderId, controller.signal);
+      const order = await orderApi.detail(acting, orderId, controller.signal);
       if (controller.signal.aborted || generation !== identityGenerationRef.current || identityRef.current !== currentIdentity) return;
       if (order.id !== orderId || !order.viewerParty) {
         setError("暂时无法确认你的订单身份，请从个人中心的订单列表查看。");
@@ -1430,9 +1431,15 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, vi
     if (!target.openingId || !Number.isInteger(target.openingVersion)) {
       throw Object.assign(new Error("期初信息未就绪"), { status: 409 });
     }
+    // Freeze the subject at invocation time. The shared order card must not send a later
+    // identity: the BFF compares it with the Cookie captured for this same request.
+    const acting = session.userId;
+    if (session.status !== "authenticated" || !acting) {
+      throw Object.assign(new Error("登录状态已变化，请刷新后按原请求核对"), { status: 401 });
+    }
     // Server owns the ack; the panel re-reads access after this resolves.
-    await orderApi.confirmOpening(target.orderId, target.openingId, Number(target.openingVersion), orderIntentKey());
-  }, []);
+    await orderApi.confirmOpening(acting, target.orderId, target.openingId, Number(target.openingVersion), orderIntentKey());
+  }, [session.userId, session.status]);
 
   /**
    * 已结束订单群只读时进入普通客服线程：复用同一条 SERVICE 线程与历史，

@@ -13,6 +13,7 @@ const typescript = requireFromTree("typescript");
 const React = requireFromTree("react");
 const { Window } = requireFromTree("happy-dom");
 const intents = requireFromTree(path.join(tree, "apps/web/src/lib/order-intents.ts"));
+const { orderApi } = requireFromTree(path.join(tree, "apps/web/src/lib/order-client.ts"));
 const heroToast = await import("@heroui/react/toast");
 
 function compile(relativePath) {
@@ -41,7 +42,7 @@ function loadComponent(relativePath, session, extra) {
     if (name === "@/components/order/order-list") return loadComponent("apps/web/src/components/order/order-list.tsx", session);
     if (name === "./rental-price-summary") return loadComponent("apps/web/src/components/order/rental-price-summary.tsx", session);
     if (name === "./recommended-accounts") return { RecommendedAccountsSection: () => null };
-    if (name === "./legacy-continuation-panel") return {LegacyContinuationPanel:()=>null};
+    if (name === "./legacy-continuation-panel") return extra?.[name] ?? {LegacyContinuationPanel:()=>null};
     if (name === './prestart-termination-panel'||name === '@/components/order/prestart-termination-panel') return loadComponent('apps/web/src/components/order/prestart-termination-panel.tsx',session,extra);
     if (name === './order-trade-actions') return loadComponent('apps/web/src/components/order/order-trade-actions.tsx',session,extra);
     if (name === '@/lib/prestart-termination-client') return requireFromTree(path.join(tree,'apps/web/src/lib/prestart-termination-client.ts'));
@@ -2660,7 +2661,9 @@ test("C02: switching users discards a late refund response from the previous sub
     const probe = createProbe(window, OrderDetail, props, async (input, init = {}) => {
       if (String(input).includes("/refunds")) {
         const who = new Headers(init.headers).get("x-zzsh-expected-user-id");
-        return who === "user_A" ? first.promise : second.promise;
+        // A Response body can only be consumed once. An identity switch legitimately triggers a
+        // fresh read, so build a new Response for every call instead of reusing one instance.
+        return (who === "user_A" ? first.promise : second.promise).then(body => json(body));
       }
       if (String(input).includes("/settlement")) return json(settlementBody);
       return json({ order: paidOrder });
@@ -2672,8 +2675,8 @@ test("C02: switching users discards a late refund response from the previous sub
       const oldBody = refundRead("order_A", { subjectId: "user_A", status: "AVAILABLE", outcome: "FULLY_CONSUMED", responsibility: { state: "POSTED", postingId: "posting_1", originalCents: "99900", allocatedCents: "99900", consumedCents: "99900", releasedCents: "0", remainingCents: "0", totalsComplete: true, dueAt: "2026-10-19T04:30:00Z", dueState: "DUE" }, intents: [refundIntent({ amount: { cents: "99900", currency: "CNY" } })], returnedIntentCount: 1 });
       const newBody = refundRead("order_A", { subjectId: "user_B", status: "AVAILABLE", outcome: "FULLY_ALLOCATED", responsibility: { state: "POSTED", postingId: "posting_2", originalCents: "22200", allocatedCents: "22200", consumedCents: "0", releasedCents: "0", remainingCents: "0", totalsComplete: true, dueAt: "2026-10-19T04:30:00Z", dueState: "DUE" }, intents: [refundIntent({ amount: { cents: "22200", currency: "CNY" } })], returnedIntentCount: 1 });
       await React.act(async () => {
-        first.resolve(json(oldBody));
-        second.resolve(json(newBody));
+        first.resolve(oldBody);
+        second.resolve(newBody);
         await new Promise(setImmediate);
       });
       await new Promise(setImmediate);
@@ -2995,4 +2998,140 @@ test("master review: legacy terminal pages never promise unconditional continuat
       assert.doesNotMatch(card.textContent, /查看订单续办/);
     } finally { await probe.dispose(); }
   }
+}));
+
+test("master review: the payment progress waits for a pending channel read", async () => withDom(async window => {
+  const OrderDetail = loadComponent("apps/web/src/components/order/order-detail.tsx", session("user_A")).OrderDetail;
+  const order = { ...paidOrder, status: "PENDING_PAYMENT", paymentOpen: true, cancelOpen: true };
+  const pending = deferred();
+  const probe = createProbe(window, OrderDetail, detailProps(order), async url => String(url).includes("channel-payment-requests") ? pending.promise : json({}));
+  try {
+    await probe.render();
+    const card = probe.host.querySelector(".order-progress-card");
+    assert.match(card.textContent, /正在核对支付状态/);
+    assert.doesNotMatch(card.textContent, /去支付|完成支付/);
+    pending.resolve(json({ contractVersion: "order-payment-request.v1", dataOrigin: "JOINPAY_CANDIDATE", capability: { channelEnabled: true, productionPaymentCapability: true, methods: [] }, order: { id: order.id, status: "PENDING_PAYMENT" }, request: { id: "payreq_1", state: "UNKNOWN" }, projection: { displayState: "CONFIRMING", actionBlockedReason: "CHANNEL_RESULT_UNKNOWN" }, paymentAction: null, payment: null }));
+    await settle(window, probe, "支付结果正在确认");
+    assert.match(card.textContent, /支付结果正在确认/);
+    assert.doesNotMatch(card.textContent, /去支付|完成支付/);
+  } finally { await probe.dispose(); }
+}));
+
+test("master review: legacy detail passes terminal status to continuation controls", async () => withDom(async window => {
+  const panel = { LegacyContinuationPanel: props => React.createElement("span", { "data-terminal-readonly": String(props.readOnly) }) };
+  const Legacy = loadComponent("apps/web/src/components/order/legacy-order-workspace.tsx", session("user_A"), { "./legacy-continuation-panel": panel }).LegacyOrderWorkspace;
+  for (const status of ["PAID", "COMPLETED", "CANCELLED"]) {
+    const row = { id: "legacy_1", displayNo: "OLD-1", title: "历史记录", party: "renter", status, source: { origin: "LEGACY", statusLabel: status }, readOnly: true, actions: [], account: { id: null, displayNo: null, readable: false }, legacyAmounts: { required: money("10.00"), paid: money("10.00"), deposit: null, refund: null } };
+    const probe = createProbe(window, Legacy, { party: "renter", orderId: row.id }, async () => json({ order: row }));
+    try {
+      await probe.render();
+      const panelNode = probe.host.querySelector("[data-terminal-readonly]");
+      assert.equal(panelNode?.getAttribute("data-terminal-readonly"), String(status !== "PAID"));
+    } finally { await probe.dispose(); }
+  }
+}));
+test("master review: an original payment intent blocks a fresh payment prompt", async () => withDom(async window => {
+  const OrderDetail = loadComponent("apps/web/src/components/order/order-detail.tsx", session("user_A")).OrderDetail;
+  const order = { ...paidOrder, status: "PENDING_PAYMENT", paymentOpen: true, cancelOpen: true };
+  const saved = intents.saveIntent({ userId: "user_A", kind: "order.channel-payment", resourceId: order.id, key: "ORIGINAL_KEY", body: { method: "WEIXIN_NATIVE" } });
+  assert.equal(saved.persisted, true);
+  const channel = { contractVersion: "order-payment-request.v1", dataOrigin: "JOINPAY_CANDIDATE", capability: { channelEnabled: true, productionPaymentCapability: true, methods: ["WEIXIN_NATIVE"] }, order: { id: order.id, status: "PENDING_PAYMENT" }, request: null, projection: { displayState: "PENDING", actionBlockedReason: null }, paymentAction: null, payment: null };
+  const probe = createProbe(window, OrderDetail, detailProps(order), async url => String(url).includes("channel-payment-requests") ? json(channel) : json({}));
+  try {
+    await probe.render();
+    await settle(window, probe, "恢复原请求回执");
+    assert.match(probe.host.textContent, /恢复原请求回执/);
+    const card = probe.host.querySelector(".order-progress-card");
+    assert.doesNotMatch(card.textContent, /去支付|完成支付/);
+    assert.match(card.textContent, /支付结果正在确认/);
+  } finally { await probe.dispose(); }
+}));
+test("master review: an unknown payment submission keeps the original intent visible in progress", async () => withDom(async window => {
+  const OrderDetail = loadComponent("apps/web/src/components/order/order-detail.tsx", session("user_A")).OrderDetail;
+  const order = { ...paidOrder, status: "PENDING_PAYMENT", paymentOpen: true, cancelOpen: true };
+  const channel = { contractVersion: "order-payment-request.v1", dataOrigin: "JOINPAY_CANDIDATE", capability: { channelEnabled: true, productionPaymentCapability: true, methods: ["ALIPAY_NATIVE"] }, order: { id: order.id, status: "PENDING_PAYMENT" }, request: null, projection: { displayState: "PENDING", actionBlockedReason: null }, paymentAction: null, payment: null };
+  let paymentPosts = 0;
+  const probe = createProbe(window, OrderDetail, detailProps(order), async (url, init = {}) => {
+    if (String(url).includes("channel-payment-requests") && init.method === "POST") { paymentPosts++; throw new Error("synthetic timeout"); }
+    return String(url).includes("channel-payment-requests") ? json(channel) : json({});
+  });
+  try {
+    await probe.render();
+    await settle(window, probe, "获取支付参数");
+    await probe.click("获取支付参数");
+    await settle(window, probe, "支付结果正在确认");
+    assert.equal(paymentPosts, 1);
+    assert.equal(intents.inspectIntent("user_A", "order.channel-payment", order.id).state, "VALID");
+    const card = probe.host.querySelector(".order-progress-card");
+    assert.match(card.textContent, /支付结果正在确认/);
+    assert.doesNotMatch(card.textContent, /去支付|完成支付/);
+  } finally { await probe.dispose(); }
+}));
+
+test("master review: a failed payment refresh cannot restore the stale pay prompt", async () => withDom(async window => {
+  const OrderDetail = loadComponent("apps/web/src/components/order/order-detail.tsx", session("user_A")).OrderDetail;
+  const order = { ...paidOrder, status: "PENDING_PAYMENT", paymentOpen: true, cancelOpen: true };
+  const channel = { contractVersion: "order-payment-request.v1", dataOrigin: "JOINPAY_CANDIDATE", capability: { channelEnabled: true, productionPaymentCapability: true, methods: ["ALIPAY_NATIVE"] }, order: { id: order.id, status: "PENDING_PAYMENT" }, request: null, projection: { displayState: "PENDING", actionBlockedReason: null }, paymentAction: null, payment: null };
+  let reads = 0;
+  const probe = createProbe(window, OrderDetail, detailProps(order), async url => String(url).includes("channel-payment-requests") ? (++reads === 1 ? json(channel) : json({ error: { code: "UNAVAILABLE" } }, 503)) : json({}));
+  try {
+    await probe.render();
+    await settle(window, probe, "获取支付参数");
+    await probe.click("刷新支付状态");
+    await settle(window, probe, "支付结果正在确认");
+    const card = probe.host.querySelector(".order-progress-card");
+    assert.match(card.textContent, /支付结果正在确认/);
+    assert.doesNotMatch(card.textContent, /去支付|完成支付/);
+  } finally { await probe.dispose(); }
+}));
+
+/* ---- Master second review: the original request subject is frozen, never re-derived ---- */
+
+test("master review: a delayed A intent keeps A's subject and the original key across B and back", async () => withDom(async window => {
+  const { performGuardedWrite } = loadComponent("apps/web/src/components/order/order-trade-actions.tsx", session("user_A"));
+  const orderId = "order_frozen_subject";
+  const saved = intents.saveIntent({ userId: "user_A", kind: "opening.confirm", resourceId: orderId, key: "ORIGINAL_KEY", body: { versionNo: 1 }, context: { openingId: "opening_1" } });
+  assert.equal(saved.persisted, true);
+  const previousFetch = globalThis.fetch, sent = [];
+  globalThis.fetch = async (_url, init) => {
+    const headers = new Headers(init.headers);
+    sent.push({ subject: headers.get("x-zzsh-expected-user-id"), key: headers.get("idempotency-key"), body: JSON.parse(init.body) });
+    return json({});
+  };
+  try {
+    let live = "user_B";
+    const request = (key, body, context, subject) => orderApi.confirmOpening(subject, orderId, String(context?.openingId ?? ""), Number(body.versionNo), key);
+    // While B is live, the A intent must not be sent at all; no new key is generated.
+    const blocked = await performGuardedWrite("user_A", "opening.confirm", orderId, { versionNo: 999 }, { openingId: "opening_1" }, request, s => s === live);
+    assert.equal(blocked.status, "unauthorized");
+    assert.equal(sent.length, 0, "no cross-subject write may be sent");
+    assert.equal(intents.inspectIntent("user_A", "opening.confirm", orderId).intent.key, "ORIGINAL_KEY");
+    // Back to A: the same frozen key/body/subject is replayed, never a new one.
+    live = "user_A";
+    const replay = await performGuardedWrite("user_A", "opening.confirm", orderId, { versionNo: 999 }, { openingId: "opening_1" }, request, s => s === live);
+    assert.equal(replay.status, "ok");
+    assert.equal(sent.length, 1);
+    assert.equal(sent[0].subject, "user_A", "the intent owner, not a later registration");
+    assert.equal(sent[0].key, "ORIGINAL_KEY");
+    assert.deepEqual(sent[0].body, { versionNo: 1 }, "the frozen original body, not the new caller body");
+    assert.equal(intents.inspectIntent("user_A", "opening.confirm", orderId).state, "NONE");
+  } finally { globalThis.fetch = previousFetch; intents.clearIntent("user_A", "opening.confirm", orderId); }
+}));
+
+test("master review: an order write without a frozen subject keeps the original intent and sends nothing", async () => withDom(async window => {
+  const { performGuardedWrite } = loadComponent("apps/web/src/components/order/order-trade-actions.tsx", session("user_A"));
+  const orderId = "order_unfrozen_subject";
+  let calls = 0;
+  const previousFetch = globalThis.fetch;
+  globalThis.fetch = async () => { calls++; return json({}); };
+  try {
+    const saved = intents.saveIntent({ userId: "user_A", kind: "settlement.decision", resourceId: orderId, key: "ORIGINAL_KEY", body: { action: "CONFIRM" } });
+    assert.equal(saved.persisted, true);
+    const outcome = await performGuardedWrite(null, "settlement.decision", orderId, { action: "CONFIRM" }, undefined, () => { throw new Error("must not call"); });
+    assert.equal(outcome.status, "definitive");
+    assert.equal(outcome.error.status, 401);
+    assert.equal(outcome.error.code, "ORDER_SUBJECT_NOT_FROZEN");
+    assert.equal(calls, 0);
+    assert.equal(intents.inspectIntent("user_A", "settlement.decision", orderId).intent.key, "ORIGINAL_KEY");
+  } finally { globalThis.fetch = previousFetch; intents.clearIntent("user_A", "settlement.decision", orderId); }
 }));

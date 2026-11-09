@@ -36,7 +36,7 @@ export function PrestartTerminationPanel({order,party,onChanged}:{order:Order;pa
   if(inspectIntent(userId,'order.prestart.request',order.id).state==='UNREADABLE'){setNote('暂时无法确认上次申请，请联系客服');return;}
   setBusy(true);
   const out=await performGuardedWrite(userId,'order.prestart.request',order.id,{expectedOrderRevision:read.orderRevision,reason},undefined,
-   (key,body)=>prestartApi.request(userId,order.id,key,body));
+   (key,body,_context,subject)=>prestartApi.request(subject,order.id,key,body));
   if(scopeRef.current!==expectedScope)return;setBusy(false);
   if(out.status==='ok'){setPending(false);setNote('结束申请已提交，请等待客服处理。');refresh(n=>n+1);onChanged();}
   else{setPending(inspectIntent(userId,'order.prestart.request',order.id).state!=='NONE');setNote(out.status==='unauthorized'?'登录状态已变化，请重新登录查看上次申请。':out.status==='unknown'||out.status==='recovery-unresolved'?'申请结果未记录，请稍后继续处理上次申请。':out.status==='blocked'?'暂时无法继续申请，请联系客服。':'申请未完成，请核对信息后重试。');}

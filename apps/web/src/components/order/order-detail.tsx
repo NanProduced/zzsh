@@ -198,7 +198,7 @@ function FulfillmentStageBar({ order, party, facts }: { order: Order; party: Ord
     if (!userId) return;
     const controller = new AbortController();
     setState({ scope, status: "loading", projection: null });
-    void orderApi.orderIm(order.id, controller.signal).then((projection) => {
+    void orderApi.orderIm(userId, order.id, controller.signal).then((projection) => {
       if (!controller.signal.aborted) setState({ scope, status: "ready", projection });
     }).catch((error: unknown) => {
       if (controller.signal.aborted) return;

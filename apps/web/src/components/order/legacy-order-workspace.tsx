@@ -29,7 +29,8 @@ export function LegacyOrderWorkspace({ party, orderId, page: pageText, accountId
     const abort = new AbortController();
     setState({ scope, loading: true, data: null, error: "" });
     if (session.status !== "authenticated" || !session.userId) return () => abort.abort();
-    const request = orderId ? orderApi.legacyDetail(orderId, abort.signal) : orderApi.listLegacy({ party, page, pageSize: 20, ...(accountId ? { accountId } : {}) }, abort.signal);
+    const acting = session.userId;
+    const request = orderId ? orderApi.legacyDetail(acting, orderId, abort.signal) : orderApi.listLegacy(acting, { party, page, pageSize: 20, ...(accountId ? { accountId } : {}) }, abort.signal);
     request.then(data => {
       if (abort.signal.aborted) return;
       const isList = "items" in data;
@@ -269,7 +270,7 @@ export function LegacyOrderWorkspace({ party, orderId, page: pageText, accountId
           </details>
         </section>
         <div id="order-legacy-continuation">
-          <LegacyContinuationPanel orderId={data.id} party={party}
+          <LegacyContinuationPanel orderId={data.id} party={party} readOnly={data.status === "COMPLETED" || data.status === "CANCELLED"}
             onContinuation={(next) => setContinuation({ scope: reportScope, value: next })}
             onOrderChanged={() => {
               setState({ scope, loading: true, data: null, error: "" });

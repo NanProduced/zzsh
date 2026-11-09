@@ -72,9 +72,9 @@ export function parsePrestartView(value:unknown,orderId:string):PrestartView{
   request,refund,coverage:'LOCAL_REGISTERED_ONLY',asOf:time(r.asOf),localAcceptanceObservedAt:time(r.localAcceptanceObservedAt),unknowns:r.unknowns as string[],bankArrival:'UNKNOWN'};
 }
 export const prestartApi={
- read:async(userId:string,orderId:string,signal?:AbortSignal)=>parsePrestartView(await requestOrderJson<unknown>(`/api/orders/${encodeURIComponent(orderId)}/prestart-termination`,{expectedUserId:userId,signal}),orderId),
+ read:async(userId:string,orderId:string,signal?:AbortSignal)=>parsePrestartView(await requestOrderJson<unknown>(`/api/orders/${encodeURIComponent(orderId)}/prestart-termination`,{subject:userId,signal}),orderId),
  request:async(userId:string,orderId:string,key:string,body:Record<string,unknown>)=>{
-  const r=object(await requestOrderWrite<unknown>(`/api/orders/${encodeURIComponent(orderId)}/prestart-termination/requests`,{expectedUserId:userId,key,body}));
+  const r=object(await requestOrderWrite<unknown>(`/api/orders/${encodeURIComponent(orderId)}/prestart-termination/requests`,{subject:userId,key,body}));
   if(r.contractVersion!=='order-prestart-termination.v1'||r.orderId!==orderId||typeof r.existing!=='boolean')throw invalid();
   const request=parsePrestartRequest(r.request);if(!request)throw invalid();return{orderId,request,existing:r.existing};
  }

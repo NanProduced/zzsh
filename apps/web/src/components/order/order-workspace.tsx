@@ -114,7 +114,7 @@ export function OrderWorkspace({ party, orderId, status: statusParam, accountId,
     const controller = new AbortController();
     detailController.current = controller;
     setDetailState({ scope: detailScope, orderId, status: "loading", order: null, error: null });
-    void orderApi.detail(orderId, controller.signal).then((order) => {
+    void orderApi.detail(session.userId, orderId, controller.signal).then((order) => {
       if (!controller.signal.aborted && sequence === detailSequence.current) setDetailState({ scope: detailScope, orderId, status: "ready", order, error: null });
     }).catch((error: unknown) => {
       if (controller.signal.aborted || sequence !== detailSequence.current || isAbortError(error)) return;

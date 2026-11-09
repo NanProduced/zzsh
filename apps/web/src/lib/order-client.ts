@@ -1,5 +1,8 @@
 import type { Money, UnitAmount, PublicQuote, FullPayoutTerms, FullPayoutTermsAcceptance, RentalMode } from "./supply-types";
-import { currentOrderExpectedUserId } from "./order-subject.ts";
+import { orderSubjectUserId, type OrderSubject } from "./order-subject.ts";
+/** Re-exported so order consumers need no extra module alias and stay on one client contract. */
+export { captureOrderSubject, isOrderSubjectCurrent, orderSubjectUserId, registerOrderExpectedUserId } from "./order-subject.ts";
+export type { OrderSubject } from "./order-subject.ts";
 export type { FullPayoutTerms, FullPayoutTermsAcceptance } from "./supply-types";
 
 export type OrderParty = "renter" | "owner";
@@ -821,25 +824,32 @@ export class OrderRequestError extends Error {
   }
 }
 
-type ReadOptions = { signal?: AbortSignal; expectedUserId?: string };
+/** A frozen subject captured when the read/write was created or recovered, never a live global. */
+export type OrderSubjectInput = OrderSubject | string;
+type ReadOptions = { signal?: AbortSignal; subject?: OrderSubjectInput };
 
 /**
- * An explicit per-call `expectedUserId` (payments, refunds, unified list, prestart) wins;
- * otherwise every `/api/orders` request carries the identity the page rendered, registered
- * synchronously by UserSessionProvider. The BFF compares it with the captured Cookie session,
- * so an old tab showing user A cannot submit a write under a Cookie that is now user B.
+ * Every `/api/orders` request must carry the subject captured at creation/recovery time. There is
+ * deliberately no fallback to a mutable "current user" registry: a delayed original intent for A
+ * must never be sent with a subject that was registered later for B. The BFF compares the value
+ * with the Cookie session captured for the same request; the API still owns object authorization.
  * Non-order endpoints (price preview, confirmation, v2 creation) keep their own contracts.
+ *
+ * A missing or malformed subject is a 401 so `performGuardedWrite` returns `unauthorized` and
+ * **keeps the frozen original key/body** instead of clearing the intent or generating a new key.
  */
-function expectedUserFor(path: string, explicit: string | undefined): string | undefined {
+function expectedUserFor(path: string, explicit: OrderSubjectInput | undefined): string | undefined {
   if (!path.startsWith("/api/orders")) return undefined;
-  return explicit ?? currentOrderExpectedUserId() ?? undefined;
+  const userId = orderSubjectUserId(explicit);
+  if (!userId) throw new OrderRequestError(401, { error: { code: "ORDER_SUBJECT_NOT_FROZEN", message: "订单请求缺少创建或恢复时冻结的操作主体；原申请已保留，请刷新页面后按原请求核对。" } });
+  return userId;
 }
 
 async function requestJson<T>(path: string, options: ReadOptions = {}): Promise<T> {
   if (!path.startsWith("/") || path.startsWith("//") || path.includes("://")) {
     throw new Error("Order path must be relative");
   }
-  const expectedUserId = expectedUserFor(path, options.expectedUserId);
+  const expectedUserId = expectedUserFor(path, options.subject);
   let response: Response;
   try {
     response = await fetch(path, { credentials: "same-origin", cache: "no-store", signal: options.signal, ...(expectedUserId === undefined ? {} : { headers: { "x-zzsh-expected-user-id": expectedUserId } }) });
@@ -860,7 +870,7 @@ function unwrapOrder(body: { order?: Order } | Order): Order {
   return order;
 }
 
-type WriteOptions = { method?: "POST"; body?: unknown; key?: string; signal?: AbortSignal; expectedUserId?: string };
+type WriteOptions = { method?: "POST"; body?: unknown; key?: string; signal?: AbortSignal; subject?: OrderSubjectInput };
 
 async function requestWrite<T>(path: string, options: WriteOptions): Promise<T> {
   if (!path.startsWith("/") || path.startsWith("//") || path.includes("://")) {
@@ -868,7 +878,7 @@ async function requestWrite<T>(path: string, options: WriteOptions): Promise<T> 
   }
   const headers = new Headers({ "content-type": "application/json" });
   if (options.key) headers.set("idempotency-key", options.key);
-  const expectedUserId = expectedUserFor(path, options.expectedUserId);
+  const expectedUserId = expectedUserFor(path, options.subject);
   if (expectedUserId !== undefined) headers.set("x-zzsh-expected-user-id", expectedUserId);
   let response: Response;
   try {
@@ -948,68 +958,73 @@ function parseOwnerRefundSummary(value: unknown, userId: string, orderId: string
   };
 }
 
+/**
+ * Every `/api/orders` method takes the frozen subject as its first argument. The value must be
+ * captured when the read/write is created or recovered (the intent owner for guarded writes, the
+ * rendered session subject for reads); it is never read from a later, mutable registration.
+ */
 export const orderApi = {
-  listLegacy: (input: { party: OrderParty; page?: number; pageSize?: number; status?: OrderStatus | "UNKNOWN"; accountId?: string }, signal?: AbortSignal) => {
+  listLegacy: (subject: OrderSubjectInput, input: { party: OrderParty; page?: number; pageSize?: number; status?: OrderStatus | "UNKNOWN"; accountId?: string }, signal?: AbortSignal) => {
     const query = new URLSearchParams({ party: input.party, page: String(input.page ?? 1), pageSize: String(input.pageSize ?? 20) });
     if (input.status) query.set("status", input.status);
     if (input.accountId) query.set("accountId", input.accountId);
-    return requestJson<LegacyOrderPage>(`/api/orders/legacy?${query.toString()}`, { signal });
+    return requestJson<LegacyOrderPage>(`/api/orders/legacy?${query.toString()}`, { signal, subject });
   },
-  legacyDetail: async (orderId: string, signal?: AbortSignal) =>
-    (await requestJson<{ order: LegacyOrder }>(`/api/orders/legacy/${encodeURIComponent(orderId)}`, { signal })).order,
-  list: (input: OrderListInput, signal?: AbortSignal) =>
-    requestJson<OrderPage>(`/api/orders?${orderListQuery(input)}`, { signal }),
-  listUnified: (userId: string, input: OrderListInput, signal?: AbortSignal) =>
-    requestJson<OrderPage>(`/api/orders/unified?${orderListQuery(input)}`, { signal, expectedUserId: userId }),
-  detail: (orderId: string, signal?: AbortSignal) =>
-    requestJson<{ order: Order }>(`/api/orders/${encodeURIComponent(orderId)}`, { signal }).then(unwrapOrder),
+  legacyDetail: async (subject: OrderSubjectInput, orderId: string, signal?: AbortSignal) =>
+    (await requestJson<{ order: LegacyOrder }>(`/api/orders/legacy/${encodeURIComponent(orderId)}`, { signal, subject })).order,
+  list: (subject: OrderSubjectInput, input: OrderListInput, signal?: AbortSignal) =>
+    requestJson<OrderPage>(`/api/orders?${orderListQuery(input)}`, { signal, subject }),
+  listUnified: (subject: OrderSubjectInput, input: OrderListInput, signal?: AbortSignal) =>
+    requestJson<OrderPage>(`/api/orders/unified?${orderListQuery(input)}`, { signal, subject }),
+  detail: (subject: OrderSubjectInput, orderId: string, signal?: AbortSignal) =>
+    requestJson<{ order: Order }>(`/api/orders/${encodeURIComponent(orderId)}`, { signal, subject }).then(unwrapOrder),
   /** Read-only fulfillment projection; same authorization and same-origin read as the order group. */
-  orderIm: (orderId: string, signal?: AbortSignal) =>
-    requestJson<unknown>(`/api/orders/${encodeURIComponent(orderId)}/im?operation=read`, { signal }).then(parseOrderImProjection),
-  personalRefunds: async (userId: string, orderId: string, signal?: AbortSignal) =>
-    parsePersonalRefunds(await requestJson<unknown>(`/api/orders/${encodeURIComponent(orderId)}/refunds`, { signal, expectedUserId: userId }), userId, orderId),
-  ownerRefundSummary: async (userId: string, orderId: string, signal?: AbortSignal) =>
-    parseOwnerRefundSummary(await requestJson<unknown>(`/api/orders/${encodeURIComponent(orderId)}/refunds`, { signal, expectedUserId: userId }), userId, orderId),
+  orderIm: (subject: OrderSubjectInput, orderId: string, signal?: AbortSignal) =>
+    requestJson<unknown>(`/api/orders/${encodeURIComponent(orderId)}/im?operation=read`, { signal, subject }).then(parseOrderImProjection),
+  personalRefunds: async (subject: OrderSubjectInput, orderId: string, signal?: AbortSignal) =>
+    parsePersonalRefunds(await requestJson<unknown>(`/api/orders/${encodeURIComponent(orderId)}/refunds`, { signal, subject }), orderSubjectUserId(subject)!, orderId),
+  ownerRefundSummary: async (subject: OrderSubjectInput, orderId: string, signal?: AbortSignal) =>
+    parseOwnerRefundSummary(await requestJson<unknown>(`/api/orders/${encodeURIComponent(orderId)}/refunds`, { signal, subject }), orderSubjectUserId(subject)!, orderId),
   previewRentalPrice: (input: RentalPricePreviewInput, signal?: AbortSignal) =>
     requestJson<RentalPricePreview>(`/api/rental-price-preview?${new URLSearchParams({ accountId: input.accountId, versionId: input.versionId, releaseId: input.releaseId }).toString()}`, { signal }),
   confirmRental: (input: { accountId: string; versionId: string; releaseId: string; fullPayoutTermsAcceptance?: FullPayoutTermsAcceptance }, signal?: AbortSignal) =>
     requestWrite<PersonalRentalQuote>("/api/order-confirmations", { body: input, signal }),
   createOrder: (confirmationToken: string, key: string, fullPayoutTermsAcceptance?: FullPayoutTermsAcceptance, agreementAcceptance?: { versionId: string; digest: string }, signal?: AbortSignal) =>
     requestWrite<{ order: Order }>("/api/v2/orders", { body: { confirmationToken, ...(fullPayoutTermsAcceptance ? { fullPayoutTermsAcceptance } : {}), ...(agreementAcceptance ? { agreementAcceptance } : {}) }, key, signal }).then(unwrapOrder),
-  cancel: (orderId: string, key: string, reason?: string, signal?: AbortSignal) =>
-    requestWrite<{ order?: Order } | Order>(`/api/orders/${encodeURIComponent(orderId)}/cancel`, { key, body: reason ? { reason } : {}, signal }),
-  pay: (orderId: string, key: string, signal?: AbortSignal) =>
+  cancel: (subject: OrderSubjectInput, orderId: string, key: string, reason?: string, signal?: AbortSignal) =>
+    requestWrite<{ order?: Order } | Order>(`/api/orders/${encodeURIComponent(orderId)}/cancel`, { key, body: reason ? { reason } : {}, signal, subject }),
+  pay: (subject: OrderSubjectInput, orderId: string, key: string, signal?: AbortSignal) =>
     requestWrite<{ payment: { confirmationId: string; disposition: string; reasonCode?: string | null; replay: boolean } }>(
-      `/api/orders/${encodeURIComponent(orderId)}/payment-requests`, { key, signal }),
-  paymentStatus: (orderId: string, signal?: AbortSignal) =>
+      `/api/orders/${encodeURIComponent(orderId)}/payment-requests`, { key, signal, subject }),
+  paymentStatus: (subject: OrderSubjectInput, orderId: string, signal?: AbortSignal) =>
     requestJson<{ order: { id: string; displayNo?: string | null; status: string; paidAt?: string | null }; payment: { confirmationId: string; disposition: string; reasonCode?: string | null; amountCents: string; currency: string; acceptedAt: string } | null }>(
-      `/api/orders/${encodeURIComponent(orderId)}/payment-requests`, { signal }),
-  requestChannelPayment: (userId: string, orderId: string, method: ChannelPaymentMethod, key: string, signal?: AbortSignal) =>
-    requestWrite<ChannelPaymentCommandReceipt>(`/api/orders/${encodeURIComponent(orderId)}/channel-payment-requests`, { body: { method }, key, signal, expectedUserId: userId }),
-  channelPaymentStatus: (userId: string, orderId: string, signal?: AbortSignal) =>
-    requestJson<ChannelPaymentView>(`/api/orders/${encodeURIComponent(orderId)}/channel-payment-requests`, { signal, expectedUserId: userId }),
-  queryChannelPayment: (userId: string, orderId: string, signal?: AbortSignal) =>
-    requestWrite<ChannelPaymentQueryReceipt>(`/api/orders/${encodeURIComponent(orderId)}/channel-payment-requests/query`, { body: {}, signal, expectedUserId: userId }),
-  localCheckoutAvailability: (userId: string, orderId: string, signal?: AbortSignal) =>
-    requestJson<unknown>(`/api/orders/${encodeURIComponent(orderId)}/local-checkouts`, { signal, expectedUserId: userId }).then(value => parseLocalCheckoutAvailability(value, orderId)),
-  issueLocalCheckout: (userId: string, orderId: string, key: string) =>
-    requestWrite<unknown>(`/api/orders/${encodeURIComponent(orderId)}/local-checkouts`, { body: {}, key, expectedUserId: userId }),
-  localCheckoutReceipt: (userId: string, orderId: string, key: string, signal?: AbortSignal) =>
-    requestJson<{ scope: string; knowledge: string; mayReapply: boolean; receipt: unknown }>(`/api/orders/${encodeURIComponent(orderId)}/local-checkouts/receipt?${new URLSearchParams({ key })}`, { signal, expectedUserId: userId }),
-  demoCheckoutAvailability: (userId: string, orderId: string, signal?: AbortSignal) =>
-    requestJson<unknown>(`/api/orders/${encodeURIComponent(orderId)}/demo-checkout`, { signal, expectedUserId: userId }).then(value => parseDemoCheckoutAvailability(value, orderId)),
-  confirmDemoCheckout: (userId: string, orderId: string, key: string) =>
-    requestWrite<unknown>(`/api/orders/${encodeURIComponent(orderId)}/demo-checkout/confirm`, { body: {}, key, expectedUserId: userId }).then(value => parseDemoCheckoutResult(value, orderId)),
-  demoCheckoutReceipt: (userId: string, orderId: string, key: string, signal?: AbortSignal) =>
-    requestJson<unknown>(`/api/orders/${encodeURIComponent(orderId)}/demo-checkout/receipt?${new URLSearchParams({ key })}`, { signal, expectedUserId: userId }).then(value => parseDemoCheckoutReceipt(value, orderId)),
-  settlement: (orderId: string, signal?: AbortSignal) =>
-    requestJson<OrderSettlement>(`/api/orders/${encodeURIComponent(orderId)}/settlement`, { signal }),
-  settlementPreview: (orderId: string, body: { lines: SettlementQuantityInput[]; endReason?: string }, signal?: AbortSignal) =>
-    requestWrite<SettlementPreview>(`/api/orders/${encodeURIComponent(orderId)}/settlement-preview`, { body, signal }),
-  submitSettlement: (orderId: string, body: { lines: SettlementQuantityInput[]; acceptedHash: string; endReason?: string; termsAccepted?: boolean }, key: string, signal?: AbortSignal) =>
-    requestWrite<OrderSettlement>(`/api/orders/${encodeURIComponent(orderId)}/settlements`, { body, key, signal }),
-  decideSettlement: (orderId: string, versionId: string, body: { action: "CONFIRM" | "REJECT"; versionHash: string; reason?: string; termsAccepted?: boolean }, key: string, signal?: AbortSignal) =>
-    requestWrite<OrderSettlement>(`/api/orders/${encodeURIComponent(orderId)}/settlements/${encodeURIComponent(versionId)}/decision`, { body, key, signal }),
-  confirmOpening: (orderId: string, openingId: string, versionNo: number, key: string, signal?: AbortSignal) =>
-    requestWrite<OrderSettlement>(`/api/orders/${encodeURIComponent(orderId)}/openings/${encodeURIComponent(openingId)}/confirm`, { body: { versionNo }, key, signal }),
+      `/api/orders/${encodeURIComponent(orderId)}/payment-requests`, { signal, subject }),
+  requestChannelPayment: (subject: OrderSubjectInput, orderId: string, method: ChannelPaymentMethod, key: string, signal?: AbortSignal) =>
+    requestWrite<ChannelPaymentCommandReceipt>(`/api/orders/${encodeURIComponent(orderId)}/channel-payment-requests`, { body: { method }, key, signal, subject }),
+  channelPaymentStatus: (subject: OrderSubjectInput, orderId: string, signal?: AbortSignal) =>
+    requestJson<ChannelPaymentView>(`/api/orders/${encodeURIComponent(orderId)}/channel-payment-requests`, { signal, subject }),
+  queryChannelPayment: (subject: OrderSubjectInput, orderId: string, signal?: AbortSignal) =>
+    requestWrite<ChannelPaymentQueryReceipt>(`/api/orders/${encodeURIComponent(orderId)}/channel-payment-requests/query`, { body: {}, signal, subject }),
+  localCheckoutAvailability: (subject: OrderSubjectInput, orderId: string, signal?: AbortSignal) =>
+    requestJson<unknown>(`/api/orders/${encodeURIComponent(orderId)}/local-checkouts`, { signal, subject }).then(value => parseLocalCheckoutAvailability(value, orderId)),
+  issueLocalCheckout: (subject: OrderSubjectInput, orderId: string, key: string) =>
+    requestWrite<unknown>(`/api/orders/${encodeURIComponent(orderId)}/local-checkouts`, { body: {}, key, subject }),
+  localCheckoutReceipt: (subject: OrderSubjectInput, orderId: string, key: string, signal?: AbortSignal) =>
+    requestJson<{ scope: string; knowledge: string; mayReapply: boolean; receipt: unknown }>(`/api/orders/${encodeURIComponent(orderId)}/local-checkouts/receipt?${new URLSearchParams({ key })}`, { signal, subject }),
+  demoCheckoutAvailability: (subject: OrderSubjectInput, orderId: string, signal?: AbortSignal) =>
+    requestJson<unknown>(`/api/orders/${encodeURIComponent(orderId)}/demo-checkout`, { signal, subject }).then(value => parseDemoCheckoutAvailability(value, orderId)),
+  confirmDemoCheckout: (subject: OrderSubjectInput, orderId: string, key: string) =>
+    requestWrite<unknown>(`/api/orders/${encodeURIComponent(orderId)}/demo-checkout/confirm`, { body: {}, key, subject }).then(value => parseDemoCheckoutResult(value, orderId)),
+  demoCheckoutReceipt: (subject: OrderSubjectInput, orderId: string, key: string, signal?: AbortSignal) =>
+    requestJson<unknown>(`/api/orders/${encodeURIComponent(orderId)}/demo-checkout/receipt?${new URLSearchParams({ key })}`, { signal, subject }).then(value => parseDemoCheckoutReceipt(value, orderId)),
+  settlement: (subject: OrderSubjectInput, orderId: string, signal?: AbortSignal) =>
+    requestJson<OrderSettlement>(`/api/orders/${encodeURIComponent(orderId)}/settlement`, { signal, subject }),
+  settlementPreview: (subject: OrderSubjectInput, orderId: string, body: { lines: SettlementQuantityInput[]; endReason?: string }, signal?: AbortSignal) =>
+    requestWrite<SettlementPreview>(`/api/orders/${encodeURIComponent(orderId)}/settlement-preview`, { body, signal, subject }),
+  submitSettlement: (subject: OrderSubjectInput, orderId: string, body: { lines: SettlementQuantityInput[]; acceptedHash: string; endReason?: string; termsAccepted?: boolean }, key: string, signal?: AbortSignal) =>
+    requestWrite<OrderSettlement>(`/api/orders/${encodeURIComponent(orderId)}/settlements`, { body, key, signal, subject }),
+  decideSettlement: (subject: OrderSubjectInput, orderId: string, versionId: string, body: { action: "CONFIRM" | "REJECT"; versionHash: string; reason?: string; termsAccepted?: boolean }, key: string, signal?: AbortSignal) =>
+    requestWrite<OrderSettlement>(`/api/orders/${encodeURIComponent(orderId)}/settlements/${encodeURIComponent(versionId)}/decision`, { body, key, signal, subject }),
+  confirmOpening: (subject: OrderSubjectInput, orderId: string, openingId: string, versionNo: number, key: string, signal?: AbortSignal) =>
+    requestWrite<OrderSettlement>(`/api/orders/${encodeURIComponent(orderId)}/openings/${encodeURIComponent(openingId)}/confirm`, { body: { versionNo }, key, signal, subject }),
 };

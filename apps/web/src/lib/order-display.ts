@@ -563,6 +563,8 @@ export type OrderPaymentFacts = {
   displayState: string | null;
   blockedReason: string | null;
   readFailed: boolean;
+  /** An original local request is still awaiting recovery; this does not establish a channel result. */
+  originalRequestPending?: boolean;
 };
 
 type ProgressOrder = Pick<Order,
@@ -633,16 +635,24 @@ export function orderProgressView({ order, party, facts, readFailed, payment = n
     // A channel request with an unknown/review result is not an invitation to pay again. The
     // channel read owns this fact; the order main status alone cannot clear it.
     const pay = payment ?? null;
-    const unknownPayment = pay?.readFailed === true
+    if (party === "renter" && pay === null && (order.paymentOpen ?? true)) {
+      return { ...base, tone: "waiting", title: "正在核对支付状态", owner: "平台",
+        note: "正在读取本单支付记录；读取完成后再显示可用操作。",
+        primary: null, secondary: [progressSupport], pendingRead: true };
+    }
+    const unknownPayment = pay?.originalRequestPending === true || pay?.readFailed === true
       || ["UNKNOWN", "SUBMITTING", "PROCESSING_UNCONFIRMED", "CHANNEL_SUCCEEDED_PENDING_ACCEPTANCE", "REVIEW_REQUIRED"].includes(pay?.state ?? "")
       || ["CONFIRMING", "CONFIRMING_PAYMENT", "UNDER_REVIEW", "SUBMITTING", "PROCESSING", "STATUS_PENDING_CONFIRMATION"].includes(pay?.displayState ?? "")
       || ["CHANNEL_RESULT_UNKNOWN", "CHANNEL_RESULT_PENDING", "PAYMENT_REVIEW", "UNKNOWN_SOURCE", "UNKNOWN_STATE", "REQUEST_SUBMITTING"].includes(pay?.blockedReason ?? "");
     if (unknownPayment) {
       return { ...base, tone: "unknown", title: "支付结果正在确认", owner: "平台",
-        note: pay?.readFailed
-          ? "本页暂时读不到这笔订单的渠道支付状态。已读到的订单事实保持有效；支付结果正在确认，不要重复付款，可重试读取、按原请求查询回执或联系客服核对。模拟付款记录不代表渠道扣款。"
-          : "本单已有一笔支付请求的结果尚未确认，或需要平台人工核对。支付结果正在确认，页面不会把它写成支付成功，也不引导重复付款；请在支付区按原请求查询回执，或联系客服核对。",
-        primary: { label: pay?.readFailed ? "重试读取" : "查询原支付请求", target: pay?.readFailed ? "refresh" : "trade" },
+        note: pay?.originalRequestPending
+          ? "本地保留了一笔待核对的原支付申请。请先查询原请求，不要重复付款；是否扣款以渠道和平台记录为准。"
+          : pay?.readFailed
+            ? "本页暂时读不到这笔订单的渠道支付状态。已读到的订单事实保持有效；支付结果正在确认，不要重复付款，可重试读取、按原请求查询回执或联系客服核对。模拟付款记录不代表渠道扣款。"
+            : "本单已有一笔支付请求的结果尚未确认，或需要平台人工核对。支付结果正在确认，页面不会把它写成支付成功，也不引导重复付款；请在支付区按原请求查询回执，或联系客服核对。",
+        primary: pay?.originalRequestPending ? { label: "查询原支付请求", target: "trade" }
+          : { label: pay?.readFailed ? "重试读取" : "查询原支付请求", target: pay?.readFailed ? "refresh" : "trade" },
         secondary: [progressSupport, progressRefresh], pendingRead: true,
         known: [...known, "本次支付读取没有给出可确认的付款结论，未确认的事项保持未知"] };
     }

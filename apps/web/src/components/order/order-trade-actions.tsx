@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import Link from "next/link";
 import { QRCodeSVG } from "qrcode.react";
 import * as Dialog from "@radix-ui/react-dialog";
@@ -27,6 +27,10 @@ import {
   type SettlementPreview,
   type SettlementQuantityInput,
   type SettlementVersion,
+  type OrderSubjectInput,
+  captureOrderSubject,
+  isOrderSubjectCurrent,
+  orderSubjectUserId,
 } from "@/lib/order-client";
 import { clearIntent, inspectIntent, isIntentStale, loadIntent, saveIntent, type IntentKind } from "@/lib/order-intents";
 import { cancelEntryOpen, chargeRowLabel, consumptionRows, decisionAmountRows, isAdjustedVersion, moneyCents, moneyText, paymentEntryOpen, paymentObservation, postingAmountRows, previewAmounts, proposedConfirmationCents, quantityText, resourceName, settlementAmountRows, settlementPreviewProblem, unitHint, type OrderPaymentFacts, type SettlementAmountRow } from "@/lib/order-display";
@@ -93,14 +97,24 @@ function writeError(error: unknown): string {
  * returned as `recovery-unresolved` and only an authoritative read may release it.
  */
 export async function performGuardedWrite<T>(
-  userId: string | null,
+  subject: OrderSubjectInput | null,
   kind: IntentKind,
   resourceId: string,
   body: Record<string, unknown>,
   context: Record<string, unknown> | undefined,
-  request: (key: string, body: Record<string, unknown>, context: Record<string, unknown> | undefined) => Promise<T>,
+  request: (key: string, body: Record<string, unknown>, context: Record<string, unknown> | undefined, subject: string) => Promise<T>,
+  assertCurrent?: (subject: string) => boolean,
 ): Promise<WriteOutcome<T>> {
-  if (!userId) return { status: "definitive", error: new OrderRequestError(401, null) };
+  // The subject is frozen here, together with the original key/body/context. It is passed into
+  // the request callback rather than being looked up when the request is actually sent, so a
+  // delayed intent for A can never be executed with a subject registered later for B.
+  const userId = orderSubjectUserId(subject);
+  if (!userId) return { status: "definitive", error: new OrderRequestError(401, { error: { code: "ORDER_SUBJECT_NOT_FROZEN", message: "订单请求缺少已冻结的操作主体；原申请已保留。" } }) };
+  if (assertCurrent && !assertCurrent(userId)) {
+    // Do not save a new intent, do not generate a new key, do not send. The frozen original
+    // request stays in session storage until the original subject is live again.
+    return { status: "unauthorized", error: new OrderRequestError(401, { error: { code: "ORDER_SUBJECT_CHANGED", message: "登录身份已变化；原申请已保留，请刷新后按原请求核对。" } }) };
+  }
   const existing = loadIntent(userId, kind, resourceId);
   let key: string, frozenBody: Record<string, unknown>, frozenContext: Record<string, unknown> | undefined;
   if (existing) {
@@ -115,7 +129,7 @@ export async function performGuardedWrite<T>(
     frozenContext = saved.intent.context;
   }
   try {
-    const value = await request(key, frozenBody, frozenContext);
+    const value = await request(key, frozenBody, frozenContext, userId);
     clearIntent(userId, kind, resourceId);
     return { status: "ok", value };
   } catch (error) {
@@ -130,6 +144,10 @@ export async function performGuardedWrite<T>(
 
 function panelError(error: unknown): PanelError {
   if (error instanceof OrderRequestError) {
+    // An already-open older tab hits the new BFF without the frozen-subject header. Never relax
+    // the write binding for compatibility: tell the user to reload once. The original key/body
+    // stays in session storage and is recovered by the new bundle after the reload.
+    if (error.status === 400 && error.code === "IDENTITY_BINDING_REQUIRED") return { message: "页面版本已更新，请刷新页面后重试；原申请已保留，不会重复提交。", retryable: false };
     if (error.status === 0) return { message: "网络中断，结果未知。原请求可安全重试，不会重复扣款或重复记账。", retryable: true };
     if (error.status === 401 || error.code === "UNAUTHENTICATED") return { message: "登录状态已变化；原申请已保留，确认身份后可恢复。", retryable: false };
     if (error.status === 403) return { message: "当前身份没有这项操作权限。", retryable: false };
@@ -229,6 +247,9 @@ function ChannelPaymentAction({ order, blocked, onChanged, onModeChange, onPendi
   const view = snapshot?.userId === userId && snapshot.orderId === order.id ? snapshot.view : null;
   const pending = userId ? inspectIntent(userId, "order.channel-payment", order.id) : { state: "NONE" as const, intent: null };
   const previousDemoPending = userId ? inspectIntent(userId, "order.demo-checkout", order.id) : { state: "NONE" as const, intent: null };
+  const originalRequestPending = pending.state !== "NONE" || previousDemoPending.state !== "NONE";
+  const originalRequestPendingRef = useRef(originalRequestPending);
+  originalRequestPendingRef.current = originalRequestPending;
   const conflictingIntents = pending.state !== "NONE" && previousDemoPending.state !== "NONE";
   const testMode = view?.dataOrigin === "LOCAL_CONTROLLED" && view.capability?.productionPaymentCapability === false;
   const active = conflictingIntents || pending.state === "VALID" || !!view && (testMode && (previousDemoPending.state === "NONE" || cashierPending) && view.capability.channelEnabled === true
@@ -237,21 +258,29 @@ function ChannelPaymentAction({ order, blocked, onChanged, onModeChange, onPendi
   const unsettled = busy || cashierPending || conflictingIntents || pending.state === "VALID" || active && (pending.state === "UNREADABLE" || view?.payment != null
     || view?.request != null && !["ACTION_READY", "REJECTED_BY_CHANNEL"].includes(view.request.state));
   useEffect(() => { onModeChange(active); onPendingChange(unsettled); }, [active, unsettled, onModeChange, onPendingChange]);
+  useEffect(() => {
+    if (originalRequestPending) {
+      reportPayment.current?.({ ...(view && !readError ? channelPaymentFacts(view) : PAYMENT_FACTS_UNREADABLE), originalRequestPending: true });
+    } else if (view && !reading && !readError) {
+      reportPayment.current?.(channelPaymentFacts(view));
+    }
+  }, [originalRequestPending, view, reading, readError]);
   useEffect(() => () => { onModeChange(false); onPendingChange(false); }, [onModeChange, onPendingChange]);
   const refresh = useCallback(async (acting: string, signal?: AbortSignal, notify = false) => {
     const expected = order.id;
     setReading(true);
+    reportPayment.current?.(null);
     try {
       const next = await orderApi.channelPaymentStatus(acting, expected, signal);
       if (!mounted.current || !identity.current(acting) || latest.current.orderId !== expected || signal?.aborted) return;
       if (next?.contractVersion !== "order-payment-request.v1" || next.order?.id !== expected || !Array.isArray(next.capability?.methods)) throw new OrderRequestError(502, null);
       setSnapshot({ userId: acting, orderId: expected, view: next }); setReadError(null);
-      reportPayment.current?.(channelPaymentFacts(next));
+      reportPayment.current?.({ ...channelPaymentFacts(next), originalRequestPending: originalRequestPendingRef.current });
       if (notify && channelApplied(next)) latest.current.onChanged();
     } catch (error) {
       if (mounted.current && identity.current(acting) && latest.current.orderId === expected && !signal?.aborted) {
         setReadError(panelError(error).message);
-        reportPayment.current?.(PAYMENT_FACTS_UNREADABLE);
+        reportPayment.current?.({ ...PAYMENT_FACTS_UNREADABLE, originalRequestPending: originalRequestPendingRef.current });
       }
     } finally { if (mounted.current && identity.current(acting) && latest.current.orderId === expected && !signal?.aborted) setReading(false); }
   }, [order.id]);
@@ -270,9 +299,9 @@ function ChannelPaymentAction({ order, blocked, onChanged, onModeChange, onPendi
     const selected = original.intent?.body?.method ?? method;
     if (selected !== "ALIPAY_NATIVE" && selected !== "WEIXIN_NATIVE") { setNotice("原支付方式未能确认，不能更换方式重新提交。"); return; }
     setBusy(true); setNotice(null);
-    const outcome = await performGuardedWrite(acting, "order.channel-payment", expected, { method: selected }, undefined, async (key, body) => {
+    const outcome = await performGuardedWrite(acting, "order.channel-payment", expected, { method: selected }, undefined, async (key, body, _context, subject) => {
       if (body.method !== "ALIPAY_NATIVE" && body.method !== "WEIXIN_NATIVE") throw new OrderRequestError(400, null);
-      const receipt = await orderApi.requestChannelPayment(acting, expected, body.method, key);
+      const receipt = await orderApi.requestChannelPayment(subject, expected, body.method, key);
       const amount = receipt?.request?.amount;
       if (receipt?.contractVersion !== "order-payment-request.v1" || receipt.dataOrigin !== (testMode ? "LOCAL_CONTROLLED" : "JOINPAY_CANDIDATE") || typeof receipt.replay !== "boolean"
         || receipt.request?.orderId !== expected || receipt.request.method !== body.method || typeof receipt.request.id !== "string" || !receipt.request.id
@@ -280,7 +309,7 @@ function ChannelPaymentAction({ order, blocked, onChanged, onModeChange, onPendi
         || amount?.currency !== "CNY" || typeof amount.cents !== "string" || !/^[1-9][0-9]{0,15}$/.test(amount.cents)
         || receipt.payment !== null || receipt.paymentAction !== null) throw new OrderRequestError(502, null);
       return receipt;
-    });
+    }, isCurrent);
     if (!mounted.current || !isCurrent(acting) || latest.current.orderId !== expected) return;
     setBusy(false);
     if (outcome.status === "ok") { await refresh(acting, undefined, true); return; }
@@ -424,11 +453,11 @@ export function LocalSandboxPaymentAction({ order, blocked, onChanged, onModeCha
   const issue = async () => {
     if (!userId || busy || blocked || !view?.checkoutEnabled || pending.state !== 'NONE') return;
     const acting = userId, orderId = order.id; setBusy(true); setNotice(null); setCheckout(null);
-    const result = await performGuardedWrite(acting, 'order.local-checkout', orderId, {}, undefined, async (key, body) => {
+    const result = await performGuardedWrite(acting, 'order.local-checkout', orderId, {}, undefined, async (key, body, _context, subject) => {
       if (Object.keys(body).length) throw new OrderRequestError(409, null);
       const binding = expected(key);
-      return parseLocalCheckout(await orderApi.issueLocalCheckout(acting, orderId, key), binding);
-    });
+      return parseLocalCheckout(await orderApi.issueLocalCheckout(subject, orderId, key), binding);
+    }, isCurrent);
     if (!mounted.current || !isCurrent(acting) || latest.current.orderId !== orderId) return;
     setBusy(false);
     if (result.status === 'ok') setCheckout(result.value);
@@ -500,12 +529,12 @@ export function DemoCheckoutAction({ order, blocked, onChanged, onAccepted, onMo
     if (!userId || busy || blocked || !view?.checkoutEnabled || pending.state !== "NONE" || !paymentEntryOpen(order)) return;
     const acting = userId, expected = order.id; setBusy(true); setNotice(null);
     const scope = view.scope;
-    const outcome = await performGuardedWrite(acting, "order.demo-checkout", expected, {}, { scope }, async (key, body, context) => {
+    const outcome = await performGuardedWrite(acting, "order.demo-checkout", expected, {}, { scope }, async (key, body, context, subject) => {
       if (Object.keys(body).length || context?.scope !== scope) throw new OrderRequestError(409, null);
-      const result = await orderApi.confirmDemoCheckout(acting, expected, key);
+      const result = await orderApi.confirmDemoCheckout(subject, expected, key);
       if (result.scope !== scope) throw new OrderRequestError(502, null);
       return result;
-    });
+    }, isCurrent);
     if (!mounted.current || !isCurrent(acting) || latest.current.orderId !== expected) return;
     setBusy(false);
     if (outcome.status === "ok") { setCompleted(true); setNotice("模拟付款已完成，不会真实扣款。"); onAccepted?.(); latest.current.onChanged(); }
@@ -595,7 +624,7 @@ function PaymentAction({ order, party, onChanged, onPaymentFacts }: { order: Ord
   const resolveRecovery = async (acting: string, typed: OrderRequestError, kind: "pay" | "cancel") => {
     const label = kind === "pay" ? "支付" : "取消";
     try {
-      const authority = await orderApi.paymentStatus(order.id);
+      const authority = await orderApi.paymentStatus(acting, order.id);
       if (!isCurrent(acting)) return;
       const observed = paymentObservation(authority.payment);
       const message = `原${label}请求仍未取得确定回执（原申请保留）。${observed}；当前页面状态不能确定这笔申请是否生效，请稍后再次查询或联系客服核对。`;
@@ -612,7 +641,7 @@ function PaymentAction({ order, party, onChanged, onPaymentFacts }: { order: Ord
     const acting = userId;
     setBusy(true); setError(null); setUnknown(null);
     const outcome = await performGuardedWrite(acting, "order.payment", order.id, {}, undefined,
-      (key) => orderApi.pay(order.id, key));
+      (_key, _body, _context, subject) => orderApi.pay(subject, order.id, _key), isCurrent);
     if (!isCurrent(acting)) return;
     setBusy(false);
     applyOutcome(acting, outcome as WriteOutcome<{ payment: { confirmationId: string; disposition: string; reasonCode?: string | null; replay: boolean } }>, "pay");
@@ -622,7 +651,8 @@ function PaymentAction({ order, party, onChanged, onPaymentFacts }: { order: Ord
     const acting = userId;
     if (!loadIntent(acting, "order.payment", order.id)) { setUnknown(null); onChanged(); return; }
     setBusy(true);
-    const outcome = await performGuardedWrite(acting, "order.payment", order.id, {}, undefined, (key) => orderApi.pay(order.id, key));
+    const outcome = await performGuardedWrite(acting, "order.payment", order.id, {}, undefined,
+      (key, _body, _context, subject) => orderApi.pay(subject, order.id, key), isCurrent);
     if (!isCurrent(acting)) return;
     setBusy(false);
     applyOutcome(acting, outcome as WriteOutcome<{ payment: { confirmationId: string; disposition: string; reasonCode?: string | null; replay: boolean } }>, "pay");
@@ -631,7 +661,8 @@ function PaymentAction({ order, party, onChanged, onPaymentFacts }: { order: Ord
     if (!userId) return;
     const acting = userId;
     setBusy(true); setError(null); setCancelUnknown(null);
-    const outcome = await performGuardedWrite(acting, "order.cancel", order.id, {}, undefined, (key, body) => orderApi.cancel(order.id, key, typeof body.reason === "string" ? body.reason : undefined));
+    const outcome = await performGuardedWrite(acting, "order.cancel", order.id, {}, undefined,
+      (key, body, _context, subject) => orderApi.cancel(subject, order.id, key, typeof body.reason === "string" ? body.reason : undefined), isCurrent);
     if (!isCurrent(acting)) return;
     setBusy(false);
     applyOutcome(acting, outcome as WriteOutcome<{ payment: { confirmationId: string; disposition: string; reasonCode?: string | null; replay: boolean } }>, "cancel");
@@ -641,7 +672,8 @@ function PaymentAction({ order, party, onChanged, onPaymentFacts }: { order: Ord
     const acting = userId;
     if (!loadIntent(acting, "order.cancel", order.id)) { setCancelUnknown(null); onChanged(); return; }
     setBusy(true);
-    const outcome = await performGuardedWrite(acting, "order.cancel", order.id, {}, undefined, (key, body) => orderApi.cancel(order.id, key, typeof body.reason === "string" ? body.reason : undefined));
+    const outcome = await performGuardedWrite(acting, "order.cancel", order.id, {}, undefined,
+      (key, body, _context, subject) => orderApi.cancel(subject, order.id, key, typeof body.reason === "string" ? body.reason : undefined), isCurrent);
     if (!isCurrent(acting)) return;
     setBusy(false);
     applyOutcome(acting, outcome as WriteOutcome<{ payment: { confirmationId: string; disposition: string; reasonCode?: string | null; replay: boolean } }>, "cancel");
@@ -721,7 +753,7 @@ function OpeningPanel({ opening, order, party, onChanged, readOnly = false }: { 
       return;
     }
     try {
-      const authority = await orderApi.settlement(order.id);
+      const authority = await orderApi.settlement(acting, order.id);
       if (!isCurrent(acting)) return;
       const target = authority.openings.find((candidate) => candidate.id === targetId);
       const originalPartyAck = target?.acks?.some((ack) => ack.party === myParty && ack.source === "PARTY") ?? false;
@@ -744,7 +776,7 @@ function OpeningPanel({ opening, order, party, onChanged, readOnly = false }: { 
     setBusy(true); setError(null); setUnknown(null);
     const outcome = await performGuardedWrite(acting, "opening.confirm", order.id, { versionNo: Number(opening.versionNo) },
       { openingId: opening.id, orderId: order.id },
-      (key, body) => orderApi.confirmOpening(order.id, opening.id, Number(body.versionNo), key));
+      (key, body, _context, subject) => orderApi.confirmOpening(subject, order.id, opening.id, Number(body.versionNo), key), isCurrent);
     if (!isCurrent(acting)) return;
     setBusy(false);
     apply(acting, outcome as WriteOutcome<OrderSettlement>);
@@ -762,7 +794,7 @@ function OpeningPanel({ opening, order, party, onChanged, readOnly = false }: { 
     setBusy(true);
     const outcome = await performGuardedWrite(acting, "opening.confirm", order.id, { versionNo: Number(opening.versionNo) },
       { openingId: opening.id, orderId: order.id },
-      (key, body, frozenContext) => orderApi.confirmOpening(order.id, String(frozenContext?.openingId ?? ""), Number(body.versionNo), key));
+      (key, body, frozenContext, subject) => orderApi.confirmOpening(subject, order.id, String(frozenContext?.openingId ?? ""), Number(body.versionNo), key), isCurrent);
     if (!isCurrent(acting)) return;
     setBusy(false);
     apply(acting, outcome as WriteOutcome<OrderSettlement>);
@@ -877,14 +909,14 @@ function EndingForm({ opening, order, party, onChanged, consumptionMode, extraRe
     return { lines:selected };
   };
   const runPreview = async () => {
-    if (locked) return;
+    if (locked || !userId) return;
     const result = validate();
     if (result.error || !result.lines) { setChecked(null); setError(result.error ?? "数量无效"); return; }
     const sequence = ++revision.current;
     setBusy(true);
     setError(null);
     try {
-      const preview = await orderApi.settlementPreview(order.id, { lines: result.lines });
+      const preview = await orderApi.settlementPreview(userId, order.id, { lines: result.lines });
       if (sequence !== revision.current) return;
       if (!preview.versionHash || (preview.reasons ?? []).some((reason) => reason !== "EARLY_REASON_REQUIRED")) {
         setError(settlementPreviewProblem(preview.reasons));
@@ -914,7 +946,7 @@ function EndingForm({ opening, order, party, onChanged, consumptionMode, extraRe
    */
   const resolveRecovery = async (acting: string) => {
     try {
-      const authority = await orderApi.settlement(order.id);
+      const authority = await orderApi.settlement(acting, order.id);
       if (!isCurrent(acting)) return;
       const observed = authority.currentRequest
         ? authority.currentRequest.kind === "INTAKE" ? "当前有结束申请，状态未确认" : authority.currentRequest.kind === "SETTLEMENT_VERSION" ? "当前有结算方案" : "当前申请状态未记录"
@@ -939,7 +971,7 @@ function EndingForm({ opening, order, party, onChanged, consumptionMode, extraRe
     const outcome = await performGuardedWrite(acting, "settlement.submit", order.id,
       { lines: checked.lines, acceptedHash: checked.versionHash, ...(early && order.earlySettlementDisclosure ? { termsAccepted: true } : {}) },
       { openingId: opening.id, openingVersion: opening.versionNo },
-      (key, body) => orderApi.submitSettlement(order.id, body as { lines: SettlementQuantityInput[]; acceptedHash: string; termsAccepted?: boolean }, key));
+      (key, body, _context, subject) => orderApi.submitSettlement(subject, order.id, body as { lines: SettlementQuantityInput[]; acceptedHash: string; termsAccepted?: boolean }, key), isCurrent);
     if (!isCurrent(acting)) return;
     setBusy(false);
     apply(acting, outcome as WriteOutcome<OrderSettlement>);
@@ -950,7 +982,7 @@ function EndingForm({ opening, order, party, onChanged, consumptionMode, extraRe
     if (!loadIntent(acting, "settlement.submit", order.id)) { setUnknown(null); onChanged(); return; }
     setBusy(true);
     const outcome = await performGuardedWrite(acting, "settlement.submit", order.id, {}, undefined,
-      (key, body) => orderApi.submitSettlement(order.id, body as { lines: SettlementQuantityInput[]; acceptedHash: string }, key));
+      (key, body, _context, subject) => orderApi.submitSettlement(subject, order.id, body as { lines: SettlementQuantityInput[]; acceptedHash: string }, key), isCurrent);
     if (!isCurrent(acting)) return;
     setBusy(false);
     apply(acting, outcome as WriteOutcome<OrderSettlement>);
@@ -1028,7 +1060,7 @@ function DecisionPanel({ version, party, order, onChanged, readOnly = false }: {
       return;
     }
     try {
-      const authority = await orderApi.settlement(order.id);
+      const authority = await orderApi.settlement(acting, order.id);
       if (!isCurrent(acting)) return;
       const target = authority.versions.find((candidate) => candidate.id === targetVersionId);
       const recorded = (target?.decisions ?? []).some((decision) => decision.party === myParty && decision.action === targetAction);
@@ -1062,7 +1094,7 @@ function DecisionPanel({ version, party, order, onChanged, readOnly = false }: {
     setError(null);
     const body = { action, versionHash: version.versionHash, ...(action === "REJECT" && reason.trim() ? { reason: reason.trim() } : {}), ...(action === "CONFIRM" && version.early && order.earlySettlementDisclosure ? { termsAccepted: true } : {}) };
     const outcome = await performGuardedWrite(acting, "settlement.decision", order.id, body, { versionId: version.id, orderId: order.id },
-      (key, frozen) => orderApi.decideSettlement(order.id, version.id, frozen as { action: "CONFIRM" | "REJECT"; versionHash: string }, key));
+      (key, frozen, _context, subject) => orderApi.decideSettlement(subject, order.id, version.id, frozen as { action: "CONFIRM" | "REJECT"; versionHash: string }, key), isCurrent);
     if (!isCurrent(acting)) return;
     setBusy(null);
     apply(acting, outcome as WriteOutcome<OrderSettlement>);
@@ -1080,7 +1112,7 @@ function DecisionPanel({ version, party, order, onChanged, readOnly = false }: {
     setBusy("CONFIRM");
     const outcome = await performGuardedWrite(acting, "settlement.decision", order.id,
       { action: "CONFIRM", versionHash: version.versionHash }, { versionId: version.id, orderId: order.id },
-      (key, frozen, frozenContext) => orderApi.decideSettlement(order.id, String(frozenContext?.versionId ?? ""), frozen as { action: "CONFIRM" | "REJECT"; versionHash: string }, key));
+      (key, frozen, frozenContext, subject) => orderApi.decideSettlement(subject, order.id, String(frozenContext?.versionId ?? ""), frozen as { action: "CONFIRM" | "REJECT"; versionHash: string }, key), isCurrent);
     if (!isCurrent(acting)) return;
     setBusy(null);
     apply(acting, outcome as WriteOutcome<OrderSettlement>);
@@ -1242,6 +1274,10 @@ function VersionHistory({ versions, current }: { versions: SettlementVersion[]; 
 }
 
 function SettlementAction({ order, party, onChanged, onStageFacts }: { order: Order; party: OrderParty; onChanged: () => void; onStageFacts?: (facts: OrderStageFacts | null, failed: boolean) => void }) {
+  const session = useUserSession();
+  // Freeze the read subject when the read is created. A late response from an older identity is
+  // dropped instead of being rendered as the new subject's settlement facts.
+  const subject = useMemo(() => captureOrderSubject(session.userId, session.identityVersion), [session.userId, session.identityVersion]);
   const [reload, setReload] = useState(0);
   const [state, setState] = useState<{ status: "loading" } | { status: "ready"; data: OrderSettlement } | { status: "unavailable" } | { status: "error" }>({ status: "loading" });
   const report = useRef(onStageFacts);
@@ -1250,18 +1286,19 @@ function SettlementAction({ order, party, onChanged, onStageFacts }: { order: Or
     const controller = new AbortController();
     setState({ status: "loading" });
     report.current?.(null, false);
-    orderApi.settlement(order.id, controller.signal).then((data) => {
-      if (controller.signal.aborted) return;
+    if (!subject) { report.current?.(null, true); setState({ status: "error" }); return () => controller.abort(); }
+    orderApi.settlement(subject, order.id, controller.signal).then((data) => {
+      if (controller.signal.aborted || !isOrderSubjectCurrent(subject, session)) return;
       setState({ status: "ready", data });
       report.current?.(stageFacts(data, activeOpening(data.openings), party), false);
     }).catch((error: unknown) => {
-      if (controller.signal.aborted) return;
+      if (controller.signal.aborted || !isOrderSubjectCurrent(subject, session)) return;
       report.current?.(null, true);
       if (error instanceof OrderRequestError && error.status === 404) setState({ status: "unavailable" });
       else setState({ status: "error" });
     });
     return () => { controller.abort(); report.current?.(null, false); };
-  }, [order.id, party, reload]);
+  }, [order.id, party, reload, subject, session]);
   const refresh = useCallback(() => { setReload((value) => value + 1); onChanged(); }, [onChanged]);
   if (state.status === "loading") return <section className="order-detail-section order-trade-panel" id="order-trade-actions" aria-busy="true" aria-label="开租与结算"><h2 className="order-section-title">开租与结算</h2><p className="order-muted">正在读取结算记录…</p></section>;
   if ((state.status === "unavailable" || state.status === "error") && onStageFacts) return null;
