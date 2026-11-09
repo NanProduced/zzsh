@@ -7,7 +7,8 @@ import { ArrowLeft, Check, CheckCircle2, CircleSlash, Clock3, Copy, Gamepad2, Me
 import { formatOrderMoney, formatOrderTime as timeText, orderApi, OrderRequestError, type Order, type OrderImProjection, type OrderParty, type OrderStatusFilter, type OrderSearchFilters, type PersonalAbnormalResponsibility, type PersonalRefundIntent, type PersonalRefundRead } from "@/lib/order-client";
 import { useUserSession } from "@/components/session/user-session-provider";
 import { useIdentityReset } from "@/components/session/identity-reset";
-import { ORDER_FULFILLMENT_STEPS, orderFulfillmentStepStates, orderFulfillmentSummary, orderLineQuantityText, orderLinesTotalLabel, orderListingSourceLabel, orderRentalModeLabel, orderSettlementStageLabel, orderUnitPriceText, unitLabel, orderAccountTitle, orderResourceLines, orderProgressView, type OrderProgressAction, type OrderProgressView } from "@/lib/order-display";
+import { requestSupportDialog } from "@/components/support/support-dialog-request";
+import { ORDER_FULFILLMENT_STEPS, orderFulfillmentStepStates, orderFulfillmentSummary, orderLineQuantityText, orderLinesTotalLabel, orderListingSourceLabel, orderRentalModeLabel, orderSettlementStageLabel, orderUnitPriceText, unitLabel, orderAccountTitle, orderResourceLines, orderProgressView, type OrderPaymentFacts, type OrderProgressAction, type OrderProgressView } from "@/lib/order-display";
 import { OrderTradeActions, type OrderStageFacts } from "@/components/order/order-trade-actions";
 import { OrderAftersale } from "./order-aftersale";
 import { PrestartTerminationPanel } from "@/components/order/prestart-termination-panel";
@@ -92,14 +93,16 @@ const PROGRESS_ANCHORS: Partial<Record<OrderProgressAction["target"], string>> =
   refund: "order-refund-section",
 };
 
-function OrderProgressCard({ view, party, orderId, backHref, onRefresh }: {
+function OrderProgressCard({ view, party, orderId, orderDisplayNo, userId, backHref, onRefresh }: {
   view: OrderProgressView;
   party: OrderParty;
   orderId: string;
+  orderDisplayNo: string | null;
+  userId: string | null;
   backHref: string;
   onRefresh: () => void;
 }) {
-  const focusAnchor = (id: string) => {
+  const focusAnchor = (id: string, label: string) => {
     if (typeof document === "undefined") return;
     const target = document.getElementById(id);
     // A refund section can be legitimately absent (not applicable / not readable yet). Never let a
@@ -116,25 +119,48 @@ function OrderProgressCard({ view, party, orderId, backHref, onRefresh }: {
       try { fallback.focus?.({ preventScroll: true }); } catch { /* focus is best-effort */ }
       return;
     }
-    const focusable = node.querySelector<HTMLElement>("button.button.primary, a.button.primary, button.button, a.button, summary, input, [tabindex]");
-    try { focusable?.focus?.({ preventScroll: true }); } catch { /* focus is best-effort */ }
+    // A comma-separated selector is resolved in document order, not selector priority. In the
+    // trade panel "刷新" appears before the actual action, so focus must be chosen by the action
+    // the card offered, then by primary weight, and only then by a non-refresh control.
+    const controls = [...node.querySelectorAll<HTMLElement>("button, a[href], summary, input, [tabindex]")]
+      .filter(control => !control.hasAttribute("disabled"));
+    const isRefresh = (control: HTMLElement) => (control.textContent ?? "").includes("刷新");
+    const wanted = controls.find(control => (control.textContent ?? "").includes(label) && !isRefresh(control));
+    const primary = controls.find(control => control.matches("button.button.primary, a.button.primary") && !isRefresh(control));
+    const plain = controls.find(control => control.matches("button.button, a.button") && !isRefresh(control));
+    const focusable = wanted ?? primary ?? plain ?? controls.find(control => !isRefresh(control));
+    if (focusable) {
+      try { focusable.focus?.({ preventScroll: true }); } catch { /* focus is best-effort */ }
+      return;
+    }
+    if (node.tabIndex < 0) node.tabIndex = -1;
+    try { node.focus?.({ preventScroll: true }); } catch { /* focus is best-effort */ }
   };
-  const run = (action: OrderProgressAction) => {
+  const run = (action: OrderProgressAction, trigger?: HTMLElement | null) => {
     if (action.target === "refresh") { onRefresh(); return; }
+    if (action.target === "support") {
+      // A service consultation is not the order-group panel. Keep the order context so the
+      // support dialog can prefill the order number without inventing any business fact.
+      const context = userId && orderDisplayNo
+        ? { userId, subjectRef: `order:${orderId}`, recordId: orderId, draftText: `订单 ${orderDisplayNo}` }
+        : undefined;
+      requestSupportDialog("SERVICE", trigger ?? null, context);
+      return;
+    }
     if (action.target === "groups") {
       window.dispatchEvent(new CustomEvent("zzsh:order-groups", { detail: { party, orderId } }));
       return;
     }
     const anchor = PROGRESS_ANCHORS[action.target];
-    if (anchor) focusAnchor(anchor);
+    if (anchor) focusAnchor(anchor, action.label);
   };
   const actionNode = (action: OrderProgressAction, primary: boolean) => {
-    const icon = action.target === "groups" ? <MessageCircle size={15} aria-hidden="true" />
+    const icon = action.target === "support" || action.target === "groups" ? <MessageCircle size={15} aria-hidden="true" />
       : action.target === "refresh" ? <RefreshCw size={15} aria-hidden="true" /> : null;
     const href = action.target === "list" ? backHref : action.href;
     const className = primary ? "button primary" : "button quiet button--sm";
     if (href) return <Link key={`${action.target}:${action.label}`} className={className} href={href} scroll={false}>{icon}{action.label}</Link>;
-    return <button key={`${action.target}:${action.label}`} type="button" className={className} onClick={() => run(action)}>{icon}{action.label}</button>;
+    return <button key={`${action.target}:${action.label}`} type="button" className={className} onClick={(event) => run(action, event.currentTarget)}>{icon}{action.label}</button>;
   };
   return <section className="order-progress-card" data-tone={view.tone} data-terminal={view.noNewTransaction ? "true" : undefined} data-testid="order-progress-card" aria-label="当前进度与下一步">
     <div className="order-progress-head">
@@ -560,8 +586,10 @@ export function OrderDetail({ party, status, accountId, orderId, filters, state,
   const session = useUserSession();
   const readScope = `${session.status === "authenticated" ? session.userId : ""}:${party}:${orderId}`;
   const [read, setRead] = useState<{ scope: string; facts: OrderStageFacts | null; failed: boolean }>({ scope: "", facts: null, failed: false });
+  const [payment, setPayment] = useState<{ scope: string; facts: OrderPaymentFacts | null }>({ scope: "", facts: null });
   const facts = read.scope === readScope ? read.facts : null;
   const readFailed = read.scope === readScope && read.failed;
+  const paymentFacts = payment.scope === readScope ? payment.facts : null;
   const back = <Link className="order-detail-back" href={backHref} scroll={false}><ArrowLeft size={16} aria-hidden="true" />返回{title}</Link>;
   if (state.status === "loading") return <section className="order-detail-view" data-testid="order-detail-loading" aria-busy="true" role="status"><div className="order-detail-loading account-module-card"><span /><span /><span /></div></section>;
   if (state.status === "error" && state.error) return <section className="order-detail-view">{back}<OrderError error={state.error} first={false} onRetry={onRetry} onLogin={onLogin} label="订单详情暂时无法读取" /></section>;
@@ -575,7 +603,7 @@ export function OrderDetail({ party, status, accountId, orderId, filters, state,
   const sourceLabel = orderListingSourceLabel(order);
   const stageLabel = orderSettlementStageLabel(order);
   const attention = attentionFor(order, facts, readFailed, party);
-  const progress = orderProgressView({ order, party, facts, readFailed });
+  const progress = orderProgressView({ order, party, facts, readFailed, payment: paymentFacts });
   return <section className="order-detail-view" data-testid="order-detail">
     {back}
     {/* Identity band: the account is the subject, the order number identifies the transaction, and the
@@ -600,7 +628,7 @@ export function OrderDetail({ party, status, accountId, orderId, filters, state,
         </div>
       </div>
     </header>
-    <OrderProgressCard view={progress} party={party} orderId={order.id} backHref={backHref} onRefresh={onChanged} />
+    <OrderProgressCard view={progress} party={party} orderId={order.id} orderDisplayNo={order.displayNo ?? null} userId={session.status === "authenticated" ? session.userId : null} backHref={backHref} onRefresh={onChanged} />
     {order.source?.origin !== "LEGACY" && !order.readOnly && order.status !== "PENDING_PAYMENT" ? <FulfillmentStageBar order={order} party={party} facts={facts} /> : null}
     <BusinessUpdateNotices surface="orders" />
     <AttentionBlock attention={attention} party={party} orderId={order.id} onRetry={onChanged} />
@@ -611,7 +639,7 @@ export function OrderDetail({ party, status, accountId, orderId, filters, state,
     <div className="order-detail-body" id="order-detail-body" tabIndex={-1}>
       <div className="order-detail-main">
         {order.source?.origin!=="LEGACY"&&order.stage?.code==="POSTED"?<OrderAftersale key={`aftersale:${order.id}`} orderId={order.id} orderDisplayNo={order.displayNo??null}/>:null}
-        {order.status !== "CANCELLED" ? <OrderTradeActions order={order} party={party} onChanged={onChanged} onStageFacts={(next, failed) => setRead({ scope: readScope, facts: next, failed })} /> : null}
+        {order.status !== "CANCELLED" ? <OrderTradeActions order={order} party={party} onChanged={onChanged} onStageFacts={(next, failed) => setRead({ scope: readScope, facts: next, failed })} onPaymentFacts={(next) => setPayment({ scope: readScope, facts: next })} /> : null}
         <PrestartTerminationPanel key={`prestart:${order.id}:${order.status}`} order={order} party={party} onChanged={onChanged}/>
         {party === "renter" && order.source?.origin !== "LEGACY" && !order.readOnly ? <OrderRefundSection key={`${order.id}:${order.status}:${facts?.phase ?? "NONE"}`} order={order} /> : null}
         {party === "owner" && order.source?.origin !== "LEGACY" && !order.readOnly && (order.status === "CANCELLED" || order.status === "COMPLETED") ? <OrderOwnerRefundSummary key={`owner-refund:${order.id}:${order.status}`} order={order} /> : null}

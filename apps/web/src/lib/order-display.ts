@@ -526,7 +526,7 @@ export function cancelEntryOpen(order: Order): boolean {
  * that were actually read and never infers success, delivery, settling or bank arrival.
  */
 export type OrderProgressOwner = "你" | "对方" | "客服" | "系统" | "平台" | "暂无";
-export type OrderProgressTarget = "trade" | "legacy" | "refund" | "groups" | "refresh" | "browse" | "manage" | "list";
+export type OrderProgressTarget = "trade" | "legacy" | "refund" | "support" | "groups" | "refresh" | "browse" | "manage" | "list";
 export type OrderProgressAction = { label: string; target: OrderProgressTarget; href?: string };
 export type OrderProgressView = {
   tone: "active" | "waiting" | "warning" | "done" | "unknown";
@@ -549,12 +549,28 @@ export type OrderProgressFacts = {
   openingConfirmedAt: string | null;
   myAck: boolean;
   otherAck: boolean;
+  /** Additive server stage / frozen opening deadline; absent on older projections and fixtures. */
+  stageCode?: string | null;
+  viewerActionRequired?: boolean;
+  autoConfirmDueAt?: string | null;
+  openingGenerationState?: "CREATED" | "REVIEW_REQUIRED" | null;
+  openingGenerationRecoveryRequired?: boolean;
+};
+
+/** Only the facts the channel payment read returned. `readFailed` means no conclusion is available. */
+export type OrderPaymentFacts = {
+  state: string | null;
+  displayState: string | null;
+  blockedReason: string | null;
+  readFailed: boolean;
 };
 
 type ProgressOrder = Pick<Order,
   "status" | "readOnly" | "source" | "paymentOpen" | "expiredAwaitingCancel" | "cancelReason" | "fundsResolution" | "viewerParty">;
 
-const progressGroups: OrderProgressAction = { label: "联系客服", target: "groups" };
+/** A support consultation, not the order-group panel: the two are different capabilities. */
+const progressSupport: OrderProgressAction = { label: "联系客服", target: "support" };
+const progressOrderGroups: OrderProgressAction = { label: "打开订单群", target: "groups" };
 const progressRefresh: OrderProgressAction = { label: "刷新进度", target: "refresh" };
 const progressRefund: OrderProgressAction = { label: "查看退款进度", target: "refund" };
 const progressBrowse: OrderProgressAction = { label: "浏览可租账号", target: "browse", href: "/accounts" };
@@ -569,11 +585,12 @@ function orderStatusFact(status: string): string {
   return "订单主状态：未记录";
 }
 
-export function orderProgressView({ order, party, facts, readFailed }: {
+export function orderProgressView({ order, party, facts, readFailed, payment = null }: {
   order: ProgressOrder;
   party: OrderParty;
   facts: OrderProgressFacts | null;
   readFailed: boolean;
+  payment?: OrderPaymentFacts | null;
 }): OrderProgressView {
   const status = order.status;
   const legacy = order.readOnly === true || order.source?.origin === "LEGACY";
@@ -583,13 +600,16 @@ export function orderProgressView({ order, party, facts, readFailed }: {
     "订单号、下单时间与金额以页面上方已读到的记录为准",
     "消耗、费用与退款以服务端结算和退款读取为准，页面不自行计算或补零",
   ];
+  // readSettlement() supplies the authoritative stage. Expose it as a known fact instead of
+  // rebuilding a second, possibly different, stage story in the browser.
+  if (facts?.stageCode) known.push(`服务端结算阶段：${facts.stageCode}${facts.viewerActionRequired ? "（需要你操作）" : "（当前不需要你操作）"}`);
   const base = { known, terminal, noNewTransaction: terminal, pendingRead: false };
 
   // A historical manual close never settled or refunded by itself.
   if (order.fundsResolution?.code === "HISTORICAL_MANUAL_CLOSE") {
     return { ...base, tone: "warning", title: "联系客服核对资金处理", owner: "客服",
       note: "原人工关闭没有自动完成结算或退款。请联系平台核对原付款与资金处理记录；订单关闭不代表资金已处理或退款已到账。",
-      primary: progressGroups, secondary: [progressRefund, progressRefresh], terminal: true, noNewTransaction: true };
+      primary: progressSupport, secondary: [progressRefund, progressRefresh], terminal: true, noNewTransaction: true };
   }
 
   // Migrated orders keep their own continuation contract; current membership prices never re-price them.
@@ -599,8 +619,8 @@ export function orderProgressView({ order, party, facts, readFailed }: {
       note: inflight
         ? "这是迁入的历史订单。页面下方的「订单续办」保留本单原有的预览、提交、确认与拒绝能力；金额以本单可核实的旧价与旧付款事实为准，不套用当前会员价格，账号资料也不是下单时的冻结快照。资料缺失请联系客服。"
         : "这是迁入的历史订单。页面只展示可核实的历史事实、原退款记录与客服入口；历史记录金额不代表渠道到账。",
-      primary: inflight ? { label: "查看订单续办", target: "legacy" } : progressGroups,
-      secondary: inflight ? [progressGroups, progressRefresh] : [{ label: "返回订单列表", target: "list" }],
+      primary: inflight ? { label: "查看订单续办", target: "legacy" } : progressSupport,
+      secondary: inflight ? [progressSupport, progressRefresh] : [{ label: "返回订单列表", target: "list" }],
       terminal: !inflight, noNewTransaction: !inflight };
   }
 
@@ -608,16 +628,32 @@ export function orderProgressView({ order, party, facts, readFailed }: {
     if (order.expiredAwaitingCancel) {
       return { ...base, tone: "warning", title: "等待平台释放账号占用", owner: "平台",
         note: "原支付保留时间已到期，系统正按序释放账号占用，不再接受新的支付。请以服务端订单状态为准，不要重复付款。",
-        primary: progressRefresh, secondary: [progressGroups, party === "renter" ? progressBrowse : progressManage] };
+        primary: progressRefresh, secondary: [progressSupport, party === "renter" ? progressBrowse : progressManage] };
+    }
+    // A channel request with an unknown/review result is not an invitation to pay again. The
+    // channel read owns this fact; the order main status alone cannot clear it.
+    const pay = payment ?? null;
+    const unknownPayment = pay?.readFailed === true
+      || ["UNKNOWN", "SUBMITTING", "PROCESSING_UNCONFIRMED", "CHANNEL_SUCCEEDED_PENDING_ACCEPTANCE", "REVIEW_REQUIRED"].includes(pay?.state ?? "")
+      || ["CONFIRMING", "CONFIRMING_PAYMENT", "UNDER_REVIEW", "SUBMITTING", "PROCESSING", "STATUS_PENDING_CONFIRMATION"].includes(pay?.displayState ?? "")
+      || ["CHANNEL_RESULT_UNKNOWN", "CHANNEL_RESULT_PENDING", "PAYMENT_REVIEW", "UNKNOWN_SOURCE", "UNKNOWN_STATE", "REQUEST_SUBMITTING"].includes(pay?.blockedReason ?? "");
+    if (unknownPayment) {
+      return { ...base, tone: "unknown", title: "支付结果正在确认", owner: "平台",
+        note: pay?.readFailed
+          ? "本页暂时读不到这笔订单的渠道支付状态。已读到的订单事实保持有效；支付结果正在确认，不要重复付款，可重试读取、按原请求查询回执或联系客服核对。模拟付款记录不代表渠道扣款。"
+          : "本单已有一笔支付请求的结果尚未确认，或需要平台人工核对。支付结果正在确认，页面不会把它写成支付成功，也不引导重复付款；请在支付区按原请求查询回执，或联系客服核对。",
+        primary: { label: pay?.readFailed ? "重试读取" : "查询原支付请求", target: pay?.readFailed ? "refresh" : "trade" },
+        secondary: [progressSupport, progressRefresh], pendingRead: true,
+        known: [...known, "本次支付读取没有给出可确认的付款结论，未确认的事项保持未知"] };
     }
     if (party === "renter" && (order.paymentOpen ?? true)) {
       return { ...base, tone: "active", title: "完成支付", owner: "你",
         note: "请在本页支付区选择服务端当前开放的方式完成付款；结果未确认时查询原请求，不要重复提交。付款接纳不等于交付、建群或开租，模拟付款记录也不代表渠道扣款。",
-        primary: { label: "去支付", target: "trade" }, secondary: [progressGroups] };
+        primary: { label: "去支付", target: "trade" }, secondary: [progressSupport] };
     }
     return { ...base, tone: "waiting", title: "等待租客支付", owner: "对方",
       note: "本单尚未付款，号主不能代付或代为接单。租客完成支付后，双方再按冻结报价核对开租清单。",
-      primary: progressRefresh, secondary: [progressGroups] };
+      primary: progressRefresh, secondary: [progressSupport] };
   }
 
   if (status === "CANCELLED") {
@@ -628,7 +664,7 @@ export function orderProgressView({ order, party, facts, readFailed }: {
       note: prestart
         ? "本单未开租终止，账号占用已解除。退款处理进度看下方退款记录；本地受理与核销都不等于渠道退款到账，售后与客服入口仍可使用。"
         : "订单已结束，本页不再提供开租或结算操作。可按实际可用性查看退款进度、提交售后记录或联系客服；取消或过账都不代表渠道退款已到账，本单账号不会因完单而再次上架。",
-      primary: progressRefund, secondary: [progressGroups, progressRefresh] };
+      primary: progressRefund, secondary: [progressSupport, progressRefresh] };
   }
 
   if (status === "PAID" || status === "COMPLETED") {
@@ -638,69 +674,173 @@ export function orderProgressView({ order, party, facts, readFailed }: {
     if (terminal && facts && facts.phase !== "POSTED") {
       return { ...base, tone: "unknown", title: "查看退款与售后", owner: "平台",
         note: "订单主状态已完成，但本次结算读取尚未给出已过账结论。已读到的订单事实保持有效；本页不再提供开租或结算操作，可按实际权限查看退款进度、提交售后记录或联系客服。",
-        primary: progressRefund, secondary: [progressGroups, progressRefresh], pendingRead: true,
+        primary: progressRefund, secondary: [progressSupport, progressRefresh], pendingRead: true,
         known: [...known, "结算阶段与订单主状态不一致，未确认的事项保持未知"] };
     }
     if (readFailed && !facts) {
       return { ...base, tone: "unknown", title: "核对当前进度", owner: "平台",
         note: "本页暂时读不到开租与结算记录。已展示的订单金额与时间仍然有效；消耗、费用及退款没有读到就保持未知，不显示为成功或到账。可重试读取或联系客服。",
-        primary: progressRetry, secondary: [progressGroups], pendingRead: true,
+        primary: progressRetry, secondary: [progressSupport], pendingRead: true,
         known: [...known, "本次开租与结算读取未成功，未确认的事项保持未知"] };
     }
     if (!facts) {
       return { ...base, tone: "unknown", title: "正在核对当前进度", owner: "平台",
         note: "页面正在按服务端记录核对开租与结算进度，暂时不展示阶段结论；已读到的订单事实保持有效。",
-        primary: progressRefresh, secondary: [progressGroups], pendingRead: true };
+        primary: progressRefresh, secondary: [progressSupport], pendingRead: true };
+    }
+    // The server can explicitly mark the stage unverifiable. Never turn that into a confident
+    // "confirm the checklist" or "end the rental" next step.
+    if (facts.stageCode === "UNKNOWN") {
+      return { ...base, tone: "unknown", title: "状态待核实", owner: "平台",
+        note: "服务端本次把结算阶段标记为待核实。已读到的订单事实保持有效；页面不推断开租、结算或退款结论，可刷新读取或联系客服核对。",
+        primary: progressRefresh, secondary: [progressSupport, progressRefund], pendingRead: true,
+        known: [...known, "服务端结算阶段为 UNKNOWN，未确认的事项保持未知"] };
     }
     if (facts.phase === "POSTED") {
       return { ...base, tone: "done", title: "查看退款与售后", owner: "暂无",
         note: "结算已过账。应退金额、平台退款处理状态与渠道到账是三件独立的事，页面不会把过账写成已到账。可按实际权限查看退款进度、提交售后记录或联系客服；本单账号不会再次上架。",
-        primary: progressRefund, secondary: [progressGroups], terminal: true, noNewTransaction: true };
+        primary: progressRefund, secondary: [progressSupport], terminal: true, noNewTransaction: true };
     }
     if (facts.phase === "DECISION_REJECTED") {
       return { ...base, tone: "warning", title: "等待新的结算方案", owner: "客服",
         note: "这一版结算未达成一致，拒绝不会使它生效。请等待客服按新的期末数据或人工调整生成新版本后再核对；期间不需要重复确认。",
-        primary: progressGroups, secondary: [progressRefresh, progressRefund] };
+        primary: progressSupport, secondary: [progressRefresh, progressRefund] };
     }
     if (facts.phase === "INTAKE_PENDING") {
       return { ...base, tone: "waiting", title: "等待客服复核结束申请", owner: "客服",
         note: "期末数据已提交，等待受权客服核实原因并复核；复核与双方确认完成后结算才生效。当前没有需要你提交的写操作。",
-        primary: progressRefresh, secondary: [progressGroups] };
+        primary: progressRefresh, secondary: [progressSupport] };
     }
     if (facts.phase === "DECISION_PENDING") {
       return { ...base, tone: "active", title: "核对并确认本版结算", owner: "你",
         note: "请在本页结算区核对本次消耗、费用承担与责任归属；金额由服务端预览与版本给出。拒绝与确认是不同结果，拒绝不会使这一版生效。",
-        primary: { label: "确认结算", target: "trade" }, secondary: [progressGroups] };
+        primary: { label: "确认结算", target: "trade" }, secondary: [progressSupport] };
     }
     if (facts.phase === "DECISION_WAITING") {
       return { ...base, tone: "waiting", title: "等待对方确认结算", owner: "对方",
         note: "你已在这一版完成操作；金额或版本变化会生成新版本并要求重新确认。无需重复提交。",
-        primary: progressRefresh, secondary: [progressGroups] };
+        primary: progressRefresh, secondary: [progressSupport] };
     }
     // No current settlement version yet: the opening checklist is the live decision.
     if (!facts.rentalStarted || !facts.openingConfirmedAt) {
       if (facts.openingVersionNo === null) {
+        const generationPending = facts.openingGenerationState === "REVIEW_REQUIRED" || facts.openingGenerationRecoveryRequired;
         return { ...base, tone: "warning", title: "联系客服核对开租清单", owner: "客服",
           note: "付款已接纳，但本单尚未读到自动生成的开租清单。资料不足或生成待核对时由客服办理；订单群准备好不等于已经开租，页面不会自动生成清单或交付。请刷新或联系客服。",
-          primary: progressGroups, secondary: [progressRefresh] };
+          primary: progressSupport, secondary: [progressOrderGroups, progressRefresh],
+          known: [...known, generationPending ? "服务端记录：开租清单生成待客服核对" : "本次结算读取没有返回开租清单"] };
       }
+      const due = facts.autoConfirmDueAt ?? null;
       if (!facts.myAck) {
         return { ...base, tone: "active", title: "确认期初清单并开租", owner: "你",
-          note: "期初数量取自本单冻结报价，双方各自确认同一版本；确认来源会区分本人、客服代操作与系统自动确认，截止时间取本单冻结值。付款、建群与沟通都不等于已开租。",
-          primary: { label: "确认期初并开租", target: "trade" }, secondary: [progressGroups] };
+          note: `期初数量取自本单冻结报价，双方各自确认同一版本；确认来源会区分本人、客服代操作与系统自动确认，截止时间取本单冻结值。${due ? "" : "本单未记录自动确认截止时间，页面不会承诺系统自动确认。"}付款、建群与沟通都不等于已开租。`,
+          primary: { label: "确认期初并开租", target: "trade" }, secondary: [progressSupport],
+          known: due ? [...known, `本单冻结的自动确认截止时间：${formatOrderTime(due)}`] : [...known, "本单未记录自动确认截止时间"] };
       }
       return { ...base, tone: "waiting", title: "等待对方确认期初清单", owner: "对方",
-        note: "你已完成期初确认，等待对方确认后正式开租；未确认时按本单冻结的截止时间由系统自动确认。无需代替对方操作。",
-        primary: progressRefresh, secondary: [progressGroups] };
+        note: due
+          ? "你已完成期初确认，等待对方确认后正式开租；未确认时按本单冻结的截止时间由系统自动确认。无需代替对方操作。"
+          : "你已完成期初确认，等待对方确认后正式开租。本单没有记录自动确认截止时间，页面不会承诺系统会自动确认；如对方迟迟未确认，请联系客服核对，不要代替对方操作。",
+        primary: progressRefresh, secondary: [progressSupport],
+        known: due ? [...known, `本单冻结的自动确认截止时间：${formatOrderTime(due)}`] : [...known, "本单未记录自动确认截止时间"] };
     }
     return { ...base, tone: "active", title: "发起结束租用并核对消耗", owner: "你",
       note: "按实际消耗或期末剩余填写后，先由服务端预览金额，再提交结算；最终金额不在浏览器计算。消耗偏低属于提前结束时，需客服复核并按新方案确认。",
-      primary: { label: "发起结束租用", target: "trade" }, secondary: [progressGroups] };
+      primary: { label: "发起结束租用", target: "trade" }, secondary: [progressSupport] };
   }
 
   return { ...base, tone: "unknown", title: "核对当前进度", owner: "平台",
     note: "当前订单状态没有可展示的下一步结论；已读到的订单事实保持有效，可刷新或联系客服。",
-    primary: progressRefresh, secondary: [progressGroups], pendingRead: true };
+    primary: progressRefresh, secondary: [progressSupport], pendingRead: true };
+}
+
+/** Report assembled from the legacy continuation read, never from the order status alone. */
+export type LegacyProgressReport = {
+  status: string;
+  party: OrderParty;
+  availability: "KNOWN" | "NOT_IMPORTED" | "ISOLATED" | null;
+  capabilities: string[];
+  stage: string | null;
+  isSettle: string | null;
+  reasons: string[];
+  refundProgress: string[];
+  /** A saved original-key intent whose result is not confirmed yet. */
+  pending: "NONE" | "VALID" | "UNREADABLE" | "UNKNOWN";
+  readFailed: boolean;
+};
+export type LegacyProgressView = {
+  tone: OrderProgressView["tone"];
+  title: string;
+  owner: OrderProgressOwner;
+  note: string;
+  primary: OrderProgressAction;
+  secondary: OrderProgressAction[];
+  known: string[];
+  terminal: boolean;
+};
+
+const LEGACY_CAPABILITY_LABELS: Record<string, string> = {
+  preview: "预览金额", propose: "提交结算方案", confirm: "确认结算方案", reject: "拒绝结算方案",
+  hold: "暂扣押金", release: "解除暂扣", confiscate: "没收押金",
+};
+const LEGACY_REFUND_LABELS: Record<string, string> = {
+  UNKNOWN: "退款状态待核对", NO_REFUND_DUE: "无需退款", NO_NEW_REFUND: "旧退款已抵扣本次应退",
+  CHANNEL_SUCCEEDED: "渠道已确认退款", FAILED: "退款未完成，请联系客服", PROCESSING: "退款处理中",
+  REVIEW_REQUIRED: "退款状态待核对", SIMULATED: "模拟退款已记录，不代表真实退款或到账",
+};
+
+/**
+ * Migrated orders have their own continuation contract. The page must only promise capabilities
+ * the continuation read actually returned, keep terminal orders free of new writes, and surface a
+ * saved original-key intent before inviting the user to look at the panel again.
+ */
+export function legacyProgressView(input: LegacyProgressReport): LegacyProgressView {
+  const terminal = input.status === "COMPLETED" || input.status === "CANCELLED";
+  const known = [
+    `历史订单主状态：${orderStatusFact(input.status).replace("订单主状态：", "")}`,
+    "旧单金额以本单可核实的旧价与旧付款事实为准，不套用当前会员价格；账号资料不是下单时的冻结快照",
+    "历史记录金额与原退款记录都不代表渠道到账",
+  ];
+  if (input.availability) known.push(`续办资料可用性：${input.availability}`);
+  if (input.stage) known.push(`旧单阶段：${input.stage}`);
+  if (input.capabilities.length) known.push(`服务端开放的续办能力：${input.capabilities.map(c => LEGACY_CAPABILITY_LABELS[c] ?? c).join("、")}`);
+  for (const progress of input.refundProgress) known.push(`原退款记录：${LEGACY_REFUND_LABELS[progress] ?? "状态待核对"}`);
+  for (const reason of input.reasons) known.push(`服务端续办理由：${reason}`);
+  const openRefund = input.refundProgress.some(p => ["UNKNOWN", "PROCESSING", "REVIEW_REQUIRED", "FAILED"].includes(p));
+
+  if (input.readFailed || input.availability === null) {
+    return { tone: "unknown", title: "续办状态待核对", owner: "平台",
+      note: "本页暂时读不到旧单续办资料。已读到的订单金额、时间与退款记录仍然有效；页面不推断还有哪些可办理的操作，可重试读取或联系客服核对。",
+      primary: progressRetry, secondary: [progressSupport], terminal,
+      known: [...known, "本次旧单续办读取未成功，未确认的事项保持未知"] };
+  }
+  if (input.availability !== "KNOWN") {
+    return { tone: "warning", title: "资料待客服核对", owner: "客服",
+      note: "这笔迁入订单的续办资料尚未核实（未导入或已隔离）。页面不承诺有任何可用的预览、提交、确认或拒绝功能；已读到的金额与时间仍是历史记录，证据缺失或金额存疑请联系客服核对。",
+      primary: progressSupport, secondary: [progressRefresh], terminal, known };
+  }
+  if (terminal) {
+    return { tone: "done", title: "查看历史订单事实", owner: "暂无",
+      note: `这笔迁入订单已完成或取消。页面只展示可核实的历史事实、原退款记录与客服入口，不再提供开租、结算或新的续办写操作，也不提供新订单续租或订单评价。${openRefund ? "本单仍有待处理的退款记录，可在下方查看并联系客服核对；" : ""}历史记录金额不代表渠道到账。`,
+      primary: progressSupport, secondary: [{ label: "返回订单列表", target: "list" }], terminal: true, known };
+  }
+  if (input.pending !== "NONE") {
+    return { tone: "warning", title: "先核对未确认的续办申请", owner: "你",
+      note: "检测到一笔按原请求键保存、结果未知的旧单续办申请。请先按原键查询回执，不要重复提交；页面不会清除待恢复记录。金额仍以旧价与旧付款事实为准。",
+      primary: { label: "查询原请求", target: "legacy" }, secondary: [progressSupport, progressRefresh], terminal: false, known };
+  }
+  if (input.capabilities.length === 0) {
+    return { tone: "waiting", title: "等待客服核对续办能力", owner: "客服",
+      note: "服务端当前没有为这笔旧单开放新的续办写操作。页面不显示预览、提交、确认或拒绝入口；已读到的金额与时间仍是历史记录，需要办理请联系客服。",
+      primary: progressSupport, secondary: [progressRefresh], terminal: false, known };
+  }
+  const stageOwner: OrderProgressOwner = input.stage === "8" ? input.party === "owner" ? "你" : "对方"
+    : input.stage === "9" ? input.party === "renter" ? "你" : "对方"
+      : input.stage === "4" ? "客服" : "你";
+  const caps = input.capabilities.map(c => LEGACY_CAPABILITY_LABELS[c] ?? c).join("、");
+  return { tone: "active", title: "查看并办理订单续办", owner: stageOwner,
+    note: `这是迁入的历史订单，不是新订单续租。下方「订单续办」当前开放：${caps}；只按本单可核实的旧价与旧付款事实办理，不套用当前会员价格，账号资料也不是下单时的冻结快照。证据缺失或金额存疑请联系客服核对。${openRefund ? "本单另有待处理的退款记录，可在下方查看并联系客服核对。" : ""}`,
+    primary: { label: "查看订单续办", target: "legacy" }, secondary: [progressSupport, progressRefresh], terminal: false, known };
 }
 
 const UNIT_LABELS: Record<string, string> = { HAFF_BASE: "哈夫币", PIECE: "件", ROUND: "发", DAY: "天" };

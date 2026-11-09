@@ -21,6 +21,7 @@ import {
   type ChannelPaymentView,
   type ChannelPaymentMethod,
   type OrderSettlement,
+  type OrderSettlementStage,
   type SettlementLine,
   type SettlementOpening,
   type SettlementPreview,
@@ -28,7 +29,7 @@ import {
   type SettlementVersion,
 } from "@/lib/order-client";
 import { clearIntent, inspectIntent, isIntentStale, loadIntent, saveIntent, type IntentKind } from "@/lib/order-intents";
-import { cancelEntryOpen, chargeRowLabel, consumptionRows, decisionAmountRows, isAdjustedVersion, moneyCents, moneyText, paymentEntryOpen, paymentObservation, postingAmountRows, previewAmounts, proposedConfirmationCents, quantityText, resourceName, settlementAmountRows, settlementPreviewProblem, unitHint, type SettlementAmountRow } from "@/lib/order-display";
+import { cancelEntryOpen, chargeRowLabel, consumptionRows, decisionAmountRows, isAdjustedVersion, moneyCents, moneyText, paymentEntryOpen, paymentObservation, postingAmountRows, previewAmounts, proposedConfirmationCents, quantityText, resourceName, settlementAmountRows, settlementPreviewProblem, unitHint, type OrderPaymentFacts, type SettlementAmountRow } from "@/lib/order-display";
 import "./order.css";
 
 type PanelError = { message: string; retryable: boolean };
@@ -39,6 +40,18 @@ export type WriteOutcome<T> =
   | { status: "blocked"; message: string }
   | { status: "recovery-unresolved"; error: OrderRequestError }
   | { status: "definitive"; error: OrderRequestError };
+
+/** Only what the channel payment read actually returned; the progress card must not infer an outcome. */
+export function channelPaymentFacts(view: ChannelPaymentView): OrderPaymentFacts {
+  return {
+    state: view.request?.state ?? null,
+    displayState: view.projection?.displayState ?? null,
+    blockedReason: view.projection?.actionBlockedReason ?? null,
+    readFailed: false,
+  };
+}
+
+export const PAYMENT_FACTS_UNREADABLE: OrderPaymentFacts = { state: null, displayState: null, blockedReason: null, readFailed: true };
 
 /** Facts the detail banner may state, and only what the settlement read actually returned. */
 export type OrderStageFacts = {
@@ -52,6 +65,14 @@ export type OrderStageFacts = {
   openingConfirmedAt: string | null;
   myAck: boolean;
   otherAck: boolean;
+  /** Server-owned stage when the settlement read supplies one; null on older projections. */
+  stageCode: OrderSettlementStage["code"] | null;
+  viewerActionRequired: boolean;
+  /** Frozen per-order auto-confirm deadline; null when the server recorded none. */
+  autoConfirmDueAt: string | null;
+  /** Opening generation outcome; null when the read omits the field. */
+  openingGenerationState: "CREATED" | "REVIEW_REQUIRED" | null;
+  openingGenerationRecoveryRequired: boolean;
   /** This party's final settlement figure, straight from the posting's final column. `null` until posted. */
   settled: { label: string; text: string } | null;
 };
@@ -184,9 +205,12 @@ function channelApplied(view: ChannelPaymentView | null): boolean {
 const ignoreDemoMode = () => {};
 
 /** 新渠道独立保留原键；普通刷新只读本地状态，不把旧受控请求当作渠道付款。 */
-function ChannelPaymentAction({ order, blocked, onChanged, onModeChange, onPendingChange, children }: {
-  order: Order; blocked: boolean; onChanged: () => void; onModeChange: (active: boolean) => void; onPendingChange: (pending: boolean) => void; children: ReactNode;
+function ChannelPaymentAction({ order, blocked, onChanged, onModeChange, onPendingChange, onPaymentFacts, children }: {
+  order: Order; blocked: boolean; onChanged: () => void; onModeChange: (active: boolean) => void; onPendingChange: (pending: boolean) => void;
+  onPaymentFacts?: (facts: OrderPaymentFacts | null) => void; children: ReactNode;
 }) {
+  const reportPayment = useRef(onPaymentFacts);
+  useEffect(() => { reportPayment.current = onPaymentFacts; }, [onPaymentFacts]);
   const session = useUserSession();
   const [snapshot, setSnapshot] = useState<{ userId: string; orderId: string; view: ChannelPaymentView } | null>(null);
   const [readError, setReadError] = useState<string | null>(null), [notice, setNotice] = useState<string | null>(null);
@@ -222,13 +246,17 @@ function ChannelPaymentAction({ order, blocked, onChanged, onModeChange, onPendi
       if (!mounted.current || !identity.current(acting) || latest.current.orderId !== expected || signal?.aborted) return;
       if (next?.contractVersion !== "order-payment-request.v1" || next.order?.id !== expected || !Array.isArray(next.capability?.methods)) throw new OrderRequestError(502, null);
       setSnapshot({ userId: acting, orderId: expected, view: next }); setReadError(null);
+      reportPayment.current?.(channelPaymentFacts(next));
       if (notify && channelApplied(next)) latest.current.onChanged();
     } catch (error) {
-      if (mounted.current && identity.current(acting) && latest.current.orderId === expected && !signal?.aborted) setReadError(panelError(error).message);
+      if (mounted.current && identity.current(acting) && latest.current.orderId === expected && !signal?.aborted) {
+        setReadError(panelError(error).message);
+        reportPayment.current?.(PAYMENT_FACTS_UNREADABLE);
+      }
     } finally { if (mounted.current && identity.current(acting) && latest.current.orderId === expected && !signal?.aborted) setReading(false); }
   }, [order.id]);
   useEffect(() => {
-    if (!userId) { setReading(false); return; }
+    if (!userId) { setReading(false); reportPayment.current?.(PAYMENT_FACTS_UNREADABLE); return; }
     const controller = new AbortController(); void refresh(userId, controller.signal);
     return () => controller.abort();
   }, [userId, refresh]);
@@ -516,7 +544,7 @@ export function DemoCheckoutAction({ order, blocked, onChanged, onAccepted, onMo
   </div>;
 }
 
-function PaymentAction({ order, party, onChanged }: { order: Order; party: OrderParty; onChanged: () => void }) {
+function PaymentAction({ order, party, onChanged, onPaymentFacts }: { order: Order; party: OrderParty; onChanged: () => void; onPaymentFacts?: (facts: OrderPaymentFacts | null) => void }) {
   const session = useUserSession();
   const [busy, setBusy] = useState(false);
   const [unknown, setUnknown] = useState<string | null>(null);
@@ -634,7 +662,7 @@ function PaymentAction({ order, party, onChanged }: { order: Order; party: Order
     {cancelUnknown ? <UnknownNotice label="取消结果未知" message={cancelUnknown} onQuery={() => void queryCancel()} onOpenOrder={onChanged} /> : null}
     {error ? <p className="order-inline-notice" role="alert">{error.message}</p> : null}
     {party === "renter" ? <div className="order-trade-actions">
-      <ChannelPaymentAction order={order} blocked={payLocked || cancelArmed || demoPending} onChanged={onChanged} onModeChange={setChannelMode} onPendingChange={setChannelPending}><DemoCheckoutAction order={order} blocked={payLocked || cancelArmed} onChanged={onChanged} onModeChange={setDemoMode} onPendingChange={setDemoPending}><LocalSandboxPaymentAction order={order} blocked={payLocked || cancelArmed} onChanged={onChanged} onModeChange={setLocalMode} onPendingChange={setLocalPending}>{paymentOpen ? <button type="button" className="button primary" onClick={() => void pay()} disabled={payLocked}>
+      <ChannelPaymentAction order={order} blocked={payLocked || cancelArmed || demoPending} onChanged={onChanged} onModeChange={setChannelMode} onPendingChange={setChannelPending} onPaymentFacts={onPaymentFacts}><DemoCheckoutAction order={order} blocked={payLocked || cancelArmed} onChanged={onChanged} onModeChange={setDemoMode} onPendingChange={setDemoPending}><LocalSandboxPaymentAction order={order} blocked={payLocked || cancelArmed} onChanged={onChanged} onModeChange={setLocalMode} onPendingChange={setLocalPending}>{paymentOpen ? <button type="button" className="button primary" onClick={() => void pay()} disabled={payLocked}>
         <WalletCards size={15} aria-hidden="true" />{busy ? "提交支付请求…" : "提交支付（本地测试支付）"}
       </button> : <p className="order-muted">当前订单不可继续支付；请刷新查看最新订单记录。</p>}</LocalSandboxPaymentAction></DemoCheckoutAction></ChannelPaymentAction>
       {cancelOpen ? (!cancelArmed ? <button type="button" className="button quiet" onClick={() => setCancelArmed(true)} disabled={cancelLocked}>取消订单</button> :
@@ -652,7 +680,7 @@ function OpeningLines({ order, opening, heading }: { order: Order; opening: Sett
     </tr>)}</tbody></table>;
 }
 
-function OpeningPanel({ opening, order, party, onChanged }: { opening: SettlementOpening; order: Order; party: OrderParty; onChanged: () => void }) {
+function OpeningPanel({ opening, order, party, onChanged, readOnly = false }: { opening: SettlementOpening; order: Order; party: OrderParty; onChanged: () => void; readOnly?: boolean }) {
   const session = useUserSession();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<PanelError | null>(null);
@@ -745,7 +773,8 @@ function OpeningPanel({ opening, order, party, onChanged }: { opening: Settlemen
     <OpeningLines order={order} opening={opening} heading={confirmed ? "开租时数量" : "期初数量"} />
     {unknown ? <UnknownNotice label="期初确认结果未知" message={unknown} onQuery={() => void query()} onOpenOrder={onChanged} /> : null}
     {error ? <p className="order-inline-notice" role="alert">{error.message}</p> : null}
-    {!confirmed && !acked && !unknown ? <button type="button" className="button primary" onClick={() => void confirm()} disabled={busy}>{busy ? "确认中…" : "确认期初并开租"}</button> : null}
+    {!readOnly && !confirmed && !acked && !unknown ? <button type="button" className="button primary" onClick={() => void confirm()} disabled={busy}>{busy ? "确认中…" : "确认期初并开租"}</button> : null}
+    {readOnly && !confirmed && !acked && !unknown ? <p className="order-muted">订单主状态已完成，本页不再提供新的期初确认；如有一笔结果未知的申请，请用下方「查询原请求」按原键核对。</p> : null}
     {!confirmed && acked ? <p className="order-muted"><Clock3 size={14} aria-hidden="true" /> {ackText(myAck, true)}；等待对方确认后正式开租。</p> : null}
     {!confirmed && opening.status === "DRAFT" && opening.autoConfirmDueAt ? <p className="order-muted">双方未确认时，将于 {formatOrderTime(opening.autoConfirmDueAt)} 自动确认并开始租期。</p> : null}
     <RecordList title="确认记录" records={acks.map((ack) => ({ label: ack.source === "PARTY" ? `${partyLabel(ack.party)}确认期初` : ack.source === "ON_BEHALF" ? `客服协助${partyLabel(ack.party)}确认期初` : ack.source === "AUTO" ? `${partyLabel(ack.party)}期初自动确认` : `${partyLabel(ack.party)}期初确认已记录`, time: ack.createdAt ?? null }))} />
@@ -789,7 +818,7 @@ function ConsumptionTable({ order, opening, version, extraResources }: { order: 
     </tr>)}</tbody></table>;
 }
 
-function EndingForm({ opening, order, party, onChanged, consumptionMode, extraResources=[] }: { opening: SettlementOpening; order: Order; party: OrderParty; onChanged: () => void; consumptionMode?: OrderSettlement["consumptionMode"]; extraResources?: SettlementLine[] }) {
+function EndingForm({ opening, order, party, onChanged, consumptionMode, extraResources=[], readOnly = false }: { opening: SettlementOpening; order: Order; party: OrderParty; onChanged: () => void; consumptionMode?: OrderSettlement["consumptionMode"]; extraResources?: SettlementLine[]; readOnly?: boolean }) {
   const session = useUserSession();
   const actual=consumptionMode==="ACTUAL";
   const extra=actual?extraResources.filter(line=>!opening.lines.some(item=>item.itemId===line.itemId)).map(line=>({...line,quantity:"0"})):[];
@@ -931,7 +960,8 @@ function EndingForm({ opening, order, party, onChanged, consumptionMode, extraRe
   if (!open) return <div className="order-trade-block">
     <h3>发起结束租用</h3>
     <p className="order-muted">{actual?"填写实际消耗数量，先预览结算金额，再确认提交。":"填写归还时的剩余数量，先预览结算金额，再确认提交。留空或负数不会被当作 0。"}</p>
-    <div className="order-trade-actions"><button type="button" className="button primary" onClick={() => setExpanded(true)}>发起结束租用</button></div>
+    {readOnly ? <p className="order-muted">订单主状态已完成，本页不再提供新的结束租用或结算申请；如有一笔结果未知的申请，请用下方「查询原请求」按原键核对。</p>
+      : <div className="order-trade-actions"><button type="button" className="button primary" onClick={() => setExpanded(true)}>发起结束租用</button></div>}
   </div>;
   return <div className="order-trade-block">
     <div className="order-trade-heading"><h3>发起结束租用</h3>{!locked && checked === null ? <button type="button" className="button quiet button--sm" onClick={() => setExpanded(false)} disabled={busy}>收起</button> : null}</div>
@@ -940,7 +970,7 @@ function EndingForm({ opening, order, party, onChanged, consumptionMode, extraRe
       <tbody>{lines.map((line) => <tr key={line.itemId}>
         <td>{line.name??resourceName(order, line.itemId)}<span className="order-trade-unit">{unitHint(line.name??resourceName(order, line.itemId), line.unit)}</span></td>
         <td>{quantityText(line.unit, line.quantity ?? "0")}</td>
-        <td><input type="text" inputMode="numeric" autoComplete="off" value={raw[line.itemId] ?? ""} placeholder="填写整数" disabled={locked || busy} aria-label={`${line.name??resourceName(order, line.itemId)} ${actual?"实际消耗":"期末剩余"}数量`} aria-invalid={error ? true : undefined} onChange={(event) => update(line.itemId, event.target.value)} /></td>
+        <td><input type="text" inputMode="numeric" autoComplete="off" value={raw[line.itemId] ?? ""} placeholder="填写整数" disabled={locked || busy || readOnly} aria-label={`${line.name??resourceName(order, line.itemId)} ${actual?"实际消耗":"期末剩余"}数量`} aria-invalid={error ? true : undefined} onChange={(event) => update(line.itemId, event.target.value)} /></td>
       </tr>)}</tbody></table>
     {error ? <p className="order-inline-notice" role="alert">{error}</p> : null}
     {unknown ? <UnknownNotice label="结束提交结果未知" message={unknown} onQuery={() => void querySubmit()} onOpenOrder={onChanged} /> : null}
@@ -949,17 +979,17 @@ function EndingForm({ opening, order, party, onChanged, consumptionMode, extraRe
       {checked.preview.reasons?.includes("EARLY_REASON_REQUIRED") && order.earlySettlementDisclosure ? <><p>{order.earlySettlementDisclosure.body}</p><label className="order-trade-consent"><input type="checkbox" checked={termsAccepted} disabled={busy} onChange={(event) => setTermsAccepted(event.target.checked)} /><span>我已阅读并同意上述提前结束规则，具体金额以结算方案为准</span></label></> : null}
       <ConsumedTable order={order} lines={lines} values={Object.fromEntries(checked.lines.map((line) => [line.itemId,"consumedQuantity" in line?line.consumedQuantity:line.remainingQuantity]))} actual={actual} consumed={checked.preview.consumed} />
       <AmountTable rows={amounts} caption={`本版结算金额明细（${party === "renter" ? "租客口径" : "号主口径"}，服务端计算）`} />
-      <div className="order-trade-actions">
+      {readOnly ? <p className="order-muted">订单主状态已完成，本页不再提交新的结算申请；下方金额仅为已读到的预览记录。</p> : <div className="order-trade-actions">
         <button type="button" className="button primary" onClick={() => void submit()} disabled={busy}>{busy ? "提交中…" : checked.preview.reasons?.includes("EARLY_REASON_REQUIRED") ? "提交结束申请" : "提交结算"}</button>
         <button type="button" className="button quiet" onClick={() => setChecked(null)} disabled={busy}>修改数量</button>
-      </div>
-    </div> : (!locked ? <div className="order-trade-actions">
+      </div>}
+    </div> : (!locked && !readOnly ? <div className="order-trade-actions">
       <button type="button" className="button primary" onClick={() => void runPreview()} disabled={busy}>{busy ? "计算中…" : "预览结算金额"}</button>
     </div> : null)}
   </div>;
 }
 
-function DecisionPanel({ version, party, order, onChanged }: { version: SettlementVersion; party: OrderParty; order: Order; onChanged: () => void }) {
+function DecisionPanel({ version, party, order, onChanged, readOnly = false }: { version: SettlementVersion; party: OrderParty; order: Order; onChanged: () => void; readOnly?: boolean }) {
   const session = useUserSession();
   const [busy, setBusy] = useState<"CONFIRM" | "REJECT" | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -1069,6 +1099,7 @@ function DecisionPanel({ version, party, order, onChanged }: { version: Settleme
     {error ? <p className="order-inline-notice" role="alert">{error}</p> : null}
     {version.early && order.earlySettlementDisclosure && !decided && !locked ? <><p>{order.earlySettlementDisclosure.body}</p><label className="order-trade-consent"><input type="checkbox" checked={termsAccepted} disabled={busy !== null} onChange={(event) => setTermsAccepted(event.target.checked)} /><span>我已核对并接受本次提前结束的费用与退款安排</span></label></> : null}
     {decided ? <p className="order-muted">{decided.action === "CONFIRM" ? "你已确认这一版结算" : "你已拒绝这一版结算"} · {formatOrderTime(decided.createdAt)}</p> :
+      readOnly ? <p className="order-muted">订单主状态已完成，本页不再提供新的确认或拒绝操作；如有一笔结果未知的申请，请用上方「查询原请求」按原键核对。</p> :
       locked ? null :
       <div className="order-trade-actions">
         {!confirmable ? <p className="order-inline-notice" role="status">这一版的拟调整金额暂时不可读，确认已暂时停用；可以刷新、拒绝，或先查询原请求。拒绝与查询不受影响。</p> : null}
@@ -1085,6 +1116,22 @@ function activeOpening(openings: SettlementOpening[]): SettlementOpening | null 
   return openings.find((opening) => opening.status === "CONFIRMED") ?? openings[openings.length - 1]!;
 }
 
+/**
+ * The server's `stage` is authoritative when readSettlement() returns the additive field. Codes
+ * that describe an opening/no-stage/unknown state keep the local reconstruction, because the
+ * progress card still needs the opening acks and deadline from the same read; a client-side
+ * rebuild is only a fallback for older projections that omit `stage`.
+ */
+function serverPhase(code: OrderSettlementStage["code"]): OrderStageFacts["phase"] | null {
+  if (code === "POSTED") return "POSTED";
+  if (code === "INTAKE_PENDING") return "INTAKE_PENDING";
+  if (code === "DECISION_REJECTED") return "DECISION_REJECTED";
+  if (code === "DECISION_PENDING") return "DECISION_PENDING";
+  if (code === "DECISION_WAITING") return "DECISION_WAITING";
+  if (code === "RENTING") return "RENTING";
+  return null;
+}
+
 function stageFacts(data: OrderSettlement, opening: SettlementOpening | null, party: OrderParty): OrderStageFacts {
   const myParty = party.toUpperCase();
   const posting = data.posting ?? null;
@@ -1092,7 +1139,7 @@ function stageFacts(data: OrderSettlement, opening: SettlementOpening | null, pa
   const request = data.currentRequest ?? null;
   const myDecision = current ? (current.decisions ?? []).find((decision) => decision.party === myParty) : undefined;
   const rejection = current?.decisions?.find(decision => decision.action === "REJECT");
-  const phase: OrderStageFacts["phase"] = posting
+  const reconstructed: OrderStageFacts["phase"] = posting
     ? "POSTED"
     : request?.kind === "INTAKE" && request.status === "OPEN"
       ? "INTAKE_PENDING"
@@ -1103,9 +1150,16 @@ function stageFacts(data: OrderSettlement, opening: SettlementOpening | null, pa
           : current
             ? "DECISION_WAITING"
             : "RENTING";
+  const stage = data.stage ?? null;
+  const phase = (stage ? serverPhase(stage.code) : null) ?? reconstructed;
   return {
     rentalStarted: data.rentalStarted === true,
     phase,
+    stageCode: stage?.code ?? null,
+    viewerActionRequired: stage?.viewerActionRequired ?? false,
+    autoConfirmDueAt: opening?.autoConfirmDueAt ?? null,
+    openingGenerationState: data.openingGeneration?.state ?? null,
+    openingGenerationRecoveryRequired: data.openingGenerationRecoveryRequired === true,
     early: posting?.early === true,
     postedAt: posting?.postedAt ?? null,
     openingVersionNo: opening?.versionNo ?? null,
@@ -1217,6 +1271,10 @@ function SettlementAction({ order, party, onChanged, onStageFacts }: { order: Or
   </section>;
   if (state.status === "error") return <section className="order-detail-section order-trade-panel" id="order-trade-actions" role="alert"><h2 className="order-section-title">开租与结算</h2><p className="order-inline-notice">结算记录没有读取成功。</p></section>;
   const data = state.data;
+  // The order status is the server-owned terminal fact. A stale settlement read can still report
+  // an in-flight opening or version; keep showing those records but never offer a new write.
+  // Original-key recovery notices live inside the panels and stay available.
+  const terminal = order.status === "COMPLETED";
   const opening = activeOpening(data.openings);
   const current = data.settlement ?? null;
   const myParty = party.toUpperCase();
@@ -1225,13 +1283,13 @@ function SettlementAction({ order, party, onChanged, onStageFacts }: { order: Or
   const openIntake = data.currentRequest?.kind === "INTAKE" && data.currentRequest.status === "OPEN";
   const rejected = current?.decisions?.some(decision => decision.action === "REJECT") === true;
   return <section className="order-detail-section order-trade-panel" id="order-trade-actions" aria-label="开租与结算">
-    <div className="order-trade-heading"><h2 className="order-section-title">开租与结算</h2><button type="button" className="button quiet button--sm" onClick={refresh}><RefreshCw size={14} aria-hidden="true" />刷新</button></div>
+    <div className="order-trade-heading"><h2 className="order-section-title">{terminal ? "开租与结算记录" : "开租与结算"}</h2><button type="button" className="button quiet button--sm" onClick={refresh}><RefreshCw size={14} aria-hidden="true" />刷新</button></div>
     {!opening ? <div className="order-trade-block"><h3>期初库存</h3><p className="order-muted">{data.openingGeneration?.state === "REVIEW_REQUIRED" || data.openingGenerationRecoveryRequired
       ? data.openingGeneration?.reason === "LEGACY_V1_QUOTE_REVIEW"
         ? "本单使用旧版建单，缺少个性化资金/包赔依据，系统不会自动生成开租清单；请联系客服按未开租取消退款或使用新版重新下单。"
         : "付款已接纳，但本单冻结资料不足或自动生成记录暂不可用，开租清单正在等待客服核对。可点本区右上角「刷新」重新读取，或用页面上方「下一步」联系客服办理；用户侧不会自行生成清单或交付。订单页与聊天不受影响。"
       : "付款接纳后系统会按本单冻结报价生成开租清单；当前尚未读取到清单。可点本区右上角「刷新」重新读取，或用页面上方「下一步」联系客服核对；用户侧不会自行生成清单或交付，订单群准备好不等于已经开租。"}</p></div>
-      : <OpeningPanel opening={opening} order={order} party={party} onChanged={refresh} />}
+      : <OpeningPanel opening={opening} order={order} party={party} onChanged={refresh} readOnly={terminal} />}
     {opening && data.rentalStarted ? <>
       {posting ? <PostingResult data={data} order={order} party={party} posting={posting} /> :
         openIntake ? <div className="order-trade-block"><h3>结束申请待客服处理</h3><p className="order-muted">已提交期末数据，等待受权客服核实原因并复核；复核与双方确认完成后结算生效。期间不会重复受理同一份结束申请。</p></div> :
@@ -1239,19 +1297,19 @@ function SettlementAction({ order, party, onChanged, onStageFacts }: { order: Or
               <h3>{myDecision?.action === "REJECT" ? "你已拒绝" : "未达成一致的结算"}第{current.versionNo}版</h3>
               <p className="order-muted">拒绝不会使这一版生效；服务端会按新的期末数据或人工调整生成新版本，请按最新版本重新核对后再决定。</p>
               <AmountTable rows={decisionAmountRows(party, current)} caption={`被拒绝版本金额明细（${party === "renter" ? "租客口径" : "号主口径"}${isAdjustedVersion(current) ? "，含人工调整" : ""}）`} />
-            </div> : current && !myDecision ? <DecisionPanel version={current} party={party} order={order} onChanged={refresh} /> :
+            </div> : current && !myDecision ? <DecisionPanel version={current} party={party} order={order} onChanged={refresh} readOnly={terminal} /> :
               current && myDecision ? <div className="order-trade-block"><h3>等待对方确认 <span className="order-trade-tag">第{current.versionNo}版</span></h3><p className="order-muted">你已在这一版结算上完成操作；金额变化会生成新版本并要求重新确认。</p>
                 <AmountTable rows={decisionAmountRows(party, current)} caption={`当前版本金额明细（${party === "renter" ? "租客口径" : "号主口径"}${isAdjustedVersion(current) ? "，含人工调整" : ""}）`} />
                 <RecordList title="结算记录" records={(current.decisions ?? []).map((decision) => ({ label: `${partyLabel(decision.party)}${settlementDecisionLabel(decision.action)}`, time: decision.createdAt ?? null }))} />
               </div> :
-                <EndingForm opening={opening} order={order} party={party} onChanged={refresh} consumptionMode={data.consumptionMode} extraResources={data.extraResources} />}
+                <EndingForm opening={opening} order={order} party={party} onChanged={refresh} consumptionMode={data.consumptionMode} extraResources={data.extraResources} readOnly={terminal} />}
     </> : null}
     {opening && !posting && data.versions.length > 1 ? <div className="order-trade-block"><h3>历史结算版本</h3><VersionHistory versions={data.versions} current={current} /></div> : null}
   </section>;
 }
 
-export function OrderTradeActions({ order, party, onChanged, onStageFacts }: { order: Order; party: OrderParty; onChanged: () => void; onStageFacts?: (facts: OrderStageFacts | null, failed: boolean) => void }) {
-  if (order.status === "PENDING_PAYMENT") return <PaymentAction order={order} party={party} onChanged={onChanged} />;
+export function OrderTradeActions({ order, party, onChanged, onStageFacts, onPaymentFacts }: { order: Order; party: OrderParty; onChanged: () => void; onStageFacts?: (facts: OrderStageFacts | null, failed: boolean) => void; onPaymentFacts?: (facts: OrderPaymentFacts | null) => void }) {
+  if (order.status === "PENDING_PAYMENT") return <PaymentAction order={order} party={party} onChanged={onChanged} onPaymentFacts={onPaymentFacts} />;
   if (order.status === "PAID" || order.status === "COMPLETED") return <SettlementAction order={order} party={party} onChanged={onChanged} onStageFacts={onStageFacts} />;
   if (order.status === "CANCELLED") return <section className="order-detail-section order-trade-panel" id="order-trade-actions" aria-label="订单收尾">
     <h2 className="order-section-title">订单收尾</h2>

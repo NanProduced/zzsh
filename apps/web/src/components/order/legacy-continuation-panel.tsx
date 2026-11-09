@@ -28,7 +28,15 @@ function safePending(userId: string, orderId: string): PendingState {
   if (kind === "propose") { try { parseLegacyQuantitiesInput(intent.body.quantities); } catch { return { state: "UNREADABLE", intent: null }; } }
   return result;
 }
-export function LegacyContinuationPanel({ orderId, party, onOrderChanged }: { orderId: string; party: "renter" | "owner"; onOrderChanged?: () => void }) {
+/** Read-only report for the surrounding workspace; the panel still owns every write. */
+export type LegacyContinuationReport = {
+  scope: string;
+  orderId: string;
+  continuation: LegacyContinuation | null;
+  error: string;
+  pending: string;
+};
+export function LegacyContinuationPanel({ orderId, party, onOrderChanged, onContinuation }: { orderId: string; party: "renter" | "owner"; onOrderChanged?: () => void; onContinuation?: (report: LegacyContinuationReport) => void }) {
   const session = useUserSession(), scope = `${session.status}:${session.userId}:${session.identityVersion}:${orderId}:${party}`;
   const live = useRef({ scope, read: 0, operation: 0 });
   if (live.current.scope !== scope) live.current = { scope, read: live.current.read + 1, operation: live.current.operation + 1 };
@@ -45,6 +53,13 @@ export function LegacyContinuationPanel({ orderId, party, onOrderChanged }: { or
   const data = result.scope === scope ? result.value : null, pendingValue = pending.scope === scope ? pending.value : { state: "NONE" as const, intent: null };
   const loading = busy.scope === scope && busy.value, blocked = loading || pendingValue.state !== "NONE";
   const fields = form.scope === scope ? form.value : {};
+  // Report the read outcome (and any saved original-key intent) to the surrounding progress card.
+  // A ref keeps a fresh callback from restarting the continuation read.
+  const notify = useRef(onContinuation);
+  notify.current = onContinuation;
+  useEffect(() => {
+    notify.current?.({ scope, orderId, continuation: data, error: error.scope === scope ? error.value : "", pending: pendingValue.state });
+  }, [scope, orderId, data, pendingValue.state, error.scope, error.value]);
   useEffect(() => {
     const abort = new AbortController(), ticket = ++live.current.read;
     setResult({ scope, value: null }); setPreview({ scope, value: null }); setConfirmation({ scope, value: null }); setResolved({ scope, value: null });

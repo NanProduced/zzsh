@@ -2892,3 +2892,107 @@ test("the other party rejecting a version stops stale confirmation prompts and d
     } finally { await probe.dispose(); }
   });
 });
+
+/* ---- Master first-review regressions (order-side status/action mapping) ---- */
+
+const detailProps = (order) => ({ orderId: order.id, party: "renter", status: "", state: { status: "ready", order, error: null }, onRetry() {}, onLogin() {}, onChanged() {} });
+const settle = async (window, probe, needle) => {
+  for (let i = 0; i < 16 && !probe.host.textContent.includes(needle); i++) await React.act(async () => { await tick(); });
+};
+
+test("master review: a completed order never exposes opening or ending writes even with a stale settlement read", async () => withDom(async window => {
+  const OrderDetail = loadComponent("apps/web/src/components/order/order-detail.tsx", session("user_A")).OrderDetail;
+  for (const data of [
+    { ...settlementBody, rentalStarted: true, openings: [{ ...opening, confirmedAt: "2026-11-09T01:00:00Z" }] },
+    { ...settlementBody, rentalStarted: false, openings: [{ ...opening, status: "DRAFT", acks: [], confirmedAt: null }] },
+  ]) {
+    const order = { ...paidOrder, status: "COMPLETED" };
+    const probe = createProbe(window, OrderDetail, detailProps(order), async url => String(url).includes("/settlement") ? json(data) : json({}));
+    try {
+      await probe.render();
+      await settle(window, probe, "不再提供开租或结算操作");
+      assert.match(probe.host.querySelector(".order-progress-card").textContent, /不再提供开租或结算操作/);
+      const trade = probe.host.querySelector("#order-trade-actions");
+      assert.ok(trade, "the settlement records remain readable");
+      assert.match(trade.textContent, /开租与结算记录/);
+      const writes = [...trade.querySelectorAll("button")].filter(node => !node.disabled && /发起结束租用|确认期初并开租|预览结算金额|提交结算|确认结算/.test(node.textContent ?? ""));
+      assert.deepEqual(writes.map(node => node.textContent), []);
+    } finally { await probe.dispose(); }
+  }
+}));
+
+test("master review: 联系客服 opens a service consultation, not the order-group panel", async () => withDom(async window => {
+  const OrderDetail = loadComponent("apps/web/src/components/order/order-detail.tsx", session("user_A")).OrderDetail;
+  const data = { ...settlementBody, rentalStarted: false, openings: [] }, events = [];
+  const groups = () => events.push("order-group"), support = event => events.push(event.detail?.type ?? "open-support");
+  window.addEventListener("zzsh:order-groups", groups); window.addEventListener("zzsh:open-support", support);
+  const probe = createProbe(window, OrderDetail, detailProps(paidOrder), async url => String(url).includes("/settlement") ? json(data) : json({}));
+  try {
+    await probe.render();
+    await settle(window, probe, "联系客服核对开租清单");
+    const button = probe.host.querySelector(".order-progress-card button.primary");
+    assert.equal(button?.textContent.trim(), "联系客服");
+    await React.act(async () => { button.click(); await tick(); });
+    assert.deepEqual(events, ["SERVICE"]);
+  } finally { window.removeEventListener("zzsh:order-groups", groups); window.removeEventListener("zzsh:open-support", support); await probe.dispose(); }
+}));
+
+test("master review: an unknown channel payment result is never presented as 完成支付", async () => withDom(async window => {
+  const OrderDetail = loadComponent("apps/web/src/components/order/order-detail.tsx", session("user_A")).OrderDetail;
+  const order = { ...paidOrder, status: "PENDING_PAYMENT", paymentOpen: true, cancelOpen: true, expiredAwaitingCancel: false };
+  const channel = { contractVersion: "order-payment-request.v1", dataOrigin: "JOINPAY_CANDIDATE", capability: { channelEnabled: true, productionPaymentCapability: true, methods: ["WEIXIN_NATIVE"], evidenceProfile: "JOINPAY_AGG_2_6_MD5" }, order: { id: order.id, displayNo: "SYNTHETIC", status: "PENDING_PAYMENT", paidAt: null }, request: { id: "payreq_1", state: "UNKNOWN", method: "WEIXIN_NATIVE", amount: { cents: "125", currency: "CNY" }, updatedAt: "2026-10-24T10:00:00Z", recovery: null }, projection: { displayState: "CONFIRMING", actionBlockedReason: "CHANNEL_RESULT_UNKNOWN" }, paymentAction: null, payment: null };
+  const probe = createProbe(window, OrderDetail, detailProps(order), async url => String(url).includes("channel-payment-requests") ? json(channel) : json({}));
+  try {
+    await probe.render();
+    await settle(window, probe, "支付结果正在确认");
+    const card = probe.host.querySelector(".order-progress-card");
+    assert.equal(card.querySelector("h2").textContent, "支付结果正在确认");
+    assert.notEqual(card.querySelector("button.primary")?.textContent.trim(), "去支付");
+    assert.doesNotMatch(card.textContent, /完成支付/);
+  } finally { await probe.dispose(); }
+}));
+
+test("master review: a progress primary action focuses the matching control, never 刷新", async () => withDom(async window => {
+  const OrderDetail = loadComponent("apps/web/src/components/order/order-detail.tsx", session("user_A")).OrderDetail;
+  const data = { ...settlementBody, openings: [{ ...opening, confirmedAt: "2026-11-09T01:00:00Z" }] };
+  const probe = createProbe(window, OrderDetail, detailProps(paidOrder), async url => String(url).includes("/settlement") ? json(data) : json({}));
+  try {
+    await probe.render();
+    await settle(window, probe, "发起结束租用");
+    const card = probe.host.querySelector(".order-progress-card");
+    assert.match(card.textContent, /发起结束租用/);
+    await React.act(async () => { card.querySelector("button.primary").click(); await tick(); });
+    assert.equal(window.document.activeElement?.textContent, "发起结束租用");
+  } finally { await probe.dispose(); }
+}));
+
+test("master review: no frozen auto-confirm deadline means no auto-confirm promise", async () => withDom(async window => {
+  const OrderDetail = loadComponent("apps/web/src/components/order/order-detail.tsx", session("user_A")).OrderDetail;
+  const draft = { ...opening, status: "DRAFT", confirmedAt: null, autoConfirmDueAt: null, acks: [{ party: "RENTER", source: "PARTY" }] };
+  const data = { ...settlementBody, rentalStarted: false, openings: [draft] };
+  const probe = createProbe(window, OrderDetail, detailProps(paidOrder), async url => String(url).includes("/settlement") ? json(data) : json({}));
+  try {
+    await probe.render();
+    await settle(window, probe, "等待对方确认期初清单");
+    const card = probe.host.querySelector(".order-progress-card");
+    assert.doesNotMatch(card.textContent, /按本单冻结的截止时间由系统自动确认/);
+    assert.match(card.textContent, /不会承诺系统会自动确认/);
+    assert.doesNotMatch(probe.host.querySelector("#order-trade-actions").textContent, /将于.*自动确认/);
+  } finally { await probe.dispose(); }
+}));
+
+test("master review: legacy terminal pages never promise unconditional continuation", async () => withDom(async window => {
+  const Legacy = loadComponent("apps/web/src/components/order/legacy-order-workspace.tsx", session("user_A")).LegacyOrderWorkspace;
+  for (const status of ["PAID", "COMPLETED", "CANCELLED"]) {
+    const row = { id: "legacy_1", displayNo: "OLD-1", title: "历史记录", party: "renter", status, source: { origin: "LEGACY", statusLabel: status }, readOnly: true, actions: [], account: { id: null, displayNo: null, readable: false }, legacyAmounts: { required: money("10.00"), paid: money("10.00"), deposit: null, refund: null } };
+    const probe = createProbe(window, Legacy, { party: "renter", orderId: row.id }, async () => json({ order: row }));
+    try {
+      await probe.render();
+      const card = probe.host.querySelector('[data-testid="order-legacy-progress"]');
+      assert.ok(card);
+      assert.doesNotMatch(card.textContent, /由你或客服处理/);
+      assert.doesNotMatch(card.textContent, /预览、提交、确认、拒绝与结果恢复能力/);
+      assert.doesNotMatch(card.textContent, /查看订单续办/);
+    } finally { await probe.dispose(); }
+  }
+}));

@@ -6,9 +6,9 @@ import { useUserSession } from "@/components/session/user-session-provider";
 import { orderApi, formatOrderMoney, formatOrderTime, OrderRequestError, type LegacyOrder, type LegacyOrderPage, type OrderParty, type OrderStatusFilter, type OrderSearchFilters } from "@/lib/order-client";
 import { orderTermLabel, orderUrl } from "@/components/order/order-presentation";
 import "./order.css";
-import { LegacyContinuationPanel } from "./legacy-continuation-panel";
+import { LegacyContinuationPanel, type LegacyContinuationReport } from "./legacy-continuation-panel";
 import { OrderAccountDossier } from "./order-account-dossier";
-import { orderAccountTitle, orderAmountFacts, orderListingSourceLabel, orderResourceLines, orderUsesResourceSummary } from "@/lib/order-display";
+import { legacyProgressView, orderAccountTitle, orderAmountFacts, orderListingSourceLabel, orderResourceLines, orderUsesResourceSummary, type LegacyProgressReport, type OrderProgressAction } from "@/lib/order-display";
 import { requestSupportDialog } from "@/components/support/support-dialog-request";
 
 export function legacyOrderHref(party: OrderParty, page = 1, orderId?: string, accountId?: string) {
@@ -23,6 +23,7 @@ export function LegacyOrderWorkspace({ party, orderId, page: pageText, accountId
   const page = pageText && /^[1-9]\d{0,6}$/.test(pageText) ? Number(pageText) : 1;
   const scope = `${session.status}:${session.userId}:${session.identityVersion}:${party}:${page}:${orderId ?? ""}:${accountId ?? ""}`;
   const [reload, setReload] = useState(0);
+  const [continuation, setContinuation] = useState<{ scope: string; value: LegacyContinuationReport | null }>({ scope: "", value: null });
   const [state, setState] = useState<{ scope: string; loading: boolean; data: LegacyOrderPage | LegacyOrder | null; error: string }>({ scope, loading: true, data: null, error: "" });
   useEffect(() => {
     const abort = new AbortController();
@@ -72,7 +73,7 @@ export function LegacyOrderWorkspace({ party, orderId, page: pageText, accountId
   const accountNo = data.account.readable ? data.account.displayNo : null;
   const isOwner = party === "owner";
 
-  const handleSupportClick = (event: React.MouseEvent<HTMLButtonElement>) => {
+  const handleSupportClick = (event: React.MouseEvent<HTMLElement>) => {
     const valid = /^legacy_order_[a-f0-9]{40}$/.test(data.id) && Boolean(data.displayNo);
     requestSupportDialog("SERVICE", event.currentTarget, valid ? {
       userId: session.userId!,
@@ -178,7 +179,7 @@ export function LegacyOrderWorkspace({ party, orderId, page: pageText, accountId
 
       <div className="order-legacy-side-col">
         {/* 客服履约与交付保障卡片 */}
-        <section className="account-module-card order-fulfillment-support-card">
+        <section className="account-module-card order-fulfillment-support-card" id="order-legacy-support">
           <div className="order-fulfillment-support-header">
             <div className="support-header-icon"><MessageSquare size={16} aria-hidden="true" /></div>
             <div>
@@ -222,34 +223,62 @@ export function LegacyOrderWorkspace({ party, orderId, page: pageText, accountId
       </div>
     </div>
 
-    {/* 旧平台迁入单的「订单续办」，不是新订单续租；不新增订单评价 */}
-    <section className="order-progress-card" data-tone="done" data-testid="order-legacy-progress" aria-label="旧订单当前进度与下一步">
-      <div className="order-progress-head">
-        <span className="order-progress-label">下一步</span>
-        <span className="order-progress-owner">由你或客服处理</span>
-      </div>
-      <h2 className="order-progress-title">查看订单事实与续办</h2>
-      <p className="order-progress-note">这是迁入的历史订单。下方「订单续办」保留本单原有的预览、提交、确认、拒绝与结果恢复能力，按本单可核实的旧价与旧付款事实办理，不套用当前会员价格；账号资料为迁入时记录，不是下单时的冻结快照。证据缺失或金额存疑请联系客服核对。已完成或取消的历史单只展示可信事实、原退款记录与客服入口，历史记录金额不代表渠道到账。</p>
-      <div className="order-progress-actions">
-        {/* A link, not a second support button: the page already has one 联系客服 control and
-            duplicate exits make the legacy workspace harder to read on narrow screens. */}
-        <a className="button secondary button--sm" href="#order-legacy-continuation">查看订单续办</a>
-      </div>
-      <details className="order-progress-facts">
-        <summary>本页已确认的事实</summary>
-        <ul>
-          <li>历史订单的金额、退款与账号资料以本单可核实的记录为准，页面不自行计算或补零</li>
-          <li>历史记录金额与原退款记录都不代表渠道到账</li>
-        </ul>
-      </details>
-    </section>
-    <div id="order-legacy-continuation">
-      <LegacyContinuationPanel orderId={data.id} party={party} onOrderChanged={() => {
-        setState({ scope, loading: true, data: null, error: "" });
-        setReload(n => n + 1);
-        onOrderChanged?.();
-      }}/>
-    </div>
+    {/* 旧平台迁入单的「订单续办」，不是新订单续租；不新增订单评价。
+        卡片的事实只来自续办读取：资料可用性、实际开放的能力、阶段、退款记录与待恢复原键。 */}
+    {(() => {
+      const reportScope = `${session.status}:${session.userId}:${session.identityVersion}:${party}:${data.id}`;
+      const report = continuation.scope === reportScope && continuation.value?.orderId === data.id ? continuation.value : null;
+      const pending = report?.pending ?? "NONE";
+      const legacyView = legacyProgressView({
+        status: data.status,
+        party,
+        availability: report?.continuation?.availability ?? null,
+        capabilities: report?.continuation?.capabilities ?? [],
+        stage: report?.continuation?.stage ?? null,
+        isSettle: report?.continuation?.isSettle ?? null,
+        reasons: report?.continuation?.reasons ?? [],
+        refundProgress: (report?.continuation?.duties ?? []).filter(duty => duty.kind === "RENTER_REFUND").map(duty => duty.refundProgress),
+        pending: (["NONE", "VALID", "UNREADABLE", "UNKNOWN"].includes(pending) ? pending : "UNKNOWN") as LegacyProgressReport["pending"],
+        readFailed: Boolean(report?.error),
+      });
+      // The page already owns exactly one 联系客服 button in its support card. Progress-card
+      // actions are links to existing anchors so a second button never competes with it, while
+      // the support link still opens the same consultation dialog.
+      const actionNode = (action: OrderProgressAction, primary: boolean) => {
+        const className = primary ? "button primary" : "button secondary button--sm";
+        if (action.target === "legacy") return <a key={action.label} className={className} href="#order-legacy-continuation">{action.label}</a>;
+        if (action.target === "list") return <Link key={action.label} className={className} href={legacyOrderHref(party)} scroll={false}>{action.label}</Link>;
+        if (action.target === "support") return <a key={action.label} className={className} href="#order-legacy-support" onClick={(event) => { event.preventDefault(); handleSupportClick(event); }}>{action.label}</a>;
+        return <a key={action.label} className={className} href="#order-legacy-progress" onClick={(event) => { event.preventDefault(); setReload(n => n + 1); }}>{action.label}</a>;
+      };
+      return <>
+        <section className="order-progress-card" id="order-legacy-progress" data-tone={legacyView.tone} data-testid="order-legacy-progress" aria-label="旧订单当前进度与下一步">
+          <div className="order-progress-head">
+            <span className="order-progress-label">下一步</span>
+            <span className="order-progress-owner">{legacyView.owner === "暂无" ? "暂无待处理动作" : `由${legacyView.owner}处理`}</span>
+          </div>
+          <h2 className="order-progress-title">{legacyView.title}</h2>
+          <p className="order-progress-note">{legacyView.note}</p>
+          <div className="order-progress-actions">
+            {actionNode(legacyView.primary, true)}
+            {legacyView.secondary.map(action => actionNode(action, false))}
+          </div>
+          <details className="order-progress-facts" open={legacyView.tone === "unknown"}>
+            <summary>本页已确认的事实</summary>
+            <ul>{legacyView.known.map(fact => <li key={fact}>{fact}</li>)}</ul>
+          </details>
+        </section>
+        <div id="order-legacy-continuation">
+          <LegacyContinuationPanel orderId={data.id} party={party}
+            onContinuation={(next) => setContinuation({ scope: reportScope, value: next })}
+            onOrderChanged={() => {
+              setState({ scope, loading: true, data: null, error: "" });
+              setReload(n => n + 1);
+              onOrderChanged?.();
+            }}/>
+        </div>
+      </>;
+    })()}
 
     {/* 底部复用完整账号档案卡片 */}
     {data.account.id || data.listingFacts || resources.length ? (

@@ -467,9 +467,18 @@ export type SettlementPosting = {
     postedRenterRefundCents?: string;
   } | null;
 };
+/** Server-owned stage summary returned by readSettlement(); absent on older projections. */
+export type OrderSettlementStage = {
+  code: "NONE" | "OPENING_PENDING" | "RENTING" | "INTAKE_PENDING" | "DECISION_PENDING" | "DECISION_WAITING" | "DECISION_REJECTED" | "POSTED" | "UNKNOWN";
+  label: string | null;
+  viewerActionRequired: boolean;
+  settlementVersionNo: number | null;
+};
 export type OrderSettlement = {
   orderId: string;
   revision?: string;
+  /** Additive settlementStageOf() result. Prefer it over a client-side reconstruction when present. */
+  stage?: OrderSettlementStage | null;
   rentalStarted?: boolean;
   consumptionMode?: "REMAINING" | "ACTUAL" | "UNAVAILABLE";
   extraResources?: SettlementLine[];
