@@ -2855,6 +2855,30 @@ test("core experience: refund conflicts stay expanded and owner null projections
   });
 });
 
+test("progress card: both parties get one primary next step, facts on demand and no invented arrival", async () => {
+  await withDom(async (window) => {
+    for (const party of ["renter", "owner"]) {
+      for (const [status, data] of [["CANCELLED", postedSettlement], ["COMPLETED", postedSettlement]]) {
+        const probe = await detailProbe(window, { ...paidOrder, status }, party, data);
+        try {
+          const card = probe.host.querySelector(".order-progress-card");
+          assert.ok(card, `${party}/${status} renders the progress card`);
+          assert.equal(card.getAttribute("aria-label"), "当前进度与下一步");
+          assert.equal(card.querySelectorAll(".order-progress-actions .button.primary").length, 1,
+            `${party}/${status} offers exactly one primary next step`);
+          const summary = card.querySelector(".order-progress-facts > summary");
+          assert.ok(summary, "known facts are behind a keyboard-reachable disclosure");
+          assert.equal(summary.tagName, "SUMMARY");
+          assert.match(card.textContent, /退款|客服|售后|进度/);
+          // "不代表渠道退款已到账" is a disclaimer, not an arrival claim; only a bare claim is a bug.
+          assert.doesNotMatch(card.textContent, /(?<!不代表)渠道退款已到账|退款成功|自动上号|自动交付|订单评价|新单续租/);
+          assert.doesNotMatch(card.textContent, /确认结算|确认期初并开租|发起结束租用/, "terminal states never re-open a write");
+        } finally { await probe.dispose(); }
+      }
+    }
+  });
+});
+
 test("the other party rejecting a version stops stale confirmation prompts and does not claim I rejected", async () => {
   await withDom(async window => {
     const rejected = { ...manualVersion, decisions: [{ party: 'OWNER', action: 'REJECT', reason: '数量需重核' }] };

@@ -7,7 +7,7 @@ import { ArrowLeft, Check, CheckCircle2, CircleSlash, Clock3, Copy, Gamepad2, Me
 import { formatOrderMoney, formatOrderTime as timeText, orderApi, OrderRequestError, type Order, type OrderImProjection, type OrderParty, type OrderStatusFilter, type OrderSearchFilters, type PersonalAbnormalResponsibility, type PersonalRefundIntent, type PersonalRefundRead } from "@/lib/order-client";
 import { useUserSession } from "@/components/session/user-session-provider";
 import { useIdentityReset } from "@/components/session/identity-reset";
-import { ORDER_FULFILLMENT_STEPS, orderFulfillmentStepStates, orderFulfillmentSummary, orderLineQuantityText, orderLinesTotalLabel, orderListingSourceLabel, orderRentalModeLabel, orderSettlementStageLabel, orderUnitPriceText, unitLabel, orderAccountTitle, orderResourceLines } from "@/lib/order-display";
+import { ORDER_FULFILLMENT_STEPS, orderFulfillmentStepStates, orderFulfillmentSummary, orderLineQuantityText, orderLinesTotalLabel, orderListingSourceLabel, orderRentalModeLabel, orderSettlementStageLabel, orderUnitPriceText, unitLabel, orderAccountTitle, orderResourceLines, orderProgressView, type OrderProgressAction, type OrderProgressView } from "@/lib/order-display";
 import { OrderTradeActions, type OrderStageFacts } from "@/components/order/order-trade-actions";
 import { OrderAftersale } from "./order-aftersale";
 import { PrestartTerminationPanel } from "@/components/order/prestart-termination-panel";
@@ -73,11 +73,84 @@ function AttentionBlock({ attention, party, orderId, onRetry }: { attention: Att
     {/* One cluster. Talking to the person who fulfils the order is the primary move; trying the read
         again is a link, not a second button competing with it. */}
     <div className="order-attention-actions">
-      {attention.actions.includes("group") ? <button type="button" className="button primary button--sm" data-support-trigger onClick={() => window.dispatchEvent(new CustomEvent("zzsh:order-groups", { detail: { party, orderId } }))}><MessageCircle size={15} aria-hidden="true" />打开订单群列表</button> : null}
-      {attention.actions.includes("browse") ? <Link href="/accounts" className="button primary button--sm">浏览可租账号</Link> : null}
-      {attention.actions.includes("manage") ? <Link href="/account?view=accounts" className="button primary button--sm">管理上架账号</Link> : null}
+      {attention.actions.includes("group") ? <button type="button" className="button secondary button--sm" data-support-trigger onClick={() => window.dispatchEvent(new CustomEvent("zzsh:order-groups", { detail: { party, orderId } }))}><MessageCircle size={15} aria-hidden="true" />打开订单群列表</button> : null}
+      {attention.actions.includes("browse") ? <Link href="/accounts" className="button secondary button--sm">浏览可租账号</Link> : null}
+      {attention.actions.includes("manage") ? <Link href="/account?view=accounts" className="button secondary button--sm">管理上架账号</Link> : null}
       {attention.actions.includes("retry") ? <button type="button" className="order-attention-link" onClick={onRetry}>重试读取</button> : null}
     </div>
+  </section>;
+}
+
+/**
+ * One decision, one primary action, facts on demand. The primary action only locates the page's
+ * single real control (or the support host); it never submits a write, so there is no second
+ * idempotency path and no duplicate capability to keep in sync with the server.
+ */
+const PROGRESS_ANCHORS: Partial<Record<OrderProgressAction["target"], string>> = {
+  trade: "order-trade-actions",
+  legacy: "order-legacy-continuation",
+  refund: "order-refund-section",
+};
+
+function OrderProgressCard({ view, party, orderId, backHref, onRefresh }: {
+  view: OrderProgressView;
+  party: OrderParty;
+  orderId: string;
+  backHref: string;
+  onRefresh: () => void;
+}) {
+  const focusAnchor = (id: string) => {
+    if (typeof document === "undefined") return;
+    const target = document.getElementById(id);
+    // A refund section can be legitimately absent (not applicable / not readable yet). Never let a
+    // primary action become a dead click: land on the detail body and keep keyboard focus somewhere.
+    const fallback = target ? null : document.getElementById("order-detail-body");
+    const node = target ?? fallback;
+    if (!node) return;
+    try {
+      const reduced = typeof window !== "undefined" && typeof window.matchMedia === "function"
+        && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+      node.scrollIntoView?.({ behavior: reduced ? "auto" : "smooth", block: "start" });
+    } catch { /* scrolling is a convenience, never a fact about the order */ }
+    if (fallback) {
+      try { fallback.focus?.({ preventScroll: true }); } catch { /* focus is best-effort */ }
+      return;
+    }
+    const focusable = node.querySelector<HTMLElement>("button.button.primary, a.button.primary, button.button, a.button, summary, input, [tabindex]");
+    try { focusable?.focus?.({ preventScroll: true }); } catch { /* focus is best-effort */ }
+  };
+  const run = (action: OrderProgressAction) => {
+    if (action.target === "refresh") { onRefresh(); return; }
+    if (action.target === "groups") {
+      window.dispatchEvent(new CustomEvent("zzsh:order-groups", { detail: { party, orderId } }));
+      return;
+    }
+    const anchor = PROGRESS_ANCHORS[action.target];
+    if (anchor) focusAnchor(anchor);
+  };
+  const actionNode = (action: OrderProgressAction, primary: boolean) => {
+    const icon = action.target === "groups" ? <MessageCircle size={15} aria-hidden="true" />
+      : action.target === "refresh" ? <RefreshCw size={15} aria-hidden="true" /> : null;
+    const href = action.target === "list" ? backHref : action.href;
+    const className = primary ? "button primary" : "button quiet button--sm";
+    if (href) return <Link key={`${action.target}:${action.label}`} className={className} href={href} scroll={false}>{icon}{action.label}</Link>;
+    return <button key={`${action.target}:${action.label}`} type="button" className={className} onClick={() => run(action)}>{icon}{action.label}</button>;
+  };
+  return <section className="order-progress-card" data-tone={view.tone} data-terminal={view.noNewTransaction ? "true" : undefined} data-testid="order-progress-card" aria-label="当前进度与下一步">
+    <div className="order-progress-head">
+      <span className="order-progress-label">下一步</span>
+      <span className="order-progress-owner">{view.pendingRead ? "进度核对中" : view.owner === "暂无" ? "暂无待处理动作" : `由${view.owner}处理`}</span>
+    </div>
+    <h2 className="order-progress-title">{view.title}</h2>
+    <p className="order-progress-note">{view.note}</p>
+    <div className="order-progress-actions">
+      {view.primary ? actionNode(view.primary, true) : null}
+      {view.secondary.map(action => actionNode(action, false))}
+    </div>
+    <details className="order-progress-facts" open={view.pendingRead || view.tone === "unknown"}>
+      <summary>本页已确认的事实</summary>
+      <ul>{view.known.map(fact => <li key={fact}>{fact}</li>)}</ul>
+    </details>
   </section>;
 }
 
@@ -371,14 +444,14 @@ function OrderOwnerRefundSummary({ order }: { order: Order }) {
   }, [order.id, order.status, reload, scope, userId]);
   if (!userId) return null;
   const refresh = <button type="button" className="button quiet button--sm" disabled={visible.status === "loading"} onClick={() => setReload(value => value + 1)}><RefreshCw size={14} aria-hidden="true" />刷新</button>;
-  if (visible.status === "loading") return <section className="order-detail-section order-refund-block" aria-label="退款进度"><h2 className="order-section-title">退款进度</h2><p className="order-muted" role="status">正在加载退款进度…</p></section>;
+  if (visible.status === "loading") return <section className="order-detail-section order-refund-block" id="order-refund-section" aria-label="退款进度"><h2 className="order-section-title">退款进度</h2><p className="order-muted" role="status">正在加载退款进度…</p></section>;
   if (visible.status === "error") {
-    return <section className="order-detail-section order-refund-block" aria-label="退款进度"><div className="order-refund-heading"><h2 className="order-section-title">退款进度</h2>{refresh}</div><p className="order-muted" role="status">退款进度暂时无法查看，请稍后重试。</p></section>;
+    return <section className="order-detail-section order-refund-block" id="order-refund-section" aria-label="退款进度"><div className="order-refund-heading"><h2 className="order-section-title">退款进度</h2>{refresh}</div><p className="order-muted" role="status">退款进度暂时无法查看，请稍后重试。</p></section>;
   }
   const read = visible.read;
   if (!read || read.progress === "NOT_APPLICABLE") return null;
   const open = ["PROCESSING", "NEEDS_REVIEW", "UNKNOWN"].includes(read.progress);
-  return <section className="order-detail-section order-refund-block" aria-label="退款进度" data-progress={read.progress}>
+  return <section className="order-detail-section order-refund-block" id="order-refund-section" aria-label="退款进度" data-progress={read.progress}>
     <div className="order-refund-heading"><h2 className="order-section-title">退款进度</h2>{refresh}</div>
     <details className="order-secondary-details order-refund-details" open={open}>
       <summary><strong>{read.label}</strong><span>{read.note}</span></summary>
@@ -416,11 +489,11 @@ function OrderRefundSection({ order }: { order: Order }) {
   }, [order.id, order.status, reload, scope, userId]);
   if (!userId) return null;
   const refresh = <button type="button" className="button quiet button--sm" disabled={visible.status === "loading"} onClick={() => setReload(value => value + 1)}><RefreshCw size={14} aria-hidden="true" />刷新</button>;
-  if (visible.status === "loading") return <section className="order-detail-section order-refund-block" aria-label="退款进度"><h2 className="order-section-title">退款进度</h2><p className="order-muted" role="status">正在加载退款进度…</p></section>;
+  if (visible.status === "loading") return <section className="order-detail-section order-refund-block" id="order-refund-section" aria-label="退款进度"><h2 className="order-section-title">退款进度</h2><p className="order-muted" role="status">正在加载退款进度…</p></section>;
   if (visible.status === "error") {
     const error = visible.error ?? new OrderRequestError(0, null);
     const copy = error.status === 401 || error.code === "UNAUTHENTICATED" ? "登录状态已变化，请重新登录后查看。" : "退款进度暂时无法查看，请稍后重试。";
-    return <section className="order-detail-section order-refund-block" aria-label="退款进度"><div className="order-refund-heading"><h2 className="order-section-title">退款进度</h2>{refresh}</div><div className="order-notice is-warning" role="alert"><CircleSlash size={17} aria-hidden="true" /><div><strong>{copy}</strong>{error.requestId ? <span>查询编号：{error.requestId}</span> : null}</div></div></section>;
+    return <section className="order-detail-section order-refund-block" id="order-refund-section" aria-label="退款进度"><div className="order-refund-heading"><h2 className="order-section-title">退款进度</h2>{refresh}</div><div className="order-notice is-warning" role="alert"><CircleSlash size={17} aria-hidden="true" /><div><strong>{copy}</strong>{error.requestId ? <span>查询编号：{error.requestId}</span> : null}</div></div></section>;
   }
   const read = visible.read;
   if (!read) return null;
@@ -430,7 +503,7 @@ function OrderRefundSection({ order }: { order: Order }) {
   const simulated = read.outcome === "FULLY_CONSUMED" && !incomplete && read.intents.length > 0
     && read.intents.every(intent => intent.source === "LOCAL_CONTROLLED" && intent.state === "SUCCEEDED" && intent.budgetDisposition === "CONSUMED");
   const outcome = simulated ? { label: "模拟退款已记录", note: "测试记录，不代表实际退款或到账。" } : refundOutcomeCopy[read.outcome];
-  return <section className="order-detail-section order-refund-block" aria-label="退款进度" data-outcome={read.outcome}>
+  return <section className="order-detail-section order-refund-block" id="order-refund-section" aria-label="退款进度" data-outcome={read.outcome}>
     <div className="order-refund-heading"><h2 className="order-section-title">退款进度</h2>{refresh}</div>
     <details className="order-secondary-details order-refund-details" open={attentionRequired}>
       <summary><strong>{outcome.label}</strong><span>{outcome.note}</span></summary>
@@ -502,6 +575,7 @@ export function OrderDetail({ party, status, accountId, orderId, filters, state,
   const sourceLabel = orderListingSourceLabel(order);
   const stageLabel = orderSettlementStageLabel(order);
   const attention = attentionFor(order, facts, readFailed, party);
+  const progress = orderProgressView({ order, party, facts, readFailed });
   return <section className="order-detail-view" data-testid="order-detail">
     {back}
     {/* Identity band: the account is the subject, the order number identifies the transaction, and the
@@ -526,6 +600,7 @@ export function OrderDetail({ party, status, accountId, orderId, filters, state,
         </div>
       </div>
     </header>
+    <OrderProgressCard view={progress} party={party} orderId={order.id} backHref={backHref} onRefresh={onChanged} />
     {order.source?.origin !== "LEGACY" && !order.readOnly && order.status !== "PENDING_PAYMENT" ? <FulfillmentStageBar order={order} party={party} facts={facts} /> : null}
     <BusinessUpdateNotices surface="orders" />
     <AttentionBlock attention={attention} party={party} orderId={order.id} onRetry={onChanged} />
@@ -533,7 +608,7 @@ export function OrderDetail({ party, status, accountId, orderId, filters, state,
       <AmountCard order={order} party={party} facts={facts} readFailed={readFailed} />
       <ContactCard order={order} onChanged={onChanged} quiet={Boolean(attention)} />
     </div>
-    <div className="order-detail-body">
+    <div className="order-detail-body" id="order-detail-body" tabIndex={-1}>
       <div className="order-detail-main">
         {order.source?.origin!=="LEGACY"&&order.stage?.code==="POSTED"?<OrderAftersale key={`aftersale:${order.id}`} orderId={order.id} orderDisplayNo={order.displayNo??null}/>:null}
         {order.status !== "CANCELLED" ? <OrderTradeActions order={order} party={party} onChanged={onChanged} onStageFacts={(next, failed) => setRead({ scope: readScope, facts: next, failed })} /> : null}

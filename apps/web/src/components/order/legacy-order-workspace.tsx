@@ -222,12 +222,34 @@ export function LegacyOrderWorkspace({ party, orderId, page: pageText, accountId
       </div>
     </div>
 
-    {/* 续租卡片（若有） */}
-    <LegacyContinuationPanel orderId={data.id} party={party} onOrderChanged={() => {
-      setState({ scope, loading: true, data: null, error: "" });
-      setReload(n => n + 1);
-      onOrderChanged?.();
-    }}/>
+    {/* 旧平台迁入单的「订单续办」，不是新订单续租；不新增订单评价 */}
+    <section className="order-progress-card" data-tone="done" data-testid="order-legacy-progress" aria-label="旧订单当前进度与下一步">
+      <div className="order-progress-head">
+        <span className="order-progress-label">下一步</span>
+        <span className="order-progress-owner">由你或客服处理</span>
+      </div>
+      <h2 className="order-progress-title">查看订单事实与续办</h2>
+      <p className="order-progress-note">这是迁入的历史订单。下方「订单续办」保留本单原有的预览、提交、确认、拒绝与结果恢复能力，按本单可核实的旧价与旧付款事实办理，不套用当前会员价格；账号资料为迁入时记录，不是下单时的冻结快照。证据缺失或金额存疑请联系客服核对。已完成或取消的历史单只展示可信事实、原退款记录与客服入口，历史记录金额不代表渠道到账。</p>
+      <div className="order-progress-actions">
+        {/* A link, not a second support button: the page already has one 联系客服 control and
+            duplicate exits make the legacy workspace harder to read on narrow screens. */}
+        <a className="button secondary button--sm" href="#order-legacy-continuation">查看订单续办</a>
+      </div>
+      <details className="order-progress-facts">
+        <summary>本页已确认的事实</summary>
+        <ul>
+          <li>历史订单的金额、退款与账号资料以本单可核实的记录为准，页面不自行计算或补零</li>
+          <li>历史记录金额与原退款记录都不代表渠道到账</li>
+        </ul>
+      </details>
+    </section>
+    <div id="order-legacy-continuation">
+      <LegacyContinuationPanel orderId={data.id} party={party} onOrderChanged={() => {
+        setState({ scope, loading: true, data: null, error: "" });
+        setReload(n => n + 1);
+        onOrderChanged?.();
+      }}/>
+    </div>
 
     {/* 底部复用完整账号档案卡片 */}
     {data.account.id || data.listingFacts || resources.length ? (
