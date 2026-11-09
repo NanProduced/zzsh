@@ -1431,14 +1431,18 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, vi
     if (!target.openingId || !Number.isInteger(target.openingVersion)) {
       throw Object.assign(new Error("期初信息未就绪"), { status: 409 });
     }
-    // Freeze the subject at invocation time. The shared order card must not send a later
-    // identity: the BFF compares it with the Cookie captured for this same request.
+    // Freeze the subject and identity generation at invocation time. The shared order card
+    // must not send a later identity, and an unknown result must keep the original key/body.
     const acting = session.userId;
     if (session.status !== "authenticated" || !acting) {
       throw Object.assign(new Error("登录状态已变化，请刷新后按原请求核对"), { status: 401 });
     }
+    const subject = { userId: acting, identityVersion: session.identityVersion };
+    const isCurrent = () => session.status === "authenticated" && session.userId === subject.userId && session.identityVersion === subject.identityVersion;
+    // The card persists the SAME `opening.confirm` intent as the order detail, so an unknown
+    // result can be recovered by the original key there instead of minting a new key here.
     // Server owns the ack; the panel re-reads access after this resolves.
-    await orderApi.confirmOpening(acting, target.orderId, target.openingId, Number(target.openingVersion), orderIntentKey());
+    await orderApi.confirmOpeningWithOriginalIntent(subject, target.orderId, target.openingId, Number(target.openingVersion), orderIntentKey, isCurrent);
   }, [session.userId, session.status]);
 
   /**

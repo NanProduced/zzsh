@@ -102,13 +102,14 @@ export function LegacyContinuationPanel({ orderId, party, onOrderChanged, onCont
     }
   }
   async function send(intent: PendingIntent) {
-    const kind = intent.context!.command as LegacyCommandName, ticket = ++live.current.operation;
+    if (!current()) return;
     // The frozen intent owner, never a later session value. A delayed intent for A must not be
     // replayed while B is live: keep the original key/body and ask the user to refresh.
     if (session.status !== "authenticated" || session.userId !== intent.userId) {
       setError({ scope, value: "登录身份已变化；原申请已保留，请刷新后按原请求核对，不会重新提交。" });
       return;
     }
+    const kind = intent.context!.command as LegacyCommandName, ticket = ++live.current.operation;
     setBusy({ scope, value: true }); setConfirmation({ scope, value: null });
     try {
       const receipt = await legacyContinuationApi.write(intent.userId, orderId, kind, intent.body, intent.key);

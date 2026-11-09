@@ -30,9 +30,11 @@ import {
   type OrderSubjectInput,
   captureOrderSubject,
   isOrderSubjectCurrent,
-  orderSubjectUserId,
+  runGuardedWrite,
+  type GuardedError,
+  type GuardedWriteResult,
 } from "@/lib/order-client";
-import { clearIntent, inspectIntent, isIntentStale, loadIntent, saveIntent, type IntentKind } from "@/lib/order-intents";
+import { clearIntent, inspectIntent, isIntentStale, loadIntent, type IntentKind } from "@/lib/order-intents";
 import { cancelEntryOpen, chargeRowLabel, consumptionRows, decisionAmountRows, isAdjustedVersion, moneyCents, moneyText, paymentEntryOpen, paymentObservation, postingAmountRows, previewAmounts, proposedConfirmationCents, quantityText, resourceName, settlementAmountRows, settlementPreviewProblem, unitHint, type OrderPaymentFacts, type SettlementAmountRow } from "@/lib/order-display";
 import "./order.css";
 
@@ -96,6 +98,23 @@ function writeError(error: unknown): string {
  * A 4xx on a fresh key is a definitive non-commit; a 4xx while recovering an existing intent is
  * returned as `recovery-unresolved` and only an authoritative read may release it.
  */
+/** The shared lib result carries structural errors; map them back to the panel outcome type. */
+function toOrderRequestError(error: GuardedError): OrderRequestError {
+  return new OrderRequestError(error.status, { error: { code: error.code, message: error.message } });
+}
+function mapGuardedResult<T>(result: GuardedWriteResult<T>): WriteOutcome<T> {
+  if (result.status === "ok") return { status: "ok", value: result.value };
+  if (result.status === "unknown") return { status: "unknown", message: writeError(toOrderRequestError(result.error)) };
+  if (result.status === "unauthorized") return { status: "unauthorized", error: toOrderRequestError(result.error) };
+  if (result.status === "blocked") return { status: "blocked", message: result.message };
+  if (result.status === "recovery-unresolved") return { status: "recovery-unresolved", error: toOrderRequestError(result.error) };
+  return { status: "definitive", error: toOrderRequestError(result.error) };
+}
+
+/**
+ * Panels delegate to the same lib core as the customer-support order card, so a frozen
+ * `opening.confirm` intent written by either entry is byte-compatible and recoverable by both.
+ */
 export async function performGuardedWrite<T>(
   subject: OrderSubjectInput | null,
   kind: IntentKind,
@@ -105,41 +124,11 @@ export async function performGuardedWrite<T>(
   request: (key: string, body: Record<string, unknown>, context: Record<string, unknown> | undefined, subject: string) => Promise<T>,
   assertCurrent?: (subject: string) => boolean,
 ): Promise<WriteOutcome<T>> {
-  // The subject is frozen here, together with the original key/body/context. It is passed into
-  // the request callback rather than being looked up when the request is actually sent, so a
-  // delayed intent for A can never be executed with a subject registered later for B.
-  const userId = orderSubjectUserId(subject);
-  if (!userId) return { status: "definitive", error: new OrderRequestError(401, { error: { code: "ORDER_SUBJECT_NOT_FROZEN", message: "订单请求缺少已冻结的操作主体；原申请已保留。" } }) };
-  if (assertCurrent && !assertCurrent(userId)) {
-    // Do not save a new intent, do not generate a new key, do not send. The frozen original
-    // request stays in session storage until the original subject is live again.
-    return { status: "unauthorized", error: new OrderRequestError(401, { error: { code: "ORDER_SUBJECT_CHANGED", message: "登录身份已变化；原申请已保留，请刷新后按原请求核对。" } }) };
-  }
-  const existing = loadIntent(userId, kind, resourceId);
-  let key: string, frozenBody: Record<string, unknown>, frozenContext: Record<string, unknown> | undefined;
-  if (existing) {
-    key = existing.key;
-    frozenBody = existing.body;
-    frozenContext = existing.context;
-  } else {
-    const saved = saveIntent({ userId, kind, resourceId, key: orderIntentKey(), body, context });
-    if (!saved.persisted) return { status: "blocked", message: "浏览器会话存储不可用，无法保存原请求恢复信息；为避免产生不可恢复的写入，本次提交已阻止。" };
-    key = saved.intent.key;
-    frozenBody = saved.intent.body;
-    frozenContext = saved.intent.context;
-  }
-  try {
-    const value = await request(key, frozenBody, frozenContext, userId);
-    clearIntent(userId, kind, resourceId);
-    return { status: "ok", value };
-  } catch (error) {
-    const typed = error instanceof OrderRequestError ? error : new OrderRequestError(0, null);
-    if (typed.status === 401 || typed.code === "UNAUTHENTICATED") return { status: "unauthorized", error: typed };
-    if (typed.status === 0 || typed.status >= 500) return { status: "unknown", message: writeError(error) };
-    if (existing) return { status: "recovery-unresolved", error: typed };
-    clearIntent(userId, kind, resourceId);
-    return { status: "definitive", error: typed };
-  }
+  return mapGuardedResult(await runGuardedWrite<T>({
+    subject, kind, resourceId, body, context, request,
+    keyFactory: orderIntentKey,
+    assertCurrent,
+  }));
 }
 
 function panelError(error: unknown): PanelError {
@@ -773,10 +762,13 @@ function OpeningPanel({ opening, order, party, onChanged, readOnly = false }: { 
   const confirm = async () => {
     if (!userId) return;
     const acting = userId;
+    const pending = inspectIntent(acting, "opening.confirm", order.id);
+    if (pending.state === "UNREADABLE") { setError({ message: "原开租确认记录无法读取，请联系客服核对。", retryable: false }); return; }
+    if (pending.intent) { setUnknown(isIntentStale(pending.intent) ? STALE_MESSAGE : "检测到未完成的开租确认，请先查询原请求。"); return; }
     setBusy(true); setError(null); setUnknown(null);
     const outcome = await performGuardedWrite(acting, "opening.confirm", order.id, { versionNo: Number(opening.versionNo) },
       { openingId: opening.id, orderId: order.id },
-      (key, body, _context, subject) => orderApi.confirmOpening(subject, order.id, opening.id, Number(body.versionNo), key), isCurrent);
+      (key, body, frozenContext, subject) => orderApi.confirmOpening(subject, order.id, String(frozenContext?.openingId ?? ""), Number(body.versionNo), key), isCurrent);
     if (!isCurrent(acting)) return;
     setBusy(false);
     apply(acting, outcome as WriteOutcome<OrderSettlement>);
@@ -1079,6 +1071,9 @@ function DecisionPanel({ version, party, order, onChanged, readOnly = false }: {
   };
   const decide = async (action: "CONFIRM" | "REJECT") => {
     if (!userId || locked) return;
+    const pending = inspectIntent(userId, "settlement.decision", order.id);
+    if (pending.state === "UNREADABLE") { setError("原结算决定记录无法读取，请联系客服核对。"); return; }
+    if (pending.intent) { setUnknown(isIntentStale(pending.intent) ? STALE_MESSAGE : "检测到未完成的结算决定，请先查询原请求。"); return; }
     // A new confirmation is refused while the amount it would settle cannot be read. Rejecting,
     // refreshing and recovering an existing frozen request stay available.
     if (action === "CONFIRM" && !confirmable) {
@@ -1094,7 +1089,7 @@ function DecisionPanel({ version, party, order, onChanged, readOnly = false }: {
     setError(null);
     const body = { action, versionHash: version.versionHash, ...(action === "REJECT" && reason.trim() ? { reason: reason.trim() } : {}), ...(action === "CONFIRM" && version.early && order.earlySettlementDisclosure ? { termsAccepted: true } : {}) };
     const outcome = await performGuardedWrite(acting, "settlement.decision", order.id, body, { versionId: version.id, orderId: order.id },
-      (key, frozen, _context, subject) => orderApi.decideSettlement(subject, order.id, version.id, frozen as { action: "CONFIRM" | "REJECT"; versionHash: string }, key), isCurrent);
+      (key, frozen, frozenContext, subject) => orderApi.decideSettlement(subject, order.id, String(frozenContext?.versionId ?? ""), frozen as { action: "CONFIRM" | "REJECT"; versionHash: string }, key), isCurrent);
     if (!isCurrent(acting)) return;
     setBusy(null);
     apply(acting, outcome as WriteOutcome<OrderSettlement>);

@@ -13,7 +13,7 @@ const typescript = requireFromTree("typescript");
 const React = requireFromTree("react");
 const { Window } = requireFromTree("happy-dom");
 const intents = requireFromTree(path.join(tree, "apps/web/src/lib/order-intents.ts"));
-const { orderApi } = requireFromTree(path.join(tree, "apps/web/src/lib/order-client.ts"));
+const { orderApi, orderIntentKey } = requireFromTree(path.join(tree, "apps/web/src/lib/order-client.ts"));
 const heroToast = await import("@heroui/react/toast");
 
 function compile(relativePath) {
@@ -3134,4 +3134,240 @@ test("master review: an order write without a frozen subject keeps the original 
     assert.equal(calls, 0);
     assert.equal(intents.inspectIntent("user_A", "settlement.decision", orderId).intent.key, "ORIGINAL_KEY");
   } finally { globalThis.fetch = previousFetch; intents.clearIntent("user_A", "settlement.decision", orderId); }
+}));
+
+test("a stale A scope cannot write after A→B→A; a fresh A scope can recover the original request", async () => withDom(async window => {
+  const { useIdentityReset } = requireFromTree(path.join(tree, "apps/web/src/components/session/identity-reset.ts"));
+  const { captureOrderSubject } = requireFromTree(path.join(tree, "apps/web/src/lib/order-subject.ts"));
+  const { performGuardedWrite } = loadComponent("apps/web/src/components/order/order-trade-actions.tsx", session("user_A"));
+  let current = { ...session("user_A"), identityVersion: 1 }, guard;
+  function Probe() { guard = useIdentityReset(current, () => {}).isCurrent; return null; }
+  const probe = createProbe(window, Probe, {}, async () => json({}));
+  const orderId = "order_aba_guard";
+  try {
+    await probe.render();
+    const oldGuard = guard, oldSubject = captureOrderSubject("user_A", 1);
+    intents.saveIntent({ userId: "user_A", kind: "opening.confirm", resourceId: orderId, key: "ORIGINAL_KEY", body: { versionNo: 1 }, context: { openingId: "opening_1" } });
+    current = { ...session("user_B"), identityVersion: 2 }; await probe.render();
+    current = { ...session("user_A"), identityVersion: 3 }; await probe.render();
+    const sent = [];
+    const request = async (key, body, context, subject) => { sent.push({ key, body, context, subject }); return {}; };
+    const stale = await performGuardedWrite(oldSubject, "opening.confirm", orderId, { versionNo: 2 }, { openingId: "opening_2" }, request, oldGuard);
+    assert.equal(stale.status, "unauthorized");
+    assert.equal(sent.length, 0);
+    assert.equal(intents.loadIntent("user_A", "opening.confirm", orderId).key, "ORIGINAL_KEY");
+    const recovered = await performGuardedWrite("user_A", "opening.confirm", orderId, { versionNo: 2 }, { openingId: "opening_2" }, request, guard);
+    assert.equal(recovered.status, "ok");
+    assert.deepEqual(sent, [{ key: "ORIGINAL_KEY", body: { versionNo: 1 }, context: { openingId: "opening_1" }, subject: "user_A" }]);
+  } finally { await probe.dispose(); intents.clearIntent("user_A", "opening.confirm", orderId); }
+}));
+
+test("unreadable original order intent is preserved and blocks a new write", async () => withDom(async window => {
+  const { performGuardedWrite } = loadComponent("apps/web/src/components/order/order-trade-actions.tsx", session("user_A"));
+  const key = "zzsh.order-intent.v1:user_A:opening.confirm:order_bad_intent";
+  window.sessionStorage.setItem(key, "{broken-original");
+  let sent = 0;
+  const result = await performGuardedWrite("user_A", "opening.confirm", "order_bad_intent", { versionNo: 2 }, { openingId: "opening_2" }, async () => { sent++; return {}; }, () => true);
+  assert.equal(result.status, "blocked");
+  assert.equal(sent, 0);
+  assert.equal(window.sessionStorage.getItem(key), "{broken-original");
+}));
+
+test("an opening intent created after mount requires explicit recovery using its frozen target", async () => withDom(async window => {
+  const log = [], next = { ...opening, id: "opening_NEW", versionNo: "2", status: "DRAFT", acks: [] };
+  const fetchImpl = router([
+    { match: "/settlement", method: "GET", respond: () => json({ ...settlementBody, openings: [next] }) },
+    { match: "/openings/opening_OLD/confirm", method: "POST", respond: () => json({ error: { code: "CONFLICT" } }, 409) },
+  ], log);
+  const OrderTradeActions = loadComponent("apps/web/src/components/order/order-trade-actions.tsx", session("user_A")).OrderTradeActions;
+  const probe = createProbe(window, OrderTradeActions, { order: paidOrder, party: "renter", onChanged() {} }, fetchImpl);
+  try {
+    await probe.render();
+    intents.saveIntent({ userId: "user_A", kind: "opening.confirm", resourceId: "order_A", key: "old_key", body: { versionNo: 1 }, context: { openingId: "opening_OLD", orderId: "order_A" } });
+    await probe.click("确认期初并开租");
+    assert.equal(log.filter(entry => entry.method === "POST").length, 0);
+    assert.match(probe.host.textContent, /请先查询原请求/);
+    await probe.click("查询原请求结果");
+    const writes = log.filter(entry => entry.method === "POST");
+    assert.equal(writes.length, 1);
+    assert.match(writes[0].url, /opening_OLD\/confirm/);
+    assert.equal(writes[0].key, "old_key");
+    assert.deepEqual(writes[0].body, { versionNo: 1 });
+  } finally { await probe.dispose(() => intents.clearIntent("user_A", "opening.confirm", "order_A")); }
+}));
+
+test("a decision intent created after mount requires explicit recovery using its frozen target", async () => withDom(async window => {
+  const log = [], next = { id: "v_NEW", versionNo: "2", kind: "SYSTEM", early: false, versionHash: "h_new", decisions: [] };
+  const fetchImpl = router([
+    { match: "/settlement", method: "GET", respond: () => json({ ...settlementBody, settlement: next, versions: [next] }) },
+    { match: "/settlements/v_OLD/decision", method: "POST", respond: () => json({ error: { code: "CONFLICT" } }, 409) },
+  ], log);
+  const OrderTradeActions = loadComponent("apps/web/src/components/order/order-trade-actions.tsx", session("user_A")).OrderTradeActions;
+  const probe = createProbe(window, OrderTradeActions, { order: paidOrder, party: "renter", onChanged() {} }, fetchImpl);
+  try {
+    await probe.render();
+    intents.saveIntent({ userId: "user_A", kind: "settlement.decision", resourceId: "order_A", key: "old_key", body: { action: "CONFIRM", versionHash: "h_old" }, context: { versionId: "v_OLD", orderId: "order_A" } });
+    await probe.click("确认结算");
+    assert.equal(log.filter(entry => entry.method === "POST").length, 0);
+    assert.match(probe.host.textContent, /请先查询原请求/);
+    await probe.click("查询原请求结果");
+    const writes = log.filter(entry => entry.method === "POST");
+    assert.equal(writes.length, 1);
+    assert.match(writes[0].url, /v_OLD\/decision/);
+    assert.equal(writes[0].key, "old_key");
+    assert.deepEqual(writes[0].body, { action: "CONFIRM", versionHash: "h_old" });
+  } finally { await probe.dispose(() => intents.clearIntent("user_A", "settlement.decision", "order_A")); }
+}));
+
+test("an opening card without a recorded deadline does not promise automatic confirmation", async () => withDom(async window => {
+  const { OrderCardMessage } = loadComponent("packages/ui/src/order-card.tsx", session("user_A"));
+  const info = { orderId: "order_A", displayNo: "ZZ-1", orderStatus: "PAID", account: { title: "账号" }, members: [],
+    terms: { viewerParty: "RENTER", basis: "QUOTE", lines: [] }, openingId: "opening_1", openingVersion: 1,
+    openingAcks: { renter: false, owner: false }, openingState: "DRAFT", openingConfirmDueAt: null };
+  const message = { senderId: "bot", card: { kind: "ORDER_OPENING", orderId: "order_A" } };
+  const probe = createProbe(window, OrderCardMessage, { message, info, onConfirmOpening: async () => {} }, async () => json({}));
+  try {
+    await probe.render();
+    assert.match(probe.host.textContent, /自动确认时间未记录/);
+    assert.doesNotMatch(probe.host.textContent, /超时未确认将由系统自动确认/);
+    await probe.click("确认开租");
+    assert.match(probe.host.querySelector('[role="dialog"]').textContent, /自动确认时间未记录/);
+    assert.doesNotMatch(probe.host.querySelector('[role="dialog"]').textContent, /等待期到期后开始租期/);
+    await probe.render({ message, info: { ...info, openingConfirmDueAt: "invalid" }, onConfirmOpening: async () => {} });
+    assert.match(probe.host.textContent, /自动确认时间未记录/);
+  } finally { await probe.dispose(); }
+}));
+
+/* ---- Master third review: the customer-support card shares the opening.confirm original request ---- */
+
+/** Extracts the REAL customer-support callback so the test exercises production wiring. */
+function cardConfirmCallback(mutableSession) {
+  const source = fs.readFileSync(path.join(tree, "apps/web/src/components/support/customer-support-workspace.tsx"), "utf8");
+  const begin = source.indexOf("  const confirmOpening = useCallback(async (target: OrderTeamAccess) => {");
+  const marker = "}, [session.userId, session.status]);";
+  const end = source.indexOf(marker, begin);
+  assert.ok(begin >= 0 && end > begin, "the real customer-support confirmOpening callback must stay extractable");
+  const fnSource = source.slice(begin, end + marker.length);
+  const module = new Module(path.join(tree, "card-confirm-regression.cjs"));
+  module.filename = path.join(tree, "card-confirm-regression.cjs");
+  module.paths = Module._nodeModulePaths(tree);
+  const compiled = typescript.transpileModule(
+    "const useCallback=(fn)=>fn; exports.create=(session,orderApi,orderIntentKey)=>{\n" + fnSource + "\nreturn confirmOpening;};",
+    { compilerOptions: { module: typescript.ModuleKind.CommonJS, target: typescript.ScriptTarget.ES2022 } },
+  ).outputText;
+  module._compile(compiled, module.filename);
+  return module.exports.create(mutableSession, orderApi, orderIntentKey);
+}
+const cardInfo = (over = {}) => ({ orderId: "order_card", displayNo: "CARD-1", orderStatus: "PAID", account: { title: "账号" }, members: [],
+  terms: { viewerParty: "RENTER", basis: "QUOTE", lines: [] }, openingId: "opening_1", openingVersion: 1,
+  openingAcks: { renter: false, owner: false }, openingState: "DRAFT", openingConfirmDueAt: null, ...over });
+const cardMessage = { senderId: "bot", card: { kind: "ORDER_OPENING", orderId: "order_card" } };
+const cardTarget = { orderId: "order_card", openingId: "opening_1", openingVersion: 1 };
+const clearCardIntent = () => { intents.clearIntent("user_A", "opening.confirm", "order_card"); intents.clearIntent("user_B", "opening.confirm", "order_card"); };
+async function clickDialogConfirm(window, probe) {
+  const button = probe.host.querySelector('[role="dialog"] .order-card-dialog-confirm');
+  assert.ok(button, "confirm dialog action must exist");
+  await React.act(async () => { button.click(); await tick(); });
+  await tick();
+}
+
+test("master review: an unknown card confirmation keeps its original key and never mints a second one", async () => withDom(async window => {
+  const { OrderCardMessage } = loadComponent("packages/ui/src/order-card.tsx", session("user_A"));
+  const callback = cardConfirmCallback(session("user_A"));
+  const keys = [], subjects = [];
+  let opened = 0;
+  const probe = createProbe(window, OrderCardMessage,
+    { message: cardMessage, info: cardInfo(), onConfirmOpening: callback, onOpenOrder: () => { opened++; } },
+    async (_url, init) => { const headers = new Headers(init.headers); keys.push(headers.get("idempotency-key")); subjects.push(headers.get("x-zzsh-expected-user-id")); return json({ error: { code: "UNAVAILABLE" } }, 503); });
+  try {
+    await probe.render();
+    await probe.click("确认开租");
+    await clickDialogConfirm(window, probe);
+    assert.equal(keys.length, 1, "only the first attempt may reach the server");
+    assert.equal(subjects[0], "user_A", "the frozen subject is sent, not a later registration");
+    const saved = intents.inspectIntent("user_A", "opening.confirm", "order_card");
+    assert.equal(saved.state, "VALID", "the original request is persisted locally");
+    assert.equal(saved.intent.key, keys[0]);
+    assert.equal(saved.intent.userId, "user_A");
+    assert.deepEqual(saved.intent.body, { versionNo: 1 });
+    assert.equal(saved.intent.context.openingId, "opening_1");
+    assert.match(probe.host.textContent, /结果未确认|原申请与原键已保留/);
+    assert.doesNotMatch(probe.host.textContent, /确认未完成，请稍后重试/);
+    assert.match(probe.host.textContent, /查看订单详情按原请求核对/);
+    // Re-opening the dialog and trying again is a recovery, never a fresh write.
+    await probe.click("确认开租");
+    await clickDialogConfirm(window, probe);
+    assert.equal(keys.length, 1);
+    assert.equal(intents.inspectIntent("user_A", "opening.confirm", "order_card").intent.key, keys[0]);
+    const recovery = probe.host.querySelector('[role="dialog"] .order-card-dialog-confirm');
+    await React.act(async () => { recovery.click(); await tick(); });
+    assert.equal(opened, 1, "the recovery action routes to the order detail");
+    assert.equal(keys.length, 1);
+  } finally { await probe.dispose(clearCardIntent); }
+}));
+
+test("master review: the order detail recovers a card-created opening intent with the same key/body/context", async () => withDom(async window => {
+  const { performGuardedWrite } = loadComponent("apps/web/src/components/order/order-trade-actions.tsx", session("user_A"));
+  const callback = cardConfirmCallback(session("user_A"));
+  const previousFetch = globalThis.fetch;
+  let firstKey = null;
+  globalThis.fetch = async (_url, init) => { firstKey = new Headers(init.headers).get("idempotency-key"); return json({ error: { code: "UNAVAILABLE" } }, 503); };
+  try {
+    await assert.rejects(() => callback(cardTarget), e => e.code === "OPENING_CONFIRM_UNKNOWN");
+    assert.equal(intents.inspectIntent("user_A", "opening.confirm", "order_card").intent.key, firstKey);
+    const sent = [];
+    const result = await performGuardedWrite("user_A", "opening.confirm", "order_card", { versionNo: 99 }, { openingId: "opening_NEW" },
+      async (key, body, context, subject) => { sent.push({ key, body, context, subject }); return {}; }, () => true);
+    assert.equal(result.status, "ok");
+    assert.deepEqual(sent, [{ key: firstKey, body: { versionNo: 1 }, context: { openingId: "opening_1", orderId: "order_card" }, subject: "user_A" }]);
+    assert.equal(intents.inspectIntent("user_A", "opening.confirm", "order_card").state, "NONE");
+  } finally { globalThis.fetch = previousFetch; clearCardIntent(); }
+}));
+
+test("master review: a re-entry, identity switch and corrupted storage never mint a new key", async () => withDom(async window => {
+  const mutable = session("user_A");
+  const callback = cardConfirmCallback(mutable);
+  const previousFetch = globalThis.fetch;
+  let writes = 0;
+  const keys = [];
+  globalThis.fetch = async (_url, init) => { writes++; keys.push(new Headers(init.headers).get("idempotency-key")); return json({ error: { code: "UNAVAILABLE" } }, 503); };
+  try {
+    await assert.rejects(() => callback(cardTarget), e => e.code === "OPENING_CONFIRM_UNKNOWN");
+    const original = intents.inspectIntent("user_A", "opening.confirm", "order_card").intent;
+    // Re-entry: a fresh card mount sees the same frozen request, not a new key.
+    const reentered = cardConfirmCallback(mutable);
+    await assert.rejects(() => reentered(cardTarget), e => e.code === "OPENING_CONFIRM_PENDING");
+    assert.equal(writes, 1);
+    assert.equal(intents.inspectIntent("user_A", "opening.confirm", "order_card").intent.key, original.key);
+    // A→B→A: A's original bytes survive; returning to A must be guided to explicit recovery.
+    mutable.userId = "user_B"; mutable.identityVersion = 2;
+    mutable.userId = "user_A"; mutable.identityVersion = 3;
+    await assert.rejects(() => reentered(cardTarget), e => e.code === "OPENING_CONFIRM_PENDING");
+    assert.equal(writes, 1);
+    assert.equal(intents.inspectIntent("user_A", "opening.confirm", "order_card").intent.key, original.key);
+    // Corrupted original bytes block a new write and are never overwritten.
+    const storageKey = `zzsh.order-intent.v1:user_A:opening.confirm:order_card`;
+    window.sessionStorage.setItem(storageKey, "{broken-original");
+    await assert.rejects(() => reentered(cardTarget), e => e.code === "ORIGINAL_REQUEST_BLOCKED");
+    assert.equal(writes, 1);
+    assert.equal(window.sessionStorage.getItem(storageKey), "{broken-original");
+  } finally { globalThis.fetch = previousFetch; clearCardIntent(); window.sessionStorage.removeItem("zzsh.order-intent.v1:user_A:opening.confirm:order_card"); }
+}));
+
+test("master review: a successful or already-confirmed card confirmation leaves no dangling intent", async () => withDom(async window => {
+  const callback = cardConfirmCallback(session("user_A"));
+  const previousFetch = globalThis.fetch;
+  const keys = [];
+  globalThis.fetch = async (_url, init) => { keys.push(new Headers(init.headers).get("idempotency-key")); return json({ ok: true }); };
+  try {
+    await callback(cardTarget);
+    assert.equal(keys.length, 1);
+    assert.equal(intents.inspectIntent("user_A", "opening.confirm", "order_card").state, "NONE");
+    // A definitive 409 (already confirmed / newer version) is a non-commit: no retry key survives.
+    globalThis.fetch = async (_url, init) => { keys.push(new Headers(init.headers).get("idempotency-key")); return json({ error: { code: "CONFLICT" } }, 409); };
+    await assert.rejects(() => callback(cardTarget), e => e.status === 409);
+    assert.equal(keys.length, 2);
+    assert.notEqual(keys[0], keys[1], "the second write is a new user action after the first succeeded");
+    assert.equal(intents.inspectIntent("user_A", "opening.confirm", "order_card").state, "NONE");
+  } finally { globalThis.fetch = previousFetch; clearCardIntent(); }
 }));

@@ -17,8 +17,8 @@ const blockedText:Record<string,string>={RENTAL_ALREADY_STARTED:"账号已开租
 export function PrestartTerminationPanel({order,party,onChanged}:{order:Order;party:OrderParty;onChanged:()=>void}){
  const session=useUserSession(),[state,setState]=useState<{scope:string;read:PrestartView|null;error:OrderRequestError|null}>({scope:'',read:null,error:null});
  const[reason,setReason]=useState(''),[note,setNote]=useState(''),[busy,setBusy]=useState(false),[reload,refresh]=useState(0),[pending,setPending]=useState(false),sequence=useRef(0);
- const{userId}=useIdentityReset(session,()=>{sequence.current++;setState({scope:'',read:null,error:null});setReason('');setNote('');setBusy(false);setPending(false);});
- const scope=`${userId}:${order.id}`,scopeRef=useRef(scope);scopeRef.current=scope;
+ const{userId,isCurrent}=useIdentityReset(session,()=>{sequence.current++;setState({scope:'',read:null,error:null});setReason('');setNote('');setBusy(false);setPending(false);});
+ const scope=JSON.stringify([userId,session.identityVersion,order.id]),scopeRef=useRef(scope);scopeRef.current=scope;
  const applicable=order.source?.origin!=='LEGACY'&&!order.readOnly&&['PAID','CANCELLED'].includes(order.status);
  useEffect(()=>{const controller=new AbortController(),n=++sequence.current;
   setState({scope,read:null,error:null});if(!userId||!applicable)return()=>controller.abort();
@@ -36,7 +36,7 @@ export function PrestartTerminationPanel({order,party,onChanged}:{order:Order;pa
   if(inspectIntent(userId,'order.prestart.request',order.id).state==='UNREADABLE'){setNote('暂时无法确认上次申请，请联系客服');return;}
   setBusy(true);
   const out=await performGuardedWrite(userId,'order.prestart.request',order.id,{expectedOrderRevision:read.orderRevision,reason},undefined,
-   (key,body,_context,subject)=>prestartApi.request(subject,order.id,key,body));
+   (key,body,_context,subject)=>prestartApi.request(subject,order.id,key,body),isCurrent);
   if(scopeRef.current!==expectedScope)return;setBusy(false);
   if(out.status==='ok'){setPending(false);setNote('结束申请已提交，请等待客服处理。');refresh(n=>n+1);onChanged();}
   else{setPending(inspectIntent(userId,'order.prestart.request',order.id).state!=='NONE');setNote(out.status==='unauthorized'?'登录状态已变化，请重新登录查看上次申请。':out.status==='unknown'||out.status==='recovery-unresolved'?'申请结果未记录，请稍后继续处理上次申请。':out.status==='blocked'?'暂时无法继续申请，请联系客服。':'申请未完成，请核对信息后重试。');}

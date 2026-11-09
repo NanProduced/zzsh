@@ -93,11 +93,22 @@ function partyText(party: "RENTER" | "OWNER"): string {
 }
 /** Server rejection codes become stable copy; raw messages/ids never reach the card. */
 function confirmErrorText(error: unknown): string {
+  // The user order client marks results whose server outcome is unknown. Do not describe them
+  // as "未完成": the original key/body is still frozen and only the order detail may recover it.
+  const code = (error as { code?: string } | null)?.code;
+  if (code === "OPENING_CONFIRM_UNKNOWN" || code === "OPENING_CONFIRM_PENDING") return "开租确认结果未确认；原申请与原键已保留，请到订单详情按原请求查询/恢复，不要重复提交。";
+  if (code === "ORIGINAL_REQUEST_BLOCKED") return "原开租确认记录无法读取或本地存储不可用，已阻止新的提交；请到订单详情或联系客服核对。";
+  if (code === "ORDER_SUBJECT_CHANGED") return "登录状态已变化；原申请已保留，请到订单详情按原请求核对。";
   const status = (error as { status?: number } | null)?.status;
   if (status === 403) return "当前账号无权确认本单，请联系平台客服。";
   if (status === 401 || status === 423) return "登录状态已变化，请重新确认身份后再操作。";
   if (status === 409) return "期初版本已更新或已确认，请刷新后再操作。";
   return "确认未完成，请稍后重试。";
+}
+/** Only these codes mean a frozen original request exists; every other error keeps the retry copy. */
+function needsOriginalRecovery(error: unknown): boolean {
+  const code = (error as { code?: string } | null)?.code;
+  return code === "OPENING_CONFIRM_UNKNOWN" || code === "OPENING_CONFIRM_PENDING" || code === "ORIGINAL_REQUEST_BLOCKED";
 }
 function DocIcon() {
   return <svg className="order-card-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
@@ -149,6 +160,7 @@ export function OrderCardMessage({ message, info, onOpenOrder, onConfirmOpening,
   const [confirmTarget, setConfirmTarget] = useState<ConfirmTarget | null>(null);
   const [confirming, setConfirming] = useState(false);
   const [confirmError, setConfirmError] = useState("");
+  const [confirmRecovery, setConfirmRecovery] = useState(false);
   const [confirmSubmittedFor, setConfirmSubmittedFor] = useState<string | null>(null);
   const card = message.card;
   if (!card) return null;
@@ -229,7 +241,7 @@ export function OrderCardMessage({ message, info, onOpenOrder, onConfirmOpening,
     && openingId !== null && openingVersion !== null && Boolean(onConfirmOpeningOnBehalf);
   const openingKey = `${openingId ?? ""}:${openingVersion ?? ""}`;
   const confirmSubmitted = confirmSubmittedFor === openingKey;
-  const openingDue = canPartyConfirm && info.openingConfirmDueAt ? info.openingConfirmDueAt : null;
+  const openingDue = canPartyConfirm && typeof info.openingConfirmDueAt === "string" && Number.isFinite(Date.parse(info.openingConfirmDueAt)) ? info.openingConfirmDueAt : null;
   const actionLabel = card.kind === "ORDER_OPENING"
     ? party === "STAFF" ? "查看本单" : canPartyConfirm ? "查看订单详情" : viewerAck === false ? "查看并确认开租" : "查看订单详情"
     : card.kind === "ORDER_ENDING" ? party === "STAFF" ? "去处理结束" : "查看并处理" : "查看订单详情";
@@ -259,12 +271,21 @@ export function OrderCardMessage({ message, info, onOpenOrder, onConfirmOpening,
   const openConfirm = (target: ConfirmTarget) => {
     if (confirming) return;
     setConfirmError("");
+    setConfirmRecovery(false);
     setConfirmTarget(target);
   };
   const closeConfirm = () => {
     if (confirming) return;
     setConfirmTarget(null);
     setConfirmError("");
+    setConfirmRecovery(false);
+  };
+  const openOrderForRecovery = () => {
+    setConfirmTarget(null);
+    setConfirmError("");
+    setConfirmRecovery(false);
+    if (onOpenOrder) onOpenOrder();
+    else if (typeof window !== "undefined") window.location.assign(detailHref);
   };
   const submitConfirm = async () => {
     const target = confirmTarget;
@@ -277,6 +298,9 @@ export function OrderCardMessage({ message, info, onOpenOrder, onConfirmOpening,
       setConfirmTarget(null);
       setConfirmSubmittedFor(openingKey);
     } catch (error) {
+      // An unknown result is not a failed attempt: keep the dialog but replace the retry submit
+      // with a route to the order detail, where the frozen original key can be queried/recovered.
+      setConfirmRecovery(needsOriginalRecovery(error));
       setConfirmError(confirmErrorText(error));
     } finally {
       setConfirming(false);
@@ -344,7 +368,7 @@ export function OrderCardMessage({ message, info, onOpenOrder, onConfirmOpening,
     </div> : null}
     {card.kind !== "ORDER_OPENING" && (figures.length || platform) ? <div className="order-card-money">{totals}</div> : null}
     {canPartyConfirm && !confirmSubmitted ? <div className="order-card-confirm" role="group" aria-label="开租确认操作">
-      <p className="order-card-confirm-copy">{openingDue ? `双方未确认时，将于 ${timeLabel(openingDue)} 自动确认并开始租期。` : "双方确认后开始租期；超时未确认将由系统自动确认。"}</p>
+      <p className="order-card-confirm-copy">{openingDue ? `双方未确认时，将于 ${timeLabel(openingDue)} 自动确认并开始租期。` : "双方确认后开始租期；自动确认时间未记录，请联系客服核对。"}</p>
       <button type="button" className="order-card-confirm-button" onClick={() => openConfirm({ mode: "PARTY" })}>确认开租</button>
     </div> : null}
     {confirmSubmitted && !viewerAck ? <p className="order-card-confirm-state" role="status">已提交确认，正在刷新订单状态…</p> : null}
@@ -370,14 +394,18 @@ export function OrderCardMessage({ message, info, onOpenOrder, onConfirmOpening,
         <strong className="order-card-dialog-title">{confirmTarget.mode === "PARTY" ? "确认开租" : `代${partyText(confirmTarget.party)}确认开租`}</strong>
         <p className="order-card-dialog-order">订单 {info.displayNo} · {accountTitle}</p>
         <p className="order-card-dialog-copy">{confirmTarget.mode === "PARTY"
-          ? "请核对账号、押金与物品清单。提交确认后等待另一方确认；双方确认或平台设置的等待期到期后开始租期，起租时间以平台确认信息为准。"
+          ? openingDue
+            ? "请核对账号、押金与物品清单。提交确认后等待另一方确认；双方确认或本单自动确认时间到期后开始租期，起租时间以平台确认信息为准。"
+            : "请核对账号、押金与物品清单。提交确认后等待另一方确认；本单自动确认时间未记录，请联系客服核对。"
           : `将以客服身份代${partyText(confirmTarget.party)}确认；该操作会记录审计，且只补齐未确认方，不会覆盖已确认记录。`}</p>
         {confirmError ? <p className="order-card-dialog-error" role="alert">{confirmError}</p> : null}
         <div className="order-card-dialog-actions">
           <button type="button" className="order-card-dialog-cancel" onClick={closeConfirm} disabled={confirming} autoFocus>取消</button>
-          <button type="button" className="order-card-dialog-confirm" onClick={() => void submitConfirm()} disabled={confirming} aria-busy={confirming}>
-            {confirming ? "确认中…" : confirmTarget.mode === "PARTY" ? "确认开租" : `代${partyText(confirmTarget.party)}确认`}
-          </button>
+          {confirmRecovery
+            ? <button type="button" className="order-card-dialog-confirm" onClick={openOrderForRecovery}>查看订单详情按原请求核对</button>
+            : <button type="button" className="order-card-dialog-confirm" onClick={() => void submitConfirm()} disabled={confirming} aria-busy={confirming}>
+                {confirming ? "确认中…" : confirmTarget.mode === "PARTY" ? "确认开租" : `代${partyText(confirmTarget.party)}确认`}
+              </button>}
         </div>
       </div>
     </div> : null}

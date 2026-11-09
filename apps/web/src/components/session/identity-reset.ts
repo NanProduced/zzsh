@@ -10,12 +10,13 @@ import type { UserSessionApi } from "@/components/session/user-session-provider"
  */
 export function useIdentityReset(session: UserSessionApi, reset: () => void): { userId: string | null; isCurrent: (candidate: string | null) => boolean } {
   const userId = session.status === "authenticated" && session.userId ? session.userId : null;
-  const [previous, setPrevious] = useState<string | null | undefined>(undefined);
-  const current = useRef<string | null>(userId);
-  current.current = userId;
-  if (previous !== userId) {
-    setPrevious(userId);
+  const scope = JSON.stringify([userId, session.identityVersion]);
+  const [previous, setPrevious] = useState<string | undefined>(undefined);
+  const current = useRef(scope);
+  current.current = scope;
+  if (previous !== scope) {
+    setPrevious(scope);
     reset();
   }
-  return { userId, isCurrent: (candidate: string | null) => current.current === candidate };
+  return { userId, isCurrent: (candidate: string | null) => current.current === scope && candidate === userId };
 }

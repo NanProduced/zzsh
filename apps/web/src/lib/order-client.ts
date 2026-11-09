@@ -1,5 +1,9 @@
 import type { Money, UnitAmount, PublicQuote, FullPayoutTerms, FullPayoutTermsAcceptance, RentalMode } from "./supply-types";
 import { orderSubjectUserId, type OrderSubject } from "./order-subject.ts";
+import { runGuardedWrite } from "./order-guarded-write.ts";
+/** Re-exported so order consumers stay on one client alias and need no extra module stub. */
+export { runGuardedWrite, guardedErrorOf } from "./order-guarded-write.ts";
+export type { GuardedError, GuardedWriteResult } from "./order-guarded-write.ts";
 /** Re-exported so order consumers need no extra module alias and stay on one client contract. */
 export { captureOrderSubject, isOrderSubjectCurrent, orderSubjectUserId, registerOrderExpectedUserId } from "./order-subject.ts";
 export type { OrderSubject } from "./order-subject.ts";
@@ -1027,4 +1031,45 @@ export const orderApi = {
     requestWrite<OrderSettlement>(`/api/orders/${encodeURIComponent(orderId)}/settlements/${encodeURIComponent(versionId)}/decision`, { body, key, signal, subject }),
   confirmOpening: (subject: OrderSubjectInput, orderId: string, openingId: string, versionNo: number, key: string, signal?: AbortSignal) =>
     requestWrite<OrderSettlement>(`/api/orders/${encodeURIComponent(orderId)}/openings/${encodeURIComponent(openingId)}/confirm`, { body: { versionNo }, key, signal, subject }),
+  /**
+   * The customer-support order card and the order detail panel share one `opening.confirm`
+   * original-request contract. The frozen subject, key, version and opening id are persisted
+   * before the write; an unknown result keeps those bytes and the caller is directed to the
+   * order detail for explicit recovery. A brand-new key is never minted while an unresolved
+   * original request exists. Errors carry stable codes for the shared card's copy.
+   */
+  confirmOpeningWithOriginalIntent: async (
+    subject: OrderSubject,
+    orderId: string,
+    openingId: string,
+    versionNo: number,
+    keyFactory: () => string,
+    isCurrent?: () => boolean,
+  ): Promise<void> => {
+    const fail = (code: string, status: number, message: string): never => {
+      throw Object.assign(new Error(message), { status, code });
+    };
+    const result = await runGuardedWrite<OrderSettlement>({
+      subject,
+      kind: "opening.confirm",
+      resourceId: orderId,
+      body: { versionNo },
+      context: { openingId, orderId },
+      keyFactory,
+      assertCurrent: isCurrent ? () => isCurrent() : undefined,
+      refuseExisting: true,
+      pendingCode: "OPENING_CONFIRM_PENDING",
+      pendingMessage: "已有一笔结果未确认的开租申请；原申请与原键已保留，请到订单详情按原请求查询/恢复，不要重复提交。",
+      request: (key, frozen, frozenContext, frozenSubject) => requestWrite<OrderSettlement>(
+        `/api/orders/${encodeURIComponent(orderId)}/openings/${encodeURIComponent(String(frozenContext?.openingId ?? openingId))}/confirm`,
+        { body: { versionNo: frozen.versionNo ?? versionNo }, key, subject: frozenSubject },
+      ),
+    });
+    if (result.status === "ok") return;
+    if (result.status === "blocked") return fail("ORIGINAL_REQUEST_BLOCKED", 423, result.message);
+    if (result.status === "unknown") return fail("OPENING_CONFIRM_UNKNOWN", result.error.status || 503, "开租确认结果未确认；原申请与原键已保留，请到订单详情按原请求查询/恢复，不要重复提交。");
+    if (result.status === "unauthorized") return fail(result.error.code, 401, `${result.error.message} 请到订单详情按原请求核对。`);
+    if (result.status === "recovery-unresolved") return fail(result.error.code, result.error.status || 409, result.error.message);
+    return fail(result.error.code, result.error.status || 400, result.error.message);
+  },
 };
