@@ -204,9 +204,10 @@ test("case column shows only proven current facts, not an inferred stage or turn
   // 类型/状态/当前接待由聊天头部承担；右栏从用户与风险摘要开始，不再重复「本次服务」。
   assert.doesNotMatch(aside.textContent, /本次服务|服务状态|当前接待|发起时间/, "the chat header owns type/status/assignee");
   assert.equal(aside.children[1]?.getAttribute("data-slot"), "card", "the user/risk card is the first rail block");
-  for (const label of ["需用户目录读取权限", "关联对象"]) {
+  for (const label of ["需用户目录读取权限"]) {
     assert.match(aside.textContent, new RegExp(label), `case column states ${label}`);
   }
+  assert.doesNotMatch(aside.textContent, /关联对象|已关联对象|已关联订单/, "the user card no longer shows the linked subject");
 });
 
 test("ending a consultation closes only the current round and says so", async (t) => {
@@ -218,7 +219,7 @@ test("ending a consultation closes only the current round and says so", async (t
   assert.doesNotMatch(dialog.textContent, /结束咨询/, "the action never claims the whole consultation/history is closed");
   assert.match(dialog.textContent, /第 2 轮/, "the dialog names the round being ended");
   assert.match(dialog.textContent, /客服 A/, "the dialog names the current assignee");
-  assert.match(dialog.textContent, /已关联对象/, "the dialog acknowledges the subject without exposing its raw reference");
+  assert.doesNotMatch(dialog.textContent, /已关联对象|关联对象/, "the dialog no longer shows the linked subject");
   assert.doesNotMatch(dialog.textContent,/listing-9/);
   assert.match(dialog.textContent, /不可撤销/, "the dialog states the consequence");
   assert.match(dialog.textContent, /聊天记录保留在同一会话/, "the dialog keeps the thread history honest");

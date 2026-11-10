@@ -64,14 +64,38 @@ test("former-member history uses the viewer account and precise cursor without r
     calls++;const body=new URLSearchParams(String(init?.body));
     assert.equal(body.get("accid"),"staff-1");assert.equal(body.get("checkTeamValid"),"false");assert.equal(body.get("includeNoSenseMsg"),"false");
     assert.equal(body.get("excludeMsgid"),"4301564702653153303");assert.equal(body.get("endtime"),"30");
-    return new Response('{"code":200,"msgs":[{"msgid":4301564702653153302,"from":"user-1","sendtime":20,"type":1,"body":{"url":"https://nos.example/image.png","w":32,"h":24,"size":100}},{"msgid":4301564702653153301,"from":"staff-1","sendtime":19,"type":0,"body":{"msg":"reply"}}]}',{status:200});
+    return new Response('{"code":200,"msgs":[{"msgid":4301564702653153302,"from":"user-1","sendtime":20,"type":1,"body":{"url":"https://nos.example/image.png","w":32,"h":24,"size":100}},{"msgid":4301564702653153301,"from":"staff-1","sendtime":19,"type":0,"body":{"msg":"reply"},"ext":"{\\"schema\\":\\"zzsh.message-reply\\",\\"version\\":1,\\"messageId\\":\\"4301564702653153302\\",\\"senderId\\":\\"user-1\\",\\"text\\":\\"orig\\"}"}]}',{status:200});
   }});
   const rows=await api.readSupportMemberHistory({teamId:"123",accountId:"staff-1",limit:50,before:{id:"4301564702653153303",time:30}});
   assert.deepEqual(rows.map(row=>row.messageServerId),["4301564702653153302","4301564702653153301"]);
   assert.equal(rows[0]!.attachment!.width,32);assert.equal(rows[0]!.attachment!.height,24);assert.equal(rows[1]!.text,"reply");
+  assert.match(rows[1]!.serverExtension ?? "", /zzsh\.message-reply/);
   await assert.rejects(api.readSupportMemberHistory({teamId:"123",accountId:"staff-1",limit:101}));
   await assert.rejects(api.readSupportMemberHistory({teamId:"123",accountId:"staff-1",limit:50,before:{id:"invalid",time:30}}));
   assert.equal(calls,1);
+});
+
+test("history normalizes NIM V2 notification attachments without rewriting them",async()=>{
+  const api=new YunxinServerApiClient({appKey:APP_KEY,appSecret:APP_SECRET,fetch:async()=>jsonResponse({code:200,msgs:[
+    {msgid:1,from:"user-1",sendtime:1,type:0,body:{msg:"hello"}},
+    {msgid:2,from:"system",sendtime:2,type:5,body:{type:0,ope:0,tname:"订单群",accids:["user-1"]}},
+    {msgid:3,from:"system",sendtime:3,type:5,body:{type:4}},
+    {msgid:4,from:"system",sendtime:4,type:5,body:{ope:0,tname:"旧建群通知",accids:["user-1"]}},
+    {msgid:5,from:"system",sendtime:5,type:5,body:{type:405}},
+    {msgid:6,from:"system",sendtime:6,type:5,body:{type:99}},
+    {msgid:7,from:"system",sendtime:7,type:5,body:{type:-1,ope:0}},
+  ]})});
+  const rows=await api.readSupportMemberHistory({teamId:"123",accountId:"staff-1",limit:10});
+  assert.equal("systemNotice" in rows[0]!,false,"普通消息不带 systemNotice");
+  assert.deepEqual(rows[1]!.systemNotice,{kind:"MEMBER_JOINED",text:"成员已加入会话"});
+  assert.deepEqual(rows[2]!.systemNotice,{kind:"TEAM_DISMISSED",text:"会话已解散"});
+  assert.deepEqual(rows[3]!.systemNotice,{kind:"TEAM_CREATED",text:"群聊已创建"});
+  assert.deepEqual(rows[4]!.systemNotice,{kind:"TEAM_DISMISSED",text:"会话已解散"});
+  assert.deepEqual(rows[5]!.systemNotice,{kind:"UNKNOWN",text:"会话信息有变化"});
+  assert.deepEqual(rows[6]!.systemNotice,{kind:"TEAM_CREATED",text:"群聊已创建"});
+  assert.equal(rows[1]!.attachment?.ope,0);
+  assert.equal(rows[1]!.attachment?.type,0);
+  assert.equal(rows[1]!.attachment?.tname,"订单群");
 });
 
 test("signs Server API requests without putting AppSecret in the request", async () => {

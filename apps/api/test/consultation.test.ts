@@ -3,7 +3,7 @@ import { test } from "node:test";
 import { spawnSync } from "node:child_process";
 import { resolve } from "node:path";
 
-import { MessageScopeRecoveryLifecycle, listAdminConsultations, listConsultationEvents, readConsultationContext, readConsultationLegacyOrderReference, decodeEventCursor, encodeEventCursor, parseEventLimit, parseConsultationBody, parseLimit, parsePresenceBody, parseSupportType, requireSupportAccess, scanSupportFirstResponseBreaches, startMessageScopeRecovery, toView } from "../src/im/consultation";
+import { MessageScopeRecoveryLifecycle, listAdminConsultations, listConsultationEvents, listConsultationRounds, readConsultationContext, readConsultationLegacyOrderReference, decodeEventCursor, encodeEventCursor, parseEventLimit, parseConsultationBody, parseLimit, parsePresenceBody, parseSupportType, requireSupportAccess, scanSupportFirstResponseBreaches, startMessageScopeRecovery, toView } from "../src/im/consultation";
 import { buildYunxinIdentityMarker, deriveYunxinAccountId } from "../src/im/identity-lifecycle";
 import { OrderDispatchLifecycle } from "../src/im/order-dispatch";
 import { reserveSupportCandidateOutcome, resolveSupportConcurrencyLimit } from "../src/im/support-dispatch";
@@ -285,7 +285,7 @@ test("event cursor rejects malformed, truncated and non-canonical payloads", () 
 function consultationReadFixture() {
   const state = {
     permissions: ["im.support.read", "im.support.accept"], locked: false, expired: false,
-    security: "ACTIVE", cookie: "", image: "/api/v1/profile/avatars/user/user_a/2",
+    security: "ACTIVE", cookie: "", image: "/api/v1/profile/avatars/user/user_a/2", identity: "READY" as "READY" | "MISMATCH",
     row: { id: "cons_a", appId: "app_a", userId: "user_a", userName: "用户甲", userUsername: "name",
       kind: "SERVICE", state: "ACTIVE", assignedAdminId: "admin_a", adminName: "客服甲",
       subjectRef: null as string | null, version: 3, messageScopeState: "READY" },
@@ -297,6 +297,7 @@ function consultationReadFixture() {
       { id: "event_b", type: "ASSIGNED", actorType: "system", actorId: "user_a", fromAdminId: null, toAdminId: "admin_a", createdAt: "2026-10-11T08:19:04.123456Z" },
       { id: "event_a", type: "CREATED", actorType: "user", actorId: "user_a", fromAdminId: null, toAdminId: null, createdAt: "2026-10-11T08:19:04.123456Z" },
     ],
+    rounds: [] as Array<{ id: string; roundSeq: string; state: string; assignedAdminId: string | null; adminName: string | null; adminImage: string | null; messageScopeId: string | null; messageScopeState: string; createdAt: string; updatedAt: string; lastMessageAt: string | null; closedAt: string | null; transferCount: string }>,
   };
   const calls: Array<{ sql: string; values: unknown[] }> = [];
   const query = async (sql: string, values: unknown[] = []) => {
@@ -307,7 +308,16 @@ function consultationReadFixture() {
     if (sql.includes("WITH role_permissions AS")) return { rows: state.permissions.map(permissionCode => ({ permissionCode })) };
     if (sql.includes('FROM "zzsh_iam"."im_identity_mapping"')) {
       const key = { provider: "yunxin" as const, appId: "app_a", realm: "admin" as const, kind: "ADMIN" as const, platformSubjectId: "admin_a" };
-      return { rows: [{ accountId: deriveYunxinAccountId(key), identityMarker: buildYunxinIdentityMarker(key), status: "READY" }] };
+      return { rows: [{ accountId: deriveYunxinAccountId(key), identityMarker: state.identity === "READY" ? buildYunxinIdentityMarker(key) : "stale", status: "READY" }] };
+    }
+    // Historical events/rounds use the public read projection: no assignment or closed-state gate.
+    if (sql.includes('FROM "zzsh_iam"."im_consultation" c') && sql.includes('WHERE c."app_id" = $1 AND c."id" = $2') && !sql.includes('c."state" <>')) {
+      const row = { ...state.row, userImage: state.image };
+      return { rows: row.appId === values[0] && row.id === values[1] ? [row] : [] };
+    }
+    if (sql.includes('LEFT JOIN LATERAL') && sql.includes('round_seq')) {
+      const [, , cursor, limit] = values;
+      return { rows: state.rounds.filter((round) => cursor === null || BigInt(round.roundSeq) < BigInt(String(cursor))).slice(0, Number(limit)) };
     }
     if (sql.includes('FROM "zzsh_iam"."im_consultation" c') && sql.includes('ORDER BY CASE WHEN c."assigned_admin_id" = $2')) {
       const row = { ...state.row, userImage: state.image };
@@ -361,6 +371,44 @@ function consultationReadFixture() {
   const actor = { userId: "admin_a", sessionId: "session_a" } as never;
   return { state, calls, pool, options, actor };
 }
+
+test("round ledger is public to support readers and returns newest rounds with a cursor", async () => {
+  const f = consultationReadFixture();
+  f.state.rounds = [
+    { id: "round_c", roundSeq: "3", state: "CLOSED", assignedAdminId: "admin_a", adminName: "客服甲", adminImage: null, messageScopeId: "team_round_c", messageScopeState: "READY", createdAt: "2026-10-12T08:00:00.000000Z", updatedAt: "2026-10-12T09:00:00.000000Z", lastMessageAt: "2026-10-12T08:30:00.000000Z", closedAt: "2026-10-12T09:00:00.000000Z", transferCount: "1" },
+    { id: "round_b", roundSeq: "2", state: "CLOSED", assignedAdminId: "admin_b", adminName: "客服乙", adminImage: null, messageScopeId: null, messageScopeState: "PENDING", createdAt: "2026-10-11T08:00:00.000000Z", updatedAt: "2026-10-11T09:00:00.000000Z", lastMessageAt: null, closedAt: "2026-10-11T09:00:00.000000Z", transferCount: "0" },
+    { id: "round_a", roundSeq: "1", state: "CLOSED", assignedAdminId: null, adminName: null, adminImage: null, messageScopeId: "team_round_a", messageScopeState: "READY", createdAt: "2026-10-10T08:00:00.000000Z", updatedAt: "2026-10-10T09:00:00.000000Z", lastMessageAt: null, closedAt: null, transferCount: "0" },
+  ];
+  const viewer = deriveYunxinAccountId({ provider: "yunxin", appId: "app_a", realm: "admin", kind: "ADMIN", platformSubjectId: "admin_a" });
+  const first = await listConsultationRounds(f.options, f.actor, "cons_a", "2", null);
+  assert.equal(first.contractVersion, "admin-consultation-rounds.v1");
+  assert.deepEqual(first.rounds.map((round) => round.roundSeq), ["3", "2"]);
+  assert.equal(first.rounds[0]!.assignedAdmin?.name, "客服甲");
+  assert.equal(first.rounds[0]!.transferCount, "1");
+  assert.equal(first.rounds[0]!.conversationId, `${viewer}|2|team_round_c`);
+  assert.equal(first.rounds[1]!.conversationId, null, "non-READY rounds expose no team");
+  assert.equal(first.nextCursor, "2");
+  assert.doesNotMatch(JSON.stringify(first), /rating|score|comment/);
+  assert.doesNotMatch(JSON.stringify(first), /messageScope|accountId|peerAccountId/);
+  const older = await listConsultationRounds(f.options, f.actor, "cons_a", "2", first.nextCursor);
+  assert.deepEqual(older.rounds.map((round) => round.roundSeq), ["1"]);
+  assert.equal(older.rounds[0]!.conversationId, `${viewer}|2|team_round_a`);
+  assert.equal(older.nextCursor, null);
+  assert.ok(f.calls.every(({ sql }) => !/\b(INSERT|UPDATE|DELETE|TRUNCATE)\b/.test(sql)));
+});
+
+test("round conversation handles stay null when the viewer identity cannot be verified", async () => {
+  const f = consultationReadFixture();
+  f.state.identity = "MISMATCH";
+  f.state.rounds = [{
+    id: "round_c", roundSeq: "3", state: "CLOSED", assignedAdminId: null, adminName: null, adminImage: null,
+    messageScopeId: "team_round_c", messageScopeState: "READY",
+    createdAt: "2026-10-12T08:00:00.000000Z", updatedAt: "2026-10-12T09:00:00.000000Z",
+    lastMessageAt: null, closedAt: "2026-10-12T09:00:00.000000Z", transferCount: "0",
+  }];
+  const page = await listConsultationRounds(f.options, f.actor, "cons_a", "20", null);
+  assert.equal(page.rounds[0]!.conversationId, null);
+});
 
 test("event projection keeps newest pages, microseconds and actor roles without private fields", async () => {
   const f = consultationReadFixture();
@@ -495,6 +543,11 @@ test("read projections recheck session and current read/object grants inside the
       if (scenario === "other-owner") f.state.row.assignedAdminId = "admin_b";
       if (scenario === "closed") f.state.row.state = "CLOSED";
       if (scenario === "missing") f.state.row.id = "other";
+      // Round events are public to support readers, including closed/other-owner rounds.
+      if (kind === "events" && (scenario === "closed" || scenario === "other-owner")) {
+        assert.equal((await listConsultationEvents(f.options, f.actor, "cons_a", null, null)).events.length, 3);
+        continue;
+      }
       await assert.rejects(kind === "events" ? listConsultationEvents(f.options, f.actor, "cons_a", null, null)
         : readConsultationContext(f.options, f.actor, "cons_a"),
       (error: unknown) => Boolean(error && typeof error === "object" && "status" in error && [401, 403, 404, 423].includes(Number(error.status))), scenario);

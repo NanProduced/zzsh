@@ -8,8 +8,7 @@ import { createServer } from "vite";
 import react from "@vitejs/plugin-react";
 
 /**
- * D-01：右栏「关联对象」的 resolved / unresolved / absent 三条渲染路径。
- * request 由调用方注入，测试不碰真实网络；未解析对象不暴露裸引用。
+ * 用户卡只展示用户与风险摘要；服务端仍返回的关联对象投影不再请求业务号或渲染入口。
  */
 
 const adminRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -58,13 +57,12 @@ async function waitFor(predicate, timeout = 3_000) {
   }
 }
 
-const scope = { profile: false, orders: false, resources: false };
-
-async function mount(t, { context, onOpenSubject, onOpenProfile }) {
+async function mount(t, { context, scope = { profile: false, orders: false, resources: false }, onOpenProfile }) {
   const calls = [];
   const request = async (path) => {
     calls.push(path);
     if (path.endsWith("/context")) return context;
+    if (path === "/users/user-a") return { user: { userId: "user-a", name: "用户 A", maskedPhone: "138****8000", accountStatus: "ACTIVE", identityStatus: "VERIFIED", ageStatus: "ADULT", source: { kind: "LOCAL" }, orderSummary: { state: "ready", count: 2 }, resourceSummary: { state: "denied" } } };
     throw new Error(`unexpected test request ${path}`);
   };
   const rootNode = browser.document.createElement("div");
@@ -81,139 +79,40 @@ async function mount(t, { context, onOpenSubject, onOpenProfile }) {
       fallbackName: "用户 A",
       scope,
       request,
-      ...(onOpenSubject ? { onOpenSubject } : {}),
       ...(onOpenProfile ? { onOpenProfile } : {}),
     }));
   });
   await settle();
-  await waitFor(() => rootNode.querySelector('[data-subject-status], .im-rail-value'));
+  await waitFor(() => rootNode.querySelector(".im-wb-card")?.textContent.includes("用户 A"));
   return { rootNode, calls };
 }
 
-const footerOf = (rootNode) => rootNode.querySelector(".im-wb-card");
-
-test("verified legacy subject is labelled as an old order without private identifiers",async t=>{
- const id=`legacy_order_${'a'.repeat(40)}`;
- const {rootNode}=await mount(t,{context:{consultationId:'c-1',user:{status:'available',publicId:'user-a',displayName:'用户 A'},
-  subject:{status:'resolved',kind:'ORDER',origin:'LEGACY',displayNo:'OLD-123',title:null,party:'RENTER',target:{kind:'ORDER',id}}}});
- assert.match(rootNode.textContent,/关联对象 · 旧订单/);assert.match(rootNode.textContent,/OLD-123/);assert.match(rootNode.textContent,/租客/);assert.doesNotMatch(rootNode.textContent,new RegExp(id));
-});
-
-test("resolved 订单：类型 + 业务展示号 + 标题 + 可跳转入口，id 不上屏", async (t) => {
-  const opened = [];
-  const { rootNode } = await mount(t, {
+test("resolved subject is never rendered or turned into a business-number request", async (t) => {
+  const { rootNode, calls } = await mount(t, {
     context: {
       consultationId: "c-1",
       user: { status: "available", publicId: "user-a", displayName: "用户 A" },
-      subject: {
-        status: "resolved", kind: "ORDER", displayNo: "DD20261029001",
-        title: "三角洲行动 · 全皮肤账号",
-        target: { kind: "ORDER", id: "rental_order_2f1c9a70b30e4d01" },
-      },
+      subject: { status: "resolved", kind: "ORDER", displayNo: "DD20261029001", title: "三角洲行动 · 全皮肤账号", target: { kind: "ORDER", id: "rental_order_2f1c9a70b30e4d01" } },
     },
-    onOpenSubject: (target, label) => opened.push({ target, label }),
   });
-
-  const card = footerOf(rootNode);
-  assert.match(card.textContent, /关联对象 · 订单/);
-  assert.match(card.textContent, /DD20261029001/);
-  assert.match(card.textContent, /三角洲行动 · 全皮肤账号/, "订单标题要显示");
-  assert.doesNotMatch(card.textContent, /rental_order_2f1c9a70b30e4d01/, "内部主键不得上屏");
-
-  const status = rootNode.querySelector("[data-subject-status]");
-  assert.equal(status.dataset.subjectStatus, "resolved");
-  assert.equal(status.dataset.subjectKind, "ORDER");
-
-  const button = rootNode.querySelector('[data-action="open-subject"]');
-  assert.ok(button, "resolved 且有 target 时必须给入口");
-  assert.equal(button.textContent, "DD20261029001", "按钮文案用业务展示号");
-  await act(async () => button.click());
-  assert.deepEqual(opened, [{ target: { kind: "ORDER", id: "rental_order_2f1c9a70b30e4d01" }, label: "DD20261029001" }]);
-});
-
-test("resolved 资源账号：title 为 null 时不渲染标题行，入口类型是 ACCOUNT", async (t) => {
-  const opened = [];
-  const { rootNode } = await mount(t, {
-    context: {
-      consultationId: "c-1",
-      user: { status: "available", publicId: "user-a", displayName: "用户 A" },
-      subject: { status: "resolved", kind: "ACCOUNT", displayNo: "AC88231", title: null, target: { kind: "ACCOUNT", id: "acct_01" } },
-    },
-    onOpenSubject: (target) => opened.push(target),
-  });
-  const card = footerOf(rootNode);
-  assert.match(card.textContent, /关联对象 · 资源账号/);
-  assert.match(card.textContent, /AC88231/);
-  assert.equal(rootNode.querySelector("[data-subject-title]"), null, "账号没有订单标题，就不该有空标题行");
-
-  const button = rootNode.querySelector('[data-action="open-subject"]');
-  await act(async () => button.click());
-  assert.deepEqual(opened, [{ kind: "ACCOUNT", id: "acct_01" }]);
-});
-
-test("resolved 但缺 target：只展示业务号，不给假入口", async (t) => {
-  const { rootNode } = await mount(t, {
-    context: {
-      consultationId: "c-1",
-      user: { status: "available", publicId: "user-a", displayName: "用户 A" },
-      subject: { status: "resolved", kind: "ORDER", displayNo: "DD0001", title: null },
-    },
-    onOpenSubject: () => { throw new Error("should not open without target"); },
-  });
-  assert.equal(rootNode.querySelector('[data-action="open-subject"]'), null);
-  assert.match(rootNode.querySelector("[data-subject-display-no]").textContent ?? "", /DD0001/);
-});
-
-test("resolved 但缺业务展示号：退回兑底文案，不拿内部 id 顶单号", async (t) => {
-  const { rootNode } = await mount(t, {
-    context: {
-      consultationId: "c-1",
-      user: { status: "available", publicId: "user-a", displayName: "用户 A" },
-      subject: { status: "resolved", kind: "ORDER", target: { kind: "ORDER", id: "rental_order_2f1c9a70b30e4d01" } },
-    },
-    onOpenSubject: () => { throw new Error("should not open"); },
-  });
-  const card = footerOf(rootNode);
-  assert.match(card.textContent, /关联对象类型暂未确认/);
+  const card = rootNode.querySelector(".im-wb-card");
+  assert.doesNotMatch(card.textContent, /关联对象|DD20261029001|三角洲行动/);
   assert.doesNotMatch(card.textContent, /rental_order_2f1c9a70b30e4d01/);
-  assert.equal(rootNode.querySelector('[data-action="open-subject"]'), null);
+  assert.equal(card.querySelector("[data-subject-status], [data-subject-display-no], [data-action='open-subject']"), null);
+  assert.deepEqual(calls, ["/im/consultations/c-1/context"], "only the conversation context is read with its user");
 });
 
-test("unresolved：明确暂未识别，不暴露裸引用也不给入口", async (t) => {
+test("profile facts still render without a subject footer", async (t) => {
   const { rootNode } = await mount(t, {
-    context: {
-      consultationId: "c-1",
-      user: { status: "available", publicId: "user-a", displayName: "用户 A" },
-      subject: { status: "unresolved", rawRef: "550e8400-e29b-41d4-a716-446655440000" },
-    },
-    onOpenSubject: () => { throw new Error("unresolved must not open"); },
-  });
-  const card = footerOf(rootNode);
-  assert.match(card.textContent, /关联对象暂未识别/);
-  assert.doesNotMatch(card.textContent, /550e8400/, "裸引用（可能是 UUID）不上屏");
-  assert.equal(rootNode.querySelector('[data-action="open-subject"]'), null);
-});
-
-test("absent：说明尚未关联，不出现任何对象号码", async (t) => {
-  const { rootNode } = await mount(t, {
+    scope: { profile: true, orders: true, resources: true },
     context: {
       consultationId: "c-1",
       user: { status: "available", publicId: "user-a", displayName: "用户 A" },
       subject: { status: "absent" },
     },
   });
-  assert.match(footerOf(rootNode).textContent, /尚未关联商品或订单/);
-  assert.equal(rootNode.querySelector('[data-action="open-subject"]'), null);
-});
-
-test("调用方没给 onOpenSubject 时：resolved 只展示业务号，不渲染按钮", async (t) => {
-  const { rootNode } = await mount(t, {
-    context: {
-      consultationId: "c-1",
-      user: { status: "available", publicId: "user-a", displayName: "用户 A" },
-      subject: { status: "resolved", kind: "ORDER", displayNo: "DD0002", title: null, target: { kind: "ORDER", id: "order_02" } },
-    },
-  });
-  assert.equal(rootNode.querySelector('[data-action="open-subject"]'), null);
-  assert.match(rootNode.querySelector("[data-subject-display-no]").textContent ?? "", /DD0002/);
+  const card = rootNode.querySelector(".im-wb-card");
+  assert.match(card.textContent, /138\*\*\*\*8000/);
+  assert.match(card.textContent, /2 单/);
+  assert.doesNotMatch(card.textContent, /关联对象|尚未关联|已关联/);
 });

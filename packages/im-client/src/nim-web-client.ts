@@ -5,6 +5,7 @@ import {
   type ImClientHandle,
 } from "./im-client-lifecycle.ts";
 import { createNimReceiptReporter, type NimReceiptStatus } from "./message-receipts.ts";
+import type { ImSystemNoticeKind } from "./message-state.ts";
 import { orderReferenceSummary } from "./order-reference.ts";
 import { parseOrderStageCard, type OrderStageCard } from "./order-stage-card.ts";
 export { encodeOrderReference, parseOrderReference, orderReferenceSummary, type OrderReference } from "./order-reference.ts";
@@ -95,6 +96,8 @@ export type NimMessageLike = {
   revoked?: boolean;
   card?: OrderStageCard;
   serverExtension?: string;
+  /** Server-normalized history field; live SDK messages do not carry it. */
+  systemNotice?: { kind: ImSystemNoticeKind; text: string } | null;
 };
 
 export const NIM_IMAGE_MAX_BYTES = 10 * 1024 * 1024;

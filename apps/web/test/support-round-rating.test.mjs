@@ -61,16 +61,24 @@ function rowOf(overrides = {}) {
   };
 }
 
-async function mountSupport(t, { row, history = [], ratingMode = "success" }) {
+async function mountSupport(t, { row, history = [], ratingMode = "success", closeMode = "success" }) {
   const originalFetch = globalThis.fetch;
   let currentRow = { ...row };
   const ratingRequests = [];
+  const closeRequests = [];
   let consultationGets = 0;
   globalThis.fetch = async (input, init = {}) => {
     const url = String(input);
     const method = init.method ?? "GET";
     if (url.startsWith("/api/orders/")) return new Response(JSON.stringify({ items: [], nextCursor: null }));
     if (url.includes("/im/token")) return new Response(JSON.stringify({ appKey: "synthetic", accountId: "preview-user", token: "synthetic", transport: "local-fake" }));
+    if (/\/im\/consultations\/[^/]+\/close$/.test(url)) {
+      closeRequests.push({ url, method, body: init.body === undefined ? null : JSON.parse(String(init.body)) });
+      if (closeMode === "failure") return new Response(JSON.stringify({ error: { code: "INTERNAL_ERROR", message: "结束咨询失败，请稍后重试。" } }), { status: 500 });
+      if (closeMode === "conflict") return new Response(JSON.stringify({ error: { code: "CONFLICT", message: "本轮咨询已结束" } }), { status: 409 });
+      currentRow = { ...currentRow, state: "CLOSED", threadState: "IDLE", rating: { available: true, submitted: false, dismissed: false, score: null } };
+      return new Response(JSON.stringify({ consultation: currentRow }));
+    }
     if (/\/im\/consultations\/[^/]+\/rating(?:\/dismiss)?$/.test(url)) {
       ratingRequests.push({ url, method, body: init.body === undefined ? null : JSON.parse(String(init.body)) });
       if (ratingMode === "failure") return new Response(JSON.stringify({ message: "synthetic failure" }), { status: 500 });
@@ -110,7 +118,7 @@ async function mountSupport(t, { row, history = [], ratingMode = "success" }) {
     row.state === "CLOSED" && row.rating?.available ? "rating card" : "support composer",
   );
   return {
-    host, root, ratingRequests,
+    host, root, ratingRequests, closeRequests,
     until,
     get consultationGets() { return consultationGets; },
     setRow: (patch) => { currentRow = { ...currentRow, ...patch }; },
@@ -387,4 +395,61 @@ test("the user workspace never exposes group controls", async (t) => {
   assert.doesNotMatch(page.host.textContent, /群成员|群设置|拉人|退群/);
   const source = readFileSync(new URL("../src/components/support/customer-support-workspace.tsx", import.meta.url), "utf8");
   assert.doesNotMatch(source, /群成员|群设置|拉人|退群/);
+});
+
+test("end-consultation entry appears only for an ACTIVE round", async (t) => {
+  const waiting = await mountSupport(t, { row: rowOf({ state: "WAITING", threadState: "WAITING" }) });
+  await waiting.until(() => waiting.host.querySelector("textarea"), "WAITING composer");
+  assert.equal(waiting.host.querySelector('[data-action="end-consultation"]'), null, "waiting rounds cannot be ended by the user");
+
+  const active = await mountSupport(t, { row: rowOf({ state: "ACTIVE", threadState: "ACTIVE" }) });
+  await active.until(() => active.host.querySelector('[data-action="end-consultation"]'), "ACTIVE close entry");
+  assert.match(active.host.querySelector('[data-action="end-consultation"]').textContent, /结束本次咨询/);
+
+  const closed = await mountSupport(t, { row: rowOf({ rating: { available: true, submitted: false, dismissed: false, score: null } }) });
+  await closed.until(() => closed.host.querySelector(".support-rating-card"), "closed rating card");
+  assert.equal(closed.host.querySelector('[data-action="end-consultation"]'), null, "ended rounds do not offer a second close");
+});
+
+test("ending an ACTIVE consultation confirms first, then refreshes into the rating card", async (t) => {
+  const page = await mountSupport(t, { row: rowOf({ state: "ACTIVE", threadState: "ACTIVE" }) });
+  await page.until(() => page.host.querySelector('[data-action="end-consultation"]'), "close entry");
+  await page.click(page.host.querySelector('[data-action="end-consultation"]'));
+  await page.until(() => browser.document.querySelector('[role="alertdialog"]'), "confirm dialog");
+  const dialog = browser.document.querySelector('[role="alertdialog"]');
+  assert.match(dialog.textContent, /结束本次咨询/);
+  assert.match(dialog.textContent, /聊天记录保留/);
+  assert.match(dialog.textContent, /重新发起/);
+
+  const cancel = [...dialog.querySelectorAll("button")].find((button) => /继续咨询/.test(button.textContent));
+  assert.ok(cancel, "confirmation keeps a safe cancel action");
+  await page.click(cancel);
+  await page.until(() => browser.document.querySelector('[role="alertdialog"]') === null, "cancel closes the dialog");
+  assert.equal(page.closeRequests.length, 0, "cancel never calls the close endpoint");
+
+  await page.click(page.host.querySelector('[data-action="end-consultation"]'));
+  await page.until(() => browser.document.querySelector('[role="alertdialog"]'), "dialog reopened");
+  const confirm = [...browser.document.querySelectorAll('[role="alertdialog"] button')].find((button) => /确认结束/.test(button.textContent));
+  assert.ok(confirm, "confirmation offers an explicit end action");
+  await page.click(confirm);
+  await page.until(() => page.closeRequests.length === 1, "close POST");
+  assert.equal(page.closeRequests[0].url, "/api/im/consultations/round-1/close");
+  assert.equal(page.closeRequests[0].method, "POST");
+  assert.match(page.closeRequests[0].body.operationId, /^support_close_/);
+  await page.until(() => page.host.querySelector(".support-rating-card"), "rating card after close");
+  assert.equal(page.host.querySelector('[data-action="end-consultation"]'), null, "the closed round cannot be ended again");
+});
+
+test("a failed end-consultation keeps the round active and reports the failure", async (t) => {
+  const page = await mountSupport(t, { row: rowOf({ state: "ACTIVE", threadState: "ACTIVE" }), closeMode: "failure" });
+  await page.until(() => page.host.querySelector('[data-action="end-consultation"]'), "close entry");
+  await page.click(page.host.querySelector('[data-action="end-consultation"]'));
+  await page.until(() => browser.document.querySelector('[role="alertdialog"]'), "confirm dialog");
+  const confirm = [...browser.document.querySelectorAll('[role="alertdialog"] button')].find((button) => /确认结束/.test(button.textContent));
+  await page.click(confirm);
+  await page.until(() => page.host.querySelector(".support-inline-error"), "close failure alert");
+  assert.match(page.host.querySelector(".support-inline-error").textContent, /结束咨询失败/);
+  assert.equal(browser.document.querySelector('[role="alertdialog"]'), null, "failure closes the confirmation so the alert is visible");
+  assert.ok(page.host.querySelector('[data-action="end-consultation"]'), "failure keeps the active round operable");
+  assert.equal(page.host.querySelector(".support-rating-card"), null, "failure never fakes a rating card");
 });

@@ -32,6 +32,7 @@ import {
   SUPPORT_FIRST_RESPONSE_ACTION,
   readConsultationFirstResponse,
   readPatrolOrderTeamAccess,
+  readPatrolConsultationAccess,
   readSupportOverview,
   readOwnSupportStatistics,
   readAllCloudConversations,
@@ -653,6 +654,62 @@ test("patrol order-team read accepts a non-member but requires the manager's own
   assert.equal(wrong, null);
 });
 
+test("patrol consultation history requires the complaint grant for complaint threads", async () => {
+  const key = { provider: "yunxin" as const, appId: APP_ID, realm: "admin" as const, kind: "ADMIN" as const, platformSubjectId: "admin_a" };
+  const account = { accountId: deriveYunxinAccountId(key), identityMarker: buildYunxinIdentityMarker(key), status: "READY" };
+  const handler = (permissions: string[], kind: string) => fakePool(adminContextHandler({
+    boss: false,
+    permissions,
+    extras: (sql) => {
+      if (sql.includes("SELECT c.id,c.kind,t.user_account_id")) return { rows: [{ id: "im_consult_1", user_account_id: "user_im_a", kind }] };
+      if (sql.includes('FROM "zzsh_iam"."im_identity_mapping"')) return { rows: [account] };
+      if (sql.includes('INSERT INTO "zzsh_iam"."audit_event"')) return { rows: [] };
+      return null;
+    },
+  }));
+  const input = { appId: APP_ID, teamId: "900001", conversationId: `${account.accountId}|2|900001`, requestId: "req_patrol_consult" };
+  const actor = { userId: "admin_a", sessionId: "session_a" };
+  const denied = handler(["im.support.read", "im.support.management.read"], "COMPLAINT");
+  assert.equal(await readPatrolConsultationAccess(denied.pool as never, input, actor), null);
+  assert.equal(denied.calls.some(({ sql }) => sql.includes('INSERT INTO "zzsh_iam"."audit_event"')), false,
+    "a denied complaint patrol read is not recorded as a successful view");
+  const allowed = handler(["im.support.read", "im.support.management.read", "im.support.complaint"], "COMPLAINT");
+  assert.deepEqual(await readPatrolConsultationAccess(allowed.pool as never, input, actor),
+    { viewerAccountId: account.accountId, peerAccountId: "user_im_a" });
+  const service = handler(["im.support.read", "im.support.management.read"], "SERVICE");
+  assert.deepEqual(await readPatrolConsultationAccess(service.pool as never, input, actor),
+    { viewerAccountId: account.accountId, peerAccountId: "user_im_a" });
+});
+
+test("patrol consultation history accepts a closed round's exact Team and rejects another thread's Team", async () => {
+  const key = { provider: "yunxin" as const, appId: APP_ID, realm: "admin" as const, kind: "ADMIN" as const, platformSubjectId: "admin_a" };
+  const account = { accountId: deriveYunxinAccountId(key), identityMarker: buildYunxinIdentityMarker(key), status: "READY" };
+  const f = fakePool(adminContextHandler({
+    boss: false,
+    permissions: ["im.support.read", "im.support.management.read"],
+    extras: (sql, values) => {
+      if (sql.includes("SELECT c.id,c.kind,t.user_account_id")) {
+        assert.match(sql, /t\.message_scope_id=\$2 AND t\.message_scope_state='READY'/);
+        assert.match(sql, /c\.message_scope_id=\$2 AND c\.message_scope_state='READY' AND c\.state='CLOSED'/);
+        assert.match(sql, /ORDER BY \(c\.state<>'CLOSED'\) DESC/);
+        return { rows: values[1] === "700001" ? [{ id: "round_closed", user_account_id: "user_im_a", kind: "SERVICE" }] : [] };
+      }
+      if (sql.includes('FROM "zzsh_iam"."im_identity_mapping"')) return { rows: [account] };
+      if (sql.includes('INSERT INTO "zzsh_iam"."audit_event"')) return { rows: [] };
+      return null;
+    },
+  }));
+  const actor = { userId: "admin_a", sessionId: "session_a" };
+  assert.deepEqual(await readPatrolConsultationAccess(f.pool as never, {
+    appId: APP_ID, teamId: "700001", conversationId: `${account.accountId}|2|700001`, requestId: "req_old_round",
+  }, actor), { viewerAccountId: account.accountId, peerAccountId: "user_im_a" });
+  assert.equal(await readPatrolConsultationAccess(f.pool as never, {
+    appId: APP_ID, teamId: "700002", conversationId: `${account.accountId}|2|700002`, requestId: "req_other_round",
+  }, actor), null);
+  assert.equal(f.calls.filter(({ sql }) => sql.includes('INSERT INTO "zzsh_iam"."audit_event"')).length, 1,
+    "only the exact closed round Team is recorded as viewed");
+});
+
 test("takeover is idempotent for the current owner and rejects non-active consultations", () => {
   assert.equal(takeoverDecision({ state: "ACTIVE", assignedAdminId: "admin_b" }, "admin_a"), "TRANSFER");
   assert.equal(takeoverDecision({ state: "ACTIVE", assignedAdminId: "admin_a" }, "admin_a"), "NOOP");
@@ -931,6 +988,28 @@ test("audit filters reach both SQL branches and reject invalid filters before re
   assert.equal(selection[6],"ORDER");assert.equal(selection[7],"admin_b");
   for(const filters of [{type:"ALL"},{type:""},{adminUserId:""},{adminUserId:"bad id"}])await assert.rejects(
     listAuditConversations({pool:f.pool,appId:APP_ID} as never,adminContext,null,null,filters),e=>(e as {status:number}).status===400);
+});
+
+test("the audit list hides complaint rows without the complaint grant", async () => {
+  const handler = (permissions: string[]) => {
+    let values: unknown[] = [];
+    const f = fakePool(adminContextHandler({ boss: false, permissions, extras: (sql, v) => {
+      if (sql.includes('FROM "zzsh_iam"."im_identity_mapping"')) return { rows: [] };
+      if (sql.includes("WITH items AS")) { values = v; return { rows: [] }; }
+      return null;
+    } }));
+    return { f, values: () => values };
+  };
+  const denied = handler(["im.support.management.read"]);
+  await listAuditConversations({ pool: denied.f.pool, appId: APP_ID } as never, adminContext, null, null);
+  assert.equal(denied.values()[8], false);
+  await assert.rejects(
+    listAuditConversations({ pool: denied.f.pool, appId: APP_ID } as never, adminContext, null, null, { type: "COMPLAINT" }),
+    (error: { status?: number }) => error.status === 403,
+  );
+  const allowed = handler(["im.support.management.read", "im.support.complaint"]);
+  await listAuditConversations({ pool: allowed.f.pool, appId: APP_ID } as never, adminContext, null, null);
+  assert.equal(allowed.values()[8], true);
 });
 
 test("my support statistics are actor-bound and never require management read or return another employee", async()=>{

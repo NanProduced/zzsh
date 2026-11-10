@@ -92,14 +92,18 @@ test("rating and admin-read routes stay POST-only and the BFF/proxy forward them
   assert.ok(routes.includes("markConsultationRead(options.consultation, context, action.id)"));
   assert.ok(routes.includes("handleUserConsultationRating("));
   assert.ok(routes.includes("handleUserConsultationRatingDismiss("));
+  assert.ok(routes.includes("\\/user\\/consultations\\/"));
+  assert.ok(routes.includes("\\/close$"));
+  assert.ok(routes.includes("handleUserConsultationClose("));
 
   const bff = readFileSync(resolve("src/bff/admin-bff.ts"), "utf8");
   assert.ok(bff.includes("(claim|transfer|close|reconcile|read)"));
 
   const proxy = readFileSync(resolve("../web/src/app/api/im/[...path]/route.ts"), "utf8");
   assert.ok(proxy.includes("\\/consultations\\/[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\\/rating(?:\\/dismiss)?"));
-  assert.ok(proxy.includes("const ratingPath = /^\\/consultations\\/"));
-  assert.ok(proxy.includes("ratingPath || orderReadPath ? `/api/v1/im/user${path}`"));
+  assert.ok(proxy.includes("const userActionPath = /^\\/consultations\\/"));
+  assert.ok(proxy.includes("rating(?:\\/dismiss)?|read|close"));
+  assert.ok(proxy.includes("userActionPath || orderReadPath ? `/api/v1/im/user${path}`"));
 });
 
 test("support overview adds submitted ratings on the Beijing date range without fake zeros", () => {

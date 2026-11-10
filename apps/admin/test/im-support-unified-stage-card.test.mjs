@@ -151,6 +151,109 @@ async function triggerOrderRefresh() {
 }
 const orderRows = (host) => [...host.querySelectorAll('.im-wb-unified-queue .im-wb-row[data-unified-kind="order"]')];
 
+// 桌面通知只在页面隐藏时创建；用探针收集标题和正文，再手动点击回调验证打开行为。
+function observeNotifications(t) {
+  const fired = [];
+  class FakeNotification {
+    static permission = "granted";
+    static requestPermission = async () => "granted";
+    constructor(title, options) { fired.push(this); this.title = title; this.options = options; this.onclick = null; }
+    close() {}
+  }
+  const originalNotification = globalThis.Notification;
+  const originalBrowserNotification = browser.Notification;
+  const hiddenDescriptor = Object.getOwnPropertyDescriptor(browser.document, "hidden");
+  globalThis.Notification = FakeNotification;
+  browser.Notification = FakeNotification;
+  Object.defineProperty(browser.document, "hidden", { configurable: true, value: true });
+  t.after(() => {
+    globalThis.Notification = originalNotification;
+    browser.Notification = originalBrowserNotification;
+    if (hiddenDescriptor) Object.defineProperty(browser.document, "hidden", hiddenDescriptor);
+    else delete browser.document.hidden;
+  });
+  return fired;
+}
+
+test("order group unread joins the bell and its notification opens that order", async (t) => {
+  readRequests = [];
+  const fired = observeNotifications(t);
+  const card = { pending: 0, failed: 0, skipped: 0, unknown: 0 };
+  const item = order("order-a", "ZZ-A", "RENTING", card);
+  api = { admin: "A", requests: [], nextCursor: null, page2: [], orders: [item], orderAccess: syntheticOrderAccess() };
+  const { host } = await mountView(t, snapshot(permissions));
+  await waitFor(() => orderRows(host).length === 1);
+  await settle();
+  const bell = host.querySelector('[data-action="toggle-notifications"]');
+  assert.equal(bell.querySelector(".im-wb-notify-count"), null, "a zero-unread order group never counts");
+  fired.length = 0;
+
+  api.orders = [{ ...item, lastMessageAt: "2026-10-01T00:05:00.000Z", lastMessagePreview: "买家催发货", unreadCount: 2 }];
+  await triggerOrderRefresh();
+  await waitFor(() => fired.length === 1);
+  assert.match(fired[0].title, /订单群 · ZZ-A/, "the order group is named in the notification title");
+  assert.equal(fired[0].options?.body, "买家催发货", "the existing preview is the notification body");
+  assert.equal(bell.querySelector(".im-wb-notify-count")?.textContent, "1", "an unread order group counts in the bell once");
+
+  await act(async () => { fired[0].onclick?.(); });
+  await waitFor(() => host.querySelector('.im-wb-unified-queue [data-order-id="order-a"]')?.getAttribute("data-active") === "true");
+  assert.equal(host.querySelector(".im-wb-pane--orders").hasAttribute("hidden"), false, "clicking the notification switches to the order section");
+  await waitFor(() => readRequests.some((request) => request.kind === "order" && request.id === "order-a"));
+  await waitFor(() => !bell.querySelector(".im-wb-notify-count"));
+  assert.equal(fired.length, 1, "marking the open order group read adds no second channel");
+});
+
+test("an order group already unread on first load seeds the bell without replaying a notification", async (t) => {
+  const fired = observeNotifications(t);
+  const card = { pending: 0, failed: 0, skipped: 0, unknown: 0 };
+  api = { admin: "A", requests: [], nextCursor: null, page2: [], orders: [
+    { ...order("order-seed", "ZZ-SEED", "RENTING", card), lastMessageAt: "2026-10-01T00:01:00.000Z", lastMessagePreview: "历史未读", unreadCount: 1 },
+  ] };
+  const { host } = await mountView(t, snapshot(permissions));
+  await waitFor(() => orderRows(host).length === 1);
+  await settle();
+  assert.equal(host.querySelector(".im-wb-notify-count")?.textContent, "1", "the existing unread still shows in the bell");
+  assert.equal(fired.length, 0, "the first loaded order queue is a baseline, not a new-message burst");
+});
+
+test("hidden order groups never notify even when unread", async (t) => {
+  const fired = observeNotifications(t);
+  window.localStorage.setItem("zzsh.im-support.order-group-prefs.admin-a", JSON.stringify({ "order-hidden": { hidden: true } }));
+  t.after(() => window.localStorage.removeItem("zzsh.im-support.order-group-prefs.admin-a"));
+  const card = { pending: 0, failed: 0, skipped: 0, unknown: 0 };
+  api = { admin: "A", requests: [], nextCursor: null, page2: [], orders: [
+    { ...order("order-hidden", "ZZ-HIDDEN", "RENTING", card), lastMessageAt: "2026-10-01T00:05:00.000Z", lastMessagePreview: "隐藏群的新消息", unreadCount: 3 },
+    { ...order("order-zero", "ZZ-ZERO", "RENTING", card), unreadCount: 0 },
+  ] };
+  const { host } = await mountView(t, snapshot(permissions));
+  await waitFor(() => orderRows(host).some((row) => row.dataset.orderId === "order-zero"));
+  await settle();
+  assert.equal(host.querySelector(".im-wb-notify-count"), null);
+  api.orders = [...api.orders];
+  await triggerOrderRefresh();
+  await settle();
+  assert.equal(fired.length, 0);
+  assert.equal(host.querySelector(".im-wb-notify-count"), null);
+});
+
+test("muted order groups never raise a notification or bell count", async (t) => {
+  const fired = observeNotifications(t);
+  window.localStorage.setItem("zzsh.im-support.order-group-prefs.admin-a", JSON.stringify({ "order-muted": { muted: true } }));
+  t.after(() => window.localStorage.removeItem("zzsh.im-support.order-group-prefs.admin-a"));
+  const card = { pending: 0, failed: 0, skipped: 0, unknown: 0 };
+  api = { admin: "A", requests: [], nextCursor: null, page2: [], orders: [
+    { ...order("order-muted", "ZZ-MUTED", "RENTING", card), lastMessageAt: "2026-10-01T00:05:00.000Z", lastMessagePreview: "免打扰群的新消息", unreadCount: 2 },
+  ] };
+  const { host } = await mountView(t, snapshot(permissions));
+  await waitFor(() => orderRows(host).length === 1);
+  await settle();
+  assert.equal(host.querySelector(".im-wb-notify-count"), null, "a muted group is not a notification source");
+  api.orders = [...api.orders];
+  await triggerOrderRefresh();
+  await settle();
+  assert.equal(fired.length, 0, "a muted group never raises a desktop notification");
+});
+
 test("search asks the server for sessions outside the loaded order pages", async (t) => {
   api = { admin: "A", hold: null, nextCursor: null, page2: [], requests: [], searchQueries: [],
     orders: [order("order-loaded", "ZZ-LOADED", "RENTING", { pending: 0, failed: 0, skipped: 0, unknown: 0 })],
@@ -353,12 +456,12 @@ for (const failure of ["removed", 401, 403, 423]) test(`a selected order detail 
   t.after(async () => { await act(async () => root.unmount()); host.remove(); browser.history.replaceState(null, "", "/workspace/support"); });
   const props = { theme: "light", idleMinutes: 15, onIdleMinutes: () => {}, onLock: () => {}, onSignOut: () => {}, onRefresh: async () => snap, onRecoveryCompleted: () => {} };
   await act(async () => root.render(createElement(WorkspaceApp, { ...props, snapshot: snap })));
-  await waitFor(() => host.querySelector('.im-wb-pane--orders .im-wb-details')?.textContent.includes('SYNTH-SECRET-ACCOUNT'), 4000);
+  await waitFor(() => host.querySelector('.im-wb-pane--orders .im-wb-details')?.textContent.includes('本单详情'), 4000);
   const before = api.accessRequests;
   if (failure === "removed") api.orders = []; else api.ordersStatus = failure;
   await triggerOrderRefresh();
   await waitFor(() => !host.querySelector('.im-wb-unified-queue [data-order-id="order-a"]'));
-  assert.doesNotMatch(host.querySelector('.im-wb-pane--orders')?.textContent ?? "", /SYNTH-SECRET-ACCOUNT/);
+  assert.equal(host.querySelector('.im-wb-pane--orders .im-wb-details'), null, "the dropped order's detail unmounts");
   assert.equal(api.accessRequests, before, "hiding does not depend on a later detail response");
 });
 
@@ -426,11 +529,11 @@ test("an authorized selected order is not cleared when it moves beyond the loade
   const fillers = Array.from({ length: 49 }, (_, i) => order(`z-${1049-i}`, `ZZ-${i}`, "RENTING", card));
   api = { admin: "A", requests: [], pageMap: { FIRST: { items: [...fillers, target], nextCursor: "order-a" } }, orderAccess: syntheticOrderAccess() };
   const host = await mountWorkspace(t, "/support?section=orders&order=order-a");
-  await waitFor(() => host.querySelector('.im-wb-pane--orders .im-wb-details')?.textContent.includes('SYNTH-A-ACCOUNT'), 4000);
+  await waitFor(() => host.querySelector('.im-wb-pane--orders .im-wb-details')?.textContent.includes('本单详情'), 4000);
   api.pageMap.FIRST = { items: [order("zz-2000", "ZZ-NEW", "RENTING", card), ...fillers], nextCursor: "z-1001" };
   await triggerOrderRefresh();
   await waitFor(() => !host.querySelector('.im-wb-unified-queue [data-order-id="order-a"]'));
-  assert.match(host.querySelector('.im-wb-pane--orders .im-wb-details')?.textContent ?? "", /SYNTH-A-ACCOUNT/);
+  assert.match(host.querySelector('.im-wb-pane--orders .im-wb-details')?.textContent ?? "", /本单详情/);
 });
 
 test("narrow order list selection stays synchronized when switching orders", async (t) => {
@@ -450,15 +553,15 @@ test("a late successful order detail response cannot restore revoked content", a
   const card = { pending: 0, failed: 0, skipped: 0, unknown: 0 };
   api = { admin: "A", requests: [], nextCursor: null, page2: [], orders: [order("order-a", "ZZ-A", "OPENING_CONFIRM", card)], orderAccess: syntheticOrderAccess() };
   const host = await mountWorkspace(t, "/support?section=orders&order=order-a");
-  await waitFor(() => host.querySelector('.im-wb-pane--orders .im-wb-details')?.textContent.includes('SYNTH-A-ACCOUNT'), 4000);
+  await waitFor(() => host.querySelector('.im-wb-pane--orders .im-wb-details')?.textContent.includes('本单详情'), 4000);
   const held = deferred(); api.holdAccess = held;
   await act(async () => host.querySelector('[data-action="refresh-order-panel"]').click());
   await waitFor(() => api.holdAccess === null);
   api.ordersStatus = 403; await triggerOrderRefresh();
   await waitFor(() => host.querySelector('[data-action="order-queue-notice"]')?.textContent.includes('权限已变化'));
-  assert.doesNotMatch(host.querySelector('.im-wb-pane--orders')?.textContent ?? "", /SYNTH-A-ACCOUNT/);
+  assert.equal(host.querySelector('.im-wb-pane--orders .im-wb-details'), null);
   await act(async () => { held.resolve(response(api.orderAccess)); await new Promise(resolve => setTimeout(resolve, 80)); });
-  assert.doesNotMatch(host.querySelector('.im-wb-pane--orders')?.textContent ?? "", /SYNTH-A-ACCOUNT/);
+  assert.equal(host.querySelector('.im-wb-pane--orders .im-wb-details'), null);
 });
 
 test("switching workspace tabs keeps the support workbench mounted and heartbeating while hidden", async (t) => {
@@ -487,7 +590,7 @@ test("a hidden support tab does not mark an order group read until it is visible
   const row = order("order-a", "ZZ-A", "RENTING", card);
   api = { admin: "A", requests: [], nextCursor: null, page2: [], orders: [{ ...row, lastMessageAt: "2026-10-01T00:00:00.000Z", unreadCount: 0 }], orderAccess: syntheticOrderAccess() };
   const host = await mountWorkspace(t, "/support?section=orders&order=order-a");
-  await waitFor(() => host.querySelector('.im-wb-pane--orders .im-wb-details')?.textContent.includes('SYNTH-A-ACCOUNT'), 4000);
+  await waitFor(() => host.querySelector('.im-wb-pane--orders .im-wb-details')?.textContent.includes('本单详情'), 4000);
   await act(async () => host.querySelector('[data-tab-id="workbench"]').click());
   api.orders = [{ ...row, lastMessageAt: "2026-10-01T00:01:00.000Z", unreadCount: 2 }];
   await triggerOrderRefresh();

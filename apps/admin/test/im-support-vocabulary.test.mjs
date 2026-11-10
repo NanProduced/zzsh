@@ -11,7 +11,6 @@ import {
   HISTORY_STATE_VOCABULARY,
   formatVocabulary,
   formatEventMovement,
-  formatSubjectRef,
 } from "../src/views/im-support-vocabulary.ts";
 
 test("im-support-vocabulary: standard mappings return correct business terms", () => {
@@ -93,15 +92,6 @@ test("im-support-vocabulary: event move formatting suppresses self loops", () =>
   assert.equal(formatEventMovement("", ""), null);
 });
 
-test("im-support-vocabulary: formatSubjectRef maps internal order ids to readable names", () => {
-  assert.equal(formatSubjectRef("order:c12345678"), "已关联订单，详见会话详情");
-  assert.equal(formatSubjectRef("order:ZZ20261101"), "已关联订单，详见会话详情");
-  assert.equal(formatSubjectRef(""), "未关联商品或订单");
-  assert.equal(formatSubjectRef(null), "未关联商品或订单");
-  assert.equal(formatSubjectRef(undefined), "未关联商品或订单");
-  assert.equal(formatSubjectRef("商品：满配六套"), "已关联对象，详情待核对");
-});
-
 test("im-support-vocabulary: no banned engineering jargon in user/operator facing terms", () => {
   const bannedWords = [
     "服务端",
@@ -149,11 +139,5 @@ test("im-support-vocabulary: no banned engineering jargon in user/operator facin
       !VOCABULARY_UNKNOWN_FALLBACK.toLowerCase().includes(banned.toLowerCase()),
       `Fallback should not contain banned word "${banned}"`
     );
-  }
-});
-
-test("unverified references never expose internal identifiers",()=>{
-  for(const ref of ["order:order_review_internal_001","listing:listing_0123","unknown:550e8400-e29b-41d4-a716-446655440000"]){
-    const shown=formatSubjectRef(ref);assert.equal(shown.includes(ref.split(":").at(-1)),false);
   }
 });

@@ -27,7 +27,7 @@ test("real patrol pages the full Team stream without an IM identity, preserves a
     if(sql.includes('"zzsh_auth_admin"."session"'))return result([{locked:false,twoFactorEnabled:true,suspended:false}]);
     if(sql.includes("WITH role_permissions"))return result(permissions.map(permissionCode=>({permissionCode})));
     if(sql.includes('g."order_id" AS "orderId"'))return result(order?[{orderId:"order-1",teamState:"READY"}]:[]);
-    if(sql.includes("SELECT c.id,t.user_account_id"))return result([{id:"round-latest",user_account_id:"user-1"}]);
+    if(sql.includes("SELECT c.id,c.kind,t.user_account_id"))return result([{id:"round-latest",user_account_id:"user-1",kind:"SERVICE"}]);
     if(sql.includes("SELECT id FROM zzsh_iam.im_support_thread"))return result([{id:"thread-1"}]);
     if(sql.includes('m.account_id AS "accountId"')){assert.equal(v[0],APP_ID);assert.ok(v[1].every((id:string)=>["user-1","staff-1"].includes(id)));assert.match(sql,/m.app_id=\$1/);assert.match(sql,/THEN u.id WHEN m.identity_kind='ADMIN' THEN a.id/);return result(v[1].map((id:string)=>id==="staff-1"?{accountId:id,kind:"ADMIN",platformId:"platform-admin-1",displayUsername:adminDisplay,name:"客服测试",image:null}:{accountId:id,kind:"USER",platformId:"platform-user-1",name:"咨询用户",image:"javascript:alert(1)"}));}
     if(sql.includes("SELECT id,object_id FROM zzsh_iam.audit_event"))return result(rows.flatMap(m=>hidden.has(m.messageServerId)?[{id:imFactId("hidden",APP_ID,viewer,m.messageServerId),object_id:m.messageServerId}]:m.messageServerId===revoked?[{id:imFactId("revoked",APP_ID,"system",m.messageServerId),object_id:m.messageServerId}]:[]).filter(r=>v[0].includes(r.id)));
@@ -893,12 +893,15 @@ test("support history checks App/Team and current assignee, then rechecks read a
     const respond=()=>{
       providerCalls++;
       if(mode==="revoke")revoked=true;
-      return [{messageServerId:"4301564702653153301",messageClientId:"first",senderId:"user-1",createTime:20,text:"opening text"}];
+      return [
+        {messageServerId:"4301564702653153301",messageClientId:"first",senderId:"user-1",createTime:20,text:"opening text",messageType:0},
+        {messageServerId:"4301564702653153302",messageClientId:"notice",senderId:"system",createTime:21,messageType:5,attachment:{type:4},systemNotice:{kind:"TEAM_DISMISSED",text:"会话已解散"}},
+      ];
     };
     const managerKey={provider:"yunxin",appId:APP_ID,realm:"admin",kind:"SYSTEM",platformSubjectId:"support-manager"};
     const managerAccount=deriveYunxinAccountId(managerKey as never);
     const provider={getSupportTeam:async()=>({ownerAccountId:managerAccount,serverExtension:JSON.stringify({schema:"zzsh.im-consultation.v1",appId:APP_ID,consultationId:"thread-1"})}),readSupportMemberHistory:async(input:unknown)=>{
-      assert.deepEqual(input,{teamId:"9001",accountId:managerAccount,limit:51});return respond().map(row=>({...row,messageType:0}));
+      assert.deepEqual(input,{teamId:"9001",accountId:managerAccount,limit:51});return respond();
     }};
     const options=userRouteOptions({security:{...userRouteOptions().security,pool,adminAuth:{api:{getSession:async()=>({user:{id:"admin-1",twoFactorEnabled:true},session:{id:"session-admin-1",locked:false}})}}} as never,
       consultation:{pool,appId:APP_ID,provider,supportManager:{key:managerKey}} as never});
@@ -906,8 +909,12 @@ test("support history checks App/Team and current assignee, then rechecks read a
     await handleYunxinRoute({method:"GET",url:path,originalUrl:path,headers:{origin:"http://127.0.0.1:3101",cookie:"zzsh_admin.session_token=opaque"}},response,options);
     assert.equal(response.statusCode,mode==="denied"||mode==="revoke"||mode==="no-round"?403:200,JSON.stringify(response.body));
     assert.equal(providerCalls,mode==="denied"||mode==="no-round"?0:1);
-    if(mode==="allow"||mode==="closed")assert.equal((response.body as any).messages[0].receiverId,"9001");
-    else assert.doesNotMatch(JSON.stringify(response.body),/opening text/);
+    if(mode==="allow"||mode==="closed"){
+      assert.equal((response.body as any).messages[0].receiverId,"9001");
+      const notice=(response.body as any).messages.find((message:any)=>message.messageServerId==="4301564702653153302");
+      assert.deepEqual(notice.systemNotice,{kind:"TEAM_DISMISSED",text:"会话已解散"});
+      assert.deepEqual(notice.attachment,{type:4});
+    } else assert.doesNotMatch(JSON.stringify(response.body),/opening text/);
   }
   }
 });

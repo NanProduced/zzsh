@@ -20,7 +20,7 @@ const vite = await createServer({
   resolve: { alias: { "@": path.join(adminRoot, "src") } },
   server: { middlewareMode: true, hmr: false },
 });
-const { ConsultationEventsCard } = await vite.ssrLoadModule("/src/views/im-support-events.tsx");
+const { ConsultationEventsCard, ConsultationRoundsTimeline } = await vite.ssrLoadModule("/src/views/im-support-events.tsx");
 const { AdminApiError } = await vite.ssrLoadModule("/src/api.ts");
 
 async function settle() {
@@ -46,6 +46,43 @@ function eventRow(overrides) {
     ...overrides,
   };
 }
+
+test("round timeline is public, scroll-bounded, and loads events only when expanded", async (t) => {
+  const rootNode = browser.document.createElement("div");
+  browser.document.body.appendChild(rootNode);
+  let root;
+  t.after(async () => { await act(async () => { root?.unmount(); }); rootNode.remove(); });
+  const calls = [];
+  const request = async (path) => {
+    calls.push(path);
+    if (path.includes("/rounds?")) return {
+      contractVersion: "admin-consultation-rounds.v1",
+      consultationId: "consultation-b",
+      rounds: [
+        { id: "round-b", roundSeq: "2", state: "ACTIVE", assignedAdmin: { id: "admin-b", name: "客服乙" }, createdAt: "2026-10-16T02:30:00.000000Z", updatedAt: "2026-10-16T02:40:00.000000Z", lastMessageAt: null, closedAt: null, transferCount: "1" },
+        { id: "round-a", roundSeq: "1", state: "CLOSED", assignedAdmin: null, createdAt: "2026-10-15T02:30:00.000000Z", updatedAt: "2026-10-15T02:40:00.000000Z", lastMessageAt: null, closedAt: "2026-10-15T02:40:00.000000Z", transferCount: "0" },
+      ],
+      nextCursor: null,
+    };
+    if (path.includes("/events?")) return { events: [eventRow({ id: "event-round", type: "CLAIMED" })], nextCursor: null };
+    throw new Error(`unexpected request ${path}`);
+  };
+  root = createRoot(rootNode);
+  await act(async () => { root.render(createElement(ConsultationRoundsTimeline, { consultationId: "consultation-b", currentRoundId: "round-b", request })); });
+  await act(async () => { rootNode.querySelector('[data-action="toggle-rounds"]').click(); });
+  await waitFor(() => rootNode.querySelectorAll(".im-wb-round").length === 2);
+  assert.ok(rootNode.querySelector(".im-wb-round-scroll"), "the timeline has its own bounded scroll area");
+  assert.equal(rootNode.querySelectorAll(".im-wb-round").length, 2);
+  assert.match(rootNode.textContent, /第 2 轮/);
+  assert.match(rootNode.textContent, /客服乙/);
+  assert.match(rootNode.textContent, /转交 1 次/);
+  assert.match(rootNode.textContent, /本轮/);
+  assert.doesNotMatch(rootNode.textContent, /评价|评分/, "round timeline never shows the user's rating");
+  assert.equal(calls.filter((path) => path.includes("/events?")).length, 0, "events are not preloaded for every round");
+  await act(async () => { rootNode.querySelector('[data-action="toggle-round-events"]').click(); });
+  await waitFor(() => rootNode.querySelectorAll(".im-wb-event").length === 1);
+  assert.ok(calls.some((path) => path.includes("/im/consultations/round-b/events?limit=20")));
+});
 
 test("events timeline: first page path, projected fields only, unknown type falls back to raw code", async (t) => {
   const rootNode = browser.document.createElement("div");

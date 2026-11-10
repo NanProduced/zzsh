@@ -43,9 +43,29 @@ const vite = await createServer({
   resolve: { alias: { "@": path.join(adminRoot, "src") } },
   server: { middlewareMode: true, hmr: false, ws: false },
 });
-const { ImSupportView } = await vite.ssrLoadModule("/src/views/im-support-view.tsx");
+const { ImSupportView, messageFromNim } = await vite.ssrLoadModule("/src/views/im-support-view.tsx");
 const notifications = await vite.ssrLoadModule("/src/views/im-support-notifications.ts");
 after(async () => { await vite.close(); });
+
+test("admin support messages trust only a valid server systemNotice", () => {
+  const base = { senderId: "system", createTime: 1, messageClientId: "notice-1", messageType: 5 };
+  const valid = messageFromNim({ ...base, attachment: { type: 0 }, systemNotice: { kind: "TEAM_DISMISSED", text: "会话已解散" } }, "admin-a");
+  assert.equal(valid?.notice?.kind, "TEAM_DISMISSED");
+  assert.equal(valid?.text, "会话已解散");
+  const fallback = messageFromNim({ ...base, attachment: { type: 3 } }, "admin-a");
+  assert.equal(fallback?.notice?.kind, "TEAM_UPDATED");
+  for (const systemNotice of [
+    { kind: "NOT_A_NOTICE", text: "任意文本" },
+    { kind: "MEMBER_JOINED", text: "伪造文案" },
+  ]) {
+    const message = messageFromNim({ ...base, attachment: { type: 1 }, systemNotice }, "admin-a");
+    assert.equal(message?.notice?.kind, "MEMBER_LEFT", "invalid server fields fall back to the shared decoder");
+  }
+  const regular = messageFromNim({ ...base, messageType: 0, text: "普通消息", systemNotice: { kind: "TEAM_DISMISSED", text: "会话已解散" } }, "admin-a");
+  assert.equal(regular?.from, "customer");
+  assert.equal(regular?.text, "普通消息");
+  assert.equal(regular?.notice, undefined);
+});
 
 function snapshot(permissions, boss = false) {
   return {
@@ -302,6 +322,47 @@ test("messages keep real sender identity, notices stay neutral, and only own mes
   const other = [...rootNode.querySelectorAll('.im-wb-msg[data-from="agent"]')].find((item) => item !== own);
   assert.equal(other.querySelector(".im-wb-msg-meta b").textContent, "客服");
 });
+
+test("bot-covered team notices stay hidden and never become the queue summary", async (t) => {
+  const botConversation = { ...activeConsultation, botAccountId: "bot-a", lastMessagePreview: "群聊已创建" };
+  fixture = {
+    consultations: [botConversation],
+    post: null,
+    history: [
+      { messageClientId: "welcome", messageServerId: "welcome", conversationId: "conv-a", senderId: "bot-a", createTime: Date.parse("2026-09-17T00:00:30.000Z"), messageType: 0, text: "欢迎咨询，本单客服马上为您处理" },
+      { messageClientId: "created", messageServerId: "created", conversationId: "conv-a", senderId: "system", createTime: Date.parse("2026-09-17T00:01:00.000Z"), messageType: 5, attachment: { ope: 0 } },
+      { messageClientId: "joined", messageServerId: "joined", conversationId: "conv-a", senderId: "system", createTime: Date.parse("2026-09-17T00:01:30.000Z"), messageType: 5, attachment: { type: 0 } },
+      { messageClientId: "question", messageServerId: "question", conversationId: "conv-a", senderId: "user-a", createTime: Date.parse("2026-09-17T00:02:00.000Z"), messageType: 0, text: "请问什么时候开始" },
+    ],
+  };
+  const { rootNode } = await mount(t, { snapshot: snapshot(["im.support.read", "im.support.accept"]) });
+  await waitFor(() => consultationRows(rootNode).length === 1);
+  assert.doesNotMatch(consultationRows(rootNode)[0].textContent, /群聊已创建/, "a server system preview is not the queue summary");
+  await selectFirst(rootNode);
+  await waitFor(() => /请问什么时候开始/.test(rootNode.textContent));
+  assert.equal(rootNode.querySelector(".im-wb-sys"), null, "a Bot welcome covers team-created and member-joined notices");
+  assert.match(rootNode.textContent, /欢迎咨询/);
+  await act(async () => { rootNode.querySelector('[data-action="back-to-queue"]').click(); });
+  await settle();
+  assert.match(consultationRows(rootNode)[0].textContent, /请问什么时候开始/, "the queue uses the last non-system message");
+});
+
+test("repeated team notices without Bot coverage collapse to one system line", async (t) => {
+  fixture = {
+    consultations: [activeConsultation],
+    post: null,
+    history: ["created-1", "created-2", "created-3"].map((id, index) => ({
+      messageClientId: id, messageServerId: id, conversationId: "conv-a", senderId: "system",
+      createTime: Date.parse("2026-09-17T00:01:00.000Z") + index * 1_000, messageType: 5, attachment: { ope: 0 },
+    })),
+  };
+  const { rootNode } = await mount(t, { snapshot: snapshot(["im.support.read", "im.support.accept"]) });
+  await selectFirst(rootNode);
+  await waitFor(() => rootNode.querySelector(".im-wb-sys"));
+  assert.equal(rootNode.querySelectorAll(".im-wb-sys").length, 1, "consecutive identical team notices merge into one fallback line");
+  assert.match(rootNode.querySelector(".im-wb-sys").textContent, /群聊已创建/);
+});
+
 
 test("queue/chat switching moves focus onto the visible pane control", async (t) => {
   fixture = { consultations: [activeConsultation], history: [], post: null };
@@ -634,7 +695,7 @@ test("the case column reads the account profile only through its own permission"
   assert.match(aside.textContent, /138.{4}8000 · 未验证/, "the phone arrives pre-masked with its own verification state");
   assert.doesNotMatch(aside.textContent, /邮箱/, "email row is removed per privacy requirements");
   assert.match(aside.textContent, /进行中订单需「订单读取」权限/, "a denied summary is a permission fact, never a count of zero");
-  assert.match(aside.textContent, /名下资源账号需「资源账号读取」权限/, "each summary names the capability it actually needs");
+  assert.doesNotMatch(aside.textContent, /名下资源账号/, "the rail no longer shows unrelated resource-account ownership");
   await act(async () => aside.querySelector('[aria-label="查看进行中订单读取权限"]').click());
   await waitFor(() => document.querySelector('[data-slot="popover-content"]')?.textContent.includes("order.read"));
   await act(async () => document.querySelector('[data-slot="popover-content"]').dispatchEvent(new browser.KeyboardEvent("keydown", { key: "Escape", bubbles: true })));
@@ -645,7 +706,7 @@ test("the case column reads the account profile only through its own permission"
   // Without user.directory.read the profile must be absent, not filled with guesses.
   const limited = await mount(t, { snapshot: snapshot(["im.support.read", "im.support.accept"]) });
   await selectFirst(limited.rootNode);
-  await waitFor(() => /关联对象/.test(limited.rootNode.textContent));
+  await waitFor(() => /需用户目录读取权限/.test(limited.rootNode.textContent));
   assert.doesNotMatch(limited.rootNode.querySelector(".im-wb-details").textContent, /账号正常|已实名|138\*\*\*\*8000|完整资料/, "no profile is invented without the permission");
   assert.match(limited.rootNode.querySelector(".im-wb-details").textContent, /需用户目录读取权限/, "the missing permission is named instead of the block silently vanishing");
   assert.match(limited.rootNode.querySelector(".im-wb-details").textContent, /测试用户甲/, "the conversation itself stays usable");
@@ -662,31 +723,6 @@ test("the case column reads the account profile only through its own permission"
   profileFixture = { user: { userId: "user-7", image: null, maskedPhone: "138****8000", phoneNumberVerified: true, maskedEmail: "z***@example.com", accountStatus: "ACTIVE", suspended: false, identity: { status: "VERIFIED", ageStatus: "ADULT", provider: "local-fixture", verifiedAt: null }, identityStatus: "VERIFIED", ageStatus: "ADULT", source: { kind: "LOCAL" }, registeredAt: "2026-01-05T00:00:00.000Z", resourceSummary: { state: "ready", count: 2 }, orderSummary: { state: "denied", permission: "order.read" }, lastBusinessActivity: { state: "not_connected", domains: ["ORDER"] } } };
 });
 
-test("a failed context read keeps the base identity and marks the subject unavailable", async (t) => {
-  contextStatus = 404;
-  contextSubject = { status: "absent" };
-  t.after(() => { contextStatus = 200; contextSubject = { status: "absent" }; });
-  fixture = { consultations: [activeConsultation], history: [], post: null };
-  const { rootNode } = await mount(t, { snapshot: snapshot(["im.support.read", "im.support.accept"]) });
-  await selectFirst(rootNode);
-  await waitFor(() => /关联对象暂时不可读取/.test(rootNode.textContent));
-  const details = rootNode.querySelector(".im-wb-details");
-  assert.doesNotMatch(details.textContent, /user-a/, "a list-projected user UUID is not used as a fallback fact either");
-  assert.match(details.textContent, /关联对象暂时不可读取/);
-  assert.doesNotMatch(details.textContent, /尚未关联商品或订单/, "a failed context read is not turned into an absent subject");
-});
-
-test("an unknown subject status fails closed instead of exposing a bare reference", async (t) => {
-  contextStatus = 200;
-  contextSubject = { status: "future_type", reference: "order-secret" };
-  t.after(() => { contextStatus = 200; contextSubject = { status: "absent" }; });
-  fixture = { consultations: [activeConsultation], history: [], post: null };
-  const { rootNode } = await mount(t, { snapshot: snapshot(["im.support.read", "im.support.accept"]) });
-  await selectFirst(rootNode);
-  await waitFor(() => /关联对象类型暂未确认/.test(rootNode.textContent));
-  assert.doesNotMatch(rootNode.querySelector(".im-wb-details").textContent, /order-secret/);
-});
-
 const FULL_PROFILE = { user: { userId: "user-a", image: "/api/v1/profile/avatars/user/user-a/1", maskedPhone: "138****8000", phoneNumberVerified: true, maskedEmail: "a***@example.com", accountStatus: "ACTIVE", suspended: false, identity: { status: "VERIFIED", ageStatus: "ADULT", provider: "local-fixture", verifiedAt: null }, identityStatus: "VERIFIED", ageStatus: "ADULT", source: { kind: "MIGRATED" }, registeredAt: "2026-01-05T00:00:00.000Z", resourceSummary: { state: "ready", count: 4 }, orderSummary: { state: "ready", currentCount: 18 }, lastBusinessActivity: { state: "not_connected", domains: ["ORDER"] } } };
 const IM_BASE = ["im.support.read", "im.support.accept"];
 
@@ -701,7 +737,7 @@ test("revoking a read capability invalidates the profile facts it produced", asy
   const { rootNode, root } = await mount(t, { snapshot: snapshot([...IM_BASE, "user.directory.read", "order.read", "supply.rental_account.read"]) });
   await selectFirst(rootNode);
   await waitFor(() => /进行中订单18 单/.test(rootNode.textContent));
-  assert.match(rootNode.textContent, /名下资源账号4 个/, "the label names ownership, not an active rental");
+  assert.doesNotMatch(rootNode.textContent, /名下资源账号/);
   assert.match(rootNode.textContent, /旧平台迁移/);
   assert.ok(rootNode.querySelector(".im-wb-avatar img"), "the profile avatar is shown while the read is held");
 
@@ -821,7 +857,7 @@ test("user/risk summary names freeze and internal risk while keeping contacts ma
   assert.match(aside.textContent, /138\*\*\*\*8000/);
   assert.doesNotMatch(aside.textContent, /a\*\*\*@example\.com|邮箱/, "email is not rendered per privacy rules");
   assert.match(aside.textContent, /进行中订单18 单/);
-  assert.match(aside.textContent, /名下资源账号4 个/);
+  assert.doesNotMatch(aside.textContent, /名下资源账号/);
   assert.doesNotMatch(aside.textContent, /user-a/, "risk facts do not add the UUID back");
   profileFixture = FULL_PROFILE;
 });
@@ -877,8 +913,8 @@ test("missing profile summaries remain unavailable rather than zero or a false p
   await selectFirst(rootNode);
   await waitFor(() => /账号正常/.test(rootNode.textContent));
   assert.match(rootNode.textContent, /进行中订单暂无数据/);
-  assert.match(rootNode.textContent, /名下资源账号暂未提供/);
-  assert.doesNotMatch(rootNode.querySelector(".im-wb-details").textContent, /0 单|0 个|需「订单读取」权限|需「资源账号读取」权限/);
+  assert.doesNotMatch(rootNode.textContent, /名下资源账号/);
+  assert.doesNotMatch(rootNode.querySelector(".im-wb-details").textContent, /0 单|需「订单读取」权限/);
   profileFixture = FULL_PROFILE;
 });
 

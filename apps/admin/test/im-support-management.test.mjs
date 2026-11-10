@@ -35,13 +35,13 @@ browser.matchMedia = (query) => ({
   dispatchEvent: () => false,
 });
 
-// 只拦截 60 秒心跳，其余定时器保持真实行为（测试卸载时会清理）。
+// 只拦截 30 秒心跳，其余定时器保持真实行为（测试卸载时会清理）。
 const intervalCallbacks = [];
 const realSetInterval = browser.setInterval.bind(browser);
 const realClearInterval = browser.clearInterval.bind(browser);
 let intervalId = 0;
 browser.setInterval = (callback, delay) => {
-  if (delay === 60_000) {
+  if (delay === 30_000) {
     const id = `heartbeat-${++intervalId}`;
     intervalCallbacks.push({ id, delay, callback, active: true });
     return id;
@@ -56,7 +56,7 @@ browser.clearInterval = (id) => {
 globalThis.ResizeObserver = globalThis.ResizeObserver ?? class { observe() {} unobserve() {} disconnect() {} };
 globalThis.setInterval = browser.setInterval;
 globalThis.clearInterval = browser.clearInterval;
-const heartbeatTimers = () => intervalCallbacks.filter((entry) => entry.active && entry.delay === 60_000);
+const heartbeatTimers = () => intervalCallbacks.filter((entry) => entry.active && entry.delay === 30_000);
 
 const vite = await createServer({
   root: adminRoot,
@@ -162,6 +162,8 @@ function baseFixture(overrides = {}) {
     auditStatus: 200,
     messages: { messages: [], nextCursor: null },
     messagePages: null,
+    messageByConversation: null,
+    rounds: null,
     auditMessagesStatus: 200,
     takeoverStatus: 200,
     transferTargets: { targets: [{ adminUserId: "admin-b", displayName: "客服 B" }], transferReady: true },
@@ -206,6 +208,10 @@ globalThis.fetch = async (input, init = {}) => {
     return json({ items, nextCursor: fixture.conversations.nextCursor ?? null });
   }
   if (pathname.endsWith("/im/audit/messages")) return fixture.auditMessagesStatus === 200 ? json(fixture.messages) : failure(fixture.auditMessagesStatus);
+  if (/\/im\/consultations\/[^/]+\/rounds$/.test(pathname)) {
+    const id = decodeURIComponent(pathname.split("/").at(-2) ?? "");
+    return json(fixture.rounds?.[id] ?? { contractVersion: "admin-consultation-rounds.v1", consultationId: id, rounds: [], nextCursor: null });
+  }
   if (pathname.includes("/im/audit/consultations/") && pathname.endsWith("/takeover")) {
     if (fixture.takeoverStatus !== 200) return failure(fixture.takeoverStatus);
     const id = decodeURIComponent(pathname.split("/").at(-2) ?? "");
@@ -216,6 +222,11 @@ globalThis.fetch = async (input, init = {}) => {
   if (pathname.endsWith("/transfer")) return json({ consultation: { ...(fixture.consultations[0] ?? activeConsultation), assignedAdmin: { id: "admin-b", name: "客服 B" } } });
   if (pathname.endsWith("/im/message-access")) return json({ authorized: true });
   if (pathname.includes("/im/messages")) {
+    const cid = url.searchParams.get("conversationId");
+    if (fixture.messageByConversation && cid && cid in fixture.messageByConversation) {
+      const value = await fixture.messageByConversation[cid];
+      return value instanceof browser.Response ? value : json(value);
+    }
     if (fixture.messagePages) {
       const page = fixture.messagePages[url.searchParams.get("cursor") ?? ""];
       if (page === undefined) return failure(500);
@@ -543,6 +554,94 @@ const patrolMessage = (id, senderId, text, createTime, extra = {}) => ({
   senderId, receiverId: "admin-b", createTime, messageType: 0, text, ...extra,
 });
 const msgNode = (rootNode, id) => rootNode.querySelector(`.im-wb-msg[data-message-id="${id}"]`);
+const roundsPage = (consultationId, rounds) => ({ contractVersion: "admin-consultation-rounds.v1", consultationId, rounds, nextCursor: null });
+const auditRound = (id, roundSeq, state, name, conversationId) => ({
+  id, roundSeq: String(roundSeq), state, assignedAdmin: name ? { name } : null, conversationId,
+  createdAt: "2026-10-29T01:00:00.000Z", updatedAt: "2026-10-29T02:00:00.000Z", lastMessageAt: null,
+  closedAt: state === "CLOSED" ? "2026-10-29T02:00:00.000Z" : null, transferCount: "0",
+});
+
+test("patrol switches rounds and reads the selected round's own conversation", async (t) => {
+  fixture = baseFixture({
+    conversations: { items: [patrolConversation("rounds", { roundSeq: 2, roundCount: 2, conversationId: "conv-latest" })], nextCursor: null },
+    rounds: { rounds: roundsPage("rounds", [
+      auditRound("rounds", 2, "ACTIVE", "客服 B", "conv-latest"),
+      auditRound("round-old", 1, "CLOSED", "客服 A", "conv-old"),
+    ]) },
+    messageByConversation: {
+      "conv-latest": { messages: [patrolMessage("latest", "user-1", "最近一轮消息", 2000, { conversationId: "conv-latest" })], nextCursor: null },
+      "conv-old": { messages: [patrolMessage("old", "user-1", "旧轮次消息", 1000, { conversationId: "conv-old" })], nextCursor: null },
+    },
+  });
+  const { rootNode } = await mountManagement(t);
+  await openPatrol(rootNode);
+  await waitFor(() => rootNode.querySelectorAll(".im-wb-mgmt-patrol-list .im-wb-row").length === 1);
+  await act(async () => rootNode.querySelector(".im-wb-mgmt-patrol-list .im-wb-row").click());
+  await waitFor(() => rootNode.querySelectorAll(".im-wb-patrol-rounds button").length === 2);
+  assert.ok(requests.some((request) => request.path.endsWith("/im/consultations/rounds/rounds?limit=20")), "rounds reuse the existing ledger endpoint");
+  const latest = [...rootNode.querySelectorAll(".im-wb-patrol-rounds button")].find((button) => button.textContent.includes("轮次 2"));
+  assert.equal(latest.dataset.active, "true", "the latest round opens by default");
+  assert.match(latest.textContent, /处理中/);
+  assert.match(latest.textContent, /客服 B/);
+  await waitFor(() => rootNode.textContent.includes("最近一轮消息"));
+  const older = [...rootNode.querySelectorAll(".im-wb-patrol-rounds button")].find((button) => button.textContent.includes("轮次 1"));
+  await clickNode(older);
+  await waitFor(() => rootNode.textContent.includes("旧轮次消息"));
+  assert.equal(older.dataset.active, "true");
+  assert.ok(requests.some((request) => request.path.endsWith("/im/messages?conversationId=conv-old&mode=patrol")), "the old round reads its own Team");
+  assert.doesNotMatch(rootNode.textContent, /最近一轮消息/, "the previous round transcript is cleared");
+});
+
+test("patrol shows a round without a conversation instead of borrowing the latest one", async (t) => {
+  fixture = baseFixture({
+    conversations: { items: [patrolConversation("rounds", { roundSeq: 2, roundCount: 2, conversationId: "conv-latest" })], nextCursor: null },
+    rounds: { rounds: roundsPage("rounds", [
+      auditRound("rounds", 2, "ACTIVE", "客服 B", "conv-latest"),
+      auditRound("round-old", 1, "CLOSED", "客服 A", null),
+    ]) },
+    messageByConversation: {
+      "conv-latest": { messages: [patrolMessage("latest", "user-1", "最近一轮消息", 2000, { conversationId: "conv-latest" })], nextCursor: null },
+    },
+  });
+  const { rootNode } = await mountManagement(t);
+  await openPatrol(rootNode);
+  await waitFor(() => rootNode.querySelectorAll(".im-wb-mgmt-patrol-list .im-wb-row").length === 1);
+  await act(async () => rootNode.querySelector(".im-wb-mgmt-patrol-list .im-wb-row").click());
+  await waitFor(() => rootNode.textContent.includes("最近一轮消息"));
+  const older = [...rootNode.querySelectorAll(".im-wb-patrol-rounds button")].find((button) => button.textContent.includes("轮次 1"));
+  const before = requests.length;
+  await clickNode(older);
+  await waitFor(() => /该轮无独立聊天记录\/历史不可用/.test(rootNode.textContent));
+  assert.equal(requests.slice(before).some((request) => request.path.includes("conversationId=conv-old")), false, "a null round sends no history request");
+  assert.doesNotMatch(rootNode.textContent, /最近一轮消息/, "the latest round is not reused as history");
+});
+
+test("patrol drops a late transcript after the round changes", async (t) => {
+  const pending = patrolDeferred();
+  fixture = baseFixture({
+    conversations: { items: [patrolConversation("rounds", { roundSeq: 2, roundCount: 2, conversationId: "conv-latest" })], nextCursor: null },
+    rounds: { rounds: roundsPage("rounds", [
+      auditRound("rounds", 2, "ACTIVE", "客服 B", "conv-latest"),
+      auditRound("round-old", 1, "CLOSED", "客服 A", "conv-old"),
+    ]) },
+    messageByConversation: {
+      "conv-latest": pending.promise,
+      "conv-old": { messages: [patrolMessage("old", "user-1", "旧轮次消息", 1000, { conversationId: "conv-old" })], nextCursor: null },
+    },
+  });
+  const { rootNode } = await mountManagement(t);
+  await openPatrol(rootNode);
+  await waitFor(() => rootNode.querySelectorAll(".im-wb-mgmt-patrol-list .im-wb-row").length === 1);
+  await act(async () => rootNode.querySelector(".im-wb-mgmt-patrol-list .im-wb-row").click());
+  await waitFor(() => rootNode.querySelectorAll(".im-wb-patrol-rounds button").length === 2);
+  const older = [...rootNode.querySelectorAll(".im-wb-patrol-rounds button")].find((button) => button.textContent.includes("轮次 1"));
+  await clickNode(older);
+  await waitFor(() => rootNode.textContent.includes("旧轮次消息"));
+  pending.resolve({ messages: [patrolMessage("late", "user-1", "迟到的最近轮次", 2000, { conversationId: "conv-latest" })], nextCursor: null });
+  await settle();
+  assert.doesNotMatch(rootNode.textContent, /迟到的最近轮次/, "a late response cannot overwrite the new round");
+  assert.match(rootNode.textContent, /旧轮次消息/);
+});
 
 test("assistant actor and session hosts remount without moving an UNKNOWN or late save into another scope", async t => {
   const source = readFileSync(path.join(adminRoot, "src/workspace/page-content.tsx"), "utf8");
@@ -724,7 +823,7 @@ test("patrol collapses generic team notices and keeps order stages factual witho
     messages: [
       patrolMessage("n-1", "user-1", "你好", at, { sender: { displayName: "用户甲", avatar: null, role: "USER" } }),
       patrolMessage("n-2", "system", "", at + 1_000, { messageType: 5, attachment: { type: 0 } }),
-      patrolMessage("n-3", "system", "", at + 2_000, { messageType: 5, attachment: { type: 9 } }),
+      patrolMessage("n-3", "system", "", at + 2_000, { messageType: 5, attachment: { type: 3 } }),
       patrolMessage("n-4", "system", "", at + 2_500, { messageType: 5, attachment: { type: 0 }, revoked: true }),
       patrolMessage("card-1", "admin-b", "", at + 3_000, { messageType: 0, card: { kind: "ORDER_OPENING", orderId: "o-1", cardId: "card-1" } }),
     ],
@@ -749,6 +848,31 @@ test("patrol collapses generic team notices and keeps order stages factual witho
   assert.match(card.textContent, /开租确认/);
   assert.doesNotMatch(card.textContent, /[¥￥]|金额依据待核对|待核对/, "patrol does not invent money facts");
   assert.equal(card.querySelector("a[href*='/orders/']"), null, "patrol does not fabricate a full order card link");
+});
+
+test("patrol renders reply quotes from the stored server extension", async (t) => {
+  const at = Date.parse("2026-10-29T02:00:00.000Z");
+  fixture = baseFixture({ conversations: { items: [patrolConversation("reply-quote", { conversationId: "conv-reply-quote" })], nextCursor: null } });
+  fixture.messages = {
+    messages: [
+      patrolMessage("orig", "user-1", "原消息", at, { conversationId: "conv-reply-quote", sender: { displayName: "用户甲", avatar: null, role: "USER" } }),
+      patrolMessage("quoted", "admin-b", "回复内容", at + 1_000, {
+        conversationId: "conv-reply-quote",
+        sender: { displayName: "客服 B", avatar: null, role: "ADMIN" },
+        serverExtension: JSON.stringify({ schema: "zzsh.message-reply", version: 1, messageId: "orig", senderId: "user-1", text: "原消息" }),
+      }),
+    ],
+    nextCursor: null,
+  };
+  const { rootNode } = await mountManagement(t);
+  await openPatrol(rootNode);
+  await waitFor(() => rootNode.querySelectorAll(".im-wb-mgmt-patrol-list .im-wb-row").length === 1);
+  await act(async () => rootNode.querySelector(".im-wb-mgmt-patrol-list .im-wb-row").click());
+  await waitFor(() => msgNode(rootNode, "quoted"));
+  const quote = msgNode(rootNode, "quoted").querySelector(".message-quoted");
+  assert.ok(quote, "the patrol bubble keeps the quoted reply");
+  assert.equal(quote.querySelector(".message-quoted-text").textContent, "原消息");
+  assert.equal(quote.querySelector(".message-quoted-sender").textContent, "用户甲：");
 });
 
 test("patrol continues past an empty filtered page and merges 64-bit ids in ascending order", async (t) => {
@@ -1064,6 +1188,7 @@ test("PBR-03 same-cid history downgrade clears the body and missing status is ne
     if (path.startsWith("/im/audit/conversations")) {
       return { items: [patrolConversation("1001", { conversationId: "viewer|2|1001", historyState })], nextCursor: null };
     }
+    if (path.includes("/rounds")) return roundsPage("1001", []);
     reads += 1;
     return { messages: [directMessage(`read-${reads}`, `BODY_${reads}`)], nextCursor: null };
   };
@@ -1100,6 +1225,7 @@ test("PBR-03 A-B-A and request changes discard the prior earlier page", async (t
         patrolConversation("1002", { conversationId: "viewer|2|1002" }),
       ], nextCursor: null };
     }
+    if (url.pathname.endsWith("/rounds")) return roundsPage("1001", []);
     if (url.searchParams.has("cursor")) return pending.promise;
     if (url.searchParams.get("conversationId") === "viewer|2|1001") {
       aReads += 1;
@@ -1126,6 +1252,7 @@ test("PBR-03 A-B-A and request changes discard the prior earlier page", async (t
   const request2 = async (path) => {
     const url = new URL(path, "http://synthetic.local");
     if (url.pathname === "/im/audit/conversations") return { items: [patrolConversation("2001", { conversationId: "viewer|2|2001" })], nextCursor: null };
+    if (url.pathname.endsWith("/rounds")) return roundsPage("2001", []);
     if (url.searchParams.has("cursor")) return replacement.promise;
     replacementReads += 1;
     return { messages: [directMessage(`new-${replacementReads}`, `NEW_REQUEST_BODY_${replacementReads}`, "viewer|2|2001")], nextCursor: "new-older" };
@@ -1147,7 +1274,9 @@ test("PBR-03 active=false invalidates an in-flight earlier page and re-reads on 
   let reads = 0;
   const request = async (path) => {
     if (path.startsWith("/im/audit/conversations")) return { items: [patrolConversation("1001", { conversationId: "viewer|2|1001" })], nextCursor: null };
-    if (new URL(path, "http://synthetic.local").searchParams.has("cursor")) return pending.promise;
+    const url = new URL(path, "http://synthetic.local");
+    if (url.pathname.endsWith("/rounds")) return roundsPage("1001", []);
+    if (url.searchParams.has("cursor")) return pending.promise;
     reads += 1;
     return { messages: [directMessage(`active-${reads}`, `ACTIVE_BODY_${reads}`)], nextCursor: "older" };
   };
@@ -1292,22 +1421,27 @@ test("pausing with unfinished consultations shows the checklist without blocking
   assert.equal(browser.document.querySelector('[aria-label="暂停接待确认"]'), null);
 });
 
-test("heartbeat posts every 60s only while available, connected and visible", async (t) => {
+test("heartbeat posts every 30s while available and connected", async (t) => {
   fixture = baseFixture();
   fixture.presence = { ...fixture.presence, availability: "AVAILABLE", connectionState: "CONNECTED" };
   const { rootNode } = await mount(t, {});
-  await waitFor(() => heartbeatTimers().length === 1);
+  await waitFor(() => heartbeatTimers().length > 0);
   const beats = () => requests.filter((request) => request.path.endsWith("/im/presence/heartbeat")).length;
+  // 30s 同时用于 presence 回写和心跳，统一触发再按 heartbeat 请求计数断言。
+  const tickTimers = async () => {
+    for (const entry of heartbeatTimers()) await act(async () => { entry.callback(); await Promise.resolve(); });
+  };
   const before = beats();
-  await act(async () => { heartbeatTimers()[0].callback(); await Promise.resolve(); });
+  await tickTimers();
   await waitFor(() => beats() === before + 1);
 
   const originalVisibility = Object.getOwnPropertyDescriptor(browser.document, "visibilityState");
   Object.defineProperty(browser.document, "visibilityState", { configurable: true, get: () => "hidden" });
   try {
-    await act(async () => { heartbeatTimers()[0].callback(); await Promise.resolve(); });
-    await settle();
-    assert.equal(beats(), before + 1, "a hidden page does not send heartbeats");
+    const hiddenBefore = beats();
+    await tickTimers();
+    await waitFor(() => beats() === hiddenBefore + 1);
+    assert.ok(beats() > hiddenBefore, "the interval keeps the operator online while the page is hidden");
   } finally {
     if (originalVisibility) Object.defineProperty(browser.document, "visibilityState", originalVisibility);
     else Object.defineProperty(browser.document, "visibilityState", { configurable: true, get: () => "visible" });
@@ -1316,7 +1450,10 @@ test("heartbeat posts every 60s only while available, connected and visible", as
   await act(async () => rootNode.querySelector(".im-wb-presence-toggle").click());
   await waitFor(() => presenceWrites.at(-1)?.availability === "OFF_DUTY");
   await settle();
-  assert.equal(heartbeatTimers().length, 0, "leaving AVAILABLE stops the heartbeat");
+  const stopped = beats();
+  await tickTimers();
+  await settle();
+  assert.equal(beats(), stopped, "leaving AVAILABLE stops the heartbeat");
 });
 
 /* ------------------------------ 纯模型 ------------------------------ */
@@ -1367,7 +1504,7 @@ test("overview parsing keeps valid points, rejects missing required metrics and 
 test("audit parsing tolerates missing fields and builds documented query paths", () => {
   const page = model.parseAuditConversations({
     items: [
-      { id: "a", type: "SERVICE" },
+      { id: "a", type: "SERVICE", roundSeq: 3, roundCount: 4 },
       { id: "", type: "SERVICE" },
       { id: "b", type: "future", title: "未来类型", adminUserId: "" },
     ],
@@ -1376,6 +1513,8 @@ test("audit parsing tolerates missing fields and builds documented query paths",
   assert.deepEqual(page.items.map((item) => item.id), ["a", "b"]);
   assert.equal(page.items[0].title, "未命名会话");
   assert.equal(page.items[1].type, "UNKNOWN");
+  assert.equal(page.items[0].roundSeq, 3);
+  assert.equal(page.items[0].roundCount, 4);
   assert.equal(page.items[0].historyState, undefined, "missing consultation historyState stays missing");
   assert.equal(page.nextCursor, null);
 
@@ -1402,11 +1541,14 @@ test("audit parsing tolerates missing fields and builds documented query paths",
       { senderId: "", createTime: 100 },
       { senderId: "u2", createTime: "bad" },
       { senderId: "u3", createTime: 200, card: { kind: "ORDER_OPENING", orderId: "o1", cardId: "c1" } },
+      { senderId: "u4", createTime: 300, text: "quoted", serverExtension: JSON.stringify({ schema: "zzsh.message-reply", version: 1, messageId: "u1-100", senderId: "u1", text: "orig" }) },
     ],
   });
-  assert.equal(messages.messages.length, 2);
+  assert.equal(messages.messages.length, 3);
   assert.equal(messages.messages[0].messageClientId, "u1-100");
   assert.equal(messages.messages[1].card.kind, "ORDER_OPENING");
+  assert.equal(messages.messages[2].reply?.messageId, "u1-100");
+  assert.equal(messages.messages[2].reply?.text, "orig");
 });
 
 test("time filters use Beijing calendar boundaries", () => {

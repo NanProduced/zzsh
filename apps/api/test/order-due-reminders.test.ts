@@ -60,6 +60,59 @@ test("0128 records one reminder per bucket with a narrow runtime update grant", 
   assert.match(acl, /GRANT UPDATE \(state,attempt_count,next_attempt_at,lease_until,lease_token_hash,sent_at,failure_class,updated_at\)\s+ON TABLE zzsh_order\.im_order_due_reminder/);
 });
 
+test("0190 freezes ambiguous due reminders as UNKNOWN instead of retrying", () => {
+  const sql = readFileSync(resolve("migrations/business/0190_order_due_reminder_unknown.sql"), "utf8");
+  assert.match(sql, /'PENDING', 'SENDING', 'SENT', 'SKIPPED', 'UNKNOWN'/);
+  assert.match(sql, /"failure_class" = 'LEASE_EXPIRED'/);
+  assert.match(sql, /"failure_class" <> 'IDENTITY_PENDING'/);
+  const journal = JSON.parse(readFileSync(resolve("migrations/business/meta/_journal.json"), "utf8"));
+  assert.ok(journal.entries.some((entry: { idx: number; tag: string }) => entry.idx === 190 && entry.tag === "0190_order_due_reminder_unknown"));
+});
+
+function dueBase(appId: string) {
+  const appKey = { provider: "yunxin" as const, appId, realm: "system" as const, kind: "SYSTEM" as const, platformSubjectId: "support-manager" };
+  return { order_id: "order-review", team_id: "900001", order_status: "PAID", due_at: DUE, ended_intake: false,
+    ended_settlement: false, ended_posting: false, system_account: deriveYunxinAccountId(appKey), system_status: "READY",
+    system_marker: buildYunxinIdentityMarker(appKey), system_subject: "support-manager" };
+}
+
+test("an ambiguous due-reminder send failure is frozen as UNKNOWN, not resent", async t => {
+  t.mock.method(Date, "now", () => DUE_MS + 60_000);
+  const rows = [{ ...dueBase("due-reminder-unknown"), id: "ambiguous", bucket: "DUE" }];
+  const finished: unknown[][] = [];
+  const query = async (sql: string, values: unknown[] = []) => {
+    if (sql.includes("SELECT r.id, r.order_id")) return { rows };
+    if (sql.includes("SET state = 'SENDING'")) return { rows: [], rowCount: 1 };
+    if (sql.includes("SET state = $3")) { finished.push(values); return { rows: [], rowCount: 1 }; }
+    return { rows: [], rowCount: 0 };
+  };
+  let sends = 0;
+  await scanOrderDueReminders({ pool: { query } as never, appId: "due-reminder-unknown",
+    transport: { sendText: async () => { sends += 1; throw Object.assign(new Error("timeout"), { code: "YUNXIN_TIMEOUT" }); } } });
+  assert.equal(sends, 1);
+  assert.deepEqual(finished.map(v => [v[2], v[3]]), [["UNKNOWN", "YUNXIN_TIMEOUT"]]);
+});
+
+test("a failed SENT write freezes the reminder instead of sending it again", async t => {
+  t.mock.method(Date, "now", () => DUE_MS + 60_000);
+  const rows = [{ ...dueBase("due-reminder-record"), id: "record-failed", bucket: "DUE" }];
+  const finished: unknown[][] = [];
+  const query = async (sql: string, values: unknown[] = []) => {
+    if (sql.includes("SELECT r.id, r.order_id")) return { rows };
+    if (sql.includes("SET state = 'SENDING'")) return { rows: [], rowCount: 1 };
+    if (sql.includes("SET state = $3")) {
+      if (values[2] === "SENT") throw new Error("connection reset");
+      finished.push(values); return { rows: [], rowCount: 1 };
+    }
+    return { rows: [], rowCount: 0 };
+  };
+  let sends = 0;
+  await scanOrderDueReminders({ pool: { query } as never, appId: "due-reminder-record",
+    transport: { sendText: async () => { sends += 1; return {} as never; } } });
+  assert.equal(sends, 1, "a failed receipt write must not resend");
+  assert.deepEqual(finished.map(v => [v[2], v[3]]), [["UNKNOWN", "RECORD_FAILED"]]);
+});
+
 test("a pending pre-expiry reminder is skipped when retry crosses into the due bucket",async t=>{
   t.mock.method(Date,"now",()=>DUE_MS+60_000);
   const appId="due-reminder-review",key={provider:"yunxin" as const,appId,realm:"system" as const,kind:"SYSTEM" as const,platformSubjectId:"support-manager"};

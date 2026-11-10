@@ -5,7 +5,7 @@ import { BodyTooLargeError, isHttpOrigin, readBoundedBody, userCookies } from ".
 const local = process.env.NODE_ENV !== "production";
 const apiOrigin = process.env.ZZSH_API_ORIGIN ?? (local ? "http://127.0.0.1:3102" : "");
 const webOrigin = process.env.ZZSH_WEB_ORIGIN ?? (local ? "http://127.0.0.1:3100" : "");
-const pathPattern = /^(?:\/aftersales|\/token|\/consultations|\/consultations\/[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\/rating(?:\/dismiss)?|\/consultations\/[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\/read|\/order-teams\/[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\/read|\/messages|\/message-access|\/images\/[A-Za-z0-9._:-]{1,128}|\/media\/[A-Za-z0-9._:-]{1,128})$/;
+const pathPattern = /^(?:\/aftersales|\/token|\/consultations|\/consultations\/[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\/rating(?:\/dismiss)?|\/consultations\/[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\/close|\/consultations\/[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\/read|\/order-teams\/[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\/read|\/messages|\/message-access|\/images\/[A-Za-z0-9._:-]{1,128}|\/media\/[A-Za-z0-9._:-]{1,128})$/;
 const requestIdPattern = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 // Matches the API video ceiling; audio/files stay within their own smaller limits.
 const MAX_MEDIA_RESPONSE_BYTES = 100 * 1024 * 1024;
@@ -30,10 +30,10 @@ async function proxy(request: Request, context: { params: Promise<{ path: string
   const method = request.method.toUpperCase();
   if (path === "/token" && method !== "GET") return errorResponse(404, "NOT_FOUND", requestId);
   if ((path === "/aftersales" || path === "/consultations" || path === "/messages") && method !== "GET" && method !== "POST") return errorResponse(404, "NOT_FOUND", requestId);
-  // 评价与已读只在 POST 下放行；GET 等其它方法不得落到通用咨询列表。
-  const ratingPath = /^\/consultations\/[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\/(?:rating(?:\/dismiss)?|read)$/.test(path);
+  // 评价、已读与结束咨询只在 POST 下放行；GET 等其它方法不得落到通用咨询列表。
+  const userActionPath = /^\/consultations\/[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\/(?:rating(?:\/dismiss)?|read|close)$/.test(path);
   const orderReadPath = /^\/order-teams\/[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\/read$/.test(path);
-  if ((ratingPath || orderReadPath) && method !== "POST") return errorResponse(404, "NOT_FOUND", requestId);
+  if ((userActionPath || orderReadPath) && method !== "POST") return errorResponse(404, "NOT_FOUND", requestId);
   if ((path.startsWith("/images/") || path.startsWith("/media/")) && method !== "GET") return errorResponse(404, "NOT_FOUND", requestId);
   if (path === "/message-access" && method !== "GET") return errorResponse(404, "NOT_FOUND", requestId);
   const headers = new Headers({ origin: webOrigin, "x-request-id": requestId });
@@ -58,7 +58,7 @@ async function proxy(request: Request, context: { params: Promise<{ path: string
     }
     if (!bodyless) headers.set("content-type", "application/json");
   }
-  const upstreamPath = path === "/token" ? "/api/v1/im/user/token" : path === "/messages" ? "/api/v1/im/user/messages" : path === "/message-access" ? "/api/v1/im/user/message-access" : path === "/aftersales" || path.startsWith("/images/") || path.startsWith("/media/") || ratingPath || orderReadPath ? `/api/v1/im/user${path}` : "/api/v1/im/user/consultations";
+  const upstreamPath = path === "/token" ? "/api/v1/im/user/token" : path === "/messages" ? "/api/v1/im/user/messages" : path === "/message-access" ? "/api/v1/im/user/message-access" : path === "/aftersales" || path.startsWith("/images/") || path.startsWith("/media/") || userActionPath || orderReadPath ? `/api/v1/im/user${path}` : "/api/v1/im/user/consultations";
   const upstreamUrl = new URL(upstreamPath, apiOrigin);
   if (method === "GET" && (path === "/aftersales" || path === "/consultations" || path === "/messages" || path === "/message-access")) {
     const limit = new URL(request.url).searchParams.get("limit");

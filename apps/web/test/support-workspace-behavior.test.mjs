@@ -548,7 +548,7 @@ test("pasting image stages file via clipboard DataTransfer, transfer preserves p
   assert.ok(revokedUrls.includes("blob:pasted-stage-1"), "preview URL is revoked once pending send completes");
 });
 
-test("TEAM_INVITE notification maps to neutral member joined label rather than consultation created", () => {
+test("NIM team notifications use the shared decoder and neutral fallbacks", () => {
   const inviteMsg = messageFromNim({
     messageType: 5,
     attachment: { type: 0 },
@@ -559,16 +559,118 @@ test("TEAM_INVITE notification maps to neutral member joined label rather than c
   assert.ok(inviteMsg);
   assert.equal(inviteMsg.from, "system");
   assert.equal(inviteMsg.text, "成员已加入会话");
+  assert.equal(inviteMsg.notice?.kind, "MEMBER_JOINED");
+
+  const createMsg = messageFromNim({
+    messageType: 5,
+    attachment: { ope: 0, tname: "订单群", accids: ["user-1"] },
+    senderId: "system-1",
+    createTime: 1001,
+    messageClientId: "create-1",
+  }, "user-1");
+  assert.ok(createMsg);
+  assert.equal(createMsg.text, "群聊已创建");
+  assert.equal(createMsg.notice?.kind, "TEAM_CREATED");
+
+  // A typed member change must not be decoded as a created group just because ope is also present.
+  const typedInvite = messageFromNim({
+    messageType: 5,
+    attachment: { ope: 0, type: 0 },
+    senderId: "system-1",
+    createTime: 1002,
+    messageClientId: "typed-invite-1",
+  }, "user-1");
+  assert.ok(typedInvite);
+  assert.equal(typedInvite.text, "成员已加入会话");
 
   const otherSysMsg = messageFromNim({
     messageType: 5,
-    attachment: { type: 1 },
+    attachment: { type: 3 },
     senderId: "system-1",
-    createTime: 1001,
+    createTime: 1003,
     messageClientId: "update-1",
   }, "user-1");
   assert.ok(otherSysMsg);
   assert.equal(otherSysMsg.text, "会话信息已更新");
+  assert.equal(otherSysMsg.notice?.kind, "TEAM_UPDATED");
+
+  const unknownMsg = messageFromNim({
+    messageType: 5,
+    attachment: { type: 99 },
+    senderId: "system-1",
+    createTime: 1004,
+    messageClientId: "unknown-1",
+  }, "user-1");
+  assert.ok(unknownMsg);
+  assert.equal(unknownMsg.text, "会话信息有变化");
+  assert.equal(unknownMsg.notice?.kind, "UNKNOWN");
+
+  // A valid server-normalized field wins over re-decoding the raw attachment.
+  const serverMsg = messageFromNim({
+    messageType: 5,
+    attachment: { type: 0 },
+    systemNotice: { kind: "TEAM_DISMISSED", text: "会话已解散" },
+    senderId: "system-1",
+    createTime: 1005,
+    messageClientId: "server-1",
+  }, "user-1");
+  assert.ok(serverMsg);
+  assert.equal(serverMsg.text, "会话已解散");
+  assert.equal(serverMsg.notice?.kind, "TEAM_DISMISSED");
+
+  // Unknown kinds or non-canonical text are not trusted; the raw attachment still decodes.
+  const badKind = messageFromNim({
+    messageType: 5,
+    attachment: { type: 3 },
+    systemNotice: { kind: "NOT_A_NOTICE", text: "任意文本" },
+    senderId: "system-1",
+    createTime: 1006,
+    messageClientId: "bad-kind-1",
+  }, "user-1");
+  assert.equal(badKind?.notice?.kind, "TEAM_UPDATED");
+  const badText = messageFromNim({
+    messageType: 5,
+    attachment: { type: 1 },
+    systemNotice: { kind: "MEMBER_JOINED", text: "伪造文案" },
+    senderId: "system-1",
+    createTime: 1007,
+    messageClientId: "bad-text-1",
+  }, "user-1");
+  assert.equal(badText?.notice?.kind, "MEMBER_LEFT");
+
+  // A normal message must never borrow a system notice.
+  const regularWithNotice = messageFromNim({
+    messageType: 0,
+    text: "普通消息",
+    systemNotice: { kind: "TEAM_DISMISSED", text: "会话已解散" },
+    senderId: "user-1",
+    createTime: 1008,
+    messageClientId: "regular-1",
+  }, "user-1");
+  assert.equal(regularWithNotice?.from, "customer");
+  assert.equal(regularWithNotice?.text, "普通消息");
+  assert.equal(regularWithNotice?.notice, undefined);
+});
+
+test("a Bot welcome keeps team lifecycle notices out of the user thread and directory", async (t) => {
+  const row = {
+    id: "round-notices", threadId: "thread-notices", roundId: "round-notices", roundSeq: 1, threadState: "ACTIVE",
+    type: "SERVICE", state: "ACTIVE", conversationId: "team-notices", messageScopeState: "READY", canSend: true,
+    assignedAdmin: { id: "staff-a", name: "客服 A" }, peerAccountId: "staff-a", botAccountId: "bot-u",
+    lastMessagePreview: "群聊已创建", lastMessageAt: "2026-10-30T00:02:00Z", updatedAt: "2026-10-30T00:02:00Z",
+  };
+  const history = {
+    "team-notices": [
+      { messageClientId: "welcome", messageServerId: "srv-welcome", conversationId: "team-notices", senderId: "bot-u", receiverId: "preview-user", createTime: 1_700_000_000_000, text: "欢迎咨询", messageType: 0 },
+      { messageClientId: "created", messageServerId: "srv-created", conversationId: "team-notices", senderId: "system", receiverId: "preview-user", createTime: 1_700_000_001_000, messageType: 5, attachment: { ope: 0 } },
+      { messageClientId: "joined", messageServerId: "srv-joined", conversationId: "team-notices", senderId: "system", receiverId: "preview-user", createTime: 1_700_000_002_000, messageType: 5, attachment: { type: 0 } },
+    ],
+  };
+  const page = await mountThreadWorkspace(t, { rows: [row], history });
+  await page.until(() => page.host.querySelector('[data-message-id="srv-welcome"]'), "bot welcome rendered");
+  assert.equal(page.host.querySelectorAll(".support-message-marker").length, 0, "Bot coverage hides team-created and member-joined notices");
+  assert.match(page.rowsInDirectory()[0].textContent, /欢迎咨询/, "the directory uses the last non-system message");
+  assert.doesNotMatch(page.rowsInDirectory()[0].textContent, /群聊已创建|成员已加入会话/);
 });
 
 test("OrderConversation 本单信息 action appends current order info to draft", async (t) => {
@@ -2022,9 +2124,67 @@ test("the composer names the real blocker instead of blaming 客服接待", asyn
     return host.querySelector("textarea").placeholder;
   };
   assert.match(await render("waiting", { id: "c-1", type: "SERVICE", state: "WAITING", conversationId: null, assignedAdmin: null, messageScopeState: "READY" }), /正在连接客服/, "a waiting consultation without a channel team is still provisioning");
-  assert.match(await render("waiting-ready", { id: "c-3", type: "SERVICE", state: "WAITING", conversationId: "team-3", assignedAdmin: null, messageScopeState: "READY" }), /已提交，客服接入后会看到你的留言；现在也可以先发消息/, "a READY waiting team gets the reassuring copy, not the old reception gate");
+  assert.match(await render("waiting-ready", { id: "c-3", type: "SERVICE", state: "WAITING", conversationId: "team-3", assignedAdmin: null, messageScopeState: "READY" }), /发送第一条消息后，客服才会收到并接入/, "a READY waiting team explains that only the first message reaches the agent");
   assert.match(await render("server-denied", { id: "c-4", type: "SERVICE", state: "ACTIVE", conversationId: "team-4", assignedAdmin: { id: "a-1", name: "客服甲" }, messageScopeState: "READY", canSend: false }), /当前会话暂不可继续/, "the backend canSend=false is honored even for an ACTIVE round");
   assert.match(await render("link-down", { id: "c-2", type: "SERVICE", state: "ACTIVE", conversationId: "team-2", assignedAdmin: { id: "a-1", name: "客服甲" }, messageScopeState: "READY" }), /消息通道正在恢复/, "a missing link is reported as a link problem, not as waiting for reception");
+});
+
+test("a failed first IM connection shows an error and lets the user reopen the same lifecycle", async (t) => {
+  const originalFetch = globalThis.fetch;
+  let tokenCalls = 0;
+  globalThis.fetch = async (input) => {
+    const url = String(input);
+    if (url.startsWith("/api/orders/")) return new Response(JSON.stringify({ items: [], nextCursor: null }));
+    if (url.includes("/im/token")) {
+      tokenCalls += 1;
+      if (tokenCalls === 1) return new Response(JSON.stringify({ error: { message: "synthetic unavailable" } }), { status: 503 });
+      return new Response(JSON.stringify({ appKey: "synthetic", accountId: "preview-user", token: "synthetic", transport: "local-fake" }));
+    }
+    if (url.includes("/im/consultations")) return new Response(JSON.stringify({ consultations: [] }));
+    if (url.includes("/im/messages")) return new Response(JSON.stringify({ messages: [] }));
+    return new Response(JSON.stringify({}));
+  };
+  const host = browser.document.createElement("div"); browser.document.body.appendChild(host);
+  const root = createRoot(host);
+  t.after(async () => { await act(async () => root.unmount()); host.remove(); globalThis.fetch = originalFetch; });
+  const until = async (predicate, label) => { for (let index = 0; index < 160; index += 1) { if (predicate()) return; await settle(); } throw new Error(`${label} timed out`); };
+  await act(async () => root.render(renderPreview({ preview: false, embedded: true, onClose: () => {} })));
+  await until(() => tokenCalls === 1 && Boolean(host.querySelector('.support-connection-state[data-state="error"]')), "first open failure");
+  const failed = host.querySelector('.support-connection-state[data-state="error"]');
+  assert.match(failed.textContent, /连接失败/, "the failure is named in the header instead of showing 正在连接");
+  const retry = [...host.querySelectorAll("button")].find((button) => button.textContent.trim() === "重新连接");
+  assert.ok(retry, "a visible reconnect action is offered");
+  await act(async () => retry.click());
+  await until(() => tokenCalls === 2, "retry reopens the existing lifecycle");
+  await until(() => !host.querySelector('.support-connection-state[data-state="error"]'), "reconnected state");
+  assert.match(host.textContent, /本地测试通道/, "the retried open produced a connected client");
+});
+
+test("a FAILED message scope keeps loaded history and offers reconnect without enabling send", async (t) => {
+  const originalFetch = globalThis.fetch;
+  const history = [{ messageClientId: "h1", conversationId: "team-1", senderId: "admin-1", receiverId: "preview-user", createTime: 1_700_000_000_000, messageType: 0, text: "已经加载的历史消息" }];
+  globalThis.fetch = async (input, init = {}) => {
+    const url = String(input);
+    if (url.startsWith("/api/orders/")) return new Response(JSON.stringify({ items: [], nextCursor: null }));
+    if (url.includes("/im/token")) return new Response(JSON.stringify({ appKey: "synthetic", accountId: "preview-user", token: "synthetic", transport: "local-fake" }));
+    if (url.includes("/im/consultations")) return new Response(JSON.stringify({ consultations: [{ id: "c-1", type: "SERVICE", state: "ACTIVE", conversationId: "team-1", messageScopeState: "FAILED", canSend: false, assignedAdmin: { id: "a-1", name: "客服甲" } }] }));
+    if (url.includes("/im/messages")) return (init.method ?? "GET") === "POST" ? new Response(JSON.stringify({ message: {} })) : new Response(JSON.stringify({ messages: history }));
+    return new Response(JSON.stringify({}));
+  };
+  const host = browser.document.createElement("div"); browser.document.body.appendChild(host);
+  const root = createRoot(host);
+  t.after(async () => { await act(async () => root.unmount()); host.remove(); globalThis.fetch = originalFetch; });
+  const until = async (predicate, label) => { for (let index = 0; index < 160; index += 1) { if (predicate()) return; await settle(); } throw new Error(`${label} timed out`); };
+  await act(async () => root.render(renderPreview({ preview: false, embedded: true, onClose: () => {} })));
+  await until(() => host.querySelector('.support-message[data-from="agent"]'), "history despite FAILED scope");
+  assert.match(host.querySelector('.support-message[data-from="agent"]').textContent, /已经加载的历史消息/, "loaded history stays visible");
+  const banner = [...host.querySelectorAll(".support-send-retry")].find((element) => element.textContent.includes("当前无法发送"));
+  assert.ok(banner, "the FAILED scope shows an explanatory error bar");
+  assert.match(banner.textContent, /可重新连接或稍后刷新/);
+  assert.ok([...banner.querySelectorAll("button")].some((button) => button.textContent.trim() === "重新连接"), "the error bar offers reconnect");
+  assert.equal(host.querySelector("textarea").disabled, true, "the composer stays read-only");
+  assert.equal(host.querySelector(".support-send-btn").disabled, true, "the send action stays disabled");
+  assert.equal(host.querySelector('.support-start-panel'), null, "the FAILED panel no longer replaces the message list");
 });
 
 /** Mount a single mutable consultation with a local-fake channel and record text POSTs. */
@@ -2102,6 +2262,13 @@ test("a WAITING consultation without a conversationId never fakes a sent message
   assert.equal(page.host.querySelector('.support-message[data-self="true"]'), null, "no fake sent bubble appears");
   assert.doesNotMatch(page.host.textContent, /已发送/, "no fake sent status appears");
   assert.equal(page.host.querySelector("textarea").value, "没有会话也不能假发送", "the draft stays with the user");
+});
+
+test("a WAITING round before the first user message says when the agent receives it", async (t) => {
+  const page = await mountWaitingConsultation(t, { id: "c-first", type: "SERVICE", state: "WAITING", conversationId: "team-first", assignedAdmin: null, messageScopeState: "READY" });
+  await page.until(() => page.host.querySelector(".support-message-empty"), "empty waiting thread");
+  assert.match(page.host.querySelector(".support-message-empty").textContent, /发送第一条消息后，客服才会收到并接入/, "the empty state explains the first message is what reaches the agent");
+  assert.doesNotMatch(page.host.textContent, /客服接入后会看到你的留言|可先留言/, "no copy claims a message was already delivered");
 });
 
 test("an unconfirmed result without its original id is never re-sent under a new id", async () => {

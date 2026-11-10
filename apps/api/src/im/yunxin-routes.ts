@@ -38,11 +38,13 @@ import {
   autoAssignWaitingConsultations,
   claimConsultation,
   closeConsultation,
+  closeUserConsultation,
   createOrResumeUserConsultation,
   dismissSupportRating,
   heartbeatOwnPresence,
   listAdminConsultations,
   listConsultationEvents,
+  listConsultationRounds,
   markConsultationRead,
   readConsultationContext,
   readConsultationLegacyOrderReference,
@@ -53,6 +55,7 @@ import {
   parseLimit,
   parsePresenceBody,
   parseSupportRatingBody,
+  parseUserCloseBody,
   readAdminMessageAccess,
   readOwnPresence,
   readUserMessageAccess,
@@ -335,6 +338,17 @@ async function handleUserConsultationRead(request: NodeRequest, response: NodeRe
   }
   const context = await readUserContext(request, options.security);
   sendJson(response, 200, await markUserConsultationRead(options.consultation, context, consultationId), requestId);
+}
+
+async function handleUserConsultationClose(request: NodeRequest, response: NodeResponse, requestId: string, options: YunxinRouteOptions, consultationId: string): Promise<void> {
+  if (!options.consultation) {
+    sendUnavailable(response, requestId);
+    return;
+  }
+  if (routeQuery(request).size) throw new SecurityApiError(400, API_V1_ERROR_CODES.INVALID_ARGUMENT, "Query is invalid");
+  const input = parseUserCloseBody(request.body);
+  const context = await readUserContext(request, options.security);
+  sendJson(response, 200, await closeUserConsultation(options.consultation, context, consultationId, input.operationId, requestId), requestId);
 }
 
 async function handleUserConsultationRatingDismiss(request: NodeRequest, response: NodeResponse, requestId: string, options: YunxinRouteOptions, consultationId: string): Promise<void> {
@@ -1197,6 +1211,17 @@ async function handleAdminConsultationEvents(request: NodeRequest, response: Nod
   sendJson(response, 200, await listConsultationEvents(options.consultation, context, consultationId, query.get("limit"), query.get("cursor")), requestId);
 }
 
+async function handleAdminConsultationRounds(request: NodeRequest, response: NodeResponse, requestId: string, options: YunxinRouteOptions, consultationId: string): Promise<void> {
+  if (!options.consultation) {
+    sendUnavailable(response, requestId);
+    return;
+  }
+  const context = await readAdminContext(request, options.security);
+  const query = routeQuery(request);
+  if ([...query.keys()].some((key) => key !== "limit" && key !== "cursor") || query.getAll("limit").length > 1 || query.getAll("cursor").length > 1) throw new SecurityApiError(400, "INVALID_ARGUMENT", "Query is invalid");
+  sendJson(response, 200, await listConsultationRounds(options.consultation, context, consultationId, query.get("limit"), query.get("cursor")), requestId);
+}
+
 async function handleAdminConsultationContext(request: NodeRequest, response: NodeResponse, requestId: string, options: YunxinRouteOptions, consultationId: string): Promise<void> {
   if (!options.consultation) {
     sendUnavailable(response, requestId);
@@ -1364,6 +1389,15 @@ export async function handleYunxinRoute(request: NodeRequest, response: NodeResp
       await handleUserConsultationRead(request, response, requestId, options, userRead[1]!);
       return;
     }
+    const userClose = /^\/user\/consultations\/([A-Za-z0-9][A-Za-z0-9._:-]{0,127})\/close$/.exec(path);
+    if (userClose) {
+      if (!originAllowed(request, [options.security.apiOrigin, options.security.userOrigin]) || method !== "POST") {
+        sendError(response, new SecurityApiError(method === "POST" ? 403 : 404, method === "POST" ? API_V1_ERROR_CODES.FORBIDDEN : API_V1_ERROR_CODES.NOT_FOUND, method === "POST" ? "Request rejected" : "Resource not found"), requestId);
+        return;
+      }
+      await handleUserConsultationClose(request, response, requestId, options, userClose[1]!);
+      return;
+    }
     const userOrderRead = /^\/user\/order-teams\/([A-Za-z0-9][A-Za-z0-9._:-]{0,127})\/read$/.exec(path);
     if (userOrderRead) {
       if (!originAllowed(request, [options.security.apiOrigin, options.security.userOrigin]) || method !== "POST") {
@@ -1498,13 +1532,14 @@ export async function handleYunxinRoute(request: NodeRequest, response: NodeResp
       sendJson(response, 200, await readConsultationLegacyOrderReference(options.consultation, context, legacyOrderMatch[1]!, legacyOrderMatch[2]!), requestId);
       return;
     }
-    const readMatch = /^\/admin\/consultations\/([A-Za-z0-9][A-Za-z0-9._:-]{0,127})\/(events|context)$/.exec(path);
+    const readMatch = /^\/admin\/consultations\/([A-Za-z0-9][A-Za-z0-9._:-]{0,127})\/(events|context|rounds)$/.exec(path);
     if (readMatch) {
       if (!originAllowed(request, [options.security.apiOrigin, options.security.adminOrigin]) || method !== "GET") {
         sendError(response, new SecurityApiError(method === "GET" ? 403 : 404, method === "GET" ? API_V1_ERROR_CODES.FORBIDDEN : API_V1_ERROR_CODES.NOT_FOUND, method === "GET" ? "Request rejected" : "Resource not found"), requestId);
         return;
       }
       if (readMatch[2] === "events") await handleAdminConsultationEvents(request, response, requestId, options, readMatch[1]!);
+      else if (readMatch[2] === "rounds") await handleAdminConsultationRounds(request, response, requestId, options, readMatch[1]!);
       else await handleAdminConsultationContext(request, response, requestId, options, readMatch[1]!);
       return;
     }

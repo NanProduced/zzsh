@@ -3,7 +3,7 @@ import { ProfileImage } from "@zzsh/ui/profile-image";
 
 
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
-import { ChevronLeft, ChevronRight, CircleAlert, CircleHelp, MoreHorizontal, Search, Settings } from "lucide-react";
+import { ChevronLeft, ChevronRight, CircleAlert, CircleHelp, MoreHorizontal, Search, Settings, X } from "lucide-react";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "../components/ui/tooltip";
 import { ActionTooltip } from "../components/ui/tooltip";
 import type { NimMessageLike, NimWebClientLike, NimWebConnectionState } from "@zzsh/im-client/nim-web-client";
@@ -53,6 +53,18 @@ function grouped(value: bigint): string {
 function yuanOf(cents: bigint): string {
   const text = cents.toString().padStart(3, "0");
   return `¥${grouped(BigInt(text.slice(0, -2)))}.${text.slice(-2)}`;
+}
+
+/** HAFF base units in millions: grouped, at most two decimals, no trailing `.00`. */
+function haffMillionsOf(value: bigint): string {
+  const million = 1_000_000n;
+  let whole = value / million;
+  let hundredths = ((value % million) * 100n + million / 2n) / million;
+  if (hundredths >= 100n) { whole += 1n; hundredths = 0n; }
+  // A non-zero quantity must never render as "0M" after rounding.
+  if (value > 0n && whole === 0n && hundredths === 0n) return "<0.01M";
+  const fraction = hundredths.toString().padStart(2, "0").replace(/0+$/, "");
+  return `${grouped(whole)}${fraction ? `.${fraction}` : ""}M`;
 }
 
 function imageOf(message: NimMessageLike): { url: string | null; thumbnailUrl: string | null; name: string } | null {
@@ -315,7 +327,7 @@ export function OrderWorkbenchPane({ identity, adminUserId, operatorName, client
     return (
       <aside className="im-wb-queue" aria-label="我参与的订单群" onContextMenu={(event) => { if ((event.target as Element).closest(".im-wb-row")) return; event.preventDefault(); setListMenu(null); }}>
         <div className="im-wb-queue-head"><strong>我参与的订单群</strong><b>{items.length - hiddenItems.length}</b></div>
-        <label className="im-wb-search"><Search size={13} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索筛选当前列表" aria-label="搜索订单群" /></label>
+        <label className="im-wb-search"><Search size={13} /><input value={query} onChange={(event) => setQuery(event.target.value)} onKeyDown={(event) => { if (event.key === "Escape" && query) { event.preventDefault(); setQuery(""); } }} placeholder="搜索筛选当前列表" aria-label="搜索订单群" />{query ? <button type="button" className="im-wb-search-clear" aria-label="清空订单群搜索" onClick={() => setQuery("")}><X size={12} /></button> : null}</label>
         <p className="im-wb-filter-note"><Tooltip><TooltipTrigger render={<button type="button" className="im-wb-hint-icon" aria-label="订单群列表范围说明" />}><CircleHelp size={13} /></TooltipTrigger><TooltipContent>仅筛选本机已加载的订单群，计数不代表全部；「我参与的」即当前目录已授权的群。</TooltipContent></Tooltip></p>
         {pinNotice ? <p className="im-wb-notice" data-tone="warn" role="status"><CircleAlert size={13} />{pinNotice}</p> : null}
         <div className="im-wb-rows">
@@ -386,10 +398,14 @@ export function OrderWorkbenchPane({ identity, adminUserId, operatorName, client
       </div>
       <div className="im-wb-chat-actions">
         <span className="im-wb-state">成员 {info.members.length}</span>
-        <button ref={groupTriggerRef} type="button" className="im-wb-btn im-wb-btn-icon" data-action="open-group-settings" aria-label="群设置" title="群设置" aria-expanded={groupSettingsOpen}
-          onClick={() => { if (groupSettingsOpen) closeGroupSettings(); else openGroupSettings(); }}><Settings size={15} /></button>
-        <button ref={detailsTriggerRef} type="button" className="im-wb-btn im-wb-btn-icon" data-action="toggle-order-details" aria-label={detailsOpen ? "收起本单详情" : "展开本单详情"} title={detailsOpen ? "收起本单详情" : "展开本单详情"} aria-expanded={detailsOpen} aria-controls="im-order-details"
-          onClick={() => { if (detailsOpen) closeDetails(); else openDetails(); }}><MoreHorizontal size={15} /></button>
+        <ActionTooltip content="群设置">
+          <button ref={groupTriggerRef} type="button" className="im-wb-btn im-wb-btn-icon" data-action="open-group-settings" aria-label="群设置" aria-expanded={groupSettingsOpen}
+            onClick={() => { if (groupSettingsOpen) closeGroupSettings(); else openGroupSettings(); }}><Settings size={15} /></button>
+        </ActionTooltip>
+        <ActionTooltip content={detailsOpen ? "收起本单详情" : "展开本单详情"}>
+          <button ref={detailsTriggerRef} type="button" className="im-wb-btn im-wb-btn-icon" data-action="toggle-order-details" aria-label={detailsOpen ? "收起本单详情" : "展开本单详情"} aria-expanded={detailsOpen} aria-controls="im-order-details"
+            onClick={() => { if (detailsOpen) closeDetails(); else openDetails(); }}><MoreHorizontal size={15} /></button>
+        </ActionTooltip>
       </div>
     </header>;
   };
@@ -440,9 +456,6 @@ export function OrderWorkbenchPane({ identity, adminUserId, operatorName, client
     const owner = info.members.find((member) => member.party === "OWNER");
     const renterPaidCents = centsOf(info.terms?.staff?.buyerTotal);
     const ended = info.orderStatus === "COMPLETED" || info.orderStatus === "CANCELLED";
-    const amountUnknown = quote !== null && (
-      (coinLines.length > 0 && coinAmount === null) || (itemLines.length > 0 && itemAmount === null)
-    );
     return (
       <aside id="im-order-details" className="order-team-aside im-wb-details im-order-rail-host" aria-label="本单详情" hidden={!detailsOpen} data-settings-open={groupSettingsOpen ? "true" : undefined}>
         {info.supportEscalation && (info.supportEscalation.addRound > 0 || info.supportEscalation.remindDueAt || info.supportEscalation.needsManualReview || info.supportEscalation.state === "RUNNING") ? (
@@ -464,7 +477,7 @@ export function OrderWorkbenchPane({ identity, adminUserId, operatorName, client
                 {coinLines.length ? <div className="im-rail-value-line" data-kind="haff">
                   <span className="im-rail-value-name">哈夫币</span>
                   <span className="im-rail-value-figures">
-                    <b>{coinQuantity === null ? "数量待核对" : `${grouped(coinQuantity)} 哈夫币`}</b>
+                    <b>{coinQuantity === null ? "数量待核对" : haffMillionsOf(coinQuantity)}</b>
                     <em data-unknown={coinAmount === null ? "true" : undefined}>{coinAmount === null ? "金额待核对" : yuanOf(coinAmount)}</em>
                   </span>
                 </div> : null}
@@ -475,11 +488,10 @@ export function OrderWorkbenchPane({ identity, adminUserId, operatorName, client
                       <em data-unknown={itemAmount === null ? "true" : undefined}>{itemAmount === null ? "总价待核对" : yuanOf(itemAmount)}</em>
                     </span>
                   </div>
-                  {itemLines.slice(0, 3).map((line, index) => <div className="im-rail-value-item" key={`${line.itemId}-${index}`}>
+                  {itemLines.map((line, index) => <div className="im-rail-value-item" key={`${line.itemId}-${index}`}>
                     <span>{line.name ?? "物资"}</span>
                     <b>{line.quantity}{line.unit ? ` ${UNIT_LABELS[line.unit] ?? line.unit}` : ""}</b>
                   </div>)}
-                  {itemLines.length > 3 ? <p className="im-rail-note">另有 {itemLines.length - 3} 项物品资源，未在摘要中展开。</p> : null}
                 </> : null}
                 {renterPaidCents !== null ? <div className="im-rail-value-line" data-kind="paid-total">
                   <span className="im-rail-value-name">租客合计</span>
@@ -487,27 +499,18 @@ export function OrderWorkbenchPane({ identity, adminUserId, operatorName, client
                 </div> : null}
               </div>
               <div className="im-rail-section-foot">
-                <span>冻结清单 · {visible.length} 项</span>
                 <a className="im-rail-link" data-action="order-open-inventory" href={`/orders/${encodeURIComponent(info.orderId)}`} onClick={(e) => { if (onOpenPath) { e.preventDefault(); onOpenPath(`/orders/${encodeURIComponent(info.orderId)}`, `订单 ${info.displayNo ?? info.orderId}`); } }}>查看完整清单<ChevronRight aria-hidden="true" /></a>
               </div>
             </> : <div className="im-rail-value-empty">
               <p className="im-rail-empty">{frozen.length ? "清单中没有数量大于 0 的项目。" : "本单未返回物品清单。"}</p>
               <a className="im-rail-link" data-action="order-open-inventory" href={`/orders/${encodeURIComponent(info.orderId)}`} onClick={(e) => { if (onOpenPath) { e.preventDefault(); onOpenPath(`/orders/${encodeURIComponent(info.orderId)}`, `订单 ${info.displayNo ?? info.orderId}`); } }}>查看完整清单<ChevronRight aria-hidden="true" /></a>
             </div>}
-            <p className="im-rail-note">按下单确认价格展示{renterPaidCents !== null ? "；租客合计含押金" : ""}；不代表结算或到账。</p>
-            {quote === null
-              ? <p className="im-rail-note">订单未返回下单价格，金额保持待核对。</p>
-              : amountUnknown ? <p className="im-rail-note">部分项目缺少价格，金额保持待核对。</p> : null}
           </RailSection>
 
-          <RailSection title="账号与双方">
-            <div className="im-rail-account">
-              <p className="im-rail-account-title">{info.account.title?.trim() || "账号"}</p>
-              <p className="im-rail-account-sub">{info.gameName} · 下单账号</p>
-              <div className="im-rail-parties">
-                <PartyRow role="租客" member={buyer} request={request} onOpenProfile={onOpenProfile} />
-                <PartyRow role="号主" member={owner} request={request} onOpenProfile={onOpenProfile} />
-              </div>
+          <RailSection title="双方">
+            <div className="im-rail-parties">
+              <PartyRow role="租客" member={buyer} request={request} onOpenProfile={onOpenProfile} />
+              <PartyRow role="号主" member={owner} request={request} onOpenProfile={onOpenProfile} />
             </div>
           </RailSection>
 
