@@ -1001,7 +1001,7 @@ export async function listSupportHandovers(
   });
 }
 
-async function auditViewerAccount(client: PoolClient, appId: string, adminUserId: string): Promise<string | null> {
+export async function auditViewerAccount(client: PoolClient, appId: string, adminUserId: string): Promise<string | null> {
   const row = (await client.query<{ accountId: string; identityMarker: string }>(
     `SELECT "account_id" AS "accountId", "identity_marker" AS "identityMarker"
        FROM "zzsh_iam"."im_identity_mapping"
@@ -1016,7 +1016,8 @@ async function auditViewerAccount(client: PoolClient, appId: string, adminUserId
 
 const AUDIT_CONVERSATIONS_SQL = `
   WITH items AS (
-    SELECT COALESCE(c."last_message_at", c."updated_at") AS sort_at,
+    (SELECT DISTINCT ON (COALESCE(c."thread_id", c."id"))
+           COALESCE(c."last_message_at", c."updated_at") AS sort_at,
            'CONSULTATION'::text AS item_kind, c."id" AS item_id,
            jsonb_build_object(
              'kind', 'CONSULTATION', 'id', c."id", 'type', c."kind", 'state', c."state",
@@ -1028,6 +1029,8 @@ const AUDIT_CONVERSATIONS_SQL = `
              'lastMessageAt', to_char(c."last_message_at" AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'),
              'firstUserMessageAt', to_char(c."first_user_message_at" AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'),
              'userUnreadCount', c."user_unread_count", 'adminUnreadCount', c."admin_unread_count",
+             'roundSeq', COALESCE(c."round_seq", 1),
+             'roundCount', count(*) OVER (PARTITION BY COALESCE(c."thread_id", c."id")),
              'historyState', CASE WHEN c."message_scope_state" = 'READY' AND c."message_scope_id" IS NOT NULL THEN 'AVAILABLE'
                WHEN c."state" = 'CLOSED' THEN 'LEGACY_UNAVAILABLE'
                WHEN c."message_scope_state" IN ('PENDING','NONE') THEN 'NOT_ESTABLISHED' ELSE 'RECOVERING' END,
@@ -1041,6 +1044,8 @@ const AUDIT_CONVERSATIONS_SQL = `
       LEFT JOIN "zzsh_auth_admin"."user" au ON au."id" = c."assigned_admin_id"
      WHERE c."app_id" = $1 AND ($7::text IS NULL OR c."kind" = $7)
        AND ($8::text IS NULL OR c."assigned_admin_id" = $8)
+       AND (c."kind" <> 'COMPLAINT' OR $9::boolean)
+     ORDER BY COALESCE(c."thread_id", c."id"), COALESCE(c."last_message_at", c."updated_at") DESC, c."id" DESC)
     UNION ALL
     SELECT COALESCE(activity.last_message_at, g."team_ready_at", o."created_at") AS sort_at,
            'ORDER_GROUP'::text AS item_kind, o."id" AS item_id,
@@ -1096,11 +1101,14 @@ export async function listAuditConversations(
   return withTransaction(options.pool, async (client) => {
     await client.query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY");
     await assertAdminContextInTransaction(client, context);
-    requireSupportManagementRead(await loadEffectiveAdminAccess(client, context.userId));
+    const access = await loadEffectiveAdminAccess(client, context.userId);
+    requireSupportManagementRead(access);
+    const canComplaint = hasPermission(access, ADMIN_PERMISSION.imSupportComplaint);
+    if (type === "COMPLAINT" && !canComplaint) throw new SecurityApiError(403, "FORBIDDEN", "Permission required");
     const viewerAccountId = await auditViewerAccount(client, options.appId, context.userId);
     const rows = (await client.query<{ sortAt: string; kind: "CONSULTATION" | "ORDER_GROUP"; id: string; payload: Record<string, unknown> }>(
       AUDIT_CONVERSATIONS_SQL,
-      [options.appId, viewerAccountId, cursor?.sortAt ?? null, cursor?.kind ?? null, cursor?.id ?? null, limit + 1, type, adminUserId],
+      [options.appId, viewerAccountId, cursor?.sortAt ?? null, cursor?.kind ?? null, cursor?.id ?? null, limit + 1, type, adminUserId, canComplaint],
     )).rows;
     const hasMore = rows.length > limit;
     const page = hasMore ? rows.slice(0, limit) : rows;
@@ -1154,12 +1162,14 @@ export async function readPatrolOrderTeamAccess(
 export async function readPatrolConsultationAccess(client:PoolClient,input:{appId:string;teamId:string;conversationId:string;requestId:string},actor:{userId:string;sessionId:string}):Promise<{viewerAccountId:string;peerAccountId:string}|null>{
   await assertAdminContextInTransaction(client,actor);
   const access=await loadEffectiveAdminAccess(client,actor.userId);requireSupportManagementRead(access);
-  const row=(await client.query<{id:string;user_account_id:string}>(`SELECT c.id,t.user_account_id FROM zzsh_iam.im_support_thread t
+  const row=(await client.query<{id:string;user_account_id:string;kind:string}>(`SELECT c.id,c.kind,t.user_account_id FROM zzsh_iam.im_support_thread t
     JOIN zzsh_iam.im_consultation c ON c.thread_id=t.id AND c.app_id=t.app_id
     WHERE t.app_id=$1 AND ((t.message_scope_id=$2 AND t.message_scope_state='READY')
       OR (c.message_scope_id=$2 AND c.message_scope_state='READY' AND c.state='CLOSED'))
     ORDER BY (c.state<>'CLOSED') DESC,c.created_at DESC,c.id DESC LIMIT 1`,[input.appId,input.teamId])).rows[0];
   if(!row)return null;
+  // Complaint threads keep the separate reception grant for patrol history too.
+  if(row.kind==="COMPLAINT"&&!hasPermission(access,ADMIN_PERMISSION.imSupportComplaint))return null;
   const viewerAccountId=await auditViewerAccount(client,input.appId,actor.userId);
   if(!viewerAccountId||input.conversationId!==`${viewerAccountId}|2|${input.teamId}`)return null;
   await recordAudit(client,{actorType:"admin",actorId:actor.userId,sessionId:actor.sessionId,action:"im.audit.conversation_viewed",objectType:"im_consultation",objectId:row.id,outcome:"SUCCESS",requestId:input.requestId,details:{mode:"PATROL_READ",teamId:input.teamId}});

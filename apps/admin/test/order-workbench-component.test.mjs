@@ -114,14 +114,14 @@ test("READY group list, role-attributed chat and the complementary order rail co
   assert.equal(node.querySelectorAll(".im-wb-thumb").length, 2, "both staged opening screenshots render");
 
   const aside = node.querySelector("#im-order-details");
-  assert.match(aside.textContent, /满配六套 · 资源账号（含安全箱）/, "the rail complements the header with the account title");
-  assert.match(aside.textContent, /三角洲行动/);
+  assert.doesNotMatch(aside.textContent, /满配六套 · 资源账号（含安全箱）/, "the rail does not repeat the header account title");
+  assert.doesNotMatch(aside.textContent, /三角洲行动|下单账号/, "the rail does not repeat the game or order-account subtitle");
   assert.match(aside.textContent, /租客小林/);
   assert.match(aside.textContent, /号主老陈/);
-  assert.match(aside.textContent, /哈夫币/);
-  assert.match(aside.textContent, /10,000,000 哈夫币/, "frozen quantities are copied from the projection verbatim");
+  assert.equal(aside.querySelector('.im-rail-value-line[data-kind="haff"] b').textContent, "10M", "HAFF quantities render in M units");
   assert.match(aside.textContent, /金额待核对/, "without a frozen quote the amount stays unknown, never 0");
   assert.doesNotMatch(aside.textContent, /¥0\.00/, "an unknown amount is never rendered as 0");
+  assert.doesNotMatch(aside.textContent, /另有|冻结清单|下单确认价格|不代表结算|未在摘要中展开/, "collapsed-summary and pricing disclaimers stay out of the rail");
   assert.doesNotMatch(aside.textContent, /account-8842|tenant-account|owner-account|10001|20002|30003/, "no account or user UUID is repeated in the rail");
   assert.doesNotMatch(aside.textContent, /用户编号|稳定账号ID|订单编号|ZZ20261011008842/, "order identity facts stay in the chat header");
   assert.doesNotMatch(aside.textContent, /买家合计|号主合计|平台贡献/, "the settlement split stays on the order page");
@@ -348,7 +348,7 @@ test("an unknown text result keeps responsibility and replays the original messa
   await settle();
 });
 
-test("the frozen inventory summary stays compact and links the existing order detail page", async (t) => {
+test("the frozen inventory summary lists the present rows and links the existing order detail page", async (t) => {
   const { node, until } = await mount(t, "ready-three");
   await until(() => node.querySelector('[data-action="order-open-inventory"]'), "inventory summary");
   assert.equal(document.body.querySelector(".im-order-inventory-dialog"), null, "the rail does not mount a second full inventory view");
@@ -357,7 +357,7 @@ test("the frozen inventory summary stays compact and links the existing order de
   assert.equal(link.getAttribute("href"), "/orders/order-8842", "the link targets the existing order detail page");
   assert.match(link.textContent, /查看完整清单/);
   const aside = node.querySelector("#im-order-details");
-  assert.match(aside.textContent, /冻结清单 · 2 项/);
+  assert.doesNotMatch(aside.textContent, /冻结清单|另有|未在摘要中展开/, "the count and collapsed-summary copy are gone");
   assert.equal(aside.querySelectorAll(".im-rail-value-item").length, 1, "only the visible resource rows are summarized");
   assert.match(aside.textContent, /装备箱/);
   assert.match(aside.textContent, /3 件/);
@@ -370,15 +370,14 @@ test("the frozen inventory summary stays compact and links the existing order de
   await until(() => node.querySelector('[data-action="order-open-inventory"]').getAttribute("href") === "/orders/order-8842", "returning to the first order restores its link");
 });
 
-test("a long inventory stays a bounded summary instead of expanding every row", async (t) => {
+test("a long inventory expands every row instead of hiding items behind a count", async (t) => {
   const { node, until } = await mount(t, "inventory-many");
   await until(() => node.querySelector('[data-action="order-open-inventory"]'), "inventory ready");
   const aside = node.querySelector("#im-order-details");
-  assert.equal(aside.querySelectorAll(".im-rail-value-item").length, 3, "the rail caps the visible resource rows");
+  assert.equal(aside.querySelectorAll(".im-rail-value-item").length, 24, "every positive resource row is rendered");
   assert.match(aside.textContent, /物品资源 · 24 项/);
-  assert.match(aside.textContent, /另有 21 项物品资源/, "the rest stays collapsed");
-  assert.match(aside.textContent, /冻结清单 · 24 项/);
-  assert.doesNotMatch(aside.textContent, /合成资源项目 4/, "the fourth row is not expanded");
+  assert.match(aside.textContent, /合成资源项目 24/, "the last row is expanded, not truncated");
+  assert.doesNotMatch(aside.textContent, /另有|冻结清单|未在摘要中展开/, "no collapsed-summary noise");
   assert.equal(node.querySelector('[data-action="order-open-inventory"]').getAttribute("href"), "/orders/order-8842");
 });
 
@@ -406,18 +405,39 @@ test("the rail treats zero-quantity inventory as absent and sums only frozen quo
   const { node, until } = await mount(t, "ready-three-zero", { fixture });
   await until(() => node.querySelector("#im-order-details .im-rail-value"), "value loaded");
   const aside = node.querySelector("#im-order-details");
-  assert.match(aside.textContent, /10,000,000 哈夫币/, "havoc total comes from the frozen inventory");
+  assert.equal(aside.querySelector('.im-rail-value-line[data-kind="haff"] b').textContent, "10M", "havoc total comes from the frozen inventory");
   assert.match(aside.textContent, /¥100,000.00/, "havoc amount comes from the frozen quote line");
   assert.match(aside.textContent, /物品资源 · 1 项/);
   assert.match(aside.textContent, /¥180.00/, "item total is the exact sum of the frozen line amounts");
   assert.doesNotMatch(aside.textContent, /零号弹匣/, "quantity 0 is absent, not an exception");
   assert.doesNotMatch(aside.textContent, /异常/, "zero is never reported as abnormal");
-  assert.match(aside.textContent, /冻结清单 · 2 项/, "the count only includes present rows");
+  assert.equal(aside.querySelectorAll(".im-rail-value-item").length, 1, "the present item still renders");
+  assert.doesNotMatch(aside.textContent, /冻结清单|另有|下单确认价格|不代表结算|下单账号/, "the removed count, disclaimers and repeated account copy stay out");
   assert.match(aside.textContent, /租客合计/);
   assert.match(aside.textContent, /¥100,860.00/, "the rail shows the renter total from the frozen staff quote");
   assert.doesNotMatch(aside.textContent, /account-8842|tenant-account|owner-account|10001|20002|30003/, "no account or user UUIDs");
   assert.doesNotMatch(aside.textContent, /复制|已复制/, "the removed copy controls do not come back");
   assert.doesNotMatch(aside.textContent, /买家合计|号主合计|平台贡献/, "no settlement split is repeated");
+});
+
+test("HAFF quantities use grouped millions with at most two decimals", async (t) => {
+  const base = fixtureById("ready-three");
+  const withHaff = (quantity) => ({
+    ...base,
+    info: { ...base.info, frozenInventory: [{ itemId: "item_haff", quantity, unit: "HAFF_BASE", pricingKind: "HAFF_RATIO", name: "哈夫币" }] },
+  });
+  const whole = await mount(t, "haff-whole", { fixture: withHaff("1069000000") });
+  await whole.until(() => whole.node.querySelector('.im-rail-value-line[data-kind="haff"] b'), "whole haff line");
+  assert.equal(whole.node.querySelector('.im-rail-value-line[data-kind="haff"] b').textContent, "1,069M", "whole millions keep grouping and no trailing decimals");
+  assert.doesNotMatch(whole.node.querySelector("#im-order-details").textContent, /1,069,000,000|1,069\.00M/, "base units and trailing zeros are not repeated");
+
+  const fractional = await mount(t, "haff-fraction", { fixture: withHaff("1069123456") });
+  await fractional.until(() => fractional.node.querySelector('.im-rail-value-line[data-kind="haff"] b'), "fractional haff line");
+  assert.equal(fractional.node.querySelector('.im-rail-value-line[data-kind="haff"] b').textContent, "1,069.12M", "fractions round to at most two decimals");
+
+  const tiny = await mount(t, "haff-tiny", { fixture: withHaff("4000") });
+  await tiny.until(() => tiny.node.querySelector('.im-rail-value-line[data-kind="haff"] b'), "tiny haff line");
+  assert.equal(tiny.node.querySelector('.im-rail-value-line[data-kind="haff"] b').textContent, "<0.01M", "a non-zero quantity never rounds down to 0M");
 });
 
 test("an image failure is scoped to the selected order", async (t) => {

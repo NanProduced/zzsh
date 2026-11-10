@@ -159,6 +159,8 @@ html.dark .support-message[data-self="true"] .support-message-bubble,html[data-t
 .support-live-dot[data-state="active"] { background:var(--color-status-success); box-shadow:0 0 0 3px color-mix(in srgb,var(--color-status-success) 14%,transparent); }
 .support-connection-state[data-state="connected"] { color:var(--color-status-success-ink); border-color:color-mix(in srgb,var(--color-status-success) 46%,var(--color-border-default)); background:color-mix(in srgb,var(--color-status-success) 8%,var(--color-bg-surface)); }
 .support-connection-state[data-state="error"] { color:var(--color-status-danger); border-color:color-mix(in srgb,var(--color-status-danger) 48%,var(--color-border-default)); }
+.support-connection-state[data-state="error"] button { min-height:24px; padding:2px 8px; border:1px solid color-mix(in srgb,var(--color-status-danger) 40%,var(--color-border-default)); border-radius:999px; background:transparent; color:inherit; font-size:11px; cursor:pointer; }
+.support-connection-state[data-state="error"] button:hover { background:color-mix(in srgb,var(--color-status-danger) 10%,transparent); }
 .support-gate-embedded { margin:0; max-width:none; box-shadow:none; }
 .support-pending-image { display:flex; align-items:center; gap:9px; margin:0 0 8px; padding:8px 10px; border:1px solid color-mix(in srgb,var(--color-status-danger) 45%,var(--color-border-default)); border-radius:8px; background:color-mix(in srgb,var(--color-status-danger) 6%,var(--color-bg-surface)); font-size:11px; }
 .support-pending-image img { width:44px; height:44px; object-fit:cover; border:1px solid var(--color-border-default); border-radius:6px; }
@@ -169,9 +171,9 @@ html.dark .support-message[data-self="true"] .support-message-bubble,html[data-t
 .support-message-image img { display:block; width:100%; height:auto; }
 .support-send-retry { display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin:8px 4px 0; padding:9px 11px; border:1px solid color-mix(in srgb,var(--color-status-danger) 50%,var(--color-border-default)); border-radius:7px; color:var(--color-status-danger); background:color-mix(in srgb,var(--color-status-danger) 7%,var(--color-bg-surface)); font-size:11px; line-height:1.55; }
 .support-send-retry > span { flex:1; min-width:120px; }
-.support-send-retry button { flex:none; min-height:26px; padding:4px 9px; border:1px solid color-mix(in srgb,var(--color-status-danger) 40%,var(--color-border-default)); border-radius:6px; color:var(--color-status-danger); background:transparent; font-size:11px; }
-.support-send-retry button:hover:not(:disabled) { background:color-mix(in srgb,var(--color-status-danger) 10%,transparent); }
-.support-send-retry button:disabled { cursor:not-allowed; opacity:.55; }
+.support-send-retry button, .support-inline-error button { flex:none; min-height:26px; padding:4px 9px; border:1px solid color-mix(in srgb,var(--color-status-danger) 40%,var(--color-border-default)); border-radius:6px; color:var(--color-status-danger); background:transparent; font-size:11px; }
+.support-send-retry button:hover:not(:disabled), .support-inline-error button:hover:not(:disabled) { background:color-mix(in srgb,var(--color-status-danger) 10%,transparent); }
+.support-send-retry button:disabled, .support-inline-error button:disabled { cursor:not-allowed; opacity:.55; }
 .support-history-more { display:flex; justify-content:center; padding:2px 0 8px; }
 .support-history-more button { min-height:28px; padding:5px 12px; border:1px solid var(--color-border-default); border-radius:999px; color:var(--color-text-secondary); background:var(--color-bg-surface); font-size:11px; }
 .support-history-more button:hover:not(:disabled) { border-color:var(--color-accent-brand); color:var(--color-accent-brand-ink); }
@@ -389,6 +391,7 @@ html.dark .support-kbd,html[data-theme="dark"] .support-kbd,:root:not([data-them
  .support-unified .support-conversation-heading { padding:10px 14px;gap:8px;min-height:48px; }
  .support-unified .support-conversation-identity h3 { font-size:14px; }
  .support-unified .support-connection-state { max-width:82px;font-size:11px; }
+ .support-unified .support-connection-state[data-state="error"] { max-width:none; }
  .support-unified .order-team-detail { padding:0 12px 12px; }
  .support-unified .order-team-detail>header { padding-right:125px; }
  /* Touch targets: the compact composer controls are 22–34px and fail on a phone. */

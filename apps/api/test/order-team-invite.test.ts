@@ -93,6 +93,11 @@ class InviteDatabase {
     if (sql.includes("platform_subject_id=$2 FOR SHARE")) {
       return { rows: this.targetIdentity && values[0] === APP && values[1] === TARGET ? [this.targetIdentity] : [] };
     }
+    if (sql.includes("SELECT mm.state FROM zzsh_order.im_order_member mm")) {
+      const subject = values[2] as string;
+      const row = this.members.find(item => item.platform_subject_id === subject && item.party === "STAFF");
+      return { rows: row ? [{ state: row.state }] : [] };
+    }
     if (sql.includes("SELECT mm.identity_id,mm.party,mm.state,m.platform_subject_id")) {
       return { rows: this.existing ? [this.existing] : [] };
     }
@@ -281,6 +286,27 @@ test("object and game scope denial fail closed before any provider or member wri
   t.mock.method(orderTeamAccess,"readOrderTeamAccess",async()=>({terminalSendAllowed:false}));
   db = fixture(); db.group = { ...db.group!, order_status: "COMPLETED" }; provider = new FakeTeamProvider();
   assert.equal((await request(db, provider)).status, 409);
+  assert.equal(provider.reads, 0);
+  assert.equal(db.writes.length, 0);
+});
+
+test("support read and game scope alone cannot join or list an untouched order group", async t => {
+  mockAccess(t);
+  const db = new InviteDatabase();
+  db.members.splice(db.members.findIndex(item => item.platform_subject_id === STAFF), 1);
+  const provider = new FakeTeamProvider();
+  await assert.rejects(invoke(db, provider), statusIs(403));
+  await assert.rejects(listOrderTeamInviteTargets(client(db), ACTOR, APP, ORDER, 10), statusIs(403));
+  assert.equal(provider.reads, 0, "a non-member never reaches the provider");
+  assert.equal(provider.creates, 0);
+  assert.equal(db.writes.length, 0);
+  assert.equal(db.audits.length, 0);
+});
+
+test("a joined member cannot invite themselves", async t => {
+  mockAccess(t);
+  const db = new InviteDatabase(), provider = new FakeTeamProvider();
+  await assert.rejects(invoke(db, provider, STAFF), statusIs(400));
   assert.equal(provider.reads, 0);
   assert.equal(db.writes.length, 0);
 });

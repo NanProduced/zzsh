@@ -4,14 +4,16 @@
  * repeats the stage, order number or settlement split.
  */
 
-.workspace-root .im-rail-value { display:grid; gap:0; border-top:1px solid var(--border); }
-.workspace-root .im-rail-value-line { display:flex; align-items:flex-start; justify-content:space-between; gap:12px; min-height:34px; padding:7px 0; border-bottom:1px solid color-mix(in oklab,var(--border) 65%,transparent); }
+.workspace-root .im-order-rail { min-width:0; }
+.workspace-root .im-rail-value { display:grid; gap:0; min-width:0; border-top:1px solid var(--border); }
+.workspace-root .im-rail-value-line { display:flex; align-items:flex-start; justify-content:space-between; gap:12px; min-height:36px; padding:8px 0; border-bottom:1px solid color-mix(in oklab,var(--border) 65%,transparent); }
 .workspace-root .im-rail-value-name { min-width:0; padding-top:1px; color:var(--muted-foreground); font-size:11px; line-height:1.5; overflow-wrap:anywhere; }
 .workspace-root .im-rail-value-figures { display:flex; flex:none; flex-direction:column; align-items:flex-end; gap:1px; }
 .workspace-root .im-rail-value-figures b { font-size:12px; font-weight:500; font-variant-numeric:tabular-nums; line-height:1.5; white-space:nowrap; }
+.workspace-root .im-rail-value-line[data-kind="haff"] .im-rail-value-figures b { font-size:13px; }
 .workspace-root .im-rail-value-figures em { font-size:13px; font-style:normal; font-weight:600; font-variant-numeric:tabular-nums; line-height:1.4; white-space:nowrap; }
 .workspace-root .im-rail-value-figures em[data-unknown="true"] { color:var(--muted-foreground); font-size:11px; font-weight:400; }
-.workspace-root .im-rail-value-item { display:flex; align-items:baseline; justify-content:space-between; gap:12px; min-height:28px; padding:4px 0 4px 10px; border-bottom:1px solid color-mix(in oklab,var(--border) 45%,transparent); font-size:12px; }
+.workspace-root .im-rail-value-item { display:flex; align-items:baseline; justify-content:space-between; gap:12px; min-height:32px; padding:6px 0 6px 12px; border-bottom:1px solid color-mix(in oklab,var(--border) 45%,transparent); font-size:12px; line-height:1.55; }
 .workspace-root .im-rail-value-item span { min-width:0; overflow-wrap:anywhere; }
 .workspace-root .im-rail-value-item b { flex:none; font-weight:500; font-variant-numeric:tabular-nums; white-space:nowrap; }
 .workspace-root .im-rail-value-item:last-child { border-bottom:0; }
@@ -20,7 +22,7 @@
 .workspace-root .im-rail-link:hover { color:var(--im-accent-strong); }
 .workspace-root .im-rail-link:focus-visible { outline:2px solid var(--ring); outline-offset:2px; }
 .workspace-root .im-rail-link svg { width:13px; height:13px; }
-.workspace-root .im-rail-parties { display:grid; gap:0; margin-top:6px; border-top:1px solid var(--border); }
+.workspace-root .im-rail-parties { display:grid; gap:0; margin-top:0; border-top:1px solid var(--border); }
 .workspace-root .im-rail-party { display:flex; align-items:baseline; gap:8px; min-height:28px; padding:4px 0; font-size:12px; }
 .workspace-root .im-rail-party-role { flex:none; width:30px; color:var(--muted-foreground); font-size:11px; }
 .workspace-root .im-rail-party-name { min-width:0; font-weight:500; overflow-wrap:anywhere; }

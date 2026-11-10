@@ -676,7 +676,7 @@ export async function handleAdminBff(request: NodeRequest, response: NodeRespons
   const imOrderRead = /^\/im\/order-teams\/[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\/read$/.test(path);
   const imImage = /^\/im\/images\/[A-Za-z0-9._:-]{1,128}$/.test(path);
   const imMedia = /^\/im\/media\/[A-Za-z0-9._:-]{1,128}$/.test(path);
-  const imReadSub = /^\/im\/consultations\/[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\/(events|context)$/.test(path);
+  const imReadSub = /^\/im\/consultations\/[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\/(events|context|rounds)$/.test(path);
   const imLegacyOrder = /^\/im\/consultations\/[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\/legacy-orders\/legacy_order_[a-f0-9]{40}$/.test(path);
   const imAuditTakeover = /^\/im\/audit\/consultations\/[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\/takeover$/.test(path);
   const imGetOrPost = path === "/im/consultations" || path === "/im/messages";

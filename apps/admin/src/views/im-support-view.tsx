@@ -1,6 +1,6 @@
 import { ProfileImage } from "@zzsh/ui/profile-image";
 "use client";
-import { formatSubjectRef, messageScopeLabel } from "./im-support-vocabulary";
+import { messageScopeLabel } from "./im-support-vocabulary";
 import { NIM_RECEIPT_PENDING, nimMessageView, oldestNimMessage } from "@zzsh/im-client/nim-web-client";
 import { SupportMessageBody, supportMessageSummary } from "./im-support-message-body";
 import { AftersaleInbox } from "./im-aftersale-inbox";
@@ -11,12 +11,12 @@ import { ArrowDown, Bell, BellOff, CalendarClock, Check, ChevronLeft, CircleAler
 import { MessageScroller as MessageScrollerPrimitive } from "@shadcn/react/message-scroller";
 import { ImClientLifecycle, ImLifecycleSupersededError } from "@zzsh/im-client/lifecycle";
 import { createLocalFakeNimWebClientFactory, createNimWebClientFactory, NIM_IMAGE_MAX_BYTES, NimImageSendError, NimMediaSendError, NimTextSendError, validateNimImageFile, validateNimMediaFile, type NimMessageLike, type NimMessageMedia, type NimWebClientLike, type NimWebConnectionState } from "@zzsh/im-client/nim-web-client";
-import { decodeImSystemNotice, mergeImMessages } from "@zzsh/im-client/message-state";
+import { collapseImSystemNotices, decodeImSystemNotice, isImSystemNoticeText, mergeImMessages, type ImSystemNotice } from "@zzsh/im-client/message-state";
 import { CHAT_EMOJIS, MessageActionMenu, MessageReplyQuote, useMessageLongPress, type MessageActionId, type MessageActionItem } from "@zzsh/ui/message-actions";
 import { MediaDraftBar, mediaMessageOf, mediaSummaryOf, type MessageMediaDraft } from "@zzsh/ui/message-media";
 import "@zzsh/ui/message-media.css";
 import { Popover, PopoverContent, PopoverTrigger } from "../components/ui/popover";
-import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "../components/ui/tooltip";
+import { ActionTooltip, Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "../components/ui/tooltip";
 import "@zzsh/ui/message-actions.css";
 import { AdminApiError, adminRequest, friendlyError, hasPermission, type SessionSnapshot } from "../api";
 import { confirmCurrentForbidden, isCurrentImRequest, messageAccessPath, supportedImageUrl, type ImRequestKey } from "./im-support-guards";
@@ -29,7 +29,7 @@ import { orderStageTone } from "@zzsh/ui/order-team-panel";
 import type { OrderTeamListItem } from "@zzsh/ui/order-team-panel";
 import { ConsultationUserCard } from "./im-support-user-card";
 import { EntityPreviewTrigger } from "../components/admin-preview";
-import { ConsultationEventsCard } from "./im-support-events";
+import { ConsultationEventsCard, ConsultationRoundsTimeline } from "./im-support-events";
 import "./im-support-details.css";
 import { formatDuration } from "./im-support-management-model";
 import { dayKeyOf, dayLabelOf, formatBytes, formatListTime, formatMonthDay, formatTime, initialOf } from "./im-support-format";
@@ -54,7 +54,6 @@ type Consultation = {
   threadState?: "IDLE" | "WAITING" | "ACTIVE";
   type: SupportType;
   state: ConsultationState;
-  subjectRef: string | null;
   assignedAdmin: { id: string; name: string; avatar?: string | null } | null;
   peerAccountId: string | null;
   /** 平台“洲洲助手（Bot）”账号；欢迎语与自动卡片由它发出。 */
@@ -86,6 +85,8 @@ type SupportMessage = {
   messageServerId?: string;
   messageType?: number;
   revoked?: boolean;
+  /** Shared decode of a NIM team notification; display decides visibility. */
+  notice?: ImSystemNotice;
   /** Raw channel message kept intact so reply/revoke/delete address the original. */
   source?: NimMessageLike;
   image?: { imageId: string; url?: string; thumbnailUrl?: string; name: string; mimeType: string; size: number };
@@ -270,6 +271,20 @@ function imageOf(message: NimMessageLike): SupportMessage["image"] | undefined {
   const thumbnailUrl = supportedImageUrl(attachment.thumbUrl) ?? url;
   return { imageId, ...(url ? { url } : {}), ...(thumbnailUrl ? { thumbnailUrl } : {}), name: typeof attachment.name === "string" ? attachment.name : "图片", mimeType: typeof attachment.mimeType === "string" ? attachment.mimeType : "image/jpeg", size: typeof attachment.size === "number" ? attachment.size : 0 };
 }
+const SERVER_SYSTEM_NOTICE_KINDS = new Set([
+  "TEAM_CREATED", "MEMBER_JOINED", "MEMBER_LEFT", "TEAM_UPDATED", "TEAM_DISMISSED", "UNKNOWN",
+]);
+
+/** Only a shape-valid server notice is trusted; anything else falls back to the shared decoder. */
+function serverSystemNotice(message: NimMessageLike): ImSystemNotice | null {
+  const notice: unknown = message.systemNotice;
+  if (message.messageType !== 5 || !notice || typeof notice !== "object" || Array.isArray(notice)) return null;
+  const { kind, text } = notice as { kind?: unknown; text?: unknown };
+  if (typeof kind !== "string" || !SERVER_SYSTEM_NOTICE_KINDS.has(kind)
+    || typeof text !== "string" || !isImSystemNoticeText(text)) return null;
+  return { kind: kind as ImSystemNotice["kind"], text: text.trim() };
+}
+
 export function messageFromNim(message: NimMessageLike, accountId: string, peerAccountId?: string | null): SupportMessage | null {
   if (typeof message.senderId !== "string" || !message.senderId) return null;
   const id = message.messageServerId || message.messageClientId || `${message.senderId}-${message.createTime}`;
@@ -288,10 +303,10 @@ export function messageFromNim(message: NimMessageLike, accountId: string, peerA
   };
   // 已撤回是占位，不是发言：正文与附件都不再展示，也不再提供菜单。
   if (message.revoked === true) return { ...base, from: self ? "agent" : "customer", text: "", revoked: true };
-  const notice = decodeImSystemNotice(message);
+  const notice = serverSystemNotice(message) ?? decodeImSystemNotice(message);
   // A notification is never attributed to a human speaker, and unknown types
   // are not rendered as if the customer had written them.
-  if (notice) return { ...base, from: "system", text: notice.text };
+  if (notice) return { ...base, from: "system", text: notice.text, notice };
   const image = imageOf(message);
   // Only the client-validated media envelope becomes a media bubble.
   const media = mediaMessageOf(message);
@@ -795,7 +810,7 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
             if (!next || !consultation) continue;
             setMessages((current) => ({ ...current, [consultation.id]: mergeImMessages(current[consultation.id] ?? [], [next]) }));
             // 即时反馈：服务端计数仍是权威，下一次队列轮询会覆盖这个乐观增量。
-            if (next.self !== true) setQueue((current) => current.map((item) => item.id === consultation.id
+            if (next.self !== true && next.from !== "system") setQueue((current) => current.map((item) => item.id === consultation.id
               ? { ...item, adminUnreadCount: Math.min((item.adminUnreadCount ?? 0) + 1, 999) }
               : item));
           }
@@ -962,6 +977,7 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
   }, [unifiedQuery, canRead, readClientKey, snapshot.session.locked]);
 
   const serverSearchActive = unifiedQuery.trim().length > 0;
+  const searchLimitReached = serverSearchActive && (searchConsultations.length >= 50 || searchOrders.length >= 50);
   const consultationDirectory = useMemo(() => {
     const seen = new Set(queue.map((row) => row.id));
     return [...searchConsultations.filter((row) => !seen.has(row.id)), ...queue];
@@ -1215,11 +1231,14 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
   useEffect(() => { setMessageMenu(null); }, [selectedId]);
 
   const displayQueue = useMemo<QueueRow[]>(() => queue.map((item) => {
-    const history = messages[item.id];
-    const last = history?.length ? history[history.length - 1] : undefined;
+    const history = messages[item.id] ?? [];
+    // 系统通知不是业务消息：摘要、时间和提醒签名都只能跟随最后一条非 system 消息。
+    const last = [...history].reverse().find((message) => message.from !== "system");
     const lastMessageAt = item.lastMessageAt ? Date.parse(item.lastMessageAt) : Number.NaN;
     // 后端 best-effort 写入的最近消息摘要；没有历史时用它，避免未打开的 ACTIVE 行只显示“打开查看”。
-    const preview = item.lastMessagePreview ? supportMessageSummary(item.lastMessagePreview).trim() || null : null;
+    const previewText = item.lastMessagePreview ? supportMessageSummary(item.lastMessagePreview).trim() : "";
+    const previewIsSystem = Boolean(previewText && isImSystemNoticeText(previewText));
+    const preview = previewText && !previewIsSystem ? previewText : null;
     // R1 重写时把这里的措辞缩短成了「待人工核验」，丢掉了「远端结果未知」这个
     // 关键差异（会读成普通待办）。恢复 HEAD 的完整措辞，队列行不得让 FAILED
     // 看起来像正常会话。
@@ -1228,9 +1247,10 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
       : closeOutcomeUnknown[item.id]
         ? "结束结果未确认，待平台核对"
         : last
-        ? `${last.from === "agent" ? (last.self ? "我：" : "客服：") : last.from === "system" ? "" : "用户："}${last.image ? "[图片]" : last.media ? mediaSummaryOf(last) ?? "[媒体]" : last.text || "[空消息]"}`
+        ? `${last.from === "agent" ? (last.self ? "我：" : "客服：") : "用户："}${last.image ? "[图片]" : last.media ? mediaSummaryOf(last) ?? "[媒体]" : last.text || "[空消息]"}`
         : preview ? preview : item.state === "WAITING" ? "等待客服接待" : item.state === "CLOSED" ? "本轮已结束" : "打开查看消息";
-    const sortAt = last?.createTime ?? (Number.isFinite(lastMessageAt) ? lastMessageAt : 0);
+    // 历史已加载但没有非 system 消息时，系统通知不能修改排序或提醒。
+    const sortAt = last?.createTime ?? (previewIsSystem ? 0 : Number.isFinite(lastMessageAt) ? lastMessageAt : 0);
     return {
       id: item.id,
       type: item.type,
@@ -1252,7 +1272,8 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
   }), [displayQueue]);
   const searchQueueRows = useMemo<QueueRow[]>(() => searchConsultations.map((item) => {
     const lastAt = item.lastMessageAt ? Date.parse(item.lastMessageAt) : Number.NaN;
-    const preview = item.lastMessagePreview ? supportMessageSummary(item.lastMessagePreview).trim() || null : null;
+    const previewText = item.lastMessagePreview ? supportMessageSummary(item.lastMessagePreview).trim() : "";
+    const preview = previewText && !isImSystemNoticeText(previewText) ? previewText : null;
     const sortAt = Number.isFinite(lastAt) ? lastAt : 0;
     return {
       id: item.id,
@@ -1272,32 +1293,64 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
     const seen = new Set(displayQueue.map((row) => row.id));
     return [...displayQueue, ...searchQueueRows.filter((row) => !seen.has(row.id))];
   }, [displayQueue, searchQueueRows]);
-  const notificationRows = useMemo(() => displayQueue.map((row) => ({
-    id: row.id,
-    title: `${typeLabel(row.type)} · ${row.title}`,
-    body: row.snippet,
-    signature: `${row.consultation?.lastMessageAt ?? ""}|${row.snippet}`,
-    unread: row.unreadCount > 0,
-  })), [displayQueue]);
+  const notificationRows = useMemo(() => [
+    ...displayQueue.map((row) => ({
+      id: row.id,
+      title: `${typeLabel(row.type)} · ${row.title}`,
+      body: row.snippet,
+      signature: `${row.sortAt || ""}|${row.snippet}`,
+      unread: row.unreadCount > 0,
+    })),
+    ...visibleOrderQueue
+      .filter((row) => {
+        if ((row.unreadCount ?? 0) <= 0) return false;
+        const preference = groupPreferenceOf(visibleGroupPrefs, row.id);
+        // Muted groups keep an unread dot only in the list; they never raise the bell or a desktop alert.
+        return !preference.hidden && !preference.muted;
+      })
+      .map((row) => {
+        const previewText = typeof row.lastMessagePreview === "string" && row.lastMessagePreview.trim()
+          ? supportMessageSummary(row.lastMessagePreview).trim()
+          : "";
+        const preview = previewText && !isImSystemNoticeText(previewText) ? previewText : null;
+        const sortAt = Date.parse(row.lastMessageAt ?? row.createdAt ?? "") || 0;
+        return {
+          id: row.id,
+          title: `订单群 · ${row.displayNo || row.title || "未命名订单群"}`,
+          body: preview ?? (row.lastMessageAt ? "有新消息" : "暂无消息"),
+          signature: `${sortAt || ""}|${preview ?? ""}|${row.unreadCount ?? 0}`,
+          unread: true,
+        };
+      }),
+  ], [displayQueue, visibleOrderQueue, visibleGroupPrefs]);
   const { unreadCount: notifyUnreadCount } = useSupportUnreadNotifications({
     adminUserId: snapshot.adminUserId,
     enabled: notifyEnabled && notifyPermission === "granted",
-    loaded: queueLoaded,
+    loaded: queueLoaded && (orderQueueReady || Boolean(orderQueueNotice)),
     rows: notificationRows,
     visible: viewing,
     // Only a conversation actually on screen suppresses its own notification.
-    selectedId: chatViewing ? selectedId : null,
+    selectedId: section === "orders" ? (orderViewing ? orderSelection : null) : chatViewing ? selectedId : null,
     onOpen: (id) => {
+      const order = visibleOrderQueue.find((item) => item.id === id);
       const row = queue.find((item) => item.id === id);
-      const path = `/support?section=consultation&consultation=${encodeURIComponent(row?.threadId ?? id)}`;
+      const path = order
+        ? `/support?section=orders&order=${encodeURIComponent(id)}`
+        : `/support?section=consultation&consultation=${encodeURIComponent(row?.threadId ?? id)}`;
       let selected = false;
       const select = () => {
         selected = true;
         restoredSelectionRef.current = true;
-        setSection("consultation");
-        setSelectedId(id);
+        if (order) {
+          setSection("orders");
+          setOrderSelection(id);
+          persistQuery({ section: "orders", order: id });
+        } else {
+          setSection("consultation");
+          setSelectedId(id);
+          persistQuery({ section: "consultation", consultation: row?.threadId ?? id });
+        }
         setMobilePane("chat");
-        persistQuery({ section: "consultation", consultation: row?.threadId ?? id });
       };
       // Bring the hidden support tab forward through the existing workspace guard
       // (permission, dirty form, write lock). A queued discard still runs this
@@ -1329,15 +1382,17 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
         const state = stageLabelOf(row);
         // 没有消息的订单群用建群时间兜底，列表不留“—”这种无法排序的空时间。
         const sortAt = Date.parse(row.lastMessageAt ?? row.createdAt ?? "") || 0;
+        const previewText = typeof row.lastMessagePreview === "string" && row.lastMessagePreview.trim()
+          ? supportMessageSummary(row.lastMessagePreview).trim()
+          : "";
+        const preview = previewText && !isImSystemNoticeText(previewText) ? previewText : null;
         return {
           kind: "order" as const,
           id: row.id,
           title: row.displayNo,
           tag: "",
           tone: "neutral" as const,
-          snippet: typeof row.lastMessagePreview === "string" && row.lastMessagePreview.trim()
-            ? supportMessageSummary(row.lastMessagePreview).trim()
-            : row.lastMessageAt ? "有新消息" : "暂无消息",
+          snippet: preview ?? (row.lastMessageAt ? "有新消息" : "暂无消息"),
           state, stateTone: orderStageTone(row),
           stageCardUnknown: (row.stageCards?.unknown ?? 0) > 0 || row.stageCards?.attention?.state === "UNKNOWN",
           // 到期只对正在租用/待结束的订单有意义；已完成的历史群不再占用列表宽度。
@@ -1361,9 +1416,7 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
     storeOrderGroupPreferences(snapshot.adminUserId, next);
     window.dispatchEvent(new CustomEvent(ORDER_GROUP_PREF_EVENT, { detail: { orderId, patch, adminUserId: snapshot.adminUserId } }));
   };
-  const unifiedTotal = serverSearchActive
-    ? unifiedRows.length
-    : displayQueue.length + visibleOrderQueue.filter((row) => !groupPreferenceOf(visibleGroupPrefs, row.id).hidden).length;
+  const unifiedTotal = unifiedRows.length;
   const hiddenOrderCount = visibleOrderQueue.filter((row) => groupPreferenceOf(visibleGroupPrefs, row.id).hidden).length;
   const restoreHiddenOrders = () => {
     const next: OrderGroupPreferenceMap = {};
@@ -2244,9 +2297,8 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
   };
   const userHoverCard = selected ? <div className="im-wb-author-hover">
     <ConsultationUserCard consultationId={selected.id} rowUserId={selected.user?.id ?? ""} fallbackName={selected.user?.name || selected.user?.username || "平台用户"}
-      request={adminRequest} scope={profileScope} showSubject={selected.type !== "COMPLAINT"}
-      onOpenProfile={(id) => onOpenPath?.(`/users/${encodeURIComponent(id)}`, "用户资料")}
-          onOpenSubject={(target, label) => onOpenPath?.(target.kind === "ORDER" ? `/orders/${encodeURIComponent(target.id)}` : `/supply/accounts/${encodeURIComponent(target.id)}`, label)} />
+      request={adminRequest} scope={profileScope}
+      onOpenProfile={(id) => onOpenPath?.(`/users/${encodeURIComponent(id)}`, "用户资料")} />
   </div> : null;
   const jumpToMessage = (messageId: string) => {
     const target = selectedMessages.find((message) => message.id === messageId || message.source?.messageServerId === messageId || message.source?.messageClientId === messageId);
@@ -2259,7 +2311,13 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
     window.setTimeout(() => targetNode.classList.remove("message-quote-target"), 1600);
   };
   let timelineDay = "";
-  const timelineItems = selectedMessages.map((message, index) => {
+  // Bot 欢迎/阶段卡已经说明建群或成员变化时，不再重复技术通知；没有 Bot 覆盖时保留一条兜底。
+  const botAccountId = selected?.botAccountId ?? null;
+  const timelineMessages = collapseImSystemNotices(selectedMessages, {
+    hasBotMessage: Boolean(botAccountId && selectedMessages.some((message) => message.from !== "system" && !message.revoked && message.senderId === botAccountId)),
+    noticeOf: (message) => message.notice ?? null,
+  });
+  const timelineItems = timelineMessages.map((message, index) => {
     const nodes = [];
     const dayKey = dayKeyOf(message.createTime);
     if (dayKey && dayKey !== timelineDay) {
@@ -2270,7 +2328,7 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
       nodes.push(<MessageScrollerPrimitive.Item key={message.id} messageId={message.id} tabIndex={-1} onContextMenu={onMessageContextMenu} {...messageLongPress}><Marker className="im-wb-sys" variant="separator"><MarkerContent>{message.text}</MarkerContent></Marker></MessageScrollerPrimitive.Item>);
       return nodes;
     }
-    const previous = selectedMessages[index - 1];
+    const previous = timelineMessages[index - 1];
     const author = authorFor(message);
     const grouped = Boolean(author.role !== "机器人" && previous && previous.from !== "system" && previous.senderId === message.senderId && (message.createTime ?? 0) - (previous.createTime ?? 0) < GROUP_WINDOW_MS);
     const imageUrl = message.image ? supportedImageUrl(message.image.url) : null;
@@ -2279,7 +2337,7 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
     nodes.push(<MessageScrollerPrimitive.Item key={message.id} messageId={message.id} scrollAnchor={message.from === "customer"} tabIndex={-1} onContextMenu={onMessageContextMenu} {...messageLongPress}>
       <Message align={mine ? "end" : "start"} className="im-wb-msg" data-message-id={message.id} data-from={message.from} data-self={mine} data-grouped={grouped}>
         {author.role === "平台用户" && userHoverCard ? <EntityPreviewTrigger enableTouchButton={false} side="right" align="start" touchLabel={`预览用户 ${author.name}`} className="im-wb-author-preview"
-          trigger={<button type="button" className="im-wb-av-button" aria-label={`查看用户 ${author.name}`} title={`查看用户 ${author.name}`}><MessageAvatar className="im-wb-av" aria-hidden="true"><ProfileImage src={author.avatar} fallback={initialOf(author.name)} /></MessageAvatar></button>}
+          trigger={<button type="button" className="im-wb-av-button" aria-label={`查看用户 ${author.name}`}><MessageAvatar className="im-wb-av" aria-hidden="true"><ProfileImage src={author.avatar} fallback={initialOf(author.name)} /></MessageAvatar></button>}
           content={userHoverCard} /> : <MessageAvatar className="im-wb-av" aria-hidden="true">{author.role === "机器人" ? <img src="/art/zhouzhou/avatar.webp" alt="" /> : <ProfileImage src={author.avatar} fallback={initialOf(author.name)} />}</MessageAvatar>}
         <MessageContent className="im-wb-msg-body">
           {grouped ? null : <MessageHeader className="im-wb-msg-meta">{author.role === "平台用户" && userHoverCard
@@ -2335,11 +2393,11 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
           <span className="im-wb-chat-sub">{!selected ? "等待用户咨询" : roundHeadlineOf(selected)}</span>
         </div>
         <div className="im-wb-chat-actions">
-          {claimReady && canManageSupport ? <button type="button" className="im-wb-btn im-wb-btn-outline" data-action="claim-consultation" title="自动分配异常时由管理岗接管" onClick={() => void claim()} disabled={busy || connection !== "CONNECTED"}>接管会话</button> : null}
+          {claimReady && canManageSupport ? <ActionTooltip content="自动分配异常时由管理岗接管"><button type="button" className="im-wb-btn im-wb-btn-outline" data-action="claim-consultation" onClick={() => void claim()} disabled={busy || connection !== "CONNECTED"}>接管会话</button></ActionTooltip> : null}
           {claimReady && !canManageSupport ? <span className="im-wb-state">系统分配中…</span> : null}
-          {selected && isMine && selected.messageScopeState !== "FAILED" ? <button ref={closeTriggerRef} type="button" data-action="close-consultation" className="im-wb-btn im-wb-btn-outline" title={!serverCanSend && canOperateSelected ? "本轮尚未就绪，暂不可结束" : undefined} onClick={() => { if (!canOperateSelected || !serverCanSend || closeOutcomeUnknown[selected.id]) return; setCloseTarget(selected); setCloseOpen(true); }} disabled={busy || !canOperateSelected || !serverCanSend || Boolean(closeOutcomeUnknown[selected.id]) || Boolean(blockedConsultations[selected.id])}>{!canOperateSelected ? "无本类型接待权限" : closeOutcomeUnknown[selected.id] ? "结束结果未确认" : "结束本轮"}</button> : null}
+          {selected && isMine && selected.messageScopeState !== "FAILED" ? <ActionTooltip content={!serverCanSend && canOperateSelected ? "本轮尚未就绪，暂不可结束" : undefined}><button ref={closeTriggerRef} type="button" data-action="close-consultation" className="im-wb-btn im-wb-btn-outline" onClick={() => { if (!canOperateSelected || !serverCanSend || closeOutcomeUnknown[selected.id]) return; setCloseTarget(selected); setCloseOpen(true); }} disabled={busy || !canOperateSelected || !serverCanSend || Boolean(closeOutcomeUnknown[selected.id]) || Boolean(blockedConsultations[selected.id])}>{!canOperateSelected ? "无本类型接待权限" : closeOutcomeUnknown[selected.id] ? "结束结果未确认" : "结束本轮"}</button></ActionTooltip> : null}
           <button ref={transferTriggerRef} type="button" data-action="open-transfer" className="im-wb-btn im-wb-btn-outline" onClick={() => void openTransfer()} disabled={!canTransfer || !selected || selected.state !== "ACTIVE" || !isMine || selected.messageScopeState !== "READY" || busy}>{canTransfer ? "转交" : "无转交权限"}</button>
-          <button ref={detailsTriggerRef} type="button" className="im-wb-btn im-wb-btn-outline im-wb-btn-icon" aria-label={detailsOpen ? "收起会话详情" : "展开会话详情"} title={detailsOpen ? "收起会话详情" : "展开会话详情"} aria-expanded={detailsOpen} aria-controls="im-wb-details" data-action="toggle-details" onClick={() => { const narrow=typeof window!=="undefined"&&window.matchMedia("(max-width: 760px)").matches; if(narrow&&mobilePane!=="details"){openDetails();return;} if (detailsOpen) closeDetails(); else openDetails(); }}><MoreHorizontal size={15} /></button>
+          <ActionTooltip content={detailsOpen ? "收起会话详情" : "展开会话详情"}><button ref={detailsTriggerRef} type="button" className="im-wb-btn im-wb-btn-outline im-wb-btn-icon" aria-label={detailsOpen ? "收起会话详情" : "展开会话详情"} aria-expanded={detailsOpen} aria-controls="im-wb-details" data-action="toggle-details" onClick={() => { const narrow=typeof window!=="undefined"&&window.matchMedia("(max-width: 760px)").matches; if(narrow&&mobilePane!=="details"){openDetails();return;} if (detailsOpen) closeDetails(); else openDetails(); }}><MoreHorizontal size={15} /></button></ActionTooltip>
         </div>
       </header>
       {readOnlyReason ? <p className="im-wb-scope-note" data-tone="readonly" data-action="support-readonly" role="status"><ShieldCheck size={13} />{readOnlyReason}</p> : null}
@@ -2356,7 +2414,7 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
                   {timelineItems}
                 </> : <MessageScrollerPrimitive.Item messageId="empty">{emptyStreamState(selected ? historyState[selected.id] : undefined, Boolean(selected))}</MessageScrollerPrimitive.Item>}
               </MessageScrollerPrimitive.Content></MessageScrollerPrimitive.Viewport>
-              <MessageScrollerPrimitive.Button direction="end" className="im-wb-jump" render={<button type="button" aria-label="跳到最新消息" title="跳到最新消息" />}><ArrowDown size={13} aria-hidden="true" /></MessageScrollerPrimitive.Button>
+              <ActionTooltip content="跳到最新消息"><MessageScrollerPrimitive.Button direction="end" className="im-wb-jump" render={<button type="button" aria-label="跳到最新消息" />}><ArrowDown size={13} aria-hidden="true" /></MessageScrollerPrimitive.Button></ActionTooltip>
             </MessageScrollerPrimitive.Root>
           </MessageScrollerPrimitive.Provider>}
       </div>
@@ -2365,7 +2423,7 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
         <img src={selectedPending.previewUrl} alt={selectedPending.name} />
         <span>{selectedPending.name} · {formatBytes(selectedPending.size)} · {selectedPending.state === "SENDING" ? `上传中 ${selectedPending.progress}%` : selectedPending.state === "UNKNOWN" ? "结果未确认" : "发送失败"}</span>
         <button type="button" onClick={() => void retryPendingImage()} disabled={sending || imageInFlight || !canSend}>{selectedPending.messageClientId ? "原消息重试" : "重试"}</button>
-        <button type="button" onClick={removePending} disabled={sendBlocked || !canSend || selectedPending.state === "UNKNOWN"} title={selectedPending.state === "UNKNOWN" ? "结果未确认时不可移除原图片" : undefined}>移除</button>
+        <ActionTooltip content={selectedPending.state === "UNKNOWN" ? "结果未确认时不可移除原图片" : undefined}><span className="im-wb-tooltip-anchor"><button type="button" onClick={removePending} disabled={sendBlocked || !canSend || selectedPending.state === "UNKNOWN"}>移除</button></span></ActionTooltip>
       </div> : null}
       {selectedMedia ? <MediaDraftBar draft={selectedMedia} onRetry={() => void retryMediaDraft()} onRemove={removeSelectedMedia} disabled={busy || sending} /> : null}
       {selectedReply ? <MessageReplyQuote label={replySummaryOf(selectedReply)} onCancel={() => clearReplyFor(draftKey)} /> : null}
@@ -2565,10 +2623,10 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
             风险摘要开始。处理记录只陈列真实事件投影，不按当前状态推断历史；投诉的额外摘要
             只使用现有投影并逐项标注缺口。 */}
         <ConsultationUserCard key={selected.id} consultationId={selected.id} rowUserId={selected.user?.id ?? ""} fallbackName={selected.user?.name || selected.user?.username || "平台用户"}
-          request={adminRequest} scope={profileScope} showSubject
-          onOpenProfile={(id) => onOpenPath?.(`/users/${encodeURIComponent(id)}`, "用户资料")}
-          onOpenSubject={(target, label) => onOpenPath?.(target.kind === "ORDER" ? `/orders/${encodeURIComponent(target.id)}` : `/supply/accounts/${encodeURIComponent(target.id)}`, label)} />
+          request={adminRequest} scope={profileScope}
+          onOpenProfile={(id) => onOpenPath?.(`/users/${encodeURIComponent(id)}`, "用户资料")} />
         <ConsultationEventsCard key={`${selected.id}:events`} consultationId={selected.id} request={adminRequest} />
+        <ConsultationRoundsTimeline key={`${selected.id}:rounds`} consultationId={selected.id} currentRoundId={selected.id} request={adminRequest} />
 
         {blockedConsultations[selected.id] ? <section className="im-wb-sec"><span>授权状态</span><small>发送权限已失效</small>
           <button type="button" className="im-wb-btn" data-action="refresh-consultation-access" onClick={() => void refreshConsultationAccess()} disabled={busy || !selected.conversationId}>重新确认当前授权</button></section> : null}
@@ -2592,7 +2650,7 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
   return <div className="im-wb-root" data-unified="true">
     <AftersaleInbox key={aftersaleScope} open={aftersaleOpen&&canRead} onOpenChange={setAftersaleOpen} scope={aftersaleScope} adminId={snapshot.adminUserId} canHandle={canRead&&canAccept} canTakeover={Boolean(snapshot.security.isBoss||snapshot.permissions.includes("im.support.audit.takeover"))} onContact={contactedAftersale} onDirtyChange={setAftersaleDirty}/>
     <nav className="im-wb-bar" aria-label="沟通类型">
-      <div className="im-wb-bar-title"><strong>客服工作台</strong><span>咨询与订单群按最近消息排序</span></div>
+      <div className="im-wb-bar-title"><strong>客服工作台</strong></div>
       <button type="button" className="im-wb-btn im-wb-btn-outline" disabled={!canRead} onClick={()=>setAftersaleOpen(true)}>售后记录</button>
       <div className="im-wb-seg" role="group">
         <button type="button" aria-pressed={section === "consultation"} onClick={() => { setSection("consultation"); persistQuery({ section: "consultation" }); }}>咨询与投诉<b>{displayQueue.length}</b></button>
@@ -2600,20 +2658,21 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
       </div>
       <span className="im-wb-spacer" />
       <div className="im-wb-runtime">
-        <button type="button" className="im-wb-btn im-wb-btn-icon im-wb-notify" data-action="toggle-notifications"
-          data-state={notifyPermission === "denied" ? "denied" : notifyEnabled && notifyPermission === "granted" ? "on" : "prompt"}
-          aria-label={notifyEnabled && notifyPermission === "granted" ? "关闭消息提醒" : "开启消息提醒"}
-          title={notifyPermission === "denied" ? "浏览器已屏蔽通知，请在站点设置中允许" : notifyEnabled && notifyPermission === "granted" ? "消息提醒已开启（需保持标签页打开）" : "开启浏览器通知与提示音"}
-          onClick={() => void toggleNotifications()}>
-          {notifyPermission === "denied" || notifyPermission === "unsupported" ? <BellOff size={15} /> : <Bell size={15} />}
-          {notifyUnreadCount > 0 ? <b className="im-wb-notify-count" aria-label={`${notifyUnreadCount} 条未读`}>{notifyUnreadCount > 99 ? "99+" : notifyUnreadCount}</b> : null}
-        </button>
+        <ActionTooltip content={notifyPermission === "denied" ? "浏览器已屏蔽通知，请在站点设置中允许" : notifyEnabled && notifyPermission === "granted" ? "消息提醒已开启（需保持标签页打开）" : "开启浏览器通知与提示音"}>
+          <button type="button" className="im-wb-btn im-wb-btn-icon im-wb-notify" data-action="toggle-notifications"
+            data-state={notifyPermission === "denied" ? "denied" : notifyEnabled && notifyPermission === "granted" ? "on" : "prompt"}
+            aria-label={notifyEnabled && notifyPermission === "granted" ? "关闭消息提醒" : "开启消息提醒"}
+            onClick={() => void toggleNotifications()}>
+            {notifyPermission === "denied" || notifyPermission === "unsupported" ? <BellOff size={15} /> : <Bell size={15} />}
+            {notifyUnreadCount > 0 ? <b className="im-wb-notify-count" aria-label={`${notifyUnreadCount} 条未读`}>{notifyUnreadCount > 99 ? "99+" : notifyUnreadCount}</b> : null}
+          </button>
+        </ActionTooltip>
         <span className="im-wb-runtime-divider" aria-hidden="true" />
         {canPresence ? <>
           <span className="im-wb-state im-wb-runtime-state" data-tone={runtime.tone}><i className={presence.availability === "AVAILABLE" && runtime.connected ? "on" : ""} />{runtime.label}</span>
           <span className="im-wb-runtime-divider" aria-hidden="true" />
-          <span className="im-wb-state im-wb-today" data-action="today-duty" title="今日接待时长（仅统计可接待且可收发消息的时间）">今日接待 <b>{formatDuration(presence.today?.seconds)}</b></span>
-          <button type="button" className="im-wb-btn im-wb-btn-outline im-wb-presence-toggle im-wb-runtime-action" data-action="toggle-presence" onClick={() => void togglePresence()} disabled={runtime.toggleDisabled} title={runtime.toggleTitle}>{runtime.toggleLabel}</button>
+          <ActionTooltip content="今日接待时长（仅统计可接待且可收发消息的时间）"><span className="im-wb-state im-wb-today" data-action="today-duty">今日接待 <b>{formatDuration(presence.today?.seconds)}</b></span></ActionTooltip>
+          <ActionTooltip content={runtime.toggleTitle}><span className="im-wb-tooltip-anchor"><button type="button" className="im-wb-btn im-wb-btn-outline im-wb-presence-toggle im-wb-runtime-action" data-action="toggle-presence" onClick={() => void togglePresence()} disabled={runtime.toggleDisabled}>{runtime.toggleLabel}</button></span></ActionTooltip>
         </> : <span className="im-wb-state">无在线状态权限</span>}
         {connection !== "CONNECTED" ? <>
           <span className="im-wb-runtime-divider" aria-hidden="true" />
@@ -2624,9 +2683,10 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
     </nav>
     <div className="im-wb-unified">
       <aside className="im-wb-unified-queue" aria-label="全部会话" onContextMenu={(event) => { const rowEl = (event.target as Element).closest(".im-wb-row") as HTMLElement | null; event.preventDefault(); if (!rowEl || rowEl.dataset.unifiedKind !== "order") { setUnifiedOrderMenu(null); return; } event.stopPropagation(); const orderId = rowEl.dataset.orderId; if (!orderId) return; setUnifiedOrderMenu({ x: event.clientX, y: event.clientY, orderId, preference: orderPreferenceOf(orderId, orderDirectory.find((row) => row.id === orderId)?.teamId), row: rowEl }); }}>
-        <div className="im-wb-unified-head"><strong>全部会话</strong><span>{searchState.loading && searchState.q === unifiedQuery.trim() ? "搜索中…" : unifiedRows.length < unifiedTotal ? `${unifiedRows.length} / ${unifiedTotal}` : unifiedTotal}</span></div>
-        <label className="im-wb-search"><Search size={13} /><input value={unifiedQuery} onChange={(event) => setUnifiedQuery(event.target.value)} placeholder="搜索用户、订单号、账号或游戏" aria-label="搜索全部会话" /></label>
+        <div className="im-wb-unified-head"><strong>全部会话</strong><span>{searchState.loading && searchState.q === unifiedQuery.trim() ? "搜索中…" : unifiedTotal}</span></div>
+        <label className="im-wb-search"><Search size={13} /><input value={unifiedQuery} maxLength={64} onChange={(event) => setUnifiedQuery(event.target.value)} onKeyDown={(event) => { if (event.key === "Escape" && unifiedQuery) { event.preventDefault(); setUnifiedQuery(""); } }} placeholder="搜索用户、订单号、账号或游戏" aria-label="搜索全部会话" />{unifiedQuery ? <button type="button" className="im-wb-search-clear" aria-label="清空搜索" onClick={() => setUnifiedQuery("")}><X size={12} /></button> : null}</label>
         {searchState.error ? <p className="im-wb-order-notice" data-tone="warn" role="status">{searchState.error}</p> : null}
+        {searchLimitReached ? <p className="im-wb-order-notice" role="status">匹配结果较多，当前每类最多显示 50 条；请补充关键词继续缩小范围。</p> : null}
         <div className="im-wb-unified-types" role="group" aria-label="会话类型">
           {([["ALL", "全部"], ["SERVICE", "咨询"], ["COMPLAINT", "投诉"], ["ORDER", "订单群"]] as const).map(([value, label]) =>
             <button key={value} type="button" aria-pressed={unifiedType === value} onClick={() => { setUnifiedType(value); persistQuery({ type: value === "ALL" ? null : value }); }}>{label}</button>)}
@@ -2705,7 +2765,7 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
     </div>
     <Dialog open={transferOpen} onOpenChange={setTransferOpen}>
       <DialogContent className="im-wb-dialog" aria-label="转交会话" showCloseButton={false} finalFocus={transferTriggerRef}>
-        <div className="im-wb-dialog-head"><div><strong>转交会话</strong><span>{selected?.user?.name || "当前咨询"}</span></div><button type="button" className="im-wb-btn im-wb-btn-icon" onClick={() => setTransferOpen(false)} aria-label="关闭转交" title="关闭转交"><X size={14} /></button></div>
+        <div className="im-wb-dialog-head"><div><strong>转交会话</strong><span>{selected?.user?.name || "当前咨询"}</span></div><ActionTooltip content="关闭转交"><button type="button" className="im-wb-btn im-wb-btn-icon" onClick={() => setTransferOpen(false)} aria-label="关闭转交"><X size={14} /></button></ActionTooltip></div>
         <label className="im-wb-dialog-note"><span>交接备注（可选，≤200 字）<em>{transferNote.length}/200</em></span>
           <Textarea value={transferNote} maxLength={200} rows={2} aria-label="交接备注（可选）" placeholder="说明交接原因或注意事项" disabled={transferBusy} onChange={(event) => setTransferNote(event.target.value)} /></label>
         {transferError ? <p className="im-wb-dialog-error" role="alert"><CircleAlert size={14} />{transferError}</p>
@@ -2720,14 +2780,13 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
     <Dialog open={offDutyOpen} onOpenChange={setOffDutyOpen}>
       <DialogContent className="im-wb-dialog" aria-label="暂停接待确认" showCloseButton={false}>
         <div className="im-wb-dialog-head"><div><strong>暂停接待</strong><span>还有 {myOpenConsultations.length} 条未完成咨询</span></div>
-          <button type="button" className="im-wb-btn im-wb-btn-icon" onClick={() => setOffDutyOpen(false)} aria-label="关闭暂停确认" title="关闭暂停确认"><X size={14} /></button></div>
+          <ActionTooltip content="关闭暂停确认"><button type="button" className="im-wb-btn im-wb-btn-icon" onClick={() => setOffDutyOpen(false)} aria-label="关闭暂停确认"><X size={14} /></button></ActionTooltip></div>
         <p className="im-wb-dialog-hint">暂停后不再接新会话，已有会话不会自动结束；你可以先逐条交接，也可以直接暂停。</p>
         <ul className="im-wb-offduty-list" aria-label="未完成咨询">
           {myOpenConsultations.map((item) => <li key={item.id} data-consultation-id={item.id}>
             <div><strong>{item.user?.name || item.user?.username || "平台用户"}</strong><span>{typeLabel(item.type)} · {scopeStateLabel(item)}</span></div>
-            <button type="button" className="im-wb-btn" data-action="offduty-transfer" disabled={!canTransfer || item.messageScopeState !== "READY" || busy}
-              title={!canTransfer ? "无转交权限" : item.messageScopeState !== "READY" ? "会话尚未就绪，暂不可转交" : undefined}
-              onClick={() => goTransferFromChecklist(item.id)}>去交接</button>
+            <ActionTooltip content={!canTransfer ? "无转交权限" : item.messageScopeState !== "READY" ? "会话尚未就绪，暂不可转交" : undefined}><span className="im-wb-tooltip-anchor"><button type="button" className="im-wb-btn" data-action="offduty-transfer" disabled={!canTransfer || item.messageScopeState !== "READY" || busy}
+              onClick={() => goTransferFromChecklist(item.id)}>去交接</button></span></ActionTooltip>
           </li>)}
         </ul>
         <div className="im-wb-dialog-actions">
@@ -2740,7 +2799,7 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
     <Dialog open={receptionOpen} onOpenChange={setReceptionOpen}>
       <DialogContent className="im-wb-dialog" aria-label="需要先开始接待" showCloseButton={false}>
         <div className="im-wb-dialog-head"><div><strong>还不能接入会话</strong><span>当前未开始接待</span></div>
-          <button type="button" className="im-wb-btn im-wb-btn-icon" onClick={() => setReceptionOpen(false)} aria-label="关闭接待提醒" title="关闭接待提醒"><X size={14} /></button></div>
+          <ActionTooltip content="关闭接待提醒"><button type="button" className="im-wb-btn im-wb-btn-icon" onClick={() => setReceptionOpen(false)} aria-label="关闭接待提醒"><X size={14} /></button></ActionTooltip></div>
         <p className="im-wb-dialog-hint">你当前还没有开始接待，直接接入会被服务端拒绝。先开始接待，平台会把你的状态更新为“可接待”，然后自动接入当前会话。</p>
         {connection !== "CONNECTED" ? <p className="im-wb-dialog-error" role="alert"><CircleAlert size={14} />消息服务未连接，暂不能开始接待。</p> : null}
         <div className="im-wb-dialog-actions">
@@ -2753,10 +2812,9 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
         所以这里不给「撤销」，也不把结束本轮包装成可逆操作。 */}
     <Dialog open={closeOpen} onOpenChange={setCloseOpen}>
       <DialogContent className="im-wb-dialog" aria-label="结束本轮" showCloseButton={false} finalFocus={closeTriggerRef}>
-        <div className="im-wb-dialog-head"><div><strong>结束本轮</strong><span>{closeTarget ? `${typeLabel(closeTarget.type)} · ${roundTagOf(closeTarget)}${roundTagOf(closeTarget) ? " · " : ""}${closeTarget.user?.name || closeTarget.user?.username || "平台用户"}` : "当前轮次"}</span></div><button type="button" className="im-wb-btn im-wb-btn-icon" onClick={() => setCloseOpen(false)} aria-label="关闭结束本轮确认" title="关闭结束本轮确认"><X size={14} /></button></div>
+        <div className="im-wb-dialog-head"><div><strong>结束本轮</strong><span>{closeTarget ? `${typeLabel(closeTarget.type)} · ${roundTagOf(closeTarget)}${roundTagOf(closeTarget) ? " · " : ""}${closeTarget.user?.name || closeTarget.user?.username || "平台用户"}` : "当前轮次"}</span></div><ActionTooltip content="关闭结束本轮确认"><button type="button" className="im-wb-btn im-wb-btn-icon" onClick={() => setCloseOpen(false)} aria-label="关闭结束本轮确认"><X size={14} /></button></ActionTooltip></div>
         {closeTarget ? <dl className="im-wb-confirm">
           <div><dt>{closeTarget.type === "COMPLAINT" ? "本轮处理" : "本轮接待"}</dt><dd>{closeTarget.assignedAdmin?.name || "尚未分配"}</dd></div>
-          <div><dt>关联对象</dt><dd>{formatSubjectRef(closeTarget.subjectRef)}</dd></div>
         </dl> : null}
         <p className="im-wb-dialog-hint">结束后只结束当前这一轮接待：客服状态恢复为空闲，聊天记录保留在同一会话，用户再次咨询会开启新一轮并重新匹配客服。本轮结束不可撤销，平台当前没有恢复本轮接待的入口。</p>
         <div className="im-wb-dialog-actions">

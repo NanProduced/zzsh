@@ -2,7 +2,7 @@
 import { ProfileImage } from "./profile-image";
 import { Fragment, useCallback, useEffect, useRef, useState, type ChangeEvent, type FormEvent, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent, type ReactElement, type ReactNode } from "react";
 import { ImLifecycleSupersededError } from "@zzsh/im-client/lifecycle";
-import { decodeImSystemNotice, mergeImMessages } from "@zzsh/im-client/message-state";
+import { collapseImSystemNotices, decodeImSystemNotice, mergeImMessages } from "@zzsh/im-client/message-state";
 import { NimImageSendError, NimMediaSendError, NimTextSendError, validateNimImageFile, validateNimMediaFile, type NimMessageLike, type NimWebClientLike, type NimWebConnectionState, type NimMessageAuthorization } from "@zzsh/im-client/nim-web-client";
 import { CHAT_EMOJIS, MessageActionMenu, MessageQuoted, MessageReplyQuote, useMessageLongPress, type MessageActionId, type MessageActionItem, type MessageLongPressHandlers } from "./message-actions";
 import { MediaDraftBar, MediaMessage, MediaPreview, MessageImage, mediaMessageOf, mediaSummaryOf, type MessageMediaDraft } from "./message-media";
@@ -1285,22 +1285,28 @@ function OrderConversation({
     targetNode.classList.add("message-quote-target");
     window.setTimeout(() => targetNode.classList.remove("message-quote-target"), 1600);
   };
+  // Bot 欢迎/阶段卡已覆盖建群和成员变化时不重复技术通知；没有覆盖时保留一条兜底。
+  const botAccountId = info.botAccountId ?? null;
+  const timelineMessages = collapseImSystemNotices(messages, {
+    hasBotMessage: Boolean(botAccountId && messages.some((message) => !message.revoked && message.senderId === botAccountId && decodeImSystemNotice(message) === null)),
+    noticeOf: (message) => message.revoked ? null : decodeImSystemNotice(message),
+  });
   return <section className="order-team-chat" aria-label="订单文字和图片沟通">
     {more&&messages.length?<div className="order-team-history"><button type="button" className="order-team-link" disabled={reading} onClick={()=>void history(messages[0])}>{reading?"正在读取…":"更早的消息"}</button></div>:null}
     {sendError?<p role="alert">{sendError}</p>:null}
     {textRetry?<div className="order-team-text-retry" role="status"><p>{textRetry.text}</p><span>发送结果待确认，请核对这条原消息</span><button type="button" disabled={sending||!textRetry.messageClientId||!info.canSend||connection!=="CONNECTED"} onClick={()=>void retryText()}>原消息重试</button></div>:null}
-    <ol ref={messageListRef} className="order-team-messages" aria-label="订单消息" aria-live="polite" onScroll={event=>{const el=event.currentTarget;stickToBottomRef.current=el.scrollHeight-el.scrollTop-el.clientHeight<80;}} onContextMenu={onMessagesContextMenu} {...longPress}>{messages.map((message,index)=>{
+    <ol ref={messageListRef} className="order-team-messages" aria-label="订单消息" aria-live="polite" onScroll={event=>{const el=event.currentTarget;stickToBottomRef.current=el.scrollHeight-el.scrollTop-el.clientHeight<80;}} onContextMenu={onMessagesContextMenu} {...longPress}>{timelineMessages.map((message,index)=>{
       const member=info.members.find(m=>m.accountId===message.senderId),replyMember=message.reply?info.members.find(m=>m.accountId===message.reply!.senderId):undefined,self=message.senderId===client.accountId,revoked=message.revoked===true;
       const replySenderName=replyMember?.name?.trim()||(replyMember?role(replyMember):message.reply?.senderId===info.botAccountId?"洲洲助手":null);
       const media=mediaMessageOf(message),card=Boolean(message.card);
       const caption=typeof message.text==="string"&&message.text.trim()?<p className="message-media-caption-text">{message.text}</p>:null;
       // Bot cards/notices always keep their sender line: a grouped follow-up must not hide who sent it.
       const bot=Boolean(!self&&info.botAccountId&&message.senderId===info.botAccountId);
-      const grouped=Boolean(!bot&&!card&&index>0&&messages[index-1]?.senderId===message.senderId&&message.createTime-messages[index-1]!.createTime<300_000);
+      const grouped=Boolean(!bot&&!card&&index>0&&timelineMessages[index-1]?.senderId===message.senderId&&message.createTime-timelineMessages[index-1]!.createTime<300_000);
       const label=self?"我":bot?"洲洲助手（Bot）":member?.name?.trim()||(member?role(member):"未署名成员");
       const avatar=member?.avatar?.trim()||null;
       const notice=message.revoked?null:decodeImSystemNotice(message);
-      const showDay=index===0||chatDayKey(message.createTime)!==chatDayKey(messages[index-1]!.createTime);
+      const showDay=index===0||chatDayKey(message.createTime)!==chatDayKey(timelineMessages[index-1]!.createTime);
       if(notice)return <Fragment key={message.id}>
         {showDay?<li className="order-team-day" role="separator"><span>{chatDayLabel(message.createTime)}</span></li>:null}
         <li className="order-team-system" data-message-id={message.id} role="separator"><span>{notice.text}</span></li>

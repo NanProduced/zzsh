@@ -269,6 +269,9 @@
 .workspace-root .im-wb-search { display:flex; align-items:center; gap:7px; flex:none; margin:11px 11px 8px; padding:0 9px; min-height:32px; border:1px solid var(--border); border-radius:7px; background:var(--background); color:var(--muted-foreground); }
 .workspace-root .im-wb-search:focus-within { border-color:var(--ring); }
 .workspace-root .im-wb-search input { flex:1; min-width:0; border:0; outline:0; background:transparent; color:var(--foreground); font:inherit; font-size:13px; }
+.workspace-root .im-wb-search-clear { display:grid; width:18px; height:18px; flex:none; place-items:center; padding:0; border:0; border-radius:50%; background:transparent; color:var(--muted-foreground); cursor:pointer; }
+.workspace-root .im-wb-search-clear:hover { color:var(--foreground); background:var(--muted); }
+.workspace-root .im-wb-tooltip-anchor { display:inline-flex; align-items:center; min-width:0; }
 .workspace-root .im-wb-filters { display:flex; gap:2px; flex:none; margin:0 11px 6px; padding:2px; border:1px solid var(--border); border-radius:7px; background:var(--background); }
 .workspace-root .im-wb-filters button { flex:1; display:inline-flex; align-items:center; justify-content:center; gap:4px; min-height:26px; padding:0 6px; border:0; border-radius:5px; color:var(--muted-foreground); background:transparent; font:inherit; font-size:11px; cursor:pointer; }
 .workspace-root .im-wb-filters button[aria-pressed="true"] { color:var(--im-accent-strong); background:color-mix(in oklab,var(--im-accent) 12%,var(--card)); font-weight:600; }

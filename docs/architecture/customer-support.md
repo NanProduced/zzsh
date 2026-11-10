@@ -4,7 +4,7 @@
 
 IM功能正式追加为0125–0141；0000–0124历史字节不改。带旧私有迁移历史的预览库须逐对象/账本核对后另行前向承接，不能只改tag或重复全量执行；源码收录不表示已完成真实PG、部署或云信验收。
 
-客服取消沿用未正式开租的原款全额应退合同；已开租订单使用既有结算/退款流程，不以客服操作绕过实耗、结算或分销责任。新已付单的 `manual-close` 返回409及 `resolution`，按真实开租事实引导客服取消/原款责任或实际消耗结算，不再仅改为CANCELLED而留下不可处理的款项。原 `MANUAL_CLOSE` 状态和成功回执不回写，列为资金待核；Admin订单列表支持 `fundsResolution=MANUAL_CLOSE`，沿原订单权限和游戏范围分页读取。最小售后记录不自行创建新退款能力；应退、本地核销、渠道结果及银行到账分别展示。
+客服取消沿用未正式开租的原款全额应退合同；已开租订单走独立的客服特殊取消，需 `order.settlement.write` 与订单游戏范围，按原款显式填写租客退款与号主金额，总额恒等于实付且不直接调用渠道；已记账结算、已有佣金或进行中退款时拒绝。取消后订单转 `SUPPORT_AFTER_START_CANCELLED`，操作人、会话、请求 ID、原因、付款确认、实付/退款/号主/平台金额与来源摘要写入 `order.support_poststart_cancel` 审计。新已付单的 `manual-close` 返回409及 `resolution`，按真实开租事实引导客服取消/原款责任或实际消耗结算，不再仅改为CANCELLED而留下不可处理的款项。原 `MANUAL_CLOSE` 状态和成功回执不回写，列为资金待核；Admin订单列表支持 `fundsResolution=MANUAL_CLOSE`，沿原订单权限和游戏范围分页读取。最小售后记录不自行创建新退款能力；应退、本地核销、渠道结果及银行到账分别展示。
 
 平台用户/管理员头像在聊天成员、消息作者和咨询上下文复用严格托管路径，旧外链不恢复；这不表示云信侧资料icon已更新。用户订单引用卡由受权目录或详情返回的viewerParty导航，不信任消息文本中的身份、金额或状态。
 
@@ -14,15 +14,16 @@ IM功能正式追加为0125–0141；0000–0124历史字节不改。带旧私�
 
 ## 管理端咨询上下文只读接口
 
-`GET /api/v1/im/admin/consultations/:id/events` 与 `GET /api/v1/im/admin/consultations/:id/context` 经管理 BFF 同路径转发，仅允许 GET。在只读、可重复读事务中重验会话/PIN、最新 `im.support.read` 和 App/咨询归属；范围为本人负责或有接待资格的未分配咨询，不依赖 SDK 在线、不建立云信身份。投诉线程另要求 `im.support.complaint`；CLOSED、跨 App、他人咨询和不存在对象统一404。
+`GET /api/v1/im/admin/consultations/:id/events`、`GET /api/v1/im/admin/consultations/:id/rounds` 与 `GET /api/v1/im/admin/consultations/:id/context` 经管理 BFF 同路径转发，仅允许 GET。`events`/`rounds` 在只读、可重复读事务中仅要求最新 `im.support.read` 与 App/咨询归属，允许读取已关闭或其他客服负责的历史轮次，不依赖 SDK 在线、不建立云信身份；`context` 仍按本人负责或有接待资格的未分配咨询读取，投诉线程另要求 `im.support.complaint`。跨 App、不存在对象统一404。
 
 - `events` 接受 `limit`（默认20、1–50）和 `cursor`。首屏为最近一页、页内升序，`nextCursor` 指向更早页；游标绑定咨询并保留数据库微秒精度，按 `(created_at,id)` 翻页。非法/重复/未知参数返回400。仅输出 `id/type/occurredAt/actor{kind,displayName}/from/to`，不输出事件原始 details 或云信账号。系统事件显示“系统”，姓名为当前投影而非历史姓名快照，缺失管理员名降级“客服”。
+- `rounds` 接受 `limit`（默认20、1–50）和 `cursor`（roundSeq），返回同一持久线程的轮次摘要，按新到旧：`id/roundSeq/state/assignedAdmin/conversationId/createdAt/updatedAt/lastMessageAt/closedAt/transferCount`。`conversationId` 仅在该轮消息通道 READY、scope 非空且能解析当前查看者云信账号时返回 `${viewerAccountId}|2|${teamId}`，否则为 `null`；它只供客户端按轮读取历史，不额外返回 Team ID 或账号字段。轮次时间线默认只请求摘要；展开某轮后才读取该轮 `events`，不预取聊天记录。用户评价不进入轮次摘要，只在客服统计中按权限展示。
 - `context` 不接受查询参数，输出 `consultationId/version/service/user/subject/membership`。用户仅包含本咨询已授权的主体 ID（`publicId`）、展示名和安全 HTTP(S) 头像；不含联系方式、证件或账户金额。无关联引用为 `subject.status=absent`；显式 order/account/listing 前缀优先；旧裸引用只在受控来源唯一命中且通过对象关系/公开可见性后解析，否则 `unresolved`。已关联订单可返回用户在该订单的 `party=RENTER|OWNER`，不按用户全局角色推断。本树会员投影未集成时返回 `membership.status=unavailable`，不能解释为普通会员。
 - 用户从旧订单进入普通咨询时使用 `legacy-order:<legacy_order_id>`；创建或恢复前检查当前用户为该旧单租客或号主，且来源未标记删除。轮次已有入口引用不改写，后续订单可由用户明确发送引用卡，原草稿保留。
 - `GET /api/v1/im/admin/consultations/:id/legacy-orders/:legacyOrderId` 经管理 BFF 同路径转发，只接受 GET；在只读事务内重验会话、咨询接待权限、App 归属，以及该咨询用户与旧单的当事人关系，仅返回旧单业务号、用户在本单的身份及站内目标，不含金额。消息文本中的订单字段不作为核验依据；打开完整订单和资金仍按独立订单、游戏范围与财务权限检查。接口实现与隔离测试不代表真实云信或部署验收。
 - 这些读取不产生业务事件、派单、建群或供应商调用。事件接口不是聊天历史归档或关闭操作结果查询；不能用目录缺席或事件缺席判断原关闭是否完成。实现不代表运行环境已装配或真实 PostgreSQL/Auth/HTTP 已验收。
 
-用户端通过全站共享客服容器进入在线客服或投诉咨询；业务咨询与投诉反馈各自保留一条持久线程，历史分别保留。管理员通过客服工作台处理受权队列，管理端按 `kind=SERVICE|COMPLAINT` 分开筛选；投诉另要求 `im.support.complaint`，默认只授予运营预设角色，可由运营配置给指定客服。迁移 `0181` 为升级前仍负责 `WAITING/ACTIVE` 投诉、且仅依赖客服预设的客服写入对象级 `im_complaint_handover_grant`，只保护具体会话，不扩大未分配投诉或新派单；个人 `DENY` 优先。`0181/0182` 必须在同一 pending 迁移批次和停写窗口执行，迁移预检拒绝两者分批，避免跨批新投诉或转交获得对象授权。投诉读取（含消息、事件、上下文和巡检只读）统一要求该权限。咨询与支付后的订单履约群是不同业务对象。订单群已有受控后端建群闭环及买家/号主/客服文字及图片入口，三方已完成local-fake浏览器联验；独立非生产App的订单群文字/图片与历史恢复已验证，完整履约及生产渠道尚未验收。
+用户端通过全站共享客服容器进入在线客服或投诉咨询；业务咨询与投诉反馈各自保留一条持久线程，历史分别保留。管理员通过客服工作台处理受权队列，管理端按 `kind=SERVICE|COMPLAINT` 分开筛选；投诉另要求 `im.support.complaint`，默认只授予运营预设角色，可由运营配置给指定客服。迁移 `0181` 为升级前仍负责 `WAITING/ACTIVE` 投诉、且仅依赖客服预设的客服写入对象级 `im_complaint_handover_grant`，只保护具体会话，不扩大未分配投诉或新派单；个人 `DENY` 优先。`0181/0182` 必须在同一 pending 迁移批次和停写窗口执行，迁移预检拒绝两者分批，避免跨批新投诉或转交获得对象授权。投诉消息、上下文和巡检只读仍要求该权限；历史处理记录和轮次摘要按 `im.support.read` 对客服公开。咨询与支付后的订单履约群是不同业务对象。订单群已有受控后端建群闭环及买家/号主/客服文字及图片入口，三方已完成local-fake浏览器联验；独立非生产App的订单群文字/图片与历史恢复已验证，完整履约及生产渠道尚未验收。
 
 订单付款接纳具备隔离受控入口：成功事实、PAID与按服务端App绑定的唯一WAITING记录同事务提交，不开放普通HTTP付款成功入口。本地派单可将WAITING转为ASSIGNED并记录负责人、时刻和审计；ASSIGNED与群READY分别表达，也不开始租用或首响计时。买卖双方IM身份尚未就绪不影响本地付款/分配事实。
 
@@ -36,7 +37,7 @@ IM功能正式追加为0125–0141；0000–0124历史字节不改。带旧私�
 - 历史消息可附 `sender{displayName,avatar,role,platformId?,displayUsername?}` 最小投影，角色为 USER/ADMIN/SYSTEM。仅按当前 App 与本页真实发送账号批量查询；platformId 仅来自已关联的平台用户或管理员，SYSTEM 不带资料引用。管理员可附规范的公开 ZZ 账号，不从邮箱或手机号推断。头像限 HTTP(S)，不含联系方式或 SYSTEM 凭据。显示名是当前公开资料，不是历史姓名快照；缺失映射不能以云信账号冒充昵称。列表用户也可有公开 avatar。巡视头像和姓名复用实体预览：用户摘要仍需 `user.directory.read` 及原资料接口授权，撤权即撤去已读摘要；客服复用轻量身份卡，不推断订单关系。
 - 自动普通文本请求透传原稳定 `message_client_id`；不能仅凭该字段宣称供应商恰好一次或用户已读。投递未知、远端去重范围与附件有效期仍分别处理。
 - `hasMore/nextCursor` 来自原始页，游标绑定 App、查看账号、会话、原消息时间及十进制64位ID，不从过滤后的可见条数推断下一页。历史附件复用客户端 SDK 的安全媒体解析与既有媒体组件。
-- 真实撤回先核验本人消息，服务端调用云信并保留结果事实；UNKNOWN 不自动重放，历史读取拒绝恢复待核验内容。确认撤回清除历史正文/附件，并同步相同最新消息的咨询摘要。SDK 确认仅本人删除后登记该查看者的隐藏事实，持久历史按这些事实过滤。供应商删除开关、旧消息缺少隐藏事实及删除结果未知的对账属于独立渠道验收边界，不能由本地过滤推断已删除。
+- 真实撤回先核验本人消息，服务端调用云信并保留结果事实；UNKNOWN 不自动重放，历史读取只隐藏该条待核验消息、不再让整页 503，且没有管理端恢复入口前不得重新展示其正文。确认撤回清除历史正文/附件，并同步相同最新消息的咨询摘要。SDK 确认仅本人删除后登记该查看者的隐藏事实，持久历史按这些事实过滤。供应商删除开关、旧消息缺少隐藏事实及删除结果未知的对账属于独立渠道验收边界，不能由本地过滤推断已删除。
 
 ## 订单群可靠创建
 
@@ -108,18 +109,19 @@ IM功能正式追加为0125–0141；0000–0124历史字节不改。带旧私�
 - 派单及咨询关闭/转交恢复在对象锁前有序锁定资格与presence；资格行/角色/范围锁忙使整轮延期，不跳到另一客服。供应商调用不占App事务闸门；未知结果仍按原租约/CAS隔离。
 - 本地调度仅通过AuthRuntimeOptions.supportDispatch显式传入appId/batchLimit/intervalMs开启，缺省关闭，无环境变量兜底。启动扫描、presence提交后唤醒与周期扫描共用有界消费者，防重叠，Nest关闭时先等在途再关池。主环境不会因合入自动启动。
 - 无Team的本地关闭仅将咨询置CLOSED，保留PENDING/FAILED的未建群事实，不虚报REVOKED；所有消息授权仍要求咨询ACTIVE。已建Team关闭沿原供应商核验流程。
+- 用户本人可结束ACTIVE轮次；WAITING/已结束返回409。用户结束复用后台同一ROUND_CLOSE操作、CLOSED事件与线程IDLE，只移除本轮客服并保留Team和聊天记录；同一operationId重放返回同一结果，跨轮次复用为409，审计记录user身份。
 
 ## 身份与授权
 
 - USER、ADMIN、SYSTEM身份按应用隔离，平台主体稳定映射到云信账号；PENDING意图与业务创建同事务，外部建号在事务外进行。外部失败不能丢失管理员创建结果。
 - Token从已认证平台主体派生，只向READY身份签发短效动态凭据，不接受客户端指定发送身份。SYSTEM群主管理身份不给前端发凭据。
 - 咨询按独立Team划分消息范围；服务端SYSTEM为群主，用户和接待客服仅为成员。配置限制不代替真实供应商权限验收。
-- 正式客户端发送、读取历史前通过同源`message-access`接口复核授权，拒绝时不调用SDK；授权等待结束后再次检查客户端代次。消息发送复核当前咨询归属、ACTIVE/READY及当前类型接待权限；结束咨询也要求当前指派和当前类型权限。历史读取与继续接待/发送分别授权，已指派不等于永久拥有发送权。
+- 正式客户端发送、读取历史前通过同源`message-access`接口复核授权，拒绝时不调用SDK；授权等待结束后再次检查客户端代次。消息发送复核当前咨询归属、ACTIVE/READY及当前类型接待权限；后台结束咨询也要求当前指派和当前类型权限。历史读取与继续接待/发送分别授权，已指派不等于永久拥有发送权。
 - 平台Cookie失效和管理员PIN锁屏分别以401/423触发身份重确认与本地客户端清理；403按当前咨询阻断操作，不退出账号。客服可在原页面重新确认服务端授权后解除该咨询的阻断；网络错误、旧身份或旧咨询的迟到响应不能解禁。已有云信在线连接的远端撤销仍需另行接入验证，客户端前置检查不能防止持有旧凭据的修改版客户端直连供应商。
 
 ## 主要入口
 
-- 用户Web同源代理：`/api/im/token`、`/api/im/consultations`；平台核心路径为`/api/v1/im/user/*`。
+- 用户Web同源代理：`/api/im/token`、`/api/im/consultations`（含`:id/close`）；平台核心路径为`/api/v1/im/user/*`。
 - 管理端BFF：`/api/bff/admin/im/*`，使用管理员会话及操作权限；身份目录只提供当前管理员本人映射。
 - 本地测试消息代理`/messages`仅在显式注入测试transport时工作，前端按服务端下发的transport选择替身；它不表示正式云信消息通过平台转发。
 
@@ -133,7 +135,7 @@ CREATE/TRANSFER/CLOSE操作持久化尝试、租约与结果。HTTP超时、传�
 
 客服presence为账号级状态，`version`用于连接/可用状态条件更新；接单、结束及转交只改变`active_load`，不推进连接版本。客户端提交当前版本，过期写返回409，不自动取新版本重放旧离线状态。服务停止不代表presence立即离线，接待资格仍受最近连接时间限制。
 
-客户端按身份/咨询代次隔离迟到响应、历史和实时消息及草稿；关闭窗口不重复创建客户端。已结束咨询可显式进入“再次咨询”并选择类型，提交沿用既有创建/恢复入口；窗口重开、刷新和类型选择不自动建立新咨询。后台恢复与订单清扫均在连接池结束前停止调度并等待在途工作。
+客户端按身份/咨询代次隔离迟到响应、历史和实时消息及草稿；关闭窗口不重复创建客户端。已结束咨询可显式进入“再次咨询”并选择类型，提交沿用既有创建/恢复入口；窗口重开、刷新和类型选择不自动建立新咨询。发起人可主动结束本人当前 `ACTIVE` 轮次：`POST /api/v1/im/user/consultations/:id/close` 使用 `{operationId}`，仅本人且同 App，`WAITING` 或已结束返回 409、跨 App/不存在 404；复用管理端同一 `ROUND_CLOSE` 持久操作、关闭事件、线程 `IDLE` 与远端核验/恢复，同 operationId 重放返回同一结果，不同轮次复用同一 operationId 冲突，请求事务内不等待供应商。后台恢复与订单清扫均在连接池结束前停止调度并等待在途工作。
 
 管理端复用`/session`刷新权限，独立于SDK是否就绪；客服页因read撤销而关闭后，工作区仍保留恢复发现。并发刷新合并，认证变更期间延后确认；跨标签锁定/解锁及401/423推进失效代次，旧响应不可回写，排队的追尾确认同样遵守认证变更窗口。轮询间隔约5秒，不承诺后台休眠或网络异常时的发现时限，也不代表远端撤权完成。
 
@@ -162,7 +164,7 @@ read客户端身份与send能力分离：只撤接待权限时保留合法连接
 
 ## 巡视、统计与最小售后记录
 
-- `GET /api/v1/im/admin/audit/conversations` 要求 `im.support.management.read`，支持 limit/cursor、type（SERVICE、COMPLAINT、ORDER）及 adminUserId。省略过滤表示全部；过滤条件变更须丢弃旧游标。订单活动时间优先消息活动，再建群/建单时间。historyState 区分 AVAILABLE、NOT_ESTABLISHED、LEGACY_UNAVAILABLE、RECOVERING，不把缺历史当零消息。巡视不改已读或派单；旧轮次保留的独立 Team 按精确 App/轮次绑定与远端标记复核读取，不借当前线程替代历史。
+- `GET /api/v1/im/admin/audit/conversations` 要求 `im.support.management.read`，支持 limit/cursor、type（SERVICE、COMPLAINT、ORDER）及 adminUserId。省略过滤表示全部；过滤条件变更须丢弃旧游标。订单活动时间优先消息活动，再建群/建单时间。historyState 区分 AVAILABLE、NOT_ESTABLISHED、LEGACY_UNAVAILABLE、RECOVERING，不把缺历史当零消息。巡视不改已读或派单；旧轮次保留的独立 Team 按精确 App/轮次绑定与远端标记复核读取，不借当前线程替代历史。咨询按持久线程聚合为一行，payload 带最近 `roundSeq`/`roundCount`，点开默认查看最近一轮，并可切换轮次按该轮 `conversationId` 读取历史，不再把不同轮次伪装成独立会话；轮次 `conversationId` 为空时显示该轮无独立聊天记录/历史不可用，不回退到最近一轮冒充。历史 `ext` 中的引用元数据随消息返回，巡视使用与客服工作台相同的引用气泡。
 - `GET /api/v1/im/admin/support-overview` 要求管理读取，支持下述时间范围，默认北京时间今天。reportDate/serverNow 来自服务器。期间接待次数/用户只计发生接待动作的咨询，不含订单群；hourly为期间CREATED/REOPENED新轮次的小时分布。排队只统计当前有用户首条消息、未指派的WAITING；可接待须AVAILABLE、CONNECTED、2分钟内心跳新鲜、云信身份READY且具备读取/接待权限，顶部“当前可接待客服”与派单资格同口径。首响askedCount为期间首次提问的咨询数，sampleCount为已人工首答数，pending/overdue和关闭未答不能冒充已答样本。
 - `GET /api/v1/im/admin/yunxin-conversations` 要求 `im.support.management.read`，按需读取每个有接待记录的客服 NIM 账号云端会话总数与置顶数。服务端通过云信 `GET /im/v2.1/conversations?account_id=...` 每页100条分页，单账号最多读取当前配额5000条；返回账号脱敏标签、计数、配额和采样时间，不返回完整 accid，不写入云信。客服统计页手动触发，不随看板轮询。
 - `GET /api/v1/im/admin/my-support-statistics` 经管理BFF转发，仅GET，支持下述时间范围，要求 `im.support.read`；身份固定为当前管理员，不接受指定员工。返回reportDate/serverNow/period、today{seconds,sessions,users}、current{consultations,orderGroups,unread,oldestPendingAt}、ratings{count,average,distribution}和firstResponse{sampleCount,averageSeconds}。个人首响只计本人是首次人工回复者且回复发生在期间的样本，不按最终接待人代计，可含跨期提问。oldestPendingAt是当前仍有未读的接待轮次之首次用户提问时间，不是最后一条未读消息的等待时长。
@@ -171,7 +173,7 @@ read客户端身份与send能力分离：只撤接待权限时保留合法连接
 - 订单群 access 返回 serverNow 与 terminalSendAllowed，由服务端判定沟通窗口。邀请运营复用现有成员邀请接口：在租群及终态合法沟通窗口内可邀请，终态还须当前有效 STAFF 成员可读；每次仍检查会话、范围、群绑定和目标资格，窗口到期拒绝。平台 availability 仅表达本平台接待偏好，不等于网易云信实时在线。
 - 押金展示复用结算/取消既有退款路径，结算退款已含 depositRefund。不新增独立退押金执行；登记应付、渠道状态与到账未知保持分开，不能重复创建押金退款。
 
-租期到期提醒重试前会复核当前时段；旧时段任务跳过后续投递（STALE_BUCKET），避免到期后再发送“24小时内到期”。跳过不代表既往未知尝试从未送达，也不改变订单状态或自动结束租期。
+租期到期提醒重试前会复核当前时段；旧时段任务跳过后续投递（STALE_BUCKET），避免到期后再发送“24小时内到期”。发送结果未知、过期租约或 `SENT` 落库失败一律冻结为 `UNKNOWN`，不自动重发，只供人工核对；仅身份未就绪等发前失败退避重试。跳过不代表既往未知尝试从未送达，也不改变订单状态或自动结束租期。
 
 ## 客服统计时间范围
 

@@ -14,8 +14,9 @@
 .order-team-messages li[data-card]{max-width:100%}
 .order-team-messages li.order-team-day{align-self:center;max-width:none;padding:2px 0;color:var(--ot-muted);font-size:11px;line-height:1.5}
 .order-team-day span{padding:2px 10px;border-radius:999px;background:color-mix(in srgb,currentColor 8%,transparent)}
-.order-team-messages li.order-team-system{align-self:center;max-width:none;justify-content:center}
-.order-team-system span{padding:2px 10px;border-radius:999px;background:color-mix(in srgb,currentColor 8%,transparent);color:var(--ot-muted);font-size:11px;line-height:1.5}
+.order-team-messages li.order-team-system{align-self:center;max-width:none;width:100%;margin:2px 0;justify-content:center;align-items:center;color:var(--ot-muted);font-size:11px;line-height:1.5;text-align:center}
+.order-team-system::before,.order-team-system::after{content:"";flex:1;height:1px;max-width:80px;background:var(--ot-border)}
+.order-team-system span{padding:0 10px}
 .order-team-msg-avatar{display:grid;flex:none;width:28px;height:28px;place-items:center;overflow:hidden;border:1px solid var(--ot-border);border-radius:50%;background:color-mix(in srgb,currentColor 6%,transparent);color:var(--ot-muted);font-size:11px;font-weight:600}
 .order-team-msg-avatar img{width:100%;height:100%;object-fit:cover}
 .order-team-msg-body{display:flex;flex-direction:column;min-width:0;gap:3px}

@@ -136,6 +136,8 @@ export type AuditConversation = {
   adminUnreadCount?: number;
   userUnreadCount?: number;
   firstUserMessageAt?: string | null;
+  roundSeq?: number;
+  roundCount?: number;
   historyState?: "AVAILABLE" | "NOT_ESTABLISHED" | "LEGACY_UNAVAILABLE" | "RECOVERING" | string;
   firstResponseAt?: string | null;
   remindDueAt?: string | null;
@@ -443,6 +445,8 @@ function parseConversation(value: unknown): AuditConversation | null {
     adminUnreadCount: maybeCount(row.adminUnreadCount) ?? undefined,
     userUnreadCount: maybeCount(row.userUnreadCount) ?? undefined,
     firstUserMessageAt: text(row.firstUserMessageAt) || null,
+    roundSeq: maybeCount(row.roundSeq) ?? undefined,
+    roundCount: maybeCount(row.roundCount) ?? undefined,
     historyState,
     firstResponseAt: text(row.firstResponseAt) || text(recordOf(row.supportEscalation).firstResponseAt) || null,
     remindDueAt: text(row.remindDueAt) || text(recordOf(row.supportEscalation).remindDueAt) || null,
@@ -488,6 +492,7 @@ function parseMessage(value: unknown): AuditMessage | null {
     ...(messageServerId ? { messageServerId } : {}),
     ...(typeof row.text === "string" ? { text: row.text } : {}),
     ...(typeof row.messageType === "number" ? { messageType: row.messageType } : {}),
+    ...(typeof row.serverExtension === "string" ? { serverExtension: row.serverExtension } : {}),
     ...(row.media !== undefined ? { media: row.media as NimMessageLike["media"] } : {}),
     ...(Object.keys(attachment).length ? { attachment: attachment as NimMessageLike["attachment"] } : {}),
     ...(Object.keys(reply).length && typeof reply.messageClientId === "string"

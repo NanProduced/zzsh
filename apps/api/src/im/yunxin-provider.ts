@@ -1,5 +1,6 @@
 import { createHash, randomBytes } from "node:crypto";
 import type { ImTransportCard } from "./im-contract";
+import { decodeYunxinSystemNotice, type YunxinSystemNotice } from "./system-notice";
 
 const DEFAULT_V1_ENDPOINT = "https://api.yunxinapi.com";
 const DEFAULT_V2_ENDPOINT = "https://open.yunxinapi.com";
@@ -151,7 +152,7 @@ export type YunxinSupportTeamExistenceLookup =
 
 /** The small server-only surface used to isolate one consultation from another. */
 export type YunxinSupportOpeningMessage = { messageServerId: string; messageClientId: string; senderId: string; createTime: number; text: string };
-export type YunxinSupportHistoryMessage = Omit<YunxinSupportOpeningMessage,"text"> & { messageType: number; text?: string; attachment?: Record<string,unknown> };
+export type YunxinSupportHistoryMessage = Omit<YunxinSupportOpeningMessage,"text"> & { messageType: number; text?: string; attachment?: Record<string,unknown>; serverExtension?: string; systemNotice?: YunxinSystemNotice | null };
 export type YunxinCloudConversationPage = {
   hasMore: boolean;
   nextToken: string | null;
@@ -675,9 +676,14 @@ export class YunxinServerApiClient implements YunxinServerApi, YunxinSupportScop
       if(!id||!sender||time===undefined||!Number.isSafeInteger(time)||type===undefined||!Number.isInteger(type))throw new YunxinApiError("read-support-member-history",null,false);
       const attachment=isRecord(value.body)?value.body:undefined;
       if ((type===0&&(!attachment||asString(attachment.msg)===undefined))||([1,2,3,6].includes(type)&&!attachment)) throw new YunxinApiError("read-support-member-history",null,false);
+      const systemNotice=decodeYunxinSystemNotice({messageType:type,attachment});
+      // V1 history exposes the client/server extension as `ext`; keep the aliases defensive.
+      const serverExtension=asString(value.ext)??asString(value.serverExtension)??asString(value.server_extension)??asString(value.serverext)??asString(value.server_ext)??asString(attachment?.ext)??asString(attachment?.serverExtension);
       return {messageServerId:id,messageClientId:asString(value.msgidclient)||id,senderId:normalizeAccountId(sender),createTime:time,messageType:type,
         ...(type===0?{text:attachment?asString(attachment.msg)??"":""}:{}),
-        ...(attachment&&type!==0?{attachment:{...attachment,width:attachment.width??attachment.w,height:attachment.height??attachment.h,duration:attachment.duration??attachment.dur}}:{})};
+        ...(attachment&&type!==0?{attachment:{...attachment,width:attachment.width??attachment.w,height:attachment.height??attachment.h,duration:attachment.duration??attachment.dur}}:{}),
+        ...(serverExtension&&serverExtension.length<=4096?{serverExtension}:{}),
+        ...(systemNotice?{systemNotice}:{})};
     });
   }
 

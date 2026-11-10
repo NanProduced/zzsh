@@ -30,7 +30,7 @@ test("unknown revoke prevents replay and history resurrection; only the matching
   let last:any=null;const facts=new Map<string,any>();
   const client={query:async(sql:string,v:any[]=[])=>{
     if(sql.includes("pg_try_advisory"))return {rows:[{locked:true}]};
-    if(sql.includes("SELECT DISTINCT ON"))return {rows:last?[last]:[]};
+    if(sql.includes("SELECT DISTINCT ON"))return {rows:last?[{object_id:imFactId("revoke_guard","app","system",message.messageServerId),...last}]:[]};
     if(sql.includes("SELECT action"))return {rows:last?[last]:[]};
     if(sql.startsWith("INSERT")){
       if(sql.includes("'im.message.revoke.started'"))last={action:"im.message.revoke.started",request_id:v[5]};
@@ -42,7 +42,8 @@ test("unknown revoke prevents replay and history resurrection; only the matching
   }};
   assert.equal(await planImRevoke(client as never,"app","staff",actor,message,"request-a"),"STARTED");
   assert.equal(await planImRevoke(client as never,"app","staff",actor,message,"request-b"),"UNKNOWN");
-  await assert.rejects(readImHistoryFilters(client as never,"app","staff",[message.messageServerId]));
+  assert.ok((await readImHistoryFilters(client as never,"app","staff",[message.messageServerId])).revoked.has(message.messageServerId),
+    "an unresolved revoke hides only that message instead of failing the whole page");
   await assert.rejects(finishImRevoke(client as never,"app","staff",actor,message,"request-b",true));
   await finishImRevoke(client as never,"app","staff",actor,message,"request-a",true);
   assert.equal(await planImRevoke(client as never,"app","staff",actor,message,"request-b"),"SUCCEEDED");

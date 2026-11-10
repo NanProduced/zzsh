@@ -32,7 +32,7 @@ async function mountOrderSender(t, methods={}, options={}) {
   class DecodedImage {naturalWidth=640;naturalHeight=360;set src(_url){queueMicrotask(()=>this.onload?.());}}
   globalThis.Image=DecodedImage;
   let canRead=true;
-  const access=id=>({orderId:id,displayNo:`ZZ-${id}`,orderStatus:'PAID',assignmentState:'ASSIGNED',teamState:'READY',appId:'app',teamId:id==='a'?'1':'2',name:`订单${id}`,gameName:'三角洲行动',account:{id:`account-${id}`,title:`账号${id}`},viewerAccountId:'viewer',conversationId:`viewer|2|${id==='a'?'1':'2'}`,canRead:true,canSend:options.canSend??true,supportEscalation:{firstResponseAt:null,remindDueAt:null,addRound:0,state:'NOT_STARTED',needsManualReview:false,noEligibleStaff:false},members:options.members??[]});
+  const access=id=>({orderId:id,displayNo:`ZZ-${id}`,orderStatus:'PAID',assignmentState:'ASSIGNED',teamState:'READY',appId:'app',teamId:id==='a'?'1':'2',name:`订单${id}`,gameName:'三角洲行动',account:{id:`account-${id}`,title:`账号${id}`},viewerAccountId:'viewer',conversationId:`viewer|2|${id==='a'?'1':'2'}`,canRead:true,canSend:options.canSend??true,...(options.botAccountId?{botAccountId:options.botAccountId}:{}),supportEscalation:{firstResponseAt:null,remindDueAt:null,addRound:0,state:'NOT_STARTED',needsManualReview:false,noEligibleStaff:false},members:options.members??[]});
   const request=async url=>{
     if(url.includes('/im?')){if(!canRead)throw Object.assign(new Error('forbidden'),{status:403});return access(url.includes('/a/')?'a':'b');}
     return {items:['a','b'].map(id=>({id,title:`账号${id}`,displayNo:`ZZ-${id}`,status:'PAID',teamState:'READY'})),nextCursor:null};
@@ -1027,6 +1027,24 @@ test('the NIM order-group creation notification is a system line, not an unsuppo
   assert.match(h.node.querySelector('.order-team-system').textContent,/群聊已创建/);
   assert.doesNotMatch(h.node.textContent,/暂不支持此消息类型/);
   assert.equal(h.node.querySelector('.order-team-msg-avatar'),null,'a team notification is not attributed to the bot speaker');
+});
+
+test('bot welcome hides lifecycle notices and duplicate notices collapse to one system line',async t=>{
+  const covered=await mountOrderSender(t,historyMethods([
+    {messageClientId:'welcome',messageServerId:'srv-welcome',senderId:'bot',receiverId:'1',createTime:100,text:'欢迎咨询',messageType:0},
+    {messageClientId:'created',messageServerId:'srv-created',senderId:'system',receiverId:'1',createTime:200,text:'',messageType:5,attachment:{ope:0}},
+    {messageClientId:'joined',messageServerId:'srv-joined',senderId:'system',receiverId:'1',createTime:300,text:'',messageType:5,attachment:{type:0}},
+  ]),{botAccountId:'bot'});
+  await covered.until(()=>covered.node.textContent.includes('欢迎咨询'));
+  assert.equal(covered.node.querySelector('.order-team-system'),null,'bot welcome covers team-created and member-joined notices');
+  assert.doesNotMatch(covered.node.textContent,/群聊已创建|成员已加入会话/);
+});
+
+test('repeated order-group creation notices without bot coverage collapse to one line',async t=>{
+  const h=await mountOrderSender(t,historyMethods(['a','b','c'].map((id,index)=>({messageClientId:`created-${id}`,messageServerId:`srv-created-${id}`,senderId:'system',receiverId:'1',createTime:100+index*1_000,text:'',messageType:5,attachment:{ope:0}}))));
+  await h.until(()=>h.node.querySelector('.order-team-system'));
+  assert.equal(h.node.querySelectorAll('.order-team-system').length,1);
+  assert.match(h.node.querySelector('.order-team-system').textContent,/群聊已创建/);
 });
 
 test('message menu exposes copy/reply/revoke/delete by message type and ownership',async t=>{
