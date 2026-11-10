@@ -624,7 +624,7 @@ export async function handleAdminBff(request: NodeRequest, response: NodeRespons
     }
     return;
   }
-  if (path === "/system/storage" || path === "/system/storage/check" || path === "/system/sms" || path === "/system/settlement-refund-policy") {
+  if (path === "/system/storage" || path === "/system/storage/check" || path === "/system/sms" || path === "/system/settlement-refund-policy" || path === "/system/opening-auto-confirm") {
     await handleSystemConfiguration(request, response, options.supply);
     return;
   }
@@ -647,14 +647,16 @@ export async function handleAdminBff(request: NodeRequest, response: NodeRespons
   }
   if (path === "/orders" || path.startsWith("/orders/")) {
     const settlementPath = /^\/orders\/[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\/(openings|settlements|settlement-preview|settlement)(\/|$)/.test(path);
-    const legacyContinuationPath = /^\/orders\/legacy\/legacy_order_[a-f0-9]{40}\/continuation\/(?:preview|propose|confirm|reject|hold|release|confiscate|duties\/[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\/(?:mature|void|owner-credit|commission-credit|refund-case|demo-refund))$/.test(path);
+    const legacyContinuationPath = /^\/orders\/legacy\/legacy_order_[a-f0-9]{40}\/continuation\/(?:preview|propose|confirm|reject|hold|release|confiscate|support-cancel|duties\/[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\/(?:mature|void|owner-credit|commission-credit|refund-case|demo-refund))$/.test(path);
     const prestartReviewPath=/^\/orders\/[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\/prestart-termination\/[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\/review$/.test(path);
     const manualClosePath=/^\/orders\/[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\/manual-close$/.test(path);
+    const progressReminderPath=/^\/orders\/[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\/progress-reminders$/.test(path);
+    const openingGenerationRetryPath=/^\/orders\/[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\/opening-generation\/retry$/.test(path);
     const supportCancelPath=/^\/orders\/[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\/support-cancel$/.test(path);
     const supportUnpaidCancelPath=/^\/orders\/[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\/support-unpaid-cancel$/.test(path);
     const memberInvitePath=/^\/orders\/[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\/members$/.test(path);
     const legacyTeamCreatePath=/^\/orders\/legacy_order_[a-f0-9]{40}\/create-team$/.test(path);
-    if (method !== "GET" && !(method === "POST" && (settlementPath || legacyContinuationPath||prestartReviewPath||manualClosePath||supportCancelPath||supportUnpaidCancelPath||memberInvitePath||legacyTeamCreatePath))) {
+    if (method !== "GET" && !(method === "POST" && (settlementPath || legacyContinuationPath||prestartReviewPath||manualClosePath||progressReminderPath||openingGenerationRetryPath||supportCancelPath||supportUnpaidCancelPath||memberInvitePath||legacyTeamCreatePath))) {
       sendError(response, 404, API_V1_ERROR_CODES.NOT_FOUND, "Resource not found", requestId);
       return;
     }
@@ -674,11 +676,11 @@ export async function handleAdminBff(request: NodeRequest, response: NodeRespons
   const imOrderRead = /^\/im\/order-teams\/[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\/read$/.test(path);
   const imImage = /^\/im\/images\/[A-Za-z0-9._:-]{1,128}$/.test(path);
   const imMedia = /^\/im\/media\/[A-Za-z0-9._:-]{1,128}$/.test(path);
-  const imReadSub = /^\/im\/consultations\/[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\/(events|context)$/.test(path);
+  const imReadSub = /^\/im\/consultations\/[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\/(events|context|rounds)$/.test(path);
   const imLegacyOrder = /^\/im\/consultations\/[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\/legacy-orders\/legacy_order_[a-f0-9]{40}$/.test(path);
   const imAuditTakeover = /^\/im\/audit\/consultations\/[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\/takeover$/.test(path);
   const imGetOrPost = path === "/im/consultations" || path === "/im/messages";
-  const imGetOnly = path === "/im/aftersales" || path === "/im/token" || path === "/im/identities" || path === "/im/support-overview" || path === "/im/my-support-statistics"
+  const imGetOnly = path === "/im/aftersales" || path === "/im/token" || path === "/im/identities" || path === "/im/support-overview" || path === "/im/yunxin-conversations" || path === "/im/my-support-statistics"
     || path === "/im/handovers" || path === "/im/audit/conversations" || path === "/im/transfer-targets"
     || path === "/im/message-access" || imImage || imMedia || imReadSub || imLegacyOrder;
   const imPostOnly = Boolean(imAction) || /^\/im\/aftersales\/[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\/(claim|contact|resolve)$/.test(path) || imOrderRead || path === "/im/presence/heartbeat" || imAuditTakeover;

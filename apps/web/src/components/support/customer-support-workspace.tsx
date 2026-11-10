@@ -11,17 +11,18 @@ import { MessageScroller as MessageScrollerPrimitive } from "@shadcn/react/messa
 import { useAuthOverlay } from "@/components/auth/auth-overlay-provider";
 import { useUserSession } from "@/components/session/user-session-provider";
 import { ImClientLifecycle } from "@/lib/im-client-lifecycle";
-import { createLocalFakeNimWebClientFactory, createNimWebClientFactory, mergeImMessages, NimImageSendError, NimMediaSendError, NimTextSendError, validateNimImageFile, validateNimMediaFile, type NimMessageLike, type NimMessageMedia, type NimWebClientLike, type NimWebConnectionState } from "@/lib/nim-web-client";
+import { collapseImSystemNotices, createLocalFakeNimWebClientFactory, createNimWebClientFactory, decodeImSystemNotice, isImSystemNoticeText, mergeImMessages, NimImageSendError, NimMediaSendError, NimTextSendError, validateNimImageFile, validateNimMediaFile, type ImSystemNotice, type NimMessageLike, type NimMessageMedia, type NimWebClientLike, type NimWebConnectionState } from "@/lib/nim-web-client";
 import { clearSupportIntent, normalizeSupportType, readSupportIntent, saveSupportIntent, supportSubjectRefFromUrl, type SupportType } from "@/lib/support-intent";
 import type { SupportOrderContext } from "./support-dialog-request";
 import "./customer-support-workspace.css";
 import { readSupportOrders, type SupportOrder } from "@/lib/support-directory";
 import { encodeOrderReference, parseOrderReference, orderReferenceSummary, type OrderReference } from "@zzsh/im-client/nim-web-client";
-import { OrderReferenceMessage } from "@zzsh/ui/order-card";
+import { OrderReferenceMessage, type HintRenderer } from "@zzsh/ui/order-card";
 import { computeSupportUnread, isDirectoryOrderGroup, publishSupportUnread, readDirectoryPreferences, writeDirectoryPreferences, type DirectoryPreference } from "./support-unread";
 import { SupportRoundRating, type RoundRatingResolution } from "./support-round-rating";
+import { ConfirmAlertDialog } from "@/components/ui/alert-dialog";
 import { OrderTeamPanel, orderStageTone, orderTeamLabel, type OrderTeamAccess } from "@zzsh/ui/order-team-panel";
-import { orderApi, orderIntentKey } from "@/lib/order-client";
+import { isOrderSubjectCurrent, orderApi, orderIntentKey } from "@/lib/order-client";
 import { orderUrl } from "@/components/order/order-presentation";
 import { CHAT_EMOJIS, MessageActionMenu, MessageQuoted, MessageReplyQuote, useMessageLongPress, type MessageActionId, type MessageActionItem } from "@zzsh/ui/message-actions";
 import { MediaDraftBar, MediaMessage, MessageImage, mediaMessageOf, mediaSummaryOf, type MessageMediaDraft } from "@zzsh/ui/message-media";
@@ -84,6 +85,8 @@ type SupportMessage = {
   messageType?: number;
   reply?: { messageId: string; senderId: string; text?: string };
   revoked?: boolean;
+  /** Shared decode of a NIM team notification; display decides visibility. */
+  notice?: ImSystemNotice;
   /** Raw channel message kept only so reply/revoke/delete can address the original. */
   source?: NimMessageLike;
   image?: { imageId: string; url?: string; thumbnailUrl?: string; name: string; mimeType: string; size: number };
@@ -92,6 +95,15 @@ type SupportMessage = {
 };
 
 const MAX_PENDING_IMAGES = 6;
+const renderTooltip = (text: string, trigger: ReactNode) => (
+  <TooltipProvider delayDuration={180}>
+    <Tooltip>
+      <TooltipTrigger asChild>{trigger}</TooltipTrigger>
+      <TooltipContent side="top">{text}</TooltipContent>
+    </Tooltip>
+  </TooltipProvider>
+);
+const renderOrderCardHint: HintRenderer = renderTooltip;
 
 const NO_ORIGINAL_ID_HINT = "原消息标识不可用，请先刷新历史确认是否送达。";
 
@@ -201,7 +213,7 @@ function normalizeConsultation(consultation: Consultation): Consultation {
 }
 
 /** Names the real blocker instead of always blaming 客服接待 (link down, no conversation yet). */
-function composerBlockReason(conversation: Pick<Consultation, "state" | "messageScopeState" | "conversationId" | "canSend"> | null, canSend: boolean): string | null {
+function composerBlockReason(conversation: Pick<Consultation, "state" | "messageScopeState" | "conversationId" | "canSend"> | null, canSend: boolean, hasUserMessage: boolean): string | null {
   if (canSend) return null;
   if (!conversation) return "创建或选择一个会话后可发送消息";
   if (conversation.messageScopeState === "FAILED") return messageScopeUserLabel("FAILED");
@@ -209,7 +221,7 @@ function composerBlockReason(conversation: Pick<Consultation, "state" | "message
   // WAITING only means "no admin yet"; the team may still be provisioning in the channel.
   const scopeReady = Boolean(conversation.conversationId) && conversation.messageScopeState === "READY";
   if (!scopeReady) return conversation.state === "WAITING" ? "正在连接客服…" : conversation.state === "CLOSED" ? "会话连接尚未就绪，请稍后重试" : "客服通道准备中，请稍候…";
-  if (conversation.state === "WAITING") return "已提交，客服接入后会看到你的留言；现在也可以先发消息";
+  if (conversation.state === "WAITING") return hasUserMessage ? "客服尚未接入，请稍候" : "发送第一条消息后，客服才会收到并接入";
   return "消息通道正在恢复，恢复后可继续发送";
 }
 
@@ -239,7 +251,7 @@ function compactOrderStage(label: string): string {
     "建群待人工核查": "待核查",
     "已付款 · 等待匹配客服": "待匹配",
     "已分配 · 正在准备订单群": "建群中",
-    "账号与开租确认": "待开租",
+    "开租确认": "待开租",
     "等待客服": "待客服",
     "组建订单群": "建群中",
     "结束确认": "待结束",
@@ -327,6 +339,20 @@ function imageOf(message: NimMessageLike): SupportMessage["image"] | undefined {
   };
 }
 
+const SERVER_SYSTEM_NOTICE_KINDS = new Set([
+  "TEAM_CREATED", "MEMBER_JOINED", "MEMBER_LEFT", "TEAM_UPDATED", "TEAM_DISMISSED", "UNKNOWN",
+]);
+
+/** Only a shape-valid server notice is trusted; anything else falls back to the shared decoder. */
+function serverSystemNotice(message: NimMessageLike): ImSystemNotice | null {
+  const notice: unknown = message.systemNotice;
+  if (message.messageType !== 5 || !notice || typeof notice !== "object" || Array.isArray(notice)) return null;
+  const { kind, text } = notice as { kind?: unknown; text?: unknown };
+  if (typeof kind !== "string" || !SERVER_SYSTEM_NOTICE_KINDS.has(kind)
+    || typeof text !== "string" || !isImSystemNoticeText(text)) return null;
+  return { kind: kind as ImSystemNotice["kind"], text: text.trim() };
+}
+
 export function messageFromNim(message: NimMessageLike, accountId: string): SupportMessage | null {
   const senderId = typeof message.senderId === "string" ? message.senderId : "";
   if (!senderId) return null;
@@ -353,14 +379,14 @@ export function messageFromNim(message: NimMessageLike, accountId: string): Supp
     };
   }
 
-  if (message.messageType === 5) {
-    const attach = message.attachment as { type?: number } | undefined;
-    const isTeamInvite = attach && typeof attach === "object" && attach.type === 0;
+  const notice = serverSystemNotice(message) ?? decodeImSystemNotice(message);
+  if (notice) {
     return {
       ...base,
       from: "system",
-      text: isTeamInvite ? "成员已加入会话" : "会话信息已更新",
+      text: notice.text,
       time: formatTime(message.createTime),
+      notice,
     };
   }
 
@@ -451,7 +477,7 @@ function subjectRefFromLocation(): string | null {
 }
 
 function SupportTypePicker({ value, onChange, disabled = false, onSelect }: { value: SupportType; onChange: (value: SupportType) => void; disabled?: boolean; onSelect?: (value: SupportType) => void }) {
-  // 投诉反馈入口保留，但两种入口进入同一个客服线程：创建时统一归一为 SERVICE。
+  // 业务咨询与投诉反馈各自一条持久线程；这里只负责选择入口类型。
   const pick = (next: SupportType) => { onChange(next); onSelect?.(next); };
   return <div className="support-type-picker" role="radiogroup" aria-label="客服类型">
     <button type="button" role="radio" aria-checked={value === "SERVICE"} className="support-type-option" data-active={value === "SERVICE"} disabled={disabled} onClick={() => pick("SERVICE")}><Headphones size={17} /><span><strong>在线客服</strong><small>商品、使用和平台服务咨询</small></span></button>
@@ -520,23 +546,40 @@ function MessageRow({ message, agentMeta, selfAvatar, peerAccountId, botAccountI
   </article>;
 }
 
-function ConnectionState({ preview, state, localFake = false }: { preview: boolean; localFake?: boolean; state: NimWebConnectionState | "idle" | "error" }) {
-  if (preview || localFake) {
+function ConnectionState({ preview, state, localFake = false, onReconnect }: { preview: boolean; localFake?: boolean; onReconnect?: () => void; state: NimWebConnectionState | "idle" | "error" }) {
+  if (preview) {
     return <span className="support-connection-state" data-state="preview" aria-live="polite">
-      {preview ? <ShieldCheck size={13} /> : <Wifi size={13} />}{preview ? "本地演示" : "本地测试通道"}
+      <ShieldCheck size={13} />{"本地演示"}
+    </span>;
+  }
+  if (state === "AUTH_FAILED") {
+    return <span className="support-connection-state" data-state="error" aria-live="polite">
+      <CircleAlert size={13} /><small>登录已失效，请刷新</small>
+    </span>;
+  }
+  if (state === "KICKED") {
+    return <span className="support-connection-state" data-state="error" aria-live="polite">
+      <CircleAlert size={13} /><small>已在其他设备登录</small>
+    </span>;
+  }
+  if (state === "error" || state === "DISCONNECTED") {
+    return <span className="support-connection-state" data-state="error" aria-live="polite">
+      <CircleAlert size={13} /><small>连接失败</small>
+      {onReconnect ? <button type="button" onClick={onReconnect}>重新连接</button> : null}
+    </span>;
+  }
+  if (localFake) {
+    return <span className="support-connection-state" data-state="preview" aria-live="polite">
+      <Wifi size={13} />{"本地测试通道"}
     </span>;
   }
   if (state === "CONNECTED") {
-    return <span className="support-connection-state" data-state="connected-quiet" title="已连接" aria-live="polite">
+    return renderTooltip("已连接", <span className="support-connection-state" data-state="connected-quiet" aria-live="polite">
       <span className="support-live-dot" data-state="active" aria-hidden="true" />
       <small>已连接</small>
-    </span>;
+    </span>);
   }
-  const label = state === "RECONNECTING" ? "正在重连…"
-    : state === "AUTH_FAILED" ? "授权核验中…"
-    : state === "KICKED" ? "已在其他设备登录"
-    : state === "error" ? "正在连接…"
-    : "正在连接…";
+  const label = state === "RECONNECTING" ? "正在重连…" : "正在连接…";
   return <span className="support-connection-state" data-state="connecting" aria-live="polite">
     <span className="support-live-dot" data-state="connecting" aria-hidden="true" />
     <small>{label}</small>
@@ -554,6 +597,8 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, vi
   const createFlight=useRef(false);
   useEffect(()=>{if(initialOrderId&&initialOrderParty){setSelectedOrder({id:initialOrderId,party:initialOrderParty});setSection("orders");setPanelView("chat");}},[initialOrderId,initialOrderParty,requestSerial]);
   const session = useUserSession();
+  const sessionRef = useRef(session);
+  sessionRef.current = session;
   const auth = useAuthOverlay();
   const [selectedType, setSelectedType] = useState<SupportType>("SERVICE");
   const [consultations, setConsultations] = useState<Consultation[]>([]);
@@ -598,6 +643,10 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, vi
   const [directoryMenu, setDirectoryMenu] = useState<{ x: number; y: number; key: string; pref: DirectoryPreference; row: HTMLElement | null } | null>(null);
   /** 本轮评价已提交/忽略后，轮询仍返回 available=true 也不再弹出。 */
   const [ratingResolved, setRatingResolved] = useState<Record<string, RoundRatingResolution>>({});
+  const [closeConfirmOpen, setCloseConfirmOpen] = useState(false);
+  const [closing, setClosing] = useState(false);
+  /** 同一轮重试复用 operationId，服务端才能识别为重放而非第二次关闭。 */
+  const closeOperationsRef = useRef<Record<string, string>>({});
   const readHiddenRef = useRef<Record<string, boolean>>({});
   /** 线程历史已成功加载后才允许上报已读，避免把“没打开过”当已读。 */
   const [historyLoaded, setHistoryLoaded] = useState<Record<string, boolean>>({});
@@ -621,6 +670,7 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, vi
   const previousPanelViewRef = useRef(panelView);
   const composingRef = useRef(false);
   const lifecycleRef = useRef<ImClientLifecycle<NimWebClientLike> | null>(null);
+  const reconnectRef = useRef<(() => void) | null>(null);
   const clientRef = useRef<NimWebClientLike | null>(null);
   const activeIdRef = useRef(activeId);
   const consultationsRef = useRef(consultations);
@@ -664,7 +714,8 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, vi
     return () => { orderNavigationRef.current?.abort(); };
   }, [currentIdentity, visible]);
   const openReferencedOrder = async (orderId: string) => {
-    if (!visible || preview || session.status !== "authenticated" || identityRef.current !== currentIdentity) return;
+    if (!visible || preview || session.status !== "authenticated" || !session.userId || identityRef.current !== currentIdentity) return;
+    const acting = session.userId;
     const known = directoryIdentity === currentIdentity ? orders.find((order) => order.id === orderId) : undefined;
     if (known && (known.party === "owner" || known.party === "renter")) {
       window.location.assign(orderUrl(known.party, "", undefined, orderId,known.origin));
@@ -676,14 +727,14 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, vi
     const generation = identityGenerationRef.current;
     try {
       if (/^legacy_order_[a-f0-9]{40}$/.test(orderId)) {
-        const order = await orderApi.legacyDetail(orderId, controller.signal);
+        const order = await orderApi.legacyDetail(acting, orderId, controller.signal);
         if (controller.signal.aborted || generation !== identityGenerationRef.current || identityRef.current !== currentIdentity) return;
         if (order.id !== orderId || order.source?.origin !== "LEGACY" || !["renter", "owner"].includes(order.party)) {
           setError("暂时无法确认你的订单身份，请从个人中心的订单列表查看。"); return;
         }
         window.location.assign(orderUrl(order.party, "", undefined, orderId, "LEGACY")); return;
       }
-      const order = await orderApi.detail(orderId, controller.signal);
+      const order = await orderApi.detail(acting, orderId, controller.signal);
       if (controller.signal.aborted || generation !== identityGenerationRef.current || identityRef.current !== currentIdentity) return;
       if (order.id !== orderId || !order.viewerParty) {
         setError("暂时无法确认你的订单身份，请从个人中心的订单列表查看。");
@@ -776,7 +827,7 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, vi
   useEffect(() => {
     if (preview) return;
     const type = normalizeSupportType(initialType);
-    // 入口意图保留在 picker 上（投诉反馈/在线客服），线程仍按归一后的 SERVICE 线程复用。
+    // 入口意图保留在 picker 上（投诉反馈/在线客服），并复用同类型持久线程。
     setSelectedType(initialType);
     if (initialOrderId && initialOrderParty) return;
     const existing = consultationsRef.current.find((item) => item.type === type);
@@ -881,6 +932,7 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, vi
   useEffect(() => {
     if (preview || session.status !== "authenticated" || !session.userId) return;
     let cancelled = false;
+    let reconnecting = false;
     const generation = identityGenerationRef.current;
     const identity = currentIdentity;
     const lifecycle = new ImClientLifecycle<NimWebClientLike>(async (context) => {
@@ -916,6 +968,7 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, vi
     });
     lifecycleRef.current = lifecycle;
     const run = async () => {
+      if (cancelled) return;
       try {
         setConnection("CONNECTING");
         setError(undefined);
@@ -934,7 +987,7 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, vi
             if (!item || !consultation) continue;
             setMessages((current) => ({ ...current, [threadKeyOf(consultation)]: mergeImMessages(current[threadKeyOf(consultation)] ?? [], [item]) }));
             // 即时反馈：服务端计数仍是权威，下一次目录轮询会覆盖这个乐观增量。
-            if (item.self !== true) {
+            if (item.self !== true && item.from !== "system") {
               setConsultations((current) => current.map((candidate) => threadKeyOf(candidate) === threadKeyOf(consultation)
                 ? { ...candidate, hasUnread: true, userUnreadCount: Math.min((candidate.userUnreadCount ?? 0) + 1, 999) }
                 : candidate));
@@ -943,12 +996,33 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, vi
         });
       } catch (cause) {
         revalidateAfterUnauthorized(cause);
-        if (!cancelled && generation === identityGenerationRef.current && identityRef.current === identity) { setConnection("error"); setImReady(false); }
+        if (!cancelled && generation === identityGenerationRef.current && identityRef.current === identity) {
+          setConnection("error");
+          setImReady(false);
+          setError("客服连接失败，请点击“重新连接”或稍后刷新。");
+        }
       }
     };
+    const reconnect = () => {
+      if (cancelled || reconnecting) return;
+      reconnecting = true;
+      setConnection("CONNECTING");
+      setError(undefined);
+      setImReady(false);
+      void (async () => {
+        try {
+          await lifecycle.close();
+          await run();
+        } finally {
+          reconnecting = false;
+        }
+      })();
+    };
+    reconnectRef.current = reconnect;
     void run();
     return () => {
       cancelled = true;
+      if (reconnectRef.current === reconnect) reconnectRef.current = null;
       clientRef.current = null;
       if (generation === identityGenerationRef.current && identityRef.current === identity) {
         readyIdentityRef.current = null;
@@ -958,6 +1032,8 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, vi
       void lifecycle.close();
     };
   }, [currentIdentity, preview, revalidateAfterUnauthorized, session.status, session.userId]);
+
+  const reconnect = () => reconnectRef.current?.();
 
   useEffect(() => {
     if (preview || !visible || session.status !== "authenticated") return;
@@ -1016,14 +1092,14 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, vi
 
   useEffect(() => {
     if (preview || activeId || consultations.length === 0) return;
-    // 入口意图（投诉/客服）共享 SERVICE 线程：优先选统一线程，只有不存在时才退回旧 COMPLAINT 行。
+    // 入口意图对应各自的持久线程：SERVICE 与 COMPLAINT 分开选中，互不覆盖。
     const wanted = normalizeSupportType(selectedType);
     const existing = consultations.find((item) => item.type === wanted) ?? consultations.find((item) => item.type === selectedType);
     if (existing) setActiveId(threadKeyOf(existing));
   }, [activeId, consultations, preview, selectedType]);
 
   useEffect(()=>{if(!preview&&!initialOrderId&&!activeId&&!selectedOrder&&!consultations.length&&orders.length){setSelectedOrder({id:orders[0]!.id,party:orders[0]!.party});setSection("orders");}},[preview,initialOrderId,activeId,selectedOrder,consultations,orders]);
-  useEffect(() => { setContextOpen(false); }, [activeId]);
+  useEffect(() => { setContextOpen(false); setCloseConfirmOpen(false); }, [activeId]);
 
   useEffect(() => {
     if (previousPanelViewRef.current === panelView) return;
@@ -1059,6 +1135,9 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, vi
   const adminReadAtMs = Number.isFinite(parsedReadAt) ? parsedReadAt : null;
   const parsedRoundStart = activeConversation?.createdAt ? Date.parse(activeConversation.createdAt) : Number.NaN;
   const roundStartMs = Number.isFinite(parsedRoundStart) ? parsedRoundStart : null;
+  // Only an own message in this round proves the agent has something to receive.
+  const hasUserMessageInRound = activeMessages.some((message) => message.self === true && (roundStartMs === null || typeof message.createTime !== "number" || message.createTime >= roundStartMs));
+  const waitingForFirstUserMessage = activeConversation?.state === "WAITING" && !hasUserMessageInRound;
   // 窄屏列表视图会把聊天窗整个隐藏；只有真正可见的聊天窗才代表用户“看到了”新消息。
   const chatPaneVisible = !narrowViewport || panelView === "chat";
   // 订单群未读按成员身份计数；只有群聊真正可见时清自己的未读，列表视图不代读。
@@ -1091,6 +1170,43 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, vi
   const activeRatingResolution = activeRoundId ? ratingResolved[activeRoundId] : undefined;
   const activeRating = activeConversation?.rating;
   const showRating = Boolean(!preview && roundEnded && activeConversation && threadStateOf(activeConversation) === "IDLE" && activeRoundId && activeRating?.available && !activeRating.submitted && !activeRating.dismissed && !activeRatingResolution);
+  const endConsultation = async () => {
+    const conversation = activeConversation;
+    if (preview || !conversation || conversation.state !== "ACTIVE" || closing) return;
+    const roundId = conversation.roundId || conversation.id;
+    const threadKey = threadKeyOf(conversation);
+    const random = globalThis.crypto?.randomUUID?.().replaceAll("-", "") ?? `${Date.now().toString(36)}${Math.random().toString(36).slice(2)}`;
+    const operationId = closeOperationsRef.current[roundId] ?? (closeOperationsRef.current[roundId] = `support_close_${random}`);
+    setClosing(true);
+    setError(undefined);
+    try {
+      const response = await fetch(`/api/im/consultations/${encodeURIComponent(roundId)}/close`, {
+        method: "POST",
+        credentials: "same-origin",
+        cache: "no-store",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ operationId }),
+      });
+      const value = await response.json().catch(() => null) as { consultation?: Consultation; error?: { message?: unknown } } | null;
+      if (!response.ok) {
+        const error = new Error(typeof value?.error?.message === "string" ? value.error.message : "结束咨询失败，请稍后重试。") as Error & { status: number };
+        error.status = response.status;
+        throw error;
+      }
+      if (!value?.consultation || typeof value.consultation.id !== "string") throw new Error("结束咨询响应格式无效");
+      const next = normalizeConsultation(value.consultation);
+      delete closeOperationsRef.current[roundId];
+      setConsultations((current) => current.map((item) => threadKeyOf(item) === threadKey ? next : item));
+      setCloseConfirmOpen(false);
+      await reloadThreadStates();
+    } catch (cause) {
+      setCloseConfirmOpen(false);
+      const status = httpStatus(cause);
+      setError(status === 409 ? "本轮咨询已结束或尚未接入客服，请刷新后重试。" : status === 403 ? "无权结束本轮咨询。" : status === 503 ? "本轮结束暂未完成，请稍后刷新重试。" : cause instanceof Error ? cause.message : "结束咨询失败，请稍后重试。");
+    } finally {
+      setClosing(false);
+    }
+  };
   canStartSendRef.current = canSend;
   const activeReply = replyTargets[activeConversationKey] ?? null;
   const selectedMedia = mediaDrafts[activeConversationKey] ?? null;
@@ -1105,7 +1221,9 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, vi
     && (message.messageType === undefined || message.messageType === 0) && message.text.trim() ? orderReferenceSummary(message.text) : null;
   const rowOfMessage = (target: EventTarget | null): HTMLElement | null => {
     const element = target as { closest?: (selector: string) => HTMLElement | null } | null;
-    return element && typeof element.closest === "function" ? element.closest("[data-message-id]") : null;
+    if (!element || typeof element.closest !== "function") return null;
+    const content = element.closest(".support-message-bubble, .support-message-media, .support-message-image, .order-card");
+    return content ? content.closest("[data-message-id]") : null;
   };
   const findActiveMessage = (id: string | undefined): SupportMessage | null => id ? (messages[activeConversationKey] ?? []).find((item) => item.id === id) ?? null : null;
   const jumpToSupportMessage = (messageId: string) => {
@@ -1230,12 +1348,18 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, vi
   const agentMeta = activeConversation?.assignedAdmin?.name ? { name: activeConversation.assignedAdmin.name, role: "客服", avatar: activeConversation.assignedAdmin.avatar } : undefined;
 
   let timelineDay = "";
-  const timelineItems: ReactNode[] = activeMessages.map((message,index) => {
-    const previous=activeMessages[index-1];
+  // Bot 欢迎/阶段卡覆盖建群和成员变化时不再重复技术通知；没有 Bot 覆盖时保留一条兜底。
+  const botAccountId = activeConversation?.botAccountId ?? null;
+  const timelineMessages = collapseImSystemNotices(activeMessages, {
+    hasBotMessage: Boolean(botAccountId && activeMessages.some((message) => message.from !== "system" && !message.revoked && message.senderId === botAccountId)),
+    noticeOf: (message) => message.notice ?? null,
+  });
+  const timelineItems: ReactNode[] = timelineMessages.map((message,index) => {
+    const previous=timelineMessages[index-1];
     const isBot = Boolean(message.from === "agent" && message.senderId && activeConversation?.botAccountId && message.senderId === activeConversation.botAccountId);
     const grouped = Boolean(!isBot && message.senderId && previous?.senderId === message.senderId && message.createTime && previous.createTime && message.createTime - previous.createTime < 300_000);
     const replySource = message.reply ? activeMessages.find((item) => item.id === message.reply!.messageId || item.messageClientId === message.reply!.messageId || item.messageServerId === message.reply!.messageId) : undefined;
-    const replySenderName = replySource ? (replySource.self ? "我" : replySource.from === "agent" ? "客服" : "用户") : null;
+    const replySenderName = replySource ? (replySource.self ? "我" : replySource.senderId === activeConversation?.botAccountId ? "洲洲助手" : replySource.from === "agent" ? "客服" : "用户") : null;
     const items: ReactNode[] = [];
     const dayKey = dayKeyOf(message.createTime);
     if (dayKey && dayKey !== timelineDay) {
@@ -1253,16 +1377,15 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, vi
           <div className="support-message-avatar" aria-hidden="true"><ProfileImage src={session.status === "authenticated" ? session.avatarUrl : null} fallback={<UserRound size={14} />} /></div>
           <div className="support-message-body">
             <div className="support-message-bubble-row">
-              <button
+              {renderTooltip(unresolvedText.unknown ? "发送结果未确认，点击重试" : "发送失败，点击重试", <button
                 type="button"
                 className="support-message-retry-btn"
-                title={unresolvedText.unknown ? "发送结果未确认，点击重试" : "发送失败，点击重试"}
                 aria-label="重新发送"
                 onClick={() => void retrySend()}
                 disabled={busy || !canSend}
               >
                 <CircleAlert size={15} />
-              </button>
+              </button>)}
               <div className="support-message-bubble" data-slot="bubble" data-failed="true">
                 {unresolvedText.text}
               </div>
@@ -1430,9 +1553,19 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, vi
     if (!target.openingId || !Number.isInteger(target.openingVersion)) {
       throw Object.assign(new Error("期初信息未就绪"), { status: 409 });
     }
+    // Freeze the subject and identity generation at invocation time. The shared order card
+    // must not send a later identity, and an unknown result must keep the original key/body.
+    const acting = session.userId;
+    if (session.status !== "authenticated" || !acting) {
+      throw Object.assign(new Error("登录状态已变化，请刷新后按原请求核对"), { status: 401 });
+    }
+    const subject = { userId: acting, identityVersion: session.identityVersion };
+    const isCurrent = () => isOrderSubjectCurrent(subject, sessionRef.current);
+    // The card persists the SAME `opening.confirm` intent as the order detail, so an unknown
+    // result can be recovered by the original key there instead of minting a new key here.
     // Server owns the ack; the panel re-reads access after this resolves.
-    await orderApi.confirmOpening(target.orderId, target.openingId, Number(target.openingVersion), orderIntentKey());
-  }, []);
+    await orderApi.confirmOpeningWithOriginalIntent(subject, target.orderId, target.openingId, Number(target.openingVersion), orderIntentKey, isCurrent);
+  }, [session.userId, session.status, session.identityVersion]);
 
   /**
    * 已结束订单群只读时进入普通客服线程：复用同一条 SERVICE 线程与历史，
@@ -2235,7 +2368,7 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, vi
     const sessionError = session.status === "error";
     return <section className={`support-gate${embedded ? " support-gate-embedded" : ""}`} aria-busy={session.status === "loading"}>
       {session.status !== "loading" ? sessionError ? <CircleAlert size={28} aria-hidden="true" /> : <Headphones size={28} aria-hidden="true" /> : null}
-      <div className="support-gate-heading"><div><h2>{sessionError ? "暂时无法打开客服" : "联系客服"}</h2>{session.status !== "loading" ? <p>{sessionError ? "登录状态读取失败，请重试。" : "投诉与咨询使用同一个客服会话，登录后继续。"}</p> : null}</div>{embedded ? <button type="button" className="support-icon-button" onClick={onClose} aria-label="关闭客服窗口" title="关闭客服窗口"><X size={18} /></button> : null}</div>
+      <div className="support-gate-heading"><div><h2>{sessionError ? "暂时无法打开客服" : "联系客服"}</h2>{session.status !== "loading" ? <p>{sessionError ? "登录状态读取失败，请重试。" : "投诉与咨询分别保留会话，登录后继续。"}</p> : null}</div>{embedded ? renderTooltip("关闭客服窗口", <button type="button" className="support-icon-button" onClick={onClose} aria-label="关闭客服窗口"><X size={18} /></button>) : null}</div>
       {session.status === "loading" ? <SessionLoading layout="compact" label="正在加载客服…" /> : null}
       {!sessionError && session.status !== "loading" ? <SupportTypePicker value={selectedType} onChange={setSelectedType} /> : null}
       {sessionError ? <button type="button" className="button secondary" onClick={session.revalidate}>重试身份确认</button> : session.status === "guest" ? <button type="button" className="button primary" onClick={() => void startConsultation()}><Headphones size={15} />登录并联系客服</button> : null}
@@ -2254,7 +2387,7 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, vi
       ? activeConversation.messageScopeState === "FAILED"
         ? "客服会话正在核验，暂不可发送"
         : activeConversation.state === "WAITING"
-          ? (activeScopeReady ? "等待客服接入，可先留言" : "正在连接客服…")
+          ? (activeScopeReady ? (waitingForFirstUserMessage ? "发送第一条消息后客服接入" : "等待客服接入") : "正在连接客服…")
           : activeConversation.state === "ACTIVE"
             ? activeConversation.assignedAdmin
               ? `当前接待：${activeConversation.assignedAdmin.name}`
@@ -2263,10 +2396,10 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, vi
       : "点击在线客服开始咨询";
 
   const consultationView = <section className={`support-workspace${embedded ? " support-workspace-embedded" : ""}`} data-preview={preview} aria-label="客服咨询窗口">
-    {error ? <div className="support-inline-error" role="alert"><CircleAlert size={15} />{error}</div> : null}
+    {error && connection !== "error" && connection !== "DISCONNECTED" ? <div className="support-inline-error" role="alert"><CircleAlert size={15} />{error}</div> : null}
     <div className="support-workspace-grid" ref={gridRef} data-view={preview ? panelView : "chat"}>
       {preview ? <nav className="support-conversation-list" aria-label="咨询会话">
-        <div className="support-list-heading" tabIndex={-1}><div><strong>咨询记录</strong><span>{preview ? "演示" : "平台记录"}</span></div><div className="support-list-heading-actions"><span className="support-list-count">{preview ? PREVIEW_CONVERSATIONS.length : consultations.length}</span><button type="button" className="support-back" data-action="back-to-chat" onClick={() => setPanelView("chat")}><ChevronLeft size={15} />返回</button>{embedded ? <button type="button" className="support-icon-button" onClick={onClose} aria-label="关闭客服窗口" title="关闭客服窗口"><X size={16} /></button> : null}</div></div>
+        <div className="support-list-heading" tabIndex={-1}><div><strong>咨询记录</strong><span>{preview ? "演示" : "平台记录"}</span></div><div className="support-list-heading-actions"><span className="support-list-count">{preview ? PREVIEW_CONVERSATIONS.length : consultations.length}</span><button type="button" className="support-back" data-action="back-to-chat" onClick={() => setPanelView("chat")}><ChevronLeft size={15} />返回</button>{embedded ? renderTooltip("关闭客服窗口", <button type="button" className="support-icon-button" onClick={onClose} aria-label="关闭客服窗口"><X size={16} /></button>) : null}</div></div>
         {PREVIEW_CONVERSATIONS.map((conversation) => <button key={conversation.id} type="button" className="support-conversation-item" data-active={conversation.id === activeId} onClick={() => { setActiveId(conversation.id); setPanelView("chat"); }} aria-current={conversation.id === activeId ? "page" : undefined}><span className="support-conversation-avatar" aria-hidden="true"><Headphones size={14} /></span><span className="support-conversation-copy"><strong>{conversation.title}</strong><span>{conversation.preview}</span></span><span className="support-conversation-meta"><time>{conversation.time}</time>{conversation.unread ? <b>{conversation.unread}</b> : null}</span></button>)}
       </nav> : null}
       <main className="support-conversation-panel">
@@ -2274,8 +2407,8 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, vi
           <button type="button" className="support-back" data-action="back-to-conversations" onClick={() => setPanelView("list")}><ChevronLeft size={15} />会话记录</button>
           <div className="support-conversation-identity"><span className="support-live-dot" data-state={activeConversation?.state === "ACTIVE" ? "active" : "idle"} aria-hidden="true" /><div><h3>{currentTitle}</h3>{currentSubtitle ? <span>{currentSubtitle}</span> : null}</div></div>
           <div className="support-heading-actions">
-            {preview || subjectRef ? <button type="button" className="support-icon-button" data-action="toggle-product-context" aria-expanded={contextOpen} aria-label="商品上下文" title="商品上下文" onClick={() => setContextOpen((value) => !value)}><Info size={16} /></button> : null}
-            {embedded ? <button type="button" className="support-icon-button" onClick={onClose} aria-label="关闭客服窗口" title="关闭客服窗口"><X size={18} /></button> : null}
+            {preview || subjectRef ? renderTooltip("商品上下文", <button type="button" className="support-icon-button" data-action="toggle-product-context" aria-expanded={contextOpen} aria-label="商品上下文" onClick={() => setContextOpen((value) => !value)}><Info size={16} /></button>) : null}
+            {embedded ? renderTooltip("关闭客服窗口", <button type="button" className="support-icon-button" onClick={onClose} aria-label="关闭客服窗口"><X size={18} /></button>) : null}
           </div>
         </header>
         <div className="support-facts-bar">
@@ -2287,7 +2420,7 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, vi
         </div>
         <div className="support-message-area">
            {unresolvedText ? <div className="support-send-retry" role="alert"><CircleAlert size={15} /><span>{unresolvedText.unknown ? "发送结果未确认，内容已保留。" : "消息发送失败，内容已保留。"}</span><button type="button" onClick={() => void refreshHistory()}>刷新历史</button><button type="button" onClick={() => void retrySend()} disabled={busy || !canSend}>{unresolvedText.messageClientId ? "原消息重试" : "重试发送"}</button></div> : null}
-           {!preview && !activeConversation ? <div className="support-start-panel" data-state="initial"><Headphones size={27} /><strong>从这里开始你的咨询</strong><span>点击后立即开始，客服接入后会看到你的留言。</span><SupportTypePicker value={selectedType} onChange={setSelectedType} disabled={busy} onSelect={(type) => void startConsultation(type)} />{busy ? <span className="support-start-panel-status" role="status">正在创建咨询…</span> : null}</div> : !preview && activeConversation?.messageScopeState === "FAILED" ? <div className="support-start-panel"><CircleAlert size={27} /><strong>{messageScopeUserLabel("FAILED")}</strong><span>平台暂时无法确认客服会话状态，已暂停发送和自动重试。请稍后再试或联系平台处理。</span></div> : <MessageScrollerPrimitive.Provider autoScroll defaultScrollPosition="last-anchor"><MessageScrollerPrimitive.Root className="support-message-scroller"><MessageScrollerPrimitive.Viewport preserveScrollOnPrepend className="support-message-viewport" aria-label="消息内容" onContextMenu={onSupportContextMenu}><MessageScrollerPrimitive.Content className="support-message-content">{timelineItems.length > 0 ? <>{historyMore[activeConversationKey] ? <MessageScrollerPrimitive.Item messageId="load-earlier"><div className="support-history-more"><button type="button" onClick={() => void loadEarlier()} disabled={historyLoading}>{historyLoading ? "正在读取更早消息…" : "更早的消息"}</button></div></MessageScrollerPrimitive.Item> : null}{timelineItems}</> : <MessageScrollerPrimitive.Item messageId="empty"><div className="support-message-empty"><Headphones size={24} /><strong>{activeConversation?.state === "WAITING" ? "咨询已提交" : "等待第一条消息"}</strong><span>{activeConversation?.state === "WAITING" ? (activeScopeReady ? "客服接入后会看到你的留言；现在也可以先发消息。" : "正在连接客服…已输入的内容会保留。") : preview ? "可以从下方快捷回复开始检查交互。" : "客服连接就绪后，消息会出现在这里。"}</span></div></MessageScrollerPrimitive.Item>}</MessageScrollerPrimitive.Content></MessageScrollerPrimitive.Viewport><MessageScrollerPrimitive.Button direction="end" className="support-jump-button" render={<button type="button" aria-label="跳到最新消息" title="跳到最新消息" />}><ArrowDown size={14} aria-hidden="true" /></MessageScrollerPrimitive.Button></MessageScrollerPrimitive.Root></MessageScrollerPrimitive.Provider>}
+           {!preview && !activeConversation ? <div className="support-start-panel" data-state="initial"><Headphones size={27} /><strong>从这里开始你的咨询</strong><span>创建咨询后发送第一条消息，客服才会收到并接入。</span><SupportTypePicker value={selectedType} onChange={setSelectedType} disabled={busy} onSelect={(type) => void startConsultation(type)} />{busy ? <span className="support-start-panel-status" role="status">正在创建咨询…</span> : null}</div> : <>{!preview && activeConversation?.messageScopeState === "FAILED" ? <div className="support-send-retry" role="alert"><CircleAlert size={15} /><span>当前无法发送，可重新连接或稍后刷新。</span><button type="button" onClick={reconnect}>重新连接</button></div> : null}<MessageScrollerPrimitive.Provider autoScroll defaultScrollPosition="last-anchor"><MessageScrollerPrimitive.Root className="support-message-scroller"><MessageScrollerPrimitive.Viewport preserveScrollOnPrepend className="support-message-viewport" aria-label="消息内容" onContextMenu={onSupportContextMenu}><MessageScrollerPrimitive.Content className="support-message-content">{timelineItems.length > 0 ? <>{historyMore[activeConversationKey] ? <MessageScrollerPrimitive.Item messageId="load-earlier"><div className="support-history-more"><button type="button" onClick={() => void loadEarlier()} disabled={historyLoading}>{historyLoading ? "正在读取更早消息…" : "更早的消息"}</button></div></MessageScrollerPrimitive.Item> : null}{timelineItems}</> : <MessageScrollerPrimitive.Item messageId="empty"><div className="support-message-empty"><Headphones size={24} /><strong>{activeConversation?.state === "WAITING" ? "咨询已提交" : "等待第一条消息"}</strong><span>{activeConversation?.state === "WAITING" ? (activeScopeReady ? (waitingForFirstUserMessage ? "发送第一条消息后，客服才会收到并接入。" : "客服尚未接入，可稍后刷新查看。") : "正在连接客服…已输入的内容会保留。") : preview ? "可以从下方快捷回复开始检查交互。" : "客服连接就绪后，消息会出现在这里。"}</span></div></MessageScrollerPrimitive.Item>}</MessageScrollerPrimitive.Content></MessageScrollerPrimitive.Viewport>{renderTooltip("跳到最新消息", <MessageScrollerPrimitive.Button direction="end" className="support-jump-button" render={<button type="button" aria-label="跳到最新消息" />}><ArrowDown size={14} aria-hidden="true" /></MessageScrollerPrimitive.Button>)}</MessageScrollerPrimitive.Root></MessageScrollerPrimitive.Provider></>}
         </div>
         <div className="support-composer-wrap">
           {validatedLegacyOrder?.signature===orderContextSignature && validatedLegacyOrder.thread===activeConversationKey ? <div className="support-attachment" role="group" aria-label="关联旧订单">
@@ -2296,7 +2429,7 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, vi
             }}>{sentLegacySignature===validatedLegacyOrder.signature?"已发送":"发送订单信息"}</button>
           </div> : null}
           {preview ? <div className="support-quick-replies" aria-label="快捷回复"><span>快捷回复</span>{["我先帮你确认一下", "请稍等，我正在核对"].map((reply) => <button key={reply} type="button" onClick={() => chooseQuickReply(reply)}>{reply}</button>)}</div> : null}
-          {attachment ? <div className="support-attachment" data-slot="attachment"><Paperclip size={14} /><span>{attachment}</span><button type="button" onClick={() => setAttachment(null)} aria-label="移除附件" title="移除附件">×</button></div> : null}
+          {attachment ? <div className="support-attachment" data-slot="attachment"><Paperclip size={14} /><span>{attachment}</span>{renderTooltip("移除附件", <button type="button" onClick={() => setAttachment(null)} aria-label="移除附件">×</button>)}</div> : null}
           {!preview && pendingImage[activeConversationKey] ? (() => {
             const pending = pendingImage[activeConversationKey]!;
             return <div className="support-pending-image" data-state={pending.state}><img src={pending.previewUrl} alt={pending.name} /><span>{pending.name} · {pending.state === "UNKNOWN" ? "发送结果未确认" : pending.state === "SENDING" ? `发送中 ${pending.progress ?? 0}%` : "发送失败"}{pending.messageClientId ? "" : "（无原消息标识）"}</span><button type="button" onClick={() => void retryPendingImage()} disabled={imageSending || !canSend}>{pending.messageClientId ? "原消息重试" : "重试"}</button><button type="button" onClick={removePendingImage} disabled={imageSending || pending.state === "UNKNOWN"}>移除</button></div>;
@@ -2336,15 +2469,14 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, vi
                         <strong>{stagedImages[activeConversationKey]!.length > 1 ? `${idx + 1}. ${staged.name}` : staged.name}</strong>
                         <span>{(staged.size / 1024).toFixed(1)} KB · {staged.state === "DECODING" ? "检查中" : "待发送"}</span>
                       </div>
-                      <button
+                      {renderTooltip("移除待发送图片", <button
                         type="button"
                         className="support-staged-remove"
                         onClick={() => removeStagedImageItem(staged.id)}
                         aria-label="移除待发送图片"
-                        title="移除待发送图片"
                       >
                         <X size={13} />
-                      </button>
+                      </button>)}
                     </div>
                   ))}
                 </div>
@@ -2364,15 +2496,15 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, vi
               onChange={(event) => {
                 setDraft(event.target.value);
                 event.currentTarget.style.height = "auto";
-                event.currentTarget.style.height = Math.min(Math.max(event.currentTarget.scrollHeight, 68), 150) + "px";
+                event.currentTarget.style.height = Math.min(Math.max(event.currentTarget.scrollHeight, 44), 120) + "px";
               }}
               onKeyDown={onComposerKeyDown}
               onPaste={onComposerPaste}
               onCompositionStart={() => { composingRef.current = true; }}
               onCompositionEnd={() => { composingRef.current = false; }}
-              placeholder={preview ? "输入咨询内容…" : composerBlockReason(activeConversation, canSend) ?? "输入咨询内容…"}
+              placeholder={preview ? "输入咨询内容…" : composerBlockReason(activeConversation, canSend, hasUserMessageInRound) ?? "输入咨询内容…"}
               aria-label="输入咨询内容"
-              rows={3}
+              rows={2}
               disabled={!canCompose || busy}
             />
             <div className="support-composer-footer">
@@ -2517,6 +2649,15 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, vi
                 </TooltipProvider>
               </div>
               <div className="support-composer-actions">
+                {!preview && activeConversation?.state === "ACTIVE" ? (
+                  <button
+                    type="button"
+                    className="support-action-btn support-action-secondary"
+                    data-action="end-consultation"
+                    disabled={closing || busy}
+                    onClick={() => setCloseConfirmOpen(true)}
+                  >结束本次咨询</button>
+                ) : null}
                 {(!canSend || activeConversation?.messageScopeState === "FAILED") ? (
                   <span className="support-composer-status">{activeConversation?.messageScopeState === "FAILED" ? messageScopeUserLabel("FAILED") : waitingProvisioning ? "正在连接客服…" : "当前不可发送"}</span>
                 ) : (
@@ -2532,15 +2673,27 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, vi
           </form>
         </div>
       </main>
-      {contextOpen ? <aside className="support-context-panel" aria-label="商品上下文"><div className="support-context-heading"><div><strong>商品与订单信息</strong><span>{preview ? "演示快照" : "平台授权信息"}</span></div><button type="button" className="support-icon-button" data-action="close-product-context" title="关闭商品上下文" aria-label="关闭商品上下文" onClick={() => { setContextOpen(false); gridRef.current?.querySelector<HTMLButtonElement>('[data-action="toggle-product-context"]')?.focus(); }}><X size={15} /></button></div>{preview ? <><article className="support-product-card" data-slot="attachment"><div className="support-product-card-top"><span>zzsh.im-card</span><span>v1</span></div><h3>{PREVIEW_PRODUCT.title}</h3><p>{PREVIEW_PRODUCT.summary}</p><dl><div><dt>状态</dt><dd>{PREVIEW_PRODUCT.statusText}</dd></div><div><dt>费用</dt><dd>{PREVIEW_PRODUCT.priceText}</dd></div></dl><div className="support-product-card-id">商品 ID · {PREVIEW_PRODUCT.objectId}</div></article><button type="button" className="support-action-btn support-action-primary support-context-send-btn" data-action="send-product-context" onClick={() => { sendOrderReference({ id: PREVIEW_PRODUCT.objectId, title: PREVIEW_PRODUCT.title, displayNo: PREVIEW_PRODUCT.objectId, party: "renter" }); }}><ReceiptText size={13} /><span>发送此订单信息</span></button></> : orders.length > 0 ? <div className="support-verified-orders"><span className="support-verified-orders-hint">点击订单，直接发送卡片：</span><div className="support-verified-orders-list">{orders.map((ord) => <button key={ord.id} type="button" className="support-verified-order-item" onClick={() => { sendOrderReference(ord); }}><strong>{ord.title}</strong><span>尾号 {ord.displayNo} · {ord.party === "owner" ? "出租订单" : "租入订单"}</span></button>)}</div></div> : <div className="support-context-empty"><Headphones size={20} /><strong>暂无可关联的订单</strong><span>仅展示你当前已付款或出租中的真实订单。</span></div>}<div className="support-context-note"><ShieldCheck size={15} /><p>点击订单即可发送卡片。</p></div></aside> : null}
+      {contextOpen ? <aside className="support-context-panel" aria-label="商品上下文"><div className="support-context-heading"><div><strong>商品与订单信息</strong><span>{preview ? "演示快照" : "平台授权信息"}</span></div>{renderTooltip("关闭商品上下文", <button type="button" className="support-icon-button" data-action="close-product-context" aria-label="关闭商品上下文" onClick={() => { setContextOpen(false); gridRef.current?.querySelector<HTMLButtonElement>('[data-action="toggle-product-context"]')?.focus(); }}><X size={15} /></button>)}</div>{preview ? <><article className="support-product-card" data-slot="attachment"><div className="support-product-card-top"><span>zzsh.im-card</span><span>v1</span></div><h3>{PREVIEW_PRODUCT.title}</h3><p>{PREVIEW_PRODUCT.summary}</p><dl><div><dt>状态</dt><dd>{PREVIEW_PRODUCT.statusText}</dd></div><div><dt>费用</dt><dd>{PREVIEW_PRODUCT.priceText}</dd></div></dl><div className="support-product-card-id">商品 ID · {PREVIEW_PRODUCT.objectId}</div></article><button type="button" className="support-action-btn support-action-primary support-context-send-btn" data-action="send-product-context" onClick={() => { sendOrderReference({ id: PREVIEW_PRODUCT.objectId, title: PREVIEW_PRODUCT.title, displayNo: PREVIEW_PRODUCT.objectId, party: "renter" }); }}><ReceiptText size={13} /><span>发送此订单信息</span></button></> : orders.length > 0 ? <div className="support-verified-orders"><span className="support-verified-orders-hint">点击订单，直接发送卡片：</span><div className="support-verified-orders-list">{orders.map((ord) => <button key={ord.id} type="button" className="support-verified-order-item" onClick={() => { sendOrderReference(ord); }}><strong>{ord.title}</strong><span>尾号 {ord.displayNo} · {ord.party === "owner" ? "出租订单" : "租入订单"}</span></button>)}</div></div> : <div className="support-context-empty"><Headphones size={20} /><strong>暂无可关联的订单</strong><span>仅展示你当前已付款或出租中的真实订单。</span></div>}<div className="support-context-note"><ShieldCheck size={15} /><p>点击订单即可发送卡片。</p></div></aside> : null}
     </div>
     {supportMenu && supportMenuMessage ? <MessageActionMenu key={`${supportMenu.key}:${supportMenu.id}`} x={supportMenu.x} y={supportMenu.y} items={supportMenuItems} onSelect={onSupportMenuAction} onClose={() => setSupportMenu(null)} returnFocus={supportMenu.row} /> : null}
+    <ConfirmAlertDialog
+      open={closeConfirmOpen}
+      onOpenChange={setCloseConfirmOpen}
+      title="结束本次咨询？"
+      description="结束后本轮聊天记录保留，你可以随时重新发起咨询。"
+      consequences={<ul><li>本轮客服服务结束，随后会出现评价入口。</li><li>聊天记录不会被删除。</li><li>重新发起会开启新的轮次。</li></ul>}
+      cancelLabel="继续咨询"
+      confirmLabel={closing ? "正在结束…" : "确认结束"}
+      busy={closing}
+      confirmDisabled={closing}
+      onConfirm={() => void endConsultation()}
+    />
   </section>;
   if(preview)return consultationView;
   const welcome=directoryReady&&!consultations.length&&!orders.length&&!initialOrderId;
-  const brand = <div className="support-brand"><img src="/art/zhouzhou/avatar.webp" width={36} height={36} alt=""/><div className="support-brand-text"><strong>洲洲客服</strong><ConnectionState preview={preview} localFake={clientRef.current?.transport==="local-fake"} state={connection} /></div></div>;
+  const brand = <div className="support-brand"><img src="/art/zhouzhou/avatar.webp" width={36} height={36} alt=""/><div className="support-brand-text"><strong>洲洲客服</strong><ConnectionState preview={preview} localFake={clientRef.current?.transport==="local-fake"} state={connection} onReconnect={reconnect} /></div></div>;
   const actions=<div className="support-entry-actions"><button type="button" className="support-action-btn support-action-primary" disabled={busy||!directoryReady} onClick={()=>void startConsultation("SERVICE")}><Headphones size={14}/>业务咨询</button><button type="button" className="support-action-btn support-action-secondary" disabled={busy||!directoryReady} onClick={()=>void startConsultation("COMPLAINT")}><ShieldCheck size={14}/>投诉反馈</button></div>;
-  const close=<button type="button" className="support-icon-button" aria-label="关闭客服窗口" title="关闭客服窗口" onClick={onClose}><X size={18}/></button>;
+  const close=renderTooltip("关闭客服窗口", <button type="button" className="support-icon-button" aria-label="关闭客服窗口" onClick={onClose}><X size={18}/></button>);
   const retainedDirectory=directoryIdentity===currentIdentity&&(consultations.length>0||orders.length>0);
   if (!directoryReady && !retainedDirectory) {
     if (directoryState === "loading") {
@@ -2600,7 +2753,7 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, vi
       <div className="support-welcome-hero">
         <span className="support-welcome-kicker">洲洲商行 · 在线客服</span>
         <h2>你好，需要什么帮助？</h2>
-        <p>真人客服实时在线协助，请选择服务事项：</p>
+        <p>真人客服协助处理，请选择服务事项：</p>
         <div className="support-welcome-entries">
           <button type="button" className="support-welcome-entry" data-action="welcome-service" disabled={busy || !directoryReady} onClick={() => void startConsultation("SERVICE")}>
             <span className="support-welcome-entry-icon" aria-hidden="true"><Headphones size={20} /></span>
@@ -2648,19 +2801,18 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, vi
           const item = entry.item;
           const threadState = threadStateOf(item);
           const statusLabel = threadStateLabel(item);
-          const lastMsg = messages[threadKeyOf(item)]?.at(-1);
-          // 历史未加载时目录显示服务端最近消息摘要；空摘要不能覆盖状态兜底。
-          const previewSnippet = typeof item.lastMessagePreview === "string" ? orderReferenceSummary(item.lastMessagePreview).trim() : "";
+          const lastMsg = [...(messages[threadKeyOf(item)] ?? [])].reverse().find((message) => message.from !== "system");
+          // 历史未加载时目录显示服务端最近消息摘要；空摘要不能覆盖状态兜底，系统通知也不进摘要。
+          const previewText = typeof item.lastMessagePreview === "string" ? orderReferenceSummary(item.lastMessagePreview).trim() : "";
+          const previewSnippet = previewText && !isImSystemNoticeText(previewText) ? previewText : "";
           const snippet = lastMsg
             ? lastMsg.image
               ? "[图片]"
               : lastMsg.media
                 ? mediaSummaryOf(lastMsg) ?? "[媒体]"
-                : lastMsg.from === "system"
-                  ? `[系统] ${lastMsg.text}`
-                  : lastMsg.text.includes("【咨询订单】")
-                    ? "[订单信息]"
-                    : orderReferenceSummary(lastMsg.text)
+                : lastMsg.text.includes("【咨询订单】")
+                  ? "[订单信息]"
+                  : orderReferenceSummary(lastMsg.text)
             : previewSnippet
               ? previewSnippet
               : item.messageScopeState === "FAILED"
@@ -2724,9 +2876,10 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, vi
         const orderTime = orderAt ? formatListTime(orderAt) : undefined;
         const orderActive = section === "orders" && selectedOrder?.id === item.id;
         // 最后一句真消息仍然优先；没有摘要时才按阶段兜底——结束态的群不能谎报“有新消息”，
-        // 建群中的群也不该说“暂无消息”。
-        const orderPreview = typeof item.lastMessagePreview === "string" && item.lastMessagePreview.trim()
-          ? item.lastMessagePreview.trim()
+        // 建群中的群也不该说“暂无消息”。系统通知不能成为目录摘要。
+        const previewText = typeof item.lastMessagePreview === "string" ? item.lastMessagePreview.trim() : "";
+        const orderPreview = previewText && !isImSystemNoticeText(previewText)
+          ? previewText
           : orderDirectorySnippet(item);
         // 群聊真正可见时，未读交给服务端清；列表只保留未读事实，不显示气泡。
         const orderUnreadCount = Math.max(0, item.unreadCount ?? 0);
@@ -2786,9 +2939,10 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, vi
       }}
       onClose={() => setDirectoryMenu(null)} returnFocus={directoryMenu.row} /> : null}
     <div className="support-unified-chat">
+      {connection === "error" || connection === "DISCONNECTED" ? <div className="support-inline-error" role="alert"><CircleAlert size={15} /><span>客服连接失败，暂时无法收发消息。</span><button type="button" onClick={reconnect}>重新连接</button></div> : null}
       {directoryState==="error"?<div className="support-inline-error" role="alert">{directoryError}<button type="button" onClick={()=>setDirectoryRevision(n=>n+1)}>重试读取</button></div>:null}
       <div className="support-pane" hidden={section!=="consultation"}>{consultationView}</div>
-      <div className="support-order-pane" hidden={section!=="orders"}><div className="support-order-actions"><button type="button" className="support-back" onClick={()=>setPanelView("list")}>返回会话</button>{close}</div><OrderTeamPanel key={currentIdentity} identity={currentIdentity} realm="user" client={clientRef.current} connection={connection} active={section==="orders"} visible={visible} polling={visible} initialParty={selectedOrder?.party??initialOrderParty} selectedOrderId={selectedOrder?.id} compact request={<T,>(path:string)=>orderRequest<T>(path,undefined,session.userId??undefined)} onAuthError={()=>{void session.confirm();}} onConfirmOpening={confirmOpening} onRequestAfterSales={requestAfterSales}/></div>
+      <div className="support-order-pane" hidden={section!=="orders"}><div className="support-order-actions"><button type="button" className="support-back" onClick={()=>setPanelView("list")}>返回会话</button>{close}</div><OrderTeamPanel key={currentIdentity} identity={currentIdentity} realm="user" client={clientRef.current} connection={connection} active={section==="orders"} visible={visible} polling={visible} initialParty={selectedOrder?.party??initialOrderParty} selectedOrderId={selectedOrder?.id} compact request={<T,>(path:string)=>orderRequest<T>(path,undefined,session.userId??undefined)} onAuthError={()=>{void session.confirm();}} onConfirmOpening={confirmOpening} renderHint={renderOrderCardHint} renderTooltip={renderOrderCardHint} onRequestAfterSales={requestAfterSales}/></div>
     </div>
   </div>;
 }

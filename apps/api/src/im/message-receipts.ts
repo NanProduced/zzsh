@@ -56,11 +56,13 @@ export async function storeImHiddenFact(client:PoolClient,appId:string,accountId
 export async function readImHistoryFilters(client:PoolClient,appId:string,accountId:string,ids:string[]):Promise<{hidden:Set<string>;revoked:Set<string>}>{
   if(!ids.length)return {hidden:new Set(),revoked:new Set()};
   const guards=ids.map(id=>imFactId("revoke_guard",appId,"system",id));
-  const operations=(await client.query<{action:string}>(`SELECT DISTINCT ON(object_id) action FROM zzsh_iam.audit_event WHERE object_type='im_message_revoke' AND object_id=ANY($1::text[]) ORDER BY object_id,occurred_at DESC,id DESC`,[guards])).rows;
-  if(operations.some(r=>r.action==="im.message.revoke.started"))throw new SecurityApiError(503,"IM_UNAVAILABLE","Message revoke result requires review");
+  const operations=(await client.query<{object_id:string;action:string}>(`SELECT DISTINCT ON(object_id) object_id,action FROM zzsh_iam.audit_event WHERE object_type='im_message_revoke' AND object_id=ANY($1::text[]) ORDER BY object_id,occurred_at DESC,id DESC`,[guards])).rows;
+  // An unresolved revoke hides only that message; the rest of the page stays readable.
+  const guardToMessage=new Map(guards.map((guard,index)=>[guard,ids[index]!]));
+  const uncertain=new Set(operations.filter(r=>r.action==="im.message.revoke.started").map(r=>guardToMessage.get(r.object_id)).filter((id):id is string=>Boolean(id)));
   const keys=ids.flatMap(id=>[imFactId("hidden",appId,accountId,id),imFactId("revoked",appId,"system",id)]);
   const rows=(await client.query<{id:string;object_id:string}>(`SELECT id,object_id FROM zzsh_iam.audit_event WHERE id=ANY($1::text[])`,[keys])).rows;
-  return {hidden:new Set(rows.filter(r=>r.id.startsWith("im_hidden_")).map(r=>r.object_id)),revoked:new Set(rows.filter(r=>r.id.startsWith("im_revoked_")).map(r=>r.object_id))};
+  return {hidden:new Set(rows.filter(r=>r.id.startsWith("im_hidden_")).map(r=>r.object_id)),revoked:new Set([...rows.filter(r=>r.id.startsWith("im_revoked_")).map(r=>r.object_id),...uncertain])};
 }
 
 export async function planImRevoke(client:PoolClient,appId:string,accountId:string,actor:ImReceiptActor,message:ImReceiptMessage,requestId:string):Promise<"STARTED"|"SUCCEEDED"|"UNKNOWN">{

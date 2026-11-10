@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { parseAdminFinanceFilters, resolveFinanceLookup, projectAdminFinanceLedger, projectAdminFinanceObservation, financeDocuments, financeOrderDocuments, readAdminFinanceDocument, financePeriodProjection, filterAdminFinanceEntries, financeSnapshot, type FinanceFacts } from "../src/finance/admin-finance-read";
+import { adminFinanceLedgerSql, parseAdminFinanceFilters, resolveFinanceLookup, projectAdminFinanceLedger, projectAdminFinanceObservation, financeDocuments, financeOrderDocuments, readAdminFinanceDocument, financePeriodProjection, filterAdminFinanceEntries, financeSnapshot, type FinanceFacts } from "../src/finance/admin-finance-read";
 import { generateAdminFinanceCsv } from "../src/finance/admin-finance-export";
 import { matchFinanceOrderReference, type FinanceOrderFact } from "../src/finance/admin-finance-order-read";
 import { FinanceSqlFixture } from "./admin-finance-fixture";
@@ -15,6 +15,15 @@ const filters = parseAdminFinanceFilters(new URLSearchParams("from=2026-10-03&to
 const line = (overrides: Record<string, unknown> = {}) => projectAdminFinanceLedger({ id: "a", account_code: "WALLET_AVAILABLE", subject_id: "u1", subject_name: "同昵称", delta: "-20000", at: "2026-10-03T00:00:00.000000Z", source_entity: "withdrawal_intent", source_id: "w1", event_kind: "RESERVE", ...overrides });
 const facts = (): FinanceFacts => ({ entries: [line()], subjects: [{ id: "u1", name: "同昵称" }], revisions: [], withdrawalsReady: true, asOf: "2026-10-03T10:00:00.000000Z", version: "a".repeat(64) });
 const actor = { userId: "admin1", sessionId: "session1", authorizationKey: "access1" }, key = { keyId: "read1", secret: "x".repeat(64) };
+test('客服取消的号主账本在所有可选来源组合中都关联本订单',()=>{
+ for(const distribution of [false,true])for(const prestart of [false,true]){
+  const sql=adminFinanceLedgerSql(distribution,prestart);
+  assert.equal((sql.match(/NATIVE_SUPPORT_CANCELLATION/g)??[]).length,2);
+  assert.match(sql,/support_poststart_cancellation/);
+  if(!distribution)assert.doesNotMatch(sql,/\bre\./);
+  if(!prestart)assert.doesNotMatch(sql,/\bpt\./);
+ }
+});
 test('historical payment/refund documents preserve original business states and remain outside current wallet and period ledger totals',()=>{
  for(const [entity,kind,purpose]of [['la_pay_order','PAYMENT','旧平台付款记录'],['la_refund_record','REFUND','旧平台退款记录']]){
   const record=projectAdminFinanceObservation({id:'source-'+kind,subject_id:'u1',subject_name:'fixture',source_type:'LEGACY_MYSQL',source_system:'legacy_mysql_restore',source_entity:entity,source_id:'11',source_digest:'a'.repeat(64),amount:'12.34',source_status:'1',at:facts().asOf,imported_at:facts().asOf,included_in_opening:false,reference_id:null,reference_no:null,extra_evidence:{snapshot:{sourceNumber:'ORIGINAL-'+kind,sourceOrderType:'order',associationState:'UNRESOLVED'}}});

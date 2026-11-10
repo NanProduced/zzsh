@@ -58,6 +58,8 @@ export function UserSessionProvider({ children }: { children: ReactNode }) {
   if (!storeRef.current) storeRef.current = createBrowserUserSessionStore();
   const store = storeRef.current;
   const snapshot = useSyncExternalStore(store.subscribe, store.getSnapshot, store.getSnapshot);
+  // No order subject is registered here. Each order read/write captures its own frozen subject
+  // when it is created or recovered, so a delayed original intent cannot inherit a later identity.
   const [profileNotice, setProfileNotice] = useState<{ userId: string; kind: 'avatar' | 'nickname' } | null>(null);
   useEffect(() => {
     const show = (event: Event) => {

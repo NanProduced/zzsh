@@ -6,7 +6,7 @@
 
 业务迁移位于 `apps/api/migrations/business/`，源码共 **154份SQL**，`meta/_journal.json` **154条**登记（idx 0…153，tag与文件名一一对应）。源码登记不表示数据库已经执行；实际链与权限须分别核验。旧`release_0141`基线覆盖原0000–0141，保持原hash后接原编号增量。中文`release_0151`由同一生成器覆盖0000–0151，已通过原链与新装的逐项结构/种子/序列/ACL比较；[表级导航](../../apps/api/migrations/initial/release_0151/NAVIGATION.md)指向本基线最终定义。每个baseline只记一条，不能冒称142或152次历史执行。默认`--initial`兼容0141，新0151使用`--initial --baseline release_0151`显式选择，见[新装基线](../operations/database-initial.md)。另有一条独立正式迁移线 `apps/api/migrations/0000_fnd004_test_metadata.sql`（`zzsh_meta.database_marker`，journal 1 条）。两条线分别由 `apps/api/src/database/migrations.ts` 与 `business-migrations.ts` 执行，记账 schema 分别为 `zzsh_meta` 与 `zzsh_business_meta`（后者不在任何 SQL 中 CREATE，由 migrator 自建）。
 
-0102 支持极速比例仅设下限；0103 增加用户冻结状态及权限；0104 增加提现查单权限；0105 保存本人实名展示来源；0106 增加异常原款退款责任，0107 增加未开租终止与全额原款应退。0105 的 runtime 权限由正式 `migrate:business` 后置 ACL 收敛为仅 SELECT，不能把 `GRANT SELECT` 当作撤销 schema 默认写权限。升级保留已执行 SQL 字节与 journal 时间；新的迁移须使用未占用编号和晚于现有链的时间。
+0102 支持极速比例仅设下限；0103 增加用户冻结状态及权限；0104 增加提现查单权限；0105 保存本人实名展示来源；0107 增加未开租终止与全额原款应退。0106 的异常原款退款功能已退役，历史迁移仅为兼容已有版本链保留。0105 的 runtime 权限由正式 `migrate:business` 后置 ACL 收敛为仅 SELECT，不能把 `GRANT SELECT` 当作撤销 schema 默认写权限。升级保留已执行 SQL 字节与 journal 时间；新的迁移须使用未占用编号和晚于现有链的时间。
 
 下列计数仅为 0000–0090 的历史静态扫描基线，不含 0091 及之后的迁移，**不是真实 PostgreSQL 目录核验**：`CREATE TABLE` 146 条（全部当前存在，含 5 张 `LIKE … INCLUDING ALL` 克隆表，全部在 `zzsh_auth_admin`）、`CREATE SEQUENCE` 3 条、函数定义事件 222 次对应 **182 个输入类型签名身份**（76 次 `CREATE OR REPLACE`，0 个同名重载）、触发器创建事件 256 次（211 条 `CREATE TRIGGER` + 45 条 `CREATE CONSTRAINT TRIGGER`）对应 **233 个（目标表+名称）身份**（当前存在 232、已删除 1），`DROP TRIGGER` 49 条、`DROP COLUMN` 2 条、`CREATE INDEX` 128 条（36 UNIQUE + 92 非唯一）对应 **126 个不同索引身份**（当前存在 123、已删除 3、删除后重建 3；其中 39 个 partial、2 个表达式索引）、隐式索引身份 277（当前存在 275）、约束身份 1348（当前存在 1332）。无 `DROP TABLE`/`DROP FUNCTION`、无 `RENAME`、无 `CREATE VIEW`、无 `CREATE POLICY`、无 `ROW LEVEL SECURITY`、无 `COMMENT ON`。
 
@@ -44,7 +44,7 @@
 | 0100 | 商户账户只读观察，1 个新关系 |
 | 0101 | 本人银行卡加密资料及版本守卫，1 个新关系 |
 | 0102–0105 | 极速比例下限、用户冻结、提现查询权限、本人实名展示来源 |
-| 0106–0107 | 异常原款退款责任、未开租终止及全额原款退款守卫 |
+| 0106–0107 | 历史退款结构、未开租终止及全额原款退款守卫；0106 异常原款退款功能已退役 |
 | 0108 | 旧资金来源证明、提现退回独立根、安全摘要与旧责任覆盖核验；不回写旧期初/原件 |
 | 0109–0111 | 内容资源/格式、未发布草稿历史、平台动态版本化展示与不可变性 |
 | 0112 | 平台法律文书封存版本、不可变接受台账；角色权限由正式后置ACL收敛 |

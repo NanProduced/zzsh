@@ -51,6 +51,21 @@ test('explicit composition cannot fall back to plain payment when preparation is
 test('first REVIEW_REQUIRED never records an earning basis',async()=>{
  const p=probe({review:true}),s=store(p),r=await confirmOrderPayment(p.c,fact(),s.value);assert.equal(r.disposition,'REVIEW_REQUIRED');assert.deepEqual(s.calls,['prepare']);assert(!p.seen.some(sql=>sql.includes('INSERT INTO zzsh_order.im_order_group')));
 });
+test('opening hook SQL failure is isolated by a savepoint and never rolls back the accepted payment',async()=>{
+ const p=probe();let recordedFailure=false;
+ const result=await confirmOrderPayment(p.c,fact(),undefined,{
+  onApplied:async()=>{throw Object.assign(new Error('missing opening table'),{code:'42P01'});},
+  onAppliedFailure:async(_input,error)=>{assert.equal((error as {code?:string}).code,'42P01');recordedFailure=true;},
+ });
+ assert.equal(result.disposition,'APPLIED');
+ assert.equal(recordedFailure,true,'the failure fact is attempted after rollback to the savepoint');
+ assert(p.seen.includes('SAVEPOINT automatic_opening'));
+ assert(p.seen.includes('ROLLBACK TO SAVEPOINT automatic_opening'));
+ assert(p.seen.includes('RELEASE SAVEPOINT automatic_opening'));
+ assert(p.seen.includes('SAVEPOINT automatic_opening_failure'));
+ assert(p.seen.some(sql=>sql.includes('INSERT INTO "zzsh_iam"."audit_event"')),'payment audit still commits');
+});
+
 test('record and audit failures escape to the transaction owner and request rollback, never commit',async()=>{
  for(const auditFailure of [false,true]){const p=probe({auditFailure}),s=store(p,{recordFailure:!auditFailure});await assert.rejects(withTransaction(p.pool,c=>confirmOrderPayment(c,fact(),s.value)),/unavailable/);assert.equal(p.seen.at(-1),'ROLLBACK');assert(!p.seen.includes('COMMIT'));assert(s.calls.includes('record'));}
 });

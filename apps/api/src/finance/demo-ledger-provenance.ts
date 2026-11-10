@@ -6,8 +6,10 @@ export type DemoLedgerOrigin = "LOCAL_DEMO_SIMULATED" | "ECS_TEST_SIMULATED" | "
 /** Classify only exact controlled money facts. An unproved controlled source stays unknown. */
 export async function readDemoLedgerOrigins(client:PoolClient,ids:readonly string[]):Promise<Map<string,DemoLedgerOrigin>> {
   const result=new Map<string,DemoLedgerOrigin>();if(!ids.length)return result;
-  const status=(await client.query<{present:boolean;ready:boolean}>(`SELECT
+  const status=(await client.query<{present:boolean;ready:boolean;support_ready:boolean}>(`SELECT
     to_regclass('zzsh_order.ecs_test_demo_finance_registration') IS NOT NULL AS present,
+    COALESCE(has_table_privilege(to_regclass('zzsh_order.support_poststart_cancellation'),'SELECT'),false)
+      AND COALESCE(has_function_privilege(to_regprocedure('zzsh_order.support_poststart_cancellation_complete(text)'),'EXECUTE'),false) AS support_ready,
     COALESCE(has_table_privilege(to_regclass('zzsh_order.ecs_test_demo_finance_registration'),'SELECT'),false)
       AND COALESCE(has_table_privilege(to_regclass('zzsh_order.controlled_payment_declaration'),'SELECT'),false)
       AND COALESCE(has_table_privilege(to_regclass('zzsh_order.withdrawal_intent'),'SELECT'),false)
@@ -17,8 +19,9 @@ export async function readDemoLedgerOrigins(client:PoolClient,ids:readonly strin
   if(status.ready!==true)throw new SecurityApiError(503,"EVIDENCE_UNAVAILABLE","测试资金来源暂不可核对");
   const rows=(await client.query<{id:string;candidate:boolean;schema:string|null}>(`SELECT l.id,
     (r.source_kind='LOCAL_CONTROLLED_WITHDRAWAL' OR p.payment_confirmation_id IS NOT NULL AND pay.source='CONTROLLED'
+      OR (r.source_kind='NATIVE_SUPPORT_CANCELLATION' ${status.support_ready ? "AND (sp.id IS NULL OR spay.source IS DISTINCT FROM 'JOINPAY')" : ""})
       OR e.kind='DEMO_LEGACY_REFUND_PAID') AS candidate,
-    COALESCE(wproof.schema,pproof.schema,lproof.schema) AS schema
+    COALESCE(wproof.schema,pproof.schema,lproof.schema${status.support_ready ? ',sproof.schema' : ''}) AS schema
     FROM zzsh_order.settlement_ledger_entry l
     LEFT JOIN zzsh_order.finance_event e ON e.id=l.finance_event_id
     LEFT JOIN zzsh_order.finance_economic_root r ON r.id=e.economic_root_id
@@ -27,6 +30,9 @@ export async function readDemoLedgerOrigins(client:PoolClient,ids:readonly strin
     LEFT JOIN zzsh_order.settlement_posting p ON p.id=COALESCE(l.posting_id,re.posting_id)
       AND (re.id IS NULL OR re.order_id=p.order_id AND re.payment_confirmation_id=p.payment_confirmation_id)
     LEFT JOIN zzsh_order.payment_confirmation pay ON pay.id=p.payment_confirmation_id AND pay.order_id=p.order_id
+    ${status.support_ready ? `LEFT JOIN zzsh_order.support_poststart_cancellation sp ON sp.id=r.source_id
+      AND sp.root_id=r.id AND sp.event_id=e.id AND e.kind='SUPPORT_CANCELLATION_RECOGNIZED'
+    LEFT JOIN zzsh_order.payment_confirmation spay ON spay.id=sp.payment_confirmation_id AND spay.order_id=sp.order_id` : ''}
     LEFT JOIN LATERAL (SELECT s.canonical_registration::jsonb->>'schema' AS schema
       FROM zzsh_order.withdrawal_intent w JOIN zzsh_order.withdrawal_admission a
         ON a.id=w.admission_id AND a.user_id=w.user_id AND a.sandbox_registration_ref=w.sandbox_registration_ref
@@ -71,6 +77,22 @@ export async function readDemoLedgerOrigins(client:PoolClient,ids:readonly strin
         AND x.assumption='SIMULATION_ASSUME_NO_PRIOR_REFUND' AND x.amount_cents>0 AND x.amount_cents<=x.paid_cents
         AND s.registration_digest=encode(sha256(convert_to(s.canonical_registration,'UTF8')),'hex')
         AND s.canonical_registration::jsonb->>'schema' IN ('ecs-test-demo-finance.v1','local-demo-clone-finance.v1')) lproof ON true
+    ${status.support_ready ? `LEFT JOIN LATERAL (SELECT s.canonical_registration::jsonb->>'schema' AS schema
+      FROM zzsh_order.controlled_payment_declaration d
+      JOIN zzsh_order.distribution_order_admission a ON a.id=d.admission_id AND a.order_id=sp.order_id AND a.revision=d.admission_revision
+      JOIN zzsh_order.ecs_test_demo_finance_registration s ON s.registration_digest=d.approval_digest AND s.registration_digest=a.approval_digest
+      WHERE spay.source='CONTROLLED' AND spay.disposition='APPLIED' AND d.order_id=sp.order_id
+        AND d.merchant_scope_id=spay.merchant_scope_id AND d.provider_transaction_id=spay.provider_transaction_id
+        AND d.merchant_order_no=spay.merchant_order_no AND d.mode='LOCAL_CONTROLLED_DECLARED_PAYMENT'
+        AND l.details->>'supportCancellationId'=sp.id AND zzsh_order.support_poststart_cancellation_complete(sp.id)
+        AND a.mode='LOCAL_CONTROLLED' AND a.resource_oid=d.resource_oid AND a.resource_name=current_database()
+        AND a.resource_marker=(s.canonical_registration::jsonb #>> '{resource,marker}')
+        AND d.resource_oid::text=(s.canonical_registration::jsonb #>> '{resource,databaseOid}')
+        AND d.canonical_payment::jsonb->>'orderId'=spay.order_id AND d.canonical_payment::jsonb->>'amountCents'=spay.amount_cents::text
+        AND d.canonical_payment::jsonb->>'currency'=spay.currency AND d.canonical_payment::jsonb->>'providerTransactionId'=spay.provider_transaction_id
+        AND d.payment_digest=encode(sha256(convert_to(d.canonical_payment,'UTF8')),'hex')
+        AND s.registration_digest=encode(sha256(convert_to(s.canonical_registration,'UTF8')),'hex')
+        AND s.canonical_registration::jsonb->>'schema' IN ('ecs-test-demo-finance.v1','local-demo-clone-finance.v1')) sproof ON true` : ''}
     WHERE l.id=ANY($1::text[])`,[ids])).rows;
   for(const row of rows){
     if(row.schema==='ecs-test-demo-finance.v1')result.set(row.id,'ECS_TEST_SIMULATED');

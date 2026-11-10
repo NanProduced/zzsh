@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import Link from "next/link";
 import { QRCodeSVG } from "qrcode.react";
 import * as Dialog from "@radix-ui/react-dialog";
@@ -21,14 +21,21 @@ import {
   type ChannelPaymentView,
   type ChannelPaymentMethod,
   type OrderSettlement,
+  type OrderSettlementStage,
   type SettlementLine,
   type SettlementOpening,
   type SettlementPreview,
   type SettlementQuantityInput,
   type SettlementVersion,
+  type OrderSubjectInput,
+  captureOrderSubject,
+  isOrderSubjectCurrent,
+  runGuardedWrite,
+  type GuardedError,
+  type GuardedWriteResult,
 } from "@/lib/order-client";
-import { clearIntent, inspectIntent, isIntentStale, loadIntent, saveIntent, type IntentKind } from "@/lib/order-intents";
-import { cancelEntryOpen, chargeRowLabel, consumptionRows, decisionAmountRows, isAdjustedVersion, moneyCents, moneyText, paymentEntryOpen, paymentObservation, postingAmountRows, previewAmounts, proposedConfirmationCents, quantityText, resourceName, settlementAmountRows, settlementPreviewProblem, unitHint, type SettlementAmountRow } from "@/lib/order-display";
+import { clearIntent, inspectIntent, isIntentStale, loadIntent, type IntentKind } from "@/lib/order-intents";
+import { cancelEntryOpen, chargeRowLabel, consumptionRows, decisionAmountRows, isAdjustedVersion, moneyCents, moneyText, paymentEntryOpen, paymentObservation, postingAmountRows, previewAmounts, proposedConfirmationCents, quantityText, resourceName, settlementAmountRows, settlementPreviewProblem, unitHint, type OrderPaymentFacts, type SettlementAmountRow } from "@/lib/order-display";
 import "./order.css";
 
 type PanelError = { message: string; retryable: boolean };
@@ -39,6 +46,18 @@ export type WriteOutcome<T> =
   | { status: "blocked"; message: string }
   | { status: "recovery-unresolved"; error: OrderRequestError }
   | { status: "definitive"; error: OrderRequestError };
+
+/** Only what the channel payment read actually returned; the progress card must not infer an outcome. */
+export function channelPaymentFacts(view: ChannelPaymentView): OrderPaymentFacts {
+  return {
+    state: view.request?.state ?? null,
+    displayState: view.projection?.displayState ?? null,
+    blockedReason: view.projection?.actionBlockedReason ?? null,
+    readFailed: false,
+  };
+}
+
+export const PAYMENT_FACTS_UNREADABLE: OrderPaymentFacts = { state: null, displayState: null, blockedReason: null, readFailed: true };
 
 /** Facts the detail banner may state, and only what the settlement read actually returned. */
 export type OrderStageFacts = {
@@ -52,6 +71,14 @@ export type OrderStageFacts = {
   openingConfirmedAt: string | null;
   myAck: boolean;
   otherAck: boolean;
+  /** Server-owned stage when the settlement read supplies one; null on older projections. */
+  stageCode: OrderSettlementStage["code"] | null;
+  viewerActionRequired: boolean;
+  /** Frozen per-order auto-confirm deadline; null when the server recorded none. */
+  autoConfirmDueAt: string | null;
+  /** Opening generation outcome; null when the read omits the field. */
+  openingGenerationState: "CREATED" | "REVIEW_REQUIRED" | null;
+  openingGenerationRecoveryRequired: boolean;
   /** This party's final settlement figure, straight from the posting's final column. `null` until posted. */
   settled: { label: string; text: string } | null;
 };
@@ -71,44 +98,45 @@ function writeError(error: unknown): string {
  * A 4xx on a fresh key is a definitive non-commit; a 4xx while recovering an existing intent is
  * returned as `recovery-unresolved` and only an authoritative read may release it.
  */
+/** The shared lib result carries structural errors; map them back to the panel outcome type. */
+function toOrderRequestError(error: GuardedError): OrderRequestError {
+  return new OrderRequestError(error.status, { error: { code: error.code, message: error.message } });
+}
+function mapGuardedResult<T>(result: GuardedWriteResult<T>): WriteOutcome<T> {
+  if (result.status === "ok") return { status: "ok", value: result.value };
+  if (result.status === "unknown") return { status: "unknown", message: writeError(toOrderRequestError(result.error)) };
+  if (result.status === "unauthorized") return { status: "unauthorized", error: toOrderRequestError(result.error) };
+  if (result.status === "blocked") return { status: "blocked", message: result.message };
+  if (result.status === "recovery-unresolved") return { status: "recovery-unresolved", error: toOrderRequestError(result.error) };
+  return { status: "definitive", error: toOrderRequestError(result.error) };
+}
+
+/**
+ * Panels delegate to the same lib core as the customer-support order card, so a frozen
+ * `opening.confirm` intent written by either entry is byte-compatible and recoverable by both.
+ */
 export async function performGuardedWrite<T>(
-  userId: string | null,
+  subject: OrderSubjectInput | null,
   kind: IntentKind,
   resourceId: string,
   body: Record<string, unknown>,
   context: Record<string, unknown> | undefined,
-  request: (key: string, body: Record<string, unknown>, context: Record<string, unknown> | undefined) => Promise<T>,
+  request: (key: string, body: Record<string, unknown>, context: Record<string, unknown> | undefined, subject: string) => Promise<T>,
+  assertCurrent?: (subject: string) => boolean,
 ): Promise<WriteOutcome<T>> {
-  if (!userId) return { status: "definitive", error: new OrderRequestError(401, null) };
-  const existing = loadIntent(userId, kind, resourceId);
-  let key: string, frozenBody: Record<string, unknown>, frozenContext: Record<string, unknown> | undefined;
-  if (existing) {
-    key = existing.key;
-    frozenBody = existing.body;
-    frozenContext = existing.context;
-  } else {
-    const saved = saveIntent({ userId, kind, resourceId, key: orderIntentKey(), body, context });
-    if (!saved.persisted) return { status: "blocked", message: "浏览器会话存储不可用，无法保存原请求恢复信息；为避免产生不可恢复的写入，本次提交已阻止。" };
-    key = saved.intent.key;
-    frozenBody = saved.intent.body;
-    frozenContext = saved.intent.context;
-  }
-  try {
-    const value = await request(key, frozenBody, frozenContext);
-    clearIntent(userId, kind, resourceId);
-    return { status: "ok", value };
-  } catch (error) {
-    const typed = error instanceof OrderRequestError ? error : new OrderRequestError(0, null);
-    if (typed.status === 401 || typed.code === "UNAUTHENTICATED") return { status: "unauthorized", error: typed };
-    if (typed.status === 0 || typed.status >= 500) return { status: "unknown", message: writeError(error) };
-    if (existing) return { status: "recovery-unresolved", error: typed };
-    clearIntent(userId, kind, resourceId);
-    return { status: "definitive", error: typed };
-  }
+  return mapGuardedResult(await runGuardedWrite<T>({
+    subject, kind, resourceId, body, context, request,
+    keyFactory: orderIntentKey,
+    assertCurrent,
+  }));
 }
 
 function panelError(error: unknown): PanelError {
   if (error instanceof OrderRequestError) {
+    // An already-open older tab hits the new BFF without the frozen-subject header. Never relax
+    // the write binding for compatibility: tell the user to reload once. The original key/body
+    // stays in session storage and is recovered by the new bundle after the reload.
+    if (error.status === 400 && error.code === "IDENTITY_BINDING_REQUIRED") return { message: "页面版本已更新，请刷新页面后重试；原申请已保留，不会重复提交。", retryable: false };
     if (error.status === 0) return { message: "网络中断，结果未知。原请求可安全重试，不会重复扣款或重复记账。", retryable: true };
     if (error.status === 401 || error.code === "UNAUTHENTICATED") return { message: "登录状态已变化；原申请已保留，确认身份后可恢复。", retryable: false };
     if (error.status === 403) return { message: "当前身份没有这项操作权限。", retryable: false };
@@ -184,9 +212,12 @@ function channelApplied(view: ChannelPaymentView | null): boolean {
 const ignoreDemoMode = () => {};
 
 /** 新渠道独立保留原键；普通刷新只读本地状态，不把旧受控请求当作渠道付款。 */
-function ChannelPaymentAction({ order, blocked, onChanged, onModeChange, onPendingChange, children }: {
-  order: Order; blocked: boolean; onChanged: () => void; onModeChange: (active: boolean) => void; onPendingChange: (pending: boolean) => void; children: ReactNode;
+function ChannelPaymentAction({ order, blocked, onChanged, onModeChange, onPendingChange, onPaymentFacts, children }: {
+  order: Order; blocked: boolean; onChanged: () => void; onModeChange: (active: boolean) => void; onPendingChange: (pending: boolean) => void;
+  onPaymentFacts?: (facts: OrderPaymentFacts | null) => void; children: ReactNode;
 }) {
+  const reportPayment = useRef(onPaymentFacts);
+  useEffect(() => { reportPayment.current = onPaymentFacts; }, [onPaymentFacts]);
   const session = useUserSession();
   const [snapshot, setSnapshot] = useState<{ userId: string; orderId: string; view: ChannelPaymentView } | null>(null);
   const [readError, setReadError] = useState<string | null>(null), [notice, setNotice] = useState<string | null>(null);
@@ -205,6 +236,9 @@ function ChannelPaymentAction({ order, blocked, onChanged, onModeChange, onPendi
   const view = snapshot?.userId === userId && snapshot.orderId === order.id ? snapshot.view : null;
   const pending = userId ? inspectIntent(userId, "order.channel-payment", order.id) : { state: "NONE" as const, intent: null };
   const previousDemoPending = userId ? inspectIntent(userId, "order.demo-checkout", order.id) : { state: "NONE" as const, intent: null };
+  const originalRequestPending = pending.state !== "NONE" || previousDemoPending.state !== "NONE";
+  const originalRequestPendingRef = useRef(originalRequestPending);
+  originalRequestPendingRef.current = originalRequestPending;
   const conflictingIntents = pending.state !== "NONE" && previousDemoPending.state !== "NONE";
   const testMode = view?.dataOrigin === "LOCAL_CONTROLLED" && view.capability?.productionPaymentCapability === false;
   const active = conflictingIntents || pending.state === "VALID" || !!view && (testMode && (previousDemoPending.state === "NONE" || cashierPending) && view.capability.channelEnabled === true
@@ -213,22 +247,34 @@ function ChannelPaymentAction({ order, blocked, onChanged, onModeChange, onPendi
   const unsettled = busy || cashierPending || conflictingIntents || pending.state === "VALID" || active && (pending.state === "UNREADABLE" || view?.payment != null
     || view?.request != null && !["ACTION_READY", "REJECTED_BY_CHANNEL"].includes(view.request.state));
   useEffect(() => { onModeChange(active); onPendingChange(unsettled); }, [active, unsettled, onModeChange, onPendingChange]);
+  useEffect(() => {
+    if (originalRequestPending) {
+      reportPayment.current?.({ ...(view && !readError ? channelPaymentFacts(view) : PAYMENT_FACTS_UNREADABLE), originalRequestPending: true });
+    } else if (view && !reading && !readError) {
+      reportPayment.current?.(channelPaymentFacts(view));
+    }
+  }, [originalRequestPending, view, reading, readError]);
   useEffect(() => () => { onModeChange(false); onPendingChange(false); }, [onModeChange, onPendingChange]);
   const refresh = useCallback(async (acting: string, signal?: AbortSignal, notify = false) => {
     const expected = order.id;
     setReading(true);
+    reportPayment.current?.(null);
     try {
       const next = await orderApi.channelPaymentStatus(acting, expected, signal);
       if (!mounted.current || !identity.current(acting) || latest.current.orderId !== expected || signal?.aborted) return;
       if (next?.contractVersion !== "order-payment-request.v1" || next.order?.id !== expected || !Array.isArray(next.capability?.methods)) throw new OrderRequestError(502, null);
       setSnapshot({ userId: acting, orderId: expected, view: next }); setReadError(null);
+      reportPayment.current?.({ ...channelPaymentFacts(next), originalRequestPending: originalRequestPendingRef.current });
       if (notify && channelApplied(next)) latest.current.onChanged();
     } catch (error) {
-      if (mounted.current && identity.current(acting) && latest.current.orderId === expected && !signal?.aborted) setReadError(panelError(error).message);
+      if (mounted.current && identity.current(acting) && latest.current.orderId === expected && !signal?.aborted) {
+        setReadError(panelError(error).message);
+        reportPayment.current?.({ ...PAYMENT_FACTS_UNREADABLE, originalRequestPending: originalRequestPendingRef.current });
+      }
     } finally { if (mounted.current && identity.current(acting) && latest.current.orderId === expected && !signal?.aborted) setReading(false); }
   }, [order.id]);
   useEffect(() => {
-    if (!userId) { setReading(false); return; }
+    if (!userId) { setReading(false); reportPayment.current?.(PAYMENT_FACTS_UNREADABLE); return; }
     const controller = new AbortController(); void refresh(userId, controller.signal);
     return () => controller.abort();
   }, [userId, refresh]);
@@ -242,9 +288,9 @@ function ChannelPaymentAction({ order, blocked, onChanged, onModeChange, onPendi
     const selected = original.intent?.body?.method ?? method;
     if (selected !== "ALIPAY_NATIVE" && selected !== "WEIXIN_NATIVE") { setNotice("原支付方式未能确认，不能更换方式重新提交。"); return; }
     setBusy(true); setNotice(null);
-    const outcome = await performGuardedWrite(acting, "order.channel-payment", expected, { method: selected }, undefined, async (key, body) => {
+    const outcome = await performGuardedWrite(acting, "order.channel-payment", expected, { method: selected }, undefined, async (key, body, _context, subject) => {
       if (body.method !== "ALIPAY_NATIVE" && body.method !== "WEIXIN_NATIVE") throw new OrderRequestError(400, null);
-      const receipt = await orderApi.requestChannelPayment(acting, expected, body.method, key);
+      const receipt = await orderApi.requestChannelPayment(subject, expected, body.method, key);
       const amount = receipt?.request?.amount;
       if (receipt?.contractVersion !== "order-payment-request.v1" || receipt.dataOrigin !== (testMode ? "LOCAL_CONTROLLED" : "JOINPAY_CANDIDATE") || typeof receipt.replay !== "boolean"
         || receipt.request?.orderId !== expected || receipt.request.method !== body.method || typeof receipt.request.id !== "string" || !receipt.request.id
@@ -252,7 +298,7 @@ function ChannelPaymentAction({ order, blocked, onChanged, onModeChange, onPendi
         || amount?.currency !== "CNY" || typeof amount.cents !== "string" || !/^[1-9][0-9]{0,15}$/.test(amount.cents)
         || receipt.payment !== null || receipt.paymentAction !== null) throw new OrderRequestError(502, null);
       return receipt;
-    });
+    }, isCurrent);
     if (!mounted.current || !isCurrent(acting) || latest.current.orderId !== expected) return;
     setBusy(false);
     if (outcome.status === "ok") { await refresh(acting, undefined, true); return; }
@@ -335,10 +381,10 @@ function ChannelPaymentAction({ order, blocked, onChanged, onModeChange, onPendi
     </select></label> : null}
     {pending.state === "UNREADABLE" || notice || readError ? <p className="order-inline-notice" role="alert">{pending.state === "UNREADABLE" ? "原支付请求恢复记录无法读取，已停止提交；请刷新状态或联系平台核对。" : notice ?? readError}</p> : null}
     <div className="order-trade-actions">
-      {mayStart ? <button type="button" className="button" disabled={busy || reading} onClick={() => void submit()}>{testMode ? "去支付" : "获取支付参数"}</button> : null}
-      {cashier ? <button type="button" className="button" disabled={busy || reading} onClick={() => setCashierOpen(true)}>打开支付</button> : null}
+      {mayStart ? <button type="button" className="button primary" disabled={busy || reading} onClick={() => void submit()}>{testMode ? "去支付" : "获取支付参数"}</button> : null}
+      {cashier ? <button type="button" className="button secondary" disabled={busy || reading} onClick={() => setCashierOpen(true)}>打开支付</button> : null}
     {queryOpen ? <button type="button" className="button secondary button--sm" disabled={busy || reading || blocked} onClick={() => void queryChannel()}>{busy ? "查询渠道结果…" : "查询渠道结果"}</button> : null}
-      {url ? <a className="button" href={url} target="_blank" rel="noopener noreferrer" referrerPolicy="no-referrer">打开支付页面</a> : null}
+      {url ? <a className="button primary" href={url} target="_blank" rel="noopener noreferrer" referrerPolicy="no-referrer">打开支付页面</a> : null}
       <button type="button" className="button secondary button--sm" disabled={busy || reading || !userId} onClick={() => userId && void refresh(userId, undefined, true)}>刷新支付状态</button>
       {pending.state === "VALID" && !applied ? <button type="button" className="button secondary button--sm" disabled={busy || reading || blocked} onClick={() => void submit(true)}>恢复原请求回执</button> : null}
     </div>
@@ -396,11 +442,11 @@ export function LocalSandboxPaymentAction({ order, blocked, onChanged, onModeCha
   const issue = async () => {
     if (!userId || busy || blocked || !view?.checkoutEnabled || pending.state !== 'NONE') return;
     const acting = userId, orderId = order.id; setBusy(true); setNotice(null); setCheckout(null);
-    const result = await performGuardedWrite(acting, 'order.local-checkout', orderId, {}, undefined, async (key, body) => {
+    const result = await performGuardedWrite(acting, 'order.local-checkout', orderId, {}, undefined, async (key, body, _context, subject) => {
       if (Object.keys(body).length) throw new OrderRequestError(409, null);
       const binding = expected(key);
-      return parseLocalCheckout(await orderApi.issueLocalCheckout(acting, orderId, key), binding);
-    });
+      return parseLocalCheckout(await orderApi.issueLocalCheckout(subject, orderId, key), binding);
+    }, isCurrent);
     if (!mounted.current || !isCurrent(acting) || latest.current.orderId !== orderId) return;
     setBusy(false);
     if (result.status === 'ok') setCheckout(result.value);
@@ -450,7 +496,7 @@ export function DemoCheckoutAction({ order, blocked, onChanged, onAccepted, onMo
   if (visibleOrder !== order.id) { setVisibleOrder(order.id); reset(); }
   const pending = userId ? inspectIntent(userId, "order.demo-checkout", order.id) : { state: "NONE" as const, intent: null };
   const localPending = userId ? inspectIntent(userId, "order.local-checkout", order.id) : { state: "NONE" as const, intent: null };
-  const active = Boolean(userId && localPending.state !== "VALID" && (discovery !== "NOT_INSTALLED" || pending.state === "VALID"));
+  const active = Boolean(userId && localPending.state !== "VALID" && (discovery !== "NOT_INSTALLED" || pending.state !== "NONE"));
   useEffect(() => { onModeChange(active); onPendingChange(active && (busy || pending.state !== "NONE")); }, [active, busy, pending.state, onModeChange, onPendingChange]);
   useEffect(() => () => { onModeChange(false); onPendingChange(false); }, [onModeChange, onPendingChange]);
   useEffect(() => {
@@ -467,17 +513,17 @@ export function DemoCheckoutAction({ order, blocked, onChanged, onAccepted, onMo
         setDiscovery(error instanceof OrderRequestError && error.status === 404 ? "NOT_INSTALLED" : "FAILED");
     });
     return () => controller.abort();
-  }, [userId, order.id, retry, expectedScope]);
+  }, [userId, order.id, retry, expectedScope, embedded, pending.state]);
   const submit = async () => {
     if (!userId || busy || blocked || !view?.checkoutEnabled || pending.state !== "NONE" || !paymentEntryOpen(order)) return;
     const acting = userId, expected = order.id; setBusy(true); setNotice(null);
     const scope = view.scope;
-    const outcome = await performGuardedWrite(acting, "order.demo-checkout", expected, {}, { scope }, async (key, body, context) => {
+    const outcome = await performGuardedWrite(acting, "order.demo-checkout", expected, {}, { scope }, async (key, body, context, subject) => {
       if (Object.keys(body).length || context?.scope !== scope) throw new OrderRequestError(409, null);
-      const result = await orderApi.confirmDemoCheckout(acting, expected, key);
+      const result = await orderApi.confirmDemoCheckout(subject, expected, key);
       if (result.scope !== scope) throw new OrderRequestError(502, null);
       return result;
-    });
+    }, isCurrent);
     if (!mounted.current || !isCurrent(acting) || latest.current.orderId !== expected) return;
     setBusy(false);
     if (outcome.status === "ok") { setCompleted(true); setNotice("模拟付款已完成，不会真实扣款。"); onAccepted?.(); latest.current.onChanged(); }
@@ -507,16 +553,17 @@ export function DemoCheckoutAction({ order, blocked, onChanged, onAccepted, onMo
     {discovery === "CHECKING" ? <p role="status">正在确认本单是否可以模拟付款…</p> : null}
     {discovery === "FAILED" || discovery === "NOT_INSTALLED" ? <p role="alert">模拟付款暂时无法确认，请重试或联系平台。</p> : null}
     {discovery === "AVAILABLE" && !view?.checkoutEnabled && pending.state === "NONE" && !completed ? <p role="status">本单当前不能模拟付款，请刷新订单查看最新状态。</p> : null}
+    {!embedded && discovery === "AVAILABLE" && view?.checkoutEnabled && pending.state === "NONE" ? <p role="status">请刷新订单，通过支付入口打开收银台。</p> : null}
     {pending.state === "UNREADABLE" ? <p role="alert">原请求记录无法读取，请保留本页并联系客服核对。</p> : notice ? <p role="status">{notice}</p> : null}
     <div className="order-trade-actions">
-      {view?.checkoutEnabled && pending.state === "NONE" && !completed && paymentEntryOpen(order) ? <button type="button" className="button" disabled={busy || blocked} onClick={() => void submit()}>{busy ? "处理中…" : embedded ? "模拟付款" : "确认模拟付款"}</button> : null}
+      {embedded && view?.checkoutEnabled && pending.state === "NONE" && !completed && paymentEntryOpen(order) ? <button type="button" className="button" disabled={busy || blocked} onClick={() => void submit()}>{busy ? "处理中…" : "模拟付款"}</button> : null}
       {pending.state === "VALID" ? <button type="button" className="button secondary" disabled={busy || blocked} onClick={() => void recover()}>查询原付款结果</button> : null}
       {discovery === "FAILED" ? <button type="button" className="button secondary" disabled={busy} onClick={() => setRetry(value => value + 1)}>重试</button> : null}
     </div>
   </div>;
 }
 
-function PaymentAction({ order, party, onChanged }: { order: Order; party: OrderParty; onChanged: () => void }) {
+function PaymentAction({ order, party, onChanged, onPaymentFacts }: { order: Order; party: OrderParty; onChanged: () => void; onPaymentFacts?: (facts: OrderPaymentFacts | null) => void }) {
   const session = useUserSession();
   const [busy, setBusy] = useState(false);
   const [unknown, setUnknown] = useState<string | null>(null);
@@ -567,7 +614,7 @@ function PaymentAction({ order, party, onChanged }: { order: Order; party: Order
   const resolveRecovery = async (acting: string, typed: OrderRequestError, kind: "pay" | "cancel") => {
     const label = kind === "pay" ? "支付" : "取消";
     try {
-      const authority = await orderApi.paymentStatus(order.id);
+      const authority = await orderApi.paymentStatus(acting, order.id);
       if (!isCurrent(acting)) return;
       const observed = paymentObservation(authority.payment);
       const message = `原${label}请求仍未取得确定回执（原申请保留）。${observed}；当前页面状态不能确定这笔申请是否生效，请稍后再次查询或联系客服核对。`;
@@ -584,7 +631,7 @@ function PaymentAction({ order, party, onChanged }: { order: Order; party: Order
     const acting = userId;
     setBusy(true); setError(null); setUnknown(null);
     const outcome = await performGuardedWrite(acting, "order.payment", order.id, {}, undefined,
-      (key) => orderApi.pay(order.id, key));
+      (_key, _body, _context, subject) => orderApi.pay(subject, order.id, _key), isCurrent);
     if (!isCurrent(acting)) return;
     setBusy(false);
     applyOutcome(acting, outcome as WriteOutcome<{ payment: { confirmationId: string; disposition: string; reasonCode?: string | null; replay: boolean } }>, "pay");
@@ -594,7 +641,8 @@ function PaymentAction({ order, party, onChanged }: { order: Order; party: Order
     const acting = userId;
     if (!loadIntent(acting, "order.payment", order.id)) { setUnknown(null); onChanged(); return; }
     setBusy(true);
-    const outcome = await performGuardedWrite(acting, "order.payment", order.id, {}, undefined, (key) => orderApi.pay(order.id, key));
+    const outcome = await performGuardedWrite(acting, "order.payment", order.id, {}, undefined,
+      (key, _body, _context, subject) => orderApi.pay(subject, order.id, key), isCurrent);
     if (!isCurrent(acting)) return;
     setBusy(false);
     applyOutcome(acting, outcome as WriteOutcome<{ payment: { confirmationId: string; disposition: string; reasonCode?: string | null; replay: boolean } }>, "pay");
@@ -603,7 +651,8 @@ function PaymentAction({ order, party, onChanged }: { order: Order; party: Order
     if (!userId) return;
     const acting = userId;
     setBusy(true); setError(null); setCancelUnknown(null);
-    const outcome = await performGuardedWrite(acting, "order.cancel", order.id, {}, undefined, (key, body) => orderApi.cancel(order.id, key, typeof body.reason === "string" ? body.reason : undefined));
+    const outcome = await performGuardedWrite(acting, "order.cancel", order.id, {}, undefined,
+      (key, body, _context, subject) => orderApi.cancel(subject, order.id, key, typeof body.reason === "string" ? body.reason : undefined), isCurrent);
     if (!isCurrent(acting)) return;
     setBusy(false);
     applyOutcome(acting, outcome as WriteOutcome<{ payment: { confirmationId: string; disposition: string; reasonCode?: string | null; replay: boolean } }>, "cancel");
@@ -613,7 +662,8 @@ function PaymentAction({ order, party, onChanged }: { order: Order; party: Order
     const acting = userId;
     if (!loadIntent(acting, "order.cancel", order.id)) { setCancelUnknown(null); onChanged(); return; }
     setBusy(true);
-    const outcome = await performGuardedWrite(acting, "order.cancel", order.id, {}, undefined, (key, body) => orderApi.cancel(order.id, key, typeof body.reason === "string" ? body.reason : undefined));
+    const outcome = await performGuardedWrite(acting, "order.cancel", order.id, {}, undefined,
+      (key, body, _context, subject) => orderApi.cancel(subject, order.id, key, typeof body.reason === "string" ? body.reason : undefined), isCurrent);
     if (!isCurrent(acting)) return;
     setBusy(false);
     applyOutcome(acting, outcome as WriteOutcome<{ payment: { confirmationId: string; disposition: string; reasonCode?: string | null; replay: boolean } }>, "cancel");
@@ -623,7 +673,7 @@ function PaymentAction({ order, party, onChanged }: { order: Order; party: Order
   const paymentOpen = paymentEntryOpen(order);
   const cancelOpen = cancelEntryOpen(order);
   const expired = order.status === "PENDING_PAYMENT" && order.expiredAwaitingCancel === true;
-  return <section className="order-detail-section order-trade-panel" aria-label="支付与取消">
+  return <section className="order-detail-section order-trade-panel" id="order-trade-actions" aria-label="支付与取消">
     <div className="order-trade-heading"><h2 className="order-section-title">支付与取消</h2></div>
     {receipt?.disposition === "APPLIED" ? <div className="order-notice is-success" role="status"><CheckCircle2 size={17} aria-hidden="true" /><div><strong>支付已接纳{receipt.replay ? "（原回执重放）" : ""}</strong><span>订单状态以服务端记录为准；支付不等于交付、建群或开租。</span></div></div> : null}
     {order.status === "PENDING_PAYMENT" && order.holdUntil ? <p className="order-trade-deadline">{expired ? "原支付保留截止" : "支付保留至"} {formatOrderTime(order.holdUntil)}；到期后是否取消以服务端订单状态为准。</p> : null}
@@ -634,7 +684,7 @@ function PaymentAction({ order, party, onChanged }: { order: Order; party: Order
     {cancelUnknown ? <UnknownNotice label="取消结果未知" message={cancelUnknown} onQuery={() => void queryCancel()} onOpenOrder={onChanged} /> : null}
     {error ? <p className="order-inline-notice" role="alert">{error.message}</p> : null}
     {party === "renter" ? <div className="order-trade-actions">
-      <ChannelPaymentAction order={order} blocked={payLocked || cancelArmed || demoPending} onChanged={onChanged} onModeChange={setChannelMode} onPendingChange={setChannelPending}><DemoCheckoutAction order={order} blocked={payLocked || cancelArmed} onChanged={onChanged} onModeChange={setDemoMode} onPendingChange={setDemoPending}><LocalSandboxPaymentAction order={order} blocked={payLocked || cancelArmed} onChanged={onChanged} onModeChange={setLocalMode} onPendingChange={setLocalPending}>{paymentOpen ? <button type="button" className="button" onClick={() => void pay()} disabled={payLocked}>
+      <ChannelPaymentAction order={order} blocked={payLocked || cancelArmed || demoPending} onChanged={onChanged} onModeChange={setChannelMode} onPendingChange={setChannelPending} onPaymentFacts={onPaymentFacts}><DemoCheckoutAction order={order} blocked={payLocked || cancelArmed} onChanged={onChanged} onModeChange={setDemoMode} onPendingChange={setDemoPending}><LocalSandboxPaymentAction order={order} blocked={payLocked || cancelArmed} onChanged={onChanged} onModeChange={setLocalMode} onPendingChange={setLocalPending}>{paymentOpen ? <button type="button" className="button primary" onClick={() => void pay()} disabled={payLocked}>
         <WalletCards size={15} aria-hidden="true" />{busy ? "提交支付请求…" : "提交支付（本地测试支付）"}
       </button> : <p className="order-muted">当前订单不可继续支付；请刷新查看最新订单记录。</p>}</LocalSandboxPaymentAction></DemoCheckoutAction></ChannelPaymentAction>
       {cancelOpen ? (!cancelArmed ? <button type="button" className="button quiet" onClick={() => setCancelArmed(true)} disabled={cancelLocked}>取消订单</button> :
@@ -652,7 +702,7 @@ function OpeningLines({ order, opening, heading }: { order: Order; opening: Sett
     </tr>)}</tbody></table>;
 }
 
-function OpeningPanel({ opening, order, party, onChanged }: { opening: SettlementOpening; order: Order; party: OrderParty; onChanged: () => void }) {
+function OpeningPanel({ opening, order, party, onChanged, readOnly = false }: { opening: SettlementOpening; order: Order; party: OrderParty; onChanged: () => void; readOnly?: boolean }) {
   const session = useUserSession();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<PanelError | null>(null);
@@ -693,7 +743,7 @@ function OpeningPanel({ opening, order, party, onChanged }: { opening: Settlemen
       return;
     }
     try {
-      const authority = await orderApi.settlement(order.id);
+      const authority = await orderApi.settlement(acting, order.id);
       if (!isCurrent(acting)) return;
       const target = authority.openings.find((candidate) => candidate.id === targetId);
       const originalPartyAck = target?.acks?.some((ack) => ack.party === myParty && ack.source === "PARTY") ?? false;
@@ -713,10 +763,13 @@ function OpeningPanel({ opening, order, party, onChanged }: { opening: Settlemen
   const confirm = async () => {
     if (!userId) return;
     const acting = userId;
+    const pending = inspectIntent(acting, "opening.confirm", order.id);
+    if (pending.state === "UNREADABLE") { setError({ message: "原开租确认记录无法读取，请联系客服核对。", retryable: false }); return; }
+    if (pending.intent) { setUnknown(isIntentStale(pending.intent) ? STALE_MESSAGE : "检测到未完成的开租确认，请先查询原请求。"); return; }
     setBusy(true); setError(null); setUnknown(null);
     const outcome = await performGuardedWrite(acting, "opening.confirm", order.id, { versionNo: Number(opening.versionNo) },
       { openingId: opening.id, orderId: order.id },
-      (key, body) => orderApi.confirmOpening(order.id, opening.id, Number(body.versionNo), key));
+      (key, body, frozenContext, subject) => orderApi.confirmOpening(subject, order.id, String(frozenContext?.openingId ?? ""), Number(body.versionNo), key), isCurrent);
     if (!isCurrent(acting)) return;
     setBusy(false);
     apply(acting, outcome as WriteOutcome<OrderSettlement>);
@@ -734,19 +787,21 @@ function OpeningPanel({ opening, order, party, onChanged }: { opening: Settlemen
     setBusy(true);
     const outcome = await performGuardedWrite(acting, "opening.confirm", order.id, { versionNo: Number(opening.versionNo) },
       { openingId: opening.id, orderId: order.id },
-      (key, body, frozenContext) => orderApi.confirmOpening(order.id, String(frozenContext?.openingId ?? ""), Number(body.versionNo), key));
+      (key, body, frozenContext, subject) => orderApi.confirmOpening(subject, order.id, String(frozenContext?.openingId ?? ""), Number(body.versionNo), key), isCurrent);
     if (!isCurrent(acting)) return;
     setBusy(false);
     apply(acting, outcome as WriteOutcome<OrderSettlement>);
   };
   return <div className="order-trade-block">
     <h3>{confirmed ? "已确认期初库存" : "期初库存确认"} <span className="order-trade-tag">第{opening.versionNo}版</span> <span className="order-trade-tag is-accent">{tag}</span></h3>
-    <p className="order-muted">{confirmed ? "以下为已生效的开租库存，确认方式见下方记录；开租后按结算记录核对消耗。" : "期初数量由客服按交付时的实际库存代录；请双方核对同一版本，当事人无法操作时可联系客服协助。付款、建群与沟通都不等于已开租。"}</p>
+    <p className="order-muted">{confirmed ? "以下为已生效的开租库存，确认方式见下方记录；开租后按结算记录核对消耗。" : "期初数量取自本单冻结报价；请双方核对同一版本，资料异常时联系客服处理。付款、建群与沟通都不等于已开租。"}</p>
     <OpeningLines order={order} opening={opening} heading={confirmed ? "开租时数量" : "期初数量"} />
     {unknown ? <UnknownNotice label="期初确认结果未知" message={unknown} onQuery={() => void query()} onOpenOrder={onChanged} /> : null}
     {error ? <p className="order-inline-notice" role="alert">{error.message}</p> : null}
-    {!confirmed && !acked && !unknown ? <button type="button" className="button" onClick={() => void confirm()} disabled={busy}>{busy ? "确认中…" : "确认期初并开租"}</button> : null}
+    {!readOnly && !confirmed && !acked && !unknown ? <button type="button" className="button primary" onClick={() => void confirm()} disabled={busy}>{busy ? "确认中…" : "确认期初并开租"}</button> : null}
+    {readOnly && !confirmed && !acked && !unknown ? <p className="order-muted">订单主状态已完成，本页不再提供新的期初确认；如有一笔结果未知的申请，请用下方「查询原请求」按原键核对。</p> : null}
     {!confirmed && acked ? <p className="order-muted"><Clock3 size={14} aria-hidden="true" /> {ackText(myAck, true)}；等待对方确认后正式开租。</p> : null}
+    {!confirmed && opening.status === "DRAFT" && opening.autoConfirmDueAt && Number.isFinite(Date.parse(opening.autoConfirmDueAt)) ? <p className="order-muted">双方未确认时，将于 {formatOrderTime(opening.autoConfirmDueAt)} 自动确认并开始租期。</p> : null}
     <RecordList title="确认记录" records={acks.map((ack) => ({ label: ack.source === "PARTY" ? `${partyLabel(ack.party)}确认期初` : ack.source === "ON_BEHALF" ? `客服协助${partyLabel(ack.party)}确认期初` : ack.source === "AUTO" ? `${partyLabel(ack.party)}期初自动确认` : `${partyLabel(ack.party)}期初确认已记录`, time: ack.createdAt ?? null }))} />
     {opening.confirmedAt ? <p className="order-muted">开租时间：{formatOrderTime(opening.confirmedAt)}</p> : null}
   </div>;
@@ -788,7 +843,7 @@ function ConsumptionTable({ order, opening, version, extraResources }: { order: 
     </tr>)}</tbody></table>;
 }
 
-function EndingForm({ opening, order, party, onChanged, consumptionMode, extraResources=[] }: { opening: SettlementOpening; order: Order; party: OrderParty; onChanged: () => void; consumptionMode?: OrderSettlement["consumptionMode"]; extraResources?: SettlementLine[] }) {
+function EndingForm({ opening, order, party, onChanged, consumptionMode, extraResources=[], readOnly = false }: { opening: SettlementOpening; order: Order; party: OrderParty; onChanged: () => void; consumptionMode?: OrderSettlement["consumptionMode"]; extraResources?: SettlementLine[]; readOnly?: boolean }) {
   const session = useUserSession();
   const actual=consumptionMode==="ACTUAL";
   const extra=actual?extraResources.filter(line=>!opening.lines.some(item=>item.itemId===line.itemId)).map(line=>({...line,quantity:"0"})):[];
@@ -847,14 +902,14 @@ function EndingForm({ opening, order, party, onChanged, consumptionMode, extraRe
     return { lines:selected };
   };
   const runPreview = async () => {
-    if (locked) return;
+    if (locked || !userId) return;
     const result = validate();
     if (result.error || !result.lines) { setChecked(null); setError(result.error ?? "数量无效"); return; }
     const sequence = ++revision.current;
     setBusy(true);
     setError(null);
     try {
-      const preview = await orderApi.settlementPreview(order.id, { lines: result.lines });
+      const preview = await orderApi.settlementPreview(userId, order.id, { lines: result.lines });
       if (sequence !== revision.current) return;
       if (!preview.versionHash || (preview.reasons ?? []).some((reason) => reason !== "EARLY_REASON_REQUIRED")) {
         setError(settlementPreviewProblem(preview.reasons));
@@ -884,7 +939,7 @@ function EndingForm({ opening, order, party, onChanged, consumptionMode, extraRe
    */
   const resolveRecovery = async (acting: string) => {
     try {
-      const authority = await orderApi.settlement(order.id);
+      const authority = await orderApi.settlement(acting, order.id);
       if (!isCurrent(acting)) return;
       const observed = authority.currentRequest
         ? authority.currentRequest.kind === "INTAKE" ? "当前有结束申请，状态未确认" : authority.currentRequest.kind === "SETTLEMENT_VERSION" ? "当前有结算方案" : "当前申请状态未记录"
@@ -909,7 +964,7 @@ function EndingForm({ opening, order, party, onChanged, consumptionMode, extraRe
     const outcome = await performGuardedWrite(acting, "settlement.submit", order.id,
       { lines: checked.lines, acceptedHash: checked.versionHash, ...(early && order.earlySettlementDisclosure ? { termsAccepted: true } : {}) },
       { openingId: opening.id, openingVersion: opening.versionNo },
-      (key, body) => orderApi.submitSettlement(order.id, body as { lines: SettlementQuantityInput[]; acceptedHash: string; termsAccepted?: boolean }, key));
+      (key, body, _context, subject) => orderApi.submitSettlement(subject, order.id, body as { lines: SettlementQuantityInput[]; acceptedHash: string; termsAccepted?: boolean }, key), isCurrent);
     if (!isCurrent(acting)) return;
     setBusy(false);
     apply(acting, outcome as WriteOutcome<OrderSettlement>);
@@ -920,7 +975,7 @@ function EndingForm({ opening, order, party, onChanged, consumptionMode, extraRe
     if (!loadIntent(acting, "settlement.submit", order.id)) { setUnknown(null); onChanged(); return; }
     setBusy(true);
     const outcome = await performGuardedWrite(acting, "settlement.submit", order.id, {}, undefined,
-      (key, body) => orderApi.submitSettlement(order.id, body as { lines: SettlementQuantityInput[]; acceptedHash: string }, key));
+      (key, body, _context, subject) => orderApi.submitSettlement(subject, order.id, body as { lines: SettlementQuantityInput[]; acceptedHash: string }, key), isCurrent);
     if (!isCurrent(acting)) return;
     setBusy(false);
     apply(acting, outcome as WriteOutcome<OrderSettlement>);
@@ -930,7 +985,8 @@ function EndingForm({ opening, order, party, onChanged, consumptionMode, extraRe
   if (!open) return <div className="order-trade-block">
     <h3>发起结束租用</h3>
     <p className="order-muted">{actual?"填写实际消耗数量，先预览结算金额，再确认提交。":"填写归还时的剩余数量，先预览结算金额，再确认提交。留空或负数不会被当作 0。"}</p>
-    <div className="order-trade-actions"><button type="button" className="button" onClick={() => setExpanded(true)}>发起结束租用</button></div>
+    {readOnly ? <p className="order-muted">订单主状态已完成，本页不再提供新的结束租用或结算申请；如有一笔结果未知的申请，请用下方「查询原请求」按原键核对。</p>
+      : <div className="order-trade-actions"><button type="button" className="button primary" onClick={() => setExpanded(true)}>发起结束租用</button></div>}
   </div>;
   return <div className="order-trade-block">
     <div className="order-trade-heading"><h3>发起结束租用</h3>{!locked && checked === null ? <button type="button" className="button quiet button--sm" onClick={() => setExpanded(false)} disabled={busy}>收起</button> : null}</div>
@@ -939,7 +995,7 @@ function EndingForm({ opening, order, party, onChanged, consumptionMode, extraRe
       <tbody>{lines.map((line) => <tr key={line.itemId}>
         <td>{line.name??resourceName(order, line.itemId)}<span className="order-trade-unit">{unitHint(line.name??resourceName(order, line.itemId), line.unit)}</span></td>
         <td>{quantityText(line.unit, line.quantity ?? "0")}</td>
-        <td><input type="text" inputMode="numeric" autoComplete="off" value={raw[line.itemId] ?? ""} placeholder="填写整数" disabled={locked || busy} aria-label={`${line.name??resourceName(order, line.itemId)} ${actual?"实际消耗":"期末剩余"}数量`} aria-invalid={error ? true : undefined} onChange={(event) => update(line.itemId, event.target.value)} /></td>
+        <td><input type="text" inputMode="numeric" autoComplete="off" value={raw[line.itemId] ?? ""} placeholder="填写整数" disabled={locked || busy || readOnly} aria-label={`${line.name??resourceName(order, line.itemId)} ${actual?"实际消耗":"期末剩余"}数量`} aria-invalid={error ? true : undefined} onChange={(event) => update(line.itemId, event.target.value)} /></td>
       </tr>)}</tbody></table>
     {error ? <p className="order-inline-notice" role="alert">{error}</p> : null}
     {unknown ? <UnknownNotice label="结束提交结果未知" message={unknown} onQuery={() => void querySubmit()} onOpenOrder={onChanged} /> : null}
@@ -948,17 +1004,17 @@ function EndingForm({ opening, order, party, onChanged, consumptionMode, extraRe
       {checked.preview.reasons?.includes("EARLY_REASON_REQUIRED") && order.earlySettlementDisclosure ? <><p>{order.earlySettlementDisclosure.body}</p><label className="order-trade-consent"><input type="checkbox" checked={termsAccepted} disabled={busy} onChange={(event) => setTermsAccepted(event.target.checked)} /><span>我已阅读并同意上述提前结束规则，具体金额以结算方案为准</span></label></> : null}
       <ConsumedTable order={order} lines={lines} values={Object.fromEntries(checked.lines.map((line) => [line.itemId,"consumedQuantity" in line?line.consumedQuantity:line.remainingQuantity]))} actual={actual} consumed={checked.preview.consumed} />
       <AmountTable rows={amounts} caption={`本版结算金额明细（${party === "renter" ? "租客口径" : "号主口径"}，服务端计算）`} />
-      <div className="order-trade-actions">
-        <button type="button" className="button" onClick={() => void submit()} disabled={busy}>{busy ? "提交中…" : checked.preview.reasons?.includes("EARLY_REASON_REQUIRED") ? "提交结束申请" : "提交结算"}</button>
+      {readOnly ? <p className="order-muted">订单主状态已完成，本页不再提交新的结算申请；下方金额仅为已读到的预览记录。</p> : <div className="order-trade-actions">
+        <button type="button" className="button primary" onClick={() => void submit()} disabled={busy}>{busy ? "提交中…" : checked.preview.reasons?.includes("EARLY_REASON_REQUIRED") ? "提交结束申请" : "提交结算"}</button>
         <button type="button" className="button quiet" onClick={() => setChecked(null)} disabled={busy}>修改数量</button>
-      </div>
-    </div> : (!locked ? <div className="order-trade-actions">
-      <button type="button" className="button secondary" onClick={() => void runPreview()} disabled={busy}>{busy ? "计算中…" : "预览结算金额"}</button>
+      </div>}
+    </div> : (!locked && !readOnly ? <div className="order-trade-actions">
+      <button type="button" className="button primary" onClick={() => void runPreview()} disabled={busy}>{busy ? "计算中…" : "预览结算金额"}</button>
     </div> : null)}
   </div>;
 }
 
-function DecisionPanel({ version, party, order, onChanged }: { version: SettlementVersion; party: OrderParty; order: Order; onChanged: () => void }) {
+function DecisionPanel({ version, party, order, onChanged, readOnly = false }: { version: SettlementVersion; party: OrderParty; order: Order; onChanged: () => void; readOnly?: boolean }) {
   const session = useUserSession();
   const [busy, setBusy] = useState<"CONFIRM" | "REJECT" | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -997,7 +1053,7 @@ function DecisionPanel({ version, party, order, onChanged }: { version: Settleme
       return;
     }
     try {
-      const authority = await orderApi.settlement(order.id);
+      const authority = await orderApi.settlement(acting, order.id);
       if (!isCurrent(acting)) return;
       const target = authority.versions.find((candidate) => candidate.id === targetVersionId);
       const recorded = (target?.decisions ?? []).some((decision) => decision.party === myParty && decision.action === targetAction);
@@ -1016,6 +1072,9 @@ function DecisionPanel({ version, party, order, onChanged }: { version: Settleme
   };
   const decide = async (action: "CONFIRM" | "REJECT") => {
     if (!userId || locked) return;
+    const pending = inspectIntent(userId, "settlement.decision", order.id);
+    if (pending.state === "UNREADABLE") { setError("原结算决定记录无法读取，请联系客服核对。"); return; }
+    if (pending.intent) { setUnknown(isIntentStale(pending.intent) ? STALE_MESSAGE : "检测到未完成的结算决定，请先查询原请求。"); return; }
     // A new confirmation is refused while the amount it would settle cannot be read. Rejecting,
     // refreshing and recovering an existing frozen request stay available.
     if (action === "CONFIRM" && !confirmable) {
@@ -1031,7 +1090,7 @@ function DecisionPanel({ version, party, order, onChanged }: { version: Settleme
     setError(null);
     const body = { action, versionHash: version.versionHash, ...(action === "REJECT" && reason.trim() ? { reason: reason.trim() } : {}), ...(action === "CONFIRM" && version.early && order.earlySettlementDisclosure ? { termsAccepted: true } : {}) };
     const outcome = await performGuardedWrite(acting, "settlement.decision", order.id, body, { versionId: version.id, orderId: order.id },
-      (key, frozen) => orderApi.decideSettlement(order.id, version.id, frozen as { action: "CONFIRM" | "REJECT"; versionHash: string }, key));
+      (key, frozen, frozenContext, subject) => orderApi.decideSettlement(subject, order.id, String(frozenContext?.versionId ?? ""), frozen as { action: "CONFIRM" | "REJECT"; versionHash: string }, key), isCurrent);
     if (!isCurrent(acting)) return;
     setBusy(null);
     apply(acting, outcome as WriteOutcome<OrderSettlement>);
@@ -1049,7 +1108,7 @@ function DecisionPanel({ version, party, order, onChanged }: { version: Settleme
     setBusy("CONFIRM");
     const outcome = await performGuardedWrite(acting, "settlement.decision", order.id,
       { action: "CONFIRM", versionHash: version.versionHash }, { versionId: version.id, orderId: order.id },
-      (key, frozen, frozenContext) => orderApi.decideSettlement(order.id, String(frozenContext?.versionId ?? ""), frozen as { action: "CONFIRM" | "REJECT"; versionHash: string }, key));
+      (key, frozen, frozenContext, subject) => orderApi.decideSettlement(subject, order.id, String(frozenContext?.versionId ?? ""), frozen as { action: "CONFIRM" | "REJECT"; versionHash: string }, key), isCurrent);
     if (!isCurrent(acting)) return;
     setBusy(null);
     apply(acting, outcome as WriteOutcome<OrderSettlement>);
@@ -1068,10 +1127,11 @@ function DecisionPanel({ version, party, order, onChanged }: { version: Settleme
     {error ? <p className="order-inline-notice" role="alert">{error}</p> : null}
     {version.early && order.earlySettlementDisclosure && !decided && !locked ? <><p>{order.earlySettlementDisclosure.body}</p><label className="order-trade-consent"><input type="checkbox" checked={termsAccepted} disabled={busy !== null} onChange={(event) => setTermsAccepted(event.target.checked)} /><span>我已核对并接受本次提前结束的费用与退款安排</span></label></> : null}
     {decided ? <p className="order-muted">{decided.action === "CONFIRM" ? "你已确认这一版结算" : "你已拒绝这一版结算"} · {formatOrderTime(decided.createdAt)}</p> :
+      readOnly ? <p className="order-muted">订单主状态已完成，本页不再提供新的确认或拒绝操作；如有一笔结果未知的申请，请用上方「查询原请求」按原键核对。</p> :
       locked ? null :
       <div className="order-trade-actions">
         {!confirmable ? <p className="order-inline-notice" role="status">这一版的拟调整金额暂时不可读，确认已暂时停用；可以刷新、拒绝，或先查询原请求。拒绝与查询不受影响。</p> : null}
-        <button type="button" className="button" onClick={() => void decide("CONFIRM")} disabled={busy !== null || !confirmable || (version.early && Boolean(order.earlySettlementDisclosure) && !termsAccepted)}>{busy === "CONFIRM" ? "确认中…" : version.early ? "确认提前结算（待客服复核）" : "确认结算"}</button>
+        <button type="button" className="button primary" onClick={() => void decide("CONFIRM")} disabled={busy !== null || !confirmable || (version.early && Boolean(order.earlySettlementDisclosure) && !termsAccepted)}>{busy === "CONFIRM" ? "确认中…" : version.early ? "确认提前结算（待客服复核）" : "确认结算"}</button>
         {!rejectOpen ? <button type="button" className="button quiet" onClick={() => setRejectOpen(true)} disabled={busy !== null}>拒绝并说明</button> :
           <span className="order-trade-reject"><input type="text" value={reason} maxLength={500} placeholder="请填写拒绝原因（可留空）" onChange={(event) => setReason(event.target.value)} aria-label="拒绝原因" /><button type="button" className="button secondary button--sm" onClick={() => void decide("REJECT")} disabled={busy !== null}>{busy === "REJECT" ? "提交中…" : "提交拒绝"}</button><button type="button" className="button quiet button--sm" onClick={() => setRejectOpen(false)} disabled={busy !== null}>返回</button></span>}
       </div>}
@@ -1084,6 +1144,22 @@ function activeOpening(openings: SettlementOpening[]): SettlementOpening | null 
   return openings.find((opening) => opening.status === "CONFIRMED") ?? openings[openings.length - 1]!;
 }
 
+/**
+ * The server's `stage` is authoritative when readSettlement() returns the additive field. Codes
+ * that describe an opening/no-stage/unknown state keep the local reconstruction, because the
+ * progress card still needs the opening acks and deadline from the same read; a client-side
+ * rebuild is only a fallback for older projections that omit `stage`.
+ */
+function serverPhase(code: OrderSettlementStage["code"]): OrderStageFacts["phase"] | null {
+  if (code === "POSTED") return "POSTED";
+  if (code === "INTAKE_PENDING") return "INTAKE_PENDING";
+  if (code === "DECISION_REJECTED") return "DECISION_REJECTED";
+  if (code === "DECISION_PENDING") return "DECISION_PENDING";
+  if (code === "DECISION_WAITING") return "DECISION_WAITING";
+  if (code === "RENTING") return "RENTING";
+  return null;
+}
+
 function stageFacts(data: OrderSettlement, opening: SettlementOpening | null, party: OrderParty): OrderStageFacts {
   const myParty = party.toUpperCase();
   const posting = data.posting ?? null;
@@ -1091,7 +1167,7 @@ function stageFacts(data: OrderSettlement, opening: SettlementOpening | null, pa
   const request = data.currentRequest ?? null;
   const myDecision = current ? (current.decisions ?? []).find((decision) => decision.party === myParty) : undefined;
   const rejection = current?.decisions?.find(decision => decision.action === "REJECT");
-  const phase: OrderStageFacts["phase"] = posting
+  const reconstructed: OrderStageFacts["phase"] = posting
     ? "POSTED"
     : request?.kind === "INTAKE" && request.status === "OPEN"
       ? "INTAKE_PENDING"
@@ -1102,9 +1178,16 @@ function stageFacts(data: OrderSettlement, opening: SettlementOpening | null, pa
           : current
             ? "DECISION_WAITING"
             : "RENTING";
+  const stage = data.stage ?? null;
+  const phase = (stage ? serverPhase(stage.code) : null) ?? reconstructed;
   return {
     rentalStarted: data.rentalStarted === true,
     phase,
+    stageCode: stage?.code ?? null,
+    viewerActionRequired: stage?.viewerActionRequired ?? false,
+    autoConfirmDueAt: opening?.autoConfirmDueAt ?? null,
+    openingGenerationState: data.openingGeneration?.state ?? null,
+    openingGenerationRecoveryRequired: data.openingGenerationRecoveryRequired === true,
     early: posting?.early === true,
     postedAt: posting?.postedAt ?? null,
     openingVersionNo: opening?.versionNo ?? null,
@@ -1187,6 +1270,10 @@ function VersionHistory({ versions, current }: { versions: SettlementVersion[]; 
 }
 
 function SettlementAction({ order, party, onChanged, onStageFacts }: { order: Order; party: OrderParty; onChanged: () => void; onStageFacts?: (facts: OrderStageFacts | null, failed: boolean) => void }) {
+  const session = useUserSession();
+  // Freeze the read subject when the read is created. A late response from an older identity is
+  // dropped instead of being rendered as the new subject's settlement facts.
+  const subject = useMemo(() => captureOrderSubject(session.userId, session.identityVersion), [session.userId, session.identityVersion]);
   const [reload, setReload] = useState(0);
   const [state, setState] = useState<{ status: "loading" } | { status: "ready"; data: OrderSettlement } | { status: "unavailable" } | { status: "error" }>({ status: "loading" });
   const report = useRef(onStageFacts);
@@ -1195,27 +1282,32 @@ function SettlementAction({ order, party, onChanged, onStageFacts }: { order: Or
     const controller = new AbortController();
     setState({ status: "loading" });
     report.current?.(null, false);
-    orderApi.settlement(order.id, controller.signal).then((data) => {
-      if (controller.signal.aborted) return;
+    if (!subject) { report.current?.(null, true); setState({ status: "error" }); return () => controller.abort(); }
+    orderApi.settlement(subject, order.id, controller.signal).then((data) => {
+      if (controller.signal.aborted || !isOrderSubjectCurrent(subject, session)) return;
       setState({ status: "ready", data });
       report.current?.(stageFacts(data, activeOpening(data.openings), party), false);
     }).catch((error: unknown) => {
-      if (controller.signal.aborted) return;
+      if (controller.signal.aborted || !isOrderSubjectCurrent(subject, session)) return;
       report.current?.(null, true);
       if (error instanceof OrderRequestError && error.status === 404) setState({ status: "unavailable" });
       else setState({ status: "error" });
     });
     return () => { controller.abort(); report.current?.(null, false); };
-  }, [order.id, party, reload]);
+  }, [order.id, party, reload, subject, session]);
   const refresh = useCallback(() => { setReload((value) => value + 1); onChanged(); }, [onChanged]);
-  if (state.status === "loading") return <section className="order-detail-section order-trade-panel" aria-busy="true" aria-label="开租与结算"><h2 className="order-section-title">开租与结算</h2><p className="order-muted">正在读取结算记录…</p></section>;
+  if (state.status === "loading") return <section className="order-detail-section order-trade-panel" id="order-trade-actions" aria-busy="true" aria-label="开租与结算"><h2 className="order-section-title">开租与结算</h2><p className="order-muted">正在读取结算记录…</p></section>;
   if ((state.status === "unavailable" || state.status === "error") && onStageFacts) return null;
-  if (state.status === "unavailable") return <section className="order-detail-section order-trade-panel" aria-label="开租与结算">
+  if (state.status === "unavailable") return <section className="order-detail-section order-trade-panel" id="order-trade-actions" aria-label="开租与结算">
     <h2 className="order-section-title">开租与结算</h2>
     <p className="order-muted">结算明细暂时无法读取，消耗、费用与退款金额尚无法展示。</p>
   </section>;
-  if (state.status === "error") return <section className="order-detail-section order-trade-panel" role="alert"><h2 className="order-section-title">开租与结算</h2><p className="order-inline-notice">结算记录没有读取成功。</p></section>;
+  if (state.status === "error") return <section className="order-detail-section order-trade-panel" id="order-trade-actions" role="alert"><h2 className="order-section-title">开租与结算</h2><p className="order-inline-notice">结算记录没有读取成功。</p></section>;
   const data = state.data;
+  // The order status is the server-owned terminal fact. A stale settlement read can still report
+  // an in-flight opening or version; keep showing those records but never offer a new write.
+  // Original-key recovery notices live inside the panels and stay available.
+  const terminal = order.status === "COMPLETED";
   const opening = activeOpening(data.openings);
   const current = data.settlement ?? null;
   const myParty = party.toUpperCase();
@@ -1223,10 +1315,14 @@ function SettlementAction({ order, party, onChanged, onStageFacts }: { order: Or
   const posting = data.posting ?? null;
   const openIntake = data.currentRequest?.kind === "INTAKE" && data.currentRequest.status === "OPEN";
   const rejected = current?.decisions?.some(decision => decision.action === "REJECT") === true;
-  return <section className="order-detail-section order-trade-panel" aria-label="开租与结算">
-    <div className="order-trade-heading"><h2 className="order-section-title">开租与结算</h2><button type="button" className="button quiet button--sm" onClick={refresh}><RefreshCw size={14} aria-hidden="true" />刷新</button></div>
-    {!opening ? <div className="order-trade-block"><h3>期初库存</h3><p className="order-muted">等待受权客服按实际交付录入期初库存后，双方在同一条目上确认并开始计租。付款与建群都不会自动开租。</p></div>
-      : <OpeningPanel opening={opening} order={order} party={party} onChanged={refresh} />}
+  return <section className="order-detail-section order-trade-panel" id="order-trade-actions" aria-label="开租与结算">
+    <div className="order-trade-heading"><h2 className="order-section-title">{terminal ? "开租与结算记录" : "开租与结算"}</h2><button type="button" className="button quiet button--sm" onClick={refresh}><RefreshCw size={14} aria-hidden="true" />刷新</button></div>
+    {!opening ? <div className="order-trade-block"><h3>期初库存</h3><p className="order-muted">{data.openingGeneration?.state === "REVIEW_REQUIRED" || data.openingGenerationRecoveryRequired
+      ? data.openingGeneration?.reason === "LEGACY_V1_QUOTE_REVIEW"
+        ? "本单使用旧版建单，缺少个性化资金/包赔依据，系统不会自动生成开租清单；请联系客服按未开租取消退款或使用新版重新下单。"
+        : "付款已接纳，但本单冻结资料不足或自动生成记录暂不可用，开租清单正在等待客服核对。可点本区右上角「刷新」重新读取，或用页面上方「下一步」联系客服办理；用户侧不会自行生成清单或交付。订单页与聊天不受影响。"
+      : "付款接纳后系统会按本单冻结报价生成开租清单；当前尚未读取到清单。可点本区右上角「刷新」重新读取，或用页面上方「下一步」联系客服核对；用户侧不会自行生成清单或交付，订单群准备好不等于已经开租。"}</p></div>
+      : <OpeningPanel opening={opening} order={order} party={party} onChanged={refresh} readOnly={terminal} />}
     {opening && data.rentalStarted ? <>
       {posting ? <PostingResult data={data} order={order} party={party} posting={posting} /> :
         openIntake ? <div className="order-trade-block"><h3>结束申请待客服处理</h3><p className="order-muted">已提交期末数据，等待受权客服核实原因并复核；复核与双方确认完成后结算生效。期间不会重复受理同一份结束申请。</p></div> :
@@ -1234,23 +1330,23 @@ function SettlementAction({ order, party, onChanged, onStageFacts }: { order: Or
               <h3>{myDecision?.action === "REJECT" ? "你已拒绝" : "未达成一致的结算"}第{current.versionNo}版</h3>
               <p className="order-muted">拒绝不会使这一版生效；服务端会按新的期末数据或人工调整生成新版本，请按最新版本重新核对后再决定。</p>
               <AmountTable rows={decisionAmountRows(party, current)} caption={`被拒绝版本金额明细（${party === "renter" ? "租客口径" : "号主口径"}${isAdjustedVersion(current) ? "，含人工调整" : ""}）`} />
-            </div> : current && !myDecision ? <DecisionPanel version={current} party={party} order={order} onChanged={refresh} /> :
+            </div> : current && !myDecision ? <DecisionPanel version={current} party={party} order={order} onChanged={refresh} readOnly={terminal} /> :
               current && myDecision ? <div className="order-trade-block"><h3>等待对方确认 <span className="order-trade-tag">第{current.versionNo}版</span></h3><p className="order-muted">你已在这一版结算上完成操作；金额变化会生成新版本并要求重新确认。</p>
                 <AmountTable rows={decisionAmountRows(party, current)} caption={`当前版本金额明细（${party === "renter" ? "租客口径" : "号主口径"}${isAdjustedVersion(current) ? "，含人工调整" : ""}）`} />
                 <RecordList title="结算记录" records={(current.decisions ?? []).map((decision) => ({ label: `${partyLabel(decision.party)}${settlementDecisionLabel(decision.action)}`, time: decision.createdAt ?? null }))} />
               </div> :
-                <EndingForm opening={opening} order={order} party={party} onChanged={refresh} consumptionMode={data.consumptionMode} extraResources={data.extraResources} />}
+                <EndingForm opening={opening} order={order} party={party} onChanged={refresh} consumptionMode={data.consumptionMode} extraResources={data.extraResources} readOnly={terminal} />}
     </> : null}
     {opening && !posting && data.versions.length > 1 ? <div className="order-trade-block"><h3>历史结算版本</h3><VersionHistory versions={data.versions} current={current} /></div> : null}
   </section>;
 }
 
-export function OrderTradeActions({ order, party, onChanged, onStageFacts }: { order: Order; party: OrderParty; onChanged: () => void; onStageFacts?: (facts: OrderStageFacts | null, failed: boolean) => void }) {
-  if (order.status === "PENDING_PAYMENT") return <PaymentAction order={order} party={party} onChanged={onChanged} />;
+export function OrderTradeActions({ order, party, onChanged, onStageFacts, onPaymentFacts }: { order: Order; party: OrderParty; onChanged: () => void; onStageFacts?: (facts: OrderStageFacts | null, failed: boolean) => void; onPaymentFacts?: (facts: OrderPaymentFacts | null) => void }) {
+  if (order.status === "PENDING_PAYMENT") return <PaymentAction order={order} party={party} onChanged={onChanged} onPaymentFacts={onPaymentFacts} />;
   if (order.status === "PAID" || order.status === "COMPLETED") return <SettlementAction order={order} party={party} onChanged={onChanged} onStageFacts={onStageFacts} />;
-  if (order.status === "CANCELLED") return <section className="order-detail-section order-trade-panel" aria-label="交易动作">
-    <h2 className="order-section-title">交易动作</h2>
-    <p className="order-muted"><CircleSlash size={14} aria-hidden="true" /> 本单已取消。{party === "renter" ? "可重新选择账号下单。" : "可前往上架账号查看接单状态。"}</p>
+  if (order.status === "CANCELLED") return <section className="order-detail-section order-trade-panel" id="order-trade-actions" aria-label="订单收尾">
+    <h2 className="order-section-title">订单收尾</h2>
+    <p className="order-muted"><CircleSlash size={14} aria-hidden="true" /> 订单已结束，本页不再提供开租、结算或新的支付操作。退款进度、售后记录与客服入口按实际可用性保留；取消或过账都不代表渠道退款已到账，本单账号不会因完单而再次上架。</p>
     <div className="order-trade-actions">
       <Link className="button secondary" href={party === "renter" ? "/accounts" : "/account?view=accounts"} scroll={false}>{party === "renter" ? "浏览可租账号" : "管理上架账号"}</Link>
     </div>

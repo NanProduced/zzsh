@@ -75,6 +75,10 @@ test('未开租结束GET/申请保持本人Cookie身份预检；不代理Admin�
   const body=JSON.stringify({expectedOrderRevision:'1',reason:'申请尚未开租结束'});
   const p=await POST(input(['order_1','prestart-termination','requests'],{method:'POST',headers:{...headers,'idempotency-key':'original_1','content-type':'application/json'},body}),ctx(['order_1','prestart-termination','requests']));
   assert.equal(p.status,200);assert.equal(calls.at(-1).options.headers.get('idempotency-key'),'original_1');
+  const cancelBody=JSON.stringify({expectedOrderRevision:'1',reasonCode:'RENTER_WRONG_ACCOUNT'});
+  const cancelled=await POST(input(['order_1','prestart-termination','cancel'],{method:'POST',headers:{...headers,'idempotency-key':'cancel_1','content-type':'application/json'},body:cancelBody}),ctx(['order_1','prestart-termination','cancel']));
+  assert.equal(cancelled.status,200);assert.equal(calls.at(-1).options.headers.get('idempotency-key'),'cancel_1');
+  assert.match(calls.at(-1).url,/order_1\/prestart-termination\/cancel$/);
   const count=calls.length;assert.equal((await POST(input(['order_1','prestart-termination','term_1','review'],{method:'POST',headers,body:'{}'}),ctx(['order_1','prestart-termination','term_1','review']))).status,404);
   assert.equal((await GET(input(['order_1','prestart-termination'],{headers},'?query=channel'),ctx(['order_1','prestart-termination']))).status,400);assert.equal(calls.length,count);
  }finally{globalThis.fetch=old;}
@@ -104,18 +108,18 @@ test('personal confirmation BFF preserves only user session, bounded body and no
 });
 
 test('order BFF list/detail forward only user cookies and preserve query',async()=>{
-  const old=globalThis.fetch;const seen=[];
-  globalThis.fetch=async(url,options)=>{seen.push({url:String(url),options});return Response.json({items:[],nextCursor:null,limit:20});};
+  const old=globalThis.fetch;const seen=[];const subject={'x-zzsh-expected-user-id':'user_a'};
+  globalThis.fetch=async(url,options)=>{if(String(url).endsWith('/get-session'))return Response.json({user:{id:'user_a'}});seen.push({url:String(url),options});return Response.json({items:[],nextCursor:null,limit:20});};
   try{
-    const r=await GET(input([],{headers:{cookie:'zzsh_user.session_token=usr; zzsh_admin.session_token=adm; other=x'}},'?party=owner&status=PENDING_PAYMENT&limit=5'),ctx(undefined));
+    const r=await GET(input([],{headers:{...subject,cookie:'zzsh_user.session_token=usr; zzsh_admin.session_token=adm; other=x'}},'?party=owner&status=PENDING_PAYMENT&limit=5'),ctx(undefined));
     assert.equal(r.status,200);
     assert.equal(seen[0].url,'http://127.0.0.1:3102/api/bff/user/orders/?party=owner&status=PENDING_PAYMENT&limit=5');
     assert.equal(seen[0].options.headers.get('cookie'),'zzsh_user.session_token=usr');
     assert.equal(seen[0].options.headers.get('cookie').includes('adm'),false);
-    const d=await GET(input(['order_abc'],{}),ctx(['order_abc']));
+    const d=await GET(input(['order_abc'],{headers:subject}),ctx(['order_abc']));
     assert.equal(d.status,200);
     assert.equal(seen[1].url,'http://127.0.0.1:3102/api/bff/user/orders/order_abc');
-    const im=await GET(input(['order_abc','im'],{},'?operation=send'),ctx(['order_abc','im']));
+    const im=await GET(input(['order_abc','im'],{headers:subject},'?operation=send'),ctx(['order_abc','im']));
     assert.equal(im.status,200);
     assert.equal(seen[2].url,'http://127.0.0.1:3102/api/bff/user/orders/order_abc/im?operation=send');
     assert.equal(r.headers.get('cache-control'),'no-store');
@@ -134,35 +138,36 @@ test('order BFF rejects unknown paths, wrong method, cross-origin writes and aut
 });
 test('order BFF preserves idempotency key and upstream error bodies',async()=>{
   const old=globalThis.fetch;let seen;
-  globalThis.fetch=async(_url,options)=>{seen=options;return Response.json({error:{code:'OCCUPIED',message:'账号当前已被占用',requestId:'req_x'}},{status:409});};
+  globalThis.fetch=async(url,options)=>{if(String(url).endsWith('/get-session'))return Response.json({user:{id:'user_a'}});seen=options;return Response.json({error:{code:'OCCUPIED',message:'账号当前已被占用',requestId:'req_x'}},{status:409});};
   try{
-    const r=await POST(input([],{method:'POST',headers:{'content-type':'application/json','idempotency-key':'key_order_1'},body:'{"accountId":"a","versionId":"v","releaseId":"r"}'}),ctx(undefined));
+    const r=await POST(input([],{method:'POST',headers:{'content-type':'application/json','idempotency-key':'key_order_1','x-zzsh-expected-user-id':'user_a'},body:'{"accountId":"a","versionId":"v","releaseId":"r"}'}),ctx(undefined));
     assert.equal(seen.headers.get('idempotency-key'),'key_order_1');
     assert.equal(r.status,409);
     assert.equal((await r.json()).error.code,'OCCUPIED');
   }finally{globalThis.fetch=old;}
 });
 test('order BFF rejects non-JSON writes, bounds input and maps upstream failures',async()=>{
-  const old=globalThis.fetch;let calls=0;globalThis.fetch=async()=>{calls++;return Response.json({});};
+  const old=globalThis.fetch;let upstreamCalls=0;const subject={'x-zzsh-expected-user-id':'user_a'};
+  globalThis.fetch=async(url)=>{if(String(url).endsWith('/get-session'))return Response.json({user:{id:'user_a'}});upstreamCalls++;return Response.json({});};
   try{
-    assert.equal((await POST(input([],{method:'POST',headers:{'content-type':'text/plain'},body:'x'}),ctx(undefined))).status,400);
+    assert.equal((await POST(input([],{method:'POST',headers:{'content-type':'text/plain',...subject},body:'x'}),ctx(undefined))).status,400);
     const body=new ReadableStream({start(c){c.enqueue(new Uint8Array(65537));},cancel(){}});
-    assert.equal((await POST(input([],{method:'POST',headers:{'content-type':'application/json'},body,duplex:'half'}),ctx(undefined))).status,413);
+    assert.equal((await POST(input([],{method:'POST',headers:{'content-type':'application/json',...subject},body,duplex:'half'}),ctx(undefined))).status,413);
+    assert.equal(upstreamCalls,0);
     globalThis.fetch=async()=>{throw new Error('network down');};
-    assert.equal((await GET(input([]),ctx(undefined))).status,503);
-    globalThis.fetch=async()=>new Response('not-json',{headers:{'content-type':'application/json'}});
-    assert.equal((await GET(input([]),ctx(undefined))).status,502);
-    assert.equal(calls,0);
+    assert.equal((await GET(input([],{headers:subject}),ctx(undefined))).status,503);
+    globalThis.fetch=async(url)=>String(url).endsWith('/get-session')?Response.json({user:{id:'user_a'}}):new Response('not-json',{headers:{'content-type':'application/json'}});
+    assert.equal((await GET(input([],{headers:subject}),ctx(undefined))).status,502);
   }finally{globalThis.fetch=old;}
 });
 
 test('historical order BFF forwards only GET list/detail and preserves authorization errors',async()=>{
-  const old=globalThis.fetch;let calls=0;
-  globalThis.fetch=async(url,init)=>{calls++;assert.match(String(url),/\/api\/bff\/user\/orders\/legacy/);assert.equal(init.method,'GET');return Response.json({error:{code:'NOT_FOUND',message:'未找到'}},{status:404});};
+  const old=globalThis.fetch;let calls=0;const subject={'x-zzsh-expected-user-id':'user_a'};
+  globalThis.fetch=async(url,init)=>{if(String(url).endsWith('/get-session'))return Response.json({user:{id:'user_a'}});calls++;assert.match(String(url),/\/api\/bff\/user\/orders\/legacy/);assert.equal(init.method,'GET');return Response.json({error:{code:'NOT_FOUND',message:'未找到'}},{status:404});};
   try{
-    assert.equal((await GET(input(['legacy','legacy_order_a']),ctx(['legacy','legacy_order_a']))).status,404);
+    assert.equal((await GET(input(['legacy','legacy_order_a'],{headers:subject}),ctx(['legacy','legacy_order_a']))).status,404);
     assert.equal(calls,1);
-    assert.equal((await POST(input(['legacy','legacy_order_a'],{method:'POST',headers:{origin:'http://127.0.0.1:3100','content-type':'application/json'},body:'{}'}),ctx(['legacy','legacy_order_a']))).status,404);
+    assert.equal((await POST(input(['legacy','legacy_order_a'],{method:'POST',headers:{'content-type':'application/json',...subject},body:'{}'}),ctx(['legacy','legacy_order_a']))).status,404);
     assert.equal(calls,1);
   }finally{globalThis.fetch=old;}
 });
@@ -178,7 +183,7 @@ test('channel payment GET forwards the v1 local projection, user session and nul
     assert.equal(seen[0].url,'http://127.0.0.1:3102/api/bff/user/orders/order_channel/channel-payment-requests');
     assert.equal(seen[0].options.headers.get('cookie'),'zzsh_user.session_token=user');
     assert.equal(seen[0].options.method,'GET');assert.equal(response.headers.get('cache-control'),'no-store');
-    await GET(input(['order_channel','payment-requests']),ctx(['order_channel','payment-requests']));
+    await GET(input(['order_channel','payment-requests'],{headers:{'x-zzsh-expected-user-id':'user_a'}}),ctx(['order_channel','payment-requests']));
     assert.equal(seen[1].url,'http://127.0.0.1:3102/api/bff/user/orders/order_channel/payment-requests');
   }finally{globalThis.fetch=old;}
 });
@@ -321,4 +326,59 @@ test('owner refund summary is forwarded only for the captured subject and reques
       if(status===200)assert.deepEqual(await response.json(),valid);
     }
   }finally{globalThis.fetch=old;}
+});
+
+// Master review: opening confirmations, settlement decisions, legacy continuation commands and
+// original-key recovery reads must not be forwardable from a page rendered for another subject.
+// The previous allowlist only covered payments, refunds and the unified list.
+test('every user order read/write binds the page subject to the captured Cookie session',async()=>{
+  const previous=globalThis.fetch,subject='user_a',legacy='legacy_order_'+'a'.repeat(40);
+  const cases=[
+    ['GET',['order_1'],''],
+    ['GET',['order_1','im'],''],
+    ['GET',['order_1','settlement'],''],
+    ['GET',['order_1','payment-requests'],''],
+    ['GET',['order_1','refunds'],''],
+    ['GET',['legacy',legacy,'continuation'],''],
+    ['GET',['legacy',legacy,'continuation','receipt'],'?key=original_1'],
+    ['GET',['order_1','demo-checkout','receipt'],'?key=original_1'],
+    ['POST',['order_1','cancel'],''],
+    ['POST',['order_1','payment-requests'],''],
+    ['POST',['order_1','settlement-preview'],''],
+    ['POST',['order_1','settlements'],''],
+    ['POST',['order_1','settlements','version_1','decision'],''],
+    ['POST',['order_1','openings','opening_1','confirm'],''],
+    ['POST',['legacy',legacy,'continuation','confirm'],''],
+  ];
+  const send=(method,path,query,headers)=>method==='GET'
+    ?GET(input(path,{headers},query),ctx(path))
+    :POST(input(path,{method:'POST',headers:{'content-type':'application/json',...headers},body:'{}'},query),ctx(path));
+  try{
+    for(const [method,path,query] of cases){
+      const label=`${method} /${path.join('/')}`;
+      for(const [kind,header,sessionUser,expectedStatus,expectedCode] of [
+        ['missing binding',{},subject,400,'IDENTITY_BINDING_REQUIRED'],
+        ['changed identity',{'x-zzsh-expected-user-id':subject},'user_b',401,'IDENTITY_CHANGED'],
+        ['matched identity',{'x-zzsh-expected-user-id':subject},subject,null,null],
+      ]){
+        const upstream=[];
+        globalThis.fetch=async(url,options)=>{
+          if(String(url).endsWith('/get-session'))return Response.json({user:{id:sessionUser}});
+          upstream.push({url:String(url),options});return Response.json({ok:true});
+        };
+        const response=await send(method,path,query,{cookie:'zzsh_user.session_token=synthetic_user_b',...header});
+        if(expectedCode){
+          assert.equal(response.status,expectedStatus,`${kind}: ${label}`);
+          assert.equal((await response.json()).error.code,expectedCode,`${kind}: ${label}`);
+          assert.equal(upstream.length,0,`${kind}: ${label} must not reach the order API`);
+        }else{
+          assert.notEqual(response.status,400,`${kind}: ${label}`);
+          assert.notEqual(response.status,401,`${kind}: ${label}`);
+          assert.equal(upstream.length,1,`${kind}: ${label} must forward exactly one order request`);
+          assert.equal(upstream[0].options.headers.has('x-zzsh-expected-user-id'),false,'internal header is never forwarded');
+          assert.equal(upstream[0].options.headers.get('cookie'),'zzsh_user.session_token=synthetic_user_b','the captured Cookie is preserved');
+        }
+      }
+    }
+  }finally{globalThis.fetch=previous;}
 });

@@ -90,6 +90,14 @@ test('simulated payments are clearly separated from channel facts and offer no f
  assert.equal(ui.opened.length,0);
 });
 
+test('a newly submitted refund for an old order links to the authorized order',async t=>{
+ const ui=await mount(t,'finance-records',[{id:'legacy_refund:attempt1',source:'NATIVE',kind:'REFUND',subjectId:'u1',subjectName:'用户一',
+  documentRef:null,relatedOrderId:'legacy_order_123',number:'LR123',relatedNumber:'PAY123',relatedNumberLabel:'原支付单号',state:'PROCESSING',amountCents:'5000',occurredAt:null}]);
+ assert.match(ui.host.textContent,/退款/);assert.match(ui.host.textContent,/原支付单号 PAY123/);assert.doesNotMatch(ui.host.textContent,/旧平台记为退款成功/);
+ const button=[...ui.host.querySelectorAll('button')].find(item=>item.textContent.trim()==='查看订单');assert.ok(button);
+ await act(async()=>button.click());assert.equal(ui.opened.at(-1)[0],'/orders/legacy_order_123?section=finance');
+});
+
 test('historical channel page uses old fields and keeps original status separate from channel proof',async t=>{
  const ui=await mount(t,'finance-record-history',[{id:'old',source:'LEGACY',kind:'REFUND',subjectId:'u1',subjectName:'用户一',documentRef:'HISTORY_REFUND:one',number:'R123',state:'旧平台记为退款成功',amountCents:'1000',amountLabel:'旧平台记录金额',occurredAt:null}]);
  assert.match(ui.requests[0],/source=LEGACY/);assert.match(ui.host.textContent,/旧平台状态为原系统记录/);assert.match(ui.host.textContent,/旧平台记为退款成功/);assert.equal(ui.host.querySelector('[aria-label="请求类型"]'),null);assert.match(ui.host.textContent,/返回资金记录/);

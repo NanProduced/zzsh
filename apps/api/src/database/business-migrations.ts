@@ -7,6 +7,7 @@ import { migrate } from "drizzle-orm/node-postgres/migrator";
 import { readMigrationFiles } from "drizzle-orm/migrator";
 import type { Pool, PoolClient } from "pg";
 import { matchesKnown0155LineEndings } from "./business-migration-compat";
+import { supportPoststartTriggersSql,supportPoststartExecutorSafeSql } from "../finance/support-poststart-schema";
 import { compensationTriggersSql, compensationFunctionsSafeSql, compensationIncidentIndexSafeSql } from '../finance/order-compensation-schema';
 
 const IDENTIFIER = /^[a-z][a-z0-9_]{0,62}$/;
@@ -40,7 +41,7 @@ export class BusinessMigrationAclError extends Error {
 }
 
 export class BusinessMigrationHistoryError extends Error {
-  constructor(readonly reason: "INVALID_LOCAL_CHAIN" | "HISTORY_UNAVAILABLE" | "NOT_EXACT_PREFIX", readonly index?: number) {
+  constructor(readonly reason: "INVALID_LOCAL_CHAIN" | "HISTORY_UNAVAILABLE" | "NOT_EXACT_PREFIX" | "SPLIT_COMPLAINT_HANDOVER", readonly index?: number) {
     super(`Business migration preflight rejected: ${reason}${index === undefined ? "" : ` at index ${index}`}`);
     this.name = "BusinessMigrationHistoryError";
   }
@@ -131,6 +132,15 @@ export async function assertBusinessMigrationPrefix(pool: Pick<Pool, "query">, m
       throw new BusinessMigrationHistoryError("NOT_EXACT_PREFIX", index);
     }
   }
+  // 0182 repairs grants only for the assignment state frozen by 0181. Refuse a split
+  // upgrade where 0181 is already applied and 0182 is pending: the repair would
+  // otherwise authorize complaints created or transferred between the two batches.
+  const tags = journal.entries.map((entry) => entry.tag);
+  const handover = tags.indexOf("0181_complaint_active_handover");
+  const repair = tags.indexOf("0182_complaint_handover_role_status");
+  if (handover >= 0 && repair > handover && history.length > handover && history.length <= repair) {
+    throw new BusinessMigrationHistoryError("SPLIT_COMPLAINT_HANDOVER", repair);
+  }
 }
 
 export async function runBusinessMigrations(pool: Pool, options: BusinessMigrationOptions): Promise<void> {
@@ -202,7 +212,7 @@ export async function applyRuntimePrivileges(pool: Pick<Pool, "query">, runtimeR
     GRANT SELECT, INSERT ON TABLE "zzsh_iam"."im_support_presence" TO ${runtimeUser};
     REVOKE DELETE, TRUNCATE ON TABLE "zzsh_iam"."im_support_presence" FROM ${runtimeUser};
     REVOKE UPDATE ON TABLE "zzsh_iam"."im_support_presence" FROM ${runtimeUser};
-    GRANT UPDATE ("availability", "connection_state", "last_connected_at", "active_load", "version", "updated_at", "last_order_assigned_at", "last_consultation_assigned_at") ON TABLE "zzsh_iam"."im_support_presence" TO ${runtimeUser};
+    GRANT UPDATE ("availability", "connection_state", "last_connected_at", "active_load", "version", "updated_at", "last_order_assigned_at", "last_consultation_assigned_at", "auth_session_id") ON TABLE "zzsh_iam"."im_support_presence" TO ${runtimeUser};
     GRANT SELECT, INSERT ON TABLE "zzsh_iam"."im_consultation" TO ${runtimeUser};
     REVOKE DELETE, TRUNCATE ON TABLE "zzsh_iam"."im_consultation" FROM ${runtimeUser};
     REVOKE UPDATE ON TABLE "zzsh_iam"."im_consultation" FROM ${runtimeUser};
@@ -472,9 +482,31 @@ export async function applyRuntimePrivileges(pool: Pick<Pool, "query">, runtimeR
   await configureNativeRefundReviewPrivileges(pool, runtimeRole);
   await configureProfileAvatarPolicyPrivileges(pool, runtimeRole);
   await configureSettlementRefundPolicyPrivileges(pool, runtimeRole);
+  await configureOpeningAutoConfirmPrivileges(pool, runtimeRole);
+  await configureComplaintHandoverPrivileges(pool, runtimeRole);
   await configureLocalFinancialSandboxPrivileges(pool, runtimeRole);
   await configureUserAuthThrottlePrivileges(pool, runtimeRole);
   await configureOrderCompensationPrivileges(pool, runtimeRole);
+  await configureSupportPoststartCancellationPrivileges(pool, runtimeRole);
+}
+
+/** 只在取消、账本和退款守卫完整时授予读与受控执行权。 */
+export async function configureSupportPoststartCancellationPrivileges(pool:Pick<Pool,"query">,runtimeRole:string):Promise<void>{
+ const table='zzsh_order.support_poststart_cancellation',role=quoteIdentifier(runtimeRole);
+ const names=['zzsh_order.cancel_order_after_start(text,bigint,numeric,numeric,text)','zzsh_order.support_poststart_cancellation_complete(text)',
+  'zzsh_order.support_cancellation_refund_liability_complete(text)','zzsh_order.support_cancellation_refund_terminal_complete(text)'];
+ const row=(await pool.query(`SELECT to_regclass($1) IS NOT NULL AS present,
+  (SELECT count(*)::int FROM unnest($2::text[]) f(name) WHERE to_regprocedure(f.name) IS NOT NULL) AS functions,
+  (${supportPoststartTriggersSql}) AS triggers,
+  (${supportPoststartExecutorSafeSql}) AS executor_safe`,
+  [table,names])).rows[0];
+ if(!row||typeof row.present!=='boolean'||!Number.isInteger(row.functions)||!Number.isInteger(row.triggers)||typeof row.executor_safe!=='boolean')
+  throw new Error('Poststart cancellation contract inventory unavailable');
+ if(!row.present&&row.functions===0&&row.triggers===0)return;
+ if(!row.present||row.functions!==names.length||row.triggers!==12||!row.executor_safe)throw new Error('Poststart cancellation contract incomplete');
+ await resetRuntimeTablePrivileges(pool,table,'PUBLIC',{select:false});
+ await resetRuntimeTablePrivileges(pool,table,role);
+ await pool.query(`REVOKE ALL ON FUNCTION ${names.join(',')} FROM PUBLIC, ${role}; GRANT EXECUTE ON FUNCTION ${names.join(',')} TO ${role}`);
 }
 
 /** An absent contract is allowed on older databases; a partial one must not receive money-write privileges. */
@@ -777,6 +809,85 @@ export async function configureSettlementRefundPolicyPrivileges(pool: Pick<Pool,
   await resetRuntimeTablePrivileges(pool, table, role, { columns });
   await pool.query(`GRANT UPDATE(normal_days,early_days,revision,updated_by_admin_id,updated_at) ON ${table} TO ${role};
     REVOKE ALL ON FUNCTION zzsh_order.guard_settlement_refund_policy() FROM PUBLIC, ${role};`);
+}
+
+/** Opening auto-generation is optional until its migration is installed; reject partial contracts. */
+export async function configureOpeningAutoConfirmPrivileges(pool: Pick<Pool, "query">, runtimeRole: string): Promise<void> {
+  const role = quoteIdentifier(runtimeRole);
+  const inventory = (await pool.query(`SELECT
+    to_regclass('zzsh_order.opening_auto_confirm_policy') IS NOT NULL AS policy,
+    to_regclass('zzsh_order.rental_opening_generation') IS NOT NULL AS generation,
+    to_regclass('zzsh_order.opening_progress_reminder') IS NOT NULL AS reminder,
+    to_regprocedure('zzsh_order.guard_opening_auto_confirm_policy()') IS NOT NULL AS guard,
+    EXISTS(SELECT 1 FROM pg_attribute WHERE attrelid=to_regclass('zzsh_order.rental_order')
+      AND attname='opening_generation_recovery_required' AND attnum>0 AND NOT attisdropped) AS recovery_marker,
+    (SELECT count(*)::integer FROM pg_attribute WHERE attrelid=to_regclass('zzsh_order.rental_opening')
+      AND attname IN ('created_by_source','payment_confirmation_id','auto_confirm_policy_revision','auto_confirm_wait_minutes')
+      AND attnum>0 AND NOT attisdropped) AS opening_columns`)).rows[0];
+  if (!inventory) throw new Error("Opening auto-generation inventory is incomplete");
+  const present = {
+    policy: inventory.policy === true,
+    generation: inventory.generation === true,
+    reminder: inventory.reminder === true,
+    guard: inventory.guard === true,
+    recoveryMarker: inventory.recovery_marker === true,
+    openingColumns: Number.isInteger(inventory.opening_columns) ? Number(inventory.opening_columns) : 0,
+  };
+  if (!present.policy && !present.generation && !present.reminder && !present.guard
+    && !present.recoveryMarker && present.openingColumns === 0) return;
+  if (!present.policy || !present.generation || !present.reminder || !present.guard
+    || !present.recoveryMarker || present.openingColumns !== 4) {
+    throw new Error("Opening auto-generation is partially deployed");
+  }
+  const policyColumns = ["singleton", "wait_minutes", "revision", "updated_by_admin_id", "updated_at"];
+  const generationColumns = ["order_id", "payment_confirmation_id", "state", "reason", "opening_id", "created_at", "updated_at"];
+  const reminderColumns = ["id", "order_id", "app_id", "admin_user_id", "request_key", "stage", "target_parties",
+    "message_text", "state", "attempt_count", "failure_class", "lease_token_hash", "lease_until", "server_message_id",
+    "sent_at", "created_at", "updated_at"];
+  const columns = async (table: string) => (await pool.query("SELECT attname FROM pg_attribute WHERE attrelid=$1::regclass AND attnum>0 AND NOT attisdropped ORDER BY attnum", [table]))
+    .rows.map(row => row.attname as string);
+  const check = async (table: string, expected: string[]) => {
+    const actual = await columns(table);
+    if (actual.length !== expected.length || new Set(actual).size !== actual.length || expected.some(name => !actual.includes(name))) {
+      throw new Error("Opening auto-generation column inventory differs");
+    }
+    return actual;
+  };
+  const policy = await check("zzsh_order.opening_auto_confirm_policy", policyColumns);
+  const generation = await check("zzsh_order.rental_opening_generation", generationColumns);
+  const reminder = await check("zzsh_order.opening_progress_reminder", reminderColumns);
+  for (const [table, actual] of [
+    ["zzsh_order.opening_auto_confirm_policy", policy],
+    ["zzsh_order.rental_opening_generation", generation],
+    ["zzsh_order.opening_progress_reminder", reminder],
+  ] as const) await resetRuntimeTablePrivileges(pool, table, "PUBLIC", { columns: actual, select: false });
+  await resetRuntimeTablePrivileges(pool, "zzsh_order.opening_auto_confirm_policy", role, { columns: policy });
+  await resetRuntimeTablePrivileges(pool, "zzsh_order.rental_opening_generation", role, { columns: generation });
+  await resetRuntimeTablePrivileges(pool, "zzsh_order.opening_progress_reminder", role, { columns: reminder });
+  await pool.query(`GRANT SELECT ON zzsh_order.opening_auto_confirm_policy TO ${role};
+    GRANT UPDATE(singleton,wait_minutes,revision,updated_by_admin_id,updated_at) ON zzsh_order.opening_auto_confirm_policy TO ${role};
+    GRANT SELECT, INSERT ON zzsh_order.rental_opening_generation TO ${role};
+    GRANT UPDATE(state,reason,opening_id,payment_confirmation_id,updated_at) ON zzsh_order.rental_opening_generation TO ${role};
+    GRANT SELECT, INSERT ON zzsh_order.opening_progress_reminder TO ${role};
+    GRANT UPDATE(state,attempt_count,failure_class,lease_token_hash,lease_until,server_message_id,sent_at,updated_at) ON zzsh_order.opening_progress_reminder TO ${role};
+    REVOKE ALL ON FUNCTION zzsh_order.guard_opening_auto_confirm_policy(), zzsh_order.set_rental_opening_auto_confirm_due() FROM PUBLIC, ${role};`);
+  const markerWritable = (await pool.query<{ writable: boolean }>(
+    `SELECT has_column_privilege($1, 'zzsh_order.rental_order', 'opening_generation_recovery_required', 'UPDATE') AS writable`,
+    [runtimeRole],
+  )).rows[0]?.writable;
+  if (markerWritable !== true) throw new Error("Opening recovery marker is not writable");
+}
+
+/** Object-level complaint handover grants are read-only to the runtime role. */
+export async function configureComplaintHandoverPrivileges(pool: Pick<Pool, "query">, runtimeRole: string): Promise<void> {
+  const table = "zzsh_iam.im_complaint_handover_grant", role = quoteIdentifier(runtimeRole);
+  const present = (await pool.query(`SELECT to_regclass($1) IS NOT NULL AS present`, [table])).rows[0]?.present;
+  if (present !== true) return;
+  const columns = (await pool.query("SELECT attname FROM pg_attribute WHERE attrelid=$1::regclass AND attnum>0 AND NOT attisdropped ORDER BY attnum", [table])).rows.map(row => row.attname as string);
+  const expected = ["consultation_id", "admin_user_id", "reason", "created_at"];
+  if (columns.length !== expected.length || expected.some(name => !columns.includes(name))) throw new Error("Complaint handover grant column inventory differs");
+  await resetRuntimeTablePrivileges(pool, table, "PUBLIC", { columns, select: false });
+  await resetRuntimeTablePrivileges(pool, table, role, { columns });
 }
 
 /** Optional avatar policy; validate the complete group before clearing inherited table/column grants. */
@@ -1210,10 +1321,14 @@ export async function configureJoinpayFinancialPrivileges(pool: Pick<Pool, "quer
   const columns = (await pool.query<{ name: string; attname: string }>(`/* joinpay financial columns */ SELECT t.name,a.attname FROM unnest($1::text[]) AS t(name)
     JOIN pg_attribute a ON a.attrelid=to_regclass(t.name) AND a.attnum>0 AND NOT a.attisdropped ORDER BY t.name,a.attnum`, [tables.map(t => t.name)])).rows;
   if (columns.some(c => !tables.some(t => t.name === c.name) || typeof c.attname !== "string")) throw new Error("JoinPay financial column inventory differs");
+  const partyCancellationColumns=['user_id','user_session_id','acting_party','reason_code'];
+  const partyCancellationCount=columns.filter(c=>c.name===prestart[1]!.name&&partyCancellationColumns.includes(c.attname)).length;
+  if(partyCancellationCount!==0&&partyCancellationCount!==partyCancellationColumns.length)throw new Error('Prestart party cancellation is partially deployed');
+  if(partyCancellationCount===partyCancellationColumns.length)prestart[1]!.insert+=' '+partyCancellationColumns.join(' ');
   const basisColumns=['basis_kind','liability_root_id','liability_event_id'];
   const basisCount=columns.filter(c=>c.name===refund[0]!.name&&basisColumns.includes(c.attname)).length;
   if(basisCount!==0&&basisCount!==3||hasPrestart&&basisCount!==3)throw new Error('Refund liability extension is partially deployed');
-  if(basisCount===3){refund[0]!.insert+=' '+basisColumns.join(' ');functions.push('zzsh_order.native_abnormal_refund_liability_complete(text)','zzsh_order.native_abnormal_refund_terminal_complete(text)');}
+  if(basisCount===3) refund[0]!.insert+=' '+basisColumns.join(' ');
   // This column belongs to the separately checked local group, not the formal provider's write surface.
   if (hasSandbox || hasDemoSandbox) refund[0]!.metadata += ' sandbox_registration_ref';
   if (hasDemoSandbox) refund[0]!.metadata += ' demo_terminal_evidence_id';

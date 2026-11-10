@@ -26,12 +26,12 @@ export async function runOrderTeamAcceptance(t:TestContext,o:Parameters<typeof r
   await seedAdmin(pool,staff,`${staff}_s`,run,false);await seedIdentity(pool,identityKey("ADMIN",staff),run);
   for(const permission of ["im.support.read","im.support.accept","im.support.presence","im.support.transfer","order.settlement.write"])
     await pool.query(`INSERT INTO zzsh_iam.admin_user_permission(admin_user_id,permission_code,effect) VALUES($1,$2,'ALLOW')`,[staff,permission]);
-  await pool.query(`INSERT INTO zzsh_iam.im_support_presence(app_id,admin_user_id,availability,connection_state,last_connected_at) VALUES($1,$2,'AVAILABLE','CONNECTED',clock_timestamp())`,[appId,staff]);
+  await pool.query(`INSERT INTO zzsh_iam.im_support_presence(app_id,admin_user_id,availability,connection_state,last_connected_at,auth_session_id) VALUES($1,$2,'AVAILABLE','CONNECTED',clock_timestamp(),(SELECT id FROM zzsh_auth_admin."session" WHERE "userId"=$2 AND "expiresAt">clock_timestamp() ORDER BY "createdAt" DESC LIMIT 1))`,[appId,staff]);
   let gameId="";const fixtureApps=new Set([appId]);
   const makePaid=async(label:string,app=appId)=>{
     const f=await o.fixture(label);const row=(await pool.query(`SELECT * FROM zzsh_order.rental_order WHERE id=$1`,[f.orderId])).rows[0];
     if(!gameId){gameId=row.game_id;await pool.query(`INSERT INTO zzsh_supply.admin_supply_scope(admin_user_id,game_id,granted_by_admin_id) VALUES($1,$2,$1)`,[staff,gameId]);}
-    if(!fixtureApps.has(app)){await seedIdentity(pool,identityKey("ADMIN",staff,app),run);await pool.query(`INSERT INTO zzsh_iam.im_support_presence(app_id,admin_user_id,availability,connection_state,last_connected_at) VALUES($1,$2,'AVAILABLE','CONNECTED',clock_timestamp())`,[app,staff]);fixtureApps.add(app);}
+    if(!fixtureApps.has(app)){await seedIdentity(pool,identityKey("ADMIN",staff,app),run);await pool.query(`INSERT INTO zzsh_iam.im_support_presence(app_id,admin_user_id,availability,connection_state,last_connected_at,auth_session_id) VALUES($1,$2,'AVAILABLE','CONNECTED',clock_timestamp(),(SELECT id FROM zzsh_auth_admin."session" WHERE "userId"=$2 AND "expiresAt">clock_timestamp() ORDER BY "createdAt" DESC LIMIT 1))`,[app,staff]);fixtureApps.add(app);}
     const fact=createControlledPaymentSource({config:o.config,resourceSet:o.resourceSet,appId:app,merchantScopeId:"team_test",allowedOrderIds:[f.orderId]})({orderId:f.orderId,merchantOrderNo:row.display_no,providerTransactionId:`tx_${randomUUID()}`,amountCents:(BigInt(row.rental_amount_cents)+BigInt(row.deposit_amount_cents)).toString(),currency:"CNY",providerPaidAt:new Date().toISOString(),requestId:`req_${randomUUID()}`});
     await withTransaction(pool,c=>confirmOrderPayment(c,fact));await dispatchPaidOrders(pool,app);
     return {...f,renter:row.renter_user_id as string,owner:row.owner_user_id as string,appId:app};
@@ -314,10 +314,13 @@ export async function runOrderTeamAcceptance(t:TestContext,o:Parameters<typeof r
     await t.test("T15 member-scoped order directory and safe identity context do not require order.read",async()=>{
       const primary=await actor(staff,"admin");
       await pool.query(`INSERT INTO zzsh_iam.admin_user_permission(admin_user_id,permission_code,effect) VALUES($1,'order.read','DENY') ON CONFLICT(admin_user_id,permission_code) DO UPDATE SET effect='DENY'`,[staff]);
-      const list=await withTransaction(pool,c=>listJoinedOrderTeams(c,primary,null,2));
+      const list=await withTransaction(pool,c=>listJoinedOrderTeams(c,primary,null,2,appId));
       assert.equal((list.items as unknown[]).length,2);assert.ok(list.nextCursor);
-      const second=await withTransaction(pool,c=>listJoinedOrderTeams(c,primary,list.nextCursor as string,2));
+      const second=await withTransaction(pool,c=>listJoinedOrderTeams(c,primary,list.nextCursor as string,2,appId));
       assert.ok(!(second.items as {id:string}[]).some(row=>(list.items as {id:string}[]).some(old=>row.id===old.id)));
+      const joined=[...(list.items as {id:string;teamId:string|null}[]),...(second.items as {id:string;teamId:string|null}[])];
+      assert.ok(joined.some(row=>typeof row.teamId==="string"&&row.teamId.length>0));
+      for(const row of joined){assert.ok(Object.hasOwn(row,"teamId"));assert.equal(row.teamId,(await group(row.id)).team_id);}
       const detail=await withTransaction(pool,c=>readOrderTeamAccess(c,primary,legacy.orderId));
       assert.equal(detail.gameName,"三角洲行动");assert.equal((detail.account as {id:string}).id,(await pool.query(`SELECT account_id FROM zzsh_order.rental_order WHERE id=$1`,[legacy.orderId])).rows[0].account_id);
       assert.ok((detail.members as {name:string}[]).every(member=>typeof member.name==="string"));
@@ -325,14 +328,14 @@ export async function runOrderTeamAcceptance(t:TestContext,o:Parameters<typeof r
       assert.doesNotMatch(JSON.stringify(detail),/phoneNumber|password|token|rental_amount|deposit_amount/);
       const boss=`team_outside_boss_${run}`;await seedAdmin(pool,boss,`${boss}_s`,run,true);await seedIdentity(pool,identityKey("ADMIN",boss),run);
       const bossActor=await actor(boss,"admin");
-      assert.deepEqual((await withTransaction(pool,c=>listJoinedOrderTeams(c,bossActor,null,20))).items,[]);
+      assert.deepEqual((await withTransaction(pool,c=>listJoinedOrderTeams(c,bossActor,null,20,appId))).items,[]);
       await assert.rejects(withTransaction(pool,c=>readOrderTeamAccess(c,bossActor,legacy.orderId)),{status:403});
       await ownerPool.query(`UPDATE zzsh_iam.admin_security SET game_scope_mode='SELECTED_GAMES' WHERE admin_user_id=$1`,[staff]);
       await ownerPool.query(`DELETE FROM zzsh_supply.admin_supply_scope WHERE admin_user_id=$1 AND game_id=$2`,[staff,gameId]);
-      try{assert.deepEqual((await withTransaction(pool,c=>listJoinedOrderTeams(c,primary,null,20))).items,[]);await assert.rejects(withTransaction(pool,c=>readOrderTeamAccess(c,primary,legacy.orderId)),{status:403});}
+      try{assert.deepEqual((await withTransaction(pool,c=>listJoinedOrderTeams(c,primary,null,20,appId))).items,[]);await assert.rejects(withTransaction(pool,c=>readOrderTeamAccess(c,primary,legacy.orderId)),{status:403});}
       finally{await pool.query(`UPDATE zzsh_iam.admin_security SET game_scope_mode='ALL_GAMES' WHERE admin_user_id=$1`,[staff]);await pool.query(`INSERT INTO zzsh_supply.admin_supply_scope(admin_user_id,game_id,granted_by_admin_id) VALUES($1,$2,$1)`,[staff,gameId]);}
       await pool.query(`UPDATE zzsh_iam.admin_user_permission SET effect='DENY' WHERE admin_user_id=$1 AND permission_code='im.support.read'`,[staff]);
-      try{await assert.rejects(withTransaction(pool,c=>listJoinedOrderTeams(c,primary,null,20)),{status:403});}
+      try{await assert.rejects(withTransaction(pool,c=>listJoinedOrderTeams(c,primary,null,20,appId)),{status:403});}
       finally{await pool.query(`UPDATE zzsh_iam.admin_user_permission SET effect='ALLOW' WHERE admin_user_id=$1 AND permission_code='im.support.read'`,[staff]);}
       const unpaid=await o.fixture("未付款群入口");const renter=(await pool.query(`SELECT renter_user_id FROM zzsh_order.rental_order WHERE id=$1`,[unpaid.orderId])).rows[0].renter_user_id;
       const renterActor=await actor(renter,"user");const pending=await withTransaction(pool,c=>readOrderTeamAccess(c,renterActor,unpaid.orderId));

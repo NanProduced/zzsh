@@ -13,6 +13,7 @@ const typescript = requireFromTree("typescript");
 const React = requireFromTree("react");
 const { Window } = requireFromTree("happy-dom");
 const intents = requireFromTree(path.join(tree, "apps/web/src/lib/order-intents.ts"));
+const { orderApi, orderIntentKey } = requireFromTree(path.join(tree, "apps/web/src/lib/order-client.ts"));
 const heroToast = await import("@heroui/react/toast");
 
 function compile(relativePath) {
@@ -41,7 +42,7 @@ function loadComponent(relativePath, session, extra) {
     if (name === "@/components/order/order-list") return loadComponent("apps/web/src/components/order/order-list.tsx", session);
     if (name === "./rental-price-summary") return loadComponent("apps/web/src/components/order/rental-price-summary.tsx", session);
     if (name === "./recommended-accounts") return { RecommendedAccountsSection: () => null };
-    if (name === "./legacy-continuation-panel") return {LegacyContinuationPanel:()=>null};
+    if (name === "./legacy-continuation-panel") return extra?.[name] ?? {LegacyContinuationPanel:()=>null};
     if (name === './prestart-termination-panel'||name === '@/components/order/prestart-termination-panel') return loadComponent('apps/web/src/components/order/prestart-termination-panel.tsx',session,extra);
     if (name === './order-trade-actions') return loadComponent('apps/web/src/components/order/order-trade-actions.tsx',session,extra);
     if (name === '@/lib/prestart-termination-client') return requireFromTree(path.join(tree,'apps/web/src/lib/prestart-termination-client.ts'));
@@ -49,9 +50,12 @@ function loadComponent(relativePath, session, extra) {
     if (name === "@/components/ui/tooltip") return { Tooltip: props => React.createElement(React.Fragment, null, props.children), TooltipTrigger: props => React.createElement(React.Fragment, null, props.children), TooltipContent: () => null };
     if (name === "@/components/ui/form-controls") return {
       Input: (props) => React.createElement("input", props),
+      Textarea: (props) => React.createElement("textarea", props),
       FormSelect: ({ label, value, options, onChange, placeholder }) => React.createElement("select", { "aria-label": label, value, onChange: e => onChange(e.target.value) }, (options || []).map(o => React.createElement("option", { key: o.value, value: o.value }, o.label))),
       DatePicker: ({ label, value, onChange, placeholder }) => React.createElement("input", { type: "text", "aria-label": label, value: value || "", onChange: e => onChange(e.target.value), placeholder }),
     };
+    if (name === "@/components/ui/alert-dialog") return { ConfirmAlertDialog: ({open,title,description,onConfirm,confirmLabel,busy}) =>
+      open ? React.createElement("div",{role:"alertdialog"},title,description,React.createElement("button",{type:"button",disabled:busy,onClick:onConfirm},confirmLabel)) : null };
     if (extra && Object.hasOwn(extra, name)) return extra[name];
     if (name === "@/lib/account-title") return loadComponent("apps/web/src/lib/account-title.ts", session);
     if (name === "@/lib/listing-filters" || name === "./listing-filters") return loadComponent("apps/web/src/lib/listing-filters.ts", session);
@@ -181,29 +185,35 @@ const demoAvailability=()=>({contractVersion:'ecs-test-checkout-availability.v1'
 const demoResult=()=>({contractVersion:'ecs-test-checkout-result.v1',scope:'ECS_TEST_SIMULATED',orderId:'order_A',payment:{confirmationId:'demo_confirmation_1',disposition:'APPLIED',reasonCode:null,replay:false},bankArrival:'UNKNOWN'});
 const demoReceipt=known=>({contractVersion:'ecs-test-checkout-receipt.v1',scope:'ECS_TEST_SIMULATED',orderId:'order_A',knowledge:known?'KNOWN':'UNKNOWN',receipt:known?demoResult():null,observedAt:new Date().toISOString(),writeAssemblyReady:true,mayReapply:false});
 
+test('a new simulated payment cannot bypass the normal cashier',async()=>withDom(async window=>{
+ const {DemoCheckoutAction}=loadComponent('apps/web/src/components/order/order-trade-actions.tsx',session('user_A'));
+ let calls=0;const p=createProbe(window,DemoCheckoutAction,localProps(),async(_url,init={})=>{assert.notEqual(init.method,'POST');calls++;return json(demoAvailability())},{exerciseDemo:true});
+ try{await p.render();assert.match(p.host.textContent,/通过支付入口打开收银台/);assert.doesNotMatch(p.host.textContent,/旧受控入口|确认模拟付款|模拟付款已完成/);assert.equal(calls,1)}finally{await p.dispose()}
+}));
+
 test('demo payment appears only after server discovery and confirms without a real channel',async()=>withDom(async window=>{
  window.happyDOM.setURL('https://test.nanproduced.cloud/account');const {DemoCheckoutAction}=loadComponent('apps/web/src/components/order/order-trade-actions.tsx',session('user_A'));let posts=0,changed=0;
- const p=createProbe(window,DemoCheckoutAction,localProps({onChanged(){changed++}}),async(url,init={})=>{
+ const p=createProbe(window,DemoCheckoutAction,localProps({embedded:true,onChanged(){changed++}}),async(url,init={})=>{
   assert.equal(new Headers(init.headers).get('x-zzsh-expected-user-id'),'user_A');
   if(init.method==='POST'){posts++;assert.match(String(url),/demo-checkout\/confirm$/);assert.deepEqual(JSON.parse(init.body),{});assert.equal(intents.loadIntent('user_A','order.demo-checkout','order_A').key,new Headers(init.headers).get('idempotency-key'));return json(demoResult())}
   assert.match(String(url),/demo-checkout$/);return json(demoAvailability());
  },{exerciseDemo:true});
- try{await p.render();assert.match(p.host.textContent,/模拟付款，不会向支付机构或银行发起扣款/);assert.doesNotMatch(p.host.textContent,/旧受控入口/);await p.click('确认模拟付款');assert.equal(posts,1);assert.equal(changed,1);assert.equal(intents.loadIntent('user_A','order.demo-checkout','order_A'),null);assert.match(p.host.textContent,/模拟付款已完成/)}finally{await p.dispose(()=>intents.clearIntent('user_A','order.demo-checkout','order_A'))}
+ try{await p.render();assert.doesNotMatch(p.host.textContent,/旧受控入口/);await p.click('模拟付款');assert.equal(posts,1);assert.equal(changed,1);assert.equal(intents.loadIntent('user_A','order.demo-checkout','order_A'),null);assert.match(p.host.textContent,/模拟付款已完成/)}finally{await p.dispose(()=>intents.clearIntent('user_A','order.demo-checkout','order_A'))}
 }));
 
 test('unknown demo payment is read by its original key and never resubmitted',async()=>withDom(async window=>{
  const {DemoCheckoutAction}=loadComponent('apps/web/src/components/order/order-trade-actions.tsx',session('user_A'));let posts=0,key,known=false,reads=0,changed=0;
- const p=createProbe(window,DemoCheckoutAction,localProps({onChanged(){changed++}}),async(url,init={})=>{
+ const p=createProbe(window,DemoCheckoutAction,localProps({embedded:true,onChanged(){changed++}}),async(url,init={})=>{
   if(init.method==='POST'){posts++;key=new Headers(init.headers).get('idempotency-key');throw new Error('response lost')}
   if(String(url).includes('/receipt?')){reads++;assert.equal(new URL(String(url),'https://local').searchParams.get('key'),key);return json(demoReceipt(known))}return json(demoAvailability());
  },{exerciseDemo:true});
- try{await p.render();await p.click('确认模拟付款');assert.equal(posts,1);assert.match(p.host.textContent,/结果尚未确认/);const original=intents.loadIntent('user_A','order.demo-checkout','order_A');assert.equal(original.key,key);assert.equal(original.context.scope,'ECS_TEST_SIMULATED');await p.click('查询原付款结果');assert.equal(intents.loadIntent('user_A','order.demo-checkout','order_A').key,key);assert.equal(changed,0);known=true;await p.click('查询原付款结果');assert.equal(posts,1);assert.equal(reads,2);assert.equal(changed,1);assert.equal(intents.loadIntent('user_A','order.demo-checkout','order_A'),null)}finally{await p.dispose(()=>intents.clearIntent('user_A','order.demo-checkout','order_A'))}
+ try{await p.render();await p.click('模拟付款');assert.equal(posts,1);assert.match(p.host.textContent,/结果尚未确认/);const original=intents.loadIntent('user_A','order.demo-checkout','order_A');assert.equal(original.key,key);assert.equal(original.context.scope,'ECS_TEST_SIMULATED');await p.click('查询原付款结果');assert.equal(intents.loadIntent('user_A','order.demo-checkout','order_A').key,key);assert.equal(changed,0);known=true;await p.click('查询原付款结果');assert.equal(posts,1);assert.equal(reads,2);assert.equal(changed,1);assert.equal(intents.loadIntent('user_A','order.demo-checkout','order_A'),null)}finally{await p.dispose(()=>intents.clearIntent('user_A','order.demo-checkout','order_A'))}
 }));
 
 test('demo checkout absence falls back; unavailable or malformed capability remains blocked',async()=>withDom(async window=>{
  const {DemoCheckoutAction}=loadComponent('apps/web/src/components/order/order-trade-actions.tsx',session('user_A'));
  for(const [status,body,expected] of [[404,{code:'NOT_FOUND'},'旧受控入口'],[503,{code:'UNAVAILABLE'},'暂时无法确认'],[200,{...demoAvailability(),productionPaymentCapability:true},'暂时无法确认']]){
-  let posts=0;const p=createProbe(window,DemoCheckoutAction,localProps(),async(_url,init={})=>{if(init.method==='POST')posts++;return json(body,status)},{exerciseDemo:true});
+  let posts=0;const p=createProbe(window,DemoCheckoutAction,localProps({embedded:true}),async(_url,init={})=>{if(init.method==='POST')posts++;return json(body,status)},{exerciseDemo:true});
   try{await p.render();assert.ok(p.host.textContent.includes(expected));assert.equal(posts,0);if(status!==404)assert.doesNotMatch(p.host.textContent,/旧受控入口|确认模拟付款|测试付款/)}finally{await p.dispose()}
  }
 }));
@@ -229,11 +239,11 @@ test('a demo receipt from another environment cannot resolve the original reques
 
 test('late demo payment reply never updates a different signed-in user',async()=>withDom(async window=>{
  const actor=session('user_A'),{DemoCheckoutAction}=loadComponent('apps/web/src/components/order/order-trade-actions.tsx',actor),pending=deferred();let changed=0;
- const p=createProbe(window,DemoCheckoutAction,localProps({onChanged(){changed++}}),async(_url,init={})=>{
+ const p=createProbe(window,DemoCheckoutAction,localProps({embedded:true,onChanged(){changed++}}),async(_url,init={})=>{
   if(init.method==='POST')return pending.promise;
   return json({...demoAvailability(),checkoutEnabled:actor.userId==='user_A'});
  },{exerciseDemo:true});
- try{await p.render();const button=[...p.host.querySelectorAll('button')].find(node=>node.textContent==='确认模拟付款');await React.act(async()=>{button.click();await tick()});
+ try{await p.render();const button=[...p.host.querySelectorAll('button')].find(node=>node.textContent==='模拟付款');await React.act(async()=>{button.click();await tick()});
   actor.userId='user_B';actor.identityVersion++;await p.render();await React.act(async()=>{pending.resolve(json(demoResult()));await tick()});
   assert.equal(changed,0);assert.doesNotMatch(p.host.textContent,/模拟付款已完成|demo_confirmation_1/);
  }finally{await p.dispose(()=>intents.clearIntent('user_A','order.demo-checkout','order_A'))}
@@ -298,7 +308,7 @@ test('未开租结束组件只读原责任/未知退款，不显示正常结算�
    intents:[{intentId:'refund_1',refundOrderNo:'RF'+'a'.repeat(28),state:'UNKNOWN',amountCents:'15908',firstSubmit:'DISPATCHED',blockedReason:null,localWriteOff:'NOT_RECORDED',savedChannelEvidence:null,bankArrival:'UNKNOWN'}]},
   coverage:'LOCAL_REGISTERED_ONLY',asOf:at,localAcceptanceObservedAt:at,unknowns:['BANK_ARRIVAL_NOT_VERIFIED'],bankArrival:'UNKNOWN'};
  const probe=createProbe(window,PrestartTerminationPanel,{order:{...paidOrder,status:'CANCELLED'},party:'renter',onChanged(){}},async(url,init)=>{calls.push({url,init});return json(read);});
- try{await probe.render();assert.equal(calls.length,1);assert.match(probe.host.textContent,/159\.08/);assert.match(probe.host.textContent,/结果未记录/);assert.match(probe.host.textContent,/到账情况请以收款记录为准/);assert.doesNotMatch(probe.host.textContent,/退款已到账|本地核销|原键/);assert.equal(probe.host.querySelector('form'),null);assert(calls.every(c=>!c.init?.method||c.init.method==='GET'));}
+ try{await probe.render();assert.equal(calls.length,1);assert.match(probe.host.textContent,/159\.08/);assert.match(probe.host.textContent,/退款进度请查看下方退款记录/);assert.doesNotMatch(probe.host.textContent,/退款已到账|本地核销|原键/);assert.equal(probe.host.querySelector('form'),null);assert(calls.every(c=>!c.init?.method||c.init.method==='GET'));}
  finally{await probe.dispose();}
 }));
 
@@ -312,10 +322,10 @@ test('未开租模拟退款明确标注不会实际退回',async()=>withDom(asyn
    intents:[{intentId:'refund_1',refundOrderNo:'RF'+'a'.repeat(28),state:'SUCCEEDED',amountCents:'15908',firstSubmit:'DISPATCHED',blockedReason:null,localWriteOff:'RECORDED',savedChannelEvidence:null,bankArrival:'UNKNOWN'}]},
   coverage:'LOCAL_REGISTERED_ONLY',asOf:at,localAcceptanceObservedAt:at,unknowns:['BANK_ARRIVAL_NOT_VERIFIED'],bankArrival:'UNKNOWN'};
  const probe=createProbe(window,PrestartTerminationPanel,{order:{...paidOrder,status:'CANCELLED'},party:'renter',onChanged(){}},async()=>json(read));
- try{await probe.render();assert.match(probe.host.textContent,/模拟退款已完成/);assert.match(probe.host.textContent,/不会实际退回款项/);assert.doesNotMatch(probe.host.textContent,/退款已到账|到账情况请以收款记录为准/);}
+ try{await probe.render();assert.match(probe.host.textContent,/退款进度请查看下方退款记录/);assert.match(probe.host.textContent,/测试记录，不代表真实退款/);assert.doesNotMatch(probe.host.textContent,/退款已到账/);}
  finally{await probe.dispose();}
  const unavailable={...read,refund:null};const second=createProbe(window,PrestartTerminationPanel,{order:{...paidOrder,status:'CANCELLED'},party:'renter',onChanged(){}},async()=>json(unavailable));
- try{await second.render();assert.match(second.host.textContent,/不会实际退回款项/);assert.doesNotMatch(second.host.textContent,/模拟退款已完成|到账情况请以收款记录为准/);}
+ try{await second.render();assert.match(second.host.textContent,/退款进度请查看下方退款记录/);assert.doesNotMatch(second.host.textContent,/模拟退款已完成|退款已到账/);}
  finally{await second.dispose();}
 }));
 
@@ -324,20 +334,39 @@ test('unreviewed prestart requests describe the payment basis without claiming a
  for(const state of ['REQUESTED','REVIEW_REQUIRED','REJECTED']){
   const read={contractVersion:'order-prestart-termination.v1',orderId:'order_A',orderRevision:'2',eligibility:{allowed:false,reason:'PRESTART_FACTS_UNAVAILABLE',refundCents:null},request:{id:'term_1',revision:'2',state,requestedByParty:'RENTER',reason:'尚未交付',reviewReason:null,createdAt:at,updatedAt:at,approvedAt:null,fullRefundCents:'15908',currency:'CNY',dataOrigin:'JOINPAY_LOCAL_ACCEPTANCE',liabilityRecognized:false,channelSubmission:'NOT_REPORTED',bankArrival:'UNKNOWN'},refund:null,coverage:'LOCAL_REGISTERED_ONLY',asOf:at,localAcceptanceObservedAt:at,unknowns:['BANK_ARRIVAL_NOT_VERIFIED'],bankArrival:'UNKNOWN'};
   const probe=createProbe(window,PrestartTerminationPanel,{order:paidOrder,party:'renter',onChanged(){}},async()=>json(read));
-  try{await probe.render();assert.match(probe.host.textContent,/原付款记录金额：¥159\.08/);assert.match(probe.host.textContent,/退款情况以审核结果为准/);assert.doesNotMatch(probe.host.textContent,/申请退款金额|退款已到账/);}finally{await probe.dispose();}
+  try{await probe.render();assert.match(probe.host.textContent,/原付款记录金额：¥159\.08/);assert.match(probe.host.textContent,/订单尚未取消/);assert.doesNotMatch(probe.host.textContent,/申请退款金额|退款已到账/);}finally{await probe.dispose();}
  }
 }));
-test('未开租申请202未知保留同一原键/body，恢复不按编辑内容重建',async()=>withDom(async window=>{
+test('未开租取消确认后202未知保留同一原键/body，恢复不按编辑内容重建',async()=>withDom(async window=>{
  const current=session('user_A'),{PrestartTerminationPanel}=loadComponent('apps/web/src/components/order/prestart-termination-panel.tsx',current),posts=[];
  const read={contractVersion:'order-prestart-termination.v1',orderId:'order_A',orderRevision:'1',eligibility:{allowed:true,reason:null,refundCents:'15908'},request:null,refund:null,
+  cancellationReasons:[{code:'RENTER_WRONG_ACCOUNT',label:'选错账号'},{code:'OTHER',label:'其他'}],
   coverage:'LOCAL_REGISTERED_ONLY',asOf:'2026-10-28T00:00:00.000000Z',localAcceptanceObservedAt:null,unknowns:['BANK_ARRIVAL_NOT_VERIFIED'],bankArrival:'UNKNOWN'};
  const probe=createProbe(window,PrestartTerminationPanel,{order:paidOrder,party:'renter',onChanged(){}},async(url,init)=>{
   if(init?.method==='POST'){posts.push(init);return json({contractVersion:'order-prestart-termination.v1',orderId:'order_A',outcome:'UNKNOWN',originalKeyRequired:true},202);}return json(read);});
- try{await probe.render();const field=probe.host.querySelector('textarea');await React.act(async()=>{Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype,'value').set.call(field,'未交付申请结束');field.dispatchEvent(new window.Event('input',{bubbles:true}));await tick();});
+ try{await probe.render();const field=probe.host.querySelector('select');await React.act(async()=>{field.value='RENTER_WRONG_ACCOUNT';field.dispatchEvent(new window.Event('change',{bubbles:true}));await tick();});
   await React.act(async()=>{probe.host.querySelector('form').dispatchEvent(new window.Event('submit',{bubbles:true,cancelable:true}));await tick();});
-  assert.equal(posts.length,1);const original=intents.loadIntent('user_A','order.prestart.request','order_A');assert.ok(original);assert.equal(original.body.reason,'未交付申请结束');
-  await React.act(async()=>{probe.host.querySelector('form').dispatchEvent(new window.Event('submit',{bubbles:true,cancelable:true}));await tick();});
+  assert.equal(posts.length,0);await React.act(async()=>{probe.host.querySelector('[role="alertdialog"] button').click();await tick();});
+  assert.equal(posts.length,1);const original=intents.loadIntent('user_A','order.prestart.cancel','order_A');assert.ok(original);assert.equal(original.body.reasonCode,'RENTER_WRONG_ACCOUNT');
+  await React.act(async()=>{probe.host.querySelector('[role="alertdialog"] button').click();await tick();});
   assert.equal(posts.length,2);assert.equal(posts[0].body,posts[1].body);assert.equal(new Headers(posts[0].headers).get('idempotency-key'),new Headers(posts[1].headers).get('idempotency-key'));
+ }finally{await probe.dispose(()=>intents.clearIntent('user_A','order.prestart.cancel','order_A'));}
+}));
+test('旧版未决申请先按原键核对，未提交时才允许选择新取消原因',async()=>withDom(async window=>{
+ const current=session('user_A'),{PrestartTerminationPanel}=loadComponent('apps/web/src/components/order/prestart-termination-panel.tsx',current),posts=[];
+ const read={contractVersion:'order-prestart-termination.v1',orderId:'order_A',orderRevision:'1',eligibility:{allowed:true,reason:null,refundCents:'15908'},request:null,refund:null,
+  cancellationReasons:[{code:'RENTER_WRONG_ACCOUNT',label:'选错账号'},{code:'OTHER',label:'其他'}],
+  coverage:'LOCAL_REGISTERED_ONLY',asOf:'2026-10-28T00:00:00.000000Z',localAcceptanceObservedAt:null,unknowns:['BANK_ARRIVAL_NOT_VERIFIED'],bankArrival:'UNKNOWN'};
+ const originalBody={expectedOrderRevision:'1',reason:'旧版未开租申请'};
+ intents.saveIntent({userId:'user_A',kind:'order.prestart.request',resourceId:'order_A',key:'old_request_key',body:originalBody});
+ const probe=createProbe(window,PrestartTerminationPanel,{order:paidOrder,party:'renter',onChanged(){}},async(url,init)=>{
+  if(init?.method==='POST'){posts.push({url,init});return json({contractVersion:'order-prestart-termination.v1',orderId:'order_A',request:null,existing:false,outcome:'NOT_SUBMITTED'});}return json(read);});
+ try{await probe.render();assert.equal(probe.host.querySelector('select'),null);
+  const button=[...probe.host.querySelectorAll('button')].find(x=>x.textContent==='查询上次申请');
+  await React.act(async()=>{button.click();await tick();});
+  assert.equal(posts.length,1);assert.match(String(posts[0].url),/prestart-termination\/requests$/);assert.deepEqual(JSON.parse(posts[0].init.body),originalBody);
+  assert.equal(new Headers(posts[0].init.headers).get('idempotency-key'),'old_request_key');
+  assert.equal(intents.loadIntent('user_A','order.prestart.request','order_A'),null);assert(probe.host.querySelector('select'));
  }finally{await probe.dispose(()=>intents.clearIntent('user_A','order.prestart.request','order_A'));}
 }));
 
@@ -349,16 +378,17 @@ const channelView=(id="order_A",over={})=>({contractVersion:"order-payment-reque
 const channelRequest=(state="ACTION_READY",method="WEIXIN_NATIVE")=>({id:"payreq_component",state,method,amount:{cents:"125",currency:"CNY"},updatedAt:"2026-10-24T10:00:00.000Z",recovery:null});
 const channelReceipt=(method,replay=false,state="SUBMITTING")=>({contractVersion:"order-payment-request.v1",dataOrigin:"JOINPAY_CANDIDATE",replay,
   request:{...channelRequest(state,method),orderId:"order_A",createdAt:"2026-10-24T10:00:00.000Z"},paymentAction:null,payment:null});
-test('demo checkout locks cancellation while the original payment outcome is unknown',async()=>withDom(async window=>{
- let posts=0,key;const Component=loadComponent('apps/web/src/components/order/order-trade-actions.tsx',session('user_A')).OrderTradeActions;
+test('a previous unknown demo checkout locks cancellation and recovers its original key',async()=>withDom(async window=>{
+ let posts=0;const key='original_demo_key';const Component=loadComponent('apps/web/src/components/order/order-trade-actions.tsx',session('user_A')).OrderTradeActions;
+ intents.saveIntent({userId:'user_A',kind:'order.demo-checkout',resourceId:'order_A',key,body:{},context:{scope:'ECS_TEST_SIMULATED'}});
  const p=createProbe(window,Component,{order:channelOrder,party:'renter',onChanged(){}},async(url,init={})=>{
   if(String(url).includes('channel-payment-requests'))return json(channelView('order_A',{capability:{channelEnabled:false,productionPaymentCapability:false,methods:[]}}));
-  if(init.method==='POST'){posts++;key=new Headers(init.headers).get('idempotency-key');throw new Error('response lost')}
+  if(init.method==='POST'){posts++;throw new Error('unexpected new payment')}
   if(String(url).includes('/receipt?')){assert.equal(new URL(String(url),'https://local').searchParams.get('key'),key);return json(demoReceipt(false))}
   return json(demoAvailability());
  },{exerciseDemo:true});
- try{await p.render();await p.click('确认模拟付款');assert.equal(posts,1);assert.equal([...p.host.querySelectorAll('button')].find(button=>button.textContent==='取消订单')?.disabled,true);
-  await p.click('查询原付款结果');assert.equal(posts,1);assert.equal(intents.loadIntent('user_A','order.demo-checkout','order_A').key,key);
+ try{await p.render();assert.equal([...p.host.querySelectorAll('button')].find(button=>button.textContent==='取消订单')?.disabled,true);
+  await p.click('查询原付款结果');assert.equal(posts,0);assert.equal(intents.loadIntent('user_A','order.demo-checkout','order_A').key,key);
  }finally{await p.dispose(()=>intents.clearIntent('user_A','order.demo-checkout','order_A'))}
 }));
 const refundRead=(orderId="order_A",over={})=>({contractVersion:"personal-native-refunds.v1",subjectId:"user_A",
@@ -2445,6 +2475,24 @@ test("legacy unauthorized detail is an error rather than an empty successful lis
     try {await probe.render();assert.match(probe.host.textContent,/不存在或当前身份无法查看/);assert.doesNotMatch(probe.host.textContent,/暂无历史订单记录/);}finally{await probe.dispose();}
   });
 });
+
+test("legacy renter sees separate source refund records without inferring bank arrival", async () => withDom(async window => {
+  const Legacy = loadComponent("apps/web/src/components/order/legacy-order-workspace.tsx", session("user_A")).LegacyOrderWorkspace;
+  const row = { id: "legacy_refund", displayNo: "OLD-1", party: "renter", status: "CANCELLED", readOnly: true,
+    source: { origin: "LEGACY", statusLabel: "已取消" }, account: { id: null, displayNo: null, readable: false },
+    legacyAmounts: { required: money("555.00"), paid: money("555.00"), deposit: null, refund: null },
+    legacyRefundHistory: { records: [{ id: "refund_1", amount: money("555.00"), status: "SUCCEEDED", recordedAt: "2026-10-16T08:18:00Z" },
+      { id: "refund_2", amount: money("2.00"), status: "FAILED", recordedAt: "2026-10-16T08:19:00Z" }], incomplete: false, channelArrival: "UNKNOWN" } };
+  const probe = createProbe(window, Legacy, { party: "renter", orderId: row.id }, async () => json({ order: row }));
+  try {
+    await probe.render();
+    assert.match(probe.host.textContent, /旧平台退款记录.*记录成功/);
+    assert.match(probe.host.textContent, /旧平台退款记录.*记录失败/);
+    assert.match(probe.host.textContent, /实际到账请以收款记录为准/);
+    assert.doesNotMatch(probe.host.textContent, /退款记录金额未记录/);
+    assert.doesNotMatch(probe.host.textContent, /557\.00/);
+  } finally { await probe.dispose(); }
+}));
 test('MCA006: authorized legacy opposite-view details offer the server-confirmed view without private prices or actions',async()=>{
  await withDom(async window=>{
   const Component=loadComponent('apps/web/src/components/order/legacy-order-workspace.tsx',session('user_A')).LegacyOrderWorkspace;
@@ -2553,7 +2601,7 @@ test("C02: renter refund section separates frozen responsibility, local write-of
       assert.match(section.textContent, /本次结算应退/);
       assert.match(section.textContent, /¥280\.00/);
       assert.match(section.textContent, /退款申请/);
-      assert.match(section.textContent, /到账未记录/);
+      assert.match(section.textContent, /退款结果待核对/);
       assert.doesNotMatch(section.textContent, /退款成功|退款已到账|银行已到账|核销|过账|渠道回执/);
       assert.deepEqual([...section.querySelectorAll("button")].map((button) => button.textContent.trim()), ["刷新"], "refund area is read-only");
     } finally { await probe.dispose(); }
@@ -2575,6 +2623,28 @@ test("a completed local simulated refund is labeled without claiming channel arr
   });
 });
 
+test("a recorded provider success is visible without claiming bank arrival",async()=>withDom(async window=>{
+ const read=refundRead("order_A",{status:"AVAILABLE",outcome:"FULLY_CONSUMED",
+  responsibility:{state:"POSTED",postingId:"posting_1",originalCents:"28000",allocatedCents:"28000",consumedCents:"28000",releasedCents:"0",remainingCents:"0",totalsComplete:true,dueAt:"2026-10-19T04:30:00Z",dueState:"DUE"},
+  intents:[refundIntent({savedChannelEvidence:{...refundIntent().savedChannelEvidence,evidenceLevel:"PROVIDER_RESPONSE"}})],returnedIntentCount:1});
+ const probe=await detailProbe(window,{...paidOrder,status:"COMPLETED"},"renter",postedSettlement,read);
+ try{const section=probe.host.querySelector('.order-refund-block');assert.match(section.textContent,/退款成功/);assert.doesNotMatch(section.textContent,/退款已到账|银行已到账/);}
+ finally{await probe.dispose();}
+}));
+
+test("a refund requiring review never displays a conflicting success",async()=>withDom(async window=>{
+ for(const source of ["JOINPAY_FORMAL","LOCAL_CONTROLLED"]){
+  for(const [outcome,requiresReview] of [["FULLY_CONSUMED",true],["CONFLICT",false]]){
+  const read=refundRead("order_A",{status:"AVAILABLE",outcome,
+   responsibility:{state:"POSTED",postingId:"posting_1",originalCents:"28000",allocatedCents:outcome==="CONFLICT"?null:"28000",consumedCents:outcome==="CONFLICT"?null:"28000",releasedCents:outcome==="CONFLICT"?null:"0",remainingCents:outcome==="CONFLICT"?null:"0",totalsComplete:outcome!=="CONFLICT",dueAt:null,dueState:"DUE"},
+   intents:[refundIntent({source,requiresReview,savedChannelEvidence:{...refundIntent().savedChannelEvidence,evidenceLevel:"PROVIDER_RESPONSE"}})],returnedIntentCount:1});
+  const probe=await detailProbe(window,{...paidOrder,status:"COMPLETED"},"renter",postedSettlement,read);
+  try{const section=probe.host.querySelector('.order-refund-block');assert.match(section.textContent,/退款(?:记录)?需要核对/);assert.match(section.textContent,/退款状态待核对/);assert.doesNotMatch(section.textContent,/退款成功|模拟退款已记录/);}
+  finally{await probe.dispose();}
+  }
+ }
+}));
+
 test("refund due time never promises processing when no application is present", async () => {
   await withDom(async window => {
     for (const [dueState,outcome,expected] of [["NOT_DUE","NOT_DUE","未到期"],["DUE","NO_INTENT","已到期"],["UNKNOWN","UNKNOWN","状态未记录"]]) {
@@ -2585,16 +2655,13 @@ test("refund due time never promises processing when no application is present",
   });
 });
 
-test("C02: cancelled and pending renter orders still read local responsibility, while owners are excluded", async () => {
+test("not-applicable refund reads do not create a misleading empty section, while owners receive their summary", async () => {
   await withDom(async (window) => {
     for (const status of ["CANCELLED", "PENDING_PAYMENT"]) {
       const probe = await detailProbe(window, { ...paidOrder, status, paidAt: null }, "renter");
       try {
         const section = probe.host.querySelector(".order-refund-block");
-        assert.ok(section, `refund section renders for ${status}`);
-        assert.match(section.textContent, /退款金额未记录/);
-        assert.doesNotMatch(section.textContent, /无需退款|退款已到账/);
-        assert.doesNotMatch(section.textContent, /没有退款记录/);
+        assert.equal(section,null, `no refund section for ${status} without a refund responsibility`);
       } finally { await probe.dispose(); }
     }
     const ownerSummary={contractVersion:"owner-refund-minimal.v1",subjectId:"user_A",orderId:"order_A",orderStatus:"CANCELLED",progress:"PROCESSING",label:"退款处理中",note:"到账情况不以本摘要为准",openIntentCount:1,asOf:"2026-11-06T00:00:00.000Z"};
@@ -2607,6 +2674,26 @@ test("C02: cancelled and pending renter orders still read local responsibility, 
     } finally { await owner.dispose(); }
   });
 });
+
+test("cancelled prestart order uses the same recorded refund result as the cancellation",async()=>withDom(async window=>{
+ for(const [source,state,label] of [["SIMULATED","SUCCEEDED","模拟退款成功"],["JOINPAY","SUCCEEDED","退款成功"],["JOINPAY","PROCESSING","退款处理中"],["UNKNOWN","UNKNOWN","退款状态待核对"]]){
+  const prestartRefund={source,state,amountCents:source==="UNKNOWN"?null:"334613",bankArrival:"UNKNOWN"};
+  const read=refundRead("order_A",{order:{orderId:"order_A",displayNo:"ZZ-1",status:"CANCELLED"},prestartRefund});
+  const probe=await detailProbe(window,{...paidOrder,status:"CANCELLED",cancelReason:"PRESTART_TERMINATED"},"renter",settlementBody,read);
+  try{const section=probe.host.querySelector('.order-refund-block');assert.ok(section);assert.match(section.textContent,new RegExp(label));
+   if(source!=="UNKNOWN")assert.match(section.textContent,/3,346\.13/);assert.doesNotMatch(section.textContent,/退款金额未记录|部分退款信息仍在核对|退款已到账/);
+  }finally{await probe.dispose();}
+ }
+}));
+
+test("support cancellation shows its recorded partial refund without claiming bank arrival",async()=>withDom(async window=>{
+ const cancellationRefund={source:"JOINPAY",state:"PROCESSING",amountCents:"5000",bankArrival:"UNKNOWN"};
+ const read=refundRead("order_A",{order:{orderId:"order_A",displayNo:"ZZ-1",status:"CANCELLED"},cancellationRefund});
+ const probe=await detailProbe(window,{...paidOrder,status:"CANCELLED",cancelReason:"SUPPORT_AFTER_START_CANCELLED"},"renter",settlementBody,read);
+ try{const section=probe.host.querySelector('.order-refund-block');assert.ok(section);assert.match(section.textContent,/退款处理中/);
+  assert.match(section.textContent,/50\.00/);assert.doesNotMatch(section.textContent,/退款金额未记录|退款已到账/);
+ }finally{await probe.dispose();}
+}));
 
 test("C02: a legitimate renter's unexpected 404/503 is unavailable with its request ID, never 'no refund'", async () => {
   await withDom(async (window) => {
@@ -2660,7 +2747,9 @@ test("C02: switching users discards a late refund response from the previous sub
     const probe = createProbe(window, OrderDetail, props, async (input, init = {}) => {
       if (String(input).includes("/refunds")) {
         const who = new Headers(init.headers).get("x-zzsh-expected-user-id");
-        return who === "user_A" ? first.promise : second.promise;
+        // A Response body can only be consumed once. An identity switch legitimately triggers a
+        // fresh read, so build a new Response for every call instead of reusing one instance.
+        return (who === "user_A" ? first.promise : second.promise).then(body => json(body));
       }
       if (String(input).includes("/settlement")) return json(settlementBody);
       return json({ order: paidOrder });
@@ -2672,8 +2761,8 @@ test("C02: switching users discards a late refund response from the previous sub
       const oldBody = refundRead("order_A", { subjectId: "user_A", status: "AVAILABLE", outcome: "FULLY_CONSUMED", responsibility: { state: "POSTED", postingId: "posting_1", originalCents: "99900", allocatedCents: "99900", consumedCents: "99900", releasedCents: "0", remainingCents: "0", totalsComplete: true, dueAt: "2026-10-19T04:30:00Z", dueState: "DUE" }, intents: [refundIntent({ amount: { cents: "99900", currency: "CNY" } })], returnedIntentCount: 1 });
       const newBody = refundRead("order_A", { subjectId: "user_B", status: "AVAILABLE", outcome: "FULLY_ALLOCATED", responsibility: { state: "POSTED", postingId: "posting_2", originalCents: "22200", allocatedCents: "22200", consumedCents: "0", releasedCents: "0", remainingCents: "0", totalsComplete: true, dueAt: "2026-10-19T04:30:00Z", dueState: "DUE" }, intents: [refundIntent({ amount: { cents: "22200", currency: "CNY" } })], returnedIntentCount: 1 });
       await React.act(async () => {
-        first.resolve(json(oldBody));
-        second.resolve(json(newBody));
+        first.resolve(oldBody);
+        second.resolve(newBody);
         await new Promise(setImmediate);
       });
       await new Promise(setImmediate);
@@ -2686,134 +2775,6 @@ test("C02: switching users discards a late refund response from the previous sub
 });
 
 // SYNTHETIC_READER_COMPONENT: accepted C04B DTO shape only; no real PG, channel or bank fact.
-const abnormalFirstSubmit=(over={})=>({dispatch:"NEVER_DISPATCHED",blockedReason:"ABNORMAL_BASIS_REVIEW",blockedAt:"2026-10-27T02:00:00Z",blockedAuditCount:1,trust:"LOCAL_AUDIT_AND_ATTEMPT",...over});
-const abnormalResponsibility=(over={})=>({confirmationId:"confirm_1",reasonCode:"LATE_PAYMENT",originalCents:"5000",currency:"CNY",liabilityRootId:"root_1",liabilityEventId:"event_1",intentIds:["intent_refund_1"],allocatedCents:"5000",consumedCents:"0",releasedCents:"0",remainingCents:"0",totalsComplete:true,state:"REVIEW_REQUIRED",firstSubmit:abnormalFirstSubmit(),reasonCodes:[],...over});
-const responsibilityTotals=(over={})=>({originalCents:"5000",allocatedCents:"5000",consumedCents:"0",releasedCents:"0",remainingCents:"0",totalsComplete:true,postingOriginalCents:null,abnormalOriginalCents:"5000",abnormalConfirmationCount:1,...over});
-
-test("C04B: a cancelled order with no posting still shows abnormal responsibility without a payment claim", async () => {
-  await withDom(async (window) => {
-    const read = refundRead("order_A", {
-      status: "AVAILABLE", outcome: "REVIEW_REQUIRED",
-      responsibility: { state: "NOT_POSTED", postingId: null, originalCents: null, allocatedCents: null, consumedCents: null, releasedCents: null, remainingCents: null, totalsComplete: false, dueAt: null, dueState: "UNKNOWN" },
-      abnormalResponsibilities: [abnormalResponsibility()], responsibilitiesTruncated: false,
-      responsibilityTotals: responsibilityTotals(),
-      intents: [refundIntent({ intentId: "intent_refund_1", basisKind: "REVIEW_CONFIRMATION", paymentConfirmationId: "confirm_1", firstSubmit: abnormalFirstSubmit(), amount: { cents: "5000", currency: "CNY" }, state: "READY", budgetDisposition: "ALLOCATED", savedChannelEvidence: null, localAccounting: { disposition: "ALLOCATED", writeOff: null, release: null, reasonCodes: [] } })],
-      returnedIntentCount: 1,
-    });
-    const probe = await detailProbe(window, { ...paidOrder, status: "CANCELLED", paidAt: null }, "renter", settlementBody, read);
-    try {
-      const section = probe.host.querySelector(".order-refund-block");
-      assert.match(section.textContent, /其他付款处理/);
-      assert.match(section.textContent, /支付时间异常/);
-      assert.match(section.textContent, /相关金额/);
-      assert.match(section.textContent, /¥50\.00/);
-      assert.match(section.textContent, /暂时无法提交/);
-      assert.doesNotMatch(section.textContent, /本次结算应退/, "no posting is invented");
-      assert.doesNotMatch(section.textContent, /没有退款记录|渠道已收到|银行已到账|退款已到账/);
-      assert.deepEqual([...section.querySelectorAll("button")].map((button) => button.textContent.trim()), ["刷新"]);
-    } finally { await probe.dispose(); }
-  });
-});
-
-test("C04B: one conflicting original does not hide the valid posting or the other abnormal original", async () => {
-  await withDom(async (window) => {
-    const read = refundRead("order_A", {
-      status: "AVAILABLE", outcome: "CONFLICT",
-      responsibility: { state: "POSTED", postingId: "posting_1", originalCents: "28000", allocatedCents: "28000", consumedCents: "28000", releasedCents: "0", remainingCents: "0", totalsComplete: true, dueAt: "2026-10-19T04:30:00Z", dueState: "DUE" },
-      abnormalResponsibilities: [
-        abnormalResponsibility(),
-        abnormalResponsibility({ confirmationId: "confirm_bad", reasonCode: "DUPLICATE_PAYMENT", originalCents: null, currency: null, liabilityRootId: null, liabilityEventId: null, intentIds: [], allocatedCents: null, consumedCents: null, releasedCents: null, remainingCents: null, totalsComplete: false, state: "CONFLICT", firstSubmit: null }),
-      ],
-      responsibilitiesTruncated: false,
-      responsibilityTotals: responsibilityTotals({ originalCents: null, allocatedCents: null, consumedCents: null, releasedCents: null, remainingCents: null, totalsComplete: false, postingOriginalCents: "28000", abnormalOriginalCents: null, abnormalConfirmationCount: 2 }),
-      intents: [refundIntent({ intentId: "intent_refund_1", basisKind: "REVIEW_CONFIRMATION", paymentConfirmationId: "confirm_1", firstSubmit: abnormalFirstSubmit(), amount: { cents: "5000", currency: "CNY" }, state: "READY", budgetDisposition: "ALLOCATED", savedChannelEvidence: null, localAccounting: { disposition: "ALLOCATED", writeOff: null, release: null, reasonCodes: [] } })],
-      returnedIntentCount: 1,
-    });
-    const probe = await detailProbe(window, { ...paidOrder, status: "COMPLETED" }, "renter", settlementBody, read);
-    try {
-      const section = probe.host.querySelector(".order-refund-block");
-      assert.equal(section.querySelectorAll(".order-refund-abnormal-item").length, 2);
-      assert.match(section.querySelectorAll(".order-refund-abnormal-item")[1].textContent, /未记录/);
-      assert.match(section.textContent, /部分退款信息仍在核对/);
-      assert.match(section.querySelector(".order-refund-amounts").textContent, /¥280\.00/, "the valid posting responsibility remains readable");
-      assert.match(section.textContent, /暂时无法提交/);
-    } finally { await probe.dispose(); }
-  });
-});
-
-test("C04B: released retries keep one original responsibility and never sum intent amounts", async () => {
-  await withDom(async (window) => {
-    const read = refundRead("order_A", {
-      status: "AVAILABLE", outcome: "RELEASED",
-      responsibility: { state: "NOT_POSTED", postingId: null, originalCents: null, allocatedCents: null, consumedCents: null, releasedCents: null, remainingCents: null, totalsComplete: false, dueAt: null, dueState: "UNKNOWN" },
-      abnormalResponsibilities: [abnormalResponsibility({ state: "RELEASED", allocatedCents: "5000", consumedCents: "0", releasedCents: "5000", remainingCents: "0", totalsComplete: true, intentIds: ["intent_refund_1", "intent_refund_2"] })],
-      responsibilitiesTruncated: false,
-      responsibilityTotals: responsibilityTotals({ allocatedCents: "5000", consumedCents: "0", releasedCents: "5000", remainingCents: "0", totalsComplete: true }),
-      intents: [
-        refundIntent({ intentId: "intent_refund_1", basisKind: "REVIEW_CONFIRMATION", paymentConfirmationId: "confirm_1", amount: { cents: "5000", currency: "CNY" }, state: "FAILED", budgetDisposition: "RELEASED", savedChannelEvidence: null, localAccounting: { disposition: "RELEASED", writeOff: null, release: { intentUpdatedAt: "2026-10-27T02:00:00Z", ledgerEventId: null, trust: "LOCAL_INTENT_ONLY" }, reasonCodes: [] } }),
-        refundIntent({ intentId: "intent_refund_2", basisKind: "REVIEW_CONFIRMATION", paymentConfirmationId: "confirm_1", amount: { cents: "5000", currency: "CNY" }, state: "READY", budgetDisposition: "ALLOCATED", savedChannelEvidence: null, localAccounting: { disposition: "ALLOCATED", writeOff: null, release: null, reasonCodes: [] } }),
-      ],
-      returnedIntentCount: 2,
-    });
-    const probe = await detailProbe(window, { ...paidOrder, status: "CANCELLED", paidAt: null }, "renter", settlementBody, read);
-    try {
-      const section = probe.host.querySelector(".order-refund-block");
-      assert.equal(section.querySelectorAll(".order-refund-abnormal-item").length, 1, "one original responsibility, not one per retry");
-      assert.equal(section.querySelectorAll(".order-refund-intent").length, 3, "one abnormal responsibility plus two intent records");
-      assert.match(section.querySelector(".order-refund-abnormal-item").textContent, /相关金额/);
-      assert.doesNotMatch(section.textContent, /¥100\.00|100\.00/, "intent amounts are not summed into a responsibility");
-      assert.match(section.textContent, /未记录/);
-      assert.equal(section.querySelector('[aria-label="退款申请记录"] .order-refund-state')?.textContent, '申请处理失败');
-    } finally { await probe.dispose(); }
-  });
-});
-
-test("C04B: merged truncation marks both lists incomplete but leaves valid posting responsibility readable", async () => {
-  await withDom(async (window) => {
-    const read = refundRead("order_A", {
-      status: "AVAILABLE", outcome: "TRUNCATED",
-      responsibility: { state: "POSTED", postingId: "posting_1", originalCents: "28000", allocatedCents: "28000", consumedCents: "28000", releasedCents: "0", remainingCents: "0", totalsComplete: true, dueAt: "2026-10-19T04:30:00Z", dueState: "DUE" },
-      abnormalResponsibilities: [abnormalResponsibility(), abnormalResponsibility({ confirmationId: "confirm_2", reasonCode: "DUPLICATE_PAYMENT" })],
-      responsibilitiesTruncated: true,
-      responsibilityTotals: responsibilityTotals({ originalCents: null, allocatedCents: null, consumedCents: null, releasedCents: null, remainingCents: null, totalsComplete: false, postingOriginalCents: "28000", abnormalOriginalCents: null, abnormalConfirmationCount: 2 }),
-      coverage: { scope: "LOCAL_REGISTERED_ONLY", intentLimit: 50, intentsComplete: false, channelRecordsChecked: false },
-      intents: [refundIntent({ basisKind: "REVIEW_CONFIRMATION", paymentConfirmationId: "confirm_1", firstSubmit: abnormalFirstSubmit() })],
-      returnedIntentCount: 1, intentsTruncated: true,
-    });
-    const probe = await detailProbe(window, { ...paidOrder, status: "COMPLETED" }, "renter", settlementBody, read);
-    try {
-      const section = probe.host.querySelector(".order-refund-block");
-      assert.match(section.textContent, /部分退款信息仍在核对/);
-      assert.match(section.textContent, /部分记录未记录/);
-      assert.match(section.querySelector(".order-refund-amounts").textContent, /¥280\.00/, "the posting basis can remain complete");
-      assert.equal(section.querySelectorAll(".order-refund-abnormal-item").length, 2);
-    } finally { await probe.dispose(); }
-  });
-});
-
-test("C04B: dispatched and unknown first-submit facts are stated without claiming delivery", async () => {
-  await withDom(async (window) => {
-    const read = refundRead("order_A", {
-      status: "AVAILABLE", outcome: "UNKNOWN",
-      responsibility: { state: "NOT_POSTED", postingId: null, originalCents: null, allocatedCents: null, consumedCents: null, releasedCents: null, remainingCents: null, totalsComplete: false, dueAt: null, dueState: "UNKNOWN" },
-      abnormalResponsibilities: [
-        abnormalResponsibility({ confirmationId: "confirm_dispatched", state: "UNKNOWN", firstSubmit: abnormalFirstSubmit({ dispatch: "DISPATCHED", blockedReason: null, blockedAt: null, blockedAuditCount: null }) }),
-        abnormalResponsibility({ confirmationId: "confirm_unknown", state: "UNKNOWN", firstSubmit: abnormalFirstSubmit({ dispatch: "UNKNOWN", blockedReason: null, blockedAt: null, blockedAuditCount: null }) }),
-      ],
-      responsibilitiesTruncated: false,
-      responsibilityTotals: responsibilityTotals({ originalCents: "10000", allocatedCents: "10000", consumedCents: "0", releasedCents: "0", remainingCents: "0", totalsComplete: true, abnormalOriginalCents: "10000", abnormalConfirmationCount: 2 }),
-      intents: [], returnedIntentCount: 0,
-    });
-    const probe = await detailProbe(window, { ...paidOrder, status: "COMPLETED" }, "renter", settlementBody, read);
-    try {
-      const section = probe.host.querySelector(".order-refund-block");
-      assert.match(section.textContent, /退款结果未记录/);
-      assert.equal(section.querySelectorAll(".order-refund-abnormal-item").length, 2);
-      assert.doesNotMatch(section.textContent, /渠道已收到|渠道处理中|银行已到账|退款已到账/);
-    } finally { await probe.dispose(); }
-  });
-});
-
 test('paid prestart termination keeps payment wording and time; unpaid cancellation keeps snapshot wording',async()=>{
  await withDom(async window=>{
   const paid=await detailProbe(window,{...paidOrder,status:'CANCELLED',cancelReason:'PRESTART_TERMINATED',paidAt:'2026-10-28T09:00:00.000000Z',cancelledAt:'2026-10-28T09:10:00.000000Z'},'renter');
@@ -2834,9 +2795,7 @@ test("core experience: own money and contact precede the long trade and refund r
     assert.ok(overview.querySelector(".order-amount-block"));
     assert.ok(overview.compareDocumentPosition(body) & window.Node.DOCUMENT_POSITION_FOLLOWING);
     const refunds = probe.host.querySelector(".order-refund-details");
-    assert.equal(refunds.open, false, "no posted refund does not open technical accounting by default");
-    assert.match(refunds.querySelector("summary").textContent, /退款金额未记录/);
-    assert.doesNotMatch(refunds.textContent, /无需退款|退款已到账/, "unknown is not turned into a financial conclusion");
+    assert.equal(refunds, null, "a not-applicable refund read does not create an empty accounting panel");
     assert.equal(probe.host.querySelector(".order-lines details").open, false);
     await probe.dispose();
   });
@@ -2844,7 +2803,7 @@ test("core experience: own money and contact precede the long trade and refund r
 
 test("core experience: refund conflicts stay expanded and owner null projections never display renter amounts", async () => {
   await withDom(async window => {
-    const conflict = refundRead("order_A", { outcome: "CONFLICT", reasonCodes: ["LEDGER_BINDING_MISMATCH"] });
+    const conflict = refundRead("order_A", { status: "AVAILABLE", outcome: "CONFLICT", reasonCodes: ["LEDGER_BINDING_MISMATCH"] });
     const renter = await detailProbe(window, { ...paidOrder, status: "COMPLETED" }, "renter", postedSettlement, conflict);
     assert.equal(renter.host.querySelector(".order-refund-details").open, true);
     await renter.dispose();
@@ -2852,6 +2811,30 @@ test("core experience: refund conflicts stay expanded and owner null projections
     assert.match(owner.host.querySelector(".order-amount-block").textContent, /123\.45/);
     assert.doesNotMatch(owner.host.querySelector(".order-amount-block").textContent, /租客已付|租客应付|押金/);
     await owner.dispose();
+  });
+});
+
+test("progress card: both parties get one primary next step, facts on demand and no invented arrival", async () => {
+  await withDom(async (window) => {
+    for (const party of ["renter", "owner"]) {
+      for (const [status, data] of [["CANCELLED", postedSettlement], ["COMPLETED", postedSettlement]]) {
+        const probe = await detailProbe(window, { ...paidOrder, status }, party, data);
+        try {
+          const card = probe.host.querySelector(".order-progress-card");
+          assert.ok(card, `${party}/${status} renders the progress card`);
+          assert.equal(card.getAttribute("aria-label"), "当前进度与下一步");
+          assert.equal(card.querySelectorAll(".order-progress-actions .button.primary").length, 1,
+            `${party}/${status} offers exactly one primary next step`);
+          const summary = card.querySelector(".order-progress-facts > summary");
+          assert.ok(summary, "known facts are behind a keyboard-reachable disclosure");
+          assert.equal(summary.tagName, "SUMMARY");
+          assert.match(card.textContent, /退款|客服|售后|进度/);
+          // "不代表渠道退款已到账" is a disclaimer, not an arrival claim; only a bare claim is a bug.
+          assert.doesNotMatch(card.textContent, /(?<!不代表)渠道退款已到账|退款成功|自动上号|自动交付|订单评价|新单续租/);
+          assert.doesNotMatch(card.textContent, /确认结算|确认期初并开租|发起结束租用/, "terminal states never re-open a write");
+        } finally { await probe.dispose(); }
+      }
+    }
   });
 });
 
@@ -2868,3 +2851,549 @@ test("the other party rejecting a version stops stale confirmation prompts and d
     } finally { await probe.dispose(); }
   });
 });
+
+/* ---- Master first-review regressions (order-side status/action mapping) ---- */
+
+const detailProps = (order) => ({ orderId: order.id, party: "renter", status: "", state: { status: "ready", order, error: null }, onRetry() {}, onLogin() {}, onChanged() {} });
+const settle = async (window, probe, needle) => {
+  for (let i = 0; i < 16 && !probe.host.textContent.includes(needle); i++) await React.act(async () => { await tick(); });
+};
+
+test("master review: a completed order never exposes opening or ending writes even with a stale settlement read", async () => withDom(async window => {
+  const OrderDetail = loadComponent("apps/web/src/components/order/order-detail.tsx", session("user_A")).OrderDetail;
+  for (const data of [
+    { ...settlementBody, rentalStarted: true, openings: [{ ...opening, confirmedAt: "2026-11-09T01:00:00Z" }] },
+    { ...settlementBody, rentalStarted: false, openings: [{ ...opening, status: "DRAFT", acks: [], confirmedAt: null }] },
+  ]) {
+    const order = { ...paidOrder, status: "COMPLETED" };
+    const probe = createProbe(window, OrderDetail, detailProps(order), async url => String(url).includes("/settlement") ? json(data) : json({}));
+    try {
+      await probe.render();
+      await settle(window, probe, "不再提供开租或结算操作");
+      assert.match(probe.host.querySelector(".order-progress-card").textContent, /不再提供开租或结算操作/);
+      const trade = probe.host.querySelector("#order-trade-actions");
+      assert.ok(trade, "the settlement records remain readable");
+      assert.match(trade.textContent, /开租与结算记录/);
+      const writes = [...trade.querySelectorAll("button")].filter(node => !node.disabled && /发起结束租用|确认期初并开租|预览结算金额|提交结算|确认结算/.test(node.textContent ?? ""));
+      assert.deepEqual(writes.map(node => node.textContent), []);
+    } finally { await probe.dispose(); }
+  }
+}));
+
+test("master review: 联系客服 opens a service consultation, not the order-group panel", async () => withDom(async window => {
+  const OrderDetail = loadComponent("apps/web/src/components/order/order-detail.tsx", session("user_A")).OrderDetail;
+  const data = { ...settlementBody, rentalStarted: false, openings: [] }, events = [];
+  const groups = () => events.push("order-group"), support = event => events.push(event.detail?.type ?? "open-support");
+  window.addEventListener("zzsh:order-groups", groups); window.addEventListener("zzsh:open-support", support);
+  const probe = createProbe(window, OrderDetail, detailProps(paidOrder), async url => String(url).includes("/settlement") ? json(data) : json({}));
+  try {
+    await probe.render();
+    await settle(window, probe, "联系客服核对开租清单");
+    const button = probe.host.querySelector(".order-progress-card button.primary");
+    assert.equal(button?.textContent.trim(), "联系客服");
+    await React.act(async () => { button.click(); await tick(); });
+    assert.deepEqual(events, ["SERVICE"]);
+  } finally { window.removeEventListener("zzsh:order-groups", groups); window.removeEventListener("zzsh:open-support", support); await probe.dispose(); }
+}));
+
+test("master review: an unknown channel payment result is never presented as 完成支付", async () => withDom(async window => {
+  const OrderDetail = loadComponent("apps/web/src/components/order/order-detail.tsx", session("user_A")).OrderDetail;
+  const order = { ...paidOrder, status: "PENDING_PAYMENT", paymentOpen: true, cancelOpen: true, expiredAwaitingCancel: false };
+  const channel = { contractVersion: "order-payment-request.v1", dataOrigin: "JOINPAY_CANDIDATE", capability: { channelEnabled: true, productionPaymentCapability: true, methods: ["WEIXIN_NATIVE"], evidenceProfile: "JOINPAY_AGG_2_6_MD5" }, order: { id: order.id, displayNo: "SYNTHETIC", status: "PENDING_PAYMENT", paidAt: null }, request: { id: "payreq_1", state: "UNKNOWN", method: "WEIXIN_NATIVE", amount: { cents: "125", currency: "CNY" }, updatedAt: "2026-10-24T10:00:00Z", recovery: null }, projection: { displayState: "CONFIRMING", actionBlockedReason: "CHANNEL_RESULT_UNKNOWN" }, paymentAction: null, payment: null };
+  const probe = createProbe(window, OrderDetail, detailProps(order), async url => String(url).includes("channel-payment-requests") ? json(channel) : json({}));
+  try {
+    await probe.render();
+    await settle(window, probe, "支付结果正在确认");
+    const card = probe.host.querySelector(".order-progress-card");
+    assert.equal(card.querySelector("h2").textContent, "支付结果正在确认");
+    assert.notEqual(card.querySelector("button.primary")?.textContent.trim(), "去支付");
+    assert.doesNotMatch(card.textContent, /完成支付/);
+  } finally { await probe.dispose(); }
+}));
+
+test("master review: a progress primary action focuses the matching control, never 刷新", async () => withDom(async window => {
+  const OrderDetail = loadComponent("apps/web/src/components/order/order-detail.tsx", session("user_A")).OrderDetail;
+  const data = { ...settlementBody, openings: [{ ...opening, confirmedAt: "2026-11-09T01:00:00Z" }] };
+  const probe = createProbe(window, OrderDetail, detailProps(paidOrder), async url => String(url).includes("/settlement") ? json(data) : json({}));
+  try {
+    await probe.render();
+    await settle(window, probe, "发起结束租用");
+    const card = probe.host.querySelector(".order-progress-card");
+    assert.match(card.textContent, /发起结束租用/);
+    await React.act(async () => { card.querySelector("button.primary").click(); await tick(); });
+    assert.equal(window.document.activeElement?.textContent, "发起结束租用");
+  } finally { await probe.dispose(); }
+}));
+
+test("master review: missing or invalid auto-confirm deadlines never promise auto-confirm", async () => withDom(async window => {
+  const OrderDetail = loadComponent("apps/web/src/components/order/order-detail.tsx", session("user_A")).OrderDetail;
+  for (const autoConfirmDueAt of [null, "invalid"]) {
+    const draft = { ...opening, status: "DRAFT", confirmedAt: null, autoConfirmDueAt, acks: [{ party: "RENTER", source: "PARTY" }] };
+    const data = { ...settlementBody, rentalStarted: false, openings: [draft] };
+    const probe = createProbe(window, OrderDetail, detailProps(paidOrder), async url => String(url).includes("/settlement") ? json(data) : json({}));
+    try {
+      await probe.render();
+      await settle(window, probe, "等待对方确认期初清单");
+      const card = probe.host.querySelector(".order-progress-card");
+      assert.doesNotMatch(card.textContent, /按本单冻结的截止时间由系统自动确认/);
+      assert.match(card.textContent, /不会承诺系统会自动确认/);
+      assert.doesNotMatch(probe.host.querySelector("#order-trade-actions").textContent, /将于.*自动确认/);
+    } finally { await probe.dispose(); }
+  }
+}));
+
+test("master review: legacy terminal pages never promise unconditional continuation", async () => withDom(async window => {
+  const Legacy = loadComponent("apps/web/src/components/order/legacy-order-workspace.tsx", session("user_A")).LegacyOrderWorkspace;
+  for (const status of ["PAID", "COMPLETED", "CANCELLED"]) {
+    const row = { id: "legacy_1", displayNo: "OLD-1", title: "历史记录", party: "renter", status, source: { origin: "LEGACY", statusLabel: status }, readOnly: true, actions: [], account: { id: null, displayNo: null, readable: false }, legacyAmounts: { required: money("10.00"), paid: money("10.00"), deposit: null, refund: null } };
+    const probe = createProbe(window, Legacy, { party: "renter", orderId: row.id }, async () => json({ order: row }));
+    try {
+      await probe.render();
+      const card = probe.host.querySelector('[data-testid="order-legacy-progress"]');
+      assert.ok(card);
+      assert.doesNotMatch(card.textContent, /由你或客服处理/);
+      assert.doesNotMatch(card.textContent, /预览、提交、确认、拒绝与结果恢复能力/);
+      assert.doesNotMatch(card.textContent, /查看订单续办/);
+    } finally { await probe.dispose(); }
+  }
+}));
+
+test("master review: the payment progress waits for a pending channel read", async () => withDom(async window => {
+  const OrderDetail = loadComponent("apps/web/src/components/order/order-detail.tsx", session("user_A")).OrderDetail;
+  const order = { ...paidOrder, status: "PENDING_PAYMENT", paymentOpen: true, cancelOpen: true };
+  const pending = deferred();
+  const probe = createProbe(window, OrderDetail, detailProps(order), async url => String(url).includes("channel-payment-requests") ? pending.promise : json({}));
+  try {
+    await probe.render();
+    const card = probe.host.querySelector(".order-progress-card");
+    assert.match(card.textContent, /正在核对支付状态/);
+    assert.doesNotMatch(card.textContent, /去支付|完成支付/);
+    pending.resolve(json({ contractVersion: "order-payment-request.v1", dataOrigin: "JOINPAY_CANDIDATE", capability: { channelEnabled: true, productionPaymentCapability: true, methods: [] }, order: { id: order.id, status: "PENDING_PAYMENT" }, request: { id: "payreq_1", state: "UNKNOWN" }, projection: { displayState: "CONFIRMING", actionBlockedReason: "CHANNEL_RESULT_UNKNOWN" }, paymentAction: null, payment: null }));
+    await settle(window, probe, "支付结果正在确认");
+    assert.match(card.textContent, /支付结果正在确认/);
+    assert.doesNotMatch(card.textContent, /去支付|完成支付/);
+  } finally { await probe.dispose(); }
+}));
+
+test("master review: legacy detail passes terminal status to continuation controls", async () => withDom(async window => {
+  const panel = { LegacyContinuationPanel: props => React.createElement("span", { "data-terminal-readonly": String(props.readOnly) }) };
+  const Legacy = loadComponent("apps/web/src/components/order/legacy-order-workspace.tsx", session("user_A"), { "./legacy-continuation-panel": panel }).LegacyOrderWorkspace;
+  for (const status of ["PAID", "COMPLETED", "CANCELLED"]) {
+    const row = { id: "legacy_1", displayNo: "OLD-1", title: "历史记录", party: "renter", status, source: { origin: "LEGACY", statusLabel: status }, readOnly: true, actions: [], account: { id: null, displayNo: null, readable: false }, legacyAmounts: { required: money("10.00"), paid: money("10.00"), deposit: null, refund: null } };
+    const probe = createProbe(window, Legacy, { party: "renter", orderId: row.id }, async () => json({ order: row }));
+    try {
+      await probe.render();
+      const panelNode = probe.host.querySelector("[data-terminal-readonly]");
+      assert.equal(panelNode?.getAttribute("data-terminal-readonly"), String(status !== "PAID"));
+    } finally { await probe.dispose(); }
+  }
+}));
+test("master review: an original payment intent blocks a fresh payment prompt", async () => withDom(async window => {
+  const OrderDetail = loadComponent("apps/web/src/components/order/order-detail.tsx", session("user_A")).OrderDetail;
+  const order = { ...paidOrder, status: "PENDING_PAYMENT", paymentOpen: true, cancelOpen: true };
+  const saved = intents.saveIntent({ userId: "user_A", kind: "order.channel-payment", resourceId: order.id, key: "ORIGINAL_KEY", body: { method: "WEIXIN_NATIVE" } });
+  assert.equal(saved.persisted, true);
+  const channel = { contractVersion: "order-payment-request.v1", dataOrigin: "JOINPAY_CANDIDATE", capability: { channelEnabled: true, productionPaymentCapability: true, methods: ["WEIXIN_NATIVE"] }, order: { id: order.id, status: "PENDING_PAYMENT" }, request: null, projection: { displayState: "PENDING", actionBlockedReason: null }, paymentAction: null, payment: null };
+  const probe = createProbe(window, OrderDetail, detailProps(order), async url => String(url).includes("channel-payment-requests") ? json(channel) : json({}));
+  try {
+    await probe.render();
+    await settle(window, probe, "恢复原请求回执");
+    assert.match(probe.host.textContent, /恢复原请求回执/);
+    const card = probe.host.querySelector(".order-progress-card");
+    assert.doesNotMatch(card.textContent, /去支付|完成支付/);
+    assert.match(card.textContent, /支付结果正在确认/);
+  } finally { await probe.dispose(); }
+}));
+test("master review: an unknown payment submission keeps the original intent visible in progress", async () => withDom(async window => {
+  const OrderDetail = loadComponent("apps/web/src/components/order/order-detail.tsx", session("user_A")).OrderDetail;
+  const order = { ...paidOrder, status: "PENDING_PAYMENT", paymentOpen: true, cancelOpen: true };
+  const channel = { contractVersion: "order-payment-request.v1", dataOrigin: "JOINPAY_CANDIDATE", capability: { channelEnabled: true, productionPaymentCapability: true, methods: ["ALIPAY_NATIVE"] }, order: { id: order.id, status: "PENDING_PAYMENT" }, request: null, projection: { displayState: "PENDING", actionBlockedReason: null }, paymentAction: null, payment: null };
+  let paymentPosts = 0;
+  const probe = createProbe(window, OrderDetail, detailProps(order), async (url, init = {}) => {
+    if (String(url).includes("channel-payment-requests") && init.method === "POST") { paymentPosts++; throw new Error("synthetic timeout"); }
+    return String(url).includes("channel-payment-requests") ? json(channel) : json({});
+  });
+  try {
+    await probe.render();
+    await settle(window, probe, "获取支付参数");
+    await probe.click("获取支付参数");
+    await settle(window, probe, "支付结果正在确认");
+    assert.equal(paymentPosts, 1);
+    assert.equal(intents.inspectIntent("user_A", "order.channel-payment", order.id).state, "VALID");
+    const card = probe.host.querySelector(".order-progress-card");
+    assert.match(card.textContent, /支付结果正在确认/);
+    assert.doesNotMatch(card.textContent, /去支付|完成支付/);
+  } finally { await probe.dispose(); }
+}));
+
+test("master review: a failed payment refresh cannot restore the stale pay prompt", async () => withDom(async window => {
+  const OrderDetail = loadComponent("apps/web/src/components/order/order-detail.tsx", session("user_A")).OrderDetail;
+  const order = { ...paidOrder, status: "PENDING_PAYMENT", paymentOpen: true, cancelOpen: true };
+  const channel = { contractVersion: "order-payment-request.v1", dataOrigin: "JOINPAY_CANDIDATE", capability: { channelEnabled: true, productionPaymentCapability: true, methods: ["ALIPAY_NATIVE"] }, order: { id: order.id, status: "PENDING_PAYMENT" }, request: null, projection: { displayState: "PENDING", actionBlockedReason: null }, paymentAction: null, payment: null };
+  let reads = 0;
+  const probe = createProbe(window, OrderDetail, detailProps(order), async url => String(url).includes("channel-payment-requests") ? (++reads === 1 ? json(channel) : json({ error: { code: "UNAVAILABLE" } }, 503)) : json({}));
+  try {
+    await probe.render();
+    await settle(window, probe, "获取支付参数");
+    await probe.click("刷新支付状态");
+    await settle(window, probe, "支付结果正在确认");
+    const card = probe.host.querySelector(".order-progress-card");
+    assert.match(card.textContent, /支付结果正在确认/);
+    assert.doesNotMatch(card.textContent, /去支付|完成支付/);
+  } finally { await probe.dispose(); }
+}));
+
+/* ---- Master second review: the original request subject is frozen, never re-derived ---- */
+
+test("master review: a delayed A intent keeps A's subject and the original key across B and back", async () => withDom(async window => {
+  const { performGuardedWrite } = loadComponent("apps/web/src/components/order/order-trade-actions.tsx", session("user_A"));
+  const orderId = "order_frozen_subject";
+  const saved = intents.saveIntent({ userId: "user_A", kind: "opening.confirm", resourceId: orderId, key: "ORIGINAL_KEY", body: { versionNo: 1 }, context: { openingId: "opening_1" } });
+  assert.equal(saved.persisted, true);
+  const previousFetch = globalThis.fetch, sent = [];
+  globalThis.fetch = async (_url, init) => {
+    const headers = new Headers(init.headers);
+    sent.push({ subject: headers.get("x-zzsh-expected-user-id"), key: headers.get("idempotency-key"), body: JSON.parse(init.body) });
+    return json({ orderId, openings: [{ id: "opening_1", versionNo: 1 }] });
+  };
+  try {
+    let live = "user_B";
+    const request = (key, body, context, subject) => orderApi.confirmOpening(subject, orderId, String(context?.openingId ?? ""), Number(body.versionNo), key);
+    // While B is live, the A intent must not be sent at all; no new key is generated.
+    const blocked = await performGuardedWrite("user_A", "opening.confirm", orderId, { versionNo: 999 }, { openingId: "opening_1" }, request, s => s === live);
+    assert.equal(blocked.status, "unauthorized");
+    assert.equal(sent.length, 0, "no cross-subject write may be sent");
+    assert.equal(intents.inspectIntent("user_A", "opening.confirm", orderId).intent.key, "ORIGINAL_KEY");
+    // Back to A: the same frozen key/body/subject is replayed, never a new one.
+    live = "user_A";
+    const replay = await performGuardedWrite("user_A", "opening.confirm", orderId, { versionNo: 999 }, { openingId: "opening_1" }, request, s => s === live);
+    assert.equal(replay.status, "ok");
+    assert.equal(sent.length, 1);
+    assert.equal(sent[0].subject, "user_A", "the intent owner, not a later registration");
+    assert.equal(sent[0].key, "ORIGINAL_KEY");
+    assert.deepEqual(sent[0].body, { versionNo: 1 }, "the frozen original body, not the new caller body");
+    assert.equal(intents.inspectIntent("user_A", "opening.confirm", orderId).state, "NONE");
+  } finally { globalThis.fetch = previousFetch; intents.clearIntent("user_A", "opening.confirm", orderId); }
+}));
+
+test("master review: an order write without a frozen subject keeps the original intent and sends nothing", async () => withDom(async window => {
+  const { performGuardedWrite } = loadComponent("apps/web/src/components/order/order-trade-actions.tsx", session("user_A"));
+  const orderId = "order_unfrozen_subject";
+  let calls = 0;
+  const previousFetch = globalThis.fetch;
+  globalThis.fetch = async () => { calls++; return json({}); };
+  try {
+    const saved = intents.saveIntent({ userId: "user_A", kind: "settlement.decision", resourceId: orderId, key: "ORIGINAL_KEY", body: { action: "CONFIRM" } });
+    assert.equal(saved.persisted, true);
+    const outcome = await performGuardedWrite(null, "settlement.decision", orderId, { action: "CONFIRM" }, undefined, () => { throw new Error("must not call"); });
+    assert.equal(outcome.status, "definitive");
+    assert.equal(outcome.error.status, 401);
+    assert.equal(outcome.error.code, "ORDER_SUBJECT_NOT_FROZEN");
+    assert.equal(calls, 0);
+    assert.equal(intents.inspectIntent("user_A", "settlement.decision", orderId).intent.key, "ORIGINAL_KEY");
+  } finally { globalThis.fetch = previousFetch; intents.clearIntent("user_A", "settlement.decision", orderId); }
+}));
+
+test("a stale A scope cannot write after A→B→A; a fresh A scope can recover the original request", async () => withDom(async window => {
+  const { useIdentityReset } = requireFromTree(path.join(tree, "apps/web/src/components/session/identity-reset.ts"));
+  const { captureOrderSubject } = requireFromTree(path.join(tree, "apps/web/src/lib/order-subject.ts"));
+  const { performGuardedWrite } = loadComponent("apps/web/src/components/order/order-trade-actions.tsx", session("user_A"));
+  let current = { ...session("user_A"), identityVersion: 1 }, guard;
+  function Probe() { guard = useIdentityReset(current, () => {}).isCurrent; return null; }
+  const probe = createProbe(window, Probe, {}, async () => json({}));
+  const orderId = "order_aba_guard";
+  try {
+    await probe.render();
+    const oldGuard = guard, oldSubject = captureOrderSubject("user_A", 1);
+    intents.saveIntent({ userId: "user_A", kind: "opening.confirm", resourceId: orderId, key: "ORIGINAL_KEY", body: { versionNo: 1 }, context: { openingId: "opening_1" } });
+    current = { ...session("user_B"), identityVersion: 2 }; await probe.render();
+    current = { ...session("user_A"), identityVersion: 3 }; await probe.render();
+    const sent = [];
+    const request = async (key, body, context, subject) => { sent.push({ key, body, context, subject }); return {}; };
+    const stale = await performGuardedWrite(oldSubject, "opening.confirm", orderId, { versionNo: 2 }, { openingId: "opening_2" }, request, oldGuard);
+    assert.equal(stale.status, "unauthorized");
+    assert.equal(sent.length, 0);
+    assert.equal(intents.loadIntent("user_A", "opening.confirm", orderId).key, "ORIGINAL_KEY");
+    const recovered = await performGuardedWrite("user_A", "opening.confirm", orderId, { versionNo: 2 }, { openingId: "opening_2" }, request, guard);
+    assert.equal(recovered.status, "ok");
+    assert.deepEqual(sent, [{ key: "ORIGINAL_KEY", body: { versionNo: 1 }, context: { openingId: "opening_1" }, subject: "user_A" }]);
+  } finally { await probe.dispose(); intents.clearIntent("user_A", "opening.confirm", orderId); }
+}));
+
+test("unreadable original order intent is preserved and blocks a new write", async () => withDom(async window => {
+  const { performGuardedWrite } = loadComponent("apps/web/src/components/order/order-trade-actions.tsx", session("user_A"));
+  const key = "zzsh.order-intent.v1:user_A:opening.confirm:order_bad_intent";
+  window.sessionStorage.setItem(key, "{broken-original");
+  let sent = 0;
+  const result = await performGuardedWrite("user_A", "opening.confirm", "order_bad_intent", { versionNo: 2 }, { openingId: "opening_2" }, async () => { sent++; return {}; }, () => true);
+  assert.equal(result.status, "blocked");
+  assert.equal(sent, 0);
+  assert.equal(window.sessionStorage.getItem(key), "{broken-original");
+}));
+
+test("an opening intent created after mount requires explicit recovery using its frozen target", async () => withDom(async window => {
+  const log = [], next = { ...opening, id: "opening_NEW", versionNo: "2", status: "DRAFT", acks: [] };
+  const fetchImpl = router([
+    { match: "/settlement", method: "GET", respond: () => json({ ...settlementBody, openings: [next] }) },
+    { match: "/openings/opening_OLD/confirm", method: "POST", respond: () => json({ error: { code: "CONFLICT" } }, 409) },
+  ], log);
+  const OrderTradeActions = loadComponent("apps/web/src/components/order/order-trade-actions.tsx", session("user_A")).OrderTradeActions;
+  const probe = createProbe(window, OrderTradeActions, { order: paidOrder, party: "renter", onChanged() {} }, fetchImpl);
+  try {
+    await probe.render();
+    intents.saveIntent({ userId: "user_A", kind: "opening.confirm", resourceId: "order_A", key: "old_key", body: { versionNo: 1 }, context: { openingId: "opening_OLD", orderId: "order_A" } });
+    await probe.click("确认期初并开租");
+    assert.equal(log.filter(entry => entry.method === "POST").length, 0);
+    assert.match(probe.host.textContent, /请先查询原请求/);
+    await probe.click("查询原请求结果");
+    const writes = log.filter(entry => entry.method === "POST");
+    assert.equal(writes.length, 1);
+    assert.match(writes[0].url, /opening_OLD\/confirm/);
+    assert.equal(writes[0].key, "old_key");
+    assert.deepEqual(writes[0].body, { versionNo: 1 });
+  } finally { await probe.dispose(() => intents.clearIntent("user_A", "opening.confirm", "order_A")); }
+}));
+
+test("a decision intent created after mount requires explicit recovery using its frozen target", async () => withDom(async window => {
+  const log = [], next = { id: "v_NEW", versionNo: "2", kind: "SYSTEM", early: false, versionHash: "h_new", decisions: [] };
+  const fetchImpl = router([
+    { match: "/settlement", method: "GET", respond: () => json({ ...settlementBody, settlement: next, versions: [next] }) },
+    { match: "/settlements/v_OLD/decision", method: "POST", respond: () => json({ error: { code: "CONFLICT" } }, 409) },
+  ], log);
+  const OrderTradeActions = loadComponent("apps/web/src/components/order/order-trade-actions.tsx", session("user_A")).OrderTradeActions;
+  const probe = createProbe(window, OrderTradeActions, { order: paidOrder, party: "renter", onChanged() {} }, fetchImpl);
+  try {
+    await probe.render();
+    intents.saveIntent({ userId: "user_A", kind: "settlement.decision", resourceId: "order_A", key: "old_key", body: { action: "CONFIRM", versionHash: "h_old" }, context: { versionId: "v_OLD", orderId: "order_A" } });
+    await probe.click("确认结算");
+    assert.equal(log.filter(entry => entry.method === "POST").length, 0);
+    assert.match(probe.host.textContent, /请先查询原请求/);
+    await probe.click("查询原请求结果");
+    const writes = log.filter(entry => entry.method === "POST");
+    assert.equal(writes.length, 1);
+    assert.match(writes[0].url, /v_OLD\/decision/);
+    assert.equal(writes[0].key, "old_key");
+    assert.deepEqual(writes[0].body, { action: "CONFIRM", versionHash: "h_old" });
+  } finally { await probe.dispose(() => intents.clearIntent("user_A", "settlement.decision", "order_A")); }
+}));
+
+test("an opening card without a recorded deadline does not promise automatic confirmation", async () => withDom(async window => {
+  const { OrderCardMessage } = loadComponent("packages/ui/src/order-card.tsx", session("user_A"));
+  const info = { orderId: "order_A", displayNo: "ZZ-1", orderStatus: "PAID", account: { title: "账号" }, members: [],
+    terms: { viewerParty: "RENTER", basis: "QUOTE", lines: [] }, openingId: "opening_1", openingVersion: 1,
+    openingAcks: { renter: false, owner: false }, openingState: "DRAFT", openingConfirmDueAt: null };
+  const message = { senderId: "bot", card: { kind: "ORDER_OPENING", orderId: "order_A" } };
+  const probe = createProbe(window, OrderCardMessage, { message, info, onConfirmOpening: async () => {} }, async () => json({}));
+  try {
+    await probe.render();
+    assert.match(probe.host.textContent, /自动确认/);
+    assert.match(probe.host.textContent, /未记录/);
+    assert.match(probe.host.querySelector(".order-card-meta .order-card-info")?.getAttribute("aria-label") ?? "", /自动确认时间未记录/);
+    assert.equal(probe.host.querySelector(".order-card-meta .order-card-info")?.getAttribute("title"), null);
+    assert.doesNotMatch(probe.host.textContent, /超时未确认将由系统自动确认/);
+    await probe.click("确认开租");
+    assert.match(probe.host.querySelector('[role="dialog"]').textContent, /自动确认时间未记录/);
+    assert.doesNotMatch(probe.host.querySelector('[role="dialog"]').textContent, /等待期到期后开始租期/);
+    await probe.render({ message, info: { ...info, openingConfirmDueAt: "invalid" }, onConfirmOpening: async () => {} });
+    assert.match(probe.host.querySelector(".order-card-meta .order-card-info")?.getAttribute("aria-label") ?? "", /自动确认时间未记录/);
+    assert.equal(probe.host.querySelector(".order-card-meta .order-card-info")?.getAttribute("title"), null);
+  } finally { await probe.dispose(); }
+}));
+
+test("a cancelled-order card shows refund only to the renter and keeps no confirmation action", async () => withDom(async window => {
+  const { OrderCardMessage } = loadComponent("packages/ui/src/order-card.tsx", session("user_A"));
+  const message = { senderId: "bot", card: { kind: "ORDER_CANCELLED", orderId: "order_C", cardId: "card_c" } };
+  const base = {
+    orderId: "order_C", displayNo: "ZZ-C", orderStatus: "CANCELLED", cancelReason: "PRESTART_TERMINATED",
+    refundPending: true, orderEndedAt: "2026-10-20T02:00:00.000Z", account: { id: "account_c", title: "账号 C" },
+    gameName: "三角洲行动", members: [],
+    terms: { viewerParty: "RENTER", basis: "QUOTE", lines: [], paidTotal: "10000", rentalAmount: "9000", depositAmount: "1000" },
+  };
+  const renter = createProbe(window, OrderCardMessage, { message, info: base }, async () => json({}));
+  try {
+    await renter.render();
+    assert.equal(renter.host.querySelector(".order-card-head .order-card-title").textContent, "订单已取消");
+    assert.match(renter.host.textContent, /退款/);
+    assert.match(renter.host.textContent, /处理中/);
+    assert.match(renter.host.textContent, /实付/);
+    assert.equal(renter.host.querySelector(".order-card-confirm"), null, "a cancelled card has no opening confirmation");
+    assert.match(renter.host.querySelector(".order-card-action").textContent, /订单详情/);
+  } finally { await renter.dispose(); }
+  const owner = createProbe(window, OrderCardMessage, {
+    message,
+    info: { ...base, terms: { ...base.terms, viewerParty: "OWNER" } },
+  }, async () => json({}));
+  try {
+    await owner.render();
+    assert.doesNotMatch(owner.host.textContent, /退款/, "the owner is never shown the renter's refund state");
+    assert.match(owner.host.textContent, /应收/);
+  } finally { await owner.dispose(); }
+}));
+
+
+
+/** Extracts the REAL customer-support callback so the test exercises production wiring. */
+function cardConfirmCallback(mutableSession, sessionRef = { current: mutableSession }) {
+  const source = fs.readFileSync(path.join(tree, "apps/web/src/components/support/customer-support-workspace.tsx"), "utf8");
+  const begin = source.indexOf("  const confirmOpening = useCallback(async (target: OrderTeamAccess) => {");
+  const marker = "}, [session.userId, session.status, session.identityVersion]);";
+  const end = source.indexOf(marker, begin);
+  assert.ok(begin >= 0 && end > begin, "the real customer-support confirmOpening callback must stay extractable");
+  const fnSource = source.slice(begin, end + marker.length);
+  const module = new Module(path.join(tree, "card-confirm-regression.cjs"));
+  module.filename = path.join(tree, "card-confirm-regression.cjs");
+  module.paths = Module._nodeModulePaths(tree);
+  const compiled = typescript.transpileModule(
+    "const useCallback=(fn)=>fn; exports.create=(session,orderApi,orderIntentKey,sessionRef,isOrderSubjectCurrent)=>{\n" + fnSource + "\nreturn confirmOpening;};",
+    { compilerOptions: { module: typescript.ModuleKind.CommonJS, target: typescript.ScriptTarget.ES2022 } },
+  ).outputText;
+  module._compile(compiled, module.filename);
+  const { isOrderSubjectCurrent } = requireFromTree(path.join(tree, "apps/web/src/lib/order-subject.ts"));
+  return module.exports.create(mutableSession, orderApi, orderIntentKey, sessionRef, isOrderSubjectCurrent);
+}
+const cardInfo = (over = {}) => ({ orderId: "order_card", displayNo: "CARD-1", orderStatus: "PAID", account: { title: "账号" }, members: [],
+  terms: { viewerParty: "RENTER", basis: "QUOTE", lines: [] }, openingId: "opening_1", openingVersion: 1,
+  openingAcks: { renter: false, owner: false }, openingState: "DRAFT", openingConfirmDueAt: null, ...over });
+const cardMessage = { senderId: "bot", card: { kind: "ORDER_OPENING", orderId: "order_card" } };
+const cardTarget = { orderId: "order_card", openingId: "opening_1", openingVersion: 1 };
+const clearCardIntent = () => { intents.clearIntent("user_A", "opening.confirm", "order_card"); intents.clearIntent("user_B", "opening.confirm", "order_card"); };
+async function clickDialogConfirm(window, probe) {
+  const button = probe.host.querySelector('[role="dialog"] .order-card-dialog-confirm');
+  assert.ok(button, "confirm dialog action must exist");
+  await React.act(async () => { button.click(); await tick(); });
+  await tick();
+}
+
+test("master review: an unknown card confirmation keeps its original key and never mints a second one", async () => withDom(async window => {
+  const { OrderCardMessage } = loadComponent("packages/ui/src/order-card.tsx", session("user_A"));
+  const callback = cardConfirmCallback(session("user_A"));
+  const keys = [], subjects = [];
+  let opened = 0;
+  const probe = createProbe(window, OrderCardMessage,
+    { message: cardMessage, info: cardInfo(), onConfirmOpening: callback, onOpenOrder: () => { opened++; } },
+    async (_url, init) => { const headers = new Headers(init.headers); keys.push(headers.get("idempotency-key")); subjects.push(headers.get("x-zzsh-expected-user-id")); return json({ error: { code: "UNAVAILABLE" } }, 503); });
+  try {
+    await probe.render();
+    await probe.click("确认开租");
+    await clickDialogConfirm(window, probe);
+    assert.equal(keys.length, 1, "only the first attempt may reach the server");
+    assert.equal(subjects[0], "user_A", "the frozen subject is sent, not a later registration");
+    const saved = intents.inspectIntent("user_A", "opening.confirm", "order_card");
+    assert.equal(saved.state, "VALID", "the original request is persisted locally");
+    assert.equal(saved.intent.key, keys[0]);
+    assert.equal(saved.intent.userId, "user_A");
+    assert.deepEqual(saved.intent.body, { versionNo: 1 });
+    assert.equal(saved.intent.context.openingId, "opening_1");
+    assert.match(probe.host.textContent, /结果未确认|原申请与原键已保留/);
+    assert.doesNotMatch(probe.host.textContent, /确认未完成，请稍后重试/);
+    assert.match(probe.host.textContent, /查看订单详情按原请求核对/);
+    // Re-opening the dialog and trying again is a recovery, never a fresh write.
+    await probe.click("确认开租");
+    await clickDialogConfirm(window, probe);
+    assert.equal(keys.length, 1);
+    assert.equal(intents.inspectIntent("user_A", "opening.confirm", "order_card").intent.key, keys[0]);
+    const recovery = probe.host.querySelector('[role="dialog"] .order-card-dialog-confirm');
+    await React.act(async () => { recovery.click(); await tick(); });
+    assert.equal(opened, 1, "the recovery action routes to the order detail");
+    assert.equal(keys.length, 1);
+  } finally { await probe.dispose(clearCardIntent); }
+}));
+
+test("master review: the order detail recovers a card-created opening intent with the same key/body/context", async () => withDom(async window => {
+  const { performGuardedWrite } = loadComponent("apps/web/src/components/order/order-trade-actions.tsx", session("user_A"));
+  const callback = cardConfirmCallback(session("user_A"));
+  const previousFetch = globalThis.fetch;
+  let firstKey = null;
+  globalThis.fetch = async (_url, init) => { firstKey = new Headers(init.headers).get("idempotency-key"); return json({ error: { code: "UNAVAILABLE" } }, 503); };
+  try {
+    await assert.rejects(() => callback(cardTarget), e => e.code === "OPENING_CONFIRM_UNKNOWN");
+    assert.equal(intents.inspectIntent("user_A", "opening.confirm", "order_card").intent.key, firstKey);
+    const sent = [];
+    const result = await performGuardedWrite("user_A", "opening.confirm", "order_card", { versionNo: 99 }, { openingId: "opening_NEW" },
+      async (key, body, context, subject) => { sent.push({ key, body, context, subject }); return {}; }, () => true);
+    assert.equal(result.status, "ok");
+    assert.deepEqual(sent, [{ key: firstKey, body: { versionNo: 1 }, context: { openingId: "opening_1", orderId: "order_card" }, subject: "user_A" }]);
+    assert.equal(intents.inspectIntent("user_A", "opening.confirm", "order_card").state, "NONE");
+  } finally { globalThis.fetch = previousFetch; clearCardIntent(); }
+}));
+
+test("master review: a re-entry, identity switch and corrupted storage never mint a new key", async () => withDom(async window => {
+  const mutable = session("user_A");
+  const callback = cardConfirmCallback(mutable);
+  const previousFetch = globalThis.fetch;
+  let writes = 0;
+  const keys = [];
+  globalThis.fetch = async (_url, init) => { writes++; keys.push(new Headers(init.headers).get("idempotency-key")); return json({ error: { code: "UNAVAILABLE" } }, 503); };
+  try {
+    await assert.rejects(() => callback(cardTarget), e => e.code === "OPENING_CONFIRM_UNKNOWN");
+    const original = intents.inspectIntent("user_A", "opening.confirm", "order_card").intent;
+    // Re-entry: a fresh card mount sees the same frozen request, not a new key.
+    const reentered = cardConfirmCallback(mutable);
+    await assert.rejects(() => reentered(cardTarget), e => e.code === "OPENING_CONFIRM_PENDING");
+    assert.equal(writes, 1);
+    assert.equal(intents.inspectIntent("user_A", "opening.confirm", "order_card").intent.key, original.key);
+    // A→B→A: A's original bytes survive; returning to A must be guided to explicit recovery.
+    mutable.userId = "user_B"; mutable.identityVersion = 2;
+    mutable.userId = "user_A"; mutable.identityVersion = 3;
+    await assert.rejects(() => reentered(cardTarget), e => e.code === "OPENING_CONFIRM_PENDING");
+    assert.equal(writes, 1);
+    assert.equal(intents.inspectIntent("user_A", "opening.confirm", "order_card").intent.key, original.key);
+    // Corrupted original bytes block a new write and are never overwritten.
+    const storageKey = `zzsh.order-intent.v1:user_A:opening.confirm:order_card`;
+    window.sessionStorage.setItem(storageKey, "{broken-original");
+    await assert.rejects(() => reentered(cardTarget), e => e.code === "ORIGINAL_REQUEST_BLOCKED");
+    assert.equal(writes, 1);
+    assert.equal(window.sessionStorage.getItem(storageKey), "{broken-original");
+  } finally { globalThis.fetch = previousFetch; clearCardIntent(); window.sessionStorage.removeItem("zzsh.order-intent.v1:user_A:opening.confirm:order_card"); }
+}));
+
+test("a stale support-card callback cannot write after a session change or A→B→A", async () => withDom(async () => {
+  const original = session("user_A"), ref = { current: original }, callback = cardConfirmCallback(original, ref);
+  const previousFetch = globalThis.fetch;
+  let writes = 0;
+  globalThis.fetch = async () => { writes++; return json({ orderId: "order_card", openings: [{ id: "opening_1", versionNo: 1 }] }); };
+  try {
+    ref.current = { ...original, status: "loading", userId: null };
+    await assert.rejects(() => callback(cardTarget), e => e.code === "ORDER_SUBJECT_CHANGED");
+    ref.current = { ...original, userId: "user_B", identityVersion: original.identityVersion + 1 };
+    await assert.rejects(() => callback(cardTarget), e => e.code === "ORDER_SUBJECT_CHANGED");
+    ref.current = { ...original, identityVersion: original.identityVersion + 2 };
+    await assert.rejects(() => callback(cardTarget), e => e.code === "ORDER_SUBJECT_CHANGED");
+    assert.equal(writes, 0);
+    assert.equal(intents.inspectIntent("user_A", "opening.confirm", "order_card").state, "NONE");
+    await cardConfirmCallback(ref.current, ref)(cardTarget);
+    assert.equal(writes, 1, "a newly rendered callback for the confirmed user may proceed");
+  } finally { globalThis.fetch = previousFetch; clearCardIntent(); }
+}));
+
+test("a malformed successful card response keeps the original confirmation intent", async () => withDom(async () => {
+  const callback = cardConfirmCallback(session("user_A"));
+  const previousFetch = globalThis.fetch;
+  let key = null;
+  globalThis.fetch = async (_url, init) => {
+    key = new Headers(init.headers).get("idempotency-key");
+    return json({ orderId: "another_order", openings: [] });
+  };
+  try {
+    await assert.rejects(() => callback(cardTarget), e => e.code === "OPENING_CONFIRM_UNKNOWN");
+    assert.equal(intents.inspectIntent("user_A", "opening.confirm", "order_card").intent?.key, key);
+  } finally { globalThis.fetch = previousFetch; clearCardIntent(); }
+}));
+
+test("master review: a successful or already-confirmed card confirmation leaves no dangling intent", async () => withDom(async window => {
+  const callback = cardConfirmCallback(session("user_A"));
+  const previousFetch = globalThis.fetch;
+  const keys = [];
+  globalThis.fetch = async (_url, init) => { keys.push(new Headers(init.headers).get("idempotency-key")); return json({ orderId: "order_card", openings: [{ id: "opening_1", versionNo: 1 }] }); };
+  try {
+    await callback(cardTarget);
+    assert.equal(keys.length, 1);
+    assert.equal(intents.inspectIntent("user_A", "opening.confirm", "order_card").state, "NONE");
+    // A definitive 409 (already confirmed / newer version) is a non-commit: no retry key survives.
+    globalThis.fetch = async (_url, init) => { keys.push(new Headers(init.headers).get("idempotency-key")); return json({ error: { code: "CONFLICT" } }, 409); };
+    await assert.rejects(() => callback(cardTarget), e => e.status === 409);
+    assert.equal(keys.length, 2);
+    assert.notEqual(keys[0], keys[1], "the second write is a new user action after the first succeeded");
+    assert.equal(intents.inspectIntent("user_A", "opening.confirm", "order_card").state, "NONE");
+  } finally { globalThis.fetch = previousFetch; clearCardIntent(); }
+}));

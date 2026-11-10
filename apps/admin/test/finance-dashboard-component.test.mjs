@@ -66,6 +66,7 @@ test('dashboard separates unknown channel facts from known business records and 
   await until(()=>ui.browser.document.body.textContent.includes('结算毛贡献 = 订单实付基数'));
   assert.match(ui.browser.document.body.textContent,/未扣分销、未加预计包赔/);
   assert.match(ui.browser.document.body.textContent,/实付 1,000 元、租客应退 200 元、号主收益 600 元/);
+  assert.match(ui.browser.document.body.textContent,/客服取消订单时的资金分配不计入此项/);
   await act(async()=>[...ui.browser.document.querySelectorAll('button')].find(button=>button.textContent.includes('关闭说明')).click());
   await act(async()=>[...ui.node.querySelectorAll('button')].find(button=>button.textContent.includes('查看排行明细')).click());
   await until(()=>ui.node.textContent.includes('每单平均贡献'));

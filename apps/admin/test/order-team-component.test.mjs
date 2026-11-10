@@ -9,6 +9,8 @@ import react from '@vitejs/plugin-react';
 import {readFileSync} from 'node:fs';
 import ts from 'typescript';
 
+const surfaceOf = (row) => row?.querySelector("p, .order-card, .message-media, .message-image, .order-team-message-revoked, .message-quoted") ?? row;
+
 // Real component + controlled SDK: receipts may arrive after switching orders or permissions.
 // SSR fixtures do not watch the monorepo or its temporary build trees.
 async function mountOrderSender(t, methods={}, options={}) {
@@ -30,7 +32,7 @@ async function mountOrderSender(t, methods={}, options={}) {
   class DecodedImage {naturalWidth=640;naturalHeight=360;set src(_url){queueMicrotask(()=>this.onload?.());}}
   globalThis.Image=DecodedImage;
   let canRead=true;
-  const access=id=>({orderId:id,displayNo:`ZZ-${id}`,orderStatus:'PAID',assignmentState:'ASSIGNED',teamState:'READY',appId:'app',teamId:id==='a'?'1':'2',name:`订单${id}`,gameName:'三角洲行动',account:{id:`account-${id}`,title:`账号${id}`},viewerAccountId:'viewer',conversationId:`viewer|2|${id==='a'?'1':'2'}`,canRead:true,canSend:options.canSend??true,supportEscalation:{firstResponseAt:null,remindDueAt:null,addRound:0,state:'NOT_STARTED',needsManualReview:false,noEligibleStaff:false},members:[]});
+  const access=id=>({orderId:id,displayNo:`ZZ-${id}`,orderStatus:'PAID',assignmentState:'ASSIGNED',teamState:'READY',appId:'app',teamId:id==='a'?'1':'2',name:`订单${id}`,gameName:'三角洲行动',account:{id:`account-${id}`,title:`账号${id}`},viewerAccountId:'viewer',conversationId:`viewer|2|${id==='a'?'1':'2'}`,canRead:true,canSend:options.canSend??true,...(options.botAccountId?{botAccountId:options.botAccountId}:{}),supportEscalation:{firstResponseAt:null,remindDueAt:null,addRound:0,state:'NOT_STARTED',needsManualReview:false,noEligibleStaff:false},members:options.members??[]});
   const request=async url=>{
     if(url.includes('/im?')){if(!canRead)throw Object.assign(new Error('forbidden'),{status:403});return access(url.includes('/a/')?'a':'b');}
     return {items:['a','b'].map(id=>({id,title:`账号${id}`,displayNo:`ZZ-${id}`,status:'PAID',teamState:'READY'})),nextCursor:null};
@@ -378,7 +380,7 @@ test('formal order panel isolates orders, authorization, drafts, late SDK work a
   await act(async()=>root.render(createElement(OrderTeamPanel,props)));
   await until(()=>node.textContent.includes('历史a'));assert.equal(node.querySelector('textarea').value,'A草稿');
   policy='send-denied';await clickRefresh();await until(()=>node.querySelector('.order-team-readonly')&&!node.querySelector('textarea'));
-  assert.match(node.textContent,/历史a/);assert.match(node.querySelector('.order-team-readonly').textContent,/当前不可发送/);
+  assert.match(node.textContent,/历史a/);assert.match(node.querySelector('.order-team-readonly').textContent,/当前只可阅读本单消息/);
   policy='network';await clickRefresh();await until(()=>node.textContent.includes('检查网络'));assert.match(node.textContent,/历史a/);
   policy='read-denied';const before=historyCalls;await clickRefresh();await until(()=>!node.querySelector('textarea'));assert.doesNotMatch(node.textContent,/历史a|A草稿/);assert.equal(historyCalls,before);
   // 真的被拒之后才升级成"重新确认授权"这个授权语义。
@@ -1019,12 +1021,41 @@ function stubClipboard(t,browser){
   return ()=>copied;
 }
 
+test('the NIM order-group creation notification is a system line, not an unsupported message',async t=>{
+  const h=await mountOrderSender(t,historyMethods([{messageClientId:'group-created',messageServerId:'srv-group-created',senderId:'bot',receiverId:'1',createTime:100,text:'',messageType:5,attachment:{ope:0,tname:'三角洲行动|订单:ZZ-a',accids:['viewer']}}]));
+  await h.until(()=>h.node.querySelector('.order-team-system'));
+  assert.match(h.node.querySelector('.order-team-system').textContent,/群聊已创建/);
+  assert.doesNotMatch(h.node.textContent,/暂不支持此消息类型/);
+  assert.equal(h.node.querySelector('.order-team-msg-avatar'),null,'a team notification is not attributed to the bot speaker');
+});
+
+test('bot welcome hides lifecycle notices and duplicate notices collapse to one system line',async t=>{
+  const covered=await mountOrderSender(t,historyMethods([
+    {messageClientId:'welcome',messageServerId:'srv-welcome',senderId:'bot',receiverId:'1',createTime:100,text:'欢迎咨询',messageType:0},
+    {messageClientId:'created',messageServerId:'srv-created',senderId:'system',receiverId:'1',createTime:200,text:'',messageType:5,attachment:{ope:0}},
+    {messageClientId:'joined',messageServerId:'srv-joined',senderId:'system',receiverId:'1',createTime:300,text:'',messageType:5,attachment:{type:0}},
+  ]),{botAccountId:'bot'});
+  await covered.until(()=>covered.node.textContent.includes('欢迎咨询'));
+  assert.equal(covered.node.querySelector('.order-team-system'),null,'bot welcome covers team-created and member-joined notices');
+  assert.doesNotMatch(covered.node.textContent,/群聊已创建|成员已加入会话/);
+});
+
+test('repeated order-group creation notices without bot coverage collapse to one line',async t=>{
+  const h=await mountOrderSender(t,historyMethods(['a','b','c'].map((id,index)=>({messageClientId:`created-${id}`,messageServerId:`srv-created-${id}`,senderId:'system',receiverId:'1',createTime:100+index*1_000,text:'',messageType:5,attachment:{ope:0}}))));
+  await h.until(()=>h.node.querySelector('.order-team-system'));
+  assert.equal(h.node.querySelectorAll('.order-team-system').length,1);
+  assert.match(h.node.querySelector('.order-team-system').textContent,/群聊已创建/);
+});
+
 test('message menu exposes copy/reply/revoke/delete by message type and ownership',async t=>{
   const h=await mountOrderSender(t,historyMethods(menuHistory()));
   const browser=globalThis.window;
   await h.until(()=>h.node.querySelectorAll('.order-team-messages li[data-message-id]').length===5);
+  const system=h.node.querySelector('.order-team-system');
+  assert.match(system.textContent,/成员已加入会话/,'team notifications render as a system line');
+  assert.doesNotMatch(h.node.textContent,/暂不支持此消息类型/,'type 5 never falls through to unsupported content');
   const row=id=>h.node.querySelector(`.order-team-messages li[data-message-id="${id}"]`);
-  const open=async(id,point={clientX:120,clientY:90})=>{await act(async()=>{const target=row(id);assert.ok(target,id);target.dispatchEvent(new browser.MouseEvent('contextmenu',{bubbles:true,cancelable:true,...point}));});await h.settle();};
+  const open=async(id,point={clientX:120,clientY:90})=>{await act(async()=>{const target=surfaceOf(row(id));assert.ok(target,id);target.dispatchEvent(new browser.MouseEvent('contextmenu',{bubbles:true,cancelable:true,...point}));});await h.settle();};
   const labels=()=>[...document.querySelectorAll('.message-action-menu [role=menuitem]')].map(b=>b.textContent.trim());
   const pick=async label=>{const button=[...document.querySelectorAll('.message-action-menu [role=menuitem]')].find(b=>b.textContent.trim()===label);assert.ok(button,label);await act(async()=>button.click());await h.settle();};
   const copied=stubClipboard(t,browser);
@@ -1054,7 +1085,7 @@ test('message menu exposes copy/reply/revoke/delete by message type and ownershi
   await h.settle();
   assert.equal(systemEvent.defaultPrevented,true,'a message row never falls back to the browser menu');
   assert.equal(document.querySelector('.message-action-menu'),null,'system notices have no menu');
-  await act(async()=>row('srv-revoked').dispatchEvent(new browser.MouseEvent('contextmenu',{bubbles:true,cancelable:true})));
+  await act(async()=>surfaceOf(row('srv-revoked')).dispatchEvent(new browser.MouseEvent('contextmenu',{bubbles:true,cancelable:true})));
   await h.settle();
   assert.equal(document.querySelector('.message-action-menu'),null,'revoked messages have no menu');
 
@@ -1064,9 +1095,22 @@ test('message menu exposes copy/reply/revoke/delete by message type and ownershi
   assert.ok(parseFloat(menu.style.top)<=browser.innerHeight-8);
   await act(async()=>document.activeElement.dispatchEvent(new browser.KeyboardEvent('keydown',{key:'Escape',bubbles:true,cancelable:true})));
   await h.settle();
-  const selected=row('srv-own');
+  const selected=surfaceOf(row('srv-own'));
   await act(async()=>{selected.dispatchEvent(new browser.PointerEvent('pointerdown',{bubbles:true,pointerType:'touch',clientX:200,clientY:150}));await new Promise(r=>setTimeout(r,600));});
   assert.deepEqual(labels(),['复制','回复','撤回','删除'],'long press opens the same menu');
+});
+
+test('composer inserts a selected group member mention',async t=>{
+  const h=await mountOrderSender(t,historyMethods(menuHistory()),{members:[{platformId:'peer',accountId:'peer',party:'BUYER',name:'测试买家',avatar:null,responsible:false}]});
+  await h.until(()=>h.node.querySelectorAll('.order-team-messages li[data-message-id]').length===5,'messages ready');
+  await h.type('@');
+  await h.until(()=>h.node.querySelector('.order-team-mention-item'),'typing @ opens the mention list');
+  const item=h.node.querySelector('.order-team-mention-item');
+  const name=item.querySelector('span').textContent.trim();
+  assert.ok(name,'the member has a display name');
+  await act(async()=>item.click());
+  await h.settle();
+  assert.match(h.node.querySelector('textarea').value,new RegExp(`@${name} `),'the selected member replaces the @ query');
 });
 
 test('reply sends replyText, shows the quote and clears it after success',async t=>{
@@ -1078,7 +1122,7 @@ test('reply sends replyText, shows the quote and clears it after success',async 
     async sendText(cid,text,authorize){await authorize({conversationId:cid,operation:'send'});sendCalls++;return h.sent(cid,text,`plain-${sendCalls}`);},
   });
   await h.until(()=>h.node.querySelectorAll('.order-team-messages li[data-message-id]').length===5);
-  const open=async id=>{await act(async()=>h.node.querySelector(`.order-team-messages li[data-message-id="${id}"]`).dispatchEvent(new globalThis.window.MouseEvent('contextmenu',{bubbles:true,cancelable:true,clientX:120,clientY:90})));await h.settle();};
+  const open=async id=>{await act(async()=>surfaceOf(h.node.querySelector(`.order-team-messages li[data-message-id="${id}"]`)).dispatchEvent(new globalThis.window.MouseEvent('contextmenu',{bubbles:true,cancelable:true,clientX:120,clientY:90})));await h.settle();};
   const pick=async label=>{const button=[...document.querySelectorAll('.message-action-menu [role=menuitem]')].find(b=>b.textContent.trim()===label);assert.ok(button,label);await act(async()=>button.click());await h.settle();};
 
   await open('srv-peer');
@@ -1108,7 +1152,7 @@ test('reply UNKNOWN keeps text and quote and never re-sends under a new id',asyn
     async sendText(cid,text,authorize){await authorize({conversationId:cid,operation:'send'});sendCalls++;plainText=text;return h.sent(cid,text,'plain-after-cancel');},
   });
   await h.until(()=>h.node.querySelectorAll('.order-team-messages li[data-message-id]').length===5);
-  await act(async()=>h.node.querySelector('.order-team-messages li[data-message-id="srv-peer"]').dispatchEvent(new globalThis.window.MouseEvent('contextmenu',{bubbles:true,cancelable:true})));
+  await act(async()=>surfaceOf(h.node.querySelector('.order-team-messages li[data-message-id="srv-peer"]')).dispatchEvent(new globalThis.window.MouseEvent('contextmenu',{bubbles:true,cancelable:true})));
   await h.settle();
   const reply=[...document.querySelectorAll('.message-action-menu [role=menuitem]')].find(b=>b.textContent.trim()==='回复');
   await act(async()=>reply.click());
@@ -1138,7 +1182,7 @@ test('revoke asks for a second confirmation, merges the revoked message and keep
     async revokeMessage(cid,message,authorize){await authorize({conversationId:cid,operation:'send'});revokeCalls++;return {...message,conversationId:cid,text:'',revoked:true};},
   });
   await h.until(()=>h.node.querySelectorAll('.order-team-messages li[data-message-id]').length===5);
-  await act(async()=>h.node.querySelector('.order-team-messages li[data-message-id="srv-own"]').dispatchEvent(new globalThis.window.MouseEvent('contextmenu',{bubbles:true,cancelable:true})));
+  await act(async()=>surfaceOf(h.node.querySelector('.order-team-messages li[data-message-id="srv-own"]')).dispatchEvent(new globalThis.window.MouseEvent('contextmenu',{bubbles:true,cancelable:true})));
   await h.settle();
   const item=label=>[...document.querySelectorAll('.message-action-menu [role=menuitem]')].find(b=>b.textContent.trim()===label);
   await act(async()=>item('撤回').click());
@@ -1149,14 +1193,14 @@ test('revoke asks for a second confirmation, merges the revoked message and keep
   await h.until(()=>revokeCalls===1,'revoke dispatched');
   await h.until(()=>h.node.querySelector('.order-team-messages li[data-message-id="srv-own"]').textContent.includes('消息已撤回'));
   assert.doesNotMatch(h.node.querySelector('.order-team-messages li[data-message-id="srv-own"]').textContent,/我方原文/);
-  await act(async()=>h.node.querySelector('.order-team-messages li[data-message-id="srv-own"]').dispatchEvent(new globalThis.window.MouseEvent('contextmenu',{bubbles:true,cancelable:true})));
+  await act(async()=>surfaceOf(h.node.querySelector('.order-team-messages li[data-message-id="srv-own"]')).dispatchEvent(new globalThis.window.MouseEvent('contextmenu',{bubbles:true,cancelable:true})));
   await h.settle();
   assert.equal(document.querySelector('.message-action-menu'),null,'a revoked message has no menu');
 
   for(const [status,copy] of [[409,'已超过可撤回时间'],[403,'无权撤回此消息']]){
     const failing=await mountOrderSender(t,{...historyMethods(menuHistory()),async revokeMessage(){throw Object.assign(new Error('synthetic revoke'),{status});}});
     await failing.until(()=>failing.node.querySelectorAll('.order-team-messages li[data-message-id]').length===5);
-    await act(async()=>failing.node.querySelector('.order-team-messages li[data-message-id="srv-own"]').dispatchEvent(new globalThis.window.MouseEvent('contextmenu',{bubbles:true,cancelable:true})));
+    await act(async()=>surfaceOf(failing.node.querySelector('.order-team-messages li[data-message-id="srv-own"]')).dispatchEvent(new globalThis.window.MouseEvent('contextmenu',{bubbles:true,cancelable:true})));
     await failing.settle();
     const affordance=label=>[...document.querySelectorAll('.message-action-menu [role=menuitem]')].find(b=>b.textContent.trim()===label);
     await act(async()=>affordance('撤回').click());
@@ -1174,7 +1218,7 @@ test('delete removes the message locally and a failure never fakes success',asyn
     async deleteMessage(cid){deleteCalls++;assert.ok(cid);},
   });
   await h.until(()=>h.node.querySelectorAll('.order-team-messages li[data-message-id]').length===5);
-  await act(async()=>h.node.querySelector('.order-team-messages li[data-message-id="srv-peer"]').dispatchEvent(new globalThis.window.MouseEvent('contextmenu',{bubbles:true,cancelable:true})));
+  await act(async()=>surfaceOf(h.node.querySelector('.order-team-messages li[data-message-id="srv-peer"]')).dispatchEvent(new globalThis.window.MouseEvent('contextmenu',{bubbles:true,cancelable:true})));
   await h.settle();
   const remove=[...document.querySelectorAll('.message-action-menu [role=menuitem]')].find(b=>b.textContent.trim()==='删除');
   await act(async()=>remove.click());
@@ -1183,7 +1227,7 @@ test('delete removes the message locally and a failure never fakes success',asyn
 
   const failing=await mountOrderSender(t,{...historyMethods(menuHistory()),async deleteMessage(){throw Object.assign(new Error('synthetic delete'),{status:403});}});
   await failing.until(()=>failing.node.querySelectorAll('.order-team-messages li[data-message-id]').length===5);
-  await act(async()=>failing.node.querySelector('.order-team-messages li[data-message-id="srv-peer"]').dispatchEvent(new globalThis.window.MouseEvent('contextmenu',{bubbles:true,cancelable:true})));
+  await act(async()=>surfaceOf(failing.node.querySelector('.order-team-messages li[data-message-id="srv-peer"]')).dispatchEvent(new globalThis.window.MouseEvent('contextmenu',{bubbles:true,cancelable:true})));
   await failing.settle();
   const removeFailed=[...document.querySelectorAll('.message-action-menu [role=menuitem]')].find(b=>b.textContent.trim()==='删除');
   await act(async()=>removeFailed.click());
@@ -1196,7 +1240,7 @@ test('read-only send permission hides reply and revoke but keeps copy and delete
   await h.until(()=>h.node.querySelectorAll('.order-team-messages li[data-message-id]').length===5);
   assert.equal(h.node.querySelector('form'),null,'read-only orders replace the composer instead of leaving a disabled box');
   assert.ok(h.node.querySelector('.order-team-readonly'),'read-only orders explain the restriction');
-  await act(async()=>h.node.querySelector('.order-team-messages li[data-message-id="srv-own"]').dispatchEvent(new globalThis.window.MouseEvent('contextmenu',{bubbles:true,cancelable:true})));
+  await act(async()=>surfaceOf(h.node.querySelector('.order-team-messages li[data-message-id="srv-own"]')).dispatchEvent(new globalThis.window.MouseEvent('contextmenu',{bubbles:true,cancelable:true})));
   await h.settle();
   assert.deepEqual([...document.querySelectorAll('.message-action-menu [role=menuitem]')].map(b=>b.textContent.trim()),['复制','删除']);
 });

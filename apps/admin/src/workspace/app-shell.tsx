@@ -175,6 +175,14 @@ export function WorkspaceApp({
     [markDirty],
   );
 
+  const updateTabQuery = useCallback((tabId: string, query: Record<string, string>) => {
+    const current = tabsRef.current.find((item) => item.id === tabId);
+    if (!current) return;
+    const next = { ...current, query };
+    setTabs((items) => items.map((item) => (item.id === next.id ? next : item)));
+    if (activeIdRef.current === tabId) replaceUrl(next, true);
+  }, [replaceUrl]);
+
   useEffect(() => {
     persistTabs(snapshot.adminUserId, { tabs, activeId });
   }, [activeId, snapshot.adminUserId, tabs]);
@@ -298,7 +306,7 @@ export function WorkspaceApp({
     return () => window.removeEventListener("beforeunload", onBeforeUnload);
   }, [dirtyIds]);
 
-  const openTab = useCallback((next: WorkspaceTab, replace = false): boolean => {
+  const openTab = useCallback((next: WorkspaceTab, replace = false, afterOpen?: () => void): boolean => {
     if (accessRef.current.locked || !canOpenKind(next.kind, accessRef.current.nav)) return false;
     const proceed = () => {
       const access = accessRef.current;
@@ -309,12 +317,14 @@ export function WorkspaceApp({
       setTabs(updated);
       setActiveId(next.id);
       replaceUrl(next, replace);
+      afterOpen?.();
       return true;
     };
     const current = tabsRef.current.find((item) => item.id === activeIdRef.current);
     const currentHref = current ? tabHref(current) : "";
     const nextHref = tabHref(next);
     if (next.id === activeIdRef.current && currentHref === nextHref) {
+      afterOpen?.();
       return true;
     }
     if (isWriteLocked(activeIdRef.current)) return false;
@@ -324,10 +334,10 @@ export function WorkspaceApp({
     return confirmLeave(activeIdRef.current, proceed);
   }, [confirmLeave, isWriteLocked, replaceUrl]);
 
-  const openPath = useCallback((path: string, title?: string): boolean => {
+  const openPath = useCallback((path: string, title?: string, afterOpen?: () => void): boolean => {
     const [pathname, search = ""] = path.split("?");
     const tab = tabFromLocation(pathname || "/workbench", search);
-    return openTab(title ? { ...tab, title } : tab);
+    return openTab(title ? { ...tab, title } : tab, false, afterOpen);
   }, [openTab]);
 
   const activate = (tabId: string): boolean => {
@@ -391,6 +401,15 @@ export function WorkspaceApp({
   };
 
   const hasSupportRead = snapshot.permissions.includes("im.support.read");
+  // 客服工作台只有一个固定 tab。切到其他 tab 时只隐藏、不卸载，避免 IM 登出和接待区间被关闭。
+  const supportTab = tabs.find((tab) => tab.kind === "support");
+  const supportTabId = supportTab?.id;
+  const onSupportDirtyChange = useCallback((dirty: boolean) => {
+    if (supportTabId) markDirty(supportTabId, dirty);
+  }, [markDirty, supportTabId]);
+  const onSupportQueryChange = useCallback((query: Record<string, string>) => {
+    if (supportTabId) updateTabQuery(supportTabId, query);
+  }, [supportTabId, updateTabQuery]);
 
   useEffect(() => {
     if (hasSupportRead || active.kind === "support") return;
@@ -453,6 +472,32 @@ export function WorkspaceApp({
     clearThemeFromTabs();
   }, [clearThemeFromTabs, onToggleTheme]);
 
+  const renderPage = (tab: WorkspaceTab, onDirty: (dirty: boolean) => void, onQuery: (query: Record<string, string>) => void) => (
+    <WorkspacePageContent
+      tab={tab}
+      snapshot={snapshot}
+      idleMinutes={idleMinutes}
+      onIdleMinutes={onIdleMinutes}
+      onLock={onLock}
+      onRefresh={onRefresh}
+      onRecoveryCompleted={onRecoveryCompleted}
+      onOpenPath={openPath}
+      onDirtyChange={onDirty}
+      onWriteLockChange={onWriteLockChange}
+      onQueryChange={onQuery}
+      refreshNonce={refreshNonce}
+      tabActive={tab.id === active.id}
+      theme={theme}
+      themeMode={themeMode}
+      onSelectThemeMode={handleSelectThemeMode}
+      onResetTheme={handleResetTheme}
+      themeStorageError={themeStorageError}
+      themeStorageStatus={themeStorageStatus}
+      urlTheme={urlTheme}
+      onExitPreview={handleExitPreview}
+    />
+  );
+
   return (
     <div className={`workspace-root min-h-svh ${theme === "dark" ? "dark" : ""}`}>
       <SidebarProvider style={{ "--sidebar-width": "250px" } as CSSProperties}>
@@ -485,36 +530,21 @@ export function WorkspaceApp({
             onActivate={activate}
             onClose={close}
           />
-          <div className="workspace-page flex min-h-0 flex-1 flex-col overflow-auto px-4 py-4 sm:px-5 sm:py-5">
+          <div className={`workspace-page flex min-h-0 flex-1 flex-col overflow-auto px-4 py-4 sm:px-5 sm:py-5${supportTab && active.id === supportTab.id ? " im-wb-active" : ""}`}>
             {activeWriteLocked ? <p role="status" className="mb-3 text-xs text-muted-foreground">内容操作正在处理或等待结果核对，暂不能离开或刷新。</p> : null}
-            <WorkspacePageContent
-              tab={active}
-              snapshot={snapshot}
-              idleMinutes={idleMinutes}
-              onIdleMinutes={onIdleMinutes}
-              onLock={onLock}
-              onRefresh={onRefresh}
-              onRecoveryCompleted={onRecoveryCompleted}
-              onOpenPath={openPath}
-              onDirtyChange={onDirtyChange}
-              onWriteLockChange={onWriteLockChange}
-              onQueryChange={(query) => {
-                const current = tabsRef.current.find((item) => item.id === activeIdRef.current);
-                if (!current) return;
-                const next = { ...current, query };
-                setTabs((items) => items.map((tab) => (tab.id === next.id ? next : tab)));
-                replaceUrl(next, true);
-              }}
-              refreshNonce={refreshNonce}
-              theme={theme}
-              themeMode={themeMode}
-              onSelectThemeMode={handleSelectThemeMode}
-              onResetTheme={handleResetTheme}
-              themeStorageError={themeStorageError}
-              themeStorageStatus={themeStorageStatus}
-              urlTheme={urlTheme}
-              onExitPreview={handleExitPreview}
-            />
+            {/* 客服工作台单独常驻：切 tab 或页面隐藏时保留 IM 连接与接待心跳。 */}
+            {supportTab ? (
+              <div hidden={active.id !== supportTab.id} className="flex min-h-0 flex-1 flex-col">
+                {renderPage(supportTab, onSupportDirtyChange, onSupportQueryChange)}
+              </div>
+            ) : null}
+            {active.id === supportTab?.id ? null : renderPage(active, onDirtyChange, (query) => {
+              const current = tabsRef.current.find((item) => item.id === activeIdRef.current);
+              if (!current) return;
+              const next = { ...current, query };
+              setTabs((items) => items.map((tab) => (tab.id === next.id ? next : tab)));
+              replaceUrl(next, true);
+            })}
           </div>
         </SidebarInset>
       </SidebarProvider>

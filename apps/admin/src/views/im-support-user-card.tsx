@@ -8,7 +8,7 @@ import { AdminApiError, type UserDirectoryDetail } from "../api";
 import { PERMISSION } from "./user-directory/user-directory-data";
 import { Badge } from "../components/ui/badge";
 import { Button } from "../components/ui/button";
-import { Card, CardContent, CardDescription, CardFooter, CardTitle } from "../components/ui/card";
+import { Card, CardContent, CardDescription, CardTitle } from "../components/ui/card";
 import { Item, ItemActions, ItemContent, ItemDescription, ItemMedia, ItemSeparator } from "../components/ui/item";
 import { EntityPreviewTrigger, UserPreviewCard, hasUsefulUserPreview } from "../components/admin-preview";
 import { initialOf } from "./im-support-format";
@@ -27,82 +27,12 @@ import { Popover, PopoverContent, PopoverTrigger } from "../components/ui/popove
  * 现有用户 hoverCard，且只在资料读取仍然持有时出现，卡内不出现 UUID。
  */
 
-/**
- * 服务端关联对象投影。resolved 才带业务展示号与跳转事实；unresolved / absent
- * 不带任何可以反推单号的字段，前端也不从 rawRef 里猜。
- */
-type SubjectProjection = {
-  status?: unknown;
-  kind?: unknown;
-  displayNo?: unknown;
-  title?: unknown;
-  target?: unknown;
-  rawRef?: unknown;
-  party?: unknown;
-  origin?: unknown;
-};
 type ContextView = {
   consultationId: string;
   user: { status: string; publicId?: string; displayName?: string; avatar?: string | null };
-  subject: SubjectProjection;
 };
 type ContextState = "loading" | "ready" | "denied" | "error";
-export type SubjectTargetKind = "ORDER" | "ACCOUNT";
-/** 已解析的关联对象：displayNo 是业务号，id 只用于跳转、不上屏。 */
-export type UserCardSubject = { kind: SubjectTargetKind; id: string; displayNo: string; title: string | null };
 export type UserProfileScope = { profile: boolean; orders: boolean; resources: boolean };
-
-type SubjectView = {
-  label: string;
-  value: string;
-  party?: string | null;
-  /** 只有服务端给出业务展示号（且类型可识别）时才出现；其余分支不渲染任何跳转入口。 */
-  resolved?: UserCardSubject;
-};
-
-const SUBJECT_KIND_LABEL: Record<SubjectTargetKind, string> = { ORDER: "订单", ACCOUNT: "资源账号" };
-const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
-
-function subjectTargetOf(value: unknown): { kind: SubjectTargetKind; id: string } | null {
-  if (!value || typeof value !== "object") return null;
-  const row = value as { kind?: unknown; id?: unknown };
-  const kind = row.kind === "ORDER" ? "ORDER" : row.kind === "ACCOUNT" ? "ACCOUNT" : null;
-  const id = typeof row.id === "string" && SAFE_ID.test(row.id) ? row.id : "";
-  return kind && id ? { kind, id } : null;
-}
-
-function subjectView(context: ContextView | null, state: ContextState): SubjectView {
-  if (!context) {
-    return {
-      label: "关联对象",
-      value: state === "loading" ? "正在读取关联对象…" : state === "denied" ? "当前账号无权读取关联对象" : "关联对象暂时不可读取",
-    };
-  }
-  const subject = context.subject ?? {};
-  if (subject.status === "absent") return { label: "关联对象", value: "尚未关联商品或订单" };
-  if (subject.status === "unresolved") {
-    // rawRef 没有持久化类型，也没有业务单号；裸引用（可能是 UUID）不直接上屏。
-    return { label: "关联对象", value: "关联对象暂未识别" };
-  }
-  if (subject.status === "resolved") {
-    const kind = subject.kind === "ORDER" ? "ORDER" : subject.kind === "ACCOUNT" ? "ACCOUNT" : null;
-    const displayNo = typeof subject.displayNo === "string" ? subject.displayNo.trim() : "";
-    // 没有类型或没有业务展示号就不是可展示的 resolved：不拿内部 id 冒充单号。
-    if (!kind || !displayNo) return { label: "关联对象", value: "关联对象类型暂未确认" };
-    const target = subjectTargetOf(subject.target);
-    const title = typeof subject.title === "string" && subject.title.trim() ? subject.title.trim() : null;
-    const party = "party" in subject && typeof subject.party === "string"
-      ? (subject.party === "RENTER" ? "租客" : subject.party === "OWNER" ? "号主" : null)
-      : null;
-    return {
-      label: `关联对象 · ${kind === "ORDER" && subject.origin === "LEGACY" ? "旧订单" : SUBJECT_KIND_LABEL[kind]}`,
-      value: displayNo,
-      party,
-      resolved: { kind, id: target?.kind === kind ? target.id : "", displayNo, title },
-    };
-  }
-  return { label: "关联对象", value: "关联对象类型暂未确认" };
-}
 
 const ACCOUNT_STATUS: Record<string, { label: string; tone: "secondary" | "destructive" | "outline" }> = {
   ACTIVE: { label: "账号正常", tone: "secondary" },
@@ -139,24 +69,20 @@ function Fact({ label, value, permission }: { label: string; value: string; perm
   );
 }
 
-export function ConsultationUserCard({ consultationId, rowUserId, fallbackName, scope, request, onOpenProfile, onOpenSubject, showSubject = true }: {
+export function ConsultationUserCard({ consultationId, rowUserId, fallbackName, scope, request, onOpenProfile }: {
   consultationId: string;
   rowUserId: string;
   fallbackName: string;
   scope: UserProfileScope;
   request: <T>(path: string) => Promise<T>;
   onOpenProfile?: (userId: string) => void;
-  /** 关联对象可跳转时由调用方决定路由；缺省只展示业务号，不给假入口。 */
-  onOpenSubject?: (target: { kind: SubjectTargetKind; id: string }, label: string) => void;
-  /** 投诉摘要自己陈述关联订单/账号，卡片不再重复。 */
-  showSubject?: boolean;
 }) {
   const [context, setContext] = useState<ContextView | null>(null);
   const [profile, setProfile] = useState<UserDirectoryDetail | null>(null);
   const [state, setState] = useState<ContextState>("loading");
   const [profileState, setProfileState] = useState<"idle" | "loading" | "ready" | "denied" | "error">("idle");
   const [attempt, setAttempt] = useState(0);
-  // One generation per (conversation, capability set, subject): a response that arrives
+  // One generation per (conversation, capability set): a response that arrives
   // after any of them changed is dropped rather than painted back.
   const readScopeKey = `${consultationId}|${scope.profile ? 1 : 0}${scope.orders ? 1 : 0}${scope.resources ? 1 : 0}|${attempt}`;
   const profileGeneration = useRef("");
@@ -185,11 +111,10 @@ export function ConsultationUserCard({ consultationId, rowUserId, fallbackName, 
   }, [readScopeKey, request, scope.profile, userId]);
 
   // Facts from a read the operator no longer holds are not displayable. The effect nulls
-  // profile whenever the capability set or subject changes, so a non-null profile is current.
+  // profile whenever the capability set or conversation changes, so a non-null profile is current.
   const facts = scope.profile ? profile : null;
   const displayName = context?.user.displayName || fallbackName;
   const avatar = managedProfileImage(context?.user.avatar) || managedProfileImage(facts?.image);
-  const subject = subjectView(context, state);
   const identityStatus = facts?.identity?.status || facts?.identityStatus || "UNKNOWN";
   const ageStatus = facts?.identity?.ageStatus || facts?.ageStatus || "UNKNOWN";
   const account = facts ? ACCOUNT_STATUS[facts.accountStatus] ?? ACCOUNT_STATUS.UNKNOWN : null;
@@ -261,7 +186,6 @@ export function ConsultationUserCard({ consultationId, rowUserId, fallbackName, 
             <ItemSeparator />
             <Fact label="手机号" value={facts.maskedPhone ? `${facts.maskedPhone} · ${facts.phoneNumberVerified ? "已验证" : facts.phoneNumberVerified === false ? "未验证" : "验证状态未知"}` : "未绑定"} />
             <Fact label="进行中订单" value={summaryText(facts.orderSummary, "单", scope.orders, PERMISSION.orders)} permission={!scope.orders || facts.orderSummary?.state === "denied" ? PERMISSION.orders : undefined} />
-            <Fact label="名下资源账号" value={summaryText(facts.resourceSummary, "个", scope.resources, PERMISSION.resources)} permission={!scope.resources || facts.resourceSummary?.state === "denied" ? PERMISSION.resources : undefined} />
           </> : null}
         </> : <div className="im-rail-permission px-4 py-2">
           <p className="text-xs text-muted-foreground">账号状态、实名与名下账号概况需用户目录读取权限。</p>
@@ -269,16 +193,6 @@ export function ConsultationUserCard({ consultationId, rowUserId, fallbackName, 
         </div>}
         {state === "error" || profileState === "error" ? <div className="im-rail-retry"><Button variant="outline" size="sm" onClick={() => setAttempt((value) => value + 1)}><RefreshCw aria-hidden="true" />重读资料</Button></div> : null}
       </CardContent>
-      {showSubject ? <CardFooter className="justify-between gap-3 border-t px-4 py-2.5">
-        <span className="shrink-0 text-xs text-muted-foreground">{subject.label}{subject.party ? `（${subject.party}）` : ""}</span>
-        <span className="grid min-w-0 justify-items-end gap-0.5 text-right" data-subject-status={subject.resolved ? "resolved" : undefined} data-subject-kind={subject.resolved?.kind}>
-          {subject.resolved && subject.resolved.id && onOpenSubject
-            ? <Button variant="link" size="sm" className="h-auto max-w-full px-0 text-sm font-medium" data-action="open-subject"
-              onClick={() => { const target = subject.resolved; if (target) onOpenSubject({ kind: target.kind, id: target.id }, target.displayNo); }}>{subject.resolved.displayNo}</Button>
-            : <span className="im-rail-value min-w-0 max-w-full truncate text-sm font-medium" data-subject-display-no={subject.resolved ? subject.resolved.displayNo : undefined}>{subject.value}</span>}
-          {subject.resolved?.title ? <span className="max-w-full truncate text-[11px] text-muted-foreground" title={subject.resolved.title} data-subject-title>{subject.resolved.title}</span> : null}
-        </span>
-      </CardFooter> : null}
     </Card>
   );
 }

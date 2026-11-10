@@ -662,6 +662,29 @@ export async function readDeclaration(
     mediaBindings,
   };
 }
+/** Only an in-flight imported account cancelled on this platform may return to an owner draft. */
+export async function canPrepareLegacyCancelledDraft(client: PoolClient, a: PublishingAccount): Promise<boolean> {
+  if (a.lifecycle !== "ACTIVE" || a.legacy_hold !== "UNRESOLVED" || !a.current_version_id) return false;
+  const installed=(await client.query<{ready:boolean}>(`SELECT to_regclass('zzsh_order.legacy_continuation_version') IS NOT NULL
+    AND to_regclass('zzsh_supply.legacy_listing_read_snapshot') IS NOT NULL AS ready`)).rows[0]?.ready;
+  if (installed!==true) return false;
+  return (await client.query<{eligible:boolean}>(`SELECT EXISTS(
+    SELECT 1 FROM zzsh_supply.legacy_listing_read_snapshot s
+    JOIN zzsh_supply.legacy_supply_map m ON m.account_id=s.account_id AND m.version_id=s.observation_version_id AND m.source_digest=s.source_digest
+      AND m.source_system=s.source_system AND m.source_entity=s.source_entity AND m.legacy_id=s.legacy_id
+    JOIN zzsh_order.legacy_order_read_snapshot l ON l.account_id=s.account_id AND l.owner_user_id=$3 AND l.source_pay_status=1 AND l.source_order_status IN(3,8,9)
+    JOIN zzsh_order.legacy_continuation_version h ON h.order_id=l.id AND h.superseded_at IS NULL AND h.command='SUPPORT_CANCEL' AND h.stage=5
+    WHERE s.account_id=$1 AND s.observation_version_id=$2 AND s.source_status=5
+      AND EXISTS(SELECT 1 FROM zzsh_iam.audit_event a WHERE a.action='order.legacy.continuation.support_cancel' AND a.object_type='rental_order'
+        AND a.object_id=l.id AND a.outcome='SUCCESS' AND a.details->>'versionId'=h.id
+        AND (a.details->>'paymentReviewScope' IN('OPERATOR','UNAVAILABLE') OR a.details->>'paymentReviewScope'='SIMULATED'
+          AND shobj_description((SELECT oid FROM pg_database WHERE datname=current_database()),'pg_database') IN('zzsh:r07-delivery-clone:v1','zzsh:ecs-test:v1')))
+      AND NOT EXISTS(SELECT 1 FROM zzsh_order.legacy_order_read_snapshot later_order JOIN zzsh_order.legacy_continuation_version completed
+        ON completed.order_id=later_order.id AND completed.command='CONFIRM' AND completed.stage=4 AND completed.superseded_at IS NULL
+        WHERE later_order.account_id=s.account_id AND completed.created_at>=h.created_at)
+  ) AS eligible`,[a.id,a.current_version_id,a.owner_user_id])).rows[0]?.eligible===true;
+}
+
 export async function createListingDraft(
   client: PoolClient,
   a: PublishingAccount,
@@ -669,7 +692,8 @@ export async function createListingDraft(
   gate: SupplyGateReader,
 ): Promise<void> {
   checkAccountRevision(a, expected);
-  await assertEditable(client, a, gate);
+  const reopenLegacy = await canPrepareLegacyCancelledDraft(client, a);
+  await assertEditable(client, a, gate, reopenLegacy);
   const old = a.current_version_id ? await currentVersion(client, a) : null;
   if (old?.review_state === "SUBMITTED")
     throw conflict("请先撤回正在审核的资料");
@@ -704,13 +728,17 @@ export async function createListingDraft(
         `INSERT INTO zzsh_supply.${table}(version_id,${fields}) SELECT $1,${fields} FROM zzsh_supply.${table} WHERE version_id=$2`,
         [id, old.id],
       );
+    if (reopenLegacy) await client.query(`INSERT INTO zzsh_supply.listing_skin(version_id,skin_id)
+      SELECT $1,unnest(h.skin_ids) FROM zzsh_supply.legacy_skin_holding h WHERE h.account_id=$2 AND h.observation_version_id=$3
+      ON CONFLICT(version_id,skin_id) DO NOTHING`, [id,a.id,old.id]);
   }
   // Switching the current version to a draft blocks new rentals without changing owner intent.
   await client.query(
-    `UPDATE zzsh_supply.rental_account SET current_version_id=$1 WHERE id=$2`,
-    [id, a.id],
+    `UPDATE zzsh_supply.rental_account SET current_version_id=$1,legacy_hold=CASE WHEN $3 THEN 'NONE' ELSE legacy_hold END WHERE id=$2`,
+    [id, a.id, reopenLegacy],
   );
   a.current_version_id = id;
+  if (reopenLegacy) a.legacy_hold = "NONE";
   await bumpAccount(client, a);
 }
 const list = (
@@ -2155,6 +2183,7 @@ export async function listingDetail(
     ownerName,
     agreement,
     account: viewer === "owner" ? { ...a, display_no: publicAccountNumber(a.display_no) } : a,
+    ...(viewer === "owner" && v.origin === "LEGACY_OBSERVATION" ? { canPrepareLegacyCancelledDraft: observed.gate?.occupancy === "FREE" && await canPrepareLegacyCancelledDraft(client,a) } : {}),
     version: {
       schemaVersion: v.schema_version,
       id: v.id,

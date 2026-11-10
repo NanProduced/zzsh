@@ -280,27 +280,18 @@ test('withdrawal lookup counts records without adding amounts and exact child nu
  }finally{fixture.close();}
 });
 
-test('global refund block proof owns exact existing intent IDs, including in-place audit changes',()=>{
- const fixture=new FinanceSqlFixture();try{
-  fixture.db.exec("CREATE TABLE zzsh_iam.audit_event(id TEXT,action TEXT,object_id TEXT,occurred_at TEXT,details TEXT); CREATE TABLE zzsh_order.channel_refund_intent(id TEXT,revision TEXT,order_id TEXT,renter_user_id TEXT,posting_id TEXT,payment_confirmation_id TEXT,payment_source TEXT,state TEXT,budget_disposition TEXT,amount_cents TEXT); CREATE TABLE zzsh_order.joinpay_refund_attempt(id TEXT,intent_id TEXT,operation TEXT,lease_version TEXT,created_at TEXT)");
-  for(const c of ['reason_code','merchant_scope_id','provider_transaction_id','merchant_order_no','joinpay_request_id','joinpay_evidence_id','joinpay_anchor_id'])fixture.db.exec('ALTER TABLE zzsh_order.payment_confirmation ADD COLUMN '+c+' TEXT');
-  fixture.db.exec("INSERT INTO zzsh_iam.audit_event VALUES('a1','order.refund.abnormal.first_submit.blocked','r1','2026-11-02','first'),('a2','order.refund.abnormal.first_submit.blocked','r2','2026-11-02','unrelated')");
-  const sql=financeVersionSql({refund_intents:true,refund_read_dependencies:true}),relation=sql.match(/FROM \((SELECT a\.id,a\.action,a\.object_id,a\.occurred_at,[\s\S]*? FROM zzsh_iam\.audit_event a WHERE[\s\S]*?)\) v/)?.[1];assert(relation);
-  const rows=()=>fixture.db.prepare(relation.replace(/::text\b/g,'')+' ORDER BY a.id').all(),version=()=>fixture.query(sql,[]).rows[0]!.finance_version;
-  assert.deepEqual(rows(),[],'no intent means no related blocked evidence');const withoutIntent=version();
-  fixture.db.exec("INSERT INTO zzsh_order.channel_refund_intent(id,revision,payment_confirmation_id,state,amount_cents) VALUES('r1','1','p1','UNKNOWN','100')");assert.deepEqual(rows().map(r=>r.id),['a1']);const before=version();assert.notEqual(before,withoutIntent);
-  fixture.db.exec("UPDATE zzsh_iam.audit_event SET details='changed-unrelated' WHERE id='a2'");assert.equal(version(),before);
-  fixture.db.exec("UPDATE zzsh_iam.audit_event SET details='changed-related' WHERE id='a1'");assert.notEqual(version(),before);
-  fixture.db.exec("INSERT INTO zzsh_order.channel_refund_intent(id,payment_confirmation_id) VALUES('r3','p1')");assert.deepEqual(rows().map(r=>r.id),['a1'],'shared payment never pulls in another intent audit');const beforeSecond=version();
-  fixture.db.exec("INSERT INTO zzsh_order.channel_refund_intent(id,payment_confirmation_id,state) VALUES('r2',NULL,'SUBMITTING')");assert.deepEqual(rows().map(r=>r.id),['a1','a2'],'a newly relevant intent enters the full proof even without a confirmation');assert.notEqual(version(),beforeSecond);
-  const beforeReview=version();fixture.db.exec("UPDATE zzsh_order.channel_refund_intent SET revision='2' WHERE id='r1'");assert.notEqual(version(),beforeReview,'a legal review transition advances the per-row revision even if listed state is unchanged');
- }finally{fixture.close();}
+test('global refund version excludes retired responsibility and retains normal refund attempts',()=>{
+ const sql=financeVersionSql({refund_intents:true,refund_read_dependencies:true});
+ assert.doesNotMatch(sql,/order\.refund\.abnormal\.first_submit\.blocked/);
+ assert.match(sql,/basis_kind IN \('POSTING','PRESTART_TERMINATION','SUPPORT_CANCELLATION'\)/);
+ assert.match(sql,/basis_kind IN \('PRESTART_TERMINATION','SUPPORT_CANCELLATION'\)/);
 });
 
 test('global narrow proof catches non-max CAS, first payment and complete capability identity',()=>{
  const fixture=new FinanceSqlFixture({native:[{id:'order',revision:'1',status:'PENDING_PAYMENT'}],withdrawals:[{id:'w1',operation_version:'1',state:'RESERVED'},{id:'w99',operation_version:'99',state:'RESERVED'}]});
  try{
   fixture.db.exec("CREATE TABLE zzsh_order.payment_request(id TEXT,revision TEXT,order_id TEXT,channel TEXT,merchant_identity_id TEXT,platform_order_no TEXT,channel_order_no TEXT,state TEXT,amount_cents TEXT,currency TEXT,evidence_level TEXT,updated_at TEXT); CREATE TABLE zzsh_order.channel_refund_intent(id TEXT,revision TEXT,order_id TEXT,renter_user_id TEXT,posting_id TEXT,payment_confirmation_id TEXT,payment_source TEXT,state TEXT,budget_disposition TEXT)");
+  fixture.db.exec("ALTER TABLE zzsh_order.channel_refund_intent ADD COLUMN basis_kind TEXT DEFAULT 'POSTING'");
   fixture.db.exec("INSERT INTO zzsh_order.payment_request(id,revision,state) VALUES('p1','1','READY'),('p99','99','READY'); INSERT INTO zzsh_order.channel_refund_intent(id,revision,state) VALUES('r1','1','ALLOCATED'),('r99','99','ALLOCATED')");
   const ready={native_orders:true,payment_requests:true,refund_intents:true,withdrawals:true},sql=financeVersionSql(ready),version=()=>fixture.query(sql,[]).rows[0]!.finance_version;
   let before=version();
@@ -324,6 +315,7 @@ test('exact payment refund and payout keys honor Beijing half-open dates without
   f.db.exec("CREATE TABLE zzsh_order.payment_request(id TEXT,order_id TEXT,channel_order_no TEXT,platform_order_no TEXT,created_at TEXT); CREATE TABLE zzsh_order.channel_refund_intent(id TEXT,renter_user_id TEXT,refund_order_no TEXT,provider_refund_trx_no TEXT,original_payment_order_no TEXT,created_at TEXT); CREATE TABLE zzsh_order.joinpay_withdrawal_intent(id TEXT,user_id TEXT,merchant_order_no TEXT,platform_serial_no TEXT,state TEXT,accepted_at TEXT)");
   const times:Array<[string,string]>=[['old','2026-10-24T00:00:00Z'],['left','2026-10-25T16:00:00Z'],['mid','2026-10-26T00:00:00Z'],['right','2026-10-26T16:00:00Z']];
   for(const[id,at]of times){f.db.prepare("INSERT INTO zzsh_order.payment_request VALUES(?,?,?,?,?)").run(id,'o-'+id,'M-WINDOW','P-'+id,at);f.db.prepare("INSERT INTO zzsh_order.channel_refund_intent VALUES(?,?,?,?,?,?)").run(id,'u1','M-WINDOW','T-'+id,'P-'+id,at);f.db.prepare("INSERT INTO zzsh_order.joinpay_withdrawal_intent VALUES(?,?,?,?,?,?)").run(id,'u1','M-WINDOW','W-'+id,'RESERVED',at);}
+  f.db.exec("ALTER TABLE zzsh_order.channel_refund_intent ADD COLUMN basis_kind TEXT DEFAULT 'POSTING'");
   const refs=(period:boolean,q='M-WINDOW')=>{const filters=parseAdminFinanceFilters(new URLSearchParams('period='+(period?'1':'0')+'&from=2026-10-26&to=2026-10-26&q='+q),new Date('2026-10-26T00:00:00Z'),false),query=financeLookupPageSql('SELECT * FROM fixture_ledger','SELECT * FROM fixture_history',{payment_requests:true,refund_intents:true,joinpay_withdrawals:true},{filters,lookup:{exact:false},page:1,pageSize:20});
    // SQLite uses TEXT for PG timestamp columns; adapt only these named columns to its same timestamp comparison type.
    const text=query.text.replace(/\b([piw]\.(?:created_at|accepted_at))(?=\s*[<>])/g,'julianday($1)');return f.query(text,query.values).rows.map(row=>row.ref).filter(Boolean).sort();};
@@ -348,6 +340,7 @@ test('exact source key pagination preserves all three families and a null occurr
   fixture.db.exec("CREATE TABLE zzsh_order.channel_refund_intent(id TEXT,refund_order_no TEXT,provider_refund_trx_no TEXT,original_payment_order_no TEXT,created_at TEXT)");
   fixture.db.exec("CREATE TABLE zzsh_order.joinpay_withdrawal_intent(id TEXT,merchant_order_no TEXT,platform_serial_no TEXT,accepted_at TEXT)");
   fixture.db.exec("INSERT INTO zzsh_order.payment_request VALUES('pc','o','M-CLOCK','P','2026-10-26T10:00:00Z'); INSERT INTO zzsh_order.channel_refund_intent VALUES('rc','R',NULL,'M-CLOCK','2026-10-26T09:00:00Z'); INSERT INTO zzsh_order.joinpay_withdrawal_intent VALUES('wc','M-CLOCK',NULL,NULL)");
+  fixture.db.exec("ALTER TABLE zzsh_order.channel_refund_intent ADD COLUMN basis_kind TEXT DEFAULT 'POSTING'");
   const filters=parseAdminFinanceFilters(new URLSearchParams('period=0&q=M-CLOCK'),new Date(),false),page=(n:number)=>financeLookupPageSql('SELECT * FROM fixture_ledger','SELECT * FROM fixture_history',{payment_requests:true,refund_intents:true,joinpay_withdrawals:true},{filters,lookup:{exact:false},page:n,pageSize:2});
   const one=page(1),two=page(2),first=fixture.query(one.text,one.values).rows,next=fixture.query(two.text,two.values).rows;
   assert.deepEqual(first.map(r=>r.ref),['PAYMENT_REQUEST:pc','REFUND_INTENT:rc']);assert.deepEqual(next.map(r=>r.ref),['JOINPAY_WITHDRAWAL:wc']);assert.equal(Number(first[0]!.document_count),3);assert.equal(Number(next[0]!.entry_count),0);

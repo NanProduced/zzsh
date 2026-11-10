@@ -8,10 +8,10 @@ export const LEGACY_DUTY_KINDS=['RENTER_REFUND','OWNER_CREDIT','COMMISSION','DEP
 export type LegacyFinanceDuty={id:string;orderId:string;kind:typeof LEGACY_DUTY_KINDS[number];sourceRecordId:string;counterpartyUserId:string|null;amountCents:string;currency:'CNY';revision:string;status:string;source:string;sourceStatus:string|null;continuationVersionId:string|null;admissionId?:string|null;maturityAt:string|null;settledBy:string|null;settledRefType:string|null;settledRefId:string|null;settledRefDigest:string|null};
 /** Produced only by T's verified confirm/admission reader under the common order lock, never HTTP JSON. */
 export type LegacyDutyFinalBasis={
- kind:'CONFIRMED_CONTINUATION'|'COMPLETED_COMMISSION_ADMISSION'|'CONFISCATED_CONTINUATION'|'HISTORICAL_UNREFUNDED_ADMISSION';
+ kind:'CONFIRMED_CONTINUATION'|'SUPPORT_CANCELLED_CONTINUATION'|'COMPLETED_COMMISSION_ADMISSION'|'CONFISCATED_CONTINUATION'|'HISTORICAL_UNREFUNDED_ADMISSION';
  dutyId:string;orderId:string;dutyKind:LegacyFinanceDuty['kind'];sourceRecordId:string;subjectId:string;amountCents:string;currency:'CNY';dutyRevision:string;
  parentSourceDigest:string;parentSourceId:string;sourceRecordEntity:'la_distribution_order'|'la_order'|'legacy_continuation_version';sourceRecordDigest:string;basisFactsDigest:string;evidenceId:string;evidenceDigest:string;continuationVersionId:string|null;admissionId:string|null;effectiveHeadId:string|null;effectiveHeadRevision:string|null;
- sourceTimeKind:'CONFIRMED_AT'|'COMPLETED_AT'|'MATURES_AT'|'DISPOSED_AT'|'SOURCE_COMPLETED_AT';sourceTime:string;maturityAt:string|null;
+ sourceTimeKind:'CONFIRMED_AT'|'COMPLETED_AT'|'MATURES_AT'|'DISPOSED_AT'|'SOURCE_COMPLETED_AT'|'SUPPORT_CANCELLED_AT';sourceTime:string;maturityAt:string|null;
  finalAmountKnown:true;netRefundKnown:boolean;currentNetRefundCents:string|null;fundsDisposition:'AVAILABLE'|'HELD'|'CONFISCATED'|'UNKNOWN';
 };
 export type LegacyDutyPostingInput={dutyId:string;expectedRevision:string;expectedEvidenceDigest:string;expectedAmountCents:string};
@@ -36,7 +36,7 @@ export function legacyDutyBasisFromTrade(duty:LegacyFinanceDuty,raw:Record<strin
   ||!(raw.effectiveHeadRevision===null||typeof raw.effectiveHeadRevision==='string'&&/^[1-9]\d{0,18}$/.test(raw.effectiveHeadRevision))
   ||(raw.effectiveHeadId===null)!==(raw.effectiveHeadRevision===null))return{knowledge:'UNKNOWN',reason:'FINAL_BASIS_BINDING_INCOMPLETE'};
  const historic=raw.sourceTimeKind==='SOURCE_COMPLETED_AT',completed=typeof raw.admissionId==='string';
- const basis:LegacyDutyFinalBasis={kind:completed?'COMPLETED_COMMISSION_ADMISSION':historic?'HISTORICAL_UNREFUNDED_ADMISSION':duty.kind==='DEPOSIT_COMPENSATION'?'CONFISCATED_CONTINUATION':'CONFIRMED_CONTINUATION',
+ const basis:LegacyDutyFinalBasis={kind:completed?'COMPLETED_COMMISSION_ADMISSION':historic?'HISTORICAL_UNREFUNDED_ADMISSION':duty.kind==='DEPOSIT_COMPENSATION'?'CONFISCATED_CONTINUATION':raw.sourceTimeKind==='SUPPORT_CANCELLED_AT'?'SUPPORT_CANCELLED_CONTINUATION':'CONFIRMED_CONTINUATION',
   dutyId:duty.id,orderId:duty.orderId,dutyKind:duty.kind,sourceRecordId:duty.sourceRecordId,subjectId:raw.beneficiaryUserId,amountCents:raw.amountCents,currency:'CNY',dutyRevision:raw.revision,
   parentSourceDigest:raw.parentSourceDigest,parentSourceId:raw.parentSourceId,sourceRecordEntity:raw.sourceRecordEntity,sourceRecordDigest:raw.sourceRecordDigest,basisFactsDigest:raw.basisFactsDigest,evidenceId:raw.basisEvidenceId,evidenceDigest:raw.effectiveFactsDigest,continuationVersionId:raw.continuationVersionId,admissionId:raw.admissionId,effectiveHeadId:raw.effectiveHeadId,effectiveHeadRevision:raw.effectiveHeadRevision,
   sourceTimeKind:raw.sourceTimeKind,sourceTime:raw.sourceTime,maturityAt:raw.maturityAt,finalAmountKnown:true,netRefundKnown:duty.kind!=='RENTER_REFUND'||raw.currentNetRefundCents===duty.amountCents,currentNetRefundCents:raw.currentNetRefundCents??null,fundsDisposition:raw.fundsDisposition};
@@ -54,7 +54,7 @@ export function planLegacyDutyFinalization(duty:LegacyFinanceDuty,basis:LegacyDu
  if(!duty||!basis||!funding||!LEGACY_DUTY_KINDS.includes(duty.kind)||duty.currency!=='CNY'||!duty.counterpartyUserId||!id.test(duty.counterpartyUserId)
   ||duty.id!==input.dutyId||duty.revision!==input.expectedRevision||cents(duty.amountCents)!==input.expectedAmountCents||!['PENDING','MATURED'].includes(duty.status)
   ||duty.settledBy!==null||duty.settledRefType!==null||duty.settledRefId!==null||duty.settledRefDigest!==null)throw conflict('DUTY_CHANGED_OR_NOT_PAYABLE');
- if(!['CONFIRMED_CONTINUATION','COMPLETED_COMMISSION_ADMISSION','CONFISCATED_CONTINUATION','HISTORICAL_UNREFUNDED_ADMISSION'].includes(basis.kind)||!['AVAILABLE','HELD','CONFISCATED','UNKNOWN'].includes(basis.fundsDisposition)
+ if(!['CONFIRMED_CONTINUATION','SUPPORT_CANCELLED_CONTINUATION','COMPLETED_COMMISSION_ADMISSION','CONFISCATED_CONTINUATION','HISTORICAL_UNREFUNDED_ADMISSION'].includes(basis.kind)||!['AVAILABLE','HELD','CONFISCATED','UNKNOWN'].includes(basis.fundsDisposition)
   ||basis.finalAmountKnown!==true||typeof basis.netRefundKnown!=='boolean'||basis.dutyId!==duty.id||basis.orderId!==duty.orderId||basis.dutyKind!==duty.kind||basis.sourceRecordId!==duty.sourceRecordId
   ||basis.subjectId!==duty.counterpartyUserId||basis.amountCents!==duty.amountCents||basis.currency!==duty.currency||basis.dutyRevision!==duty.revision||basis.evidenceDigest!==input.expectedEvidenceDigest
   ||basis.continuationVersionId!==duty.continuationVersionId||basis.admissionId!==duty.admissionId
@@ -70,7 +70,8 @@ export function planLegacyDutyFinalization(duty:LegacyFinanceDuty,basis:LegacyDu
    ||basis.admissionId!==null||basis.continuationVersionId!==null)throw conflict('HISTORICAL_UNPAID_REFUND_EVIDENCE_REQUIRED');
  }else if(!basis.effectiveHeadId||!basis.effectiveHeadRevision||!id.test(basis.effectiveHeadId)||!/^[1-9]\d{0,18}$/.test(basis.effectiveHeadRevision)
   ||basis.admissionId!==null||!basis.continuationVersionId||(basis.kind==='CONFISCATED_CONTINUATION')!==(duty.kind==='DEPOSIT_COMPENSATION')
-  ||basis.sourceTimeKind!==(basis.kind==='CONFISCATED_CONTINUATION'?'DISPOSED_AT':'CONFIRMED_AT'))throw conflict('CURRENT_HEAD_FINAL_EVIDENCE_REQUIRED');
+  ||basis.sourceTimeKind!==(basis.kind==='CONFISCATED_CONTINUATION'?'DISPOSED_AT':basis.kind==='SUPPORT_CANCELLED_CONTINUATION'?'SUPPORT_CANCELLED_AT':'CONFIRMED_AT')
+  ||basis.kind==='SUPPORT_CANCELLED_CONTINUATION'&&!['OWNER_CREDIT','RENTER_REFUND'].includes(duty.kind))throw conflict('CURRENT_HEAD_FINAL_EVIDENCE_REQUIRED');
  if(duty.kind==='RENTER_REFUND'&&(basis.fundsDisposition!=='AVAILABLE'||!basis.netRefundKnown||basis.currentNetRefundCents!==duty.amountCents)||duty.kind==='DEPOSIT_COMPENSATION'&&basis.fundsDisposition!=='CONFISCATED')throw conflict('DUTY_FUNDS_DISPOSITION_NOT_PAYABLE');
  if(micros(basis.sourceTime)>micros(now))throw conflict('DUTY_FINAL_TIME_IN_FUTURE');
  if(duty.kind==='COMMISSION'){

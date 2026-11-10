@@ -14,6 +14,7 @@ import { Badge } from "../components/ui/badge";
 import { Button } from "../components/ui/button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../components/ui/select";
 import { Card, CardContent, CardDescription, CardTitle } from "../components/ui/card";
+import { SupportPoststartCancelCard } from "./support-poststart-cancel";
 import { Item, ItemActions, ItemContent, ItemGroup, ItemMedia, ItemTitle } from "../components/ui/item";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "../components/ui/table";
 import { formatFundingCents } from "./supply-review/model";
@@ -23,11 +24,11 @@ import {
   readOrderSettlement,
   readSupportCancel,
   readSupportUnpaidCancel,
+  retryAutomaticOpening,
   sendFulfillmentIntent,
-  sendManualClose,
+  sendProgressReminder,
   sendSupportCancel,
   sendSupportUnpaidCancel,
-  type ManualCloseResult,
   type EarlyEndReason,
   type FulfillmentIntent,
   type SettlementReadView,
@@ -52,6 +53,38 @@ const SETTLEMENT_REASON_LABELS:Record<string,string>={
   INSUFFICIENT_PREPAYMENT:"本单实付不足以覆盖结算费用，请核对数量并与双方沟通。",
   SETTLEMENT_PRICING_INVALID:"本单冻结价格资料无法核实，请联系维护人员。",
   ORDER_PARTY_UNAVAILABLE:"订单一方账号当前不可用，请核实身份和资金状态后处理。",
+};
+/** 自动开租资料不足时只解释原因，不提供伪造清单的入口。 */
+const OPENING_REVIEW_REASONS:Record<string,string>={
+  PAYMENT_BASIS_MISSING:"付款接纳依据缺失，不能据此生成开租清单。",
+  ORDER_NOT_PAID:"订单当前不是已付款可开租状态。",
+  QUOTE_BASIS_INVALID:"本单冻结报价或资源清单不完整。",
+  LEGACY_V1_QUOTE_REVIEW:"旧版建单缺少个性化资金/包赔依据，不能自动生成开租清单；请按未开租取消退款或使用新版下单。",
+  GENERATION_FAILED:"自动生成开租清单时发生数据库错误，付款已保留，请核对后重试或按未开租处理。",
+  GENERATION_RECORD_MISSING:"自动开租记录写入失败，付款已保留；请重新核对开租依据，或按未开租取消退款。",
+  "42P01":"自动开租表未安装，付款已保留；请完成迁移后重新核对。",
+  "42501":"自动开租权限不足，付款已保留；请核对运行角色权限后重新核对。",
+  "55P03":"自动开租遇到锁冲突，付款已保留；请稍后重新核对。",
+  FULL_PAYOUT_UNKNOWN:"全额包赔或资金依据不完整。",
+  SETTLEMENT_PRICING_INVALID:"冻结价格资料无法核实。",
+  OPENING_QUANTITY_MISMATCH:"开租数量与冻结报价不一致。",
+  AUTO_CONFIRM_POLICY_UNAVAILABLE:"自动确认配置暂不可用。",
+};
+function openingReviewText(reason:string|null|undefined):string{
+  return reason&&OPENING_REVIEW_REASONS[reason]?OPENING_REVIEW_REASONS[reason]!:"开租资料待人工核对，暂不能生成清单。";
+}
+const REMINDER_REASON_TEXT:Record<string,string>={
+  ORDER_NOT_ACTIVE:"订单已结束或不在可提醒阶段，未发送消息。",
+  OPENING_MISSING:"本单尚无开租清单，请先核对付款与开租资料。",
+  OPENING_REVIEW_REQUIRED:"本单开租资料待核对，暂不能发送开租提醒。",
+  INTAKE_PENDING:"本单已有结算申请待客服处理，暂不需要提醒双方。",
+  PARTIES_CONFIRMED:"双方已完成当前阶段的确认，暂不需要提醒。",
+  DECISION_REJECTED:"结算方案已被一方拒绝，请先协调或重新发起，不再提醒另一方确认原方案。",
+  STAGE_CHANGED:"原提醒对应的阶段已变化，已结束旧请求；请按当前订单状态重新发起提醒。",
+  SETTLEMENT_POSTED:"本单结算已生效，不再发送阶段提醒。",
+  TEAM_NOT_READY:"订单群尚未就绪，暂不能发送提醒；订单页不受影响。",
+  REMINDER_IN_PROGRESS:"上一条提醒仍在发送中，请稍后查看本单状态。",
+  REMINDER_UNKNOWN:"上一条提醒结果未知；请先在订单群核对是否已发送，确认未发送后再新建提醒。",
 };
 
 const AMOUNT_LABELS: Record<string, string> = {
@@ -127,6 +160,9 @@ function decisionLabel(decision: { party?: string; action?: string }): string {
 function storageKeyFor(viewerId: string, orderId: string): string {
   return `zzsh.im-support.fulfillment.${viewerId}.${orderId}`;
 }
+function reminderKeyFor(viewerId: string, orderId: string): string {
+  return `zzsh.im-support.reminder.${viewerId}.${orderId}`;
+}
 
 /**
  * Admin-only fulfillment section. Writes are frozen intents persisted by
@@ -136,6 +172,24 @@ function storageKeyFor(viewerId: string, orderId: string): string {
  * Frozen order inventory arrives through the authorized IM slot projection;
  * the section never computes money and never writes an order/ledger row.
  */
+/** Standalone review notice: visible even when the settlement read fails or the order has ended. */
+export function StageCardAttentionNotice({ stageCards, terminal = false }: {
+  stageCards?: Array<{ kind: string; kindLabel?: string; state: string }>;
+  terminal?: boolean;
+}) {
+  const unknown = (stageCards ?? []).filter((card) => card.state === "UNKNOWN");
+  if (!unknown.length) return null;
+  const labels = unknown.map((card) => card.kindLabel?.trim() || card.kind).join("、");
+  return <Alert variant="warning" role="status" data-action="stage-card-unknown">
+    <TriangleAlert /><AlertTitle>自动卡发送结果待核对</AlertTitle>
+    <AlertDescription>
+      {terminal
+        ? `${labels}可能已发出。订单已结束，请先在订单群核对；本页不开放补发或写操作。`
+        : `${labels}可能已发出。请先在订单群核对；确认未发送后，再按当前阶段使用“发送进度提醒”，不要直接重发。`}
+    </AlertDescription>
+  </Alert>;
+}
+
 export function OrderFulfillmentSection({ orderId, displayNo, viewerId, orderStatus, frozenInventory, canManualClose, compact=false, onViewChange }: { orderId: string; displayNo: string; viewerId: string; orderStatus?: string; frozenInventory?: InventoryLine[]; canManualClose?: boolean; compact?:boolean; onViewChange?:(view:SettlementReadView|null)=>void }) {
   const [view, setView] = useState<SettlementReadView | null>(null);
   const [readState, setReadState] = useState<FulfillmentReadState>("idle");
@@ -159,6 +213,12 @@ export function OrderFulfillmentSection({ orderId, displayNo, viewerId, orderSta
   const [panelOpen, setPanelOpen] = useState(false);
   const [loading, setLoading] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [reminderBusy, setReminderBusy] = useState(false);
+  const [reminderPending, setReminderPending] = useState<string | null>(null);
+  const [reminderUnknown, setReminderUnknown] = useState(false);
+  const [openingRetryBusy, setOpeningRetryBusy] = useState(false);
+  const [openingRetryPending, setOpeningRetryPending] = useState<string | null>(null);
+  const [openingRetryOpen, setOpeningRetryOpen] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const generationRef = useRef(0);
@@ -296,6 +356,23 @@ export function OrderFulfillmentSection({ orderId, displayNo, viewerId, orderSta
       setStorageBlocked(true);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [viewerId, orderId]);
+
+  useEffect(() => {
+    try {
+      const raw = window.sessionStorage.getItem(reminderKeyFor(viewerId, orderId));
+      if (raw && /^[A-Za-z0-9._:-]{8,128}$/.test(raw)) {
+        setReminderPending(raw);
+        setReminderUnknown(true);
+        setNotice("检测到上次进度提醒结果未确认；请先在订单群核对，或按原请求查看结果。");
+      } else {
+        setReminderPending(null);
+        setReminderUnknown(false);
+      }
+    } catch {
+      setReminderPending(null);
+      setReminderUnknown(false);
+    }
   }, [viewerId, orderId]);
 
   useEffect(() => {
@@ -453,6 +530,14 @@ export function OrderFulfillmentSection({ orderId, displayNo, viewerId, orderSta
 
   const latestOpening = view?.openings?.[view.openings.length - 1];
   const openingConfirmed = Boolean(view?.openings?.some((opening) => opening.status === "CONFIRMED"));
+  const openingRecoveryRequired = view?.openingGenerationRecoveryRequired === true;
+  const openingReview = view?.openingGeneration?.state === "REVIEW_REQUIRED"
+    ? view.openingGeneration
+    : openingRecoveryRequired
+      ? { state: "REVIEW_REQUIRED" as const, reason: "GENERATION_RECORD_MISSING" }
+      : null;
+  // 旧接口或迁移前已付款、没有任何自动生成结论的订单保留手工兜底；有恢复标记的新单走重新核对。
+  const legacyOpeningEntry = view?.openingGeneration == null && !openingRecoveryRequired;
   const current = view?.settlement ?? null;
   const posting = view?.posting ?? null;
   const partyConfirmed = Boolean(current?.decisions?.some((d) => d.party === "RENTER" && d.action === "CONFIRM")
@@ -462,7 +547,7 @@ export function OrderFulfillmentSection({ orderId, displayNo, viewerId, orderSta
   const stage = useMemo(() => {
     if (posting) return { key: "posted", label: "已生效" } as const;
     if (!openingConfirmed && latestOpening) return { key: "opening-pending", label: "等待双方确认开租" } as const;
-    if (!openingConfirmed) return { key: "needs-opening", label: "待发起开租确认" } as const;
+    if (!openingConfirmed) return { key: "needs-opening", label: openingReview ? "开租资料待客服核对" : legacyOpeningEntry ? "待发起开租确认" : "待系统生成开租清单" } as const;
     if (view?.currentRequest?.kind === "INTAKE") return { key: "intake-pending", label: "有结算申请待处理" } as const;
     if (!current) return { key: "needs-settlement", label: "履约中 · 待结算" } as const;
     if (current.decisions?.some(d=>d.action==="REJECT"&&d.versionHash===current.versionHash)) return {key:"decision-rejected",label:"结算方案有争议"} as const;
@@ -470,11 +555,13 @@ export function OrderFulfillmentSection({ orderId, displayNo, viewerId, orderSta
     if (current.early && partyConfirmed && !supportReviewed) return { key: "needs-review", label: "待客服复核" } as const;
     if (current.early) return { key: "reviewed", label: "已复核" } as const;
     return { key: "normal-version", label: "正常结算版本" } as const;
-  }, [posting, openingConfirmed, latestOpening, view?.currentRequest?.kind, current, partyConfirmed, supportReviewed]);
+  }, [posting, openingConfirmed, latestOpening, openingReview, legacyOpeningEntry, view?.currentRequest?.kind, current, partyConfirmed, supportReviewed]);
 
   const task = useMemo(() => {
     switch (stage.key) {
-      case "needs-opening": return { title: "发起开租确认", action: "发起开租确认" };
+      case "needs-opening": return legacyOpeningEntry
+        ? { title: "发起开租确认", action: "发起开租确认" }
+        : { title: "开租资料待客服核对", action: "查看核对说明" };
       case "opening-pending": return { title: "等待双方确认开租", action: "查看开租清单" };
       case "intake-pending": return { title: "有结束申请待处理", action: "打开核对面板" };
       case "needs-settlement": return { title: "履约中 · 等待结算", action: "打开核对面板" };
@@ -485,7 +572,7 @@ export function OrderFulfillmentSection({ orderId, displayNo, viewerId, orderSta
       case "normal-version": return { title: "正常结算版本", action: "查看结算明细" };
       default: return { title: "已过账", action: "查看过账明细" };
     }
-  }, [stage.key]);
+  }, [stage.key, legacyOpeningEntry]);
 
   // 确认状态只认同一版本上的 ack/decision：新版本会让旧确认失效。
   const partyFacts = useMemo(() => {
@@ -517,6 +604,67 @@ export function OrderFulfillmentSection({ orderId, displayNo, viewerId, orderSta
     }
     void beginIntent({ kind: "record-opening", lines: linesForOpening() });
   };
+  const clearReminderKey = () => {
+    try { window.sessionStorage.removeItem(reminderKeyFor(viewerId, orderId)); } catch { /* state still clears */ }
+    setReminderPending(null);
+    setReminderUnknown(false);
+  };
+  const deliverReminder = async (key: string | null) => {
+    if (reminderBusy) return;
+    const requestKey = key ?? `support_reminder_${crypto.randomUUID()}`;
+    if (key === null) {
+      try { window.sessionStorage.setItem(reminderKeyFor(viewerId, orderId), requestKey); }
+      catch { setError("无法保存提醒请求键，已阻止发送；请检查浏览器存储。"); return; }
+    }
+    setReminderPending(requestKey); setReminderBusy(true); setError(""); setNotice("");
+    const outcome = await sendProgressReminder(orderId, requestKey);
+    if (scopeRef.current !== scope) return;
+    if (outcome.kind === "accepted") {
+      clearReminderKey();
+      setNotice(`已发送进度提醒（${outcome.receipt.stage}）。提醒不会创建清单或替人确认。`);
+    } else if (outcome.kind === "blocked") {
+      if (outcome.reason === "REMINDER_UNKNOWN" || outcome.reason === "REMINDER_IN_PROGRESS") {
+        setReminderUnknown(outcome.reason === "REMINDER_UNKNOWN");
+        setError(REMINDER_REASON_TEXT[outcome.reason] ?? "请先核对提醒状态。");
+      } else {
+        clearReminderKey();
+        setError(REMINDER_REASON_TEXT[outcome.reason] ?? "当前阶段暂不能发送提醒，请刷新后核对。");
+      }
+    } else if (outcome.kind === "auth") {
+      setError("登录状态已变化；原提醒请求仍保留，重新确认身份后可查看结果。");
+    } else {
+      setReminderPending(requestKey);
+      setReminderUnknown(true);
+      setError("提醒投递结果未确认；请先在订单群核对是否已发送，再决定是否新建提醒。");
+    }
+    setReminderBusy(false);
+  };
+  const retryOpeningGeneration = async () => {
+    if (openingRetryBusy) return;
+    const key = openingRetryPending ?? `support_opening_retry_${crypto.randomUUID()}`;
+    setOpeningRetryPending(key); setOpeningRetryBusy(true); setError(""); setNotice("");
+    const outcome = await retryAutomaticOpening(orderId, key);
+    if (scopeRef.current !== scope) return;
+    if (outcome.kind === "accepted") {
+      setOpeningRetryPending(null);
+      if (outcome.state === "REVIEW_REQUIRED") {
+        setError(`重新核对后仍不能生成开租清单：${openingReviewText(outcome.reason)}（原因：${outcome.reason ?? "UNKNOWN"}）`);
+      } else {
+        setNotice(outcome.state === "CREATED" ? "已重新核对并生成开租清单。" : "开租清单已存在，已刷新当前状态。");
+        await load();
+      }
+    } else if (outcome.kind === "blocked") {
+      setOpeningRetryPending(null);
+      setError(outcome.reason === "PAYMENT_BASIS_MISSING" ? "未找到已接纳的付款依据，暂不能重新生成。" : "当前不能重新核对开租依据，请刷新后查看。");
+    } else if (outcome.kind === "auth") {
+      setError("登录状态已变化；原核对请求仍保留，重新确认身份后可重试。");
+    } else {
+      setError("重新核对结果未确认；请按原请求重试，不会换键重复创建。");
+    }
+    setOpeningRetryBusy(false);
+  };
+  const sendReminder = () => deliverReminder(reminderPending);
+  const restartReminder = () => { clearReminderKey(); void deliverReminder(null); };
   const previewSettlement = () => {
     if (lines.length === 0 || lines.some((line) => quantityForSubmit(line.value,line.unit)===null)) {
       setError("请核对资源数量；哈夫币按 M 填写，其他资源填写非负整数。");
@@ -574,7 +722,7 @@ export function OrderFulfillmentSection({ orderId, displayNo, viewerId, orderSta
   };
 
   const renderInventory = (mode: "opening" | "remaining") => lines.length > 0 ? <div className="im-support-fulfillment-lines overflow-x-auto rounded-lg border" role="group" aria-label={mode === "opening" ? "开租资源清单" : view?.consumptionMode==="ACTUAL"?"实际消耗":"剩余库存"}>
-    <Table><TableHeader><TableRow><TableHead>资源</TableHead><TableHead>{mode==="opening"?"下单冻结数量":"开租数量"}</TableHead><TableHead>{mode==="opening"?"确认数量":view?.consumptionMode==="ACTUAL"?"实际消耗":"剩余数量"}</TableHead></TableRow></TableHeader><TableBody>
+    <Table><TableHeader><TableRow><TableHead>资源</TableHead><TableHead>{mode==="opening"?"下单冻结数量":"开租数量"}</TableHead><TableHead>{mode==="opening"?"清单数量":view?.consumptionMode==="ACTUAL"?"实际消耗":"剩余数量"}</TableHead></TableRow></TableHeader><TableBody>
     {lines.map((line,index)=>{const reference=mode==="opening"?inventoryByName.get(line.itemId)?.quantity:latestOpening?.lines?.find(item=>item.itemId===line.itemId)?.quantity;const unit=line.unit==="HAFF_BASE"?"M":UNIT_LABELS[line.unit]??line.unit;
       return <TableRow key={line.itemId}><TableCell>{line.name??"资源未记录"}</TableCell><TableCell className="tabular-nums">{reference===undefined?"未记录":`${quantityForDisplay(reference,line.unit)} ${unit}`}</TableCell><TableCell><div className="flex items-center gap-2"><Input value={line.value} inputMode={line.unit==="HAFF_BASE"?"decimal":"numeric"} disabled={locked} onChange={(event)=>setLineValue(index,event.target.value)} aria-label={`${line.name??line.itemId} ${mode==="opening"?"期初数量":view?.consumptionMode==="ACTUAL"?"实际消耗数量":"剩余数量"}`} /><span className="shrink-0 text-muted-foreground">{unit}</span></div></TableCell></TableRow>;})}
     </TableBody></Table>
@@ -693,15 +841,23 @@ export function OrderFulfillmentSection({ orderId, displayNo, viewerId, orderSta
   // 右栏只留任务入口：阶段、订单状态与版本确认由顶部阶段条与本核对面板承担，避免重复。
   return <><Card className={`im-support-fulfillment im-order-card${compact?" oc-action-card":""}`} data-stage={stage.key} aria-label="本单当前任务">
     <CardContent className={compact?"grid gap-2.5 p-0":"grid gap-2.5 p-4"}>
-      <div className="flex items-start gap-3">
+      <div className="flex items-start gap-2">
         <div className="grid min-w-0 flex-1 gap-1">
           <CardTitle className="flex items-start gap-2 text-sm"><ClipboardList className="mt-0.5 size-4 shrink-0 text-primary" />{compact?task.title:"履约核对"}</CardTitle>
-          <CardDescription className="text-xs leading-relaxed">{stage.key==="needs-opening"?"核对资源后发起，等待双方确认。":"核对本单履约进度及结算方案。"}</CardDescription>
+          <CardDescription className="text-xs leading-relaxed">{stage.key==="needs-opening"?"付款已接纳；系统未生成清单时显示待核对原因。":"核对本单履约进度及结算方案。"}</CardDescription>
         </div>
-        <div className="flex shrink-0 flex-col items-stretch gap-1.5">
-          <Button size="sm" data-action="open-fulfillment-panel" onClick={() => setPanelOpen(true)}>{task.action}</Button>
-          {readButton}
-        </div>
+        {readButton}
+      </div>
+      <div className="flex flex-wrap items-center gap-1.5">
+        <Button size="sm" data-action="open-fulfillment-panel" onClick={() => setPanelOpen(true)}>{task.action}</Button>
+        {canManualClose !== false && ["opening-pending","needs-settlement","awaiting-decision"].includes(stage.key)
+          ? <Button size="sm" variant="outline" data-action="send-progress-reminder" disabled={reminderBusy || busy || loading}
+              onClick={() => void sendReminder()}>{reminderBusy ? "发送中…" : reminderPending ? "核对原提醒" : "发送进度提醒"}</Button>
+          : null}
+        {reminderUnknown && reminderPending
+          ? <Button size="sm" variant="ghost" data-action="restart-progress-reminder" disabled={reminderBusy || busy || loading}
+              onClick={restartReminder}>已在群内核对未发送，重新发送</Button>
+          : null}
       </div>
       {panelOpen ? null : statusMessages}
     </CardContent>
@@ -721,12 +877,28 @@ export function OrderFulfillmentSection({ orderId, displayNo, viewerId, orderSta
           <p className="px-3 py-2 text-xs text-muted-foreground">{supportReviewed ? "客服已复核本版本。" : canManualClose ? "当事人无法操作时，客服可在核实后协助处理并记录原因。" : "请等待双方确认。"}</p>
         </div> : null}
 
-      {stage.key === "needs-opening" ? <div className="im-support-fulfillment-stage-panel">
+      {stage.key === "needs-opening" ? (legacyOpeningEntry ? <div className="im-support-fulfillment-stage-panel">
         <strong>核对开租资源</strong>
-        <small>确认数量须与本单冻结清单一致。提交后等待租客和号主确认，双方确认后开始计算租期；订单群提示由系统另行发送。</small>
+        <small>历史已付款订单尚无自动生成结论。请按本单冻结清单核对后提交，等待租客和号主确认；新订单由系统在付款接纳后自动生成。</small>
         {renderInventory("opening")}
         <div className="im-support-fulfillment-actions"><Button type="button" onClick={() => armConfirmation("opening")} disabled={primaryDisabled || lines.length === 0}>提交开租清单</Button></div>
-      </div> : null}
+      </div> : <div className="im-support-fulfillment-stage-panel">
+        <strong>开租资料待客服核对</strong>
+        <small>付款事实已保留；系统依据本单冻结报价自动生成清单。资料不足时不会伪造数量、金额或当事人确认。</small>
+        <Alert variant="warning" role="status"><TriangleAlert /><AlertTitle>尚未生成开租清单</AlertTitle><AlertDescription>{openingReview ? openingReviewText(openingReview.reason) : "本单没有可读取的自动生成结论，请核对付款与订单资料。"}{openingReview?.reason ? `（原因：${openingReview.reason}）` : ""}</AlertDescription></Alert>
+        {canManualClose !== false ? <div className="im-support-fulfillment-actions">
+          <Button type="button" variant="outline" data-action="retry-opening-generation" disabled={openingRetryBusy}
+            onClick={() => setOpeningRetryOpen(true)}>{openingRetryBusy ? "核对中…" : openingRetryPending ? "按原请求重试核对" : "重新核对开租依据"}</Button>
+        </div> : null}
+        <ConfirmAlertDialog open={openingRetryOpen} onOpenChange={setOpeningRetryOpen}
+          title="重新核对开租依据？" contentLabel="确认重新核对开租依据"
+          description="系统只会在原付款和本单冻结报价可核实时生成清单；仍不足时保持待客服核对，不会伪造数量、金额或当事人确认。"
+          confirmLabel={openingRetryBusy ? "核对中…" : "确认重新核对"} cancelLabel="返回核对" confirmVariant="default" busy={openingRetryBusy}
+          onConfirm={() => { setOpeningRetryOpen(false); void retryOpeningGeneration(); }}>
+          <p className="text-sm">操作会记录当前客服、原付款绑定和审计；不会替双方确认。</p>
+        </ConfirmAlertDialog>
+        <p className="im-support-fulfillment-empty">核对仍不能证明依据时必须保持待处理；如确认无法交付，请使用下方“取消未开租订单”或既有退款流程，不能凭猜测生成清单。</p>
+      </div>) : null}
 
       {stage.key === "opening-pending" ? <div className="im-support-fulfillment-stage-panel">
         <strong>等待双方确认开租</strong>
@@ -855,8 +1027,8 @@ export function OrderFulfillmentSection({ orderId, displayNo, viewerId, orderSta
       </DialogContent>
     </Dialog>
   </Card>
-  {canManualClose && !compact && orderStatus === "PAID" ? <ManualCloseCard orderId={orderId} displayNo={displayNo} onSettlement={() => { void load(); setPanelOpen(true); }} /> : null}
   {canManualClose && orderStatus === "PAID" && view.rentalStarted===false ? <SupportCancelCard orderId={orderId} displayNo={displayNo} compact={compact} /> : null}
+  {canManualClose && orderStatus === "PAID" && view.rentalStarted===true ? <SupportPoststartCancelCard orderId={orderId} displayNo={displayNo} viewerId={viewerId} compact={compact} /> : null}
   </>;
 }
 
@@ -977,7 +1149,7 @@ function SupportCancelCard({ orderId, displayNo, compact=false }: { orderId: str
       setPhase("IDLE");
       if (cause instanceof AdminApiError && (cause.status === 401 || cause.status === 423)) setError("登录状态已变化；请重新确认管理员身份后核对。");
       else if (cause instanceof AdminApiError && cause.status === 403) setError("当前账号不是本单客服，或没有订单结算写权限。");
-      else if (cause instanceof AdminApiError && cause.status === 404) setError("当前无法办理客服取消或读取订单，请核对退款责任。");
+      else if (cause instanceof AdminApiError && cause.status === 404) setError("当前无法办理客服取消或读取订单，请核对订单和付款信息。");
       else setError(friendlyError(cause));
     }
   };
@@ -1052,66 +1224,5 @@ function SupportCancelCard({ orderId, displayNo, compact=false }: { orderId: str
       </label>
       {error ? <p className="im-wb-dialog-error" role="alert"><CircleAlert size={14} />{error}</p> : null}
     </ConfirmAlertDialog>
-  </Card>;
-}
-
-function ManualCloseCard({ orderId, displayNo, onSettlement }: { orderId: string; displayNo: string; onSettlement: () => void }) {
-  const [open, setOpen] = useState(false);
-  const [remark, setRemark] = useState("");
-  const [phase, setPhase] = useState<"IDLE" | "SENDING" | "UNKNOWN">("IDLE");
-  const [result, setResult] = useState<ManualCloseResult | null>(null);
-  const [error, setError] = useState("");
-  const [resolution, setResolution] = useState<"PRESTART_REFUND_REQUIRED" | "SETTLEMENT_REQUIRED" | null>(null);
-  const keyRef = useRef("");
-  const valid = remark.trim().length >= 3 && remark.trim().length <= 200
-    && ![...remark].some((ch) => { const code = ch.codePointAt(0)!; return code < 32 || code === 127; });
-  const submit = async () => {
-    if (!valid || phase === "SENDING" || result) return;
-    if (!keyRef.current) keyRef.current = `manual_close_${orderId}_${crypto.randomUUID()}`;
-    setPhase("SENDING"); setError("");
-    try {
-      const closed = await sendManualClose(orderId, remark.trim(), keyRef.current);
-      setResult(closed); setPhase("IDLE"); setOpen(false);
-    } catch (cause) {
-      if (cause instanceof AdminApiError && cause.status === 409 && (cause.reason === "PRESTART_REFUND_REQUIRED" || cause.reason === "SETTLEMENT_REQUIRED")) {
-        setResolution(cause.reason); setPhase("IDLE"); setOpen(false); setError(""); return;
-      }
-      if (cause instanceof AdminApiError && (cause.status === 0 || cause.status === 429 || cause.status >= 500)) {
-        setPhase("UNKNOWN");
-        setError("结果未确认，请刷新订单核对；不要用新备注重复提交，可保留本页重试同一请求。");
-      } else {
-        setPhase("IDLE");
-        const code = cause instanceof AdminApiError ? cause.code : "";
-        setError(code === "ORDER_NOT_CLOSABLE" ? "订单已不是可手动结单的状态；请刷新后核对。"
-          : cause instanceof AdminApiError && cause.status === 403 ? "当前账号不是本单客服，或没有订单结算写权限。"
-          : friendlyError(cause));
-      }
-    }
-  };
-  return <Card className="im-support-fulfillment im-order-card" data-manual-close="true" aria-label="异常处理">
-    <CardContent className="grid gap-2 p-4">
-      <CardTitle className="flex items-center gap-2 text-sm"><TriangleAlert className="size-4 shrink-0 text-destructive" />异常处理</CardTitle>
-      <CardDescription className="text-xs leading-relaxed">结束订单不能跳过结算与退款。请提交实际情况，系统核对后引导到适用的正式流程；原人工关闭记录仍须核对资金。</CardDescription>
-      {resolution ? <Alert variant="warning"><TriangleAlert /><AlertTitle>订单未关闭，请完成正式处理</AlertTitle><AlertDescription>{resolution === "PRESTART_REFUND_REQUIRED" ? "本单尚未确认开租，请核实未使用与无争议后办理未开租取消。" : "本单已确认开租，请核对实际消耗，通过正常或提前结算处理应收应退。"}</AlertDescription><AlertAction>{resolution === "PRESTART_REFUND_REQUIRED" ? <a className="text-sm underline underline-offset-4" href={`#${encodeURIComponent(`support-cancel-${orderId}`)}`}>前往未开租取消</a> : <Button type="button" variant="outline" size="sm" onClick={onSettlement}>前往结算处理</Button>}</AlertAction></Alert>
-        : result ? <Alert><ShieldCheck /><AlertTitle>已手动结单（原办理记录）</AlertTitle><AlertDescription>原记录未自动结算或退款，资金处理待核实；沟通权限以订单群当前提示为准。</AlertDescription></Alert>
-        : <div className="im-support-fulfillment-actions">
-          <Button variant="outline" size="sm" data-action="manual-close-open" onClick={() => { setError(""); setOpen(true); }}>核对结束方式</Button>
-        </div>}
-      {error && !open ? <p className="im-support-fulfillment-error" role="alert"><CircleAlert size={14} />{error}</p> : null}
-    </CardContent>
-    <Dialog open={open} onOpenChange={setOpen}>
-      <DialogContent className="im-wb-dialog" aria-label="手动结单" showCloseButton={false}>
-        <div className="im-wb-dialog-head"><div><strong>核对结束方式</strong><span>订单 {displayNo}</span></div><Button type="button" variant="ghost" size="icon" onClick={() => setOpen(false)} disabled={phase === "SENDING"} aria-label="关闭手动结单"><X size={14} /></Button></div>
-        <Alert variant="warning"><TriangleAlert /><AlertTitle>先核对本单办理路径</AlertTitle><AlertDescription>未开租取消与已开租结算是不同流程，本入口不会跳过应收应退责任。提交后请按系统返回的办理路径继续；不代表订单已关闭或退款到账。</AlertDescription></Alert>
-        <label className="im-wb-dialog-note"><span>处理备注（必填，3–200 字）<em>{remark.length}/200</em></span>
-          <Textarea value={remark} maxLength={200} rows={3} aria-label="手动结单处理备注" placeholder="说明异常原因与后续资金处理方式" disabled={phase === "SENDING" || phase === "UNKNOWN"} onChange={(event) => { setRemark(event.target.value); setError(""); }} />
-        </label>
-        {error ? <p className="im-wb-dialog-error" role="alert"><CircleAlert size={14} />{error}</p> : null}
-        <div className="im-wb-dialog-actions">
-          <Button variant="ghost" size="sm" onClick={() => setOpen(false)} disabled={phase === "SENDING"}>取消</Button>
-          <Button variant="outline" size="sm" data-action="manual-close-submit" onClick={() => void submit()} disabled={!valid || phase === "SENDING" || Boolean(result)}>{phase === "SENDING" ? "提交中…" : phase === "UNKNOWN" ? "重试同一请求" : "核对办理路径"}</Button>
-        </div>
-      </DialogContent>
-    </Dialog>
   </Card>;
 }

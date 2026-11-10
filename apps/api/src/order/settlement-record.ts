@@ -21,7 +21,7 @@ import { assertSupportOrderAccess } from "./manual-close";
 import { openingConfirmStep, type OpeningConfirmParty } from "./opening-auto-confirm";
 import {frozenPersonalGrowthV4Valid} from './personal-growth-confirmation';
 import { readFormalCollectionAdmission, type FormalCollectionAdmission } from "./joinpay-collection-profile";
-import { assertControlledSettlementResource } from "./payment-confirmation";
+import { assertControlledSettlementResource, type PaymentAcceptanceOptions } from "./payment-confirmation";
 import { assertBusinessRuntimeIdentity } from "../database/business";
 import { assertLocalSandboxOrderAdmission, localFinancialSandboxRegistration, type LocalFinancialSandbox } from "../finance/local-financial-sandbox-resource";
 import { assertEcsTestDemoOrderAdmission, readEcsTestDemoRegistration, type DemoFinanceResource } from "../finance/ecs-test-demo-resource";
@@ -61,6 +61,7 @@ type LockedOrder = {
   quote: Record<string, unknown>;
   appId: string | null;
   revision: string;
+  openingGenerationRecoveryRequired: boolean;
 };
 
 export function settlementSurfaceOpen(flag: boolean | undefined, admission?: FormalCollectionAdmission, sandbox?:LocalFinancialSandbox, demo?:DemoFinanceResource): boolean {
@@ -171,11 +172,14 @@ export async function lockSettlement(client: PoolClient, orderId: string, actor:
   const row = (await client.query<{
     id: string; renterUserId: string; ownerUserId: string; accountId: string; listingVersionId: string; gameId: string; status: string;
     depositCents: string; contentHash: string; ruleReleaseId: string; quote: Record<string, unknown>; appId: string | null; revision: string;
+    openingGenerationRecoveryRequired: boolean;
   }>(
     `SELECT o.id, o.renter_user_id AS "renterUserId", o.owner_user_id AS "ownerUserId", o.account_id AS "accountId",
             o.listing_version_id AS "listingVersionId", o.game_id AS "gameId", o.status, o.deposit_amount_cents::text AS "depositCents", o.content_hash AS "contentHash",
             o.rule_release_id AS "ruleReleaseId",
-            o.quote_snapshot AS quote, o.revision::text AS revision, g.app_id AS "appId"
+            o.quote_snapshot AS quote, o.revision::text AS revision,
+            o.opening_generation_recovery_required AS "openingGenerationRecoveryRequired",
+            g.app_id AS "appId"
        FROM zzsh_order.rental_order o
        LEFT JOIN zzsh_order.im_order_group g ON g.order_id = o.id
       WHERE o.id = $1
@@ -778,17 +782,44 @@ function frozenLineFacts(order: LockedOrder): Map<string, { unit: string; pricin
   return facts;
 }
 
+/** A paid order with no opening and no generation fact is recoverable even when the marker write failed. */
+export function openingRecoveryRequired(input: {
+  marker: boolean; status: string; hasOpening: boolean; hasGeneration: boolean; hasAcceptedPayment: boolean;
+}): boolean {
+  return input.marker || (input.status === "PAID" && !input.hasOpening && !input.hasGeneration && input.hasAcceptedPayment);
+}
+
 async function view(client: PoolClient, order: LockedOrder): Promise<Command> {
   const facts = frozenLineFacts(order);
   const openingRows = (await client.query<{
     id: string; versionNo: number; status: string; confirmedAt: string | null; createdAt: string; confirmSource: string | null;
+    createdBySource: string; autoConfirmDueAt: string | null; autoConfirmWaitMinutes: number | null;
     lines: Array<{ itemId: string; quantity: string }>; quoteDigest: string; paymentDigest: string;
   }>(
     `SELECT id, version_no AS "versionNo", status, confirmed_at AS "confirmedAt", created_at AS "createdAt",
-            confirm_source AS "confirmSource", lines, quote_digest AS "quoteDigest", payment_digest AS "paymentDigest"
+            confirm_source AS "confirmSource", created_by_source AS "createdBySource",
+            to_char(auto_confirm_due_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "autoConfirmDueAt",
+            auto_confirm_wait_minutes AS "autoConfirmWaitMinutes",
+            lines, quote_digest AS "quoteDigest", payment_digest AS "paymentDigest"
        FROM zzsh_order.rental_opening WHERE order_id = $1 ORDER BY version_no`,
     [order.id],
   )).rows;
+  const openingGeneration = (await client.query<{
+    state: string; reason: string | null; paymentConfirmationId: string; createdAt: string; updatedAt: string;
+  }>(
+    `SELECT state, reason, payment_confirmation_id AS "paymentConfirmationId",
+            to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "createdAt",
+            to_char(updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "updatedAt"
+       FROM zzsh_order.rental_opening_generation WHERE order_id = $1`,
+    [order.id],
+  )).rows[0] ?? null;
+  const missingGeneration = order.status === "PAID" && openingRows.length === 0 && openingGeneration === null;
+  const acceptedPayment = missingGeneration
+    ? ((await client.query(
+      `SELECT 1 FROM zzsh_order.payment_confirmation WHERE order_id = $1 AND disposition = 'APPLIED' LIMIT 1`,
+      [order.id],
+    )).rowCount ?? 0) > 0
+    : false;
   const ackRows = openingRows.length === 0 ? [] : (await client.query<{ openingId: string; party: string; userId: string; source: string; createdAt: string }>(
     `SELECT opening_id AS "openingId", party, user_id AS "userId", source, created_at AS "createdAt"
        FROM zzsh_order.rental_opening_ack WHERE opening_id = ANY($1::text[]) ORDER BY created_at, party`,
@@ -854,6 +885,11 @@ async function view(client: PoolClient, order: LockedOrder): Promise<Command> {
     consumptionMode:pricingInvalid?"UNAVAILABLE":settlementPricing?"ACTUAL":"REMAINING",
     extraResources,
     openings,
+    openingGeneration,
+    openingGenerationRecoveryRequired: openingRecoveryRequired({
+      marker: order.openingGenerationRecoveryRequired, status: order.status,
+      hasOpening: openings.length > 0, hasGeneration: openingGeneration !== null, hasAcceptedPayment: acceptedPayment,
+    }),
     intakes,
     versions: withDecisions,
     currentRequest: pendingIntake
@@ -962,17 +998,22 @@ function isolateSettlementParty(value: unknown, viewer: SettlementViewer): unkno
 function projectSettlementBody(value: unknown, viewer: SettlementViewer): unknown {
   if (!value || typeof value !== "object" || Array.isArray(value)) return value;
   const body = pickFields(value, [
-    "error", "orderId", "revision", "rentalStarted", "consumptionMode", "extraResources", "openings", "intakes", "versions", "currentRequest", "settlement", "posting",
+    "error", "orderId", "revision", "rentalStarted", "consumptionMode", "extraResources", "openings", "openingGeneration", "openingGenerationRecoveryRequired", "intakes", "versions", "currentRequest", "settlement", "posting",
     "ready", "reasons", "stage", "postingAuthorized", "feeDeducted", "orderStatus", "accepted", "early", "amounts", "versionHash",
     "baseVersionId", "consumed", "systemOwnerNet", "systemRenterRefund", "proposedOwnerNet", "proposedRenterRefund", "reason",
   ]);
   if(Array.isArray(body.extraResources))body.extraResources=body.extraResources.map(item=>pickFields(item,["itemId","name","unit","pricingKind"]));
   if (Array.isArray(body.openings)) body.openings = body.openings.map((opening) => {
-    const projected = pickFields(opening, ["id", "versionNo", "status", "confirmedAt", "createdAt", "confirmSource", "quoteDigest", "paymentDigest", "lines", "acks"]);
+    const projected = pickFields(opening, ["id", "versionNo", "status", "confirmedAt", "createdAt", "confirmSource", "createdBySource", "autoConfirmDueAt", "autoConfirmWaitMinutes", "quoteDigest", "paymentDigest", "lines", "acks"]);
     if (Array.isArray(projected.lines)) projected.lines = projected.lines.map((line) => pickFields(line, ["itemId", "quantity", "unit", "pricingKind"]));
     if (Array.isArray(projected.acks)) projected.acks = projected.acks.map((ack) => pickFields(ack, ["party", "source", "createdAt"]));
     return projected;
   });
+  if (body.openingGeneration !== undefined && body.openingGeneration !== null) {
+    body.openingGeneration = pickFields(body.openingGeneration, viewer === "SUPPORT"
+      ? ["state", "reason", "paymentConfirmationId", "createdAt", "updatedAt"]
+      : ["state", "reason", "createdAt", "updatedAt"]);
+  }
   if (Array.isArray(body.intakes)) body.intakes = body.intakes.map((intake) => {
     const projected = pickFields(intake, ["id", "versionNo", "initiatorParty", "lines", "status", "settlementVersionId", "createdAt"]);
     if (Array.isArray(projected.lines)) projected.lines = projected.lines.map((line) => pickFields(line, ["itemId", "remainingQuantity", "consumedQuantity"]));
@@ -1045,20 +1086,186 @@ export async function recordOpening(client: PoolClient, orderId: string, actor: 
   if (order.status !== "PAID") return blocked(["ORDER_NOT_PAID"]);
   const payment = await appliedPayment(client, orderId);
   if (!payment || payment.currency !== "CNY") return blocked(["PAYMENT_BASIS_MISSING"]);
+  // 付款接纳后已自动生成唯一清单；客服不再另起一版，只保留历史人工记录入口。
+  if ((await client.query(`SELECT 1 FROM zzsh_order.rental_opening WHERE order_id = $1`, [orderId])).rowCount) return blocked(["OPENING_ALREADY_RECORDED"]);
   const built = basisOrReasons(order, payment, lines);
   if ("reasons" in built) return blocked(built.reasons);
-  if ((await client.query(`SELECT 1 FROM zzsh_order.rental_opening WHERE order_id = $1 AND status = 'CONFIRMED'`, [orderId])).rowCount) return blocked(["OPENING_IMMUTABLE"]);
-  const versionNo = Number((await client.query<{ n: number }>(`SELECT COALESCE(MAX(version_no), 0) + 1 AS n FROM zzsh_order.rental_opening WHERE order_id = $1`, [orderId])).rows[0]!.n);
   const id = `opening_${randomUUID().replaceAll("-", "")}`;
   const stored = built.basis.lines.map((line) => ({ itemId: line.itemId, quantity: line.openingQuantity }));
   await client.query(
-    `INSERT INTO zzsh_order.rental_opening (id, order_id, version_no, quote_digest, payment_digest, lines, status, created_by_admin_id)
-     VALUES ($1, $2, $3, $4, $5, $6::jsonb, 'DRAFT', $7)`,
-    [id, orderId, versionNo, built.basis.quoteDigest, built.basis.paymentDigest, JSON.stringify(stored), actor.userId],
+    `INSERT INTO zzsh_order.rental_opening (id, order_id, version_no, quote_digest, payment_digest, lines, status, created_by_admin_id, payment_confirmation_id)
+     VALUES ($1, $2, 1, $3, $4, $5::jsonb, 'DRAFT', $6, $7)`,
+    [id, orderId, built.basis.quoteDigest, built.basis.paymentDigest, JSON.stringify(stored), actor.userId, payment.id],
   );
-  await audit(client, actor, "order.opening.recorded", orderId, requestId, { openingId: id, versionNo });
+  // 手工兜底也解除待客服核对状态，后续读取不再同时显示“已生成”和“待核对”。
+  await client.query(
+    `UPDATE zzsh_order.rental_opening_generation
+        SET state='CREATED', reason=NULL, opening_id=$2, updated_at=clock_timestamp()
+      WHERE order_id=$1 AND state='REVIEW_REQUIRED'`,
+    [orderId, id],
+  );
+  await audit(client, actor, "order.opening.recorded", orderId, requestId, { openingId: id, versionNo: 1, source: "ADMIN" });
   return view(client, order);
 }
+
+export type AutomaticOpeningResult =
+  | { state: "CREATED"; openingId: string; dueAt: string | null; waitMinutes: number; policyRevision: string }
+  | { state: "EXISTS"; openingId: string }
+  | { state: "REVIEW_REQUIRED"; reason: string };
+
+/**
+ * 在付款接纳的同一事务内，从本单冻结报价生成唯一 DRAFT 清单。
+ * 资料不足时只记录可恢复原因，绝不伪造数量、金额或当事人确认。调用方已持有订单行锁。
+ */
+export async function recordAutomaticOpening(
+  client: PoolClient,
+  orderId: string,
+  paymentConfirmationId: string,
+  requestId: string,
+): Promise<AutomaticOpeningResult> {
+  const payment = (await client.query<{ id: string; amountCents: string; currency: string; disposition: string }>(
+    `SELECT id, amount_cents::text AS "amountCents", currency, disposition
+       FROM zzsh_order.payment_confirmation WHERE id = $1 AND order_id = $2`,
+    [paymentConfirmationId, orderId],
+  )).rows[0];
+  if (!payment || payment.disposition !== "APPLIED" || payment.currency !== "CNY") {
+    return automaticOpeningReview(client, orderId, paymentConfirmationId, "PAYMENT_BASIS_MISSING", requestId);
+  }
+  const existing = (await client.query<{ id: string }>(
+    `SELECT id FROM zzsh_order.rental_opening WHERE order_id = $1 ORDER BY version_no DESC LIMIT 1`,
+    [orderId],
+  )).rows[0];
+  if (existing) return { state: "EXISTS", openingId: existing.id };
+
+  const order = (await client.query<Omit<LockedOrder, "quote"> & { quote: Record<string, unknown> | null }>(
+    `SELECT o.id, o.renter_user_id AS "renterUserId", o.owner_user_id AS "ownerUserId",
+            o.account_id AS "accountId", o.listing_version_id AS "listingVersionId", o.game_id AS "gameId",
+            o.status, o.deposit_amount_cents::text AS "depositCents", o.content_hash AS "contentHash",
+            o.rule_release_id AS "ruleReleaseId", o.quote_snapshot AS quote, o.revision::text AS revision,
+            o.opening_generation_recovery_required AS "openingGenerationRecoveryRequired",
+            g.app_id AS "appId"
+       FROM zzsh_order.rental_order o
+       LEFT JOIN zzsh_order.im_order_group g ON g.order_id = o.id
+      WHERE o.id = $1`,
+    [orderId],
+  )).rows[0];
+  if (!order || order.status !== "PAID") return automaticOpeningReview(client, orderId, paymentConfirmationId, "ORDER_NOT_PAID", requestId);
+  const quote = order.quote;
+  if (!quote) return automaticOpeningReview(client, orderId, paymentConfirmationId, "QUOTE_BASIS_INVALID", requestId);
+  // Open v1 standard quotes have price lines but no personalized funding/guarantee basis.
+  // Do not fabricate a settlement basis and do not advertise them as auto-opening.
+  if (!quote.personal) return automaticOpeningReview(client, orderId, paymentConfirmationId, "LEGACY_V1_QUOTE_REVIEW", requestId);
+  const quoteLines = quote.lines;
+  if (!Array.isArray(quoteLines) || quoteLines.length < 1 || quoteLines.length > 64) {
+    return automaticOpeningReview(client, orderId, paymentConfirmationId, "QUOTE_BASIS_INVALID", requestId);
+  }
+  const lines: LineQty[] = [];
+  for (const raw of quoteLines) {
+    if (!raw || typeof raw !== "object") return automaticOpeningReview(client, orderId, paymentConfirmationId, "QUOTE_BASIS_INVALID", requestId);
+    const line = raw as Record<string, unknown>;
+    if (typeof line.itemId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(line.itemId)
+      || typeof line.quantity !== "string" || !/^(0|[1-9]\d{0,18})$/.test(line.quantity)) {
+      return automaticOpeningReview(client, orderId, paymentConfirmationId, "QUOTE_BASIS_INVALID", requestId);
+    }
+    lines.push({ itemId: line.itemId, quantity: line.quantity });
+  }
+  const built = basisOrReasons({ ...order, quote }, payment, lines);
+  if ("reasons" in built) {
+    return automaticOpeningReview(client, orderId, paymentConfirmationId, built.reasons[0] ?? "QUOTE_BASIS_INVALID", requestId);
+  }
+  const policy = (await client.query<{ revision: string; waitMinutes: number }>(
+    `SELECT revision::text AS revision, wait_minutes AS "waitMinutes"
+       FROM zzsh_order.opening_auto_confirm_policy WHERE singleton FOR SHARE`,
+  )).rows[0];
+  if (!policy || !/^[1-9]\d{0,18}$/.test(policy.revision) || !Number.isInteger(policy.waitMinutes)
+    || policy.waitMinutes < 1 || policy.waitMinutes > 10080) {
+    return automaticOpeningReview(client, orderId, paymentConfirmationId, "AUTO_CONFIRM_POLICY_UNAVAILABLE", requestId);
+  }
+  const openingId = `opening_${randomUUID().replaceAll("-", "")}`;
+  const stored = built.basis.lines.map((line) => ({ itemId: line.itemId, quantity: line.openingQuantity }));
+  const inserted = (await client.query<{ dueAt: string; waitMinutes: number }>(
+    `INSERT INTO zzsh_order.rental_opening
+       (id, order_id, version_no, quote_digest, payment_digest, lines, status, created_by_source, payment_confirmation_id)
+     VALUES ($1, $2, 1, $3, $4, $5::jsonb, 'DRAFT', 'SYSTEM', $6)
+     RETURNING to_char(auto_confirm_due_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "dueAt",
+               auto_confirm_wait_minutes AS "waitMinutes"`,
+    [openingId, orderId, built.basis.quoteDigest, built.basis.paymentDigest, JSON.stringify(stored), paymentConfirmationId],
+  )).rows[0];
+  await client.query(
+    `INSERT INTO zzsh_order.rental_opening_generation (order_id, payment_confirmation_id, state, reason, opening_id)
+     VALUES ($1, $2, 'CREATED', NULL, $3)
+     ON CONFLICT (order_id) DO UPDATE SET payment_confirmation_id=EXCLUDED.payment_confirmation_id,
+       state='CREATED', reason=NULL, opening_id=EXCLUDED.opening_id, updated_at=clock_timestamp()
+     WHERE zzsh_order.rental_opening_generation.state <> 'CREATED'`,
+    [orderId, paymentConfirmationId, openingId],
+  );
+  await client.query(`UPDATE zzsh_order.rental_order SET opening_generation_recovery_required=false WHERE id=$1`, [orderId]);
+  await recordAudit(client, {
+    actorType: "system", action: "order.opening.auto_recorded", objectType: "rental_order", objectId: orderId,
+    outcome: "SUCCESS", requestId,
+    details: { openingId, versionNo: 1, paymentConfirmationId, policyRevision: policy.revision, waitMinutes: inserted?.waitMinutes ?? policy.waitMinutes },
+  });
+  return {
+    state: "CREATED", openingId,
+    dueAt: inserted?.dueAt ?? null,
+    waitMinutes: inserted?.waitMinutes ?? policy.waitMinutes,
+    policyRevision: policy.revision,
+  };
+}
+
+async function automaticOpeningReview(
+  client: PoolClient, orderId: string, paymentConfirmationId: string, reason: string, requestId: string,
+): Promise<AutomaticOpeningResult> {
+  await client.query(
+    `INSERT INTO zzsh_order.rental_opening_generation (order_id, payment_confirmation_id, state, reason)
+     VALUES ($1, $2, 'REVIEW_REQUIRED', $3)
+     ON CONFLICT (order_id) DO UPDATE SET payment_confirmation_id=EXCLUDED.payment_confirmation_id,
+       state='REVIEW_REQUIRED', reason=EXCLUDED.reason, opening_id=NULL, updated_at=clock_timestamp()
+     WHERE zzsh_order.rental_opening_generation.state <> 'CREATED'`,
+    [orderId, paymentConfirmationId, reason],
+  );
+  await client.query(`UPDATE zzsh_order.rental_order SET opening_generation_recovery_required=false WHERE id=$1`, [orderId]);
+  await recordAudit(client, {
+    actorType: "system", action: "order.opening.auto_review_required", objectType: "rental_order", objectId: orderId,
+    outcome: "FAILURE", reason, requestId, details: { paymentConfirmationId, recoverable: true },
+  });
+  return { state: "REVIEW_REQUIRED", reason };
+}
+
+/** Durable review fact after the automatic-opening SQL failed and was rolled back to a savepoint. */
+export async function recordAutomaticOpeningFailure(
+  client: PoolClient,
+  orderId: string,
+  paymentConfirmationId: string,
+  requestId: string,
+  error: unknown,
+): Promise<void> {
+  const code = typeof (error as { code?: unknown } | null)?.code === "string"
+    && /^[A-Z0-9_]{1,64}$/.test((error as { code: string }).code)
+    ? (error as { code: string }).code
+    : "GENERATION_FAILED";
+  await client.query("SAVEPOINT automatic_opening_failure_record");
+  try {
+    await automaticOpeningReview(client, orderId, paymentConfirmationId, code, requestId);
+    await client.query("RELEASE SAVEPOINT automatic_opening_failure_record");
+  } catch {
+    await client.query("ROLLBACK TO SAVEPOINT automatic_opening_failure_record");
+    await client.query("RELEASE SAVEPOINT automatic_opening_failure_record");
+    // The generation table itself may be unavailable; the order-level marker is the
+    // last durable, discoverable fallback and does not fabricate an opening.
+    await client.query(`UPDATE zzsh_order.rental_order SET opening_generation_recovery_required=true WHERE id=$1`, [orderId]);
+  }
+}
+
+/** Shared production hook: generate the opening, or record a recoverable review fact. */
+export const automaticOpeningAcceptance: PaymentAcceptanceOptions = {
+  onApplied: async ({ client, orderId, confirmationId, requestId }) => {
+    await recordAutomaticOpening(client, orderId, confirmationId, requestId);
+  },
+  onAppliedFailure: async ({ client, orderId, confirmationId, requestId }, error) => {
+    await recordAutomaticOpeningFailure(client, orderId, confirmationId, requestId, error);
+  },
+};
 
 async function openingAcks(client: PoolClient, openingId: string): Promise<string[]> {
   return (await client.query<{ party: string }>(

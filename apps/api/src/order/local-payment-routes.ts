@@ -8,6 +8,7 @@ import { ensureApiV1RequestId, validateIdempotencyKey } from "../contracts/api-v
 import { bodyOf, conflict, ensureOnlyFields, forbidden, headerValue, notFound, sendJson, type SupplyNodeRequest } from "../supply/supply-util";
 import { safely, type SupplyResponse } from "../supply/supply-routes";
 import { confirmOrderPayment, createControlledPaymentSource } from "./payment-confirmation";
+import { automaticOpeningAcceptance } from "./settlement-record";
 import type { PaymentDistributionStore } from "../finance/distribution-payment-store";
 
 /**
@@ -100,7 +101,7 @@ export function mountLocalControlledPayments(app: INestApplication, security: Au
             // Stable per order so a retried key replays the identical local declaration; the
             // authoritative acceptance time is still the database clock inside the gate.
             amountCents: total, currency: order.currency, providerPaidAt: order.created_at as string, requestId,
-          }), options.distribution);
+          }), options.distribution, automaticOpeningAcceptance);
           return payment;
         });
         sendJson(response, 200, { payment: result }, requestId);

@@ -43,9 +43,29 @@ const vite = await createServer({
   resolve: { alias: { "@": path.join(adminRoot, "src") } },
   server: { middlewareMode: true, hmr: false, ws: false },
 });
-const { ImSupportView } = await vite.ssrLoadModule("/src/views/im-support-view.tsx");
+const { ImSupportView, messageFromNim } = await vite.ssrLoadModule("/src/views/im-support-view.tsx");
 const notifications = await vite.ssrLoadModule("/src/views/im-support-notifications.ts");
 after(async () => { await vite.close(); });
+
+test("admin support messages trust only a valid server systemNotice", () => {
+  const base = { senderId: "system", createTime: 1, messageClientId: "notice-1", messageType: 5 };
+  const valid = messageFromNim({ ...base, attachment: { type: 0 }, systemNotice: { kind: "TEAM_DISMISSED", text: "会话已解散" } }, "admin-a");
+  assert.equal(valid?.notice?.kind, "TEAM_DISMISSED");
+  assert.equal(valid?.text, "会话已解散");
+  const fallback = messageFromNim({ ...base, attachment: { type: 3 } }, "admin-a");
+  assert.equal(fallback?.notice?.kind, "TEAM_UPDATED");
+  for (const systemNotice of [
+    { kind: "NOT_A_NOTICE", text: "任意文本" },
+    { kind: "MEMBER_JOINED", text: "伪造文案" },
+  ]) {
+    const message = messageFromNim({ ...base, attachment: { type: 1 }, systemNotice }, "admin-a");
+    assert.equal(message?.notice?.kind, "MEMBER_LEFT", "invalid server fields fall back to the shared decoder");
+  }
+  const regular = messageFromNim({ ...base, messageType: 0, text: "普通消息", systemNotice: { kind: "TEAM_DISMISSED", text: "会话已解散" } }, "admin-a");
+  assert.equal(regular?.from, "customer");
+  assert.equal(regular?.text, "普通消息");
+  assert.equal(regular?.notice, undefined);
+});
 
 function snapshot(permissions, boss = false) {
   return {
@@ -152,6 +172,37 @@ test("the workspace query carries the selected thread and filter across tab remo
   const active = consultationRows(restored.rootNode).find((row) => row.getAttribute("data-active") === "true");
   assert.match(active.textContent, /用户 B/, "a remounted workbench reopens the thread from the tab query");
   assert.match(restored.rootNode.querySelector(".im-wb-chat-title h2").textContent, /用户 B/);
+});
+
+test("a hidden support view does not mark consultation history read until it is visible again", async (t) => {
+  const readRequests = () => requests.filter((path) => /\/im\/consultations\/[^/]+\/read$/.test(path));
+  fixture = { consultations: [activeConsultation], post: null, history: [
+    { messageClientId: "hidden-peer", messageServerId: "hidden-peer", conversationId: "conv-a", senderId: "user-a", createTime: Date.now() - 1000, messageType: 0, text: "切走后到达的消息" },
+  ] };
+  const mounted = await mount(t, { active: false });
+  await waitFor(() => consultationRows(mounted.rootNode).length === 1);
+  await act(async () => { consultationRows(mounted.rootNode)[0].click(); });
+  await waitFor(() => mounted.rootNode.querySelectorAll(".im-wb-msg").length === 1);
+  await settle();
+  assert.equal(readRequests().length, 0, "an inactive workspace tab does not advance read state");
+
+  const original = Object.getOwnPropertyDescriptor(browser.document, "visibilityState");
+  t.after(() => {
+    if (original) Object.defineProperty(browser.document, "visibilityState", original);
+    else delete browser.document.visibilityState;
+  });
+  Object.defineProperty(browser.document, "visibilityState", { configurable: true, value: "hidden" });
+  const snap = snapshot(["im.support.read", "im.support.accept", "im.support.presence"]);
+  await act(async () => {
+    mounted.root.render(createElement(ImSupportView, { snapshot: snap, onRefresh: async () => snap, active: true }));
+    browser.document.dispatchEvent(new browser.Event("visibilitychange"));
+  });
+  await settle();
+  assert.equal(readRequests().length, 0, "a background browser page does not advance read state");
+
+  Object.defineProperty(browser.document, "visibilityState", { configurable: true, value: "visible" });
+  await act(async () => { browser.document.dispatchEvent(new browser.Event("visibilitychange")); });
+  await waitFor(() => readRequests().length === 1, 3000);
 });
 
 test("chat header and queue follow the real selected consultation", async (t) => {
@@ -272,6 +323,47 @@ test("messages keep real sender identity, notices stay neutral, and only own mes
   assert.equal(other.querySelector(".im-wb-msg-meta b").textContent, "客服");
 });
 
+test("bot-covered team notices stay hidden and never become the queue summary", async (t) => {
+  const botConversation = { ...activeConsultation, botAccountId: "bot-a", lastMessagePreview: "群聊已创建" };
+  fixture = {
+    consultations: [botConversation],
+    post: null,
+    history: [
+      { messageClientId: "welcome", messageServerId: "welcome", conversationId: "conv-a", senderId: "bot-a", createTime: Date.parse("2026-09-17T00:00:30.000Z"), messageType: 0, text: "欢迎咨询，本单客服马上为您处理" },
+      { messageClientId: "created", messageServerId: "created", conversationId: "conv-a", senderId: "system", createTime: Date.parse("2026-09-17T00:01:00.000Z"), messageType: 5, attachment: { ope: 0 } },
+      { messageClientId: "joined", messageServerId: "joined", conversationId: "conv-a", senderId: "system", createTime: Date.parse("2026-09-17T00:01:30.000Z"), messageType: 5, attachment: { type: 0 } },
+      { messageClientId: "question", messageServerId: "question", conversationId: "conv-a", senderId: "user-a", createTime: Date.parse("2026-09-17T00:02:00.000Z"), messageType: 0, text: "请问什么时候开始" },
+    ],
+  };
+  const { rootNode } = await mount(t, { snapshot: snapshot(["im.support.read", "im.support.accept"]) });
+  await waitFor(() => consultationRows(rootNode).length === 1);
+  assert.doesNotMatch(consultationRows(rootNode)[0].textContent, /群聊已创建/, "a server system preview is not the queue summary");
+  await selectFirst(rootNode);
+  await waitFor(() => /请问什么时候开始/.test(rootNode.textContent));
+  assert.equal(rootNode.querySelector(".im-wb-sys"), null, "a Bot welcome covers team-created and member-joined notices");
+  assert.match(rootNode.textContent, /欢迎咨询/);
+  await act(async () => { rootNode.querySelector('[data-action="back-to-queue"]').click(); });
+  await settle();
+  assert.match(consultationRows(rootNode)[0].textContent, /请问什么时候开始/, "the queue uses the last non-system message");
+});
+
+test("repeated team notices without Bot coverage collapse to one system line", async (t) => {
+  fixture = {
+    consultations: [activeConsultation],
+    post: null,
+    history: ["created-1", "created-2", "created-3"].map((id, index) => ({
+      messageClientId: id, messageServerId: id, conversationId: "conv-a", senderId: "system",
+      createTime: Date.parse("2026-09-17T00:01:00.000Z") + index * 1_000, messageType: 5, attachment: { ope: 0 },
+    })),
+  };
+  const { rootNode } = await mount(t, { snapshot: snapshot(["im.support.read", "im.support.accept"]) });
+  await selectFirst(rootNode);
+  await waitFor(() => rootNode.querySelector(".im-wb-sys"));
+  assert.equal(rootNode.querySelectorAll(".im-wb-sys").length, 1, "consecutive identical team notices merge into one fallback line");
+  assert.match(rootNode.querySelector(".im-wb-sys").textContent, /群聊已创建/);
+});
+
+
 test("queue/chat switching moves focus onto the visible pane control", async (t) => {
   fixture = { consultations: [activeConsultation], history: [], post: null };
   const { rootNode } = await mount(t, { snapshot: snapshot(["im.support.read", "im.support.accept", "im.support.transfer", "im.support.presence"]) });
@@ -385,6 +477,8 @@ test("collapsing details in the unified inbox leaves a single conversation colum
   assert.ok(consultationRule > desktop, "the consultation pane collapses to one column from 1100px up");
   assert.match(css.slice(consultationRule, consultationRule + 160), /grid-template-columns:\s*minmax\(0,\s*1fr\)/, "no 400-460px empty track remains");
   assert.ok(css.indexOf('.im-wb-root[data-unified="true"] .im-wb-pane--orders .order-team-grid[data-details="false"]') > desktop, "the order grid keeps its own single-column rule");
+  assert.ok(css.includes('.order-team-grid[data-details="true"] .order-team-detail > .im-wb-details'), "the 1280 overlay target includes the display-contents wrapper");
+  assert.doesNotMatch(css, /\.order-team-grid\[data-details="true"\] > \.im-wb-details/, "the overlay never targets a non-existent direct child");
 });
 
 for (const scenario of ["connected", "no-permission", "disconnected"]) {
@@ -431,6 +525,66 @@ for (const scenario of ["connected", "no-permission", "disconnected"]) {
     assert.equal(writes.length, written, "a successful toggle is not followed by an automatic rewrite");
   });
 }
+
+test("a second browser window only takes over reception through an explicit action", async (t) => {
+  const originalFetch = globalThis.fetch;
+  let owned = true;
+  const writes = [];
+  globalThis.fetch = async (input, init = {}) => {
+    const url = String(input);
+    if (url.endsWith("/im/token")) return json({ appKey: "synthetic", accountId: "admin-a", token: "synthetic", transport: "local-fake" });
+    if (url.includes("/im/consultations")) return json({ consultations: [] });
+    if (url.endsWith("/im/presence")) {
+      if (init.method === "PUT") {
+        const body = JSON.parse(String(init.body));
+        writes.push(body);
+        owned = false;
+        return json({ adminUserId: "admin-a", availability: body.availability, connectionState: "CONNECTED", activeLoad: 0, version: 2, ownedByAnotherSession: false });
+      }
+      return json({ adminUserId: "admin-a", availability: "AVAILABLE", connectionState: "CONNECTED", activeLoad: 0, version: 1, ownedByAnotherSession: owned });
+    }
+    if (url.includes("/im/messages")) return json({ messages: [] });
+    throw new Error(`unexpected test request ${url}`);
+  };
+  t.after(() => { globalThis.fetch = originalFetch; });
+  const { rootNode } = await mount(t, { snapshot: snapshot(["im.support.read", "im.support.accept", "im.support.presence"]) });
+  await waitFor(() => rootNode.querySelector(".im-wb-presence-toggle")?.textContent === "接管接待");
+  assert.equal(writes.length, 0, "mounting a second window does not steal the first window's presence");
+  await act(async () => rootNode.querySelector(".im-wb-presence-toggle").click());
+  await waitFor(() => writes.length === 1);
+  assert.equal(writes[0].availability, "AVAILABLE");
+  assert.equal(writes[0].takeover, true, "takeover is explicit, not a passive CONNECTED sync");
+  await waitFor(() => rootNode.querySelector(".im-wb-presence-toggle")?.textContent === "暂停接待");
+});
+
+test("an unbound pre-0184 AVAILABLE presence is not resumed automatically", async (t) => {
+  const originalFetch = globalThis.fetch;
+  const writes = [];
+  globalThis.fetch = async (input, init = {}) => {
+    const url = String(input);
+    if (url.endsWith("/im/token")) return json({ appKey: "synthetic", accountId: "admin-a", token: "synthetic", transport: "local-fake" });
+    if (url.includes("/im/consultations")) return json({ consultations: [] });
+    if (url.endsWith("/im/presence")) {
+      if (init.method === "PUT") {
+        const body = JSON.parse(String(init.body));
+        writes.push(body);
+        return json({ adminUserId: "admin-a", availability: body.availability, connectionState: "CONNECTED", activeLoad: 0, version: 2, ownedByAnotherSession: false, unbound: false });
+      }
+      return json({ adminUserId: "admin-a", availability: "AVAILABLE", connectionState: "CONNECTED", activeLoad: 0, version: 1, ownedByAnotherSession: false, unbound: true });
+    }
+    if (url.includes("/im/messages")) return json({ messages: [] });
+    throw new Error(`unexpected test request ${url}`);
+  };
+  t.after(() => { globalThis.fetch = originalFetch; });
+  const { rootNode } = await mount(t, { snapshot: snapshot(["im.support.read", "im.support.accept", "im.support.presence"]) });
+  await waitFor(() => rootNode.querySelector(".im-wb-presence-toggle")?.textContent === "开始接待");
+  assert.equal(writes.length, 0, "mounting a workbench does not re-bind an unbound AVAILABLE row");
+  await act(async () => rootNode.querySelector(".im-wb-presence-toggle").click());
+  await waitFor(() => writes.length === 1);
+  assert.equal(writes[0].availability, "AVAILABLE");
+  assert.equal(writes[0].takeover, true, "binding an old row requires an explicit start");
+  await waitFor(() => rootNode.querySelector(".im-wb-presence-toggle")?.textContent === "暂停接待");
+});
 
 // 状态写入的失败注入装置：初始 GET/PUT 走真实成功路径，用户点击后的那一次写入按场景失败。
 async function mountPresenceHarness(t, { refreshedAvailability = "PAUSED" } = {}) {
@@ -541,7 +695,7 @@ test("the case column reads the account profile only through its own permission"
   assert.match(aside.textContent, /138.{4}8000 · 未验证/, "the phone arrives pre-masked with its own verification state");
   assert.doesNotMatch(aside.textContent, /邮箱/, "email row is removed per privacy requirements");
   assert.match(aside.textContent, /进行中订单需「订单读取」权限/, "a denied summary is a permission fact, never a count of zero");
-  assert.match(aside.textContent, /名下资源账号需「资源账号读取」权限/, "each summary names the capability it actually needs");
+  assert.doesNotMatch(aside.textContent, /名下资源账号/, "the rail no longer shows unrelated resource-account ownership");
   await act(async () => aside.querySelector('[aria-label="查看进行中订单读取权限"]').click());
   await waitFor(() => document.querySelector('[data-slot="popover-content"]')?.textContent.includes("order.read"));
   await act(async () => document.querySelector('[data-slot="popover-content"]').dispatchEvent(new browser.KeyboardEvent("keydown", { key: "Escape", bubbles: true })));
@@ -552,7 +706,7 @@ test("the case column reads the account profile only through its own permission"
   // Without user.directory.read the profile must be absent, not filled with guesses.
   const limited = await mount(t, { snapshot: snapshot(["im.support.read", "im.support.accept"]) });
   await selectFirst(limited.rootNode);
-  await waitFor(() => /关联对象/.test(limited.rootNode.textContent));
+  await waitFor(() => /需用户目录读取权限/.test(limited.rootNode.textContent));
   assert.doesNotMatch(limited.rootNode.querySelector(".im-wb-details").textContent, /账号正常|已实名|138\*\*\*\*8000|完整资料/, "no profile is invented without the permission");
   assert.match(limited.rootNode.querySelector(".im-wb-details").textContent, /需用户目录读取权限/, "the missing permission is named instead of the block silently vanishing");
   assert.match(limited.rootNode.querySelector(".im-wb-details").textContent, /测试用户甲/, "the conversation itself stays usable");
@@ -569,31 +723,6 @@ test("the case column reads the account profile only through its own permission"
   profileFixture = { user: { userId: "user-7", image: null, maskedPhone: "138****8000", phoneNumberVerified: true, maskedEmail: "z***@example.com", accountStatus: "ACTIVE", suspended: false, identity: { status: "VERIFIED", ageStatus: "ADULT", provider: "local-fixture", verifiedAt: null }, identityStatus: "VERIFIED", ageStatus: "ADULT", source: { kind: "LOCAL" }, registeredAt: "2026-01-05T00:00:00.000Z", resourceSummary: { state: "ready", count: 2 }, orderSummary: { state: "denied", permission: "order.read" }, lastBusinessActivity: { state: "not_connected", domains: ["ORDER"] } } };
 });
 
-test("a failed context read keeps the base identity and marks the subject unavailable", async (t) => {
-  contextStatus = 404;
-  contextSubject = { status: "absent" };
-  t.after(() => { contextStatus = 200; contextSubject = { status: "absent" }; });
-  fixture = { consultations: [activeConsultation], history: [], post: null };
-  const { rootNode } = await mount(t, { snapshot: snapshot(["im.support.read", "im.support.accept"]) });
-  await selectFirst(rootNode);
-  await waitFor(() => /关联对象暂时不可读取/.test(rootNode.textContent));
-  const details = rootNode.querySelector(".im-wb-details");
-  assert.doesNotMatch(details.textContent, /user-a/, "a list-projected user UUID is not used as a fallback fact either");
-  assert.match(details.textContent, /关联对象暂时不可读取/);
-  assert.doesNotMatch(details.textContent, /尚未关联商品或订单/, "a failed context read is not turned into an absent subject");
-});
-
-test("an unknown subject status fails closed instead of exposing a bare reference", async (t) => {
-  contextStatus = 200;
-  contextSubject = { status: "future_type", reference: "order-secret" };
-  t.after(() => { contextStatus = 200; contextSubject = { status: "absent" }; });
-  fixture = { consultations: [activeConsultation], history: [], post: null };
-  const { rootNode } = await mount(t, { snapshot: snapshot(["im.support.read", "im.support.accept"]) });
-  await selectFirst(rootNode);
-  await waitFor(() => /关联对象类型暂未确认/.test(rootNode.textContent));
-  assert.doesNotMatch(rootNode.querySelector(".im-wb-details").textContent, /order-secret/);
-});
-
 const FULL_PROFILE = { user: { userId: "user-a", image: "/api/v1/profile/avatars/user/user-a/1", maskedPhone: "138****8000", phoneNumberVerified: true, maskedEmail: "a***@example.com", accountStatus: "ACTIVE", suspended: false, identity: { status: "VERIFIED", ageStatus: "ADULT", provider: "local-fixture", verifiedAt: null }, identityStatus: "VERIFIED", ageStatus: "ADULT", source: { kind: "MIGRATED" }, registeredAt: "2026-01-05T00:00:00.000Z", resourceSummary: { state: "ready", count: 4 }, orderSummary: { state: "ready", currentCount: 18 }, lastBusinessActivity: { state: "not_connected", domains: ["ORDER"] } } };
 const IM_BASE = ["im.support.read", "im.support.accept"];
 
@@ -608,7 +737,7 @@ test("revoking a read capability invalidates the profile facts it produced", asy
   const { rootNode, root } = await mount(t, { snapshot: snapshot([...IM_BASE, "user.directory.read", "order.read", "supply.rental_account.read"]) });
   await selectFirst(rootNode);
   await waitFor(() => /进行中订单18 单/.test(rootNode.textContent));
-  assert.match(rootNode.textContent, /名下资源账号4 个/, "the label names ownership, not an active rental");
+  assert.doesNotMatch(rootNode.textContent, /名下资源账号/);
   assert.match(rootNode.textContent, /旧平台迁移/);
   assert.ok(rootNode.querySelector(".im-wb-avatar img"), "the profile avatar is shown while the read is held");
 
@@ -728,7 +857,7 @@ test("user/risk summary names freeze and internal risk while keeping contacts ma
   assert.match(aside.textContent, /138\*\*\*\*8000/);
   assert.doesNotMatch(aside.textContent, /a\*\*\*@example\.com|邮箱/, "email is not rendered per privacy rules");
   assert.match(aside.textContent, /进行中订单18 单/);
-  assert.match(aside.textContent, /名下资源账号4 个/);
+  assert.doesNotMatch(aside.textContent, /名下资源账号/);
   assert.doesNotMatch(aside.textContent, /user-a/, "risk facts do not add the UUID back");
   profileFixture = FULL_PROFILE;
 });
@@ -784,8 +913,8 @@ test("missing profile summaries remain unavailable rather than zero or a false p
   await selectFirst(rootNode);
   await waitFor(() => /账号正常/.test(rootNode.textContent));
   assert.match(rootNode.textContent, /进行中订单暂无数据/);
-  assert.match(rootNode.textContent, /名下资源账号暂未提供/);
-  assert.doesNotMatch(rootNode.querySelector(".im-wb-details").textContent, /0 单|0 个|需「订单读取」权限|需「资源账号读取」权限/);
+  assert.doesNotMatch(rootNode.textContent, /名下资源账号/);
+  assert.doesNotMatch(rootNode.querySelector(".im-wb-details").textContent, /0 单|需「订单读取」权限/);
   profileFixture = FULL_PROFILE;
 });
 
@@ -811,11 +940,13 @@ async function waitForMenuHistory(rootNode) {
 }
 
 const menuLabels = () => [...document.querySelectorAll('.message-action-menu [role="menuitem"]')].map((button) => button.textContent.trim());
+const surfaceOf = (row) => row?.querySelector(".im-wb-bub, .message-media, .message-image, .order-card, p") ?? row;
 
 async function openMenu(rootNode, id, point = { clientX: 120, clientY: 90 }) {
   const row = rootNode.querySelector(`[data-message-id="${id}"]`);
   assert.ok(row, `message row ${id} exists`);
-  await act(async () => { row.dispatchEvent(new browser.MouseEvent("contextmenu", { bubbles: true, cancelable: true, ...point })); });
+  const surface = row.querySelector(".im-wb-bub, .message-media, .message-image, .order-card, p") ?? row;
+  await act(async () => { surface.dispatchEvent(new browser.MouseEvent("contextmenu", { bubbles: true, cancelable: true, ...point })); });
   await settle();
   return row;
 }
@@ -910,7 +1041,7 @@ test("consultation message menu follows message type, send capability and keyboa
 
   const ownRow = rootNode.querySelector('[data-message-id="srv-own"]');
   await act(async () => {
-    ownRow.dispatchEvent(new browser.PointerEvent("pointerdown", { bubbles: true, pointerType: "touch", clientX: 200, clientY: 150 }));
+    surfaceOf(ownRow).dispatchEvent(new browser.PointerEvent("pointerdown", { bubbles: true, pointerType: "touch", clientX: 200, clientY: 150 }));
     await new Promise((resolve) => setTimeout(resolve, 600));
   });
   await settle();
@@ -1036,7 +1167,7 @@ test("revoke asks for a second confirmation, replaces the content and maps 409/4
   await waitFor(() => revokeCalls === 1);
   await waitFor(() => /消息已撤回/.test(rootNode.querySelector('[data-message-id="srv-own"]').textContent));
   assert.doesNotMatch(rootNode.querySelector('[data-message-id="srv-own"]').textContent, /我方原文/, "revoked content is cleared");
-  await act(async () => { rootNode.querySelector('[data-message-id="srv-own"]').dispatchEvent(new browser.MouseEvent("contextmenu", { bubbles: true, cancelable: true })); });
+  await act(async () => { surfaceOf(rootNode.querySelector('[data-message-id="srv-own"]')).dispatchEvent(new browser.MouseEvent("contextmenu", { bubbles: true, cancelable: true })); });
   await settle();
   assert.equal(document.querySelector(".message-action-menu"), null, "a revoked message has no menu");
 
@@ -1093,6 +1224,170 @@ test("claim while support is off duty opens the start-reception prompt instead o
   await settle();
   assert.match(browser.document.body.textContent ?? "", /还不能接入会话/);
   assert.equal(requests.some((path) => path.includes("/claim")), false, "off-duty claim never reaches the server");
+});
+
+test("a conflicted start never continues to claim another window's conversation", async (t) => {
+  const originalFetch = globalThis.fetch;
+  const claimCalls = [];
+  let otherWindowOwns = false;
+  globalThis.fetch = async (input, init = {}) => {
+    const url = new URL(String(input), browser.location.href);
+    if (url.pathname.endsWith("/im/token")) return json({ appKey: "synthetic", accountId: "admin-a", token: "synthetic", transport: "local-fake" });
+    if (url.pathname.endsWith("/im/consultations")) return json({ consultations: [waitingConsultation] });
+    if (url.pathname.endsWith("/context")) return json({
+      consultationId: waitingConsultation.id, version: 1,
+      service: { type: "SERVICE", state: "WAITING", messageScopeState: "READY", handler: null },
+      user: { status: "available", publicId: "user-b", displayName: "用户 B", avatar: null },
+      subject: { status: "absent" }, membership: { status: "unavailable", reason: "membership_projection_not_integrated" },
+    });
+    if (url.pathname.endsWith("/im/presence")) {
+      if (init.method === "PUT") {
+        const body = JSON.parse(String(init.body));
+        if (body.availability === "AVAILABLE") {
+          otherWindowOwns = true;
+          return new browser.Response(JSON.stringify({ error: { code: "CONFLICT" } }), { status: 409, headers: { "content-type": "application/json" } });
+        }
+        return json({ adminUserId: "admin-a", availability: "OFF_DUTY", connectionState: "CONNECTED", activeLoad: 0, version: 2, ownedByAnotherSession: false, unbound: false });
+      }
+      return json({
+        adminUserId: "admin-a", availability: otherWindowOwns ? "AVAILABLE" : "OFF_DUTY", connectionState: "CONNECTED",
+        activeLoad: 0, version: otherWindowOwns ? 3 : 1, ownedByAnotherSession: otherWindowOwns, unbound: false,
+      });
+    }
+    if (url.pathname.includes("/claim")) { claimCalls.push(url.pathname); return json({}); }
+    if (url.pathname.includes("/im/messages")) return json({ messages: [] });
+    return json({});
+  };
+  t.after(() => { globalThis.fetch = originalFetch; });
+  const { rootNode } = await mount(t, { snapshot: snapshot(["im.support.read", "im.support.accept", "im.support.presence"], true) });
+  await waitFor(() => consultationRows(rootNode).length > 0);
+  await act(async () => { [...rootNode.querySelectorAll(".im-wb-filters button")].find((button) => button.textContent.includes("待接待")).click(); });
+  await settle();
+  await act(async () => { consultationRows(rootNode)[0].click(); });
+  await settle();
+  const claim = rootNode.querySelector('[data-action="claim-consultation"]');
+  assert.ok(claim, "claim action");
+  await act(async () => { claim.click(); });
+  await settle();
+  const start = browser.document.querySelector('[data-action="start-reception-and-claim"]');
+  assert.ok(start, "off-duty claim opens the explicit start prompt");
+  await act(async () => { start.click(); });
+  await settle();
+  await settle();
+  assert.equal(claimCalls.length, 0, "a 409/other-window AVAILABLE is not treated as this window's start success");
+});
+
+test("a late successful start cannot claim after switching administrator", async (t) => {
+  const originalFetch = globalThis.fetch;
+  let live = "admin-a", putSeen = false, release;
+  const held = new Promise(resolve => { release = resolve; }), claimCalls = [];
+  globalThis.fetch = async (input, init = {}) => {
+    const url = new URL(String(input), browser.location.href);
+    if (url.pathname.endsWith("/im/token")) return json({ appKey: "synthetic", accountId: live, token: "synthetic", transport: "local-fake" });
+    if (url.pathname.endsWith("/im/consultations")) return json({ consultations: [waitingConsultation] });
+    if (url.pathname.endsWith("/context")) return json({ consultationId: waitingConsultation.id, version: 1, service: { type: "SERVICE", state: "WAITING", messageScopeState: "READY", handler: null }, user: { status: "available", publicId: "user-b", displayName: "用户 B", avatar: null }, subject: { status: "absent" }, membership: { status: "unavailable", reason: "synthetic" } });
+    if (url.pathname.endsWith("/im/presence")) {
+      if (init.method === "PUT") {
+        const body = JSON.parse(String(init.body));
+        if (body.availability === "AVAILABLE" && live === "admin-a") { putSeen = true; await held; return json({ adminUserId: "admin-a", availability: "AVAILABLE", connectionState: "CONNECTED", version: 3, ownedByAnotherSession: false, unbound: false }); }
+        return json({ adminUserId: live, availability: body.availability, connectionState: "CONNECTED", version: 2, ownedByAnotherSession: false, unbound: false });
+      }
+      return json({ adminUserId: live, availability: "OFF_DUTY", connectionState: "CONNECTED", version: 1, ownedByAnotherSession: false, unbound: false });
+    }
+    if (url.pathname.includes("/claim")) { claimCalls.push({ adminAtSend: live, path: url.pathname }); return json({}); }
+    if (url.pathname.includes("/im/messages")) return json({ messages: [] });
+    return json({});
+  };
+  t.after(() => { release(); globalThis.fetch = originalFetch; });
+  const first = snapshot(["im.support.read", "im.support.accept", "im.support.presence"], true);
+  const mounted = await mount(t, { snapshot: first });
+  await waitFor(() => consultationRows(mounted.rootNode).length > 0);
+  await act(async () => { [...mounted.rootNode.querySelectorAll(".im-wb-filters button")].find(button => button.textContent.includes("待接待")).click(); });
+  await settle();
+  await act(async () => { consultationRows(mounted.rootNode)[0].click(); });
+  await settle();
+  await act(async () => { mounted.rootNode.querySelector('[data-action="claim-consultation"]').click(); });
+  await waitFor(() => browser.document.querySelector('[data-action="start-reception-and-claim"]'));
+  await act(async () => { browser.document.querySelector('[data-action="start-reception-and-claim"]').click(); });
+  await waitFor(() => putSeen);
+  live = "admin-b";
+  const second = { ...first, adminUserId: "admin-b", user: { ...first.user, name: "客服 B", username: "admin-b" }, session: { ...first.session, id: "session-b" } };
+  await act(async () => { mounted.root.render(createElement(ImSupportView, { snapshot: second, onRefresh: async () => second })); });
+  await act(async () => { release(); await new Promise(resolve => setTimeout(resolve, 50)); });
+  await settle();
+  assert.deepEqual(claimCalls, [], "A's late success must not start a claim with B's session");
+});
+
+test("a late presence version read cannot write after switching administrator", async (t) => {
+  const originalFetch = globalThis.fetch;
+  let live = "admin-a", aReads = 0, heldStarted = false, release;
+  const held = new Promise(resolve => { release = resolve; }), writes = [];
+  globalThis.fetch = async (input, init = {}) => {
+    const url = new URL(String(input), browser.location.href);
+    if (url.pathname.endsWith("/im/token")) return json({ appKey: "synthetic", accountId: live, token: "synthetic", transport: "local-fake" });
+    if (url.pathname.endsWith("/im/consultations")) return json({ consultations: [] });
+    if (url.pathname.endsWith("/im/presence")) {
+      if (init.method === "PUT") {
+        const body = JSON.parse(String(init.body)); writes.push({ adminAtSend: live, ...body });
+        return json({ adminUserId: live, availability: body.availability, connectionState: "CONNECTED", version: body.version + 1, ownedByAnotherSession: false, unbound: false });
+      }
+      if (live === "admin-a" && ++aReads === 1) return new browser.Response("{}", { status: 503 });
+      if (live === "admin-a") { heldStarted = true; await held; return json({ adminUserId: "admin-a", availability: "OFF_DUTY", connectionState: "CONNECTED", version: 51, ownedByAnotherSession: false, unbound: false }); }
+      return json({ adminUserId: "admin-b", availability: "OFF_DUTY", connectionState: "CONNECTED", version: 2, ownedByAnotherSession: false, unbound: false });
+    }
+    if (url.pathname.includes("/im/messages")) return json({ messages: [] });
+    return json({});
+  };
+  t.after(() => { release(); globalThis.fetch = originalFetch; });
+  const first = snapshot(["im.support.read", "im.support.accept", "im.support.presence"], true);
+  const mounted = await mount(t, { snapshot: first });
+  await waitFor(() => heldStarted);
+  live = "admin-b";
+  const second = { ...first, adminUserId: "admin-b", user: { ...first.user, name: "客服 B", username: "admin-b" }, session: { ...first.session, id: "session-b" } };
+  await act(async () => { mounted.root.render(createElement(ImSupportView, { snapshot: second, onRefresh: async () => second })); });
+  await waitFor(() => writes.some(row => row.adminAtSend === "admin-b" && row.version === 2));
+  await act(async () => { release(); await new Promise(resolve => setTimeout(resolve, 50)); });
+  await settle();
+  assert.equal(writes.some(row => row.adminAtSend === "admin-b" && row.version === 51), false, "A's late read cannot send its state under B's session");
+});
+
+test("a late successful start does not claim a consultation after selection changes", async (t) => {
+  const originalFetch = globalThis.fetch;
+  let putSeen = false, release;
+  const held = new Promise(resolve => { release = resolve; }), claimCalls = [];
+  const second = { ...waitingConsultation, id: "c-waiting-2", threadId: "thread-c", roundId: "c-waiting-2", user: { id: "user-c", name: "用户 C", username: "user-c" } };
+  globalThis.fetch = async (input, init = {}) => {
+    const url = new URL(String(input), browser.location.href);
+    if (url.pathname.endsWith("/im/token")) return json({ appKey: "synthetic", accountId: "admin-a", token: "synthetic", transport: "local-fake" });
+    if (url.pathname.endsWith("/im/consultations")) return json({ consultations: [waitingConsultation, second] });
+    if (url.pathname.endsWith("/context")) return json({ consultationId: waitingConsultation.id, version: 1, service: { type: "SERVICE", state: "WAITING", messageScopeState: "READY", handler: null }, user: { status: "available", publicId: "user-b", displayName: "用户 B", avatar: null }, subject: { status: "absent" }, membership: { status: "unavailable", reason: "synthetic" } });
+    if (url.pathname.endsWith("/im/presence")) {
+      if (init.method === "PUT") {
+        const body = JSON.parse(String(init.body));
+        if (body.availability === "AVAILABLE") { putSeen = true; await held; }
+        return json({ adminUserId: "admin-a", availability: body.availability, connectionState: "CONNECTED", version: 2, ownedByAnotherSession: false, unbound: false });
+      }
+      return json({ adminUserId: "admin-a", availability: "OFF_DUTY", connectionState: "CONNECTED", version: 1, ownedByAnotherSession: false, unbound: false });
+    }
+    if (url.pathname.includes("/claim")) { claimCalls.push(url.pathname); return json({}); }
+    if (url.pathname.includes("/im/messages")) return json({ messages: [] });
+    return json({});
+  };
+  t.after(() => { release(); globalThis.fetch = originalFetch; });
+  const mounted = await mount(t, { snapshot: snapshot(["im.support.read", "im.support.accept", "im.support.presence"], true) });
+  await waitFor(() => consultationRows(mounted.rootNode).length > 0);
+  await act(async () => { [...mounted.rootNode.querySelectorAll(".im-wb-filters button")].find(button => button.textContent.includes("待接待")).click(); });
+  await settle();
+  await act(async () => { consultationRows(mounted.rootNode).find(row => row.textContent.includes("用户 B")).click(); });
+  await settle();
+  await act(async () => { mounted.rootNode.querySelector('[data-action="claim-consultation"]').click(); });
+  await waitFor(() => browser.document.querySelector('[data-action="start-reception-and-claim"]'));
+  await act(async () => { browser.document.querySelector('[data-action="start-reception-and-claim"]').click(); });
+  await waitFor(() => putSeen);
+  await act(async () => { consultationRows(mounted.rootNode).find(row => row.textContent.includes("用户 C")).click(); });
+  await act(async () => { release(); await new Promise(resolve => setTimeout(resolve, 50)); });
+  await settle();
+  assert.deepEqual(claimCalls, [], "changing selection cannot send the previous consultation's claim");
 });
 
 /* --------------------------- 消息提醒状态机 --------------------------- */
@@ -1158,7 +1453,7 @@ test("the first loaded queue seeds the baseline instead of replaying a backlog",
   const root = createRoot(rootNode);
   t.after(async () => { await act(async () => { root.unmount(); }); rootNode.remove(); });
   const render = async (input) => { await act(async () => { root.render(createElement(NotificationProbe, { input })); }); };
-  const base = { adminUserId: "admin-a", enabled: true, selectedId: null, onOpen: () => {} };
+  const base = { adminUserId: "admin-a", enabled: true, visible: true, selectedId: null, onOpen: () => {} };
 
   // 首帧 rows 为空、随后队列返回历史未读：只播种，不提示。
   await render({ ...base, loaded: false, rows: [] });

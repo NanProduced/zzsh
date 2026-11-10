@@ -34,6 +34,57 @@ const COLLAPSED_EVENT_COUNT = 2;
 
 type LoadStatus = "loading" | "ready" | "error" | "forbidden" | "missing" | "expired";
 
+export type RoundItem = {
+  id: string;
+  roundSeq: string;
+  state: string;
+  assignedAdmin: { name?: string | null } | null;
+  /** Viewer-scoped Team handle for this round; null means no readable round history. */
+  conversationId: string | null;
+  createdAt: string;
+  updatedAt: string;
+  lastMessageAt: string | null;
+  closedAt: string | null;
+  transferCount: string;
+};
+
+type RoundPage = { contractVersion?: unknown; consultationId?: unknown; rounds?: unknown; nextCursor?: unknown };
+
+const ROUND_STATE_LABEL: Record<string, string> = {
+  WAITING: "等待接待",
+  ACTIVE: "接待中",
+  CLOSED: "已结束",
+};
+
+export function asRoundPage(value: unknown): { rounds: RoundItem[]; nextCursor: string | null } {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("INVALID_ROUNDS");
+  const page = value as RoundPage;
+  if (page.contractVersion !== "admin-consultation-rounds.v1" || !Array.isArray(page.rounds)) throw new Error("INVALID_ROUNDS");
+  const rounds = page.rounds.flatMap((entry): RoundItem[] => {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) return [];
+    const row = entry as Record<string, unknown>;
+    const id = typeof row.id === "string" && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(row.id) ? row.id : "";
+    const roundSeq = typeof row.roundSeq === "string" && /^[1-9][0-9]{0,18}$/.test(row.roundSeq) ? row.roundSeq : "";
+    const state = typeof row.state === "string" && ["WAITING", "ACTIVE", "CLOSED"].includes(row.state) ? row.state : "";
+    const createdAt = typeof row.createdAt === "string" && Number.isFinite(Date.parse(row.createdAt)) ? row.createdAt : "";
+    if (!id || !roundSeq || !state || !createdAt) return [];
+    const admin = row.assignedAdmin && typeof row.assignedAdmin === "object" && !Array.isArray(row.assignedAdmin)
+      ? { name: typeof (row.assignedAdmin as { name?: unknown }).name === "string" ? (row.assignedAdmin as { name: string }).name : null }
+      : null;
+    const transferCount = typeof row.transferCount === "string" && /^(0|[1-9][0-9]{0,18})$/.test(row.transferCount) ? row.transferCount : "0";
+    return [{
+      id, roundSeq, state, assignedAdmin: admin,
+      conversationId: typeof row.conversationId === "string" && row.conversationId ? row.conversationId : null,
+      createdAt,
+      updatedAt: typeof row.updatedAt === "string" ? row.updatedAt : createdAt,
+      lastMessageAt: typeof row.lastMessageAt === "string" ? row.lastMessageAt : null,
+      closedAt: typeof row.closedAt === "string" && Number.isFinite(Date.parse(row.closedAt)) ? row.closedAt : null,
+      transferCount,
+    }];
+  });
+  return { rounds, nextCursor: typeof page.nextCursor === "string" ? page.nextCursor : null };
+}
+
 function statusOf(error: unknown): number | undefined {
   if (error instanceof AdminApiError) return error.status;
   return error && typeof error === "object" && "status" in error && typeof (error as { status?: unknown }).status === "number" ? (error as { status: number }).status : undefined;
@@ -154,6 +205,114 @@ export function ConsultationEventsCard({ consultationId, request, onSummary }: {
       ) : null}
       {events.length > COLLAPSED_EVENT_COUNT ? <button type="button" className="im-wb-btn" data-action="toggle-events" aria-expanded={expanded} onClick={() => setExpanded((value) => !value)}>{expanded ? "收起处理记录" : "查看全部处理记录"}</button> : null}
       {status === "ready" && nextCursor ? <button type="button" className="im-wb-btn" data-action="load-earlier-events" onClick={loadEarlier} disabled={loadingEarlier}>{loadingEarlier ? "正在读取更早记录…" : earlierFailed ? "更早记录读取失败，点击重试" : "加载更早的处理记录"}</button> : null}
+    </section>
+  );
+}
+
+type RoundLoadStatus = "idle" | "loading" | "ready" | "error" | "forbidden" | "missing";
+
+/**
+ * Public round ledger: every support reader can see all rounds of the selected
+ * thread. It shows events only; chat history stays in the normal conversation
+ * reader, and user ratings are deliberately absent.
+ */
+export function ConsultationRoundsTimeline({ consultationId, currentRoundId, request }: {
+  consultationId: string;
+  currentRoundId: string;
+  request: EventsRequest;
+}) {
+  const [open, setOpen] = useState(false);
+  const [rounds, setRounds] = useState<RoundItem[]>([]);
+  const [nextCursor, setNextCursor] = useState<string | null>(null);
+  const [status, setStatus] = useState<RoundLoadStatus>("idle");
+  const [message, setMessage] = useState("");
+  const [expandedRound, setExpandedRound] = useState<string | null>(null);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const generationRef = useRef(0);
+
+  useEffect(() => {
+    generationRef.current += 1;
+    setOpen(false);
+    setRounds([]);
+    setNextCursor(null);
+    setStatus("idle");
+    setMessage("");
+    setExpandedRound(null);
+    setLoadingMore(false);
+  }, [consultationId]);
+
+  const load = async (cursor?: string) => {
+    const generation = ++generationRef.current;
+    if (cursor) setLoadingMore(true);
+    else {
+      setRounds([]);
+      setNextCursor(null);
+      setStatus("loading");
+    }
+    setMessage("");
+    try {
+      const query = new URLSearchParams({ limit: "20" });
+      if (cursor) query.set("cursor", cursor);
+      const value = await request<unknown>(`/im/consultations/${encodeURIComponent(consultationId)}/rounds?${query}`);
+      if (generationRef.current !== generation) return;
+      const page = asRoundPage(value);
+      setRounds((current) => cursor ? [...current, ...page.rounds] : page.rounds);
+      setNextCursor(page.nextCursor);
+      setStatus("ready");
+    } catch (error) {
+      if (generationRef.current !== generation) return;
+      const code = statusOf(error);
+      setStatus(code === 403 || code === 401 ? "forbidden" : code === 404 ? "missing" : "error");
+      setMessage(code === 403 || code === 401 ? "当前账号无权查看咨询轮次。" : code === 404 ? "咨询不存在或轮次不可读取。" : "咨询轮次读取失败。");
+    } finally {
+      if (generationRef.current === generation) setLoadingMore(false);
+    }
+  };
+
+  const toggle = () => {
+    if (open) {
+      setOpen(false);
+      setExpandedRound(null);
+      return;
+    }
+    setOpen(true);
+    if (status === "idle" || status === "error") void load();
+  };
+
+  return (
+    <section className="im-wb-sec im-wb-rounds" aria-label="历史轮次">
+      <span><History size={12} />历史轮次</span>
+      <button type="button" className="im-wb-btn" data-action="toggle-rounds" aria-expanded={open} onClick={toggle}>{open ? "收起历史轮次" : "查看历史轮次"}</button>
+      {open ? <div className="im-wb-round-scroll" aria-busy={status === "loading" || loadingMore}>
+        {status === "loading" ? <small>正在读取咨询轮次…</small> : null}
+        {status === "forbidden" || status === "missing" || status === "error" ? <p className="im-wb-events-note" data-tone="warn"><ShieldCheck size={13} />{message}</p> : null}
+        {status === "ready" && rounds.length === 0 ? <small>该咨询暂无轮次记录。</small> : null}
+        {rounds.length ? <ol className="im-wb-rounds-timeline">
+          {rounds.map((round) => {
+            const current = round.id === currentRoundId;
+            const expanded = expandedRound === round.id;
+            return <li key={round.id} className="im-wb-round" data-current={current ? "true" : undefined} data-state={round.state}>
+              <span className="im-wb-round-dot" aria-hidden="true" />
+              <div className="im-wb-round-body">
+                <header className="im-wb-round-head">
+                  <strong>第 {round.roundSeq} 轮</strong>
+                  <span className="im-wb-round-state">{ROUND_STATE_LABEL[round.state] ?? "状态未记录"}</span>
+                  {current ? <span className="im-wb-round-current">本轮</span> : null}
+                </header>
+                <p className="im-wb-round-meta">接待：{round.assignedAdmin?.name?.trim() || "未分配"}</p>
+                <p className="im-wb-round-meta">
+                  <time>{formatDateTime(round.createdAt)}</time>
+                  {round.state === "CLOSED" ? ` → ${round.closedAt ? formatDateTime(round.closedAt) : "结束时间未记录"}` : " · 进行中"}
+                </p>
+                {round.transferCount !== "0" ? <p className="im-wb-round-meta">转交 {round.transferCount} 次</p> : null}
+                <button type="button" className="im-wb-round-events-toggle" data-action="toggle-round-events" aria-expanded={expanded} onClick={() => setExpandedRound(expanded ? null : round.id)}>{expanded ? "收起处理记录" : "查看处理记录"}</button>
+                {expanded ? <ConsultationEventsCard consultationId={round.id} request={request} /> : null}
+              </div>
+            </li>;
+          })}
+        </ol> : null}
+        {status === "ready" && nextCursor ? <button type="button" className="im-wb-btn" data-action="load-earlier-rounds" onClick={() => void load(nextCursor)} disabled={loadingMore}>{loadingMore ? "正在读取更早轮次…" : "加载更早轮次"}</button> : null}
+      </div> : null}
     </section>
   );
 }

@@ -22,9 +22,11 @@ import { loadDemoFinanceRuntime } from "./finance/ecs-test-demo-loader";
 export async function bootstrap() {
   const config = loadConfig();
   const authEnabledValue = businessFeatureEnabled(process.env, "AUTH_ENABLED", true) ? "true" : "false";
+  const settlementRecordingEnabled = businessFeatureEnabled(process.env, "ORDER_SETTLEMENT_RECORDING_ENABLED");
   const withdrawalBankBinding = loadWithdrawalBankBindingRuntime({ database: config.database, authEnabled: authEnabledValue === "true" });
   const joinpayWithdrawal = loadJoinpayPayoutRuntime({ provider: config.provider, database: config.database, authEnabled: authEnabledValue === "true" }, withdrawalBankBinding);
-  const joinpayCollection = loadJoinpayCollectionRuntime({ provider: config.provider, database: config.database, authEnabled: authEnabledValue === "true" });
+  const joinpayCollection = loadJoinpayCollectionRuntime({ provider: config.provider, database: config.database,
+    authEnabled: authEnabledValue === "true", settlementRecordingEnabled });
   const withoutJoinpay = isEcsTestWithoutJoinpay(process.env);
   const joinpayRefund = loadJoinpayRefundRuntime({ provider: config.provider, database: config.database, authEnabled: authEnabledValue === "true" });
   const joinpayAccountSnapshot = loadEcsTestJoinpayAccountSnapshotRuntime({ provider: config.provider, database: config.database, authEnabled: authEnabledValue === "true" });
@@ -47,6 +49,8 @@ export async function bootstrap() {
     const authConfig=businessPool?loadAuthRuntimeConfig(undefined,undefined,{testOperationsEnabled:config.testOperationsEnabled}):undefined;
     if(!authConfig&&(process.env.LOCAL_DEMO_CLONE_FINANCE_ENABLED==='true'||process.env.ECS_TEST_DEMO_FINANCE_ENABLED==='true'))
       throw new ConfigurationError('DEMO_FINANCE_REQUIRES_AUTH');
+    // Closed settlement keeps the collection callback/recovery assembly but the
+    // loader omits new-request admission; accepted callbacks still auto-generate.
     const demo=authConfig?loadDemoFinanceRuntime({config,origins:authConfig}):undefined;
     const distributionNative = !demo && !withoutJoinpay
       ? loadNativeDistributionRuntime({ config, authEnabled: authEnabledValue === "true", admission: joinpayCollection?.admission }) : undefined;

@@ -18,6 +18,7 @@ import "@zzsh/ui/message-media.css";
 import { decodeImSystemNotice } from "@zzsh/im-client/message-state";
 import { AdminApiError, friendlyError } from "../api";
 import { SupportDashboard } from "./im-support-statistics";
+import { asRoundPage, type RoundItem } from "./im-support-events";
 import { SupportInfoHint } from "./im-support-report-range";
 export { SupportDashboard } from "./im-support-statistics";
 import { SupportAssistantSettings } from "./im-support-settings";
@@ -27,6 +28,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from ".
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "../components/ui/tabs";
 import { Marker, MarkerContent } from "../components/ui/marker";
 import { Message, MessageAvatar, MessageContent, MessageHeader } from "../components/ui/message";
+import { ActionTooltip, Tooltip, TooltipContent, TooltipTrigger } from "../components/ui/tooltip";
 import { EntityPreviewTrigger, UserPreviewCard, UserProfilePreview } from "../components/admin-preview";
 import { AdminMemberPreviewCard } from "./im-support-group-settings";
 import { supportedImageUrl } from "./im-support-guards";
@@ -42,6 +44,7 @@ const CARD_LABELS: Record<string, string> = {
   ORDER_OPENING: "开租确认",
   ORDER_ENDING: "结束确认",
   ORDER_SETTLED: "结算完成",
+  ORDER_CANCELLED: "订单已取消",
   ORDER_PRICE_CHANGE: "价格调整",
 };
 
@@ -139,23 +142,50 @@ export function SupportPatrol({ active, request, currentAdminUserId, onOpenProfi
   const [earlierError, setEarlierError] = useState("");
   const [messageReloadToken, setMessageReloadToken] = useState(0);
   const [readingEarlier, setReadingEarlier] = useState(false);
+  const [rounds, setRounds] = useState<RoundItem[]>([]);
+  const [roundsFor, setRoundsFor] = useState<string | null>(null);
+  const [selectedRoundId, setSelectedRoundId] = useState<string | null>(null);
+  const [roundStatus, setRoundStatus] = useState<"idle" | "loading" | "ready" | "error">("idle");
+  const [roundError, setRoundError] = useState("");
+  const [roundReloadToken, setRoundReloadToken] = useState(0);
   const viewportRef = useRef<HTMLDivElement | null>(null);
   const earlierAnchorRef = useRef<{ id: string; top: number } | null>(null);
   const initialScrollRef = useRef(false);
   const listOwnerRef = useRef(currentAdminUserId);
 
   const selected = selectedId ? items.find((item) => item.id === selectedId) ?? null : null;
-  const selectedConversationRef = useRef(selected?.conversationId);
-  selectedConversationRef.current = selected?.conversationId;
+  const roundsCurrent = Boolean(selected && selected.type !== "ORDER" && roundsFor === selected.id);
+  const activeRound = roundsCurrent && selectedRoundId ? rounds.find((round) => round.id === selectedRoundId) ?? null : null;
+  // Latest round is the fallback until (or unless) the round ledger answers.
+  const activeRoundKey = selected?.type === "ORDER" ? "" : activeRound?.id ?? (roundsCurrent ? selectedRoundId : null) ?? selected?.id ?? "";
+  const historyConversationId = selected
+    ? selected.type === "ORDER"
+      ? selected.conversationId
+      : activeRound
+        ? activeRound.conversationId
+        : selected.conversationId
+    : null;
+  const roundHistoryUnavailable = roundsCurrent && Boolean(activeRound) && !activeRound!.conversationId;
+  const historyReadable = selected
+    ? selected.type === "ORDER"
+      ? canReadPatrolHistory(selected)
+      : activeRound ? Boolean(activeRound.conversationId) : canReadPatrolHistory(selected)
+    : false;
+  const fallbackHistoryState = activeRound ? undefined : selected?.historyState;
+  const activeConversationRef = useRef(historyConversationId);
+  activeConversationRef.current = historyConversationId;
+  const activeRoundKeyRef = useRef(activeRoundKey);
+  activeRoundKeyRef.current = activeRoundKey;
+  const activeHistoryReadableRef = useRef(historyReadable);
+  activeHistoryReadableRef.current = historyReadable;
   const selectedIdRef = useRef(selected?.id);
   selectedIdRef.current = selected?.id;
-  const selectedHistoryStateRef = useRef(selected?.historyState);
-  selectedHistoryStateRef.current = selected?.historyState;
 
   // Render-time scope changes invalidate old responses before effects or paint.
   const listGenerationRef = useRef(0);
   const moreRequestRef = useRef(0);
   const messageGenerationRef = useRef(0);
+  const roundGenerationRef = useRef(0);
   const listScopeRef = useRef("");
   const messageScopeRef = useRef("");
   const requestRef = useRef(request);
@@ -171,7 +201,7 @@ export function SupportPatrol({ active, request, currentAdminUserId, onOpenProfi
     listGenerationRef.current += 1;
     moreRequestRef.current += 1;
   }
-  const messageScope = `${active ? 1 : 0}|${currentAdminUserId ?? ""}|${selected?.id ?? ""}|${selected?.type ?? ""}|${selected?.conversationId ?? ""}|${selected?.historyState ?? "MISSING"}|${messageReloadToken}`;
+  const messageScope = `${active ? 1 : 0}|${currentAdminUserId ?? ""}|${selected?.id ?? ""}|${selected?.type ?? ""}|${historyConversationId ?? ""}|${activeRoundKey}|${historyReadable ? 1 : 0}|${messageReloadToken}`;
   if (messageScope !== messageScopeRef.current) {
     messageScopeRef.current = messageScope;
     messageGenerationRef.current += 1;
@@ -248,7 +278,7 @@ export function SupportPatrol({ active, request, currentAdminUserId, onOpenProfi
           setListMoreError("");
           setLoadingMore(false);
           setListState("forbidden");
-          setListError(accessDenialText(status, "list"));
+          setListError(type === "COMPLAINT" ? "查看投诉会话需要「投诉接待」权限。" : accessDenialText(status, "list"));
           clearMessageView("idle");
           return;
         }
@@ -258,20 +288,50 @@ export function SupportPatrol({ active, request, currentAdminUserId, onOpenProfi
     return () => { cancelled = true; };
   }, [active, type, adminId, request, currentAdminUserId, reloadToken, clearMessageView]);
 
+  // One round ledger per selected consultation; the shared parser keeps the timeline contract.
+  useEffect(() => {
+    const generation = ++roundGenerationRef.current;
+    setRounds([]);
+    setSelectedRoundId(null);
+    setRoundError("");
+    if (!active || !selected || selected.type === "ORDER") {
+      setRoundsFor(null);
+      setRoundStatus("idle");
+      return () => { roundGenerationRef.current += 1; };
+    }
+    setRoundsFor(selected.id);
+    setSelectedRoundId(selected.id);
+    setRoundStatus("loading");
+    // shortcut: the switcher lists the newest 20 rounds only; add paging if longer threads need older switches.
+    void request<unknown>(`/im/consultations/${encodeURIComponent(selected.id)}/rounds?limit=20`)
+      .then((value) => {
+        if (generation !== roundGenerationRef.current) return;
+        const page = asRoundPage(value);
+        setRounds(page.rounds);
+        setSelectedRoundId((current) => current && page.rounds.some((round) => round.id === current) ? current : page.rounds[0]?.id ?? null);
+        setRoundStatus("ready");
+      })
+      .catch((error: unknown) => {
+        if (generation !== roundGenerationRef.current) return;
+        setRoundStatus("error");
+        setRoundError(friendlyError(error));
+      });
+    return () => { roundGenerationRef.current += 1; };
+  }, [active, selected?.id, selected?.type, request, roundReloadToken]);
+
   useEffect(() => {
     clearMessageView("idle");
     const generation = messageGenerationRef.current;
     if (!active || !selected) {
       return () => { messageGenerationRef.current += 1; };
     }
-    const historyReadable = canReadPatrolHistory(selected);
-    if (!selected.conversationId || !historyReadable) {
+    if (!historyConversationId || !historyReadable) {
       setMessageState("ready");
       return () => { messageGenerationRef.current += 1; };
     }
     let cancelled = false;
     setMessageState("loading");
-    void request<unknown>(auditMessagesPath(selected.conversationId))
+    void request<unknown>(auditMessagesPath(historyConversationId))
       .then((value) => {
         if (cancelled || generation !== messageGenerationRef.current) return;
         const page = parseAuditMessages(value);
@@ -295,7 +355,7 @@ export function SupportPatrol({ active, request, currentAdminUserId, onOpenProfi
       cancelled = true;
       messageGenerationRef.current += 1;
     };
-  }, [active, currentAdminUserId, selected?.id, selected?.conversationId, selected?.historyState, request, messageReloadToken, clearMessageView]);
+  }, [active, currentAdminUserId, selected?.id, historyConversationId, activeRoundKey, historyReadable, request, messageReloadToken, clearMessageView]);
 
   const adminOptions = useMemo<[string, string][]>(
     () => [["all", "全部客服"], ...adminChoices.map((choice) => [choice.id, choice.name] as [string, string])],
@@ -352,13 +412,13 @@ export function SupportPatrol({ active, request, currentAdminUserId, onOpenProfi
   };
 
   const loadEarlier = async () => {
-    if (!active || !selected?.conversationId || !canReadPatrolHistory(selected) || !messageCursor || readingEarlier) return;
+    if (!active || !selected || !historyConversationId || !historyReadable || !messageCursor || readingEarlier) return;
     const generation = messageGenerationRef.current;
     setReadingEarlier(true);
     setEarlierError("");
     const expectedId = selected.id;
-    const expected = selected.conversationId;
-    const expectedIsOrder = selected.type === "ORDER";
+    const expected = historyConversationId;
+    const expectedRound = activeRoundKey;
     const viewport = viewportRef.current;
     const bounds = viewport?.getBoundingClientRect();
     const anchor = viewport && bounds
@@ -370,19 +430,18 @@ export function SupportPatrol({ active, request, currentAdminUserId, onOpenProfi
     earlierAnchorRef.current = anchor?.dataset.messageId ? { id: anchor.dataset.messageId, top: anchor.getBoundingClientRect().top } : null;
     try {
       const page = parseAuditMessages(await request(auditMessagesPath(expected, messageCursor)));
-      const stillReadable = selectedHistoryStateRef.current
-        ? selectedHistoryStateRef.current === "AVAILABLE"
-        : expectedIsOrder && selectedConversationRef.current === expected;
       if (generation !== messageGenerationRef.current
         || selectedIdRef.current !== expectedId
-        || selectedConversationRef.current !== expected
-        || !stillReadable) return;
+        || activeRoundKeyRef.current !== expectedRound
+        || activeConversationRef.current !== expected
+        || !activeHistoryReadableRef.current) return;
       setMessages((current) => mergeAuditMessages(current, page.messages));
       setMessageCursor(page.nextCursor);
     } catch (error) {
       if (generation !== messageGenerationRef.current
         || selectedIdRef.current !== expectedId
-        || selectedConversationRef.current !== expected) return;
+        || activeRoundKeyRef.current !== expectedRound
+        || activeConversationRef.current !== expected) return;
       earlierAnchorRef.current = null;
       const status = statusOf(error);
       if (isAccessDenied(status)) {
@@ -469,7 +528,7 @@ export function SupportPatrol({ active, request, currentAdminUserId, onOpenProfi
         <FilterSelect label="按状态筛选" value={stateFilter} options={STATE_OPTIONS} onChange={setStateFilter} />
         <FilterSelect label="按时间筛选" value={timeFilter} options={TIME_OPTIONS} onChange={(next) => setTimeFilter(next === "today" || next === "7d" ? next : "all")} />
       </div>
-      <p className="im-wb-filter-note">状态和时间仅筛选已加载会话。</p>
+      <p className="im-wb-filter-note">左侧按用户会话聚合，第 N 轮为最近轮次；状态和时间仅筛选已加载会话。</p>
       <div className="im-wb-rows">
         {listState === "loading" && !items.length ? <div className="im-wb-list-empty"><strong>正在读取会话…</strong></div> : null}
         {listState === "forbidden" ? <div className="im-wb-list-empty"><ShieldCheck size={20} aria-hidden="true" /><strong>无权查看会话巡视</strong><span>{listError || "需要「客服管理读取」权限。"}</span></div> : null}
@@ -484,6 +543,7 @@ export function SupportPatrol({ active, request, currentAdminUserId, onOpenProfi
             <span className="im-wb-row-top">
               <b>{name}</b>
               <i className="im-wb-tag" data-tone={item.type === "COMPLAINT" ? "warn" : "neutral"}>{auditTypeLabel(item.type)}</i>
+              {item.type !== "ORDER" && item.roundSeq ? <i className="im-wb-tag" data-tone="neutral">第 {item.roundSeq} 轮</i> : null}
               <time>{item.lastMessageAt ? formatListTime(item.lastMessageAt) : "—"}</time>
             </span>
             <span className="im-wb-row-snip">
@@ -491,7 +551,7 @@ export function SupportPatrol({ active, request, currentAdminUserId, onOpenProfi
             </span>
             <span className="im-wb-row-foot">
               <em data-state={auditStateLabel(item.state)}>{auditStateLabel(item.state)}</em>
-              {item.adminUnreadCount ? <span className="im-wb-unread-pill" title="接待方未读">接待未读 {item.adminUnreadCount}</span> : null}
+              {item.adminUnreadCount ? <ActionTooltip content="接待方未读"><span className="im-wb-unread-pill">接待未读 {item.adminUnreadCount}</span></ActionTooltip> : null}
               {item.state === "WAITING" && item.firstUserMessageAt ? (
                 <span className="im-wb-waiting-time text-xs text-muted-foreground">
                   等待中 · 留言于 {formatListTime(item.firstUserMessageAt)}
@@ -520,13 +580,22 @@ export function SupportPatrol({ active, request, currentAdminUserId, onOpenProfi
           <span className="im-wb-chat-av" aria-hidden="true"><ProfileImage src={selected.userAvatar} fallback={initialOf(selectedName ?? "会话成员")} /></span>
           <div className="im-wb-chat-title">
             <h2>{selectedName}</h2>
-            <span>{auditTypeLabel(selected.type)} · {auditStateLabel(selected.state)} · 当前接待：{selected.adminName}</span>
+            <span>{auditTypeLabel(selected.type)} · {auditStateLabel(selected.state)} · 最近接待：{selected.adminName}{selected.type !== "ORDER" && selected.roundSeq ? ` · 最近第 ${selected.roundSeq} 轮${selected.roundCount && selected.roundCount > 1 ? `（共 ${selected.roundCount} 轮）` : ""}` : ""} · {selected.type === "ORDER" ? "整条订单群历史" : activeRound ? `正在查看第 ${activeRound.roundSeq} 轮历史` : "可切换轮次读取历史"}</span>
           </div>
           <div className="im-wb-chat-actions">
             <Badge variant="outline">只读巡视</Badge>
             <SupportInfoHint label="巡视操作说明">参与订单群请使用成员邀请；交接会话请在客服工作台转交。</SupportInfoHint>
           </div>
         </header>
+        {selected.type !== "ORDER" ? <div className="im-wb-patrol-rounds" aria-label="轮次切换">
+          {roundStatus === "loading" ? <span className="im-wb-patrol-round-note">正在读取轮次…</span> : null}
+          {roundStatus === "error" ? <span className="im-wb-patrol-round-note" data-tone="warn" title={roundError}>轮次读取失败<button type="button" onClick={() => setRoundReloadToken((token) => token + 1)}>重试</button></span> : null}
+          {roundStatus === "ready" && !rounds.length ? <span className="im-wb-patrol-round-note">暂无轮次记录，按最近轮次读取</span> : null}
+          {roundStatus === "ready" && selected.roundCount && selected.roundCount > rounds.length ? <span className="im-wb-patrol-round-note">仅显示最近 {rounds.length} 轮</span> : null}
+          {rounds.map((round) => <button type="button" key={round.id} data-round-id={round.id} data-active={round.id === activeRound?.id || (!activeRound && round.id === selected.id)} onClick={() => setSelectedRoundId(round.id)}>
+            <b>轮次 {round.roundSeq}</b><span>{auditStateLabel(round.state)}</span><span>{round.assignedAdmin?.name?.trim() || "未分配"}</span>
+          </button>)}
+        </div> : null}
         {messageState === "ready" && (messageCursor || earlierError) ? <div className="im-wb-patrol-history">
           {earlierError ? <span className="im-wb-history-error" role="alert">{earlierError}</span> : null}
           <button type="button" disabled={readingEarlier} onClick={() => void loadEarlier()}>{readingEarlier ? "正在读取更早消息…" : earlierError ? "重新读取更早消息" : "更早的消息"}</button>
@@ -541,18 +610,22 @@ export function SupportPatrol({ active, request, currentAdminUserId, onOpenProfi
                     : <>
                       {messageState === "error" ? <div className="im-wb-empty"><CircleAlert size={22} aria-hidden="true" /><strong>消息读取失败</strong><span>{messageError}</span><Button variant="outline" size="sm" onClick={() => setMessageReloadToken(token => token + 1)}>重新读取</Button></div> : null}
                       {messages.length ? <AuditTimeline messages={messages} request={request} onOpenProfile={onOpenProfile} /> : messageState !== "error" ? <div className="im-wb-empty"><Headphones size={22} aria-hidden="true" /><strong>
-                        {selected.historyState === "NOT_ESTABLISHED" ? "会话通道尚未建立"
-                          : selected.historyState === "LEGACY_UNAVAILABLE" ? "历史会话暂不可读"
-                            : selected.historyState === "RECOVERING" ? "会话通道恢复中，请稍后刷新"
-                              : !selected.historyState && selected.type !== "ORDER" ? "历史状态尚未提供，暂不读取"
-                                : selected.historyState && selected.historyState !== "AVAILABLE" ? "历史状态暂不支持读取，请刷新核对"
-                                  : messageCursor ? "当前页没有可显示消息，可继续读取更早记录"
-                                    : selected.conversationId ? "该会话暂无可读消息" : "会话消息尚未就绪"}
+                        {roundHistoryUnavailable ? "该轮无独立聊天记录/历史不可用"
+                          : fallbackHistoryState === "NOT_ESTABLISHED" ? "会话通道尚未建立"
+                            : fallbackHistoryState === "LEGACY_UNAVAILABLE" ? "历史会话暂不可读"
+                              : fallbackHistoryState === "RECOVERING" ? "会话通道恢复中，请稍后刷新"
+                                : !fallbackHistoryState && selected.type !== "ORDER" && !activeRound ? "历史状态尚未提供，暂不读取"
+                                  : fallbackHistoryState && fallbackHistoryState !== "AVAILABLE" ? "历史状态暂不支持读取，请刷新核对"
+                                    : messageCursor ? "当前页没有可显示消息，可继续读取更早记录"
+                                      : historyConversationId ? activeRound ? "该轮暂无可读消息" : "该会话暂无可读消息" : "会话消息尚未就绪"}
                       </strong></div> : null}
                     </>}
               </MessageScrollerPrimitive.Content>
             </MessageScrollerPrimitive.Viewport>
-            <MessageScrollerPrimitive.Button direction="end" className="im-wb-jump" render={<button type="button" aria-label="跳到最新消息" title="跳到最新消息" />}><ArrowDown size={13} aria-hidden="true" /></MessageScrollerPrimitive.Button>
+            <Tooltip>
+              <TooltipTrigger render={<MessageScrollerPrimitive.Button direction="end" className="im-wb-jump" render={<button type="button" aria-label="跳到最新消息" />}><ArrowDown size={13} aria-hidden="true" /></MessageScrollerPrimitive.Button>} />
+              <TooltipContent>跳到最新消息</TooltipContent>
+            </Tooltip>
           </MessageScrollerPrimitive.Root></div>
         </MessageScrollerPrimitive.Provider>
       </>}

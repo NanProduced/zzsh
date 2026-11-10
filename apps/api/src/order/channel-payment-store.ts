@@ -11,7 +11,7 @@ import {
   evaluateJoinpaySyncResponse, evaluateJoinpayTransportFailure, joinpayTransition, type JoinpayOutcome, type JoinpayPersistedRequest, type RequestState,
   type JoinpayTransportFailure,
 } from "./joinpay-protocol";
-import { confirmOrderPayment, type PaymentResult } from "./payment-confirmation";
+import { confirmOrderPayment, type PaymentAcceptanceOptions, type PaymentResult } from "./payment-confirmation";
 import { lockRefundOrderNo } from "./payment-original-lock";
 import { describeCollectionProfile, type BoundCollectionProfile } from "./joinpay-collection-profile";
 import { readVerifiedJoinpayFactScope, type FormalJoinpayPaymentFact } from "./joinpay-collection-source";
@@ -595,7 +595,7 @@ export type ControlledAcceptance = Readonly<{ payment: PaymentResult; anchor: An
  * 仅接受 createControlledPaymentSource 真实生成的 capability，且必须带完整 createPaymentDistributionStore；
  * 缺分佣准入不降级为无 distribution 的成功。新关系、confirmation、PAID/WAITING、basis 与审计同事务，失败抛给事务所有者。
  */
-export async function acceptControlledPayment(client: PoolClient, input: { fact: VerifiedFact; distribution: PaymentDistributionStore; requestId?: string }): Promise<ControlledAcceptance> {
+export async function acceptControlledPayment(client: PoolClient, input: { fact: VerifiedFact; distribution: PaymentDistributionStore; requestId?: string; acceptance?: PaymentAcceptanceOptions }): Promise<ControlledAcceptance> {
   const { fact, distribution } = input;
   if (!distribution || typeof distribution.prepare !== "function" || typeof distribution.record !== "function" || typeof distribution.readOriginal !== "function") {
     throw new SecurityApiError(503, API_V1_ERROR_CODES.EVIDENCE_UNAVAILABLE, "Explicit distribution payment admission unavailable");
@@ -610,7 +610,7 @@ export async function acceptControlledPayment(client: PoolClient, input: { fact:
     }
   }
   await xactLock(client, ["zzsh:payment-channel-transaction:v1", "CONTROLLED", fact.merchantScopeId, fact.providerTransactionId]);
-  const payment = await confirmOrderPayment(client, fact, distribution);
+  const payment = await confirmOrderPayment(client, fact, distribution, input.acceptance);
   const raw = sha256(JSON.stringify([fact.source, fact.merchantScopeId, fact.providerTransactionId, fact.orderId, fact.amountCents]));
   const observe = (event: string, result: string, before: RequestState, after: RequestState, flags: { late?: boolean; conflict?: boolean }) =>
     appendObservation(client, { requestId: row!.id, channel: "CONTROLLED", merchantIdentityId: row!.merchant_identity_id, channelOrderNo: row!.channel_order_no,

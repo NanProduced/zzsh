@@ -1,4 +1,12 @@
 import type { Money, UnitAmount, PublicQuote, FullPayoutTerms, FullPayoutTermsAcceptance, RentalMode } from "./supply-types";
+import { orderSubjectUserId, type OrderSubject } from "./order-subject.ts";
+import { runGuardedWrite } from "./order-guarded-write.ts";
+/** Re-exported so order consumers stay on one client alias and need no extra module stub. */
+export { runGuardedWrite, guardedErrorOf } from "./order-guarded-write.ts";
+export type { GuardedError, GuardedWriteResult } from "./order-guarded-write.ts";
+/** Re-exported so order consumers need no extra module alias and stay on one client contract. */
+export { captureOrderSubject, isOrderSubjectCurrent, orderSubjectUserId, registerOrderExpectedUserId } from "./order-subject.ts";
+export type { OrderSubject } from "./order-subject.ts";
 export type { FullPayoutTerms, FullPayoutTermsAcceptance } from "./supply-types";
 
 export type OrderParty = "renter" | "owner";
@@ -120,42 +128,7 @@ export type PersonalRefundObservation = {
   ageSeconds: number | null;
   trust: "LOCAL_OBSERVATION_NOT_REVALIDATED";
 };
-export type PersonalRefundBasis = "POSTING" | "REVIEW_CONFIRMATION";
-export type PersonalFirstSubmit = {
-  dispatch: "NEVER_DISPATCHED" | "DISPATCHED" | "UNKNOWN";
-  blockedReason: "ORIGINAL_ORDER_NO_AMBIGUOUS" | "ABNORMAL_BASIS_REVIEW" | null;
-  blockedAt: string | null;
-  blockedAuditCount: number | null;
-  trust: "LOCAL_AUDIT_AND_ATTEMPT";
-};
-export type PersonalAbnormalResponsibility = {
-  confirmationId: string;
-  reasonCode: "DUPLICATE_PAYMENT" | "LATE_PAYMENT" | "UNKNOWN_REASON";
-  originalCents: string | null;
-  currency: "CNY" | null;
-  liabilityRootId: string | null;
-  liabilityEventId: string | null;
-  intentIds: string[];
-  allocatedCents: string | null;
-  consumedCents: string | null;
-  releasedCents: string | null;
-  remainingCents: string | null;
-  totalsComplete: boolean;
-  state: "NO_INTENT" | "READY" | "PROCESSING" | "UNKNOWN" | "CONSUMED" | "RELEASED" | "REVIEW_REQUIRED" | "CONFLICT";
-  firstSubmit: PersonalFirstSubmit | null;
-  reasonCodes: string[];
-};
-export type PersonalResponsibilityTotals = {
-  originalCents: string | null;
-  allocatedCents: string | null;
-  consumedCents: string | null;
-  releasedCents: string | null;
-  remainingCents: string | null;
-  totalsComplete: boolean;
-  postingOriginalCents: string | null;
-  abnormalOriginalCents: string | null;
-  abnormalConfirmationCount: number;
-};
+export type PersonalRefundBasis = "POSTING";
 export type PersonalRefundIntent = {
   intentId: string;
   refundOrderNo: string | null;
@@ -163,7 +136,6 @@ export type PersonalRefundIntent = {
   evidenceLevel: string | null;
   basisKind?: PersonalRefundBasis;
   paymentConfirmationId?: string | null;
-  firstSubmit?: PersonalFirstSubmit | null;
   amount: { cents: string; currency: "CNY" } | null;
   state: "READY" | "SUBMITTING" | "UNKNOWN" | "PROCESSING" | "REVIEW_REQUIRED" | "SUCCEEDED" | "FAILED" | "UNRECOGNIZED";
   budgetDisposition: "ALLOCATED" | "CONSUMED" | "RELEASED" | "UNRECOGNIZED";
@@ -195,6 +167,10 @@ export type PersonalRefundRead = {
   order: { orderId: string; displayNo: string | null; status: string };
   status: "AVAILABLE" | "NOT_APPLICABLE";
   outcome: PersonalRefundOutcome;
+  prestartRefund?: { state: "PROCESSING" | "SUCCEEDED" | "FAILED" | "UNKNOWN"; amountCents: string | null;
+    source: "SIMULATED" | "JOINPAY" | "UNKNOWN"; bankArrival: "UNKNOWN" };
+  cancellationRefund?: { state: "PROCESSING" | "SUCCEEDED" | "FAILED" | "UNKNOWN"; amountCents: string | null;
+    source: "SIMULATED" | "JOINPAY" | "UNKNOWN"; bankArrival: "UNKNOWN" };
   coverage: { scope: "LOCAL_REGISTERED_ONLY"; intentLimit: number; intentsComplete: boolean; channelRecordsChecked: false };
   asOf: string;
   responsibility: {
@@ -212,10 +188,6 @@ export type PersonalRefundRead = {
   intents: PersonalRefundIntent[];
   returnedIntentCount: number;
   intentsTruncated: boolean;
-  /** Additive C04B fields. Old C02 responses omit all three and stay readable. */
-  abnormalResponsibilities?: PersonalAbnormalResponsibility[];
-  responsibilitiesTruncated?: boolean;
-  responsibilityTotals?: PersonalResponsibilityTotals;
   actualChannelRefund: { amountCents: null; channelRefundTrxNo: null; completedAt: null; destination: null; bankArrival: "UNKNOWN"; reasonCodes: string[] };
   localFundsEffect: { basis: "LOCAL_REGISTERED_ACCOUNTING"; writtenOffCents: string | null; releasedCents: string | null; bankArrival: "UNKNOWN" } | null;
   reasonCodes: string[];
@@ -359,6 +331,7 @@ export type LegacyOrder = {
   ownerIncomeSource?: { source: "LEGACY_ORDER_SNAPSHOT"; sourceLabel: string };
   payment: { state: "RECORDED_PAID" | "RECORDED_UNPAID" | "UNKNOWN"; recordedAt: string | null; recordedAmount: Money | null };
   legacyAmounts: { required: Money | null; paid: Money | null; deposit: Money | null; goods?: Money | null; items?: Money | null; refund: Money | null; refundChannelState: "NOT_RECORDED_BY_SOURCE" | "PENDING" | "UNKNOWN" } | null;
+  legacyRefundHistory?: { records: { id: string; amount: Money; status: "PROCESSING" | "SUCCEEDED" | "FAILED" | "UNKNOWN"; recordedAt: string | null }[]; incomplete: boolean; channelArrival: "UNKNOWN" };
   account: { id: string | null; displayNo: string | null; readable: boolean };
   orderFacts?: LegacyOrderFacts;
   readOnly: true; paymentOpen: false; cancelOpen: false; continuationCount: 0; actions: never[];
@@ -416,6 +389,9 @@ export type SettlementOpening = {
   /** Authoritative "rental started" time for a confirmed opening; never inferred from payment or the client clock. */
   confirmedAt?: string | null;
   createdAt?: string;
+  createdBySource?: "ADMIN" | "SYSTEM" | null;
+  autoConfirmDueAt?: string | null;
+  autoConfirmWaitMinutes?: number | null;
   lines: SettlementLine[];
   acks?: Array<{ party: string; source?: string; createdAt?: string }>;
 };
@@ -463,13 +439,24 @@ export type SettlementPosting = {
     postedRenterRefundCents?: string;
   } | null;
 };
+/** Server-owned stage summary returned by readSettlement(); absent on older projections. */
+export type OrderSettlementStage = {
+  code: "NONE" | "OPENING_PENDING" | "RENTING" | "INTAKE_PENDING" | "DECISION_PENDING" | "DECISION_WAITING" | "DECISION_REJECTED" | "POSTED" | "UNKNOWN";
+  label: string | null;
+  viewerActionRequired: boolean;
+  settlementVersionNo: number | null;
+};
 export type OrderSettlement = {
   orderId: string;
   revision?: string;
+  /** Additive settlementStageOf() result. Prefer it over a client-side reconstruction when present. */
+  stage?: OrderSettlementStage | null;
   rentalStarted?: boolean;
   consumptionMode?: "REMAINING" | "ACTUAL" | "UNAVAILABLE";
   extraResources?: SettlementLine[];
   openings: SettlementOpening[];
+  openingGeneration?: { state: "CREATED" | "REVIEW_REQUIRED"; reason?: string | null; createdAt?: string; updatedAt?: string } | null;
+  openingGenerationRecoveryRequired?: boolean;
   intakes: Array<{ id: string; versionNo: string; status: string; initiatorParty?: string; settlementVersionId?: string | null; createdAt?: string; lines?: Array<{ itemId: string; remainingQuantity?: string; consumedQuantity?: string }> }>;
   versions: SettlementVersion[];
   /** `status` is only present for an INTAKE request; a settlement-version request omits it entirely. */
@@ -543,55 +530,6 @@ const refundStrings = (value: unknown): string[] => {
   if (!Array.isArray(value) || value.length > 100) throw invalidRefund();
   return value.map((item) => refundText(item, 160));
 };
-const refundFirstSubmit = (value: unknown): PersonalFirstSubmit | null => {
-  if (value === null) return null;
-  const v = refundRecord(value);
-  if (!["NEVER_DISPATCHED", "DISPATCHED", "UNKNOWN"].includes(String(v.dispatch))
-    || !(v.blockedReason === null || ["ORIGINAL_ORDER_NO_AMBIGUOUS", "ABNORMAL_BASIS_REVIEW"].includes(String(v.blockedReason)))
-    || (v.blockedAuditCount !== null && (!Number.isSafeInteger(v.blockedAuditCount) || (v.blockedAuditCount as number) < 0))
-    || v.trust !== "LOCAL_AUDIT_AND_ATTEMPT") throw invalidRefund();
-  return {
-    dispatch: v.dispatch as PersonalFirstSubmit["dispatch"],
-    blockedReason: v.blockedReason as PersonalFirstSubmit["blockedReason"],
-    blockedAt: refundTime(v.blockedAt),
-    blockedAuditCount: v.blockedAuditCount as number | null,
-    trust: "LOCAL_AUDIT_AND_ATTEMPT",
-  };
-};
-const refundAbnormalResponsibility = (value: unknown): PersonalAbnormalResponsibility => {
-  const v = refundRecord(value), originalCents = refundCents(v.originalCents);
-  if (!["DUPLICATE_PAYMENT", "LATE_PAYMENT", "UNKNOWN_REASON"].includes(String(v.reasonCode))
-    || !(v.currency === null || v.currency === "CNY") || (originalCents !== null && v.currency !== "CNY")
-    || !["NO_INTENT", "READY", "PROCESSING", "UNKNOWN", "CONSUMED", "RELEASED", "REVIEW_REQUIRED", "CONFLICT"].includes(String(v.state))
-    || typeof v.totalsComplete !== "boolean") throw invalidRefund();
-  const allocatedCents = refundCents(v.allocatedCents), consumedCents = refundCents(v.consumedCents);
-  const releasedCents = refundCents(v.releasedCents), remainingCents = refundCents(v.remainingCents);
-  if (v.state === "CONFLICT" && (v.totalsComplete || [allocatedCents, consumedCents, releasedCents, remainingCents].some((amount) => amount !== null))) throw invalidRefund();
-  if (v.totalsComplete && (originalCents === null || v.currency !== "CNY"
-    || [allocatedCents, consumedCents, releasedCents, remainingCents].some((amount) => amount === null))) throw invalidRefund();
-  return {
-    confirmationId: refundText(v.confirmationId, 180),
-    reasonCode: v.reasonCode as PersonalAbnormalResponsibility["reasonCode"],
-    originalCents, currency: v.currency as "CNY" | null,
-    liabilityRootId: refundNullableText(v.liabilityRootId, 180), liabilityEventId: refundNullableText(v.liabilityEventId, 180),
-    intentIds: refundStrings(v.intentIds),
-    allocatedCents, consumedCents, releasedCents, remainingCents, totalsComplete: v.totalsComplete,
-    state: v.state as PersonalAbnormalResponsibility["state"],
-    firstSubmit: v.firstSubmit === undefined ? null : refundFirstSubmit(v.firstSubmit),
-    reasonCodes: refundStrings(v.reasonCodes),
-  };
-};
-const refundResponsibilityTotals = (value: unknown): PersonalResponsibilityTotals => {
-  const v = refundRecord(value);
-  if (typeof v.totalsComplete !== "boolean" || !Number.isSafeInteger(v.abnormalConfirmationCount) || (v.abnormalConfirmationCount as number) < 0) throw invalidRefund();
-  return {
-    originalCents: refundCents(v.originalCents), allocatedCents: refundCents(v.allocatedCents),
-    consumedCents: refundCents(v.consumedCents), releasedCents: refundCents(v.releasedCents),
-    remainingCents: refundCents(v.remainingCents), totalsComplete: v.totalsComplete,
-    postingOriginalCents: refundCents(v.postingOriginalCents), abnormalOriginalCents: refundCents(v.abnormalOriginalCents),
-    abnormalConfirmationCount: v.abnormalConfirmationCount as number,
-  };
-};
 const refundObservation = (value: unknown): PersonalRefundObservation | null => {
   if (value === null) return null;
   const v = refundRecord(value);
@@ -618,10 +556,9 @@ const refundIntent = (value: unknown): PersonalRefundIntent => {
   if (evidence && (!["SUCCEEDED", "FAILED_NO_EXECUTION"].includes(String(evidence.terminal)) || evidence.trust !== "SAVED_EVIDENCE_NOT_REVALIDATED")) throw invalidRefund();
   if (writeOff && (writeOff.trust !== "LOCAL_LEDGER" || refundCents(writeOff.amountCents) === null)) throw invalidRefund();
   if (release && (release.ledgerEventId !== null || release.trust !== "LOCAL_INTENT_ONLY")) throw invalidRefund();
-  if (v.basisKind !== undefined && !["POSTING", "REVIEW_CONFIRMATION"].includes(String(v.basisKind))) throw invalidRefund();
+  if (v.basisKind !== undefined && v.basisKind !== "POSTING") throw invalidRefund();
   const basisKind = v.basisKind === undefined ? undefined : v.basisKind as PersonalRefundBasis;
   const paymentConfirmationId = v.paymentConfirmationId === undefined ? undefined : refundNullableText(v.paymentConfirmationId, 180);
-  const firstSubmit = v.firstSubmit === undefined ? undefined : refundFirstSubmit(v.firstSubmit);
   return {
     intentId: refundText(v.intentId, 180),
     refundOrderNo: v.refundOrderNo === null ? null : (() => { const text = refundText(v.refundOrderNo, 32); if (!/^RF[0-9a-f]{28}$/.test(text)) throw invalidRefund(); return text; })(),
@@ -629,7 +566,6 @@ const refundIntent = (value: unknown): PersonalRefundIntent => {
     evidenceLevel: refundNullableText(v.evidenceLevel, 64),
     ...(basisKind === undefined ? {} : { basisKind }),
     ...(paymentConfirmationId === undefined ? {} : { paymentConfirmationId }),
-    ...(firstSubmit === undefined ? {} : { firstSubmit }),
     amount: amount ? { cents: amount.cents as string, currency: "CNY" as const } : null,
     state: v.state as PersonalRefundIntent["state"],
     budgetDisposition: v.budgetDisposition as PersonalRefundIntent["budgetDisposition"],
@@ -657,40 +593,29 @@ export function parsePersonalRefunds(value: unknown, expectedUserId: string, exp
   const root = refundRecord(value), order = refundRecord(root.order), coverage = refundRecord(root.coverage);
   const responsibility = refundRecord(root.responsibility), actual = refundRecord(root.actualChannelRefund);
   const funds = root.localFundsEffect === null ? null : refundRecord(root.localFundsEffect);
+  const prestart = root.prestartRefund === undefined ? undefined : refundRecord(root.prestartRefund);
+  const cancellation = root.cancellationRefund === undefined ? undefined : refundRecord(root.cancellationRefund);
+  if (prestart && cancellation) throw invalidRefund();
+  for (const summary of [prestart, cancellation]) if (summary && (order.status !== "CANCELLED" || !["PROCESSING", "SUCCEEDED", "FAILED", "UNKNOWN"].includes(String(summary.state))
+    || !["SIMULATED", "JOINPAY", "UNKNOWN"].includes(String(summary.source)) || summary.bankArrival !== "UNKNOWN"
+    || summary.amountCents !== null && (typeof summary.amountCents !== "string" || !/^[1-9][0-9]{0,15}$/.test(summary.amountCents))
+    || summary.state !== "UNKNOWN" && (summary.source === "UNKNOWN" || summary.amountCents === null))) throw invalidRefund();
   const intents = Array.isArray(root.intents) ? root.intents.map(refundIntent) : (() => { throw invalidRefund(); })();
   const noResponsibilityTotals = ["allocatedCents", "consumedCents", "releasedCents", "remainingCents"].every((name) => responsibility[name] === null);
-  const hasAbnormalFields = ["abnormalResponsibilities", "responsibilitiesTruncated", "responsibilityTotals"].some((name) => root[name] !== undefined);
-  const abnormalResponsibilities = hasAbnormalFields
-    ? (Array.isArray(root.abnormalResponsibilities) ? root.abnormalResponsibilities.map(refundAbnormalResponsibility) : (() => { throw invalidRefund(); })())
-    : undefined;
-  if (abnormalResponsibilities && abnormalResponsibilities.length > 50) throw invalidRefund();
-  const responsibilitiesTruncated = hasAbnormalFields
-    ? (typeof root.responsibilitiesTruncated === "boolean" ? root.responsibilitiesTruncated : (() => { throw invalidRefund(); })())
-    : undefined;
-  const responsibilityTotals = hasAbnormalFields ? refundResponsibilityTotals(root.responsibilityTotals) : undefined;
-  if (responsibilitiesTruncated && responsibilityTotals && (responsibilityTotals.totalsComplete
-    || [responsibilityTotals.originalCents, responsibilityTotals.allocatedCents, responsibilityTotals.consumedCents, responsibilityTotals.releasedCents, responsibilityTotals.remainingCents].some((amount) => amount !== null))) throw invalidRefund();
-  if (responsibilityTotals && responsibilitiesTruncated !== true && responsibilityTotals.abnormalConfirmationCount !== abnormalResponsibilities!.length) throw invalidRefund();
   if (responsibility.state === "NOT_POSTED" && (responsibility.totalsComplete || responsibility.postingId !== null
     || responsibility.originalCents !== null || !noResponsibilityTotals)) throw invalidRefund();
-  if (responsibilityTotals?.totalsComplete && (
-    [responsibilityTotals.originalCents, responsibilityTotals.allocatedCents, responsibilityTotals.consumedCents, responsibilityTotals.releasedCents, responsibilityTotals.remainingCents].some((amount) => amount === null)
-    || responsibilitiesTruncated || root.intentsTruncated || !coverage.intentsComplete
-    || (responsibility.state === "POSTED" && !responsibility.totalsComplete)
-    || abnormalResponsibilities!.some((item) => item.state === "CONFLICT" || !item.totalsComplete))) throw invalidRefund();
-  const legacyProjection = !hasAbnormalFields;
   if (root.contractVersion !== "personal-native-refunds.v1" || root.subjectId !== expectedUserId || order.orderId !== expectedOrderId
     || !["AVAILABLE", "NOT_APPLICABLE"].includes(String(root.status)) || !refundOutcomes.includes(root.outcome as PersonalRefundOutcome)
     || coverage.scope !== "LOCAL_REGISTERED_ONLY" || coverage.intentLimit !== 50 || typeof coverage.intentsComplete !== "boolean" || coverage.channelRecordsChecked !== false
     || !refundTime(root.asOf) || !["POSTED", "NOT_POSTED"].includes(String(responsibility.state))
     || !["DUE", "NOT_DUE", "UNKNOWN"].includes(String(responsibility.dueState)) || typeof responsibility.totalsComplete !== "boolean"
     || typeof root.returnedIntentCount !== "number" || root.returnedIntentCount !== intents.length || intents.length > 50
-    || (legacyProjection && !coverage.intentsComplete && (!noResponsibilityTotals || responsibility.totalsComplete))
+    || (!coverage.intentsComplete && (!noResponsibilityTotals || responsibility.totalsComplete))
     || (root.status === "NOT_APPLICABLE" && responsibility.state !== "NOT_POSTED")
     || typeof root.intentsTruncated !== "boolean"
-    || (legacyProjection && root.intentsTruncated && (responsibility.totalsComplete || coverage.intentsComplete || !noResponsibilityTotals
+    || (root.intentsTruncated && (responsibility.totalsComplete || coverage.intentsComplete || !noResponsibilityTotals
       || funds !== null && (funds.writtenOffCents !== null || funds.releasedCents !== null)))
-    || (legacyProjection && root.outcome === "CONFLICT" && (responsibility.totalsComplete || !noResponsibilityTotals
+    || (root.outcome === "CONFLICT" && (responsibility.totalsComplete || !noResponsibilityTotals
       || funds !== null && (funds.writtenOffCents !== null || funds.releasedCents !== null)))
     || actual.amountCents !== null || actual.channelRefundTrxNo !== null || actual.completedAt !== null || actual.destination !== null || actual.bankArrival !== "UNKNOWN"
     || typeof order.displayNo !== "string" && order.displayNo !== null) throw invalidRefund();
@@ -699,6 +624,10 @@ export function parsePersonalRefunds(value: unknown, expectedUserId: string, exp
     contractVersion: root.contractVersion, subjectId: expectedUserId,
     order: { orderId: order.orderId, displayNo: order.displayNo as string | null, status: refundText(order.status, 32) },
     status: root.status as PersonalRefundRead["status"], outcome: root.outcome as PersonalRefundOutcome,
+    ...(prestart ? { prestartRefund: { state: prestart.state as NonNullable<PersonalRefundRead["prestartRefund"]>["state"],
+      amountCents: refundCents(prestart.amountCents), source: prestart.source as NonNullable<PersonalRefundRead["prestartRefund"]>["source"], bankArrival: "UNKNOWN" as const } } : {}),
+    ...(cancellation ? { cancellationRefund: { state: cancellation.state as NonNullable<PersonalRefundRead["cancellationRefund"]>["state"],
+      amountCents: refundCents(cancellation.amountCents), source: cancellation.source as NonNullable<PersonalRefundRead["cancellationRefund"]>["source"], bankArrival: "UNKNOWN" as const } } : {}),
     coverage: { scope: "LOCAL_REGISTERED_ONLY", intentLimit: 50, intentsComplete: coverage.intentsComplete, channelRecordsChecked: false },
     asOf: root.asOf as string,
     responsibility: {
@@ -710,7 +639,6 @@ export function parsePersonalRefunds(value: unknown, expectedUserId: string, exp
       dueAt: refundTime(responsibility.dueAt), dueState: responsibility.dueState as PersonalRefundRead["responsibility"]["dueState"],
     },
     intents, returnedIntentCount: intents.length, intentsTruncated: root.intentsTruncated,
-    ...(hasAbnormalFields ? { abnormalResponsibilities: abnormalResponsibilities!, responsibilitiesTruncated: responsibilitiesTruncated!, responsibilityTotals: responsibilityTotals! } : {}),
     actualChannelRefund: { amountCents: null, channelRefundTrxNo: null, completedAt: null, destination: null, bankArrival: "UNKNOWN", reasonCodes: refundStrings(actual.reasonCodes) },
     localFundsEffect: funds ? { basis: "LOCAL_REGISTERED_ACCOUNTING", writtenOffCents: refundCents(funds.writtenOffCents), releasedCents: refundCents(funds.releasedCents), bankArrival: "UNKNOWN" } : null,
     reasonCodes: refundStrings(root.reasonCodes), unknowns: refundStrings(root.unknowns),
@@ -806,15 +734,35 @@ export class OrderRequestError extends Error {
   }
 }
 
-type ReadOptions = { signal?: AbortSignal; expectedUserId?: string };
+/** A frozen subject captured when the read/write was created or recovered, never a live global. */
+export type OrderSubjectInput = OrderSubject | string;
+type ReadOptions = { signal?: AbortSignal; subject?: OrderSubjectInput };
+
+/**
+ * Every `/api/orders` request must carry the subject captured at creation/recovery time. There is
+ * deliberately no fallback to a mutable "current user" registry: a delayed original intent for A
+ * must never be sent with a subject that was registered later for B. The BFF compares the value
+ * with the Cookie session captured for the same request; the API still owns object authorization.
+ * Non-order endpoints (price preview, confirmation, v2 creation) keep their own contracts.
+ *
+ * A missing or malformed subject is a 401 so `performGuardedWrite` returns `unauthorized` and
+ * **keeps the frozen original key/body** instead of clearing the intent or generating a new key.
+ */
+function expectedUserFor(path: string, explicit: OrderSubjectInput | undefined): string | undefined {
+  if (!path.startsWith("/api/orders")) return undefined;
+  const userId = orderSubjectUserId(explicit);
+  if (!userId) throw new OrderRequestError(401, { error: { code: "ORDER_SUBJECT_NOT_FROZEN", message: "订单请求缺少创建或恢复时冻结的操作主体；原申请已保留，请刷新页面后按原请求核对。" } });
+  return userId;
+}
 
 async function requestJson<T>(path: string, options: ReadOptions = {}): Promise<T> {
   if (!path.startsWith("/") || path.startsWith("//") || path.includes("://")) {
     throw new Error("Order path must be relative");
   }
+  const expectedUserId = expectedUserFor(path, options.subject);
   let response: Response;
   try {
-    response = await fetch(path, { credentials: "same-origin", cache: "no-store", signal: options.signal, ...(options.expectedUserId === undefined ? {} : { headers: { "x-zzsh-expected-user-id": options.expectedUserId } }) });
+    response = await fetch(path, { credentials: "same-origin", cache: "no-store", signal: options.signal, ...(expectedUserId === undefined ? {} : { headers: { "x-zzsh-expected-user-id": expectedUserId } }) });
   } catch (error) {
     if (options.signal?.aborted) throw error;
     throw new OrderRequestError(0, null);
@@ -832,7 +780,7 @@ function unwrapOrder(body: { order?: Order } | Order): Order {
   return order;
 }
 
-type WriteOptions = { method?: "POST"; body?: unknown; key?: string; signal?: AbortSignal; expectedUserId?: string };
+type WriteOptions = { method?: "POST"; body?: unknown; key?: string; signal?: AbortSignal; subject?: OrderSubjectInput };
 
 async function requestWrite<T>(path: string, options: WriteOptions): Promise<T> {
   if (!path.startsWith("/") || path.startsWith("//") || path.includes("://")) {
@@ -840,7 +788,8 @@ async function requestWrite<T>(path: string, options: WriteOptions): Promise<T> 
   }
   const headers = new Headers({ "content-type": "application/json" });
   if (options.key) headers.set("idempotency-key", options.key);
-  if (options.expectedUserId !== undefined) headers.set("x-zzsh-expected-user-id", options.expectedUserId);
+  const expectedUserId = expectedUserFor(path, options.subject);
+  if (expectedUserId !== undefined) headers.set("x-zzsh-expected-user-id", expectedUserId);
   let response: Response;
   try {
     response = await fetch(path, {
@@ -863,6 +812,16 @@ async function requestWrite<T>(path: string, options: WriteOptions): Promise<T> 
 }
 
 export { requestJson as requestOrderJson, requestWrite as requestOrderWrite };
+
+async function requestOpeningConfirmation(subject: OrderSubjectInput, orderId: string, openingId: string, versionNo: number, key: string, signal?: AbortSignal): Promise<OrderSettlement> {
+  const result = await requestWrite<unknown>(`/api/orders/${encodeURIComponent(orderId)}/openings/${encodeURIComponent(openingId)}/confirm`, { body: { versionNo }, key, signal, subject });
+  if (!result || typeof result !== "object" || Array.isArray(result)) throw new OrderRequestError(502, null);
+  const body = result as Record<string, unknown>;
+  if (body.orderId !== orderId || !Array.isArray(body.openings) || body.openings.filter(opening =>
+    opening && typeof opening === "object" && opening.id === openingId && (opening.versionNo === versionNo || opening.versionNo === String(versionNo))).length !== 1)
+    throw new OrderRequestError(502, null);
+  return result as OrderSettlement;
+}
 
 export function orderIntentKey(): string {
   return "op_" + crypto.randomUUID().replaceAll("-", "");
@@ -919,68 +878,113 @@ function parseOwnerRefundSummary(value: unknown, userId: string, orderId: string
   };
 }
 
+/**
+ * Every `/api/orders` method takes the frozen subject as its first argument. The value must be
+ * captured when the read/write is created or recovered (the intent owner for guarded writes, the
+ * rendered session subject for reads); it is never read from a later, mutable registration.
+ */
 export const orderApi = {
-  listLegacy: (input: { party: OrderParty; page?: number; pageSize?: number; status?: OrderStatus | "UNKNOWN"; accountId?: string }, signal?: AbortSignal) => {
+  listLegacy: (subject: OrderSubjectInput, input: { party: OrderParty; page?: number; pageSize?: number; status?: OrderStatus | "UNKNOWN"; accountId?: string }, signal?: AbortSignal) => {
     const query = new URLSearchParams({ party: input.party, page: String(input.page ?? 1), pageSize: String(input.pageSize ?? 20) });
     if (input.status) query.set("status", input.status);
     if (input.accountId) query.set("accountId", input.accountId);
-    return requestJson<LegacyOrderPage>(`/api/orders/legacy?${query.toString()}`, { signal });
+    return requestJson<LegacyOrderPage>(`/api/orders/legacy?${query.toString()}`, { signal, subject });
   },
-  legacyDetail: async (orderId: string, signal?: AbortSignal) =>
-    (await requestJson<{ order: LegacyOrder }>(`/api/orders/legacy/${encodeURIComponent(orderId)}`, { signal })).order,
-  list: (input: OrderListInput, signal?: AbortSignal) =>
-    requestJson<OrderPage>(`/api/orders?${orderListQuery(input)}`, { signal }),
-  listUnified: (userId: string, input: OrderListInput, signal?: AbortSignal) =>
-    requestJson<OrderPage>(`/api/orders/unified?${orderListQuery(input)}`, { signal, expectedUserId: userId }),
-  detail: (orderId: string, signal?: AbortSignal) =>
-    requestJson<{ order: Order }>(`/api/orders/${encodeURIComponent(orderId)}`, { signal }).then(unwrapOrder),
+  legacyDetail: async (subject: OrderSubjectInput, orderId: string, signal?: AbortSignal) =>
+    (await requestJson<{ order: LegacyOrder }>(`/api/orders/legacy/${encodeURIComponent(orderId)}`, { signal, subject })).order,
+  list: (subject: OrderSubjectInput, input: OrderListInput, signal?: AbortSignal) =>
+    requestJson<OrderPage>(`/api/orders?${orderListQuery(input)}`, { signal, subject }),
+  listUnified: (subject: OrderSubjectInput, input: OrderListInput, signal?: AbortSignal) =>
+    requestJson<OrderPage>(`/api/orders/unified?${orderListQuery(input)}`, { signal, subject }),
+  detail: (subject: OrderSubjectInput, orderId: string, signal?: AbortSignal) =>
+    requestJson<{ order: Order }>(`/api/orders/${encodeURIComponent(orderId)}`, { signal, subject }).then(unwrapOrder),
   /** Read-only fulfillment projection; same authorization and same-origin read as the order group. */
-  orderIm: (orderId: string, signal?: AbortSignal) =>
-    requestJson<unknown>(`/api/orders/${encodeURIComponent(orderId)}/im?operation=read`, { signal }).then(parseOrderImProjection),
-  personalRefunds: async (userId: string, orderId: string, signal?: AbortSignal) =>
-    parsePersonalRefunds(await requestJson<unknown>(`/api/orders/${encodeURIComponent(orderId)}/refunds`, { signal, expectedUserId: userId }), userId, orderId),
-  ownerRefundSummary: async (userId: string, orderId: string, signal?: AbortSignal) =>
-    parseOwnerRefundSummary(await requestJson<unknown>(`/api/orders/${encodeURIComponent(orderId)}/refunds`, { signal, expectedUserId: userId }), userId, orderId),
+  orderIm: (subject: OrderSubjectInput, orderId: string, signal?: AbortSignal) =>
+    requestJson<unknown>(`/api/orders/${encodeURIComponent(orderId)}/im?operation=read`, { signal, subject }).then(parseOrderImProjection),
+  personalRefunds: async (subject: OrderSubjectInput, orderId: string, signal?: AbortSignal) =>
+    parsePersonalRefunds(await requestJson<unknown>(`/api/orders/${encodeURIComponent(orderId)}/refunds`, { signal, subject }), orderSubjectUserId(subject)!, orderId),
+  ownerRefundSummary: async (subject: OrderSubjectInput, orderId: string, signal?: AbortSignal) =>
+    parseOwnerRefundSummary(await requestJson<unknown>(`/api/orders/${encodeURIComponent(orderId)}/refunds`, { signal, subject }), orderSubjectUserId(subject)!, orderId),
   previewRentalPrice: (input: RentalPricePreviewInput, signal?: AbortSignal) =>
     requestJson<RentalPricePreview>(`/api/rental-price-preview?${new URLSearchParams({ accountId: input.accountId, versionId: input.versionId, releaseId: input.releaseId }).toString()}`, { signal }),
   confirmRental: (input: { accountId: string; versionId: string; releaseId: string; fullPayoutTermsAcceptance?: FullPayoutTermsAcceptance }, signal?: AbortSignal) =>
     requestWrite<PersonalRentalQuote>("/api/order-confirmations", { body: input, signal }),
   createOrder: (confirmationToken: string, key: string, fullPayoutTermsAcceptance?: FullPayoutTermsAcceptance, agreementAcceptance?: { versionId: string; digest: string }, signal?: AbortSignal) =>
     requestWrite<{ order: Order }>("/api/v2/orders", { body: { confirmationToken, ...(fullPayoutTermsAcceptance ? { fullPayoutTermsAcceptance } : {}), ...(agreementAcceptance ? { agreementAcceptance } : {}) }, key, signal }).then(unwrapOrder),
-  cancel: (orderId: string, key: string, reason?: string, signal?: AbortSignal) =>
-    requestWrite<{ order?: Order } | Order>(`/api/orders/${encodeURIComponent(orderId)}/cancel`, { key, body: reason ? { reason } : {}, signal }),
-  pay: (orderId: string, key: string, signal?: AbortSignal) =>
+  cancel: (subject: OrderSubjectInput, orderId: string, key: string, reason?: string, signal?: AbortSignal) =>
+    requestWrite<{ order?: Order } | Order>(`/api/orders/${encodeURIComponent(orderId)}/cancel`, { key, body: reason ? { reason } : {}, signal, subject }),
+  pay: (subject: OrderSubjectInput, orderId: string, key: string, signal?: AbortSignal) =>
     requestWrite<{ payment: { confirmationId: string; disposition: string; reasonCode?: string | null; replay: boolean } }>(
-      `/api/orders/${encodeURIComponent(orderId)}/payment-requests`, { key, signal }),
-  paymentStatus: (orderId: string, signal?: AbortSignal) =>
+      `/api/orders/${encodeURIComponent(orderId)}/payment-requests`, { key, signal, subject }),
+  paymentStatus: (subject: OrderSubjectInput, orderId: string, signal?: AbortSignal) =>
     requestJson<{ order: { id: string; displayNo?: string | null; status: string; paidAt?: string | null }; payment: { confirmationId: string; disposition: string; reasonCode?: string | null; amountCents: string; currency: string; acceptedAt: string } | null }>(
-      `/api/orders/${encodeURIComponent(orderId)}/payment-requests`, { signal }),
-  requestChannelPayment: (userId: string, orderId: string, method: ChannelPaymentMethod, key: string, signal?: AbortSignal) =>
-    requestWrite<ChannelPaymentCommandReceipt>(`/api/orders/${encodeURIComponent(orderId)}/channel-payment-requests`, { body: { method }, key, signal, expectedUserId: userId }),
-  channelPaymentStatus: (userId: string, orderId: string, signal?: AbortSignal) =>
-    requestJson<ChannelPaymentView>(`/api/orders/${encodeURIComponent(orderId)}/channel-payment-requests`, { signal, expectedUserId: userId }),
-  queryChannelPayment: (userId: string, orderId: string, signal?: AbortSignal) =>
-    requestWrite<ChannelPaymentQueryReceipt>(`/api/orders/${encodeURIComponent(orderId)}/channel-payment-requests/query`, { body: {}, signal, expectedUserId: userId }),
-  localCheckoutAvailability: (userId: string, orderId: string, signal?: AbortSignal) =>
-    requestJson<unknown>(`/api/orders/${encodeURIComponent(orderId)}/local-checkouts`, { signal, expectedUserId: userId }).then(value => parseLocalCheckoutAvailability(value, orderId)),
-  issueLocalCheckout: (userId: string, orderId: string, key: string) =>
-    requestWrite<unknown>(`/api/orders/${encodeURIComponent(orderId)}/local-checkouts`, { body: {}, key, expectedUserId: userId }),
-  localCheckoutReceipt: (userId: string, orderId: string, key: string, signal?: AbortSignal) =>
-    requestJson<{ scope: string; knowledge: string; mayReapply: boolean; receipt: unknown }>(`/api/orders/${encodeURIComponent(orderId)}/local-checkouts/receipt?${new URLSearchParams({ key })}`, { signal, expectedUserId: userId }),
-  demoCheckoutAvailability: (userId: string, orderId: string, signal?: AbortSignal) =>
-    requestJson<unknown>(`/api/orders/${encodeURIComponent(orderId)}/demo-checkout`, { signal, expectedUserId: userId }).then(value => parseDemoCheckoutAvailability(value, orderId)),
-  confirmDemoCheckout: (userId: string, orderId: string, key: string) =>
-    requestWrite<unknown>(`/api/orders/${encodeURIComponent(orderId)}/demo-checkout/confirm`, { body: {}, key, expectedUserId: userId }).then(value => parseDemoCheckoutResult(value, orderId)),
-  demoCheckoutReceipt: (userId: string, orderId: string, key: string, signal?: AbortSignal) =>
-    requestJson<unknown>(`/api/orders/${encodeURIComponent(orderId)}/demo-checkout/receipt?${new URLSearchParams({ key })}`, { signal, expectedUserId: userId }).then(value => parseDemoCheckoutReceipt(value, orderId)),
-  settlement: (orderId: string, signal?: AbortSignal) =>
-    requestJson<OrderSettlement>(`/api/orders/${encodeURIComponent(orderId)}/settlement`, { signal }),
-  settlementPreview: (orderId: string, body: { lines: SettlementQuantityInput[]; endReason?: string }, signal?: AbortSignal) =>
-    requestWrite<SettlementPreview>(`/api/orders/${encodeURIComponent(orderId)}/settlement-preview`, { body, signal }),
-  submitSettlement: (orderId: string, body: { lines: SettlementQuantityInput[]; acceptedHash: string; endReason?: string; termsAccepted?: boolean }, key: string, signal?: AbortSignal) =>
-    requestWrite<OrderSettlement>(`/api/orders/${encodeURIComponent(orderId)}/settlements`, { body, key, signal }),
-  decideSettlement: (orderId: string, versionId: string, body: { action: "CONFIRM" | "REJECT"; versionHash: string; reason?: string; termsAccepted?: boolean }, key: string, signal?: AbortSignal) =>
-    requestWrite<OrderSettlement>(`/api/orders/${encodeURIComponent(orderId)}/settlements/${encodeURIComponent(versionId)}/decision`, { body, key, signal }),
-  confirmOpening: (orderId: string, openingId: string, versionNo: number, key: string, signal?: AbortSignal) =>
-    requestWrite<OrderSettlement>(`/api/orders/${encodeURIComponent(orderId)}/openings/${encodeURIComponent(openingId)}/confirm`, { body: { versionNo }, key, signal }),
+      `/api/orders/${encodeURIComponent(orderId)}/payment-requests`, { signal, subject }),
+  requestChannelPayment: (subject: OrderSubjectInput, orderId: string, method: ChannelPaymentMethod, key: string, signal?: AbortSignal) =>
+    requestWrite<ChannelPaymentCommandReceipt>(`/api/orders/${encodeURIComponent(orderId)}/channel-payment-requests`, { body: { method }, key, signal, subject }),
+  channelPaymentStatus: (subject: OrderSubjectInput, orderId: string, signal?: AbortSignal) =>
+    requestJson<ChannelPaymentView>(`/api/orders/${encodeURIComponent(orderId)}/channel-payment-requests`, { signal, subject }),
+  queryChannelPayment: (subject: OrderSubjectInput, orderId: string, signal?: AbortSignal) =>
+    requestWrite<ChannelPaymentQueryReceipt>(`/api/orders/${encodeURIComponent(orderId)}/channel-payment-requests/query`, { body: {}, signal, subject }),
+  localCheckoutAvailability: (subject: OrderSubjectInput, orderId: string, signal?: AbortSignal) =>
+    requestJson<unknown>(`/api/orders/${encodeURIComponent(orderId)}/local-checkouts`, { signal, subject }).then(value => parseLocalCheckoutAvailability(value, orderId)),
+  issueLocalCheckout: (subject: OrderSubjectInput, orderId: string, key: string) =>
+    requestWrite<unknown>(`/api/orders/${encodeURIComponent(orderId)}/local-checkouts`, { body: {}, key, subject }),
+  localCheckoutReceipt: (subject: OrderSubjectInput, orderId: string, key: string, signal?: AbortSignal) =>
+    requestJson<{ scope: string; knowledge: string; mayReapply: boolean; receipt: unknown }>(`/api/orders/${encodeURIComponent(orderId)}/local-checkouts/receipt?${new URLSearchParams({ key })}`, { signal, subject }),
+  demoCheckoutAvailability: (subject: OrderSubjectInput, orderId: string, signal?: AbortSignal) =>
+    requestJson<unknown>(`/api/orders/${encodeURIComponent(orderId)}/demo-checkout`, { signal, subject }).then(value => parseDemoCheckoutAvailability(value, orderId)),
+  confirmDemoCheckout: (subject: OrderSubjectInput, orderId: string, key: string) =>
+    requestWrite<unknown>(`/api/orders/${encodeURIComponent(orderId)}/demo-checkout/confirm`, { body: {}, key, subject }).then(value => parseDemoCheckoutResult(value, orderId)),
+  demoCheckoutReceipt: (subject: OrderSubjectInput, orderId: string, key: string, signal?: AbortSignal) =>
+    requestJson<unknown>(`/api/orders/${encodeURIComponent(orderId)}/demo-checkout/receipt?${new URLSearchParams({ key })}`, { signal, subject }).then(value => parseDemoCheckoutReceipt(value, orderId)),
+  settlement: (subject: OrderSubjectInput, orderId: string, signal?: AbortSignal) =>
+    requestJson<OrderSettlement>(`/api/orders/${encodeURIComponent(orderId)}/settlement`, { signal, subject }),
+  settlementPreview: (subject: OrderSubjectInput, orderId: string, body: { lines: SettlementQuantityInput[]; endReason?: string }, signal?: AbortSignal) =>
+    requestWrite<SettlementPreview>(`/api/orders/${encodeURIComponent(orderId)}/settlement-preview`, { body, signal, subject }),
+  submitSettlement: (subject: OrderSubjectInput, orderId: string, body: { lines: SettlementQuantityInput[]; acceptedHash: string; endReason?: string; termsAccepted?: boolean }, key: string, signal?: AbortSignal) =>
+    requestWrite<OrderSettlement>(`/api/orders/${encodeURIComponent(orderId)}/settlements`, { body, key, signal, subject }),
+  decideSettlement: (subject: OrderSubjectInput, orderId: string, versionId: string, body: { action: "CONFIRM" | "REJECT"; versionHash: string; reason?: string; termsAccepted?: boolean }, key: string, signal?: AbortSignal) =>
+    requestWrite<OrderSettlement>(`/api/orders/${encodeURIComponent(orderId)}/settlements/${encodeURIComponent(versionId)}/decision`, { body, key, signal, subject }),
+  confirmOpening: (subject: OrderSubjectInput, orderId: string, openingId: string, versionNo: number, key: string, signal?: AbortSignal) =>
+    requestOpeningConfirmation(subject, orderId, openingId, versionNo, key, signal),
+  /**
+   * The customer-support order card and the order detail panel share one `opening.confirm`
+   * original-request contract. The frozen subject, key, version and opening id are persisted
+   * before the write; an unknown result keeps those bytes and the caller is directed to the
+   * order detail for explicit recovery. A brand-new key is never minted while an unresolved
+   * original request exists. Errors carry stable codes for the shared card's copy.
+   */
+  confirmOpeningWithOriginalIntent: async (
+    subject: OrderSubject,
+    orderId: string,
+    openingId: string,
+    versionNo: number,
+    keyFactory: () => string,
+    isCurrent?: () => boolean,
+  ): Promise<void> => {
+    const fail = (code: string, status: number, message: string): never => {
+      throw Object.assign(new Error(message), { status, code });
+    };
+    const result = await runGuardedWrite<OrderSettlement>({
+      subject,
+      kind: "opening.confirm",
+      resourceId: orderId,
+      body: { versionNo },
+      context: { openingId, orderId },
+      keyFactory,
+      assertCurrent: isCurrent ? () => isCurrent() : undefined,
+      refuseExisting: true,
+      pendingCode: "OPENING_CONFIRM_PENDING",
+      pendingMessage: "已有一笔结果未确认的开租申请；原申请与原键已保留，请到订单详情按原请求查询/恢复，不要重复提交。",
+      request: (key, frozen, frozenContext, frozenSubject) => requestOpeningConfirmation(
+        frozenSubject, orderId, String(frozenContext?.openingId ?? openingId), Number(frozen.versionNo ?? versionNo), key,
+      ),
+    });
+    if (result.status === "ok") return;
+    if (result.status === "blocked") return fail("ORIGINAL_REQUEST_BLOCKED", 423, result.message);
+    if (result.status === "unknown") return fail("OPENING_CONFIRM_UNKNOWN", result.error.status || 503, "开租确认结果未确认；原申请与原键已保留，请到订单详情按原请求查询/恢复，不要重复提交。");
+    if (result.status === "unauthorized") return fail(result.error.code, 401, `${result.error.message} 请到订单详情按原请求核对。`);
+    if (result.status === "recovery-unresolved") return fail(result.error.code, result.error.status || 409, result.error.message);
+    return fail(result.error.code, result.error.status || 400, result.error.message);
+  },
 };

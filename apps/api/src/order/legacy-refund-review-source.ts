@@ -10,6 +10,18 @@ import type { LegacyRefundReviewBasis } from "./legacy-refund-review";
 const unavailable = (reason: string): never => { throw new SecurityApiError(409, "CONFLICT", reason); };
 type Source = Omit<LegacyRefundReviewBasis, "merchantIdentityId" | "originalIntentExists">;
 
+/** A recorded old refund needs separate handling; absence is not a channel receipt. */
+export async function hasLegacyRecordedRefunds(client:PoolClient,binding:LegacyOrderBinding,excludeVersionId:string|null=null):Promise<boolean> {
+  const row=(await client.query<{found:boolean}>(`SELECT EXISTS(SELECT 1 FROM zzsh_order.personal_finance_observation o
+    JOIN zzsh_order.legacy_order_read_snapshot l ON l.id=$1 AND l.renter_user_id=o.user_id
+    WHERE o.source_system='legacy_mysql_restore' AND o.source_entity='la_refund_record' AND o.source_kind='HISTORICAL_REFUND'
+      AND (o.snapshot->>'referenceId'=l.legacy_id OR o.snapshot->>'referenceSn'=l.original_order_no))
+    OR EXISTS(SELECT 1 FROM zzsh_order.legacy_refund_case x LEFT JOIN zzsh_order.legacy_order_duty d ON d.id=x.duty_id
+      WHERE x.order_id=$1 AND ($2::text IS NULL OR d.continuation_version_id IS DISTINCT FROM $2)) AS found`,[binding.id,excludeVersionId])).rows[0];
+  if(typeof row?.found!=="boolean")return unavailable("LEGACY_REFUND_HISTORY_UNKNOWN");
+  return row.found;
+}
+
 /** An old completed order has no continuation head; its imported payment observation is its source. */
 export async function readHistoricalOriginalPayment(client:PoolClient,binding:LegacyOrderBinding) {
   const rows=(await client.query<{source_id:string;source_digest:string;source_canonical:string;snapshot:Record<string,unknown>}>(`SELECT source_id,source_digest,source_canonical,snapshot
@@ -51,7 +63,7 @@ export async function readLockedLegacyRefundSource(client: PoolClient, binding: 
       dutyEvidenceDigest:resolved.effectiveFactsDigest,renterUserId:binding.renterUserId,paymentRecordId:payment.id,paymentOrderNo:payment.paymentOrderNo,
       paidCents:binding.paidCents!,refundDueAt:null,fundsDisposition:resolved.fundsDisposition,dutyState:duty.status as 'PENDING'|'MATURED'};
   }
-  if (!head || head.orderId !== binding.id || String(head.stage) !== "4" || String(head.isSettle) !== "0"
+  if (!head || head.orderId !== binding.id || !(String(head.stage)==="4" || String(head.stage)==="5" && head.command==="SUPPORT_CANCEL") || String(head.isSettle) !== "0"
     || binding.sourcePayStatus !== 1 || ![3,8,9].includes(binding.sourceOrderStatus)
     || duty.orderId !== binding.id || duty.kind !== "RENTER_REFUND" || duty.source !== "CONTINUATION"
     || duty.counterpartyUserId !== binding.renterUserId || !duty.continuationVersionId
@@ -67,7 +79,7 @@ export async function readLockedLegacyRefundSource(client: PoolClient, binding: 
   if (!imported || imported.orderId !== binding.id || imported.sourceKind !== "SOURCE_IMPORT" || imported.sourceDigest !== binding.sourceDigest)
     return unavailable("LEGACY_PAYMENT_SOURCE_UNAVAILABLE");
   const facts = readSealedLegacyFacts(imported), source = facts.evidence.source, payment = source.paidPay;
-  if (facts.evidence.admission !== "PARAMETER_COMPLETE" || source.legacyOrderId !== binding.legacyId
+  if (facts.evidence.admission !== "PARAMETER_COMPLETE" && head.command!=="SUPPORT_CANCEL" || source.legacyOrderId !== binding.legacyId
     || source.renterId !== binding.legacyRenterId || source.ownerId !== binding.legacyOwnerId || source.accountId !== binding.legacyAccountId || !Array.isArray(payment)
     || payment.length !== 1 || payment[0]!.orderId !== undefined && payment[0]!.orderId !== binding.legacyId
     || typeof payment[0]!.id !== "string" || !/^[1-9]\d{0,23}$/.test(payment[0]!.id)
@@ -90,7 +102,7 @@ export async function readLockedLegacyRefundSource(client: PoolClient, binding: 
   [binding.id,payment[0]!.id,payment[0]!.payOrderSn])).rows[0];
   if (duplicate?.found !== false) return unavailable("LEGACY_PAYMENT_SOURCE_AMBIGUOUS");
   const row=(await client.query<{dueAt:string|null}>(`SELECT to_char(refund_due_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "dueAt"
-    FROM zzsh_order.legacy_continuation_version WHERE id=$1 AND order_id=$2 AND command='CONFIRM'`,[duty.continuationVersionId,binding.id])).rows[0];
+    FROM zzsh_order.legacy_continuation_version WHERE id=$1 AND order_id=$2 AND command IN('CONFIRM','SUPPORT_CANCEL')`,[duty.continuationVersionId,binding.id])).rows[0];
   if (!row) return unavailable("LEGACY_REFUND_CONFIRMATION_UNAVAILABLE");
   return {orderId:binding.id,dutyId:duty.id,dutyRevision:duty.revision,dutyCents:duty.amountCents,sourceDigest:binding.sourceDigest,
     dutyEvidenceDigest:resolved.effectiveFactsDigest,renterUserId:binding.renterUserId,paymentRecordId:payment[0]!.id,

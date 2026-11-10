@@ -26,6 +26,7 @@ const { createRoot } = await import("react-dom/client");
 const adminRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const vite = await createServer({ configFile: false, root: adminRoot, plugins: [react()], resolve: { alias: { "@": path.join(adminRoot, "src") } }, server: { middlewareMode: true, hmr: false } });
 const { OrderWorkbenchPane } = await vite.ssrLoadModule("/src/views/im-support-orders.tsx");
+const { useOrderGroupCloudPins } = await vite.ssrLoadModule("/src/views/im-support-group-settings.tsx");
 const { createFixtureDeps, fixtureById } = await vite.ssrLoadModule("/test/fixtures/order-workbench-fixtures.ts");
 
 const timers = new Map();
@@ -69,14 +70,26 @@ async function mount(t, caseId, { select = true, fixture, request, props } = {})
   return { node, root, deps, item, settle, until, props: paneProps };
 }
 const rows = (node) => [...node.querySelectorAll(".im-wb-queue .im-wb-row")];
+const messageRows = (node) => [...node.querySelectorAll(".order-team-messages li[data-message-id]")];
 const click = async (button) => { assert.ok(button, "control available"); await act(async () => button.click()); };
 const byText = (node, text) => [...node.querySelectorAll("button")].find((button) => button.textContent.includes(text));
 const openGroupSettings = async (node, until) => {
-  await until(() => node.querySelector(".im-wb-chat"), "chat rendered");
+  await until(() => node.querySelector(".order-team-conversation"), "chat rendered");
   await click(node.querySelector('[data-action="open-group-settings"]'));
   await until(() => document.querySelector('[data-settings-drawer="true"]'), "group settings drawer");
   return [...document.querySelectorAll('[data-settings-drawer="true"]')].at(-1);
 };
+
+test("the order list marks an automatic stage-card review without opening any write path", async (t) => {
+  const base = fixtureById("ready-three");
+  const fixture = { ...base, info: { ...base.info, stageCards: [{ kind: "ORDER_OPENING", kindLabel: "开租确认", state: "UNKNOWN" }] } };
+  const { node, until } = await mount(t, "stage-card-unknown", { fixture, select: false });
+  await until(() => rows(node).length === 3, "three loaded groups");
+  const marked = node.querySelector('.im-wb-queue .im-wb-row[data-order-id="order-8842"]');
+  assert.match(marked.textContent, /自动卡待核对/);
+  const other = node.querySelector('.im-wb-queue .im-wb-row[data-order-id="order-7710"]');
+  assert.doesNotMatch(other.textContent, /自动卡待核对/, "only the order with an UNKNOWN card is marked");
+});
 
 test("READY group list, role-attributed chat and the complementary order rail come from the loaded projections", async (t) => {
   const { node, until } = await mount(t, "ready-three");
@@ -89,26 +102,26 @@ test("READY group list, role-attributed chat and the complementary order rail co
   assert.equal(rows(node)[0].getAttribute("data-active"), "true", "the first loaded group is selected");
   assert.match(node.querySelector(".im-wb-queue-head b").textContent, /3/);
 
-  await until(() => node.querySelector(".im-wb-msg"), "chat rendered");
-  const messages = [...node.querySelectorAll(".im-wb-msg")];
+  await until(() => node.querySelector(".order-team-messages li[data-message-id]"), "chat rendered");
+  const messages = [...node.querySelectorAll(".order-team-messages li[data-message-id]")];
   const buyer = messages.find((row) => row.textContent.includes("付款后从哪里交接"));
   assert.match(buyer.textContent, /小林/, "sender name comes from the member table");
   assert.match(buyer.textContent, /租客/, "party BUYER is labelled 租客");
   const staff = messages.find((row) => row.textContent.includes("我来协助本次交接"));
   assert.equal(staff.getAttribute("data-self"), "true", "the operator's own messages sit on the right");
   assert.match(staff.textContent, /负责客服/);
-  assert.ok(node.querySelector(".im-wb-sys"), "the join notification is a system marker, not a speaker line");
+  assert.ok(node.querySelector(".order-team-system"), "the join notification is a system marker, not a speaker line");
   assert.equal(node.querySelectorAll(".im-wb-thumb").length, 2, "both staged opening screenshots render");
 
   const aside = node.querySelector("#im-order-details");
-  assert.match(aside.textContent, /满配六套 · 资源账号（含安全箱）/, "the rail complements the header with the account title");
-  assert.match(aside.textContent, /三角洲行动/);
+  assert.doesNotMatch(aside.textContent, /满配六套 · 资源账号（含安全箱）/, "the rail does not repeat the header account title");
+  assert.doesNotMatch(aside.textContent, /三角洲行动|下单账号/, "the rail does not repeat the game or order-account subtitle");
   assert.match(aside.textContent, /租客小林/);
   assert.match(aside.textContent, /号主老陈/);
-  assert.match(aside.textContent, /哈夫币/);
-  assert.match(aside.textContent, /10,000,000 哈夫币/, "frozen quantities are copied from the projection verbatim");
+  assert.equal(aside.querySelector('.im-rail-value-line[data-kind="haff"] b').textContent, "10M", "HAFF quantities render in M units");
   assert.match(aside.textContent, /金额待核对/, "without a frozen quote the amount stays unknown, never 0");
   assert.doesNotMatch(aside.textContent, /¥0\.00/, "an unknown amount is never rendered as 0");
+  assert.doesNotMatch(aside.textContent, /另有|冻结清单|下单确认价格|不代表结算|未在摘要中展开/, "collapsed-summary and pricing disclaimers stay out of the rail");
   assert.doesNotMatch(aside.textContent, /account-8842|tenant-account|owner-account|10001|20002|30003/, "no account or user UUID is repeated in the rail");
   assert.doesNotMatch(aside.textContent, /用户编号|稳定账号ID|订单编号|ZZ20261011008842/, "order identity facts stay in the chat header");
   assert.doesNotMatch(aside.textContent, /买家合计|号主合计|平台贡献/, "the settlement split stays on the order page");
@@ -120,29 +133,50 @@ test("READY group list, role-attributed chat and the complementary order rail co
 
 test("admin custom conversation opens the platform message menu on a row", async (t) => {
   const { node, until } = await mount(t, "ready-three");
-  await until(() => node.querySelector(".im-wb-msg"), "chat rendered");
-  const buyer = [...node.querySelectorAll(".im-wb-msg")].find((row) => row.textContent.includes("付款后从哪里交接"));
-  await act(async () => buyer.dispatchEvent(new browser.MouseEvent("contextmenu", { bubbles: true, cancelable: true, button: 2, clientX: 160, clientY: 160 })));
+  await until(() => node.querySelector(".order-team-messages li[data-message-id]"), "chat rendered");
+  const buyer = [...node.querySelectorAll(".order-team-messages li[data-message-id]")].find((row) => row.textContent.includes("付款后从哪里交接"));
+  const buyerSurface = buyer.querySelector("p, .im-wb-bub, .message-media, .message-image, .order-card");
+  assert.ok(buyerSurface, "the bubble is the context-menu surface");
+  await act(async () => buyerSurface.dispatchEvent(new browser.MouseEvent("contextmenu", { bubbles: true, cancelable: true, button: 2, clientX: 160, clientY: 160 })));
   await until(() => document.querySelector('.message-action-menu[role="menu"]'), "buyer menu");
   const buyerItems = [...document.querySelectorAll('.message-action-menu [role="menuitem"]')].map((item) => item.textContent.trim());
   assert.ok(buyerItems.includes("复制"), "text message offers copy");
   assert.ok(buyerItems.includes("回复"), "sendable group offers reply");
   assert.ok(buyerItems.includes("删除"), "any visible message offers local delete");
   assert.ok(!buyerItems.includes("撤回"), "another member's message cannot be revoked");
+  assert.ok(!buyerItems.includes("置顶会话") && !buyerItems.includes("群设置"), "in-chat menu never exposes group-level actions");
   await act(async () => document.dispatchEvent(new browser.KeyboardEvent("keydown", { key: "Escape", bubbles: true })));
   await until(() => !document.querySelector('.message-action-menu[role="menu"]'), "menu closed");
 
-  const staff = [...node.querySelectorAll(".im-wb-msg")].find((row) => row.textContent.includes("我来协助本次交接"));
-  await act(async () => staff.dispatchEvent(new browser.MouseEvent("contextmenu", { bubbles: true, cancelable: true, button: 2, clientX: 180, clientY: 200 })));
+  const staff = [...node.querySelectorAll(".order-team-messages li[data-message-id]")].find((row) => row.textContent.includes("我来协助本次交接"));
+  const staffSurface = staff.querySelector("p, .im-wb-bub, .message-media, .message-image, .order-card");
+  assert.ok(staffSurface, "the staff bubble is the context-menu surface");
+  await act(async () => staffSurface.dispatchEvent(new browser.MouseEvent("contextmenu", { bubbles: true, cancelable: true, button: 2, clientX: 180, clientY: 200 })));
   await until(() => document.querySelector('.message-action-menu[role="menu"]'), "staff menu");
   const staffItems = [...document.querySelectorAll('.message-action-menu [role="menuitem"]')].map((item) => item.textContent.trim());
   assert.ok(staffItems.includes("撤回"), "the operator can revoke their own message");
 });
 
+test("admin composer inserts a selected group mention", async (t) => {
+  const { node, until } = await mount(t, "ready-three");
+  await until(() => node.querySelector("textarea"), "composer ready");
+  const input = node.querySelector("textarea");
+  await act(async () => {
+    Object.getOwnPropertyDescriptor(browser.HTMLTextAreaElement.prototype, "value").set.call(input, "@");
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+  await until(() => document.querySelector(".order-team-mention-item"), "typing @ opens the mention list");
+  const item = document.querySelector(".order-team-mention-item");
+  const name = item.querySelector("span").textContent.trim();
+  assert.ok(name, "the mention item names a member");
+  await act(async () => item.click());
+  assert.match(node.querySelector("textarea").value, new RegExp(`@${name} `), "the selected member replaces the @ query");
+});
+
 test("unknown historical senders degrade neutrally instead of borrowing a name", async (t) => {
   const { node, until } = await mount(t, "unknown-sender");
   await until(() => node.textContent.includes("成员表已无此账号"), "history loaded");
-  const row = [...node.querySelectorAll(".im-wb-msg")].find((item) => item.textContent.includes("成员表已无此账号"));
+  const row = [...node.querySelectorAll(".order-team-messages li[data-message-id]")].find((item) => item.textContent.includes("成员表已无此账号"));
   assert.match(row.textContent, /未署名成员/);
   assert.doesNotMatch(row.textContent, /租客|号主|负责客服/, "an unmapped sender is never attributed to a known party");
 });
@@ -184,7 +218,7 @@ test("party confirmation binds to the same version only", async (t) => {
 
 test("settlement unavailable keeps the conversation readable and never defaults to 待录入", async (t) => {
   const { node, until } = await mount(t, "settlement-unavailable");
-  await until(() => node.querySelector(".im-wb-msg"), "history still loaded");
+  await until(() => node.querySelector(".order-team-messages li[data-message-id]"), "history still loaded");
   const task = node.querySelector(".im-support-fulfillment");
   assert.match(task.textContent, /本单结算记录不可用/);
   assert.match(task.textContent, /本环境未启用结算记录/);
@@ -233,10 +267,10 @@ test("an active order keeps the existing fulfillment write entry", async (t) => 
 
 test("send-only revocation keeps history and draft but blocks new sends", async (t) => {
   const { node, until, settle } = await mount(t, "send-only");
-  await until(() => node.querySelector(".im-wb-msg"), "history loaded");
+  await until(() => node.querySelector(".order-team-messages li[data-message-id]"), "history loaded");
   assert.match(node.textContent, /当前只可阅读/);
   assert.equal(node.querySelector("textarea"), null, "read-only replaces the composer instead of leaving a dead input");
-  assert.equal(node.querySelector(".im-wb-send"), null);
+  assert.equal(node.querySelector(".order-team-send"), null);
   assert.ok(node.querySelector(".im-wb-thumb"), "already loaded images stay visible");
   await settle();
   assert.match(node.textContent, /期初截图已发/, "loaded history is never cleared by a send revocation");
@@ -271,7 +305,10 @@ test("search filters only the loaded list and never claims a full count", async 
   await until(() => rows(node).length === 1, "filtered to one row");
   assert.match(rows(node)[0].textContent, /ZZ20261010007710/);
   assert.match(node.querySelector(".im-wb-queue-head b").textContent, /3/, "the header count still reports the loaded set, not the filter result");
-  assert.match(node.querySelector(".im-wb-filter-note").textContent, /不代表全部/);
+  const scopeHint = node.querySelector('[aria-label="订单群列表范围说明"]');
+  assert.ok(scopeHint, "the list scope keeps an accessible hint");
+  assert.equal(scopeHint.getAttribute("title"), null, "no native browser title is used");
+  assert.match(scopeHint.getAttribute("aria-label") ?? "", /订单群列表范围说明/);
 });
 
 test("empty, read failure and forbidden lists stay three different answers", async (t) => {
@@ -304,14 +341,14 @@ test("an unknown text result keeps responsibility and replays the original messa
   });
   await click(node.querySelector('form button[type="submit"]'));
   await until(() => node.textContent.includes("原消息重试"), "unknown kept");
-  assert.match(node.querySelector(".im-wb-pending").textContent, /结果未确认/);
+  assert.match(node.querySelector(".order-team-text-retry").textContent, /发送结果待确认/);
   assert.equal(node.querySelector("textarea").value, "第一条", "the draft survives the unknown result");
-  await click(node.querySelector('[data-action="order-retry-text"]'));
-  await until(() => !node.querySelector(".im-wb-pending"), "responsibility settled");
+  await click([...node.querySelectorAll(".order-team-text-retry button")].find((button) => button.textContent.includes("原消息重试")));
+  await until(() => !node.querySelector(".order-team-text-retry"), "responsibility settled");
   await settle();
 });
 
-test("the frozen inventory summary stays compact and links the existing order detail page", async (t) => {
+test("the frozen inventory summary lists the present rows and links the existing order detail page", async (t) => {
   const { node, until } = await mount(t, "ready-three");
   await until(() => node.querySelector('[data-action="order-open-inventory"]'), "inventory summary");
   assert.equal(document.body.querySelector(".im-order-inventory-dialog"), null, "the rail does not mount a second full inventory view");
@@ -320,7 +357,7 @@ test("the frozen inventory summary stays compact and links the existing order de
   assert.equal(link.getAttribute("href"), "/orders/order-8842", "the link targets the existing order detail page");
   assert.match(link.textContent, /查看完整清单/);
   const aside = node.querySelector("#im-order-details");
-  assert.match(aside.textContent, /冻结清单 · 2 项/);
+  assert.doesNotMatch(aside.textContent, /冻结清单|另有|未在摘要中展开/, "the count and collapsed-summary copy are gone");
   assert.equal(aside.querySelectorAll(".im-rail-value-item").length, 1, "only the visible resource rows are summarized");
   assert.match(aside.textContent, /装备箱/);
   assert.match(aside.textContent, /3 件/);
@@ -333,15 +370,14 @@ test("the frozen inventory summary stays compact and links the existing order de
   await until(() => node.querySelector('[data-action="order-open-inventory"]').getAttribute("href") === "/orders/order-8842", "returning to the first order restores its link");
 });
 
-test("a long inventory stays a bounded summary instead of expanding every row", async (t) => {
+test("a long inventory expands every row instead of hiding items behind a count", async (t) => {
   const { node, until } = await mount(t, "inventory-many");
   await until(() => node.querySelector('[data-action="order-open-inventory"]'), "inventory ready");
   const aside = node.querySelector("#im-order-details");
-  assert.equal(aside.querySelectorAll(".im-rail-value-item").length, 3, "the rail caps the visible resource rows");
+  assert.equal(aside.querySelectorAll(".im-rail-value-item").length, 24, "every positive resource row is rendered");
   assert.match(aside.textContent, /物品资源 · 24 项/);
-  assert.match(aside.textContent, /另有 21 项物品资源/, "the rest stays collapsed");
-  assert.match(aside.textContent, /冻结清单 · 24 项/);
-  assert.doesNotMatch(aside.textContent, /合成资源项目 4/, "the fourth row is not expanded");
+  assert.match(aside.textContent, /合成资源项目 24/, "the last row is expanded, not truncated");
+  assert.doesNotMatch(aside.textContent, /另有|冻结清单|未在摘要中展开/, "no collapsed-summary noise");
   assert.equal(node.querySelector('[data-action="order-open-inventory"]').getAttribute("href"), "/orders/order-8842");
 });
 
@@ -349,6 +385,7 @@ test("the rail treats zero-quantity inventory as absent and sums only frozen quo
   const base = fixtureById("ready-three");
   const terms = {
     viewerParty: "STAFF", basis: "QUOTE", currency: "CNY", scale: 2, version: "quote-v1", rentalAmount: null, depositAmount: null, paidTotal: null,
+    staff: { buyerRentalAmount: "10018000", ownerRentalAmount: "9000000", buyerTotal: "10086000", ownerTotal: "9500000", platformContribution: "1018000" },
     lines: [
       { itemId: "item_haff", name: "哈夫币", quantity: "10000000", unitPrice: null, amount: null, buyerUnitPrice: "1", ownerUnitPrice: "0.8", buyerAmount: "10000000", ownerAmount: "8000000", platformContribution: "2000000" },
       { itemId: "item_case", name: "装备箱", quantity: "3", unitPrice: null, amount: null, buyerUnitPrice: "6000", ownerUnitPrice: "5000", buyerAmount: "18000", ownerAmount: "15000", platformContribution: "3000" },
@@ -368,16 +405,39 @@ test("the rail treats zero-quantity inventory as absent and sums only frozen quo
   const { node, until } = await mount(t, "ready-three-zero", { fixture });
   await until(() => node.querySelector("#im-order-details .im-rail-value"), "value loaded");
   const aside = node.querySelector("#im-order-details");
-  assert.match(aside.textContent, /10,000,000 哈夫币/, "havoc total comes from the frozen inventory");
+  assert.equal(aside.querySelector('.im-rail-value-line[data-kind="haff"] b').textContent, "10M", "havoc total comes from the frozen inventory");
   assert.match(aside.textContent, /¥100,000.00/, "havoc amount comes from the frozen quote line");
   assert.match(aside.textContent, /物品资源 · 1 项/);
   assert.match(aside.textContent, /¥180.00/, "item total is the exact sum of the frozen line amounts");
   assert.doesNotMatch(aside.textContent, /零号弹匣/, "quantity 0 is absent, not an exception");
   assert.doesNotMatch(aside.textContent, /异常/, "zero is never reported as abnormal");
-  assert.match(aside.textContent, /冻结清单 · 2 项/, "the count only includes present rows");
+  assert.equal(aside.querySelectorAll(".im-rail-value-item").length, 1, "the present item still renders");
+  assert.doesNotMatch(aside.textContent, /冻结清单|另有|下单确认价格|不代表结算|下单账号/, "the removed count, disclaimers and repeated account copy stay out");
+  assert.match(aside.textContent, /租客合计/);
+  assert.match(aside.textContent, /¥100,860.00/, "the rail shows the renter total from the frozen staff quote");
   assert.doesNotMatch(aside.textContent, /account-8842|tenant-account|owner-account|10001|20002|30003/, "no account or user UUIDs");
   assert.doesNotMatch(aside.textContent, /复制|已复制/, "the removed copy controls do not come back");
   assert.doesNotMatch(aside.textContent, /买家合计|号主合计|平台贡献/, "no settlement split is repeated");
+});
+
+test("HAFF quantities use grouped millions with at most two decimals", async (t) => {
+  const base = fixtureById("ready-three");
+  const withHaff = (quantity) => ({
+    ...base,
+    info: { ...base.info, frozenInventory: [{ itemId: "item_haff", quantity, unit: "HAFF_BASE", pricingKind: "HAFF_RATIO", name: "哈夫币" }] },
+  });
+  const whole = await mount(t, "haff-whole", { fixture: withHaff("1069000000") });
+  await whole.until(() => whole.node.querySelector('.im-rail-value-line[data-kind="haff"] b'), "whole haff line");
+  assert.equal(whole.node.querySelector('.im-rail-value-line[data-kind="haff"] b').textContent, "1,069M", "whole millions keep grouping and no trailing decimals");
+  assert.doesNotMatch(whole.node.querySelector("#im-order-details").textContent, /1,069,000,000|1,069\.00M/, "base units and trailing zeros are not repeated");
+
+  const fractional = await mount(t, "haff-fraction", { fixture: withHaff("1069123456") });
+  await fractional.until(() => fractional.node.querySelector('.im-rail-value-line[data-kind="haff"] b'), "fractional haff line");
+  assert.equal(fractional.node.querySelector('.im-rail-value-line[data-kind="haff"] b').textContent, "1,069.12M", "fractions round to at most two decimals");
+
+  const tiny = await mount(t, "haff-tiny", { fixture: withHaff("4000") });
+  await tiny.until(() => tiny.node.querySelector('.im-rail-value-line[data-kind="haff"] b'), "tiny haff line");
+  assert.equal(tiny.node.querySelector('.im-rail-value-line[data-kind="haff"] b').textContent, "<0.01M", "a non-zero quantity never rounds down to 0M");
 });
 
 test("an image failure is scoped to the selected order", async (t) => {
@@ -392,7 +452,7 @@ test("an image failure is scoped to the selected order", async (t) => {
 
 test("a new identity returns the narrow workbench to its selectable list", async (t) => {
   const { node, root, deps, until } = await mount(t, "ready-three");
-  await until(() => node.querySelector(".im-wb-chat"), "original chat");
+  await until(() => node.querySelector(".order-team-conversation"), "original chat");
   assert.equal(node.querySelector(".order-team-grid").getAttribute("data-pane"), "chat");
   const search = node.querySelector('[aria-label="搜索订单群"]');
   await act(async () => {
@@ -430,16 +490,21 @@ test("the admin custom conversation renders an order-stage card with both sides"
     }],
   };
   const { node, until } = await mount(t, "ready-three-card", { fixture });
-  await until(() => node.querySelector(".im-wb-msg .order-card"), "stage card rendered");
-  const card = node.querySelector(".im-wb-msg .order-card");
+  await until(() => node.querySelector(".order-team-messages li[data-message-id] .order-card"), "stage card rendered");
+  const card = node.querySelector(".order-team-messages li[data-message-id] .order-card");
   assert.equal(card.getAttribute("data-kind"), "ORDER_OPENING", "the shared card keeps its kind");
   assert.equal(card.getAttribute("data-party"), "STAFF", "the admin workbench reads the staff projection");
   assert.equal(card.querySelector(".order-card-head .order-card-title").textContent, "开租确认", "the dark header names the stage");
   assert.ok(card.querySelector(".order-card-head .order-card-icon"), "the header keeps its document icon");
   const acks = [...card.querySelectorAll(".order-card-ack")].map(ack => [ack.querySelector(".order-card-ack-name").textContent, ack.getAttribute("data-state"), ack.querySelector(".order-card-ack-state").textContent, Boolean(ack.querySelector(".order-card-ack-mark svg"))]);
-  assert.deepEqual(acks, [["租客", "confirmed", "已确认", true], ["号主", "pending", "待确认", false]], "both party steps are shown with their marks");
+  assert.deepEqual(acks, [["租客", "confirmed", "已确认", true], ["号主", "pending", "待确认", true]], "both party steps show a meaningful mark");
   assert.match(card.querySelector(".order-card-account").textContent, /满配六套 · 资源账号（含安全箱）/);
-  assert.equal(card.querySelector(".order-card-game").textContent, "三角洲行动");
+  assert.equal(card.querySelector(".order-card-game"), null, "the game name is not repeated inside the card");
+  assert.match(card.textContent, /自动确认/, "the opening card keeps the auto-confirm deadline fact");
+  const infoHint = card.querySelector(".order-card-head .order-card-info");
+  assert.match(infoHint?.getAttribute("aria-label") ?? "", /金额按订单冻结价展示/);
+  assert.equal(infoHint?.getAttribute("title"), null, "explanatory copy does not use a native browser title");
+  assert.doesNotMatch(card.textContent, /双方未确认时，将于/, "the long inline hint is not printed in the chat card");
   assert.doesNotMatch(card.textContent, /account-8842|稳定 ID/, "no account stable id is rendered");
   const figures = Object.fromEntries([...card.querySelectorAll(".order-card-figure")]
     .map(figure => [figure.querySelector("dt").textContent, figure.querySelector("dd").textContent]));
@@ -462,11 +527,11 @@ test("the admin custom conversation renders an order-stage card with both sides"
   assert.match(card.querySelector(".order-card-copy-state").textContent, /已复制/, "the copy result is announced");
   assert.equal(card.querySelector(".order-card-action").tagName, "BUTTON", "the footer action keeps the admin callback");
   assert.equal(card.closest(".im-wb-bub"), null, "the card replaces the text bubble instead of nesting inside it");
-  assert.equal(card.closest(".im-wb-msg-body").getAttribute("data-card"), "true", "the message body is widened for the card");
+  assert.equal(card.closest(".order-team-msg-body").getAttribute("data-card"), "true", "the message body is widened for the card");
 
   const row = card.closest("[data-message-id]");
   assert.ok(row, "the card stays a message row");
-  await act(async () => row.dispatchEvent(new browser.MouseEvent("contextmenu", { bubbles: true, cancelable: true, button: 2, clientX: 160, clientY: 180 })));
+  await act(async () => card.dispatchEvent(new browser.MouseEvent("contextmenu", { bubbles: true, cancelable: true, button: 2, clientX: 160, clientY: 180 })));
   await until(() => document.querySelector('.message-action-menu[role="menu"]'), "card menu");
   const labels = [...document.querySelectorAll('.message-action-menu [role="menuitem"]')].map((item) => item.textContent.trim());
   assert.ok(labels.includes("删除"), "delete stays available on a card row");
@@ -488,8 +553,8 @@ test("quoted replies are visible on the admin side and revoked messages stay exp
     ],
   };
   const { node, until } = await mount(t, "ready-three", { fixture });
-  await until(() => node.querySelector(".im-wb-bub .message-quoted"), "quoted reply rendered");
-  const quote = node.querySelector(".im-wb-bub .message-quoted");
+  await until(() => node.querySelector(".order-team-msg-body .message-quoted"), "quoted reply rendered");
+  const quote = node.querySelector(".order-team-msg-body .message-quoted");
   assert.match(quote.textContent, /小林：你好，付款后从哪里交接？/);
   await act(async () => quote.dispatchEvent(new browser.MouseEvent("contextmenu", { bubbles: true, cancelable: true, button: 2, clientX: 360, clientY: 260 })));
   await until(() => browser.document.querySelector('.message-action-menu [data-action="jump"]'), "quote jump menu");
@@ -498,7 +563,7 @@ test("quoted replies are visible on the admin side and revoked messages stay exp
   const revoked = node.querySelector('.im-wb-bub[data-revoked="true"]');
   assert.ok(revoked, "revoked message keeps an explicit state");
   assert.match(revoked.textContent, /消息已撤回/);
-  assert.equal(revoked.closest(".im-wb-msg").querySelector(".im-wb-msg-status"), null, "a revoked message does not claim 已发送");
+  assert.equal(revoked.closest(".order-team-messages li[data-message-id]").querySelector(".order-team-msg-status"), null, "a revoked message does not claim 已发送");
 });
 
 test("the group settings drawer groups users and staff, marks the responsible admin and renders no identifiers", async (t) => {
@@ -624,6 +689,80 @@ test("pin, mute and local hide are per-admin preferences and hiding never leaves
   await until(() => rows(node).length === 3, "restore only clears the local hide marker");
 });
 
+test("order-group avatars repeat the order tail in the list and the chat header", async (t) => {
+  browser.localStorage.clear();
+  const { node, until } = await mount(t, "ready-three");
+  await until(() => rows(node).length === 3, "three loaded groups");
+  const listMarks = rows(node).map((row) => row.querySelector(".im-wb-order-av"));
+  assert.deepEqual(listMarks.map((mark) => mark.textContent), ["8842", "7710", "3906"], "the tail of each order number is the mark");
+  assert.ok(new Set(listMarks.map((mark) => mark.dataset.tone)).size >= 2, "adjacent orders do not share one tone");
+  await until(() => node.querySelector(".im-wb-chat-head .im-wb-order-av"), "chat header mark");
+  const header = node.querySelector(".im-wb-chat-head .im-wb-order-av");
+  assert.equal(header.textContent, listMarks[0].textContent, "the header repeats the selected row's tail");
+  assert.equal(header.dataset.tone, listMarks[0].dataset.tone, "the header repeats the selected row's tone");
+});
+
+test("cloud-pinned team ids win over local pins and toggle through the cloud port", async (t) => {
+  browser.localStorage.clear();
+  browser.localStorage.setItem("zzsh.im-support.order-group-prefs.admin-fixture", JSON.stringify({ "order-8842": { pinned: true } }));
+  const toggles = [];
+  const { node, until } = await mount(t, "ready-three", {
+    select: false,
+    props: {
+      cloudPinnedTeamIds: new Set(["team-order-7710"]),
+      onToggleCloudPin: (orderId, teamId, pinned) => { toggles.push([orderId, teamId, pinned]); },
+    },
+  });
+  await until(() => rows(node).length === 3, "three loaded groups");
+  assert.match(rows(node)[0].textContent, /ZZ20261010007710/, "the cloud pin outranks the stale local pin");
+  assert.match(rows(node)[0].textContent, /置顶/);
+  assert.doesNotMatch(rows(node)[1].textContent, /置顶/, "a local pin is not shown while cloud pins are authoritative");
+
+  await act(async () => rows(node)[0].click());
+  const drawer = await openGroupSettings(node, until);
+  assert.match(drawer.textContent, /云信账号同步，跨设备生效/);
+  await click(drawer.querySelector('[data-pref="pin"]'));
+  await until(() => toggles.length === 1, "the pin toggle reaches the cloud port");
+  assert.deepEqual(toggles[0], ["order-7710", "team-order-7710", false]);
+});
+
+test("cloud pin hook keeps only this account's team conversations", async (t) => {
+  const node = document.createElement("div");
+  document.body.append(node);
+  const root = createRoot(node);
+  let api;
+  let reads = 0;
+  const calls = [];
+  const client = {
+    accountId: "viewer",
+    async getStickTopConversationIds() { reads += 1; return ["viewer|2|111", "other|2|222", "viewer|not-a-team", "viewer|2|333"]; },
+    async setConversationStickTop(conversationId, pinned) { calls.push([conversationId, pinned]); },
+  };
+  function Probe({ client: current }) {
+    api = useOrderGroupCloudPins(current);
+    return createElement("output", { "data-status": api.status, "data-teams": [...api.teamIds].sort().join(","), "data-error": api.error ?? "" });
+  }
+  t.after(async () => { await act(async () => root.unmount()); node.remove(); });
+  await act(async () => root.render(createElement(Probe, { client })));
+  for (let attempt = 0; attempt < 100 && node.querySelector("output")?.dataset.status !== "CLOUD"; attempt += 1) {
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 5)); });
+  }
+  const output = node.querySelector("output");
+  assert.equal(output.dataset.status, "CLOUD");
+  assert.equal(output.dataset.teams, "111,333", "other accounts and malformed conversation ids are ignored");
+  assert.equal(reads, 1);
+  await act(async () => api.toggle("333", true));
+  assert.deepEqual(calls, [["viewer|2|333", true]]);
+  await act(async () => api.toggle("333", false));
+  assert.deepEqual(calls.at(-1), ["viewer|2|333", false]);
+  assert.equal(node.querySelector("output").dataset.teams, "111");
+  client.setConversationStickTop = async () => { throw Object.assign(new Error("forbidden"), { code: 403 }); };
+  await act(async () => { await api.toggle("111", true).catch(() => undefined); });
+  assert.equal(node.querySelector("output").dataset.status, "LOCAL", "a forbidden cloud write falls back to local pins");
+  assert.match(node.querySelector("output").dataset.error, /403/);
+  assert.equal(node.querySelector("output").dataset.teams, "", "the cloud set is cleared when falling back to local");
+});
+
 test("staff preview cards are platform-support cards without user profile fields or UUIDs", async (t) => {
   browser.localStorage.clear();
   const { node, until } = await mount(t, "multi-staff");
@@ -645,4 +784,27 @@ test("staff preview cards are platform-support cards without user profile fields
   assert.doesNotMatch(card.textContent, /30003|viewer|10001|20002/, "no member or account UUID is rendered");
   assert.doesNotMatch(card.textContent, /可接待|已暂停|未上线/, "presence is not invented when the projection has none");
   assert.equal(document.body.querySelector('[aria-label^="用户预览"]'), null, "the user preview card is not used for an administrator");
+});
+
+test("a cancelled order keeps the opening card as history but disables confirmation", async (t) => {
+  const base = fixtureById("ready-three");
+  const fixture = {
+    ...base,
+    info: { ...base.info, orderStatus: "CANCELLED", cancelReason: "PRESTART_TERMINATED", openingState: "DRAFT", openingAcks: { renter: false, owner: false } },
+    history: [...base.history, {
+      messageClientId: "m-cancelled-opening", messageServerId: "srv-cancelled-opening", senderId: "tenant-account", receiverId: "team-8842",
+      createTime: Date.parse("2026-10-11T01:34:00Z"), messageType: 0, text: "",
+      card: { kind: "ORDER_OPENING", orderId: "order-8842", cardId: "card-cancelled" },
+    }],
+  };
+  const { node, until } = await mount(t, "ready-three-cancelled", { fixture });
+  await until(() => node.querySelector(".order-team-messages li[data-message-id] .order-card"), "cancelled opening card rendered");
+  const card = node.querySelector(".order-team-messages li[data-message-id] .order-card");
+  assert.match(card.querySelector(".order-card-terminal").textContent, /订单已取消（未开租终止），开租确认已失效。/);
+  const confirm = card.querySelector(".order-card-confirm .order-card-confirm-button");
+  assert.ok(confirm, "the cancelled card keeps a visible confirmation control");
+  assert.equal(confirm.disabled, true, "the confirmation control is visibly disabled");
+  assert.equal(confirm.textContent, "确认开租");
+  assert.equal(card.querySelector(".order-card-action").textContent.includes("订单详情"), true, "only the order-detail path remains");
+  assert.equal(card.querySelectorAll(".order-card-ack-mark svg").length, 2, "pending marks remain visible as history");
 });

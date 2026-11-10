@@ -205,7 +205,7 @@ test("CS-05: the first send after a closed round opens one round and sends the e
   assert.equal(autoAssignCalls, 0, "a plain send without preview recording does not assign here");
 });
 
-test("entry intent: a COMPLAINT entry still opens a SERVICE thread and sends the complaint welcome", async () => {
+test("entry intent: a COMPLAINT entry opens a COMPLAINT thread and sends the complaint welcome", async () => {
   const texts: string[] = [];
   const fixture = createConsultationFixture({
     sendText: async (input: { text: string }) => { texts.push(input.text); },
@@ -217,11 +217,11 @@ test("entry intent: a COMPLAINT entry still opens a SERVICE thread and sends the
     messageTransport: { sendText: fixture.transport.sendText },
     supportManager: managerOptions(new FakeSupportScopeProvider()),
     autoAssignConsultations: true,
-  } as never, userContext, "SERVICE", null, "req_complaint_entry", "COMPLAINT");
+  } as never, userContext, "COMPLAINT", null, "req_complaint_entry", "COMPLAINT");
   await flush();
-  assert.equal(created.consultation.type, "SERVICE", "the thread kind stays SERVICE");
+  assert.equal(created.consultation.type, "COMPLAINT", "the thread kind is complaint");
   assert.equal(created.consultation.state, "WAITING");
-  assert.equal(fixture.inserts[0]!.values[3], "SERVICE", "the round kind is normalized");
+  assert.equal(fixture.inserts[0]!.values[3], "COMPLAINT", "the round kind is complaint");
   assert.equal(fixture.inserts[0]!.values[10], "COMPLAINT", "the raw entry intent is stored for the welcome");
   assert.deepEqual(texts, [
     "抱歉给您带来不好的体验，您的反馈已记录。",
@@ -475,12 +475,12 @@ test("hardening: a new claim still reserves exactly once and success never relea
   assert.equal(countCalls(fixture.f.calls, '"active_load" = GREATEST'), 0, "a successful claim keeps its load");
 });
 
-/* ----------------------- complaints unified to SERVICE ----------------------- */
+/* ----------------------- complaints use a separate thread ----------------------- */
 
-test("complaints: a legacy COMPLAINT round claims with read+accept plus management takeover and never reads exclusions", async () => {
+test("complaints: a COMPLAINT round claims with read+accept+complaint and never reads exclusions", async () => {
   const fixture = claimFixture({
     opState: "NONE", opTarget: "admin_a", kind: "COMPLAINT",
-    permissions: ["im.support.read", "im.support.accept", "im.support.audit.takeover"],
+    permissions: ["im.support.read", "im.support.accept", "im.support.complaint", "im.support.audit.takeover"],
   });
   const result = await claimConsultation({
     pool: fixture.f.pool,
@@ -495,23 +495,36 @@ test("complaints: a legacy COMPLAINT round claims with read+accept plus manageme
     "complaint exclusion evidence no longer participates in claim");
 });
 
-test("complaints: auto-assign reserves a legacy COMPLAINT round without im.support.complaint", async () => {
-  const fixture = claimFixture({
+test("complaints: auto-assign skips an agent without im.support.complaint and assigns one with it", async () => {
+  const denied = claimFixture({
     opState: "NONE", opTarget: "admin_a", kind: "COMPLAINT",
     permissions: ["im.support.read", "im.support.accept"],
   });
-  const assigned = await autoAssignWaitingConsultations({
-    pool: fixture.f.pool,
+  assert.deepEqual(await autoAssignWaitingConsultations({
+    pool: denied.f.pool,
     appId: APP_ID,
-    provider: fixture.provider,
-    supportManager: managerOptions(fixture.provider),
+    provider: denied.provider,
+    supportManager: managerOptions(denied.provider),
+    autoAssignConsultations: true,
+  } as never, 5), []);
+  assert.equal(denied.state.inserts, 0, "no member is added without the complaint grant");
+
+  const allowed = claimFixture({
+    opState: "NONE", opTarget: "admin_a", kind: "COMPLAINT",
+    permissions: ["im.support.read", "im.support.accept", "im.support.complaint"],
+  });
+  const assigned = await autoAssignWaitingConsultations({
+    pool: allowed.f.pool,
+    appId: APP_ID,
+    provider: allowed.provider,
+    supportManager: managerOptions(allowed.provider),
     autoAssignConsultations: true,
   } as never, 5);
   assert.deepEqual(assigned, ["consult_2"]);
-  assert.equal(fixture.state.inserts, 1, "exactly one ADD_MEMBER is recorded");
-  assert.equal(fixture.state.round, "ACTIVE");
-  assert.equal(countCalls(fixture.f.calls, "active_load=active_load+1"), 1);
-  assert.ok(!fixture.f.calls.some(({ sql }) => sql.includes("SELECT details FROM zzsh_iam.im_consultation_event")),
+  assert.equal(allowed.state.inserts, 1, "exactly one ADD_MEMBER is recorded");
+  assert.equal(allowed.state.round, "ACTIVE");
+  assert.equal(countCalls(allowed.f.calls, "active_load=active_load+1"), 1);
+  assert.ok(!allowed.f.calls.some(({ sql }) => sql.includes("SELECT details FROM zzsh_iam.im_consultation_event")),
     "complaint exclusion evidence no longer participates in assignment");
 });
 
@@ -1061,19 +1074,19 @@ function closeFixture() {
  */
 function createConsultationFixture(transport: { sendText: (input: { messageClientId: string; text: string }) => Promise<void> }, legacyIds: string[] = []) {
   const userAccountId = identityFor("USER", "user_a").accountId;
-  let round: { id: string; state: string; subjectRef: string | null } | null = null;
+  let round: { id: string; state: string; subjectRef: string | null; kind: string } | null = null;
   let threadState = "IDLE";
   const inserts: Call[] = [];
   const previewUpdates: unknown[][] = [];
   let autoAssignCalls = 0;
 
-  const threadRow = () => ({
-    id: "thread_1", appId: APP_ID, userId: "user_a", kind: "SERVICE", state: threadState,
+  const threadRow = (kind = "SERVICE") => ({
+    id: "thread_1", appId: APP_ID, userId: "user_a", kind, state: threadState,
     userAccountId, peerAccountId: null, messageScopeId: "900001", messageScopeState: "READY",
     lastRoundSeq: "1", version: "1",
   });
   const consultationRow = () => ({
-    id: round!.id, userId: "user_a", kind: "SERVICE", state: "WAITING",
+    id: round!.id, userId: "user_a", kind: round!.kind, state: "WAITING",
     userAccountId, peerAccountId: null, assignedAdminId: null, subjectRef: round!.subjectRef,
     version: 1, lastMessageAt: new Date("2026-10-20T00:00:00.000Z"), lastMessagePreview: null,
     createdAt: new Date("2026-10-20T00:00:00.000Z"), updatedAt: new Date("2026-10-20T00:00:00.000Z"),
@@ -1094,14 +1107,14 @@ function createConsultationFixture(transport: { sendText: (input: { messageClien
       return { rows: [] };
     }
     if (sql.includes('FROM "zzsh_iam"."im_support_thread"') && sql.includes('"kind" = $3')) {
-      return { rows: [threadRow()] };
+      return { rows: [threadRow(String(values[2]))] };
     }
     if (sql.includes('FROM "zzsh_iam"."im_consultation"') && sql.includes('"state" <> \'CLOSED\'')) {
       return { rows: round ? [{ id: round.id, state: round.state }] : [] };
     }
     if (sql.includes('INSERT INTO "zzsh_iam"."im_consultation"')) {
       inserts.push({ sql, values });
-      round = { id: String(values[0]), state: "WAITING", subjectRef: values[5] === null ? null : String(values[5]) };
+      round = { id: String(values[0]), state: "WAITING", subjectRef: values[5] === null ? null : String(values[5]), kind: String(values[3]) };
       return { rows: [] };
     }
     if (sql.includes('UPDATE "zzsh_iam"."im_support_thread"') && sql.includes('"state" = \'WAITING\'')) {

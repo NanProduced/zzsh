@@ -7,7 +7,6 @@ import { Textarea } from "@/components/ui/textarea";
 import { Dialog,DialogContent,DialogDescription,DialogHeader,DialogTitle } from "@/components/ui/dialog";
 import { ConfirmAlertDialog } from "@/components/ui/alert-dialog";
 import { formatFundingCents } from "./supply-review/model";
-import { AdminOriginalRefundPanel } from './admin-original-refund-panel';
 
 type RequestRead={id:string;revision:string;state:"REQUESTED"|"REVIEW_REQUIRED"|"REJECTED"|"APPROVED";reason:string;reviewReason:string|null;fullRefundCents:string|null;liabilityRecognized:boolean;dataOrigin:string;bankArrival:"UNKNOWN"};
 type RefundRead={integration:string;truncated:boolean;simulationScope?:'LOCAL_DEMO_SIMULATED'|'ECS_TEST_SIMULATED';totals:{allocatedCents:string;consumedCents:string;remainingCents:string}|null;
@@ -98,8 +97,7 @@ export function AdminPrestartTerminationPanel({orderId,binding,canWrite,actionsT
     {read?.refund?.totals?<p>已分配 {formatFundingCents(read.refund.totals.allocatedCents)} · 本地核销 {formatFundingCents(read.refund.totals.consumedCents)} · 尚未分配责任 {formatFundingCents(read.refund.totals.remainingCents)}</p>:<p>退款合计未记录，不能补零。</p>}
     {read?.refund?.intents?.map((i,n)=><p key={i.intentId??`unknown-${n}`}>{i.refundOrderNo??'原退款号未知'} · {i.state==='SUCCEEDED'&&read.refund?.simulationScope?'模拟退款已完成':refundStates[i.state]??'状态未记录'} · {i.firstSubmit==='DISPATCHED'?'已有提交尝试':i.firstSubmit==='NEVER_DISPATCHED'?'尚无提交尝试':'提交状态未记录'}{i.blockedReason?' · 原号歧义，需复核':''} · {i.localWriteOff==='RECORDED'?'本站核销已记录':i.localWriteOff==='NOT_RECORDED'?'本站尚未核销':'核销状态未记录'}</p>)}
     {read?.refund?.truncated?<p>记录已截断，合计未知。</p>:null}
-    {r.dataOrigin==='JOINPAY_LOCAL_ACCEPTANCE'?<AdminOriginalRefundPanel orderId={orderId} basis="PRESTART_TERMINATION" reference={r.id}
-      canWrite={canWrite&&read?.canReview===true} binding={binding} onRecorded={()=>reload(n=>n+1)} actionsTarget={actionsTarget}/>:<p>本地受控责任未接真实渠道。</p>}
+    {r.dataOrigin==='LOCAL_CONTROLLED'?<p>本地受控责任未接真实渠道。</p>:null}
    </div>:null}
    {(canWrite&&read?.canReview&&(r.state==='REQUESTED'||r.state==='REVIEW_REQUIRED')||pending)?<>{actionsTarget===undefined?<Button size="sm" variant="secondary" onClick={()=>setReviewOpen(true)} disabled={busy}>处理结束申请</Button>:actionsTarget?createPortal(<Button size="sm" variant="secondary" onClick={()=>setReviewOpen(true)} disabled={busy}>处理结束申请</Button>,actionsTarget):null}<Dialog open={reviewOpen} onOpenChange={open=>{if(!busy)setReviewOpen(open);}}><DialogContent><DialogHeader><DialogTitle>处理未开租结束申请</DialogTitle><DialogDescription>核对订单和双方情况后选择处理方式。</DialogDescription></DialogHeader><div className="space-y-3">
     <p>原申请：{r.reason} · 原款全额 {r.fullRefundCents===null?'未知':formatFundingCents(r.fullRefundCents)}</p>

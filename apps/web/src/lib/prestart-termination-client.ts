@@ -6,6 +6,7 @@ export type PrestartRequest = { id:string;revision:string;state:"REQUESTED"|"REV
   channelSubmission:"NOT_REPORTED";bankArrival:"UNKNOWN" };
 export type PrestartView = { contractVersion:"order-prestart-termination.v1";orderId:string;orderRevision:string;
   eligibility:{allowed:boolean;reason:string|null;refundCents:string|null};request:PrestartRequest|null;
+  cancellationReasons:{code:string;label:string}[];
   refund:PrestartRefundProgress|null;
   coverage:"LOCAL_REGISTERED_ONLY";asOf:string|null;localAcceptanceObservedAt:string|null;unknowns:string[];bankArrival:"UNKNOWN" };
 const invalid=()=>new OrderRequestError(502,{error:{code:"PRESTART_CONTRACT_REQUIRED",message:"未开租结束依据暂不可用，请保留原请求并重读"}});
@@ -68,14 +69,21 @@ export function parsePrestartView(value:unknown,orderId:string):PrestartView{
  const refundCents=cents(e.refundCents);if(!e.allowed&&refundCents!==null)throw invalid();
  const request=parsePrestartRequest(r.request),refund=parsePrestartRefund(r.refund);
  if(refund?.simulationScope&&request?.dataOrigin!=='LOCAL_CONTROLLED')throw invalid();
+ const options=r.cancellationReasons===undefined?[]:r.cancellationReasons;
+ if(!Array.isArray(options)||options.length>10)throw invalid();
+ const cancellationReasons=options.map(v=>{const item=object(v),code=text(item.code,64),label=text(item.label,100);
+  if(!/^[A-Z_]+$/.test(code))throw invalid();return{code,label};});
+ if(new Set(cancellationReasons.map(v=>v.code)).size!==cancellationReasons.length)throw invalid();
  return{contractVersion:'order-prestart-termination.v1',orderId,orderRevision:revision(r.orderRevision),eligibility:{allowed:e.allowed,reason:e.reason as string|null,refundCents},
-  request,refund,coverage:'LOCAL_REGISTERED_ONLY',asOf:time(r.asOf),localAcceptanceObservedAt:time(r.localAcceptanceObservedAt),unknowns:r.unknowns as string[],bankArrival:'UNKNOWN'};
+  request,refund,cancellationReasons,coverage:'LOCAL_REGISTERED_ONLY',asOf:time(r.asOf),localAcceptanceObservedAt:time(r.localAcceptanceObservedAt),unknowns:r.unknowns as string[],bankArrival:'UNKNOWN'};
 }
 export const prestartApi={
- read:async(userId:string,orderId:string,signal?:AbortSignal)=>parsePrestartView(await requestOrderJson<unknown>(`/api/orders/${encodeURIComponent(orderId)}/prestart-termination`,{expectedUserId:userId,signal}),orderId),
- request:async(userId:string,orderId:string,key:string,body:Record<string,unknown>)=>{
-  const r=object(await requestOrderWrite<unknown>(`/api/orders/${encodeURIComponent(orderId)}/prestart-termination/requests`,{expectedUserId:userId,key,body}));
+ read:async(userId:string,orderId:string,signal?:AbortSignal)=>parsePrestartView(await requestOrderJson<unknown>(`/api/orders/${encodeURIComponent(orderId)}/prestart-termination`,{subject:userId,signal}),orderId),
+ request:async(userId:string,orderId:string,key:string,body:Record<string,unknown>,action:'requests'|'cancel'='requests')=>{
+  const r=object(await requestOrderWrite<unknown>(`/api/orders/${encodeURIComponent(orderId)}/prestart-termination/${action}`,{subject:userId,key,body}));
   if(r.contractVersion!=='order-prestart-termination.v1'||r.orderId!==orderId||typeof r.existing!=='boolean')throw invalid();
-  const request=parsePrestartRequest(r.request);if(!request)throw invalid();return{orderId,request,existing:r.existing};
+  const request=parsePrestartRequest(r.request);
+  if(!request && !(action==='requests'&&r.outcome==='NOT_SUBMITTED'&&r.existing===false))throw invalid();
+  return{orderId,request,existing:r.existing};
  }
 };

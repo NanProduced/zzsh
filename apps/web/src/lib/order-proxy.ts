@@ -15,7 +15,7 @@ const webOrigin =
   process.env.ZZSH_WEB_ORIGIN ?? (local ? "http://127.0.0.1:3100" : "");
 const id = "[A-Za-z0-9][A-Za-z0-9._:-]{0,127}";
 const getPath = new RegExp(`^/(?:legacy(?:/${id}(?:/continuation(?:/receipt)?)?)?|${id}(?:/(?:im|settlement|payment-requests|channel-payment-requests|local-checkouts(?:/receipt)?|demo-checkout(?:/receipt)?|refunds|prestart-termination))?)?$`);
-const postPath = new RegExp(`^/(?:legacy/${id}/continuation/(?:preview|propose|confirm|reject)|${id}/(?:cancel|payment-requests|local-checkouts|demo-checkout/confirm|channel-payment-requests(?:/query)?|prestart-termination/requests|settlement-preview|settlements(?:/${id}/decision)?|openings/${id}/confirm))?$`);
+const postPath = new RegExp(`^/(?:legacy/${id}/continuation/(?:preview|propose|confirm|reject)|${id}/(?:cancel|payment-requests|local-checkouts|demo-checkout/confirm|channel-payment-requests(?:/query)?|prestart-termination/(?:requests|cancel)|settlement-preview|settlements(?:/${id}/decision)?|openings/${id}/confirm))?$`);
 const error = (status: number, code: string, requestId: string) =>
   Response.json(
     { error: { code, message: "订单请求未完成", requestId } },
@@ -50,7 +50,6 @@ export async function forwardOrderRequest(
     (method !== "GET" && request.headers.get("origin") !== webOrigin)
   )
     return error(403, "FORBIDDEN", requestId);
-  const channelPayment = resource === "orders" && path.includes("/channel-payment-requests");
   const localCheckout = resource === "orders" && new RegExp(`^/${id}/local-checkouts(?:/receipt)?$`).test(path);
   const demoCheckout = resource === "orders" && new RegExp(`^/${id}/demo-checkout(?:/receipt|/confirm)?$`).test(path);
   if (localCheckout || demoCheckout) {
@@ -64,8 +63,13 @@ export async function forwardOrderRequest(
   const legacyTeamRead = resource === "orders" && method === "GET" && (path === "/legacy-im-groups" || /^\/legacy_order_[a-f0-9]{40}\/im$/.test(path));
   if ((refundRead || prestart) && new URL(request.url).search) return error(400, "INVALID_ARGUMENT", requestId);
   const expectedUserId = request.headers.get("x-zzsh-expected-user-id");
-  if ((channelPayment || localCheckout || demoCheckout || refundRead || prestart || unifiedList || legacyTeamRead) && (!expectedUserId || !new RegExp(`^${id}$`).test(expectedUserId)))
-    return error(400, "INVALID_ARGUMENT", requestId);
+  // Every user order read/write is bound to the identity the page rendered. The previous
+  // allowlist covered payments, refunds and the unified list only, so a stale tab could
+  // forward opening confirmations, settlement decisions and legacy continuation writes
+  // under a Cookie that had since switched to another subject.
+  const boundOrderRequest = resource === "orders";
+  if (boundOrderRequest && (!expectedUserId || !new RegExp(`^${id}$`).test(expectedUserId)))
+    return error(400, "IDENTITY_BINDING_REQUIRED", requestId);
   if (resource === "rental-price-preview") {
     const url = new URL(request.url), refs = ["accountId", "versionId", "releaseId"];
     if (url.pathname !== "/api/rental-price-preview") return error(404, "NOT_FOUND", requestId);
@@ -104,10 +108,11 @@ export async function forwardOrderRequest(
   }
   let upstream: Response;
   try {
-    if (channelPayment || localCheckout || demoCheckout || refundRead || prestart || unifiedList || legacyTeamRead) {
+    if (boundOrderRequest) {
       const authHeaders = new Headers({ origin: webOrigin, "x-request-id": requestId });
       if (cookies) authHeaders.set("cookie", cookies);
-      // 同一份捕获Cookie核身份，旧标签页不能借新账号会话读取私有订单或提交渠道请求。
+      // 同一份捕获Cookie核身份：页面预期用户与当前会话不一致时，任何订单读/写都不转发。
+      // 旧标签页不能借新账号会话读取私有订单、确认开租、决定结算或办理旧单续办。
       const auth = await fetch(new URL("/api/auth/user/get-session", apiOrigin), { method: "GET", headers: authHeaders, cache: "no-store", redirect: "error", signal: deadline });
       if (!auth.ok) return error(auth.status >= 400 && auth.status < 500 ? auth.status : 503, auth.status === 403 ? "FORBIDDEN" : auth.status >= 400 && auth.status < 500 ? "UNAUTHENTICATED" : "INTERNAL_ERROR", requestId);
       const session = JSON.parse(new TextDecoder().decode(await readBoundedBody(auth, 64 * 1024, deadline)));

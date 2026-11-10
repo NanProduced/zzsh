@@ -3,9 +3,10 @@ import { ProfileImage } from "@zzsh/ui/profile-image";
 
 
 import { useCallback, useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
-import { ChevronLeft, CircleAlert, EyeOff, Eye, RefreshCw, Search, UserPlus, X } from "lucide-react";
+import { CircleAlert, EyeOff, Eye, RefreshCw, Search, UserPlus, X } from "lucide-react";
 import { EntityPreviewTrigger, PreviewCardShell } from "../components/admin-preview";
 import { orderTeamMemberRole, type OrderTeamAccess, type OrderTeamMember } from "@zzsh/ui/order-team-panel";
+import type { NimWebClientLike } from "@zzsh/im-client/nim-web-client";
 import { initialOf } from "./im-support-format";
 import "./im-support-group-settings.css";
 
@@ -67,6 +68,78 @@ export function groupPreferenceOf(preferences: OrderGroupPreferenceMap, orderId:
 
 export function withGroupPreference(preferences: OrderGroupPreferenceMap, orderId: string, patch: Partial<OrderGroupPreference>): OrderGroupPreferenceMap {
   return { ...preferences, [orderId]: { ...groupPreferenceOf(preferences, orderId), ...patch } };
+}
+
+/**
+ * Pin is owned by NIM cloud per account. The hook exposes only numeric team
+ * ids; local preferences remain the fallback when the client cannot reach
+ * cloud conversations (local test transport or a disabled deployment).
+ */
+export type OrderGroupCloudPins = {
+  status: "LOADING" | "CLOUD" | "LOCAL";
+  teamIds: ReadonlySet<string>;
+  error: string | null;
+  toggle: (teamId: string, pinned: boolean) => Promise<void>;
+};
+
+const ORDER_TEAM_ID = /^[0-9]{1,19}$/;
+
+function pinnedTeamIds(conversationIds: readonly string[], accountId: string): Set<string> {
+  const prefix = `${accountId}|2|`;
+  return new Set(conversationIds
+    .filter((value) => typeof value === "string" && value.startsWith(prefix))
+    .map((value) => value.slice(prefix.length))
+    .filter((value) => ORDER_TEAM_ID.test(value)));
+}
+
+function withTeamPin(current: ReadonlySet<string>, teamId: string, pinned: boolean): Set<string> {
+  const next = new Set(current);
+  if (pinned) next.add(teamId);
+  else next.delete(teamId);
+  return next;
+}
+
+export function useOrderGroupCloudPins(client: NimWebClientLike | null | undefined): OrderGroupCloudPins {
+  const [state, setState] = useState<{ status: "LOADING" | "CLOUD" | "LOCAL"; teamIds: Set<string>; error: string | null }>({ status: "LOADING", teamIds: new Set(), error: null });
+  const clientRef = useRef(client);
+  clientRef.current = client;
+  useEffect(() => {
+    if (!client || typeof client.getStickTopConversationIds !== "function" || typeof client.setConversationStickTop !== "function") {
+      setState({ status: "LOCAL", teamIds: new Set(), error: null });
+      return;
+    }
+    let active = true;
+    setState({ status: "LOADING", teamIds: new Set(), error: null });
+    void client.getStickTopConversationIds().then((conversationIds) => {
+      if (!active) return;
+      setState({ status: "CLOUD", teamIds: pinnedTeamIds(conversationIds, client.accountId), error: null });
+    }).catch(() => {
+      if (!active) return;
+      setState({ status: "LOCAL", teamIds: new Set(), error: "云信置顶暂不可用，当前保留本机置顶。" });
+    });
+    return () => { active = false; };
+  }, [client]);
+  const toggle = useCallback(async (teamId: string, pinned: boolean) => {
+    const current = clientRef.current;
+    if (!current?.setConversationStickTop || state.status !== "CLOUD") throw new Error("云信置顶不可用");
+    if (!ORDER_TEAM_ID.test(teamId)) throw new Error("订单群标识无效");
+    setState((previous) => ({ ...previous, teamIds: withTeamPin(previous.teamIds, teamId, pinned), error: null }));
+    try {
+      await current.setConversationStickTop(`${current.accountId}|2|${teamId}`, pinned);
+    } catch (cause) {
+      const forbidden = (cause as { code?: unknown } | null)?.code === 403;
+      setState((previous) => ({
+        ...previous,
+        status: forbidden ? "LOCAL" : previous.status,
+        teamIds: withTeamPin(previous.teamIds, teamId, !pinned),
+        error: forbidden
+          ? "云信拒绝云端置顶（403）：当前 App/账号未开通该能力，已回退本机置顶。"
+          : "云信置顶更新失败，未改变置顶状态。",
+      }));
+      throw cause;
+    }
+  }, [state.status]);
+  return { ...state, toggle };
 }
 
 type StaffAvailability = "AVAILABLE" | "PAUSED" | "OFF_DUTY";
@@ -142,7 +215,7 @@ function PreferenceSwitch({ pref, label, hint, active, onClick }: { pref: string
   </button>;
 }
 
-export function AdminOrderGroupSettingsDrawer({ info, request, preferences, onPreferenceChange, onHide, onClose, inviteMember }: {
+export function AdminOrderGroupSettingsDrawer({ info, request, preferences, onPreferenceChange, onHide, onClose, inviteMember, pinCloud = false }: {
   info: OrderTeamAccess;
   request: <T>(path: string) => Promise<T>;
   preferences: OrderGroupPreference;
@@ -150,6 +223,7 @@ export function AdminOrderGroupSettingsDrawer({ info, request, preferences, onPr
   onHide: () => void;
   onClose: () => void;
   inviteMember?: InviteOrderGroupMember;
+  pinCloud?: boolean;
 }) {
   const [pickerOpen, setPickerOpen] = useState(false);
   const [directory, setDirectory] = useState<AdminInviteTarget[]>([]);
@@ -223,7 +297,6 @@ export function AdminOrderGroupSettingsDrawer({ info, request, preferences, onPr
     onClick={(event) => { if (event.target === event.currentTarget) onClose(); }}>
     <section className="im-og-sheet" onClick={(event) => event.stopPropagation()}>
       <header className="im-og-head">
-        <button type="button" className="im-og-back" data-action="back-to-order-chat" onClick={onClose}><ChevronLeft size={14} />返回会话</button>
         <div className="im-og-head-title"><strong>群设置</strong><span>{info.displayNo}</span></div>
         <button ref={closeRef} type="button" className="im-og-icon-btn" data-action="close-group-settings" aria-label="关闭群设置" onClick={onClose}><X size={15} /></button>
       </header>
@@ -283,10 +356,10 @@ export function AdminOrderGroupSettingsDrawer({ info, request, preferences, onPr
           </div> : null}
         </section>
 
-        <section className="im-og-section" aria-label="本机会话偏好">
-          <h3>本机会话偏好</h3>
+        <section className="im-og-section" aria-label="会话偏好">
+          <h3>会话偏好</h3>
           <div className="im-og-prefs">
-            <PreferenceSwitch pref="pin" label="置顶会话" hint="本机列表排到最前" active={preferences.pinned} onClick={() => onPreferenceChange({ pinned: !preferences.pinned })} />
+            <PreferenceSwitch pref="pin" label="置顶会话" hint={pinCloud ? "云信账号同步，跨设备生效" : "本机列表排到最前"} active={preferences.pinned} onClick={() => onPreferenceChange({ pinned: !preferences.pinned })} />
             <PreferenceSwitch pref="mute" label="消息免打扰" hint="只在本机标记" active={preferences.muted} onClick={() => onPreferenceChange({ muted: !preferences.muted })} />
             <div className="im-og-hide-row">
               <span className="im-og-pref-copy"><b>{preferences.hidden ? "已在本机隐藏" : "不显示会话"}</b><small>只隐藏本机列表，不影响群聊。</small></span>
@@ -295,7 +368,7 @@ export function AdminOrderGroupSettingsDrawer({ info, request, preferences, onPr
               </button>
             </div>
           </div>
-          <p className="im-og-note">偏好只保存在本机；免打扰不拦截平台通知。</p>
+          <p className="im-og-note">{pinCloud ? "置顶保存在云信账号，换浏览器或环境后仍会同步；免打扰和隐藏只在本机。若云信未开通该能力，会自动回退本机并提示。" : "偏好只保存在本机；免打扰不拦截平台通知。"}</p>
         </section>
       </div>
     </section>

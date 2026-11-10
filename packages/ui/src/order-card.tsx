@@ -1,9 +1,12 @@
 "use client";
-import { useState } from "react";
+import { useState, type ReactElement, type ReactNode } from "react";
 import type { NimMessageLike } from "@zzsh/im-client/nim-web-client";
 import type { OrderTeamAccess, OrderTeamTerms } from "./order-team-panel";
 import type { OrderReference } from "@zzsh/im-client/nim-web-client";
 import "./order-card.css";
+
+/** Apps pass their platform tooltip; the shared package never renders a native browser title. */
+export type HintRenderer = (text: string, trigger: ReactElement) => ReactNode;
 
 /** Order-stage cards travel as ordinary chat messages; every fact is read from the
     role-projected order access, never from the card payload itself. */
@@ -17,8 +20,20 @@ const HEADINGS: Record<OrderCardKind, string> = {
   ORDER_OPENING: "开租确认",
   ORDER_ENDING: "结束确认",
   ORDER_SETTLED: "结算完成",
+  ORDER_CANCELLED: "订单已取消",
   ORDER_PRICE_CHANGE: "价格调整待确认",
 };
+const CANCEL_REASON_LABEL: Record<string, string> = {
+  USER: "用户取消",
+  TIMEOUT: "超时取消",
+  PRESTART_TERMINATED: "未开租终止",
+  MANUAL_CLOSE: "客服手动结束",
+  SUPPORT_CANCELLED_REFUND: "客服取消并退款",
+  SUPPORT_UNPAID: "客服取消未付款订单",
+};
+function cancelReasonText(reason: string | null | undefined): string {
+  return (reason && CANCEL_REASON_LABEL[reason]) || "订单已取消";
+}
 /** Cents only. Anything else stays unreadable instead of being shown as 0. */
 function amountText(value: string | null | undefined, basis: Basis): string {
   if (basis !== "QUOTE" || typeof value !== "string" || !/^(0|[1-9]\d{0,17})$/.test(value)) return PENDING;
@@ -91,13 +106,32 @@ function ackSourceText(confirmed: boolean, source: OpeningAckSource | null | und
 function partyText(party: "RENTER" | "OWNER"): string {
   return party === "RENTER" ? "租客" : "号主";
 }
+/** Keep the game name once: strip a leading game prefix from the account title. */
+export function accountSummaryOf(info: Pick<OrderTeamAccess, "gameName" | "account">): string {
+  const title = info.account.title?.trim() || "账号";
+  const game = info.gameName?.trim();
+  if (!game || !title.startsWith(game)) return title;
+  const rest = title.slice(game.length).replace(/^[\s·|:：-]+/, "").trim();
+  return rest || title;
+}
 /** Server rejection codes become stable copy; raw messages/ids never reach the card. */
 function confirmErrorText(error: unknown): string {
+  // The user order client marks results whose server outcome is unknown. Do not describe them
+  // as "未完成": the original key/body is still frozen and only the order detail may recover it.
+  const code = (error as { code?: string } | null)?.code;
+  if (code === "OPENING_CONFIRM_UNKNOWN" || code === "OPENING_CONFIRM_PENDING") return "开租确认结果未确认；原申请与原键已保留，请到订单详情按原请求查询/恢复，不要重复提交。";
+  if (code === "ORIGINAL_REQUEST_BLOCKED") return "原开租确认记录无法读取或本地存储不可用，已阻止新的提交；请到订单详情或联系客服核对。";
+  if (code === "ORDER_SUBJECT_CHANGED") return "登录状态已变化；原申请已保留，请到订单详情按原请求核对。";
   const status = (error as { status?: number } | null)?.status;
   if (status === 403) return "当前账号无权确认本单，请联系平台客服。";
   if (status === 401 || status === 423) return "登录状态已变化，请重新确认身份后再操作。";
   if (status === 409) return "期初版本已更新或已确认，请刷新后再操作。";
   return "确认未完成，请稍后重试。";
+}
+/** Only these codes mean a frozen original request exists; every other error keeps the retry copy. */
+function needsOriginalRecovery(error: unknown): boolean {
+  const code = (error as { code?: string } | null)?.code;
+  return code === "OPENING_CONFIRM_UNKNOWN" || code === "OPENING_CONFIRM_PENDING" || code === "ORIGINAL_REQUEST_BLOCKED";
 }
 function DocIcon() {
   return <svg className="order-card-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
@@ -106,6 +140,9 @@ function DocIcon() {
 }
 function CheckIcon() {
   return <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="m5 12.5 4.5 4.5L19 7.5" /></svg>;
+}
+function ClockIcon() {
+  return <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="8.5" /><path d="M12 7.5V12l3 2" /></svg>;
 }
 function ChevronIcon({ className }: { className: string }) {
   return <svg className={className} width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6" /></svg>;
@@ -118,6 +155,10 @@ function CopyIcon() {
 }
 function InfoIcon() {
   return <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9" /><path d="M12 11v5" /><path d="M12 8h.01" /></svg>;
+}
+function InfoHint({ text, renderHint }: { text: string; renderHint?: HintRenderer }) {
+  const trigger = <button type="button" className="order-card-info" aria-label={text}><InfoIcon /></button>;
+  return <>{renderHint ? renderHint(text, trigger) : trigger}</>;
 }
 
 /** Display-only shared reference; the destination authorizes access to order facts. */
@@ -137,21 +178,29 @@ export function OrderReferenceMessage({ order, onOpenOrder }: { order: OrderRefe
  * confirmation, one account line, a compact amount list and a footer with the
  * order number. The order detail page owns the full inventory and the actions.
  */
-export function OrderCardMessage({ message, info, onOpenOrder, onConfirmOpening, onConfirmOpeningOnBehalf }: {
+export function OrderCardMessage({ message, info, onOpenOrder, onConfirmOpening, onConfirmOpeningOnBehalf, renderHint }: {
   message: NimMessageLike; info: OrderTeamAccess; onOpenOrder?: () => void;
   /** Party confirmation runs through the user order endpoint; resolution is never faked locally. */
   onConfirmOpening?: (info: OrderTeamAccess) => Promise<void>;
   /** Staff confirmation on behalf of one missing party; the server re-checks permission and order scope. */
   onConfirmOpeningOnBehalf?: (info: OrderTeamAccess, party: "RENTER" | "OWNER") => Promise<void>;
+  renderHint?: HintRenderer;
 }) {
   const [expanded, setExpanded] = useState(false);
   const [copied, setCopied] = useState(false);
   const [confirmTarget, setConfirmTarget] = useState<ConfirmTarget | null>(null);
   const [confirming, setConfirming] = useState(false);
   const [confirmError, setConfirmError] = useState("");
+  const [confirmRecovery, setConfirmRecovery] = useState(false);
   const [confirmSubmittedFor, setConfirmSubmittedFor] = useState<string | null>(null);
   const card = message.card;
   if (!card) return null;
+  // Stage cards are Bot-owned. Requiring the current group's bot sender (when the
+  // projection provides one) keeps a user-forged custom message from changing the
+  // headline; the facts below still come only from the authorized order read.
+  if (card.orderId !== info.orderId || (info.botAccountId && message.senderId !== info.botAccountId)) {
+    return <p className="order-team-message-revoked" role="status">订单卡片来源待核对，请到订单详情处理。</p>;
+  }
   const heading = HEADINGS[card.kind] ?? HEADINGS.ORDER_PRICE_CHANGE;
   const terms = info.terms;
   const basis = basisOf(terms);
@@ -204,15 +253,37 @@ export function OrderCardMessage({ message, info, onOpenOrder, onConfirmOpening,
     else figures.push({ label: "租客合计", value: money(staff?.buyerTotal) }, { label: "号主合计", value: money(staff?.ownerTotal) });
     if (party === "STAFF") platform = money(staff?.platformContribution);
     note = "到账时间以支付渠道为准。";
+  } else if (card.kind === "ORDER_CANCELLED") {
+    meta.push({ label: "取消原因", value: cancelReasonText(info.cancelReason) });
+    if (info.orderEndedAt) meta.push({ label: "取消时间", value: timeLabel(info.orderEndedAt) });
+    // Refund only concerns the renter who paid; the owner never sees a refund row.
+    if (party === "RENTER") {
+      if (info.refundPending === true) meta.push({ label: "退款", value: "处理中" });
+      else if (info.refundCompletedAt) meta.push({ label: "退款", value: "已完成" });
+      figures.push({ label: "实付", value: money(terms?.paidTotal) });
+      if (info.refundPending === true || info.refundCompletedAt) note = "退款进度以支付渠道为准。";
+    } else if (party === "OWNER") {
+      figures.push({ label: "应收", value: money(terms?.rentalAmount) });
+    } else {
+      figures.push({ label: "租客合计", value: money(staff?.buyerTotal) }, { label: "号主合计", value: money(staff?.ownerTotal) });
+      platform = money(staff?.platformContribution);
+    }
   } else {
     note = "价格调整内容以订单详情为准，确认前金额不变。";
   }
 
   const acks = info.openingAcks;
   const viewerAck = party === "RENTER" ? acks?.renter : party === "OWNER" ? acks?.owner : null;
+  const ackRule = (confirmed: boolean | undefined, source: OpeningAckSource | null | undefined): string => {
+    if (!confirmed) return "";
+    if (source === "AUTO") return "双方未确认，已按平台设置的等待期由系统自动确认；租期自确认时起算。";
+    if (source === "ON_BEHALF") return "客服已代未确认方完成确认；租期自确认时起算。";
+    return "";
+  };
   const openingConfirmed = card.kind === "ORDER_OPENING"
     ? info.openingState ? info.openingState === "CONFIRMED" : Boolean(acks?.renter && acks?.owner)
     : false;
+  const orderTerminal = info.orderStatus === "CANCELLED" || info.orderStatus === "COMPLETED";
   const openingId = typeof info.openingId === "string" && info.openingId ? info.openingId : null;
   const openingVersion = Number.isInteger(info.openingVersion) ? Number(info.openingVersion) : null;
   const openingPending = card.kind === "ORDER_OPENING" && !openingConfirmed && info.orderStatus === "PAID";
@@ -223,10 +294,15 @@ export function OrderCardMessage({ message, info, onOpenOrder, onConfirmOpening,
     && openingId !== null && openingVersion !== null && Boolean(onConfirmOpeningOnBehalf);
   const openingKey = `${openingId ?? ""}:${openingVersion ?? ""}`;
   const confirmSubmitted = confirmSubmittedFor === openingKey;
-  const openingDue = canPartyConfirm && info.openingConfirmDueAt ? info.openingConfirmDueAt : null;
-  const actionLabel = card.kind === "ORDER_OPENING"
-    ? party === "STAFF" ? "查看本单" : canPartyConfirm ? "查看订单详情" : viewerAck === false ? "查看并确认开租" : "查看订单详情"
-    : card.kind === "ORDER_ENDING" ? party === "STAFF" ? "去处理结束" : "查看并处理" : "查看订单详情";
+  const openingDue = canPartyConfirm && typeof info.openingConfirmDueAt === "string" && Number.isFinite(Date.parse(info.openingConfirmDueAt)) ? info.openingConfirmDueAt : null;
+  const openingRule = canPartyConfirm
+    ? openingDue ? `双方未确认时，将于 ${timeLabel(openingDue)} 自动确认并开始租期。` : "双方确认后开始租期；自动确认时间未记录，请联系客服核对。"
+    : "";
+  if (card.kind === "ORDER_OPENING" && openingPending) meta.push({ label: "自动确认", value: openingDue ? timeLabel(openingDue) : "未记录" });
+  const actionLabel = orderTerminal ? "订单详情"
+    : card.kind === "ORDER_OPENING"
+      ? party === "STAFF" ? "查看本单" : "订单详情"
+      : card.kind === "ORDER_ENDING" ? party === "STAFF" ? "去处理结束" : "查看并处理" : "查看订单详情";
   // The user site needs the party view to open the right order tab; staff always pass a callback.
   const detailHref = party === "STAFF"
     ? `/account?orderId=${encodeURIComponent(info.orderId)}`
@@ -234,7 +310,7 @@ export function OrderCardMessage({ message, info, onOpenOrder, onConfirmOpening,
   const lineAmount = (line: OrderTeamTerms["lines"][number]) => party === "STAFF"
     ? `租客 ${money(line.buyerAmount)} · 号主 ${money(line.ownerAmount)}`
     : money(line.amount);
-  const accountTitle = info.account.title?.trim() || "账号";
+  const accountTitle = accountSummaryOf(info);
   const totals = <>
     {figures.length ? <dl className="order-card-figures" data-count={figures.length}>{figures.map(figure =>
       <div className="order-card-figure" key={figure.label}><dt>{figure.label}</dt><dd data-pending={figure.value === PENDING ? "true" : undefined}>{figure.value}</dd></div>)}</dl> : null}
@@ -253,12 +329,21 @@ export function OrderCardMessage({ message, info, onOpenOrder, onConfirmOpening,
   const openConfirm = (target: ConfirmTarget) => {
     if (confirming) return;
     setConfirmError("");
+    setConfirmRecovery(false);
     setConfirmTarget(target);
   };
   const closeConfirm = () => {
     if (confirming) return;
     setConfirmTarget(null);
     setConfirmError("");
+    setConfirmRecovery(false);
+  };
+  const openOrderForRecovery = () => {
+    setConfirmTarget(null);
+    setConfirmError("");
+    setConfirmRecovery(false);
+    if (onOpenOrder) onOpenOrder();
+    else if (typeof window !== "undefined") window.location.assign(detailHref);
   };
   const submitConfirm = async () => {
     const target = confirmTarget;
@@ -271,6 +356,9 @@ export function OrderCardMessage({ message, info, onOpenOrder, onConfirmOpening,
       setConfirmTarget(null);
       setConfirmSubmittedFor(openingKey);
     } catch (error) {
+      // An unknown result is not a failed attempt: keep the dialog but replace the retry submit
+      // with a route to the order detail, where the frozen original key can be queried/recovered.
+      setConfirmRecovery(needsOriginalRecovery(error));
       setConfirmError(confirmErrorText(error));
     } finally {
       setConfirming(false);
@@ -282,33 +370,33 @@ export function OrderCardMessage({ message, info, onOpenOrder, onConfirmOpening,
     <header className="order-card-head">
       <DocIcon />
       <strong className="order-card-title">{heading}</strong>
+      {note ? <InfoHint text={note} renderHint={renderHint} /> : null}
     </header>
     {showAcks ? <div className="order-card-acks" aria-label="开租确认状态">
       <div className="order-card-ack" data-state={acks?.renter ? "confirmed" : "pending"} data-self={party === "RENTER" ? "true" : undefined} data-source={acks?.renter ? info.openingAckSources?.renter ?? "PARTY" : undefined}>
-        <span className="order-card-ack-mark" aria-hidden="true">{acks?.renter ? <CheckIcon /> : null}</span>
+        <span className="order-card-ack-mark" aria-hidden="true">{acks?.renter ? <CheckIcon /> : <ClockIcon />}</span>
         <span className="order-card-ack-text">
           <span className="order-card-ack-name">租客</span>
-          <span className="order-card-ack-state">{ackSourceText(Boolean(acks?.renter), info.openingAckSources?.renter)}</span>
+          <span className="order-card-ack-state">{ackSourceText(Boolean(acks?.renter), info.openingAckSources?.renter)}{ackRule(acks?.renter, info.openingAckSources?.renter) ? <InfoHint text={ackRule(acks?.renter, info.openingAckSources?.renter)} renderHint={renderHint} /> : null}</span>
         </span>
       </div>
       <span className="order-card-ack-link" aria-hidden="true" />
       <div className="order-card-ack" data-state={acks?.owner ? "confirmed" : "pending"} data-self={party === "OWNER" ? "true" : undefined} data-source={acks?.owner ? info.openingAckSources?.owner ?? "PARTY" : undefined}>
-        <span className="order-card-ack-mark" aria-hidden="true">{acks?.owner ? <CheckIcon /> : null}</span>
+        <span className="order-card-ack-mark" aria-hidden="true">{acks?.owner ? <CheckIcon /> : <ClockIcon />}</span>
         <span className="order-card-ack-text">
           <span className="order-card-ack-name">号主</span>
-          <span className="order-card-ack-state">{ackSourceText(Boolean(acks?.owner), info.openingAckSources?.owner)}</span>
+          <span className="order-card-ack-state">{ackSourceText(Boolean(acks?.owner), info.openingAckSources?.owner)}{ackRule(acks?.owner, info.openingAckSources?.owner) ? <InfoHint text={ackRule(acks?.owner, info.openingAckSources?.owner)} renderHint={renderHint} /> : null}</span>
         </span>
       </div>
     </div> : null}
-    {showAcks && openingConfirmed && info.openingConfirmSource === "AUTO" ? <p className="order-card-ack-note">双方未确认，已按 40 分钟规则由系统自动确认；租期自确认时起算。</p> : null}
-    {showAcks && openingConfirmed && info.openingConfirmSource === "ON_BEHALF" ? <p className="order-card-ack-note">客服已代未确认方完成确认；租期自确认时起算。</p> : null}
+    {card.kind === "ORDER_OPENING" && info.orderStatus === "CANCELLED" ? <p className="order-card-terminal" role="status">订单已取消（{cancelReasonText(info.cancelReason)}），开租确认已失效。</p> : null}
+    {card.kind === "ORDER_OPENING" && info.orderStatus === "COMPLETED" ? <p className="order-card-terminal" role="status">订单已结束，开租确认已失效。</p> : null}
     <div className="order-card-subject">
       <strong className="order-card-account">{accountTitle}</strong>
-      <span className="order-card-game">{info.gameName}</span>
     </div>
     {!readAmounts ? <p className="order-card-verify" role="status"><i className="order-card-warn-dot" aria-hidden="true" />金额依据待核对，最终以订单详情为准。</p> : null}
     {meta.length ? <dl className="order-card-meta">{meta.map(item =>
-      <div className="order-card-meta-row" key={item.label}><dt>{item.label}</dt><dd>{item.value}</dd></div>)}</dl> : null}
+      <div className="order-card-meta-row" key={item.label}><dt>{item.label}{item.label === "自动确认" && openingRule ? <InfoHint text={openingRule} renderHint={renderHint} /> : null}</dt><dd>{item.value}</dd></div>)}</dl> : null}
     {card.kind === "ORDER_OPENING" ? <div className="order-card-money">
       <div className="order-card-rows">
         <div className="order-card-row">
@@ -338,40 +426,47 @@ export function OrderCardMessage({ message, info, onOpenOrder, onConfirmOpening,
     </div> : null}
     {card.kind !== "ORDER_OPENING" && (figures.length || platform) ? <div className="order-card-money">{totals}</div> : null}
     {canPartyConfirm && !confirmSubmitted ? <div className="order-card-confirm" role="group" aria-label="开租确认操作">
-      <p className="order-card-confirm-copy">{openingDue ? `双方未确认时，将于 ${timeLabel(openingDue)} 自动确认并开始租期。` : "双方确认后开始租期；超时未确认将由系统自动确认。"}</p>
       <button type="button" className="order-card-confirm-button" onClick={() => openConfirm({ mode: "PARTY" })}>确认开租</button>
+    </div> : null}
+    {card.kind === "ORDER_OPENING" && info.orderStatus === "CANCELLED" ? <div className="order-card-confirm" role="group" aria-label="开租确认操作">
+      <button type="button" className="order-card-confirm-button" disabled>确认开租</button>
     </div> : null}
     {confirmSubmitted && !viewerAck ? <p className="order-card-confirm-state" role="status">已提交确认，正在刷新订单状态…</p> : null}
     {canConfirmOnBehalf ? <div className="order-card-confirm" data-staff="true" role="group" aria-label="客服代确认操作">
-      <p className="order-card-confirm-copy">代确认只补齐未确认方，并记录操作人与审计；租期自确认时起算。</p>
-      <div className="order-card-confirm-actions">{missingParties.map(item =>
-        <button type="button" className="order-card-confirm-button" key={item} onClick={() => openConfirm({ mode: "ON_BEHALF", party: item })}>代{partyText(item)}确认</button>)}</div>
+      <div className="order-card-confirm-actions">
+        <InfoHint text="代确认只补齐未确认方，并记录操作人与审计；租期自确认时起算。" renderHint={renderHint} />
+        {missingParties.map(item =>
+          <button type="button" className="order-card-confirm-button" key={item} onClick={() => openConfirm({ mode: "ON_BEHALF", party: item })}>代{partyText(item)}确认</button>)}
+      </div>
     </div> : null}
     <footer className="order-card-foot">
       <span className="order-card-no">
         <span>订单 <b>{info.displayNo}</b></span>
-        <button type="button" className="order-card-copy" aria-label={`复制订单号 ${info.displayNo}`} title="复制订单号" onClick={copyDisplayNo}><CopyIcon /></button>
+        <button type="button" className="order-card-copy" aria-label={`复制订单号 ${info.displayNo}`} onClick={copyDisplayNo}><CopyIcon /></button>
         <span className="order-card-copy-state" role="status" aria-live="polite">{copied ? "已复制" : ""}</span>
       </span>
       {onOpenOrder
-        ? <button type="button" className="order-card-action" onClick={onOpenOrder} title="打开订单详情完成确认与操作">{actionLabel}<ArrowIcon className="order-card-action-chevron" /></button>
-        : <a className="order-card-action" href={detailHref} title="打开订单详情完成确认与操作">{actionLabel}<ArrowIcon className="order-card-action-chevron" /></a>}
+        ? <button type="button" className="order-card-action" onClick={onOpenOrder} aria-label={`${actionLabel}：打开订单详情完成确认与操作`}>{actionLabel}<ArrowIcon className="order-card-action-chevron" /></button>
+        : <a className="order-card-action" href={detailHref} aria-label={`${actionLabel}：打开订单详情完成确认与操作`}>{actionLabel}<ArrowIcon className="order-card-action-chevron" /></a>}
     </footer>
-    {note ? <p className="order-card-note"><InfoIcon /><span>{note}</span></p> : null}
     {confirmTarget ? <div className="order-card-dialog-layer" onClick={event => { if (event.target === event.currentTarget) closeConfirm(); }}
       onKeyDown={event => { if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); closeConfirm(); } }}>
       <div className="order-card-dialog" role="dialog" aria-modal="true" aria-label={confirmTarget.mode === "PARTY" ? "确认开租" : `代${partyText(confirmTarget.party)}确认开租`} data-mode={confirmTarget.mode} aria-busy={confirming}>
         <strong className="order-card-dialog-title">{confirmTarget.mode === "PARTY" ? "确认开租" : `代${partyText(confirmTarget.party)}确认开租`}</strong>
         <p className="order-card-dialog-order">订单 {info.displayNo} · {accountTitle}</p>
         <p className="order-card-dialog-copy">{confirmTarget.mode === "PARTY"
-          ? "请核对账号、押金与物品清单。提交确认后等待另一方确认；双方确认或 40 分钟到期后开始租期，起租时间以平台确认信息为准。"
+          ? openingDue
+            ? "请核对账号、押金与物品清单。提交确认后等待另一方确认；双方确认或本单自动确认时间到期后开始租期，起租时间以平台确认信息为准。"
+            : "请核对账号、押金与物品清单。提交确认后等待另一方确认；本单自动确认时间未记录，请联系客服核对。"
           : `将以客服身份代${partyText(confirmTarget.party)}确认；该操作会记录审计，且只补齐未确认方，不会覆盖已确认记录。`}</p>
         {confirmError ? <p className="order-card-dialog-error" role="alert">{confirmError}</p> : null}
         <div className="order-card-dialog-actions">
           <button type="button" className="order-card-dialog-cancel" onClick={closeConfirm} disabled={confirming} autoFocus>取消</button>
-          <button type="button" className="order-card-dialog-confirm" onClick={() => void submitConfirm()} disabled={confirming} aria-busy={confirming}>
-            {confirming ? "确认中…" : confirmTarget.mode === "PARTY" ? "确认开租" : `代${partyText(confirmTarget.party)}确认`}
-          </button>
+          {confirmRecovery
+            ? <button type="button" className="order-card-dialog-confirm" onClick={openOrderForRecovery}>查看订单详情按原请求核对</button>
+            : <button type="button" className="order-card-dialog-confirm" onClick={() => void submitConfirm()} disabled={confirming} aria-busy={confirming}>
+                {confirming ? "确认中…" : confirmTarget.mode === "PARTY" ? "确认开租" : `代${partyText(confirmTarget.party)}确认`}
+              </button>}
         </div>
       </div>
     </div> : null}

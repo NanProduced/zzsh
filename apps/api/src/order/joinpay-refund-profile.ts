@@ -4,7 +4,7 @@ export type RefundOperation = "SUBMIT" | "QUERY" | "NOTIFY";
 export type RefundWireBinding = JoinpayRefundBinding & Readonly<{merchantIdentityId:string;notifyUrl:string;reason?:string;
   profileId:string;initialProfileSha256:string;keyVersionRef:string}>;
 export type RefundBinding = RefundWireBinding & Readonly<{ intentId: string; postingId: string | null;
-  basisKind?: "POSTING" | "REVIEW_CONFIRMATION" | "PRESTART_TERMINATION"; abnormalConfirmationId?: string | null; orderId: string; paymentConfirmationId: string;
+  basisKind?: "POSTING" | "PRESTART_TERMINATION" | "SUPPORT_CANCELLATION"; orderId: string; paymentConfirmationId: string;
   renterUserId: string; originalPaymentTrxNo: string; responsibilityVersionHash: string }>;
 const sha = (v: string | Uint8Array) => createHash("sha256").update(v).digest("hex"), ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/, SHA = /^[0-9a-f]{64}$/;
 const isSha=(v:unknown):v is string=>typeof v==="string"&&SHA.test(v);

@@ -131,6 +131,60 @@ test("owner refund summary authorizes the owner and exposes only minimal progres
  assert.equal(calls.some(sql=>sql.includes('channel_refund_intent')),false,"unauthorized actor cannot read refund facts");
 });
 
+test("owner sees approved prestart refund waiting for dispatch and failed refunds require help",async()=>{
+ const {readOwnerRefundMinimalSummary}=await import("../src/finance/owner-refund-summary-read");
+ let state:"none"|"failed"|"unknown"|"unavailable"="none";
+ const client={query:async(sql:string)=>{
+  if(sql.includes('SELECT "suspended"'))return{rows:[{suspended:false}]};
+  if(sql.includes('user_identity_state'))return{rows:[]};
+  if(sql.includes('"session"'))return{rows:[{}],rowCount:1};
+  if(sql.includes('o.owner_user_id'))return{rows:[{status:"CANCELLED",cancel_reason:"PRESTART_TERMINATED",paid_confirmation_id:"payment-1",owner_user_id:"owner-1",as_of:"2026-11-06T00:00:00.000000Z"}]};
+  if(sql.includes('channel_refund_intent'))return{rows:state==="none"||state==="unavailable"?[]:[{state:state==="failed"?"FAILED":"NEW_UNKNOWN_STATE",count:"1"}]};
+  if(sql.includes('has_table_privilege'))return{rows:[{ready:state!=="unavailable"}]};
+  if(sql.includes('prestart_liability_complete'))return{rows:[{ready:true}]};
+  throw Error("unexpected query");
+ }} as any;
+ const actor={userId:"owner-1",sessionId:"session-1"};
+ assert.equal((await readOwnerRefundMinimalSummary(client,actor,{orderId:"order-1"})).progress,"PROCESSING");
+ state="failed";assert.equal((await readOwnerRefundMinimalSummary(client,actor,{orderId:"order-1"})).progress,"NEEDS_REVIEW");
+ state="unknown";assert.equal((await readOwnerRefundMinimalSummary(client,actor,{orderId:"order-1"})).progress,"UNKNOWN");
+ state="unavailable";assert.equal((await readOwnerRefundMinimalSummary(client,actor,{orderId:"order-1"})).progress,"UNKNOWN");
+});
+
+test("prestart owner refund lookup cannot count an unrelated refund attempt",async()=>{
+ const {readOwnerRefundMinimalSummary}=await import("../src/finance/owner-refund-summary-read");
+ const client={query:async(sql:string,values:unknown[])=>{
+  if(sql.includes('SELECT "suspended"'))return{rows:[{suspended:false}]};
+  if(sql.includes('user_identity_state'))return{rows:[]};
+  if(sql.includes('"session"'))return{rows:[{}],rowCount:1};
+  if(sql.includes('o.owner_user_id'))return{rows:[{status:"CANCELLED",cancel_reason:"PRESTART_TERMINATED",paid_confirmation_id:"payment-1",owner_user_id:"owner-1",as_of:"2026-11-06T00:00:00.000000Z"}]};
+  if(sql.includes('channel_refund_intent')){assert.match(sql,/basis_kind='PRESTART_TERMINATION'/);assert.deepEqual(values,["order-1",true,"payment-1"]);return{rows:[]};}
+  if(sql.includes('has_table_privilege'))return{rows:[{ready:true}]};
+  if(sql.includes('prestart_liability_complete'))return{rows:[{ready:true}]};
+  throw Error("unexpected query");
+ }} as any;
+ const result=await readOwnerRefundMinimalSummary(client,{userId:"owner-1",sessionId:"session-1"},{orderId:"order-1"});
+ assert.equal(result.progress,"PROCESSING");
+});
+
+test("开租后客服取消的号主只看本单退款进度，未分配与零退款分开",async()=>{
+ const {readOwnerRefundMinimalSummary}=await import("../src/finance/owner-refund-summary-read");
+ let amount="5000",ready=true;const client={query:async(sql:string,values:unknown[])=>{
+  if(sql.includes('SELECT "suspended"'))return{rows:[{suspended:false}]};
+  if(sql.includes('user_identity_state'))return{rows:[]};
+  if(sql.includes('"session"'))return{rows:[{}],rowCount:1};
+  if(sql.includes('o.owner_user_id'))return{rows:[{status:"CANCELLED",cancel_reason:"SUPPORT_AFTER_START_CANCELLED",paid_confirmation_id:"payment-1",owner_user_id:"owner-1",as_of:"2026-11-06T00:00:00.000000Z"}]};
+  if(sql.includes('channel_refund_intent')){assert.match(sql,/basis_kind='SUPPORT_CANCELLATION'/);assert.deepEqual(values,["order-1",true,"payment-1"]);return{rows:[]};}
+  if(sql.includes('has_table_privilege'))return{rows:[{ready}]};
+  if(sql.includes('support_poststart_cancellation_complete'))return{rows:[{ready:true,amount}]};
+  throw Error('unexpected query');
+ }} as any;
+ const actor={userId:"owner-1",sessionId:"session-1"};
+ assert.equal((await readOwnerRefundMinimalSummary(client,actor,{orderId:'order-1'})).progress,'PROCESSING');
+ amount='0';assert.equal((await readOwnerRefundMinimalSummary(client,actor,{orderId:'order-1'})).progress,'NONE');
+ ready=false;assert.equal((await readOwnerRefundMinimalSummary(client,actor,{orderId:'order-1'})).progress,'UNKNOWN');
+});
+
 test("work-view predicate keeps paid or unpaid active orders and only proven unresolved native refunds", async()=>{
  let sql="",args:unknown[]=[];
  const client={query:async(s:string,v:unknown[]=[])=>{

@@ -22,7 +22,7 @@ export type JoinpayCollectionRuntimeDocument = {
   newRequestsEnabled: boolean;
   recovery?: NonNullable<Assembly["recovery"]>;
 };
-type Context = Pick<AppConfig, "provider" | "database"> & { authEnabled: boolean };
+type Context = Pick<AppConfig, "provider" | "database"> & { authEnabled: boolean; settlementRecordingEnabled: boolean };
 const fail = (code: string): never => { throw new ConfigurationError(code); };
 const object = (value: unknown): value is Record<string, unknown> =>
   value !== null && typeof value === "object" && !Array.isArray(value);
@@ -125,11 +125,13 @@ export function loadJoinpayCollectionRuntime(context: Context, env: NodeJS.Proce
       }
       return keys.get(reference)!;
     };
-    const source = { admission, profileFor, keyFor };
+    const source = { admission, profileFor, keyFor, autoOpening: true };
     return {
       admission,
       routes: {
-        ...(document.newRequestsEnabled ? { initial: { admission, profile: submit!,
+        // Closed settlement keeps callbacks/recovery assembled but stops new
+        // real payments that could not be confirmed or posted.
+        ...(document.newRequestsEnabled && context.settlementRecordingEnabled ? { initial: { admission, profile: submit!,
           wire: { tradeMerchantNo: submitDescriptor!.tradeMerchantNo, productName: document.productName!, notifyUrl: submitDescriptor!.notifyUrl } } } : {}),
         execution: { formal: source, profileFor, keyFor },
         read: { formalAdmission: admission, qrHostAllowlist: Object.freeze([...document.qrHostAllowlist]) },

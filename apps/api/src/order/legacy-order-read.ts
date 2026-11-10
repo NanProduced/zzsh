@@ -15,6 +15,7 @@ export async function legacyContinuationReady(client: Pick<PoolClient, "query">)
 // Every consuming relation joins the unique current continuation head as h.
 export const LEGACY_EFFECTIVE_STAGE_SQL = `COALESCE(h.stage,l.source_order_status)`;
 export const LEGACY_CONTINUATION_COMPLETED_AT_SQL = `COALESCE((SELECT created_at FROM zzsh_order.legacy_continuation_version WHERE order_id=l.id AND command='CONFIRM' ORDER BY revision DESC LIMIT 1),l.source_completed_at)`;
+export const LEGACY_CONTINUATION_CANCELLED_AT_SQL = `COALESCE((SELECT created_at FROM zzsh_order.legacy_continuation_version WHERE order_id=l.id AND command='SUPPORT_CANCEL' ORDER BY revision DESC LIMIT 1),l.source_cancelled_at)`;
 export const LEGACY_ORDER_STATUS_SQL = `CASE WHEN ${LEGACY_EFFECTIVE_STAGE_SQL}=5 THEN 'CANCELLED' WHEN ${LEGACY_EFFECTIVE_STAGE_SQL}=4 THEN 'COMPLETED'
  WHEN ${LEGACY_EFFECTIVE_STAGE_SQL}=1 AND l.source_pay_status=0 THEN 'PENDING_PAYMENT'
  WHEN ${LEGACY_EFFECTIVE_STAGE_SQL} IN(2,3,6,7,8,9) AND l.source_pay_status=1 THEN 'PAID' ELSE 'UNKNOWN' END`;

@@ -43,6 +43,30 @@ test("mapped source-qualified route rejects native IDs, path traversal, double e
  for(const id of ["7","order_native","history%3Aid","legacy_order_%252f","legacy_order_%2F","legacy_order_"+"f".repeat(40)+"%2Fextra"]){assert.throws(()=>parseLegacyContinuationPath("/legacy/"+id+"/continuation"));}
  assert.equal(parseLegacyContinuationPath("/legacy/"+legacyBinding.id+"/continuation/confirm/extra"),null);
 });
+test("legacy support cancellation allocates its refund before commit and preserves the original key on replay",async t=>{
+ const auth:typeof import('../src/auth/auth-security')=require('../src/auth/auth-security');
+ const allocation:typeof import('../src/order/legacy-support-cancel-refund')=require('../src/order/legacy-support-cancel-refund');
+ t.mock.method(auth,'readAdminContext',async()=>({userId:'staff_1',sessionId:'session_1'}));
+ t.mock.method(walletCredit,'authorizeLegacyFinanceDuty',async(...[_client,actor]:Parameters<typeof walletCredit.authorizeLegacyFinanceDuty>)=>({binding:legacyBinding,userIds:[],actor,financeDutyKind:'OWNER_CREDIT'}));
+ let applied=0;const events:string[]=[],records=new Map<string,any>();
+ t.mock.method(c,'applyLegacyContinuationCommand',async(...[_client,_actor,id,input]:Parameters<typeof c.applyLegacyContinuationCommand>)=>{applied++;return {status:200,body:{orderId:id,command:input.kind,stage:'5',versionId:'version_1'}};});
+ t.mock.method(allocation,'allocateLegacySupportCancelRefundInTransaction',async(...[_client,_actor,id,key]:Parameters<typeof allocation.allocateLegacySupportCancelRefundInTransaction>)=>{
+  assert.equal(id,legacyBinding.id);assert.equal(key,'original_cancel_key');assert.ok(records.has(key),'original receipt must exist before allocation');
+  events.push('allocation');return {state:'CREATED',replayed:false};
+ });
+ const pool={connect:async()=>({release(){},query:async(sql:string,v:unknown[]=[])=>{
+  if(sql==='COMMIT')events.push('commit');
+  if(sql.includes('"request_fingerprint" AS')){const row=records.get(String(v[1]));return {rows:row?[row]:[],rowCount:row?1:0};}
+  if(sql.startsWith('INSERT INTO "zzsh_supply"."idempotency_record"'))records.set(String(v[1]),{requestFingerprint:v[2],responseStatus:v[3],responseBody:JSON.parse(String(v[4])),publishRequired:false});
+  return {rows:[],rowCount:0};
+ }})} as unknown as Pool;
+ const request={method:'POST',originalUrl:`/api/v1/admin/orders/legacy/${legacyBinding.id}/continuation/support-cancel`,headers:{origin:'http://admin.invalid','idempotency-key':'original_cancel_key'},body:{expectedRevision:null,inputEvidenceId:'evidence_1',refundCents:'5000',ownerCents:'3000',reason:'双方协商取消',originalPaymentChecked:true}};
+ const options={pool,apiOrigin:'http://api.invalid',adminOrigin:'http://admin.invalid',legacyRefund:{legacyRefundsEnabled:true,legacyInitialProfile:{},admission:{}}} as never;
+ assert.equal(await handleLegacyContinuationRoute(request as never,response() as never,options,'admin'),true);
+ assert.deepEqual(events.slice(-2),['allocation','commit']);
+ assert.equal(await handleLegacyContinuationRoute(request as never,response() as never,options,'admin'),true);
+ assert.equal(applied,1);assert.deepEqual(events,['allocation','commit','allocation','commit']);
+});
 test("staff owner-credit route rechecks authorization and recovers the original idempotent receipt",async t=>{
  const auth:typeof import("../src/auth/auth-security")=require("../src/auth/auth-security");t.mock.method(auth,"readAdminContext",async()=>({userId:"staff_1",sessionId:"session_1"}));
  const records=new Map<string,any>(),kinds:string[]=[];let writes=0,authorized=0;

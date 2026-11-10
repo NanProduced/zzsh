@@ -32,32 +32,11 @@ async function setup(t,component,props,answer,seedStorage){
  const click=async el=>{await act(async()=>el.dispatchEvent(new w.MouseEvent('click',{bubbles:true})));await act(async()=>new Promise(setImmediate));};
  return{host,calls,w,render,click,root,module};
 }
-const originalProps={componentName:'AdminOriginalRefundPanel',orderId:'order_1',basis:'PRESTART_TERMINATION',reference:'term_1',canWrite:true,binding};
 const button=(ui,label)=>[...ui.w.document.querySelectorAll('button')].find(item=>item.textContent.trim()===label);
-async function confirm(ui){const alert=ui.w.document.querySelector('[role="alertdialog"]');assert(alert);await ui.click([...alert.querySelectorAll('button')].find(item=>item.textContent.trim()==='确认登记'));}
-test('未开租退款按固定原引用登记；缺复核确认与无权时按钮关闭',async t=>{
- const ui=await setup(t,'/apps/admin/src/views/admin-original-refund-panel.tsx',originalProps,()=>response({contractVersion:'admin-prestart-native-refund.v1',orderId:'order_1',terminationId:'term_1',outcome:'ALLOCATED',replayed:false,
-  intentId:'refund_1',refundOrderNo:'RF'+'a'.repeat(28),state:'READY',budgetDisposition:'ALLOCATED',channel:{result:'NOT_SUBMITTED',bankArrival:'UNKNOWN'}}));
- await ui.click(button(ui,'核对退款责任'));let submit=button(ui,'登记全额原路退款意图');assert.equal(submit.disabled,true);await ui.click(ui.w.document.querySelector('input[type=checkbox]'));submit=button(ui,'登记全额原路退款意图');assert.equal(submit.disabled,false);await ui.click(submit);assert.equal(ui.calls.length,0);await confirm(ui);
- assert.equal(ui.calls.length,1);assert.match(ui.calls[0].url,/term_1\/refund-requests$/);assert.deepEqual(JSON.parse(ui.calls[0].body),{});
- assert.match(ui.host.textContent,/渠道提交与银行到账未记录/);
- await ui.render({...originalProps,canWrite:false});assert.equal(ui.host.textContent,'');
-});
-test('坏2xx回执保留原键/body；重复点击只恢复原退款，不覆盖UNKNOWN',async t=>{
- const ui=await setup(t,'/apps/admin/src/views/admin-original-refund-panel.tsx',originalProps,()=>response({wrong:'shape'}));
- await ui.click(button(ui,'核对退款责任'));await ui.click(ui.w.document.querySelector('input[type=checkbox]'));await ui.click(button(ui,'登记全额原路退款意图'));await confirm(ui);
- assert.match(ui.host.textContent,/原引用、原内容和原键已保留/);await ui.click(button(ui,'按原键恢复退款登记'));await confirm(ui);
- assert.equal(ui.calls.length,2);assert.equal(new Headers(ui.calls[0].headers).get('idempotency-key'),new Headers(ui.calls[1].headers).get('idempotency-key'));
- assert.equal(ui.calls[0].body,ui.calls[1].body);assert.deepEqual(JSON.parse(ui.calls[0].body),{});
-});
-test('退款需要复核时展示可理解原因，不暴露内部码',async t=>{
- const ui=await setup(t,'/apps/admin/src/views/admin-original-refund-panel.tsx',originalProps,()=>response({contractVersion:'admin-prestart-native-refund.v1',orderId:'order_1',terminationId:'term_1',replayed:false,outcome:'REVIEW_REQUIRED',reason:'ORIGINAL_ORDER_NO_AMBIGUOUS',channel:{result:'NOT_SUBMITTED',bankArrival:'UNKNOWN'}}));
- await ui.click(button(ui,'核对退款责任'));await ui.click(ui.w.document.querySelector('input[type=checkbox]'));await ui.click(button(ui,'登记全额原路退款意图'));await confirm(ui);
- assert.match(ui.host.textContent,/原订单号不明确/);assert.doesNotMatch(ui.host.textContent,/ORIGINAL_ORDER_NO_AMBIGUOUS/);
-});
 test('审核读取只GET，责任/本地核销/未知与原号并列，零默认渠道命令',async t=>{
  const ui=await setup(t,'/apps/admin/src/views/admin-prestart-termination-panel.tsx',{componentName:'AdminPrestartTerminationPanel',orderId:'order_1',binding,canWrite:true},()=>response(ctx));
  assert.equal(ui.calls.length,1);assert.equal(ui.calls[0].method,'GET');assert.match(ui.host.textContent,/159\.08/);assert.match(ui.host.textContent,/本站尚未核销/);assert.match(ui.host.textContent,/结果未记录/);assert.doesNotMatch(ui.host.textContent,/UNKNOWN/);assert.match(ui.host.textContent,/银行到账未记录/);
+ assert.doesNotMatch(ui.host.textContent,/核对原路退款责任|登记全额原路退款意图/);
  assert.equal(ui.host.textContent.includes('已经到账'),false);
 });
 test('未开租受控付款与退款清楚区分模拟结果',async t=>{
@@ -71,13 +50,6 @@ test('缺少受控来源或演示范围冲突时不显示退款结果',async t=>
  const invalid={...ctx,refund:{...ctx.refund,simulationScope:'ECS_TEST_SIMULATED'}};
  const ui=await setup(t,'/apps/admin/src/views/admin-prestart-termination-panel.tsx',{componentName:'AdminPrestartTerminationPanel',orderId:'order_1',binding,canWrite:true},()=>response(invalid));
  assert.match(ui.host.textContent,/终止依据读取不可用/);assert.doesNotMatch(ui.host.textContent,/模拟退款已完成|已经到账/);
-});
-test('纯回执解析不把review、坏枚举或数组当已登记/渠道成功',async t=>{
- const ui=await setup(t,'/apps/admin/src/views/admin-original-refund-panel.tsx',{...originalProps,canWrite:false},()=>response(null));
- const parse=ui.module.originalRefundReceipt;
- const expected={orderId:'order_1',reference:'term_1'},review={contractVersion:'admin-prestart-native-refund.v1',orderId:'order_1',terminationId:'term_1',replayed:false,outcome:'REVIEW_REQUIRED',reason:'ORIGINAL_ORDER_NO_AMBIGUOUS',channel:{result:'NOT_SUBMITTED',bankArrival:'UNKNOWN'}};
- assert.deepEqual(parse(review,'PRESTART_TERMINATION',expected),{review:true,reason:'ORIGINAL_ORDER_NO_AMBIGUOUS'});
- for(const v of [null,[],{},ctx,{...review,terminationId:'other'},{...review,replayed:true},{contractVersion:'admin-prestart-native-refund.v1',replayed:false,outcome:'SUCCEEDED',channel:{result:'SUCCEEDED',bankArrival:'ARRIVED'}}])assert.throws(()=>parse(v,'PRESTART_TERMINATION',expected));
 });
 
 test('未开租审核遇202 UNKNOWN按原键/原体恢复；更换主体不串原审核',async t=>{

@@ -9,7 +9,7 @@ import { assertUserContextInTransaction } from "../auth/user-identity";
 import { lockSettlement, type SettlementActor } from "./settlement-record";
 import { readPrestartRefundProgress } from "./prestart-refund-store";
 import { prestartLiabilityPlan, recognizePrestartRefundLiability, verifyPrestartRefundLiability } from "../finance/prestart-refund-liability";
-import { assertPrestartDecision, prestartTerminationEligibility, PRESTART_TERMINATION_STATES, PRESTART_TERMINATION_VERSION,
+import { assertPrestartDecision, prestartCancellationReason, PRESTART_CANCELLATION_REASONS, prestartTerminationEligibility, PRESTART_TERMINATION_STATES, PRESTART_TERMINATION_VERSION,
   type PrestartFacts, type PrestartTerminationState } from "./prestart-termination-model";
 
 const ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
@@ -53,6 +53,18 @@ export async function assertPrestartTerminationSchema(client: PoolClient) {
       AND tgname IN('prestart_termination_guard','prestart_request_closure') AND NOT tgisinternal AND tgenabled='O')
     AND has_table_privilege(current_user,to_regclass('zzsh_order.prestart_termination'),'SELECT') AS ready`)).rows[0];
   if (row?.ready !== true) throw unavailable("Prestart termination schema is not deployed");
+}
+
+async function prestartPartyCancelSchemaReady(client:PoolClient) {
+ const row=(await client.query(`SELECT
+  (SELECT count(*)=4 AND bool_and(has_column_privilege(current_user,attrelid,attname,'INSERT'))
+   FROM pg_attribute WHERE attrelid=to_regclass('zzsh_order.prestart_termination_decision')
+    AND attname IN('user_id','user_session_id','acting_party','reason_code') AND attnum>0 AND NOT attisdropped)
+  AND EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid=to_regclass('zzsh_order.prestart_termination_decision')
+    AND conname='prestart_decision_actor_shape' AND convalidated)
+  AND EXISTS(SELECT 1 FROM pg_trigger WHERE tgrelid=to_regclass('zzsh_order.prestart_termination_decision')
+    AND tgname='prestart_decision_guard' AND tgenabled='O' AND NOT tgisinternal) AS ready`)).rows[0];
+ return row?.ready===true;
 }
 
 async function originalFacts(client: PoolClient, orderId: string): Promise<OrderFacts> {
@@ -142,8 +154,10 @@ export async function readPrestartTermination(client: PoolClient, actor: Settlem
   const allowed = eligibility(facts);
   if (request?.state === "APPROVED") await verifyPrestartRefundLiability(client,request.id,request.payment_basis,request.liability_root_id,request.liability_event_id);
   const refund=request?.state==='APPROVED'?await readPrestartRefundProgress(client,request.id,request.payment_basis,moneyReadable,actor.localFinancialSandbox,actor.ecsTestDemo):null;
+  const cancellationReady=actor.realm==="user"&&await prestartPartyCancelSchemaReady(client);
   return { contractVersion: PRESTART_TERMINATION_VERSION, orderId, orderRevision: facts.revision,
     eligibility: {...allowed,refundCents: moneyReadable ? allowed.refundCents : null}, request: projection(request,moneyReadable),refund,
+    ...(actor.realm === "user" ? { cancellationReasons: cancellationReady?PRESTART_CANCELLATION_REASONS[actor.userId === facts.renter_user_id ? "RENTER" : "OWNER"]:[] } : {}),
     coverage:"LOCAL_REGISTERED_ONLY" as const,canReview,asOf:facts.as_of??null,localAcceptanceObservedAt:facts.accepted_at??null,
     unknowns:["CHANNEL_QUERY_NOT_PERFORMED","BANK_ARRIVAL_NOT_VERIFIED"],bankArrival: "UNKNOWN" as const };
 }
@@ -154,25 +168,65 @@ export async function authorizePrestartWrite(client: PoolClient, actor: Settleme
   return lockSettlement(client,orderId,actor,"PRESTART_TERMINATION");
 }
 
-export async function requestPrestartTermination(client: PoolClient, actor: SettlementActor, input: { orderId: string; expectedOrderRevision: string; reason: string; requestId: string }) {
-  if (actor.realm !== "user") throw new SecurityApiError(403,"FORBIDDEN","An order party must request termination");
-  if (typeof input.reason !== "string" || input.reason.trim().length < 3 || Buffer.byteLength(input.reason,"utf8")>600
-    || typeof input.expectedOrderRevision !== "string" || !/^[1-9][0-9]{0,18}$/.test(input.expectedOrderRevision) || !ID.test(input.requestId)) throw new SecurityApiError(400,"INVALID_ARGUMENT","Invalid termination request");
-  await authorizePrestartWrite(client,actor,input.orderId);
-  await assertPrestartTerminationSchema(client);
-  const facts = await originalFacts(client,input.orderId), permitted = eligibility(facts);
-  if (facts.revision !== input.expectedOrderRevision) throw conflict("Order changed; reload the original order");
-  if (!permitted.allowed) throw conflict(permitted.reason!);
-  const found = await current(client,input.orderId,true);
-  if (found && found.state !== "REJECTED") return { status:200,body:{ contractVersion:PRESTART_TERMINATION_VERSION,request:projection(found,actor.userId===facts.renter_user_id),existing:true,orderId:input.orderId } };
-  const basis = paymentBasis(facts), id = `pterm_${randomUUID().replaceAll("-","")}`;
-  const row = (await client.query<TerminationRow>(`INSERT INTO zzsh_order.prestart_termination
-    (id,order_id,requested_by_user_id,requested_by_party,reason,basis_digest,payment_basis,request_id)
-    VALUES($1,$2,$3,$4,$5,$6,$7::jsonb,$8) RETURNING ${COLUMNS}`,
-    [id,input.orderId,actor.userId,actor.userId===facts.renter_user_id?"RENTER":"OWNER",input.reason.trim(),basis.digest,JSON.stringify(basis),input.requestId])).rows[0]!;
-  await recordAudit(client,{actorType:"user",actorId:actor.userId,sessionId:actor.sessionId,action:"order.prestart.termination.requested",
-    objectType:"prestart_termination",objectId:id,requestId:input.requestId,outcome:"SUCCESS",details:{orderId:input.orderId,basisDigest:basis.digest,channelResult:"NOT_SUBMITTED"}});
-  return {status:200,body:{contractVersion:PRESTART_TERMINATION_VERSION,orderId:input.orderId,request:projection(row,actor.userId===facts.renter_user_id),existing:false}};
+/** 直接取消仍须与开租确认争用同一订单锁，并在同事务记完整原款退款责任。 */
+export async function cancelPrestartTermination(client:PoolClient,actor:SettlementActor,input:{
+ orderId:string;expectedOrderRevision:string;reasonCode:unknown;otherReason?:unknown;requestId:string;
+}) {
+ if(actor.realm!=="user")throw new SecurityApiError(403,"FORBIDDEN","An order party must cancel");
+ if(typeof input.expectedOrderRevision!=="string"||!/^[1-9][0-9]{0,18}$/.test(input.expectedOrderRevision)||!ID.test(input.requestId))
+  throw new SecurityApiError(400,"INVALID_ARGUMENT","Invalid cancellation request");
+ await authorizePrestartWrite(client,actor,input.orderId);
+ await assertPrestartTerminationSchema(client);
+ if(!(await prestartPartyCancelSchemaReady(client)))throw unavailable("Direct prestart cancellation is not deployed");
+ const facts=await originalFacts(client,input.orderId);
+ const party=actor.userId===facts.renter_user_id?"RENTER":actor.userId===facts.owner_user_id?"OWNER":null;
+ if(!party)throw missing();
+ const reason=prestartCancellationReason(party,input.reasonCode,input.otherReason);
+ let row=await current(client,input.orderId,true);
+ if(row?.state==="APPROVED"){
+  if(row.requested_by_party==="SUPPORT")throw conflict("Order was already cancelled");
+  await verifyPrestartRefundLiability(client,row.id,row.payment_basis,row.liability_root_id,row.liability_event_id);
+  return {status:200,body:{contractVersion:PRESTART_TERMINATION_VERSION,orderId:input.orderId,request:projection(row,actor.userId===facts.renter_user_id),existing:true}};
+ }
+ if(facts.revision!==input.expectedOrderRevision)throw conflict("Order changed; reload the original order");
+ const permitted=eligibility(facts);
+ if(!permitted.allowed)throw conflict(permitted.reason!);
+ if(row&&row.state!=="REJECTED"&&row.requested_by_party==="SUPPORT")throw conflict("Existing support cancellation requires review");
+ const basis=paymentBasis(facts);
+ if(row&&row.state!=="REJECTED"){
+  if(row.basis_digest!==basis.digest)throw conflict("Original applied payment changed");
+ }else{
+  const id=`pterm_${randomUUID().replaceAll("-","")}`;
+  row=(await client.query<TerminationRow>(`INSERT INTO zzsh_order.prestart_termination
+   (id,order_id,requested_by_user_id,requested_by_party,reason,basis_digest,payment_basis,request_id)
+   VALUES($1,$2,$3,$4,$5,$6,$7::jsonb,$8) RETURNING ${COLUMNS}`,
+   [id,input.orderId,actor.userId,party,reason.reason,basis.digest,JSON.stringify(basis),input.requestId])).rows[0]!;
+ }
+ const changed=(await client.query<TerminationRow>(`UPDATE zzsh_order.prestart_termination SET state='APPROVED',revision=revision+1,last_reason=$2,
+  approved_at=clock_timestamp(),updated_at=clock_timestamp()
+  WHERE id=$1 AND revision=$3::bigint AND state IN('REQUESTED','REVIEW_REQUIRED') RETURNING ${COLUMNS}`,
+  [row.id,reason.reason,row.revision])).rows[0];
+ if(!changed)throw conflict("Cancellation changed; retry using the original request");
+ await client.query(`INSERT INTO zzsh_order.prestart_termination_decision
+  (id,termination_id,result_revision,decision,assessment,reason,admin_user_id,session_id,request_id,user_id,user_session_id,acting_party,reason_code)
+  VALUES($1,$2,$3,'APPROVE','PARTY_FULL_REFUND',$4,NULL,NULL,$5,$6,$7,$8,$9)`,
+  [`pterm_decision_${randomUUID().replaceAll("-","")}`,row.id,changed.revision,reason.reason,input.requestId,actor.userId,actor.sessionId,party,reason.code]);
+ const liability=await recognizePrestartRefundLiability(client,row.id,row.payment_basis,input.requestId);
+ await client.query(`UPDATE zzsh_order.prestart_termination SET liability_root_id=$2,liability_event_id=$3 WHERE id=$1`,[row.id,liability.rootId,liability.eventId]);
+ const cancelled=await client.query(`UPDATE zzsh_order.rental_order SET status='CANCELLED',cancel_reason='PRESTART_TERMINATED',
+  cancelled_at=clock_timestamp(),revision=revision+1,updated_at=clock_timestamp()
+  WHERE id=$1 AND status='PAID' AND paid_confirmation_id=$2 AND revision=$3::bigint`,
+  [row.order_id,row.payment_basis.paymentConfirmationId,facts.revision]);
+ if(cancelled.rowCount!==1)throw conflict("Original paid order changed");
+ await recordAudit(client,{actorType:"user",actorId:actor.userId,sessionId:actor.sessionId,action:"order.prestart.termination.cancelled",
+  objectType:"prestart_termination",objectId:row.id,requestId:input.requestId,outcome:"SUCCESS",reason:reason.reason,
+  details:{orderId:row.order_id,decision:"APPROVE",actingParty:party,reasonCode:reason.code,basisDigest:row.basis_digest,
+   liabilityRootId:liability.rootId,channelResult:"NOT_SUBMITTED"}});
+ await verifyPrestartRefundLiability(client,row.id,row.payment_basis,liability.rootId,liability.eventId);
+ changed.liability_root_id=liability.rootId;changed.liability_event_id=liability.eventId;
+ return {status:200,body:{contractVersion:PRESTART_TERMINATION_VERSION,orderId:input.orderId,
+  request:projection(changed,actor.userId===facts.renter_user_id),existing:false,
+  localFundsEffect:"REFUND_LIABILITY_RECOGNIZED",channelResult:"NOT_SUBMITTED",bankArrival:"UNKNOWN"}};
 }
 
 export async function reviewPrestartTermination(client: PoolClient, actor: SettlementActor, input: {

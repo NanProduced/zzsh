@@ -192,6 +192,16 @@ test('未开租单表/三扩展列缺一/缺完整性函数时在任何GRANT前�
  const col=prestartCatalog();col.state.catalog.get(intent)!.splice(col.state.catalog.get(intent)!.indexOf('basis_kind'),1);await assert.rejects(configure(col.pool),/partially deployed/);assert.equal(mutations(col).length,0);
  const fn=prestartCatalog();fn.state.functions.delete('zzsh_order.native_prestart_refund_terminal_complete(text)');await assert.rejects(configure(fn.pool),/function inventory/);assert.equal(mutations(fn).length,0);
 });
+test('当事人自行取消列须完整部署，只授予必要写入权',async()=>{
+ const cols=['user_id','user_session_id','acting_party','reason_code'],decision='zzsh_order.prestart_termination_decision';
+ const partial=prestartCatalog();partial.state.catalog.get(decision)!.push(cols[0]!);
+ await assert.rejects(configure(partial.pool),/party cancellation is partially deployed/);assert.equal(mutations(partial).length,0);
+ const f=prestartCatalog();f.state.catalog.get(decision)!.push(...cols);
+ for(const principal of ['runtime_role','PUBLIC'])for(const op of ops)for(const col of cols)f.rights.get(principal+':'+decision)!.columns.get(op)!.add(col);
+ await configure(f.pool);
+ for(const col of cols){assert(f.can(decision,'INSERT',col));assert.equal(f.can(decision,'UPDATE',col),false);}
+ assert.equal(f.can(decision,'DELETE'),false);
+});
 
 test('退款前向迁移按0106后0107登记，来源证明由后继0108独立提供',()=>{
  const j=JSON.parse(readFileSync(resolve('migrations/business/meta/_journal.json'),'utf8'));

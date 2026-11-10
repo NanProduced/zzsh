@@ -88,6 +88,36 @@ test('native channel records include submissions only, never query attempts',asy
  assert.equal((sql.match(/a\.operation='SUBMIT'/g)??[]).length,3);assert.doesNotMatch(sql,/a\.operation='QUERY'|HISTORICAL_PAYMENT/);assert.equal(values.length,11);
 });
 
+test('refunds newly submitted for legacy orders appear with the authorized order, not as historical refunds',async()=>{
+ let selection='',detail='';
+ const client={query:async(sql:string)=>{
+  if(sql.includes('AS "legacyFormalExists"'))return {rows:[{exists:false,legacyFormalExists:true,legacyFormalReady:true}]};
+  if(sql.startsWith('WITH activity_candidates')){selection=sql;return {rows:[{family:'legacy_refund',id:'attempt1',at:'2026-01-01T00:00:00Z',total:'1'}]};}
+  detail=sql;return {rows:[{id:'attempt1',number:'LR1',related_number:'old_payment',state:'REVIEW_REQUIRED',amount:'5000',user_id:'renter',name:'租客',visible_order_id:'legacy_order_1',at:'2026-01-01T00:00:00Z'}]};
+ }} as unknown as PoolClient;
+ const result=await readAdminChannelActivity(client,{...base,kind:'REFUND',subjectUserId:'owner'},access);
+ const item=result.items[0] as any;
+ assert.equal(item.source,'NATIVE');assert.equal(item.kind,'REFUND');assert.equal(item.subjectRole,'OWNER');
+ assert.equal(item.amountCents,'5000');assert.equal(item.state,'REVIEW_REQUIRED');assert.equal(item.bankArrival,'UNKNOWN');
+ assert.equal(item.relatedOrderId,'legacy_order_1');assert.equal(item.documentRef,null);
+ assert.match(selection,/legacy_refund_attempt/);assert.match(selection,/a\.operation='SUBMIT'/);
+ assert.match(selection,/x\.renter_user_id=\$12/);assert.match(selection,/lo\.owner_user_id=\$12/);
+ assert.match(detail,/CASE WHEN \$4::boolean AND/);assert.doesNotMatch(detail,/request_body|raw_body/);
+});
+
+test('an installed but unreadable legacy refund source cannot silently disappear from the current funds list',async()=>{
+ const client={query:async(sql:string)=>sql.startsWith('WITH activity_candidates')?{rows:[{family:null,id:null,at:null,total:'0'}]}
+  :{rows:[{exists:false,legacyFormalExists:true,legacyFormalReady:false}]}} as unknown as PoolClient;
+ await assert.rejects(readAdminChannelActivity(client,{...base,kind:'REFUND'},access),/Legacy order refund records are unavailable/);
+ assert.equal((await readAdminChannelActivity(client,{...base,kind:'PAYMENT'},access)).total,0,'unrelated payment reads remain available');
+});
+
+test('a selected legacy refund which cannot be loaded fails instead of returning a misleading empty page',async()=>{
+ const client={query:async(sql:string)=>sql.includes('AS "legacyFormalExists"')?{rows:[{exists:false,legacyFormalExists:true,legacyFormalReady:true}]}
+  :sql.startsWith('WITH activity_candidates')?{rows:[{family:'legacy_refund',id:'missing',at:null,total:'1'}]}:{rows:[]}} as unknown as PoolClient;
+ await assert.rejects(readAdminChannelActivity(client,{...base,kind:'REFUND'},access),/Legacy order refund records changed/);
+});
+
 test('a payout attempt displays the channel net amount without exposing request or bank data',async()=>{
  let detail='';
  const client={query:async(sql:string)=>{
@@ -96,7 +126,20 @@ test('a payout attempt displays the channel net amount without exposing request 
  }} as unknown as PoolClient;
  const result=await readAdminChannelActivity(client,{...base,kind:'WITHDRAWAL'},access),item=result.items[0] as {amountCents:string;grossCents:string;feeCents:string;amountLabel:string;state:string};
  assert.match(detail,/w\.net_cents::text AS amount/);assert.doesNotMatch(detail,/request_body|receiver_account|receiver_name/);
+  assert.match(detail,/CASE WHEN w\.requires_review THEN 'REVIEW_REQUIRED' ELSE w\.state END/);
  assert.equal(item.amountCents,'950');assert.equal(item.grossCents,'1000');assert.equal(item.feeCents,'50');assert.equal(item.amountLabel,'渠道出款金额');assert.equal(item.state,'UNKNOWN');
+});
+
+test('a refund needing review does not display the original terminal state as a confirmed result',async()=>{
+ let detail='';
+ const client={query:async(sql:string)=>{
+  if(sql.includes('AS "legacyFormalExists"'))return {rows:[{exists:false,legacyFormalExists:false,legacyFormalReady:false}]};
+  if(sql.startsWith('WITH activity_candidates'))return {rows:[{family:'refund',id:'attempt1',at:null,total:'1'}]};
+  detail=sql;return {rows:[{id:'attempt1',business_id:'refund1',number:'RF1',state:'REVIEW_REQUIRED',amount:'100',user_id:'u1',name:'用户',at:null}]};
+ }} as unknown as PoolClient;
+ const result=await readAdminChannelActivity(client,{...base,kind:'REFUND'},access);
+ assert.match(detail,/CASE WHEN i\.requires_review THEN 'REVIEW_REQUIRED' ELSE i\.state END/);
+ assert.equal((result.items[0] as {state:string}).state,'REVIEW_REQUIRED');
 });
 
 test('current balance movements exclude opening and show each available withdrawal leg once',async()=>{
@@ -106,14 +149,16 @@ test('current balance movements exclude opening and show each available withdraw
     {id:'revoke',account_code:'WALLET_AVAILABLE',subject_id:'u1',subject_name:'用户',delta:'-200',event_kind:'EARNING_REVOKED',source_kind:'NATIVE_RENTAL_REFERRAL',economic_root_id:'earning1',at:'2026-01-04T00:00:00Z'},
     {id:'legacy-commission',account_code:'WALLET_AVAILABLE',subject_id:'u1',subject_name:'用户',delta:'300',event_kind:'LEGACY_DUTY_SETTLED',source_kind:'LEGACY_CONTINUATION_DUTY',beneficiary_role:'COMMISSION',source_id:'duty1',at:'2026-01-05T00:00:00Z'},
   ];
-  let selection='';
+  let selection='',detail='';
   const client={query:async(sql:string)=>{
     if(sql.startsWith('WITH activity_candidates')) {selection=sql;return {rows:ledger.map(row=>({family:'ledger',id:row.id,at:row.at,total:String(ledger.length)}))};}
+    if(sql.includes('FROM zzsh_order.settlement_ledger_entry l'))detail=sql;
     return {rows:ledger};
   }} as unknown as PoolClient;
   const result=await readAdminBalanceActivity(client,base,access), items=result.items as {source:string;label:string;amountCents:string}[];
   assert.match(selection,/l\.account_code IN \('OWNER_AVAILABLE','WALLET_AVAILABLE'\)/);
   assert.match(selection,/e\.kind<>'OPENING'/);assert.doesNotMatch(selection,/personal_finance_observation/);
+  assert.match(detail,/WHERE r\.source_kind IS DISTINCT FROM 'NATIVE_ABNORMAL_REFUND'\s+AND l\.id=ANY/);
   assert.deepEqual(items.map(row=>[row.source,row.label,row.amountCents]),[['NATIVE','提现扣除','-1000'],['NATIVE','提现退回','1000'],['NATIVE','分销收益冲回','-200'],['NATIVE','分销收入','300']]);
   assert.equal(result.total,4);
 });

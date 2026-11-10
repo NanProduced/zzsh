@@ -8,6 +8,7 @@ import { validateIdempotencyKey } from "../contracts/api-v1";
 import { assertLocalFinancialSandboxResource, ensureLocalSandboxOrderAdmission, localFinancialSandboxRegistration, type LocalFinancialSandbox } from "../finance/local-financial-sandbox-resource";
 import type { PaymentDistributionStore } from "../finance/distribution-payment-store";
 import { createSandboxControlledPaymentSource, confirmOrderPayment, type PaymentInput } from "./payment-confirmation";
+import { automaticOpeningAcceptance } from "./settlement-record";
 import { signLocalSandboxCheckout, verifyLocalSandboxCheckout, assertLocalSandboxCheckoutSigner, localSandboxPaymentAnchor, type LocalSandboxCheckoutSigner } from "./local-sandbox-checkout-crypto";
 import { createHash } from "node:crypto";
 
@@ -112,7 +113,7 @@ export async function completeLocalSandboxCheckout(pool: Pool, actor: Actor, ord
         // all account/order waits. Pre-lock verification alone cannot authorize a later expired ticket.
         const source = createSandboxControlledPaymentSource({ sandbox: options.sandbox, payerUserId: actor.userId,
           payerSessionId: actor.sessionId, checkoutExpiresAt: claim.expiresAt, appId: options.appId });
-        const payment = await confirmOrderPayment(c, source(input), options.distribution);
+        const payment = await confirmOrderPayment(c, source(input), options.distribution, automaticOpeningAcceptance);
         await recordAudit(c, { actorType: "user", actorId: actor.userId, sessionId: actor.sessionId, requestId: actor.requestId, action: "local.sandbox.checkout.completed",
           objectType: "rental_order", objectId: orderId, outcome: "SUCCESS", details: { checkoutId: claim.checkoutId, declarationId: anchor.declarationId, disposition: payment.disposition } });
         return { status: 200, body: { contractVersion: "local-sandbox-checkout-result.v1", scope: "LOCAL_CONTROLLED", orderId, payment, bankArrival: "UNKNOWN" } };

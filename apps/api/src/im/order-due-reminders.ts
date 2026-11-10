@@ -169,7 +169,7 @@ async function claim(options: OrderDueReminderOptions, row: DueRow, tokenHash: s
   return changed.rowCount === 1;
 }
 
-async function finish(options: OrderDueReminderOptions, row: DueRow, tokenHash: string, state: "SENT" | "SKIPPED", reason: string | null): Promise<void> {
+async function finish(options: OrderDueReminderOptions, row: DueRow, tokenHash: string, state: "SENT" | "SKIPPED" | "UNKNOWN", reason: string | null): Promise<void> {
   await options.pool.query(
     `UPDATE zzsh_order.im_order_due_reminder
         SET state = $3, sent_at = CASE WHEN $3::text = 'SENT' THEN clock_timestamp() ELSE NULL END,
@@ -211,7 +211,7 @@ export async function scanOrderDueReminders(options: OrderDueReminderOptions, li
   await materialize(options);
   await options.pool.query(
     `UPDATE zzsh_order.im_order_due_reminder
-        SET state = 'PENDING', lease_until = NULL, lease_token_hash = NULL,
+        SET state = 'UNKNOWN', lease_until = NULL, lease_token_hash = NULL,
             failure_class = 'LEASE_EXPIRED', updated_at = clock_timestamp()
       WHERE app_id = $1 AND state = 'SENDING' AND lease_until <= clock_timestamp()`,
     [options.appId],
@@ -225,11 +225,24 @@ export async function scanOrderDueReminders(options: OrderDueReminderOptions, li
     }
     try {
       await deliver(options, row);
-      await finish(options, row, tokenHash, "SENT", null);
     } catch (error) {
       const code = failureClass(error);
-      if (code === "ORDER_ENDED" || code === "DUE_UNKNOWN" || code === "STALE_BUCKET") await finish(options, row, tokenHash, "SKIPPED", code);
-      else await retry(options, row, tokenHash, code);
+      if (code === "ORDER_ENDED" || code === "DUE_UNKNOWN" || code === "STALE_BUCKET" || code === "INVALID_BUCKET") {
+        await finish(options, row, tokenHash, "SKIPPED", code);
+      } else if (code === "IDENTITY_PENDING") {
+        // Nothing left the process; the same reminder can safely wait for the identity.
+        await retry(options, row, tokenHash, code);
+      } else {
+        // The provider may have accepted the text before the connection failed.
+        await finish(options, row, tokenHash, "UNKNOWN", code);
+      }
+      continue;
+    }
+    try {
+      await finish(options, row, tokenHash, "SENT", null);
+    } catch {
+      // A failed SENT write is not proof of failure; never fall back to a resend.
+      await finish(options, row, tokenHash, "UNKNOWN", "RECORD_FAILED").catch(() => {});
     }
   }
 }

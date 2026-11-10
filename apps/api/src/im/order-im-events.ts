@@ -10,7 +10,7 @@ import { SecurityApiError, recordAudit, withTransaction } from "../auth/security
 import { assertActiveInTransaction } from "../auth/user-identity";
 import { requireSupportAccess, type SupportType } from "./consultation";
 import type { YunxinServerApi, YunxinTeamMessageFact } from "./yunxin-provider";
-import { legacyOrderReadState } from "../order/legacy-order-read";
+import { legacyOrderReadState, LEGACY_CONTINUATION_CANCELLED_AT_SQL } from "../order/legacy-order-read";
 import { legacyTeamSendWindow } from "./legacy-order-team-window";
 
 /**
@@ -210,7 +210,7 @@ const ORDER_SCOPE_SELECT = `SELECT g.order_id, g.app_id, g.team_id, g.team_state
     CASE WHEN g.legacy_order_id IS NULL THEN o.status ELSE 'LEGACY' END AS order_status,
     COALESCE(o.renter_user_id,l.renter_user_id) AS renter_user_id,COALESCE(o.owner_user_id,l.owner_user_id) AS owner_user_id,
     COALESCE(o.game_id,l.game_id) AS game_id,l.source_order_status,l.source_pay_status,h.stage AS continuation_stage,
-    CASE WHEN COALESCE(h.stage,l.source_order_status)=5 THEN l.source_cancelled_at ELSE COALESCE(
+    CASE WHEN COALESCE(h.stage,l.source_order_status)=5 THEN ${LEGACY_CONTINUATION_CANCELLED_AT_SQL} ELSE COALESCE(
       (SELECT v.created_at FROM zzsh_order.legacy_continuation_version v WHERE v.order_id=l.id AND v.command='CONFIRM' ORDER BY v.revision DESC LIMIT 1),l.source_completed_at) END AS legacy_ended_at,
     g.legacy_order_id
   FROM zzsh_order.im_order_group g LEFT JOIN zzsh_order.rental_order o ON o.id=g.order_id AND g.legacy_order_id IS NULL

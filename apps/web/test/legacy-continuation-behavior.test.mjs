@@ -20,9 +20,9 @@ test("legacy settlement preview rejects unrounded server amounts",async()=>{
   const client=load("apps/web/src/lib/legacy-continuation-client.ts",{"./order-client.ts":{
     requestOrderWrite:async()=>({revision:null,inputEvidenceId:"evidence_source",proposalFingerprint:digest,previewAmounts:{refundNet:amount},proposalAmounts:{refundNet:amount}}),
   }}).legacyContinuationApi;
-  assert.equal((await client.preview(id,quantities)).proposalAmounts.refundNet,"10.01");
-  amount="10.00000000";assert.equal((await client.preview(id,quantities)).proposalAmounts.refundNet,"10.00");
-  amount="10.005";await assert.rejects(client.preview(id,quantities),/预估结果暂不可用/);
+  assert.equal((await client.preview("user_A",id,quantities)).proposalAmounts.refundNet,"10.01");
+  amount="10.00000000";assert.equal((await client.preview("user_A",id,quantities)).proposalAmounts.refundNet,"10.00");
+  amount="10.005";await assert.rejects(client.preview("user_A",id,quantities),/预估结果暂不可用/);
 });
 const tick = () => new Promise(resolve=>setImmediate(resolve));
 async function setup(t, api = {}) {
@@ -59,10 +59,17 @@ test('renter sees a simulated old-order refund without a bank-arrival claim',asy
  const p=await setup(t,{read:async()=>view({stage:'4',capabilities:[],duties:[duty]})});await p.render(React.createElement(p.LegacyContinuationPanel,{orderId:id,party:'renter'}));
  assert.match(p.host.textContent,/模拟退款已记录，不代表真实退款或到账/);assert.doesNotMatch(p.host.textContent,/渠道已确认退款/);
 });
+test('cancelled legacy order shows its pending refund without claiming channel success',async t=>{
+ const duty={id:'refund',kind:'RENTER_REFUND',amountCents:'5000',status:'PENDING',settledBy:null};
+ const p=await setup(t,{read:async()=>view({stage:'5',availability:'ISOLATED',capabilities:[],duties:[duty],refundDueAt:'2026-11-14T08:00:00Z'})});
+ await p.render(React.createElement(p.LegacyContinuationPanel,{orderId:id,party:'renter',readOnly:true}));
+ assert.match(p.host.textContent,/订单已取消/);assert.match(p.host.textContent,/租客退款/);assert.match(p.host.textContent,/¥50\.00/);
+ assert.match(p.host.textContent,/到账以实际退款进度为准/);assert.doesNotMatch(p.host.textContent,/渠道已确认退款|提交结算方案|确认提交/);
+});
 test("legacy in-flight renter sees units, explicit zero items and the disclosed early fee before submitting",async t=>{
  let submitted;
  const p=await setup(t,{read:async()=>view({stage:"3",quantities:null,capabilities:["propose"],amounts:{},commandFingerprints:{}}),
-  preview:async(_order,values)=>{submitted=values;return {revision:null,inputEvidenceId:"evidence_source",proposalFingerprint:digest,previewAmounts:{},proposalAmounts:{returnOrderMoney:"94.00"},settlementKind:"EARLY",earlyFee:"5.00"};}});
+  preview:async(_subject,_order,values)=>{submitted=values;return {revision:null,inputEvidenceId:"evidence_source",proposalFingerprint:digest,previewAmounts:{},proposalAmounts:{returnOrderMoney:"94.00"},settlementKind:"EARLY",earlyFee:"5.00"};}});
  await p.render(React.createElement(p.LegacyContinuationPanel,{orderId:id,party:"renter"}));
  assert.match(p.host.textContent,/哈夫币消耗（M）/);assert.match(p.host.textContent,/6级子弹（组）/);assert.match(p.host.textContent,/1 组为 60 发/);
  const inputs=[...p.host.querySelectorAll("input")];assert.equal(inputs[0].value,"");assert(inputs.slice(1).every(item=>item.value==="0"));
@@ -106,7 +113,9 @@ test("owner distinguishes a credited platform balance from income still awaiting
 });
 test("original body/key is retained before POST, uncertain result reads receipt and retries only original bytes",async t=>{
   const p=await setup(t);await p.render();await p.click("确认结算方案");await p.click("确认提交");
-  assert.equal(p.calls.length,1);const original=p.intents.inspectIntent("user_A","legacy.continuation",id);assert.equal(original.state,"VALID");assert.equal(original.intent.key,"ORIGINAL_KEY");assert.deepEqual(p.calls[0].slice(1),["confirm",original.intent.body,"ORIGINAL_KEY"]);
+  assert.equal(p.calls.length,1);const original=p.intents.inspectIntent("user_A","legacy.continuation",id);assert.equal(original.state,"VALID");assert.equal(original.intent.key,"ORIGINAL_KEY");
+  assert.equal(p.calls[0][0],"user_A","the frozen intent owner is the request subject, not a later session value");assert.equal(p.calls[0][1],id);
+  assert.deepEqual(p.calls[0].slice(2),["confirm",original.intent.body,"ORIGINAL_KEY"]);
   await p.click("查询处理进度");await p.click("继续提交上次申请");assert.equal(p.calls.length,2);assert.deepEqual(p.calls[1],p.calls[0]);assert.equal(p.intents.inspectIntent("user_A","legacy.continuation",id).state,"VALID");
   p.client.receipt=async()=>({state:"KNOWN_REJECTED",status:409,fingerprint:digest,receipt:{outcome:"REJECTED"}});await p.click("查询处理进度");assert.equal(p.intents.inspectIntent("user_A","legacy.continuation",id).state,"VALID");await p.click("刷新后重新核对");assert.equal(p.intents.inspectIntent("user_A","legacy.continuation",id).state,"NONE");
 });
@@ -145,4 +154,49 @@ test("scope render hides private amounts and confirmation before passive clearin
 });
 test("read errors and isolated facts remain distinct from empty or successful continuation",async t=>{
   const p=await setup(t,{read:async()=>{throw new Error("missing schema");}});await p.render();assert(p.host.textContent.includes("暂时无法查看办理信息"));assert(!p.host.textContent.includes("正在核对续办资料"));assert.equal(p.calls.length,0);
+});
+
+test("terminal legacy order keeps records but blocks new continuation actions", async t => {
+  const p = await setup(t);
+  await p.render();
+  await p.click("确认结算方案");
+  assert.match(p.host.textContent, /确认提交/);
+  await p.render(React.createElement(p.LegacyContinuationPanel, { orderId: id, party: "owner", readOnly: true }));
+  assert.match(p.host.textContent, /82\.00/);
+  assert.doesNotMatch(p.host.textContent, /确认结算方案|拒绝结算方案|确认提交/);
+  assert.equal(p.calls.length, 0);
+});
+
+test("terminal legacy order preserves the original-key recovery entry", async t => {
+  const p = await setup(t);
+  p.intents.saveIntent({ userId: "user_A", kind: "legacy.continuation", resourceId: id, key: "ORIGINAL_KEY", body: { expectedRevision: null, inputEvidenceId: "evidence_source", planFingerprint: digest }, context: { command: "confirm" } });
+  await p.render(React.createElement(p.LegacyContinuationPanel, { orderId: id, party: "owner", readOnly: true }));
+  assert.match(p.host.textContent, /查询处理进度/);
+  assert.doesNotMatch(p.host.textContent, /确认结算方案|拒绝结算方案/);
+  assert.equal(p.intents.inspectIntent("user_A", "legacy.continuation", id).intent.key, "ORIGINAL_KEY");
+  assert.equal(p.calls.length, 0);
+});
+test("a late legacy preview cannot return after the order becomes terminal", async t => {
+  let resolvePreview;
+  const preview = new Promise(resolve => { resolvePreview = resolve; });
+  const p = await setup(t, { read: async () => view({ stage: "3", capabilities: ["propose"] }), preview: async () => preview });
+  await p.render(React.createElement(p.LegacyContinuationPanel, { orderId: id, party: "owner" }));
+  await p.click("核对结算结果");
+  await p.render(React.createElement(p.LegacyContinuationPanel, { orderId: id, party: "owner", readOnly: true }));
+  await React.act(async () => { resolvePreview({ revision: null, inputEvidenceId: "evidence_source", proposalFingerprint: digest, previewAmounts: {}, proposalAmounts: { refundNet: "82.00" } }); await tick(); });
+  await p.render(React.createElement(p.LegacyContinuationPanel, { orderId: id, party: "owner", readOnly: false }));
+  assert.doesNotMatch(p.host.textContent, /提交结算方案/);
+  assert.equal(p.calls.length, 0);
+});
+
+test("master review: a frozen A continuation intent is never replayed under B and keeps its original key", async t => {
+  const p = await setup(t);
+  p.intents.saveIntent({ userId: "user_A", kind: "legacy.continuation", resourceId: id, key: "ORIGINAL_KEY", body: {}, context: { command: "confirm" } });
+  await p.render(React.createElement(p.LegacyContinuationPanel, { orderId: id, party: "owner" }));
+  p.session.userId = "user_B"; p.session.identityVersion = 2;
+  await p.render(React.createElement(p.LegacyContinuationPanel, { orderId: id, party: "owner" }));
+  assert.equal(p.intents.inspectIntent("user_A", "legacy.continuation", id).intent.key, "ORIGINAL_KEY", "the original request remains stored");
+  assert.equal(p.intents.inspectIntent("user_B", "legacy.continuation", id).state, "NONE", "no new key is created for B");
+  assert.equal(p.calls.length, 0, "no cross-subject write is sent");
+  assert.doesNotMatch(p.host.textContent, /继续提交上次申请/, "B cannot replay A's intent");
 });

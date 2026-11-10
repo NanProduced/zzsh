@@ -9,7 +9,7 @@
  */
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Bar, BarChart, CartesianGrid, LabelList, Line, LineChart, Tooltip as ChartTooltip, XAxis, YAxis } from "recharts";
-import { CircleAlert, ShieldCheck } from "lucide-react";
+import { CircleAlert, RefreshCw, ShieldCheck } from "lucide-react";
 import { AdminApiError, friendlyError } from "../api";
 import { Badge } from "../components/ui/badge";
 import { Button } from "../components/ui/button";
@@ -202,7 +202,7 @@ export function SupportDashboard({ active, request, demo = false }: { active: bo
 
       {overview ? <>
         <div className="im-wb-mgmt-totals" aria-label="统计概况">
-          <MetricCard label="当前可接待客服" value={overview.totals.onDutyCount} hint="已开始接待、连接正常，且最近 2 分钟有响应的客服。" />
+          <MetricCard label="当前可接待客服" value={overview.totals.onDutyCount} hint="在线、已连接、最近 2 分钟有响应、云信身份就绪且具备接待权限的客服。" />
           <MetricCard label="当前排队咨询" value={overview.totals.waitingConsultations} hint="当前未分配且用户已留言的等待咨询；实时事实，不是所选期间的历史排队。" />
           <MetricCard label={`${scopeWord}接待咨询`} value={overview.totals.todaySessions} hint="期间发生分配、接入、转交或结束的咨询，同一咨询只计一次。" />
           <MetricCard label={`${scopeWord}接待用户`} value={overview.totals.todayUsers} hint="所选期间去重用户；同一用户跨天只计 1 人。" />
@@ -262,9 +262,92 @@ export function SupportDashboard({ active, request, demo = false }: { active: bo
             </div>
           </CardContent>
         </Card>
+        <YunxinConversationUsageCard request={request} demo={demo} />
       </> : null}
     </div>
   </TooltipProvider>;
+}
+
+type YunxinConversationUsageAccount = {
+  adminUserId: string;
+  name: string;
+  accountLabel: string;
+  conversationCount: number | null;
+  stickTopCount: number | null;
+  state: "OK" | "TRUNCATED" | "ERROR";
+  error?: string;
+};
+type YunxinConversationUsage = {
+  available: boolean;
+  sampledAt: string;
+  quota: number;
+  accounts: YunxinConversationUsageAccount[];
+};
+
+function YunxinConversationUsageCard({ request, demo }: { request: SupportManagementRequest; demo: boolean }) {
+  const [data, setData] = useState<YunxinConversationUsage | null>(null);
+  const [state, setState] = useState<"idle" | "loading" | "ready" | "error">("idle");
+  const [error, setError] = useState("");
+  const load = async () => {
+    if (state === "loading") return;
+    setState("loading");
+    setError("");
+    try {
+      setData(await request<YunxinConversationUsage>("/im/yunxin-conversations"));
+      setState("ready");
+    } catch (reason) {
+      const status = (reason as { status?: number } | null)?.status;
+      setError(status === 404 || status === 503
+        ? "当前服务端尚未部署云信会话容量接口。"
+        : friendlyError(reason));
+      setState("error");
+    }
+  };
+  return <Card className="im-wb-mgmt-card" data-panel="yunxin-conversations">
+    <CardHeader>
+      <div className="flex items-center justify-between gap-3">
+        <div>
+          <CardTitle className="flex items-center gap-1.5">云信会话容量 <SupportInfoHint label="云信会话容量口径">按云信账号统计云端会话总数；置顶会话包含在总数内，置顶数量另有上限。达到 5000 后云端列表可能截断，不能把置顶当永久归档。</SupportInfoHint></CardTitle>
+          <span className="im-wb-mgmt-toolbar-note">配额 {data?.quota ?? 5000}/账号 · 置顶会话占用该配额</span>
+        </div>
+        <Button variant="outline" size="sm" data-action="refresh-yunxin-conversations" onClick={() => void load()} disabled={demo || state === "loading"}>
+          <RefreshCw aria-hidden="true" />{state === "loading" ? "读取中…" : "读取会话数"}
+        </Button>
+      </div>
+    </CardHeader>
+    <CardContent className="im-wb-mgmt-card-content">
+      {demo ? <p className="im-wb-mgmt-inline-state">演示模式不读取云信服务端数据。</p> : null}
+      {!demo && state === "idle" ? <p className="im-wb-mgmt-inline-state">按需读取，不会自动轮询云信接口。</p> : null}
+      {state === "error" ? <p className="im-wb-mgmt-inline-state text-destructive" role="alert">{error}</p> : null}
+      {state === "ready" && data ? (!data.available
+        ? <p className="im-wb-mgmt-inline-state">当前环境未装配云信服务端 API，无法读取会话容量。</p>
+        : <><div className="im-wb-mgmt-table-wrap"><Table className="im-wb-mgmt-table">
+          <TableHeader><TableRow>
+            <TableHead>客服</TableHead><TableHead>NIM 账号</TableHead>
+            <TableHead className="text-right">云端会话</TableHead><TableHead className="text-right">置顶</TableHead><TableHead>容量</TableHead>
+          </TableRow></TableHeader>
+          <TableBody>
+            {data.accounts.length ? data.accounts.map((account) => {
+              const count = account.conversationCount;
+              const ratio = count === null ? null : count / data.quota;
+              const tone: "success" | "warning" | "unknown" = account.state === "ERROR" ? "unknown" : account.state === "TRUNCATED" || (ratio !== null && ratio >= 0.8) ? "warning" : "success";
+              return <TableRow key={account.adminUserId} data-admin-user-id={account.adminUserId}>
+                <TableCell className="font-medium">{account.name}</TableCell>
+                <TableCell className="tabular-nums">{account.accountLabel}</TableCell>
+                <TableCell className="text-right tabular-nums">{count === null ? "—" : count}</TableCell>
+                <TableCell className="text-right tabular-nums">{account.stickTopCount === null ? "—" : account.stickTopCount}</TableCell>
+                <TableCell>
+                  <Badge variant={tone}>{account.state === "ERROR" ? account.error ?? "读取失败"
+                    : account.state === "TRUNCATED" ? `≥${data.quota}，未完整读取`
+                      : ratio === null ? "—" : `${Math.round(ratio * 100)}%`}</Badge>
+                </TableCell>
+              </TableRow>;
+            }) : <TableRow><TableCell colSpan={5} className="im-wb-mgmt-empty-cell">暂无客服 NIM 账号</TableCell></TableRow>}
+          </TableBody>
+        </Table></div>
+        <span className="im-wb-mgmt-toolbar-note">采样于 {formatDateTime(data.sampledAt)}；账号已脱敏。</span></>) : null}
+    </CardContent>
+  </Card>;
 }
 
 function MetricCard({ label, value, hint }: { label: string; value: number; hint?: string }) {

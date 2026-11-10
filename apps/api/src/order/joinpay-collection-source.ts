@@ -17,6 +17,8 @@ export type FormalCollectionSourceOptions = {
   profileFor: (operation: CollectionProfileOperation, original: Readonly<CollectionPersistedBinding>,
     pinned?: Readonly<{ profileId: string; profileSha256: string; keyVersionRef: string }>) => BoundCollectionProfile;
   keyFor: (keyVersionRef: string) => string;
+  /** Formal collection is a production payment acceptance path; generate the opening in the same transaction. */
+  autoOpening?: boolean;
 };
 type Row = {
   request_id: string; order_id: string; state: RequestState; merchant_identity_id: string; channel_order_no: string; amount_cents: string;

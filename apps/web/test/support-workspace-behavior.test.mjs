@@ -395,7 +395,7 @@ test("nonpreview fifty conversations restore selection and draft in the real hos
   assert.equal(browser.document.activeElement === items[49], true, 'return focuses the selected last item, not the first');
 });
 
-test('directory refresh has a two-page budget and stops when the window is hidden or unmounted',async(t)=>{
+test('directory refresh scans its four order sources and stops when the window is hidden or unmounted',async(t)=>{
  const oldFetch=globalThis.fetch,oldInterval=window.setInterval,oldClear=window.clearInterval;
  let tick,orderCalls=0,release;
  window.setInterval=callback=>{tick=callback;return 1;};window.clearInterval=()=>{};
@@ -404,18 +404,18 @@ test('directory refresh has a two-page budget and stops when the window is hidde
   if(url.includes('/im/token'))return new Response('{}',{status:503});
   if(url.includes('/im/consultations'))return new Response('{"consultations":[]}');
   orderCalls++;
-  if(orderCalls===5)await new Promise(resolve=>release=resolve);
+  if(orderCalls===9)await new Promise(resolve=>release=resolve);
   return new Response(JSON.stringify({items:[],nextCursor:'page-'+orderCalls}));
  };
  const host=document.createElement('div');document.body.append(host);const root=createRoot(host);
  t.after(async()=>{await act(async()=>root.unmount());host.remove();globalThis.fetch=oldFetch;window.setInterval=oldInterval;window.clearInterval=oldClear;});
  const render=visible=>root.render(renderPreview({preview:false,embedded:true,visible}));
- await act(async()=>render(true));await settle();assert.equal(orderCalls,2);assert.doesNotMatch(host.textContent,/你好，需要/);
- await act(async()=>tick());await settle();assert.equal(orderCalls,4);
+ await act(async()=>render(true));await settle();assert.equal(orderCalls,4);assert.doesNotMatch(host.textContent,/你好，需要/);
+ await act(async()=>tick());await settle();assert.equal(orderCalls,8);
  const oldTick=tick;
- await act(async()=>render(false));await act(async()=>oldTick());assert.equal(orderCalls,4);
- await act(async()=>render(true));await settle();assert.equal(orderCalls,5);
- await act(async()=>root.unmount());await act(async()=>release());await settle();assert.equal(orderCalls,5,'no follow-up page after unmount');
+ await act(async()=>render(false));await act(async()=>oldTick());assert.equal(orderCalls,8);
+ await act(async()=>render(true));await settle();assert.equal(orderCalls,9);
+ await act(async()=>root.unmount());await act(async()=>release());await settle();assert.equal(orderCalls,9,'no follow-up page after unmount');
 });
 
 test("F1 requires complete directory success; failures never become empty and creation is single-flight", async(t)=>{
@@ -548,7 +548,7 @@ test("pasting image stages file via clipboard DataTransfer, transfer preserves p
   assert.ok(revokedUrls.includes("blob:pasted-stage-1"), "preview URL is revoked once pending send completes");
 });
 
-test("TEAM_INVITE notification maps to neutral member joined label rather than consultation created", () => {
+test("NIM team notifications use the shared decoder and neutral fallbacks", () => {
   const inviteMsg = messageFromNim({
     messageType: 5,
     attachment: { type: 0 },
@@ -559,16 +559,118 @@ test("TEAM_INVITE notification maps to neutral member joined label rather than c
   assert.ok(inviteMsg);
   assert.equal(inviteMsg.from, "system");
   assert.equal(inviteMsg.text, "成员已加入会话");
+  assert.equal(inviteMsg.notice?.kind, "MEMBER_JOINED");
+
+  const createMsg = messageFromNim({
+    messageType: 5,
+    attachment: { ope: 0, tname: "订单群", accids: ["user-1"] },
+    senderId: "system-1",
+    createTime: 1001,
+    messageClientId: "create-1",
+  }, "user-1");
+  assert.ok(createMsg);
+  assert.equal(createMsg.text, "群聊已创建");
+  assert.equal(createMsg.notice?.kind, "TEAM_CREATED");
+
+  // A typed member change must not be decoded as a created group just because ope is also present.
+  const typedInvite = messageFromNim({
+    messageType: 5,
+    attachment: { ope: 0, type: 0 },
+    senderId: "system-1",
+    createTime: 1002,
+    messageClientId: "typed-invite-1",
+  }, "user-1");
+  assert.ok(typedInvite);
+  assert.equal(typedInvite.text, "成员已加入会话");
 
   const otherSysMsg = messageFromNim({
     messageType: 5,
-    attachment: { type: 1 },
+    attachment: { type: 3 },
     senderId: "system-1",
-    createTime: 1001,
+    createTime: 1003,
     messageClientId: "update-1",
   }, "user-1");
   assert.ok(otherSysMsg);
   assert.equal(otherSysMsg.text, "会话信息已更新");
+  assert.equal(otherSysMsg.notice?.kind, "TEAM_UPDATED");
+
+  const unknownMsg = messageFromNim({
+    messageType: 5,
+    attachment: { type: 99 },
+    senderId: "system-1",
+    createTime: 1004,
+    messageClientId: "unknown-1",
+  }, "user-1");
+  assert.ok(unknownMsg);
+  assert.equal(unknownMsg.text, "会话信息有变化");
+  assert.equal(unknownMsg.notice?.kind, "UNKNOWN");
+
+  // A valid server-normalized field wins over re-decoding the raw attachment.
+  const serverMsg = messageFromNim({
+    messageType: 5,
+    attachment: { type: 0 },
+    systemNotice: { kind: "TEAM_DISMISSED", text: "会话已解散" },
+    senderId: "system-1",
+    createTime: 1005,
+    messageClientId: "server-1",
+  }, "user-1");
+  assert.ok(serverMsg);
+  assert.equal(serverMsg.text, "会话已解散");
+  assert.equal(serverMsg.notice?.kind, "TEAM_DISMISSED");
+
+  // Unknown kinds or non-canonical text are not trusted; the raw attachment still decodes.
+  const badKind = messageFromNim({
+    messageType: 5,
+    attachment: { type: 3 },
+    systemNotice: { kind: "NOT_A_NOTICE", text: "任意文本" },
+    senderId: "system-1",
+    createTime: 1006,
+    messageClientId: "bad-kind-1",
+  }, "user-1");
+  assert.equal(badKind?.notice?.kind, "TEAM_UPDATED");
+  const badText = messageFromNim({
+    messageType: 5,
+    attachment: { type: 1 },
+    systemNotice: { kind: "MEMBER_JOINED", text: "伪造文案" },
+    senderId: "system-1",
+    createTime: 1007,
+    messageClientId: "bad-text-1",
+  }, "user-1");
+  assert.equal(badText?.notice?.kind, "MEMBER_LEFT");
+
+  // A normal message must never borrow a system notice.
+  const regularWithNotice = messageFromNim({
+    messageType: 0,
+    text: "普通消息",
+    systemNotice: { kind: "TEAM_DISMISSED", text: "会话已解散" },
+    senderId: "user-1",
+    createTime: 1008,
+    messageClientId: "regular-1",
+  }, "user-1");
+  assert.equal(regularWithNotice?.from, "customer");
+  assert.equal(regularWithNotice?.text, "普通消息");
+  assert.equal(regularWithNotice?.notice, undefined);
+});
+
+test("a Bot welcome keeps team lifecycle notices out of the user thread and directory", async (t) => {
+  const row = {
+    id: "round-notices", threadId: "thread-notices", roundId: "round-notices", roundSeq: 1, threadState: "ACTIVE",
+    type: "SERVICE", state: "ACTIVE", conversationId: "team-notices", messageScopeState: "READY", canSend: true,
+    assignedAdmin: { id: "staff-a", name: "客服 A" }, peerAccountId: "staff-a", botAccountId: "bot-u",
+    lastMessagePreview: "群聊已创建", lastMessageAt: "2026-10-30T00:02:00Z", updatedAt: "2026-10-30T00:02:00Z",
+  };
+  const history = {
+    "team-notices": [
+      { messageClientId: "welcome", messageServerId: "srv-welcome", conversationId: "team-notices", senderId: "bot-u", receiverId: "preview-user", createTime: 1_700_000_000_000, text: "欢迎咨询", messageType: 0 },
+      { messageClientId: "created", messageServerId: "srv-created", conversationId: "team-notices", senderId: "system", receiverId: "preview-user", createTime: 1_700_000_001_000, messageType: 5, attachment: { ope: 0 } },
+      { messageClientId: "joined", messageServerId: "srv-joined", conversationId: "team-notices", senderId: "system", receiverId: "preview-user", createTime: 1_700_000_002_000, messageType: 5, attachment: { type: 0 } },
+    ],
+  };
+  const page = await mountThreadWorkspace(t, { rows: [row], history });
+  await page.until(() => page.host.querySelector('[data-message-id="srv-welcome"]'), "bot welcome rendered");
+  assert.equal(page.host.querySelectorAll(".support-message-marker").length, 0, "Bot coverage hides team-created and member-joined notices");
+  assert.match(page.rowsInDirectory()[0].textContent, /欢迎咨询/, "the directory uses the last non-system message");
+  assert.doesNotMatch(page.rowsInDirectory()[0].textContent, /群聊已创建|成员已加入会话/);
 });
 
 test("OrderConversation 本单信息 action appends current order info to draft", async (t) => {
@@ -636,7 +738,7 @@ test("OrderConversation 本单信息 action appends current order info to draft"
   const textarea = host.querySelector("textarea");
   assert.ok(textarea, "textarea rendered");
   assert.ok(host.querySelector(".order-team-composer-box"), "composer uses the shared boxed input");
-  assert.equal(host.querySelectorAll(".order-team-composer-tools .order-team-tool").length, 5, "emoji, image, video, file and order info share the icon toolbar");
+  assert.equal(host.querySelectorAll(".order-team-composer-tools .order-team-tool").length, 6, "mention, emoji, image, video, file and order info share the icon toolbar");
   assert.ok(host.querySelector(".order-team-composer-hint"), "keyboard hint matches the support chat");
   assert.ok(infoBtn.getAttribute("data-tip"), "icon tools expose a hover tooltip");
   assert.ok(host.querySelector(".order-team-msg-avatar"), "messages render the shared avatar column");
@@ -1469,7 +1571,7 @@ async function mountSupportDirectory(t, consultations, props = {}) {
       if ((init.method ?? "GET") === "POST") {
         const body = JSON.parse(String(init.body));
         creates.push(body);
-        return new Response(JSON.stringify({ consultation: { id: "created-1", type: body.type==="COMPLAINT"?"SERVICE":body.type, state: "WAITING", conversationId: null, assignedAdmin: null, messageScopeState: "READY" } }));
+        return new Response(JSON.stringify({ consultation: { id: "created-1", type: body.type, state: "WAITING", conversationId: null, assignedAdmin: null, messageScopeState: "READY" } }));
       }
       return new Response(JSON.stringify({ consultations }));
     }
@@ -1502,28 +1604,27 @@ test("opening with SERVICE never presents or creates a live COMPLAINT conversati
   assert.equal(creates.length, 0, "opening the window never creates a consultation");
 });
 
-test("opening with COMPLAINT reuses the existing SERVICE thread", async (t) => {
+test("opening with COMPLAINT selects the existing COMPLAINT thread", async (t) => {
   const { host, creates, until } = await mountSupportDirectory(t, [
     { id: "service-1", type: "SERVICE", state: "ACTIVE", conversationId: "team-service", messageScopeState: "READY", assignedAdmin: { id: "a-1", name: "客服甲" } },
     { id: "complaint-1", type: "COMPLAINT", state: "ACTIVE", conversationId: "team-complaint", messageScopeState: "READY", assignedAdmin: { id: "a-2", name: "专员乙" } },
   ], { initialType: "COMPLAINT" });
-  await until(() => host.querySelector('.support-directory .support-conversation-item[data-active="true"]'), "SERVICE selection");
+  await until(() => host.querySelector('.support-directory .support-conversation-item[data-active="true"]'), "COMPLAINT selection");
   const active = host.querySelector('.support-directory .support-conversation-item[data-active="true"]');
-  assert.match(active.textContent, /平台客服/, "the legacy COMPLAINT entry lands on the SERVICE thread");
-  assert.doesNotMatch(active.textContent, /投诉反馈/);
-  assert.match(host.querySelector(".support-conversation-identity h3").textContent, /平台客服/);
-  assert.equal(host.querySelector('.support-start-panel[data-state="initial"]'), null, "the existing SERVICE thread replaces the start panel");
+  assert.match(active.textContent, /投诉反馈/, "the complaint entry selects its own thread");
+  assert.match(host.querySelector(".support-conversation-identity h3").textContent, /投诉反馈/);
+  assert.equal(host.querySelector('.support-start-panel[data-state="initial"]'), null, "the existing complaint thread replaces the start panel");
   assert.equal(creates.length, 0, "opening never creates a second thread");
 });
 
-test("the complaint entry stays visible and starts the unified SERVICE chat directly", async (t) => {
+test("the complaint entry starts the complaint thread directly", async (t) => {
   const { host, creates, until } = await mountSupportDirectory(t, [], { initialType: "COMPLAINT" });
   await until(() => /你好，需要什么帮助/.test(host.textContent), "welcome entry");
   const complaint = host.querySelector('[data-action="welcome-complaint"]');
   assert.ok(complaint, "the complaint entry is not removed");
   await act(async () => { complaint.click(); });
   await until(() => creates.length === 1, "complaint entry starts the consultation");
-  assert.equal(creates[0].type, "COMPLAINT", "the request preserves complaint intent; the API returns the unified SERVICE thread");
+  assert.equal(creates[0].type, "COMPLAINT", "the request and returned thread keep the complaint type");
 });
 
 test("opening selects the live SERVICE consultation", async (t) => {
@@ -1538,15 +1639,15 @@ test("opening selects the live SERVICE consultation", async (t) => {
   assert.equal(host.querySelector('.support-start-panel[data-state="initial"]'), null, "a live consultation replaces the start panel");
 });
 
-test("a legacy COMPLAINT login intent creates the SERVICE thread", async (t) => {
+test("a legacy COMPLAINT login intent creates the COMPLAINT thread", async (t) => {
   const storageKey = "zzsh-support-intent-v1";
   window.sessionStorage.setItem(storageKey, JSON.stringify({ type: "COMPLAINT", source: "/help/rental-getting-started", createdAt: Date.now() }));
   t.after(() => window.sessionStorage.removeItem(storageKey));
   const { host, creates, until } = await mountSupportDirectory(t, []);
   await until(() => creates.length === 1, "legacy intent creates one consultation");
-  assert.equal(creates[0].type, "COMPLAINT", "the POST preserves entry intent; the API unifies the thread");
-  await until(() => host.querySelector('.support-unified'), "the created SERVICE thread opens");
-  assert.match(host.querySelector(".support-conversation-identity h3").textContent, /平台客服/);
+  assert.equal(creates[0].type, "COMPLAINT", "the POST keeps the complaint type");
+  await until(() => host.querySelector('.support-unified'), "the created COMPLAINT thread opens");
+  assert.match(host.querySelector(".support-conversation-identity h3").textContent, /投诉反馈/);
   assert.equal(window.sessionStorage.getItem(storageKey), null, "a submitted intent is cleared");
 });
 
@@ -2023,9 +2124,67 @@ test("the composer names the real blocker instead of blaming 客服接待", asyn
     return host.querySelector("textarea").placeholder;
   };
   assert.match(await render("waiting", { id: "c-1", type: "SERVICE", state: "WAITING", conversationId: null, assignedAdmin: null, messageScopeState: "READY" }), /正在连接客服/, "a waiting consultation without a channel team is still provisioning");
-  assert.match(await render("waiting-ready", { id: "c-3", type: "SERVICE", state: "WAITING", conversationId: "team-3", assignedAdmin: null, messageScopeState: "READY" }), /已提交，客服接入后会看到你的留言；现在也可以先发消息/, "a READY waiting team gets the reassuring copy, not the old reception gate");
+  assert.match(await render("waiting-ready", { id: "c-3", type: "SERVICE", state: "WAITING", conversationId: "team-3", assignedAdmin: null, messageScopeState: "READY" }), /发送第一条消息后，客服才会收到并接入/, "a READY waiting team explains that only the first message reaches the agent");
   assert.match(await render("server-denied", { id: "c-4", type: "SERVICE", state: "ACTIVE", conversationId: "team-4", assignedAdmin: { id: "a-1", name: "客服甲" }, messageScopeState: "READY", canSend: false }), /当前会话暂不可继续/, "the backend canSend=false is honored even for an ACTIVE round");
   assert.match(await render("link-down", { id: "c-2", type: "SERVICE", state: "ACTIVE", conversationId: "team-2", assignedAdmin: { id: "a-1", name: "客服甲" }, messageScopeState: "READY" }), /消息通道正在恢复/, "a missing link is reported as a link problem, not as waiting for reception");
+});
+
+test("a failed first IM connection shows an error and lets the user reopen the same lifecycle", async (t) => {
+  const originalFetch = globalThis.fetch;
+  let tokenCalls = 0;
+  globalThis.fetch = async (input) => {
+    const url = String(input);
+    if (url.startsWith("/api/orders/")) return new Response(JSON.stringify({ items: [], nextCursor: null }));
+    if (url.includes("/im/token")) {
+      tokenCalls += 1;
+      if (tokenCalls === 1) return new Response(JSON.stringify({ error: { message: "synthetic unavailable" } }), { status: 503 });
+      return new Response(JSON.stringify({ appKey: "synthetic", accountId: "preview-user", token: "synthetic", transport: "local-fake" }));
+    }
+    if (url.includes("/im/consultations")) return new Response(JSON.stringify({ consultations: [] }));
+    if (url.includes("/im/messages")) return new Response(JSON.stringify({ messages: [] }));
+    return new Response(JSON.stringify({}));
+  };
+  const host = browser.document.createElement("div"); browser.document.body.appendChild(host);
+  const root = createRoot(host);
+  t.after(async () => { await act(async () => root.unmount()); host.remove(); globalThis.fetch = originalFetch; });
+  const until = async (predicate, label) => { for (let index = 0; index < 160; index += 1) { if (predicate()) return; await settle(); } throw new Error(`${label} timed out`); };
+  await act(async () => root.render(renderPreview({ preview: false, embedded: true, onClose: () => {} })));
+  await until(() => tokenCalls === 1 && Boolean(host.querySelector('.support-connection-state[data-state="error"]')), "first open failure");
+  const failed = host.querySelector('.support-connection-state[data-state="error"]');
+  assert.match(failed.textContent, /连接失败/, "the failure is named in the header instead of showing 正在连接");
+  const retry = [...host.querySelectorAll("button")].find((button) => button.textContent.trim() === "重新连接");
+  assert.ok(retry, "a visible reconnect action is offered");
+  await act(async () => retry.click());
+  await until(() => tokenCalls === 2, "retry reopens the existing lifecycle");
+  await until(() => !host.querySelector('.support-connection-state[data-state="error"]'), "reconnected state");
+  assert.match(host.textContent, /本地测试通道/, "the retried open produced a connected client");
+});
+
+test("a FAILED message scope keeps loaded history and offers reconnect without enabling send", async (t) => {
+  const originalFetch = globalThis.fetch;
+  const history = [{ messageClientId: "h1", conversationId: "team-1", senderId: "admin-1", receiverId: "preview-user", createTime: 1_700_000_000_000, messageType: 0, text: "已经加载的历史消息" }];
+  globalThis.fetch = async (input, init = {}) => {
+    const url = String(input);
+    if (url.startsWith("/api/orders/")) return new Response(JSON.stringify({ items: [], nextCursor: null }));
+    if (url.includes("/im/token")) return new Response(JSON.stringify({ appKey: "synthetic", accountId: "preview-user", token: "synthetic", transport: "local-fake" }));
+    if (url.includes("/im/consultations")) return new Response(JSON.stringify({ consultations: [{ id: "c-1", type: "SERVICE", state: "ACTIVE", conversationId: "team-1", messageScopeState: "FAILED", canSend: false, assignedAdmin: { id: "a-1", name: "客服甲" } }] }));
+    if (url.includes("/im/messages")) return (init.method ?? "GET") === "POST" ? new Response(JSON.stringify({ message: {} })) : new Response(JSON.stringify({ messages: history }));
+    return new Response(JSON.stringify({}));
+  };
+  const host = browser.document.createElement("div"); browser.document.body.appendChild(host);
+  const root = createRoot(host);
+  t.after(async () => { await act(async () => root.unmount()); host.remove(); globalThis.fetch = originalFetch; });
+  const until = async (predicate, label) => { for (let index = 0; index < 160; index += 1) { if (predicate()) return; await settle(); } throw new Error(`${label} timed out`); };
+  await act(async () => root.render(renderPreview({ preview: false, embedded: true, onClose: () => {} })));
+  await until(() => host.querySelector('.support-message[data-from="agent"]'), "history despite FAILED scope");
+  assert.match(host.querySelector('.support-message[data-from="agent"]').textContent, /已经加载的历史消息/, "loaded history stays visible");
+  const banner = [...host.querySelectorAll(".support-send-retry")].find((element) => element.textContent.includes("当前无法发送"));
+  assert.ok(banner, "the FAILED scope shows an explanatory error bar");
+  assert.match(banner.textContent, /可重新连接或稍后刷新/);
+  assert.ok([...banner.querySelectorAll("button")].some((button) => button.textContent.trim() === "重新连接"), "the error bar offers reconnect");
+  assert.equal(host.querySelector("textarea").disabled, true, "the composer stays read-only");
+  assert.equal(host.querySelector(".support-send-btn").disabled, true, "the send action stays disabled");
+  assert.equal(host.querySelector('.support-start-panel'), null, "the FAILED panel no longer replaces the message list");
 });
 
 /** Mount a single mutable consultation with a local-fake channel and record text POSTs. */
@@ -2103,6 +2262,13 @@ test("a WAITING consultation without a conversationId never fakes a sent message
   assert.equal(page.host.querySelector('.support-message[data-self="true"]'), null, "no fake sent bubble appears");
   assert.doesNotMatch(page.host.textContent, /已发送/, "no fake sent status appears");
   assert.equal(page.host.querySelector("textarea").value, "没有会话也不能假发送", "the draft stays with the user");
+});
+
+test("a WAITING round before the first user message says when the agent receives it", async (t) => {
+  const page = await mountWaitingConsultation(t, { id: "c-first", type: "SERVICE", state: "WAITING", conversationId: "team-first", assignedAdmin: null, messageScopeState: "READY" });
+  await page.until(() => page.host.querySelector(".support-message-empty"), "empty waiting thread");
+  assert.match(page.host.querySelector(".support-message-empty").textContent, /发送第一条消息后，客服才会收到并接入/, "the empty state explains the first message is what reaches the agent");
+  assert.doesNotMatch(page.host.textContent, /客服接入后会看到你的留言|可先留言/, "no copy claims a message was already delivered");
 });
 
 test("an unconfirmed result without its original id is never re-sent under a new id", async () => {
@@ -2377,15 +2543,16 @@ async function mountSupportActions(t, options = {}) {
   await until(() => host.querySelector("textarea") && !host.querySelector("textarea").disabled, "sendable consultation");
   await until(() => host.querySelector('[data-message-id="srv-peer"]'), "history rendered");
   const row = (id) => host.querySelector(`[data-message-id="${id}"]`);
+  const surface = (id) => row(id)?.querySelector(".support-message-bubble, .support-message-media, .support-message-image, .order-card") ?? row(id);
   const open = async (id, point = { clientX: 120, clientY: 90 }) => {
-    await act(async () => { const target = row(id); assert.ok(target, id); target.dispatchEvent(new browser.MouseEvent("contextmenu", { bubbles: true, cancelable: true, ...point })); });
+    await act(async () => { const target = surface(id); assert.ok(target, id); target.dispatchEvent(new browser.MouseEvent("contextmenu", { bubbles: true, cancelable: true, ...point })); });
     await settle();
   };
   const labels = () => [...browser.document.querySelectorAll(".message-action-menu [role=menuitem]")].map((item) => item.textContent.trim());
   const pick = async (label) => { const button = [...browser.document.querySelectorAll(".message-action-menu [role=menuitem]")].find((item) => item.textContent.trim() === label); assert.ok(button, label); await act(async () => button.click()); await settle(); };
   const type = async (value) => { await act(async () => { const element = host.querySelector("textarea"); Object.getOwnPropertyDescriptor(browser.HTMLTextAreaElement.prototype, "value").set.call(element, value); element.dispatchEvent(new Event("input", { bubbles: true })); }); };
   const submit = async () => { await act(async () => { host.querySelector("form").dispatchEvent(new browser.Event("submit", { bubbles: true, cancelable: true })); }); };
-  const longPress = async (id) => { await act(async () => { row(id).dispatchEvent(new browser.PointerEvent("pointerdown", { bubbles: true, pointerType: "touch", clientX: 160, clientY: 100 })); await new Promise((resolve) => setTimeout(resolve, 600)); }); };
+  const longPress = async (id) => { await act(async () => { surface(id).dispatchEvent(new browser.PointerEvent("pointerdown", { bubbles: true, pointerType: "touch", clientX: 160, clientY: 100 })); await new Promise((resolve) => setTimeout(resolve, 600)); }); };
   const setVisible = async (visible) => { await act(async () => root.render(renderPreview({ preview: false, embedded: true, visible, onClose: () => {} }))); };
   return { host, posts, orderReads, row, open, labels, pick, type, submit, longPress, until, setVisible, draft: () => host.querySelector("textarea").value };
 }
@@ -2641,7 +2808,7 @@ async function mountOrderCardPanel(t, info, messages, panelProps = {}) {
 }
 
 test("order stage cards render by kind as chat messages with the stage facts", async (t) => {
-  const info = cardAccess(cardTermsFor("STAFF"), { stage: "SETTLED", orderStatus: "COMPLETED", endState: "REQUESTED", dueAt: "2026-10-19T10:00:00.000Z", sendUntil: "2026-10-18T10:00:00.000Z" });
+  const info = cardAccess(cardTermsFor("STAFF"), { stage: "SETTLED", orderStatus: "COMPLETED", endState: "REQUESTED", dueAt: "2026-10-19T10:00:00.000Z", sendUntil: "2026-10-18T10:00:00.000Z", botAccountId: "platform-1" });
   // 四种阶段卡同处一个会话，各自保留自己的标题与业务事实。
   const host = await mountOrderCardPanel(t, info, [
     cardMessage("ORDER_OPENING", 1, info),
@@ -2651,12 +2818,14 @@ test("order stage cards render by kind as chat messages with the stage facts", a
   ]);
   const cards = [...host.querySelectorAll(".order-card")];
   assert.deepEqual(cards.map(card => card.getAttribute("data-kind")), ["ORDER_OPENING", "ORDER_ENDING", "ORDER_SETTLED", "ORDER_PRICE_CHANGE"], "each card keeps its kind");
+  assert.deepEqual([...host.querySelectorAll(".order-team-messages li[data-card]")].map(row => row.querySelector(".order-team-msg-meta b")?.textContent), ["洲洲助手（Bot）", "洲洲助手（Bot）", "洲洲助手（Bot）", "洲洲助手（Bot）"], "every bot card keeps its sender name even when messages are grouped");
   assert.equal(cards[0].querySelector(".order-card-head .order-card-title").textContent, "开租确认");
   assert.ok(cards[0].querySelector(".order-card-head .order-card-icon"), "the stage title sits in the dark header with its icon");
   assert.equal(cards[1].querySelector(".order-card-title").textContent, "结束确认");
   assert.equal(cards[2].querySelector(".order-card-title").textContent, "结算完成");
   assert.equal(cards[3].querySelector(".order-card-title").textContent, "价格调整待确认");
-  assert.match(cards[3].textContent, /价格调整内容以订单详情为准/, "the price-change card keeps its business copy");
+  assert.match(cards[3].querySelector(".order-card-head .order-card-info")?.getAttribute("aria-label") ?? "", /价格调整内容以订单详情为准/, "the price-change card keeps its business copy as an accessible hint");
+  assert.equal(cards[3].querySelector(".order-card-head .order-card-info")?.getAttribute("title"), null, "the card does not use a native browser title");
   const acks = [...cards[0].querySelectorAll(".order-card-ack")].map(ack => ({
     name: ack.querySelector(".order-card-ack-name").textContent,
     state: ack.getAttribute("data-state"),
@@ -2665,8 +2834,8 @@ test("order stage cards render by kind as chat messages with the stage facts", a
   }));
   assert.deepEqual(acks, [
     { name: "租客", state: "confirmed", status: "已确认", checked: true },
-    { name: "号主", state: "pending", status: "待确认", checked: false },
-  ], "confirmed shows a filled check, pending shows an empty circle");
+    { name: "号主", state: "pending", status: "待确认", checked: true },
+  ], "confirmed shows a filled check, pending shows a clock instead of an empty circle");
   assert.equal(cards[0].querySelectorAll(".order-card-ack-link").length, 1, "the two parties are joined by one connector");
   assert.match(cards[1].textContent, /已发起 · 待双方确认/, "endState REQUESTED is spoken as awaiting both sides");
   assert.match(cards[2].textContent, /已结算/);
@@ -2676,7 +2845,7 @@ test("order stage cards render by kind as chat messages with the stage facts", a
   const staffCard = cards[0];
   assert.equal(staffCard.getAttribute("data-party"), "STAFF");
   assert.match(staffCard.querySelector(".order-card-account").textContent, /高练度全限定号/, "the account title is the card headline");
-  assert.equal(staffCard.querySelector(".order-card-game").textContent, "绝区零", "the game name sits under the account title");
+  assert.equal(staffCard.querySelector(".order-card-game"), null, "the game name is not repeated inside the card");
   assert.doesNotMatch(staffCard.textContent, /acc-card-1|稳定 ID/, "no account stable id is rendered");
   const staffFigures = Object.fromEntries([...staffCard.querySelectorAll(".order-card-figure")]
     .map(figure => [figure.querySelector("dt").textContent, figure.querySelector("dd").textContent]));
@@ -2976,7 +3145,7 @@ test("media history renders video, file and audio, falls back when the URL is mi
   assert.equal(missing.querySelector(".message-media-video-player"), null, "a missing URL never becomes a broken player");
   assert.match(missing.querySelector(".message-media-unavailable").textContent, /媒体暂不可用/);
 
-  await act(async () => video.dispatchEvent(new browser.MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 120, clientY: 90 })));
+  await act(async () => videoTrigger.dispatchEvent(new browser.MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 120, clientY: 90 })));
   await settle();
   const labels = [...browser.document.querySelectorAll(".message-action-menu [role=menuitem]")].map((item) => item.textContent.trim());
   assert.ok(!labels.includes("复制"), "media is not copyable text");
@@ -3007,7 +3176,7 @@ test("a long item list folds and a card row still opens the message menu", async
   await act(async () => card.querySelector(".order-card-items-toggle").click());
   assert.equal(card.querySelectorAll(".order-card-line").length, 0, "the fold closes again");
 
-  await act(async () => row.dispatchEvent(new browser.MouseEvent("contextmenu", { bubbles: true, cancelable: true, button: 2, clientX: 120, clientY: 140 })));
+  await act(async () => card.dispatchEvent(new browser.MouseEvent("contextmenu", { bubbles: true, cancelable: true, button: 2, clientX: 120, clientY: 140 })));
   const menu = browser.document.querySelector('.message-action-menu[role="menu"]');
   assert.ok(menu, "contextmenu on a card still opens the platform menu");
   const labels = [...menu.querySelectorAll('[role="menuitem"]')].map(item => item.textContent.trim());
@@ -3213,4 +3382,22 @@ test("closing a support view prevents a late order detail from navigating", asyn
   await act(async () => { finish(new Response(JSON.stringify({ order: { id: "order-reference", viewerParty: "owner" } }))); });
   await settle();
   assert.deepEqual(paths, []);
+});
+
+test("an initially selected user order keeps the role switch usable", async (t) => {
+  const host = document.createElement("div"); document.body.appendChild(host); const root = createRoot(host);
+  t.after(async () => { await act(async () => root.unmount()); host.remove(); });
+  const access = { orderId: "order-a", displayNo: "ZZ-A", orderStatus: "PAID", assignmentState: "ASSIGNED", teamState: "READY", appId: "synth", teamId: "12345",
+    gameName: "SYNTH", account: { id: "a", title: "SYNTH-A" }, viewerAccountId: "test-user", conversationId: "test-user|2|12345", canRead: true, canSend: true,
+    members: [{ platformId: "u-a", accountId: "test-user", party: "USER", name: "租客", avatar: null }],
+    supportEscalation: { firstResponseAt: null, remindDueAt: null, addRound: 0, state: "STOPPED", needsManualReview: false, noEligibleStaff: false } };
+  const client = { accountId: "test-user", transport: "local-fake", getConnectionState: () => "CONNECTED", getMessageHistory: async () => [], onMessages: () => () => {}, onConnectionStateChange: () => () => {} };
+  const request = async (path) => path.includes('/im?') ? access : { items: [], nextCursor: null };
+  await act(async () => root.render(createElement(OrderTeamPanel, { identity: "user-a", realm: "user", client, connection: "CONNECTED", active: true, selectedOrderId: "order-a", compact: true, request, onAuthError: () => {} })));
+  for (let i = 0; i < 40 && !host.querySelector('.order-team-role-switch'); i++) await settle();
+  const role = [...host.querySelectorAll('.order-team-role-switch button')].find(x => x.textContent.includes("出租"));
+  assert.ok(role);
+  await act(async () => role.click()); await settle();
+  assert.ok(host.querySelector('.order-team-role-switch'));
+  assert.doesNotMatch(host.textContent, /正在核对订单授权/);
 });

@@ -11,7 +11,8 @@ import { assertAdminContextInTransaction, type AdminContext } from "../auth/auth
 import { recordAudit, SecurityApiError, withTransaction } from "../auth/security-core";
 import { buildYunxinIdentityMarker, deriveYunxinAccountId } from "./identity-lifecycle";
 import type { SupportAvailability, SupportConnectionState } from "./consultation";
-import { resolveSupportConcurrencyLimit } from "./support-dispatch";
+import { YunxinApiError, type YunxinSupportScopeApi } from "./yunxin-provider";
+
 import { managedProfileImagePath } from "../profile/profile-avatar";
 
 export const SUPPORT_HANDOVER_NOTE_MAX = 200;
@@ -24,6 +25,11 @@ export const SUPPORT_AUDIT_MAX_LIMIT = 50;
 export const SUPPORT_FIRST_RESPONSE_DEFAULT_SECONDS = 120;
 export const SUPPORT_FIRST_RESPONSE_MIN_SECONDS = 30;
 export const SUPPORT_FIRST_RESPONSE_MAX_SECONDS = 86_400;
+
+/** Current Yunxin console quota per account; update if the App plan changes. */
+export const YUNXIN_CLOUD_CONVERSATION_QUOTA = 5000;
+/** 100 per page, stop after 50 pages (the current quota) instead of unbounded loops. */
+export const YUNXIN_CLOUD_CONVERSATION_MAX_PAGES = 50;
 
 /**
  * 首响事实的动作名。im_consultation 没有 first_response 列（0120 只加了 first_user_message_at），
@@ -66,9 +72,9 @@ export type SupportOverviewRow = {
   todaySessions: number;
   todayUsers: number;
   currentOrderGroups: number;
-  /** 服务端接待上限；与 support-dispatch.ts 同一常量来源，不是 UI 关注线。 */
-  capacityLimit: number;
-  /** 当前占用 = 咨询接待数 + 在租订单群数。 */
+  /** 业务不设接待硬上限；保留 null 表示“无上限”，仅 totalLoad 作统计。 */
+  capacityLimit: number | null;
+  /** 当前占用 = 咨询接待数 + 在租订单群数（只展示，不拦截）。 */
   totalLoad: number;
   atCapacity: boolean;
 };
@@ -84,12 +90,17 @@ export type SupportQueueReasonView = "NO_ONLINE_STAFF" | "ALL_AT_CAPACITY" | "CA
  */
 export type SupportQueueView = {
   queued: number;
+  /** Waiting rounds split by the permission cohort each one actually needs. */
+  serviceQueued: number;
+  complaintQueued: number;
+  serviceEligible: number;
+  complaintEligible: number;
   oldestQueuedAt: string | null;
   oldestWaitSeconds: number | null;
   onDuty: number;
   withFreeSlot: number;
   atCapacity: number;
-  capacityLimit: number;
+  capacityLimit: number | null;
   reason: SupportQueueReasonView | null;
 };
 
@@ -384,6 +395,21 @@ export async function readLatestHandoverNote(
   return row?.note ?? null;
 }
 
+const SUPPORT_OVERVIEW_ELIGIBLE_SQL = `
+  SELECT p."admin_user_id" AS "adminUserId", m."account_id" AS "accountId", m."identity_marker" AS "identityMarker"
+    FROM "zzsh_iam"."im_support_presence" p
+    JOIN "zzsh_iam"."admin_security" s ON s."admin_user_id" = p."admin_user_id"
+    JOIN "zzsh_auth_admin"."user" u ON u."id" = p."admin_user_id"
+    JOIN "zzsh_auth_admin"."session" a
+      ON a."id" = p."auth_session_id" AND a."userId" = p."admin_user_id"
+     AND a.locked = false AND a."expiresAt" > clock_timestamp()
+    JOIN "zzsh_iam"."im_identity_mapping" m
+      ON m."provider" = 'yunxin' AND m."app_id" = p."app_id" AND m."realm" = 'admin'
+     AND m."identity_kind" = 'ADMIN' AND m."platform_subject_id" = p."admin_user_id" AND m."status" = 'READY'
+   WHERE p."app_id" = $1 AND s."status" = 'ACTIVE' AND NOT u."suspended"
+     AND p."availability" = 'AVAILABLE' AND p."connection_state" = 'CONNECTED'
+     AND p."last_connected_at" > clock_timestamp() - interval '2 minutes'`;
+
 const SUPPORT_OVERVIEW_ON_DUTY_SQL = `
   WITH bounds AS (${dayBounds("$2", "$3")}),
   day_sessions AS (
@@ -490,9 +516,6 @@ const SUPPORT_OVERVIEW_TOTALS_SQL = `
        AND e."created_at" >= b.day_start AND e."created_at" < b.day_end
   )
   SELECT
-    (SELECT COUNT(*)::int FROM "zzsh_iam"."im_support_presence" p
-      WHERE p."app_id" = $1 AND p."availability" = 'AVAILABLE' AND p."connection_state" = 'CONNECTED'
-        AND p."last_connected_at" > clock_timestamp() - interval '2 minutes') AS "onDutyCount",
     (SELECT COUNT(*)::int FROM "zzsh_iam"."im_consultation" c
       WHERE c."app_id" = $1 AND c."state" = 'WAITING' AND c."assigned_admin_id" IS NULL
         AND c."first_user_message_at" IS NOT NULL) AS "waitingConsultations",
@@ -615,28 +638,18 @@ const SUPPORT_OVERVIEW_RESOLUTION_SQL = `
 
 const SUPPORT_OVERVIEW_QUEUE_SQL = `
   WITH queued AS (
-    SELECT count(*)::int AS "queued", min(c."first_user_message_at") AS "oldestQueuedAt",
+    SELECT count(*)::int AS "queued",
+           count(*) FILTER (WHERE c."kind" <> 'COMPLAINT')::int AS "serviceQueued",
+           count(*) FILTER (WHERE c."kind" = 'COMPLAINT')::int AS "complaintQueued",
+           min(c."first_user_message_at") AS "oldestQueuedAt",
            EXTRACT(EPOCH FROM (clock_timestamp() - min(c."first_user_message_at"))) AS "oldestWaitSeconds"
       FROM "zzsh_iam"."im_consultation" c
      WHERE c."app_id" = $1 AND c."state" = 'WAITING' AND c."assigned_admin_id" IS NULL
        AND c."first_user_message_at" IS NOT NULL
-  ),
-  duty AS (
-    SELECT p."admin_user_id",
-           p."active_load" + COALESCE((SELECT count(*) FROM "zzsh_order"."im_order_group" g
-             JOIN "zzsh_order"."rental_order" o ON o."id" = g."order_id"
-            WHERE g."app_id" = $1 AND o."status" = 'PAID'
-              AND COALESCE(g."responsible_admin_id", g."assigned_admin_id") = p."admin_user_id"), 0) AS "load"
-      FROM "zzsh_iam"."im_support_presence" p
-     WHERE p."app_id" = $1 AND p."availability" = 'AVAILABLE' AND p."connection_state" = 'CONNECTED'
-       AND p."last_connected_at" > clock_timestamp() - interval '2 minutes'
   )
-  SELECT q."queued",
+  SELECT q."queued", q."serviceQueued", q."complaintQueued",
          to_char(q."oldestQueuedAt" AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "oldestQueuedAt",
-         floor(COALESCE(q."oldestWaitSeconds", 0))::int AS "oldestWaitSeconds",
-         (SELECT count(*)::int FROM duty) AS "onDuty",
-         (SELECT count(*)::int FROM duty WHERE "load" < $2) AS "withFreeSlot",
-         (SELECT count(*)::int FROM duty WHERE "load" >= $2) AS "atCapacity"
+         floor(COALESCE(q."oldestWaitSeconds", 0))::int AS "oldestWaitSeconds"
     FROM queued q`;
 
 /** 首响质量聚合：事实统一经 readConsultationFirstResponse，不在这里另写跨表 join。 */
@@ -687,7 +700,8 @@ export async function readSupportOverview(
 ): Promise<SupportOverview> {
   const range = parseSupportRange(dateValue, dateToValue);
   const date = range.dateFrom, endDate = range.dateTo;
-  const capacityLimit = resolveSupportConcurrencyLimit(limits.capacityLimit);
+  // No hard capacity: all fresh online agents are reported as able to take work.
+  const capacityLimit = null;
   const firstResponseSeconds = resolveFirstResponseSeconds(limits.firstResponseSeconds);
   return withTransaction(options.pool, async (client) => {
     await client.query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY");
@@ -710,10 +724,26 @@ export async function readSupportOverview(
       currentOrderGroups: integer(row.currentOrderGroups),
       capacityLimit,
       totalLoad: integer(row.totalLoad),
-      atCapacity: integer(row.totalLoad) >= capacityLimit,
+      atCapacity: false,
     }));
+    // Queue eligibility mirrors dispatch: AVAILABLE/CONNECTED/fresh presence with a
+    // READY admin identity, read+accept grants, plus complaint for COMPLAINT queues.
+    const eligibleRows = (await client.query<{ adminUserId: string; accountId: string; identityMarker: string }>(
+      SUPPORT_OVERVIEW_ELIGIBLE_SQL, [options.appId],
+    )).rows;
+    const eligibleAccess = await Promise.all(eligibleRows.map((row) => loadEffectiveAdminAccess(client, row.adminUserId)));
+    const eligible = eligibleRows.flatMap((row, index) => {
+      const access = eligibleAccess[index] ?? null;
+      const key = { provider: "yunxin" as const, appId: options.appId, realm: "admin" as const, kind: "ADMIN" as const, platformSubjectId: row.adminUserId };
+      const matches = row.accountId === deriveYunxinAccountId(key) && row.identityMarker === buildYunxinIdentityMarker(key)
+        && hasPermission(access, ADMIN_PERMISSION.imSupportRead)
+        && hasPermission(access, ADMIN_PERMISSION.imSupportAccept);
+      return matches ? [{ row, access }] : [];
+    });
+    const serviceEligible = eligible.length;
+    const complaintEligible = eligible.filter(({ access }) => hasPermission(access, ADMIN_PERMISSION.imSupportComplaint)).length;
     const totalsRow = (await client.query<{
-      onDutyCount: string | number; waitingConsultations: string | number;
+      waitingConsultations: string | number;
       todaySessions: string | number; todayUsers: string | number;
       transfersToday: string | number; handoversToday: string | number;
     }>(SUPPORT_OVERVIEW_TOTALS_SQL, [options.appId, date, endDate])).rows[0];
@@ -735,23 +765,32 @@ export async function readSupportOverview(
     });
     // 排队、首响、解决时长都是只读聚合：没有事实就返回 null/0，不伪造。
     const queueRow = (await client.query<{
-      queued: string | number; oldestQueuedAt: string | null; oldestWaitSeconds: string | number;
-      onDuty: string | number; withFreeSlot: string | number; atCapacity: string | number;
-    }>(SUPPORT_OVERVIEW_QUEUE_SQL, [options.appId, capacityLimit])).rows[0];
+      queued: string | number; serviceQueued: string | number; complaintQueued: string | number;
+      oldestQueuedAt: string | null; oldestWaitSeconds: string | number;
+    }>(SUPPORT_OVERVIEW_QUEUE_SQL, [options.appId])).rows[0];
     const queued = integer(queueRow?.queued);
-    const withFreeSlot = integer(queueRow?.withFreeSlot);
-    const atCapacity = integer(queueRow?.atCapacity);
+    const serviceQueued = integer(queueRow?.serviceQueued);
+    const complaintQueued = integer(queueRow?.complaintQueued);
+    const eligibleForQueuedTypes = eligible.filter(({ access }) =>
+      (serviceQueued > 0 && hasPermission(access, ADMIN_PERMISSION.imSupportAccept))
+      || (complaintQueued > 0 && hasPermission(access, ADMIN_PERMISSION.imSupportAccept)
+        && hasPermission(access, ADMIN_PERMISSION.imSupportComplaint))).length;
     const queue: SupportQueueView = {
       queued,
+      serviceQueued,
+      complaintQueued,
+      serviceEligible,
+      complaintEligible,
       oldestQueuedAt: queueRow?.oldestQueuedAt ?? null,
       oldestWaitSeconds: queued > 0 ? integer(queueRow?.oldestWaitSeconds) : null,
-      onDuty: integer(queueRow?.onDuty),
-      withFreeSlot,
-      atCapacity,
-      capacityLimit,
+      onDuty: serviceEligible,
+      withFreeSlot: eligibleForQueuedTypes,
+      atCapacity: 0,
+      capacityLimit: null,
       reason: queued === 0 ? null
-        : withFreeSlot > 0 ? "CAPACITY_AVAILABLE"
-        : atCapacity > 0 ? "ALL_AT_CAPACITY" : "NO_ONLINE_STAFF",
+        : (serviceQueued > 0 && serviceEligible === 0) || (complaintQueued > 0 && complaintEligible === 0)
+          ? "NO_ONLINE_STAFF"
+          : "CAPACITY_AVAILABLE",
     };
     const firstResponse = await readSupportFirstResponseQuality(client, options.appId, date, endDate, firstResponseSeconds);
     const resolutionRow = (await client.query<{ closed: string | number; averageSeconds: string | number | null }>(
@@ -767,7 +806,7 @@ export async function readSupportOverview(
       quality,
       onDuty,
       totals: {
-        onDutyCount: integer(totalsRow?.onDutyCount),
+        onDutyCount: serviceEligible,
         waitingConsultations: integer(totalsRow?.waitingConsultations),
         todaySessions: integer(totalsRow?.todaySessions),
         todayUsers: integer(totalsRow?.todayUsers),
@@ -791,6 +830,115 @@ export async function readSupportOverview(
       },
     };
   });
+}
+
+export type YunxinConversationUsageAccount = {
+  adminUserId: string;
+  name: string;
+  accountLabel: string;
+  conversationCount: number | null;
+  stickTopCount: number | null;
+  state: "OK" | "TRUNCATED" | "ERROR";
+  error?: string;
+};
+
+export type YunxinConversationUsage = {
+  available: boolean;
+  sampledAt: string;
+  quota: number;
+  accounts: YunxinConversationUsageAccount[];
+};
+
+function maskYunxinAccount(accountId: string): string {
+  return accountId.length <= 8 ? "****" : `${accountId.slice(0, 4)}…${accountId.slice(-4)}`;
+}
+
+/**
+ * Page through one account's cloud conversations. The server read is on demand,
+ * bounded to the console quota, and never exposes the full NIM account id.
+ */
+export async function readAllCloudConversations(
+  provider: Pick<YunxinSupportScopeApi, "listCloudConversations">,
+  accountId: string,
+): Promise<{ conversationCount: number; stickTopCount: number; state: "OK" | "TRUNCATED" }> {
+  const readPage = provider.listCloudConversations;
+  if (!readPage) throw new Error("Yunxin cloud conversations are unavailable");
+  let conversationCount = 0;
+  let stickTopCount = 0;
+  let pageToken: string | undefined;
+  for (let page = 0; page < YUNXIN_CLOUD_CONVERSATION_MAX_PAGES; page += 1) {
+    const result = await readPage({ accountId, ...(pageToken === undefined ? {} : { pageToken }), limit: 100 });
+    conversationCount += result.items.length;
+    stickTopCount += result.items.filter((item) => item.stickTop).length;
+    if (!result.hasMore) return { conversationCount, stickTopCount, state: "OK" };
+    if (!result.nextToken) return { conversationCount, stickTopCount, state: "TRUNCATED" };
+    pageToken = result.nextToken;
+  }
+  return { conversationCount, stickTopCount, state: "TRUNCATED" };
+}
+
+/**
+ * Read-only Yunxin cloud conversation capacity by support agent. This is
+ * intentionally on-demand (the dashboard refreshes it manually) because each
+ * account can require multiple provider pages.
+ */
+export async function readYunxinConversationUsage(
+  options: { pool: Pool; appId: string; provider?: Pick<YunxinSupportScopeApi, "listCloudConversations"> },
+  context: AdminContext,
+): Promise<YunxinConversationUsage> {
+  const rows = await withTransaction(options.pool, async (client) => {
+    await client.query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY");
+    await assertAdminContextInTransaction(client, context);
+    requireSupportManagementRead(await loadEffectiveAdminAccess(client, context.userId));
+    return (await client.query<{ adminUserId: string; accountId: string; name: string }>(
+      `WITH agents AS (
+         SELECT p."admin_user_id" FROM "zzsh_iam"."im_support_presence" p WHERE p."app_id" = $1
+         UNION
+         SELECT s."admin_user_id" FROM "zzsh_iam"."im_support_presence_session" s WHERE s."app_id" = $1
+       )
+       SELECT DISTINCT a."admin_user_id" AS "adminUserId", m."account_id" AS "accountId",
+              COALESCE(NULLIF(btrim(u."name"), ''), u."username", a."admin_user_id") AS "name"
+         FROM agents a
+         JOIN "zzsh_auth_admin"."user" u ON u."id" = a."admin_user_id"
+         JOIN "zzsh_iam"."im_identity_mapping" m
+           ON m."platform_subject_id" = a."admin_user_id" AND m."app_id" = $1
+          AND m."provider" = 'yunxin' AND m."realm" = 'admin'
+          AND m."identity_kind" = 'ADMIN' AND m."status" = 'READY'
+        ORDER BY "name", a."admin_user_id"
+        LIMIT 100`,
+      [options.appId],
+    )).rows;
+  });
+  const sampledAt = new Date().toISOString();
+  const provider = options.provider;
+  if (!provider?.listCloudConversations) {
+    return { available: false, sampledAt, quota: YUNXIN_CLOUD_CONVERSATION_QUOTA, accounts: [] };
+  }
+  const accounts: YunxinConversationUsageAccount[] = [];
+  for (let index = 0; index < rows.length; index += 4) {
+    const batch = rows.slice(index, index + 4);
+    accounts.push(...await Promise.all(batch.map(async (row): Promise<YunxinConversationUsageAccount> => {
+      const base = {
+        adminUserId: row.adminUserId,
+        name: row.name,
+        accountLabel: maskYunxinAccount(row.accountId),
+      };
+      try {
+        return { ...base, ...await readAllCloudConversations(provider, row.accountId) };
+      } catch (error) {
+        return {
+          ...base,
+          conversationCount: null,
+          stickTopCount: null,
+          state: "ERROR",
+          error: error instanceof YunxinApiError
+            ? `云信错误 ${error.providerCode ?? error.httpStatus ?? "未知"}`
+            : "云信读取失败",
+        };
+      }
+    })));
+  }
+  return { available: true, sampledAt, quota: YUNXIN_CLOUD_CONVERSATION_QUOTA, accounts };
 }
 
 export async function listSupportHandovers(
@@ -853,7 +1001,7 @@ export async function listSupportHandovers(
   });
 }
 
-async function auditViewerAccount(client: PoolClient, appId: string, adminUserId: string): Promise<string | null> {
+export async function auditViewerAccount(client: PoolClient, appId: string, adminUserId: string): Promise<string | null> {
   const row = (await client.query<{ accountId: string; identityMarker: string }>(
     `SELECT "account_id" AS "accountId", "identity_marker" AS "identityMarker"
        FROM "zzsh_iam"."im_identity_mapping"
@@ -868,7 +1016,8 @@ async function auditViewerAccount(client: PoolClient, appId: string, adminUserId
 
 const AUDIT_CONVERSATIONS_SQL = `
   WITH items AS (
-    SELECT COALESCE(c."last_message_at", c."updated_at") AS sort_at,
+    (SELECT DISTINCT ON (COALESCE(c."thread_id", c."id"))
+           COALESCE(c."last_message_at", c."updated_at") AS sort_at,
            'CONSULTATION'::text AS item_kind, c."id" AS item_id,
            jsonb_build_object(
              'kind', 'CONSULTATION', 'id', c."id", 'type', c."kind", 'state', c."state",
@@ -880,6 +1029,8 @@ const AUDIT_CONVERSATIONS_SQL = `
              'lastMessageAt', to_char(c."last_message_at" AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'),
              'firstUserMessageAt', to_char(c."first_user_message_at" AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'),
              'userUnreadCount', c."user_unread_count", 'adminUnreadCount', c."admin_unread_count",
+             'roundSeq', COALESCE(c."round_seq", 1),
+             'roundCount', count(*) OVER (PARTITION BY COALESCE(c."thread_id", c."id")),
              'historyState', CASE WHEN c."message_scope_state" = 'READY' AND c."message_scope_id" IS NOT NULL THEN 'AVAILABLE'
                WHEN c."state" = 'CLOSED' THEN 'LEGACY_UNAVAILABLE'
                WHEN c."message_scope_state" IN ('PENDING','NONE') THEN 'NOT_ESTABLISHED' ELSE 'RECOVERING' END,
@@ -893,6 +1044,8 @@ const AUDIT_CONVERSATIONS_SQL = `
       LEFT JOIN "zzsh_auth_admin"."user" au ON au."id" = c."assigned_admin_id"
      WHERE c."app_id" = $1 AND ($7::text IS NULL OR c."kind" = $7)
        AND ($8::text IS NULL OR c."assigned_admin_id" = $8)
+       AND (c."kind" <> 'COMPLAINT' OR $9::boolean)
+     ORDER BY COALESCE(c."thread_id", c."id"), COALESCE(c."last_message_at", c."updated_at") DESC, c."id" DESC)
     UNION ALL
     SELECT COALESCE(activity.last_message_at, g."team_ready_at", o."created_at") AS sort_at,
            'ORDER_GROUP'::text AS item_kind, o."id" AS item_id,
@@ -948,11 +1101,14 @@ export async function listAuditConversations(
   return withTransaction(options.pool, async (client) => {
     await client.query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY");
     await assertAdminContextInTransaction(client, context);
-    requireSupportManagementRead(await loadEffectiveAdminAccess(client, context.userId));
+    const access = await loadEffectiveAdminAccess(client, context.userId);
+    requireSupportManagementRead(access);
+    const canComplaint = hasPermission(access, ADMIN_PERMISSION.imSupportComplaint);
+    if (type === "COMPLAINT" && !canComplaint) throw new SecurityApiError(403, "FORBIDDEN", "Permission required");
     const viewerAccountId = await auditViewerAccount(client, options.appId, context.userId);
     const rows = (await client.query<{ sortAt: string; kind: "CONSULTATION" | "ORDER_GROUP"; id: string; payload: Record<string, unknown> }>(
       AUDIT_CONVERSATIONS_SQL,
-      [options.appId, viewerAccountId, cursor?.sortAt ?? null, cursor?.kind ?? null, cursor?.id ?? null, limit + 1, type, adminUserId],
+      [options.appId, viewerAccountId, cursor?.sortAt ?? null, cursor?.kind ?? null, cursor?.id ?? null, limit + 1, type, adminUserId, canComplaint],
     )).rows;
     const hasMore = rows.length > limit;
     const page = hasMore ? rows.slice(0, limit) : rows;
@@ -1006,12 +1162,14 @@ export async function readPatrolOrderTeamAccess(
 export async function readPatrolConsultationAccess(client:PoolClient,input:{appId:string;teamId:string;conversationId:string;requestId:string},actor:{userId:string;sessionId:string}):Promise<{viewerAccountId:string;peerAccountId:string}|null>{
   await assertAdminContextInTransaction(client,actor);
   const access=await loadEffectiveAdminAccess(client,actor.userId);requireSupportManagementRead(access);
-  const row=(await client.query<{id:string;user_account_id:string}>(`SELECT c.id,t.user_account_id FROM zzsh_iam.im_support_thread t
+  const row=(await client.query<{id:string;user_account_id:string;kind:string}>(`SELECT c.id,c.kind,t.user_account_id FROM zzsh_iam.im_support_thread t
     JOIN zzsh_iam.im_consultation c ON c.thread_id=t.id AND c.app_id=t.app_id
     WHERE t.app_id=$1 AND ((t.message_scope_id=$2 AND t.message_scope_state='READY')
       OR (c.message_scope_id=$2 AND c.message_scope_state='READY' AND c.state='CLOSED'))
     ORDER BY (c.state<>'CLOSED') DESC,c.created_at DESC,c.id DESC LIMIT 1`,[input.appId,input.teamId])).rows[0];
   if(!row)return null;
+  // Complaint threads keep the separate reception grant for patrol history too.
+  if(row.kind==="COMPLAINT"&&!hasPermission(access,ADMIN_PERMISSION.imSupportComplaint))return null;
   const viewerAccountId=await auditViewerAccount(client,input.appId,actor.userId);
   if(!viewerAccountId||input.conversationId!==`${viewerAccountId}|2|${input.teamId}`)return null;
   await recordAudit(client,{actorType:"admin",actorId:actor.userId,sessionId:actor.sessionId,action:"im.audit.conversation_viewed",objectType:"im_consultation",objectId:row.id,outcome:"SUCCESS",requestId:input.requestId,details:{mode:"PATROL_READ",teamId:input.teamId}});

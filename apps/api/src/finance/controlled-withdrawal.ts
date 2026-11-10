@@ -3,9 +3,9 @@ import { SecurityApiError } from '../auth/security-core';
 import { conflict, ensureOnlyFields, forbidden, invalid, notFound, requiredString } from '../supply/supply-util';
 import { canonicalize } from '../supply/content-hash';
 import { exactCents } from './personal-finance-read';
-import { calculateWithdrawalAmounts, planWithdrawalLedger, type WithdrawalLedgerPlan } from './withdrawal-ledger';
+import { planWithdrawalLedger, type WithdrawalLedgerPlan } from './withdrawal-ledger';
 import { demoNativeWithdrawalPolicy, type NativeWithdrawalScope } from './native-withdrawal-resource';
-import { TEAM_TEST_WITHDRAWAL_POLICY } from './withdrawal-business-policy';
+import { quoteWithdrawalBusinessAmounts, TEAM_TEST_WITHDRAWAL_POLICY } from './withdrawal-business-policy';
 export type { WithdrawalLedgerPlan } from './withdrawal-ledger';
 
 export type ControlledWithdrawalPolicy = {
@@ -96,11 +96,10 @@ export function quoteControlledWithdrawal(body: Record<string, unknown>, policy:
     const day = localWithdrawalDayWindow(facts.now);
     if (facts.usage.start !== day.start || facts.usage.end !== day.end) throw unavailable('WITHDRAW_FREQUENCY_UNKNOWN');
   }
-  if (amount < min || amount > max || facts.usage.quotaCount >= policy.maxAcceptedPerWindow) throw conflict('Withdrawal limit reached');
-  const { netCents, feeCents } = calculateWithdrawalAmounts(amount.toString(), policy.fee);
   const available = BigInt(exactCents(facts.availableCents));
   if (available < 0n) throw unavailable('WALLET_RECONCILIATION_REQUIRED');
-  if (amount > available) throw conflict('Insufficient available funds');
+  const { netCents, feeCents } = quoteWithdrawalBusinessAmounts({amountCents:amount.toString(),availableCents:available.toString(),used:facts.usage.quotaCount,
+    minCents:min.toString(),maxCents:max.toString(),maxIntents:policy.maxAcceptedPerWindow,fee:policy.fee});
   return { userId: facts.userId, destinationId, policyVersion, ledgerRevision: facts.ledgerRevision, acceptedAt: facts.now, currency: 'CNY', grossCents: amount.toString(), netCents, feeCents, mode: 'LOCAL_CONTROLLED' };
 }
 

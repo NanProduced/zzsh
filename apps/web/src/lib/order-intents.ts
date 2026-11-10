@@ -16,6 +16,7 @@ export type IntentKind =
   | "order.demo-checkout"
   | "order.cancel"
   | "order.prestart.request"
+  | "order.prestart.cancel"
   | "opening.confirm"
   | "settlement.submit"
   | "settlement.decision"

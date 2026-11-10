@@ -240,12 +240,12 @@ test("0130 adds the persistent thread, round link and round-close operation with
 
 test("round close ends the round only and never dismisses the thread Team", () => {
   const source = readFileSync(resolve("src/im/consultation.ts"), "utf8");
-  const begin = source.indexOf("async function beginClose");
-  const local = source.indexOf("async function completeLocalClose");
-  assert.ok(begin > 0 && local > begin);
-  const closeSection = source.slice(begin, local);
-  assert.match(closeSection, /'ROUND_CLOSE'/);
-  assert.doesNotMatch(closeSection, /dismissSupportTeam/);
+  const shared = source.slice(source.indexOf("async function beginRoundClose"), source.indexOf("async function beginClose"));
+  assert.ok(shared.length > 0);
+  assert.match(shared, /'ROUND_CLOSE'/);
+  assert.doesNotMatch(shared, /dismissSupportTeam/);
+  assert.match(source, /beginRoundClose\(client, options, row, requestId,\s*\{ realm: "admin"/);
+  assert.match(source, /beginRoundClose\(client, options, row, requestId,\s*\{ realm: "user"/);
   const roundClose = source.slice(source.indexOf("async function completeRoundCloseRecovery"), source.indexOf("async function reconcileRoundClose"));
   assert.ok(roundClose.length > 0);
   assert.match(roundClose, /teamRetained/);

@@ -6,7 +6,7 @@ import {recordAudit,withTransaction} from "../auth/security-core";
 import { readFormalRefundAdmission, assertFormalRefundProfile, assertRefundStart } from "../order/joinpay-refund-profile";
 import { executeJoinpayPayout, PayoutCommitUnknown, JOINPAY_PAYOUT_MAX_AUTOMATIC_QUERIES, type PayoutExecution } from "./joinpay-payout-attempt";
 import { readPayoutScope } from "./joinpay-payout-profile";
-import { allocatePrestartJoinpayRefunds,PrestartRefundAllocationUnknown } from "../order/prestart-refund-store";
+import { allocatePrestartJoinpayRefunds,allocateSupportCancellationJoinpayRefunds,PrestartRefundAllocationUnknown } from "../order/prestart-refund-store";
 
 export type JoinpayFundsRecoverySettings = { workerId: string; batchLimit: number; minimumIntervalSeconds: number };
 type RefundOptions = JoinpayFundsRecoverySettings & { execution: RefundExecution };
@@ -16,8 +16,8 @@ export type JoinpayFundsRecoveryOptions = { refund?: RefundOptions; legacyRefund
 type Row = { id: string; state: string };
 const ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/, PAYOUT_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,179}$/;
 const REFUND_STATES = ["READY", "SUBMITTING", "UNKNOWN", "PROCESSING", "REVIEW_REQUIRED"];
-// 只有实际存在固定 blocked 审计的意图按小时退避；从未阻断的合法异常保持正常到期顺序，不改状态或预算。
-const ABNORMAL_BLOCK_RETRY_SECONDS = 3600;
+// 原款需核对时按小时退避，不改变原意图或预算。
+const ORIGINAL_REFUND_BLOCK_RETRY_SECONDS = 3600;
 const PAYOUT_STATES = ["RESERVED", "SUBMITTING", "UNKNOWN", "PROCESSING", "CHANNEL_SUCCEEDED_PENDING_ACCEPTANCE"];
 function settings<T extends JoinpayFundsRecoverySettings>(value: T): T {
   if (!value || typeof value.workerId !== "string" || !ID.test(value.workerId) || !Number.isSafeInteger(value.batchLimit) || value.batchLimit < 1 || value.batchLimit > 10
@@ -57,6 +57,7 @@ export async function recoverJoinpayRefundBatch(input: RefundOptions, signal?: A
   const o = refundOptions(input), a = readFormalRefundAdmission(o.execution.admission);
   const allocation = o.execution.initialProfile ? await allocatePostedJoinpayRefunds(o.execution, o.batchLimit, signal) : undefined;
   const prestartAllocation=o.execution.initialProfile?await allocatePrestartJoinpayRefunds(o.execution,o.batchLimit,signal):undefined;
+  const supportCancellationAllocation=o.execution.initialProfile?await allocateSupportCancellationJoinpayRefunds(o.execution,o.batchLimit,signal):undefined;
   const accepted = [{ reference: a.reference, sha256: a.sha256 }, ...a.historicalInitialAdmissions];
   const canSubmit = !!o.execution.initialProfile && a.acceptedProfiles.some(profile => profile.operation === "SUBMIT");
   const rows = await scan(o.execution.pool, a, `SELECT i.id,i.state FROM zzsh_order.channel_refund_intent i
@@ -65,22 +66,20 @@ export async function recoverJoinpayRefundBatch(input: RefundOptions, signal?: A
       AND EXISTS(SELECT 1 FROM jsonb_to_recordset($3::jsonb) AS accepted(reference text,sha256 text)
         WHERE accepted.reference=i.initial_admission_ref AND accepted.sha256=i.initial_admission_sha256)
       AND (i.state<>'READY' OR i.lease_version>0 OR NOT i.requires_review)
+      AND i.basis_kind IN ('POSTING','PRESTART_TERMINATION','SUPPORT_CANCELLATION')
       AND (i.lease_version>0 OR $8::boolean)
       AND (i.lease_until IS NULL OR i.lease_until<=clock_timestamp())
       AND (SELECT count(*) FROM zzsh_order.joinpay_refund_attempt counted WHERE counted.intent_id=i.id AND counted.operation='QUERY')<$7::integer
       AND NOT EXISTS(SELECT 1 FROM zzsh_order.joinpay_refund_attempt recent WHERE recent.intent_id=i.id
         AND recent.created_at>clock_timestamp()-make_interval(secs=>$5::integer))
-      AND (NOT (i.basis_kind='REVIEW_CONFIRMATION' AND i.state='READY') OR NOT EXISTS(
-        SELECT 1 FROM zzsh_iam.audit_event blocked WHERE blocked.action='order.refund.abnormal.first_submit.blocked'
+      AND (NOT(i.basis_kind IN('PRESTART_TERMINATION','SUPPORT_CANCELLATION') AND i.state='READY') OR NOT EXISTS(
+        SELECT 1 FROM zzsh_iam.audit_event blocked WHERE blocked.action IN('order.refund.prestart.first_submit.blocked','order.refund.support_cancel.first_submit.blocked')
           AND blocked.object_type='channel_refund_intent' AND blocked.object_id=i.id AND blocked.outcome='FAILURE'
-          AND blocked.occurred_at>clock_timestamp()-make_interval(secs=>${ABNORMAL_BLOCK_RETRY_SECONDS})))
-      AND (NOT(i.basis_kind='PRESTART_TERMINATION' AND i.state='READY') OR NOT EXISTS(
-        SELECT 1 FROM zzsh_iam.audit_event blocked WHERE blocked.action='order.refund.prestart.first_submit.blocked'
-          AND blocked.object_type='channel_refund_intent' AND blocked.object_id=i.id AND blocked.outcome='FAILURE'
-          AND blocked.occurred_at>clock_timestamp()-make_interval(secs=>${ABNORMAL_BLOCK_RETRY_SECONDS})))
+          AND blocked.occurred_at>clock_timestamp()-make_interval(secs=>${ORIGINAL_REFUND_BLOCK_RETRY_SECONDS})))
     ORDER BY i.due_at,i.id LIMIT $6`, [a.merchantIdentityId, a.merchantNo, JSON.stringify(accepted), REFUND_STATES,
     o.minimumIntervalSeconds, o.batchLimit, JOINPAY_REFUND_MAX_AUTOMATIC_QUERIES, canSubmit], REFUND_STATES, o.batchLimit, "REFUND", signal);
-  const result = { selected: rows.length, recorded: 0, skipped: 0, ...(allocation ? { allocation } : {}),...(prestartAllocation?{prestartAllocation}:{}) };
+  const result = { selected: rows.length, recorded: 0, skipped: 0, ...(allocation ? { allocation } : {}),...(prestartAllocation?{prestartAllocation}:{}),
+    ...(supportCancellationAllocation?{supportCancellationAllocation}:{}) };
   for (const row of rows) {
     if (signal?.aborted) break;
     const observed = await executeJoinpayRefund(o.execution, row.id, o.workerId, o.minimumIntervalSeconds);

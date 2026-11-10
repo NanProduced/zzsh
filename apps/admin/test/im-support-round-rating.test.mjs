@@ -190,7 +190,7 @@ async function selectRow(rootNode, text) {
 
 const basePermissions = ["im.support.read", "im.support.accept"];
 
-async function mountSupport(t, { permissions = basePermissions } = {}) {
+async function mountSupport(t, { permissions = basePermissions, onOpenPath } = {}) {
   const rootNode = browser.document.createElement("div");
   browser.document.body.appendChild(rootNode);
   const root = createRoot(rootNode);
@@ -200,7 +200,7 @@ async function mountSupport(t, { permissions = basePermissions } = {}) {
   });
   const snap = snapshot(permissions);
   const onRefresh = async () => snap;
-  await act(async () => { root.render(createElement(ImSupportView, { snapshot: snap, onRefresh })); });
+  await act(async () => { root.render(createElement(ImSupportView, { snapshot: snap, onRefresh, onOpenPath })); });
   await settle();
   return { rootNode, root, snap, onRefresh };
 }
@@ -420,7 +420,11 @@ test("the bell covers complaint rows and its notification opens that consultatio
   });
   browser.localStorage.removeItem("zzsh.im-support.seen.admin-a");
 
-  const { rootNode } = await mountSupport(t, { permissions: ["im.support.read", "im.support.accept", "im.support.complaint"] });
+  const opened = [];
+  const { rootNode } = await mountSupport(t, {
+    permissions: ["im.support.read", "im.support.accept", "im.support.complaint"],
+    onOpenPath: (path) => { opened.push(path); return true; },
+  });
   await waitFor(() => consultationRows(rootNode).length === 1);
   await settle();
   assert.equal(rootNode.querySelector('.im-wb-row[data-active="true"]'), null, "loading the queue selects nothing");
@@ -436,6 +440,7 @@ test("the bell covers complaint rows and its notification opens that consultatio
 
   await act(async () => { fired[0].onclick?.(); });
   await settle();
+  assert.deepEqual(opened, ["/support?section=consultation&consultation=thread-complaint"], "the notification activates the support tab through workspace navigation");
   assert.match(rootNode.querySelector('.im-wb-row[data-active="true"]')?.textContent ?? "", /投诉用户/, "the notification selects its own row");
   assert.match(rootNode.querySelector(".im-wb-chat-title h2").textContent, /投诉反馈/);
   assert.equal(rootNode.querySelector(".im-wb").dataset.pane, "chat", "opening a notification switches to the chat pane");

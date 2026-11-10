@@ -6,7 +6,7 @@ import type { Pool, PoolClient } from "pg";
 import { withTransaction } from "../src/auth/security-core";
 import { assertBusinessRuntimeIdentity, BusinessDatabaseService, createBusinessPool } from "../src/database/business";
 import { closeResource, finishDatabaseTest } from "./database-test-support";
-import { applyRuntimePrivileges, configureNativeRefundReviewPrivileges, configureSettlementRefundPolicyPrivileges, configureSkinIdentityPrivileges } from "../src/database/business-migrations";
+import { applyRuntimePrivileges, configureNativeRefundReviewPrivileges, configureOpeningAutoConfirmPrivileges, configureSettlementRefundPolicyPrivileges, configureSkinIdentityPrivileges } from "../src/database/business-migrations";
 
 test('directory pool is single-use within the existing ten business connection slots and both pools close',async()=>{
   const config={database:{host:'127.0.0.1',port:1,name:'offline',user:'offline',password:'offline'}},shared=createBusinessPool(config,{max:8}),directory=createBusinessPool(config,{max:2,maxUses:1});
@@ -157,6 +157,46 @@ test("settlement refund policy ACL rejects partial installations before granting
     assert.equal(seen.length, 1);
     assert.doesNotMatch(seen[0]!, /\bGRANT\b/);
   }
+});
+
+test("opening auto-generation ACL rejects partial installs before granting and stays absent on old prefixes", async () => {
+  for (const shape of [
+    { policy: true, generation: false, reminder: true, guard: true, recovery_marker: true, opening_columns: 4 },
+    { policy: true, generation: true, reminder: true, guard: true, recovery_marker: true, opening_columns: 3 },
+    { policy: false, generation: true, reminder: true, guard: true, recovery_marker: true, opening_columns: 4 },
+    { policy: true, generation: true, reminder: true, guard: true, recovery_marker: false, opening_columns: 4 },
+  ]) {
+    const seen: string[] = [];
+    const pool = { query: async (sql: string) => { seen.push(sql); return { rows: [shape] }; } } as unknown as Pool;
+    await assert.rejects(configureOpeningAutoConfirmPrivileges(pool, "fixture_runtime"), /partially deployed/);
+    assert.equal(seen.length, 1);
+    assert.doesNotMatch(seen[0]!, /\bGRANT\b/);
+  }
+  const seen: string[] = [];
+  const absent = { query: async (sql: string) => { seen.push(sql); return { rows: [{ policy: false, generation: false, reminder: false, guard: false, recovery_marker: false, opening_columns: 0 }] }; } } as unknown as Pool;
+  await configureOpeningAutoConfirmPrivileges(absent, "fixture_runtime");
+  assert.equal(seen.length, 1);
+  assert.doesNotMatch(seen[0]!, /\bGRANT\b/);
+});
+
+test("opening ACL checks the recovery marker is writable by the runtime role", async () => {
+  const inventory = { policy: true, generation: true, reminder: true, guard: true, recovery_marker: true, opening_columns: 4 };
+  const writes: string[] = [];
+  const pool = { query: async (sql: string, params?: unknown[]) => {
+    writes.push(sql);
+    if (sql.includes("has_column_privilege")) return { rows: [{ writable: true }] };
+    if (sql.includes("attname IN ('created_by_source'")) return { rows: [inventory] };
+    if (sql.includes("SELECT attname FROM pg_attribute")) {
+      if (params?.[0] === "zzsh_order.opening_auto_confirm_policy") return { rows: ["singleton", "wait_minutes", "revision", "updated_by_admin_id", "updated_at"].map((attname) => ({ attname })) };
+      if (params?.[0] === "zzsh_order.rental_opening_generation") return { rows: ["order_id", "payment_confirmation_id", "state", "reason", "opening_id", "created_at", "updated_at"].map((attname) => ({ attname })) };
+      return { rows: ["id", "order_id", "app_id", "admin_user_id", "request_key", "stage", "target_parties", "message_text", "state", "attempt_count", "failure_class", "lease_token_hash", "lease_until", "server_message_id", "sent_at", "created_at", "updated_at"].map((attname) => ({ attname })) };
+    }
+    return { rows: [] };
+  } } as unknown as Pool;
+  await configureOpeningAutoConfirmPrivileges(pool, "fixture_runtime");
+  const check = writes.find((sql) => sql.includes("has_column_privilege"))!;
+  assert.match(check, /opening_generation_recovery_required/);
+  assert.match(check, /'UPDATE'/);
 });
 
 test("native refund review ACL rejects partial installation and only grants the guarded function",async()=>{

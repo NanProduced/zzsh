@@ -1,11 +1,21 @@
 // SYNTHETIC_COMPONENT_MODEL：只验证业务判断，不证明真实原款、PG锁或退款到账。
 import assert from "node:assert/strict";
 import test from "node:test";
-import { assertPrestartDecision, prestartTerminationEligibility, type PrestartFacts } from "../src/order/prestart-termination-model";
+import { assertPrestartDecision, prestartCancellationReason, prestartTerminationEligibility, type PrestartFacts } from "../src/order/prestart-termination-model";
 
 const facts: PrestartFacts = { orderState: "PAID", paymentSource: "JOINPAY", paymentDisposition: "APPLIED", currency: "CNY",
   paidCents: "15908", orderCents: "15908", paymentBound: true, openingConfirmed: false, hasPosting: false,
   pendingAdjustment: false, monetaryEarningCount: "0" };
+test("开租前取消原因按订单角色区分，只有其他需填写说明", () => {
+  assert.deepEqual(prestartCancellationReason("RENTER", "RENTER_WRONG_ACCOUNT", undefined), {code:"RENTER_WRONG_ACCOUNT",reason:"选错账号"});
+  assert.deepEqual(prestartCancellationReason("OWNER", "OWNER_UNAVAILABLE", undefined), {code:"OWNER_UNAVAILABLE",reason:"暂时无法配合"});
+  assert.deepEqual(prestartCancellationReason("RENTER", "OTHER", "  时间不合适  "), {code:"OTHER",reason:"时间不合适"});
+  assert.throws(() => prestartCancellationReason("RENTER", "OWNER_UNAVAILABLE", undefined));
+  assert.throws(() => prestartCancellationReason("OWNER", "RENTER_WRONG_ACCOUNT", undefined));
+  assert.throws(() => prestartCancellationReason("RENTER", "OTHER", "不想"));
+  assert.throws(() => prestartCancellationReason("OWNER", "OTHER", "原因\n换行"));
+  assert.throws(() => prestartCancellationReason("RENTER", "RENTER_WRONG_ACCOUNT", "额外理由"));
+});
 test("未正式开租的原APPLIED款全额应退，不生成费用或正常结算", () => {
   assert.deepEqual(prestartTerminationEligibility(facts), { allowed: true, reason: null, refundCents: "15908" });
   assert.equal(prestartTerminationEligibility({ ...facts, paymentSource: "CONTROLLED" }).refundCents, "15908");

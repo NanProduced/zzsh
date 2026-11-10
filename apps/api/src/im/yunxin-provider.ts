@@ -1,4 +1,6 @@
 import { createHash, randomBytes } from "node:crypto";
+import type { ImTransportCard } from "./im-contract";
+import { decodeYunxinSystemNotice, type YunxinSystemNotice } from "./system-notice";
 
 const DEFAULT_V1_ENDPOINT = "https://api.yunxinapi.com";
 const DEFAULT_V2_ENDPOINT = "https://open.yunxinapi.com";
@@ -150,8 +152,15 @@ export type YunxinSupportTeamExistenceLookup =
 
 /** The small server-only surface used to isolate one consultation from another. */
 export type YunxinSupportOpeningMessage = { messageServerId: string; messageClientId: string; senderId: string; createTime: number; text: string };
-export type YunxinSupportHistoryMessage = Omit<YunxinSupportOpeningMessage,"text"> & { messageType: number; text?: string; attachment?: Record<string,unknown> };
+export type YunxinSupportHistoryMessage = Omit<YunxinSupportOpeningMessage,"text"> & { messageType: number; text?: string; attachment?: Record<string,unknown>; serverExtension?: string; systemNotice?: YunxinSystemNotice | null };
+export type YunxinCloudConversationPage = {
+  hasMore: boolean;
+  nextToken: string | null;
+  items: Array<{ conversationId: string; stickTop: boolean; type: number; updateTime: number }>;
+};
 export type YunxinSupportScopeApi = {
+  /** Read-only cloud conversation page for capacity monitoring; omitted by local fakes. */
+  listCloudConversations?(input: { accountId: string; pageToken?: string; limit?: number }): Promise<YunxinCloudConversationPage>;
   readSupportMessage?(input:{teamId:string;operatorAccountId:string;messageServerId:string;messageTime?:number}):Promise<(YunxinTeamMessageFact&{text?:string})|null>;
   revokeSupportMessage?(input:{teamId:string;senderId:string;messageServerId:string;createTime:number}):Promise<void>;
   readSupportMemberHistory?(input: { teamId: string; accountId: string; limit: number; before?: { id: string; time: number } }): Promise<YunxinSupportHistoryMessage[]>;
@@ -164,6 +173,8 @@ export type YunxinSupportScopeApi = {
   readSupportTeamExistence(input: { appId: string; consultationId: string; ownerAccountId: string; teamId: string }): Promise<YunxinSupportTeamExistenceLookup>;
   /** Server-side text as the manager or an assigned agent; absent on local fakes that use the in-memory transport. */
   sendSupportTeamText?(input: { teamId: string; senderAccountId: string; text: string; messageClientId: string }): Promise<void>;
+  /** Platform order-stage card carried by a NIM custom message (type 100). */
+  sendSupportTeamCard?(input: { teamId: string; senderAccountId: string; card: ImTransportCard; text: string; messageClientId: string }): Promise<{ messageServerId: string; createTime: number }>;
 };
 
 export type YunxinCreateAccountInput = {
@@ -665,9 +676,14 @@ export class YunxinServerApiClient implements YunxinServerApi, YunxinSupportScop
       if(!id||!sender||time===undefined||!Number.isSafeInteger(time)||type===undefined||!Number.isInteger(type))throw new YunxinApiError("read-support-member-history",null,false);
       const attachment=isRecord(value.body)?value.body:undefined;
       if ((type===0&&(!attachment||asString(attachment.msg)===undefined))||([1,2,3,6].includes(type)&&!attachment)) throw new YunxinApiError("read-support-member-history",null,false);
+      const systemNotice=decodeYunxinSystemNotice({messageType:type,attachment});
+      // V1 history exposes the client/server extension as `ext`; keep the aliases defensive.
+      const serverExtension=asString(value.ext)??asString(value.serverExtension)??asString(value.server_extension)??asString(value.serverext)??asString(value.server_ext)??asString(attachment?.ext)??asString(attachment?.serverExtension);
       return {messageServerId:id,messageClientId:asString(value.msgidclient)||id,senderId:normalizeAccountId(sender),createTime:time,messageType:type,
         ...(type===0?{text:attachment?asString(attachment.msg)??"":""}:{}),
-        ...(attachment&&type!==0?{attachment:{...attachment,width:attachment.width??attachment.w,height:attachment.height??attachment.h,duration:attachment.duration??attachment.dur}}:{})};
+        ...(attachment&&type!==0?{attachment:{...attachment,width:attachment.width??attachment.w,height:attachment.height??attachment.h,duration:attachment.duration??attachment.dur}}:{}),
+        ...(serverExtension&&serverExtension.length<=4096?{serverExtension}:{}),
+        ...(systemNotice?{systemNotice}:{})};
     });
   }
 
@@ -752,6 +768,41 @@ export class YunxinServerApiClient implements YunxinServerApi, YunxinSupportScop
       || (field(data, "receiver_id", "team_id") !== undefined && String(field(data, "receiver_id", "team_id")) !== team)) {
       throw new YunxinApiError("send-support-team-text", null, false);
     }
+  }
+
+  async sendSupportTeamCard(input: { teamId: string; senderAccountId: string; card: ImTransportCard; text: string; messageClientId: string }): Promise<{ messageServerId: string; createTime: number }> {
+    const team = normalizeTeamId(input.teamId);
+    const sender = normalizeAccountId(input.senderAccountId);
+    const kinds = ["ORDER_OPENING", "ORDER_ENDING", "ORDER_SETTLED", "ORDER_CANCELLED", "ORDER_PRICE_CHANGE"];
+    const id = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+    const text = input.text.trim();
+    if (!kinds.includes(input.card.kind) || !id.test(input.card.orderId) || !id.test(input.card.cardId)
+      || !text || text.length > 5000 || !id.test(input.messageClientId)) {
+      throw new Error("Invalid support team card");
+    }
+    const raw = JSON.stringify({ schema: "zzsh.order-card", version: 1, kind: input.card.kind, orderId: input.card.orderId, cardId: input.card.cardId });
+    if (raw.length > 4096) throw new Error("Invalid support team card");
+    const conversationId = `${sender}|2|${team}`;
+    const data = responseData(await this.request("send-support-team-card", "POST",
+      `/im/v2/conversations/${encodeURIComponent(conversationId)}/messages`, {
+        message: {
+          message_type: 100,
+          text,
+          message_client_id: input.messageClientId,
+          attachment: { raw },
+        },
+      }, "", "v2"));
+    const returnedSender = asString(field(data, "sender_id"));
+    const conversationType = asNumber(field(data, "conversation_type"));
+    const messageType = asNumber(field(data, "message_type"));
+    const createTime = asNumber(field(data, "create_time"));
+    const messageServerId = messageIdFromUnknown(field(data, "message_server_id"));
+    if (!returnedSender || normalizeAccountId(returnedSender) !== sender || conversationType !== 2 || messageType !== 100
+      || createTime === undefined || !Number.isFinite(createTime) || !messageServerId
+      || (field(data, "receiver_id", "team_id") !== undefined && String(field(data, "receiver_id", "team_id")) !== team)) {
+      throw new YunxinApiError("send-support-team-card", null, false);
+    }
+    return { messageServerId, createTime };
   }
 
   async sendOrderTeamNotice(teamId: string, operatorAccountId: string, routeConfig?: YunxinMessageRouteConfig): Promise<void> {
@@ -1017,6 +1068,34 @@ export class YunxinServerApiClient implements YunxinServerApi, YunxinSupportScop
       }
       throw error;
     }
+  }
+
+  async listCloudConversations(input: { accountId: string; pageToken?: string; limit?: number }): Promise<YunxinCloudConversationPage> {
+    const accountId = normalizeAccountId(input.accountId);
+    const limit = input.limit ?? 100;
+    if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw new Error("Invalid cloud conversation page size");
+    const query = new URLSearchParams({ account_id: accountId, limit: String(limit) });
+    if (input.pageToken !== undefined) {
+      if (typeof input.pageToken !== "string" || !input.pageToken || input.pageToken.length > 512) throw new Error("Invalid cloud conversation page token");
+      query.set("page_token", input.pageToken);
+    }
+    const payload = await this.request("list-cloud-conversations", "GET", "/im/v2.1/conversations", undefined, `?${query.toString()}`, "v2");
+    const data = isRecord(payload) && isRecord(payload.data) ? payload.data : null;
+    if (!data || typeof data.has_more !== "boolean" || !Array.isArray(data.items)) {
+      throw new YunxinApiError("list-cloud-conversations", null, false, 200);
+    }
+    const items = data.items.map((item): YunxinCloudConversationPage["items"][number] => {
+      if (!isRecord(item) || typeof item.conversation_id !== "string" || !item.conversation_id || item.conversation_id.length > 256
+        || typeof item.stick_top !== "boolean" || typeof item.type !== "number" || typeof item.update_time !== "number") {
+        throw new YunxinApiError("list-cloud-conversations", null, false, 200);
+      }
+      return { conversationId: item.conversation_id, stickTop: item.stick_top, type: item.type, updateTime: item.update_time };
+    });
+    return {
+      hasMore: data.has_more,
+      nextToken: typeof data.next_token === "string" && data.next_token ? data.next_token : null,
+      items,
+    };
   }
 
   private async request(

@@ -12,6 +12,7 @@ import { readLegacyDutyBasis } from "./legacy-duty-basis";
 import { readLockedLegacyRefundSource } from "./legacy-refund-review-source";
 import type { LegacyContinuationActor } from "./legacy-continuation-model";
 
+// TODO(正式上线前): 移除旧单测试退款适配，不能把模拟假设用于真实退款。
 type Input={dutyId:string;expectedDutyRevision:string;expectedHeadRevision:string;assumption:"SIMULATION_ASSUME_NO_PRIOR_REFUND";reason:string};
 const sha=(value:string)=>createHash("sha256").update(value).digest("hex");
 const unavailable=()=>new SecurityApiError(503,"EVIDENCE_UNAVAILABLE","旧单模拟退款记录暂不可核实");
@@ -26,7 +27,7 @@ export async function readDemoLegacyRefundReadiness(client:PoolClient,actor:Lega
   const no=(reason:string)=>({...base,canSubmit:false,reason});
   if(receipt)return no("SIMULATION_ALREADY_EXISTS");
   if(!registration.active)return no("SIMULATION_DISABLED");
-  if(!locked.head || String(locked.head.stage)!=="4")return no("ORDER_NOT_SETTLED");
+  if(!locked.head || !(String(locked.head.stage)==="4" || String(locked.head.stage)==="5" && locked.head.command==="SUPPORT_CANCEL"))return no("ORDER_NOT_SETTLED");
   if(duty.status!=="PENDING" || duty.settledBy!==null)return no("DUTY_ALREADY_PROCESSED");
   if(duty.amountCents==="0")return no("NO_REFUND_DUE");
   try {

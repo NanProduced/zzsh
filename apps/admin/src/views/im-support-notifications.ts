@@ -99,6 +99,8 @@ export function useSupportUnreadNotifications(input: {
   /** True only after the first successful queue read; an empty queue is still a loaded queue. */
   loaded: boolean;
   rows: SupportNotificationRow[];
+  /** Whether the support workbench itself is on screen; switching admin tabs must alert, not suppress. */
+  visible: boolean;
   selectedId: string | null;
   onOpen: (id: string) => void;
 }): { unreadCount: number } {
@@ -126,7 +128,7 @@ export function useSupportUnreadNotifications(input: {
     const changed = changedSupportNotificationRows(previous, input.rows, input.selectedId);
     if (!changed.length) return;
     playSupportChime();
-    const hidden = typeof document !== "undefined" && (document.hidden || !document.hasFocus());
+    const hidden = !input.visible || typeof document === "undefined" || document.hidden || !document.hasFocus();
     if (!hidden) return;
     for (const row of changed.slice(0, 3)) {
       try {
@@ -137,7 +139,7 @@ export function useSupportUnreadNotifications(input: {
         };
       } catch { /* permission can change between checks */ }
     }
-  }, [input.adminUserId, input.enabled, input.loaded, input.rows, input.selectedId]);
+  }, [input.adminUserId, input.enabled, input.loaded, input.rows, input.visible, input.selectedId]);
 
   useEffect(() => {
     if (typeof document === "undefined") return;

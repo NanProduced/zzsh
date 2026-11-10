@@ -265,23 +265,58 @@ export async function readFinanceDashboardChannels(client: PoolClient, query: Da
   const required = ['payment_confirmation','payment_channel_transaction','channel_refund_intent','joinpay_refund_evidence','joinpay_withdrawal_intent','joinpay_payout_evidence'];
   const readable = (await client.query<{ ready: boolean }>(`SELECT bool_and(COALESCE(has_table_privilege(to_regclass('zzsh_order.'||name),'SELECT'),false)) AS ready FROM unnest($1::text[]) AS t(name)`, [required])).rows[0]?.ready === true;
   if (!readable) return { version: 'admin.finance-dashboard-channels.v1' as const, period, state: 'UNAVAILABLE' as const, items: [] };
+  const legacyNames=['legacy_refund_case','legacy_refund_intent','legacy_refund_observation','legacy_refund_terminal_evidence'];
+  const legacy = query.source==='new' ? null : (await client.query<{present:number;ready:boolean}>(`SELECT
+    count(*) FILTER(WHERE to_regclass('zzsh_order.'||name) IS NOT NULL)::int AS present,
+    bool_and(COALESCE(has_table_privilege(to_regclass('zzsh_order.'||name),'SELECT'),false))
+      AND COALESCE(has_table_privilege(to_regclass('zzsh_order.legacy_order_read_snapshot'),'SELECT'),false)
+      AND COALESCE(has_table_privilege(to_regclass('zzsh_order.finance_event'),'SELECT'),false) AS ready
+    FROM unnest($1::text[]) AS t(name)`,[legacyNames])).rows[0];
+  if (query.source!=='new' && (!legacy || !Number.isInteger(legacy.present) || typeof legacy.ready!=='boolean'
+    || legacy.present!==0 && (legacy.present!==legacyNames.length || legacy.ready!==true)))
+    return { version:'admin.finance-dashboard-channels.v1' as const,period,state:'UNAVAILABLE' as const,items:[] };
   const scope = gameScopeSql('o.game_id', '$3', '$4');
   const rows = (await client.query(`/* dashboard verified channel facts */ WITH facts AS (
     SELECT 'PAYMENT'::text AS kind,p.amount_cents AS amount,p.provider_paid_at AS at
       FROM zzsh_order.payment_confirmation p JOIN zzsh_order.payment_channel_transaction a ON a.id=p.joinpay_anchor_id
       JOIN zzsh_order.rental_order o ON o.id=p.order_id
-      WHERE p.source='JOINPAY' AND p.disposition='APPLIED' AND p.currency='CNY' AND a.channel='JOINPAY' AND a.evidence_level='JOINPAY_VERIFIED'
+      WHERE ${query.source==='legacy'?'false AND ':''}p.source='JOINPAY' AND p.disposition='APPLIED' AND p.currency='CNY' AND a.channel='JOINPAY' AND a.evidence_level='JOINPAY_VERIFIED'
         AND a.merchant_identity_id=ANY($5::text[]) AND ${scope} AND ${inPeriod('p.provider_paid_at')}
     UNION ALL
     SELECT 'REFUND',i.amount_cents,e.completed_at FROM zzsh_order.channel_refund_intent i
       JOIN zzsh_order.joinpay_refund_evidence e ON e.id=i.terminal_evidence_id AND e.intent_id=i.id
       JOIN zzsh_order.rental_order o ON o.id=i.order_id
-      WHERE i.payment_source='JOINPAY' AND i.state='SUCCEEDED' AND e.terminal='SUCCEEDED'
+      WHERE ${query.source==='legacy'?'false AND ':''}i.payment_source='JOINPAY' AND i.basis_kind IN ('POSTING','PRESTART_TERMINATION','SUPPORT_CANCELLATION') AND i.state='SUCCEEDED' AND NOT i.requires_review AND e.terminal='SUCCEEDED'
         AND i.merchant_identity_id=ANY($5::text[]) AND ${scope} AND ${inPeriod('e.completed_at')}
+    ${legacy?.ready===true ? `UNION ALL
+    SELECT 'REFUND',i.amount_cents,e.completed_at FROM zzsh_order.legacy_refund_intent i
+      JOIN zzsh_order.legacy_refund_case x ON x.id=i.case_id
+      JOIN zzsh_order.legacy_order_read_snapshot l ON l.id=x.order_id AND l.renter_user_id=x.renter_user_id
+      JOIN zzsh_order.legacy_refund_terminal_evidence e ON e.id=i.terminal_evidence_id AND e.intent_id=i.id
+      JOIN zzsh_order.legacy_refund_observation obs ON obs.id=e.observation_id AND obs.intent_id=i.id
+      JOIN zzsh_order.finance_event f ON f.id=e.finance_event_id AND f.kind='LEGACY_REFUND_PAID' AND f.subject_user_id=x.renter_user_id
+      WHERE i.state='SUCCEEDED' AND i.budget_disposition='CONSUMED' AND NOT i.requires_review AND e.terminal='SUCCEEDED'
+        AND e.merchant_no=x.merchant_no AND e.refund_transaction_no=i.provider_refund_trx_no AND e.completed_at=i.completed_at
+        AND obs.evidence_level='PROVIDER_RESPONSE' AND obs.event='PENDING_TERMINAL' AND obs.response_complete AND obs.transport_failure IS NULL
+        AND ((obs.operation='QUERY' AND obs.http_status=200) OR (obs.operation='NOTIFY' AND obs.http_status IS NULL))
+        AND obs.schema_status='VALID' AND obs.signature_status='MATCH' AND obs.binding_status='MATCH'
+        AND obs.raw_body IS NOT NULL AND obs.raw_sha256=encode(sha256(obs.raw_body),'hex')
+        AND e.facts_digest=encode(sha256(convert_to(e.facts_canonical,'UTF8')),'hex')
+        AND CASE WHEN pg_input_is_valid(e.facts_canonical,'jsonb') THEN
+          e.facts_canonical::jsonb->>'intentId'=i.id AND e.facts_canonical::jsonb->>'caseId'=x.id
+          AND e.facts_canonical::jsonb->>'orderId'=l.id AND e.facts_canonical::jsonb->>'renterUserId'=x.renter_user_id
+          AND e.facts_canonical::jsonb->>'merchantIdentityId'=x.merchant_identity_id AND e.facts_canonical::jsonb->>'merchantNo'=x.merchant_no
+          AND e.facts_canonical::jsonb->>'originalPaymentOrderNo'=x.original_payment_order_no
+          AND e.facts_canonical::jsonb->>'refundOrderNo'=i.refund_order_no AND e.facts_canonical::jsonb->>'amountCents'=i.amount_cents::text
+          AND e.facts_canonical::jsonb->>'currency'='CNY' AND e.facts_canonical::jsonb->>'refundTransactionNo'=e.refund_transaction_no
+          AND e.facts_canonical::jsonb->>'financeEventId'=f.id AND e.facts_canonical::jsonb->>'terminal'='SUCCEEDED'
+          AND e.facts_canonical::jsonb->>'sourceObservationId'=obs.id
+          ELSE false END
+        AND x.merchant_identity_id=ANY($5::text[]) AND ${gameScopeSql('l.game_id','$3','$4')} AND ${inPeriod('e.completed_at')}`:''}
     UNION ALL
     SELECT 'WITHDRAWAL',i.net_cents,e.created_at FROM zzsh_order.joinpay_withdrawal_intent i
       JOIN zzsh_order.joinpay_payout_evidence e ON e.id=i.terminal_evidence_id AND e.intent_id=i.id
-      WHERE i.state='SUCCEEDED' AND e.terminal='PAID' AND i.merchant_identity_id=ANY($5::text[]) AND ${inPeriod('e.created_at')}
+      WHERE i.state='SUCCEEDED' AND NOT i.requires_review AND e.terminal='PAID' AND i.merchant_identity_id=ANY($5::text[]) AND ${inPeriod('e.created_at')}
   ) SELECT kind,count(*)::text AS count,sum(amount)::text AS cents FROM facts GROUP BY kind ORDER BY kind`,
     [period.from, period.to, viewer.adminId, viewer.isBoss, merchantIds])).rows;
   return { version: 'admin.finance-dashboard-channels.v1' as const, period, state: 'RECORDED_PARTIAL' as const,

@@ -247,10 +247,10 @@ test("read routes are POST-only and forwarded by the web proxy", () => {
 
   const proxy = readFileSync(resolve("../web/src/app/api/im/[...path]/route.ts"), "utf8");
   assert.ok(proxy.includes("\\/consultations\\/[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\\/read"));
-  assert.ok(proxy.includes("(?:rating(?:\\/dismiss)?|read)"));
+  assert.ok(proxy.includes("(?:rating(?:\\/dismiss)?|read|close)"));
   assert.ok(proxy.includes('path.endsWith("/read")'));
   assert.ok(proxy.includes('path === "/messages" ? 14_100_000 : 16_384'));
-  assert.ok(proxy.includes("ratingPath || orderReadPath ? `/api/v1/im/user${path}`"));
+  assert.ok(proxy.includes("userActionPath || orderReadPath ? `/api/v1/im/user${path}`"));
   assert.ok(proxy.includes("order-teams\\/[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\\/read"));
 });
 

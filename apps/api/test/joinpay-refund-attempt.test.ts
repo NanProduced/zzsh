@@ -172,26 +172,20 @@ test("SYNTHETIC_COMPONENT_MODEL：review只停SUBMIT，原号QUERY保留raw/audi
   assert.equal(m.state.audits.length,2);assert.equal(m.state.row.requires_review,true);assert.equal(result?.terminal,null);assert.equal(captured,0);assert.equal(consumed,0);
 });
 
-test("Master门禁模型：意图创建后原商户单号变多trx，首次SUBMIT前必须重核并停止",async t=>{
+test("已停用的异常原款退款不能首次提交",async t=>{
   const m=executionModel(t);m.state.row.basis_kind="REVIEW_CONFIRMATION";m.state.row.posting_id=null;
   let keys=0;m.options.keyFor=()=>{keys++;return KEY;};
-  const c=await m.options.pool.connect(),query=c.query.bind(c);
-  c.query=async(sql:string,p:any[]=[])=>sql.includes("count(DISTINCT")||sql.includes("abnormal refund first submit")
-    ?{rows:[{valid:false,order_no_trx_count:"2",count:"2"}],rowCount:1}:query(sql,p);
   await executeJoinpayRefund(m.options,"refund_model_1","worker_1");
   assert.equal(keys,0);assert.equal(m.state.sends.length,0);assert.equal(m.state.attempts.length,0);
 });
 
-test("R1门禁失败只留固定REVIEW结论：不释放预算、不取钥、不发SUBMIT、不改lease",async t=>{
+test("停用的异常退款不释放预算、不发请求、不改lease",async t=>{
   const m=executionModel(t);m.state.row.basis_kind="REVIEW_CONFIRMATION";m.state.row.posting_id=null;
-  const c=await m.options.pool.connect(),query=c.query.bind(c);
-  c.query=async(sql:string,p:any[]=[])=>sql.includes("abnormal refund first submit")
-    ?{rows:[{valid:false,order_no_trx_count:"3"}],rowCount:1}:query(sql,p);
   await executeJoinpayRefund(m.options,"refund_model_1","worker_1");
   assert.equal(m.state.row.state,"READY");assert.equal(m.state.row.lease_version,"0");
   assert.equal(m.state.row.lease_owner,null);assert.equal(m.state.row.requires_review,false);
   assert.equal(m.state.attempts.length,0);assert.equal(m.state.sends.length,0);
-  assert.equal(m.state.audits.length,1);assert.ok(JSON.stringify(m.state.audits[0]).includes("order.refund.abnormal.first_submit.blocked"));
+  assert.equal(m.state.audits.length,0);
 });
 test("薄通知原URI/GET/精确ACK：坏输入/非GET/未知路径不读钥或出网", async () => {
   let body = "", status = 0, connects = 0;

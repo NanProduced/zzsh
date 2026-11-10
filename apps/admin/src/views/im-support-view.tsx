@@ -1,34 +1,35 @@
 import { ProfileImage } from "@zzsh/ui/profile-image";
 "use client";
-import { formatSubjectRef, messageScopeLabel } from "./im-support-vocabulary";
+import { messageScopeLabel } from "./im-support-vocabulary";
 import { NIM_RECEIPT_PENDING, nimMessageView, oldestNimMessage } from "@zzsh/im-client/nim-web-client";
 import { SupportMessageBody, supportMessageSummary } from "./im-support-message-body";
 import { AftersaleInbox } from "./im-aftersale-inbox";
 import type { AftersaleRecord } from "@zzsh/im-client/aftersale";
 
 import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, type ClipboardEvent as ReactClipboardEvent, type DragEvent, type FormEvent, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent } from "react";
-import { ArrowDown, Bell, BellOff, CalendarClock, Check, ChevronLeft, CircleAlert, FileText, Headphones, Images, MessageSquareText, MoreHorizontal, Pin, ReceiptText, Search, ShieldCheck, Smile, UserRound, Video, X } from "lucide-react";
+import { ArrowDown, Bell, BellOff, CalendarClock, Check, ChevronLeft, CircleAlert, FileText, Headphones, Images, MessageSquareText, MoreHorizontal, Pin, Search, ShieldCheck, Smile, UserRound, Video, X } from "lucide-react";
 import { MessageScroller as MessageScrollerPrimitive } from "@shadcn/react/message-scroller";
 import { ImClientLifecycle, ImLifecycleSupersededError } from "@zzsh/im-client/lifecycle";
 import { createLocalFakeNimWebClientFactory, createNimWebClientFactory, NIM_IMAGE_MAX_BYTES, NimImageSendError, NimMediaSendError, NimTextSendError, validateNimImageFile, validateNimMediaFile, type NimMessageLike, type NimMessageMedia, type NimWebClientLike, type NimWebConnectionState } from "@zzsh/im-client/nim-web-client";
-import { decodeImSystemNotice, mergeImMessages } from "@zzsh/im-client/message-state";
+import { collapseImSystemNotices, decodeImSystemNotice, isImSystemNoticeText, mergeImMessages, type ImSystemNotice } from "@zzsh/im-client/message-state";
 import { CHAT_EMOJIS, MessageActionMenu, MessageReplyQuote, useMessageLongPress, type MessageActionId, type MessageActionItem } from "@zzsh/ui/message-actions";
 import { MediaDraftBar, mediaMessageOf, mediaSummaryOf, type MessageMediaDraft } from "@zzsh/ui/message-media";
 import "@zzsh/ui/message-media.css";
 import { Popover, PopoverContent, PopoverTrigger } from "../components/ui/popover";
-import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "../components/ui/tooltip";
+import { ActionTooltip, Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "../components/ui/tooltip";
 import "@zzsh/ui/message-actions.css";
 import { AdminApiError, adminRequest, friendlyError, hasPermission, type SessionSnapshot } from "../api";
 import { confirmCurrentForbidden, isCurrentImRequest, messageAccessPath, supportedImageUrl, type ImRequestKey } from "./im-support-guards";
 import { canOperateSupportType, createReadClientKey, createSendCapabilityKey } from "./im-support-capabilities";
 import { planSupportNotificationToggle, playSupportChime, readSupportNotificationPreference, requestSupportNotificationPermission, storeSupportNotificationPreference, supportNotificationPermission, unlockSupportAudio, useSupportUnreadNotifications, type SupportNotificationPermission } from "./im-support-notifications";
-import { groupPreferenceOf, readOrderGroupPreferences, storeOrderGroupPreferences, withGroupPreference, ORDER_GROUP_PREF_EVENT, ORDER_GROUP_SETTINGS_EVENT, type OrderGroupPreference, type OrderGroupPreferenceMap } from "./im-support-group-settings";
+import { groupPreferenceOf, readOrderGroupPreferences, storeOrderGroupPreferences, useOrderGroupCloudPins, withGroupPreference, ORDER_GROUP_PREF_EVENT, ORDER_GROUP_SETTINGS_EVENT, type OrderGroupPreference, type OrderGroupPreferenceMap } from "./im-support-group-settings";
 import { OrderWorkbenchPane } from "./im-support-orders";
+import { OrderGroupAvatar } from "./order-group-avatar";
 import { orderStageTone } from "@zzsh/ui/order-team-panel";
 import type { OrderTeamListItem } from "@zzsh/ui/order-team-panel";
 import { ConsultationUserCard } from "./im-support-user-card";
 import { EntityPreviewTrigger } from "../components/admin-preview";
-import { ConsultationEventsCard } from "./im-support-events";
+import { ConsultationEventsCard, ConsultationRoundsTimeline } from "./im-support-events";
 import "./im-support-details.css";
 import { formatDuration } from "./im-support-management-model";
 import { dayKeyOf, dayLabelOf, formatBytes, formatListTime, formatMonthDay, formatTime, initialOf } from "./im-support-format";
@@ -53,7 +54,6 @@ type Consultation = {
   threadState?: "IDLE" | "WAITING" | "ACTIVE";
   type: SupportType;
   state: ConsultationState;
-  subjectRef: string | null;
   assignedAdmin: { id: string; name: string; avatar?: string | null } | null;
   peerAccountId: string | null;
   /** 平台“洲洲助手（Bot）”账号；欢迎语与自动卡片由它发出。 */
@@ -85,6 +85,8 @@ type SupportMessage = {
   messageServerId?: string;
   messageType?: number;
   revoked?: boolean;
+  /** Shared decode of a NIM team notification; display decides visibility. */
+  notice?: ImSystemNotice;
   /** Raw channel message kept intact so reply/revoke/delete address the original. */
   source?: NimMessageLike;
   image?: { imageId: string; url?: string; thumbnailUrl?: string; name: string; mimeType: string; size: number };
@@ -92,7 +94,7 @@ type SupportMessage = {
 };
 type ImToken = { appKey: string; accountId: string; token: string; transport: "nim" | "local-fake" };
 type PresenceToday = { seconds: number; sessions: number; users: number };
-type Presence = { adminUserId: string; availability: "OFF_DUTY" | "AVAILABLE" | "PAUSED"; connectionState: string; activeLoad: number; version: number; today?: PresenceToday };
+type Presence = { adminUserId: string; availability: "OFF_DUTY" | "AVAILABLE" | "PAUSED"; connectionState: string; activeLoad: number; version: number; ownedByAnotherSession?: boolean; unbound?: boolean; today?: PresenceToday };
 type SupportSection = "consultation" | "orders";
 type QueueRow = { id: string; type: SupportType; title: string; snippet: string; time: string; sortAt: number; state: "待接入" | "接待中" | "已结束" | "通道异常"; unreadCount: number; consultation?: Consultation };
 type UnifiedRow = {
@@ -107,6 +109,8 @@ type UnifiedRow = {
   stateTone: "good" | "warn" | "neutral" | "attention" | "live" | "done" | "danger";
   /** 订单群的到期等次要事实，用 icon+短标签显示，不占时间列。 */
   meta?: string;
+  /** UNKNOWN 自动卡只提示核对，不表示已发送或未发送。 */
+  stageCardUnknown?: boolean;
   unreadCount: number;
   sortAt: number;
   time: string;
@@ -210,6 +214,55 @@ function stageToneOf(state: string): "good" | "warn" | "neutral" {
 function connectionForPresence(state: NimWebConnectionState | "idle" | "error"): Presence["connectionState"] {
   return state === "idle" ? "DISCONNECTED" : state === "error" ? "AUTH_FAILED" : state;
 }
+/** Keep the runtime label, tone and action consistent when the IM channel is not CONNECTED. */
+export function presenceRuntimeState(
+  availability: Presence["availability"],
+  connection: NimWebConnectionState | "idle" | "error",
+  busy: boolean,
+  ownedByAnotherSession = false,
+  unbound = false,
+): { connected: boolean; tone: "good" | "warn" | "neutral"; label: string; toggleDisabled: boolean; toggleTitle: string | undefined; toggleLabel: string } {
+  const connected = connection === "CONNECTED";
+  const owned = ownedByAnotherSession === true;
+  const needsExplicitStart = unbound === true;
+  return {
+    connected,
+    tone: owned || needsExplicitStart ? "warn" : availability === "AVAILABLE" && !connected ? "warn" : availability === "AVAILABLE" ? "good" : "neutral",
+    label: needsExplicitStart
+      ? connected ? "需重新开始接待" : connection === "idle" || connection === "CONNECTING" ? "需重新开始接待 · 连接中" : "需重新开始接待 · 连接异常"
+      : connection === "idle" || connection === "CONNECTING"
+        ? "连接中"
+        : !connected
+          ? availability === "AVAILABLE" ? "连接异常 · 接待中" : "连接异常"
+          : owned ? "其他窗口接待中" : availability === "AVAILABLE" ? "可接待" : availability === "PAUSED" ? "已暂停" : "未上线",
+    toggleDisabled: owned || needsExplicitStart ? busy || !connected : availability === "AVAILABLE" ? busy : busy || !connected,
+    toggleTitle: owned
+      ? connected ? "接管当前接待窗口" : "消息服务异常，暂不可接管"
+      : needsExplicitStart
+        ? connected ? "重新开始接待" : "消息服务异常，暂不可开始接待"
+        : availability === "AVAILABLE"
+          ? connected ? undefined : "消息服务异常，可先结束接待"
+          : connection === "idle" || connection === "CONNECTING" ? "消息通道连接中，请稍候" : !connected ? "消息服务异常，暂不可接待" : undefined,
+    toggleLabel: owned ? "接管接待" : needsExplicitStart ? "开始接待" : availability === "AVAILABLE" ? "暂停接待" : "开始接待",
+  };
+}
+/**
+ * Reconnecting is written immediately so dispatch stops, while the server keeps the
+ * reception interval open for a short reconnect. A terminal disconnect gets a short
+ * grace before closing; auth failures and kicks are written immediately.
+ */
+export function presenceDisconnectGraceMs(state: NimWebConnectionState): number | null {
+  if (state === "CONNECTED" || state === "AUTH_FAILED" || state === "KICKED") return null;
+  return state === "DISCONNECTED" ? 10_000 : 0;
+}
+/** Only this write's authoritative response may count as a successful presence change. */
+export function presenceWriteSucceeded(value: Presence | undefined, availability: Presence["availability"]): boolean {
+  return Boolean(value && value.availability === availability && value.ownedByAnotherSession !== true && value.unbound !== true);
+}
+/** Read/unread decisions require the workbench tab, the browser page and keyboard focus. */
+function supportPageVisible(): boolean {
+  return typeof document === "undefined" || (document.visibilityState === "visible" && document.hasFocus());
+}
 function imageOf(message: NimMessageLike): SupportMessage["image"] | undefined {
   if (message.messageType !== 1 || !message.attachment || typeof message.attachment !== "object") return undefined;
   const attachment = message.attachment;
@@ -218,6 +271,20 @@ function imageOf(message: NimMessageLike): SupportMessage["image"] | undefined {
   const thumbnailUrl = supportedImageUrl(attachment.thumbUrl) ?? url;
   return { imageId, ...(url ? { url } : {}), ...(thumbnailUrl ? { thumbnailUrl } : {}), name: typeof attachment.name === "string" ? attachment.name : "图片", mimeType: typeof attachment.mimeType === "string" ? attachment.mimeType : "image/jpeg", size: typeof attachment.size === "number" ? attachment.size : 0 };
 }
+const SERVER_SYSTEM_NOTICE_KINDS = new Set([
+  "TEAM_CREATED", "MEMBER_JOINED", "MEMBER_LEFT", "TEAM_UPDATED", "TEAM_DISMISSED", "UNKNOWN",
+]);
+
+/** Only a shape-valid server notice is trusted; anything else falls back to the shared decoder. */
+function serverSystemNotice(message: NimMessageLike): ImSystemNotice | null {
+  const notice: unknown = message.systemNotice;
+  if (message.messageType !== 5 || !notice || typeof notice !== "object" || Array.isArray(notice)) return null;
+  const { kind, text } = notice as { kind?: unknown; text?: unknown };
+  if (typeof kind !== "string" || !SERVER_SYSTEM_NOTICE_KINDS.has(kind)
+    || typeof text !== "string" || !isImSystemNoticeText(text)) return null;
+  return { kind: kind as ImSystemNotice["kind"], text: text.trim() };
+}
+
 export function messageFromNim(message: NimMessageLike, accountId: string, peerAccountId?: string | null): SupportMessage | null {
   if (typeof message.senderId !== "string" || !message.senderId) return null;
   const id = message.messageServerId || message.messageClientId || `${message.senderId}-${message.createTime}`;
@@ -236,10 +303,10 @@ export function messageFromNim(message: NimMessageLike, accountId: string, peerA
   };
   // 已撤回是占位，不是发言：正文与附件都不再展示，也不再提供菜单。
   if (message.revoked === true) return { ...base, from: self ? "agent" : "customer", text: "", revoked: true };
-  const notice = decodeImSystemNotice(message);
+  const notice = serverSystemNotice(message) ?? decodeImSystemNotice(message);
   // A notification is never attributed to a human speaker, and unknown types
   // are not rendered as if the customer had written them.
-  if (notice) return { ...base, from: "system", text: notice.text };
+  if (notice) return { ...base, from: "system", text: notice.text, notice };
   const image = imageOf(message);
   // Only the client-validated media envelope becomes a media bubble.
   const media = mediaMessageOf(message);
@@ -272,7 +339,7 @@ async function readConsultations(): Promise<Consultation[]> {
   return value.consultations as Consultation[];
 }
 
-export function ImSupportView({ snapshot, initialSection = "consultation", initialConsultationId, initialOrderId, initialUnifiedType = "ALL", workspaceQuery = {}, onQueryChange, onRefresh, onOpenPath, onDirtyChange }: {
+export function ImSupportView({ snapshot, initialSection = "consultation", initialConsultationId, initialOrderId, initialUnifiedType = "ALL", workspaceQuery = {}, onQueryChange, onRefresh, onOpenPath, onDirtyChange, active = true }: {
   snapshot: Extract<SessionSnapshot, { authenticated: true }>;
   initialSection?: "consultation" | "orders";
   initialConsultationId?: string;
@@ -281,13 +348,15 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
   workspaceQuery?: Record<string, string>;
   onQueryChange?: (query: Record<string, string>) => void;
   onRefresh: () => Promise<SessionSnapshot>;
-  onOpenPath?: (path: string, title?: string) => void;
+  onOpenPath?: (path: string, title?: string, afterOpen?: () => void) => boolean | void;
   onDirtyChange?: (dirty:boolean)=>void;
+  /** False while the workspace tab is hidden; hidden views must not advance unread state or suppress alerts. */
+  active?: boolean;
 }) {
   const [section, setSection] = useState<SupportSection>(initialSection);
   useEffect(() => setSection(initialSection), [initialSection]);
-  // 工作台只渲染当前 Tab，切换会卸载本视图；把选中与筛选留在工作区 tab query，
-  // 切回/刷新后按持久线程（或订单 id）恢复，而不是重新从空状态开始。
+  // 工作台常驻挂载，切 Tab 只隐藏；把选中与筛选留在工作区 tab query，
+  // 刷新后按持久线程（或订单 id）恢复，而不是重新从空状态开始。
   const persistQuery = useCallback((patch: Record<string, string | null>) => {
     if (!onQueryChange) return;
     const next = { ...workspaceQuery };
@@ -306,6 +375,21 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
   const canTransfer = hasPermission(snapshot, "im.support.transfer");
   const canPresence = canRead && hasPermission(snapshot, "im.support.presence");
   const readClientKey = createReadClientKey({ adminUserId: snapshot.adminUserId, sessionId: snapshot.session.id, locked: snapshot.session.locked, canRead });
+  // Reads are an explicit "user is looking at this" claim: a hidden workspace tab or
+  // background browser page must never advance unread state on its own.
+  const [pageVisible, setPageVisible] = useState(supportPageVisible);
+  useEffect(() => {
+    const sync = () => setPageVisible(supportPageVisible());
+    document.addEventListener("visibilitychange", sync);
+    window.addEventListener("focus", sync);
+    window.addEventListener("blur", sync);
+    sync();
+    return () => {
+      document.removeEventListener("visibilitychange", sync);
+      window.removeEventListener("focus", sync);
+      window.removeEventListener("blur", sync);
+    };
+  }, []);
   const aftersaleScope=`${readClientKey}:${snapshot.security.isBoss}:${snapshot.permissions.slice().sort().join("|")}`;
   const aftersaleScopeRef=useRef(aftersaleScope);aftersaleScopeRef.current=aftersaleScope;
   const [aftersaleOpen,setAftersaleOpen]=useState(false),[aftersaleDirty,setAftersaleDirty]=useState(false);
@@ -320,9 +404,26 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
   const [orderQueue, setOrderQueue] = useState<OrderTeamListItem[]>([]);
   const [orderQueueLoaded, setOrderQueueLoaded] = useState(false);
   const [orderSelection, setOrderSelection] = useState<string | null>(null);
+  const [orderQueueScope, setOrderQueueScope] = useState<string | null>(null);
+  const [orderNextCursor, setOrderNextCursor] = useState<string | null>(null);
+  const [orderLoadingMore, setOrderLoadingMore] = useState(false);
+  const [orderRefreshing, setOrderRefreshing] = useState(false);
+  const [orderQueueNotice, setOrderQueueNotice] = useState<string | undefined>();
+  const orderScopeRef = useRef(readClientKey);
+  const orderEpochRef = useRef(0);
+  const orderNextCursorRef = useRef<string | null>(null);
+  const orderPagesLoadedRef = useRef(1);
+  const orderLoadingMoreRef = useRef(false);
+  const orderRefreshInFlightRef = useRef(false);
+  orderScopeRef.current = readClientKey;
   const [groupPrefs, setGroupPrefs] = useState<OrderGroupPreferenceMap>(() => readOrderGroupPreferences(snapshot.adminUserId));
+  const [groupPrefsScope, setGroupPrefsScope] = useState(snapshot.adminUserId);
   const [unifiedOrderMenu, setUnifiedOrderMenu] = useState<{ x: number; y: number; orderId: string; preference: OrderGroupPreference; row: HTMLElement | null } | null>(null);
   const [unifiedQuery, setUnifiedQuery] = useState("");
+  const [searchConsultations, setSearchConsultations] = useState<Consultation[]>([]);
+  const [searchOrders, setSearchOrders] = useState<OrderTeamListItem[]>([]);
+  const [searchState, setSearchState] = useState<{ q: string; loading: boolean; error: string | null }>({ q: "", loading: false, error: null });
+  const searchEpochRef = useRef(0);
   const [unifiedType, setUnifiedType] = useState<"ALL" | "SERVICE" | "COMPLAINT" | "ORDER">(initialUnifiedType);
   const [messages, setMessages] = useState<Record<string, SupportMessage[]>>({});
   const [drafts, setDrafts] = useState<Record<string, string>>({});
@@ -333,10 +434,19 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
   const [quickReplyDrafts, setQuickReplyDrafts] = useState<QuickReplyItem[]>([]);
   const [quickReplyError, setQuickReplyError] = useState("");
   useEffect(() => { setQuickReplies(readSupportQuickReplies(snapshot.adminUserId)); }, [snapshot.adminUserId]);
+  useEffect(() => {
+    setGroupPrefs(readOrderGroupPreferences(snapshot.adminUserId));
+    setGroupPrefsScope(snapshot.adminUserId);
+    setUnifiedOrderMenu(null);
+  }, [snapshot.adminUserId]);
   // Below this width a third column leaves the chat unusable, so the case column
 // starts collapsed and the operator opens it deliberately.
   const [detailsOpen, setDetailsOpen] = useState(() => !(typeof window !== "undefined" && typeof window.matchMedia === "function" && window.matchMedia("(max-width:1439px)").matches));
   const [mobilePane, setMobilePane] = useState<"queue" | "chat" | "details">("queue");
+  const narrowScreen = typeof window !== "undefined" && typeof window.matchMedia === "function" && window.matchMedia("(max-width: 760px)").matches;
+  const viewing = active && pageVisible;
+  const chatViewing = viewing && section === "consultation" && (!narrowScreen || mobilePane === "chat");
+  const orderViewing = viewing && section === "orders" && (!narrowScreen || mobilePane === "chat");
   const [notice, setNotice] = useState<string>();
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState<"waiting" | "mine">("mine");
@@ -403,6 +513,9 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
 
   const lifecycleRef = useRef<ImClientLifecycle<NimWebClientLike> | null>(null);
   const clientRef = useRef<NimWebClientLike | null>(null);
+  const cloudPins = useOrderGroupCloudPins(clientRef.current);
+  const cloudPinnedTeamIds = cloudPins.status === "CLOUD" ? cloudPins.teamIds : undefined;
+  useEffect(() => { if (cloudPins.error) setNotice(cloudPins.error); }, [cloudPins.error]);
   const availabilityRef = useRef<Presence["availability"]>("OFF_DUTY");
   const presenceVersionRef = useRef<number | null>(null);
   // 最近一次由服务端确认的 presence。写入失败时用它回退 availabilityRef，
@@ -484,14 +597,14 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
     setPresence(value);
   }, []);
 
-  const writePresence = useCallback((availability: Presence["availability"], state: ReturnType<typeof connectionForPresence>) => {
+  const writePresence = useCallback((availability: Presence["availability"], state: ReturnType<typeof connectionForPresence>, options?: { takeover?: boolean }) => {
     const key = readClientKey;
     const generation = operatorGenerationRef.current;
+    const current = () => canPresenceRef.current && operatorRef.current === key && operatorGenerationRef.current === generation;
+    if (!canPresence || !current()) return Promise.resolve<Presence | undefined>(undefined);
     availabilityRef.current = availability;
-    if (!canPresence || !canPresenceRef.current) return Promise.resolve<Presence | undefined>(undefined);
     const operation = presenceWriteRef.current.then(async () => {
-      if (!canPresenceRef.current) return undefined;
-      if (operatorRef.current !== key || operatorGenerationRef.current !== generation) return undefined;
+      if (!current()) return undefined;
       let version = presenceVersionRef.current;
       if (version === null) {
         // 本操作员本次会话的第一次写入：先向服务端要当前版本，再写。
@@ -499,15 +612,24 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
         // 首屏就变成“未上线 + 一次失败”，而这不是并发冲突。
         try {
           const existing = await adminRequest<Presence>("/im/presence");
+          if (!current()) return undefined;
           rememberPresence(existing);
           version = presenceVersionRef.current;
         } catch {
+          if (!current()) return undefined;
           // 读不到就保持 null，让服务端按“无行则插入”的规则自行裁决。
         }
       }
+      if (!current()) return undefined;
       try {
-        const value = await adminRequest<Presence>("/im/presence", { availability, connectionState: state, ...(version === null ? {} : { version }) }, "PUT");
-        if (canPresenceRef.current && operatorRef.current === key && operatorGenerationRef.current === generation) rememberPresence(value);
+        const value = await adminRequest<Presence>("/im/presence", {
+          availability,
+          connectionState: state,
+          ...(version === null ? {} : { version }),
+          ...(options?.takeover ? { takeover: true } : {}),
+        }, "PUT");
+        if (!current()) return undefined;
+        rememberPresence(value);
         return value;
       } catch (cause) {
         if (!canPresenceRef.current || operatorRef.current !== key || operatorGenerationRef.current !== generation) return undefined;
@@ -540,6 +662,19 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
     readyOperatorRef.current = null;
     setQueue([]);
     setQueueLoaded(false);
+    setOrderQueue([]);
+    setOrderQueueLoaded(false);
+    setOrderQueueScope(null);
+    setOrderSelection(null);
+    setOrderNextCursor(null);
+    orderNextCursorRef.current = null;
+    orderPagesLoadedRef.current = 1;
+    orderLoadingMoreRef.current = false;
+    orderRefreshInFlightRef.current = false;
+    orderEpochRef.current += 1;
+    setOrderQueueNotice(undefined);
+    setOrderRefreshing(false);
+    setOrderLoadingMore(false);
     setMessages({});
     setDrafts({});
     setSelectedId(null);
@@ -549,6 +684,7 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
     setHistoryMore({});
     setHistoryState({});
     markedReadSignaturesRef.current.clear();
+    markedOrderReadRef.current.clear();
     readInFlightRef.current.clear();
     setHistoryLoading(false);
     setFailedText({});
@@ -612,6 +748,7 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
       const factory = createNimWebClientFactory({
         appKey: token.appKey,
         accountId: token.accountId,
+        enableCloudConversation: true,
         messageReceiptEndpoint:"/api/bff/admin/im/messages",
         onReceiptStatus:({pending,failed,persistent})=>{if(pending&&(failed||!persistent))setNotice(NIM_RECEIPT_PENDING+(!persistent?"本地恢复记录未保存，请在离开前恢复登记。":""));else if(!pending)setNotice(current=>current?.startsWith(NIM_RECEIPT_PENDING)?undefined:current);},
         messageAuthorization: async ({ conversationId, operation,...intent }) => {
@@ -627,6 +764,8 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
       return factory(context);
     });
     lifecycleRef.current = lifecycle;
+    let graceTimer: number | undefined;
+    let graceState: NimWebConnectionState = "DISCONNECTED";
     const run = async () => {
       try {
         setConnection("CONNECTING");
@@ -643,12 +782,25 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
         if (presenceResult.status === "fulfilled" && presenceResult.value) rememberPresence(presenceResult.value);
         if (queueResult.status === "fulfilled") { setQueue(queueResult.value); setQueueLoaded(true); }
         else setNotice(friendlyError(queueResult.reason));
-        if (canPresence) void writePresence(availabilityRef.current, connectionForPresence(client.getConnectionState()));
+        if (canPresence && !presenceRef.current.ownedByAnotherSession && !presenceRef.current.unbound) void writePresence(availabilityRef.current, connectionForPresence(client.getConnectionState()));
         client.onConnectionStateChange((state) => {
           if (cancelled || generation !== operatorGenerationRef.current || operatorRef.current !== operator || clientRef.current !== client) return;
           setConnection(state);
-          // 失败由 writePresence 统一转成可见提示，这里不再静默吞掉。
-          if (canPresence) void writePresence(availabilityRef.current, connectionForPresence(state));
+          if (!canPresence || presenceRef.current.ownedByAnotherSession || presenceRef.current.unbound) return;
+          const delay = presenceDisconnectGraceMs(state);
+          if (delay === null || delay === 0) {
+            if (graceTimer !== undefined) { window.clearTimeout(graceTimer); graceTimer = undefined; }
+            void writePresence(availabilityRef.current, connectionForPresence(state));
+            return;
+          }
+          graceState = state;
+          // 同一次断线只给一次宽限；SDK 反复重试不续期，宽限内恢复则保留原 session。
+          if (graceTimer !== undefined) return;
+          graceTimer = window.setTimeout(() => {
+            graceTimer = undefined;
+            if (cancelled || generation !== operatorGenerationRef.current || operatorRef.current !== operator || clientRef.current !== client) return;
+            void writePresence(availabilityRef.current, connectionForPresence(graceState));
+          }, delay);
         });
         client.onMessages((incoming) => {
           if (cancelled || generation !== operatorGenerationRef.current || operatorRef.current !== operator || clientRef.current !== client) return;
@@ -658,7 +810,7 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
             if (!next || !consultation) continue;
             setMessages((current) => ({ ...current, [consultation.id]: mergeImMessages(current[consultation.id] ?? [], [next]) }));
             // 即时反馈：服务端计数仍是权威，下一次队列轮询会覆盖这个乐观增量。
-            if (next.self !== true) setQueue((current) => current.map((item) => item.id === consultation.id
+            if (next.self !== true && next.from !== "system") setQueue((current) => current.map((item) => item.id === consultation.id
               ? { ...item, adminUnreadCount: Math.min((item.adminUnreadCount ?? 0) + 1, 999) }
               : item));
           }
@@ -670,6 +822,7 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
     void run();
     return () => {
       cancelled = true;
+      if (graceTimer !== undefined) window.clearTimeout(graceTimer);
       clientRef.current = null;
       if (generation === operatorGenerationRef.current && operatorRef.current === operator) readyOperatorRef.current = null;
       if (lifecycleRef.current === lifecycle) lifecycleRef.current = null;
@@ -702,29 +855,208 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
 
   // Unified inbox: order groups share the same left directory as consultations.
   useEffect(() => {
-    if (!canRead) return;
+    if (!canRead || snapshot.session.locked) return;
+    const scope = readClientKey;
     let cancelled = false;
     let loading = false;
-    const refreshOrders = () => {
-      if (cancelled || loading) return;
+    const refreshOrders = async () => {
+      if (cancelled || loading || orderLoadingMoreRef.current || orderRefreshInFlightRef.current) return;
       loading = true;
-      void adminRequest<{ items?: OrderTeamListItem[] }>("/orders/im-groups?limit=50")
-        .then((value) => { if (!cancelled) { setOrderQueue(Array.isArray(value.items) ? value.items : []); setOrderQueueLoaded(true); } })
-        .catch(() => undefined)
-        .finally(() => { loading = false; });
+      orderRefreshInFlightRef.current = true;
+      setOrderRefreshing(true);
+      const epoch = ++orderEpochRef.current;
+      const targetPages = Math.max(1, orderPagesLoadedRef.current);
+      const pages: OrderTeamListItem[] = [];
+      let cursor: string | null = null;
+      let next: string | null = null;
+      let fetched = 0;
+      try {
+        for (let page = 0; page < targetPages; page += 1) {
+          const pageResult: { items?: OrderTeamListItem[]; nextCursor?: string | null } = await adminRequest<{
+            items?: OrderTeamListItem[]; nextCursor?: string | null;
+          }>(`/orders/im-groups?limit=50${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`);
+          if (cancelled || orderScopeRef.current !== scope || orderEpochRef.current !== epoch) return;
+          const items = Array.isArray(pageResult.items) ? pageResult.items : [];
+          pages.push(...items);
+          fetched += 1;
+          next = typeof pageResult.nextCursor === "string" ? pageResult.nextCursor : null;
+          cursor = next;
+          if (!cursor) break;
+        }
+        const seen = new Set<string>();
+        const fresh = pages.filter((row) => { if (seen.has(row.id)) return false; seen.add(row.id); return true; });
+        setOrderQueue(fresh);
+        // A missing row implies removal only after the complete authorized directory was read.
+        if (!next) setOrderSelection((current) => current && !seen.has(current) ? null : current);
+        orderNextCursorRef.current = next;
+        setOrderNextCursor(next);
+        orderPagesLoadedRef.current = Math.max(1, fetched);
+        setOrderQueueScope(scope);
+        setOrderQueueLoaded(true);
+        setOrderQueueNotice(undefined);
+      } catch (error) {
+        if (cancelled || orderScopeRef.current !== scope || orderEpochRef.current !== epoch) return;
+        const status = httpStatus(error);
+        if (status === 401 || status === 403 || status === 423) {
+          setOrderQueue([]);
+          setOrderSelection(null);
+          orderNextCursorRef.current = null;
+          setOrderNextCursor(null);
+          orderPagesLoadedRef.current = 1;
+          setOrderQueueScope(scope);
+          setOrderQueueLoaded(true);
+          setOrderQueueNotice("订单群读取权限已变化，列表已隐藏。");
+        } else if (pages.length > 0) {
+          const seen = new Set<string>();
+          const fresh = pages.filter((row) => { if (seen.has(row.id)) return false; seen.add(row.id); return true; });
+          setOrderQueue(fresh);
+          orderNextCursorRef.current = cursor;
+          setOrderNextCursor(cursor);
+          orderPagesLoadedRef.current = targetPages;
+          setOrderQueueScope(scope);
+          setOrderQueueLoaded(true);
+          setOrderQueueNotice("部分订单群刷新失败，已显示最新读取页；稍后自动重试。");
+        } else {
+          setOrderQueueNotice("订单群列表刷新失败，当前显示上次成功结果，可能已过期；稍后自动重试。");
+        }
+      } finally {
+        if (orderScopeRef.current === scope && orderEpochRef.current === epoch) {
+          loading = false;
+          orderRefreshInFlightRef.current = false;
+          setOrderRefreshing(false);
+        }
+      }
     };
-    refreshOrders();
-    const timer = window.setInterval(refreshOrders, 15_000);
+    void refreshOrders();
+    const timer = window.setInterval(() => { void refreshOrders(); }, 15_000);
     return () => { cancelled = true; window.clearInterval(timer); };
-  }, [canRead]);
+  }, [canRead, readClientKey, snapshot.session.locked]);
+
+  const visibleOrderQueue = orderQueueScope === readClientKey ? orderQueue : [];
+  const orderQueueReady = orderQueueScope === readClientKey && orderQueueLoaded;
+
+  // Server-side search: all authorized consultations and order groups, not just the loaded pages.
+  useEffect(() => {
+    const text = unifiedQuery.trim();
+    const epoch = ++searchEpochRef.current;
+    if (!text) {
+      setSearchConsultations([]);
+      setSearchOrders([]);
+      setSearchState({ q: "", loading: false, error: null });
+      return;
+    }
+    if (!canRead || snapshot.session.locked) return;
+    setSearchConsultations([]);
+    setSearchOrders([]);
+    setSearchState({ q: text, loading: true, error: null });
+    const timer = window.setTimeout(() => {
+      void Promise.allSettled([
+        adminRequest<{ consultations?: Consultation[]; query?: string | null }>(`/im/consultations?limit=50&q=${encodeURIComponent(text)}`),
+        adminRequest<{ items?: OrderTeamListItem[]; query?: string | null }>(`/orders/im-groups?limit=50&q=${encodeURIComponent(text)}`),
+      ]).then(([consultationResult, orderResult]) => {
+        if (epoch !== searchEpochRef.current) return;
+        const consultations = consultationResult.status === "fulfilled" && Array.isArray(consultationResult.value.consultations)
+          ? consultationResult.value.consultations : [];
+        const orders = orderResult.status === "fulfilled" && Array.isArray(orderResult.value.items)
+          ? orderResult.value.items : [];
+        const consultationApplied = consultationResult.status === "fulfilled" && consultationResult.value.query === text;
+        const orderApplied = orderResult.status === "fulfilled" && orderResult.value.query === text;
+        const failed = consultationResult.status === "rejected" || orderResult.status === "rejected";
+        setSearchConsultations(consultationApplied ? consultations : []);
+        setSearchOrders(orderApplied ? orders : []);
+        setSearchState({
+          q: text,
+          loading: false,
+          error: !consultationApplied || !orderApplied
+            ? "搜索服务暂不可用，当前仅搜索已加载的会话"
+            : failed ? "部分结果读取失败，请重试" : null,
+        });
+      });
+    }, 250);
+    return () => window.clearTimeout(timer);
+  }, [unifiedQuery, canRead, readClientKey, snapshot.session.locked]);
+
+  const serverSearchActive = unifiedQuery.trim().length > 0;
+  const searchLimitReached = serverSearchActive && (searchConsultations.length >= 50 || searchOrders.length >= 50);
+  const consultationDirectory = useMemo(() => {
+    const seen = new Set(queue.map((row) => row.id));
+    return [...searchConsultations.filter((row) => !seen.has(row.id)), ...queue];
+  }, [queue, searchConsultations]);
+  const orderDirectory = useMemo(() => {
+    const seen = new Set(visibleOrderQueue.map((row) => row.id));
+    return [...visibleOrderQueue, ...searchOrders.filter((row) => !seen.has(row.id))];
+  }, [visibleOrderQueue, searchOrders]);
+  const visibleGroupPrefs = groupPrefsScope === snapshot.adminUserId ? groupPrefs : {};
+  const orderPreferenceOf = (orderId: string, teamId?: string | null): OrderGroupPreference => {
+    const preference = groupPreferenceOf(visibleGroupPrefs, orderId);
+    return cloudPinnedTeamIds && teamId ? { ...preference, pinned: cloudPinnedTeamIds.has(teamId) } : preference;
+  };
+  const toggleOrderPin = (orderId: string, teamId: string | null | undefined, pinned: boolean) => {
+    if (cloudPinnedTeamIds) {
+      if (!teamId) {
+        setNotice("该订单群尚未返回云信群号，暂只能在本机置顶。");
+        applyGroupPreference(orderId, { pinned });
+        return;
+      }
+      void cloudPins.toggle(teamId, pinned).catch(() => undefined);
+      return;
+    }
+    applyGroupPreference(orderId, { pinned });
+  };
+  const loadMoreOrders = useCallback(async () => {
+    const cursor = orderNextCursorRef.current;
+    if (!cursor || orderLoadingMoreRef.current || orderRefreshInFlightRef.current) return;
+    const scope = readClientKey;
+    const epoch = orderEpochRef.current;
+    orderLoadingMoreRef.current = true;
+    setOrderLoadingMore(true);
+    try {
+      const value = await adminRequest<{ items?: OrderTeamListItem[]; nextCursor?: string | null }>(
+        `/orders/im-groups?limit=50&cursor=${encodeURIComponent(cursor)}`,
+      );
+      if (orderScopeRef.current !== scope || orderEpochRef.current !== epoch) return;
+      const items = Array.isArray(value.items) ? value.items : [];
+      setOrderQueue((current) => {
+        const seen = new Set(current.map((row) => row.id));
+        return [...current, ...items.filter((row) => !seen.has(row.id))];
+      });
+      orderPagesLoadedRef.current += 1;
+      orderNextCursorRef.current = typeof value.nextCursor === "string" ? value.nextCursor : null;
+      setOrderNextCursor(orderNextCursorRef.current);
+      setOrderQueueScope(scope);
+      setOrderQueueLoaded(true);
+      setOrderQueueNotice(undefined);
+    } catch (error) {
+      if (orderScopeRef.current !== scope || orderEpochRef.current !== epoch) return;
+      const status = httpStatus(error);
+      if (status === 401 || status === 403 || status === 423) {
+        setOrderQueue([]);
+        setOrderSelection(null);
+        orderNextCursorRef.current = null;
+        setOrderNextCursor(null);
+        orderPagesLoadedRef.current = 1;
+        setOrderQueueNotice("订单群读取权限已变化，列表已隐藏。");
+      } else {
+        setOrderQueueNotice("加载更多订单群失败，已保留已加载页；请重试。");
+      }
+    } finally {
+      if (orderScopeRef.current === scope && orderEpochRef.current === epoch) {
+        orderLoadingMoreRef.current = false;
+        setOrderLoadingMore(false);
+      }
+    }
+  }, [readClientKey]);
   useEffect(() => {
     const onSync = (event: Event) => {
-      const detail = (event as CustomEvent<{ snapshot?: OrderGroupPreferenceMap }>).detail;
-      if (detail?.snapshot) setGroupPrefs(detail.snapshot);
+      const detail = (event as CustomEvent<{ snapshot?: OrderGroupPreferenceMap; adminUserId?: string }>).detail;
+      if (!detail?.snapshot) return;
+      if (detail.adminUserId !== undefined && detail.adminUserId !== snapshot.adminUserId) return;
+      setGroupPrefs(detail.snapshot);
+      setGroupPrefsScope(snapshot.adminUserId);
     };
     window.addEventListener(ORDER_GROUP_PREF_EVENT, onSync);
     return () => window.removeEventListener(ORDER_GROUP_PREF_EVENT, onSync);
-  }, []);
+  }, [snapshot.adminUserId]);
 
   const restoredSelectionRef = useRef(false);
   const restoreConsultation = () => {
@@ -738,7 +1070,7 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
   };
   const restoreOrder = () => {
     if (!initialOrderId) return false;
-    const target = orderQueue.find((item) => item.id === initialOrderId);
+    const target = visibleOrderQueue.find((item) => item.id === initialOrderId);
     if (!target) return false;
     setSection("orders");
     setOrderSelection(target.id);
@@ -750,7 +1082,7 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
     // 只恢复当前 section 的选中，等该 section 的目录首次加载完成再判断；
     // 否则先到的另一侧会把视图抢到错误的 section。
     if (initialSection === "orders") {
-      if (!orderQueueLoaded) return;
+      if (!orderQueueReady) return;
       if (restoreOrder()) return;
       restoredSelectionRef.current = true;
       return;
@@ -758,34 +1090,46 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
     if (!queueLoaded) return;
     if (restoreConsultation()) return;
     restoredSelectionRef.current = true;
-  }, [initialConsultationId, initialSection, orderQueueLoaded, queueLoaded, queue]);
+  }, [initialConsultationId, initialSection, orderQueueReady, queueLoaded, queue]);
 
   // 内部切换 section 时也可以回到该 section 上次选中的会话；用户新点一条则不会被覆盖。
   useEffect(() => {
     if (!restoredSelectionRef.current) return;
     if (section === "orders" && !orderSelection && initialOrderId) restoreOrder();
     else if (section === "consultation" && !selectedId && initialConsultationId) restoreConsultation();
-  }, [section, orderSelection, selectedId, initialOrderId, initialConsultationId, orderQueue, queue]);
+  }, [section, orderSelection, selectedId, initialOrderId, initialConsultationId, visibleOrderQueue, queue]);
 
   useEffect(() => {
     if (!canPresence || readyOperatorRef.current !== readClientKey || connection !== "CONNECTED") return;
     const generation = operatorGenerationRef.current;
     const operator = readClientKey;
     const timer = window.setInterval(() => {
-      if (generation === operatorGenerationRef.current && operatorRef.current === operator) void writePresence(availabilityRef.current, connectionForPresence(connection));
+      if (generation === operatorGenerationRef.current && operatorRef.current === operator && !presenceRef.current.ownedByAnotherSession && !presenceRef.current.unbound) {
+        void writePresence(availabilityRef.current, connectionForPresence(connection));
+      }
     }, 30_000);
     return () => window.clearInterval(timer);
   }, [canPresence, connection, readClientKey, writePresence]);
 
-  // 接待心跳：只在页面可见且确实处于“可接待 + 可收发消息”时发送；失败不影响 UI。
+  // 接待心跳：页面隐藏、切换管理 tab 时仍保持在线；恢复可见/网络/前台时立即补发，
+  // 避免浏览器后台定时器节流造成今日接待断档。失败不影响 UI。
   useEffect(() => {
-    if (!canPresence || presence.availability !== "AVAILABLE" || connection !== "CONNECTED" || snapshot.session.locked) return;
-    const timer = window.setInterval(() => {
-      if (typeof document !== "undefined" && document.visibilityState === "hidden") return;
-      void adminRequest("/im/presence/heartbeat", {}, "POST").catch(() => undefined);
-    }, 60_000);
-    return () => window.clearInterval(timer);
-  }, [canPresence, connection, presence.availability, snapshot.session.locked]);
+    if (!canPresence || presence.ownedByAnotherSession || presence.unbound || presence.availability !== "AVAILABLE" || connection !== "CONNECTED" || snapshot.session.locked) return;
+    const heartbeat = () => { void adminRequest("/im/presence/heartbeat", {}, "POST").catch(() => undefined); };
+    const timer = window.setInterval(heartbeat, 30_000);
+    const onVisible = () => { if (document.visibilityState === "visible") heartbeat(); };
+    document.addEventListener("visibilitychange", onVisible);
+    window.addEventListener("focus", onVisible);
+    window.addEventListener("online", heartbeat);
+    window.addEventListener("pageshow", heartbeat);
+    return () => {
+      window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", onVisible);
+      window.removeEventListener("focus", onVisible);
+      window.removeEventListener("online", heartbeat);
+      window.removeEventListener("pageshow", heartbeat);
+    };
+  }, [canPresence, connection, presence.availability, presence.ownedByAnotherSession, presence.unbound, snapshot.session.locked]);
 
   // 日常流不代选：首次加载或队列刷新不替客服打开会话，否则未读会在没被看到时就上报。
   // 只有显式选择（点行、铃铛通知、交接清单）会设置 selectedId；选中的一轮消失时才清空。
@@ -816,24 +1160,24 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
     target.focus();
   }, [mobilePane]);
 
-  const selected = queue.find((item) => item.id === selectedId) ?? null;
+  const selected = consultationDirectory.find((item) => item.id === selectedId) ?? null;
   const selectedMessages = messages[selectedId ?? ""] ?? [];
   // 订单群未读按成员身份计数；只有该群聊真的在屏幕上时才清自己的未读。
-  const selectedOrderRow = orderSelection ? orderQueue.find((item) => item.id === orderSelection) ?? null : null;
+  const selectedOrderRow = orderSelection ? orderDirectory.find((item) => item.id === orderSelection) ?? null : null;
   useEffect(() => {
-    if (section !== "orders" || !selectedOrderRow || (selectedOrderRow.unreadCount ?? 0) <= 0) return;
-    const narrow = typeof window !== "undefined" && typeof window.matchMedia === "function" && window.matchMedia("(max-width: 760px)").matches;
-    if (narrow && mobilePane !== "chat") return;
+    if (!orderViewing || !selectedOrderRow || (selectedOrderRow.unreadCount ?? 0) <= 0) return;
     const signature = `${selectedOrderRow.id}:${selectedOrderRow.lastMessageAt ?? ""}:${selectedOrderRow.unreadCount}`;
     if (markedOrderReadRef.current.has(signature)) return;
     markedOrderReadRef.current.add(signature);
     void adminRequest(`/im/order-teams/${encodeURIComponent(selectedOrderRow.id)}/read`, {}, "POST")
       .then(() => setOrderQueue((current) => current.map((item) => item.id === selectedOrderRow.id ? { ...item, unreadCount: 0 } : item)))
       .catch(() => markedOrderReadRef.current.delete(signature));
-  }, [section, selectedOrderRow, mobilePane]);
+  }, [orderViewing, selectedOrderRow]);
   const rowOfMessage = (target: EventTarget | null): HTMLElement | null => {
     const element = target as { closest?: (selector: string) => HTMLElement | null } | null;
-    return element && typeof element.closest === "function" ? element.closest("[data-message-id]") : null;
+    if (!element || typeof element.closest !== "function") return null;
+    const content = element.closest(".im-wb-bub, .message-media, .message-image, .order-card, p");
+    return content ? content.closest("[data-message-id][tabindex]") : null;
   };
   const findSelectedMessage = (id: string | undefined): SupportMessage | null => id ? selectedMessages.find((item) => item.id === id) ?? null : null;
   const openMessageMenu = (message: SupportMessage | null, x: number, y: number, row: HTMLElement | null) => {
@@ -887,11 +1231,14 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
   useEffect(() => { setMessageMenu(null); }, [selectedId]);
 
   const displayQueue = useMemo<QueueRow[]>(() => queue.map((item) => {
-    const history = messages[item.id];
-    const last = history?.length ? history[history.length - 1] : undefined;
+    const history = messages[item.id] ?? [];
+    // 系统通知不是业务消息：摘要、时间和提醒签名都只能跟随最后一条非 system 消息。
+    const last = [...history].reverse().find((message) => message.from !== "system");
     const lastMessageAt = item.lastMessageAt ? Date.parse(item.lastMessageAt) : Number.NaN;
     // 后端 best-effort 写入的最近消息摘要；没有历史时用它，避免未打开的 ACTIVE 行只显示“打开查看”。
-    const preview = item.lastMessagePreview ? supportMessageSummary(item.lastMessagePreview).trim() || null : null;
+    const previewText = item.lastMessagePreview ? supportMessageSummary(item.lastMessagePreview).trim() : "";
+    const previewIsSystem = Boolean(previewText && isImSystemNoticeText(previewText));
+    const preview = previewText && !previewIsSystem ? previewText : null;
     // R1 重写时把这里的措辞缩短成了「待人工核验」，丢掉了「远端结果未知」这个
     // 关键差异（会读成普通待办）。恢复 HEAD 的完整措辞，队列行不得让 FAILED
     // 看起来像正常会话。
@@ -900,9 +1247,10 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
       : closeOutcomeUnknown[item.id]
         ? "结束结果未确认，待平台核对"
         : last
-        ? `${last.from === "agent" ? (last.self ? "我：" : "客服：") : last.from === "system" ? "" : "用户："}${last.image ? "[图片]" : last.media ? mediaSummaryOf(last) ?? "[媒体]" : last.text || "[空消息]"}`
+        ? `${last.from === "agent" ? (last.self ? "我：" : "客服：") : "用户："}${last.image ? "[图片]" : last.media ? mediaSummaryOf(last) ?? "[媒体]" : last.text || "[空消息]"}`
         : preview ? preview : item.state === "WAITING" ? "等待客服接待" : item.state === "CLOSED" ? "本轮已结束" : "打开查看消息";
-    const sortAt = last?.createTime ?? (Number.isFinite(lastMessageAt) ? lastMessageAt : 0);
+    // 历史已加载但没有非 system 消息时，系统通知不能修改排序或提醒。
+    const sortAt = last?.createTime ?? (previewIsSystem ? 0 : Number.isFinite(lastMessageAt) ? lastMessageAt : 0);
     return {
       id: item.id,
       type: item.type,
@@ -922,32 +1270,102 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
     waiting: displayQueue.filter((row) => row.state === "待接入").length,
     mine: displayQueue.filter((row) => row.state === "接待中" || row.state === "通道异常").length,
   }), [displayQueue]);
-  const notificationRows = useMemo(() => displayQueue.map((row) => ({
-    id: row.id,
-    title: `${typeLabel(row.type)} · ${row.title}`,
-    body: row.snippet,
-    signature: `${row.consultation?.lastMessageAt ?? ""}|${row.snippet}`,
-    unread: row.unreadCount > 0,
-  })), [displayQueue]);
+  const searchQueueRows = useMemo<QueueRow[]>(() => searchConsultations.map((item) => {
+    const lastAt = item.lastMessageAt ? Date.parse(item.lastMessageAt) : Number.NaN;
+    const previewText = item.lastMessagePreview ? supportMessageSummary(item.lastMessagePreview).trim() : "";
+    const preview = previewText && !isImSystemNoticeText(previewText) ? previewText : null;
+    const sortAt = Number.isFinite(lastAt) ? lastAt : 0;
+    return {
+      id: item.id,
+      type: item.type,
+      title: item.user?.name || item.user?.username || "平台用户",
+      snippet: preview ?? (item.state === "WAITING" ? "等待客服接待" : item.state === "CLOSED" ? "本轮已结束" : "打开查看消息"),
+      time: sortAt ? formatListTime(sortAt) : "—",
+      sortAt,
+      state: scopeStateLabel(item),
+      unreadCount: item.state === "ACTIVE" && item.assignedAdmin?.id === snapshot.adminUserId
+        ? Math.max(0, item.adminUnreadCount ?? 0)
+        : 0,
+      consultation: item,
+    };
+  }), [searchConsultations, snapshot.adminUserId]);
+  const queueDirectory = useMemo<QueueRow[]>(() => {
+    const seen = new Set(displayQueue.map((row) => row.id));
+    return [...displayQueue, ...searchQueueRows.filter((row) => !seen.has(row.id))];
+  }, [displayQueue, searchQueueRows]);
+  const notificationRows = useMemo(() => [
+    ...displayQueue.map((row) => ({
+      id: row.id,
+      title: `${typeLabel(row.type)} · ${row.title}`,
+      body: row.snippet,
+      signature: `${row.sortAt || ""}|${row.snippet}`,
+      unread: row.unreadCount > 0,
+    })),
+    ...visibleOrderQueue
+      .filter((row) => {
+        if ((row.unreadCount ?? 0) <= 0) return false;
+        const preference = groupPreferenceOf(visibleGroupPrefs, row.id);
+        // Muted groups keep an unread dot only in the list; they never raise the bell or a desktop alert.
+        return !preference.hidden && !preference.muted;
+      })
+      .map((row) => {
+        const previewText = typeof row.lastMessagePreview === "string" && row.lastMessagePreview.trim()
+          ? supportMessageSummary(row.lastMessagePreview).trim()
+          : "";
+        const preview = previewText && !isImSystemNoticeText(previewText) ? previewText : null;
+        const sortAt = Date.parse(row.lastMessageAt ?? row.createdAt ?? "") || 0;
+        return {
+          id: row.id,
+          title: `订单群 · ${row.displayNo || row.title || "未命名订单群"}`,
+          body: preview ?? (row.lastMessageAt ? "有新消息" : "暂无消息"),
+          signature: `${sortAt || ""}|${preview ?? ""}|${row.unreadCount ?? 0}`,
+          unread: true,
+        };
+      }),
+  ], [displayQueue, visibleOrderQueue, visibleGroupPrefs]);
   const { unreadCount: notifyUnreadCount } = useSupportUnreadNotifications({
     adminUserId: snapshot.adminUserId,
     enabled: notifyEnabled && notifyPermission === "granted",
-    loaded: queueLoaded,
+    loaded: queueLoaded && (orderQueueReady || Boolean(orderQueueNotice)),
     rows: notificationRows,
-    selectedId,
+    visible: viewing,
+    // Only a conversation actually on screen suppresses its own notification.
+    selectedId: section === "orders" ? (orderViewing ? orderSelection : null) : chatViewing ? selectedId : null,
     onOpen: (id) => {
-      restoredSelectionRef.current = true;
-      setSection("consultation");
-      setSelectedId(id);
-      setMobilePane("chat");
+      const order = visibleOrderQueue.find((item) => item.id === id);
       const row = queue.find((item) => item.id === id);
-      persistQuery({ section: "consultation", consultation: row?.threadId ?? id });
+      const path = order
+        ? `/support?section=orders&order=${encodeURIComponent(id)}`
+        : `/support?section=consultation&consultation=${encodeURIComponent(row?.threadId ?? id)}`;
+      let selected = false;
+      const select = () => {
+        selected = true;
+        restoredSelectionRef.current = true;
+        if (order) {
+          setSection("orders");
+          setOrderSelection(id);
+          persistQuery({ section: "orders", order: id });
+        } else {
+          setSection("consultation");
+          setSelectedId(id);
+          persistQuery({ section: "consultation", consultation: row?.threadId ?? id });
+        }
+        setMobilePane("chat");
+      };
+      // Bring the hidden support tab forward through the existing workspace guard
+      // (permission, dirty form, write lock). A queued discard still runs this
+      // callback after confirmation; a refused open never mutates the hidden view.
+      const opened = onOpenPath?.(path, undefined, select);
+      if (opened === false) return;
+      if (!selected) select();
     },
   });
   const unifiedRows = useMemo<UnifiedRow[]>(() => {
     const text = unifiedQuery.trim().toLowerCase();
-    const matches = (row: UnifiedRow) => (!text || `${row.title} ${row.snippet} ${row.tag} ${row.state}`.toLowerCase().includes(text));
-    const consultations: UnifiedRow[] = displayQueue
+    const serverConsultationIds = new Set(searchQueueRows.map((row) => row.id));
+    const serverOrderIds = new Set(searchOrders.map((row) => row.id));
+    const matches = (row: UnifiedRow, fromServer = false) => fromServer || !text || `${row.title} ${row.snippet} ${row.tag} ${row.state}`.toLowerCase().includes(text);
+    const consultations: UnifiedRow[] = queueDirectory
       .filter((row) => unifiedType === "ALL" || (unifiedType !== "ORDER" && row.type === unifiedType))
       .map((row): UnifiedRow => ({
         kind: "consultation", id: row.id, title: row.title, avatar: row.consultation?.user?.avatar,
@@ -956,24 +1374,27 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
         snippet: row.snippet, state: row.state, stateTone: stageToneOf(row.state),
         unreadCount: row.unreadCount, sortAt: row.sortAt, time: row.time,
       }))
-      .filter(matches);
-    const orders: UnifiedRow[] = (unifiedType === "ALL" || unifiedType === "ORDER" ? orderQueue : [])
-      .filter((row) => !groupPreferenceOf(groupPrefs, row.id).hidden)
+      .filter((row) => matches(row, serverConsultationIds.has(row.id)));
+    const orders: UnifiedRow[] = (unifiedType === "ALL" || unifiedType === "ORDER" ? orderDirectory : [])
+      .filter((row) => !groupPreferenceOf(visibleGroupPrefs, row.id).hidden)
       .map((row): UnifiedRow => {
-        const preference = groupPreferenceOf(groupPrefs, row.id);
+        const preference = orderPreferenceOf(row.id, row.teamId);
         const state = stageLabelOf(row);
         // 没有消息的订单群用建群时间兜底，列表不留“—”这种无法排序的空时间。
         const sortAt = Date.parse(row.lastMessageAt ?? row.createdAt ?? "") || 0;
+        const previewText = typeof row.lastMessagePreview === "string" && row.lastMessagePreview.trim()
+          ? supportMessageSummary(row.lastMessagePreview).trim()
+          : "";
+        const preview = previewText && !isImSystemNoticeText(previewText) ? previewText : null;
         return {
           kind: "order" as const,
           id: row.id,
           title: row.displayNo,
           tag: "",
           tone: "neutral" as const,
-          snippet: typeof row.lastMessagePreview === "string" && row.lastMessagePreview.trim()
-            ? supportMessageSummary(row.lastMessagePreview).trim()
-            : row.lastMessageAt ? "有新消息" : "暂无消息",
+          snippet: preview ?? (row.lastMessageAt ? "有新消息" : "暂无消息"),
           state, stateTone: orderStageTone(row),
+          stageCardUnknown: (row.stageCards?.unknown ?? 0) > 0 || row.stageCards?.attention?.state === "UNKNOWN",
           // 到期只对正在租用/待结束的订单有意义；已完成的历史群不再占用列表宽度。
           meta: row.dueAt && (row.stage === "RENTING" || row.stage === "ENDING") ? `到期 ${formatMonthDay(row.dueAt)}` : undefined,
           unreadCount: Math.max(0, row.unreadCount ?? 0),
@@ -983,33 +1404,35 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
           muted: preference.muted,
         };
       })
-      .filter(matches);
+      .filter((row) => matches(row, serverOrderIds.has(row.id)));
     // 置顶优先，其余一律按最后一条消息倒序；咨询与订单群在同一条时间轴上。
     return [...consultations, ...orders].sort((a, b) =>
       Number(Boolean(b.pinned)) - Number(Boolean(a.pinned)) || b.sortAt - a.sortAt);
-  }, [displayQueue, groupPrefs, orderQueue, unifiedQuery, unifiedType]);
+  }, [cloudPinnedTeamIds, queueDirectory, visibleGroupPrefs, orderDirectory, searchOrders, searchQueueRows, unifiedQuery, unifiedType]);
   const applyGroupPreference = (orderId: string, patch: Partial<OrderGroupPreference>) => {
-    const next = withGroupPreference(groupPrefs, orderId, patch);
+    const next = withGroupPreference(visibleGroupPrefs, orderId, patch);
     setGroupPrefs(next);
+    setGroupPrefsScope(snapshot.adminUserId);
     storeOrderGroupPreferences(snapshot.adminUserId, next);
-    window.dispatchEvent(new CustomEvent(ORDER_GROUP_PREF_EVENT, { detail: { orderId, patch } }));
+    window.dispatchEvent(new CustomEvent(ORDER_GROUP_PREF_EVENT, { detail: { orderId, patch, adminUserId: snapshot.adminUserId } }));
   };
-  const unifiedTotal = displayQueue.length + orderQueue.filter((row) => !groupPreferenceOf(groupPrefs, row.id).hidden).length;
-  const hiddenOrderCount = orderQueue.filter((row) => groupPreferenceOf(groupPrefs, row.id).hidden).length;
+  const unifiedTotal = unifiedRows.length;
+  const hiddenOrderCount = visibleOrderQueue.filter((row) => groupPreferenceOf(visibleGroupPrefs, row.id).hidden).length;
   const restoreHiddenOrders = () => {
     const next: OrderGroupPreferenceMap = {};
-    for (const [orderId, preference] of Object.entries(groupPrefs)) next[orderId] = { ...preference, hidden: false };
+    for (const [orderId, preference] of Object.entries(visibleGroupPrefs)) next[orderId] = { ...preference, hidden: false };
     setGroupPrefs(next);
+    setGroupPrefsScope(snapshot.adminUserId);
     storeOrderGroupPreferences(snapshot.adminUserId, next);
-    for (const [orderId, preference] of Object.entries(groupPrefs)) {
-      if (preference.hidden) window.dispatchEvent(new CustomEvent(ORDER_GROUP_PREF_EVENT, { detail: { orderId, patch: { hidden: false } } }));
+    for (const [orderId, preference] of Object.entries(visibleGroupPrefs)) {
+      if (preference.hidden) window.dispatchEvent(new CustomEvent(ORDER_GROUP_PREF_EVENT, { detail: { orderId, patch: { hidden: false }, adminUserId: snapshot.adminUserId } }));
     }
   };
   const handleUnifiedOrderMenuAction = (action: MessageActionId) => {
     const menu = unifiedOrderMenu;
     setUnifiedOrderMenu(null);
     if (!menu) return;
-    if (action === "pin") { applyGroupPreference(menu.orderId, { pinned: !menu.preference.pinned }); return; }
+    if (action === "pin") { toggleOrderPin(menu.orderId, orderDirectory.find((row) => row.id === menu.orderId)?.teamId, !menu.preference.pinned); return; }
     if (action === "mute") { applyGroupPreference(menu.orderId, { muted: !menu.preference.muted }); return; }
     if (action === "hide") {
       applyGroupPreference(menu.orderId, { hidden: true });
@@ -1229,12 +1652,9 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
   // 非负责、非 ACTIVE、历史失败或会话不在前台都不发。失败静默，已读只能来自服务端。
   const selectedReadSignature = selected ? `${selectedMessages.length}:${selectedMessages.at(-1)?.id ?? ""}` : "";
   useEffect(() => {
-    if (!canRead || section !== "consultation" || !selected || !selectedMessages.length) return;
+    if (!canRead || !chatViewing || !selected || !selectedMessages.length) return;
     if (selected.state !== "ACTIVE" || selected.assignedAdmin?.id !== snapshot.adminUserId) return;
     if (historyState[selected.id] !== "ready") return;
-    // 窄屏三栏互斥：队列/详情在前台时，聊天并没有被看到。
-    if (typeof window !== "undefined" && typeof window.matchMedia === "function"
-      && window.matchMedia("(max-width: 760px)").matches && mobilePane !== "chat") return;
     const roundId = selected.roundId || selected.id;
     const signature = selectedReadSignature;
     if (!roundId || !signature) return;
@@ -1247,7 +1667,7 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
     }).catch(() => {
       if (readInFlightRef.current.get(roundId) === signature) readInFlightRef.current.delete(roundId);
     });
-  }, [canRead, section, mobilePane, snapshot.adminUserId, selected?.id, selected?.state, selected?.roundId, selected?.assignedAdmin?.id, historyState[selected?.id ?? ""], selectedReadSignature]);
+  }, [canRead, chatViewing, snapshot.adminUserId, selected?.id, selected?.state, selected?.roundId, selected?.assignedAdmin?.id, historyState[selected?.id ?? ""], selectedReadSignature]);
 
   const reloadHistory = async (consultationId: string) => {
     setHistoryRetryToken((token) => token + 1);
@@ -1280,6 +1700,7 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
   const claim = async (afterReception = false) => {
     if (!canManageSupport) { setNotice("当前会话由系统自动分配；需要人工接管请联系管理岗。"); return; }
     if (!selected || selected.state !== "WAITING" || !canOperateSupportType(selected.type, canAccept, canComplaint)) return;
+    if (operatorRef.current !== readClientKey || selectedIdRef.current !== selected.id) return;
     // Claim is only valid for an AVAILABLE + CONNECTED support presence. Do not
     // send the request while off duty and then surface an opaque 503.
     if (!afterReception && (presence.availability !== "AVAILABLE" || connection !== "CONNECTED")) {
@@ -1306,7 +1727,7 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
     } finally { endBusy(busyOwner); }
   };
   const startReceptionAndClaim = async () => {
-    const started = await applyPresence("AVAILABLE");
+    const started = await applyPresence("AVAILABLE", { takeover: true });
     if (!started) return;
     setReceptionOpen(false);
     if (connectionForPresence(connection) !== "CONNECTED") { setNotice("消息服务未连接，暂不能接入会话。"); return; }
@@ -1422,22 +1843,28 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
       if (current && isCurrentImRequest(requestKey, current)) setTransferError(friendlyError(cause));
     } finally { setTransferBusy(false); }
   };
-  const applyPresence = async (availability: Presence["availability"]): Promise<boolean> => {
+  const applyPresence = async (availability: Presence["availability"], options?: { takeover?: boolean }): Promise<boolean> => {
     if (!canPresence) return false;
     const busyOwner = beginBusy();
     setNotice(undefined);
     const generation = operatorGenerationRef.current;
     const operator = readClientKey;
-    try { await writePresence(availability, connectionForPresence(connection)); return availabilityRef.current === availability; }
+    try {
+      const value = await writePresence(availability, connectionForPresence(connection), options);
+      return canPresenceRef.current && generation === operatorGenerationRef.current && operatorRef.current === operator
+        && presenceWriteSucceeded(value, availability);
+    }
     catch (cause) { if (canPresenceRef.current && generation === operatorGenerationRef.current && operatorRef.current === operator) setNotice(friendlyError(cause)); return false; }
     finally { endBusy(busyOwner); }
   };
   const togglePresence = async () => {
     if (!canPresence) return;
-    const next = presence.availability === "AVAILABLE" ? "OFF_DUTY" : "AVAILABLE";
+    // Another window owns presence: an explicit "接管接待" is the only action here.
+    const takeover = presence.ownedByAnotherSession === true || presence.unbound === true || presence.availability !== "AVAILABLE";
+    const next = takeover ? "AVAILABLE" : "OFF_DUTY";
     // 暂停/下线前把未完成会话摆出来；用户可以继续暂停，也可以逐条去交接，不强制阻断。
     if (next === "OFF_DUTY" && myOpenConsultations.length) { setNotice(undefined); setOffDutyOpen(true); return; }
-    await applyPresence(next);
+    await applyPresence(next, takeover ? { takeover: true } : undefined);
   };
   const goTransferFromChecklist = (consultationId: string) => {
     setOffDutyOpen(false);
@@ -1870,9 +2297,8 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
   };
   const userHoverCard = selected ? <div className="im-wb-author-hover">
     <ConsultationUserCard consultationId={selected.id} rowUserId={selected.user?.id ?? ""} fallbackName={selected.user?.name || selected.user?.username || "平台用户"}
-      request={adminRequest} scope={profileScope} showSubject={selected.type !== "COMPLAINT"}
-      onOpenProfile={(id) => onOpenPath?.(`/users/${encodeURIComponent(id)}`, "用户资料")}
-          onOpenSubject={(target, label) => onOpenPath?.(target.kind === "ORDER" ? `/orders/${encodeURIComponent(target.id)}` : `/supply/accounts/${encodeURIComponent(target.id)}`, label)} />
+      request={adminRequest} scope={profileScope}
+      onOpenProfile={(id) => onOpenPath?.(`/users/${encodeURIComponent(id)}`, "用户资料")} />
   </div> : null;
   const jumpToMessage = (messageId: string) => {
     const target = selectedMessages.find((message) => message.id === messageId || message.source?.messageServerId === messageId || message.source?.messageClientId === messageId);
@@ -1885,7 +2311,13 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
     window.setTimeout(() => targetNode.classList.remove("message-quote-target"), 1600);
   };
   let timelineDay = "";
-  const timelineItems = selectedMessages.map((message, index) => {
+  // Bot 欢迎/阶段卡已经说明建群或成员变化时，不再重复技术通知；没有 Bot 覆盖时保留一条兜底。
+  const botAccountId = selected?.botAccountId ?? null;
+  const timelineMessages = collapseImSystemNotices(selectedMessages, {
+    hasBotMessage: Boolean(botAccountId && selectedMessages.some((message) => message.from !== "system" && !message.revoked && message.senderId === botAccountId)),
+    noticeOf: (message) => message.notice ?? null,
+  });
+  const timelineItems = timelineMessages.map((message, index) => {
     const nodes = [];
     const dayKey = dayKeyOf(message.createTime);
     if (dayKey && dayKey !== timelineDay) {
@@ -1896,16 +2328,16 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
       nodes.push(<MessageScrollerPrimitive.Item key={message.id} messageId={message.id} tabIndex={-1} onContextMenu={onMessageContextMenu} {...messageLongPress}><Marker className="im-wb-sys" variant="separator"><MarkerContent>{message.text}</MarkerContent></Marker></MessageScrollerPrimitive.Item>);
       return nodes;
     }
-    const previous = selectedMessages[index - 1];
-    const grouped = Boolean(previous && previous.from !== "system" && previous.senderId === message.senderId && (message.createTime ?? 0) - (previous.createTime ?? 0) < GROUP_WINDOW_MS);
+    const previous = timelineMessages[index - 1];
     const author = authorFor(message);
+    const grouped = Boolean(author.role !== "机器人" && previous && previous.from !== "system" && previous.senderId === message.senderId && (message.createTime ?? 0) - (previous.createTime ?? 0) < GROUP_WINDOW_MS);
     const imageUrl = message.image ? supportedImageUrl(message.image.url) : null;
     const imageThumbnailUrl = message.image ? supportedImageUrl(message.image.thumbnailUrl) : null;
     const mine = message.self === true;
     nodes.push(<MessageScrollerPrimitive.Item key={message.id} messageId={message.id} scrollAnchor={message.from === "customer"} tabIndex={-1} onContextMenu={onMessageContextMenu} {...messageLongPress}>
       <Message align={mine ? "end" : "start"} className="im-wb-msg" data-message-id={message.id} data-from={message.from} data-self={mine} data-grouped={grouped}>
         {author.role === "平台用户" && userHoverCard ? <EntityPreviewTrigger enableTouchButton={false} side="right" align="start" touchLabel={`预览用户 ${author.name}`} className="im-wb-author-preview"
-          trigger={<button type="button" className="im-wb-av-button" aria-label={`查看用户 ${author.name}`} title={`查看用户 ${author.name}`}><MessageAvatar className="im-wb-av" aria-hidden="true"><ProfileImage src={author.avatar} fallback={initialOf(author.name)} /></MessageAvatar></button>}
+          trigger={<button type="button" className="im-wb-av-button" aria-label={`查看用户 ${author.name}`}><MessageAvatar className="im-wb-av" aria-hidden="true"><ProfileImage src={author.avatar} fallback={initialOf(author.name)} /></MessageAvatar></button>}
           content={userHoverCard} /> : <MessageAvatar className="im-wb-av" aria-hidden="true">{author.role === "机器人" ? <img src="/art/zhouzhou/avatar.webp" alt="" /> : <ProfileImage src={author.avatar} fallback={initialOf(author.name)} />}</MessageAvatar>}
         <MessageContent className="im-wb-msg-body">
           {grouped ? null : <MessageHeader className="im-wb-msg-meta">{author.role === "平台用户" && userHoverCard
@@ -1961,11 +2393,11 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
           <span className="im-wb-chat-sub">{!selected ? "等待用户咨询" : roundHeadlineOf(selected)}</span>
         </div>
         <div className="im-wb-chat-actions">
-          {claimReady && canManageSupport ? <button type="button" className="im-wb-btn im-wb-btn-outline" data-action="claim-consultation" title="自动分配异常时由管理岗接管" onClick={() => void claim()} disabled={busy || connection !== "CONNECTED"}>接管会话</button> : null}
+          {claimReady && canManageSupport ? <ActionTooltip content="自动分配异常时由管理岗接管"><button type="button" className="im-wb-btn im-wb-btn-outline" data-action="claim-consultation" onClick={() => void claim()} disabled={busy || connection !== "CONNECTED"}>接管会话</button></ActionTooltip> : null}
           {claimReady && !canManageSupport ? <span className="im-wb-state">系统分配中…</span> : null}
-          {selected && isMine && selected.messageScopeState !== "FAILED" ? <button ref={closeTriggerRef} type="button" data-action="close-consultation" className="im-wb-btn im-wb-btn-outline" title={!serverCanSend && canOperateSelected ? "本轮尚未就绪，暂不可结束" : undefined} onClick={() => { if (!canOperateSelected || !serverCanSend || closeOutcomeUnknown[selected.id]) return; setCloseTarget(selected); setCloseOpen(true); }} disabled={busy || !canOperateSelected || !serverCanSend || Boolean(closeOutcomeUnknown[selected.id]) || Boolean(blockedConsultations[selected.id])}>{!canOperateSelected ? "无本类型接待权限" : closeOutcomeUnknown[selected.id] ? "结束结果未确认" : "结束本轮"}</button> : null}
+          {selected && isMine && selected.messageScopeState !== "FAILED" ? <ActionTooltip content={!serverCanSend && canOperateSelected ? "本轮尚未就绪，暂不可结束" : undefined}><button ref={closeTriggerRef} type="button" data-action="close-consultation" className="im-wb-btn im-wb-btn-outline" onClick={() => { if (!canOperateSelected || !serverCanSend || closeOutcomeUnknown[selected.id]) return; setCloseTarget(selected); setCloseOpen(true); }} disabled={busy || !canOperateSelected || !serverCanSend || Boolean(closeOutcomeUnknown[selected.id]) || Boolean(blockedConsultations[selected.id])}>{!canOperateSelected ? "无本类型接待权限" : closeOutcomeUnknown[selected.id] ? "结束结果未确认" : "结束本轮"}</button></ActionTooltip> : null}
           <button ref={transferTriggerRef} type="button" data-action="open-transfer" className="im-wb-btn im-wb-btn-outline" onClick={() => void openTransfer()} disabled={!canTransfer || !selected || selected.state !== "ACTIVE" || !isMine || selected.messageScopeState !== "READY" || busy}>{canTransfer ? "转交" : "无转交权限"}</button>
-          <button ref={detailsTriggerRef} type="button" className="im-wb-btn im-wb-btn-outline im-wb-btn-icon" aria-label={detailsOpen ? "收起会话详情" : "展开会话详情"} title={detailsOpen ? "收起会话详情" : "展开会话详情"} aria-expanded={detailsOpen} aria-controls="im-wb-details" data-action="toggle-details" onClick={() => { const narrow=typeof window!=="undefined"&&window.matchMedia("(max-width: 760px)").matches; if(narrow&&mobilePane!=="details"){openDetails();return;} if (detailsOpen) closeDetails(); else openDetails(); }}><MoreHorizontal size={15} /></button>
+          <ActionTooltip content={detailsOpen ? "收起会话详情" : "展开会话详情"}><button ref={detailsTriggerRef} type="button" className="im-wb-btn im-wb-btn-outline im-wb-btn-icon" aria-label={detailsOpen ? "收起会话详情" : "展开会话详情"} aria-expanded={detailsOpen} aria-controls="im-wb-details" data-action="toggle-details" onClick={() => { const narrow=typeof window!=="undefined"&&window.matchMedia("(max-width: 760px)").matches; if(narrow&&mobilePane!=="details"){openDetails();return;} if (detailsOpen) closeDetails(); else openDetails(); }}><MoreHorizontal size={15} /></button></ActionTooltip>
         </div>
       </header>
       {readOnlyReason ? <p className="im-wb-scope-note" data-tone="readonly" data-action="support-readonly" role="status"><ShieldCheck size={13} />{readOnlyReason}</p> : null}
@@ -1982,7 +2414,7 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
                   {timelineItems}
                 </> : <MessageScrollerPrimitive.Item messageId="empty">{emptyStreamState(selected ? historyState[selected.id] : undefined, Boolean(selected))}</MessageScrollerPrimitive.Item>}
               </MessageScrollerPrimitive.Content></MessageScrollerPrimitive.Viewport>
-              <MessageScrollerPrimitive.Button direction="end" className="im-wb-jump" render={<button type="button" aria-label="跳到最新消息" title="跳到最新消息" />}><ArrowDown size={13} aria-hidden="true" /></MessageScrollerPrimitive.Button>
+              <ActionTooltip content="跳到最新消息"><MessageScrollerPrimitive.Button direction="end" className="im-wb-jump" render={<button type="button" aria-label="跳到最新消息" />}><ArrowDown size={13} aria-hidden="true" /></MessageScrollerPrimitive.Button></ActionTooltip>
             </MessageScrollerPrimitive.Root>
           </MessageScrollerPrimitive.Provider>}
       </div>
@@ -1991,7 +2423,7 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
         <img src={selectedPending.previewUrl} alt={selectedPending.name} />
         <span>{selectedPending.name} · {formatBytes(selectedPending.size)} · {selectedPending.state === "SENDING" ? `上传中 ${selectedPending.progress}%` : selectedPending.state === "UNKNOWN" ? "结果未确认" : "发送失败"}</span>
         <button type="button" onClick={() => void retryPendingImage()} disabled={sending || imageInFlight || !canSend}>{selectedPending.messageClientId ? "原消息重试" : "重试"}</button>
-        <button type="button" onClick={removePending} disabled={sendBlocked || !canSend || selectedPending.state === "UNKNOWN"} title={selectedPending.state === "UNKNOWN" ? "结果未确认时不可移除原图片" : undefined}>移除</button>
+        <ActionTooltip content={selectedPending.state === "UNKNOWN" ? "结果未确认时不可移除原图片" : undefined}><span className="im-wb-tooltip-anchor"><button type="button" onClick={removePending} disabled={sendBlocked || !canSend || selectedPending.state === "UNKNOWN"}>移除</button></span></ActionTooltip>
       </div> : null}
       {selectedMedia ? <MediaDraftBar draft={selectedMedia} onRetry={() => void retryMediaDraft()} onRemove={removeSelectedMedia} disabled={busy || sending} /> : null}
       {selectedReply ? <MessageReplyQuote label={replySummaryOf(selectedReply)} onCancel={() => clearReplyFor(draftKey)} /> : null}
@@ -2014,7 +2446,10 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
           <InputGroupAddon align="block-end" className="im-wb-composer-tools">
             <TooltipProvider delay={200}>
               <Popover open={quickReplyOpen} onOpenChange={setQuickReplyOpen}>
-                <PopoverTrigger render={<button type="button" className="im-wb-tool" data-action="quick-replies" aria-label="常用语" title="常用语" disabled={!canEdit || sendBlocked} />}><MessageSquareText size={15} /></PopoverTrigger>
+                <Tooltip>
+                  <TooltipTrigger render={<PopoverTrigger render={<button type="button" className="im-wb-tool" data-action="quick-replies" aria-label="常用语" disabled={!canEdit || sendBlocked}><MessageSquareText size={15} /></button>} />} />
+                  <TooltipContent>常用语</TooltipContent>
+                </Tooltip>
                 <PopoverContent side="top" align="start" className="w-80 p-0">
                   {editingQuickReplies ? (
                     <div className="p-3 space-y-2 text-xs" data-panel="quick-replies-editor">
@@ -2149,7 +2584,10 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
                 </PopoverContent>
               </Popover>
               <Popover open={emojiOpen} onOpenChange={setEmojiOpen}>
-                <PopoverTrigger render={<button type="button" className="im-wb-tool" aria-label="表情" title="表情" disabled={!canEdit || sendBlocked} />}><Smile size={15} /></PopoverTrigger>
+                <Tooltip>
+                  <TooltipTrigger render={<PopoverTrigger render={<button type="button" className="im-wb-tool" aria-label="表情" disabled={!canEdit || sendBlocked}><Smile size={15} /></button>} />} />
+                  <TooltipContent>表情</TooltipContent>
+                </Tooltip>
                 <PopoverContent side="top" align="start" className="w-auto p-0"><div className="chat-emoji-grid">
                   {CHAT_EMOJIS.map((item) => <button key={item.emoji} type="button" className="chat-emoji-button" aria-label={item.label} onClick={() => insertEmoji(item.emoji)}>{item.emoji}</button>)}
                 </div></PopoverContent>
@@ -2185,10 +2623,10 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
             风险摘要开始。处理记录只陈列真实事件投影，不按当前状态推断历史；投诉的额外摘要
             只使用现有投影并逐项标注缺口。 */}
         <ConsultationUserCard key={selected.id} consultationId={selected.id} rowUserId={selected.user?.id ?? ""} fallbackName={selected.user?.name || selected.user?.username || "平台用户"}
-          request={adminRequest} scope={profileScope} showSubject
-          onOpenProfile={(id) => onOpenPath?.(`/users/${encodeURIComponent(id)}`, "用户资料")}
-          onOpenSubject={(target, label) => onOpenPath?.(target.kind === "ORDER" ? `/orders/${encodeURIComponent(target.id)}` : `/supply/accounts/${encodeURIComponent(target.id)}`, label)} />
+          request={adminRequest} scope={profileScope}
+          onOpenProfile={(id) => onOpenPath?.(`/users/${encodeURIComponent(id)}`, "用户资料")} />
         <ConsultationEventsCard key={`${selected.id}:events`} consultationId={selected.id} request={adminRequest} />
+        <ConsultationRoundsTimeline key={`${selected.id}:rounds`} consultationId={selected.id} currentRoundId={selected.id} request={adminRequest} />
 
         {blockedConsultations[selected.id] ? <section className="im-wb-sec"><span>授权状态</span><small>发送权限已失效</small>
           <button type="button" className="im-wb-btn" data-action="refresh-consultation-access" onClick={() => void refreshConsultationAccess()} disabled={busy || !selected.conversationId}>重新确认当前授权</button></section> : null}
@@ -2204,10 +2642,15 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
       persistQuery({section:"consultation",consultation:threadId});
     }).catch(cause=>{if(aftersaleScopeRef.current===expected)setNotice(friendlyError(cause));});
   };
+  // Availability is the server's reception intent; the label must still show a broken
+  // message channel instead of claiming "可接待". Ending presence stays available so
+  // the operator can clear a stale AVAILABLE row even while the IM channel reconnects.
+  const runtime = presenceRuntimeState(presence.availability, connection, busy, presence.ownedByAnotherSession === true, presence.unbound === true);
+
   return <div className="im-wb-root" data-unified="true">
     <AftersaleInbox key={aftersaleScope} open={aftersaleOpen&&canRead} onOpenChange={setAftersaleOpen} scope={aftersaleScope} adminId={snapshot.adminUserId} canHandle={canRead&&canAccept} canTakeover={Boolean(snapshot.security.isBoss||snapshot.permissions.includes("im.support.audit.takeover"))} onContact={contactedAftersale} onDirtyChange={setAftersaleDirty}/>
     <nav className="im-wb-bar" aria-label="沟通类型">
-      <div className="im-wb-bar-title"><strong>客服工作台</strong><span>咨询与订单群按最近消息排序</span></div>
+      <div className="im-wb-bar-title"><strong>客服工作台</strong></div>
       <button type="button" className="im-wb-btn im-wb-btn-outline" disabled={!canRead} onClick={()=>setAftersaleOpen(true)}>售后记录</button>
       <div className="im-wb-seg" role="group">
         <button type="button" aria-pressed={section === "consultation"} onClick={() => { setSection("consultation"); persistQuery({ section: "consultation" }); }}>咨询与投诉<b>{displayQueue.length}</b></button>
@@ -2215,20 +2658,21 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
       </div>
       <span className="im-wb-spacer" />
       <div className="im-wb-runtime">
-        <button type="button" className="im-wb-btn im-wb-btn-icon im-wb-notify" data-action="toggle-notifications"
-          data-state={notifyPermission === "denied" ? "denied" : notifyEnabled && notifyPermission === "granted" ? "on" : "prompt"}
-          aria-label={notifyEnabled && notifyPermission === "granted" ? "关闭消息提醒" : "开启消息提醒"}
-          title={notifyPermission === "denied" ? "浏览器已屏蔽通知，请在站点设置中允许" : notifyEnabled && notifyPermission === "granted" ? "消息提醒已开启（需保持标签页打开）" : "开启浏览器通知与提示音"}
-          onClick={() => void toggleNotifications()}>
-          {notifyPermission === "denied" || notifyPermission === "unsupported" ? <BellOff size={15} /> : <Bell size={15} />}
-          {notifyUnreadCount > 0 ? <b className="im-wb-notify-count" aria-label={`${notifyUnreadCount} 条未读`}>{notifyUnreadCount > 99 ? "99+" : notifyUnreadCount}</b> : null}
-        </button>
+        <ActionTooltip content={notifyPermission === "denied" ? "浏览器已屏蔽通知，请在站点设置中允许" : notifyEnabled && notifyPermission === "granted" ? "消息提醒已开启（需保持标签页打开）" : "开启浏览器通知与提示音"}>
+          <button type="button" className="im-wb-btn im-wb-btn-icon im-wb-notify" data-action="toggle-notifications"
+            data-state={notifyPermission === "denied" ? "denied" : notifyEnabled && notifyPermission === "granted" ? "on" : "prompt"}
+            aria-label={notifyEnabled && notifyPermission === "granted" ? "关闭消息提醒" : "开启消息提醒"}
+            onClick={() => void toggleNotifications()}>
+            {notifyPermission === "denied" || notifyPermission === "unsupported" ? <BellOff size={15} /> : <Bell size={15} />}
+            {notifyUnreadCount > 0 ? <b className="im-wb-notify-count" aria-label={`${notifyUnreadCount} 条未读`}>{notifyUnreadCount > 99 ? "99+" : notifyUnreadCount}</b> : null}
+          </button>
+        </ActionTooltip>
         <span className="im-wb-runtime-divider" aria-hidden="true" />
         {canPresence ? <>
-          <span className="im-wb-state im-wb-runtime-state" data-tone={presence.availability === "AVAILABLE" ? "good" : "neutral"}><i className={presence.availability === "AVAILABLE" ? "on" : ""} />{connection === "idle" || connection === "CONNECTING" ? "连接中" : presence.availability === "AVAILABLE" ? "可接待" : presence.availability === "PAUSED" ? "已暂停" : "未上线"}</span>
+          <span className="im-wb-state im-wb-runtime-state" data-tone={runtime.tone}><i className={presence.availability === "AVAILABLE" && runtime.connected ? "on" : ""} />{runtime.label}</span>
           <span className="im-wb-runtime-divider" aria-hidden="true" />
-          <span className="im-wb-state im-wb-today" data-action="today-duty" title="今日接待时长（仅统计可接待且可收发消息的时间）">今日接待 <b>{formatDuration(presence.today?.seconds)}</b></span>
-          <button type="button" className="im-wb-btn im-wb-btn-outline im-wb-presence-toggle im-wb-runtime-action" data-action="toggle-presence" onClick={() => void togglePresence()} disabled={busy || connection !== "CONNECTED"} title={connection === "idle" || connection === "CONNECTING" ? "消息通道连接中，请稍候" : connection !== "CONNECTED" ? "消息服务异常，暂不可接待" : undefined}>{presence.availability === "AVAILABLE" ? "暂停接待" : "开始接待"}</button>
+          <ActionTooltip content="今日接待时长（仅统计可接待且可收发消息的时间）"><span className="im-wb-state im-wb-today" data-action="today-duty">今日接待 <b>{formatDuration(presence.today?.seconds)}</b></span></ActionTooltip>
+          <ActionTooltip content={runtime.toggleTitle}><span className="im-wb-tooltip-anchor"><button type="button" className="im-wb-btn im-wb-btn-outline im-wb-presence-toggle im-wb-runtime-action" data-action="toggle-presence" onClick={() => void togglePresence()} disabled={runtime.toggleDisabled}>{runtime.toggleLabel}</button></span></ActionTooltip>
         </> : <span className="im-wb-state">无在线状态权限</span>}
         {connection !== "CONNECTED" ? <>
           <span className="im-wb-runtime-divider" aria-hidden="true" />
@@ -2238,24 +2682,29 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
       {clientRef.current?.transport === "local-fake" ? <span className="im-wb-state im-wb-local">本地测试</span> : null}
     </nav>
     <div className="im-wb-unified">
-      <aside className="im-wb-unified-queue" aria-label="全部会话" onContextMenu={(event) => { const rowEl = (event.target as Element).closest(".im-wb-row") as HTMLElement | null; event.preventDefault(); if (!rowEl || rowEl.dataset.unifiedKind !== "order") { setUnifiedOrderMenu(null); return; } event.stopPropagation(); const orderId = rowEl.dataset.orderId; if (!orderId) return; setUnifiedOrderMenu({ x: event.clientX, y: event.clientY, orderId, preference: groupPreferenceOf(groupPrefs, orderId), row: rowEl }); }}>
-        <div className="im-wb-unified-head"><strong>全部会话</strong><span>{unifiedRows.length < unifiedTotal ? `${unifiedRows.length} / ${unifiedTotal}` : unifiedTotal}</span></div>
-        <label className="im-wb-search"><Search size={13} /><input value={unifiedQuery} onChange={(event) => setUnifiedQuery(event.target.value)} placeholder="搜索用户、订单号或内容" aria-label="搜索全部会话" /></label>
+      <aside className="im-wb-unified-queue" aria-label="全部会话" onContextMenu={(event) => { const rowEl = (event.target as Element).closest(".im-wb-row") as HTMLElement | null; event.preventDefault(); if (!rowEl || rowEl.dataset.unifiedKind !== "order") { setUnifiedOrderMenu(null); return; } event.stopPropagation(); const orderId = rowEl.dataset.orderId; if (!orderId) return; setUnifiedOrderMenu({ x: event.clientX, y: event.clientY, orderId, preference: orderPreferenceOf(orderId, orderDirectory.find((row) => row.id === orderId)?.teamId), row: rowEl }); }}>
+        <div className="im-wb-unified-head"><strong>全部会话</strong><span>{searchState.loading && searchState.q === unifiedQuery.trim() ? "搜索中…" : unifiedTotal}</span></div>
+        <label className="im-wb-search"><Search size={13} /><input value={unifiedQuery} maxLength={64} onChange={(event) => setUnifiedQuery(event.target.value)} onKeyDown={(event) => { if (event.key === "Escape" && unifiedQuery) { event.preventDefault(); setUnifiedQuery(""); } }} placeholder="搜索用户、订单号、账号或游戏" aria-label="搜索全部会话" />{unifiedQuery ? <button type="button" className="im-wb-search-clear" aria-label="清空搜索" onClick={() => setUnifiedQuery("")}><X size={12} /></button> : null}</label>
+        {searchState.error ? <p className="im-wb-order-notice" data-tone="warn" role="status">{searchState.error}</p> : null}
+        {searchLimitReached ? <p className="im-wb-order-notice" role="status">匹配结果较多，当前每类最多显示 50 条；请补充关键词继续缩小范围。</p> : null}
         <div className="im-wb-unified-types" role="group" aria-label="会话类型">
           {([["ALL", "全部"], ["SERVICE", "咨询"], ["COMPLAINT", "投诉"], ["ORDER", "订单群"]] as const).map(([value, label]) =>
             <button key={value} type="button" aria-pressed={unifiedType === value} onClick={() => { setUnifiedType(value); persistQuery({ type: value === "ALL" ? null : value }); }}>{label}</button>)}
         </div>
+        {orderQueueNotice && (unifiedType === "ALL" || unifiedType === "ORDER")
+          ? <p className="im-wb-order-notice" data-tone="warn" role="status" data-action="order-queue-notice">{orderQueueNotice}</p>
+          : null}
         <div className="im-wb-rows">
           {unifiedRows.length ? unifiedRows.map((row) => {
             const active = row.kind === "consultation" ? section === "consultation" && selectedId === row.id : section === "orders" && orderSelection === row.id;
             return <button type="button" key={`${row.kind}:${row.id}`} className="im-wb-row" data-unified-kind={row.kind} data-order-id={row.kind === "order" ? row.id : undefined} data-active={active} aria-current={active ? "page" : undefined}
-              onContextMenu={row.kind === "order" ? (event) => { event.preventDefault(); event.stopPropagation(); setUnifiedOrderMenu({ x: event.clientX, y: event.clientY, orderId: row.id, preference: groupPreferenceOf(groupPrefs, row.id), row: event.currentTarget }); } : undefined}
+              onContextMenu={row.kind === "order" ? (event) => { event.preventDefault(); event.stopPropagation(); setUnifiedOrderMenu({ x: event.clientX, y: event.clientY, orderId: row.id, preference: orderPreferenceOf(row.id, orderDirectory.find((item) => item.id === row.id)?.teamId), row: event.currentTarget }); } : undefined}
               onClick={() => {
                 restoredSelectionRef.current = true;
                 if (row.kind === "consultation") {
                   setSection("consultation");
                   setSelectedId(row.id);
-                  const target = queue.find((item) => item.id === row.id);
+                  const target = consultationDirectory.find((item) => item.id === row.id);
                   persistQuery({ section: "consultation", consultation: target?.threadId ?? row.id });
                 } else {
                   setSection("orders");
@@ -2264,11 +2713,14 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
                 }
                 setMobilePane("chat");
               }}>
-              <span className="im-wb-row-av" data-kind={row.kind} aria-hidden="true">{row.kind === "order" ? <ReceiptText size={17} /> : <ProfileImage src={row.avatar} fallback={initialOf(row.title)} />}</span>
+              {row.kind === "order"
+                ? <OrderGroupAvatar displayNo={row.title} className="im-wb-row-av" />
+                : <span className="im-wb-row-av" data-kind={row.kind} aria-hidden="true"><ProfileImage src={row.avatar} fallback={initialOf(row.title)} /></span>}
               <span className="im-wb-row-copy">
                 <span className="im-wb-row-top">
                   <b>{row.title}</b>
                   {row.tag ? <i className="im-wb-tag" data-tone={row.tone}>{row.tag}</i> : null}
+                  {row.stageCardUnknown ? <i className="im-wb-tag" data-tone="warn">自动卡待核对</i> : null}
                   {row.pinned ? <Pin size={11} className="im-wb-row-flag" aria-label="已置顶" /> : null}
                 </span>
                 <span className="im-wb-row-snip">
@@ -2286,7 +2738,11 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
                     : null}
               </span>
             </button>;
-          }) : <div className="im-wb-list-empty"><strong>暂无会话</strong><span>新的咨询、投诉和订单群会出现在这里。</span></div>}
+          }) : <div className="im-wb-list-empty"><strong>{searchState.loading ? "正在搜索…" : serverSearchActive ? "没有匹配的会话" : "暂无会话"}</strong><span>{serverSearchActive ? "换一个关键词，或清空搜索查看全部已加载会话。" : "新的咨询、投诉和订单群会出现在这里。"}</span></div>}
+          {orderNextCursor && !serverSearchActive && (unifiedType === "ALL" || unifiedType === "ORDER")
+            ? <button type="button" className="im-wb-more" data-action="load-more-orders" disabled={orderLoadingMore || orderRefreshing}
+                onClick={() => void loadMoreOrders()}>{orderRefreshing ? "刷新中…" : orderLoadingMore ? "正在读取…" : "加载更多订单群"}</button>
+            : null}
           {hiddenOrderCount ? <button type="button" className="im-wb-more im-og-restore" onClick={restoreHiddenOrders}>已隐藏 {hiddenOrderCount} 个订单群 · 恢复显示</button> : null}
         </div>
       </aside>
@@ -2301,14 +2757,15 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
       <div className="im-wb-unified-detail">
         <div className="im-wb-pane" hidden={section !== "consultation"}>{consultationPane}</div>
         {canRead ? <div className="im-wb-pane im-wb-pane--orders" hidden={section !== "orders"}><OrderWorkbenchPane identity={readClientKey} adminUserId={snapshot.adminUserId} operatorName={operatorName}
-          client={clientRef.current} connection={connection} active={section === "orders"} sendAllowed={canAccept} selectedOrderId={orderSelection}
+          client={clientRef.current} connection={connection} active={section === "orders"} sendAllowed={canAccept} selectedOrderId={orderSelection} onSelectedOrderChange={setOrderSelection}
+          cloudPinnedTeamIds={cloudPinnedTeamIds} onToggleCloudPin={(orderId, teamId, pinned) => toggleOrderPin(orderId, teamId, pinned)}
           canManualClose={snapshot.security.isBoss || snapshot.permissions.includes("order.settlement.write")} request={adminRequest} onAuthError={() => { void onRefresh(); }}
           onOpenProfile={profileScope.profile ? (id) => onOpenPath?.(`/users/${encodeURIComponent(id)}`, "用户资料") : undefined} onOpenPath={onOpenPath} /></div> : null}
       </div>
     </div>
     <Dialog open={transferOpen} onOpenChange={setTransferOpen}>
       <DialogContent className="im-wb-dialog" aria-label="转交会话" showCloseButton={false} finalFocus={transferTriggerRef}>
-        <div className="im-wb-dialog-head"><div><strong>转交会话</strong><span>{selected?.user?.name || "当前咨询"}</span></div><button type="button" className="im-wb-btn im-wb-btn-icon" onClick={() => setTransferOpen(false)} aria-label="关闭转交" title="关闭转交"><X size={14} /></button></div>
+        <div className="im-wb-dialog-head"><div><strong>转交会话</strong><span>{selected?.user?.name || "当前咨询"}</span></div><ActionTooltip content="关闭转交"><button type="button" className="im-wb-btn im-wb-btn-icon" onClick={() => setTransferOpen(false)} aria-label="关闭转交"><X size={14} /></button></ActionTooltip></div>
         <label className="im-wb-dialog-note"><span>交接备注（可选，≤200 字）<em>{transferNote.length}/200</em></span>
           <Textarea value={transferNote} maxLength={200} rows={2} aria-label="交接备注（可选）" placeholder="说明交接原因或注意事项" disabled={transferBusy} onChange={(event) => setTransferNote(event.target.value)} /></label>
         {transferError ? <p className="im-wb-dialog-error" role="alert"><CircleAlert size={14} />{transferError}</p>
@@ -2323,14 +2780,13 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
     <Dialog open={offDutyOpen} onOpenChange={setOffDutyOpen}>
       <DialogContent className="im-wb-dialog" aria-label="暂停接待确认" showCloseButton={false}>
         <div className="im-wb-dialog-head"><div><strong>暂停接待</strong><span>还有 {myOpenConsultations.length} 条未完成咨询</span></div>
-          <button type="button" className="im-wb-btn im-wb-btn-icon" onClick={() => setOffDutyOpen(false)} aria-label="关闭暂停确认" title="关闭暂停确认"><X size={14} /></button></div>
+          <ActionTooltip content="关闭暂停确认"><button type="button" className="im-wb-btn im-wb-btn-icon" onClick={() => setOffDutyOpen(false)} aria-label="关闭暂停确认"><X size={14} /></button></ActionTooltip></div>
         <p className="im-wb-dialog-hint">暂停后不再接新会话，已有会话不会自动结束；你可以先逐条交接，也可以直接暂停。</p>
         <ul className="im-wb-offduty-list" aria-label="未完成咨询">
           {myOpenConsultations.map((item) => <li key={item.id} data-consultation-id={item.id}>
             <div><strong>{item.user?.name || item.user?.username || "平台用户"}</strong><span>{typeLabel(item.type)} · {scopeStateLabel(item)}</span></div>
-            <button type="button" className="im-wb-btn" data-action="offduty-transfer" disabled={!canTransfer || item.messageScopeState !== "READY" || busy}
-              title={!canTransfer ? "无转交权限" : item.messageScopeState !== "READY" ? "会话尚未就绪，暂不可转交" : undefined}
-              onClick={() => goTransferFromChecklist(item.id)}>去交接</button>
+            <ActionTooltip content={!canTransfer ? "无转交权限" : item.messageScopeState !== "READY" ? "会话尚未就绪，暂不可转交" : undefined}><span className="im-wb-tooltip-anchor"><button type="button" className="im-wb-btn" data-action="offduty-transfer" disabled={!canTransfer || item.messageScopeState !== "READY" || busy}
+              onClick={() => goTransferFromChecklist(item.id)}>去交接</button></span></ActionTooltip>
           </li>)}
         </ul>
         <div className="im-wb-dialog-actions">
@@ -2343,7 +2799,7 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
     <Dialog open={receptionOpen} onOpenChange={setReceptionOpen}>
       <DialogContent className="im-wb-dialog" aria-label="需要先开始接待" showCloseButton={false}>
         <div className="im-wb-dialog-head"><div><strong>还不能接入会话</strong><span>当前未开始接待</span></div>
-          <button type="button" className="im-wb-btn im-wb-btn-icon" onClick={() => setReceptionOpen(false)} aria-label="关闭接待提醒" title="关闭接待提醒"><X size={14} /></button></div>
+          <ActionTooltip content="关闭接待提醒"><button type="button" className="im-wb-btn im-wb-btn-icon" onClick={() => setReceptionOpen(false)} aria-label="关闭接待提醒"><X size={14} /></button></ActionTooltip></div>
         <p className="im-wb-dialog-hint">你当前还没有开始接待，直接接入会被服务端拒绝。先开始接待，平台会把你的状态更新为“可接待”，然后自动接入当前会话。</p>
         {connection !== "CONNECTED" ? <p className="im-wb-dialog-error" role="alert"><CircleAlert size={14} />消息服务未连接，暂不能开始接待。</p> : null}
         <div className="im-wb-dialog-actions">
@@ -2356,10 +2812,9 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
         所以这里不给「撤销」，也不把结束本轮包装成可逆操作。 */}
     <Dialog open={closeOpen} onOpenChange={setCloseOpen}>
       <DialogContent className="im-wb-dialog" aria-label="结束本轮" showCloseButton={false} finalFocus={closeTriggerRef}>
-        <div className="im-wb-dialog-head"><div><strong>结束本轮</strong><span>{closeTarget ? `${typeLabel(closeTarget.type)} · ${roundTagOf(closeTarget)}${roundTagOf(closeTarget) ? " · " : ""}${closeTarget.user?.name || closeTarget.user?.username || "平台用户"}` : "当前轮次"}</span></div><button type="button" className="im-wb-btn im-wb-btn-icon" onClick={() => setCloseOpen(false)} aria-label="关闭结束本轮确认" title="关闭结束本轮确认"><X size={14} /></button></div>
+        <div className="im-wb-dialog-head"><div><strong>结束本轮</strong><span>{closeTarget ? `${typeLabel(closeTarget.type)} · ${roundTagOf(closeTarget)}${roundTagOf(closeTarget) ? " · " : ""}${closeTarget.user?.name || closeTarget.user?.username || "平台用户"}` : "当前轮次"}</span></div><ActionTooltip content="关闭结束本轮确认"><button type="button" className="im-wb-btn im-wb-btn-icon" onClick={() => setCloseOpen(false)} aria-label="关闭结束本轮确认"><X size={14} /></button></ActionTooltip></div>
         {closeTarget ? <dl className="im-wb-confirm">
           <div><dt>{closeTarget.type === "COMPLAINT" ? "本轮处理" : "本轮接待"}</dt><dd>{closeTarget.assignedAdmin?.name || "尚未分配"}</dd></div>
-          <div><dt>关联对象</dt><dd>{formatSubjectRef(closeTarget.subjectRef)}</dd></div>
         </dl> : null}
         <p className="im-wb-dialog-hint">结束后只结束当前这一轮接待：客服状态恢复为空闲，聊天记录保留在同一会话，用户再次咨询会开启新一轮并重新匹配客服。本轮结束不可撤销，平台当前没有恢复本轮接待的入口。</p>
         <div className="im-wb-dialog-actions">

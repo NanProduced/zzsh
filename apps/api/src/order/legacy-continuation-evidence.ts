@@ -68,7 +68,7 @@ export async function readLegacyContinuationUserIds(client:PoolClient,binding:Le
 export async function readLegacyContinuationHead(client: PoolClient, orderId: string, lock = false): Promise<LegacyHeadRow | null> {
   return (await client.query<LegacyHeadRow>(`SELECT id,order_id AS "orderId",revision::text,input_evidence_id AS "inputEvidenceId",result_evidence_id AS "resultEvidenceId",stage,is_settle AS "isSettle",command,amounts,
     (SELECT to_char((to_jsonb(confirmed)->>'refund_due_at')::timestamptz AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') FROM zzsh_order.legacy_continuation_version confirmed
-      WHERE confirmed.order_id=zzsh_order.legacy_continuation_version.order_id AND confirmed.command='CONFIRM' ORDER BY confirmed.revision DESC LIMIT 1) AS "refundDueAt"
+      WHERE confirmed.order_id=zzsh_order.legacy_continuation_version.order_id AND confirmed.command IN('CONFIRM','SUPPORT_CANCEL') ORDER BY confirmed.revision DESC LIMIT 1) AS "refundDueAt"
     FROM zzsh_order.legacy_continuation_version WHERE order_id=$1 AND superseded_at IS NULL${lock ? " FOR UPDATE" : ""}`, [orderId])).rows[0] ?? null;
 }
 export async function readLegacyContinuationDuties(client: PoolClient, orderId: string, lock = false): Promise<LegacyDutyRow[]> {
@@ -91,6 +91,22 @@ export async function readLegacyContinuationEvidence(client: PoolClient, orderId
   }
   return row;
 }
+/** Do not offer a write action before the matching database guards are installed. */
+export async function legacySupportCancellationReady(client: Pick<PoolClient,"query">): Promise<boolean> {
+  const result = await client.query<{ready:boolean}>(`SELECT COALESCE(
+    EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid=to_regclass('zzsh_order.legacy_continuation_version')
+      AND conname='legacy_continuation_version_command_check' AND pg_get_constraintdef(oid) LIKE '%SUPPORT_CANCEL%')
+    AND EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid=to_regclass('zzsh_order.legacy_continuation_version')
+      AND conname='legacy_continuation_version_stage_check' AND pg_get_constraintdef(oid) LIKE '%5%')
+    AND position('SUPPORT_CANCEL' IN pg_get_functiondef(to_regprocedure('zzsh_order.check_legacy_continuation_result()')))>0
+    AND position('SUPPORT_CANCEL' IN pg_get_functiondef(to_regprocedure('zzsh_order.guard_legacy_duty()')))>0
+    AND NOT EXISTS(SELECT 1 FROM unnest(ARRAY['id','order_id','revision','command','actor','input_evidence_id','result_evidence_id','stage','is_settle','is_advance_set','amounts','commission_revisions','assignments','plan_fingerprint','created_at']) col
+      WHERE NOT has_column_privilege(current_user,to_regclass('zzsh_order.legacy_continuation_version'),col,'INSERT'))
+    AND has_column_privilege(current_user,to_regclass('zzsh_order.legacy_continuation_version'),'superseded_at','UPDATE')
+    AND NOT EXISTS(SELECT 1 FROM unnest(ARRAY['status','revision','decided_at','decided_by','decision_reason','decision_evidence_ref']) col
+      WHERE NOT has_column_privilege(current_user,to_regclass('zzsh_order.legacy_order_duty'),col,'UPDATE')),false) AS ready`);
+  return result.rows[0]?.ready === true;
+}
 export async function readLegacyContinuation(client: PoolClient, actor: LegacyContinuationActor, orderId: string, finance?: LegacyDutyFinalizationReader) {
   const binding = await readLegacyContinuationBinding(client, orderId);
   const access = await authorizeLegacyContinuation(client, actor, binding);
@@ -101,6 +117,8 @@ export async function readLegacyContinuation(client: PoolClient, actor: LegacyCo
   const evidence = await readLegacyContinuationEvidence(client, orderId, head);
   const disposition = finance ? await finance(client, orderId, duties) : "UNKNOWN";
   const continuation=projectLegacyContinuation(binding, actor, evidence, head, duties, access.canOperate, disposition, access.canReadCommission,access.canSettle===true);
+  if (continuation.capabilities.includes("support_cancel") && !(await legacySupportCancellationReady(client)))
+    continuation.capabilities=continuation.capabilities.filter(kind=>kind!=="support_cancel");
   if(actor.realm!=="admin" || !access.canReadCommission)return {continuation};
   const commissionUsers=[...new Set(duties.filter(d=>d.kind==="COMMISSION"&&d.counterpartyUserId).map(d=>d.counterpartyUserId!))];
   if(!commissionUsers.length)return {continuation};

@@ -22,9 +22,9 @@ export function OrderFulfillmentTimeline({order,settlement,legacy,paymentTitle,p
    const acknowledgements=(opening.acks??[]).filter(a=>a.party==='RENTER'||a.party==='OWNER');
    const lines=acknowledgements.map(a=>`${party(a.party)}：${source(a.source)}${a.createdAt?` · ${formatTime(a.createdAt)}`:''}`);
    if(opening.status==='DRAFT')for(const p of ['RENTER','OWNER'])if(!acknowledgements.some(a=>a.party===p))lines.push(`${party(p)}：待确认`);
-   events.push({id:'opening',title:opening.status==='CONFIRMED'?'开租已确认':opening.status==='DRAFT'?'等待双方确认开租':'开租状态未记录',time:opening.status==='CONFIRMED'?opening.confirmedAt:opening.createdAt,timeLabel:opening.status==='CONFIRMED'?'开租时间':'发起时间',detail:opening.versionNo?`开租清单第 ${opening.versionNo} 版`:undefined,lines,state:opening.status==='CONFIRMED'?'done':opening.status==='DRAFT'?'current':'unknown',icon:KeyRound});
+   events.push({id:'opening',title:opening.status==='CONFIRMED'?'开租已确认':opening.status==='DRAFT'?'等待双方确认开租':'开租状态未记录',time:opening.status==='CONFIRMED'?opening.confirmedAt:opening.createdAt,timeLabel:opening.status==='CONFIRMED'?'开租时间':opening.createdBySource==='SYSTEM'?'生成时间':'发起时间',detail:opening.versionNo?`开租清单第 ${opening.versionNo} 版${opening.createdBySource==='SYSTEM'?' · 付款接纳后自动生成':''}`:undefined,lines,state:opening.status==='CONFIRMED'?'done':opening.status==='DRAFT'?'current':'unknown',icon:KeyRound});
   }else if(progress?.state==='CONFIRMED')events.push({id:'opening',title:'开租已确认',time:progress.confirmedAtUtc,timeLabel:'开租时间',state:'done',icon:KeyRound});
-  else if(order.status==='PAID'&&progress?.state==='NOT_STARTED')events.push({id:'opening',title:'待发起开租确认',detail:'客服核对本单资源后发起，租客与号主再确认。',state:'current',icon:KeyRound});
+  else if(order.status==='PAID'&&progress?.state==='NOT_STARTED')events.push({id:'opening',title:'待生成开租清单',detail:'付款接纳后系统按本单冻结报价生成；资料不足时显示待客服核对。',state:'current',icon:KeyRound});
   else if(order.status==='PAID'&&progress?.state==='AWAITING_CONFIRMATION')events.push({id:'opening',title:'等待双方确认开租',detail:'确认明细暂未读取。',state:'current',icon:KeyRound});
   else if(order.status==='PAID'&&progress?.state==='UNKNOWN')events.push({id:'opening',title:'开租进度未读取',state:'unknown',icon:KeyRound});
   const intake=settlement?.intakes?.at(-1),version=settlement?.settlement,posting=settlement?.posting;

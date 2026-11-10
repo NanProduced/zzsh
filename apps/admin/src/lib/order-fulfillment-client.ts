@@ -43,7 +43,9 @@ export type SettlementReadView = {
   reasons?: string[];
   currentRequest?: { kind?: string; id?: string; versionNo?: number; status?: string } | null;
   settlement?: SettlementVersionView | null;
-  openings?: Array<{ id?: string; versionNo?: number; status?: string; confirmedAt?: string | null; confirmSource?:string|null; createdAt?: string; lines?: Array<{ itemId?: string; quantity?: string; unit?: string; pricingKind?: string }>; acks?: Array<{ party?: string; source?: string; createdAt?: string }> }>;
+  openings?: Array<{ id?: string; versionNo?: number; status?: string; confirmedAt?: string | null; confirmSource?:string|null; createdBySource?:string|null; autoConfirmDueAt?:string|null; autoConfirmWaitMinutes?:number|null; createdAt?: string; lines?: Array<{ itemId?: string; quantity?: string; unit?: string; pricingKind?: string }>; acks?: Array<{ party?: string; source?: string; createdAt?: string }> }>;
+  openingGeneration?: { state?: "CREATED" | "REVIEW_REQUIRED"; reason?: string | null; paymentConfirmationId?: string; createdAt?: string; updatedAt?: string } | null;
+  openingGenerationRecoveryRequired?: boolean;
   posting?: { id?: string; settlementVersionId?: string; versionHash?: string; early?: boolean; postedAt?: string; refundDueAt?: string | null; amounts?: Record<string, SettlementAmount> } | null;
   versions?: SettlementVersionView[];
   amounts?: Record<string, SettlementAmount>;
@@ -111,6 +113,9 @@ export type SupportCancelView = {
   eligibility: { allowed: boolean; reason: SupportCancelReason | null; refundCents: string | null; openingConfirmed?: boolean };
   openingConfirmed: boolean;
   supportCancellation: SupportCancelRow | null;
+  poststartEligibility?: { allowed: boolean; reason: SupportCancelReason | null; refundCents: string | null; openingConfirmed: boolean };
+  poststartCancellation?: { caseId: string; refundCents: string; ownerCents: string; platformContributionCents: string;
+    commissionCents: string; reason: string; refundState?: string };
   refund: SupportCancelRefund | null;
   existing: boolean;
   channel: { result: string; bankArrival: "UNKNOWN" } | null;
@@ -132,13 +137,19 @@ export async function readSupportCancel(orderId: string): Promise<SupportCancelV
 }
 
 /** Send or replay one frozen support cancellation. The caller must reuse `key` after an unknown result. */
-export async function sendSupportCancel(orderId: string, expectedOrderRevision: string, reason: string, key: string): Promise<SupportCancelOutcome> {
+export async function sendSupportCancel(orderId: string, expectedOrderRevision: string, reason: string, key: string,
+  allocation?: { refundCents: string; ownerCents: string; expectedAdminId: string }): Promise<SupportCancelOutcome> {
   try {
     const raw = await adminRequest<Record<string, unknown>>(`${orderBase(orderId)}/support-cancel`,
-      { expectedOrderRevision, reason }, "POST", { "idempotency-key": key });
+      { expectedOrderRevision, reason, ...allocation }, "POST", { "idempotency-key": key });
     if (raw.outcome === "UNKNOWN" || raw.originalKeyRequired === true) return { kind: "unknown" };
     if (raw.contractVersion !== "admin-support-cancel.v1" || raw.orderId !== orderId || typeof raw.orderRevision !== "string"
       || typeof raw.eligibility !== "object" || raw.eligibility === null
+      || allocation && (raw.orderStatus !== 'CANCELLED' || raw.cancelReason !== 'SUPPORT_AFTER_START_CANCELLED'
+        || !raw.poststartCancellation || typeof raw.poststartCancellation !== 'object'
+        || (raw.poststartCancellation as {refundCents?:unknown}).refundCents !== allocation.refundCents
+        || (raw.poststartCancellation as {ownerCents?:unknown}).ownerCents !== allocation.ownerCents
+        || (raw.poststartCancellation as {commissionCents?:unknown}).commissionCents !== '0')
       || raw.simulationScope !== undefined && (typeof raw.simulationScope !== 'string'||!['LOCAL_DEMO_SIMULATED','ECS_TEST_SIMULATED'].includes(raw.simulationScope)
         || !raw.channel || typeof raw.channel !== 'object' || (raw.channel as {result?:unknown}).result !== 'NOT_SUBMITTED'
         || (raw.channel as {bankArrival?:unknown}).bankArrival !== 'UNKNOWN')) return { kind: "unknown" };
@@ -300,4 +311,51 @@ export async function sendFulfillmentIntent(intent: FulfillmentIntent, replay = 
 /** Legacy receipts remain recoverable; current PAID orders return the formal resolution in a 409. */
 export async function sendManualClose(orderId: string, remark: string, key: string): Promise<ManualCloseResult> {
   return adminRequest<ManualCloseResult>(`${orderBase(orderId)}/manual-close`, { remark }, "POST", { "idempotency-key": key });
+}
+
+export type AutomaticOpeningRetry =
+  | { kind: "accepted"; state: "CREATED" | "EXISTS" | "REVIEW_REQUIRED"; openingId?: string; reason?: string }
+  | { kind: "blocked"; reason: string }
+  | { kind: "auth"; status: 401 | 423 }
+  | { kind: "unknown"; error: unknown };
+
+export async function retryAutomaticOpening(orderId: string, key: string): Promise<AutomaticOpeningRetry> {
+  try {
+    const body = await adminRequest<{ state: "CREATED" | "EXISTS" | "REVIEW_REQUIRED"; openingId?: string; reason?: string }>(
+      `${orderBase(orderId)}/opening-generation/retry`, {}, "POST", { "idempotency-key": key });
+    return { kind: "accepted", state: body.state, ...(body.openingId ? { openingId: body.openingId } : {}), ...(body.reason ? { reason: body.reason } : {}) };
+  } catch (error) {
+    if (error instanceof AdminApiError) {
+      if (error.status === 401 || error.status === 423) return { kind: "auth", status: error.status };
+      if (error.status >= 400 && error.status < 500) return { kind: "blocked", reason: error.reasons[0] ?? error.code };
+      return { kind: "unknown", error };
+    }
+    return { kind: "unknown", error };
+  }
+}
+
+export type ProgressReminderReceipt = {
+  reminderId: string; orderId: string; stage: string; targets: string[];
+  state: "PENDING" | "SENT" | "FAILED"; messageClientId: string;
+};
+export type ProgressReminderOutcome =
+  | { kind: "accepted"; receipt: ProgressReminderReceipt }
+  | { kind: "blocked"; reason: string }
+  | { kind: "auth"; status: 401 | 423 }
+  | { kind: "unknown"; error: unknown };
+
+/** One click = one request key. A retry with the same key never mints a second reminder. */
+export async function sendProgressReminder(orderId: string, key: string): Promise<ProgressReminderOutcome> {
+  try {
+    const receipt = await adminRequest<ProgressReminderReceipt>(`${orderBase(orderId)}/progress-reminders`, {}, "POST", { "idempotency-key": key });
+    return { kind: "accepted", receipt };
+  } catch (error) {
+    if (error instanceof AdminApiError) {
+      if (error.status === 401 || error.status === 423) return { kind: "auth", status: error.status };
+      if (error.status === 409) return { kind: "blocked", reason: error.reasons[0] ?? error.code };
+      if (error.status === 0 || error.status === 429 || error.status >= 500) return { kind: "unknown", error };
+      return { kind: "blocked", reason: error.code };
+    }
+    return { kind: "unknown", error };
+  }
 }

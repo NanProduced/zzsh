@@ -1333,7 +1333,7 @@ function AccountDetail({ detail, gameName, latest, busy, identityReady, onAction
         </div>
       </div>
       <div className="supply-detail-actions">
-        {historicalReadOnly ? <p className="supply-detail-actions-hint">历史只读记录，不参与当前接单或编辑；如需处理请联系客服。</p> : <>
+        {historicalReadOnly ? detail.canPrepareLegacyCancelledDraft ? <div className="space-y-2"><p className="supply-detail-actions-hint">原订单已取消，请核实并更新账号资料后重新上架。</p><Link href={editHref} className="button primary"><Pencil size={15} aria-hidden="true" />核实资料并重新上架</Link></div> : <p className="supply-detail-actions-hint">历史只读记录，不参与当前接单或编辑；如需处理请联系客服。</p> : <>
           {account.owner_paused
             ? <button type="button" className="button secondary button--sm" disabled={!identityReady || busy !== ""} onClick={() => void onAction("resume")}><Play size={15} aria-hidden="true" />{busy === "resume" ? "恢复中…" : "恢复接单"}</button>
             : version ? <button type="button" className="button secondary button--sm" disabled={!identityReady || busy !== ""} onClick={() => void onAction("pause")}><Pause size={15} aria-hidden="true" />{busy === "pause" ? "暂停中…" : "暂停接单"}</button> : null}

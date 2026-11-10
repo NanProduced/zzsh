@@ -367,21 +367,10 @@ export async function readAdminChannelPaymentEvidence(client: Client, scope: Cha
 
 export type ChannelRefundIntentEvidence = Readonly<{
   intentId: string; refundOrderNo: string; amount: ChannelMoney; localState: string; budgetDisposition: string;
-  requiresReview: boolean; basisKind: "POSTING" | "REVIEW_CONFIRMATION" | "PRESTART_TERMINATION"; paymentConfirmationId: string | null;
+  requiresReview: boolean; basisKind: "POSTING" | "PRESTART_TERMINATION" | "SUPPORT_CANCELLATION"; paymentConfirmationId: string | null;
   liabilityRootId: string | null; liabilityEventId: string | null;
-  firstSubmit: Readonly<{ dispatch: "NEVER_DISPATCHED" | "DISPATCHED" | "UNKNOWN";
-    blockedReason: "ORIGINAL_ORDER_NO_AMBIGUOUS" | "ABNORMAL_BASIS_REVIEW" | null; blockedAt: string | null;
-    blockedAuditCount: number | null; trust: "LOCAL_AUDIT_AND_ATTEMPT" }> | null;
   localTerminal: Readonly<{ evidenceId: string | null; rootId: string | null; eventId: string | null }> | null;
   trustedActualCents: null; trustedRefundTrxNo: null; trustedCompletedAt: null; mayResubmit: false; bankArrival: "UNKNOWN";
-}>;
-export type ChannelAbnormalResponsibilityEvidence = Readonly<{
-  confirmationId: string; reasonCode: string; originalCents: string | null; allocatedCents: string | null;
-  consumedCents: string | null; releasedCents: string | null; remainingCents: string | null;
-  totalsComplete: boolean; state: string; intentIds: readonly string[];
-  liabilityRootId: string | null; liabilityEventId: string | null;
-  firstSubmit: ChannelRefundIntentEvidence["firstSubmit"];
-  reasonCodes: readonly string[];
 }>;
 export type ChannelRefundEvidence = Readonly<{
   contractVersion: "admin-channel-refund-evidence.v1";
@@ -398,7 +387,6 @@ export type ChannelRefundEvidence = Readonly<{
   trustedRefundTrxNo: null;
   trustedCompletedAt: null;
   intents: readonly ChannelRefundIntentEvidence[] | null;
-  abnormalResponsibilities: readonly ChannelAbnormalResponsibilityEvidence[] | null;
   intentTotals: Readonly<{ requestedCents: string | null; allocatedCents: string | null; consumedCents: string | null; releasedCents: string | null }>;
   intentTotalsComplete: boolean | null;
   responsibilityTotals: Readonly<{ originalCents: string | null; allocatedCents: string | null; consumedCents: string | null;
@@ -415,7 +403,6 @@ function emptyRefund(orderId: string, asOf: string, status: ChannelRefundEvidenc
     refundSourceFamily: "JOINPAY", posting: null,
     totals: { requestedCents: null, allocatedCents: null, consumedCents: null, releasedCents: null },
     residualCents: null, trustedActualRefundCents: null, trustedRefundTrxNo: null, trustedCompletedAt: null, intents: null,
-    abnormalResponsibilities: null,
     intentTotals: { requestedCents: null, allocatedCents: null, consumedCents: null, releasedCents: null },
     responsibilityTotals: null, intentTotalsComplete: null,
     bankArrival: "UNKNOWN", safeTarget: null,
@@ -492,19 +479,11 @@ export async function readAdminChannelRefundEvidence(client: Client, scope: Chan
   if (!data.financeReadable) return emptyRefund(input.orderId, asOf, "FORBIDDEN", "FINANCE_PERMISSION_REQUIRED");
   if (input.origin !== "NATIVE") return emptyRefund(input.orderId, asOf, "NOT_APPLICABLE", "LEGACY_REFUND_SOURCE_NOT_INTEGRATED");
   const summary = await readAdminOrderRefundSummary(client, { orderId: input.orderId, origin: "NATIVE", financeReadable: true });
-  const abnormalResponsibilities = (summary as { abnormalResponsibilities?: readonly { intentIds?: readonly string[]; merchantIdentityId?: unknown; totalsComplete?: unknown }[] }).abnormalResponsibilities ?? [];
   if (summary.integration === "INTEGRATED" && summary.intents) await assertRefundMerchants(client, data, input.orderId, summary.intents);
   const prestart=(summary as {prestartTermination?:{merchantIdentityId:string;refund:{integration:string;truncated:boolean}}}).prestartTermination;
   if(prestart)requireStoredMerchant(data,prestart.merchantIdentityId);
-  if (summary.integration === "INTEGRATED") {
-    for (const responsibility of abnormalResponsibilities) {
-      if (responsibility.totalsComplete === true) for (const intentId of responsibility.intentIds ?? []) {
-        if (!summary.intents?.some(intent => intent.intentId === intentId)) throw unavailable("Abnormal refund responsibility intent is unavailable");
-      }
-      if (responsibility.merchantIdentityId !== undefined && responsibility.merchantIdentityId !== null) requireStoredMerchant(data, responsibility.merchantIdentityId);
-    }
-  }
-  const incompleteAbnormal = abnormalResponsibilities.some(row => row.totalsComplete !== true);
+  const support=(summary as {supportCancellation?:{merchantIdentityId:string}}).supportCancellation;
+  if(support)requireStoredMerchant(data,support.merchantIdentityId);
   const reasons: string[] = (summary.reasonCodes ?? []).filter((value): value is string => typeof value === "string" && CODE.test(value));
   const posting = await readSettlementPosting(client, input.orderId, reasons);
   const status: ChannelRefundEvidence["status"] = summary.integration === "INTEGRATED" ? "INTEGRATED"
@@ -533,21 +512,20 @@ export async function readAdminChannelRefundEvidence(client: Client, scope: Chan
       if (intent.evidenceId !== null && evidenceId === null || intent.rootId !== null && rootId === null
         || intent.eventId !== null && eventId === null) add(reasons, "LOCAL_TERMINAL_REFERENCE_UNREADABLE");
       const rawBasis = (intent as { basisKind?: unknown }).basisKind;
-      const basisKind = rawBasis === "REVIEW_CONFIRMATION" ? "REVIEW_CONFIRMATION" as const : rawBasis === "PRESTART_TERMINATION"?"PRESTART_TERMINATION" as const:"POSTING" as const;
-      const firstSubmit = (intent as { firstSubmit?: ChannelRefundIntentEvidence["firstSubmit"] }).firstSubmit ?? null;
+      if (rawBasis !== undefined && !["POSTING", "PRESTART_TERMINATION", "SUPPORT_CANCELLATION"].includes(String(rawBasis))) { valid = false; break; }
+      const basisKind = rawBasis === "PRESTART_TERMINATION" ? "PRESTART_TERMINATION" as const : rawBasis === "SUPPORT_CANCELLATION" ? "SUPPORT_CANCELLATION" as const : "POSTING" as const;
       const liabilityRootId = (intent as { liabilityRootId?: unknown }).liabilityRootId;
       const liabilityEventId = (intent as { liabilityEventId?: unknown }).liabilityEventId;
       mapped.push({ intentId, refundOrderNo, amount, localState: code(intent.localState) ?? "UNKNOWN",
         budgetDisposition: disposition, requiresReview: intent.requiresReview, basisKind,
         paymentConfirmationId: id((intent as { paymentConfirmationId?: unknown }).paymentConfirmationId),
-        liabilityRootId: id(liabilityRootId), liabilityEventId: id(liabilityEventId), firstSubmit,
+        liabilityRootId: id(liabilityRootId), liabilityEventId: id(liabilityEventId),
         localTerminal: evidenceId || rootId || eventId ? { evidenceId, rootId, eventId } : null,
         trustedActualCents: null, trustedRefundTrxNo: null, trustedCompletedAt: null, mayResubmit: false, bankArrival: "UNKNOWN" });
     }
     if (valid) {
       intents = mapped;
       if (truncated) add(reasons, "REFUND_COVERAGE_TRUNCATED");
-      else if (incompleteAbnormal) add(reasons, "REFUND_INTENT_TOTALS_INCOMPLETE");
       else {
         totals = { requestedCents: sumCents(requested), allocatedCents: sumCents(allocated),
           consumedCents: sumCents(consumed), releasedCents: sumCents(released) };
@@ -579,34 +557,11 @@ export async function readAdminChannelRefundEvidence(client: Client, scope: Chan
   const projectedStatus = status === "INTEGRATED" && intents === null ? "UNAVAILABLE" : status;
   const responsibilityBudget = (summary as { responsibilityBudget?: { originalCents: string | null; allocatedCents: string | null;
     consumedCents: string | null; releasedCents: string | null; remainingCents: string | null; totalsComplete: boolean } }).responsibilityBudget;
-  const responsibilityEvidence = abnormalResponsibilities.map(responsibility => ({
-    confirmationId: id((responsibility as { confirmationId?: unknown }).confirmationId) ?? "",
-    reasonCode: code((responsibility as { reasonCode?: unknown }).reasonCode) ?? "UNKNOWN_REASON",
-    originalCents: typeof (responsibility as { originalCents?: unknown }).originalCents === "string"
-      ? (responsibility as { originalCents: string }).originalCents : null,
-    allocatedCents: typeof (responsibility as { allocatedCents?: unknown }).allocatedCents === "string"
-      ? (responsibility as { allocatedCents: string }).allocatedCents : null,
-    consumedCents: typeof (responsibility as { consumedCents?: unknown }).consumedCents === "string"
-      ? (responsibility as { consumedCents: string }).consumedCents : null,
-    releasedCents: typeof (responsibility as { releasedCents?: unknown }).releasedCents === "string"
-      ? (responsibility as { releasedCents: string }).releasedCents : null,
-    remainingCents: typeof (responsibility as { remainingCents?: unknown }).remainingCents === "string"
-      ? (responsibility as { remainingCents: string }).remainingCents : null,
-    totalsComplete: (responsibility as { totalsComplete?: unknown }).totalsComplete === true,
-    state: code((responsibility as { state?: unknown }).state) ?? "UNKNOWN",
-    intentIds: ((responsibility as { intentIds?: unknown }).intentIds as readonly string[] | undefined) ?? [],
-    liabilityRootId: id((responsibility as { liabilityRootId?: unknown }).liabilityRootId),
-    liabilityEventId: id((responsibility as { liabilityEventId?: unknown }).liabilityEventId),
-    firstSubmit: (responsibility as { firstSubmit?: ChannelRefundIntentEvidence["firstSubmit"] }).firstSubmit ?? null,
-    reasonCodes: Array.isArray((responsibility as { reasonCodes?: unknown }).reasonCodes)
-      ? ((responsibility as { reasonCodes: unknown[] }).reasonCodes).filter((value): value is string => typeof value === "string" && CODE.test(value)) : [],
-  }));
   return { contractVersion: "admin-channel-refund-evidence.v1", status: projectedStatus,
     coverage: projectedStatus !== "INTEGRATED" || sourceIntents === null ? "INTENTS_UNAVAILABLE" : truncated ? "TRUNCATED" : "LOCAL_REGISTERED_ONLY",
     orderId: input.orderId, refundSourceFamily: "JOINPAY", posting, totals, residualCents: null,
-    abnormalResponsibilities: projectedStatus === "INTEGRATED" ? responsibilityEvidence : null,
     intentTotals: totals,
-    intentTotalsComplete: projectedStatus === "INTEGRATED" && intents !== null ? !truncated && !incompleteAbnormal : null,
+    intentTotalsComplete: projectedStatus === "INTEGRATED" && intents !== null ? !truncated : null,
     responsibilityTotals: projectedStatus === "INTEGRATED" && responsibilityBudget ? {
       originalCents: responsibilityBudget.originalCents, allocatedCents: responsibilityBudget.allocatedCents,
       consumedCents: responsibilityBudget.consumedCents, releasedCents: responsibilityBudget.releasedCents,
@@ -880,7 +835,7 @@ export async function searchAdminChannelOriginals(client: Client, scope: Channel
     if (!await schemaReady(client, "zzsh_order.channel_refund_intent",
       ["id", "order_id", "posting_id", "payment_source", "merchant_identity_id", "original_payment_trx_no",
         "original_payment_order_no", "refund_order_no", "provider_refund_trx_no", "amount_cents", "currency", "state",
-        "budget_disposition", "requires_review", "terminal_evidence_id", "evidence_level", "created_at"])) {
+        "budget_disposition", "requires_review", "terminal_evidence_id", "evidence_level", "created_at", "basis_kind"])) {
       return searchFailure("NOT_INTEGRATED", echo, asOf, "REFUND_SCHEMA_UNAVAILABLE");
     }
     const rows = (await client.query<Row>(`SELECT i.id AS intent_id,i.order_id,i.merchant_identity_id,i.posting_id,
@@ -889,7 +844,7 @@ export async function searchAdminChannelOriginals(client: Client, scope: Channel
         i.terminal_evidence_id,${utc("i.created_at")} AS recorded_at${subjectUserId ? ",scope_order.owner_user_id AS scope_owner_id,scope_order.renter_user_id AS scope_renter_id" : ""}
       FROM zzsh_order.channel_refund_intent i
       ${subjectUserId ? "JOIN zzsh_order.rental_order scope_order ON scope_order.id=i.order_id" : ""}
-      WHERE i.payment_source='JOINPAY' AND i.merchant_identity_id=$1 AND (
+      WHERE i.payment_source='JOINPAY' AND i.basis_kind IN ('POSTING','PRESTART_TERMINATION','SUPPORT_CANCELLATION') AND i.merchant_identity_id=$1 AND (
         ($2::text IS NOT NULL AND i.refund_order_no=$2 AND ($3::text IS NULL OR i.provider_refund_trx_no=$3))
         OR ($2::text IS NOT NULL AND i.original_payment_order_no=$2 AND ($3::text IS NULL OR i.original_payment_trx_no=$3))
         OR ($2::text IS NULL AND $3::text IS NOT NULL AND (i.provider_refund_trx_no=$3 OR i.original_payment_trx_no=$3)))

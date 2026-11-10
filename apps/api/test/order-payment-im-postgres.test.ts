@@ -7,6 +7,7 @@ import { Pool } from "pg";
 import type { AppConfig } from "../src/config/config";
 import { withTransaction } from "../src/auth/security-core";
 import { confirmOrderPayment, createControlledPaymentSource, type PaymentInput } from "../src/order/payment-confirmation";
+import { automaticOpeningAcceptance } from "../src/order/settlement-record";
 import { cancelExpiredReservation, composeSupplyGateWithOrderOccupancy, readOrderOccupancy, sweepExpiredHolds } from "../src/order/order";
 
 type Fixture = { orderId: string; accountId: string; versionId: string; releaseId: string };
@@ -237,6 +238,23 @@ export async function runPaymentAcceptance(t: TestContext, o: Options): Promise<
     assert.throws(() => source([paid.orderId])({ ...paidInput, source: "CONTROLLED" } as PaymentInput));
     assert.throws(() => source([paid.orderId])({ ...paidInput, orderId: "not_allowlisted" }));
   });
+  await t.test("P09 the open v1 order path keeps payment and records a recoverable opening review", async () => {
+    const f = await o.fixture("自动开租v1");
+    const p = await input(f.orderId);
+    const accepted = await withTransaction(pool, (c) => confirmOrderPayment(c, source([p.orderId])(p), undefined, automaticOpeningAcceptance));
+    assert.equal(accepted.disposition, "APPLIED");
+    const openingCount = (await pool.query(`SELECT count(*)::int AS n FROM zzsh_order.rental_opening WHERE order_id=$1`, [f.orderId])).rows[0].n;
+    assert.equal(openingCount, 0, "a v1 quote without personal funding evidence does not fabricate an opening");
+    const generation = (await pool.query(`SELECT state, reason, payment_confirmation_id FROM zzsh_order.rental_opening_generation WHERE order_id=$1`, [f.orderId])).rows[0];
+    assert.equal(generation.state, "REVIEW_REQUIRED");
+    assert.equal(generation.reason, "LEGACY_V1_QUOTE_REVIEW");
+    assert.equal(generation.payment_confirmation_id, accepted.confirmationId);
+    const order = (await pool.query(`SELECT status, paid_confirmation_id FROM zzsh_order.rental_order WHERE id=$1`, [f.orderId])).rows[0];
+    assert.deepEqual(order, { status: "PAID", paid_confirmation_id: accepted.confirmationId }, "the accepted payment is never rolled back");
+    assert.equal((await pay(p)).replay, true);
+    assert.equal((await pool.query(`SELECT count(*)::int AS n FROM zzsh_order.rental_opening_generation WHERE order_id=$1`, [f.orderId])).rows[0].n, 1);
+  });
+
   await t.test("P08 payment with one-connection pool and no IM identity", async () => {
     const first = await o.fixture("付款单连接A");
     const second = await o.fixture("付款单连接B");

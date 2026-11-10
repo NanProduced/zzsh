@@ -46,6 +46,7 @@ export function WorkspacePageContent({
   onWriteLockChange,
   onQueryChange,
   refreshNonce,
+  tabActive = true,
   theme,
   themeMode,
   onSelectThemeMode,
@@ -62,11 +63,13 @@ export function WorkspacePageContent({
   onLock: () => void;
   onRefresh: () => Promise<SessionSnapshot>;
   onRecoveryCompleted: () => void;
-  onOpenPath: (path: string, title?: string) => void;
+  onOpenPath: (path: string, title?: string, afterOpen?: () => void) => boolean | void;
   onDirtyChange: (dirty: boolean) => void;
   onWriteLockChange?: (locked: boolean) => void;
   onQueryChange: (query: Record<string, string>) => void;
   refreshNonce: number;
+  /** The support workbench stays mounted while hidden; this tells it whether the tab is actually active. */
+  tabActive?: boolean;
   theme?: Theme;
   themeMode?: ThemeMode;
   onSelectThemeMode?: (mode: ThemeMode) => void;
@@ -130,7 +133,7 @@ export function WorkspacePageContent({
     const supportType = tab.query.type === "SERVICE" || tab.query.type === "COMPLAINT" || tab.query.type === "ORDER" ? tab.query.type : "ALL";
     const selectedThread = tab.query.consultation && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(tab.query.consultation) ? tab.query.consultation : undefined;
     const selectedOrder = tab.query.order && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(tab.query.order) ? tab.query.order : undefined;
-    return <>{tab.query.fromOrderId&&/^[A-Za-z0-9._:-]{1,128}$/.test(tab.query.fromOrderId)?<button className="oc-back" onClick={()=>onOpenPath(`/orders/${tab.query.fromOrderId}`)}>返回来源订单</button>:null}<ImSupportView key={tab.id} snapshot={snapshot} initialSection={tab.query.section==="orders"?"orders":"consultation"} initialConsultationId={selectedThread} initialOrderId={selectedOrder} initialUnifiedType={supportType} workspaceQuery={tab.query} onQueryChange={onQueryChange} onRefresh={onRefresh} onOpenPath={onOpenPath} onDirtyChange={onDirtyChange} /></>;
+    return <>{tab.query.fromOrderId&&/^[A-Za-z0-9._:-]{1,128}$/.test(tab.query.fromOrderId)?<button className="oc-back" onClick={()=>onOpenPath(`/orders/${tab.query.fromOrderId}`)}>返回来源订单</button>:null}<ImSupportView key={tab.id} snapshot={snapshot} initialSection={tab.query.section==="orders"?"orders":"consultation"} initialConsultationId={selectedThread} initialOrderId={selectedOrder} initialUnifiedType={supportType} workspaceQuery={tab.query} onQueryChange={onQueryChange} onRefresh={onRefresh} onOpenPath={onOpenPath} onDirtyChange={onDirtyChange} active={tabActive} /></>;
   }
   if (tab.kind === "support-mine") {
     const canReadSupport = snapshot.security.isBoss || snapshot.permissions.includes("im.support.read");

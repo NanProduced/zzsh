@@ -691,7 +691,7 @@ export function RentalConfirmPanel({
       // claim the original request succeeded or never happened, and the intent stays frozen.
       let observed = "";
       try {
-        const page = await orderApi.list({ party: "renter", accountId, limit: 5 });
+        const page = await orderApi.list(acting, { party: "renter", accountId, limit: 5 });
         if (!isCurrent(acting)) return;
         observed = page.items.length
           ? `当前账号最近订单：${page.items.slice(0, 3).map((item) => item.displayNo ?? item.id).join("、")}`
@@ -720,7 +720,7 @@ export function RentalConfirmPanel({
 
   const resolvePayment = useCallback(async (acting: string, orderId: string) => {
     try {
-      const authority = await orderApi.paymentStatus(orderId);
+      const authority = await orderApi.paymentStatus(acting, orderId);
       if (!isCurrent(acting)) return;
       const observed = paymentObservation(authority.payment);
       setStage({ kind: "pay-unknown", orderId, message: `原支付请求仍未取得确定回执（原申请保留）。${observed}；当前页面状态不能确定这笔申请是否生效，请稍后再次查询或联系客服核对。` });
@@ -733,7 +733,7 @@ export function RentalConfirmPanel({
     if (!userId) return;
     const acting = userId;
     if (!loadIntent(acting, "order.payment", orderId)) { void resolvePayment(acting, orderId); return; }
-    const outcome = await performGuardedWrite(acting, "order.payment", orderId, {}, undefined, (key) => orderApi.pay(orderId, key));
+    const outcome = await performGuardedWrite(acting, "order.payment", orderId, {}, undefined, (key, _body, _context, subject) => orderApi.pay(subject, orderId, key), isCurrent);
     if (!isCurrent(acting)) return;
     applyPayment(acting, outcome as WriteOutcome<{ payment: { confirmationId: string; disposition: string; reasonCode?: string | null; replay: boolean } }>, orderId);
   }, [userId, isCurrent, applyPayment, resolvePayment]);

@@ -60,14 +60,14 @@ export async function captureLocalSandboxRefundTerminalFact(client:PoolClient,op
       ||terminal.originalPaymentTrxNo!==row.original_payment_trx_no||terminal.amountCents!==row.amount_cents||terminal.currency!=='CNY'
       ||typeof terminal.refundTransactionNo!=='string'||!ID.test(terminal.refundTransactionNo)||typeof terminal.completedAt!=='string'
       ||!/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/.test(terminal.completedAt)||!Number.isFinite(Date.parse(terminal.completedAt))
-      ||new Date(terminal.completedAt).toISOString()!==terminal.completedAt||!['POSTING','PRESTART_TERMINATION'].includes(row.basis_kind))throw Error();
+      ||new Date(terminal.completedAt).toISOString()!==terminal.completedAt||!['POSTING','PRESTART_TERMINATION','SUPPORT_CANCELLATION'].includes(row.basis_kind))throw Error();
   }catch{throw conflict('Original local refund operation is incomplete or mismatched');}
   const body:Omit<NativeRefundTerminalFact,'factsDigest'>={evidenceId:'local_rfe_'+sha(row.id+':'+row.operation_id).slice(0,40),intentId:row.id,
     postingId:row.posting_id,orderId:row.order_id,paymentConfirmationId:row.payment_confirmation_id,renterUserId:row.renter_user_id,
     merchantIdentityId:row.merchant_identity_id,originalPaymentTrxNo:row.original_payment_trx_no,originalPaymentOrderNo:row.original_payment_order_no,
     responsibilityVersionHash:row.responsibility_version_hash,refundOrderNo:row.refund_order_no,amountCents:row.amount_cents,currency:'CNY',terminal:'SUCCEEDED',
     refundTransactionNo:terminal.refundTransactionNo as string,completedAt:terminal.completedAt as string,sourceObservationId:row.operation_id,
-    ...(row.basis_kind==='PRESTART_TERMINATION'?{basisKind:'PRESTART_TERMINATION' as const}:{})};
+    ...(row.basis_kind==='PRESTART_TERMINATION'||row.basis_kind==='SUPPORT_CANCELLATION'?{basisKind:row.basis_kind as 'PRESTART_TERMINATION'|'SUPPORT_CANCELLATION'}:{})};
   const canonical=canonicalize(body),fact=Object.freeze({...body,factsDigest:sha(canonical)});
   const context=(await client.query('SELECT pg_current_xact_id()::text AS xid')).rows[0];
   if(typeof context?.xid!=='string')throw invalid('Original refund transaction unavailable');

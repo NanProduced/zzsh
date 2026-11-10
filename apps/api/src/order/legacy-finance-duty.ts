@@ -12,6 +12,7 @@ import { conflict, notFound } from "../supply/supply-util";
 import { authorizeLegacyMutation, type LegacyMutationAuthority } from "./legacy-continuation-command";
 import { lockLegacyContinuationOrder, readLegacyContinuationBinding, readLegacyContinuationUserIds } from "./legacy-continuation-evidence";
 import { readLegacyDutyBasis } from "./legacy-duty-basis";
+import { hasLegacyRecordedRefunds } from "./legacy-refund-review-source";
 import type { LegacyContinuationActor, LegacyDutyRow } from "./legacy-continuation-model";
 
 export type LegacyFinanceDutyKind="OWNER_CREDIT"|"COMMISSION"|"RENTER_REFUND";
@@ -62,6 +63,19 @@ async function postLockedDuty(client:PoolClient,orderId:string,kind:LegacyFinanc
       AND has_function_privilege(current_user,p.oid,'EXECUTE')) AS ready`)).rows[0]?.ready;
   if(available!==true)throw new SecurityApiError(503,"EVIDENCE_UNAVAILABLE","Legacy owner credit is unavailable");
   const raw=await readLegacyDutyBasis(client,orderId,duty),adapted=legacyDutyBasisFromTrade(duty,raw);
+  if(kind==="OWNER_CREDIT" && adapted.knowledge==="KNOWN" && adapted.basis.kind==="SUPPORT_CANCELLED_CONTINUATION") {
+    let recorded=true;
+    try {
+      const scopes=(await client.query<{scope:string;marker:string|null}>(`SELECT a.details->>'paymentReviewScope' AS scope,
+        shobj_description((SELECT oid FROM pg_database WHERE datname=current_database()),'pg_database') AS marker
+        FROM zzsh_iam.audit_event a WHERE a.action='order.legacy.continuation.support_cancel' AND a.object_type='rental_order' AND a.object_id=$1
+          AND a.actor_type='admin' AND a.outcome='SUCCESS' AND a.details->>'versionId'=$2 AND a.details->>'originalPaymentChecked'='true' LIMIT 2`,[orderId,adapted.basis.continuationVersionId])).rows;
+      const scope=scopes.length===1?scopes[0]:null;
+      if(scope && (scope.scope==="OPERATOR" || scope.scope==="SIMULATED" && ["zzsh:r07-delivery-clone:v1","zzsh:ecs-test:v1"].includes(scope.marker??"")))
+        recorded=await hasLegacyRecordedRefunds(client,binding,adapted.basis.continuationVersionId);
+    } catch { /* Unknown is handled as an offline case. */ }
+    if(recorded)throw conflict("REFUND_HISTORY_REQUIRES_OFFLINE");
+  }
   if(adapted.knowledge!=="KNOWN")throw conflict("WALLET_CREDIT_BASIS_UNAVAILABLE");
   const funding=await readLegacyDutyFundingProof(client,duty,adapted.basis);
   if(funding.knowledge!=="KNOWN")throw conflict("WALLET_CREDIT_HISTORY_UNPROVEN");

@@ -58,6 +58,13 @@ async function assertAccess(c: Pick<PoolClient, "query">, actor: OrderTeamInvite
     if (scopeIsEmpty(gameScope, false)) throw noGameScopeError();
     if (!scopeAllowsGame(gameScope, false, scope.game_id)) throw forbidden();
   }
+  // Only a current JOINED member may change the member list; support read plus
+  // game scope alone must not let an outsider add themselves to the group.
+  const actorState = (await c.query<{ state: string }>(`SELECT mm.state FROM zzsh_order.im_order_member mm
+    JOIN zzsh_iam.im_identity_mapping m ON m.id=mm.identity_id AND m.app_id=mm.app_id
+    WHERE mm.order_id=$1 AND mm.app_id=$2 AND m.realm='admin' AND m.identity_kind='ADMIN' AND m.platform_subject_id=$3`,
+    [orderId, appId, actor.userId])).rows[0]?.state;
+  if (actorState !== "JOINED") throw forbidden();
   if (scope.order_status !== "PAID") {
     if (!["COMPLETED", "CANCELLED"].includes(scope.order_status)) throw conflict("Order is not active");
     const access = await readOrderTeamAccess(c as PoolClient,{...actor,realm:"admin"},orderId);
@@ -175,6 +182,7 @@ export async function inviteOrderTeamAdmin(
   requestId: string,
 ): Promise<OrderTeamInviteResult> {
   await assertAccess(c, actor, options.appId, orderId);
+  if (targetAdminId === actor.userId) throw new SecurityApiError(400, API_V1_ERROR_CODES.INVALID_ARGUMENT, "Cannot invite yourself");
   // Share the dispatch/IAM qualification locks before taking order/group locks.
   await lockSupportMutation(c as PoolClient, options.appId, [], [actor.userId, targetAdminId]);
   await lockOrderTeam(c, orderId);

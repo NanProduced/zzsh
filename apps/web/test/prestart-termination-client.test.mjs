@@ -21,6 +21,13 @@ test('坏版本/对象/枚举/金额/时间、未认责任的APPROVED直接拒�
   {request:{...request,state:['APPROVED']}},{request:{...request,liabilityRecognized:false}},
   {request:{...request,fullRefundCents:15908}},{request:{...request,approvedAt:null}}])assert.throws(()=>parsePrestartView({...view(),...patch},'order_1'));
 });
+test('取消原因采用服务端角色选项，缺少选项时不能误当作已配置',()=>{
+ const options=[{code:'RENTER_WRONG_ACCOUNT',label:'选错账号'},{code:'OTHER',label:'其他'}];
+ assert.deepEqual(parsePrestartView({...view(),cancellationReasons:options},'order_1').cancellationReasons,options);
+ assert.deepEqual(parsePrestartView(view(),'order_1').cancellationReasons,[]);
+ assert.throws(()=>parsePrestartView({...view(),cancellationReasons:[...options,options[0]]},'order_1'));
+ assert.throws(()=>parsePrestartView({...view(),cancellationReasons:[{code:'bad/code',label:'坏选项'}]},'order_1'));
+});
 test('截断、冲突或未接入不能提供完整合计；分配含核销、remaining不是未到账',()=>{
  for(const patch of [{truncated:true},{integration:'UNAVAILABLE'},{totals:{...refund.totals,remainingCents:'15908'}},
   {totals:{...refund.totals,consumedCents:'15909'}},{intents:[{...refund.intents[0],firstSubmit:['DISPATCHED']}]}])assert.throws(()=>parsePrestartRefund({...refund,...patch}));

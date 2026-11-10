@@ -15,3 +15,24 @@
 
 /* 处理记录默认只露最近两条；更早的行仍在真实列表里，展开即见。 */
 .workspace-root .im-wb-event[hidden] { display:none; }
+
+/* 历史轮次：纵向时间线，固定滚动区域，事件只在展开时读取。 */
+.workspace-root .im-wb-rounds .im-wb-btn { justify-self:start; }
+.workspace-root .im-wb-round-scroll { max-height:360px; overflow-y:auto; overscroll-behavior:contain; padding:2px 4px 2px 0; }
+.workspace-root .im-wb-rounds-timeline { position:relative; display:grid; gap:0; margin:6px 0 8px; padding:0 0 0 14px; list-style:none; }
+.workspace-root .im-wb-rounds-timeline::before { content:""; position:absolute; left:5px; top:4px; bottom:4px; width:1px; background:var(--border); }
+.workspace-root .im-wb-round { position:relative; display:block; min-width:0; padding:0 0 12px 10px; }
+.workspace-root .im-wb-round-dot { position:absolute; left:-13px; top:4px; width:9px; height:9px; border-radius:50%; background:var(--muted-foreground); box-shadow:0 0 0 2px var(--card); }
+.workspace-root .im-wb-round[data-current="true"] .im-wb-round-dot { background:var(--im-accent-strong,var(--ring)); }
+.workspace-root .im-wb-round-body { display:grid; gap:2px; min-width:0; }
+.workspace-root .im-wb-round-head { display:flex; align-items:center; flex-wrap:wrap; gap:6px; min-width:0; }
+.workspace-root .im-wb-round-head strong { font-size:12px; line-height:1.5; }
+.workspace-root .im-wb-round-state { color:var(--muted-foreground); font-size:11px; }
+.workspace-root .im-wb-round[data-state="ACTIVE"] .im-wb-round-state { color:var(--im-accent-strong); }
+.workspace-root .im-wb-round-current { padding:0 4px; border:1px solid color-mix(in oklab,var(--im-accent-strong) 35%,var(--border)); border-radius:4px; color:var(--im-accent-strong); font-size:10px; line-height:16px; }
+.workspace-root .im-wb-round-meta { margin:0; color:var(--muted-foreground); font-size:11px; line-height:1.55; overflow-wrap:anywhere; }
+.workspace-root .im-wb-round-events-toggle { justify-self:start; margin-top:2px; padding:0; border:0; background:none; color:var(--foreground); font:inherit; font-size:11px; line-height:1.5; text-decoration:underline; text-underline-offset:3px; cursor:pointer; }
+.workspace-root .im-wb-round-events-toggle:hover { color:var(--im-accent-strong); }
+.workspace-root .im-wb-round-events-toggle:focus-visible { outline:2px solid var(--ring); outline-offset:2px; }
+.workspace-root .im-wb-round .im-wb-sec { margin:4px 0 0; padding:6px 0 0; border-top:1px solid var(--border); }
+.workspace-root .im-wb-round .im-wb-events { max-height:180px; overflow-y:auto; overscroll-behavior:contain; }

@@ -6,6 +6,7 @@ import { Badge } from "../components/ui/badge";
 import { StatusMessage } from "../components/ui-elements";
 import { contentTime } from "./content-resources-model";
 import { SettlementRefundPolicyPanel } from "./settlement-refund-policy-panel";
+import { OpeningAutoConfirmPolicyPanel } from "./opening-auto-confirm-policy-panel";
 import { SystemSmsConfigurationPanel } from "./system-sms-configuration-panel";
 
 export type SystemStorageConfiguration = {
@@ -82,9 +83,14 @@ export function SystemConfigurationView({ snapshot, refreshNonce = 0 }: {
       <div><h1 id="system-configuration-title" className="text-xl font-semibold tracking-tight">系统配置</h1><p className="mt-1 text-sm text-muted-foreground">查看当前部署配置与运行检查结果。</p></div>
       <Button type="button" variant="outline" disabled={current.busy} onClick={() => void load()}><RefreshCw aria-hidden="true" />刷新配置</Button>
     </header>
-    <section className="mt-6 flex max-w-5xl flex-wrap items-center justify-between gap-4 border-b border-border pb-5" aria-labelledby="settlement-refund-settings-title">
-      <div><h2 id="settlement-refund-settings-title" className="text-base font-semibold">订单结算</h2><p className="mt-1 text-sm text-muted-foreground">分别设置正常和提前结算的退款等待期。</p></div>
-      <SettlementRefundPolicyPanel actorId={snapshot.adminUserId} sessionId={snapshot.session.id} />
+    <section className="mt-6 grid max-w-5xl gap-4 border-b border-border pb-5" aria-labelledby="settlement-refund-settings-title">
+      <div className="flex flex-wrap items-center justify-between gap-4">
+        <div><h2 id="settlement-refund-settings-title" className="text-base font-semibold">订单结算</h2><p className="mt-1 text-sm text-muted-foreground">分别设置正常和提前结算的退款等待期，以及新开租清单的自动确认等待期。</p></div>
+        <div className="flex flex-wrap gap-2">
+          <OpeningAutoConfirmPolicyPanel actorId={snapshot.adminUserId} sessionId={snapshot.session.id} />
+          <SettlementRefundPolicyPanel actorId={snapshot.adminUserId} sessionId={snapshot.session.id} />
+        </div>
+      </div>
     </section>
     <SystemSmsConfigurationPanel key={owner} refreshNonce={refreshNonce}/>
     <div className="mt-5"><StatusMessage error={current.error} /></div>

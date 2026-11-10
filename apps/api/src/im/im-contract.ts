@@ -17,7 +17,7 @@ export type ImTransportReply = {
 };
 
 export type ImTransportCard = {
-  kind: "ORDER_OPENING"|"ORDER_ENDING"|"ORDER_SETTLED"|"ORDER_PRICE_CHANGE";
+  kind: "ORDER_OPENING"|"ORDER_ENDING"|"ORDER_SETTLED"|"ORDER_CANCELLED"|"ORDER_PRICE_CHANGE";
   orderId: string;
   cardId: string;
 };
@@ -85,12 +85,14 @@ export type ImTransportMedia = {
 export type ImTransportMessage = {
   messageClientId: string;
   messageServerId: string;
+  /** Provider-issued server ID only; locally generated/client IDs never belong here. */
+  serverMessageId?: string | null;
   conversationId: string;
   senderId: string;
   receiverId: string;
   createTime: number;
   text?: string;
-  messageType: 0 | 1 | 2 | 3 | 6;
+  messageType: 0 | 1 | 2 | 3 | 6 | 100;
   reply?: ImTransportReply;
   revoked?: boolean;
   card?: ImTransportCard;

@@ -38,6 +38,7 @@ import { managedProfileImagePath } from "../profile/profile-avatar";
 import { lockDispatchGate, lockSupportMutation, readEligibleSupport, reserveSupportCandidateOutcome, type LockedSupportRoster, type SupportQueueReason } from "./support-dispatch";
 import { assignWaitingOrders } from "./order-dispatch";
 import {
+  auditViewerAccount,
   readLatestHandoverNote,
   readSupportToday,
   recordSupportHandover,
@@ -49,7 +50,7 @@ import {
 } from "./support-management";
 
 export type SupportType = "SERVICE" | "COMPLAINT";
-/** 用户进入咨询页的入口场景；仅用于欢迎语，线程 kind 仍归一 SERVICE。 */
+/** 用户进入咨询页的入口场景；决定欢迎语，并对应 SERVICE/COMPLAINT 两类持久线程。 */
 export type ConsultationEntryIntent = SupportType;
 export type ConsultationState = "WAITING" | "ACTIVE" | "CLOSED";
 export type SupportThreadState = "IDLE" | "WAITING" | "ACTIVE";
@@ -93,6 +94,10 @@ export type SupportPresence = {
   lastConnectedAt: string | null;
   activeLoad: number;
   version: number;
+  /** Another browser session currently owns this admin's single presence row. */
+  ownedByAnotherSession: boolean;
+  /** Pre-0184 row with no auth session owner; requires an explicit start to bind. */
+  unbound: boolean;
   today: SupportDayCounts;
 };
 
@@ -247,6 +252,7 @@ type PresenceRow = {
   lastConnectedAt: Date | string | null;
   activeLoad: number;
   version: string | number;
+  authSessionId: string | null;
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -299,21 +305,22 @@ export function parseConsultationBody(value: unknown): { type: SupportType; entr
   const allowed = new Set(["type", "subjectRef"]);
   if (Object.keys(value).some((key) => !allowed.has(key))) throw invalid("Request body contains an unknown field");
   const entryIntent = parseSupportType(value.type);
-  // 投诉入口已并入普通咨询：旧客户端仍可传 COMPLAINT，新建请求只落到 SERVICE 线程；
-  // 原始入口意图只决定欢迎语文案，不改变线程 kind。
-  return { type: entryIntent === "COMPLAINT" ? "SERVICE" : entryIntent, entryIntent, subjectRef: parseSubjectRef(value.subjectRef) };
+  // 投诉与业务咨询各自保留持久线程；入口意图只决定欢迎语，不再改写线程 kind。
+  return { type: entryIntent, entryIntent, subjectRef: parseSubjectRef(value.subjectRef) };
 }
 
-export function parsePresenceBody(value: unknown): { availability: SupportAvailability; connectionState: SupportConnectionState; version?: number } {
+export function parsePresenceBody(value: unknown): { availability: SupportAvailability; connectionState: SupportConnectionState; version?: number; takeover?: boolean } {
   if (!isRecord(value)) throw invalid("Request body is invalid");
-  if (Object.keys(value).some((key) => key !== "availability" && key !== "connectionState" && key !== "version")) throw invalid("Request body contains an unknown field");
+  if (Object.keys(value).some((key) => key !== "availability" && key !== "connectionState" && key !== "version" && key !== "takeover")) throw invalid("Request body contains an unknown field");
   if (typeof value.availability !== "string" || !AVAILABILITY.has(value.availability as SupportAvailability)) throw invalid("Availability is invalid");
   if (typeof value.connectionState !== "string" || !CONNECTION_STATES.has(value.connectionState as SupportConnectionState)) throw invalid("Connection state is invalid");
   if (value.version !== undefined && (!Number.isSafeInteger(value.version) || (value.version as number) < 0)) throw invalid("Presence version is invalid");
+  if (value.takeover !== undefined && typeof value.takeover !== "boolean") throw invalid("Presence takeover flag is invalid");
   return {
     availability: value.availability as SupportAvailability,
     connectionState: value.connectionState as SupportConnectionState,
     ...(value.version === undefined ? {} : { version: value.version as number }),
+    ...(value.takeover === undefined ? {} : { takeover: value.takeover as boolean }),
   };
 }
 
@@ -329,6 +336,14 @@ export function parseSupportRatingBody(value: unknown): { score: number; comment
   if (!comment) return { score, comment: null };
   if ([...comment].length > 200) throw invalid("Rating comment is invalid");
   return { score, comment };
+}
+
+/** 用户主动结束本轮：客户端提供稳定的 operationId，重放返回同一结果。 */
+export function parseUserCloseBody(value: unknown): { operationId: string } {
+  if (!isRecord(value)) throw invalid("Request body is invalid");
+  if (Object.keys(value).some((key) => key !== "operationId")) throw invalid("Request body contains an unknown field");
+  if (typeof value.operationId !== "string" || !/^[A-Za-z0-9_-]{16,80}$/.test(value.operationId)) throw invalid("Invalid operation identity");
+  return { operationId: value.operationId };
 }
 
 function teamConversationId(accountId: string, teamId: string): string {
@@ -644,14 +659,47 @@ async function wakeAutoAssign(options: ConsultationRouteOptions, limit = 5): Pro
   await autoAssignWaitingConsultations(options, limit).catch(() => undefined);
 }
 
-export function requireSupportAccess(access: EffectiveAdminAccess | null, _type: SupportType, action: "accept" | "transfer" = "accept"): void {
-  // 投诉已并入普通咨询：旧 COMPLAINT 行同样只要求接待权限，不再追加 im.support.complaint。
-  const required = action === "transfer"
+export function requireSupportAccess(
+  access: EffectiveAdminAccess | null,
+  type: SupportType,
+  action: "accept" | "transfer" = "accept",
+  objectGrant = false,
+): void {
+  const required: string[] = action === "transfer"
     ? [ADMIN_PERMISSION.imSupportAccept, ADMIN_PERMISSION.imSupportTransfer]
     : [ADMIN_PERMISSION.imSupportAccept];
+  if (type === "COMPLAINT" && !objectGrant) required.push(ADMIN_PERMISSION.imSupportComplaint);
   if (!required.every((permission) => hasPermission(access, permission))) {
     throw new SecurityApiError(403, "FORBIDDEN", "Permission required");
   }
+}
+
+const complaintObjectGrantSql = (consultationColumn: string, adminParameter: string) => `EXISTS (
+  SELECT 1 FROM "zzsh_iam"."im_complaint_handover_grant" h
+   WHERE h."consultation_id" = ${consultationColumn} AND h."admin_user_id" = ${adminParameter}
+     AND NOT EXISTS (SELECT 1 FROM "zzsh_iam"."admin_user_permission" d
+       WHERE d."admin_user_id" = ${adminParameter} AND d."permission_code" = 'im.support.complaint' AND d."effect" = 'DENY'))`;
+
+async function complaintHandoverGranted(client: PoolClient, consultationId: string, adminUserId: string): Promise<boolean> {
+  return ((await client.query(
+    `SELECT 1 WHERE ${complaintObjectGrantSql("$1", "$2")}`,
+    [consultationId, adminUserId],
+  )).rowCount ?? 0) === 1;
+}
+
+/** Object-level exception only for the exact pre-upgrade complaint assigned to this admin. */
+async function requireSupportAccessFor(
+  client: PoolClient,
+  access: EffectiveAdminAccess | null,
+  adminUserId: string,
+  row: { id: string; kind: SupportType; assignedAdminId: string | null },
+  action: "accept" | "transfer" = "accept",
+): Promise<void> {
+  const objectGrant = row.kind === "COMPLAINT"
+    && row.assignedAdminId === adminUserId
+    && !hasPermission(access, ADMIN_PERMISSION.imSupportComplaint)
+    && await complaintHandoverGranted(client, row.id, adminUserId);
+  requireSupportAccess(access, row.kind, action, objectGrant);
 }
 
 type Candidate = {
@@ -852,7 +900,7 @@ export async function markConsultationRead(
     if (row.state !== "ACTIVE" || row.assignedAdminId !== context.userId) {
       throw new SecurityApiError(403, "FORBIDDEN", "Consultation is not assigned to the current administrator");
     }
-    requireSupportAccess(access, row.kind);
+    await requireSupportAccessFor(client, access, context.userId, row);
     const updated = await client.query<{ adminReadAt: Date | string | null }>(
       `UPDATE "zzsh_iam"."im_consultation"
           SET "admin_read_at" = clock_timestamp(), "admin_unread_count" = 0
@@ -1044,6 +1092,12 @@ function createScopeLease(options: ConsultationRouteOptions, claim: ScopeOperati
 }
 function scopeOperationId(): string {
   return `im_scope_op_${randomBytes(16).toString("hex")}`;
+}
+
+/** 用户结束本轮的操作 id 由客户端 operationId 派生，同输入重放命中同一行。 */
+function userCloseOperationId(appId: string, userId: string, operationId: string): string {
+  const digest = createHash("sha256").update(JSON.stringify([appId, userId, operationId]), "utf8").digest("hex");
+  return `im_scope_op_${digest.slice(0, 32)}`;
 }
 
 function scopeLeaseHash(token: string): string {
@@ -2026,7 +2080,7 @@ async function claimCloseReconciliation(
     if (!hasPermission(access, ADMIN_PERMISSION.imSupportTransfer)) throw new SecurityApiError(403, "FORBIDDEN", "Permission required");
     const row = await readConsultation(client, options.appId, consultationId, true);
     if (row.assignedAdminId !== context.userId) throw new SecurityApiError(403, "FORBIDDEN", "Consultation is not assigned to the current administrator");
-    requireSupportAccess(access, row.kind);
+    await requireSupportAccessFor(client, access, context.userId, row);
     const latest = (await client.query<{ id: string }>(
       `SELECT "id" FROM "zzsh_iam"."im_consultation_scope_operation"
          WHERE "app_id" = $1 AND "consultation_id" = $2 ORDER BY "created_at" DESC, "id" DESC LIMIT 1 FOR UPDATE`,
@@ -2221,7 +2275,14 @@ async function readUserConsultationView(options: ConsultationRouteOptions, conte
       [options.appId, consultationId, context.userId],
     )).rows[0];
     if (!row) throw new SecurityApiError(404, "NOT_FOUND", "Consultation not found");
-    return { consultation: { ...toView(row, accountId), botAccountId: supportBotAccountId(options) } };
+    const rating = await readRoundRating(client, options.appId, row.id);
+    return {
+      consultation: {
+        ...toView(row, accountId),
+        botAccountId: supportBotAccountId(options),
+        rating: ratingView(rating, row.state === "CLOSED" && Boolean(row.assignedAdminId)),
+      },
+    };
   });
 }
 
@@ -2447,6 +2508,14 @@ export async function readAdminMessageAccess(
     const access = await loadEffectiveAdminAccess(client, context.userId);
     const assigned = matching.assignedAdminId === context.userId;
     if(!hasPermission(access,ADMIN_PERMISSION.imSupportRead)&&!hasPermission(access,ADMIN_PERMISSION.imSupportManagementRead))throw new SecurityApiError(403,"FORBIDDEN","Permission required");
+    // Complaint threads require the separate grant for reads too; the object-level
+    // 0181 handover grant only covers the exact pre-upgrade assigned conversation.
+    const complaintObjectGrant = matching.kind === "COMPLAINT" && assigned
+      && !hasPermission(access, ADMIN_PERMISSION.imSupportComplaint)
+      && await complaintHandoverGranted(client, matching.id, context.userId);
+    if (matching.kind === "COMPLAINT" && !hasPermission(access, ADMIN_PERMISSION.imSupportComplaint) && !complaintObjectGrant) {
+      throw new SecurityApiError(403, "FORBIDDEN", "Permission required");
+    }
     if (assigned) {
       if (matching.peerAccountId !== viewerAccountId) throw new SecurityApiError(403, "FORBIDDEN", "Consultation is not authorized");
       // One responsible agent per round: only the ACTIVE assignee may send.
@@ -2471,7 +2540,7 @@ export async function readAdminMessageAccess(
     // History remains readable under the directory/read contract; every send
     // rechecks the current type-specific reception grant in this transaction.
     if (requireSendPermission) {
-      requireSupportAccess(access, matching.kind);
+      await requireSupportAccessFor(client, access, context.userId, matching);
       if (intent && matching.threadId) await storeImSendIntent(client,{...intent,appId:options.appId,threadId:matching.threadId,roundId:matching.id,conversationId,accountId:viewerAccountId,actorId:context.userId,realm:"admin"},{...context,realm:"admin"});
     }
     return { viewerAccountId, peerAccountId: matching.userAccountId };
@@ -2607,14 +2676,16 @@ export async function listAdminConsultations(
   context: AdminContext,
   _access: EffectiveAdminAccess,
   limit: number,
-): Promise<{ consultations: ConsultationView[] }> {
+  query: string | null = null,
+): Promise<{ consultations: ConsultationView[]; query: string | null }> {
   return withTransaction(options.pool, async (client) => {
     await assertAdminContextInTransaction(client, context);
     const access = await loadEffectiveAdminAccess(client, context.userId);
     const accountId = await readyAccount(client, identityKey(options.appId, "admin", "ADMIN", context.userId));
     const serviceQueue = hasPermission(access, ADMIN_PERMISSION.imSupportAccept);
+    const canComplaint = hasPermission(access, ADMIN_PERMISSION.imSupportComplaint);
     const adminThreadRead = Boolean(access?.isBoss || hasPermission(access, ADMIN_PERMISSION.imSupportManagementRead));
-    // 旧 COMPLAINT 行按普通会话进入同一队列；不再按 kind 或 im.support.complaint 分流。
+    // SERVICE/COMPLAINT 各自成线程；没有投诉权限的客服不看投诉队列。
     // 用户还没说话的 WAITING 空会话不进队列；每个线程只保留一行：优先有用户消息的开放轮，
     // 其次本人处理过的最近已结束轮，保证轮次结束后仍能从同一会话打开历史。
     const rows = (await client.query<ConsultationRow>(
@@ -2623,6 +2694,7 @@ export async function listAdminConsultations(
           AND c."id" = (
             SELECT c2."id" FROM "zzsh_iam"."im_consultation" c2
              WHERE c2."app_id" = c."app_id" AND c2."thread_id" = c."thread_id"
+               AND (c2."kind" <> 'COMPLAINT' OR $5::boolean OR ${complaintObjectGrantSql('c2."id"', "$2")})
                AND (c2."assigned_admin_id" = $2
                  OR (c2."assigned_admin_id" IS NULL AND $3::boolean AND c2."state" = 'WAITING'))
                AND (c2."state" <> 'CLOSED' OR NOT EXISTS (
@@ -2634,14 +2706,16 @@ export async function listAdminConsultations(
                       c2."created_at" DESC, c2."id" DESC
              LIMIT 1
           )
+          AND (c."kind" <> 'COMPLAINT' OR $5::boolean OR ${complaintObjectGrantSql('c."id"', "$2")})
           AND (c."assigned_admin_id" = $2
             OR (c."assigned_admin_id" IS NULL AND $3::boolean AND c."state" = 'WAITING'))
           AND NOT (c."state" = 'WAITING' AND c."assigned_admin_id" IS NULL AND c."first_user_message_at" IS NULL)
+          AND ($6::text IS NULL OR u."name" ILIKE '%'||$6||'%' OR u."username" ILIKE '%'||$6||'%')
         ORDER BY CASE WHEN c."assigned_admin_id" = $2 THEN 0 ELSE 1 END, c."updated_at", c."id"
         LIMIT $4`,
-      [options.appId, context.userId, serviceQueue, limit],
+      [options.appId, context.userId, serviceQueue, limit, canComplaint, query ?? null],
     )).rows;
-    return { consultations: rows.map((row) => ({ ...toView(row, accountId, true, context.userId, adminThreadRead), botAccountId: supportBotAccountId(options) })) };
+    return { consultations: rows.map((row) => ({ ...toView(row, accountId, true, context.userId, adminThreadRead), botAccountId: supportBotAccountId(options) })), query: query ?? null };
   });
 }
 
@@ -2650,20 +2724,21 @@ export async function readOwnPresence(options: ConsultationRouteOptions, context
     await assertAdminContextInTransaction(client, context);
     const row = (await client.query<PresenceRow>(
       `SELECT "admin_user_id" AS "adminUserId", "availability", "connection_state" AS "connectionState",
-              "last_connected_at" AS "lastConnectedAt", "active_load" AS "activeLoad", "version"
+              "last_connected_at" AS "lastConnectedAt", "active_load" AS "activeLoad", "version",
+              "auth_session_id" AS "authSessionId"
          FROM "zzsh_iam"."im_support_presence" WHERE "app_id" = $1 AND "admin_user_id" = $2`,
       [options.appId, context.userId],
     )).rows[0];
     const today = await readSupportToday(client, options.appId, context.userId);
-    return row ? { ...presenceView(row), today } : { ...defaultPresence(context.userId), today };
+    return row ? { ...presenceView(row, context.sessionId), today } : { ...defaultPresence(context.userId), today };
   });
 }
 
 function defaultPresence(adminUserId: string): Omit<SupportPresence, "today"> {
-  return { adminUserId, availability: "OFF_DUTY", connectionState: "DISCONNECTED", lastConnectedAt: null, activeLoad: 0, version: 0 };
+  return { adminUserId, availability: "OFF_DUTY", connectionState: "DISCONNECTED", lastConnectedAt: null, activeLoad: 0, version: 0, ownedByAnotherSession: false, unbound: false };
 }
 
-function presenceView(row: PresenceRow): Omit<SupportPresence, "today"> {
+function presenceView(row: PresenceRow, currentSessionId: string): Omit<SupportPresence, "today"> {
   return {
     adminUserId: row.adminUserId,
     availability: row.availability,
@@ -2671,15 +2746,22 @@ function presenceView(row: PresenceRow): Omit<SupportPresence, "today"> {
     lastConnectedAt: iso(row.lastConnectedAt),
     activeLoad: row.activeLoad,
     version: numberValue(row.version),
+    ownedByAnotherSession: row.authSessionId !== null && row.authSessionId !== currentSessionId,
+    unbound: row.authSessionId === null,
   };
 }
 
-/** 开区间只在 AVAILABLE + CONNECTED 成立；所有其他组合都结束区间。 */
+/**
+ * CONNECTED opens/keeps the reception interval. A short transport reconnect keeps it
+ * open but is already excluded from dispatch by the connection-state predicate.
+ */
 export function presenceSessionAction(
   availability: SupportAvailability,
   connectionState: SupportConnectionState,
-): "OPEN" | "CLOSE" {
-  return availability === "AVAILABLE" && connectionState === "CONNECTED" ? "OPEN" : "CLOSE";
+): "OPEN" | "KEEP" | "CLOSE" {
+  if (availability === "AVAILABLE" && connectionState === "CONNECTED") return "OPEN";
+  if (availability === "AVAILABLE" && (connectionState === "RECONNECTING" || connectionState === "CONNECTING")) return "KEEP";
+  return "CLOSE";
 }
 
 export function presenceSessionEndReason(
@@ -2688,8 +2770,8 @@ export function presenceSessionEndReason(
 ): "PAUSED" | "OFF_DUTY" | "DISCONNECTED" | null {
   if (availability === "PAUSED") return "PAUSED";
   if (availability === "OFF_DUTY") return "OFF_DUTY";
-  if (connectionState !== "CONNECTED") return "DISCONNECTED";
-  // AVAILABLE + CONNECTED is the open interval, not an end reason.
+  if (connectionState !== "CONNECTED" && connectionState !== "RECONNECTING" && connectionState !== "CONNECTING") return "DISCONNECTED";
+  // AVAILABLE + (CONNECTED | reconnecting) is not an end reason.
   return null;
 }
 
@@ -2703,10 +2785,12 @@ export const PRESENCE_SESSION_CLOSE_SQL = `UPDATE "zzsh_iam"."im_support_presenc
   WHERE "app_id" = $1 AND "admin_user_id" = $2 AND "ended_at" IS NULL`;
 
 async function syncPresenceSession(client: PoolClient, appId: string, adminUserId: string, row: PresenceRow): Promise<void> {
-  if (presenceSessionAction(row.availability, row.connectionState) === "OPEN") {
+  const action = presenceSessionAction(row.availability, row.connectionState);
+  if (action === "OPEN") {
     await client.query(PRESENCE_SESSION_OPEN_SQL, [`im_presence_${randomUUID().replaceAll("-", "")}`, appId, adminUserId]);
     return;
   }
+  if (action === "KEEP") return;
   const reason = presenceSessionEndReason(row.availability, row.connectionState);
   if (!reason) return;
   await client.query(PRESENCE_SESSION_CLOSE_SQL, [appId, adminUserId, reason]);
@@ -2725,6 +2809,7 @@ export async function heartbeatOwnPresence(
             SET "last_connected_at" = clock_timestamp()
           WHERE "app_id" = $1 AND "admin_user_id" = $2
             AND "availability" = 'AVAILABLE' AND "connection_state" = 'CONNECTED'
+            AND "auth_session_id" = $3
           RETURNING "admin_user_id"
        ), s AS (
          UPDATE "zzsh_iam"."im_support_presence_session"
@@ -2736,7 +2821,7 @@ export async function heartbeatOwnPresence(
        SELECT EXISTS (SELECT 1 FROM p) AS "presence",
               EXISTS (SELECT 1 FROM s) AS "session",
               to_char(clock_timestamp() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "serverTime"`,
-      [options.appId, context.userId],
+      [options.appId, context.userId, context.sessionId],
     )).rows[0];
     return {
       ok: row?.presence === true && row?.session === true,
@@ -2748,7 +2833,7 @@ export async function heartbeatOwnPresence(
 export async function updateOwnPresence(
   options: ConsultationRouteOptions,
   context: AdminContext,
-  input: { availability: SupportAvailability; connectionState: SupportConnectionState; version?: number },
+  input: { availability: SupportAvailability; connectionState: SupportConnectionState; version?: number; takeover?: boolean },
   requestId: string,
 ): Promise<SupportPresence> {
   const result = await withTransaction(options.pool, async (client) => {
@@ -2758,9 +2843,21 @@ export async function updateOwnPresence(
     if (!hasPermission(access, ADMIN_PERMISSION.imSupportPresence)) {
       throw new SecurityApiError(403, "FORBIDDEN", "Permission required");
     }
+    // Hold the caller's session row until the presence write commits. This serializes
+    // presence with /pin/lock (session -> presence) and closes the race where a
+    // takeover that passed the earlier plain session check could write after lock.
+    const session = await client.query<{ locked: boolean }>(
+      `SELECT "locked" FROM "zzsh_auth_admin"."session"
+        WHERE "id" = $1 AND "userId" = $2 AND "expiresAt" > clock_timestamp()
+        FOR UPDATE`,
+      [context.sessionId, context.userId],
+    );
+    if (!session.rows[0]) throw new SecurityApiError(401, "UNAUTHENTICATED", "Session is not available");
+    if (session.rows[0].locked) throw new SecurityApiError(423, "FORBIDDEN", "Account locked");
     const current = (await client.query<PresenceRow>(
       `SELECT "admin_user_id" AS "adminUserId", "availability", "connection_state" AS "connectionState",
-              "last_connected_at" AS "lastConnectedAt", "active_load" AS "activeLoad", "version"
+              "last_connected_at" AS "lastConnectedAt", "active_load" AS "activeLoad", "version",
+              "auth_session_id" AS "authSessionId"
          FROM "zzsh_iam"."im_support_presence"
         WHERE "app_id" = $1 AND "admin_user_id" = $2`,
       [options.appId, context.userId],
@@ -2772,17 +2869,30 @@ export async function updateOwnPresence(
     if (!current && input.version !== undefined && input.version !== 0) {
       throw conflict("Presence version is stale");
     }
+    const explicitStart = input.takeover === true && input.availability === "AVAILABLE" && input.connectionState === "CONNECTED";
+    if (input.takeover === true && !explicitStart) {
+      throw conflict("Presence takeover requires an explicit connected start");
+    }
+    if (current?.authSessionId && current.authSessionId !== context.sessionId && !explicitStart) {
+      throw conflict("Presence is owned by another session");
+    }
+    // A pre-0184 row has no owner. A passive CONNECTED sync must not turn its old
+    // AVAILABLE state back into dispatchable reception; only an explicit start may bind.
+    if (current?.authSessionId === null && input.availability === "AVAILABLE" && !explicitStart) {
+      throw conflict("Presence is unbound; explicit start required");
+    }
     await options.testPresenceBarrier?.(context);
     let persisted: PresenceRow | undefined;
     if (!current) {
       const inserted = await client.query<PresenceRow>(
         `INSERT INTO "zzsh_iam"."im_support_presence"
-          ("app_id", "admin_user_id", "availability", "connection_state", "last_connected_at")
-         VALUES ($1,$2,$3,$4,CASE WHEN $4 = 'CONNECTED' THEN clock_timestamp() ELSE NULL END)
+          ("app_id", "admin_user_id", "availability", "connection_state", "last_connected_at", "auth_session_id")
+         VALUES ($1,$2,$3,$4,CASE WHEN $4 = 'CONNECTED' THEN clock_timestamp() ELSE NULL END,$5)
          ON CONFLICT ("app_id", "admin_user_id") DO NOTHING
          RETURNING "admin_user_id" AS "adminUserId", "availability", "connection_state" AS "connectionState",
-                   "last_connected_at" AS "lastConnectedAt", "active_load" AS "activeLoad", "version"`,
-        [options.appId, context.userId, input.availability, input.connectionState],
+                   "last_connected_at" AS "lastConnectedAt", "active_load" AS "activeLoad", "version",
+                   "auth_session_id" AS "authSessionId"`,
+        [options.appId, context.userId, input.availability, input.connectionState, context.sessionId],
       );
       persisted = inserted.rows[0];
     } else {
@@ -2791,12 +2901,17 @@ export async function updateOwnPresence(
             SET "availability" = $3,
                 "connection_state" = $4,
                 "last_connected_at" = CASE WHEN $4 = 'CONNECTED' THEN clock_timestamp() ELSE NULL END,
+                "auth_session_id" = $6,
                 "version" = "version" + 1,
                 "updated_at" = clock_timestamp()
           WHERE "app_id" = $1 AND "admin_user_id" = $2 AND "version" = $5
+            AND ("auth_session_id" = $6
+                 OR ($7::boolean AND $3 = 'AVAILABLE' AND $4 = 'CONNECTED')
+                 OR ("auth_session_id" IS NULL AND $3 <> 'AVAILABLE'))
           RETURNING "admin_user_id" AS "adminUserId", "availability", "connection_state" AS "connectionState",
-                    "last_connected_at" AS "lastConnectedAt", "active_load" AS "activeLoad", "version"`,
-        [options.appId, context.userId, input.availability, input.connectionState, currentVersion],
+                    "last_connected_at" AS "lastConnectedAt", "active_load" AS "activeLoad", "version",
+                    "auth_session_id" AS "authSessionId"`,
+        [options.appId, context.userId, input.availability, input.connectionState, currentVersion, context.sessionId, input.takeover === true],
       );
       persisted = updated.rows[0];
     }
@@ -2814,7 +2929,7 @@ export async function updateOwnPresence(
       requestId,
       details: { availability: input.availability, connectionState: input.connectionState, appId: options.appId },
     });
-    return { ...presenceView(persisted), today };
+    return { ...presenceView(persisted, context.sessionId), today };
   });
   if (result.availability === "AVAILABLE" && result.connectionState === "CONNECTED") {
     options.wakeDispatch?.();
@@ -2850,7 +2965,7 @@ async function beginClaimMembership(options: ConsultationRouteOptions, context: 
     const currentAccess = await loadEffectiveAdminAccess(client, context.userId);
     if (!hasPermission(currentAccess, ADMIN_PERMISSION.imSupportRead)) throw new SecurityApiError(403, "FORBIDDEN", "Permission required");
     const row = await readConsultation(client, options.appId, consultationId);
-    requireSupportAccess(currentAccess, row.kind);
+    await requireSupportAccessFor(client, currentAccess, context.userId, row);
     if(aftersaleId){
       const record=(await client.query<{requester_user_id:string;handler_admin_id:string|null}>(`SELECT requester_user_id,handler_admin_id FROM zzsh_iam.im_aftersale_record WHERE app_id=$1 AND id=$2 AND state='PENDING' FOR UPDATE`,[options.appId,aftersaleId])).rows[0];
       if(!record||row.kind!=="SERVICE"||record.requester_user_id!==row.userId||record.handler_admin_id!==context.userId)throw new SecurityApiError(403,"FORBIDDEN","Aftersale contact is not assigned to this agent");
@@ -3088,7 +3203,7 @@ async function beginTransfer(
     if (kind === "TAKEOVER") {
       if (takeoverDecision(row, context.userId) === "NOOP") return { alreadyAssigned: true } as const;
     } else {
-      requireSupportAccess(currentAccess, row.kind, "transfer");
+      await requireSupportAccessFor(client, currentAccess, context.userId, row, "transfer");
       if (row.state !== "ACTIVE" || row.assignedAdminId !== context.userId) throw new SecurityApiError(403, "FORBIDDEN", "Consultation is not assigned to the current administrator");
       if (targetAdminId === context.userId) throw invalid("Target administrator must be different");
     }
@@ -3207,20 +3322,95 @@ export async function listTransferTargets(
     const access = await loadEffectiveAdminAccess(client, context.userId);
     if (!hasPermission(access, ADMIN_PERMISSION.imSupportRead)) throw new SecurityApiError(403, "FORBIDDEN", "Permission required");
     const row = await readConsultation(client, options.appId, consultationId);
-    requireSupportAccess(access, row.kind, "transfer");
+    await requireSupportAccessFor(client, access, context.userId, row, "transfer");
     if (row.state !== "ACTIVE" || row.assignedAdminId !== context.userId) {
       throw new SecurityApiError(403, "FORBIDDEN", "Consultation is not assigned to the current administrator");
     }
     if (row.messageScopeState !== "READY" || !row.messageScopeId) return { targets: [], transferReady: false };
     const candidates = await readEligibleSupport(client, options.appId, locked);
     const targets = candidates
-      .filter((candidate) => candidate.adminUserId !== context.userId)
+      .filter((candidate) => candidate.adminUserId !== context.userId && (row.kind !== "COMPLAINT" || candidate.complaint))
       .map((candidate) => ({ adminUserId: candidate.adminUserId, displayName: candidate.adminName }));
     return { targets, transferReady: true };
   });
 }
 
 type ClosePlan = { operationId: string };
+
+type RoundCloseActor = {
+  realm: "admin" | "user";
+  actorId: string;
+  sessionId: string;
+  /** 用户侧客户端 operationId，仅用于审计追溯。 */
+  clientOperationId?: string;
+};
+
+/** Admin close and user close share this single ROUND_CLOSE implementation. */
+async function beginRoundClose(
+  client: PoolClient,
+  options: ConsultationRouteOptions,
+  row: ConsultationRow,
+  requestId: string,
+  actor: RoundCloseActor,
+  operationId: string,
+): Promise<ClosePlan | null> {
+  const consultationId = row.id;
+  if (!row.threadId) throw conflict("Consultation has no support thread");
+  const latestOperation = (await client.query<{ id: string; operationType: MessageScopeOperationType; state: MessageScopeOperationState }>(
+    `SELECT "id", "operation_type" AS "operationType", "state" FROM "zzsh_iam"."im_consultation_scope_operation"
+      WHERE "app_id" = $1 AND "consultation_id" = $2 ORDER BY "created_at" DESC, "id" DESC LIMIT 1 FOR UPDATE`,
+    [options.appId, consultationId],
+  )).rows[0];
+  if (latestOperation && ["PENDING", "RUNNING", "UNKNOWN"].includes(latestOperation.state)) throw unavailable("IM message scope operation is being recovered");
+  if (!row.messageScopeId) {
+    if (latestOperation && latestOperation.state !== "SUCCEEDED") throw unavailable("IM message scope requires recovery before close");
+    if (!["PENDING", "FAILED", "REVOKED"].includes(row.messageScopeState)) throw unavailable("IM message scope requires recovery before close");
+    return null;
+  }
+  if (!options.provider) throw unavailable("IM message scope provider is not configured");
+  if (latestOperation?.operationType === "ROUND_CLOSE" && (latestOperation.state === "FAILED" || latestOperation.state === "NEEDS_REVIEW")) {
+    throw unavailable("IM 本轮结束结果待对账，请使用恢复入口重试");
+  }
+  if (row.messageScopeState !== "READY" && row.messageScopeState !== "FAILED") throw unavailable("IM message scope is not ready to close");
+  const thread = await readThreadById(client, options.appId, row.threadId, true);
+  if (thread.messageScopeState !== "READY" || thread.messageScopeId !== row.messageScopeId) throw unavailable("IM support thread Team is inconsistent");
+  if (!row.assignedAdminId || !row.peerAccountId) throw conflict("Consultation assignment is inconsistent");
+  const manager = supportManagerAccount(options);
+  const updated = await client.query<{ messageScopeVersion: string | number }>(
+    `UPDATE "zzsh_iam"."im_consultation"
+      SET "message_scope_state" = 'REVOKING', "message_scope_version" = "message_scope_version" + 1,
+            "version" = "version" + 1, "updated_at" = clock_timestamp()
+      WHERE "app_id" = $1 AND "id" = $2 AND "state" = 'ACTIVE' AND "message_scope_state" IN ('READY', 'FAILED')
+      RETURNING "message_scope_version" AS "messageScopeVersion"`,
+    [options.appId, row.id],
+  );
+  if (updated.rowCount !== 1 || !updated.rows[0]) throw conflict("Consultation changed during close");
+  await client.query(
+    `INSERT INTO "zzsh_iam"."im_consultation_scope_operation"
+      ("id", "app_id", "consultation_id", "operation_type", "scope_version", "owner_account_id", "user_account_id",
+       "previous_admin_id", "previous_admin_account_id", "provider_team_id")
+     VALUES ($1,$2,$3,'ROUND_CLOSE',$4,$5,$6,$7,$8,$9)`,
+    [operationId, options.appId, row.id, updated.rows[0].messageScopeVersion, manager.accountId, row.userAccountId,
+      row.assignedAdminId, row.peerAccountId, row.messageScopeId],
+  );
+  await recordAudit(client, {
+    actorType: actor.realm,
+    actorId: actor.actorId,
+    sessionId: actor.sessionId,
+    action: "im.consultation.round_close.requested",
+    objectType: "im_consultation",
+    objectId: row.id,
+    outcome: "SUCCESS",
+    requestId,
+    details: {
+      threadId: thread.id,
+      roundSeq: row.roundSeq,
+      teamRetained: true,
+      ...(actor.clientOperationId ? { operationId: actor.clientOperationId } : {}),
+    },
+  });
+  return { operationId };
+}
 
 async function beginClose(options: ConsultationRouteOptions, context: AdminContext, consultationId: string, requestId: string): Promise<ClosePlan | null> {
   return withTransaction(options.pool, async (client) => {
@@ -3231,58 +3421,78 @@ async function beginClose(options: ConsultationRouteOptions, context: AdminConte
     if (!hasPermission(access, ADMIN_PERMISSION.imSupportRead)) throw new SecurityApiError(403, "FORBIDDEN", "Permission required");
     const row = await readConsultation(client, options.appId, consultationId, true);
     if (row.state !== "ACTIVE" || row.assignedAdminId !== context.userId) throw new SecurityApiError(403, "FORBIDDEN", "Consultation is not assigned to the current administrator");
-    requireSupportAccess(access, row.kind);
-    if (!row.threadId) throw conflict("Consultation has no support thread");
-    const latestOperation = (await client.query<{ id: string; operationType: MessageScopeOperationType; state: MessageScopeOperationState }>(
-      `SELECT "id", "operation_type" AS "operationType", "state" FROM "zzsh_iam"."im_consultation_scope_operation"
-        WHERE "app_id" = $1 AND "consultation_id" = $2 ORDER BY "created_at" DESC, "id" DESC LIMIT 1 FOR UPDATE`,
-      [options.appId, consultationId],
-    )).rows[0];
-    if (latestOperation && ["PENDING", "RUNNING", "UNKNOWN"].includes(latestOperation.state)) throw unavailable("IM message scope operation is being recovered");
-    if (!row.messageScopeId) {
-      if (latestOperation && latestOperation.state !== "SUCCEEDED") throw unavailable("IM message scope requires recovery before close");
-      if (!["PENDING", "FAILED", "REVOKED"].includes(row.messageScopeState)) throw unavailable("IM message scope requires recovery before close");
-      return null;
-    }
-    if (!options.provider) throw unavailable("IM message scope provider is not configured");
-    if (latestOperation?.operationType === "ROUND_CLOSE" && (latestOperation.state === "FAILED" || latestOperation.state === "NEEDS_REVIEW")) {
-      throw unavailable("IM 本轮结束结果待对账，请使用恢复入口重试");
-    }
-    if (row.messageScopeState !== "READY" && row.messageScopeState !== "FAILED") throw unavailable("IM message scope is not ready to close");
-    const thread = await readThreadById(client, options.appId, row.threadId, true);
-    if (thread.messageScopeState !== "READY" || thread.messageScopeId !== row.messageScopeId) throw unavailable("IM support thread Team is inconsistent");
-    if (!row.assignedAdminId || !row.peerAccountId) throw conflict("Consultation assignment is inconsistent");
-    const manager = supportManagerAccount(options);
-    const updated = await client.query<{ messageScopeVersion: string | number }>(
-      `UPDATE "zzsh_iam"."im_consultation"
-        SET "message_scope_state" = 'REVOKING', "message_scope_version" = "message_scope_version" + 1,
-              "version" = "version" + 1, "updated_at" = clock_timestamp()
-        WHERE "app_id" = $1 AND "id" = $2 AND "state" = 'ACTIVE' AND "message_scope_state" IN ('READY', 'FAILED')
-        RETURNING "message_scope_version" AS "messageScopeVersion"`,
-      [options.appId, row.id],
-    );
-    if (updated.rowCount !== 1 || !updated.rows[0]) throw conflict("Consultation changed during close");
-    const operationId = scopeOperationId();
-    await client.query(
-      `INSERT INTO "zzsh_iam"."im_consultation_scope_operation"
-        ("id", "app_id", "consultation_id", "operation_type", "scope_version", "owner_account_id", "user_account_id",
-         "previous_admin_id", "previous_admin_account_id", "provider_team_id")
-       VALUES ($1,$2,$3,'ROUND_CLOSE',$4,$5,$6,$7,$8,$9)`,
-      [operationId, options.appId, row.id, updated.rows[0].messageScopeVersion, manager.accountId, row.userAccountId,
-        row.assignedAdminId, row.peerAccountId, row.messageScopeId],
-    );
-    await recordAudit(client, {
-      actorType: "admin",
-      actorId: context.userId,
-      sessionId: context.sessionId,
-      action: "im.consultation.round_close.requested",
-      objectType: "im_consultation",
-      objectId: row.id,
-      outcome: "SUCCESS",
-      requestId,
-      details: { threadId: thread.id, roundSeq: row.roundSeq, teamRetained: true },
-    });
-    return { operationId };
+    await requireSupportAccessFor(client, access, context.userId, row);
+    return beginRoundClose(client, options, row, requestId,
+      { realm: "admin", actorId: context.userId, sessionId: context.sessionId }, scopeOperationId());
+  });
+}
+
+type LocalCloseActor =
+  | { realm: "admin"; context: AdminContext }
+  | { realm: "user"; context: UserContext };
+
+async function completeLocalCloseInTransaction(
+  client: PoolClient,
+  options: ConsultationRouteOptions,
+  actor: LocalCloseActor,
+  row: ConsultationRow,
+  requestId: string,
+  clientOperationId?: string,
+): Promise<void> {
+  const actorId = actor.context.userId;
+  if (actor.realm === "admin") {
+    const access = await loadEffectiveAdminAccess(client, actorId);
+    if (!hasPermission(access, ADMIN_PERMISSION.imSupportRead)) throw new SecurityApiError(403, "FORBIDDEN", "Permission required");
+    await requireSupportAccessFor(client, access, actorId, row);
+    if (row.state !== "ACTIVE" || row.assignedAdminId !== actorId) throw conflict("Consultation changed during close");
+  } else {
+    if (row.userId !== actorId) throw new SecurityApiError(404, "NOT_FOUND", "Consultation not found");
+    if (row.state === "WAITING") throw conflict("等待客服接入后才能结束本轮咨询");
+    if (row.state !== "ACTIVE") throw conflict("本轮咨询已结束");
+  }
+  if (row.messageScopeId) throw conflict("IM message scope requires remote close");
+  // No Team ever existed: close the business object without claiming remote revocation.
+  const updated = await client.query(
+    actor.realm === "admin"
+      ? `UPDATE "zzsh_iam"."im_consultation"
+            SET "state" = 'CLOSED',
+                "version" = "version" + 1, "message_scope_version" = "message_scope_version" + 1,
+                "updated_at" = clock_timestamp()
+          WHERE "app_id" = $1 AND "id" = $2 AND "state" = 'ACTIVE' AND "assigned_admin_id" = $3`
+      : `UPDATE "zzsh_iam"."im_consultation"
+            SET "state" = 'CLOSED',
+                "version" = "version" + 1, "message_scope_version" = "message_scope_version" + 1,
+                "updated_at" = clock_timestamp()
+          WHERE "app_id" = $1 AND "id" = $2 AND "state" = 'ACTIVE' AND "user_id" = $3`,
+    [options.appId, row.id, actorId],
+  );
+  if (updated.rowCount !== 1) throw conflict("Consultation changed during close");
+  await decrementPresence(client, options.appId, row.assignedAdminId);
+  await client.query(
+    `UPDATE "zzsh_iam"."im_support_thread"
+        SET "state" = 'IDLE', "peer_account_id" = NULL, "version" = "version" + 1, "updated_at" = clock_timestamp()
+      WHERE "app_id" = $1 AND "id" = $2`,
+    [options.appId, row.threadId ?? ""],
+  );
+  await writeEvent(client, {
+    consultationId: row.id,
+    eventType: "CLOSED",
+    actorType: actor.realm,
+    actorId,
+    fromAdminId: row.assignedAdminId,
+    peerAccountId: row.peerAccountId,
+    ...(clientOperationId ? { details: { operationId: clientOperationId, local: true } } : {}),
+  });
+  await recordAudit(client, {
+    actorType: actor.realm,
+    actorId,
+    sessionId: actor.context.sessionId,
+    action: "im.consultation.closed",
+    objectType: "im_consultation",
+    objectId: row.id,
+    outcome: "SUCCESS",
+    requestId,
+    ...(clientOperationId ? { details: { operationId: clientOperationId, local: true } } : {}),
   });
 }
 
@@ -3292,30 +3502,88 @@ async function completeLocalClose(options: ConsultationRouteOptions, context: Ad
     await setAuditContext(client, "admin", context.userId, context.sessionId, requestId);
     await assertAdminContextInTransaction(client, context);
     const row = await readConsultation(client, options.appId, consultationId, true);
-    const access = await loadEffectiveAdminAccess(client, context.userId);
-    if (!hasPermission(access, ADMIN_PERMISSION.imSupportRead)) throw new SecurityApiError(403, "FORBIDDEN", "Permission required");
-    requireSupportAccess(access, row.kind);
-    if (row.state !== "ACTIVE" || row.assignedAdminId !== context.userId) throw conflict("Consultation changed during close");
-    if (row.messageScopeId) throw conflict("IM message scope requires remote close");
-    // No Team ever existed: close the business object without claiming remote revocation.
-    await client.query(
-      `UPDATE "zzsh_iam"."im_consultation"
-          SET "state" = 'CLOSED',
-              "version" = "version" + 1, "message_scope_version" = "message_scope_version" + 1,
-              "updated_at" = clock_timestamp()
-        WHERE "app_id" = $1 AND "id" = $2 AND "state" = 'ACTIVE' AND "assigned_admin_id" = $3`,
-      [options.appId, consultationId, context.userId],
-    );
-    await decrementPresence(client, options.appId, context.userId);
-    await client.query(
-      `UPDATE "zzsh_iam"."im_support_thread"
-          SET "state" = 'IDLE', "peer_account_id" = NULL, "version" = "version" + 1, "updated_at" = clock_timestamp()
-        WHERE "app_id" = $1 AND "id" = $2`,
-      [options.appId, row.threadId ?? ""],
-    );
-    await writeEvent(client, { consultationId, eventType: "CLOSED", actorType: "admin", actorId: context.userId, fromAdminId: context.userId, peerAccountId: row.peerAccountId });
-    await recordAudit(client, { actorType: "admin", actorId: context.userId, sessionId: context.sessionId, action: "im.consultation.closed", objectType: "im_consultation", objectId: consultationId, outcome: "SUCCESS", requestId });
+    await completeLocalCloseInTransaction(client, options, { realm: "admin", context }, row, requestId);
   });
+}
+
+type UserCloseReplay =
+  | { operationId: string; state: MessageScopeOperationState }
+  | { local: true };
+
+/**
+ * Same operationId replays the durable scope operation or the local CLOSED event;
+ * a different round under the same operationId is a conflict, never a second close.
+ */
+async function readUserCloseReplay(
+  client: PoolClient,
+  options: ConsultationRouteOptions,
+  row: ConsultationRow,
+  operationId: string,
+  clientOperationId: string,
+): Promise<UserCloseReplay | null> {
+  const operation = (await client.query<{ consultationId: string; operationType: MessageScopeOperationType; state: MessageScopeOperationState }>(
+    `SELECT "consultation_id" AS "consultationId", "operation_type" AS "operationType", "state"
+       FROM "zzsh_iam"."im_consultation_scope_operation"
+      WHERE "app_id" = $1 AND "id" = $2 FOR UPDATE`,
+    [options.appId, operationId],
+  )).rows[0];
+  if (operation) {
+    if (operation.consultationId !== row.id || operation.operationType !== "ROUND_CLOSE") throw conflict("Operation identity was reused with different input");
+    return { operationId, state: operation.state };
+  }
+  const closed = (await client.query<{ consultationId: string }>(
+    `SELECT e."consultation_id" AS "consultationId"
+       FROM "zzsh_iam"."im_consultation_event" e
+       JOIN "zzsh_iam"."im_consultation" c ON c."id" = e."consultation_id"
+      WHERE c."app_id" = $1 AND e."actor_type" = 'user' AND e."actor_id" = $2
+        AND e."event_type" = 'CLOSED' AND e."details"->>'operationId' = $3
+      LIMIT 1`,
+    [options.appId, row.userId, clientOperationId],
+  )).rows[0];
+  if (closed) {
+    if (closed.consultationId !== row.id) throw conflict("Operation identity was reused with different input");
+    return { local: true };
+  }
+  return null;
+}
+
+/**
+ * User-initiated close: only the active round owned by the caller. The durable
+ * ROUND_CLOSE operation keeps retries and remote recovery on the admin path;
+ * idempotency also rides that operation (or the local CLOSED event), so the
+ * provider call is never wrapped in the request's database transaction.
+ */
+export async function closeUserConsultation(
+  options: ConsultationRouteOptions,
+  context: UserContext,
+  id: string,
+  clientOperationId: string,
+  requestId: string,
+): Promise<{ consultation: ConsultationView }> {
+  const plan = await withTransaction(options.pool, async (client) => {
+    await lockDispatchGate(client, options.appId);
+    await setAuditContext(client, "user", context.userId, context.sessionId, requestId);
+    await assertUserContextInTransaction(client, context);
+    const row = await readConsultation(client, options.appId, id, true);
+    if (row.userId !== context.userId) throw new SecurityApiError(404, "NOT_FOUND", "Consultation not found");
+    const operationId = userCloseOperationId(options.appId, context.userId, clientOperationId);
+    const replay = await readUserCloseReplay(client, options, row, operationId, clientOperationId);
+    if (replay) return { ...replay, replayed: true as const };
+    if (row.state === "WAITING") throw conflict("等待客服接入后才能结束本轮咨询");
+    if (row.state !== "ACTIVE") throw conflict("本轮咨询已结束");
+    const close = await beginRoundClose(client, options, row, requestId,
+      { realm: "user", actorId: context.userId, sessionId: context.sessionId, clientOperationId }, operationId);
+    if (!close) {
+      await completeLocalCloseInTransaction(client, options, { realm: "user", context }, row, requestId, clientOperationId);
+      return { local: true as const, replayed: false as const };
+    }
+    return { ...close, state: "PENDING" as const, replayed: false as const };
+  });
+  if ("operationId" in plan && plan.state !== "SUCCEEDED") await runScopeOperationNow(options, plan.operationId);
+  const result = await readUserConsultationView(options, context, id);
+  if (result.consultation.state !== "CLOSED") throw unavailable("本轮结束正在处理中，请稍后刷新");
+  void wakeAutoAssign(options);
+  return result;
 }
 
 export async function claimConsultation(options: ConsultationRouteOptions, context: AdminContext, id: string, requestId: string, aftersaleId?:string): Promise<{ consultation: ConsultationView }> {
@@ -3425,7 +3693,7 @@ async function retryOwnClaimOperation(
     const detail = await readScopeOperation(client, options.appId, operation.id, true);
     if (detail.operationType !== "ADD_MEMBER" || detail.targetAdminId !== context.userId) return null;
     if (detail.state !== "FAILED" && detail.state !== "NEEDS_REVIEW") return null;
-    requireSupportAccess(access, row.kind);
+    await requireSupportAccessFor(client, access, context.userId, row);
     if (row.messageScopeState !== "READY" || row.messageScopeId !== detail.providerTeamId) {
       throw conflict("IM claim scope changed during recovery");
     }
@@ -3598,13 +3866,16 @@ async function readAuthorizedAdminConsultation(
   const access = await loadEffectiveAdminAccess(client, context.userId);
   if (!hasPermission(access, ADMIN_PERMISSION.imSupportRead)) throw new SecurityApiError(403, "FORBIDDEN", "Permission required");
   const serviceQueue = hasPermission(access, ADMIN_PERMISSION.imSupportAccept);
+  const canComplaint = hasPermission(access, ADMIN_PERMISSION.imSupportComplaint);
   const result = await client.query<ConsultationRow>(
     `${CONSULTATION_SELECT}
-      WHERE c."app_id" = $1 AND c."id" = $2 AND c."state" <> 'CLOSED' AND (
-        c."assigned_admin_id" = $3
-        OR (c."assigned_admin_id" IS NULL AND $4::boolean)
-      )`,
-    [appId, consultationId, context.userId, serviceQueue],
+      WHERE c."app_id" = $1 AND c."id" = $2 AND c."state" <> 'CLOSED'
+        AND (c."kind" <> 'COMPLAINT' OR $5::boolean OR ${complaintObjectGrantSql('c."id"', "$3")})
+        AND (
+          c."assigned_admin_id" = $3
+          OR (c."assigned_admin_id" IS NULL AND $4::boolean)
+        )`,
+    [appId, consultationId, context.userId, serviceQueue, canComplaint],
   );
   const row = result.rows[0];
   // Identical rejection for "does not exist", "other app", "closed" and "not yours":
@@ -3640,6 +3911,26 @@ async function displayNames(client: PoolClient, relation: string, ids: string[])
   return names;
 }
 
+/**
+ * Historical round records are read-only and public to every support reader.
+ * Sending and receiving still go through the current-round checks.
+ */
+async function readAuthorizedAdminConsultationHistory(
+  client: PoolClient,
+  context: AdminContext,
+  appId: string,
+  consultationId: string,
+): Promise<ConsultationRow> {
+  const access = await loadEffectiveAdminAccess(client, context.userId);
+  if (!hasPermission(access, ADMIN_PERMISSION.imSupportRead)) throw new SecurityApiError(403, "FORBIDDEN", "Permission required");
+  const row = (await client.query<ConsultationRow>(
+    `${CONSULTATION_SELECT} WHERE c."app_id" = $1 AND c."id" = $2`,
+    [appId, consultationId],
+  )).rows[0];
+  if (!row) throw new SecurityApiError(404, "NOT_FOUND", "Consultation not found");
+  return row;
+}
+
 export async function listConsultationEvents(
   options: ConsultationRouteOptions,
   context: AdminContext,
@@ -3653,7 +3944,7 @@ export async function listConsultationEvents(
   return withTransaction(options.pool, async (client) => {
     await client.query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY");
     await assertAdminContextInTransaction(client, context);
-    await readAuthorizedAdminConsultation(client, context, options.appId, consultationId);
+    await readAuthorizedAdminConsultationHistory(client, context, options.appId, consultationId);
     // Newest page first, then flipped for display: the first screen must not be the oldest 20.
     const rows = (await client.query<{
       id: string; type: string; actorType: string; actorId: string | null; fromAdminId: string | null; toAdminId: string | null;
@@ -3694,6 +3985,107 @@ export async function listConsultationEvents(
         to: row.toAdminId ? { displayName: adminNames.get(row.toAdminId) || "客服" } : null,
       })),
       nextCursor: hasMore && page[0] ? encodeEventCursor(consultationId, page[0].createdAt, page[0].id) : null,
+    };
+  });
+}
+
+export type ConsultationRoundView = {
+  id: string;
+  roundSeq: string;
+  state: ConsultationState;
+  assignedAdmin: { id: string; name: string; avatar?: string } | null;
+  /** Read-only patrol handle for this round's own Team, scoped to the current viewer. */
+  conversationId: string | null;
+  createdAt: string;
+  updatedAt: string;
+  lastMessageAt: string | null;
+  closedAt: string | null;
+  transferCount: string;
+};
+
+export type ConsultationRoundsPage = {
+  contractVersion: "admin-consultation-rounds.v1";
+  consultationId: string;
+  rounds: ConsultationRoundView[];
+  nextCursor: string | null;
+};
+
+function parseRoundCursor(value: string | null): string | null {
+  if (value === null) return null;
+  if (!/^[1-9][0-9]{0,18}$/.test(value)) throw invalid("Cursor is invalid");
+  return value;
+}
+
+/**
+ * All rounds on one persistent thread, newest first. Public to support readers;
+ * no assignment, complaint or rating projection is added here.
+ */
+export async function listConsultationRounds(
+  options: ConsultationRouteOptions,
+  context: AdminContext,
+  consultationId: string,
+  limitValue: string | null,
+  cursorValue: string | null,
+): Promise<ConsultationRoundsPage> {
+  const limit = parseEventLimit(limitValue);
+  if (!ID_PATTERN.test(consultationId)) throw invalid("Consultation identifier is invalid");
+  const cursor = parseRoundCursor(cursorValue);
+  return withTransaction(options.pool, async (client) => {
+    await client.query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY");
+    await assertAdminContextInTransaction(client, context);
+    const target = await readAuthorizedAdminConsultationHistory(client, context, options.appId, consultationId);
+    const threadId = target.threadId ?? target.id;
+    const viewerAccountId = await auditViewerAccount(client, options.appId, context.userId);
+    const rows = (await client.query<{
+      id: string; roundSeq: string; state: ConsultationState; assignedAdminId: string | null;
+      adminName: string | null; adminImage: string | null; messageScopeId: string | null; messageScopeState: MessageScopeState;
+      createdAt: string; updatedAt: string;
+      lastMessageAt: string | null; closedAt: string | null; transferCount: string;
+    }>(
+      `SELECT c."id", COALESCE(c."round_seq", 1)::text AS "roundSeq", c."state",
+              c."assigned_admin_id" AS "assignedAdminId", au."name" AS "adminName", au."image" AS "adminImage",
+              c."message_scope_id" AS "messageScopeId", c."message_scope_state" AS "messageScopeState",
+              to_char(c."created_at" AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "createdAt",
+              to_char(c."updated_at" AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "updatedAt",
+              to_char(c."last_message_at" AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "lastMessageAt",
+              to_char(ev."closedAt" AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "closedAt",
+              ev."transferCount"::text AS "transferCount"
+         FROM "zzsh_iam"."im_consultation" c
+         LEFT JOIN "zzsh_auth_admin"."user" au ON au."id" = c."assigned_admin_id"
+         LEFT JOIN LATERAL (
+           SELECT max(e."created_at") FILTER (WHERE e."event_type" = 'CLOSED') AS "closedAt",
+                  count(*) FILTER (WHERE e."event_type" = 'TRANSFERRED') AS "transferCount"
+             FROM "zzsh_iam"."im_consultation_event" e
+            WHERE e."consultation_id" = c."id"
+         ) ev ON true
+        WHERE c."app_id" = $1 AND c."thread_id" = $2
+          AND ($3::bigint IS NULL OR COALESCE(c."round_seq", 1) < $3::bigint)
+        ORDER BY COALESCE(c."round_seq", 1) DESC, c."created_at" DESC, c."id" DESC
+        LIMIT $4`,
+      [options.appId, threadId, cursor, limit + 1],
+    )).rows;
+    const hasMore = rows.length > limit;
+    const page = hasMore ? rows.slice(0, limit) : rows;
+    return {
+      contractVersion: "admin-consultation-rounds.v1",
+      consultationId,
+      rounds: page.map((row) => ({
+        id: row.id,
+        roundSeq: row.roundSeq,
+        state: row.state,
+        assignedAdmin: row.assignedAdminId
+          ? { id: row.assignedAdminId, name: row.adminName?.trim() || "平台客服", ...(managedProfileImagePath(row.adminImage) ? { avatar: managedProfileImagePath(row.adminImage)! } : {}) }
+          : null,
+        conversationId: row.messageScopeState === "READY" && row.messageScopeId && viewerAccountId
+          ? `${viewerAccountId}|2|${row.messageScopeId}`
+          : null,
+        createdAt: row.createdAt,
+        updatedAt: row.updatedAt,
+        lastMessageAt: row.lastMessageAt,
+        closedAt: row.closedAt,
+        transferCount: row.transferCount,
+      })),
+      nextCursor: hasMore && page.at(-1) ? page.at(-1)!.roundSeq : null,
     };
   });
 }

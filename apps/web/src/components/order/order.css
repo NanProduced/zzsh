@@ -252,8 +252,6 @@
 .order-refund-funds { margin: 0; color: var(--color-text-muted); font-size: 12px; line-height: 1.7; }
 .order-refund-totals { display: grid; gap: 10px; padding: 14px; border: 1px solid var(--color-border-subtle); border-radius: 10px; background: var(--color-bg-surface); }
 .order-refund-totals .order-refund-amounts { border: 0; padding: 0; background: none; }
-.order-refund-abnormal { display: grid; gap: 10px; padding: 14px; border: 1px solid color-mix(in srgb, var(--color-status-warning) 30%, var(--color-border-subtle)); border-radius: 10px; background: color-mix(in srgb, var(--color-status-warning) 5%, var(--color-bg-surface)); }
-.order-refund-abnormal .order-refund-intents { gap: 8px; }
 .order-refund-submit { margin: 0; color: var(--color-text-secondary); font-size: 12px; line-height: 1.6; }
 .order-refund-intents-heading h3 { margin: 0; color: var(--color-text-primary); font-size: 14px; }
 .order-refund-intents-heading span { color: var(--color-text-muted); font-size: 12px; }
@@ -481,15 +479,19 @@
 .order-fulfillment-stage[data-tone="unknown"] .order-fulfillment-dot { background: transparent; border: 1px dashed var(--color-text-muted); }
 .order-fulfillment-summary { flex: 1 1 220px; min-width: 0; margin: 0; color: var(--color-text-primary); font-size: 13px; font-weight: 600; line-height: 1.55; overflow-wrap: anywhere; }
 .order-fulfillment-head .button { flex: 0 0 auto; margin-left: auto; }
-.order-fulfillment-steps { display: flex; align-items: center; gap: 5px; margin: 0; padding: 1px 0 2px; overflow-x: auto; list-style: none; scrollbar-width: thin; }
-.order-fulfillment-steps li { display: inline-flex; align-items: center; gap: 6px; flex: 0 0 auto; padding: 3px 9px; border: 1px solid var(--color-border-subtle); border-radius: 999px; color: var(--color-text-muted); font-size: 11px; line-height: 1.6; white-space: nowrap; }
-.order-fulfillment-steps li[data-state="done"] { color: var(--color-text-secondary); border-color: color-mix(in srgb, var(--color-status-success) 26%, var(--color-border-subtle)); }
-.order-fulfillment-steps li[data-state="current"] { color: var(--color-text-primary); border-color: color-mix(in srgb, var(--color-accent-brand) 45%, var(--color-border-default)); background: color-mix(in srgb, var(--color-accent-brand) 8%, transparent); font-weight: 600; }
-.order-fulfillment-steps li[data-state="cancelled"],
-.order-fulfillment-steps li[data-state="unknown"] { border-style: dashed; }
-.order-fulfillment-step-dot { width: 6px; height: 6px; flex: 0 0 auto; border-radius: 50%; background: currentColor; opacity: 0.45; }
-.order-fulfillment-steps li[data-state="done"] .order-fulfillment-step-dot { background: var(--color-status-success); opacity: 1; }
-.order-fulfillment-steps li[data-state="current"] .order-fulfillment-step-dot { background: var(--color-accent-brand); opacity: 1; }
+.order-fulfillment-steps { display: flex; align-items: flex-start; gap: 0; margin: 0; padding: 1px 0 2px; overflow-x: auto; list-style: none; scrollbar-width: thin; }
+.order-fulfillment-steps li { position: relative; display: grid; justify-items: center; gap: 6px; flex: 1 1 0; min-width: 64px; padding: 0; border: 0; border-radius: 0; background: none; color: var(--color-text-muted); font-size: 11px; line-height: 1.4; text-align: center; white-space: normal; }
+.order-fulfillment-steps li::before { content: ""; position: absolute; top: 5px; left: 50%; width: 100%; height: 2px; background: var(--color-border-subtle); }
+.order-fulfillment-steps li:last-child::before { display: none; }
+.order-fulfillment-steps li[data-state="done"] { color: var(--color-text-secondary); }
+.order-fulfillment-steps li[data-state="current"] { color: var(--color-text-primary); font-weight: 600; }
+.order-fulfillment-steps li[data-state="cancelled"] { color: var(--color-status-danger); font-weight: 600; }
+.order-fulfillment-step-dot { position: relative; z-index: 1; width: 11px; height: 11px; flex: 0 0 auto; border: 2px solid var(--color-border-default); border-radius: 50%; background: var(--color-bg-card); }
+.order-fulfillment-steps li[data-state="done"] .order-fulfillment-step-dot { border-color: var(--color-status-success); background: var(--color-status-success); }
+.order-fulfillment-steps li[data-state="current"] .order-fulfillment-step-dot { border-color: var(--color-accent-brand); background: var(--color-accent-brand); box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-accent-brand) 16%, transparent); }
+.order-fulfillment-steps li[data-state="cancelled"] .order-fulfillment-step-dot { border-color: var(--color-status-danger); background: var(--color-status-danger); }
+.order-fulfillment-steps li[data-state="skipped"] .order-fulfillment-step-dot,
+.order-fulfillment-steps li[data-state="unknown"] .order-fulfillment-step-dot { border-style: dashed; background: var(--color-bg-card); }
 
 @media (max-width: 599px) {
   .order-fulfillment-stage { padding: 11px 13px; }
@@ -711,4 +713,47 @@ html[data-theme="dark"] .skin-tag-rarity { color: #f59e0b; background: #382c16; 
 .order-lightbox-arrow:disabled { opacity: 0.2; cursor: not-allowed; }
 .order-lightbox-arrow.prev { left: 12px; }
 .order-lightbox-arrow.next { right: 12px; }
+
+/* Order progress card: one decision, one primary action, facts on demand.
+   Only existing surface/border/text tokens are used so both themes stay readable. */
+.order-progress-card {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+  margin-top: 24px;
+  padding: 20px 22px;
+  border: 1px solid var(--color-border-default);
+  border-left: 3px solid var(--color-accent-brand);
+  border-radius: 12px;
+  background: var(--color-bg-surface);
+}
+.order-progress-card[data-tone="warning"] { border-left-color: var(--color-status-warning); }
+.order-progress-card[data-tone="done"] { border-left-color: var(--color-status-success); }
+.order-progress-card[data-tone="unknown"],
+.order-progress-card[data-tone="waiting"] { border-left-color: var(--color-border-default); }
+.order-progress-head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; }
+.order-progress-label { font-size: 11px; font-weight: 700; letter-spacing: 0.08em; color: var(--color-text-secondary); text-transform: uppercase; }
+.order-progress-owner { padding: 2px 10px; border: 1px solid var(--color-border-subtle); border-radius: 999px; font-size: 12px; font-weight: 600; color: var(--color-text-secondary); }
+.order-progress-title { margin: 0; color: var(--color-text-primary); font-size: clamp(18px, 2.2vw, 22px); font-weight: 650; line-height: 1.35; }
+.order-progress-note { margin: 0; max-width: 72ch; color: var(--color-text-secondary); font-size: 14px; line-height: 1.75; }
+.order-progress-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 12px; }
+.order-progress-facts { min-width: 0; padding-top: 10px; border-top: 1px solid var(--color-border-subtle); }
+.order-progress-facts > summary { width: fit-content; cursor: pointer; list-style: none; color: var(--color-text-secondary); font-size: 13px; font-weight: 600; }
+.order-progress-facts > summary::-webkit-details-marker { display: none; }
+.order-progress-facts > summary::after { content: " · 展开"; font-weight: 400; }
+.order-progress-facts[open] > summary::after { content: " · 收起"; }
+.order-progress-facts > summary:focus-visible { outline: 2px solid var(--color-focus-ring); outline-offset: 4px; border-radius: 4px; }
+.order-progress-facts ul { display: grid; gap: 6px; margin: 10px 0 0; padding-left: 20px; }
+.order-progress-facts li { color: var(--color-text-secondary); font-size: 13px; line-height: 1.65; }
+#order-trade-actions, #order-refund-section, #order-legacy-continuation { scroll-margin-top: 16px; }
+
+@media (max-width: 599px) {
+  .order-progress-card { margin-top: 18px; padding: 16px; gap: 10px; }
+  .order-progress-title { font-size: 18px; }
+  .order-progress-note { font-size: 13px; }
+  .order-progress-actions { gap: 8px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .order-progress-card { transition: none; }
+}
 

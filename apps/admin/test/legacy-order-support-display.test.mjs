@@ -40,7 +40,6 @@ function loadOrderView(probe){
   './im-support-fulfillment':{OrderFulfillmentSection:empty,SupportUnpaidCancelCard:empty},
   './admin-joinpay-ops-panel':{AdminCollectionQueryBox:empty,AdminNativeRefundPanel:empty,normalRefundBasis:()=>({})},
   './admin-prestart-termination-panel':{AdminPrestartTerminationPanel:empty},
-  './admin-original-refund-panel':{AdminOriginalRefundPanel:empty},
   './supply-listing-review-view':{SupplyListingReviewView:empty},
   '../components/dashboard/domain-summary-block':{DomainSummaryBlock:empty},
   '../components/dashboard/domain-summary-model':{readDomainSummary:async()=>({})},

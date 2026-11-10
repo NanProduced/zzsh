@@ -8,7 +8,7 @@ import { lockSupportMutation } from "./support-dispatch";
 import { buildYunxinIdentityMarker, deriveYunxinAccountId } from "./identity-lifecycle";
 import { readOrderTeamAccess, readOrderTeamMemberRows, projectOrderTeamMembers, type OrderTeamActor } from "./order-team-access";
 import { supportManagerIdentityKey } from "./consultation";
-import { legacyOrderReadState, LEGACY_ORDER_STATUS_SQL } from "../order/legacy-order-read";
+import { legacyOrderReadState, LEGACY_CONTINUATION_CANCELLED_AT_SQL, LEGACY_ORDER_STATUS_SQL } from "../order/legacy-order-read";
 import { OrderImSdkRouteError, type OrderImSdkRouteBindings } from "../config/config";
 import { legacyTeamSendWindow } from "./legacy-order-team-window";
 
@@ -50,7 +50,7 @@ export async function requestLegacyOrderTeam(c:PoolClient,actor:Actor,appId:stri
 export async function readLegacyOrderTeamAccess(c:PoolClient,actor:OrderTeamActor,orderId:string,operation:"read"|"send"="read",bindings?:OrderImSdkRouteBindings):Promise<Record<string,unknown>>{
   if(actor.realm==="user")await assertUserContextInTransaction(c,actor);else await assertAdminContextInTransaction(c,actor);
   const row=(await c.query(`SELECT l.id,l.original_order_no,l.renter_user_id,l.owner_user_id,l.game_id,l.account_id,
-    l.source_order_status,l.source_pay_status,l.source_cancelled_at,l.source_completed_at,h.stage AS continuation_stage,
+    l.source_order_status,l.source_pay_status,${LEGACY_CONTINUATION_CANCELLED_AT_SQL} AS source_cancelled_at,l.source_completed_at,h.stage AS continuation_stage,
     (SELECT v.created_at FROM zzsh_order.legacy_continuation_version v WHERE v.order_id=l.id AND v.command='CONFIRM' ORDER BY v.revision DESC LIMIT 1) AS continuation_completed_at,game.name AS game_name,
     g.app_id,g.assigned_admin_id,g.provision_state,g.team_state,g.team_id,g.team_name,g.team_ready_at
     FROM zzsh_order.legacy_order_read_snapshot l JOIN zzsh_supply.game game ON game.id=l.game_id

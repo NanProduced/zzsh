@@ -1,4 +1,4 @@
-import { requestOrderJson, requestOrderWrite } from "./order-client.ts";
+import { requestOrderJson, requestOrderWrite, type OrderSubjectInput } from "./order-client.ts";
 import { formatExactYuan } from "@zzsh/ui/display-money";
 
 export type LegacyCommandName = "propose" | "confirm" | "reject" | "hold" | "release" | "confiscate";
@@ -31,7 +31,7 @@ export function parseLegacyContinuation(value: unknown): LegacyContinuation {
     || value.earlyFee !== undefined && value.earlyFee !== null && (typeof value.earlyFee !== "string" || !/^(0|[1-9]\d{0,23})\.\d{2}$/.test(value.earlyFee))
     || value.refundDueAt !== undefined && value.refundDueAt !== null && (typeof value.refundDueAt !== "string" || !Number.isFinite(Date.parse(value.refundDueAt)))
     || !record(value.amounts) || !Array.isArray(value.duties) || value.duties.length > 200) throw new Error("订单续办信息暂不可用");
-  if (value.stage !== null && !["3", "8", "9", "4"].includes(String(value.stage)) || value.isSettle !== null && !["0", "2", "3"].includes(String(value.isSettle))) throw new Error("订单状态暂不可用");
+  if (value.stage !== null && !["3", "8", "9", "4", "5"].includes(String(value.stage)) || value.isSettle !== null && !["0", "2", "3"].includes(String(value.isSettle))) throw new Error("订单状态暂不可用");
   const amounts: LegacyContinuation["amounts"] = {};
   for (const [key, amount] of Object.entries(value.amounts)) {
     if (!/^[A-Za-z][A-Za-z0-9]{0,40}$/.test(key)) throw new Error("订单金额暂不可用");
@@ -72,9 +72,10 @@ export async function legacyIntentFingerprint(orderId: string, kind: LegacyComma
   return Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", bytes))).map(x => x.toString(16).padStart(2, "0")).join("");
 }
 export const legacyContinuationApi = {
-  async read(orderId: string, signal?: AbortSignal) { const body = await requestOrderJson<{ continuation: unknown }>(base(orderId), { signal }); return parseLegacyContinuation(body.continuation); },
-  async preview(orderId: string, quantities: LegacyQuantitiesInput, signal?: AbortSignal): Promise<LegacyProposal> {
-    const body = await requestOrderWrite<LegacyProposal>(base(orderId) + "/preview", { body: { quantities }, signal });
+  /** `subject` is the frozen owner of the operation (the intent owner on replay). */
+  async read(subject: OrderSubjectInput, orderId: string, signal?: AbortSignal) { const body = await requestOrderJson<{ continuation: unknown }>(base(orderId), { signal, subject }); return parseLegacyContinuation(body.continuation); },
+  async preview(subject: OrderSubjectInput, orderId: string, quantities: LegacyQuantitiesInput, signal?: AbortSignal): Promise<LegacyProposal> {
+    const body = await requestOrderWrite<LegacyProposal>(base(orderId) + "/preview", { body: { quantities }, signal, subject });
     if (!body || typeof body.inputEvidenceId !== "string" || !id.test(body.inputEvidenceId) || !digest.test(body.proposalFingerprint) || !record(body.proposalAmounts) || !record(body.previewAmounts)
       || body.revision !== null && (typeof body.revision !== "string" || !/^[1-9]\d{0,17}$/.test(body.revision))
       || body.settlementKind !== undefined && !["EARLY", "NORMAL"].includes(body.settlementKind)
@@ -83,12 +84,12 @@ export const legacyContinuationApi = {
     const display = (amounts: Record<string, string | null>) => Object.fromEntries(Object.entries(amounts).map(([key, value]) => [key, value === null ? null : formatExactYuan(value)]));
     return { ...body, proposalAmounts: display(body.proposalAmounts), previewAmounts: display(body.previewAmounts) };
   },
-  async write(orderId: string, kind: LegacyCommandName, body: Record<string, unknown>, key: string, signal?: AbortSignal) {
-    const result = await requestOrderWrite<unknown>(base(orderId) + "/" + kind, { body, key, signal });
+  async write(subject: OrderSubjectInput, orderId: string, kind: LegacyCommandName, body: Record<string, unknown>, key: string, signal?: AbortSignal) {
+    const result = await requestOrderWrite<unknown>(base(orderId) + "/" + kind, { body, key, signal, subject });
     return validateResult(orderId,kind,body,result);
   },
-  async receipt(orderId: string, kind: LegacyCommandName, key: string, originalBody: Record<string, unknown>, signal?: AbortSignal): Promise<LegacyReceipt> {
-    const body = await requestOrderJson<LegacyReceipt>(base(orderId) + "/receipt?" + new URLSearchParams({ command: kind, key }), { signal });
+  async receipt(subject: OrderSubjectInput, orderId: string, kind: LegacyCommandName, key: string, originalBody: Record<string, unknown>, signal?: AbortSignal): Promise<LegacyReceipt> {
+    const body = await requestOrderJson<LegacyReceipt>(base(orderId) + "/receipt?" + new URLSearchParams({ command: kind, key }), { signal, subject });
     if (!body || !["UNKNOWN", "KNOWN_SUCCESS", "KNOWN_REJECTED"].includes(body.state)) throw new Error("原请求结果暂不可用");
     if (body.state !== "UNKNOWN" && (body.fingerprint !== await legacyIntentFingerprint(orderId, kind, originalBody) || !Number.isInteger(body.status) || body.state === "KNOWN_SUCCESS" && (body.status < 200 || body.status >= 300) || body.state === "KNOWN_REJECTED" && ![400, 409].includes(body.status))) throw new Error("原请求信息不一致，请保留并联系受权客服核对");
     if(body.state==="KNOWN_SUCCESS")validateResult(orderId,kind,originalBody,body.receipt);

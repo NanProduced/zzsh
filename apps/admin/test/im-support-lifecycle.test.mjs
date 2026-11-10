@@ -122,7 +122,7 @@ test("read client identity is stable for send-only changes while type send capab
   assert.notEqual(serviceOnly, all);
   assert.notEqual(all, none);
   assert.equal(canOperateSupportType("SERVICE", true, false), true);
-  assert.equal(canOperateSupportType("COMPLAINT", true, false), true, "complaints are ordinary chats and need no complaint grant");
+  assert.equal(canOperateSupportType("COMPLAINT", true, false), false, "complaints require the separate grant");
   assert.equal(canOperateSupportType("COMPLAINT", true, true), true);
   assert.equal(canOperateSupportType("SERVICE", false, true), false);
 });

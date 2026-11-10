@@ -4,6 +4,9 @@ import { SecurityApiError } from "../auth/security-core";
 import { invalid, notFound } from "../supply/supply-util";
 import {assertLocalFinancialSandboxResource,localFinancialSandboxRegistration,type LocalFinancialSandbox} from './local-financial-sandbox-resource';
 import {assertEcsTestDemoResource,readEcsTestDemoRegistration,type DemoFinanceResource} from './ecs-test-demo-resource';
+import { readPrestartRefundProgress } from '../order/prestart-refund-store';
+import type { PrestartPaymentBasis } from '../order/prestart-termination';
+import { verifyPrestartRefundLiability } from './prestart-refund-liability';
 
 export const PERSONAL_REFUND_READ_VERSION = "personal-native-refunds.v1";
 const INTENT_LIMIT = 50;
@@ -50,32 +53,7 @@ export type PersonalRefundObservation = Readonly<{
   trust: "LOCAL_OBSERVATION_NOT_REVALIDATED";
 }>;
 
-export type PersonalRefundBasis = "POSTING" | "REVIEW_CONFIRMATION";
-export type PersonalFirstSubmit = Readonly<{
-  dispatch: "NEVER_DISPATCHED" | "DISPATCHED" | "UNKNOWN";
-  blockedReason: "ORIGINAL_ORDER_NO_AMBIGUOUS" | "ABNORMAL_BASIS_REVIEW" | null;
-  blockedAt: string | null;
-  blockedAuditCount: number | null;
-  trust: "LOCAL_AUDIT_AND_ATTEMPT";
-}>;
-export type PersonalAbnormalResponsibility = Readonly<{
-  confirmationId: string;
-  reasonCode: "DUPLICATE_PAYMENT" | "LATE_PAYMENT" | "UNKNOWN_REASON";
-  originalCents: string | null;
-  currency: "CNY" | null;
-  liabilityRootId: string | null;
-  liabilityEventId: string | null;
-  intentIds: readonly string[];
-  allocatedCents: string | null;
-  consumedCents: string | null;
-  releasedCents: string | null;
-  remainingCents: string | null;
-  totalsComplete: boolean;
-  state: "NO_INTENT" | "READY" | "PROCESSING" | "UNKNOWN" | "CONSUMED" | "RELEASED" | "REVIEW_REQUIRED" | "CONFLICT";
-  firstSubmit: PersonalFirstSubmit | null;
-  reasonCodes: readonly string[];
-}>;
-
+export type PersonalRefundBasis = "POSTING";
 export type PersonalRefundIntent = Readonly<{
   intentId: string;
   refundOrderNo: string | null;
@@ -92,7 +70,6 @@ export type PersonalRefundIntent = Readonly<{
   updatedAt: string | null;
   latestObservation: PersonalRefundObservation | null;
   latestFailure: PersonalRefundObservation | null;
-  firstSubmit: PersonalFirstSubmit | null;
   savedChannelEvidence: Readonly<{
     terminal: "SUCCEEDED" | "FAILED_NO_EXECUTION";
     evidenceLevel: (typeof EVIDENCE_LEVELS)[number] | null;
@@ -123,6 +100,10 @@ export type PersonalRefundReadProjection = Readonly<{
   order: Readonly<{ orderId: string; displayNo: string | null; status: PersonalOrderStatus }>;
   status: "AVAILABLE" | "NOT_APPLICABLE";
   outcome: PersonalRefundOutcome;
+  prestartRefund?: Readonly<{ state: "PROCESSING" | "SUCCEEDED" | "FAILED" | "UNKNOWN"; amountCents: string | null;
+    source: "SIMULATED" | "JOINPAY" | "UNKNOWN"; bankArrival: "UNKNOWN" }>;
+  cancellationRefund?: Readonly<{ state: "PROCESSING" | "SUCCEEDED" | "FAILED" | "UNKNOWN"; amountCents: string | null;
+    source: "SIMULATED" | "JOINPAY" | "UNKNOWN"; bankArrival: "UNKNOWN" }>;
   coverage: Readonly<{ scope: "LOCAL_REGISTERED_ONLY"; intentLimit: number; intentsComplete: boolean; channelRecordsChecked: false }>;
   asOf: string;
   responsibility: Readonly<{
@@ -136,19 +117,6 @@ export type PersonalRefundReadProjection = Readonly<{
     totalsComplete: boolean;
     dueAt: string | null;
     dueState: "DUE" | "NOT_DUE" | "UNKNOWN";
-  }>;
-  abnormalResponsibilities: readonly PersonalAbnormalResponsibility[];
-  responsibilitiesTruncated: boolean;
-  responsibilityTotals: Readonly<{
-    originalCents: string | null;
-    allocatedCents: string | null;
-    consumedCents: string | null;
-    releasedCents: string | null;
-    remainingCents: string | null;
-    totalsComplete: boolean;
-    postingOriginalCents: string | null;
-    abnormalOriginalCents: string | null;
-    abnormalConfirmationCount: number;
   }>;
   intents: readonly PersonalRefundIntent[];
   returnedIntentCount: number;
@@ -174,7 +142,7 @@ export type PersonalRefundReadProjection = Readonly<{
 type Row = Record<string, unknown>;
 
 const REQUIRED = [
-  { table: "zzsh_order.rental_order", columns: ["id", "display_no", "status", "renter_user_id"] },
+  { table: "zzsh_order.rental_order", columns: ["id", "display_no", "status", "renter_user_id", "cancel_reason", "paid_confirmation_id"] },
   { table: "zzsh_order.settlement_posting", columns: ["id", "order_id", "currency", "renter_refund_cents", "refund_due_at", "posted_at"] },
   { table: "zzsh_order.payment_confirmation", columns: ["id", "order_id", "source", "disposition", "reason_code", "currency", "amount_cents",
     "merchant_scope_id", "provider_transaction_id", "merchant_order_no", "joinpay_request_id", "joinpay_evidence_id", "joinpay_anchor_id"] },
@@ -218,7 +186,7 @@ const PREFLIGHT_SQL = `WITH req AS (
     COALESCE(bool_and(installed AND columns_ready AND resource_ready),false) AS ready
   FROM checked`;
 
-const ORDER_SQL = `SELECT o.id,o.display_no,o.status,o.renter_user_id,
+const ORDER_SQL = `SELECT o.id,o.display_no,o.status,o.renter_user_id,o.cancel_reason,o.paid_confirmation_id,
     p.id AS posting_id,p.currency AS posting_currency,p.renter_refund_cents::text AS refund_cents,
     to_char(p.refund_due_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS due_at
   FROM zzsh_order.rental_order o
@@ -234,15 +202,6 @@ const INTENT_SQL = `SELECT i.id,i.posting_id,i.order_id,i.renter_user_id,i.payme
     to_char(i.due_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS due_at,
     to_char(i.created_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS created_at,
     to_char(i.updated_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS updated_at,
-    (SELECT count(*)::int FROM zzsh_order.joinpay_refund_attempt x WHERE x.intent_id=i.id AND x.operation='SUBMIT') AS submit_attempts,
-    (SELECT count(*)::int FROM zzsh_iam.audit_event a WHERE a.action='order.refund.abnormal.first_submit.blocked'
-      AND a.object_type='channel_refund_intent' AND a.object_id=i.id AND a.outcome='FAILURE') AS blocked_count,
-    (SELECT to_char(a.occurred_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') FROM zzsh_iam.audit_event a
-      WHERE a.action='order.refund.abnormal.first_submit.blocked' AND a.object_type='channel_refund_intent'
-        AND a.object_id=i.id AND a.outcome='FAILURE' ORDER BY a.occurred_at DESC,a.id COLLATE "C" DESC LIMIT 1) AS blocked_at,
-    (SELECT a.details->>'gateReason' FROM zzsh_iam.audit_event a
-      WHERE a.action='order.refund.abnormal.first_submit.blocked' AND a.object_type='channel_refund_intent'
-        AND a.object_id=i.id AND a.outcome='FAILURE' ORDER BY a.occurred_at DESC,a.id COLLATE "C" DESC LIMIT 1) AS blocked_reason,
     e.terminal AS evidence_terminal,e.refund_transaction_no AS evidence_trx_no,
     to_char(e.completed_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS evidence_completed_at,
     eo.evidence_level AS terminal_evidence_level,
@@ -289,77 +248,8 @@ const INTENT_SQL = `SELECT i.id,i.posting_id,i.order_id,i.renter_user_id,i.payme
       FROM zzsh_order.channel_refund_observation c WHERE c.intent_id=i.id AND c.event IN('UNKNOWN','STALE')
     ) f ORDER BY observed_at DESC,observation_source COLLATE "C" DESC,observation_id COLLATE "C" DESC LIMIT 1
   ) fail ON true
-  WHERE i.posting_id=$1
+  WHERE i.posting_id=$1 AND i.basis_kind='POSTING'
   ORDER BY i.created_at,i.id COLLATE "C" LIMIT ${INTENT_LIMIT + 1}`;
-
-const ABNORMAL_INTENT_SQL = INTENT_SQL.replace("WHERE i.posting_id=$1",
-  "WHERE i.order_id=$1 AND i.payment_source='JOINPAY' AND i.basis_kind='REVIEW_CONFIRMATION' AND i.posting_id IS NULL");
-
-const ABNORMAL_RESPONSIBILITY_SQL = `SELECT c.id AS confirmation_id,c.order_id,c.reason_code,c.amount_cents::text AS original_cents,
-    c.currency,c.merchant_scope_id,c.provider_transaction_id,c.merchant_order_no,c.joinpay_request_id,c.joinpay_evidence_id,c.joinpay_anchor_id,
-    o.renter_user_id,
-    rq.channel AS request_channel,rq.evidence_level AS request_evidence_level,rq.merchant_identity_id AS request_merchant,
-    rq.channel_order_no AS request_order_no,rq.amount_cents::text AS request_amount_cents,rq.currency AS request_currency,
-    b.wire_merchant_no,b.formal_admission_ref,
-    a.channel AS anchor_channel,a.evidence_level AS anchor_evidence_level,a.native_order_id AS anchor_order,a.request_id AS anchor_request,
-    a.merchant_identity_id AS anchor_merchant,a.channel_trx_no AS anchor_trx,
-    lr.id AS liability_root_id,lr.source_kind AS liability_root_kind,lr.source_type AS liability_root_type,
-    lr.source_system AS liability_root_system,lr.source_entity AS liability_root_entity,lr.source_id AS liability_root_source_id,
-    lr.subject_user_id AS liability_root_subject,lr.beneficiary_role AS liability_root_role,lr.source_digest AS liability_root_digest,
-    lr.policy_version AS liability_root_policy,lr.basis_id AS liability_root_basis,
-    le.id AS liability_event_id,le.kind AS liability_event_kind,le.economic_root_id AS liability_event_root,
-    le.subject_user_id AS liability_event_subject,
-    (SELECT count(*)::int FROM zzsh_order.channel_refund_intent x WHERE x.payment_confirmation_id=c.id
-      AND x.payment_source='JOINPAY' AND x.basis_kind='REVIEW_CONFIRMATION') AS intent_count,
-    (SELECT count(*)::int FROM zzsh_order.channel_refund_intent x JOIN zzsh_order.joinpay_refund_attempt y ON y.intent_id=x.id
-      WHERE x.payment_confirmation_id=c.id AND x.payment_source='JOINPAY' AND x.basis_kind='REVIEW_CONFIRMATION'
-        AND y.operation='SUBMIT') AS submit_attempts,
-    (SELECT count(*)::int FROM zzsh_iam.audit_event a2 WHERE a2.action='order.refund.abnormal.first_submit.blocked'
-      AND a2.object_type='channel_refund_intent' AND a2.outcome='FAILURE'
-      AND a2.object_id IN (SELECT x.id FROM zzsh_order.channel_refund_intent x WHERE x.payment_confirmation_id=c.id
-        AND x.payment_source='JOINPAY' AND x.basis_kind='REVIEW_CONFIRMATION')) AS blocked_count,
-    (SELECT to_char(a2.occurred_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') FROM zzsh_iam.audit_event a2
-      WHERE a2.action='order.refund.abnormal.first_submit.blocked' AND a2.object_type='channel_refund_intent' AND a2.outcome='FAILURE'
-        AND a2.object_id IN (SELECT x.id FROM zzsh_order.channel_refund_intent x WHERE x.payment_confirmation_id=c.id
-          AND x.payment_source='JOINPAY' AND x.basis_kind='REVIEW_CONFIRMATION')
-      ORDER BY a2.occurred_at DESC,a2.id COLLATE "C" DESC LIMIT 1) AS blocked_at,
-    (SELECT a2.details->>'gateReason' FROM zzsh_iam.audit_event a2
-      WHERE a2.action='order.refund.abnormal.first_submit.blocked' AND a2.object_type='channel_refund_intent' AND a2.outcome='FAILURE'
-        AND a2.object_id IN (SELECT x.id FROM zzsh_order.channel_refund_intent x WHERE x.payment_confirmation_id=c.id
-          AND x.payment_source='JOINPAY' AND x.basis_kind='REVIEW_CONFIRMATION')
-      ORDER BY a2.occurred_at DESC,a2.id COLLATE "C" DESC LIMIT 1) AS blocked_reason
-  FROM zzsh_order.payment_confirmation c
-  JOIN zzsh_order.rental_order o ON o.id=c.order_id
-  LEFT JOIN zzsh_order.payment_request rq ON rq.id=c.joinpay_request_id AND rq.order_id=c.order_id
-  LEFT JOIN zzsh_order.joinpay_collection_binding b ON b.request_id=rq.id
-  LEFT JOIN zzsh_order.payment_channel_transaction a ON a.id=c.joinpay_anchor_id
-  LEFT JOIN LATERAL (SELECT * FROM zzsh_order.finance_economic_root r
-    WHERE r.source_kind='NATIVE_ABNORMAL_REFUND' AND r.source_id=c.id ORDER BY r.id COLLATE "C" LIMIT 1) lr ON true
-  LEFT JOIN zzsh_order.finance_event le ON le.economic_root_id=lr.id AND le.kind='REFUND_LIABILITY_RECOGNIZED'
-  WHERE c.order_id=$1 AND c.source='JOINPAY' AND c.disposition='REVIEW_REQUIRED'
-    AND c.reason_code IN('DUPLICATE_PAYMENT','LATE_PAYMENT') AND c.currency='CNY'
-  ORDER BY c.id COLLATE "C" LIMIT ${INTENT_LIMIT + 1}`;
-
-const LIABILITY_SQL = `SELECT e.id AS event_id,e.kind AS event_kind,e.subject_user_id AS event_subject,
-    r.id AS root_id,r.source_kind AS root_kind,r.source_type AS root_type,r.source_system AS root_system,
-    r.source_entity AS root_entity,r.source_id AS root_source_id,r.subject_user_id AS root_subject,
-    r.beneficiary_role AS root_role,r.source_digest AS root_digest,r.policy_version AS root_policy,r.basis_id AS root_basis,
-    COALESCE(sum(l.debit_cents) FILTER(WHERE l.line_no=1 AND l.account_code='JOINPAY_UNALLOCATED_RECEIPT'),0)::text AS line1_debit,
-    COALESCE(sum(l.credit_cents) FILTER(WHERE l.line_no=1 AND l.account_code='JOINPAY_UNALLOCATED_RECEIPT'),0)::text AS line1_credit,
-    count(*) FILTER(WHERE l.line_no=1 AND l.account_code='JOINPAY_UNALLOCATED_RECEIPT' AND l.counterparty_user_id IS NULL
-      AND l.posting_id IS NULL AND l.source_payment_confirmation_id IS NULL
-      AND l.details->>'abnormalRefundLiabilityId'=r.source_id AND l.details->>'paymentConfirmationId'=r.source_id)::text AS line1_good,
-    COALESCE(sum(l.debit_cents) FILTER(WHERE l.line_no=2 AND l.account_code='RENTER_REFUND_PAYABLE'),0)::text AS line2_debit,
-    COALESCE(sum(l.credit_cents) FILTER(WHERE l.line_no=2 AND l.account_code='RENTER_REFUND_PAYABLE'),0)::text AS line2_credit,
-    count(*) FILTER(WHERE l.line_no=2 AND l.account_code='RENTER_REFUND_PAYABLE' AND l.counterparty_user_id=r.subject_user_id
-      AND l.posting_id IS NULL AND l.source_payment_confirmation_id IS NULL
-      AND l.details->>'abnormalRefundLiabilityId'=r.source_id AND l.details->>'paymentConfirmationId'=r.source_id)::text AS line2_good,
-    count(*)::text AS total_lines
-  FROM zzsh_order.finance_event e
-  JOIN zzsh_order.finance_economic_root r ON r.id=e.economic_root_id
-  LEFT JOIN zzsh_order.settlement_ledger_entry l ON l.finance_event_id=e.id
-  WHERE e.id=ANY($1::text[]) AND e.kind='REFUND_LIABILITY_RECOGNIZED'
-  GROUP BY e.id,r.id`;
 
 const LEDGER_SQL = `SELECT e.id AS event_id,e.subject_user_id,e.economic_root_id,
     r.id AS root_id,r.source_kind AS root_source_kind,r.source_id AS root_source_id,r.subject_user_id AS root_subject_user_id,
@@ -371,9 +261,6 @@ const LEDGER_SQL = `SELECT e.id AS event_id,e.subject_user_id,e.economic_root_id
     COALESCE(sum(l.debit_cents) FILTER(WHERE l.account_code='PAYOUT_CLEARING'),0)::text AS clearing_debit,
     COALESCE(sum(l.credit_cents) FILTER(WHERE l.account_code='PAYOUT_CLEARING'),0)::text AS clearing_credit,
     count(*) FILTER(WHERE l.account_code='PAYOUT_CLEARING')::text AS clearing_lines,
-    COALESCE(sum(l.debit_cents) FILTER(WHERE l.account_code='JOINPAY_UNALLOCATED_RECEIPT'),0)::text AS unallocated_debit,
-    COALESCE(sum(l.credit_cents) FILTER(WHERE l.account_code='JOINPAY_UNALLOCATED_RECEIPT'),0)::text AS unallocated_credit,
-    count(*) FILTER(WHERE l.account_code='JOINPAY_UNALLOCATED_RECEIPT')::text AS unallocated_lines,
     count(*)::text AS total_lines
   FROM zzsh_order.finance_event e
   JOIN zzsh_order.finance_economic_root r ON r.id=e.economic_root_id
@@ -428,66 +315,26 @@ type IntentDraft = {
   amountCents: string | null;
   terminalEventId: string | null;
   terminalRootId: string | null;
-  completedAt: string | null;
-  liabilityRootId: string | null;
-  liabilityEventId: string | null;
-  merchantIdentityId: string | null;
-  originalPaymentTrxNo: string | null;
-  originalPaymentOrderNo: string | null;
   reasons: string[];
   writeOff: PersonalRefundIntent["localAccounting"]["writeOff"];
   release: PersonalRefundIntent["localAccounting"]["release"];
   localRegisteredTerminal:boolean;
 };
 
-const FIRST_SUBMIT_REASONS = ["ORIGINAL_ORDER_NO_AMBIGUOUS", "ABNORMAL_BASIS_REVIEW"] as const;
-function firstSubmitOf(raw: Row, state: PersonalRefundIntentState, reasons: Set<string>, conflict: (reason: string) => void): PersonalFirstSubmit | null {
-  const attempts = raw.submit_attempts, blockedCount = raw.blocked_count;
-  if (!Number.isSafeInteger(attempts) || !Number.isSafeInteger(blockedCount)) {
-    conflict("FIRST_SUBMIT_FACTS_UNREADABLE"); reasons.add("FIRST_SUBMIT_FACTS_UNREADABLE"); return null;
-  }
-  const attemptsCount = attempts as number, blockedAuditCount = blockedCount as number;
-  const blockedAt = timestamp(raw.blocked_at) ? raw.blocked_at : null;
-  const blockedReason = known(raw.blocked_reason, FIRST_SUBMIT_REASONS);
-  if (raw.blocked_at !== null && raw.blocked_at !== undefined && !blockedAt) {
-    conflict("FIRST_SUBMIT_BLOCK_TIME_UNREADABLE"); reasons.add("FIRST_SUBMIT_BLOCK_TIME_UNREADABLE");
-  }
-  if (blockedAuditCount > 0 && blockedAt === null) {
-    conflict("FIRST_SUBMIT_BLOCK_TIME_MISSING"); reasons.add("FIRST_SUBMIT_BLOCK_TIME_MISSING");
-  }
-  if (blockedAt !== null && blockedReason === null) {
-    conflict("FIRST_SUBMIT_BLOCK_REASON_UNKNOWN"); reasons.add("FIRST_SUBMIT_BLOCK_REASON_UNKNOWN");
-  }
-  if (attemptsCount > 0) return { dispatch: "DISPATCHED", blockedReason: null, blockedAt: null,
-    blockedAuditCount, trust: "LOCAL_AUDIT_AND_ATTEMPT" };
-  if (blockedAt !== null) return { dispatch: "NEVER_DISPATCHED", blockedReason, blockedAt,
-    blockedAuditCount, trust: "LOCAL_AUDIT_AND_ATTEMPT" };
-  if (state === "READY") return { dispatch: "NEVER_DISPATCHED", blockedReason: null, blockedAt: null,
-    blockedAuditCount, trust: "LOCAL_AUDIT_AND_ATTEMPT" };
-  conflict("SUBMIT_ATTEMPT_MISSING"); reasons.add("SUBMIT_ATTEMPT_MISSING");
-  return { dispatch: "UNKNOWN", blockedReason: null, blockedAt: null, blockedAuditCount: blockedCount as number,
-    trust: "LOCAL_AUDIT_AND_ATTEMPT" };
-}
-
-function parseIntentRow(raw: Row, ctx: { actorId: string; orderId: string; basis: PersonalRefundBasis;
-  expectedPostingId: string | null; responsibilityCents: string | null; responsibilityDigest?: string | null; asOf: string;
+function parseIntentRow(raw: Row, ctx: { actorId: string; orderId: string;
+  expectedPostingId: string; asOf: string;
   conflict: (reason: string) => void; onForeign: () => void;localRegisteredTerminal?:boolean }): IntentDraft | null {
-  const { conflict, basis, expectedPostingId, responsibilityCents } = ctx;
+  const { conflict, expectedPostingId } = ctx;
   const reasons = new Set<string>();
   const intentId = typeof raw.id === "string" && ID.test(raw.id) ? raw.id : null;
   if (!intentId) { conflict("INTENT_ID_UNREADABLE"); return null; }
   if (raw.renter_user_id !== ctx.actorId) { conflict("INTENT_RENTER_MISMATCH"); ctx.onForeign(); return null; }
   if (raw.order_id !== ctx.orderId) conflict("INTENT_ORDER_MISMATCH");
-  if (raw.basis_kind !== basis) { conflict("INTENT_BASIS_MISMATCH"); reasons.add("INTENT_BASIS_MISMATCH"); }
+  if (raw.basis_kind !== "POSTING") { conflict("INTENT_BASIS_MISMATCH"); reasons.add("INTENT_BASIS_MISMATCH"); }
   const paymentConfirmationId = typeof raw.payment_confirmation_id === "string" && ID.test(raw.payment_confirmation_id)
     ? raw.payment_confirmation_id : null;
   if (!paymentConfirmationId) { conflict("INTENT_CONFIRMATION_UNREADABLE"); reasons.add("INTENT_CONFIRMATION_UNREADABLE"); }
-  if (basis === "POSTING") {
-    if (raw.posting_id !== expectedPostingId) conflict("INTENT_POSTING_MISMATCH");
-  } else {
-    if (raw.posting_id !== null && raw.posting_id !== undefined) { conflict("ABNORMAL_INTENT_POSTING_PRESENT"); reasons.add("ABNORMAL_INTENT_POSTING_PRESENT"); }
-    if (!raw.liability_root_id || !raw.liability_event_id) { conflict("ABNORMAL_LIABILITY_MISSING"); reasons.add("ABNORMAL_LIABILITY_MISSING"); }
-  }
+  if (raw.posting_id !== expectedPostingId) conflict("INTENT_POSTING_MISMATCH");
 
   const paymentSource = raw.payment_source, evidenceLevel = plainText(raw.evidence_level, 64);
   let source: PersonalRefundSource = "UNRECOGNIZED";
@@ -499,13 +346,6 @@ function parseIntentRow(raw: Row, ctx: { actorId: string; orderId: string; basis
   const amountCents = typeof rawAmount === "string" && POSITIVE_CENTS.test(rawAmount) ? rawAmount : null;
   if (currency !== "CNY") { conflict("INTENT_CURRENCY_NOT_CNY"); reasons.add("INTENT_CURRENCY_NOT_CNY"); }
   if (amountCents === null) { conflict("INTENT_AMOUNT_INVALID"); reasons.add("INTENT_AMOUNT_INVALID"); }
-  if (basis === "REVIEW_CONFIRMATION" && responsibilityCents !== null && amountCents !== responsibilityCents) {
-    conflict("ABNORMAL_INTENT_AMOUNT_MISMATCH"); reasons.add("ABNORMAL_INTENT_AMOUNT_MISMATCH");
-  }
-  if (basis === "REVIEW_CONFIRMATION" && ctx.responsibilityDigest !== undefined && ctx.responsibilityDigest !== null
-    && raw.responsibility_version_hash !== ctx.responsibilityDigest) {
-    conflict("ABNORMAL_INTENT_DIGEST_MISMATCH"); reasons.add("ABNORMAL_INTENT_DIGEST_MISMATCH");
-  }
   const amount = amountCents !== null && currency === "CNY" ? { cents: amountCents, currency: "CNY" as const } : null;
 
   const state = known(raw.state, INTENT_STATES) ?? "UNRECOGNIZED";
@@ -525,7 +365,6 @@ function parseIntentRow(raw: Row, ctx: { actorId: string; orderId: string; basis
   if (raw.completed_at !== null && raw.completed_at !== undefined && !completedAt) {
     conflict("INTENT_TERMINAL_TIME_UNREADABLE"); reasons.add("INTENT_TERMINAL_TIME_UNREADABLE");
   }
-  const firstSubmit = basis === "REVIEW_CONFIRMATION" ? firstSubmitOf(raw, state, reasons, conflict) : null;
 
   const latestObservation = observationOf(raw, "latest_source", "latest_event", "latest_failure_reason",
     "latest_evidence_level", "latest_observed_at", ctx.asOf, reasons);
@@ -602,14 +441,9 @@ function parseIntentRow(raw: Row, ctx: { actorId: string; orderId: string; basis
     if (!terminalEventId) { conflict("LOCAL_WRITE_OFF_EVENT_MISSING"); reasons.add("LOCAL_WRITE_OFF_EVENT_MISSING"); }
     if (!terminalRootId) { conflict("LOCAL_WRITE_OFF_ROOT_MISSING"); reasons.add("LOCAL_WRITE_OFF_ROOT_MISSING"); }
   }
-  return { intent: { intentId, refundOrderNo, source, evidenceLevel, basisKind: basis, paymentConfirmationId, amount, state,
+  return { intent: { intentId, refundOrderNo, source, evidenceLevel, basisKind: "POSTING", paymentConfirmationId, amount, state,
     budgetDisposition: disposition, requiresReview, dueAt: intentDueAt, createdAt, updatedAt, latestObservation, latestFailure,
-    firstSubmit, savedChannelEvidence }, disposition, amountCents, terminalEventId, terminalRootId, completedAt,
-    liabilityRootId: typeof raw.liability_root_id === "string" ? raw.liability_root_id : null,
-    liabilityEventId: typeof raw.liability_event_id === "string" ? raw.liability_event_id : null,
-    merchantIdentityId: typeof raw.merchant_identity_id === "string" ? raw.merchant_identity_id : null,
-    originalPaymentTrxNo: typeof raw.original_payment_trx_no === "string" ? raw.original_payment_trx_no : null,
-    originalPaymentOrderNo: typeof raw.original_payment_order_no === "string" ? raw.original_payment_order_no : null,
+    savedChannelEvidence }, disposition, amountCents, terminalEventId, terminalRootId,
     reasons: [...reasons], writeOff: null, release,localRegisteredTerminal };
 }
 
@@ -619,196 +453,12 @@ function emptyProjection(order: PersonalRefundReadProjection["order"], asOf: str
     coverage: { scope: "LOCAL_REGISTERED_ONLY", intentLimit: INTENT_LIMIT, intentsComplete: true, channelRecordsChecked: false }, asOf,
     responsibility: { state: "NOT_POSTED", postingId: null, originalCents: null, allocatedCents: null, consumedCents: null,
       releasedCents: null, remainingCents: null, totalsComplete: false, dueAt: null, dueState: "UNKNOWN" },
-    abnormalResponsibilities: [], responsibilitiesTruncated: false,
-    responsibilityTotals: { originalCents: null, allocatedCents: null, consumedCents: null, releasedCents: null,
-      remainingCents: null, totalsComplete: false, postingOriginalCents: null, abnormalOriginalCents: null, abnormalConfirmationCount: 0 },
     intents: [], returnedIntentCount: 0, intentsTruncated: false,
     actualChannelRefund: { amountCents: null, channelRefundTrxNo: null, completedAt: null, destination: null, bankArrival: "UNKNOWN",
       reasonCodes: ["CHANNEL_EVIDENCE_NOT_REVALIDATED", "REFUND_DESTINATION_NOT_PROJECTED", "NO_TRUSTED_CHANNEL_TERMINAL"] },
     localFundsEffect: { basis: "LOCAL_REGISTERED_ACCOUNTING", writtenOffCents: null, releasedCents: null, bankArrival: "UNKNOWN" },
     reasonCodes: unique([...reasonCodes, "LOCAL_RECORDS_ONLY"]),
     unknowns: ["CHANNEL_REFUND_RECORD_NOT_CHECKED", "BANK_ARRIVAL_UNKNOWN", "REFUND_DESTINATION_NOT_PROJECTED"] };
-}
-
-
-type AbnormalRead = {
-  responsibilities: PersonalAbnormalResponsibility[];
-  intents: IntentDraft[];
-  conflictReasons: Set<string>;
-  reasons: string[];
-  truncated: boolean;
-  foreign: number;
-};
-
-function abnormalFirstSubmit(raw: Row, intentDrafts: IntentDraft[], reasons: Set<string>,
-  conflict: (reason: string) => void): PersonalFirstSubmit | null {
-  if (intentDrafts.length === 0) return null;
-  const latest = [...intentDrafts].sort((a, b) =>
-    (a.intent.createdAt ?? "").localeCompare(b.intent.createdAt ?? "") || a.intent.intentId.localeCompare(b.intent.intentId)).at(-1)!;
-  if (latest.intent.firstSubmit) return latest.intent.firstSubmit;
-  const attempts = raw.submit_attempts, blockedCount = raw.blocked_count;
-  if (!Number.isSafeInteger(attempts) || !Number.isSafeInteger(blockedCount)) {
-    conflict("FIRST_SUBMIT_FACTS_UNREADABLE"); reasons.add("FIRST_SUBMIT_FACTS_UNREADABLE"); return null;
-  }
-  const attemptsCount = attempts as number, blockedAuditCount = blockedCount as number;
-  const blockedAt = timestamp(raw.blocked_at) ? raw.blocked_at : null;
-  if (attemptsCount > 0) return { dispatch: "DISPATCHED", blockedReason: null, blockedAt: null,
-    blockedAuditCount, trust: "LOCAL_AUDIT_AND_ATTEMPT" };
-  if (blockedAt) return { dispatch: "NEVER_DISPATCHED", blockedReason: known(raw.blocked_reason, FIRST_SUBMIT_REASONS),
-    blockedAt, blockedAuditCount, trust: "LOCAL_AUDIT_AND_ATTEMPT" };
-  return { dispatch: "NEVER_DISPATCHED", blockedReason: null, blockedAt: null,
-    blockedAuditCount, trust: "LOCAL_AUDIT_AND_ATTEMPT" };
-}
-
-function liabilityValid(row: Row | undefined, responsibility: PersonalAbnormalResponsibility,
-  actorId: string, digest: string | null, reasons: Set<string>, conflict: (reason: string) => void): boolean {
-  if (!row) { conflict("ABNORMAL_LIABILITY_MISSING"); reasons.add("ABNORMAL_LIABILITY_MISSING"); return false; }
-  const amount = responsibility.originalCents;
-  const good = responsibility.liabilityRootId !== null && responsibility.liabilityEventId !== null && amount !== null
-    && row.root_id === responsibility.liabilityRootId && row.event_id === responsibility.liabilityEventId
-    && row.root_kind === "NATIVE_ABNORMAL_REFUND" && row.root_type === "NATIVE" && row.root_system === "zzsh"
-    && row.root_entity === "joinpay_abnormal_refund_liability" && row.root_source_id === responsibility.confirmationId
-    && row.root_subject === actorId && row.root_role === "RENTER" && row.root_policy === null && row.root_basis === null
-    && (digest === null || row.root_digest === digest)
-    && row.event_kind === "REFUND_LIABILITY_RECOGNIZED" && row.event_root === responsibility.liabilityRootId
-    && row.event_subject === actorId
-    && row.total_lines === "2" && row.line1_good === "1" && row.line2_good === "1"
-    && row.line1_debit === amount && row.line1_credit === "0" && row.line2_debit === "0" && row.line2_credit === amount;
-  if (!good) { conflict("ABNORMAL_LIABILITY_MISMATCH"); reasons.add("ABNORMAL_LIABILITY_MISMATCH"); }
-  return good;
-}
-
-async function readAbnormalSection(client: PoolClient, actorId: string, orderId: string, asOf: string): Promise<AbnormalRead> {
-  const conflictReasons = new Set<string>(), reasons: string[] = [];
-  const conflict = (reason: string) => { if (!conflictReasons.has(reason)) { conflictReasons.add(reason); reasons.push(reason); } };
-  const rows = (await client.query<Row>(ABNORMAL_RESPONSIBILITY_SQL, [orderId])).rows;
-  const truncated = rows.length > INTENT_LIMIT;
-  if (truncated) reasons.push("ABNORMAL_RESPONSIBILITY_LIST_TRUNCATED");
-  const confirmationRows = rows.slice(0, INTENT_LIMIT);
-  const responsibilityByConfirmation = new Map<string, { raw: Row; reasons: Set<string> }>();
-  for (const raw of confirmationRows) {
-    const confirmationId = typeof raw.confirmation_id === "string" && ID.test(raw.confirmation_id) ? raw.confirmation_id : null;
-    if (!confirmationId) { conflict("ABNORMAL_CONFIRMATION_UNREADABLE"); continue; }
-    const local = new Set<string>();
-    const fail = (reason: string) => { local.add(reason); conflict(reason); };
-    if (raw.order_id !== orderId || raw.renter_user_id !== actorId) fail("ABNORMAL_CONFIRMATION_SUBJECT_MISMATCH");
-    if (!["DUPLICATE_PAYMENT", "LATE_PAYMENT"].includes(raw.reason_code as string)) fail("ABNORMAL_CONFIRMATION_REASON_UNKNOWN");
-    if (raw.currency !== "CNY") fail("ABNORMAL_CONFIRMATION_CURRENCY_NOT_CNY");
-    if (raw.request_channel !== "JOINPAY" || raw.request_evidence_level !== "JOINPAY_CANDIDATE"
-      || raw.request_merchant !== raw.merchant_scope_id || raw.request_order_no !== raw.merchant_order_no
-      || raw.request_amount_cents !== raw.original_cents || raw.request_currency !== "CNY"
-      || typeof raw.formal_admission_ref !== "string" || raw.formal_admission_ref.length < 1) fail("ABNORMAL_ORIGINAL_REQUEST_MISMATCH");
-    if (raw.anchor_channel !== "JOINPAY" || raw.anchor_order !== orderId || raw.anchor_request !== raw.joinpay_request_id
-      || raw.anchor_merchant !== raw.merchant_scope_id || raw.anchor_trx !== raw.provider_transaction_id
-      || raw.anchor_evidence_level !== "JOINPAY_VERIFIED") fail("ABNORMAL_ANCHOR_MISMATCH");
-    const amount = typeof raw.original_cents === "string" && POSITIVE_CENTS.test(raw.original_cents) ? raw.original_cents : null;
-    if (amount === null) fail("ABNORMAL_AMOUNT_INVALID");
-    responsibilityByConfirmation.set(confirmationId, { raw, reasons: local });
-  }
-  const intentRows = (await client.query<Row>(ABNORMAL_INTENT_SQL, [orderId])).rows;
-  if (rows.length === 0 && intentRows.length === 0) return { responsibilities: [], intents: [], conflictReasons, reasons, truncated: false, foreign: 0 };
-  const intentTruncated = intentRows.length > INTENT_LIMIT;
-  if (intentTruncated) reasons.push("INTENT_LIST_TRUNCATED");
-  const intents: IntentDraft[] = [];
-  const unmatched = new Map<string, IntentDraft[]>();
-  let foreign = 0;
-  for (const raw of intentRows.slice(0, INTENT_LIMIT)) {
-    const confirmationId = typeof raw.payment_confirmation_id === "string" ? raw.payment_confirmation_id : "";
-    const target = responsibilityByConfirmation.get(confirmationId);
-    if (!target) {
-      conflict("ABNORMAL_INTENT_CONFIRMATION_UNMATCHED");
-      const draft = parseIntentRow(raw, { actorId, orderId, basis: "REVIEW_CONFIRMATION", expectedPostingId: null,
-        responsibilityCents: null, responsibilityDigest: null, asOf, conflict, onForeign: () => { foreign += 1; } });
-      if (draft) unmatched.set(confirmationId || "unmatched_intent", [...(unmatched.get(confirmationId || "unmatched_intent") ?? []), draft]);
-      continue;
-    }
-    const responsibilityAmount = typeof target.raw.original_cents === "string" ? target.raw.original_cents : null;
-    const responsibilityDigest = typeof target.raw.liability_root_digest === "string" ? target.raw.liability_root_digest : null;
-    const draft = parseIntentRow(raw, { actorId, orderId, basis: "REVIEW_CONFIRMATION", expectedPostingId: null,
-      responsibilityCents: responsibilityAmount, responsibilityDigest, asOf, conflict, onForeign: () => { foreign += 1; } });
-    if (draft) intents.push(draft);
-  }
-  await applyWriteOffs(client, intents, actorId, conflict);
-  const byConfirmation = new Map<string, IntentDraft[]>();
-  for (const draft of intents) {
-    const id = draft.intent.paymentConfirmationId;
-    if (!id) continue;
-    byConfirmation.set(id, [...(byConfirmation.get(id) ?? []), draft]);
-  }
-  const liabilityIds = unique([...responsibilityByConfirmation.values()].flatMap(value =>
-    typeof value.raw.liability_event_id === "string" ? [value.raw.liability_event_id] : []));
-  const liabilityRows = liabilityIds.length ? (await client.query<Row>(LIABILITY_SQL, [liabilityIds])).rows : [];
-  const liability = new Map(liabilityRows.map(row => [row.event_id, row]));
-  const responsibilities: PersonalAbnormalResponsibility[] = [];
-  for (const [confirmationId, value] of responsibilityByConfirmation) {
-    const raw = value.raw;
-    const localDrafts = byConfirmation.get(confirmationId) ?? [];
-    for (const draft of localDrafts) {
-      if (draft.liabilityRootId !== (typeof raw.liability_root_id === "string" ? raw.liability_root_id : null)
-        || draft.liabilityEventId !== (typeof raw.liability_event_id === "string" ? raw.liability_event_id : null)
-        || draft.merchantIdentityId !== (typeof raw.merchant_scope_id === "string" ? raw.merchant_scope_id : null)
-        || draft.originalPaymentTrxNo !== (typeof raw.provider_transaction_id === "string" ? raw.provider_transaction_id : null)
-        || draft.originalPaymentOrderNo !== (typeof raw.merchant_order_no === "string" ? raw.merchant_order_no : null)) {
-        value.reasons.add("ABNORMAL_INTENT_BINDING_MISMATCH"); conflict("ABNORMAL_INTENT_BINDING_MISMATCH");
-      }
-      for (const reason of draft.reasons) { value.reasons.add(reason); conflict(reason); }
-    }
-    const amount = typeof raw.original_cents === "string" && POSITIVE_CENTS.test(raw.original_cents) ? raw.original_cents : null;
-    const digest = typeof raw.liability_root_digest === "string" ? raw.liability_root_digest : null;
-    const rootId = typeof raw.liability_root_id === "string" && ID.test(raw.liability_root_id) ? raw.liability_root_id : null;
-    const eventId = typeof raw.liability_event_id === "string" && ID.test(raw.liability_event_id) ? raw.liability_event_id : null;
-    if (Number(raw.intent_count) > localDrafts.length) { value.reasons.add("ABNORMAL_INTENT_UNREADABLE"); conflict("ABNORMAL_INTENT_UNREADABLE"); }
-    if (localDrafts.length === 0 && Number(raw.intent_count) === 0 && rootId === null && eventId === null) continue;
-    const shouldHaveLiability = localDrafts.length > 0 || Number(raw.intent_count) > 0 || rootId !== null || eventId !== null;
-    if (shouldHaveLiability) liabilityValid(eventId ? liability.get(eventId) : undefined,
-      { confirmationId, reasonCode: "UNKNOWN_REASON", originalCents: amount, currency: raw.currency === "CNY" ? "CNY" : null,
-        liabilityRootId: rootId, liabilityEventId: eventId, intentIds: [], allocatedCents: null, consumedCents: null,
-        releasedCents: null, remainingCents: null, totalsComplete: false, state: "CONFLICT", firstSubmit: null, reasonCodes: [] },
-      actorId, digest, value.reasons, (reason) => { value.reasons.add(reason); conflict(reason); });
-    const active = localDrafts.filter(d => d.disposition !== "RELEASED");
-    if (active.length > 1) { value.reasons.add("ABNORMAL_MULTIPLE_ACTIVE_INTENTS"); conflict("ABNORMAL_MULTIPLE_ACTIVE_INTENTS"); }
-    let allocated: bigint | null = amount === null ? null : 0n, consumed: bigint | null = amount === null ? null : 0n,
-      released: bigint | null = amount === null ? null : 0n, remaining: bigint | null = null;
-    if (amount !== null) {
-      for (const draft of localDrafts) {
-        if (draft.amountCents === null) { allocated = null; consumed = null; released = null; break; }
-        const cents = BigInt(draft.amountCents);
-        if (draft.disposition === "RELEASED") released! += cents;
-        else { allocated! += cents; if (draft.disposition === "CONSUMED") consumed! += cents; }
-      }
-      if (allocated !== null) {
-        if (allocated > BigInt(amount)) { value.reasons.add("ABNORMAL_ALLOCATION_EXCEEDS_RESPONSIBILITY"); conflict("ABNORMAL_ALLOCATION_EXCEEDS_RESPONSIBILITY"); allocated = null; consumed = null; released = null; }
-        else remaining = BigInt(amount) - allocated;
-      }
-    }
-    const firstSubmit = abnormalFirstSubmit(raw, localDrafts, value.reasons, (reason) => { value.reasons.add(reason); conflict(reason); });
-    const anyReview = localDrafts.some(d => d.intent.requiresReview || d.intent.state === "REVIEW_REQUIRED");
-    const blocked = firstSubmit?.dispatch === "NEVER_DISPATCHED" && firstSubmit.blockedReason !== null;
-    const localConflict = localDrafts.some(d => d.reasons.length > 0)
-      || [...value.reasons].some(r => /MISMATCH|INVALID|MISSING|UNREADABLE|UNKNOWN/.test(r));
-    if (localConflict) { allocated = null; consumed = null; released = null; remaining = null; }
-    const state: PersonalAbnormalResponsibility["state"] = localConflict ? "CONFLICT" : anyReview || blocked ? "REVIEW_REQUIRED"
-      : localDrafts.some(d => d.intent.state === "UNKNOWN" || d.intent.state === "UNRECOGNIZED") ? "UNKNOWN"
-      : localDrafts.some(d => d.intent.state === "SUBMITTING" || d.intent.state === "PROCESSING") ? "PROCESSING"
-      : allocated !== null && consumed !== null && amount !== null && consumed === BigInt(amount) && localDrafts.length > 0 ? "CONSUMED"
-      : allocated !== null && allocated === 0n && released !== null && released > 0n ? "RELEASED"
-      : localDrafts.length === 0 ? "NO_INTENT" : "READY";
-    responsibilities.push({ confirmationId, reasonCode: raw.reason_code === "DUPLICATE_PAYMENT" || raw.reason_code === "LATE_PAYMENT"
-      ? raw.reason_code : "UNKNOWN_REASON", originalCents: amount, currency: raw.currency === "CNY" ? "CNY" : null,
-      liabilityRootId: rootId, liabilityEventId: eventId, intentIds: localDrafts.map(d => d.intent.intentId),
-      allocatedCents: allocated?.toString() ?? null, consumedCents: consumed?.toString() ?? null,
-      releasedCents: released?.toString() ?? null, remainingCents: remaining?.toString() ?? null,
-      totalsComplete: amount !== null && allocated !== null && !localConflict,
-      state, firstSubmit, reasonCodes: unique(value.reasons) });
-  }
-  for (const [confirmationId, drafts] of unmatched) {
-    for (const draft of drafts) for (const reason of draft.reasons) conflict(reason);
-    responsibilities.push({ confirmationId, reasonCode: "UNKNOWN_REASON", originalCents: null, currency: null,
-      liabilityRootId: null, liabilityEventId: null, intentIds: [], allocatedCents: null, consumedCents: null,
-      releasedCents: null, remainingCents: null, totalsComplete: false, state: "CONFLICT", firstSubmit: null,
-      reasonCodes: ["ABNORMAL_INTENT_CONFIRMATION_UNMATCHED"] });
-  }
-  return { responsibilities, intents, conflictReasons, reasons: unique(reasons), truncated: truncated || intentTruncated, foreign };
 }
 
 
@@ -821,10 +471,7 @@ async function applyWriteOffs(client: PoolClient, drafts: IntentDraft[], actorId
   for (const draft of drafts) {
     if (!draft.terminalEventId || draft.disposition !== "CONSUMED") continue;
     const row = ledger.get(draft.terminalEventId), reasons = new Set(draft.reasons);
-    const abnormal = draft.intent.basisKind === "REVIEW_CONFIRMATION";
-    const line2Debit = abnormal ? row?.unallocated_debit : row?.clearing_debit;
-    const line2Credit = abnormal ? row?.unallocated_credit : row?.clearing_credit;
-    const line2Lines = abnormal ? row?.unallocated_lines : row?.clearing_lines;
+    const line2Debit = row?.clearing_debit, line2Credit = row?.clearing_credit, line2Lines = row?.clearing_lines;
     const bindingValid = row && row.economic_root_id === draft.terminalRootId && row.root_id === draft.terminalRootId
       && row.root_source_kind === (draft.localRegisteredTerminal?'LOCAL_CONTROLLED_RENTAL_REFUND':"NATIVE_RENTAL_REFUND") && row.root_source_id === draft.intent.intentId && row.root_subject_user_id === actorId;
     const valid = row && bindingValid && row.subject_user_id === actorId
@@ -847,132 +494,78 @@ async function applyWriteOffs(client: PoolClient, drafts: IntentDraft[], actorId
 }
 
 
-function personalIntentsOf(drafts: IntentDraft[]): PersonalRefundIntent[] {
-  return drafts.map(draft => ({
-    ...draft.intent,
-    localAccounting: { disposition: draft.disposition, writeOff: draft.writeOff, release: draft.release, reasonCodes: draft.reasons },
-    channelFacts: { actualAmountCents: null, channelRefundTrxNo: null, completedAt: null, destination: null, bankArrival: "UNKNOWN",
-      reasonCodes: ["CHANNEL_EVIDENCE_NOT_REVALIDATED", "REFUND_DESTINATION_NOT_PROJECTED"] },
-    reasonCodes: draft.reasons,
-  }));
+type PrestartSummary = NonNullable<PersonalRefundReadProjection["prestartRefund"]>;
+const unknownPrestart = (): PrestartSummary => ({ state: "UNKNOWN", amountCents: null, source: "UNKNOWN", bankArrival: "UNKNOWN" });
+
+/** The same recorded responsibility drives both the cancellation and refund views. */
+export function projectPrestartRefundSummary(source: "JOINPAY" | "CONTROLLED", amountCents: string,
+  progress: Awaited<ReturnType<typeof readPrestartRefundProgress>>): PrestartSummary {
+  if (!POSITIVE_CENTS.test(amountCents)) return unknownPrestart();
+  const origin: PrestartSummary["source"] = source === "JOINPAY" ? "JOINPAY" : "dataOrigin" in progress && progress.dataOrigin === "LOCAL_CONTROLLED" ? "SIMULATED" : "UNKNOWN";
+  const base = { amountCents, source: origin, bankArrival: "UNKNOWN" as const };
+  const intents = progress.intents;
+  if (origin === "UNKNOWN" || progress.integration !== "INTEGRATED" || progress.truncated || !progress.totals || !intents
+    || progress.totals.originalCents !== amountCents || intents.some(i => i.requiresReview || ["UNKNOWN", "REVIEW_REQUIRED", "CONFLICT"].includes(i.state)))
+    return { ...base, state: "UNKNOWN" };
+  if (intents.some(i => ["READY", "SUBMITTING", "PROCESSING"].includes(i.state)) || !intents.length)
+    return { ...base, state: "PROCESSING" };
+  const succeeded = intents.filter(i => i.state === "SUCCEEDED" && i.localWriteOff === "RECORDED");
+  if (progress.totals.consumedCents === amountCents && progress.totals.allocatedCents === amountCents
+    && succeeded.length === 1 && (origin === "SIMULATED" || succeeded[0]?.savedChannelEvidence?.terminal === "SUCCEEDED"))
+    return { ...base, state: "SUCCEEDED" };
+  if (intents.some(i => i.state === "FAILED") && progress.totals.allocatedCents === "0") return { ...base, state: "FAILED" };
+  return { ...base, state: "UNKNOWN" };
 }
 
-function abnormalTotals(abnormal: AbnormalRead): { original: bigint | null; allocated: bigint | null; consumed: bigint | null;
-  released: bigint | null; remaining: bigint | null; complete: boolean } {
-  let original = 0n, allocated = 0n, consumed = 0n, released = 0n;
-  let complete = abnormal.conflictReasons.size === 0 && !abnormal.truncated && abnormal.foreign === 0;
-  for (const responsibility of abnormal.responsibilities) {
-    if (responsibility.originalCents === null || responsibility.allocatedCents === null
-      || responsibility.consumedCents === null || responsibility.releasedCents === null) { complete = false; continue; }
-    original += BigInt(responsibility.originalCents);
-    allocated += BigInt(responsibility.allocatedCents);
-    consumed += BigInt(responsibility.consumedCents);
-    released += BigInt(responsibility.releasedCents);
-    if (!responsibility.totalsComplete) complete = false;
-  }
-  return { original: complete ? original : null, allocated: complete ? allocated : null,
-    consumed: complete ? consumed : null, released: complete ? released : null,
-    remaining: complete && allocated <= original ? original - allocated : null, complete };
+export async function readPersonalPrestartRefund(client: PoolClient, orderId: string, userId: string, confirmationId: unknown,
+  reason: unknown, resource?: LocalFinancialSandbox | DemoFinanceResource): Promise<PrestartSummary> {
+  const ready = (await client.query(`SELECT COALESCE(
+    has_table_privilege(current_user,to_regclass('zzsh_order.prestart_termination'),'SELECT') AND
+    has_function_privilege(current_user,to_regprocedure('zzsh_order.prestart_liability_complete(text)'),'EXECUTE'),false) AS ready`)).rows[0]?.ready === true;
+  if (!ready) return unknownPrestart();
+  const rows = (await client.query<{id:string;requested_by_party:string;payment_basis:PrestartPaymentBasis;basis_digest:string;liability_root_id:string|null;liability_event_id:string|null}>(
+    `SELECT id,requested_by_party,payment_basis,basis_digest,liability_root_id,liability_event_id FROM zzsh_order.prestart_termination
+     WHERE order_id=$1 AND state='APPROVED' ORDER BY created_at DESC,id DESC LIMIT 2`, [orderId])).rows;
+  const term = rows[0], basis = term?.payment_basis;
+  if (rows.length !== 1 || !term || !basis || basis.orderId !== orderId || basis.renterUserId !== userId
+    || basis.paymentConfirmationId !== confirmationId || basis.digest !== term.basis_digest
+    || reason === "SUPPORT_CANCELLED_REFUND" && term.requested_by_party !== "SUPPORT"
+    || reason === "PRESTART_TERMINATED" && !["RENTER", "OWNER"].includes(term.requested_by_party)) return unknownPrestart();
+  try { await verifyPrestartRefundLiability(client, term.id, basis, term.liability_root_id, term.liability_event_id); }
+  catch (error) { if (error instanceof SecurityApiError && error.code === "EVIDENCE_UNAVAILABLE") return unknownPrestart(); throw error; }
+  const sandbox = resource?.kind === "REGISTERED_LOCAL_FINANCIAL_SANDBOX" ? resource : undefined;
+  const demo = resource && resource.kind !== "REGISTERED_LOCAL_FINANCIAL_SANDBOX" ? resource : undefined;
+  const progress = await readPrestartRefundProgress(client, term.id, basis, true, sandbox, demo);
+  return projectPrestartRefundSummary(basis.source, basis.amountCents, progress);
 }
 
-function abnormalOutcome(abnormal: AbnormalRead, totals: ReturnType<typeof abnormalTotals>): PersonalRefundOutcome {
-  if (abnormal.conflictReasons.size > 0 || abnormal.foreign > 0) return "CONFLICT";
-  if (abnormal.truncated) return "TRUNCATED";
-  if (abnormal.responsibilities.some(r => r.state === "REVIEW_REQUIRED"
-    || (r.firstSubmit?.dispatch === "NEVER_DISPATCHED" && r.firstSubmit.blockedReason !== null))) return "REVIEW_REQUIRED";
-  if (abnormal.responsibilities.some(r => r.state === "UNKNOWN" || r.firstSubmit?.dispatch === "UNKNOWN")) return "UNKNOWN";
-  if (abnormal.responsibilities.some(r => r.state === "PROCESSING")) return "PROCESSING";
-  if (abnormal.responsibilities.length === 0) return "RESPONSIBILITY_NOT_POSTED";
-  if (abnormal.responsibilities.every(r => r.state === "NO_INTENT")) return "NO_INTENT";
-  if (totals.consumed !== null && totals.original !== null && totals.consumed === totals.original) return "FULLY_CONSUMED";
-  if (totals.consumed !== null && totals.consumed > 0n) return "PARTIALLY_CONSUMED";
-  if (totals.released !== null && totals.released > 0n && (totals.allocated === null || totals.allocated === 0n)) return "RELEASED";
-  if (totals.allocated !== null && totals.allocated > 0n) return totals.original !== null
-    && totals.allocated === totals.original ? "FULLY_ALLOCATED" : "PARTIALLY_ALLOCATED";
-  return "NO_INTENT";
-}
-
-function abnormalOnlyProjection(order: PersonalRefundReadProjection["order"], asOf: string, actorId: string,
-  abnormal: AbnormalRead, extraReasons: string[] = []): PersonalRefundReadProjection {
-  const intents = personalIntentsOf(abnormal.intents);
-  const totals = abnormalTotals(abnormal);
-  const outcome = abnormalOutcome(abnormal, totals);
-  const reasons = unique([...extraReasons, ...abnormal.reasons,
-    ...abnormal.responsibilities.flatMap(r => r.reasonCodes), "ABNORMAL_REVIEW_CONFIRMATION_LOCAL_RESPONSIBILITY",
-    "LOCAL_RECORDS_ONLY"]);
-  return {
-    contractVersion: PERSONAL_REFUND_READ_VERSION, subjectId: actorId, order, status: "AVAILABLE", outcome,
-    coverage: { scope: "LOCAL_REGISTERED_ONLY", intentLimit: INTENT_LIMIT,
-      intentsComplete: !abnormal.truncated && abnormal.foreign === 0 && abnormal.conflictReasons.size === 0, channelRecordsChecked: false }, asOf,
-    responsibility: { state: "NOT_POSTED", postingId: null, originalCents: null, allocatedCents: null, consumedCents: null,
-      releasedCents: null, remainingCents: null, totalsComplete: false, dueAt: null, dueState: "UNKNOWN" },
-    abnormalResponsibilities: abnormal.responsibilities, responsibilitiesTruncated: abnormal.truncated,
-    responsibilityTotals: { originalCents: totals.original?.toString() ?? null, allocatedCents: totals.allocated?.toString() ?? null,
-      consumedCents: totals.consumed?.toString() ?? null, releasedCents: totals.released?.toString() ?? null,
-      remainingCents: totals.remaining?.toString() ?? null, totalsComplete: totals.complete,
-      postingOriginalCents: null, abnormalOriginalCents: totals.original?.toString() ?? null,
-      abnormalConfirmationCount: abnormal.responsibilities.length },
-    intents, returnedIntentCount: intents.length, intentsTruncated: abnormal.truncated,
-    actualChannelRefund: { amountCents: null, channelRefundTrxNo: null, completedAt: null, destination: null, bankArrival: "UNKNOWN",
-      reasonCodes: ["CHANNEL_EVIDENCE_NOT_REVALIDATED", "REFUND_DESTINATION_NOT_PROJECTED", "NO_TRUSTED_CHANNEL_TERMINAL"] },
-    localFundsEffect: { basis: "LOCAL_REGISTERED_ACCOUNTING", writtenOffCents: totals.consumed?.toString() ?? null,
-      releasedCents: totals.released?.toString() ?? null, bankArrival: "UNKNOWN" },
-    reasonCodes: reasons,
-    unknowns: ["CHANNEL_REFUND_RECORD_NOT_CHECKED", "BANK_ARRIVAL_UNKNOWN", "REFUND_DESTINATION_NOT_PROJECTED"],
-  };
-}
-
-function mergeAbnormalProjection(base: PersonalRefundReadProjection, abnormal: AbnormalRead,
-  extraConflictReasons: ReadonlySet<string>, actorId: string): PersonalRefundReadProjection {
-  const abnormalIntents = personalIntentsOf(abnormal.intents);
-  const allIntents = [...base.intents, ...abnormalIntents];
-  const truncated = base.intentsTruncated || abnormal.truncated || allIntents.length > INTENT_LIMIT;
-  const intents = truncated ? allIntents.slice(0, INTENT_LIMIT) : allIntents;
-  const totals = abnormalTotals(abnormal);
-  const baseComplete = !truncated && base.responsibility.totalsComplete && base.responsibility.originalCents !== null
-    && base.responsibility.allocatedCents !== null && base.responsibility.consumedCents !== null && base.responsibility.releasedCents !== null;
-  const combinedOriginal = baseComplete && totals.complete
-    ? BigInt(base.responsibility.originalCents!) + totals.original! : null;
-  const combinedAllocated = baseComplete && totals.complete
-    ? BigInt(base.responsibility.allocatedCents!) + totals.allocated! : null;
-  const combinedConsumed = baseComplete && totals.complete
-    ? BigInt(base.responsibility.consumedCents!) + totals.consumed! : null;
-  const combinedReleased = baseComplete && totals.complete
-    ? BigInt(base.responsibility.releasedCents!) + totals.released! : null;
-  const combinedRemaining = combinedOriginal !== null && combinedAllocated !== null && combinedAllocated <= combinedOriginal
-    ? combinedOriginal - combinedAllocated : null;
-  const conflict = abnormal.conflictReasons.size > 0 || abnormal.foreign > 0 || extraConflictReasons.size > 0 || base.outcome === "CONFLICT";
-  let outcome: PersonalRefundOutcome;
-  if (conflict) outcome = "CONFLICT";
-  else if (truncated) outcome = "TRUNCATED";
-  else if (abnormal.responsibilities.some(r => r.state === "REVIEW_REQUIRED"
-    || (r.firstSubmit?.dispatch === "NEVER_DISPATCHED" && r.firstSubmit.blockedReason !== null))) outcome = "REVIEW_REQUIRED";
-  else if (base.outcome === "REVIEW_REQUIRED") outcome = "REVIEW_REQUIRED";
-  else if (abnormal.responsibilities.some(r => r.state === "UNKNOWN" || r.firstSubmit?.dispatch === "UNKNOWN") || base.outcome === "UNKNOWN") outcome = "UNKNOWN";
-  else if (abnormal.responsibilities.some(r => r.state === "PROCESSING") || base.outcome === "PROCESSING") outcome = "PROCESSING";
-  else if (combinedOriginal !== null && combinedConsumed !== null && combinedConsumed === combinedOriginal) outcome = "FULLY_CONSUMED";
-  else if (combinedConsumed !== null && combinedConsumed > 0n) outcome = "PARTIALLY_CONSUMED";
-  else if (combinedReleased !== null && combinedReleased > 0n && (combinedAllocated === null || combinedAllocated === 0n)) outcome = "RELEASED";
-  else if (combinedAllocated !== null && combinedAllocated > 0n) outcome =
-    combinedOriginal !== null && combinedAllocated === combinedOriginal ? "FULLY_ALLOCATED" : "PARTIALLY_ALLOCATED";
-  else outcome = base.outcome === "NOT_DUE" ? "NOT_DUE" : "NO_INTENT";
-  const reasons = unique([...base.reasonCodes, ...abnormal.reasons,
-    ...abnormal.responsibilities.flatMap(r => r.reasonCodes), "ABNORMAL_REVIEW_CONFIRMATION_LOCAL_RESPONSIBILITY"]);
-  return {
-    ...base, outcome: conflict ? "CONFLICT" : outcome,
-    abnormalResponsibilities: abnormal.responsibilities,
-    responsibilitiesTruncated: abnormal.truncated,
-    responsibilityTotals: { originalCents: combinedOriginal?.toString() ?? null, allocatedCents: combinedAllocated?.toString() ?? null,
-      consumedCents: combinedConsumed?.toString() ?? null, releasedCents: combinedReleased?.toString() ?? null,
-      remainingCents: combinedRemaining?.toString() ?? null, totalsComplete: combinedOriginal !== null && !conflict,
-      postingOriginalCents: base.responsibility.originalCents, abnormalOriginalCents: totals.original?.toString() ?? null,
-      abnormalConfirmationCount: abnormal.responsibilities.length },
-    intents, returnedIntentCount: intents.length, intentsTruncated: truncated,
-    coverage: { ...base.coverage, intentsComplete: !truncated && !conflict },
-    localFundsEffect: { basis: "LOCAL_REGISTERED_ACCOUNTING",
-      writtenOffCents: combinedConsumed?.toString() ?? null, releasedCents: combinedReleased?.toString() ?? null, bankArrival: "UNKNOWN" },
-    reasonCodes: conflict ? unique([...reasons, "CONFLICT"]) : reasons,
-  };
+/** Read the same original-payment liability used by a support cancellation, never infer channel arrival. */
+export async function readPersonalSupportCancellationRefund(client: PoolClient, orderId: string, userId: string, confirmationId: unknown,
+  resource?: LocalFinancialSandbox | DemoFinanceResource): Promise<PrestartSummary | undefined> {
+  const ready = (await client.query(`SELECT COALESCE(
+    has_table_privilege(current_user,to_regclass('zzsh_order.support_poststart_cancellation'),'SELECT') AND
+    has_function_privilege(current_user,to_regprocedure('zzsh_order.support_poststart_cancellation_complete(text)'),'EXECUTE'),false) AS ready`)).rows[0]?.ready === true;
+  if (!ready) return unknownPrestart();
+  const rows = (await client.query(`SELECT p.id,p.order_id,p.renter_user_id,p.owner_user_id,p.payment_confirmation_id,p.source_digest,
+    p.refund_cents::text AS refund_cents,c.source,c.disposition,c.currency,c.merchant_scope_id,c.merchant_order_no,c.provider_transaction_id,
+    zzsh_order.support_poststart_cancellation_complete(p.id) AS complete
+    FROM zzsh_order.support_poststart_cancellation p JOIN zzsh_order.payment_confirmation c ON c.id=p.payment_confirmation_id AND c.order_id=p.order_id
+    WHERE p.order_id=$1 ORDER BY p.created_at DESC,p.id DESC LIMIT 2`, [orderId])).rows;
+  const row = rows[0];
+  if (rows.length !== 1 || !row || row.order_id !== orderId || row.renter_user_id !== userId || row.payment_confirmation_id !== confirmationId
+    || row.complete !== true || row.disposition !== "APPLIED" || row.currency !== "CNY" || !["JOINPAY", "CONTROLLED"].includes(row.source)
+    || typeof row.refund_cents !== "string" || !/^(0|[1-9][0-9]{0,15})$/.test(row.refund_cents)
+    || ![row.id,row.owner_user_id,row.payment_confirmation_id,row.merchant_scope_id,row.merchant_order_no,row.provider_transaction_id].every(v => typeof v === "string" && ID.test(v))
+    || typeof row.source_digest !== "string" || !/^[a-f0-9]{64}$/.test(row.source_digest)) return unknownPrestart();
+  if (row.refund_cents === "0") return undefined;
+  const basis: PrestartPaymentBasis = { orderId, renterUserId: userId, ownerUserId: row.owner_user_id,
+    paymentConfirmationId: row.payment_confirmation_id, source: row.source, merchantIdentityId: row.merchant_scope_id,
+    merchantOrderNo: row.merchant_order_no, channelTrxNo: row.provider_transaction_id, amountCents: row.refund_cents,
+    currency: "CNY", digest: row.source_digest };
+  const sandbox = resource?.kind === "REGISTERED_LOCAL_FINANCIAL_SANDBOX" ? resource : undefined;
+  const demo = resource && resource.kind !== "REGISTERED_LOCAL_FINANCIAL_SANDBOX" ? resource : undefined;
+  const progress = await readPrestartRefundProgress(client, row.id, basis, true, sandbox, demo, "SUPPORT_CANCELLATION");
+  return projectPrestartRefundSummary(basis.source, basis.amountCents, progress);
 }
 
 /** 只读本人原生订单的本地退款投影；不重验渠道原件、不读商户钥、不执行退款或资金动作。 */
@@ -992,16 +585,20 @@ export async function readPersonalNativeRefunds(client: PoolClient, actor: UserC
     return { ...emptyProjection(order, asOf, "AVAILABLE", "CONFLICT", ["UNRECOGNIZED_ORDER_STATUS"]), subjectId: actor.userId };
   }
   const postingId = first.posting_id;
-  const abnormal = await readAbnormalSection(client, actor.userId, orderId, asOf);
-  const hasAbnormal = abnormal.responsibilities.length > 0 || abnormal.intents.length > 0 || abnormal.truncated || abnormal.conflictReasons.size > 0;
+  const prestartRefund = order.status === "CANCELLED" && (postingId === null || postingId === undefined)
+    && ["PRESTART_TERMINATED", "SUPPORT_CANCELLED_REFUND"].includes(String(first.cancel_reason))
+    ? await readPersonalPrestartRefund(client, orderId, actor.userId, first.paid_confirmation_id, first.cancel_reason, sandbox) : undefined;
+  const cancellationRefund = order.status === "CANCELLED" && (postingId === null || postingId === undefined)
+    && first.cancel_reason === "SUPPORT_AFTER_START_CANCELLED"
+    ? await readPersonalSupportCancellationRefund(client, orderId, actor.userId, first.paid_confirmation_id, sandbox) : undefined;
   if (order.status === "PENDING_PAYMENT" || order.status === "CANCELLED") {
-    if (!hasAbnormal) return postingId === null || postingId === undefined
+    return postingId === null || postingId === undefined
       ? { ...emptyProjection(order, asOf, "NOT_APPLICABLE", "RESPONSIBILITY_NOT_POSTED",
-          ["LOCAL_RESPONSIBILITY_NOT_POSTED", "ORDER_STATE_DOES_NOT_PROVE_CHANNEL_PAYMENT"]), subjectId: actor.userId }
+          ["LOCAL_RESPONSIBILITY_NOT_POSTED", "ORDER_STATE_DOES_NOT_PROVE_CHANNEL_PAYMENT"]), subjectId: actor.userId,
+          ...(prestartRefund ? { prestartRefund } : {}), ...(cancellationRefund ? { cancellationRefund } : {}) }
       : { ...emptyProjection(order, asOf, "AVAILABLE", "CONFLICT", ["POSTING_ON_NON_COMPLETED_ORDER"]), subjectId: actor.userId };
   }
   if (order.status === "PAID" && (postingId === null || postingId === undefined)) {
-    if (hasAbnormal) return abnormalOnlyProjection(order, asOf, actor.userId, abnormal);
     return { ...emptyProjection(order, asOf, "NOT_APPLICABLE", "RESPONSIBILITY_NOT_POSTED",
       ["LOCAL_RESPONSIBILITY_NOT_POSTED"]), subjectId: actor.userId };
   }
@@ -1013,14 +610,9 @@ export async function readPersonalNativeRefunds(client: PoolClient, actor: UserC
   }
   const validPosting = typeof postingId === "string" && ID.test(postingId);
   if (!validPosting) {
-    if (!hasAbnormal) {
-      const missing = postingId === null || postingId === undefined;
-      return { ...emptyProjection(order, asOf, "AVAILABLE", "CONFLICT",
-        [order.status === "COMPLETED" && missing ? "COMPLETED_ORDER_WITHOUT_POSTING" : "POSTING_ID_UNREADABLE"]), subjectId: actor.userId };
-    }
-    return abnormalOnlyProjection(order, asOf, actor.userId, abnormal,
-      order.status === "PENDING_PAYMENT" || order.status === "CANCELLED"
-        ? ["LOCAL_RESPONSIBILITY_NOT_POSTED", "ORDER_STATE_DOES_NOT_PROVE_CHANNEL_PAYMENT"] : []);
+    const missing = postingId === null || postingId === undefined;
+    return { ...emptyProjection(order, asOf, "AVAILABLE", "CONFLICT",
+      [order.status === "COMPLETED" && missing ? "COMPLETED_ORDER_WITHOUT_POSTING" : "POSTING_ID_UNREADABLE"]), subjectId: actor.userId };
   }
 
   const aggregateReasons = new Set<string>();
@@ -1054,8 +646,8 @@ export async function readPersonalNativeRefunds(client: PoolClient, actor: UserC
   let foreignIntentCount = 0;
 
   for (const raw of rawRows.slice(0, INTENT_LIMIT)) {
-    const draft = parseIntentRow(raw, { actorId: actor.userId, orderId, basis: "POSTING", expectedPostingId: postingId,
-      responsibilityCents: null, asOf, conflict, onForeign: () => { foreignIntentCount += 1; },localRegisteredTerminal:localTerminals.has(String(raw.id)) });
+    const draft = parseIntentRow(raw, { actorId: actor.userId, orderId, expectedPostingId: postingId,
+      asOf, conflict, onForeign: () => { foreignIntentCount += 1; },localRegisteredTerminal:localTerminals.has(String(raw.id)) });
     if (draft) drafts.push(draft);
   }
   await applyWriteOffs(client, drafts, actor.userId, conflict);
@@ -1135,14 +727,6 @@ export async function readPersonalNativeRefunds(client: PoolClient, actor: UserC
       allocatedCents: allocated?.toString() ?? null, consumedCents: consumed?.toString() ?? null,
       releasedCents: released?.toString() ?? null, remainingCents: remaining?.toString() ?? null,
       totalsComplete, dueAt, dueState },
-    abnormalResponsibilities: [],
-    responsibilitiesTruncated: false,
-    responsibilityTotals: { originalCents: totalsComplete ? originalCents : null,
-      allocatedCents: totalsComplete ? allocated?.toString() ?? null : null,
-      consumedCents: totalsComplete ? consumed?.toString() ?? null : null,
-      releasedCents: totalsComplete ? released?.toString() ?? null : null,
-      remainingCents: totalsComplete ? remaining?.toString() ?? null : null,
-      totalsComplete, postingOriginalCents: originalCents, abnormalOriginalCents: null, abnormalConfirmationCount: 0 },
     intents,
     returnedIntentCount: intents.length,
     intentsTruncated: truncated,
@@ -1153,5 +737,5 @@ export async function readPersonalNativeRefunds(client: PoolClient, actor: UserC
     reasonCodes,
     unknowns: ["CHANNEL_REFUND_RECORD_NOT_CHECKED", "BANK_ARRIVAL_UNKNOWN", "REFUND_DESTINATION_NOT_PROJECTED"],
   };
-  return hasAbnormal ? mergeAbnormalProjection(base, abnormal, conflictReasons, actor.userId) : base;
+  return base;
 }

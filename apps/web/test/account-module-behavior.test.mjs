@@ -593,6 +593,17 @@ test("historical-only legacy observations show a read-only business state withou
     assert.doesNotMatch(p.host.textContent, /规则变更|未报价|保证金未知|资料不能发布/);
   } finally { await p.close(); }
 });
+test("a cancelled in-flight legacy account offers owner verification without pretending it is listed", async () => {
+  const supply=detailOf("acc-cancelled");supply.version.origin="LEGACY_OBSERVATION";supply.canPrepareLegacyCancelledDraft=true;
+  const p=await probe({viaFetch:async url=>url.includes("/me/accounts")?Response.json({items:[{...accountRow("acc-cancelled"),historicalReadOnly:true}],nextCursor:null}):Response.json(supply)});
+  try {
+    await p.render("accounts","acc-cancelled");
+    assert.match(p.host.textContent,/原订单已取消，请核实并更新账号资料后重新上架/);
+    const link=[...p.host.querySelectorAll("a")].find(item=>item.textContent.includes("核实资料并重新上架"));assert(link);
+    assert.match(link.getAttribute("href"),/\/publish\?accountId=acc-cancelled&edit=1/);
+    assert.equal([...p.host.querySelectorAll("button")].some(button=>["暂停接单","恢复接单"].includes(button.textContent.trim())),false);
+  } finally {await p.close();}
+});
 const rowIds = (p) => [...p.host.querySelectorAll("[data-account-row]")].map((node) => node.getAttribute("data-account-row"));
 const { SupplyRequestError } = require(path.join(tree, "apps/web/src/lib/supply-client.ts"));
 

@@ -17,7 +17,7 @@ import { YunxinIdentityRepository } from "../src/im/yunxin-identity-repository";
 import { confirmOrderPayment, createControlledPaymentSource, type PaymentInput } from "../src/order/payment-confirmation";
 import { issuePersonalConfirmation, type ConfirmationFunding } from "../src/order/personal-confirmation";
 import { createPersonalReservation } from "../src/order/personal-order";
-import { computeSyntheticFullPayout, settlementSurfaceOpen } from "../src/order/settlement-record";
+import { automaticOpeningAcceptance, computeSyntheticFullPayout, settlementSurfaceOpen } from "../src/order/settlement-record";
 import { readOrderOccupancy } from "../src/order/order";
 import { runBusinessMigrations } from "../src/database/business-migrations";
 import { CUSTOMER_TIERS, type CustomerTier } from "../src/supply/delta-rental";
@@ -411,7 +411,7 @@ export async function runSettlementAcceptance(t: TestContext, o: Base & {
     `SELECT quote_snapshot->'lines' AS lines FROM zzsh_order.rental_order WHERE id = $1`, [orderId])).rows[0]!.lines;
   const openingBody = async (orderId: string) => ({ lines: (await quoteLines(orderId)).map((line) => ({ itemId: line.itemId, quantity: line.quantity })) });
   const remainingBody = async (orderId: string, remaining: string) => ({ lines: (await quoteLines(orderId)).map((line) => ({ itemId: line.itemId, remainingQuantity: remaining })) });
-  const makePaidV2 = async (label: string, selected = true, membershipTier: CustomerTier = "STANDARD") => {
+  const makePaidV2 = async (label: string, selected = true, membershipTier: CustomerTier = "STANDARD", autoOpening = false) => {
     assert.equal(o.resourceSet, "trade_settlement", "v2 controlled compensation is restricted to the registered settlement resource");
     await setMembershipTier(membershipTier);
     const account = await o.publishApproved(o.owner, label, "30000", true, selected,
@@ -455,7 +455,7 @@ export async function runSettlementAcceptance(t: TestContext, o: Base & {
     const fact = createControlledPaymentSource({
       config: o.config, resourceSet: o.resourceSet, appId, merchantScopeId: "settle-merchant", allowedOrderIds: [orderId],
     })(input);
-    const applied = await withTransaction(pool, (client) => confirmOrderPayment(client, fact));
+    const applied = await withTransaction(pool, (client) => confirmOrderPayment(client, fact, undefined, autoOpening ? automaticOpeningAcceptance : undefined));
     assert.equal(applied.disposition, "APPLIED");
     const paid = (await pool.query<{ paymentId: string; amount: string }>(
       `SELECT p.id AS "paymentId", p.amount_cents::text AS amount FROM zzsh_order.rental_order o
@@ -490,7 +490,7 @@ export async function runSettlementAcceptance(t: TestContext, o: Base & {
     await pool.query(`INSERT INTO zzsh_supply.admin_supply_scope(admin_user_id, game_id, granted_by_admin_id) VALUES ($1,$2,$3) ON CONFLICT (admin_user_id, game_id) DO NOTHING`, [adminId, gameId, o.boss.id]);
   }
   await seedIdentity(pool, { provider: "yunxin", appId, realm: "admin", kind: "ADMIN", platformSubjectId: staff.id }, run);
-  await pool.query(`INSERT INTO zzsh_iam.im_support_presence(app_id, admin_user_id, availability, connection_state, last_connected_at) VALUES ($1,$2,'AVAILABLE','CONNECTED',clock_timestamp())`, [appId, staff.id]);
+  await pool.query(`INSERT INTO zzsh_iam.im_support_presence(app_id, admin_user_id, availability, connection_state, last_connected_at, auth_session_id) VALUES ($1,$2,'AVAILABLE','CONNECTED',clock_timestamp(),(SELECT id FROM zzsh_auth_admin."session" WHERE "userId"=$2 AND "expiresAt">clock_timestamp() ORDER BY "createdAt" DESC LIMIT 1))`, [appId, staff.id]);
 
   const successAudits = async (orderId: string, action: string) => Number((await pool.query(
     `SELECT count(*)::int AS n FROM zzsh_iam.audit_event WHERE object_id = $1 AND action = $2 AND outcome = 'SUCCESS'`,
@@ -1910,6 +1910,19 @@ export async function runSettlementAcceptance(t: TestContext, o: Base & {
   assert.equal(compatibilityRelease.body!.generation, String(Number(currentGeneration) + 1));
   console.log("trg2 R1 DISCOUNT_USER compatibility fixture", JSON.stringify({ gameId, releaseId: compatibilityRelease.body!.releaseId, generation: compatibilityRelease.body!.generation, tiers: CUSTOMER_TIERS }));
   await settleV2("B3B1 v2冻结DISCOUNT_USER", "NORMAL", "DISCOUNT_USER");
+
+  const autoOpened = await makePaidV2("自动开租 v2", true, "STANDARD", true);
+  const autoOpening = (await pool.query(`SELECT id, version_no, status, created_by_source, created_by_admin_id,
+    auto_confirm_wait_minutes, to_char(auto_confirm_due_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS due
+    FROM zzsh_order.rental_opening WHERE order_id=$1`, [autoOpened.orderId])).rows;
+  assert.equal(autoOpening.length, 1, "a v2 personalised payment produces one opening");
+  assert.equal(autoOpening[0].status, "DRAFT");
+  assert.equal(autoOpening[0].created_by_source, "SYSTEM");
+  assert.equal(autoOpening[0].created_by_admin_id, null);
+  assert.equal(autoOpening[0].auto_confirm_wait_minutes, 40);
+  assert.ok(autoOpening[0].due);
+  const autoGeneration = (await pool.query(`SELECT state, opening_id FROM zzsh_order.rental_opening_generation WHERE order_id=$1`, [autoOpened.orderId])).rows[0];
+  assert.deepEqual(autoGeneration, { state: "CREATED", opening_id: autoOpening[0].id });
 
   const counts = (await pool.query(`SELECT
     (SELECT count(*)::int FROM zzsh_order.rental_order) AS orders,

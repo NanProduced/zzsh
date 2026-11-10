@@ -38,6 +38,8 @@ class PoolFixture {
     else if (sql.includes('FROM "zzsh_supply"."media_asset"')) rows = this.sample ? [{ publicStorageKey: KEY }] : [];
     else if (sql.includes("to_regclass('zzsh_order.settlement_refund_policy')")) rows = [{ available: true }];
     else if (sql.includes("FROM zzsh_order.settlement_refund_policy")) rows = [{ normalDays: 0, earlyDays: 7, revision: "1" }];
+    else if (sql.includes("to_regclass('zzsh_order.opening_auto_confirm_policy')")) rows = [{ available: true }];
+    else if (sql.includes("FROM zzsh_order.opening_auto_confirm_policy")) rows = [{ waitMinutes: 40, revision: "1" }];
     else throw new Error("Unexpected fixture query: " + sql);
     return { rows, rowCount: rows.length };
   }
@@ -160,6 +162,21 @@ test("settlement refund policy is Boss-only and rejects cross-origin or invalid 
   assert.equal(invalidResponse.code, 400);
 });
 
+test("opening auto-confirm policy is Boss-only and rejects 0 or out-of-range minutes", async () => {
+  const f = setup();
+  const read = await f.run("/opening-auto-confirm");
+  assert.equal(read.code, 200);
+  assert.deepEqual(read.body, { waitMinutes: 40, revision: "1", available: true });
+  f.pool.isBoss = false;
+  assert.equal((await f.run("/opening-auto-confirm")).code, 403);
+  f.pool.isBoss = true;
+  const invalid = f.request("/opening-auto-confirm", "PUT");
+  invalid.body = { waitMinutes: 0, expectedRevision: "1" };
+  const response = new ResponseFixture();
+  await handleSystemConfiguration(invalid, response as SupplyResponse, f.options);
+  assert.equal(response.code, 400);
+});
+
 test("missing authentication is denied before any configuration or database access", async () => {
   const f = setup(); f.options.adminAuth.api.getSession = async () => null;
   const result = await f.run();
@@ -246,6 +263,18 @@ test("Admin BFF exposes SMS configuration only through the guarded read route",a
   }
   f.pool.isBoss=false;const request=f.request("/sms");request.originalUrl="/api/bff/admin/system/sms";
   const response=new ResponseFixture();await handleAdminBff(request,response as never,options);assert.equal(response.code,403);
+});
+
+test("Admin BFF dispatches opening auto-confirm without bypassing validation", async () => {
+  const f = setup();
+  const options = { apiOrigin: API, adminOrigin: ORIGIN, adminSecurityOptions: f.options, supply: f.options } as unknown as AdminBffOptions;
+  const read = f.request("/opening-auto-confirm"); read.originalUrl = "/api/bff/admin/system/opening-auto-confirm";
+  const response = new ResponseFixture(); await handleAdminBff(read, response as never, options);
+  assert.equal(response.code, 200); assert.equal(response.body.waitMinutes, 40);
+  const invalid = f.request("/opening-auto-confirm", "PUT"); invalid.originalUrl = "/api/bff/admin/system/opening-auto-confirm";
+  invalid.body = { waitMinutes: 10081, expectedRevision: "1" };
+  const rejected = new ResponseFixture(); await handleAdminBff(invalid, rejected as never, options);
+  assert.equal(rejected.code, 400);
 });
 
 test("Admin BFF dispatches the refund wait policy without bypassing validation", async () => {

@@ -62,6 +62,10 @@ export type SupportQueueReason = "NO_ONLINE_STAFF" | "ALL_AT_CAPACITY" | "CAPACI
 
 export type SupportQueueSnapshot = {
   queued: number;
+  serviceQueued?: number | null;
+  complaintQueued?: number | null;
+  serviceEligible?: number | null;
+  complaintEligible?: number | null;
   oldestQueuedAt: string | null;
   oldestWaitSeconds: number | null;
   onDuty: number;
@@ -132,6 +136,8 @@ export type AuditConversation = {
   adminUnreadCount?: number;
   userUnreadCount?: number;
   firstUserMessageAt?: string | null;
+  roundSeq?: number;
+  roundCount?: number;
   historyState?: "AVAILABLE" | "NOT_ESTABLISHED" | "LEGACY_UNAVAILABLE" | "RECOVERING" | string;
   firstResponseAt?: string | null;
   remindDueAt?: string | null;
@@ -197,6 +203,10 @@ function parseQueue(value: unknown): SupportQueueSnapshot | null {
     : "UNKNOWN";
   return {
     queued: count(row.queued),
+    serviceQueued: maybeCount(row.serviceQueued),
+    complaintQueued: maybeCount(row.complaintQueued),
+    serviceEligible: maybeCount(row.serviceEligible),
+    complaintEligible: maybeCount(row.complaintEligible),
     oldestQueuedAt: text(row.oldestQueuedAt) || null,
     oldestWaitSeconds: maybeCount(row.oldestWaitSeconds),
     onDuty: count(row.onDuty),
@@ -435,6 +445,8 @@ function parseConversation(value: unknown): AuditConversation | null {
     adminUnreadCount: maybeCount(row.adminUnreadCount) ?? undefined,
     userUnreadCount: maybeCount(row.userUnreadCount) ?? undefined,
     firstUserMessageAt: text(row.firstUserMessageAt) || null,
+    roundSeq: maybeCount(row.roundSeq) ?? undefined,
+    roundCount: maybeCount(row.roundCount) ?? undefined,
     historyState,
     firstResponseAt: text(row.firstResponseAt) || text(recordOf(row.supportEscalation).firstResponseAt) || null,
     remindDueAt: text(row.remindDueAt) || text(recordOf(row.supportEscalation).remindDueAt) || null,
@@ -453,7 +465,7 @@ export function parseAuditConversations(value: unknown): AuditPage<AuditConversa
 
 export type AuditMessage = NimMessageLike & { sender?: { displayName: string; avatar: string | null; role: "USER" | "ADMIN" | "SYSTEM"; platformId?: string; displayUsername?: string } };
 
-const CARD_KINDS = ["ORDER_OPENING", "ORDER_ENDING", "ORDER_SETTLED", "ORDER_PRICE_CHANGE"] as const;
+const CARD_KINDS = ["ORDER_OPENING", "ORDER_ENDING", "ORDER_SETTLED", "ORDER_CANCELLED", "ORDER_PRICE_CHANGE"] as const;
 const AUDIT_MESSAGE_TYPES = ["CONSULTATION", "ORDER"] as const;
 
 function parseCard(value: unknown): NimMessageLike["card"] | undefined {
@@ -480,6 +492,7 @@ function parseMessage(value: unknown): AuditMessage | null {
     ...(messageServerId ? { messageServerId } : {}),
     ...(typeof row.text === "string" ? { text: row.text } : {}),
     ...(typeof row.messageType === "number" ? { messageType: row.messageType } : {}),
+    ...(typeof row.serverExtension === "string" ? { serverExtension: row.serverExtension } : {}),
     ...(row.media !== undefined ? { media: row.media as NimMessageLike["media"] } : {}),
     ...(Object.keys(attachment).length ? { attachment: attachment as NimMessageLike["attachment"] } : {}),
     ...(Object.keys(reply).length && typeof reply.messageClientId === "string"
@@ -649,7 +662,7 @@ export const SUPPORT_SLA_GAPS: readonly SupportSlaGap[] = [
 export type SupportDutySummary = {
   /** 在岗可接待（availability=AVAILABLE）人数。 */
   available: number;
-  /** 在岗可接待且通道已连接，与服务端 totals.onDutyCount 同口径。 */
+  /** 在岗且通道已连接（presence 口径）；顶部“当前可接待”另按服务端派单资格。 */
   connected: number;
   /** 非在岗但名下仍有接待的客服数。 */
   offDutyWithLoad: number;
@@ -818,7 +831,7 @@ export function formatSlaDuration(seconds: number | null | undefined): string {
 }
 
 export function queueReasonLabel(reason: SupportQueueReason): string {
-  if (reason === "NO_ONLINE_STAFF") return "无在岗客服";
+  if (reason === "NO_ONLINE_STAFF") return "无匹配在岗客服";
   if (reason === "ALL_AT_CAPACITY") return "全部满载";
   if (reason === "CAPACITY_AVAILABLE") return "有空位";
   return "原因未提供";
@@ -872,8 +885,11 @@ export function handoverSummaryText(input: HandoverSummaryInput): string {
       : "交接：交接记录未读取，本摘要不含交接数";
 
   const queue = input.queue ?? null;
+  const complaintSplit = queue && (queue.complaintQueued ?? 0) > 0
+    ? ` · 投诉排队 ${queue.complaintQueued} · 可接投诉 ${queue.complaintEligible ?? 0}`
+    : "";
   const queueLine = queue
-    ? `排队：${queue.queued} 条${queue.oldestWaitSeconds !== null && queue.oldestWaitSeconds > 0 ? `（最久 ${formatSlaDuration(queue.oldestWaitSeconds)}）` : ""} · 在岗 ${queue.onDuty} · 可接单 ${queue.withFreeSlot} · 满载 ${queue.atCapacity}${queue.capacityLimit !== null ? ` · 上限 ${queue.capacityLimit} 条/人` : ""} · 原因 ${queueReasonLabel(queue.reason)}`
+    ? `排队：${queue.queued} 条${complaintSplit}${queue.oldestWaitSeconds !== null && queue.oldestWaitSeconds > 0 ? `（最久 ${formatSlaDuration(queue.oldestWaitSeconds)}）` : ""} · 在岗 ${queue.onDuty} · 可接单 ${queue.withFreeSlot} · 满载 ${queue.atCapacity}${queue.capacityLimit !== null ? ` · 上限 ${queue.capacityLimit} 条/人` : ""} · 原因 ${queueReasonLabel(queue.reason)}`
     : null;
 
   const gaps: string[] = [];

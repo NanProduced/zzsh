@@ -518,6 +518,7 @@ export async function handlePublishingRoute(
         if (historical) {
           detail.account = a;
           detail.available = false;
+          delete detail.canPrepareLegacyCancelledDraft;
           detail.blockers = [
             ...(detail.blockers as string[]),
             "HISTORICAL_VERSION",

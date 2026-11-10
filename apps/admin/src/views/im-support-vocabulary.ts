@@ -87,14 +87,3 @@ export function formatEventMovement(
   }
   return f || t || null;
 }
-
-export function formatSubjectRef(ref?: string | null): string {
-  if (!ref) return "未关联商品或订单";
-  if (ref.startsWith("order:")) {
-    return "已关联订单，详见会话详情";
-  }
-  if (ref.startsWith("listing:") || ref.startsWith("goods:")) {
-    return "已关联商品，详见会话详情";
-  }
-  return "已关联对象，详情待核对";
-}

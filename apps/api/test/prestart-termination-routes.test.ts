@@ -20,7 +20,7 @@ function fixture(t:any){
  t.mock.method(core,'withTransaction',async(_p:any,fn:any)=>fn(c));
  t.mock.method(domain,'authorizePrestartWrite',async(_c:any,actor:any,id:any)=>{seen.push({action:'authorize',value:{actor,id}});});
  t.mock.method(domain,'readPrestartTermination',async(_c:any,actor:any,id:any)=>{seen.push({action:'read',value:{actor,id}});return{orderId:id};});
- t.mock.method(domain,'requestPrestartTermination',async(_c:any,actor:any,input:any)=>{seen.push({action:'request',value:{actor,input}});return{status:200,body:{request:{state:'REQUESTED'}}};});
+ t.mock.method(domain,'cancelPrestartTermination',async(_c:any,actor:any,input:any)=>{seen.push({action:'cancel',value:{actor,input}});return{status:200,body:{request:{state:'APPROVED'}}} as any;});
  t.mock.method(domain,'reviewPrestartTermination',async(_c:any,actor:any,input:any)=>{seen.push({action:'review',value:{actor,input}});return{status:200,body:{request:{state:'APPROVED'}}};});
  t.mock.method(routes,'runIdempotentWrite',async(_o:any,_r:any,res:any,_id:any,scope:any,_a:any,frozen:any,authorize:any,action:any)=>{
   seen.push({action:'idempotency',value:{scope,frozen}});await authorize(c,{});const r=await action(c);if(failCommit)throw Error('SYNTHETIC_COMMIT_RESPONSE_UNKNOWN');res.status(r.status).json(r.body);});
@@ -40,33 +40,36 @@ test('模拟环境沿用服务端身份和同一资源处理未开租申请、�
  await handlePrestartTerminationRoute(f.req(),f.response,f.options,'user');
  const reader=f.seen.find(s=>s.action==='read')?.value.actor;
  assert.equal(reader.ecsTestDemo,demo);assert.deepEqual(reader.settlementReadIdentity,{database:'zzsh_ecs_test',runtimeUser:'zzsh_ecs_runtime'});
- await handlePrestartTerminationRoute(f.req('user','order_1/prestart-termination/requests','POST',{expectedOrderRevision:'1',reason:'未开租取消'}),f.response,f.options,'user');
- assert.equal(f.seen.find(s=>s.action==='request')?.value.actor.ecsTestDemo,demo);
+ await handlePrestartTerminationRoute(f.req('user','order_1/prestart-termination/cancel','POST',{expectedOrderRevision:'1',reasonCode:'RENTER_WRONG_ACCOUNT'}),f.response,f.options,'user');
+ assert.equal(f.seen.find(s=>s.action==='cancel')?.value.actor.ecsTestDemo,demo);
  await handlePrestartTerminationRoute(f.req('admin','order_1/prestart-termination/term_1/review','POST',{expectedRevision:'1',decision:'APPROVE',assessment:'NO_USE_NO_DISPUTE',reason:'核实无争议'}),f.response,f.options,'admin');
  assert.equal(f.seen.find(s=>s.action==='review')?.value.actor.ecsTestDemo,demo);
 });
 test('申请/审核锁定幂等scope与原body；不收客户端金额、目标或供应商状态',async t=>{
  const f=fixture(t);
- await handlePrestartTerminationRoute(f.req('user','order_1/prestart-termination/requests','POST',{expectedOrderRevision:'1',reason:'未交付申请结束'}),f.response,f.options,'user');
- assert.deepEqual(f.seen.find(s=>s.action==='idempotency')?.value.scope,{principalId:'renter_1',operation:'order.prestart.request',resourceId:'order_1'});
+ await handlePrestartTerminationRoute(f.req('user','order_1/prestart-termination/cancel','POST',{expectedOrderRevision:'1',reasonCode:'RENTER_WRONG_ACCOUNT'}),f.response,f.options,'user');
+ assert.deepEqual(f.seen.find(s=>s.action==='idempotency')?.value.scope,{principalId:'renter_1',operation:'order.prestart.cancel',resourceId:'order_1'});
  await handlePrestartTerminationRoute(f.req('admin','order_1/prestart-termination/term_1/review','POST',{expectedRevision:'1',decision:'APPROVE',assessment:'NO_USE_NO_DISPUTE',reason:'核实无交付无争议'}),f.response,f.options,'admin');
  assert(f.seen.some(s=>s.action==='review'));
- await assert.rejects(handlePrestartTerminationRoute(f.req('user','order_1/prestart-termination/requests','POST',{expectedOrderRevision:'1',reason:'申请未交付',amountCents:'1'}),f.response,f.options,'user'),(e:any)=>e.status===400);
+ await assert.rejects(handlePrestartTerminationRoute(f.req('user','order_1/prestart-termination/cancel','POST',{expectedOrderRevision:'1',reasonCode:'RENTER_WRONG_ACCOUNT',amountCents:'1'}),f.response,f.options,'user'),(e:any)=>e.status===400);
 });
 test('领域完成后COMMIT响应未知返回202原键恢复；Origin/GET query先拒绝',async t=>{
- const f=fixture(t);f.unknown();await handlePrestartTerminationRoute(f.req('user','order_1/prestart-termination/requests','POST',{expectedOrderRevision:'1',reason:'未交付申请结束'}),f.response,f.options,'user');
+ const f=fixture(t);f.unknown();await handlePrestartTerminationRoute(f.req('user','order_1/prestart-termination/cancel','POST',{expectedOrderRevision:'1',reasonCode:'RENTER_WRONG_ACCOUNT'}),f.response,f.options,'user');
  assert.equal(f.status(),202);assert.equal(f.body().outcome,'UNKNOWN');assert.equal(f.body().originalKeyRequired,true);assert.equal(f.body().bankArrival,'UNKNOWN');
  const cross=f.req();cross.headers.origin='https://other.invalid';await assert.rejects(handlePrestartTerminationRoute(cross,f.response,f.options,'user'),(e:any)=>e.status===403);
  await assert.rejects(handlePrestartTerminationRoute(f.req('user','order_1/prestart-termination?query=channel'),f.response,f.options,'user'),(e:any)=>e.status===400);
 });
-test('Admin异常/未开租退款独立POST，引用只随原对象传入；GET和额外金额拒绝',async t=>{
+test('旧申请入口只允许原键回执；新请求明确未提交，不再生成待客服审核',async t=>{
+ const f=fixture(t);await handlePrestartTerminationRoute(f.req('user','order_1/prestart-termination/requests','POST',{expectedOrderRevision:'1',reason:'未交付申请结束'}),f.response,f.options,'user');
+ assert.equal(f.status(),200);assert.equal(f.body().outcome,'NOT_SUBMITTED');assert.equal(f.seen.some(s=>s.action==='cancel'),false);
+});
+test('异常原款入口已停用；未开租退款仍绑定原对象且拒绝额外金额',async t=>{
  const f=fixture(t);const calls:any[]=[];
- t.mock.method(refunds,'requestAdminAbnormalNativeRefund',async(_p:any,_e:any,v:any)=>{calls.push(v);return{outcome:'REVIEW_REQUIRED'} as any;});
  t.mock.method(refunds,'requestAdminPrestartNativeRefund',async(_p:any,_e:any,v:any)=>{calls.push(v);return{outcome:'ALLOCATED'} as any;});
- await handleAdminNativeRefundRoute(f.req('admin','order_1/refunds/abnormal','POST',{confirmationId:'pc_1',reason:'核实迟到原款'}),f.response,f.options,'/api/v1/admin/orders',{pool:{} as any});
- assert.equal(f.status(),200);assert.equal(calls[0].orderId,'order_1');assert.equal(calls[0].confirmationId,'pc_1');
+ assert.equal(await handleAdminNativeRefundRoute(f.req('admin','order_1/refunds/abnormal','POST',{confirmationId:'pc_1',reason:'核实迟到原款'}),f.response,f.options,'/api/v1/admin/orders',{pool:{} as any}),false);
+ assert.equal(calls.length,0);
  await handleAdminNativeRefundRoute(f.req('admin','order_1/prestart-termination/term_1/refund-requests','POST'),f.response,f.options,'/api/v1/admin/orders',{pool:{} as any});
- assert.equal(calls[1].terminationId,'term_1');assert.equal(calls[1].idempotencyKey,'original_1');
- await handleAdminNativeRefundRoute(f.req('admin','order_1/prestart-termination/term_1/refund-requests','POST',{amountCents:'1'}),f.response,f.options,'/api/v1/admin/orders',{pool:{} as any});assert.equal(f.status(),400);assert.equal(calls.length,2);
- await handleAdminNativeRefundRoute(f.req('admin','order_1/refunds/abnormal','GET'),f.response,f.options,'/api/v1/admin/orders',{pool:{} as any});assert.equal(f.status(),404);
+ assert.equal(calls[0].terminationId,'term_1');assert.equal(calls[0].idempotencyKey,'original_1');
+ await handleAdminNativeRefundRoute(f.req('admin','order_1/prestart-termination/term_1/refund-requests','POST',{amountCents:'1'}),f.response,f.options,'/api/v1/admin/orders',{pool:{} as any});assert.equal(f.status(),400);assert.equal(calls.length,1);
+ assert.equal(await handleAdminNativeRefundRoute(f.req('admin','order_1/refunds/abnormal','GET'),f.response,f.options,'/api/v1/admin/orders',{pool:{} as any}),false);
 });

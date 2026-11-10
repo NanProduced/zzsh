@@ -1409,6 +1409,12 @@ export async function mountAuthHandlers(
   }
   const settlementRecordingEnabled = options.settlementRecordingEnabled === true || (options.testOperationsEnabled === true
     && process.env.ZZSH_SETTLEMENT_RECORDING === "controlled" && process.env.NODE_ENV !== "production");
+  const orderCardTransport = options.testImMessageTransport?.card
+    ? {
+      card: options.testImMessageTransport.card.bind(options.testImMessageTransport),
+      ...(options.testImMessageTransport.sendText ? { text: options.testImMessageTransport.sendText.bind(options.testImMessageTransport) } : {}),
+    }
+    : teamTextSender ? createYunxinStageCardTransport(teamTextSender) : undefined;
   const orderOptions: OrderRuntimeOptions = {
     ...securityOptions,
     channelPaymentReadOptions: paymentReadOptions,
@@ -1428,6 +1434,7 @@ export async function mountAuthHandlers(
     ...(options.testImMessageTransport
       ? { systemMessageTransport: { sendText: options.testImMessageTransport.sendText.bind(options.testImMessageTransport) } }
       : teamTextSender ? { systemMessageTransport: createYunxinSystemMessageTransport(teamTextSender) } : {}),
+    ...(orderCardTransport ? { cardTransport: orderCardTransport } : {}),
   };
   // Credit routes own both BFF prefixes and must be registered before the
   // generic BFF fallbacks, which otherwise turn unknown credit paths into 404.

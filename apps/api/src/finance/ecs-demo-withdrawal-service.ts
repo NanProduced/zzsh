@@ -8,6 +8,7 @@ import { withdrawalPolicyForScope } from "./controlled-withdrawal";
 import type { NativeWithdrawalScope } from "./native-withdrawal-resource";
 
 type Actor = UserContext & { requestId: string };
+// TODO(正式上线前): 移除测试提现适配及其装配，模拟成功不是银行卡到账。
 export type EcsDemoWithdrawalOptions = Readonly<{ demo: DemoFinanceResource; scope: NativeWithdrawalScope }>;
 type Intent = { id:string; state:string; fundsDisposition:string; amountCents:string; netCents:string; feeCents:string; acceptedAt:string };
 type Target = { id:string; kind:string; mask:string; amountCents:string; currency:string; expiresAt:string; policyVersion:string };
