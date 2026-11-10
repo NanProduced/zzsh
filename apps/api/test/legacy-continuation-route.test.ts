@@ -3,12 +3,13 @@ import assert from "node:assert/strict";
 import type {Pool} from "pg";
 import {mountOrderHandlers,type OrderRuntimeOptions} from "../src/order/order-routes";
 import {handleLegacyContinuationRoute,parseLegacyContinuationPath} from "../src/order/legacy-continuation-routes";
-import {legacyBinding,legacyEvidence,legacySource,legacyQuantities} from "./legacy-continuation-fixture";
+import {legacyBinding,legacyEvidence,legacySource,legacyQuantities,legacyVerifiedProposal} from "./legacy-continuation-fixture";
 import {conflict,notFound,type SupplyNodeRequest} from "../src/supply/supply-util";
 import {initialLegacyFacts,projectLegacyContinuation} from "../src/order/legacy-continuation-model";
 import type {SupplyResponse} from "../src/supply/supply-routes";
 const e: typeof import("../src/order/legacy-continuation-evidence")=require("../src/order/legacy-continuation-evidence"),c: typeof import("../src/order/legacy-continuation-command")=require("../src/order/legacy-continuation-command");
 const walletCredit: typeof import("../src/order/legacy-finance-duty")=require("../src/order/legacy-finance-duty");
+const basisReader: typeof import("../src/order/legacy-settlement-basis")=require("../src/order/legacy-settlement-basis");
 function response(){return {headersSent:false,statusCode:0,payload:undefined as unknown,status(n:number){this.statusCode=n;return this;},setHeader(){return this;},json(body:unknown){this.payload=body;this.headersSent=true;return this;}};}
 test("real mounted legacy GET/receipt and POST preserve actor/key/body; no test-operation switch is required",async t=>{
  const user:typeof import("../src/auth/user-identity")=require("../src/auth/user-identity");t.mock.method(user,"readUserContext",async()=>({userId:legacyBinding.ownerUserId,sessionId:"session_fixture"}));
@@ -43,6 +44,28 @@ test("mapped source-qualified route rejects native IDs, path traversal, double e
  for(const id of ["7","order_native","history%3Aid","legacy_order_%252f","legacy_order_%2F","legacy_order_"+"f".repeat(40)+"%2Fextra"]){assert.throws(()=>parseLegacyContinuationPath("/legacy/"+id+"/continuation"));}
  assert.equal(parseLegacyContinuationPath("/legacy/"+legacyBinding.id+"/continuation/confirm/extra"),null);
 });
+test("staff records verified opening facts once; original key and current authorization remain required",async t=>{
+ const auth:typeof import('../src/auth/auth-security')=require('../src/auth/auth-security');
+ t.mock.method(auth,'readAdminContext',async()=>({userId:'staff_1',sessionId:'session_1'}));
+ let writes=0,allowed=true,checks=0;const records=new Map<string,any>(),fixture=legacyVerifiedProposal();
+ t.mock.method(walletCredit,'authorizeLegacyFinanceDuty',async(...[_client,actor]:Parameters<typeof walletCredit.authorizeLegacyFinanceDuty>)=>{checks++;if(!allowed)throw conflict('REVOKED');return {binding:legacyBinding,userIds:[],actor,financeDutyKind:'OWNER_CREDIT'};});
+ t.mock.method(e,'lockLegacyContinuationOrder',async()=>({head:null,duties:[]}));
+ t.mock.method(e,'readLegacyContinuationEvidence',async()=>fixture.original);
+ t.mock.method(basisReader,'recordLegacySettlementBasis',async(...[_client,actor,binding,row,_head,input]:Parameters<typeof basisReader.recordLegacySettlementBasis>)=>{writes++;assert.equal(actor.userId,'staff_1');assert.equal(binding.id,legacyBinding.id);assert.equal(row.id,fixture.original.id);assert.equal(input.partiesVerified,true);return {status:200,body:{orderId:binding.id,basisId:'basis_1',basisRevision:'1',state:'VERIFIED'}};});
+ const pool={connect:async()=>({release(){},query:async(sql:string,v:unknown[]=[])=>{
+  if(sql.includes('"request_fingerprint" AS')){const r=records.get(String(v[1]));return{rows:r?[r]:[],rowCount:r?1:0};}
+  if(sql.startsWith('INSERT INTO "zzsh_supply"."idempotency_record"'))records.set(String(v[1]),{requestFingerprint:v[2],responseStatus:v[3],responseBody:JSON.parse(String(v[4])),publishRequired:false});
+  return {rows:[],rowCount:0};
+ }})} as unknown as Pool;
+ const body={expectedRevision:null,inputEvidenceId:fixture.original.id,expectedBasisId:null,openingHaffM:'1',baseBot:'10',ownerPrices:fixture.basis.ownerPrices,openingItems:fixture.basis.openingItems,fullPayout:false,partiesVerified:true,reason:'双方已核实原单'};
+ const request={method:'POST',originalUrl:`/api/v1/admin/orders/legacy/${legacyBinding.id}/continuation/verify-basis`,headers:{origin:'http://admin.invalid','idempotency-key':'original_basis_key'},body};
+ const opts={pool,apiOrigin:'http://api.invalid',adminOrigin:'http://admin.invalid'} as never;
+ await handleLegacyContinuationRoute(request as never,response() as never,opts,'admin');
+ await handleLegacyContinuationRoute(request as never,response() as never,opts,'admin');
+ assert.equal(writes,1);assert.equal(checks,2);
+ allowed=false;await assert.rejects(()=>handleLegacyContinuationRoute(request as never,response() as never,opts,'admin'),/REVOKED/);assert.equal(writes,1);
+ await assert.rejects(()=>handleLegacyContinuationRoute({...request,body:{...body,partiesVerified:false}} as never,response() as never,opts,'admin'),/OPENING_BASIS_INVALID/);
+});
 test("legacy support cancellation allocates its refund before commit and preserves the original key on replay",async t=>{
  const auth:typeof import('../src/auth/auth-security')=require('../src/auth/auth-security');
  const allocation:typeof import('../src/order/legacy-support-cancel-refund')=require('../src/order/legacy-support-cancel-refund');
@@ -66,6 +89,21 @@ test("legacy support cancellation allocates its refund before commit and preserv
  assert.deepEqual(events.slice(-2),['allocation','commit']);
  assert.equal(await handleLegacyContinuationRoute(request as never,response() as never,options,'admin'),true);
  assert.equal(applied,1);assert.deepEqual(events,['allocation','commit','allocation','commit']);
+});
+test("a deferred cancellation refund is visible only while its refund duty remains pending",async t=>{
+ const user:typeof import('../src/auth/user-identity')=require('../src/auth/user-identity');
+ const history:typeof import('../src/order/legacy-refund-review-source')=require('../src/order/legacy-refund-review-source');
+ t.mock.method(user,'readUserContext',async()=>({userId:legacyBinding.renterUserId,sessionId:'fixture_session'}));
+ t.mock.method(history,'hasLegacyRecordedRefunds',async()=>false);
+ t.mock.method(e,'readLegacyContinuationBinding',async()=>legacyBinding);t.mock.method(e,'readLegacyContinuationHead',async()=>null);
+ let status='PENDING';
+ t.mock.method(e,'readLegacyContinuation',async()=>({continuation:{schema:'legacy-continuation.v1',stage:'5',duties:[{id:'refund_1',kind:'RENTER_REFUND',status}],reasons:[]}} as never));
+ const pool={connect:async()=>({release(){},query:async(sql:string)=>sql.includes('allocation_deferred')?{rows:[{found:true}]}:{rows:[]}})} as unknown as Pool;
+ const request={method:'GET',originalUrl:`/api/v1/orders/legacy/${legacyBinding.id}/continuation`,headers:{}};
+ const first=response();await handleLegacyContinuationRoute(request as never,first as never,{pool} as never,'user');
+ assert((first.payload as any).continuation.reasons.includes('REFUND_ALLOCATION_DEFERRED'));
+ status='SETTLED';const second=response();await handleLegacyContinuationRoute(request as never,second as never,{pool} as never,'user');
+ assert(!(second.payload as any).continuation.reasons.includes('REFUND_ALLOCATION_DEFERRED'));
 });
 test("demo legacy cancellation completes only its test refund before commit and keeps cancellation on retry",async t=>{
  const auth:typeof import('../src/auth/auth-security')=require('../src/auth/auth-security');
@@ -191,7 +229,8 @@ test("legacy support preview exposes deposit shortage as a safe actionable reaso
  const admin:typeof import("../src/auth/auth-security")=require("../src/auth/auth-security");
  t.mock.method(admin,"readAdminContext",async()=>({userId:"fixture_admin",sessionId:"fixture_session"}));
  t.mock.method(e,"readLegacyContinuationBinding",async()=>legacyBinding);t.mock.method(e,"authorizeLegacyContinuation",async()=>({canOperate:true,canReadCommission:false}));
- t.mock.method(e,"readLegacyContinuationHead",async()=>null);t.mock.method(e,"readLegacyContinuationEvidence",async()=>legacyEvidence(initialLegacyFacts(legacySource())));
+ const fixture=legacyVerifiedProposal();t.mock.method(basisReader,"readLegacySettlementBasis",async()=>fixture.basis);
+ t.mock.method(e,"readLegacyContinuationHead",async()=>null);t.mock.method(e,"readLegacyContinuationEvidence",async()=>fixture.original);
  const pool={connect:async()=>({release(){},query:async()=>({rows:[],rowCount:0})})} as unknown as Pool;
  const out=response(),request={method:"POST",originalUrl:`/api/v1/admin/orders/legacy/${legacyBinding.id}/continuation/preview`,headers:{origin:"http://admin.invalid"},body:{quantities:legacyQuantities("999999"),onBehalf:"renter"}};
  assert.equal(await handleLegacyContinuationRoute(request as never,out as never,{pool,apiOrigin:"http://api.invalid",adminOrigin:"http://admin.invalid"} as never,"admin"),true);
@@ -202,7 +241,8 @@ test("legacy preview refuses an unproven used price before exposing a quote",asy
  const admin:typeof import("../src/auth/auth-security")=require("../src/auth/auth-security");
  t.mock.method(admin,"readAdminContext",async()=>({userId:"fixture_admin",sessionId:"fixture_session"}));
  t.mock.method(e,"readLegacyContinuationBinding",async()=>legacyBinding);t.mock.method(e,"authorizeLegacyContinuation",async()=>({canOperate:true,canReadCommission:false}));
- const source=legacySource();source.orderPrices.awm=null;
+ const fixture=legacyVerifiedProposal(),source=fixture.original.facts.evidence.source;source.orderPrices.awm=null;
+ t.mock.method(basisReader,"readLegacySettlementBasis",async()=>fixture.basis);
  t.mock.method(e,"readLegacyContinuationHead",async()=>null);t.mock.method(e,"readLegacyContinuationEvidence",async()=>legacyEvidence(initialLegacyFacts(source)));
  const pool={connect:async()=>({release(){},query:async()=>({rows:[],rowCount:0})})} as unknown as Pool;
  const out=response(),request={method:"POST",originalUrl:`/api/v1/admin/orders/legacy/${legacyBinding.id}/continuation/preview`,headers:{origin:"http://admin.invalid"},body:{quantities:{...legacyQuantities("1"),awm:"1"},onBehalf:"renter"}};
@@ -228,7 +268,8 @@ test("mounted legacy parties receive filtered fresh/replay/race/receipt output w
   }})} as unknown as Pool;
   t.mock.method(c,"authorizeLegacyMutation",async(...[_client,actor]:Parameters<typeof c.authorizeLegacyMutation>)=>{if(!allowed||![legacyBinding.ownerUserId,legacyBinding.renterUserId].includes(actor.userId))throw notFound();return{binding:legacyBinding,userIds:[],actor};});
   t.mock.method(c,"applyLegacyContinuationCommand",async()=>{applies++;return{status:200,body:structuredClone(raw)};});
-  const facts=initialLegacyFacts(legacySource({saleEarnings:"13.27",returnOrderMoney:"73.19"})),row=legacyEvidence(facts);
+  const fixture=legacyVerifiedProposal(),facts=initialLegacyFacts({...fixture.original.facts.evidence.source,saleEarnings:"13.27",returnOrderMoney:"73.19"}),row=legacyEvidence(facts);
+  t.mock.method(basisReader,"readLegacySettlementBasis",async()=>fixture.basis);
   t.mock.method(e,"readLegacyContinuation",async(...[_client,actor]:Parameters<typeof e.readLegacyContinuation>)=>({continuation:projectLegacyContinuation(legacyBinding,actor,row,null,[])}));
   t.mock.method(e,"readLegacyContinuationBinding",async()=>legacyBinding);t.mock.method(e,"authorizeLegacyContinuation",async()=>({canOperate:false,canReadCommission:false}));
   t.mock.method(e,"readLegacyContinuationHead",async()=>null);t.mock.method(e,"readLegacyContinuationEvidence",async()=>row);

@@ -6,16 +6,17 @@ import { Button } from "../components/ui-elements";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "../components/ui/dialog";
 import { ConfirmAlertDialog } from "../components/ui/alert-dialog";
 import { Input } from "../components/ui/input";
+import { Checkbox } from "../components/ui/checkbox";
 import { Textarea } from "../components/ui/textarea";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../components/ui/select";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "../components/ui/table";
-import { clearLegacyAdminIntent, inspectLegacyAdminIntent, legacyAdminSubject, previewLegacyAdminContinuation, readLegacyAdminContinuation, recoverLegacyAdminIntent, retainLegacyAdminIntent, sendLegacyAdminIntent, type LegacyAdminAction, type LegacyAdminPending, type LegacyAdminProposal, type LegacyAdminQuantities, type LegacyAdminReceipt, type LegacyAdminView, type LegacyDemoScope } from "../lib/legacy-continuation-client";
+import { clearLegacyAdminIntent, inspectLegacyAdminIntent, legacyAdminSubject, previewLegacyAdminContinuation, readLegacyAdminContinuation, recoverLegacyAdminIntent, retainLegacyAdminIntent, sendLegacyAdminIntent, type LegacyAdminAction, type LegacyAdminPending, type LegacyAdminProposal, type LegacyAdminQuantities, type LegacyAdminReceipt, type LegacyAdminView, type LegacyDemoScope, type LegacyEndReason } from "../lib/legacy-continuation-client";
 import {LegacyRefundChoice} from './legacy-refund-choice';
 import "./legacy-continuation.css";
 
 type Snapshot = Extract<SessionSnapshot, { authenticated: true }>;
-const commandName: Record<LegacyAdminAction, string> = { propose: "协助提交结算方案", confirm: "客服确认结算方案", reject: "退回结算方案", hold: "暂扣押金", release: "解除暂扣", confiscate: "没收押金", support_cancel: "取消订单并退款", mature: "核定佣金成熟", void: "按已核来源作废佣金", "owner-credit": "入账号主收益", "commission-credit":"入账分销佣金", "refund-case":"创建退款任务", "demo-refund":"模拟退款" };
-const amountName: Record<string, string> = { payMoney: "原已付", saleEarnings: "号主毛结算", returnOrderMoney: "退款毛额", detainMoney: "原扣留金额", ownerNet: "号主应结", refundNet: "租客净应退", platformContribution: "平台结算贡献（分配额）", commissionPool: "佣金池", depositCompensation: "押金补偿责任" };
+const commandName: Record<LegacyAdminAction, string> = { propose: "协助提交结算方案", confirm: "客服确认结算方案", reject: "退回结算方案", hold: "暂扣押金", release: "解除暂扣", confiscate: "没收押金", support_cancel: "取消订单并退款", "verify-basis":"登记核实资料", mature: "核定佣金成熟", void: "按已核来源作废佣金", "owner-credit": "入账号主收益", "commission-credit":"入账分销佣金", "refund-case":"创建退款任务", "demo-refund":"模拟退款" };
+const amountName: Record<string, string> = { payMoney: "原已付", saleEarnings: "号主毛结算", returnOrderMoney: "退款毛额", detainMoney: "原扣留金额", ownerNet: "号主应结", refundNet: "租客净应退", earlyMakeup:"提前结算补足", renterPayoutFee:"租客承担的包赔费", platformContribution: "平台结算贡献（分配额）", commissionPool: "佣金池", depositCompensation: "押金补偿责任" };
 const dutyName: Record<string, string> = { RENTER_REFUND: "租客退款", OWNER_CREDIT: "号主应结", COMMISSION: "佣金", DEPOSIT_COMPENSATION: "押金补偿" };
 const money = (cents: string) => `¥${BigInt(cents) / 100n}.${(BigInt(cents) % 100n).toString().padStart(2, "0")}`;
 const legacyErrors: Record<string, string> = { DEPOSIT_SHORT: "本单已付金额不足以覆盖实际消耗，请核对数量并与双方沟通。", RETURN_NEGATIVE: "按原单规则计算后退款金额不足，请核对实际消耗。", EVIDENCE_ISOLATED: "旧单计价资料需要核对，暂不能提交方案。", MISSING_STORED_SETTLEMENT: "当前方案金额不完整，请退回后重新核对。", FINANCE_FACT_UNAVAILABLE: "资金处理记录暂不可用，请稍后核对。", FINANCE_FACT_UNKNOWN: "资金处理状态尚未确认，请先核对原单。", DEPOSIT_ALREADY_SETTLED: "本单已有退款责任记录，请先核对，不能重复处理。", CONTINUATION_REVISION_CONFLICT: "本单已有新进展，请刷新后重新核对。", PLAN_FINGERPRINT_MISMATCH: "本次预估已变化，请重新预览。", DUTY_REVISION_CONFLICT: "处理状态已更新，请刷新后核对。", STATUS_INVALID: "订单状态已变化，请刷新后核对。", QUANTITY_INVALID: "消耗数量不正确，请检查填写内容。", PRECISION_UNSUPPORTED: "本单结算金额不能准确记录到分，请核对数量并联系维护人员。", CONFIRM_POOL_NEGATIVE: "结算金额与原单实付不相符，请核对价格和消耗。", OWNER_NET_NEGATIVE: "号主结算金额不足以覆盖包赔费用，请核对原单。" };
@@ -25,6 +26,15 @@ legacyErrors.PAYMENT_BASIS_UNAVAILABLE = "原付款记录不完整，请联系�
 legacyErrors.COMMISSION_SOURCE_UNAVAILABLE = "本单分销记录尚未核清，请联系运营处理。";
 legacyErrors.COMMISSION_ALREADY_PAID = "本单已有入账佣金，请联系运营处理。";
 legacyErrors.REFUND_HISTORY_REQUIRES_OFFLINE = "本单存在旧退款记录，请先线下核对，避免重复处理。";
+legacyErrors.OPENING_BASIS_UNVERIFIED = "请先与双方核实旧单期初数量、原价格和结束原因。";
+legacyErrors.OPENING_BASIS_UNAVAILABLE = "旧单核实依据暂不可用，请重新核对。";
+legacyErrors.OPENING_BASIS_PRICE_MISMATCH = "期初数量或原比例与旧单金额不一致，请重新核对。";
+legacyErrors.OPENING_ITEMS_UNVERIFIED = "请先核实旧单期初物资及号主价格。";
+legacyErrors.LEGACY_PROPOSAL_RECONFIRM_REQUIRED = "旧结算方案需按当前规则重新核对并由双方确认。";
+legacyErrors.END_REASON_INCONSISTENT = "结束原因与哈夫币消耗比例不一致，请重新核对。";
+legacyErrors.END_REASON_REQUIRED = "请先选择结束原因。";
+legacyErrors.HAFF_SPREAD_RATIO_UNSAFE = "原单价差不适用自动结算，请与双方协调。";
+legacyErrors.EARLY_REVIEW_PENDING = "结算方案已确认，等待客服复核。";
 function legacyError(error: unknown) { const reason = error && typeof error === "object" && "reason" in error ? (error as { reason?: unknown }).reason : undefined; return typeof reason === "string" && legacyErrors[reason] ? legacyErrors[reason] : friendlyError(error); }
 type Scoped<T> = { scope: string; value: T };
 const quantityLabels: Record<keyof LegacyAdminQuantities, string> = { expendHaff: "哈夫币（M）", barrett: "巴雷特子弹（发）", bullet: "6级子弹（组，60发/组）", awm: "AWM子弹（发）", armor: "6级甲（件）", helmet: "6级头盔（件）", coffee: "咖啡（件）", card: "保险体验卡（天）" };
@@ -32,6 +42,7 @@ const quantityLabels: Record<keyof LegacyAdminQuantities, string> = { expendHaff
 const emptyQuantities = (): LegacyAdminQuantities => ({ expendHaff: "", barrett: "", bullet: "", awm: "", armor: "", helmet: "", coffee: "", card: "" });
 const quantityKeys = Object.keys(quantityLabels) as Array<keyof LegacyAdminQuantities>;
 const quantitiesComplete = (value: LegacyAdminQuantities) => quantityKeys.every((key) => value[key].trim() !== "");
+const endReasonItems=[{value:"NONE",label:"请选择结束原因"},{value:"NORMAL",label:"正常结算"},{value:"TENANT_VOLUNTARY_EARLY",label:"租客自愿提前结束"},{value:"OWNER_OR_ACCOUNT_EARLY",label:"号主或账号原因提前结束"}];
 type LegacyResourceSnapshot = { source?: string; haff?: { quantity: string | null } | null; materials: Array<{ code?:string; name: string | null; quantity: string | null; unit: string | null }>; materialsTruncated?:boolean; termDays?: string | null; safeBoxText?: string | null; gradingText?: string | null; loginMethodText?: string | null };
 const haffM = (quantity: string | null | undefined) => {
   if (!quantity || !/^\d+$/.test(quantity)) return "未记录";
@@ -55,7 +66,9 @@ export function LegacyAdminContinuationPanel({ snapshot, orderId, frozenAccount,
   const [supportReason, setSupportReason] = useState<Scoped<string>>({ scope, value: "" });
   const [cancelForm, setCancelForm] = useState<Scoped<{refund:string;owner:string;reason:string}>>({scope,value:{refund:"",owner:"",reason:""}});
   const [commissionReasons,setCommissionReasons]=useState<Scoped<Record<string,string>>>({scope,value:{}});
-  const [proposalForm, setProposalForm] = useState<Scoped<{ onBehalf: "renter" | "owner" | ""; quantities: LegacyAdminQuantities }>>({ scope, value: { onBehalf: "", quantities: emptyQuantities() } });
+  const [proposalForm, setProposalForm] = useState<Scoped<{ onBehalf: "renter" | "owner" | ""; endReason:LegacyEndReason|""; quantities: LegacyAdminQuantities }>>({ scope, value: { onBehalf: "", endReason:"", quantities: emptyQuantities() } });
+  const [basisOpen,setBasisOpen]=useState(false);
+  const [basisForm,setBasisForm]=useState<Scoped<{openingHaffM:string;baseBot:string;ownerPrices:LegacyAdminQuantities;openingItems:LegacyAdminQuantities;fullPayout:""|"YES"|"NO";reason:string;verified:boolean}>>({scope,value:{openingHaffM:"",baseBot:"",ownerPrices:emptyQuantities(),openingItems:emptyQuantities(),fullPayout:"",reason:"",verified:false}});
   const [proposal, setProposal] = useState<Scoped<{ data: LegacyAdminProposal; formKey: string } | null>>({ scope, value: null });
   const [proposeOpen, setProposeOpen] = useState(false);
   const [operation, setOperation] = useState<Scoped<{kind:"review"|"void"|"owner-credit"|"commission-credit"|"refund"|"support_cancel"; dutyId?:string}|null>>({scope,value:null});
@@ -64,22 +77,27 @@ export function LegacyAdminContinuationPanel({ snapshot, orderId, frozenAccount,
   const current = () => live.current.scope === scope, data = view.scope === scope ? view.value : null, p = pending.scope === scope ? pending.value : { state: "NONE" as const, intent: null }, loading = busy.scope === scope && busy.value;
   const reportView = useRef(onViewChange); reportView.current = onViewChange;
   useEffect(() => { reportView.current?.(data); }, [scope, data]);
-  const form = proposalForm.scope === scope ? proposalForm.value : { onBehalf: "" as const, quantities: emptyQuantities() }, preview = proposal.scope === scope ? proposal.value : null;
+  const form = proposalForm.scope === scope ? proposalForm.value : { onBehalf: "" as const, endReason:"" as const, quantities: emptyQuantities() }, preview = proposal.scope === scope ? proposal.value : null;
+  const basis=basisForm.scope===scope?basisForm.value:{openingHaffM:"",baseBot:"",ownerPrices:emptyQuantities(),openingItems:emptyQuantities(),fullPayout:"" as const,reason:"",verified:false};
   const cancel = cancelForm.scope===scope?cancelForm.value:{refund:"",owner:"",reason:""};
   const cancelRefund=parseYuanToCents(cancel.refund),cancelOwner=parseYuanToCents(cancel.owner),cancelPaid=data?.amounts.payMoney?.cents??null,cancelReason=cancel.reason.trim();
   const cancelValid=cancelRefund!==null && cancelOwner!==null && cancelPaid!==null && /^(0|[1-9]\d{0,15})$/.test(cancelRefund) && /^(0|[1-9]\d{0,15})$/.test(cancelOwner)
     && BigInt(cancelRefund)+BigInt(cancelOwner)<=BigInt(cancelPaid) && [...cancelReason].length>=3 && cancelReason.length<=500 && new TextEncoder().encode(cancelReason).length<=600 && !/[\u0000-\u001f\u007f]/.test(cancelReason);
   const canOperate = snapshot.security.isBoss || snapshot.permissions.includes("order.legacy.continue"), canCredit=canOperate && (snapshot.security.isBoss || snapshot.permissions.includes("order.settlement.write")), canCommissionCredit=canCredit && (snapshot.security.isBoss || snapshot.permissions.includes("finance.document.read")), locked = loading || p.state !== "NONE";
+  const basisValid=basis.verified && !!basis.fullPayout
+    && /^(0|[1-9]\d{0,9})(?:\.\d{1,2})?$/.test(basis.openingHaffM.trim()) && /^[1-9]\d{0,9}$/.test(basis.baseBot.trim())
+    && [...basis.reason.trim()].length>=3 && new TextEncoder().encode(basis.reason.trim()).length<=600
+    && quantityKeys.filter(key=>key!=="expendHaff").every(key=>(!basis.openingItems[key].trim()||/^(0|[1-9]\d{0,9})(?:\.\d{1,2})?$/.test(basis.openingItems[key].trim())) && (!basis.ownerPrices[key].trim()||/^(0|[1-9]\d{0,9})(?:\.\d{1,8})?$/.test(basis.ownerPrices[key].trim())));
   useEffect(() => {
     const abort = new AbortController(), ticket = ++live.current.ticket;
-    setView({ scope, value: null }); setConfirm({ scope, value: null }); setReceipt({ scope, value: null }); setProposal({ scope, value: null }); setPending({ scope, value: inspectLegacyAdminIntent(subject, orderId) }); setProposeOpen(false); setOperation({scope,value:null});setRetryOpen({scope,value:false});
+    setView({ scope, value: null }); setConfirm({ scope, value: null }); setReceipt({ scope, value: null }); setProposal({ scope, value: null }); setPending({ scope, value: inspectLegacyAdminIntent(subject, orderId) }); setProposeOpen(false); setBasisOpen(false); setOperation({scope,value:null});setRetryOpen({scope,value:false});
     void readLegacyAdminContinuation(orderId, abort.signal).then(value => { if (!current() || abort.signal.aborted || live.current.ticket !== ticket) return; setView({ scope, value }); setError({ scope, value: "" }); }).catch(e => { if (current() && !abort.signal.aborted && live.current.ticket === ticket) setError({ scope, value: legacyError(e) }); });
     return () => abort.abort();
   }, [scope, nonce, refreshNonce]);
   async function estimate() {
-    if (!data?.capabilities.includes("propose") || !canOperate || locked || !form.onBehalf || !current()) return;
+    if (!data?.capabilities.includes("propose") || !canOperate || locked || !form.onBehalf || !form.endReason || !current()) return;
     const ticket = ++live.current.ticket, formKey = JSON.stringify(form); setBusy({ scope, value: true }); setError({ scope, value: "" });
-    try { const result = await previewLegacyAdminContinuation(orderId, form.quantities, form.onBehalf); if (current() && live.current.ticket === ticket) setProposal({ scope, value: { data: result, formKey } }); }
+    try { const result = await previewLegacyAdminContinuation(orderId, form.quantities, form.onBehalf,form.endReason); if (current() && live.current.ticket === ticket) setProposal({ scope, value: { data: result, formKey } }); }
     catch (e) { if (current() && live.current.ticket === ticket) setError({ scope, value: legacyError(e) }); }
     finally { if (current() && live.current.ticket === ticket) setBusy({ scope, value: false }); }
   }
@@ -91,16 +109,21 @@ export function LegacyAdminContinuationPanel({ snapshot, orderId, frozenAccount,
       const rationale=command==="commission-credit"?(commissionReasons.scope===scope?commissionReasons.value[d.id]?.trim()??"":""):(supportReason.scope===scope?supportReason.value.trim():"");
       if(command==="owner-credit" && (!canCredit || d.kind!=="OWNER_CREDIT" || d.status!=="PENDING" || [...rationale].length<3))return;
       if(command==="commission-credit" && (!canCommissionCredit || d.kind!=="COMMISSION" || d.status!=="MATURED" || !d.beneficiary?.name || [...rationale].length<3))return;
-      body = { expectedRevision: d.revision, ...(command === "void" ? { sourceFactAuditId: sourceRef.scope === scope ? sourceRef.value.trim() : "", reason: reason.scope === scope ? reason.value.trim() : "" } : ["owner-credit","commission-credit"].includes(command)?{reason:rationale}:{}) }; }
+      body = { expectedRevision: d.revision, ...(command === "void" ? { sourceFactAuditId: sourceRef.scope === scope ? sourceRef.value.trim() : "", reason: reason.scope === scope ? reason.value.trim() : "" } : ["owner-credit","commission-credit"].includes(command)?{reason:rationale,...(command==="owner-credit"?{originalPaymentChecked:true}:{})}:{}) }; }
     else {
       const rationale = supportReason.scope === scope ? supportReason.value.trim() : "";
-      if (!data.capabilities.includes(command) || !data.evidenceId) return;
-      if (command === "support_cancel") {
+      if ((!data.capabilities.includes(command) && command!=="verify-basis") || !data.evidenceId) return;
+      if(command==="verify-basis") {
+        if(!canCredit || data.stage!=="3" || data.availability!=="KNOWN" || !basisValid)return;
+        const ownerPrices=Object.fromEntries(quantityKeys.filter(key=>key!=="expendHaff").map(key=>[key,basis.ownerPrices[key].trim()||null]));
+        const openingItems=Object.fromEntries(quantityKeys.map(key=>[key,key==="expendHaff"?basis.openingHaffM.trim():basis.openingItems[key].trim()||null]));
+        body={expectedRevision:data.revision,inputEvidenceId:data.evidenceId,expectedBasisId:data.lastBasisId,openingHaffM:basis.openingHaffM.trim(),baseBot:basis.baseBot.trim(),ownerPrices,openingItems,fullPayout:basis.fullPayout==="YES",partiesVerified:true,reason:basis.reason.trim()};
+      } else if (command === "support_cancel") {
         if (!canCredit || !cancelValid || cancelRefund===null || cancelOwner===null) return;
         body = { expectedRevision: data.revision, inputEvidenceId: data.evidenceId, refundCents: cancelRefund, ownerCents: cancelOwner, reason: cancelReason, originalPaymentChecked:true };
       } else if (command === "propose") {
-        if (!preview || preview.formKey !== JSON.stringify(form) || !form.onBehalf || [...rationale].length < 3) return;
-        body = { expectedRevision: preview.data.revision, inputEvidenceId: preview.data.inputEvidenceId, planFingerprint: preview.data.proposalFingerprint, quantities: form.quantities, reason: rationale, onBehalf: form.onBehalf };
+        if (!preview || preview.formKey !== JSON.stringify(form) || !form.onBehalf || !form.endReason || [...rationale].length < 3) return;
+        body = { expectedRevision: preview.data.revision, inputEvidenceId: preview.data.inputEvidenceId, planFingerprint: preview.data.proposalFingerprint, quantities: form.quantities, endReason:form.endReason, reason: rationale, onBehalf: form.onBehalf };
       } else {
         if (!data.commandFingerprints[command] || command === "confirm" && !data.confirmationAmounts || ["confirm", "reject"].includes(command) && [...rationale].length < 3) return;
         body = { expectedRevision: data.revision, inputEvidenceId: data.evidenceId, planFingerprint: data.commandFingerprints[command], ...(["confirm", "reject"].includes(command) ? { reason: rationale } : {}) };
@@ -124,7 +147,7 @@ export function LegacyAdminContinuationPanel({ snapshot, orderId, frozenAccount,
       setPending({ scope, value: { state: "VALID", intent } });
       await sendLegacyAdminIntent(intent);
       if (!current() || live.current.ticket !== ticket) return;
-      clearLegacyAdminIntent(intent); setPending({ scope, value: { state: "NONE", intent: null } }); setConfirm({ scope, value: null }); setProposeOpen(false);setOperation({scope,value:null}); setNonce(n => n + 1);
+      clearLegacyAdminIntent(intent); setPending({ scope, value: { state: "NONE", intent: null } }); setConfirm({ scope, value: null }); setProposeOpen(false);setBasisOpen(false);setOperation({scope,value:null}); setNonce(n => n + 1);
     } catch (e) { if (current() && live.current.ticket === ticket) { const retained=inspectLegacyAdminIntent(subject, orderId); setPending({ scope, value: retained }); setError({ scope, value: legacyError(e) }); if(retained.state!=="NONE"){setConfirm({scope,value:null});setProposeOpen(false);setOperation({scope,value:null});} } }
     finally { if (current() && live.current.ticket === ticket) setBusy({ scope, value: false }); }
   }
@@ -145,15 +168,28 @@ export function LegacyAdminContinuationPanel({ snapshot, orderId, frozenAccount,
     && typeof refundApplied==='string'&&/^(0|[1-9]\d{0,23})$/.test(refundApplied)&&BigInt(refundApplied)<=BigInt(refundDuty.amountCents)
     ? {previous:refundPrevious,applied:refundApplied,next:(BigInt(refundDuty.amountCents)-BigInt(refundApplied)).toString()}:null;
   return <section className="oc-section lc-admin" aria-label="旧单续办与责任" aria-busy={loading}>
-    <header><div><h2>旧单办理与责任</h2><p>{data?.stage ? ({ "3": "进行中", "8": "待号主确认", "9": "待租客确认", "4": "订单已完成", "5": "订单已取消" }[data.stage] ?? "未记录") : "独立核对续办依据"}</p></div><Button variant="secondary" size="sm" disabled={loading} onClick={() => setNonce(n => n + 1)}>刷新</Button></header>
+    <header><div><h2>旧单办理与责任</h2><p>{data?.reasons.includes("EARLY_REVIEW_PENDING") ? "待客服复核" : data?.stage ? ({ "3": "进行中", "8": "待号主确认", "9": "待租客确认", "4": "订单已完成", "5": "订单已取消" }[data.stage] ?? "未记录") : "独立核对续办依据"}</p></div><Button variant="secondary" size="sm" disabled={loading} onClick={() => setNonce(n => n + 1)}>刷新</Button></header>
     {error.scope === scope && error.value ? <p role="alert">{error.value}</p> : null}
     {!data ? <p className="oc-fact-note">{error.scope === scope && error.value ? "续办资料暂不可用，订单主体信息保留。" : "正在核对续办资料…"}</p> : data.availability !== "KNOWN" && data.stage !== "5" ? <p className="oc-fact-note">{data.availability === "NOT_IMPORTED" ? "本单续办来源尚未记录。" : "本单来源存在隔离事项，不能据此办理。"}</p> : <>
       <dl className="oc-fact-list">{Object.entries(data.amounts).filter(([key]) => amountName[key] && (data.stage!=="5" || ["payMoney","ownerNet","refundNet","platformContribution"].includes(key))).map(([key, amount]) => <div key={key}><dt>{amountName[key]}</dt><dd>{amount ? `¥${amount.yuan}` : "未记录"}</dd></div>)}</dl>
       <p className="oc-fact-note">订单完成、资金入账和渠道到账分别核对；解除暂扣不会自动追加扣留部分退款。</p>
       {["4","5"].includes(data.stage ?? "") && data.duties.some(d => d.kind === "RENTER_REFUND" && ["PENDING", "MATURED"].includes(d.status)) ? <p className="oc-fact-note">{data.refundDueAt ? `退款最早处理时间：${formatDate(data.refundDueAt)}。` : "退款处理时间待核。"} 具体到账状态以渠道记录为准。</p> : null}
       {data.reasons.some(code => code.startsWith("FINANCE_FACT")) ? <p className="oc-fact-note">原资金处理结果尚未确认，暂时无法协助结算或处理押金。</p> : null}
+      {data.reasons.includes("LEGACY_PROPOSAL_RECONFIRM_REQUIRED") ? <p className="oc-fact-note">旧平台未确认的方案需先退回，重新计算后再由双方确认。</p> : null}
       {data.reasons.includes("REFUND_HISTORY_REQUIRES_OFFLINE") ? <p className="oc-fact-note">本单历史退款需要线下核对，相关退款和号主收益暂不自动处理。</p> : null}
+      {data.reasons.includes("REFUND_ALLOCATION_DEFERRED") ? <p className="oc-fact-note">退款任务尚未创建，请核对本单付款与退款后继续处理。</p> : null}
       {canOperate&&["hold","release","confiscate"].some(kind=>data.capabilities.includes(kind))?action(<div className="lc-actions">{(["hold", "release", "confiscate"] as const).filter(kind => data.capabilities.includes(kind)).map(kind => <Button key={kind} variant={kind === "confiscate" ? "danger" : "secondary"} disabled={locked} onClick={() => choose(kind)}>{commandName[kind]}</Button>)}</div>):null}
+      {canCredit && data.stage==="3" && data.availability==="KNOWN" ? <>{action(<Button variant="secondary" disabled={locked} onClick={()=>setBasisOpen(true)}>{data.lastBasisId?"重新核实旧单资料":"核实旧单结算资料"}</Button>)}<Dialog open={basisOpen} onOpenChange={open=>{if(!loading)setBasisOpen(open);}}><DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-3xl"><DialogHeader><DialogTitle>核实旧单结算资料</DialogTitle></DialogHeader><div className="space-y-4 text-sm">
+        <p className="text-muted-foreground">先与租客、号主核对下单时的原始资料。迁入时账号资料仅供参考，不能直接当作下单快照。</p>
+        <div className="grid gap-3 sm:grid-cols-2"><label>原始哈夫币数量（M）<Input aria-label="原始哈夫币数量（M）" inputMode="decimal" value={basis.openingHaffM} disabled={locked} onChange={e=>setBasisForm({scope,value:{...basis,openingHaffM:e.target.value,verified:false}})} /></label><label>号主原比例（1元 = 万哈夫币）<Input aria-label="号主原比例" inputMode="numeric" value={basis.baseBot} disabled={locked} onChange={e=>setBasisForm({scope,value:{...basis,baseBot:e.target.value,verified:false}})} /></label></div>
+        <div><span>原单全额包赔</span><Select value={basis.fullPayout||"NONE"} disabled={locked} onValueChange={value=>setBasisForm({scope,value:{...basis,fullPayout:value==="YES"||value==="NO"?value:"",verified:false}})} items={[{value:"NONE",label:"请选择"},{value:"YES",label:"已选择"},{value:"NO",label:"未选择"}]}><SelectTrigger aria-label="原单全额包赔"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="NONE">请选择</SelectItem><SelectItem value="YES">已选择</SelectItem><SelectItem value="NO">未选择</SelectItem></SelectContent></Select></div>
+        <p className="text-muted-foreground">填写已核实的号主原单价；需要计算租客自愿提前结束的包赔费时，也须逐项核实原有数量。未核实的项留空，不会自动按 0 处理。</p>
+        <div className="overflow-x-auto rounded-lg border"><Table><TableHeader><TableRow><TableHead>物资</TableHead><TableHead>号主原单价（元）</TableHead><TableHead>原有数量</TableHead></TableRow></TableHeader><TableBody>{quantityKeys.filter(key=>key!=="expendHaff").map(key=><TableRow key={key}><TableCell>{quantityLabels[key]}</TableCell><TableCell><Input aria-label={`${quantityLabels[key]}号主原单价`} inputMode="decimal" value={basis.ownerPrices[key]} disabled={locked} onChange={e=>setBasisForm({scope,value:{...basis,ownerPrices:{...basis.ownerPrices,[key]:e.target.value},verified:false}})} /></TableCell><TableCell><Input aria-label={`${quantityLabels[key]}原有数量`} inputMode="decimal" value={basis.openingItems[key]} disabled={locked} onChange={e=>setBasisForm({scope,value:{...basis,openingItems:{...basis.openingItems,[key]:e.target.value},verified:false}})} /></TableCell></TableRow>)}</TableBody></Table></div>
+        <label className="block space-y-1">核实记录<Textarea aria-label="原单核实记录" value={basis.reason} disabled={locked} maxLength={500} onChange={e=>setBasisForm({scope,value:{...basis,reason:e.target.value,verified:false}})} /></label>
+        <label className="flex items-center gap-2"><Checkbox aria-label="已与双方核实下单时的原始资料" checked={basis.verified} disabled={locked} onCheckedChange={checked=>setBasisForm({scope,value:{...basis,verified:checked===true}})} />已与双方核实下单时的原始资料</label>
+        {error.scope===scope && error.value?<p role="alert" className="text-destructive">{error.value}</p>:null}
+        <Button disabled={locked||!basisValid} onClick={()=>choose("verify-basis")}>登记核实资料</Button>
+      </div></DialogContent></Dialog></> : null}
       {canOperate && data.capabilities.includes("propose") ? <div className="mt-4">{action(<Button variant="secondary" disabled={locked} onClick={() => setProposeOpen(true)}>协助发起结算</Button>)}<Dialog open={proposeOpen} onOpenChange={open=>{if(!loading)setProposeOpen(open);}}><DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-2xl"><DialogHeader><DialogTitle>协助发起结算</DialogTitle></DialogHeader><div className="space-y-4">
         <p className="text-sm text-muted-foreground">先与双方核实实际消耗，再选择发起方并预览方案；提交后由另一方确认。</p>
         {frozenAccount ? <section aria-label="迁入时账号资源" className="space-y-2 text-sm">
@@ -165,6 +201,7 @@ export function LegacyAdminContinuationPanel({ snapshot, orderId, frozenAccount,
           </TableBody></Table></div>
         </section> : null}
         <div className="space-y-1 text-sm"><span>结算发起方</span><Select value={form.onBehalf || "NONE"} disabled={locked} onValueChange={value => { setProposalForm({ scope, value: { ...form, onBehalf: value === "renter" || value === "owner" ? value : "" } }); setProposal({ scope, value: null }); }} items={[{ value: "NONE", label: "请选择" }, { value: "renter", label: "租客" }, { value: "owner", label: "号主" }]}><SelectTrigger aria-label="结算发起方" className="w-full sm:w-56"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="NONE">请选择</SelectItem><SelectItem value="renter">租客</SelectItem><SelectItem value="owner">号主</SelectItem></SelectContent></Select></div>
+        <div className="space-y-1 text-sm"><span>结束原因</span><Select value={form.endReason||"NONE"} disabled={locked} onValueChange={value=>{setProposalForm({scope,value:{...form,endReason:value==="NORMAL"||value==="TENANT_VOLUNTARY_EARLY"||value==="OWNER_OR_ACCOUNT_EARLY"?value:""}});setProposal({scope,value:null});}} items={endReasonItems}><SelectTrigger aria-label="结束原因" className="w-full sm:w-56"><SelectValue /></SelectTrigger><SelectContent>{endReasonItems.map(item=><SelectItem key={item.value} value={item.value}>{item.label}</SelectItem>)}</SelectContent></Select></div>
         <section className="space-y-2" aria-label="本次实际消耗"><div className="flex flex-wrap items-center justify-between gap-2"><div><h3 className="text-sm font-semibold">本次实际消耗</h3><p className="mt-1 text-xs text-muted-foreground">核对后填写；哈夫币按 M，6 级子弹按组（60 发/组）。</p></div><Button type="button" variant="outline" size="sm" disabled={locked} onClick={() => {
           const quantities = { ...form.quantities };
           for (const key of quantityKeys) if (!quantities[key].trim()) quantities[key] = "0";
@@ -172,8 +209,8 @@ export function LegacyAdminContinuationPanel({ snapshot, orderId, frozenAccount,
         }}>其他项填 0</Button></div><p className="text-xs text-muted-foreground">只填写当前空白项，已填写的数量不会被覆盖。</p>
         <div className="overflow-x-auto rounded-lg border"><Table><TableHeader><TableRow><TableHead>资源与单位</TableHead><TableHead>本次消耗</TableHead></TableRow></TableHeader><TableBody>{(Object.entries(quantityLabels) as Array<[keyof LegacyAdminQuantities, string]>).map(([key, label]) => <TableRow key={key}><TableCell><label htmlFor={`${quantityId}-${key}`}>{label}</label></TableCell><TableCell><Input id={`${quantityId}-${key}`} aria-label={label} inputMode="decimal" value={form.quantities[key]} disabled={locked} onChange={event => { setProposalForm({ scope, value: { ...form, quantities: { ...form.quantities, [key]: event.target.value.trim() } } }); setProposal({ scope, value: null }); }} /></TableCell></TableRow>)}</TableBody></Table></div></section>
         {error.scope === scope && error.value ? <p role="alert" className="text-sm text-destructive">{error.value}</p> : null}
-        <Button variant="secondary" disabled={locked || !form.onBehalf || !quantitiesComplete(form.quantities)} onClick={() => void estimate()}>预览结算方案</Button>
-        {preview ? <div className="space-y-3 rounded-lg bg-muted/50 p-4"><p className="text-sm font-medium">{preview.data.settlementKind === "EARLY" ? "提前结算" : "正常结算"}</p><dl className="grid gap-3 sm:grid-cols-2"><div><dt className="text-xs text-muted-foreground">号主预计结算</dt><dd className="mt-1 font-medium tabular-nums">{preview.data.proposalAmounts.ownerNet == null ? "未记录" : `¥${preview.data.proposalAmounts.ownerNet}`}</dd></div><div><dt className="text-xs text-muted-foreground">租客退款方案金额（未扣暂扣）</dt><dd className="mt-1 font-medium tabular-nums">{preview.data.proposalAmounts.returnOrderMoney == null ? "未记录" : `¥${preview.data.proposalAmounts.returnOrderMoney}`}</dd></div></dl><p className="text-xs text-muted-foreground">此处为结算方案，提交不代表资金已入账或退款到账。</p></div> : null}
+        <Button variant="secondary" disabled={locked || !form.onBehalf || !form.endReason || !quantitiesComplete(form.quantities)} onClick={() => void estimate()}>预览结算方案</Button>
+        {preview ? <div className="space-y-3 rounded-lg bg-muted/50 p-4"><p className="text-sm font-medium">{preview.data.settlementKind === "EARLY" ? "提前结算" : "正常结算"}</p><dl className="grid gap-3 sm:grid-cols-2"><div><dt className="text-xs text-muted-foreground">号主预计结算</dt><dd className="mt-1 font-medium tabular-nums">{preview.data.proposalAmounts.ownerNet == null ? "未记录" : `¥${preview.data.proposalAmounts.ownerNet}`}</dd></div><div><dt className="text-xs text-muted-foreground">租客退款方案金额（未扣暂扣）</dt><dd className="mt-1 font-medium tabular-nums">{preview.data.proposalAmounts.returnOrderMoney == null ? "未记录" : `¥${preview.data.proposalAmounts.returnOrderMoney}`}</dd></div>{(["earlyMakeup","renterPayoutFee"] as const).filter(key=>preview.data.proposalAmounts[key]!=null).map(key=><div key={key}><dt className="text-xs text-muted-foreground">{amountName[key]}</dt><dd className="mt-1 font-medium tabular-nums">¥{preview.data.proposalAmounts[key]}</dd></div>)}</dl><p className="text-xs text-muted-foreground">此处为结算方案，提交不代表资金已入账或退款到账。</p></div> : null}
         <label className="block space-y-1 text-sm">处理原因<Textarea aria-label="客服发起结算原因" value={supportReason.scope === scope ? supportReason.value : ""} disabled={locked} maxLength={500} onChange={e => setSupportReason({ scope, value: e.target.value })} /></label>
         <Button disabled={locked || !preview || supportReason.scope !== scope || [...supportReason.value.trim()].length < 3} onClick={() => choose("propose")}>核对并提交方案</Button>
       </div></DialogContent></Dialog></div> : null}
@@ -208,7 +245,7 @@ export function LegacyAdminContinuationPanel({ snapshot, orderId, frozenAccount,
     {canCommissionCredit && data && (data.availability==="NOT_IMPORTED" || data.availability==="KNOWN" && data.stage==="4") && data.duties.filter(d=>d.kind==="COMMISSION"&&d.status==="MATURED").map((d,index)=><div className="lc-source" key={d.id}><h3>分销佣金入账 · 第 {index+1} 笔</h3><p className="oc-fact-note">收益人：{d.beneficiary?.name??"资料暂不可用"} · 佣金 {money(d.amountCents)}。</p>{action(<Button variant="secondary" disabled={locked||!d.beneficiary?.name} onClick={()=>setOperation({scope,value:{kind:"commission-credit",dutyId:d.id}})}>处理分销佣金</Button>)}<Dialog open={activeOperation?.kind==="commission-credit"&&activeOperation.dutyId===d.id} onOpenChange={open=>{if(!open&&!loading)setOperation({scope,value:null});}}><DialogContent><DialogHeader><DialogTitle>核对分销佣金</DialogTitle></DialogHeader><div className="space-y-3"><p className="text-sm">收益人：{d.beneficiary?.name??"资料暂不可用"} · {money(d.amountCents)}。系统会核对旧站余额记录，确认未重复后记入可用余额。</p><label className="block text-sm">处理原因<Textarea aria-label={`分销佣金入账原因 ${d.beneficiary?.name??"资料待核"} 第${index+1}笔`} value={commissionReasons.scope===scope?commissionReasons.value[d.id]??"":""} disabled={locked||!d.beneficiary?.name} maxLength={500} onChange={e=>setCommissionReasons({scope,value:{...(commissionReasons.scope===scope?commissionReasons.value:{}),[d.id]:e.target.value}})} rows={2}/></label><Button disabled={locked||!d.beneficiary?.name||commissionReasons.scope!==scope||[...(commissionReasons.value[d.id]??"").trim()].length<3} onClick={()=>choose("commission-credit",d.id)}>核对并入账佣金</Button></div></DialogContent></Dialog></div>)}
     <ConfirmAlertDialog open={confirmation!==null} onOpenChange={open=>{if(!open&&!loading)setConfirm({scope,value:null});}}
       contentLabel="确认旧单处理" title={confirmation?`确认${commandName[confirmation.command]}？`:"确认旧单处理"}
-      description={confirmation?.command==="support_cancel"?'请先核对汇聚原付款：确认没有其他已退或未决退款，再提交本次取消；如存在其他退款，请线下协调。此确认不代表退款已到账。':confirmation?.command==="demo-refund"?'仅按历史未退款的假设模拟本次退款；不会调用汇聚，也不代表真实退款或到账。':confirmation?.command==="refund-case"?'确认后记录核对结果；渠道处理与到账以回执为准。':confirmation?.command==="owner-credit"?"确认后按核对结果记入号主可用余额，不代表银行卡已到账。":confirmation?.command==="commission-credit"?"确认后按核对结果记入收益人可用余额，不代表银行卡已到账。":"请核对本次处理的订单、金额和原因；此操作不证明资金已到账。"}
+      description={confirmation?.command==="verify-basis"?'请确认资料已与双方核实。登记后才能按本单原价与当前规则计算结算，不会立即产生退款或入账。':confirmation?.command==="support_cancel"?'请先核对汇聚原付款：确认没有其他已退或未决退款，再提交本次取消；如存在其他退款，请线下协调。此确认不代表退款已到账。':confirmation?.command==="demo-refund"?'仅按历史未退款的假设模拟本次退款；不会调用汇聚，也不代表真实退款或到账。':confirmation?.command==="refund-case"?'确认后记录核对结果；渠道处理与到账以回执为准。':confirmation?.command==="owner-credit"?"请先核对本单原付款及历史退款。确认后按核对结果记入号主可用余额，不代表银行卡已到账。":confirmation?.command==="commission-credit"?"确认后按核对结果记入收益人可用余额，不代表银行卡已到账。":"请核对本次处理的订单、金额和原因；此操作不证明资金已到账。"}
       confirmLabel={confirmation?.command==="confirm"?"确认提交":confirmation?`确认${commandName[confirmation.command]}`:"确认"}
       confirmVariant={confirmation&&["reject","confiscate","void","support_cancel"].includes(confirmation.command)?"destructive":"default"}
       cancelLabel="返回核对" busy={loading} confirmDisabled={confirmation===null||confirmation.command==='refund-case'&&!refundSummary} onConfirm={()=>void submit()}>

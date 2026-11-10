@@ -2,6 +2,7 @@ import { requestOrderJson, requestOrderWrite, type OrderSubjectInput } from "./o
 import { formatExactYuan } from "@zzsh/ui/display-money";
 
 export type LegacyCommandName = "propose" | "confirm" | "reject" | "hold" | "release" | "confiscate";
+export type LegacyEndReason = "NORMAL" | "TENANT_VOLUNTARY_EARLY" | "OWNER_OR_ACCOUNT_EARLY";
 export type LegacyQuantitiesInput = Record<"expendHaff" | "barrett" | "bullet" | "awm" | "armor" | "helmet" | "coffee" | "card", string | null>;
 export type LegacyContinuation = {
   schema: "legacy-continuation.v1"; availability: "KNOWN" | "NOT_IMPORTED" | "ISOLATED";
@@ -67,15 +68,15 @@ export function parseLegacyQuantitiesInput(value: unknown): LegacyQuantitiesInpu
   return result as LegacyQuantitiesInput;
 }
 export async function legacyIntentFingerprint(orderId: string, kind: LegacyCommandName, body: Record<string, unknown>): Promise<string> {
-  const input = { kind, expectedRevision: body.expectedRevision, inputEvidenceId: body.inputEvidenceId, planFingerprint: body.planFingerprint, ...(kind === "propose" ? { quantities: parseLegacyQuantitiesInput(body.quantities) } : {}) };
+  const input = { kind, expectedRevision: body.expectedRevision, inputEvidenceId: body.inputEvidenceId, planFingerprint: body.planFingerprint, ...(kind === "propose" ? { quantities: parseLegacyQuantitiesInput(body.quantities), ...(body.endReason ? {endReason:body.endReason} : {}) } : {}) };
   const bytes = new TextEncoder().encode(JSON.stringify(["order.legacy.continuation." + kind, orderId, input]));
   return Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", bytes))).map(x => x.toString(16).padStart(2, "0")).join("");
 }
 export const legacyContinuationApi = {
   /** `subject` is the frozen owner of the operation (the intent owner on replay). */
   async read(subject: OrderSubjectInput, orderId: string, signal?: AbortSignal) { const body = await requestOrderJson<{ continuation: unknown }>(base(orderId), { signal, subject }); return parseLegacyContinuation(body.continuation); },
-  async preview(subject: OrderSubjectInput, orderId: string, quantities: LegacyQuantitiesInput, signal?: AbortSignal): Promise<LegacyProposal> {
-    const body = await requestOrderWrite<LegacyProposal>(base(orderId) + "/preview", { body: { quantities }, signal, subject });
+  async preview(subject: OrderSubjectInput, orderId: string, quantities: LegacyQuantitiesInput, endReason?: LegacyEndReason, signal?: AbortSignal): Promise<LegacyProposal> {
+    const body = await requestOrderWrite<LegacyProposal>(base(orderId) + "/preview", { body: { quantities, ...(endReason ? {endReason} : {}) }, signal, subject });
     if (!body || typeof body.inputEvidenceId !== "string" || !id.test(body.inputEvidenceId) || !digest.test(body.proposalFingerprint) || !record(body.proposalAmounts) || !record(body.previewAmounts)
       || body.revision !== null && (typeof body.revision !== "string" || !/^[1-9]\d{0,17}$/.test(body.revision))
       || body.settlementKind !== undefined && !["EARLY", "NORMAL"].includes(body.settlementKind)

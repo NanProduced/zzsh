@@ -36,7 +36,8 @@ export function prepareLegacyConfirmGrowth(input: LegacyConfirmGrowthInput): { o
     if (input?.origin?.kind !== "CONTINUATION_CONFIRM" || input.origin.components) return { ok: false, reason: "CONFIRMED_RESULT_UNPROVEN" };
     const projected = projectLegacyGrowthConsumption(input);
     if (projected.knowledge !== "KNOWN") return { ok: false, reason: projected.reason ?? "CONFIRMED_RESULT_UNPROVEN" };
-    if (projected.facts.length !== 2 || !["RENTAL_SETTLEMENT", "MATERIAL_CONSUMPTION"].every(component => projected.facts.some(fact => fact.component === component))) return { ok: false, reason: "CONFIRM_COMPONENTS_INCOMPLETE" };
+    const types=projected.facts.map(fact=>fact.component);
+    if (types.length<2 || types.length>3 || new Set(types).size!==types.length || !["RENTAL_SETTLEMENT", "MATERIAL_CONSUMPTION"].every(component => types.includes(component as typeof types[number])) || types.some(type=>!["RENTAL_SETTLEMENT","MATERIAL_CONSUMPTION","MINIMUM_BILLING"].includes(type))) return { ok: false, reason: "CONFIRM_COMPONENTS_INCOMPLETE" };
     const rows = projected.facts.map(fact => prepareLegacyGrowthRow(fact, input.binding.gameId));
     if (rows.some(row => row === null)) return { ok: false, reason: "CONFIRM_COMPONENTS_INVALID" };
     return { ok: true, rows: rows as PreparedLegacyRow[] };

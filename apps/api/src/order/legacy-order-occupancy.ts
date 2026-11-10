@@ -24,7 +24,9 @@ export function accountOccupancySql(accountId: string) {
       OR EXISTS(SELECT 1 FROM zzsh_order.legacy_order_read_snapshot l WHERE l.account_id=${accountId}
         AND (l.source_pay_status NOT IN(0,1) OR (l.source_pay_status=1 AND l.source_order_status NOT IN(3,4,5,8,9)))))`,
     paid, pending,
-    completed: `EXISTS(SELECT 1 FROM zzsh_order.rental_order WHERE account_id=${accountId} AND status='COMPLETED')`,
+    completed: `(EXISTS(SELECT 1 FROM zzsh_order.rental_order WHERE account_id=${accountId} AND status='COMPLETED')
+      OR EXISTS(SELECT 1 FROM zzsh_order.legacy_order_read_snapshot l JOIN zzsh_order.legacy_continuation_version v ON v.order_id=l.id
+        WHERE l.account_id=${accountId} AND l.source_pay_status=1 AND l.source_order_status IN(3,8,9) AND v.command='CONFIRM' AND v.stage=4))`,
   };
 }
 export function mergeOrderOccupancy(...states: OrderOccupancy[]): OrderOccupancy {

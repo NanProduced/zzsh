@@ -34,10 +34,10 @@ test("public occupancy labels only use authoritative native states and never car
   assert.deepEqual(await gate(free, { id: "fixture" } as never), { publisherBail: "NOT_REQUIRED", reference: "fixture", occupancy: "FREE" });
 });
 
-test("completed native rental remains terminal even when it no longer occupies; cancelled attempts are not terminal", async () => {
+test("completed native or continued legacy rental remains terminal; cancellation is not completion", async () => {
   let calls = 0;
   const client = { query: async (sql: string, values: unknown[]) => {
-    calls++; assert.match(sql, /status='COMPLETED'/); assert.deepEqual(values, ['supply-once']);
+    calls++; assert.match(sql, /status='COMPLETED'/); assert.match(sql,/l\.source_order_status IN\(3,8,9\) AND v\.command='CONFIRM' AND v\.stage=4/); assert.deepEqual(values, ['supply-once']);
     return { rows: [{ state: 'FREE', kind: null, rentalCompleted: true }] };
   } } as unknown as PoolClient;
   const gate = composeSupplyGateWithOrderOccupancy(async () => ({ publisherBail:'NOT_REQUIRED',occupancy:'FREE',reference:'proof' }));

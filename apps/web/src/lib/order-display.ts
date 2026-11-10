@@ -862,6 +862,11 @@ export function legacyProgressView(input: LegacyProgressReport): LegacyProgressV
       note: "检测到一笔按原请求键保存、结果未知的旧单续办申请。请先按原键查询回执，不要重复提交；页面不会清除待恢复记录。金额仍以旧价与旧付款事实为准。",
       primary: { label: "查询原请求", target: "legacy" }, secondary: [progressSupport, progressRefresh], terminal: false, known };
   }
+  if (input.reasons.includes("EARLY_REVIEW_PENDING")) {
+    return { tone: "waiting", title: "提前结算待客服复核", owner: "客服",
+      note: "结算方案已确认，客服复核后才会过账；退款进度以实际处理为准。",
+      primary: progressSupport, secondary: [progressRefresh], terminal: false, known };
+  }
   if (input.capabilities.length === 0) {
     return { tone: "waiting", title: "等待客服核对续办能力", owner: "客服",
       note: "服务端当前没有为这笔旧单开放新的续办写操作。页面不显示预览、提交、确认或拒绝入口；已读到的金额与时间仍是历史记录，需要办理请联系客服。",

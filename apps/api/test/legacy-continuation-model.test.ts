@@ -1,8 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { planLegacyContinuation, type AmountPlan, type LegacyCommand } from "../src/order/legacy-continuation-calc";
+import { planLegacyContinuation, planVerifiedLegacySettlement, type AmountPlan, type LegacyCommand } from "../src/order/legacy-continuation-calc";
 import { deriveLegacyFacts, initialLegacyFacts, legacyCommissionMaturity, legacyOrderAdvisoryKey, legacyPlanYuanToCents, projectLegacyContinuation, projectLegacyPartyAmounts,projectLegacyCommandReceipt,previewLegacyContinuation,readSealedLegacyFacts,type LegacyDutyRow } from "../src/order/legacy-continuation-model";
-import { legacyBinding as b, legacyEvidence, legacyQuantities, legacySource } from "./legacy-continuation-fixture";
+import { legacyBinding as b, legacyEvidence, legacyQuantities, legacySource, legacyVerifiedProposal } from "./legacy-continuation-fixture";
 
 test("variable-scale yuan becomes exact integer cents with24digit bound", () => {
   for (const [yuan, cents] of [["0.01", "1"], ["9.20", "920"], ["10", "1000"], ["100.00", "10000"], ["0", "0"], ["1.00000000", "100"]]) assert.equal(legacyPlanYuanToCents(yuan!), cents);
@@ -34,11 +34,13 @@ test("reject discards proposal monetary projection and next proposal uses derive
   assert.equal(result.derivedFromEvidenceId, "source"); assert.equal(result.derivedFromCommandVersionId, "reject");
   assert(planLegacyContinuation(result.evidence, { kind: "propose", caller: { role: "renter", legacyUserId: "11" }, quantities: legacyQuantities("1") }).ok);
 });
-test("imported8 without head supports opposing party directly and isolates unknown facts", () => {
+test("imported pending proposal must be rejected and recalculated before confirmation", () => {
   const source = legacySource({ orderStatus: "8", returnOrderMoney: "87.00", saleEarnings: "10.00" });
   const row = legacyEvidence(initialLegacyFacts(source));
   const view = projectLegacyContinuation(b, { realm: "user", userId: b.ownerUserId, sessionId: "fixture", requestId: "fixture" }, row, null, []);
-  assert.equal(view.revision, null); assert.deepEqual(view.capabilities, ["confirm", "reject"]);
+  assert.equal(view.revision, null); assert.deepEqual(view.capabilities, ["reject"]);assert(view.reasons.includes("LEGACY_PROPOSAL_RECONFIRM_REQUIRED"));
+  const proposer=projectLegacyContinuation(b,{realm:"user",userId:b.renterUserId,sessionId:"fixture",requestId:"fixture"},row,null,[]);
+  assert(proposer.reasons.includes("LEGACY_PROPOSAL_RECONFIRM_REQUIRED"));assert(!proposer.capabilities.includes("confirm"));
   assert.equal(view.amounts.saleEarnings?.cents,"1000");assert.equal(Object.hasOwn(view.amounts,"returnOrderMoney"),false);
   assert.equal(planLegacyContinuation(row.facts.evidence, { kind: "confirm", caller: { role: "owner", legacyUserId: "22" } }).ok, true);
   const isolated = legacyEvidence(initialLegacyFacts({ ...source, baseBot: null }));
@@ -85,23 +87,23 @@ test("a settled owner duty is presented as verified only after its financial fac
  assert.equal(projectLegacyContinuation(b,partyActor("renter"),row,null,[duty],false,"NONE").duties.length,0);
 });
 test("preview filters both actual calculated bags and keeps the original proposal fingerprint",()=>{
- const facts=initialLegacyFacts(legacySource()),quantities=legacyQuantities("1.00");
+ const {original,basis,quantities}=legacyVerifiedProposal(),facts=original.facts;
  for(const who of ["owner","renter"] as const){
-  const actor=partyActor(who),out=previewLegacyContinuation(facts,b,actor,quantities);
-  const full=planLegacyContinuation(facts.evidence,{kind:"propose",caller:{role:who,legacyUserId:who==="owner"?b.legacyOwnerId:b.legacyRenterId},quantities});assert(full.ok);assert.equal(out.proposalFingerprint,full.fingerprint);
+  const actor=partyActor(who),out=previewLegacyContinuation(facts,b,actor,quantities,undefined,basis,"NORMAL");
+  const full=planVerifiedLegacySettlement(facts.evidence,{kind:"propose",caller:{role:who,legacyUserId:who==="owner"?b.legacyOwnerId:b.legacyRenterId},quantities,settlementBasis:basis,endReason:"NORMAL"},basis);assert(full.ok);assert.equal(out.proposalFingerprint,full.fingerprint);
   for(const amounts of [out.previewAmounts,out.proposalAmounts]){assert.equal(Object.hasOwn(amounts,who==="owner"?"payMoney":"saleEarnings"),false);assert.equal(Object.hasOwn(amounts,who==="owner"?"saleEarnings":"payMoney"),true);}
  }
 });
-test("staff proposal keeps staff identity but calculates with the explicitly selected party's original rule",()=>{
- const facts=initialLegacyFacts(legacySource()),quantities=legacyQuantities("1.00");
+test("staff proposal keeps staff identity and uses the same verified rule for either party",()=>{
+ const {original,basis,quantities}=legacyVerifiedProposal(),facts=original.facts;
  for(const who of ["renter","owner"] as const){
-  const admin=previewLegacyContinuation(facts,b,partyActor("admin"),quantities,who);
-  const user=planLegacyContinuation(facts.evidence,{kind:"propose",caller:{role:who,legacyUserId:who==="owner"?b.legacyOwnerId:b.legacyRenterId},quantities});assert(user.ok);
+  const admin=previewLegacyContinuation(facts,b,partyActor("admin"),quantities,who,basis,"NORMAL");
+  const user=planVerifiedLegacySettlement(facts.evidence,{kind:"propose",caller:{role:who,legacyUserId:who==="owner"?b.legacyOwnerId:b.legacyRenterId},quantities,settlementBasis:basis,endReason:"NORMAL"},basis);assert(user.ok);
   const normalized=Object.fromEntries(Object.entries(user.amounts).map(([key,value])=>{
    if(value===null)return[key,null];const cents=BigInt(legacyPlanYuanToCents(value));return[key,`${cents/100n}.${(cents%100n).toString().padStart(2,"0")}`];
   }));
   assert.deepEqual(admin.proposalAmounts,normalized);
-  const bound=planLegacyContinuation(facts.evidence,{kind:"propose",caller:{role:"admin",legacyUserId:"",onBehalf:who},quantities});assert(bound.ok);
+  const bound=planVerifiedLegacySettlement(facts.evidence,{kind:"propose",caller:{role:"admin",legacyUserId:"",onBehalf:who},quantities,settlementBasis:basis,endReason:"NORMAL"},basis);assert(bound.ok);
   assert.equal(admin.proposalFingerprint,bound.fingerprint);assert.notEqual(admin.proposalFingerprint,user.fingerprint);
   assert.equal(bound.nextStatus,who==="renter"?"8":"9");
  }
@@ -110,22 +112,23 @@ test("staff proposal keeps staff identity but calculates with the explicitly sel
  const forged=planLegacyContinuation(facts.evidence,{kind:"propose",caller:{role:"renter",legacyUserId:b.legacyRenterId,onBehalf:"owner"},quantities});assert.equal(forged.ok,false);
 });
 test("legacy preview shows two decimals and rounds a new fractional proposal consistently",()=>{
- const quantities={...legacyQuantities("1.00"),barrett:"1.00"};
- const prices={...legacySource().accountPrices,barrett:"0.25"};
- const facts=initialLegacyFacts(legacySource({isFullPayout:"1",accountPrices:prices,orderPrices:prices}));
- const result=previewLegacyContinuation(facts,b,partyActor("admin"),quantities,"renter");
+ const fixture=legacyVerifiedProposal(), quantities={...legacyQuantities("1.00"),barrett:"1.00"};
+ const prices={...legacySource().accountPrices,barrett:"0.25"},basis={...fixture.basis,ownerPrices:prices,fullPayout:true};
+ const facts=initialLegacyFacts({...fixture.original.facts.evidence.source,isFullPayout:"1",accountPrices:prices,orderPrices:prices});
+ const result=previewLegacyContinuation(facts,b,partyActor("admin"),quantities,"renter",basis,"NORMAL");
  assert.equal(result.proposalAmounts.saleEarnings,"10.25");assert.equal(result.proposalAmounts.fullPayoutMoney,"0.82");
  assert(Object.values(result.proposalAmounts).every(value=>value===null||/^\d+\.\d{2}$/.test(value)));
- const fractional=initialLegacyFacts(legacySource({accountPrices:{...prices,barrett:"0.01"},orderPrices:{...prices,barrett:"0.01"}}));
- const rounded=previewLegacyContinuation(fractional,b,partyActor("admin"),{...quantities,barrett:"0.50"},"renter");
- assert.equal(rounded.proposalAmounts.saleEarnings,"10.01");assert.equal(rounded.proposalAmounts.returnOrderMoney,"87.00");
- assert.equal(rounded.proposalAmounts.ownerNet,"10.01");assert.equal(rounded.proposalAmounts.commissionPool,"2.99");
+ const fractional=initialLegacyFacts({...fixture.original.facts.evidence.source,accountPrices:{...prices,barrett:"0.01"},orderPrices:{...prices,barrett:"0.01"}});
+ const rounded=previewLegacyContinuation(fractional,b,partyActor("admin"),{...quantities,barrett:"0.50"},"renter",{...fixture.basis,ownerPrices:{...prices,barrett:"0.01"}},"NORMAL");
+ assert.equal(rounded.proposalAmounts.saleEarnings,"10.01");assert.equal(rounded.proposalAmounts.returnOrderMoney,"89.99");
+ assert.equal(rounded.proposalAmounts.ownerNet,"10.01");assert.equal(rounded.proposalAmounts.commissionPool,"0.00");
 });
 test("legacy early proposal discloses the renter's actual early deduction without exposing it to the owner",()=>{
- const facts=initialLegacyFacts(legacySource({storedCommissionMoney:"5.00"})),quantities=legacyQuantities("0.10");
- const renter=previewLegacyContinuation(facts,b,partyActor("renter"),quantities);
- assert.equal(renter.settlementKind,"EARLY");assert.equal(renter.earlyFee,"5.00");
- const owner=previewLegacyContinuation(facts,b,partyActor("owner"),quantities);
+ const fixture=legacyVerifiedProposal(),facts=initialLegacyFacts({...fixture.original.facts.evidence.source,baseBot:"110",profitDot:"10",goodsMoney:"100.00",storedCommissionMoney:"9.00"}),quantities=legacyQuantities("60");
+ const basis={...fixture.basis,openingHaffM:"100",baseBot:"110",openingItems:legacyQuantities("100")};
+ const renter=previewLegacyContinuation(facts,b,partyActor("renter"),quantities,undefined,basis,"TENANT_VOLUNTARY_EARLY");
+ assert.equal(renter.settlementKind,"EARLY");assert.equal(renter.earlyFee,"2.25");
+ const owner=previewLegacyContinuation(facts,b,partyActor("owner"),quantities,undefined,basis,"TENANT_VOLUNTARY_EARLY");
  assert.equal(owner.settlementKind,"EARLY");assert.equal(Object.hasOwn(owner,"earlyFee"),false);
 });
 test("an imported pending early proposal is labelled without inventing a fee from incomplete historical components",()=>{

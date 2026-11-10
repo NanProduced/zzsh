@@ -5,6 +5,7 @@ import { computeQuote } from "../src/supply/pricing";
 import { compatRule } from "./pricing-compat-fixture";
 import {
   computeSettlement,
+  earlyMakeupCents,
   settlementConfirmationReady,
   SETTLEMENT_ROUNDING_POLICY,
   type ComputeSettlementInput,
@@ -12,6 +13,11 @@ import {
   type SettlementEndReason,
   type FullPayoutSelection,
 } from "../src/order/settlement";
+
+test("shared early makeup curve uses exact consumption and rounds to cents", () => {
+  assert.deepEqual([50n, 60n, 70n].map(q => earlyMakeupCents(10000n, q, 100n)), [5000n, 2500n, 0n]);
+  assert.throws(() => earlyMakeupCents(10000n, 1n, 0n));
+});
 
 const HAFF = "100000000";
 

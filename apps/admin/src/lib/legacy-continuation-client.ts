@@ -2,14 +2,15 @@ import { adminRequest } from "../api";
 import { formatExactYuan } from "@zzsh/ui/display-money";
 import { withSupplyWriteLock } from "./supply-write-lock";
 
-export type LegacyAdminAction = "propose" | "confirm" | "reject" | "hold" | "release" | "confiscate" | "support_cancel" | "mature" | "void" | "owner-credit" | "commission-credit" | "refund-case" | "demo-refund";
+export type LegacyAdminAction = "propose" | "confirm" | "reject" | "hold" | "release" | "confiscate" | "support_cancel" | "verify-basis" | "mature" | "void" | "owner-credit" | "commission-credit" | "refund-case" | "demo-refund";
+export type LegacyEndReason = "NORMAL" | "TENANT_VOLUNTARY_EARLY" | "OWNER_OR_ACCOUNT_EARLY";
 export type LegacyDemoScope = "LOCAL_DEMO_SIMULATED" | "ECS_TEST_SIMULATED";
 export type LegacyDemoRefund = {contractVersion:'demo-legacy-refund.v1';scope:LegacyDemoScope;orderId:string;dutyId:string;operationId:string;amountCents:string;paidCents:string;assumption:'SIMULATION_ASSUME_NO_PRIOR_REFUND';simulatedAt:string;state:'SIMULATED';bankArrival:'UNKNOWN'};
 export type LegacyAdminQuantities = Record<"expendHaff" | "barrett" | "bullet" | "awm" | "armor" | "helmet" | "coffee" | "card", string>;
 export type LegacyRecordedQuantities = { [K in keyof LegacyAdminQuantities]: string | null };
 export type LegacyAdminProposal = { revision: string | null; inputEvidenceId: string; proposalFingerprint: string; settlementKind: "EARLY" | "NORMAL"; proposalAmounts: Record<string, string | null> };
 export type LegacyAdminDuty = { id: string; kind: string; amountCents: string; currency: "CNY"; status: string; maturityAt: string | null; revision: string; settledBy: string | null; sourceStatus: string | null; financeVerified:boolean; beneficiary: {userId:string;name:string|null}|null };
-export type LegacyAdminView = { schema: "legacy-continuation.v1"; availability: "KNOWN" | "NOT_IMPORTED" | "ISOLATED"; revision: string | null; evidenceId: string | null; stage: string | null; isSettle: string | null; refundDueAt: string | null; amounts: Record<string, { cents: string; yuan: string } | null>; quantities: LegacyRecordedQuantities | null; confirmationAmounts: { ownerNet: { cents: string; yuan: string }; refundNet: { cents: string; yuan: string } } | null; capabilities: string[]; commandFingerprints: Record<string, string>; duties: LegacyAdminDuty[]; reasons: string[]; channelState: "UNKNOWN" };
+export type LegacyAdminView = { schema: "legacy-continuation.v1"; availability: "KNOWN" | "NOT_IMPORTED" | "ISOLATED"; revision: string | null; evidenceId: string | null; stage: string | null; isSettle: string | null; refundDueAt: string | null; lastBasisId: string | null; amounts: Record<string, { cents: string; yuan: string } | null>; quantities: LegacyRecordedQuantities | null; confirmationAmounts: { ownerNet: { cents: string; yuan: string }; refundNet: { cents: string; yuan: string } } | null; capabilities: string[]; commandFingerprints: Record<string, string>; duties: LegacyAdminDuty[]; reasons: string[]; channelState: "UNKNOWN" };
 export type LegacyAdminIntent = { schema: 1; subject: string; orderId: string; command: LegacyAdminAction; dutyId: string | null; key: string; body: Record<string, unknown>; at: string;demoScope?:LegacyDemoScope };
 export type LegacyAdminReceipt = { state: "UNKNOWN" } | { state: "KNOWN_SUCCESS" | "KNOWN_REJECTED"; status: number; fingerprint: string; receipt: unknown };
 export type LegacyAdminPending = { state: "NONE" | "UNREADABLE"; intent: null } | { state: "VALID"; intent: LegacyAdminIntent };
@@ -40,6 +41,10 @@ export async function readLegacyAdminDemoRefund(orderId:string,dutyId:string,sig
 }
 function validateResult(intent:LegacyAdminIntent,result:unknown) {
   if(intent.command==='demo-refund')return demoRefundResult(result,intent.orderId,intent.dutyId!,intent.demoScope!);
+  if(intent.command==='verify-basis') {
+    if(!object(result)||result.orderId!==intent.orderId||typeof result.basisId!=="string"||!TOKEN.test(result.basisId)||typeof result.basisRevision!=="string"||!/^[1-9]\d{0,17}$/.test(result.basisRevision)||result.state!=="VERIFIED")throw new Error("核实结果尚待确认");
+    return result;
+  }
   if(intent.command==='refund-case'){
     if(!object(result)||result.orderId!==intent.orderId||result.dutyId!==intent.dutyId||typeof result.caseId!=='string'||!TOKEN.test(result.caseId)
       || typeof result.dutyCents!=='string'||!/^(0|[1-9]\d{0,23})$/.test(result.dutyCents)||typeof result.priorAppliedCents!=='string'
@@ -59,7 +64,7 @@ function validateResult(intent:LegacyAdminIntent,result:unknown) {
   return result;
 }
 function validIntent(value: unknown, subject: string, orderId: string): value is LegacyAdminIntent {
-  if (!object(value) || value.schema !== 1 || value.subject !== subject || value.orderId !== orderId || !["propose", "confirm", "reject", "hold", "release", "confiscate", "support_cancel", "mature", "void", "owner-credit", "commission-credit", "refund-case", "demo-refund"].includes(String(value.command)) || typeof value.key !== "string" || !/^legacy_[a-f0-9]{32}$/.test(value.key) || !object(value.body) || typeof value.at !== "string" || !Number.isFinite(Date.parse(value.at))) return false;
+  if (!object(value) || value.schema !== 1 || value.subject !== subject || value.orderId !== orderId || !["propose", "confirm", "reject", "hold", "release", "confiscate", "support_cancel", "verify-basis", "mature", "void", "owner-credit", "commission-credit", "refund-case", "demo-refund"].includes(String(value.command)) || typeof value.key !== "string" || !/^legacy_[a-f0-9]{32}$/.test(value.key) || !object(value.body) || typeof value.at !== "string" || !Number.isFinite(Date.parse(value.at))) return false;
   if (Object.keys(value).some(x => !["schema", "subject", "orderId", "command", "dutyId", "key", "body", "at", "demoScope"].includes(x))) return false;
   if(value.command==='demo-refund'?!['LOCAL_DEMO_SIMULATED','ECS_TEST_SIMULATED'].includes(String(value.demoScope)):value.demoScope!==undefined)return false;
   const duty = value.command === "mature" || value.command === "void" || value.command === "owner-credit" || value.command === "commission-credit" || value.command==='refund-case'||value.command==='demo-refund', body = value.body;
@@ -79,22 +84,37 @@ function validIntent(value: unknown, subject: string, orderId: string): value is
       && [body.paidCents,body.previouslyRefundedCents,body.priorAppliedToDutyCents].every(item=>typeof item==='string'&&/^(0|[1-9]\d{0,23})$/.test(item))
       && body.noUnresolvedRefunds===true&&typeof body.evidenceRef==='string'&&body.evidenceRef.trim().length>=3&&new TextEncoder().encode(body.evidenceRef).length<=600;
   }
+  if(value.command==='verify-basis') {
+    const keys=["expectedRevision","inputEvidenceId","expectedBasisId","openingHaffM","baseBot","ownerPrices","openingItems","fullPayout","partiesVerified","reason"];
+    const priceKeys=["barrett","bullet","awm","armor","helmet","coffee","card"];
+    return Object.keys(body).sort().join()===keys.sort().join() && (body.expectedRevision===null||typeof body.expectedRevision==='string'&&/^[1-9]\d{0,17}$/.test(body.expectedRevision))
+      && typeof body.inputEvidenceId==='string'&&TOKEN.test(body.inputEvidenceId) && (body.expectedBasisId===null||typeof body.expectedBasisId==='string'&&TOKEN.test(body.expectedBasisId))
+      && typeof body.openingHaffM==='string'&&/^(0|[1-9]\d{0,9})(?:\.\d{1,2})?$/.test(body.openingHaffM) && typeof body.baseBot==='string'&&/^[1-9]\d{0,9}$/.test(body.baseBot)
+      && object(body.ownerPrices)&&Object.keys(body.ownerPrices).sort().join()===priceKeys.sort().join()&&Object.values(body.ownerPrices).every(x=>x===null||typeof x==='string'&&/^(0|[1-9]\d{0,9})(?:\.\d{1,8})?$/.test(x))
+      && validOptionalQuantities(body.openingItems)&&typeof body.fullPayout==='boolean'
+      && body.partiesVerified===true&&typeof body.reason==='string'&&[...body.reason.trim()].length>=3&&new TextEncoder().encode(body.reason).length<=600&&!/[\u0000-\u001f\u007f]/.test(body.reason);
+  }
   if (body.expectedRevision !== null && (typeof body.expectedRevision !== "string" || !/^[1-9]\d{0,17}$/.test(body.expectedRevision))) return false;
   if (duty && body.expectedRevision === null) return false;
-  const fields = duty ? ["expectedRevision", "sourceFactAuditId", "reason"] : value.command === "support_cancel" ? ["expectedRevision","inputEvidenceId","refundCents","ownerCents","reason","originalPaymentChecked"] : ["expectedRevision", "inputEvidenceId", "planFingerprint", ...(["confirm", "reject"].includes(String(value.command)) ? ["reason"] : []), ...(value.command === "propose" ? ["quantities", "onBehalf", "reason"] : [])];
+  const fields = duty ? ["expectedRevision", "sourceFactAuditId", "reason", ...(value.command === "owner-credit" ? ["originalPaymentChecked"] : [])] : value.command === "support_cancel" ? ["expectedRevision","inputEvidenceId","refundCents","ownerCents","reason","originalPaymentChecked"] : ["expectedRevision", "inputEvidenceId", "planFingerprint", ...(["confirm", "reject"].includes(String(value.command)) ? ["reason"] : []), ...(value.command === "propose" ? ["quantities", "onBehalf", "reason", "endReason"] : [])];
   if (Object.keys(body).some(x => !fields.includes(x))) return false;
   if (!duty && (typeof body.inputEvidenceId !== "string" || !TOKEN.test(body.inputEvidenceId) || value.command !== "support_cancel" && (typeof body.planFingerprint !== "string" || !DIGEST.test(body.planFingerprint)))) return false;
   if (value.command === "support_cancel" && (body.originalPaymentChecked!==true || ![body.refundCents,body.ownerCents].every(v=>typeof v==="string"&&/^(0|[1-9]\d{0,15})$/.test(v)) || typeof body.reason!=="string" || body.reason!==body.reason.trim() || [...body.reason].length<3 || new TextEncoder().encode(body.reason).length>600 || /[\u0000-\u001f\u007f]/.test(body.reason))) return false;
   if (body.sourceFactAuditId !== undefined && (typeof body.sourceFactAuditId !== "string" || !TOKEN.test(body.sourceFactAuditId)) || body.reason !== undefined && (typeof body.reason !== "string" || !body.reason.trim() || body.reason.length > 500)) return false;
   if (value.command === "void" && (typeof body.sourceFactAuditId !== "string" || !TOKEN.test(body.sourceFactAuditId) || typeof body.reason !== "string" || !body.reason.trim() || body.reason.length > 500)) return false;
   if (["owner-credit","commission-credit"].includes(String(value.command)) && (body.sourceFactAuditId !== undefined || typeof body.reason !== "string" || [...body.reason.trim()].length < 3 || body.reason.length > 500)) return false;
+  if (body.originalPaymentChecked !== undefined && value.command === "owner-credit" && body.originalPaymentChecked !== true) return false;
   if (["confirm", "reject"].includes(String(value.command)) && (typeof body.reason !== "string" || [...body.reason.trim()].length < 3 || body.reason.length > 500)) return false;
   if (value.command === "propose" && (!validQuantities(body.quantities) || !["renter", "owner"].includes(String(body.onBehalf)) || typeof body.reason !== "string" || [...body.reason.trim()].length < 3 || body.reason.length > 500)) return false;
+  if (body.endReason !== undefined && !["NORMAL","TENANT_VOLUNTARY_EARLY","OWNER_OR_ACCOUNT_EARLY"].includes(String(body.endReason))) return false;
   return true;
 }
 const quantityNames = ["expendHaff", "barrett", "bullet", "awm", "armor", "helmet", "coffee", "card"] as const;
 function validQuantities(value: unknown): value is LegacyAdminQuantities {
   return object(value) && Object.keys(value).length === quantityNames.length && quantityNames.every(name => typeof value[name] === "string" && /^(0|[1-9]\d{0,9})(?:\.\d{1,2})?$/.test(value[name] as string));
+}
+function validOptionalQuantities(value: unknown): boolean {
+  return object(value) && Object.keys(value).length === quantityNames.length && quantityNames.every(name => value[name] === null || typeof value[name] === "string" && /^(0|[1-9]\d{0,9})(?:\.\d{1,2})?$/.test(value[name] as string));
 }
 export function inspectLegacyAdminIntent(subject: string, orderId: string): LegacyAdminPending {
   try {
@@ -126,6 +146,7 @@ export function parseLegacyAdminView(value: unknown): LegacyAdminView {
   if (!object(value) || value.schema !== "legacy-continuation.v1" || !["KNOWN", "NOT_IMPORTED", "ISOLATED"].includes(String(value.availability)) || value.channelState !== "UNKNOWN" || !object(value.amounts) || !Array.isArray(value.capabilities) || value.capabilities.some(x => typeof x !== "string" || !["preview", "propose", "confirm", "reject", "hold", "release", "confiscate", "support_cancel"].includes(x)) || !object(value.commandFingerprints) || Object.values(value.commandFingerprints).some(x => typeof x !== "string" || !DIGEST.test(x)) || !Array.isArray(value.duties) || value.duties.length > 200 || !Array.isArray(value.reasons) || value.reasons.some(x => typeof x !== "string" || x.length > 100)) throw new Error("旧单办理资料暂不可用");
   if (value.stage !== null && !["3", "8", "9", "4", "5"].includes(String(value.stage)) || value.isSettle !== null && !["0", "2", "3"].includes(String(value.isSettle)) || value.revision !== null && (typeof value.revision !== "string" || !/^[1-9]\d{0,17}$/.test(value.revision)) || value.evidenceId !== null && (typeof value.evidenceId !== "string" || !TOKEN.test(value.evidenceId))) throw new Error("旧单版本暂不可用");
   if (value.refundDueAt !== undefined && value.refundDueAt !== null && (typeof value.refundDueAt !== "string" || !Number.isFinite(Date.parse(value.refundDueAt)))) throw new Error("退款时间暂不可用");
+  if (value.lastBasisId !== undefined && value.lastBasisId !== null && (typeof value.lastBasisId !== "string" || !TOKEN.test(value.lastBasisId))) throw new Error("结算核实资料暂不可用");
   const amounts: LegacyAdminView["amounts"] = {};
   for (const [k, amount] of Object.entries(value.amounts)) {
     if (amount === null) { amounts[k] = null; continue; }
@@ -153,7 +174,7 @@ export function parseLegacyAdminView(value: unknown): LegacyAdminView {
   const quantities = rawQuantities ? Object.fromEntries(quantityFields.map(key => {
     const item=rawQuantities[key];return [key,typeof item==="string"&&/^(0|[1-9]\d{0,9})(?:\.\d{1,2})?$/.test(item)?item:null];
   })) as LegacyRecordedQuantities : null;
-  return { schema: "legacy-continuation.v1", availability: value.availability as LegacyAdminView["availability"], revision: value.revision as string | null, evidenceId: value.evidenceId as string | null, stage: value.stage as string | null, isSettle: value.isSettle as string | null, refundDueAt: typeof value.refundDueAt === "string" ? value.refundDueAt : null, amounts, quantities, confirmationAmounts, duties, capabilities: [...value.capabilities] as string[], commandFingerprints: { ...value.commandFingerprints } as Record<string, string>, reasons: [...value.reasons] as string[], channelState: "UNKNOWN" };
+  return { schema: "legacy-continuation.v1", availability: value.availability as LegacyAdminView["availability"], revision: value.revision as string | null, evidenceId: value.evidenceId as string | null, stage: value.stage as string | null, isSettle: value.isSettle as string | null, refundDueAt: typeof value.refundDueAt === "string" ? value.refundDueAt : null, lastBasisId: typeof value.lastBasisId === "string" ? value.lastBasisId : null, amounts, quantities, confirmationAmounts, duties, capabilities: [...value.capabilities] as string[], commandFingerprints: { ...value.commandFingerprints } as Record<string, string>, reasons: [...value.reasons] as string[], channelState: "UNKNOWN" };
 }
 export async function readLegacyAdminContinuation(orderId: string, signal?: AbortSignal) {
   const response = await adminRequest<{ continuation: unknown }>(base(orderId), undefined, "GET", {}, signal);
@@ -237,9 +258,9 @@ export async function retryLegacyAdminRefund(intentId:string,input:{previouslyRe
     || !object(result.outcome)||!['RETRY_CREATED','RETRY_EXISTS','UNKNOWN'].includes(String(result.outcome.kind))||result.channelArrival!=='UNKNOWN')throw new Error('退款重试结果暂不可用');
   return {kind:String(result.outcome.kind)};
 }
-export async function previewLegacyAdminContinuation(orderId: string, quantities: LegacyAdminQuantities, onBehalf: "renter" | "owner"): Promise<LegacyAdminProposal> {
+export async function previewLegacyAdminContinuation(orderId: string, quantities: LegacyAdminQuantities, onBehalf: "renter" | "owner", endReason?:LegacyEndReason): Promise<LegacyAdminProposal> {
   if (!validQuantities(quantities) || !["renter", "owner"].includes(onBehalf)) throw new Error("请填写有效的消耗数量并选择发起方");
-  const result = await adminRequest<unknown>(base(orderId) + "/preview", { quantities, onBehalf }, "POST");
+  const result = await adminRequest<unknown>(base(orderId) + "/preview", { quantities, onBehalf, ...(endReason?{endReason}:{}) }, "POST");
   if (!object(result) || result.revision !== null && (typeof result.revision !== "string" || !/^[1-9]\d{0,17}$/.test(result.revision)) || typeof result.inputEvidenceId !== "string" || !TOKEN.test(result.inputEvidenceId) || typeof result.proposalFingerprint !== "string" || !DIGEST.test(result.proposalFingerprint) || !["EARLY", "NORMAL"].includes(String(result.settlementKind)) || !object(result.proposalAmounts) || Object.values(result.proposalAmounts).some(v => v !== null && formatExactYuan(v) === null)) throw new Error("结算预估暂不可用");
   return { ...result, proposalAmounts: Object.fromEntries(Object.entries(result.proposalAmounts).map(([key, value]) => [key, value === null ? null : formatExactYuan(value)])) } as LegacyAdminProposal;
 }
@@ -259,7 +280,7 @@ export async function recoverLegacyAdminIntent(intent: LegacyAdminIntent): Promi
     intent.command==='refund-case' ? {orderId:intent.orderId,dutyId:intent.dutyId,expectedDutyRevision:body.expectedDutyRevision,expectedHeadRevision:body.expectedHeadRevision,
     paymentOrderNo:body.paymentOrderNo,confirmedMerchantNo:body.confirmedMerchantNo,paidCents:body.paidCents,previouslyRefundedCents:body.previouslyRefundedCents,
     priorAppliedToDutyCents:body.priorAppliedToDutyCents,noUnresolvedRefunds:body.noUnresolvedRefunds,evidenceRef:body.evidenceRef}
-    : intent.dutyId ? { dutyId: intent.dutyId, kind: intent.command, expectedRevision: body.expectedRevision, sourceFactAuditId: body.sourceFactAuditId, reason: body.reason } : intent.command === "support_cancel" ? {kind:intent.command,expectedRevision:body.expectedRevision,inputEvidenceId:body.inputEvidenceId,refundCents:body.refundCents,ownerCents:body.ownerCents,originalPaymentChecked:body.originalPaymentChecked,reason:body.reason} : { kind: intent.command, expectedRevision: body.expectedRevision, inputEvidenceId: body.inputEvidenceId, planFingerprint: body.planFingerprint, ...(intent.command === "propose" ? { quantities: body.quantities } : {}), ...(body.reason === undefined ? {} : { reason: body.reason }), ...(body.onBehalf === undefined ? {} : { onBehalf: body.onBehalf }) };
+    : intent.command==='verify-basis'?body : intent.dutyId ? { dutyId: intent.dutyId, kind: intent.command, expectedRevision: body.expectedRevision, sourceFactAuditId: body.sourceFactAuditId, reason: body.reason, ...(body.originalPaymentChecked===true?{originalPaymentChecked:true}:{}) } : intent.command === "support_cancel" ? {kind:intent.command,expectedRevision:body.expectedRevision,inputEvidenceId:body.inputEvidenceId,refundCents:body.refundCents,ownerCents:body.ownerCents,originalPaymentChecked:body.originalPaymentChecked,reason:body.reason} : { kind: intent.command, expectedRevision: body.expectedRevision, inputEvidenceId: body.inputEvidenceId, planFingerprint: body.planFingerprint, ...(intent.command === "propose" ? { quantities: body.quantities, ...(body.endReason?{endReason:body.endReason}:{}) } : {}), ...(body.reason === undefined ? {} : { reason: body.reason }), ...(body.onBehalf === undefined ? {} : { onBehalf: body.onBehalf }) };
   const bytes = new TextEncoder().encode(JSON.stringify([operation, intent.dutyId ?? intent.orderId, input]));
   const fingerprint = Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", bytes))).map(x => x.toString(16).padStart(2, "0")).join("");
   if (result.fingerprint !== fingerprint || result.state === "KNOWN_SUCCESS" && !(result.status >= 200 && result.status < 300) || result.state === "KNOWN_REJECTED" && ![400, 409].includes(result.status)) throw new Error("原请求绑定不一致，禁止覆盖");

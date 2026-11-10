@@ -4,7 +4,7 @@ import {createRequire,Module} from "node:module";
 import fs from "node:fs";import path from "node:path";import {fileURLToPath} from "node:url";
 const tree=path.resolve(path.dirname(fileURLToPath(import.meta.url)),"../../.."),require=createRequire(path.join(tree,"package.json")),ts=require("typescript"),React=require("react"),{Window}=require("happy-dom");
 const orderId="legacy_order_"+"a".repeat(40),digest="b".repeat(64);
-function load(file,overrides={}){const m=new Module(path.join(tree,file));m.filename=path.join(tree,file);m.paths=Module._nodeModulePaths(tree);m.require=name=>overrides[name]??(name.endsWith(".css")?{}:name==="../components/ui/dialog"?{Dialog:({children})=>React.createElement(React.Fragment,null,children),DialogContent:({children})=>React.createElement("div",null,children),DialogHeader:({children})=>React.createElement("div",null,children),DialogTitle:({children})=>React.createElement("div",null,children)}:require(name));m._compile(ts.transpileModule(fs.readFileSync(m.filename,"utf8"),{compilerOptions:{module:ts.ModuleKind.CommonJS,jsx:ts.JsxEmit.ReactJSX,target:ts.ScriptTarget.ES2022,esModuleInterop:true}}).outputText,m.filename);return m.exports;}
+function load(file,overrides={}){const m=new Module(path.join(tree,file));m.filename=path.join(tree,file);m.paths=Module._nodeModulePaths(tree);m.require=name=>overrides[name]??(name.endsWith(".css")?{}:name==="../components/ui/checkbox"?{Checkbox:({onCheckedChange,...props})=>React.createElement("input",{...props,type:"checkbox",onChange:e=>onCheckedChange?.(e.target.checked)})}:name==="../components/ui/dialog"?{Dialog:({children})=>React.createElement(React.Fragment,null,children),DialogContent:({children})=>React.createElement("div",null,children),DialogHeader:({children})=>React.createElement("div",null,children),DialogTitle:({children})=>React.createElement("div",null,children)}:require(name));m._compile(ts.transpileModule(fs.readFileSync(m.filename,"utf8"),{compilerOptions:{module:ts.ModuleKind.CommonJS,jsx:ts.JsxEmit.ReactJSX,target:ts.ScriptTarget.ES2022,esModuleInterop:true}}).outputText,m.filename);return m.exports;}
 function client(request){return load("apps/admin/src/lib/legacy-continuation-client.ts",{"../api":{adminRequest:request},"./supply-write-lock":require(path.join(tree,"apps/admin/src/lib/supply-write-lock.ts"))});}
 test("legacy settlement previews only display server amounts rounded to cents",async()=>{
  let amount="10.01";const c=client(async()=>({revision:"2",inputEvidenceId:"evidence_result",proposalFingerprint:digest,settlementKind:"NORMAL",proposalAmounts:{ownerNet:amount}}));
@@ -26,7 +26,7 @@ test("authorized support can submit owner credit with a reason and clear wallet 
  await React.act(async()=>{[...host.querySelectorAll("button")].find(button=>button.textContent==="核对并入账").click();await tick();});
  assert.match(host.textContent,/不代表银行卡已到账/);
  await React.act(async()=>{[...host.querySelectorAll("button")].find(button=>button.textContent==="确认入账号主收益").click();await tick();});
- assert.equal(sent.command,"owner-credit");assert.deepEqual(sent.body,{expectedRevision:"1",reason:"核对双方订单结算"});
+ assert.equal(sent.command,"owner-credit");assert.deepEqual(sent.body,{expectedRevision:"1",reason:"核对双方订单结算",originalPaymentChecked:true});
  await React.act(async()=>{root.render(React.createElement(LegacyAdminContinuationPanel,{snapshot,orderId}));await tick();});
  assert(!host.textContent.includes("核对并入账"));
 });
@@ -138,7 +138,7 @@ const tick=()=>new Promise(resolve=>setImmediate(resolve));
 const html=(tag)=>(props)=>React.createElement(tag,props);
 const sharedUi={"./legacy-refund-review-panel":{LegacyRefundReviewPanel:()=>null},"./legacy-refund-choice":{LegacyRefundChoice:()=>null},"../components/ui/input":{Input:html("input")},"../components/ui/textarea":{Textarea:html("textarea")},
  "../components/ui/alert-dialog":{ConfirmAlertDialog:({open,onOpenChange,title,description,children,cancelLabel,confirmLabel,onConfirm,busy,confirmDisabled,contentLabel})=>open?React.createElement("div",{role:"alertdialog","aria-label":contentLabel},title,description,children,React.createElement("button",{disabled:busy,onClick:()=>onOpenChange(false)},cancelLabel),React.createElement("button",{disabled:busy||confirmDisabled,onClick:onConfirm},confirmLabel)):null},
- "../components/ui/select":{Select:({value,onValueChange,disabled})=>React.createElement("select",{value,disabled,"aria-label":"结算发起方",onChange:e=>onValueChange(e.target.value)},...["NONE","renter","owner"].map(v=>React.createElement("option",{key:v,value:v},v))),SelectContent:()=>null,SelectItem:()=>null,SelectTrigger:()=>null,SelectValue:()=>null},
+ "../components/ui/select":{Select:({value,onValueChange,disabled,children,items})=>React.createElement("select",{value,disabled,"aria-label":React.Children.toArray(children).find(x=>x?.props?.["aria-label"])?.props["aria-label"]??"选择",onChange:e=>onValueChange(e.target.value)},...(items??["NONE","renter","owner"].map(v=>({value:v,label:v}))).map(v=>React.createElement("option",{key:v.value,value:v.value},v.label))),SelectContent:()=>null,SelectItem:()=>null,SelectTrigger:()=>null,SelectValue:()=>null},
  "../components/ui/table":{Table:html("table"),TableBody:html("tbody"),TableCell:html("td"),TableHead:html("th"),TableHeader:html("thead"),TableRow:html("tr")}};
 test("legacy support cancellation validates allocation and requires an explicit second confirmation",async t=>{
  const w=storage(t),{createRoot}=require("react-dom/client"),host=document.createElement("div");document.body.append(host);const root=createRoot(host);t.after(async()=>React.act(async()=>root.unmount()));
@@ -339,7 +339,8 @@ test("staff can preview a legacy settlement and submit the exact reviewed party,
  api.sendLegacyAdminIntent=async intent=>{sent=intent;return {};};
  const {LegacyAdminContinuationPanel}=load("apps/admin/src/views/legacy-continuation-panel.tsx",{...sharedUi,"../api":{friendlyError:e=>e.message,formatDate:x=>x},"../components/ui-elements":{Button:({variant:_,size:__,...p})=>React.createElement("button",p)},"../lib/legacy-continuation-client":api});
  await React.act(async()=>{root.render(React.createElement(LegacyAdminContinuationPanel,{snapshot,orderId}));await tick();});
- await React.act(async()=>{const select=host.querySelector('select[aria-label="结算发起方"]');select.value="renter";select.dispatchEvent(new w.Event("change",{bubbles:true}));const input=host.querySelector('input[aria-label="哈夫币（M）"]');Object.getOwnPropertyDescriptor(w.HTMLInputElement.prototype,"value").set.call(input,"10");input.dispatchEvent(new w.Event("input",{bubbles:true}));await tick();});
+ await React.act(async()=>{const select=host.querySelector('select[aria-label="结算发起方"]');select.value="renter";select.dispatchEvent(new w.Event("change",{bubbles:true}));await tick();});
+ await React.act(async()=>{const select=host.querySelector('select[aria-label="结束原因"]');select.value="TENANT_VOLUNTARY_EARLY";select.dispatchEvent(new w.Event("change",{bubbles:true}));const input=host.querySelector('input[aria-label="哈夫币（M）"]');Object.getOwnPropertyDescriptor(w.HTMLInputElement.prototype,"value").set.call(input,"10");input.dispatchEvent(new w.Event("input",{bubbles:true}));await tick();});
  await React.act(async()=>{const input=host.querySelector('input[aria-label="6级甲（件）"]');Object.getOwnPropertyDescriptor(w.HTMLInputElement.prototype,"value").set.call(input,"3");input.dispatchEvent(new w.Event("input",{bubbles:true}));await tick();});
  assert.equal([...host.querySelectorAll("button")].find(b=>b.textContent==="预览结算方案").disabled,true);
  await React.act(async()=>{[...host.querySelectorAll("button")].find(b=>b.textContent==="其他项填 0").click();await tick();});
@@ -387,4 +388,34 @@ test("staff proposal recovery is bound to party, reason, quantities and the expe
  await assert.rejects(()=>c.recoverLegacyAdminIntent({...intent,body:{...body,onBehalf:"owner"}}),/绑定不一致/);
  await assert.rejects(()=>c.recoverLegacyAdminIntent({...intent,body:{...body,quantities:{...quantities,expendHaff:"11"}}}),/绑定不一致/);
  reply.receipt.stage="9";await assert.rejects(()=>c.recoverLegacyAdminIntent(intent),/尚待核对/);
+});
+test("verified opening evidence keeps its original key and cannot be replaced on recovery",async t=>{
+ storage(t);let reply={state:"UNKNOWN"};const c=client(async()=>reply),subject=c.legacyAdminSubject("staff",orderId);
+ const quantities={expendHaff:"60",barrett:"0",bullet:"0",awm:"0",armor:"0",helmet:"0",coffee:"0",card:"0"};
+ const body={expectedRevision:null,inputEvidenceId:"evidence_result",expectedBasisId:null,openingHaffM:"100",baseBot:"110",ownerPrices:{barrett:null,bullet:null,awm:null,armor:null,helmet:null,coffee:null,card:null},openingItems:{...quantities,expendHaff:"100"},fullPayout:false,partiesVerified:true,reason:"已与双方核实原单"};
+ const intent=await c.retainLegacyAdminIntent(subject,orderId,"verify-basis",body);
+ assert.equal(c.inspectLegacyAdminIntent(subject,orderId).state,"VALID");
+ const bytes=new TextEncoder().encode(JSON.stringify(["order.legacy.continuation.verify-basis",orderId,body]));
+ const fingerprint=Buffer.from(await crypto.subtle.digest("SHA-256",bytes)).toString("hex");
+ reply={state:"KNOWN_SUCCESS",status:200,fingerprint,receipt:{orderId,basisId:"basis_1",basisRevision:"1",state:"VERIFIED"}};
+ assert.equal((await c.recoverLegacyAdminIntent(intent)).state,"KNOWN_SUCCESS");
+ await assert.rejects(()=>c.recoverLegacyAdminIntent({...intent,body:{...body,openingHaffM:"101"}}),/绑定不一致/);
+});
+test("staff can verify original facts independently of later consumption, with a second confirmation",async t=>{
+ const w=storage(t),{createRoot}=require('react-dom/client'),host=document.createElement('div');document.body.append(host);const root=createRoot(host);t.after(async()=>React.act(async()=>root.unmount()));
+ const source=view({stage:'3',revision:null,capabilities:[],commandFingerprints:{},reasons:['OPENING_BASIS_UNVERIFIED'],lastBasisId:null});
+ const api=client(async()=>source);api.readLegacyAdminContinuation=async()=>api.parseLegacyAdminView(source);let sent;
+ api.sendLegacyAdminIntent=async intent=>{sent=intent;return {};};
+ const {LegacyAdminContinuationPanel}=load('apps/admin/src/views/legacy-continuation-panel.tsx',{...sharedUi,'../api':{friendlyError:e=>e.message,formatDate:x=>x},'../components/ui-elements':{Button:({variant:_,size:__,...p})=>React.createElement('button',p)},'../lib/legacy-continuation-client':api});
+ await React.act(async()=>{root.render(React.createElement(LegacyAdminContinuationPanel,{snapshot:{...snapshot,permissions:[...snapshot.permissions,'order.settlement.write']},orderId}));await tick();});
+ const fill=async(selector,value)=>React.act(async()=>{const el=host.querySelector(selector);assert(el,selector);const proto=el.tagName==='TEXTAREA'?w.HTMLTextAreaElement.prototype:w.HTMLInputElement.prototype;Object.getOwnPropertyDescriptor(proto,'value').set.call(el,value);el.dispatchEvent(new w.Event('input',{bubbles:true}));await tick();});
+ await fill('input[aria-label="原始哈夫币数量（M）"]','100');await fill('input[aria-label="号主原比例"]','110');
+ await React.act(async()=>{const select=host.querySelector('select[aria-label="原单全额包赔"]');select.value='NO';select.dispatchEvent(new w.Event('change',{bubbles:true}));await tick();});
+ await fill('textarea[aria-label="原单核实记录"]','双方核实原单');
+ await React.act(async()=>{host.querySelector('input[aria-label="已与双方核实下单时的原始资料"]').click();await tick();});
+ const next=[...host.querySelectorAll('button')].find(button=>button.textContent==='登记核实资料'&&!button.disabled);assert(next);
+ await React.act(async()=>{next.click();await tick();});assert.equal(sent,undefined);
+ await React.act(async()=>{[...host.querySelectorAll('button')].find(button=>button.textContent==='确认登记核实资料').click();await tick();});
+ assert.equal(sent.command,'verify-basis');assert.equal(sent.body.openingHaffM,'100');assert.equal(sent.body.partiesVerified,true);
+ assert.equal(Object.hasOwn(sent.body,'quantities'),false);assert.equal(Object.hasOwn(sent.body,'endReason'),false);
 });

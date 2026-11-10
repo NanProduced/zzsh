@@ -118,14 +118,20 @@ async function assessReadCoverage(subject: string, contributions: readonly Legac
     if (source.commandId !== null) {
       const revision = Number(source.revision);
       if (!Number.isSafeInteger(revision) || revision < 1) return conflict("LEGACY_CONFIRM_SOURCE_INVALID");
-      const components = ["RENTAL_SETTLEMENT", "MATERIAL_CONSUMPTION"].map(component => legacyRows.find(r => r.sourceKey === `${component}:${source.sourceKey}` && r.sourceId === source.sourceKey && r.settlementVersion === source.commandId && r.revision === revision && !r.correctionOf));
-      if (keys.has(source.sourceKey) && components.every(row => row?.sourceDigest && ownFacts.has(factIdentity(row)))) continue;
+      const components = ["RENTAL_SETTLEMENT", "MATERIAL_CONSUMPTION", "MINIMUM_BILLING"].map(component => legacyRows.find(r => r.sourceKey === `${component}:${source.sourceKey}` && r.sourceId === source.sourceKey && r.settlementVersion === source.commandId && r.revision === revision && !r.correctionOf));
+      const verifiedV2 = source.growthInput?.origin?.result?.facts?.evidence?.source?.settlementV2 != null;
+      if (!verifiedV2 && keys.has(source.sourceKey) && components.slice(0, 2).every(row => row?.sourceDigest && ownFacts.has(factIdentity(row)))) continue;
       // The historical receipt stays immutable; only this separately re-derived formal source can prove an increment.
-      if (!source.growthInput || !source.createdAt || normalizeGrowthInstant(source.createdAt) <= coveredThrough) return pending(keys.has(source.sourceKey) ? "LEGACY_CONFIRM_FACTS_NOT_INGESTED" : "LEGACY_SOURCE_WINDOW_UNVERIFIED");
+      if (!source.growthInput || !source.createdAt) return pending(keys.has(source.sourceKey) ? "LEGACY_CONFIRM_FACTS_NOT_INGESTED" : "LEGACY_SOURCE_WINDOW_UNVERIFIED");
       const input = source.growthInput;
       if (input.subjectUserId !== subject || `legacy_mysql_restore:la_order:${input.binding.legacyId}` !== source.sourceKey || input.origin.command.id !== source.commandId || input.origin.command.revision !== source.revision || input.origin.command.createdAt !== source.createdAt) return conflict("LEGACY_CONFIRM_SOURCE_INVALID");
       const prepared = prepareLegacyConfirmGrowth(input);
       if (!prepared.ok) return pending("LEGACY_CONFIRM_SOURCE_UNPROVEN");
+      if (keys.has(source.sourceKey) && prepared.rows.every(expected => {
+        const row = components.find(item => item?.sourceKey === expected.contribution.sourceKey);
+        return row?.sourceDigest === expected.sourceDigest && row.gameId === expected.gameId && ownFacts.has(factIdentity(row));
+      })) continue;
+      if (normalizeGrowthInstant(source.createdAt) <= coveredThrough) return pending(keys.has(source.sourceKey) ? "LEGACY_CONFIRM_FACTS_NOT_INGESTED" : "LEGACY_SOURCE_WINDOW_UNVERIFIED");
       for (const expected of prepared.rows) {
         const row = components.find(row => row?.sourceKey === expected.contribution.sourceKey);
         if (!row?.sourceDigest) return pending("LEGACY_CONFIRM_FACTS_NOT_INGESTED");

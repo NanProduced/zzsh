@@ -5,7 +5,7 @@ import { canonicalize } from "../src/supply/content-hash";
 import { sha256Hex as sha } from "../src/supply/supply-util";
 import { deriveLegacyFacts, initialLegacyFacts } from "../src/order/legacy-continuation-model";
 import { planLegacyContinuation } from "../src/order/legacy-continuation-calc";
-import { legacyBinding, legacyEvidence, legacyQuantities, legacySource } from "./legacy-continuation-fixture";
+import { legacyBinding, legacyEvidence, legacyQuantities, legacySource, legacyVerifiedEarlyProposal } from "./legacy-continuation-fixture";
 import { prepareLegacyConfirmGrowth, recordLegacyConfirmGrowth, type LegacyConfirmGrowthInput, type LegacyGrowthLiveSource } from "../src/auth/membership-growth-legacy-live";
 import { prepareLegacyGrowthBackfill, type LegacyCoverageRecord } from "../src/auth/membership-growth-legacy";
 import { readLegacyGrowthCoverageAssessment, readLegacyGrowthCoverageAssessments, type LegacyGrowthStoredContribution } from "../src/auth/membership-growth-legacy-store";
@@ -76,6 +76,29 @@ test("formal version 2 carries two exact components and stable replay keys witho
   assert([...db.rows.values()].every(row => row.revision === 2 && row.settlementVersion === "runtime-confirm-2" && row.effectiveAt === confirmedAt && row.recordedAt === confirmedAt));
   assert.equal(canonicalize(db.records), old);
   assert(!db.calls.some(sql => /INSERT INTO zzsh_iam.membership_growth_legacy_coverage|^(BEGIN|COMMIT)/.test(sql)));
+});
+
+test("new-rule legacy early settlement counts the makeup separately and excludes the renter payout fee",async()=>{
+  const v=legacyVerifiedEarlyProposal("8",true),input={...legacyEvidence(v.facts),id:"proposal-result",sourceKind:"DERIVED" as const,evidenceVersion:"2"};
+  const cmd={kind:"confirm" as const,caller:{role:"owner" as const,legacyUserId:"22"}},plan=planLegacyContinuation(input.facts.evidence,cmd);assert(plan.ok);
+  const result={...legacyEvidence(deriveLegacyFacts(input.facts,plan,cmd,input.id,"verified-confirm")),id:"confirm-result",sourceKind:"DERIVED" as const,evidenceVersion:"3"};
+  const growth:LegacyConfirmGrowthInput={binding:legacyBinding,subjectUserId:subject,recordedAt:confirmedAt,origin:{kind:"CONTINUATION_CONFIRM",input,result,
+    command:{id:"verified-confirm",revision:"2",createdAt:confirmedAt,inputEvidenceId:input.id,resultEvidenceId:result.id,planFingerprint:plan.fingerprint,
+      actor:{realm:"user",userId:legacyBinding.ownerUserId,sessionId:"fixture",requestId:"fixture"}}}};
+  const prepared=prepareLegacyConfirmGrowth(growth);assert(prepared.ok);
+  assert.deepEqual(prepared.rows.map(row=>[row.contribution.sourceType,row.contribution.amountCents]).sort(),[["MATERIAL_CONSUMPTION","0"],["MINIMUM_BILLING","225"],["RENTAL_SETTLEMENT","6000"]]);
+  const db=fixture();db.sources.push(liveSource(growth));assert.deepEqual(await recordLegacyConfirmGrowth(db.client,growth),{inserted:3,replayed:0});
+  assert.deepEqual(await recordLegacyConfirmGrowth(db.client,growth),{inserted:0,replayed:3});
+  const rows=[...db.rows.values()];
+  const single=await readLegacyGrowthCoverageAssessment(db.client,subject,rows,asOf);
+  assert.equal(single.state,"COMPLETE");
+  assert.deepEqual((await readLegacyGrowthCoverageAssessments(db.client,new Map([[subject,rows]]),asOf)).get(subject),single);
+  assert.equal((await readLegacyGrowthCoverageAssessment(db.client,subject,rows.filter(row=>row.sourceType!=="MINIMUM_BILLING"),asOf)).state,"BACKFILL_PENDING");
+  const forged=structuredClone(rows),minimum=forged.find(row=>row.sourceType==="MINIMUM_BILLING")!;
+  minimum.amountCents="999";
+  minimum.sourceDigest=growthContributionSourceDigest(legacyGrowthVersionHash(minimum.sourceId,minimum.settlementVersion),minimum.gameId,minimum);
+  assert.equal((await readLegacyGrowthCoverageAssessment(db.client,subject,forged,asOf)).state,"SOURCE_CONFLICT");
+  assert.equal((await readMembershipGrowth(db.client,subject,asOf))?.growth.lifetimePoints,"62");
 });
 
 test("a priced material consumption keeps its independent exact component beside rental", async () => {

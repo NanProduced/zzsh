@@ -4,6 +4,7 @@ import { test, type TestContext } from "node:test";
 import type { Pool, PoolClient } from "pg";
 import * as profiles from "../src/order/joinpay-refund-profile";
 import * as store from "../src/order/channel-refund-store";
+import { SecurityApiError } from "../src/auth/security-core";
 import { allocatePostedJoinpayRefunds, RefundAllocationCommitUnknown, type RefundExecution } from "../src/order/joinpay-refund-attempt";
 import * as attempts from "../src/order/joinpay-refund-attempt";
 import * as prestart from '../src/order/prestart-refund-store';
@@ -90,21 +91,34 @@ test("复用跨原付款预算与人工复核守卫，超额/复核均不留下�
 });
 
 function batchFixture(t: TestContext) {
-  admission(t); const trace: string[] = [], allocated: string[] = []; let scans = 0, scanReleased = false, failCommit = false;
+  admission(t); const trace: string[] = [], allocated: string[] = []; let scans = 0, scanReleased = false, failCommit = false, firstNeedsReview = false;
   const rows = [{ posting_id: "posting_one" }, { posting_id: "posting_two" }];
   const client = { release() { trace.push("TX_RELEASE"); }, async query(sql: string) {
-    trace.push(sql); if (sql === "COMMIT" && failCommit) throw Error("SIMULATED_COMMIT_ACK_LOSS"); return { rows: [] };
+    trace.push(sql); if (sql === "COMMIT" && failCommit) throw Error("SIMULATED_COMMIT_ACK_LOSS");
+    if (sql.startsWith("SELECT current_database()")) return { rows: [{ db: view.database, actor: view.runtimeUser }] };
+    return { rows: [] };
   } } as unknown as PoolClient;
   const pool = { connect: async () => { scans++; if (scans === 1) return {
     release() { scanReleased = true; trace.push("SCAN_RELEASE"); }, async query(sql: string) {
       trace.push(sql); return { rows: sql.startsWith("SELECT current_database()") ? [{ db: view.database, actor: view.runtimeUser }] : rows };
     } }; return client; } } as unknown as Pool;
   t.mock.method(store, "createPostedNativeRefundIntent", async (...[_c, input]: Parameters<typeof store.createPostedNativeRefundIntent>) => {
-    assert.equal(scanReleased, true); assert.equal(trace.at(-1), "BEGIN"); allocated.push(input.postingId); return { outcome: "ALLOCATED", receipt: {} } as never;
+    assert.equal(scanReleased, true); assert.equal(trace.at(-1), "BEGIN"); allocated.push(input.postingId);
+    if (firstNeedsReview && input.postingId === "posting_one") throw new SecurityApiError(409, "CONFLICT", "Original payment refund requires review");
+    return { outcome: "ALLOCATED", receipt: {} } as never;
   });
   const options = { pool, admission: {} as profiles.FormalRefundAdmission, initialProfile: {} as profiles.BoundRefundProfile, profileFor: never, keyFor: never, fetch: never } as RefundExecution;
-  return { options, trace, rows, allocated, fail: () => { failCommit = true; }, connects: () => scans };
+  return { options, trace, rows, allocated, fail: () => { failCommit = true; }, reviewFirst: () => { firstNeedsReview = true; }, connects: () => scans };
 }
+
+test("a single invalid posting is deferred and later refunds still allocate", async t => {
+  const f = batchFixture(t); f.reviewFirst();
+  const result = await allocatePostedJoinpayRefunds(f.options, 2);
+  assert.deepEqual(result, { selected: 2, allocated: 1, replayed: 0, skipped: 1 });
+  assert.deepEqual(f.allocated, ["posting_one", "posting_two"]);
+  assert(f.trace.some(sql => sql.includes("order.refund.allocation.deferred") && sql.includes("interval '1 hour'")));
+  assert(f.trace.some(sql => sql.includes('INSERT INTO "zzsh_iam"."audit_event"')));
+});
 
 test("缺初始profile默认关闭；扫描释放后逐单原事务分配，不读钥或外呼", async t => {
   const f = batchFixture(t), noInitial = { ...f.options, initialProfile: undefined };
@@ -151,6 +165,7 @@ test("错资源在扫描前退出并释放；无正式初始资格在连接前�
 test("恢复编排先确认分配再消费原意图；ALLOCATION未知不查单/外呼且后台状态保留正确对象", async t => {
   admission(t); let allocated = 0, scans = 0;
   t.mock.method(prestart,'allocatePrestartJoinpayRefunds',async()=>({selected:0,allocated:0,replayed:0,skipped:0}));
+  t.mock.method(prestart,'allocateSupportCancellationJoinpayRefunds',async()=>({selected:0,allocated:0,replayed:0,skipped:0}));
   const pool = { connect: async () => { scans++; return { release() {}, query: async (sql: string) => ({ rows: sql.startsWith("SELECT current_database()")
     ? [{ db: view.database, actor: view.runtimeUser }] : [] }) }; } } as unknown as Pool;
   const execution = { pool, admission: {} as profiles.FormalRefundAdmission, initialProfile: {} as profiles.BoundRefundProfile, profileFor: never, keyFor: never, fetch: never } as RefundExecution;

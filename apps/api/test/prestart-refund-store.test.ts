@@ -6,7 +6,7 @@ import type {Pool,PoolClient} from 'pg';
 import {hashApprovalPayload} from '../src/auth/approval-audit';
 import * as liability from '../src/finance/prestart-refund-liability';
 import * as profiles from '../src/order/joinpay-refund-profile';
-import {createLiabilityFormalRefundIntent,readPrestartRefundGate,readPrestartRefundProgress,allocatePrestartJoinpayRefunds,PrestartRefundAllocationUnknown} from '../src/order/prestart-refund-store';
+import {createLiabilityFormalRefundIntent,readPrestartRefundGate,readPrestartRefundProgress,allocatePrestartJoinpayRefunds,allocateSupportCancellationJoinpayRefunds,PrestartRefundAllocationUnknown} from '../src/order/prestart-refund-store';
 import {executeJoinpayRefund} from '../src/order/joinpay-refund-attempt';
 import * as store from '../src/order/channel-refund-store';
 import {sandboxFixture,sandboxClient} from './local-financial-sandbox-fixture';
@@ -164,4 +164,22 @@ test('自动分配COMMIT未确认保留termination和固定原键，停止下一
  const o={pool:{connect:async()=>{count++;return f.c;}},admission:input.admission,initialProfile:input.profile} as any;
  await assert.rejects(allocatePrestartJoinpayRefunds(o,2),(e:any)=>e instanceof PrestartRefundAllocationUnknown&&e.terminationId==='term_1'&&e.idempotencyKey.startsWith('auto_prestart_'));
  assert.equal(count,2);
+});
+
+for (const kind of ['prestart','support'] as const) test(`${kind}退款原号不明确时记录待核并继续下一单`,async t=>{
+ const f=fixture(t),query=f.c.query.bind(f.c),first=kind==='prestart'?'term_1':'cancel_1',second=kind==='prestart'?'term_2':'cancel_2';
+ let current='';const scans:string[]=[];
+ (f.c as any).query=async(sql:string,v:any[]=[])=>{
+  if(sql.includes('to_regclass'))return{rows:[{ready:true}]};
+  if(sql.startsWith(kind==='prestart'?'SELECT t.id FROM':'SELECT p.id FROM')){scans.push(sql);return{rows:[{id:first},{id:second}]};}
+  if(sql.includes('FROM zzsh_order.prestart_termination')&&!sql.startsWith('SELECT t.id FROM')){current=v[0];return{rows:[{...term,id:current}]};}
+  if(sql.includes('FROM zzsh_order.support_poststart_cancellation p JOIN'))current=v[0];
+  if(sql.includes('count(DISTINCT c.provider_transaction_id)'))return{rows:[{transactions:current===first?'2':'1',bound:true}]};
+  return query(sql,v);
+ };
+ const o={pool:{connect:async()=>f.c},admission:input.admission,initialProfile:input.profile} as any;
+ const result=kind==='prestart'?await allocatePrestartJoinpayRefunds(o,2):await allocateSupportCancellationJoinpayRefunds(o,2);
+ assert.deepEqual(result,{selected:2,allocated:1,replayed:0,skipped:1});
+ assert(scans[0]?.includes("order.refund.allocation.deferred")&&scans[0]?.includes("interval '1 hour'"));
+ assert(f.calls.some(call=>call.sql.includes('INSERT INTO "zzsh_iam"."audit_event"')&&call.v.includes(first)));
 });

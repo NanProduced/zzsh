@@ -8,6 +8,7 @@ import { FORMAL_REFUND_COLUMNS,lockRefundFunds,assertRefundResource,type FormalR
 import { assertFormalRefundProfile,assertRefundStart,assertRefundBinding,describeRefundProfile,type FormalRefundAdmission,type BoundRefundProfile } from "./joinpay-refund-profile";
 import type { PrestartPaymentBasis } from "./prestart-termination";
 import type { RefundExecution } from "./joinpay-refund-attempt";
+import { deferRefundAllocation, isRefundAllocationRefusal, refundAllocationReason, RefundAllocationNeedsReview } from "./refund-allocation-deferral";
 import {assertLocalFinancialSandboxResource,localFinancialSandboxRegistration,type LocalFinancialSandbox} from '../finance/local-financial-sandbox-resource';
 import {assertEcsTestDemoResource,demoFinanceScope,readEcsTestDemoRegistration,type DemoFinanceResource} from '../finance/ecs-test-demo-resource';
 
@@ -126,6 +127,9 @@ export async function allocatePrestartJoinpayRefunds(o:RefundExecution,limit:num
   rows=(await scan.query<{id:string}>(`SELECT t.id FROM zzsh_order.prestart_termination t
    WHERE t.state='APPROVED' AND t.payment_basis->>'source'='JOINPAY' AND t.payment_basis->>'merchantIdentityId'=$1
     AND NOT EXISTS(SELECT 1 FROM zzsh_order.channel_refund_intent i WHERE i.payment_confirmation_id=t.payment_basis->>'paymentConfirmationId')
+     AND NOT EXISTS(SELECT 1 FROM zzsh_iam.audit_event deferred WHERE deferred.object_id=t.id
+      AND deferred.object_type='prestart_termination' AND deferred.action='order.refund.allocation.deferred'
+      AND deferred.outcome='FAILURE' AND deferred.occurred_at>clock_timestamp()-interval '1 hour')
    ORDER BY t.approved_at,t.id LIMIT $2`,[a.merchantIdentityId,limit])).rows;
  }finally{scan.release();}
  if(rows.length>limit||rows.some(r=>typeof r.id!=='string'||!ID.test(r.id))||new Set(rows.map(r=>r.id)).size!==rows.length)throw unavailable();
@@ -133,11 +137,14 @@ export async function allocatePrestartJoinpayRefunds(o:RefundExecution,limit:num
  for(const row of rows){
   if(signal?.aborted)break;
   const key=prestartRefundAllocationKey(row.id);let completed=false;
-  try{
-   const receipt=await withTransaction(o.pool,async c=>{const v=await createLiabilityFormalRefundIntent(c,{terminationId:row.id,idempotencyKey:key,
+   let receipt:Awaited<ReturnType<typeof createLiabilityFormalRefundIntent>>;
+   try{
+    receipt=await withTransaction(o.pool,async c=>{const v=await createLiabilityFormalRefundIntent(c,{terminationId:row.id,idempotencyKey:key,
     requestId:key,admission:o.admission,profile:o.initialProfile});completed=true;return v;});
-   if(receipt.kind==='ALLOCATED')result.allocated++;else if(receipt.kind==='REPLAYED')result.replayed++;else result.skipped++;
-  }catch(error){if(completed)throw new PrestartRefundAllocationUnknown(row.id,key);throw error;}
+   }catch(error){if(completed)throw new PrestartRefundAllocationUnknown(row.id,key);if(!isRefundAllocationRefusal(error))throw error;
+    await deferRefundAllocation(o.pool,a,'prestart_termination',row.id,refundAllocationReason(error));result.skipped++;continue;}
+   if(receipt.kind==='ALLOCATED')result.allocated++;else if(receipt.kind==='REPLAYED')result.replayed++;else{
+    await deferRefundAllocation(o.pool,a,'prestart_termination',row.id,receipt.reason);result.skipped++;}
  }
  return result;
 }
@@ -158,6 +165,9 @@ export async function allocateSupportCancellationJoinpayRefunds(o:RefundExecutio
    JOIN zzsh_order.payment_confirmation c ON c.id=p.payment_confirmation_id AND c.order_id=p.order_id
    WHERE p.refund_cents>0 AND c.source='JOINPAY' AND c.merchant_scope_id=$1
     AND NOT EXISTS(SELECT 1 FROM zzsh_order.channel_refund_intent i WHERE i.payment_confirmation_id=c.id)
+     AND NOT EXISTS(SELECT 1 FROM zzsh_iam.audit_event deferred WHERE deferred.object_id=p.id
+      AND deferred.object_type='support_poststart_cancellation' AND deferred.action='order.refund.allocation.deferred'
+      AND deferred.outcome='FAILURE' AND deferred.occurred_at>clock_timestamp()-interval '1 hour')
    ORDER BY p.created_at,p.id LIMIT $2`,[a.merchantIdentityId,limit])).rows;
  }finally{scan.release();}
  if(rows.length>limit||rows.some(r=>typeof r.id!=='string'||!ID.test(r.id))||new Set(rows.map(r=>r.id)).size!==rows.length)throw unavailable();
@@ -165,11 +175,14 @@ export async function allocateSupportCancellationJoinpayRefunds(o:RefundExecutio
  for(const row of rows){
   if(signal?.aborted)break;
   const key=supportCancellationRefundAllocationKey(row.id);let completed=false;
-  try{
-   const receipt=await withTransaction(o.pool,async c=>{const v=await createLiabilityFormalRefundIntent(c,{supportCancellationId:row.id,idempotencyKey:key,
+   let receipt:Awaited<ReturnType<typeof createLiabilityFormalRefundIntent>>;
+   try{
+    receipt=await withTransaction(o.pool,async c=>{const v=await createLiabilityFormalRefundIntent(c,{supportCancellationId:row.id,idempotencyKey:key,
     requestId:key,admission:o.admission,profile:o.initialProfile});completed=true;return v;});
-   if(receipt.kind==='ALLOCATED')result.allocated++;else if(receipt.kind==='REPLAYED')result.replayed++;else result.skipped++;
-  }catch(error){if(completed)throw new PrestartRefundAllocationUnknown(row.id,key);throw error;}
+   }catch(error){if(completed)throw new PrestartRefundAllocationUnknown(row.id,key);if(!isRefundAllocationRefusal(error))throw error;
+    await deferRefundAllocation(o.pool,a,'support_poststart_cancellation',row.id,refundAllocationReason(error));result.skipped++;continue;}
+   if(receipt.kind==='ALLOCATED')result.allocated++;else if(receipt.kind==='REPLAYED')result.replayed++;else{
+    await deferRefundAllocation(o.pool,a,'support_poststart_cancellation',row.id,receipt.reason);result.skipped++;}
  }
  return result;
 }
@@ -198,11 +211,11 @@ export async function createLiabilityFormalRefundIntent(client:PoolClient,input:
  const b=term.payment_basis,basisKind=support?'SUPPORT_CANCELLATION' as const:'PRESTART_TERMINATION' as const;
  const operation=support?'support-cancel.refund':'prestart.refund';
  const cancelReason=support?'SUPPORT_AFTER_START_CANCELLED':term.requested_by_party==='SUPPORT'?'SUPPORT_CANCELLED_REFUND':'PRESTART_TERMINATED';
- if(!b||b.source!=='JOINPAY'||b.digest!==term.basis_digest)throw unavailable();
+ if(!b||b.source!=='JOINPAY'||b.digest!==term.basis_digest)throw new RefundAllocationNeedsReview('PAYMENT_BASIS_INVALID');
  await lockRefundFunds(client,'JOINPAY',b.merchantIdentityId,b.channelTrxNo);
  await client.query(`SELECT pg_advisory_xact_lock(hashtextextended(jsonb_build_array('zzsh:refund-order-no:v1',$1::text,$2::text)::text,0))`,[b.merchantIdentityId,b.merchantOrderNo]);
- if((await client.query(`SELECT id FROM zzsh_auth_user."user" WHERE id=$1 FOR UPDATE`,[b.renterUserId])).rowCount!==1)throw unavailable();
- if(support){if((await client.query(`SELECT zzsh_order.support_poststart_cancellation_complete($1) AS valid`,[term.id])).rows[0]?.valid!==true)throw unavailable();}
+ if((await client.query(`SELECT id FROM zzsh_auth_user."user" WHERE id=$1 FOR UPDATE`,[b.renterUserId])).rowCount!==1)throw new RefundAllocationNeedsReview('RENTER_UNAVAILABLE');
+ if(support){if((await client.query(`SELECT zzsh_order.support_poststart_cancellation_complete($1) AS valid`,[term.id])).rows[0]?.valid!==true)throw new RefundAllocationNeedsReview('CANCELLATION_BASIS_INVALID');}
  else await verifyPrestartRefundLiability(client,term.id,b,term.liability_root_id,term.liability_event_id);
  const fingerprint=fingerprintRequest(operation+'.intent',term.id,{confirmationId:b.paymentConfirmationId,amountCents:b.amountCents,basisDigest:b.digest});
  const old=(await client.query<FormalRefundRow>(`SELECT ${FORMAL_REFUND_COLUMNS} FROM zzsh_order.channel_refund_intent
@@ -232,7 +245,7 @@ export async function createLiabilityFormalRefundIntent(client:PoolClient,input:
   FROM zzsh_order.payment_confirmation c JOIN zzsh_order.rental_order o ON o.id=c.order_id
   WHERE c.source='JOINPAY' AND c.merchant_scope_id=$1 AND c.merchant_order_no=$2 AND c.disposition IN('APPLIED','REVIEW_REQUIRED')`,
   [b.merchantIdentityId,b.merchantOrderNo,b.paymentConfirmationId,paidCents,admission.merchantNo,cancelReason])).rows[0];
- if(original?.bound!==true)throw unavailable();
+ if(original?.bound!==true)throw new RefundAllocationNeedsReview('ORIGINAL_PAYMENT_UNPROVEN');
  if(original.transactions!=='1')return{kind:'REVIEW_REQUIRED' as const,reason:'ORIGINAL_ORDER_NO_AMBIGUOUS' as const};
  const budget=(await client.query(`SELECT COALESCE(sum(amount_cents) FILTER(WHERE budget_disposition<>'RELEASED'),0)::text AS allocated,
   bool_or(requires_review) AS requires_review FROM zzsh_order.channel_refund_intent WHERE payment_source='JOINPAY' AND merchant_identity_id=$1

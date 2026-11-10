@@ -239,6 +239,12 @@ function makeupExact(F: Rat, consumed: bigint, declared: bigint) {
   return rat(0n);
 }
 
+/** The same early-ending curve applies when an old order has a verified opening amount. */
+export function earlyMakeupCents(fullSpreadCents: bigint, consumed: bigint, declared: bigint): bigint {
+  if (fullSpreadCents < 0n || consumed < 0n || declared <= 0n) throw new DecimalError("Invalid early settlement basis");
+  return rRoundCents(makeupExact(rat(fullSpreadCents, 100n), consumed, declared));
+}
+
 function parseExactRatio(ratio: SettlementExactRatio | null | undefined, prefix: string, reasons: string[]): { buyer: Rat; owner: Rat } | null {
   if (!ratio || typeof ratio !== "object") {
     reasons.push(`${prefix}_EXACT_RATIO_MISSING`);

@@ -8,6 +8,7 @@ import { assertRefundResource, createFormalRefundIntent, createPostedNativeRefun
 import { assertFormalRefundProfile, assertRefundStart, describeRefundProfile, inspectRefundProfile, produceRefundRequest, readFormalRefundAdmission,
   readRefundOutbound, readRefundProfileEvidence, refundCompleteTimeToUtc, refundFailureMayRelease, refundWayAccepted, RefundProfileError, type BoundRefundProfile, type RefundBinding, type RefundOperation, type RefundOutbound } from "./joinpay-refund-profile";
 import { readPrestartRefundGate,readSupportCancellationRefundGate } from "./prestart-refund-store";
+import { deferRefundAllocation, isRefundAllocationRefusal, refundAllocationReason } from "./refund-allocation-deferral";
 import { captureRefundTerminalFact, nativeTerminalReviewsConsistent, readVerifiedRefundTerminalFact, refundTerminalConflicts, type RefundSourceOptions } from "./joinpay-refund-source";
 import { preflightJoinpayRefundResponse } from "./joinpay-refund-protocol";
 const ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/, sha = (v: string | Uint8Array) => createHash("sha256").update(v).digest("hex"), fresh = (p: string) => `${p}_${randomUUID().replaceAll("-", "")}`;
@@ -317,6 +318,9 @@ export async function allocatePostedJoinpayRefunds(o: RefundExecution, batchLimi
        WHERE c.order_id=o.id AND c.source='JOINPAY' AND c.disposition='APPLIED' AND o.status='COMPLETED'
          AND c.merchant_scope_id=$1 AND c.currency='CNY' AND p.currency=c.currency AND p.captured_cents=c.amount_cents
          AND p.renter_refund_cents>0 AND NOT EXISTS(SELECT 1 FROM zzsh_order.channel_refund_intent i WHERE i.posting_id=p.id)
+          AND NOT EXISTS(SELECT 1 FROM zzsh_iam.audit_event deferred WHERE deferred.object_id=p.id
+            AND deferred.object_type='settlement_posting' AND deferred.action='order.refund.allocation.deferred'
+            AND deferred.outcome='FAILURE' AND deferred.occurred_at>clock_timestamp()-interval '1 hour')
        ORDER BY p.refund_due_at,p.id LIMIT $2`, [a.merchantIdentityId, batchLimit])).rows;
   } finally { scan.release(); }
   if (rows.length > batchLimit || new Set(rows.map(r => r.posting_id)).size !== rows.length
@@ -326,15 +330,21 @@ export async function allocatePostedJoinpayRefunds(o: RefundExecution, batchLimi
     if (signal?.aborted) break;
     const requestId = "auto_refund_" + sha(row.posting_id).slice(0, 40);
     let completed = false;
+    let receipt: Awaited<ReturnType<typeof createPostedNativeRefundIntent>>;
     try {
-      const receipt = await withTransaction(o.pool, async client => {
+      receipt = await withTransaction(o.pool, async client => {
         const allocated = await createPostedNativeRefundIntent(client, { postingId: row.posting_id, requestId, admission: o.admission, profile });
         completed = true; return allocated;
       });
-      if (receipt.outcome === "ALLOCATED") result.allocated++; else if (receipt.outcome === "REPLAYED") result.replayed++; else result.skipped++;
     } catch (error) {
       if (completed) throw new RefundAllocationCommitUnknown(row.posting_id, postedRefundAllocationKey(row.posting_id));
-      throw error;
+      if (!isRefundAllocationRefusal(error)) throw error;
+      await deferRefundAllocation(o.pool, a, "settlement_posting", row.posting_id, refundAllocationReason(error));
+      result.skipped++; continue;
+    }
+    if (receipt.outcome === "ALLOCATED") result.allocated++; else if (receipt.outcome === "REPLAYED") result.replayed++; else {
+      await deferRefundAllocation(o.pool, a, "settlement_posting", row.posting_id, receipt.reason ?? "ALLOCATION_SKIPPED");
+      result.skipped++;
     }
   }
   return result;

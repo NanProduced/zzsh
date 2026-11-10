@@ -2,10 +2,11 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { PoolClient } from "pg";
 import { conflict, fingerprintRequest, withIdempotency,sha256Hex } from "../src/supply/supply-util";
-import { planLegacyContinuation } from "../src/order/legacy-continuation-calc";
+import { planLegacyContinuation, planVerifiedLegacySettlement } from "../src/order/legacy-continuation-calc";
 import { initialLegacyFacts, sealLegacyFacts, type LegacyContinuationActor, type LegacyDutyRow, type LegacyHeadRow } from "../src/order/legacy-continuation-model";
 import { applyLegacyContinuationCommand, applyLegacyDutyCommand, authorizeLegacyMutation, legacyCommandOutcome, parseLegacyMutation } from "../src/order/legacy-continuation-command";
-import { legacyBinding, legacyEvidence, legacyQuantities, legacySource } from "./legacy-continuation-fixture";
+import { legacyBinding, legacyEvidence, legacyQuantities, legacySource, legacyVerifiedProposal, legacyVerifiedEarlyProposal } from "./legacy-continuation-fixture";
+import * as basisReader from "../src/order/legacy-settlement-basis";
 import { canonicalize } from "../src/supply/content-hash";
 
 const evidence: typeof import("../src/order/legacy-continuation-evidence") = require("../src/order/legacy-continuation-evidence");
@@ -20,27 +21,40 @@ function clientFor(handler: (sql: string, values: unknown[]) => { rows: unknown[
   const client = { query: async (sql: string, values: unknown[] = []) => { calls.push({ sql, values }); return handler(sql, values); } } as unknown as PoolClient;
   return { client, calls };
 }
-function arrange(t: import("node:test").TestContext, source = legacySource(), head: LegacyHeadRow | null = null, duties: LegacyDutyRow[] = []) {
-  const facts = initialLegacyFacts(source), row = legacyEvidence(facts);
+function arrange(t: import("node:test").TestContext, source = legacySource(), head: LegacyHeadRow | null = null, duties: LegacyDutyRow[] = [], verified?:Pick<ReturnType<typeof legacyVerifiedProposal>,"facts"|"basis"|"original">) {
+  const facts = verified?.facts ?? initialLegacyFacts(source), row = legacyEvidence(facts);
   t.mock.method(evidence, "readLegacyContinuationBinding", async () => legacyBinding);
   t.mock.method(evidence, "authorizeLegacyContinuation", async () => ({ canOperate: true, canReadCommission: true }));
   const readUsers = t.mock.method(evidence, "readLegacyContinuationUserIds", async () => [legacyBinding.ownerUserId,legacyBinding.renterUserId].sort());
   t.mock.method(evidence, "lockLegacyContinuationOrder", async () => ({ head, duties: structuredClone(duties) }));
   t.mock.method(evidence, "readLegacyContinuationEvidence", async () => row);
+  if(verified){
+    t.mock.method(basisReader,"readLegacySettlementBasis",async()=>verified.basis);
+    t.mock.method(basisReader,"readLegacyProposalBasis",async()=>verified.basis);
+    t.mock.method(basisReader,"readLegacyBasisInputEvidence",async()=>verified.original);
+  }
   const probe = clientFor(sql => sql.includes("maturityAt") && sql.includes("SELECT to_char") ? { rows: [{ at: "2026-10-16T02:03:04.123456Z", maturityAt: "2026-10-23T02:03:04.123456Z" }], rowCount: 1 } : sql.startsWith("UPDATE zzsh_order.legacy_continuation_version") || sql.startsWith("INSERT INTO zzsh_iam.membership_growth_contribution") ? { rows: [], rowCount: 1 } : empty);
   return { ...probe, facts, row, readUsers };
 }
-function mutation(source: ReturnType<typeof legacySource>, kind: "propose" | "confirm" | "reject" | "hold" | "release" | "confiscate", who: LegacyContinuationActor) {
+function mutation(source: ReturnType<typeof legacySource>, kind: "propose" | "confirm" | "reject" | "hold" | "release" | "confiscate", who: LegacyContinuationActor, basis?:ReturnType<typeof legacyVerifiedProposal>["basis"]) {
   const role = who.realm === "admin" ? "admin" : who.userId === legacyBinding.ownerUserId ? "owner" : "renter";
-  const quantities = legacyQuantities("0.10"), caller = { role, legacyUserId: role === "owner" ? "22" : role === "renter" ? "11" : "" } as const;
-  const plan = planLegacyContinuation(initialLegacyFacts(source).evidence, kind === "propose" ? { kind, caller, quantities } : { kind, caller });
+  const quantities = legacyQuantities(basis?"1.30":"0.10"), caller = { role, legacyUserId: role === "owner" ? "22" : role === "renter" ? "11" : "" } as const;
+  const plan = kind === "propose" && basis ? planVerifiedLegacySettlement(initialLegacyFacts(source).evidence,{kind,caller,quantities,endReason:"NORMAL",settlementBasis:basis},basis)
+    : planLegacyContinuation(initialLegacyFacts(source).evidence, kind === "propose" ? { kind, caller, quantities } : { kind, caller });
   assert(plan.ok, plan.ok ? "" : plan.code);
-  return parseLegacyMutation(kind, { expectedRevision: null, inputEvidenceId: "fixture_evidence", planFingerprint: plan.fingerprint, ...(kind === "propose" ? { quantities } : {}) });
+  return parseLegacyMutation(kind, { expectedRevision: null, inputEvidenceId: "fixture_evidence", planFingerprint: plan.fingerprint, ...(kind === "propose" ? { quantities, ...(basis?{endReason:"NORMAL"}:{}) } : {}) });
 }
-test("first imported 8/9 confirms without a head, derives complete facts and creates separate non-financial duties", async t => {
+test("imported pending 8/9 is preserved but cannot be confirmed until recalculated", async t => {
   for (const stage of ["8", "9"]) {
     const source = legacySource({ orderStatus: stage, quantities: legacyQuantities("10.00"), saleEarnings: "13.00", returnOrderMoney: "87.00" });
     const p = arrange(t, source), who = actor("user", stage === "8" ? "owner" : "renter"), input = mutation(source, "confirm", who);
+    await assert.rejects(()=>applyLegacyContinuationCommand(p.client, who, legacyBinding.id, input),/LEGACY_PROPOSAL_RECONFIRM_REQUIRED/);
+    assert(!p.calls.some(q=>/^(INSERT|UPDATE)/.test(q.sql)));t.mock.restoreAll();
+  }
+});
+test("verified proposals confirm for either opposing party and create separate non-financial duties", async t => {
+  for (const stage of ["8", "9"] as const) {
+    const v=legacyVerifiedProposal(stage),source=v.source,p=arrange(t,source,null,[],v),who=actor("user",stage==="8"?"owner":"renter"),input=mutation(source,"confirm",who);
     const result = await applyLegacyContinuationCommand(p.client, who, legacyBinding.id, input);
     assert.equal(result.body.stage, "4");
     const inserted = p.calls.find(q => q.sql.startsWith("INSERT INTO zzsh_order.legacy_continuation_evidence")); assert(inserted);
@@ -53,9 +67,22 @@ test("first imported 8/9 confirms without a head, derives complete facts and cre
     t.mock.restoreAll();
   }
 });
+test("a verified early proposal records the other party's confirmation before support finalizes",async t=>{
+  const v=legacyVerifiedEarlyProposal(),head:LegacyHeadRow={id:"fixture_proposal",orderId:legacyBinding.id,revision:"1",inputEvidenceId:v.original.id,resultEvidenceId:"fixture_evidence",stage:8,isSettle:0,command:"PROPOSE",amounts:v.facts.amounts};
+  const p=arrange(t,v.source,head,[],v),who=actor("user","owner");
+  t.mock.method(basisReader,"legacyEarlyPartyConfirmed",async()=>false);
+  const input={...mutation(v.source,"confirm",who),expectedRevision:"1"};
+  const acknowledgement=await applyLegacyContinuationCommand(p.client,who,legacyBinding.id,input);
+  assert.equal(acknowledgement.body.reviewPending,true);assert.equal(acknowledgement.body.stage,"8");
+  assert(p.calls.some(q=>q.sql.includes('INSERT INTO "zzsh_iam"."audit_event"')&&q.values[4]==="order.legacy.settlement.party_confirmed"));
+  assert(!p.calls.some(q=>/INSERT INTO zzsh_order.legacy_order_duty|INSERT INTO zzsh_order.legacy_continuation_version/.test(q.sql)));
+  const staff=actor("admin"),staffInput={...mutation(v.source,"confirm",staff),expectedRevision:"1",reason:"已与双方核实提前结算"};
+  assert.equal((await applyLegacyContinuationCommand(p.client,staff,legacyBinding.id,staffInput,async()=>"NONE")).body.stage,"4");
+  assert(p.calls.some(q=>q.sql.includes('INSERT INTO "zzsh_iam"."audit_event"')&&q.values[4]==="order.legacy.continuation.confirm"));
+});
 test("staff confirms the existing proposal only with a reason and known finance state, under the staff identity", async t => {
-  const source = legacySource({ orderStatus: "8", quantities: legacyQuantities("10.00"), saleEarnings: "13.00", returnOrderMoney: "87.00" });
-  const p = arrange(t, source), who = actor("admin"), input = mutation(source, "confirm", who);
+  const v=legacyVerifiedProposal(),source=v.source;
+  const p = arrange(t, source,null,[],v), who = actor("admin"), input = mutation(source, "confirm", who);
   await assert.rejects(() => applyLegacyContinuationCommand(p.client, who, legacyBinding.id, input, async () => "NONE"), /recorded reason/);
   const withReason = { ...input, reason: "已核对双方情况" };
   await assert.rejects(() => applyLegacyContinuationCommand(p.client, who, legacyBinding.id, withReason, async () => "UNKNOWN"), /FINANCE_FACT_UNKNOWN/);
@@ -85,7 +112,7 @@ test("support reason length matches PostgreSQL character count for supplementary
  assert.equal(parseLegacyMutation("reject",{...body,reason:"😀😀😀"}).reason,"😀😀😀");
 });
 test("CAS and exact preview fingerprint reject before mutation; first proposal carries full source and delta", async t => {
-  const p = arrange(t), who = actor("user"), input = mutation(legacySource(), "propose", who);
+  const v=legacyVerifiedProposal(),source=v.original.facts.evidence.source,p=arrange(t,source,null,[],{...v,facts:v.original.facts}),who=actor("user"),input=mutation(source,"propose",who,v.basis);
   await assert.rejects(() => applyLegacyContinuationCommand(p.client, who, legacyBinding.id, { ...input, expectedRevision: "1" }), /CONTINUATION_REVISION_CONFLICT/);
   await assert.rejects(() => applyLegacyContinuationCommand(p.client, who, legacyBinding.id, { ...input, planFingerprint: "0".repeat(64) }), /PLAN_FINGERPRINT_MISMATCH/);
   assert(!p.calls.some(q => /INSERT|UPDATE/.test(q.sql)));
@@ -109,9 +136,9 @@ test("旧单客服特殊取消无需预览指纹，按原款登记双方责任�
 });
 test("staff initiates a legacy settlement with explicit party, reason and unchanged finance evidence", async t => {
   for (const onBehalf of ["renter", "owner"] as const) {
-    const source=legacySource(), p=arrange(t,source), who=actor("admin"), quantities=legacyQuantities("0.10");
-    const plan=planLegacyContinuation(p.facts.evidence,{kind:"propose",caller:{role:"admin",legacyUserId:"",onBehalf},quantities});assert(plan.ok);
-    const input=parseLegacyMutation("propose",{expectedRevision:null,inputEvidenceId:"fixture_evidence",planFingerprint:plan.fingerprint,quantities,reason:"双方已沟通核实",onBehalf});
+    const v=legacyVerifiedProposal(),source=v.original.facts.evidence.source,p=arrange(t,source,null,[],{...v,facts:v.original.facts}),who=actor("admin"),quantities=legacyQuantities("1.30");
+    const plan=planVerifiedLegacySettlement(p.facts.evidence,{kind:"propose",caller:{role:"admin",legacyUserId:"",onBehalf},quantities,settlementBasis:v.basis,endReason:"NORMAL"},v.basis);assert(plan.ok);
+    const input=parseLegacyMutation("propose",{expectedRevision:null,inputEvidenceId:"fixture_evidence",planFingerprint:plan.fingerprint,quantities,endReason:"NORMAL",reason:"双方已沟通核实",onBehalf});
     await assert.rejects(()=>applyLegacyContinuationCommand(p.client,who,legacyBinding.id,{...input,reason:undefined},async()=>"NONE"),/recorded reason/);
     await assert.rejects(()=>applyLegacyContinuationCommand(p.client,who,legacyBinding.id,input,async()=>"UNKNOWN"),/FINANCE_FACT_UNKNOWN/);
     await assert.rejects(()=>applyLegacyContinuationCommand(p.client,who,legacyBinding.id,{...input,onBehalf:onBehalf==="renter"?"owner":"renter"},async()=>"NONE"),/PLAN_FINGERPRINT_MISMATCH/);
@@ -202,9 +229,9 @@ type VoidAudit = { id: string; actorType: string; actorId: string; sessionId: st
 type ReviewedVoid = { sourceDigest: string; decisionEvidenceRef: string | null; decidedBy: LegacyContinuationActor | null; decisionReason: string | null; factAudit: VoidAudit | null; voidAudit: VoidAudit | null };
 function reviewedCommissionFixture(t: import("node:test").TestContext, stage: "8" | "9", mutate?: (proof: ReviewedVoid) => void) {
   const commission = { id: "41", beneficiaryId: "11", status: "1", ratio: "10", storedEarnings: "0.50", level: "1" };
-  const source = legacySource({ orderStatus: stage, quantities: legacyQuantities("10.00"), saleEarnings: "13.00", returnOrderMoney: "80.00", commissions: [commission] });
+  const v=legacyVerifiedProposal(stage,"7",{commissions:[commission]}),source=v.source;
   const duty: LegacyDutyRow = { id: "fixture_commission", orderId: legacyBinding.id, continuationVersionId: null, kind: "COMMISSION", sourceRecordId: "41", counterpartyUserId: legacyBinding.renterUserId, amountCents: "50", currency: "CNY", status: "PENDING", source: "LEGACY_IMPORT", sourceStatus: "1", level: "1", ratio: "10", maturityAt: null, revision: "1", settledBy: null, settledRefType: null, settledRefId: null, settledRefDigest: null };
-  arrange(t, source, null, [duty]);
+  arrange(t, source, null, [duty],v);
   t.mock.method(evidence, "legacyBeneficiaryUserId", async (_client: PoolClient, id: string) => id === "11" ? legacyBinding.renterUserId : null);
   const canonical = canonicalize({ id: "41", order_id: "7", user_id: "11", status: "3", level: "1", ratio: "10", earnings: "0.50" });
   const fact: VoidAudit = { id: "fixture_review", actorType: "admin", actorId: "fixture_reviewer", sessionId: "review_session", requestId: "req_review", action: "order.legacy.duty.source_fact_reviewed", objectType: "rental_order", objectId: legacyBinding.id, outcome: "SUCCESS", details: { sourceRecordId: "41", parentSourceDigest: legacyBinding.sourceDigest, sourceStatus: "3", parentCancelledNotPayable: false, sourceRecord: { canonical, digest: sha256Hex(canonical) }, parentCancellation: null, evidenceRef: "fixture:reviewed-status3" } };
@@ -303,8 +330,8 @@ test("reviewed parent cancellation must carry its exact canonical not-payable de
 });
 
 test("CONFIRM records both exact growth components on the same caller transaction without an owner coverage write", async t => {
-  const source = legacySource({ orderStatus: "8", quantities: legacyQuantities("10.00"), saleEarnings: "13.00", returnOrderMoney: "87.00" });
-  const p = arrange(t, source), who = actor("user", "owner");
+  const v=legacyVerifiedProposal(),source=v.source;
+  const p = arrange(t, source,null,[],v), who = actor("user", "owner");
   await applyLegacyContinuationCommand(p.client, who, legacyBinding.id, mutation(source, "confirm", who));
   const contributions = p.calls.filter(q => q.sql.startsWith("INSERT INTO zzsh_iam.membership_growth_contribution"));
   assert.equal(contributions.length, 2, "confirmation must persist rental and material facts, including a legitimate zero component");

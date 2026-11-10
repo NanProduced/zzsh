@@ -79,7 +79,7 @@ export function projectLegacyGrowthConsumption(input:LegacyGrowthConsumptionInpu
       // A never-confirmed proposal may retain measurements after cancellation; its full typed refund voids its price.
       return {...base,knowledge:"EXCLUDED",reason:fullRefund?"CANCELLED_FULL_REFUND":"CANCELLED_UNCONSUMED",facts:[]};
     }
-    let paid:bigint,returned:bigint,items:bigint|null=null,rental:bigint|null=null,minimum=0n,effectiveAt:string,version:string,revision:number,proof:Proof|undefined;
+    let paid:bigint,returned:bigint,items:bigint|null=null,rental:bigint|null=null,minimum=0n,excludedFee=0n,verifiedV2=false,effectiveAt:string,version:string,revision:number,proof:Proof|undefined;
     if(input.origin.kind==="CONTINUATION_CONFIRM"){
       const o=input.origin,c=o.command,before=readSealedLegacyFacts(o.input),result=readSealedLegacyFacts(o.result),role=c.actor.realm==="user"?(c.actor.userId===b.ownerUserId?"owner":c.actor.userId===b.renterUserId?"renter":"other"):"admin";
       const cmd:LegacyCommand={kind:"confirm",caller:{role,legacyUserId:role==="owner"?b.legacyOwnerId:role==="renter"?b.legacyRenterId:""}},plan=planLegacyContinuation(before.evidence,cmd);
@@ -92,6 +92,15 @@ export function projectLegacyGrowthConsumption(input:LegacyGrowthConsumptionInpu
         const quantity=result.evidence.source.quantities[key as keyof typeof result.evidence.source.quantities];
         return typeof quantity==="string" && /^(0|[1-9]\d{0,9})(?:\.\d{1,2})?$/.test(quantity) && legacyDecimalEquals(quantity,"0");
       }))items=0n;
+      const v2=result.evidence.source.settlementV2;
+      if(v2){
+        if(result.amounts.divide==null || result.amounts.expendOrder==null || result.amounts.earlyMakeup==null || result.amounts.renterPayoutFee==null
+          || !legacyDecimalEquals(result.amounts.earlyMakeup,v2.earlyMakeup) || !legacyDecimalEquals(result.amounts.renterPayoutFee,v2.renterPayoutFee))return unknown("CONFIRM_COMPONENTS_INCOMPLETE");
+        rental=BigInt(legacyPlanYuanToCents(result.amounts.divide));items=BigInt(legacyPlanYuanToCents(result.amounts.expendOrder));
+        minimum=BigInt(legacyPlanYuanToCents(v2.earlyMakeup));excludedFee=BigInt(legacyPlanYuanToCents(v2.renterPayoutFee));
+        if(minimum>0n && v2.endReason!=="TENANT_VOLUNTARY_EARLY" || excludedFee>0n && (!v2.fullPayout || v2.endReason!=="TENANT_VOLUNTARY_EARLY"))return unknown("CONFIRM_COMPONENTS_INCOMPLETE");
+        verifiedV2=true;
+      }
       effectiveAt=c.createdAt;version=c.id;revision=Number(c.revision);proof=o.components;base.evidence.basisDigest=o.result.factsDigest;base.evidence.basisRef=o.result.id;
     }else{
       const o=input.origin,row=parsedProof(o.sourceRecord);
@@ -101,7 +110,8 @@ export function projectLegacyGrowthConsumption(input:LegacyGrowthConsumptionInpu
       paid=BigInt(legacyPlanYuanToCents(row.pay_money as string));returned=BigInt(legacyPlanYuanToCents(row.return_order_money as string));effectiveAt=b.completedAt;version="legacy-cutoff:"+o.sourceRecord.digest;revision=1;proof=o.components;base.evidence.basisDigest=o.sourceRecord.digest;base.evidence.basisRef=sourceKey(b);
     }
     if(paid.toString()!==b.paidCents || returned>paid)return unknown("RESOURCE_CHARGE_SOURCE_CONFLICT");
-    const resource=paid-returned;base.observedResourceChargeCents=resource.toString();
+    if(excludedFee>paid-returned)return unknown("COMPONENT_TOTAL_CONFLICT");
+    const resource=paid-returned-excludedFee;base.observedResourceChargeCents=resource.toString();
     if(proof){
       if(!admittedComponentDigests?.has(proof.digest))return unknown("COMPONENT_EVIDENCE_NOT_ADMITTED");
       const p=parsedProof(proof);
@@ -111,7 +121,9 @@ export function projectLegacyGrowthConsumption(input:LegacyGrowthConsumptionInpu
       if(rental+items+minimum!==resource)return unknown("COMPONENT_TOTAL_CONFLICT");base.evidence.componentDigest=proof.digest;
     }else{
       if(items===null)return unknown("ITEM_COMPONENT_NOT_FROZEN");
-      if(items>resource)return unknown("COMPONENT_TOTAL_CONFLICT");rental=resource-items;
+      if(items>resource)return unknown("COMPONENT_TOTAL_CONFLICT");
+      if(verifiedV2){if(rental===null || rental+items+minimum!==resource)return unknown("COMPONENT_TOTAL_CONFLICT");}
+      else rental=resource-items;
       // Old calc v1 has no independently booked minimum component; no extra minimum fact is invented.
     }
     if(!Number.isSafeInteger(revision) || revision<1)return unknown("SOURCE_REVISION_UNREPRESENTABLE");

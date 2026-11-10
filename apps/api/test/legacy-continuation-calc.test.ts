@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import { strict as assert } from "node:assert";
-import { admitLegacyEvidence, planLegacyContinuation, LEGACY_REJECT_ASSIGNMENTS, type LegacyContinuationSource, type LegacyPrices, type LegacyQuantities } from "../src/order/legacy-continuation-calc";
+import { admitLegacyEvidence, planLegacyContinuation, planVerifiedLegacySettlement, LEGACY_REJECT_ASSIGNMENTS, type LegacyContinuationSource, type LegacyPrices, type LegacyQuantities, type LegacySettlementBasis } from "../src/order/legacy-continuation-calc";
 import { deriveLegacyFacts, initialLegacyFacts, legacyPlanYuanToCents } from "../src/order/legacy-continuation-model";
 
 const names = ["barrett", "bullet", "awm", "armor", "helmet", "coffee", "card"] as const;
@@ -13,6 +13,45 @@ function source(patch: Partial<LegacyContinuationSource> = {}): LegacyContinuati
 const renter = { role: "renter" as const, legacyUserId: "11" };
 const owner = { role: "owner" as const, legacyUserId: "22" };
 const plan = (patch: Partial<LegacyContinuationSource>, command: Parameters<typeof planLegacyContinuation>[1]) => planLegacyContinuation(admitLegacyEvidence(source(patch)), command);
+
+test("verified old orders use quantity-only threshold and the shared early fee for both parties", () => {
+  const original = source({ baseBot: "110", profitDot: "10", goodsMoney: "100.00", storedCommissionMoney: "9.00", depositAmount: "0.00" });
+  const quantities = qty("60.00");
+  const basis: LegacySettlementBasis = { id: "basis_1", openingHaffM: "100", baseBot: "110", ownerPrices: prices("1.00"),
+    openingItems: qty("100"), fullPayout: false };
+  const results = [renter, owner].map(caller => planVerifiedLegacySettlement(admitLegacyEvidence(original), { kind: "propose", caller, quantities, endReason:"TENANT_VOLUNTARY_EARLY" }, basis));
+  for (const result of results) {
+    assert(result.ok); assert.equal(result.isAdvanceSet, 1);
+    assert.equal(result.amounts.earlyMakeup, "2.25");
+    assert.equal(result.amounts.returnOrderMoney, "37.75");
+    assert.equal(result.amounts.ownerNet, "55.00");
+  }
+  const ownerReason = planVerifiedLegacySettlement(admitLegacyEvidence(original), { kind: "propose", caller: renter, quantities, endReason: "OWNER_OR_ACCOUNT_EARLY" }, basis);
+  assert(ownerReason.ok); assert.equal(ownerReason.amounts.earlyMakeup, "0.00"); assert.equal(ownerReason.amounts.returnOrderMoney, "40.00");
+  const normalQty = qty("70.00");
+  const normal = planVerifiedLegacySettlement(admitLegacyEvidence(original), { kind: "propose", caller: renter, quantities: normalQty, endReason:"NORMAL" }, basis);
+  assert(normal.ok); assert.equal(normal.isAdvanceSet, 0); assert.equal(normal.amounts.earlyMakeup, "0.00");
+  const missingReason=planVerifiedLegacySettlement(admitLegacyEvidence(original),{kind:"propose",caller:renter,quantities},basis);
+  assert(!missingReason.ok);assert.equal(missingReason.code,"END_REASON_REQUIRED");
+  const incorrectReason=planVerifiedLegacySettlement(admitLegacyEvidence(original),{kind:"propose",caller:renter,quantities,endReason:"NORMAL"},basis);
+  assert(!incorrectReason.ok);assert.equal(incorrectReason.code,"END_REASON_INCONSISTENT");
+  const changedPayout=planVerifiedLegacySettlement(admitLegacyEvidence(original),{kind:"propose",caller:renter,quantities,endReason:"TENANT_VOLUNTARY_EARLY"},{...basis,fullPayout:true});
+  assert(!changedPayout.ok);assert.equal(changedPayout.code,"OPENING_BASIS_UNVERIFIED");
+  const mismatch = planVerifiedLegacySettlement(admitLegacyEvidence(original), { kind: "propose", caller: renter, quantities }, { ...basis, baseBot: "111" });
+  assert.equal(mismatch.ok, false);
+  const withPayout = planVerifiedLegacySettlement(admitLegacyEvidence({...original,isFullPayout:"1"}), { kind: "propose", caller: renter, quantities, endReason:"TENANT_VOLUNTARY_EARLY" }, { ...basis, fullPayout: true });
+  assert(withPayout.ok); assert.equal(withPayout.amounts.renterPayoutFee, "7.28"); assert.equal(withPayout.amounts.ownerNet, "55.00");
+  const payoutCommand={kind:"propose" as const,caller:renter,quantities,endReason:"TENANT_VOLUNTARY_EARLY" as const,settlementBasis:{...basis,fullPayout:true}};
+  const payoutFacts=deriveLegacyFacts(initialLegacyFacts({...original,isFullPayout:"1"}),withPayout,payoutCommand,"input","payout_proposal");
+  const payoutConfirm=planLegacyContinuation(payoutFacts.evidence,{kind:"confirm",caller:owner});assert(payoutConfirm.ok);
+  assert.equal(payoutConfirm.amounts.renterPayoutFee,"7.28");assert.equal(payoutConfirm.amounts.commissionPool,withPayout.amounts.commissionPool);
+  const proposalCommand = { kind: "propose" as const, caller: renter, quantities, settlementBasis: basis, endReason:"TENANT_VOLUNTARY_EARLY" as const };
+  const proposed = results[0]!; assert(proposed.ok);
+  const facts = deriveLegacyFacts(initialLegacyFacts(original), proposed, proposalCommand, "input", "proposal");
+  const confirmed = planLegacyContinuation(facts.evidence, { kind: "confirm", caller: owner }); assert(confirmed.ok);
+  assert.equal(confirmed.amounts.refundNet, proposed.amounts.returnOrderMoney);
+  assert.equal(confirmed.amounts.commissionPool, proposed.amounts.commissionPool);
+});
 
 test("旧单客服特殊取消按原实付分配，不改变旧单价格且不计佣金",()=>{
   const actor={role:"admin" as const,legacyUserId:""};
@@ -72,7 +111,7 @@ test("equal threshold does not become advance, and the next cent does", () => {
 
 test("owner preview and owner propose use different price sources", () => {
   const quantities = qty("1.00", "1");
-  const patch = { goodsMoney: "20.00", accountPrices: { ...prices("8.00"), barrett: "20.00" }, orderPrices: { ...prices("8.00"), barrett: "1.00" } };
+  const patch = { goodsMoney: "20.00", accountPrices: { ...prices("8.00"), barrett: "10.00" }, orderPrices: { ...prices("8.00"), barrett: "20.00" } };
   const preview = plan(patch, { kind: "preview", caller: owner, quantities });
   const propose = plan(patch, { kind: "propose", caller: owner, quantities });
   if (!preview.ok || !propose.ok) assert.fail("price paths should calculate");
@@ -81,7 +120,7 @@ test("owner preview and owner propose use different price sources", () => {
   assert.equal(preview.amounts.saleEarnings, "10.20");
   assert.equal(propose.nextStatus, "9");
   assert.equal(propose.isAdvanceSet, 0);
-  assert.deepEqual([propose.amounts.saleEarnings, propose.amounts.returnOrderMoney], ["30.00", "86.00"]);
+  assert.deepEqual([propose.amounts.saleEarnings, propose.amounts.returnOrderMoney], ["20.00", "67.00"]);
 });
 
 test("preview does not move status and a repeated call keeps the fingerprint", () => {
@@ -274,6 +313,16 @@ test("rounding that would over-allocate an old payment stops the proposal",()=>{
  const original=source({profitDot:"0",accountPrices:{...prices("8.00"),barrett:"0.01"},orderPrices:{...prices("8.00"),barrett:"0.01"}});
  const result=planLegacyContinuation(admitLegacyEvidence(original),{kind:"propose",caller:renter,quantities:qty("1.00","0.50")});
  assert.equal(result.ok,false);if(!result.ok)assert.equal(result.code,"CONFIRM_POOL_NEGATIVE");
+});
+
+test("proposals reject exact-cent negative owner income or commission pool before confirmation", () => {
+  const command = { kind: "propose" as const, caller: renter, quantities: qty("1.00", "1.00") };
+  const negativePool = plan({ orderPrices: { ...prices("8.00"), barrett: "1.00" }, accountPrices: { ...prices("8.00"), barrett: "100.00" } }, command);
+  assert.equal(negativePool.ok, false);
+  if (!negativePool.ok) assert.equal(negativePool.code, "CONFIRM_POOL_NEGATIVE");
+  const negativeOwner = plan({ fullPayoutMoney: "20.00" }, { ...command, quantities: qty("1.00") });
+  assert.equal(negativeOwner.ok, false);
+  if (!negativeOwner.ok) assert.equal(negativeOwner.code, "OWNER_NET_NEGATIVE");
 });
 
 test("CONFIRM consumes the stored fee and never recomputes the newly normalized PROPOSE fee", () => {

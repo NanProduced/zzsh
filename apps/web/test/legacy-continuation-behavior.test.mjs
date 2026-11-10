@@ -24,6 +24,14 @@ test("legacy settlement preview rejects unrounded server amounts",async()=>{
   amount="10.00000000";assert.equal((await client.preview("user_A",id,quantities)).proposalAmounts.refundNet,"10.00");
   amount="10.005";await assert.rejects(client.preview("user_A",id,quantities),/预估结果暂不可用/);
 });
+test("legacy original-key recovery binds the selected ending reason",async()=>{
+ const {legacyIntentFingerprint}=load("apps/web/src/lib/legacy-continuation-client.ts",{"./order-client.ts":{}});
+ const body={expectedRevision:null,inputEvidenceId:"evidence_source",planFingerprint:digest,quantities,endReason:"TENANT_VOLUNTARY_EARLY"};
+ const input={kind:"propose",expectedRevision:null,inputEvidenceId:body.inputEvidenceId,planFingerprint:digest,quantities,endReason:body.endReason};
+ const expected=Buffer.from(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(JSON.stringify(['order.legacy.continuation.propose',id,input])))).toString('hex');
+ assert.equal(await legacyIntentFingerprint(id,'propose',body),expected);
+ assert.notEqual(await legacyIntentFingerprint(id,'propose',{...body,endReason:'OWNER_OR_ACCOUNT_EARLY'}),expected);
+});
 const tick = () => new Promise(resolve=>setImmediate(resolve));
 async function setup(t, api = {}) {
   const browser = new Window({url:"http://fixture.invalid/account"}); Object.assign(globalThis,{window:browser,document:browser.document,HTMLElement:browser.HTMLElement,Node:browser.Node,Event:browser.Event,IS_REACT_ACT_ENVIRONMENT:true});
@@ -33,7 +41,7 @@ async function setup(t, api = {}) {
   const helpers = load("apps/web/src/lib/legacy-continuation-client.ts",{"./order-client.ts":{}});
   const calls = [], client = {read:async()=>view(),preview:async()=>({revision:null,inputEvidenceId:"evidence_source",proposalFingerprint:digest,previewAmounts:{},proposalAmounts:{refundNet:"82.00"}}),write:async(...args)=>{calls.push(args);throw new Error("network uncertain");},receipt:async()=>({state:"UNKNOWN"}),...api};
   const {LegacyContinuationPanel} = load("apps/web/src/components/order/legacy-continuation-panel.tsx",{
-    "@/components/session/user-session-provider":{useUserSession:()=>session},"@/lib/order-client":{orderIntentKey:()=>"ORIGINAL_KEY",formatOrderTime:x=>x,OrderRequestError:class extends Error{}},"@/lib/order-intents":intents,"@/lib/legacy-continuation-client":{legacyContinuationApi:client,parseLegacyQuantitiesInput:helpers.parseLegacyQuantitiesInput}
+    "@/components/session/user-session-provider":{useUserSession:()=>session},"@/components/ui/form-controls":{FormSelect:({label,value,options,onChange,disabled})=>React.createElement('select',{'aria-label':label,value,disabled,onChange:e=>onChange(e.target.value)},React.createElement('option',{value:''},'请选择'),...options.map(o=>React.createElement('option',{key:o.value,value:o.value},o.label)))},"@/lib/order-client":{orderIntentKey:()=>"ORIGINAL_KEY",formatOrderTime:x=>x,OrderRequestError:class extends Error{}},"@/lib/order-intents":intents,"@/lib/legacy-continuation-client":{legacyContinuationApi:client,parseLegacyQuantitiesInput:helpers.parseLegacyQuantitiesInput}
   });
   const render = async wrapper => React.act(async()=>{root.render(wrapper??React.createElement(LegacyContinuationPanel,{orderId:id,party:"owner"}));await tick();});
   t.after(async()=>{await React.act(async()=>root.unmount());await browser.happyDOM.abort();});
@@ -67,14 +75,15 @@ test('cancelled legacy order shows its pending refund without claiming channel s
  assert.match(p.host.textContent,/到账以实际退款进度为准/);assert.doesNotMatch(p.host.textContent,/渠道已确认退款|提交结算方案|确认提交/);
 });
 test("legacy in-flight renter sees units, explicit zero items and the disclosed early fee before submitting",async t=>{
- let submitted;
+ let submitted,endReason;
  const p=await setup(t,{read:async()=>view({stage:"3",quantities:null,capabilities:["propose"],amounts:{},commandFingerprints:{}}),
-  preview:async(_subject,_order,values)=>{submitted=values;return {revision:null,inputEvidenceId:"evidence_source",proposalFingerprint:digest,previewAmounts:{},proposalAmounts:{returnOrderMoney:"94.00"},settlementKind:"EARLY",earlyFee:"5.00"};}});
+  preview:async(_subject,_order,values,reason)=>{submitted=values;endReason=reason;return {revision:null,inputEvidenceId:"evidence_source",proposalFingerprint:digest,previewAmounts:{},proposalAmounts:{returnOrderMoney:"94.00"},settlementKind:"EARLY",earlyFee:"5.00"};}});
  await p.render(React.createElement(p.LegacyContinuationPanel,{orderId:id,party:"renter"}));
  assert.match(p.host.textContent,/哈夫币消耗（M）/);assert.match(p.host.textContent,/6级子弹（组）/);assert.match(p.host.textContent,/1 组为 60 发/);
  const inputs=[...p.host.querySelectorAll("input")];assert.equal(inputs[0].value,"");assert(inputs.slice(1).every(item=>item.value==="0"));
  await React.act(async()=>{Object.getOwnPropertyDescriptor(p.browser.HTMLInputElement.prototype,"value").set.call(inputs[0],"0.10");inputs[0].dispatchEvent(new p.browser.Event("input",{bubbles:true}));await tick();});
- await p.click("核对结算结果");assert.equal(submitted.expendHaff,"0.10");assert.equal(submitted.bullet,"0");
+ await React.act(async()=>{const select=p.host.querySelector('select[aria-label="结束原因"]');select.value="TENANT_VOLUNTARY_EARLY";select.dispatchEvent(new p.browser.Event("change",{bubbles:true}));await tick();});
+ await p.click("核对结算结果");assert.equal(submitted.expendHaff,"0.10");assert.equal(submitted.bullet,"0");assert.equal(endReason,"TENANT_VOLUNTARY_EARLY");
  assert.match(p.host.textContent,/提前结算费用 ¥5\.00/);assert.match(p.host.textContent,/已计入下方退款金额/);assert.match(p.host.textContent,/94\.00/);
 });
 test("an existing early proposal explains its status without inventing a missing fee",async t=>{
@@ -181,6 +190,7 @@ test("a late legacy preview cannot return after the order becomes terminal", asy
   const preview = new Promise(resolve => { resolvePreview = resolve; });
   const p = await setup(t, { read: async () => view({ stage: "3", capabilities: ["propose"] }), preview: async () => preview });
   await p.render(React.createElement(p.LegacyContinuationPanel, { orderId: id, party: "owner" }));
+  await React.act(async()=>{const select=p.host.querySelector('select[aria-label="结束原因"]');select.value="NORMAL";select.dispatchEvent(new p.browser.Event("change",{bubbles:true}));await tick();});
   await p.click("核对结算结果");
   await p.render(React.createElement(p.LegacyContinuationPanel, { orderId: id, party: "owner", readOnly: true }));
   await React.act(async () => { resolvePreview({ revision: null, inputEvidenceId: "evidence_source", proposalFingerprint: digest, previewAmounts: {}, proposalAmounts: { refundNet: "82.00" } }); await tick(); });

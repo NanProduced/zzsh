@@ -1,7 +1,7 @@
 import { canonicalize } from "../supply/content-hash";
 import { decimalToBigInt, divideToScale, formatScaledInteger, parseNonNegativeDecimal } from "../supply/decimal";
 import { conflict, invalid, notFound, sha256Hex } from "../supply/supply-util";
-import { admitLegacyEvidence, planLegacyContinuation, type AmountPlan, type LegacyCommand, type LegacyContinuationEvidence, type LegacyContinuationSource, type LegacyQuantities } from "./legacy-continuation-calc";
+import { admitLegacyEvidence, planLegacyContinuation, planVerifiedLegacySettlement, type AmountPlan, type LegacyCommand, type LegacyContinuationEvidence, type LegacyContinuationSource, type LegacyEndReason, type LegacyQuantities, type LegacySettlementBasis } from "./legacy-continuation-calc";
 
 export const LEGACY_DUTY_KINDS = ["RENTER_REFUND", "OWNER_CREDIT", "COMMISSION", "DEPOSIT_COMPENSATION"] as const;
 export type LegacyDutyKind = typeof LEGACY_DUTY_KINDS[number];
@@ -52,10 +52,12 @@ export type LegacyContinuationView = {
   confirmationAmounts?: { ownerNet: { cents: string; yuan: string }; refundNet: { cents: string; yuan: string } } | null;
   refundDueAt?: string | null;
   settlementKind?: "EARLY" | "NORMAL" | null; earlyFee?: string | null;
+  settlementBasis?: { id:string; openingHaffM:string } | null; lastBasisId?: string | null;
+  earlyReviewPending?: boolean;
   capabilities: string[]; commandFingerprints: Record<string, string>; reasons: string[]; duties: Array<{ id: string; kind: LegacyDutyKind; amountCents: string; currency: "CNY"; status: LegacyDutyStatus; maturityAt: string | null; sourceStatus: string | null; revision: string; settledBy: string | null; financeVerified:boolean }>;
   channelState: "UNKNOWN";
 };
-const LEGACY_VISIBLE_REASONS = new Set(["DEPOSIT_SHORT", "RETURN_NEGATIVE", "EVIDENCE_ISOLATED", "MISSING_STORED_SETTLEMENT", "FINANCE_FACT_UNAVAILABLE", "FINANCE_FACT_UNKNOWN", "DEPOSIT_ALREADY_SETTLED", "CONTINUATION_REVISION_CONFLICT", "PLAN_FINGERPRINT_MISMATCH", "DUTY_REVISION_CONFLICT", "STATUS_INVALID", "QUANTITY_INVALID", "PRECISION_UNSUPPORTED", "CONFIRM_POOL_NEGATIVE", "OWNER_NET_NEGATIVE", "WALLET_CREDIT_HISTORY_UNPROVEN", "WALLET_CREDIT_BASIS_UNAVAILABLE", "PAYMENT_BASIS_UNAVAILABLE", "CANCEL_AMOUNT_INVALID", "COMMISSION_ALREADY_PAID", "COMMISSION_SOURCE_UNAVAILABLE", "REFUND_HISTORY_REQUIRES_OFFLINE"]);
+const LEGACY_VISIBLE_REASONS = new Set(["DEPOSIT_SHORT", "RETURN_NEGATIVE", "EVIDENCE_ISOLATED", "MISSING_STORED_SETTLEMENT", "FINANCE_FACT_UNAVAILABLE", "FINANCE_FACT_UNKNOWN", "DEPOSIT_ALREADY_SETTLED", "CONTINUATION_REVISION_CONFLICT", "PLAN_FINGERPRINT_MISMATCH", "DUTY_REVISION_CONFLICT", "STATUS_INVALID", "QUANTITY_INVALID", "PRECISION_UNSUPPORTED", "CONFIRM_POOL_NEGATIVE", "OWNER_NET_NEGATIVE", "WALLET_CREDIT_HISTORY_UNPROVEN", "WALLET_CREDIT_BASIS_UNAVAILABLE", "PAYMENT_BASIS_UNAVAILABLE", "CANCEL_AMOUNT_INVALID", "COMMISSION_ALREADY_PAID", "COMMISSION_SOURCE_UNAVAILABLE", "REFUND_HISTORY_REQUIRES_OFFLINE", "OPENING_BASIS_UNVERIFIED", "OPENING_BASIS_UNAVAILABLE", "OPENING_BASIS_CHANGED", "OPENING_BASIS_PRICE_MISMATCH", "OPENING_ITEMS_UNVERIFIED", "END_REASON_REQUIRED", "END_REASON_INCONSISTENT", "HAFF_SPREAD_RATIO_UNSAFE", "LEGACY_PROPOSAL_RECONFIRM_REQUIRED"]);
 export function visibleLegacyReason(value: unknown): string | undefined { return typeof value === "string" && LEGACY_VISIBLE_REASONS.has(value) ? value : undefined; }
 
 /** Calc emits exact decimals of variable scale; the persisted contract is integer cents. */
@@ -116,7 +118,11 @@ export function deriveLegacyFacts(current: LegacyEffectiveFacts, plan: AmountPla
   if (plan.nextStatus !== null) source.orderStatus = plan.nextStatus;
   if (plan.isSettle !== null) source.isSettle = plan.isSettle;
   if (plan.isAdvanceSet !== null) source.isAdvanceSet = String(plan.isAdvanceSet);
-  if (command.kind === "propose") source.quantities = structuredClone(command.quantities);
+  if (command.kind === "propose") {
+    source.quantities = structuredClone(command.quantities);
+    if (command.settlementBasis) source.settlementV2 = { basisId: command.settlementBasis.id, inputEvidenceId: evidenceId, endReason: command.endReason ?? "NORMAL", fullPayout:command.settlementBasis.fullPayout,
+      earlyMakeup: plan.amounts.earlyMakeup!, renterPayoutFee: plan.amounts.renterPayoutFee! };
+  }
   for (const field of ["payMoney", "saleEarnings", "returnOrderMoney", "fullPayoutMoney", "detainMoney"] as const) {
     const value = plan.amounts[field];
     // A null unassigned payout in the old plan retains its known stored value.
@@ -124,6 +130,7 @@ export function deriveLegacyFacts(current: LegacyEffectiveFacts, plan: AmountPla
     amounts[field] = source[field];
   }
   if (command.kind === "reject") {
+    delete source.settlementV2;
     source.saleEarnings = null; source.returnOrderMoney = null; source.fullPayoutMoney = "0";
     source.quantities = { expendHaff: null, barrett: "0", bullet: "0", awm: "0", armor: "0", helmet: "0", coffee: "0", card: "0" };
     amounts = { payMoney: source.payMoney, saleEarnings: null, returnOrderMoney: null, fullPayoutMoney: "0", detainMoney: source.detainMoney };
@@ -134,7 +141,7 @@ export function legacyContinuationRole(binding: LegacyOrderBinding, actor: Legac
   return actor.realm === "admin" ? "admin" : actor.userId === binding.renterUserId ? "renter" : actor.userId === binding.ownerUserId ? "owner" : "other";
 }
 const LEGACY_OWNER_AMOUNTS = ["saleEarnings", "ownerNet", "fullPayoutMoney", "divide2", "expendAccount", "depositCompensation"];
-const LEGACY_RENTER_AMOUNTS = ["payMoney", "returnOrderMoney", "refundGross", "refundNet", "detainMoney", "divide", "expendOrder"];
+const LEGACY_RENTER_AMOUNTS = ["payMoney", "returnOrderMoney", "refundGross", "refundNet", "detainMoney", "divide", "expendOrder", "earlyMakeup", "renterPayoutFee"];
 /** Stored evidence and fingerprints stay complete; only the authenticated party's output is narrowed. */
 export function projectLegacyPartyAmounts<T>(binding: LegacyOrderBinding, actor: LegacyContinuationActor, amounts: Record<string, T>): Record<string, T> {
   if (legacyContinuationRole(binding, actor) === "other") throw notFound();
@@ -148,7 +155,7 @@ export function projectLegacyCommandReceipt(binding: LegacyOrderBinding, actor: 
   if (actor.realm === "admin") return structuredClone(body);
   if (!body || typeof body !== "object" || Array.isArray(body)) return null;
   const source = body as Record<string, unknown>, result: Record<string, unknown> = {};
-  for (const key of ["orderId", "command", "revision", "versionId", "inputEvidenceId", "resultEvidenceId", "evidenceId", "stage", "channelState", "outcome", "status"]) {
+  for (const key of ["orderId", "command", "revision", "versionId", "inputEvidenceId", "resultEvidenceId", "evidenceId", "stage", "channelState", "outcome", "status", "reviewPending"]) {
     if (Object.hasOwn(source, key) && (source[key] === null || ["string", "number", "boolean"].includes(typeof source[key]))) result[key] = source[key];
   }
   for (const key of ["amounts", "previewAmounts", "proposalAmounts"]) {
@@ -176,6 +183,7 @@ export function legacyCapabilities(source: LegacyContinuationSource, role: "rent
 }
 function legacyEarlyFee(amounts: Record<string, string | null>): string | null {
   try {
+    if (amounts.earlyMakeup !== undefined && amounts.earlyMakeup !== null) return formatScaledInteger(BigInt(legacyPlanYuanToCents(amounts.earlyMakeup)), 2);
     const amount = (name: string) => BigInt(legacyPlanYuanToCents(amounts[name]!));
     const difference = amount("payMoney") - amount("divide") - amount("expendOrder") - amount("returnOrderMoney");
     return difference >= 0n ? formatScaledInteger(difference, 2) : null;
@@ -194,10 +202,12 @@ export function projectLegacyContinuation(binding: LegacyOrderBinding, actor: Le
     return [key, cents === null ? null : { cents, yuan: formatScaledInteger(BigInt(cents), 2) }];
   }));
   const reasons = [...facts.evidence.reasons, ...(actor.realm === "admin" && disposition === "UNKNOWN" ? ["FINANCE_FACT_UNAVAILABLE"] : [])];
+  if (["8","9"].includes(source.orderStatus) && !source.settlementV2) reasons.push("LEGACY_PROPOSAL_RECONFIRM_REQUIRED");
   const commandFingerprints: Record<string, string> = {};
   let confirmationAmounts: LegacyContinuationView["confirmationAmounts"] = null;
   const capabilities = (facts.evidence.admission === "PARAMETER_COMPLETE" ? legacyCapabilities(source, role, canOperate, disposition) : []).filter(kind => {
     if (kind === "preview" || kind === "propose") return true;
+    if (kind === "confirm" && !source.settlementV2) return false;
     if (role === "admin" && kind === "confirm" && !canSettle) return false;
     const plan = planLegacyContinuation(facts.evidence, { kind: kind as "confirm" | "reject" | "hold" | "release" | "confiscate", caller: { role, legacyUserId: role === "owner" ? binding.legacyOwnerId : role === "renter" ? binding.legacyRenterId : "" } });
     if (!plan.ok) { reasons.push(plan.code); return false; }
@@ -233,14 +243,15 @@ export function legacyCommissionMaturity(time: CompletedCommissionTime, cutoff: 
   if (due < 0n || due > 253402300799999999n) throw invalid("ISOLATED_MATURITY_EVIDENCE_MISSING");
   return { maturityAt: new Date(Number(due / 1000000n) * 1000).toISOString().slice(0, 19) + "." + (due % 1000000n).toString().padStart(6, "0") + "Z", maturedByCutoff: due <= asOf };
 }
-export function previewLegacyContinuation(facts: LegacyEffectiveFacts, binding: LegacyOrderBinding, actor: LegacyContinuationActor, quantities: LegacyQuantities, onBehalf?: "renter" | "owner") {
+export function previewLegacyContinuation(facts: LegacyEffectiveFacts, binding: LegacyOrderBinding, actor: LegacyContinuationActor, quantities: LegacyQuantities, onBehalf?: "renter" | "owner", basis?: LegacySettlementBasis, endReason?: LegacyEndReason) {
   const role = legacyContinuationRole(binding, actor);
   if (role === "admin" ? !onBehalf : onBehalf !== undefined) throw invalid("STAFF_ROLE_INVALID");
   const caller = { role, legacyUserId: role === "owner" ? binding.legacyOwnerId : role === "renter" ? binding.legacyRenterId : "", ...(onBehalf ? { onBehalf } : {}) };
-  const plan = planLegacyContinuation(facts.evidence, { kind: "preview", caller, quantities });
+  if (!basis) throw conflict("OPENING_BASIS_UNVERIFIED");
+  const plan = planVerifiedLegacySettlement(facts.evidence, { kind: "preview", caller, quantities, ...(endReason ? {endReason} : {}) }, basis);
   if (!plan.ok) throw conflict(plan.code);
-  const command = { kind: "propose" as const, caller, quantities };
-  const proposal = planLegacyContinuation(facts.evidence, command);
+  const command = { kind: "propose" as const, caller, quantities, settlementBasis:basis, ...(endReason ? {endReason} : {}) };
+  const proposal = planVerifiedLegacySettlement(facts.evidence, command, basis);
   if (!proposal.ok) throw conflict(proposal.code);
   try { deriveLegacyFacts(facts, proposal, command, "preview", "preview"); }
   catch (error) { if (error instanceof Error && error.message === "PRECISION_UNSUPPORTED") throw conflict("PRECISION_UNSUPPORTED"); throw error; }

@@ -1,7 +1,7 @@
 import { sha256Hex } from "../src/supply/supply-util";
 import { legacyOwnerUserId } from "../src/supply/legacy-user-migration";
-import type { LegacyContinuationSource, LegacyPrices, LegacyQuantities } from "../src/order/legacy-continuation-calc";
-import { sealLegacyFacts, type LegacyEffectiveFacts, type LegacyEvidenceRow, type LegacyOrderBinding } from "../src/order/legacy-continuation-model";
+import { admitLegacyEvidence, planVerifiedLegacySettlement, type LegacyContinuationSource, type LegacyPrices, type LegacyQuantities, type LegacySettlementBasis } from "../src/order/legacy-continuation-calc";
+import { deriveLegacyFacts, initialLegacyFacts, sealLegacyFacts, type LegacyEffectiveFacts, type LegacyEvidenceRow, type LegacyOrderBinding } from "../src/order/legacy-continuation-model";
 
 export const legacyPrices = (value: string | null) => Object.fromEntries(["barrett", "bullet", "awm", "armor", "helmet", "coffee", "card"].map(n => [n, value])) as LegacyPrices;
 export const legacyQuantities = (haff: string | null): LegacyQuantities => ({ expendHaff: haff, ...legacyPrices("0.00") });
@@ -12,4 +12,31 @@ export const legacyBinding: LegacyOrderBinding = { id: "legacy_order_" + sha256H
 export function legacyEvidence(facts: LegacyEffectiveFacts): LegacyEvidenceRow {
   const s = sealLegacyFacts(facts);
   return { id: "fixture_evidence", orderId: legacyBinding.id, evidenceVersion: "1", sourceKind: "SOURCE_IMPORT", sourceDigest: legacyBinding.sourceDigest, factsDigest: s.digest, factsCanonical: s.canonical, facts };
+}
+
+/** A real new-rule proposal, with a sealed original and independently verified opening basis. */
+export function legacyVerifiedProposal(stage: "8" | "9" = "8", itemAmount = "0", patch: Partial<LegacyContinuationSource> = {}) {
+  const source = legacySource({ baseBot:"10", profitDot:"0", goodsMoney:"10.00", storedCommissionMoney:"0.00", ...patch,
+    orderStatus:"3", orderPrices:{...legacyPrices("8.00"),barrett:itemAmount} });
+  const basis:LegacySettlementBasis = {id:"fixture_basis",openingHaffM:"1",baseBot:"10",ownerPrices:{...legacyPrices("8.00"),barrett:"0"},openingItems:legacyQuantities("1"),fullPayout:false};
+  const quantities={...legacyQuantities("1.30"),barrett:itemAmount==="0"?"0":"1"};
+  const caller=stage==="8"?{role:"renter" as const,legacyUserId:source.renterId}:{role:"owner" as const,legacyUserId:source.ownerId};
+  const command={kind:"propose" as const,caller,quantities,endReason:"NORMAL" as const,settlementBasis:basis};
+  const plan=planVerifiedLegacySettlement(admitLegacyEvidence(source),command,basis);
+  if(!plan.ok)throw new Error(`Invalid verified fixture: ${plan.code}`);
+  const original=legacyEvidence(initialLegacyFacts(source)); original.id="fixture_original";
+  const facts=deriveLegacyFacts(original.facts,plan,command,original.id,"fixture_proposal");
+  return {source:facts.evidence.source,facts,original,basis,quantities,plan};
+}
+
+export function legacyVerifiedEarlyProposal(stage:"8"|"9"="8",fullPayout=false) {
+  const source=legacySource({baseBot:"110",profitDot:"10",goodsMoney:"100.00",storedCommissionMoney:"9.00",detainMoney:"0.00",isFullPayout:fullPayout?"1":"0"});
+  const basis:LegacySettlementBasis={id:"fixture_basis",openingHaffM:"100",baseBot:"110",ownerPrices:legacyPrices("1"),openingItems:legacyQuantities("100"),fullPayout};
+  const quantities=legacyQuantities("60"),caller=stage==="8"?{role:"renter" as const,legacyUserId:source.renterId}:{role:"owner" as const,legacyUserId:source.ownerId};
+  const command={kind:"propose" as const,caller,quantities,endReason:"TENANT_VOLUNTARY_EARLY" as const,settlementBasis:basis};
+  const plan=planVerifiedLegacySettlement(admitLegacyEvidence(source),command,basis);
+  if(!plan.ok)throw new Error(`Invalid verified fixture: ${plan.code}`);
+  const original=legacyEvidence(initialLegacyFacts(source));original.id="fixture_original";
+  const facts=deriveLegacyFacts(original.facts,plan,command,original.id,"fixture_proposal");
+  return {source:facts.evidence.source,facts,original,basis,quantities,plan};
 }

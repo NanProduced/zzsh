@@ -10,12 +10,13 @@ import * as basis from "../src/order/legacy-duty-basis";
 import * as finance from "../src/finance/legacy-duty-finance";
 import * as funding from "../src/finance/legacy-duty-funding";
 import * as financeStore from "../src/finance/legacy-duty-finance-store";
+import * as refundSource from "../src/order/legacy-refund-review-source";
 import {authorizeLegacyFinanceDuty,postLegacyFinanceDuty,projectLegacyFinanceDutyReceipt} from "../src/order/legacy-finance-duty";
 import {legacyBinding} from "./legacy-continuation-fixture";
 
 const actor={realm:"admin" as const,userId:"support_1",sessionId:"session_1",requestId:"request_1"},digest="a".repeat(64);
 const ref={type:"LEDGER_ENTRY",id:"ledger_1",digest},input={dutyId:"duty_1",expectedRevision:"1",reason:"核对旧单结算"};
-function fixture(t:any,options:{historyUnknown?:boolean;changedBeneficiary?:boolean;noPermission?:boolean;noFinance?:boolean;commission?:boolean;pending?:boolean}={}){
+function fixture(t:any,options:{historyUnknown?:boolean;changedBeneficiary?:boolean;noPermission?:boolean;noFinance?:boolean;commission?:boolean;pending?:boolean;cancelScope?:string;recordedRefund?:boolean}={}){
  const calls:string[]=[],userIds=[legacyBinding.ownerUserId,legacyBinding.renterUserId].sort(),authority={binding:legacyBinding,userIds,actor,financeDutyKind:options.commission?"COMMISSION" as const:"OWNER_CREDIT" as const};
  let posted=false;
  const duty={id:"duty_1",orderId:legacyBinding.id,kind:options.commission?"COMMISSION":"OWNER_CREDIT",counterpartyUserId:options.commission?legacyBinding.renterUserId:legacyBinding.ownerUserId,amountCents:"1000",currency:"CNY",
@@ -24,6 +25,8 @@ function fixture(t:any,options:{historyUnknown?:boolean;changedBeneficiary?:bool
  const client={query:async(sql:string)=>{
   if(sql.includes("rental_account"))return{rows:[{id:legacyBinding.accountId}],rowCount:1};
   if(sql.includes("FROM pg_proc"))return{rows:[{ready:true}]};
+  if(sql.includes("paymentReviewScope"))return{rows:[{scope:options.cancelScope,marker:null}]};
+  if(sql.includes('INSERT INTO "zzsh_iam"."audit_event"')){calls.push("audit");return{rows:[],rowCount:1};}
   if(sql.includes("clock_timestamp()"))return{rows:[{now:"2026-11-07T00:00:00.000000Z"}]};
   if(sql.includes("post_legacy_finance_duty")){calls.push("post");posted=true;return{rows:[{result:{dutyId:duty.id,orderId:duty.orderId,amountCents:duty.amountCents,reference:{digest}}}]};}
   throw Error("Unexpected SQL "+sql);
@@ -36,7 +39,8 @@ function fixture(t:any,options:{historyUnknown?:boolean;changedBeneficiary?:bool
  t.mock.method(evidence,"readLegacyContinuationBinding",async()=>legacyBinding);
  t.mock.method(evidence,"lockLegacyContinuationOrder",async()=>({head:null,duties:[posted?{...duty,status:"SETTLED",settledBy:"FINANCE",revision:"2"}:duty]}));
  t.mock.method(basis,"readLegacyDutyBasis",async()=>({state:"KNOWN"}) as any);
- t.mock.method(finance,"legacyDutyBasisFromTrade",()=>({knowledge:"KNOWN",basis:{evidenceDigest:digest}}) as any);
+ t.mock.method(finance,"legacyDutyBasisFromTrade",()=>({knowledge:"KNOWN",basis:{evidenceDigest:digest,...(options.cancelScope?{kind:"SUPPORT_CANCELLED_CONTINUATION",continuationVersionId:"version_1"}:{})}}) as any);
+ t.mock.method(refundSource,"hasLegacyRecordedRefunds",async()=>options.recordedRefund===true);
  t.mock.method(funding,"readLegacyDutyFundingProof",async()=>options.historyUnknown?{knowledge:"UNKNOWN",reason:"SOURCE_UNCLEAR"}:{knowledge:"KNOWN",proof:{fixture:true}} as any);
  t.mock.method(finance,"planLegacyDutyFinalization",()=>({canonical:"{}",factDigest:digest}) as any);
  t.mock.method(financeStore,"readAdminLegacyDutyFinances",async()=>new Map([[duty.id,{dutyId:duty.id,orderId:duty.orderId,kind:duty.kind,subjectId:duty.counterpartyUserId,
@@ -51,6 +55,15 @@ test("owner credit requires live admin permission and exact source proof before 
  for(const options of [{historyUnknown:true},{changedBeneficiary:true}]){
   const x=fixture(t,options);await assert.rejects(postLegacyFinanceDuty(x.client,actor,legacyBinding.id,"OWNER_CREDIT",input,x.authority));assert.deepEqual(x.calls,[]);t.mock.restoreAll();
  }
+});
+test("previously unavailable cancellation can credit only after an explicit recorded recheck",async t=>{
+ const f=fixture(t,{cancelScope:"UNAVAILABLE"});
+ await assert.rejects(postLegacyFinanceDuty(f.client,actor,legacyBinding.id,"OWNER_CREDIT",input,f.authority),/REFUND_HISTORY_REQUIRES_OFFLINE/);
+ const result=await postLegacyFinanceDuty(f.client,actor,legacyBinding.id,"OWNER_CREDIT",{...input,originalPaymentChecked:true},f.authority);
+ assert.equal(result.body.status,"SETTLED");assert.deepEqual(f.calls,["audit","post"]);t.mock.restoreAll();
+ const blocked=fixture(t,{cancelScope:"UNAVAILABLE",recordedRefund:true});
+ await assert.rejects(postLegacyFinanceDuty(blocked.client,actor,legacyBinding.id,"OWNER_CREDIT",{...input,originalPaymentChecked:true},blocked.authority),/REFUND_HISTORY_REQUIRES_OFFLINE/);
+ assert.deepEqual(blocked.calls,[]);
 });
 test("owner credit posts only the frozen duty and verifies the resulting receipt",async t=>{
  const f=fixture(t),authority=await authorizeLegacyFinanceDuty(f.client,actor,legacyBinding.id,"OWNER_CREDIT");

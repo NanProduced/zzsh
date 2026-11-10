@@ -15,8 +15,9 @@ INSERT INTO zzsh_order.rental_order(id,display_no,account_id,listing_version_id,
  VALUES('synth_order','SYNTH_ORDER','synth_account','synth_version','synth_owner','synth_renter','synth_game','synth_release',
  repeat('a',64),'synth','PAID',8000,2000,'CNY',3600,'{}','Synthetic',now()+interval '1 hour','synth_payment',now());
 INSERT INTO zzsh_order.payment_confirmation(id,source,merchant_scope_id,provider_transaction_id,merchant_order_no,order_id,
- amount_cents,currency,provider_paid_at,disposition,request_id)
- VALUES('synth_payment','CONTROLLED','synth_merchant','synth_trx','synth_order_no','synth_order',10000,'CNY',now(),'APPLIED','synth_payment_req');
+ amount_cents,currency,provider_paid_at,disposition,request_id,joinpay_request_id,joinpay_evidence_id,joinpay_anchor_id)
+ VALUES('synth_payment','JOINPAY','synth_merchant','synth_trx','synth_order_no','synth_order',10000,'CNY',now(),'APPLIED','synth_payment_req',
+ 'synth_channel_request','synth_channel_evidence','synth_channel_anchor');
 
 INSERT INTO zzsh_order.rental_opening(id,order_id,version_no,quote_digest,payment_digest,lines,status,created_by_source,payment_confirmation_id)
  VALUES('synth_opening','synth_order',1,repeat('c',64),repeat('d',64),'[]'::jsonb,'DRAFT','SYSTEM','synth_payment');

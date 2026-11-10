@@ -1,6 +1,8 @@
 import { createHash } from "node:crypto";
 import { canonicalize } from "../supply/content-hash";
 import { addDecimal, DecimalError, decimalToBigInt, divideToScale, multiplyDecimal, parseNonNegativeDecimal, parseSignedDecimal, subtractDecimal, formatDecimalAtScale, formatScaledInteger, type Decimal } from "../supply/decimal";
+import { fullPayoutServiceFeeCents } from "../supply/full-payout-fee";
+import { earlyMakeupCents } from "./settlement";
 
 /** Old settlement arithmetic. Plans only: no database, clock, route, or ledger write. */
 export const LEGACY_CONTINUATION_CALC_VERSION = "legacy-continuation-calc.v1";
@@ -11,6 +13,10 @@ export type PriceName = "barrett" | "bullet" | "awm" | "armor" | "helmet" | "cof
 export type LegacyPrices = Record<PriceName, Text>;
 export type LegacyQuantities = { expendHaff: Text } & LegacyPrices;
 export type LegacyPolicy = { advanceOrderSetRatio: string; expend: Record<string, string> };
+export type LegacyEndReason = "NORMAL" | "TENANT_VOLUNTARY_EARLY" | "OWNER_OR_ACCOUNT_EARLY";
+export type LegacySettlementBasis = {
+  id: string; openingHaffM: string; baseBot: string; ownerPrices: LegacyPrices; openingItems: LegacyQuantities; fullPayout: boolean;
+};
 export type PaidPaySource = { id: string; payOrderSn: string; payMoney: string; orderId?: string };
 export type CommissionSource = { id: string; beneficiaryId: string; ratio: string; level: string; status: string; storedEarnings: string };
 export type LegacyContinuationSource = {
@@ -19,6 +25,7 @@ export type LegacyContinuationSource = {
   detainMoney: Text; returnOrderMoney: Text; saleEarnings: Text; fullPayoutMoney: Text; isFullPayout: Text;
   isAdvanceSet: Text; orderPrices: LegacyPrices; accountPrices: LegacyPrices; quantities: LegacyQuantities;
   paidPay: PaidPaySource[]; commissions: CommissionSource[]; policy: LegacyPolicy;
+  settlementV2?: { basisId: string; inputEvidenceId: string; endReason: LegacyEndReason; fullPayout:boolean; earlyMakeup: string; renterPayoutFee: string };
 };
 export type EvidenceAdmission = "PARAMETER_COMPLETE" | "ISOLATED";
 export type LegacyContinuationEvidence = {
@@ -28,7 +35,7 @@ export type LegacyContinuationEvidence = {
 };
 type Caller = { role: "renter" | "owner" | "admin" | "other"; legacyUserId: string; onBehalf?: "renter" | "owner" };
 export type LegacyCommand =
-  | { kind: "preview" | "propose"; caller: Caller; quantities: LegacyQuantities }
+  | { kind: "preview" | "propose"; caller: Caller; quantities: LegacyQuantities; endReason?: LegacyEndReason; settlementBasis?: LegacySettlementBasis }
   | { kind: "support_cancel"; caller: Caller; refundCents: string; ownerCents: string }
   | { kind: "confirm" | "reject" | "hold" | "release" | "confiscate"; caller: Caller };
 export type CalcRefusal = { ok: false; code: string; amounts: Record<string, string | null> };
@@ -208,9 +215,77 @@ function finish(source: LegacyContinuationEvidence, command: LegacyCommand, plan
       if(pool.value<0n)return refuse("CONFIRM_POOL_NEGATIVE");
       amounts.ownerNet=text(net);amounts.commissionPool=text(pool);
     }
+    if(typeof amounts.ownerNet==="string" && parseSignedDecimal(amounts.ownerNet,18,"ownerNet").value<0n)return refuse("OWNER_NET_NEGATIVE");
+    if(typeof amounts.commissionPool==="string" && parseSignedDecimal(amounts.commissionPool,18,"commissionPool").value<0n)return refuse("CONFIRM_POOL_NEGATIVE");
   }
   const fingerprint = digest({ evidence: source.parameterDigest, command, ...(normalized?{rounding:"LEGACY_COLUMN_HALF_UP_CENT_V1"}:{}) });
   return { ok: true, assignments: null, ...plan, amounts, applied: false, recognitionDelta: "0", fingerprint };
+}
+
+/** Current continuation uses staff-verified opening facts; the imported source remains immutable. */
+export function planVerifiedLegacySettlement(evidence: LegacyContinuationEvidence,
+  command: Extract<LegacyCommand, {kind: "preview" | "propose"}>, basis: LegacySettlementBasis): AmountPlan | CalcRefusal {
+  let checked: LegacyContinuationEvidence;
+  try { checked = admitLegacyEvidence(evidence.source); } catch { return refuse("EVIDENCE_SCHEMA"); }
+  if (checked.parameterDigest !== evidence.parameterDigest || checked.admission !== "PARAMETER_COMPLETE") return refuse("EVIDENCE_ISOLATED");
+  const source = checked.source, role = command.caller.role === "admin" ? command.caller.onBehalf : command.caller.role;
+  if (source.orderStatus !== "3" || !["renter", "owner"].includes(role ?? "")
+    || command.caller.role === "renter" && command.caller.legacyUserId !== source.renterId
+    || command.caller.role === "owner" && command.caller.legacyUserId !== source.ownerId
+    || command.caller.role !== "admin" && command.caller.onBehalf !== undefined) return refuse("NOT_PARTY");
+  if (!basis || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(basis.id ?? "")
+    || !QTY.test(basis.openingHaffM ?? "") || !INT.test(basis.baseBot ?? "")
+    || typeof basis.fullPayout !== "boolean") return refuse("OPENING_BASIS_UNVERIFIED");
+  if (["0", "1"].includes(source.isFullPayout ?? "") && basis.fullPayout !== (source.isFullPayout === "1")) return refuse("OPENING_BASIS_UNVERIFIED");
+  try {
+    const opening = dec(basis.openingHaffM, "opening haff"), used = dec(command.quantities.expendHaff!, "consumed haff");
+    const Q = decimalToBigInt(opening, 2), q = decimalToBigInt(used, 2);
+    if (Q <= 0n || !QTY.test(command.quantities.expendHaff ?? "") || !source.profitDot || !INT.test(source.profitDot)) return refuse("QUANTITY_INVALID");
+    if (!QTY.test(basis.openingItems?.expendHaff ?? "") || cmp(dec(basis.openingItems.expendHaff!, "opening items haff"), opening) !== 0) return refuse("OPENING_BASIS_UNVERIFIED");
+    const base = BigInt(basis.baseBot), profit = BigInt(source.profitDot), full = splits(opening, base, profit);
+    const goods = dec(source.goodsMoney!, "old goods"), spread = dec(source.storedCommissionMoney!, "old spread");
+    const ownerFullHaff = subtractDecimal(goods, spread);
+    if (ownerFullHaff.value < 0n || cmp(full.narrow, goods) !== 0 || cmp(full.wide, ownerFullHaff) !== 0) return refuse("OPENING_BASIS_PRICE_MISMATCH");
+    const paid = decimalToBigInt(dec(source.payMoney!, "paid"), 2), goodsCents = decimalToBigInt(goods, 2), spreadCents = decimalToBigInt(spread, 2);
+    const early = q * 10n < Q * 7n;
+    const endReason = command.endReason ?? (early ? null : "NORMAL");
+    if (endReason === null) return refuse("END_REASON_REQUIRED");
+    if (!["NORMAL", "TENANT_VOLUNTARY_EARLY", "OWNER_OR_ACCOUNT_EARLY"].includes(endReason) || early !== (endReason !== "NORMAL")) return refuse("END_REASON_INCONSISTENT");
+    if (early && spreadCents * 5n > goodsCents * 2n) return refuse("HAFF_SPREAD_RATIO_UNSAFE");
+    for (const name of NAMES) {
+      if (qtyOf(name, command.quantities)) {
+        if (!source.orderPrices[name] || !gt(dec(source.orderPrices[name]!, name), zero()) || basis.ownerPrices[name] == null) return refuse("EVIDENCE_ISOLATED");
+      }
+      if (early && basis.fullPayout && endReason === "TENANT_VOLUNTARY_EARLY") {
+        if (basis.openingItems[name] == null || qtyOf(name, basis.openingItems) && basis.ownerPrices[name] == null) return refuse("OPENING_ITEMS_UNVERIFIED");
+      }
+    }
+    const toCents = (value: Decimal) => divideToScale(value, {value: 1n, scale: 0}, 2).value;
+    const current = splits(used, base, profit);
+    const buyerItems = toCents(expend(command.quantities, source.orderPrices, "order", source.policy));
+    const ownerItems = expend(command.quantities, basis.ownerPrices, "account", source.policy);
+    const ownerGross = toCents(addDecimal(current.wide, ownerItems));
+    const buyerHaff = toCents(current.narrow);
+    const makeup = early && endReason === "TENANT_VOLUNTARY_EARLY" ? earlyMakeupCents(spreadCents, q, Q) : 0n;
+    let ownerFee = 0n, renterFee = 0n;
+    if (basis.fullPayout) {
+      if (early && endReason === "TENANT_VOLUNTARY_EARLY") {
+        const fullItems = toCents(expend(basis.openingItems, basis.ownerPrices, "account", source.policy));
+        renterFee = fullPayoutServiceFeeCents(toCents(ownerFullHaff) + fullItems);
+      } else ownerFee = fullPayoutServiceFeeCents(ownerGross);
+    }
+    const refund = paid - buyerHaff - buyerItems - makeup - renterFee, ownerNet = ownerGross - ownerFee;
+    if (refund < 0n) return refuse("DEPOSIT_SHORT");
+    if (ownerNet < 0n) return refuse("OWNER_NET_NEGATIVE");
+    const pool = paid - ownerGross - refund - renterFee;
+    if (pool < 0n) return refuse("CONFIRM_POOL_NEGATIVE");
+    const yuan = (v: bigint) => formatScaledInteger(v, 2);
+    const amounts = { payMoney: yuan(paid), divide: yuan(buyerHaff), divide2: yuan(toCents(current.wide)), expendOrder: yuan(buyerItems),
+      expendAccount: yuan(toCents(ownerItems)), saleEarnings: yuan(ownerGross), returnOrderMoney: yuan(refund), fullPayoutMoney: yuan(ownerFee),
+      ownerNet: yuan(ownerNet), commissionPool: yuan(pool), earlyMakeup: yuan(makeup), renterPayoutFee: yuan(renterFee) };
+    return finish(evidence, { ...command, settlementBasis: basis }, { kind: command.kind, nextStatus: command.kind === "propose" ? role === "renter" ? "8" : "9" : null,
+      isSettle: source.isSettle, isAdvanceSet: early ? 1 : 0, amounts, commissionRevisions: [] });
+  } catch (error) { return refuse(error instanceof DecimalError ? "AMOUNT_INVALID" : "EVIDENCE_SCHEMA"); }
 }
 export function planLegacyContinuation(evidence: LegacyContinuationEvidence, command: LegacyCommand): AmountPlan | CalcRefusal {
   if (evidence?.schemaVersion !== 1 || evidence.legacyOrderId !== evidence.source?.legacyOrderId || evidence.provenance?.profitDot !== "ORDER_COLUMN" || evidence.provenance?.baseBot !== "ACCOUNT_COLUMN_AT_CUTOFF_NOT_ORDER_FROZEN") return refuse("EVIDENCE_RELATION");
@@ -265,7 +340,12 @@ export function planLegacyContinuation(evidence: LegacyContinuationEvidence, com
     if (source.saleEarnings === null || source.returnOrderMoney === null || source.fullPayoutMoney === null) return refuse("MISSING_STORED_SETTLEMENT");
     const pay = parsed(source.payMoney!), sale = parsed(source.saleEarnings), returned = parsed(source.returnOrderMoney), payout = parsed(source.fullPayoutMoney);
     if (!pay || !sale || !returned || !payout) return refuse("AMOUNT_INVALID");
-    const pool = poolOf(pay, sale, returned);
+    const v2 = source.settlementV2;
+    const renterFee = v2 ? parsed(v2.renterPayoutFee) : zero();
+    if (v2 && (!renterFee || !parsed(v2.earlyMakeup) || typeof v2.fullPayout!=="boolean" || !["0","1"].includes(source.isAdvanceSet ?? "") || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(v2.basisId) || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(v2.inputEvidenceId)
+      || !["NORMAL", "TENANT_VOLUNTARY_EARLY", "OWNER_OR_ACCOUNT_EARLY"].includes(v2.endReason)
+      || (source.isAdvanceSet === "1") !== (v2.endReason !== "NORMAL"))) return refuse("EVIDENCE_SCHEMA");
+    const pool = subtractDecimal(poolOf(pay, sale, returned), renterFee!);
     if (pool.value < 0n) return refuse("CONFIRM_POOL_NEGATIVE", { commissionPool: text(pool) });
     const ownerNet = subtractDecimal(sale, payout);
     if (ownerNet.value < 0n) return refuse("OWNER_NET_NEGATIVE", { saleEarnings: text(sale), fullPayoutMoney: text(payout), ownerNet: text(ownerNet) });
@@ -277,7 +357,7 @@ export function planLegacyContinuation(evidence: LegacyContinuationEvidence, com
     if (commissionRevisions.some(row => row.reason === "UNKNOWN_COMMISSION_STATUS" || row.reason === "INVALID_COMMISSION_RATIO")) return refuse("COMMISSION_UNPROVEN");
     const allocated = source.commissions.reduce((sum, row) => row.status === "1" ? addDecimal(sum, parsed(commissionRevisions.find(item => item.id === row.id)?.legalEarnings ?? "0") ?? zero()) : sum, zero());
     if (gt(allocated, pool)) return refuse("COMMISSION_EXCEEDS_POOL", { commissionPool: text(pool), commissionAllocated: text(allocated) });
-    return finish(evidence, command, { kind: "confirm", nextStatus: "4", isSettle: source.isSettle, isAdvanceSet: source.isAdvanceSet === "1" ? 1 : 0, amounts: { payMoney: text(pay), saleEarnings: text(sale), returnOrderMoney: text(returned), fullPayoutMoney: text(payout), ownerNet: text(ownerNet), commissionPool: text(pool), refundGross: text(returned), refundNet: text(net) }, commissionRevisions });
+    return finish(evidence, command, { kind: "confirm", nextStatus: "4", isSettle: source.isSettle, isAdvanceSet: source.isAdvanceSet === "1" ? 1 : 0, amounts: { payMoney: text(pay), saleEarnings: text(sale), returnOrderMoney: text(returned), fullPayoutMoney: text(payout), ownerNet: text(ownerNet), commissionPool: text(pool), refundGross: text(returned), refundNet: text(net), ...(v2 ? {earlyMakeup:v2.earlyMakeup,renterPayoutFee:v2.renterPayoutFee} : {}) }, commissionRevisions });
   }
   if (command.kind !== "preview" && command.kind !== "propose") return refuse("STATUS_INVALID");
   if (source.orderStatus !== "3") return refuse("STATUS_INVALID");

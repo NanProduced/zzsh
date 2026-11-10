@@ -38,7 +38,7 @@ async function verifiedReceipt(client:PoolClient,orderId:string,sourceDigest:str
 }
 
 async function postDuty(client:PoolClient,actor:LegacyContinuationActor,orderId:string,kind:LegacyFinanceDutyKind,
-  input:{dutyId:string;expectedRevision:string;reason:string},authority:LegacyFinanceDutyAuthority,userConfirmation:boolean) {
+  input:{dutyId:string;expectedRevision:string;reason:string;originalPaymentChecked?:true},authority:LegacyFinanceDutyAuthority,userConfirmation:boolean) {
   if(!["OWNER_CREDIT","COMMISSION","RENTER_REFUND"].includes(kind) || authority.financeDutyKind!==kind
     || (userConfirmation ? actor.realm!=="user" || kind!=="OWNER_CREDIT" : actor.realm!=="admin")
     || authority.actor.realm!==actor.realm || authority.binding.id!==orderId || authority.actor.userId!==actor.userId
@@ -50,11 +50,11 @@ async function postDuty(client:PoolClient,actor:LegacyContinuationActor,orderId:
   if(!duty || duty.kind!==kind || !duty.counterpartyUserId || kind==="OWNER_CREDIT" && duty.counterpartyUserId!==authority.binding.ownerUserId
     || kind==="RENTER_REFUND" && duty.counterpartyUserId!==authority.binding.renterUserId)throw notFound();
   if(!authority.userIds.includes(duty.counterpartyUserId))throw conflict("CONTINUATION_BENEFICIARIES_CHANGED");
-  return postLockedDuty(client,orderId,kind,input,authority.binding,duty);
+  return postLockedDuty(client,orderId,kind,input,authority.binding,duty,actor);
 }
 
 async function postLockedDuty(client:PoolClient,orderId:string,kind:LegacyFinanceDutyKind,
-  input:{expectedRevision:string;reason:string},binding:LegacyMutationAuthority["binding"],duty:LegacyDutyRow) {
+  input:{expectedRevision:string;reason:string;originalPaymentChecked?:true},binding:LegacyMutationAuthority["binding"],duty:LegacyDutyRow,actor?:LegacyContinuationActor) {
   if(duty.status==="SETTLED" && duty.settledBy==="FINANCE")return {status:200,body:await verifiedReceipt(client,orderId,binding.sourceDigest,duty,kind)};
   if(duty.status!==(kind==="COMMISSION"?"MATURED":"PENDING") || duty.revision!==input.expectedRevision)throw conflict("DUTY_REVISION_CONFLICT");
   const available=(await client.query<{ready:boolean}>(`SELECT EXISTS(SELECT 1 FROM pg_proc p JOIN pg_class c
@@ -64,17 +64,21 @@ async function postLockedDuty(client:PoolClient,orderId:string,kind:LegacyFinanc
   if(available!==true)throw new SecurityApiError(503,"EVIDENCE_UNAVAILABLE","Legacy owner credit is unavailable");
   const raw=await readLegacyDutyBasis(client,orderId,duty),adapted=legacyDutyBasisFromTrade(duty,raw);
   if(kind==="OWNER_CREDIT" && adapted.knowledge==="KNOWN" && adapted.basis.kind==="SUPPORT_CANCELLED_CONTINUATION") {
-    let recorded=true;
+    let recorded=true, manuallyRechecked=false;
     try {
       const scopes=(await client.query<{scope:string;marker:string|null}>(`SELECT a.details->>'paymentReviewScope' AS scope,
         shobj_description((SELECT oid FROM pg_database WHERE datname=current_database()),'pg_database') AS marker
         FROM zzsh_iam.audit_event a WHERE a.action='order.legacy.continuation.support_cancel' AND a.object_type='rental_order' AND a.object_id=$1
           AND a.actor_type='admin' AND a.outcome='SUCCESS' AND a.details->>'versionId'=$2 AND a.details->>'originalPaymentChecked'='true' LIMIT 2`,[orderId,adapted.basis.continuationVersionId])).rows;
       const scope=scopes.length===1?scopes[0]:null;
-      if(scope && (scope.scope==="OPERATOR" || scope.scope==="SIMULATED" && ["zzsh:r07-delivery-clone:v1","zzsh:ecs-test:v1"].includes(scope.marker??"")))
+      manuallyRechecked=scope?.scope==="UNAVAILABLE" && actor?.realm==="admin" && input.originalPaymentChecked===true;
+      if(scope && (scope.scope==="OPERATOR" || scope.scope==="SIMULATED" && ["zzsh:r07-delivery-clone:v1","zzsh:ecs-test:v1"].includes(scope.marker??"") || manuallyRechecked))
         recorded=await hasLegacyRecordedRefunds(client,binding,adapted.basis.continuationVersionId);
     } catch { /* Unknown is handled as an offline case. */ }
     if(recorded)throw conflict("REFUND_HISTORY_REQUIRES_OFFLINE");
+    if(manuallyRechecked && actor)await recordAudit(client,{actorType:"admin",actorId:actor.userId,sessionId:actor.sessionId,requestId:actor.requestId,
+      action:"order.legacy.owner_credit.payment_rechecked",objectType:"legacy_order_duty",objectId:duty.id,outcome:"SUCCESS",reason:input.reason.trim(),
+      details:{orderId,continuationVersionId:adapted.basis.continuationVersionId,channelResult:"UNKNOWN"}});
   }
   if(adapted.knowledge!=="KNOWN")throw conflict("WALLET_CREDIT_BASIS_UNAVAILABLE");
   const funding=await readLegacyDutyFundingProof(client,duty,adapted.basis);
@@ -94,7 +98,7 @@ async function postLockedDuty(client:PoolClient,orderId:string,kind:LegacyFinanc
 
 /** Caller owns an idempotent transaction and has locked/rechecked the real administrator. */
 export async function postLegacyFinanceDuty(client:PoolClient,actor:LegacyContinuationActor,orderId:string,kind:LegacyFinanceDutyKind,
-  input:{dutyId:string;expectedRevision:string;reason:string},authority:LegacyFinanceDutyAuthority) {
+  input:{dutyId:string;expectedRevision:string;reason:string;originalPaymentChecked?:true},authority:LegacyFinanceDutyAuthority) {
   return postDuty(client,actor,orderId,kind,input,authority,false);
 }
 

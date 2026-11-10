@@ -1,4 +1,5 @@
 import type {PoolClient} from "pg";
+import {recordAudit} from "../auth/security-core";
 import {fingerprintRequest,withIdempotency} from "../supply/supply-util";
 import {describeRefundProfile,type BoundRefundProfile,type FormalRefundAdmission} from "./joinpay-refund-profile";
 import {readLegacyContinuationDuties,readLegacyContinuationEvidence,readLegacyContinuationHead} from "./legacy-continuation-evidence";
@@ -47,17 +48,31 @@ export async function allocateLegacySupportCancelRefund(client:PoolClient,actor:
 export async function allocateLegacySupportCancelRefundInTransaction(client:PoolClient,actor:LegacyContinuationActor,orderId:string,key:string,
   fingerprint:string,execution:{admission:FormalRefundAdmission;profile:BoundRefundProfile}) {
   await client.query("SAVEPOINT legacy_cancel_refund_allocation");
+  let result:Awaited<ReturnType<typeof allocateLegacySupportCancelRefund>>|{state:"DEFERRED"};
   try {
     // Cancellation validates its guards immediately; the refund's linked rows must be built together first.
     await client.query("SET CONSTRAINTS ALL DEFERRED");
-    const result=await allocateLegacySupportCancelRefund(client,actor,orderId,key,fingerprint,execution);
+    result=await allocateLegacySupportCancelRefund(client,actor,orderId,key,fingerprint,execution);
     await client.query("SET CONSTRAINTS ALL IMMEDIATE");
     await client.query("RELEASE SAVEPOINT legacy_cancel_refund_allocation");
-    return result;
   } catch {
     await client.query("ROLLBACK TO SAVEPOINT legacy_cancel_refund_allocation");
     await client.query("RELEASE SAVEPOINT legacy_cancel_refund_allocation");
-    return {state:"DEFERRED" as const};
+    result={state:"DEFERRED"};
   }
+  if(["DEFERRED","NOT_READY","HISTORY_REQUIRES_OFFLINE"].includes(result.state)) {
+    await client.query("SAVEPOINT legacy_cancel_refund_notice");
+    try {
+      await recordAudit(client,{actorType:actor.realm,actorId:actor.userId,sessionId:actor.sessionId,requestId:actor.requestId,
+        action:"order.legacy.refund.allocation_deferred",objectType:"rental_order",objectId:orderId,outcome:"FAILURE",
+        reason:result.state,details:{channelResult:"NOT_SUBMITTED"}});
+      await client.query("RELEASE SAVEPOINT legacy_cancel_refund_notice");
+    } catch {
+      await client.query("ROLLBACK TO SAVEPOINT legacy_cancel_refund_notice");
+      await client.query("RELEASE SAVEPOINT legacy_cancel_refund_notice");
+      console.error("Legacy cancellation refund deferral could not be recorded; refund duty remains pending");
+    }
+  }
+  return result;
 }
 
