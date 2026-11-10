@@ -15,6 +15,7 @@
 .workspace-root .im-rail-value-figures em[data-unknown="true"] { color:var(--muted-foreground); font-size:11px; font-weight:400; }
 .workspace-root .im-rail-value-item { display:flex; align-items:baseline; justify-content:space-between; gap:12px; min-height:32px; padding:6px 0 6px 12px; border-bottom:1px solid color-mix(in oklab,var(--border) 45%,transparent); font-size:12px; line-height:1.55; }
 .workspace-root .im-rail-value-item span { min-width:0; overflow-wrap:anywhere; }
+.workspace-root .im-rail-value-item .im-rail-value-spec { margin-left:6px; color:var(--muted-foreground); font-size:11px; font-weight:400; font-variant-numeric:tabular-nums; white-space:nowrap; }
 .workspace-root .im-rail-value-item b { flex:none; font-weight:500; font-variant-numeric:tabular-nums; white-space:nowrap; }
 .workspace-root .im-rail-value-item:last-child { border-bottom:0; }
 .workspace-root .im-rail-value-empty { display:grid; gap:8px; justify-items:start; }

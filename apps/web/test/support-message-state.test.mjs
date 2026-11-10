@@ -1,6 +1,18 @@
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
-import { collapseImSystemNotices, decodeImSystemNotice, mergeImMessages } from "../src/lib/nim-web-client.ts";
+import { collapseImSystemNotices, decodeImSystemNotice, imSystemNoticeLabel, mergeImMessages } from "../src/lib/nim-web-client.ts";
+
+test("support notices speak the consultation language and hide team metadata churn", () => {
+  assert.equal(imSystemNoticeLabel("TEAM_CREATED", "SERVICE"), "咨询已开始");
+  assert.equal(imSystemNoticeLabel("TEAM_CREATED", "COMPLAINT"), "投诉已提交");
+  assert.equal(imSystemNoticeLabel("MEMBER_JOINED", "SERVICE"), "客服已接入");
+  assert.equal(imSystemNoticeLabel("MEMBER_LEFT", "COMPLAINT"), "本轮接待已结束");
+  assert.equal(imSystemNoticeLabel("TEAM_DISMISSED", "SERVICE"), "咨询已结束");
+  assert.equal(imSystemNoticeLabel("UNKNOWN", "COMPLAINT"), null, "unmapped vendor events stay hidden instead of showing a vague line");
+  assert.equal(imSystemNoticeLabel("TEAM_UPDATED", "SERVICE"), null, "technical team metadata updates stay hidden in support");
+  assert.equal(imSystemNoticeLabel("TEAM_UPDATED", "ORDER"), "会话信息已更新", "order groups keep the group wording");
+  assert.equal(imSystemNoticeLabel("MEMBER_JOINED", "ORDER"), "成员已加入会话");
+});
 
 test("merges history with live messages by stable id and keeps newer delivery", () => {
   const result = mergeImMessages(

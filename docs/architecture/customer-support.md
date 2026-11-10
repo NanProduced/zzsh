@@ -38,6 +38,7 @@ IM功能正式追加为0125–0141；0000–0124历史字节不改。带旧私�
 - 自动普通文本请求透传原稳定 `message_client_id`；不能仅凭该字段宣称供应商恰好一次或用户已读。投递未知、远端去重范围与附件有效期仍分别处理。
 - `hasMore/nextCursor` 来自原始页，游标绑定 App、查看账号、会话、原消息时间及十进制64位ID，不从过滤后的可见条数推断下一页。历史附件复用客户端 SDK 的安全媒体解析与既有媒体组件。
 - 真实撤回先核验本人消息，服务端调用云信并保留结果事实；UNKNOWN 不自动重放，历史读取只隐藏该条待核验消息、不再让整页 503，且没有管理端恢复入口前不得重新展示其正文。确认撤回清除历史正文/附件，并同步相同最新消息的咨询摘要。SDK 确认仅本人删除后登记该查看者的隐藏事实，持久历史按这些事实过滤。供应商删除开关、旧消息缺少隐藏事实及删除结果未知的对账属于独立渠道验收边界，不能由本地过滤推断已删除。
+- 咨询/投诉消息中的云信系统通知按客服语义展示：咨询已开始、投诉已提交、客服已接入、本轮接待已结束、咨询已结束/投诉会话已结束；TEAM_UPDATED 与未知类型的通知不展示，避免“会话信息有变化”这类无信息量提示。订单群仍使用群聊文案。Bot 已覆盖的建群/成员变化不重复展示，未覆盖时保留一条兜底。
 
 ## 订单群可靠创建
 
@@ -164,13 +165,13 @@ read客户端身份与send能力分离：只撤接待权限时保留合法连接
 
 ## 巡视、统计与最小售后记录
 
-- `GET /api/v1/im/admin/audit/conversations` 要求 `im.support.management.read`，支持 limit/cursor、type（SERVICE、COMPLAINT、ORDER）及 adminUserId。省略过滤表示全部；过滤条件变更须丢弃旧游标。订单活动时间优先消息活动，再建群/建单时间。historyState 区分 AVAILABLE、NOT_ESTABLISHED、LEGACY_UNAVAILABLE、RECOVERING，不把缺历史当零消息。巡视不改已读或派单；旧轮次保留的独立 Team 按精确 App/轮次绑定与远端标记复核读取，不借当前线程替代历史。咨询按持久线程聚合为一行，payload 带最近 `roundSeq`/`roundCount`，点开默认查看最近一轮，并可切换轮次按该轮 `conversationId` 读取历史，不再把不同轮次伪装成独立会话；轮次 `conversationId` 为空时显示该轮无独立聊天记录/历史不可用，不回退到最近一轮冒充。历史 `ext` 中的引用元数据随消息返回，巡视使用与客服工作台相同的引用气泡。
+- `GET /api/v1/im/admin/audit/conversations` 要求 `im.support.management.read`，支持 limit/cursor、type（SERVICE、COMPLAINT、ORDER）及 adminUserId。省略过滤表示全部；过滤条件变更须丢弃旧游标。订单活动时间优先消息活动，再建群/建单时间。historyState 区分 AVAILABLE、NOT_ESTABLISHED、LEGACY_UNAVAILABLE、RECOVERING，不把缺历史当零消息。巡视不改已读或派单；旧轮次保留的独立 Team 按精确 App/轮次绑定与远端标记复核读取，不借当前线程替代历史。咨询按持久线程聚合为一行，payload 带最近 `roundSeq`/`roundCount`；点开加载整条线程历史，轮次条仅用于跳转定位，不按轮切换历史。轮次定位按 `round.createdAt` 前后 10 秒有界回看，避免把下一轮触发消息归入上一轮；不同 Team 的轮次按有界补拉与主线程合并，不把不同轮次伪装成独立会话。历史 `ext` 中的引用元数据随消息返回，巡视使用与客服工作台相同的引用气泡。
 - `GET /api/v1/im/admin/support-overview` 要求管理读取，支持下述时间范围，默认北京时间今天。reportDate/serverNow 来自服务器。期间接待次数/用户只计发生接待动作的咨询，不含订单群；hourly为期间CREATED/REOPENED新轮次的小时分布。排队只统计当前有用户首条消息、未指派的WAITING；可接待须AVAILABLE、CONNECTED、2分钟内心跳新鲜、云信身份READY且具备读取/接待权限，顶部“当前可接待客服”与派单资格同口径。首响askedCount为期间首次提问的咨询数，sampleCount为已人工首答数，pending/overdue和关闭未答不能冒充已答样本。
 - `GET /api/v1/im/admin/yunxin-conversations` 要求 `im.support.management.read`，按需读取每个有接待记录的客服 NIM 账号云端会话总数与置顶数。服务端通过云信 `GET /im/v2.1/conversations?account_id=...` 每页100条分页，单账号最多读取当前配额5000条；返回账号脱敏标签、计数、配额和采样时间，不返回完整 accid，不写入云信。客服统计页手动触发，不随看板轮询。
 - `GET /api/v1/im/admin/my-support-statistics` 经管理BFF转发，仅GET，支持下述时间范围，要求 `im.support.read`；身份固定为当前管理员，不接受指定员工。返回reportDate/serverNow/period、today{seconds,sessions,users}、current{consultations,orderGroups,unread,oldestPendingAt}、ratings{count,average,distribution}和firstResponse{sampleCount,averageSeconds}。个人首响只计本人是首次人工回复者且回复发生在期间的样本，不按最终接待人代计，可含跨期提问。oldestPendingAt是当前仍有未读的接待轮次之首次用户提问时间，不是最后一条未读消息的等待时长。
 - 最小售后记录仅绑定 NATIVE 已确认 POSTED 结算订单，租客/号主各自可提交；结算后即可提交，不另等72小时。用户 `GET/POST /api/v1/im/user/aftersales`（GET 必须 orderSource=NATIVE、orderId）只返回本人记录。管理 `GET /api/v1/im/admin/aftersales` 和 `POST /:id/claim|contact|resolve` 复核读取/接待及责任范围。描述/结果上限1000字，同人同单至多一条 PENDING；处理后可新提交，仅 PENDING/RESOLVED 两状态。创建/处理用稳定操作 ID，领取/处理核版本；处理完成保留历史处理人。
 - 售后沟通复用已有 SERVICE 咨询和转交机制，没有新工单消息系统。待处理记录随当前咨询责任变更，已处理记录不跟随；contact 只有 ACTIVE、本人接待、READY、可发送时才成功，否则保留记录并返回可恢复结果。记录处理状态不代表退款/到账，不创建资金事实。
-- 订单群 access 返回 serverNow 与 terminalSendAllowed，由服务端判定沟通窗口。邀请运营复用现有成员邀请接口：在租群及终态合法沟通窗口内可邀请，终态还须当前有效 STAFF 成员可读；每次仍检查会话、范围、群绑定和目标资格，窗口到期拒绝。平台 availability 仅表达本平台接待偏好，不等于网易云信实时在线。
+- 订单群 access 返回 serverNow 与 terminalSendAllowed，由服务端判定沟通窗口。邀请运营复用现有成员邀请接口：在租群及终态合法沟通窗口内可邀请，终态还须当前有效 STAFF 成员可读；每次仍检查会话、范围、群绑定和目标资格，窗口到期拒绝。管理端群设置按 `terminalSendAllowed` 显示邀请入口：窗口内允许，窗口结束或操作者非 JOINED 成员时隐藏并说明原因。平台 availability 仅表达本平台接待偏好，不等于网易云信实时在线。
 - 押金展示复用结算/取消既有退款路径，结算退款已含 depositRefund。不新增独立退押金执行；登记应付、渠道状态与到账未知保持分开，不能重复创建押金退款。
 
 租期到期提醒重试前会复核当前时段；旧时段任务跳过后续投递（STALE_BUCKET），避免到期后再发送“24小时内到期”。发送结果未知、过期租约或 `SENT` 落库失败一律冻结为 `UNKNOWN`，不自动重发，只供人工核对；仅身份未就绪等发前失败退避重试。跳过不代表既往未知尝试从未送达，也不改变订单状态或自动结束租期。

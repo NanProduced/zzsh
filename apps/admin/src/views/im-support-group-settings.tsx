@@ -7,7 +7,7 @@ import { CircleAlert, EyeOff, Eye, RefreshCw, Search, UserPlus, X } from "lucide
 import { EntityPreviewTrigger, PreviewCardShell } from "../components/admin-preview";
 import { orderTeamMemberRole, type OrderTeamAccess, type OrderTeamMember } from "@zzsh/ui/order-team-panel";
 import type { NimWebClientLike } from "@zzsh/im-client/nim-web-client";
-import { initialOf } from "./im-support-format";
+import { formatDateTime, initialOf } from "./im-support-format";
 import "./im-support-group-settings.css";
 
 /**
@@ -264,6 +264,16 @@ export function AdminOrderGroupSettingsDrawer({ info, request, preferences, onPr
   const staff = info.members.filter((member) => member.party === "STAFF") as MemberView[];
   const others = info.members.filter((member) => member.party !== "BUYER" && member.party !== "OWNER" && member.party !== "STAFF");
   const ended = info.orderStatus === "COMPLETED" || info.orderStatus === "CANCELLED";
+  const viewerJoined = Boolean(info.viewerAccountId
+    && info.members.some((member) => member.party === "STAFF" && member.accountId === info.viewerAccountId));
+  const sendUntil = info.sendUntil ? Date.parse(info.sendUntil) : Number.NaN;
+  const serverNow = info.serverNow ? Date.parse(info.serverNow) : Date.now();
+  const sendWindowExpired = Number.isFinite(sendUntil) && Number.isFinite(serverNow) && serverNow >= sendUntil;
+  const terminalWindowOpen = info.terminalSendAllowed === true && !sendWindowExpired;
+  const inviteAvailable = viewerJoined && (!ended || terminalWindowOpen);
+  const inviteBlockedReason = viewerJoined && ended
+    ? "订单已结束，沟通窗口已关闭，无法邀请。"
+    : null;
 
   const memberIds = new Set(info.members.map((member) => member.platformId));
   const text = query.trim().toLowerCase();
@@ -273,7 +283,7 @@ export function AdminOrderGroupSettingsDrawer({ info, request, preferences, onPr
   const candidates = matchedAdmins.slice(0, ADMIN_PICKER_LIMIT);
 
   const invite = async (candidate: AdminInviteTarget) => {
-    if (!inviteMember || invitePhase?.state === "SENDING") return;
+    if (!inviteMember || !inviteAvailable || invitePhase?.state === "SENDING") return;
     const name = candidate.displayName?.trim() || "该管理员";
     setInvitePhase({ key: candidate.adminUserId, name, state: "SENDING" });
     try {
@@ -315,10 +325,16 @@ export function AdminOrderGroupSettingsDrawer({ info, request, preferences, onPr
 
           <div className="im-og-section-head im-og-staff-head">
             <h3>客服成员</h3>
-            {ended
-              ? <span className="im-og-readonly" data-action="invite-ended-readonly">本单已结束</span>
-              : <button type="button" className="im-og-invite-btn" data-action="open-admin-invite" onClick={() => setPickerOpen((open) => !open)}><UserPlus size={13} />邀请管理员</button>}
+            {inviteAvailable
+              ? <button type="button" className="im-og-invite-btn" data-action="open-admin-invite" onClick={() => setPickerOpen((open) => !open)}><UserPlus size={13} />邀请管理员</button>
+              : <span className="im-og-readonly" data-action={ended ? "invite-ended-readonly" : "invite-member-readonly"}>{viewerJoined ? "本单已结束" : "仅群内客服可邀请"}</span>}
           </div>
+          {ended ? <p className="im-og-note" data-action="invite-window-note">
+            {terminalWindowOpen
+              ? `订单已结束，仍可在沟通窗口内邀请${info.sendUntil ? `（至 ${formatDateTime(info.sendUntil)}）` : ""}。`
+              : inviteBlockedReason ?? "订单已结束，当前不可邀请。"}
+          </p> : null}
+          {!viewerJoined ? <p className="im-og-note">仅本群客服成员可邀请管理员。</p> : null}
           {staff.length ? <ul className="im-og-members" data-member-group="STAFF" aria-label="客服成员">
             {staff.map((member) => <StaffMemberRow key={member.accountId} member={member} />)}
           </ul> : <p className="im-og-empty">服务端未返回客服成员。</p>}
@@ -326,7 +342,7 @@ export function AdminOrderGroupSettingsDrawer({ info, request, preferences, onPr
             {others.map((member) => <li className="im-og-member" key={member.accountId}><MemberAvatar member={member} name={member.name?.trim() || "未分组成员"} /><span className="im-og-member-copy"><b>{member.name?.trim() || "未分组成员"}</b><small>成员类型待确认</small></span></li>)}
           </ul> : null}
 
-          {pickerOpen && !ended ? <div className="im-og-picker" aria-label="邀请管理员">
+          {pickerOpen && inviteAvailable ? <div className="im-og-picker" aria-label="邀请管理员">
             <label className="im-og-search"><Search size={13} aria-hidden="true" /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索管理员姓名" aria-label="搜索管理员姓名" /></label>
             <p className="im-og-note">可邀请现有管理员。</p>
             {!inviteMember ? <p className="im-og-status" data-tone="warn" role="status">暂不可用：当前暂不支持直接发送邀请。</p> : null}

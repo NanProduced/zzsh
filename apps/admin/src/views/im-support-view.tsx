@@ -11,7 +11,7 @@ import { ArrowDown, Bell, BellOff, CalendarClock, Check, ChevronLeft, CircleAler
 import { MessageScroller as MessageScrollerPrimitive } from "@shadcn/react/message-scroller";
 import { ImClientLifecycle, ImLifecycleSupersededError } from "@zzsh/im-client/lifecycle";
 import { createLocalFakeNimWebClientFactory, createNimWebClientFactory, NIM_IMAGE_MAX_BYTES, NimImageSendError, NimMediaSendError, NimTextSendError, validateNimImageFile, validateNimMediaFile, type NimMessageLike, type NimMessageMedia, type NimWebClientLike, type NimWebConnectionState } from "@zzsh/im-client/nim-web-client";
-import { collapseImSystemNotices, decodeImSystemNotice, isImSystemNoticeText, mergeImMessages, type ImSystemNotice } from "@zzsh/im-client/message-state";
+import { collapseImSystemNotices, decodeImSystemNotice, imSystemNoticeLabel, isImSystemNoticeText, mergeImMessages, type ImSystemNotice } from "@zzsh/im-client/message-state";
 import { CHAT_EMOJIS, MessageActionMenu, MessageReplyQuote, useMessageLongPress, type MessageActionId, type MessageActionItem } from "@zzsh/ui/message-actions";
 import { MediaDraftBar, mediaMessageOf, mediaSummaryOf, type MessageMediaDraft } from "@zzsh/ui/message-media";
 import "@zzsh/ui/message-media.css";
@@ -2313,6 +2313,7 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
   let timelineDay = "";
   // Bot 欢迎/阶段卡已经说明建群或成员变化时，不再重复技术通知；没有 Bot 覆盖时保留一条兜底。
   const botAccountId = selected?.botAccountId ?? null;
+  const noticeScope = selected?.type ?? "SERVICE";
   const timelineMessages = collapseImSystemNotices(selectedMessages, {
     hasBotMessage: Boolean(botAccountId && selectedMessages.some((message) => message.from !== "system" && !message.revoked && message.senderId === botAccountId)),
     noticeOf: (message) => message.notice ?? null,
@@ -2325,7 +2326,9 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
       nodes.push(<MessageScrollerPrimitive.Item key={`day-${dayKey}`} messageId={`day-${dayKey}`}><Marker className="im-wb-day" role="separator"><MarkerContent>{dayLabelOf(dayKey)}</MarkerContent></Marker></MessageScrollerPrimitive.Item>);
     }
     if (message.from === "system") {
-      nodes.push(<MessageScrollerPrimitive.Item key={message.id} messageId={message.id} tabIndex={-1} onContextMenu={onMessageContextMenu} {...messageLongPress}><Marker className="im-wb-sys" variant="separator"><MarkerContent>{message.text}</MarkerContent></Marker></MessageScrollerPrimitive.Item>);
+      const label = message.notice ? imSystemNoticeLabel(message.notice.kind, noticeScope) : message.text;
+      if (label === null) return nodes;
+      nodes.push(<MessageScrollerPrimitive.Item key={message.id} messageId={message.id} tabIndex={-1} onContextMenu={onMessageContextMenu} {...messageLongPress}><Marker className="im-wb-sys" variant="separator"><MarkerContent>{label}</MarkerContent></Marker></MessageScrollerPrimitive.Item>);
       return nodes;
     }
     const previous = timelineMessages[index - 1];

@@ -6,7 +6,7 @@
  * 可选旧兼容字段才保持 null。统计口径（北京时间自然日）由服务端决定，前端不推断。
  */
 import { mergeImMessages } from "@zzsh/im-client/message-state";
-import { nimMessageView, type NimMessageLike } from "@zzsh/im-client/nim-web-client";
+import { nimMessageView, parseOrderStageCard, type NimMessageLike } from "@zzsh/im-client/nim-web-client";
 import { BEIJING_TIME_ZONE, beijingTodayStart } from "../workspace/beijing-time";
 
 export type SupportOverviewAgent = {
@@ -482,7 +482,7 @@ function parseMessage(value: unknown): AuditMessage | null {
   const messageServerId = text(row.messageServerId);
   const attachment = recordOf(row.attachment);
   const reply = recordOf(row.reply);
-  const card = parseCard(row.card);
+  const card = parseCard(row.card) ?? parseOrderStageCard(attachment) ?? undefined;
   const base: NimMessageLike = {
     messageClientId: text(row.messageClientId) || messageServerId || `${senderId}-${createTime}`,
     conversationId: text(row.conversationId),
@@ -563,6 +563,28 @@ export function auditStateLabel(state: string): string {
   if (state === "ACTIVE") return "处理中";
   if (state === "CLOSED") return "已结束";
   return "暂无法识别，请刷新核对";
+}
+
+/**
+ * Round rows are inserted a beat after the message that opens the round, so the
+ * window starts a bounded lookback before createdAt. Adjacent windows meet at
+ * the next round's shifted start, keeping the next round's trigger out.
+ */
+export const ROUND_WINDOW_LOOKBACK_MS = 10_000;
+export function roundTimeWindow(
+  rounds: readonly { id: string; createdAt: string }[],
+  roundId: string,
+): { start: number; end: number } | null {
+  const round = rounds.find((item) => item.id === roundId);
+  const createdAt = round ? Date.parse(round.createdAt) : Number.NaN;
+  if (!Number.isFinite(createdAt)) return null;
+  const start = createdAt - ROUND_WINDOW_LOOKBACK_MS;
+  let end = Number.POSITIVE_INFINITY;
+  for (const item of rounds) {
+    const at = Date.parse(item.createdAt);
+    if (Number.isFinite(at) && at > createdAt) end = Math.min(end, at - ROUND_WINDOW_LOOKBACK_MS);
+  }
+  return { start, end: Math.max(start, end) };
 }
 
 /** 状态（可用/暂停/离线）沿用工作台现有文案；可接待但通道未连时不能只说“可接待”。 */
