@@ -73,6 +73,7 @@ test('paid legacy states without continuation support stay visible for manual re
     f.dataset.populationSha256=createHash('sha256').update(JSON.stringify(f.dataset.population)).digest('hex');f.dataset.sourceRef='source';
     const counts={'2':0,'6':0,'7':0};counts[status]=1;
     f.dataset.domains.continuations={unsupportedStatuses:counts,preparedEvidence:{commissionPolicy:'ACTIVE_OR_SETTLED_SOURCE_V1'}};
+    f.dataset.domains.liabilities={source:0};
     const proof=await verifySelectedPopulationFiles({datasetDir:'dataset',sourceDir:'source',...f});
     assert.deepEqual(proof.unsupportedContinuations,{...counts,total:1});
     counts[status]=0;
@@ -97,6 +98,7 @@ test('selected-scope preflight compares continuation fields and commissions befo
     digest:createHash('sha256').update(value).digest('hex'),evidenceRef:'source:la_distribution_order:'+commission.id}]};
   f.rows['target-continuations']=[continuation];f.dataset.files.continuations={file:'target-continuations',rows:1};
   f.dataset.domains.continuations={unsupportedStatuses:{'2':0,'6':0,'7':0},preparedEvidence:{commissionPolicy:'ACTIVE_OR_SETTLED_SOURCE_V1'}};
+  f.dataset.domains.liabilities={source:0};
   await verifySelectedPopulationFiles({datasetDir:'dataset',sourceDir:'source',...f});
   continuation.source.orderPrices.awm='99.00';
   await assert.rejects(verifySelectedPopulationFiles({datasetDir:'dataset',sourceDir:'source',...f}),/CONTINUATION_SOURCE_FACT_CHANGED/);

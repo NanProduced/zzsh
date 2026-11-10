@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import {test} from 'node:test';
-import {assertFundsWriterCoverage,assertRebuiltEmptyCoverageChunk,assertRebuiltEmptyCoverageManifest,continuationCommissionEffects,createEmptyCoverageSink,isPreparedRefundRelationshipVerified,safeLegacyWithdrawalEvidence} from './local-funds-plan.mjs';
+import {assertFundsWriterCoverage,assertPendingCommissionCoverage,assertRebuiltEmptyCoverageChunk,assertRebuiltEmptyCoverageManifest,continuationCommissionEffects,createEmptyCoverageSink,isPreparedRefundRelationshipVerified,safeLegacyWithdrawalEvidence} from './local-funds-plan.mjs';
 import {isExactLegacyRefundRelationship,LEGACY_REFUND_RELATIONSHIP_POLICY} from './local-source-adapter.mjs';
 
 test('a refund relationship needs the original order, user and nonblank matching number',()=>{
@@ -20,6 +20,15 @@ test('settled and void commission evidence never creates another pending duty',(
   'supply/legacy-user-migration':{legacyOwnerUserId:()=> 'user-44'}};
  const effects=continuationCommissionEffects([{body:{orderId:'order-1',sourceDigest:'digest',source:{commissions}}}],name=>modules[name]);
  assert.equal(effects.length,1);assert.equal(effects[0].sourceRecordId,'1');assert.equal(effects[0].status,'PENDING');
+});
+
+test('pending commission coverage checks source identities and values, not only counts',()=>{
+ const original={id:'1',order_id:'7',status:'1',earnings:'1.00'},source=new Map([[original.id,original]]);
+ const rows=[{parentLegacyOrderId:'7',sourceRecord:{...original}}];
+ assert.doesNotThrow(()=>assertPendingCommissionCoverage(rows,source));
+ for(const changed of [[],[{...rows[0],parentLegacyOrderId:'8'}],[{...rows[0],sourceRecord:{...original,earnings:'2.00'}}],
+  [{...rows[0],sourceRecord:{...original,id:'2'}}],[rows[0],rows[0]]])
+  assert.throws(()=>assertPendingCommissionCoverage(changed,source),/FUNDS_PENDING_COMMISSION_SOURCE_SET_CHANGED/);
 });
 
 test('streamed empty coverage is checked against regenerated source, exact bytes and ordered manifest',()=>{

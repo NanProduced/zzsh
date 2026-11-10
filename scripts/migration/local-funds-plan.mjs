@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { createReadStream, readFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
+import { isDeepStrictEqual } from "node:util";
 import { assertContinuationCommissionCoverage, assertContinuationSourceCoverage, isExactLegacyRefundRelationship, LEGACY_REFUND_RELATIONSHIP_POLICY, NEXT_CONTINUATION_COMMISSION_POLICY, NEXT_CONTINUATION_POLICY, readBoundSourceRows, sourceFinanceObservation } from "./local-source-adapter.mjs";
 
 const sha = value => createHash("sha256").update(value).digest("hex");
@@ -78,6 +79,11 @@ export function createEmptyCoverageSink({ onChunk = null } = {}) {
 export function continuationCommissionEffects(rows,mod){
  const model=mod("order/legacy-continuation-model"),users=mod("supply/legacy-user-migration");
  return rows.flatMap(({body})=>body.source.commissions.filter(c=>c.status==='1').map(c=>({dutyId:model.legacyEconomicDutyId(body.orderId,'COMMISSION',c.id),kind:'COMMISSION',sourceRecordId:c.id,amountCents:model.legacyPlanYuanToCents(c.storedEarnings),beneficiaryUserId:users.legacyOwnerUserId('legacy_mysql_restore','la_user',c.beneficiaryId),level:c.level,ratio:c.ratio,sourceDigest:body.sourceDigest,status:'PENDING',settledBy:null})));
+}
+export function assertPendingCommissionCoverage(rows,source){
+ const seen=new Set();for(const row of rows){const raw=source.get(row?.sourceRecord?.id);
+  if(!raw||seen.has(raw.id)||row.parentLegacyOrderId!==raw.order_id||!isDeepStrictEqual(row.sourceRecord,raw))throw Error('FUNDS_PENDING_COMMISSION_SOURCE_SET_CHANGED');seen.add(raw.id);}
+ if(seen.size!==source.size)throw Error('FUNDS_PENDING_COMMISSION_SOURCE_SET_CHANGED');
 }
 
 const restrictedWithdrawalFields=["real_name","account","money_qr_code","apply_remark","pay_desc","pay_search_result","audit_remark","transfer_voucher","transfer_remark","bank_card_no","bank_name","mobile","admin_id"];
@@ -231,13 +237,15 @@ if (fundsSource) {
  const listingDepositExclusion={schema:"zzsh.listing-deposit-exclusion.v1",policy:"NOT_MIGRATED_OWNER_CONFIRMED_NO_OUTSTANDING",
   sourcePayments:listingDepositPays.length,sourcePaymentAmountCents:listingDepositPays.reduce((n,raw)=>n+BigInt(mod("finance/personal-finance-read").sourceYuanToCents(raw.pay_money)),0n).toString(),
   sourceAccountsWithPaidMark:source.accounts.filter(raw=>raw.pay_is==="1").length,sourceAccountsWithReturnMark:source.accounts.filter(raw=>raw.return_is==="1").length,targetRows:0};
- let completedPending=0,continuationPending=0,pendingAmount=0n;
+ let completedPending=0,continuationPending=0,pendingAmount=0n;const pendingSource=new Map();
  for(const row of source.distributionOrders)if(row.status==="1"&&row.is_delete==="0"){
+  if(verifyContinuation&&(row.order_type!=='1'||pendingSource.has(row.id)))throw Error('FUNDS_PENDING_COMMISSION_SOURCE_INVALID');pendingSource.set(row.id,row);
   const parent=orderById.get(row.order_id);if(parent?.order_status==="4")completedPending++;else if(["3","8","9"].includes(parent?.order_status))continuationPending++;else throw Error("FUNDS_PENDING_COMMISSION_PARENT_NOT_CLOSED");
   pendingAmount+=BigInt(mod("finance/personal-finance-read").sourceYuanToCents(row.earnings));
  }
  const continuationRows=[];for await(const row of readBoundSourceRows(domainFile("continuations"),manifest.files.continuations))continuationRows.push(row);
  const pendingRows=[];for await(const row of readBoundSourceRows(domainFile("pending-commissions"),manifest.files["pending-commissions"]))pendingRows.push(row);
+ if(verifyContinuation)assertPendingCommissionCoverage(pendingRows,pendingSource);
  const continuationPolicy=manifest.domains?.continuations?.preparedEvidence;
  if(verifyContinuation){
   if(continuationPolicy.commissionPolicy!==NEXT_CONTINUATION_COMMISSION_POLICY)throw Error('CONTINUATION_COMMISSION_POLICY_UNPROVEN');

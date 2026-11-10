@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { createRequire } from 'node:module';
 import test from 'node:test';
-import { assertContinuationCommissionCoverage, assertContinuationSourceCoverage, assertNextBusinessPopulation, buildNextContinuationRows, expectedContinuationImports, includeContinuationCommission, inspectUnresolvedRefundSource, NEXT_CONTINUATION_COMMISSION_POLICY, NEXT_CONTINUATION_POLICY, sourceContinuation } from './local-source-adapter.mjs';
+import { assertContinuationCommissionCoverage, assertContinuationSourceCoverage, assertLegacyLiabilitySourceCoverage, assertNextBusinessPopulation, buildNextContinuationRows, expectedContinuationImports, includeContinuationCommission, inspectUnresolvedRefundSource, NEXT_CONTINUATION_COMMISSION_POLICY, NEXT_CONTINUATION_POLICY, sourceContinuation } from './local-source-adapter.mjs';
 
 const source = (id, admission, reasons = []) => ({sourceId:id, parentSourceDigest:id.repeat(64), source:{legacyOrderId:id, admission, reasons}, admission, reasons, commissionEvidence:[], targetParentReady:true});
 const rows = () => [source('1','PARAMETER_COMPLETE'), source('2','ISOLATED',['MISSING_BASE_BOT'])];
@@ -91,6 +91,19 @@ test('continuation prices, quantities, payment and policy must match the indepen
  assert.throws(()=>assertContinuationSourceCoverage([],sources),/ORDER_SET_CHANGED/);
  assert.throws(()=>assertContinuationSourceCoverage([row],{...sources,accounts:[]}),/ORDER_UNAVAILABLE/);
  assert.throws(()=>assertContinuationSourceCoverage([row],{...sources,tradePolicy:[...tradePolicy,tradePolicy[1]]}),/POLICY_INVALID/);
+});
+
+test('liability source closure includes multiple original refunds and rejects omitted or changed records',()=>{
+ const orders=[{id:'1',pay_is:'1',order_status:'4',is_settle:'0'},{id:'2',pay_is:'1',order_status:'5',is_settle:'0',return_order_money:'5.00'}];
+ const refunds=[{id:'r1',order_type:'order',order_id:'2'},{id:'r2',order_type:'order',order_id:'2'}],ready=new Set(['1','2']);
+ const liabilities=[{sourceId:'1',classification:'COMPLETED_UNREFUNDED',originalOrder:orders[0],refundRecords:[],targetParentReady:true},
+  {sourceId:'2',classification:'REFUND_RECORD_EXISTS',originalOrder:orders[1],refundRecords:refunds,targetParentReady:true}];
+ const proof=assertLegacyLiabilitySourceCoverage(liabilities,orders,refunds,ready);
+ assert.equal(proof.total,2);assert.equal(proof.byClassification.REFUND_RECORD_EXISTS,1);
+ assert.throws(()=>assertLegacyLiabilitySourceCoverage(liabilities.slice(0,1),orders,refunds,ready),/LIABILITY_SOURCE_FACT_CHANGED/);
+ const changed=structuredClone(liabilities);changed[1].refundRecords.pop();
+ assert.throws(()=>assertLegacyLiabilitySourceCoverage(changed,orders,refunds,ready),/LIABILITY_SOURCE_FACT_CHANGED/);
+ assert.throws(()=>assertLegacyLiabilitySourceCoverage(liabilities,[orders[0],{...orders[1],return_order_money:'bad'}],refunds,ready),/LIABILITY_SOURCE_AMOUNT_INVALID/);
 });
 
 test('unresolved refund source retains exact original order fields; malformed or missing evidence is never treated as absence',()=>{

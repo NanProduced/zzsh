@@ -4,7 +4,7 @@ import { existsSync, lstatSync, readFileSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
-import { assertContinuationCommissionCoverage, assertContinuationSourceCoverage, isExactLegacyRefundRelationship, NEXT_CONTINUATION_COMMISSION_POLICY, readVerifiedSourceRows, unsupportedLegacyContinuationStatus } from './local-source-adapter.mjs';
+import { assertContinuationCommissionCoverage, assertContinuationSourceCoverage, assertLegacyLiabilitySourceCoverage, isExactLegacyRefundRelationship, NEXT_CONTINUATION_COMMISSION_POLICY, readVerifiedSourceRows, unsupportedLegacyContinuationStatus } from './local-source-adapter.mjs';
 import { assertCapturedPopulation, directFullDomains, partitionSourceKeys, retainedFullDomains } from './full-source-scope.mjs';
 import { assertSelectedScopeForWrite } from './selected-business-scope.mjs';
 import { writePrivate } from '../local-auth.mjs';
@@ -49,7 +49,7 @@ export async function verifySelectedPopulationFiles({datasetDir,sourceDir,datase
  const selected={accounts:new Set(scope.write.accounts),orders:new Set(scope.write.orders)};
  const verifyContinuationStatus=dataset?.domains?.continuations?.preparedEvidence?.commissionPolicy===NEXT_CONTINUATION_COMMISSION_POLICY;
  const unsupportedStatuses={'2':0,'6':0,'7':0};
- const continuationSources={accounts:[],orders:[],pays:[],tradePolicy:[]},continuationCommissions=[];
+ const continuationSources={accounts:[],orders:[],pays:[],tradePolicy:[]},continuationCommissions=[],sourceRefunds=[];
  const users=new Set(),accounts=new Map(),orders=new Map(),paid=new Set();let missingPaidReference=false;
  for(const name of ['users','accounts','orders','pays']){
   assert(source.files?.[name]&&population.domains?.[name],'SELECTED_SCOPE_SOURCE_DOMAIN_MISSING');
@@ -140,6 +140,7 @@ export async function verifySelectedPopulationFiles({datasetDir,sourceDir,datase
   assert(typeof row?.id==='string'&&row.id&&!refundIds.has(row.id),'SELECTED_SCOPE_SOURCE_KEY_INVALID');
   assert(['user_id','order_type','order_id','order_sn'].every(field=>Object.hasOwn(row,field)),'SELECTED_SCOPE_REFUND_FIELDS_MISSING');
   refundIds.add(row.id);refundParents.captured++;refundDigest.update(JSON.stringify(row.id)+'\n');
+  if(verifyContinuationStatus&&selected.orders.has(row.order_id))sourceRefunds.push(row);
   assert(users.has(row.user_id),'SELECTED_SCOPE_REFUND_USER_NOT_CAPTURED');
   if(!readyUsers.has(row.user_id)){refundParents.subjectIsolated++;return;}
   assert(row.order_type==='order','SELECTED_SCOPE_REFUND_TYPE_NOT_SUPPORTED');
@@ -150,6 +151,7 @@ export async function verifySelectedPopulationFiles({datasetDir,sourceDir,datase
   refundParents.retainedOrder++;
  });
  assert(refundParents.captured===source.files.refunds.rows&&population.domains.refunds.capturedIdsSha256===refundDigest.digest('hex'),'SELECTED_SCOPE_CAPTURE_DIGEST_MISMATCH');
+ let liabilitySource;
  if(verifyContinuationStatus){
   assert.deepEqual(dataset.domains.continuations.unsupportedStatuses,unsupportedStatuses,'SELECTED_SCOPE_CONTINUATION_STATUS_DRIFT');
   assert(source.files?.tradePolicy&&source.files?.distributionOrders,'SELECTED_SCOPE_CONTINUATION_SOURCES_MISSING');
@@ -159,9 +161,13 @@ export async function verifySelectedPopulationFiles({datasetDir,sourceDir,datase
   if(dataset.files?.continuations)await readRows(datasetDir,dataset.files.continuations,row=>continuations.push(row));
   assertContinuationSourceCoverage(continuations,continuationSources);
   assertContinuationCommissionCoverage(continuations,continuationCommissions,dataset.sourceRef);
+  const liabilities=[];
+  if(dataset.files?.liabilities)await readRows(datasetDir,dataset.files.liabilities,row=>liabilities.push(row));
+  liabilitySource=assertLegacyLiabilitySourceCoverage(liabilities,continuationSources.orders,sourceRefunds,readyOrders);
+  assert.equal(dataset.domains?.liabilities?.source,liabilitySource.total,'SELECTED_SCOPE_LIABILITY_SOURCE_COUNT_DRIFT');
  }
  return {status:'SELECTED_SCOPE_SOURCE_AND_INPUT_VERIFIED_TARGET_NOT_RUN',...result,accountSnapshots,refundParents,
-  ...(verifyContinuationStatus?{unsupportedContinuations:{...unsupportedStatuses,total:Object.values(unsupportedStatuses).reduce((a,b)=>a+b,0)}}:{}),sourceConnections:0,targetConnections:0,targetWrites:0};
+  ...(verifyContinuationStatus?{liabilitySource,unsupportedContinuations:{...unsupportedStatuses,total:Object.values(unsupportedStatuses).reduce((a,b)=>a+b,0)}}:{}),sourceConnections:0,targetConnections:0,targetWrites:0};
 }
 export async function verifyPopulationFiles({datasetDir,sourceDir,dataset,source,readRows=checkedRows}){
  const expected=assertCapturedPopulation(dataset,source),keys={},ready={},isolated={},retained={};

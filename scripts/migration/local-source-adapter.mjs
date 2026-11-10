@@ -87,6 +87,38 @@ export function assertContinuationSourceCoverage(continuations, sources) {
     if(!isDeepStrictEqual(source,expected))throw new Error('CONTINUATION_SOURCE_FACT_CHANGED');
   }
 }
+/** Check the complete source set of historical refund and settlement liabilities. */
+export function assertLegacyLiabilitySourceCoverage(liabilities, orders, refunds, readyOrderIds) {
+  if (![liabilities,orders,refunds].every(Array.isArray) || !(readyOrderIds instanceof Set)) throw new Error('LIABILITY_SOURCE_INPUTS_UNAVAILABLE');
+  const refundByOrder=new Map();
+  for(const row of refunds)if(row.order_type==='order'){
+    if(!refundByOrder.has(row.order_id))refundByOrder.set(row.order_id,[]);refundByOrder.get(row.order_id).push(row);
+  }
+  const actual=new Map();for(const row of liabilities){
+    if(typeof row?.sourceId!=='string'||actual.has(row.sourceId))throw new Error('LIABILITY_SOURCE_DUPLICATE');actual.set(row.sourceId,row);
+  }
+  const counts={COMPLETED_UNREFUNDED:0,DETAINED:0,POSTED_CONFISCATION:0,REFUND_RECORD_EXISTS:0};
+  for(const raw of orders){
+    if(raw.pay_is!=='1')continue;
+    let classification=null;
+    if(raw.order_status==='4'&&raw.is_settle==='0')classification='COMPLETED_UNREFUNDED';
+    else if(raw.order_status==='4'&&raw.is_settle==='2')classification='DETAINED';
+    else if(raw.is_settle==='3')classification='POSTED_CONFISCATION';
+    else if(raw.order_status==='5'&&raw.return_order_money!==null){
+      const amount=raw.return_order_money;
+      if(typeof amount!=='string'||! /^-?(0|[1-9]\d{0,21})\.\d{2}$/.test(amount)||amount==='-0.00')throw new Error('LIABILITY_SOURCE_AMOUNT_INVALID');
+      if(BigInt(amount.replace('.',''))>0n&&(refundByOrder.get(raw.id)?.length??0)>0)classification='REFUND_RECORD_EXISTS';
+    }
+    if(!classification)continue;
+    counts[classification]++;const row=actual.get(raw.id);
+    if(!row||row.classification!==classification||!isDeepStrictEqual(row.originalOrder,raw)
+       ||!isDeepStrictEqual(row.refundRecords,refundByOrder.get(raw.id)??[])||row.targetParentReady!==readyOrderIds.has(raw.id))
+      throw new Error('LIABILITY_SOURCE_FACT_CHANGED');
+    actual.delete(raw.id);
+  }
+  if(actual.size)throw new Error('LIABILITY_SOURCE_SET_CHANGED');
+  return {total:Object.values(counts).reduce((a,b)=>a+b,0),byClassification:counts};
+}
 /** Full capture is input evidence; NEXT writes only the owner's selected account/order population. */
 export function assertNextBusinessPopulation(population, isNext) {
   if (isNext !== true && isNext !== false) throw new Error('MIGRATION_PROFILE_FLAG_UNPROVEN');
