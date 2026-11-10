@@ -452,6 +452,11 @@ export function OrderWorkbenchPane({ identity, adminUserId, operatorName, client
     const coinQuantity = sumQuantity(coinLines);
     const coinAmount = sumAmount(coinLines);
     const itemAmount = sumAmount(itemLines);
+    const itemNameCounts = new Map<string, number>();
+    for (const line of itemLines) {
+      const name = line.name?.trim() || "物资";
+      itemNameCounts.set(name, (itemNameCounts.get(name) ?? 0) + 1);
+    }
     const buyer = info.members.find((member) => member.party === "BUYER");
     const owner = info.members.find((member) => member.party === "OWNER");
     const renterPaidCents = centsOf(info.terms?.staff?.buyerTotal);
@@ -488,10 +493,15 @@ export function OrderWorkbenchPane({ identity, adminUserId, operatorName, client
                       <em data-unknown={itemAmount === null ? "true" : undefined}>{itemAmount === null ? "总价待核对" : yuanOf(itemAmount)}</em>
                     </span>
                   </div>
-                  {itemLines.map((line, index) => <div className="im-rail-value-item" key={`${line.itemId}-${index}`}>
-                    <span>{line.name ?? "物资"}</span>
-                    <b>{line.quantity}{line.unit ? ` ${UNIT_LABELS[line.unit] ?? line.unit}` : ""}</b>
-                  </div>)}
+                  {itemLines.map((line, index) => {
+                    const name = line.name?.trim() || "物资";
+                    const duplicate = (itemNameCounts.get(name) ?? 0) > 1;
+                    const lineAmount = amountOf(line);
+                    return <div className="im-rail-value-item" key={`${line.itemId}-${index}`}>
+                      <span>{name}{duplicate ? <small className="im-rail-value-spec">{lineAmount === null ? `#${line.itemId.slice(-6)}` : yuanOf(lineAmount)}</small> : null}</span>
+                      <b>{line.quantity}{line.unit ? ` ${UNIT_LABELS[line.unit] ?? line.unit}` : ""}</b>
+                    </div>;
+                  })}
                 </> : null}
                 {renterPaidCents !== null ? <div className="im-rail-value-line" data-kind="paid-total">
                   <span className="im-rail-value-name">租客合计</span>

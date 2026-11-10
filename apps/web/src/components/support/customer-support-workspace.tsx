@@ -1,10 +1,11 @@
 "use client";
 import { NIM_RECEIPT_PENDING, oldestNimMessage } from "@zzsh/im-client/nim-web-client";
+import { imSystemNoticeLabel } from "@zzsh/im-client/message-state";
 import { ProfileImage } from "@zzsh/ui/profile-image";
 import { SessionLoading } from "../auth/session-loading";
 
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type ChangeEvent, type ClipboardEvent as ReactClipboardEvent, type FormEvent, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent, type ReactNode } from "react";
-import { ArrowDown, BellOff, Check, ChevronLeft, ChevronRight, CircleAlert, FileText, Headphones, ImagePlus, Info, Paperclip, Pin, ReceiptText, ShieldCheck, Smile, UserRound, Video, Wifi, WifiOff, X } from "lucide-react";
+import { ArrowDown, BellOff, Check, ChevronLeft, ChevronRight, CircleAlert, FileText, Headphones, ImagePlus, Paperclip, Pin, ReceiptText, ShieldCheck, Smile, UserRound, Video, Wifi, WifiOff, X } from "lucide-react";
 import * as Popover from "@radix-ui/react-popover";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { MessageScroller as MessageScrollerPrimitive } from "@shadcn/react/message-scroller";
@@ -343,14 +344,16 @@ const SERVER_SYSTEM_NOTICE_KINDS = new Set([
   "TEAM_CREATED", "MEMBER_JOINED", "MEMBER_LEFT", "TEAM_UPDATED", "TEAM_DISMISSED", "UNKNOWN",
 ]);
 
-/** Only a shape-valid server notice is trusted; anything else falls back to the shared decoder. */
+const SUPPORT_WHEEL_SCROLLERS = ".support-message-viewport,.support-context-panel,.support-conversation-list,.support-verified-orders-list,.order-team-messages,.order-team-list";
+
+/** Only a shape-valid server notice is trusted; the display picks the scope-specific wording. */
 function serverSystemNotice(message: NimMessageLike): ImSystemNotice | null {
   const notice: unknown = message.systemNotice;
   if (message.messageType !== 5 || !notice || typeof notice !== "object" || Array.isArray(notice)) return null;
-  const { kind, text } = notice as { kind?: unknown; text?: unknown };
-  if (typeof kind !== "string" || !SERVER_SYSTEM_NOTICE_KINDS.has(kind)
-    || typeof text !== "string" || !isImSystemNoticeText(text)) return null;
-  return { kind: kind as ImSystemNotice["kind"], text: text.trim() };
+  const { kind } = notice as { kind?: unknown };
+  if (typeof kind !== "string" || !SERVER_SYSTEM_NOTICE_KINDS.has(kind)) return null;
+  const typed = kind as ImSystemNotice["kind"];
+  return { kind: typed, text: imSystemNoticeLabel(typed, "ORDER") ?? "" };
 }
 
 export function messageFromNim(message: NimMessageLike, accountId: string): SupportMessage | null {
@@ -613,7 +616,6 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, vi
   const narrowViewport = useSyncExternalStore(subscribeSupportViewport, supportViewportNarrow, () => false);
   const [contextOpen, setContextOpen] = useState(false);
   const [emojiOpen, setEmojiOpen] = useState(false);
-  const [orderPopoverOpen, setOrderPopoverOpen] = useState(false);
   const [connection, setConnection] = useState<NimWebConnectionState | "idle" | "error">(preview ? "idle" : "idle");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
@@ -666,6 +668,7 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, vi
   const fileInputRef = useRef<HTMLInputElement>(null);
   const draftRef = useRef<HTMLTextAreaElement>(null);
   const gridRef = useRef<HTMLDivElement>(null);
+  const workspaceRootRef = useRef<HTMLElement>(null);
   const chatHeadingRef = useRef<HTMLElement | null>(null);
   const previousPanelViewRef = useRef(panelView);
   const composingRef = useRef(false);
@@ -684,6 +687,20 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, vi
   useEffect(()=>{entryIntentRef.current=initialType;},[initialType,requestSerial]);
   const validOrderContext=session.status==="authenticated"&&initialOrderContext?.userId&&initialOrderContext.userId===session.userId?initialOrderContext:undefined;
   const subjectRef = useMemo(() => validOrderContext?.subjectRef??subjectRefFromLocation(), [validOrderContext?.subjectRef,requestSerial]);
+
+  // The support window is non-modal; wheel over its chrome must not scroll the page behind it.
+  useEffect(() => {
+    const root = workspaceRootRef.current;
+    if (!root) return;
+    const scope = root.closest<HTMLElement>(".support-dialog-content") ?? root;
+    const onWheel = (event: WheelEvent) => {
+      const container = event.target instanceof Element ? event.target.closest<HTMLElement>(SUPPORT_WHEEL_SCROLLERS) : null;
+      if (container && container.scrollHeight > container.clientHeight) return;
+      event.preventDefault();
+    };
+    scope.addEventListener("wheel", onWheel, { passive: false });
+    return () => scope.removeEventListener("wheel", onWheel);
+  }, [session.status, visible, preview]);
 
   const lastAuthenticatedIdentityRef = useRef<string | null>(null);
   if (session.status === "authenticated" && session.userId) {
@@ -1211,7 +1228,7 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, vi
   const activeReply = replyTargets[activeConversationKey] ?? null;
   const selectedMedia = mediaDrafts[activeConversationKey] ?? null;
   const sendOrderReference = (order: OrderReference) => {
-    setOrderPopoverOpen(false); setContextOpen(false);
+    setContextOpen(false);
     void sendMessage(undefined, order);
   };
   const mediaInFlight = Boolean(selectedMedia?.state === "SENDING" || mediaFlights.current.has(activeConversationKey) || mediaSending);
@@ -1350,9 +1367,14 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, vi
   let timelineDay = "";
   // Bot 欢迎/阶段卡覆盖建群和成员变化时不再重复技术通知；没有 Bot 覆盖时保留一条兜底。
   const botAccountId = activeConversation?.botAccountId ?? null;
+  const noticeScope = activeConversation?.type === "COMPLAINT" ? "COMPLAINT" : "SERVICE";
   const timelineMessages = collapseImSystemNotices(activeMessages, {
     hasBotMessage: Boolean(botAccountId && activeMessages.some((message) => message.from !== "system" && !message.revoked && message.senderId === botAccountId)),
     noticeOf: (message) => message.notice ?? null,
+  }).flatMap((message) => {
+    if (!message.notice) return [message];
+    const text = imSystemNoticeLabel(message.notice.kind, noticeScope);
+    return text === null ? [] : [{ ...message, text }];
   });
   const timelineItems: ReactNode[] = timelineMessages.map((message,index) => {
     const previous=timelineMessages[index-1];
@@ -2395,7 +2417,7 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, vi
             : "本轮咨询已结束，发送消息即可开始新咨询"
       : "点击在线客服开始咨询";
 
-  const consultationView = <section className={`support-workspace${embedded ? " support-workspace-embedded" : ""}`} data-preview={preview} aria-label="客服咨询窗口">
+  const consultationView = <section ref={workspaceRootRef} className={`support-workspace${embedded ? " support-workspace-embedded" : ""}`} data-preview={preview} aria-label="客服咨询窗口">
     {error && connection !== "error" && connection !== "DISCONNECTED" ? <div className="support-inline-error" role="alert"><CircleAlert size={15} />{error}</div> : null}
     <div className="support-workspace-grid" ref={gridRef} data-view={preview ? panelView : "chat"}>
       {preview ? <nav className="support-conversation-list" aria-label="咨询会话">
@@ -2407,7 +2429,6 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, vi
           <button type="button" className="support-back" data-action="back-to-conversations" onClick={() => setPanelView("list")}><ChevronLeft size={15} />会话记录</button>
           <div className="support-conversation-identity"><span className="support-live-dot" data-state={activeConversation?.state === "ACTIVE" ? "active" : "idle"} aria-hidden="true" /><div><h3>{currentTitle}</h3>{currentSubtitle ? <span>{currentSubtitle}</span> : null}</div></div>
           <div className="support-heading-actions">
-            {preview || subjectRef ? renderTooltip("商品上下文", <button type="button" className="support-icon-button" data-action="toggle-product-context" aria-expanded={contextOpen} aria-label="商品上下文" onClick={() => setContextOpen((value) => !value)}><Info size={16} /></button>) : null}
             {embedded ? renderTooltip("关闭客服窗口", <button type="button" className="support-icon-button" onClick={onClose} aria-label="关闭客服窗口"><X size={18} /></button>) : null}
           </div>
         </header>
@@ -2510,77 +2531,17 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, vi
             <div className="support-composer-footer">
               <div className="support-composer-tools">
                 <TooltipProvider delayDuration={200}>
-                  <Popover.Root open={orderPopoverOpen} onOpenChange={setOrderPopoverOpen}>
-                    <Tooltip>
-                      <TooltipTrigger asChild>
-                        <Popover.Trigger asChild>
-                          <button
-                            type="button"
-                            className="support-tool-btn"
-                            data-action="toggle-product-context"
-                            aria-expanded={orderPopoverOpen}
-                            aria-label="关联订单"
-                            disabled={preview ? busy : (!canSend || busy)}
-                            onClick={() => setOrderPopoverOpen((o) => !o)}
-                          >
-                            <ReceiptText size={16} />
-                          </button>
-                        </Popover.Trigger>
-                      </TooltipTrigger>
-                      <TooltipContent side="top">关联订单</TooltipContent>
-                    </Tooltip>
-                    <Popover.Portal>
-                      <Popover.Content
-                        side="top"
-                        align="start"
-                        sideOffset={8}
-                        className="support-order-popover-content"
-                      >
-                        <div className="support-order-popover-header">
-                          <strong>{section === "orders" ? "本单信息" : "关联订单"}</strong>
-                          <span className="support-order-popover-count">
-                            {preview ? "1 件演示商品" : `${orders.length} 笔订单`}
-                          </span>
-                        </div>
-                        {preview ? (
-                          <div className="support-verified-orders-list">
-                            <button
-                              type="button"
-                              className="support-verified-order-item"
-                              onClick={() => {
-                                sendOrderReference({ id: PREVIEW_PRODUCT.objectId, title: PREVIEW_PRODUCT.title, displayNo: PREVIEW_PRODUCT.objectId, party: "renter" });
-                              }}
-                            >
-                              <strong>{PREVIEW_PRODUCT.title}</strong>
-                              <span>演示商品 · {PREVIEW_PRODUCT.objectId}</span>
-                            </button>
-                          </div>
-                        ) : orders.length > 0 ? (
-                          <div className="support-verified-orders-list">
-                            {orders.map((ord) => (
-                              <button
-                                key={ord.id}
-                                type="button"
-                                className="support-verified-order-item"
-                                onClick={() => {
-                                  sendOrderReference(ord);
-                                }}
-                              >
-                                <strong>{ord.title}</strong>
-                                <span>尾号 {ord.displayNo} · {ord.party === "owner" ? "出租订单" : "租入订单"}</span>
-                              </button>
-                            ))}
-                          </div>
-                        ) : (
-                          <div className="support-context-empty">
-                            <ReceiptText size={20} />
-                            <strong>暂无可关联的订单</strong>
-                            <span>仅展示你当前已付款或出租中的真实订单。</span>
-                          </div>
-                        )}
-                      </Popover.Content>
-                    </Popover.Portal>
-                  </Popover.Root>
+                  {renderTooltip("关联订单", <button
+                    type="button"
+                    className="support-tool-btn"
+                    data-action="toggle-product-context"
+                    aria-expanded={contextOpen}
+                    aria-label="关联订单"
+                    disabled={preview ? busy : (!canSend || busy)}
+                    onClick={() => setContextOpen((open) => !open)}
+                  >
+                    <ReceiptText size={16} />
+                  </button>)}
 
                   <Popover.Root open={emojiOpen} onOpenChange={setEmojiOpen}>
                     <Tooltip>

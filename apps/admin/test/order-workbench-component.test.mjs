@@ -420,6 +420,35 @@ test("the rail treats zero-quantity inventory as absent and sums only frozen quo
   assert.doesNotMatch(aside.textContent, /买家合计|号主合计|平台贡献/, "no settlement split is repeated");
 });
 
+test("duplicate item names are distinguished by their frozen line amount", async (t) => {
+  const base = fixtureById("ready-three");
+  const terms = {
+    viewerParty: "STAFF", basis: "QUOTE", currency: "CNY", scale: 2, version: "quote-v1", rentalAmount: null, depositAmount: null, paidTotal: null,
+    staff: { buyerRentalAmount: "10018000", ownerRentalAmount: "9000000", buyerTotal: "10086000", ownerTotal: "9500000", platformContribution: "1018000" },
+    lines: [
+      { itemId: "item_ammo_a", name: "六级弹", quantity: "10", unitPrice: null, amount: null, buyerUnitPrice: "1200", ownerUnitPrice: "1000", buyerAmount: "12000", ownerAmount: "10000", platformContribution: "2000" },
+      { itemId: "item_ammo_b", name: "六级弹", quantity: "20", unitPrice: null, amount: null, buyerUnitPrice: "1200", ownerUnitPrice: "1000", buyerAmount: "24000", ownerAmount: "20000", platformContribution: "4000" },
+    ],
+  };
+  const fixture = {
+    ...base,
+    info: {
+      ...base.info, terms,
+      frozenInventory: [
+        { itemId: "item_ammo_a", quantity: "10", unit: "PIECE", pricingKind: "FIXED_UNIT", name: "六级弹" },
+        { itemId: "item_ammo_b", quantity: "20", unit: "PIECE", pricingKind: "FIXED_UNIT", name: "六级弹" },
+      ],
+    },
+  };
+  const { node, until } = await mount(t, "ready-three-duplicate-names", { fixture });
+  await until(() => node.querySelector("#im-order-details .im-rail-value"), "value loaded");
+  const rows = [...node.querySelectorAll("#im-order-details .im-rail-value-item")];
+  assert.equal(rows.length, 2, "both same-name items still render");
+  assert.match(rows[0].textContent, /六级弹/);
+  assert.match(rows[0].textContent, /¥120\.00/, "the first duplicate line names its frozen amount");
+  assert.match(rows[1].textContent, /¥240\.00/, "the second duplicate line is distinguishable");
+});
+
 test("HAFF quantities use grouped millions with at most two decimals", async (t) => {
   const base = fixtureById("ready-three");
   const withHaff = (quantity) => ({
@@ -656,6 +685,59 @@ test("admin invites use the order-scoped bounded picker and report permission, u
   assert.deepEqual(overridden[0], ["order-8842", "admin-candidate-2"]);
   assert.equal(writes.length, 1, "the overridden transport is the only writer");
   await settle();
+});
+
+test("terminal order groups invite only while the server communication window is open", async (t) => {
+  browser.localStorage.clear();
+  const base = fixtureById("ready-three");
+  const serverNow = "2026-10-11T12:00:00.000Z";
+  const open = { ...base, info: { ...base.info, orderStatus: "CANCELLED", terminalSendAllowed: true, sendUntil: "2026-10-12T12:00:00.000Z", serverNow } };
+  const opened = await mount(t, "terminal-window-open", { fixture: open });
+  const openDrawer = await openGroupSettings(opened.node, opened.until);
+  const invite = openDrawer.querySelector('[data-action="open-admin-invite"]');
+  assert.ok(invite, "the ended order still exposes the invite entry inside the window");
+  assert.match(openDrawer.textContent, /订单已结束，仍可在沟通窗口内邀请（至 .*）/);
+  await click(invite);
+  await opened.until(() => openDrawer.querySelector(".im-og-picker"), "invite picker opens for a terminal order");
+
+  const expired = {
+    ...base,
+    info: { ...base.info, orderStatus: "CANCELLED", terminalSendAllowed: true, sendUntil: "2026-10-11T10:00:00.000Z", serverNow },
+  };
+  const closed = await mount(t, "terminal-window-expired", { fixture: expired });
+  const closedDrawer = await openGroupSettings(closed.node, closed.until);
+  assert.equal(closedDrawer.querySelector('[data-action="open-admin-invite"]'), null, "an expired sendUntil hides the invite entry even when the server flag is true");
+  assert.equal(closedDrawer.querySelector(".im-og-picker"), null);
+  assert.match(closedDrawer.textContent, /订单已结束，沟通窗口已关闭，无法邀请/);
+
+  const denied = {
+    ...base,
+    info: { ...base.info, orderStatus: "CANCELLED", terminalSendAllowed: false, sendUntil: "2026-10-12T12:00:00.000Z", serverNow },
+  };
+  const blocked = await mount(t, "terminal-window-denied", { fixture: denied });
+  const blockedDrawer = await openGroupSettings(blocked.node, blocked.until);
+  assert.equal(blockedDrawer.querySelector('[data-action="open-admin-invite"]'), null, "terminalSendAllowed=false hides the invite entry");
+  assert.match(blockedDrawer.textContent, /订单已结束，沟通窗口已关闭，无法邀请/);
+});
+
+test("an order group viewer outside the JOINED staff list cannot invite administrators", async (t) => {
+  browser.localStorage.clear();
+  const base = fixtureById("ready-three");
+  const fixture = {
+    ...base,
+    info: {
+      ...base.info,
+      members: [
+        { platformId: "10001", accountId: "tenant-account", party: "BUYER", name: "小林", avatar: null },
+        { platformId: "20002", accountId: "owner-account", party: "OWNER", name: "老陈", avatar: null },
+        { platformId: "30004", accountId: "staff-b-account", party: "STAFF", name: "小李", avatar: null },
+      ],
+    },
+  };
+  const { node, until } = await mount(t, "viewer-not-joined", { fixture });
+  const drawer = await openGroupSettings(node, until);
+  assert.equal(drawer.querySelector('[data-action="open-admin-invite"]'), null, "a non-JOINED viewer gets no invite entry");
+  assert.match(drawer.textContent, /仅群内客服可邀请/);
 });
 
 test("pin, mute and local hide are per-admin preferences and hiding never leaves the group", async (t) => {

@@ -296,6 +296,7 @@ test("messages keep real sender identity, notices stay neutral, and only own mes
     post: null,
     history: [
       { messageClientId: "n-1", messageServerId: "n-1", conversationId: "conv-a", senderId: "user-a", createTime: Date.parse("2026-09-17T00:01:00.000Z"), messageType: 5, attachment: { type: 0 } },
+      { messageClientId: "n-2", messageServerId: "n-2", conversationId: "conv-a", senderId: "system", createTime: Date.parse("2026-09-17T00:01:30.000Z"), messageType: 5, attachment: { type: 3 } },
       { messageClientId: "m-1", messageServerId: "m-1", conversationId: "conv-a", senderId: "user-a", createTime: Date.parse("2026-09-17T00:02:00.000Z"), messageType: 0, text: "用户提问" },
       { messageClientId: "m-2", messageServerId: "m-2", conversationId: "conv-a", senderId: "admin-a", createTime: Date.parse("2026-09-17T00:03:00.000Z"), messageType: 0, text: "客服回复" },
       { messageClientId: "m-3", messageServerId: "m-3", conversationId: "conv-a", senderId: "admin-other", createTime: Date.parse("2026-09-17T00:04:00.000Z"), messageType: 0, text: "另一位客服" },
@@ -307,7 +308,8 @@ test("messages keep real sender identity, notices stay neutral, and only own mes
 
   const system = rootNode.querySelector(".im-wb-sys");
   assert.ok(system, "a TEAM_INVITE notification renders as a system line, not a bubble");
-  assert.equal(system.textContent, "成员已加入会话");
+  assert.equal(system.textContent, "客服已接入");
+  assert.doesNotMatch(rootNode.textContent, /会话信息已更新/, "TEAM_UPDATED is hidden in support threads");
   assert.equal(rootNode.querySelectorAll('.im-wb-msg[data-from="system"]').length, 0, "a notice is never attributed to a speaker");
   assert.doesNotMatch(rootNode.textContent, /暂不支持展示的消息类型/, "known notice types are decoded instead of dumped");
 
@@ -360,7 +362,7 @@ test("repeated team notices without Bot coverage collapse to one system line", a
   await selectFirst(rootNode);
   await waitFor(() => rootNode.querySelector(".im-wb-sys"));
   assert.equal(rootNode.querySelectorAll(".im-wb-sys").length, 1, "consecutive identical team notices merge into one fallback line");
-  assert.match(rootNode.querySelector(".im-wb-sys").textContent, /群聊已创建/);
+  assert.match(rootNode.querySelector(".im-wb-sys").textContent, /咨询已开始/);
 });
 
 

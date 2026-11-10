@@ -9,13 +9,41 @@ import { conflict, invalid, notFound } from "../supply/supply-util";
 import { lockLegacyContinuationOrder } from "./legacy-continuation-evidence";
 import { authorizeLegacyFinanceDuty, postLegacyFinanceDuty, type LegacyFinanceDutyAuthority } from "./legacy-finance-duty";
 import { readLegacyDutyBasis } from "./legacy-duty-basis";
-import { readLockedLegacyRefundSource } from "./legacy-refund-review-source";
-import type { LegacyContinuationActor } from "./legacy-continuation-model";
+import { hasLegacyRecordedRefunds, readLockedLegacyRefundSource } from "./legacy-refund-review-source";
+import { legacyPlanYuanToCents, type LegacyContinuationActor } from "./legacy-continuation-model";
 
 // TODO(正式上线前): 移除旧单测试退款适配，不能把模拟假设用于真实退款。
 type Input={dutyId:string;expectedDutyRevision:string;expectedHeadRevision:string;assumption:"SIMULATION_ASSUME_NO_PRIOR_REFUND";reason:string};
 const sha=(value:string)=>createHash("sha256").update(value).digest("hex");
 const unavailable=()=>new SecurityApiError(503,"EVIDENCE_UNAVAILABLE","旧单模拟退款记录暂不可核实");
+
+/** Test-only channel completion; failures leave the original cancellation and refund duty intact. */
+export async function simulateLegacyCancellationRefund(client:PoolClient,actor:LegacyContinuationActor,orderId:string,demo:DemoFinanceResource) {
+  await client.query("SAVEPOINT demo_legacy_cancel_refund");
+  try {
+    const authority=await authorizeLegacyFinanceDuty(client,actor,orderId,"RENTER_REFUND",true);
+    const {head,duties}=await lockLegacyContinuationOrder(client,orderId);
+    if(!head || head.command!=="SUPPORT_CANCEL" || String(head.stage)!=="5")throw conflict("ORDER_NOT_CANCELLED");
+    const refunds=duties.filter(d=>d.kind==="RENTER_REFUND" && d.continuationVersionId===head.id);
+    if(refunds.length>1)throw conflict("REFUND_DUTY_CONFLICT");
+    const duty=refunds[0];
+    if(!duty){
+      if(typeof head.amounts.refundNet!=="string" || legacyPlanYuanToCents(head.amounts.refundNet)!=="0")throw conflict("REFUND_DUTY_MISSING");
+      await client.query("RELEASE SAVEPOINT demo_legacy_cancel_refund");return "NOT_REQUIRED" as const;
+    }
+    if(await readDemoLegacyRefund(client,orderId,duty.id,demo)){await client.query("RELEASE SAVEPOINT demo_legacy_cancel_refund");return "ALREADY_SIMULATED" as const;}
+    if(duty.status!=="PENDING" || await hasLegacyRecordedRefunds(client,authority.binding,head.id))throw conflict("REFUND_HISTORY_REQUIRES_OFFLINE");
+    await client.query("SET CONSTRAINTS ALL DEFERRED");
+    await simulateLegacyRefund(client,actor,orderId,{dutyId:duty.id,expectedDutyRevision:duty.revision,expectedHeadRevision:head.revision,
+      assumption:"SIMULATION_ASSUME_NO_PRIOR_REFUND",reason:"客服取消后模拟原路退款"},authority,demo);
+    await client.query("RELEASE SAVEPOINT demo_legacy_cancel_refund");
+    return "SIMULATED" as const;
+  } catch {
+    await client.query("ROLLBACK TO SAVEPOINT demo_legacy_cancel_refund");
+    await client.query("RELEASE SAVEPOINT demo_legacy_cancel_refund");
+    return "REQUIRES_REVIEW" as const;
+  }
+}
 
 /** Advisory only: the write locks and verifies every source again in its own transaction. */
 export async function readDemoLegacyRefundReadiness(client:PoolClient,actor:LegacyContinuationActor,orderId:string,dutyId:string,demo:DemoFinanceResource) {
