@@ -945,3 +945,40 @@ test("tab-model & nav-config: 运营看板 aliases and restoreTabs normalize to 
   assert.equal(deduplicated.tabs.filter((tab) => tab.id === "support-overview").length, 1, "legacy + canonical restore to one tab");
   assert.equal(deduplicated.activeId, "support-overview");
 });
+
+test("SupportDashboard: Yunxin conversation capacity is read on demand and masks account ids", async () => {
+  const container = browser.document.createElement("div");
+  browser.document.body.appendChild(container);
+  const root = createRoot(container);
+  const requests = [];
+  const request = async (requestPath) => {
+    requests.push(requestPath);
+    if (requestPath.startsWith("/im/support-overview")) return zeroOverview();
+    if (requestPath === "/im/yunxin-conversations") {
+      return {
+        available: true,
+        sampledAt: "2026-11-01T00:00:00.000Z",
+        quota: 5000,
+        accounts: [{ adminUserId: "admin-a", name: "客服 A", accountLabel: "zza4…0d4", conversationCount: 4123, stickTopCount: 2, state: "OK" }],
+      };
+    }
+    throw new Error(`unexpected request ${requestPath}`);
+  };
+  try {
+    await act(async () => root.render(createElement(SupportDashboard, { active: true, request })));
+    const card = () => container.querySelector('[data-panel="yunxin-conversations"]');
+    assert.ok(card(), "capacity card is rendered with the dashboard");
+    assert.doesNotMatch(requests.join(","), /yunxin-conversations/, "the expensive read is not polled automatically");
+    await act(async () => card().querySelector('[data-action="refresh-yunxin-conversations"]').click());
+    for (let attempt = 0; attempt < 50 && !container.textContent.includes("客服 A"); attempt += 1) {
+      await act(async () => { await new Promise((resolve) => setTimeout(resolve, 10)); });
+    }
+    assert.match(container.textContent, /客服 A/);
+    assert.match(container.textContent, /zza4…0d4/);
+    assert.match(container.textContent, /82%/);
+    assert.doesNotMatch(container.textContent, /zza4edf95dba41cf1de450e8221dd0d4/, "full NIM account stays out of the DOM");
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
+});

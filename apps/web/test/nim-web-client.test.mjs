@@ -92,7 +92,7 @@ class FakeLoginService {
   }
 }
 
-function fakeSdk({ loginService = new FakeLoginService(), loginError, messageService, messageCreator, conversationUtil, storageService } = {}) {
+function fakeSdk({ loginService = new FakeLoginService(), loginError, messageService, messageCreator, conversationUtil, storageService, conversationService } = {}) {
   const calls = { initialize: [], destroyed: 0 };
   const sdk = {
     getInstance(initializeOptions, otherOptions) {
@@ -115,6 +115,7 @@ function fakeSdk({ loginService = new FakeLoginService(), loginError, messageSer
         V2NIMMessageCreator: messageCreator,
         V2NIMStorageService: storageService,
         V2NIMConversationIdUtil: conversationUtil,
+        V2NIMConversationService: conversationService,
         async destroy() {
           calls.destroyed += 1;
         },
@@ -214,6 +215,29 @@ test("initializes the V2 SDK, logs in, maps connection states, and cleans up lis
   assert.equal(calls.destroyed, 1);
   loginService.emit("onConnectStatus", 1);
   assert.deepEqual(states, ["RECONNECTING", "KICKED", "AUTH_FAILED", "DISCONNECTED"]);
+});
+
+test("cloud conversation pinning is opt-in and uses the per-account conversation ids", async () => {
+  const pinned = new Set(["viewer|2|111"]);
+  let syncFinished;
+  const service = {
+    on(eventName, listener) { if (eventName === "onSyncFinished") syncFinished = listener; },
+    off() {},
+    async getStickTopConversationList() { return [...pinned].map((conversationId) => ({ conversationId, stickTop: true })); },
+    async stickTopConversation(conversationId, stickTop) { if (stickTop) pinned.add(conversationId); else pinned.delete(conversationId); },
+  };
+  const { sdk, calls } = fakeSdk({ conversationService: service });
+  const { context } = testContext("viewer");
+  const handle = await createNimWebClientFactory({ appKey: "test-app-key", token: "test-token", enableCloudConversation: true }, async () => sdk)(context);
+  assert.equal(calls.initialize[0].initializeOptions.enableV2CloudConversation, true);
+  assert.deepEqual(calls.initialize[0].otherOptions, { V2NIMSyncServiceConfig: { stickTopSessions: true } });
+  assert.equal(typeof syncFinished, "function");
+  syncFinished();
+  assert.deepEqual(await handle.client.getStickTopConversationIds(), ["viewer|2|111"]);
+  await handle.client.setConversationStickTop("viewer|2|222", true);
+  await handle.client.setConversationStickTop("viewer|2|111", false);
+  assert.deepEqual(await handle.client.getStickTopConversationIds(), ["viewer|2|222"]);
+  await handle.dispose();
 });
 
 test("unwraps the browser package's nested default export", () => {
@@ -710,16 +734,15 @@ test("local fake polling pushes known messages whose content was revoked or quot
   }
 });
 
-test("real adapter calls replyMessage/revokeMessage/deleteMessage behind authorization and merges modified events", async () => {
+test("real adapter sends a normal text with reply metadata on the server extension, then revokes/deletes behind authorization", async () => {
   const listeners = new Map();
-  const calls = { reply: [], revoke: [], delete: [] };
+  const calls = { send: [], revoke: [], delete: [] };
   const messageService = {
     on(eventName, listener) { listeners.set(eventName, listener); },
     off(eventName, listener) { if (listeners.get(eventName) === listener) listeners.delete(eventName); },
-    async replyMessage(...args) {
-      calls.reply.push(args);
-      const replyTo = args[1];
-      return { message: { messageClientId: "client-reply", messageServerId: "server-reply", conversationId: replyTo.conversationId, senderId: "customer-real", receiverId: "peer-1", createTime: 2, messageType: 0, text: "回复" } };
+    async sendMessage(message, conversationId, params) {
+      calls.send.push({ message, conversationId, params });
+      return { message: { messageClientId: "client-reply", messageServerId: "server-reply", conversationId, senderId: "customer-real", receiverId: "peer-1", createTime: 2, messageType: 0, text: message.text, serverExtension: message.serverExtension } };
     },
     async revokeMessage(message) { calls.revoke.push(message); },
     async deleteMessage(message) { calls.delete.push(message); },
@@ -731,9 +754,12 @@ test("real adapter calls replyMessage/revokeMessage/deleteMessage behind authori
     const authorize = async ({ operation }) => { operations.push(operation); };
     const replyTo = sampleMessage({ conversationId: "customer-real|2|9001", senderId: "peer-1", text: "长".repeat(200) });
     const reply = await handle.client.replyText("customer-real|2|9001", "回复", replyTo, authorize);
-    assert.equal(calls.reply.length, 1);
-    assert.deepEqual(calls.reply[0][1], {...replyTo,conversationType:2});
-    assert.equal(calls.reply[0].length, 2);
+    assert.equal(calls.send.length, 1, "reply uses the ordinary text send, not the Thread-only replyMessage API");
+    const extension = JSON.parse(calls.send[0].message.serverExtension);
+    assert.equal(extension.schema, "zzsh.message-reply");
+    assert.equal(extension.messageId, "s1");
+    assert.equal(extension.senderId, "peer-1");
+    assert.equal(extension.text.length, 120);
     assert.equal(reply.reply.messageId, "s1");
     assert.equal(reply.reply.senderId, "peer-1");
     assert.equal(reply.reply.text.length, 120);
@@ -753,7 +779,7 @@ test("real adapter calls replyMessage/revokeMessage/deleteMessage behind authori
     await assert.rejects(handle.client.replyText("customer-real|2|9001", "回复", replyTo, deny), (error) => error?.status === 403);
     await assert.rejects(handle.client.revokeMessage("customer-real|2|9001", message, deny), (error) => error?.status === 403);
     await assert.rejects(handle.client.deleteMessage("customer-real|2|9001", message, deny), (error) => error?.status === 403);
-    assert.equal(calls.reply.length, 1);
+    assert.equal(calls.send.length, 1);
     assert.equal(calls.revoke.length, 1);
     assert.equal(calls.delete.length, 1);
 
@@ -766,10 +792,12 @@ test("real adapter calls replyMessage/revokeMessage/deleteMessage behind authori
     handle.client.onMessages((messages) => received.push(...messages));
     listeners.get("onReceiveMessagesModified")([{ messageClientId: "m2", messageServerId: "s2", conversationId: "customer-real|2|9001", senderId: "peer-1", receiverId: "customer-real", createTime: 3, messageType: 0, text: "修改", threadReply: { messageClientId: "m1", messageServerId: "s1", senderId: "peer-1", receiverId: "customer-real", createTime: 1 } }]);
     assert.deepEqual(received[0].reply, { messageId: "s1", senderId: "peer-1" });
+    listeners.get("onReceiveMessages")([{ messageClientId: "m3", messageServerId: "s3", conversationId: "customer-real|2|9001", senderId: "peer-1", receiverId: "customer-real", createTime: 4, messageType: 0, text: "带引用", serverExtension: JSON.stringify({ schema: "zzsh.message-reply", version: 1, messageId: "s1", senderId: "peer-1", text: "原消息" }) }]);
+    assert.deepEqual(received.at(-1).reply, { messageId: "s1", senderId: "peer-1", text: "原消息" }, "history parses reply metadata from the server extension");
     listeners.get("onMessageRevokeNotifications")([{ messageRefer: { messageClientId: "m1", messageServerId: "s1", conversationId: "customer-real|2|9001", senderId: "customer-real", receiverId: "peer-1", createTime: 1 }, revokeAccountId: "customer-real" }]);
-    assert.equal(received[1].revoked, true);
-    assert.equal(received[1].text, "");
-    assert.equal(received[1].messageServerId, "s1");
+    assert.equal(received[2].revoked, true);
+    assert.equal(received[2].text, "");
+    assert.equal(received[2].messageServerId, "s1");
     await handle.dispose();
     assert.equal(listeners.size, 0);
   } finally {

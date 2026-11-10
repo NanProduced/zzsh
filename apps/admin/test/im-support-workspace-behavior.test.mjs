@@ -904,11 +904,13 @@ async function waitForMenuHistory(rootNode) {
 }
 
 const menuLabels = () => [...document.querySelectorAll('.message-action-menu [role="menuitem"]')].map((button) => button.textContent.trim());
+const surfaceOf = (row) => row?.querySelector(".im-wb-bub, .message-media, .message-image, .order-card, p") ?? row;
 
 async function openMenu(rootNode, id, point = { clientX: 120, clientY: 90 }) {
   const row = rootNode.querySelector(`[data-message-id="${id}"]`);
   assert.ok(row, `message row ${id} exists`);
-  await act(async () => { row.dispatchEvent(new browser.MouseEvent("contextmenu", { bubbles: true, cancelable: true, ...point })); });
+  const surface = row.querySelector(".im-wb-bub, .message-media, .message-image, .order-card, p") ?? row;
+  await act(async () => { surface.dispatchEvent(new browser.MouseEvent("contextmenu", { bubbles: true, cancelable: true, ...point })); });
   await settle();
   return row;
 }
@@ -1129,7 +1131,7 @@ test("revoke asks for a second confirmation, replaces the content and maps 409/4
   await waitFor(() => revokeCalls === 1);
   await waitFor(() => /消息已撤回/.test(rootNode.querySelector('[data-message-id="srv-own"]').textContent));
   assert.doesNotMatch(rootNode.querySelector('[data-message-id="srv-own"]').textContent, /我方原文/, "revoked content is cleared");
-  await act(async () => { rootNode.querySelector('[data-message-id="srv-own"]').dispatchEvent(new browser.MouseEvent("contextmenu", { bubbles: true, cancelable: true })); });
+  await act(async () => { surfaceOf(rootNode.querySelector('[data-message-id="srv-own"]')).dispatchEvent(new browser.MouseEvent("contextmenu", { bubbles: true, cancelable: true })); });
   await settle();
   assert.equal(document.querySelector(".message-action-menu"), null, "a revoked message has no menu");
 

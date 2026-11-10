@@ -17,7 +17,7 @@ import type { SupportOrderContext } from "./support-dialog-request";
 import "./customer-support-workspace.css";
 import { readSupportOrders, type SupportOrder } from "@/lib/support-directory";
 import { encodeOrderReference, parseOrderReference, orderReferenceSummary, type OrderReference } from "@zzsh/im-client/nim-web-client";
-import { OrderReferenceMessage } from "@zzsh/ui/order-card";
+import { OrderReferenceMessage, type HintRenderer } from "@zzsh/ui/order-card";
 import { computeSupportUnread, isDirectoryOrderGroup, publishSupportUnread, readDirectoryPreferences, writeDirectoryPreferences, type DirectoryPreference } from "./support-unread";
 import { SupportRoundRating, type RoundRatingResolution } from "./support-round-rating";
 import { OrderTeamPanel, orderStageTone, orderTeamLabel, type OrderTeamAccess } from "@zzsh/ui/order-team-panel";
@@ -92,6 +92,14 @@ type SupportMessage = {
 };
 
 const MAX_PENDING_IMAGES = 6;
+const renderOrderCardHint: HintRenderer = (text, trigger) => (
+  <TooltipProvider delayDuration={180}>
+    <Tooltip>
+      <TooltipTrigger asChild>{trigger}</TooltipTrigger>
+      <TooltipContent side="top">{text}</TooltipContent>
+    </Tooltip>
+  </TooltipProvider>
+);
 
 const NO_ORIGINAL_ID_HINT = "原消息标识不可用，请先刷新历史确认是否送达。";
 
@@ -239,7 +247,7 @@ function compactOrderStage(label: string): string {
     "建群待人工核查": "待核查",
     "已付款 · 等待匹配客服": "待匹配",
     "已分配 · 正在准备订单群": "建群中",
-    "账号与开租确认": "待开租",
+    "开租确认": "待开租",
     "等待客服": "待客服",
     "组建订单群": "建群中",
     "结束确认": "待结束",
@@ -1108,7 +1116,9 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, vi
     && (message.messageType === undefined || message.messageType === 0) && message.text.trim() ? orderReferenceSummary(message.text) : null;
   const rowOfMessage = (target: EventTarget | null): HTMLElement | null => {
     const element = target as { closest?: (selector: string) => HTMLElement | null } | null;
-    return element && typeof element.closest === "function" ? element.closest("[data-message-id]") : null;
+    if (!element || typeof element.closest !== "function") return null;
+    const content = element.closest(".support-message-bubble, .support-message-media, .support-message-image, .order-card");
+    return content ? content.closest("[data-message-id]") : null;
   };
   const findActiveMessage = (id: string | undefined): SupportMessage | null => id ? (messages[activeConversationKey] ?? []).find((item) => item.id === id) ?? null : null;
   const jumpToSupportMessage = (messageId: string) => {
@@ -1238,7 +1248,7 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, vi
     const isBot = Boolean(message.from === "agent" && message.senderId && activeConversation?.botAccountId && message.senderId === activeConversation.botAccountId);
     const grouped = Boolean(!isBot && message.senderId && previous?.senderId === message.senderId && message.createTime && previous.createTime && message.createTime - previous.createTime < 300_000);
     const replySource = message.reply ? activeMessages.find((item) => item.id === message.reply!.messageId || item.messageClientId === message.reply!.messageId || item.messageServerId === message.reply!.messageId) : undefined;
-    const replySenderName = replySource ? (replySource.self ? "我" : replySource.from === "agent" ? "客服" : "用户") : null;
+    const replySenderName = replySource ? (replySource.self ? "我" : replySource.senderId === activeConversation?.botAccountId ? "洲洲助手" : replySource.from === "agent" ? "客服" : "用户") : null;
     const items: ReactNode[] = [];
     const dayKey = dayKeyOf(message.createTime);
     if (dayKey && dayKey !== timelineDay) {
@@ -2377,7 +2387,7 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, vi
               onChange={(event) => {
                 setDraft(event.target.value);
                 event.currentTarget.style.height = "auto";
-                event.currentTarget.style.height = Math.min(Math.max(event.currentTarget.scrollHeight, 68), 150) + "px";
+                event.currentTarget.style.height = Math.min(Math.max(event.currentTarget.scrollHeight, 44), 120) + "px";
               }}
               onKeyDown={onComposerKeyDown}
               onPaste={onComposerPaste}
@@ -2385,7 +2395,7 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, vi
               onCompositionEnd={() => { composingRef.current = false; }}
               placeholder={preview ? "输入咨询内容…" : composerBlockReason(activeConversation, canSend) ?? "输入咨询内容…"}
               aria-label="输入咨询内容"
-              rows={3}
+              rows={2}
               disabled={!canCompose || busy}
             />
             <div className="support-composer-footer">
@@ -2801,7 +2811,7 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, vi
     <div className="support-unified-chat">
       {directoryState==="error"?<div className="support-inline-error" role="alert">{directoryError}<button type="button" onClick={()=>setDirectoryRevision(n=>n+1)}>重试读取</button></div>:null}
       <div className="support-pane" hidden={section!=="consultation"}>{consultationView}</div>
-      <div className="support-order-pane" hidden={section!=="orders"}><div className="support-order-actions"><button type="button" className="support-back" onClick={()=>setPanelView("list")}>返回会话</button>{close}</div><OrderTeamPanel key={currentIdentity} identity={currentIdentity} realm="user" client={clientRef.current} connection={connection} active={section==="orders"} visible={visible} polling={visible} initialParty={selectedOrder?.party??initialOrderParty} selectedOrderId={selectedOrder?.id} compact request={<T,>(path:string)=>orderRequest<T>(path,undefined,session.userId??undefined)} onAuthError={()=>{void session.confirm();}} onConfirmOpening={confirmOpening} onRequestAfterSales={requestAfterSales}/></div>
+      <div className="support-order-pane" hidden={section!=="orders"}><div className="support-order-actions"><button type="button" className="support-back" onClick={()=>setPanelView("list")}>返回会话</button>{close}</div><OrderTeamPanel key={currentIdentity} identity={currentIdentity} realm="user" client={clientRef.current} connection={connection} active={section==="orders"} visible={visible} polling={visible} initialParty={selectedOrder?.party??initialOrderParty} selectedOrderId={selectedOrder?.id} compact request={<T,>(path:string)=>orderRequest<T>(path,undefined,session.userId??undefined)} onAuthError={()=>{void session.confirm();}} onConfirmOpening={confirmOpening} renderHint={renderOrderCardHint} renderTooltip={renderOrderCardHint} onRequestAfterSales={requestAfterSales}/></div>
     </div>
   </div>;
 }

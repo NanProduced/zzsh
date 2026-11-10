@@ -805,13 +805,13 @@ const stageProjection = (overrides = {}) => ({
   ...overrides,
 });
 
-test("the six-step projection maps to stage, due, ending and read-only copy", () => {
+test("the fulfillment projection maps to stage, due, ending and read-only copy", () => {
   const now = Date.parse("2026-10-20T00:00:00Z");
   assert.equal(display.orderFulfillmentSummary(stageProjection({ stage: "WAITING_STAFF" }), { now }), "已付款 · 待客服接入");
   assert.equal(display.orderFulfillmentSummary(stageProjection({ stage: "TEAM_PENDING" }), { now }), "已付款 · 订单群准备中");
   assert.equal(
     display.orderFulfillmentSummary(stageProjection({ stage: "OPENING_CONFIRM", openingAcks: { renter: true, owner: false } }), { now }),
-    "账号与开租确认 · 租客已确认 · 号主未记录",
+    "开租确认 · 租客确认已记录 · 号主未记录",
   );
   assert.match(display.orderFulfillmentSummary(stageProjection({ dueAt: "2026-11-01T00:00:00.000Z" }), { now }), /^租用中 · 到期 /);
   assert.match(display.orderFulfillmentSummary(stageProjection({ dueAt: "2026-10-01T00:00:00.000Z" }), { now }), /^租用中 · 已到期 /);
@@ -825,10 +825,14 @@ test("the six-step projection maps to stage, due, ending and read-only copy", ()
   assert.equal(display.orderFulfillmentSummary(stageProjection({ stage: "SETTLED", canSend: false }), { now }), "结算完成 · 仅可查看");
   // A missing projection is a state of its own; no stage, due or window is invented.
   assert.equal(display.orderFulfillmentSummary(null), "阶段未确认");
-  assert.deepEqual(display.orderFulfillmentStepStates("RENTING"), ["done", "done", "done", "current", "pending", "pending"]);
-  assert.deepEqual(display.orderFulfillmentStepStates("SETTLED"), ["done", "done", "done", "done", "done", "done"]);
-  assert.deepEqual(display.orderFulfillmentStepStates("CANCELLED"), ["cancelled", "cancelled", "cancelled", "cancelled", "cancelled", "cancelled"]);
-  assert.deepEqual(display.orderFulfillmentStepStates(null), ["unknown", "unknown", "unknown", "unknown", "unknown", "unknown"]);
+  assert.deepEqual(display.orderFulfillmentStepStates("RENTING"), ["done", "done", "current", "pending", "pending"]);
+  assert.deepEqual(display.orderFulfillmentStepStates("SETTLED"), ["done", "done", "done", "done", "done"]);
+  assert.deepEqual(display.orderFulfillmentStepStates("CANCELLED"), ["done", "skipped", "cancelled"]);
+  assert.deepEqual(display.orderFulfillmentStepStates("CANCELLED", true), ["done", "done", "done", "cancelled"]);
+  assert.deepEqual(display.orderFulfillmentStepStates(null), ["unknown", "unknown", "unknown", "unknown", "unknown"]);
+  assert.deepEqual(display.orderFulfillmentSteps("CANCELLED").map((step) => step.label), ["已付款", "开租确认", "已取消"]);
+  assert.deepEqual(display.orderFulfillmentSteps("CANCELLED", true).map((step) => step.label), ["已付款", "开租确认", "租用中", "已取消"]);
+  assert.deepEqual(display.ORDER_FULFILLMENT_STEPS.map((step) => step.label), ["已付款", "开租确认", "租用中", "结束确认", "结算完成"]);
 });
 
 test("a prestart termination speaks about refund pending instead of a generic cancellation", () => {
@@ -839,7 +843,15 @@ test("a prestart termination speaks about refund pending instead of a generic ca
   );
   assert.equal(
     display.orderFulfillmentSummary(stageProjection({ stage: "CANCELLED", cancelReason: "PRESTART_TERMINATED", refundPending: false, sendUntil: "2026-10-21T00:00:00.000Z" }), { now }),
-    "未开租终止 · 退款已核销 · 可沟通至 2026/10/21 08:00",
+    "未开租终止 · 可沟通至 2026/10/21 08:00",
+  );
+  assert.equal(
+    display.orderFulfillmentSummary(stageProjection({ stage: "CANCELLED", cancelReason: "PRESTART_TERMINATED", refundPending: true }), { now, showRefund: false }),
+    "未开租终止 · 仅可查看",
+  );
+  assert.equal(
+    display.orderFulfillmentSummary(stageProjection({ stage: "CANCELLED", cancelReason: "PRESTART_TERMINATED", refundPending: true, refundCompletedAt: "2026-10-20T08:00:00.000Z", sendUntil: "2026-10-21T00:00:00.000Z" }), { now }),
+    "未开租终止 · 退款已完成 · 可沟通至 2026/10/21 08:00",
   );
   assert.equal(
     display.orderFulfillmentSummary(stageProjection({ stage: "CANCELLED", cancelReason: "MANUAL_CLOSE", sendUntil: "2026-10-21T00:00:00.000Z" }), { now }),
@@ -885,9 +897,9 @@ test("the detail renders the six-stage bar from the IM projection and keeps the 
     assert.ok(detail, "the detail view renders");
     assert.match(detail.querySelector(".order-fulfillment-summary").textContent, /^租用中 · 到期 /);
     const steps = [...detail.querySelectorAll(".order-fulfillment-steps li")];
-    assert.deepEqual(steps.map((node) => node.textContent), ["已付款", "客服与群", "账号与开租", "租用中", "结束确认", "结算完成"]);
-    assert.deepEqual(steps.map((node) => node.dataset.state), ["done", "done", "done", "current", "pending", "pending"]);
-    assert.equal(steps[3].getAttribute("aria-current"), "step");
+    assert.deepEqual(steps.map((node) => node.textContent), ["已付款", "开租确认", "租用中", "结束确认", "结算完成"]);
+    assert.deepEqual(steps.map((node) => node.dataset.state), ["done", "done", "current", "pending", "pending"]);
+    assert.equal(steps[2].getAttribute("aria-current"), "step");
     // The group entry is part of the bar and uses the existing support host, not a second chat.
     const entry = [...detail.querySelectorAll("button")].find((node) => node.textContent?.includes("打开订单群"));
     assert.ok(entry, "the group entry renders");
@@ -923,7 +935,7 @@ test("a settled projection names the 72-hour window and its read-only state", as
     await tick(); await tick();
     const detail = probe.host.querySelector("[data-testid=order-detail]");
     assert.equal(detail.querySelector(".order-fulfillment-summary").textContent, "结算完成 · 已超过 72 小时 · 仅可查看");
-    assert.deepEqual([...detail.querySelectorAll(".order-fulfillment-steps li")].map((node) => node.dataset.state), ["done", "done", "done", "done", "done", "done"]);
+    assert.deepEqual([...detail.querySelectorAll(".order-fulfillment-steps li")].map((node) => node.dataset.state), ["done", "done", "done", "done", "done"]);
   } finally { await probe.dispose(); }
 });
 
@@ -943,7 +955,7 @@ test("a failed IM projection leaves the stage pending verification without a six
     const bar = detail.querySelector(".order-fulfillment-stage");
     assert.equal(detail.querySelector(".order-fulfillment-summary").textContent, "阶段未确认");
     assert.equal(detail.querySelector(".order-fulfillment-steps"), null);
-    assert.doesNotMatch(bar.textContent, /租用中|结算完成 ·|待客服接入|账号与开租/);
+    assert.doesNotMatch(bar.textContent, /租用中|结算完成 ·|待客服接入|开租确认/);
   } finally { await probe.dispose(); }
 });
 

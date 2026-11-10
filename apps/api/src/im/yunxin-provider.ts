@@ -152,7 +152,14 @@ export type YunxinSupportTeamExistenceLookup =
 /** The small server-only surface used to isolate one consultation from another. */
 export type YunxinSupportOpeningMessage = { messageServerId: string; messageClientId: string; senderId: string; createTime: number; text: string };
 export type YunxinSupportHistoryMessage = Omit<YunxinSupportOpeningMessage,"text"> & { messageType: number; text?: string; attachment?: Record<string,unknown> };
+export type YunxinCloudConversationPage = {
+  hasMore: boolean;
+  nextToken: string | null;
+  items: Array<{ conversationId: string; stickTop: boolean; type: number; updateTime: number }>;
+};
 export type YunxinSupportScopeApi = {
+  /** Read-only cloud conversation page for capacity monitoring; omitted by local fakes. */
+  listCloudConversations?(input: { accountId: string; pageToken?: string; limit?: number }): Promise<YunxinCloudConversationPage>;
   readSupportMessage?(input:{teamId:string;operatorAccountId:string;messageServerId:string;messageTime?:number}):Promise<(YunxinTeamMessageFact&{text?:string})|null>;
   revokeSupportMessage?(input:{teamId:string;senderId:string;messageServerId:string;createTime:number}):Promise<void>;
   readSupportMemberHistory?(input: { teamId: string; accountId: string; limit: number; before?: { id: string; time: number } }): Promise<YunxinSupportHistoryMessage[]>;
@@ -760,7 +767,7 @@ export class YunxinServerApiClient implements YunxinServerApi, YunxinSupportScop
   async sendSupportTeamCard(input: { teamId: string; senderAccountId: string; card: ImTransportCard; text: string; messageClientId: string }): Promise<{ messageServerId: string; createTime: number }> {
     const team = normalizeTeamId(input.teamId);
     const sender = normalizeAccountId(input.senderAccountId);
-    const kinds = ["ORDER_OPENING", "ORDER_ENDING", "ORDER_SETTLED", "ORDER_PRICE_CHANGE"];
+    const kinds = ["ORDER_OPENING", "ORDER_ENDING", "ORDER_SETTLED", "ORDER_CANCELLED", "ORDER_PRICE_CHANGE"];
     const id = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
     const text = input.text.trim();
     if (!kinds.includes(input.card.kind) || !id.test(input.card.orderId) || !id.test(input.card.cardId)
@@ -1055,6 +1062,34 @@ export class YunxinServerApiClient implements YunxinServerApi, YunxinSupportScop
       }
       throw error;
     }
+  }
+
+  async listCloudConversations(input: { accountId: string; pageToken?: string; limit?: number }): Promise<YunxinCloudConversationPage> {
+    const accountId = normalizeAccountId(input.accountId);
+    const limit = input.limit ?? 100;
+    if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw new Error("Invalid cloud conversation page size");
+    const query = new URLSearchParams({ account_id: accountId, limit: String(limit) });
+    if (input.pageToken !== undefined) {
+      if (typeof input.pageToken !== "string" || !input.pageToken || input.pageToken.length > 512) throw new Error("Invalid cloud conversation page token");
+      query.set("page_token", input.pageToken);
+    }
+    const payload = await this.request("list-cloud-conversations", "GET", "/im/v2.1/conversations", undefined, `?${query.toString()}`, "v2");
+    const data = isRecord(payload) && isRecord(payload.data) ? payload.data : null;
+    if (!data || typeof data.has_more !== "boolean" || !Array.isArray(data.items)) {
+      throw new YunxinApiError("list-cloud-conversations", null, false, 200);
+    }
+    const items = data.items.map((item): YunxinCloudConversationPage["items"][number] => {
+      if (!isRecord(item) || typeof item.conversation_id !== "string" || !item.conversation_id || item.conversation_id.length > 256
+        || typeof item.stick_top !== "boolean" || typeof item.type !== "number" || typeof item.update_time !== "number") {
+        throw new YunxinApiError("list-cloud-conversations", null, false, 200);
+      }
+      return { conversationId: item.conversation_id, stickTop: item.stick_top, type: item.type, updateTime: item.update_time };
+    });
+    return {
+      hasMore: data.has_more,
+      nextToken: typeof data.next_token === "string" && data.next_token ? data.next_token : null,
+      items,
+    };
   }
 
   private async request(

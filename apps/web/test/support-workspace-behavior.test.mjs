@@ -636,7 +636,7 @@ test("OrderConversation 本单信息 action appends current order info to draft"
   const textarea = host.querySelector("textarea");
   assert.ok(textarea, "textarea rendered");
   assert.ok(host.querySelector(".order-team-composer-box"), "composer uses the shared boxed input");
-  assert.equal(host.querySelectorAll(".order-team-composer-tools .order-team-tool").length, 5, "emoji, image, video, file and order info share the icon toolbar");
+  assert.equal(host.querySelectorAll(".order-team-composer-tools .order-team-tool").length, 6, "mention, emoji, image, video, file and order info share the icon toolbar");
   assert.ok(host.querySelector(".order-team-composer-hint"), "keyboard hint matches the support chat");
   assert.ok(infoBtn.getAttribute("data-tip"), "icon tools expose a hover tooltip");
   assert.ok(host.querySelector(".order-team-msg-avatar"), "messages render the shared avatar column");
@@ -2376,15 +2376,16 @@ async function mountSupportActions(t, options = {}) {
   await until(() => host.querySelector("textarea") && !host.querySelector("textarea").disabled, "sendable consultation");
   await until(() => host.querySelector('[data-message-id="srv-peer"]'), "history rendered");
   const row = (id) => host.querySelector(`[data-message-id="${id}"]`);
+  const surface = (id) => row(id)?.querySelector(".support-message-bubble, .support-message-media, .support-message-image, .order-card") ?? row(id);
   const open = async (id, point = { clientX: 120, clientY: 90 }) => {
-    await act(async () => { const target = row(id); assert.ok(target, id); target.dispatchEvent(new browser.MouseEvent("contextmenu", { bubbles: true, cancelable: true, ...point })); });
+    await act(async () => { const target = surface(id); assert.ok(target, id); target.dispatchEvent(new browser.MouseEvent("contextmenu", { bubbles: true, cancelable: true, ...point })); });
     await settle();
   };
   const labels = () => [...browser.document.querySelectorAll(".message-action-menu [role=menuitem]")].map((item) => item.textContent.trim());
   const pick = async (label) => { const button = [...browser.document.querySelectorAll(".message-action-menu [role=menuitem]")].find((item) => item.textContent.trim() === label); assert.ok(button, label); await act(async () => button.click()); await settle(); };
   const type = async (value) => { await act(async () => { const element = host.querySelector("textarea"); Object.getOwnPropertyDescriptor(browser.HTMLTextAreaElement.prototype, "value").set.call(element, value); element.dispatchEvent(new Event("input", { bubbles: true })); }); };
   const submit = async () => { await act(async () => { host.querySelector("form").dispatchEvent(new browser.Event("submit", { bubbles: true, cancelable: true })); }); };
-  const longPress = async (id) => { await act(async () => { row(id).dispatchEvent(new browser.PointerEvent("pointerdown", { bubbles: true, pointerType: "touch", clientX: 160, clientY: 100 })); await new Promise((resolve) => setTimeout(resolve, 600)); }); };
+  const longPress = async (id) => { await act(async () => { surface(id).dispatchEvent(new browser.PointerEvent("pointerdown", { bubbles: true, pointerType: "touch", clientX: 160, clientY: 100 })); await new Promise((resolve) => setTimeout(resolve, 600)); }); };
   const setVisible = async (visible) => { await act(async () => root.render(renderPreview({ preview: false, embedded: true, visible, onClose: () => {} }))); };
   return { host, posts, orderReads, row, open, labels, pick, type, submit, longPress, until, setVisible, draft: () => host.querySelector("textarea").value };
 }
@@ -2640,7 +2641,7 @@ async function mountOrderCardPanel(t, info, messages, panelProps = {}) {
 }
 
 test("order stage cards render by kind as chat messages with the stage facts", async (t) => {
-  const info = cardAccess(cardTermsFor("STAFF"), { stage: "SETTLED", orderStatus: "COMPLETED", endState: "REQUESTED", dueAt: "2026-10-19T10:00:00.000Z", sendUntil: "2026-10-18T10:00:00.000Z" });
+  const info = cardAccess(cardTermsFor("STAFF"), { stage: "SETTLED", orderStatus: "COMPLETED", endState: "REQUESTED", dueAt: "2026-10-19T10:00:00.000Z", sendUntil: "2026-10-18T10:00:00.000Z", botAccountId: "platform-1" });
   // 四种阶段卡同处一个会话，各自保留自己的标题与业务事实。
   const host = await mountOrderCardPanel(t, info, [
     cardMessage("ORDER_OPENING", 1, info),
@@ -2650,12 +2651,14 @@ test("order stage cards render by kind as chat messages with the stage facts", a
   ]);
   const cards = [...host.querySelectorAll(".order-card")];
   assert.deepEqual(cards.map(card => card.getAttribute("data-kind")), ["ORDER_OPENING", "ORDER_ENDING", "ORDER_SETTLED", "ORDER_PRICE_CHANGE"], "each card keeps its kind");
+  assert.deepEqual([...host.querySelectorAll(".order-team-messages li[data-card]")].map(row => row.querySelector(".order-team-msg-meta b")?.textContent), ["洲洲助手（Bot）", "洲洲助手（Bot）", "洲洲助手（Bot）", "洲洲助手（Bot）"], "every bot card keeps its sender name even when messages are grouped");
   assert.equal(cards[0].querySelector(".order-card-head .order-card-title").textContent, "开租确认");
   assert.ok(cards[0].querySelector(".order-card-head .order-card-icon"), "the stage title sits in the dark header with its icon");
   assert.equal(cards[1].querySelector(".order-card-title").textContent, "结束确认");
   assert.equal(cards[2].querySelector(".order-card-title").textContent, "结算完成");
   assert.equal(cards[3].querySelector(".order-card-title").textContent, "价格调整待确认");
-  assert.match(cards[3].textContent, /价格调整内容以订单详情为准/, "the price-change card keeps its business copy");
+  assert.match(cards[3].querySelector(".order-card-head .order-card-info")?.getAttribute("aria-label") ?? "", /价格调整内容以订单详情为准/, "the price-change card keeps its business copy as an accessible hint");
+  assert.equal(cards[3].querySelector(".order-card-head .order-card-info")?.getAttribute("title"), null, "the card does not use a native browser title");
   const acks = [...cards[0].querySelectorAll(".order-card-ack")].map(ack => ({
     name: ack.querySelector(".order-card-ack-name").textContent,
     state: ack.getAttribute("data-state"),
@@ -2664,8 +2667,8 @@ test("order stage cards render by kind as chat messages with the stage facts", a
   }));
   assert.deepEqual(acks, [
     { name: "租客", state: "confirmed", status: "已确认", checked: true },
-    { name: "号主", state: "pending", status: "待确认", checked: false },
-  ], "confirmed shows a filled check, pending shows an empty circle");
+    { name: "号主", state: "pending", status: "待确认", checked: true },
+  ], "confirmed shows a filled check, pending shows a clock instead of an empty circle");
   assert.equal(cards[0].querySelectorAll(".order-card-ack-link").length, 1, "the two parties are joined by one connector");
   assert.match(cards[1].textContent, /已发起 · 待双方确认/, "endState REQUESTED is spoken as awaiting both sides");
   assert.match(cards[2].textContent, /已结算/);
@@ -2675,7 +2678,7 @@ test("order stage cards render by kind as chat messages with the stage facts", a
   const staffCard = cards[0];
   assert.equal(staffCard.getAttribute("data-party"), "STAFF");
   assert.match(staffCard.querySelector(".order-card-account").textContent, /高练度全限定号/, "the account title is the card headline");
-  assert.equal(staffCard.querySelector(".order-card-game").textContent, "绝区零", "the game name sits under the account title");
+  assert.equal(staffCard.querySelector(".order-card-game"), null, "the game name is not repeated inside the card");
   assert.doesNotMatch(staffCard.textContent, /acc-card-1|稳定 ID/, "no account stable id is rendered");
   const staffFigures = Object.fromEntries([...staffCard.querySelectorAll(".order-card-figure")]
     .map(figure => [figure.querySelector("dt").textContent, figure.querySelector("dd").textContent]));
@@ -2975,7 +2978,7 @@ test("media history renders video, file and audio, falls back when the URL is mi
   assert.equal(missing.querySelector(".message-media-video-player"), null, "a missing URL never becomes a broken player");
   assert.match(missing.querySelector(".message-media-unavailable").textContent, /媒体暂不可用/);
 
-  await act(async () => video.dispatchEvent(new browser.MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 120, clientY: 90 })));
+  await act(async () => videoTrigger.dispatchEvent(new browser.MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 120, clientY: 90 })));
   await settle();
   const labels = [...browser.document.querySelectorAll(".message-action-menu [role=menuitem]")].map((item) => item.textContent.trim());
   assert.ok(!labels.includes("复制"), "media is not copyable text");
@@ -3006,7 +3009,7 @@ test("a long item list folds and a card row still opens the message menu", async
   await act(async () => card.querySelector(".order-card-items-toggle").click());
   assert.equal(card.querySelectorAll(".order-card-line").length, 0, "the fold closes again");
 
-  await act(async () => row.dispatchEvent(new browser.MouseEvent("contextmenu", { bubbles: true, cancelable: true, button: 2, clientX: 120, clientY: 140 })));
+  await act(async () => card.dispatchEvent(new browser.MouseEvent("contextmenu", { bubbles: true, cancelable: true, button: 2, clientX: 120, clientY: 140 })));
   const menu = browser.document.querySelector('.message-action-menu[role="menu"]');
   assert.ok(menu, "contextmenu on a card still opens the platform menu");
   const labels = [...menu.querySelectorAll('[role="menuitem"]')].map(item => item.textContent.trim());

@@ -840,23 +840,23 @@ export function OrderFulfillmentSection({ orderId, displayNo, viewerId, orderSta
   // 右栏只留任务入口：阶段、订单状态与版本确认由顶部阶段条与本核对面板承担，避免重复。
   return <><Card className={`im-support-fulfillment im-order-card${compact?" oc-action-card":""}`} data-stage={stage.key} aria-label="本单当前任务">
     <CardContent className={compact?"grid gap-2.5 p-0":"grid gap-2.5 p-4"}>
-      <div className="flex items-start gap-3">
+      <div className="flex items-start gap-2">
         <div className="grid min-w-0 flex-1 gap-1">
           <CardTitle className="flex items-start gap-2 text-sm"><ClipboardList className="mt-0.5 size-4 shrink-0 text-primary" />{compact?task.title:"履约核对"}</CardTitle>
           <CardDescription className="text-xs leading-relaxed">{stage.key==="needs-opening"?"付款已接纳；系统未生成清单时显示待核对原因。":"核对本单履约进度及结算方案。"}</CardDescription>
         </div>
-        <div className="flex shrink-0 flex-col items-stretch gap-1.5">
-          <Button size="sm" data-action="open-fulfillment-panel" onClick={() => setPanelOpen(true)}>{task.action}</Button>
-          {canManualClose !== false && ["opening-pending","needs-settlement","awaiting-decision"].includes(stage.key)
-            ? <Button size="sm" variant="outline" data-action="send-progress-reminder" disabled={reminderBusy || busy || loading}
-                onClick={() => void sendReminder()}>{reminderBusy ? "发送中…" : reminderPending ? "核对原提醒" : "发送进度提醒"}</Button>
-            : null}
-          {reminderUnknown && reminderPending
-            ? <Button size="sm" variant="ghost" data-action="restart-progress-reminder" disabled={reminderBusy || busy || loading}
-                onClick={restartReminder}>已在群内核对未发送，重新发送</Button>
-            : null}
-          {readButton}
-        </div>
+        {readButton}
+      </div>
+      <div className="flex flex-wrap items-center gap-1.5">
+        <Button size="sm" data-action="open-fulfillment-panel" onClick={() => setPanelOpen(true)}>{task.action}</Button>
+        {canManualClose !== false && ["opening-pending","needs-settlement","awaiting-decision"].includes(stage.key)
+          ? <Button size="sm" variant="outline" data-action="send-progress-reminder" disabled={reminderBusy || busy || loading}
+              onClick={() => void sendReminder()}>{reminderBusy ? "发送中…" : reminderPending ? "核对原提醒" : "发送进度提醒"}</Button>
+          : null}
+        {reminderUnknown && reminderPending
+          ? <Button size="sm" variant="ghost" data-action="restart-progress-reminder" disabled={reminderBusy || busy || loading}
+              onClick={restartReminder}>已在群内核对未发送，重新发送</Button>
+          : null}
       </div>
       {panelOpen ? null : statusMessages}
     </CardContent>

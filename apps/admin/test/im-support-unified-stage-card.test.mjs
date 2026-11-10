@@ -87,7 +87,11 @@ let readRequests = [];
 globalThis.fetch = async (input) => {
   const url = new URL(String(input), browser.location.href);
   if (url.pathname.endsWith("/im/token")) return response({ appKey: "test-app", accountId: "admin-a", token: "test-token", transport: "local-fake" });
-  if (url.pathname.endsWith("/im/consultations")) return response({ consultations: [] });
+  if (url.pathname.endsWith("/im/consultations")) {
+    const q = url.searchParams.get("q");
+    if (q) { api.searchQueries = [...(api.searchQueries ?? []), `consultations:${q}`]; return response({ consultations: api.searchConsultations ?? [], query: q }); }
+    return response({ consultations: [] });
+  }
   if (url.pathname.endsWith("/im/presence")) return response({ availability: "AVAILABLE", connectionState: "CONNECTED", version: 1 });
   if (url.pathname.endsWith("/im/presence/heartbeat")) { heartbeatRequests += 1; return response({}); }
   if (url.pathname.includes("/im/order-teams/") && url.pathname.endsWith("/read")) { readRequests.push({ kind: "order", id: url.pathname.split("/").at(-2) }); return response({}); }
@@ -99,6 +103,11 @@ globalThis.fetch = async (input) => {
   }
   if (url.pathname.endsWith("/orders/order-b/im")) return response({ ...api.orderAccess, orderId: "order-b", displayNo: "ZZ-B", account: { id: "account-b", title: "SYNTH-B-ACCOUNT" } });
   if (url.pathname.endsWith("/orders/im-groups")) {
+    const q = url.searchParams.get("q");
+    if (q) {
+      api.searchQueries = [...(api.searchQueries ?? []), `orders:${q}`];
+      return response({ items: api.searchOrders ?? [], nextCursor: null, query: q });
+    }
     const cursor = url.searchParams.get("cursor");
     api.requests.push({ admin: api.admin, cursor });
     if (api.ordersStatus) return response({ error: { code: "FORBIDDEN", message: "synthetic" } }, api.ordersStatus);
@@ -142,6 +151,22 @@ async function triggerOrderRefresh() {
 }
 const orderRows = (host) => [...host.querySelectorAll('.im-wb-unified-queue .im-wb-row[data-unified-kind="order"]')];
 
+test("search asks the server for sessions outside the loaded order pages", async (t) => {
+  api = { admin: "A", hold: null, nextCursor: null, page2: [], requests: [], searchQueries: [],
+    orders: [order("order-loaded", "ZZ-LOADED", "RENTING", { pending: 0, failed: 0, skipped: 0, unknown: 0 })],
+    searchOrders: [order("order-server", "ZZ-SERVER", "CANCELLED", { pending: 0, failed: 0, skipped: 0, unknown: 0 })] };
+  const { host } = await mountView(t, snapshot(permissions));
+  await waitFor(() => orderRows(host).length === 1);
+  const input = host.querySelector('.im-wb-search input');
+  await act(async () => {
+    Object.getOwnPropertyDescriptor(browser.HTMLInputElement.prototype, "value").set.call(input, "ZZ-SERVER");
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+  await waitFor(() => orderRows(host).some((row) => row.dataset.orderId === "order-server"));
+  assert.ok(api.searchQueries.includes("orders:ZZ-SERVER"), "the order directory is queried server-side");
+  assert.ok(api.searchQueries.includes("consultations:ZZ-SERVER"), "the consultation directory is queried server-side");
+});
+
 test("desktop unified order list marks UNKNOWN cards without treating them as sent or unsent", async (t) => {
   api = { admin: "A", hold: null, nextCursor: null, page2: [], requests: [],
     orders: [
@@ -158,7 +183,6 @@ test("desktop unified order list marks UNKNOWN cards without treating them as se
   assert.match(row("order-unknown").textContent, /自动卡待核对/);
   assert.doesNotMatch(row("order-skipped").textContent, /自动卡待核对/, "a skipped attention card does not hide a clean count");
   assert.doesNotMatch(row("order-clean").textContent, /自动卡待核对/);
-  assert.match(host.textContent, /仅搜索已加载会话/, "the search scope is explicit");
 
   const css = readFileSync(path.join(adminRoot, "src/workspace/workspace.css"), "utf8");
   assert.match(css, /@media \(min-width:1100px\)[\s\S]*im-wb-root\[data-unified="true"\] \.im-wb-unified-queue \{ display:flex; \}/);

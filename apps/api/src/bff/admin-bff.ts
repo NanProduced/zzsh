@@ -680,7 +680,7 @@ export async function handleAdminBff(request: NodeRequest, response: NodeRespons
   const imLegacyOrder = /^\/im\/consultations\/[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\/legacy-orders\/legacy_order_[a-f0-9]{40}$/.test(path);
   const imAuditTakeover = /^\/im\/audit\/consultations\/[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\/takeover$/.test(path);
   const imGetOrPost = path === "/im/consultations" || path === "/im/messages";
-  const imGetOnly = path === "/im/aftersales" || path === "/im/token" || path === "/im/identities" || path === "/im/support-overview" || path === "/im/my-support-statistics"
+  const imGetOnly = path === "/im/aftersales" || path === "/im/token" || path === "/im/identities" || path === "/im/support-overview" || path === "/im/yunxin-conversations" || path === "/im/my-support-statistics"
     || path === "/im/handovers" || path === "/im/audit/conversations" || path === "/im/transfer-targets"
     || path === "/im/message-access" || imImage || imMedia || imReadSub || imLegacyOrder;
   const imPostOnly = Boolean(imAction) || /^\/im\/aftersales\/[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\/(claim|contact|resolve)$/.test(path) || imOrderRead || path === "/im/presence/heartbeat" || imAuditTakeover;

@@ -563,24 +563,7 @@ export async function handleOrderAdminRoute(
         { principalId: actor.userId, operation: "order.manual_close", resourceId: orderId },
         { realm: "admin", id: actor.userId, sessionId: actor.sessionId }, { remark },
         async (client) => { await assertManualCloseAccess(client, orderId, actor); },
-        (client) => manualCloseOrder(client, orderId, actor, remark, requestId),
-        undefined,
-        async () => {
-          const transport = options.systemMessageTransport;
-          if (!transport) return;
-          const group = (await options.pool.query<{ teamId: string; systemAccount: string }>(
-            `SELECT g.team_id AS "teamId", m.account_id AS "systemAccount"
-               FROM zzsh_order.im_order_group g JOIN zzsh_iam.im_identity_mapping m ON m.id = g.system_identity_id
-               JOIN zzsh_order.rental_order o ON o.id=g.order_id AND o.status='CANCELLED' AND o.cancel_reason='MANUAL_CLOSE'
-              WHERE g.order_id = $1 AND g.team_state = 'READY' AND g.team_id IS NOT NULL LIMIT 1`, [orderId])).rows[0];
-          if (!group) return;
-          try {
-            await transport.sendText({ conversationId: `${group.systemAccount}|2|${group.teamId}`,
-              senderAccountId: group.systemAccount, receiverAccountId: group.teamId,
-              text: "客服已手动结束本单。如对处理有疑问，请联系客服。",
-              messageClientId: `manual_close_${orderId}` });
-          } catch { /* The close and audit are committed; notification is best-effort in the fake seam. */ }
-        });
+        (client) => manualCloseOrder(client, orderId, actor, remark, requestId));
       return;
     }
     if (method !== "GET") throw notFound();
@@ -590,9 +573,13 @@ export async function handleOrderAdminRoute(
       await assertAdminContextInTransaction(client, context);
       if(path==="/im-groups"){
         const cursor=query.get("cursor");if(cursor&&!ID_TOKEN.test(cursor))throw invalid("Cursor is invalid");
+        if(query.getAll("q").length>1)throw invalid("Search query is invalid","q");
+        const rawQuery=query.get("q");
+        const searchQuery=rawQuery===null?null:rawQuery.trim();
+        if(searchQuery!==null&&(searchQuery.length<1||searchQuery.length>64))throw invalid("Search query is invalid","q");
         let groups: Awaited<ReturnType<typeof listJoinedOrderTeams>>;
         try {
-          groups = await listJoinedOrderTeams(client,{...context,realm:"admin"},cursor,parseLimit(query.get("limit")),options.orderTeamMembers?.appId??"");
+          groups = await listJoinedOrderTeams(client,{...context,realm:"admin"},cursor,parseLimit(query.get("limit")),options.orderTeamMembers?.appId??"",searchQuery);
         } catch (error) {
           // 订单群列表 500 曾无堆栈可查；这里把请求上下文与原始错误一起打出来。
           console.error(JSON.stringify({ event: "order.im_groups.failed", requestId,

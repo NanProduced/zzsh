@@ -72,7 +72,11 @@ export type ImSystemNotice = { text: string };
  */
 export function decodeImSystemNotice(message: { messageType?: number; attachment?: unknown }): ImSystemNotice | null {
   if (message.messageType !== 5) return null;
-  const attachment = message.attachment;
-  const type = attachment && typeof attachment === "object" && !Array.isArray(attachment) ? (attachment as { type?: unknown }).type : undefined;
+  const attachment = message.attachment && typeof message.attachment === "object" && !Array.isArray(message.attachment)
+    ? message.attachment as { type?: unknown; ope?: unknown }
+    : undefined;
+  const type = attachment?.type;
+  const ope = attachment?.ope;
+  if (ope === 0) return { text: "群聊已创建" };
   return { text: type === 0 ? "成员已加入会话" : "会话信息已更新" };
 }

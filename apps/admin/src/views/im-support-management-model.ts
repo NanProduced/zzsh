@@ -461,7 +461,7 @@ export function parseAuditConversations(value: unknown): AuditPage<AuditConversa
 
 export type AuditMessage = NimMessageLike & { sender?: { displayName: string; avatar: string | null; role: "USER" | "ADMIN" | "SYSTEM"; platformId?: string; displayUsername?: string } };
 
-const CARD_KINDS = ["ORDER_OPENING", "ORDER_ENDING", "ORDER_SETTLED", "ORDER_PRICE_CHANGE"] as const;
+const CARD_KINDS = ["ORDER_OPENING", "ORDER_ENDING", "ORDER_SETTLED", "ORDER_CANCELLED", "ORDER_PRICE_CHANGE"] as const;
 const AUDIT_MESSAGE_TYPES = ["CONSULTATION", "ORDER"] as const;
 
 function parseCard(value: unknown): NimMessageLike["card"] | undefined {

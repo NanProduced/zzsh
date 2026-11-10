@@ -43,37 +43,58 @@ export function orderSettlementStageLabel(order: Pick<Order, "stage">): string |
   return order.stage && !["NONE", "UNKNOWN"].includes(order.stage.code) ? order.stage.label : null;
 }
 
-/** The six fulfillment steps, in the order the server projects them. */
+/** The normal fulfillment path. A cancelled order renders only the steps it actually reached. */
 export const ORDER_FULFILLMENT_STEPS = [
   { key: "PAID", label: "已付款" },
-  { key: "TEAM", label: "客服与群" },
-  { key: "OPENING", label: "账号与开租" },
+  { key: "OPENING", label: "开租确认" },
   { key: "RENTING", label: "租用中" },
   { key: "ENDING", label: "结束确认" },
   { key: "SETTLED", label: "结算完成" },
 ] as const;
 
-export type OrderFulfillmentStepState = "done" | "current" | "pending" | "cancelled" | "unknown";
+export const ORDER_CANCELLED_PRESTART_STEPS = [
+  { key: "PAID", label: "已付款" },
+  { key: "OPENING", label: "开租确认" },
+  { key: "CANCELLED", label: "已取消" },
+] as const;
 
-/** WAITING_STAFF and TEAM_PENDING stay in the second step; PENDING_PAYMENT/CANCELLED own no step. */
+export const ORDER_CANCELLED_STARTED_STEPS = [
+  { key: "PAID", label: "已付款" },
+  { key: "OPENING", label: "开租确认" },
+  { key: "RENTING", label: "租用中" },
+  { key: "CANCELLED", label: "已取消" },
+] as const;
+
+export type OrderFulfillmentStepState = "done" | "current" | "pending" | "cancelled" | "skipped" | "unknown";
+
+/** WAITING_STAFF and TEAM_PENDING are both inside the paid step. */
 export function orderFulfillmentStepIndex(stage: OrderImStage | null | undefined): number {
   switch (stage) {
     case "WAITING_STAFF":
-    case "TEAM_PENDING": return 1;
-    case "OPENING_CONFIRM": return 2;
-    case "RENTING": return 3;
-    case "ENDING": return 4;
-    case "SETTLED": return 5;
+    case "TEAM_PENDING": return 0;
+    case "OPENING_CONFIRM": return 1;
+    case "RENTING": return 2;
+    case "ENDING": return 3;
+    case "SETTLED": return 4;
     default: return -1;
   }
 }
 
+/** Cancelled orders keep the path they reached, then end on a red terminal step. */
+export function orderFulfillmentSteps(stage: OrderImStage | null | undefined, cancelledAfterOpening = false) {
+  if (stage !== "CANCELLED") return ORDER_FULFILLMENT_STEPS;
+  return cancelledAfterOpening ? ORDER_CANCELLED_STARTED_STEPS : ORDER_CANCELLED_PRESTART_STEPS;
+}
+
 /** A missing projection leaves every step unknown; it never marks progress from the order status. */
-export function orderFulfillmentStepStates(stage: OrderImStage | null | undefined): OrderFulfillmentStepState[] {
-  if (stage === "CANCELLED") return ORDER_FULFILLMENT_STEPS.map(() => "cancelled");
+export function orderFulfillmentStepStates(stage: OrderImStage | null | undefined, cancelledAfterOpening = false): OrderFulfillmentStepState[] {
+  const steps = orderFulfillmentSteps(stage, cancelledAfterOpening);
+  if (stage === "CANCELLED") {
+    return steps.map((step) => step.key === "CANCELLED" ? "cancelled" : step.key === "OPENING" && !cancelledAfterOpening ? "skipped" : "done");
+  }
   const current = orderFulfillmentStepIndex(stage);
-  if (current < 0) return ORDER_FULFILLMENT_STEPS.map(() => "unknown");
-  return ORDER_FULFILLMENT_STEPS.map((_, index) => {
+  if (current < 0) return steps.map(() => "unknown");
+  return steps.map((_, index) => {
     if (stage === "SETTLED") return "done";
     return index < current ? "done" : index === current ? "current" : "pending";
   });
@@ -96,7 +117,7 @@ function fulfillmentWindowText(sendUntil: string | null, canSend: boolean, now: 
  */
 export function orderFulfillmentSummary(
   projection: OrderImProjection | null | undefined,
-  options: { now?: number; ending?: OrderFulfillmentEnding } = {},
+  options: { now?: number; ending?: OrderFulfillmentEnding; showRefund?: boolean } = {},
 ): string {
   if (!projection) return "阶段未确认";
   const now = options.now ?? Date.now();
@@ -105,10 +126,10 @@ export function orderFulfillmentSummary(
     case "WAITING_STAFF": return "已付款 · 待客服接入";
     case "TEAM_PENDING": return "已付款 · 订单群准备中";
     case "OPENING_CONFIRM": {
-      if (projection.openingState === "NONE") return "账号与开租确认 · 待生成或核对开租清单";
+      if (projection.openingState === "NONE") return "开租确认 · 待生成或核对开租清单";
       const acks = projection.openingAcks;
-      if (!acks) return "账号与开租确认";
-      return `账号与开租确认 · 租客${acks.renter ? "确认已记录" : "未记录"} · 号主${acks.owner ? "确认已记录" : "未记录"}`;
+      if (!acks) return "开租确认";
+      return `开租确认 · 租客${acks.renter ? "确认已记录" : "未记录"} · 号主${acks.owner ? "确认已记录" : "未记录"}`;
     }
     case "RENTING": {
       if (!projection.dueAt) return "租用中";
@@ -126,8 +147,10 @@ export function orderFulfillmentSummary(
     case "CANCELLED": {
       if (projection.cancelReason === "MANUAL_CLOSE") return `客服手动结束 · ${fulfillmentWindowText(projection.sendUntil, projection.canSend, now)}`;
       if (projection.cancelReason !== "PRESTART_TERMINATED") return `已取消 · ${fulfillmentWindowText(projection.sendUntil, projection.canSend, now)}`;
+      if (options.showRefund === false) return `未开租终止 · ${fulfillmentWindowText(projection.sendUntil, projection.canSend, now)}`;
       if (projection.refundPending) return "未开租终止 · 退款处理中 · 可沟通";
-      return `未开租终止 · 退款已核销 · ${fulfillmentWindowText(projection.sendUntil, projection.canSend, now)}`;
+      if (projection.refundCompletedAt) return `未开租终止 · 退款已完成 · ${fulfillmentWindowText(projection.sendUntil, projection.canSend, now)}`;
+      return `未开租终止 · ${fulfillmentWindowText(projection.sendUntil, projection.canSend, now)}`;
     }
     case "SETTLED":
       return `结算完成 · ${fulfillmentWindowText(projection.sendUntil, projection.canSend, now)}`;

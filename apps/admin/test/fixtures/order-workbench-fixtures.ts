@@ -39,7 +39,7 @@ function listItems(orderIds: string[], firstInfo?: OrderTeamAccess) {
   return orderIds.map((id, index) => {
     const row = index === 0 && firstInfo ? firstInfo : access(orderIdIndex.get(id) ?? {});
     const cards = row.stageCards ?? [];
-    return { id, displayNo: row.displayNo, title: row.account.title, status: row.orderStatus, teamState: row.teamState,
+    return { id, displayNo: row.displayNo, teamId: row.teamId, title: row.account.title, status: row.orderStatus, teamState: row.teamState,
       stageCards: { pending: 0, failed: cards.filter((card) => card.state !== "SENT").length,
         skipped: cards.filter((card) => card.state === "SKIPPED").length, unknown: cards.filter((card) => card.state === "UNKNOWN").length },
       firstResponseAt: row.supportEscalation.firstResponseAt, remindDueAt: row.supportEscalation.remindDueAt, addRound: row.supportEscalation.addRound, escalationState: row.supportEscalation.state };

@@ -24,7 +24,7 @@ export type OrderStageCardOptions = {
   leaseMs?: number;
 };
 
-const STAGE_KINDS = ["ORDER_WELCOME", "ORDER_OPENING", "ORDER_ENDING", "ORDER_SETTLED"] as const;
+const STAGE_KINDS = ["ORDER_WELCOME", "ORDER_OPENING", "ORDER_ENDING", "ORDER_SETTLED", "ORDER_CANCELLED"] as const;
 export type StageCardKind = (typeof STAGE_KINDS)[number];
 const WELCOME_TEXT = "订单群已建立。本单的账号核对、开租确认和沟通都会在这里进行，双方确认后开始计算租期。有疑问可以直接在群里留言。";
 const PREVIEWS: Record<StageCardKind, string> = {
@@ -32,6 +32,7 @@ const PREVIEWS: Record<StageCardKind, string> = {
   ORDER_OPENING: "开租确认卡",
   ORDER_ENDING: "结束确认卡",
   ORDER_SETTLED: "洲洲助手：本单已完成结算",
+  ORDER_CANCELLED: "洲洲助手：本单已取消",
 };
 
 const WINDOW_MS = 72 * 60 * 60 * 1_000;
@@ -103,6 +104,9 @@ export function stageCardDeliveryBlock(input: {
   hasActivity: boolean;
   now: number;
 }): StageCardSkipReason | null {
+  if (input.kind === "ORDER_CANCELLED") {
+    return input.orderStatus === "CANCELLED" ? null : "STAGE_NOT_REACHED";
+  }
   if (input.kind === "ORDER_WELCOME") {
     if (input.orderStatus !== "PAID") return "ORDER_ENDED";
     // Someone already spoke in the group; a late "群已建立" would read as a duplicate greeting.
@@ -152,17 +156,20 @@ async function materialize(options: OrderStageCardOptions): Promise<void> {
          ) posting ON TRUE
         WHERE g.app_id = $1 AND g.team_state = 'READY' AND g.team_id IS NOT NULL
           AND (o.status = 'PAID'
+            OR (o.status = 'CANCELLED' AND o.cancelled_at > clock_timestamp() - interval '72 hours')
             OR (o.status = 'COMPLETED' AND posting.posted_at > clock_timestamp() - interval '72 hours'))
      ), wanted AS (
        SELECT f.order_id, f.app_id, 'ORDER_WELCOME'::text AS kind FROM facts f
         WHERE f.order_status = 'PAID'
           AND NOT EXISTS(SELECT 1 FROM zzsh_order.im_order_stage_card sc WHERE sc.order_id = f.order_id)
        UNION ALL
-       SELECT order_id, app_id, 'ORDER_OPENING'::text AS kind FROM facts WHERE opening_status IN ('DRAFT', 'CONFIRMED')
+       SELECT order_id, app_id, 'ORDER_OPENING'::text AS kind FROM facts WHERE order_status = 'PAID' AND opening_status IN ('DRAFT', 'CONFIRMED')
        UNION ALL
-       SELECT order_id, app_id, 'ORDER_ENDING' FROM facts WHERE has_intake
+       SELECT order_id, app_id, 'ORDER_ENDING' FROM facts WHERE order_status = 'PAID' AND has_intake
        UNION ALL
        SELECT order_id, app_id, 'ORDER_SETTLED' FROM facts WHERE order_status = 'COMPLETED' AND posted_at IS NOT NULL
+       UNION ALL
+       SELECT order_id, app_id, 'ORDER_CANCELLED' FROM facts WHERE order_status = 'CANCELLED'
      )
      INSERT INTO zzsh_order.im_order_stage_card (id, order_id, app_id, kind, card_id)
      SELECT 'im_card_' || substr(md5(order_id || ':' || kind), 1, 32), order_id, app_id, kind,
@@ -191,7 +198,7 @@ async function dueRows(options: OrderStageCardOptions, limit: number): Promise<D
       WHERE sc.app_id = $1 AND sc.state = 'PENDING' AND sc.next_attempt_at <= clock_timestamp()
         AND ${stageCardSafeSendSql("sc.failure_class")}
         AND g.team_state = 'READY' AND g.team_id IS NOT NULL
-      ORDER BY CASE sc.kind WHEN 'ORDER_WELCOME' THEN 0 WHEN 'ORDER_OPENING' THEN 1 WHEN 'ORDER_ENDING' THEN 2 ELSE 3 END, sc.created_at, sc.id
+      ORDER BY CASE sc.kind WHEN 'ORDER_CANCELLED' THEN 0 WHEN 'ORDER_WELCOME' THEN 1 WHEN 'ORDER_OPENING' THEN 2 WHEN 'ORDER_ENDING' THEN 3 ELSE 4 END, sc.created_at, sc.id
       LIMIT $2`,
     [options.appId, limit],
   )).rows;

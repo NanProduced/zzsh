@@ -1,12 +1,12 @@
 "use client";
 import { ProfileImage } from "./profile-image";
-import { Fragment, useCallback, useEffect, useRef, useState, type ChangeEvent, type FormEvent, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent, type ReactNode } from "react";
+import { Fragment, useCallback, useEffect, useRef, useState, type ChangeEvent, type FormEvent, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent, type ReactElement, type ReactNode } from "react";
 import { ImLifecycleSupersededError } from "@zzsh/im-client/lifecycle";
-import { mergeImMessages } from "@zzsh/im-client/message-state";
+import { decodeImSystemNotice, mergeImMessages } from "@zzsh/im-client/message-state";
 import { NimImageSendError, NimMediaSendError, NimTextSendError, validateNimImageFile, validateNimMediaFile, type NimMessageLike, type NimWebClientLike, type NimWebConnectionState, type NimMessageAuthorization } from "@zzsh/im-client/nim-web-client";
 import { CHAT_EMOJIS, MessageActionMenu, MessageQuoted, MessageReplyQuote, useMessageLongPress, type MessageActionId, type MessageActionItem, type MessageLongPressHandlers } from "./message-actions";
 import { MediaDraftBar, MediaMessage, MediaPreview, MessageImage, mediaMessageOf, mediaSummaryOf, type MessageMediaDraft } from "./message-media";
-import { OrderCardMessage } from "./order-card";
+import { OrderCardMessage, accountSummaryOf, type HintRenderer } from "./order-card";
 
 /** Composer icons live in this package (no icon dependency); tooltips are CSS-only. */
 function ComposerIcon({ id }: { id: "emoji" | "image" | "video" | "file" | "info" }) {
@@ -48,7 +48,7 @@ export type OrderTeamAccess={orderId:string;displayNo:string;orderStatus:string;
   terms?:OrderTeamTerms;terminalSendAllowed?:boolean;serverNow?:string;
   stageCards?:Array<{kind:string;kindLabel?:string;state:string;failureClass?:string|null;failureLabel?:string|null;updatedAt?:string|null}>;
   frozenInventory?:Array<{itemId:string;quantity:string;unit:string;pricingKind:string;name:string|null}>};
-type OrderItem={id:string;displayNo:string;title:string;status:string;stage?:OrderTeamFulfillmentStage;dueAt?:string|null;todo?:string|null;firstResponseOverdue?:boolean;teamState?:string|null;firstResponseAt?:string|null;remindDueAt?:string|null;lastMessageAt?:string|null;lastMessagePreview?:string|null;createdAt?:string|null;unreadCount?:number;addRound?:number;escalationState?:string;stageCards?:{pending:number;failed:number;skipped:number;unknown?:number;attention?:{state?:string}|null};fulfillmentAssignment?:{state:string;teamState:string|null}|null};
+type OrderItem={id:string;displayNo:string;title:string;status:string;teamId?:string|null;stage?:OrderTeamFulfillmentStage;dueAt?:string|null;todo?:string|null;firstResponseOverdue?:boolean;teamState?:string|null;firstResponseAt?:string|null;remindDueAt?:string|null;lastMessageAt?:string|null;lastMessagePreview?:string|null;createdAt?:string|null;unreadCount?:number;addRound?:number;escalationState?:string;stageCards?:{pending:number;failed:number;skipped:number;unknown?:number;attention?:{state?:string}|null};fulfillmentAssignment?:{state:string;teamState:string|null}|null};
 type OrderPage={items:OrderItem[];nextCursor:string|null};
 type ListRefresh={scope:string;targetPages:number;pagesRead:number;cursor:string|null|undefined;items:OrderItem[]};
 const REFRESH_PAGE_BUDGET=2;
@@ -61,6 +61,14 @@ type Props={identity:string;realm:"user"|"admin";client:NimWebClientLike|null;co
   extraMenuItems?:MessageActionItem[];onExtraMenuAction?:(id:MessageActionId)=>void;
   /** Inline opening confirmation. The callback performs the authorized write; the panel re-reads server truth. */
   onConfirmOpening?:(info:OrderTeamAccess)=>Promise<void>;
+  /** Copy hints inside stage cards use the host app's platform tooltip, never a native title. */
+  renderHint?:HintRenderer;
+  /** Composer tool buttons use the same host platform tooltip. */
+  renderTooltip?:(text:string,trigger:ReactElement)=>ReactNode;
+  /** Replace only the order header while keeping the shared message list/composer. */
+  renderOrderHeader?:(info:OrderTeamAccess)=>ReactNode;
+  /** Host-specific message body (legacy order references), without replacing the shared list/composer. */
+  renderMessageContent?:(message:NimMessageLike,info:OrderTeamAccess)=>ReactNode;
   /** Ended/read-only groups: open the ordinary SERVICE support thread with this order as context. */
   onRequestAfterSales?:(info:OrderTeamAccess)=>void;
   /** Suppress the browser menu on blank panel space; rows/messages own their own menus. */
@@ -95,7 +103,8 @@ const copyableText=(message:NimMessageLike):string|null=>(message.messageType===
 function messageRowOf(target:EventTarget|null):HTMLElement|null{
   const element=target as {closest?:(selector:string)=>HTMLElement|null}|null;
   if(!element||typeof element.closest!=="function")return null;
-  return element.closest("[data-message-id]");
+  const content=element.closest("p, .im-wb-bub, .order-card, .message-media, .message-image, .order-team-message-revoked, .message-quoted");
+  return content?content.closest("[data-message-id]"):null;
 }
 function orderEndLabel(order:{orderStatus?:string;status?:string}):string|null{
   const status=order.orderStatus??order.status;
@@ -141,22 +150,37 @@ export function orderTeamLabel(order:{orderStatus?:string;status?:string;stage?:
   if(team==="READY")return "订单群已就绪";
   return (order.assignmentState??order.fulfillmentAssignment?.state)==="ASSIGNED"?"已分配 · 正在准备订单群":"已付款 · 等待匹配客服";
 }
-const FULFILLMENT_STEPS=[{key:"PAID",label:"已付款"},{key:"TEAM",label:"客服与群"},{key:"OPENING",label:"账号与开租"},{key:"RENTING",label:"租用中"},{key:"ENDING",label:"结束确认"},{key:"SETTLED",label:"结算完成"}] as const;
+type FulfillmentStepKey="PAID"|"OPENING"|"RENTING"|"ENDING"|"SETTLED"|"CANCELLED";
+type FulfillmentStep={key:FulfillmentStepKey;label:string};
+const NORMAL_STEPS:readonly FulfillmentStep[]=[{key:"PAID",label:"已付款"},{key:"OPENING",label:"开租确认"},{key:"RENTING",label:"租用中"},{key:"ENDING",label:"结束确认"},{key:"SETTLED",label:"结算完成"}];
+const PRESTART_CANCEL_STEPS:readonly FulfillmentStep[]=[{key:"PAID",label:"已付款"},{key:"OPENING",label:"开租确认"},{key:"CANCELLED",label:"已取消"}];
+const STARTED_CANCEL_STEPS:readonly FulfillmentStep[]=[{key:"PAID",label:"已付款"},{key:"OPENING",label:"开租确认"},{key:"RENTING",label:"租用中"},{key:"CANCELLED",label:"已取消"}];
 export function fulfillmentStageLabel(stage:OrderTeamFulfillmentStage|undefined):string{
   switch(stage){
     case "PENDING_PAYMENT":return "待付款";case "WAITING_STAFF":return "等待客服";case "TEAM_PENDING":return "组建订单群";
-    case "OPENING_CONFIRM":return "账号与开租确认";case "RENTING":return "租用中";case "ENDING":return "结束确认";
+    case "OPENING_CONFIRM":return "开租确认";case "RENTING":return "租用中";case "ENDING":return "结束确认";
     case "SETTLED":return "结算完成";case "CANCELLED":return "已取消";default:return "进行中";
   }
 }
-function stageStepIndex(stage:OrderTeamFulfillmentStage|undefined):number{
-  switch(stage){case "PENDING_PAYMENT":return -1;case "WAITING_STAFF":case "TEAM_PENDING":return 1;case "OPENING_CONFIRM":return 2;case "RENTING":return 3;case "ENDING":return 4;case "SETTLED":return 5;default:return -1;}
+function startedBeforeCancel(info:OrderTeamAccess):boolean{
+  return info.openingState==="CONFIRMED"||Boolean(info.rentalStartedAt);
 }
-type FulfillmentStepState="done"|"current"|"pending"|"cancelled";
+function stageSteps(info:OrderTeamAccess,stage:OrderTeamFulfillmentStage):readonly FulfillmentStep[]{
+  if(stage!=="CANCELLED")return NORMAL_STEPS;
+  return startedBeforeCancel(info)?STARTED_CANCEL_STEPS:PRESTART_CANCEL_STEPS;
+}
+function stageStepIndex(stage:OrderTeamFulfillmentStage|undefined):number{
+  switch(stage){case "PENDING_PAYMENT":return -1;case "WAITING_STAFF":case "TEAM_PENDING":return 0;case "OPENING_CONFIRM":return 1;case "RENTING":return 2;case "ENDING":return 3;case "SETTLED":return 4;default:return -1;}
+}
+type FulfillmentStepState="done"|"current"|"pending"|"cancelled"|"skipped";
 /** One rule for both the collapsed bar and the chat empty-state timeline. */
-function stageStepState(stage:OrderTeamFulfillmentStage,index:number):FulfillmentStepState{
+function stageStepState(info:OrderTeamAccess,stage:OrderTeamFulfillmentStage,step:FulfillmentStep,index:number):FulfillmentStepState{
+  if(stage==="CANCELLED"){
+    if(step.key==="CANCELLED")return "cancelled";
+    if(step.key==="OPENING"&&!startedBeforeCancel(info))return "skipped";
+    return "done";
+  }
   if(stage==="SETTLED")return "done";
-  if(stage==="CANCELLED")return "cancelled";
   const current=stageStepIndex(stage);
   return index<current?"done":index===current?"current":"pending";
 }
@@ -172,7 +196,7 @@ function stageCollapsedText(info:OrderTeamAccess):string{
   if(stage==="OPENING_CONFIRM"){
     const acks=info.openingAcks;
     const who=acks?`租客${acks.renter?"已确认":"待确认"} · 号主${acks.owner?"已确认":"待确认"}`:null;
-    return who?`账号与开租确认 · ${who}`:"账号与开租确认";
+    return who?`开租确认 · ${who}`:"开租确认";
   }
   if(stage==="RENTING"){
     if(info.dueAt){const due=new Date(info.dueAt).getTime();return Number.isFinite(due)&&due<Date.now()?`租用中 · 已到期 ${serverTimeLabel(info.dueAt)}`:`租用中 · 到期 ${serverTimeLabel(info.dueAt)}`;}
@@ -186,8 +210,10 @@ function stageCollapsedText(info:OrderTeamAccess):string{
       ? info.terminalSendAllowed
       : (Number.isFinite(until)&&Number.isFinite(now)&&now<until);
     if(info.cancelReason==="PRESTART_TERMINATED"){
-      if(info.refundPending===true||allowed)return info.sendUntil?`未开租终止 · 可沟通至 ${serverTimeLabel(info.sendUntil)}`:"未开租终止 · 退款处理中 · 可沟通";
-      return "未开租终止 · 仅可查看";
+      const showRefund=info.terms?.viewerParty!=="OWNER";
+      if(showRefund&&info.refundPending===true)return info.sendUntil?`未开租终止 · 退款处理中 · 可沟通至 ${serverTimeLabel(info.sendUntil)}`:"未开租终止 · 退款处理中 · 可沟通";
+      if(showRefund&&info.refundCompletedAt)return allowed?(info.sendUntil?`未开租终止 · 退款已完成 · 可沟通至 ${serverTimeLabel(info.sendUntil)}`:"未开租终止 · 退款已完成 · 可沟通"):"未开租终止 · 退款已完成 · 仅可查看";
+      return allowed?(info.sendUntil?`未开租终止 · 可沟通至 ${serverTimeLabel(info.sendUntil)}`:"未开租终止 · 可沟通"):"未开租终止 · 仅可查看";
     }
     if(info.cancelReason==="MANUAL_CLOSE"){
       if(allowed)return info.sendUntil?`客服手动结束 · 可沟通至 ${serverTimeLabel(info.sendUntil)}`:"客服手动结束 · 可沟通";
@@ -205,7 +231,7 @@ function stageCollapsedText(info:OrderTeamAccess):string{
     ? "结算完成 · 已超过 72 小时 · 仅可查看"
     : "结算完成";
 }
-/** Compact six-step bar. Collapsed it is one line; the steps stay available without becoming a dashboard. */
+/** Compact timeline. Collapsed it is one line; the steps stay available without becoming a dashboard. */
 export function FulfillmentStageBar({info,transport,connection}:{info:OrderTeamAccess;transport?:"nim"|"local-fake";connection?:string}){
   const [open,setOpen]=useState(false);
   if(info.origin==="LEGACY")return <section className="order-team-stage" aria-label="订单状态"><div className="order-team-stage-toggle"><span className="order-team-stage-now">迁入订单 · {info.legacyStatusLabel??"状态待核实"}</span></div></section>;
@@ -219,22 +245,22 @@ export function FulfillmentStageBar({info,transport,connection}:{info:OrderTeamA
       {connection&&connection!=="CONNECTED"?<span className="order-team-stage-env" data-tone="warn">{connection==="RECONNECTING"?"重连中":"未连接"}</span>:null}
       <span className="order-team-stage-chevron" aria-hidden="true"/>
     </button>
-    {open?<ol className="order-team-stage-steps">{FULFILLMENT_STEPS.map((step,index)=>{
-      const state=stageStepState(stage,index);
-      return <li key={step.key} data-state={state}><span className="order-team-stage-step-mark" aria-hidden="true"/><span>{step.label}</span></li>;
+    {open?<ol className="order-team-stage-steps">{stageSteps(info,stage).map((step,index)=>{
+      const state=stageStepState(info,stage,step,index);
+      return <li key={step.key} data-state={state} {...(state==="current"?{"aria-current":"step" as const}:{})}><span className="order-team-stage-step-mark" aria-hidden="true"/><span>{step.label}</span></li>;
     })}</ol>:null}
   </section>;
 }
-/** NIM history can be empty even when the order is settled; order facts still tell the six-step story. */
+/** NIM history can be empty even when the order is settled; order facts still tell the fulfillment story. */
 export function OrderTeamChatEmptyState({info,reading,orderDetailHref}:{info:OrderTeamAccess;reading:boolean;orderDetailHref?:string}){
-  const stage=stageOf(info),current=stageStepIndex(stage);
+  const stage=stageOf(info),steps=stageSteps(info,stage);
   return <div className="order-team-chat-empty" role="status">
     <span className="order-team-empty-mark" aria-hidden="true"/>
     <strong>{reading?"正在读取消息…":"还没有消息"}</strong>
     <span className="order-team-chat-empty-copy">{reading?"请稍候":"本单暂时还没有消息。"}{orderDetailHref?<a className="order-team-chat-empty-link" href={orderDetailHref}>查看订单详情</a>:null}</span>
     {info.origin!=="LEGACY"?<ol className="order-team-stage-steps" aria-label="订单阶段时间线">
-      {FULFILLMENT_STEPS.map((step,index)=>{const state=stageStepState(stage,index);
-        return <li key={step.key} data-state={state} {...(index===current&&state==="current"?{"aria-current":"step" as const}:{})}><span className="order-team-stage-step-mark" aria-hidden="true"/><span>{step.label}</span></li>;})}
+      {steps.map((step,index)=>{const state=stageStepState(info,stage,step,index);
+        return <li key={step.key} data-state={state} {...(state==="current"?{"aria-current":"step" as const}:{})}><span className="order-team-stage-step-mark" aria-hidden="true"/><span>{step.label}</span></li>;})}
     </ol>:<span className="order-team-chat-empty-copy">这是客服为迁入订单创建的新群，旧消息不会显示在这里。</span>}
   </div>;
 }
@@ -346,7 +372,7 @@ function OrderMessageImage({attachment}:{attachment:ImageAttachment}){
 }
 
 /** Both platforms pass their existing client. This component never logs in or creates a Team. */
-export function OrderTeamPanel({identity,realm,client,connection,active,visible=true,polling=true,selectedOrderId,controlledSelection=false,compact=false,initialParty="renter",sendAllowed=true,layout="inline",request,onAuthError,renderFulfillment,renderList,renderAside,renderConversation,extraMenuItems,onExtraMenuAction,onConfirmOpening,onRequestAfterSales,onBlankContextMenu,onSelectedOrderChange,gridPane,gridDetailsOpen}:Props){
+export function OrderTeamPanel({identity,realm,client,connection,active,visible=true,polling=true,selectedOrderId,controlledSelection=false,compact=false,initialParty="renter",sendAllowed=true,layout="inline",request,onAuthError,renderFulfillment,renderList,renderAside,renderConversation,extraMenuItems,onExtraMenuAction,onConfirmOpening,renderHint,renderTooltip,renderOrderHeader,renderMessageContent,onRequestAfterSales,onBlankContextMenu,onSelectedOrderChange,gridPane,gridDetailsOpen}:Props){
   const [party,setParty]=useState(initialParty),[items,setItems]=useState<OrderItem[]>([]),[next,setNext]=useState<string|null>(null);
   const [selected,setSelected]=useState<string|null>(null),[info,setInfo]=useState<OrderTeamAccess|null>(null),[error,setError]=useState("");
   // 「重新确认授权」只在真的失权（401/403/423）时才是恢复动作；正常列表不该常驻一个
@@ -642,11 +668,11 @@ export function OrderTeamPanel({identity,realm,client,connection,active,visible=
   useEffect(()=>{if(controlledSelection||selectedOrderId){const next=selectedOrderId??null;accessSequence.current++;setInfo(null);setSelected(next);setError("");onSelectedOrderChange?.(next);}},[selectedOrderId,controlledSelection]);
   const choose=(id:string|null)=>{accessSequence.current++;setInfo(null);setSelected(id);setError("");onSelectedOrderChange?.(id);};
   const visibleItems=itemsScope.current===listScope?items:[],visibleNext=itemsScope.current===listScope?next:null;
-  const orderHeader=info&&!renderConversation?<header className="order-team-head">
+  const orderHeader=info&&!renderConversation?(renderOrderHeader?renderOrderHeader(info):<header className="order-team-head">
     <div className="order-team-head-row"><h3>订单 {info.displayNo}</h3><span className="order-team-head-chip">{info.origin==="LEGACY"?info.legacyStatusLabel??"迁入订单":stageOf(info)==="CANCELLED"&&info.cancelReason==="PRESTART_TERMINATED"?"未开租终止":stageOf(info)==="CANCELLED"&&info.cancelReason==="MANUAL_CLOSE"?"客服手动结束":fulfillmentStageLabel(stageOf(info))}</span><a className="order-team-head-link" href={orderDetailPath(info,party)}>订单详情</a></div>
-    <p className="order-team-head-sub">{info.gameName} · {info.account.title?.trim()||"账号"}</p>
+    <p className="order-team-head-sub">{accountSummaryOf(info) === info.gameName ? info.gameName : `${info.gameName} · ${accountSummaryOf(info)}`}</p>
     <p className="order-team-head-members">{info.members.map(member=>`${role(member)} ${member.name?.trim()||"未署名"}`).join(" · ")}</p>
-  </header>:null;
+  </header>):null;
   const orderEscalation=info?(compact?<details className="support-order-summary"><summary>{orderTeamLabel(info)} · 查看订单摘要</summary><p>{info.gameName} · {info.account.title?.trim()||"账号"}</p><a href={orderDetailPath(info,party)}>前往订单核对</a><OrderTeamEscalation value={info.supportEscalation}/></details>:<OrderTeamEscalation value={info.supportEscalation}/>):null;
   const orderFulfillment=info&&info.origin!=="LEGACY"&&realm==="admin"&&renderFulfillment?<div className="order-team-fulfillment-slot">{renderFulfillment({orderId:info.orderId,displayNo:info.displayNo,teamState:info.teamState,canSend:info.canSend,...(info.frozenInventory?{frozenInventory:info.frozenInventory}:{})})}</div>:null;
   const orderMembers=info?<ul className="order-team-members" aria-label="群成员">{info.members.map(m=><li key={m.accountId}><ProfileImage src={m.avatar} fallback={<span aria-hidden="true">{Array.from(m.name?.trim()||role(m))[0]||"用"}</span>} width={28} height={28}/><span>{m.name?.trim()||role(m)}<small>{role(m)}</small>{realm==="admin"&&m.party!=="STAFF"?<small>用户编号 {m.platformId} · 会员：未知 · 实名：未知</small>:null}</span></li>)}</ul>:null;
@@ -660,7 +686,7 @@ export function OrderTeamPanel({identity,realm,client,connection,active,visible=
   const orderConversation=info&&client&&active?<>
     <OrderConversation key={JSON.stringify([identity,info.appId,info.orderId,info.teamId])} client={client} info={{...info,canSend:info.canSend&&sendAllowed}} connection={connection} active={active} visible={visible} orderDetailHref={realm==="user"?orderDetailPath(info,party):undefined}
     extraMenuItems={extraMenuItems} onExtraMenuAction={onExtraMenuAction}
-    onConfirmOpening={confirmOpeningWithRefresh} onRequestAfterSales={onRequestAfterSales}
+    onConfirmOpening={confirmOpeningWithRefresh} renderHint={renderHint} renderTooltip={renderTooltip} renderMessageContent={renderMessageContent} onRequestAfterSales={onRequestAfterSales}
     readAccess={operation=>accessRef.current(operation)} draftKey={draftKey} draft={drafts[draftKey]??""} setDraft={value=>setDrafts(current=>({...current,[draftKey]:value}))}
     pendingText={pendingTextByOrder[draftKey]??null} getPendingText={()=>pendingTextByOrderRef.current[draftKey]??null} isTextSending={()=>textAttempts.current.has(draftKey)} beginPendingText={beginPendingText} settlePendingText={settlePendingText}
     stagedImages={stagedByOrder[draftKey]??[]} setStagedImages={updater=>setStagedByOrder(current=>{
@@ -702,7 +728,7 @@ export function OrderTeamPanel({identity,realm,client,connection,active,visible=
           {info.canRead&&info.teamState==="READY"?layout==="aside"?<>
             <div className="order-team-conversation">{orderHeader}<FulfillmentStageBar info={info} transport={client?.transport} connection={String(connection)}/>{orderConversation}</div>
             {orderAside}
-          </>:<>{orderHeader}<FulfillmentStageBar info={info} transport={client?.transport} connection={String(connection)}/>{realm==="admin"?orderAsideNodes:<div className="order-team-user-members" role="group" aria-label="群成员"><span className="order-team-members-label">群成员：</span><span className="order-team-members-text">{info.members.map(m=>`${role(m)} ${m.name?.trim()||"未署名"}`).join(" · ")}</span></div>}{orderConversation}</>:<>{orderHeader}<FulfillmentStageBar info={info} transport={client?.transport} connection={String(connection)}/>{realm==="admin"?orderAsideNodes:null}<div className="order-team-notready" role="status"><strong>订单群还在准备中</strong><span>页面会自动更新状态；打开页面不会触发付款或重复建群。</span></div></>}
+          </>:<>{orderHeader}<FulfillmentStageBar info={info} transport={client?.transport} connection={String(connection)}/>{realm==="admin"?orderAsideNodes:null}{orderConversation}</>:<>{orderHeader}<FulfillmentStageBar info={info} transport={client?.transport} connection={String(connection)}/>{realm==="admin"?orderAsideNodes:null}<div className="order-team-notready" role="status"><strong>订单群还在准备中</strong><span>页面会自动更新状态；打开页面不会触发付款或重复建群。</span></div></>}
         </>}
       </div>
     </div>}
@@ -743,6 +769,9 @@ function OrderConversation({
   extraMenuItems,
   onExtraMenuAction,
   onConfirmOpening,
+  renderHint,
+  renderTooltip,
+  renderMessageContent,
   onRequestAfterSales,
 }:{
   client:NimWebClientLike;
@@ -778,6 +807,9 @@ function OrderConversation({
   extraMenuItems?:MessageActionItem[];
   onExtraMenuAction?:(id:MessageActionId)=>void;
   onConfirmOpening?:(info:OrderTeamAccess)=>Promise<void>;
+  renderHint?:HintRenderer;
+  renderTooltip?:(text:string,trigger:ReactElement)=>ReactNode;
+  renderMessageContent?:(message:NimMessageLike,info:OrderTeamAccess)=>ReactNode;
   onRequestAfterSales?:(info:OrderTeamAccess)=>void;
 }){
   type Message=NimMessageLike&{id:string};
@@ -786,7 +818,11 @@ function OrderConversation({
   const [messages,setMessages]=useState<Message[]>([]),[error,setError]=useState(""),[localSending,setSending]=useState(false),[reading,setReading]=useState(false),[more,setMore]=useState(true),[viewer,setViewer]=useState<{url:string;name:string}|null>(null),[historyFailed,setHistoryFailed]=useState(false);
   const [replyTo,setReplyTo]=useState<Message|null>(null),[replyUncertain,setReplyUncertain]=useState(false);
   const [emojiOpen,setEmojiOpen]=useState(false);
+  const [mentionOpen,setMentionOpen]=useState(false);
+  const [mentionQuery,setMentionQuery]=useState("");
+  const [mentionStart,setMentionStart]=useState<number|null>(null);
   const messageListRef=useRef<HTMLOListElement|null>(null);
+  const stickToBottomRef=useRef(true);
   const [menu,setMenu]=useState<{id:string;x:number;y:number;row:HTMLElement|null}|null>(null);
   const composerRef=useRef<HTMLTextAreaElement|null>(null);
   const imageInput=useRef<HTMLInputElement|null>(null);
@@ -805,6 +841,10 @@ function OrderConversation({
   const scope=JSON.stringify([info.appId,info.orderId,info.teamId,info.conversationId,info.viewerAccountId]);
   const scopeRef=useRef(scope);scopeRef.current=scope;
   // A quote whose target was deleted or revoked must stop claiming to be replyable.
+  useEffect(()=>{
+    const el=messageListRef.current;
+    if(el&&stickToBottomRef.current)el.scrollTop=el.scrollHeight;
+  },[messages]);
   useEffect(()=>{if(!replyTo)return;const current=messages.find(message=>message.id===replyTo.id);if(!current||current.revoked){setReplyTo(null);setReplyUncertain(false);}},[messages,replyTo]);
   const stageFiles=(files:File[])=>{
     if(!files.length)return;
@@ -1040,6 +1080,21 @@ function OrderConversation({
     setEmojiOpen(false);
     requestAnimationFrame(()=>composerRef.current?.focus());
   };
+  const insertMention=(name:string)=>{
+    const token=`@${name} `;
+    if(draft.length+token.length>4000)return;
+    const el=composerRef.current;
+    const cursor=el?.selectionStart??draft.length;
+    const start=mentionStart??cursor;
+    const next=`${draft.slice(0,start)}${token}${draft.slice(cursor)}`;
+    if(next.length>4000)return;
+    setDraft(next);
+    setMentionOpen(false);
+    setMentionQuery("");
+    setMentionStart(null);
+    setEmojiOpen(false);
+    requestAnimationFrame(()=>{el?.focus();const position=start+token.length;el?.setSelectionRange(position,position);});
+  };
   const retryText=async()=>{
     if(submittingRef.current||sending||isTextSending()||isImageSending()||isMediaSending()||pendingImageRef.current?.state==="SENDING"||!canStartSendRef.current)return;
     const original=getPendingText();
@@ -1179,6 +1234,18 @@ function OrderConversation({
   const imageBlocked=stagedImages.some(it=>it.state==="DECODING"||it.width<=0||it.height<=0);
   const mediaInFlight=isMediaSending()||mediaDraft?.state==="SENDING";
   const sendError=error||(pendingText?.state==="UNKNOWN"?(pendingText.messageClientId?"上一条文字发送结果未确认，请先核验或按原消息重试":"原文字标识不可用，请先核验发送结果；不可重新发送"):"");
+  const mentionMembers=info.members.filter(member=>member.accountId!==client.accountId&&member.name?.trim());
+  const mentionCandidates=mentionMembers.filter(member=>!mentionQuery||member.name!.trim().toLowerCase().includes(mentionQuery.toLowerCase()));
+  const withTooltip=(text:string,button:ReactElement)=>renderTooltip?renderTooltip(text,button):button;
+  const syncMention=(value:string,cursor:number|null)=>{
+    const position=cursor??value.length;
+    const match=/@([^\s@]{0,30})$/.exec(value.slice(0,position));
+    if(!match){setMentionOpen(false);setMentionQuery("");setMentionStart(null);return;}
+    setMentionStart(position-match[1]!.length-1);
+    setMentionQuery(match[1]!);
+    setMentionOpen(true);
+    setEmojiOpen(false);
+  };
   // 放大查看始终是同一个原生 modal dialog：换呈现层不能顺带丢掉 Escape 收敛与焦点回归。
   const viewerDialog=<MediaPreview item={viewer?{...viewer,kind:"image"}:null} returnFocus={viewerTrigger.current} onClose={()=>setViewer(null)}/>;
   if(render)return <>
@@ -1201,11 +1268,13 @@ function OrderConversation({
     : (Number.isFinite(until)&&Number.isFinite(now)&&now<until);
   const readOnlyText=info.orderStatus==="COMPLETED"||info.orderStatus==="CANCELLED"
     ?(info.cancelReason==="PRESTART_TERMINATED"
-      ?(allowed?"本单未开租终止，仍可在沟通窗口内发送消息":"本单未开租终止，退款已核销，仅可查看历史")
+      ?(info.terms?.viewerParty!=="OWNER"&&info.refundPending===true
+        ?(allowed?"本单未开租终止，退款处理中，仍可在沟通窗口内发送消息":"本单未开租终止，退款处理中，仅可查看历史")
+        :(allowed?"本单未开租终止，仍可在沟通窗口内发送消息":"本单未开租终止，仅可查看历史"))
       :info.cancelReason==="MANUAL_CLOSE"
         ?(allowed?"本单客服手动结束，仍可在沟通窗口内发送消息":"本单客服手动结束，仅可查看历史")
         :(allowed?"本单已结束，仍可在沟通窗口内发送消息":"本单已结束，仅可查看历史"))
-    :info.teamState!=="READY"?"订单群尚未就绪，暂不可发送":"当前不可发送";
+    :info.teamState!=="READY"?"订单群尚未就绪，暂不可发送":"当前只可阅读本单消息；历史与草稿会保留";
   const jumpToMessage = (messageId: string) => {
     const target = messages.find((message) => message.id === messageId || message.messageClientId === messageId || message.messageServerId === messageId);
     if (!target) return;
@@ -1220,21 +1289,28 @@ function OrderConversation({
     {more&&messages.length?<div className="order-team-history"><button type="button" className="order-team-link" disabled={reading} onClick={()=>void history(messages[0])}>{reading?"正在读取…":"更早的消息"}</button></div>:null}
     {sendError?<p role="alert">{sendError}</p>:null}
     {textRetry?<div className="order-team-text-retry" role="status"><p>{textRetry.text}</p><span>发送结果待确认，请核对这条原消息</span><button type="button" disabled={sending||!textRetry.messageClientId||!info.canSend||connection!=="CONNECTED"} onClick={()=>void retryText()}>原消息重试</button></div>:null}
-    <ol ref={messageListRef} className="order-team-messages" aria-label="订单消息" aria-live="polite" onContextMenu={onMessagesContextMenu} {...longPress}>{messages.map((message,index)=>{
+    <ol ref={messageListRef} className="order-team-messages" aria-label="订单消息" aria-live="polite" onScroll={event=>{const el=event.currentTarget;stickToBottomRef.current=el.scrollHeight-el.scrollTop-el.clientHeight<80;}} onContextMenu={onMessagesContextMenu} {...longPress}>{messages.map((message,index)=>{
       const member=info.members.find(m=>m.accountId===message.senderId),replyMember=message.reply?info.members.find(m=>m.accountId===message.reply!.senderId):undefined,self=message.senderId===client.accountId,revoked=message.revoked===true;
+      const replySenderName=replyMember?.name?.trim()||(replyMember?role(replyMember):message.reply?.senderId===info.botAccountId?"洲洲助手":null);
       const media=mediaMessageOf(message),card=Boolean(message.card);
       const caption=typeof message.text==="string"&&message.text.trim()?<p className="message-media-caption-text">{message.text}</p>:null;
-      const grouped=Boolean(index>0&&messages[index-1]?.senderId===message.senderId&&message.createTime-messages[index-1]!.createTime<300_000);
+      // Bot cards/notices always keep their sender line: a grouped follow-up must not hide who sent it.
       const bot=Boolean(!self&&info.botAccountId&&message.senderId===info.botAccountId);
-      const label=self?"我":bot?"洲洲助手（Bot）":member?.name?.trim()||(member?role(member):"平台消息");
+      const grouped=Boolean(!bot&&!card&&index>0&&messages[index-1]?.senderId===message.senderId&&message.createTime-messages[index-1]!.createTime<300_000);
+      const label=self?"我":bot?"洲洲助手（Bot）":member?.name?.trim()||(member?role(member):"未署名成员");
       const avatar=member?.avatar?.trim()||null;
-      const content=revoked?<span className="order-team-message-revoked">消息已撤回</span>:<>{card?<OrderCardMessage message={message} info={info} onConfirmOpening={onConfirmOpening}/>:media?<><MediaMessage media={media}/>{caption}</>:message.messageType===1&&message.attachment?<><OrderMessageImage attachment={message.attachment}/>{caption}</>:<p>{(message.messageType===undefined||message.messageType===0)&&typeof message.text==="string"?message.text:"暂不支持此消息类型"}</p>}{message.reply?<MessageQuoted text={message.reply.text??"消息"} senderName={replyMember?.name?.trim()||(replyMember?role(replyMember):null)} onJump={()=>jumpToMessage(message.reply!.messageId)}/>:null}</>;
+      const notice=message.revoked?null:decodeImSystemNotice(message);
       const showDay=index===0||chatDayKey(message.createTime)!==chatDayKey(messages[index-1]!.createTime);
+      if(notice)return <Fragment key={message.id}>
+        {showDay?<li className="order-team-day" role="separator"><span>{chatDayLabel(message.createTime)}</span></li>:null}
+        <li className="order-team-system" data-message-id={message.id} role="separator"><span>{notice.text}</span></li>
+      </Fragment>;
+      const content=renderMessageContent?renderMessageContent(message,info):revoked?<span className="order-team-message-revoked">消息已撤回</span>:<>{card?<OrderCardMessage message={message} info={info} onConfirmOpening={onConfirmOpening} renderHint={renderHint}/>:media?<><MediaMessage media={media}/>{caption}</>:message.messageType===1&&message.attachment?<><OrderMessageImage attachment={message.attachment}/>{caption}</>:<p>{(message.messageType===undefined||message.messageType===0)&&typeof message.text==="string"?message.text:"暂不支持此消息类型"}</p>}{message.reply?<MessageQuoted text={message.reply.text??"消息"} senderName={replySenderName} onJump={()=>jumpToMessage(message.reply!.messageId)}/>:null}</>;
       return <Fragment key={message.id}>
         {showDay?<li className="order-team-day" role="separator"><span>{chatDayLabel(message.createTime)}</span></li>:null}
         <li data-message-id={message.id} tabIndex={-1} data-self={self} data-grouped={grouped} data-card={card||undefined}>
         <span className="order-team-msg-avatar" aria-hidden="true">{bot?<img src="/art/zhouzhou/avatar.webp" alt=""/>:<ProfileImage src={avatar} fallback={Array.from(label)[0]||"用"} loading="lazy"/>}</span>
-        <div className="order-team-msg-body">
+        <div className="order-team-msg-body" data-card={card||undefined}>
           <small className="order-team-msg-meta"><b>{label}</b>{member?<em className="order-team-msg-role">{role(member)}</em>:null}<time>{chatTimeLabel(new Date(message.createTime).toString())}</time></small>
           {content}
           {self&&!revoked&&!card?<small className="order-team-msg-status"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="m5 12 5 5L20 7"/></svg><span>已发送</span></small>:null}
@@ -1249,19 +1325,23 @@ function OrderConversation({
     {replyTo?<MessageReplyQuote label={replySummaryOf(replyTo)} onCancel={()=>{setReplyTo(null);setReplyUncertain(false);}}/>:null}
     {!info.canSend||(historyFailed&&!messages.length)?<div className="order-team-readonly" role="status"><span className="order-team-readonly-mark" aria-hidden="true"/><span>{historyFailed&&!messages.length?"消息暂未加载，暂不可发送":readOnlyText}</span>{(info.orderStatus==="COMPLETED"||info.orderStatus==="CANCELLED")&&onRequestAfterSales?<button type="button" className="order-team-readonly-action" onClick={()=>onRequestAfterSales(info)}>联系客服处理订单问题</button>:null}</div>:<form className="order-team-composer" onSubmit={send}>
       <div className="order-team-composer-box">
-        <textarea ref={composerRef} aria-label="订单消息输入" rows={2} value={draft} maxLength={4000} onChange={e=>{setDraft(e.target.value);e.currentTarget.style.height="auto";e.currentTarget.style.height=Math.min(e.currentTarget.scrollHeight,120)+"px";}} onKeyDown={onComposerKeyDown} placeholder="输入消息…"/>
+        <textarea ref={composerRef} aria-label="订单消息输入" rows={2} value={draft} maxLength={4000} onChange={e=>{setDraft(e.target.value);e.currentTarget.style.height="auto";e.currentTarget.style.height=Math.min(e.currentTarget.scrollHeight,120)+"px";syncMention(e.target.value,e.target.selectionStart);}} onKeyDown={onComposerKeyDown} placeholder="输入消息…"/>
         <div className="order-team-composer-tools">
+          <div className="order-team-mention">
+            {withTooltip("提及成员",<button type="button" className="order-team-tool" data-tip="提及成员" aria-label="提及成员" aria-expanded={mentionOpen} disabled={!mentionMembers.length} onClick={()=>{setMentionOpen(open=>!open);setMentionStart(null);setMentionQuery("");setEmojiOpen(false);}}><span className="order-team-at" aria-hidden="true">@</span></button>)}
+            {mentionOpen?<div className="order-team-mention-list" role="menu" aria-label="群成员">{mentionCandidates.length?mentionCandidates.map(member=><button key={member.accountId} type="button" role="menuitem" className="order-team-mention-item" onClick={()=>insertMention(member.name!.trim())}><span>{member.name!.trim()}</span><small>{member.party==="BUYER"?"租客":member.party==="OWNER"?"号主":member.party==="STAFF"?"客服":role(member)}</small></button>):<span className="order-team-mention-empty">没有匹配的成员</span>}</div>:null}
+          </div>
           <div className="order-team-emoji">
-            <button type="button" className="order-team-tool" data-tip="表情" aria-label="表情" aria-expanded={emojiOpen} onClick={()=>setEmojiOpen(open=>!open)}><ComposerIcon id="emoji" /></button>
+            {withTooltip("表情",<button type="button" className="order-team-tool" data-tip="表情" aria-label="表情" aria-expanded={emojiOpen} onClick={()=>{setEmojiOpen(open=>!open);setMentionOpen(false);}}><ComposerIcon id="emoji" /></button>)}
             {emojiOpen?<div className="order-team-emoji-grid" role="menu" aria-label="表情">{CHAT_EMOJIS.map(item=><button key={item.emoji} type="button" role="menuitem" className="order-team-emoji-item" aria-label={item.label} onClick={()=>insertEmoji(item.emoji)}>{item.emoji}</button>)}</div>:null}
           </div>
-          <button type="button" className="order-team-tool" data-tip="发送图片" onClick={()=>imageInput.current?.click()} disabled={connection!=="CONNECTED"||sending||imageInFlight||mediaInFlight} aria-label="发送图片"><ComposerIcon id="image" /></button>
+          {withTooltip("发送图片",<button type="button" className="order-team-tool" data-tip="发送图片" onClick={()=>imageInput.current?.click()} disabled={connection!=="CONNECTED"||sending||imageInFlight||mediaInFlight} aria-label="发送图片"><ComposerIcon id="image" /></button>)}
           <input ref={imageInput} type="file" multiple accept="image/jpeg,image/png" hidden onChange={chooseImage} disabled={connection!=="CONNECTED"||sending||imageInFlight||mediaInFlight}/>
-          <button type="button" className="order-team-tool" data-tip="发送视频" onClick={()=>videoInput.current?.click()} disabled={connection!=="CONNECTED"||sending||imageInFlight||mediaInFlight} aria-label="发送视频"><ComposerIcon id="video" /></button>
+          {withTooltip("发送视频",<button type="button" className="order-team-tool" data-tip="发送视频" onClick={()=>videoInput.current?.click()} disabled={connection!=="CONNECTED"||sending||imageInFlight||mediaInFlight} aria-label="发送视频"><ComposerIcon id="video" /></button>)}
           <input ref={videoInput} type="file" accept="video/mp4,video/quicktime,video/webm" hidden onChange={chooseMedia("video")} disabled={connection!=="CONNECTED"||sending||imageInFlight||mediaInFlight||mediaDraft?.state==="UNKNOWN"}/>
-          <button type="button" className="order-team-tool" data-tip="发送文件" onClick={()=>mediaFileInput.current?.click()} disabled={connection!=="CONNECTED"||sending||imageInFlight||mediaInFlight} aria-label="发送文件"><ComposerIcon id="file" /></button>
+          {withTooltip("发送文件",<button type="button" className="order-team-tool" data-tip="发送文件" onClick={()=>mediaFileInput.current?.click()} disabled={connection!=="CONNECTED"||sending||imageInFlight||mediaInFlight} aria-label="发送文件"><ComposerIcon id="file" /></button>)}
           <input ref={mediaFileInput} type="file" accept="application/pdf,application/zip,text/plain,text/csv,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.openxmlformats-officedocument.presentationml.presentation" hidden onChange={chooseMedia("file")} disabled={connection!=="CONNECTED"||sending||imageInFlight||mediaInFlight||mediaDraft?.state==="UNKNOWN"}/>
-          <button type="button" className="order-team-tool" data-tip="插入本单信息" aria-label="插入本单信息" onClick={()=>{const infoText=`【本单信息】${info.account.title?.trim()||"账号"} (订单尾号: ${info.displayNo})`;setDraft(draft?`${draft}\n${infoText}`:infoText);}}><ComposerIcon id="info" /></button>
+          {withTooltip("插入本单信息",<button type="button" className="order-team-tool" data-tip="插入本单信息" aria-label="插入本单信息" onClick={()=>{const infoText=`【本单信息】${info.account.title?.trim()||"账号"} (订单尾号: ${info.displayNo})`;setDraft(draft?`${draft}\n${infoText}`:infoText);}}><ComposerIcon id="info" /></button>)}
           <span className="order-team-composer-hint"><kbd>Enter</kbd> 发送 · <kbd>Shift</kbd>+<kbd>Enter</kbd> 换行</span>
           <button type="submit" className="order-team-send" disabled={connection!=="CONNECTED"||sending||imageInFlight||mediaInFlight||imageBlocked||(!draft.trim()&&!stagedImages.length&&!pendingImage&&mediaDraft?.state!=="READY")}>{sending?"发送中…":pendingImage&&(pendingImage.state==="FAILED"||pendingImage.state==="UNKNOWN")?"重试图片":stagedImages.length>0?"发送图片":"发送"}</button>
         </div>

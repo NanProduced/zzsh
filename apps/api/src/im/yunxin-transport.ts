@@ -26,6 +26,7 @@ const CARD_TEXT: Record<string, string> = {
   ORDER_OPENING: "【开租确认卡】请在订单群内确认账号信息并确认开租，双方确认后开始计算租期。",
   ORDER_ENDING: "【结束确认卡】请确认本单已经结束，确认后进入结算。",
   ORDER_SETTLED: "【结算完成卡】本单已完成结算。",
+  ORDER_CANCELLED: "【订单取消卡】本单已取消，请在订单详情查看取消原因与退款状态。",
 };
 const CARD_FALLBACK = "【订单进度卡】订单状态已更新，请查看本单详情。";
 

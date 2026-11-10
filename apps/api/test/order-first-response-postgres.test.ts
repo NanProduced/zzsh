@@ -824,7 +824,7 @@ export async function runOrderFirstResponseAcceptance(t: TestContext, o: Options
     let projection=await withTransaction(pool,c=>readOrderTeamAccess(c,staffActor,order.orderId));
     assert.equal((projection.supportEscalation as any).addRound,1);assert.equal((projection.supportEscalation as any).state,"RUNNING");
     assert.equal((projection.members as any[]).find(member=>member.platformId===candidateA)?.responsible,true);
-    const directory=await withTransaction(pool,c=>listJoinedOrderTeams(c,staffActor,null,20));
+    const directory=await withTransaction(pool,c=>listJoinedOrderTeams(c,staffActor,null,20,appId));
     assert.equal((directory.items as any[]).find(item=>item.id===order.orderId)?.addRound,1);
     await setEscalationDue(order.orderId,false,true);
     await scanOrderEscalations(escalationOptions,100);

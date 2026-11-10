@@ -7,7 +7,7 @@ import { AftersaleInbox } from "./im-aftersale-inbox";
 import type { AftersaleRecord } from "@zzsh/im-client/aftersale";
 
 import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, type ClipboardEvent as ReactClipboardEvent, type DragEvent, type FormEvent, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent } from "react";
-import { ArrowDown, Bell, BellOff, CalendarClock, Check, ChevronLeft, CircleAlert, FileText, Headphones, Images, MessageSquareText, MoreHorizontal, Pin, ReceiptText, Search, ShieldCheck, Smile, UserRound, Video, X } from "lucide-react";
+import { ArrowDown, Bell, BellOff, CalendarClock, Check, ChevronLeft, CircleAlert, FileText, Headphones, Images, MessageSquareText, MoreHorizontal, Pin, Search, ShieldCheck, Smile, UserRound, Video, X } from "lucide-react";
 import { MessageScroller as MessageScrollerPrimitive } from "@shadcn/react/message-scroller";
 import { ImClientLifecycle, ImLifecycleSupersededError } from "@zzsh/im-client/lifecycle";
 import { createLocalFakeNimWebClientFactory, createNimWebClientFactory, NIM_IMAGE_MAX_BYTES, NimImageSendError, NimMediaSendError, NimTextSendError, validateNimImageFile, validateNimMediaFile, type NimMessageLike, type NimMessageMedia, type NimWebClientLike, type NimWebConnectionState } from "@zzsh/im-client/nim-web-client";
@@ -22,8 +22,9 @@ import { AdminApiError, adminRequest, friendlyError, hasPermission, type Session
 import { confirmCurrentForbidden, isCurrentImRequest, messageAccessPath, supportedImageUrl, type ImRequestKey } from "./im-support-guards";
 import { canOperateSupportType, createReadClientKey, createSendCapabilityKey } from "./im-support-capabilities";
 import { planSupportNotificationToggle, playSupportChime, readSupportNotificationPreference, requestSupportNotificationPermission, storeSupportNotificationPreference, supportNotificationPermission, unlockSupportAudio, useSupportUnreadNotifications, type SupportNotificationPermission } from "./im-support-notifications";
-import { groupPreferenceOf, readOrderGroupPreferences, storeOrderGroupPreferences, withGroupPreference, ORDER_GROUP_PREF_EVENT, ORDER_GROUP_SETTINGS_EVENT, type OrderGroupPreference, type OrderGroupPreferenceMap } from "./im-support-group-settings";
+import { groupPreferenceOf, readOrderGroupPreferences, storeOrderGroupPreferences, useOrderGroupCloudPins, withGroupPreference, ORDER_GROUP_PREF_EVENT, ORDER_GROUP_SETTINGS_EVENT, type OrderGroupPreference, type OrderGroupPreferenceMap } from "./im-support-group-settings";
 import { OrderWorkbenchPane } from "./im-support-orders";
+import { OrderGroupAvatar } from "./order-group-avatar";
 import { orderStageTone } from "@zzsh/ui/order-team-panel";
 import type { OrderTeamListItem } from "@zzsh/ui/order-team-panel";
 import { ConsultationUserCard } from "./im-support-user-card";
@@ -404,6 +405,10 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
   const [groupPrefsScope, setGroupPrefsScope] = useState(snapshot.adminUserId);
   const [unifiedOrderMenu, setUnifiedOrderMenu] = useState<{ x: number; y: number; orderId: string; preference: OrderGroupPreference; row: HTMLElement | null } | null>(null);
   const [unifiedQuery, setUnifiedQuery] = useState("");
+  const [searchConsultations, setSearchConsultations] = useState<Consultation[]>([]);
+  const [searchOrders, setSearchOrders] = useState<OrderTeamListItem[]>([]);
+  const [searchState, setSearchState] = useState<{ q: string; loading: boolean; error: string | null }>({ q: "", loading: false, error: null });
+  const searchEpochRef = useRef(0);
   const [unifiedType, setUnifiedType] = useState<"ALL" | "SERVICE" | "COMPLAINT" | "ORDER">(initialUnifiedType);
   const [messages, setMessages] = useState<Record<string, SupportMessage[]>>({});
   const [drafts, setDrafts] = useState<Record<string, string>>({});
@@ -493,6 +498,9 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
 
   const lifecycleRef = useRef<ImClientLifecycle<NimWebClientLike> | null>(null);
   const clientRef = useRef<NimWebClientLike | null>(null);
+  const cloudPins = useOrderGroupCloudPins(clientRef.current);
+  const cloudPinnedTeamIds = cloudPins.status === "CLOUD" ? cloudPins.teamIds : undefined;
+  useEffect(() => { if (cloudPins.error) setNotice(cloudPins.error); }, [cloudPins.error]);
   const availabilityRef = useRef<Presence["availability"]>("OFF_DUTY");
   const presenceVersionRef = useRef<number | null>(null);
   // 最近一次由服务端确认的 presence。写入失败时用它回退 availabilityRef，
@@ -725,6 +733,7 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
       const factory = createNimWebClientFactory({
         appKey: token.appKey,
         accountId: token.accountId,
+        enableCloudConversation: true,
         messageReceiptEndpoint:"/api/bff/admin/im/messages",
         onReceiptStatus:({pending,failed,persistent})=>{if(pending&&(failed||!persistent))setNotice(NIM_RECEIPT_PENDING+(!persistent?"本地恢复记录未保存，请在离开前恢复登记。":""));else if(!pending)setNotice(current=>current?.startsWith(NIM_RECEIPT_PENDING)?undefined:current);},
         messageAuthorization: async ({ conversationId, operation,...intent }) => {
@@ -910,7 +919,74 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
 
   const visibleOrderQueue = orderQueueScope === readClientKey ? orderQueue : [];
   const orderQueueReady = orderQueueScope === readClientKey && orderQueueLoaded;
+
+  // Server-side search: all authorized consultations and order groups, not just the loaded pages.
+  useEffect(() => {
+    const text = unifiedQuery.trim();
+    const epoch = ++searchEpochRef.current;
+    if (!text) {
+      setSearchConsultations([]);
+      setSearchOrders([]);
+      setSearchState({ q: "", loading: false, error: null });
+      return;
+    }
+    if (!canRead || snapshot.session.locked) return;
+    setSearchConsultations([]);
+    setSearchOrders([]);
+    setSearchState({ q: text, loading: true, error: null });
+    const timer = window.setTimeout(() => {
+      void Promise.allSettled([
+        adminRequest<{ consultations?: Consultation[]; query?: string | null }>(`/im/consultations?limit=50&q=${encodeURIComponent(text)}`),
+        adminRequest<{ items?: OrderTeamListItem[]; query?: string | null }>(`/orders/im-groups?limit=50&q=${encodeURIComponent(text)}`),
+      ]).then(([consultationResult, orderResult]) => {
+        if (epoch !== searchEpochRef.current) return;
+        const consultations = consultationResult.status === "fulfilled" && Array.isArray(consultationResult.value.consultations)
+          ? consultationResult.value.consultations : [];
+        const orders = orderResult.status === "fulfilled" && Array.isArray(orderResult.value.items)
+          ? orderResult.value.items : [];
+        const consultationApplied = consultationResult.status === "fulfilled" && consultationResult.value.query === text;
+        const orderApplied = orderResult.status === "fulfilled" && orderResult.value.query === text;
+        const failed = consultationResult.status === "rejected" || orderResult.status === "rejected";
+        setSearchConsultations(consultationApplied ? consultations : []);
+        setSearchOrders(orderApplied ? orders : []);
+        setSearchState({
+          q: text,
+          loading: false,
+          error: !consultationApplied || !orderApplied
+            ? "搜索服务暂不可用，当前仅搜索已加载的会话"
+            : failed ? "部分结果读取失败，请重试" : null,
+        });
+      });
+    }, 250);
+    return () => window.clearTimeout(timer);
+  }, [unifiedQuery, canRead, readClientKey, snapshot.session.locked]);
+
+  const serverSearchActive = unifiedQuery.trim().length > 0;
+  const consultationDirectory = useMemo(() => {
+    const seen = new Set(queue.map((row) => row.id));
+    return [...searchConsultations.filter((row) => !seen.has(row.id)), ...queue];
+  }, [queue, searchConsultations]);
+  const orderDirectory = useMemo(() => {
+    const seen = new Set(visibleOrderQueue.map((row) => row.id));
+    return [...visibleOrderQueue, ...searchOrders.filter((row) => !seen.has(row.id))];
+  }, [visibleOrderQueue, searchOrders]);
   const visibleGroupPrefs = groupPrefsScope === snapshot.adminUserId ? groupPrefs : {};
+  const orderPreferenceOf = (orderId: string, teamId?: string | null): OrderGroupPreference => {
+    const preference = groupPreferenceOf(visibleGroupPrefs, orderId);
+    return cloudPinnedTeamIds && teamId ? { ...preference, pinned: cloudPinnedTeamIds.has(teamId) } : preference;
+  };
+  const toggleOrderPin = (orderId: string, teamId: string | null | undefined, pinned: boolean) => {
+    if (cloudPinnedTeamIds) {
+      if (!teamId) {
+        setNotice("该订单群尚未返回云信群号，暂只能在本机置顶。");
+        applyGroupPreference(orderId, { pinned });
+        return;
+      }
+      void cloudPins.toggle(teamId, pinned).catch(() => undefined);
+      return;
+    }
+    applyGroupPreference(orderId, { pinned });
+  };
   const loadMoreOrders = useCallback(async () => {
     const cursor = orderNextCursorRef.current;
     if (!cursor || orderLoadingMoreRef.current || orderRefreshInFlightRef.current) return;
@@ -1068,10 +1144,10 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
     target.focus();
   }, [mobilePane]);
 
-  const selected = queue.find((item) => item.id === selectedId) ?? null;
+  const selected = consultationDirectory.find((item) => item.id === selectedId) ?? null;
   const selectedMessages = messages[selectedId ?? ""] ?? [];
   // 订单群未读按成员身份计数；只有该群聊真的在屏幕上时才清自己的未读。
-  const selectedOrderRow = orderSelection ? visibleOrderQueue.find((item) => item.id === orderSelection) ?? null : null;
+  const selectedOrderRow = orderSelection ? orderDirectory.find((item) => item.id === orderSelection) ?? null : null;
   useEffect(() => {
     if (!orderViewing || !selectedOrderRow || (selectedOrderRow.unreadCount ?? 0) <= 0) return;
     const signature = `${selectedOrderRow.id}:${selectedOrderRow.lastMessageAt ?? ""}:${selectedOrderRow.unreadCount}`;
@@ -1083,7 +1159,9 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
   }, [orderViewing, selectedOrderRow]);
   const rowOfMessage = (target: EventTarget | null): HTMLElement | null => {
     const element = target as { closest?: (selector: string) => HTMLElement | null } | null;
-    return element && typeof element.closest === "function" ? element.closest("[data-message-id]") : null;
+    if (!element || typeof element.closest !== "function") return null;
+    const content = element.closest(".im-wb-bub, .message-media, .message-image, .order-card, p");
+    return content ? content.closest("[data-message-id]") : null;
   };
   const findSelectedMessage = (id: string | undefined): SupportMessage | null => id ? selectedMessages.find((item) => item.id === id) ?? null : null;
   const openMessageMenu = (message: SupportMessage | null, x: number, y: number, row: HTMLElement | null) => {
@@ -1172,6 +1250,28 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
     waiting: displayQueue.filter((row) => row.state === "待接入").length,
     mine: displayQueue.filter((row) => row.state === "接待中" || row.state === "通道异常").length,
   }), [displayQueue]);
+  const searchQueueRows = useMemo<QueueRow[]>(() => searchConsultations.map((item) => {
+    const lastAt = item.lastMessageAt ? Date.parse(item.lastMessageAt) : Number.NaN;
+    const preview = item.lastMessagePreview ? supportMessageSummary(item.lastMessagePreview).trim() || null : null;
+    const sortAt = Number.isFinite(lastAt) ? lastAt : 0;
+    return {
+      id: item.id,
+      type: item.type,
+      title: item.user?.name || item.user?.username || "平台用户",
+      snippet: preview ?? (item.state === "WAITING" ? "等待客服接待" : item.state === "CLOSED" ? "本轮已结束" : "打开查看消息"),
+      time: sortAt ? formatListTime(sortAt) : "—",
+      sortAt,
+      state: scopeStateLabel(item),
+      unreadCount: item.state === "ACTIVE" && item.assignedAdmin?.id === snapshot.adminUserId
+        ? Math.max(0, item.adminUnreadCount ?? 0)
+        : 0,
+      consultation: item,
+    };
+  }), [searchConsultations, snapshot.adminUserId]);
+  const queueDirectory = useMemo<QueueRow[]>(() => {
+    const seen = new Set(displayQueue.map((row) => row.id));
+    return [...displayQueue, ...searchQueueRows.filter((row) => !seen.has(row.id))];
+  }, [displayQueue, searchQueueRows]);
   const notificationRows = useMemo(() => displayQueue.map((row) => ({
     id: row.id,
     title: `${typeLabel(row.type)} · ${row.title}`,
@@ -1209,8 +1309,10 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
   });
   const unifiedRows = useMemo<UnifiedRow[]>(() => {
     const text = unifiedQuery.trim().toLowerCase();
-    const matches = (row: UnifiedRow) => (!text || `${row.title} ${row.snippet} ${row.tag} ${row.state}`.toLowerCase().includes(text));
-    const consultations: UnifiedRow[] = displayQueue
+    const serverConsultationIds = new Set(searchQueueRows.map((row) => row.id));
+    const serverOrderIds = new Set(searchOrders.map((row) => row.id));
+    const matches = (row: UnifiedRow, fromServer = false) => fromServer || !text || `${row.title} ${row.snippet} ${row.tag} ${row.state}`.toLowerCase().includes(text);
+    const consultations: UnifiedRow[] = queueDirectory
       .filter((row) => unifiedType === "ALL" || (unifiedType !== "ORDER" && row.type === unifiedType))
       .map((row): UnifiedRow => ({
         kind: "consultation", id: row.id, title: row.title, avatar: row.consultation?.user?.avatar,
@@ -1219,11 +1321,11 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
         snippet: row.snippet, state: row.state, stateTone: stageToneOf(row.state),
         unreadCount: row.unreadCount, sortAt: row.sortAt, time: row.time,
       }))
-      .filter(matches);
-    const orders: UnifiedRow[] = (unifiedType === "ALL" || unifiedType === "ORDER" ? visibleOrderQueue : [])
+      .filter((row) => matches(row, serverConsultationIds.has(row.id)));
+    const orders: UnifiedRow[] = (unifiedType === "ALL" || unifiedType === "ORDER" ? orderDirectory : [])
       .filter((row) => !groupPreferenceOf(visibleGroupPrefs, row.id).hidden)
       .map((row): UnifiedRow => {
-        const preference = groupPreferenceOf(visibleGroupPrefs, row.id);
+        const preference = orderPreferenceOf(row.id, row.teamId);
         const state = stageLabelOf(row);
         // 没有消息的订单群用建群时间兜底，列表不留“—”这种无法排序的空时间。
         const sortAt = Date.parse(row.lastMessageAt ?? row.createdAt ?? "") || 0;
@@ -1247,11 +1349,11 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
           muted: preference.muted,
         };
       })
-      .filter(matches);
+      .filter((row) => matches(row, serverOrderIds.has(row.id)));
     // 置顶优先，其余一律按最后一条消息倒序；咨询与订单群在同一条时间轴上。
     return [...consultations, ...orders].sort((a, b) =>
       Number(Boolean(b.pinned)) - Number(Boolean(a.pinned)) || b.sortAt - a.sortAt);
-  }, [displayQueue, visibleGroupPrefs, visibleOrderQueue, unifiedQuery, unifiedType]);
+  }, [cloudPinnedTeamIds, queueDirectory, visibleGroupPrefs, orderDirectory, searchOrders, searchQueueRows, unifiedQuery, unifiedType]);
   const applyGroupPreference = (orderId: string, patch: Partial<OrderGroupPreference>) => {
     const next = withGroupPreference(visibleGroupPrefs, orderId, patch);
     setGroupPrefs(next);
@@ -1259,7 +1361,9 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
     storeOrderGroupPreferences(snapshot.adminUserId, next);
     window.dispatchEvent(new CustomEvent(ORDER_GROUP_PREF_EVENT, { detail: { orderId, patch, adminUserId: snapshot.adminUserId } }));
   };
-  const unifiedTotal = displayQueue.length + visibleOrderQueue.filter((row) => !groupPreferenceOf(visibleGroupPrefs, row.id).hidden).length;
+  const unifiedTotal = serverSearchActive
+    ? unifiedRows.length
+    : displayQueue.length + visibleOrderQueue.filter((row) => !groupPreferenceOf(visibleGroupPrefs, row.id).hidden).length;
   const hiddenOrderCount = visibleOrderQueue.filter((row) => groupPreferenceOf(visibleGroupPrefs, row.id).hidden).length;
   const restoreHiddenOrders = () => {
     const next: OrderGroupPreferenceMap = {};
@@ -1275,7 +1379,7 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
     const menu = unifiedOrderMenu;
     setUnifiedOrderMenu(null);
     if (!menu) return;
-    if (action === "pin") { applyGroupPreference(menu.orderId, { pinned: !menu.preference.pinned }); return; }
+    if (action === "pin") { toggleOrderPin(menu.orderId, orderDirectory.find((row) => row.id === menu.orderId)?.teamId, !menu.preference.pinned); return; }
     if (action === "mute") { applyGroupPreference(menu.orderId, { muted: !menu.preference.muted }); return; }
     if (action === "hide") {
       applyGroupPreference(menu.orderId, { hidden: true });
@@ -2167,8 +2271,8 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
       return nodes;
     }
     const previous = selectedMessages[index - 1];
-    const grouped = Boolean(previous && previous.from !== "system" && previous.senderId === message.senderId && (message.createTime ?? 0) - (previous.createTime ?? 0) < GROUP_WINDOW_MS);
     const author = authorFor(message);
+    const grouped = Boolean(author.role !== "机器人" && previous && previous.from !== "system" && previous.senderId === message.senderId && (message.createTime ?? 0) - (previous.createTime ?? 0) < GROUP_WINDOW_MS);
     const imageUrl = message.image ? supportedImageUrl(message.image.url) : null;
     const imageThumbnailUrl = message.image ? supportedImageUrl(message.image.thumbnailUrl) : null;
     const mine = message.self === true;
@@ -2284,7 +2388,10 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
           <InputGroupAddon align="block-end" className="im-wb-composer-tools">
             <TooltipProvider delay={200}>
               <Popover open={quickReplyOpen} onOpenChange={setQuickReplyOpen}>
-                <PopoverTrigger render={<button type="button" className="im-wb-tool" data-action="quick-replies" aria-label="常用语" title="常用语" disabled={!canEdit || sendBlocked} />}><MessageSquareText size={15} /></PopoverTrigger>
+                <Tooltip>
+                  <TooltipTrigger render={<PopoverTrigger render={<button type="button" className="im-wb-tool" data-action="quick-replies" aria-label="常用语" disabled={!canEdit || sendBlocked}><MessageSquareText size={15} /></button>} />} />
+                  <TooltipContent>常用语</TooltipContent>
+                </Tooltip>
                 <PopoverContent side="top" align="start" className="w-80 p-0">
                   {editingQuickReplies ? (
                     <div className="p-3 space-y-2 text-xs" data-panel="quick-replies-editor">
@@ -2419,7 +2526,10 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
                 </PopoverContent>
               </Popover>
               <Popover open={emojiOpen} onOpenChange={setEmojiOpen}>
-                <PopoverTrigger render={<button type="button" className="im-wb-tool" aria-label="表情" title="表情" disabled={!canEdit || sendBlocked} />}><Smile size={15} /></PopoverTrigger>
+                <Tooltip>
+                  <TooltipTrigger render={<PopoverTrigger render={<button type="button" className="im-wb-tool" aria-label="表情" disabled={!canEdit || sendBlocked}><Smile size={15} /></button>} />} />
+                  <TooltipContent>表情</TooltipContent>
+                </Tooltip>
                 <PopoverContent side="top" align="start" className="w-auto p-0"><div className="chat-emoji-grid">
                   {CHAT_EMOJIS.map((item) => <button key={item.emoji} type="button" className="chat-emoji-button" aria-label={item.label} onClick={() => insertEmoji(item.emoji)}>{item.emoji}</button>)}
                 </div></PopoverContent>
@@ -2513,10 +2623,10 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
       {clientRef.current?.transport === "local-fake" ? <span className="im-wb-state im-wb-local">本地测试</span> : null}
     </nav>
     <div className="im-wb-unified">
-      <aside className="im-wb-unified-queue" aria-label="全部会话" onContextMenu={(event) => { const rowEl = (event.target as Element).closest(".im-wb-row") as HTMLElement | null; event.preventDefault(); if (!rowEl || rowEl.dataset.unifiedKind !== "order") { setUnifiedOrderMenu(null); return; } event.stopPropagation(); const orderId = rowEl.dataset.orderId; if (!orderId) return; setUnifiedOrderMenu({ x: event.clientX, y: event.clientY, orderId, preference: groupPreferenceOf(visibleGroupPrefs, orderId), row: rowEl }); }}>
-        <div className="im-wb-unified-head"><strong>全部会话</strong><span>{unifiedRows.length < unifiedTotal ? `${unifiedRows.length} / ${unifiedTotal}` : unifiedTotal}</span></div>
-        <label className="im-wb-search"><Search size={13} /><input value={unifiedQuery} onChange={(event) => setUnifiedQuery(event.target.value)} placeholder="搜索用户、订单号或内容" aria-label="搜索全部会话" /></label>
-        <p className="im-wb-filter-note">仅搜索已加载会话；更多订单群请使用“加载更多”。</p>
+      <aside className="im-wb-unified-queue" aria-label="全部会话" onContextMenu={(event) => { const rowEl = (event.target as Element).closest(".im-wb-row") as HTMLElement | null; event.preventDefault(); if (!rowEl || rowEl.dataset.unifiedKind !== "order") { setUnifiedOrderMenu(null); return; } event.stopPropagation(); const orderId = rowEl.dataset.orderId; if (!orderId) return; setUnifiedOrderMenu({ x: event.clientX, y: event.clientY, orderId, preference: orderPreferenceOf(orderId, orderDirectory.find((row) => row.id === orderId)?.teamId), row: rowEl }); }}>
+        <div className="im-wb-unified-head"><strong>全部会话</strong><span>{searchState.loading && searchState.q === unifiedQuery.trim() ? "搜索中…" : unifiedRows.length < unifiedTotal ? `${unifiedRows.length} / ${unifiedTotal}` : unifiedTotal}</span></div>
+        <label className="im-wb-search"><Search size={13} /><input value={unifiedQuery} onChange={(event) => setUnifiedQuery(event.target.value)} placeholder="搜索用户、订单号、账号或游戏" aria-label="搜索全部会话" /></label>
+        {searchState.error ? <p className="im-wb-order-notice" data-tone="warn" role="status">{searchState.error}</p> : null}
         <div className="im-wb-unified-types" role="group" aria-label="会话类型">
           {([["ALL", "全部"], ["SERVICE", "咨询"], ["COMPLAINT", "投诉"], ["ORDER", "订单群"]] as const).map(([value, label]) =>
             <button key={value} type="button" aria-pressed={unifiedType === value} onClick={() => { setUnifiedType(value); persistQuery({ type: value === "ALL" ? null : value }); }}>{label}</button>)}
@@ -2528,13 +2638,13 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
           {unifiedRows.length ? unifiedRows.map((row) => {
             const active = row.kind === "consultation" ? section === "consultation" && selectedId === row.id : section === "orders" && orderSelection === row.id;
             return <button type="button" key={`${row.kind}:${row.id}`} className="im-wb-row" data-unified-kind={row.kind} data-order-id={row.kind === "order" ? row.id : undefined} data-active={active} aria-current={active ? "page" : undefined}
-              onContextMenu={row.kind === "order" ? (event) => { event.preventDefault(); event.stopPropagation(); setUnifiedOrderMenu({ x: event.clientX, y: event.clientY, orderId: row.id, preference: groupPreferenceOf(visibleGroupPrefs, row.id), row: event.currentTarget }); } : undefined}
+              onContextMenu={row.kind === "order" ? (event) => { event.preventDefault(); event.stopPropagation(); setUnifiedOrderMenu({ x: event.clientX, y: event.clientY, orderId: row.id, preference: orderPreferenceOf(row.id, orderDirectory.find((item) => item.id === row.id)?.teamId), row: event.currentTarget }); } : undefined}
               onClick={() => {
                 restoredSelectionRef.current = true;
                 if (row.kind === "consultation") {
                   setSection("consultation");
                   setSelectedId(row.id);
-                  const target = queue.find((item) => item.id === row.id);
+                  const target = consultationDirectory.find((item) => item.id === row.id);
                   persistQuery({ section: "consultation", consultation: target?.threadId ?? row.id });
                 } else {
                   setSection("orders");
@@ -2543,7 +2653,9 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
                 }
                 setMobilePane("chat");
               }}>
-              <span className="im-wb-row-av" data-kind={row.kind} aria-hidden="true">{row.kind === "order" ? <ReceiptText size={17} /> : <ProfileImage src={row.avatar} fallback={initialOf(row.title)} />}</span>
+              {row.kind === "order"
+                ? <OrderGroupAvatar displayNo={row.title} className="im-wb-row-av" />
+                : <span className="im-wb-row-av" data-kind={row.kind} aria-hidden="true"><ProfileImage src={row.avatar} fallback={initialOf(row.title)} /></span>}
               <span className="im-wb-row-copy">
                 <span className="im-wb-row-top">
                   <b>{row.title}</b>
@@ -2566,8 +2678,8 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
                     : null}
               </span>
             </button>;
-          }) : <div className="im-wb-list-empty"><strong>暂无会话</strong><span>新的咨询、投诉和订单群会出现在这里。</span></div>}
-          {orderNextCursor && (unifiedType === "ALL" || unifiedType === "ORDER")
+          }) : <div className="im-wb-list-empty"><strong>{searchState.loading ? "正在搜索…" : serverSearchActive ? "没有匹配的会话" : "暂无会话"}</strong><span>{serverSearchActive ? "换一个关键词，或清空搜索查看全部已加载会话。" : "新的咨询、投诉和订单群会出现在这里。"}</span></div>}
+          {orderNextCursor && !serverSearchActive && (unifiedType === "ALL" || unifiedType === "ORDER")
             ? <button type="button" className="im-wb-more" data-action="load-more-orders" disabled={orderLoadingMore || orderRefreshing}
                 onClick={() => void loadMoreOrders()}>{orderRefreshing ? "刷新中…" : orderLoadingMore ? "正在读取…" : "加载更多订单群"}</button>
             : null}
@@ -2586,6 +2698,7 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
         <div className="im-wb-pane" hidden={section !== "consultation"}>{consultationPane}</div>
         {canRead ? <div className="im-wb-pane im-wb-pane--orders" hidden={section !== "orders"}><OrderWorkbenchPane identity={readClientKey} adminUserId={snapshot.adminUserId} operatorName={operatorName}
           client={clientRef.current} connection={connection} active={section === "orders"} sendAllowed={canAccept} selectedOrderId={orderSelection} onSelectedOrderChange={setOrderSelection}
+          cloudPinnedTeamIds={cloudPinnedTeamIds} onToggleCloudPin={(orderId, teamId, pinned) => toggleOrderPin(orderId, teamId, pinned)}
           canManualClose={snapshot.security.isBoss || snapshot.permissions.includes("order.settlement.write")} request={adminRequest} onAuthError={() => { void onRefresh(); }}
           onOpenProfile={profileScope.profile ? (id) => onOpenPath?.(`/users/${encodeURIComponent(id)}`, "用户资料") : undefined} onOpenPath={onOpenPath} /></div> : null}
       </div>

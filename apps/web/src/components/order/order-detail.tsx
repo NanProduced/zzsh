@@ -8,7 +8,7 @@ import { formatOrderMoney, formatOrderTime as timeText, orderApi, OrderRequestEr
 import { useUserSession } from "@/components/session/user-session-provider";
 import { useIdentityReset } from "@/components/session/identity-reset";
 import { requestSupportDialog } from "@/components/support/support-dialog-request";
-import { ORDER_FULFILLMENT_STEPS, orderFulfillmentStepStates, orderFulfillmentSummary, orderLineQuantityText, orderLinesTotalLabel, orderListingSourceLabel, orderRentalModeLabel, orderSettlementStageLabel, orderUnitPriceText, unitLabel, orderAccountTitle, orderResourceLines, orderProgressView, type OrderPaymentFacts, type OrderProgressAction, type OrderProgressView } from "@/lib/order-display";
+import { orderFulfillmentSteps, orderFulfillmentStepStates, orderFulfillmentSummary, orderLineQuantityText, orderLinesTotalLabel, orderListingSourceLabel, orderRentalModeLabel, orderSettlementStageLabel, orderUnitPriceText, unitLabel, orderAccountTitle, orderResourceLines, orderProgressView, type OrderPaymentFacts, type OrderProgressAction, type OrderProgressView } from "@/lib/order-display";
 import { OrderTradeActions, type OrderStageFacts } from "@/components/order/order-trade-actions";
 import { OrderAftersale } from "./order-aftersale";
 import { PrestartTerminationPanel } from "@/components/order/prestart-termination-panel";
@@ -183,7 +183,7 @@ function OrderProgressCard({ view, party, orderId, orderDisplayNo, userId, backH
 type StageReadState = { scope: string; status: "loading" | "ready" | "failed"; projection: OrderImProjection | null };
 
 /**
- * A compact six-step bar. It is read-only: the stage comes from the order IM projection, the group
+ * A compact fulfillment timeline. It is read-only: the stage comes from the order IM projection, the group
  * entry reuses the existing support host, and a missing projection says "阶段未确认" rather than
  * deriving progress from the order status.
  */
@@ -216,9 +216,11 @@ function FulfillmentStageBar({ order, party, facts }: { order: Order; party: Ord
     : facts?.phase === "INTAKE_PENDING" ? "SERVICE" as const
     : null;
   const summary = projection
-    ? orderFulfillmentSummary(projection, { ending })
+    ? orderFulfillmentSummary(projection, { ending, showRefund: party === "renter" })
     : visible.status === "failed" ? "阶段未确认" : "阶段核对中…";
-  const steps = projection ? orderFulfillmentStepStates(projection.stage) : null;
+  const cancelledAfterOpening = Boolean(projection && projection.stage === "CANCELLED" && (projection.openingState === "CONFIRMED" || projection.rentalStartedAt));
+  const steps = projection ? orderFulfillmentStepStates(projection.stage, cancelledAfterOpening) : null;
+  const stepDefs = orderFulfillmentSteps(projection?.stage, cancelledAfterOpening);
   const tone = !projection ? "unknown" : projection.stage === "SETTLED" ? "done" : projection.stage === "CANCELLED" ? "closed" : "active";
   return <section className="order-fulfillment-stage" data-stage={projection?.stage ?? "UNKNOWN"} data-tone={tone} aria-label="履约阶段">
     <div className="order-fulfillment-head">
@@ -226,9 +228,9 @@ function FulfillmentStageBar({ order, party, facts }: { order: Order; party: Ord
       <p className="order-fulfillment-summary" role="status">{summary}</p>
       <button type="button" className="button quiet button--sm" data-support-trigger onClick={() => window.dispatchEvent(new CustomEvent("zzsh:order-groups", { detail: { party, orderId: order.id } }))}><MessageCircle size={15} aria-hidden="true" />打开订单群</button>
     </div>
-    {steps ? <ol className="order-fulfillment-steps" aria-label="六个履约阶段">{ORDER_FULFILLMENT_STEPS.map((step, index) => {
+    {steps ? <ol className="order-fulfillment-steps" aria-label="订单履约阶段">{stepDefs.map((step, index) => {
       const stepState = steps[index] ?? "unknown";
-      return <li key={step.key} data-state={stepState} aria-current={stepState === "current" ? "step" : undefined}><span className="order-fulfillment-step-dot" aria-hidden="true" />{step.label}</li>;
+      return <li key={step.key} data-state={stepState} aria-current={stepState === "current" ? "step" : undefined}><span className="order-fulfillment-step-dot" aria-hidden="true" /><span>{step.label}</span></li>;
     })}</ol> : null}
   </section>;
 }

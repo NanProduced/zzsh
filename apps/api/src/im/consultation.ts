@@ -2654,7 +2654,8 @@ export async function listAdminConsultations(
   context: AdminContext,
   _access: EffectiveAdminAccess,
   limit: number,
-): Promise<{ consultations: ConsultationView[] }> {
+  query: string | null = null,
+): Promise<{ consultations: ConsultationView[]; query: string | null }> {
   return withTransaction(options.pool, async (client) => {
     await assertAdminContextInTransaction(client, context);
     const access = await loadEffectiveAdminAccess(client, context.userId);
@@ -2687,11 +2688,12 @@ export async function listAdminConsultations(
           AND (c."assigned_admin_id" = $2
             OR (c."assigned_admin_id" IS NULL AND $3::boolean AND c."state" = 'WAITING'))
           AND NOT (c."state" = 'WAITING' AND c."assigned_admin_id" IS NULL AND c."first_user_message_at" IS NULL)
+          AND ($6::text IS NULL OR u."name" ILIKE '%'||$6||'%' OR u."username" ILIKE '%'||$6||'%')
         ORDER BY CASE WHEN c."assigned_admin_id" = $2 THEN 0 ELSE 1 END, c."updated_at", c."id"
         LIMIT $4`,
-      [options.appId, context.userId, serviceQueue, limit, canComplaint],
+      [options.appId, context.userId, serviceQueue, limit, canComplaint, query ?? null],
     )).rows;
-    return { consultations: rows.map((row) => ({ ...toView(row, accountId, true, context.userId, adminThreadRead), botAccountId: supportBotAccountId(options) })) };
+    return { consultations: rows.map((row) => ({ ...toView(row, accountId, true, context.userId, adminThreadRead), botAccountId: supportBotAccountId(options) })), query: query ?? null };
   });
 }
 

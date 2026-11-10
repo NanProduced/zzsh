@@ -63,7 +63,10 @@ test("a new order group gets one bot welcome before the opening card", () => {
   // welcome that could not be the group's first message is recorded as SKIPPED instead of vanishing.
   assert.match(source, /EXISTS\(SELECT 1 FROM zzsh_order\.im_order_activity act WHERE act\.order_id = sc\.order_id\) AS has_activity/);
   assert.doesNotMatch(source, /NOT EXISTS\(SELECT 1 FROM zzsh_order\.im_order_activity/);
-  assert.match(source, /WHEN 'ORDER_WELCOME' THEN 0/);
+  assert.match(source, /WHEN 'ORDER_CANCELLED' THEN 0/);
+  assert.match(source, /WHEN 'ORDER_WELCOME' THEN 1/);
+  assert.match(source, /'ORDER_CANCELLED' FROM facts WHERE order_status = 'CANCELLED'/);
+  assert.match(source, /o\.cancelled_at > clock_timestamp\(\) - interval '72 hours'/, "historical cancellations do not backfill new cards");
   assert.match(source, /订单群已建立/);
 });
 
@@ -72,6 +75,13 @@ test("0138 extends the stage-card ledger with the bot welcome", () => {
   assert.match(sql, /'ORDER_WELCOME'/);
   const journal = JSON.parse(readFileSync(resolve("migrations/business/meta/_journal.json"), "utf8"));
   assert.ok(journal.entries.some((entry: { idx: number; tag: string }) => entry.idx === 138 && entry.tag === "0138_im_order_group_welcome"));
+});
+
+test("0185 adds the cancellation card to the ledger kind check", () => {
+  const sql = readFileSync(resolve("migrations/business/0185_order_cancelled_stage_card.sql"), "utf8");
+  assert.match(sql, /'ORDER_CANCELLED'/);
+  const journal = JSON.parse(readFileSync(resolve("migrations/business/meta/_journal.json"), "utf8"));
+  assert.ok(journal.entries.some((entry: { idx: number; tag: string }) => entry.idx === 185 && entry.tag === "0185_order_cancelled_stage_card"));
 });
 
 test("0127 records one card per stage with a narrow runtime update grant", () => {  const sql = readFileSync(resolve("migrations/business/0127_im_order_stage_card.sql"), "utf8");
@@ -109,6 +119,11 @@ test("a produced card is skipped, not replayed, once its stage is gone", () => {
   assert.equal(stageCardDeliveryBlock({ ...settled, orderStatus: "COMPLETED", now: POSTED_MS + 72 * HOUR }), "SEND_WINDOW_CLOSED");
   assert.equal(stageCardDeliveryBlock({ ...settled, orderStatus: "PAID" }), "STAGE_NOT_REACHED");
   assert.equal(stageCardDeliveryBlock({ ...settled, orderStatus: "CANCELLED" }), "STAGE_NOT_REACHED");
+
+  const cancelled = { kind: "ORDER_CANCELLED" as const, postedAt: null, hasActivity: true, now: POSTED_MS };
+  assert.equal(stageCardDeliveryBlock({ ...cancelled, orderStatus: "CANCELLED" }), null);
+  assert.equal(stageCardDeliveryBlock({ ...cancelled, orderStatus: "PAID" }), "STAGE_NOT_REACHED");
+  assert.equal(stageCardDeliveryBlock({ ...cancelled, orderStatus: "COMPLETED" }), "STAGE_NOT_REACHED");
 });
 
 test("the settlement notice names the Beijing posting time and never an amount", () => {

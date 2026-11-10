@@ -329,6 +329,7 @@ export const STAGE_CARD_KIND_LABEL: Record<StageCardKind, string> = {
   ORDER_OPENING: "开租确认",
   ORDER_ENDING: "结束确认",
   ORDER_SETTLED: "结算完成",
+  ORDER_CANCELLED: "订单已取消",
 };
 
 const STAGE_CARD_FAILURE_LABEL: Record<string, string> = {
@@ -519,7 +520,7 @@ function queueTodo(f: OrderFulfillment, now = Date.now()): string | null {
 }
 
 /** Member-scoped directory; deliberately independent of the order.read directory. */
-export async function listJoinedOrderTeams(c:PoolClient,actor:OrderTeamActor,cursor:string|null,limit:number,appId?:string):Promise<Record<string,unknown>>{
+export async function listJoinedOrderTeams(c:PoolClient,actor:OrderTeamActor,cursor:string|null,limit:number,appId?:string,query:string|null=null):Promise<Record<string,unknown>>{
   if(actor.realm!=="admin")throw denied();
 
   await assertAdminContextInTransaction(c,actor);
@@ -527,7 +528,7 @@ export async function listJoinedOrderTeams(c:PoolClient,actor:OrderTeamActor,cur
   if(!hasPermission(access,"im.support.read"))throw denied();
   assertGameScopeUsable(await readAdminGameScope(c,actor.userId),access?.isBoss===true);
   const rows=(await c.query<Record<string,any>>(`SELECT o.id,o.display_no AS "displayNo",o.title,o.status,o.created_at AS "createdAt",'NATIVE'::text AS origin,
-      g.team_state AS "teamState",g.provision_state AS "provisionState",
+      g.team_id AS "teamId",g.team_state AS "teamState",g.provision_state AS "provisionState",
       latest_opening.status AS "openingStatus",latest_opening.confirmed_at AS "openingConfirmedAt",
       EXISTS(SELECT 1 FROM zzsh_order.rental_opening_ack a WHERE a.opening_id=latest_opening.id) AS "openingAcked",
       o.term_seconds::text AS "termSeconds",
@@ -574,10 +575,14 @@ export async function listJoinedOrderTeams(c:PoolClient,actor:OrderTeamActor,cur
     ) stage_count ON TRUE
     WHERE mm.party='STAFF' AND mm.state='JOINED' AND m.realm='admin' AND m.identity_kind='ADMIN' AND m.status='READY'
       AND m.platform_subject_id=$1 AND m.app_id=$5 AND g.app_id=$5 AND ${gameScopeSql("o.game_id","$1","$2")}
+      AND ($6::text IS NULL OR o.display_no ILIKE '%'||$6||'%' OR o.title ILIKE '%'||$6||'%'
+        OR game.name ILIKE '%'||$6||'%'
+        OR EXISTS(SELECT 1 FROM zzsh_auth_user."user" su WHERE su.id IN (o.renter_user_id,o.owner_user_id)
+          AND (su.name ILIKE '%'||$6||'%' OR su.username ILIKE '%'||$6||'%')))
       AND ($3::text IS NULL OR o.id<$3)
     UNION ALL
     SELECT l.id,l.original_order_no AS "displayNo",'迁入账号'::text AS title,${LEGACY_ORDER_STATUS_SQL} AS status,l.source_created_at AS "createdAt",'LEGACY'::text AS origin,
-      g.team_state,g.provision_state,NULL::text,NULL::timestamptz,false,NULL::text,false,false,NULL::timestamptz,
+      g.team_id,g.team_state,g.provision_state,NULL::text,NULL::timestamptz,false,NULL::text,false,false,NULL::timestamptz,
       g.first_response_at,g.remind_due_at,COALESCE(g.add_round,0),COALESCE(g.escalation_state,'NOT_STARTED'),false,
       act.last_message_at,act.last_message_preview,COALESCE(unread.unread_count,0),game.name,NULL::jsonb,NULL::jsonb
     FROM zzsh_order.im_order_member mm JOIN zzsh_iam.im_identity_mapping m ON m.id=mm.identity_id AND m.app_id=mm.app_id
@@ -588,8 +593,13 @@ export async function listJoinedOrderTeams(c:PoolClient,actor:OrderTeamActor,cur
     LEFT JOIN zzsh_order.im_order_unread unread ON unread.order_id=l.id AND unread.identity_id=m.id
     WHERE mm.party='STAFF' AND mm.state='JOINED' AND m.realm='admin' AND m.identity_kind='ADMIN' AND m.status='READY'
       AND m.platform_subject_id=$1 AND m.app_id=$5 AND g.app_id=$5 AND ${gameScopeSql("l.game_id","$1","$2")}
-      AND COALESCE(l.source_snapshot->>'is_delete','0')='0' AND ($3::text IS NULL OR l.id<$3)
-    ORDER BY id DESC LIMIT $4`,[actor.userId,access!.isBoss,cursor,limit+1,appId??null])).rows;
+      AND COALESCE(l.source_snapshot->>'is_delete','0')='0'
+      AND ($6::text IS NULL OR l.original_order_no ILIKE '%'||$6||'%'
+        OR game.name ILIKE '%'||$6||'%'
+        OR EXISTS(SELECT 1 FROM zzsh_auth_user."user" su WHERE su.id IN (l.renter_user_id,l.owner_user_id)
+          AND (su.name ILIKE '%'||$6||'%' OR su.username ILIKE '%'||$6||'%')))
+      AND ($3::text IS NULL OR l.id<$3)
+    ORDER BY id DESC LIMIT $4`,[actor.userId,access!.isBoss,cursor,limit+1,appId??null,query??null])).rows;
   const items=rows.slice(0,limit).map(({openingStatus,openingConfirmedAt,openingAcked,termSeconds,intakeOpen,settlementCurrent,postedAt,provisionState,stageCard,stageCardCounts,...row})=>{
     if(row.origin==="LEGACY")return {...row,stageCards:projectStageCardQueue(null,null)};
     const fulfillment=projectOrderFulfillment({orderStatus:row.status,hasGroup:true,provisionState,teamState:row.teamState,
@@ -597,7 +607,7 @@ export async function listJoinedOrderTeams(c:PoolClient,actor:OrderTeamActor,cur
       currentSettlement:Boolean(settlementCurrent),posted:postedAt!==null});
     return {...row,stage:fulfillment.stage,dueAt:fulfillment.dueAt,todo:queueTodo(fulfillment),stageCards:projectStageCardQueue(stageCard,stageCardCounts)};
   });
-  return {items,nextCursor:rows.length>limit?rows[limit-1]!.id:null,limit};
+  return {items,nextCursor:rows.length>limit?rows[limit-1]!.id:null,limit,query:query??null};
 }
 
 const ORDER_TEAM_CONVERSATION=/^([A-Za-z0-9][A-Za-z0-9_@.-]{0,31})\|2\|([0-9]{1,19})$/;

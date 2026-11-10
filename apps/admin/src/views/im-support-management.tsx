@@ -42,6 +42,7 @@ const CARD_LABELS: Record<string, string> = {
   ORDER_OPENING: "开租确认",
   ORDER_ENDING: "结束确认",
   ORDER_SETTLED: "结算完成",
+  ORDER_CANCELLED: "订单已取消",
   ORDER_PRICE_CHANGE: "价格调整",
 };
 

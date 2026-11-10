@@ -32,25 +32,34 @@ function renderEmpty(props) {
 
 const stepStates = (host) => [...host.querySelectorAll(".order-team-chat-empty .order-team-stage-steps li")].map((node) => node.dataset.state);
 
-test("an empty settled order group shows the six steps as complete instead of a bare no-messages line", () => {
+test("an empty settled order group shows the full path as complete instead of a bare no-messages line", () => {
   const host = renderEmpty({ info: access({ stage: "SETTLED", orderStatus: "COMPLETED" }) });
   const empty = host.querySelector(".order-team-chat-empty");
   assert.ok(empty, "the empty chat state renders");
   assert.equal(empty.getAttribute("role"), "status");
   assert.match(empty.textContent, /还没有消息/);
-  assert.deepEqual([...empty.querySelectorAll(".order-team-stage-steps li")].map((node) => node.textContent), ["已付款", "客服与群", "账号与开租", "租用中", "结束确认", "结算完成"]);
-  assert.deepEqual(stepStates(host), ["done", "done", "done", "done", "done", "done"]);
+  assert.deepEqual([...empty.querySelectorAll(".order-team-stage-steps li")].map((node) => node.textContent), ["已付款", "开租确认", "租用中", "结束确认", "结算完成"]);
+  assert.deepEqual(stepStates(host), ["done", "done", "done", "done", "done"]);
   assert.equal(empty.querySelector("a"), null, "no fabricated order link without a callback or href");
   const withoutStage = renderEmpty({ info: access({ stage: undefined, orderStatus: "COMPLETED" }) });
-  assert.deepEqual(stepStates(withoutStage), ["done", "done", "done", "done", "done", "done"], "COMPLETED resolves to settlement without a projected stage");
+  assert.deepEqual(stepStates(withoutStage), ["done", "done", "done", "done", "done"], "COMPLETED resolves to settlement without a projected stage");
 });
 
 test("the empty timeline highlights the current step and keeps later steps pending", () => {
   const host = renderEmpty({ info: access({ stage: "RENTING", orderStatus: "PAID" }) });
   const steps = [...host.querySelectorAll(".order-team-chat-empty .order-team-stage-steps li")];
-  assert.deepEqual(stepStates(host), ["done", "done", "done", "current", "pending", "pending"]);
-  assert.equal(steps[3].getAttribute("aria-current"), "step");
+  assert.deepEqual(stepStates(host), ["done", "done", "current", "pending", "pending"]);
+  assert.equal(steps[2].getAttribute("aria-current"), "step");
   assert.equal(steps.filter((node) => node.hasAttribute("aria-current")).length, 1);
+});
+
+test("a cancelled order keeps only the path it reached and ends on a red cancellation step", () => {
+  const prestart = renderEmpty({ info: access({ stage: "CANCELLED", orderStatus: "CANCELLED", openingState: "DRAFT", rentalStartedAt: null }) });
+  const prestartSteps = [...prestart.querySelectorAll(".order-team-chat-empty .order-team-stage-steps li")];
+  assert.deepEqual(prestartSteps.map((node) => node.textContent), ["已付款", "开租确认", "已取消"]);
+  assert.deepEqual(prestartSteps.map((node) => node.dataset.state), ["done", "skipped", "cancelled"]);
+  const started = renderEmpty({ info: access({ stage: "CANCELLED", orderStatus: "CANCELLED", openingState: "CONFIRMED" }) });
+  assert.deepEqual(stepStates(started), ["done", "done", "done", "cancelled"]);
 });
 
 test("the empty state offers order details only when the panel has a real link", () => {
@@ -108,7 +117,7 @@ test("an empty order group renders the stage timeline, and a real message remove
     await empty.until(() => empty.node.querySelector(".order-team-chat-empty .order-team-stage-steps"));
     const emptyState = empty.node.querySelector(".order-team-chat-empty");
     assert.equal(emptyState.getAttribute("role"), "status");
-    assert.deepEqual(stepStates(empty.node), ["done", "done", "done", "done", "done", "done"]);
+    assert.deepEqual(stepStates(empty.node), ["done", "done", "done", "done", "done"]);
     assert.equal(emptyState.querySelector(".order-team-chat-empty-link").getAttribute("href"), "/account?view=rentals&orderId=order_A");
   } finally {
     await empty.dispose();

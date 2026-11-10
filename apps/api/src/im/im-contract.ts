@@ -17,7 +17,7 @@ export type ImTransportReply = {
 };
 
 export type ImTransportCard = {
-  kind: "ORDER_OPENING"|"ORDER_ENDING"|"ORDER_SETTLED"|"ORDER_PRICE_CHANGE";
+  kind: "ORDER_OPENING"|"ORDER_ENDING"|"ORDER_SETTLED"|"ORDER_CANCELLED"|"ORDER_PRICE_CHANGE";
   orderId: string;
   cardId: string;
 };

@@ -68,6 +68,7 @@ const SCENES: readonly Scene[] = [
   { key: "ORDER_OPENING", group: "orders", label: "开租确认", when: "订单进入开租核对阶段", sender: "洲洲助手（系统）", note: "引导核对账号与订单；通知本身不代表双方已确认。", status: "builtin" },
   { key: "ORDER_ENDING", group: "orders", label: "结束确认", when: "订单进入结束核对阶段", sender: "洲洲助手（系统）", note: "引导双方核对结束信息；不会自动结束订单。", status: "builtin" },
   { key: "ORDER_SETTLED", group: "orders", label: "结算完成", when: "平台确认订单已结算，且仍在结算后沟通窗口内", sender: "洲洲助手（系统）", note: "结算时间由订单填入；不代表退款已到账。", status: "builtin" },
+  { key: "ORDER_CANCELLED", group: "orders", label: "订单已取消", when: "订单取消且订单群已就绪；每个订单只发一次", sender: "洲洲助手（系统）", note: "退款状态只对租客展示；不承诺渠道到账时间。", status: "builtin" },
   { key: "MANUAL_CLOSE", group: "orders", label: "客服手动结束", when: "客服按既有流程手动结束订单后，且订单群仍可发送", sender: "洲洲助手（系统）", note: "只通知处理结果，不发送客服内部备注。", status: "builtin" },
   { key: "DUE_REMINDERS", group: "reminders", label: "租期到期提醒", when: "开租已确认、订单仍在租用，并到达对应提醒节点", sender: "洲洲助手（系统）", note: "到期时间由订单计算；进入结束或结算后停止提醒。", status: "builtin", buckets: DUE_BUCKETS },
   { key: "ESCALATION_WAIT", group: "reminders", label: "补派安抚", when: "部署显式开启首响补派后，订单仍在等待人工接待", sender: "洲洲群主助手（系统）", note: "是否发送取决于部署策略；本页只读，不提供启用开关。", status: "policy" },

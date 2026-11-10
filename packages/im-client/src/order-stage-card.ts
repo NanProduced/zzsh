@@ -1,9 +1,9 @@
 /** Platform-owned order stage card payload carried by a NIM custom message. */
-export type OrderStageCardKind = "ORDER_OPENING" | "ORDER_ENDING" | "ORDER_SETTLED" | "ORDER_PRICE_CHANGE";
+export type OrderStageCardKind = "ORDER_OPENING" | "ORDER_ENDING" | "ORDER_SETTLED" | "ORDER_CANCELLED" | "ORDER_PRICE_CHANGE";
 export type OrderStageCard = { kind: OrderStageCardKind; orderId: string; cardId: string };
 
 const SCHEMA = "zzsh.order-card";
-const KINDS = new Set<OrderStageCardKind>(["ORDER_OPENING", "ORDER_ENDING", "ORDER_SETTLED", "ORDER_PRICE_CHANGE"]);
+const KINDS = new Set<OrderStageCardKind>(["ORDER_OPENING", "ORDER_ENDING", "ORDER_SETTLED", "ORDER_CANCELLED", "ORDER_PRICE_CHANGE"]);
 const ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 
 function record(value: unknown): Record<string, unknown> | null {

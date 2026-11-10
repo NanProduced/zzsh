@@ -34,6 +34,8 @@ import {
   readPatrolOrderTeamAccess,
   readSupportOverview,
   readOwnSupportStatistics,
+  readAllCloudConversations,
+  YUNXIN_CLOUD_CONVERSATION_MAX_PAGES,
   readSupportToday,
   resolveFirstResponseSeconds,
   recordSupportHandover,
@@ -729,6 +731,8 @@ test("admin BFF forwards the new support-management routes with strict methods",
   }
   assert.equal((await run("/im/handovers?limit=20")).status, 401);
   assert.equal((await run("/im/audit/conversations?limit=20")).status, 401);
+  assert.equal((await run("/im/yunxin-conversations")).status, 401);
+  assert.equal((await run("/im/yunxin-conversations", "POST")).status, 404);
   assert.equal((await run("/im/presence/heartbeat", "POST")).status, 503);
   assert.equal((await run("/im/audit/consultations/im_consult_1/takeover", "POST")).status, 503);
   assert.equal((await run("/im/support-overview", "POST")).status, 404);
@@ -947,4 +951,38 @@ test("my support statistics are actor-bound and never require management read or
   const denied=fakePool(adminContextHandler({permissions:[]}));
   await assert.rejects(readOwnSupportStatistics({pool:denied.pool,appId:APP_ID} as never,adminContext),e=>(e as {status:number}).status===403);
   assert.equal(denied.calls.some(c=>c.sql.includes("AS active")),false);
+});
+
+test("cloud conversation paging counts pinned conversations and stops at the quota bound", async () => {
+  let calls = 0;
+  const paged = {
+    listCloudConversations: async () => {
+      calls += 1;
+      return calls === 1
+        ? { hasMore: true, nextToken: "page-2", items: [
+          { conversationId: "staff-1|2|1", stickTop: true, type: 2, updateTime: 1 },
+          { conversationId: "staff-1|2|2", stickTop: false, type: 2, updateTime: 2 },
+        ] }
+        : { hasMore: false, nextToken: null, items: [
+          { conversationId: "staff-1|2|3", stickTop: false, type: 2, updateTime: 3 },
+        ] };
+    },
+  };
+  const result = await readAllCloudConversations(paged, "staff-1");
+  assert.deepEqual(result, { conversationCount: 3, stickTopCount: 1, state: "OK" });
+  assert.equal(calls, 2);
+
+  let cappedCalls = 0;
+  const capped = {
+    listCloudConversations: async () => {
+      cappedCalls += 1;
+      return { hasMore: true, nextToken: "next", items: [
+        { conversationId: `staff-1|2|${cappedCalls}`, stickTop: false, type: 2, updateTime: cappedCalls },
+      ] };
+    },
+  };
+  const truncated = await readAllCloudConversations(capped, "staff-1");
+  assert.equal(truncated.state, "TRUNCATED");
+  assert.equal(truncated.conversationCount, YUNXIN_CLOUD_CONVERSATION_MAX_PAGES);
+  assert.equal(cappedCalls, YUNXIN_CLOUD_CONVERSATION_MAX_PAGES);
 });

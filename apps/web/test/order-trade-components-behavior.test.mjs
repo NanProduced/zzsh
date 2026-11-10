@@ -3230,17 +3230,51 @@ test("an opening card without a recorded deadline does not promise automatic con
   const probe = createProbe(window, OrderCardMessage, { message, info, onConfirmOpening: async () => {} }, async () => json({}));
   try {
     await probe.render();
-    assert.match(probe.host.textContent, /自动确认时间未记录/);
+    assert.match(probe.host.textContent, /自动确认/);
+    assert.match(probe.host.textContent, /未记录/);
+    assert.match(probe.host.querySelector(".order-card-meta .order-card-info")?.getAttribute("aria-label") ?? "", /自动确认时间未记录/);
+    assert.equal(probe.host.querySelector(".order-card-meta .order-card-info")?.getAttribute("title"), null);
     assert.doesNotMatch(probe.host.textContent, /超时未确认将由系统自动确认/);
     await probe.click("确认开租");
     assert.match(probe.host.querySelector('[role="dialog"]').textContent, /自动确认时间未记录/);
     assert.doesNotMatch(probe.host.querySelector('[role="dialog"]').textContent, /等待期到期后开始租期/);
     await probe.render({ message, info: { ...info, openingConfirmDueAt: "invalid" }, onConfirmOpening: async () => {} });
-    assert.match(probe.host.textContent, /自动确认时间未记录/);
+    assert.match(probe.host.querySelector(".order-card-meta .order-card-info")?.getAttribute("aria-label") ?? "", /自动确认时间未记录/);
+    assert.equal(probe.host.querySelector(".order-card-meta .order-card-info")?.getAttribute("title"), null);
   } finally { await probe.dispose(); }
 }));
 
-/* ---- Master third review: the customer-support card shares the opening.confirm original request ---- */
+test("a cancelled-order card shows refund only to the renter and keeps no confirmation action", async () => withDom(async window => {
+  const { OrderCardMessage } = loadComponent("packages/ui/src/order-card.tsx", session("user_A"));
+  const message = { senderId: "bot", card: { kind: "ORDER_CANCELLED", orderId: "order_C", cardId: "card_c" } };
+  const base = {
+    orderId: "order_C", displayNo: "ZZ-C", orderStatus: "CANCELLED", cancelReason: "PRESTART_TERMINATED",
+    refundPending: true, orderEndedAt: "2026-10-20T02:00:00.000Z", account: { id: "account_c", title: "账号 C" },
+    gameName: "三角洲行动", members: [],
+    terms: { viewerParty: "RENTER", basis: "QUOTE", lines: [], paidTotal: "10000", rentalAmount: "9000", depositAmount: "1000" },
+  };
+  const renter = createProbe(window, OrderCardMessage, { message, info: base }, async () => json({}));
+  try {
+    await renter.render();
+    assert.equal(renter.host.querySelector(".order-card-head .order-card-title").textContent, "订单已取消");
+    assert.match(renter.host.textContent, /退款/);
+    assert.match(renter.host.textContent, /处理中/);
+    assert.match(renter.host.textContent, /实付/);
+    assert.equal(renter.host.querySelector(".order-card-confirm"), null, "a cancelled card has no opening confirmation");
+    assert.match(renter.host.querySelector(".order-card-action").textContent, /订单详情/);
+  } finally { await renter.dispose(); }
+  const owner = createProbe(window, OrderCardMessage, {
+    message,
+    info: { ...base, terms: { ...base.terms, viewerParty: "OWNER" } },
+  }, async () => json({}));
+  try {
+    await owner.render();
+    assert.doesNotMatch(owner.host.textContent, /退款/, "the owner is never shown the renter's refund state");
+    assert.match(owner.host.textContent, /应收/);
+  } finally { await owner.dispose(); }
+}));
+
+
 
 /** Extracts the REAL customer-support callback so the test exercises production wiring. */
 function cardConfirmCallback(mutableSession, sessionRef = { current: mutableSession }) {

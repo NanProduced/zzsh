@@ -11,6 +11,7 @@ import { assertAdminContextInTransaction, type AdminContext } from "../auth/auth
 import { recordAudit, SecurityApiError, withTransaction } from "../auth/security-core";
 import { buildYunxinIdentityMarker, deriveYunxinAccountId } from "./identity-lifecycle";
 import type { SupportAvailability, SupportConnectionState } from "./consultation";
+import { YunxinApiError, type YunxinSupportScopeApi } from "./yunxin-provider";
 
 import { managedProfileImagePath } from "../profile/profile-avatar";
 
@@ -24,6 +25,11 @@ export const SUPPORT_AUDIT_MAX_LIMIT = 50;
 export const SUPPORT_FIRST_RESPONSE_DEFAULT_SECONDS = 120;
 export const SUPPORT_FIRST_RESPONSE_MIN_SECONDS = 30;
 export const SUPPORT_FIRST_RESPONSE_MAX_SECONDS = 86_400;
+
+/** Current Yunxin console quota per account; update if the App plan changes. */
+export const YUNXIN_CLOUD_CONVERSATION_QUOTA = 5000;
+/** 100 per page, stop after 50 pages (the current quota) instead of unbounded loops. */
+export const YUNXIN_CLOUD_CONVERSATION_MAX_PAGES = 50;
 
 /**
  * 首响事实的动作名。im_consultation 没有 first_response 列（0120 只加了 first_user_message_at），
@@ -824,6 +830,115 @@ export async function readSupportOverview(
       },
     };
   });
+}
+
+export type YunxinConversationUsageAccount = {
+  adminUserId: string;
+  name: string;
+  accountLabel: string;
+  conversationCount: number | null;
+  stickTopCount: number | null;
+  state: "OK" | "TRUNCATED" | "ERROR";
+  error?: string;
+};
+
+export type YunxinConversationUsage = {
+  available: boolean;
+  sampledAt: string;
+  quota: number;
+  accounts: YunxinConversationUsageAccount[];
+};
+
+function maskYunxinAccount(accountId: string): string {
+  return accountId.length <= 8 ? "****" : `${accountId.slice(0, 4)}…${accountId.slice(-4)}`;
+}
+
+/**
+ * Page through one account's cloud conversations. The server read is on demand,
+ * bounded to the console quota, and never exposes the full NIM account id.
+ */
+export async function readAllCloudConversations(
+  provider: Pick<YunxinSupportScopeApi, "listCloudConversations">,
+  accountId: string,
+): Promise<{ conversationCount: number; stickTopCount: number; state: "OK" | "TRUNCATED" }> {
+  const readPage = provider.listCloudConversations;
+  if (!readPage) throw new Error("Yunxin cloud conversations are unavailable");
+  let conversationCount = 0;
+  let stickTopCount = 0;
+  let pageToken: string | undefined;
+  for (let page = 0; page < YUNXIN_CLOUD_CONVERSATION_MAX_PAGES; page += 1) {
+    const result = await readPage({ accountId, ...(pageToken === undefined ? {} : { pageToken }), limit: 100 });
+    conversationCount += result.items.length;
+    stickTopCount += result.items.filter((item) => item.stickTop).length;
+    if (!result.hasMore) return { conversationCount, stickTopCount, state: "OK" };
+    if (!result.nextToken) return { conversationCount, stickTopCount, state: "TRUNCATED" };
+    pageToken = result.nextToken;
+  }
+  return { conversationCount, stickTopCount, state: "TRUNCATED" };
+}
+
+/**
+ * Read-only Yunxin cloud conversation capacity by support agent. This is
+ * intentionally on-demand (the dashboard refreshes it manually) because each
+ * account can require multiple provider pages.
+ */
+export async function readYunxinConversationUsage(
+  options: { pool: Pool; appId: string; provider?: Pick<YunxinSupportScopeApi, "listCloudConversations"> },
+  context: AdminContext,
+): Promise<YunxinConversationUsage> {
+  const rows = await withTransaction(options.pool, async (client) => {
+    await client.query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY");
+    await assertAdminContextInTransaction(client, context);
+    requireSupportManagementRead(await loadEffectiveAdminAccess(client, context.userId));
+    return (await client.query<{ adminUserId: string; accountId: string; name: string }>(
+      `WITH agents AS (
+         SELECT p."admin_user_id" FROM "zzsh_iam"."im_support_presence" p WHERE p."app_id" = $1
+         UNION
+         SELECT s."admin_user_id" FROM "zzsh_iam"."im_support_presence_session" s WHERE s."app_id" = $1
+       )
+       SELECT DISTINCT a."admin_user_id" AS "adminUserId", m."account_id" AS "accountId",
+              COALESCE(NULLIF(btrim(u."name"), ''), u."username", a."admin_user_id") AS "name"
+         FROM agents a
+         JOIN "zzsh_auth_admin"."user" u ON u."id" = a."admin_user_id"
+         JOIN "zzsh_iam"."im_identity_mapping" m
+           ON m."platform_subject_id" = a."admin_user_id" AND m."app_id" = $1
+          AND m."provider" = 'yunxin' AND m."realm" = 'admin'
+          AND m."identity_kind" = 'ADMIN' AND m."status" = 'READY'
+        ORDER BY "name", a."admin_user_id"
+        LIMIT 100`,
+      [options.appId],
+    )).rows;
+  });
+  const sampledAt = new Date().toISOString();
+  const provider = options.provider;
+  if (!provider?.listCloudConversations) {
+    return { available: false, sampledAt, quota: YUNXIN_CLOUD_CONVERSATION_QUOTA, accounts: [] };
+  }
+  const accounts: YunxinConversationUsageAccount[] = [];
+  for (let index = 0; index < rows.length; index += 4) {
+    const batch = rows.slice(index, index + 4);
+    accounts.push(...await Promise.all(batch.map(async (row): Promise<YunxinConversationUsageAccount> => {
+      const base = {
+        adminUserId: row.adminUserId,
+        name: row.name,
+        accountLabel: maskYunxinAccount(row.accountId),
+      };
+      try {
+        return { ...base, ...await readAllCloudConversations(provider, row.accountId) };
+      } catch (error) {
+        return {
+          ...base,
+          conversationCount: null,
+          stickTopCount: null,
+          state: "ERROR",
+          error: error instanceof YunxinApiError
+            ? `云信错误 ${error.providerCode ?? error.httpStatus ?? "未知"}`
+            : "云信读取失败",
+        };
+      }
+    })));
+  }
+  return { available: true, sampledAt, quota: YUNXIN_CLOUD_CONVERSATION_QUOTA, accounts };
 }
 
 export async function listSupportHandovers(

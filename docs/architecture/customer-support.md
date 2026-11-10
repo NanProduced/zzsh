@@ -70,7 +70,9 @@ IM功能正式追加为0125–0141；0000–0124历史字节不改。带旧私�
 
 ## 订单阶段卡自定义消息
 
-订单阶段卡（开租确认、结束确认、结算完成）由服务端以 NIM 自定义消息（`message_type=100`）发送，`attachment.raw` 只承载 `{schema:"zzsh.order-card",version:1,kind,orderId,cardId}`。NIM 只负责存储和投递；卡片 UI、按钮动作和权限校验仍由 Web/Admin 客户端及订单接口完成。
+订单阶段卡（开租确认、结束确认、结算完成、订单取消）由服务端以 NIM 自定义消息（`message_type=100`）发送，`attachment.raw` 只承载 `{schema:"zzsh.order-card",version:1,kind,orderId,cardId}`。NIM 只负责存储和投递；卡片 UI、按钮动作和权限校验仍由 Web/Admin 客户端及订单接口完成。`ORDER_CANCELLED` 每个订单一张，取消后 72 小时内且群 READY 时补发；退款处理中/已完成只对租客展示，号主不展示退款行。
+
+普通消息引用不使用 NIM 的 Thread `replyMessage`（它只生成 `threadRoot/threadReply`），而是随普通文本消息写入 `serverExtension` 的稳定 JSON：`{schema:"zzsh.message-reply",version:1,messageId,senderId,text?}`。发送端和历史读取端都解析该字段，保证刷新和对方客户端仍能看到引用；其他客户端接入时必须实现同一解析，未知 extension 按普通文本处理。群成员 @ 目前以文本 `@显示名` 发送，未写入云信 mention 元数据或定向提醒；输入 `@` 或点击输入框的 @ 按钮都会打开成员选择，输入字符会过滤成员。
 
 - 客户端只解析平台自有的严格形状；未知版本、额外字段、非法 ID 或伪造内容按普通文本/不支持消息处理。
 - 卡片金额、双方、开租/结算状态一律来自受权订单读取，不信任消息体。
@@ -82,7 +84,9 @@ IM功能正式追加为0125–0141；0000–0124历史字节不改。带旧私�
 
 ## 订单文字入口
 
-- 买家/号主从个人中心租入/出租订单打开共享客服容器的“我的订单群”；客服工作台提供“我参与的订单群”。Admin的`GET /api/v1/admin/orders/im-groups`按JOINED、当前read权限及游戏范围分页，独立于order.read管理目录；群外Boss不因此获得群访问权。统一会话列表的订单队列按管理员/会话绑定，身份变化立即隐藏旧列表并丢弃旧响应；每页50条，刷新按已加载页链重新读取（最多10页）并替换旧快照，翻页与刷新不混用旧cursor；失败/部分失败保留可重试提示，搜索仅覆盖已加载会话。
+- 买家/号主从个人中心租入/出租订单打开共享客服容器的“我的订单群”；客服工作台提供“我参与的订单群”。Admin的`GET /api/v1/admin/orders/im-groups`按JOINED、当前read权限及游戏范围分页，独立于order.read管理目录；群外Boss不因此获得群访问权。统一会话列表的订单队列按管理员/会话绑定，身份变化立即隐藏旧列表并丢弃旧响应；每页50条，刷新按已加载页链重新读取（最多10页）并替换旧快照，翻页与刷新不混用旧cursor；失败/部分失败保留可重试提示，搜索由服务端按当前授权目录查询订单号、账号标题、游戏、租客/号主姓名，不再只过滤已加载会话；咨询与订单群各最多返回 50 条。目录项附带 `teamId`（云信群标识，不含成员 accid），供管理端把云信账号置顶会话映射回订单。
+- 管理端订单群置顶使用云信 `V2NIMConversationService.stickTopConversation`，按当前 NIM 账号保存在云端并在登录时同步，不再只依赖浏览器 storage；免打扰和隐藏仍是本机偏好。`local-fake` 或云信会话能力不可用时回退本机置顶并在群设置中明确提示。
+- 云信“云端会话数”是单账号云端会话列表的容量配额，置顶会话占用该配额；置顶数量另有上限（云信错误码 `110303`），两者不是同一限制。接近配额时需清理历史会话或升级配额，不能把置顶当作永久归档。
 - 两个容器复用原NIM连接，订单面板没有另一套登录或连接管理器。订单与咨询的上下文、授权、消息与草稿分别处理；订单发送和历史操作前请求订单IM授权，等待结束再次检查身份、App、订单、Team及客户端代次。收起或切换对象不触发付款、分配或建群。
 - 固定摘要只展示订单编号/群名、游戏、账号摘要及平台成员昵称头像/身份；内部accid不作默认昵称，会员/实名暂无受权投影时显示未知。没有电话、密码或验证码摘要。订单阶段卡使用 NIM 自定义消息（type 100）承载最小 `schema/version/kind/orderId/cardId`；客户端只解析平台自有形状，金额/身份/状态仍从受权订单读取。用户分享的“关联订单卡”仍走版本化文本标记，两者不混用。
 - 本包提供文字发送、实时合并、锚点历史分页及重连后的历史读取。send-only撤权保留合法历史与草稿；read撤权清除当前敏感状态，401/423交回既有认证刷新。订单授权请求按当前上下文单飞，过期结果不能恢复权限。
@@ -160,6 +164,7 @@ read客户端身份与send能力分离：只撤接待权限时保留合法连接
 
 - `GET /api/v1/im/admin/audit/conversations` 要求 `im.support.management.read`，支持 limit/cursor、type（SERVICE、COMPLAINT、ORDER）及 adminUserId。省略过滤表示全部；过滤条件变更须丢弃旧游标。订单活动时间优先消息活动，再建群/建单时间。historyState 区分 AVAILABLE、NOT_ESTABLISHED、LEGACY_UNAVAILABLE、RECOVERING，不把缺历史当零消息。巡视不改已读或派单；旧轮次保留的独立 Team 按精确 App/轮次绑定与远端标记复核读取，不借当前线程替代历史。
 - `GET /api/v1/im/admin/support-overview` 要求管理读取，支持下述时间范围，默认北京时间今天。reportDate/serverNow 来自服务器。期间接待次数/用户只计发生接待动作的咨询，不含订单群；hourly为期间CREATED/REOPENED新轮次的小时分布。排队只统计当前有用户首条消息、未指派的WAITING；可接待须AVAILABLE、CONNECTED、2分钟内心跳新鲜、云信身份READY且具备读取/接待权限，顶部“当前可接待客服”与派单资格同口径。首响askedCount为期间首次提问的咨询数，sampleCount为已人工首答数，pending/overdue和关闭未答不能冒充已答样本。
+- `GET /api/v1/im/admin/yunxin-conversations` 要求 `im.support.management.read`，按需读取每个有接待记录的客服 NIM 账号云端会话总数与置顶数。服务端通过云信 `GET /im/v2.1/conversations?account_id=...` 每页100条分页，单账号最多读取当前配额5000条；返回账号脱敏标签、计数、配额和采样时间，不返回完整 accid，不写入云信。客服统计页手动触发，不随看板轮询。
 - `GET /api/v1/im/admin/my-support-statistics` 经管理BFF转发，仅GET，支持下述时间范围，要求 `im.support.read`；身份固定为当前管理员，不接受指定员工。返回reportDate/serverNow/period、today{seconds,sessions,users}、current{consultations,orderGroups,unread,oldestPendingAt}、ratings{count,average,distribution}和firstResponse{sampleCount,averageSeconds}。个人首响只计本人是首次人工回复者且回复发生在期间的样本，不按最终接待人代计，可含跨期提问。oldestPendingAt是当前仍有未读的接待轮次之首次用户提问时间，不是最后一条未读消息的等待时长。
 - 最小售后记录仅绑定 NATIVE 已确认 POSTED 结算订单，租客/号主各自可提交；结算后即可提交，不另等72小时。用户 `GET/POST /api/v1/im/user/aftersales`（GET 必须 orderSource=NATIVE、orderId）只返回本人记录。管理 `GET /api/v1/im/admin/aftersales` 和 `POST /:id/claim|contact|resolve` 复核读取/接待及责任范围。描述/结果上限1000字，同人同单至多一条 PENDING；处理后可新提交，仅 PENDING/RESOLVED 两状态。创建/处理用稳定操作 ID，领取/处理核版本；处理完成保留历史处理人。
 - 售后沟通复用已有 SERVICE 咨询和转交机制，没有新工单消息系统。待处理记录随当前咨询责任变更，已处理记录不跟随；contact 只有 ACTIVE、本人接待、READY、可发送时才成功，否则保留记录并返回可恢复结果。记录处理状态不代表退款/到账，不创建资金事实。

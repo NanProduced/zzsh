@@ -183,6 +183,15 @@ test("a scoped collection without a matching game returns an empty page, not an 
   assert.equal(scoped.bindingSql, "", "an empty page reads no bindings at all");
 });
 
+test("order directory search filters server-side by order, game, preview and user name", async () => {
+  const scoped = new ScopeCollectionClient();
+  scoped.gameIds = ["delta"];
+  await listJoinedOrderTeams(scoped as unknown as PoolClient, collectionActor, null, 20, "app_fixture", "ZZ-123");
+  assert.match(scoped.listSql, /\$6::text IS NULL OR o\.display_no ILIKE/);
+  assert.match(scoped.listSql, /su\.name ILIKE/);
+  assert.doesNotMatch(scoped.listSql, /last_message_preview\s+ILIKE/);
+});
+
 test("collection rows project stage, dueAt and todo from the same fulfillment facts", async () => {
   const scoped = new ScopeCollectionClient();
   scoped.gameIds = ["delta"];

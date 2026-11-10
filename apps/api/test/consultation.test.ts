@@ -528,9 +528,12 @@ test("COMPLAINT rows require the complaint grant and never read exclusion eviden
   const queue = await listAdminConsultations({ pool: f.pool, appId: "app_a" } as never, f.actor, null as never, 10);
   assert.equal(queue.consultations.length, 1, "an authorized unassigned complaint joins the queue");
   assert.equal(queue.consultations[0]!.type, "COMPLAINT");
+  await listAdminConsultations({ pool: f.pool, appId: "app_a" } as never, f.actor, null as never, 10, "alice");
   const listQuery = f.calls.find(({ sql }) => sql.includes('ORDER BY CASE WHEN c."assigned_admin_id" = $2'));
   assert.ok(listQuery);
   assert.match(listQuery!.sql, /c2\."kind" <> 'COMPLAINT' OR \$5::boolean/);
+  assert.match(listQuery!.sql, /\$6::text IS NULL OR u\."name" ILIKE/);
+  assert.doesNotMatch(listQuery!.sql, /COALESCE\(c\."last_message_preview",''\)/);
 });
 
 test("new consultation reads traverse the real BFF and handler with strict methods and queries", async () => {

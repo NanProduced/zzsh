@@ -795,3 +795,34 @@ test("automatic Team cards use a type-100 custom message with a minimal raw payl
   assert.deepEqual(JSON.parse(String((message.attachment as {raw:string}).raw)),{schema:"zzsh.order-card",version:1,...card});
   await assert.rejects(api.sendSupportTeamCard({teamId:"900001",senderAccountId:"review_sender",card:{...card,orderId:"../private"},text:"开租确认卡",messageClientId:"im_card_event_1"}));
 });
+
+test("cloud conversation pages are bounded and keep only the monitoring fields", async () => {
+  const urls: string[] = [];
+  const api = new YunxinServerApiClient({
+    appKey: APP_KEY,
+    appSecret: APP_SECRET,
+    fetch: async (input) => {
+      urls.push(String(input));
+      return jsonResponse({ code: 200, data: { has_more: false, next_token: null, items: [
+        { conversation_id: "staff-1|2|123", stick_top: true, type: 2, update_time: 1 },
+        { conversation_id: "staff-1|2|456", stick_top: false, type: 2, update_time: 2 },
+      ] } });
+    },
+  });
+  const page = await api.listCloudConversations({ accountId: "staff-1", limit: 100 });
+  assert.equal(page.items.length, 2);
+  assert.equal(page.items[0]!.stickTop, true);
+  assert.equal(page.items[1]!.stickTop, false);
+  assert.equal(page.hasMore, false);
+  assert.match(urls[0]!, /\/im\/v2\.1\/conversations\?account_id=staff-1&limit=100$/);
+  await assert.rejects(api.listCloudConversations({ accountId: "bad id" }));
+
+  const malformed = new YunxinServerApiClient({
+    appKey: APP_KEY,
+    appSecret: APP_SECRET,
+    fetch: async () => jsonResponse({ code: 200, data: { has_more: false, items: [
+      { conversation_id: "staff-1|2|123", stick_top: "yes", type: 2, update_time: 1 },
+    ] } }),
+  });
+  await assert.rejects(malformed.listCloudConversations({ accountId: "staff-1" }), YunxinApiError);
+});

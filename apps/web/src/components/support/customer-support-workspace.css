@@ -318,27 +318,27 @@ html[data-theme="dark"] .support-message[data-self="true"] .support-message-imag
 
 /* Integrated Composer (WeChat style: clean textarea on top, tools & send on bottom) */
 .support-composer-wrap { padding:10px 18px 14px;background:var(--color-bg-surface);border-top:1px solid var(--color-border-subtle); }
-.support-composer { display:flex;flex-direction:column;border:1px solid var(--color-border-subtle);border-radius:8px;background:var(--color-bg-canvas);padding:8px 12px;gap:4px;transition:border-color .15s ease,background-color .15s ease;box-shadow:none;outline:none; }
+.support-composer { display:flex;flex-direction:column;border:1px solid var(--color-border-default,var(--color-border-subtle));border-radius:10px;background:color-mix(in srgb,var(--color-text-primary) 2%,transparent);padding:8px 10px 6px;gap:0;transition:border-color .15s ease,background-color .15s ease;box-shadow:none;outline:none; }
 .support-composer[data-dragging="true"] { border-color:var(--color-accent-brand)!important;background:color-mix(in srgb,var(--color-accent-brand) 6%,var(--color-bg-canvas))!important;box-shadow:0 0 0 1px var(--color-accent-brand)!important; }
 .support-composer:focus-within,.support-composer:focus { border-color:var(--color-border-subtle)!important;box-shadow:none!important;outline:none!important; }
-.support-composer textarea { width:100%;min-height:68px;max-height:150px;resize:none;border:0!important;outline:0!important;box-shadow:none!important;color:var(--color-text-primary);background:transparent;font-size:13px;line-height:1.55;padding:2px 0 6px;caret-color:var(--color-accent-brand); }
+.support-composer textarea { width:100%;min-height:44px;max-height:120px;resize:none;border:0!important;outline:0!important;box-shadow:none!important;color:var(--color-text-primary);background:transparent;font-size:13px;line-height:1.5;padding:2px 0;caret-color:var(--color-accent-brand); }
 .support-composer textarea:focus,.support-composer textarea:focus-visible { outline:none!important;box-shadow:none!important;border:none!important; }
 /* Keyboard focus needs a visible affordance; mouse clicks keep the flat look. */
-.support-composer:has(textarea:focus-visible) { border-color:var(--color-accent-brand)!important;box-shadow:0 0 0 1px color-mix(in srgb,var(--color-accent-brand) 45%,transparent)!important; }
+.support-composer:has(textarea:focus-visible) { border-color:var(--color-accent-brand)!important;box-shadow:0 0 0 2px color-mix(in srgb,var(--color-accent-brand) 14%,transparent)!important; }
 .support-composer textarea::placeholder { color:var(--color-text-muted); }
-.support-composer-footer { display:flex;align-items:center;justify-content:space-between;gap:12px;padding-top:4px;border-top:none; }
-.support-composer-tools { display:flex;align-items:center;gap:6px; }
-.support-tool-btn { display:inline-grid;width:28px;height:28px;place-items:center;border-radius:4px;border:0;background:transparent;color:var(--color-text-secondary);cursor:pointer;transition:background-color .15s ease,color .15s ease;position:relative;padding:0; }
-.support-tool-btn:hover { background:var(--color-bg-elevated);color:var(--color-text-primary); }
+.support-composer-footer { display:flex;align-items:center;justify-content:space-between;gap:8px;padding-top:2px;border-top:none; }
+.support-composer-tools { display:flex;align-items:center;gap:4px; }
+.support-tool-btn { display:inline-grid;width:28px;height:28px;place-items:center;border-radius:5px;border:0;background:transparent;color:var(--color-text-secondary);cursor:pointer;transition:background-color .15s ease,color .15s ease;position:relative;padding:0; }
+.support-tool-btn:hover { background:color-mix(in srgb,var(--color-text-primary) 6%,transparent);color:var(--color-text-primary); }
 .support-tool-btn:focus-within { outline:2px solid var(--color-focus-ring);outline-offset:1px; }
 .support-tool-btn input { position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);opacity:0; }
-.support-composer-actions { display:flex;align-items:center;gap:10px;margin-left:auto; }
-.support-composer-hint { font-size:11px;color:var(--color-text-muted);white-space:nowrap;display:inline-flex;align-items:center;gap:2px; }
-.support-kbd { display:inline-flex;align-items:center;justify-content:center;height:18px;min-width:18px;padding:0 4px;font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono","Courier New",monospace;font-size:10px;font-weight:500;line-height:1;color:var(--color-text-secondary);background:var(--color-bg-elevated);border:1px solid var(--color-border-default);border-radius:4px;box-shadow:0 1px 1px rgba(0,0,0,.05);user-select:none;margin:0 1px;vertical-align:middle; }
+.support-composer-actions { display:flex;align-items:center;gap:4px;margin-left:auto; }
+.support-composer-hint { font-size:10px;color:var(--color-text-muted);white-space:nowrap;display:inline-flex;align-items:center;gap:2px; }
+.support-kbd { display:inline-flex;align-items:center;justify-content:center;height:18px;min-width:18px;padding:0 4px;font-family:inherit;font-size:10px;font-weight:500;line-height:1;color:var(--color-text-secondary);background:var(--color-bg-elevated);border:1px solid var(--color-border-default);border-radius:4px;box-shadow:0 1px 1px rgba(0,0,0,.05);user-select:none;margin:0 1px;vertical-align:middle; }
 html.dark .support-kbd,html[data-theme="dark"] .support-kbd,:root:not([data-theme="light"]) .support-kbd { background:rgba(255,255,255,.08);border-color:rgba(255,255,255,.16);color:rgba(255,255,255,.7); }
-.support-composer-status { font-size:11px;color:var(--color-status-warning-ink);white-space:nowrap; }
+.support-composer-status { font-size:10px;color:var(--color-status-warning-ink);white-space:nowrap; }
 .support-start-panel > .support-start-panel-status { color:var(--color-text-secondary);font-size:11px; }
-.support-send-btn { display:inline-flex;align-items:center;justify-content:center;white-space:nowrap;flex:none;min-width:52px;height:26px;padding:0 14px;border-radius:4px;border:0;background:var(--color-accent-brand);color:var(--color-accent-brand-text);font-size:12px;font-weight:500;cursor:pointer;transition:opacity .15s ease; }
+.support-send-btn { display:inline-flex;align-items:center;justify-content:center;white-space:nowrap;flex:none;min-width:52px;height:30px;padding:0 14px;border-radius:6px;border:0;background:var(--color-accent-brand);color:var(--color-accent-brand-text);font-size:12px;font-weight:600;cursor:pointer;transition:opacity .15s ease; }
 .support-send-btn:hover:not(:disabled) { opacity:.9; }
 .support-send-btn:disabled { opacity:1;cursor:not-allowed;background:var(--color-bg-elevated);color:var(--color-text-secondary);border:1px solid var(--color-border-default); }
 .support-context-send-btn { width:100%;margin-top:12px;justify-content:center; }
@@ -367,8 +367,9 @@ html.dark .support-kbd,html[data-theme="dark"] .support-kbd,:root:not([data-them
 .support-unified .order-team-chat { display:flex;flex-direction:column;flex:1;min-height:0; }
 .support-unified .order-team-messages { flex:1;min-height:80px;max-height:none;margin:0;padding:16px 4px; }
 /* 输入框边框由 order-team-composer-box 提供，form 只负责占位，不能再套一层或按列右对齐。 */
-.support-unified .order-team-chat form { display:block;border:0;padding:0;background:transparent; }
-.support-unified .order-team-chat textarea { border:0!important;outline:0!important;box-shadow:none!important;min-height:36px;max-height:120px;font-size:13px;resize:none;padding:2px 0;background:transparent;caret-color:var(--color-accent-brand); }
+.support-unified .order-team-chat form { display:block;border:0;padding:0;margin:0;background:transparent; }
+.support-unified .order-team-chat .order-team-send { min-height:30px;padding:0 14px;border-radius:6px;font-size:12px;font-weight:600; }
+.support-unified .order-team-chat textarea { border:0!important;outline:0!important;box-shadow:none!important;min-height:44px;max-height:120px;font-size:13px;resize:none;padding:2px 0;background:transparent;caret-color:var(--color-accent-brand); }
 .support-unified .order-team-composer-tools { display:flex;align-items:center;gap:4px; }
 .support-unified .order-team-info-action { font-size:11px;padding:3px 8px;border:1px solid var(--color-border-subtle);border-radius:4px;background:var(--color-bg-surface);color:var(--color-text-secondary);cursor:pointer; }
 .support-unified .order-team-info-action:hover { border-color:var(--color-accent-brand);color:var(--color-text-primary); }
@@ -459,12 +460,14 @@ html[data-theme="dark"] .support-unified .order-team-messages p,
 html.dark .support-unified .order-team-messages li[data-self="true"] p,
 html[data-theme="dark"] .support-unified .order-team-messages li[data-self="true"] p,
 :root:not([data-theme="light"]) .support-unified .order-team-messages li[data-self="true"] p { border-color:rgba(229,169,60,.45); background:linear-gradient(135deg,rgba(229,169,60,.24),rgba(200,140,30,.17)); color:#ffffff; box-shadow:0 2px 6px rgba(0,0,0,.35); }
-.support-unified .order-team-composer-box { padding:8px 12px 6px; border-radius:8px; border-color:var(--color-border-subtle); background:var(--color-bg-canvas); }
-.support-unified .order-team-composer-box:focus-within { border-color:var(--color-accent-brand); box-shadow:0 0 0 1px color-mix(in srgb,var(--color-accent-brand) 45%,transparent); }
-.support-unified .order-team-composer-tools { gap:6px; }
-.support-unified .order-team-panel .order-team-tool { width:28px; height:28px; border-radius:4px; }
-.support-unified .order-team-panel .order-team-send { height:26px; padding:0 14px; border-radius:4px; font-size:12px; font-weight:500; }
-.support-unified .order-team-composer-hint { font-size:11px; }
+.support-unified .order-team-composer-box { padding:8px 10px 6px; border-radius:10px; border-color:var(--color-border-default,var(--color-border-subtle)); background:color-mix(in srgb,var(--color-text-primary) 2%,transparent); }
+.support-unified .order-team-composer-box:focus-within { border-color:var(--color-accent-brand); box-shadow:0 0 0 2px color-mix(in srgb,var(--color-accent-brand) 14%,transparent); }
+.support-unified .order-team-composer-tools { gap:4px; }
+.support-unified .order-team-panel .order-team-tool { width:28px; height:28px; border-radius:5px; }
+.support-unified .order-team-panel .order-team-send { height:30px; padding:0 14px; border-radius:6px; font-size:12px; font-weight:600; }
+.support-unified .order-team-panel .order-team-send:hover:not(:disabled) { opacity:.9; }
+.support-unified .order-team-panel .order-team-send:disabled { background:var(--color-bg-elevated); color:var(--color-text-secondary); border:1px solid var(--color-border-default); opacity:1; }
+.support-unified .order-team-composer-hint { font-size:10px; }
 /* 触屏：客服窗口 760px 断点把工具/发送抬到 44px，订单群输入框跟同一档，别留 40px 的夹生尺寸。 */
 @media(max-width:768px){
  .support-composer-hint { display:none; }
