@@ -182,29 +182,35 @@ const demoAvailability=()=>({contractVersion:'ecs-test-checkout-availability.v1'
 const demoResult=()=>({contractVersion:'ecs-test-checkout-result.v1',scope:'ECS_TEST_SIMULATED',orderId:'order_A',payment:{confirmationId:'demo_confirmation_1',disposition:'APPLIED',reasonCode:null,replay:false},bankArrival:'UNKNOWN'});
 const demoReceipt=known=>({contractVersion:'ecs-test-checkout-receipt.v1',scope:'ECS_TEST_SIMULATED',orderId:'order_A',knowledge:known?'KNOWN':'UNKNOWN',receipt:known?demoResult():null,observedAt:new Date().toISOString(),writeAssemblyReady:true,mayReapply:false});
 
+test('a new simulated payment cannot bypass the normal cashier',async()=>withDom(async window=>{
+ const {DemoCheckoutAction}=loadComponent('apps/web/src/components/order/order-trade-actions.tsx',session('user_A'));
+ let calls=0;const p=createProbe(window,DemoCheckoutAction,localProps(),async(_url,init={})=>{assert.notEqual(init.method,'POST');calls++;return json(demoAvailability())},{exerciseDemo:true});
+ try{await p.render();assert.match(p.host.textContent,/通过支付入口打开收银台/);assert.doesNotMatch(p.host.textContent,/旧受控入口|确认模拟付款|模拟付款已完成/);assert.equal(calls,1)}finally{await p.dispose()}
+}));
+
 test('demo payment appears only after server discovery and confirms without a real channel',async()=>withDom(async window=>{
  window.happyDOM.setURL('https://test.nanproduced.cloud/account');const {DemoCheckoutAction}=loadComponent('apps/web/src/components/order/order-trade-actions.tsx',session('user_A'));let posts=0,changed=0;
- const p=createProbe(window,DemoCheckoutAction,localProps({onChanged(){changed++}}),async(url,init={})=>{
+ const p=createProbe(window,DemoCheckoutAction,localProps({embedded:true,onChanged(){changed++}}),async(url,init={})=>{
   assert.equal(new Headers(init.headers).get('x-zzsh-expected-user-id'),'user_A');
   if(init.method==='POST'){posts++;assert.match(String(url),/demo-checkout\/confirm$/);assert.deepEqual(JSON.parse(init.body),{});assert.equal(intents.loadIntent('user_A','order.demo-checkout','order_A').key,new Headers(init.headers).get('idempotency-key'));return json(demoResult())}
   assert.match(String(url),/demo-checkout$/);return json(demoAvailability());
  },{exerciseDemo:true});
- try{await p.render();assert.match(p.host.textContent,/模拟付款，不会向支付机构或银行发起扣款/);assert.doesNotMatch(p.host.textContent,/旧受控入口/);await p.click('确认模拟付款');assert.equal(posts,1);assert.equal(changed,1);assert.equal(intents.loadIntent('user_A','order.demo-checkout','order_A'),null);assert.match(p.host.textContent,/模拟付款已完成/)}finally{await p.dispose(()=>intents.clearIntent('user_A','order.demo-checkout','order_A'))}
+ try{await p.render();assert.doesNotMatch(p.host.textContent,/旧受控入口/);await p.click('模拟付款');assert.equal(posts,1);assert.equal(changed,1);assert.equal(intents.loadIntent('user_A','order.demo-checkout','order_A'),null);assert.match(p.host.textContent,/模拟付款已完成/)}finally{await p.dispose(()=>intents.clearIntent('user_A','order.demo-checkout','order_A'))}
 }));
 
 test('unknown demo payment is read by its original key and never resubmitted',async()=>withDom(async window=>{
  const {DemoCheckoutAction}=loadComponent('apps/web/src/components/order/order-trade-actions.tsx',session('user_A'));let posts=0,key,known=false,reads=0,changed=0;
- const p=createProbe(window,DemoCheckoutAction,localProps({onChanged(){changed++}}),async(url,init={})=>{
+ const p=createProbe(window,DemoCheckoutAction,localProps({embedded:true,onChanged(){changed++}}),async(url,init={})=>{
   if(init.method==='POST'){posts++;key=new Headers(init.headers).get('idempotency-key');throw new Error('response lost')}
   if(String(url).includes('/receipt?')){reads++;assert.equal(new URL(String(url),'https://local').searchParams.get('key'),key);return json(demoReceipt(known))}return json(demoAvailability());
  },{exerciseDemo:true});
- try{await p.render();await p.click('确认模拟付款');assert.equal(posts,1);assert.match(p.host.textContent,/结果尚未确认/);const original=intents.loadIntent('user_A','order.demo-checkout','order_A');assert.equal(original.key,key);assert.equal(original.context.scope,'ECS_TEST_SIMULATED');await p.click('查询原付款结果');assert.equal(intents.loadIntent('user_A','order.demo-checkout','order_A').key,key);assert.equal(changed,0);known=true;await p.click('查询原付款结果');assert.equal(posts,1);assert.equal(reads,2);assert.equal(changed,1);assert.equal(intents.loadIntent('user_A','order.demo-checkout','order_A'),null)}finally{await p.dispose(()=>intents.clearIntent('user_A','order.demo-checkout','order_A'))}
+ try{await p.render();await p.click('模拟付款');assert.equal(posts,1);assert.match(p.host.textContent,/结果尚未确认/);const original=intents.loadIntent('user_A','order.demo-checkout','order_A');assert.equal(original.key,key);assert.equal(original.context.scope,'ECS_TEST_SIMULATED');await p.click('查询原付款结果');assert.equal(intents.loadIntent('user_A','order.demo-checkout','order_A').key,key);assert.equal(changed,0);known=true;await p.click('查询原付款结果');assert.equal(posts,1);assert.equal(reads,2);assert.equal(changed,1);assert.equal(intents.loadIntent('user_A','order.demo-checkout','order_A'),null)}finally{await p.dispose(()=>intents.clearIntent('user_A','order.demo-checkout','order_A'))}
 }));
 
 test('demo checkout absence falls back; unavailable or malformed capability remains blocked',async()=>withDom(async window=>{
  const {DemoCheckoutAction}=loadComponent('apps/web/src/components/order/order-trade-actions.tsx',session('user_A'));
  for(const [status,body,expected] of [[404,{code:'NOT_FOUND'},'旧受控入口'],[503,{code:'UNAVAILABLE'},'暂时无法确认'],[200,{...demoAvailability(),productionPaymentCapability:true},'暂时无法确认']]){
-  let posts=0;const p=createProbe(window,DemoCheckoutAction,localProps(),async(_url,init={})=>{if(init.method==='POST')posts++;return json(body,status)},{exerciseDemo:true});
+  let posts=0;const p=createProbe(window,DemoCheckoutAction,localProps({embedded:true}),async(_url,init={})=>{if(init.method==='POST')posts++;return json(body,status)},{exerciseDemo:true});
   try{await p.render();assert.ok(p.host.textContent.includes(expected));assert.equal(posts,0);if(status!==404)assert.doesNotMatch(p.host.textContent,/旧受控入口|确认模拟付款|测试付款/)}finally{await p.dispose()}
  }
 }));
@@ -230,11 +236,11 @@ test('a demo receipt from another environment cannot resolve the original reques
 
 test('late demo payment reply never updates a different signed-in user',async()=>withDom(async window=>{
  const actor=session('user_A'),{DemoCheckoutAction}=loadComponent('apps/web/src/components/order/order-trade-actions.tsx',actor),pending=deferred();let changed=0;
- const p=createProbe(window,DemoCheckoutAction,localProps({onChanged(){changed++}}),async(_url,init={})=>{
+ const p=createProbe(window,DemoCheckoutAction,localProps({embedded:true,onChanged(){changed++}}),async(_url,init={})=>{
   if(init.method==='POST')return pending.promise;
   return json({...demoAvailability(),checkoutEnabled:actor.userId==='user_A'});
  },{exerciseDemo:true});
- try{await p.render();const button=[...p.host.querySelectorAll('button')].find(node=>node.textContent==='确认模拟付款');await React.act(async()=>{button.click();await tick()});
+ try{await p.render();const button=[...p.host.querySelectorAll('button')].find(node=>node.textContent==='模拟付款');await React.act(async()=>{button.click();await tick()});
   actor.userId='user_B';actor.identityVersion++;await p.render();await React.act(async()=>{pending.resolve(json(demoResult()));await tick()});
   assert.equal(changed,0);assert.doesNotMatch(p.host.textContent,/模拟付款已完成|demo_confirmation_1/);
  }finally{await p.dispose(()=>intents.clearIntent('user_A','order.demo-checkout','order_A'))}
@@ -350,16 +356,17 @@ const channelView=(id="order_A",over={})=>({contractVersion:"order-payment-reque
 const channelRequest=(state="ACTION_READY",method="WEIXIN_NATIVE")=>({id:"payreq_component",state,method,amount:{cents:"125",currency:"CNY"},updatedAt:"2026-10-24T10:00:00.000Z",recovery:null});
 const channelReceipt=(method,replay=false,state="SUBMITTING")=>({contractVersion:"order-payment-request.v1",dataOrigin:"JOINPAY_CANDIDATE",replay,
   request:{...channelRequest(state,method),orderId:"order_A",createdAt:"2026-10-24T10:00:00.000Z"},paymentAction:null,payment:null});
-test('demo checkout locks cancellation while the original payment outcome is unknown',async()=>withDom(async window=>{
- let posts=0,key;const Component=loadComponent('apps/web/src/components/order/order-trade-actions.tsx',session('user_A')).OrderTradeActions;
+test('a previous unknown demo checkout locks cancellation and recovers its original key',async()=>withDom(async window=>{
+ let posts=0;const key='original_demo_key';const Component=loadComponent('apps/web/src/components/order/order-trade-actions.tsx',session('user_A')).OrderTradeActions;
+ intents.saveIntent({userId:'user_A',kind:'order.demo-checkout',resourceId:'order_A',key,body:{},context:{scope:'ECS_TEST_SIMULATED'}});
  const p=createProbe(window,Component,{order:channelOrder,party:'renter',onChanged(){}},async(url,init={})=>{
   if(String(url).includes('channel-payment-requests'))return json(channelView('order_A',{capability:{channelEnabled:false,productionPaymentCapability:false,methods:[]}}));
-  if(init.method==='POST'){posts++;key=new Headers(init.headers).get('idempotency-key');throw new Error('response lost')}
+  if(init.method==='POST'){posts++;throw new Error('unexpected new payment')}
   if(String(url).includes('/receipt?')){assert.equal(new URL(String(url),'https://local').searchParams.get('key'),key);return json(demoReceipt(false))}
   return json(demoAvailability());
  },{exerciseDemo:true});
- try{await p.render();await p.click('确认模拟付款');assert.equal(posts,1);assert.equal([...p.host.querySelectorAll('button')].find(button=>button.textContent==='取消订单')?.disabled,true);
-  await p.click('查询原付款结果');assert.equal(posts,1);assert.equal(intents.loadIntent('user_A','order.demo-checkout','order_A').key,key);
+ try{await p.render();assert.equal([...p.host.querySelectorAll('button')].find(button=>button.textContent==='取消订单')?.disabled,true);
+  await p.click('查询原付款结果');assert.equal(posts,0);assert.equal(intents.loadIntent('user_A','order.demo-checkout','order_A').key,key);
  }finally{await p.dispose(()=>intents.clearIntent('user_A','order.demo-checkout','order_A'))}
 }));
 const refundRead=(orderId="order_A",over={})=>({contractVersion:"personal-native-refunds.v1",subjectId:"user_A",

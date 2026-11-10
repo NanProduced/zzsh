@@ -7,6 +7,7 @@ import { demoForChannelRequestCapability } from "./channel-payment-store";
 import { runEcsDemoRefundStep } from "./local-sandbox-refund-worker";
 import { prestartRefundAllocationKey } from "./prestart-refund-store";
 
+// TODO(正式上线前): 移除测试退款适配及其装配，模拟成功不是渠道退款。
 type Options = Readonly<{ demo: DemoFinanceResource; capability: unknown }>;
 const ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const unavailable = () => new SecurityApiError(503, "EVIDENCE_UNAVAILABLE", "模拟退款记录暂不可用");

@@ -12,6 +12,7 @@ import { readLegacyDutyBasis } from "./legacy-duty-basis";
 import { readLockedLegacyRefundSource } from "./legacy-refund-review-source";
 import type { LegacyContinuationActor } from "./legacy-continuation-model";
 
+// TODO(正式上线前): 移除旧单测试退款适配，不能把模拟假设用于真实退款。
 type Input={dutyId:string;expectedDutyRevision:string;expectedHeadRevision:string;assumption:"SIMULATION_ASSUME_NO_PRIOR_REFUND";reason:string};
 const sha=(value:string)=>createHash("sha256").update(value).digest("hex");
 const unavailable=()=>new SecurityApiError(503,"EVIDENCE_UNAVAILABLE","旧单模拟退款记录暂不可核实");
