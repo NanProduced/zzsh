@@ -15,7 +15,7 @@ import {createLegacyRefundCase,readLegacyRefundCaseForStatus,readLegacyRefundCas
 import {describeRefundProfile,RefundProfileError,type BoundRefundProfile} from './joinpay-refund-profile';
 import type {RefundSourceOptions} from './joinpay-refund-source';
 import {readLegacyRefundProgress} from './legacy-refund-attempt';
-import {readDemoLegacyRefund,readDemoLegacyRefundReadiness,simulateLegacyRefund} from './ecs-demo-legacy-refund';
+import {readDemoLegacyRefund,readDemoLegacyRefundReadiness,simulateLegacyCancellationRefund,simulateLegacyRefund} from './ecs-demo-legacy-refund';
 import {allocateLegacySupportCancelRefundInTransaction} from './legacy-support-cancel-refund';
 import type {DemoFinanceResource} from '../finance/ecs-test-demo-resource';
 
@@ -271,6 +271,10 @@ export async function handleLegacyContinuationRoute(request: SupplyNodeRequest, 
           fingerprintRequest("order.legacy.continuation.support_cancel",parsed.orderId,input),execution);
         if(allocation.state==="DEFERRED")console.error("Legacy cancellation refund remains pending; original cancellation is retained");
       }
+      // TODO(正式上线前): 移除旧单取消的测试渠道回执；正式退款仍走原任务。
+      if(result.status>=200 && result.status<300 && input.kind==="support_cancel" && options.ecsTestDemo && !liveRefundReady)
+        if(await simulateLegacyCancellationRefund(client,actor,parsed.orderId,options.ecsTestDemo)==="REQUIRES_REVIEW")
+          console.error("Test legacy cancellation refund remains pending; original cancellation is retained");
       return { ...result, body: projectLegacyCommandReceipt(authority.binding, actor, result.body) };
     });
   return true;

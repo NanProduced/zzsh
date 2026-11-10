@@ -10,12 +10,17 @@ import type { LegacyRefundReviewBasis } from "./legacy-refund-review";
 const unavailable = (reason: string): never => { throw new SecurityApiError(409, "CONFLICT", reason); };
 type Source = Omit<LegacyRefundReviewBasis, "merchantIdentityId" | "originalIntentExists">;
 
-/** A recorded old refund needs separate handling; absence is not a channel receipt. */
+/** Any possibly related old refund needs human review; absence is not a channel receipt. */
 export async function hasLegacyRecordedRefunds(client:PoolClient,binding:LegacyOrderBinding,excludeVersionId:string|null=null):Promise<boolean> {
-  const row=(await client.query<{found:boolean}>(`SELECT EXISTS(SELECT 1 FROM zzsh_order.personal_finance_observation o
-    JOIN zzsh_order.legacy_order_read_snapshot l ON l.id=$1 AND l.renter_user_id=o.user_id
+  const row=(await client.query<{found:boolean}>(`WITH source_observations AS MATERIALIZED (
+    SELECT o.user_id,o.snapshot,CASE WHEN pg_input_is_valid(o.snapshot#>>'{rawSource,canonical}','jsonb')
+      THEN (o.snapshot#>>'{rawSource,canonical}')::jsonb ELSE NULL END AS raw FROM zzsh_order.personal_finance_observation o
     WHERE o.source_system='legacy_mysql_restore' AND o.source_entity='la_refund_record' AND o.source_kind='HISTORICAL_REFUND'
-      AND (o.snapshot->>'referenceId'=l.legacy_id OR o.snapshot->>'referenceSn'=l.original_order_no))
+  ) SELECT EXISTS(SELECT 1 FROM source_observations o JOIN zzsh_order.legacy_order_read_snapshot l ON l.id=$1
+      AND ((o.user_id=l.renter_user_id AND (o.snapshot->>'referenceId'=l.legacy_id OR o.snapshot->>'referenceSn'=l.original_order_no))
+        OR o.raw->>'order_id'=l.legacy_id OR o.raw->>'order_sn'=l.original_order_no
+        OR (o.user_id=l.renter_user_id AND o.snapshot->>'associationState' IS DISTINCT FROM 'SOURCE_VERIFIED'
+          AND COALESCE(o.raw->>'order_id','')='' AND COALESCE(o.raw->>'order_sn','')='')))
     OR EXISTS(SELECT 1 FROM zzsh_order.legacy_refund_case x LEFT JOIN zzsh_order.legacy_order_duty d ON d.id=x.duty_id
       WHERE x.order_id=$1 AND ($2::text IS NULL OR d.continuation_version_id IS DISTINCT FROM $2)) AS found`,[binding.id,excludeVersionId])).rows[0];
   if(typeof row?.found!=="boolean")return unavailable("LEGACY_REFUND_HISTORY_UNKNOWN");
