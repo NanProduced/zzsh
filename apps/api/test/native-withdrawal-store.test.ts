@@ -20,17 +20,21 @@ test("仅两条共享分录守卫接纳精确的正式历史版本，不接纳�
  const demo=legacy.replace("(NOT (new.details ? 'legacyRefundIntentId'::text))",
   "((NOT (new.details ? 'legacyRefundIntentId'::text)) AND (NOT (new.details ? 'demoLegacyRefundId'::text)))");
  const compensation=(value:string)=>value.slice(0,-1)+" AND (NOT (new.details ? 'compensationCaseId'::text)))";
+ const retired=(value:string)=>value.replace(" AND (NOT (new.details ? 'abnormalRefundLiabilityId'::text))","");
  const c={query:async(sql:string,args:string[])=>{
   if(sql.includes("G4 payout fixed guards")){
    assert.match(sql,/IS DISTINCT FROM eg\.quals->>\(CASE/);
    assert.match(sql,/to_regclass\('zzsh_order\.local_controlled_refund_evidence'\) IS NOT NULL THEN 2/);
    assert.match(sql,/to_regclass\('zzsh_order\.prestart_termination'\) IS NOT NULL THEN 1/);
+   assert.match(sql,/settlement_retired_refund_excluded/);
+   assert.match(sql,/pg_get_constraintdef\(q\.oid\)=/);
    const triggers=JSON.parse(args[0]!).triggers as {name:string;qual:string|null;quals:(string|null)[]}[];
    const extended=triggers.filter(t=>t.quals.length>1);
    assert.deepEqual(extended.map(t=>t.name),["finance_entry_guard","finance_entry_batch_guard"]);
    for(const t of triggers){
     if(!extended.includes(t)){assert.deepEqual(t.quals,[t.qual]);continue;}
-    assert.deepEqual(t.quals,[qual(base),qual(formal),qual([...formal,"localRefundIntentId"]),legacy,compensation(legacy),demo,compensation(demo)]);
+    assert.deepEqual(t.quals,[qual(base),qual(formal),qual([...formal,"localRefundIntentId"]),legacy,compensation(legacy),demo,compensation(demo),
+     retired(legacy),retired(compensation(legacy)),retired(demo),retired(compensation(demo))]);
     assert(!t.quals.includes(qual(formal.filter(n=>n!=="nativeRefundIntentId"))));
     assert(!t.quals.includes(qual([...formal,"unreviewedPayoutSource"])));
    }

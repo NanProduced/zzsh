@@ -141,6 +141,8 @@ export async function assertNativePayoutExecutionReady(c:PoolClient){
    const demo=legacy.replace("(NOT (new.details ? 'legacyRefundIntentId'::text))",
     "((NOT (new.details ? 'legacyRefundIntentId'::text)) AND (NOT (new.details ? 'demoLegacyRefundId'::text)))");
    quals.push(formal+")",sandbox,legacy,append(legacy,"compensationCaseId"),demo,append(demo,"compensationCaseId"));
+   const retired=(value:string)=>value.replace(" AND (NOT (new.details ? 'abnormalRefundLiabilityId'::text))","");
+   quals.push(retired(legacy),retired(append(legacy,"compensationCaseId")),retired(demo),retired(append(demo,"compensationCaseId")));
   }
   return {...t,quals};
  })};
@@ -184,6 +186,13 @@ export async function assertNativePayoutExecutionReady(c:PoolClient){
    OR t.tgdeferrable IS DISTINCT FROM eg.deferred OR t.tginitdeferred IS DISTINCT FROM eg.deferred
    OR substring(pg_get_triggerdef(t.oid) FROM ' WHEN \\((.*)\\) EXECUTE FUNCTION ') IS DISTINCT FROM eg.quals->>(CASE
     WHEN jsonb_array_length(eg.quals)=1 THEN 0
+    WHEN EXISTS(SELECT 1 FROM pg_constraint q WHERE q.conrelid=to_regclass('zzsh_order.settlement_ledger_entry')
+      AND q.conname='settlement_retired_refund_excluded' AND q.convalidated
+      AND pg_get_constraintdef(q.oid)='CHECK (((NOT COALESCE((details ? ''abnormalRefundLiabilityId''::text), false)) AND (account_code <> ''JOINPAY_UNALLOCATED_RECEIPT''::text)))') THEN
+     CASE WHEN to_regclass('zzsh_order.legacy_refund_case') IS NULL THEN -1
+      WHEN to_regclass('zzsh_order.ecs_demo_legacy_refund') IS NOT NULL AND to_regclass('zzsh_order.order_compensation_posting') IS NOT NULL THEN 10
+      WHEN to_regclass('zzsh_order.ecs_demo_legacy_refund') IS NOT NULL THEN 9
+      WHEN to_regclass('zzsh_order.order_compensation_posting') IS NOT NULL THEN 8 ELSE 7 END
     WHEN to_regclass('zzsh_order.legacy_refund_case') IS NOT NULL AND to_regclass('zzsh_order.ecs_demo_legacy_refund') IS NOT NULL
      AND to_regclass('zzsh_order.order_compensation_posting') IS NOT NULL THEN 6
     WHEN to_regclass('zzsh_order.legacy_refund_case') IS NOT NULL AND to_regclass('zzsh_order.ecs_demo_legacy_refund') IS NOT NULL THEN 5

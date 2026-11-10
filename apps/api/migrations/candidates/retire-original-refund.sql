@@ -250,6 +250,26 @@ BEGIN
 END $$;
 COMMENT ON FUNCTION zzsh_order.guard_joinpay_refund_intent() IS '核验正常和未开租退款的原付款、责任与渠道状态';
 
+-- 已验证分录约束后，去除通用守卫对已退役字段的例外；保留其他领域的原条件。
+DO $retire_entry_guard$
+DECLARE item record;original text;updated text;enabled "char";
+ needle text:=' AND (NOT (new.details ? ''abnormalRefundLiabilityId''::text))';
+BEGIN
+ FOR item IN SELECT * FROM (VALUES
+  ('finance_entry_guard','zzsh_order.guard_finance_entry()',false),
+  ('finance_entry_batch_guard','zzsh_order.check_finance_batch()',true)
+ ) AS required(name,fn,deferred) LOOP
+  SELECT pg_get_triggerdef(t.oid),t.tgenabled INTO STRICT original,enabled FROM pg_trigger t
+   WHERE t.tgrelid='zzsh_order.settlement_ledger_entry'::regclass AND t.tgname=item.name AND NOT t.tgisinternal
+    AND t.tgfoid=to_regprocedure(item.fn) AND t.tgdeferrable=item.deferred AND t.tginitdeferred=item.deferred AND t.tgenabled IN('O','A');
+  updated:=replace(original,needle,'');
+  IF length(original)-length(updated)<>length(needle) THEN RAISE EXCEPTION 'retired entry exclusion differs'; END IF;
+  EXECUTE format('DROP TRIGGER %I ON zzsh_order.settlement_ledger_entry',item.name);
+  EXECUTE updated;
+  IF enabled='A' THEN EXECUTE format('ALTER TABLE zzsh_order.settlement_ledger_entry ENABLE ALWAYS TRIGGER %I',item.name);END IF;
+ END LOOP;
+END $retire_entry_guard$;
+
 DROP INDEX IF EXISTS zzsh_order.joinpay_abnormal_refund_key;
 DROP TRIGGER abnormal_refund_liability_root_guard ON zzsh_order.finance_economic_root;
 DROP TRIGGER abnormal_refund_liability_entry_guard ON zzsh_order.settlement_ledger_entry;
