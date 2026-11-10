@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { PoolClient } from "pg";
 import { SecurityApiError } from "../src/auth/security-core";
-import { readPersonalNativeRefunds } from "../src/finance/personal-refund-read";
+import { projectPrestartRefundSummary, readPersonalNativeRefunds } from "../src/finance/personal-refund-read";
 import {sandboxFixture,sandboxClient} from './local-financial-sandbox-fixture';
 import type {LocalFinancialSandbox} from '../src/finance/local-financial-sandbox-resource';
 
@@ -19,6 +19,21 @@ const ROOT_ID = "native_refund_root_" + "c".repeat(20);
 const EVIDENCE_ID = "jre_" + "b".repeat(40);
 const INTENT_ID = "rfi_" + "a".repeat(40);
 
+test("prestart refund summary distinguishes simulated success, verified channel record and unknown results",()=>{
+ const intent={state:"SUCCEEDED",requiresReview:false,localWriteOff:"RECORDED",savedChannelEvidence:null};
+ const totals={originalCents:"334613",allocatedCents:"334613",consumedCents:"334613",releasedCents:"0",remainingCents:"0",totalsComplete:true};
+ const progress:any={integration:"INTEGRATED",truncated:false,totals,intents:[intent],bankArrival:"UNKNOWN",dataOrigin:"LOCAL_CONTROLLED"};
+ assert.deepEqual(projectPrestartRefundSummary("CONTROLLED","334613",progress),{state:"SUCCEEDED",amountCents:"334613",source:"SIMULATED",bankArrival:"UNKNOWN"});
+ assert.equal(projectPrestartRefundSummary("CONTROLLED","334613",{...progress,dataOrigin:undefined}).state,"UNKNOWN");
+ assert.equal(projectPrestartRefundSummary("JOINPAY","334613",progress).state,"UNKNOWN");
+ const channel={...progress,intents:[{...intent,savedChannelEvidence:{terminal:"SUCCEEDED"}}]};
+ assert.equal(projectPrestartRefundSummary("JOINPAY","334613",channel).state,"SUCCEEDED");
+ assert.equal(projectPrestartRefundSummary("JOINPAY","334613",{...channel,intents:[{...channel.intents[0],requiresReview:true}]}).state,"UNKNOWN");
+ assert.equal(projectPrestartRefundSummary("JOINPAY","334613",{...channel,intents:[{...intent,state:"PROCESSING",localWriteOff:"NOT_RECORDED"}]}).state,"PROCESSING");
+ assert.equal(projectPrestartRefundSummary("JOINPAY","334613",{...channel,totals:{...totals,allocatedCents:"0"},intents:[{...intent,state:"FAILED"}]}).state,"FAILED");
+ assert.equal(projectPrestartRefundSummary("JOINPAY","334613",{...channel,truncated:true}).state,"UNKNOWN");
+});
+
 type Query = { sql: string; values: unknown[] };
 type Result = { rows: Record<string, unknown>[]; rowCount?: number };
 type State = {
@@ -34,6 +49,7 @@ type State = {
   ledgerRows?: Record<string, unknown>[];
   localSandbox?:LocalFinancialSandbox;
   localComplete?:boolean;
+  prestartReady?:boolean;
 };
 
 function fake(state: State = {}) {
@@ -57,6 +73,7 @@ function fake(state: State = {}) {
     if (sql.startsWith("SELECT i.id,i.posting_id,i.order_id")) return { rows: state.intentRows ?? [] };
     if (sql.startsWith("SELECT e.id AS event_id,e.kind AS event_kind")) return { rows: state.liabilityRows ?? [] };
     if (sql.startsWith("SELECT e.id AS event_id")) return { rows: state.ledgerRows ?? [] };
+    if (sql.includes("has_table_privilege(current_user,to_regclass('zzsh_order.prestart_termination')")) return { rows: [{ready: state.prestartReady === true}] };
     if(sql.startsWith('SELECT i.id,zzsh_order.local_controlled_refund_terminal_complete'))return{rows:state.localComplete?[{id:INTENT_ID,complete:true}]:[]};
     if(sandbox)return sandbox.query(sql,values);
     throw new Error("Unexpected SQL: " + sql);
@@ -115,6 +132,12 @@ const read = (state: State, orderId = ORDER) => {
 const rejectStatus = (error: unknown, status: number) => error instanceof SecurityApiError && error.status === status;
 const helperSql = (trace: Query[]) => trace.filter(entry => !entry.sql.startsWith('SELECT "suspended"')
   && !entry.sql.includes('"zzsh_iam"."user_identity_state"') && !entry.sql.startsWith('SELECT 1 FROM "zzsh_auth_user"."session"'));
+
+test("cancelled prestart order with unavailable refund source stays unknown", async () => {
+  const {result} = read({prestartReady:false, orderRows:[order({status:"CANCELLED", cancel_reason:"PRESTART_TERMINATED", paid_confirmation_id:"pc_1", posting_id:null})]});
+  const data = await result;
+  assert.deepEqual(data.prestartRefund,{state:"UNKNOWN",amountCents:null,source:"UNKNOWN",bankArrival:"UNKNOWN"});
+});
 
 test("本人正常读取：全部分摊、精确金额、本地记账与渠道事实分列", async () => {
   const { result, trace } = await read({ intentRows: [intent()] });

@@ -203,6 +203,8 @@ export type PersonalRefundRead = {
   order: { orderId: string; displayNo: string | null; status: string };
   status: "AVAILABLE" | "NOT_APPLICABLE";
   outcome: PersonalRefundOutcome;
+  prestartRefund?: { state: "PROCESSING" | "SUCCEEDED" | "FAILED" | "UNKNOWN"; amountCents: string | null;
+    source: "SIMULATED" | "JOINPAY" | "UNKNOWN"; bankArrival: "UNKNOWN" };
   coverage: { scope: "LOCAL_REGISTERED_ONLY"; intentLimit: number; intentsComplete: boolean; channelRecordsChecked: false };
   asOf: string;
   responsibility: {
@@ -367,6 +369,7 @@ export type LegacyOrder = {
   ownerIncomeSource?: { source: "LEGACY_ORDER_SNAPSHOT"; sourceLabel: string };
   payment: { state: "RECORDED_PAID" | "RECORDED_UNPAID" | "UNKNOWN"; recordedAt: string | null; recordedAmount: Money | null };
   legacyAmounts: { required: Money | null; paid: Money | null; deposit: Money | null; goods?: Money | null; items?: Money | null; refund: Money | null; refundChannelState: "NOT_RECORDED_BY_SOURCE" | "PENDING" | "UNKNOWN" } | null;
+  legacyRefundHistory?: { records: { id: string; amount: Money; status: "PROCESSING" | "SUCCEEDED" | "FAILED" | "UNKNOWN"; recordedAt: string | null }[]; incomplete: boolean; channelArrival: "UNKNOWN" };
   account: { id: string | null; displayNo: string | null; readable: boolean };
   orderFacts?: LegacyOrderFacts;
   readOnly: true; paymentOpen: false; cancelOpen: false; continuationCount: 0; actions: never[];
@@ -679,6 +682,11 @@ export function parsePersonalRefunds(value: unknown, expectedUserId: string, exp
   const root = refundRecord(value), order = refundRecord(root.order), coverage = refundRecord(root.coverage);
   const responsibility = refundRecord(root.responsibility), actual = refundRecord(root.actualChannelRefund);
   const funds = root.localFundsEffect === null ? null : refundRecord(root.localFundsEffect);
+  const prestart = root.prestartRefund === undefined ? undefined : refundRecord(root.prestartRefund);
+  if (prestart && (order.status !== "CANCELLED" || !["PROCESSING", "SUCCEEDED", "FAILED", "UNKNOWN"].includes(String(prestart.state))
+    || !["SIMULATED", "JOINPAY", "UNKNOWN"].includes(String(prestart.source)) || prestart.bankArrival !== "UNKNOWN"
+    || prestart.amountCents !== null && (typeof prestart.amountCents !== "string" || !/^[1-9][0-9]{0,15}$/.test(prestart.amountCents))
+    || prestart.state !== "UNKNOWN" && (prestart.source === "UNKNOWN" || prestart.amountCents === null))) throw invalidRefund();
   const intents = Array.isArray(root.intents) ? root.intents.map(refundIntent) : (() => { throw invalidRefund(); })();
   const noResponsibilityTotals = ["allocatedCents", "consumedCents", "releasedCents", "remainingCents"].every((name) => responsibility[name] === null);
   const hasAbnormalFields = ["abnormalResponsibilities", "responsibilitiesTruncated", "responsibilityTotals"].some((name) => root[name] !== undefined);
@@ -721,6 +729,8 @@ export function parsePersonalRefunds(value: unknown, expectedUserId: string, exp
     contractVersion: root.contractVersion, subjectId: expectedUserId,
     order: { orderId: order.orderId, displayNo: order.displayNo as string | null, status: refundText(order.status, 32) },
     status: root.status as PersonalRefundRead["status"], outcome: root.outcome as PersonalRefundOutcome,
+    ...(prestart ? { prestartRefund: { state: prestart.state as NonNullable<PersonalRefundRead["prestartRefund"]>["state"],
+      amountCents: refundCents(prestart.amountCents), source: prestart.source as NonNullable<PersonalRefundRead["prestartRefund"]>["source"], bankArrival: "UNKNOWN" as const } } : {}),
     coverage: { scope: "LOCAL_REGISTERED_ONLY", intentLimit: 50, intentsComplete: coverage.intentsComplete, channelRecordsChecked: false },
     asOf: root.asOf as string,
     responsibility: {

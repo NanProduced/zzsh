@@ -409,7 +409,7 @@ const refundOutcomeCopy: Record<PersonalRefundRead["outcome"], { label: string; 
 };
 const refundIntentStateLabel: Record<PersonalRefundIntent["state"], string> = {
   READY: "等待处理", SUBMITTING: "发送结果待核", UNKNOWN: "结果未记录", PROCESSING: "处理中",
-  REVIEW_REQUIRED: "需要核对", SUCCEEDED: "到账未记录", FAILED: "申请处理失败", UNRECOGNIZED: "状态未记录",
+  REVIEW_REQUIRED: "需要核对", SUCCEEDED: "退款结果待核对", FAILED: "申请处理失败", UNRECOGNIZED: "状态未记录",
 };
 const abnormalReasonLabel: Record<PersonalAbnormalResponsibility["reasonCode"], string> = { DUPLICATE_PAYMENT: "重复支付", LATE_PAYMENT: "支付时间异常", UNKNOWN_REASON: "其他付款" };
 const abnormalStateLabel: Record<PersonalAbnormalResponsibility["state"], string> = {
@@ -431,7 +431,9 @@ function AbnormalResponsibilityCard({ item }: { item: PersonalAbnormalResponsibi
 }
 
 function RefundIntentCard({ intent }: { intent: PersonalRefundIntent }) {
-  const stateLabel = intent.source === "LOCAL_CONTROLLED" && intent.state === "SUCCEEDED" ? "模拟退款已记录" : refundIntentStateLabel[intent.state];
+  const channelSucceeded = intent.source === "JOINPAY_FORMAL" && intent.state === "SUCCEEDED" && intent.budgetDisposition === "CONSUMED"
+    && intent.savedChannelEvidence?.terminal === "SUCCEEDED" && intent.savedChannelEvidence.evidenceLevel === "PROVIDER_RESPONSE";
+  const stateLabel = intent.source === "LOCAL_CONTROLLED" && intent.state === "SUCCEEDED" ? "模拟退款已记录" : channelSucceeded ? "退款成功" : refundIntentStateLabel[intent.state];
   return <li className="order-refund-intent">
     <div className="order-refund-intent-head"><strong>{intent.refundOrderNo ?? "退款申请"}</strong><span className="order-refund-state">{stateLabel}</span></div>
     <dl className="order-facts order-refund-intent-facts">
@@ -523,18 +525,32 @@ function OrderRefundSection({ order }: { order: Order }) {
   }
   const read = visible.read;
   if (!read) return null;
+  if (read.status === "NOT_APPLICABLE" && !read.prestartRefund) return null;
   const responsibility = read.responsibility;
-  const attentionRequired = ["UNKNOWN", "REVIEW_REQUIRED", "TRUNCATED", "CONFLICT"].includes(read.outcome);
+  const prestart = read.prestartRefund;
+  const attentionRequired = prestart ? ["UNKNOWN", "FAILED"].includes(prestart.state) || Boolean(read.abnormalResponsibilities?.length)
+    : ["UNKNOWN", "REVIEW_REQUIRED", "TRUNCATED", "CONFLICT"].includes(read.outcome);
   const incomplete = read.responsibilitiesTruncated || read.intentsTruncated || !read.coverage.intentsComplete || Boolean(read.responsibilityTotals && !read.responsibilityTotals.totalsComplete) || responsibility.state === "POSTED" && !responsibility.totalsComplete;
   const simulated = read.outcome === "FULLY_CONSUMED" && !incomplete && read.intents.length > 0
     && read.intents.every(intent => intent.source === "LOCAL_CONTROLLED" && intent.state === "SUCCEEDED" && intent.budgetDisposition === "CONSUMED");
-  const outcome = simulated ? { label: "模拟退款已记录", note: "测试记录，不代表实际退款或到账。" } : refundOutcomeCopy[read.outcome];
-  return <section className="order-detail-section order-refund-block" id="order-refund-section" aria-label="退款进度" data-outcome={read.outcome}>
+  const channelSucceeded = read.outcome === "FULLY_CONSUMED" && !incomplete && read.intents.length > 0
+    && read.intents.every(intent => intent.source === "JOINPAY_FORMAL" && intent.state === "SUCCEEDED" && intent.budgetDisposition === "CONSUMED"
+      && intent.savedChannelEvidence?.terminal === "SUCCEEDED" && intent.savedChannelEvidence.evidenceLevel === "PROVIDER_RESPONSE");
+  const prestartCopy = prestart ? {
+    PROCESSING: { label: "退款处理中", note: "请稍后查看退款进度。" },
+    SUCCEEDED: { label: prestart.source === "SIMULATED" ? "模拟退款成功" : "退款成功", note: prestart.source === "SIMULATED" ? "测试记录，不会实际退款。" : "渠道已记录退款成功，到账时间以收款记录为准。" },
+    FAILED: { label: "退款未完成", note: "请联系客服处理。" },
+    UNKNOWN: { label: "退款状态待核对", note: "请稍后查看或联系客服。" },
+  }[prestart.state] : null;
+  const outcome = prestartCopy ?? (simulated ? { label: "模拟退款已记录", note: "测试记录，不代表实际退款或到账。" }
+    : channelSucceeded ? { label: "退款成功", note: "渠道已记录退款成功，到账时间以收款记录为准。" } : refundOutcomeCopy[read.outcome]);
+  return <section className="order-detail-section order-refund-block" id="order-refund-section" aria-label="退款进度" data-outcome={prestart?.state ?? read.outcome}>
     <div className="order-refund-heading"><h2 className="order-section-title">退款进度</h2>{refresh}</div>
     <details className="order-secondary-details order-refund-details" open={attentionRequired}>
       <summary><strong>{outcome.label}</strong><span>{outcome.note}</span></summary>
       <div className="order-refund-detail-content">
-        {incomplete ? <p className="order-inline-notice" role="status">部分退款信息仍在核对，当前记录可能不完整。</p> : null}
+        {incomplete && (!prestart || Boolean(read.abnormalResponsibilities?.length)) ? <p className="order-inline-notice" role="status">部分退款信息仍在核对，当前记录可能不完整。</p> : null}
+        {prestart?.amountCents ? <dl className="order-facts order-refund-amounts"><div><dt>{prestart.state === "SUCCEEDED" ? "退款金额" : "应退金额"}</dt><dd>{refundMoney(prestart.amountCents)}</dd></div></dl> : null}
         {responsibility.state === "POSTED" ? <dl className="order-facts order-refund-amounts">
           <div><dt>本次结算应退</dt><dd>{refundMoney(responsibility.originalCents)}</dd></div>
           {responsibility.dueAt ? <div><dt>退款到期时间</dt><dd>{timeText(responsibility.dueAt, { timeZoneName: false })}{responsibility.dueState === "DUE" ? "（已到期）" : responsibility.dueState === "NOT_DUE" ? "（未到期）" : "（状态未记录）"}</dd></div> : null}

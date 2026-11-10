@@ -1,9 +1,11 @@
 import { applyOrderUserFacts, readOrderUserFacts } from "./frozen-listing-read";
 import type { PoolClient } from "pg";
-import { invalid, notFound } from "../supply/supply-util";
+import { invalid, notFound, sha256Hex } from "../supply/supply-util";
 import { centsToYuan } from "./order";
 import { publicAccountNumber } from "../supply/account-number";
 import { declaredTitleOrNull } from "../supply/publishing";
+import { canonicalize } from "../supply/content-hash";
+import { historicalObservationDisplay, typedHistoricalOrderReference } from "../finance/legacy-observation-display";
 import { legacyContinuationReady, legacyEpochTimestamp, legacyMoneyCents, legacyOrderLifecycleStage, legacyOrderReadState, LEGACY_CONTINUATION_COMPLETED_AT_SQL, LEGACY_ORDER_STATUS_SQL } from "./legacy-order-read";
 
 export type LegacyUserOrderFilter = {
@@ -151,6 +153,58 @@ export function legacyUserOrderFrom(continuationReady: boolean): string { return
  ${continuationReady ? `LEFT JOIN zzsh_order.legacy_continuation_version h ON h.order_id=l.id AND h.superseded_at IS NULL` : `LEFT JOIN (SELECT NULL::text AS order_id,NULL::int AS stage) h ON h.order_id=l.id`}
  LEFT JOIN zzsh_supply.listing_version v ON v.id=a.current_version_id AND v.account_id=a.id`; }
 
+type LegacyRefundHistoryRow = {
+  legacy_id: string; legacy_renter_id: string; renter_user_id: string; observation_user_id: string | null;
+  order_no: string; order_digest: string; order_snapshot: Record<string, unknown>;
+  source_id: string | null; source_digest: string | null; source_canonical: string | null;
+  snapshot: Record<string, any> | null; source_at: string | null;
+};
+
+/** Original refund observations are display-only and never change the order or the wallet. */
+export function projectLegacyRefundHistory(rows: LegacyRefundHistoryRow[], userId: string) {
+  const records: { id: string; amount: ReturnType<typeof centsToYuan>; status: "PROCESSING" | "SUCCEEDED" | "FAILED" | "UNKNOWN"; recordedAt: string | null }[] = [];
+  let incomplete = rows.length > 50;
+  for (const row of rows.slice(0, 50)) {
+    if (row.source_id === null) continue;
+    try {
+      const s = row.snapshot!, raw = { source_type: "LEGACY_MYSQL", source_system: "legacy_mysql_restore", source_entity: "la_refund_record",
+        source_id: row.source_id, source_digest: row.source_digest, source_status: s.sourceStatus, amount: s.amount, at: row.source_at,
+        extra_evidence: { snapshot: s, canonical: row.source_canonical, legacyUserId: row.legacy_renter_id } };
+      const display = historicalObservationDisplay(raw), original = JSON.parse(s.rawSource.canonical);
+      if (row.renter_user_id !== userId || row.observation_user_id !== userId
+        || sha256Hex(canonicalize(row.order_snapshot)) !== row.order_digest || String(row.order_snapshot.id) !== row.legacy_id
+        || String(row.order_snapshot.user_id) !== row.legacy_renter_id || row.order_snapshot.order_sn !== row.order_no
+        || typedHistoricalOrderReference(raw) !== row.legacy_id || display.amountSemantics !== "BUSINESS_RECORD" || display.recordedAmountCents === null
+        || s.referenceSn !== row.order_no || String(original.order_id) !== row.legacy_id || original.order_sn !== row.order_no
+        || String(original.user_id) !== row.legacy_renter_id || original.order_type !== "order"
+        || !row.source_at || Date.parse(row.source_at) !== Date.parse(legacyEpochTimestamp(String(s.createdAt)) ?? "")) throw new Error("LEGACY_REFUND_BINDING_UNAVAILABLE");
+      const status = ({ "0": "PROCESSING", "1": "SUCCEEDED", "2": "FAILED" } as const)[String(s.sourceStatus) as "0" | "1" | "2"] ?? "UNKNOWN";
+      if (Array.isArray(s.sourceRefundFlags) && s.sourceRefundFlags.length > 0) incomplete = true;
+      records.push({ id: row.source_id, amount: centsToYuan(display.recordedAmountCents), status, recordedAt: row.source_at });
+    } catch { incomplete = true; }
+  }
+  return { records, incomplete, channelArrival: "UNKNOWN" as const };
+}
+
+export async function readLegacyRefundHistory(client: PoolClient, userId: string, orderId: string) {
+  const ready = (await client.query(`SELECT c.oid IS NOT NULL AND NOT c.relrowsecurity
+    AND has_table_privilege(current_user,c.oid,'SELECT') AS ready FROM (SELECT to_regclass('zzsh_order.personal_finance_observation') AS oid) t
+    LEFT JOIN pg_class c ON c.oid=t.oid`)).rows[0]?.ready === true;
+  if (!ready) return { records: [], incomplete: true, channelArrival: "UNKNOWN" as const };
+  const result = await client.query<LegacyRefundHistoryRow>(`SELECT l.legacy_id,l.legacy_renter_id,l.renter_user_id,o.user_id AS observation_user_id,l.original_order_no AS order_no,
+      l.source_digest AS order_digest,l.source_snapshot AS order_snapshot,o.source_id,o.source_digest,o.source_canonical,o.snapshot,
+      ${utc("o.source_event_at")} AS source_at
+    FROM zzsh_order.legacy_order_read_snapshot l
+    LEFT JOIN LATERAL (SELECT x.user_id,x.source_id,x.source_digest,x.source_canonical,x.snapshot,x.source_event_at
+      FROM zzsh_order.personal_finance_observation x
+      WHERE x.user_id=$1 AND x.legacy_user_id=l.legacy_renter_id AND x.source_type='LEGACY_MYSQL'
+        AND x.source_system=l.source_system AND x.source_entity='la_refund_record' AND x.source_kind='HISTORICAL_REFUND'
+        AND (x.snapshot->>'referenceId'=l.legacy_id OR x.snapshot->>'referenceSn'=l.original_order_no)
+      ORDER BY x.source_event_at,x.source_id LIMIT 51) o ON true
+    WHERE l.id=$2 AND l.renter_user_id=$1 AND l.source_system='legacy_mysql_restore' AND l.source_entity='la_order'`, [userId, orderId]);
+  return projectLegacyRefundHistory(result.rows, userId);
+}
+
 export async function listUserLegacyOrders(client: PoolClient, userId: string, filter: LegacyUserOrderFilter) {
   const continuationReady = await legacyContinuationReady(client);
   const result = (await client.query<{ total: string; items: LegacyUserOrderRow[] }>(
@@ -169,6 +223,7 @@ export async function getUserLegacyOrder(client: PoolClient, userId: string, id:
   const row = (await client.query<LegacyUserOrderRow>(`SELECT ${legacyUserOrderFields(continuationReady)} ${legacyUserOrderFrom(continuationReady)} WHERE l.id=$2 AND (l.owner_user_id=$1 OR l.renter_user_id=$1)`, [userId, id])).rows[0];
   if (!row) throw notFound();
   const order: Record<string, unknown> = projectUserLegacyOrder(row, userId);
+  if (row.renterUserId === userId) order.legacyRefundHistory = await readLegacyRefundHistory(client, userId, id);
   const facts = await readOrderUserFacts(client, userId, [{ origin: "LEGACY", orderId: row.id, accountId: row.accountId ?? null, ownerUserId: row.ownerUserId }]);
   applyOrderUserFacts(order, facts.get(`LEGACY:${row.id}`));
   return { order };

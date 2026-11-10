@@ -38,6 +38,18 @@ test("accepted projection is parsed with zero and null kept distinct", () => {
   assert.equal(zero.localFundsEffect, null);
 });
 
+test("prestart refund is an additive cancelled-order fact and never invents bank arrival",()=>{
+ const value=read({order:{orderId:"order_A",displayNo:"ZZ-1",status:"CANCELLED"},
+  prestartRefund:{state:"SUCCEEDED",amountCents:"334613",source:"SIMULATED",bankArrival:"UNKNOWN"}});
+ assert.deepEqual(parsePersonalRefunds(value,"user_A","order_A").prestartRefund,value.prestartRefund);
+ for(const change of [{state:"SUCCEEDED",amountCents:null,source:"JOINPAY",bankArrival:"UNKNOWN"},
+  {state:"SUCCEEDED",amountCents:"0",source:"SIMULATED",bankArrival:"UNKNOWN"},
+  {state:"SUCCEEDED",amountCents:"1",source:"UNKNOWN",bankArrival:"UNKNOWN"},
+  {state:"SUCCEEDED",amountCents:"1",source:"JOINPAY",bankArrival:"ARRIVED"}])
+  assert.throws(()=>parsePersonalRefunds({...value,prestartRefund:change},"user_A","order_A"));
+ assert.throws(()=>parsePersonalRefunds({...value,order:{...value.order,status:"PAID"}},"user_A","order_A"));
+});
+
 test("contract, subject, order and enum anchors are enforced", () => {
   for (const bad of [
     read({ contractVersion: "personal-native-refunds.v0" }),
