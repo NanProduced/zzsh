@@ -1060,7 +1060,8 @@ test('next-profile completion requires checkpoint fence release and fenced readb
   Object.assign(data.expected.dataset.domains.orders,{source:2,isolated:0});
   Object.assign(data.expected.dataset.domains.continuations,{source:1,isolated:0,unsupportedStatuses:{'2':0,'6':0,'7':0},preparedEvidence:{policy:'PRESERVE_SOURCE_ADMISSION_V1',commissionPolicy:'ACTIVE_OR_SETTLED_SOURCE_V1',readyComplete:1,readyIsolated:0,readyUnprepared:0,unreadyEmitted:0,unreadyUnprepared:0}});
   data.expected.dataset.domains.liabilities={source:2};
-  data.checkpoint.quarantine=[];data.checkpoint.fundsSupplement={pendingCommissionCoverage:{completedDutyCandidates:2}};
+  data.checkpoint.quarantine=[];data.checkpoint.fundsSupplement={pendingCommissionCoverage:{completedDutyCandidates:2,continuationEvidence:0}};
+  data.checkpoint.sourceScopeVerification={continuationSource:{orders:1},liabilitySource:{total:2},continuationCommissions:{total:0,pending:0,settled:0,void:0,unknown:0,softDeletedSettled:0}};
   data.checkpoint.phases.invitationFacts.nextIndex=0;data.checkpoint.phases.invitationCounts={complete:true,quarantined:0,nextIndex:0};
   data.readback.invitationFacts={childCountClosure:{status:'VERIFIED',packets:0,auditsMatched:0,subjects:2,matched:2,known:2,unknown:0}};
   data.expected.display.accountBaseRatio={scope:'ACCOUNT_AT_CAPTURE_NOT_ORDER_SNAPSHOT',known:2,unknown:0};
@@ -1088,6 +1089,12 @@ test('next-profile completion requires checkpoint fence release and fenced readb
   }
   const unsupported=structuredClone(data);unsupported.expected.dataset.domains.continuations.unsupportedStatuses['6']=1;
   assert(assessRoundEvidence(unsupported).issues.includes('ROUND_LEGACY_CONTINUATION_MANUAL_REVIEW'));
+  const isolatedContinuation=structuredClone(data);isolatedContinuation.expected.dataset.domains.continuations.preparedEvidence.readyIsolated=1;
+  assert(assessRoundEvidence(isolatedContinuation).issues.includes('ROUND_LEGACY_CONTINUATION_MANUAL_REVIEW'));
+  const settled=structuredClone(data);Object.assign(settled.checkpoint.sourceScopeVerification.continuationCommissions,{total:1,settled:1});
+  assert(assessRoundEvidence(settled).issues.includes('ROUND_LEGACY_COMMISSION_MANUAL_REVIEW'));
+  const missingProof=structuredClone(data);delete missingProof.checkpoint.sourceScopeVerification.liabilitySource;
+  assert(assessRoundEvidence(missingProof).issues.includes('ROUND_LEGACY_FINANCE_SOURCE_PROOF_UNCONFIRMED'));
   for (const change of [d=>{delete d.checkpoint.quarantine;},d=>{d.expected.dataset.domains.liabilities.source++;},
     d=>{d.checkpoint.fundsSupplement.pendingCommissionCoverage.completedDutyCandidates++;}]) {
     const changed=structuredClone(data);change(changed);assert.equal(assessRoundEvidence(changed).status,'INCOMPLETE');

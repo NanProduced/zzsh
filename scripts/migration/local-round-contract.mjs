@@ -477,7 +477,8 @@ export function assessRoundEvidence({ input, inputSha256, actorProof, receipt, c
           || domain.isolated!==0 || domain.ready!==domain.source;
       })) issues.push('ROUND_SELECTED_BUSINESS_REQUIRES_REVIEW');
       const unsupported=expected?.dataset?.domains?.continuations?.unsupportedStatuses;
-      if (['2','6','7'].some(status=>!Number.isSafeInteger(unsupported?.[status])||unsupported[status]!==0))
+      if (['2','6','7'].some(status=>!Number.isSafeInteger(unsupported?.[status])||unsupported[status]!==0)
+          || expected?.dataset?.domains?.continuations?.preparedEvidence?.readyIsolated!==0)
         issues.push('ROUND_LEGACY_CONTINUATION_MANUAL_REVIEW');
       if (!Array.isArray(checkpoint.quarantine) || checkpoint.quarantine.some(row => ['liabilityDuties','completedCommissions'].includes(row?.domain)))
         issues.push('ROUND_LEGACY_FINANCE_ASSEMBLY_REQUIRES_REVIEW');
@@ -486,6 +487,14 @@ export function assessRoundEvidence({ input, inputSha256, actorProof, receipt, c
       if (!Number.isSafeInteger(liabilities) || checkpoint.phases?.liabilityDuties?.nextIndex!==liabilities
           || !Number.isSafeInteger(completedCommissions) || checkpoint.phases?.completedCommissions?.nextIndex!==completedCommissions)
         issues.push('ROUND_LEGACY_FINANCE_SOURCE_COUNT_DRIFT');
+      const sourceProof=checkpoint.sourceScopeVerification, commissions=sourceProof?.continuationCommissions;
+      const keys=['total','pending','settled','void','unknown','softDeletedSettled'];
+      if (sourceProof?.continuationSource?.orders!==continuationExpected || sourceProof?.liabilitySource?.total!==liabilities
+          || !keys.every(key=>Number.isSafeInteger(commissions?.[key])&&commissions[key]>=0)
+          || commissions.pending!==checkpoint.fundsSupplement?.pendingCommissionCoverage?.continuationEvidence
+          || commissions.pending+commissions.settled+commissions.void+commissions.unknown!==commissions.total
+          || commissions.softDeletedSettled>commissions.settled) issues.push('ROUND_LEGACY_FINANCE_SOURCE_PROOF_UNCONFIRMED');
+      else if (commissions.settled||commissions.unknown) issues.push('ROUND_LEGACY_COMMISSION_MANUAL_REVIEW');
     }
     if (!Number.isSafeInteger(checkpoint.skinHoldingsPreparation?.isolated)
       || checkpoint.skinHoldingsPreparation.ready + checkpoint.skinHoldingsPreparation.isolated !== expected?.dataset?.domains?.accounts?.ready) issues.push("ROUND_HOLDINGS_DENOMINATOR_DRIFT");

@@ -151,7 +151,7 @@ export async function verifySelectedPopulationFiles({datasetDir,sourceDir,datase
   refundParents.retainedOrder++;
  });
  assert(refundParents.captured===source.files.refunds.rows&&population.domains.refunds.capturedIdsSha256===refundDigest.digest('hex'),'SELECTED_SCOPE_CAPTURE_DIGEST_MISMATCH');
- let liabilitySource;
+ let liabilitySource,continuationSource,continuationCommissionsProof;
  if(verifyContinuationStatus){
   assert.deepEqual(dataset.domains.continuations.unsupportedStatuses,unsupportedStatuses,'SELECTED_SCOPE_CONTINUATION_STATUS_DRIFT');
   assert(source.files?.tradePolicy&&source.files?.distributionOrders,'SELECTED_SCOPE_CONTINUATION_SOURCES_MISSING');
@@ -159,15 +159,15 @@ export async function verifySelectedPopulationFiles({datasetDir,sourceDir,datase
   await readRows(sourceDir,source.files.distributionOrders,row=>{if(selected.orders.has(row.order_id))continuationCommissions.push(row);});
   const continuations=[];
   if(dataset.files?.continuations)await readRows(datasetDir,dataset.files.continuations,row=>continuations.push(row));
-  assertContinuationSourceCoverage(continuations,continuationSources);
-  assertContinuationCommissionCoverage(continuations,continuationCommissions,dataset.sourceRef);
+  continuationSource=assertContinuationSourceCoverage(continuations,continuationSources);
+  continuationCommissionsProof=assertContinuationCommissionCoverage(continuations,continuationCommissions,dataset.sourceRef);
   const liabilities=[];
   if(dataset.files?.liabilities)await readRows(datasetDir,dataset.files.liabilities,row=>liabilities.push(row));
   liabilitySource=assertLegacyLiabilitySourceCoverage(liabilities,continuationSources.orders,sourceRefunds,readyOrders);
   assert.equal(dataset.domains?.liabilities?.source,liabilitySource.total,'SELECTED_SCOPE_LIABILITY_SOURCE_COUNT_DRIFT');
  }
  return {status:'SELECTED_SCOPE_SOURCE_AND_INPUT_VERIFIED_TARGET_NOT_RUN',...result,accountSnapshots,refundParents,
-  ...(verifyContinuationStatus?{liabilitySource,unsupportedContinuations:{...unsupportedStatuses,total:Object.values(unsupportedStatuses).reduce((a,b)=>a+b,0)}}:{}),sourceConnections:0,targetConnections:0,targetWrites:0};
+  ...(verifyContinuationStatus?{liabilitySource,continuationSource,continuationCommissions:continuationCommissionsProof,unsupportedContinuations:{...unsupportedStatuses,total:Object.values(unsupportedStatuses).reduce((a,b)=>a+b,0)}}:{}),sourceConnections:0,targetConnections:0,targetWrites:0};
 }
 export async function verifyPopulationFiles({datasetDir,sourceDir,dataset,source,readRows=checkedRows}){
  const expected=assertCapturedPopulation(dataset,source),keys={},ready={},isolated={},retained={};

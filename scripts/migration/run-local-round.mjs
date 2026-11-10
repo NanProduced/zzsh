@@ -26,6 +26,8 @@ function setSourceReadiness(proof) {
   externalReadiness.refundRelationships = { status: refunds.relationshipUnresolved || refunds.subjectIsolated ? "REVIEW_REQUIRED" : "NO_REVIEW_IN_CAPTURED_INPUT", ...refunds };
   if (proof.unsupportedContinuations) externalReadiness.unsupportedContinuations = {
     status: proof.unsupportedContinuations.total ? "REVIEW_REQUIRED" : "NO_REVIEW_IN_CAPTURED_INPUT", ...proof.unsupportedContinuations };
+  if (proof.continuationCommissions) externalReadiness.continuationCommissions = {
+    status: proof.continuationCommissions.settled || proof.continuationCommissions.unknown ? "REVIEW_REQUIRED" : "NO_REVIEW_IN_CAPTURED_INPUT", ...proof.continuationCommissions };
 }
 assert([execute, validate, inspect, resumeGrowth].filter(Boolean).length <= 1, "ONE_ROUND_ACTION_REQUIRED");
 if (!execute && !validate && !inspect && !resumeGrowth) {

@@ -22,6 +22,7 @@ export function assertContinuationCommissionCoverage(continuations, sourceRows, 
   if (!Array.isArray(continuations) || !Array.isArray(sourceRows) || typeof sourceRef !== 'string')
     throw new Error('CONTINUATION_COMMISSION_SOURCE_UNAVAILABLE');
   const orders = new Map(), expected = new Map(), sourceIds = new Set();
+  const counts={total:0,pending:0,settled:0,void:0,unknown:0,softDeletedSettled:0};
   for (const row of continuations) {
     if (typeof row?.sourceId !== 'string' || orders.has(row.sourceId) || row.source?.legacyOrderId !== row.sourceId)
       throw new Error('CONTINUATION_COMMISSION_SOURCE_UNAVAILABLE');
@@ -31,6 +32,8 @@ export function assertContinuationCommissionCoverage(continuations, sourceRows, 
     if (!orders.has(raw?.order_id) || !includeContinuationCommission(raw)) continue;
     if (typeof raw.id !== 'string' || sourceIds.has(raw.id)) throw new Error('CONTINUATION_COMMISSION_SOURCE_DUPLICATE');
     sourceIds.add(raw.id);
+    counts.total++;if(raw.status==='1')counts.pending++;else if(raw.status==='2'){counts.settled++;if(raw.is_delete==='1')counts.softDeletedSettled++;}
+    else if(raw.status==='3')counts.void++;else counts.unknown++;
     if (!expected.has(raw.order_id)) expected.set(raw.order_id,[]);
     expected.get(raw.order_id).push(raw);
   }
@@ -49,6 +52,7 @@ export function assertContinuationCommissionCoverage(continuations, sourceRows, 
         throw new Error('CONTINUATION_COMMISSION_SOURCE_FACT_CHANGED');
     }
   }
+  return counts;
 }
 /** Re-read order, account, payment and policy facts independently of the prepared continuation file. */
 export function assertContinuationSourceCoverage(continuations, sources) {
@@ -86,6 +90,7 @@ export function assertContinuationSourceCoverage(continuations, sources) {
       policy:{advanceOrderSetRatio:policies[0].value,expend}};
     if(!isDeepStrictEqual(source,expected))throw new Error('CONTINUATION_SOURCE_FACT_CHANGED');
   }
+  return {orders:expectedOrders.length,paymentAttempts:[...paidByOrder.entries()].filter(([id])=>actual.has(id)).reduce((n,[,rows])=>n+rows.length,0)};
 }
 /** Check the complete source set of historical refund and settlement liabilities. */
 export function assertLegacyLiabilitySourceCoverage(liabilities, orders, refunds, readyOrderIds) {
