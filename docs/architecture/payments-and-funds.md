@@ -84,12 +84,11 @@
 | --- | --- |
 | `POST/GET /api/v1/orders/:id/channel-payment-requests` | 本人建收款请求/读本地支付动作及事实；旧 CONTROLLED 路由保持兼容，JOINPAY 旧客户端明确拒绝升级。 |
 | `POST /api/v1/orders/:id/channel-payment-requests/query` | 本人按原请求查单，不首派/换号；可信成功可推进唯一接纳。 |
-| `GET /api/v1/orders/:id/refunds` | 本人租客读取正常/异常责任及退款事实，不调用 Admin 命令 GET。 |
+| `GET /api/v1/orders/:id/refunds` | 本人租客读取正常退款责任及退款事实，不调用 Admin 命令 GET。 |
 | `GET /api/v1/orders/:id/prestart-termination`、`GET /api/v1/admin/orders/:id/prestart-termination` | 当事人或有订单范围的 Admin 本地读取；号主不获租客退款金额，Admin 金额按财务读权或合法审核资格裁剪。 |
 | `POST /api/v1/orders/:id/prestart-termination/requests` | 当事人申请，带当前版本、原因和幂等键。 |
 | `POST /api/v1/admin/orders/:id/prestart-termination/:termId/review` | `order.settlement.write` 与订单/game/team 范围；核准另需明确未使用无争议声明。 |
 | `GET/POST /api/v1/admin/orders/:id/refunds` | 已授权结算操作者读取命令上下文/分配正常退款；`finance.read` 不单独授予该接口的命令权限。 |
-| `POST /api/v1/admin/orders/:id/refunds/abnormal` | 人工复核指定原 confirmation，只建本地全额原款责任/意图。 |
 | `POST /api/v1/admin/orders/:id/prestart-termination/:termId/refund-requests` | 按已核准原责任创建意图，不直接出网；返回 `NOT_SUBMITTED`。 |
 | `GET/POST /api/v1/users/me/withdrawal-bank-binding`、`GET .../receipt` | 本人绑卡/读取/原键恢复，写入沿当前版本、幂等和审计。 |
 | `GET /api/v1/users/me/channel-withdrawals/options`、`POST .../quote`、`POST ...`、`GET .../:id`、`GET .../receipt` | 本人资格、报价、预留、详情及恢复；创建重核身份、政策、钱包版本、配额和目标。 |
