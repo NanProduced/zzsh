@@ -6,7 +6,8 @@ import {validateIdempotencyKey} from "../contracts/api-v1";
 import {conflict,invalid,notFound,fingerprintRequest,withIdempotency} from "../supply/supply-util";
 import {readPersonalWallet} from "./personal-finance-read";
 import {assertNoReferralRecoveryForWithdrawal} from "./distribution-recovery-gate";
-import {calculateWithdrawalAmounts,planWithdrawalLedger,type WithdrawalLedgerPlan} from "./withdrawal-ledger";
+import {planWithdrawalLedger,type WithdrawalLedgerPlan} from "./withdrawal-ledger";
+import {quoteWithdrawalBusinessAmounts} from "./withdrawal-business-policy";
 import {assertInitialPayoutScope,assertPayoutProfile,assertPayoutStart,assertPayoutSubmitBinding,assertPayoutReviewStrategy,describePayoutProfile,readPayoutProfileEvidence,readPayoutScope,readWithdrawalAdmission,
  type BoundPayoutProfile,type PayoutScope,type PayoutBinding,type WithdrawalAdmission} from "./joinpay-payout-profile";
 import {assertNativeWithdrawalFact} from "./joinpay-payout-source";
@@ -92,8 +93,9 @@ async function fresh(c:PoolClient,actor:NativeWithdrawalActor,b:NativeWithdrawal
  await assertNoReferralRecoveryForWithdrawal(c,actor.userId);
  const used=(await c.query(`SELECT count(*)::text AS count FROM zzsh_order.joinpay_withdrawal_intent WHERE user_id=$1 AND accepted_at>=$2::timestamptz AND accepted_at<$3::timestamptz AND ($4='ACCEPTED_INTENT' OR state<>'FAILED')`,[actor.userId,policy.quotaStart,policy.quotaEnd,policy.frequencyBasis])).rows[0]?.count;
  if(typeof used!=="string"||!/^(0|[1-9][0-9]*)$/.test(used))throw unavailable("Withdrawal quota unknown");
- if(BigInt(used)>=BigInt(policy.maxIntents)||!/^[1-9][0-9]{0,15}$/.test(b.amountCents)||BigInt(b.amountCents)<BigInt(policy.minCents)||BigInt(b.amountCents)>BigInt(policy.maxCents)||BigInt(b.amountCents)>BigInt(wallet.buckets.available.amountCents))throw conflict("Withdrawal amount or frequency unavailable");
- const money=calculateWithdrawalAmounts(b.amountCents,policy.fee),coverageCanonical=JSON.stringify(coverage),coverageSha256=sha(coverageCanonical);
+ if(!/^[1-9][0-9]{0,15}$/.test(b.amountCents))throw conflict("Withdrawal amount or frequency unavailable");
+ const money=quoteWithdrawalBusinessAmounts({amountCents:b.amountCents,availableCents:wallet.buckets.available.amountCents,used,
+  minCents:policy.minCents,maxCents:policy.maxCents,maxIntents:policy.maxIntents,fee:policy.fee}),coverageCanonical=JSON.stringify(coverage),coverageSha256=sha(coverageCanonical);
  const expectedWalletVersion=`jwdq1:${sha(JSON.stringify([actor.userId,revision,coverageSha256,coverage.coverageVersion,coverage.coveredSetDigest,policy.version,policy.sha256,money.grossCents,money.netCents,money.feeCents,a.target.destinationId,a.target.revision,a.target.fingerprint,a.identity.version,a.identity.proofSha256]))}`;
  return{admission:a,scope,profile,p,clock,revision,coverage,coverageCanonical,coverageSha256,money,expectedWalletVersion};
 }
