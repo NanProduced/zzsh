@@ -50,9 +50,12 @@ function loadComponent(relativePath, session, extra) {
     if (name === "@/components/ui/tooltip") return { Tooltip: props => React.createElement(React.Fragment, null, props.children), TooltipTrigger: props => React.createElement(React.Fragment, null, props.children), TooltipContent: () => null };
     if (name === "@/components/ui/form-controls") return {
       Input: (props) => React.createElement("input", props),
+      Textarea: (props) => React.createElement("textarea", props),
       FormSelect: ({ label, value, options, onChange, placeholder }) => React.createElement("select", { "aria-label": label, value, onChange: e => onChange(e.target.value) }, (options || []).map(o => React.createElement("option", { key: o.value, value: o.value }, o.label))),
       DatePicker: ({ label, value, onChange, placeholder }) => React.createElement("input", { type: "text", "aria-label": label, value: value || "", onChange: e => onChange(e.target.value), placeholder }),
     };
+    if (name === "@/components/ui/alert-dialog") return { ConfirmAlertDialog: ({open,title,description,onConfirm,confirmLabel,busy}) =>
+      open ? React.createElement("div",{role:"alertdialog"},title,description,React.createElement("button",{type:"button",disabled:busy,onClick:onConfirm},confirmLabel)) : null };
     if (extra && Object.hasOwn(extra, name)) return extra[name];
     if (name === "@/lib/account-title") return loadComponent("apps/web/src/lib/account-title.ts", session);
     if (name === "@/lib/listing-filters" || name === "./listing-filters") return loadComponent("apps/web/src/lib/listing-filters.ts", session);
@@ -331,20 +334,39 @@ test('unreviewed prestart requests describe the payment basis without claiming a
  for(const state of ['REQUESTED','REVIEW_REQUIRED','REJECTED']){
   const read={contractVersion:'order-prestart-termination.v1',orderId:'order_A',orderRevision:'2',eligibility:{allowed:false,reason:'PRESTART_FACTS_UNAVAILABLE',refundCents:null},request:{id:'term_1',revision:'2',state,requestedByParty:'RENTER',reason:'尚未交付',reviewReason:null,createdAt:at,updatedAt:at,approvedAt:null,fullRefundCents:'15908',currency:'CNY',dataOrigin:'JOINPAY_LOCAL_ACCEPTANCE',liabilityRecognized:false,channelSubmission:'NOT_REPORTED',bankArrival:'UNKNOWN'},refund:null,coverage:'LOCAL_REGISTERED_ONLY',asOf:at,localAcceptanceObservedAt:at,unknowns:['BANK_ARRIVAL_NOT_VERIFIED'],bankArrival:'UNKNOWN'};
   const probe=createProbe(window,PrestartTerminationPanel,{order:paidOrder,party:'renter',onChanged(){}},async()=>json(read));
-  try{await probe.render();assert.match(probe.host.textContent,/原付款记录金额：¥159\.08/);assert.match(probe.host.textContent,/退款情况以审核结果为准/);assert.doesNotMatch(probe.host.textContent,/申请退款金额|退款已到账/);}finally{await probe.dispose();}
+  try{await probe.render();assert.match(probe.host.textContent,/原付款记录金额：¥159\.08/);assert.match(probe.host.textContent,/订单尚未取消/);assert.doesNotMatch(probe.host.textContent,/申请退款金额|退款已到账/);}finally{await probe.dispose();}
  }
 }));
-test('未开租申请202未知保留同一原键/body，恢复不按编辑内容重建',async()=>withDom(async window=>{
+test('未开租取消确认后202未知保留同一原键/body，恢复不按编辑内容重建',async()=>withDom(async window=>{
  const current=session('user_A'),{PrestartTerminationPanel}=loadComponent('apps/web/src/components/order/prestart-termination-panel.tsx',current),posts=[];
  const read={contractVersion:'order-prestart-termination.v1',orderId:'order_A',orderRevision:'1',eligibility:{allowed:true,reason:null,refundCents:'15908'},request:null,refund:null,
+  cancellationReasons:[{code:'RENTER_WRONG_ACCOUNT',label:'选错账号'},{code:'OTHER',label:'其他'}],
   coverage:'LOCAL_REGISTERED_ONLY',asOf:'2026-10-28T00:00:00.000000Z',localAcceptanceObservedAt:null,unknowns:['BANK_ARRIVAL_NOT_VERIFIED'],bankArrival:'UNKNOWN'};
  const probe=createProbe(window,PrestartTerminationPanel,{order:paidOrder,party:'renter',onChanged(){}},async(url,init)=>{
   if(init?.method==='POST'){posts.push(init);return json({contractVersion:'order-prestart-termination.v1',orderId:'order_A',outcome:'UNKNOWN',originalKeyRequired:true},202);}return json(read);});
- try{await probe.render();const field=probe.host.querySelector('textarea');await React.act(async()=>{Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype,'value').set.call(field,'未交付申请结束');field.dispatchEvent(new window.Event('input',{bubbles:true}));await tick();});
+ try{await probe.render();const field=probe.host.querySelector('select');await React.act(async()=>{field.value='RENTER_WRONG_ACCOUNT';field.dispatchEvent(new window.Event('change',{bubbles:true}));await tick();});
   await React.act(async()=>{probe.host.querySelector('form').dispatchEvent(new window.Event('submit',{bubbles:true,cancelable:true}));await tick();});
-  assert.equal(posts.length,1);const original=intents.loadIntent('user_A','order.prestart.request','order_A');assert.ok(original);assert.equal(original.body.reason,'未交付申请结束');
-  await React.act(async()=>{probe.host.querySelector('form').dispatchEvent(new window.Event('submit',{bubbles:true,cancelable:true}));await tick();});
+  assert.equal(posts.length,0);await React.act(async()=>{probe.host.querySelector('[role="alertdialog"] button').click();await tick();});
+  assert.equal(posts.length,1);const original=intents.loadIntent('user_A','order.prestart.cancel','order_A');assert.ok(original);assert.equal(original.body.reasonCode,'RENTER_WRONG_ACCOUNT');
+  await React.act(async()=>{probe.host.querySelector('[role="alertdialog"] button').click();await tick();});
   assert.equal(posts.length,2);assert.equal(posts[0].body,posts[1].body);assert.equal(new Headers(posts[0].headers).get('idempotency-key'),new Headers(posts[1].headers).get('idempotency-key'));
+ }finally{await probe.dispose(()=>intents.clearIntent('user_A','order.prestart.cancel','order_A'));}
+}));
+test('旧版未决申请先按原键核对，未提交时才允许选择新取消原因',async()=>withDom(async window=>{
+ const current=session('user_A'),{PrestartTerminationPanel}=loadComponent('apps/web/src/components/order/prestart-termination-panel.tsx',current),posts=[];
+ const read={contractVersion:'order-prestart-termination.v1',orderId:'order_A',orderRevision:'1',eligibility:{allowed:true,reason:null,refundCents:'15908'},request:null,refund:null,
+  cancellationReasons:[{code:'RENTER_WRONG_ACCOUNT',label:'选错账号'},{code:'OTHER',label:'其他'}],
+  coverage:'LOCAL_REGISTERED_ONLY',asOf:'2026-10-28T00:00:00.000000Z',localAcceptanceObservedAt:null,unknowns:['BANK_ARRIVAL_NOT_VERIFIED'],bankArrival:'UNKNOWN'};
+ const originalBody={expectedOrderRevision:'1',reason:'旧版未开租申请'};
+ intents.saveIntent({userId:'user_A',kind:'order.prestart.request',resourceId:'order_A',key:'old_request_key',body:originalBody});
+ const probe=createProbe(window,PrestartTerminationPanel,{order:paidOrder,party:'renter',onChanged(){}},async(url,init)=>{
+  if(init?.method==='POST'){posts.push({url,init});return json({contractVersion:'order-prestart-termination.v1',orderId:'order_A',request:null,existing:false,outcome:'NOT_SUBMITTED'});}return json(read);});
+ try{await probe.render();assert.equal(probe.host.querySelector('select'),null);
+  const button=[...probe.host.querySelectorAll('button')].find(x=>x.textContent==='查询上次申请');
+  await React.act(async()=>{button.click();await tick();});
+  assert.equal(posts.length,1);assert.match(String(posts[0].url),/prestart-termination\/requests$/);assert.deepEqual(JSON.parse(posts[0].init.body),originalBody);
+  assert.equal(new Headers(posts[0].init.headers).get('idempotency-key'),'old_request_key');
+  assert.equal(intents.loadIntent('user_A','order.prestart.request','order_A'),null);assert(probe.host.querySelector('select'));
  }finally{await probe.dispose(()=>intents.clearIntent('user_A','order.prestart.request','order_A'));}
 }));
 

@@ -12,7 +12,7 @@
 | 收款请求 | `payment_request` 持久保存原商户单号、稳定商户、金额及原请求映射；同订单重试取原请求，不换号绕过 UNKNOWN。 |
 | 渠道尝试/观察/证据 | 保留每次派发、查询、通知、验签与绑定判断；观察可追加，旧失败、冲突和 UNKNOWN 不覆盖。 |
 | 付款确认 | `payment_confirmation` 的 `APPLIED` 是本站唯一接纳；`REVIEW_REQUIRED` 是需要复核的原款，不是可重复消费的付款。 |
-| 结算与应退责任 | 正常过账、异常收款责任、未开租终止责任分别建模；无正常 posting 不代表无应退责任。 |
+| 结算与应退责任 | 正常过账与未开租终止责任分别建模；无正常 posting 不代表无应退责任。 |
 | 退款意图/提现意图 | 冻结原款或原目标、政策、预算与幂等身份；意图建立不代表已经提交供应商。 |
 | 经济根/事件/分录 | 唯一来源、不可变事件及平衡分录决定本站账务；页面状态不创造余额。 |
 
@@ -86,8 +86,9 @@
 | `POST /api/v1/orders/:id/channel-payment-requests/query` | 本人按原请求查单，不首派/换号；可信成功可推进唯一接纳。 |
 | `GET /api/v1/orders/:id/refunds` | 本人租客读取正常退款责任及退款事实，不调用 Admin 命令 GET。 |
 | `GET /api/v1/orders/:id/prestart-termination`、`GET /api/v1/admin/orders/:id/prestart-termination` | 当事人或有订单范围的 Admin 本地读取；号主不获租客退款金额，Admin 金额按财务读权或合法审核资格裁剪。 |
-| `POST /api/v1/orders/:id/prestart-termination/requests` | 当事人申请，带当前版本、原因和幂等键。 |
-| `POST /api/v1/admin/orders/:id/prestart-termination/:termId/review` | `order.settlement.write` 与订单/game/team 范围；核准另需明确未使用无争议声明。 |
+| `POST /api/v1/orders/:id/prestart-termination/cancel` | 当事人在开租前选择对应角色的取消原因并直接取消；服务端核对版本、身份与原款，保留原幂等键。 |
+| `POST /api/v1/orders/:id/prestart-termination/requests` | 仅按原键恢复旧申请；无原申请时返回未提交，不新增申请。 |
+| `POST /api/v1/admin/orders/:id/prestart-termination/:termId/review` | 有订单和游戏范围权限的管理员处理已存在的历史申请；核准需明确未使用无争议声明。 |
 | `GET/POST /api/v1/admin/orders/:id/refunds` | 已授权结算操作者读取命令上下文/分配正常退款；`finance.read` 不单独授予该接口的命令权限。 |
 | `POST /api/v1/admin/orders/:id/prestart-termination/:termId/refund-requests` | 按已核准原责任创建意图，不直接出网；返回 `NOT_SUBMITTED`。 |
 | `GET/POST /api/v1/users/me/withdrawal-bank-binding`、`GET .../receipt` | 本人绑卡/读取/原键恢复，写入沿当前版本、幂等和审计。 |

@@ -48,9 +48,11 @@ Boss 可在系统配置中管理等待期，接口为 `GET/PUT /api/v1/admin/sys
 
 ## 已付款未开租终止
 
-`order-prestart-termination.v1` 独立于正常结算：本人租客或号主通过 `POST /api/v1/orders/:orderId/prestart-termination/requests` 提交原因与订单版本；具有 `order.settlement.write` 且处于订单游戏范围内的管理员，通过 `POST /api/v1/admin/orders/:orderId/prestart-termination/:id/review` 复核，订单群不可用时仍可处理。核准必须明确确认未交付/使用、无争议，且原付款、无确认开租、无过账、无待决人工金额调整、无已计提资金分佣均在原锁链内重核。双方已确认开租的订单不能进入本命令。
+`order-prestart-termination.v1` 独立于正常结算：双方确认开租前，租客或号主通过 `POST /api/v1/orders/:orderId/prestart-termination/cancel` 提交订单版本、各自角色的原因代码与幂等键；选择“其他”时填写说明。服务端在原订单锁内核对当事人、原付款、开租和过账状态，直接取消并登记全额原款退款责任，不再等待客服审核。取消与开租确认共用订单锁；任一方已完成全部开租确认后不能再走本命令。订单占用解除后，账号是否可租仍由其上架、权限和其他占用状态决定。
 
-核准事务保留原 `APPLIED` 付款，将订单置为 `CANCELLED`，记录唯一全额应退责任及平衡分录，不创建开租、正常 `settlement_posting` 或分佣冲回。冻结分佣依据本身不等于资金分佣。审计或守卫失败回滚；未确认的 COMMIT 返回 `UNKNOWN`，必须保留原键和原请求体恢复。表/完整性守卫未部署时拒绝新写入。
+旧版 `.../requests` 只用于按原键恢复之前的申请回执；没有原申请时明确返回未提交，不静默执行新取消。管理员审核接口仅保留用于处理已存在的历史申请。
+
+取消事务保留原 `APPLIED` 付款，将订单置为 `CANCELLED`，记录唯一全额应退责任及平衡分录，不创建开租、正常 `settlement_posting` 或分佣冲回。冻结分佣依据本身不等于资金分佣。审计或守卫失败回滚；未确认的 COMMIT 返回 `UNKNOWN`，必须保留原键和原请求体恢复。表/完整性守卫未部署时拒绝新写入。
 
 两端 `GET .../prestart-termination` 只读本地一致快照；用户限当事人，号主不获得租客退款明细，管理员金额按 `finance.read` 或本单合法审核资格裁剪。责任、分配、核销、保存的渠道证据和银行到账分别展示，未核定不补零。核准不是退款完成。已核准的原生 JOINPAY 责任由既有退款 worker 或明确受权的 `POST /api/v1/admin/orders/:orderId/prestart-termination/:id/refund-requests` 领取；命令只登记本地意图并返回 `NOT_SUBMITTED`，沿原商户号、原款、共同预算及原目标提交。受控来源不能因此升级为真实渠道退款。同原号出现多个流水时首派停止复核，已经派发的查询与通知继续按原退款号恢复。
 

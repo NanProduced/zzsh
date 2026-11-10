@@ -15,7 +15,7 @@ const webOrigin =
   process.env.ZZSH_WEB_ORIGIN ?? (local ? "http://127.0.0.1:3100" : "");
 const id = "[A-Za-z0-9][A-Za-z0-9._:-]{0,127}";
 const getPath = new RegExp(`^/(?:legacy(?:/${id}(?:/continuation(?:/receipt)?)?)?|${id}(?:/(?:im|settlement|payment-requests|channel-payment-requests|local-checkouts(?:/receipt)?|demo-checkout(?:/receipt)?|refunds|prestart-termination))?)?$`);
-const postPath = new RegExp(`^/(?:legacy/${id}/continuation/(?:preview|propose|confirm|reject)|${id}/(?:cancel|payment-requests|local-checkouts|demo-checkout/confirm|channel-payment-requests(?:/query)?|prestart-termination/requests|settlement-preview|settlements(?:/${id}/decision)?|openings/${id}/confirm))?$`);
+const postPath = new RegExp(`^/(?:legacy/${id}/continuation/(?:preview|propose|confirm|reject)|${id}/(?:cancel|payment-requests|local-checkouts|demo-checkout/confirm|channel-payment-requests(?:/query)?|prestart-termination/(?:requests|cancel)|settlement-preview|settlements(?:/${id}/decision)?|openings/${id}/confirm))?$`);
 const error = (status: number, code: string, requestId: string) =>
   Response.json(
     { error: { code, message: "订单请求未完成", requestId } },

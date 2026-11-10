@@ -75,6 +75,10 @@ test('未开租结束GET/申请保持本人Cookie身份预检；不代理Admin�
   const body=JSON.stringify({expectedOrderRevision:'1',reason:'申请尚未开租结束'});
   const p=await POST(input(['order_1','prestart-termination','requests'],{method:'POST',headers:{...headers,'idempotency-key':'original_1','content-type':'application/json'},body}),ctx(['order_1','prestart-termination','requests']));
   assert.equal(p.status,200);assert.equal(calls.at(-1).options.headers.get('idempotency-key'),'original_1');
+  const cancelBody=JSON.stringify({expectedOrderRevision:'1',reasonCode:'RENTER_WRONG_ACCOUNT'});
+  const cancelled=await POST(input(['order_1','prestart-termination','cancel'],{method:'POST',headers:{...headers,'idempotency-key':'cancel_1','content-type':'application/json'},body:cancelBody}),ctx(['order_1','prestart-termination','cancel']));
+  assert.equal(cancelled.status,200);assert.equal(calls.at(-1).options.headers.get('idempotency-key'),'cancel_1');
+  assert.match(calls.at(-1).url,/order_1\/prestart-termination\/cancel$/);
   const count=calls.length;assert.equal((await POST(input(['order_1','prestart-termination','term_1','review'],{method:'POST',headers,body:'{}'}),ctx(['order_1','prestart-termination','term_1','review']))).status,404);
   assert.equal((await GET(input(['order_1','prestart-termination'],{headers},'?query=channel'),ctx(['order_1','prestart-termination']))).status,400);assert.equal(calls.length,count);
  }finally{globalThis.fetch=old;}

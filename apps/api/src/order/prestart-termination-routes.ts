@@ -7,7 +7,7 @@ import { ensureApiV1RequestId } from "../contracts/api-v1";
 import { bodyOf, ensureOnlyFields, forbidden, invalid, notFound, sendJson } from "../supply/supply-util";
 import { requireOrigin, requestPath, runIdempotentWrite, type SupplyResponse } from "../supply/supply-routes";
 import { assertPrestartDecision } from "./prestart-termination-model";
-import { authorizePrestartWrite, readPrestartTermination, requestPrestartTermination, reviewPrestartTermination } from "./prestart-termination";
+import { authorizePrestartWrite, cancelPrestartTermination, readPrestartTermination, reviewPrestartTermination } from "./prestart-termination";
 import type {LocalFinancialSandbox} from '../finance/local-financial-sandbox-resource';
 import type {DemoFinanceResource} from '../finance/ecs-test-demo-resource';
 import {settlementReadIdentity} from './settlement-record';
@@ -17,13 +17,14 @@ type Realm="user"|"admin";
 const ID="[A-Za-z0-9][A-Za-z0-9._:-]{0,127}";
 const READ=new RegExp(`^/(${ID})/prestart-termination$`);
 const CREATE=new RegExp(`^/(${ID})/prestart-termination/requests$`);
+const CANCEL=new RegExp(`^/(${ID})/prestart-termination/cancel$`);
 const REVIEW=new RegExp(`^/(${ID})/prestart-termination/(${ID})/review$`);
 
 /** 由已有订单router承接；GET不领取、不触发渠道或补建责任。 */
 export async function handlePrestartTerminationRoute(request:Request,response:SupplyResponse,options:AuthSecurityOptions&{localFinancialSandbox?:LocalFinancialSandbox;ecsTestDemo?:DemoFinanceResource},realm:Realm):Promise<boolean>{
  const prefix=realm==='user'?'/api/v1/orders':'/api/v1/admin/orders';
- const {path,query}=requestPath(request,prefix),read=READ.exec(path),create=realm==='user'?CREATE.exec(path):null,review=realm==='admin'?REVIEW.exec(path):null;
- if(!read&&!create&&!review)return false;
+ const {path,query}=requestPath(request,prefix),read=READ.exec(path),create=realm==='user'?CREATE.exec(path):null,cancel=realm==='user'?CANCEL.exec(path):null,review=realm==='admin'?REVIEW.exec(path):null;
+ if(!read&&!create&&!cancel&&!review)return false;
  const method=(request.method??'GET').toUpperCase(),requestId=ensureApiV1RequestId(request);
  if(query.size)throw invalid('Prestart termination does not accept query fields');
  if(method==='GET'&&read){
@@ -36,10 +37,10 @@ export async function handlePrestartTerminationRoute(request:Request,response:Su
    return readPrestartTermination(client,{...context,realm,settlementAdmission:options.settlementAdmission,settlementReadIdentity:settlementReadIdentity(options.pool),localFinancialSandbox:options.localFinancialSandbox,ecsTestDemo:options.ecsTestDemo},read[1]!);
   });sendJson(response,200,result,requestId);return true;
  }
- if(method!=='POST'||!create&&!review)throw notFound();
+ if(method!=='POST'||!create&&!cancel&&!review)throw notFound();
  if(!requireOrigin(request,response,options,requestId))return true;
  const context=realm==='user'?await readUserContext(request,options):await readAdminContext(request,options),actor={...context,realm,settlementAdmission:options.settlementAdmission,localFinancialSandbox:options.localFinancialSandbox,ecsTestDemo:options.ecsTestDemo};
- const body=bodyOf(request),orderId=(create??review)![1]!;
+ const body=bodyOf(request),orderId=(create??cancel??review)![1]!;
  async function command(operation:string,resourceId:string,frozen:unknown,action:(c:PoolClient)=>Promise<{status:number;body:unknown}>){
   let actionCompleted=false;
   try{await runIdempotentWrite(options,request,response,requestId,{principalId:actor.userId,operation,resourceId},
@@ -55,7 +56,19 @@ export async function handlePrestartTerminationRoute(request:Request,response:Su
   if(typeof body.expectedOrderRevision!=='string'||!/^[1-9][0-9]{0,18}$/.test(body.expectedOrderRevision)
    ||typeof body.reason!=='string'||body.reason.trim().length<3||Buffer.byteLength(body.reason,'utf8')>600)throw invalid('Invalid termination request');
   const frozen={expectedOrderRevision:body.expectedOrderRevision,reason:body.reason.trim()};
-  await command('order.prestart.request',orderId,frozen,client=>requestPrestartTermination(client,actor,{...frozen,orderId,requestId}));return true;
+  // 旧客户端只能按原键恢复已提交的申请，不能悄悄把“申请审核”改为立即取消。
+  await command('order.prestart.request',orderId,frozen,async()=>({status:200,body:{
+   contractVersion:'order-prestart-termination.v1',orderId,request:null,existing:false,outcome:'NOT_SUBMITTED',
+  }}));return true;
+ }
+ if(cancel){
+  ensureOnlyFields(body,['expectedOrderRevision','reasonCode','otherReason']);
+  if(typeof body.expectedOrderRevision!=='string'||!/^[1-9][0-9]{0,18}$/.test(body.expectedOrderRevision)
+   ||typeof body.reasonCode!=='string'||!/^[A-Z_]{1,64}$/.test(body.reasonCode)
+   ||body.otherReason!==undefined&&(typeof body.otherReason!=='string'||Buffer.byteLength(body.otherReason,'utf8')>600))throw invalid('Invalid cancellation request');
+  const frozen={expectedOrderRevision:body.expectedOrderRevision,reasonCode:body.reasonCode,
+   ...(typeof body.otherReason==='string'?{otherReason:body.otherReason.trim()}:{})};
+  await command('order.prestart.cancel',orderId,frozen,client=>cancelPrestartTermination(client,actor,{...frozen,orderId,requestId}));return true;
  }
  ensureOnlyFields(body,['expectedRevision','decision','assessment','reason']);
  const frozen=assertPrestartDecision({expectedRevision:body.expectedRevision,decision:body.decision,assessment:body.assessment,reason:body.reason});

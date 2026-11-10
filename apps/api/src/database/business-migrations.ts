@@ -1282,6 +1282,10 @@ export async function configureJoinpayFinancialPrivileges(pool: Pick<Pool, "quer
   const columns = (await pool.query<{ name: string; attname: string }>(`/* joinpay financial columns */ SELECT t.name,a.attname FROM unnest($1::text[]) AS t(name)
     JOIN pg_attribute a ON a.attrelid=to_regclass(t.name) AND a.attnum>0 AND NOT a.attisdropped ORDER BY t.name,a.attnum`, [tables.map(t => t.name)])).rows;
   if (columns.some(c => !tables.some(t => t.name === c.name) || typeof c.attname !== "string")) throw new Error("JoinPay financial column inventory differs");
+  const partyCancellationColumns=['user_id','user_session_id','acting_party','reason_code'];
+  const partyCancellationCount=columns.filter(c=>c.name===prestart[1]!.name&&partyCancellationColumns.includes(c.attname)).length;
+  if(partyCancellationCount!==0&&partyCancellationCount!==partyCancellationColumns.length)throw new Error('Prestart party cancellation is partially deployed');
+  if(partyCancellationCount===partyCancellationColumns.length)prestart[1]!.insert+=' '+partyCancellationColumns.join(' ');
   const basisColumns=['basis_kind','liability_root_id','liability_event_id'];
   const basisCount=columns.filter(c=>c.name===refund[0]!.name&&basisColumns.includes(c.attname)).length;
   if(basisCount!==0&&basisCount!==3||hasPrestart&&basisCount!==3)throw new Error('Refund liability extension is partially deployed');
