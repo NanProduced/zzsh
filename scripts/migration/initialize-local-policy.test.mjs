@@ -1,6 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { mkdtempSync, writeFileSync, unlinkSync, rmdirSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createHash } from "node:crypto";
 import { assertPolicyProfileBinding, assertPolicyRuntimeBinding, buildLocalTestPolicyTemplate, buildPolicyDraft, runPolicyInitialization, validatePolicyContent } from "./initialize-local-policy.mjs";
@@ -48,6 +51,23 @@ test("policy plan is zero connection and uses the strict true feature value", ()
     const plan = JSON.parse(result.stdout);
     assert.equal(plan.action, "PLAN"); assert.equal(plan.connections, 0); assert.equal(plan.credentialReads, 0); assert.equal(plan.resourceLocks, 0);
     assert.equal(plan.feature, "ZZSH_MEMBERSHIP_GROWTH_ENABLED=true");
+});
+
+test("NEXT refuses the obsolete approval initializer before profile reads or requests", async t => {
+    const dir = mkdtempSync(join(tmpdir(), "zzsh-policy-preflight-")), file = join(dir, "input.json");
+    t.after(() => { unlinkSync(file); rmdirSync(dir); });
+    const target = { database: "zzsh_test_regression", oid: "42", nonce: "fixture", migrationProfile: "LOCAL_MIGRATION_NEXT_V1" };
+    const bytes = Buffer.from(JSON.stringify({ kind: "FORMAL_LOCAL_MEMBERSHIP_POLICY_INITIALIZATION_V1", target,
+      serverBinding: { file: join(dir, "not-read.json") }, profileFile: join(dir, "not-read-profile.json") }));
+    writeFileSync(file, bytes);
+    const result = spawnSync(process.execPath, [fileURLToPath(new URL("./initialize-local-policy.mjs", import.meta.url)),
+      "--execute", "--input", file, "--input-sha", digest(bytes), "--out", join(dir, "not-created")], { encoding: "utf8", timeout: 5000 });
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /NEXT_MIGRATION_ADMISSION_INCOMPLETE/);
+    assert.doesNotMatch(result.stderr, /ENOENT|ECONN/);
+    let writes = 0, requests = 0;
+    await assert.rejects(runPolicyInitialization({ target, write: () => writes++, fetcher: async () => { requests++; } }), /NEXT_MIGRATION_ADMISSION_INCOMPLETE/);
+    assert.deepEqual([writes, requests], [0, 0]);
 });
 
 test("new effective time changes both fields without changing exact policy values or original template", () => {
