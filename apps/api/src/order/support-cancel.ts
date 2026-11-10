@@ -7,6 +7,7 @@ import { assertSupportOrderAccess, type ManualCloseActor } from "./manual-close"
 import { lockSettlement } from "./settlement-record";
 import { readPrestartRefundProgress } from "./prestart-refund-store";
 import { assertEcsTestDemoOrderAdmission, assertEcsTestDemoResource, demoFinanceScope } from "../finance/ecs-test-demo-resource";
+import { supportPoststartExecutorSafeSql, supportPoststartTriggersSql } from "../finance/support-poststart-schema";
 import type { PrestartPaymentBasis } from "./prestart-termination";
 import {
   supportCancelEligibility, supportCancelConflict,supportPoststartCancellationAllocation,supportPoststartCancellationEligibility,
@@ -48,6 +49,28 @@ export async function assertSupportCancelSchema(client: PoolClient) {
     AND (SELECT count(*) FROM pg_trigger WHERE tgrelid=to_regclass('zzsh_order.prestart_termination')
       AND tgname IN('prestart_termination_guard','prestart_request_closure') AND NOT tgisinternal AND tgenabled='O')=2 AS ready`)).rows[0];
   if (row?.ready !== true) throw unavailable("Support cancellation schema is not deployed");
+}
+
+/** Do not cancel a paid order if the corresponding refund executor is only partially installed. */
+export async function supportPoststartSchemaReady(client:PoolClient,controlled:boolean):Promise<boolean> {
+ const row=(await client.query(`SELECT COALESCE(
+  to_regclass('zzsh_order.support_poststart_cancellation') IS NOT NULL
+  AND has_table_privilege(current_user,to_regclass('zzsh_order.support_poststart_cancellation'),'SELECT')
+  AND (${supportPoststartTriggersSql})=12 AND (${supportPoststartExecutorSafeSql})
+  AND NOT EXISTS(SELECT 1 FROM (VALUES
+   ('zzsh_order.cancel_order_after_start(text,bigint,numeric,numeric,text)'),
+   ('zzsh_order.support_poststart_cancellation_complete(text)'),
+   ('zzsh_order.support_cancellation_refund_liability_complete(text)'),
+   ('zzsh_order.support_cancellation_refund_terminal_complete(text)')) f(signature)
+   WHERE to_regprocedure(f.signature) IS NULL OR NOT has_function_privilege(current_user,to_regprocedure(f.signature),'EXECUTE'))
+  AND EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid=to_regclass('zzsh_order.channel_refund_intent')
+   AND conname='channel_refund_current_basis_only' AND convalidated AND position('SUPPORT_CANCELLATION' IN pg_get_constraintdef(oid))>0)
+  AND EXISTS(SELECT 1 FROM pg_index WHERE indexrelid=to_regclass('zzsh_order.support_cancellation_refund_original_key') AND indisvalid AND indisready AND indisunique)
+  AND (NOT $1::boolean OR (to_regclass('zzsh_order.local_controlled_refund_operation') IS NOT NULL
+   AND to_regclass('zzsh_order.local_controlled_refund_evidence') IS NOT NULL
+   AND to_regprocedure('zzsh_order.local_controlled_refund_liability_complete(text)') IS NOT NULL
+   AND to_regprocedure('zzsh_order.local_controlled_refund_terminal_complete(text)') IS NOT NULL)),false) AS ready`,[controlled])).rows[0];
+ return row?.ready===true;
 }
 
 async function factsOf(client: PoolClient, orderId: string): Promise<SupportFactsRow> {
@@ -224,9 +247,7 @@ export async function supportCancelAfterOpening(client:PoolClient,actor:ManualCl
  if(!eligibility.allowed)return supportCancelConflict(input.orderId,eligibility.reason!);
  const amount=supportPoststartCancellationAllocation({paidCents:facts.amount_cents,previouslyAllocatedCents:'0',
   refundCents:input.refundCents,ownerCents:input.ownerCents});
- const ready=(await client.query(`SELECT to_regprocedure('zzsh_order.cancel_order_after_start(text,bigint,numeric,numeric,text)') IS NOT NULL
-  AND has_function_privilege(current_user,to_regprocedure('zzsh_order.cancel_order_after_start(text,bigint,numeric,numeric,text)'),'EXECUTE') AS ready`)).rows[0]?.ready;
- if(ready!==true)throw unavailable("Poststart cancellation schema is not deployed");
+ if(!await supportPoststartSchemaReady(client,facts.payment_source==='CONTROLLED'))throw unavailable("Poststart cancellation or refund schema is not deployed");
  const value=(await client.query<{value:any}>(`SELECT zzsh_order.cancel_order_after_start($1,$2::bigint,$3::numeric,$4::numeric,$5) AS value`,
   [input.orderId,input.expectedOrderRevision,amount.refundCents,amount.ownerCents,input.reason])).rows[0]?.value;
  if(!value||value.orderId!==input.orderId||value.status!=='CANCELLED'||value.paidCents!==amount.paidCents
@@ -253,7 +274,9 @@ export async function readSupportCancellation(client: PoolClient, actor: ManualC
   await assertSupportCancelSchema(client);
   const facts = await factsOf(client, orderId);
   const demo=await demoForFacts(client,actor,facts,'READ_ORIGINAL');
-  const poststartEligibility=supportPoststartCancellationEligibility(modelFacts(facts),demo?.active===true);
+  let poststartEligibility=supportPoststartCancellationEligibility(modelFacts(facts),demo?.active===true);
+  if(poststartEligibility.allowed && !await supportPoststartSchemaReady(client,facts.payment_source==='CONTROLLED'))
+    poststartEligibility={allowed:false,reason:'PAYMENT_BASIS_UNAVAILABLE',refundCents:null,openingConfirmed:true};
   if(facts.status==='CANCELLED'&&facts.cancel_reason==='SUPPORT_AFTER_START_CANCELLED'){
     const terminalFn=facts.payment_source==='CONTROLLED'?'local_controlled_refund_terminal_complete':'support_cancellation_refund_terminal_complete';
     const liabilityFn=facts.payment_source==='CONTROLLED'?'local_controlled_refund_liability_complete':'support_cancellation_refund_liability_complete';

@@ -111,6 +111,13 @@ async function main(){
   const ledger=(await readClient.query(ledgerSql,[entries[0].id])).rows[0];assert.equal(ledger.order_id,orderId);
   await readClient.query('ROLLBACK');
  }finally{readClient.release();}
+ const probe=await admin.connect();
+ try{
+  await probe.query('BEGIN');
+  await probe.query('ALTER TABLE zzsh_order.settlement_ledger_entry DISABLE TRIGGER support_poststart_entry_guard');
+  await probe.query('SET LOCAL ROLE zzsh_synth_runtime');
+  assert.equal(await require('../dist/src/order/support-cancel.js').supportPoststartSchemaReady(probe,true),false);
+ }finally{await probe.query('ROLLBACK').catch(()=>{});probe.release();}
  console.log('PASS: real synthetic-PG cancellation, simulated original refund, renter readback and demo ledger origin');
 }
 main().catch(e=>{console.error(e.stack||e.message);process.exitCode=1}).finally(async()=>{await migration.end();await admin.end();await runtime.end();});
