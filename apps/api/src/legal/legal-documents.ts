@@ -59,6 +59,10 @@ export function legalDigest(body: string): string {
   return createHash("sha256").update(body, "utf8").digest("hex");
 }
 
+export function normalizeLegalDocumentBody(value: unknown): string {
+  return text(value, "body", 20_000);
+}
+
 const EARLY_DISCLOSURE_BODY = "本次提前结束需双方确认并经受权客服复核后生效。费用和退款责任以本次结算版本列示的金额为准，具体承担按核实的结束原因处理。退款在结算生效后7个自然日发起；发起退款不代表渠道或银行到账。";
 export type EarlySettlementDisclosure = { versionId: string; body: string; digest: string };
 
@@ -151,7 +155,7 @@ export async function createLegalDraft(client: PoolClient, adminUserId: string, 
   ensureOnlyFields(body, ["docType", "title", "body", "effectiveAt"]);
   const docType = parseLegalDocType(body.docType);
   const title = text(body.title, "title", 640, 160);
-  const documentBody = text(body.body, "body", 20_000);
+  const documentBody = normalizeLegalDocumentBody(body.body);
   const at = effectiveAt(body.effectiveAt);
   const id = newSupplyId("legal");
   const row = (await client.query<LegalDocumentVersion>(
@@ -175,7 +179,7 @@ export async function updateLegalDraft(client: PoolClient, id: string, body: Rec
   if (current.status !== "DRAFT") throw conflict("Sealed legal document cannot be edited");
   if (current.revision !== body.expectedRevision) throw conflict("Legal document changed; reload and retry");
   const title = body.title === undefined ? current.title : text(body.title, "title", 640, 160);
-  const documentBody = body.body === undefined ? current.body : text(body.body, "body", 20_000);
+  const documentBody = body.body === undefined ? current.body : normalizeLegalDocumentBody(body.body);
   const at = body.effectiveAt === undefined ? current.effectiveAt : effectiveAt(body.effectiveAt);
   const row = (await client.query<LegalDocumentVersion>(
     `UPDATE "zzsh_content"."legal_document_version"

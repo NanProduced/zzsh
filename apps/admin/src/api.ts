@@ -226,7 +226,9 @@ export type UserDirectoryDetail = Omit<UserDirectoryItem, "source"> & {
   riskRevision?: number;
   phoneNumberVerified: boolean | null;
   maskedEmail: string | null;
-  identity: { status: string; ageStatus: string; provider: string | null; verifiedAt: string | null };
+  identity: { status: string; ageStatus: string; provider: string | null; verifiedAt: string | null;
+    display?: { realNameMasked: string; idCardMasked: string; maskingVersion: string } | null;
+    displayReason?: 'NOT_RECORDED' | 'NOT_VERIFIED' | 'STORE_UNAVAILABLE' | null };
   source: {
     kind: UserDirectorySourceKind;
     legacyId?: string;

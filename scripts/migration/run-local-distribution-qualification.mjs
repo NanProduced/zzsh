@@ -5,12 +5,12 @@ import { createRequire, Module } from "node:module";
 import { basename, delimiter, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { writePrivate } from "../local-auth.mjs";
-import { readSourceRows } from "./local-source-adapter.mjs";
-import { assertDistributionCoreReadback, assertDistributionPolicyReceipt, assertDistributionSourceBindings, assertDistributionRepairBuild, assertDistributionOptimizedBuild, assertDistributionRepairGuard, assertQualificationRecoveryEvidence, assertQualificationRenewalEvidence, assertQualificationConstraintRetryEvidence, assertHistoricalFinancePopulation, assertHistoricalFinanceUnchanged, assertNewDistributionTarget, assertQualificationAuthority, assertQualificationPlanBinding, assertQualificationPolicy, assertQualificationReadback, assertRegisteredDistributionTarget, buildLegacyQualificationPlan, isolatedDistributionBuild, legacyDistributionPolicy, privateDistributionPath, reviewedDistributionActor } from "./local-distribution-qualification-plan.mjs";
+import { readVerifiedSourceRows } from "./local-source-adapter.mjs";
+import { assertDistributionCoreReadback, assertDistributionPolicyReceipt, assertDistributionSourceBindings, assertDistributionRepairBuild, assertDistributionOptimizedBuild, assertDistributionRepairGuard, assertQualificationRecoveryEvidence, assertQualificationRenewalEvidence, assertQualificationConstraintRetryEvidence, assertHistoricalFinancePopulation, assertHistoricalFinanceUnchanged, assertNewDistributionTarget, assertQualificationAuthority, assertQualificationPlanBinding, assertQualificationPolicy, assertQualificationReadback, assertRegisteredDistributionTarget, buildLegacyQualificationPlan, isolatedDistributionBuild, legacyDistributionPolicy, normalizedDistributionPolicyFormat, privateDistributionPath, reviewedDistributionActor, validatedLegacyDistributionPayload } from "./local-distribution-qualification-plan.mjs";
 import { executeQualification, assertQualificationRecoveryPreimage } from "./local-distribution-qualification-runner.mjs";
 import { verifyQualificationReceipts } from "./local-distribution-qualification-readback.mjs";
 import { approveLocalNativePolicy } from "./local-distribution-policy-runtime.mjs";
-import { assertLiveTarget, loadRegisteredTarget, targetIdentityQuery } from "./local-target-registry.mjs";
+import { assertLiveTarget, assertNextMigrationWriteReady, loadRegisteredTarget, targetIdentityQuery } from "./local-target-registry.mjs";
 import { assertRoundDependencyProof, inspectRoundDependencyLayout } from "./local-round-dependencies.mjs";
 
 const args = process.argv.slice(2), option = name => { const i = args.indexOf(name); return i < 0 ? undefined : args[i + 1]; };
@@ -53,7 +53,8 @@ assert(d && d.scope === "NATIVE" && typeof d.candidate?.path === "string" && hex
 assert([d.qualificationRecovery,d.qualificationRenewal,d.qualificationConstraintRetry].filter(Boolean).length<=1,'DISTRIBUTION_RECOVERY_MODE_CONFLICT');
 const optimized=d.qualificationRenewal||d.qualificationConstraintRetry;
 const target = input.target;
-Object.assign(summary,{datasetSha256:input.dataset?.sha256,sourceDigest:input.source?.sha256,target:{oid:target?.oid,nonce:target?.nonce}});
+if (["--approve", "--execute"].includes(mode)) assertNextMigrationWriteReady(target);
+Object.assign(summary,{datasetSha256:input.dataset?.sha256,sourceDigest:input.source?.sha256,target:{oid:target?.oid,nonce:target?.nonce,...(target?.instance?{instance:target.instance}:{}),...(target?.migrationProfile?{migrationProfile:target.migrationProfile}:{})}});
 assertNewDistributionTarget(target);
 const sourceDir = privatePath(input.source.path), datasetDir = privatePath(input.dataset.path);
 const capture = pinned(join(sourceDir, "receipt.json"), input.source.sha256), dataset = pinned(join(datasetDir, "manifest.json"), input.dataset.sha256);
@@ -63,6 +64,7 @@ const core = d.coreEvidence;
 const roundReceipt = pinned(privatePath(core?.roundReceipt?.path), core?.roundReceipt?.sha256), coreReadback = pinned(privatePath(core?.readback?.path), core?.readback?.sha256);
 const financialObservations = assertDistributionCoreReadback(roundReceipt, coreReadback, { roundInputSha256: core.roundInputSha256, readbackSha256: core.readback.sha256,
   datasetSha256: input.dataset.sha256, sourceSha256: input.source.sha256, target });
+summary.roundInputSha256 = core.roundInputSha256; summary.roundReceiptSha256 = core.roundReceipt.sha256;
 summary.coreReadbackSha256 = core.readback.sha256; summary.financialObservations = financialObservations;
 
 const api = isolatedDistributionBuild(root, input.apiDist);
@@ -128,16 +130,22 @@ const { readDistributionPolicyRowInTransaction } = moduleFromBuild("finance/dist
 const buildDigest = sha(canonicalize(input.buildFiles));
 async function capturedRows(name) {
   const file = capture.files[name]; assert(file && file.file === basename(file.file) && hex.test(file.sha256 ?? ""));
-  const path = privatePath(join(sourceDir, file.file)), bytes = readFileSync(path); assert.equal(sha(bytes), file.sha256, "DISTRIBUTION_CAPTURE_FILE_CHANGED:" + name);
-  const rows = []; for await (const row of readSourceRows(path)) rows.push(row);
-  assert.equal(rows.length, file.rows); return rows;
+  const path = privatePath(join(sourceDir, file.file)), rows = [];
+  await readVerifiedSourceRows(path, file, row => rows.push(row)); return rows;
 }
 const configuration = await capturedRows("distributionConfig"), rawLevels = await capturedRows("distributionLevels");
 assert.equal(canonicalize(configuration), canonicalize(candidate.configuration), "DISTRIBUTION_CONFIGURATION_SOURCE_CHANGED");
 assert.equal(canonicalize(rawLevels), canonicalize(candidate.rawLevels), "DISTRIBUTION_LEVEL_SOURCE_CHANGED");
-const payload = legacyDistributionPolicy({ scope: d.scope, receiptSha256: input.source.sha256, configurationSha256: capture.files.distributionConfig.sha256, levelsSha256: capture.files.distributionLevels.sha256, configuration, rawLevels });
-assert.equal(canonicalize(payload), canonicalize(candidate.approvalPayloads?.find(p => p.config?.scope === d.scope)), "DISTRIBUTION_CANDIDATE_POLICY_CHANGED");
-assert.equal(canonicalize(parseDistributionPolicyChange(payload)), canonicalize(payload), "DISTRIBUTION_POLICY_INVALID");
+const sourcePayload = legacyDistributionPolicy({ scope: d.scope, receiptSha256: input.source.sha256, configurationSha256: capture.files.distributionConfig.sha256, levelsSha256: capture.files.distributionLevels.sha256, configuration, rawLevels });
+assert.equal(canonicalize(sourcePayload), canonicalize(candidate.approvalPayloads?.find(p => p.config?.scope === d.scope)), "DISTRIBUTION_CANDIDATE_POLICY_CHANGED");
+const normalizedPolicy = normalizedDistributionPolicyFormat(d.policyFormat, roundReceipt);
+const payload = validatedLegacyDistributionPayload(sourcePayload, parseDistributionPolicyChange, canonicalize, normalizedPolicy);
+if (normalizedPolicy) {
+  const proof = roundReceipt.distributionSourcePreflight;
+  assert(proof?.status === 'DISTRIBUTION_SOURCE_PRECHECK_PASSED_TARGET_NOT_RUN' && proof.sourceReceiptSha256 === input.source.sha256
+    && proof.configurationSha256 === capture.files.distributionConfig.sha256 && proof.levelsSha256 === capture.files.distributionLevels.sha256
+    && proof.policyDigest === sha(canonicalize(payload.config)), 'DISTRIBUTION_PREFLIGHT_POLICY_CHANGED');
+}
 const credentialFile = protectedInput(input.credentials);
 const registry = JSON.parse(readFileSync(join(dirname(credentialFile), "resource.json")));
 const registered = loadRegisteredTarget(credentialFile);
@@ -206,7 +214,7 @@ async function readTarget(originalPlan) {
 summary.timings.inputValidationMs=Math.round(performance.now()-processStarted); output("receipt.json", summary);
   if (mode === "--prepare") {
     const data = await readTarget(); verifyBuild();
-    const plan = { schema: "zzsh.local-distribution-qualification-plan.v1", inputSha256, datasetSha256: input.dataset.sha256, sourceDigest: input.source.sha256, candidateSha256: d.candidate.sha256, target: { oid: target.oid, nonce: target.nonce, database: registry.database, marker: registry.marker, ownerOid: data.resource.owner_oid, migrationRoleOid: credentials.migration.oid, instance:registered.instance }, buildDigest, toolFiles, ...data.plan, historicalFinance: data.history, headCompatible: data.headCompatible, policyActiveAtPrepare: data.policyActive, readOnlyRollbackAck: true, clientClosed: true };
+    const plan = { schema: "zzsh.local-distribution-qualification-plan.v1", inputSha256, datasetSha256: input.dataset.sha256, sourceDigest: input.source.sha256, candidateSha256: d.candidate.sha256, target: { oid: target.oid, nonce: target.nonce, database: registry.database, marker: registry.marker, ownerOid: data.resource.owner_oid, migrationRoleOid: credentials.migration.oid, instance:registered.instance, ...(target.migrationProfile?{migrationProfile:target.migrationProfile}:{}) }, buildDigest, toolFiles, ...data.plan, historicalFinance: data.history, headCompatible: data.headCompatible, policyActiveAtPrepare: data.policyActive, readOnlyRollbackAck: true, clientClosed: true };
     if(d.qualificationRenewal){const r=d.qualificationRenewal,evidence=Object.fromEntries(['failure','inspection','previousPlan','previousInput','previousAuthority','buildManifest'].map(name=>[name,pinned(privatePath(r[name]?.path),r[name]?.sha256)]));
       summary.renewal=assertQualificationRenewalEvidence({...evidence,plan,input,refs:r,canonicalize});}
     if(d.qualificationConstraintRetry){const r=d.qualificationConstraintRetry,evidence=Object.fromEntries(['failure','inspection','previousPlan','previousInput','previousAuthority','priorRecoveryInput','upgradePlan','upgradeExecution','upgradeReadback','buildManifest'].map(name=>[name,pinned(privatePath(r[name]?.path),r[name]?.sha256)]));
@@ -220,7 +228,8 @@ summary.timings.inputValidationMs=Math.round(performance.now()-processStarted); 
     summary.policyActive = data.policyActive;
   } else {
     const plan = pinned(privatePath(option("--plan")), option("--plan-sha"));
-    const planBinding = { inputSha256, datasetSha256: input.dataset.sha256, sourceDigest: input.source.sha256, candidateSha256: d.candidate.sha256, scope: d.scope, target: { oid: target.oid, nonce: target.nonce, database: registry.database, marker: registry.marker, migrationRoleOid: credentials.migration.oid, instance:registered.instance }, expectedParticipants: dataset.domains.users.ready, buildDigest, toolFiles };
+    summary.planSha256 = option("--plan-sha");
+    const planBinding = { inputSha256, datasetSha256: input.dataset.sha256, sourceDigest: input.source.sha256, candidateSha256: d.candidate.sha256, scope: d.scope, target: { oid: target.oid, nonce: target.nonce, database: registry.database, marker: registry.marker, migrationRoleOid: credentials.migration.oid, instance:registered.instance, ...(target.migrationProfile?{migrationProfile:target.migrationProfile}:{}) }, expectedParticipants: dataset.domains.users.ready, buildDigest, toolFiles };
     assertQualificationPlanBinding(plan, planBinding, canonicalize);
     const expectedPolicy = buildLegacyQualificationPlan({ participants: [], packets: [], payload, sourceDigest: input.source.sha256, canonicalize, projectQualification: projectLegacyInvitationQualification, expectedParticipants: 0 });
     assertQualificationPolicy(plan, expectedPolicy, canonicalize);
@@ -260,14 +269,15 @@ summary.timings.inputValidationMs=Math.round(performance.now()-processStarted); 
       if(optimized)assert.equal(typeof prepareReviewedLegacyQualificationIndex,'function','DISTRIBUTION_RENEWAL_INDEX_REQUIRED');
       const pool = new Pool({ ...base, user: credentials.migration.name, password: credentials.migration.password, max: 1 });
       const lock = new Client({ ...base, database: "postgres", user: credentials.migration.name, password: credentials.migration.password });
-      await executeQualification({ pool, lock, identity, plan, authority, actor, registry, target, sourceDigest: input.source.sha256, bind: bindReviewedLegacyInvitationFacts, qualify: qualifyReviewedLegacyParticipants, prepareIndex: prepareReviewedLegacyQualificationIndex, verifyBuild, summary, save: () => output("receipt.json", summary), ...(q||r||r2?{verifyRecovery:client=>assertQualificationRecoveryPreimage(client,plan,actor)}:{}) });
+      await executeQualification({ pool, lock, identity, plan, authority, actor, registry, registeredTarget: registered, target, sourceDigest: input.source.sha256, bind: bindReviewedLegacyInvitationFacts, qualify: qualifyReviewedLegacyParticipants, prepareIndex: prepareReviewedLegacyQualificationIndex, verifyBuild, summary, save: () => output("receipt.json", summary), ...(q||r||r2?{verifyRecovery:client=>assertQualificationRecoveryPreimage(client,plan,actor)}:{}) });
     }
     if (mode !== "--approve") {
       verifyBuild(); const after = await readTarget(plan); verifyBuild(); assert(after.policyActive && after.headCompatible, "ACTIVE_DISTRIBUTION_POLICY_REQUIRED");
       assertQualificationReadback(plan, after.plan);
       assertHistoricalFinanceUnchanged(plan.historicalFinance,after.history,canonicalize);
       summary.historicalFinanceReadback = after.history;
-      summary.status = "EXACT_QUALIFICATION_READBACK_PASSED"; summary.readOnlyRollbackAck = true; summary.readOnlyClientClosed = true;
+      summary.status = "EXACT_QUALIFICATION_READBACK_PASSED"; summary.policyActive = true; summary.policyId = plan.policyId;
+      summary.policyDigest = plan.policyDigest; summary.readOnlyRollbackAck = true; summary.readOnlyClientClosed = true;
       summary.counts = { ...summary.counts, readbackEligible: after.plan.existing.length, readbackIneligible: after.plan.ineligible.length, readbackUnresolved: (after.plan.unresolved ?? []).length, readbackExceptions: after.plan.exceptions.length, verifiedReceiptBatches: after.qualificationReceipts.batches, verifiedReceiptParticipants: after.qualificationReceipts.participants };
     }
   }

@@ -2,7 +2,9 @@ import { prepareLocalFundsPlan, assertFundsWriterCoverage,continuationCommission
 import { createHash } from "node:crypto";
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
+import { buildNextContinuationRows } from "./local-source-adapter.mjs";
 import { requiresInvitationCountClosure } from "./local-round-contract.mjs";
+import { openingReviewResource } from "./local-target-opening.mjs";
 const sha = value => createHash("sha256").update(value).digest("hex");
 const micros = value => value.replace(/\.([0-9]{3})Z$/, (_, digits) => "." + digits + "000Z");
 async function arrayOf(ctx, name) { const result = []; const file = ctx.domainFile(name); if (file)
@@ -44,10 +46,11 @@ export async function applyInvitationDomains(ctx, reviewCommon, resource, canoni
     }
 }
 export async function applyFinancialDomains(ctx) {
+    if (typeof ctx.isNextMigration !== 'boolean') throw new Error('MIGRATION_PROFILE_FLAG_UNPROVEN');
     if(!ctx.fundsSource||!ctx.refundAttemptsSource)throw new Error("EXACT_FINANCIAL_SUPPLEMENTS_REQUIRED");
     const { client, actor, mod, manifest, state } = ctx, preparation = mod("finance/legacy-finance-source-preparation"), canonical = mod("supply/content-hash").canonicalize;
     const sourceCutoff=new Date(manifest.sourceCutoff).toISOString();
-    const resource = { host: "127.0.0.1", port: Number(ctx.targetPort ?? 55432), database: "zzsh_test_regression", oid: Number(state.binding.oid), owner: state.resource.owner, marker: state.resource.marker, role: state.resource.role, roleOid: Number(state.resource.role_oid) };
+    const resource = openingReviewResource(ctx);
     const reviewCommon = { ref: "CORE_FULL_LEGACY_" + state.binding.oid, attempt: "dataset-" + state.binding.datasetSha256.slice(0, 16), actor: { userId: actor.userId, sessionId: actor.sessionId }, resource, ...(state.executionWindow ?? { notBefore: state.startedAt, expiresAt: new Date(Date.parse(state.startedAt) + 12 * 3600000).toISOString() }), cutoff: sourceCutoff };
     // Empty coverage is streamed: each 400-entry chunk is frozen to its own restricted file as soon
     // as it is complete, so a full-source round never holds one entry per subject and source kind.
@@ -92,11 +95,17 @@ export async function applyFinancialDomains(ctx) {
     // The old listing deposit is out of scope: nothing is written for it, and the exclusion is
     // recorded on the plan so the report can prove it was deliberate.
     const continuations = await arrayOf(ctx, "continuations");
-    let continuationRows = state.generatedPhases?.continuationEvidence ? freezePhase(ctx, "continuationEvidence", []) : null;
+    const next = ctx.isNextMigration === true;
+    let continuationRows = !next && state.generatedPhases?.continuationEvidence ? freezePhase(ctx, "continuationEvidence", []) : null;
     if (!continuationRows) {
         const target = await facts(ctx, continuations.map(row => row.sourceId));
         const byLegacy = new Map(target.parents.map(p => [p.legacyId, p]));
         continuationRows = [];
+        if (next) {
+            continuationRows = buildNextContinuationRows({manifest, rows: continuations, parents: target.parents, sourceAsOf: micros(sourceCutoff), admit: mod("order/legacy-continuation-calc").admitLegacyEvidence});
+            const prior = state.generatedPhases?.continuationEvidence && freezePhase(ctx, "continuationEvidence", []);
+            if (prior && JSON.stringify(prior) !== JSON.stringify(continuationRows)) throw new Error("CONTINUATION_FROZEN_PHASE_CHANGED");
+        } else {
         for (const row of continuations) {
             const parent = byLegacy.get(row.sourceId);
             if (!parent) {
@@ -108,6 +117,7 @@ export async function applyFinancialDomains(ctx) {
                 continue;
             }
             continuationRows.push({ sourceId: row.sourceId, body: { orderId: parent.parentOrderId, sourceDigest: parent.sourceDigest, sourceAsOf: micros(sourceCutoff), evidenceRef: manifest.sourceRef + ":continuation:" + row.sourceId, source: row.source, commissionEvidence: row.commissionEvidence } });
+        }
         }
         continuationRows = freezePhase(ctx, "continuationEvidence", continuationRows);
     }

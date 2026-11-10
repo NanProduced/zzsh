@@ -79,6 +79,11 @@ function fixture(options: { failAudit?: boolean; failCoverage?: boolean; failCon
   const port: LegacyCoveragePort = {
     async readByFingerprint(c, s, fp) { assert.equal(c, client); portLog.push("read-fingerprint"); return structuredClone(state().coverage.get(s + "|" + fp) ?? null); },
     async readByExecutionKey(c, s, key) { assert.equal(c, client); portLog.push("read-key"); return structuredClone([...state().coverage.values()].find((r) => r.subjectUserId === s && r.executionKey === key) ?? null); },
+    async readForWrite(c,s,key,fp) {
+      assert.equal(c,client);portLog.push("read-write");const byKey=[...state().coverage.values()].find(r=>r.subjectUserId===s&&r.executionKey===key);
+      if(byKey)return {record:structuredClone(byKey),matchedByKey:true};const byFp=state().coverage.get(s+"|"+fp);
+      return byFp?{record:structuredClone(byFp),matchedByKey:false}:null;
+    },
     async persist(c, record) {
       assert.equal(c, client); portLog.push("persist"); if (options.failCoverage) throw new Error("SYNTHETIC_COVERAGE_FAILURE");
       const old = state().coverage.get(record.subjectUserId + "|" + record.fingerprint) ?? [...state().coverage.values()].find((r) => r.subjectUserId === record.subjectUserId && r.executionKey === record.executionKey); if (old) return structuredClone(old);

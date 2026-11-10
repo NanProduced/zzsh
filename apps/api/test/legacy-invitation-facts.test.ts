@@ -87,6 +87,20 @@ function database(){
 }
 async function bind(db:ReturnType<typeof database>,packet:LegacyInvitationFactsInput,phase:'IMPORT'|'COUNTS'='IMPORT',mode:'execute'|'recover'='execute'){return bindReviewedLegacyInvitationFacts(db.client,actor,review(packet,phase),mode);}
 
+test('next-round invitation maintenance binds its local port, cluster and database epoch',async()=>{
+ const packet=planned([raw('1')]).packets[0]!,db=database(),nonce='a'.repeat(24);
+ const target:LegacyInvitationFactsReview['resource']={host:'127.0.0.1',port:55435,database:'zzsh_test_regression',oid:42,owner:'zzsh',ownerOid:10,
+  marker:'zzsh:regression-test:v1',role:'zzsh_regression_migration',roleOid:11,migrationProfile:'LOCAL_MIGRATION_NEXT_V1',systemIdentifier:'12345',nonce};
+ const r:LegacyInvitationFactsReview={...review(packet),resource:target},client=db.client as any,base=client.query.bind(client),live={...target};
+ client.connectionParameters={host:target.host,port:target.port,database:target.database,user:target.role};
+ client.query=async(sql:string,args:any[]=[])=>sql.includes('invitation-facts resource')?{rows:[{...live,now:at,owned:3,complete:true,read_only:'off'}],rowCount:1}:base(sql,args);
+ await assert.doesNotReject(bindReviewedLegacyInvitationFacts(client,actor,r));
+ for(const key of ['nonce','systemIdentifier'] as const){const old=live[key];live[key]='9';await assert.rejects(bindReviewedLegacyInvitationFacts(client,actor,r));live[key]=old;}
+ await assert.rejects(bindReviewedLegacyInvitationFacts(client,actor,{...r,resource:{...target,migrationProfile:undefined}}));
+ await assert.rejects(bindReviewedLegacyInvitationFacts(client,actor,{...r,resource:{...target,port:55434}}));
+ assert.equal(db.state.writes,0);
+});
+
 function qualificationIndexFixture(duplicate=false){
  const packet=planned([raw('1'),raw('2'),raw('3')]).packets[0]!,db=database(),prepared=prepareLegacyInvitationFacts(packet,hash(packet));
  const state={xid:'100',locked:false,events:[{id:'audit1',version:'5'}],packets:new Map([['audit1',{source:packet.source,facts:packet.subjects,facts_type:'array',receipt:packet.source.receiptSha256}]]),participants:new Map(prepared.subjects.map(p=>[p.userId,p.sourceDigest]))};

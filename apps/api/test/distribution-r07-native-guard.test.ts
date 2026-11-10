@@ -14,6 +14,7 @@ function client(change:{host?:string;port?:number;database?:string;user?:string;
  return {connectionParameters,getTransactionStatus:()=> 'T',query:async(sql:string)=>{
   if(sql.includes('AS "databaseName"'))return {rows:[safe]};
   if(sql.includes('AS "ownsBusinessSchema"'))return {rows:[{ownsBusinessSchema:false,ownsBusinessRelation:false,hasPrivilegedMembership:false}]};
+  if(sql.includes('AS "systemIdentifier"'))return {rows:[{oid:change.oid??123,name:'zzsh_test_regression',role:change.role??role,role_oid:change.roleOid??456,nonce:change.nonce??nonce,marker:change.marker??'zzsh:regression-test:v1',systemIdentifier:change.cluster??instance.systemIdentifier}]};
   if(sql.includes('system_identifier::text'))return {rows:[{system_identifier:change.cluster??instance.systemIdentifier}]};
   if(sql.includes('AS "ownerOid"'))return {rows:[{owner:change.owner??'zzsh',ownerOid:change.ownerOid??200,complete:true}]};
   if(sql.includes("to_regprocedure('zzsh_order.distribution_policy_contract_version()')"))return {rows:[{ready:true}]};
@@ -36,4 +37,19 @@ test('R06 default remains restricted to 55432, and caller mutation cannot change
  const mutable={...instance},newScope=createReviewedLocalNativeDistributionScope(proof(55433),{owner:'zzsh',ownerOid:200,instance:mutable});mutable.systemIdentifier='999';
  await assert.doesNotReject(assertDistributionPolicyWriteReadyInTransaction(client(),newScope));
  assert.throws(()=>createReviewedLocalNativeDistributionScope(proof(55433),{owner:'zzsh',ownerOid:200,instance:{...instance,systemIdentifier:''}}));
+});
+
+test('next-round distribution scope requires a branded instance and cannot grant another purpose',async()=>{
+ const next={host:'127.0.0.1' as const,port:55435,systemIdentifier:instance.systemIdentifier,migrationProfile:'LOCAL_MIGRATION_NEXT_V1' as const};
+ const binding={resourceOid:123,nonce,runtimeRoleOid:456,migrationInstance:next};
+ const registered=createControlledRegressionResource(config(next.port),binding,'DISTRIBUTION');
+ const scope=createReviewedLocalNativeDistributionScope(registered,{owner:'zzsh',ownerOid:200,instance:next});
+ await assert.doesNotReject(assertDistributionPolicyWriteReadyInTransaction(client({port:55435}),scope));
+ for(const change of [{port:55433},{cluster:'999'},{oid:124},{nonce:'b'.repeat(24)},{roleOid:457}])
+  await assert.rejects(assertDistributionPolicyWriteReadyInTransaction(client({port:55435,...change}),scope));
+ assert.throws(()=>createControlledRegressionResource(config(next.port),binding,'WITHDRAWAL'));
+ assert.throws(()=>createControlledRegressionResource(config(next.port),{...binding,migrationInstance:{...next,systemIdentifier:123 as any}},'DISTRIBUTION'));
+ assert.throws(()=>createControlledRegressionResource(config(next.port),{resourceOid:123,nonce,runtimeRoleOid:456},'DISTRIBUTION'));
+ assert.throws(()=>createReviewedLocalNativeDistributionScope(registered,{owner:'zzsh',ownerOid:200,instance:{...next,systemIdentifier:'999'}}));
+ assert.throws(()=>createReviewedLocalNativeDistributionScope({kind:'CONTROLLED_REGRESSION_RESOURCE'},{owner:'zzsh',ownerOid:200,instance:next}));
 });

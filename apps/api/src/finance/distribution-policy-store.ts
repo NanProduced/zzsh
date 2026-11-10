@@ -5,7 +5,7 @@ import {validateDistributionPolicy,type DistributionPolicyConfig} from './distri
 import {prepareDistributionPolicyChange,initialDistributionPolicyConfig,isInitialPolicyChange,type DistributionPolicyChange,type DistributionPolicyUpdate,type DistributionPolicyInitial} from './distribution-policy-change';
 import {ConfigurationError,isEcsTestWithoutJoinpay,type AppConfig} from '../config/config';
 import {assertBusinessRuntimeIdentity} from '../database/business';
-import {assertControlledRegressionResource,type ControlledRegressionResource} from './controlled-regression-resource';
+import {assertControlledRegressionInstance,assertControlledRegressionResource,isControlledMigrationInstance,type ControlledMigrationInstance,type ControlledRegressionResource} from './controlled-regression-resource';
 import {REGRESSION_DATABASE,REGRESSION_MARKER,REGRESSION_RUNTIME_USER} from '../config/test-resource';
 import {readFormalCollectionAdmission,type FormalCollectionAdmission} from '../order/joinpay-collection-profile';
 import {assertLocalFinancialSandboxAssembly,assertLocalFinancialSandboxResource,localFinancialSandboxRegistration,type LocalFinancialSandbox} from './local-financial-sandbox-resource';
@@ -20,7 +20,7 @@ const milestoneName='zzsh_test_order_milestone_real_1',milestoneRuntime='zzsh_or
 const localProofs=new WeakMap<LocalDistributionScope,Readonly<CreationReceipt&{readOnly:boolean;origins?:DistributionOrigins;sandbox?:LocalFinancialSandbox;nativeReadNonce?:string;nativeReadPort?:number}>>();
 const nativeProofs=new WeakMap<LocalDistributionScope,Readonly<{kind:'NATIVE';database:string;runtimeUser:string;admissionSha256:string|null;withoutJoinpay:boolean}>>();
 const demoNativeProofs=new WeakMap<LocalDistributionScope,DemoFinanceResource>();
-type ReviewedDistributionInstance=Readonly<{host:'127.0.0.1';port:55432|55433;systemIdentifier:string}>;
+type ReviewedDistributionInstance=Readonly<{host:'127.0.0.1';port:number;systemIdentifier:string;migrationProfile?:'LOCAL_MIGRATION_NEXT_V1'}>;
 const reviewedLocalNativeProofs=new WeakMap<LocalDistributionScope,Readonly<{proof:ControlledRegressionResource;owner:string;ownerOid:number;instance?:ReviewedDistributionInstance}>>();
 /** Formal NATIVE scope comes only from the reviewed formal collection admission; no receipt or env shortcut. */
 export function createNativeDistributionPolicyScope(admission:FormalCollectionAdmission):LocalDistributionScope{
@@ -49,7 +49,9 @@ export function createReviewedLocalNativeDistributionScope(proof:ControlledRegre
  if(!owner||!/^[a-z][a-z0-9_]{0,62}$/.test(owner.owner)||owner.owner===REGRESSION_RUNTIME_USER||!Number.isSafeInteger(owner.ownerOid)||owner.ownerOid<=0||owner.ownerOid>4294967295)
   throw new ConfigurationError('REVIEWED_LOCAL_NATIVE_DISTRIBUTION_OWNER_INVALID');
  const instance=owner.instance;
- if(instance&&(instance.host!=='127.0.0.1'||![55432,55433].includes(instance.port)||!/^[0-9]+$/.test(instance.systemIdentifier)))throw new ConfigurationError('REVIEWED_LOCAL_NATIVE_DISTRIBUTION_INSTANCE_INVALID');
+ if(instance&&(instance.migrationProfile===undefined?(instance.host!=='127.0.0.1'||![55432,55433].includes(instance.port)||!/^[0-9]+$/.test(instance.systemIdentifier))
+  :!isControlledMigrationInstance(instance as ControlledMigrationInstance)))throw new ConfigurationError('REVIEWED_LOCAL_NATIVE_DISTRIBUTION_INSTANCE_INVALID');
+ if(instance?.migrationProfile)assertControlledRegressionInstance(proof,instance as ControlledMigrationInstance);
  const value=Object.freeze({kind:'NATIVE_DISTRIBUTION' as const});reviewedLocalNativeProofs.set(value,Object.freeze({proof,owner:owner.owner,ownerOid:owner.ownerOid,...(instance?{instance:Object.freeze({...instance})}:{})}));return value;
 }
 export function distributionPolicyScopeOf(binding:LocalDistributionScope|undefined):DistributionPolicyScopeKind{return binding!==undefined&&(nativeProofs.has(binding)||demoNativeProofs.has(binding)||reviewedLocalNativeProofs.has(binding)||localProofs.get(binding)?.nativeReadNonce!==undefined)?'NATIVE':'LOCAL_CONTROLLED';}

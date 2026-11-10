@@ -54,14 +54,14 @@ const port = {} as LegacyCoveragePort;
 function resultFor(input: maintenance.LegacyGrowthMaintenanceInput): Awaited<ReturnType<typeof maintenance.applyLegacyGrowthMaintenance>> {
   return { replayed: false, receipt: { schema: "legacy-growth-maintenance-receipt-v1", operation: maintenance.LEGACY_GROWTH_MAINTENANCE_OPERATION, executionKey: input.executionKey, subjectUserId: input.subjectUserId, businessFingerprint: input.businessFingerprint, businessPackageSha256: input.businessPackageSha256, coverageFingerprint: "c".repeat(64), coverageExecutionKey: input.executionKey, sourceReceiptDigest: "d".repeat(64), coverageState: "COMPLETE", inserted: 0, replayed: 0, execution: { approvalRef: input.execution.approvalRef, attempt: input.execution.attempt } } };
 }
-function fakeDb(options: { commitError?: Error; rollbackError?: Error; expired?: boolean } = {}) {
+function fakeDb(options: { commitError?: Error; rollbackError?: Error; commitCommand?: string; rollbackCommand?: string; expired?: boolean } = {}) {
   const queries: string[] = [], releases: Array<boolean | undefined> = []; let connects = 0;
   const client = { async query(sql: string) {
     const id = sql.includes("credit-init-window") ? "WINDOW" : sql; queries.push(id);
     if (id === "WINDOW") return { rows: [{ dbNow: options.expired ? "2026-10-20T04:00:00.000000Z" : "2026-10-20T01:00:00.000000Z" }], rowCount: 1 };
     if (sql === "COMMIT" && options.commitError) throw options.commitError;
     if (sql === "ROLLBACK" && options.rollbackError) throw options.rollbackError;
-    return { rows: [], rowCount: 0 };
+    return { rows: [], rowCount: 0, command: sql === "COMMIT" ? options.commitCommand ?? "COMMIT" : sql === "ROLLBACK" ? options.rollbackCommand ?? "ROLLBACK" : sql };
   }, release(discard?: boolean) { releases.push(discard); } } as unknown as PoolClient;
   const pool = { async connect() { connects++; return client; } } as unknown as Pool;
   return { pool, client, queries, releases, connects: () => connects };
@@ -133,6 +133,22 @@ test("APPLY uses one client and checks DB clock immediately before COMMIT", asyn
   assert.deepEqual(db.queries, ["BEGIN", "WINDOW", "COMMIT"]); assert.deepEqual(db.releases, [undefined]); assert.equal(db.connects(), 1);
 });
 
+test("the pre-commit guard receives the same client that will commit", async t => {
+  const run = fixture().run(), db = fakeDb();
+  t.mock.method(maintenance, "applyLegacyGrowthMaintenance", async (_client: PoolClient, input: maintenance.LegacyGrowthMaintenanceInput) => resultFor(input));
+  await runLegacyGrowthMaintenanceApply(db.pool, run.input, port, async client => { assert.equal(client, db.client); db.queries.push("FENCE"); });
+  assert.deepEqual(db.queries, ["BEGIN", "WINDOW", "FENCE", "COMMIT"]);
+});
+
+test("a lost maintenance lock before COMMIT rolls back and preserves the original key", async t => {
+  const run = fixture().run(), db = fakeDb();
+  t.mock.method(maintenance, "applyLegacyGrowthMaintenance", async (_client: PoolClient, input: maintenance.LegacyGrowthMaintenanceInput) => resultFor(input));
+  await assert.rejects(() => runLegacyGrowthMaintenanceApply(db.pool, run.input, port, async () => { db.queries.push("LOCK_CHECK"); throw new Error("LOCK_LOST"); }), error =>
+    error instanceof LegacyGrowthMaintenanceOutcomeError && error.outcome === "NOT_COMMITTED" && error.rollbackAcknowledged && error.preserved.executionKey === KEY);
+  assert.deepEqual(db.queries, ["BEGIN", "WINDOW", "LOCK_CHECK", "ROLLBACK"]);
+  assert(!db.queries.includes("COMMIT"));
+});
+
 test("COMMIT error preserves both fingerprints/key/package and discards without rollback or unsafe error text", async t => {
   const run = fixture().run(), cause = new Error("RAW_SOURCE_SECRET_SQL"), db = fakeDb({ commitError: cause });
   t.mock.method(maintenance, "applyLegacyGrowthMaintenance", async (_client: PoolClient, input: maintenance.LegacyGrowthMaintenanceInput) => resultFor(input));
@@ -142,6 +158,18 @@ test("COMMIT error preserves both fingerprints/key/package and discards without 
     const text = describeLegacyGrowthMaintenanceFailure(error); assert.match(text, /COMMIT_UNKNOWN/); assert.match(text, /RECOVER_READ/); assert(!text.includes("RAW_SOURCE_SECRET_SQL")); assert(!text.includes("rollback acknowledged")); return true;
   });
   assert.deepEqual(db.queries, ["BEGIN", "WINDOW", "COMMIT"]); assert.deepEqual(db.releases, [true]);
+});
+
+test("unexpected COMMIT or ROLLBACK command tags never claim acknowledgement", async t => {
+  const run = fixture().run(), badCommit = fakeDb({ commitCommand: "ROLLBACK" });
+  t.mock.method(maintenance, "applyLegacyGrowthMaintenance", async (_client: PoolClient, input: maintenance.LegacyGrowthMaintenanceInput) => resultFor(input));
+  await assert.rejects(() => runLegacyGrowthMaintenanceApply(badCommit.pool, run.input, port), error =>
+    error instanceof LegacyGrowthMaintenanceOutcomeError && error.outcome === "COMMIT_UNKNOWN" && !error.rollbackAcknowledged && error.preserved.executionKey === KEY);
+  assert.deepEqual(badCommit.releases, [true]);
+  const badRollback = fakeDb({ expired: true, rollbackCommand: "UNKNOWN" });
+  await assert.rejects(() => runLegacyGrowthMaintenanceApply(badRollback.pool, run.input, port), error =>
+    error instanceof LegacyGrowthMaintenanceOutcomeError && error.outcome === "NOT_COMMITTED" && !error.rollbackAcknowledged && error.preserved.executionKey === KEY);
+  assert.deepEqual(badRollback.releases, [true]);
 });
 
 test("expired final permit never sends COMMIT, and rollback failure retains the original cause", async t => {

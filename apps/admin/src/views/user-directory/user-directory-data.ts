@@ -81,6 +81,8 @@ export type User = {
   suspended: boolean;
   /** Raw server enum, so the semantic tone never depends on re-parsing a label. */
   identityStatus: string;
+  identityNameMasked?: string | null;
+  identityDocumentMasked?: string | null;
   identity: string;
   age: string;
   verifiedAt: string | null;
@@ -152,6 +154,8 @@ function project(row: UserDirectoryItem | UserDirectoryDetail, has:(permission:s
     suspended: row.suspended,
     identity: identityLabel(detail?.identity.status ?? row.identityStatus),
     identityStatus: detail?.identity.status ?? row.identityStatus,
+    identityNameMasked: detail?.identity.display?.realNameMasked ?? null,
+    identityDocumentMasked: detail?.identity.display?.idCardMasked ?? null,
     age: ageLabel(detail?.identity.ageStatus ?? row.ageStatus),
     verifiedAt: detail?.identity.verifiedAt ?? null,
     createdAt: row.createdAt,
@@ -454,7 +458,7 @@ export class UserDirectoryBff {
 }
 
 export type UserNotePage = { items: {id:string;text:string;author:{id:string;displayName:string};createdAt:string;canDelete:boolean}[]; nextCursor:string|null; capabilities:{canCreate:boolean;canManage:boolean} };
-export type SensitiveProfile = {userId:string;phoneNumber:string|null;realName:null;identityNumber:null;availability:{phoneNumber:'AVAILABLE'|'NOT_RECORDED';realName:'NOT_RECORDED';identityNumber:'NOT_RECORDED'}};
+export type SensitiveProfile = {userId:string;phoneNumber:string|null;realName:string|null;identityNumber:string|null;availability:{phoneNumber:'AVAILABLE'|'NOT_RECORDED';realName:'AVAILABLE'|'NOT_RECORDED';identityNumber:'AVAILABLE'|'NOT_RECORDED'}};
 export type UserConsumptionComponents = {haffRentCents:string|null;itemConsumptionCents:string|null;earlyMakeupCents:string|null;renterFeeCents:string|null};
 export type UserConsumption = {contractVersion:'admin-user-consumption.v1';subjectId:string;currency:'CNY';amountUnit:'CENT';scope:'CURRENT_POSTED_NATIVE_SETTLEMENTS';asOfUtc:string;knowledge:'KNOWN'|'UNKNOWN';amountCents:string|null;knownAmountCents:string;components:UserConsumptionComponents;total:number;unknownCount:number;page:number;pageSize:number;items:(UserConsumptionComponents & {orderId:string;displayNo:string;gameId:string;postingId:string;settlementVersionId:string;versionHash:string;postedAt:string;documentRef:string;knowledge:'KNOWN'|'UNKNOWN';amountCents:string|null;reasonCodes:string[]})[];legacyHistory:{knowledge:'UNKNOWN';amountCents:null;reason:'LEGACY_COMPONENT_BREAKDOWN_NOT_AVAILABLE'}};
 

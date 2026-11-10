@@ -66,6 +66,12 @@ function fakeDb(opts: { failCommit?: boolean; failInsertAt?: number; failPersist
     },
     async readByFingerprint(_c, s, fp) { return find(byFp, `${s}|${fp}`, (r) => r.fingerprint); },
     async readByExecutionKey(_c, s, k) { return find(byKey, `${s}|${k}`, (r) => String(r.executionKey)); },
+    async readForWrite(_c,s,k,fp) {
+      const byExecution=find(byKey,`${s}|${k}`,(r)=>String(r.executionKey));
+      if(byExecution)return {record:byExecution,matchedByKey:true};
+      const byFingerprint=find(byFp,`${s}|${fp}`,(r)=>r.fingerprint);
+      return byFingerprint?{record:byFingerprint,matchedByKey:false}:null;
+    },
   };
   return { table, byFp, byKey, client, port, pool: { async connect() { return client; } } as any };
 }

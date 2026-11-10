@@ -1,22 +1,250 @@
 import { createHash } from "node:crypto";
-import { createReadStream } from "node:fs";
+import { createReadStream, lstatSync } from "node:fs";
+import { basename, join } from "node:path";
+import { StringDecoder } from "node:string_decoder";
+// NEXT preserves the original evidence even when the old order lacks calculation inputs.
+// A preserved ISOLATED record does not authorize settlement or prove a channel refund.
+export const NEXT_CONTINUATION_POLICY = 'PRESERVE_SOURCE_ADMISSION_V1';
+/** Full capture is input evidence; NEXT writes only the owner's selected account/order population. */
+export function assertNextBusinessPopulation(population, isNext) {
+  if (isNext !== true && isNext !== false) throw new Error('MIGRATION_PROFILE_FLAG_UNPROVEN');
+  if (isNext && population?.mode !== 'SELECTED_BUSINESS_SCOPE') throw new Error('NEXT_SELECTED_BUSINESS_SCOPE_REQUIRED');
+}
+/** Validate opaque historical refund evidence without attributing it to an order. */
+export function inspectUnresolvedRefundSource(snapshot, canonicalize) {
+  const raw = snapshot?.rawSource;
+  if (snapshot?.associationState !== 'UNRESOLVED' || raw?.entity !== 'la_refund_record' || typeof raw.canonical !== 'string') return 'SOURCE_MISSING';
+  if (!/^[a-f0-9]{64}$/.test(raw.digest ?? '') || createHash('sha256').update(raw.canonical).digest('hex') !== raw.digest) return 'SOURCE_DIGEST_MISMATCH';
+  let value;
+  try { value = JSON.parse(raw.canonical); } catch { return 'SOURCE_JSON_INVALID'; }
+  if (!value || typeof value !== 'object' || Array.isArray(value) || canonicalize(value) !== raw.canonical) return 'SOURCE_CANONICAL_INVALID';
+  if (!Object.hasOwn(value,'order_id') || !Object.hasOwn(value,'order_sn')) return 'SOURCE_ORDER_FIELDS_MISSING';
+  const idUsable = (typeof value.order_id === 'string' || typeof value.order_id === 'number' && Number.isSafeInteger(value.order_id))
+    && /^[1-9]\d{0,23}$/.test(String(value.order_id));
+  const numberUsable = typeof value.order_sn === 'string' && value.order_sn.trim().length > 0;
+  if (!idUsable && !numberUsable) return 'SOURCE_ORDER_IDENTIFIERS_UNUSABLE';
+  return null;
+}
+
+export function expectedContinuationImports(manifest, isNext) {
+  const d = manifest?.domains?.continuations;
+  if (isNext !== true && isNext !== false) throw new Error('CONTINUATION_PROFILE_UNPROVEN');
+  if (!isNext) return d?.parameterComplete;
+  const s = d?.preparedEvidence;
+  const fields = ['readyComplete', 'readyIsolated', 'readyUnprepared', 'unreadyEmitted', 'unreadyUnprepared'];
+  if (s?.policy !== NEXT_CONTINUATION_POLICY || !fields.every(k => Number.isSafeInteger(s[k]) && s[k] >= 0)
+      || s.readyUnprepared !== 0 || s.unreadyEmitted !== 0 || s.unreadyUnprepared !== 0 || !Number.isSafeInteger(d.source)
+      || fields.reduce((n, k) => n + s[k], 0) !== d.source
+      || !Number.isSafeInteger(d.parameterComplete) || !Number.isSafeInteger(d.isolated)
+      || d.parameterComplete + d.isolated !== d.source
+      || (manifest.files?.continuations?.rows ?? 0) !== s.readyComplete + s.readyIsolated + s.unreadyEmitted) {
+    throw new Error('NEXT_CONTINUATION_SOURCE_COVERAGE_UNPROVEN');
+  }
+  return s.readyComplete + s.readyIsolated;
+}
+
+export function verifyNextContinuationRows(manifest, rows, admit) {
+  const expected = expectedContinuationImports(manifest, true);
+  const seen = new Set(), ready = [];
+  let complete = 0, isolated = 0, unready = 0;
+  for (const row of rows) {
+    if (!row || typeof row.sourceId !== 'string' || seen.has(row.sourceId)) throw new Error('CONTINUATION_SOURCE_DUPLICATE');
+    seen.add(row.sourceId);
+    if (row.targetParentReady === false) { unready++; continue; }
+    if (row.targetParentReady !== true || row.source?.legacyOrderId !== row.sourceId || !/^[a-f0-9]{64}$/.test(row.parentSourceDigest ?? ''))
+      throw new Error('CONTINUATION_SOURCE_PARENT_MISMATCH');
+    const actual = admit(row.source);
+    if (!['PARAMETER_COMPLETE', 'ISOLATED'].includes(row.admission) || actual.admission !== row.admission
+        || JSON.stringify(actual.reasons) !== JSON.stringify(row.reasons)) throw new Error('CONTINUATION_SOURCE_ADMISSION_MISMATCH');
+    if (row.admission === 'PARAMETER_COMPLETE') complete++; else isolated++;
+    ready.push(row);
+  }
+  const s = manifest.domains.continuations.preparedEvidence;
+  if (ready.length !== expected || complete !== s.readyComplete || isolated !== s.readyIsolated || unready !== s.unreadyEmitted)
+    throw new Error('NEXT_CONTINUATION_SOURCE_COUNT_MISMATCH');
+  return ready;
+}
+
+export function buildNextContinuationRows({ manifest, rows, parents, sourceAsOf, admit }) {
+  const ready = verifyNextContinuationRows(manifest, rows, admit);
+  const byId = new Map(parents.map(parent => [parent.legacyId, parent]));
+  if (byId.size !== parents.length) throw new Error('CONTINUATION_PARENT_DUPLICATE');
+  return ready.map(row => {
+    const parent = byId.get(row.sourceId);
+    if (!parent || row.parentSourceDigest !== parent.sourceDigest) throw new Error('CONTINUATION_SOURCE_PARENT_MISMATCH');
+    return { sourceId: row.sourceId, body: { orderId: parent.parentOrderId, sourceDigest: parent.sourceDigest,
+      sourceAsOf, evidenceRef: manifest.sourceRef + ':continuation:' + row.sourceId, source: row.source, commissionEvidence: row.commissionEvidence } };
+  });
+}
 export function parseSourceCaptureLine(line) {
     return JSON.parse(/^[0-9A-F]+$/.test(line) ? Buffer.from(line, "hex").toString("utf8") : line);
 }
 export const sourceJsonLine = row => JSON.stringify(row).replaceAll("\u2028", "\\u2028").replaceAll("\u2029", "\\u2029") + "\n";
-/** Source text can contain U+2028/U+2029; readline treats those as record separators. JSONL uses LF. */
-export async function* readSourceRows(file) {
-    const input = createReadStream(file, { encoding: "utf8" }); let pending = "";
+/** A new restore is accepted only with the same pre/post-checked capture origin. */
+export function assertCapturedSourceOrigin(receipt,binding,bindingSha) {
+    const origin=receipt?.sourceOrigin;
+    if(binding?.schema!=="zzsh.local-source-origin.v2") {
+        if(origin?.schema==="zzsh.local-source-origin.v2") throw new Error("SOURCE_ORIGIN_BINDING_MISMATCH");
+        return;
+    }
+    const identity=receipt?.identity;
+    if(!/^[a-f0-9]{64}$/.test(bindingSha??"")||receipt?.schema!=="zzsh.legacy-source-capture.v1"||receipt.status!=="CAPTURED_READ_ONLY"
+      ||receipt.rollbackConfirmed!==true||receipt.clientClosed!==true||receipt.client?.code!==0||receipt.clientStderrPresent!==false
+      ||origin?.schema!==binding.schema||origin.bindingSha256!==bindingSha
+      ||origin.verifiedAfterCapture!==true||origin.sourceExportConsistency!=="NOT_VERIFIED_BY_RESTORE"
+      ||binding.restoreRecord?.sourceExportConsistency!=="NOT_VERIFIED_BY_RESTORE"||origin.serverUuid!==binding.source?.serverUuid
+      ||!/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i.test(origin.serverUuid??"")||!/^[a-f0-9]{64}$/.test(binding.container?.id??"")
+      ||binding.source?.network!=="none"||binding.source.readOnly!==true||binding.source.superReadOnly!==true||binding.source.eventScheduler!=="DISABLED"
+      ||!/^[a-f0-9]{64}$/.test(binding.restoreRecord?.dumpSha256??"")||binding.restoreRecord.consumedSha256!==binding.restoreRecord.dumpSha256||binding.restoreRecord.importClientExitCode!==0
+      ||receipt.containerId!==binding.container?.id||receipt.database!==binding.source?.database
+      ||identity?.database!==receipt.database||identity.principal!=="root@localhost"||identity.readOnly!==1||identity.isolation!=="REPEATABLE-READ"||identity.accessMode!=="READ ONLY"||identity.txState!=="ACTIVE"
+      ||identity.serverUuid!==origin.serverUuid||identity.globalReadOnly!==1||identity.superReadOnly!==1||identity.eventScheduler!=="DISABLED")
+        throw new Error("SOURCE_ORIGIN_BINDING_MISMATCH");
+}
+/** New captures must distinguish unavailable account facts from an omitted projection. */
+export function assertDisplayCaptureCoverage(display) {
+    const ratio=display?.accountBaseRatio,payout=display?.accountFullPayout,total=display?.rows,scope="ACCOUNT_AT_CAPTURE_NOT_ORDER_SNAPSHOT";
+    const valid=value=>Number.isSafeInteger(value)&&value>=0;
+    if(!valid(total)||ratio?.scope!==scope||![ratio.known,ratio.unknown].every(valid)||ratio.known+ratio.unknown!==total
+      ||payout?.scope!==scope||![payout.selected,payout.unselected,payout.unknown].every(valid)
+      ||payout.selected+payout.unselected+payout.unknown!==total)throw new Error("DISPLAY_CAPTURE_COVERAGE_REQUIRED");
+}
+export function assertDisplayCaptureRow(snapshot) {
+    if(!snapshot||typeof snapshot!=="object"||Array.isArray(snapshot)
+      ||!Object.hasOwn(snapshot,"sourceAccountBaseRatioWanPerYuan")||!Object.hasOwn(snapshot,"sourceAccountFullPayoutSelected")
+      ||snapshot.sourceAccountBaseRatioWanPerYuan!==null&&typeof snapshot.sourceAccountBaseRatioWanPerYuan!=="string"
+      ||snapshot.sourceAccountFullPayoutSelected!==null&&typeof snapshot.sourceAccountFullPayoutSelected!=="boolean")
+      throw new Error("DISPLAY_CAPTURE_FACTS_REQUIRED");
+}
+export function assertLegacyIdentityColumns(columns) {
+    for (const field of ["id", "is_bind_id", "real_name", "id_card"])
+        if (!columns?.has(field)) throw new Error("SOURCE_IDENTITY_COLUMN_MISSING:" + field);
+}
+export function assertLegacyListedPricingColumns(gameColumns, configColumns) {
+    for (const [table, columns, fields] of [["la_sg_game", gameColumns, ["id", "profit_dot"]], ["la_system_config", configColumns, ["id", "type", "name", "value"]]])
+        for (const field of fields) if (!columns?.has(field)) throw new Error("SOURCE_LISTED_PRICING_COLUMN_MISSING:" + table + "." + field);
+}
+export function assertLegacySkinDictionaryColumns(accountColumns,typeColumns,dataColumns) {
+    for (const [table,columns,fields] of [["la_rental_accounts",accountColumns,["id","knife_skin","agent_skin","weapon_skin","gold_skin"]],
+        ["la_dict_type",typeColumns,["id","dict_type"]],["la_dict_data",dataColumns,["id","type_id","name","value","is_delete"]]])
+        for (const field of fields) if (!columns?.has(field)) throw new Error("SOURCE_SKIN_DICTIONARY_COLUMN_MISSING:" + table + "." + field);
+}
+export function inspectLegacySkinDictionaryCapture(receipt) {
+    const proof=receipt?.skinDictionaryCapture;
+    if (proof===undefined || proof===null) return {status:"LEGACY_FIXED_RULES"};
+    if (proof.schema!=="zzsh.legacy-skin-dictionary-capture.v1" || proof.accounts!=="accountDisplay" || proof.types!=="skinDictionaryTypes"
+        || proof.data!=="skinDictionaryData" || proof.sameSnapshot!==true || receipt.status!=="CAPTURED_READ_ONLY"
+        || receipt.rollbackConfirmed!==true || receipt.clientClosed!==true) throw new Error("SOURCE_SKIN_DICTIONARY_PROOF_INVALID");
+    for (const name of ["accountDisplay","skinDictionaryTypes","skinDictionaryData"])
+        if (!Array.isArray(receipt.files?.[name]?.fields)) throw new Error("SOURCE_SKIN_DICTIONARY_PROOF_INVALID");
+    assertLegacySkinDictionaryColumns(new Set(receipt.files.accountDisplay.fields),new Set(receipt.files.skinDictionaryTypes.fields),new Set(receipt.files.skinDictionaryData.fields));
+    return {status:"SAME_SNAPSHOT_DYNAMIC_RULES"};
+}
+export function inspectLegacyListedPricingCapture(receipt, games, settings, parseInteger) {
+    const proof = receipt?.listedPricingCapture;
+    if (proof === undefined || proof === null) return { status: "NOT_CAPTURED_IN_BASE" };
+    if (proof.schema !== "zzsh.legacy-listed-pricing-capture.v1" || proof.gameDomain !== "games" || proof.gameProfitField !== "profit_dot"
+        || proof.fastConfigDomain !== "tradePolicy" || proof.fastConfigType !== "game" || proof.fastConfigName !== "profitFirstDot"
+        || proof.runtimeRedis !== "NOT_CAPTURED" || receipt.status !== "CAPTURED_READ_ONLY" || receipt.rollbackConfirmed !== true || receipt.clientClosed !== true
+        || !Array.isArray(receipt.files?.games?.fields) || !Array.isArray(receipt.files?.tradePolicy?.fields)
+        || !Array.isArray(games) || !Array.isArray(settings) || typeof parseInteger !== "function") throw new Error("SOURCE_LISTED_PRICING_PROOF_INVALID");
+    assertLegacyListedPricingColumns(new Set(receipt.files.games.fields), new Set(receipt.files.tradePolicy.fields));
+    const game = games.filter(row => row?.id === "1" && row.is_delete === "0"), fast = settings.filter(row => row?.type === "game" && row.name === "profitFirstDot");
+    if (game.length !== 1 || fast.length !== 1 || typeof game[0].profit_dot !== "string" || typeof fast[0].value !== "string") throw new Error("SOURCE_LISTED_PRICING_VALUES_NOT_UNIQUE");
+    try { parseInteger(game[0].profit_dot, true); parseInteger(fast[0].value, true); }
+    catch { throw new Error("SOURCE_LISTED_PRICING_VALUES_INVALID"); }
+    return { status: "MYSQL_CAPTURE_VALUES_VALIDATED", gameRows: 1, fastConfigRows: 1, runtimeRedis: "NOT_CAPTURED", target: "NOT_VERIFIED" };
+}
+export function planLegacyIdentitySource(raw, verified, modules) {
+    if (!verified) return { state: "NOT_VERIFIED", trustedIdentityNumber: null, legacyIdentityProfile: null };
+    const details = { realName: raw.real_name, idCardNo: raw.id_card };
+    if (!modules.identityProfile.validLegacyIdentityDetails(details)) return { state: "INVALID", trustedIdentityNumber: null, legacyIdentityProfile: null };
+    try {
+        return { state: "READY", trustedIdentityNumber: modules.identity.normalizeIdentityDocument(raw.id_card), legacyIdentityProfile: details };
+    } catch { return { state: "INVALID", trustedIdentityNumber: null, legacyIdentityProfile: null }; }
+}
+export function matchesLegacyIdentitySource(raw, row) {
+    const verified = row?.input?.evidence?.status?.realNameBound;
+    if (!raw || raw.id !== row?.sourceId || typeof verified !== "boolean" || raw.is_bind_id !== (verified ? "1" : "0")) return false;
+    return verified ? row.legacyIdentityProfile?.realName === raw.real_name && row.legacyIdentityProfile?.idCardNo === raw.id_card
+        : row.legacyIdentityProfile === null;
+}
+/** Legacy text can contain U+2028/U+2029; only LF terminates these files' records. */
+export async function* readLfLines(input, onBytes) {
+    const decoder = new StringDecoder("utf8"); let pending = "";
     try {
         for await (const chunk of input) {
-            pending += chunk; let at;
+            if (onBytes) onBytes(chunk);
+            pending += decoder.write(chunk); let at;
             while ((at = pending.indexOf("\n")) >= 0) {
                 const line = pending.slice(0, at); pending = pending.slice(at + 1);
-                if (line.trim()) yield JSON.parse(line);
+                yield line;
             }
         }
-        if (pending.trim()) yield JSON.parse(pending);
+        pending += decoder.end();
+        if (pending) yield pending;
     } finally { input.destroy(); }
+}
+export async function* readSourceRows(file, onBytes) {
+    for await (const line of readLfLines(createReadStream(file), onBytes)) if (line.trim()) yield JSON.parse(line);
+}
+/** Consumers must finish the stream before accepting data derived from it. */
+export async function* readBoundSourceRows(file, entry) {
+    if (!entry || !/^[a-f0-9]{64}$/.test(entry.sha256 ?? "") || !Number.isSafeInteger(entry.rows) || entry.rows < 0) throw new Error("SOURCE_STREAM_META_INVALID");
+    const consumed = createHash("sha256"); let count = 0;
+    for await (const row of readSourceRows(file, bytes => consumed.update(bytes))) { count++; yield row; }
+    if (count !== entry.rows || consumed.digest("hex") !== entry.sha256) throw new Error("SOURCE_STREAM_CHANGED");
+    const after = createHash("sha256"); for await (const bytes of createReadStream(file)) after.update(bytes);
+    if (after.digest("hex") !== entry.sha256) throw new Error("SOURCE_STREAM_CHANGED_AFTER_READ");
+}
+/** Visit only in memory until the consumed bytes and subsequent file state have both been verified. */
+export async function readVerifiedSourceRows(file, entry, visit) {
+    if (typeof visit !== "function") throw new Error("SOURCE_STREAM_META_INVALID");
+    let count = 0; for await (const row of readBoundSourceRows(file, entry)) { visit(row); count++; }
+    return count;
+}
+
+/** Check the entire display package against the frozen source before any target write. */
+export async function verifyDisplayCaptureInputs({sourceDir,sourceEntry,accountsDir,accountsEntry,displayDir,display,canonicalize}) {
+    assertDisplayCaptureCoverage(display);
+    if(typeof canonicalize!=="function"||!Array.isArray(sourceEntry?.fields)||!['base_bot','is_full_payout'].every(key=>sourceEntry.fields.includes(key))
+      ||!Number.isSafeInteger(display.notDisplayable)||display.notDisplayable<0||display.rows+display.notDisplayable!==accountsEntry?.rows)
+      throw new Error("DISPLAY_CAPTURE_SOURCE_REQUIRED");
+    const file=(directory,entry)=>{
+      if(typeof directory!=="string"||!entry||typeof entry.file!=="string"||entry.file!==basename(entry.file))throw new Error("DISPLAY_CAPTURE_SOURCE_REQUIRED");
+      const path=join(directory,entry.file),stat=lstatSync(path);if(!stat.isFile()||stat.isSymbolicLink())throw new Error("DISPLAY_CAPTURE_SOURCE_REQUIRED");return path;
+    };
+    const source=new Map(),expected=new Map();
+    await readVerifiedSourceRows(file(sourceDir,sourceEntry),sourceEntry,row=>{
+      if(typeof row?.id!=="string"||!row.id||source.has(row.id)||!Object.hasOwn(row,'base_bot')||!Object.hasOwn(row,'is_full_payout')
+        ||!['0','1','2','3','4','5','6'].includes(row.status)||!['0','1'].includes(row.is_delete))
+        throw new Error("DISPLAY_CAPTURE_SOURCE_INVALID");
+      source.set(row.id,{...legacyAccountCaptureProof(row,canonicalize),status:row.status,deleted:row.is_delete==='1'});
+    });
+    let nonDisplayable=0;
+    await readVerifiedSourceRows(file(accountsDir,accountsEntry),accountsEntry,row=>{
+      const proof=source.get(row?.sourceId);
+      if(!proof||proof.sourceDigest!==row.sourceDigest||String(row.sourceStatus)!==proof.status||row.sourceDeleted!==proof.deleted||expected.has(row.sourceId))
+        throw new Error("DISPLAY_CAPTURE_ACCOUNT_SOURCE_MISMATCH");
+      const eligible=Boolean(row.snapshot&&row.sourceUpdatedAt&&[0,3,4,5,6].includes(Number(row.sourceStatus))&&!row.sourceDeleted);
+      if(eligible)expected.set(row.sourceId,{proof,sourceUpdatedAt:row.sourceUpdatedAt});else {expected.set(row.sourceId,null);nonDisplayable++;}
+    });
+    if(nonDisplayable!==display.notDisplayable)throw new Error("DISPLAY_CAPTURE_DENOMINATOR_MISMATCH");
+    const seen=new Set(),ratio={known:0,unknown:0},payout={selected:0,unselected:0,unknown:0};
+    const entry={file:display.file,sha256:display.sha256,rows:display.rows};
+    await readVerifiedSourceRows(file(displayDir,entry),entry,row=>{
+      const match=expected.get(row?.sourceId);assertDisplayCaptureRow(row?.snapshot);
+      if(!match||seen.has(row.sourceId)||row.baseSourceDigest!==match.proof.sourceDigest||row.sourceUpdatedAt!==match.sourceUpdatedAt
+        ||!matchesCapturedAccountBaseRatio(match.proof,row.snapshot,row.baseSourceDigest)
+        ||!matchesCapturedAccountFullPayout(match.proof,row.snapshot,row.baseSourceDigest))throw new Error("DISPLAY_CAPTURE_SOURCE_MISMATCH");
+      seen.add(row.sourceId);ratio[row.snapshot.sourceAccountBaseRatioWanPerYuan===null?'unknown':'known']++;
+      payout[row.snapshot.sourceAccountFullPayoutSelected===null?'unknown':row.snapshot.sourceAccountFullPayoutSelected?'selected':'unselected']++;
+    });
+    if(seen.size!==display.rows||seen.size!==expected.size-nonDisplayable||ratio.known!==display.accountBaseRatio.known||ratio.unknown!==display.accountBaseRatio.unknown
+      ||['selected','unselected','unknown'].some(key=>payout[key]!==display.accountFullPayout[key]))throw new Error("DISPLAY_CAPTURE_DENOMINATOR_MISMATCH");
+    return {status:"SOURCE_DISPLAY_CAPTURE_VERIFIED_TARGET_NOT_RUN",sourceAccounts:sourceEntry.rows,preparedAccounts:accountsEntry.rows,
+      displayRows:display.rows,notDisplayable:nonDisplayable,ratio,payout,sourceSha256:sourceEntry.sha256,accountsSha256:accountsEntry.sha256,displaySha256:display.sha256,
+      sourceConnections:0,targetConnections:0,targetWrites:0};
 }
 /** A later, bounded extract may add facts but cannot rewrite any field in its frozen base row. */
 export function assertSourceSupplementFields(original, supplement) {
@@ -262,6 +490,16 @@ export function matchesLegacyOrderCapture(proof, planned, canonicalize) {
     return Boolean(proof && proof.sourceId === planned.sourceId && proof.sourceDigest === planned.sourceDigest
         && digest(canonicalize(planned.source.row)) === proof.sourceDigest);
 }
+export const LEGACY_REFUND_RELATIONSHIP_POLICY = "legacy-refund-relationship-v2";
+export const LEGACY_DATASET_PREPARATION_TOOLS = Object.freeze(["prepare-local-dataset.mjs", "local-source-adapter.mjs", "local-source-scenarios.mjs", "selected-business-scope.mjs"]);
+
+/** A blank matching order number is missing evidence, not an exact refund link. */
+export function isExactLegacyRefundRelationship(refund, order) {
+    return refund?.order_type === "order" && typeof refund.order_id === "string" && refund.order_id !== "" && order?.id === refund.order_id
+        && typeof refund.user_id === "string" && refund.user_id !== "" && order.user_id === refund.user_id
+        && typeof refund.order_sn === "string" && refund.order_sn.trim() !== "" && order.order_sn === refund.order_sn;
+}
+
 export function sourceFinanceObservation(domain, raw) {
     const integer = value => { if (!/^-?[0-9]+$/.test(value ?? "") || !Number.isSafeInteger(Number(value)))
         throw new Error("SOURCE_INTEGER_INVALID"); return Number(value); };

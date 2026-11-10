@@ -12,17 +12,23 @@ export async function runNativeDistributionApproval({ handleAdminSecurity, secur
   const sessionsAt = performance.now();
   try { await verifySession(first); await verifySession(second); }
   finally { (summary.timings ??= {}).sessionValidationMs = Math.round(performance.now() - sessionsAt); save(); }
-  async function call(actor, step, path, body, key) {
+  async function call(actor, step, path, body, key, validResponse) {
     const startedAt = new Date().toISOString(), started = performance.now(); let sent = false, recorded = false;
     const record = status => { summary.steps.push({ step, ...(key ? { idempotencyKey: key } : {}), status, startedAt, finishedAt: new Date().toISOString(), elapsedMs: Math.round(performance.now() - started) }); recorded = true; };
     try {
       verifyBuild(); await verifyResource(); await verifySession(actor);
       summary.pending = { step, ...(key ? { idempotencyKey: key } : {}), startedAt, sent: false }; save();
-      const result = { statusCode: 200, body: undefined, status(code) { this.statusCode = code; return this; }, setHeader() { return this; }, json(value) { this.body = value; } };
+      const result = { statusCode: 200, body: undefined, responded: false, status(code) { this.statusCode = code; return this; }, setHeader() { return this; }, json(value) { this.body = value; this.responded = true; } };
       const request = { method: body === undefined ? "GET" : "POST", originalUrl: "/api/v1/admin/security/approvals" + path,
         headers: { origin, cookie: actor.cookie, ...(key ? { "idempotency-key": key } : {}) }, ...(body === undefined ? {} : { body }) };
       summary.pending.sent = true; sent = true; save();
       await handleAdminSecurity(request, result, security);
+      const definitive = result.responded && Number.isInteger(result.statusCode)
+        && (result.statusCode === 200 && (!validResponse || validResponse(result.body)) || result.statusCode >= 400 && result.statusCode < 500);
+      if (key && !definitive) {
+        record('OUTCOME_UNKNOWN'); summary.steps.at(-1).responseStatus = result.statusCode; save();
+        throw new Error('DISTRIBUTION_APPROVAL_OUTCOME_UNKNOWN:' + step);
+      }
       record(result.statusCode); delete summary.pending; save();
       assert.equal(result.statusCode, 200, "DISTRIBUTION_APPROVAL_REJECTED:" + step);
       return result.body;
@@ -48,13 +54,14 @@ export async function runNativeDistributionApproval({ handleAdminSecurity, secur
     template = await getTemplate();
   }
   assert(template?.candidates?.some(c => c.username?.toLowerCase() === second.username.toLowerCase() && c.isBoss === true && c.eligible === true), "EXISTING_TEMPLATE_SECOND_BOSS_NOT_ELIGIBLE");
-  const created = await call(first, "request", "/requests", structuredClone(plan.approvalBody), key + ":request");
-  assert(created?.requestId && created.requestId === created.approvalRequestId && created.status === "PENDING", "DISTRIBUTION_APPROVAL_REQUEST_MISMATCH");
+  const created = await call(first, "request", "/requests", structuredClone(plan.approvalBody), key + ":request",
+    value => Boolean(value?.requestId && value.requestId === value.approvalRequestId && value.status === "PENDING"));
   summary.approvalRequestId = created.requestId; save();
-  const decided = await call(second, "decision", "/requests/decision", { requestId: created.requestId, decision: "APPROVE", password: second.password, totpCode: totp(second.totp) }, key + ":decision");
-  assert(decided?.requestId === created.requestId && decided.status === "APPROVED", "DISTRIBUTION_APPROVAL_DECISION_MISMATCH");
-  const executed = await call(first, "execute", "/requests/execute", { requestId: created.requestId, password: first.password, totpCode: totp(first.totp) }, key + ":execute");
-  assert(executed?.requestId === created.requestId && executed.status === "EXECUTED" && executed.executionStatus === "SUCCEEDED" && executed.resultCode === "DISTRIBUTION_POLICY_INITIALIZED" && executed.businessResultRef === plan.policyId, "DISTRIBUTION_APPROVAL_EXECUTION_MISMATCH");
+  await call(second, "decision", "/requests/decision", { requestId: created.requestId, decision: "APPROVE", password: second.password, totpCode: totp(second.totp) }, key + ":decision",
+    value => value?.requestId === created.requestId && value.status === "APPROVED");
+  await call(first, "execute", "/requests/execute", { requestId: created.requestId, password: first.password, totpCode: totp(first.totp) }, key + ":execute",
+    value => value?.requestId === created.requestId && value.status === "EXECUTED" && value.executionStatus === "SUCCEEDED"
+      && value.resultCode === "DISTRIBUTION_POLICY_INITIALIZED" && value.businessResultRef === plan.policyId);
   summary.status = "POLICY_COMMIT_ACK_READBACK_REQUIRED"; summary.policyId = plan.policyId; save();
   const detail = await call(first, "approval-readback", "/requests/detail?requestId=" + encodeURIComponent(created.requestId));
   assert(detail?.requestId === created.requestId && detail.status === "EXECUTED" && detail.operation?.code === operationCode && detail.decision?.decision === "APPROVED" && detail.decision.approver?.id === second.userId && detail.execution?.status === "SUCCEEDED" && detail.execution.resultCode === "DISTRIBUTION_POLICY_INITIALIZED" && detail.execution.resultDetail === plan.policyId && detail.execution.executor?.id === first.userId, "DISTRIBUTION_APPROVAL_READBACK_MISMATCH");

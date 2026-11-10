@@ -5,12 +5,13 @@ import Module, { createRequire } from 'node:module';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { writePrivate } from '../local-auth.mjs';
-import { advisoryLockSql, assertLiveTarget, loadRegisteredTarget, maintenanceConnection, targetConnection, targetIdentityQuery } from './local-target-registry.mjs';
+import { advisoryLockSql, assertLiveTarget, hasVerifiedNextInitialSchema, isRegisteredMigrationInstance, loadRegisteredTarget, maintenanceConnection, NEXT_MIGRATION_PROFILE, targetConnection, targetIdentityQuery } from './local-target-registry.mjs';
 import { isolatedDistributionBuild } from './local-distribution-qualification-plan.mjs';
 
 const root=resolve(fileURLToPath(new URL('../..',import.meta.url))),privateRoot=resolve('E:/zzsh-local-state/restricted'),runtimeRoot=resolve('E:/zzsh-local-state/runtime'),mainApi=resolve('E:/zzsh/zzsh/apps/api');
 const sha=x=>createHash('sha256').update(x).digest('hex'),hex=x=>typeof x==='string'&&/^[a-f0-9]{64}$/.test(x);
 const canonical=x=>JSON.stringify(x,(_,v)=>v&&typeof v==='object'&&!Array.isArray(v)?Object.fromEntries(Object.entries(v).sort(([a],[b])=>a.localeCompare(b))):v);
+export const R07_BOOTSTRAP_SECRET_FILES=Object.freeze({user:'AUTH_USER_SECRET_FILE',admin:'AUTH_ADMIN_SECRET_FILE',bootstrap:'AUTH_ADMIN_BOOTSTRAP_SECRET_FILE',redis:'REDIS_PASSWORD_FILE',identity:'USER_IDENTITY_SUBJECT_HMAC_KEY_FILE',identityProfile:'USER_LEGACY_IDENTITY_PROFILE_KEY_FILE',listing:'LISTING_CURSOR_SECRET_FILE'});
 function inside(base,value,output=false){
  assert(typeof value==='string'&&isAbsolute(value),'BOOTSTRAP_PATH_REQUIRED');const p=resolve(value),rel=relative(base,p);
  assert(rel&&!rel.startsWith('..')&&!isAbsolute(rel),'BOOTSTRAP_PATH_REQUIRED');
@@ -24,12 +25,15 @@ function jsFiles(dir,prefix=''){const result={};for(const e of readdirSync(dir,{
 }return result;}
 export function assertR07BootstrapInputs(request,registered,schema){
  const target=request?.target;
- assert(request?.schema==='zzsh.round07-bootstrap-runtime-request.v1'&&registered?.instance&&registered.port===55433&&!registered.pendingReset
+ assert(request?.schema==='zzsh.round07-bootstrap-runtime-request.v1'&&isRegisteredMigrationInstance(registered)&&!registered.pendingReset
    &&registered.database==='zzsh_test_regression'&&registered.marker==='zzsh:regression-test:v1'&&registered.migrationRoleOid&&registered.runtimeRoleOid
    &&registered.lockKey==='806006'&&registered.maintenanceDatabase==='postgres'
    &&target?.bootstrapReservation==='ROUND07_BOOTSTRAP_RESERVED'&&target.oid===registered.oid&&target.nonce===registered.nonce
    &&target.migrationRoleOid===registered.migrationRoleOid&&canonical(target.instance)===canonical(registered.instance)
+   &&(target.migrationProfile??null)===(registered.migrationProfile??null)
    &&schema?.status==='CLEAN_SCHEMA_INSTALLED'&&schema.oid===target.oid&&schema.nonce===target.nonce&&canonical(schema.instance)===canonical(target.instance)
+   &&(target.migrationProfile!==NEXT_MIGRATION_PROFILE||schema.migrationProfile===NEXT_MIGRATION_PROFILE
+     &&schema.targetFence==='HELD_ACROSS_SCHEMA_AND_ACL'&&schema.targetFenceReleased===true&&hasVerifiedNextInitialSchema(schema))
    &&Number.isSafeInteger(schema.finalOrdinal)&&schema.finalOrdinal>=160&&schema.commitAck===true&&schema.migrationAck===true&&schema.runtimeAclReadback===true
    &&Array.isArray(target.schemaHashes)&&target.schemaHashes.length>0&&target.schemaHashes.every(hex)&&canonical(schema.hashes)===canonical(target.schemaHashes)&&hex(schema.journalSha256)&&hex(schema.historySha256)
    &&schema.readbackRollbackAck===true&&schema.readbackClientClosed===true&&schema.unlockAck===true&&schema.maintenanceClosed===true
@@ -67,8 +71,7 @@ async function main(){
  for(const kind of ['migration','runtime'])assert(credentials[kind]?.name===registered[kind+'Role']&&credentials[kind]?.oid===registered[kind+'RoleOid'],'BOOTSTRAP_ROLE_CHANGED');
  const api=isolatedDistributionBuild(root,request.apiDist);for(let x=api;x!==dirname(x);x=dirname(x))assert(!lstatSync(x).isSymbolicLink(),'BOOTSTRAP_LINK_REFUSED');
  const buildFiles=jsFiles(api);assert(Object.keys(buildFiles).length>0&&canonical(buildFiles)===canonical(request.buildFiles),'BOOTSTRAP_BUILD_CHANGED');
- const secretNames={user:'AUTH_USER_SECRET_FILE',admin:'AUTH_ADMIN_SECRET_FILE',bootstrap:'AUTH_ADMIN_BOOTSTRAP_SECRET_FILE',redis:'REDIS_PASSWORD_FILE',identity:'USER_IDENTITY_SUBJECT_HMAC_KEY_FILE',listing:'LISTING_CURSOR_SECRET_FILE'};
- const secretEnv={},secretPaths={};for(const [key,env] of Object.entries(secretNames)){
+ const secretEnv={},secretPaths={};for(const [key,env] of Object.entries(R07_BOOTSTRAP_SECRET_FILES)){
   const ref=request.secrets?.[key],path=inside(join(mainApi,'.secrets'),ref?.path),bytes=readFileSync(path);
   assert(hex(ref.sha256)&&sha(bytes)===ref.sha256,'BOOTSTRAP_SECRET_CHANGED');secretEnv[env]=relative(mainApi,path).replaceAll('\\','/');secretPaths[key]=path;
  }
@@ -78,6 +81,7 @@ async function main(){
  const system=Object.fromEntries(Object.entries(process.env).filter(([key])=>/^(PATH|PATHEXT|SYSTEMROOT|WINDIR|COMSPEC|TEMP|TMP|USERPROFILE|LOCALAPPDATA|APPDATA|HOMEDRIVE|HOMEPATH|SYSTEMDRIVE|PROGRAMFILES(?:\(X86\))?|PROGRAMDATA|NUMBER_OF_PROCESSORS|PROCESSOR_.+)$/i.test(key)));
  const env={...system,...secretEnv,NODE_PATH:[join(root,'apps/api/node_modules'),join(root,'node_modules')].join(';'),APP_PROFILE:'test',PROVIDER_MODE:'fake',NODE_ENV:'development',HOST:'127.0.0.1',PORT:'4242',
   DB_TARGET:'local-compose',DB_HOST:registered.host,DB_PORT:String(registered.port),DB_NAME:registered.database,DB_USER:registered.runtimeRole,DB_PASSWORD:credentials.runtime.password,
+  ...(registered.migrationProfile?{LOCAL_MIGRATION_BOOTSTRAP_ENABLED:'true'}:{}),
   REDIS_HOST:'127.0.0.1',REDIS_PORT:'56379',AUTH_ENABLED:'true',AUTH_API_ORIGIN:request.origins.apiOrigin,AUTH_USER_ORIGIN:request.origins.userOrigin,AUTH_ADMIN_ORIGIN:request.origins.adminOrigin,
   AUTH_SECURE_COOKIES:'false',AUTH_LOCAL_SMS_MOCK:'true',USER_SMS_PROVIDER:'disabled',USER_REAL_NAME_PROVIDER:'disabled',LISTING_CURSOR_KEY_ID:'r07-bootstrap',
   YUNXIN_ENABLED:'false',ORDER_TEAMS_ENABLED:'false',SUPPORT_DISPATCH_ENABLED:'false',ORDER_IM_EVENTS_ENABLED:'false',ORDER_SWEEP_ENABLED:'false',DISTRIBUTION_DUE_WORKER_ENABLED:'false',
@@ -103,6 +107,7 @@ async function main(){
   assert(unlockAck&&maintenanceClosed,'BOOTSTRAP_MAINTENANCE_CLEANUP_UNCONFIRMED');
   const config=loadConfig(env,mainApi),auth=loadAuthRuntimeConfig(env,mainApi,{testOperationsEnabled:false});
   assertR07ProvidersClosed(config,auth);
+   assert(Buffer.isBuffer(auth.userIdentitySubjectKey)&&Buffer.isBuffer(auth.userLegacyIdentityProfileKey),'BOOTSTRAP_IDENTITY_KEYS_NOT_LOADED');
   pool=createBusinessPool(config,{max:4});
   await assertBusinessRuntimeIdentity(pool,config);app=await createApp({health:{dependencies:createFakeHealthDependencies()},database:{pool},auth:{...auth,pool}});
   await app.init();await app.listen(4242,'127.0.0.1');
@@ -111,13 +116,16 @@ async function main(){
    &&sha(readFileSync(registered.sourceFile))===registrySha&&sha(readFileSync(request.schemaReceipt.path))===request.schemaReceipt.sha256
    &&Object.entries(secretPaths).every(([key,path])=>sha(readFileSync(path))===request.secrets[key].sha256),'BOOTSTRAP_FILES_CHANGED');
   pinnedBuild(request.buildManifest);pinnedBuild(request.sourceManifest);
-  const resource={database:registered.database,oid:registered.oid,resourceOid:registered.oid,nonce:registered.nonce,marker:registered.marker,instance:registered.instance,migrationRoleOid:registered.migrationRoleOid};
+  const resource={database:registered.database,oid:registered.oid,resourceOid:registered.oid,nonce:registered.nonce,marker:registered.marker,instance:registered.instance,migrationRoleOid:registered.migrationRoleOid,
+   ...(registered.migrationProfile?{migrationProfile:registered.migrationProfile}:{})};
   const binding={status:'R07_BOOTSTRAP_API_LISTENING',at:new Date().toISOString(),pid:process.pid,port:4242,stopFile:join(runtimeOut,'api.stop'),resource,
    actualResource:{database:registered.database,oid:registered.oid,nonce:registered.nonce,marker:registered.marker,instance:registered.instance,owner:actual.owner,owner_oid:actual.owner_oid,
+    ...(registered.migrationProfile?{migrationProfile:registered.migrationProfile}:{}),
     migration_role_oid:registered.migrationRoleOid,runtime_role:registered.runtimeRole,runtime_role_oid:registered.runtimeRoleOid,read_only:actual.read_only},
    initialization:{nonce:registered.nonce,imProvisioner:false,imIdentityRepository:false,imAppId:null},origins:request.origins,formalAppMounted:true,
    NoIM:true,imProvisioner:false,imIdentityRepository:false,imAppId:false,financialCommandCapabilities:false,workersEnabled:false,maintenanceLockReleased:unlockAck,maintenanceClosed,
-   runtimeRequestSha256:option('--request-sha'),bootstrapSecretSha256:request.secrets.bootstrap.sha256,compiledRoot:api,moduleSha256:moduleSha,copyManifestSha256:bundleSha};
+    runtimeRequestSha256:option('--request-sha'),bootstrapSecretSha256:request.secrets.bootstrap.sha256,identitySubjectKeySha256:request.secrets.identity.sha256,
+    legacyIdentityProfileKeySha256:request.secrets.identityProfile.sha256,compiledRoot:api,moduleSha256:moduleSha,copyManifestSha256:bundleSha};
   writePrivate(join(runtimeOut,'binding.json'),binding);console.log(JSON.stringify({status:binding.status,pid:process.pid,port:binding.port,binding:join(runtimeOut,'binding.json'),bundle:join(bundleOut,'bundle.json'),bundleSha256:bundleSha,channelCalls:0}));
   const timer=setInterval(()=>{if(!existsSync(binding.stopFile))return;clearInterval(timer);void closeRuntime().then(()=>{
    writePrivate(join(runtimeOut,'stopped.json'),{status:'R07_BOOTSTRAP_API_STOPPED',pid:process.pid,at:new Date().toISOString()});

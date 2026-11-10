@@ -18,6 +18,14 @@ test('maintenance binding only seals matching completed round and exact isolated
   change(wrong);assert.throws(()=>makeR07MaintenanceBinding(wrong),/R07_MAINTENANCE_EVIDENCE_CHANGED/);
  }
 });
+test('next-round maintenance binding requires matching profile, port and cluster throughout',()=>{
+ const i={...instance,port:55435},t={...target,instance:i,migrationProfile:'LOCAL_MIGRATION_NEXT_V1'},r={...resource,instance:i,migrationProfile:t.migrationProfile};
+ const next={...input,round:{...round,target:t},receipt:{...receipt,target:t},binding:{...binding,resource:r,actualResource:{...binding.actualResource,instance:i,migrationProfile:t.migrationProfile}}};
+ assert.equal(makeR07MaintenanceBinding(next).status,'R07_MAINTENANCE_API_LISTENING');
+ assert.throws(()=>makeR07MaintenanceBinding({...next,receipt:{...next.receipt,target:{...t,migrationProfile:undefined}}}),/R07_MAINTENANCE_EVIDENCE_CHANGED/);
+ assert.throws(()=>makeR07MaintenanceBinding({...next,round:{...next.round,target:{...t,migrationProfile:undefined}}}),/R07_MAINTENANCE_EVIDENCE_CHANGED/);
+ assert.throws(()=>makeR07MaintenanceBinding({...next,binding:{...next.binding,resource:{...r,instance}}}),/R07_MAINTENANCE_EVIDENCE_CHANGED/);
+});
 test('maintenance seal defaults to no connections',()=>{
  const result=spawnSync(process.execPath,[fileURLToPath(new URL('./seal-round07-maintenance-binding.mjs',import.meta.url))],{encoding:'utf8'});
  assert.equal(result.status,0);assert.equal(JSON.parse(result.stdout).connections,0);

@@ -1,6 +1,18 @@
 import assert from 'node:assert/strict';
 import {test} from 'node:test';
-import {assertFundsWriterCoverage,assertRebuiltEmptyCoverageChunk,assertRebuiltEmptyCoverageManifest,createEmptyCoverageSink,safeLegacyWithdrawalEvidence} from './local-funds-plan.mjs';
+import {assertFundsWriterCoverage,assertRebuiltEmptyCoverageChunk,assertRebuiltEmptyCoverageManifest,createEmptyCoverageSink,isPreparedRefundRelationshipVerified,safeLegacyWithdrawalEvidence} from './local-funds-plan.mjs';
+import {isExactLegacyRefundRelationship,LEGACY_REFUND_RELATIONSHIP_POLICY} from './local-source-adapter.mjs';
+
+test('a refund relationship needs the original order, user and nonblank matching number',()=>{
+ const order={id:'o1',user_id:'u1',order_sn:'order-1'},refund={order_type:'order',order_id:'o1',user_id:'u1',order_sn:'order-1'};
+ assert.equal(isExactLegacyRefundRelationship(refund,order),true);
+ for(const [r,o] of [[{...refund,user_id:'u2'},order],[{...refund,order_id:'o2'},order],[{...refund,order_sn:'other'},order],
+  [{...refund,order_sn:''},{...order,order_sn:''}],[{...refund,order_sn:null},{...order,order_sn:null}],[refund,null]])
+  assert.equal(isExactLegacyRefundRelationship(r,o),false);
+ assert.equal(isPreparedRefundRelationshipVerified({...refund,order_sn:''},{...order,order_sn:''},undefined),true);
+ assert.equal(isPreparedRefundRelationshipVerified({...refund,order_sn:''},{...order,order_sn:''},LEGACY_REFUND_RELATIONSHIP_POLICY),false);
+ assert.throws(()=>isPreparedRefundRelationshipVerified(refund,order,'unrecognized-policy'),/LEGACY_REFUND_RELATIONSHIP_POLICY_UNSUPPORTED/);
+});
 
 test('streamed empty coverage is checked against regenerated source, exact bytes and ordered manifest',()=>{
  const chunks=[],sink=createEmptyCoverageSink({onChunk:chunk=>chunks.push(chunk)});

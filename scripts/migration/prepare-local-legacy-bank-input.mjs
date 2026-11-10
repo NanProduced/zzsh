@@ -4,7 +4,7 @@ import { createRequire } from "node:module";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { spawnSync } from "node:child_process";
-import { normalizeRegisteredTarget } from "./local-target-registry.mjs";
+import { hasVerifiedNextInitialSchema, isRegisteredMigrationInstance, NEXT_MIGRATION_PROFILE, normalizeRegisteredTarget } from "./local-target-registry.mjs";
 import { assertDistributionCoreReadback, assertRegisteredDistributionTarget, isolatedDistributionBuild } from "./local-distribution-qualification-plan.mjs";
 import { captureBoundLegacyBankSource, releaseBoundLegacyBankSource, useBoundLegacyBankSource } from "./local-legacy-bank-source.mjs";
 
@@ -36,19 +36,28 @@ export function requireFinalR07ApiDist(root, candidate, stat = lstatSync) {
 }
 
 /** Intermediate 0156 or an unacknowledged/mismatched final target cannot authorize a bank input. */
-export function assertFinalLegacyBankSchema(proof, final, registry, stage, swap) {
+export function assertFinalLegacyBankSchema(proof, final, registry, stage, swap, original) {
   const t = proof?.target;
   const upgraded=proof?.schema === "zzsh.round07-bank-schema-proof.v2";
-  if (proof?.schema === "zzsh.round07-bank-schema-proof.v1" || upgraded) {
+  const next=proof?.schema === "zzsh.local-bank-schema-proof.v1";
+  if (proof?.schema === "zzsh.round07-bank-schema-proof.v1" || upgraded || next) {
     const registered = normalizeRegisteredTarget(registry);
     if (proof.status !== "FINAL_SCHEMA_READBACK_ACK" || !Number.isInteger(proof.finalOrdinal) || proof.finalOrdinal < 160
       || proof.readOnlyRollbackAck !== true || proof.clientClosed !== true || !hex(proof.journalSha256) || !hex(proof.historySha256)
       || ![proof.roundInput,proof.roundReceipt,proof.coreReadback,proof.finalReceipt].every(ref => typeof ref?.path === "string" && hex(ref.sha256))
-      || final?.schema !== (upgraded?"zzsh.round07-final-schema.v2":"zzsh.round07-final-schema.v1") || final.status !== "FINAL_SCHEMA_VERIFIED" || final.operation !== (upgraded?"UPGRADE_0161_AND_READBACK":"BOOTSTRAP_AND_CORE_READBACK")
+      || final?.schema !== (next?"zzsh.local-bank-final-schema.v1":upgraded?"zzsh.round07-final-schema.v2":"zzsh.round07-final-schema.v1") || final.status !== "FINAL_SCHEMA_VERIFIED" || final.operation !== (upgraded?"UPGRADE_0161_AND_READBACK":"BOOTSTRAP_AND_CORE_READBACK")
       || final.actualMigrationPerformed !== false || final.finalOrdinal !== proof.finalOrdinal || final.journalSha256 !== proof.journalSha256
       || final.historySha256 !== proof.historySha256 || final.readOnlyRollbackAck !== true || final.clientClosed !== true || final.unlockAck !== true || final.maintenanceClosed !== true
       || final.roundInputSha256 !== proof.roundInput.sha256 || final.roundReceiptSha256 !== proof.roundReceipt.sha256 || final.coreReadbackSha256 !== proof.coreReadback.sha256
-      || !t || t.round !== 7 || !registered.instance || !same(t.instance, registered.instance) || t.host !== registered.host || t.port !== registered.port
+      || next && (!original || !hasVerifiedNextInitialSchema(original.schema) || original.schema.migrationProfile!==NEXT_MIGRATION_PROFILE
+        || typeof proof.schemaReceipt?.path!=='string' || !hex(proof.schemaReceipt.sha256) || !same(proof.schemaReceipt,original.round?.bootstrapEvidence?.schema)
+        || final.schemaReceiptSha256!==proof.schemaReceipt.sha256 || original.round?.target?.migrationProfile!==NEXT_MIGRATION_PROFILE
+        || original.round.target.bootstrapReservation!=='ROUND07_BOOTSTRAP_RESERVED' || String(original.schema.oid)!==String(t?.databaseOid)
+        || original.schema.nonce!==t?.nonce || !same(original.schema.instance,t?.instance)
+        || original.schema.journalSha256!==proof.journalSha256 || original.schema.historySha256!==proof.historySha256
+        || !same(original.schema.hashes,original.round.target.schemaHashes))
+      || !t || t.round !== (next?'next':7) || !isRegisteredMigrationInstance(registered) || !same(t.instance, registered.instance) || t.host !== registered.host || t.port !== registered.port
+      || (t.migrationProfile??null)!==(registered.migrationProfile??null) || (next?registered.migrationProfile!==NEXT_MIGRATION_PROFILE:registered.migrationProfile!==null)
       || t.database !== "zzsh_test_regression" || String(t.databaseOid) !== registered.oid || t.nonce !== registered.nonce || t.marker !== registered.marker || registered.pendingReset
       || registered.lockKey !== "806006" || registered.maintenanceDatabase !== "postgres"
       || ![t.databaseOid,t.ownerOid,t.runtimeRoleOid,t.migrationRoleOid].every(v => Number.isSafeInteger(v) && v > 0 && v <= 4294967295)
@@ -109,9 +118,9 @@ export function makeR07UpgradedBankSchemaEvidence({oldProof,oldFinal,upgradePlan
 
 /** Build a R07 proof only from the sealed fresh-schema receipt and independent core readback. */
 export function makeR07BankSchemaEvidence({round,roundInput,roundReceipt,roundReceiptRef,readback,readbackRef,schema,runtime,registry,journalSha256,finalPath}) {
-  const t=round?.target,registered=normalizeRegisteredTarget(registry),actual=runtime?.actualResource;
+  const t=round?.target,registered=normalizeRegisteredTarget(registry),actual=runtime?.actualResource,next=t?.migrationProfile===NEXT_MIGRATION_PROFILE;
   if(round?.schema!=="zzsh.local-round.v1" || t?.bootstrapReservation!=="ROUND07_BOOTSTRAP_RESERVED"
-    || !registered.instance || !same(t.instance,registered.instance) || registered.database!=="zzsh_test_regression"
+    || !isRegisteredMigrationInstance(registered) || !same(t.instance,registered.instance) || (t.migrationProfile??null)!==registered.migrationProfile || registered.database!=="zzsh_test_regression"
     || registered.oid!==t.oid || registered.nonce!==t.nonce || registered.pendingReset || !registered.owner
     || !registered.migrationRoleOid || !registered.runtimeRoleOid || registered.migrationRoleOid!==t.migrationRoleOid
     || registered.lockKey!=="806006" || registered.maintenanceDatabase!=="postgres" || !hex(journalSha256)
@@ -119,39 +128,45 @@ export function makeR07BankSchemaEvidence({round,roundInput,roundReceipt,roundRe
     || typeof finalPath!=="string" || schema?.status!=="CLEAN_SCHEMA_INSTALLED" || !Number.isInteger(schema.finalOrdinal) || schema.finalOrdinal<160
     || String(schema.oid)!==t.oid || schema.nonce!==t.nonce || !same(schema.instance,t.instance) || schema.journalSha256!==journalSha256
     || !hex(schema.historySha256) || !same(schema.hashes,t.schemaHashes) || schema.commitAck!==true || schema.migrationAck!==true
+    || next && !hasVerifiedNextInitialSchema(schema)
     || schema.readbackRollbackAck!==true || schema.readbackClientClosed!==true || schema.unlockAck!==true || schema.maintenanceClosed!==true
     || runtime?.formalAppMounted!==true || runtime.resource?.database!==registered.database || String(runtime.resource?.oid??runtime.resource?.resourceOid)!==registered.oid
     || runtime.resource?.nonce!==registered.nonce || !same(runtime.resource?.instance,registered.instance)
     || actual?.database!==registered.database || String(actual.oid??actual.resourceOid)!==registered.oid || actual.nonce!==registered.nonce
     || !same(actual.instance,registered.instance) || actual.marker!==registered.marker || actual.owner!==registered.owner
+    || next&&[runtime.resource,actual].some(value=>value?.migrationProfile!==NEXT_MIGRATION_PROFILE)
     || String(actual.migration_role_oid)!==registered.migrationRoleOid || actual.runtime_role!==registered.runtimeRole || String(actual.runtime_role_oid)!==registered.runtimeRoleOid
     || actual.read_only!=="on" || !/^[1-9]\d*$/.test(String(actual.owner_oid??""))) stop();
   assertRegisteredDistributionTarget(t,round.dataset?.sha256,{...registry,instance:registered.instance});
   assertDistributionCoreReadback(roundReceipt,readback,{roundInputSha256:roundInput.sha256,readbackSha256:readbackRef.sha256,
     datasetSha256:round.dataset?.sha256,sourceSha256:round.source?.sha256,target:t});
-  const target={round:7,host:registered.host,port:registered.port,instance:registered.instance,database:registered.database,databaseOid:Number(registered.oid),
+  const target={round:next?'next':7,host:registered.host,port:registered.port,instance:registered.instance,database:registered.database,databaseOid:Number(registered.oid),
+    ...(next?{migrationProfile:NEXT_MIGRATION_PROFILE}:{}),
     marker:registered.marker,nonce:registered.nonce,owner:registered.owner,ownerOid:Number(actual.owner_oid),runtimeUser:registered.runtimeRole,
     runtimeRoleOid:Number(registered.runtimeRoleOid),migrationUser:registered.migrationRole,migrationRoleOid:Number(registered.migrationRoleOid)};
-  const final={schema:"zzsh.round07-final-schema.v1",status:"FINAL_SCHEMA_VERIFIED",operation:"BOOTSTRAP_AND_CORE_READBACK",actualMigrationPerformed:false,
+  const final={schema:next?"zzsh.local-bank-final-schema.v1":"zzsh.round07-final-schema.v1",status:"FINAL_SCHEMA_VERIFIED",operation:"BOOTSTRAP_AND_CORE_READBACK",actualMigrationPerformed:false,
     finalOrdinal:schema.finalOrdinal,journalSha256,historySha256:schema.historySha256,readOnlyRollbackAck:readback.rollbackConfirmed,clientClosed:readback.connectionsClosed,
-    unlockAck:readback.lockReleased,maintenanceClosed:readback.connectionsClosed,roundInputSha256:roundInput.sha256,roundReceiptSha256:roundReceiptRef.sha256,coreReadbackSha256:readbackRef.sha256,target};
-  const finalBytes=Buffer.from(JSON.stringify(final,null,2)+"\n"),proof={schema:"zzsh.round07-bank-schema-proof.v1",status:"FINAL_SCHEMA_READBACK_ACK",finalOrdinal:final.finalOrdinal,
+    unlockAck:readback.lockReleased,maintenanceClosed:readback.connectionsClosed,roundInputSha256:roundInput.sha256,roundReceiptSha256:roundReceiptRef.sha256,coreReadbackSha256:readbackRef.sha256,
+    ...(next?{schemaReceiptSha256:round.bootstrapEvidence?.schema?.sha256}:{}),target};
+  const finalBytes=Buffer.from(JSON.stringify(final,null,2)+"\n"),proof={schema:next?"zzsh.local-bank-schema-proof.v1":"zzsh.round07-bank-schema-proof.v1",status:"FINAL_SCHEMA_READBACK_ACK",finalOrdinal:final.finalOrdinal,
     journalSha256,historySha256:final.historySha256,readOnlyRollbackAck:true,clientClosed:true,target,roundInput,roundReceipt:roundReceiptRef,coreReadback:readbackRef,
+    ...(next?{schemaReceipt:round.bootstrapEvidence?.schema}:{}),
     finalReceipt:{path:finalPath,sha256:sha(finalBytes)}};
-  assertFinalLegacyBankSchema(proof,final,registry);
+  assertFinalLegacyBankSchema(proof,final,registry,undefined,undefined,next?{round,schema}:undefined);
   return {final,proof};
 }
 
 export function assertLegacyBankKeyringProof(proof,target) {
-  const r07=target?.round===7;
-  if(proof?.schema!==(r07?"zzsh.r07-bank-keyring-receipt.v1":"zzsh.r06-bank-keyring-receipt.v1") || proof.status!=="KEYRING_READY"
+  const next=target?.round==='next',r07=target?.round===7,modern=next||r07;
+  if(!modern&&target?.round!==6 || proof?.schema!==(next?"zzsh.local-bank-keyring-receipt.v1":r07?"zzsh.r07-bank-keyring-receipt.v1":"zzsh.r06-bank-keyring-receipt.v1") || proof.status!=="KEYRING_READY"
     || proof.aclVerified!==true || proof.backupMatches!==true || proof.database!==target.database || proof.runtimeUser!==target.runtimeUser
     || typeof proof.version!=="string" || !proof.files?.[proof.version]
-    || r07 && (proof.target?.oid!==String(target.databaseOid) || proof.target?.nonce!==target.nonce || !same(proof.target?.instance,target.instance))) stop();
+    || modern && (proof.target?.oid!==String(target.databaseOid) || proof.target?.nonce!==target.nonce || !same(proof.target?.instance,target.instance)
+      || (proof.target?.migrationProfile??null)!==(target.migrationProfile??null))) stop();
 }
 
 export function assertLegacyBankSourceProof(proof,round,sourceReceiptSha256,sourceBindingSha256) {
-  if(proof?.schema!==(round===7?"zzsh.r07-bank-source-validation.v1":"zzsh.r06-bank-source-validation.v1") || proof.status!=="SOURCE_VERIFIED_READ_ONLY"
+  if(![6,7,'next'].includes(round) || proof?.schema!==(round==='next'?"zzsh.local-bank-source-validation.v1":round===7?"zzsh.r07-bank-source-validation.v1":"zzsh.r06-bank-source-validation.v1") || proof.status!=="SOURCE_VERIFIED_READ_ONLY"
     || proof.restoreMatchesDump!==true || proof.sourceAccess!=="MYSQL_REPEATABLE_READ_READ_ONLY_ROLLBACK" || proof.plaintextRowsPersisted!==false
     || proof.postgresConnections!==0 || proof.writes!==0 || !hex(proof.sourceReceiptSha256) || !hex(proof.sourceBindingSha256)
     || proof.sourceReceiptSha256!==sourceReceiptSha256 || proof.sourceBindingSha256!==sourceBindingSha256)stop();
@@ -159,7 +174,7 @@ export function assertLegacyBankSourceProof(proof,round,sourceReceiptSha256,sour
 
 /** Testable content-only authority construction; no source rows, credentials or key bytes enter this object. */
 export function makeLegacyBankAuthority(input, inputSha256, plan, planSha256, window, approvalRef) {
-  if (!hex(inputSha256) || !hex(planSha256) || !input || !plan || ![6,7].includes(input.target?.round) || input.schema !== "zzsh.local-legacy-bank-input.v1"
+  if (!hex(inputSha256) || !hex(planSha256) || !input || !plan || ![6,7,'next'].includes(input.target?.round) || input.schema !== "zzsh.local-legacy-bank-input.v1"
     || plan.schema !== "zzsh.local-legacy-bank-plan.v1" || plan.inputSha256 !== inputSha256 || plan.datasetSha256 !== input.dataset?.sha256
     || plan.buildSha256 !== input.buildSha256 || plan.schemaJournalSha256 !== input.schemaJournalSha256 || plan.schemaHistorySha256 !== input.schemaHistorySha256
     || !same(plan.binding?.target, input.target) || plan.binding?.source?.sourceReceiptSha256 !== input.source?.sourceReceiptSha256
@@ -167,7 +182,7 @@ export function makeLegacyBankAuthority(input, inputSha256, plan, planSha256, wi
     || !window || !Number.isFinite(Date.parse(window.notBefore)) || !Number.isFinite(Date.parse(window.expiresAt))
     || !/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/.test(window.notBefore) || !/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/.test(window.expiresAt)
     || Date.parse(window.notBefore) >= Date.parse(window.expiresAt) || typeof approvalRef !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(approvalRef)) stop();
-  return { schema: "zzsh.local-legacy-bank-authority.v1", purpose: input.target?.round === 7 ? "ROUND_07_BANK_IMPORT" : "ROUND_06_BANK_IMPORT", inputSha256, planSha256,
+  return { schema: "zzsh.local-legacy-bank-authority.v1", purpose: input.target?.round === 'next' ? "LOCAL_MIGRATION_BANK_IMPORT" : input.target?.round === 7 ? "ROUND_07_BANK_IMPORT" : "ROUND_06_BANK_IMPORT", inputSha256, planSha256,
     binding: plan.binding, commitment: plan.commitment, buildSha256: input.buildSha256, schemaJournalSha256: input.schemaJournalSha256,
     schemaHistorySha256: input.schemaHistorySha256, maxWrites: plan.counts.ready, notBefore: window.notBefore, expiresAt: window.expiresAt, approvalRef };
 }
@@ -224,6 +239,12 @@ function jsonFile(path, expected, roots, sid) {
   if (!hex(expected)) stop(); const bytes = readFileSync(file); if (sha(bytes) !== expected) stop();
   try { return JSON.parse(bytes); } catch { return stop(); }
 }
+function readOriginalNextBankSchema(proof, restricted, sid) {
+  if (proof?.schema !== 'zzsh.local-bank-schema-proof.v1') return undefined;
+  const round=jsonFile(proof.roundInput?.path,proof.roundInput?.sha256,[restricted],sid);
+  if (!same(round.bootstrapEvidence?.schema,proof.schemaReceipt)) stop();
+  return {round,schema:jsonFile(proof.schemaReceipt?.path,proof.schemaReceipt?.sha256,[restricted],sid)};
+}
 function writeNew(path, value) { let fd; try { fd = openSync(path, "wx", 0o600); writeFileSync(fd, JSON.stringify(value, null, 2) + "\n"); } finally { if (fd !== undefined) closeSync(fd); } }
 
 async function main() {
@@ -234,13 +255,15 @@ async function main() {
   const root = resolve(fileURLToPath(new URL("../..", import.meta.url))), restricted = resolve("E:/zzsh-local-state/restricted"), runtime = resolve("E:/zzsh-local-state/runtime"), secrets = resolve("E:/zzsh/zzsh/apps/api/.secrets"), sid = currentSid();
   const request = jsonFile(option("--request"), option("--request-sha"), [restricted], sid), out = secureNewDirectory(option("--out"), restricted, sid);
   if (modes[0] === "--schema-proof") {
-    if(request.schema!=="zzsh.round07-bank-schema-request.v1")stop();
+    const next=request.schema==="zzsh.local-bank-schema-request.v1";
+    if(!next&&request.schema!=="zzsh.round07-bank-schema-request.v1")stop();
     const round=jsonFile(request.roundInput?.path,request.roundInput?.sha256,[restricted],sid),
       roundReceipt=jsonFile(request.roundReceipt?.path,request.roundReceipt?.sha256,[restricted],sid),
       readback=jsonFile(request.coreReadback?.path,request.coreReadback?.sha256,[restricted],sid),
       registry=jsonFile(request.registry?.path,request.registry?.sha256,[restricted],sid),
       schema=jsonFile(round.bootstrapEvidence?.schema?.path,round.bootstrapEvidence?.schema?.sha256,[restricted],sid),
       runtimeBinding=jsonFile(round.bootstrapEvidence?.runtime?.path,round.bootstrapEvidence?.runtime?.sha256,[restricted,runtime],sid);
+    if((round.target?.migrationProfile===NEXT_MIGRATION_PROFILE)!==next)stop();
     if(resolve(request.registry.path).toLowerCase()!==resolve(dirname(round.credentials),"resource.json").toLowerCase())stop();
     const journalBytes=readFileSync(join(root,"apps/api/migrations/business/meta/_journal.json")),journal=JSON.parse(journalBytes),last=journal.entries?.at(-1);
     if(last?.idx!==schema.finalOrdinal || !Number.isSafeInteger(last.idx) || last.idx<160 || typeof last.tag!=='string'
@@ -250,7 +273,7 @@ async function main() {
       schema,runtime:runtimeBinding,registry,journalSha256:sha(journalBytes),finalPath:join(out,"final-schema.json")});
     writeNew(join(out,"final-schema.json"),result.final);writeNew(join(out,"schema-proof.json"),result.proof);
     if(sha(readFileSync(join(out,"final-schema.json")))!==result.proof.finalReceipt.sha256)stop();
-    console.log(JSON.stringify({status:"R07_SCHEMA_EVIDENCE_READY_NOT_EXECUTED",proofSha256:sha(readFileSync(join(out,"schema-proof.json"))),dbConnections:0,keyReads:0}));
+    console.log(JSON.stringify({status:next?"LOCAL_BANK_SCHEMA_EVIDENCE_READY_NOT_EXECUTED":"R07_SCHEMA_EVIDENCE_READY_NOT_EXECUTED",proofSha256:sha(readFileSync(join(out,"schema-proof.json"))),dbConnections:0,keyReads:0}));
   } else if (modes[0] === "--schema-upgrade-proof") {
     if(request.schema!=='zzsh.round07-bank-schema-upgrade-request.v1')stop();
     const refs=request.upgradeRefs,values=Object.fromEntries(['oldProof','oldFinal','upgradePlan','upgradeExecution','upgradeReadback','liveReadback'].map(k=>[k,jsonFile(refs?.[k]?.path,refs?.[k]?.sha256,[restricted],sid)])),
@@ -259,27 +282,30 @@ async function main() {
     if(sha(readFileSync(join(out,'final-schema.json')))!==result.proof.finalReceipt.sha256)stop();
     console.log(JSON.stringify({status:'R07_UPGRADED_SCHEMA_EVIDENCE_READY_NOT_EXECUTED',proofSha256:sha(readFileSync(join(out,'schema-proof.json'))),dbConnections:0,keyReads:0}));
   } else if (modes[0] === "--source-proof") {
-    if(request.schema!=="zzsh.round07-bank-source-request.v1")stop();
+    const next=request.schema==="zzsh.local-bank-source-request.v1";
+    if(!next&&request.schema!=="zzsh.round07-bank-source-request.v1")stop();
     const round=jsonFile(request.roundInput?.path,request.roundInput?.sha256,[restricted],sid),apiDir=requireFinalR07ApiDist(root,round.apiDist),
       hashPath=join(apiDir,"supply/content-hash.js"),moduleSha=round.buildFiles?.["supply/content-hash.js"];
-    if(round.target?.bootstrapReservation!=="ROUND07_BOOTSTRAP_RESERVED" || !hex(moduleSha) || sha(readFileSync(hashPath))!==moduleSha
+    if(round.target?.bootstrapReservation!=="ROUND07_BOOTSTRAP_RESERVED" || (round.target?.migrationProfile===NEXT_MIGRATION_PROFILE)!==next || !hex(moduleSha) || sha(readFileSync(hashPath))!==moduleSha
       || !hex(round.source?.sha256) || !hex(request.sourceBindingSha256))stop();
     const require=createRequire(join(root,"apps/api/package.json")),{canonicalize}=require(hashPath),sourceInput={sourceDir:round.source.path,
       sourceReceiptSha256:round.source.sha256,sourceBinding:request.sourceBinding,sourceBindingSha256:request.sourceBindingSha256};
     const token=await captureBoundLegacyBankSource(sourceInput,canonicalize);
     try {
-      const value=useBoundLegacyBankSource(token),evidence={schema:"zzsh.r07-bank-source-validation.v1",status:"SOURCE_VERIFIED_READ_ONLY",restoreMatchesDump:true,
+      const value=useBoundLegacyBankSource(token),evidence={schema:next?"zzsh.local-bank-source-validation.v1":"zzsh.r07-bank-source-validation.v1",status:"SOURCE_VERIFIED_READ_ONLY",restoreMatchesDump:true,
         sourceAccess:"MYSQL_REPEATABLE_READ_READ_ONLY_ROLLBACK",plaintextRowsPersisted:false,postgresConnections:0,writes:0,
         sourceReceiptSha256:round.source.sha256,sourceBindingSha256:request.sourceBindingSha256,sourceDumpSha256:value.source.sourceDumpSha256,rows:value.rows.length};
-      assertLegacyBankSourceProof(evidence,7,round.source.sha256,request.sourceBindingSha256);writeNew(join(out,"source-proof.json"),evidence);
-      console.log(JSON.stringify({status:"R07_BANK_SOURCE_EVIDENCE_READY_NOT_EXECUTED",sourceProofSha256:sha(readFileSync(join(out,"source-proof.json"))),rows:evidence.rows,postgresConnections:0,writes:0}));
+      assertLegacyBankSourceProof(evidence,next?'next':7,round.source.sha256,request.sourceBindingSha256);writeNew(join(out,"source-proof.json"),evidence);
+      console.log(JSON.stringify({status:next?"LOCAL_BANK_SOURCE_EVIDENCE_READY_NOT_EXECUTED":"R07_BANK_SOURCE_EVIDENCE_READY_NOT_EXECUTED",sourceProofSha256:sha(readFileSync(join(out,"source-proof.json"))),rows:evidence.rows,postgresConnections:0,writes:0}));
     } finally {releaseBoundLegacyBankSource(token);}
   } else if (modes[0] === "--keyring-proof") {
-    if(request.schema!=="zzsh.round07-bank-keyring-request.v1" || typeof request.version!=="string" || !request.files?.[request.version])stop();
+    const next=request.schema==="zzsh.local-bank-keyring-request.v1";
+    if(!next&&request.schema!=="zzsh.round07-bank-keyring-request.v1" || typeof request.version!=="string" || !request.files?.[request.version])stop();
     const proof=jsonFile(request.schemaProof?.path,request.schemaProof?.sha256,[restricted],sid),
       final=jsonFile(proof.finalReceipt?.path,proof.finalReceipt?.sha256,[restricted],sid),
-      registry=jsonFile(request.registry?.path,request.registry?.sha256,[restricted],sid),target=assertFinalLegacyBankSchema(proof,final,registry);
-    if(target.round!==7)stop();
+      registry=jsonFile(request.registry?.path,request.registry?.sha256,[restricted],sid),original=readOriginalNextBankSchema(proof,restricted,sid),
+      target=assertFinalLegacyBankSchema(proof,final,registry,undefined,undefined,original);
+    if(target.round!==(next?'next':7))stop();
     for(const ref of [request.config,...Object.values(request.files)]){
       if(!hex(ref?.sha256))stop();const path=pathUnder(ref.path,[secrets]);checkAcl(dirname(path),sid,true);checkAcl(path,sid);
       if(sha(readFileSync(path))!==ref.sha256)stop();relativeBankSecretPath(resolve("E:/zzsh/zzsh/apps/api"),path);
@@ -290,14 +316,14 @@ async function main() {
     const backupDir=pathUnder(request.backupDirectory,[restricted,secrets]),backup=pathUnder(request.backupFile,[backupDir]);
     checkAcl(backupDir,sid,true);checkAcl(backup,sid);
     if(!hex(request.backupSha256)||sha(readFileSync(backup))!==request.backupSha256||request.backupSha256!==request.files[request.version].sha256)stop();
-    const evidence={schema:"zzsh.r07-bank-keyring-receipt.v1",status:"KEYRING_READY",aclVerified:true,backupMatches:true,database:target.database,runtimeUser:target.runtimeUser,
-      target:{oid:String(target.databaseOid),nonce:target.nonce,instance:target.instance},version:request.version,config:request.config,files:request.files,
+    const evidence={schema:next?"zzsh.local-bank-keyring-receipt.v1":"zzsh.r07-bank-keyring-receipt.v1",status:"KEYRING_READY",aclVerified:true,backupMatches:true,database:target.database,runtimeUser:target.runtimeUser,
+      target:{oid:String(target.databaseOid),nonce:target.nonce,instance:target.instance,...(next?{migrationProfile:NEXT_MIGRATION_PROFILE}:{})},version:request.version,config:request.config,files:request.files,
       backupDirectory:backupDir,backupFile:backup,backupSha256:request.backupSha256};
     assertLegacyBankKeyringProof(evidence,target);writeNew(join(out,"keyring-proof.json"),evidence);
-    console.log(JSON.stringify({status:"R07_KEYRING_EVIDENCE_READY_NOT_EXECUTED",proofSha256:sha(readFileSync(join(out,"keyring-proof.json"))),dbConnections:0,keysGenerated:0}));
+    console.log(JSON.stringify({status:next?"LOCAL_BANK_KEYRING_EVIDENCE_READY_NOT_EXECUTED":"R07_KEYRING_EVIDENCE_READY_NOT_EXECUTED",proofSha256:sha(readFileSync(join(out,"keyring-proof.json"))),dbConnections:0,keysGenerated:0}));
   } else if (modes[0] === "--input") {
     if (request.schema !== "zzsh.local-legacy-bank-input-request.v1") stop();
-    const proof = jsonFile(request.schemaProof?.path, request.schemaProof?.sha256, [restricted], sid), r07 = ["zzsh.round07-bank-schema-proof.v1","zzsh.round07-bank-schema-proof.v2"].includes(proof.schema);
+    const proof = jsonFile(request.schemaProof?.path, request.schemaProof?.sha256, [restricted], sid), r07 = ["zzsh.round07-bank-schema-proof.v1","zzsh.round07-bank-schema-proof.v2","zzsh.local-bank-schema-proof.v1"].includes(proof.schema);
     const registryPath = r07 ? pathUnder(request.registry?.path, [restricted]) : resolve(secrets, "local-postgresql/regression_test/resource.json");
     if (resolve(request.registry?.path ?? "").toLowerCase() !== registryPath.toLowerCase()) stop();
     const registry = jsonFile(registryPath, request.registry?.sha256, r07 ? [restricted] : [secrets], sid);
@@ -305,7 +331,7 @@ async function main() {
     const stage = r07 ? null : jsonFile(final.stageReceipt?.path, final.stageReceipt?.sha256, [restricted], sid), swap = r07 ? null : jsonFile(final.swapReceipt?.path, final.swapReceipt?.sha256, [restricted], sid);
     const source = jsonFile(request.sourceProof?.path, request.sourceProof?.sha256, [restricted], sid);
     const dataset = jsonFile(request.dataset?.path, request.dataset?.sha256, [restricted], sid), keyring = jsonFile(request.keyringProof?.path, request.keyringProof?.sha256, [restricted], sid);
-    const t = assertFinalLegacyBankSchema(proof, final, registry, stage, swap);
+    const t = assertFinalLegacyBankSchema(proof, final, registry, stage, swap, readOriginalNextBankSchema(proof,restricted,sid));
     if(proof.schema==='zzsh.round07-bank-schema-proof.v2'){
       const refs=proof.upgradeRefs,values=Object.fromEntries(['oldProof','oldFinal','upgradePlan','upgradeExecution','upgradeReadback','liveReadback'].map(k=>[k,jsonFile(refs?.[k]?.path,refs?.[k]?.sha256,[restricted],sid)]));
       const checked=makeR07UpgradedBankSchemaEvidence({...values,registry,refs,finalPath:proof.finalReceipt.path});if(!same(checked.final,final)||!same(checked.proof,proof))stop();

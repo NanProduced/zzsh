@@ -4,11 +4,21 @@ import { readFileSync } from "node:fs";
 import { win32 as path } from "node:path";
 import { Readable } from "node:stream";
 import test from "node:test";
+import { openingReviewResource } from "./local-target-opening.mjs";
 
 const source = readFileSync(new URL("./local-target-opening.mjs", import.meta.url), "utf8")
   .replace(/^import .*;$/gm, "").replace(/^export /gm, "");
 const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
 const sha = bytes => createHash("sha256").update(bytes).digest("hex");
+
+test("next-round finance review carries the pinned cluster and epoch without changing old resource shapes", () => {
+  const ctx = { targetPort: 55435, state: { binding: { oid: "42", nonce: "a".repeat(24), migrationProfile: "LOCAL_MIGRATION_NEXT_V1",
+    instance: { host: "127.0.0.1", port: 55435, systemIdentifier: "12345" } }, resource: { owner: "zzsh", marker: "marker", role: "role", role_oid: "43" } } };
+  const resource = openingReviewResource(ctx);
+  assert.deepEqual([resource.port, resource.migrationProfile, resource.systemIdentifier, resource.nonce], [55435, "LOCAL_MIGRATION_NEXT_V1", "12345", "a".repeat(24)]);
+  const old = structuredClone(ctx); delete old.state.binding.migrationProfile; old.targetPort = 55433;
+  assert.equal(Object.hasOwn(openingReviewResource(old), "systemIdentifier"), false);
+});
 
 async function rejectOpening(cause) {
   const data = Buffer.from("fixture source\n");

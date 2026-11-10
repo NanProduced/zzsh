@@ -7,9 +7,9 @@ import {fileURLToPath} from 'node:url';
 import {parseArgs} from 'node:util';
 import {defaultStore,writePrivate} from '../local-auth.mjs';
 import {writeLoadCheckpoint} from './local-load-checkpoint.mjs';
-import {readSourceRows} from './local-source-adapter.mjs';
-import {assertCreditAuthority,assertCreditCohort,assertCreditPlanReady,creditCategoryCounts,creditRetainedDigest,creditRowsDigest,executeCreditBatchSequence} from './local-credit-initialization-plan.mjs';
-import {assertLiveTarget,loadRegisteredTarget,targetIdentityQuery} from './local-target-registry.mjs';
+import {readVerifiedSourceRows} from './local-source-adapter.mjs';
+import {assertCreditAuthority,assertCreditCohort,assertCreditPlanReady,creditCategoryCounts,creditRetainedDigest,creditRowsDigest,executeCreditBatchSequence,guardCreditPoolClient} from './local-credit-initialization-plan.mjs';
+import {acquireMigrationSessionFence,assertLiveTarget,assertMigrationFenceHeld,assertNextMigrationWriteReady,captureMaintenanceLockEpoch,isRegisteredMigrationInstance,loadRegisteredTarget,NEXT_MIGRATION_PROFILE,releaseMigrationSessionFence,targetIdentityQuery} from './local-target-registry.mjs';
 
 const root=resolve(fileURLToPath(new URL('../..',import.meta.url))),restricted=resolve('E:/zzsh-local-state/restricted');
 const sha=value=>createHash('sha256').update(value).digest('hex'),hex=/^[a-f0-9]{64}$/;
@@ -21,9 +21,11 @@ export function creditMaintenanceSecretLocation(value,secretRoot,target,privateR
  const file=resolve(value),root=resolve(secretRoot),inside=relative(resolve(privateRoot),file);
  if(file.toLowerCase()===resolve(root,'postgres_password').toLowerCase() || inside&&!inside.startsWith('..')&&!isAbsolute(inside))return file;
  const local=relative(root,file).replaceAll('\\','/'),instance=target?.instance;
+ const secretPattern=target?.migrationProfile===NEXT_MIGRATION_PROFILE?/^migration-postgres-[a-z0-9-]+\/postgres_password$/i:/^round07-postgres-[a-z0-9-]+\/postgres_password$/i;
  assert(target?.bootstrapReservation==='ROUND07_BOOTSTRAP_RESERVED'&&instance?.host==='127.0.0.1'&&Number.isInteger(instance.port)
   &&instance.port>0&&instance.port<65536&&/^[0-9]+$/.test(instance.systemIdentifier??'')
-  &&/^round07-postgres-[a-z0-9-]+\/postgres_password$/i.test(local),'CREDIT_MAINTENANCE_SECRET_PATH_INVALID');
+  &&(target.migrationProfile==null||target.migrationProfile===NEXT_MIGRATION_PROFILE&&isRegisteredMigrationInstance({host:instance.host,port:instance.port,instance,migrationProfile:target.migrationProfile}))
+  &&secretPattern.test(local),'CREDIT_MAINTENANCE_SECRET_PATH_INVALID');
  return file;
 }
 let distributionGuards;
@@ -50,6 +52,7 @@ export async function main(args=process.argv.slice(2)){
  const started=performance.now(),startedAt=new Date().toISOString(),mode=modes[0],out=privatePath(v.out,true);
  assert(!existsSync(out),'PRESERVE_CREDIT_OUTPUT');
  const round=pinned(privatePath(v['round-input']),v['round-input-sha']);assert.equal(round.schema,'zzsh.local-round.v1');distributionGuards.assertNewDistributionTarget(round.target);
+ if(mode==='execute')assertNextMigrationWriteReady(round.target);
  const receipt=pinned(privatePath(v['round-receipt']),v['round-receipt-sha']),readback=pinned(privatePath(v['core-readback']),v['core-readback-sha']);
  distributionGuards.assertDistributionCoreReadback(receipt,readback,{roundInputSha256:v['round-input-sha'],readbackSha256:v['core-readback-sha'],datasetSha256:round.dataset.sha256,sourceSha256:round.source.sha256,target:round.target});
  assert(round.strictBatch===true&&receipt.strictBatch===true&&receipt.completion?.growth==='PASS','CREDIT_STRICT_CORE_AND_GROWTH_REQUIRED');
@@ -70,7 +73,7 @@ export async function main(args=process.argv.slice(2)){
  const secretRoot=dirname(defaultStore()),credentialsPath=resolve(round.credentials);if(credentialsPath.toLowerCase()!==resolve(secretRoot,'local-postgresql/regression_test/credentials.json').toLowerCase())privatePath(credentialsPath);
  const registryPath=join(dirname(credentialsPath),'resource.json');
  function registry(){const r=JSON.parse(readFileSync(noLink(registryPath))),current=loadRegisteredTarget(credentialsPath);r.instance=current.instance;distributionGuards.assertRegisteredDistributionTarget(round.target,round.dataset.sha256,r);assert(current.lockKey==='806006'&&current.maintenanceDatabase==='postgres'&&r.protectedDataset.status==='LOCAL_DATASET_SKIN_HOLDINGS_COMMITTED_REVIEW_REQUIRED'&&r.roles.runtime.name===runtimeRole,'CREDIT_REGISTRY_CHANGED');return r;}
- const registered=registry(),registeredTarget=loadRegisteredTarget(credentialsPath),epoch={oid:round.target.oid,nonce:round.target.nonce,...(registeredTarget.instance?{instance:registeredTarget.instance}:{})};
+ const registered=registry(),registeredTarget=loadRegisteredTarget(credentialsPath),epoch={oid:round.target.oid,nonce:round.target.nonce,...(registeredTarget.instance?{instance:registeredTarget.instance}:{}),...(registeredTarget.migrationProfile?{migrationProfile:registeredTarget.migrationProfile}:{})};
  const resource={databaseName:database,databaseOid:epoch.oid,owner,runtimeRole,bindingKind:'DATABASE_COMMENT',databaseComment:marker};
  const manifestFile=noLink(v['build-manifest']),manifest=pinned(manifestFile,v['build-manifest-sha']),build=buildBinding(v.build,manifest,v['build-manifest-sha']);
  assert.deepEqual(Object.entries(round.buildFiles??{}).sort(),Object.entries(build.files).sort(),'CREDIT_BUILD_DIFFERS_FROM_CORE');
@@ -87,10 +90,10 @@ export async function main(args=process.argv.slice(2)){
  const {assertBusinessRuntimeIdentity}=compiled('database/business');
  const {legacyOwnerUserId}=compiled('supply/legacy-user-migration'),users=dataset.files?.users;
  assert(users&&users.file===basename(users.file)&&hex.test(users.sha256??'')&&users.rows===ready,'CREDIT_SOURCE_USERS_REQUIRED');
- const userFile=privatePath(join(round.dataset.path,users.file));assert.equal(sha(readFileSync(userFile)),users.sha256,'CREDIT_SOURCE_USERS_CHANGED');
- const expectedIds=[];for await(const row of readSourceRows(userFile)){
+ const userFile=privatePath(join(round.dataset.path,users.file)),expectedIds=[];
+ await readVerifiedSourceRows(userFile,users,row=>{
   const e=row?.input?.evidence;assert(e?.sourceSystem==='legacy_mysql_restore'&&e.sourceEntity==='la_user'&&row.userId===legacyOwnerUserId(e.sourceSystem,e.sourceEntity,e.legacyId),'CREDIT_SOURCE_USER_ID_CHANGED');expectedIds.push(row.userId);
- }
+ });
  expectedIds.sort();assert(expectedIds.length===ready&&new Set(expectedIds).size===ready,'CREDIT_SOURCE_USER_SET_INVALID');
  binding.datasetUsersSha256=users.sha256;binding.sourceUserSetSha256=sha(expectedIds.join('\n')+'\n');
  if(mode==='validate'){
@@ -114,7 +117,7 @@ export async function main(args=process.argv.slice(2)){
  const secret=readFileSync(noLink(maintenancePath));assert.equal(sha(secret),maintenance.sha256,'CREDIT_MAINTENANCE_SECRET_CHANGED');
  const {Client,Pool}=require('pg'),base={host:registeredTarget.host,port:registeredTarget.port,connectionTimeoutMillis:3000,statement_timeout:120000,lock_timeout:1000};
  const timings={inputValidationMs:Math.round(performance.now()-started)};
- let lock,pool,held=false,lockError,transportError,summary={schema:'zzsh.local-credit-initialization-receipt.v1',status:'STARTED',mode,binding,batches:[],timings,financialWrites:0,channelCalls:0},unlockAck=false,poolClosed=false,lockClosed=false;
+ let lock,pool,held=false,lockError,transportError,fenceEpoch,fencePid,fenceHeld=false,summary={schema:'zzsh.local-credit-initialization-receipt.v1',status:'STARTED',mode,binding,batches:[],timings,financialWrites:0,channelCalls:0},unlockAck=false,poolClosed=false,lockClosed=false;
  writePrivate(join(out,'summary.json'),summary);
  async function identity(client,readOnly){
   const r=(await client.query(targetIdentityQuery())).rows[0];assertLiveTarget(registeredTarget,r,'runtime');
@@ -122,21 +125,33 @@ export async function main(args=process.argv.slice(2)){
  }
  async function lockStillHeld(){assert(!lockError&&!transportError,'CREDIT_CONNECTION_ERROR');const r=await lock.query("SELECT EXISTS(SELECT 1 FROM pg_locks WHERE locktype='advisory' AND pid=pg_backend_pid() AND classid=0::oid AND objid=806006::oid AND objsubid=1 AND mode='ExclusiveLock' AND granted) AS held");assert.equal(r.rows[0].held,true,'CREDIT_MAINTENANCE_LOCK_LOST');}
  function guardedPool(application_name){
-  const p=new Pool({...base,database,user:runtimeRole,password:credentials.runtime.password,max:1,application_name});
-  p.on('connect',client=>{client.on('error',e=>{transportError??=e;});const query=client.query.bind(client);client.query=(sql,...params)=>{
-   if(sql==='BEGIN'||sql==='BEGIN READ ONLY')return query(sql,...params).then(async result=>{registry();await identity(client,sql==='BEGIN READ ONLY');return result;});
-   if(sql==='COMMIT')return lockStillHeld().then(()=>{registry();verifyBuild();return query(sql,...params);}).then(result=>{assert.equal(result.command,'COMMIT','CREDIT_COMMIT_ACK_UNCONFIRMED');return result;});
-   if(sql==='ROLLBACK')return query(sql,...params).then(result=>{assert.equal(result.command,'ROLLBACK','CREDIT_ROLLBACK_ACK_UNCONFIRMED');return result;});
-   return query(sql,...params);
-  };});p.on('error',e=>{transportError??=e;});return p;
+  const p=new Pool({...base,database,user:runtimeRole,password:credentials.runtime.password,max:1,application_name,
+   ...(registeredTarget.migrationProfile===NEXT_MIGRATION_PROFILE?{idleTimeoutMillis:0}:{})});
+  p.on('connect',client=>{client.on('error',e=>{transportError??=e;});guardCreditPoolClient(client,{
+   afterBegin:async(c,readOnly)=>{registry();await identity(c,readOnly);if(fenceEpoch){assert.equal(c.processID,fencePid,'CREDIT_FENCE_SESSION_CHANGED');await assertMigrationFenceHeld(c,registeredTarget,fenceEpoch);}},
+   beforeCommit:async c=>{if(fenceEpoch){assert(!lockError&&!transportError,'CREDIT_CONNECTION_ERROR');assert.equal(c.processID,fencePid,'CREDIT_FENCE_SESSION_CHANGED');await assertMigrationFenceHeld(c,registeredTarget,fenceEpoch);}else await lockStillHeld();registry();verifyBuild();}
+  });});p.on('error',e=>{transportError??=e;});return p;
+ }
+ async function acquirePoolFence(p){
+  const client=await p.connect();let discard=false;
+  try{await identity(client,false);await acquireMigrationSessionFence(client,registeredTarget,fenceEpoch);fenceHeld=true;fencePid=client.processID;assert(Number.isInteger(fencePid)&&fencePid>0,'CREDIT_FENCE_SESSION_UNAVAILABLE');}
+  catch(error){discard=true;throw error;}finally{client.release(discard);}
+ }
+ async function releasePoolFence(p){
+  let client,discard=false;
+  try{client=await p.connect();assert.equal(client.processID,fencePid,'CREDIT_FENCE_SESSION_CHANGED');await releaseMigrationSessionFence(client,registeredTarget);fenceHeld=false;return true;}
+  catch{discard=true;return false;}finally{if(client)client.release(discard);}
  }
  async function currentUsers(client){
   const rows=(await client.query(`SELECT u.id AS "userId",CASE WHEN s.account_status='CANCELLED' THEN 'CANCELLED' WHEN s.account_status='FROZEN' THEN 'FROZEN' WHEN u.suspended THEN 'RESTRICTED' WHEN s.account_status='ACTIVE' THEN 'ACTIVE' ELSE 'UNKNOWN' END category,c.user_id IS NOT NULL AS "hasCreditState",EXISTS(SELECT 1 FROM zzsh_credit.credit_event e WHERE e.user_id=u.id AND e.event_type='INITIALIZED') AS "hasInitializedEvent",EXISTS(SELECT 1 FROM zzsh_credit.credit_event e WHERE e.user_id=u.id AND e.event_type<>'INITIALIZED') AS "hasOtherCreditEvent" FROM zzsh_iam.user_identity_state s JOIN zzsh_auth_user."user" u ON u.id=s.user_id LEFT JOIN zzsh_credit.user_credit_state c ON c.user_id=u.id WHERE s.provider='legacy_mysql_restore' ORDER BY u.id COLLATE "C"`)).rows;
   assertCreditCohort(rows,expectedIds);return rows;
  }
  try{
-  let at=performance.now();lock=new Client({...base,database:'postgres',user:owner,password:secret.toString('utf8').trim(),application_name:'r06-credit-maintenance-lock'});lock.on('error',e=>{lockError??=e;});await lock.connect();held=(await lock.query('SELECT pg_try_advisory_lock(806006::bigint) AS ok')).rows[0].ok;assert(held,'CREDIT_RESOURCE_BUSY');registry();await lockStillHeld();timings.lockAcquisitionMs=Math.round(performance.now()-at);
+  let at=performance.now();lock=new Client({...base,database:'postgres',user:owner,password:secret.toString('utf8').trim(),application_name:'r06-credit-maintenance-lock'});lock.on('error',e=>{lockError??=e;});await lock.connect();held=(await lock.query('SELECT pg_try_advisory_lock(806006::bigint) AS ok')).rows[0].ok;assert(held,'CREDIT_RESOURCE_BUSY');registry();await lockStillHeld();
+  if(registeredTarget.migrationProfile===NEXT_MIGRATION_PROFILE)fenceEpoch=await captureMaintenanceLockEpoch(lock,registeredTarget);
+  timings.lockAcquisitionMs=Math.round(performance.now()-at);
   pool=guardedPool('r06-credit-runtime');
+  if(fenceEpoch){await acquirePoolFence(pool);summary.targetFence='HELD_DURING_CREDIT_STAGE';}
   await assertBusinessRuntimeIdentity(pool,{database:{name:database,user:runtimeRole,runtimeUser:runtimeRole}});
   at=performance.now();const rows=await withReadOnlyTransaction(pool,currentUsers),sourceRowsSha256=creditRowsDigest(rows),otherEventWithoutState=rows.filter(row=>row.hasOtherCreditEvent&&!row.hasCreditState).length;timings.cohortReadMs=Math.round(performance.now()-at);
   if(mode==='prepare'){
@@ -164,8 +179,10 @@ export async function main(args=process.argv.slice(2)){
     apply:async input=>runCreditInitializationBatch(pool,input),
     saveResult:async({item},result)=>writePrivate(join(out,item.file.replace('.json','.result.json')),result),
    },summary);
-   await lockStillHeld();verifyBuild();await pool.end();poolClosed=true;summary.writePoolClosed=true;writeLoadCheckpoint(join(out,'summary.json'),summary);
-   pool=guardedPool('r06-credit-independent-readback');poolClosed=false;await assertBusinessRuntimeIdentity(pool,{database:{name:database,user:runtimeRole,runtimeUser:runtimeRole}});
+   await lockStillHeld();verifyBuild();
+   if(fenceEpoch){summary.writeFenceRelease='PENDING';writeLoadCheckpoint(join(out,'summary.json'),summary);summary.writeFenceReleased=await releasePoolFence(pool);assert(summary.writeFenceReleased,'CREDIT_WRITE_FENCE_RELEASE_UNCONFIRMED');}
+   await pool.end();poolClosed=true;summary.writePoolClosed=true;writeLoadCheckpoint(join(out,'summary.json'),summary);
+   pool=guardedPool('r06-credit-independent-readback');poolClosed=false;if(fenceEpoch)await acquirePoolFence(pool);await assertBusinessRuntimeIdentity(pool,{database:{name:database,user:runtimeRole,runtimeUser:runtimeRole}});
    at=performance.now();summary.readback=await withReadOnlyTransaction(pool,async c=>{
     const readbackPid=(await c.query('SELECT pg_backend_pid() AS pid')).rows[0].pid;assert(readbackPid!==writerBackendPid,'CREDIT_INDEPENDENT_CONNECTION_REQUIRED');
     const after={states:creditRetainedDigest((await c.query('SELECT to_jsonb(c)::text AS row FROM zzsh_credit.user_credit_state c WHERE NOT (c.user_id=ANY($1::text[])) ORDER BY c.user_id COLLATE "C"',[ids])).rows),events:creditRetainedDigest((await c.query('SELECT to_jsonb(e)::text AS row FROM zzsh_credit.credit_event e WHERE NOT (e.user_id=ANY($1::text[])) ORDER BY e.id COLLATE "C"',[ids])).rows)};
@@ -182,10 +199,14 @@ export async function main(args=process.argv.slice(2)){
   summary.status=error.outcome==='COMMIT_UNKNOWN'?'COMMIT_UNKNOWN_STOPPED':summary.pending?.commitAck?'COMMIT_ACK_RECEIPT_FAILED_STOPPED':mode==='execute'&&summary.batches.length?(summary.batches.length===plan.batches.length?'COMMITTED_ACK_READBACK_REQUIRED':'PARTIAL_COMMITTED_STOPPED'):'STOPPED';summary.error={code,outcome:error.outcome??null,preserved:error.preserved??summary.pending??null};
   console.error(JSON.stringify({status:summary.status,code}));process.exitCode=1;
  }finally{
+  if(fenceEpoch&&fenceHeld){
+   try{if(summary)writeLoadCheckpoint(join(out,'summary.json'),{...summary,targetFenceRelease:'PENDING'});summary.targetFenceReleased=await releasePoolFence(pool);if(!summary.targetFenceReleased)process.exitCode=1;}
+   catch{summary.targetFenceReleased=false;process.exitCode=1;}
+  }
   try{if(pool){await pool.end();poolClosed=true;}}catch{process.exitCode=1;}
   try{if(held)unlockAck=(await lock.query('SELECT pg_advisory_unlock(806006::bigint) AS ok')).rows[0].ok;}catch{process.exitCode=1;}
   try{if(lock){await lock.end();lockClosed=true;}}catch{process.exitCode=1;}
-  if(summary){if(!unlockAck||!poolClosed||!lockClosed||lockError||transportError){process.exitCode=1;if(['PREPARED_NOT_APPROVED','CREDIT_INITIALIZATION_READBACK_PASS'].includes(summary.status))summary.status='CREDIT_CLEANUP_UNCONFIRMED_STOPPED';}
+  if(summary){if(!unlockAck||!poolClosed||!lockClosed||lockError||transportError||fenceEpoch&&(summary.targetFenceReleased!==true||mode==='execute'&&summary.writeFenceReleased!==true)){process.exitCode=1;if(['PREPARED_NOT_APPROVED','CREDIT_INITIALIZATION_READBACK_PASS'].includes(summary.status))summary.status='CREDIT_CLEANUP_UNCONFIRMED_STOPPED';}
    Object.assign(summary,{unlockAck,poolClosed,lockClosed,startedAt,finishedAt:new Date().toISOString(),elapsedMs:Math.round(performance.now()-started)});
    const file=join(out,mode==='prepare'?'manifest.json':'summary.json');writeLoadCheckpoint(file,summary);if(mode==='prepare')writeLoadCheckpoint(join(out,'summary.json'),summary);console.log(JSON.stringify({status:summary.status,sha256:sha(readFileSync(file)),batches:summary.batches.length,categoryCounts:summary.categoryCounts,reconciliation:summary.reconciliation,otherEventWithoutState:summary.otherEventWithoutState,readback:summary.readback,unlockAck,poolClosed,lockClosed,elapsedMs:summary.elapsedMs}));}
  }

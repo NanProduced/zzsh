@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { isAbsolute, relative, resolve } from "node:path";
+import { NEXT_MIGRATION_PROFILE } from "./local-target-registry.mjs";
+import { basename, isAbsolute, join, relative, resolve } from "node:path";
+import { readVerifiedSourceRows } from "./local-source-adapter.mjs";
 
 const sha = value => createHash("sha256").update(value).digest("hex");
 const hex = /^[a-f0-9]{64}$/;
@@ -15,6 +17,7 @@ export function assertRegisteredDistributionTarget(target, datasetSha256, regist
   assertNewDistributionTarget(target);
   assert(registry?.database === "zzsh_test_regression" && registry.marker === "zzsh:regression-test:v1" && registry.oid === target.oid && registry.nonce === target.nonce && !registry.pendingReset
     && JSON.stringify(target.instance ?? null) === JSON.stringify(registry.instance ?? null)
+    && (target.migrationProfile ?? null) === (registry.migrationProfile ?? null)
     && registry.roles?.migration?.oid === target.migrationRoleOid && registry.protectedDataset?.bootstrapReservation === target.bootstrapReservation
     && registry.protectedDataset?.manifestSha256 === datasetSha256 && registry.protectedDataset.epoch?.oid === target.oid && registry.protectedDataset.epoch?.nonce === target.nonce, "DISTRIBUTION_REGISTERED_TARGET_CHANGED");
 }
@@ -37,14 +40,18 @@ export function assertDistributionCoreReadback(round, readback, binding) {
   assert(round?.schema === "zzsh.local-round-receipt.v1" && round.inputSha256 === binding.roundInputSha256
     && round.datasetSha256 === binding.datasetSha256 && round.sourceReceiptSha256 === binding.sourceSha256
     && round.target?.oid === binding.target.oid && round.target?.nonce === binding.target.nonce
+    && JSON.stringify(round.target?.instance ?? null) === JSON.stringify(binding.target.instance ?? null)
+    && (round.target?.migrationProfile ?? null) === (binding.target.migrationProfile ?? null)
     && (round.status === "DATASET_AND_GROWTH_ACK_READBACK_PASS" || recovered) && round.completion?.status === "COMPLETE"
-    && round.completion?.dataset === "PASS" && typeof round.finishedAt === "string"
+    && round.completion?.dataset === "PASS" && (!binding.target.instance || round.completion?.growth === "PASS") && typeof round.finishedAt === "string"
     && stage?.status === "ACK" && stage.code === 0 && stage.signal === null && stage.metrics?.evidenceSha256 === binding.readbackSha256,
   "DISTRIBUTION_COMPLETED_ROUND_REQUIRED");
   assert(readback?.schema === "zzsh.local-dataset-readback.v1" && readback.status === "CORE_SOURCE_TARGET_EXACT_READBACK_PASSED"
     && readback.sourceDatasetSha256 === binding.datasetSha256 && readback.resource?.database === "zzsh_test_regression"
     && readback.resource?.oid === binding.target.oid && readback.resource?.nonce === binding.target.nonce
     && JSON.stringify(readback.resource?.instance ?? null) === JSON.stringify(binding.target.instance ?? null)
+    && (readback.resource?.migrationProfile ?? null) === (binding.target.migrationProfile ?? null)
+    && (binding.target.migrationProfile !== NEXT_MIGRATION_PROFILE || readback.targetFence === 'HELD_UNTIL_ROLLBACK')
     && readback.differenceCount === 0 && readback.targetWrites === 0 && readback.rollbackConfirmed === true
     && readback.lockReleased === true && readback.connectionsClosed === true, "DISTRIBUTION_CORE_READBACK_REQUIRED");
   const finance = readback.financialHistory, counts = finance?.counts;
@@ -207,15 +214,62 @@ export function legacyDistributionPolicy({ scope, receiptSha256, configurationSh
   const activeConfig = configuration.filter(row => row.is_delete === "0");
   const flags = new Map(activeConfig.map(row => [row.name, typeof row.value === "string" ? row.value.trim() : row.value]));
   assert.equal(flags.size, activeConfig.length, "DUPLICATE_LEGACY_DISTRIBUTION_SETTING");
-  for (const [name, value] of Object.entries({ open: "1", level: "1", openCondition: "1", isSelfRebate: "0", settlementTiming: "1", settlementTime: "7.0" }))
+  for (const [name, value] of Object.entries({ open: "1", level: "1", openCondition: "1", isSelfRebate: "0", settlementTiming: "1" }))
     assert.equal(flags.get(name), value, "LEGACY_DISTRIBUTION_SETTING_CHANGED:" + name);
+  const rawDelay = flags.get("settlementTime");
+  assert(typeof rawDelay === "string" && rawDelay.length <= 64 && /^(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$/.test(rawDelay), "LEGACY_DISTRIBUTION_DELAY_INVALID");
+  const significant = rawDelay.split(/[eE]/)[0].replace(".", "").replace(/^0+/, "").replace(/0+$/, "");
+  assert(significant.length <= 9, "LEGACY_DISTRIBUTION_DELAY_INVALID");
+  // The old settlement job parsed a Java Float, then truncated it to whole days.
+  const legacyDelay = Math.fround(Number(rawDelay));
+  assert(Number.isFinite(legacyDelay) && legacyDelay >= 0 && legacyDelay <= 999999, "LEGACY_DISTRIBUTION_DELAY_INVALID");
+  const settlementDelayDays = Math.trunc(legacyDelay);
   assert.equal(flags.get("earningsCalMethod") ?? "1", "1", "LEGACY_DISTRIBUTION_CALCULATION_CHANGED");
   const active = rawLevels.filter(row => row.is_delete === "0");
   const levels = active.map(row => ({ code: "legacy_" + row.id, rank: Number(row.weights), default: row.is_default === "1", renterPercent: row.first_ratio, ownerPercent: row.second_ratio, upgrade: null }));
   assert(levels.length && levels.filter(level => level.default).length === 1 && levels.every(level => Number.isSafeInteger(level.rank) && level.rank > 0));
   assert.equal(new Set(levels.map(level => level.code)).size, levels.length, "DUPLICATE_LEGACY_LEVEL");
   const legacySource = { receiptSha256, configurationSha256, levelsSha256, levelNames: Object.fromEntries(active.map(row => ["legacy_" + row.id, row.name])) };
-  return { schema: "distribution-policy-initialize.v2", config: { schema: "distribution-policy.v3", scope, enabled: true, participation: "AUTO_AT_REGISTRATION", depth: 1, selfRebate: false, accountModes: ["ordinary", "custom"], minimumAccrualCents: "1", settlementDelayDays: 7, levels, legacySource }, reason: "承接已核旧平台租赁分销策略和有效档位" };
+  return { schema: "distribution-policy-initialize.v2", config: { schema: "distribution-policy.v3", scope, enabled: true, participation: "AUTO_AT_REGISTRATION", depth: 1, selfRebate: false, accountModes: ["ordinary", "custom"], minimumAccrualCents: "1", settlementDelayDays, levels, legacySource }, reason: "承接已核旧平台租赁分销策略和有效档位" };
+}
+
+/** New rounds use the API's exact decimal normalization; sealed old rounds keep their original rule. */
+export function validatedLegacyDistributionPayload(sourcePayload, parsePolicy, canonicalize, fresh) {
+  assert(typeof parsePolicy === 'function' && typeof canonicalize === 'function' && typeof fresh === 'boolean', 'DISTRIBUTION_POLICY_VALIDATOR_REQUIRED');
+  const parsed = parsePolicy(sourcePayload);
+  if (!fresh) assert.equal(canonicalize(parsed), canonicalize(sourcePayload), 'DISTRIBUTION_POLICY_INVALID');
+  return fresh ? parsed : sourcePayload;
+}
+
+export function normalizedDistributionPolicyFormat(format, roundReceipt) {
+  const proved = roundReceipt?.distributionSourcePreflight?.status === 'DISTRIBUTION_SOURCE_PRECHECK_PASSED_TARGET_NOT_RUN';
+  if (format === undefined) { assert(!proved, 'DISTRIBUTION_POLICY_FORMAT_REQUIRED'); return false; }
+  assert(format === 'SOURCE_API_NORMALIZED_V1' && proved, 'DISTRIBUTION_POLICY_FORMAT_UNPROVEN');
+  return true;
+}
+
+/** Catch missing or invalid source policy before a long core migration begins. */
+export async function verifyLegacyDistributionPrerequisite({ sourceDir, receipt, sourceSha256, canonicalize, parsePolicy, safePath = value => value }) {
+  assert(receipt?.status === "CAPTURED_READ_ONLY" && receipt.rollbackConfirmed === true && receipt.clientClosed === true
+    && hex.test(sourceSha256 ?? "") && typeof sourceDir === "string" && typeof canonicalize === "function"
+    && typeof parsePolicy === "function" && typeof safePath === "function", "DISTRIBUTION_PREFLIGHT_SOURCE_REQUIRED");
+  const rows = {};
+  for (const name of ["distributionConfig", "distributionLevels"]) {
+    const entry = receipt.files?.[name];
+    assert(entry && typeof entry.file === "string" && entry.file === basename(entry.file) && hex.test(entry.sha256 ?? "")
+      && Number.isSafeInteger(entry.rows) && entry.rows >= 0, "DISTRIBUTION_PREFLIGHT_SOURCE_REQUIRED");
+    rows[name] = [];
+    await readVerifiedSourceRows(safePath(join(sourceDir, entry.file)), entry, row => rows[name].push(row));
+  }
+  const rawPayload = legacyDistributionPolicy({ scope: "NATIVE", receiptSha256: sourceSha256,
+    configurationSha256: receipt.files.distributionConfig.sha256, levelsSha256: receipt.files.distributionLevels.sha256,
+    configuration: rows.distributionConfig, rawLevels: rows.distributionLevels });
+  const payload = validatedLegacyDistributionPayload(rawPayload, parsePolicy, canonicalize, true);
+  return { status: "DISTRIBUTION_SOURCE_PRECHECK_PASSED_TARGET_NOT_RUN", sourceReceiptSha256: sourceSha256,
+    configurationSha256: receipt.files.distributionConfig.sha256, levelsSha256: receipt.files.distributionLevels.sha256,
+    configurationRows: rows.distributionConfig.length, sourceLevels: rows.distributionLevels.length,
+    activeLevels: payload.config.levels.length, settlementDelayDays: payload.config.settlementDelayDays,
+    policyDigest: sha(canonicalize(payload.config)), connections: 0, targetWrites: 0 };
 }
 
 /** Plan exactly the target's imported participants against immutable source-backed audit facts. */
@@ -314,6 +368,7 @@ export function assertDistributionPolicyReceipt(receipt, binding, canonicalize) 
     && receipt.inputSha256 === binding.inputSha256 && receipt.datasetSha256 === binding.datasetSha256 && receipt.sourceDigest === binding.sourceDigest
     && receipt.target?.oid === binding.target.oid && receipt.target?.nonce === binding.target.nonce
     && JSON.stringify(receipt.target?.instance ?? null) === JSON.stringify(binding.target.instance ?? null)
+    && (receipt.target?.migrationProfile ?? null) === (binding.target.migrationProfile ?? null)
     && receipt.financialWrites === 0 && receipt.lockReleased === true && receipt.lockClientClosed === true && receipt.clientsClosed === true
     && Array.isArray(receipt.steps) && ["decision", "execute", "approval-readback"].every(name => receipt.steps.some(step => step.step === name && step.status === 200)), "DISTRIBUTION_APPROVAL_RECEIPT_REQUIRED");
   assertHistoricalFinanceUnchanged(binding.historicalFinance, receipt.historicalFinanceBaseline, canonicalize);
@@ -321,7 +376,7 @@ export function assertDistributionPolicyReceipt(receipt, binding, canonicalize) 
 }
 
 export function assertQualificationPlanBinding(plan, binding, canonicalize) {
-  assert(plan.schema === "zzsh.local-distribution-qualification-plan.v1" && plan.inputSha256 === binding.inputSha256 && plan.datasetSha256 === binding.datasetSha256 && plan.sourceDigest === binding.sourceDigest && plan.candidateSha256 === binding.candidateSha256 && plan.scope === binding.scope && plan.target?.oid === binding.target.oid && plan.target?.nonce === binding.target.nonce && plan.target?.database === binding.target.database && plan.target?.marker === binding.target.marker && plan.target?.migrationRoleOid === binding.target.migrationRoleOid && JSON.stringify(plan.target?.instance ?? null) === JSON.stringify(binding.target.instance ?? null) && plan.buildDigest === binding.buildDigest && canonicalize(plan.toolFiles) === canonicalize(binding.toolFiles) && plan.readOnlyRollbackAck && plan.clientClosed && plan.headCompatible && Array.isArray(plan.exceptions) && plan.exceptions.length === 0, "DISTRIBUTION_PLAN_BINDING_CHANGED");
+  assert(plan.schema === "zzsh.local-distribution-qualification-plan.v1" && plan.inputSha256 === binding.inputSha256 && plan.datasetSha256 === binding.datasetSha256 && plan.sourceDigest === binding.sourceDigest && plan.candidateSha256 === binding.candidateSha256 && plan.scope === binding.scope && plan.target?.oid === binding.target.oid && plan.target?.nonce === binding.target.nonce && plan.target?.database === binding.target.database && plan.target?.marker === binding.target.marker && plan.target?.migrationRoleOid === binding.target.migrationRoleOid && JSON.stringify(plan.target?.instance ?? null) === JSON.stringify(binding.target.instance ?? null) && (plan.target?.migrationProfile ?? null) === (binding.target.migrationProfile ?? null) && plan.buildDigest === binding.buildDigest && canonicalize(plan.toolFiles) === canonicalize(binding.toolFiles) && plan.readOnlyRollbackAck && plan.clientClosed && plan.headCompatible && Array.isArray(plan.exceptions) && plan.exceptions.length === 0, "DISTRIBUTION_PLAN_BINDING_CHANGED");
   assertQualificationBatches(plan, canonicalize);
   assert(Array.isArray(plan.existing) && Array.isArray(plan.ineligible) && Array.isArray(plan.unresolved ?? [])
     && (plan.unresolved ?? []).every(row => row.reason === "ORIGINAL_QUALIFICATION_MISSING" && row.frozen === null
@@ -333,7 +388,7 @@ export function assertQualificationPlanBinding(plan, binding, canonicalize) {
 
 export function assertQualificationAuthority(authority, binding, now = Date.now()) {
   const start = Date.parse(authority.notBefore), end = Date.parse(authority.expiresAt);
-  assert(authority.schema === "root-reviewed-legacy-distribution-qualification.v2" && authority.approvedBy === "Root" && authority.status === "APPROVED" && authority.inputSha256 === binding.inputSha256 && authority.planSha256 === binding.planSha256 && authority.scope === binding.scope && authority.policyId === binding.policyId && authority.policyDigest === binding.policyDigest && authority.target?.oid === binding.target.oid && authority.target?.nonce === binding.target.nonce && authority.target?.database === binding.target.database && authority.target?.marker === binding.target.marker && authority.target?.migrationRoleOid === binding.target.migrationRoleOid && JSON.stringify(authority.target?.instance ?? null) === JSON.stringify(binding.target.instance ?? null) && authority.lock === 806006 && authority.allowFinancialWrites === false && start <= now && now < end && end - start <= 30 * 60000 && start >= Date.parse(binding.window?.notBefore) && end <= Date.parse(binding.window?.expiresAt), "DISTRIBUTION_AUTHORITY_CHANGED_OR_EXPIRED");
+  assert(authority.schema === "root-reviewed-legacy-distribution-qualification.v2" && authority.approvedBy === "Root" && authority.status === "APPROVED" && authority.inputSha256 === binding.inputSha256 && authority.planSha256 === binding.planSha256 && authority.scope === binding.scope && authority.policyId === binding.policyId && authority.policyDigest === binding.policyDigest && authority.target?.oid === binding.target.oid && authority.target?.nonce === binding.target.nonce && authority.target?.database === binding.target.database && authority.target?.marker === binding.target.marker && authority.target?.migrationRoleOid === binding.target.migrationRoleOid && JSON.stringify(authority.target?.instance ?? null) === JSON.stringify(binding.target.instance ?? null) && (authority.target?.migrationProfile ?? null) === (binding.target.migrationProfile ?? null) && authority.lock === 806006 && authority.allowFinancialWrites === false && start <= now && now < end && end - start <= 30 * 60000 && start >= Date.parse(binding.window?.notBefore) && end <= Date.parse(binding.window?.expiresAt), "DISTRIBUTION_AUTHORITY_CHANGED_OR_EXPIRED");
 }
 
 export function reviewedDistributionActor(actorFile, target, approved) {

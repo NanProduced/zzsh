@@ -1,11 +1,10 @@
 import { createHash } from "node:crypto";
 import { createReadStream, readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
-import { createInterface } from "node:readline";
 import { createRequire } from "node:module";
 import { resolve, join, dirname, basename } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
-import { sourceUserPlanningRow, sourceContactPlanningRow, sourceAccountPlan, sourceOrderPlan, sourceFinanceObservation } from "./local-source-adapter.mjs";
+import { planLegacyIdentitySource, sourceUserPlanningRow, sourceContactPlanningRow, sourceAccountPlan, sourceOrderPlan, sourceFinanceObservation, readSourceRows as rows } from "./local-source-adapter.mjs";
 import { prepareLocalStoredOpening } from "./local-opening-proof.mjs";
 
 const args = process.argv.slice(2), option = key => { const index = args.indexOf(key); return index < 0 ? undefined : args[index + 1]; };
@@ -24,13 +23,12 @@ const original = JSON.parse(bytes), receiptBytes = readFileSync(join(original.so
 if (sha(receiptBytes) !== original.sourceReceiptSha256) throw new Error("FROZEN_SOURCE_RECEIPT_CHANGED");
 const receipt = JSON.parse(receiptBytes);
 if (receipt.status !== "CAPTURED_READ_ONLY" || !receipt.rollbackConfirmed || !receipt.clientClosed) throw new Error("UNCONFIRMED_FROZEN_SOURCE");
-async function* rows(path) { const input = createReadStream(path), reader = createInterface({ input, crlfDelay: Infinity }); try { for await (const line of reader) if (line) yield JSON.parse(line); } finally { reader.close(); input.destroy(); } }
 async function checked(dir, entry) { if (!entry || entry.file !== basename(entry.file)) throw new Error("BOUND_INPUT_PATH_INVALID"); const path = join(dir, entry.file), h = createHash("sha256"); for await (const bytes of createReadStream(path)) h.update(bytes); if (h.digest("hex") !== entry.sha256) throw new Error("BOUND_INPUT_BYTES_CHANGED"); return path; }
 for (const entry of Object.values(receipt.files)) await checked(original.source, entry);
 for (const entry of Object.values(original.files)) await checked(dataset, entry);
 const api = resolve(option("--api-dist") ?? join(root, "apps/api/dist/src")), mod = name => require(join(api, name + ".js"));
 const modules = { planner: mod("legacy-load/user-order-offline-plan"), contentHash: mod("supply/content-hash"), orderRead: mod("order/legacy-order-read"),
-  migration: mod("supply/legacy-user-migration"), phone: mod("auth/phone-number"), finance: mod("finance/legacy-finance-source-preparation"), money: mod("finance/personal-finance-read"), identity: mod("auth/identity-subject") };
+  migration: mod("supply/legacy-user-migration"), phone: mod("auth/phone-number"), finance: mod("finance/legacy-finance-source-preparation"), money: mod("finance/personal-finance-read"), identity: mod("auth/identity-subject"), identityProfile: mod("auth/legacy-identity-profile") };
 if (typeof modules.planner.planLegacyUserContactBatch !== "function") throw new Error("CONTACT_AWARE_BUILD_REQUIRED");
 const sid = /S-1-5-[0-9-]+/.exec(spawnSync("whoami", ["/user", "/fo", "csv", "/nh"], { encoding: "utf8", windowsHide: true }).stdout)?.[0];
 if (!sid) throw new Error("SID_REQUIRED");
@@ -59,8 +57,10 @@ for (const [id, plan] of planned) {
     if (e.status.realNameBound && typeof raw.id_card === "string" && raw.id_card.trim()) {
       try { trustedIdentityNumber = modules.identity.normalizeIdentityDocument(raw.id_card); } catch { }
     }
+    const identity = original.identityProfiles ? planLegacyIdentitySource(raw, e.status.realNameBound, modules) : null;
+    if (identity?.state === "INVALID") throw new Error("LEGACY_IDENTITY_SOURCE_INCOMPLETE");
     newUsers.push({ sourceId: id, userId: plan.userId, sourceDigest: e.sourceDigest, input: plan.writerInput,
-      trustedIdentityNumber, operation: "supply.legacy.owner-migrate", idempotencyKey: modules.migration.legacyOwnerMigrationKey(e), targetExistence: "UNREAD_REQUIRES_ABSENCE_OR_EXACT_REPLAY" });
+      trustedIdentityNumber, ...(identity ? { legacyIdentityProfile: identity.legacyIdentityProfile } : {}), operation: "supply.legacy.owner-migrate", idempotencyKey: modules.migration.legacyOwnerMigrationKey(e), targetExistence: "UNREAD_REQUIRES_ABSENCE_OR_EXACT_REPLAY" });
     balances.push({ sourceId: id, userId: plan.userId, sourceDigest: e.sourceDigest, source: { id: raw.id, earnings: raw.earnings, money: raw.money },
       amounts: { earnings: modules.money.sourceYuanToCents(raw.earnings), money: modules.money.sourceSignedYuanToCents(raw.money) } });
     let reason = e.status.deleted ? "SOURCE_CANCELLED_LOGIN_DISABLED" : e.status.disabled ? "SOURCE_FROZEN_LOGIN_DISABLED" : e.legacyPassword ? "LEGACY_NUMBER_PASSWORD_ENDPOINT_REQUIRED"
@@ -123,6 +123,7 @@ emit("stored-opening-reviews", openings);
 const sourceTotal = balances.reduce((sum, row) => sum + BigInt(row.amounts.earnings), 0n), admittedTotal = openings.filter(r => r.state === "CANDIDATE").reduce((sum, row) => sum + BigInt(row.input.proof.availableCents), 0n);
 const reasons = {}; for (const row of recovery) { const entry = reasons[row.reason] ?? { subjects: 0, sourceStoredEarningsCents: 0n }; entry.subjects++; entry.sourceStoredEarningsCents += BigInt(row.sourceStoredEarningsCents); reasons[row.reason] = entry; }
 const report = { format: "zzsh.legacy-contact-append-plan.v1", status: "SOURCE_CLOSED_PENDING_ROOT_REVIEW_AND_FRESH_TARGET_CAS", sourceDatasetSha256: sha(bytes), sourceReceiptSha256: original.sourceReceiptSha256,
+  ...(original.identityProfiles ? { identityProfiles: { schema: "zzsh.legacy-identity-profile-source.v1", verified: newUsers.filter(row => row.input.evidence.status.realNameBound).length, ready: newUsers.filter(row => row.legacyIdentityProfile).length, invalid: 0 } } : {}),
   source: original.source, sourceRef: original.sourceRef, gameBindings: original.gameBindings, sourceOrigin: original.sourceOrigin,
   sourceCutoff: original.sourceCutoff, apiDist: api, codeEntrySha256: sha(readFileSync(fileURLToPath(import.meta.url))), files,
   counts: { sourceFamily: family.size, additionalCancelledContactCorrections: cancelledCorrections.length, appendUsers: newUsers.length, existingContactCorrections: corrections.length, accounts: accountAppend.length, orders: orderAppend.length, continuationEvidence: continuation.length,

@@ -15,6 +15,7 @@ import { readUserDirectoryWalletSummaries, DIRECTORY_WALLET_PERMISSION, DIRECTOR
 import { readKnownMembershipTiers, DIRECTORY_MEMBERSHIP_TIERS, type DirectoryMembershipTierFilter } from "./user-directory-membership";
 import { maskPhoneNumber, readDirectoryUserSummaries } from "./user-directory-summary";
 import { managedProfileImagePath } from "../profile/profile-avatar";
+import { pgIdentityDisplayStore, readIdentityDisplay } from "./identity-display";
 export { maskPhoneNumber } from "./user-directory-summary";
 
 export const USER_DIRECTORY_SOURCE = {
@@ -716,6 +717,7 @@ export async function readUserDirectoryDetail(
   const registeredAt = original ? row.originalRegisteredAt ?? null : row.localCreatedAt;
   const summaries = await readUserDirectoryBusinessSummaries(client, viewer, [userId]);
   const wallets = await readUserDirectoryWalletSummaries(client, { walletRead: viewer.walletRead === true }, [userId]);
+  const identityDisplay = await readIdentityDisplay(pgIdentityDisplayStore(client), userId, row.identityStatus);
   return {
     userId: row.id,
     name: row.name,
@@ -738,6 +740,8 @@ export async function readUserDirectoryDetail(
       ageStatus: row.ageStatus ?? "UNKNOWN",
       provider: row.provider ?? null,
       verifiedAt: row.identityVerifiedAt,
+      display: identityDisplay.identityDisplay,
+      displayReason: identityDisplay.identityDisplayReason,
     },
     identityStatus: row.identityStatus ?? "UNKNOWN",
     ageStatus: row.ageStatus ?? "UNKNOWN",

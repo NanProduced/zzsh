@@ -204,8 +204,7 @@ export class ConfigurationError extends Error {
 
 const LOCAL_HOST = "127.0.0.1";
 const LOCAL_DB_PORT = 55432;
-// A second registered local instance is allowed for an isolated migration target; the boundary stays
-// loopback plus this fixed set of project ports, never an arbitrary value.
+// Ordinary local runtimes use fixed ports; isolated migration bootstrap has a separate closed-provider gate.
 const LOCAL_DB_PORTS: readonly number[] = [LOCAL_DB_PORT, 55433];
 const LOCAL_REDIS_PORT = 56379;
 const IDENTIFIER = /^[a-z][a-z0-9_]{0,62}$/;
@@ -514,6 +513,17 @@ export function loadConfig(
   const localDemoFlag=env.LOCAL_DEMO_CLONE_FINANCE_ENABLED?.trim()??"false";
   if(!['true','false'].includes(localDemoFlag))throw new ConfigurationError('LOCAL_DEMO_CLONE_FINANCE_ENABLED is invalid');
   const localDemo=localDemoFlag==='true';
+  const migrationBootstrapFlag=env.LOCAL_MIGRATION_BOOTSTRAP_ENABLED?.trim()??"false";
+  if(!['true','false'].includes(migrationBootstrapFlag))throw new ConfigurationError('LOCAL_MIGRATION_BOOTSTRAP_ENABLED is invalid');
+  const migrationBootstrap=migrationBootstrapFlag==='true';
+  if(migrationBootstrap&&(localDemo||profile!=='test'||provider!=='fake'||env.NODE_ENV!=='development'||host!==LOCAL_HOST||port!==4242
+    ||target!=='local-compose'||databaseHost!==LOCAL_HOST||databaseName!=='zzsh_test_regression'||databaseUser!=='zzsh_regression_runtime'
+    ||databasePort<1024||[55432,55433,55434].includes(databasePort)||env.ENABLE_TEST_OPERATIONS!=='false'
+    ||['JOINPAY_COLLECTION_ENABLED','JOINPAY_REFUND_ENABLED','JOINPAY_PAYOUT_ENABLED','JOINPAY_ACCOUNTS_ENABLED',
+      'YUNXIN_ENABLED','ORDER_TEAMS_ENABLED','SUPPORT_DISPATCH_ENABLED','ORDER_IM_EVENTS_ENABLED','ORDER_SWEEP_ENABLED',
+      'DISTRIBUTION_DUE_WORKER_ENABLED','DISTRIBUTION_NATIVE_ENABLED','ORDER_SETTLEMENT_RECORDING_ENABLED'].some(key=>env[key]!=='false')
+    ||env.USER_SMS_PROVIDER!=='disabled'||env.USER_REAL_NAME_PROVIDER!=='disabled'))
+    throw new ConfigurationError('LOCAL_MIGRATION_BOOTSTRAP_TARGET_INVALID');
   if(localDemo && (profile!=='dev'||env.NODE_ENV!=='development'||provider!=='fake'||host!=='127.0.0.1'||port!==4232
     ||target!=='local-compose'||databaseHost!=='127.0.0.1'||databasePort!==55434||databaseName!=='zzsh_test_r07_delivery_20261108'
     ||env.ECS_TEST_DEMO_FINANCE_ENABLED==='true'||env.ENABLE_TEST_OPERATIONS==='true'
@@ -564,7 +574,7 @@ export function loadConfig(
     if (databaseHost !== LOCAL_HOST || redisHost !== LOCAL_HOST) {
       throw new ConfigurationError("local-compose databases must use 127.0.0.1");
     }
-    if (!(localDemo ? databasePort===55434 : LOCAL_DB_PORTS.includes(databasePort)) || redisPort !== LOCAL_REDIS_PORT) {
+    if (!(localDemo ? databasePort===55434 : migrationBootstrap || LOCAL_DB_PORTS.includes(databasePort)) || redisPort !== LOCAL_REDIS_PORT) {
       throw new ConfigurationError("local-compose ports are outside the zzsh boundary");
     }
   }

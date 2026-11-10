@@ -4,8 +4,8 @@ import { createReadStream, existsSync, lstatSync, mkdirSync, openSync, closeSync
 import { createRequire } from "node:module";
 import { dirname, isAbsolute, join, parse, resolve } from "node:path";
 import pg from "pg";
-import { readSourceRows } from "./local-source-adapter.mjs";
-import { advisoryLockSql, assertLiveTarget, loadRegisteredTarget, maintenanceConnection, targetConnection, targetIdentityQuery } from "./local-target-registry.mjs";
+import { readBoundSourceRows } from "./local-source-adapter.mjs";
+import { acquireMigrationSessionFence, advisoryLockSql, assertLiveTarget, assertMigrationFenceHeld, assertNextMigrationWriteReady, captureMaintenanceLockEpoch, loadRegisteredTarget, maintenanceConnection, NEXT_MIGRATION_PROFILE, releaseMigrationSessionFence, targetConnection, targetIdentityQuery } from "./local-target-registry.mjs";
 
 const args = process.argv.slice(2), option = name => { const i = args.indexOf(name); return i < 0 ? undefined : args[i + 1]; };
 if (!args.includes("--verify") && !args.includes("--apply")) { console.log(JSON.stringify({ action: "PLAN", required: ["--verify or --apply", "--plan-dir", "--plan-receipt-sha", "--source-plan-dir", "--source-dir", "--source-receipt-sha", "--api-dist"], applyAlsoRequires: ["--credentials", "--actor-file", "--oid", "--nonce", "--out"], dbConnections: 0, targetWrites: 0 })); process.exit(0); }
@@ -26,11 +26,10 @@ const source = readBound(join(sourceDir, "receipt.json"), option("--source-recei
 if (plan.status !== "PREPARED_TARGET_NOT_RUN" || sourcePlan.status !== "SOURCE_REFERENCES_PLANNED_TARGET_NOT_RUN" || source.status !== "CAPTURED_READ_ONLY" || !source.rollbackConfirmed || !source.clientClosed || sourcePlan.sourceReceiptSha256 !== option("--source-receipt-sha") || sourcePlan.sourceAccountsSha256 !== source.files?.accounts?.sha256 || source.files?.accounts?.file !== "accounts.jsonl") throw new Error("SOURCE_BINDING_MISMATCH");
 async function checkFile(path, expected) { const digest = createHash("sha256"); for await (const bytes of createReadStream(path)) digest.update(bytes); if (digest.digest("hex") !== expected) throw new Error("INPUT_FILE_SHA_MISMATCH"); }
 const planFile = join(planDir, "account-paths.jsonl"), sourceFile = join(sourceDir, "accounts.jsonl");
-await checkFile(planFile, plan.fileSha256); await checkFile(sourceFile, source.files.accounts.sha256);
 const require = createRequire(import.meta.url), writer = require(join(resolve(apiDist), "legacy-load/legacy-path-records.js"));
 if (typeof writer.prepareLegacyPathRecord !== "function" || typeof writer.recordLegacyPathRecords !== "function") throw new Error("BUILT_WRITER_REQUIRED");
 const prepared = new Map(); let displayCount = 0, penaltyCount = 0;
-for await (const item of readSourceRows(planFile)) {
+for await (const item of readBoundSourceRows(planFile, { sha256: plan.fileSha256, rows: plan.accounts })) {
   if (!/^[1-9][0-9]*$/.test(item.legacyId ?? "") || prepared.has(item.legacyId) || !/^[a-f0-9]{64}$/.test(item.sourceDigest ?? "") || typeof item.ownerUserId !== "string") throw new Error("PATH_PLAN_INVALID");
   if (!Array.isArray(item.displayPaths) || !Array.isArray(item.penaltyPaths)) throw new Error("PATH_PLAN_INVALID");
   displayCount += item.displayPaths.length; penaltyCount += item.penaltyPaths.length;
@@ -38,7 +37,7 @@ for await (const item of readSourceRows(planFile)) {
 }
 if (prepared.size !== plan.accounts || displayCount !== plan.displayPaths || penaltyCount !== plan.penaltyPaths) throw new Error("PATH_PLAN_COUNT_MISMATCH");
 let matched = 0;
-for await (const row of readSourceRows(sourceFile)) {
+for await (const row of readBoundSourceRows(sourceFile, source.files.accounts)) {
   const entry = prepared.get(row.id); if (!entry) continue;
   if (entry.sourceRow || row.user_id !== entry.plan.legacyOwnerId) throw new Error("SOURCE_OWNER_MISMATCH");
   const actual = writer.prepareLegacyPathRecord(row);
@@ -61,6 +60,7 @@ for (const path of [actorFile, credentialsFile]) { let p = resolve(path); for (;
 if (existsSync(out)) throw new Error("NEW_OUTPUT_REQUIRED");
 const resource = JSON.parse(readFileSync(join(dirname(credentialsFile), "resource.json"))), credentials = JSON.parse(readFileSync(credentialsFile)), actorProof = JSON.parse(readFileSync(actorFile));
 const registered = loadRegisteredTarget(credentialsFile);
+if (apply) assertNextMigrationWriteReady(registered);
 const actor = { id: actorProof.id ?? actorProof.actorId, sessionId: actorProof.sessionId };
 if (actorProof.actorId && actorProof.actorId !== actor.id) throw new Error("TARGET_ACTOR_ALIASES_CONFLICT");
 if (resource.database !== "zzsh_test_regression" || registered.database !== resource.database || registered.oid !== expectedOid || registered.nonce !== expectedNonce || resource.oid !== expectedOid || resource.nonce !== expectedNonce || resource.pendingReset || credentials.migration?.name !== resource.roles?.migration?.name || credentials.migration?.oid !== resource.roles?.migration?.oid || credentials.migration?.name !== registered.migrationRole || credentials.migration?.oid !== registered.migrationRoleOid || typeof actor.id !== "string" || typeof actor.sessionId !== "string" || !actor.id || !actor.sessionId) throw new Error("TARGET_BINDING_INVALID");
@@ -80,14 +80,21 @@ let queries = 0, chunks = 0, closed = false, lockHeld = false, lockReleased = fa
 client.query = (...args) => { queries++; return originalQuery(...args); };
 maintenance.query = (...args) => { queries++; return maintenanceQuery(...args); };
 const auth = require(join(resolve(apiDist), "auth/auth-security.js")), security = require(join(resolve(apiDist), "auth/security-core.js"));
-let state = "STARTED", applied = 0, replayed = 0, begun = false, commitSent = false, failure;
+let state = "STARTED", applied = 0, replayed = 0, begun = false, commitSent = false, commitAck = false, failure, fenceEpoch, fenceHeld = false, targetFenceReleased;
 try {
   await maintenance.connect();
   lockHeld = (await maintenance.query(advisoryLockSql(registered, "try"))).rows[0]?.ok === true;
   if (!lockHeld) throw new Error("REGRESSION_RESOURCE_BUSY");
-  await client.connect(); await client.query("BEGIN READ ONLY"); begun = true;
+  if (registered.migrationProfile === NEXT_MIGRATION_PROFILE) fenceEpoch = await captureMaintenanceLockEpoch(maintenance, registered);
+  await client.connect();
+  if (fenceEpoch) {
+    assertLiveTarget(registered, (await client.query(targetIdentityQuery())).rows[0]);
+    await acquireMigrationSessionFence(client, registered, fenceEpoch); fenceHeld = true;
+  }
+  await client.query("BEGIN READ ONLY"); begun = true;
   const identity = (await client.query(targetIdentityQuery())).rows[0];
   assertLiveTarget(registered, identity);
+  if (fenceHeld) await assertMigrationFenceHeld(client, registered, fenceEpoch);
   if (identity.oid !== expectedOid || identity.nonce !== expectedNonce || identity.marker !== "zzsh:regression-test:v1" || identity.role !== credentials.migration.name || identity.role_oid !== credentials.migration.oid) throw new Error("LIVE_TARGET_CHANGED");
   await auth.assertAdminContextInTransaction(client, { userId: actor.id, sessionId: actor.sessionId });
   const rows = (await client.query(`SELECT m.legacy_id,m.account_id,m.source_digest,a.owner_user_id FROM zzsh_supply.legacy_supply_map m JOIN zzsh_supply.rental_account a ON a.id=m.account_id WHERE m.source_system='legacy_mysql_restore' AND m.source_entity='la_rental_accounts' AND m.legacy_id=ANY($1::text[])`, [[...prepared.keys()]])).rows;
@@ -99,23 +106,30 @@ try {
     withinWindow();
     const batch = items.slice(offset, offset + 100); log({ event: "BATCH_START", offset, count: batch.length });
     await client.query("BEGIN"); begun = true;
+    if (fenceHeld) await assertMigrationFenceHeld(client, registered, fenceEpoch);
     const requestId = `legacy_media_paths_${offset}`; await security.setAuditContext(client, "admin", actor.id, actor.sessionId, requestId);
     const result = await writer.recordLegacyPathRecords(client, batch.map(entry => ({ accountId: entry.accountId, sourceRow: entry.sourceRow })), { id: actor.id, sessionId: actor.sessionId, requestId });
     const newCount = result.inserted, replayCount = result.replayed;
     log({ event: "BATCH_COMMIT_INTENT", offset, count: batch.length, planReceiptSha256: option("--plan-receipt-sha") });
     fsyncSync(fd);
     withinWindow();
+    if (fenceHeld) await assertMigrationFenceHeld(client, registered, fenceEpoch);
     commitSent = true; const commit = await client.query("COMMIT"); begun = false;
     if (commit.command !== "COMMIT") throw new Error("COMMIT_ACK_MISMATCH");
-    applied += newCount; replayed += replayCount; chunks++; log({ event: "BATCH_COMMIT_ACK", offset, count: batch.length, inserted: newCount, replayed: replayCount }); commitSent = false;
+    commitAck = true;
+    applied += newCount; replayed += replayCount; chunks++; log({ event: "BATCH_COMMIT_ACK", offset, count: batch.length, inserted: newCount, replayed: replayCount }); fsyncSync(fd); commitSent = false; commitAck = false;
   }
   state = "COMPLETE"; log({ event: "COMPLETE", accounts: prepared.size, applied, replayed });
 } catch (error) {
-  state = commitSent ? "COMMIT_UNKNOWN" : "STOPPED";
+  state = commitSent ? commitAck ? "COMMIT_ACK_RECEIPT_FAILED" : "COMMIT_UNKNOWN" : "STOPPED";
   failure = error.code ?? (/^[A-Z][A-Z0-9_]+$/.test(error.message ?? "") ? error.message : error.name);
-  if (begun && !commitSent) { try { const ack = await client.query("ROLLBACK"); log({ event: "ROLLBACK", acknowledged: ack.command === "ROLLBACK" }); } catch { log({ event: "ROLLBACK", acknowledged: false }); } }
+  if (begun && !commitSent) { try { const ack = await client.query("ROLLBACK"); begun = false; if (ack.command !== "ROLLBACK") state = "ROLLBACK_UNKNOWN"; log({ event: "ROLLBACK", acknowledged: ack.command === "ROLLBACK" }); } catch { state = "ROLLBACK_UNKNOWN"; log({ event: "ROLLBACK", acknowledged: false }); } }
   log({ event: state, applied, replayed, failure });
 } finally {
+  if (fenceHeld && !begun && !commitSent) {
+    try { await releaseMigrationSessionFence(client, registered); targetFenceReleased = true; }
+    catch { targetFenceReleased = false; }
+  } else if (fenceHeld) targetFenceReleased = false;
   const targetClosed = await client.end().then(() => true, () => false);
   if (lockHeld) {
     try { lockReleased = (await maintenance.query(advisoryLockSql(registered, "unlock"))).rows[0]?.ok === true; } catch {}
@@ -124,4 +138,4 @@ try {
   closed = targetClosed && maintenanceClosed;
   closeSync(fd);
 }
-console.log(JSON.stringify({ status: state, accounts: prepared.size, applied, replayed, queries, chunks, closed, lockReleased, failure, wallMs: performance.now() - started })); if (state !== "COMPLETE" || !closed || !lockReleased) process.exitCode = 1;
+console.log(JSON.stringify({ status: state, accounts: prepared.size, applied, replayed, queries, chunks, closed, lockReleased, ...(fenceEpoch?{targetFence:'HELD_ACROSS_BATCHES',targetFenceReleased}:{}), failure, wallMs: performance.now() - started })); if (state !== "COMPLETE" || !closed || !lockReleased || fenceEpoch && targetFenceReleased !== true) process.exitCode = 1;

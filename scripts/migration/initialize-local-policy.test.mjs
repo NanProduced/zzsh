@@ -24,6 +24,18 @@ test("round-seven membership policy is bound to its own instance and closed prov
         const invalid = structuredClone(binding); change(invalid); assert.throws(() => run(invalid), /R07_POLICY_RUNTIME_BINDING_REQUIRED/);
     }
 });
+test("next-round membership policy requires the same isolated profile and instance on both runtime facts", () => {
+    const instance={host:"127.0.0.1",port:55435,systemIdentifier:"12345"},migrationProfile="LOCAL_MIGRATION_NEXT_V1";
+    const target={database:"zzsh_test_regression",oid:"42",nonce:"abcdef",migrationRoleOid:"77",instance,migrationProfile};
+    const binding={resource:{...target},actualResource:{instance,migrationProfile,read_only:"on",migration_role_oid:"77"},status:"R07_BOOTSTRAP_API_LISTENING",port:4242,
+      origins:{apiOrigin:"http://127.0.0.1:4242"},NoIM:true,imProvisioner:false,imIdentityRepository:false,imAppId:false,
+      formalAppMounted:true,financialCommandCapabilities:false,workersEnabled:false,maintenanceLockReleased:true,maintenanceClosed:true};
+    const run=candidate=>{const bytes=Buffer.from(JSON.stringify(candidate));assertPolicyRuntimeBinding({target,serverBinding:{sha256:digest(bytes)}},candidate,bytes);};
+    assert.doesNotThrow(()=>run(binding));
+    for(const change of [x=>{delete x.resource.migrationProfile;},x=>{x.actualResource.migrationProfile='OTHER';},x=>{x.actualResource.instance.port=55433;}]){
+      const bad=structuredClone(binding);change(bad);assert.throws(()=>run(bad),/R07_POLICY_RUNTIME_BINDING_REQUIRED/);
+    }
+});
 function policyBase() {
     const result = structuredClone(template);
     result.policy.tiers = Object.fromEntries(tiers.map(tier => [tier, { tier, tenantDeposit: "ACCOUNT_BASE", pricing: Object.fromEntries(modes.map(mode => [mode, { status: "CONFIGURED", kind: "TOTAL_DISCOUNT", mode, priceVersionId: result.priceVersionId, costBasisRef: result.priceVersionId, payableRatio: "1" }])) }]));

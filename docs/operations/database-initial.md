@@ -1,6 +1,6 @@
 # 业务数据库新装基线
 
-生产空库显式选择 `apps/api/migrations/initial/release_production_0174/`，覆盖 canonical 0000–0174。它从受控的 0153 生产基线与完整后续链生成，保留业务结构、静态种子、约束和权限。所有业务表和有效列，以及业务版本账，都有数据库目录中的中文 `COMMENT`。安装前先确认目标业务 schema 为空，并使用已有 migration profile 的独立 DDL 与 runtime 身份：
+生产空库显式选择 `apps/api/migrations/initial/release_production_0174/`，覆盖 canonical 0000–0174。它从受控的 0153 生产基线与完整后续链生成，保留业务结构、静态种子、约束和权限。基线内的业务表、有效列及版本账有中文 `COMMENT`；后续迁移的对象须重新检查。安装前先确认目标业务 schema 为空，并使用已有 migration profile 的独立 DDL 与 runtime 身份：
 
 ```sh
 npm run migrate:business -w @zzsh/api -- --initial --baseline release_production_0174
@@ -8,11 +8,17 @@ npm run migrate:business -w @zzsh/api -- --initial --baseline release_production
 
 四个 SQL 段依次安装结构、`02-initial_data.sql` 中的必要静态种子、约束和触发器、PUBLIC 权限。静态种子只包含权限与角色、审批模板、头像审核默认策略、退款等待期默认 0/7 天，以及旧订单资金责任运行合同；不包含管理员、TOTP、旧上架保证金或用户交易数据。游戏目录、价目、会员和分销政策、信用档案与法律文书仍须单独按各自来源初始化和验证。runtime 窄权由 `applyRuntimePrivileges` 安装。manifest 校验源迁移、覆盖前缀、各段及组合的原始字节；保留函数正文的换行，不格式化已封签的 SQL。
 
-该基线之后的 canonical 尾迁移包含 `0175_legacy_account_capture_facts`、`0176_user_auth_throttle`、`0177_market_identity_provider` 和 `0178_order_compensation`。`0176` 安装用户认证限流及挑战防重放结构，运行角色的表、序列和清理所需列权限由 `applyRuntimePrivileges` 收敛；使用 PostgreSQL 限流时，新版 API 启动前会核验依赖，旧版 API 不具备该检查。`0177` 扩展实名提供方约束，保留原有来源，新供应商的实名调用在请求前检查结构是否就绪。`0178` 安装订单包赔赔款凭证、审批权限与入账保护；运行角色只能调用受控函数，结构不完整时不授予入账权限。已有同名结构仅在完整结构指纹和所有者一致时承接。基线源文件校验只对已独立确认的 `0155` LF/CRLF 固定字节对兼容，其他内容或换行变化仍拒绝。
+当前租赁业务资料包必须包含启用的游戏和租赁服务、关联的已封存价格/租期/出租协议、哈夫币和已启用物资的标准价目及可匹配的租期；启用包赔时还须核对对应封存条款。业务包初始化后记录目标规则摘要，迁移读回时分别用迁移角色和 runtime 角色核对；摘要使用 PostgreSQL 原始数值文本，避免金额精度丢失。这只验证上述配置的读取权限，不代替全部 runtime 权限、API 启动、分销信用初始化或页面验收。
+
+该基线之后的 canonical 尾迁移包含 `0175_legacy_account_capture_facts`、`0176_user_auth_throttle`、`0177_market_identity_provider` 和 `0178_order_compensation`。`0176` 安装用户认证限流及挑战防重放结构；`0177` 扩展实名提供方约束；`0178` 安装订单包赔赔款凭证、审批权限与入账保护。后续迁移的编号和已安装状态以正式 journal 与数据库版本账为准。旧实名加密资料由迁移身份写入、运行角色只读，保护钥与主体摘要密钥独立配置和备份；同名结构不能未经核验直接承接。基线源文件校验只对已独立确认的 `0155` LF/CRLF 固定字节对兼容，其他内容或换行变化仍拒绝。
+
+新装基线和尾迁移后的静态种子可能不同；NEXT 初始化同时绑定基线原始种子证明、独立核定的尾链种子合同及已审阅的 `--release-commit`。尾链不改变种子时可复用合同；种子有意变化时须独立核对并更新合同。安装后逐项核对种子、额外业务数据、业务 schema 和中文注释，未通过不得继续业务导入。
 
 生产投影省略已下线的管理工作台布局、纯本地模拟支付声明、退款沙箱、模拟提现及其辅助对象，也不安装独立的 `zzsh_meta` 测试元数据。保留 `zzsh_business_meta.migrations` 业务版本账、正式汇聚收款／退款／出款、绑卡、钱包及旧来源和审计。通用 `payment_channel_observation` 保留作兼容观察读取，生产约束仅接受未验证的汇聚观察；正式收款观察保存在 `joinpay_collection_observation`，任何单条观察均不代表已收款或到账。
 
 已装 `release_0141`、`release_0151`、`release_production_0153` 或原 canonical 的库按原版本账接后续编号迁移；原文件与哈希不变。生产 initial 只记一条明确的基线和后续增量，不补造覆盖历史，也不用于删表重灌。以后正常迁移无需重复传 `--initial`。空库使用初始安装时显式选基线；仅用 `--initial` 仍由 registry 的兼容默认值决定。
+
+全新生产空库不要从 `0000` 逐个重放历史 canonical：`0105` 保留了对旧本地测试角色的直接授权，缺少该角色时原链会失败；不应在生产创建这个测试角色来绕过。使用上面的生产 initial，旧已执行迁移保持原字节，后续变化以新编号迁移和版本账承接。
 
 本地受控渠道测试使用登记的独立测试资源，按其原 canonical 链或 `--initial --baseline release_0151` 新装，并使用已有受控资源准入。不要将测试辅助对象、模拟凭据或事实迁入生产基线。此路径的受控成功也不代表真实渠道或银行到账。
 

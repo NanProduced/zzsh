@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { createReadStream, readFileSync, writeFileSync, mkdirSync, existsSync, lstatSync, openSync, closeSync, writeSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdirSync, existsSync, lstatSync, openSync, closeSync, writeSync } from "node:fs";
 import { createRequire } from "node:module";
 import { basename, dirname, join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
-import { readSourceRows, sourceJsonLine } from "./local-source-adapter.mjs";
+import { readBoundSourceRows, sourceJsonLine } from "./local-source-adapter.mjs";
 import { prepareLocalStoredOpening } from "./local-opening-proof.mjs";
 
 const args = process.argv.slice(2);
@@ -46,12 +46,7 @@ assert.equal(funds.database, base.database);
 assert.equal(funds.sourceSupplement.fullSourcePopulation, true);
 async function* checkedRows(dir, meta) {
   assert(meta.file === basename(meta.file), "OPENING_INPUT_FILENAME_INVALID");
-  const file = join(dir, meta.file), digest = createHash("sha256");
-  for await (const chunk of createReadStream(file)) digest.update(chunk);
-  assert.equal(digest.digest("hex"), meta.sha256, "OPENING_FILE_SHA_MISMATCH:" + meta.file);
-  let n = 0;
-  for await (const row of readSourceRows(file)) { n++; yield row; }
-  assert.equal(n, meta.rows, "OPENING_FILE_COUNT_MISMATCH:" + meta.file);
+  yield* readBoundSourceRows(privatePath(join(dir, meta.file)), meta);
 }
 const maps = { logs: new Map(), orders: new Map(), withdraws: new Map(), distributions: new Map() };
 for (const [dir, file, map] of [

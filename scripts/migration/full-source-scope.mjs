@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { assertSelectedScopeForWrite } from './selected-business-scope.mjs';
+import { assertCaptureTargetProfile, NEXT_MIGRATION_PROFILE } from './local-target-registry.mjs';
+import { assertNextBusinessPopulation } from './local-source-adapter.mjs';
 
 const hex=value=>typeof value==='string'&&/^[a-f0-9]{64}$/.test(value);
 const sha=value=>createHash('sha256').update(value).digest('hex');
@@ -52,6 +54,8 @@ export function partitionSourceKeys(sourceIds,readyIds,isolatedIds) {
 }
 
 export function assertRoundPopulationBinding(input,dataset,source,verification) {
+  assertCaptureTargetProfile(source,input.target?.migrationProfile ?? null);
+  assertNextBusinessPopulation(dataset?.population, input?.target?.migrationProfile === NEXT_MIGRATION_PROFILE);
   if(!dataset.population){assert(!input.population,'UNDECLARED_POPULATION_CANNOT_BE_PROMOTED');return {mode:dataset.scenarioSelection?.schema==='zzsh.source-scenarios.v1'?'LEGACY_SCENARIO_SELECTION':'LEGACY_UNDECLARED'};}
   if(dataset.population.mode!=='FULL_CAPTURED_SOURCE'){
     const p=dataset.population;

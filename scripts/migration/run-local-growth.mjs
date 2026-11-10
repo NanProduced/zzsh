@@ -1,13 +1,14 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { createReadStream, existsSync, lstatSync, mkdirSync, readFileSync, writeFileSync, appendFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readFileSync, writeFileSync, appendFileSync } from "node:fs";
 import { createRequire } from "node:module";
-import { advisoryLockSql, assertLiveTarget, loadRegisteredTarget } from "./local-target-registry.mjs";
+import { acquireMigrationSessionFence, acquireMigrationTransactionFence, advisoryLockSql, assertLiveTarget, assertMaintenanceLockHeld, assertMigrationFenceHeld, assertNextMigrationWriteReady, captureMaintenanceLockEpoch, guardedMigrationTargetPool, loadRegisteredTarget, NEXT_MIGRATION_PROFILE, releaseMigrationSessionFence, targetIdentityQuery } from "./local-target-registry.mjs";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { writePrivate } from "../local-auth.mjs";
 import { assertGrowthScopePartition, buildLocalGrowthPlan } from "./local-growth-plan.mjs";
-import { readSourceRows } from "./local-source-adapter.mjs";
+import { assertGrowthPriorAttempt, executeGrowthEntry, growthFailureStatus, growthQueryCategory, growthRecoveryStatus, inlineGrowthIntent, openGrowthPackageReader, sameGrowthInstance, syncInlineGrowthLog, validateGrowthPackageEntries, verifyGrowthPackageBytes, verifyInlineGrowthLog, writeGrowthPackagePacks } from "./local-growth-packages.mjs";
+import { readVerifiedSourceRows } from "./local-source-adapter.mjs";
 
 const args = process.argv.slice(2), option = name => { const i = args.indexOf(name); return i < 0 ? undefined : args[i + 1]; };
 const modes = ["--prepare", "--apply", "--readback", "--recover-index"].filter(x => args.includes(x));
@@ -36,6 +37,10 @@ const inputSha256 = option("--input-sha"), input = pinned(privatePath(option("--
 assert.equal(input.schema, "zzsh.local-round.v1");
 const growthInput = input.growth;
 assert(growthInput && typeof growthInput.policyId === "string" && Number.isFinite(Date.parse(growthInput.policyEffectiveAt)), "EXACT_CURRENT_GROWTH_POLICY_REQUIRED");
+assert(growthInput.packageLayout===undefined||growthInput.packageLayout==='PACKED_V2',"GROWTH_PACKAGE_LAYOUT_INVALID");
+const packed=growthInput.packageLayout==='PACKED_V2';
+assert(growthInput.approvalLayout === undefined || packed && growthInput.approvalLayout === 'INLINE_INTENT_V1', 'GROWTH_APPROVAL_LAYOUT_INVALID');
+const inlineApprovals = mode === '--apply' && growthInput.approvalLayout === 'INLINE_INTENT_V1';
 const out = privatePath(option("--out"), true);
 assert(!existsSync(out), "PRESERVE_ORIGINAL_GROWTH_OUTPUT");
 const target = input.target;
@@ -61,6 +66,9 @@ const database = resource.database, marker = resource.marker;
 assert.equal(resource.oid, target.oid);
 assert.equal(resource.nonce, target.nonce);
 assert.deepEqual(target.instance ?? null,resource.instance,"GROWTH_REGISTERED_INSTANCE_CHANGED");
+assert.equal(target.migrationProfile ?? null, resource.migrationProfile, "GROWTH_REGISTERED_PROFILE_CHANGED");
+if (mode === "--apply") assertNextMigrationWriteReady(resource);
+if (packed) assert(sameGrowthInstance(target.instance, resource.instance), "GROWTH_PACKED_INSTANCE_REQUIRED");
 assert(!resource.pendingReset && resource.protectedDataset?.manifestSha256 === input.dataset.sha256 && resource.protectedDataset.epoch?.oid === target.oid && resource.protectedDataset.epoch?.nonce === target.nonce, "GROWTH_PROTECTED_SOURCE_TARGET_REQUIRED");
 const credentials = read(credentialsFile);
 assert.equal(credentials.database, database);
@@ -71,10 +79,14 @@ for (const role of ["migration", "runtime"]) {
 }
 assert.equal(credentials.migration.oid, target.migrationRoleOid);
 const summaryFile = join(out, "summary.json");
-const result = { schema: "zzsh.local-growth-round-receipt.v1", status: "STARTED", mode, inputSha256, datasetSha256: input.dataset.sha256, oid: target.oid, nonce: target.nonce, ...(resource.instance?{instance:resource.instance}:{}), startedAt: new Date().toISOString(), queries: 0, retries: 0, fundsWrites: 0 };
+const result = { schema: "zzsh.local-growth-round-receipt.v1", status: "STARTED", mode, inputSha256, datasetSha256: input.dataset.sha256, oid: target.oid, nonce: target.nonce, ...(resource.instance?{instance:resource.instance}:{}), ...(resource.migrationProfile?{migrationProfile:resource.migrationProfile}:{}), startedAt: new Date().toISOString(), queries: 0, ...(packed?{queryCategories:{}}:{}), retries: 0, fundsWrites: 0 };
 const save = () => writePrivate(summaryFile, result);
 const base = { host: resource.host, port: resource.port, statement_timeout: 30000, connectionTimeoutMillis: 3000, lock_timeout: 1000, application_name: "zzsh-local-growth-round" };
-const instrument = client => { const query = client.query.bind(client); client.query = (...a) => { result.queries++; return query(...a); }; return client; };
+const instrument = client => { const query = client.query.bind(client); client.query = (...a) => {
+  result.queries++;
+  if (packed) { const category = growthQueryCategory(a[0]); result.queryCategories[category] = (result.queryCategories[category] ?? 0) + 1; }
+  return query(...a);
+}; return client; };
 async function identity(client, role, roleOid) {
   const i = (await client.query(`SELECT current_database() database,d.oid::text,shobj_description(d.oid,'pg_database') marker,pg_get_userbyid(d.datdba) owner,current_setting('zzsh.regression_run') nonce,current_user role,r.oid::text role_oid,current_setting('transaction_read_only') read_only,r.rolsuper::text is_super,r.rolcreatedb::text can_create_db,r.rolcreaterole::text can_create_role,r.rolinherit::text can_inherit,r.rolbypassrls::text can_bypass_rls,(SELECT system_identifier::text FROM pg_control_system()) system_identifier,pg_get_userbyid(c.relowner) coverage_owner,to_char(transaction_timestamp() AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') as_of FROM pg_database d JOIN pg_roles r ON r.rolname=current_user CROSS JOIN pg_class c WHERE d.datname=current_database() AND c.oid=to_regclass('zzsh_iam.membership_growth_legacy_coverage')`)).rows[0];
   assertLiveTarget(resource,i,"runtime");
@@ -88,30 +100,51 @@ async function activePolicy(client) {
 }
 async function readonly(task) {
   const role = credentials.runtime, db = instrument(new Client({ ...base, database, user: role.name, password: role.password }));
-  let began = false;
+  const needsFence = resource.migrationProfile === NEXT_MIGRATION_PROFILE && ["--prepare", "--readback"].includes(mode);
+  const readLock = needsFence ? new Client({ ...base, database: resource.maintenanceDatabase, user: credentials.migration.name, password: credentials.migration.password }) : null;
+  let began = false, dbConnectAttempted = false, lockConnectAttempted = false, held = false, completed = false, connectionError;
+  db.on('error', error => { connectionError ??= error; });
+  readLock?.on('error', error => { connectionError ??= error; });
   try {
-    await db.connect(); await db.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY"); began = true;
+    let fenceEpoch;
+    if (readLock) {
+      lockConnectAttempted = true; await readLock.connect();
+      held = (await readLock.query(advisoryLockSql(resource, "try"))).rows[0]?.ok === true;
+      assert(held, "GROWTH_READONLY_RESOURCE_BUSY");
+      fenceEpoch = await captureMaintenanceLockEpoch(readLock, resource);
+    }
+    dbConnectAttempted = true; await db.connect(); await db.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY"); began = true;
     const i = await identity(db, role.name, role.oid);
-    return await task(db, i, await activePolicy(db));
+    if (fenceEpoch) { await acquireMigrationTransactionFence(db, resource, fenceEpoch); result.readOnlyFence = "HELD_UNTIL_ROLLBACK"; }
+    const value = await task(db, i, await activePolicy(db));
+    assert(!connectionError, "GROWTH_READONLY_CONNECTION_LOST"); completed = true; return value;
   } finally {
     try { if (began) result.readOnlyRollbackAck = (await db.query("ROLLBACK")).command === "ROLLBACK"; }
-    finally { await db.end(); result.readOnlyClientClosed = true; }
+    catch { result.readOnlyRollbackAck = false; }
+    try { if (dbConnectAttempted) { await db.end(); result.readOnlyClientClosed = true; } }
+    catch { result.readOnlyClientClosed = false; }
+    if (readLock) {
+      try { if (held) result.readOnlyMaintenanceUnlock = (await readLock.query(advisoryLockSql(resource, "unlock"))).rows[0]?.ok === true; }
+      catch { result.readOnlyMaintenanceUnlock = false; }
+      try { if (lockConnectAttempted) { await readLock.end(); result.readOnlyMaintenanceClosed = true; } }
+      catch { result.readOnlyMaintenanceClosed = false; }
+    }
+    if (completed && (!result.readOnlyRollbackAck || !result.readOnlyClientClosed || readLock && (!result.readOnlyMaintenanceUnlock || !result.readOnlyMaintenanceClosed)))
+      throw Error("GROWTH_READONLY_CLEANUP_UNCONFIRMED");
   }
 }
 async function checkedRows(dir, entry) {
   assert.equal(entry.file, basename(entry.file));
-  const file = join(dir, entry.file), digest = createHash("sha256");
-  for await (const bytes of createReadStream(file)) digest.update(bytes);
-  assert.equal(digest.digest("hex"), entry.sha256);
-  const rows = []; for await (const row of readSourceRows(file)) rows.push(row);
-  assert.equal(rows.length, entry.rows);
+  const file = privatePath(join(dir, entry.file)), rows = [];
+  await readVerifiedSourceRows(file, entry, row => rows.push(row));
   return rows;
 }
 const orderSql = `SELECT id,legacy_id AS "legacyId",account_id AS "accountId",legacy_account_id AS "legacyAccountId",game_id AS "gameId",owner_user_id AS "ownerUserId",renter_user_id AS "renterUserId",legacy_owner_id AS "legacyOwnerId",legacy_renter_id AS "legacyRenterId",owner_source_digest AS "ownerSourceDigest",renter_source_digest AS "renterSourceDigest",source_digest AS "sourceDigest",source_order_status AS "sourceOrderStatus",source_pay_status AS "sourcePayStatus",recorded_paid_amount_cents::text AS "paidCents",to_char(source_completed_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "completedAt",source_snapshot AS "sourceSnapshot" FROM zzsh_order.legacy_order_read_snapshot ORDER BY legacy_id`;
 const model = mod("auth/membership-growth"), legacy = mod("auth/membership-growth-legacy"), canonicalize = mod("supply/content-hash").canonicalize;
 const pinManifest = () => {
   const path = privatePath(option("--manifest")), expected = option("--manifest-sha"), plan = pinned(path, expected);
-  assert(plan.schema === "zzsh.local-growth-round-plan.v1" && plan.status === "PREPARED_NOT_APPLIED" && plan.datasetSha256 === input.dataset.sha256 && plan.oid === target.oid && plan.nonce === target.nonce && plan.policy.id === growthInput.policyId && plan.cutoff === cutoff && plan.buildDigest === sha(canonicalize(input.buildFiles)) && plan.packages.length === m.domains.users.ready && plan.summary.orders === m.domains.orders.ready, "GROWTH_PLAN_BINDING_CHANGED");
+  assert(plan.schema === (packed?"zzsh.local-growth-round-plan.v2":"zzsh.local-growth-round-plan.v1") && plan.status === "PREPARED_NOT_APPLIED" && plan.datasetSha256 === input.dataset.sha256 && plan.oid === target.oid && plan.nonce === target.nonce && (plan.migrationProfile??null)===(target.migrationProfile??null) && (!packed || sameGrowthInstance(plan.instance, target.instance)) && plan.policy.id === growthInput.policyId && plan.cutoff === cutoff && plan.buildDigest === sha(canonicalize(input.buildFiles)) && plan.packages.length === m.domains.users.ready && plan.summary.orders === m.domains.orders.ready, "GROWTH_PLAN_BINDING_CHANGED");
+  validateGrowthPackageEntries(plan);
   result.manifestSha256 = expected;
   return { plan, directory: dirname(path) };
 };
@@ -140,13 +173,17 @@ try {
     const p = buildLocalGrowthPlan({ modules: { canonicalize, ...mod("order/legacy-growth-consumption"), ...legacy, ...model }, cohort, orders, growthExcluded, targets: targetProof.orders, payments, refunds, refundLogs, cutoff, lineage, oldRuleEvidenceRef: "local-growth-reviewed-source:" + sha(canonicalize(lineage)) });
     writePrivate(join(out, "source-review.json"), p.review);
     writePrivate(join(out, "unknown-sources.json"), p.unknownSources);
-    mkdirSync(join(out, "packages"));
-    const packages = p.packages.map((item, index) => {
-      const file = "packages/" + String(index + 1).padStart(5, "0") + ".json";
-      writeFileSync(join(out, file), item.bytes, { flag: "wx", mode: 0o600 });
-      return { file, userId: item.userId, sha256: item.sha256, executionKey: item.executionKey, coverageState: item.prepared.coverageState, coverageFingerprint: item.prepared.fingerprint, contributionCount: item.prepared.rows.length, projection: item.projection };
-    });
-    const manifest = { schema: "zzsh.local-growth-round-plan.v1", status: "PREPARED_NOT_APPLIED", datasetSha256: input.dataset.sha256, oid: target.oid, nonce: target.nonce, policy: targetProof.policy, coverageOwner: targetProof.identity.coverage_owner, buildDigest: sha(canonicalize(input.buildFiles)), cutoff, lineage, targetReceiptSha256: sha(readFileSync(join(out, "target-readonly.json"))), reviewDigest: p.reviewDigest, packages, summary: p.summary };
+    let packs,packages;
+    if(packed)({packs,packages}=writeGrowthPackagePacks(out,p.packages));
+    else {
+      mkdirSync(join(out, "packages"));
+      packages = p.packages.map((item, index) => {
+        const file = "packages/" + String(index + 1).padStart(5, "0") + ".json";
+        writeFileSync(join(out, file), item.bytes, { flag: "wx", mode: 0o600 });
+        return { file, userId: item.userId, sha256: item.sha256, executionKey: item.executionKey, coverageState: item.prepared.coverageState, coverageFingerprint: item.prepared.fingerprint, contributionCount: item.prepared.rows.length, projection: item.projection };
+      });
+    }
+    const manifest = { schema: packed?"zzsh.local-growth-round-plan.v2":"zzsh.local-growth-round-plan.v1", status: "PREPARED_NOT_APPLIED", datasetSha256: input.dataset.sha256, oid: target.oid, nonce: target.nonce, ...(packed?{instance:target.instance}:{}), ...(target.migrationProfile?{migrationProfile:target.migrationProfile}:{}), policy: targetProof.policy, coverageOwner: targetProof.identity.coverage_owner, buildDigest: sha(canonicalize(input.buildFiles)), cutoff, lineage, targetReceiptSha256: sha(readFileSync(join(out, "target-readonly.json"))), reviewDigest: p.reviewDigest, ...(packed?{packs}:{}), packages, summary: p.summary };
     writePrivate(join(out, "manifest.json"), manifest);
     Object.assign(result, { status: "PREPARED_NOT_APPLIED", manifestSha256: sha(readFileSync(join(out, "manifest.json"))), summary: p.summary });
   } else if (mode === "--readback") {
@@ -192,6 +229,9 @@ try {
     result.status = "EXACT_ALL_RECORDS_AND_FACTS_VERIFIED";
   } else {
     const { plan, directory } = pinManifest(), recovery = mode === "--recover-index", recoverIndex = recovery ? Number(option("--recover-index")) : null;
+    const packageReader=openGrowthPackageReader(plan,file=>privatePath(join(directory,file)));
+    try {
+    if(!recovery)verifyGrowthPackageBytes(plan,packageReader.read);
     const actorProof = pinned(privatePath(input.actor.path), input.actor.sha256);
     const actor = { id: actorProof.id ?? actorProof.actorId, sessionId: actorProof.sessionId };
     assert(actor.id && actor.sessionId && (!actorProof.actorId || actor.id === actorProof.actorId));
@@ -208,28 +248,60 @@ try {
       assert.equal(sha(bytes), secret.sha256, "GROWTH_MAINTENANCE_SECRET_CHANGED");
       password = bytes.toString("utf8").trim();
     }
-    const migration = { ...base, user, password }, lock = instrument(new Client({ ...migration, database: resource.maintenanceDatabase })), pool = new Pool({ ...migration, database, max: 1 });
-    pool.on("connect", instrument);
+    const migration = { ...base, user, password }, lock = instrument(new Client({ ...migration, database: resource.maintenanceDatabase })),
+      pool = new Pool({ ...migration, database, max: 1, ...(resource.migrationProfile === NEXT_MIGRATION_PROFILE ? { idleTimeoutMillis: 0 } : {}) });
+    let lockError, poolError;
+    lock.on('error', error => { lockError ??= error; });
+    pool.on('error', error => { poolError ??= error; });
+    pool.on("connect", client => { instrument(client); client.on('error', error => { poolError ??= error; }); });
+    const checkMaintenanceLock = async () => {
+      assert(!lockError && !poolError, 'GROWTH_MAINTENANCE_CONNECTION_LOST');
+      await assertMaintenanceLockHeld(lock, resource);
+      assert(!lockError && !poolError, 'GROWTH_MAINTENANCE_CONNECTION_LOST');
+    };
     const cli = mod("auth/membership-growth-legacy-cli"), maintenance = mod("auth/membership-growth-legacy-maintenance"), port = mod("auth/membership-growth-legacy-store").createLegacyGrowthCoveragePort();
+    if (packed && !recovery) assert.equal(cli.LEGACY_GROWTH_PRECOMMIT_GUARD_VERSION, 'v1', 'GROWTH_PRECOMMIT_GUARD_NOT_INSTALLED');
+    if (resource.migrationProfile === NEXT_MIGRATION_PROFILE && !recovery)
+      assert.equal(cli.LEGACY_GROWTH_TARGET_FENCE_GUARD_VERSION, 'v1', 'GROWTH_TARGET_FENCE_GUARD_NOT_INSTALLED');
     const originalActorId = actor.id;
-    let continued = null;
+    let continued = null, recoveryFrom = null;
     if (option("--continue-from")) {
       assert(!recovery, "CONTINUE_AND_RECOVER_ARE_SEPARATE");
       continued = pinned(privatePath(option("--continue-from")), option("--continue-from-sha"));
-      assert(continued.status === "NOT_COMMITTED_STOPPED" && continued.error?.rollbackAcknowledged === true && continued.actorId === originalActorId && continued.manifestSha256 === result.manifestSha256 && continued.oid === target.oid && continued.nonce === target.nonce && Number.isSafeInteger(continued.completed) && continued.completed >= 0 && continued.completed < plan.packages.length, "KNOWN_ORIGINAL_ROLLBACK_REQUIRED_TO_CONTINUE");
-      const original = plan.packages[continued.completed];
-      assert(continued.pending?.index === continued.completed + 1 && continued.pending.executionKey === original.executionKey && continued.pending.businessPackageSha256 === original.sha256, "CONTINUATION_ORIGINAL_PACKAGE_CHANGED");
+      assertGrowthPriorAttempt(continued, { mode: "CONTINUE", plan, target, actorId: originalActorId, manifestSha256: result.manifestSha256, packed });
     }
     if (recovery) {
       assert(Number.isSafeInteger(recoverIndex) && recoverIndex >= 1 && recoverIndex <= plan.packages.length);
-      const from = pinned(privatePath(option("--recover-from")), option("--recover-from-sha"));
-      assert(from.status === "COMMIT_UNKNOWN_STOPPED" && from.pending?.index === recoverIndex && from.pending.executionKey === plan.packages[recoverIndex - 1].executionKey && from.manifestSha256 === result.manifestSha256 && from.actorId === originalActorId && from.oid === target.oid && from.nonce === target.nonce, "ORIGINAL_GROWTH_UNKNOWN_RECEIPT_REQUIRED");
+      recoveryFrom = pinned(privatePath(option("--recover-from")), option("--recover-from-sha"));
+      assertGrowthPriorAttempt(recoveryFrom, { mode: "RECOVER", plan, target, actorId: originalActorId, manifestSha256: result.manifestSha256, index: recoverIndex, packed });
     }
-    let held = false, lockConnected = false;
+    let held = false, lockConnected = false, fenceEpoch, fencePid, fenceAcquired = false, writePool = pool;
     try {
       await lock.connect(); lockConnected = true;
       held = (await lock.query(advisoryLockSql(resource, "try"))).rows[0]?.ok === true;
       assert(held, "REGRESSION_RESOURCE_BUSY");
+      await checkMaintenanceLock();
+      if (resource.migrationProfile === NEXT_MIGRATION_PROFILE) {
+        fenceEpoch = await captureMaintenanceLockEpoch(lock, resource);
+        const fenceClient = await pool.connect();
+        try {
+          const actual = (await fenceClient.query(targetIdentityQuery())).rows[0];
+          if (user === resource.migrationRole) assertLiveTarget(resource, actual);
+          else assert(actual?.database === resource.database && actual.oid === resource.oid && actual.owner === resource.owner
+            && actual.role === resource.owner && actual.role_oid === String(actual.owner_oid) && actual.marker === resource.marker
+            && actual.nonce === resource.nonce && actual.system_identifier === resource.instance.systemIdentifier, 'GROWTH_OWNER_TARGET_CHANGED');
+          await acquireMigrationSessionFence(fenceClient, resource, fenceEpoch); fenceAcquired = true;
+          fencePid = fenceClient.processID;
+          assert(Number.isInteger(fencePid) && fencePid > 0, 'GROWTH_FENCE_SESSION_UNAVAILABLE');
+        } catch (error) { fenceClient.release(true); throw error; }
+        fenceClient.release();
+        writePool = guardedMigrationTargetPool(pool, async client => {
+          assert.equal(client.getTransactionStatus?.(), 'I', 'GROWTH_FENCE_SESSION_NOT_IDLE');
+          assert.equal(client.processID, fencePid, 'GROWTH_FENCE_SESSION_CHANGED');
+          if (recovery) await assertMigrationFenceHeld(client, resource, fenceEpoch);
+        });
+        result.targetFence = 'HELD_ACROSS_BATCHES'; save();
+      }
       await readonly(async (db, i) => {
         assert.equal(i.coverage_owner, user);
         const counts = (await db.query("SELECT (SELECT count(*)::int FROM zzsh_iam.user_identity_state WHERE provider='legacy_mysql_restore') users,(SELECT count(*)::int FROM zzsh_order.legacy_order_read_snapshot) orders,(SELECT count(*)::int FROM zzsh_iam.membership_growth_legacy_coverage) coverage,(SELECT count(*)::int FROM zzsh_iam.membership_growth_contribution) contributions")).rows[0];
@@ -251,25 +323,40 @@ try {
       const scope = { bindingKind: "DATABASE_COMMENT", databaseName: database, databaseOid: target.oid, owner: "zzsh", runtimeRole: user, databaseComment: marker };
       const { withReadOnlyTransaction } = mod("credit/credit-initialization");
       Object.assign(result, { actorId: originalActorId, completed: continued?.completed ?? 0, inserted: continued?.inserted ?? 0, replayed: continued?.replayed ?? 0, complete: continued?.complete ?? 0, partial: continued?.partial ?? 0 });
+      const startIndex = result.completed, eventsPath = join(out, "events.jsonl");
+      const approvalBytesFor = (item, leafMode = "APPLY") => Buffer.from(JSON.stringify({ schema: "legacy-growth-maintenance-approval-v2", status: "APPROVED", approvalRef: growthInput.approvalRef, attempt: growthInput.attempt, mode: leafMode, businessPackageSha256: item.sha256, executionKey: item.executionKey, actor: { adminId: actor.id, sessionId: actor.sessionId }, windowStartUtc, windowEndUtc, resource: scope }) + "\n");
+      if (inlineApprovals) result.approvalLayout = growthInput.approvalLayout;
       if (continued) result.priorReceiptSha256 = option("--continue-from-sha");
       save();
-      mkdirSync(join(out, "approvals"));
+      if (inlineApprovals) writeFileSync(eventsPath, "", { flag: "wx", mode: 0o600 });
+      else mkdirSync(join(out, "approvals"));
       for (const index of recovery ? [recoverIndex] : plan.packages.keys().drop(result.completed).map(i => i + 1)) {
         const item = plan.packages[index - 1];
-        assert.equal(item.file, "packages/" + String(index).padStart(5, "0") + ".json");
-        const businessPath = privatePath(join(directory, item.file)), businessBytes = readFileSync(businessPath);
+        if(!packed)assert.equal(item.file, "packages/" + String(index).padStart(5, "0") + ".json");
+        const businessPath = privatePath(join(directory, item.file)), businessBytes = packageReader.read(item.file,item.offset,item.length);
         assert.equal(sha(businessBytes), item.sha256);
         const leafMode = recovery ? "RECOVER_READ" : "APPLY";
-        const approval = { schema: "legacy-growth-maintenance-approval-v2", status: "APPROVED", approvalRef: growthInput.approvalRef, attempt: growthInput.attempt, mode: leafMode, businessPackageSha256: item.sha256, executionKey: item.executionKey, actor: { adminId: actor.id, sessionId: actor.sessionId }, windowStartUtc, windowEndUtc, resource: scope };
-        const leafPath = join(out, "approvals", String(index).padStart(5, "0") + ".json"), approvalBytes = Buffer.from(JSON.stringify(approval) + "\n"), approvalSha256 = sha(approvalBytes);
-        writeFileSync(leafPath, approvalBytes, { flag: "wx", mode: 0o600 });
+        const approvalBytes = approvalBytesFor(item, leafMode), approvalSha256 = sha(approvalBytes);
+        const leafPath = inlineApprovals ? `inline-approval:${index}` : join(out, "approvals", String(index).padStart(5, "0") + ".json");
+        if (!inlineApprovals) writeFileSync(leafPath, approvalBytes, { flag: "wx", mode: 0o600 });
         const run = cli.readLegacyGrowthMaintenanceRun({ LEGACY_GROWTH_ENABLED: "true", LEGACY_GROWTH_PACKAGE_FILE: businessPath, LEGACY_GROWTH_PACKAGE_SHA256: item.sha256, LEGACY_GROWTH_APPROVAL_FILE: leafPath, LEGACY_GROWTH_APPROVAL_SHA256: approvalSha256, LEGACY_GROWTH_MODE: leafMode }, file => file === leafPath ? approvalBytes : businessBytes, Date.now(), { databaseName: database, databaseUser: user });
+        if (recovery && packed) assert.equal(run.input.businessFingerprint, recoveryFrom.pending.businessFingerprint, "ORIGINAL_GROWTH_FINGERPRINT_CHANGED");
         const pending = { index, executionKey: item.executionKey, businessPackageSha256: item.sha256, approvalSha256, businessFingerprint: run.input.businessFingerprint };
         result.pending = pending;
-        appendFileSync(join(out, "events.jsonl"), JSON.stringify({ event: "INTENT", ...pending }) + "\n", { flush: true });
-        const reply = recovery ? await withReadOnlyTransaction(pool, client => maintenance.readLegacyGrowthMaintenanceReceipt(client, run.input, port)) : await cli.runLegacyGrowthMaintenanceApply(pool, run.input, port);
-        appendFileSync(join(out, "events.jsonl"), JSON.stringify({ event: recovery ? "RECOVER_READ" : "COMMIT_ACK", ...pending, reply }) + "\n");
-        if (recovery) result.recoveryState = reply.state;
+        const reply = await executeGrowthEntry({ pending, recovery,
+          writeIntent: () => appendFileSync(eventsPath, JSON.stringify(inlineApprovals ? inlineGrowthIntent(pending, approvalBytes) : { event: "INTENT", ...pending }) + "\n", { flush: true }),
+          execute: async () => {
+            if (!recovery) return cli.runLegacyGrowthMaintenanceApply(writePool, run.input, port, fenceEpoch ? async client => {
+              assert(!lockError && !poolError, 'GROWTH_MAINTENANCE_CONNECTION_LOST');
+              await assertMigrationFenceHeld(client, resource, fenceEpoch);
+              assert(!lockError && !poolError, 'GROWTH_MAINTENANCE_CONNECTION_LOST');
+            } : checkMaintenanceLock);
+            await checkMaintenanceLock();
+            const value = await withReadOnlyTransaction(writePool, client => maintenance.readLegacyGrowthMaintenanceReceipt(client, run.input, port));
+            await checkMaintenanceLock(); return value;
+          },
+          writeResult: reply => appendFileSync(eventsPath, JSON.stringify({ event: recovery ? "RECOVER_READ" : "COMMIT_ACK", ...pending, reply }) + "\n") });
+        if (recovery) { result.recoveryState = reply.state; result.originalAttemptSha256 = option("--recover-from-sha"); }
         else {
           const receipt = reply.receipt;
           assert(receipt.coverageFingerprint === item.coverageFingerprint && receipt.coverageState === item.coverageState && receipt.subjectUserId === item.userId && receipt.executionKey === item.executionKey, "GROWTH_ACK_RECONCILIATION_FAILED");
@@ -288,23 +375,41 @@ try {
         assert.equal(result.partial, plan.summary.pending);
         assert.equal(result.inserted, plan.summary.contributions);
         assert.equal(result.replayed, 0);
+        if (inlineApprovals) {
+          result.status = 'ALL_COMMITS_ACK_LOG_VERIFICATION_REQUIRED'; save();
+          syncInlineGrowthLog(eventsPath); result.approvalLog = await verifyInlineGrowthLog(eventsPath, { packages: plan.packages, startIndex, approvalBytesFor });
+        }
+        packageReader.close();
+        verifyGrowthPackageBytes(plan,packageReader.read);
       }
-      result.status = recovery ? "RECOVERED_READ_ONLY" : "APPLIED_COMMIT_ACK_INDEPENDENT_READBACK_REQUIRED";
+      result.status = recovery ? growthRecoveryStatus(result.recoveryState) : "APPLIED_COMMIT_ACK_INDEPENDENT_READBACK_REQUIRED";
+      if (result.status === "RECOVERY_READBACK_REVIEW_REQUIRED") process.exitCode = 1;
     } finally {
+      if (fenceAcquired) {
+        let fenceClient, discard = false;
+        try {
+          fenceClient = await pool.connect();
+          assert.equal(fenceClient.processID, fencePid, 'GROWTH_FENCE_SESSION_CHANGED');
+          await releaseMigrationSessionFence(fenceClient, resource); result.targetFenceReleased = true;
+        } catch { result.targetFenceReleased = false; discard = true; process.exitCode = 1; }
+        finally { if (fenceClient) fenceClient.release(discard); }
+      }
       try { await pool.end(); result.poolClosed = true; } finally {
         try { if (held) result.unlockAck = (await lock.query(advisoryLockSql(resource, "unlock"))).rows[0]?.ok === true; }
         finally { if (lockConnected) await lock.end(); result.lockClosed = true; }
       }
     }
-    assert(result.poolClosed && result.unlockAck && result.lockClosed, "GROWTH_CLEANUP_UNCONFIRMED");
+    assert(result.poolClosed && result.unlockAck && result.lockClosed
+      && (resource.migrationProfile !== NEXT_MIGRATION_PROFILE || result.targetFenceReleased === true), "GROWTH_CLEANUP_UNCONFIRMED");
+    } finally { packageReader.close(); }
   }
 } catch (error) {
-  result.status = error.outcome === "COMMIT_UNKNOWN" ? "COMMIT_UNKNOWN_STOPPED" : error.outcome === "NOT_COMMITTED" ? "NOT_COMMITTED_STOPPED" : "STOPPED_PRESERVE_ORIGINAL_EVIDENCE";
+  result.status = growthFailureStatus(error, result.pending, result.status === 'ALL_COMMITS_ACK_LOG_VERIFICATION_REQUIRED');
   result.error = { code: error.cause?.code ?? error.code ?? error.name, message: String(error.message).slice(0, 200), rollbackAcknowledged: error.rollbackAcknowledged ?? null, preserved: error.preserved ?? null };
   process.exitCode = 1;
 } finally {
   result.finishedAt = new Date().toISOString();
   result.wallMs = performance.now() - started;
   save();
-  console.log(JSON.stringify({ status: result.status, mode, queries: result.queries, wallMs: result.wallMs, manifestSha256: result.manifestSha256, summary: result.summary, receipt: summaryFile }));
+  console.log(JSON.stringify({ status: result.status, mode, queries: result.queries, ...(packed?{queryCategories:result.queryCategories}:{}), wallMs: result.wallMs, manifestSha256: result.manifestSha256, summary: result.summary, receipt: summaryFile }));
 }

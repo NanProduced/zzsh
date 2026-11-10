@@ -180,4 +180,34 @@ test("policy proof binds an independently sealed source, exact row, spread and m
   smaller.supplement.accountSourceDigests=smaller.supplement.accountSourceDigests.slice(0,3);smaller.supplementSha256=sha256Hex(canonicalize(smaller.supplement));
   const smallerText=canonicalize(smaller);assert.equal(readLegacyListedPolicy(smallerText,{...binding,proofSha256:sha256Hex(smallerText),expectedAccountCount:3,...authorityFor(smallerText)}).ordinarySpread,"6");
   assert.throws(()=>readLegacyListedPolicy(smallerText,{...binding,proofSha256:sha256Hex(smallerText),expectedAccountCount:4,...authorityFor(smallerText)}),/LEGACY_POLICY_PROOF_INVALID/);
+
+  const captured=structuredClone(bundle) as any;
+  captured.schema="legacy-listed-policy-evidence-v2";
+  captured.temporalLimit="SAME_MYSQL_SNAPSHOT_RUNTIME_REDIS_NOT_CAPTURED";
+  Object.assign(captured.supplement,{schema:"legacy-listed-policy-capture-v2",comparison:"ACCOUNTS_AND_POLICY_SAME_CAPTURE",
+    temporalLimit:"RUNTIME_REDIS_NOT_CAPTURED",clientClosed:true});
+  delete captured.supplement.startedAt; delete captured.supplement.finishedAt;
+  const sealedCapture=(value:any)=>{
+    value.supplementSha256=sha256Hex(canonicalize(value.supplement));
+    const text=canonicalize(value);
+    return {text,binding:{...binding,proofSha256:sha256Hex(text),...authorityFor(text)}};
+  };
+  const same=sealedCapture(captured), result=readLegacyListedPolicy(same.text,same.binding);
+  assert.deepEqual([result.ordinarySpread,result.fastSpread,result.temporalLimit],["6","12","SAME_MYSQL_SNAPSHOT_RUNTIME_REDIS_NOT_CAPTURED"]);
+  const frozen=JSON.parse(result.policyCanonical);
+  assert.equal(frozen.schema,"legacy-listed-policy-frozen-v2");
+  assert.equal("supplementStartedAt" in frozen,false);
+  for(const mutate of [
+    (x:any)=>{x.supplement.clientClosed=false;},
+    (x:any)=>{x.supplement.temporalLimit="REDIS_CONFIRMED";},
+    (x:any)=>{x.supplement.comparison="EXACT_LISTED_ROWS_AND_CAPTURED_MATERIAL_POLICY_IDENTICAL";},
+    (x:any)=>{x.supplement.baseCaptureStartedAt="2026-11-03T07:00:00Z";},
+    (x:any)=>{x.supplement.baseCaptureFinishedAt="2026-11-02T00:00:00Z";},
+    (x:any)=>{x.supplement.gameRows[0].profitDot="7";},
+    (x:any)=>{x.supplement.accountSourceDigests.pop();},
+    (x:any)=>{x.supplement.accountSourceDigests[1].id=x.supplement.accountSourceDigests[0].id;},
+  ]){
+    const invalid=structuredClone(captured);mutate(invalid);const candidate=sealedCapture(invalid);
+    assert.throws(()=>readLegacyListedPolicy(candidate.text,candidate.binding),/LEGACY_POLICY_PROOF_INVALID/);
+  }
 });

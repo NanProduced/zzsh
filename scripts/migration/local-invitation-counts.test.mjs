@@ -40,7 +40,9 @@ test("whole-user count closure requires every original subject and packet before
 
 test("streamed packets reject replacement, reordering, truncation and a changed file before accepting its changed packet",async t=>{
   const dir=mkdtempSync(join(tmpdir(),"zzsh-invitation-stream-"));t.after(()=>rmSync(dir,{recursive:true}));
-  const {manifest,packets,invitation}=fixture(),path=join(dir,"packets.jsonl"),bytes=Buffer.from(packets.map(p=>JSON.stringify(p)).join("\n")+"\n");
+  const {manifest,packets,invitation}=fixture(),path=join(dir,"packets.jsonl");
+  packets[0].note="合成昵称\u2028保留\u2029原样";
+  const bytes=Buffer.from(packets.map(p=>JSON.stringify(p)).join("\n")+"\n");
   const sha=createHash("sha256").update(bytes).digest("hex");writeFileSync(path,bytes);
   const hashes=await preflightInvitationFile(path,sha,manifest,invitation), accepted=[];
   for await(const packet of readBoundInvitationPackets(path,sha,hashes))accepted.push(packet);

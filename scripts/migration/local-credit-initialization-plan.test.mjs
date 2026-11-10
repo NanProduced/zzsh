@@ -2,7 +2,7 @@ import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {spawnSync} from 'node:child_process';
 import {resolve} from 'node:path';
-import {assertCreditAuthority,assertCreditCohort,assertCreditPlanReady,creditCategoryCounts,creditRetainedDigest,creditRowsDigest,executeCreditBatchSequence} from './local-credit-initialization-plan.mjs';
+import {assertCreditAuthority,assertCreditCohort,assertCreditPlanReady,creditCategoryCounts,creditRetainedDigest,creditRowsDigest,executeCreditBatchSequence,guardCreditPoolClient} from './local-credit-initialization-plan.mjs';
 
 const row=(userId,category='ACTIVE',hasCreditState=false,hasInitializedEvent=false,hasOtherCreditEvent=false)=>({userId,category,hasCreditState,hasInitializedEvent,hasOtherCreditEvent});
 const digest='a'.repeat(64),actor={actorId:'boss',sessionId:'session'},binding={epoch:{oid:'42',nonce:'b'.repeat(24)},datasetSha256:digest};
@@ -12,6 +12,15 @@ const authority=()=>({schema:'zzsh.local-credit-authority.v1',status:'APPROVED',
 test('credit entry without a mode is a zero-connection plan',()=>{
  const p=spawnSync(process.execPath,[resolve('scripts/migration/run-local-credit-initialization.mjs')],{encoding:'utf8'});
  assert.equal(p.status,0);assert.deepEqual(JSON.parse(p.stdout),{status:'PLAN_ONLY',modes:['validate','prepare','authorize','execute'],connections:0,credentialReads:0,financialWrites:0});
+});
+
+test('credit target guard runs after BEGIN and immediately before COMMIT',async()=>{
+ const events=[];let lost=false;
+ const client=guardCreditPoolClient({async query(sql){events.push(sql);return {command:sql.startsWith('BEGIN')?'BEGIN':sql};}},
+  {afterBegin:async(_client,readOnly)=>events.push(readOnly?'READ_FENCE':'WRITE_FENCE'),beforeCommit:async()=>{events.push('COMMIT_FENCE');if(lost)throw Error('TARGET_FENCE_EPOCH_LOST');}});
+ await client.query('BEGIN');await client.query('COMMIT');assert.deepEqual(events,['BEGIN','WRITE_FENCE','COMMIT_FENCE','COMMIT']);
+ events.length=0;lost=true;await client.query('BEGIN');await assert.rejects(client.query('COMMIT'),/TARGET_FENCE_EPOCH_LOST/);await client.query('ROLLBACK');
+ assert.deepEqual(events,['BEGIN','WRITE_FENCE','COMMIT_FENCE','ROLLBACK']);
 });
 
 test('ordered subject cohort detects duplicate, invalid or changed category and evidence',()=>{
@@ -30,6 +39,9 @@ test('only balanced, reviewed plans without orphan events and with closed resour
  assert.doesNotThrow(()=>assertCreditPlanReady(plan()));
  for(const changed of [{...plan(),otherEventWithoutState:1},{...plan(),reconciliation:{...plan().reconciliation,unknown:1}},{...plan(),reconciliation:{...plan().reconciliation,eventWithoutState:1}},{...plan(),unlockAck:false},{...plan(),poolClosed:false},{...plan(),batches:[{userCount:1}]}])
   assert.throws(()=>assertCreditPlanReady(changed),/CREDIT_PLAN_REQUIRES_REVIEW/);
+ const next={...plan(),binding:{...binding,epoch:{...binding.epoch,migrationProfile:'LOCAL_MIGRATION_NEXT_V1'}}};
+ assert.throws(()=>assertCreditPlanReady(next),/CREDIT_PLAN_REQUIRES_REVIEW/);
+ assert.doesNotThrow(()=>assertCreditPlanReady({...next,targetFence:'HELD_DURING_CREDIT_STAGE',targetFenceReleased:true}));
 });
 
 test('authority binds the exact source, target, actor, batch count and open window',()=>{

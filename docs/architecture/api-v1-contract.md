@@ -215,7 +215,8 @@ ID 以 opaque 字符串传输，允许 `A-Za-z0-9` 开头，后续使用 `A-Za-z
 |---|---|
 | GET /users | `user.directory.read`；`q`匹配稳定ID、旧ID、昵称、用户名/展示用户名；仍支持精确`userId/legacyId`和模糊`identifier`。筛选`accountStatus/source/identityStatus/ageStatus/registeredFrom/registeredTo/limit/cursor`；建档范围和排序均用canonical `user.createdAt`，时间为RFC3339，按(createdAt,id)倒序。cursor模式返回`items/total/nextCursor/limit`，total为同主体可见范围、同过滤的完整数量，不受cursor影响。游标绑定管理员、Boss状态、有效权限/游戏scope签名、全部筛选和limit，不一致409；可选页码模式见下文 |
 | POST /users/lookup | 同一只读查询，另需`user.phone.lookup`。手机号仅放JSON正文，允许与上述非敏感筛选一起提交；不改变数据。GET中的phone或搜索参数中的手机号拒绝400。响应只给脱敏手机号，游标仅含查询摘要及排序键，不含原手机号 |
-| GET /users/{userId} | `user.directory.read`；规范创建/更新时间、来源三态、账号/实名/年龄状态和脱敏联系方式，附与列表同口径的关系、成长礼遇和信用摘要；技术追溯另按`admin.audit.read`裁剪（Boss全量，非Boss仅本人来源操作）。不投影钱包余额/收益，不在读取时补造资格 |
+| GET /users/{userId} | `user.directory.read`；规范创建/更新时间、来源三态、账号/实名/年龄状态、脱敏实名资料及联系方式，附与列表同口径的关系、成长礼遇和信用摘要；技术追溯另按`admin.audit.read`裁剪（Boss全量，非Boss仅本人来源操作）。不投影钱包余额/收益，不在读取时补造资格 |
+| POST /users/{userId}/sensitive-profile | 另需`user.identity.sensitive.read`；按当前旧实名来源与主体绑定解密姓名和证件，连同已存手机号按需读取，同事务记字段名审计，响应`no-store`。资料缺失与解密依赖不可用分别处理，新渠道仅有脱敏资料时不伪造明文 |
 | GET /users/{userId}/rental-accounts | 另需`supply.rental_account.read`，同时检查owner关联与游戏scope；`publication=published` 与目录上架数共同包括当前发布及仍在公开列表的旧资料。旧资料以`publiclyListed`表示；发布和公开展示均不表示可租资格。 |
 | GET /users/{userId}/orders | 另需`order.read` + 游戏/对象范围；`role=renter|owner|any`仅表示该单参与方，另有status/limit/cursor。status支持原单状态及`current`（PENDING_PAYMENT或PAID，属于过滤分组，不是新订单状态）；与目录分角色计数同口径、同新旧来源，过滤先于分页。金额来自冻结订单快照；取消后仍保留paidAt，已付/完成但时间缺失不可推断未付。没有独立供给读取权限时不返回内部accountId/展示号 |
 | GET /users/{userId}/audit-events | 另需既有`admin.audit.read`；按用户对象过滤，Boss全量、非Boss仅本人操作；沿用敏感detail裁剪，不新增用户页专用IAM scope |

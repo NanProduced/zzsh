@@ -1,17 +1,22 @@
 import assert from "node:assert/strict";
+import { acquireMigrationTransactionFence, assertMaintenanceLockHeld, captureMaintenanceLockEpoch, isRegisteredMigrationInstance, NEXT_MIGRATION_PROFILE } from './local-target-registry.mjs';
 
 /** Keep the original R06 default, while R07 must bind the exact registered cluster and port. */
 export function qualificationReviewResource(current,registry,target,{readOnly=false}={}){
   assert(typeof readOnly==='boolean','DISTRIBUTION_QUALIFICATION_INSTANCE_CHANGED');
   const instance=target.instance;
   if(instance){
-    assert(instance.host==='127.0.0.1'&&[55432,55433].includes(instance.port)&&/^[0-9]+$/.test(instance.systemIdentifier??'')
+    const next=target.migrationProfile===NEXT_MIGRATION_PROFILE;
+    assert(instance.host==='127.0.0.1'&&(next?isRegisteredMigrationInstance({host:instance.host,port:instance.port,instance,migrationProfile:registry.migrationProfile}):[55432,55433].includes(instance.port))
+      &&(target.migrationProfile??null)===(registry.migrationProfile??null)&&/^[0-9]+$/.test(instance.systemIdentifier??'')
+      &&(!next||/^[a-f0-9]{24}$/.test(target.nonce??'')&&target.nonce===registry.nonce&&current.nonce===target.nonce)
       &&JSON.stringify(instance)===JSON.stringify(registry.instance??null)&&current.oid===target.oid
       &&current.system_identifier===instance.systemIdentifier&&current.database===registry.database&&current.owner===registry.owner
       &&current.marker===registry.marker&&current.role===registry.roles?.migration?.name&&String(current.role_oid)===String(registry.roles?.migration?.oid)
       &&String(current.role_oid)===String(target.migrationRoleOid)&&current.read_only===(readOnly?'on':'off'),'DISTRIBUTION_QUALIFICATION_INSTANCE_CHANGED');
   }else assert(!registry.instance,'DISTRIBUTION_QUALIFICATION_INSTANCE_CHANGED');
-  return {host:instance?.host??'127.0.0.1',port:instance?.port??55432,database:registry.database,oid:Number(current.oid),owner:current.owner,ownerOid:current.owner_oid,marker:current.marker,role:current.role,roleOid:Number(current.role_oid)};
+  return {host:instance?.host??'127.0.0.1',port:instance?.port??55432,database:registry.database,oid:Number(current.oid),owner:current.owner,ownerOid:current.owner_oid,marker:current.marker,role:current.role,roleOid:Number(current.role_oid),
+    ...(target.migrationProfile===NEXT_MIGRATION_PROFILE?{migrationProfile:target.migrationProfile,systemIdentifier:instance.systemIdentifier,nonce:target.nonce}:{})};
 }
 
 /** Recheck every original subject and idempotency key under the write transaction and lock. */
@@ -36,8 +41,15 @@ export async function assertQualificationRecoveryPreimage(client,plan,actor){
 }
 
 /** One transaction across the reviewed batches. An uncertain COMMIT is never retried. */
-export async function executeQualification({ pool, lock, identity, plan, authority, actor, registry, target, sourceDigest, bind, qualify, prepareIndex, verifyBuild, summary, save, verifyRecovery, now = Date.now }) {
+export async function executeQualification({ pool, lock, identity, plan, authority, actor, registry, registeredTarget, target, sourceDigest, bind, qualify, prepareIndex, verifyBuild, summary, save, verifyRecovery, now = Date.now }) {
   let client, locked = false, started = false, commitSent = false;
+  let lockError, poolError;
+  lock.on?.('error', error => { lockError ??= error; }); pool.on?.('error', error => { poolError ??= error; });
+  const checkLock = async () => {
+    assert(!lockError && !poolError, 'DISTRIBUTION_MAINTENANCE_CONNECTION_LOST');
+    await assertMaintenanceLockHeld(lock, { lockKey: '806006', maintenanceDatabase: 'postgres', instance: target.instance ?? null });
+    assert(!lockError && !poolError, 'DISTRIBUTION_MAINTENANCE_CONNECTION_LOST');
+  };
   const timings = summary.timings ??= {}, lockAt = performance.now();
   summary.transaction = { status: "NOT_STARTED", plannedBatches: plan.batches.length };
   try {
@@ -45,12 +57,24 @@ export async function executeQualification({ pool, lock, identity, plan, authori
     locked = (await lock.query("SELECT pg_try_advisory_lock(806006) AS ok")).rows[0]?.ok === true;
     timings.maintenanceLockMs = Math.round(performance.now() - lockAt); save();
     assert(locked, "DISTRIBUTION_MAINTENANCE_LOCK_BUSY");
-    const beginAt = performance.now(); verifyBuild(); client = await pool.connect(); await client.query("BEGIN"); started = true;
+    await checkLock();
+    let fenceEpoch;
+    if (target.migrationProfile === NEXT_MIGRATION_PROFILE) {
+      assert(isRegisteredMigrationInstance(registeredTarget) && registeredTarget.migrationProfile === target.migrationProfile
+        && registeredTarget.oid === target.oid && registeredTarget.nonce === target.nonce
+        && JSON.stringify(registeredTarget.instance) === JSON.stringify(target.instance), 'DISTRIBUTION_FENCE_TARGET_CHANGED');
+      fenceEpoch = await captureMaintenanceLockEpoch(lock, registeredTarget);
+    }
+    const beginAt = performance.now(); verifyBuild(); client = await pool.connect(); client.on?.('error', error => { poolError ??= error; }); await client.query("BEGIN"); started = true;
     summary.transaction.status = "OPEN"; timings.transactionBeginMs = Math.round(performance.now() - beginAt); save();
     const identityAt = performance.now();
     const current = await identity(client, "migration", false); assert.equal(current.owner_oid, plan.target.ownerOid);
     timings.targetIdentityMs = Math.round(performance.now() - identityAt); save();
     const resource = qualificationReviewResource(current,registry,target);
+    if (fenceEpoch) {
+      await acquireMigrationTransactionFence(client, registeredTarget, fenceEpoch);
+      summary.transaction.fence = 'HELD_UNTIL_TRANSACTION_END'; save();
+    }
     if(verifyRecovery){summary.recoveryPreflight=await verifyRecovery(client);save();}
     const reviewFor=batch=>({ ref: authority.approvalRef, attempt: authority.attempt, actor: { userId: actor.userId, sessionId: actor.sessionId }, resource, nonce: target.nonce, notBefore: authority.notBefore, expiresAt: authority.expiresAt, sourceDigest, bodyDigest: batch.bodyDigest, phase: "QUALIFY" });
     let qualificationIndex;
@@ -78,14 +102,15 @@ export async function executeQualification({ pool, lock, identity, plan, authori
     timings.constraintBudgetMs=constraintBudgetMs;save();await client.query("SET CONSTRAINTS ALL IMMEDIATE");
     timings.constraintsMs = Math.round(performance.now() - verifyAt); save();
     assert(now() < Date.parse(authority.expiresAt), "DISTRIBUTION_AUTHORITY_EXPIRED_BEFORE_COMMIT");
+    await checkLock(); verifyBuild();
     const commitAt = performance.now(); summary.transaction.status = "COMMIT_REQUESTED"; save();
-    commitSent = true; try { await client.query("COMMIT"); } finally { timings.commitMs = Math.round(performance.now() - commitAt); }
+    commitSent = true; try { assert.equal((await client.query("COMMIT"))?.command, "COMMIT", "DISTRIBUTION_COMMIT_ACK_UNCONFIRMED"); } finally { timings.commitMs = Math.round(performance.now() - commitAt); }
     started = false; summary.transaction.status = "COMMIT_ACKNOWLEDGED"; summary.transaction.committedBatches = summary.batches.length; summary.status = "COMMITTED_ACK_READBACK_REQUIRED";
   } catch (error) {
     if (timings.maintenanceLockMs === undefined) timings.maintenanceLockMs = Math.round(performance.now() - lockAt);
     summary.status = commitSent ? "COMMIT_UNKNOWN" : "STOPPED"; summary.error = { code: error.code ?? error.name };
     if (commitSent) summary.transaction.status = "COMMIT_UNKNOWN";
-    if (started && !commitSent) { const rollbackAt=performance.now(); try { await client.query("ROLLBACK"); summary.rollbackAck = true; summary.transaction.status = "ROLLBACK_ACKNOWLEDGED"; } catch { summary.rollbackAck = false; summary.transaction.status = "ROLLBACK_UNKNOWN"; } finally { timings.rollbackMs=Math.round(performance.now()-rollbackAt); } }
+    if (started && !commitSent) { const rollbackAt=performance.now(); try { summary.rollbackAck = (await client.query("ROLLBACK"))?.command === "ROLLBACK"; summary.transaction.status = summary.rollbackAck ? "ROLLBACK_ACKNOWLEDGED" : "ROLLBACK_UNKNOWN"; } catch { summary.rollbackAck = false; summary.transaction.status = "ROLLBACK_UNKNOWN"; } finally { timings.rollbackMs=Math.round(performance.now()-rollbackAt); } }
     throw error;
   } finally {
     try { client?.release(summary.status === "COMMIT_UNKNOWN" || summary.rollbackAck === false); summary.clientReleased = true; } catch { summary.clientReleased = false; }

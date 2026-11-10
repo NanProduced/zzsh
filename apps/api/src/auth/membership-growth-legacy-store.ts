@@ -32,6 +32,16 @@ export function createLegacyGrowthCoveragePort(): LegacyCoveragePort {
   const port: LegacyCoveragePort = {
     readByFingerprint: (client, subject, fingerprint) => read(client, subject, "fingerprint", fingerprint),
     readByExecutionKey: (client, subject, executionKey) => read(client, subject, "execution_key", executionKey),
+    async readForWrite(client, subject, executionKey, fingerprint) {
+      const row = (await client.query<StoredRecord & { matchedByKey: boolean }>(`SELECT record_canonical AS canonical,record_digest AS digest,(execution_key=$2) AS "matchedByKey"
+        FROM ${TABLE} WHERE subject_user_id=$1 AND (execution_key=$2 OR fingerprint=$3)
+        ORDER BY CASE WHEN execution_key=$2 THEN 0 ELSE 1 END LIMIT 1`, [subject, executionKey, fingerprint])).rows[0];
+      if (!row) return null;
+      const record = decode(row);
+      if (!record || typeof row.matchedByKey !== "boolean" || record.subjectUserId !== subject
+        || (row.matchedByKey ? record.executionKey !== executionKey : record.fingerprint !== fingerprint)) throw unavailable();
+      return { record, matchedByKey: row.matchedByKey };
+    },
     async persist(client, record) {
       if (!record.executionKey) throw unavailable();
       const canonical = canonicalize(record);
@@ -43,8 +53,7 @@ export function createLegacyGrowthCoveragePort(): LegacyCoveragePort {
       ["growth_coverage_" + sha256Hex(canonicalize([record.subjectUserId, record.fingerprint])).slice(0, 48), record.subjectUserId, record.fingerprint, record.executionKey, record.receiptDigest, record.cutoff, record.fromExclusive, record.coverageState, canonical, sha256Hex(canonical)])).rows[0];
       if (inserted) return decode(inserted)!;
       // A raced execution-key conflict takes precedence over a different key's identical fingerprint.
-      const existing = await port.readByExecutionKey(client, record.subjectUserId, record.executionKey)
-        ?? await port.readByFingerprint(client, record.subjectUserId, record.fingerprint);
+      const existing = (await port.readForWrite(client, record.subjectUserId, record.executionKey, record.fingerprint))?.record;
       if (!existing) throw unavailable();
       return existing;
     },

@@ -3,6 +3,7 @@ import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { LocalSession, localOrigin, totp, validateProfile, writePrivate } from "../local-auth.mjs";
+import { isRegisteredMigrationInstance } from "./local-target-registry.mjs";
 
 const sha = bytes => createHash("sha256").update(bytes).digest("hex");
 const security = "/api/v1/admin/security/approvals/";
@@ -79,7 +80,9 @@ export function assertPolicyRuntimeBinding(input, binding, bindingBytes) {
     if (sha(bindingBytes) !== input.serverBinding.sha256 || binding.resource?.database !== input.target.database || String(binding.resource.oid ?? binding.resource.resourceOid) !== input.target.oid || binding.resource.nonce !== input.target.nonce || binding.NoIM !== true || binding.imProvisioner !== false || binding.imIdentityRepository !== false || binding.imAppId !== false) fail("EXACT_OPENED_NO_IM_RUNTIME_BINDING_REQUIRED");
     if (input.target.instance || binding.status === "R07_BOOTSTRAP_API_LISTENING") {
         const instance = input.target.instance, equal = value => value?.host === instance.host && value?.port === instance.port && value?.systemIdentifier === instance.systemIdentifier;
-        if (instance?.host !== "127.0.0.1" || instance.port !== 55433 || !/^[0-9]+$/.test(instance.systemIdentifier ?? "") || !/^[1-9][0-9]*$/.test(input.target.migrationRoleOid ?? "")
+        if (!isRegisteredMigrationInstance({ host: instance?.host, port: instance?.port, instance, migrationProfile: input.target.migrationProfile })
+          || !/^[1-9][0-9]*$/.test(input.target.migrationRoleOid ?? "")
+          || [binding.resource,binding.actualResource].some(value=>(value?.migrationProfile??null)!==(input.target.migrationProfile??null))
           || !equal(binding.resource.instance) || !equal(binding.actualResource?.instance) || binding.status !== "R07_BOOTSTRAP_API_LISTENING"
           || binding.port !== 4242 || binding.origins?.apiOrigin !== "http://127.0.0.1:4242"
           || binding.actualResource?.read_only !== "on" || String(binding.actualResource?.migration_role_oid) !== String(input.target.migrationRoleOid)

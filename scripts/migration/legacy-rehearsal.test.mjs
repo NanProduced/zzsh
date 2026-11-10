@@ -63,6 +63,21 @@ test("offline plan is zero-network, zero-writer and never rentable", () => {
   assert.equal(plan.domains.continuation.counts.CONFLICT, 0);
 });
 
+test("offline reports never expose identity source fields", () => {
+  const dir = temp(), manifest = load(join(FIXTURE_PATH, "manifest.json"));
+  for (const spec of Object.values(manifest.inputs)) spec.path = join(FIXTURE_PATH, spec.path);
+  const identities = load(manifest.inputs.identities.path);
+  const probes = ["SYNTHETIC_PRIVATE_NAME_719", "SYNTHETIC_PRIVATE_ID_719"];
+  Object.assign(identities.users[0], { real_name: probes[0], id_card: probes[1] });
+  const input = join(dir, "identity-fixture.json"); put(input, identities);
+  manifest.inputs.identities = { ...manifest.inputs.identities, path: input, sha256: sha(readFileSync(input)) };
+  const manifestFile = join(dir, "manifest.json"); put(manifestFile, manifest);
+  const out = join(dir, "plan"), result = run(["plan", "--manifest", manifestFile, "--out", out]);
+  assert.equal(result.status, 0, result.stderr);
+  const output = result.stdout + result.stderr + readFileSync(join(out, "plan.json"), "utf8");
+  for (const probe of probes) assert.equal(output.includes(probe), false);
+});
+
 test("selftest covers positive/negative reconciliation and fail-closed guards", () => {
   const out = temp();
   const run = spawnSync(process.execPath, [CLI, "selftest", "--manifest",join(FIXTURE_PATH,"manifest.json"),"--fixture-dir",FIXTURE_PATH,"--api-dist", API_DIST, "--out", out], { encoding: "utf8" });

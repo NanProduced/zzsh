@@ -5,7 +5,7 @@ import { createRequire } from 'node:module';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { validateProfile, writePrivate } from '../local-auth.mjs';
-import { advisoryLockSql, assertLiveTarget, loadRegisteredTarget, maintenanceConnection, targetConnection, targetIdentityQuery } from './local-target-registry.mjs';
+import { advisoryLockSql, assertLiveTarget, isRegisteredMigrationInstance, loadRegisteredTarget, maintenanceConnection, targetConnection, targetIdentityQuery } from './local-target-registry.mjs';
 
 const root=resolve(fileURLToPath(new URL('../..',import.meta.url))),restricted=resolve('E:/zzsh-local-state/restricted'),runtime=resolve('E:/zzsh-local-state/runtime');
 const sha=x=>createHash('sha256').update(x).digest('hex');
@@ -17,13 +17,14 @@ function pathInRestricted(path,output=false,base=restricted){
 }
 function pin(ref,base=restricted){const path=pathInRestricted(ref?.path,false,base),bytes=readFileSync(path);assert(/^[a-f0-9]{64}$/.test(ref.sha256??'')&&sha(bytes)===ref.sha256,'BOOTSTRAP_READBACK_INPUT_CHANGED');return JSON.parse(bytes);}
 function sameTarget(value,target){return value&&value.database===target.database&&String(value.oid??value.resourceOid)===target.oid&&value.nonce===target.nonce
-  &&value.instance?.host===target.instance.host&&value.instance?.port===target.instance.port&&value.instance?.systemIdentifier===target.instance.systemIdentifier;}
+  &&value.instance?.host===target.instance.host&&value.instance?.port===target.instance.port&&value.instance?.systemIdentifier===target.instance.systemIdentifier
+  &&(value.migrationProfile??null)===(target.migrationProfile??null);}
 
 export function validateR07BootstrapProofInputs(input,registered,profile,receipts){
   const t=input?.target;
   assert(input?.schema==='zzsh.round07-bootstrap-readback-request.v1'&&t?.bootstrapReservation==='ROUND07_BOOTSTRAP_RESERVED'
-    &&t.instance?.host==='127.0.0.1'&&t.instance?.port===55433&&/^[0-9]+$/.test(t.instance.systemIdentifier??'')
-    &&registered?.port===55433&&!registered.pendingReset&&registered.lockKey==='806006'&&sameTarget(t,registered)
+    &&isRegisteredMigrationInstance(registered)&&!registered.pendingReset&&registered.lockKey==='806006'&&sameTarget(t,registered)
+    &&(t.migrationProfile??null)===(registered.migrationProfile??null)
     &&t.migrationRoleOid===registered.migrationRoleOid&&registered.runtimeRoleOid,'BOOTSTRAP_READBACK_TARGET_CHANGED');
   validateProfile(profile);const names=['boss-one','boss-two','operations','support'];
   assert(Object.keys(profile.actors).sort().join()===names.sort().join()&&new Set(names.map(n=>profile.actors[n].userId)).size===4

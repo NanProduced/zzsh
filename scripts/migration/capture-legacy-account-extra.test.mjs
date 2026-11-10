@@ -44,6 +44,15 @@ test('same-source binding requires original and later read-only transactions, cl
     (a,b,c)=>{b.files.accountDisplay.fields=b.files.accountDisplay.fields.filter(field=>field!=='is_demulan');},
   ]){const a=base(),b=supplement(),c=binding();mutate(a,b,c);assert.throws(()=>validateCaptureBindings(a,b,c));}
 });
+test('a new restore requires both captures to bind the same verified server and source proof',()=>{
+  const a=base(),b=supplement(),c=binding(),uuid='12345678-1234-1234-1234-123456789abc';
+  c.schema='zzsh.local-source-origin.v2';c.container.name='zzsh-migration-mysql-fixture-01';Object.assign(c.source,{serverUuid:uuid,network:'none',readOnly:true,superReadOnly:true,eventScheduler:'DISABLED'});Object.assign(c.restoreRecord,{sourceExportConsistency:'NOT_VERIFIED_BY_RESTORE',consumedSha256:digest,importClientExitCode:0});
+  for(const r of [a,b]){r.identity={...identity,serverUuid:uuid,globalReadOnly:1,superReadOnly:1,eventScheduler:'DISABLED'};
+    r.sourceOrigin={schema:c.schema,bindingSha256:digest,serverUuid:uuid,verifiedAfterCapture:true,sourceExportConsistency:'NOT_VERIFIED_BY_RESTORE'};}
+  assert.doesNotThrow(()=>validateCaptureBindings(a,b,c,digest));
+  assert.throws(()=>validateCaptureBindings(a,{...b,sourceOrigin:{...b.sourceOrigin,verifiedAfterCapture:false}},c,digest),/SOURCE_ORIGIN_BINDING_MISMATCH/);
+  assert.throws(()=>validateCaptureBindings(a,b,c,'0'.repeat(64)),/SOURCE_ORIGIN_BINDING_MISMATCH/);
+});
 
 test('supplement receipt must identify the exact capture, adapter and extra-checking code',()=>{
   const expected={toolSha256:'a'.repeat(64),supportToolSha256:'b'.repeat(64),accountExtraToolSha256:'c'.repeat(64)};

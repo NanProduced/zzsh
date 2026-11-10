@@ -10,9 +10,10 @@ import { matchesLegacyBankSource, prepareLegacyBankBinding, validLegacyBankDetai
 
 type BankRow = Readonly<{ user_id: string; name: string | null; card_no: string | null; create_time: string; update_time: string }>;
 type Source = Readonly<{ sourceReceiptSha256: string; sourceDumpSha256: string; sourceCutoff: string }>;
-export type LocalBankTarget = Readonly<{ round: 6 | 7; host: "127.0.0.1"; port: 55432 | 55433; database: string; databaseOid: number;
+export type LocalBankTarget = Readonly<{ round: 6 | 7 | 'next'; host: "127.0.0.1"; port: number; database: string; databaseOid: number;
   marker: string; nonce: string; owner: string; ownerOid: number; runtimeUser: string; runtimeRoleOid: number;
-  instance?: Readonly<{host:"127.0.0.1";port:55432|55433;systemIdentifier:string}>; migrationUser?:string; migrationRoleOid?:number }>;
+  instance?: Readonly<{host:"127.0.0.1";port:number;systemIdentifier:string}>; migrationUser?:string; migrationRoleOid?:number;
+  migrationProfile?:'LOCAL_MIGRATION_NEXT_V1' }>;
 export type LocalBankOperator = Readonly<{ userId: string; sessionId: string }>;
 type Row = Readonly<{ source: LegacyBankSource; name: string; cardNo: string }>;
 export type LegacyBankImportPlan = Readonly<{ kind: "CONTROLLED_LEGACY_BANK_IMPORT_PLAN" }>;
@@ -29,9 +30,14 @@ export function prepareLegacyBankImport(rows: readonly BankRow[], userSourceDige
   target: LocalBankTarget, operator: LocalBankOperator): LegacyBankImportPlan {
   if (!Array.isArray(rows) || !(userSourceDigests instanceof Map) || !source || !hash(source.sourceReceiptSha256) || !hash(source.sourceDumpSha256)
     || typeof source.sourceCutoff !== "string" || !Number.isFinite(Date.parse(source.sourceCutoff))
-    || !target || ![6,7].includes(target.round) || target.host !== "127.0.0.1" || ![55432,55433].includes(target.port) || process.env.NODE_ENV === "production"
+    || !target || ![6,7,'next'].includes(target.round) || target.host !== "127.0.0.1" || process.env.NODE_ENV === "production"
     || target.round === 6 && target.port !== 55432
-    || target.round === 7 && (!target.instance || target.instance.host !== target.host || target.instance.port !== target.port || !/^[0-9]+$/.test(target.instance.systemIdentifier)
+    || target.round === 7 && ![55432,55433].includes(target.port)
+    || target.round === 'next' && (target.migrationProfile!=='LOCAL_MIGRATION_NEXT_V1'||!Number.isInteger(target.port)||target.port<1024||target.port>65535
+      ||[55432,55433,55434].includes(target.port)||target.database!=='zzsh_test_regression'||target.marker!=='zzsh:regression-test:v1'
+      ||target.owner!=='zzsh'||target.runtimeUser!=='zzsh_regression_runtime'||target.migrationUser!=='zzsh_regression_migration')
+    || target.round !== 'next' && target.migrationProfile !== undefined
+    || (target.round === 7 || target.round === 'next') && (!target.instance || target.instance.host !== target.host || target.instance.port !== target.port || !/^[0-9]+$/.test(target.instance.systemIdentifier)
       || typeof target.migrationUser !== "string" || !/^zzsh_[a-z0-9_]{1,55}$/.test(target.migrationUser) || target.migrationUser === target.runtimeUser
       || !Number.isSafeInteger(target.migrationRoleOid) || target.migrationRoleOid! <= 0 || target.migrationRoleOid! > 4294967295 || target.migrationRoleOid === target.runtimeRoleOid)
     || !/^zzsh_test_[a-z0-9_]{1,48}$/.test(target.database) || !/^zzsh_[a-z0-9_]{1,55}$/.test(target.runtimeUser)
@@ -100,7 +106,7 @@ export function legacyBankImportRequestId(plan: LegacyBankImportPlan, legacyUser
     secret = Buffer.from(material); derived = createHmac("sha256", secret).update("legacy-bank-import.recovery.key.v1").digest();
     return "bank-import_" + createHmac("sha256", derived).update(JSON.stringify(["legacy-bank-import.recovery.v1", value.target.databaseOid,
       value.target.nonce, value.source.sourceReceiptSha256, value.source.sourceDumpSha256, legacyUserId,
-      ...(value.target.round === 7 ? [value.target.instance!.systemIdentifier] : [])])).digest("hex").slice(0, 32);
+      ...(value.target.round === 7 || value.target.round === 'next' ? [value.target.instance!.systemIdentifier] : [])])).digest("hex").slice(0, 32);
   } catch { throw unavailable("LEGACY_BANK_PLAN_KEY_UNAVAILABLE"); } finally { secret?.fill(0); derived?.fill(0); }
 }
 
@@ -126,7 +132,7 @@ async function assertResource(c: PoolClient, plan: Plan, o: WithdrawalBankBindin
   const t = plan.target;
   if (!row || Number(row.oid) !== t.databaseOid || row.name !== t.database || row.role !== t.runtimeUser || Number(row.role_oid) !== t.runtimeRoleOid
     || row.owner !== t.owner || Number(row.owner_oid) !== t.ownerOid || row.marker !== t.marker || row.nonce !== t.nonce || row.ready !== true
-    || (t.round === 7 && row.system_identifier !== t.instance?.systemIdentifier)
+    || ((t.round === 7 || t.round === 'next') && row.system_identifier !== t.instance?.systemIdentifier)
     || row.rolsuper !== false || row.rolcreatedb !== false || row.rolcreaterole !== false || row.rolinherit !== false || row.rolbypassrls !== false) throw unavailable("LEGACY_BANK_RESOURCE_MISMATCH");
   await assertBusinessRuntimeIdentity(c, { database: { name: t.database, user: t.runtimeUser, runtimeUser: t.runtimeUser } });
 }

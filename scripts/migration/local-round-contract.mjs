@@ -1,13 +1,42 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import { assertRentalReferenceReceipt } from "./business-reference-readiness.mjs";
 import { createReadStream, lstatSync, readFileSync } from "node:fs";
-import { createInterface } from "node:readline";
 import { dirname, isAbsolute, relative, resolve } from "node:path";
+import { LEGACY_DATASET_PREPARATION_TOOLS, assertCapturedSourceOrigin, expectedContinuationImports, readSourceRows } from "./local-source-adapter.mjs";
+import { sameGrowthInstance, validateGrowthPackageLayout, verifyGrowthPackageBytes } from "./local-growth-packages.mjs";
+import { hasVerifiedNextInitialSchema, NEXT_MIGRATION_PROFILE } from "./local-target-registry.mjs";
 
 const requiredDatasetStages = ["core-and-funds", "display", "opening", "holdings", "paths", "readback"];
 const requiredGrowthStages = ["growth-prepare", "growth-apply", "growth-readback"];
 const loadPhases = ["users", "accounts", "orders", "invitationFacts", "financeHistory", "financeEmptyCoverage", "guaranteeHistory", "continuationEvidence", "liabilityDuties", "completedCommissions", "accountDisplay", "storedOpening", "skinHoldings"];
 const knownLoadStatuses = new Set(["LOCAL_DATASET_CORE_AND_FINANCIAL_DOMAINS_COMMITTED_REVIEW_REQUIRED", "LOCAL_DATASET_DISPLAY_ENRICHMENT_COMMITTED_REVIEW_REQUIRED", "LOCAL_DATASET_STORED_OPENINGS_COMMITTED_REVIEW_REQUIRED", "LOCAL_DATASET_SKIN_HOLDINGS_COMMITTED_REVIEW_REQUIRED", "FAILED_ROLLED_BACK"]);
+
+/** A new round must not silently reuse an unproven old restore or mix source captures. */
+export function assertRoundSourceOrigin(input,source,dataset,binding,funds,refund,workflow,workflowInput) {
+  if(input.target?.migrationProfile!==NEXT_MIGRATION_PROFILE)return;
+  const ref=input.sourceBinding,workflowRef=input.sourceWorkflow;
+  assert(ref&&typeof ref.path==='string'&&/^[a-f0-9]{64}$/.test(ref.sha256??'')&&binding?.schema==='zzsh.local-source-origin.v2','ROUND_SOURCE_RESTORE_PROOF_REQUIRED');
+  const sameRef=(a,b)=>a&&b&&isAbsolute(a.path??'')&&isAbsolute(b.path??'')&&resolve(a.path).toLowerCase()===resolve(b.path).toLowerCase()&&a.sha256===b.sha256&&/^[a-f0-9]{64}$/.test(a.sha256??'');
+  assert(workflowRef&&/^[a-f0-9]{64}$/.test(workflowRef.sha256??'')&&workflow?.schema==='zzsh.local-source-workflow-receipt.v1'
+    &&workflow.status==='SOURCE_CAPTURED_DATASET_NOT_PREPARED'&&workflow.targetWrites===0&&workflow.automaticCleanup===false
+    &&workflow.input?.sha256===workflow.inputSha256&&/^[a-f0-9]{64}$/.test(workflow.inputSha256??'')
+    &&Array.isArray(workflow.stages)&&workflow.stages.length===6
+    &&['prepare','restore','capture','finance','refund','verify'].every((name,i)=>workflow.stages[i]?.name===name&&workflow.stages[i].status==='ACK'&&Number.isSafeInteger(workflow.stages[i].wallMs)&&workflow.stages[i].wallMs>=0)
+    &&sameRef(workflow.result?.source,input.source)&&sameRef(workflow.result?.funds,input.funds)&&sameRef(workflow.result?.refundAttempts,input.refundAttempts)
+    &&sameRef(workflow.result?.sourceBinding,ref)&&workflow.result?.containerId===binding.container?.id,
+    'ROUND_SOURCE_WORKFLOW_PROOF_REQUIRED');
+  assert(workflowInput?.schema==='zzsh.local-source-workflow.v1'&&binding.container.name==='zzsh-migration-mysql-'+workflowInput.suffix
+    &&workflowInput.imageId===binding.container.imageId&&isAbsolute(workflowInput.dump??'')&&resolve(workflowInput.dump).toLowerCase()===resolve(binding.restoreRecord.dumpPath??'').toLowerCase()
+    &&workflowInput.exportStartedAt===binding.restoreRecord.exportStartedAt&&workflowInput.cutoff===binding.restoreRecord.cutoff
+    &&isAbsolute(workflowInput.out??'')&&resolve(workflowInput.out).toLowerCase()===resolve(dirname(workflow.result.source.path)).toLowerCase(),
+    'ROUND_SOURCE_WORKFLOW_INPUT_CHANGED');
+  for(const receipt of [source,funds,refund])assertCapturedSourceOrigin(receipt,binding,ref.sha256);
+  assert(dataset?.sourceReceiptSha256===input.source?.sha256&&dataset.sourceOrigin?.bindingSha256===ref.sha256
+    &&dataset.sourceOrigin?.dumpSha256===binding.restoreRecord?.dumpSha256&&dataset.sourceCutoff===binding.restoreRecord?.cutoff
+    &&funds.sourceSupplement?.baseReceiptSha256===input.source.sha256&&refund.sourceSupplement?.baseReceiptSha256===input.source.sha256,
+    'ROUND_SOURCE_RESTORE_BINDING_CHANGED');
+}
 
 /** Whole-user migrations must close child sets; scenario subsets intentionally cannot. */
 export function requiresInvitationCountClosure(manifest) {
@@ -66,21 +95,17 @@ export function assertInvitationCountPackets(manifest, packets, invitation) {
 
 async function* checkedInvitationPackets(file, expectedSha256, expectedPacketHashes) {
   if (!/^[a-f0-9]{64}$/.test(expectedSha256 ?? "")) throw new Error("INVITATION_FILE_BINDING_REQUIRED");
-  const stream=createReadStream(file), digest=createHash("sha256"), reader=createInterface({input:stream,crlfDelay:Infinity});
-  stream.on("data",chunk=>digest.update(chunk));let count=0;
-  try {
-    for await(const line of reader) if(line) {
-      const packet=JSON.parse(line), packetHash=createHash("sha256").update(JSON.stringify(packet)).digest("hex");
-      if(expectedPacketHashes && packetHash!==expectedPacketHashes[count]) throw new Error("INVITATION_PACKET_CHANGED");
-      count++;yield {packet,packetHash};
-    }
-    if(expectedPacketHashes && count!==expectedPacketHashes.length) throw new Error("INVITATION_PACKET_COUNT_CHANGED");
-    if(digest.digest("hex")!==expectedSha256) throw new Error("INVITATION_FILE_SHA_MISMATCH");
-    // Also re-open the named file: replacement after the stream buffered a valid
-    // packet must still stop the phase, without changing any original packet key.
-    const current=createHash("sha256");for await(const chunk of createReadStream(file))current.update(chunk);
-    if(current.digest("hex")!==expectedSha256) throw new Error("INVITATION_FILE_SHA_MISMATCH");
-  } finally { reader.close();stream.destroy(); }
+  const digest=createHash("sha256");let count=0;
+  for await(const packet of readSourceRows(file,chunk=>digest.update(chunk))) {
+    const packetHash=createHash("sha256").update(JSON.stringify(packet)).digest("hex");
+    if(expectedPacketHashes && packetHash!==expectedPacketHashes[count]) throw new Error("INVITATION_PACKET_CHANGED");
+    count++;yield {packet,packetHash};
+  }
+  if(expectedPacketHashes && count!==expectedPacketHashes.length) throw new Error("INVITATION_PACKET_COUNT_CHANGED");
+  if(digest.digest("hex")!==expectedSha256) throw new Error("INVITATION_FILE_SHA_MISMATCH");
+  // Also re-open the named file: replacement after buffering must stop the phase.
+  const current=createHash("sha256");for await(const chunk of createReadStream(file))current.update(chunk);
+  if(current.digest("hex")!==expectedSha256) throw new Error("INVITATION_FILE_SHA_MISMATCH");
 }
 
 /** No packet payload survives preflight; each write pass rechecks its preflight digest and file. */
@@ -129,13 +154,20 @@ function buildDigest(buildFiles) {
 }
 
 export function assertGrowthPlanEvidence({ input, inputSha256, expected, prepare, manifest, manifestSha256 }) {
-  const sameTarget = item => item && item.oid === input.target.oid && item.nonce === input.target.nonce;
+  assert(input.growth?.packageLayout===undefined||input.growth.packageLayout==='PACKED_V2',"ROUND_GROWTH_PREPARE_UNCONFIRMED");
+  const packed=input.growth?.packageLayout==='PACKED_V2';
+  assert(input.growth?.approvalLayout === undefined || packed && input.growth.approvalLayout === 'INLINE_INTENT_V1', 'ROUND_GROWTH_PREPARE_UNCONFIRMED');
+  const sameTarget = item => item && item.oid === input.target.oid && item.nonce === input.target.nonce
+    && (!packed || sameGrowthInstance(item.instance, input.target.instance))
+    && (item.migrationProfile ?? null) === (input.target.migrationProfile ?? null);
   let cutoff = null;
   try { cutoff = new Date(expected.dataset.sourceCutoff).toISOString().replace(/\.(\d{3})Z$/, (_, ms) => "." + ms + "000Z"); } catch { /* missing cutoff is not evidence */ }
   const digest = buildDigest(input.buildFiles);
   assert(prepare && prepare.inputSha256 === inputSha256 && prepare.datasetSha256 === input.dataset.sha256 && sameTarget(prepare)
     && prepare.mode === "--prepare" && prepare.status === "PREPARED_NOT_APPLIED" && prepare.readOnlyRollbackAck === true && prepare.readOnlyClientClosed === true
-    && manifest && manifest.schema === "zzsh.local-growth-round-plan.v1" && manifest.status === "PREPARED_NOT_APPLIED"
+    && (input.target.migrationProfile !== NEXT_MIGRATION_PROFILE || prepare.readOnlyFence === "HELD_UNTIL_ROLLBACK"
+      && prepare.readOnlyMaintenanceUnlock === true && prepare.readOnlyMaintenanceClosed === true)
+    && manifest && manifest.schema === (packed?"zzsh.local-growth-round-plan.v2":"zzsh.local-growth-round-plan.v1") && manifest.status === "PREPARED_NOT_APPLIED"
     && manifestSha256 === prepare.manifestSha256 && manifest.datasetSha256 === input.dataset.sha256 && sameTarget(manifest)
     && cutoff !== null && manifest.cutoff === cutoff && digest !== null && manifest.buildDigest === digest
     && manifest.policy?.id === input.growth?.policyId && Date.parse(manifest.policy?.effectiveAt) === Date.parse(input.growth?.policyEffectiveAt)
@@ -143,11 +175,12 @@ export function assertGrowthPlanEvidence({ input, inputSha256, expected, prepare
     && prepare.summary?.users === expected?.dataset?.domains?.users?.ready && prepare.summary?.orders === expected?.dataset?.domains?.orders?.ready
     && ["users", "orders", "complete", "pending", "contributions"].every(key => manifest.summary?.[key] === prepare.summary?.[key]), "ROUND_GROWTH_PREPARE_UNCONFIRMED");
   const summary = prepare.summary, seenUsers = new Set(), seenKeys = new Set();
+  if(packed)validateGrowthPackageLayout(manifest);
   assert(["users", "orders", "complete", "pending", "contributions"].every(key => Number.isSafeInteger(summary[key]) && summary[key] >= 0)
     && summary.complete + summary.pending === summary.users, "ROUND_GROWTH_PREPARE_UNCONFIRMED");
   let complete = 0, pending = 0, contributions = 0;
   for (const [index, item] of manifest.packages.entries()) {
-    assert(item && item.file === "packages/" + String(index + 1).padStart(5, "0") + ".json"
+    assert(item && (packed || item.file === "packages/" + String(index + 1).padStart(5, "0") + ".json")
       && typeof item.userId === "string" && item.userId.length > 0 && typeof item.executionKey === "string" && item.executionKey.length > 0
       && /^[a-f0-9]{64}$/.test(item.sha256 ?? "") && /^[a-f0-9]{64}$/.test(item.coverageFingerprint ?? "")
       && ["COMPLETE", "BACKFILL_PENDING"].includes(item.coverageState) && Number.isSafeInteger(item.contributionCount) && item.contributionCount >= 0
@@ -161,10 +194,7 @@ export function assertGrowthPlanEvidence({ input, inputSha256, expected, prepare
 
 /** Check every sealed package before the first growth commit, not only when its turn arrives. */
 export function assertGrowthPackages(manifest, readPackage) {
-  for (const item of manifest.packages) {
-    const bytes = readPackage(item.file);
-    assert(createHash("sha256").update(bytes).digest("hex") === item.sha256, "ROUND_GROWTH_PACKAGE_SHA_MISMATCH");
-  }
+  verifyGrowthPackageBytes(manifest,readPackage);
 }
 
 /** A new output is allowed only when the failed original never reached a loader write boundary. */
@@ -188,6 +218,7 @@ export function assertNoWriteRetryLineage({ input, originalInput, originalReceip
 /** Bootstrap receipts are evidence for one database epoch, not reusable seed data. */
 export function assertRoundBootstrap(input, actorProof, evidence) {
   const target = input.target, binding = input.bootstrapEvidence;
+  assert(target.migrationProfile !== NEXT_MIGRATION_PROFILE || target.bootstrapReservation === "ROUND07_BOOTSTRAP_RESERVED", "ROUND_BOOTSTRAP_TARGET_OR_EVIDENCE_MISMATCH:schema");
     const sameTarget = (value, database = true) => value && String(value.oid ?? value.resourceOid) === target.oid && value.nonce === target.nonce
     && (!database || value.database === "zzsh_test_regression")
     && (!target.instance || JSON.stringify(value.instance ?? null) === JSON.stringify(target.instance));
@@ -195,6 +226,8 @@ export function assertRoundBootstrap(input, actorProof, evidence) {
     const runtimeEvidence = evidence.runtime ?? {};
     const actualEvidence = runtimeEvidence.actualResource ?? evidence.build?.actualResource;
     assert(binding && evidence && sameTarget(runtimeEvidence.resource) && sameTarget(actualEvidence), fail + ":runtime");
+    assert((runtimeEvidence.resource.migrationProfile ?? null) === (target.migrationProfile ?? null)
+      && (actualEvidence.migrationProfile ?? null) === (target.migrationProfile ?? null), fail + ":runtime-profile");
     assert(runtimeEvidence.resource.marker === "zzsh:regression-test:v1" && actualEvidence.marker === "zzsh:regression-test:v1"
     && String(runtimeEvidence.resource.migrationRoleOid ?? actualEvidence.migration_role_oid) === target.migrationRoleOid
     && String(actualEvidence.migration_role_oid) === target.migrationRoleOid
@@ -218,8 +251,12 @@ export function assertRoundBootstrap(input, actorProof, evidence) {
     && evidence.schema.readbackRollbackAck === true && evidence.schema.readbackClientClosed === true
     && /^[a-f0-9]{64}$/.test(evidence.schema.journalSha256 ?? "") && /^[a-f0-9]{64}$/.test(evidence.schema.historySha256 ?? "");
   const finalRound07Schema = target.instance && evidence.schema?.status === "CLEAN_SCHEMA_INSTALLED" && sameTarget(evidence.schema, false)
+    && (evidence.schema.migrationProfile ?? null) === (target.migrationProfile ?? null)
     && evidence.schema.finalOrdinal >= 160 && evidence.schema.commitAck === true && evidence.schema.migrationAck === true
     && evidence.schema.readbackRollbackAck === true && evidence.schema.readbackClientClosed === true && evidence.schema.unlockAck === true && evidence.schema.maintenanceClosed === true
+    && (target.migrationProfile !== NEXT_MIGRATION_PROFILE || evidence.schema.migrationProfile === NEXT_MIGRATION_PROFILE
+      && evidence.schema.targetFence === "HELD_ACROSS_SCHEMA_AND_ACL" && evidence.schema.targetFenceReleased === true && evidence.schema.runtimeAclReadback === true
+      && hasVerifiedNextInitialSchema(evidence.schema))
     && /^[a-f0-9]{64}$/.test(evidence.schema.journalSha256 ?? "") && /^[a-f0-9]{64}$/.test(evidence.schema.historySha256 ?? "");
   assert(target.bootstrapReservation === "ROUND07_BOOTSTRAP_RESERVED" ? finalRound07Schema
     : target.bootstrapReservation === "ROUND06_BOOTSTRAP_RESERVED" ? finalRound06Schema
@@ -242,7 +279,14 @@ export function assertRoundBootstrap(input, actorProof, evidence) {
   const business = evidence.business;
   assert(business?.status === "REFERENCE_BOOTSTRAP_COMMITTED" && sameTarget(business, false)
     && Array.isArray(business.tables) && business.tables.length > 0 && /^[a-f0-9]{64}$/.test(business.manifestSha256 ?? "")
-    && business.commitAck === true && business.maintenanceClosed === true && business.poolClosed === true && business.unlock === true, fail + ":business");
+    && business.commitAck === true && business.maintenanceClosed === true && business.poolClosed === true && business.unlock === true
+    && (target.migrationProfile !== NEXT_MIGRATION_PROFILE || business.migrationProfile === NEXT_MIGRATION_PROFILE
+      && business.targetFence === "HELD_UNTIL_TRANSACTION_END"), fail + ":business");
+  if (input.legal) {
+    assertRentalReferenceReceipt(business);
+    const validatorSha256 = createHash("sha256").update(readFileSync(new URL("./business-reference-readiness.mjs", import.meta.url))).digest("hex");
+    assert.equal(business.rentalReference.validatorSha256, validatorSha256, "ROUND_RENTAL_REFERENCE_VALIDATOR_CHANGED");
+  }
   const actorId = actorProof.id ?? actorProof.actorId;
   assert(actorId && actorProof.sessionId && String(actorProof.resourceOid) === target.oid && actorProof.nonce === target.nonce
     && (!actorProof.actorId || actorProof.actorId === actorId) && business.maintenanceAdminId === actorId, fail + ":actor");
@@ -261,21 +305,116 @@ export function assertRoundBootstrap(input, actorProof, evidence) {
       && actual.decision === "APPROVED" && actual.executionStatus === "SUCCEEDED" && actual.onlyNewBossRelations === true
       && Date.parse(actual.effectiveAtUtc) === Date.parse(input.growth.policyEffectiveAt), fail + ":policy");
   }
-  return { status: "TARGET_BOUND_BOOTSTRAP_EVIDENCE_VERIFIED", database: "zzsh_test_regression", oid: target.oid, nonce: target.nonce };
+  return { status: "TARGET_BOUND_BOOTSTRAP_EVIDENCE_VERIFIED", database: "zzsh_test_regression", oid: target.oid, nonce: target.nonce,
+    ...(input.legal ? { rentalReference: { targetDigest: business.rentalReference.targetDigest, businessReceiptSha256: binding.business.sha256 } } : {}) };
+}
+
+/** A newly initialized round must bind both reviewed documents to the same build and bootstrap receipt. */
+export function assertRoundLegalBootstrap(input, legal, proof) {
+  const digest = value => typeof value === "string" && /^[a-f0-9]{64}$/.test(value);
+  assert(digest(input?.legal?.sha256), "ROUND_LEGAL_INPUT_REQUIRED");
+  const at = legal?.effectiveAt;
+  assert(legal?.schema === "zzsh.legal-initial-source.v1" && typeof at === "string"
+    && /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/.test(at) && Number.isFinite(Date.parse(at))
+    && new Date(at).toISOString() === at && ["INITIALIZED", "EXACT_PRESENT"].includes(proof?.status)
+    && proof.inputSha256 === input.legal.sha256 && proof.effectiveAt === at
+    && digest(legal.terms?.sha256) && digest(legal.privacy?.sha256)
+    && proof.terms?.sourceSha256 === legal.terms.sha256 && proof.privacy?.sourceSha256 === legal.privacy.sha256
+    && digest(proof.terms?.digest) && digest(proof.privacy?.digest), "ROUND_LEGAL_BOOTSTRAP_UNCONFIRMED");
+  for (const file of ["legal/legal-documents.js", "auth/security-core.js", "supply/content-hash.js", "supply/supply-util.js"])
+    assert(digest(legal.build?.[file]) && legal.build[file] === input.buildFiles?.[file], "ROUND_LEGAL_BUILD_CHANGED");
+}
+
+/** The API and importer must use the same independent identity keys for this database epoch. */
+export function assertRoundIdentityKeyBinding(input, runtime) {
+  const subject = input?.secrets?.identitySubjectHmac?.sha256, profile = input?.secrets?.identityProfile?.sha256;
+  assert(/^[a-f0-9]{64}$/.test(subject ?? "") && /^[a-f0-9]{64}$/.test(profile ?? "") && subject !== profile
+    && runtime?.identitySubjectKeySha256 === subject && runtime?.legacyIdentityProfileKeySha256 === profile,
+  "ROUND_IDENTITY_BOOTSTRAP_UNCONFIRMED");
+}
+
+export function assertRoundPreparationTools(dataset, scripts) {
+  for (const name of LEGACY_DATASET_PREPARATION_TOOLS) {
+    const digest = dataset?.toolFiles?.[name];
+    assert(/^[a-f0-9]{64}$/.test(digest ?? "") && digest === scripts?.[name], "ROUND_PREPARATION_TOOL_CHANGED:" + name);
+  }
+}
+
+/** Count pending openings explicitly; a zero balance does not prove its historical evidence. */
+export function assertRoundOpeningPartition(dataset, opening) {
+  const s = opening?.stats, count = n => Number.isSafeInteger(n) && n >= 0;
+  const cents = n => typeof n === "string" && /^(0|[1-9]\d{0,35})$/.test(n);
+  assert(s && [s.subjects, s.candidate, s.reviewRequired, s.positiveSource, s.candidatePositive].every(count)
+    && s.subjects === dataset?.domains?.users?.ready && s.candidate + s.reviewRequired === s.subjects
+    && s.candidatePositive <= s.candidate && s.candidatePositive <= s.positiveSource
+    && s.positiveSource <= s.subjects && s.positiveSource - s.candidatePositive <= s.reviewRequired
+    && [s.sourceAvailableCents, s.candidateAvailableCents, s.reviewAvailableCents, dataset?.storedBalanceTotals?.mappedEarningsCents].every(cents)
+    && s.sourceAvailableCents === dataset.storedBalanceTotals.mappedEarningsCents
+    && BigInt(s.sourceAvailableCents) === BigInt(s.candidateAvailableCents) + BigInt(s.reviewAvailableCents)
+    && (BigInt(s.sourceAvailableCents) > 0n) === (s.positiveSource > 0)
+    && (BigInt(s.candidateAvailableCents) > 0n) === (s.candidatePositive > 0)
+    && (BigInt(s.reviewAvailableCents) > 0n) === (s.positiveSource - s.candidatePositive > 0),
+  "ROUND_OPENING_PARTITION_INCOMPLETE");
+  return { status: s.reviewRequired ? "REVIEW_REQUIRED" : "NO_REVIEW_IN_PREPARED_INPUT", subjects: s.subjects,
+    candidate: s.candidate, reviewRequired: s.reviewRequired, reviewAvailableCents: s.reviewAvailableCents };
 }
 
 /** Offline assessment: historical artifacts prove their recorded run, not current target state. */
 export function assessRoundEvidence({ input, inputSha256, actorProof, receipt, checkpoint, readback, expected, growth, checkpointInput = input, checkpointActorProof = actorProof, requireStageAcks = true, requireReadback = true, requireGrowth = true }) {
   const issues = [], target = input.target;
+  if (target.migrationProfile === NEXT_MIGRATION_PROFILE && expected?.dataset?.population?.mode !== 'SELECTED_BUSINESS_SCOPE') issues.push('ROUND_NEXT_SELECTED_BUSINESS_SCOPE_REQUIRED');
+  let continuationExpected;
+  try { continuationExpected = expectedContinuationImports(expected?.dataset, target.migrationProfile === NEXT_MIGRATION_PROFILE); }
+  catch { issues.push('ROUND_CONTINUATION_SOURCE_COVERAGE_UNPROVEN'); }
   let invitationClosure = false;
   try { invitationClosure = requiresInvitationCountClosure(expected?.dataset); }
   catch { issues.push("ROUND_INVITATION_SCOPE_UNPROVEN"); }
   const sameTarget = value => value && String(value.oid) === target.oid && value.nonce === target.nonce
-    && (!target.instance || JSON.stringify(value.instance ?? null) === JSON.stringify(target.instance));
+    && (!target.instance || JSON.stringify(value.instance ?? null) === JSON.stringify(target.instance))
+    && (value.migrationProfile ?? null) === (target.migrationProfile ?? null);
   if (!receipt || receipt.schema !== "zzsh.local-round-receipt.v1" || receipt.inputSha256 !== inputSha256
     || receipt.datasetSha256 !== input.dataset.sha256 || !sameTarget(receipt.target)
     || JSON.stringify(receipt.target?.schemaHashes) !== JSON.stringify(target.schemaHashes)
     || (receipt.strictBatch ?? false) !== (input.strictBatch === true)) issues.push("ROUND_RECEIPT_BINDING_MISMATCH");
+  if (!input.resume && expected?.dataset?.identityProfiles && expected.dataset.population?.mode === "SELECTED_BUSINESS_SCOPE") {
+    const { elapsedMs, ...scope } = receipt?.population?.sourceVerification ?? {};
+    const domainsMatch = ["users", "accounts", "orders"].every(name => {
+      const actual = scope[name], planned = expected.dataset.domains?.[name], captured = expected.dataset.population.domains?.[name]?.captured;
+      return actual && Number.isSafeInteger(captured) && actual.captured === captured && actual.retained === planned?.source
+        && actual.ready === planned?.ready && actual.isolated === planned?.isolated && actual.excluded === captured - actual.retained;
+    });
+    if (receipt?.population?.mode !== "SELECTED_BUSINESS_SCOPE" || !Number.isSafeInteger(elapsedMs) || elapsedMs < 0
+      || scope.status !== "SELECTED_SCOPE_SOURCE_AND_INPUT_VERIFIED_TARGET_NOT_RUN" || scope.sourceConnections !== 0
+      || scope.targetConnections !== 0 || scope.targetWrites !== 0 || !domainsMatch
+      || JSON.stringify(scope) !== JSON.stringify(checkpoint?.sourceScopeVerification)) issues.push("ROUND_SOURCE_SCOPE_CHECKPOINT_UNCONFIRMED");
+  }
+  if(!input.resume&&expected?.dataset?.identityProfiles){
+    const p=receipt?.displayCapturePreflight,display=expected.display,accountFile=expected.dataset.files?.accounts;
+    if(p?.status!=='SOURCE_DISPLAY_CAPTURE_VERIFIED_TARGET_NOT_RUN'||p.sourceReceiptSha256!==input.source?.sha256
+      ||p.datasetManifestSha256!==input.dataset.sha256||p.displayManifestSha256!==input.display?.sha256
+      ||!/^[a-f0-9]{64}$/.test(p.sourceSha256??'')||p.accountsSha256!==accountFile?.sha256||p.displaySha256!==display?.sha256
+      ||!Number.isSafeInteger(p.sourceAccounts)||p.sourceAccounts<p.preparedAccounts||p.preparedAccounts!==expected.dataset.domains?.accounts?.ready
+      ||p.displayRows!==display?.rows||p.notDisplayable!==display?.notDisplayable||p.sourceConnections!==0||p.targetConnections!==0||p.targetWrites!==0
+      ||p.ratio?.known!==display?.accountBaseRatio?.known||p.ratio?.unknown!==display?.accountBaseRatio?.unknown
+      ||['selected','unselected','unknown'].some(key=>p.payout?.[key]!==display?.accountFullPayout?.[key]))
+      issues.push('ROUND_DISPLAY_CAPTURE_PREFLIGHT_UNCONFIRMED');
+  }
+  if (expected?.dataset?.identityProfiles && input.growth?.packageLayout === 'PACKED_V2') {
+    const proof = receipt?.distributionSourcePreflight, source = expected.source;
+    if (proof?.status !== 'DISTRIBUTION_SOURCE_PRECHECK_PASSED_TARGET_NOT_RUN' || proof.sourceReceiptSha256 !== input.source?.sha256
+      || !['configurationSha256','levelsSha256','validatorSha256','policyParserSha256'].every(key => /^[a-f0-9]{64}$/.test(proof[key] ?? ''))
+      || proof.configurationSha256 !== source?.files?.distributionConfig?.sha256 || proof.levelsSha256 !== source?.files?.distributionLevels?.sha256
+      || proof.configurationRows !== source?.files?.distributionConfig?.rows || proof.sourceLevels !== source?.files?.distributionLevels?.rows
+      || !Number.isSafeInteger(proof.activeLevels) || proof.activeLevels < 1 || !Number.isSafeInteger(proof.settlementDelayDays) || proof.settlementDelayDays < 0
+      || !/^[a-f0-9]{64}$/.test(proof.policyDigest ?? '') || proof.connections !== 0 || proof.targetWrites !== 0
+      || proof.validatorSha256 !== receipt.toolFiles?.['local-distribution-qualification-plan.mjs']
+      || proof.policyParserSha256 !== input.buildFiles?.['finance/distribution-policy-change.js']
+      || input.target?.migrationProfile === NEXT_MIGRATION_PROFILE && (proof.growthFenceGuardVersion !== 'v1'
+        || proof.growthCommitGuardSha256 !== input.buildFiles?.['auth/membership-growth-legacy-cli.js'])
+      || input.growth.approvalLayout === 'INLINE_INTENT_V1' && (!/^[a-f0-9]{64}$/.test(proof.growthCommitGuardSha256 ?? '')
+        || proof.growthCommitGuardSha256 !== input.buildFiles?.['auth/membership-growth-legacy-cli.js']))
+      issues.push('ROUND_DISTRIBUTION_SOURCE_UNCONFIRMED');
+  }
   const stages = Array.isArray(receipt?.stages) ? receipt.stages : [];
   const stageIndex = name => {
     const indexes = stages.map((item, i) => item && typeof item === "object" && item.name === name ? i : -1).filter(i => i >= 0);
@@ -293,6 +432,11 @@ export function assessRoundEvidence({ input, inputSha256, actorProof, receipt, c
     }
   };
   if (requireStageAcks) checkStages(requiredDatasetStages);
+  if (requireStageAcks && target.migrationProfile === NEXT_MIGRATION_PROFILE) {
+    const pathStage = stages.filter(item => item?.name === 'paths').at(-1);
+    if (pathStage?.metrics?.targetFence !== 'HELD_ACROSS_BATCHES' || pathStage.metrics.targetFenceReleased !== true)
+      issues.push('ROUND_PATH_FENCE_UNCONFIRMED');
+  }
   const actorId = checkpointActorProof?.id ?? checkpointActorProof?.actorId;
   if (!checkpoint || checkpoint.schema !== "zzsh.local-legacy-load.v1" || !sameTarget(checkpoint.binding)
     || checkpoint.binding.database !== "zzsh_test_regression" || checkpoint.binding.datasetSha256 !== input.dataset.sha256
@@ -301,6 +445,7 @@ export function assessRoundEvidence({ input, inputSha256, actorProof, receipt, c
     || JSON.stringify(checkpoint.schemaHashes) !== JSON.stringify(checkpointInput.target.schemaHashes)
     || JSON.stringify(checkpoint.executionWindow ?? null) !== JSON.stringify(checkpointInput.window ?? null)
     || ["poolClosed", "unlock", "maintenanceClosed", "rollbackConfirmed"].some(key => checkpoint[key] !== true)
+    || checkpointInput.target?.migrationProfile === NEXT_MIGRATION_PROFILE && (checkpoint.targetFenceReleased !== true || checkpoint.protectionRecorded !== true)
     || !knownLoadStatuses.has(checkpoint.status)) {
     issues.push("ROUND_CHECKPOINT_UNCONFIRMED");
   } else {
@@ -321,23 +466,49 @@ export function assessRoundEvidence({ input, inputSha256, actorProof, receipt, c
         || checkpoint.phases?.invitationFacts?.nextIndex!==expectedPackets) issues.push("ROUND_INVITATION_COUNT_CLOSURE_INCOMPLETE");
     }
     const counts = { users: expected?.dataset?.domains?.users?.ready, accounts: expected?.dataset?.domains?.accounts?.ready,
-      orders: expected?.dataset?.domains?.orders?.ready, continuationEvidence: expected?.dataset?.domains?.continuations?.parameterComplete,
+      orders: expected?.dataset?.domains?.orders?.ready, continuationEvidence: continuationExpected,
       accountDisplay: expected?.display?.rows, storedOpening: expected?.openings?.stats?.candidate, skinHoldings: checkpoint.skinHoldingsPreparation?.ready };
     for (const [name, count] of Object.entries(counts)) if (!Number.isSafeInteger(count) || checkpoint.phases?.[name]?.nextIndex !== count) issues.push("ROUND_PHASE_COUNT_DRIFT:" + name);
+    if (target.migrationProfile === NEXT_MIGRATION_PROFILE && checkpoint.phases?.continuationEvidence?.quarantined !== 0) issues.push('ROUND_CONTINUATION_IMPORT_INCOMPLETE');
     if (!Number.isSafeInteger(checkpoint.skinHoldingsPreparation?.isolated)
       || checkpoint.skinHoldingsPreparation.ready + checkpoint.skinHoldingsPreparation.isolated !== expected?.dataset?.domains?.accounts?.ready) issues.push("ROUND_HOLDINGS_DENOMINATOR_DRIFT");
   }
   if (requireReadback && (!readback || readback.schema !== "zzsh.local-dataset-readback.v1" || !sameTarget(readback.resource)
     || readback.resource.database !== "zzsh_test_regression" || readback.sourceDatasetSha256 !== input.dataset.sha256
     || readback.status !== "CORE_SOURCE_TARGET_EXACT_READBACK_PASSED" || readback.differenceCount !== 0
+    || target.migrationProfile === NEXT_MIGRATION_PROFILE && readback.targetFence !== "HELD_UNTIL_ROLLBACK"
     || readback.targetWrites !== 0 || !readback.rollbackConfirmed || !readback.lockReleased || !readback.connectionsClosed)) issues.push("ROUND_DATASET_READBACK_UNCONFIRMED");
   else if (requireReadback) {
+    if (expected?.dataset?.identityProfiles) {
+      const source = expected.dataset.identityProfiles, actual = readback.identityProfiles;
+      if (source.schema !== "zzsh.legacy-identity-profile-source.v1" || source.invalid !== 0
+        || !Number.isSafeInteger(source.ready) || source.ready < 0 || source.verified !== source.ready
+        || !/^[a-f0-9]{64}$/.test(checkpoint?.binding?.identityProfileKeyProof ?? "")
+        || !/^[a-f0-9]{64}$/.test(checkpoint?.binding?.identitySubjectKeyProof ?? "")
+        || actual?.expected !== source.ready || actual?.sourceMatched !== source.ready || actual?.matched !== source.ready || actual?.target !== source.ready
+        || actual?.source?.closed !== true || !Number.isSafeInteger(actual?.source?.rows) || actual.source.rows < source.ready
+        || !Number.isSafeInteger(actual?.source?.verified) || actual.source.verified < source.ready)
+        issues.push("ROUND_IDENTITY_PROFILE_READBACK_UNCONFIRMED");
+      const legal = readback.legal;
+      if (!/^[a-f0-9]{64}$/.test(input.legal?.sha256 ?? "") || legal?.status !== "VERIFIED" || legal.inputSha256 !== input.legal.sha256
+        || !legal.terms?.id || !legal.privacy?.id || !/^[a-f0-9]{64}$/.test(legal.terms?.digest ?? "")
+        || !/^[a-f0-9]{64}$/.test(legal.privacy?.digest ?? "") || !Number.isFinite(Date.parse(legal.effectiveAt ?? "")))
+        issues.push("ROUND_LEGAL_READBACK_UNCONFIRMED");
+      const rental = readback.rentalReference, bootstrap = receipt?.bootstrapEvidence?.rentalReference;
+      if (rental?.status !== "TARGET_CONFIG_VERIFIED" || rental.runtimeAccess !== "VERIFIED" || rental.runtimeRollbackConfirmed !== true || rental.runtimeClosed !== true
+        || !/^[a-f0-9]{64}$/.test(rental.targetDigest ?? "")
+        || rental.targetDigest !== bootstrap?.targetDigest || rental.businessReceiptSha256 !== input.bootstrapEvidence?.business?.sha256
+        || rental.businessReceiptSha256 !== bootstrap?.businessReceiptSha256)
+        issues.push("ROUND_RENTAL_REFERENCE_READBACK_UNCONFIRMED");
+    }
     if(invitationClosure){
       const closure=readback.invitationFacts?.childCountClosure, facts=expected.dataset.invitationFacts;
       if(closure?.status!=="VERIFIED" || closure.packets!==facts.selectedPackets || closure.auditsMatched!==facts.selectedPackets
         || closure.subjects!==facts.subjects || closure.matched!==facts.subjects
         || !Number.isSafeInteger(closure.known) || !Number.isSafeInteger(closure.unknown) || closure.known+closure.unknown!==facts.subjects)
         issues.push("ROUND_INVITATION_COUNT_READBACK_UNCONFIRMED");
+    }
+    if(invitationClosure||expected?.dataset?.identityProfiles){
       const sourceRatio=expected?.display?.accountBaseRatio, ratio=readback?.display?.accountBaseRatio, total=expected?.display?.rows;
       if(sourceRatio?.scope!=="ACCOUNT_AT_CAPTURE_NOT_ORDER_SNAPSHOT" || !Number.isSafeInteger(sourceRatio.known) || sourceRatio.known<0
         || !Number.isSafeInteger(sourceRatio.unknown) || sourceRatio.unknown<0 || sourceRatio.known+sourceRatio.unknown!==total
@@ -374,10 +545,17 @@ export function assessRoundEvidence({ input, inputSha256, actorProof, receipt, c
     catch { issues.push("ROUND_GROWTH_PREPARE_UNCONFIRMED"); }
     if (!binding(apply) || apply.mode !== "--apply" || apply.status !== "APPLIED_COMMIT_ACK_INDEPENDENT_READBACK_REQUIRED"
       || apply.manifestSha256 !== manifestSha256 || !apply.poolClosed || !apply.unlockAck || !apply.lockClosed
+      || target.migrationProfile === NEXT_MIGRATION_PROFILE && (apply.targetFence !== 'HELD_ACROSS_BATCHES' || apply.targetFenceReleased !== true)
       || apply.fundsWrites !== 0 || apply.pending !== null || apply.completed !== prepare?.summary?.users || apply.inserted !== prepare?.summary?.contributions
       || apply.replayed !== 0 || apply.complete !== prepare?.summary?.complete || apply.partial !== prepare?.summary?.pending) issues.push("ROUND_GROWTH_APPLY_UNCONFIRMED");
+    if (input.growth.approvalLayout === 'INLINE_INTENT_V1' && (apply?.approvalLayout !== 'INLINE_INTENT_V1'
+      || apply.approvalLog?.status !== 'INLINE_INTENTS_AND_ACKS_VERIFIED' || apply.approvalLog.startIndex !== 0
+      || apply.approvalLog.completed !== prepare?.summary?.users || apply.approvalLog.lines !== prepare?.summary?.users * 2
+      || !/^[a-f0-9]{64}$/.test(apply.approvalLog.sha256 ?? ''))) issues.push('ROUND_GROWTH_APPROVAL_LOG_UNCONFIRMED');
     if (!binding(result) || result.mode !== "--readback" || result.status !== "EXACT_ALL_RECORDS_AND_FACTS_VERIFIED"
       || result.manifestSha256 !== manifestSha256 || !result.readOnlyRollbackAck || !result.readOnlyClientClosed || result.fundsWrites !== 0
+      || target.migrationProfile === NEXT_MIGRATION_PROFILE && (result.readOnlyFence !== 'HELD_UNTIL_ROLLBACK'
+        || result.readOnlyMaintenanceUnlock !== true || result.readOnlyMaintenanceClosed !== true)
       || result.summary?.coverage !== prepare?.summary?.users || result.summary?.contributions !== prepare?.summary?.contributions
       || result.summary?.complete !== prepare?.summary?.complete || result.summary?.pending !== prepare?.summary?.pending) issues.push("ROUND_GROWTH_READBACK_UNCONFIRMED");
   }
@@ -395,8 +573,11 @@ export function assertResumeLineage({ input, previousInput, previousInputSha256,
     const before = previousInput[key], after = input[key];
     assert((key === "holdingOverlay" && !before && !after) || (before && after && /^[a-f0-9]{64}$/.test(before.sha256 ?? "") && before.sha256 === after.sha256), fail + ":" + key);
   }
+  if(input.target?.migrationProfile===NEXT_MIGRATION_PROFILE)
+    for(const key of ['sourceBinding','sourceWorkflow'])assert(/^[a-f0-9]{64}$/.test(previousInput[key]?.sha256??'')&&previousInput[key].sha256===input[key]?.sha256,fail+':'+key);
   assert(previousInput.target?.oid === input.target.oid && previousInput.target?.nonce === input.target.nonce
     && previousInput.target?.migrationRoleOid === input.target.migrationRoleOid
+    && (previousInput.target?.migrationProfile ?? null) === (input.target.migrationProfile ?? null)
     && JSON.stringify(previousInput.target?.instance ?? null) === JSON.stringify(input.target?.instance ?? null)
     && JSON.stringify(previousInput.target?.schemaHashes) === JSON.stringify(input.target.schemaHashes)
     && (previousInput.strictBatch === true) === (input.strictBatch === true), fail + ":target");

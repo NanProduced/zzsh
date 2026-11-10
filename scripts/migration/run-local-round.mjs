@@ -5,17 +5,26 @@ import { basename, delimiter, dirname, isAbsolute, join, relative, resolve } fro
 import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
 import { spawn, spawnSync } from "node:child_process";
-import { loadRegisteredTarget, targetConnection } from "./local-target-registry.mjs";
+import { assertCaptureTargetProfile, assertNextMigrationWriteReady, loadRegisteredTarget, NEXT_MIGRATION_PROFILE, sameMigrationProfile, targetConnection } from "./local-target-registry.mjs";
 import { assertSameDirectoryResumeSafe, inspectRoundResumeOutput, isRoundReceiptPath, isStrictRoundReservation, matchesLoadReservation, reserveRoundResumeOutput, strictRoundReservation, writeLoadCheckpoint } from "./local-load-checkpoint.mjs";
-import { assertRoundBootstrap, assessRoundEvidence, assertGrowthPlanEvidence, assertGrowthPackages, assertResumeLineage, verifyResumeSchema, assessResumeStages, assertNoWriteRetryLineage, assertReadbackRecoveryOverlay, assertReviewedGrowthRuleFiles, assertGrowthRuleRetry, requiresInvitationCountClosure } from "./local-round-contract.mjs";
-import { inspectRoundDependencyLayout, probeRoundDependencies, assertRoundDependencyProof, assertBoundRunnerScripts } from "./local-round-dependencies.mjs";
+import { assertRoundBootstrap, assertRoundLegalBootstrap, assertRoundIdentityKeyBinding, assertRoundOpeningPartition, assertRoundPreparationTools, assertRoundSourceOrigin, assessRoundEvidence, assertGrowthPlanEvidence, assertGrowthPackages, assertResumeLineage, verifyResumeSchema, assessResumeStages, assertNoWriteRetryLineage, assertReadbackRecoveryOverlay, assertReviewedGrowthRuleFiles, assertGrowthRuleRetry, requiresInvitationCountClosure } from "./local-round-contract.mjs";
+import { inspectRoundDependencyLayout, probeRoundDependencies, assertRoundDependencyProof, assertBoundRunnerScripts, assertNextSourceTools, verifyRoundDistributionSource } from "./local-round-dependencies.mjs";
 import { assertFullExecutionAdmitted, assertRoundPopulationBinding } from "./full-source-scope.mjs";
+import { LEGACY_REFUND_RELATIONSHIP_POLICY, assertDisplayCaptureCoverage, assertNextBusinessPopulation, expectedContinuationImports, verifyDisplayCaptureInputs } from "./local-source-adapter.mjs";
+import { verifySelectedPopulationFiles } from "./verify-full-source-population.mjs";
+import { digestInlineGrowthLog, openGrowthPackageReader } from "./local-growth-packages.mjs";
 
 const args = process.argv.slice(2), option = name => {
   const i = args.indexOf(name);
   return i < 0 ? undefined : args[i + 1];
 };
 const execute = args.includes("--execute"), validate = args.includes("--validate"), inspect = args.includes("--inspect-receipt"), resumeGrowth = args.includes("--resume-growth");
+const externalReadiness = { status: "NOT_ASSESSED_BY_ROUND", checks: ["distribution-policy-and-qualification", "credit-initialization", "listed-account-takeover", "legacy-bank-binding", "backup-restore-and-page-acceptance"] };
+function setSourceReadiness(proof) {
+  const accounts = proof.accountSnapshots, refunds = proof.refundParents;
+  externalReadiness.accountSnapshots = { status: accounts.unavailable ? "REVIEW_REQUIRED" : "NO_REVIEW_IN_PREPARED_INPUT", ...accounts };
+  externalReadiness.refundRelationships = { status: refunds.relationshipUnresolved || refunds.subjectIsolated ? "REVIEW_REQUIRED" : "NO_REVIEW_IN_CAPTURED_INPUT", ...refunds };
+}
 assert([execute, validate, inspect, resumeGrowth].filter(Boolean).length <= 1, "ONE_ROUND_ACTION_REQUIRED");
 if (!execute && !validate && !inspect && !resumeGrowth) {
   console.log(JSON.stringify({ action: "PLAN", required: ["--execute or --resume-growth or --validate or --inspect-receipt", "--input", "--input-sha"], inspectRequired: ["--receipt", "--receipt-sha"], stages: ["core-and-funds", "display", "opening", "holdings", "paths", "readback", "growth-prepare", "growth-apply", "growth-readback"], fullCapturedSource: "REQUIRES_BOUNDED_COVERAGE_AND_INDEPENDENT_SCOPE_PROOF", selectedBusinessScope: "FULL_SOURCE_SCAN_SELECTED_ACCOUNTS_AND_PAID_ORDERS", resumeGrowth: "complete original checkpoint + fresh target-bound readbacks + new growth authorization; original checkpoint is not written", prerequisites: ["fresh registered regression database or exact completed checkpoint", "target-bound formal bootstrap evidence", "bound source and derived packages"], connections: 0, credentialReads: 0 }));
@@ -41,7 +50,13 @@ function bound(file, expected) {
   return JSON.parse(bytes);
 }
 const inputSha256 = option("--input-sha"), input = bound(privatePath(option("--input")), inputSha256);
+const runnerDir = dirname(fileURLToPath(import.meta.url));
 assert.equal(input.schema, "zzsh.local-round.v1");
+if (input.target?.migrationProfile === NEXT_MIGRATION_PROFILE) externalReadiness.nextTargetAdmission = { status: "INCOMPLETE" };
+if (execute || resumeGrowth) assertNextMigrationWriteReady(input.target);
+assert(!input.growth||input.growth.packageLayout===undefined||input.growth.packageLayout==='PACKED_V2',"ROUND_GROWTH_PACKAGE_LAYOUT_INVALID");
+assert(!input.growth || input.growth.approvalLayout === undefined || input.growth.packageLayout === 'PACKED_V2'
+  && input.growth.approvalLayout === 'INLINE_INTENT_V1', 'ROUND_GROWTH_APPROVAL_LAYOUT_INVALID');
 if(!inspect&&input.target?.bootstrapReservation==="ROUND07_BOOTSTRAP_RESERVED"&&input.growth)assertReviewedGrowthRuleFiles(input.growth.oldRuleFiles);
 assert(!(execute && input.resume) && (!resumeGrowth || input.resume), "ROUND_RESUME_MODE_REQUIRED");
 function growthAttemptPath() {
@@ -62,7 +77,13 @@ function bootstrap(actorProof) {
     administrators: refs.administrators.map(bootstrapFile), adminBindings: refs.administrators.map(ref => ref.serverBinding ? bootstrapFile(ref.serverBinding) : null),
     business: bootstrapFile(refs.business), readback: bootstrapFile(refs.readback),
     bundle: bootstrapFile(refs.bundle), ...(input.growth ? { policy: bootstrapFile(refs.policy) } : {}) };
-  return assertRoundBootstrap(input, actorProof, evidence);
+  const verified = assertRoundBootstrap(input, actorProof, evidence);
+  if (input.secrets?.identityProfile) assertRoundIdentityKeyBinding(input, evidence.runtime);
+  if (input.legal) {
+    assert(evidence.business?.catalogModel === "OWNER_KIND_V2", "ROUND_CATALOG_BOOTSTRAP_UNCONFIRMED");
+    assertRoundLegalBootstrap(input, bound(privatePath(input.legal.path), input.legal.sha256), evidence.business?.legal);
+  }
+  return verified;
 }
 function readResumeLineage(expected) {
   const refs = input.resume;
@@ -127,6 +148,17 @@ function assessArtifacts(out, context) {
     if (input.growth && artifactIssues.some(issue => issue.includes(":growth-"))) completion.growth = "INCOMPLETE";
     completion.issues.push(...artifactIssues);
   }
+  if (!input.resume && input.growth?.approvalLayout === 'INLINE_INTENT_V1') {
+    const hashes = { readback: artifacts.readbackSha256, ...artifacts.growthArtifactHashes };
+    for (const [name, digest] of Object.entries(hashes)) {
+      const stage = context.receipt?.stages?.findLast(row => row?.name === name && row.status === 'ACK');
+      if (!digest || stage?.metrics?.evidenceSha256 !== digest) {
+        completion.status = 'INCOMPLETE';
+        if (name === 'readback') completion.dataset = 'INCOMPLETE'; else completion.growth = 'INCOMPLETE';
+        completion.issues.push('ROUND_STAGE_EVIDENCE_CHANGED:' + name);
+      }
+    }
+  }
   if (input.resume) {
     const resumeStages = assessResumeStages(context.receipt, input);
     if (resumeStages.status !== "COMPLETE") { completion.status = "INCOMPLETE"; completion.issues.push(...resumeStages.issues); }
@@ -155,12 +187,32 @@ if (inspect) {
   const receipt = bound(receiptPath, option("--receipt-sha"));
   const actorProof = bound(privatePath(input.actor.path), input.actor.sha256);
   const pinned = (entry, name = "manifest.json") => bound(join(privatePath(entry.path), name), entry.sha256);
-  const expected = { dataset: pinned(input.dataset), display: pinned(input.display), openings: pinned(input.openings), paths: pinned(input.paths, "receipt.json") };
-  let populationIssue=false;
+  const expected = { dataset: pinned(input.dataset), source: pinned(input.source, "receipt.json"), display: pinned(input.display), openings: pinned(input.openings), paths: pinned(input.paths, "receipt.json") };
+  let populationIssue=false, openingIssue=false, distributionIssue=false, sourceOriginIssue=false, sourceWorkflowForInspect=null;
+  try{assertCaptureTargetProfile(expected.source,input.target?.migrationProfile ?? null);}catch{sourceOriginIssue=true;}
+  if(input.target?.migrationProfile===NEXT_MIGRATION_PROFILE)try{
+    const binding=bound(privatePath(input.sourceBinding?.path),input.sourceBinding?.sha256);
+    sourceWorkflowForInspect=bound(privatePath(input.sourceWorkflow?.path),input.sourceWorkflow?.sha256);
+    const workflowInput=bound(privatePath(sourceWorkflowForInspect.input?.path),sourceWorkflowForInspect.input?.sha256);
+    assertRoundSourceOrigin(input,expected.source,expected.dataset,binding,pinned(input.funds,'receipt.json'),pinned(input.refundAttempts,'receipt.json'),sourceWorkflowForInspect,workflowInput);
+  }catch{sourceOriginIssue=true;}
+  if (expected.dataset.identityProfiles && expected.dataset.refundRelationshipPolicy !== LEGACY_REFUND_RELATIONSHIP_POLICY) populationIssue=true;
+  if (!input.resume && expected.dataset.identityProfiles) try { assertRoundPreparationTools(expected.dataset, receipt.toolFiles); }
+  catch { populationIssue=true; }
+  if (expected.dataset.identityProfiles) try { externalReadiness.storedOpening = assertRoundOpeningPartition(expected.dataset, expected.openings); }
+  catch { openingIssue=true; }
   if(expected.dataset.population||input.population)try{
-    const source=pinned(input.source,'receipt.json'),v=input.population?.verification;
+    const source=expected.source,v=input.population?.verification;
+    assert.equal(expected.dataset.sourceReceiptSha256,input.source.sha256,'ROUND_SOURCE_RECEIPT_CHANGED');
     const proof=expected.dataset.population?.mode==='FULL_CAPTURED_SOURCE'?bound(privatePath(v?.path),v?.sha256):null;
     assertRoundPopulationBinding(input,expected.dataset,source,proof);
+    if (!input.resume && expected.dataset.identityProfiles && expected.dataset.population?.mode === 'SELECTED_BUSINESS_SCOPE') {
+      const { elapsedMs, ...recorded } = receipt.population?.sourceVerification ?? {};
+      assert(receipt.population?.mode === 'SELECTED_BUSINESS_SCOPE' && Number.isSafeInteger(elapsedMs) && elapsedMs >= 0, 'ROUND_SOURCE_SCOPE_VERIFICATION_REQUIRED');
+      const current = await verifySelectedPopulationFiles({ datasetDir: privatePath(input.dataset.path), sourceDir: privatePath(input.source.path), dataset: expected.dataset, source });
+      assert.deepEqual(recorded, current, 'ROUND_SOURCE_SCOPE_VERIFICATION_CHANGED');
+      setSourceReadiness(current);
+    }
   }catch{populationIssue=true;}
   let bootstrapStatus, bootstrapReason;
   try { bootstrap(actorProof); bootstrapStatus = "PASS"; } catch (error) {
@@ -174,9 +226,28 @@ if (inspect) {
     ...(lineage ? { checkpointInput: lineage.previousInput, checkpointActorProof: lineage.previousActorProof, requireStageAcks: false } : {}) });
   if (input.resume && !lineage) { completion.status = "INCOMPLETE"; completion.issues.unshift("ROUND_RESUME_LINEAGE_UNCONFIRMED"); }
   if(populationIssue){completion.status='INCOMPLETE';completion.dataset='INCOMPLETE';completion.issues.unshift('ROUND_POPULATION_SCOPE_UNCONFIRMED');}
+  if(sourceOriginIssue){completion.status='INCOMPLETE';completion.dataset='INCOMPLETE';completion.issues.unshift('ROUND_SOURCE_RESTORE_PROOF_UNCONFIRMED');}
+  if(openingIssue){completion.status='INCOMPLETE';completion.dataset='INCOMPLETE';completion.issues.unshift('ROUND_OPENING_PARTITION_UNCONFIRMED');}
+  if (expected.dataset.identityProfiles && input.growth?.packageLayout === 'PACKED_V2') try {
+    const binding = input.dependencyBinding, proof = bound(privatePath(binding.proof.path), binding.proof.sha256);
+    const layout = inspectRoundDependencyLayout({ apiDist: resolve(input.apiDist), bundlePath: input.bootstrapEvidence.bundle.path,
+      bundleSha256: input.bootstrapEvidence.bundle.sha256, buildManifestPath: binding.buildManifest.path, buildManifestSha256: binding.buildManifest.sha256,
+      sourceSnapshot: binding.sourceSnapshot, sourceManifestPath: binding.sourceManifest.path, sourceManifestSha256: binding.sourceManifest.sha256 });
+    assertRoundDependencyProof(proof, layout); assertBoundRunnerScripts(runnerDir, layout.scriptFiles);
+    if(input.target?.migrationProfile===NEXT_MIGRATION_PROFILE)
+      assertNextSourceTools(input,bound(privatePath(input.sourceBinding.path),input.sourceBinding.sha256),[expected.source,pinned(input.funds,'receipt.json'),pinned(input.refundAttempts,'receipt.json')],layout.scriptFiles,sourceWorkflowForInspect);
+    assert.deepEqual(await verifyRoundDistributionSource({input,source:expected.source,layout,proof,runnerDir,privatePath}), receipt.distributionSourcePreflight);
+    assert.equal(sha(readFileSync(join(privatePath(input.source.path), "receipt.json"))), input.source.sha256);
+  } catch { distributionIssue = true; }
+  if (distributionIssue) { completion.status = 'INCOMPLETE'; completion.dataset = 'INCOMPLETE'; completion.issues.unshift('ROUND_DISTRIBUTION_SOURCE_UNCONFIRMED'); }
+  if (input.growth?.approvalLayout === 'INLINE_INTENT_V1') try {
+    const growthSummary = read(privatePath(join(output, 'growth-execution', 'summary.json')));
+    const log = privatePath(join(output, 'growth-execution', 'events.jsonl'));
+    assert.equal(await digestInlineGrowthLog(log), growthSummary.approvalLog?.sha256, 'ROUND_GROWTH_APPROVAL_LOG_CHANGED');
+  } catch { completion.status = 'INCOMPLETE'; completion.growth = 'INCOMPLETE'; completion.issues.unshift('ROUND_GROWTH_APPROVAL_LOG_UNCONFIRMED'); }
   if (input.retryEvidence) try { readNoWriteRetry(); } catch { completion.status = "INCOMPLETE"; completion.issues.unshift("ROUND_RETRY_LINEAGE_UNCONFIRMED"); }
   if (bootstrapStatus !== "PASS") { completion.status = "INCOMPLETE"; completion.issues.unshift("ROUND_BOOTSTRAP_EVIDENCE_UNCONFIRMED"); }
-  console.log(JSON.stringify({ status: completion.status, bootstrap: bootstrapStatus, ...(bootstrapReason ? { bootstrapReason } : {}), ...completion, evidenceOnly: true, targetConnections: 0, credentialReads: 0, targetWrites: 0 }));
+  console.log(JSON.stringify({ status: completion.status, bootstrap: bootstrapStatus, ...(bootstrapReason ? { bootstrapReason } : {}), ...completion, assessmentScope: "DATASET_AND_GROWTH", externalReadiness, evidenceOnly: true, targetConnections: 0, credentialReads: 0, targetWrites: 0 }));
   if (completion.status !== "COMPLETE") process.exitCode = 1;
   process.exit();
 }
@@ -198,28 +269,46 @@ function assertResumeOutputStillSafe() {
 assertResumeOutputStillSafe();
 const pinned = (entry, name = "manifest.json") => bound(join(privatePath(entry.path), name), entry.sha256);
 const m = pinned(input.dataset), display = pinned(input.display), openings = pinned(input.openings);
+assertNextBusinessPopulation(m.population, input.target?.migrationProfile === NEXT_MIGRATION_PROFILE);
+const continuationExpected = expectedContinuationImports(m, input.target?.migrationProfile === NEXT_MIGRATION_PROFILE);
+// New rounds must detect obsolete source packages during validation; historical growth-only resumes retain their original evidence.
+if (!input.resume) assert(m.identityProfiles?.schema === "zzsh.legacy-identity-profile-source.v1", "ROUND_IDENTITY_PROFILE_SOURCE_REQUIRED");
+if (!input.resume) assert(m.refundRelationshipPolicy === LEGACY_REFUND_RELATIONSHIP_POLICY, "ROUND_REFUND_RELATIONSHIP_POLICY_REQUIRED");
+if (m.identityProfiles) assert(input.legal && /^[a-f0-9]{64}$/.test(input.legal.sha256 ?? ""), "ROUND_LEGAL_INPUT_REQUIRED");
 const funds = pinned(input.funds, "receipt.json"), refund = pinned(input.refundAttempts, "receipt.json");
 const source = pinned(input.source, "receipt.json"), pathPlan = pinned(input.paths, "receipt.json");
+const hasNextSource=input.target?.migrationProfile===NEXT_MIGRATION_PROFILE;
+const sourceWorkflow=hasNextSource?bound(privatePath(input.sourceWorkflow?.path),input.sourceWorkflow?.sha256):null;
+if(hasNextSource)
+  assertRoundSourceOrigin(input,source,m,bound(privatePath(input.sourceBinding?.path),input.sourceBinding?.sha256),funds,refund,sourceWorkflow,bound(privatePath(sourceWorkflow?.input?.path),sourceWorkflow?.input?.sha256));
 const populationProof=m.population?.mode==='FULL_CAPTURED_SOURCE'?bound(privatePath(input.population?.verification?.path),input.population?.verification?.sha256):null;
 const populationAudit=assertRoundPopulationBinding(input,m,source,populationProof);
 assertFullExecutionAdmitted(populationAudit,execute?'execute':resumeGrowth?'resume-growth':'validate');
 pinned(input.pathSourcePlan, "receipt.json");
 pinned(input.dictionary, "receipt.json");
 assert.equal(m.sourceReceiptSha256, input.source.sha256);
+if (!input.resume && populationAudit.mode === "SELECTED_BUSINESS_SCOPE") {
+  const scopeStarted = performance.now();
+  populationAudit.sourceVerification = { ...await verifySelectedPopulationFiles({ datasetDir: privatePath(input.dataset.path), sourceDir: privatePath(input.source.path), dataset: m, source }),
+    elapsedMs: Math.round(performance.now() - scopeStarted) };
+  setSourceReadiness(populationAudit.sourceVerification);
+}
 assert.equal(funds.sourceSupplement.baseReceiptSha256, input.source.sha256);
 assert.equal(refund.sourceSupplement.baseReceiptSha256, input.source.sha256);
 assert.equal(source.status, "CAPTURED_READ_ONLY");
 for (const plan of [display, openings, pathPlan]) assert.equal(plan.datasetSha256, input.dataset.sha256);
 assert.equal(pathPlan.sourcePlanReceiptSha256, input.pathSourcePlan.sha256);
 assert.equal(display.rows + display.notDisplayable, m.domains.accounts.ready);
+if(!input.resume&&m.identityProfiles)assertDisplayCaptureCoverage(display);
 assert.equal(pathPlan.accounts, m.domains.accounts.ready);
 assert.equal(openings.stats.subjects, m.domains.users.ready);
+if (m.identityProfiles) externalReadiness.storedOpening = assertRoundOpeningPartition(m, openings);
 if (input.holdingOverlay) bound(privatePath(input.holdingOverlay.path), input.holdingOverlay.sha256);
 const actorFile = privatePath(input.actor.path), actorProof = bound(actorFile, input.actor.sha256);
 const actor = { id: actorProof.id ?? actorProof.actorId, sessionId: actorProof.sessionId };
 assert(actor.id && actor.sessionId && (!actorProof.actorId || actor.id === actorProof.actorId), "ONE_BOUND_ADMIN_ACTOR_REQUIRED");
 const retryProof = input.retryEvidence ? readNoWriteRetry() : undefined;
-const lineage = input.resume ? readResumeLineage({ dataset: m, display, openings, paths: pathPlan }) : null;
+const lineage = input.resume ? readResumeLineage({ dataset: m, source, display, openings, paths: pathPlan }) : null;
 let previousRepair;
 if(input.resume?.previousRepair){
   assert(lineage,"ROUND_GROWTH_RULE_RETRY_UNCONFIRMED");const refs=input.resume.previousRepair;
@@ -236,6 +325,12 @@ if (lineage) assert(input.growth?.approvedBy === "Root" && /^[A-Za-z0-9][A-Za-z0
 if (lineage) assert(!existsSync(growthAttemptPath()), "ROUND_GROWTH_EXISTING_ATTEMPT_REQUIRES_RECOVERY");
 const secretRoot = resolve("E:/zzsh/zzsh/apps/api/.secrets");
 const secretFiles = { databaseMaintenance: "DB_PASSWORD_FILE", identitySubjectHmac: "USER_IDENTITY_SUBJECT_HMAC_KEY_FILE" };
+if (m.identityProfiles) {
+  assert(m.identityProfiles.schema === "zzsh.legacy-identity-profile-source.v1" && m.identityProfiles.invalid === 0
+    && Number.isSafeInteger(m.identityProfiles.ready) && m.identityProfiles.ready >= 0
+    && m.identityProfiles.verified === m.identityProfiles.ready, "ROUND_IDENTITY_PROFILE_SOURCE_INCOMPLETE");
+  secretFiles.identityProfile = "USER_LEGACY_IDENTITY_PROFILE_KEY_FILE";
+}
 const secretEnv = Object.fromEntries(Object.entries(secretFiles).map(([name, env]) => {
   const binding = input.secrets?.[name];
   assert(binding && isAbsolute(binding.path) && resolve(binding.path).toLowerCase().startsWith(secretRoot.toLowerCase() + "\\")
@@ -243,6 +338,8 @@ const secretEnv = Object.fromEntries(Object.entries(secretFiles).map(([name, env
   return [env, binding.path];
 }));
 const registry = loadRegisteredTarget(input.credentials);
+assert(sameMigrationProfile(input.target,registry), "ROUND_REGISTERED_PROFILE_CHANGED");
+if (execute || resumeGrowth) assertNextMigrationWriteReady(registry);
 assert.equal(registry.oid, input.target.oid);
 assert.equal(registry.nonce, input.target.nonce);
 assert.equal(registry.migrationRoleOid, input.target.migrationRoleOid);
@@ -275,7 +372,6 @@ const buildModulesVerified = assertBuild();
 for (const file of ["database/business-migrations.js", "supply/legacy-user-migration.js", "legacy-load/legacy-account-seam.js", "order/legacy-order-read.js", "finance/personal-finance-maintenance.js", "legacy-load/legacy-path-records.js"])
   assert(Object.hasOwn(input.buildFiles, file), "ROUND_BUILD_ENTRYPOINT_MISSING:" + file);
 let dependencyLayout, dependencyProof, recoveryOverlay;
-const runnerDir=dirname(fileURLToPath(import.meta.url));
 if (["ROUND06_BOOTSTRAP_RESERVED","ROUND07_BOOTSTRAP_RESERVED"].includes(input.target.bootstrapReservation)) {
   const binding = input.dependencyBinding;
   assert(binding?.buildManifest && binding?.sourceManifest && typeof binding.sourceSnapshot === "string" && binding?.proof, "ROUND_DEPENDENCY_BINDING_REQUIRED");
@@ -285,6 +381,11 @@ if (["ROUND06_BOOTSTRAP_RESERVED","ROUND07_BOOTSTRAP_RESERVED"].includes(input.t
     buildManifestPath: binding.buildManifest.path, buildManifestSha256: binding.buildManifest.sha256, sourceSnapshot: binding.sourceSnapshot,
     sourceManifestPath: binding.sourceManifest.path, sourceManifestSha256: binding.sourceManifest.sha256 });
   dependencyLayout = inspectLayout(); assertRoundDependencyProof(dependencyProof, dependencyLayout);
+  if(input.target?.migrationProfile===NEXT_MIGRATION_PROFILE)
+    assertNextSourceTools(input,bound(privatePath(input.sourceBinding.path),input.sourceBinding.sha256),[source,funds,refund],dependencyLayout.scriptFiles,sourceWorkflow);
+  if (input.legal) assert.equal(dependencyLayout.scriptFiles["business-reference-readiness.mjs"], bootstrapFile(input.bootstrapEvidence.business).rentalReference?.validatorSha256, "ROUND_RENTAL_REFERENCE_VALIDATOR_NOT_SEALED");
+  if (!inspect&&input.growth?.packageLayout==='PACKED_V2') assert.equal(dependencyLayout.scriptFiles['local-growth-packages.mjs'],sha(readFileSync(join(runnerDir,'local-growth-packages.mjs'))),'ROUND_GROWTH_PACKAGER_NOT_SEALED');
+  if (!input.resume && m.identityProfiles) assertRoundPreparationTools(m, dependencyLayout.scriptFiles);
   if(input.resume?.readbackRepair){
     assert(lineage, "ROUND_READBACK_RECOVERY_REQUIRES_LINEAGE");
     const repair=bound(privatePath(input.resume.readbackRepair.path),input.resume.readbackRepair.sha256),relativeRunner=relative(resolve(apiDist,"../../../.."),runnerDir).replaceAll("\\","/");
@@ -299,9 +400,26 @@ if (["ROUND06_BOOTSTRAP_RESERVED","ROUND07_BOOTSTRAP_RESERVED"].includes(input.t
   const liveProbe = probeRoundDependencies(dependencyLayout);
   assert(liveProbe.closureSha256 === dependencyProof.closureSha256 && liveProbe.entrypoints === dependencyProof.entrypoints, "ROUND_DEPENDENCY_CLOSURE_CHANGED");
 }
+if(!inspect&&input.growth?.packageLayout==='PACKED_V2')assert(dependencyLayout,'ROUND_GROWTH_PACKAGER_NOT_SEALED');
+let displayCapturePreflight, distributionSourcePreflight;
+if(!input.resume&&m.identityProfiles){
+  const contentHash=createRequire(import.meta.url)(join(apiDist,'supply/content-hash.js'));
+  assert(typeof contentHash.canonicalize==='function','ROUND_DISPLAY_CANONICALIZER_REQUIRED');
+  displayCapturePreflight={...await verifyDisplayCaptureInputs({sourceDir:privatePath(input.source.path),sourceEntry:source.files?.accounts,
+    accountsDir:privatePath(input.dataset.path),accountsEntry:m.files?.accounts,displayDir:privatePath(input.display.path),display,canonicalize:contentHash.canonicalize}),
+    sourceReceiptSha256:input.source.sha256,datasetManifestSha256:input.dataset.sha256,displayManifestSha256:input.display.sha256};
+}
+if (m.identityProfiles && input.growth?.packageLayout === 'PACKED_V2') {
+  distributionSourcePreflight = await verifyRoundDistributionSource({input,source,layout:dependencyLayout,proof:dependencyProof,runnerDir,privatePath});
+  assert.equal(sha(readFileSync(join(privatePath(input.source.path), "receipt.json"))), input.source.sha256, "ROUND_DISTRIBUTION_SOURCE_CHANGED");
+  if (lineage) {
+    const previous = bound(lineage.previousReceiptPath, input.resume.previousReceipt.sha256);
+    assert.deepEqual(distributionSourcePreflight, previous.distributionSourcePreflight, "ROUND_RESUME_DISTRIBUTION_SOURCE_CHANGED");
+  }
+}
 const validationWallMs = performance.now() - started;
 if (validate) {
-  console.log(JSON.stringify({ status: "SEALED_INPUTS_VALIDATED_TARGET_NOT_RUN", inputSha256, datasetSha256: input.dataset.sha256, population:populationAudit, strictBatch, bootstrapEvidence, ...(lineage ? { resumeLineage: lineage.proof } : {}), ...(retryProof ? { retryLineage: retryProof } : {}), ...(dependencyProof ? { dependencies: { status: dependencyProof.status, entrypoints: dependencyProof.entrypoints, files: dependencyProof.closureFiles.length, closureSha256: dependencyProof.closureSha256 } } : {}), growthPlanned: Boolean(input.growth), validationWallMs, buildModulesVerified, targetConnections: 0, credentialReads: 0, targetWrites: 0 }));
+  console.log(JSON.stringify({ status: "SEALED_INPUTS_VALIDATED_TARGET_NOT_RUN", inputSha256, datasetSha256: input.dataset.sha256, population:populationAudit, ...(displayCapturePreflight?{displayCapturePreflight}:{}), ...(distributionSourcePreflight?{distributionSourcePreflight}:{}), assessmentScope: "DATASET_AND_GROWTH", externalReadiness, strictBatch, bootstrapEvidence, ...(lineage ? { resumeLineage: lineage.proof } : {}), ...(retryProof ? { retryLineage: retryProof } : {}), ...(dependencyProof ? { dependencies: { status: dependencyProof.status, entrypoints: dependencyProof.entrypoints, files: dependencyProof.closureFiles.length, closureSha256: dependencyProof.closureSha256 } } : {}), growthPlanned: Boolean(input.growth), validationWallMs, buildModulesVerified, targetConnections: 0, credentialReads: 0, targetWrites: 0 }));
   process.exit(0);
 }
 
@@ -310,13 +428,14 @@ assert(sid, "ROUND_SID_REQUIRED");
     mkdirSync(out, { recursive: true });
 assert.equal(spawnSync("icacls", [out, "/inheritance:r", "/grant:r", `*${sid}:(OI)(CI)F`, "*S-1-5-18:(OI)(CI)F", "*S-1-5-32-544:(OI)(CI)F"], { windowsHide: true }).status, 0, "ROUND_ACL_FAILED");
 const runnerScripts = runnerDir, root = dependencyLayout?.sourceRoot ?? fileURLToPath(new URL("../..", import.meta.url)), scripts = dependencyLayout?.scriptDir ?? runnerScripts;
-const toolNames = ["run-local-round.mjs", "local-round-contract.mjs", ...(dependencyLayout ? ["local-round-dependencies.mjs", "local-source-adapter.mjs"] : []), "load-local-dataset.mjs", "local-load-checkpoint.mjs", "local-target-finance.mjs", "local-funds-plan.mjs", "local-target-display.mjs", "local-target-opening.mjs", "local-target-holdings.mjs", "load-legacy-path-accounts.mjs", "readback-local-dataset.mjs", "run-local-growth.mjs", "local-growth-plan.mjs"];
-const toolPaths = Object.fromEntries(toolNames.map(name => [name, join(["run-local-round.mjs", "local-round-contract.mjs", "local-round-dependencies.mjs"].includes(name) || recoveryOverlay && ["readback-local-dataset.mjs","local-funds-plan.mjs"].includes(name) ? runnerScripts : scripts, name)]));
+const scopeRunnerTools = ["full-source-scope.mjs", "selected-business-scope.mjs", "verify-full-source-population.mjs", "local-source-adapter.mjs"];
+const toolNames = ["run-local-round.mjs", "local-round-contract.mjs", ...(input.legal ? ["business-reference-readiness.mjs"] : []), ...(input.growth?.packageLayout==='PACKED_V2'?["local-growth-packages.mjs"]:[]), ...(distributionSourcePreflight?["local-distribution-qualification-plan.mjs"]:[]), ...scopeRunnerTools, ...(dependencyLayout ? ["local-round-dependencies.mjs"] : []), "prepare-local-dataset.mjs", "local-source-scenarios.mjs", "load-local-dataset.mjs", "local-load-checkpoint.mjs", "local-target-finance.mjs", "local-funds-plan.mjs", "local-target-display.mjs", "local-target-opening.mjs", "local-target-holdings.mjs", "load-legacy-path-accounts.mjs", "local-legal-pair.mjs", "readback-local-dataset.mjs", "run-local-growth.mjs", "local-growth-plan.mjs"];
+const toolPaths = Object.fromEntries(toolNames.map(name => [name, join(["run-local-round.mjs", "local-round-contract.mjs", "business-reference-readiness.mjs", "local-growth-packages.mjs", "local-distribution-qualification-plan.mjs", "local-round-dependencies.mjs", ...scopeRunnerTools].includes(name) || recoveryOverlay && ["readback-local-dataset.mjs", "local-funds-plan.mjs", "local-legal-pair.mjs"].includes(name) ? runnerScripts : scripts, name)]));
 const toolFiles = Object.fromEntries(toolNames.map(name => [name, sha(readFileSync(toolPaths[name]))]));
 if (dependencyLayout) assert.equal(sha(readFileSync(join(runnerScripts, "local-load-checkpoint.mjs"))), toolFiles["local-load-checkpoint.mjs"], "ROUND_SHARED_CHECKPOINT_TOOL_CHANGED");
 assertResumeOutputStillSafe();
 const attemptOut = sameDirectoryResume ? reserveRoundResumeOutput(out, sameDirectoryResume) : out;
-const receipt = { schema: "zzsh.local-round-receipt.v1", inputSha256, datasetSha256: input.dataset.sha256, sourceReceiptSha256: input.source.sha256, target: input.target, strictBatch, bootstrapEvidence, validationWallMs, buildModulesVerified, toolFiles,
+const receipt = { schema: "zzsh.local-round-receipt.v1", inputSha256, datasetSha256: input.dataset.sha256, sourceReceiptSha256: input.source.sha256, target: input.target, strictBatch, bootstrapEvidence, validationWallMs, buildModulesVerified, toolFiles, population: populationAudit, ...(displayCapturePreflight?{displayCapturePreflight}:{}), ...(distributionSourcePreflight?{distributionSourcePreflight}:{}), assessmentScope: "DATASET_AND_GROWTH", externalReadiness,
   ...(sameDirectoryResume ? { sameDirectoryResume } : {}),
   ...(retryProof ? { retryLineage: retryProof } : {}),
   ...(lineage ? { mode: "RESUME_GROWTH", prior: { previousInput: input.resume.previousInput, previousReceipt: input.resume.previousReceipt, checkpoint: input.resume.checkpoint, proof: lineage.proof }, ...(recoveryOverlay?{readbackRepair:input.resume.readbackRepair}:{}), ...(previousRepair?{previousRepair}: {}) } : {}),
@@ -333,6 +452,10 @@ function assertCheckpoint(phaseNames) {
   assert.equal(state.strictBatch ?? false, strictBatch, "CHECKPOINT_STRICT_BATCH_CHANGED");
   assert.equal(state.pending, null, "ROUND_COMMIT_KNOWLEDGE_UNKNOWN");
   for (const field of ["poolClosed", "unlock", "maintenanceClosed", "rollbackConfirmed"]) assert.equal(state[field], true, "ROUND_CLEANUP_UNCONFIRMED:" + field);
+  if (input.target.migrationProfile === NEXT_MIGRATION_PROFILE) {
+    assert.equal(state.targetFenceReleased, true, "ROUND_CLEANUP_UNCONFIRMED:targetFenceReleased");
+    assert.equal(state.protectionRecorded, true, "ROUND_CLEANUP_UNCONFIRMED:protectionRecorded");
+  }
   assert(!["RUNNING", "COMMIT_UNKNOWN", "ROLLBACK_UNKNOWN", "RECEIPT_WRITE_FAILED_COMMITTED", "FAILED_STOPPED"].includes(state.status));
   return Object.fromEntries(phaseNames.map(name => {
     const phase = state.phases[name];
@@ -401,7 +524,7 @@ async function step(name, script, flags, verify) {
     });
     Object.assign(stage, result);
     assert.equal(result.code, 0, "ROUND_STAGE_STOPPED:" + name);
-    stage.metrics = verify(stdoutPath);
+    stage.metrics = await verify(stdoutPath);
     stage.status = "ACK";
   } finally {
     if (stdout !== undefined) closeSync(stdout);
@@ -453,7 +576,7 @@ try {
   if (!lineage) {
   await step("core-and-funds", load, [...write, ...bind("funds-source", input.funds), ...bind("refund-attempts", input.refundAttempts)], () => closedPhases(
     ["users", "accounts", "orders", "invitationFacts", ...(requiresInvitationCountClosure(m)?["invitationCounts"]:[]), "financeHistory", "financeEmptyCoverage", "continuationEvidence", "liabilityDuties", "completedCommissions"],
-    { users: m.domains.users.ready, accounts: m.domains.accounts.ready, orders: m.domains.orders.ready, continuationEvidence: m.domains.continuations.parameterComplete,
+    { users: m.domains.users.ready, accounts: m.domains.accounts.ready, orders: m.domains.orders.ready, continuationEvidence: continuationExpected,
       ...(requiresInvitationCountClosure(m)?{invitationFacts:m.invitationFacts.selectedPackets,invitationCounts:m.invitationFacts.selectedPackets}:{}) },
   ));
   await step("display", load, [...write, "--enrich-display", ...bind("display-plan", input.display)], () => closedPhases(["accountDisplay"], { accountDisplay: display.rows }));
@@ -467,24 +590,31 @@ try {
   await step("paths", "load-legacy-path-accounts.mjs", ["--apply", "--plan-dir", input.paths.path, "--plan-receipt-sha", input.paths.sha256, "--source-plan-dir", input.pathSourcePlan.path, "--source-dir", input.source.path, "--source-receipt-sha", input.source.sha256, "--api-dist", apiDist, "--credentials", input.credentials, "--actor-file", actorFile, ...target, "--not-before", input.window.notBefore, "--expires-at", input.window.expiresAt, "--out", pathsOut], stdout => {
     const result = JSON.parse(readFileSync(stdout, "utf8").trim().split(/\r?\n/).at(-1));
     assert.equal(result.status, "COMPLETE");
+    if (input.target.migrationProfile === NEXT_MIGRATION_PROFILE)
+      assert(result.targetFence === 'HELD_ACROSS_BATCHES' && result.targetFenceReleased === true, 'ROUND_PATH_TARGET_FENCE_UNCONFIRMED');
     assert.equal(result.applied + result.replayed, pathPlan.accounts);
     return result;
   });
   }
   const readback = join(out, "readback.json");
-  await step("readback", "readback-local-dataset.mjs", ["--readback", ...base, "--checkpoint", checkpoint, ...bind("paths-plan", input.paths), ...bind("funds-source", input.funds), ...bind("refund-attempts", input.refundAttempts), "--out", readback], () => {
+  await step("readback", "readback-local-dataset.mjs", ["--readback", ...base, "--checkpoint", checkpoint, ...bind("paths-plan", input.paths), ...bind("funds-source", input.funds), ...bind("refund-attempts", input.refundAttempts), ...(input.legal ? [...bind("legal-input", input.legal), ...bind("business-bootstrap", input.bootstrapEvidence.business)] : []), "--out", readback], () => {
     const result = read(readback);
     assert.equal(result.status, "CORE_SOURCE_TARGET_EXACT_READBACK_PASSED");
     assert.equal(result.differenceCount, 0);
     assert(result.rollbackConfirmed && result.lockReleased && result.connectionsClosed);
+    if (input.target.migrationProfile === NEXT_MIGRATION_PROFILE)
+      assert(result.resource?.migrationProfile === NEXT_MIGRATION_PROFILE && result.targetFence === "HELD_UNTIL_ROLLBACK", "ROUND_TARGET_READBACK_FENCE_UNCONFIRMED");
+    if (input.legal) assert(result.rentalReference?.status === "TARGET_CONFIG_VERIFIED" && result.rentalReference.businessReceiptSha256 === input.bootstrapEvidence.business.sha256
+      && result.rentalReference.targetDigest === bootstrapEvidence.rentalReference.targetDigest && result.rentalReference.runtimeAccess === "VERIFIED"
+      && result.rentalReference.runtimeRollbackConfirmed === true && result.rentalReference.runtimeClosed === true, "ROUND_RENTAL_REFERENCE_READBACK_UNCONFIRMED");
     if (lineage) {
       assertStageBindings();
       const evidence = assessRoundEvidence({ input, inputSha256, actorProof, receipt, checkpoint: read(checkpoint), readback: result,
-        expected: { dataset: m, display, openings, paths: pathPlan }, checkpointInput: lineage.previousInput,
+        expected: { dataset: m, source, display, openings, paths: pathPlan }, checkpointInput: lineage.previousInput,
         checkpointActorProof: lineage.previousActorProof, requireStageAcks: false, requireGrowth: false });
       assert.equal(evidence.status, "COMPLETE", "ROUND_RESUME_DATA_READBACK_UNCONFIRMED");
     }
-    return { domains: result.domains, display: result.display, holdings: result.holdings, openings: result.openings, paths: result.paths, queries: result.queries, differences: result.differenceCount, evidenceSha256: sha(readFileSync(readback)) };
+    return { domains: result.domains, ...(result.identityProfiles ? { identityProfiles: result.identityProfiles } : {}), display: result.display, holdings: result.holdings, openings: result.openings, paths: result.paths, queries: result.queries, differences: result.differenceCount, evidenceSha256: sha(readFileSync(readback)) };
   });
   receipt.datasetStatus = lineage ? "FRESH_DATA_READBACK_PASS" : "DATASET_STAGES_ACK_READBACK_PASS";
   if (input.growth) {
@@ -494,32 +624,45 @@ try {
       const p = read(join(planDir, "summary.json"));
       const manifest = bound(join(planDir, "manifest.json"), p.manifestSha256);
       assertGrowthPlanEvidence({ input, inputSha256, expected: { dataset: m, display, openings, paths: pathPlan }, prepare: p, manifest, manifestSha256: p.manifestSha256 });
-      assertGrowthPackages(manifest, file => readFileSync(privatePath(join(planDir, file))));
+      if(manifest.schema==='zzsh.local-growth-round-plan.v2'){
+        const reader=openGrowthPackageReader(manifest,file=>privatePath(join(planDir,file)));
+        try{assertGrowthPackages(manifest,reader.read);}finally{reader.close();}
+      }else assertGrowthPackages(manifest, file => readFileSync(privatePath(join(planDir, file))));
       return { manifestSha256: p.manifestSha256, queries: p.queries, ...p.summary, evidenceSha256: sha(readFileSync(join(planDir, "summary.json"))) };
     });
     const p = receipt.stages.at(-1).metrics, plan = ["--manifest", join(planDir, "manifest.json"), "--manifest-sha", p.manifestSha256];
     const growthWrite = join(out, "growth-execution"), growthRead = join(out, "growth-readback");
     if (lineage) reserveResumeGrowthAttempt(p.manifestSha256);
-    await step("growth-apply", growth, ["--apply", ...growthBase, ...plan, "--out", growthWrite], () => {
+    await step("growth-apply", growth, ["--apply", ...growthBase, ...plan, "--out", growthWrite], async () => {
       const r = read(join(growthWrite, "summary.json"));
       assert(r.status === "APPLIED_COMMIT_ACK_INDEPENDENT_READBACK_REQUIRED" && r.poolClosed && r.unlockAck && r.lockClosed);
+      if (input.target.migrationProfile === NEXT_MIGRATION_PROFILE)
+        assert(r.targetFence === 'HELD_ACROSS_BATCHES' && r.targetFenceReleased === true, 'ROUND_GROWTH_TARGET_FENCE_UNCONFIRMED');
       assert(r.mode === "--apply" && r.inputSha256 === inputSha256 && r.datasetSha256 === input.dataset.sha256 && r.oid === input.target.oid
         && r.nonce === input.target.nonce && r.manifestSha256 === p.manifestSha256 && r.fundsWrites === 0 && r.pending === null
         && r.completed === p.users && r.inserted === p.contributions && r.replayed === 0 && r.complete === p.complete && r.partial === p.pending, "ROUND_GROWTH_APPLY_ACK_MISMATCH");
+      if (input.growth.approvalLayout === 'INLINE_INTENT_V1') {
+        assert(r.approvalLayout === 'INLINE_INTENT_V1' && r.approvalLog?.status === 'INLINE_INTENTS_AND_ACKS_VERIFIED'
+          && r.approvalLog.startIndex === 0 && r.approvalLog.completed === p.users && r.approvalLog.lines === p.users * 2
+          && /^[a-f0-9]{64}$/.test(r.approvalLog.sha256 ?? ''), 'ROUND_GROWTH_APPROVAL_LOG_UNCONFIRMED');
+        assert.equal(await digestInlineGrowthLog(privatePath(join(growthWrite, 'events.jsonl'))), r.approvalLog.sha256, 'ROUND_GROWTH_APPROVAL_LOG_CHANGED');
+      }
       return { completed: r.completed, inserted: r.inserted, replayed: r.replayed, queries: r.queries, evidenceSha256: sha(readFileSync(join(growthWrite, "summary.json"))) };
     });
     await step("growth-readback", growth, ["--readback", ...growthBase, ...plan, "--out", growthRead], () => {
       const r = read(join(growthRead, "summary.json"));
       assert(r.status === "EXACT_ALL_RECORDS_AND_FACTS_VERIFIED" && r.readOnlyRollbackAck && r.readOnlyClientClosed);
+      if (input.target.migrationProfile === NEXT_MIGRATION_PROFILE)
+        assert(r.readOnlyFence === 'HELD_UNTIL_ROLLBACK' && r.readOnlyMaintenanceUnlock && r.readOnlyMaintenanceClosed, 'ROUND_GROWTH_READBACK_FENCE_UNCONFIRMED');
       return { queries: r.queries, ...r.summary, evidenceSha256: sha(readFileSync(join(growthRead, "summary.json"))) };
     });
     if (lineage) {
       const finalReadback = join(out, "readback-final.json");
-      await step("readback-final", "readback-local-dataset.mjs", ["--readback", ...base, "--checkpoint", checkpoint, ...bind("paths-plan", input.paths), ...bind("funds-source", input.funds), ...bind("refund-attempts", input.refundAttempts), "--out", finalReadback], () => {
+      await step("readback-final", "readback-local-dataset.mjs", ["--readback", ...base, "--checkpoint", checkpoint, ...bind("paths-plan", input.paths), ...bind("funds-source", input.funds), ...bind("refund-attempts", input.refundAttempts), ...(input.legal ? [...bind("legal-input", input.legal), ...bind("business-bootstrap", input.bootstrapEvidence.business)] : []), "--out", finalReadback], () => {
         const result = read(finalReadback);
         assertStageBindings();
         const evidence = assessRoundEvidence({ input, inputSha256, actorProof, receipt, checkpoint: read(checkpoint), readback: result,
-          expected: { dataset: m, display, openings, paths: pathPlan }, checkpointInput: lineage.previousInput,
+          expected: { dataset: m, source, display, openings, paths: pathPlan }, checkpointInput: lineage.previousInput,
           checkpointActorProof: lineage.previousActorProof, requireStageAcks: false, requireGrowth: false });
         assert.equal(evidence.status, "COMPLETE", "ROUND_RESUME_FINAL_READBACK_UNCONFIRMED");
         return { domains: result.domains, display: result.display, holdings: result.holdings, openings: result.openings, paths: result.paths, queries: result.queries, differences: result.differenceCount, evidenceSha256: sha(readFileSync(finalReadback)) };
@@ -536,7 +679,7 @@ try {
     ...(error.resumeCleanup ? { readOnlyCleanup: error.resumeCleanup } : {}) };
   process.exitCode = 1;
 } finally {
-  receipt.completion = assessArtifacts(out, { input, inputSha256, actorProof, receipt, expected: { dataset: m, display, openings, paths: pathPlan },
+  receipt.completion = assessArtifacts(out, { input, inputSha256, actorProof, receipt, expected: { dataset: m, source, display, openings, paths: pathPlan },
     ...(lineage ? { checkpointInput: lineage.previousInput, checkpointActorProof: lineage.previousActorProof, requireStageAcks: false } : {}) });
   if (["DATASET_AND_GROWTH_ACK_READBACK_PASS", "DATASET_AND_GROWTH_REVALIDATED_PASS"].includes(receipt.status) && receipt.completion.status !== "COMPLETE") {
     receipt.status = "STOPPED_PRESERVE_ORIGINAL_KEYS_AND_RECEIPTS";
@@ -546,5 +689,5 @@ try {
   receipt.finishedAt = new Date().toISOString();
   receipt.wallMs = performance.now() - started;
   save();
-  console.log(JSON.stringify({ status: receipt.status, wallMs: receipt.wallMs, receipt: receiptFile }));
+  console.log(JSON.stringify({ status: receipt.status, assessmentScope: receipt.assessmentScope, externalReadiness, wallMs: receipt.wallMs, receipt: receiptFile }));
 }

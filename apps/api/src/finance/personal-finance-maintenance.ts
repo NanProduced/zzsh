@@ -15,7 +15,8 @@ export type OpeningMaintenanceInput={inputSha256:string;cutoff:string;proof:{use
 const sha=(s:string)=>createHash('sha256').update(s).digest('hex');
 export type FinanceOpeningReview={
  ref:string;attempt:string;actor:{userId:string;sessionId:string};
- resource:{host:'127.0.0.1';port:number;database:string;oid:number;owner:string;marker:string;role:string;roleOid:number};
+ resource:{host:'127.0.0.1';port:number;database:string;oid:number;owner:string;marker:string;role:string;roleOid:number;
+  migrationProfile?:'LOCAL_MIGRATION_NEXT_V1';systemIdentifier?:string;nonce?:string};
  notBefore:string;expiresAt:string;inputSha256:string;cutoff:string;bodyDigest:string;
  subject:{userId:string;sourceId:string;identityDigest:string;sourceDigest:string;availableCents:string;coveredDigest:string};
 };
@@ -30,6 +31,15 @@ export function isReviewedFinanceMaintenanceResource(resource: FinanceOpeningRev
   ? resource.marker===REGRESSION_MARKER&&resource.owner==='zzsh'&&resource.role===REGRESSION_MIGRATION_USER
   : /^zzsh_test_order_[a-z][a-z0-9_]{0,20}$/.test(resource.database)&&resource.marker==='zzsh:order-reservation-test:v1';
 }
+/** Next-round local targets require an independently bound PostgreSQL cluster and database epoch. */
+export function isReviewedFinanceMaintenanceEndpoint(resource:FinanceOpeningReview['resource']):boolean {
+ if(resource.host!=='127.0.0.1')return false;
+ if(resource.migrationProfile===undefined)return [55432,55433].includes(resource.port)&&resource.systemIdentifier===undefined&&resource.nonce===undefined;
+ return resource.migrationProfile==='LOCAL_MIGRATION_NEXT_V1'&&process.env.NODE_ENV!=='production'&&resource.database===REGRESSION_DATABASE
+  &&isReviewedFinanceMaintenanceResource(resource)&&Number.isInteger(resource.port)&&resource.port>=1024&&resource.port<=65535
+  &&![55432,55433,55434].includes(resource.port)&&typeof resource.systemIdentifier==='string'&&/^[0-9]+$/.test(resource.systemIdentifier)
+  &&typeof resource.nonce==='string'&&/^[a-f0-9]{24}$/.test(resource.nonce);
+}
 function admission(value:FinanceOpeningAdmission){const p=admissions.get(value);if(!p)throw invalid('Finance opening admission is not internally bound');return p;}
 async function assertAdmission(client:PoolClient,actor:Actor,scope:FinanceOpeningAdmission,recover=false){
  const p=admission(scope);
@@ -39,12 +49,15 @@ async function assertAdmission(client:PoolClient,actor:Actor,scope:FinanceOpenin
 export async function assertFinanceMaintenanceResource(client:PoolClient,actor:Actor,r:Pick<FinanceOpeningReview,'actor'|'resource'|'notBefore'|'expiresAt'>,mode:{recover?:boolean;recoveryOnly?:boolean}={}){
  const connection=(client as PoolClient & {connectionParameters?:{host:string;port:number;database:string;user:string}}).connectionParameters;
  if(actor.userId!==r.actor.userId||actor.sessionId!==r.actor.sessionId)throw forbidden('Opening approval belongs to another actor/session');
+ if(!isReviewedFinanceMaintenanceEndpoint(r.resource))throw conflict('Opening resource endpoint is not reviewed');
  if(!connection||connection.host!==r.resource.host||connection.port!==r.resource.port||connection.database!==r.resource.database||connection.user!==r.resource.role)throw conflict('Opening connection does not match reviewed local resource');
  const actual=(await client.query(`/* finance-opening resource */ SELECT d.oid::int AS oid,current_database() AS database,pg_get_userbyid(d.datdba) AS owner,
  shobj_description(d.oid,'pg_database') AS marker,current_user AS role,r.oid::int AS "roleOid",clock_timestamp() AS now,
  (SELECT pg_get_userbyid(relowner) FROM pg_class WHERE oid=to_regclass('zzsh_order.finance_opening_basis')) AS "tableOwner"
+ ${r.resource.migrationProfile===undefined?'':`,current_setting('zzsh.regression_run',true) AS nonce,(SELECT system_identifier::text FROM pg_control_system()) AS "systemIdentifier"`}
  FROM pg_database d JOIN pg_roles r ON r.rolname=current_user WHERE d.datname=current_database()`)).rows[0];
- if(!actual||['oid','database','owner','marker','role','roleOid'].some(k=>actual[k]!==r.resource[k as keyof FinanceOpeningReview['resource']])||actual.tableOwner!==r.resource.role)throw conflict('Opening database identity/owner/role is not reviewed');
+ if(!actual||['oid','database','owner','marker','role','roleOid'].some(k=>actual[k]!==r.resource[k as keyof FinanceOpeningReview['resource']])||actual.tableOwner!==r.resource.role
+  ||r.resource.migrationProfile!==undefined&&(actual.nonce!==r.resource.nonce||actual.systemIdentifier!==r.resource.systemIdentifier))throw conflict('Opening database identity/owner/role is not reviewed');
  const now=new Date(actual.now).getTime(),start=Date.parse(r.notBefore),end=Date.parse(r.expiresAt);
  if(![now,start,end].every(Number.isFinite)||end<=start||now<start||(!mode.recover&&(mode.recoveryOnly||now>=end)))throw forbidden('Opening execution window is not active');
 }
@@ -53,10 +66,10 @@ export async function assertFinanceMaintenanceResource(client:PoolClient,actor:A
 export async function bindReviewedFinanceOpeningAdmission(client:PoolClient,actor:Actor,review:FinanceOpeningReview,mode:'execute'|'recover'='execute'):Promise<FinanceOpeningAdmission>{
  if(!review||typeof review!=='object'||!review.resource||!review.actor||!review.subject)throw invalid('Complete internal opening review required');
  ensureOnlyFields(review,['ref','attempt','actor','resource','notBefore','expiresAt','inputSha256','cutoff','bodyDigest','subject']);
- ensureOnlyFields(review.actor,['userId','sessionId']);ensureOnlyFields(review.resource,['host','port','database','oid','owner','marker','role','roleOid']);
+ ensureOnlyFields(review.actor,['userId','sessionId']);ensureOnlyFields(review.resource,['host','port','database','oid','owner','marker','role','roleOid','migrationProfile','systemIdentifier','nonce']);
  ensureOnlyFields(review.subject,['userId','sourceId','identityDigest','sourceDigest','availableCents','coveredDigest']);
  if(![review.ref,review.attempt,review.actor.userId,review.actor.sessionId,review.subject.userId].every(x=>typeof x==='string'&&identifier.test(x))
- ||review.resource.host!=='127.0.0.1'||![55432,55433].includes(review.resource.port)||!isReviewedFinanceMaintenanceResource(review.resource)
+ ||!isReviewedFinanceMaintenanceEndpoint(review.resource)||!isReviewedFinanceMaintenanceResource(review.resource)
  ||![review.resource.owner,review.resource.role].every(x=>typeof x==='string'&&/^[a-zA-Z_][a-zA-Z0-9_]{0,62}$/.test(x))
  ||![review.resource.oid,review.resource.roleOid].every(x=>Number.isSafeInteger(x)&&x>0)||typeof review.subject.sourceId!=='string'||!/^[1-9]\d{0,23}$/.test(review.subject.sourceId)
  ||typeof review.subject.availableCents!=='string'||!/^(0|[1-9]\d{0,23})$/.test(review.subject.availableCents)||!['execute','recover'].includes(mode)
@@ -71,10 +84,10 @@ export async function bindReviewedFinanceOpeningAdmission(client:PoolClient,acto
 function assertReviewedOpeningShape(review:FinanceOpeningReview,mode:'execute'|'recover'){
  if(!review||typeof review!=='object'||!review.resource||!review.actor||!review.subject)throw invalid('Complete internal opening review required');
  ensureOnlyFields(review,['ref','attempt','actor','resource','notBefore','expiresAt','inputSha256','cutoff','bodyDigest','subject']);
- ensureOnlyFields(review.actor,['userId','sessionId']);ensureOnlyFields(review.resource,['host','port','database','oid','owner','marker','role','roleOid']);
+ ensureOnlyFields(review.actor,['userId','sessionId']);ensureOnlyFields(review.resource,['host','port','database','oid','owner','marker','role','roleOid','migrationProfile','systemIdentifier','nonce']);
  ensureOnlyFields(review.subject,['userId','sourceId','identityDigest','sourceDigest','availableCents','coveredDigest']);
  if(![review.ref,review.attempt,review.actor.userId,review.actor.sessionId,review.subject.userId].every(x=>typeof x==='string'&&identifier.test(x))
- ||review.resource.host!=='127.0.0.1'||![55432,55433].includes(review.resource.port)||!isReviewedFinanceMaintenanceResource(review.resource)
+ ||!isReviewedFinanceMaintenanceEndpoint(review.resource)||!isReviewedFinanceMaintenanceResource(review.resource)
  ||![review.resource.owner,review.resource.role].every(x=>typeof x==='string'&&/^[a-zA-Z_][a-zA-Z0-9_]{0,62}$/.test(x))
  ||![review.resource.oid,review.resource.roleOid].every(x=>Number.isSafeInteger(x)&&x>0)||typeof review.subject.sourceId!=='string'||!/^[1-9]\d{0,23}$/.test(review.subject.sourceId)
  ||typeof review.subject.availableCents!=='string'||!/^(0|[1-9]\d{0,23})$/.test(review.subject.availableCents)||!['execute','recover'].includes(mode)
@@ -311,6 +324,7 @@ export async function authorizeMaintenanceBatch(client:PoolClient,actor:Actor,re
    ||r.resource.host!==first.resource.host||r.resource.port!==first.resource.port||r.resource.database!==first.resource.database
    ||r.resource.oid!==first.resource.oid||r.resource.owner!==first.resource.owner||r.resource.marker!==first.resource.marker
    ||r.resource.role!==first.resource.role||r.resource.roleOid!==first.resource.roleOid
+   ||r.resource.migrationProfile!==first.resource.migrationProfile||r.resource.systemIdentifier!==first.resource.systemIdentifier||r.resource.nonce!==first.resource.nonce
    ||r.notBefore!==first.notBefore||r.expiresAt!==first.expiresAt)
    throw conflict('Batched maintenance objects do not share one actor, resource and window');
  }

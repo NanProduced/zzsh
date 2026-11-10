@@ -452,6 +452,7 @@ export async function applyRuntimePrivileges(pool: Pick<Pool, "query">, runtimeR
   await configureIdentityDisplaySourcePrivileges(pool, runtimeRole);
   await configureIdentitySubjectPrivileges(pool, runtimeRole);
   await configureNativeIdentityPrivileges(pool, runtimeRole);
+  await configureLegacyIdentityProfilePrivileges(pool, runtimeRole);
   await configureAdminSecurityCommandPrivileges(pool, runtimeRole);
   await configureMembershipGrowthPrivileges(pool, runtimeRole);
   await configureLegacyGrowthCoveragePrivileges(pool, runtimeRole);
@@ -511,6 +512,23 @@ export async function configureUserAuthThrottlePrivileges(pool: Pick<Pool, "quer
     GRANT SELECT, INSERT, DELETE ON TABLE zzsh_iam.user_auth_captcha_used TO ${runtime};
     -- The bounded sweep locks expired rows with FOR UPDATE SKIP LOCKED.
     GRANT UPDATE (expires_at) ON TABLE zzsh_iam.user_auth_captcha_used TO ${runtime};`);
+}
+
+/** Migrated full identity is encrypted; only the migration owner can create it. */
+export async function configureLegacyIdentityProfilePrivileges(pool: Pick<Pool, "query">, runtimeRole: string): Promise<void> {
+  if ((await pool.query("SELECT to_regclass('zzsh_iam.user_legacy_identity_profile') IS NOT NULL AS present")).rows[0]?.present !== true) return;
+  const runtime = quoteIdentifier(runtimeRole);
+  await pool.query(`DO $legacy_identity_profile_acl$ DECLARE target_role text; owner_name text;
+    BEGIN
+      SELECT pg_get_userbyid(relowner) INTO STRICT owner_name FROM pg_class WHERE oid='zzsh_iam.user_legacy_identity_profile'::regclass;
+      FOR target_role IN SELECT rolname FROM pg_roles UNION ALL SELECT 'PUBLIC' LOOP
+        IF target_role<>owner_name THEN
+          EXECUTE format('REVOKE ALL PRIVILEGES ON TABLE zzsh_iam.user_legacy_identity_profile FROM %s',CASE WHEN target_role='PUBLIC' THEN 'PUBLIC' ELSE quote_ident(target_role) END);
+          EXECUTE format('REVOKE ALL PRIVILEGES (user_id,subject_digest,source_digest,source_ref,key_version,name_mask,document_mask,nonce,authentication_tag,ciphertext,recorded_at) ON TABLE zzsh_iam.user_legacy_identity_profile FROM %s',CASE WHEN target_role='PUBLIC' THEN 'PUBLIC' ELSE quote_ident(target_role) END);
+        END IF;
+      END LOOP;
+    END $legacy_identity_profile_acl$;
+    GRANT SELECT ON TABLE zzsh_iam.user_legacy_identity_profile TO ${runtime};`);
 }
 
 export async function configureIdentitySubjectPrivileges(pool: Pick<Pool, "query">, runtimeRole: string): Promise<void> {

@@ -1,11 +1,12 @@
 import {assertRebuiltEmptyCoverageChunk,assertRebuiltEmptyCoverageManifest,continuationCommissionEffects,prepareLocalFundsPlan} from "./local-funds-plan.mjs";
-import { advisoryLockSql, assertLiveTarget, assertReadbackTarget, loadRegisteredTarget, maintenanceConnection, targetConnection, targetIdentityQuery } from "./local-target-registry.mjs";
+import { acquireMigrationTransactionFence, advisoryLockSql, assertLiveTarget, assertMigrationFenceHeld, assertReadbackTarget, captureMaintenanceLockEpoch, loadRegisteredTarget, maintenanceConnection, NEXT_MIGRATION_PROFILE, targetConnection, targetIdentityQuery } from "./local-target-registry.mjs";
 import { compareKeySets } from "./local-key-set.mjs";
-import { classifyLegacyRegistrationTime, compareLegacyRegistrationFact, matchesLegacyAccountMetricAudit, legacyAccountCaptureProof, matchesLegacyAccountCapture, matchesCapturedAccountBaseRatio, matchesCapturedAccountFullPayout, legacyOrderCaptureProof, matchesLegacyOrderCapture } from "./local-source-adapter.mjs";
+import { assertLegacyIdentityColumns, assertDisplayCaptureCoverage, assertNextBusinessPopulation, inspectUnresolvedRefundSource, matchesLegacyIdentitySource, classifyLegacyRegistrationTime, compareLegacyRegistrationFact, matchesLegacyAccountMetricAudit, legacyAccountCaptureProof, matchesLegacyAccountCapture, matchesCapturedAccountBaseRatio, matchesCapturedAccountFullPayout, legacyOrderCaptureProof, matchesLegacyOrderCapture, readSourceRows as rows } from "./local-source-adapter.mjs";
 import { assessInvitationChildSet, preflightInvitationFile, readBoundInvitationPackets, requiresInvitationCountClosure } from "./local-round-contract.mjs";
-import { createHash } from "node:crypto";
+import { prepareLegalPair, readPinnedRegularFile, verifyLegalPair } from "./local-legal-pair.mjs";
+import { assertRentalReferenceReceipt, readTargetRentalReference, verifyRuntimeRentalReference } from "./business-reference-readiness.mjs";
+import { createHash, createHmac } from "node:crypto";
 import { createReadStream, readFileSync, writeFileSync, existsSync, lstatSync } from "node:fs";
-import { createInterface } from "node:readline";
 import { createRequire } from "node:module";
 import { dirname, join, resolve, basename } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -26,6 +27,7 @@ const registration = loadRegisteredTarget(credentialPath);
 const bytes = readFileSync(join(dataset, "manifest.json"));
 if (hash(bytes) !== option("--dataset-sha")) throw new Error("DATASET_MANIFEST_SHA_MISMATCH");
 const manifest = JSON.parse(bytes), state = JSON.parse(readFileSync(checkpoint));
+assertNextBusinessPopulation(manifest.population, registration.migrationProfile === NEXT_MIGRATION_PROFILE);
 if (manifest.population?.mode === "SELECTED_BUSINESS_SCOPE") {
   const times=manifest.registrationTimeSource;
   if (!times || ![times.VALID,times.MISSING,times.INVALID].every(n=>Number.isSafeInteger(n)&&n>=0)
@@ -34,7 +36,8 @@ if (manifest.population?.mode === "SELECTED_BUSINESS_SCOPE") {
 // The checkpoint may only be reconciled against the target its registry names, never against a
 // database name repeated in this script.
 if (state.binding?.datasetSha256 !== option("--dataset-sha") || state.binding.database !== registration.database || state.binding.oid !== registration.oid || state.pending || state.status === "RUNNING" || !["users", "accounts", "orders"].every(name => state.phases[name]?.complete)) throw new Error("KNOWN_COMPLETED_CORE_CHECKPOINT_REQUIRED");
-async function* rows(path) { const stream = createReadStream(path), reader = createInterface({ input: stream, crlfDelay: Infinity }); try { for await (const line of reader) if (line) yield JSON.parse(line); } finally { reader.close(); stream.destroy(); } }
+if (registration.migrationProfile === NEXT_MIGRATION_PROFILE && (state.targetFenceReleased !== true || state.protectionRecorded !== true))
+  throw new Error("TARGET_FENCE_CLEANUP_UNCONFIRMED");
 for (const [name, entry] of Object.entries(manifest.files)) {
   if (entry.file !== basename(entry.file)) throw new Error("DATASET_FILE_PATH_INVALID");
   const digest = createHash("sha256"); for await (const bytes of createReadStream(join(dataset, entry.file))) digest.update(bytes);
@@ -46,6 +49,69 @@ const maintenance = new Client(maintenanceConnection(registration, { user: "zzsh
 const db = new Client(targetConnection(registration, { user: credential.migration.name, password: credential.migration.password, applicationName: "core-dataset-reconciliation-read-only", connectionTimeoutMillis: 3000, statement_timeout: 15000, lock_timeout: 500 }));
 const mod = name => require(join(api, name + ".js"));
 const canonical = mod("supply/content-hash").canonicalize, accountId = mod("legacy-load/legacy-account-seam").legacyAccountId, orderRead = mod("order/legacy-order-read");
+const hasIdentityProfiles = manifest.identityProfiles?.schema === "zzsh.legacy-identity-profile-source.v1";
+if (manifest.identityProfiles && (!hasIdentityProfiles || manifest.identityProfiles.invalid !== 0
+  || manifest.identityProfiles.verified !== manifest.identityProfiles.ready)) throw new Error("LEGACY_IDENTITY_PROFILE_SOURCE_INCOMPLETE");
+let identityProfile, identitySubject, profileKey, subjectKey, sourceUsers, expectedSourceUsers = 0, previousSourceId = -1n;
+let legalService, preparedLegal, legalInputSha, businessReceipt, businessReceiptFile, businessReceiptSha;
+if (hasIdentityProfiles || option("--legal-input")) {
+  const file = option("--legal-input"), expected = option("--legal-input-sha");
+  if (!file || !resolve(file).toLowerCase().startsWith("e:\\zzsh-local-state\\restricted\\") || !/^[a-f0-9]{64}$/.test(expected ?? "")) throw new Error("LEGAL_INITIAL_INPUT_REQUIRED");
+  const inputBytes = readPinnedRegularFile(file);
+  if (hash(inputBytes) !== expected) throw new Error("LEGAL_INITIAL_INPUT_CHANGED");
+  legalInputSha = expected; legalService = mod("legal/legal-documents");
+  preparedLegal = prepareLegalPair(JSON.parse(inputBytes), readPinnedRegularFile, legalService);
+}
+if (hasIdentityProfiles || option("--business-bootstrap")) {
+  businessReceiptFile = option("--business-bootstrap"); businessReceiptSha = option("--business-bootstrap-sha");
+  if (!businessReceiptFile || !resolve(businessReceiptFile).toLowerCase().startsWith("e:\\zzsh-local-state\\restricted\\")
+    || !/^[a-f0-9]{64}$/.test(businessReceiptSha ?? "")) throw new Error("RENTAL_REFERENCE_BOOTSTRAP_REQUIRED");
+  const businessBytes = readPinnedRegularFile(businessReceiptFile, 2_000_000);
+  if (hash(businessBytes) !== businessReceiptSha) throw new Error("RENTAL_REFERENCE_BOOTSTRAP_CHANGED");
+  businessReceipt = JSON.parse(businessBytes); assertRentalReferenceReceipt(businessReceipt);
+  if (businessReceipt.status !== "REFERENCE_BOOTSTRAP_COMMITTED" || businessReceipt.commitAck !== true
+    || businessReceipt.maintenanceClosed !== true || businessReceipt.poolClosed !== true || businessReceipt.unlock !== true
+    || String(businessReceipt.oid) !== registration.oid || businessReceipt.nonce !== registration.nonce
+    || JSON.stringify(businessReceipt.instance ?? null) !== JSON.stringify(registration.instance ?? null)
+    || (businessReceipt.migrationProfile ?? null) !== registration.migrationProfile
+    || registration.migrationProfile === NEXT_MIGRATION_PROFILE && businessReceipt.targetFence !== "HELD_UNTIL_TRANSACTION_END"
+    || businessReceipt.rentalReference.validatorSha256 !== hash(readFileSync(new URL("./business-reference-readiness.mjs", import.meta.url))))
+    throw new Error("RENTAL_REFERENCE_BOOTSTRAP_UNCONFIRMED");
+}
+const identitySource = { rows: 0, verified: 0, closed: false };
+async function nextIdentitySource() {
+  const next = await sourceUsers.next();
+  if (!next.done) {
+    if (typeof next.value.id !== "string" || !/^\d{1,32}$/.test(next.value.id)) throw new Error("IDENTITY_SOURCE_KEY_INVALID");
+    const id = BigInt(next.value.id);
+    if (id <= previousSourceId) throw new Error("IDENTITY_SOURCE_ORDER_INVALID");
+    previousSourceId = id; identitySource.rows++;
+    if (next.value.is_bind_id === "1") identitySource.verified++;
+  }
+  return next;
+}
+if (hasIdentityProfiles) {
+  if (!process.env.USER_LEGACY_IDENTITY_PROFILE_KEY_FILE) throw new Error("LEGACY_IDENTITY_PROFILE_KEY_FILE_REQUIRED");
+  identityProfile = mod("auth/legacy-identity-profile"); identitySubject = mod("auth/identity-subject");
+  const profileSecret = readFileSync(process.env.USER_LEGACY_IDENTITY_PROFILE_KEY_FILE, "utf8").trim();
+  const subjectSecret = readFileSync(process.env.USER_IDENTITY_SUBJECT_HMAC_KEY_FILE ?? "E:/zzsh/zzsh/apps/api/.secrets/user_identity_subject_hmac", "utf8").trim();
+  if (profileSecret === subjectSecret) throw new Error("LEGACY_IDENTITY_PROFILE_KEY_NOT_INDEPENDENT");
+  profileKey = identityProfile.legacyIdentityProfileKey(profileSecret); subjectKey = identitySubject.deriveIdentitySubjectKey(subjectSecret);
+  if (state.binding.identityProfileKeyProof !== createHmac("sha256", profileKey).update("legacy-profile-key-v1:" + hash(bytes)).digest("hex")
+    || state.binding.identitySubjectKeyProof !== createHmac("sha256", subjectKey).update("legacy-subject-key-v1:" + hash(bytes)).digest("hex")) throw new Error("LEGACY_IDENTITY_PROFILE_KEY_BINDING_CHANGED");
+  const receiptBytes = readFileSync(join(manifest.source, "receipt.json"));
+  if (hash(receiptBytes) !== manifest.sourceReceiptSha256) throw new Error("IDENTITY_SOURCE_RECEIPT_CHANGED");
+  const sourceReceipt = JSON.parse(receiptBytes), file = sourceReceipt.files?.users;
+  if (sourceReceipt.status !== "CAPTURED_READ_ONLY" || sourceReceipt.rollbackConfirmed !== true || sourceReceipt.clientClosed !== true
+    || !file || file.file !== basename(file.file) || !/^[a-f0-9]{64}$/.test(file.sha256 ?? "")) throw new Error("IDENTITY_SOURCE_RECEIPT_INVALID");
+  assertLegacyIdentityColumns(new Set(file.fields ?? []));
+  const path = join(manifest.source, file.file), digest = createHash("sha256");
+  for await (const chunk of createReadStream(path)) digest.update(chunk);
+  if (digest.digest("hex") !== file.sha256) throw new Error("IDENTITY_SOURCE_FILE_CHANGED");
+  if (!Number.isSafeInteger(file.rows) || file.rows < 0) throw new Error("IDENTITY_SOURCE_COUNT_INVALID");
+  expectedSourceUsers = file.rows;
+  sourceUsers = rows(path);
+}
 const originalMetricSources = manifest.legacyDashboardSources ? {} : null;
 if (originalMetricSources) {
   const sourceReceiptBytes = readFileSync(join(manifest.source, "receipt.json"));
@@ -67,19 +133,46 @@ if (originalMetricSources) {
     originalMetricSources[domain] = records;
   }
 }
-const report = { schema: "zzsh.local-dataset-readback.v1", startedAt: new Date().toISOString(), resource: { oid: state.binding.oid, nonce: state.binding.nonce, database: registration.database, ...(registration.instance ? {instance:registration.instance} : {}) }, sourceDatasetSha256: option("--dataset-sha"), status: "STARTED", queries: 0, domains: {}, differences: [], differenceCount: 0, targetWrites: 0, rollbackConfirmed: false, lockReleased: false, connectionsClosed: false };
+const report = { schema: "zzsh.local-dataset-readback.v1", startedAt: new Date().toISOString(), resource: { oid: state.binding.oid, nonce: state.binding.nonce, database: registration.database, ...(registration.instance ? {instance:registration.instance} : {}), ...(registration.migrationProfile ? {migrationProfile:registration.migrationProfile} : {}) }, sourceDatasetSha256: option("--dataset-sha"), status: "STARTED", queries: 0, domains: {}, differences: [], differenceCount: 0, targetWrites: 0, rollbackConfirmed: false, lockReleased: false, connectionsClosed: false };
 const difference = (domain, id, reason) => { report.differenceCount++; if (report.differences.length < 100) report.differences.push({ domain, id, reason }); };
 const query = async (...args) => { report.queries++; return db.query(...args); };
 async function batched(domain, apply, collect = null, batchSize = 1000, source = null) { let batch = [], count = 0; for await (const row of source ?? rows(join(dataset, manifest.files[domain].file))) { batch.push(row); if (collect) collect.push(row.sourceId); if (batch.length === batchSize) { await apply(batch); count += batch.length; batch = []; } } if (batch.length) { await apply(batch); count += batch.length; } return count; }
-const started = performance.now(); let held = false, connected = false;
+const started = performance.now(); let held = false, connected = false, fenceEpoch;
 try {
   await maintenance.connect(); held = (await maintenance.query(advisoryLockSql(registration, "try"))).rows[0].ok;
   if (!held) throw new Error("REGRESSION_RESOURCE_BUSY");
+  fenceEpoch = registration.migrationProfile === NEXT_MIGRATION_PROFILE ? await captureMaintenanceLockEpoch(maintenance, registration) : null;
   await db.connect(); connected = true; await query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
   const actual = (await query(targetIdentityQuery())).rows[0];
   assertLiveTarget(registration, actual);
+  if (fenceEpoch) {
+    await acquireMigrationTransactionFence({ query, getTransactionStatus: () => db.getTransactionStatus() }, registration, fenceEpoch);
+    report.targetFence = "HELD_UNTIL_ROLLBACK";
+  }
+  if (preparedLegal) report.legal = { status: "VERIFIED", inputSha256: legalInputSha,
+    ...verifyLegalPair(await legalService.readCurrentPlatformDocuments(db), preparedLegal) };
+  if (businessReceipt) {
+    const actualReference = await readTargetRentalReference({ query }, businessReceipt.rentalReference.gameCode);
+    if (actualReference.targetDigest !== businessReceipt.rentalReference.targetDigest
+      || ["gameCode", "termOptions", "enabledItems", "fullPayout"].some(field => actualReference[field] !== businessReceipt.rentalReference[field])
+      || JSON.stringify(actualReference.tableCounts) !== JSON.stringify(businessReceipt.rentalReference.tableCounts))
+      throw new Error("RENTAL_REFERENCE_TARGET_CHANGED");
+    if (credential.runtime?.name !== registration.runtimeRole || credential.runtime?.oid !== registration.runtimeRoleOid
+      || typeof credential.runtime.password !== "string" || !credential.runtime.password) throw new Error("RENTAL_REFERENCE_RUNTIME_ROLE_CHANGED");
+    const runtimeDb = new Client(targetConnection(registration, { user: credential.runtime.name, password: credential.runtime.password,
+      applicationName: "rental-reference-runtime-readback", connectionTimeoutMillis: 3000, statement_timeout: 15000, lock_timeout: 500 }));
+    const runtimeProof = await verifyRuntimeRentalReference(runtimeDb, businessReceipt.rentalReference, async client => {
+      const identity = (await client.query(targetIdentityQuery())).rows[0];
+      assertLiveTarget(registration, identity, "runtime");
+      if (identity.read_only !== "on") throw new Error("RENTAL_REFERENCE_RUNTIME_NOT_READ_ONLY");
+    });
+    if (hash(readPinnedRegularFile(businessReceiptFile, 2_000_000)) !== businessReceiptSha) throw new Error("RENTAL_REFERENCE_BOOTSTRAP_CHANGED");
+    report.rentalReference = { status: "TARGET_CONFIG_VERIFIED", businessReceiptSha256: businessReceiptSha,
+      targetDigest: actualReference.targetDigest, ...runtimeProof, apiAvailability: "NOT_ASSESSED" };
+  }
   const userKeys = [], accountKeys = [], orderKeys = [];
   const registrationTime = { sourceCaptured: manifest.registrationTimeSource ?? null, readySource: { VALID: 0, MISSING: 0, INVALID: 0 }, targetFactMissing: 0, targetLegacyIdMismatch: 0, targetTimeMismatch: 0 };
+  const identityProfiles = { expected: 0, sourceMatched: 0, matched: 0, target: 0 };
   const users = await batched("users", async batch => {
     const actual = new Map((await query(`SELECT u.id,u.name,u."phoneNumber",u."phoneNumberVerified",u.suspended,u.image,
        i.provider,i.provider_reference,i.account_status,i.identity_status,i.age_status,i.verified_at,
@@ -93,8 +186,34 @@ try {
        LEFT JOIN zzsh_supply.profile_avatar p ON p.realm='user' AND p.subject_id=u.id
        LEFT JOIN zzsh_iam.user_registration_fact rf ON rf.user_id=u.id
        WHERE u.id=ANY($1::text[])`, [batch.map(row => row.userId)])).rows.map(row => [row.id, row]));
+    const profiles = hasIdentityProfiles ? new Map((await query(`SELECT p.user_id,p.source_ref,p.source_digest,p.subject_digest,p.key_version,p.name_mask,p.document_mask,p.nonce,p.authentication_tag,p.ciphertext,
+      b.subject_digest AS bound_subject_digest,b.source AS bound_source FROM zzsh_iam.user_legacy_identity_profile p
+      LEFT JOIN zzsh_iam.user_identity_subject b ON b.user_id=p.user_id WHERE p.user_id=ANY($1::text[])`, [batch.map(row => row.userId)])).rows.map(row => [row.user_id,row])) : null;
     for (const row of batch) {
       const found = actual.get(row.userId), e = row.input.evidence;
+      if (profiles) {
+        const stored = profiles.get(row.userId);
+        let source = await nextIdentitySource();
+        while (!source.done && source.value.id !== row.sourceId) source = await nextIdentitySource();
+        const sameSource = !source.done && matchesLegacyIdentitySource(source.value, row);
+        if (!sameSource) difference("identityProfiles", row.sourceId, "IDENTITY_ORIGINAL_SOURCE_DRIFT");
+        if (e.status.realNameBound) {
+          identityProfiles.expected++;
+          if (sameSource) identityProfiles.sourceMatched++;
+          try {
+            if (!stored || !row.legacyIdentityProfile || !row.trustedIdentityNumber || stored.source_ref !== "la_user:" + row.sourceId
+              || stored.source_digest !== row.sourceDigest || stored.bound_source !== "LEGACY_IMPORT"
+              || stored.subject_digest !== stored.bound_subject_digest
+              || stored.subject_digest !== identitySubject.identitySubjectDigest(row.trustedIdentityNumber, subjectKey)) throw new Error();
+            const opened = identityProfile.openLegacyIdentityProfile({ userId: row.userId, sourceRef: stored.source_ref,
+              sourceDigest: stored.source_digest, subjectDigest: stored.subject_digest },
+            { keyVersion: stored.key_version, nameMask: stored.name_mask, documentMask: stored.document_mask,
+              nonce: stored.nonce, tag: stored.authentication_tag, ciphertext: stored.ciphertext }, profileKey, subjectKey);
+            if (opened.realName !== row.legacyIdentityProfile.realName || opened.idCardNo !== row.legacyIdentityProfile.idCardNo) throw new Error();
+            identityProfiles.matched++;
+          } catch { difference("identityProfiles", row.sourceId, "SOURCE_TARGET_IDENTITY_PROFILE_DRIFT"); }
+        } else if (stored) difference("identityProfiles", row.sourceId, "UNVERIFIED_USER_HAS_IDENTITY_PROFILE");
+      }
       registrationTime.readySource[classifyLegacyRegistrationTime(e.sourceCreatedAt, orderRead.legacyEpochTimestamp)]++;
       if (!found) { registrationTime.targetFactMissing++; difference("users", row.sourceId, "TARGET_IDENTITY_MISSING"); continue; }
       const registration = compareLegacyRegistrationFact(e.sourceCreatedAt, row.sourceId, {userId:found.registration_user_id,legacyId:found.registration_legacy_id,registeredAt:found.registration_time});
@@ -113,6 +232,14 @@ try {
     }
   }, userKeys);
   report.domains.users = { expected: users };
+  if (hasIdentityProfiles) {
+    while (!(await nextIdentitySource()).done) { /* count the complete frozen source */ }
+    if (identitySource.rows !== expectedSourceUsers) difference("identityProfiles", "SOURCE", "IDENTITY_SOURCE_DENOMINATOR_DRIFT");
+    identityProfiles.target = Number((await query("SELECT count(*)::int AS n FROM zzsh_iam.user_legacy_identity_profile")).rows[0].n);
+    if (identityProfiles.expected !== manifest.identityProfiles.ready || identityProfiles.target !== identityProfiles.expected)
+      difference("identityProfiles", "COHORT", "IDENTITY_PROFILE_DENOMINATOR_DRIFT");
+    report.identityProfiles = { ...identityProfiles, source: identitySource };
+  }
   report.registrationTime = registrationTime;
   const accounts = await batched("accounts", async batch => {
     const actual = new Map((await query(`SELECT m.legacy_id,m.account_id,m.source_digest,m.evidence_ref,m.version_id,a.owner_user_id,a.game_id,a.current_version_id,a.legacy_hold,v.origin,v.review_state,
@@ -194,6 +321,7 @@ try {
       report[name] = { expected, matched };
     }
     const display = state.additiveInputs.display, dm = JSON.parse(readFileSync(await checked(display.directory, "manifest.json", display.manifestSha256)));
+    if(hasIdentityProfiles)assertDisplayCaptureCoverage(dm);
     const ratio = dm.accountBaseRatio ? { scope: dm.accountBaseRatio.scope, expected: dm.rows, matched: 0, known: 0, unknown: 0 } : null;
     const payout = dm.accountFullPayout ? { scope: dm.accountFullPayout.scope, expected: dm.rows, matched: 0, selected: 0, unselected: 0, unknown: 0 } : null;
     if (ratio && (ratio.scope !== "ACCOUNT_AT_CAPTURE_NOT_ORDER_SNAPSHOT" || !originalMetricSources || dm.accountBaseRatio.known + dm.accountBaseRatio.unknown !== dm.rows)) throw new Error("DISPLAY_ACCOUNT_RATIO_SOURCE_PROOF_REQUIRED");
@@ -244,13 +372,21 @@ try {
     if(hash(bytes)!==phase.sha256)throw new Error("FINANCIAL_PHASE_INPUT_CHANGED");
     const expected=JSON.parse(bytes).flatMap(group=>mod("finance/personal-finance-observation-maintenance").planFinanceObservations(group.input).observations.map(row=>({...row,domain:group.domain})));
     const counts={},attemptStatusCounts={};let readableAttempts=0;
+    const unresolvedRefunds={expected:0,verified:0,issues:{}};
     for(let i=0;i<expected.length;i+=500){
       const batch=expected.slice(i,i+500),actual=new Map((await query(`SELECT o.source_entity,o.source_id,o.user_id,o.legacy_user_id,o.source_digest,o.source_canonical,o.snapshot,to_char(o.source_event_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') event_at FROM zzsh_order.personal_finance_observation o JOIN unnest($1::text[],$2::text[]) k(entity,id) ON o.source_entity=k.entity AND o.source_id=k.id WHERE o.source_system='legacy_mysql_restore'`,[batch.map(r=>r.sourceEntity),batch.map(r=>r.sourceId)])).rows.map(r=>[r.source_entity+":"+r.source_id,r]));
       for(const row of batch){const found=actual.get(row.sourceEntity+":"+row.sourceId);counts[row.domain]??={expected:0,readable:0};counts[row.domain].expected++;
+        if(state.binding.migrationProfile===NEXT_MIGRATION_PROFILE && row.domain==='refunds' && row.snapshot?.associationState==='UNRESOLVED'){
+          unresolvedRefunds.expected++;
+          const issue=inspectUnresolvedRefundSource(found?.snapshot,canonical);
+          if(issue){unresolvedRefunds.issues[issue]=(unresolvedRefunds.issues[issue]??0)+1;difference('financeHistory',row.sourceEntity+':'+row.sourceId,'UNRESOLVED_REFUND_'+issue);}
+          else unresolvedRefunds.verified++;
+        }
         if(!found||found.user_id!==row.userId||found.legacy_user_id!==row.legacyUserId||found.source_digest!==row.sourceDigest||found.source_canonical!==row.sourceCanonical||canonical(found.snapshot)!==canonical(row.snapshot)||found.event_at!==row.sourceEventAt)difference("financeHistory",row.sourceEntity+":"+row.sourceId,"FROZEN_SOURCE_OBSERVATION_DRIFT");else{counts[row.domain].readable++;if(row.domain==='refunds')for(const attempt of found.snapshot.sourceAttempts??[]){readableAttempts++;attemptStatusCounts[attempt.sourceStatus]=(attemptStatusCounts[attempt.sourceStatus]??0)+1;}}
       }
     }
     report.refundAttempts={readable:readableAttempts,actualStatusCounts:attemptStatusCounts,expected:state.fundsSupplement.refundAttemptCoverage?.selected??null,sourceStates:state.fundsSupplement.refundAttemptCoverage?.statusCounts??{},scope:"TYPED_LA_REFUND_LOG_CHILDREN_EXACTLY_COVERED_BY_PARENT_CANONICAL_DIGEST_NOT_NEW_CHANNEL_TRANSACTIONS"};
+    if(state.binding.migrationProfile===NEXT_MIGRATION_PROFILE)report.unresolvedRefundSources={...unresolvedRefunds,scope:'RAW_SOURCE_PRESERVED_NOT_A_CONFIRMED_ORDER_LINK_OR_CHANNEL_REFUND'};
     const actualTotal = (await query("SELECT count(*)::int n FROM zzsh_order.personal_finance_observation WHERE source_system='legacy_mysql_restore'")).rows[0].n;
     if (actualTotal !== expected.length) difference("financeHistory", "COHORT", "OBSERVATION_DENOMINATOR_DIFFERED");
     report.financialHistory={scope:"source observations only; no wallet posting or channel arrival",counts,walletEffectsFromObservation:false,arrivalVerified:false};
@@ -423,15 +559,26 @@ try {
   for (const [domain, fact] of Object.entries(report.domains)) if (report.actualCounts[domain] !== fact.expected) difference(domain, "COHORT", "TARGET_DENOMINATOR_DIFFERED");
   report.sourceDomains = manifest.domains; report.sourceQuarantine = manifest.quarantine;
   report.status = report.differenceCount === 0 ? "CORE_SOURCE_TARGET_EXACT_READBACK_PASSED" : "CORE_SOURCE_TARGET_DIFFERENCES";
-  await query("ROLLBACK"); report.rollbackConfirmed = true;
+  if (fenceEpoch) await assertMigrationFenceHeld({ query }, registration, fenceEpoch);
+  if ((await query("ROLLBACK")).command !== "ROLLBACK") throw new Error("READBACK_ROLLBACK_ACK_UNCONFIRMED");
+  report.rollbackConfirmed = true;
 }
-catch (error) { report.status = "READBACK_FAILED"; report.error = error.code ?? error.message; process.exitCode = 1; }
+catch (error) { report.status = "READBACK_FAILED"; report.error = typeof error.code === "string" ? error.code : /^[A-Z][A-Z0-9_]{2,100}$/.test(error.message ?? "") ? error.message : "READBACK_OPERATION_FAILED"; process.exitCode = 1; }
 finally {
-  if (connected && !report.rollbackConfirmed) { try { await query("ROLLBACK"); report.rollbackConfirmed = true; } catch {} }
-  await db.end();
+  if (sourceUsers) {
+    try { await sourceUsers.return(); identitySource.closed = true; }
+    catch { report.status = "READBACK_FAILED"; report.error = "IDENTITY_SOURCE_CLOSE_FAILED"; process.exitCode = 1; }
+  }
+  if (connected && !report.rollbackConfirmed) { try { report.rollbackConfirmed = (await query("ROLLBACK")).command === "ROLLBACK"; } catch {} }
+  let targetClosed = false, maintenanceClosed = false;
+  try { await db.end(); targetClosed = true; } catch { /* cleanup remains unconfirmed */ }
   if (held) { try { report.lockReleased = (await maintenance.query(advisoryLockSql(registration, "unlock"))).rows[0].ok; } catch {} }
-  await maintenance.end(); report.connectionsClosed = true; report.finishedAt = new Date().toISOString(); report.monotonicElapsedMs = performance.now() - started;
-  if (!report.rollbackConfirmed || !report.lockReleased || report.differenceCount) process.exitCode = 1;
+  try { await maintenance.end(); maintenanceClosed = true; } catch { /* cleanup remains unconfirmed */ }
+  report.connectionsClosed = targetClosed && maintenanceClosed; report.finishedAt = new Date().toISOString(); report.monotonicElapsedMs = performance.now() - started;
+  if (!report.rollbackConfirmed || !report.lockReleased || !report.connectionsClosed || report.differenceCount) {
+    if (report.status === "CORE_SOURCE_TARGET_EXACT_READBACK_PASSED") report.status = "READBACK_CLEANUP_UNCONFIRMED";
+    process.exitCode = 1;
+  }
   writeFileSync(output, JSON.stringify(report, null, 2) + "\n", { flag: "wx" });
   console.log(JSON.stringify({ status: report.status, differences: report.differenceCount, queries: report.queries, rollback: report.rollbackConfirmed, unlock: report.lockReleased, closed: report.connectionsClosed }));
 }

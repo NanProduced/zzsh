@@ -1,20 +1,24 @@
 import { createHash, randomBytes } from "node:crypto";
 import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
-import { basename, dirname, join, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { createRequire } from "node:module";
-import { advisoryLockSql, assertLiveTarget, loadRegisteredTarget, maintenanceConnection, targetConnection, targetIdentityQuery } from "./local-target-registry.mjs";
+import { fileURLToPath } from "node:url";
+import { acquireMigrationTransactionFence, advisoryLockSql, assertLiveTarget, assertMigrationFenceHeld, captureMaintenanceLockEpoch, loadRegisteredTarget, maintenanceConnection, NEXT_MIGRATION_PROFILE, targetConnection, targetIdentityQuery } from "./local-target-registry.mjs";
 import { execFileSync } from "node:child_process";
 import { LocalSession, localOrigin, totp, validateProfile, writePrivate } from "../local-auth.mjs";
 import { verifySkinRetirementPackage } from "./derive-business-reference-skin-retirement.mjs";
+import { initializeLegalPair, prepareLegalPair, readPinnedRegularFile } from "./local-legal-pair.mjs";
+import { assertRentalReferenceReady, BUSINESS_REFERENCE_TABLES, readTargetRentalReference } from "./business-reference-readiness.mjs";
 const processStarted = performance.now(), processStartedAt = new Date().toISOString();
 const require = createRequire(import.meta.url), { Client, Pool } = require("pg");
+const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const args = process.argv.slice(2), option = name => { const i = args.indexOf(name); return i < 0 ? undefined : args[i + 1]; };
 const BUSINESS_KIND = "BUSINESS_REFERENCE_PACKAGE_V1";
-const businessTables = new Set(["game", "game_service_operation", "skin_category", "firearm_classification", "firearm_alias", "full_payout_terms_version", "billable_item", "skin_rarity", "skin_owner", "firearm", "skin", "price_version", "price_line", "term_version", "term_option", "agreement_version", "rule_release", "media_asset"].map(name => "zzsh_supply." + name).concat("zzsh_content.legal_document_version"));
+const businessTables = new Set([...BUSINESS_REFERENCE_TABLES, "zzsh_supply.skin_category"]);
 const sha = value => createHash("sha256").update(value).digest("hex");
 const q = name => { if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) throw new Error("UNSAFE_REFERENCE_IDENTIFIER"); return '"' + name + '"'; };
 if (!args.includes("--execute") && !args.includes("--verify")) {
-    console.log(JSON.stringify({ action: "PLAN", required: ["--execute", "--manifest", "--manifest-sha", "--oid", "--nonce", "--credentials", "--receipt"], formalAdminInitialization: { required: ["--execute", "--initialize-admins", "--stage", "--input", "--credentials", "--out"], stages: ["bosses", "staff"], serverAssignedFirstLogins: ["zz00001", "zz00002"], sequenceMinimumDigits: 5, noImRuntimeBindingRequired: true, sequence: "formal Boss bootstrap/enrollment -> business package -> formal ops/support create/enrollment", oldAdminRestore: "SUPERSEDED_NOT_FOR_APPLICATION" }, businessPackage: { capture: ["--execute", "--capture-business", "--credentials", "--source-oid", "--game-code", "--out"], applyAdditional: ["--maintenance-admin-id"], verify: ["--verify", "--manifest", "--manifest-sha"], tables: [...businessTables], identityPolicy: "business package contains no identities, sessions, upload tokens, approvals or transactions; bind newly initialized maintenance Boss" }, target: "registered regression only", connections: 0, credentialReads: 0, identityPolicy: "old admin restore SUPERSEDED_NOT_FOR_APPLICATION; initialize two Bosses and one ops/support using formal routes" }));
+    console.log(JSON.stringify({ action: "PLAN", required: ["--execute", "--manifest", "--manifest-sha", "--oid", "--nonce", "--credentials", "--receipt"], formalAdminInitialization: { required: ["--execute", "--initialize-admins", "--stage", "--input", "--credentials", "--out"], stages: ["bosses", "staff"], serverAssignedFirstLogins: ["zz00001", "zz00002"], sequenceMinimumDigits: 5, noImRuntimeBindingRequired: true, sequence: "formal Boss bootstrap/enrollment -> business package -> formal ops/support create/enrollment", oldAdminRestore: "SUPERSEDED_NOT_FOR_APPLICATION" }, businessPackage: { capture: ["--execute", "--capture-business", "--credentials", "--source-oid", "--game-code", "--out"], applyAdditional: ["--maintenance-admin-id", "--maintenance-session-id", "--legal-input", "--legal-input-sha"], verify: ["--verify", "--manifest", "--manifest-sha"], tables: [...businessTables], identityPolicy: "business package contains no identities, sessions, upload tokens, approvals or transactions; bind newly initialized maintenance Boss" }, target: "registered regression only", connections: 0, credentialReads: 0, identityPolicy: "old admin restore SUPERSEDED_NOT_FOR_APPLICATION; initialize two Bosses and one ops/support using formal routes" }));
     process.exit(0);
 }
 if (process.version !== "v24.20.0")
@@ -65,15 +69,36 @@ if (skinV2) verifySkinRetirementPackage(bytes, name => {
 });
 if (business && !skinV2 && tables.get("zzsh_supply.skin")?.columns?.filter(column => column.name === "category_id").length !== 1)
     throw new Error("BUSINESS_CATALOG_PROFILE_INVALID");
-if (business) validateBusinessPackage(tables, source, expectedBusinessTables);
-else if (tables.get("zzsh_auth_admin.user")?.rows.length !== 5 || tables.get("zzsh_iam.admin_security")?.rows.length !== 5) throw new Error("REVIEWED_FIVE_ADMIN_IDENTITY_CLOSURE_REQUIRED");
+const parsedBusinessTables = business ? validateBusinessPackage(tables, source, expectedBusinessTables) : null;
+const rentalReference = skinV2 ? { ...assertRentalReferenceReady(parsedBusinessTables, source.gameCode),
+    validatorSha256: sha(readFileSync(new URL('./business-reference-readiness.mjs', import.meta.url))) } : undefined;
+if (!business && (tables.get("zzsh_auth_admin.user")?.rows.length !== 5 || tables.get("zzsh_iam.admin_security")?.rows.length !== 5)) throw new Error("REVIEWED_FIVE_ADMIN_IDENTITY_CLOSURE_REQUIRED");
 if (args.includes("--verify")) {
-    console.log(JSON.stringify({ status: "REFERENCE_FILES_VERIFIED", kind: source.kind, tables: tables.size, rows: [...tables.values()].reduce((sum, table) => sum + table.rows.length, 0), connections: 0, credentialReads: 0, mediaBytesVerified: false, ...(!business ? { applicationStatus: "SUPERSEDED_NOT_FOR_APPLICATION" } : {}) }));
+    console.log(JSON.stringify({ status: "REFERENCE_FILES_VERIFIED", kind: source.kind, tables: tables.size, rows: [...tables.values()].reduce((sum, table) => sum + table.rows.length, 0), connections: 0, credentialReads: 0, mediaBytesVerified: false, ...(rentalReference ? { rentalReference } : {}), ...(!business ? { applicationStatus: "SUPERSEDED_NOT_FOR_APPLICATION" } : {}) }));
     process.exit(0);
 }
 if (!business) throw new Error("ADMIN_REFERENCE_RESTORE_SUPERSEDED_NOT_FOR_APPLICATION");
+if (!skinV2) throw new Error("BUSINESS_CATALOG_PROFILE_RETIRED");
 const maintenanceAdminId = option("--maintenance-admin-id");
 if (business && !maintenanceAdminId) throw new Error("EXISTING_MAINTENANCE_ADMIN_BINDING_REQUIRED");
+const maintenanceSessionId = option("--maintenance-session-id"), legalInputFile = option("--legal-input"), legalInputSha = option("--legal-input-sha");
+if (![maintenanceSessionId, legalInputFile, legalInputSha].every(value => typeof value === "string" && value.length > 0)
+    || !isAbsolute(legalInputFile) || !/^[a-f0-9]{64}$/.test(legalInputSha)) throw new Error("BUSINESS_LEGAL_INPUT_REQUIRED");
+const legalInputBytes = readPinnedRegularFile(legalInputFile);
+if (sha(legalInputBytes) !== legalInputSha) throw new Error("BUSINESS_LEGAL_INPUT_CHANGED");
+const legalInput = JSON.parse(legalInputBytes), apiDist = resolve(option("--api-dist") ?? join(ROOT, "apps/api/dist/src"));
+const apiRelative = relative(ROOT, apiDist);
+if (!apiRelative || apiRelative.startsWith("..") || isAbsolute(apiRelative)) throw new Error("BUSINESS_LEGAL_BUILD_OUTSIDE_WORKTREE");
+function verifyLegalBuild() {
+    for (const name of ["legal/legal-documents.js", "auth/security-core.js", "supply/content-hash.js", "supply/supply-util.js"]) {
+        const expected = legalInput.build?.[name], path = join(apiDist, name);
+        if (!/^[a-f0-9]{64}$/.test(expected ?? "") || sha(readPinnedRegularFile(path, 1_000_000)) !== expected) throw new Error("BUSINESS_LEGAL_BUILD_CHANGED");
+    }
+}
+verifyLegalBuild();
+const legalService = require(join(apiDist, "legal/legal-documents.js")), legalAudit = require(join(apiDist, "auth/security-core.js")).recordAudit;
+const legalReadBytes = path => readPinnedRegularFile(path);
+const preparedLegal = prepareLegalPair(legalInput, legalReadBytes, legalService);
 if (business) for (const table of tables.values()) {
     const fields = source.foreignKeys.filter(fk => fk.child === table.key && fk.parent === "zzsh_auth_admin.user").flatMap(fk => fk.columns);
     // Preserve sealed source bytes; replace only existing non-null attribution IDs in the target input.
@@ -89,11 +114,12 @@ if (registered.database !== "zzsh_test_regression" || registered.oid !== expecte
 const receiptFile = resolve(option("--receipt") ?? "");
 if (!receiptFile.toLowerCase().startsWith("e:\\zzsh-local-state\\restricted\\") || existsSync(receiptFile))
     throw new Error("NEW_PRIVATE_RECEIPT_REQUIRED");
-const result = { status: "STARTED", kind: source.kind, manifestSha256: sha(bytes), database: registered.database, oid: expectedOid, nonce: expectedNonce, ...(registered.instance ? {instance:registered.instance} : {}), startedAt: processStartedAt, tables: [], expectedDifferences: [], pending: [], sourceIdsPreserved: true, sourceRawUnchanged: true, ...(business ? { maintenanceAdminId, attributionPolicy: "non-null source admin FKs rebound; original attribution remains in sealed source", mediaBytesVerified: false } : {}) };
+const result = { status: "STARTED", kind: source.kind, catalogModel: source.catalogModel, manifestSha256: sha(bytes), database: registered.database, oid: expectedOid, nonce: expectedNonce, ...(registered.instance ? {instance:registered.instance} : {}), ...(registered.migrationProfile ? {migrationProfile:registered.migrationProfile} : {}), startedAt: processStartedAt, tables: [], expectedDifferences: [], pending: [], sourceIdsPreserved: true, sourceRawUnchanged: true, ...(business ? { maintenanceAdminId, attributionPolicy: "non-null source admin FKs rebound; original attribution remains in sealed source", mediaBytesVerified: false, rentalReference } : {}) };
 const cfg = { connectionTimeoutMillis: 3000, statement_timeout: 15000, lock_timeout: 500 };
 const maintenance = new Client(maintenanceConnection(registered, { ...cfg, user: "zzsh", password: readFileSync(process.env.DB_PASSWORD_FILE ?? join(ROOT, "apps/api/.secrets/postgres_password"), "utf8").trim(), applicationName: "core-reference-bootstrap-lock" }));
 const pool = new Pool(targetConnection(registered, { ...cfg, user: credentials.migration.name, password: credentials.migration.password, max: 1, applicationName: "core-reference-bootstrap" }));
-let client, held = false, begun = false, commitSent = false;
+let client, held = false, begun = false, commitSent = false, fenceEpoch, connectionError;
+maintenance.on?.("error", error => { connectionError ??= error; });
 const STATIC = new Set(["zzsh_iam.admin_permission", "zzsh_iam.admin_role", "zzsh_iam.admin_role_permission", "zzsh_iam.approval_template"]);
 // A package captured in one environment carries that environment's provenance timestamps. A target's
 // own triggers rewrite created_at/updated_at on insert, so those two columns can never match across
@@ -176,11 +202,17 @@ try {
     held = (await maintenance.query(advisoryLockSql(registered, "try"))).rows[0].ok;
     if (!held)
         throw new Error("REGRESSION_RESOURCE_BUSY");
+    if (registered.migrationProfile === NEXT_MIGRATION_PROFILE) fenceEpoch = await captureMaintenanceLockEpoch(maintenance, registered);
     client = await pool.connect();
+    client.on?.("error", error => { connectionError ??= error; });
     const identity = (await client.query(targetIdentityQuery())).rows[0];
     assertLiveTarget(registered, identity);
     if (identity.oid !== expectedOid || identity.nonce !== expectedNonce || identity.owner !== "zzsh" || identity.marker !== "zzsh:regression-test:v1" || identity.role !== credentials.migration.name || identity.role_oid !== credentials.migration.oid)
         throw new Error("REFERENCE_TARGET_IDENTITY_CHANGED");
+    if (fenceEpoch) {
+        await client.query("BEGIN"); begun = true;
+        await acquireMigrationTransactionFence(client, registered, fenceEpoch); result.targetFence = "HELD_UNTIL_TRANSACTION_END";
+    }
     if (skinV2) {
         const schema = (await client.query(`SELECT to_regclass('zzsh_supply.skin_category') IS NULL AS "categoryTableAbsent",
             NOT EXISTS(SELECT 1 FROM pg_attribute WHERE attrelid=to_regclass('zzsh_supply.skin') AND attname='category_id' AND attnum>0 AND NOT attisdropped) AS "categoryColumnAbsent"`)).rows[0];
@@ -194,12 +226,15 @@ try {
             throw new Error("TARGET_HAS_NONREFERENCE_ADMIN");
     }
     for (const table of tables.values()) { const columns=(await client.query("SELECT attname AS name FROM pg_attribute WHERE attrelid=to_regclass($1) AND attnum>0 AND NOT attisdropped",[table.sql])).rows.map(row=>row.name);if(!columns.length||table.columns.some(column=>!columns.includes(column.name)))throw new Error("REFERENCE_TARGET_COLUMNS_MISMATCH:"+table.key);}
-    await client.query("BEGIN");
-    begun = true;
+    if (!begun) { await client.query("BEGIN"); begun = true; }
     await client.query("SET LOCAL TIME ZONE 'UTC'");
     if (business) {
-        const actor = (await client.query('SELECT a.is_boss,a.status,u.suspended FROM zzsh_iam.admin_security a JOIN zzsh_auth_admin."user" u ON u.id=a.admin_user_id WHERE a.admin_user_id=$1 FOR SHARE OF a,u', [maintenanceAdminId])).rows[0];
-        if (!actor?.is_boss || actor.status !== "ACTIVE" || actor.suspended) throw new Error("ACTIVE_EXISTING_MAINTENANCE_ADMIN_REQUIRED");
+        const actor = (await client.query(`SELECT a.is_boss,a.status,a.password_change_required,u.suspended,u."twoFactorEnabled" AS two_factor,s.locked
+          FROM zzsh_iam.admin_security a JOIN zzsh_auth_admin."user" u ON u.id=a.admin_user_id
+          JOIN zzsh_auth_admin.session s ON s."userId"=u.id AND s.id=$2 AND s."expiresAt">clock_timestamp()
+          WHERE a.admin_user_id=$1 FOR SHARE OF a,u,s`, [maintenanceAdminId,maintenanceSessionId])).rows[0];
+        if (!actor?.is_boss || actor.status !== "ACTIVE" || actor.suspended || actor.password_change_required || actor.two_factor !== true || actor.locked)
+            throw new Error("ACTIVE_EXISTING_MAINTENANCE_ADMIN_REQUIRED");
     }
     await client.query("SELECT set_config('zzsh.actor_type','system',true),set_config('zzsh.request_id','reference-bootstrap',true)");
     const constraints = (await client.query("SELECT sn.nspname||'.'||sc.relname child,pn.nspname||'.'||pc.relname parent,a.attname column_name FROM pg_constraint k JOIN pg_class sc ON sc.oid=k.conrelid JOIN pg_namespace sn ON sn.oid=sc.relnamespace JOIN pg_class pc ON pc.oid=k.confrelid JOIN pg_namespace pn ON pn.oid=pc.relnamespace CROSS JOIN LATERAL unnest(k.conkey) att JOIN pg_attribute a ON a.attrelid=sc.oid AND a.attnum=att WHERE k.contype='f'")).rows;
@@ -249,6 +284,12 @@ try {
         if (table)
             await restoreTable(table);
     }
+    result.legal = { ...(await initializeLegalPair(client, { id: maintenanceAdminId, sessionId: maintenanceSessionId,
+        requestId: "reference-legal-" + sha(legalInputBytes).slice(0, 24) }, preparedLegal, legalService, legalAudit)), inputSha256: legalInputSha };
+    if (sha(readPinnedRegularFile(legalInputFile)) !== legalInputSha) throw new Error("BUSINESS_LEGAL_INPUT_CHANGED");
+    verifyLegalBuild();
+    prepareLegalPair(legalInput, legalReadBytes, legalService);
+    if (sha(readFileSync(new URL('./business-reference-readiness.mjs', import.meta.url))) !== rentalReference.validatorSha256) throw new Error("BUSINESS_RENTAL_REFERENCE_VALIDATOR_CHANGED");
     for (const table of tables.values()) {
         let exact = 0, semantic = 0;
         for (const row of table.rows) {
@@ -265,9 +306,19 @@ try {
         entry.exact = exact;
         entry.baselineTimestampOnly = semantic;
     }
+    const targetReference = await readTargetRentalReference(client, source.gameCode);
+    for (const field of ['gameCode', 'termOptions', 'enabledItems', 'fullPayout'])
+        if (targetReference[field] !== rentalReference[field]) throw new Error('BUSINESS_RENTAL_TARGET_SOURCE_MISMATCH');
+    if (JSON.stringify(targetReference.tableCounts) !== JSON.stringify(rentalReference.tableCounts)) throw new Error('BUSINESS_RENTAL_TARGET_SOURCE_MISMATCH');
+    result.rentalReference.targetDigest = targetReference.targetDigest;
     await client.query("SET CONSTRAINTS ALL IMMEDIATE");
+    if (fenceEpoch) {
+        if (connectionError) throw new Error("REFERENCE_FENCE_CONNECTION_LOST");
+        await assertMigrationFenceHeld(client, registered, fenceEpoch);
+        if (connectionError) throw new Error("REFERENCE_FENCE_CONNECTION_LOST");
+    }
     commitSent = true;
-    await client.query("COMMIT");
+    if ((await client.query("COMMIT")).command !== "COMMIT") throw new Error("REFERENCE_COMMIT_ACK_UNCONFIRMED");
     begun = false;
     result.commitAck = true;
     result.status = "REFERENCE_BOOTSTRAP_COMMITTED";
@@ -275,22 +326,25 @@ try {
     result.maintenanceActor = actors[0] ?? null;
 }
 catch (error) {
-    result.status = commitSent && !result.commitAck ? "REFERENCE_COMMIT_UNKNOWN" : "FAILED_STOPPED";
-    result.error = { code: error.code ?? null, message: String(error.message).slice(0, 300), constraint: error.constraint ?? null };
+    result.status = commitSent ? result.commitAck ? "REFERENCE_COMMITTED_READBACK_REQUIRED" : "REFERENCE_COMMIT_UNKNOWN" : "FAILED_STOPPED";
+    result.error = { code: typeof error.code === "string" && /^[A-Za-z0-9_]{1,30}$/.test(error.code) ? error.code : null,
+        message: /^[A-Za-z0-9_:.-]{1,160}$/.test(error.message ?? "") ? error.message : "REFERENCE_OPERATION_FAILED",
+        constraint: typeof error.constraint === "string" && /^[A-Za-z0-9_.-]{1,100}$/.test(error.constraint) ? error.constraint : null };
     if (begun && !commitSent)
         try {
-            await client.query("ROLLBACK");
-            result.rollbackAck = true;
+            result.rollbackAck = (await client.query("ROLLBACK")).command === "ROLLBACK";
+            if (!result.rollbackAck) result.status = "REFERENCE_ROLLBACK_UNKNOWN";
         }
         catch {
             result.rollbackAck = false;
+            result.status = "REFERENCE_ROLLBACK_UNKNOWN";
         }
     process.exitCode = 1;
 }
 finally {
-    client?.release();
-    await pool.end();
-    result.poolClosed = true;
+    try { client?.release(commitSent && !result.commitAck || result.rollbackAck === false ? true : undefined); }
+    catch { result.clientReleaseFailed = true; }
+    try { await pool.end(); result.poolClosed = true; } catch { result.poolClosed = false; }
     if (held)
         try {
             result.unlock = (await maintenance.query(advisoryLockSql(registered, "unlock"))).rows[0].ok;
@@ -298,8 +352,11 @@ finally {
         catch {
             result.unlock = false;
         }
-    await maintenance.end();
-    result.maintenanceClosed = true;
+    try { await maintenance.end(); result.maintenanceClosed = true; } catch { result.maintenanceClosed = false; }
+    if (!result.poolClosed || !result.unlock || !result.maintenanceClosed || result.clientReleaseFailed) {
+        if (result.status === "REFERENCE_BOOTSTRAP_COMMITTED") result.status = "REFERENCE_COMMITTED_CLEANUP_UNCONFIRMED";
+        process.exitCode = 1;
+    }
     result.finishedAt = new Date().toISOString();
     result.wallMs = performance.now() - processStarted;
     writeFileSync(receiptFile, JSON.stringify(result, null, 2) + "\n", { flag: "wx" });
@@ -333,6 +390,7 @@ function validateBusinessPackage(tables, manifest, expectedTables = businessTabl
             if (values.every(value => value !== null) && !keys.has(JSON.stringify(values))) throw new Error("BUSINESS_FOREIGN_KEY_NOT_CLOSED:" + fk.child + ":" + fk.name);
         }
     }
+    return rows;
 }
 
 async function captureBusinessPackage() {
@@ -419,7 +477,8 @@ async function initializeFormalAdmins() {
     if (registered.instance && (input.stage !== stage || !/^[a-f0-9]{64}$/.test(input.credentialsSha256 ?? "") || sha(credentialBytes) !== input.credentialsSha256)) throw new Error("FORMAL_INITIALIZATION_STAGE_OR_CREDENTIAL_CHANGED");
     if (registered.database !== input.target.database || registered.oid !== input.target.oid || registered.nonce !== input.target.nonce || registered.pendingReset || credentials.migration?.name !== registered.migrationRole || (registered.migrationRoleOid !== null && credentials.migration?.oid !== registered.migrationRoleOid)) throw new Error("REGISTERED_RESOURCE_CHANGED");
     if (JSON.stringify(input.target.instance ?? null) !== JSON.stringify(registered.instance)
-      || JSON.stringify(binding.resource?.instance ?? null) !== JSON.stringify(registered.instance)) throw new Error("FORMAL_INITIALIZATION_INSTANCE_CHANGED");
+      || JSON.stringify(binding.resource?.instance ?? null) !== JSON.stringify(registered.instance)
+      || [input.target,binding.resource,binding.actualResource].some(value => (value?.migrationProfile ?? null) !== registered.migrationProfile)) throw new Error("FORMAL_INITIALIZATION_INSTANCE_CHANGED");
     if (registered.instance && (binding.status !== "R07_BOOTSTRAP_API_LISTENING" || binding.port !== 4242
       || JSON.stringify(binding.actualResource?.instance ?? null) !== JSON.stringify(registered.instance) || binding.actualResource?.read_only !== "on"
       || String(binding.actualResource?.migration_role_oid) !== registered.migrationRoleOid || binding.financialCommandCapabilities !== false

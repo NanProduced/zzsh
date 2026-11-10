@@ -163,6 +163,7 @@ export type AuthSecurityOptions = {
   userSmsConfiguration?: import("./sms-templates").SmsTemplateConfiguration;
   /** Stable identity-only HMAC key; independent from rotating authentication secrets. */
   userIdentitySubjectKey?: Buffer;
+  userLegacyIdentityProfileKey?: Buffer;
   userRealNamePolicy?: { dailyLimit: number; minIntervalSeconds: number };
   settlementAdmission?: import("../order/joinpay-collection-profile").FormalCollectionAdmission;
   userObligationReader: UserObligationReader;

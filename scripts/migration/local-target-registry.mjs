@@ -11,6 +11,7 @@
 // system_identifier, because that is the only fact that separates two instances carrying the same
 // database name, roles, marker and lock number.
 import { strict as assert } from "node:assert/strict";
+import { randomBytes } from "node:crypto";
 import { lstatSync, readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 
@@ -19,6 +20,23 @@ export const DEFAULT_HOST = "127.0.0.1";
 export const DEFAULT_PORT = 55432;
 export const DEFAULT_LOCK_KEY = "806006";
 export const DEFAULT_MAINTENANCE_DATABASE = "postgres";
+export const NEXT_MIGRATION_PROFILE = "LOCAL_MIGRATION_NEXT_V1";
+export const NEXT_INITIAL_BASELINE = "release_production_0174";
+export const sameMigrationProfile = (a,b) => (a?.migrationProfile ?? null) === (b?.migrationProfile ?? null);
+export function assertCaptureTargetProfile(receipt, profile) {
+  assert.equal(receipt?.sourceOrigin?.schema === "zzsh.local-source-origin.v2", profile === NEXT_MIGRATION_PROFILE, "TARGET_SOURCE_PROFILE_MISMATCH");
+}
+export function hasVerifiedNextInitialSchema(schema) {
+  return schema?.status === "CLEAN_SCHEMA_INSTALLED" && schema.migrationProfile === NEXT_MIGRATION_PROFILE
+    && schema.commitAck === true && schema.migrationAck === true && schema.runtimeAclReadback === true
+    && schema.readbackRollbackAck === true && schema.readbackClientClosed === true && schema.unlockAck === true && schema.maintenanceClosed === true
+    && schema.targetFence === "HELD_ACROSS_SCHEMA_AND_ACL" && schema.targetFenceReleased === true
+    && schema.initialBaseline === NEXT_INITIAL_BASELINE
+    && schema.initialSeedReadback?.status === "INITIAL_SEEDS_AND_COMMENTS_VERIFIED"
+    && /^[a-f0-9]{64}$/.test(schema.initialBaselineManifestSha256 ?? "")
+    && /^[a-f0-9]{64}$/.test(schema.initialTailSeedProofSha256 ?? "")
+    && /^[a-f0-9]{40}$/.test(schema.releaseCommit ?? "");
+}
 const DATABASE = /^[a-z][a-z0-9_]{0,62}$/;
 const MARKER = /^[a-z][a-z0-9:_-]{0,127}$/;
 const ROLE = /^[a-z][a-z0-9_]{0,62}$/;
@@ -98,6 +116,8 @@ export function normalizeRegisteredTarget(raw, source = RESOURCE_FILE) {
   if (protectedDataset !== null) assert.ok(typeof protectedDataset === "object", "TARGET_PROTECTED_DATASET_INVALID");
   const pendingReset = raw.pendingReset ?? null;
   if (pendingReset !== null) assert.ok(typeof pendingReset === "object" && !Array.isArray(pendingReset), "TARGET_PENDING_RESET_INVALID");
+  const migrationProfile = raw.migrationProfile ?? null;
+  assert.ok(migrationProfile === null || migrationProfile === NEXT_MIGRATION_PROFILE && hasInstance, "TARGET_MIGRATION_PROFILE_INVALID");
   return Object.freeze({
     sourceFile: source,
     instance: hasInstance ? Object.freeze({ host, port, systemIdentifier }) : null,
@@ -114,9 +134,24 @@ export function normalizeRegisteredTarget(raw, source = RESOURCE_FILE) {
     runtimeRoleOid,
     lockKey,
     maintenanceDatabase,
+    migrationProfile,
     protectedDataset,
     pendingReset,
   });
+}
+
+/** Older R07 artifacts keep their original port; new isolated targets require a distinct profile. */
+export function isRegisteredMigrationInstance(target) {
+  const instance = target?.instance, port = target?.port, profile = target?.migrationProfile ?? null;
+  return Boolean(instance && target.host === DEFAULT_HOST && instance.host === target.host && instance.port === port
+    && typeof instance.systemIdentifier === "string" && DIGITS.test(instance.systemIdentifier)
+    && (profile === null ? port === 55433 : profile === NEXT_MIGRATION_PROFILE && Number.isInteger(port)
+      && port >= 1024 && port <= 65535 && ![55432, 55433, 55434].includes(port)));
+}
+
+// shortcut: block next-profile writes until every finance, bank and recovery adapter is verified.
+export function assertNextMigrationWriteReady(target) {
+  assert.notEqual(target?.migrationProfile, NEXT_MIGRATION_PROFILE, "NEXT_MIGRATION_ADMISSION_INCOMPLETE");
 }
 
 /** Live identity as read from the target connection; no registry value is echoed back. */
@@ -193,7 +228,7 @@ export function assertRuntimeRoleCompanion(target, row) {
 export function assertReadbackTarget(target, binding, credential) {
   assert.ok(binding && credential?.migration, "RESOURCE_BINDING_CHANGED");
   assert.ok(target.oid === binding.oid && target.nonce === binding.nonce && target.database === binding.database
-    && JSON.stringify(binding.instance ?? null) === JSON.stringify(target.instance) && !target.pendingReset
+    && JSON.stringify(binding.instance ?? null) === JSON.stringify(target.instance) && (binding.migrationProfile ?? null) === target.migrationProfile && !target.pendingReset
     && credential.migration.name === target.migrationRole && typeof target.migrationRoleOid === "string"
     && credential.migration.oid === target.migrationRoleOid, "RESOURCE_BINDING_CHANGED");
 }
@@ -242,4 +277,119 @@ export function advisoryLockSql(target, action) {
   return action === "try"
     ? `SELECT pg_try_advisory_lock(${target.lockKey}::bigint) ok`
     : `SELECT pg_advisory_unlock(${target.lockKey}::bigint) ok`;
+}
+
+/** Check the original maintenance session still holds the registered single-bigint lock. */
+export async function assertMaintenanceLockHeld(client, target) {
+  assert.ok(/^[0-9]+$/.test(target?.lockKey ?? '') && BigInt(target.lockKey) <= 9223372036854775807n, 'TARGET_LOCK_KEY_INVALID');
+  const row = (await client.query(`SELECT current_database() AS database,
+    (SELECT system_identifier::text FROM pg_control_system()) AS system_identifier,
+    EXISTS(SELECT 1 FROM pg_locks WHERE locktype='advisory' AND pid=pg_backend_pid()
+      AND database=(SELECT oid FROM pg_database WHERE datname=current_database())
+      AND classid=(($1::bigint >> 32) & 4294967295::bigint)::oid AND objid=($1::bigint & 4294967295::bigint)::oid
+      AND objsubid=1 AND mode='ExclusiveLock' AND granted) AS held`, [target.lockKey])).rows[0];
+  assert.ok(row && row.database === target.maintenanceDatabase && row.held === true
+    && (!target.instance || row.system_identifier === target.instance.systemIdentifier), 'TARGET_MAINTENANCE_LOCK_LOST');
+}
+
+// The target-database fence uses the two-integer advisory namespace, separate from the maintenance lock.
+const MIGRATION_FENCE_NAMESPACE = 1515873096;
+
+/** A borrowed client must still be the session that owns the target lock. */
+export function guardedMigrationTargetPool(pool, verify) {
+  assert(typeof pool?.connect === 'function' && typeof verify === 'function', 'TARGET_FENCED_POOL_INVALID');
+  return { async connect() {
+    const client = await pool.connect();
+    try { await verify(client); return client; }
+    catch (error) { try { client.release(true); } catch {} throw error; }
+  } };
+}
+
+/** Bind a next-round write to the exact backend that owns the maintenance lock. */
+export async function captureMaintenanceLockEpoch(client, target) {
+  assert.equal(target?.migrationProfile, NEXT_MIGRATION_PROFILE, 'TARGET_FENCE_PROFILE_INVALID');
+  assert.equal(target.lockKey, DEFAULT_LOCK_KEY, 'TARGET_FENCE_LOCK_INVALID');
+  assert.equal(target.maintenanceDatabase, 'postgres', 'TARGET_FENCE_MAINTENANCE_DATABASE_INVALID');
+  assert.ok(isRegisteredMigrationInstance(target), 'TARGET_FENCE_INSTANCE_INVALID');
+  await assertMaintenanceLockHeld(client, target);
+  const random = randomBytes(16), keys = [0, 4, 8, 12].map(offset => random.readInt32BE(offset));
+  assert.ok(keys[0] !== keys[2] || keys[1] !== keys[3], 'TARGET_MAINTENANCE_EPOCH_COLLISION');
+  const acquired = [];
+  try {
+    for (const offset of [0, 2]) {
+      const pair = keys.slice(offset, offset + 2);
+      assert.equal((await client.query('SELECT pg_try_advisory_lock($1::integer,$2::integer) AS acquired', pair)).rows[0]?.acquired,
+        true, 'TARGET_MAINTENANCE_EPOCH_BUSY');
+      acquired.push(pair);
+    }
+    const row = (await client.query('SELECT pg_backend_pid() AS pid')).rows[0];
+    assert.ok(Number.isInteger(row?.pid) && row.pid > 0, 'TARGET_MAINTENANCE_EPOCH_UNAVAILABLE');
+    await assertMaintenanceLockHeld(client, target);
+    return Object.freeze({ pid: row.pid, keys: Object.freeze(keys), systemIdentifier: target.instance.systemIdentifier });
+  } catch (error) {
+    for (const pair of acquired) try { await client.query('SELECT pg_advisory_unlock($1::integer,$2::integer)', pair); } catch { /* connection loss releases its session locks */ }
+    throw error;
+  }
+}
+
+function assertFenceBinding(target, epoch) {
+  assert.equal(target?.migrationProfile, NEXT_MIGRATION_PROFILE, 'TARGET_FENCE_PROFILE_INVALID');
+  assert.equal(target.lockKey, DEFAULT_LOCK_KEY, 'TARGET_FENCE_LOCK_INVALID');
+  assert.equal(target.maintenanceDatabase, 'postgres', 'TARGET_FENCE_MAINTENANCE_DATABASE_INVALID');
+  assert.ok(isRegisteredMigrationInstance(target) && /^[1-9][0-9]*$/.test(target.oid ?? '')
+    && /^[a-f0-9]{24}$/.test(target.nonce ?? '') && Number.isInteger(epoch?.pid) && epoch.pid > 0
+    && Array.isArray(epoch.keys) && epoch.keys.length === 4 && epoch.keys.every(value => Number.isInteger(value) && value >= -2147483648 && value <= 2147483647)
+    && (epoch.keys[0] !== epoch.keys[2] || epoch.keys[1] !== epoch.keys[3]) && epoch.systemIdentifier === target.instance.systemIdentifier,
+  'TARGET_FENCE_BINDING_INVALID');
+}
+
+/** Recheck both the maintenance epoch and this connection's target lock. */
+export async function assertMigrationFenceHeld(client, target, epoch) {
+  assertFenceBinding(target, epoch);
+  const row = (await client.query(`SELECT current_database() AS database,d.oid::text AS oid,
+    current_setting('zzsh.regression_run',true) AS nonce,(SELECT system_identifier::text FROM pg_control_system()) AS system_identifier,
+    EXISTS(SELECT 1 FROM pg_locks l WHERE l.locktype='advisory' AND l.pid=$1
+      AND l.database=(SELECT oid FROM pg_database WHERE datname=$2)
+      AND l.classid=(($3::bigint >> 32) & 4294967295::bigint)::oid AND l.objid=($3::bigint & 4294967295::bigint)::oid
+      AND l.objsubid=1 AND l.mode='ExclusiveLock' AND l.granted
+      AND EXISTS(SELECT 1 FROM pg_locks e WHERE e.locktype='advisory' AND e.pid=l.pid AND e.database=l.database AND e.objsubid=2
+        AND e.classid=($4::bigint & 4294967295::bigint)::oid AND e.objid=($5::bigint & 4294967295::bigint)::oid AND e.mode='ExclusiveLock' AND e.granted)
+      AND EXISTS(SELECT 1 FROM pg_locks e WHERE e.locktype='advisory' AND e.pid=l.pid AND e.database=l.database AND e.objsubid=2
+        AND e.classid=($6::bigint & 4294967295::bigint)::oid AND e.objid=($7::bigint & 4294967295::bigint)::oid AND e.mode='ExclusiveLock' AND e.granted))
+      AND EXISTS(SELECT 1 FROM pg_locks f WHERE f.locktype='advisory' AND f.pid=pg_backend_pid() AND f.database=d.oid AND f.objsubid=2
+        AND f.classid=$8::oid AND f.objid=$9::oid AND f.mode='ExclusiveLock' AND f.granted) AS held
+    FROM pg_database d WHERE d.datname=current_database()`, [epoch.pid, target.maintenanceDatabase, target.lockKey, ...epoch.keys,
+    MIGRATION_FENCE_NAMESPACE, Number(target.lockKey)])).rows[0];
+  assert.ok(row?.database === target.database && row.oid === target.oid && row.nonce === target.nonce
+    && row.system_identifier === epoch.systemIdentifier && row.held === true, 'TARGET_FENCE_EPOCH_LOST');
+}
+
+/** Hold the fence until this transaction ends; a successor must acquire it before writing. */
+export async function acquireMigrationTransactionFence(client, target, epoch) {
+  assertFenceBinding(target, epoch);
+  assert.equal(client.getTransactionStatus?.(), 'T', 'TARGET_FENCE_TRANSACTION_REQUIRED');
+  const lock = (await client.query('SELECT pg_try_advisory_xact_lock($1::integer,$2::integer) AS acquired',
+    [MIGRATION_FENCE_NAMESPACE, Number(target.lockKey)])).rows[0];
+  assert.equal(lock?.acquired, true, 'TARGET_FENCE_BUSY');
+  await assertMigrationFenceHeld(client, target, epoch);
+}
+
+/** Hold the same fence across batches and checkpoint updates on a single target connection. */
+export async function acquireMigrationSessionFence(client, target, epoch) {
+  assertFenceBinding(target, epoch);
+  assert.equal(client.getTransactionStatus?.(), 'I', 'TARGET_FENCE_IDLE_CONNECTION_REQUIRED');
+  const args = [MIGRATION_FENCE_NAMESPACE, Number(target.lockKey)];
+  assert.equal((await client.query('SELECT pg_try_advisory_lock($1::integer,$2::integer) AS acquired', args)).rows[0]?.acquired,
+    true, 'TARGET_FENCE_BUSY');
+  try { await assertMigrationFenceHeld(client, target, epoch); }
+  catch (error) { try { await client.query('SELECT pg_advisory_unlock($1::integer,$2::integer)', args); } catch { /* closing the connection releases the lock */ } throw error; }
+}
+
+export async function releaseMigrationSessionFence(client, target) {
+  assert.equal(target?.migrationProfile, NEXT_MIGRATION_PROFILE, 'TARGET_FENCE_PROFILE_INVALID');
+  assert.equal(target.lockKey, DEFAULT_LOCK_KEY, 'TARGET_FENCE_LOCK_INVALID');
+  assert.equal(client.getTransactionStatus?.(), 'I', 'TARGET_FENCE_IDLE_CONNECTION_REQUIRED');
+  const row = (await client.query('SELECT pg_advisory_unlock($1::integer,$2::integer) AS released',
+    [MIGRATION_FENCE_NAMESPACE, Number(target.lockKey)])).rows[0];
+  assert.equal(row?.released, true, 'TARGET_FENCE_RELEASE_UNCONFIRMED');
 }

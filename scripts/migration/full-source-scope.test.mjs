@@ -62,6 +62,7 @@ test('full round requires exact source scope, strict batching and independent so
  const input={strictBatch:true,source:{sha256:sourceSha},dataset:{sha256:datasetSha},population:{schema:'zzsh.round-population-binding.v1',mode:'FULL_CAPTURED_SOURCE',scopeSha256:f.dataset.populationSha256,sourceReceiptSha256:sourceSha,verification:{path:'private/receipt.json',sha256:'c'.repeat(64)}}};
  const verification={schema:'zzsh.full-source-scope-readback.v1',status:'DIRECT_DOMAIN_SOURCE_PARTITIONS_VERIFIED_TARGET_NOT_RUN',datasetSha256:datasetSha,sourceReceiptSha256:sourceSha,populationSha256:f.dataset.populationSha256,...proof,sourceConnections:0,targetConnections:0,targetWrites:0};
  assert.equal(assertRoundPopulationBinding(input,f.dataset,f.source,verification).status,'FULL_CAPTURED_INPUT_SCOPE_VERIFIED_TARGET_NOT_YET_PROVED');
+ assert.throws(()=>assertRoundPopulationBinding({...input,target:{migrationProfile:'LOCAL_MIGRATION_NEXT_V1'}},f.dataset,{...f.source,sourceOrigin:{schema:'zzsh.local-source-origin.v2'}},verification),/NEXT_SELECTED_BUSINESS_SCOPE_REQUIRED/);
  for(const mutate of [x=>{x.strictBatch=false;},x=>{x.population.mode='SCENARIO_SELECTION';},x=>{x.population.scopeSha256='f'.repeat(64);}]){
   const changed=structuredClone(input);mutate(changed);assert.throws(()=>assertRoundPopulationBinding(changed,f.dataset,f.source,verification));
  }
@@ -81,4 +82,11 @@ test('full round requires exact source scope, strict batching and independent so
  assert.doesNotThrow(()=>assertFullExecutionAdmitted({mode:'LEGACY_SCENARIO_SELECTION'},'execute'));
  assert.throws(()=>assertFullExecutionAdmitted({mode:'LEGACY_UNDECLARED'},'execute'),/UNDECLARED_POPULATION_EXECUTION_BLOCKED/);
  assert.throws(()=>assertFullExecutionAdmitted({mode:'UNKNOWN'},'execute'),/UNDECLARED_POPULATION_EXECUTION_BLOCKED/);
+});
+test('a v2 capture cannot be passed through the historical R07 profile',()=>{
+ const next={sourceOrigin:{schema:'zzsh.local-source-origin.v2'}};
+ assert.throws(()=>assertRoundPopulationBinding({}, {}, next, null),/TARGET_SOURCE_PROFILE_MISMATCH/);
+ assert.throws(()=>assertRoundPopulationBinding({target:{migrationProfile:'LOCAL_MIGRATION_NEXT_V1'}}, {}, {}, null),/TARGET_SOURCE_PROFILE_MISMATCH/);
+ assert.equal(assertRoundPopulationBinding({}, {}, {}, null).mode,'LEGACY_UNDECLARED');
+ assert.throws(()=>assertRoundPopulationBinding({target:{migrationProfile:'LOCAL_MIGRATION_NEXT_V1'}}, {}, next, null),/NEXT_SELECTED_BUSINESS_SCOPE_REQUIRED/);
 });

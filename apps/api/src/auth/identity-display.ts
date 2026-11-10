@@ -2,6 +2,9 @@ import type { Pool, PoolClient } from "pg";
 import {createHmac} from "node:crypto";
 import {SecurityApiError} from "./security-core";
 import type {NativeRealNameProvider} from "./identity-provider";
+import { maskIdCard, maskRealName } from "./identity-mask";
+import { readLegacyIdentityMasks } from "./legacy-identity-profile";
+export { maskIdCard, maskRealName } from "./identity-mask";
 
 /** B5: read-only masked identity display. Full values never leave this module and are never logged. */
 export const IDENTITY_MASKING_VERSION = "identity-mask-v1" as const;
@@ -9,22 +12,8 @@ export interface IdentityDisplay { realNameMasked: string; idCardMasked: string;
 export type IdentityDisplayResult = { identityDisplay: IdentityDisplay; identityDisplayReason: null; identityDisplaySource?: "NATIVE_PROVIDER" | "RECORDED_SOURCE" }
   | { identityDisplay: null; identityDisplayReason: "NOT_RECORDED" | "NOT_VERIFIED" | "STORE_UNAVAILABLE" };
 
-export function maskRealName(name: string): string {
-  const c = Array.from(name.trim());
-  if (c.length <= 1) return "*";
-  if (c.length === 2) return `${c[0]}*`;
-  return `${c[0]}${"*".repeat(c.length - 2)}${c[c.length - 1]}`;
-}
-export function maskIdCard(id: string): string {
-  const c = Array.from(id.trim());
-  if (c.length === 18) return `${c.slice(0, 6).join("")}${"*".repeat(8)}${c.slice(14).join("")}`;
-  if (c.length <= 4) return "*".repeat(c.length);
-  // Non-18 legacy formats: keep only the last 4 (stricter than v1 18-char rule).
-  return `${"*".repeat(c.length - 4)}${c.slice(-4).join("")}`;
-}
-
 /** Minimal restricted store interface: one self-scoped SELECT, no write path. */
-type IdentityDisplayRecord={ realName: string; idCardNo: string;source?:"RECORDED_SOURCE" }|{maskedDisplay:IdentityDisplay;source:"NATIVE_PROVIDER"};
+type IdentityDisplayRecord={ realName: string; idCardNo: string;source?:"RECORDED_SOURCE" }|{maskedDisplay:IdentityDisplay;source:"NATIVE_PROVIDER"|"RECORDED_SOURCE"};
 export interface IdentityDisplayStore { read(userId: string): Promise<IdentityDisplayRecord | null> }
 export function pgIdentityDisplayStore(db: Pool | PoolClient): IdentityDisplayStore {
   return {
@@ -45,6 +34,14 @@ export function pgIdentityDisplayStore(db: Pool | PoolClient): IdentityDisplaySt
             return{maskedDisplay:{realNameMasked:row.nameMask,idCardMasked:row.documentMask,maskingVersion:IDENTITY_MASKING_VERSION},source:"NATIVE_PROVIDER" as const};
           }
         }
+      const legacyReady=(await db.query<{ready:boolean}>(`SELECT to_regclass('zzsh_iam.user_legacy_identity_profile') IS NOT NULL AS ready`)).rows[0]?.ready===true;
+      if(legacyReady){
+        const row=await readLegacyIdentityMasks(db,userId);
+        if(row){
+          if(transactional)await db.query("RELEASE SAVEPOINT identity_display_read");
+          return {maskedDisplay:{realNameMasked:row.nameMask,idCardMasked:row.documentMask,maskingVersion:IDENTITY_MASKING_VERSION},source:"RECORDED_SOURCE" as const};
+        }
+      }
       const r = await db.query<{ realName: string; idCardNo: string }>(
         `/* identity-display-read */ SELECT d.real_name AS "realName", d.id_card_no AS "idCardNo"
            FROM zzsh_iam.user_identity_display_source d JOIN zzsh_iam.user_identity_state s ON s.user_id=d.user_id

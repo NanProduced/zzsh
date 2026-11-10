@@ -252,12 +252,14 @@ export async function handleUserDirectoryAdmin(
       const result = await withTransaction(options.pool, async client => {
         await assertAdminContextInTransaction(client, context);
         const access = await requireAdminAccess(client, context.userId);
-        if (sensitiveRead) return {status:200,body:await readUserSensitiveProfile(client,actor,access,userId)};
+        if (sensitiveRead) return {status:200,body:await readUserSensitiveProfile(client,actor,access,userId,
+          { profileKey: options.userLegacyIdentityProfileKey, subjectKey: options.userIdentitySubjectKey })};
         const key = validateIdempotencyKey(request.headers["idempotency-key"]);
         return method === "POST" ? createUserNote(client,actor,access,{userId,...parseUserNoteBody(request.body)},key)
           : deleteUserNote(client,actor,access,{userId,noteId:decodeId(noteMatch![2]!)},key);
       });
-      signal.throwIfAborted(); sendJson(response,result.status,result.body,requestId); return;
+      signal.throwIfAborted(); if (sensitiveRead) response.setHeader("Cache-Control", "no-store");
+      sendJson(response,result.status,result.body,requestId); return;
     }
     if (riskFlagWrite) {
       const userId = decodeId(riskFlagMatch![1]!);

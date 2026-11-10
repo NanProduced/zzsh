@@ -51,6 +51,11 @@ function fixture(records: LegacyCoverageRecord[], sources: Source[] = []) {
       if (stored.some(v => v.subjectUserId === r.subjectUserId && (v.fingerprint === r.fingerprint || v.executionKey === r.executionKey))) return { rows: [], rowCount: 0 };
       stored.push(r); inserted++; return { rows: [sealed(r)], rowCount: 1 };
     }
+    if (sql.includes('AS "matchedByKey"')) {
+      const byKey=stored.find(v=>v.subjectUserId===args[0]&&v.executionKey===args[1]);
+      const r=byKey??stored.find(v=>v.subjectUserId===args[0]&&v.fingerprint===args[2]);
+      return {rows:r?[{...sealed(r),matchedByKey:Boolean(byKey)}]:[]};
+    }
     if (sql.includes("record_canonical AS canonical")) {
       const r = stored.find(v => v.subjectUserId === args[0] && (sql.includes("execution_key=$2") ? v.executionKey : v.fingerprint) === args[1]);
       return { rows: r ? [sealed(r)] : [] };
@@ -74,6 +79,16 @@ test("coverage conflict gives raced execution key precedence over another key's 
   const alias = { ...next, executionKey: "fixture-key-other" }, f = fixture([old, alias]);
   const stored = await createLegacyGrowthCoveragePort().persist(f.client, next);
   assert.equal(stored.fingerprint, old.fingerprint); assert.notEqual(stored.fingerprint, next.fingerprint);
+});
+test("combined write lookup uses one query and retains execution-key precedence", async () => {
+  const old=record(prepared(),"fixture-key-001"), next=record(prepared([historical()],[sourceKey],"c".repeat(64)),"fixture-key-other");
+  const f=fixture([old,next]),port=createLegacyGrowthCoveragePort();
+  assert.deepEqual(await port.readForWrite(f.client,subject,old.executionKey!,next.fingerprint),{record:old,matchedByKey:true});
+  assert.equal(f.trace.length,1);
+  assert.deepEqual(await port.readForWrite(f.client,subject,"fixture-key-missing",next.fingerprint),{record:next,matchedByKey:false});
+  assert.equal(await port.readForWrite(f.client,subject,"fixture-key-missing","0".repeat(64)),null);
+  await assert.rejects(port.readForWrite({query:async()=>({rows:[{canonical:canonicalize(old),digest:'f'.repeat(64),matchedByKey:true}]})} as never,subject,old.executionKey!,next.fingerprint),
+    (e:any)=>e.code==='EVIDENCE_UNAVAILABLE');
 });
 test("coverage reader rejects a changed canonical digest instead of trusting a JSON record", async () => {
   await assert.rejects(createLegacyGrowthCoveragePort().readByFingerprint({ query: async () => ({ rows: [{ canonical: canonicalize(record(prepared())), digest: "f".repeat(64) }] }) } as never, subject, prepared().fingerprint), (e: any) => e.code === "EVIDENCE_UNAVAILABLE");
