@@ -1,248 +1,128 @@
-import { useEffect, useId, useState } from "react";
-import {
-  Ban, Check, Clock, FilePlus2, Settings2, UserPlus, X, Play, TriangleAlert,
-} from "lucide-react";
+import { useId, useState } from "react";
+import { Check, X, Ban, Clock, FilePlus2, TriangleAlert } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
-import { PasswordInput } from "../../components/ui-elements";
-import { StepUpCaptcha } from "../../components/altcha-field";
 import { Badge } from "../../components/ui/badge";
-import {
-  Dialog, DialogClose, DialogContent, DialogDescription, DialogFooter, DialogTitle,
-} from "../../components/ui/dialog";
 import { Input } from "../../components/ui/input";
 import { Checkbox } from "../../components/ui/checkbox";
-import { MembershipDateTimeField, parsePayableRatio, entitlementWindowError, formatCentsToYuan } from "../membership-entitlement-form";
 import { Textarea } from "../../components/ui/textarea";
-import { Tooltip, TooltipContent, TooltipTrigger } from "../../components/ui/tooltip";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../../components/ui/select";
-import { Alert, AlertDescription, AlertTitle } from "../../components/ui/alert";
-import { ConfirmAlertDialog } from '../../components/ui/alert-dialog';
-import { financeMoney } from '../admin-finance-api';
+import { Alert, AlertDescription } from "../../components/ui/alert";
+import { ConfirmAlertDialog } from "../../components/ui/alert-dialog";
 import {
   Timeline, TimelineContent, TimelineDate, TimelineHeader, TimelineIndicator,
   TimelineItem, TimelineSeparator, TimelineTitle,
 } from "../../components/reui/timeline";
-import { adminRequest, friendlyError } from "../../api";
 import {
-  ACTION_LABELS, APPROVAL_ACTION_NAMES, actionBlockReason, actionFor, auditActionLabel, auditNarrative,
-  auditOutcomeView, businessProgress, canAct, candidateAvailabilityLabel, executionModeLabel,
-  executionProgress, nextStepLabel, objectRefLabel, objectRefPath, personLabel, reasonLabel, statusView,
-  type ActionEligibility, type AuditEvent, type Candidate, type CandidateOptions, type RequestDetail as Detail,
-  type ApprovalDecisionAmendment, type EntitlementAmendmentPayload,
+  MembershipDateTimeField, parsePayableRatio, entitlementWindowError, formatCentsToYuan,
+} from "../membership-entitlement-form";
+import { financeMoney } from "../admin-finance-api";
+import {
+  actionBlockReason, actionFor, auditActionLabel, auditNarrative, canAct, isHighImpactOperation,
+  objectRefLabel, objectRefPath, personLabel, requestStatusView,
+  type ApprovalDecisionAmendment, type AuditEvent, type EntitlementAmendmentPayload,
+  type RequestDetail as Detail,
 } from "./contract";
 import { BusinessSummary } from "./business-summary";
 import { RequestFlow } from "./request-flow";
-import { Fact, FactGrid, FieldLabel, NotApplicable, Section, SectionTitle, StatusFact, UnknownFact, formatApprovalDate as formatDate } from "./atoms";
+import { Fact, FactGrid, FieldLabel, formatApprovalDate as formatDate } from "./atoms";
 
 const REASON_MAX = 500;
 
-/** 对象标识对管理员只需短前缀辨认；完整值放 title 供核对。 */
-function shortId(id: string): string {
-  return id.length > 12 ? `${id.slice(0, 8)}…` : id;
-}
+/** 实时复核凭据：高影响类型批准时只带 6 位动态码，绝不携带密码。 */
+export type ApprovalStepUp = { totpCode: string };
 
 function eventIcon(event: AuditEvent) {
-  if (event.outcome === "FAILURE") return <TriangleAlert size={13} aria-hidden />;
   switch (event.action) {
     case "approval.request.created": return <FilePlus2 size={13} aria-hidden />;
     case "approval.request.approved": return <Check size={13} aria-hidden />;
     case "approval.request.rejected": return <X size={13} aria-hidden />;
-    case "approval.request.cancelled": return <Ban size={13} aria-hidden />;
-    case "approval.request.expired": return <Clock size={13} aria-hidden />;
-    case "approval.request.candidate_added": return <UserPlus size={13} aria-hidden />;
-    case "approval.execution.completed": return <Play size={13} aria-hidden />;
-    case "approval.template.configured": return <Settings2 size={13} aria-hidden />;
+    case "approval.request.cancelled":
+    case "approval.request.withdrawn": return <Ban size={13} aria-hidden />;
     default: return <Clock size={13} aria-hidden />;
   }
 }
 
-/**
- * 事件按真实结果逐项显示。Timeline 的 value 固定为 0，使 step<=activeStep 恒不成立，
- * 连接线保持中性——否则驳回/失败/过期会被渲染成“流程已完成”。
- */
-function HistoryTimeline({ history }: { history: AuditEvent[] }) {
+/** 审计事件进入各申请详情的时间线，用「提交 / 批准 / 驳回 / 撤回 / 已生效」。 */
+function CompactTimeline({ history }: { history: AuditEvent[] }) {
   if (history.length === 0) return <p className="text-xs text-muted-foreground">暂未读到这张申请的事件记录。</p>;
   return (
-    <Timeline value={0} aria-label="申请事件记录">
-      {history.map((event, index) => {
-        const outcome = auditOutcomeView(event.outcome);
-        return (
-          <TimelineItem key={event.eventId} step={index + 1}>
-            <TimelineIndicator className="grid place-items-center border-border bg-surface text-muted-foreground">
-              {eventIcon(event)}
-            </TimelineIndicator>
-            <TimelineSeparator className="bg-border" />
-            <TimelineHeader>
-              <TimelineDate dateTime={event.occurredAt ?? undefined}>{formatDate(event.occurredAt)}</TimelineDate>
-              <TimelineTitle className="flex flex-wrap items-center gap-2">
-                {auditActionLabel(event.action)}
-                <span className={`text-xs font-normal ${outcome.tone === "error" ? "text-destructive" : outcome.tone === "success" ? "text-emerald-700 dark:text-emerald-300" : "text-muted-foreground"}`}>
-                  {outcome.label}
-                </span>
-              </TimelineTitle>
-            </TimelineHeader>
-            <TimelineContent className="text-xs">
-              <span>{personLabel(event.actor)}</span>
-              <span className="mx-1.5 text-muted-foreground">·</span>
-              <span className="break-words">{auditNarrative(event)}</span>
-              <details className="mt-1 text-[11px] text-muted-foreground"><summary className="cursor-pointer">技术标识</summary><span className="font-mono">{event.action}</span></details>
-            </TimelineContent>
-          </TimelineItem>
-        );
-      })}
+    <Timeline value={0} aria-label="申请时间线">
+      {history.map((event, index) => (
+        <TimelineItem key={event.eventId} step={index + 1}>
+          <TimelineIndicator className="grid place-items-center border-border bg-surface text-muted-foreground">
+            {eventIcon(event)}
+          </TimelineIndicator>
+          <TimelineSeparator className="bg-border" />
+          <TimelineHeader>
+            <TimelineDate dateTime={event.occurredAt ?? undefined}>{formatDate(event.occurredAt)}</TimelineDate>
+            <TimelineTitle>{auditActionLabel(event.action)}</TimelineTitle>
+          </TimelineHeader>
+          <TimelineContent className="text-xs">
+            <span>{personLabel(event.actor)}</span>
+            <span className="mx-1.5 text-muted-foreground">·</span>
+            <span className="break-words">{auditNarrative(event)}</span>
+          </TimelineContent>
+        </TimelineItem>
+      ))}
     </Timeline>
   );
 }
 
-function Candidates({ candidates, availability }: { candidates: Candidate[]; availability: Detail["candidateAvailability"] }) {
-  const summary = candidateAvailabilityLabel(availability);
-  return (
-    <Section
-      title="候选审批人"
-      hint="名单上的资格是通用审批资格（账号状态、双因素、通用审批权限）。能不能处理这一单还取决于该操作的业务权限与游戏范围，以候选可用汇总与逐项动作资格为准。"
-    >
-      {candidates.length === 0 ? <p className="text-xs text-muted-foreground">候选快照为空。</p> : (
-        <ul className="flex flex-wrap gap-1.5">
-          {candidates.map((candidate) => (
-            <li key={`${candidate.username}-${candidate.source ?? "TEMPLATE"}`}>
-              <Badge variant={candidate.eligible === true ? "outline" : "unknown"}>
-                {personLabel(candidate)}
-                <span className="text-muted-foreground">·</span>
-                {candidate.eligible === true ? "具备通用审批资格" : candidate.status === "FROZEN" ? "已冻结，通用资格不满足" : "通用资格不满足"}
-                <span className="text-muted-foreground">·</span>
-                {candidate.source === "APPENDED" ? "追加" : "模板"}
-              </Badge>
-            </li>
-          ))}
-        </ul>
-      )}
-      {summary ? <p className="text-xs text-muted-foreground">{summary}</p> : <UnknownFact hint="服务端未提供候选可用性汇总。" />}
-      <p className="text-xs text-muted-foreground">
-        徽标只表示通用审批资格；本单是否有人可处理看上一步的候选可用汇总，本人能否处理看逐项动作资格。
-      </p>
-    </Section>
-  );
-}
-
-function AddCandidateForm({ requestId, busy, blocked, onAppend }: { requestId: string; busy: boolean; blocked: boolean; onAppend: (username: string, reason: string) => void }) {
-  const [open, setOpen] = useState(false);
-  const [options, setOptions] = useState<CandidateOptions | null>(null);
-  const [loadError, setLoadError] = useState<string>();
-  const [loading, setLoading] = useState(false);
-  const [nonce, setNonce] = useState(0);
-  const [username, setUsername] = useState("");
-  const [reason, setReason] = useState("");
-
-  // 候选人读取用审批专用接口，不要求全管理员目录权限。
-  useEffect(() => {
-    if (!open) return;
-    let cancelled = false;
-    setLoading(true);
-    setLoadError(undefined);
-    adminRequest<CandidateOptions>("/security/approvals/candidate-options?requestId=" + encodeURIComponent(requestId))
-      .then((data) => { if (!cancelled) setOptions(data); })
-      .catch((failure) => { if (!cancelled) { setOptions(null); setLoadError(friendlyError(failure)); } })
-      .finally(() => { if (!cancelled) setLoading(false); });
-    return () => { cancelled = true; };
-  }, [open, requestId, nonce]);
-
-  const eligible = options?.candidates ?? [];
-  const excluded = Object.entries(options?.excludedByReason ?? {});
-  const items = eligible.map((candidate) => ({ value: candidate.username, label: personLabel(candidate) }));
-
-  return (
-    <div className="rounded-md border border-border/60 p-3">
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <SectionTitle hint="追加的候选人必须是当前对这一张申请合格的人；原配置名单不会被删除或跳过。">追加审批人</SectionTitle>
-        <Button type="button" size="sm" variant="secondary" disabled={busy || blocked} onClick={() => setOpen((value) => !value)}>
-          {open ? "收起" : "追加审批人"}
-        </Button>
-      </div>
-      {open ? (
-        <div className="mt-3 space-y-3">
-          {loading ? <p className="text-xs text-muted-foreground">正在读取可选审批人…</p> : null}
-          {loadError ? <NotApplicable reason={`读不到可选审批人：${loadError}`} /> : null}
-          {options && !loading ? (
-            <>
-              {eligible.length === 0 ? (
-                <p className="text-xs leading-relaxed text-muted-foreground">
-                  当前没有可追加的合格审批人。{excluded.length > 0 ? `另有 ${excluded.map(([code, count]) => `${count} 人${reasonLabel(code)}`).join("、")}，不列出身份。` : ""}
-                </p>
-              ) : (
-                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-                  <label className="block min-w-0">
-                    <FieldLabel>选择审批人（仅列出对这一单合格的人）</FieldLabel>
-                    <Select value={username} onValueChange={(value) => setUsername(value ?? "")} items={items}>
-                      <SelectTrigger className="h-9 w-full focus-visible:outline-none!"><SelectValue /></SelectTrigger>
-                      <SelectContent>
-                        {eligible.map((candidate) => (
-                          <SelectItem key={candidate.username} value={candidate.username}>{personLabel(candidate)}</SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
-                  </label>
-                  <label className="block min-w-0">
-                    <FieldLabel>追加原因（至少 3 字，最多 {REASON_MAX} 字）</FieldLabel>
-                    <Input value={reason} maxLength={REASON_MAX} onChange={(event) => setReason(event.target.value)} placeholder="为什么需要追加这位审批人" />
-                  </label>
-                </div>
-              )}
-              {excluded.length > 0 && eligible.length > 0 ? (
-                <p className="text-xs text-muted-foreground">
-                  另有 {excluded.map(([code, count]) => `${count} 人${reasonLabel(code)}`).join("、")}。
-                  {options.requesterExcluded ? " 原申请人已排除。" : ""}
-                </p>
-              ) : null}
-              <div className="flex flex-wrap gap-2">
-                <Button
-                  type="button" size="sm" variant="secondary" loading={busy}
-                  disabled={busy || blocked || loading || !username || reason.trim().length < 3}
-                  onClick={() => { onAppend(username, reason.trim()); setReason(""); setUsername(""); setOpen(false); }}
-                >
-                  提交追加
-                </Button>
-                <Button type="button" size="sm" variant="ghost" disabled={loading} onClick={() => setNonce((value) => value + 1)}>重新读取可选审批人</Button>
-              </div>
-            </>
-          ) : null}
-        </div>
-      ) : null}
-    </div>
-  );
-}
-
-type DialogKind = "approve" | "reject" | "execute" | "withdraw";
-/** 实时复核凭据：只在内存中随本次请求发出，绝不写入待核对记录。 */
-export type ApprovalStepUp = { password: string; totpCode: string };
-
-function DecisionDialog({
-  kind, detail, onClose, onSubmit,
+export function RequestDetail({
+  detail, busy, blocked, canApprove, onOpenRequest, onOpenPath, onLocateRecovery, onDecide, onWithdraw,
 }: {
-  kind: DialogKind | null;
   detail: Detail;
-  onClose: () => void;
-  onSubmit: (kind: DialogKind, reason: string, stepUp: ApprovalStepUp, amendment?: ApprovalDecisionAmendment) => void;
+  busy: boolean;
+  blocked: boolean;
+  /** 是否具备审批权限；纯客服为 false，此时不渲染批准/驳回按钮。 */
+  canApprove: boolean;
+  onOpenRequest: (requestId: string, title: string) => void;
+  onOpenPath?: (path: string, title: string) => void;
+  onLocateRecovery?: () => void;
+  onDecide: (decision: "APPROVE" | "REJECT", reason: string, totpCode?: string, amendment?: ApprovalDecisionAmendment) => void;
+  onWithdraw?: (reason: string) => void;
 }) {
+  const [contentOpen, setContentOpen] = useState(true);
+  const [flowView, setFlowView] = useState<false | "flow">(false);
   const [reason, setReason] = useState("");
-  const [password, setPassword] = useState("");
   const [totpCode, setTotpCode] = useState("");
   const [confirmCompensation, setConfirmCompensation] = useState(false);
-  const passwordId = useId();
-  const totpId = useId();
-  const stepUpReady = password.length >= 12 && /^\d{6}$/.test(totpCode);
-  const [recall, setRecall] = useState("");
   const [editRequested, setEditRequested] = useState(false);
-  const editId = useId();
-  const depositId = useId();
-  const [finalPayload, setFinalPayload] = useState<EntitlementAmendmentPayload | null>(null);
+  const [finalPayload, setFinalPayload] = useState<EntitlementAmendmentPayload | null>(
+    () => detail.entitlementAmendment?.editablePayload ?? null,
+  );
   const [depositAllowanceInput, setDepositAllowanceInput] = useState(() => {
     const payload = detail.entitlementAmendment?.editablePayload;
     return payload?.depositAllowanceCents && payload.depositAllowanceCents !== "0" && !payload?.depositWaived
       ? formatCentsToYuan(payload.depositAllowanceCents)
       : "";
   });
-  const canEdit = kind === "approve" && detail.entitlementAmendment != null;
+  const totpId = useId();
+  const reasonId = useId();
+  const editId = useId();
+  const depositId = useId();
+
+  const actions = detail.actions;
+  const highImpact = isHighImpactOperation(detail.operation.code);
+  const status = requestStatusView({ status: detail.status, operationCode: detail.operation.code, business: detail.business });
+  const title = detail.business?.businessTitle ?? OPERATION_FALLBACK_TITLE(detail.operation.code);
+  const summaryLine = detail.business?.changeSummary || detail.summary;
+
+  const canApproveAction = canAct(actions, "approve");
+  const canRejectAction = canAct(actions, "reject");
+  const canWithdrawAction = canAct(actions, "withdraw");
+  const decisionAvailable = canApprove && (canApproveAction || canRejectAction || canWithdrawAction);
+
+  const approveBlockReason = actionBlockReason(actions, "approve");
+  const contentChanged = actionFor(actions, "approve")?.reasonCode === "OBJECT_VERSION_CHANGED"
+    || Boolean(detail.statusReason && /变化|被修改|不一致/.test(detail.statusReason));
+  const settlementAwaitingOrder = detail.operation.code === "order.settlement.adjust"
+    && detail.status === "APPROVED" && detail.business?.settlementResult?.posted !== true;
+
+  const refs = detail.business?.objectRefs ?? [];
+  const sourcePath = refs.map((ref) => objectRefPath(ref)).find((path): path is string => path !== null) ?? null;
+
+  const canEdit = canApproveAction && detail.entitlementAmendment != null;
   const allowanceValid = !depositAllowanceInput || /^(0|[1-9]\d*)(\.\d{1,2})?$/.test(depositAllowanceInput.trim());
   const editError = editRequested && finalPayload
     ? entitlementWindowError(finalPayload.startsAtUtc, finalPayload.endsAtUtc)
@@ -250,461 +130,241 @@ function DecisionDialog({
       || (!allowanceValid ? "押金减免额度须为合法人民币金额（最多2位小数）" : "")
       || (finalPayload.reason.trim().length < 2 ? "请填写礼遇办理原因" : "")
     : "";
-  const change = detail.business?.changeSummary ?? detail.summary;
-  const recallTarget = detail.summary.slice(0, 8);
-  const rejectRequiresReason = kind === "reject";
+
+  const buildAmendment = (): ApprovalDecisionAmendment | undefined => {
+    if (!canEdit || !editRequested || !finalPayload) return undefined;
+    const base = { ...finalPayload };
+    const trimmed = depositAllowanceInput.trim();
+    if (base.depositWaived) { if (base.depositAllowanceCents !== undefined) base.depositAllowanceCents = "0"; }
+    else if (trimmed && /^(0|[1-9]\d*)(\.\d{1,2})?$/.test(trimmed)) {
+      const [whole = "0", fraction = ""] = trimmed.split(".");
+      base.depositAllowanceCents = (BigInt(whole) * 100n + BigInt(fraction.padEnd(2, "0"))).toString();
+      base.depositWaived = false;
+    } else if (base.depositAllowanceCents !== undefined) base.depositAllowanceCents = "0";
+    return { expectedPayloadHash: detail.entitlementAmendment!.expectedPayloadHash, finalPayload: base };
+  };
+
+  const totpReady = !highImpact || /^\d{6}$/.test(totpCode);
+  const rejectReady = reason.trim().length >= 3;
+  const approveDisabled = busy || blocked || !canApproveAction || !totpReady || Boolean(editError);
+
+  const runApprove = () => {
+    if (approveDisabled) return;
+    const code = totpCode; setTotpCode("");
+    onDecide("APPROVE", reason.trim(), highImpact ? code : undefined, buildAmendment());
+    setReason(""); setEditRequested(false);
+  };
+  const clickApprove = () => {
+    if (approveDisabled) return;
+    if (detail.operation.code === "order.compensation.grant") setConfirmCompensation(true);
+    else runApprove();
+  };
+  const clickReject = () => {
+    if (busy || blocked || !canRejectAction || !rejectReady) return;
+    onDecide("REJECT", reason.trim());
+    setReason("");
+  };
+  const clickWithdraw = () => {
+    if (busy || blocked || !canWithdrawAction) return;
+    onWithdraw?.(reason.trim());
+    setReason("");
+  };
+
   const compensationAmount = detail.business?.compensation?.amountCents;
-  const compensationReady = detail.operation.code !== 'order.compensation.grant' || kind !== 'approve' || typeof compensationAmount === 'string' && /^[1-9]\d{0,15}$/.test(compensationAmount);
-  const disabled = Boolean(editError) || !stepUpReady || !compensationReady || (kind === null
-    ? true
-    : rejectRequiresReason
-      ? reason.trim().length < 3
-      : kind === "execute"
-        ? recall.trim() !== recallTarget
-        : false);
-
-  useEffect(() => {
-    setEditRequested(false);
-    const payload = detail.entitlementAmendment?.editablePayload ?? null;
-    setFinalPayload(payload);
-    const initialCents = payload?.depositAllowanceCents;
-    if (initialCents && initialCents !== "0" && !payload?.depositWaived) {
-      setDepositAllowanceInput(formatCentsToYuan(initialCents));
-    } else {
-      setDepositAllowanceInput("");
-    }
-    if (kind === null) { setReason(""); setRecall(""); setPassword(""); setTotpCode(""); setConfirmCompensation(false); }
-  }, [kind, detail.requestId, detail.entitlementAmendment?.editablePayload]);
-
-  const title = kind === "approve" ? "确认批准" : kind === "reject" ? "确认驳回" : kind === "withdraw" ? "确认撤回申请" : "确认执行";
-  const consequence = kind === "approve"
-    ? detail.operation.code === 'order.compensation.grant' ? '确认批准后，系统将在同一事务内将赔偿记入该订单号主的可用余额。' : (detail.business?.executionMode === "SOURCE_BUSINESS"
-      ? "批准后本申请进入待执行；本业务由来源流程完成双方确认、客服复核与过账，审批页不会代为到账。"
-      : "批准后本申请进入待执行；执行是独立步骤，批准不代表执行完成或资金到账。")
-    : kind === "reject"
-      ? "驳回后原申请关闭且不会复活；如需再次办理请由来源业务重新发起。"
-      : kind === "withdraw"
-        ? "撤回后申请关闭（已撤回），审批人不能再处理；撤回动作写入审计，如需再次办理请重新发起。"
-      : "执行结果单独记录，不可撤销。执行成功只代表本次执行完成，业务对象是否生效以领域结果为准。";
-
-  const submitDecision = () => {
-    if (!kind || disabled) return;
-    const amendment = canEdit && editRequested && finalPayload ? {
-      expectedPayloadHash: detail.entitlementAmendment!.expectedPayloadHash,
-      finalPayload: (() => {
-        const base = { ...finalPayload }, trimmed = depositAllowanceInput.trim();
-        if (base.depositWaived) { if (base.depositAllowanceCents !== undefined) base.depositAllowanceCents = "0"; }
-        else if (trimmed && /^(0|[1-9]\d*)(\.\d{1,2})?$/.test(trimmed)) {
-          const [whole = "0", fraction = ""] = trimmed.split(".");
-          base.depositAllowanceCents = (BigInt(whole) * 100n + BigInt(fraction.padEnd(2, "0"))).toString(); base.depositWaived = false;
-        } else if (base.depositAllowanceCents !== undefined) base.depositAllowanceCents = "0";
-        return base;
-      })()
-    } : undefined;
-    const stepUp = { password, totpCode }; setPassword(""); setTotpCode("");
-    onSubmit(kind, reason.trim(), stepUp, amendment);
-  };
-
-  return (<>
-    <Dialog open={kind !== null} onOpenChange={(open) => { if (!open) onClose(); }}>
-      <DialogContent>
-        <DialogTitle>{title}</DialogTitle>
-        <DialogDescription>{consequence}</DialogDescription>
-        <div className="space-y-3 text-xs">
-          <div className="space-y-1.5 rounded-md border border-border bg-foreground/[0.02] p-3">
-            <p className="text-sm font-medium text-foreground">{detail.business?.businessTitle ?? "业务摘要暂不可用"}</p>
-            <p className="leading-relaxed break-words text-muted-foreground">{change}</p>
-            <p><span className="text-muted-foreground">申请人：</span>{personLabel(detail.requester)}</p>
-            <p><span className="text-muted-foreground">申请编号：</span><span className="font-mono break-all">{detail.requestId}</span></p>
-            {detail.business?.objectRefs?.length ? (
-              <p className="break-words">
-                <span className="text-muted-foreground">作用对象：</span>
-                {detail.business.objectRefs.filter((ref) => ref.id).map((ref) => `${objectRefLabel(ref.type)} ${ref.id}`).join("；")}
-              </p>
-            ) : null}
-            <p><span className="text-muted-foreground">载荷哈希：</span><span className="font-mono break-all">{detail.operation.payloadHash}</span></p>
-          </div>
-          {canEdit ? <div className="space-y-3 rounded-md border border-border p-3">
-            <div className="flex items-center gap-2"><Checkbox id={editId} checked={editRequested} onCheckedChange={checked => setEditRequested(checked === true)} /><label htmlFor={editId}>调整礼遇后批准</label></div>
-            {editRequested && finalPayload ? <div className="space-y-3">
-              <p className="text-xs text-muted-foreground">保留原申请；以下内容将作为本次最终批准结果。</p>
-              <label className="block space-y-1.5"><FieldLabel>应付比例</FieldLabel><Input aria-label="批准应付比例" inputMode="decimal" value={finalPayload.pricing.payableRatio} onChange={event => setFinalPayload({ ...finalPayload, pricing: { ...finalPayload.pricing, payableRatio: event.target.value } })} /></label>
-              <p className="text-[11px] text-muted-foreground">
-                适用范围：{finalPayload.pricing.scope === "ALL_ENABLED_RENTAL_MODES"
-                  ? "全部已启用租赁方式统一"
-                  : typeof finalPayload.pricing.mode === "string"
-                    ? `旧版 · ${({ ordinary: "普通", custom: "自定义", fast: "极速" } as Record<string, string>)[finalPayload.pricing.mode] ?? finalPayload.pricing.mode}`
-                    : "范围待核"}（不可修改）。受益人、游戏、礼遇类型、政策与成本引用同样不可修改。
-              </p>
-              <MembershipDateTimeField label="批准开始时间" value={finalPayload.startsAtUtc} onChange={value => setFinalPayload({ ...finalPayload, startsAtUtc: value })} />
-              <MembershipDateTimeField label="批准结束时间" value={finalPayload.endsAtUtc} onChange={value => setFinalPayload({ ...finalPayload, endsAtUtc: value })} />
-              <div className="space-y-2">
-                <div className="flex items-center gap-2"><Checkbox id={depositId} checked={finalPayload.depositWaived} onCheckedChange={checked => { setFinalPayload({ ...finalPayload, depositWaived: checked === true }); if (checked) setDepositAllowanceInput(""); }} /><label htmlFor={depositId}>独立免押</label></div>
-                {!finalPayload.depositWaived ? (
-                  <label className="block space-y-1.5"><FieldLabel>押金减免额度（元）</FieldLabel><Input aria-label="批准押金减免额度" inputMode="decimal" placeholder="0 表示不减免" value={depositAllowanceInput} onChange={event => setDepositAllowanceInput(event.target.value)} /></label>
-                ) : null}
-              </div>
-              <label className="block space-y-1.5"><FieldLabel>办理原因</FieldLabel><Textarea aria-label="批准礼遇原因" value={finalPayload.reason} maxLength={500} onChange={event => setFinalPayload({ ...finalPayload, reason: event.target.value })} /></label>
-              {editError ? <p role="alert" className="text-destructive">{editError}</p> : null}
-            </div> : null}
-          </div> : null}
-          {kind === "withdraw" ? (
-            <label className="block space-y-1.5">
-              <FieldLabel>{`撤回原因（可选，最多 ${REASON_MAX} 字）`}</FieldLabel>
-              <Textarea value={reason} rows={2} maxLength={REASON_MAX} onChange={(event) => setReason(event.target.value)} placeholder="例如：信息填错，稍后重新提交" />
-            </label>
-          ) : null}
-          {kind === "approve" || kind === "reject" ? (
-            <label className="block space-y-1.5">
-              <FieldLabel>{rejectRequiresReason ? `驳回原因（必填，至少 3 字，最多 ${REASON_MAX} 字）` : `批准意见（可选，最多 ${REASON_MAX} 字）`}</FieldLabel>
-              <Textarea
-                value={reason} rows={2} maxLength={REASON_MAX}
-                onChange={(event) => setReason(event.target.value)}
-                placeholder={rejectRequiresReason ? "说明驳回依据" : "补充说明（可选）"}
-              />
-            </label>
-          ) : null}
-          {kind === "execute" ? (
-            <>
-              <div className="space-y-1 rounded-md border border-border bg-foreground/[0.02] p-2.5">
-                <p className="text-[11px] text-muted-foreground">申请摘要原文（复述前 8 字以确认本次执行对象）</p>
-                <p className="leading-relaxed"><span className="font-medium text-foreground">{detail.summary.slice(0, 8)}</span>{detail.summary.slice(8)}</p>
-              </div>
-              <label className="block space-y-1.5">
-                <FieldLabel>复述申请摘要前 8 字以确认：{recallTarget}</FieldLabel>
-                <Input value={recall} onChange={(event) => setRecall(event.target.value)} className="font-mono" placeholder="复述摘要前 8 字" />
-              </label>
-            </>
-          ) : null}
-          <div className="space-y-3 rounded-md border border-border p-3">
-            <p className="text-[11px] leading-relaxed text-muted-foreground">高风险操作需本人实时复核：输入登录密码与身份验证器中的 6 位动态码。</p>
-            <div className="grid gap-3 sm:grid-cols-2">
-              <div className="space-y-1.5">
-                <label htmlFor={passwordId}><FieldLabel>本人密码</FieldLabel></label>
-                <PasswordInput id={passwordId} autoComplete="current-password" value={password} onChange={(event) => setPassword(event.target.value)} className="h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm" />
-              </div>
-              <div className="space-y-1.5">
-                <label htmlFor={totpId}><FieldLabel>6 位动态验证码</FieldLabel></label>
-                <Input id={totpId} inputMode="numeric" autoComplete="one-time-code" maxLength={6} value={totpCode} onChange={(event) => setTotpCode(event.target.value.replace(/\D/g, "").slice(0, 6))} className="font-mono tracking-widest" />
-              </div>
-            </div>
-            <StepUpCaptcha />
-          </div>
-        </div>
-        <DialogFooter>
-          <DialogClose render={<Button variant="secondary" size="sm" />}>取消</DialogClose>
-          <Button type="button" size="sm" variant={kind === "approve" ? "primary" : kind === "withdraw" ? "secondary" : "danger"} disabled={disabled} onClick={() => { if (kind === 'approve' && detail.operation.code === 'order.compensation.grant') setConfirmCompensation(true); else submitDecision(); }}>
-            {kind === "approve" ? "确认批准" : kind === "reject" ? "确认驳回" : kind === "withdraw" ? "确认撤回" : "确认执行"}
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
-    <ConfirmAlertDialog open={confirmCompensation} onOpenChange={setConfirmCompensation} contentLabel="确认包赔入账" title="确认批准并入账？"
-      description={`赔偿 ${financeMoney(detail.business?.compensation?.amountCents)} 将记入本单号主余额；请核对事故与依据。`}
-      confirmLabel="确认批准并入账" cancelLabel="返回核对" onConfirm={()=>{setConfirmCompensation(false);submitDecision();}}/>
-  </>);
-}
-
-function ActionButton({ eligibility, busy, blocked, onClick }: { eligibility: ActionEligibility; busy: boolean; blocked: boolean; onClick: () => void }) {
-  const label = ACTION_LABELS[eligibility.action] ?? eligibility.action;
-  const block = eligibility.allowed ? null : actionBlockReason([eligibility], eligibility.action);
-  // 只有真正可办理时才给饱和色：禁用态用中性 secondary，避免危险色成为页面唯一的高饱和块。
-  const variant = !eligibility.allowed
-    ? "secondary"
-    : eligibility.action === "reject"
-      ? "danger"
-      : eligibility.action === "approve" || eligibility.action === "execute"
-        ? "primary"
-        : "secondary";
-  const button = (
-    <Button
-      type="button" size="sm" variant={variant}
-      loading={busy && eligibility.allowed}
-      disabled={!eligibility.allowed || busy || blocked}
-      onClick={onClick}
-    >
-      {label}
-    </Button>
-  );
-  if (!block) return button;
-  return (
-    <Tooltip>
-      <TooltipTrigger render={<span tabIndex={0} className="inline-flex cursor-not-allowed focus-visible:outline-solid focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring" />}>{button}</TooltipTrigger>
-      <TooltipContent className="max-w-64">{block}</TooltipContent>
-    </Tooltip>
-  );
-}
-
-export function RequestDetail({
-  detail, busy, blocked, onOpenRequest, onOpenPath, onLocateRecovery, onDecide, onExecute, onAppend, onWithdraw,
-}: {
-  detail: Detail;
-  busy: boolean;
-  blocked: boolean;
-  onOpenRequest: (requestId: string, title: string) => void;
-  /** 跨对象导航由工作区壳提供；未透传时来源对象只列标识，不渲染死按钮。 */
-  onOpenPath?: (path: string, title: string) => void;
-  onLocateRecovery?: () => void;
-  onDecide: (decision: "APPROVE" | "REJECT", reason: string, stepUp: ApprovalStepUp, amendment?: ApprovalDecisionAmendment) => void;
-  onExecute: (stepUp: ApprovalStepUp) => void;
-  onAppend: (username: string, reason: string) => void;
-  onWithdraw?: (reason: string, stepUp: ApprovalStepUp) => void;
-}) {
-  const [dialog, setDialog] = useState<DialogKind | null>(null);
-  const [flowView, setFlowView] = useState<"flow" | "timeline">("flow");
-  const [flowExpanded, setFlowExpanded] = useState(true);
-  const status = statusView(detail.status);
-  const execution = executionProgress(detail);
-  const progress = businessProgress(detail.business);
-  const actions = detail.actions;
-  const unknownActions = (actions ?? []).filter((item) => !item || !(APPROVAL_ACTION_NAMES as readonly string[]).includes(item.action));
-  const listed = APPROVAL_ACTION_NAMES.filter((name) => actionFor(actions, name) !== null);
-  const refs = detail.business?.objectRefs ?? [];
-  // 来源业务回链：结算调整由来源订单流程消费，替代申请也必须由来源业务重新发起。
-  const sourcePath = refs.map((ref) => objectRefPath(ref)).find((path): path is string => path !== null) ?? null;
-  const sourceBusiness = (detail.operation.executionMode ?? detail.business?.executionMode) === "SOURCE_BUSINESS";
-  // 只显示真能办的动作；其余不可用原因按原因文案合并进「查看限制」，不摆一排灰按钮。
-  const actionable = listed.filter((name) => name !== "addCandidate" && canAct(actions, name));
-  // 撤回只对申请人/Boss 有意义：不可撤回时不进限制说明，避免审批人看到无关噪音。
-  const blockedNames = listed.filter((name) => !canAct(actions, name) && name !== "withdraw");
-  const blockedReasonGroups = new Map<string, string[]>();
-  for (const name of blockedNames) {
-    const reason = actionBlockReason(actions, name) ?? "原因未提供";
-    const group = blockedReasonGroups.get(reason) ?? [];
-    group.push(ACTION_LABELS[name] ?? name);
-    blockedReasonGroups.set(reason, group);
-  }
-  const isTerminal = detail.status === "EXPIRED" || detail.status === "CANCELLED" || detail.status === "REJECTED";
-  const blockedTitle = detail.statusReason
-    || (detail.status === "EXPIRED" ? "申请已过期，未作出审批决定"
-      : detail.status === "CANCELLED" ? "申请已被替代或取消"
-        : detail.status === "REJECTED" ? "申请已驳回"
-          : "当前不能批准、驳回或执行");
-  const executeNext = nextStepLabel(actionFor(actions, "execute")?.nextStepCode);
-  const blockedNext = executeNext
-    || (isTerminal ? (sourceBusiness ? "如需再次办理，请回到来源业务重新发起。" : "如需再次办理，请由来源业务重新发起。") : "当前不能办理；具体原因见下方限制说明。");
-  const reasonList = (
-    <ul aria-label="操作限制" className="mt-1 space-y-0.5 text-xs leading-relaxed text-muted-foreground">
-      {[...blockedReasonGroups].map(([reason, labels]) => <li key={reason}>{labels.join("、")}：{reason}</li>)}
-    </ul>
-  );
-  const renderActionButton = (name: string) => {
-    const eligibility = actionFor(actions, name)!;
-    if (name === "replace") {
-      // 替代：由来源业务重新发起并带 supersedesRequestId；单纯撤回走 withdraw。
-      return (
-        <Button key={name} type="button" size="sm" variant="secondary" disabled={busy || blocked || sourcePath === null || !onOpenPath}
-          onClick={() => { if (sourcePath && onOpenPath) onOpenPath(sourcePath, "重新发起（替代本申请）"); }}>返回来源业务</Button>
-      );
-    }
-    return (
-      <ActionButton key={name} eligibility={eligibility} busy={busy} blocked={blocked}
-        onClick={() => setDialog(name === "approve" ? "approve" : name === "reject" ? "reject" : name === "withdraw" ? "withdraw" : "execute")} />
-    );
-  };
-  const guide = blocked ? "这次办理的原结果尚待核对，请先查询原结果，再决定是否继续。"
-    : busy ? "正在办理或核对这次请求，请稍候。"
-      : canAct(actions, "approve") || canAct(actions, "reject") ? "请先核对本次事项，再选择批准或驳回。"
-        : canAct(actions, "execute") ? "已具备本次执行资格；核对后通过原确认框执行。"
-          : sourceBusiness ? nextStepLabel(actionFor(actions, "execute")?.nextStepCode) ?? "后续由来源业务办理，请前往来源对象核对。"
-            : actions === undefined ? "本次操作资格暂未确认，当前只能查看。"
-              : "当前不能批准、驳回或执行；请按下方具体原因核对。";
-
 
   return (
     <div className="space-y-5">
+      {/* 页头 */}
       <div className="space-y-2">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div className="min-w-0">
-            <h3 className="text-base font-semibold break-words text-foreground">{detail.business?.businessTitle ?? "业务摘要暂不可用"}</h3>
-            <p className="mt-1 text-sm leading-relaxed break-words text-muted-foreground">{detail.business?.changeSummary || detail.summary}</p>
-          </div>
-          <div className="flex flex-wrap items-center gap-2"><Badge variant="outline">{executionModeLabel(detail.operation.executionMode ?? detail.business?.executionMode)}</Badge></div>
-        </div>
-        <dl aria-label="申请基本信息" className="grid grid-cols-1 gap-x-6 gap-y-3 text-xs sm:grid-cols-3">
-          <div><dt className="text-muted-foreground">申请人</dt><dd className="mt-1">{personLabel(detail.requester)}</dd></div>
-          <div><dt className="text-muted-foreground">申请时间（北京时间）</dt><dd className="mt-1">{formatDate(detail.createdAt)}</dd></div>
-          <div><dt className="text-muted-foreground">申请有效期至（北京时间）</dt><dd className="mt-1">{formatDate(detail.expiresAt)}</dd></div>
-        </dl>
-      </div>
-
-      {/* 审批状态 / 执行状态 / 业务进度分列，不用连续 Stepper 暗示必然成功。 */}
-      <div className="grid grid-cols-1 gap-4 rounded-md border border-border/60 bg-foreground/[0.02] p-3 sm:grid-cols-3">
-        <StatusFact label="审批状态" tone={status.tone}>
-          {status.label}
-          {detail.statusReason ? <span className="ml-1.5 font-normal text-muted-foreground">{detail.statusReason}</span> : null}
-        </StatusFact>
-        <StatusFact label="执行状态" tone={execution.tone}>
-          {execution.label}
-          {execution.detail ? <span className="ml-1.5 font-normal text-muted-foreground">{execution.detail}</span> : null}
-        </StatusFact>
-        <StatusFact label="业务进度" tone={progress.tone}>
-          {progress.label}
-          {progress.detail ? <span className="ml-1.5 font-normal text-muted-foreground">{progress.detail}</span> : null}
-        </StatusFact>
-      </div>
-
-      <section aria-label="审批流程" className="space-y-3">
-        <div className="flex flex-wrap items-start justify-between gap-3">
-          <div>
-            <h3 className="text-sm font-semibold">审批流程</h3>
-            <p className="mt-1 text-xs leading-relaxed text-muted-foreground">默认选中当前环节；点击节点在下方核对该步事实与办理动作。时间线是同一过程的审计视图。</p>
+            <h3 className="text-base font-semibold break-words text-foreground">{title}</h3>
+            <p className="mt-1 text-sm leading-relaxed break-words text-muted-foreground">{summaryLine}</p>
           </div>
           <div className="flex flex-wrap items-center gap-2">
-            <div role="group" aria-label="流程视图" className="flex overflow-hidden rounded-md border border-border">
-              <Button type="button" size="sm" variant={flowView === "flow" ? "secondary" : "ghost"} aria-pressed={flowView === "flow"} onClick={() => setFlowView("flow")} className="rounded-none">流程图</Button>
-              <Button type="button" size="sm" variant={flowView === "timeline" ? "secondary" : "ghost"} aria-pressed={flowView === "timeline"} onClick={() => setFlowView("timeline")} className="rounded-none">时间线</Button>
-            </div>
-            <Button type="button" size="sm" variant="secondary" aria-expanded={flowExpanded} onClick={() => setFlowExpanded(value => !value)}>{flowExpanded ? "收起" : "展开"}</Button>
+            <Badge variant={status.tone === "error" ? "destructive" : status.tone === "success" ? "success" : status.tone === "warning" ? "warning" : "outline"}>{status.label}</Badge>
+            <Badge variant="outline">{highImpact ? "高" : detail.operation.code === "order.settlement.adjust" ? "中" : "低"}</Badge>
           </div>
         </div>
-        {flowExpanded ? (
-          flowView === "timeline" ? (
-            <div className="border-t border-border pt-3"><HistoryTimeline history={detail.history} /></div>
-          ) : (
-            <>
-              <RequestFlow detail={detail} />
-              <section aria-label="当前办理" className="rounded-lg border border-border bg-foreground/[0.02] p-4">
-                {blocked && onLocateRecovery ? (
-                  <div className="mb-3"><Button type="button" size="sm" variant="secondary" onClick={onLocateRecovery}>查看原结果核对</Button></div>
-                ) : null}
-                {actions === undefined ? (
-                  <NotApplicable reason="本次操作资格暂未确认，当前只能查看；可刷新后再次核对。" />
-                ) : actionable.length > 0 ? (
-                  <div className="space-y-3">
-                    <p className="text-sm leading-relaxed">{guide}</p>
-                    <div className="flex flex-wrap gap-2">{actionable.map(renderActionButton)}</div>
-                    {blockedNames.length > 0 ? (
-                      <details className="text-xs text-muted-foreground">
-                        <summary className="cursor-pointer">查看部分动作的限制</summary>
-                        {reasonList}
-                      </details>
-                    ) : null}
-                    {unknownActions.length > 0 ? (
-                      <p className="text-xs leading-relaxed text-muted-foreground">这张申请包含本页暂不支持的动作，当前不能办理该项；具体标识可在技术追溯中核对。</p>
-                    ) : null}
-                  </div>
-                ) : (
-                  <Alert variant="warning" role="status">
-                    <TriangleAlert aria-hidden="true" />
-                    <AlertTitle>{blockedTitle}</AlertTitle>
-                    <AlertDescription>
-                      <p className="leading-relaxed">{blockedNext}</p>
-                      {blockedReasonGroups.size > 0 ? (
-                        <details className="mt-2">
-                          <summary className="cursor-pointer text-xs">查看限制</summary>
-                          {reasonList}
-                        </details>
-                      ) : null}
-                      {unknownActions.length > 0 ? (
-                        <p className="mt-2 text-xs leading-relaxed">这张申请包含本页暂不支持的动作，具体标识可在技术追溯中核对。</p>
-                      ) : null}
-                    </AlertDescription>
-                  </Alert>
-                )}
-                {canAct(actions, "addCandidate") ? (
-                  <div className="mt-3">
-                    <AddCandidateForm requestId={detail.requestId} busy={busy} blocked={blocked} onAppend={onAppend} />
-                  </div>
-                ) : null}
-                {sourceBusiness ? (
-                  <div className="mt-3">
-                    <Button type="button" size="sm" variant="secondary" disabled={busy || blocked || sourcePath === null || !onOpenPath}
-                      onClick={() => { if (sourcePath && onOpenPath) onOpenPath(sourcePath, "来源业务"); }}>前往来源业务</Button>
-                  </div>
-                ) : null}
-              </section>
-            </>
-          )
+        <dl aria-label="申请基本信息" className="grid grid-cols-1 gap-x-6 gap-y-3 text-xs sm:grid-cols-2">
+          <div><dt className="text-muted-foreground">申请人</dt><dd className="mt-1">{personLabel(detail.requester)}</dd></div>
+          <div><dt className="text-muted-foreground">提交时间（北京时间）</dt><dd className="mt-1">{formatDate(detail.createdAt)}</dd></div>
+        </dl>
+        {detail.statusReason ? <p className="text-xs text-muted-foreground">{detail.statusReason}</p> : null}
+      </div>
+
+      {/* 申请内容卡（默认展开） */}
+      <section className="rounded-md border border-border/60 p-3">
+        <button type="button" className="flex w-full items-center justify-between gap-2 text-left" aria-expanded={contentOpen} onClick={() => setContentOpen((value) => !value)}>
+          <span className="text-sm font-medium">申请内容</span>
+          <span className="text-xs text-muted-foreground">{contentOpen ? "收起" : "展开"}</span>
+        </button>
+        {contentOpen ? (
+          <div className="mt-4"><BusinessSummary business={detail.business} operationCode={detail.operation.code} /></div>
         ) : null}
+      </section>
+
+      {/* 决定区 */}
+      <section aria-label="决定区" className="space-y-3 rounded-md border border-border/60 p-3">
+        <h3 className="text-sm font-medium">办理</h3>
+
+        {contentChanged ? (
+          <Alert variant="warning" role="status">
+            <TriangleAlert aria-hidden="true" />
+            <AlertDescription>内容已变化，请驳回并请申请人重新提交。</AlertDescription>
+          </Alert>
+        ) : null}
+
+        {settlementAwaitingOrder ? (
+          <Alert variant="info" role="status">
+            <AlertDescription className="flex flex-wrap items-center gap-2">
+              请回订单完成双方确认和过账。
+              {sourcePath && onOpenPath ? <Button type="button" size="sm" variant="secondary" onClick={() => onOpenPath(sourcePath, "来源订单")}>前往订单</Button> : null}
+            </AlertDescription>
+          </Alert>
+        ) : null}
+
+        {blocked && onLocateRecovery ? (
+          <div><Button type="button" size="sm" variant="secondary" onClick={onLocateRecovery}>查看原结果核对</Button></div>
+        ) : null}
+
+        {!decisionAvailable ? (
+          <p className="text-xs leading-relaxed text-muted-foreground" role="status">
+            {!canApprove
+              ? "当前账号没有审批权限，只能查看申请内容。"
+              : detail.statusReason || approveBlockReason || "当前不能批准或驳回；这张申请已处理或你不在可办理范围内。"}
+          </p>
+        ) : (
+          <div className="space-y-3">
+            <label className="block space-y-1.5" htmlFor={reasonId}>
+              <FieldLabel>{canRejectAction ? `办理意见（驳回需至少 3 字，最多 ${REASON_MAX} 字）` : `办理意见（可选，最多 ${REASON_MAX} 字）`}</FieldLabel>
+              <Textarea id={reasonId} value={reason} rows={2} maxLength={REASON_MAX} onChange={(event) => setReason(event.target.value)} placeholder="补充说明（可选）" />
+            </label>
+
+            {highImpact && canApproveAction ? (
+              <div className="space-y-2 rounded-md border border-border p-3">
+                <p className="text-[11px] leading-relaxed text-muted-foreground">这是高影响申请，批准需输入身份验证器中的 6 位动态码。</p>
+                <div className="flex flex-wrap items-end gap-3">
+                  <label className="block space-y-1.5" htmlFor={totpId}>
+                    <FieldLabel>6 位动态验证码</FieldLabel>
+                    <Input id={totpId} aria-label="批准动态验证码" inputMode="numeric" autoComplete="one-time-code" maxLength={6} value={totpCode}
+                      onChange={(event) => setTotpCode(event.target.value.replace(/\D/g, "").slice(0, 6))} className="w-40 font-mono tracking-widest" />
+                  </label>
+                </div>
+              </div>
+            ) : null}
+
+            {canEdit ? (
+              <details className="rounded-md border border-border/60 p-3 text-xs">
+                <summary className="cursor-pointer">调整礼遇后批准</summary>
+                <div className="mt-3 space-y-3">
+                  <div className="flex items-center gap-2"><Checkbox id={editId} checked={editRequested} onCheckedChange={(checked) => setEditRequested(checked === true)} /><label htmlFor={editId}>按调整后的内容批准</label></div>
+                  {editRequested && finalPayload ? (
+                    <>
+                      <p className="text-muted-foreground">保留原申请；以下内容作为本次最终批准结果。</p>
+                      <label className="block space-y-1.5"><FieldLabel>应付比例</FieldLabel><Input aria-label="批准应付比例" inputMode="decimal" value={finalPayload.pricing.payableRatio} onChange={(event) => setFinalPayload({ ...finalPayload, pricing: { ...finalPayload.pricing, payableRatio: event.target.value } })} /></label>
+                      <MembershipDateTimeField label="批准开始时间" value={finalPayload.startsAtUtc} onChange={(value) => setFinalPayload({ ...finalPayload, startsAtUtc: value })} />
+                      <MembershipDateTimeField label="批准结束时间" value={finalPayload.endsAtUtc} onChange={(value) => setFinalPayload({ ...finalPayload, endsAtUtc: value })} />
+                      <div className="flex items-center gap-2"><Checkbox id={depositId} checked={finalPayload.depositWaived} onCheckedChange={(checked) => { setFinalPayload({ ...finalPayload, depositWaived: checked === true }); if (checked) setDepositAllowanceInput(""); }} /><label htmlFor={depositId}>独立免押</label></div>
+                      {!finalPayload.depositWaived ? <label className="block space-y-1.5"><FieldLabel>押金减免额度（元）</FieldLabel><Input aria-label="批准押金减免额度" inputMode="decimal" placeholder="0 表示不减免" value={depositAllowanceInput} onChange={(event) => setDepositAllowanceInput(event.target.value)} /></label> : null}
+                      <label className="block space-y-1.5"><FieldLabel>办理原因</FieldLabel><Textarea aria-label="批准礼遇原因" value={finalPayload.reason} maxLength={500} onChange={(event) => setFinalPayload({ ...finalPayload, reason: event.target.value })} /></label>
+                      {editError ? <p role="alert" className="text-destructive">{editError}</p> : null}
+                    </>
+                  ) : null}
+                </div>
+              </details>
+            ) : null}
+
+            <div className="flex flex-wrap gap-2">
+              {canApproveAction ? <Button type="button" size="sm" variant="primary" loading={busy && canApproveAction} disabled={approveDisabled} onClick={clickApprove}>确认批准</Button> : null}
+              {canRejectAction ? <Button type="button" size="sm" variant="danger" disabled={busy || blocked || !rejectReady} onClick={clickReject}>确认驳回</Button> : null}
+              {canWithdrawAction && onWithdraw ? <Button type="button" size="sm" variant="secondary" disabled={busy || blocked} onClick={clickWithdraw}>撤回申请</Button> : null}
+            </div>
+            {canApproveAction && !totpReady ? <p className="text-xs text-muted-foreground">请输入 6 位动态验证码后再批准。</p> : null}
+          </div>
+        )}
+      </section>
+
+      {/* 缩小的流程或时间线 */}
+      <section aria-label="流程与时间线" className="space-y-2">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <h3 className="text-sm font-medium">办理时间线</h3>
+          <Button type="button" size="sm" variant="ghost" aria-pressed={flowView === "flow"} onClick={() => setFlowView((value) => value === "flow" ? false : "flow")}>{flowView === "flow" ? "收起流程图" : "查看流程图"}</Button>
+        </div>
+        {flowView === "flow" ? (
+          <div className="rounded-lg border border-border p-2"><RequestFlow detail={detail} /></div>
+        ) : (
+          <div className="rounded-lg border border-border bg-foreground/[0.02] p-3"><CompactTimeline history={detail.history} /></div>
+        )}
       </section>
 
       {detail.supersedesRequestId || detail.supersededByRequestId ? (
         <div className="flex flex-wrap items-center gap-2 rounded-md border border-border/60 p-3 text-xs">
           {detail.supersededByRequestId ? <span className="text-foreground">本申请已被另一申请替代，不再推进。</span> : null}
-          {detail.supersedesRequestId ? (
-            <Button type="button" size="sm" variant="secondary" onClick={() => onOpenRequest(detail.supersedesRequestId!, "被替代的原申请")}>查看被替代的原申请</Button>
-          ) : null}
-          {detail.supersededByRequestId ? (
-            <Button type="button" size="sm" variant="secondary" onClick={() => onOpenRequest(detail.supersededByRequestId!, "替代本申请的审批申请")}>查看替代申请</Button>
-          ) : null}
+          {detail.supersedesRequestId ? <Button type="button" size="sm" variant="secondary" onClick={() => onOpenRequest(detail.supersedesRequestId!, "被替代的原申请")}>查看被替代的原申请</Button> : null}
+          {detail.supersededByRequestId ? <Button type="button" size="sm" variant="secondary" onClick={() => onOpenRequest(detail.supersededByRequestId!, "替代本申请的申请")}>查看替代申请</Button> : null}
         </div>
       ) : null}
 
-      <details data-approval-business-details className="rounded-md border border-border/60 p-3">
-        <summary className="cursor-pointer text-sm font-medium">申请明细与业务结果</summary>
-        <div className="mt-4 space-y-5"><BusinessSummary business={detail.business} operationCode={detail.operation.code} /></div>
-      </details>
-
+      {/* 作用对象：没有可跳转页面的类型只列名称，不造死按钮、不说无导航 */}
       {refs.length > 0 ? (
-        <Section title="作用对象与去向" hint="链接只指向平台内已有对象页；没有对应页面的类型只列标识，不拼技术 ID 造入口。">
+        <section className="space-y-2">
+          <h3 className="text-sm font-medium">涉及对象</h3>
           <ul className="flex flex-wrap gap-1.5">
             {refs.filter((ref) => ref.id).map((ref) => {
               const path = objectRefPath(ref);
               return (
                 <li key={`${ref.type}-${ref.id}`}>
                   {path && onOpenPath
-                    ? <Button type="button" size="sm" variant="secondary" title={ref.id ?? undefined} onClick={() => onOpenPath(path, objectRefLabel(ref.type))}>{objectRefLabel(ref.type)}<span className="font-mono text-xs opacity-70">{shortId(ref.id ?? "")}</span></Button>
-                    : <Badge variant="outline" title={ref.id ?? undefined}>{objectRefLabel(ref.type)}<span className="font-mono text-xs opacity-70">{shortId(ref.id ?? "")}</span></Badge>}
+                    ? <Button type="button" size="sm" variant="secondary" onClick={() => onOpenPath(path, objectRefLabel(ref.type))}>{objectRefLabel(ref.type)}</Button>
+                    : <Badge variant="outline">{objectRefLabel(ref.type)}</Badge>}
                 </li>
               );
             })}
           </ul>
-          {sourcePath === null || !onOpenPath ? (
-            <p className="text-xs text-muted-foreground">
-              {detail.business?.executionMode === "SOURCE_BUSINESS"
-                ? "结算调整的结果由来源订单流程消费；请从上方订单对象进入完成双方确认、客服复核与过账，审批页不提供通用执行。"
-                : "这些对象类型当前没有可跳转的平台页面，只列出标识供核对。"}
-              {sourcePath !== null && !onOpenPath ? " 工作区尚未提供跨对象导航，请从左侧导航进入对应页面。" : ""}
-            </p>
-          ) : null}
-        </Section>
+        </section>
       ) : null}
 
-
+      {/* 技术详情：折叠到页脚，默认不显示编号/触发条件/哈希/事件编码 */}
       <details className="rounded-md border border-border/60 p-3">
-        <summary className="cursor-pointer text-sm font-medium">候选名单与资格说明</summary>
-        <div className="mt-3"><Candidates candidates={detail.candidates} availability={detail.candidateAvailability} /></div>
+        <summary className="cursor-pointer text-sm font-medium">技术详情</summary>
+        <div className="mt-3 space-y-3 text-xs">
+          <FactGrid>
+            <Fact label="申请编号" value={detail.requestId} mono />
+            <Fact label="业务操作" value={detail.operation.code} mono />
+            <Fact label="触发条件" value={detail.operation.triggerCondition} mono />
+            <Fact label="载荷版本" value={`v${detail.operation.payloadVersion}`} />
+            <Fact label="内容校验值" value={detail.operation.payloadHash} mono />
+            <Fact label="模板版本" value={`v${detail.template.version}`} />
+          </FactGrid>
+          {detail.history.length > 0 ? (
+            <p className="break-all text-muted-foreground">事件编码：{detail.history.map((event) => event.action).join("、")}</p>
+          ) : null}
+          {detail.operation.payload ? (
+            <>
+              <FieldLabel>载荷正文（仅测试操作返回脱敏正文）</FieldLabel>
+              <pre className="overflow-x-auto whitespace-pre-wrap break-words rounded-md bg-foreground/[0.04] p-2 font-mono text-[11px]">{JSON.stringify(detail.operation.payload, null, 2)}</pre>
+            </>
+          ) : null}
+        </div>
       </details>
 
-      <Section title="技术追溯">
-        <details className="rounded-md border border-border/60 px-3 py-2 text-xs">
-          <summary className="cursor-pointer select-none text-muted-foreground">载荷快照与模板标识</summary>
-          <div className="mt-2">
-            <FactGrid>
-              <Fact label="申请编号" value={detail.requestId} mono />
-              <Fact label="操作标识" value={detail.operation.code} mono />
-              <Fact label="触发条件" value={detail.operation.triggerCondition} mono />
-              <Fact label="载荷版本" value={`v${detail.operation.payloadVersion}`} />
-              <Fact label="模板快照版本" value={`v${detail.template.version}`} />
-              {unknownActions.length > 0 ? <Fact label="未识别动作" value={unknownActions.map(item => item.action).join("、")} mono /> : null}
-            </FactGrid>
-            <p className="mt-2 text-xs text-muted-foreground">动作资格与原因来自服务端 actions；本页只作展示，实际办理时仍会重新核对权限、对象和状态。</p>
-            {detail.operation.payload ? (
-              <>
-                <FieldLabel>不可变载荷（仅测试操作返回脱敏正文）</FieldLabel>
-                <pre className="overflow-x-auto whitespace-pre-wrap break-words rounded-md bg-foreground/[0.04] p-2 font-mono text-[11px]">{JSON.stringify(detail.operation.payload, null, 2)}</pre>
-              </>
-            ) : (
-              <p className="mt-2 text-xs text-muted-foreground">正式业务的载荷正文不外发；判断依据以上方受权摘要为准。</p>
-            )}
-          </div>
-        </details>
-      </Section>
-
-      <DecisionDialog
-        key={detail.requestId}
-        kind={dialog}
-        detail={detail}
-        onClose={() => setDialog(null)}
-        onSubmit={(kind, reason, stepUp, amendment) => {
-          setDialog(null);
-          if (kind === "approve") onDecide("APPROVE", reason, stepUp, amendment);
-          else if (kind === "reject") onDecide("REJECT", reason, stepUp);
-          else if (kind === "withdraw") onWithdraw?.(reason, stepUp);
-          else onExecute(stepUp);
-        }}
-      />
+      <ConfirmAlertDialog open={confirmCompensation} onOpenChange={setConfirmCompensation} contentLabel="确认包赔入账" title="确认批准并入账？"
+        description={`赔偿 ${financeMoney(compensationAmount)} 将记入本单号主余额；请核对事故与依据。`}
+        confirmLabel="确认批准并入账" cancelLabel="返回核对" onConfirm={() => { setConfirmCompensation(false); runApprove(); }} />
     </div>
   );
+}
+
+function OPERATION_FALLBACK_TITLE(code: string): string {
+  const map: Record<string, string> = {
+    "membership.benefit.policy.publish": "发布会员权益政策",
+    "distribution.policy.publish": "调整分销政策",
+    "order.compensation.grant": "订单全额包赔赔偿",
+    "order.settlement.adjust": "人工调整订单结算",
+    "membership.entitlement.grant": "发放会员礼遇",
+    "membership.entitlement.replace": "替换会员礼遇",
+    "membership.entitlement.revoke": "撤销会员礼遇",
+  };
+  return map[code] ?? "审批申请";
 }

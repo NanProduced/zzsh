@@ -22,22 +22,32 @@ export function BossCrest({ size = 14, className = "" }: { size?: number; classN
   );
 }
 
-/** 一句业务脉搏：只用已有的待审批接口；读不到就不显示。 */
-function useBossPulse(canApprove: boolean, refreshNonce: number): string | undefined {
-  const [pulse, setPulse] = useState<string>();
+/**
+ * 「待我处理」数量：与审批列表用同一个统一接口，跟随 refreshNonce 刷新。
+ * 读不到、无权限或没有待办时返回 undefined，由调用方决定不显示角标。
+ */
+export function useApprovalPendingCount(enabled: boolean, refreshNonce: number): number | undefined {
+  const [count, setCount] = useState<number | undefined>(undefined);
   useEffect(() => {
-    if (!canApprove) return;
+    if (!enabled) { setCount(undefined); return; }
     let alive = true;
-    adminRequest<{ requests?: unknown[] }>("/security/approvals/requests/pending?limit=50")
+    adminRequest<{ pendingCount?: number }>("/security/approvals/requests?scope=pending&limit=1")
       .then((result) => {
-        if (!alive || !Array.isArray(result.requests)) return;
-        const n = result.requests.length;
-        setPulse(n === 0 ? "待您定夺的申请已清空，一切如常。" : `有 ${n >= 50 ? "50+" : n} 件申请等您定夺。`);
+        if (!alive) return;
+        const n = result.pendingCount;
+        setCount(typeof n === "number" && n > 0 ? n : undefined);
       })
-      .catch(() => { if (alive) setPulse(undefined); });
+      .catch(() => { if (alive) setCount(undefined); });
     return () => { alive = false; };
-  }, [canApprove, refreshNonce]);
-  return pulse;
+  }, [enabled, refreshNonce]);
+  return count;
+}
+
+/** 一句业务脉搏：复用统一的待我处理数量；读不到就不显示。 */
+function useBossPulse(canApprove: boolean, refreshNonce: number): string | undefined {
+  const count = useApprovalPendingCount(canApprove, refreshNonce);
+  if (count === undefined) return undefined;
+  return `有 ${count} 件申请等您定夺。`;
 }
 
 export function BossGreeting({ name, canApprove, refreshNonce }: { name: string; canApprove: boolean; refreshNonce: number }) {

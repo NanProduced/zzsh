@@ -44,14 +44,6 @@ function depositBenefitSummary(summary: Record<string, unknown>): string | null 
   return null;
 }
 
-function pricingScopeLabel(pricing: Record<string, unknown>): string {
-  const scope = typeof pricing.scope === "string" ? pricing.scope : null;
-  const mode = typeof pricing.mode === "string" ? pricing.mode : null;
-  if (scope === "ALL_ENABLED_RENTAL_MODES") return "全部已启用租赁方式统一";
-  if (mode) return `旧版 · ${({ ordinary: "普通", custom: "自定义", fast: "极速" } as Record<string, string>)[mode] ?? mode}`;
-  return "范围待核";
-}
-
 function MembershipSummary({ summary }: { summary: Record<string, unknown> }) {
   const pricing = summary.pricingSummary as Record<string, unknown> | undefined;
   const original = summary.originalRequest as Record<string, unknown> | undefined;
@@ -311,8 +303,6 @@ export function BusinessSummary({ business, operationCode }: { business: Busines
   const summary = business.summary;
   const restricted = business.restrictedReasonCodes ?? [];
   const changeSummary = business.changeSummary ?? text(summary ?? {}, "changeSummary");
-  const pricing = business.pricingReference as Record<string, unknown> | undefined;
-  const costBasis = business.costBasis as Record<string, unknown> | undefined;
   const policyOperation = operationCode === "membership.benefit.policy.publish";
   const distributionOperation = operationCode === "distribution.policy.publish";
   const entitlementOperation = ["membership.entitlement.grant", "membership.entitlement.replace", "membership.entitlement.revoke"].includes(operationCode);
@@ -349,18 +339,6 @@ export function BusinessSummary({ business, operationCode }: { business: Busines
             {(entitlementOperation || settlementOperation) && business.game ? <Fact label="游戏" value={business.game.name ?? business.game.id} /> : null}
             <Fact label="申请理由" value={text(summary, "reason")} />
           </FactGrid>
-          <details data-approval-snapshot-technical className="rounded-md border border-border/60 px-3 py-2 text-xs">
-            <summary className="cursor-pointer select-none text-muted-foreground">申请技术依据</summary>
-            <div className="mt-3"><FactGrid>
-              <Fact label="载荷版本" value={typeof summary.payloadVersion === "number" ? "v" + summary.payloadVersion : null} />
-              <Fact label="载荷哈希" value={text(summary, "payloadHash")} mono />
-              {entitlementOperation ? <Fact label="作用范围标识" value={text(summary, "scopeKey")} mono /> : null}
-              {pricing && entitlementOperation ? <Fact label="适用范围" value={pricingScopeLabel(pricing)} /> : null}
-              {entitlementOperation ? <Fact label="关联政策" value={text(summary, "policyId") ? [text(summary, "policyId"), typeof summary.policyVersion === "number" ? "v" + summary.policyVersion : null, text(summary, "policyStatus") ? policyStatusLabel(text(summary, "policyStatus")) : null].filter(Boolean).join(" · ") : null} mono /> : null}
-              {pricing && entitlementOperation ? <Fact label="定价口径引用" value={[pricingScopeLabel(pricing), text(pricing, "priceVersionId"), text(pricing, "costBasisRef"), text(pricing, "schema")].filter(Boolean).join(" · ") || null} mono /> : null}
-              {costBasis ? <Fact label="成本依据" value={[text(costBasis, "priceVersionId"), text(costBasis, "ruleReleaseId")].filter(Boolean).join(" · ") || null} mono /> : null}
-            </FactGrid></div>
-          </details>
           {settlementOperation ? <SettlementCompare summary={summary} /> : null}
           {entitlementOperation ? <FrozenTargets summary={summary} /> : null}
         </Section>

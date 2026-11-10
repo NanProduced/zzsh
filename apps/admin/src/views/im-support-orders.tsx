@@ -526,7 +526,7 @@ export function OrderWorkbenchPane({ identity, adminUserId, operatorName, client
 
           {/* 已结束订单的进度与终态只在顶部阶段条呈现；右栏不再重复状态卡。 */}
           <StageCardAttentionNotice stageCards={Array.isArray(info.stageCards) ? info.stageCards : []} terminal={ended} />
-          {ended ? null : <OrderFulfillmentSection key={info.orderId} orderId={info.orderId} displayNo={info.displayNo} viewerId={adminUserId} orderStatus={info.orderStatus} canManualClose={canManualClose === true && info.members.some((member) => member.party === "STAFF" && member.platformId === adminUserId)} {...(info.frozenInventory ? { frozenInventory: info.frozenInventory } : {})} />}
+          {ended ? null : <OrderFulfillmentSection key={info.orderId} orderId={info.orderId} displayNo={info.displayNo} viewerId={adminUserId} orderStatus={info.orderStatus} canManualClose={canManualClose === true && info.members.some((member) => member.party === "STAFF" && member.platformId === adminUserId)} onOpenPath={onOpenPath} {...(info.frozenInventory ? { frozenInventory: info.frozenInventory } : {})} />}
         </div>
         <Dialog open={groupSettingsOpen} onOpenChange={(open) => { if (!open) closeGroupSettings(); }}>
           <DialogContent className="im-og-settings-dialog" aria-label="群设置" showCloseButton={false}>

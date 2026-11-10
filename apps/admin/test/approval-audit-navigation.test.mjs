@@ -1,3 +1,13 @@
+/**
+ * ADM-APPROVAL-UI-2 · 审批中心导航待办角标（组件层）
+ *
+ * 旧测试覆盖的是「审计记录」页签的筛选 / 分页 / URL 同步 / 审计行跳转，
+ * 该页签及 /audit/events 接口已整体移除。新 UI 只保留一处导航角标：
+ * useApprovalPendingCount 用统一接口 scope=pending&limit=1 读 pendingCount，
+ * 跟随 refreshNonce 刷新，无待办或无权限时不显示。
+ *
+ * 仍然渲染真实组件、拦截真实 fetch 并断言真实 DOM 与真实请求参数。
+ */
 import assert from "node:assert/strict";
 import { after, test } from "node:test";
 import { fileURLToPath } from "node:url";
@@ -8,9 +18,14 @@ import { createServer } from "vite";
 import react from "@vitejs/plugin-react";
 
 const adminRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const browser = new Window({ url: "http://127.0.0.1:4301/workspace/approvals" });
+const browser = new Window({ url: "http://127.0.0.1:3101/workspace/approvals" });
+browser.matchMedia = (query) => ({
+  matches: false, media: query, onchange: null,
+  addListener() {}, removeListener() {}, addEventListener() {}, removeEventListener() {}, dispatchEvent() { return false; },
+});
 globalThis.window = browser;
 globalThis.document = browser.document;
+globalThis.matchMedia = browser.matchMedia;
 globalThis.HTMLElement = browser.HTMLElement;
 globalThis.Element = browser.Element;
 globalThis.ShadowRoot = browser.ShadowRoot;
@@ -25,8 +40,6 @@ globalThis.getComputedStyle = browser.getComputedStyle.bind(browser);
 globalThis.requestAnimationFrame = browser.requestAnimationFrame.bind(browser);
 globalThis.cancelAnimationFrame = browser.cancelAnimationFrame.bind(browser);
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
-// 产品代码读写 globalThis.sessionStorage；显式绑定到本测试窗口的存储，
-// 不依赖 Node 某个启动环境是否默认提供 Web Storage。用例结束由 happyDOM.abort 回收。
 Object.defineProperty(globalThis, "sessionStorage", { value: browser.sessionStorage, configurable: true, writable: true });
 
 const { createRoot } = await import("react-dom/client");
@@ -35,9 +48,15 @@ const vite = await createServer({
   root: adminRoot,
   plugins: [react()],
   resolve: { alias: { "@": path.join(adminRoot, "src") } },
+  // 独立缓存目录：避免与其它 vite 测试共享 node_modules/.vite/deps 时反复重建删除。
+  cacheDir: fileURLToPath(new URL("../../../tmp/approval-vite-cache/audit-navigation/", import.meta.url)),
   server: { middlewareMode: true, hmr: false },
 });
-const { ApprovalAuditView } = await vite.ssrLoadModule("/src/views/approval-audit-view.tsx");
+const { useApprovalPendingCount } = await vite.ssrLoadModule("/src/workspace/boss-touches.tsx");
+const { WorkspaceNavItem } = await vite.ssrLoadModule("/src/workspace/nav-item.tsx");
+const { WorkspaceSidebar } = await vite.ssrLoadModule("/src/workspace/sidebar.tsx");
+const { SidebarProvider } = await vite.ssrLoadModule("/src/components/ui/sidebar.tsx");
+const { workspaceMenuItems } = await vite.ssrLoadModule("/src/workspace/nav-config.ts");
 
 after(async () => {
   await vite.close();
@@ -48,137 +67,38 @@ function json(body, status = 200) {
   return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
 }
 
-const permissions = [
-  "approval.template.read",
-  "approval.request.create",
-  "approval.request.read",
-  "approval.request.approve",
-  "approval.audit.read",
-  "admin.account.read",
-];
-
-function snapshot(perms = permissions, isBoss = true) {
+function snapshot(perms = ["approval.request.read", "approval.request.approve"], isBoss = false) {
   return {
     authenticated: true,
-    adminUserId: "admin-boss",
-    user: { name: "Boss", username: "zz00001", displayUsername: "ZZ00001", twoFactorEnabled: true },
+    adminUserId: "admin-ops",
+    user: { name: "运营小周", username: "zz00007", displayUsername: "ZZ00007", image: null },
     security: { status: "ACTIVE", isBoss, passwordChangeRequired: false },
     session: { id: "session-1", locked: false, pinConfigured: true, createdAt: null, expiresAt: null },
     permissions: perms,
   };
 }
 
-function summary(requestId, status, summaryText) {
-  return {
-    requestId,
-    operationCode: "approval.test.execute",
-    triggerCondition: "manual",
-    payloadVersion: 1,
-    payloadHash: "hash-" + requestId,
-    summary: summaryText,
-    status,
-    statusReason: null,
-    requester: { username: "zz00001", displayUsername: "ZZ00001", name: "Boss" },
-    createdAt: "2026-10-06T00:00:00.000Z",
-    expiresAt: "2026-10-08T00:00:00.000Z",
-  };
-}
-
-function detail(requestId, status, summaryText, links = {}) {
-  return {
-    ...summary(requestId, status, summaryText),
-    operation: { code: "approval.test.execute", triggerCondition: "manual", payloadVersion: 1, payloadHash: "hash-" + requestId, payload: { outcome: "SUCCESS" } },
-    template: { id: "tpl-1", version: 1 },
-    requester: { username: "zz00002", displayUsername: "ZZ00002", name: "审批人", status: "ACTIVE" },
-    decision: null,
-    execution: null,
-    candidates: [{ username: "zz00001", displayUsername: "ZZ00001", name: "Boss", status: "ACTIVE", eligible: true, source: "TEMPLATE" }],
-    history: [],
-    supersedesRequestId: links.supersedes ?? null,
-    supersededByRequestId: links.supersededBy ?? null,
-  };
-}
-
-const auditEvent = (id, action, options = {}) => ({
-  eventId: "evt-" + id,
-  actor: { username: options.actorUsername ?? "zz00001", displayUsername: (options.actorUsername ?? "zz00001").toUpperCase(), name: "Boss" },
-  action,
-  objectType: options.objectType ?? "approval_request",
-  objectId: options.objectId === undefined ? id : options.objectId,
-  outcome: options.outcome ?? "SUCCESS",
-  reason: options.reason ?? null,
-  requestId: options.requestId === undefined ? id : options.requestId,
-  occurredAt: "2026-10-06T00:00:00.000Z",
-  details: options.details ?? { operationCode: "approval.test.execute" },
-});
-
-let auditCalls = [];
-let candidateCalls = [];
-let recoveryCalls = [];
-let recoveryResponse = { knowledge: "UNRESOLVED", operation: "approval.request.execute", key: "idem_x", explanationCode: "RECEIPT_NOT_FOUND", resolution: "UNKNOWN_NOT_ABSENT" };
+// ── fetch 夹具 ─────────────────────────────────────────────────────────────
+let calls = [];
+let pendingCountValue = 3;
+let omitPendingCount = false;
+let fetchShouldFail = false;
 
 async function mockFetch(input, init = {}) {
   const url = new URL(String(input), browser.location.href);
-  if ((init.method ?? "GET") !== "GET") return json({});
-  if (url.pathname.endsWith("/security/approvals/templates")) {
-    return json({ templates: [{ id: "tpl-1", operationCode: "approval.test.execute", triggerCondition: "manual", version: 1, updatedAt: null, candidates: [{ username: "zz00001", name: "Boss", status: "ACTIVE", eligible: true }] }] });
-  }
-  if (url.pathname.endsWith("/security/approvals/operations")) {
-    return json({
-      operations: [
-        { operationCode: "membership.entitlement.grant", businessType: "membership", title: "发放会员礼遇权益", executionMode: "GENERIC_TRANSACTION", testOnly: false, initiation: { allowed: true, reasonCode: "OK", requiredPermission: "approval.request.create" }, triggers: [{ triggerCondition: "membership.entitlement.grant.requested", templateVersion: 1, candidateTotal: 2, candidateEligible: 1, blockingReasonCode: null }] },
-        { operationCode: "order.settlement.adjust", businessType: "settlement", title: "人工调整订单结算", executionMode: "SOURCE_BUSINESS", testOnly: false, initiation: { allowed: false, reasonCode: "INITIATED_FROM_SOURCE_BUSINESS", requiredPermission: "approval.request.create" }, triggers: [] },
-      ],
-      unregisteredOperationPolicy: "未知操作只读展示并给出原因，不进入通用执行器",
-      scope: "REGISTERED_OPERATIONS_FOR_CURRENT_ADMIN",
-      testOperationsEnabled: false,
-    });
-  }
-  if (url.pathname.endsWith("/security/approvals/candidate-options")) {
-    candidateCalls.push(url.search);
-    return json({
-      candidates: [{ username: "zz00002", displayUsername: "ZZ00002", name: "审批人", isBoss: false, eligible: true, reasonCode: "OK" }],
-      excludedByReason: { TWO_FACTOR_REQUIRED: 1 },
-      requesterExcluded: Boolean(url.searchParams.get("requestId")),
-      excludedFields: ["ip", "session", "credentials", "lastLoginAt"],
-      requiredPermission: "approval.template.configure",
-    });
-  }
-  if (url.pathname.endsWith("/security/approvals/recovery")) {
-    recoveryCalls.push(url.search);
-    return json(recoveryResponse);
-  }
-  if (url.pathname.endsWith("/security/admins")) {
-    return json({ admins: [{ id: "admin-boss", username: "zz00001", name: "Boss", status: "ACTIVE" }] });
-  }
-  if (url.pathname.endsWith("/security/approvals/requests/mine")) {
-    return json({ requests: [summary("m1", "PENDING", "定位样本申请")], nextCursor: null });
-  }
-  if (url.pathname.endsWith("/security/approvals/requests/pending")) {
-    return json({ requests: [], nextCursor: null });
-  }
-  if (url.pathname.endsWith("/security/approvals/requests/detail")) {
-    const id = url.searchParams.get("requestId");
-    if (id === "m1") return json(detail("m1", "CANCELLED", "定位样本申请", { supersedes: "m0", supersededBy: "m9" }));
-    return json(detail(id ?? "m0", "PENDING", "其他申请"));
-  }
-  if (url.pathname.endsWith("/security/approvals/audit/events")) {
-    auditCalls.push(url.search);
-    const action = url.searchParams.get("action");
-    const actor = url.searchParams.get("actorUsername");
-    const requestId = url.searchParams.get("requestId");
-    let events = [
-      auditEvent("req-1", "approval.request.created", { requestId: "req_http_trace_1", details: { summary: "样本业务摘要文字", operationCode: "approval.test.execute", payloadVersion: 1, templateVersion: 1 } }),
-      auditEvent("req-2", "approval.request.rejected", { actorUsername: "zz00002", requestId: "req_http_trace_2", outcome: "FAILURE", reason: "资料与当前版本不符" }),
-      auditEvent("tpl-1", "approval.template.configured", { objectType: "approval_template", objectId: "tpl-1", requestId: null }),
-      auditEvent("tpl-2", "approval.template.configured", { objectType: "approval_template", objectId: "tpl-2", requestId: "req_http_trace_9" }),
-    ];
-    if (action) events = events.filter((event) => event.action === action);
-    if (requestId) events = events.filter((event) => event.objectId === requestId || event.requestId === requestId);
-    if (actor) events = events.filter((event) => event.actor.username === actor.toLowerCase());
-    return json({ events, nextCursor: null, scope: "BOSS_ALL_APPROVAL_EVENTS" });
-  }
-  throw new Error(`unexpected test request ${url.pathname}${url.search}`);
+  calls.push({ path: url.pathname, search: url.search, method: init.method ?? "GET" });
+  if (fetchShouldFail) throw new Error("network unavailable");
+  const body = { requests: [], nextCursor: null, scope: "pending" };
+  if (!omitPendingCount) body.pendingCount = pendingCountValue;
+  return json(body);
+}
+
+function resetFixtures() {
+  calls = [];
+  pendingCountValue = 3;
+  omitPendingCount = false;
+  fetchShouldFail = false;
+  globalThis.fetch = mockFetch;
 }
 
 async function settle() {
@@ -193,289 +113,184 @@ async function waitFor(predicate, timeout = 2000) {
   }
 }
 
-async function clickRaw(element) {
-  assert.ok(element, "expected clickable element");
-  await act(async () => { element.dispatchEvent(new browser.MouseEvent("click", { bubbles: true, cancelable: true })); });
+function makeHost() {
+  for (const previous of [...browser.document.querySelectorAll(".workspace-root")]) previous.classList.remove("workspace-root");
+  const host = browser.document.createElement("div");
+  host.className = "workspace-root";
+  browser.document.body.appendChild(host);
+  return host;
+}
+
+async function mount(element, t) {
+  const host = makeHost();
+  const root = createRoot(host);
+  const view = {
+    host,
+    rerender: async (next) => { await act(async () => root.render(next)); },
+  };
+  t.after(async () => { await act(async () => root.unmount()); host.remove(); });
+  await act(async () => root.render(element));
+  return view;
+}
+
+/** hook 探针：把 useApprovalPendingCount 的真实返回值渲染成文本。 */
+function Probe({ enabled, refreshNonce }) {
+  const count = useApprovalPendingCount(enabled, refreshNonce);
+  return createElement("output", { "data-testid": "pending-count" }, count === undefined ? "none" : String(count));
+}
+
+function withProvider(child) {
+  return createElement(SidebarProvider, null, child);
+}
+
+function badgeOf(host) {
+  return host.querySelector('[data-slot="sidebar-menu-badge"]');
+}
+
+// ── 1. useApprovalPendingCount 的统一接口契约 ──────────────────────────────
+
+test("角标使用统一接口 GET /security/approvals/requests?scope=pending&limit=1 读 pendingCount", async (t) => {
+  resetFixtures();
+  pendingCountValue = 4;
+  const view = await mount(createElement(Probe, { enabled: true, refreshNonce: 0 }), t);
+  await waitFor(() => view.host.textContent.includes("4"));
+  assert.equal(view.host.querySelector('[data-testid="pending-count"]').textContent, "4");
+  assert.equal(calls.length, 1);
+  const params = new URLSearchParams(calls[0].search);
+  assert.equal(params.get("scope"), "pending");
+  assert.equal(params.get("limit"), "1");
+  assert.ok(calls[0].path.endsWith("/security/approvals/requests"));
+});
+
+test("pendingCount=0 时不显示角标", async (t) => {
+  resetFixtures();
+  pendingCountValue = 0;
+  const view = await mount(createElement(Probe, { enabled: true, refreshNonce: 0 }), t);
+  await waitFor(() => calls.length >= 1);
   await settle();
-}
+  assert.equal(view.host.querySelector('[data-testid="pending-count"]').textContent, "none");
+});
 
-function setInput(element, value) {
-  const setValue = Object.getOwnPropertyDescriptor(browser.HTMLInputElement.prototype, "value").set;
-  setValue.call(element, value);
-  element.dispatchEvent(new browser.Event("input", { bubbles: true }));
-}
-
-/** 组件库 Select 的选项在弹层里，按 supply-controls.test.mjs 的既有做法点击触发器再点选项。 */
-async function chooseOption(trigger, label) {
-  await act(async () => trigger.click());
-  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
-  const option = [...browser.document.querySelectorAll('[role="option"]')].find((item) => item.textContent.trim() === label);
-  assert.ok(option, "option " + label);
-  await act(async () => option.click());
+test("服务端未返回 pendingCount 时不显示角标，不猜 0 也不猜有值", async (t) => {
+  resetFixtures();
+  omitPendingCount = true;
+  const view = await mount(createElement(Probe, { enabled: true, refreshNonce: 0 }), t);
+  await waitFor(() => calls.length >= 1);
   await settle();
+  assert.equal(view.host.querySelector('[data-testid="pending-count"]').textContent, "none");
+});
+
+test("读取失败（网络错误）时不显示角标", async (t) => {
+  resetFixtures();
+  fetchShouldFail = true;
+  const view = await mount(createElement(Probe, { enabled: true, refreshNonce: 0 }), t);
+  await waitFor(() => calls.length >= 1);
+  await settle();
+  assert.equal(view.host.querySelector('[data-testid="pending-count"]').textContent, "none");
+});
+
+test("refreshNonce 变化会重新读取同一接口", async (t) => {
+  resetFixtures();
+  const view = await mount(createElement(Probe, { enabled: true, refreshNonce: 0 }), t);
+  await waitFor(() => calls.length === 1);
+  pendingCountValue = 7;
+  await view.rerender(createElement(Probe, { enabled: true, refreshNonce: 1 }));
+  await waitFor(() => calls.length === 2 && view.host.textContent.includes("7"));
+  assert.deepEqual(calls.map((call) => call.search), ["?scope=pending&limit=1", "?scope=pending&limit=1"]);
+});
+
+test("关闭开关（无权限/不可见）时完全不发请求", async (t) => {
+  resetFixtures();
+  const view = await mount(createElement(Probe, { enabled: false, refreshNonce: 0 }), t);
+  await settle();
+  assert.equal(view.host.querySelector('[data-testid="pending-count"]').textContent, "none");
+  assert.equal(calls.length, 0);
+});
+
+// ── 2. 角标在导航项上的渲染 ────────────────────────────────────────────────
+
+const approvalsItem = (badge) => ({
+  label: "审批中心", path: "/approvals", kind: "approvals", ...(badge === undefined ? {} : { badge }),
+});
+const location = { pathname: "/approvals", search: "" };
+
+test("审批中心项有待办时渲染「待我处理 N 件」角标", async (t) => {
+  resetFixtures();
+  const view = await mount(withProvider(createElement(WorkspaceNavItem, {
+    item: approvalsItem(5), location, onNavigate() {},
+  })), t);
+  await settle();
+  const badge = badgeOf(view.host);
+  assert.ok(badge, "有待办时显示角标");
+  assert.equal(badge.getAttribute("aria-label"), "待我处理 5 件");
+  assert.equal(badge.textContent.trim(), "5");
+});
+
+test("超过 99 件时角标显示 99+", async (t) => {
+  resetFixtures();
+  const view = await mount(withProvider(createElement(WorkspaceNavItem, {
+    item: approvalsItem(150), location, onNavigate() {},
+  })), t);
+  await settle();
+  assert.equal(badgeOf(view.host).textContent.trim(), "99+");
+});
+
+test("审批中心项没有待办时不渲染角标", async (t) => {
+  resetFixtures();
+  const view = await mount(withProvider(createElement(WorkspaceNavItem, {
+    item: approvalsItem(undefined), location, onNavigate() {},
+  })), t);
+  await settle();
+  assert.equal(badgeOf(view.host), null);
+  assert.ok(!view.host.textContent.includes("待我处理"));
+});
+
+// ── 3. WorkspaceSidebar 端到端 ─────────────────────────────────────────────
+
+function sidebar(snapshotValue, refreshNonce = 0) {
+  return withProvider(createElement(WorkspaceSidebar, {
+    snapshot: snapshotValue, location, onNavigate() {}, onSignOut() {}, refreshNonce,
+  }));
 }
 
-function buttons(container) {
-  return [...container.querySelectorAll("button")];
-}
-
-function buttonByText(text) {
-  return buttons(document.body).find((button) => button.textContent.trim() === text);
-}
-
-async function renderView(props = {}) {
-  const rootNode = browser.document.createElement("div");
-  browser.document.body.appendChild(rootNode);
-  const root = createRoot(rootNode);
-  // 默认页已改为「待我处理」；这些用例以「我的申请」为前提，显式声明而不是依赖默认。
-  let latest = { snapshot: snapshot(), initialTab: "mine", ...props };
-  const render = async (extra = {}) => {
-    latest = { ...latest, ...extra };
-    await act(async () => {
-      root.render(createElement(ApprovalAuditView, latest));
-    });
-  };
-  await render();
-  return { rootNode, root, render, cleanup: async () => { await act(async () => root.unmount()); rootNode.remove(); } };
-}
-
-async function openAuditTab(view) {
-  const tablist = view.rootNode.querySelector('[role="tablist"]');
-  await click([...tablist.querySelectorAll("button")].find((tab) => tab.textContent.includes("审计记录")));
-  await waitFor(() => view.rootNode.textContent.includes("approval.request.created"));
-}
-
-test("audit tab filters reach the API, reset paging, render scope and sync the tab query", async () => {
-  auditCalls = [];
-  globalThis.fetch = mockFetch;
-  const queryWrites = [];
-  const view = await renderView({ onQueryChange: (query) => queryWrites.push(query) });
-  try {
-    await waitFor(() => view.rootNode.textContent.includes("定位样本申请"));
-    await openAuditTab(view);
-    assert.equal(auditCalls.length >= 1, true, "initial audit load happened");
-    assert.ok(!auditCalls[0].includes("action="), "initial load has no filter params");
-    assert.ok(view.rootNode.textContent.includes("Boss：全部审批与授权事件"), "scope label rendered");
-
-    const form = buttonByText("查询审计").closest("form");
-    const [actionSelect, objectTypeSelect] = form.querySelectorAll('[data-slot="select-trigger"]');
-    await chooseOption(actionSelect, "审批驳回");
-    await chooseOption(objectTypeSelect, "审批申请");
-    setInput(form.querySelector("#approval-audit-actor"), "ZZ00002");
-    setInput(form.querySelector("#approval-audit-request-id"), "req-2");
-    await settle();
-    assert.match(actionSelect.textContent, /审批驳回/, "action select applied");
-    assert.match(objectTypeSelect.textContent, /审批申请/, "objectType select applied");
-    await act(async () => { form.dispatchEvent(new browser.Event("submit", { bubbles: true, cancelable: true })); });
-    await settle();
-    await waitFor(() => auditCalls.some((query) => query.includes("action=approval.request.rejected")));
-    const last = auditCalls.at(-1);
-    assert.ok(last.includes("action=approval.request.rejected"), "action param sent");
-    assert.ok(last.includes("objectType=approval_request"), "objectType param sent");
-    assert.ok(last.includes("actorUsername=ZZ00002"), "actorUsername param sent");
-    assert.ok(last.includes("requestId=req-2"), "requestId param sent");
-    assert.ok(!last.includes("cursor="), "filter submit restarts from the first page");
-    const rows = () => [...view.rootNode.querySelectorAll("tbody tr")].map((row) => row.textContent);
-    await waitFor(() => rows().every((text) => !text.includes("approval.request.created")));
-    assert.ok(rows().some((text) => text.includes("approval.request.rejected")), "filtered row remains");
-    const synced = queryWrites.at(-1);
-    assert.equal(synced.tab, "audit");
-    assert.equal(synced.action, "approval.request.rejected");
-    assert.equal(synced.objectType, "approval_request");
-    assert.equal(synced.actorUsername, "ZZ00002");
-    assert.equal(synced.requestId, "req-2");
-  } finally {
-    await view.cleanup();
-    globalThis.fetch = undefined;
-  }
+test("菜单配置里审批中心是 kind=approvals 的唯一入口", () => {
+  const items = workspaceMenuItems({ isBoss: false, permissions: ["approval.request.read"] });
+  const approvals = items.filter((item) => item.kind === "approvals");
+  assert.equal(approvals.length, 1);
+  assert.equal(approvals[0].label, "审批中心");
+  assert.equal(approvals[0].badge, undefined, "静态菜单不预置角标");
 });
 
-test("audit rows expose the related request and open its detail", async () => {
-  auditCalls = [];
-  globalThis.fetch = mockFetch;
-  const opened = [];
-  const view = await renderView({ onOpenObject: (id, title) => opened.push({ id, title }) });
-  try {
-    await waitFor(() => view.rootNode.textContent.includes("定位样本申请"));
-    await openAuditTab(view);
-    const rows = [...view.rootNode.querySelectorAll("tbody tr")];
-    const createdRow = rows.find((row) => row.textContent.includes("approval.request.created"));
-    assert.ok(createdRow.textContent.includes("req-1"), "object id visible for tracing");
-    const templateRows = rows.filter((row) => row.textContent.includes("approval.template.configured"));
-    assert.equal(templateRows.length, 2, "both template events rendered");
-    for (const templateRow of templateRows) {
-      assert.ok(templateRow.textContent.includes("审批模板"), "object type label is business-readable");
-      assert.equal([...templateRow.querySelectorAll("button")].length, 0, "template events never link to a request, even with an HTTP trace id");
-    }
-    const link = [...createdRow.querySelectorAll("button")].find((button) => button.textContent.trim() === "查看申请");
-    await click(link);
-    assert.deepEqual(opened, [{ id: "req-1", title: "审批详情" }], "row link opens the approval request object, not the HTTP trace id");
-  } finally {
-    await view.cleanup();
-    globalThis.fetch = undefined;
-  }
+test("侧栏有 pendingCount 时审批中心显示待办角标", async (t) => {
+  resetFixtures();
+  pendingCountValue = 3;
+  const view = await mount(sidebar(snapshot()), t);
+  await waitFor(() => badgeOf(view.host) !== null);
+  assert.ok(view.host.textContent.includes("审批中心"));
+  assert.equal(badgeOf(view.host).getAttribute("aria-label"), "待我处理 3 件");
+  const params = new URLSearchParams(calls[0].search);
+  assert.equal(params.get("scope"), "pending");
+  assert.equal(params.get("limit"), "1");
 });
 
-test("detail renders supersede links that open the related requests", async () => {
-  auditCalls = [];
-  globalThis.fetch = mockFetch;
-  const opened = [];
-  const view = await renderView({ objectOnly: true, initialRequestId: "m1", onOpenObject: (id, title) => opened.push({ id, title }) });
-  try {
-    await waitFor(() => view.rootNode.textContent.includes("定位样本申请"));
-    await waitFor(() => buttonByText("查看被替代的原申请") !== undefined);
-    const supersededNotice = view.rootNode.textContent.includes("本申请已被另一申请替代");
-    assert.equal(supersededNotice, true, "superseded notice is visible without promising the terminal request");
-    await click(buttonByText("查看被替代的原申请"));
-    assert.deepEqual(opened.at(-1), { id: "m0", title: "被替代的原申请" });
-    await click(buttonByText("查看替代申请"));
-    assert.deepEqual(opened.at(-1), { id: "m9", title: "替代本申请的审批申请" });
-  } finally {
-    await view.cleanup();
-    globalThis.fetch = undefined;
-  }
+test("侧栏无待办时审批中心不显示角标", async (t) => {
+  resetFixtures();
+  pendingCountValue = 0;
+  const view = await mount(sidebar(snapshot()), t);
+  await waitFor(() => calls.length >= 1);
+  await settle();
+  assert.ok(view.host.textContent.includes("审批中心"));
+  assert.equal(badgeOf(view.host), null, "无待办不显示角标");
 });
 
-test("an external query change backfills the audit filters and reloads", async () => {
-  auditCalls = [];
-  globalThis.fetch = mockFetch;
-  const view = await renderView({ initialTab: "audit", initialQuery: { tab: "audit" } });
-  try {
-    await waitFor(() => view.rootNode.textContent.includes("approval.request.created"));
-    const before = auditCalls.length;
-    await view.render({ initialQuery: { tab: "audit", actorUsername: "zz00001" } });
-    await waitFor(() => auditCalls.length > before && auditCalls.at(-1).includes("actorUsername=zz00001"));
-    const form = buttonByText("查询审计").closest("form");
-    assert.equal(form.querySelector("#approval-audit-actor").value, "zz00001", "filter form backfilled from the query");
-  } finally {
-    await view.cleanup();
-    globalThis.fetch = undefined;
-  }
+test("侧栏随 refreshNonce 刷新待办数量", async (t) => {
+  resetFixtures();
+  pendingCountValue = 2;
+  const view = await mount(sidebar(snapshot(), 0), t);
+  await waitFor(() => badgeOf(view.host) !== null);
+  assert.equal(badgeOf(view.host).getAttribute("aria-label"), "待我处理 2 件");
+  pendingCountValue = 6;
+  await view.rerender(sidebar(snapshot(), 1));
+  await waitFor(() => badgeOf(view.host)?.getAttribute("aria-label") === "待我处理 6 件");
+  assert.equal(calls.length, 2);
 });
-
-test("Master: external URL matching an unsubmitted draft still reloads the applied query", async () => {
-  auditCalls = [];
-  globalThis.fetch = mockFetch;
-  const view = await renderView({ initialTab: "audit", initialQuery: { tab: "audit", actorUsername: "zz00001" } });
-  try {
-    await waitFor(() => auditCalls.some((query) => query.includes("actorUsername=zz00001")) && view.rootNode.querySelectorAll("tbody tr").length > 0);
-    const form = buttonByText("查询审计").closest("form");
-    await act(async () => setInput(form.querySelector("#approval-audit-actor"), "zz00002"));
-    await settle();
-    const before = auditCalls.length;
-    await view.render({ initialQuery: { tab: "audit", actorUsername: "zz00002" } });
-    await settle();
-    await settle();
-    assert.ok(auditCalls.length > before && auditCalls.at(-1).includes("actorUsername=zz00002"), "URL switched to zz00002 must reload the applied query instead of keeping zz00001 results");
-    const appliedRows = [...view.rootNode.querySelectorAll("tbody tr")].map((row) => row.textContent).join("\n");
-    assert.ok(appliedRows.includes("审批驳回"), "zz00002 results are now applied");
-    assert.ok(!appliedRows.includes("提交申请"), "zz00001 rows replaced");
-  } finally {
-    await view.cleanup();
-    globalThis.fetch = undefined;
-  }
-});
-
-test("Master: failed new filter cannot present previous rows as current results", async () => {
-  auditCalls = [];
-  globalThis.fetch = async (input, init = {}) => {
-    const url = new URL(String(input), browser.location.href);
-    if (url.pathname.endsWith("/audit/events") && url.searchParams.get("actorUsername") === "zz00002") {
-      auditCalls.push(url.search);
-      return json({ error: { code: "INTERNAL_ERROR", message: "fixture failure" } }, 500);
-    }
-    return mockFetch(input, init);
-  };
-  const view = await renderView({ initialTab: "audit", initialQuery: { tab: "audit", actorUsername: "zz00001" } });
-  try {
-    await waitFor(() => view.rootNode.querySelectorAll("tbody tr").length > 0);
-    const form = buttonByText("查询审计").closest("form");
-    await act(async () => setInput(form.querySelector("#approval-audit-actor"), "zz00002"));
-    await click(buttonByText("查询审计"));
-    await settle();
-    const rows = [...view.rootNode.querySelectorAll("tbody tr")];
-    assert.equal(rows.length, 0, "failed new filter must clear previous rows instead of presenting them as current results");
-    assert.ok(!view.rootNode.textContent.includes("暂无符合条件"), "error state and empty state stay mutually exclusive");
-    assert.ok(view.rootNode.textContent.includes("服务暂时无法完成请求"), "the failure surfaces as an error with recovery guidance");
-  } finally {
-    await view.cleanup();
-    globalThis.fetch = undefined;
-  }
-});
-
-test("a late response from an older query cannot overwrite the newer results", async () => {
-  auditCalls = [];
-  let releaseOld = null;
-  globalThis.fetch = async (input, init = {}) => {
-    const url = new URL(String(input), browser.location.href);
-    if (url.pathname.endsWith("/audit/events") && url.searchParams.get("actorUsername") === "zz00001") {
-      auditCalls.push(url.search);
-      return new Promise((resolve) => {
-        releaseOld = () => resolve(mockFetch(input, init));
-      });
-    }
-    if (url.pathname.endsWith("/audit/events")) auditCalls.push(url.search);
-    return mockFetch(input, init);
-  };
-  const view = await renderView({ initialTab: "audit", initialQuery: { tab: "audit", actorUsername: "zz00001" } });
-  try {
-    await waitFor(() => releaseOld !== null);
-    const form = view.rootNode.querySelector("form");
-    await act(async () => setInput(form.querySelector("#approval-audit-actor"), "zz00002"));
-    await act(async () => { form.dispatchEvent(new browser.Event("submit", { bubbles: true, cancelable: true })); });
-    await waitFor(() => [...view.rootNode.querySelectorAll("tbody tr")].some((row) => row.textContent.includes("审批驳回")));
-    releaseOld();
-    await settle();
-    await settle();
-    const rows = [...view.rootNode.querySelectorAll("tbody tr")].map((row) => row.textContent).join("\n");
-    assert.ok(rows.includes("审批驳回"), "newer zz00002 rows stay visible");
-    assert.ok(!rows.includes("提交申请"), "the stale zz00001 response was discarded");
-    assert.equal([...view.rootNode.querySelectorAll("tbody tr")].length, 1, "only the newer response rows remain");
-    assert.ok(view.rootNode.textContent.includes("第 1 页"), "paging follows the newer response");
-  } finally {
-    await view.cleanup();
-    globalThis.fetch = undefined;
-  }
-});
-
-test("audit rows lead with Chinese labels and the business narrative, technical trace folded", async () => {
-  auditCalls = [];
-  globalThis.fetch = mockFetch;
-  const view = await renderView({ onOpenObject: () => {} });
-  try {
-    await waitFor(() => view.rootNode.textContent.includes("定位样本申请"));
-    await openAuditTab(view);
-    const rows = [...view.rootNode.querySelectorAll("tbody tr")];
-    const createdRow = rows.find((row) => row.textContent.includes("样本业务摘要文字"));
-    assert.ok(createdRow, "business summary leads the narrative cell");
-    assert.ok(createdRow.textContent.includes("提交申请"), "Chinese action label leads the action cell");
-    assert.ok(createdRow.textContent.includes("approval.request.created"), "raw action code kept as secondary trace");
-    const outcomeCell = createdRow.querySelectorAll("td")[4];
-    assert.equal(outcomeCell.textContent.trim(), "成功", "outcome renders in Chinese");
-    const outcomeStatus = outcomeCell.querySelector('[data-slot="inline-status"]');
-    assert.ok(outcomeStatus, "outcome uses the shared InlineStatus atom");
-    assert.ok(outcomeStatus.querySelector('span[aria-hidden="true"]'), "outcome carries a non-colour marker so it is not colour-only");
-    const fold = createdRow.querySelector("details");
-    assert.ok(fold, "technical trace folded into details");
-    assert.ok(fold.textContent.includes("payloadVersion"), "fold keeps the raw technical fields");
-    const rejectedRow = rows.find((row) => row.textContent.includes("审批驳回"));
-    assert.equal(rejectedRow.querySelectorAll("td")[4].textContent.trim(), "失败", "failure outcome renders in Chinese");
-    assert.ok(rejectedRow.querySelectorAll('td')[4].querySelector('[data-slot="inline-status"]'), "failure uses the shared inline status atom");
-    assert.ok(rejectedRow.textContent.includes("资料与当前版本不符"), "reason leads the narrative when present");
-    const linkCell = createdRow.querySelectorAll("td")[5];
-    assert.ok(linkCell.textContent.includes("查看申请"), "link column sits before the long narrative column for narrow screens");
-  } finally {
-    await view.cleanup();
-    globalThis.fetch = undefined;
-  }
-});
-
-// Step-up credentials are required in every approval write dialog; tests fill them once the dialog opens.
-async function click(element) { await clickRaw(element); await fillStepUpFields(element); }
-async function fillStepUpFields(element) {
-  const doc = element?.ownerDocument; if (!doc) return;
-  const fields = [...doc.querySelectorAll('input[autocomplete="current-password"], input[autocomplete="one-time-code"]')].filter((field) => !field.value);
-  if (fields.length === 0) return;
-  const setValue = Object.getOwnPropertyDescriptor(doc.defaultView.HTMLInputElement.prototype, "value").set;
-  await act(async () => { for (const field of fields) { setValue.call(field, field.autocomplete === "one-time-code" ? "123456" : "step-up-password-1"); field.dispatchEvent(new doc.defaultView.Event("input", { bubbles: true })); } });
-}

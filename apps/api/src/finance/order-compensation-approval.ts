@@ -72,7 +72,6 @@ export async function readCompensationCases(client: PoolClient, origin: 'NATIVE'
 /** Only the approved original request is eligible; posting is delegated to the guarded DB function. */
 export const executeOrderCompensation: ApprovalOperationExecutor = async (client,input,actor,requestId) => {
   if (input.operationCode !== ORDER_COMPENSATION_OPERATION || input.payloadVersion !== 1 || sha(input.operationPayload) !== input.operationPayloadHash || input.decidedBy !== actor.userId) return unavailable('赔偿审批依据不一致');
-  if (new Date(input.expiresAt).getTime() <= Date.now()) return unavailable('赔偿审批已过期');
   await validateCompensationSubmission(client,input.operationPayload);
   const result=(await client.query<{value:{caseId:string;eventId:string}}>('SELECT zzsh_order.post_order_compensation($1) AS value',[input.requestId])).rows[0]?.value;
   if (!result || typeof result.caseId !== 'string' || typeof result.eventId !== 'string') throw new SecurityApiError(503,'EVIDENCE_UNAVAILABLE','赔偿入账结果待核对');

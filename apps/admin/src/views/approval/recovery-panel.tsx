@@ -1,9 +1,8 @@
 import { useState } from "react";
-import { StepUpCaptcha } from "../../components/altcha-field";
 import { CircleCheck, TriangleAlert } from "lucide-react";
 import { Alert, AlertDescription, AlertTitle } from "../../components/ui/alert";
 import { Button } from "@/components/ui/button";
-import { PasswordInput } from "../../components/ui-elements";
+import { Input } from "../../components/ui/input";
 import { formatDate } from "../../api";
 import { ACTION_LABELS, executionView, reasonLabel, statusView, type RecoveryResult } from "./contract";
 import { Fact, FactGrid } from "./atoms";
@@ -26,7 +25,6 @@ const RECEIPT_FIELDS: Array<[string, (receipt: NonNullable<RecoveryResult["recei
   ["模板版本", (receipt) => (receipt.templateVersion ? `v${receipt.templateVersion}` : null)],
   ["候选人数", (receipt) => (typeof receipt.candidateCount === "number" ? String(receipt.candidateCount) : null)],
   ["追加的候选人", (receipt) => receipt.candidateUsername ?? null],
-  ["有效期至", (receipt) => (receipt.expiresAt ? formatDate(receipt.expiresAt) : null)],
 ];
 
 function Receipt({ result }: { result: RecoveryResult }) {
@@ -62,7 +60,6 @@ function Receipt({ result }: { result: RecoveryResult }) {
       )}
       <p className="text-xs leading-relaxed text-muted-foreground">
         以上只是「这把请求标识 → 原回执」的映射，不代表业务已落地；业务是否生效以领域结果与来源业务为准。
-        {result.fingerprint ? <> 回执指纹 <span className="font-mono break-all">{result.fingerprint}</span> 可用于区分「同一意图重放」与「这把标识被用在了别的命令上」。</> : null}
       </p>
     </div>
   );
@@ -76,39 +73,34 @@ function operationAction(operation: string): string {
 }
 
 /**
- * 未核清责任的恢复面。四种结果分开表达：
- * 已知回执 / 未找到回执（读不到≠没执行）/ 恢复被拒（≠原操作失败）/ 查询本身失败。
+ * 未核清责任的恢复面。结果未知时只提供「查询原结果」与「用原请求重试」（沿用原幂等键，不换键）。
+ * 高影响类型重试需重新输入 6 位动态码，不携带密码。
  */
 export function RecoveryPanel({
   kind, lookup, busy, lookupBusy = false, persisted = true, others = 0, onRetryWrite, onRetryReadback, onLookup, onDiscard, requiresStepUp = false,
 }: {
   kind: "unknown" | "readback" | "resolved";
   lookup: RecoveryLookup;
-  /** 写或读回在途。 */
   busy: boolean;
-  /** 恢复查询在途：其余出口禁用但不换文案。 */
   lookupBusy?: boolean;
-  /** 责任记录是否已落浏览器存储；否则关闭页面后无法自动恢复。 */
   persisted?: boolean;
-  /** 同身份下其他对象的未核清笔数。 */
   others?: number;
+  /** 仅高影响类型批准需要重新输入动态码。 */
   requiresStepUp?: boolean;
-  onRetryWrite: (stepUp?: { password: string; totpCode: string }) => void;
+  onRetryWrite: (stepUp?: { totpCode: string }) => void;
   onRetryReadback: () => void;
   onLookup: () => void;
   onDiscard: () => void;
 }) {
-  const [password, setPassword] = useState("");
   const [totpCode, setTotpCode] = useState("");
-  const stepUpReady = !requiresStepUp || (password.length >= 12 && /^\d{6}$/.test(totpCode));
+  const stepUpReady = !requiresStepUp || /^\d{6}$/.test(totpCode);
   const retry = () => {
     if (!stepUpReady || busy || lookupBusy) return;
-    const credentials = requiresStepUp ? { password, totpCode } : undefined;
-    setPassword(""); setTotpCode("");
+    const credentials = requiresStepUp ? { totpCode } : undefined;
+    setTotpCode("");
     onRetryWrite(credentials);
   };
   if (kind === "resolved") {
-    // 终态证据已到达：不再给出与结果矛盾的 UNKNOWN 重放出口。
     return (
       <section className="space-y-3 rounded-md border border-border bg-foreground/[0.02] p-3">
         <Alert variant="success" role="status">
@@ -135,7 +127,7 @@ export function RecoveryPanel({
         </AlertTitle>
         <AlertDescription>
           {kind === "unknown"
-            ? "服务端可能已经处理这次请求。责任尚未核清前不要换新标识重试，也不要把它当作失败；下面两个入口都不会产生第二次业务写入以外的效果。"
+            ? "服务端可能已经处理这次请求。责任尚未核清前不要换请求重试，也不要把它当作失败；只能查询原结果或用原请求重试。"
             : "请求已被受理，但回读最新状态失败。原申请上下文与请求标识已保留，先确认状态再决定是否继续。"}
         </AlertDescription>
       </Alert>
@@ -147,7 +139,7 @@ export function RecoveryPanel({
           <AlertTitle>没有找到这把请求标识对应的回执</AlertTitle>
           <AlertDescription>
             {reasonLabel(lookup.result.explanationCode)}；{reasonLabel(lookup.result.resolution)}。
-            没有回执不能证明原操作没有发生（例如写入已提交但回执读取路径不可达），因此不自动允许换新标识重试。
+            没有回执不能证明原操作没有发生，因此不自动允许换请求重试。
           </AlertDescription>
         </Alert>
       ) : null}
@@ -156,8 +148,7 @@ export function RecoveryPanel({
           <TriangleAlert aria-hidden="true" />
           <AlertTitle>恢复读取被拒</AlertTitle>
           <AlertDescription className="break-words">
-            {lookup.message}。这是恢复被拒，不是原操作失败：服务端没有回任何回执字段，也没有产生第二次写入。
-            常见原因是授权或业务范围在提交后发生变化，或这张申请已不在你的可读范围内。
+            {lookup.message}。这是恢复被拒，不是原操作失败，也没有产生第二次写入。
           </AlertDescription>
         </Alert>
       ) : null}
@@ -170,16 +161,17 @@ export function RecoveryPanel({
       ) : null}
       {lookup.state === "loading" ? <p className="text-xs text-muted-foreground">正在查询原结果…</p> : null}
 
-      {kind === "unknown" && requiresStepUp ? <div className="space-y-3 rounded-md border border-border p-3">
-        <p className="text-xs text-muted-foreground">重试前请重新输入本人密码与动态码；原请求标识和业务内容保持不变，凭据不会保存在恢复记录中。</p>
-        <label className="block space-y-1 text-xs">本人密码
-          <PasswordInput aria-label="原请求重试本人密码" autoComplete="current-password" value={password} disabled={busy || lookupBusy} onChange={event => setPassword(event.target.value)} />
-        </label>
-        <label className="block space-y-1 text-xs">6 位动态验证码
-          <input aria-label="原请求重试动态码" inputMode="numeric" autoComplete="one-time-code" maxLength={6} value={totpCode} disabled={busy || lookupBusy} onChange={event => setTotpCode(event.target.value.replace(/\D/g, "").slice(0, 6))} />
-        </label>
-        <StepUpCaptcha />
-      </div> : null}
+      {kind === "unknown" && requiresStepUp ? (
+        <div className="space-y-3 rounded-md border border-border p-3">
+          <p className="text-xs text-muted-foreground">高影响申请重试需重新输入 6 位动态码；原请求标识与业务内容保持不变，动态码不会保存在恢复记录中。</p>
+          <label className="block space-y-1 text-xs" htmlFor="recovery-totp">6 位动态验证码
+            <Input id="recovery-totp" aria-label="原请求重试动态码" inputMode="numeric" autoComplete="one-time-code" maxLength={6}
+              value={totpCode} disabled={busy || lookupBusy} onChange={(event) => setTotpCode(event.target.value.replace(/\D/g, "").slice(0, 6))}
+              className="font-mono tracking-widest" />
+          </label>
+        </div>
+      ) : null}
+
       <div className="flex flex-wrap gap-2">
         {kind === "unknown" ? (
           <Button type="button" size="sm" variant="secondary" loading={busy} disabled={busy || lookupBusy || !stepUpReady} onClick={retry}>用原请求重试</Button>
@@ -193,9 +185,8 @@ export function RecoveryPanel({
       </div>
       <p className="text-xs leading-relaxed text-muted-foreground">
         收起只隐藏面板：原请求标识与请求内容仍保留在当前身份与会话的责任记录里，回到原对象时会重新出现。
-        只有读回核实、查到已知回执、或首次提交被服务端明确拒绝，才会解除这笔责任；重放被拒、查不到回执或恢复读取被拒都不解除。
         {others > 0 ? ` 另有 ${others} 笔其他对象的未核清请求。` : ""}
-        {!persisted ? " 浏览器存储不可用：本记录仅在当前页面实例内有效，关闭页面后无法自动恢复。" : ""}
+        {!persisted ? " 浏览器存储不可用：本记录仅在当前页面实例内有效。" : ""}
       </p>
     </section>
   );

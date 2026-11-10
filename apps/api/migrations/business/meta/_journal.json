@@ -1345,6 +1345,13 @@
       "when": 1794224569869,
       "tag": "0191_legacy_support_cancel",
       "breakpoints": true
+    },
+    {
+      "idx": 192,
+      "version": "7",
+      "when": 1794335180086,
+      "tag": "0195_approval_center_link",
+      "breakpoints": true
     }
   ]
 }

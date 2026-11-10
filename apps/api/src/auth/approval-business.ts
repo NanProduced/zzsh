@@ -35,7 +35,6 @@ const SOURCE = APPROVAL_EXECUTION_MODE.sourceBusiness;
 
 const REGISTRATIONS: readonly ApprovalOperationRegistration[] = [
   { operationCode: "distribution.policy.publish", businessType: "distribution", title: "调整分销政策", executionMode: GENERIC, testOnly: false, permissionStage: "EXECUTE" },
-  { operationCode: "distribution.earning.reverse", businessType: "distribution", title: "全额冲回分销佣金", executionMode: GENERIC, testOnly: false, permissionStage: "EXECUTE" },
   { operationCode: "membership.benefit.policy.publish", businessType: "membership", title: "发布会员权益政策", executionMode: GENERIC, testOnly: false, permissionStage: "EXECUTE" },
   { operationCode: "membership.entitlement.grant", businessType: "membership", title: "发放会员礼遇权益", executionMode: GENERIC, testOnly: false, permissionStage: "EXECUTE" },
   { operationCode: "membership.entitlement.replace", businessType: "membership", title: "替换会员礼遇权益", executionMode: GENERIC, testOnly: false, permissionStage: "EXECUTE" },
@@ -59,10 +58,11 @@ export function approvalRegistration(operationCode: string): ApprovalOperationRe
  * 避免预检与实际执行各写一份而漂移。
  */
 export function membershipBusinessPermission(operationCode: string, stage: "REQUEST" | "DECIDE" | "EXECUTE"): string | null {
-  if (operationCode === ORDER_COMPENSATION_OPERATION) return stage === 'REQUEST' ? ADMIN_PERMISSION.orderCompensationRequest : ADMIN_PERMISSION.orderCompensationApprove;
-  if (operationCode === "distribution.policy.publish" || operationCode === "distribution.earning.reverse") return "personal.distribution.policy.manage";
+  if (operationCode === ORDER_COMPENSATION_OPERATION) return stage === "REQUEST" ? ADMIN_PERMISSION.orderCompensationRequest : ADMIN_PERMISSION.orderCompensationApprove;
+  if (operationCode === "distribution.policy.publish") return "personal.distribution.policy.manage";
   if (!operationCode.startsWith("membership.")) return null;
-  if (operationCode === "membership.benefit.policy.publish") return ADMIN_PERMISSION.membershipPolicyPublish;
+  // 会员权益政策：提交用运营预设的 draft，批准/执行仍用 Boss 专属 publish（配合 membershipDecisionRequiresBoss）。
+  if (operationCode === "membership.benefit.policy.publish") return stage === "REQUEST" ? ADMIN_PERMISSION.membershipPolicyDraft : ADMIN_PERMISSION.membershipPolicyPublish;
   if (operationCode === "membership.entitlement.revoke") return ADMIN_PERMISSION.membershipEntitlementRevoke;
   return stage === "REQUEST"
     ? ADMIN_PERMISSION.membershipEntitlementRequest
@@ -72,7 +72,15 @@ export function membershipBusinessPermission(operationCode: string, stage: "REQU
 }
 
 export function membershipDecisionRequiresBoss(operationCode: string): boolean {
-  return operationCode === "membership.benefit.policy.publish" || operationCode === "distribution.policy.publish" || operationCode === "distribution.earning.reverse";
+  // Owner 已定：只有会员权益政策和订单全额包赔赔偿需要 Boss 角色；分销政策下放运营。
+  return operationCode === "membership.benefit.policy.publish" || operationCode === ORDER_COMPENSATION_OPERATION;
+}
+
+/** 高影响批准的批准动作需要动态码；驳回、撤回与中低影响批准都不需要，也不再要密码。 */
+export function approvalDecisionRequiresTotp(operationCode: string): boolean {
+  return operationCode === "membership.benefit.policy.publish"
+    || operationCode === "distribution.policy.publish"
+    || operationCode === ORDER_COMPENSATION_OPERATION;
 }
 
 /** 执行侧是否要求游戏对象范围：与会员执行器实际校验保持一致，不机械加严审批前置。 */

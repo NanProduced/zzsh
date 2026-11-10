@@ -42,6 +42,8 @@ export type WorkspaceMenuItem = {
   path?: string;
   kind?: WorkspaceRouteKind;
   items?: WorkspaceMenuItem[];
+  /** 导航待办角标（如审批中心「待我处理」数量）；没有待办时不设置。 */
+  badge?: number;
 };
 
 export function workspaceMenuItems(nav: NavPermission): WorkspaceMenuItem[] {

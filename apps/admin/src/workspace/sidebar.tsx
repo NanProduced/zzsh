@@ -21,7 +21,7 @@ import {
   useSidebar,
 } from "@/components/ui/sidebar";
 import type { SessionSnapshot } from "../api";
-import { BossCrest } from "./boss-touches";
+import { BossCrest, useApprovalPendingCount } from "./boss-touches";
 
 import { workspaceMenuItems } from "./nav-config";
 import { WorkspaceNavItem } from "./nav-item";
@@ -33,15 +33,22 @@ export function WorkspaceSidebar({
   location,
   onNavigate,
   onSignOut,
+  refreshNonce = 0,
 }: {
   snapshot: Extract<SessionSnapshot, { authenticated: true }>;
   location: NavLocation;
   onNavigate: (path: string) => void;
   onSignOut: () => void;
+  refreshNonce?: number;
 }) {
   const { state, isMobile } = useSidebar();
   const showMark = !isMobile && state === "collapsed";
   const nav: NavPermission = { isBoss: snapshot.security.isBoss, permissions: snapshot.permissions };
+  const canSeeApprovals = nav.isBoss
+    || ["approval.request.read", "approval.request.approve", "approval.template.read", "approval.audit.read"].some((code) => nav.permissions.includes(code));
+  const approvalPending = useApprovalPendingCount(canSeeApprovals, refreshNonce);
+  const menuItems = workspaceMenuItems(nav).map((item) =>
+    item.kind === "approvals" && approvalPending ? { ...item, badge: approvalPending } : item);
   const name = snapshot.user.name || snapshot.user.displayUsername || snapshot.user.username || "管理员";
   const account = snapshot.user.displayUsername || snapshot.user.username || "";
   const initial = name.slice(0, 1).toUpperCase();
@@ -64,7 +71,7 @@ export function WorkspaceSidebar({
       </SidebarHeader>
       <SidebarContent>
         <SidebarMenu className="mt-2 mb-2 gap-0.5 px-2">
-          {workspaceMenuItems(nav).map((item) => (
+          {menuItems.map((item) => (
             <WorkspaceNavItem key={`${item.label}-${item.path ?? "title"}`} item={item} location={location} onNavigate={onNavigate} />
           ))}
         </SidebarMenu>

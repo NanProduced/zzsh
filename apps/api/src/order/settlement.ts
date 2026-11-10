@@ -535,7 +535,7 @@ export function settlementConfirmationReady(facts: SettlementConfirmationFacts):
     else {
       if (typeof ap.requesterId !== "string" || ap.requesterId.trim() === "" || typeof ap.approverId !== "string" || ap.approverId.trim() === "") {
         reasons.push("OPS_ACTOR_MISSING");
-      } else if (ap.requesterId === ap.approverId) reasons.push("OPS_SELF_APPROVE");
+      }
       if (ap.payloadHash !== facts.currentVersionHash) reasons.push("OPS_PAYLOAD_STALE");
     }
   }

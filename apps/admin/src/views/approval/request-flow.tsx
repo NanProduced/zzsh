@@ -16,9 +16,8 @@ function currentRecord(detail: RequestDetail): string {
   return detail.status === "PENDING" || detail.status === "EXPIRED" || detail.status === "CANCELLED" ? "review" : "request";
 }
 
-// 与顶部标题徽标 / 三轴状态卡重复的状态标签：不再在节点工作区复读。
+// 与顶部标题徽标 / 状态卡重复的状态标签：不再在节点工作区复读。
 const CARD_DUPLICATE_LABELS = new Set(["申请状态", "执行方式", "执行结果", "业务进度", "执行说明", "业务说明"]);
-const TECHNICAL_LABELS = new Set(["规则快照", "发起条件"]);
 
 /** 选中节点的事实网格：只显示该节点真实、且未在顶部出现过的经手事实。 */
 function RequestFlowContent({ detail }: { detail: RequestDetail }) {
@@ -35,8 +34,7 @@ function RequestFlowContent({ detail }: { detail: RequestDetail }) {
       { label: "执行完成时间", value: detail.execution.completedAt ?? "未提供" },
     );
   }
-  const visibleFacts = facts.filter(fact => !TECHNICAL_LABELS.has(fact.label) && !CARD_DUPLICATE_LABELS.has(fact.label));
-  const technicalFacts = facts.filter(fact => TECHNICAL_LABELS.has(fact.label));
+  const visibleFacts = facts.filter(fact => !CARD_DUPLICATE_LABELS.has(fact.label));
   const grid = (items: typeof facts) => (
     <dl className="mt-3 grid gap-x-5 gap-y-3 text-xs sm:grid-cols-2">
       {items.map(fact => (
@@ -63,15 +61,9 @@ function RequestFlowContent({ detail }: { detail: RequestDetail }) {
             </div>
             {selected.description ? <p className="mt-1 text-xs leading-relaxed text-muted-foreground">{selected.description}</p> : null}
             {visibleFacts.length ? grid(visibleFacts) : null}
-            {technicalFacts.length ? (
-              <details className="mt-3 text-xs text-muted-foreground">
-                <summary className="cursor-pointer">步骤技术信息</summary>
-                {grid(technicalFacts)}
-              </details>
-            ) : null}
             {selected.kind === "approval" && selected.approvers.length > 0 ? (
               <div className="mt-3 text-xs">
-                <p className="text-muted-foreground">候选名单；通用资格不代表本单操作授权，也不代表已作出决定。</p>
+                <p className="text-muted-foreground">可审批的人（以服务端当前资格为准）。</p>
                 <ul className="mt-2 flex flex-wrap gap-x-4 gap-y-2">
                   {selected.approvers.map((approver, index) => (
                     <li key={approver.name + "-" + index}><span>{approver.name}</span><span className="ml-1 text-muted-foreground">{approver.title}</span></li>

@@ -152,24 +152,30 @@ export type BusinessView = {
   costBasis?: { priceVersionId: string | null; ruleReleaseId: string | null };
   /** 分销申请的冻结改动，不是当前全局政策或完整原值。 */
   policyChange?: { schema?: string; initial?: boolean; expectedPolicyId: string | null; expectedRevision: string | null; expectedPolicyDigest: string | null; changes?: Record<string, unknown>; reason: string | null };
-  compensation?: { orderId:string;origin:'NATIVE'|'LEGACY';gameId:string;ownerUserId:string;amountCents:string;caseRef:string;reason:string;evidenceRef:string;sourceDigest:string };
+  /** displayNo 为订单展示号；旧结构只有 orderId，展示时优先取 displayNo。 */
+  compensation?: { orderId:string;displayNo?:string|null;origin:'NATIVE'|'LEGACY';gameId:string;ownerUserId:string;amountCents:string;caseRef:string;reason:string;evidenceRef:string;sourceDigest:string };
   result?: { knowledge: string; policyVersionId?: string | null; caseId?:string|null };
 };
 
+/**
+ * 统一列表接口 GET /security/approvals/requests 的返回项。
+ * 除 requestId/status 外一律可选：统一列表只返回展示必需字段，
+ * 详情与旧结构仍可能携带更多字段，故保留为可选以兼容，前端只展示需要的内容。
+ */
 export type RequestSummary = {
   requestId: string;
   operationCode: string;
-  triggerCondition: string;
-  payloadVersion: number;
-  payloadHash: string;
   summary: string;
   status: string;
   statusReason?: string | null;
   requester: Person;
   createdAt: string | null;
-  expiresAt: string | null;
   business?: BusinessView;
   actions?: ActionEligibility[];
+  triggerCondition?: string;
+  payloadVersion?: number;
+  payloadHash?: string;
+  expiresAt?: string | null;
   candidateAvailability?: { total: number; eligible: number; blockingReasonCode: string | null } | null;
 };
 
@@ -257,12 +263,12 @@ export type Template = {
 
 const STATUS: Record<string, { label: string; tone: InlineStatusTone }> = {
   PENDING: { label: "待审批", tone: "warning" },
-  APPROVED: { label: "已批准", tone: "info" },
+  APPROVED: { label: "已生效", tone: "success" },
   REJECTED: { label: "已驳回", tone: "error" },
-  CANCELLED: { label: "已撤回或被替代", tone: "neutral" },
-  EXPIRED: { label: "已过期", tone: "neutral" },
-  EXECUTED: { label: "审批执行完成", tone: "success" },
-  EXECUTION_FAILED: { label: "执行失败", tone: "error" },
+  CANCELLED: { label: "已撤回", tone: "neutral" },
+  EXPIRED: { label: "已失效", tone: "neutral" },
+  EXECUTED: { label: "已生效", tone: "success" },
+  EXECUTION_FAILED: { label: "办理未成功", tone: "error" },
 };
 
 export function statusView(value: string | undefined | null): { label: string; tone: InlineStatusTone } {
@@ -311,7 +317,7 @@ const REASONS: Record<string, string> = {
   BUSINESS_ADAPTER_MISSING: "业务摘要暂时无法读取",
   TEST_OPERATION_PAYLOAD_WITHHELD: "测试操作载荷不外发",
   MEMBERSHIP_DETAIL_READ_REQUIRED: "定价与成本口径需要会员明细读取权限",
-  NO_CANDIDATE_SNAPSHOT: "候选快照为空",
+  NO_CANDIDATE_SNAPSHOT: "暂无可审批的人",
   NO_ELIGIBLE_CANDIDATE: "候选中无人当前合格",
   ENTITLEMENT_RESULT_NOT_READ: "读不到本次执行作用的权益行",
   SETTLEMENT_VERSION_NOT_READ: "读不到本次调整对应的结算版本",
@@ -451,10 +457,10 @@ export function businessTitleOf(item: Pick<RequestSummary, "business" | "operati
 }
 
 export function executionModeLabel(mode: string | undefined | null): string {
-  if (mode === "GENERIC_TRANSACTION") return "平台执行";
+  if (mode === "GENERIC_TRANSACTION") return "系统办理";
   if (mode === "SOURCE_BUSINESS") return "来源业务完成";
-  if (mode === "UNSUPPORTED") return "不支持执行";
-  return mode ? mode : "执行方式未提供";
+  if (mode === "UNSUPPORTED") return "暂不支持办理";
+  return mode ? mode : "办理方式未提供";
 }
 
 /**
@@ -535,15 +541,15 @@ export const AUDIT_ACTIONS = [
 ];
 
 const AUDIT_ACTION_LABELS: Record<string, string> = {
-  "approval.request.created": "提交申请",
-  "approval.request.approved": "审批同意",
-  "approval.request.rejected": "审批驳回",
-  "approval.request.cancelled": "申请被替代或取消",
-  "approval.request.withdrawn": "撤回申请",
-  "approval.request.expired": "申请过期",
-  "approval.request.candidate_added": "追加审批人",
-  "approval.execution.completed": "执行完成",
-  "approval.template.configured": "配置审批模板",
+  "approval.request.created": "提交",
+  "approval.request.approved": "批准",
+  "approval.request.rejected": "驳回",
+  "approval.request.cancelled": "撤回",
+  "approval.request.withdrawn": "撤回",
+  "approval.request.expired": "已失效",
+  "approval.request.candidate_added": "补充审批人",
+  "approval.execution.completed": "已生效",
+  "approval.template.configured": "配置规则",
 };
 
 export function auditActionLabel(action: string): string {
@@ -581,4 +587,174 @@ export function auditScopeLabel(scope: string | undefined): string {
   if (scope === "BOSS_ALL_APPROVAL_EVENTS") return "Boss：全部审批与授权事件";
   if (scope === "ACTOR_OR_REQUEST_SCOPE") return "当前账号：本人操作或本人相关申请的事件";
   return "已按当前账号范围过滤";
+}
+
+// ── 改版：风险级别 / 状态 / 摘要 / 规则说明 ──────────────────────────────────
+
+/** 业务类型的人类可读名称；用于列表筛选与摘要兜底，不用裸操作码。 */
+export const OPERATION_TITLES: Record<string, string> = {
+  "membership.benefit.policy.publish": "发布会员权益政策",
+  "distribution.policy.publish": "调整分销政策",
+  "order.compensation.grant": "订单全额包赔赔偿",
+  "order.settlement.adjust": "人工调整订单结算",
+  "membership.entitlement.grant": "发放会员礼遇",
+  "membership.entitlement.replace": "替换会员礼遇",
+  "membership.entitlement.revoke": "撤销会员礼遇",
+};
+
+/** 高影响类型：批准时需要 6 位动态码。 */
+export const HIGH_IMPACT_OPERATIONS = new Set([
+  "membership.benefit.policy.publish",
+  "distribution.policy.publish",
+  "order.compensation.grant",
+]);
+
+export function isHighImpactOperation(code: string | undefined | null): boolean {
+  return typeof code === "string" && HIGH_IMPACT_OPERATIONS.has(code);
+}
+
+export type RiskLevel = "高" | "中" | "低";
+
+/** 结算调整为中级，高影响三类为高级，其余礼遇类为低级。 */
+export function operationLevel(code: string | undefined | null): RiskLevel {
+  if (isHighImpactOperation(code)) return "高";
+  if (code === "order.settlement.adjust") return "中";
+  return "低";
+}
+
+/** 结算调整单批准后到订单完成确认/过账之间，用专用状态文案，不显示通用「已生效」。 */
+export function requestStatusView(input: { status: string; operationCode?: string | null; business?: BusinessView }): { label: string; tone: InlineStatusTone } {
+  if (input.operationCode === "order.settlement.adjust" && input.status === "APPROVED") {
+    return input.business?.settlementResult?.posted === true
+      ? { label: "已完成", tone: "success" }
+      : { label: "已批准，待订单确认", tone: "warning" };
+  }
+  return statusView(input.status);
+}
+
+/** 规则说明：一张只读表，7 列，内容固定（全额冲回分销佣金不显示）。 */
+export type RuleRow = {
+  type: string; submitters: string; approvers: string; selfApprove: string;
+  totp: string; afterApprove: string; entry: string;
+};
+
+export const RULES_COLUMNS = ["类型", "谁提交", "谁批准", "能否自批", "动态码", "批准后", "在哪发起"] as const;
+
+export const RULES_ROWS: RuleRow[] = [
+  { type: "发布会员权益政策", submitters: "运营、Boss", approvers: "仅 Boss", selfApprove: "Boss 可以", totp: "要", afterApprove: "立即发布", entry: "会员成长页" },
+  { type: "调整分销政策", submitters: "运营、Boss", approvers: "运营、Boss", selfApprove: "可以", totp: "要", afterApprove: "立即生成新版本", entry: "分销政策页" },
+  { type: "订单全额包赔赔偿", submitters: "客服、运营、Boss", approvers: "仅 Boss", selfApprove: "Boss 可以", totp: "要", afterApprove: "立即记入号主余额", entry: "订单详情" },
+  { type: "人工调整订单结算", submitters: "客服、运营、Boss", approvers: "运营、Boss", selfApprove: "可以", totp: "不用", afterApprove: "回订单双方确认后过账", entry: "订单履约/结算" },
+  { type: "发放/替换会员礼遇", submitters: "客服、运营、Boss", approvers: "运营、Boss", selfApprove: "可以", totp: "不用", afterApprove: "立即生效", entry: "会员礼遇页" },
+  { type: "撤销会员礼遇", submitters: "运营、Boss", approvers: "运营、Boss", selfApprove: "可以", totp: "不用", afterApprove: "立即生效", entry: "会员礼遇页" },
+];
+
+const summaryDateFormatter = new Intl.DateTimeFormat("zh-CN", { dateStyle: "medium", timeZone: "Asia/Shanghai" });
+
+function shortDate(value: string | null): string {
+  if (!value) return "待核";
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? "待核" : summaryDateFormatter.format(date);
+}
+
+function yuanFromCents(cents: unknown): string | null {
+  if (typeof cents !== "string" || !/^-?\d+$/.test(cents)) return null;
+  const value = BigInt(cents);
+  const abs = value < 0n ? -value : value;
+  return `${value < 0n ? "−" : ""}${(abs / 100n).toLocaleString("zh-CN")}.${(abs % 100n).toString().padStart(2, "0")} 元`;
+}
+
+function amountText(value: unknown): string | null {
+  if (value === null || value === undefined) return null;
+  if (typeof value === "object" && !Array.isArray(value)) return moneyLabel(value);
+  return yuanFromCents(value);
+}
+
+function strField(obj: Record<string, unknown>, key: string): string | null {
+  const value = obj[key];
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function policyValueLabel(key: string, value: unknown): string {
+  if (typeof value === "boolean") return value ? "开启" : "暂停";
+  if (key === "settlementDelayDays") return `${value} 天`;
+  if (key === "renterPercent" || key === "ownerPercent") return `${value}%`;
+  return typeof value === "string" || typeof value === "number" ? String(value) : "已调整";
+}
+
+/**
+ * 列表一行摘要：按业务类型写人话，不显示任何技术字符串。
+ * 结构化字段缺失时回退到服务端给的 summary / changeSummary，绝不裸露操作码或哈希。
+ */
+export function requestSummaryLine(item: Pick<RequestSummary, "operationCode" | "summary" | "business">): string {
+  const code = item.operationCode;
+  const fallback = typeof item.summary === "string" && item.summary.trim() ? item.summary.trim() : "申请内容待核";
+  const business = item.business;
+  if (!business) return fallback;
+  const s = (business.summary ?? {}) as Record<string, unknown>;
+
+  if (code === "order.compensation.grant") {
+    const c = business.compensation;
+    if (!c) return fallback;
+    const amount = yuanFromCents(c.amountCents) ?? "金额待核";
+    const order = c.displayNo || c.orderId || "订单待核";
+    const reason = c.reason || business.changeSummary || "";
+    return `赔偿 ${amount} · 订单 ${order}${reason ? ` · ${reason}` : ""}`;
+  }
+
+  if (code === "distribution.policy.publish") {
+    const change = business.policyChange;
+    const changes = change?.changes && typeof change.changes === "object" && !Array.isArray(change.changes)
+      ? change.changes as Record<string, unknown> : null;
+    if (!changes) return business.changeSummary || fallback;
+    const labels: Record<string, string> = { enabled: "计佣状态", renterPercent: "推荐租客比例", ownerPercent: "推荐号主比例", settlementDelayDays: "结算后等待入账" };
+    const parts: string[] = [];
+    for (const [key, value] of Object.entries(changes)) {
+      const label = labels[key] ?? key;
+      if (value && typeof value === "object" && !Array.isArray(value) && ("from" in value || "to" in value)) {
+        const pair = value as { from?: unknown; to?: unknown };
+        parts.push(`${label} ${pair.from === undefined ? "原值" : policyValueLabel(key, pair.from)} → ${pair.to === undefined ? "新值" : policyValueLabel(key, pair.to)}`);
+      } else {
+        parts.push(`${label} → ${policyValueLabel(key, value)}`);
+      }
+    }
+    return parts.length ? parts.join("；") : (business.changeSummary || fallback);
+  }
+
+  if (code === "membership.benefit.policy.publish") {
+    const draft = (s.policyDraft ?? {}) as Record<string, unknown>;
+    const effective = strField(draft, "effectiveAtUtc");
+    return (business.changeSummary || fallback) + (effective ? ` · 拟生效 ${shortDate(effective)}` : "");
+  }
+
+  if (code === "membership.entitlement.grant" || code === "membership.entitlement.replace") {
+    const user = strField(s, "targetUserName") ?? strField(s, "targetUserId") ?? "用户待核";
+    const kind = strField(s, "entitlementKindTitle") ?? strField(s, "entitlementKind") ?? "礼遇待核";
+    const pricing = (s.pricingSummary ?? {}) as Record<string, unknown>;
+    const discount = strField(pricing, "payableRatio");
+    const window = strField(s, "startsAt") || strField(s, "endsAt")
+      ? ` · ${shortDate(strField(s, "startsAt"))} 至 ${shortDate(strField(s, "endsAt"))}` : "";
+    return `${user} · ${kind}${discount ? ` · 折扣 ${discount}` : ""}${window}`;
+  }
+
+  if (code === "membership.entitlement.revoke") {
+    const user = strField(s, "targetUserName") ?? strField(s, "targetUserId") ?? "用户待核";
+    const revoked = (s.revokedEntitlement ?? {}) as Record<string, unknown>;
+    const kind = strField(revoked, "kindTitle") ?? strField(revoked, "kind") ?? strField(s, "entitlementKindTitle") ?? "礼遇待核";
+    const end = strField(revoked, "currentEndsAt") ?? strField(revoked, "endsAt") ?? strField(s, "endsAt");
+    return `${user} · 收回${kind}${end ? ` · 原到期 ${shortDate(end)}` : ""}`;
+  }
+
+  if (code === "order.settlement.adjust") {
+    const order = strField(s, "displayNo") ?? strField(s, "orderId");
+    const ownerSys = amountText(s.systemOwnerNet), ownerNew = amountText(s.proposedOwnerNet);
+    const renterSys = amountText(s.systemRenterRefund), renterNew = amountText(s.proposedRenterRefund);
+    const parts: string[] = [];
+    if (ownerSys || ownerNew) parts.push(`号主净额 ${ownerSys ?? "待核"} → ${ownerNew ?? "待核"}`);
+    if (renterSys || renterNew) parts.push(`租客应退 ${renterSys ?? "待核"} → ${renterNew ?? "待核"}`);
+    const head = order ? `订单 ${order}` : "结算调整";
+    return parts.length ? `${head} · ${parts.join(" · ")}` : (business.changeSummary || fallback);
+  }
+
+  return business.changeSummary || fallback;
 }

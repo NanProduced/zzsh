@@ -417,10 +417,10 @@ test("M2-C approval and authorized audit query enforce the minimum workflow", as
     assert.ok(Array.isArray(templates.body?.templates));
 
     await configure(base, boss, "approval.test.execute", "manual", [boss.username, candidateOne.username]);
-    const selfRequestId = await createRequest(base, boss, "approval.test.execute", "manual", "SUCCESS", "Boss 自审阻断");
+    const selfRequestId = await createRequest(base, boss, "approval.test.execute", "manual", "SUCCESS", "Boss 自批样本");
     const selfDecision = await decide(base, boss, selfRequestId, "APPROVE");
-    assert.equal(selfDecision.response.status, 403, "self approval must be rejected");
-    assert.equal((await detail(base, boss, selfRequestId)).body?.status, "PENDING");
+    assert.equal(selfDecision.response.status, 200, "self approval is allowed");
+    assert.equal((await detail(base, boss, selfRequestId)).body?.status, "APPROVED", "a test-operation approval only writes the decision");
 
     await configure(base, boss, "approval.no.eligible", "manual", [candidateThree.username]);
     const freeze = await request(base, "/api/v1/admin/security/freeze", { targetAdminId: candidateThree.id, password: boss.password, totpCode: totpCode(boss.secret), reason: "M2-C 无资格验证" }, boss.jar, ADMIN_ORIGIN);
@@ -477,7 +477,7 @@ test("M2-C approval and authorized audit query enforce the minimum workflow", as
     assert.equal((await detail(base, requester, payloadNew)).body?.status, "PENDING");
 
     await configure(base, boss, "approval.test.execute", "append", [candidateOne.username]);
-    const appendRequest = await createRequest(base, requester, "approval.test.execute", "append", "SUCCESS", "追加合法审批人");
+    const appendRequest = await createRequest(base, requester, "approval.test.execute", "append", "SUCCESS", "退役的追加候选端点");
     const appendBefore = await detail(base, requester, appendRequest);
     assert.equal(appendBefore.body?.status, "PENDING");
     assert.equal(appendBefore.body?.decision, null);
@@ -486,38 +486,35 @@ test("M2-C approval and authorized audit query enforce the minimum workflow", as
       "SELECT count(*)::text AS count FROM \"zzsh_iam\".\"audit_event\" WHERE \"object_type\" = 'approval_request' AND \"object_id\" = $1 AND \"action\" = 'approval.request.candidate_added'",
       [appendRequest],
     );
-    const unrelatedOther = await bff(base, "/security/approvals/requests/add-candidate", { requestId: appendRequest, username: candidateTwo.username, reason: "无关管理员不得追加他人" }, unrelated);
-    assert.equal(unrelatedOther.response.status, 403);
-    const unrelatedSelf = await direct(base, "/approvals/requests/add-candidate", { requestId: appendRequest, username: unrelated.username, reason: "无关管理员不得自追加" }, unrelated);
-    assert.equal(unrelatedSelf.response.status, 403);
-    const candidateOneOther = await direct(base, "/approvals/requests/add-candidate", { requestId: appendRequest, username: candidateTwo.username, reason: "候选人不是流程负责人" }, candidateOne);
-    assert.equal(candidateOneOther.response.status, 403);
-    const appendAfterUnauthorized = await detail(base, requester, appendRequest);
-    assert.equal(appendAfterUnauthorized.body?.status, "PENDING");
-    assert.equal(appendAfterUnauthorized.body?.decision, null);
-    assert.deepEqual(appendAfterUnauthorized.body?.candidates?.map((item: { username?: string }) => item.username), [candidateOne.username.toLowerCase()]);
+    // 追加候选端点已退役：任何调用方都得到 409，状态与审计都不变。
+    const unrelatedOther = await bff(base, "/security/approvals/requests/add-candidate", { requestId: appendRequest, username: candidateTwo.username, reason: "退役端点不接受追加" }, unrelated);
+    assert.equal(unrelatedOther.response.status, 409);
+    const unrelatedSelf = await direct(base, "/approvals/requests/add-candidate", { requestId: appendRequest, username: unrelated.username, reason: "退役端点不接受追加" }, unrelated);
+    assert.equal(unrelatedSelf.response.status, 409);
+    const candidateOneOther = await direct(base, "/approvals/requests/add-candidate", { requestId: appendRequest, username: candidateTwo.username, reason: "退役端点不接受追加" }, candidateOne);
+    assert.equal(candidateOneOther.response.status, 409);
+    const appended = await bff(base, "/security/approvals/requests/add-candidate", { requestId: appendRequest, username: candidateTwo.username, reason: "退役端点不接受追加" }, requester);
+    assert.equal(appended.response.status, 409);
+    const appendAfterRetired = await detail(base, requester, appendRequest);
+    assert.equal(appendAfterRetired.body?.status, "PENDING");
+    assert.equal(appendAfterRetired.body?.decision, null);
+    assert.deepEqual(appendAfterRetired.body?.candidates?.map((item: { username?: string }) => item.username), [candidateOne.username.toLowerCase()]);
     const appendAuditAfter = await runtimePool.query<{ count: string }>(
       "SELECT count(*)::text AS count FROM \"zzsh_iam\".\"audit_event\" WHERE \"object_type\" = 'approval_request' AND \"object_id\" = $1 AND \"action\" = 'approval.request.candidate_added'",
       [appendRequest],
     );
-    assert.equal(appendAuditAfter.rows[0]?.count, appendAuditBefore.rows[0]?.count, "unauthorized append must not create a success audit");
-    const appended = await bff(base, "/security/approvals/requests/add-candidate", { requestId: appendRequest, username: candidateTwo.username, reason: "申请人临时增加当前合格候选人" }, requester);
-    assert.equal(appended.response.status, 200);
-    const appendDetail = await detail(base, requester, appendRequest);
-    assert.equal(appendDetail.body?.candidates?.length, 2);
-    assert.ok(appendDetail.body?.candidates?.some((item: { username?: string; source?: string }) => item.username === candidateOne.username.toLowerCase() && item.source === "TEMPLATE"));
-    assert.ok(appendDetail.body?.candidates?.some((item: { username?: string; source?: string }) => item.username === candidateTwo.username.toLowerCase() && item.source === "APPENDED"));
+    assert.equal(appendAuditAfter.rows[0]?.count, appendAuditBefore.rows[0]?.count, "a retired append must not create a success audit");
 
     await configure(base, boss, "approval.test.execute", "expired-pending", [candidateOne.username]);
-    const expiredPendingId = await createRequest(base, requester, "approval.test.execute", "expired-pending", "SUCCESS", "无关管理员不能使待审批过期");
+    const expiredPendingId = await createRequest(base, requester, "approval.test.execute", "expired-pending", "SUCCESS", "过去时间不再使待审批过期");
     await migrationPool.query("UPDATE \"zzsh_iam\".\"approval_request\" SET \"expires_at\" = clock_timestamp() - interval '1 second' WHERE \"id\" = $1", [expiredPendingId]);
     const expiredPendingAuditBefore = await runtimePool.query<{ count: string }>(
       "SELECT count(*)::text AS count FROM \"zzsh_iam\".\"audit_event\" WHERE \"object_type\" = 'approval_request' AND \"object_id\" = $1 AND \"action\" = 'approval.request.expired'",
       [expiredPendingId],
     );
-    assert.equal((await direct(base, "/approvals/requests/decision", { requestId: expiredPendingId, decision: "APPROVE" }, unrelated)).response.status, 403);
-    assert.equal((await execute(base, unrelated, expiredPendingId)).response.status, 403);
-    assert.equal((await direct(base, "/approvals/requests/add-candidate", { requestId: expiredPendingId, username: candidateTwo.username, reason: "无关管理员不能使待审批过期" }, unrelated)).response.status, 403);
+    // 申请有效期一律 infinity：服务端不再按时间把申请改写为 EXPIRED。
+    assert.equal((await execute(base, requester, expiredPendingId)).response.status, 409, "the execute endpoint is retired");
+    assert.equal((await direct(base, "/approvals/requests/add-candidate", { requestId: expiredPendingId, username: candidateTwo.username, reason: "退役端点不接受追加" }, unrelated)).response.status, 409);
     const expiredPendingUnchanged = await runtimePool.query<{ status: string; decisions: string; candidates: string }>(
       "SELECT r.\"status\", (SELECT count(*)::text FROM \"zzsh_iam\".\"approval_decision\" d WHERE d.\"request_id\" = r.\"id\") AS decisions, (SELECT count(*)::text FROM \"zzsh_iam\".\"approval_request_candidate\" c WHERE c.\"request_id\" = r.\"id\") AS candidates FROM \"zzsh_iam\".\"approval_request\" r WHERE r.\"id\" = $1",
       [expiredPendingId],
@@ -527,21 +524,21 @@ test("M2-C approval and authorized audit query enforce the minimum workflow", as
       "SELECT count(*)::text AS count FROM \"zzsh_iam\".\"audit_event\" WHERE \"object_type\" = 'approval_request' AND \"object_id\" = $1 AND \"action\" = 'approval.request.expired'",
       [expiredPendingId],
     );
-    assert.equal(expiredPendingAuditAfter.rows[0]?.count, expiredPendingAuditBefore.rows[0]?.count, "unrelated expired calls must not create an expiry audit");
-    assert.equal((await direct(base, "/approvals/requests/decision", { requestId: expiredPendingId, decision: "APPROVE" }, candidateOne)).response.status, 409);
-    assert.equal((await runtimePool.query<{ status: string }>("SELECT \"status\" FROM \"zzsh_iam\".\"approval_request\" WHERE \"id\" = $1", [expiredPendingId])).rows[0]?.status, "EXPIRED");
+    assert.equal(expiredPendingAuditAfter.rows[0]?.count, expiredPendingAuditBefore.rows[0]?.count, "no expiry audit is ever written");
+    assert.equal((await decide(base, candidateOne, expiredPendingId, "APPROVE")).response.status, 200, "a past expiresAt no longer blocks a decision");
+    assert.equal((await runtimePool.query<{ status: string }>("SELECT \"status\" FROM \"zzsh_iam\".\"approval_request\" WHERE \"id\" = $1", [expiredPendingId])).rows[0]?.status, "APPROVED");
 
     await configure(base, boss, "approval.test.execute", "expired-approved", [candidateOne.username]);
-    const expiredApprovedId = await createRequest(base, requester, "approval.test.execute", "expired-approved", "SUCCESS", "无关管理员不能使已通过过期");
+    const expiredApprovedId = await createRequest(base, requester, "approval.test.execute", "expired-approved", "SUCCESS", "过去时间不再使已通过过期");
     assert.equal((await decide(base, candidateOne, expiredApprovedId, "APPROVE")).response.status, 200);
     await migrationPool.query("UPDATE \"zzsh_iam\".\"approval_request\" SET \"expires_at\" = clock_timestamp() - interval '1 second' WHERE \"id\" = $1", [expiredApprovedId]);
     const expiredApprovedAuditBefore = await runtimePool.query<{ count: string }>(
       "SELECT count(*)::text AS count FROM \"zzsh_iam\".\"audit_event\" WHERE \"object_type\" = 'approval_request' AND \"object_id\" = $1 AND \"action\" = 'approval.request.expired'",
       [expiredApprovedId],
     );
-    assert.equal((await decide(base, unrelated, expiredApprovedId, "REJECT", "无关管理员不能改写已通过申请")).response.status, 403);
-    assert.equal((await direct(base, "/approvals/requests/execute", { requestId: expiredApprovedId }, unrelated)).response.status, 403);
-    assert.equal((await bff(base, "/security/approvals/requests/add-candidate", { requestId: expiredApprovedId, username: candidateTwo.username, reason: "无关管理员不能追加已通过申请" }, unrelated)).response.status, 403);
+    assert.equal((await decide(base, unrelated, expiredApprovedId, "REJECT", "无关管理员不能改写已通过申请")).response.status, 409, "the request is already closed by its status, not by expiry");
+    assert.equal((await execute(base, requester, expiredApprovedId)).response.status, 409);
+    assert.equal((await bff(base, "/security/approvals/requests/add-candidate", { requestId: expiredApprovedId, username: candidateTwo.username, reason: "退役端点不接受追加" }, unrelated)).response.status, 409);
     const expiredApprovedUnchanged = await runtimePool.query<{ status: string; executions: string; candidates: string }>(
       "SELECT r.\"status\", (SELECT count(*)::text FROM \"zzsh_iam\".\"approval_execution\" e WHERE e.\"request_id\" = r.\"id\") AS executions, (SELECT count(*)::text FROM \"zzsh_iam\".\"approval_request_candidate\" c WHERE c.\"request_id\" = r.\"id\") AS candidates FROM \"zzsh_iam\".\"approval_request\" r WHERE r.\"id\" = $1",
       [expiredApprovedId],
@@ -551,28 +548,25 @@ test("M2-C approval and authorized audit query enforce the minimum workflow", as
       "SELECT count(*)::text AS count FROM \"zzsh_iam\".\"audit_event\" WHERE \"object_type\" = 'approval_request' AND \"object_id\" = $1 AND \"action\" = 'approval.request.expired'",
       [expiredApprovedId],
     );
-    assert.equal(expiredApprovedAuditAfter.rows[0]?.count, expiredApprovedAuditBefore.rows[0]?.count, "unrelated approved-expiry calls must not create an expiry audit");
-    assert.equal((await execute(base, requester, expiredApprovedId)).response.status, 409);
-    assert.equal((await runtimePool.query<{ status: string }>("SELECT \"status\" FROM \"zzsh_iam\".\"approval_request\" WHERE \"id\" = $1", [expiredApprovedId])).rows[0]?.status, "EXPIRED");
+    assert.equal(expiredApprovedAuditAfter.rows[0]?.count, expiredApprovedAuditBefore.rows[0]?.count, "no expiry audit is ever written");
+    assert.equal((await runtimePool.query<{ status: string }>("SELECT \"status\" FROM \"zzsh_iam\".\"approval_request\" WHERE \"id\" = $1", [expiredApprovedId])).rows[0]?.status, "APPROVED");
 
     await configure(base, boss, "approval.test.execute", "execute", [candidateOne.username]);
-    const successfulExecutionId = await createRequest(base, requester, "approval.test.execute", "execute", "SUCCESS", "非资金成功执行");
+    const successfulExecutionId = await createRequest(base, requester, "approval.test.execute", "execute", "SUCCESS", "执行端点退役样本");
     assert.equal((await decide(base, candidateOne, successfulExecutionId, "APPROVE")).response.status, 200);
-    assert.equal((await execute(base, requester, successfulExecutionId)).response.status, 200);
+    // /approvals/requests/execute 已退役；测试操作批准只写决定，不进入通用执行器。
+    assert.equal((await execute(base, requester, successfulExecutionId)).response.status, 409);
     assert.equal((await execute(base, requester, successfulExecutionId)).response.status, 409);
     const successfulExecutionDb = await runtimePool.query<{ status: string; executions: string }>(
       "SELECT r.\"status\", (SELECT count(*)::text FROM \"zzsh_iam\".\"approval_execution\" e WHERE e.\"request_id\" = r.\"id\") AS executions FROM \"zzsh_iam\".\"approval_request\" r WHERE r.\"id\" = $1",
       [successfulExecutionId],
     );
-    assert.deepEqual(successfulExecutionDb.rows[0], { status: "EXECUTED", executions: "1" });
+    assert.deepEqual(successfulExecutionDb.rows[0], { status: "APPROVED", executions: "0" }, "test operations are not auto-executed on approval");
 
-    const failedExecutionId = await createRequest(base, requester, "approval.test.execute", "execute", "FAILURE", "非资金失败执行");
+    const failedExecutionId = await createRequest(base, requester, "approval.test.execute", "execute", "FAILURE", "执行端点退役失败样本");
     assert.equal((await decide(base, candidateOne, failedExecutionId, "APPROVE")).response.status, 200);
-    const failedExecution = await execute(base, requester, failedExecutionId);
-    assert.equal(failedExecution.response.status, 200);
-    assert.equal(failedExecution.body?.executionStatus, "FAILED");
-    assert.equal((await execute(base, requester, failedExecutionId)).response.status, 409);
-    const expiredExecutionId = await createRequest(base, requester, "approval.test.execute", "execute", "SUCCESS", "过期执行阻断");
+    assert.equal((await execute(base, requester, failedExecutionId)).response.status, 409, "no separate execution endpoint exists for a failed receipt");
+    const expiredExecutionId = await createRequest(base, requester, "approval.test.execute", "execute", "SUCCESS", "过去时间不再影响执行端点");
     assert.equal((await decide(base, candidateOne, expiredExecutionId, "APPROVE")).response.status, 200);
     await migrationPool.query("UPDATE \"zzsh_iam\".\"approval_request\" SET \"expires_at\" = clock_timestamp() - interval '1 second' WHERE \"id\" = $1", [expiredExecutionId]);
     assert.equal((await execute(base, requester, expiredExecutionId)).response.status, 409);
@@ -580,7 +574,7 @@ test("M2-C approval and authorized audit query enforce the minimum workflow", as
       "SELECT r.\"status\", (SELECT count(*)::text FROM \"zzsh_iam\".\"approval_execution\" e WHERE e.\"request_id\" = r.\"id\") AS executions FROM \"zzsh_iam\".\"approval_request\" r WHERE r.\"id\" = $1",
       [expiredExecutionId],
     );
-    assert.deepEqual(expiredExecutionDb.rows[0], { status: "EXPIRED", executions: "0" });
+    assert.deepEqual(expiredExecutionDb.rows[0], { status: "APPROVED", executions: "0" }, "a past expiresAt never rewrites the status to EXPIRED");
 
     await configure(base, boss, "approval.audit.rollback", "manual", [candidateOne.username]);
     await migrationPool.query("REVOKE INSERT ON TABLE \"zzsh_iam\".\"audit_event\" FROM " + quotedIdentifier(resources.runtimeUser, "runtime user"));
@@ -675,10 +669,10 @@ test("M2-C approval and authorized audit query enforce the minimum workflow", as
     assert.equal((await bff(base, "/security/audit/events?limit=20", undefined, genericReader)).response.status, 403, "personal DENY must remain effective on audit query");
     assert.equal((await bff(base, "/security/audit/events", {}, boss)).response.status, 404, "generic audit is read-only");
 
-    const missingKey = await fetch(base + "/api/bff/admin/security/approvals/requests/execute", {
+    const missingKey = await fetch(base + "/api/bff/admin/security/approvals/requests/decision", {
       method: "POST",
       headers: { origin: ADMIN_ORIGIN, "content-type": "application/json", cookie: requester.jar.header() },
-      body: JSON.stringify({ requestId: appendRequest }),
+      body: JSON.stringify({ requestId: appendRequest, decision: "APPROVE" }),
     });
     assert.equal(missingKey.status, 400, "an approval write without Idempotency-Key must be rejected");
     assert.equal((await readJson(missingKey))?.error?.code, "MISSING_IDEMPOTENCY_KEY");
@@ -727,19 +721,18 @@ test("M2-C approval and authorized audit query enforce the minimum workflow", as
     assert.equal(templateAudits.rows[0]?.count, "1", "a replayed template update must not append another audit");
 
     const executeKey = newIdempotencyKey();
-    const replayExecutionId = await createRequest(base, requester, "approval.test.execute", "execute", "SUCCESS", "执行重放不重复", undefined);
-    assert.equal((await decide(base, candidateOne, replayExecutionId, "APPROVE")).response.status, 200);
-    const firstExecution = await execute(base, requester, replayExecutionId, executeKey);
+    const replayExecutionId = await createRequest(base, requester, "approval.test.execute", "execute", "SUCCESS", "决定重放不重复", undefined);
+    const firstExecution = await decide(base, candidateOne, replayExecutionId, "APPROVE", undefined, executeKey);
     assert.equal(firstExecution.response.status, 200, JSON.stringify(firstExecution.body));
-    const replayedExecution = await execute(base, requester, replayExecutionId, executeKey);
+    const replayedExecution = await decide(base, candidateOne, replayExecutionId, "APPROVE", undefined, executeKey);
     assert.equal(replayedExecution.response.status, 200, JSON.stringify(replayedExecution.body));
     assert.equal(replayedExecution.body?.idempotencyReplay, true);
-    assert.equal(replayedExecution.body?.resultCode, firstExecution.body?.resultCode);
-    const replayExecutionDb = await runtimePool.query<{ status: string; executions: string; audits: string }>(
-      "SELECT r.\"status\", (SELECT count(*)::text FROM \"zzsh_iam\".\"approval_execution\" e WHERE e.\"request_id\" = r.\"id\") AS executions, (SELECT count(*)::text FROM \"zzsh_iam\".\"audit_event\" a WHERE a.\"action\" = 'approval.execution.completed' AND a.\"object_id\" = r.\"id\") AS audits FROM \"zzsh_iam\".\"approval_request\" r WHERE r.\"id\" = $1",
+    assert.equal(replayedExecution.body?.status, firstExecution.body?.status);
+    const replayExecutionDb = await runtimePool.query<{ status: string; decisions: string; audits: string }>(
+      "SELECT r.\"status\", (SELECT count(*)::text FROM \"zzsh_iam\".\"approval_decision\" d WHERE d.\"request_id\" = r.\"id\") AS decisions, (SELECT count(*)::text FROM \"zzsh_iam\".\"audit_event\" a WHERE a.\"action\" = 'approval.request.approved' AND a.\"object_id\" = r.\"id\") AS audits FROM \"zzsh_iam\".\"approval_request\" r WHERE r.\"id\" = $1",
       [replayExecutionId],
     );
-    assert.deepEqual(replayExecutionDb.rows[0], { status: "EXECUTED", executions: "1", audits: "1" }, "replay must not repeat the business effect or the audit");
+    assert.deepEqual(replayExecutionDb.rows[0], { status: "APPROVED", decisions: "1", audits: "1" }, "replay must not repeat the decision or the audit");
 
     const recovery = await bff(base, "/security/approvals/recovery?operation=approval.request.create&key=" + encodeURIComponent(executeKey), undefined, requester);
     assert.equal(recovery.response.status, 200, JSON.stringify(recovery.body));
@@ -752,11 +745,10 @@ test("M2-C approval and authorized audit query enforce the minimum workflow", as
     const foreignRecovery = await bff(base, "/security/approvals/recovery?operation=approval.request.create&key=" + encodeURIComponent(replayKey), undefined, candidateOne);
     assert.equal(foreignRecovery.body?.knowledge, "UNRESOLVED", "another administrator must not read this principal's receipt");
     assert.equal((await bff(base, "/security/approvals/recovery?operation=arbitrary.table&key=" + encodeURIComponent(replayKey), undefined, requester)).response.status, 400);
-    assert.equal((await bff(base, "/security/approvals/recovery?operation=approval.request.execute&key=" + encodeURIComponent(executeKey), undefined, requester)).response.status, 400, "target-scoped recovery must name its target");
-    const scopedRecovery = await bff(base, `/security/approvals/recovery?operation=approval.request.execute&key=${encodeURIComponent(executeKey)}&requestId=${encodeURIComponent(replayExecutionId)}`, undefined, requester);
+    assert.equal((await bff(base, "/security/approvals/recovery?operation=approval.request.decide&key=" + encodeURIComponent(executeKey), undefined, candidateOne)).response.status, 400, "target-scoped recovery must name its target");
+    const scopedRecovery = await bff(base, `/security/approvals/recovery?operation=approval.request.decide&key=${encodeURIComponent(executeKey)}&requestId=${encodeURIComponent(replayExecutionId)}`, undefined, candidateOne);
     assert.equal(scopedRecovery.body?.knowledge, "KNOWN");
-    assert.equal(scopedRecovery.body?.receipt?.executionStatus, "SUCCEEDED");
-    assert.equal(scopedRecovery.body?.receipt?.executionMode, "GENERIC_TRANSACTION");
+    assert.equal(scopedRecovery.body?.receipt?.status, "APPROVED");
 
     const readback = await detail(base, requester, appendRequest);
     assert.equal(readback.response.status, 200);

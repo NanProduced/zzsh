@@ -490,7 +490,7 @@ function policyChangeSteps(request: AdminPolicyChangeRequest, change: AdminPolic
 
 const POLICY_CHANGE_COPY: Record<PolicyChangeCardKind, { label: string; nextStep: string; effectiveNote: string }> = {
   draft: { label: "草稿待提交", nextStep: "下一步：保存并核对差异后可提交审批；审批通过并执行后才生效。", effectiveNote: "尚未提交；当前生效仍以本页权益表为准。" },
-  pending: { label: "待审批", nextStep: "下一步：由具备审批权限的管理员在审批中心处理；当前审批不是多人逐级必签。", effectiveNote: "批准并执行后才生效；计划时间不构成按时生效保证。" },
+  pending: { label: "待 Boss 审批", nextStep: "下一步：由 Boss 在审批中心处理；当前审批不是多人逐级必签。", effectiveNote: "批准并执行后才生效；计划时间不构成按时生效保证。" },
   rejected: { label: "已退回", nextStep: "下一步：调整草稿并保存后可重新提交；服务端仍会复核重复申请。", effectiveNote: "本次申请未生效；当前权益不变。" },
   approved: { label: "审批已过待发布", nextStep: "下一步：执行/发布；批准不等于生效。", effectiveNote: "执行并到达计划时间后才生效。" },
   "execution-unknown": { label: "执行状态待核对", nextStep: "下一步：核对执行结果；失败或未知不能当作已生效。", effectiveNote: "执行未确认，当前不能称为已生效。" },
@@ -1670,7 +1670,7 @@ export function MembershipGrowthAdminView({
     && !["unknown", "unavailable", "forbidden"].includes(changeCard.kind) ? readChange.requestedValues ?? null : null;
   const descriptions: Record<PolicyChangeCardKind, string> = {
     draft: "核对并保存草稿后，可提交审批。", none: "当前没有待处理的政策申请。",
-    pending: "申请已提交，等待审批。", approved: "审批已通过，执行发布后才会生效。",
+    pending: "申请已提交，等待 Boss 审批。", approved: "审批已通过，执行发布后才会生效。",
     rejected: "申请已退回，请调整并保存草稿后重新提交。", expired: "申请已过期，请调整并保存草稿后重新提交。",
     cancelled: "申请已撤销，请调整并保存草稿后重新提交。", "execution-unknown": "执行结果尚未确认，请先核对原结果。",
     "pending-effective": "已发布，等待生效。", effective: "这份申请已生效。",

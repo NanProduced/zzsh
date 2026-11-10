@@ -11,7 +11,7 @@ test('shared operation uses existing request/manage gate and Boss review without
  const op='distribution.policy.publish',registration=approvalRegistration(op);
  assert.equal(registration?.businessType,'distribution');assert.equal(registration?.testOnly,false);assert.equal(registration?.executionMode,'GENERIC_TRANSACTION');
  for(const stage of ['REQUEST','DECIDE','EXECUTE'] as const)assert.equal(membershipBusinessPermission(op,stage),'personal.distribution.policy.manage');
- assert.equal(membershipDecisionRequiresBoss(op),true);assert.equal(membershipOperationRequiresGameScope(op),false);
+ assert.equal(membershipDecisionRequiresBoss(op),false,'distribution policy publish is delegated to ops; only membership benefit policy and compensation stay Boss-only');assert.equal(membershipOperationRequiresGameScope(op),false);
  assert.equal(membershipDecisionRequiresBoss('membership.benefit.policy.publish'),true);
 });
 test('approval business summary only projects real frozen policy change and actual execution receipt',async()=>{
@@ -46,31 +46,18 @@ function reversalClient(executions:any[],earning:any=earningRow){const sql:strin
  if(query.includes('rental_referral_earning'))return{rows:earning?[earning]:[]};
  return{rows:[]};}};}
 const reversalViewer:any={userId:'ops_1',access:{status:'ACTIVE',passwordChangeRequired:false,isBoss:false,permissions:new Set(['personal.distribution.policy.read'])},gameScope:{mode:'ALL_GAMES',gameIds:[]}};
-test('full reversal approval shows the original earning and never claims authority without a consumed receipt',async()=>{
- const unauthorized=await projectApprovalBusinesses(reversalClient([]) as any,[reversalRow],reversalViewer);
- const first=unauthorized.views.get(reversalRow.id)! as any;
- assert.equal(first.businessType,'distribution');assert.equal(first.reversal.authorization.knowledge,'NOT_EXECUTED');assert.deepEqual(first.result,{knowledge:'UNKNOWN'});
- assert.equal(first.reversal.original.amountCents,'2500');assert.equal(first.reversal.original.role,'OWNER_REFERRAL');assert.equal(first.reversal.original.postingId,'post_1');
- assert.equal(first.reversal.requestPayloadHash,'c'.repeat(64));assert.equal(first.reversal.originalFactsKnowledge,'KNOWN');
- const failed=await projectApprovalBusinesses(reversalClient([{requestId:reversalRow.id,receiptId:'exec_1',status:'FAILED',resultCode:'X',resultDetail:null,executedBy:'ops_1'}]) as any,[reversalRow],reversalViewer);
- assert.equal((failed.views.get(reversalRow.id) as any).reversal.authorization.knowledge,'REJECTED');
+test('distribution.earning.reverse is retired from the registry; only a restricted historical projection remains',async()=>{
+ assert.equal(approvalRegistration('distribution.earning.reverse'),null,'the full-reversal operation is no longer registered');
  const succeeded=await projectApprovalBusinesses(reversalClient([{requestId:reversalRow.id,receiptId:'exec_1',status:'SUCCEEDED',resultCode:'DISTRIBUTION_REVERSAL_AUTHORIZED',resultDetail:'earning_1',executedBy:'ops_1'}]) as any,[reversalRow],reversalViewer);
  const done=succeeded.views.get(reversalRow.id)! as any;
- assert.equal(done.reversal.authorization.knowledge,'KNOWN');assert.equal(done.reversal.authorization.executionReceiptId,'exec_1');assert.deepEqual(done.result,{knowledge:'KNOWN',earningId:'earning_1'});
- const drifted=await projectApprovalBusinesses(reversalClient([],{...earningRow,amountCents:'2400'}) as any,[reversalRow],reversalViewer);
- assert.equal((drifted.views.get(reversalRow.id) as any).reversal.originalFactsKnowledge,'MISMATCH');
+ assert.equal(done.businessType,'unknown','an unregistered operation is never typed as a live business');
+ assert.equal(done.detailsAvailable,true,'the historical reversal facts stay readable');
+ assert.equal(done.reversal.authorization.knowledge,'NOT_EXECUTED','execution receipts are no longer loaded for a retired operation, so it can never claim authority');
+ assert.deepEqual(done.result,{knowledge:'UNKNOWN'});
+ assert.equal(done.reversal.original.amountCents,'2500');assert.equal(done.reversal.original.role,'OWNER_REFERRAL');
+ assert.equal(done.reversal.originalFactsKnowledge,'KNOWN');
  const missing=await projectApprovalBusinesses(reversalClient([],null) as any,[reversalRow],reversalViewer);
  assert.equal((missing.views.get(reversalRow.id) as any).detailsAvailable,false);
- assert.deepEqual((missing.views.get(reversalRow.id) as any).restrictedReasonCodes,['ORIGINAL_OBJECT_UNAVAILABLE']);
- const outside=await projectApprovalBusinesses(reversalClient([{requestId:reversalRow.id,receiptId:'exec_1',status:'SUCCEEDED',resultCode:'DISTRIBUTION_REVERSAL_AUTHORIZED',resultDetail:'earning_1',executedBy:'ops_1'}]) as any,[reversalRow],{...reversalViewer,gameScope:{mode:'SELECTED_GAMES',gameIds:['alpha']}});
- assert.equal((outside.views.get(reversalRow.id) as any).detailsAvailable,false);
- assert.deepEqual((outside.views.get(reversalRow.id) as any).restrictedReasonCodes,['GAME_SCOPE_DENIED']);
- assert.doesNotMatch(JSON.stringify(outside.views.get(reversalRow.id)),/2500|user_owner|post_1/,'a withdrawn game scope must not leak the original money facts');
- const inside=await projectApprovalBusinesses(reversalClient([{requestId:reversalRow.id,receiptId:'exec_1',status:'SUCCEEDED',resultCode:'DISTRIBUTION_REVERSAL_AUTHORIZED',resultDetail:'earning_1',executedBy:'ops_1'}]) as any,[reversalRow],{...reversalViewer,gameScope:{mode:'SELECTED_GAMES',gameIds:['delta']}});
- assert.equal((inside.views.get(reversalRow.id) as any).reversal.original.role,'OWNER_REFERRAL');
- assert.equal((inside.views.get(reversalRow.id) as any).reversal.authorization.knowledge,'KNOWN');
- const emptyScope=await projectApprovalBusinesses(reversalClient([]) as any,[reversalRow],{...reversalViewer,gameScope:{mode:'SELECTED_GAMES',gameIds:[]}});
- assert.deepEqual((emptyScope.views.get(reversalRow.id) as any).restrictedReasonCodes,['GAME_SCOPE_DENIED']);
  const denied=await projectApprovalBusinesses(reversalClient([]) as any,[reversalRow],{...reversalViewer,access:{...reversalViewer.access,permissions:new Set()}});
  assert.equal((denied.views.get(reversalRow.id) as any).detailsAvailable,false);assert.equal('reversal' in (denied.views.get(reversalRow.id) as any),false);
 });
