@@ -7,7 +7,7 @@ import { assertFormalRefundProfile, describeRefundProfile, inspectRefundProfile,
 const sha = (v: string | Uint8Array) => createHash("sha256").update(v).digest("hex"), ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 export type RefundSourceOptions = { admission: FormalRefundAdmission; profileFor: (operation: RefundOperation, binding: Readonly<RefundWireBinding>, pinned?: Readonly<{ profileId: string; profileSha256: string; keyVersionRef: string }>) => BoundRefundProfile; keyFor: (ref: string) => string };
 export type NativeRefundTerminalFact = Readonly<{ evidenceId: string; intentId: string; postingId: string | null; orderId: string; paymentConfirmationId: string;
-  basisKind?: "POSTING" | "PRESTART_TERMINATION";
+  basisKind?: "POSTING" | "PRESTART_TERMINATION" | "SUPPORT_CANCELLATION";
   renterUserId: string; merchantIdentityId: string; originalPaymentTrxNo: string; originalPaymentOrderNo: string; responsibilityVersionHash: string;
   refundOrderNo: string; amountCents: string; currency: "CNY"; terminal: "SUCCEEDED" | "FAILED_NO_EXECUTION"; refundTransactionNo: string | null;
   completedAt: string | null; sourceObservationId: string; factsDigest: string }>;
@@ -50,7 +50,8 @@ function bodyFor(r: FormalRefundRow, observationId: string, terminal: "SUCCEEDED
     paymentConfirmationId: r.payment_confirmation_id, renterUserId: r.renter_user_id, merchantIdentityId: r.merchant_identity_id,
     originalPaymentTrxNo: r.original_payment_trx_no, originalPaymentOrderNo: r.original_payment_order_no, responsibilityVersionHash: r.responsibility_version_hash,
     refundOrderNo: r.refund_order_no, amountCents: r.amount_cents, currency: "CNY", terminal, refundTransactionNo: trx, completedAt: at, sourceObservationId: observationId };
-  return r.basis_kind === "PRESTART_TERMINATION" ? { ...base, postingId:null, basisKind:"PRESTART_TERMINATION" } : base;
+  return r.basis_kind === "PRESTART_TERMINATION" || r.basis_kind === "SUPPORT_CANCELLATION"
+    ? { ...base, postingId:null, basisKind:r.basis_kind } : base;
 }
 /** 只读原件再验；数据库cached status/verified/canonical均不能单独产事实。 */
 export async function readVerifiedRefundTerminalFact(client: PoolClient, options: RefundSourceOptions, evidenceId: string): Promise<NativeRefundTerminalFact> {

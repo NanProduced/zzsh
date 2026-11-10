@@ -57,7 +57,7 @@ const liveType = `CASE WHEN root.source_kind='NATIVE_RENTAL_REFERRAL' OR root.so
  WHEN root.source_kind='ORDER_COMPENSATION' THEN 'FULL_PAYOUT_COMPENSATION'
  WHEN root.source_entity IN('withdrawal_intent','joinpay_withdrawal_intent') THEN CASE WHEN e.kind IN('RELEASE','JOINPAY_WITHDRAWAL_RELEASED') THEN 'WITHDRAWAL_RETURN' ELSE 'WITHDRAWAL' END
  WHEN root.source_kind='LEGACY_CONTINUATION_DUTY' AND root.beneficiary_role='DEPOSIT_COMPENSATION' THEN 'DEPOSIT_COMPENSATION'
- WHEN l.posting_id IS NOT NULL OR root.source_kind='LEGACY_CONTINUATION_DUTY' AND root.beneficiary_role='OWNER_CREDIT' THEN 'OWNER_INCOME' ELSE 'OTHER' END`;
+ WHEN l.posting_id IS NOT NULL OR root.source_kind='NATIVE_SUPPORT_CANCELLATION' AND l.account_code='OWNER_AVAILABLE' OR root.source_kind='LEGACY_CONTINUATION_DUTY' AND root.beneficiary_role='OWNER_CREDIT' THEN 'OWNER_INCOME' ELSE 'OTHER' END`;
 const historyType = `CASE o.snapshot->>'legacyChangeType' WHEN '1001' THEN 'SETTLEMENT' WHEN '1002' THEN 'WITHDRAWAL' WHEN '1003' THEN 'WITHDRAWAL_RETURN' WHEN '1004' THEN 'WITHDRAWAL_RETURN' WHEN '1005' THEN 'WITHDRAWAL_RETURN' WHEN '1006' THEN 'PLATFORM_ADJUSTMENT' WHEN '1007' THEN 'PLATFORM_ADJUSTMENT' WHEN '1008' THEN 'DEPOSIT_COMPENSATION' WHEN '1009' THEN 'TASK_SETTLEMENT' ELSE 'OTHER' END`;
 
 // The owner can see another user's old payment only when its typed source and order bind to that owner.
@@ -107,7 +107,7 @@ export async function readAdminBalanceActivity(client: PoolClient, q: ActivityQu
   if (q.view === 'LIVE') parts.push(`SELECT 'ledger' AS family,l.id,${utc('COALESCE(e.created_at,p.posted_at,l.created_at)')} AS at
     FROM zzsh_order.settlement_ledger_entry l LEFT JOIN zzsh_order.finance_event e ON e.id=l.finance_event_id
     LEFT JOIN zzsh_order.finance_economic_root root ON root.id=e.economic_root_id
-    LEFT JOIN zzsh_order.settlement_posting p ON p.id=l.posting_id LEFT JOIN zzsh_order.rental_order ord ON ord.id=p.order_id
+    LEFT JOIN zzsh_order.settlement_posting p ON p.id=l.posting_id LEFT JOIN zzsh_order.rental_order ord ON ord.id=COALESCE(p.order_id,CASE WHEN root.source_kind='NATIVE_SUPPORT_CANCELLATION' THEN l.details->>'orderId' END)
     LEFT JOIN zzsh_auth_user."user" u ON u.id=l.counterparty_user_id
     WHERE l.account_code IN ('OWNER_AVAILABLE','WALLET_AVAILABLE') AND l.counterparty_user_id IS NOT NULL AND l.created_at <= $2::timestamptz AND (e.id IS NULL OR e.kind<>'OPENING')
     AND ${during('CASE WHEN l.finance_event_id IS NOT NULL THEN e.created_at ELSE p.posted_at END')} AND ($10='ALL' OR (${liveType})=$10) ${q.subjectUserId?'AND l.counterparty_user_id=$12':''}
@@ -147,7 +147,7 @@ export async function readAdminBalanceActivity(client: PoolClient, q: ActivityQu
   for (const row of ledgerRows) {
     const entry = projectAdminFinanceLedger(row);
     const commission = row.source_kind === 'NATIVE_RENTAL_REFERRAL' || row.source_kind === 'LEGACY_CONTINUATION_DUTY' && row.beneficiary_role === 'COMMISSION';
-    const label = commission ? entry.direction === 'OUT' ? '分销收益冲回' : '分销收入' : row.source_kind === 'ORDER_COMPENSATION' ? '包赔赔偿' : ['withdrawal_intent','joinpay_withdrawal_intent'].includes(row.source_entity) ? (['RELEASE','JOINPAY_WITHDRAWAL_RELEASED'].includes(row.event_kind) ? '提现退回' : '提现扣除') : row.source_kind === 'LEGACY_CONTINUATION_DUTY' && row.beneficiary_role === 'DEPOSIT_COMPENSATION' ? '押金补偿' : row.posting_id || row.source_kind === 'LEGACY_CONTINUATION_DUTY' && row.beneficiary_role === 'OWNER_CREDIT' ? '号主租赁收入' : '余额变动';
+    const label = commission ? entry.direction === 'OUT' ? '分销收益冲回' : '分销收入' : row.source_kind === 'ORDER_COMPENSATION' ? '包赔赔偿' : row.source_kind === 'NATIVE_SUPPORT_CANCELLATION' ? '订单取消号主收益' : ['withdrawal_intent','joinpay_withdrawal_intent'].includes(row.source_entity) ? (['RELEASE','JOINPAY_WITHDRAWAL_RELEASED'].includes(row.event_kind) ? '提现退回' : '提现扣除') : row.source_kind === 'LEGACY_CONTINUATION_DUTY' && row.beneficiary_role === 'DEPOSIT_COMPENSATION' ? '押金补偿' : row.posting_id || row.source_kind === 'LEGACY_CONTINUATION_DUTY' && row.beneficiary_role === 'OWNER_CREDIT' ? '号主租赁收入' : '余额变动';
     const dataOrigin=demoOrigins.get(row.id);
     mapped.set(`ledger:${row.id}`, { id:entry.id, source:'NATIVE', subjectId:entry.subjectId, subjectName:entry.subjectName, label, amountCents:entry.deltaCents, occurredAt:entry.occurredAt, documentRef:row.source_kind==='ORDER_COMPENSATION'?null:entry.documentRef,
       ...(dataOrigin?{dataOrigin,bankArrival:'UNKNOWN' as const}:{}) });

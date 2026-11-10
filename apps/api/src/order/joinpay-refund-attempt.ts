@@ -7,7 +7,7 @@ import { assertRefundResource, createFormalRefundIntent, createPostedNativeRefun
   type FormalRefundCreateInput, type FormalRefundRow, type NativeRefundState } from "./channel-refund-store";
 import { assertFormalRefundProfile, assertRefundStart, describeRefundProfile, inspectRefundProfile, produceRefundRequest, readFormalRefundAdmission,
   readRefundOutbound, readRefundProfileEvidence, refundCompleteTimeToUtc, refundFailureMayRelease, refundWayAccepted, RefundProfileError, type BoundRefundProfile, type RefundBinding, type RefundOperation, type RefundOutbound } from "./joinpay-refund-profile";
-import { readPrestartRefundGate } from "./prestart-refund-store";
+import { readPrestartRefundGate,readSupportCancellationRefundGate } from "./prestart-refund-store";
 import { captureRefundTerminalFact, nativeTerminalReviewsConsistent, readVerifiedRefundTerminalFact, refundTerminalConflicts, type RefundSourceOptions } from "./joinpay-refund-source";
 import { preflightJoinpayRefundResponse } from "./joinpay-refund-protocol";
 const ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/, sha = (v: string | Uint8Array) => createHash("sha256").update(v).digest("hex"), fresh = (p: string) => `${p}_${randomUUID().replaceAll("-", "")}`;
@@ -126,7 +126,7 @@ async function prepare(o: RefundExecution, intentId: string, owner: string, mini
     if (authorize) await authorize(c, intentId);
     const row = await lockFormalRefundContext(c, o.admission, intentId), state = row.state;
     if (["SUCCEEDED", "FAILED"].includes(state)) return { kind: "SKIPPED", state, reason: "TERMINAL" };
-    if (!["POSTING", "PRESTART_TERMINATION"].includes(row.basis_kind ?? "POSTING")) return { kind: "SKIPPED", state, reason: "INELIGIBLE" };
+    if (!["POSTING", "PRESTART_TERMINATION", "SUPPORT_CANCELLATION"].includes(row.basis_kind ?? "POSTING")) return { kind: "SKIPPED", state, reason: "INELIGIBLE" };
     // A persisted review flag may be queried after submission, but never cleared by the query.
     if (queryOnly && (state === "REVIEW_REQUIRED" && !row.requires_review || state === "READY" && row.requires_review))
       return { kind: "SKIPPED", state, reason: "REVIEW_REQUIRED" };
@@ -168,10 +168,10 @@ async function prepare(o: RefundExecution, intentId: string, owner: string, mini
     if (operation === "SUBMIT") {
       const review = (await c.query(`SELECT EXISTS(SELECT 1 FROM zzsh_order.channel_refund_intent WHERE payment_source='JOINPAY' AND merchant_identity_id=$1 AND original_payment_trx_no=$2 AND requires_review) AS blocked`, [row.merchant_identity_id, row.original_payment_trx_no])).rows[0];
       if (review?.blocked !== false) return { kind: "SKIPPED", state, reason: "REVIEW_REQUIRED" };
-      if (row.basis_kind === "PRESTART_TERMINATION") {
-        const gate=await readPrestartRefundGate(c,row);
+      if (row.basis_kind === "PRESTART_TERMINATION" || row.basis_kind === "SUPPORT_CANCELLATION") {
+        const gate=row.basis_kind==="PRESTART_TERMINATION"?await readPrestartRefundGate(c,row):await readSupportCancellationRefundGate(c,row);
         if(!gate.valid){
-          await recordAudit(c,{actorType:"system",action:"order.refund.prestart.first_submit.blocked",objectType:"channel_refund_intent",
+          await recordAudit(c,{actorType:"system",action:row.basis_kind==="PRESTART_TERMINATION"?"order.refund.prestart.first_submit.blocked":"order.refund.support_cancel.first_submit.blocked",objectType:"channel_refund_intent",
             objectId:intentId,outcome:"FAILURE",requestId:intentId,reason:gate.reason!,details:{gateReason:gate.reason,orderNoTrxCount:gate.orderNoTrxCount}});
           return {kind:"SKIPPED",state,reason:"PRESTART_BASIS_REVIEW"};
         }

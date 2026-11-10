@@ -50,6 +50,14 @@ test("prestart refund is an additive cancelled-order fact and never invents bank
  assert.throws(()=>parsePersonalRefunds({...value,order:{...value.order,status:"PAID"}},"user_A","order_A"));
 });
 
+test("poststart cancellation refund keeps its own verified amount and rejects contradictory summaries",()=>{
+ const summary={state:"PROCESSING",amountCents:"5000",source:"JOINPAY",bankArrival:"UNKNOWN"};
+ const value=read({order:{orderId:"order_A",displayNo:"ZZ-1",status:"CANCELLED"},cancellationRefund:summary});
+ assert.deepEqual(parsePersonalRefunds(value,"user_A","order_A").cancellationRefund,summary);
+ assert.throws(()=>parsePersonalRefunds({...value,prestartRefund:summary},"user_A","order_A"));
+ assert.throws(()=>parsePersonalRefunds({...value,cancellationRefund:{...summary,bankArrival:"ARRIVED"}},"user_A","order_A"));
+});
+
 test("contract, subject, order and enum anchors are enforced", () => {
   for (const bad of [
     read({ contractVersion: "personal-native-refunds.v0" }),

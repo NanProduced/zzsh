@@ -50,6 +50,9 @@ type State = {
   localSandbox?:LocalFinancialSandbox;
   localComplete?:boolean;
   prestartReady?:boolean;
+  supportCancelReady?:boolean;
+  supportCancelRows?:Record<string, unknown>[];
+  supportRefundRows?:Record<string, unknown>[];
 };
 
 function fake(state: State = {}) {
@@ -74,6 +77,10 @@ function fake(state: State = {}) {
     if (sql.startsWith("SELECT e.id AS event_id,e.kind AS event_kind")) return { rows: state.liabilityRows ?? [] };
     if (sql.startsWith("SELECT e.id AS event_id")) return { rows: state.ledgerRows ?? [] };
     if (sql.includes("has_table_privilege(current_user,to_regclass('zzsh_order.prestart_termination')")) return { rows: [{ready: state.prestartReady === true}] };
+    if (sql.includes("has_table_privilege(current_user,to_regclass('zzsh_order.support_poststart_cancellation')")) return { rows: [{ready: state.supportCancelReady === true}] };
+    if (sql.startsWith("SELECT p.id,p.order_id,p.renter_user_id")) return {rows:state.supportCancelRows ?? []};
+    if (sql.startsWith("SELECT to_regprocedure('zzsh_order.support_cancellation_refund_terminal_complete")) return {rows:[{ready:true}]};
+    if (sql.startsWith("SELECT i.id,i.order_id,i.renter_user_id")) return {rows:state.supportRefundRows ?? []};
     if(sql.startsWith('SELECT i.id,zzsh_order.local_controlled_refund_terminal_complete'))return{rows:state.localComplete?[{id:INTENT_ID,complete:true}]:[]};
     if(sandbox)return sandbox.query(sql,values);
     throw new Error("Unexpected SQL: " + sql);
@@ -137,6 +144,24 @@ test("cancelled prestart order with unavailable refund source stays unknown", as
   const {result} = read({prestartReady:false, orderRows:[order({status:"CANCELLED", cancel_reason:"PRESTART_TERMINATED", paid_confirmation_id:"pc_1", posting_id:null})]});
   const data = await result;
   assert.deepEqual(data.prestartRefund,{state:"UNKNOWN",amountCents:null,source:"UNKNOWN",bankArrival:"UNKNOWN"});
+});
+
+test("开租后客服取消按本单责任显示部分退款，不伪造到账或跨用户记录", async () => {
+  const original = order({status:"CANCELLED",cancel_reason:"SUPPORT_AFTER_START_CANCELLED",paid_confirmation_id:"pc_1",posting_id:null});
+  const basis = {id:"sc_1",order_id:ORDER,renter_user_id:USER,owner_user_id:"owner_1",payment_confirmation_id:"pc_1",
+    source_digest:"b".repeat(64),refund_cents:"5000",source:"JOINPAY",disposition:"APPLIED",currency:"CNY",
+    merchant_scope_id:"merchant_1",merchant_order_no:"order_1",provider_transaction_id:"trx_1",complete:true};
+  const state = {supportCancelReady:true,supportCancelRows:[basis],orderRows:[original]};
+  const pending = await read(state).result;
+  assert.deepEqual(pending.cancellationRefund,{state:"PROCESSING",amountCents:"5000",source:"JOINPAY",bankArrival:"UNKNOWN"});
+  assert.equal(pending.prestartRefund,undefined);
+  const foreign = await read({...state,supportCancelRows:[{...basis,renter_user_id:"other"}]}).result;
+  assert.equal(foreign.cancellationRefund?.state,"UNKNOWN");
+  assert.equal(foreign.cancellationRefund?.amountCents,null);
+  const zero = await read({...state,supportCancelRows:[{...basis,refund_cents:"0"}]}).result;
+  assert.equal(zero.cancellationRefund,undefined);
+  const missing = await read({...state,supportCancelReady:false}).result;
+  assert.equal(missing.cancellationRefund?.state,"UNKNOWN");
 });
 
 test("本人正常读取：全部分摊、精确金额、本地记账与渠道事实分列", async () => {

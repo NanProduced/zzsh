@@ -2673,6 +2673,15 @@ test("cancelled prestart order uses the same recorded refund result as the cance
  }
 }));
 
+test("support cancellation shows its recorded partial refund without claiming bank arrival",async()=>withDom(async window=>{
+ const cancellationRefund={source:"JOINPAY",state:"PROCESSING",amountCents:"5000",bankArrival:"UNKNOWN"};
+ const read=refundRead("order_A",{order:{orderId:"order_A",displayNo:"ZZ-1",status:"CANCELLED"},cancellationRefund});
+ const probe=await detailProbe(window,{...paidOrder,status:"CANCELLED",cancelReason:"SUPPORT_AFTER_START_CANCELLED"},"renter",settlementBody,read);
+ try{const section=probe.host.querySelector('.order-refund-block');assert.ok(section);assert.match(section.textContent,/退款处理中/);
+  assert.match(section.textContent,/50\.00/);assert.doesNotMatch(section.textContent,/退款金额未记录|退款已到账/);
+ }finally{await probe.dispose();}
+}));
+
 test("C02: a legitimate renter's unexpected 404/503 is unavailable with its request ID, never 'no refund'", async () => {
   await withDom(async (window) => {
     for (const [status, code, requestId] of [[404, "NOT_FOUND", "req_refund_404"], [503, "EVIDENCE_UNAVAILABLE", "req_refund_503"]]) {

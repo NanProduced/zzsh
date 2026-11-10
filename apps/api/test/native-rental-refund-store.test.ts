@@ -18,15 +18,17 @@ test("原应退（包括租客押金）计划仅借应退责任、贷现有清�
   assert.equal(p.lines.some(l => String(l.account) === "WALLET_AVAILABLE"), false);
 });
 
-test('未开租终止复用同一核销清算计划但不伪造posting；其他来源不能传null',()=>{
+test('未开租及客服取消复用核销清算计划但不伪造posting；其他来源不能传null',()=>{
  const p=planNativeRentalRefundJournal({...input(),postingId:null,basisKind:'PRESTART_TERMINATION'});
  assert.equal(p.lines[0]!.details.postingId,null);assert.equal(p.lines[1]!.account,'PAYOUT_CLEARING');
+ const cancellation=planNativeRentalRefundJournal({...input(),postingId:null,basisKind:'SUPPORT_CANCELLATION'});
+ assert.deepEqual(cancellation.lines.map(l=>[l.account,l.debit,l.credit,l.subject]),p.lines.map(l=>[l.account,l.debit,l.credit,l.subject]));
  assert.throws(()=>planNativeRentalRefundJournal({...input(),postingId:null}));
  assert.throws(()=>planNativeRentalRefundJournal({...input(),postingId:null,basisKind:'REVIEW_CONFIRMATION'} as any));
 });
 
 test('模拟与正式退款对相同责任产生相同金额分录，来源仍分开',()=>{
- for(const basis of [input(),{...input(),postingId:null,basisKind:'PRESTART_TERMINATION' as const}]){
+ for(const basis of [input(),{...input(),postingId:null,basisKind:'PRESTART_TERMINATION' as const},{...input(),postingId:null,basisKind:'SUPPORT_CANCELLATION' as const}]){
   const formal=planNativeRentalRefundJournal(basis),simulated=planLocalSandboxRentalRefundJournal({...basis,orderId:'order_synthetic_1'});
   const money=(lines:typeof formal.lines)=>lines.map(line=>[line.account,line.debit,line.credit,line.subject]);
   assert.deepEqual(money(simulated.lines),money(formal.lines));assert.notEqual(simulated.rootId,formal.rootId);

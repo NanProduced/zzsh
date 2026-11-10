@@ -145,27 +145,43 @@ export async function createNativeRefundIntent(client: PoolClient, input: {
 
 /** Reuses the original approved CONTROLLED prestart liability and shared funds budget. There is
  * no client amount/provider target and no formal admission/profile fallback in this branch. */
-export async function createSandboxPrestartRefundIntent(client:PoolClient,input:{terminationId:string;idempotencyKey:unknown;requestId:string;capability:unknown}){
+export async function createSandboxLiabilityRefundIntent(client:PoolClient,input:{terminationId?:string;supportCancellationId?:string;idempotencyKey:unknown;requestId:string;capability:unknown}){
   const key=validateIdempotencyKey(input.idempotencyKey),sandbox=sandboxForChannelRequestCapability(input.capability),demo=demoForChannelRequestCapability(input.capability);
-  if((!sandbox&&!demo)||sandbox&&demo||!validId(input.terminationId)||!validId(input.requestId))throw invalid();
+  const support=input.supportCancellationId!==undefined,ref=support?input.supportCancellationId:input.terminationId;
+  if((!sandbox&&!demo)||sandbox&&demo||!validId(ref)||support&&input.terminationId!==undefined||!validId(input.requestId))throw invalid();
   await admitted(client,input.capability);
   const reference=sandbox?localFinancialSandboxRegistration(sandbox).registration.reference:readEcsTestDemoRegistration(demo!).registration.reference;
-  const term=(await client.query<{id:string;payment_basis:PrestartPaymentBasis;basis_digest:string;approved_at:string;liability_root_id:string;liability_event_id:string}>(
-    `SELECT id,payment_basis,basis_digest,approved_at::text,liability_root_id,liability_event_id FROM zzsh_order.prestart_termination WHERE id=$1 AND state='APPROVED'`,[input.terminationId])).rows[0];
+  type Liability={id:string;payment_basis:PrestartPaymentBasis;basis_digest:string;approved_at:string;liability_root_id:string;liability_event_id:string};
+  let term:Liability|undefined,paidCents:string;
+  if(support){
+    const p=(await client.query<any>(`SELECT p.id,p.order_id,p.owner_user_id,p.renter_user_id,p.payment_confirmation_id,p.paid_cents::text,
+      p.refund_cents::text,p.source_digest,p.created_at::text,p.root_id,p.event_id,c.source,c.merchant_scope_id,c.merchant_order_no,c.provider_transaction_id
+      FROM zzsh_order.support_poststart_cancellation p JOIN zzsh_order.payment_confirmation c ON c.id=p.payment_confirmation_id AND c.order_id=p.order_id WHERE p.id=$1`,[ref])).rows[0];
+    if(!p)throw notFound();
+    term={id:p.id,basis_digest:p.source_digest,approved_at:p.created_at,liability_root_id:p.root_id,liability_event_id:p.event_id,
+      payment_basis:{orderId:p.order_id,ownerUserId:p.owner_user_id,renterUserId:p.renter_user_id,paymentConfirmationId:p.payment_confirmation_id,source:p.source,
+       merchantIdentityId:p.merchant_scope_id,merchantOrderNo:p.merchant_order_no,channelTrxNo:p.provider_transaction_id,amountCents:p.refund_cents,currency:'CNY',digest:p.source_digest}};
+    paidCents=p.paid_cents;
+  }else{
+    term=(await client.query<Liability>(`SELECT id,payment_basis,basis_digest,approved_at::text,liability_root_id,liability_event_id FROM zzsh_order.prestart_termination WHERE id=$1 AND state='APPROVED'`,[ref])).rows[0];
+    if(!term)throw notFound();paidCents=term.payment_basis.amountCents;
+  }
   if(!term)throw notFound();const b=term.payment_basis;
+  const basisKind=support?'SUPPORT_CANCELLATION' as const:'PRESTART_TERMINATION' as const,operation=support?'support-cancel.refund':'prestart.refund';
   if(!b||b.source!=='CONTROLLED'||b.digest!==term.basis_digest)throw invalid('Original local prestart payment differs');
   assertSyntheticChannelRequestOrder(input.capability,b.orderId);
   if(demo)await assertEcsTestDemoOrderAdmission(client,demo,b.orderId);
   assertSandboxOriginalPayment(input.capability,{source:b.source,merchant_scope_id:b.merchantIdentityId});
   await lockRefundFunds(client,'CONTROLLED',b.merchantIdentityId,b.channelTrxNo);
   if((await client.query('SELECT id FROM zzsh_auth_user."user" WHERE id=$1 FOR UPDATE',[b.renterUserId])).rowCount!==1)throw notFound();
-  await verifyPrestartRefundLiability(client,term.id,b,term.liability_root_id,term.liability_event_id);
-  const fingerprint=fingerprintRequest('prestart.refund.intent',term.id,{confirmationId:b.paymentConfirmationId,amountCents:b.amountCents,basisDigest:b.digest});
+  if(support){if((await client.query(`SELECT zzsh_order.support_poststart_cancellation_complete($1) AS valid`,[term.id])).rows[0]?.valid!==true)throw conflict('Original support cancellation unavailable');}
+  else await verifyPrestartRefundLiability(client,term.id,b,term.liability_root_id,term.liability_event_id);
+  const fingerprint=fingerprintRequest(operation+'.intent',term.id,{confirmationId:b.paymentConfirmationId,amountCents:b.amountCents,basisDigest:b.digest});
   const extra=',basis_kind,liability_root_id,liability_event_id,sandbox_registration_ref';
   const old=(await client.query<RefundRow&{basis_kind:string;liability_root_id:string;liability_event_id:string;sandbox_registration_ref:string}>(
     `SELECT ${COLUMNS}${extra} FROM zzsh_order.channel_refund_intent WHERE payment_confirmation_id=$1 AND idempotency_key=$2`,[b.paymentConfirmationId,key])).rows[0];
   if(old){
-    if(old.payment_source!=='CONTROLLED'||old.basis_kind!=='PRESTART_TERMINATION'||old.request_fingerprint!==fingerprint
+    if(old.payment_source!=='CONTROLLED'||old.basis_kind!==basisKind||old.request_fingerprint!==fingerprint
       ||old.sandbox_registration_ref!==reference||old.posting_id!==null||old.order_id!==b.orderId||old.amount_cents!==b.amountCents
       ||old.liability_root_id!==term.liability_root_id||old.liability_event_id!==term.liability_event_id)throw conflict('Original local refund key has different facts');
     return{kind:'REPLAYED' as const,intentId:old.id,refundOrderNo:old.refund_order_no,state:old.state,budgetDisposition:old.budget_disposition??'ALLOCATED'};
@@ -173,21 +189,21 @@ export async function createSandboxPrestartRefundIntent(client:PoolClient,input:
   const original=(await client.query(`SELECT count(*)::text AS n,bool_and(c.id=$3 AND c.disposition='APPLIED' AND o.paid_confirmation_id=c.id
       AND o.status='CANCELLED' AND c.amount_cents=$4::numeric AND c.currency='CNY') AS bound
     FROM zzsh_order.payment_confirmation c JOIN zzsh_order.rental_order o ON o.id=c.order_id
-    WHERE c.source='CONTROLLED' AND c.merchant_scope_id=$1 AND c.merchant_order_no=$2`,[b.merchantIdentityId,b.merchantOrderNo,b.paymentConfirmationId,b.amountCents])).rows[0];
+    WHERE c.source='CONTROLLED' AND c.merchant_scope_id=$1 AND c.merchant_order_no=$2`,[b.merchantIdentityId,b.merchantOrderNo,b.paymentConfirmationId,paidCents])).rows[0];
   if(original?.n!=='1'||original.bound!==true)throw conflict('Original local prestart payment is ambiguous');
   const basis:RefundBasis={order_id:b.orderId,payment_confirmation_id:b.paymentConfirmationId,renter_user_id:b.renterUserId,
     version_hash:b.digest,due_at:term.approved_at,source:'CONTROLLED',merchant_scope_id:b.merchantIdentityId,provider_transaction_id:b.channelTrxNo,
-    merchant_order_no:b.merchantOrderNo,paid_cents:b.amountCents,responsibility_cents:b.amountCents,currency:'CNY'};
+    merchant_order_no:b.merchantOrderNo,paid_cents:paidCents,responsibility_cents:b.amountCents,currency:'CNY'};
   await assertRefundBudget(client,basis,null,b.amountCents);
   const number=refundNumber(basis,term.id,key);
   const row=(await client.query<RefundRow>(`INSERT INTO zzsh_order.channel_refund_intent
     (id,posting_id,order_id,payment_confirmation_id,renter_user_id,payment_source,merchant_identity_id,original_payment_trx_no,original_payment_order_no,
       responsibility_version_hash,refund_order_no,amount_cents,currency,idempotency_key,request_fingerprint,due_at,basis_kind,liability_root_id,liability_event_id,sandbox_registration_ref)
-    VALUES($1,NULL,$2,$3,$4,'CONTROLLED',$5,$6,$7,$8,$9,$10,'CNY',$11,$12,$13,'PRESTART_TERMINATION',$14,$15,$16) RETURNING ${COLUMNS}`,
+    VALUES($1,NULL,$2,$3,$4,'CONTROLLED',$5,$6,$7,$8,$9,$10,'CNY',$11,$12,$13,$17,$14,$15,$16) RETURNING ${COLUMNS}`,
   [freshId('refund'),b.orderId,b.paymentConfirmationId,b.renterUserId,b.merchantIdentityId,b.channelTrxNo,b.merchantOrderNo,b.digest,number,
-    b.amountCents,key,fingerprint,term.approved_at,term.liability_root_id,term.liability_event_id,reference])).rows[0];
+    b.amountCents,key,fingerprint,term.approved_at,term.liability_root_id,term.liability_event_id,reference,basisKind])).rows[0];
   if(!row)throw conflict('Local prestart refund allocation unavailable');
-  await audit(client,row.id,'order.refund.prestart.allocated',input.requestId,{terminationId:term.id,paymentConfirmationId:b.paymentConfirmationId,amountCents:b.amountCents,currency:'CNY',channelResult:'NOT_SUBMITTED'});
+  await audit(client,row.id,support?'order.refund.support_cancel.allocated':'order.refund.prestart.allocated',input.requestId,{terminationId:term.id,paymentConfirmationId:b.paymentConfirmationId,amountCents:b.amountCents,currency:'CNY',channelResult:'NOT_SUBMITTED'});
   return{kind:'ALLOCATED' as const,intentId:row.id,refundOrderNo:row.refund_order_no,state:row.state,budgetDisposition:row.budget_disposition??'ALLOCATED'};
 }
 
@@ -269,7 +285,7 @@ export async function recordRefundTransportFailure(client: PoolClient, input: {
 }
 
 export type NativeRefundState = RefundIntentState | "PROCESSING" | "REVIEW_REQUIRED" | "SUCCEEDED" | "FAILED";
-export type RefundBasisKind = "POSTING" | "PRESTART_TERMINATION";
+export type RefundBasisKind = "POSTING" | "PRESTART_TERMINATION" | "SUPPORT_CANCELLATION";
 export type FormalRefundRow = Omit<RefundRow, "payment_source" | "state" | "posting_id"> & {
   payment_source: "JOINPAY"; state: NativeRefundState; posting_id: string | null; basis_kind: RefundBasisKind;
   evidence_level: string; budget_disposition: "ALLOCATED" | "CONSUMED" | "RELEASED";
@@ -290,7 +306,7 @@ export async function assertRefundResource(client: PoolClient, admission: Formal
 }
 export function formalRefundBinding(r: FormalRefundRow, admission: FormalRefundAdmission): RefundBinding {
   const a = readFormalRefundAdmission(admission), basisKind: RefundBasisKind = r.basis_kind ?? "POSTING";
-  if (!["POSTING","PRESTART_TERMINATION"].includes(basisKind)
+  if (!["POSTING","PRESTART_TERMINATION","SUPPORT_CANCELLATION"].includes(basisKind)
     || r.payment_source !== "JOINPAY" || r.evidence_level !== "JOINPAY_FORMAL" || r.currency !== "CNY" || r.merchant_identity_id !== a.merchantIdentityId
     || r.wire_merchant_no !== a.merchantNo || !r.initial_admission_canonical || createHash("sha256").update(r.initial_admission_canonical).digest("hex") !== r.initial_admission_sha256
     || basisKind === "POSTING" && r.posting_id === null

@@ -113,6 +113,9 @@ export type SupportCancelView = {
   eligibility: { allowed: boolean; reason: SupportCancelReason | null; refundCents: string | null; openingConfirmed?: boolean };
   openingConfirmed: boolean;
   supportCancellation: SupportCancelRow | null;
+  poststartEligibility?: { allowed: boolean; reason: SupportCancelReason | null; refundCents: string | null; openingConfirmed: boolean };
+  poststartCancellation?: { caseId: string; refundCents: string; ownerCents: string; platformContributionCents: string;
+    commissionCents: string; reason: string; refundState?: string };
   refund: SupportCancelRefund | null;
   existing: boolean;
   channel: { result: string; bankArrival: "UNKNOWN" } | null;
@@ -134,13 +137,19 @@ export async function readSupportCancel(orderId: string): Promise<SupportCancelV
 }
 
 /** Send or replay one frozen support cancellation. The caller must reuse `key` after an unknown result. */
-export async function sendSupportCancel(orderId: string, expectedOrderRevision: string, reason: string, key: string): Promise<SupportCancelOutcome> {
+export async function sendSupportCancel(orderId: string, expectedOrderRevision: string, reason: string, key: string,
+  allocation?: { refundCents: string; ownerCents: string; expectedAdminId: string }): Promise<SupportCancelOutcome> {
   try {
     const raw = await adminRequest<Record<string, unknown>>(`${orderBase(orderId)}/support-cancel`,
-      { expectedOrderRevision, reason }, "POST", { "idempotency-key": key });
+      { expectedOrderRevision, reason, ...allocation }, "POST", { "idempotency-key": key });
     if (raw.outcome === "UNKNOWN" || raw.originalKeyRequired === true) return { kind: "unknown" };
     if (raw.contractVersion !== "admin-support-cancel.v1" || raw.orderId !== orderId || typeof raw.orderRevision !== "string"
       || typeof raw.eligibility !== "object" || raw.eligibility === null
+      || allocation && (raw.orderStatus !== 'CANCELLED' || raw.cancelReason !== 'SUPPORT_AFTER_START_CANCELLED'
+        || !raw.poststartCancellation || typeof raw.poststartCancellation !== 'object'
+        || (raw.poststartCancellation as {refundCents?:unknown}).refundCents !== allocation.refundCents
+        || (raw.poststartCancellation as {ownerCents?:unknown}).ownerCents !== allocation.ownerCents
+        || (raw.poststartCancellation as {commissionCents?:unknown}).commissionCents !== '0')
       || raw.simulationScope !== undefined && (typeof raw.simulationScope !== 'string'||!['LOCAL_DEMO_SIMULATED','ECS_TEST_SIMULATED'].includes(raw.simulationScope)
         || !raw.channel || typeof raw.channel !== 'object' || (raw.channel as {result?:unknown}).result !== 'NOT_SUBMITTED'
         || (raw.channel as {bankArrival?:unknown}).bankArrival !== 'UNKNOWN')) return { kind: "unknown" };

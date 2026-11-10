@@ -30,6 +30,7 @@ const vite = await createServer({
   server: { middlewareMode: true, hmr: false },
 });
 const { OrderFulfillmentSection } = await vite.ssrLoadModule("/src/views/im-support-fulfillment.tsx");
+const { SupportPoststartCancelCard } = await vite.ssrLoadModule("/src/views/support-poststart-cancel.tsx");
 after(async () => { await vite.close(); });
 beforeEach(() => { browser.localStorage.clear(); });
 
@@ -267,4 +268,43 @@ test("结果未确认保留同一幂等键，重试不会换键或伪造成功",
   await click(retry);
   await waitFor(() => keys.length === 2);
   assert.equal(keys[0], keys[1], "an unknown result keeps the original idempotency key");
+});
+
+test("开租后客服取消先核对再确认，未知结果跨页面恢复同一金额和原键",async t=>{
+ Object.defineProperty(browser.navigator,"locks",{configurable:true,value:{request:async(_name,_options,run)=>run({})}});
+ const requests=[];
+ const initial={...preview,openingConfirmed:true,poststartEligibility:{allowed:true,reason:null,refundCents:"10000",openingConfirmed:true}};
+ const accepted={...initial,orderRevision:"2",orderStatus:"CANCELLED",cancelReason:"SUPPORT_AFTER_START_CANCELLED",
+  eligibility:{allowed:false,reason:"ALREADY_CANCELLED",refundCents:"5000",openingConfirmed:true},
+  poststartCancellation:{caseId:"sc_1",refundCents:"5000",ownerCents:"3000",platformContributionCents:"2000",commissionCents:"0",reason:"双方协商取消"},
+  channel:{result:"NOT_SUBMITTED",bankArrival:"UNKNOWN"}};
+ globalThis.fetch=async(input,init={})=>{
+  if((init.method??"GET")==="GET")return response(initial);
+  requests.push({key:new Headers(init.headers).get("idempotency-key"),body:JSON.parse(init.body)});
+  return requests.length===1?response({error:{code:"INTERNAL_ERROR"}},500):response(accepted);
+ };
+ const first=mount();let second;
+ t.after(async()=>{if(second)await act(async()=>second.root.unmount());first.host.remove();second?.host.remove();});
+ const props={orderId:"order-A",displayNo:"ZZ-TEST-0001",viewerId:"admin-A"};
+ await act(async()=>first.root.render(createElement(SupportPoststartCancelCard,props)));
+ await waitFor(()=>button(first.host,"取消订单并退款")&&!button(first.host,"取消订单并退款").disabled);
+ await click(button(first.host,"取消订单并退款"));
+ await waitFor(()=>document.body.querySelector('[aria-label="退还租客金额"]'));
+ const input=async(label,value)=>{const node=document.body.querySelector(`[aria-label="${label}"]`);const setter=Object.getOwnPropertyDescriptor(browser.HTMLInputElement.prototype,"value").set;setter.call(node,value);await act(async()=>node.dispatchEvent(new browser.Event("input",{bubbles:true})));await settle();};
+ await input("退还租客金额","50");await input("号主收益金额","30");await input("取消原因","双方协商取消");
+ await click(button(document.body,"核对并取消"));
+ assert.equal(requests.length,0,"opening confirmation never submits");
+ assert.match(document.body.textContent,/平台贡献 ¥20\.00/);
+ await click(button(document.body,"确认取消并退款"));
+ await waitFor(()=>document.body.textContent.includes("取消结果未确认"));
+ assert.equal(requests.length,1);
+ await act(async()=>first.root.unmount());
+ second=mount();await act(async()=>second.root.render(createElement(SupportPoststartCancelCard,props)));
+ await waitFor(()=>button(second.host,"核对原取消请求"));await click(button(second.host,"核对原取消请求"));
+ await waitFor(()=>document.body.textContent.includes("上次请求结果未确认"));
+ await click(button(document.body,"核对原请求"));await click(button(document.body,"按原请求核对"));
+ await waitFor(()=>second.host.textContent.includes("订单已取消"));
+ assert.deepEqual(requests[1],requests[0]);
+ assert.deepEqual(requests[0].body,{expectedOrderRevision:"1",reason:"双方协商取消",refundCents:"5000",ownerCents:"3000",expectedAdminId:"admin-A"});
+ assert.equal(browser.localStorage.getItem("zzsh.support.poststart-cancel.admin-A.order-A"),null);
 });

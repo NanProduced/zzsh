@@ -513,9 +513,9 @@ function OrderRefundSection({ order }: { order: Order }) {
   }
   const read = visible.read;
   if (!read) return null;
-  if (read.status === "NOT_APPLICABLE" && !read.prestartRefund) return null;
+  if (read.status === "NOT_APPLICABLE" && !read.prestartRefund && !read.cancellationRefund) return null;
   const responsibility = read.responsibility;
-  const prestart = read.prestartRefund;
+  const prestart = read.prestartRefund ?? read.cancellationRefund;
   const attentionRequired = prestart ? ["UNKNOWN", "FAILED"].includes(prestart.state)
     : ["UNKNOWN", "REVIEW_REQUIRED", "TRUNCATED", "CONFLICT"].includes(read.outcome);
   const incomplete = read.intentsTruncated || !read.coverage.intentsComplete || responsibility.state === "POSTED" && !responsibility.totalsComplete;

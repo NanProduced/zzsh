@@ -167,6 +167,24 @@ test("prestart owner refund lookup cannot count an unrelated refund attempt",asy
  assert.equal(result.progress,"PROCESSING");
 });
 
+test("开租后客服取消的号主只看本单退款进度，未分配与零退款分开",async()=>{
+ const {readOwnerRefundMinimalSummary}=await import("../src/finance/owner-refund-summary-read");
+ let amount="5000",ready=true;const client={query:async(sql:string,values:unknown[])=>{
+  if(sql.includes('SELECT "suspended"'))return{rows:[{suspended:false}]};
+  if(sql.includes('user_identity_state'))return{rows:[]};
+  if(sql.includes('"session"'))return{rows:[{}],rowCount:1};
+  if(sql.includes('o.owner_user_id'))return{rows:[{status:"CANCELLED",cancel_reason:"SUPPORT_AFTER_START_CANCELLED",paid_confirmation_id:"payment-1",owner_user_id:"owner-1",as_of:"2026-11-06T00:00:00.000000Z"}]};
+  if(sql.includes('channel_refund_intent')){assert.match(sql,/basis_kind='SUPPORT_CANCELLATION'/);assert.deepEqual(values,["order-1",true,"payment-1"]);return{rows:[]};}
+  if(sql.includes('has_table_privilege'))return{rows:[{ready}]};
+  if(sql.includes('support_poststart_cancellation_complete'))return{rows:[{ready:true,amount}]};
+  throw Error('unexpected query');
+ }} as any;
+ const actor={userId:"owner-1",sessionId:"session-1"};
+ assert.equal((await readOwnerRefundMinimalSummary(client,actor,{orderId:'order-1'})).progress,'PROCESSING');
+ amount='0';assert.equal((await readOwnerRefundMinimalSummary(client,actor,{orderId:'order-1'})).progress,'NONE');
+ ready=false;assert.equal((await readOwnerRefundMinimalSummary(client,actor,{orderId:'order-1'})).progress,'UNKNOWN');
+});
+
 test("work-view predicate keeps paid or unpaid active orders and only proven unresolved native refunds", async()=>{
  let sql="",args:unknown[]=[];
  const client={query:async(s:string,v:unknown[]=[])=>{

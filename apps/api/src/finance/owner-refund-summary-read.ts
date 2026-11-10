@@ -49,12 +49,13 @@ export async function readOwnerRefundMinimalSummary(
     return { contractVersion: OWNER_REFUND_MINIMAL_VERSION, subjectId: actor.userId, orderId, orderStatus: order.status, progress: "NOT_APPLICABLE", label: copy.label, note: copy.note, openIntentCount: 0, asOf: order.as_of };
   }
   const prestart = order.status === "CANCELLED" && ["PRESTART_TERMINATED", "SUPPORT_CANCELLED_REFUND"].includes(order.cancel_reason ?? "");
+  const poststart = order.status === "CANCELLED" && order.cancel_reason === "SUPPORT_AFTER_START_CANCELLED";
   const intents = (await client.query<{ state: string; count: string }>(
     `SELECT i.state,count(*)::text AS count
      FROM zzsh_order.channel_refund_intent i
-     WHERE i.order_id=$1 AND (NOT $2::boolean OR (i.basis_kind='PRESTART_TERMINATION' AND i.payment_confirmation_id=$3))
+     WHERE i.order_id=$1 AND (NOT $2::boolean OR (i.basis_kind='${poststart ? "SUPPORT_CANCELLATION" : "PRESTART_TERMINATION"}' AND i.payment_confirmation_id=$3))
      GROUP BY i.state`,
-    [orderId, prestart, order.paid_confirmation_id ?? null],
+    [orderId, prestart || poststart, order.paid_confirmation_id ?? null],
   )).rows;
   const counts = new Map(intents.map((row) => [row.state, Number(row.count)]));
   const openIntentCount = OPEN_STATES.reduce((sum, state) => sum + (counts.get(state) ?? 0), 0);
@@ -78,6 +79,18 @@ export async function readOwnerRefundMinimalSummary(
       progress = result?.ready === true ? "PROCESSING" : "UNKNOWN";
     } else progress = "UNKNOWN";
   } else if (prestart) progress = "UNKNOWN";
+  else if (poststart && order.paid_confirmation_id) {
+    const available = (await client.query<{ ready: boolean }>(`SELECT COALESCE(
+      has_table_privilege(current_user,to_regclass('zzsh_order.support_poststart_cancellation'),'SELECT') AND
+      has_function_privilege(current_user,to_regprocedure('zzsh_order.support_poststart_cancellation_complete(text)'),'EXECUTE'),false) AS ready`)).rows[0]?.ready === true;
+    if (available) {
+      const result = (await client.query<{ amount: string; ready: boolean }>(`SELECT p.refund_cents::text AS amount,
+        zzsh_order.support_poststart_cancellation_complete(p.id) AS ready FROM zzsh_order.support_poststart_cancellation p
+        WHERE p.order_id=$1 AND p.payment_confirmation_id=$2`, [orderId, order.paid_confirmation_id])).rows[0];
+      progress = result?.ready === true && typeof result.amount === "string" && /^(0|[1-9][0-9]{0,15})$/.test(result.amount)
+        ? result.amount === "0" ? "NONE" : "PROCESSING" : "UNKNOWN";
+    } else progress = "UNKNOWN";
+  } else if (poststart) progress = "UNKNOWN";
   else if (order.status === "CANCELLED" || order.status === "COMPLETED") progress = "NONE";
   else progress = "NOT_APPLICABLE";
   const copy = COPY[progress];

@@ -128,6 +128,10 @@ export function adminFinanceLedgerSql(nativeDistribution:boolean,prestart=false)
   sql=sql.replace('r.basis_id,r.id AS economic_root_id',`pt.id AS prestart_termination_id,pt.payment_basis->>'paymentConfirmationId' AS prestart_confirmation_id,
     pt.payment_basis->>'amountCents' AS prestart_amount_cents,${utc('pt.approved_at')} AS prestart_approved_at,r.basis_id,r.id AS economic_root_id`);
  }
+ const currentOrder=prestart?(nativeDistribution?'COALESCE(p.order_id,re.order_id,pt.order_id)':'COALESCE(p.order_id,pt.order_id)')
+  :(nativeDistribution?'COALESCE(p.order_id,re.order_id)':'p.order_id');
+ const linkedOrder=`COALESCE(${currentOrder},CASE WHEN r.source_kind='NATIVE_SUPPORT_CANCELLATION' AND r.source_entity='support_poststart_cancellation' THEN l.details->>'orderId' END)`;
+ sql=sql.replace(`${currentOrder} AS order_id`,`${linkedOrder} AS order_id`).replace(`o.id=${currentOrder}`,`o.id=${linkedOrder}`);
  return sql;}
 const observationEvidenceSql="jsonb_build_object('snapshot',o.snapshot,'canonical',o.source_canonical,'legacyUserId',o.legacy_user_id)";
 export const ADMIN_FINANCE_OBSERVATION_SQL = `SELECT o.id,o.user_id AS subject_id,COALESCE(u.name,o.user_id) AS subject_name,o.source_kind,o.source_type,o.source_system,o.source_entity,o.source_id,o.source_digest,COALESCE(oa.basis_id,o.basis_id) AS basis_id,COALESCE(oa.included_in_opening,o.included_in_opening) AS included_in_opening,

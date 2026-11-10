@@ -169,6 +169,8 @@ export type PersonalRefundRead = {
   outcome: PersonalRefundOutcome;
   prestartRefund?: { state: "PROCESSING" | "SUCCEEDED" | "FAILED" | "UNKNOWN"; amountCents: string | null;
     source: "SIMULATED" | "JOINPAY" | "UNKNOWN"; bankArrival: "UNKNOWN" };
+  cancellationRefund?: { state: "PROCESSING" | "SUCCEEDED" | "FAILED" | "UNKNOWN"; amountCents: string | null;
+    source: "SIMULATED" | "JOINPAY" | "UNKNOWN"; bankArrival: "UNKNOWN" };
   coverage: { scope: "LOCAL_REGISTERED_ONLY"; intentLimit: number; intentsComplete: boolean; channelRecordsChecked: false };
   asOf: string;
   responsibility: {
@@ -592,10 +594,12 @@ export function parsePersonalRefunds(value: unknown, expectedUserId: string, exp
   const responsibility = refundRecord(root.responsibility), actual = refundRecord(root.actualChannelRefund);
   const funds = root.localFundsEffect === null ? null : refundRecord(root.localFundsEffect);
   const prestart = root.prestartRefund === undefined ? undefined : refundRecord(root.prestartRefund);
-  if (prestart && (order.status !== "CANCELLED" || !["PROCESSING", "SUCCEEDED", "FAILED", "UNKNOWN"].includes(String(prestart.state))
-    || !["SIMULATED", "JOINPAY", "UNKNOWN"].includes(String(prestart.source)) || prestart.bankArrival !== "UNKNOWN"
-    || prestart.amountCents !== null && (typeof prestart.amountCents !== "string" || !/^[1-9][0-9]{0,15}$/.test(prestart.amountCents))
-    || prestart.state !== "UNKNOWN" && (prestart.source === "UNKNOWN" || prestart.amountCents === null))) throw invalidRefund();
+  const cancellation = root.cancellationRefund === undefined ? undefined : refundRecord(root.cancellationRefund);
+  if (prestart && cancellation) throw invalidRefund();
+  for (const summary of [prestart, cancellation]) if (summary && (order.status !== "CANCELLED" || !["PROCESSING", "SUCCEEDED", "FAILED", "UNKNOWN"].includes(String(summary.state))
+    || !["SIMULATED", "JOINPAY", "UNKNOWN"].includes(String(summary.source)) || summary.bankArrival !== "UNKNOWN"
+    || summary.amountCents !== null && (typeof summary.amountCents !== "string" || !/^[1-9][0-9]{0,15}$/.test(summary.amountCents))
+    || summary.state !== "UNKNOWN" && (summary.source === "UNKNOWN" || summary.amountCents === null))) throw invalidRefund();
   const intents = Array.isArray(root.intents) ? root.intents.map(refundIntent) : (() => { throw invalidRefund(); })();
   const noResponsibilityTotals = ["allocatedCents", "consumedCents", "releasedCents", "remainingCents"].every((name) => responsibility[name] === null);
   if (responsibility.state === "NOT_POSTED" && (responsibility.totalsComplete || responsibility.postingId !== null
@@ -622,6 +626,8 @@ export function parsePersonalRefunds(value: unknown, expectedUserId: string, exp
     status: root.status as PersonalRefundRead["status"], outcome: root.outcome as PersonalRefundOutcome,
     ...(prestart ? { prestartRefund: { state: prestart.state as NonNullable<PersonalRefundRead["prestartRefund"]>["state"],
       amountCents: refundCents(prestart.amountCents), source: prestart.source as NonNullable<PersonalRefundRead["prestartRefund"]>["source"], bankArrival: "UNKNOWN" as const } } : {}),
+    ...(cancellation ? { cancellationRefund: { state: cancellation.state as NonNullable<PersonalRefundRead["cancellationRefund"]>["state"],
+      amountCents: refundCents(cancellation.amountCents), source: cancellation.source as NonNullable<PersonalRefundRead["cancellationRefund"]>["source"], bankArrival: "UNKNOWN" as const } } : {}),
     coverage: { scope: "LOCAL_REGISTERED_ONLY", intentLimit: 50, intentsComplete: coverage.intentsComplete, channelRecordsChecked: false },
     asOf: root.asOf as string,
     responsibility: {

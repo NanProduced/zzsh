@@ -102,6 +102,8 @@ export type PersonalRefundReadProjection = Readonly<{
   outcome: PersonalRefundOutcome;
   prestartRefund?: Readonly<{ state: "PROCESSING" | "SUCCEEDED" | "FAILED" | "UNKNOWN"; amountCents: string | null;
     source: "SIMULATED" | "JOINPAY" | "UNKNOWN"; bankArrival: "UNKNOWN" }>;
+  cancellationRefund?: Readonly<{ state: "PROCESSING" | "SUCCEEDED" | "FAILED" | "UNKNOWN"; amountCents: string | null;
+    source: "SIMULATED" | "JOINPAY" | "UNKNOWN"; bankArrival: "UNKNOWN" }>;
   coverage: Readonly<{ scope: "LOCAL_REGISTERED_ONLY"; intentLimit: number; intentsComplete: boolean; channelRecordsChecked: false }>;
   asOf: string;
   responsibility: Readonly<{
@@ -537,6 +539,35 @@ export async function readPersonalPrestartRefund(client: PoolClient, orderId: st
   return projectPrestartRefundSummary(basis.source, basis.amountCents, progress);
 }
 
+/** Read the same original-payment liability used by a support cancellation, never infer channel arrival. */
+export async function readPersonalSupportCancellationRefund(client: PoolClient, orderId: string, userId: string, confirmationId: unknown,
+  resource?: LocalFinancialSandbox | DemoFinanceResource): Promise<PrestartSummary | undefined> {
+  const ready = (await client.query(`SELECT COALESCE(
+    has_table_privilege(current_user,to_regclass('zzsh_order.support_poststart_cancellation'),'SELECT') AND
+    has_function_privilege(current_user,to_regprocedure('zzsh_order.support_poststart_cancellation_complete(text)'),'EXECUTE'),false) AS ready`)).rows[0]?.ready === true;
+  if (!ready) return unknownPrestart();
+  const rows = (await client.query(`SELECT p.id,p.order_id,p.renter_user_id,p.owner_user_id,p.payment_confirmation_id,p.source_digest,
+    p.refund_cents::text AS refund_cents,c.source,c.disposition,c.currency,c.merchant_scope_id,c.merchant_order_no,c.provider_transaction_id,
+    zzsh_order.support_poststart_cancellation_complete(p.id) AS complete
+    FROM zzsh_order.support_poststart_cancellation p JOIN zzsh_order.payment_confirmation c ON c.id=p.payment_confirmation_id AND c.order_id=p.order_id
+    WHERE p.order_id=$1 ORDER BY p.created_at DESC,p.id DESC LIMIT 2`, [orderId])).rows;
+  const row = rows[0];
+  if (rows.length !== 1 || !row || row.order_id !== orderId || row.renter_user_id !== userId || row.payment_confirmation_id !== confirmationId
+    || row.complete !== true || row.disposition !== "APPLIED" || row.currency !== "CNY" || !["JOINPAY", "CONTROLLED"].includes(row.source)
+    || typeof row.refund_cents !== "string" || !/^(0|[1-9][0-9]{0,15})$/.test(row.refund_cents)
+    || ![row.id,row.owner_user_id,row.payment_confirmation_id,row.merchant_scope_id,row.merchant_order_no,row.provider_transaction_id].every(v => typeof v === "string" && ID.test(v))
+    || typeof row.source_digest !== "string" || !/^[a-f0-9]{64}$/.test(row.source_digest)) return unknownPrestart();
+  if (row.refund_cents === "0") return undefined;
+  const basis: PrestartPaymentBasis = { orderId, renterUserId: userId, ownerUserId: row.owner_user_id,
+    paymentConfirmationId: row.payment_confirmation_id, source: row.source, merchantIdentityId: row.merchant_scope_id,
+    merchantOrderNo: row.merchant_order_no, channelTrxNo: row.provider_transaction_id, amountCents: row.refund_cents,
+    currency: "CNY", digest: row.source_digest };
+  const sandbox = resource?.kind === "REGISTERED_LOCAL_FINANCIAL_SANDBOX" ? resource : undefined;
+  const demo = resource && resource.kind !== "REGISTERED_LOCAL_FINANCIAL_SANDBOX" ? resource : undefined;
+  const progress = await readPrestartRefundProgress(client, row.id, basis, true, sandbox, demo, "SUPPORT_CANCELLATION");
+  return projectPrestartRefundSummary(basis.source, basis.amountCents, progress);
+}
+
 /** 只读本人原生订单的本地退款投影；不重验渠道原件、不读商户钥、不执行退款或资金动作。 */
 export async function readPersonalNativeRefunds(client: PoolClient, actor: UserContext,
   input: { orderId: unknown },sandbox?:LocalFinancialSandbox|DemoFinanceResource): Promise<PersonalRefundReadProjection> {
@@ -557,10 +588,14 @@ export async function readPersonalNativeRefunds(client: PoolClient, actor: UserC
   const prestartRefund = order.status === "CANCELLED" && (postingId === null || postingId === undefined)
     && ["PRESTART_TERMINATED", "SUPPORT_CANCELLED_REFUND"].includes(String(first.cancel_reason))
     ? await readPersonalPrestartRefund(client, orderId, actor.userId, first.paid_confirmation_id, first.cancel_reason, sandbox) : undefined;
+  const cancellationRefund = order.status === "CANCELLED" && (postingId === null || postingId === undefined)
+    && first.cancel_reason === "SUPPORT_AFTER_START_CANCELLED"
+    ? await readPersonalSupportCancellationRefund(client, orderId, actor.userId, first.paid_confirmation_id, sandbox) : undefined;
   if (order.status === "PENDING_PAYMENT" || order.status === "CANCELLED") {
     return postingId === null || postingId === undefined
       ? { ...emptyProjection(order, asOf, "NOT_APPLICABLE", "RESPONSIBILITY_NOT_POSTED",
-          ["LOCAL_RESPONSIBILITY_NOT_POSTED", "ORDER_STATE_DOES_NOT_PROVE_CHANNEL_PAYMENT"]), subjectId: actor.userId, ...(prestartRefund ? { prestartRefund } : {}) }
+          ["LOCAL_RESPONSIBILITY_NOT_POSTED", "ORDER_STATE_DOES_NOT_PROVE_CHANNEL_PAYMENT"]), subjectId: actor.userId,
+          ...(prestartRefund ? { prestartRefund } : {}), ...(cancellationRefund ? { cancellationRefund } : {}) }
       : { ...emptyProjection(order, asOf, "AVAILABLE", "CONFLICT", ["POSTING_ON_NON_COMPLETED_ORDER"]), subjectId: actor.userId };
   }
   if (order.status === "PAID" && (postingId === null || postingId === undefined)) {

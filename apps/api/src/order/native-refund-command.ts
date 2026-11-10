@@ -6,8 +6,8 @@ import { assertGameScopeUsable, readAdminGameScope, scopeAllowsGame } from "../a
 import { recordAudit, SecurityApiError, withTransaction } from "../auth/security-core";
 import { API_V1_ERROR_CODES, validateIdempotencyKey } from "../contracts/api-v1";
 import { conflict, forbidden, invalid, notFound } from "../supply/supply-util";
-import { createFormalRefundIntent, createNativeRefundIntent, createSandboxPrestartRefundIntent, type FormalRefundCreateInput } from "./channel-refund-store";
-import { createPrestartFormalRefundIntent } from "./prestart-refund-store";
+import { createFormalRefundIntent, createNativeRefundIntent, createSandboxLiabilityRefundIntent, type FormalRefundCreateInput } from "./channel-refund-store";
+import { createLiabilityFormalRefundIntent } from "./prestart-refund-store";
 import { describeRefundProfile, type BoundRefundProfile, type FormalRefundAdmission } from "./joinpay-refund-profile";
 import {localRefundRegistration,type LocalSandboxRefundOptions} from './local-sandbox-refund-source';
 import {sandboxForChannelRequestCapability,demoForChannelRequestCapability} from './channel-payment-store';
@@ -117,8 +117,8 @@ export async function requestAdminPrestartNativeRefund(pool:Pool,execution:Admin
   await authorizeAdminNativeRefund(c,input.actor,input.orderId);
   const original=(await c.query(`SELECT id FROM zzsh_order.prestart_termination WHERE id=$1 AND order_id=$2 AND state='APPROVED'`,[input.terminationId,input.orderId])).rows;
   if(original.length!==1)throw notFound();
-  const result=local?await createSandboxPrestartRefundIntent(c,{terminationId:input.terminationId,idempotencyKey:key,requestId:input.requestId,capability:local.capability})
-    :await createPrestartFormalRefundIntent(c,{terminationId:input.terminationId,idempotencyKey:key,requestId:input.requestId,admission:execution.admission,profile:execution.initialProfile});
+  const result=local?await createSandboxLiabilityRefundIntent(c,{terminationId:input.terminationId,idempotencyKey:key,requestId:input.requestId,capability:local.capability})
+    :await createLiabilityFormalRefundIntent(c,{terminationId:input.terminationId,idempotencyKey:key,requestId:input.requestId,admission:execution.admission,profile:execution.initialProfile});
   await recordAudit(c,{actorType:'admin',actorId:input.actor.userId,sessionId:input.actor.sessionId,
    action:'order.refund.prestart.requested',objectType:'prestart_termination',objectId:input.terminationId,outcome:'SUCCESS',requestId:input.requestId,
    details:{orderId:input.orderId,outcome:result.kind,channelResult:'NOT_SUBMITTED',...('intentId' in result?{intentId:result.intentId}:{reason:result.reason})}});

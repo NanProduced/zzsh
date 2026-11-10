@@ -6,7 +6,7 @@ import type {Pool,PoolClient} from 'pg';
 import {hashApprovalPayload} from '../src/auth/approval-audit';
 import * as liability from '../src/finance/prestart-refund-liability';
 import * as profiles from '../src/order/joinpay-refund-profile';
-import {createPrestartFormalRefundIntent,readPrestartRefundGate,readPrestartRefundProgress,allocatePrestartJoinpayRefunds,PrestartRefundAllocationUnknown} from '../src/order/prestart-refund-store';
+import {createLiabilityFormalRefundIntent,readPrestartRefundGate,readPrestartRefundProgress,allocatePrestartJoinpayRefunds,PrestartRefundAllocationUnknown} from '../src/order/prestart-refund-store';
 import {executeJoinpayRefund} from '../src/order/joinpay-refund-attempt';
 import * as store from '../src/order/channel-refund-store';
 import {sandboxFixture,sandboxClient} from './local-financial-sandbox-fixture';
@@ -32,6 +32,11 @@ function fixture(t:any){
  const c={query:async(sql:string,v:any[]=[])=>{calls.push({sql,v});
   if(['BEGIN','COMMIT','ROLLBACK'].includes(sql))return{rows:[]};
   if(sql.includes('FROM zzsh_order.prestart_termination'))return{rows:[term]};
+  if(sql.includes('FROM zzsh_order.support_poststart_cancellation p JOIN'))return{rows:[{id:'cancel_1',order_id:b.orderId,owner_user_id:b.ownerUserId,
+   renter_user_id:b.renterUserId,payment_confirmation_id:b.paymentConfirmationId,paid_cents:b.amountCents,refund_cents:'5000',source_digest:'f'.repeat(64),
+   created_at:'2026-10-28T00:00:00.000000Z',root_id:'cancel_root',event_id:'cancel_event',source:'JOINPAY',merchant_scope_id:b.merchantIdentityId,
+   merchant_order_no:b.merchantOrderNo,provider_transaction_id:b.channelTrxNo}]};
+  if(sql.includes('support_poststart_cancellation_complete'))return{rows:[{valid:true}]};
   if(sql.startsWith('SELECT current_database()'))return{rows:[{db:a.database,actor:a.runtimeUser}]};
   if(sql.includes('to_regprocedure'))return{rows:[{ready:true}]};
   if(sql.startsWith('SELECT pg_advisory'))return{rows:[]};
@@ -45,7 +50,7 @@ function fixture(t:any){
    original={id:v[0],order_id:v[1],payment_confirmation_id:v[2],renter_user_id:v[3],merchant_identity_id:v[4],original_payment_trx_no:v[5],original_payment_order_no:v[6],
     responsibility_version_hash:v[7],refund_order_no:v[8],amount_cents:v[9],idempotency_key:v[10],request_fingerprint:v[11],
     initial_admission_ref:v[13],initial_admission_sha256:v[14],initial_admission_canonical:v[15],wire_merchant_no:v[16],initial_profile_id:v[17],initial_profile_sha256:v[18],
-    initial_key_version_ref:v[19],liability_root_id:v[23],liability_event_id:v[24],basis_kind:'PRESTART_TERMINATION',payment_source:'JOINPAY',posting_id:null,
+    initial_key_version_ref:v[19],liability_root_id:v[23],liability_event_id:v[24],basis_kind:v[25],payment_source:'JOINPAY',posting_id:null,
     evidence_level:'JOINPAY_FORMAL',currency:'CNY',state:'READY',budget_disposition:'ALLOCATED',requires_review:false,lease_version:'0'};
    return{rows:[original],rowCount:1};}
   if(sql.includes('"zzsh_iam"."audit_event"'))return{rows:[],rowCount:1};
@@ -55,27 +60,36 @@ function fixture(t:any){
 }
 
 test('全额原笔分配由核准快照取得；无posting、客户端金额和目标',async t=>{
- const f=fixture(t),r=await createPrestartFormalRefundIntent(f.c,input);assert.equal(r.kind,'ALLOCATED');
+ const f=fixture(t),r=await createLiabilityFormalRefundIntent(f.c,input);assert.equal(r.kind,'ALLOCATED');
  assert.equal(f.original.amount_cents,'15908');assert.equal(f.original.posting_id,null);assert.equal(f.original.basis_kind,'PRESTART_TERMINATION');
  assert.equal(f.original.original_payment_order_no,b.merchantOrderNo);assert.equal(f.calls.some(c=>/INSERT INTO zzsh_order.settlement_posting/.test(c.sql)),false);
  const funds=f.calls.findIndex(c=>c.sql.includes('refund-funds:v1')),number=f.calls.findIndex(c=>c.sql.includes('refund-order-no:v1')),user=f.calls.findIndex(c=>c.sql.includes('zzsh_auth_user'));
  assert(funds<number&&number<user);
 });
+test('客服取消只退已记录的部分金额，核原实付款且同键恢复',async t=>{
+ const f=fixture(t),request={supportCancellationId:'cancel_1',idempotencyKey:'cancel_key',requestId:'request_1',admission:input.admission,profile:input.profile};
+ const result=await createLiabilityFormalRefundIntent(f.c,request);assert.equal(result.kind,'ALLOCATED');
+ assert.equal(f.original.basis_kind,'SUPPORT_CANCELLATION');assert.equal(f.original.amount_cents,'5000');
+ assert.equal(f.original.liability_root_id,'cancel_root');assert.equal(f.original.liability_event_id,'cancel_event');
+ const original=f.calls.find(c=>c.sql.includes('count(DISTINCT c.provider_transaction_id)'))!;
+ assert.equal(original.v[3],'15908');assert.equal(original.v[5],'SUPPORT_AFTER_START_CANCELLED');
+ assert.equal((await createLiabilityFormalRefundIntent(f.c,{...request,admission:undefined,profile:undefined})).kind,'REPLAYED');
+});
 test('新准入关闭后旧键仍恢复；原canonical/绑定改变不被升级',async t=>{
- const f=fixture(t);await createPrestartFormalRefundIntent(f.c,input);
- const r=await createPrestartFormalRefundIntent(f.c,{...input,admission:undefined,profile:undefined});assert.equal(r.kind,'REPLAYED');
- f.original.initial_admission_canonical+=' ';await assert.rejects(createPrestartFormalRefundIntent(f.c,input),(e:any)=>e.status===503);
+ const f=fixture(t);await createLiabilityFormalRefundIntent(f.c,input);
+ const r=await createLiabilityFormalRefundIntent(f.c,{...input,admission:undefined,profile:undefined});assert.equal(r.kind,'REPLAYED');
+ f.original.initial_admission_canonical+=' ';await assert.rejects(createLiabilityFormalRefundIntent(f.c,input),(e:any)=>e.status===503);
 });
 test('同原号多trx、共同预算活跃或人工复核阻断新分配；释放后可新键且不重认负债',async t=>{
- const f=fixture(t);f.transactions('2');assert.equal((await createPrestartFormalRefundIntent(f.c,input)).kind,'REVIEW_REQUIRED');assert.equal(f.original,null);
- f.transactions('1');f.budget('15908');await assert.rejects(createPrestartFormalRefundIntent(f.c,input),(e:any)=>e.status===409);
- f.budget('0',true);await assert.rejects(createPrestartFormalRefundIntent(f.c,input),(e:any)=>e.status===409);
- f.budget('0');await createPrestartFormalRefundIntent(f.c,input);const released:any=f.original;released.state='FAILED';released.budget_disposition='RELEASED';
- assert.equal((await createPrestartFormalRefundIntent(f.c,{...input,idempotencyKey:'next_after_release'})).kind,'ALLOCATED');
+ const f=fixture(t);f.transactions('2');assert.equal((await createLiabilityFormalRefundIntent(f.c,input)).kind,'REVIEW_REQUIRED');assert.equal(f.original,null);
+ f.transactions('1');f.budget('15908');await assert.rejects(createLiabilityFormalRefundIntent(f.c,input),(e:any)=>e.status===409);
+ f.budget('0',true);await assert.rejects(createLiabilityFormalRefundIntent(f.c,input),(e:any)=>e.status===409);
+ f.budget('0');await createLiabilityFormalRefundIntent(f.c,input);const released:any=f.original;released.state='FAILED';released.budget_disposition='RELEASED';
+ assert.equal((await createLiabilityFormalRefundIntent(f.c,{...input,idempotencyKey:'next_after_release'})).kind,'ALLOCATED');
  assert.equal(f.calls.some(c=>c.sql.startsWith('INSERT INTO zzsh_order.finance_')),false);
 });
 test('首派门禁重核新发现的同原号流水；未领lease、不取钥、不HTTP且保留原预算',async t=>{
- const f=fixture(t);await createPrestartFormalRefundIntent(f.c,input);f.transactions('2');
+ const f=fixture(t);await createLiabilityFormalRefundIntent(f.c,input);f.transactions('2');
  assert.equal((await readPrestartRefundGate(f.c,f.original)).valid,false);
  t.mock.method(store,'lockFormalRefundContext',async()=>f.original);t.mock.method(store,'formalRefundBinding',()=>({}) as any);
  const q=f.c.query.bind(f.c);(f.c as any).query=async(sql:string,v:any[])=>sql.includes('to_regclass')?{rows:[{ready:true}]}:
@@ -87,7 +101,7 @@ test('首派门禁重核新发现的同原号流水；未领lease、不取钥、
  assert(f.calls.some(c=>c.v.includes('order.refund.prestart.first_submit.blocked')));
 });
 test('只读进度明确区分释放/未知/核销和保存证据；不调渠道、不把坏绑定补0',async t=>{
- const f=fixture(t);await createPrestartFormalRefundIntent(f.c,input);
+ const f=fixture(t);await createLiabilityFormalRefundIntent(f.c,input);
  const row={...f.original,complete:true,dispatched:true,blocked_reason:null,updated_at:'2026-10-28T00:00:00.000000Z',saved_terminal:null,saved_trx:null,saved_completed_at:null,saved_at:null};
  for(const [state,disposition,consumed,remaining] of [['UNKNOWN','ALLOCATED','0','0'],['FAILED','RELEASED','0','15908'],['SUCCEEDED','CONSUMED','15908','0']]){
   f.rows([{...row,state,budget_disposition:disposition}]);const p=await readPrestartRefundProgress(f.c,term.id,b,true);
@@ -96,8 +110,20 @@ test('只读进度明确区分释放/未知/核销和保存证据；不调渠道
  f.rows([{...row,renter_user_id:'other'}]);const bad=await readPrestartRefundProgress(f.c,term.id,b,true);assert.equal(bad.integration,'UNAVAILABLE');assert.equal(bad.totals,null);assert.equal(bad.intents?.[0]?.amountCents,null);
  f.rows([row]);const owner=await readPrestartRefundProgress(f.c,term.id,b,false);assert.equal(owner.totals,null);assert.equal(owner.intents?.[0]?.refundOrderNo,null);
 });
+test('客服特殊取消只读取本单部分退款，错误责任类型不显示成功',async t=>{
+ const f=fixture(t);
+ await createLiabilityFormalRefundIntent(f.c,{supportCancellationId:'cancel_1',idempotencyKey:'cancel_key',requestId:'request_1',admission:input.admission,profile:input.profile});
+ const basis={...b,amountCents:'5000',digest:'f'.repeat(64)};
+ const row={...f.original,complete:true,dispatched:true,blocked_reason:null,updated_at:'2026-10-28T00:00:00.000000Z',
+  state:'SUCCEEDED',budget_disposition:'CONSUMED',local_written_off_at:'2026-10-28T01:00:00.000000Z',saved_terminal:'SUCCEEDED',saved_trx:'refund_trx',saved_completed_at:'2026-10-28T01:00:00.000000Z',saved_at:'2026-10-28T01:00:00.000000Z'};
+ f.rows([row]);const result=await readPrestartRefundProgress(f.c,'cancel_1',basis,true,undefined,undefined,'SUPPORT_CANCELLATION');
+ assert.equal(result.totals?.consumedCents,'5000');assert.equal(result.intents?.[0]?.state,'SUCCEEDED');assert.equal(result.bankArrival,'UNKNOWN');
+ f.rows([{...row,basis_kind:'PRESTART_TERMINATION'}]);
+ const bad=await readPrestartRefundProgress(f.c,'cancel_1',basis,true,undefined,undefined,'SUPPORT_CANCELLATION');
+ assert.equal(bad.integration,'UNAVAILABLE');assert.equal(bad.totals,null);
+});
 test('只读截断及多重活跃分配不给完整合计；原责任不按重试次数相乘',async t=>{
- const f=fixture(t);await createPrestartFormalRefundIntent(f.c,input);const row={...f.original,complete:true,dispatched:false};
+ const f=fixture(t);await createLiabilityFormalRefundIntent(f.c,input);const row={...f.original,complete:true,dispatched:false};
  f.rows(Array.from({length:51},(_,n)=>({...row,id:`refund_${n}`})));const p=await readPrestartRefundProgress(f.c,term.id,b,true);assert.equal(p.truncated,true);assert.equal(p.totals,null);assert.equal(p.intents?.length,50);
 });
 test('退款schema未装配永远没有本地完成时间，不能结束退款后IM窗口',async()=>{

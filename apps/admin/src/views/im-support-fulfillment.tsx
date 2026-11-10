@@ -14,6 +14,7 @@ import { Badge } from "../components/ui/badge";
 import { Button } from "../components/ui/button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../components/ui/select";
 import { Card, CardContent, CardDescription, CardTitle } from "../components/ui/card";
+import { SupportPoststartCancelCard } from "./support-poststart-cancel";
 import { Item, ItemActions, ItemContent, ItemGroup, ItemMedia, ItemTitle } from "../components/ui/item";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "../components/ui/table";
 import { formatFundingCents } from "./supply-review/model";
@@ -1027,6 +1028,7 @@ export function OrderFulfillmentSection({ orderId, displayNo, viewerId, orderSta
     </Dialog>
   </Card>
   {canManualClose && orderStatus === "PAID" && view.rentalStarted===false ? <SupportCancelCard orderId={orderId} displayNo={displayNo} compact={compact} /> : null}
+  {canManualClose && orderStatus === "PAID" && view.rentalStarted===true ? <SupportPoststartCancelCard orderId={orderId} displayNo={displayNo} viewerId={viewerId} compact={compact} /> : null}
   </>;
 }
 
@@ -1147,7 +1149,7 @@ function SupportCancelCard({ orderId, displayNo, compact=false }: { orderId: str
       setPhase("IDLE");
       if (cause instanceof AdminApiError && (cause.status === 401 || cause.status === 423)) setError("登录状态已变化；请重新确认管理员身份后核对。");
       else if (cause instanceof AdminApiError && cause.status === 403) setError("当前账号不是本单客服，或没有订单结算写权限。");
-      else if (cause instanceof AdminApiError && cause.status === 404) setError("当前无法办理客服取消或读取订单，请核对退款责任。");
+      else if (cause instanceof AdminApiError && cause.status === 404) setError("当前无法办理客服取消或读取订单，请核对订单和付款信息。");
       else setError(friendlyError(cause));
     }
   };

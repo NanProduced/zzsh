@@ -34,6 +34,11 @@ async function main(){
   await c.query('SET LOCAL ROLE synth_payout_runtime');
   await assert.rejects(assertNativePayoutExecutionReady(c),/guards, constraints or narrow privileges differ/);
   await c.query('ROLLBACK TO SAVEPOINT bad_guard');
+  await c.query('SAVEPOINT bad_support_guard');
+  await c.query('ALTER TABLE zzsh_order.settlement_ledger_entry DISABLE TRIGGER support_poststart_entry_guard');
+  await c.query('SET LOCAL ROLE synth_payout_runtime');
+  await assert.rejects(assertNativePayoutExecutionReady(c),/guards, constraints or narrow privileges differ/);
+  await c.query('ROLLBACK TO SAVEPOINT bad_support_guard');
   await c.query('SET LOCAL ROLE synth_payout_runtime');await assertNativePayoutExecutionReady(c);
   console.log('PASS: retired-refund payout preflight accepts only the intact constraint and exact ledger guards');
  }finally{await c.query('ROLLBACK').catch(()=>{});await c.end();}

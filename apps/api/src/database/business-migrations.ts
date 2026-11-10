@@ -7,6 +7,7 @@ import { migrate } from "drizzle-orm/node-postgres/migrator";
 import { readMigrationFiles } from "drizzle-orm/migrator";
 import type { Pool, PoolClient } from "pg";
 import { matchesKnown0155LineEndings } from "./business-migration-compat";
+import { supportPoststartTriggersSql,supportPoststartExecutorSafeSql } from "../finance/support-poststart-schema";
 import { compensationTriggersSql, compensationFunctionsSafeSql, compensationIncidentIndexSafeSql } from '../finance/order-compensation-schema';
 
 const IDENTIFIER = /^[a-z][a-z0-9_]{0,62}$/;
@@ -485,6 +486,26 @@ export async function applyRuntimePrivileges(pool: Pick<Pool, "query">, runtimeR
   await configureLocalFinancialSandboxPrivileges(pool, runtimeRole);
   await configureUserAuthThrottlePrivileges(pool, runtimeRole);
   await configureOrderCompensationPrivileges(pool, runtimeRole);
+  await configureSupportPoststartCancellationPrivileges(pool, runtimeRole);
+}
+
+/** 只在取消、账本和退款守卫完整时授予读与受控执行权。 */
+export async function configureSupportPoststartCancellationPrivileges(pool:Pick<Pool,"query">,runtimeRole:string):Promise<void>{
+ const table='zzsh_order.support_poststart_cancellation',role=quoteIdentifier(runtimeRole);
+ const names=['zzsh_order.cancel_order_after_start(text,bigint,numeric,numeric,text)','zzsh_order.support_poststart_cancellation_complete(text)',
+  'zzsh_order.support_cancellation_refund_liability_complete(text)','zzsh_order.support_cancellation_refund_terminal_complete(text)'];
+ const row=(await pool.query(`SELECT to_regclass($1) IS NOT NULL AS present,
+  (SELECT count(*)::int FROM unnest($2::text[]) f(name) WHERE to_regprocedure(f.name) IS NOT NULL) AS functions,
+  (${supportPoststartTriggersSql}) AS triggers,
+  (${supportPoststartExecutorSafeSql}) AS executor_safe`,
+  [table,names])).rows[0];
+ if(!row||typeof row.present!=='boolean'||!Number.isInteger(row.functions)||!Number.isInteger(row.triggers)||typeof row.executor_safe!=='boolean')
+  throw new Error('Poststart cancellation contract inventory unavailable');
+ if(!row.present&&row.functions===0&&row.triggers===0)return;
+ if(!row.present||row.functions!==names.length||row.triggers!==12||!row.executor_safe)throw new Error('Poststart cancellation contract incomplete');
+ await resetRuntimeTablePrivileges(pool,table,'PUBLIC',{select:false});
+ await resetRuntimeTablePrivileges(pool,table,role);
+ await pool.query(`REVOKE ALL ON FUNCTION ${names.join(',')} FROM PUBLIC, ${role}; GRANT EXECUTE ON FUNCTION ${names.join(',')} TO ${role}`);
 }
 
 /** An absent contract is allowed on older databases; a partial one must not receive money-write privileges. */
