@@ -56,7 +56,7 @@ export async function manualCloseOrder(
   if (order.status !== "PAID" || !order.paidConfirmationId) throw conflict("ORDER_NOT_CLOSABLE");
   if(typeof order.openingConfirmed!=="boolean")throw new SecurityApiError(503,"EVIDENCE_UNAVAILABLE","Opening facts are unavailable");
   const resolution=order.openingConfirmed
-    ?{code:"SETTLEMENT_REQUIRED",readPath:`/api/v1/admin/orders/${orderId}/settlement`,message:"请按实际消耗完成结算后结束订单。"}
+    ?{code:"SETTLEMENT_REQUIRED",readPath:`/api/v1/admin/orders/${orderId}/settlement`,message:"请按实际情况办理结算或客服取消并退款。"}
     :{code:"PRESTART_REFUND_REQUIRED",readPath:`/api/v1/admin/orders/${orderId}/support-cancel`,message:"请办理未开租客服取消，确认原款应退责任后结束订单。"};
   await recordAudit(client, {
     actorType: "admin", actorId: actor.userId, sessionId: actor.sessionId, action: "order.manual_close.rejected",

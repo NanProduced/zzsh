@@ -49,6 +49,7 @@ test("new paid orders must use original refund responsibility or actual-consumpt
   const result=await manualCloseOrder(client,"order",{userId:"support",sessionId:"session"},"handle actual original responsibility","request");
   assert.equal(result.status,409);assert.equal(result.body.status,"PAID");assert.equal(result.body.orderUnchanged,true);
   assert.equal((result.body.resolution as{code:string}).code,confirmed?"SETTLEMENT_REQUIRED":"PRESTART_REFUND_REQUIRED");
+  if(confirmed)assert.match((result.body.resolution as{message:string}).message,/客服取消并退款/);
  }
  assert.equal(seen.some(sql=>/UPDATE zzsh_order\.rental_order|INSERT INTO zzsh_order\.(settlement|prestart|payment)/.test(sql)),false);
  status="CANCELLED";cancelReason="MANUAL_CLOSE";
