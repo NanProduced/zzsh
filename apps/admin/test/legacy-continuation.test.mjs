@@ -140,6 +140,32 @@ const sharedUi={"./legacy-refund-review-panel":{LegacyRefundReviewPanel:()=>null
  "../components/ui/alert-dialog":{ConfirmAlertDialog:({open,onOpenChange,title,description,children,cancelLabel,confirmLabel,onConfirm,busy,confirmDisabled,contentLabel})=>open?React.createElement("div",{role:"alertdialog","aria-label":contentLabel},title,description,children,React.createElement("button",{disabled:busy,onClick:()=>onOpenChange(false)},cancelLabel),React.createElement("button",{disabled:busy||confirmDisabled,onClick:onConfirm},confirmLabel)):null},
  "../components/ui/select":{Select:({value,onValueChange,disabled})=>React.createElement("select",{value,disabled,"aria-label":"结算发起方",onChange:e=>onValueChange(e.target.value)},...["NONE","renter","owner"].map(v=>React.createElement("option",{key:v,value:v},v))),SelectContent:()=>null,SelectItem:()=>null,SelectTrigger:()=>null,SelectValue:()=>null},
  "../components/ui/table":{Table:html("table"),TableBody:html("tbody"),TableCell:html("td"),TableHead:html("th"),TableHeader:html("thead"),TableRow:html("tr")}};
+test("legacy support cancellation validates allocation and requires an explicit second confirmation",async t=>{
+ const w=storage(t),{createRoot}=require("react-dom/client"),host=document.createElement("div");document.body.append(host);const root=createRoot(host);t.after(async()=>React.act(async()=>root.unmount()));
+ const source=view({stage:"3",isSettle:"0",amounts:{payMoney:{cents:"10000",yuan:"100.00"}},capabilities:["support_cancel"],commandFingerprints:{}});
+ const api=client(async()=>source);api.readLegacyAdminContinuation=async()=>api.parseLegacyAdminView(source);let sent;api.sendLegacyAdminIntent=async intent=>{sent=intent;return {};};
+ const {LegacyAdminContinuationPanel}=load("apps/admin/src/views/legacy-continuation-panel.tsx",{...sharedUi,"../api":{friendlyError:e=>e.message,formatDate:x=>x},"../components/ui-elements":{Button:({variant:_,size:__,...p})=>React.createElement("button",p)},"../lib/legacy-continuation-client":api});
+ const authorized={...snapshot,permissions:[...snapshot.permissions,"order.settlement.write"]};
+ await React.act(async()=>{root.render(React.createElement(LegacyAdminContinuationPanel,{snapshot:authorized,orderId}));await tick();});
+ await React.act(async()=>{[...host.querySelectorAll("button")].find(x=>x.textContent==="取消订单并退款").click();await tick();});
+ const change=async(selector,value,proto)=>React.act(async()=>{const el=host.querySelector(selector);Object.getOwnPropertyDescriptor(proto,"value").set.call(el,value);el.dispatchEvent(new w.Event("input",{bubbles:true}));await tick();});
+ await change('input[id$="-refund"]',"80",w.HTMLInputElement.prototype);await change('input[id$="-owner"]',"30",w.HTMLInputElement.prototype);await change('textarea[id$="-cancel-reason"]',"双方协商取消",w.HTMLTextAreaElement.prototype);
+ assert.match(host.textContent,/合计不能超过原实付/);let next=[...host.querySelectorAll("button")].find(x=>x.textContent==="核对并继续");assert(next.disabled);assert.equal(sent,undefined);
+ await change('input[id$="-owner"]',"20",w.HTMLInputElement.prototype);next=[...host.querySelectorAll("button")].find(x=>x.textContent==="核对并继续");assert.equal(next.disabled,false);
+ await React.act(async()=>{next.click();await tick();});assert.equal(sent,undefined);assert.match(host.querySelector('[role="alertdialog"]').textContent,/退给租客 ¥80\.00.*号主收益 ¥20\.00/);
+ await React.act(async()=>{[...host.querySelectorAll('[role="alertdialog"] button')].find(x=>x.textContent==="确认取消订单并退款").click();await tick();});
+ assert.equal(sent.command,"support_cancel");assert.deepEqual(sent.body,{expectedRevision:"2",inputEvidenceId:"evidence_result",refundCents:"8000",ownerCents:"2000",reason:"双方协商取消",originalPaymentChecked:true});
+});
+test("legacy cancellation recovery retains original actor, amounts and key",async t=>{
+ storage(t);let reply={state:"UNKNOWN"};const c=client(async()=>reply),subject=c.legacyAdminSubject("admin_A",orderId);
+ const body={expectedRevision:"2",inputEvidenceId:"evidence_result",refundCents:"5000",ownerCents:"3000",reason:"双方协商取消",originalPaymentChecked:true};
+ const intent=await c.retainLegacyAdminIntent(subject,orderId,"support_cancel",body);assert.equal((await c.recoverLegacyAdminIntent(intent)).state,"UNKNOWN");
+ assert.equal(c.inspectLegacyAdminIntent(subject,orderId).intent.key,intent.key);assert.equal(c.inspectLegacyAdminIntent(c.legacyAdminSubject("admin_B",orderId),orderId).state,"NONE");
+ const input={kind:"support_cancel",expectedRevision:body.expectedRevision,inputEvidenceId:body.inputEvidenceId,refundCents:body.refundCents,ownerCents:body.ownerCents,originalPaymentChecked:true,reason:body.reason},bytes=new TextEncoder().encode(JSON.stringify(["order.legacy.continuation.support_cancel",orderId,input]));
+ const fingerprint=Buffer.from(await crypto.subtle.digest("SHA-256",bytes)).toString("hex");
+ reply={state:"KNOWN_SUCCESS",status:200,fingerprint,receipt:{orderId,command:"support_cancel",inputEvidenceId:body.inputEvidenceId,versionId:"version_1",resultEvidenceId:"evidence_2",revision:"3",stage:"5",channelState:"UNKNOWN"}};
+ assert.equal((await c.recoverLegacyAdminIntent(intent)).state,"KNOWN_SUCCESS");reply.receipt.stage="4";await assert.rejects(c.recoverLegacyAdminIntent(intent),/待核对/);
+});
 test("legacy refund request recovery remains bound to the original amounts and duty",async t=>{
  storage(t);let reply={state:'UNKNOWN'};const c=client(async()=>reply),subject=c.legacyAdminSubject('staff',orderId);
  const body={expectedDutyRevision:'1',expectedHeadRevision:'2',paymentOrderNo:'OLDPAY123',confirmedMerchantNo:'12345',paidCents:'10000',

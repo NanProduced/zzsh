@@ -40,7 +40,18 @@ async function main(){
   const file=fs.readFileSync(path.join(__dirname,'fixtures/poststart-support-refund-synthetic.sql'),'utf8');
   const boundary=file.indexOf('WITH proof AS (');assert(boundary>0);
   const seed=file.slice(0,boundary).replace(":'refund'::numeric",'5000::numeric').replace(":'owner'::numeric",'3000::numeric');
-  await c.query(seed);await c.query('SET CONSTRAINTS ALL DEFERRED');
+  if(process.env.POSTSTART_REFUND_SYNTH_ROLLBACK_ONLY==='1'){
+   await c.query('BEGIN');
+   const existing=(await c.query(`SELECT p.refund_cents::text,p.owner_cents::text,zzsh_order.support_poststart_cancellation_complete(p.id) AS valid,
+    (SELECT count(*)::int FROM zzsh_order.channel_refund_intent i WHERE i.order_id=p.order_id) AS intents
+    FROM zzsh_order.support_poststart_cancellation p WHERE p.order_id='post_order'`)).rows;
+   assert.deepEqual(existing,[{refund_cents:'5000',owner_cents:'3000',valid:true,intents:0}]);
+   await c.query("SET LOCAL session_replication_role='replica'");
+   await c.query(`UPDATE zzsh_auth_admin.session SET "expiresAt"=clock_timestamp()+interval '1 hour' WHERE id='post_admin_session' AND "userId"='post_admin'`);
+   await c.query("SET LOCAL session_replication_role='origin'");
+   await c.query("SELECT set_config('zzsh.actor_type','admin',true),set_config('zzsh.actor_id','post_admin',true),set_config('zzsh.session_id','post_admin_session',true),set_config('zzsh.request_id','post_cancel_req',true)");
+  }else await c.query(seed);
+  await c.query('SET CONSTRAINTS ALL DEFERRED');
   const cancel=(await c.query("SELECT id FROM zzsh_order.support_poststart_cancellation WHERE order_id='post_order'")).rows[0];assert(cancel);
   const input={supportCancellationId:cancel.id,idempotencyKey:'synthetic_partial_refund',requestId:'synthetic_refund_request',admission:{},profile:{}};
   const created=await createLiabilityFormalRefundIntent(c,input);assert.equal(created.kind,'ALLOCATED');
@@ -63,8 +74,30 @@ async function main(){
   const queue=await require('../dist/src/finance/admin-finance-obligation-queues.js').readAdminFinanceObligationQueues(c,asOf,true);
   const pending=queue.refunds.items.find(item=>item.documentRef==='ORDER:post_order');
   assert(pending);assert.equal(pending.source,'SUPPORT_CANCELLATION');assert.equal(pending.amountCents,'5000');
+  await c.query('SAVEPOINT conflicted_refund_read');await c.query("SET LOCAL session_replication_role='replica'");
+  const raw=Buffer.from('synthetic native refund'),profileCanonical='{}',profileSha=crypto.createHash('sha256').update(profileCanonical).digest('hex'),rawSha=crypto.createHash('sha256').update(raw).digest('hex');
+  await c.query(`INSERT INTO zzsh_order.joinpay_refund_attempt(id,intent_id,operation,lease_version,lease_owner,profile_id,profile_canonical,profile_sha256,key_version_ref,admission_sha256,request_body,request_sha256,created_at)
+    VALUES('post_attempt',$1,'SUBMIT',1,'post_worker','post_profile',$2,$3,'post_key',$3,$4,$5,transaction_timestamp()-interval '1 second')`,[created.intentId,profileCanonical,profileSha,raw,rawSha]);
+  await c.query(`INSERT INTO zzsh_order.joinpay_refund_observation(id,intent_id,operation,profile_id,profile_canonical,profile_sha256,key_version_ref,raw_body,raw_sha256,response_complete,http_status,received_bytes,transport_failure,event,schema_status,signature_status,binding_status,evidence_level,state_before,state_after,request_id)
+    VALUES('post_observation',$1,'NOTIFY','post_profile',$2,$3,'post_key',$4,$5,true,NULL,$6,NULL,'PENDING_TERMINAL','VALID','MATCH','MATCH','PROVIDER_RESPONSE','SUBMITTING','SUBMITTING','post_request')`,[created.intentId,profileCanonical,profileSha,raw,rawSha,raw.length]);
+  await c.query(`INSERT INTO zzsh_order.joinpay_refund_evidence(id,intent_id,observation_id,operation,terminal,refund_transaction_no,completed_at_raw,completed_at,facts_canonical,facts_digest)
+    VALUES('post_evidence_refund',$1,'post_observation','NOTIFY','SUCCEEDED','post_refund_trx','synthetic',transaction_timestamp()-interval '1 second',$2,$3)`,[created.intentId,profileCanonical,profileSha]);
+  await c.query(`UPDATE zzsh_order.channel_refund_intent i SET state='SUCCEEDED',budget_disposition='CONSUMED',requires_review=true,lease_version=1,lease_owner='post_worker',lease_until=clock_timestamp()+interval '1 minute',
+    terminal_evidence_id='post_evidence_refund',terminal_root_id=p.root_id,terminal_event_id=p.event_id,provider_refund_trx_no='post_refund_trx',completed_at=transaction_timestamp()-interval '1 second'
+    FROM zzsh_order.support_poststart_cancellation p WHERE i.id=$1 AND p.order_id=i.order_id`,[created.intentId]);
+  await c.query("SET LOCAL session_replication_role='origin'");
+  const activity=require('../dist/src/finance/admin-finance-activity.js'),read=await activity.readAdminChannelActivity(c,
+    activity.parseActivityQuery(new URLSearchParams('kind=REFUND'),false),{adminId:'post_admin',isBoss:true,orderRead:true,financeDocumentRead:true,resourceRead:true});
+  assert.equal(read.items.find(row=>row.id==='refund:post_attempt')?.state,'REVIEW_REQUIRED','a conflicted terminal is not presented as settled');
+  const channel=require('../dist/src/finance/admin-finance-dashboard.js').readFinanceDashboardChannels,query={range:'all',basis:'settled',limit:20,source:'new'},viewer={adminId:'post_admin',isBoss:true};
+  assert.deepEqual((await channel(c,query,viewer,['post_merchant'])).items,[],'a conflicted terminal is not counted as a confirmed channel refund');
+  await c.query("SET LOCAL session_replication_role='replica'");await c.query(`UPDATE zzsh_order.channel_refund_intent SET requires_review=false WHERE id=$1`,[created.intentId]);
+  await c.query("SET LOCAL session_replication_role='origin'");
+  assert.deepEqual((await channel(c,query,viewer,['post_merchant'])).items,[{kind:'REFUND',count:'1',cents:'5000'}]);
+  await c.query('ROLLBACK TO SAVEPOINT conflicted_refund_read');
   console.log('PASS: support partial refund allocation, same-key replay and duplicate budget rejection on synthetic PG');
   await c.query('ROLLBACK');
+  if(process.env.POSTSTART_REFUND_SYNTH_ROLLBACK_ONLY==='1')return;
   const contextMarker=seed.indexOf("SELECT set_config('zzsh.actor_type'");assert(contextMarker>0);
   await c.query(seed.slice(0,contextMarker));await c.query('COMMIT');
   const other=await pool.connect(),observer=await pool.connect();

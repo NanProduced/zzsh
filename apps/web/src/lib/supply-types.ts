@@ -593,6 +593,7 @@ export type MyAccountRow = {
 };
 export type MySupply = {
   historicalRead?: LegacyHistoricalRead | null;
+  canPrepareLegacyCancelledDraft?: boolean;
   account: {
     id: string;
     game_id: string;

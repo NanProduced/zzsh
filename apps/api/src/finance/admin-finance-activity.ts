@@ -165,16 +165,24 @@ export async function readAdminChannelActivity(client: PoolClient, q: ActivityQu
   if (exact && !q.q) throw invalid('A document lookup reference is required');
   const parts: string[] = [];
   const demoState = q.source === 'NATIVE'
-    ? (await client.query<{ exists:boolean; readable:boolean; refundReady:boolean; legacyRefundReady:boolean; withdrawalReady:boolean }>(`SELECT to_regclass('zzsh_order.ecs_test_demo_finance_registration') IS NOT NULL AS exists,
+    ? (await client.query<{ exists:boolean; readable:boolean; refundReady:boolean; legacyRefundReady:boolean; withdrawalReady:boolean; legacyFormalExists:boolean; legacyFormalReady:boolean }>(`SELECT to_regclass('zzsh_order.ecs_test_demo_finance_registration') IS NOT NULL AS exists,
       COALESCE(has_table_privilege(to_regclass('zzsh_order.ecs_test_demo_finance_registration'),'SELECT'),false) AS readable,
       COALESCE(has_table_privilege(to_regclass('zzsh_order.local_controlled_refund_operation'),'SELECT'),false) AS "refundReady",
       COALESCE(has_table_privilege(to_regclass('zzsh_order.ecs_demo_legacy_refund'),'SELECT'),false) AS "legacyRefundReady",
       COALESCE(has_table_privilege(to_regclass('zzsh_order.controlled_payout_operation'),'SELECT'),false)
-        AND COALESCE(has_table_privilege(to_regclass('zzsh_order.withdrawal_intent'),'SELECT'),false) AS "withdrawalReady"`)).rows[0] : undefined;
+        AND COALESCE(has_table_privilege(to_regclass('zzsh_order.withdrawal_intent'),'SELECT'),false) AS "withdrawalReady",
+      (to_regclass('zzsh_order.legacy_refund_attempt') IS NOT NULL OR to_regclass('zzsh_order.legacy_refund_intent') IS NOT NULL
+        OR to_regclass('zzsh_order.legacy_refund_case') IS NOT NULL) AS "legacyFormalExists",
+      COALESCE(has_table_privilege(to_regclass('zzsh_order.legacy_refund_attempt'),'SELECT'),false)
+        AND COALESCE(has_table_privilege(to_regclass('zzsh_order.legacy_refund_intent'),'SELECT'),false)
+        AND COALESCE(has_table_privilege(to_regclass('zzsh_order.legacy_refund_case'),'SELECT'),false)
+        AND COALESCE(has_table_privilege(to_regclass('zzsh_order.legacy_order_read_snapshot'),'SELECT'),false) AS "legacyFormalReady"`)).rows[0] : undefined;
   if (demoState?.exists && !demoState.readable) throw new SecurityApiError(503,'EVIDENCE_UNAVAILABLE','Test payment classification is unavailable');
   if (demoState?.exists && ((q.kind==='ALL'||q.kind==='REFUND') && (!demoState.refundReady||!demoState.legacyRefundReady)
     || (q.kind==='ALL'||q.kind==='WITHDRAWAL') && !demoState.withdrawalReady))
     throw new SecurityApiError(503,'EVIDENCE_UNAVAILABLE','Test finance classification is unavailable');
+  if (demoState?.legacyFormalExists && !demoState.legacyFormalReady && (q.kind==='ALL'||q.kind==='REFUND'))
+    throw new SecurityApiError(503,'EVIDENCE_UNAVAILABLE','Legacy order refund records are unavailable');
   if (q.source !== 'NATIVE') {
     const kinds = q.kind === 'ALL' ? "'HISTORICAL_PAYMENT','HISTORICAL_REFUND','HISTORICAL_WITHDRAWAL'" : `'HISTORICAL_${q.kind}'`;
     parts.push(`SELECT 'history' AS family,o.id,${utc('COALESCE(o.source_event_at,o.imported_at)')} AS at
@@ -214,6 +222,15 @@ export async function readAdminChannelActivity(client: PoolClient, q: ActivityQu
       LEFT JOIN zzsh_order.rental_order ord ON ord.id=i.order_id LEFT JOIN zzsh_auth_user."user" u ON u.id=i.renter_user_id
       WHERE a.operation='SUBMIT' AND i.basis_kind IN ('POSTING','PRESTART_TERMINATION','SUPPORT_CANCELLATION') AND a.created_at <= $2::timestamptz AND ${during('a.created_at')}
       ${q.subjectUserId?`AND (i.renter_user_id=$12 OR (ord.owner_user_id=$12 AND ord.renter_user_id=i.renter_user_id AND ${orderVisible('ord')}))`:''} AND ${match(['i.refund_order_no','i.provider_refund_trx_no','i.original_payment_order_no',orderTerm('ord','ord.display_no')],exact)}`);
+    if ((q.kind==='ALL'||q.kind==='REFUND') && demoState?.legacyFormalReady) parts.push(`SELECT 'legacy_refund' AS family,a.id,${utc('a.created_at')} AS at
+      FROM zzsh_order.legacy_refund_attempt a JOIN zzsh_order.legacy_refund_intent i ON i.id=a.intent_id
+      JOIN zzsh_order.legacy_refund_case x ON x.id=i.case_id JOIN zzsh_order.legacy_order_read_snapshot lo ON lo.id=x.order_id AND lo.renter_user_id=x.renter_user_id
+      LEFT JOIN zzsh_auth_user."user" u ON u.id=x.renter_user_id
+      WHERE a.operation='SUBMIT' AND a.created_at<=$2::timestamptz AND ${during('a.created_at')}
+      AND i.initial_profile_sha256=encode(sha256(convert_to(i.initial_profile_canonical,'UTF8')),'hex')
+      AND CASE WHEN pg_input_is_valid(i.initial_profile_canonical,'jsonb') THEN i.initial_profile_canonical::jsonb->>'purpose'='MERCHANT_REFUND' ELSE false END
+      ${q.subjectUserId?`AND (x.renter_user_id=$12 OR (lo.owner_user_id=$12 AND ${orderVisible('lo')}))`:''}
+      AND ${match(['i.refund_order_no','i.provider_refund_trx_no','x.original_payment_order_no',orderTerm('lo','lo.original_order_no')],exact)}`);
     if ((q.kind==='ALL'||q.kind==='REFUND') && demoState?.exists) parts.push(`SELECT 'demo_refund' AS family,a.id,${utc('a.created_at')} AS at
       FROM zzsh_order.local_controlled_refund_operation a JOIN zzsh_order.channel_refund_intent i ON i.id=a.intent_id AND i.payment_source='CONTROLLED'
       JOIN zzsh_order.rental_order ord ON ord.id=i.order_id AND ord.renter_user_id=i.renter_user_id
@@ -265,12 +282,27 @@ export async function readAdminChannelActivity(client: PoolClient, q: ActivityQu
   }
   const families = [
     { key:'payment', sql:`SELECT a.id,${utc('a.created_at')} AS at,p.id AS business_id,p.channel_order_no AS number,p.platform_order_no AS related_number,p.method,p.state,p.amount_cents::text AS amount,ord.renter_user_id AS user_id,u.name FROM zzsh_order.joinpay_collection_attempt a JOIN zzsh_order.payment_request p ON p.id=a.request_id JOIN zzsh_order.rental_order ord ON ord.id=p.order_id LEFT JOIN zzsh_auth_user."user" u ON u.id=ord.renter_user_id WHERE a.id=ANY($1::text[])`, kind:'PAYMENT', prefix:'PAYMENT_REQUEST' },
-    { key:'refund', sql:`SELECT a.id,${utc('a.created_at')} AS at,i.id AS business_id,i.refund_order_no AS number,i.original_payment_order_no AS related_number,i.state,i.amount_cents::text AS amount,i.renter_user_id AS user_id,u.name FROM zzsh_order.joinpay_refund_attempt a JOIN zzsh_order.channel_refund_intent i ON i.id=a.intent_id LEFT JOIN zzsh_auth_user."user" u ON u.id=i.renter_user_id WHERE a.id=ANY($1::text[])`, kind:'REFUND', prefix:'REFUND_INTENT' },
-    { key:'withdrawal', sql:`SELECT a.id,${utc('a.created_at')} AS at,w.id AS business_id,w.merchant_order_no AS number,w.state,w.net_cents::text AS amount,w.gross_cents::text AS gross_cents,w.fee_cents::text AS fee_cents,w.user_id,u.name FROM zzsh_order.joinpay_payout_attempt a JOIN zzsh_order.joinpay_withdrawal_intent w ON w.id=a.intent_id LEFT JOIN zzsh_auth_user."user" u ON u.id=w.user_id WHERE a.id=ANY($1::text[])`, kind:'WITHDRAWAL', prefix:'JOINPAY_WITHDRAWAL' },
+    { key:'refund', sql:`SELECT a.id,${utc('a.created_at')} AS at,i.id AS business_id,i.refund_order_no AS number,i.original_payment_order_no AS related_number,CASE WHEN i.requires_review THEN 'REVIEW_REQUIRED' ELSE i.state END AS state,i.amount_cents::text AS amount,i.renter_user_id AS user_id,u.name FROM zzsh_order.joinpay_refund_attempt a JOIN zzsh_order.channel_refund_intent i ON i.id=a.intent_id LEFT JOIN zzsh_auth_user."user" u ON u.id=i.renter_user_id WHERE a.id=ANY($1::text[])`, kind:'REFUND', prefix:'REFUND_INTENT' },
+    { key:'withdrawal', sql:`SELECT a.id,${utc('a.created_at')} AS at,w.id AS business_id,w.merchant_order_no AS number,CASE WHEN w.requires_review THEN 'REVIEW_REQUIRED' ELSE w.state END AS state,w.net_cents::text AS amount,w.gross_cents::text AS gross_cents,w.fee_cents::text AS fee_cents,w.user_id,u.name FROM zzsh_order.joinpay_payout_attempt a JOIN zzsh_order.joinpay_withdrawal_intent w ON w.id=a.intent_id LEFT JOIN zzsh_auth_user."user" u ON u.id=w.user_id WHERE a.id=ANY($1::text[])`, kind:'WITHDRAWAL', prefix:'JOINPAY_WITHDRAWAL' },
   ];
   for (const family of families) {
     const ids = page.rows.filter(row=>row.family===family.key).map(row=>row.id); if (!ids.length) continue;
     for (const row of (await client.query(family.sql,[ids])).rows) mapped.set(`${family.key}:${row.id}`, { id:`${family.key}:${row.id}`, source:'NATIVE', kind:family.kind, subjectId:row.user_id, subjectName:displayName(row.name,row.user_id), ...(q.subjectUserId?{subjectRole:family.kind==='WITHDRAWAL'?'WITHDRAWER':row.user_id===q.subjectUserId?'RENTER':'OWNER'}:{}), number:row.number, relatedNumber:row.related_number??null, relatedNumberLabel:family.kind==='PAYMENT'?'平台订单号':family.kind==='REFUND'?'原支付单号':null, method:row.method??null, grossCents:row.gross_cents??null, feeCents:row.fee_cents??null, amountCents:row.amount, amountLabel:family.kind==='WITHDRAWAL'?'渠道出款金额':family.kind==='REFUND'?'退款申请金额':'收款申请金额', occurredAt:row.at, state:row.state, documentRef:`${family.prefix}:${row.business_id}` });
+  }
+  const legacyRefundIds=page.rows.filter(row=>row.family==='legacy_refund').map(row=>row.id);
+  if(legacyRefundIds.length){
+    const records=(await client.query(`SELECT a.id,${utc('a.created_at')} AS at,i.refund_order_no AS number,x.original_payment_order_no AS related_number,
+      CASE WHEN i.requires_review THEN 'REVIEW_REQUIRED' ELSE i.state END AS state,i.amount_cents::text AS amount,x.renter_user_id AS user_id,u.name,
+      CASE WHEN $4::boolean AND ${gameScopeSql('lo.game_id','$2','$3')} THEN lo.id END AS visible_order_id
+      FROM zzsh_order.legacy_refund_attempt a JOIN zzsh_order.legacy_refund_intent i ON i.id=a.intent_id
+      JOIN zzsh_order.legacy_refund_case x ON x.id=i.case_id JOIN zzsh_order.legacy_order_read_snapshot lo ON lo.id=x.order_id AND lo.renter_user_id=x.renter_user_id
+      LEFT JOIN zzsh_auth_user."user" u ON u.id=x.renter_user_id WHERE a.id=ANY($1::text[]) AND a.operation='SUBMIT'`,
+      [legacyRefundIds,access.adminId,access.isBoss,access.isBoss||access.orderRead])).rows;
+    if(records.length!==legacyRefundIds.length)throw new SecurityApiError(503,'EVIDENCE_UNAVAILABLE','Legacy order refund records changed during reading');
+    for(const row of records)mapped.set(`legacy_refund:${row.id}`,{id:`legacy_refund:${row.id}`,source:'NATIVE',kind:'REFUND',
+      subjectId:row.user_id,subjectName:displayName(row.name,row.user_id),...(q.subjectUserId?{subjectRole:row.user_id===q.subjectUserId?'RENTER':'OWNER'}:{}),
+      number:row.number,relatedNumber:row.related_number,relatedNumberLabel:'原支付单号',relatedOrderId:row.visible_order_id??null,
+      amountCents:row.amount,amountLabel:'退款申请金额',occurredAt:row.at,state:row.state,documentRef:null,bankArrival:'UNKNOWN'});
   }
   const demoIds = page.rows.filter(row=>row.family==='demo_payment').map(row=>row.id);
   if (demoIds.length) {

@@ -31,7 +31,7 @@ export function parseLegacyContinuation(value: unknown): LegacyContinuation {
     || value.earlyFee !== undefined && value.earlyFee !== null && (typeof value.earlyFee !== "string" || !/^(0|[1-9]\d{0,23})\.\d{2}$/.test(value.earlyFee))
     || value.refundDueAt !== undefined && value.refundDueAt !== null && (typeof value.refundDueAt !== "string" || !Number.isFinite(Date.parse(value.refundDueAt)))
     || !record(value.amounts) || !Array.isArray(value.duties) || value.duties.length > 200) throw new Error("订单续办信息暂不可用");
-  if (value.stage !== null && !["3", "8", "9", "4"].includes(String(value.stage)) || value.isSettle !== null && !["0", "2", "3"].includes(String(value.isSettle))) throw new Error("订单状态暂不可用");
+  if (value.stage !== null && !["3", "8", "9", "4", "5"].includes(String(value.stage)) || value.isSettle !== null && !["0", "2", "3"].includes(String(value.isSettle))) throw new Error("订单状态暂不可用");
   const amounts: LegacyContinuation["amounts"] = {};
   for (const [key, amount] of Object.entries(value.amounts)) {
     if (!/^[A-Za-z][A-Za-z0-9]{0,40}$/.test(key)) throw new Error("订单金额暂不可用");

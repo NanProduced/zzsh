@@ -10,7 +10,7 @@ export type LegacyDutyBasis = { state: "UNKNOWN"; reason: string } | {
   state: "KNOWN"; dutyId: string; orderId: string; kind: LegacyDutyRow["kind"]; beneficiaryUserId: string; amountCents: string; currency: "CNY";
   parentSourceDigest: string; parentSourceId: string; sourceRecordEntity: "la_distribution_order" | "la_order" | "legacy_continuation_version"; sourceRecordDigest: string; basisFactsDigest: string; effectiveFactsDigest: string;
   continuationVersionId: string | null; admissionId: string | null; basisEvidenceId: string; revision: string; maturityAt: string | null;
-  sourceTimeKind: "CONFIRMED_AT" | "COMPLETED_AT" | "MATURES_AT" | "DISPOSED_AT" | "SOURCE_COMPLETED_AT";
+  sourceTimeKind: "CONFIRMED_AT" | "COMPLETED_AT" | "MATURES_AT" | "DISPOSED_AT" | "SOURCE_COMPLETED_AT" | "SUPPORT_CANCELLED_AT";
   sourceTime: string; effectiveHeadId: string | null; effectiveHeadRevision: string | null; currentNetRefundCents:string|null;sourceIsSettle: string | null; fundsDisposition: "AVAILABLE" | "HELD" | "CONFISCATED" | "UNKNOWN";
 };
 type Version = LegacyHeadRow & { actor: { realm: "user" | "admin"; userId: string }; planFingerprint: string; commissionRevisions: unknown; createdAt: string };
@@ -57,14 +57,18 @@ export async function readLegacyDutyBasis(client: PoolClient, orderId: string, d
     if (gross === null || gross < detain || (gross-detain).toString() !== duty.amountCents || duty.counterpartyUserId !== binding.renterUserId) return { state: "UNKNOWN", reason: "HISTORICAL_REFUND_AMOUNT_MISMATCH" };
     return { ...common,currentNetRefundCents:(gross-detain).toString(),sourceRecordEntity:"la_order", sourceRecordDigest: fact.settlementRecord.digest, basisFactsDigest: fact.settlementRecord.digest, effectiveFactsDigest: effective?.factsDigest ?? fact.settlementRecord.digest, continuationVersionId: null, admissionId: null,basisEvidenceId:audit.id, sourceTimeKind: "SOURCE_COMPLETED_AT", sourceTime: binding.completedAt };
   }
-  const command = duty.kind === "DEPOSIT_COMPENSATION" ? "CONFISCATE" : "CONFIRM";
+  const command = duty.kind === "DEPOSIT_COMPENSATION" ? "CONFISCATE" : head?.command === "SUPPORT_CANCEL" && duty.continuationVersionId === head.id ? "SUPPORT_CANCEL" : "CONFIRM";
   const v = (await client.query<Version>(`SELECT id,order_id AS "orderId",revision::text,input_evidence_id AS "inputEvidenceId",result_evidence_id AS "resultEvidenceId",stage,is_settle AS "isSettle",command,amounts,actor,plan_fingerprint AS "planFingerprint",commission_revisions AS "commissionRevisions",${utc("created_at")} AS "createdAt" FROM zzsh_order.legacy_continuation_version WHERE order_id=$1 AND command=$2 ORDER BY revision DESC LIMIT 1`, [orderId, command])).rows[0];
   if (!v || !effective || !effectiveFacts || BigInt(v.revision)>BigInt(head?.revision ?? "0")) return { state: "UNKNOWN", reason: "FINAL_COMMAND_MISSING" };
   const rows = (await client.query<LegacyEvidenceRow>(`SELECT id,order_id AS "orderId",evidence_version::text AS "evidenceVersion",source_kind AS "sourceKind",source_digest AS "sourceDigest",facts_digest AS "factsDigest",facts_canonical AS "factsCanonical",facts FROM zzsh_order.legacy_continuation_evidence WHERE order_id=$1 AND id=ANY($2::text[])`, [orderId,[v.inputEvidenceId,v.resultEvidenceId]])).rows;
   const before = rows.find(r => r.id === v.inputEvidenceId), result = rows.find(r => r.id === v.resultEvidenceId);
   if (!before || !result || before.sourceDigest !== binding.sourceDigest || result.sourceDigest !== binding.sourceDigest) return { state: "UNKNOWN", reason: "FINAL_COMMAND_EVIDENCE_MISSING" };
   const facts = readSealedLegacyFacts(before), role = v.actor.realm === "admin" ? "admin" : v.actor.userId === binding.renterUserId ? "renter" : v.actor.userId === binding.ownerUserId ? "owner" : "other";
-  const cmd: LegacyCommand = { kind: command === "CONFIRM" ? "confirm" : "confiscate", caller: { role, legacyUserId: role === "renter" ? binding.legacyRenterId : role === "owner" ? binding.legacyOwnerId : "" } };
+  const caller:LegacyCommand["caller"]={ role, legacyUserId: role === "renter" ? binding.legacyRenterId : role === "owner" ? binding.legacyOwnerId : "" };
+  if(command==="SUPPORT_CANCEL" && (role!=="admin" || typeof v.amounts.refundNet!=="string" || typeof v.amounts.ownerNet!=="string"))return {state:"UNKNOWN",reason:"CANCELLATION_AMOUNT_UNAVAILABLE"};
+  const cmd: LegacyCommand = command === "SUPPORT_CANCEL"
+    ? {kind:"support_cancel",caller,refundCents:legacyPlanYuanToCents(v.amounts.refundNet!),ownerCents:legacyPlanYuanToCents(v.amounts.ownerNet!)}
+    : { kind: command === "CONFIRM" ? "confirm" : "confiscate", caller };
   const plan = planLegacyContinuation(facts.evidence,cmd);
   if (!plan.ok || plan.fingerprint !== v.planFingerprint || canonicalize(plan.commissionRevisions) !== canonicalize(v.commissionRevisions) || canonicalize(deriveLegacyFacts(facts,plan,cmd,before.id,v.id)) !== canonicalize(readSealedLegacyFacts(result))) throw conflict("FINAL_COMMAND_EVIDENCE_MISMATCH");
   let amount: string | null = null, beneficiary: string | null = null, sourceRecordDigest = result.factsDigest;
@@ -76,5 +80,5 @@ export async function readLegacyDutyBasis(client: PoolClient, orderId: string, d
     if (duty.maturityAt !== legacyCommissionMaturity({kind:"COMPLETED_AT",at:v.createdAt,evidenceDigest:result.factsDigest},v.createdAt).maturityAt) return { state: "UNKNOWN", reason: "COMMISSION_MATURITY_MISMATCH" };
   } else { amount = legacyPlanYuanToCents(plan.amounts[duty.kind === "RENTER_REFUND" ? "refundNet" : duty.kind === "OWNER_CREDIT" ? "ownerNet" : "depositCompensation"]!); beneficiary = duty.kind === "RENTER_REFUND" ? binding.renterUserId : binding.ownerUserId; if (duty.sourceRecordId !== v.id) return {state:"UNKNOWN",reason:"DUTY_COMMAND_MISMATCH"}; }
   if (amount !== duty.amountCents || beneficiary !== duty.counterpartyUserId) return { state: "UNKNOWN", reason: "FINAL_AMOUNT_OR_BENEFICIARY_MISMATCH" };
-  return { ...common,sourceRecordEntity:duty.kind==="COMMISSION"?"la_distribution_order":"legacy_continuation_version",sourceRecordDigest,basisFactsDigest:result.factsDigest,effectiveFactsDigest:effective.factsDigest,continuationVersionId:v.id,admissionId:null,basisEvidenceId:result.id,sourceTimeKind:command === "CONFIRM" ? "CONFIRMED_AT" : "DISPOSED_AT",sourceTime:v.createdAt };
+  return { ...common,sourceRecordEntity:duty.kind==="COMMISSION"?"la_distribution_order":"legacy_continuation_version",sourceRecordDigest,basisFactsDigest:result.factsDigest,effectiveFactsDigest:effective.factsDigest,continuationVersionId:v.id,admissionId:null,basisEvidenceId:result.id,sourceTimeKind:command === "CONFIRM" ? "CONFIRMED_AT" : command === "SUPPORT_CANCEL" ? "SUPPORT_CANCELLED_AT" : "DISPOSED_AT",sourceTime:v.createdAt };
 }

@@ -14,6 +14,38 @@ const renter = { role: "renter" as const, legacyUserId: "11" };
 const owner = { role: "owner" as const, legacyUserId: "22" };
 const plan = (patch: Partial<LegacyContinuationSource>, command: Parameters<typeof planLegacyContinuation>[1]) => planLegacyContinuation(admitLegacyEvidence(source(patch)), command);
 
+test("旧单客服特殊取消按原实付分配，不改变旧单价格且不计佣金",()=>{
+  const actor={role:"admin" as const,legacyUserId:""};
+  const command={kind:"support_cancel" as const,caller:actor,refundCents:"5000",ownerCents:"3000"};
+  for(const status of ["3","8","9"]){
+    const input=source({orderStatus:status}),facts=initialLegacyFacts(input),result=planLegacyContinuation(facts.evidence,command);
+    if(!result.ok)assert.fail(result.code);
+    assert.deepEqual([result.nextStatus,result.amounts.refundNet,result.amounts.ownerNet,result.amounts.platformContribution,result.amounts.commissionPool],
+      ["5","50.00","30.00","20.00","0.00"]);
+    assert.deepEqual(result.commissionRevisions,[]);
+    const after=deriveLegacyFacts(facts,result,command,"source","cancel");
+    assert.equal(after.evidence.source.orderStatus,"5");assert.deepEqual(after.evidence.source.orderPrices,input.orderPrices);
+    assert.deepEqual(after.evidence.source.accountPrices,input.accountPrices);assert.equal(facts.evidence.source.orderStatus,status);
+  }
+  const isolated=plan({baseBot:null},command);assert.equal(isolated.ok,true,"取消不依赖旧单物资价格或比例齐全");
+  assert.throws(()=>initialLegacyFacts(source({orderStatus:"5"})),/STATUS_INVALID/);
+  const held=plan({isSettle:"2",detainMoney:"5.00"},command);assert.equal(held.ok&&held.isSettle,"0");
+  for(const invalid of [
+    plan({}, {...command,refundCents:"8000",ownerCents:"3000"}),
+    plan({}, {...command,refundCents:"1.5"}),
+    plan({}, {...command,caller:renter}),
+    plan({orderStatus:"4"},command),
+    plan({isSettle:"3"},command),
+    plan({paidPay:[]},command),
+    plan({paidPay:[{id:"9",orderId:"8",payOrderSn:"P7",payMoney:"100.00"}]},command),
+    plan({paidPay:[{id:"bad",payOrderSn:"P7",payMoney:"100.00"}]},command),
+    plan({paidPay:[{id:"9",payOrderSn:"P7!",payMoney:"100.00"}]},command),
+    plan({commissions:[{id:"1",beneficiaryId:"44",ratio:"20",level:"2",status:"9",storedEarnings:"1.00"}]},command),
+    plan({commissions:[{id:"1",beneficiaryId:"44",ratio:"20",level:"2",status:"1",storedEarnings:"1.00"},{id:"1",beneficiaryId:"44",ratio:"20",level:"2",status:"1",storedEarnings:"1.00"}]},command),
+    plan({commissions:[{id:"1",beneficiaryId:"44",ratio:"20",level:"2",status:"2",storedEarnings:"1.00"}]},command),
+  ])assert.equal(invalid.ok,false);
+});
+
 test("hand golden matches the isolated Java transcription for ordinary, advance, and payout", () => {
   const ordinary = plan({}, { kind: "propose", caller: renter, quantities: qty("1.00") });
   assert.equal(ordinary.ok, true);

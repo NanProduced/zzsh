@@ -2632,6 +2632,19 @@ test("a recorded provider success is visible without claiming bank arrival",asyn
  finally{await probe.dispose();}
 }));
 
+test("a refund requiring review never displays a conflicting success",async()=>withDom(async window=>{
+ for(const source of ["JOINPAY_FORMAL","LOCAL_CONTROLLED"]){
+  for(const [outcome,requiresReview] of [["FULLY_CONSUMED",true],["CONFLICT",false]]){
+  const read=refundRead("order_A",{status:"AVAILABLE",outcome,
+   responsibility:{state:"POSTED",postingId:"posting_1",originalCents:"28000",allocatedCents:outcome==="CONFLICT"?null:"28000",consumedCents:outcome==="CONFLICT"?null:"28000",releasedCents:outcome==="CONFLICT"?null:"0",remainingCents:outcome==="CONFLICT"?null:"0",totalsComplete:outcome!=="CONFLICT",dueAt:null,dueState:"DUE"},
+   intents:[refundIntent({source,requiresReview,savedChannelEvidence:{...refundIntent().savedChannelEvidence,evidenceLevel:"PROVIDER_RESPONSE"}})],returnedIntentCount:1});
+  const probe=await detailProbe(window,{...paidOrder,status:"COMPLETED"},"renter",postedSettlement,read);
+  try{const section=probe.host.querySelector('.order-refund-block');assert.match(section.textContent,/退款(?:记录)?需要核对/);assert.match(section.textContent,/退款状态待核对/);assert.doesNotMatch(section.textContent,/退款成功|模拟退款已记录/);}
+  finally{await probe.dispose();}
+  }
+ }
+}));
+
 test("refund due time never promises processing when no application is present", async () => {
   await withDom(async window => {
     for (const [dueState,outcome,expected] of [["NOT_DUE","NOT_DUE","未到期"],["DUE","NO_INTENT","已到期"],["UNKNOWN","UNKNOWN","状态未记录"]]) {

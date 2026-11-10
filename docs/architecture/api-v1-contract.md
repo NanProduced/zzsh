@@ -119,12 +119,14 @@ ID 以 opaque 字符串传输，允许 `A-Za-z0-9` 开头，后续使用 `A-Za-z
 
 核心前缀 `/api/v1/supply`，用户Cookie BFF为 `/api/bff/user/supply`（只适配传输，不重算业务）。管理审核核心前缀 `/api/v1/admin/supply/listing-reviews`，Admin BFF为 `/api/bff/admin/supply/listing-reviews`。
 
+本人账号详情的旧观察版本可返回 `canPrepareLegacyCancelledDraft`：true 只表示已具备创建待核草稿的入口，创建和发布仍各自重新校验；false 或字段缺失均不表示可以上架。
+
 | 核心接口 | 输入/结果 |
 |---|---|
 | GET /games/{gameId}/publishing-options | 生效release/generation、租期选项、允许的安全箱/计价选项代码、封存协议正文及digest；不含收价和抽成参数 |
 | POST /accounts | `{gameId}`；创建本人账号档案，不同时创建草稿。随后GET读取版本，再以当前expectedRevision调用POST /accounts/{id}/drafts |
 | GET /me/accounts、GET /accounts/{id} | 本人供给、草稿/当前版本、OwnerQuote、对应版本的协议正文、审核原因与blockers；详情可用versionId读取同档案历史，历史不可作为当前可租版本。号主读取的`declaration.mediaBindings`在既有`assetId/position/purpose/byteHash`上增加只读`reviewState`（`PENDING\|APPROVED\|REJECTED\|QUARANTINED\|UNAVAILABLE`）、`publicDisplayEligible`与`publiclyReadable`。前者只表示素材当前具备 ACCOUNT_DISPLAY+技术READY+审核状态PENDING或APPROVED+PUBLIC_DISPLAY+公开衍生键；`publiclyReadable`表示`GET /listings/{accountId}/media/{assetId}`此刻会放行：须账号当前可公开（未暂停/未受限/规则有效/当前版本具有有效发布事实且媒体就绪）且该图绑定在当前公开版本 payload 中。私有凭证、草稿独有图、撤权或暂停后均为 false。不由账号版本 APPROVED 推断。写入草稿仍只接受`assetId/position`，多带只读字段返回400。裁剪回`DraftInput`时只保留`assetId/position`。缺失或不可解析的绑定返回`UNAVAILABLE`且不让整份详情500。 |
-| POST /accounts/{id}/drafts | expectedRevision；首次草稿或从已处理版本复制新草稿。审核中先撤回，切换为草稿立即阻止旧版接单，不改写owner_paused |
+| POST /accounts/{id}/drafts | expectedRevision；首次草稿或从已处理版本复制新草稿。审核中先撤回，切换为草稿立即阻止旧版接单，不改写owner_paused。迁移时正在出租的旧账号仅在本平台客服特殊取消后可由号主创建草稿，服务端核对旧账号来源、取消事实、账号占用和版本；创建后须由号主核实资料并重新走发布规则，不自动上架。原已下架旧账号不因此开放。 |
 | PUT /accounts/{id}/draft | expectedRevision及title/description/attributes/termOptionCode/pricingOptionCode/inventory/skins/entitlements/mediaBindings；库存为整数基础单位文本或null，媒体只提交assetId/position，不接收价格/号主ID/digest/byteHash |
 | POST /accounts/{id}/quote | expectedRevision；从持久化草稿、当前封存规则、目录和媒体记录生成并保存唯一规范化payload/hash；未知数量、条件、有效期不补零 |
 | POST /accounts/{id}/accept-rules、/submit | expectedRevision、versionId、releaseId、contentHash；接受和提交必须匹配已保存报价及当前release |
@@ -329,7 +331,7 @@ ORIGINAL 列表通过 `user_registration_fact` 读取最新成功迁移审计的
 
 - 管理端渠道证据的 `GET /api/v1/admin/finance/channel-evidence/originals/{merchantId}` 和 `withdrawals/{merchantId}/{intentId}` 可选 `subjectUserId` 限定用户，仍须财务读取、用户目录读取及该商户授权。收款与退款按原生订单租客或号主匹配，并要求订单读取及游戏范围；提现按申请人的用户 ID 匹配。过滤在候选数量限制之前执行，原单检索以 `subjectRole` 标明租客、号主或提现人；直接提现凭证也必须属于该用户。上述 GET 只读取本站已保存的证据，不查询渠道；旧平台来源不伪装成新平台渠道证据。
 - 用户 `POST /api/v1/orders/{orderId}/channel-payment-requests/query`（Nest BFF `/api/bff/user/orders/...`，Web `/api/orders/...`）正文为空对象。仅本人原单，按订单定位独立 payreq；`order-payment-request.v1` 回执含 `request:{id,orderId,state}` 与 `query.kind`，不首次派发、换商户号或返回支付参数，沿用查询间隔、预算和租约。此 POST 可在可信 E4 后调用正式付款接纳，产生本地账务、分佣、订单及群效果；普通 GET 仍仅读本地。提交未知返回 `202`、`request.state=UNKNOWN`、`query.kind=UNKNOWN_COMMIT` 并保留实际 payreq ID，按原请求恢复。Web BFF 用同一捕获 Cookie 核对期望主体；客户端核对两种 ID 后再读本地状态，不能据渠道查询文字判定到账。
-- 管理 `GET/POST /api/v1/admin/orders/{orderId}/refunds`（BFF `/api/bff/admin/orders/{orderId}/refunds`）均需现有 `order.settlement.write`、管理员事务复检、游戏范围和 `readOrderTeamAccess` 的 `READY/canRead` 订单对象授权；`finance.read` 或同游戏权限均不单独授权退款。POST 要求 `Idempotency-Key` 与 `{amountCents:string,reason?:string,postingId?:string}`：金额为 CNY 正整数字符串分，只从可信 `JOINPAY/APPLIED` 原款和已到期冻结责任分配，歧义时须指定 postingId。返回 `admin-native-refund.v1` 的意图/原退款号、金额、状态、预算及责任，创建与审计同事务；GET 返回 `admin-native-refunds.v1` 的本地意图、冻结/已分配/剩余责任及最近观察。管理订单页已消费普通退款及独立异常/未开租入口；接口只建本地意图，不直接提交渠道。
+- 管理 `GET/POST /api/v1/admin/orders/{orderId}/refunds`（BFF `/api/bff/admin/orders/{orderId}/refunds`）均需现有 `order.settlement.write`、管理员事务复检、游戏范围和 `readOrderTeamAccess` 的 `READY/canRead` 订单对象授权；`finance.read` 或同游戏权限均不单独授权退款。POST 要求 `Idempotency-Key` 与 `{amountCents:string,reason?:string,postingId?:string}`：金额为 CNY 正整数字符串分，只从可信 `JOINPAY/APPLIED` 原款和已到期冻结责任分配，歧义时须指定 postingId。返回 `admin-native-refund.v1` 的意图/原退款号、金额、状态、预算及责任，创建与审计同事务；GET 返回 `admin-native-refunds.v1` 的本地意图、冻结/已分配/剩余责任及最近观察。接口只建本地意图，不直接提交渠道；订单取消及其退款按对应阶段的取消合同处理。
 - 关闭新退款或当前 initialProfile 缺失时，既有 store 仍先处理安全的原键重放，新意图继续拒绝。首次创建的 `channel.result=NOT_SUBMITTED` 仅描述创建时；重放为 `UNKNOWN`，当前状态另由 GET 读取，银行到账保持 `UNKNOWN`。COMMIT ACK 未知返回 `503/EVIDENCE_UNAVAILABLE`，保留同键同体恢复，不换键重建。
 - 用户 `GET /api/v1/users/me/channel-withdrawals/options`（Nest BFF `/api/bff/user/channel-withdrawals/options`）的 `withdrawal-request-context.v1` 兼容增加 `identity` 和 `quota`；后者含 `used/maxIntents/remaining/windowStart/windowEnd`，缺证据为 null。`canQuote/reasonCodes` 明示身份、成年、政策及 `WITHDRAWAL_QUOTA_UNKNOWN/EXHAUSTED` 等原因；报价/创建仍重核身份、次数、原目标、政策和余额，不补造证明或为消除 503 开启 PAYOUT。旧 CONTROLLED、SYNTHETIC_PROTOCOL、LOCAL_CONTROLLED、本地接纳、渠道成功与银行到账分别表达；源码接入不等于部署、PG 或真实渠道验收。
 

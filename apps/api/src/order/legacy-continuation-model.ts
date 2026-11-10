@@ -55,7 +55,7 @@ export type LegacyContinuationView = {
   capabilities: string[]; commandFingerprints: Record<string, string>; reasons: string[]; duties: Array<{ id: string; kind: LegacyDutyKind; amountCents: string; currency: "CNY"; status: LegacyDutyStatus; maturityAt: string | null; sourceStatus: string | null; revision: string; settledBy: string | null; financeVerified:boolean }>;
   channelState: "UNKNOWN";
 };
-const LEGACY_VISIBLE_REASONS = new Set(["DEPOSIT_SHORT", "RETURN_NEGATIVE", "EVIDENCE_ISOLATED", "MISSING_STORED_SETTLEMENT", "FINANCE_FACT_UNAVAILABLE", "FINANCE_FACT_UNKNOWN", "DEPOSIT_ALREADY_SETTLED", "CONTINUATION_REVISION_CONFLICT", "PLAN_FINGERPRINT_MISMATCH", "DUTY_REVISION_CONFLICT", "STATUS_INVALID", "QUANTITY_INVALID", "PRECISION_UNSUPPORTED", "CONFIRM_POOL_NEGATIVE", "OWNER_NET_NEGATIVE", "WALLET_CREDIT_HISTORY_UNPROVEN", "WALLET_CREDIT_BASIS_UNAVAILABLE"]);
+const LEGACY_VISIBLE_REASONS = new Set(["DEPOSIT_SHORT", "RETURN_NEGATIVE", "EVIDENCE_ISOLATED", "MISSING_STORED_SETTLEMENT", "FINANCE_FACT_UNAVAILABLE", "FINANCE_FACT_UNKNOWN", "DEPOSIT_ALREADY_SETTLED", "CONTINUATION_REVISION_CONFLICT", "PLAN_FINGERPRINT_MISMATCH", "DUTY_REVISION_CONFLICT", "STATUS_INVALID", "QUANTITY_INVALID", "PRECISION_UNSUPPORTED", "CONFIRM_POOL_NEGATIVE", "OWNER_NET_NEGATIVE", "WALLET_CREDIT_HISTORY_UNPROVEN", "WALLET_CREDIT_BASIS_UNAVAILABLE", "PAYMENT_BASIS_UNAVAILABLE", "CANCEL_AMOUNT_INVALID", "COMMISSION_ALREADY_PAID", "COMMISSION_SOURCE_UNAVAILABLE", "REFUND_HISTORY_REQUIRES_OFFLINE"]);
 export function visibleLegacyReason(value: unknown): string | undefined { return typeof value === "string" && LEGACY_VISIBLE_REASONS.has(value) ? value : undefined; }
 
 /** Calc emits exact decimals of variable scale; the persisted contract is integer cents. */
@@ -82,7 +82,8 @@ export function assertLegacyEffectiveFacts(facts: LegacyEffectiveFacts): LegacyE
   if (!facts || facts.schemaVersion !== 1 || !facts.evidence || !facts.amounts || Array.isArray(facts.amounts)) throw conflict("EVIDENCE_SCHEMA");
   const checked = admitLegacyEvidence(facts.evidence.source);
   if (canonicalize(checked) !== canonicalize(facts.evidence)) throw conflict("EVIDENCE_DIGEST_MISMATCH");
-  if (!["3", "8", "9", "4"].includes(checked.source.orderStatus) || !["0", "2", "3"].includes(checked.source.isSettle)) throw conflict("STATUS_INVALID");
+  if (!["3", "8", "9", "4", "5"].includes(checked.source.orderStatus) || !["0", "2", "3"].includes(checked.source.isSettle)) throw conflict("STATUS_INVALID");
+  if (checked.source.orderStatus === "5" && (!facts.derivedFromEvidenceId || !facts.derivedFromCommandVersionId)) throw conflict("STATUS_INVALID");
   for (const value of Object.values(facts.amounts)) if (value !== null) legacyPlanYuanToCents(value);
   if (facts.commissionEvidence) {
     if (!Array.isArray(facts.commissionEvidence) || new Set(facts.commissionEvidence.map(p => p.sourceRecordId)).size !== facts.commissionEvidence.length) throw conflict("COMMISSION_SOURCE_EVIDENCE_INVALID");
@@ -163,6 +164,7 @@ export function projectLegacyCommandReceipt(binding: LegacyOrderBinding, actor: 
 }
 export function legacyCapabilities(source: LegacyContinuationSource, role: "renter" | "owner" | "admin" | "other", canOperate: boolean, disposition: LegacyFinanceDisposition): string[] {
   if (role === "other") return [];
+  if (source.orderStatus === "5") return [];
   if (role === "admin") {
     if (!canOperate || !["NONE", "FINALIZED_ZERO"].includes(disposition)) return [];
     const deposit = source.isSettle === "0" ? ["hold"] : source.isSettle === "2" ? ["release", "confiscate"] : [];
@@ -207,6 +209,11 @@ export function projectLegacyContinuation(binding: LegacyOrderBinding, actor: Le
     }
     commandFingerprints[kind] = plan.fingerprint; return true;
   });
+  if(role==="admin" && canOperate && canSettle && binding.sourcePayStatus===1 && binding.paidCents!==null
+    && !duties.some(d=>(["OWNER_CREDIT","RENTER_REFUND"].includes(d.kind)&&d.status!=="VOID") || d.kind==="COMMISSION"&&d.status==="SETTLED"&&BigInt(d.amountCents)>0n)) {
+    const candidate=planLegacyContinuation(facts.evidence,{kind:"support_cancel",caller:{role:"admin",legacyUserId:""},refundCents:"0",ownerCents:"0"});
+    if(candidate.ok && source.payMoney!==null && legacyPlanYuanToCents(source.payMoney)===binding.paidCents)capabilities.push("support_cancel");
+  }
   const settlementKind = ["8", "9", "4"].includes(source.orderStatus) ? source.isAdvanceSet === "1" ? "EARLY" : source.isAdvanceSet === "0" ? "NORMAL" : null : null;
   return { ...base, availability: facts.evidence.admission === "PARAMETER_COMPLETE" ? "KNOWN" : "ISOLATED", stage: source.orderStatus, isSettle: source.isSettle, amounts, quantities: structuredClone(source.quantities), capabilities, commandFingerprints, reasons,
     settlementKind, ...(role === "renter" && settlementKind === "EARLY" ? { earlyFee: legacyEarlyFee(facts.amounts) } : {}), ...(role === "renter" || role === "admin" ? { refundDueAt: head?.refundDueAt ?? null } : {}), ...(role === "admin" ? { confirmationAmounts } : {}) };

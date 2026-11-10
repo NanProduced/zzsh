@@ -420,10 +420,10 @@ function refundMoney(cents: string | null): string {
   return `¥${(value / 100n).toLocaleString("zh-CN")}.${(value % 100n).toString().padStart(2, "0")}`;
 }
 
-function RefundIntentCard({ intent }: { intent: PersonalRefundIntent }) {
+function RefundIntentCard({ intent, conflict }: { intent: PersonalRefundIntent; conflict: boolean }) {
   const channelSucceeded = intent.source === "JOINPAY_FORMAL" && intent.state === "SUCCEEDED" && intent.budgetDisposition === "CONSUMED"
     && intent.savedChannelEvidence?.terminal === "SUCCEEDED" && intent.savedChannelEvidence.evidenceLevel === "PROVIDER_RESPONSE";
-  const stateLabel = intent.source === "LOCAL_CONTROLLED" && intent.state === "SUCCEEDED" ? "模拟退款已记录" : channelSucceeded ? "退款成功" : refundIntentStateLabel[intent.state];
+  const stateLabel = intent.requiresReview || conflict ? "退款状态待核对" : intent.source === "LOCAL_CONTROLLED" && intent.state === "SUCCEEDED" && intent.budgetDisposition === "CONSUMED" ? "模拟退款已记录" : channelSucceeded ? "退款成功" : refundIntentStateLabel[intent.state];
   return <li className="order-refund-intent">
     <div className="order-refund-intent-head"><strong>{intent.refundOrderNo ?? "退款申请"}</strong><span className="order-refund-state">{stateLabel}</span></div>
     <dl className="order-facts order-refund-intent-facts">
@@ -431,7 +431,7 @@ function RefundIntentCard({ intent }: { intent: PersonalRefundIntent }) {
       {intent.createdAt ? <div><dt>申请时间</dt><dd>{timeText(intent.createdAt, { timeZoneName: false })}</dd></div> : null}
     </dl>
     {intent.source === "LOCAL_CONTROLLED" ? <p className="order-muted">测试记录，不代表真实退款。</p> : null}
-    {intent.requiresReview ? <p className="order-muted">这笔退款需要核对，请联系客服。</p> : null}
+    {intent.requiresReview || conflict ? <p className="order-muted">这笔退款需要核对，请联系客服。</p> : null}
   </li>;
 }
 
@@ -518,8 +518,9 @@ function OrderRefundSection({ order }: { order: Order }) {
   if (read.status === "NOT_APPLICABLE" && !read.prestartRefund && !read.cancellationRefund) return null;
   const responsibility = read.responsibility;
   const prestart = read.prestartRefund ?? read.cancellationRefund;
+  const needsReview = read.intents.some(intent => intent.requiresReview);
   const attentionRequired = prestart ? ["UNKNOWN", "FAILED"].includes(prestart.state)
-    : ["UNKNOWN", "REVIEW_REQUIRED", "TRUNCATED", "CONFLICT"].includes(read.outcome);
+    : needsReview || ["UNKNOWN", "REVIEW_REQUIRED", "TRUNCATED", "CONFLICT"].includes(read.outcome);
   const incomplete = read.intentsTruncated || !read.coverage.intentsComplete || responsibility.state === "POSTED" && !responsibility.totalsComplete;
   const simulated = read.outcome === "FULLY_CONSUMED" && !incomplete && read.intents.length > 0
     && read.intents.every(intent => intent.source === "LOCAL_CONTROLLED" && intent.state === "SUCCEEDED" && intent.budgetDisposition === "CONSUMED");
@@ -532,7 +533,7 @@ function OrderRefundSection({ order }: { order: Order }) {
     FAILED: { label: "退款未完成", note: "请联系客服处理。" },
     UNKNOWN: { label: "退款状态待核对", note: "请稍后查看或联系客服。" },
   }[prestart.state] : null;
-  const outcome = prestartCopy ?? (simulated ? { label: "模拟退款已记录", note: "测试记录，不代表实际退款或到账。" }
+  const outcome = prestartCopy ?? (needsReview ? refundOutcomeCopy.REVIEW_REQUIRED : simulated ? { label: "模拟退款已记录", note: "测试记录，不代表实际退款或到账。" }
     : channelSucceeded ? { label: "退款成功", note: "渠道已记录退款成功，到账时间以收款记录为准。" } : refundOutcomeCopy[read.outcome]);
   return <section className="order-detail-section order-refund-block" id="order-refund-section" aria-label="退款进度" data-outcome={prestart?.state ?? read.outcome}>
     <div className="order-refund-heading"><h2 className="order-section-title">退款进度</h2>{refresh}</div>
@@ -546,7 +547,7 @@ function OrderRefundSection({ order }: { order: Order }) {
           {responsibility.dueAt ? <div><dt>退款到期时间</dt><dd>{timeText(responsibility.dueAt, { timeZoneName: false })}{responsibility.dueState === "DUE" ? "（已到期）" : responsibility.dueState === "NOT_DUE" ? "（未到期）" : "（状态未记录）"}</dd></div> : null}
         </dl> : null}
         {responsibility.state === "POSTED" && responsibility.dueAt ? <p className="order-muted">到期不代表退款已处理或到账。</p> : null}
-        {read.intents.length ? <section aria-label="退款申请记录"><div className="order-refund-intents-heading"><h3>退款申请</h3><span>{read.intentsTruncated || !read.coverage.intentsComplete ? "部分记录未记录" : `${read.returnedIntentCount} 笔`}</span></div><ul className="order-refund-intents">{read.intents.map(intent => <RefundIntentCard key={intent.intentId} intent={intent} />)}</ul></section> : null}
+        {read.intents.length ? <section aria-label="退款申请记录"><div className="order-refund-intents-heading"><h3>退款申请</h3><span>{read.intentsTruncated || !read.coverage.intentsComplete ? "部分记录未记录" : `${read.returnedIntentCount} 笔`}</span></div><ul className="order-refund-intents">{read.intents.map(intent => <RefundIntentCard key={intent.intentId} intent={intent} conflict={read.outcome === "CONFLICT"} />)}</ul></section> : null}
         <p className="order-muted">到账情况请以收款记录为准。</p>
       </div>
     </details>

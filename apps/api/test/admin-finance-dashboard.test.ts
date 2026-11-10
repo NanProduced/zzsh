@@ -107,3 +107,34 @@ test('channel evidence unavailable stays unavailable and never becomes zero', as
   assert.deepEqual(result.items, []);
   assert.ok(f.queries.every(item => !item.sql.includes('dashboard verified channel facts')));
 });
+
+test('channel totals include verified new refunds for old orders within merchant and game scope',async()=>{
+ const queries:{sql:string;values:unknown[]}[]=[];
+ const client={query:async(sql:string,values:unknown[]=[])=>{queries.push({sql,values});
+  if(sql.includes(' AS today'))return {rows:[{today:'2026-11-06',as_of:'2026-11-06T04:00:00.000000Z'}]};
+  if(sql.includes(' AS present'))return {rows:[{present:4,ready:true}]};
+  if(sql.includes('bool_and'))return {rows:[{ready:true}]};
+  if(sql.includes('dashboard verified channel facts'))return {rows:[{kind:'REFUND',count:'1',cents:'5000'}]};
+  throw Error('Unexpected query');
+ }} as unknown as PoolClient;
+ const result=await readFinanceDashboardChannels(client,parseFinanceDashboardQuery(new URLSearchParams('source=legacy')),viewer,['merchant1']);
+ assert.deepEqual(result.items,[{kind:'REFUND',count:'1',cents:'5000'}]);
+ const statement=queries.find(row=>row.sql.includes('dashboard verified channel facts'))!;
+ assert.match(statement.sql,/legacy_refund_terminal_evidence/);assert.match(statement.sql,/obs\.evidence_level='PROVIDER_RESPONSE'/);
+ assert.match(statement.sql,/NOT i\.requires_review/);assert.match(statement.sql,/facts_canonical::jsonb->>'amountCents'=i\.amount_cents::text/);
+  assert.match(statement.sql,/i\.state='SUCCEEDED' AND NOT i\.requires_review AND e\.terminal='SUCCEEDED'/);
+  assert.match(statement.sql,/i\.state='SUCCEEDED' AND NOT i\.requires_review AND e\.terminal='PAID'/);
+ assert.match(statement.sql,/WHERE false AND p\.source='JOINPAY'/);assert.match(statement.sql,/sgame\."game_id" = l\.game_id/);
+ assert.deepEqual(statement.values.at(-1),['merchant1']);
+});
+
+test('channel totals do not report partial data as complete when legacy refund tables cannot be read',async()=>{
+ const client={query:async(sql:string)=>{
+  if(sql.includes(' AS today'))return {rows:[{today:'2026-11-06',as_of:'2026-11-06T04:00:00.000000Z'}]};
+  if(sql.includes(' AS present'))return {rows:[{present:4,ready:false}]};
+  if(sql.includes('bool_and'))return {rows:[{ready:true}]};
+  throw Error('Unsafe channel query');
+ }} as unknown as PoolClient;
+ const result=await readFinanceDashboardChannels(client,parseFinanceDashboardQuery(new URLSearchParams()),viewer,['merchant1']);
+ assert.equal(result.state,'UNAVAILABLE');assert.deepEqual(result.items,[]);
+});

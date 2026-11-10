@@ -14,9 +14,13 @@ const {applyRuntimePrivileges}=require('../dist/src/database/business-migrations
 const sha=s=>createHash('sha256').update(s).digest('hex'),empty=sha(''),b=fixture.legacyBinding;
 const actor={realm:'admin',userId:'synthetic-completion-staff',sessionId:'synthetic-completion-session',requestId:'synthetic-completion-request'};
 const concurrency=process.env.LEGACY_COMPLETION_SYNTH_CONCURRENCY==='1';
-const database=concurrency?'zzsh_legacy_retry_concurrency':'zzsh_test_order_settlement_closure';
-const marker=concurrency?'zzsh:legacy-retry-concurrency:v1':'zzsh:synthetic-settlement-test:v1';
-const pool=new Pool({host:'127.0.0.1',port:5432,database,user:'postgres',max:3,statement_timeout:15000});
+const cancellationRace=process.env.LEGACY_COMPLETION_SYNTH_CANCEL_RACE==='1';
+const cancellation=process.env.LEGACY_COMPLETION_SYNTH_CANCELLATION==='1'||cancellationRace;
+assert(!(concurrency&&cancellation));
+const database=cancellationRace?'zzsh_synth_cancel_race_r3':cancellation?'zzsh_synth_prod_refund_r3':concurrency?'zzsh_legacy_retry_concurrency':'zzsh_test_order_settlement_closure';
+const marker=cancellationRace?'zzsh:synthetic:legacy-cancel-race:v1':cancellation?'zzsh:synthetic:production-refund-v1':concurrency?'zzsh:legacy-retry-concurrency:v1':'zzsh:synthetic-settlement-test:v1';
+const runtimeRole=cancellationRace?'zzsh_synth_runtime':'zzsh_completion_synth_probe';
+const pool=new Pool({host:'127.0.0.1',port:cancellation?55439:5432,database,user:'postgres',max:3,statement_timeout:15000});
 (async()=>{
  const c=await pool.connect();let workerHeld=false;try{
   const identity=(await c.query(`SELECT current_database() AS db,current_user AS role,d.oid::text AS oid,
@@ -37,7 +41,7 @@ const pool=new Pool({host:'127.0.0.1',port:5432,database,user:'postgres',max:3,s
   await c.query(`INSERT INTO zzsh_iam.admin_security(admin_user_id,status,is_boss,first_activated_at) VALUES($1,'ACTIVE',true,now())`,[actor.userId]);
   await c.query(`INSERT INTO zzsh_auth_admin.session(id,"userId",token,"expiresAt","createdAt","updatedAt") VALUES($1,$2,'synthetic-token',clock_timestamp()+interval '1 hour',now(),now())`,[actor.sessionId,actor.userId]);
   await c.query('INSERT INTO zzsh_auth_admin."user"(id,name,email,"twoFactorEnabled","createdAt","updatedAt") VALUES($1,$1,$2,true,now(),now())',['synthetic-denied','synthetic-denied@example.invalid']);
-  await c.query(`INSERT INTO zzsh_iam.admin_security(admin_user_id,status,is_boss,first_activated_at) VALUES('synthetic-denied','ACTIVE',false,now())`);
+  await c.query(`INSERT INTO zzsh_iam.admin_security(admin_user_id,status,is_boss,first_activated_at,game_scope_mode) VALUES('synthetic-denied','ACTIVE',false,now(),'SELECTED_GAMES')`);
   await c.query(`INSERT INTO zzsh_auth_admin.session(id,"userId",token,"expiresAt","createdAt","updatedAt") VALUES('synthetic-denied-session','synthetic-denied','synthetic-denied-token',clock_timestamp()+interval '1 hour',now(),now())`);
   await c.query('INSERT INTO zzsh_auth_admin."user"(id,name,email,"twoFactorEnabled","createdAt","updatedAt") VALUES($1,$1,$2,true,now(),now())',['synthetic-agent','synthetic-agent@example.invalid']);
   await c.query(`INSERT INTO zzsh_iam.admin_security(admin_user_id,status,is_boss,first_activated_at) VALUES('synthetic-agent','ACTIVE',false,now())`);
@@ -74,23 +78,312 @@ const pool=new Pool({host:'127.0.0.1',port:5432,database,user:'postgres',max:3,s
   await c.query(`INSERT INTO zzsh_order.personal_finance_observation_coverage(id,user_id,source_system,legacy_user_id,source_kind,source_entity,source_cutoff,
    input_sha256,identity_digest,source_count,imported_count,isolated_count,source_set_digest,imported_set_digest,isolated_set_digest,body_digest,source_canonical)
    VALUES('completion-renter-history',$1,'legacy_mysql_restore',$2,'HISTORICAL_EARNINGS_LOG','la_log_earnings','2026-11-01T00:00:00Z',$3,$3,0,0,0,$4,$4,$4,$3,'{}')`,[b.renterUserId,b.legacyRenterId,b.renterSourceDigest,empty]);
+  if(cancellation){
+   await c.query(`UPDATE zzsh_order.legacy_order_read_snapshot SET source_paid_at=transaction_timestamp()-interval '1 second' WHERE id=$1`,[b.id]);
+   await c.query(`UPDATE zzsh_supply.game SET code='delta' WHERE id=$1`,[b.gameId]);
+   await c.query(`INSERT INTO zzsh_supply.game_service_operation(id,game_id,service_code,enabled) VALUES('synthetic-rental-service',$1,'ACCOUNT_RENTAL',true)`,[b.gameId]);
+   await c.query(`INSERT INTO zzsh_supply.listing_version(id,account_id,sequence,origin,review_state,title,description,attributes,term_option_code,pricing_option_code,schema_version)
+     VALUES('synthetic-observation',$1,1,'LEGACY_OBSERVATION','IMPORTED_UNVERIFIED','旧资料',NULL,'{}'::jsonb,'','',1)`,[b.accountId]);
+   await c.query(`INSERT INTO zzsh_supply.legacy_supply_map(source_system,source_entity,legacy_id,account_id,version_id,evidence_ref,source_digest)
+     VALUES('legacy_mysql_restore','la_rental_accounts',$1,$2,'synthetic-observation','synthetic',$3)`,[b.legacyAccountId,b.accountId,b.sourceDigest]);
+   await c.query(`INSERT INTO zzsh_supply.legacy_listing_read_snapshot(account_id,observation_version_id,source_system,source_entity,legacy_id,source_digest,source_status,source_updated_at,evidence_ref,snapshot,created_by_admin_id)
+     VALUES($1,'synthetic-observation','legacy_mysql_restore','la_rental_accounts',$2,$3,5,now(),'synthetic','{}'::jsonb,$4)`,[b.accountId,b.legacyAccountId,b.sourceDigest,actor.userId]);
+   await c.query(`UPDATE zzsh_supply.rental_account SET current_version_id='synthetic-observation',legacy_hold='UNRESOLVED' WHERE id=$1`,[b.accountId]);
+  }
   await c.query("SET LOCAL session_replication_role='origin'");
-  await c.query(fs.readFileSync('migrations/business/0168_legacy_payment_order_number_guard.sql','utf8'));
-  await c.query(fs.readFileSync('migrations/business/0169_legacy_finance_duty_runtime.sql','utf8'));
-  await c.query(fs.readFileSync('migrations/business/0170_legacy_commission_confirmation_link.sql','utf8'));
-  await c.query(fs.readFileSync('migrations/business/0171_legacy_refund_case.sql','utf8'));
-  await c.query('CREATE ROLE zzsh_completion_synth_probe NOLOGIN');
-  await applyRuntimePrivileges({query:(...args)=>c.query(...args)},'zzsh_completion_synth_probe');
-  assert.equal((await c.query("SELECT has_function_privilege('zzsh_completion_synth_probe','zzsh_order.create_legacy_refund_case(text)','EXECUTE') AS allowed")).rows[0].allowed,true);
-  assert.equal((await c.query("SELECT has_function_privilege('zzsh_completion_synth_probe','zzsh_order.resume_legacy_refund_review(text,text)','EXECUTE') AS allowed")).rows[0].allowed,true);
-  assert.equal((await c.query("SELECT has_function_privilege('zzsh_completion_synth_probe','zzsh_order.resolve_legacy_refund_terminal(text,text,text)','EXECUTE') AS allowed")).rows[0].allowed,true);
-  assert.equal((await c.query("SELECT has_table_privilege('zzsh_completion_synth_probe','zzsh_order.legacy_refund_terminal_resolution','INSERT') AS allowed")).rows[0].allowed,false);
-  assert.equal((await c.query("SELECT has_table_privilege('zzsh_completion_synth_probe','zzsh_order.legacy_refund_review_resolution','INSERT') AS allowed")).rows[0].allowed,false);
-  assert.equal((await c.query("SELECT has_table_privilege('zzsh_completion_synth_probe','zzsh_order.legacy_refund_case','INSERT') AS allowed")).rows[0].allowed,false);
-  await c.query('SET LOCAL ROLE zzsh_completion_synth_probe');
+  if(cancellation){assert.equal(await evidence.legacySupportCancellationReady(c),false);await c.query(fs.readFileSync('migrations/candidates/legacy-support-cancel.sql','utf8'));}
+  else {
+   await c.query(fs.readFileSync('migrations/business/0168_legacy_payment_order_number_guard.sql','utf8'));
+   await c.query(fs.readFileSync('migrations/business/0169_legacy_finance_duty_runtime.sql','utf8'));
+   await c.query(fs.readFileSync('migrations/business/0170_legacy_commission_confirmation_link.sql','utf8'));
+   await c.query(fs.readFileSync('migrations/business/0171_legacy_refund_case.sql','utf8'));
+  }
+  if(!cancellationRace)await c.query('CREATE ROLE zzsh_completion_synth_probe NOLOGIN');
+  await applyRuntimePrivileges({query:(...args)=>c.query(...args)},runtimeRole);
+  assert.equal((await c.query("SELECT has_function_privilege($1,'zzsh_order.create_legacy_refund_case(text)','EXECUTE') AS allowed",[runtimeRole])).rows[0].allowed,true);
+  assert.equal((await c.query("SELECT has_function_privilege($1,'zzsh_order.resume_legacy_refund_review(text,text)','EXECUTE') AS allowed",[runtimeRole])).rows[0].allowed,true);
+  assert.equal((await c.query("SELECT has_function_privilege($1,'zzsh_order.resolve_legacy_refund_terminal(text,text,text)','EXECUTE') AS allowed",[runtimeRole])).rows[0].allowed,true);
+  assert.equal((await c.query("SELECT has_table_privilege($1,'zzsh_order.legacy_refund_terminal_resolution','INSERT') AS allowed",[runtimeRole])).rows[0].allowed,false);
+  assert.equal((await c.query("SELECT has_table_privilege($1,'zzsh_order.legacy_refund_review_resolution','INSERT') AS allowed",[runtimeRole])).rows[0].allowed,false);
+  assert.equal((await c.query("SELECT has_table_privilege($1,'zzsh_order.legacy_refund_case','INSERT') AS allowed",[runtimeRole])).rows[0].allowed,false);
+  await c.query(`SET LOCAL ROLE ${runtimeRole}`);
   await setAuditContext(c,'admin',actor.userId,actor.sessionId,actor.requestId);
   await assert.rejects(finance.authorizeLegacyFinanceDuty(c,{...actor,userId:'synthetic-denied',sessionId:'synthetic-denied-session'},b.id,'OWNER_CREDIT'),error=>error.status===403);
   assert.equal((await c.query('SELECT count(*)::int AS n FROM zzsh_order.legacy_continuation_version WHERE order_id=$1',[b.id])).rows[0].n,0);
+  if(cancellationRace){
+   await c.query('COMMIT');
+   const other=await pool.connect(),observer=await pool.connect(),util=require('../dist/src/supply/supply-util.js');
+   try {
+    const op='order.legacy.continuation.support_cancel',key='synthetic_cancel_same_key';
+    const input=command.parseLegacyMutation('support_cancel',{expectedRevision:null,inputEvidenceId:original.id,refundCents:'5000',ownerCents:'3000',reason:'双方协商取消',originalPaymentChecked:true});
+    const scope={realm:'admin',principalId:actor.userId,operation:op,resourceId:b.id},fingerprint=util.fingerprintRequest(op,b.id,input);
+    const profiles=require('../dist/src/order/joinpay-refund-profile.js'),refundStore=require('../dist/src/order/channel-refund-store.js');
+    const saved={assertFormalRefundProfile:profiles.assertFormalRefundProfile,describeRefundProfile:profiles.describeRefundProfile,
+      readRefundProfileEvidence:profiles.readRefundProfileEvidence,assertRefundStart:profiles.assertRefundStart,assertRefundBinding:profiles.assertRefundBinding,assertRefundResource:refundStore.assertRefundResource};
+    const profileText=JSON.stringify({kind:'JOINPAY_REFUND_PROFILE_V1',operation:'SUBMIT',purpose:'MERCHANT_REFUND',database,runtimeUser:runtimeRole,merchantIdentityId:'synthetic-merchant',merchantNo:'12345',profileId:'synthetic-profile',keyVersionRef:'synthetic-key-ref',notifyUrl:'https://fixture.invalid/refund',fundsAccount:'SETTLED'});
+    const admissionText=JSON.stringify({kind:'FORMAL_NATIVE_REFUND_SERVER_REVIEW',reference:'synthetic-admission',database,runtimeUser:runtimeRole,merchantIdentityId:'synthetic-merchant',merchantNo:'12345',acceptedProfiles:[{operation:'SUBMIT',profileId:'synthetic-profile',profileSha256:sha(profileText),keyVersionRef:'synthetic-key-ref'},{operation:'QUERY'},{operation:'NOTIFY'}]});
+    profiles.assertFormalRefundProfile=()=>({merchantIdentityId:'synthetic-merchant',reference:'synthetic-admission',sha256:sha(admissionText),canonical:admissionText});
+    profiles.describeRefundProfile=()=>({merchantIdentityId:'synthetic-merchant',merchantNo:'12345',profileId:'synthetic-profile',profileSha256:sha(profileText),keyVersionRef:'synthetic-key-ref',notifyUrl:'https://fixture.invalid/refund',fundsAccount:'SETTLED'});
+    profiles.readRefundProfileEvidence=()=>profileText;profiles.assertRefundStart=()=>{};profiles.assertRefundBinding=()=>{};refundStore.assertRefundResource=async()=> '1';
+    const prepare=async client=>{await client.query('BEGIN');await client.query(`SET LOCAL ROLE ${runtimeRole}`);await setAuditContext(client,'admin',actor.userId,actor.sessionId,actor.requestId);};
+    const execute=async(client,requestKey=key)=>{let authority;return util.withIdempotency(client,scope,requestKey,fingerprint,
+      async replay=>{authority=await finance.authorizeLegacyFinanceDuty(client,actor,b.id,'OWNER_CREDIT',!!replay);},
+      ()=>command.applyLegacyContinuationCommand(client,actor,b.id,input,readLegacyDutyFinalization,authority,finance.postLegacyOwnerCreditOnConfirmation,'OPERATOR'));};
+    await prepare(c);const first=await execute(c);assert.equal(first.replayed,false);
+    const allocator=require('../dist/src/order/legacy-support-cancel-refund.js');
+    assert.equal((await allocator.allocateLegacySupportCancelRefundInTransaction(c,actor,b.id,key,fingerprint,{admission:{},profile:{}})).state,'CREATED');
+    await prepare(other);const aPid=(await c.query('SELECT pg_backend_pid() AS pid')).rows[0].pid,bPid=(await other.query('SELECT pg_backend_pid() AS pid')).rows[0].pid;
+    const replay=execute(other).then(value=>({value}),error=>({error}));let blocked=false;
+    for(let i=0;i<100&&!blocked;i++){blocked=(await observer.query('SELECT $1::int=ANY(pg_blocking_pids($2::int)) AS blocked',[aPid,bPid])).rows[0].blocked;if(!blocked)await new Promise(resolve=>setTimeout(resolve,25));}
+    assert.equal(blocked,true,'second request must actually wait on the first transaction');
+    await c.query('SET CONSTRAINTS ALL IMMEDIATE');await c.query('COMMIT');
+    const second=await replay;if(second.error)throw second.error;assert.equal(second.value.replayed,true);assert.deepEqual(second.value.body,first.body);
+    assert.equal((await allocator.allocateLegacySupportCancelRefundInTransaction(other,actor,b.id,key,fingerprint,{admission:{},profile:{}})).state,'ALREADY_CREATED');
+    await other.query('COMMIT');
+    await prepare(other);await assert.rejects(execute(other,'synthetic_cancel_other_key'),error=>error.status===409&&error.message==='CONTINUATION_REVISION_CONFLICT');await other.query('ROLLBACK');
+    const counts=(await observer.query(`SELECT
+      (SELECT count(*)::int FROM zzsh_order.legacy_continuation_version WHERE order_id=$1 AND command='SUPPORT_CANCEL') AS versions,
+      (SELECT count(*)::int FROM zzsh_order.legacy_order_duty WHERE order_id=$1 AND kind='RENTER_REFUND') AS refunds,
+      (SELECT count(*)::int FROM zzsh_order.legacy_order_duty WHERE order_id=$1 AND kind='OWNER_CREDIT') AS owners,
+      (SELECT count(*)::int FROM zzsh_order.legacy_order_duty WHERE order_id=$1 AND kind='COMMISSION' AND status<>'VOID') AS live_commissions,
+      (SELECT count(*)::int FROM zzsh_order.settlement_ledger_entry WHERE counterparty_user_id=$2 AND account_code='OWNER_AVAILABLE') AS owner_entries`,[b.id,b.ownerUserId])).rows[0];
+    assert.deepEqual(counts,{versions:1,refunds:1,owners:1,live_commissions:0,owner_entries:1});
+    console.log('PASS: two PostgreSQL transactions actually contended; same key replays one cancellation and one owner credit');
+    assert.equal((await observer.query(`SELECT count(*)::int AS n FROM zzsh_order.legacy_refund_case WHERE order_id=$1`,[b.id])).rows[0].n,1);
+    assert.equal((await observer.query(`SELECT state FROM zzsh_order.legacy_refund_intent WHERE case_id=(SELECT id FROM zzsh_order.legacy_refund_case WHERE order_id=$1)`,[b.id])).rows[0].state,'READY');
+    Object.assign(profiles,{assertFormalRefundProfile:saved.assertFormalRefundProfile,describeRefundProfile:saved.describeRefundProfile,
+      readRefundProfileEvidence:saved.readRefundProfileEvidence,assertRefundStart:saved.assertRefundStart,assertRefundBinding:saved.assertRefundBinding});refundStore.assertRefundResource=saved.assertRefundResource;
+    console.log('PASS: cancellation and exactly one ordinary refund task commit together under concurrent same-key replay');
+   } finally {await other.query('ROLLBACK').catch(()=>{});other.release();observer.release();}
+   return;
+  }
+  if(cancellation){
+   const ready=await evidence.legacySupportCancellationReady(c);
+   if(!ready)console.log('synthetic cancellation readiness', (await c.query(`SELECT
+    EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid=to_regclass('zzsh_order.legacy_continuation_version') AND conname='legacy_continuation_version_command_check' AND pg_get_constraintdef(oid) LIKE '%SUPPORT_CANCEL%') AS command_ok,
+    EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid=to_regclass('zzsh_order.legacy_continuation_version') AND conname='legacy_continuation_version_stage_check' AND pg_get_constraintdef(oid) LIKE '%5%') AS stage_ok,
+    position('SUPPORT_CANCEL' IN pg_get_functiondef(to_regprocedure('zzsh_order.check_legacy_continuation_result()')))>0 AS result_guard_ok,
+    position('SUPPORT_CANCEL' IN pg_get_functiondef(to_regprocedure('zzsh_order.guard_legacy_duty()')))>0 AS duty_guard_ok,
+    has_column_privilege(current_user,to_regclass('zzsh_order.legacy_continuation_version'),'id','INSERT') AS version_insert,
+    has_column_privilege(current_user,to_regclass('zzsh_order.legacy_order_duty'),'status','UPDATE') AS duty_update`)).rows[0]);
+   assert.equal(ready,true);
+   await c.query('SAVEPOINT missing_cancel_acl');await c.query('RESET ROLE');
+   await c.query(`REVOKE UPDATE(status) ON zzsh_order.legacy_order_duty FROM ${runtimeRole}`);await c.query(`SET LOCAL ROLE ${runtimeRole}`);
+   assert.equal(await evidence.legacySupportCancellationReady(c),false,'do not expose cancellation without its duty update privilege');
+   await c.query('ROLLBACK TO SAVEPOINT missing_cancel_acl');
+   const publishing=require('../dist/src/supply/publishing.js');
+   const accountBefore=await publishing.lockPublishingAccount(c,b.accountId);
+   assert.equal(await publishing.canPrepareLegacyCancelledDraft(c,accountBefore),false);
+   await c.query('SAVEPOINT missing_commission');await c.query('RESET ROLE');await c.query("SET LOCAL session_replication_role='replica'");
+   await c.query('DELETE FROM zzsh_order.legacy_order_duty WHERE id=$1',[commissionId]);
+   await c.query("SET LOCAL session_replication_role='origin'");await c.query(`SET LOCAL ROLE ${runtimeRole}`);
+   const missing=command.parseLegacyMutation('support_cancel',{expectedRevision:null,inputEvidenceId:original.id,refundCents:'5000',ownerCents:'3000',reason:'双方协商取消',originalPaymentChecked:true});
+   const missingAuthority=await finance.authorizeLegacyFinanceDuty(c,actor,b.id,'OWNER_CREDIT');
+   await assert.rejects(command.applyLegacyContinuationCommand(c,actor,b.id,missing,readLegacyDutyFinalization,missingAuthority,finance.postLegacyOwnerCreditOnConfirmation,'OPERATOR'),error=>error.message==='COMMISSION_SOURCE_UNAVAILABLE');
+   await c.query('ROLLBACK TO SAVEPOINT missing_commission');
+   await c.query('SAVEPOINT recorded_refund_cancel');await c.query('RESET ROLE');await c.query("SET LOCAL session_replication_role='replica'");
+   await c.query(`INSERT INTO zzsh_order.personal_finance_observation(id,user_id,source_kind,source_type,source_system,legacy_user_id,source_entity,source_id,source_digest,source_canonical,included_in_opening,snapshot)
+     VALUES('synthetic-refund-before',$1,'HISTORICAL_REFUND','LEGACY_MYSQL','legacy_mysql_restore',$2,'la_refund_record','41',$3,'{}',false,$4::jsonb)`,[b.renterUserId,b.legacyRenterId,b.sourceDigest,JSON.stringify({referenceId:b.legacyId})]);
+   await c.query("SET LOCAL session_replication_role='origin'");await c.query(`SET LOCAL ROLE ${runtimeRole}`);
+   const historyAuthority=await finance.authorizeLegacyFinanceDuty(c,actor,b.id,'OWNER_CREDIT');
+   const historyCancel=await command.applyLegacyContinuationCommand(c,actor,b.id,missing,readLegacyDutyFinalization,historyAuthority,finance.postLegacyOwnerCreditOnConfirmation,'OPERATOR');
+   assert.equal(historyCancel.body.stage,'5');const historyDuties=await evidence.readLegacyContinuationDuties(c,b.id);
+   assert.equal(historyDuties.find(d=>d.kind==='OWNER_CREDIT').status,'PENDING');
+   assert.equal((await c.query(`SELECT count(*)::int AS n FROM zzsh_order.settlement_ledger_entry WHERE counterparty_user_id=$1 AND account_code='OWNER_AVAILABLE'`,[b.ownerUserId])).rows[0].n,0);
+   await c.query('SET CONSTRAINTS ALL IMMEDIATE');await c.query('ROLLBACK TO SAVEPOINT recorded_refund_cancel');
+   await c.query('SAVEPOINT simulated_scope');
+   const u=require('../dist/src/supply/supply-util.js'),op='order.legacy.continuation.support_cancel',simKey='synthetic_cancel_scope',simFingerprint=u.fingerprintRequest(op,b.id,missing);
+   const simAuthority=await finance.authorizeLegacyFinanceDuty(c,actor,b.id,'OWNER_CREDIT');
+   await u.withIdempotency(c,{realm:'admin',principalId:actor.userId,operation:op,resourceId:b.id},simKey,simFingerprint,async()=>{},
+    ()=>command.applyLegacyContinuationCommand(c,actor,b.id,missing,readLegacyDutyFinalization,simAuthority,finance.postLegacyOwnerCreditOnConfirmation,'SIMULATED'));
+   assert.equal((await evidence.readLegacyContinuationDuties(c,b.id)).find(d=>d.kind==='OWNER_CREDIT').status,'PENDING',
+    'simulated verification cannot post owner funds outside a registered demo database');
+   assert.equal((await require('../dist/src/order/legacy-support-cancel-refund.js').allocateLegacySupportCancelRefund(c,actor,b.id,simKey,simFingerprint,{admission:{},profile:{}})).state,'NOT_READY',
+    'simulated verification must never authorize a formal refund');
+   await c.query('SET CONSTRAINTS ALL IMMEDIATE');await c.query('ROLLBACK TO SAVEPOINT simulated_scope');
+   await c.query('SAVEPOINT unavailable_scope');
+   const unavailableAuthority=await finance.authorizeLegacyFinanceDuty(c,actor,b.id,'OWNER_CREDIT');
+   await command.applyLegacyContinuationCommand(c,actor,b.id,missing,readLegacyDutyFinalization,unavailableAuthority,finance.postLegacyOwnerCreditOnConfirmation,'UNAVAILABLE');
+   const unavailableOwner=(await evidence.readLegacyContinuationDuties(c,b.id)).find(d=>d.kind==='OWNER_CREDIT');assert.equal(unavailableOwner.status,'PENDING');
+   await assert.rejects(finance.postLegacyFinanceDuty(c,actor,b.id,'OWNER_CREDIT',{dutyId:unavailableOwner.id,expectedRevision:unavailableOwner.revision,reason:'核对旧站收益'},unavailableAuthority),
+    error=>error.message==='REFUND_HISTORY_REQUIRES_OFFLINE');
+   await c.query('SET CONSTRAINTS ALL IMMEDIATE');await c.query('ROLLBACK TO SAVEPOINT unavailable_scope');
+   await c.query('SAVEPOINT owner_credit_failure');
+   const failureAuthority=await finance.authorizeLegacyFinanceDuty(c,actor,b.id,'OWNER_CREDIT');
+   const failedCredit=async(...args)=>{await finance.postLegacyOwnerCreditOnConfirmation(...args);throw new Error('synthetic owner credit failure');};
+   const deferredCancel=await command.applyLegacyContinuationCommand(c,actor,b.id,missing,readLegacyDutyFinalization,failureAuthority,failedCredit,'OPERATOR');
+   assert.equal(deferredCancel.body.stage,'5','a failed optional credit must not undo cancellation');
+   const deferredDuties=await evidence.readLegacyContinuationDuties(c,b.id);
+   assert.equal(deferredDuties.find(d=>d.kind==='OWNER_CREDIT').status,'PENDING');
+   assert.equal(deferredDuties.find(d=>d.kind==='RENTER_REFUND').status,'PENDING');
+   assert.equal((await c.query(`SELECT count(*)::int AS n FROM zzsh_order.settlement_ledger_entry WHERE counterparty_user_id=$1 AND account_code='OWNER_AVAILABLE'`,[b.ownerUserId])).rows[0].n,0,'partial credit must roll back');
+   assert.deepEqual((await c.query(`SELECT reason FROM zzsh_iam.audit_event WHERE action='order.legacy.owner_credit.deferred' AND details->>'versionId'=$1`,[deferredCancel.body.versionId])).rows,[{reason:'AUTO_CREDIT_FAILED'}]);
+   await c.query('SET CONSTRAINTS ALL IMMEDIATE');await c.query('ROLLBACK TO SAVEPOINT owner_credit_failure');
+   await c.query('SAVEPOINT cancellation_flow');
+   const cancel=command.parseLegacyMutation('support_cancel',{expectedRevision:null,inputEvidenceId:original.id,refundCents:'5000',ownerCents:'3000',reason:'双方协商取消',originalPaymentChecked:true});
+   const authority=await finance.authorizeLegacyFinanceDuty(c,actor,b.id,'OWNER_CREDIT');
+   const util=require('../dist/src/supply/supply-util.js'),operation='order.legacy.continuation.support_cancel',cancelKey='synthetic_legacy_cancel';
+   const cancelFingerprint=util.fingerprintRequest(operation,b.id,cancel);
+   const cancelled=await util.withIdempotency(c,{realm:'admin',principalId:actor.userId,operation,resourceId:b.id},cancelKey,cancelFingerprint,async()=>{},
+    ()=>command.applyLegacyContinuationCommand(c,actor,b.id,cancel,readLegacyDutyFinalization,authority,finance.postLegacyOwnerCreditOnConfirmation,'OPERATOR'));
+   assert.equal(cancelled.body.stage,'5');await c.query('SET CONSTRAINTS ALL DEFERRED');
+   const head=await evidence.readLegacyContinuationHead(c,b.id),duties=await evidence.readLegacyContinuationDuties(c,b.id);
+   assert.equal(head.command,'SUPPORT_CANCEL');assert.equal(head.stage,5);assert(head.refundDueAt);
+   assert.equal(duties.find(d=>d.kind==='COMMISSION').status,'VOID');
+   const dashboard=require('../dist/src/finance/admin-finance-dashboard.js');
+   const dashboardQuery={range:'all',basis:'settled',limit:20,source:'legacy'},viewer={adminId:actor.userId,isBoss:true,quoteRead:true};
+   const trend=await dashboard.readFinanceDashboardTrend(c,dashboardQuery,viewer);
+   assert.equal(trend.insights.cancelled,'1');
+   assert(trend.points.every(point=>point.settlements===null),'cancellation allocation must not masquerade as a completed settlement');
+   assert.equal((await dashboard.readFinanceDashboardCustomers(c,dashboardQuery,viewer)).items.length,0,'cancelled order is excluded from settled customer ranking');
+   const ownerDuty=duties.find(d=>d.kind==='OWNER_CREDIT'),refundDuty=duties.find(d=>d.kind==='RENTER_REFUND');
+   assert.equal(ownerDuty.amountCents,'3000');assert.equal(refundDuty.amountCents,'5000');
+   const renter={realm:'user',userId:b.renterUserId,sessionId:'user-session-'+b.legacyRenterId,requestId:'synthetic-renter-read'};
+   const owner={realm:'user',userId:b.ownerUserId,sessionId:'user-session-'+b.legacyOwnerId,requestId:'synthetic-owner-read'};
+   await setAuditContext(c,'user',renter.userId,renter.sessionId,renter.requestId);
+   const renterView=(await evidence.readLegacyContinuation(c,renter,b.id,readLegacyDutyFinalization)).continuation;
+   assert.equal(renterView.stage,'5');assert.deepEqual(renterView.capabilities,[]);assert.equal(renterView.duties.find(d=>d.kind==='RENTER_REFUND').amountCents,'5000');assert(!renterView.duties.some(d=>d.kind==='OWNER_CREDIT'));
+   await setAuditContext(c,'user',owner.userId,owner.sessionId,owner.requestId);
+   const ownerView=(await evidence.readLegacyContinuation(c,owner,b.id,readLegacyDutyFinalization)).continuation;
+   assert.equal(ownerView.stage,'5');assert.equal(ownerView.duties.find(d=>d.kind==='OWNER_CREDIT').amountCents,'3000');assert(!ownerView.duties.some(d=>d.kind==='RENTER_REFUND'));
+   await c.query('SAVEPOINT was_offline');await c.query('RESET ROLE');await c.query("SET LOCAL session_replication_role='replica'");
+   await c.query(`UPDATE zzsh_supply.legacy_listing_read_snapshot SET source_status=4 WHERE account_id=$1`,[b.accountId]);
+   await c.query("SET LOCAL session_replication_role='origin'");await c.query(`SET LOCAL ROLE ${runtimeRole}`);
+   assert.equal(await publishing.canPrepareLegacyCancelledDraft(c,await publishing.lockPublishingAccount(c,b.accountId)),false,'an account offline at migration remains historical');
+   await c.query('ROLLBACK TO SAVEPOINT was_offline');
+   await c.query('SAVEPOINT owner_draft');
+   await require('../dist/src/auth/user-identity.js').assertUserContextInTransaction(c,owner);
+   const editable=await publishing.lockPublishingAccount(c,b.accountId);
+   assert.equal(await publishing.canPrepareLegacyCancelledDraft(c,editable),true);
+   const gate=async client=>({publisherBail:'NOT_REQUIRED',occupancy:(await require('../dist/src/order/legacy-order-occupancy.js').readAccountOccupancyFacts(client,b.accountId)).state,reference:'synthetic-gate'});
+   const ownDetail=await publishing.listingDetail(c,editable,'owner',gate);assert.equal(ownDetail.canPrepareLegacyCancelledDraft,true);assert.equal(ownDetail.available,false);
+   await publishing.createListingDraft(c,editable,editable.revision,gate);
+   await c.query('SET CONSTRAINTS ALL IMMEDIATE');
+   const draft=(await c.query(`SELECT a.legacy_hold,v.origin,v.review_state,(SELECT count(*)::int FROM zzsh_supply.listing_publication p WHERE p.account_id=a.id) AS publications
+     FROM zzsh_supply.rental_account a JOIN zzsh_supply.listing_version v ON v.id=a.current_version_id WHERE a.id=$1`,[b.accountId])).rows[0];
+   assert.deepEqual(draft,{legacy_hold:'NONE',origin:'NATIVE',review_state:'DRAFT',publications:0});
+   await c.query('ROLLBACK TO SAVEPOINT owner_draft');
+   await setAuditContext(c,'admin',actor.userId,actor.sessionId,actor.requestId);
+   assert.equal(ownerDuty.status,'SETTLED');assert.equal(refundDuty.status,'PENDING');
+   const originalRefund=await require('../dist/src/order/legacy-refund-review-source.js').readLockedLegacyRefundSource(c,b,head,refundDuty);
+   assert.equal(originalRefund.dutyCents,'5000');assert.equal(originalRefund.paidCents,'10000');assert.equal(originalRefund.paymentOrderNo,'FIXTURE_P7');assert(originalRefund.refundDueAt);
+   const profiles=require('../dist/src/order/joinpay-refund-profile.js'),refundStore=require('../dist/src/order/channel-refund-store.js');
+   const saved={assertFormalRefundProfile:profiles.assertFormalRefundProfile,describeRefundProfile:profiles.describeRefundProfile,
+    readRefundProfileEvidence:profiles.readRefundProfileEvidence,assertRefundStart:profiles.assertRefundStart,assertRefundBinding:profiles.assertRefundBinding,assertRefundResource:refundStore.assertRefundResource};
+   const profileText=JSON.stringify({kind:'JOINPAY_REFUND_PROFILE_V1',operation:'SUBMIT',purpose:'MERCHANT_REFUND',database,runtimeUser:'zzsh_completion_synth_probe',merchantIdentityId:'synthetic-merchant',merchantNo:'12345',profileId:'synthetic-profile',keyVersionRef:'synthetic-key-ref',notifyUrl:'https://fixture.invalid/refund',fundsAccount:'SETTLED'});
+   const admissionText=JSON.stringify({kind:'FORMAL_NATIVE_REFUND_SERVER_REVIEW',reference:'synthetic-admission',database,runtimeUser:'zzsh_completion_synth_probe',merchantIdentityId:'synthetic-merchant',merchantNo:'12345',acceptedProfiles:[{operation:'SUBMIT',profileId:'synthetic-profile',profileSha256:sha(profileText),keyVersionRef:'synthetic-key-ref'},{operation:'QUERY'},{operation:'NOTIFY'}]});
+   profiles.assertFormalRefundProfile=()=>({merchantIdentityId:'synthetic-merchant',reference:'synthetic-admission',sha256:sha(admissionText),canonical:admissionText});
+   profiles.describeRefundProfile=()=>({merchantIdentityId:'synthetic-merchant',merchantNo:'12345',profileId:'synthetic-profile',profileSha256:sha(profileText),keyVersionRef:'synthetic-key-ref',notifyUrl:'https://fixture.invalid/refund',fundsAccount:'SETTLED'});
+   profiles.readRefundProfileEvidence=()=>profileText;profiles.assertRefundStart=()=>{};profiles.assertRefundBinding=()=>{};refundStore.assertRefundResource=async()=> '1';
+   try{
+    const {allocateLegacySupportCancelRefund:allocate,allocateLegacySupportCancelRefundInTransaction:allocateInTransaction}=require('../dist/src/order/legacy-support-cancel-refund.js');
+    assert.equal((await allocate(c,actor,b.id,'wrong_key',cancelFingerprint,{admission:{},profile:{}})).state,'NOT_READY');
+    await c.query('SAVEPOINT prior_refund');await c.query('RESET ROLE');await c.query("SET LOCAL session_replication_role='replica'");
+    await c.query(`INSERT INTO zzsh_order.personal_finance_observation(id,user_id,source_kind,source_type,source_system,legacy_user_id,source_entity,source_id,source_digest,source_canonical,included_in_opening,snapshot)
+      VALUES('synthetic-refund',$1,'HISTORICAL_REFUND','LEGACY_MYSQL','legacy_mysql_restore',$2,'la_refund_record','42',$3,'{}',false,$4::jsonb)`,[b.renterUserId,b.legacyRenterId,b.sourceDigest,JSON.stringify({referenceId:b.legacyId})]);
+    await c.query("SET LOCAL session_replication_role='origin'");await c.query(`SET LOCAL ROLE ${runtimeRole}`);
+    assert.equal((await allocate(c,actor,b.id,cancelKey,cancelFingerprint,{admission:{},profile:{}})).state,'HISTORY_REQUIRES_OFFLINE');
+    await c.query('ROLLBACK TO SAVEPOINT prior_refund');
+    profiles.assertRefundStart=()=>{throw new Error('synthetic allocation failure');};
+    assert.equal((await allocateInTransaction(c,actor,b.id,cancelKey,cancelFingerprint,{admission:{},profile:{}})).state,'DEFERRED');
+    assert.equal((await evidence.readLegacyContinuationHead(c,b.id)).stage,5,'allocation failure must not undo cancellation');
+    assert.equal((await evidence.readLegacyContinuationDuties(c,b.id)).find(d=>d.id===refundDuty.id).status,'PENDING');
+    assert.equal((await c.query(`SELECT count(*)::int AS n FROM zzsh_order.legacy_refund_case WHERE duty_id=$1`,[refundDuty.id])).rows[0].n,0);
+    assert.equal((await c.query(`SELECT count(*)::int AS n FROM zzsh_iam.audit_event WHERE action='order.legacy.refund.reviewed' AND object_id=$1`,[refundDuty.id])).rows[0].n,0,'failed allocation leaves no partial review');
+    profiles.assertRefundStart=()=>{};
+    await c.query('SET CONSTRAINTS ALL IMMEDIATE');
+    const created=await allocateInTransaction(c,actor,b.id,cancelKey,cancelFingerprint,{admission:{},profile:{}});
+    assert.equal(created.state,'CREATED');assert.equal((await allocate(c,actor,b.id,cancelKey,cancelFingerprint,{admission:{},profile:{}})).state,'ALREADY_CREATED');
+    const item=(await c.query(`SELECT new_refund_cents::text AS amount FROM zzsh_order.legacy_refund_case WHERE duty_id=$1`,[refundDuty.id])).rows[0];assert.equal(item.amount,'5000');
+    assert.equal((await c.query(`SELECT state FROM zzsh_order.legacy_refund_intent WHERE case_id=(SELECT id FROM zzsh_order.legacy_refund_case WHERE duty_id=$1)`,[refundDuty.id])).rows[0].state,'READY');
+    await c.query('SAVEPOINT channel_activity');
+    const originalCase=(await c.query(`SELECT x.id AS case_id,x.original_payment_order_no,i.id AS intent_id,i.refund_order_no,f.root_id
+      FROM zzsh_order.legacy_refund_case x JOIN zzsh_order.legacy_refund_intent i ON i.case_id=x.id
+      JOIN zzsh_order.legacy_duty_finance_fact f ON f.duty_id=x.duty_id WHERE x.duty_id=$1`,[refundDuty.id])).rows[0];
+    assert(originalCase);
+    await c.query('RESET ROLE');await c.query("SET LOCAL session_replication_role='replica'");
+    const wire=Buffer.from('synthetic request'),raw=Buffer.from('synthetic response');
+    await c.query(`INSERT INTO zzsh_order.legacy_refund_attempt(id,intent_id,operation,lease_version,lease_owner,profile_id,profile_canonical,profile_sha256,key_version_ref,admission_sha256,request_body,request_sha256,created_at)
+      VALUES('synthetic-submit',$1,'SUBMIT',1,'synthetic','synthetic-profile',$2,$3,'synthetic-key-ref',$4,$5,$6,transaction_timestamp()-interval '1 second')`,
+      [originalCase.intent_id,profileText,sha(profileText),sha(admissionText),wire,sha(wire)]);
+    const financeEvent='synthetic_legacy_refund_event',observation='synthetic_legacy_refund_observation',terminal='synthetic_legacy_refund_terminal',trx='synthetic_refund_transaction';
+    await c.query(`INSERT INTO zzsh_order.finance_event(id,economic_root_id,kind,subject_user_id,expected_ledger_revision) VALUES($1,$2,'LEGACY_REFUND_PAID',$3,0)`,[financeEvent,originalCase.root_id,b.renterUserId]);
+    await c.query(`INSERT INTO zzsh_order.legacy_refund_observation(id,intent_id,operation,profile_id,profile_canonical,profile_sha256,key_version_ref,raw_body,raw_sha256,response_complete,http_status,received_bytes,transport_failure,event,schema_status,signature_status,binding_status,evidence_level,state_before,state_after,request_id)
+      VALUES($1,$2,'NOTIFY','synthetic-profile',$3,$4,'synthetic-key-ref',$5,$6,true,NULL,$7,NULL,'PENDING_TERMINAL','VALID','MATCH','MATCH','SYNTHETIC_PROTOCOL','SUBMITTING','SUBMITTING','synthetic-request')`,
+      [observation,originalCase.intent_id,profileText,sha(profileText),raw,sha(raw),raw.length]);
+    const terminalFacts=JSON.stringify({intentId:originalCase.intent_id,caseId:originalCase.case_id,orderId:b.id,renterUserId:b.renterUserId,
+      merchantIdentityId:'synthetic-merchant',merchantNo:'12345',originalPaymentOrderNo:originalCase.original_payment_order_no,refundOrderNo:originalCase.refund_order_no,
+      amountCents:'5000',currency:'CNY',terminal:'SUCCEEDED',refundTransactionNo:trx,financeEventId:financeEvent,sourceObservationId:observation});
+    await c.query(`INSERT INTO zzsh_order.legacy_refund_terminal_evidence(id,intent_id,observation_id,terminal,merchant_no,refund_transaction_no,completed_at_raw,completed_at,finance_event_id,facts_canonical,facts_digest)
+      VALUES($1,$2,$3,'SUCCEEDED','12345',$4,'synthetic-time',transaction_timestamp()-interval '1 second',$5,$6,$7)`,
+      [terminal,originalCase.intent_id,observation,trx,financeEvent,terminalFacts,sha(terminalFacts)]);
+    await c.query(`UPDATE zzsh_order.legacy_refund_intent SET state='SUCCEEDED',budget_disposition='CONSUMED',lease_version=1,lease_owner='synthetic',
+      lease_until=clock_timestamp()+interval '1 minute',claim_xid=pg_current_xact_id(),terminal_evidence_id=$2,terminal_event_id=$3,
+      provider_refund_trx_no=$4,completed_at=transaction_timestamp()-interval '1 second' WHERE id=$1`,[originalCase.intent_id,terminal,financeEvent,trx]);
+    await c.query("SET LOCAL session_replication_role='origin'");await c.query(`SET LOCAL ROLE ${runtimeRole}`);
+    const activity=require('../dist/src/finance/admin-finance-activity.js'),query=activity.parseActivityQuery(new URLSearchParams('kind=REFUND&subjectUserId='+encodeURIComponent(b.ownerUserId)),false);
+    const access={adminId:actor.userId,isBoss:true,orderRead:true,financeDocumentRead:true,resourceRead:true};
+    const rows=await activity.readAdminChannelActivity(c,query,access),entry=rows.items.find(row=>row.id==='legacy_refund:synthetic-submit');
+    assert(entry);assert.equal(entry.amountCents,'5000');assert.equal(entry.subjectRole,'OWNER');assert.equal(entry.relatedOrderId,b.id);assert.equal(entry.bankArrival,'UNKNOWN');
+    const denied=await activity.readAdminChannelActivity(c,query,{...access,adminId:'synthetic-denied',isBoss:false});assert.equal(denied.items.length,0,'an unauthorized owner order must not leak through subject lookup');
+    const renterRows=await activity.readAdminChannelActivity(c,{...query,subjectUserId:b.renterUserId},{...access,adminId:'synthetic-denied',isBoss:false});
+    const renterEntry=renterRows.items.find(row=>row.id==='legacy_refund:synthetic-submit');assert(renterEntry);assert.equal(renterEntry.relatedOrderId,null,'unscoped staff must not receive the order ID');
+    assert(!(await activity.readAdminChannelActivity(c,{...query,source:'LEGACY'},access)).items.some(row=>row.id==='legacy_refund:synthetic-submit'),'new refund submissions are not duplicated as old source observations');
+    const dashboardQuery={range:'all',basis:'settled',limit:20,source:'legacy'},dashboardViewer={adminId:actor.userId,isBoss:true};
+    const channels=require('../dist/src/finance/admin-finance-dashboard.js').readFinanceDashboardChannels;
+    assert(!((await channels(c,dashboardQuery,dashboardViewer,['synthetic-merchant'])).items.some(row=>row.kind==='REFUND')),'synthetic observation is not real channel evidence');
+    await c.query('RESET ROLE');await c.query("SET LOCAL session_replication_role='replica'");
+    await c.query(`UPDATE zzsh_order.legacy_refund_observation SET evidence_level='PROVIDER_RESPONSE' WHERE id=$1`,[observation]);
+    await c.query("SET LOCAL session_replication_role='origin'");await c.query(`SET LOCAL ROLE ${runtimeRole}`);
+    assert.deepEqual((await channels(c,dashboardQuery,dashboardViewer,['synthetic-merchant'])).items,[{kind:'REFUND',count:'1',cents:'5000'}]);
+    assert.deepEqual((await channels(c,{...dashboardQuery,source:'all'},dashboardViewer,['synthetic-merchant'])).items,[{kind:'REFUND',count:'1',cents:'5000'}],'new and old views must not double-count the same refund');
+    assert.deepEqual((await channels(c,{...dashboardQuery,source:'new'},dashboardViewer,['synthetic-merchant'])).items,[],'old-order refunds respect source filter');
+    assert.deepEqual((await channels(c,dashboardQuery,dashboardViewer,['other-merchant'])).items,[],'channel totals respect merchant scope');
+    assert.deepEqual((await channels(c,dashboardQuery,{...dashboardViewer,adminId:'synthetic-denied',isBoss:false},['synthetic-merchant'])).items,[],'channel totals respect game scope');
+    await c.query('RESET ROLE');await c.query("SET LOCAL session_replication_role='replica'");
+    await c.query(`UPDATE zzsh_order.legacy_refund_intent SET requires_review=true WHERE id=$1`,[originalCase.intent_id]);
+    await c.query("SET LOCAL session_replication_role='origin'");await c.query(`SET LOCAL ROLE ${runtimeRole}`);
+    assert.deepEqual((await channels(c,dashboardQuery,dashboardViewer,['synthetic-merchant'])).items,[],'conflicted refund evidence is not counted as confirmed');
+    await c.query('ROLLBACK TO SAVEPOINT channel_activity');
+   }finally{Object.assign(profiles,{assertFormalRefundProfile:saved.assertFormalRefundProfile,describeRefundProfile:saved.describeRefundProfile,
+    readRefundProfileEvidence:saved.readRefundProfileEvidence,assertRefundStart:saved.assertRefundStart,assertRefundBinding:saved.assertRefundBinding});refundStore.assertRefundResource=saved.assertRefundResource;}
+   assert.equal((await c.query(`SELECT count(*)::int AS n FROM zzsh_order.settlement_ledger_entry WHERE counterparty_user_id=$1 AND account_code='OWNER_AVAILABLE'`,[b.ownerUserId])).rows[0].n,1);
+   const account=await require('../dist/src/order/legacy-order-occupancy.js').readAccountOccupancyFacts(c,b.accountId);assert.equal(account.state,'FREE');
+   await c.query('SET CONSTRAINTS ALL IMMEDIATE');
+   await c.query('ROLLBACK TO SAVEPOINT cancellation_flow');
+   console.log('PASS: legacy support cancellation records exact allocation, voids commission and posts owner once');
+   await c.query('SAVEPOINT cancellation_isolated');await c.query('RESET ROLE');await c.query("SET LOCAL session_replication_role='replica'");
+   const isolated=fixture.legacyEvidence(model.initialLegacyFacts(fixture.legacySource({baseBot:null,commissions:[commission]}),[{sourceRecordId:commission.id,canonical:commissionSource,digest:sha(commissionSource),evidenceRef:'synthetic-commission'}]));
+   assert.equal(isolated.facts.evidence.admission,'ISOLATED');
+   await c.query(`UPDATE zzsh_order.legacy_continuation_evidence SET parameter_digest=$2,admission=$3,reasons=$4::jsonb,facts=$5::jsonb,facts_canonical=$6,facts_digest=$7 WHERE id=$1`,
+    [original.id,isolated.facts.evidence.parameterDigest,isolated.facts.evidence.admission,JSON.stringify(isolated.facts.evidence.reasons),JSON.stringify(isolated.facts),isolated.factsCanonical,isolated.factsDigest]);
+   await c.query("SET LOCAL session_replication_role='origin'");await c.query(`SET LOCAL ROLE ${runtimeRole}`);await setAuditContext(c,'admin',actor.userId,actor.sessionId,actor.requestId);
+   const isolatedInput=command.parseLegacyMutation('support_cancel',{expectedRevision:null,inputEvidenceId:original.id,refundCents:'5000',ownerCents:'3000',reason:'双方协商取消',originalPaymentChecked:true});
+   const isolatedAuthority=await finance.authorizeLegacyFinanceDuty(c,actor,b.id,'OWNER_CREDIT'),isolatedKey='synthetic_isolated_cancel',isolatedFingerprint=util.fingerprintRequest(operation,b.id,isolatedInput);
+   await util.withIdempotency(c,{realm:'admin',principalId:actor.userId,operation,resourceId:b.id},isolatedKey,isolatedFingerprint,async()=>{},
+    ()=>command.applyLegacyContinuationCommand(c,actor,b.id,isolatedInput,readLegacyDutyFinalization,isolatedAuthority,finance.postLegacyOwnerCreditOnConfirmation,'OPERATOR'));
+   await c.query('SET CONSTRAINTS ALL DEFERRED');
+   profiles.assertFormalRefundProfile=()=>({merchantIdentityId:'synthetic-merchant',reference:'synthetic-admission',sha256:sha(admissionText),canonical:admissionText});
+   profiles.describeRefundProfile=()=>({merchantIdentityId:'synthetic-merchant',merchantNo:'12345',profileId:'synthetic-profile',profileSha256:sha(profileText),keyVersionRef:'synthetic-key-ref',notifyUrl:'https://fixture.invalid/refund',fundsAccount:'SETTLED'});
+   profiles.readRefundProfileEvidence=()=>profileText;profiles.assertRefundStart=()=>{};profiles.assertRefundBinding=()=>{};refundStore.assertRefundResource=async()=> '1';
+   try {assert.equal((await require('../dist/src/order/legacy-support-cancel-refund.js').allocateLegacySupportCancelRefund(c,actor,b.id,isolatedKey,isolatedFingerprint,{admission:{},profile:{}})).state,'CREATED');await c.query('SET CONSTRAINTS ALL IMMEDIATE');}
+   finally{Object.assign(profiles,{assertFormalRefundProfile:saved.assertFormalRefundProfile,describeRefundProfile:saved.describeRefundProfile,readRefundProfileEvidence:saved.readRefundProfileEvidence,assertRefundStart:saved.assertRefundStart,assertRefundBinding:saved.assertRefundBinding});refundStore.assertRefundResource=saved.assertRefundResource;}
+   await c.query('ROLLBACK TO SAVEPOINT cancellation_isolated');
+   console.log('PASS: an incomplete historical price does not prevent a manually allocated cancellation refund');
+   for (const [refundCents,ownerCents] of [['0','10000'],['10000','0'],['0','0']]) {
+    await c.query('SAVEPOINT cancellation_zero');
+    const zero=command.parseLegacyMutation('support_cancel',{expectedRevision:null,inputEvidenceId:original.id,refundCents,ownerCents,reason:'双方协商取消',originalPaymentChecked:true});
+    const a=await finance.authorizeLegacyFinanceDuty(c,actor,b.id,'OWNER_CREDIT');
+    await command.applyLegacyContinuationCommand(c,actor,b.id,zero,readLegacyDutyFinalization,a,finance.postLegacyOwnerCreditOnConfirmation,'OPERATOR');
+    await c.query('SET CONSTRAINTS ALL IMMEDIATE');
+    const items=await evidence.readLegacyContinuationDuties(c,b.id);
+    assert.equal(items.filter(d=>d.kind==='RENTER_REFUND').length,refundCents==='0'?0:1);
+    assert.equal(items.filter(d=>d.kind==='OWNER_CREDIT').length,ownerCents==='0'?0:1);
+    assert.equal(items.find(d=>d.kind==='COMMISSION').status,'VOID');
+    await c.query('ROLLBACK TO SAVEPOINT cancellation_zero');
+   }
+   console.log('PASS: zero allocations do not create false pending refunds or income');
+  }
   await c.query('SAVEPOINT admin_flow');
   const quantities=fixture.legacyQuantities('5.00');
   const proposed=calc.planLegacyContinuation(original.facts.evidence,{kind:'propose',caller:{role:'admin',legacyUserId:'',onBehalf:'renter'},quantities});assert(proposed.ok);
@@ -135,6 +428,7 @@ const pool=new Pool({host:'127.0.0.1',port:5432,database,user:'postgres',max:3,s
   assert.equal((await command.applyLegacyContinuationCommand(c,actor,b.id,supportInput,readLegacyDutyFinalization,supportAuthority,finance.postLegacyOwnerCreditOnConfirmation)).body.stage,'4');
   const supportDuty=(await evidence.readLegacyContinuationDuties(c,b.id)).find(d=>d.kind==='OWNER_CREDIT');assert.equal(supportDuty?.status,'SETTLED');
   assert.deepEqual((await c.query('SELECT actor_realm,actor_id FROM zzsh_order.legacy_duty_finance_fact WHERE duty_id=$1',[supportDuty.id])).rows[0],{actor_realm:'admin',actor_id:actor.userId});
+  if(cancellation){await c.query('ROLLBACK');console.log('PASS: existing legacy proposal and confirmation remain available');return;}
   const refundProfile=require('../dist/src/order/joinpay-refund-profile.js'),refundStore=require('../dist/src/order/channel-refund-store.js');
   const oldProfile=refundProfile.assertFormalRefundProfile,oldDescription=refundProfile.describeRefundProfile,oldEvidence=refundProfile.readRefundProfileEvidence,oldStart=refundProfile.assertRefundStart,oldBinding=refundProfile.assertRefundBinding,oldResource=refundStore.assertRefundResource;
   const profileText=JSON.stringify({kind:'JOINPAY_REFUND_PROFILE_V1',operation:'SUBMIT',purpose:'MERCHANT_REFUND',database,runtimeUser:'zzsh_completion_synth_probe',merchantIdentityId:'synthetic-merchant',merchantNo:'12345',profileId:'synthetic-profile',keyVersionRef:'synthetic-key-ref',notifyUrl:'https://fixture.invalid/refund',fundsAccount:'SETTLED'});

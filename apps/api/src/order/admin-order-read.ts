@@ -8,7 +8,7 @@ import { projectPublicAttributeDisplay } from "../supply/listing-query";
 import { frozenResourceLines } from "./frozen-listing-read";
 import { conflict, invalid, notFound } from "../supply/supply-util";
 import { escapeLike } from "../supply/catalog";
-import { legacyContinuationReady, legacyEpochTimestamp, legacyMoneyCents, legacyOrderReadState, LEGACY_CONTINUATION_COMPLETED_AT_SQL, LEGACY_ORDER_STATUS_SQL } from "./legacy-order-read";
+import { legacyContinuationReady, legacyEpochTimestamp, legacyMoneyCents, legacyOrderReadState, LEGACY_CONTINUATION_CANCELLED_AT_SQL, LEGACY_CONTINUATION_COMPLETED_AT_SQL, LEGACY_ORDER_STATUS_SQL } from "./legacy-order-read";
 import { formatDecimalExact, parseNonNegativeDecimal } from "../supply/decimal";
 import { settlementConfirmationReady, type SettlementConfirmationFacts } from "./settlement";
 import { readDirectoryUserSummaries, type DirectoryUserSummary } from "../auth/user-directory-summary";
@@ -49,7 +49,7 @@ const NATIVE_RECORD = `to_jsonb(o)||jsonb_build_object('rental_amount_cents',o.r
     'first_response_at',to_jsonb(g)->>'first_response_at','remind_due_at',to_jsonb(g)->>'remind_due_at',
     'add_round',COALESCE((to_jsonb(g)->>'add_round')::int,0),'escalation_state',COALESCE(to_jsonb(g)->>'escalation_state','NOT_STARTED'))`;
 const LEGACY_RECORD = (continuationReady: boolean) => `to_jsonb(l)||jsonb_build_object('due_amount_cents',l.due_amount_cents::text,'recorded_paid_amount_cents',l.recorded_paid_amount_cents::text,'deposit_amount_cents',l.deposit_amount_cents::text,
-    'source_created_at',${utc('l.source_created_at')},'source_paid_at',${utc('l.source_paid_at')},'source_cancelled_at',${utc('l.source_cancelled_at')},'source_completed_at',${utc(continuationReady ? LEGACY_CONTINUATION_COMPLETED_AT_SQL : "l.source_completed_at")},
+    'source_created_at',${utc('l.source_created_at')},'source_paid_at',${utc('l.source_paid_at')},'source_cancelled_at',${utc(continuationReady ? LEGACY_CONTINUATION_CANCELLED_AT_SQL : 'l.source_cancelled_at')},'source_completed_at',${utc(continuationReady ? LEGACY_CONTINUATION_COMPLETED_AT_SQL : "l.source_completed_at")},
     'continuation_stage',h.stage,
     'owner_name',ou.name,'renter_name',ru.name,'account_no',a.display_no)`;
 

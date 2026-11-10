@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { canonicalize } from "../supply/content-hash";
-import { addDecimal, DecimalError, divideToScale, multiplyDecimal, parseNonNegativeDecimal, parseSignedDecimal, subtractDecimal, formatDecimalAtScale, type Decimal } from "../supply/decimal";
+import { addDecimal, DecimalError, decimalToBigInt, divideToScale, multiplyDecimal, parseNonNegativeDecimal, parseSignedDecimal, subtractDecimal, formatDecimalAtScale, formatScaledInteger, type Decimal } from "../supply/decimal";
 
 /** Old settlement arithmetic. Plans only: no database, clock, route, or ledger write. */
 export const LEGACY_CONTINUATION_CALC_VERSION = "legacy-continuation-calc.v1";
@@ -29,6 +29,7 @@ export type LegacyContinuationEvidence = {
 type Caller = { role: "renter" | "owner" | "admin" | "other"; legacyUserId: string; onBehalf?: "renter" | "owner" };
 export type LegacyCommand =
   | { kind: "preview" | "propose"; caller: Caller; quantities: LegacyQuantities }
+  | { kind: "support_cancel"; caller: Caller; refundCents: string; ownerCents: string }
   | { kind: "confirm" | "reject" | "hold" | "release" | "confiscate"; caller: Caller };
 export type CalcRefusal = { ok: false; code: string; amounts: Record<string, string | null> };
 export const LEGACY_REJECT_ASSIGNMENTS = {
@@ -216,7 +217,7 @@ export function planLegacyContinuation(evidence: LegacyContinuationEvidence, com
   let checked: LegacyContinuationEvidence;
   try { checked = admitLegacyEvidence(evidence.source); } catch { return refuse("EVIDENCE_SCHEMA"); }
   if (checked.parameterDigest !== evidence.parameterDigest) return refuse("EVIDENCE_DIGEST_MISMATCH");
-  if (evidence.admission !== "PARAMETER_COMPLETE" || checked.admission !== "PARAMETER_COMPLETE") return refuse("EVIDENCE_ISOLATED");
+  if (command.kind !== "support_cancel" && (evidence.admission !== "PARAMETER_COMPLETE" || checked.admission !== "PARAMETER_COMPLETE")) return refuse("EVIDENCE_ISOLATED");
   const source = checked.source;
   const caller = command.caller;
   if (caller.role === "other" && ["preview", "propose", "confirm", "reject"].includes(command.kind)) return refuse("NOT_PARTY");
@@ -224,6 +225,27 @@ export function planLegacyContinuation(evidence: LegacyContinuationEvidence, com
   if (caller.role === "admin" && ["preview", "propose"].includes(command.kind) && !caller.onBehalf) return refuse("STAFF_ROLE_INVALID");
   const party = caller.role === "renter" ? source.renterId : caller.role === "owner" ? source.ownerId : null;
   if (party !== null && caller.legacyUserId !== party) return refuse("NOT_PARTY");
+  if (command.kind === "support_cancel") {
+    if (caller.role !== "admin" || !["3", "8", "9"].includes(source.orderStatus)) return refuse("STATUS_INVALID");
+    if (!["0", "2"].includes(source.isSettle)) return refuse("DEPOSIT_ALREADY_SETTLED");
+    if (!/^(0|[1-9]\d{0,15})$/.test(command.refundCents) || !/^(0|[1-9]\d{0,15})$/.test(command.ownerCents)) return refuse("CANCEL_AMOUNT_INVALID");
+    const payment=Array.isArray(source.paidPay)?source.paidPay[0]:undefined;
+    const sourceId=/^[1-9]\d{0,23}$/;
+    if (!sourceId.test(source.legacyOrderId ?? "") || !sourceId.test(source.renterId ?? "") || !sourceId.test(source.ownerId ?? "") || !sourceId.test(source.accountId ?? "")
+      || source.payMoney === null || !Array.isArray(source.paidPay) || source.paidPay.length !== 1 || !payment || !sourceId.test(payment.id ?? "")
+      || !/^[A-Za-z0-9_-]{1,50}$/.test(payment.payOrderSn ?? "") || payment.orderId !== undefined && payment.orderId !== source.legacyOrderId
+      || !moneyEqual(source.payMoney,payment.payMoney)) return refuse("PAYMENT_BASIS_UNAVAILABLE");
+    if (!Array.isArray(source.commissions) || source.commissions.some(row => !sourceId.test(row.id ?? "") || !sourceId.test(row.beneficiaryId ?? "") || !["1","2","3"].includes(row.status))) return refuse("COMMISSION_SOURCE_UNAVAILABLE");
+    if (new Set(source.commissions.map(row=>row.id)).size!==source.commissions.length) return refuse("COMMISSION_SOURCE_UNAVAILABLE");
+    if (source.commissions.some(row => row.status === "2")) return refuse("COMMISSION_ALREADY_PAID");
+    let paid:bigint;try {paid=decimalToBigInt(parseNonNegativeDecimal(source.payMoney,2,"legacy payment"),2);}catch{return refuse("PAYMENT_BASIS_UNAVAILABLE");}
+    const refund=BigInt(command.refundCents),owner=BigInt(command.ownerCents);
+    if(paid<=0n||refund+owner>paid)return refuse("CANCEL_AMOUNT_INVALID");
+    const yuan=(value:bigint)=>formatScaledInteger(value,2);
+    return finish(evidence,command,{kind:command.kind,nextStatus:"5",isSettle:"0",isAdvanceSet:null,
+      amounts:{payMoney:yuan(paid),saleEarnings:yuan(owner),ownerNet:yuan(owner),returnOrderMoney:yuan(refund),refundNet:yuan(refund),
+        detainMoney:"0.00",fullPayoutMoney:"0.00",platformContribution:yuan(paid-refund-owner),commissionPool:"0.00"},commissionRevisions:[]});
+  }
   if (command.kind === "hold" || command.kind === "release" || command.kind === "confiscate") {
     if (caller.role !== "admin") return refuse("DEPOSIT_ACTOR_INVALID");
     if (command.kind === "hold" && source.isSettle !== "0") return refuse("DEPOSIT_STATE_INVALID");

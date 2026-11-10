@@ -59,6 +59,13 @@ test('renter sees a simulated old-order refund without a bank-arrival claim',asy
  const p=await setup(t,{read:async()=>view({stage:'4',capabilities:[],duties:[duty]})});await p.render(React.createElement(p.LegacyContinuationPanel,{orderId:id,party:'renter'}));
  assert.match(p.host.textContent,/模拟退款已记录，不代表真实退款或到账/);assert.doesNotMatch(p.host.textContent,/渠道已确认退款/);
 });
+test('cancelled legacy order shows its pending refund without claiming channel success',async t=>{
+ const duty={id:'refund',kind:'RENTER_REFUND',amountCents:'5000',status:'PENDING',settledBy:null};
+ const p=await setup(t,{read:async()=>view({stage:'5',availability:'ISOLATED',capabilities:[],duties:[duty],refundDueAt:'2026-11-14T08:00:00Z'})});
+ await p.render(React.createElement(p.LegacyContinuationPanel,{orderId:id,party:'renter',readOnly:true}));
+ assert.match(p.host.textContent,/订单已取消/);assert.match(p.host.textContent,/租客退款/);assert.match(p.host.textContent,/¥50\.00/);
+ assert.match(p.host.textContent,/到账以实际退款进度为准/);assert.doesNotMatch(p.host.textContent,/渠道已确认退款|提交结算方案|确认提交/);
+});
 test("legacy in-flight renter sees units, explicit zero items and the disclosed early fee before submitting",async t=>{
  let submitted;
  const p=await setup(t,{read:async()=>view({stage:"3",quantities:null,capabilities:["propose"],amounts:{},commandFingerprints:{}}),

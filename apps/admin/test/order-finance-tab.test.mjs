@@ -36,6 +36,10 @@ test('separately authorized refund summary survives missing finance-document per
  const ui=await setup(t);await ui.render({state:'forbidden',distribution,refundSummary:{contractVersion:'v1',integration:'INTEGRATED',intents:[{intentId:'r2',refundOrderNo:'R-2',amount:{cents:'1500',currency:'CNY'},localState:'PROCESSING',budgetDisposition:'ALLOCATED',requiresReview:false,bankArrival:'UNKNOWN'}],bankArrival:'UNKNOWN'}});
  assert.match(ui.node.textContent,/无权查看本单资金凭证/);assert.match(ui.node.textContent,/R-2/);assert.match(ui.node.textContent,/15\.00 元/);assert.match(ui.node.textContent,/仅覆盖汇聚来源/);
 });
+test('refund marked for review does not present local success as its current state',async t=>{
+ const ui=await setup(t);await ui.render({state:'forbidden',distribution,refundSummary:{contractVersion:'v1',integration:'INTEGRATED',intents:[{intentId:'r2',refundOrderNo:'R-2',amount:{cents:'1500',currency:'CNY'},localState:'SUCCEEDED',budgetDisposition:'CONSUMED',requiresReview:true,bankArrival:'UNKNOWN'}],bankArrival:'UNKNOWN'}});
+ assert.match(ui.node.textContent,/状态需核对/);assert.doesNotMatch(ui.node.textContent,/本地记录成功/);
+});
 test('legacy source total is not presented as a current refund or ledger posting',async t=>{
  const ui=await setup(t),old=evidence({documentRef:'LEGACY_ORDER:l1',posting:{state:'UNKNOWN',ref:null,postedAt:null},captured:unknown(),ownerNet:unknown(),refundPayable:unknown(),platformContribution:unknown(),historicalRefund:known('1080'),business:{payment:{state:'LEGACY_RECORDED_PAID',amount:known('7680'),occurredAt:null},settlementState:'LEGACY_RECORDED_COMPLETE',legacyCompletedAmounts:{ownerEarnings:known('6000'),refundAmount:known('1080')},paymentAttempts:[],refundOrders:[],reasonCodes:[]}});
  await ui.render({state:'ready',evidence:old,distribution});assert.match(ui.node.textContent,/旧平台记录已付款/);assert.match(ui.node.textContent,/退款金额原记/);assert.equal((ui.node.textContent.match(/10\.80 元/g)??[]).length,1);assert.doesNotMatch(ui.node.textContent,/退款已到账|已记入号主可用余额/);

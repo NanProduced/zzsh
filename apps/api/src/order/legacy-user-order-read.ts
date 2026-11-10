@@ -6,7 +6,7 @@ import { publicAccountNumber } from "../supply/account-number";
 import { declaredTitleOrNull } from "../supply/publishing";
 import { canonicalize } from "../supply/content-hash";
 import { historicalObservationDisplay, typedHistoricalOrderReference } from "../finance/legacy-observation-display";
-import { legacyContinuationReady, legacyEpochTimestamp, legacyMoneyCents, legacyOrderLifecycleStage, legacyOrderReadState, LEGACY_CONTINUATION_COMPLETED_AT_SQL, LEGACY_ORDER_STATUS_SQL } from "./legacy-order-read";
+import { legacyContinuationReady, legacyEpochTimestamp, legacyMoneyCents, legacyOrderLifecycleStage, legacyOrderReadState, LEGACY_CONTINUATION_CANCELLED_AT_SQL, LEGACY_CONTINUATION_COMPLETED_AT_SQL, LEGACY_ORDER_STATUS_SQL } from "./legacy-order-read";
 
 export type LegacyUserOrderFilter = {
   party: "renter" | "owner";
@@ -142,7 +142,7 @@ const utc = (column: string) => `to_char(${column} AT TIME ZONE 'UTC','YYYY-MM-D
 export function legacyUserOrderFields(continuationReady: boolean): string { return `l.id,l.original_order_no AS "displayNo",l.source_order_status AS "sourceOrderStatus",l.source_pay_status AS "sourcePayStatus",h.stage AS "continuationStage",l.source_snapshot->>'is_delete' AS "sourceDeletedFlag",
  l.owner_user_id AS "ownerUserId",l.renter_user_id AS "renterUserId",l.game_id AS "gameId",CASE WHEN a.owner_user_id=$1 THEN v.title ELSE NULL END AS title,
  l.account_id AS "accountId",a.display_no AS "accountDisplayNo",COALESCE(a.owner_user_id=$1,false) AS "accountReadable",
- ${utc("l.source_created_at")} AS "createdAt",${utc("l.source_paid_at")} AS "paidAt",${utc("l.source_cancelled_at")} AS "cancelledAt",${utc(continuationReady ? LEGACY_CONTINUATION_COMPLETED_AT_SQL : "l.source_completed_at")} AS "completedAt",
+ ${utc("l.source_created_at")} AS "createdAt",${utc("l.source_paid_at")} AS "paidAt",${utc(continuationReady ? LEGACY_CONTINUATION_CANCELLED_AT_SQL : "l.source_cancelled_at")} AS "cancelledAt",${utc(continuationReady ? LEGACY_CONTINUATION_COMPLETED_AT_SQL : "l.source_completed_at")} AS "completedAt",
  l.due_amount_cents::text AS "dueCents",l.recorded_paid_amount_cents::text AS "paidCents",l.deposit_amount_cents::text AS "depositCents",
  l.source_snapshot->>'goods_money' AS "goodsYuan",l.source_snapshot->>'expend_pay_money' AS "itemsYuan",l.source_snapshot->>'return_order_money' AS "refundYuan",
  l.source_snapshot->>'sale_earnings' AS "saleEarningsYuan",l.source_snapshot->>'full_payout_money' AS "fullPayoutFeeYuan",
