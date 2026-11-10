@@ -1161,7 +1161,7 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
     const element = target as { closest?: (selector: string) => HTMLElement | null } | null;
     if (!element || typeof element.closest !== "function") return null;
     const content = element.closest(".im-wb-bub, .message-media, .message-image, .order-card, p");
-    return content ? content.closest("[data-message-id]") : null;
+    return content ? content.closest("[data-message-id][tabindex]") : null;
   };
   const findSelectedMessage = (id: string | undefined): SupportMessage | null => id ? selectedMessages.find((item) => item.id === id) ?? null : null;
   const openMessageMenu = (message: SupportMessage | null, x: number, y: number, row: HTMLElement | null) => {

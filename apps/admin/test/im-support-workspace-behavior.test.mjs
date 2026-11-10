@@ -1005,7 +1005,7 @@ test("consultation message menu follows message type, send capability and keyboa
 
   const ownRow = rootNode.querySelector('[data-message-id="srv-own"]');
   await act(async () => {
-    ownRow.dispatchEvent(new browser.PointerEvent("pointerdown", { bubbles: true, pointerType: "touch", clientX: 200, clientY: 150 }));
+    surfaceOf(ownRow).dispatchEvent(new browser.PointerEvent("pointerdown", { bubbles: true, pointerType: "touch", clientX: 200, clientY: 150 }));
     await new Promise((resolve) => setTimeout(resolve, 600));
   });
   await settle();
