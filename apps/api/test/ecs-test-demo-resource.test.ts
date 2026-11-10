@@ -190,6 +190,7 @@ test("demo runtime refuses a partial cashier schema before exposing test payment
     if(expected)await assert.rejects(preflightEcsTestDemoRuntime(pool,runtime),error=>error instanceof Error&&error.message===expected);
     else await preflightEcsTestDemoRuntime(pool,runtime);
     assert.equal(calls.some(sql=>/^(INSERT|UPDATE|DELETE|ALTER|CREATE|TRUNCATE)\b/i.test(sql)),false);
+    assert.ok(calls.some(sql=>sql.includes("f6f549e979cb43d7e85f8ff6d0ab11471b7434acdd9ace3a432b1f6c4fc93608") && sql.includes("ANY(expected.digests)")));
     if(!baseReady)assert.equal(calls.some(sql=>sql.includes("test_channel_request_guard")),false);
   }
 });

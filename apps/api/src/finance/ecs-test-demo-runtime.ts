@@ -104,13 +104,13 @@ export async function preflightEcsTestDemoRuntime(pool: Pool, assembly: EcsTestD
       AND COALESCE(has_column_privilege(current_user,to_regclass('zzsh_order.controlled_payout_operation'),'payout_key','INSERT'),false)
       AND COALESCE(has_column_privilege(current_user,to_regclass('zzsh_order.withdrawal_provider_fact'),'result_key','INSERT'),false)
       AND NOT EXISTS(SELECT 1 FROM (VALUES
-        ('zzsh_order.guard_controlled_operation()','2a746e49329750525137238bf901240e65202fb30438fb73de0f2bca7fcf8254'),
-        ('zzsh_order.guard_sandbox_withdrawal_destination()','81e3335ebfeb2cb77ea95f5652eefe64bffa4cf6b4ae177b305d307e5193f3b2'),
-        ('zzsh_order.guard_sandbox_withdrawal_intent()','42e8ca7dd1f2ea9a72c65d11420c5af5753ec1e78c88937a1f3d41aa7ab16d4b'),
-        ('zzsh_order.guard_local_refund_source()','ef171dfa5ec8d0ccba1fdbe23613f96af7c11e02794afc1e8b7c76afa4203d8b')) expected(signature,digest)
+        ('zzsh_order.guard_controlled_operation()',ARRAY['2a746e49329750525137238bf901240e65202fb30438fb73de0f2bca7fcf8254']),
+        ('zzsh_order.guard_sandbox_withdrawal_destination()',ARRAY['81e3335ebfeb2cb77ea95f5652eefe64bffa4cf6b4ae177b305d307e5193f3b2']),
+        ('zzsh_order.guard_sandbox_withdrawal_intent()',ARRAY['42e8ca7dd1f2ea9a72c65d11420c5af5753ec1e78c88937a1f3d41aa7ab16d4b']),
+        ('zzsh_order.guard_local_refund_source()',ARRAY['ef171dfa5ec8d0ccba1fdbe23613f96af7c11e02794afc1e8b7c76afa4203d8b','f6f549e979cb43d7e85f8ff6d0ab11471b7434acdd9ace3a432b1f6c4fc93608'])) expected(signature,digests)
         LEFT JOIN pg_proc p ON p.oid=to_regprocedure(expected.signature)
         WHERE p.oid IS NULL OR p.proowner IS DISTINCT FROM (SELECT nspowner FROM pg_namespace WHERE nspname='zzsh_order')
-          OR encode(sha256(convert_to(replace(pg_get_functiondef(p.oid),chr(13)||chr(10),chr(10)),'UTF8')),'hex') IS DISTINCT FROM expected.digest)
+          OR NOT (encode(sha256(convert_to(replace(pg_get_functiondef(p.oid),chr(13)||chr(10),chr(10)),'UTF8')),'hex')=ANY(expected.digests)))
       AND NOT EXISTS(SELECT 1 FROM (VALUES('zzsh_order.withdrawal_destination','withdrawal_destination_scenario_check'),
         ('zzsh_order.controlled_payout_operation','controlled_payout_operation_scenario_check')) expected(relation_name,name)
         WHERE NOT EXISTS(SELECT 1 FROM pg_constraint p WHERE p.conrelid=to_regclass(expected.relation_name)
