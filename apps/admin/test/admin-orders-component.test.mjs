@@ -596,22 +596,15 @@ test('master: order detail separates lack of permission, unknown parts and verif
   assert.match(node.textContent,/原单记录，合计尚未核对/);assert.match(node.textContent,/完整构成仍未确认/);assert.match(node.textContent,/未记录付款/);assert.doesNotMatch(node.textContent,/本单冻结账号摘要 · 历史/);
 });
 
-test('order detail exposes pending original-refund recovery above tabs and keeps its original key on navigation', async t => {
-  const {browser,root,node,AdminOrderChainView}=await setup(t),calls=[];
-  const previousStorage=globalThis.sessionStorage;globalThis.sessionStorage=browser.sessionStorage;t.after(()=>{globalThis.sessionStorage=previousStorage;});
+test('order detail does not show retired abnormal refund controls or data', async t => {
+  const {root,node,AdminOrderChainView}=await setup(t),calls=[];
   const id='pending-refund',snap=snapshotFor('pending-refund-admin'),value={...chainOrder,id,displayNo:'PENDING-REFUND',status:'PAID',source:{origin:'NATIVE'}};
   snap.permissions=[...snap.permissions,'order.settlement.write'];
-  const scope=JSON.stringify([snap.adminUserId,snap.session.id,id,'REVIEW_CONFIRMATION',null]),storageKey=`zzsh.admin.original-refund.${scope}`;
-  const pending={scope,key:'original-key-1',reference:'confirmation-1',body:{confirmationId:'confirmation-1',reason:'已核对原款'}};
-  browser.sessionStorage.setItem(storageKey,JSON.stringify(pending));
-  globalThis.fetch=async(url,init={})=>{calls.push({url:String(url),method:init.method??'GET'});if(String(url).includes('readMode=combined'))return response({order:value});if(String(url).endsWith('/refunds'))return response({items:[]});return response({error:{code:'NOT_FOUND'}},404);};
+  globalThis.fetch=async(url,init={})=>{calls.push({url:String(url),method:init.method??'GET'});if(String(url).includes('readMode=combined'))return response({order:value,refundSummary:{integration:'INTEGRATED',intents:[{intentId:'retired_intent',refundOrderNo:'RETIRED_REFUND',basisKind:'REVIEW_CONFIRMATION',amount:{cents:'100',currency:'CNY'},localState:'UNKNOWN',requiresReview:true}],abnormalResponsibilities:[{confirmationId:'retired_record'}]}});if(String(url).endsWith('/refunds'))return response({items:[]});return response({error:{code:'NOT_FOUND'}},404);};
   await act(async()=>root.render(createElement(AdminOrderChainView,{...chainProps('pending-refund-admin'),snapshot:snap,objectOnly:true,initialOrderId:id})));
-  await until(()=>node.textContent.includes('本单有退款记录或原请求需要核对'));
+  await until(()=>node.textContent.includes('PENDING-REFUND'));
   assert.match(node.textContent,/本单账号和双方/);assert.match(node.textContent,/关键费用/);
-  await act(async()=>buttonNamed(node,'查看资金与退款').click());
-  await until(()=>node.querySelector('.oc-exception')?.open===true);
-  assert.match(node.querySelector('.oc-exception').textContent,/存在原请求待恢复/);
-  assert.equal(browser.sessionStorage.getItem(storageKey),JSON.stringify(pending));
+  assert.doesNotMatch(node.textContent,/核对原路退款责任|登记全额原路退款意图|retired_record|RETIRED_REFUND/);
   assert(calls.every(call=>call.method==='GET'));
 });
 test('first, refresh and page read errors remain failures; expired restore context rereads page one', async t => {
@@ -658,7 +651,7 @@ test('CHAIN refund intents keep their own coverage, budget and review facts apar
   assert.match(text,/预算已使用/);assert.match(text,/预算已释放/);
   assert.match(text,/渠道到账未取得依据/);assert.equal(text.includes('银行已到账'),false);
 });
-test('CHAIN abnormal refund shows readable reasons without claiming channel arrival', async t => {
+test('CHAIN ignores retired abnormal refund data from an older response', async t => {
   const {root,node,AdminOrderChainView}=await setup(t);
   const value={...chainOrder,id:'refund-abnormal',displayNo:'REFUND-ABNORMAL',status:'PAID',source:{origin:'NATIVE'}};
   const refundSummary={contractVersion:'admin-order-refund-summary.v1',integration:'INTEGRATED',bankArrival:'UNKNOWN',reasonCodes:[],intents:[],abnormalResponsibilities:[{
@@ -667,8 +660,7 @@ test('CHAIN abnormal refund shows readable reasons without claiming channel arri
   globalThis.fetch=async url=>String(url).includes('readMode=combined')?response({order:value,refundSummary}):response({error:{code:'NOT_FOUND'}},404);
   await act(async()=>root.render(createElement(AdminOrderChainView,{...chainProps('refund-abnormal'),objectOnly:true,initialOrderId:value.id})));
   await until(()=>node.textContent.includes('REFUND-ABNORMAL'));
-  assert.match(node.textContent,/重复支付/);assert.match(node.textContent,/原订单号不明确/);assert.match(node.textContent,/退款关联信息不一致/);assert.match(node.textContent,/退款资料需核对/);
-  assert.doesNotMatch(node.textContent,/DUPLICATE_PAYMENT|FUTURE_STATE|ORIGINAL_ORDER_NO_AMBIGUOUS|ABNORMAL_INTENT_BINDING_MISMATCH|FUTURE_ISSUE|银行已到账/);
+  assert.doesNotMatch(node.textContent,/重复支付|原订单号不明确|退款关联信息不一致|DUPLICATE_PAYMENT|FUTURE_STATE|ORIGINAL_ORDER_NO_AMBIGUOUS|ABNORMAL_INTENT_BINDING_MISMATCH|FUTURE_ISSUE|银行已到账/);
 });
 test('optional finance/group reads are independent and never call controlled settlement or infer rental start', async t => {
   const {root,node,AdminOrderChainView}=await setup(t);const calls=[];let finishFinance,mode='slow';

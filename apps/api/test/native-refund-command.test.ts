@@ -53,7 +53,7 @@ const input = { actor: ACTOR, orderId: "order_1", amountCents: "1200", reason: "
 
 test('未开租全额退款命令沿同一管理员授权，不收用户金额；提交未知保留原键',async t=>{
  mocks(t);let n=0;
- t.mock.method(prestartStore,'createPrestartFormalRefundIntent',async(_c:any,v:any)=>{n++;assert.equal(v.terminationId,'term_1');assert.equal(v.idempotencyKey,'original_1');assert.equal('amountCents' in v,false);
+ t.mock.method(prestartStore,'createLiabilityFormalRefundIntent',async(_c:any,v:any)=>{n++;assert.equal(v.terminationId,'term_1');assert.equal(v.idempotencyKey,'original_1');assert.equal('amountCents' in v,false);
   return{kind:'ALLOCATED',intentId:'refund_1',refundOrderNo:'RF'+'a'.repeat(28),state:'READY',budgetDisposition:'ALLOCATED'} as any;});
  t.mock.method(securityCore,'recordAudit',async()=>{});
  const request={actor:ACTOR,orderId:'order_1',terminationId:'term_1',idempotencyKey:'original_1',requestId:'req_1'};
@@ -61,7 +61,7 @@ test('未开租全额退款命令沿同一管理员授权，不收用户金额�
  await assert.rejects(requestAdminPrestartNativeRefund(model({commitLoss:true}).pool,execution,request),(e:any)=>e.originalKey==='original_1');assert.equal(n,2);
 });
 test('未开租退款拒绝finance.read命令替代和跨订单termination，不触碰分配器',async t=>{
- mocks(t,{access:{...ACCESS,permissions:new Set(['finance.read'])}});let n=0;t.mock.method(prestartStore,'createPrestartFormalRefundIntent',async()=>{n++;throw Error('UNEXPECTED');});
+ mocks(t,{access:{...ACCESS,permissions:new Set(['finance.read'])}});let n=0;t.mock.method(prestartStore,'createLiabilityFormalRefundIntent',async()=>{n++;throw Error('UNEXPECTED');});
  const request={actor:ACTOR,orderId:'order_1',terminationId:'term_1',idempotencyKey:'original_1',requestId:'req_1'};
  await assert.rejects(requestAdminPrestartNativeRefund(model().pool,execution,request),(e:any)=>e.status===403);assert.equal(n,0);
  t.mock.method(adminAuthorization,'loadEffectiveAdminAccess',async()=>ACCESS);

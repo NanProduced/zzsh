@@ -7,9 +7,11 @@ import { assertSupportOrderAccess, type ManualCloseActor } from "./manual-close"
 import { lockSettlement } from "./settlement-record";
 import { readPrestartRefundProgress } from "./prestart-refund-store";
 import { assertEcsTestDemoOrderAdmission, assertEcsTestDemoResource, demoFinanceScope } from "../finance/ecs-test-demo-resource";
+import { supportPoststartExecutorSafeSql, supportPoststartTriggersSql } from "../finance/support-poststart-schema";
 import type { PrestartPaymentBasis } from "./prestart-termination";
 import {
-  supportCancelEligibility, supportCancelConflict, type SupportCancelFacts, type SupportCancelReason,
+  supportCancelEligibility, supportCancelConflict,supportPoststartCancellationAllocation,supportPoststartCancellationEligibility,
+  type SupportCancelFacts, type SupportCancelReason,
 } from "./support-cancel-model";
 
 const ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
@@ -47,6 +49,28 @@ export async function assertSupportCancelSchema(client: PoolClient) {
     AND (SELECT count(*) FROM pg_trigger WHERE tgrelid=to_regclass('zzsh_order.prestart_termination')
       AND tgname IN('prestart_termination_guard','prestart_request_closure') AND NOT tgisinternal AND tgenabled='O')=2 AS ready`)).rows[0];
   if (row?.ready !== true) throw unavailable("Support cancellation schema is not deployed");
+}
+
+/** Do not cancel a paid order if the corresponding refund executor is only partially installed. */
+export async function supportPoststartSchemaReady(client:PoolClient,controlled:boolean):Promise<boolean> {
+ const row=(await client.query(`SELECT COALESCE(
+  to_regclass('zzsh_order.support_poststart_cancellation') IS NOT NULL
+  AND has_table_privilege(current_user,to_regclass('zzsh_order.support_poststart_cancellation'),'SELECT')
+  AND (${supportPoststartTriggersSql})=12 AND (${supportPoststartExecutorSafeSql})
+  AND NOT EXISTS(SELECT 1 FROM (VALUES
+   ('zzsh_order.cancel_order_after_start(text,bigint,numeric,numeric,text)'),
+   ('zzsh_order.support_poststart_cancellation_complete(text)'),
+   ('zzsh_order.support_cancellation_refund_liability_complete(text)'),
+   ('zzsh_order.support_cancellation_refund_terminal_complete(text)')) f(signature)
+   WHERE to_regprocedure(f.signature) IS NULL OR NOT has_function_privilege(current_user,to_regprocedure(f.signature),'EXECUTE'))
+  AND EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid=to_regclass('zzsh_order.channel_refund_intent')
+   AND conname='channel_refund_current_basis_only' AND convalidated AND position('SUPPORT_CANCELLATION' IN pg_get_constraintdef(oid))>0)
+  AND EXISTS(SELECT 1 FROM pg_index WHERE indexrelid=to_regclass('zzsh_order.support_cancellation_refund_original_key') AND indisvalid AND indisready AND indisunique)
+  AND (NOT $1::boolean OR (to_regclass('zzsh_order.local_controlled_refund_operation') IS NOT NULL
+   AND to_regclass('zzsh_order.local_controlled_refund_evidence') IS NOT NULL
+   AND to_regprocedure('zzsh_order.local_controlled_refund_liability_complete(text)') IS NOT NULL
+   AND to_regprocedure('zzsh_order.local_controlled_refund_terminal_complete(text)') IS NOT NULL)),false) AS ready`,[controlled])).rows[0];
+ return row?.ready===true;
 }
 
 async function factsOf(client: PoolClient, orderId: string): Promise<SupportFactsRow> {
@@ -210,6 +234,39 @@ export async function supportCancelOrder(client: PoolClient, actor: ManualCloseA
   } };
 }
 
+/** 客服可在开租后按原款分配；结算草稿不要求人工预先关闭。 */
+export async function supportCancelAfterOpening(client:PoolClient,actor:ManualCloseActor,input:{
+ orderId:string;expectedOrderRevision:string;reason:string;refundCents:string;ownerCents:string;requestId:string;
+}) {
+ if(!ID.test(input.orderId)||!ID.test(input.requestId))throw new SecurityApiError(400,"INVALID_ARGUMENT","Invalid support cancellation reference");
+ await lockSettlement(client,input.orderId,{...actor,realm:"admin"},"PRESTART_TERMINATION",true);
+ await assertSupportCancelSchema(client);
+ const facts=await factsOf(client,input.orderId),demo=await demoForFacts(client,actor,facts,'WRITE');
+ if(facts.revision!==input.expectedOrderRevision)return supportCancelConflict(input.orderId,"ORDER_CHANGED");
+ const eligibility=supportPoststartCancellationEligibility(modelFacts(facts),demo?.active===true);
+ if(!eligibility.allowed)return supportCancelConflict(input.orderId,eligibility.reason!);
+ const amount=supportPoststartCancellationAllocation({paidCents:facts.amount_cents,previouslyAllocatedCents:'0',
+  refundCents:input.refundCents,ownerCents:input.ownerCents});
+ if(!await supportPoststartSchemaReady(client,facts.payment_source==='CONTROLLED'))throw unavailable("Poststart cancellation or refund schema is not deployed");
+ const value=(await client.query<{value:any}>(`SELECT zzsh_order.cancel_order_after_start($1,$2::bigint,$3::numeric,$4::numeric,$5) AS value`,
+  [input.orderId,input.expectedOrderRevision,amount.refundCents,amount.ownerCents,input.reason])).rows[0]?.value;
+ if(!value||value.orderId!==input.orderId||value.status!=='CANCELLED'||value.paidCents!==amount.paidCents
+  ||value.refundCents!==amount.refundCents||value.ownerCents!==amount.ownerCents
+  ||value.platformContributionCents!==amount.platformContributionCents||value.commissionCents!=='0'||value.channelResult!=='NOT_SUBMITTED')
+  throw unavailable("Poststart cancellation receipt differs");
+ const recorded=(await client.query<{revision:string;cancelled_at:string|null}>(`SELECT revision::text,${utc('cancelled_at')} AS cancelled_at
+  FROM zzsh_order.rental_order WHERE id=$1 AND status='CANCELLED' AND cancel_reason='SUPPORT_AFTER_START_CANCELLED'`,[input.orderId])).rows[0];
+ if(!recorded||recorded.revision!==(BigInt(facts.revision)+1n).toString()||!recorded.cancelled_at)
+  throw unavailable("Poststart cancellation order receipt is unavailable");
+ return {status:200,body:{contractVersion:SUPPORT_CANCEL_VERSION,orderId:input.orderId,
+  orderRevision:recorded.revision,orderStatus:'CANCELLED',cancelReason:'SUPPORT_AFTER_START_CANCELLED',cancelledAt:recorded.cancelled_at,
+  eligibility:{allowed:false,reason:'ALREADY_CANCELLED',refundCents:amount.refundCents,openingConfirmed:true},
+  openingConfirmed:true,supportCancellation:null,refund:null,existing:false,channel:{result:'NOT_SUBMITTED',bankArrival:'UNKNOWN'},
+  poststartCancellation:{caseId:value.caseId,refundCents:amount.refundCents,ownerCents:amount.ownerCents,
+   platformContributionCents:amount.platformContributionCents,commissionCents:'0',reason:input.reason},
+  ...(demo?{simulationScope:demoFinanceScope(demo.resource)}:{})}};
+}
+
 /** 只读预检：金额/资格/已有客服取消与退款进度；不领取、不出网、不补写责任。 */
 export async function readSupportCancellation(client: PoolClient, actor: ManualCloseActor, orderId: string) {
   if (!ID.test(orderId)) throw missing();
@@ -217,17 +274,38 @@ export async function readSupportCancellation(client: PoolClient, actor: ManualC
   await assertSupportCancelSchema(client);
   const facts = await factsOf(client, orderId);
   const demo=await demoForFacts(client,actor,facts,'READ_ORIGINAL');
+  let poststartEligibility=supportPoststartCancellationEligibility(modelFacts(facts),demo?.active===true);
+  if(poststartEligibility.allowed && !await supportPoststartSchemaReady(client,facts.payment_source==='CONTROLLED'))
+    poststartEligibility={allowed:false,reason:'PAYMENT_BASIS_UNAVAILABLE',refundCents:null,openingConfirmed:true};
+  if(facts.status==='CANCELLED'&&facts.cancel_reason==='SUPPORT_AFTER_START_CANCELLED'){
+    const terminalFn=facts.payment_source==='CONTROLLED'?'local_controlled_refund_terminal_complete':'support_cancellation_refund_terminal_complete';
+    const liabilityFn=facts.payment_source==='CONTROLLED'?'local_controlled_refund_liability_complete':'support_cancellation_refund_liability_complete';
+    const row=(await client.query(`SELECT p.id,p.reason,p.refund_cents::text,p.owner_cents::text,p.platform_cents::text,
+      zzsh_order.support_poststart_cancellation_complete(p.id) AS complete,
+      (SELECT CASE WHEN i.payment_source=$2 AND CASE WHEN i.state IN('SUCCEEDED','FAILED') THEN zzsh_order.${terminalFn}(i.id)
+          ELSE zzsh_order.${liabilityFn}(i.id) END IS TRUE THEN i.state ELSE 'UNKNOWN' END
+       FROM zzsh_order.channel_refund_intent i WHERE i.payment_confirmation_id=p.payment_confirmation_id
+       AND i.basis_kind='SUPPORT_CANCELLATION' ORDER BY i.created_at DESC,i.id DESC LIMIT 1) AS refund_state
+      FROM zzsh_order.support_poststart_cancellation p WHERE p.order_id=$1`,[orderId,facts.payment_source])).rows[0];
+    if(!row||row.complete!==true)throw unavailable("Poststart cancellation record is unavailable");
+    return {contractVersion:SUPPORT_CANCEL_VERSION,orderId,orderRevision:facts.revision,orderStatus:facts.status,cancelReason:facts.cancel_reason,
+      cancelledAt:facts.cancelled_at,eligibility:{allowed:false,reason:'ALREADY_CANCELLED',refundCents:row.refund_cents,openingConfirmed:true},
+      poststartEligibility,openingConfirmed:true,supportCancellation:null,refund:null,existing:true,
+      poststartCancellation:{caseId:row.id,reason:row.reason,refundCents:row.refund_cents,ownerCents:row.owner_cents,
+        platformContributionCents:row.platform_cents,commissionCents:'0',refundState:row.refund_state??'NOT_SUBMITTED'},
+      channel:{result:row.refund_state??'NOT_SUBMITTED',bankArrival:'UNKNOWN'},...(demo?{simulationScope:demoFinanceScope(demo.resource)}:{})};
+  }
   const current = await latestSupportTermination(client, orderId);
   if (current) {
     if (current.state !== "REJECTED") {
       const result = await existingResult(client, current, facts, true,demo);
-      return { ...result.body, eligibility: { allowed: false, reason: "ALREADY_CANCELLED" as SupportCancelReason,
+      return { ...result.body,poststartEligibility, eligibility: { allowed: false, reason: "ALREADY_CANCELLED" as SupportCancelReason,
         refundCents: current.payment_basis?.amountCents ?? null, openingConfirmed: facts.opening_confirmed } };
     }
     if (current.state === "REJECTED") {
       const eligibility = supportCancelEligibility(modelFacts(facts),demo?.active===true);
       return { contractVersion: SUPPORT_CANCEL_VERSION, orderId, orderRevision: facts.revision, orderStatus: facts.status,
-        cancelReason: facts.cancel_reason, cancelledAt: facts.cancelled_at, eligibility: { ...eligibility, refundCents: facts.amount_cents },
+        cancelReason: facts.cancel_reason, cancelledAt: facts.cancelled_at, eligibility: { ...eligibility, refundCents: facts.amount_cents },poststartEligibility,
         openingConfirmed: facts.opening_confirmed, supportCancellation: null, refund: null, existing: false, channel: null,
         ...(demo?{simulationScope:demoFinanceScope(demo.resource)}:{}) };
     }
@@ -235,7 +313,7 @@ export async function readSupportCancellation(client: PoolClient, actor: ManualC
   const eligibility = supportCancelEligibility(modelFacts(facts),demo?.active===true);
   return { contractVersion: SUPPORT_CANCEL_VERSION, orderId, orderRevision: facts.revision, orderStatus: facts.status,
     cancelReason: facts.cancel_reason, cancelledAt: facts.cancelled_at,
-    eligibility: { ...eligibility, refundCents: facts.amount_cents },
+    eligibility: { ...eligibility, refundCents: facts.amount_cents },poststartEligibility,
     openingConfirmed: facts.opening_confirmed, supportCancellation: null, refund: null, existing: false, channel: null,
     ...(demo?{simulationScope:demoFinanceScope(demo.resource)}:{}) };
 }

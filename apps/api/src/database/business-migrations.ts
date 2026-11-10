@@ -7,6 +7,7 @@ import { migrate } from "drizzle-orm/node-postgres/migrator";
 import { readMigrationFiles } from "drizzle-orm/migrator";
 import type { Pool, PoolClient } from "pg";
 import { matchesKnown0155LineEndings } from "./business-migration-compat";
+import { supportPoststartTriggersSql,supportPoststartExecutorSafeSql } from "../finance/support-poststart-schema";
 import { compensationTriggersSql, compensationFunctionsSafeSql, compensationIncidentIndexSafeSql } from '../finance/order-compensation-schema';
 
 const IDENTIFIER = /^[a-z][a-z0-9_]{0,62}$/;
@@ -485,6 +486,26 @@ export async function applyRuntimePrivileges(pool: Pick<Pool, "query">, runtimeR
   await configureLocalFinancialSandboxPrivileges(pool, runtimeRole);
   await configureUserAuthThrottlePrivileges(pool, runtimeRole);
   await configureOrderCompensationPrivileges(pool, runtimeRole);
+  await configureSupportPoststartCancellationPrivileges(pool, runtimeRole);
+}
+
+/** 只在取消、账本和退款守卫完整时授予读与受控执行权。 */
+export async function configureSupportPoststartCancellationPrivileges(pool:Pick<Pool,"query">,runtimeRole:string):Promise<void>{
+ const table='zzsh_order.support_poststart_cancellation',role=quoteIdentifier(runtimeRole);
+ const names=['zzsh_order.cancel_order_after_start(text,bigint,numeric,numeric,text)','zzsh_order.support_poststart_cancellation_complete(text)',
+  'zzsh_order.support_cancellation_refund_liability_complete(text)','zzsh_order.support_cancellation_refund_terminal_complete(text)'];
+ const row=(await pool.query(`SELECT to_regclass($1) IS NOT NULL AS present,
+  (SELECT count(*)::int FROM unnest($2::text[]) f(name) WHERE to_regprocedure(f.name) IS NOT NULL) AS functions,
+  (${supportPoststartTriggersSql}) AS triggers,
+  (${supportPoststartExecutorSafeSql}) AS executor_safe`,
+  [table,names])).rows[0];
+ if(!row||typeof row.present!=='boolean'||!Number.isInteger(row.functions)||!Number.isInteger(row.triggers)||typeof row.executor_safe!=='boolean')
+  throw new Error('Poststart cancellation contract inventory unavailable');
+ if(!row.present&&row.functions===0&&row.triggers===0)return;
+ if(!row.present||row.functions!==names.length||row.triggers!==12||!row.executor_safe)throw new Error('Poststart cancellation contract incomplete');
+ await resetRuntimeTablePrivileges(pool,table,'PUBLIC',{select:false});
+ await resetRuntimeTablePrivileges(pool,table,role);
+ await pool.query(`REVOKE ALL ON FUNCTION ${names.join(',')} FROM PUBLIC, ${role}; GRANT EXECUTE ON FUNCTION ${names.join(',')} TO ${role}`);
 }
 
 /** An absent contract is allowed on older databases; a partial one must not receive money-write privileges. */
@@ -1282,10 +1303,14 @@ export async function configureJoinpayFinancialPrivileges(pool: Pick<Pool, "quer
   const columns = (await pool.query<{ name: string; attname: string }>(`/* joinpay financial columns */ SELECT t.name,a.attname FROM unnest($1::text[]) AS t(name)
     JOIN pg_attribute a ON a.attrelid=to_regclass(t.name) AND a.attnum>0 AND NOT a.attisdropped ORDER BY t.name,a.attnum`, [tables.map(t => t.name)])).rows;
   if (columns.some(c => !tables.some(t => t.name === c.name) || typeof c.attname !== "string")) throw new Error("JoinPay financial column inventory differs");
+  const partyCancellationColumns=['user_id','user_session_id','acting_party','reason_code'];
+  const partyCancellationCount=columns.filter(c=>c.name===prestart[1]!.name&&partyCancellationColumns.includes(c.attname)).length;
+  if(partyCancellationCount!==0&&partyCancellationCount!==partyCancellationColumns.length)throw new Error('Prestart party cancellation is partially deployed');
+  if(partyCancellationCount===partyCancellationColumns.length)prestart[1]!.insert+=' '+partyCancellationColumns.join(' ');
   const basisColumns=['basis_kind','liability_root_id','liability_event_id'];
   const basisCount=columns.filter(c=>c.name===refund[0]!.name&&basisColumns.includes(c.attname)).length;
   if(basisCount!==0&&basisCount!==3||hasPrestart&&basisCount!==3)throw new Error('Refund liability extension is partially deployed');
-  if(basisCount===3){refund[0]!.insert+=' '+basisColumns.join(' ');functions.push('zzsh_order.native_abnormal_refund_liability_complete(text)','zzsh_order.native_abnormal_refund_terminal_complete(text)');}
+  if(basisCount===3) refund[0]!.insert+=' '+basisColumns.join(' ');
   // This column belongs to the separately checked local group, not the formal provider's write surface.
   if (hasSandbox || hasDemoSandbox) refund[0]!.metadata += ' sandbox_registration_ref';
   if (hasDemoSandbox) refund[0]!.metadata += ' demo_terminal_evidence_id';

@@ -8,7 +8,7 @@ import * as adminIdentity from "../src/auth/auth-security";
 import * as adminAccess from "../src/auth/admin-authorization";
 import * as settlement from "../src/order/settlement-record";
 import * as liability from "../src/finance/prestart-refund-liability";
-import { readPrestartTermination, requestPrestartTermination, reviewPrestartTermination, type PrestartPaymentBasis } from "../src/order/prestart-termination";
+import { cancelPrestartTermination, readPrestartTermination, reviewPrestartTermination, type PrestartPaymentBasis } from "../src/order/prestart-termination";
 
 const renter={realm:"user" as const,userId:"renter",sessionId:"sr"},owner={realm:"user" as const,userId:"owner",sessionId:"so"};
 const support={realm:"admin" as const,userId:"staff",sessionId:"sa"};
@@ -30,7 +30,8 @@ function fixture(t:any,patch:Record<string,unknown>={}){
   if(sql.startsWith('INSERT INTO zzsh_order.prestart_termination\n')){row={id:values[0],order_id:values[1],requested_by_user_id:values[2],requested_by_party:values[3],reason:values[4],
    basis_digest:values[5],payment_basis:JSON.parse(values[6]),state:'REQUESTED',revision:'1',created_at:'2026-10-28T00:00:00.000000Z',updated_at:'2026-10-28T00:00:00.000000Z',
    approved_at:null,liability_root_id:null,liability_event_id:null,last_reason:null};return{rows:[row],rowCount:1};}
-  if(sql.startsWith('UPDATE zzsh_order.prestart_termination SET state=')){row={...row,state:values[1],revision:(BigInt(row.revision)+1n).toString(),last_reason:values[2],approved_at:values[1]==='APPROVED'?'2026-10-28T00:00:01.000000Z':null};return{rows:[row],rowCount:1};}
+  if(sql.startsWith('UPDATE zzsh_order.prestart_termination SET state=')){const direct=sql.includes("state='APPROVED'"),state=direct?'APPROVED':values[1];
+   row={...row,state,revision:(BigInt(row.revision)+1n).toString(),last_reason:direct?values[1]:values[2],approved_at:state==='APPROVED'?'2026-10-28T00:00:01.000000Z':null};return{rows:[row],rowCount:1};}
   if(sql.startsWith('UPDATE zzsh_order.prestart_termination SET liability_root')){row.liability_root_id=values[1];row.liability_event_id=values[2];return{rows:[],rowCount:1};}
   if(sql.startsWith('UPDATE zzsh_order.rental_order SET status=')){facts.status='CANCELLED';return{rows:[],rowCount:1};}
   if(sql.includes('INSERT INTO "zzsh_iam"."audit_event"')||sql.startsWith('INSERT INTO zzsh_order.prestart_termination_decision'))return{rows:[],rowCount:1};
@@ -47,23 +48,33 @@ function fixture(t:any,patch:Record<string,unknown>={}){
   state:'REQUESTED',revision:'1',basis_digest:basis.digest,payment_basis:basis,created_at:'2026-10-28T00:00:00.000000Z',updated_at:'2026-10-28T00:00:00.000000Z',approved_at:null,
   liability_root_id:null,liability_event_id:null,last_reason:null};}};
 }
-const request={orderId:'order_1',expectedOrderRevision:'1',reason:'双方尚未正式开租',requestId:'req_1'};
 const review={orderId:'order_1',terminationId:'pterm_1',expectedRevision:'1',decision:'APPROVE',assessment:'NO_USE_NO_DISPUTE',reason:'已核实无使用和费用争议',requestId:'req_2'};
 
-test('本人租客/号主可申请；号主不取得租客原款金额，申请不记钱/改订单状态',async t=>{
- for(const actor of [renter,owner]){const h=fixture(t),r=await requestPrestartTermination(h.client,actor,request);
-  assert.equal(r.status,200);assert.equal(r.body.request?.fullRefundCents,actor===renter?'15908':null);
-  assert.equal(h.facts.status,'PAID');assert.equal(h.recognized.length,0);assert.equal(h.calls.some(c=>c.sql.includes('INSERT INTO zzsh_order.finance_')),false);}
+test('双方未开租可自行取消，直接按原款记全额退款责任且无客服决定',async t=>{
+ for(const [actor,reasonCode] of [[renter,'RENTER_WRONG_ACCOUNT'],[owner,'OWNER_UNAVAILABLE']] as const){
+  const h=fixture(t),r=await cancelPrestartTermination(h.client,actor,{orderId:'order_1',expectedOrderRevision:'1',reasonCode,requestId:'req_cancel'});
+  assert.equal(r.body.request?.state,'APPROVED');assert.equal(r.body.request?.liabilityRecognized,true);
+  assert.equal(r.body.request?.fullRefundCents,actor===renter?'15908':null);
+  assert.equal(h.facts.status,'CANCELLED');assert.equal(h.recognized[0].amountCents,'15908');
+  const decision=h.calls.find(c=>c.sql.includes('INSERT INTO zzsh_order.prestart_termination_decision'))!;
+  assert.match(decision.sql,/'PARTY_FULL_REFUND'/);assert.equal(decision.values.at(-1),reasonCode);
+  assert.equal(h.calls.some(c=>c.sql.includes('INSERT INTO zzsh_order.settlement_posting')),false);
+ }
 });
-test('他人和未付款/已开租/已有过账/争议调整/分佣阻断，不创建终止请求',async t=>{
- const h=fixture(t);await assert.rejects(requestPrestartTermination(h.client,{...renter,userId:'other'},request),(e:any)=>e.status===404);
- for(const p of [{status:'PENDING_PAYMENT'},{opening_confirmed:true},{has_posting:true},{pending_adjustment:true},{earning_count:'1'}]){
-  const f=fixture(t,p);await assert.rejects(requestPrestartTermination(f.client,renter,request),(e:any)=>e.status===409);assert.equal(f.row,null);}
+test('既有未开租申请可由另一方直接取消；开租或身份/原因不符不能取消',async t=>{
+ const existing=fixture(t);existing.seed();
+ const result=await cancelPrestartTermination(existing.client,owner,{orderId:'order_1',expectedOrderRevision:'1',reasonCode:'OWNER_UNAVAILABLE',requestId:'req_cancel'});
+ assert.equal(result.body.request?.state,'APPROVED');assert.equal(existing.facts.status,'CANCELLED');
+ for(const [actor,patch,reasonCode] of [[renter,{opening_confirmed:true},'RENTER_WRONG_ACCOUNT'],[renter,{},'OWNER_UNAVAILABLE'],[{...renter,userId:'stranger'},{} ,'RENTER_WRONG_ACCOUNT']] as const){
+  const h=fixture(t,patch);await assert.rejects(cancelPrestartTermination(h.client,actor,{orderId:'order_1',expectedOrderRevision:'1',reasonCode,requestId:'req_cancel'}));
+  assert.equal(h.recognized.length,0);assert.equal(h.facts.status,'PAID');
+ }
 });
-test('重复申请回原当前请求，过期订单revision不能产生新对象',async t=>{
- const h=fixture(t);h.seed();const r=await requestPrestartTermination(h.client,owner,request);assert.equal(r.body.existing,true);assert.equal(r.body.request?.id,'pterm_1');
- await assert.rejects(requestPrestartTermination(h.client,renter,{...request,expectedOrderRevision:'2'}),(e:any)=>e.status===409);
- assert.equal(h.calls.some(c=>c.sql.startsWith('INSERT INTO zzsh_order.prestart_termination\n')),false);
+test('未付款、结算、已开租或过期版本不能创建直接取消',async t=>{
+ for(const p of [{status:'PENDING_PAYMENT'},{opening_confirmed:true},{has_posting:true},{pending_adjustment:true},{earning_count:'1'},{revision:'2'}]){
+  const f=fixture(t,p);await assert.rejects(cancelPrestartTermination(f.client,renter,{orderId:'order_1',expectedOrderRevision:'1',reasonCode:'RENTER_WRONG_ACCOUNT',requestId:'req_1'}),
+   (e:any)=>e.status===409);assert.equal(f.row,null);assert.equal(f.recognized.length,0);
+ }
 });
 test('客服核准全退：同事务识别原款责任并取消，保留付款指针，不生成opening/posting或分佣冲回',async t=>{
  const h=fixture(t);h.seed();const result=await reviewPrestartTermination(h.client,support,review);
@@ -87,7 +98,7 @@ test('终态复核只读原责任，不重建；不能用新键把核准冒充�
 });
 test('普通GET限本人，缺结构不可报无申请；不取资金锁/改状态',async t=>{
  const h=fixture(t);h.seed();const out=await readPrestartTermination(h.client,owner,'order_1');assert.equal(out.request?.fullRefundCents,null);assert.equal(out.eligibility.refundCents,null);
- assert.equal(h.calls.some(c=>/\b(INSERT|UPDATE|DELETE)\b|FOR UPDATE|advisory/i.test(c.sql)),false);
+ assert.equal(h.calls.some(c=>/^\s*(INSERT|UPDATE|DELETE)\b|FOR UPDATE|advisory/i.test(c.sql)),false);
  const stranger=fixture(t);await assert.rejects(readPrestartTermination(stranger.client,{...renter,userId:'stranger'},'order_1'),(e:any)=>e.status===404);
  const noSchema=fixture(t);(noSchema.client as any).query=async()=>({rowCount:1,rows:[{ready:false}]});await assert.rejects(readPrestartTermination(noSchema.client,renter,'order_1'),(e:any)=>e.status===503);
 });

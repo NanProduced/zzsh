@@ -14,10 +14,6 @@ const requirements: Requirement[] = [
   table("refunds", "rental_order", "id display_no renter_user_id paid_confirmation_id"),
   table("refunds", "settlement_posting", "id order_id payment_confirmation_id version_hash currency captured_cents renter_refund_cents posted_at refund_due_at"),
   table("refunds", "payment_confirmation", "id order_id source disposition reason_code currency amount_cents merchant_scope_id provider_transaction_id merchant_order_no joinpay_request_id joinpay_evidence_id joinpay_anchor_id accepted_at"),
-  table("refunds", "payment_request", "id order_id channel evidence_level merchant_identity_id channel_order_no amount_cents currency"),
-  table("refunds", "joinpay_collection_binding", "request_id wire_merchant_no formal_admission_ref"),
-  table("refunds", "joinpay_collection_evidence", "id request_id event channel_trx_no schema_outcome signature_outcome binding_outcome raw_sha256"),
-  table("refunds", "payment_channel_transaction", "id channel evidence_level native_order_id request_id merchant_identity_id channel_trx_no"),
   table("refunds", "channel_refund_intent", "id posting_id order_id renter_user_id basis_kind payment_confirmation_id liability_root_id liability_event_id responsibility_version_hash payment_source evidence_level merchant_identity_id original_payment_trx_no original_payment_order_no amount_cents currency state budget_disposition requires_review due_at terminal_evidence_id terminal_root_id terminal_event_id created_at"),
   table("refunds", "prestart_termination", "id order_id payment_basis basis_digest requested_by_party state approved_at liability_root_id liability_event_id created_at"),
   table("refunds", "legacy_order_duty", "id order_id kind source_record_id counterparty_user_id amount_cents currency status source source_status source_digest continuation_version_id admission_id maturity_at revision settled_by settled_ref_type settled_ref_id settled_ref_digest created_at"),
@@ -29,7 +25,7 @@ const requirements: Requirement[] = [
   ...["joinpay_payout_evidence", "joinpay_payout_attempt"].map(name => table("withdrawals", name, "id")),
 ];
 const functions = [
-  ...["native_refund_terminal_complete", "native_abnormal_refund_liability_complete", "native_abnormal_refund_terminal_complete", "prestart_liability_complete", "prestart_payment_basis_valid", "support_cancel_payment_basis_valid", "native_prestart_refund_liability_complete", "native_prestart_refund_terminal_complete"].map(name => ({ domain: "refunds", name: `zzsh_order.${name}(${name.endsWith("basis_valid") ? "jsonb" : "text"})` })),
+  ...["native_refund_terminal_complete", "prestart_liability_complete", "prestart_payment_basis_valid", "support_cancel_payment_basis_valid", "native_prestart_refund_liability_complete", "native_prestart_refund_terminal_complete"].map(name => ({ domain: "refunds", name: `zzsh_order.${name}(${name.endsWith("basis_valid") ? "jsonb" : "text"})` })),
   { domain: "controlledWithdrawals", name: "zzsh_order.withdrawal_expected_lines(text)" },
   ...["joinpay_withdrawal_expected_lines", "joinpay_withdrawal_complete"].map(name => ({ domain: "withdrawals", name: `zzsh_order.${name}(text)` })),
 ];
@@ -72,7 +68,7 @@ SELECT count(*)::text AS count,COALESCE(sum(amount),0)::text AS amount,
   'documentRef',document_ref,'reasonCodes',reasons) ORDER BY CASE WHEN source='LEGACY_DUTY' THEN 1 ELSE 0 END,due_at NULLS LAST,id COLLATE "C") FROM preview),'[]'::jsonb) AS items,
  COALESCE((SELECT jsonb_agg(jsonb_build_object('source',source,'count',n::text,'unknownCount',unknown::text,'amountCents',amount::text) ORDER BY source)
   FROM (SELECT f.source,count(p.id) AS n,count(p.id) FILTER(WHERE p.amount IS NULL) AS unknown,COALESCE(sum(p.amount),0) AS amount
-   FROM (VALUES ${refund ? "('POSTING'),('REVIEW_CONFIRMATION'),('PRESTART_TERMINATION'),('LEGACY_DUTY')" : includeControlled ? "('LOCAL_CONTROLLED'),('JOINPAY_FORMAL')" : "('JOINPAY_FORMAL')"}) f(source)
+   FROM (VALUES ${refund ? "('POSTING'),('PRESTART_TERMINATION'),('LEGACY_DUTY')" : includeControlled ? "('LOCAL_CONTROLLED'),('JOINPAY_FORMAL')" : "('JOINPAY_FORMAL')"}) f(source)
    LEFT JOIN pending p ON p.source=f.source GROUP BY f.source) s),'[]'::jsonb) AS sources
 FROM pending`;
 
@@ -94,41 +90,6 @@ WITH basis AS MATERIALIZED (
  LEFT JOIN zzsh_order.payment_confirmation c ON c.id=p.payment_confirmation_id
  WHERE p.posted_at<=$1::timestamptz AND p.renter_refund_cents>0
  UNION ALL
- SELECT 'REVIEW_CONFIRMATION',c.id,c.order_id,o.display_no,o.renter_user_id,c.id,r.source_digest,NULL,r.id,e.id,
-  c.source,c.merchant_scope_id,c.provider_transaction_id,c.merchant_order_no,c.amount_cents,NULL::timestamptz,c.accepted_at,
-  COALESCE(c.source='JOINPAY' AND c.reason_code IN('DUPLICATE_PAYMENT','LATE_PAYMENT') AND c.currency='CNY'
-   AND r.id='native_abnormal_refund_liability_'||substr(encode(sha256(convert_to(c.id,'UTF8')),'hex'),1,40)
-   AND r.source_type='NATIVE' AND r.source_system='zzsh' AND r.source_entity='joinpay_abnormal_refund_liability'
-   AND r.subject_user_id=o.renter_user_id AND r.beneficiary_role='RENTER' AND r.basis_id IS NULL AND r.policy_version IS NULL
-   AND e.id=r.id||'_recognized' AND e.subject_user_id=o.renter_user_id
-   AND (SELECT count(*) FROM zzsh_order.finance_event x WHERE x.economic_root_id=r.id)=1
-   AND c.joinpay_evidence_id IS NOT NULL AND c.joinpay_anchor_id IS NOT NULL
-   AND rq.channel='JOINPAY' AND rq.evidence_level='JOINPAY_CANDIDATE' AND rq.merchant_identity_id=c.merchant_scope_id
-   AND rq.channel_order_no=c.merchant_order_no AND rq.amount_cents=c.amount_cents AND rq.currency='CNY'
-   AND cb.wire_merchant_no IS NOT NULL AND cb.formal_admission_ref IS NOT NULL
-   AND ce.event='E4' AND ce.schema_outcome='VALID' AND ce.signature_outcome='MATCH' AND ce.binding_outcome='MATCH'
-   AND ce.channel_trx_no=c.provider_transaction_id AND ce.raw_sha256=r.source_digest
-   AND ca.channel='JOINPAY' AND ca.evidence_level='JOINPAY_VERIFIED' AND ca.native_order_id=c.order_id
-   AND ca.request_id=c.joinpay_request_id AND ca.merchant_identity_id=c.merchant_scope_id AND ca.channel_trx_no=c.provider_transaction_id
-   AND NOT EXISTS(SELECT 1 FROM zzsh_order.payment_confirmation x WHERE x.source='JOINPAY' AND x.merchant_scope_id=c.merchant_scope_id
-    AND x.provider_transaction_id=c.provider_transaction_id AND x.disposition='APPLIED')
-   AND NOT EXISTS(SELECT 1 FROM zzsh_order.settlement_posting x WHERE x.payment_confirmation_id=c.id)
-   AND (SELECT count(DISTINCT x.provider_transaction_id) FROM zzsh_order.payment_confirmation x WHERE x.source='JOINPAY'
-    AND x.merchant_scope_id=c.merchant_scope_id AND x.merchant_order_no=c.merchant_order_no AND x.disposition IN('APPLIED','REVIEW_REQUIRED'))=1
-   AND (SELECT count(*)=2 AND count(*) FILTER(WHERE l.posting_id IS NULL AND l.source_payment_confirmation_id IS NULL
-    AND l.details=jsonb_build_object('abnormalRefundLiabilityId',c.id,'paymentConfirmationId',c.id,'evidenceId',c.joinpay_evidence_id,'anchorId',c.joinpay_anchor_id,'amountCents',c.amount_cents::text)
-    AND ((l.line_no=1 AND l.account_code='JOINPAY_UNALLOCATED_RECEIPT' AND l.debit_cents=c.amount_cents AND l.credit_cents=0 AND l.counterparty_user_id IS NULL)
-     OR(l.line_no=2 AND l.account_code='RENTER_REFUND_PAYABLE' AND l.debit_cents=0 AND l.credit_cents=c.amount_cents AND l.counterparty_user_id=o.renter_user_id)))=2
-    FROM zzsh_order.settlement_ledger_entry l WHERE l.finance_event_id=e.id),false)
- FROM zzsh_order.payment_confirmation c LEFT JOIN zzsh_order.rental_order o ON o.id=c.order_id
- LEFT JOIN zzsh_order.payment_request rq ON rq.id=c.joinpay_request_id AND rq.order_id=c.order_id
- LEFT JOIN zzsh_order.joinpay_collection_binding cb ON cb.request_id=rq.id
- LEFT JOIN zzsh_order.joinpay_collection_evidence ce ON ce.id=c.joinpay_evidence_id AND ce.request_id=c.joinpay_request_id
- LEFT JOIN zzsh_order.payment_channel_transaction ca ON ca.id=c.joinpay_anchor_id
- LEFT JOIN zzsh_order.finance_economic_root r ON r.source_kind='NATIVE_ABNORMAL_REFUND' AND r.source_id=c.id
- LEFT JOIN zzsh_order.finance_event e ON e.economic_root_id=r.id AND e.kind='REFUND_LIABILITY_RECOGNIZED'
- WHERE c.disposition='REVIEW_REQUIRED' AND c.accepted_at<=$1::timestamptz
- UNION ALL
  SELECT 'PRESTART_TERMINATION',t.id,t.order_id,o.display_no,o.renter_user_id,c.id,t.basis_digest,NULL,t.liability_root_id,t.liability_event_id,
   c.source,c.merchant_scope_id,c.provider_transaction_id,c.merchant_order_no,c.amount_cents,t.approved_at,t.created_at,
   CASE WHEN t.payment_basis->>'amountCents'~'^[1-9][0-9]{0,15}$' THEN zzsh_order.prestart_liability_complete(t.id) ELSE false END
@@ -142,18 +103,16 @@ WITH basis AS MATERIALIZED (
    AND i.posting_id IS NOT DISTINCT FROM b.posting_id AND i.liability_root_id IS NOT DISTINCT FROM b.liability_root
    AND i.liability_event_id IS NOT DISTINCT FROM b.liability_event AND i.merchant_identity_id=b.merchant
    AND i.original_payment_trx_no=b.trx AND i.original_payment_order_no=b.original_no
-   AND (b.source='REVIEW_CONFIRMATION' OR i.due_at=b.due_at),false) AS bound,
+   AND i.due_at=b.due_at,false) AS bound,
   CASE WHEN i.state IN('SUCCEEDED','FAILED') AND i.payment_source='JOINPAY' AND i.evidence_level='JOINPAY_FORMAL' THEN
    CASE i.basis_kind WHEN 'POSTING' THEN zzsh_order.native_refund_terminal_complete(i.id)
-    WHEN 'REVIEW_CONFIRMATION' THEN zzsh_order.native_abnormal_refund_terminal_complete(i.id)
     WHEN 'PRESTART_TERMINATION' THEN zzsh_order.native_prestart_refund_terminal_complete(i.id) ELSE false END ELSE false END AS terminal_complete
  FROM basis b LEFT JOIN zzsh_order.channel_refund_intent i ON i.created_at<=$1::timestamptz AND
   ((b.source='POSTING' AND i.posting_id=b.basis_id)
-   OR(b.source='REVIEW_CONFIRMATION' AND i.basis_kind='REVIEW_CONFIRMATION' AND i.payment_confirmation_id=b.basis_id)
    OR(b.source='PRESTART_TERMINATION' AND i.basis_kind='PRESTART_TERMINATION' AND i.payment_confirmation_id=b.payment_confirmation_id))
 ), native AS (
  SELECT source||':'||basis_id AS id,source,max(order_id) AS order_id,max(number) AS number,
-  min(CASE WHEN source='REVIEW_CONFIRMATION' THEN intent_due_at ELSE due_at END) AS due_at,max(original) AS recorded_amount,
+  min(due_at) AS due_at,max(original) AS recorded_amount,
   CASE WHEN bool_and(valid) AND count(*)=count(DISTINCT intent_id)+count(*) FILTER(WHERE intent_id IS NULL)
    AND bool_and(intent_id IS NULL OR(bound AND NOT requires_review AND
     ((state IN('READY','SUBMITTING','PROCESSING','UNKNOWN','REVIEW_REQUIRED') AND budget_disposition='ALLOCATED')

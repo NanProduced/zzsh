@@ -6,7 +6,9 @@ import {validateIdempotencyKey} from "../contracts/api-v1";
 import {conflict,invalid,notFound,fingerprintRequest,withIdempotency} from "../supply/supply-util";
 import {readPersonalWallet} from "./personal-finance-read";
 import {assertNoReferralRecoveryForWithdrawal} from "./distribution-recovery-gate";
-import {calculateWithdrawalAmounts,planWithdrawalLedger,type WithdrawalLedgerPlan} from "./withdrawal-ledger";
+import {planWithdrawalLedger,type WithdrawalLedgerPlan} from "./withdrawal-ledger";
+import {supportPoststartTriggersSql,supportPoststartExecutorSafeSql} from "./support-poststart-schema";
+import {quoteWithdrawalBusinessAmounts} from "./withdrawal-business-policy";
 import {assertInitialPayoutScope,assertPayoutProfile,assertPayoutStart,assertPayoutSubmitBinding,assertPayoutReviewStrategy,describePayoutProfile,readPayoutProfileEvidence,readPayoutScope,readWithdrawalAdmission,
  type BoundPayoutProfile,type PayoutScope,type PayoutBinding,type WithdrawalAdmission} from "./joinpay-payout-profile";
 import {assertNativeWithdrawalFact} from "./joinpay-payout-source";
@@ -92,8 +94,9 @@ async function fresh(c:PoolClient,actor:NativeWithdrawalActor,b:NativeWithdrawal
  await assertNoReferralRecoveryForWithdrawal(c,actor.userId);
  const used=(await c.query(`SELECT count(*)::text AS count FROM zzsh_order.joinpay_withdrawal_intent WHERE user_id=$1 AND accepted_at>=$2::timestamptz AND accepted_at<$3::timestamptz AND ($4='ACCEPTED_INTENT' OR state<>'FAILED')`,[actor.userId,policy.quotaStart,policy.quotaEnd,policy.frequencyBasis])).rows[0]?.count;
  if(typeof used!=="string"||!/^(0|[1-9][0-9]*)$/.test(used))throw unavailable("Withdrawal quota unknown");
- if(BigInt(used)>=BigInt(policy.maxIntents)||!/^[1-9][0-9]{0,15}$/.test(b.amountCents)||BigInt(b.amountCents)<BigInt(policy.minCents)||BigInt(b.amountCents)>BigInt(policy.maxCents)||BigInt(b.amountCents)>BigInt(wallet.buckets.available.amountCents))throw conflict("Withdrawal amount or frequency unavailable");
- const money=calculateWithdrawalAmounts(b.amountCents,policy.fee),coverageCanonical=JSON.stringify(coverage),coverageSha256=sha(coverageCanonical);
+ if(!/^[1-9][0-9]{0,15}$/.test(b.amountCents))throw conflict("Withdrawal amount or frequency unavailable");
+ const money=quoteWithdrawalBusinessAmounts({amountCents:b.amountCents,availableCents:wallet.buckets.available.amountCents,used,
+  minCents:policy.minCents,maxCents:policy.maxCents,maxIntents:policy.maxIntents,fee:policy.fee}),coverageCanonical=JSON.stringify(coverage),coverageSha256=sha(coverageCanonical);
  const expectedWalletVersion=`jwdq1:${sha(JSON.stringify([actor.userId,revision,coverageSha256,coverage.coverageVersion,coverage.coveredSetDigest,policy.version,policy.sha256,money.grossCents,money.netCents,money.feeCents,a.target.destinationId,a.target.revision,a.target.fingerprint,a.identity.version,a.identity.proofSha256]))}`;
  return{admission:a,scope,profile,p,clock,revision,coverage,coverageCanonical,coverageSha256,money,expectedWalletVersion};
 }
@@ -130,10 +133,18 @@ export async function assertNativePayoutExecutionReady(c:PoolClient){
  const expected=NATIVE_PAYOUT_EXECUTION_SCHEMA,tableNames=expected.tables.map(t=>t.name);
  const e={...expected,triggers:expected.triggers.map(t=>{
   const quals:Array<string|null>=[t.qual];
-  // These two shared ledger guards have exact forward versions for abnormal, prestart and sandbox refund branches.
+  // Shared guards grow only through known, installed finance migrations; compare the exact resulting predicate.
   if(t.table==="zzsh_order.settlement_ledger_entry"&&(t.name==="finance_entry_guard"||t.name==="finance_entry_batch_guard")&&t.qual!==null){
    const prefix=t.qual.slice(0,-1), formal=prefix+" AND (NOT (new.details ? 'abnormalRefundLiabilityId'::text)) AND (NOT (new.details ? 'prestartTerminationId'::text))";
-   quals.push(formal+")",formal+" AND (NOT (new.details ? 'localRefundIntentId'::text)))");
+   const sandbox=formal+" AND (NOT (new.details ? 'localRefundIntentId'::text)))";
+   const append=(value:string,key:string)=>value.slice(0,-1)+` AND (NOT (new.details ? '${key}'::text)))`;
+   const legacy=append(append(sandbox,"legacyRefundCaseId"),"legacyRefundIntentId");
+   const demo=legacy.replace("(NOT (new.details ? 'legacyRefundIntentId'::text))",
+    "((NOT (new.details ? 'legacyRefundIntentId'::text)) AND (NOT (new.details ? 'demoLegacyRefundId'::text)))");
+   quals.push(formal+")",sandbox,legacy,append(legacy,"compensationCaseId"),demo,append(demo,"compensationCaseId"));
+   const retired=(value:string)=>value.replace(" AND (NOT (new.details ? 'abnormalRefundLiabilityId'::text))","");
+   quals.push(retired(legacy),retired(append(legacy,"compensationCaseId")),retired(demo),retired(append(demo,"compensationCaseId")));
+   quals.push(...quals.map(value=>value===null?null:append(value,"supportCancellationId")));
   }
   return {...t,quals};
  })};
@@ -176,9 +187,23 @@ export async function assertNativePayoutExecutionReady(c:PoolClient){
   WHERE t.oid IS NULL OR t.tgnargs<>0 OR t.tgenabled<>'O' OR t.tgfoid IS DISTINCT FROM to_regprocedure(eg.signature) OR t.tgtype IS DISTINCT FROM eg.type::smallint
    OR t.tgdeferrable IS DISTINCT FROM eg.deferred OR t.tginitdeferred IS DISTINCT FROM eg.deferred
    OR substring(pg_get_triggerdef(t.oid) FROM ' WHEN \\((.*)\\) EXECUTE FUNCTION ') IS DISTINCT FROM eg.quals->>(CASE
-    WHEN jsonb_array_length(eg.quals)=1 THEN 0
+    WHEN jsonb_array_length(eg.quals)=1 THEN 0 ELSE (
+    CASE
+    WHEN EXISTS(SELECT 1 FROM pg_constraint q WHERE q.conrelid=to_regclass('zzsh_order.settlement_ledger_entry')
+      AND q.conname='settlement_retired_refund_excluded' AND q.convalidated
+      AND pg_get_constraintdef(q.oid)='CHECK (((NOT COALESCE((details ? ''abnormalRefundLiabilityId''::text), false)) AND (account_code <> ''JOINPAY_UNALLOCATED_RECEIPT''::text)))') THEN
+     CASE WHEN to_regclass('zzsh_order.legacy_refund_case') IS NULL THEN 9999
+      WHEN to_regclass('zzsh_order.ecs_demo_legacy_refund') IS NOT NULL AND to_regclass('zzsh_order.order_compensation_posting') IS NOT NULL THEN 10
+      WHEN to_regclass('zzsh_order.ecs_demo_legacy_refund') IS NOT NULL THEN 9
+      WHEN to_regclass('zzsh_order.order_compensation_posting') IS NOT NULL THEN 8 ELSE 7 END
+    WHEN to_regclass('zzsh_order.legacy_refund_case') IS NOT NULL AND to_regclass('zzsh_order.ecs_demo_legacy_refund') IS NOT NULL
+     AND to_regclass('zzsh_order.order_compensation_posting') IS NOT NULL THEN 6
+    WHEN to_regclass('zzsh_order.legacy_refund_case') IS NOT NULL AND to_regclass('zzsh_order.ecs_demo_legacy_refund') IS NOT NULL THEN 5
+    WHEN to_regclass('zzsh_order.legacy_refund_case') IS NOT NULL AND to_regclass('zzsh_order.order_compensation_posting') IS NOT NULL THEN 4
+    WHEN to_regclass('zzsh_order.legacy_refund_case') IS NOT NULL THEN 3
     WHEN to_regclass('zzsh_order.local_controlled_refund_evidence') IS NOT NULL THEN 2
-    WHEN to_regclass('zzsh_order.prestart_termination') IS NOT NULL THEN 1 ELSE 0 END))
+    WHEN to_regclass('zzsh_order.prestart_termination') IS NOT NULL THEN 1 ELSE 0 END)
+    +CASE WHEN to_regclass('zzsh_order.support_poststart_cancellation') IS NOT NULL THEN 11 ELSE 0 END END))
  AND NOT EXISTS(SELECT 1 FROM ek WHERE NOT EXISTS(SELECT 1 FROM pg_constraint q WHERE q.conrelid=to_regclass(ek."table") AND q.contype::text=ek.type AND q.convalidated
   AND(SELECT jsonb_agg(a.attname ORDER BY u.n) FROM unnest(q.conkey) WITH ORDINALITY u(attnum,n) JOIN pg_attribute a ON a.attrelid=q.conrelid AND a.attnum=u.attnum)=ek.columns))
  AND NOT EXISTS(SELECT 1 FROM eforeign WHERE NOT EXISTS(SELECT 1 FROM pg_constraint q JOIN pg_class target ON target.oid=q.confrelid JOIN pg_namespace n ON n.oid=target.relnamespace
@@ -191,7 +216,12 @@ export async function assertNativePayoutExecutionReady(c:PoolClient){
  AND NOT EXISTS(SELECT 1 FROM ei WHERE NOT EXISTS(SELECT 1 FROM pg_index i JOIN pg_class ix ON ix.oid=i.indexrelid
   WHERE ix.relname=ei.name AND i.indrelid=to_regclass(ei."table") AND i.indisunique AND i.indisvalid AND i.indisready AND i.indnkeyatts=i.indnatts
    AND(SELECT jsonb_agg(a.attname ORDER BY u.n) FROM unnest(i.indkey::smallint[]) WITH ORDINALITY u(attnum,n) LEFT JOIN pg_attribute a ON a.attrelid=i.indrelid AND a.attnum=u.attnum)=ei.columns
-   AND pg_get_expr(i.indexprs,i.indrelid) IS NOT DISTINCT FROM ei.expression AND pg_get_expr(i.indpred,i.indrelid) IS NOT DISTINCT FROM ei.predicate)) AS ready`,[JSON.stringify(e)])).rows[0];
+   AND pg_get_expr(i.indexprs,i.indrelid) IS NOT DISTINCT FROM ei.expression AND pg_get_expr(i.indpred,i.indrelid) IS NOT DISTINCT FROM ei.predicate))
+ AND (to_regclass('zzsh_order.support_poststart_cancellation') IS NULL OR (
+   (${supportPoststartTriggersSql})=12 AND (${supportPoststartExecutorSafeSql})
+   AND to_regprocedure('zzsh_order.support_poststart_cancellation_complete(text)') IS NOT NULL
+   AND to_regprocedure('zzsh_order.support_cancellation_refund_liability_complete(text)') IS NOT NULL
+   AND to_regprocedure('zzsh_order.support_cancellation_refund_terminal_complete(text)') IS NOT NULL)) AS ready`,[JSON.stringify(e)])).rows[0];
  if(result?.ready!==true)throw unavailable("Native payout guards, constraints or narrow privileges differ");
 }
 export async function readNativeWithdrawalRecovery(c:PoolClient,actor:NativeWithdrawalActor,scope:PayoutScope,input:{intentId?:string;key?:string}){await assertNativePayoutResource(c,scope);await assertUserContextInTransaction(c,actor);

@@ -3,8 +3,10 @@ import { test } from "node:test";
 import { createRequire } from "node:module";
 import { join } from "node:path";
 import type { PoolClient } from "pg";
-import { getUserLegacyOrder, listUserLegacyOrders, parseLegacyUserOrderQuery, projectUserLegacyOrder, legacyUserOrderFrom } from "../src/order/legacy-user-order-read";
+import { getUserLegacyOrder, listUserLegacyOrders, parseLegacyUserOrderQuery, projectLegacyRefundHistory, projectUserLegacyOrder, legacyUserOrderFrom } from "../src/order/legacy-user-order-read";
 import { legacyOrderReadState } from "../src/order/legacy-order-read";
+import { canonicalize } from "../src/supply/content-hash";
+import { sha256Hex } from "../src/supply/supply-util";
 
 // OFFLINE_FIXTURE_ONLY. No source transactions are manufactured for missing branches.
 const row = {
@@ -15,6 +17,33 @@ const row = {
   dueCents:"6600", paidCents:"6600", depositCents:"0", goodsYuan:"60.00", itemsYuan:"6.00", refundYuan:null,
   source_snapshot:{phone:"private",password:"private"},evidence_ref:"private",owner_phone:"private",
 };
+
+function historicalRefund(id = "1", status = "1") {
+ const order = { id:"36980",user_id:"29",order_sn:"20261016155949243636" },
+  original = { id,user_id:"29",order_id:order.id,order_sn:order.order_sn,order_type:"order",sn:"refund_"+id,refund_status:status,refund_amount:"555.00" },
+  source = {kind:"refundObservation",sourceId:Number(id),sourceUserId:29,amount:original.refund_amount,sourceStatus:Number(status),createdAt:1792137600,
+   referenceType:"LEGACY_ORDER",referenceId:order.id,referenceSn:order.order_sn,associationState:"SOURCE_VERIFIED",sourceOrderType:"order",
+   sourceNumber:original.sn,channelArrival:"UNKNOWN",rawSource:{entity:"la_refund_record",canonical:canonicalize(original),digest:sha256Hex(canonicalize(original))}},
+  canonical=canonicalize(source);
+ return {legacy_id:order.id,legacy_renter_id:order.user_id,renter_user_id:"renter",observation_user_id:"renter",order_no:order.order_sn,
+  order_digest:sha256Hex(canonicalize(order)),order_snapshot:order,source_id:id,source_digest:sha256Hex(canonical),source_canonical:canonical,snapshot:source,
+  source_at:new Date(source.createdAt*1000).toISOString()};
+}
+
+test("legacy refund history displays each verified source record without adding retries or exposing raw facts",()=>{
+ const first=historicalRefund(),failed=historicalRefund("2","2"),result=projectLegacyRefundHistory([first,failed],"renter");
+ assert.equal(result.incomplete,false);assert.equal(result.channelArrival,"UNKNOWN");
+ assert.deepEqual(result.records.map(record=>[record.amount.amount,record.status]),[["555.00","SUCCEEDED"],["555.00","FAILED"]]);
+ assert(!JSON.stringify(result).includes("legacy_renter_id"));assert(!JSON.stringify(result).includes("rawSource"));
+ for(const changed of [
+  {...first,renter_user_id:"other"},{...first,observation_user_id:"other"},{...first,order_digest:"0".repeat(64)},
+  {...first,source_digest:"0".repeat(64)},{...first,order_no:"different"},{...first,source_at:"2026-01-01T00:00:00.000Z"},
+ ]){const rejected=projectLegacyRefundHistory([changed],"renter");assert.equal(rejected.incomplete,true);assert.deepEqual(rejected.records,[]);}
+ const flaggedSnapshot={...first.snapshot,sourceRefundFlags:["MULTIPLE_REFUND_RECORDS_FOR_TYPED_ORDER"]};
+ const flaggedCanonical=canonicalize(flaggedSnapshot),flagged={...first,snapshot:flaggedSnapshot,source_canonical:flaggedCanonical,source_digest:sha256Hex(flaggedCanonical)};
+ assert.equal(projectLegacyRefundHistory([flagged],"renter").incomplete,true);
+ assert.equal(projectLegacyRefundHistory(Array.from({length:51},()=>first),"renter").incomplete,true);
+});
 test("soft-deleted old records never reappear in user list/detail after migration", () => {
  for(const sourceDeletedFlag of ["1","2",""]) assert.throws(()=>projectUserLegacyOrder({...row,sourceDeletedFlag},"renter"),
   (error:unknown)=>(error as{status?:number}).status===404);

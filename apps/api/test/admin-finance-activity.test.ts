@@ -106,14 +106,16 @@ test('current balance movements exclude opening and show each available withdraw
     {id:'revoke',account_code:'WALLET_AVAILABLE',subject_id:'u1',subject_name:'用户',delta:'-200',event_kind:'EARNING_REVOKED',source_kind:'NATIVE_RENTAL_REFERRAL',economic_root_id:'earning1',at:'2026-01-04T00:00:00Z'},
     {id:'legacy-commission',account_code:'WALLET_AVAILABLE',subject_id:'u1',subject_name:'用户',delta:'300',event_kind:'LEGACY_DUTY_SETTLED',source_kind:'LEGACY_CONTINUATION_DUTY',beneficiary_role:'COMMISSION',source_id:'duty1',at:'2026-01-05T00:00:00Z'},
   ];
-  let selection='';
+  let selection='',detail='';
   const client={query:async(sql:string)=>{
     if(sql.startsWith('WITH activity_candidates')) {selection=sql;return {rows:ledger.map(row=>({family:'ledger',id:row.id,at:row.at,total:String(ledger.length)}))};}
+    if(sql.includes('FROM zzsh_order.settlement_ledger_entry l'))detail=sql;
     return {rows:ledger};
   }} as unknown as PoolClient;
   const result=await readAdminBalanceActivity(client,base,access), items=result.items as {source:string;label:string;amountCents:string}[];
   assert.match(selection,/l\.account_code IN \('OWNER_AVAILABLE','WALLET_AVAILABLE'\)/);
   assert.match(selection,/e\.kind<>'OPENING'/);assert.doesNotMatch(selection,/personal_finance_observation/);
+  assert.match(detail,/WHERE r\.source_kind IS DISTINCT FROM 'NATIVE_ABNORMAL_REFUND'\s+AND l\.id=ANY/);
   assert.deepEqual(items.map(row=>[row.source,row.label,row.amountCents]),[['NATIVE','提现扣除','-1000'],['NATIVE','提现退回','1000'],['NATIVE','分销收益冲回','-200'],['NATIVE','分销收入','300']]);
   assert.equal(result.total,4);
 });

@@ -332,63 +332,6 @@ test("refund evidence separates responsibility, allocation, consumption and rele
 });
 
 
-test("C04B-02 abnormal refund basis keeps unique responsibility totals and blocked facts", async () => {
-  const abnormalIntent = { ...refundIntent("rfi_abn", "RF" + "a".repeat(28), "5000", "ALLOCATED", "READY"),
-    basisKind: "REVIEW_CONFIRMATION", paymentConfirmationId: "pc_abn", liabilityRootId: "root_abn",
-    liabilityEventId: "event_abn", firstSubmit: { dispatch: "NEVER_DISPATCHED", blockedReason: "ORIGINAL_ORDER_NO_AMBIGUOUS",
-      blockedAt: ISO_1, blockedAuditCount: 1, trust: "LOCAL_AUDIT_AND_ATTEMPT" } };
-  const summary = { ...refundSummary([abnormalIntent]), abnormalResponsibilities: [{
-    confirmationId: "pc_abn", reasonCode: "LATE_PAYMENT", originalCents: "5000", allocatedCents: "5000",
-    consumedCents: "0", releasedCents: "0", remainingCents: "0", totalsComplete: true, state: "REVIEW_REQUIRED",
-    intentIds: ["rfi_abn"], liabilityRootId: "root_abn", liabilityEventId: "event_abn",
-    merchantIdentityId: MERCHANT, firstSubmit: abnormalIntent.firstSubmit }],
-    responsibilityBudget: { originalCents: "5000", allocatedCents: "5000", consumedCents: "0", releasedCents: "0",
-      remainingCents: "0", totalsComplete: true } } as unknown as RefundSummary;
-  const restore = stub(refundRead, "readAdminOrderRefundSummary", async () => summary);
-  const client = refundClient({ posting: [] });
-  try {
-    const result = await readAdminChannelRefundEvidence(pool(client), scope(), { orderId: "ord_1", origin: "NATIVE" });
-    assert.equal(result.status, "INTEGRATED");
-    assert.equal(result.posting, null);
-    assert.equal(result.intents![0]!.basisKind, "REVIEW_CONFIRMATION");
-    assert.equal(result.intents![0]!.firstSubmit!.blockedReason, "ORIGINAL_ORDER_NO_AMBIGUOUS");
-    assert.equal(result.abnormalResponsibilities![0]!.originalCents, "5000");
-    assert.equal(result.responsibilityTotals!.originalCents, "5000");
-    assert.equal(result.responsibilityTotals!.totalsComplete, true);
-    assert.ok(result.reasonCodes.includes("INTENT_TOTALS_ARE_NOT_UNIQUE_RESPONSIBILITY"));
-    assert.ok(result.reasonCodes.includes("BANK_ARRIVAL_UNKNOWN"));
-    noWrites(client.calls);
-  } finally { restore(); }
-});
-
-test("C04B-02-R1 abnormal conflict responsibility stays visible without fake amounts", async () => {
-  const summary = { ...refundSummary([]), abnormalResponsibilities: [{
-    confirmationId: "pc_bad", reasonCode: "LATE_PAYMENT", originalCents: null, allocatedCents: null,
-    consumedCents: null, releasedCents: null, remainingCents: null, totalsComplete: false, state: "CONFLICT",
-    intentIds: ["rfi_bad"], liabilityRootId: null, liabilityEventId: null, merchantIdentityId: null,
-    firstSubmit: null, reasonCodes: ["ABNORMAL_LIABILITY_MISMATCH"] }],
-    responsibilityBudget: { originalCents: null, allocatedCents: null, consumedCents: null,
-      releasedCents: null, remainingCents: null, totalsComplete: false } } as unknown as RefundSummary;
-  const restore = stub(refundRead, "readAdminOrderRefundSummary", async () => summary);
-  const client = refundClient({ posting: [] });
-  try {
-    const result = await readAdminChannelRefundEvidence(pool(client), scope(), { orderId: "ord_1", origin: "NATIVE" });
-    assert.equal(result.status, "INTEGRATED");
-    assert.equal(result.abnormalResponsibilities!.length, 1);
-    assert.equal(result.abnormalResponsibilities![0]!.state, "CONFLICT");
-    assert.equal(result.abnormalResponsibilities![0]!.originalCents, null);
-    assert.equal(result.abnormalResponsibilities![0]!.totalsComplete, false);
-    assert.equal(result.responsibilityTotals!.totalsComplete, false);
-    assert.equal(result.intentTotalsComplete, false);
-    assert.equal(result.totals.requestedCents, null);
-    assert.equal(result.intentTotals.allocatedCents, null);
-    assert(result.abnormalResponsibilities![0]!.reasonCodes.includes("ABNORMAL_LIABILITY_MISMATCH"));
-    assert(result.reasonCodes.includes("REFUND_INTENT_TOTALS_INCOMPLETE"));
-    assert(!result.reasonCodes.includes("NO_LOCAL_REFUND_INTENTS"));
-    noWrites(client.calls);
-  } finally { restore(); }
-});
-
 test("truncated refund coverage exposes partial intents but no totals", async () => {
   const summary = { ...refundSummary([refundIntent("rfi_1", "RF1", "100", "CONSUMED")]), truncated: true } as unknown as RefundSummary;
   const restore = stub(refundRead, "readAdminOrderRefundSummary", async () => summary);

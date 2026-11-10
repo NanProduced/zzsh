@@ -1,4 +1,6 @@
 import { ConfigurationError, readSecret } from "../config/config";
+import { SecurityApiError } from "../auth/security-core";
+import { conflict } from "../supply/supply-util";
 import { calculateWithdrawalAmounts, type WithdrawalFee } from "./withdrawal-ledger";
 
 export type WithdrawalBusinessPolicy = Readonly<{
@@ -11,6 +13,26 @@ export type WithdrawalBusinessPolicy = Readonly<{
   reviewStrategy: "VERIFIED_DIRECT_EXECUTION" | "MERCHANT_REVIEW_REQUIRED";
   quotaUtcOffsetMinutes: number;
 }>;
+
+/** Shared business limits for the real and test payout adapters. Amounts remain integer cents. */
+export function quoteWithdrawalBusinessAmounts(input: {
+  amountCents: string; availableCents: string; used: string | number;
+  minCents: string; maxCents: string; maxIntents: number; fee: WithdrawalFee;
+}) {
+  const used = typeof input.used === "number" && Number.isSafeInteger(input.used) ? String(input.used) : input.used;
+  if (typeof used !== "string" || !/^(0|[1-9][0-9]*)$/.test(used)
+    || typeof input.availableCents !== "string" || !/^(0|[1-9][0-9]*)$/.test(input.availableCents))
+    throw new SecurityApiError(503, "EVIDENCE_UNAVAILABLE", "Withdrawal balance or quota unavailable");
+  if (!/^[1-9][0-9]{0,23}$/.test(input.minCents) || !/^[1-9][0-9]{0,23}$/.test(input.maxCents)
+    || !Number.isSafeInteger(input.maxIntents) || input.maxIntents < 1)
+    throw new SecurityApiError(503, "EVIDENCE_UNAVAILABLE", "Withdrawal policy unavailable");
+  if (!/^[1-9][0-9]{0,23}$/.test(input.amountCents)) throw conflict("Withdrawal amount or frequency unavailable");
+  const amount = BigInt(input.amountCents), min = BigInt(input.minCents), max = BigInt(input.maxCents);
+  if (min > max) throw new SecurityApiError(503, "EVIDENCE_UNAVAILABLE", "Withdrawal policy unavailable");
+  if (amount < min || amount > max || amount > BigInt(input.availableCents) || BigInt(used) >= BigInt(input.maxIntents))
+    throw conflict("Withdrawal amount or frequency unavailable");
+  return calculateWithdrawalAmounts(input.amountCents, input.fee);
+}
 
 /** 测试值仅供已登记的测试环境；正式出款仍需要独立的审核配置。 */
 export const TEAM_TEST_WITHDRAWAL_POLICY: WithdrawalBusinessPolicy = Object.freeze({

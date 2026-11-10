@@ -496,7 +496,7 @@ export function DemoCheckoutAction({ order, blocked, onChanged, onAccepted, onMo
   if (visibleOrder !== order.id) { setVisibleOrder(order.id); reset(); }
   const pending = userId ? inspectIntent(userId, "order.demo-checkout", order.id) : { state: "NONE" as const, intent: null };
   const localPending = userId ? inspectIntent(userId, "order.local-checkout", order.id) : { state: "NONE" as const, intent: null };
-  const active = Boolean(userId && localPending.state !== "VALID" && (discovery !== "NOT_INSTALLED" || pending.state === "VALID"));
+  const active = Boolean(userId && localPending.state !== "VALID" && (discovery !== "NOT_INSTALLED" || pending.state !== "NONE"));
   useEffect(() => { onModeChange(active); onPendingChange(active && (busy || pending.state !== "NONE")); }, [active, busy, pending.state, onModeChange, onPendingChange]);
   useEffect(() => () => { onModeChange(false); onPendingChange(false); }, [onModeChange, onPendingChange]);
   useEffect(() => {
@@ -513,7 +513,7 @@ export function DemoCheckoutAction({ order, blocked, onChanged, onAccepted, onMo
         setDiscovery(error instanceof OrderRequestError && error.status === 404 ? "NOT_INSTALLED" : "FAILED");
     });
     return () => controller.abort();
-  }, [userId, order.id, retry, expectedScope]);
+  }, [userId, order.id, retry, expectedScope, embedded, pending.state]);
   const submit = async () => {
     if (!userId || busy || blocked || !view?.checkoutEnabled || pending.state !== "NONE" || !paymentEntryOpen(order)) return;
     const acting = userId, expected = order.id; setBusy(true); setNotice(null);
@@ -553,9 +553,10 @@ export function DemoCheckoutAction({ order, blocked, onChanged, onAccepted, onMo
     {discovery === "CHECKING" ? <p role="status">正在确认本单是否可以模拟付款…</p> : null}
     {discovery === "FAILED" || discovery === "NOT_INSTALLED" ? <p role="alert">模拟付款暂时无法确认，请重试或联系平台。</p> : null}
     {discovery === "AVAILABLE" && !view?.checkoutEnabled && pending.state === "NONE" && !completed ? <p role="status">本单当前不能模拟付款，请刷新订单查看最新状态。</p> : null}
+    {!embedded && discovery === "AVAILABLE" && view?.checkoutEnabled && pending.state === "NONE" ? <p role="status">请刷新订单，通过支付入口打开收银台。</p> : null}
     {pending.state === "UNREADABLE" ? <p role="alert">原请求记录无法读取，请保留本页并联系客服核对。</p> : notice ? <p role="status">{notice}</p> : null}
     <div className="order-trade-actions">
-      {view?.checkoutEnabled && pending.state === "NONE" && !completed && paymentEntryOpen(order) ? <button type="button" className="button" disabled={busy || blocked} onClick={() => void submit()}>{busy ? "处理中…" : embedded ? "模拟付款" : "确认模拟付款"}</button> : null}
+      {embedded && view?.checkoutEnabled && pending.state === "NONE" && !completed && paymentEntryOpen(order) ? <button type="button" className="button" disabled={busy || blocked} onClick={() => void submit()}>{busy ? "处理中…" : "模拟付款"}</button> : null}
       {pending.state === "VALID" ? <button type="button" className="button secondary" disabled={busy || blocked} onClick={() => void recover()}>查询原付款结果</button> : null}
       {discovery === "FAILED" ? <button type="button" className="button secondary" disabled={busy} onClick={() => setRetry(value => value + 1)}>重试</button> : null}
     </div>

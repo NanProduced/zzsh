@@ -276,7 +276,7 @@ export async function readFinanceDashboardChannels(client: PoolClient, query: Da
     SELECT 'REFUND',i.amount_cents,e.completed_at FROM zzsh_order.channel_refund_intent i
       JOIN zzsh_order.joinpay_refund_evidence e ON e.id=i.terminal_evidence_id AND e.intent_id=i.id
       JOIN zzsh_order.rental_order o ON o.id=i.order_id
-      WHERE i.payment_source='JOINPAY' AND i.state='SUCCEEDED' AND e.terminal='SUCCEEDED'
+      WHERE i.payment_source='JOINPAY' AND i.basis_kind IN ('POSTING','PRESTART_TERMINATION') AND i.state='SUCCEEDED' AND e.terminal='SUCCEEDED'
         AND i.merchant_identity_id=ANY($5::text[]) AND ${scope} AND ${inPeriod('e.completed_at')}
     UNION ALL
     SELECT 'WITHDRAWAL',i.net_cents,e.created_at FROM zzsh_order.joinpay_withdrawal_intent i

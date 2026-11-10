@@ -27,7 +27,6 @@ import { orderUpperResources } from "./admin-order-upper-resources";
 import { OrderFulfillmentSection, SupportUnpaidCancelCard } from "./im-support-fulfillment";
 import { AdminNativeRefundPanel, normalRefundBasis } from "./admin-joinpay-ops-panel";
 import { AdminPrestartTerminationPanel } from "./admin-prestart-termination-panel";
-import { AdminOriginalRefundPanel } from "./admin-original-refund-panel";
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Alert, AlertAction, AlertDescription, AlertTitle } from "../components/ui/alert";
@@ -42,11 +41,8 @@ type Snapshot=Extract<SessionSnapshot,{authenticated:true}>;
 type Payment={state:"RECORDED_PAID"|"RECORDED_UNPAID"|"UNKNOWN";recordedAt:string|null;recordedAmount:AdminOrderMoney|null};
 type PartySummary=import('../api').DirectoryUserPreview;
 type PrepaymentBreakdown={basis:string;completeness:"COMPLETE"|"PARTIAL"|"UNKNOWN";haffRental:AdminOrderMoney|null;materialsPrepay:AdminOrderMoney|null};
-type RefundIntent={intentId:string;refundOrderNo:string;amount:{cents:string;currency:string};localState:string;budgetDisposition:string;requiresReview:boolean;mayResubmit:boolean;bankArrival:"UNKNOWN"};
-type RefundFirstSubmit={dispatch:"NEVER_DISPATCHED"|"DISPATCHED"|"UNKNOWN";blockedReason:string|null;blockedAt:string|null;blockedAuditCount:number|null;trust:string};
-type AbnormalResponsibility={confirmationId:string|null;reasonCode:string|null;originalCents:string|null;currency:string|null;intentIds:string[]|null;allocatedCents:string|null;consumedCents:string|null;releasedCents:string|null;remainingCents:string|null;totalsComplete:boolean;state:string;firstSubmit?:RefundFirstSubmit|null;reasonCodes?:string[]|null};
-type ResponsibilityBudget={originalCents:string|null;allocatedCents:string|null;consumedCents:string|null;releasedCents:string|null;remainingCents:string|null;totalsComplete:boolean;postingOriginalCents:string|null;abnormalOriginalCents:string|null};
-type RefundSummary={contractVersion:string;integration:string;intents:RefundIntent[]|null;bankArrival:"UNKNOWN";reasonCodes:string[];coverageScope?:'JOINPAY_ONLY'|null;coverage?:'COMPLETE_WITHIN_LIMIT'|'TRUNCATED'|null;truncated?:boolean;abnormalResponsibilities?:AbnormalResponsibility[]|null;responsibilityBudget?:ResponsibilityBudget|null};
+type RefundIntent={intentId:string;refundOrderNo:string;amount:{cents:string;currency:string};localState:string;budgetDisposition:string;requiresReview:boolean;mayResubmit:boolean;bankArrival:"UNKNOWN";basisKind?:string};
+type RefundSummary={contractVersion:string;integration:string;intents:RefundIntent[]|null;bankArrival:"UNKNOWN";reasonCodes:string[];coverageScope?:'JOINPAY_ONLY'|null;coverage?:'COMPLETE_WITHIN_LIMIT'|'TRUNCATED'|null;truncated?:boolean};
 const centsOrUnknown=(v:string|null|undefined)=>v==null?"未知":formatFundingCents(v);
 function LegacyOrderFinanceObservations({rows,onOpen}:{rows:NonNullable<FinanceResponse['legacyOrderObservations']>;onOpen:(ref:string,title:string)=>void}){
  if(!rows.length)return <p className="oc-fact-note">本次未读取到关联原单据。</p>;
@@ -61,11 +57,6 @@ function LegacyOrderFinanceObservations({rows,onOpen}:{rows:NonNullable<FinanceR
    {row.kind==='REFUND'?<p className="oc-fact-note">渠道到账未记录。</p>:null}
  </li>)}</ul>;
 }
-const abnormalStateText=(s:string)=>({NO_INTENT:"未建申请",READY:"待派发",PROCESSING:"本地处理中",UNKNOWN:"状态未知",CONSUMED:"本地已核销",RELEASED:"预算已释放",REVIEW_REQUIRED:"本地复核中，不自动重试",CONFLICT:"记录冲突，金额不予汇总"} as Record<string,string>)[s]??"状态未记录";
-const abnormalReason=(s:string|null)=>({DUPLICATE_PAYMENT:"重复支付",LATE_PAYMENT:"支付时间异常"} as Record<string,string>)[s??""]??"原因未记录";
-const refundIssue=(s:string)=>({ABNORMAL_INTENT_CONFIRMATION_UNMATCHED:"退款与付款记录未匹配",ABNORMAL_INTENT_BINDING_MISMATCH:"退款关联信息不一致",ABNORMAL_INTENT_UNREADABLE:"部分退款记录不可读取",ABNORMAL_MULTIPLE_ACTIVE_INTENTS:"存在多笔处理中退款",ABNORMAL_ALLOCATION_EXCEEDS_RESPONSIBILITY:"分配金额超过退款责任",ABNORMAL_INTENT_POSTING_PRESENT:"退款关联结算记录异常",ABNORMAL_LIABILITY_MISSING:"退款责任资料缺失",ABNORMAL_INTENT_AMOUNT_MISMATCH:"退款金额不一致",ABNORMAL_INTENT_DIGEST_MISMATCH:"退款依据不一致",ABNORMAL_LIABILITY_MISMATCH:"退款责任资料不一致"} as Record<string,string>)[s]??"退款资料需核对";
-const firstSubmitText=(f?:RefundFirstSubmit|null)=>!f?"":f.dispatch==="NEVER_DISPATCHED"?(f.blockedReason?` · 首次提交受阻（${f.blockedReason==="ORIGINAL_ORDER_NO_AMBIGUOUS"?"原订单号不明确":f.blockedReason==="ABNORMAL_BASIS_REVIEW"?"异常付款依据待复核":"原因未记录"}），不自动重试`:" · 尚未派发"):f.dispatch==="DISPATCHED"?" · 已有提交尝试，是否送达/到账未核实":" · 提交事实未知";
-function AbnormalRefundBlock({summary}:{summary:RefundSummary}){const list=summary.abnormalResponsibilities;const b=summary.responsibilityBudget;if(!list?.length&&!b)return null;return <div className="oc-abnormal-refund">{b?<p className="oc-fact-note">已登记本地责任范围合计（不代表全单应退）：{b.totalsComplete?`原责任 ${centsOrUnknown(b.originalCents)} · 已分配 ${centsOrUnknown(b.allocatedCents)} · 本地核销 ${centsOrUnknown(b.consumedCents)} · 尚未分配责任 ${centsOrUnknown(b.remainingCents)}`:"合计不完整，不显示汇总金额"}；不等于渠道退款或银行到账。</p>:null}{list?.length?<ul className="oc-abnormal-responsibilities space-y-1 text-sm">{list.map((r,i)=><li key={r.confirmationId??`conflict-${i}`}><span>异常原款（{abnormalReason(r.reasonCode)}） · 原额 {centsOrUnknown(r.originalCents)}</span><small className="ml-2 text-xs text-muted-foreground">{abnormalStateText(r.state)}{firstSubmitText(r.firstSubmit)}{r.totalsComplete?` · 本地核销 ${centsOrUnknown(r.consumedCents)}`:" · 本条金额不完整"}{r.reasonCodes?.length?` · ${[...new Set(r.reasonCodes.map(refundIssue))].join("、")}`:""}</small></li>)}</ul>:null}</div>}
 type FrozenAccount={source:"ORDER_VERSION"|"ACCOUNT_PUBLIC_VERSION"|"LEGACY_ACCOUNT_SNAPSHOT";sourceUpdatedAt?:string|null;gradingText?:string|null;haff:{itemId?:string;code:string;name:string|null;quantity:string|null;unit:string}|null;materials:Array<{itemId?:string;code:string;name:string|null;quantity:string|null;unit:string}>;materialsTotal?:number;materialsTruncated?:boolean;termDays:string|null;termSeconds:string|null;loginMethodText:string|null;safeBoxText?:string|null};
 // 哈夫币兑换比例：原生单来自下单冻结报价；迁入单原单无比例时取账号公开比例（ACCOUNT_PUBLIC_VERSION），都没有为未知
 type HaffRatio={source:string;state:"KNOWN"|"UNKNOWN"|"NOT_RECORDED";wanPerYuan:string|null;customerTier:string|null;referenceOnly?:boolean};
@@ -313,7 +304,7 @@ function Detail({snapshot,id,onOpenPath,refreshNonce,financeOrigin,financeReturn
  // A source-only navigation keeps this request alive; use its latest return context.
  const openPath=useRef(onOpenPath);openPath.current=(path,title)=>{const query=new URLSearchParams();if(initialSection==='finance')query.set('section','finance');if(financeOrigin)query.set('financeOrigin',financeOrigin);const fallback=sanitizeFinanceReturn(financeReturn);if(fallback)query.set('financeReturn',fallback);onOpenPath(path+(query.size?`?${query}`:''),title);};
  const [error,setError]=useState<string>(),[nonce,setNonce]=useState(0);
- const [detailTab,setDetailTab]=useState(initialSection==='finance'?'finance':'fulfillment'),[nativeAttention,setNativeAttention]=useState(false),[originalAttention,setOriginalAttention]=useState(false);
+ const [detailTab,setDetailTab]=useState(initialSection==='finance'?'finance':'fulfillment'),[nativeAttention,setNativeAttention]=useState(false);
  const detailSection=useRef<HTMLDivElement>(null);
  const orderReadKey=JSON.stringify([id,keyOf(snapshot),refreshNonce,nonce]);
  const [loadedOrder,setLoadedOrder]=useState<{key:string;value:Order}>();
@@ -444,7 +435,7 @@ function Detail({snapshot,id,onOpenPath,refreshNonce,financeOrigin,financeReturn
     {!originalAmounts&&!legacy?.evidenceId?<p className="oc-fact-note">尚未取得结算金额记录。</p>:null}
   </>:funds.state==='ready'&&funds.evidence?(()=>{const e=funds.evidence;if(e.posting.state!=="POSTED"&&e.posting.state!=="FINALIZED_ZERO")return <p className="oc-fact-note">本单尚无可展示的结算过账金额。</p>;return <><div><span>号主结算净额</span><strong>{financeMoney(e.ownerNet)}</strong></div><div><span>租客应退</span><strong>{financeMoney(e.refundPayable)}</strong></div><div><span>退款出款记录</span><strong>{financeMoney(e.refunded)}</strong></div><div><span>平台结算贡献（非净利润）</span><strong>{financeMoney(e.platformContribution)}</strong></div>{compensation?.length===1?<div><span>全额包赔服务费{compensation[0]?.payer==="OWNER"?"（号主承担）":compensation[0]?.payer==="RENTER"?"（租客承担）":""}</span><strong>{formatFundingCents(compensation[0]!.cents)}</strong></div>:null}</>;})():<p className="oc-fact-note">{funds.state==='loading'?"正在读取结算记录…":funds.state==='forbidden'?"当前账号无权查看结算记录。":"结算记录暂不可用。"}</p>}
 </div><p className="oc-fact-note">{reconciliationNote(o)}</p></section></div>
-  {(nativeAttention||originalAttention||refundSummary?.intents?.some(intent=>intent.localState==='UNKNOWN'||intent.requiresReview))?<div className="oc-attention" role="status"><span>本单有退款记录或原请求需要核对。</span><Button size="sm" variant="secondary" onClick={()=>setDetailTab('finance')}>查看资金与退款</Button></div>:null}
+  {(nativeAttention||refundSummary?.intents?.some(intent=>(!intent.basisKind||['POSTING','PRESTART_TERMINATION'].includes(intent.basisKind))&&(intent.localState==='UNKNOWN'||intent.requiresReview)))?<div className="oc-attention" role="status"><span>本单有退款记录或原请求需要核对。</span><Button size="sm" variant="secondary" onClick={()=>setDetailTab('finance')}>查看资金与退款</Button></div>:null}
   <div ref={detailSection}><Tabs value={detailTab} onValueChange={value=>setDetailTab(String(value))} className="oc-detail-tabs"><TabsList aria-label="订单详情分区"><TabsTrigger value="fulfillment">履约</TabsTrigger><TabsTrigger value="finance">资金</TabsTrigger><TabsTrigger value="records">账号资料</TabsTrigger></TabsList>
   <TabsContent value="fulfillment" keepMounted>
   <OrderFulfillmentTimeline order={o} settlement={settlement?.key===orderReadKey?settlement.value:null} legacy={legacy} paymentTitle={paymentLabel(o)} paymentTimeText={paymentRecordTime(o)} formatTime={time}/>
@@ -453,24 +444,8 @@ function Detail({snapshot,id,onOpenPath,refreshNonce,financeOrigin,financeReturn
   </TabsContent><TabsContent value="finance" keepMounted>
   <OrderFinanceTab state={funds.state} evidence={funds.evidence} requestId={funds.requestId} paymentState={o.payment?.state} refundSummary={refundSummary} distribution={distribution} settlement={settlement?.key===orderReadKey?settlement.value:null} onRetry={()=>retryFunds(n=>n+1)} onOpenDocument={canFinanceDocument?openFundsDocument:undefined}/>
   <OrderCompensationPanel snapshot={snapshot} orderId={o.id} displayNo={o.displayNo} origin={o.source.origin} actionsTarget={actionsTarget} onOpenPath={onOpenPath} refreshNonce={refreshNonce}/>
-  {refundSummary?.abnormalResponsibilities?.length?<section className="oc-section"><h2>异常付款及退款责任</h2><AbnormalRefundBlock summary={refundSummary}/></section>:null}
   {o.source.origin==='LEGACY'&&funds.state==='ready'&&funds.legacyObservations?.length&&(!funds.evidence?.business||distribution.state!=='ready'&&funds.legacyObservations.some(row=>row.kind==='DISTRIBUTION'))?<section className="oc-section"><h2>{funds.evidence?.business?'旧分销记录':'旧资金原记录'}</h2><LegacyOrderFinanceObservations rows={funds.evidence?.business?funds.legacyObservations.filter(row=>row.kind==='DISTRIBUTION'):funds.legacyObservations} onOpen={openFundsDocument}/></section>:null}
   {o.source.origin==='NATIVE'?<AdminNativeRefundPanel orderId={o.id} canWrite={snapshot.security.isBoss||snapshot.permissions.includes("order.settlement.write")} basis={normalRefundBasis(funds.state,funds.evidence,false)} binding={{adminUserId:snapshot.adminUserId,sessionId:snapshot.session.id}} onAttentionChange={setNativeAttention} actionsTarget={actionsTarget}/>:null}
-  {o.source.origin==='NATIVE'&&(snapshot.security.isBoss||snapshot.permissions.includes('order.settlement.write'))
-    ? (() => {
-      // The panel stays mounted so a sessionStorage recovery request can raise attention;
-      // it is only visible with abnormal evidence, a review-required payment or that request.
-      const showAbnormalRefund = Boolean(originalAttention || refundSummary?.abnormalResponsibilities?.length || paymentSummary?.acceptance?.state === 'REVIEW_REQUIRED');
-      return <>
-        <div className={showAbnormalRefund ? undefined : 'hidden'} aria-hidden={!showAbnormalRefund}>
-          <details className="oc-section oc-exception" open={originalAttention||undefined}><summary>异常原款退款依据</summary><AdminOriginalRefundPanel orderId={o.id} basis="REVIEW_CONFIRMATION" canWrite binding={{adminUserId:snapshot.adminUserId,sessionId:snapshot.session.id}} onAttentionChange={setOriginalAttention} actionsTarget={actionsTarget}/></details>
-        </div>
-        {!showAbnormalRefund&&(refundSummary===undefined||paymentSummary===undefined)
-          ? <section className="oc-section"><h2>异常原款退款依据</h2><p className="oc-fact-note">付款与退款依据尚未读取完成；在取得异常依据前，不能据此认定本单没有异常原款。</p></section>
-          : null}
-      </>;
-    })()
-    : null}
   <section className="oc-section"><h2>{o.source.origin==='LEGACY'?'渠道记录':'汇聚渠道证据'}</h2>
     {o.source.origin==='LEGACY'?<p className="oc-fact-note">旧渠道依据尚未接入。</p>:snapshot.permissions.includes('finance.read') && (snapshot.security.isBoss || snapshot.permissions.includes('order.read')) ? <Button size="sm" variant="outline" onClick={()=>{
       const source = '/orders/' + encodeURIComponent(o.id) + '?section=finance';

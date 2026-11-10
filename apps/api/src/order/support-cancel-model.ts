@@ -43,6 +43,50 @@ export type SupportCancelEligibility = Readonly<{
   openingConfirmed: boolean;
 }>;
 
+/** 客服特殊取消按原款剩余额分配；金额均为整分，不产生分销佣金。 */
+export function supportPoststartCancellationAllocation(input: {
+ paidCents:unknown;previouslyAllocatedCents:unknown;refundCents:unknown;ownerCents:unknown;
+}) {
+ const values=[input.paidCents,input.previouslyAllocatedCents,input.refundCents,input.ownerCents];
+ if(values.some(value=>typeof value!=="string"||!/^(0|[1-9][0-9]{0,15})$/.test(value)))
+  throw new SecurityApiError(400,"INVALID_ARGUMENT","取消金额必须为非负整数分");
+ const [paid,allocated,refund,owner]=values.map(value=>BigInt(value as string)) as [bigint,bigint,bigint,bigint];
+ if(allocated>0n)throw new SecurityApiError(409,"CONFLICT","原付款已有退款记录，请先线下核对");
+ if(paid===0n||refund+owner>paid)
+  throw new SecurityApiError(409,"CONFLICT","退款和号主收益合计不能超过原付款剩余金额");
+ return {paidCents:paid.toString(),previouslyAllocatedCents:allocated.toString(),refundCents:refund.toString(),
+  ownerCents:owner.toString(),platformContributionCents:(paid-allocated-refund-owner).toString(),commissionCents:"0"};
+}
+
+export function assertSupportPoststartCancelInput(input:Record<string,unknown>) {
+ const revision=input.expectedOrderRevision,reason=input.reason,refund=input.refundCents,owner=input.ownerCents;
+ if(typeof revision!=="string"||!/^[1-9][0-9]{0,18}$/.test(revision)
+  ||typeof reason!=="string"||[...reason.trim()].length<3||Buffer.byteLength(reason.trim(),"utf8")>600
+  ||/[\u0000-\u001f\u007f]/.test(reason)
+  ||typeof refund!=="string"||!/^(0|[1-9][0-9]{0,15})$/.test(refund)
+  ||typeof owner!=="string"||!/^(0|[1-9][0-9]{0,15})$/.test(owner))
+  throw new SecurityApiError(400,"INVALID_ARGUMENT","请填写取消原因、退款金额和号主收益");
+ return {expectedOrderRevision:revision,reason:reason.trim(),refundCents:refund,ownerCents:owner};
+}
+
+/** 已开租客服取消不要求结算草稿先关闭，但不能覆盖已记账或已分配退款。 */
+export function supportPoststartCancellationEligibility(facts:SupportCancelFacts,allowControlled=false):SupportCancelEligibility {
+ const blocked=(reason:SupportCancelReason):SupportCancelEligibility=>({allowed:false,reason,refundCents:null,openingConfirmed:facts?.openingConfirmed===true});
+ if(!facts||!["paymentBound","openingConfirmed","hasPosting","pendingSettlement","pendingAdjustment","otherTermination"]
+  .every(key=>typeof(facts as unknown as Record<string,unknown>)[key]==="boolean")
+  ||typeof facts.monetaryEarningCount!=="string"||typeof facts.activeRefundCount!=="string")return blocked("PAYMENT_BASIS_UNAVAILABLE");
+ if(facts.orderState!=="PAID")return blocked(facts.orderState==="COMPLETED"?"ORDER_COMPLETED":"ORDER_NOT_PAID");
+ if(!facts.paymentBound||!(facts.paymentSource==="JOINPAY"||allowControlled&&facts.paymentSource==="CONTROLLED")
+  ||facts.paymentDisposition!=="APPLIED"||facts.currency!=="CNY"||typeof facts.paidCents!=="string"||!CENTS.test(facts.paidCents)
+  ||facts.paidCents!==facts.orderCents)return blocked("PAYMENT_BASIS_UNAVAILABLE");
+ if(!facts.openingConfirmed)return blocked("ORDER_CHANGED");
+ if(facts.hasPosting)return blocked("SETTLEMENT_ALREADY_POSTED");
+ if(facts.monetaryEarningCount!=="0")return blocked("DISTRIBUTION_RECONCILIATION_REQUIRED");
+ if(facts.activeRefundCount!=="0")return blocked("REFUND_PENDING");
+ if(facts.otherTermination)return blocked("TERMINATION_PENDING");
+ return {allowed:true,reason:null,refundCents:facts.paidCents,openingConfirmed:true};
+}
+
 /**
  * 纯业务判断，不授予退款能力。客服取消沿用未开租全额原款责任，要求：
  * 订单 PAID、原 APPLIED 付款完整、无结算/结算草稿/待处理调整、无未冲销佣金、

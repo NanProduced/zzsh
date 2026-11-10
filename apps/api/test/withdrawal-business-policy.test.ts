@@ -1,6 +1,15 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { assertWithdrawalBusinessPolicyMatches, loadWithdrawalBusinessPolicy, parseWithdrawalBusinessPolicy, TEAM_TEST_WITHDRAWAL_POLICY } from "../src/finance/withdrawal-business-policy";
+import { assertWithdrawalBusinessPolicyMatches, loadWithdrawalBusinessPolicy, parseWithdrawalBusinessPolicy, quoteWithdrawalBusinessAmounts, TEAM_TEST_WITHDRAWAL_POLICY } from "../src/finance/withdrawal-business-policy";
+
+test("real and simulated payouts share exact amount, balance and quota limits",()=>{
+ const base={amountCents:"10000",availableCents:"10000",used:0,minCents:"200",maxCents:"1000000",maxIntents:2,fee:{kind:"FIXED" as const,cents:"100"}};
+ assert.deepEqual(quoteWithdrawalBusinessAmounts(base),{grossCents:"10000",netCents:"9900",feeCents:"100"});
+ for(const patch of [{amountCents:"199"},{amountCents:"1000001"},{amountCents:"0"},{availableCents:"9999"},{used:2}])
+  assert.throws(()=>quoteWithdrawalBusinessAmounts({...base,...patch}),(e:any)=>e.status===409);
+ for(const patch of [{availableCents:"-1"},{used:"unknown"},{minCents:"0"}])
+  assert.throws(()=>quoteWithdrawalBusinessAmounts({...base,...patch}),(e:any)=>e.status===503);
+});
 
 test("approved test withdrawal values have one validated business policy",()=>{
   const policy=parseWithdrawalBusinessPolicy(TEAM_TEST_WITHDRAWAL_POLICY);

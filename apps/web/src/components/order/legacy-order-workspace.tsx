@@ -151,8 +151,10 @@ export function LegacyOrderWorkspace({ party, orderId, page: pageText, accountId
                 <div><dt>额外物品金额（原）</dt><dd>{formatOrderMoney(data.legacyAmounts?.items)}</dd></div>
                 <div><dt>已付金额</dt><dd>{formatOrderMoney(data.legacyAmounts?.paid)}</dd></div>
                 <div><dt>押金</dt><dd>{formatOrderMoney(data.legacyAmounts?.deposit)}</dd></div>
-                <div><dt>退款记录金额</dt><dd>{formatOrderMoney(data.legacyAmounts?.refund)}</dd></div>
+                {data.legacyAmounts?.refund || !data.legacyRefundHistory?.records.length ? <div><dt>{data.legacyRefundHistory?.records.length ? "原单退款金额" : "退款记录金额"}</dt><dd>{formatOrderMoney(data.legacyAmounts?.refund)}</dd></div> : null}
+                {data.legacyRefundHistory?.records.map(record => <div key={record.id}><dt>旧平台退款记录 <small>（{({ PROCESSING: "处理中", SUCCEEDED: "记录成功", FAILED: "记录失败", UNKNOWN: "状态未记录" } as const)[record.status]}）</small></dt><dd>{formatOrderMoney(record.amount)}</dd></div>)}
               </dl>
+              {data.legacyRefundHistory?.incomplete ? <p className="order-muted">部分旧退款记录暂无法核对。</p> : null}
               {notice}
             </div>
           )}

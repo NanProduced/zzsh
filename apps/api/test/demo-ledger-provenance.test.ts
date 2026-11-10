@@ -21,3 +21,17 @@ test("demo provenance requires readable registered evidence and does not label o
   assert.equal(result.get("local"),"LOCAL_DEMO_SIMULATED");assert.equal(result.get("ecs"),"ECS_TEST_SIMULATED");
   assert.equal(result.get("unproved"),"UNKNOWN");assert.equal(result.has("legacy"),false);
 });
+
+test("客服取消测试账本仅在原付款与登记闭合时识别，缺依据保持未知",async()=>{
+ let sqlText='';
+ const client={query:async(sql:string)=>{
+  if(sql.includes('AS present'))return{rows:[{present:true,ready:true,support_ready:true}]};
+  sqlText=sql;return{rows:[{id:'controlled',candidate:true,schema:'local-demo-clone-finance.v1'},
+   {id:'unproved',candidate:true,schema:null},{id:'formal',candidate:false,schema:null}]};
+ }} as unknown as PoolClient;
+ const result=await readDemoLedgerOrigins(client,['controlled','unproved','formal']);
+ assert.equal(result.get('controlled'),'LOCAL_DEMO_SIMULATED');assert.equal(result.get('unproved'),'UNKNOWN');assert.equal(result.has('formal'),false);
+ assert.match(sqlText,/support_poststart_cancellation_complete\(sp\.id\)/);
+ assert.match(sqlText,/spay\.source IS DISTINCT FROM 'JOINPAY'/);
+ assert.match(sqlText,/s\.registration_digest=encode\(sha256/);
+});

@@ -60,6 +60,7 @@ test("退款首派必须显式开启，单有SUBMIT准入只允许恢复", async
   assert.equal(f.trace[3]!.values!.at(-1), false);
   t.mock.method(refundProfiles,'assertFormalRefundProfile',()=>f.view as never);t.mock.method(refundProfiles,'assertRefundStart',()=>{});
   t.mock.method(refunds,'allocatePostedJoinpayRefunds',async()=>({} as never));t.mock.method(prestart,'allocatePrestartJoinpayRefunds',async()=>({} as never));
+  t.mock.method(prestart,'allocateSupportCancellationJoinpayRefunds',async()=>({} as never));
   await recoverJoinpayRefundBatch({...f.refund,execution:{...f.refund.execution,initialProfile:{} as refundProfiles.BoundRefundProfile}});
   assert.equal(f.trace[5]!.values!.at(-1),true);
 });
@@ -137,12 +138,12 @@ test("坏枚举/重复ID/超批量/终态不交执行器；不把本地查询结
   assert.equal(called, 0);
 });
 
-test("C04B-02 仅未首派READY异常按阻断小时退避，其他原单保持到期顺序", async t => {
+test("退款扫描排除退役的异常原款并保留未开租退款退避", async t => {
   const f = fixture(t); await recoverJoinpayRefundBatch(f.refund);
   const scan = f.trace[1]!;
-  assert.match(scan.sql, /order\.refund\.abnormal\.first_submit\.blocked/);
+  assert.match(scan.sql, /order\.refund\.prestart\.first_submit\.blocked/);
   assert.match(scan.sql, /occurred_at>clock_timestamp\(\)-make_interval\(secs=>3600\)/);
-  assert.match(scan.sql, /NOT \(i\.basis_kind='REVIEW_CONFIRMATION' AND i\.state='READY'\) OR NOT EXISTS/);
+  assert.match(scan.sql, /i\.basis_kind IN \('POSTING','PRESTART_TERMINATION','SUPPORT_CANCELLATION'\)/);
   assert.match(scan.sql, /ORDER BY i\.due_at,i\.id LIMIT/);
   assert.equal(scan.values!.at(-1), false);
 });
@@ -244,7 +245,7 @@ test("真实Nest生命周期：先排空资金任务再结束原池，未配置�
   } finally { await app.close(); }
 });
 
-test("Master R1: old first-submit blocked audit must not pause an already-dispatched query",async t=>{
+test("retired abnormal intents are excluded regardless of their old state",async t=>{
  const f=fixture(t);await recoverJoinpayRefundBatch(f.refund);
- assert.match(f.trace[1]!.sql,/NOT \(i\.basis_kind='REVIEW_CONFIRMATION' AND i\.state='READY'\) OR NOT EXISTS/);
+ assert.match(f.trace[1]!.sql,/i\.basis_kind IN \('POSTING','PRESTART_TERMINATION','SUPPORT_CANCELLATION'\)/);
 });

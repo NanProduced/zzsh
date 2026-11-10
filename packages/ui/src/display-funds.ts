@@ -10,12 +10,11 @@ import { displayLabel, UNRECOGNIZED_STATE_LABEL } from "./display-credit.ts";
 export { UNRECOGNIZED_STATE_LABEL };
 
 export type ObligationSource =
-  | "POSTING" | "REVIEW_CONFIRMATION" | "PRESTART_TERMINATION" | "LEGACY_DUTY"
+  | "POSTING" | "PRESTART_TERMINATION" | "LEGACY_DUTY"
   | "LOCAL_CONTROLLED" | "JOINPAY_FORMAL";
 
 const obligationSourceLabels: Record<ObligationSource, string> = {
   POSTING: "本平台结算责任",
-  REVIEW_CONFIRMATION: "异常收款记录",
   PRESTART_TERMINATION: "未开租终止责任",
   LEGACY_DUTY: "旧平台责任",
   LOCAL_CONTROLLED: "站内模拟提现（未实际打款）",

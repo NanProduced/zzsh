@@ -14,6 +14,8 @@ npm run migrate:business -w @zzsh/api -- --initial --baseline release_production
 
 已装 `release_0141`、`release_0151`、`release_production_0153` 或原 canonical 的库按原版本账接后续编号迁移；原文件与哈希不变。生产 initial 只记一条明确的基线和后续增量，不补造覆盖历史，也不用于删表重灌。以后正常迁移无需重复传 `--initial`。空库使用初始安装时显式选基线；仅用 `--initial` 仍由 registry 的兼容默认值决定。
 
+其后的 `0179`–`0189` 继续由同一迁移入口按版本账依次安装，包括客服权限与接待状态、开租确认，以及新订单取消和原路退款结构。`0186`–`0189` 新建的开租后取消记录在空库中为空；旧订单的原付款、历史退款及旧价目仍按旧数据迁移合同导入，不能推定为新平台取消记录或渠道到账。对已有库先核对版本、退役结构与数据，再执行升级；初始化结构不代表旧单续办或退款已通过验收。
+
 本地受控渠道测试使用登记的独立测试资源，按其原 canonical 链或 `--initial --baseline release_0151` 新装，并使用已有受控资源准入。不要将测试辅助对象、模拟凭据或事实迁入生产基线。此路径的受控成功也不代表真实渠道或银行到账。
 
 `node scripts/migration/build-business-initial.mjs --plan` 不连接数据库。生产导出需 `--execute --production --source-db <登记的临时生成库> --oid <现场OID> --baseline <新版本> --source-count <冻结迁移数>`，并绑定准确 marker、nonce 和维护锁。若生成库从已登记生产基线安装后追加 canonical 尾链，显式传入 `--source-baseline <原基线>`，工具会复用基线校验并逐项核对实际版本账。使用本机 `pg_dump` 时须以 `--pg-dump-executable <绝对路径> --pg-dump-sha256 <摘要>` 绑定工具字节；未指定时保留原本地 Docker 执行方式。生成器只读空业务库的同一快照，仅允许固定的静态种子；四张权限、角色、角色权限和审批模板表必须与绑定 canonical 全链的行集证明一致，只排除生成时变化的 `created_at`、`updated_at`；默认单例逐值核对。发现额外、缺失或更改的种子、其他业务数据、缺失中文注释或混入排除对象即拒绝。发布前比较原链与生产投影的有意差集、投影与新装的结构和有效权限，以及已装旧基线的升级路径。目录和安装验证不替代真实旧数据转换或渠道验收。

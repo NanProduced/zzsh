@@ -2,11 +2,12 @@ import type { Pool } from "pg";
 import { SecurityApiError, withTransaction } from "../auth/security-core";
 import { assertEcsTestDemoOrderAdmission, assertEcsTestDemoResource, demoFinanceScope, readEcsTestDemoRegistration, type DemoFinanceResource } from "../finance/ecs-test-demo-resource";
 import { conflict, invalid } from "../supply/supply-util";
-import { createNativeRefundIntent, createSandboxPrestartRefundIntent, postedRefundAllocationKey } from "./channel-refund-store";
+import { createNativeRefundIntent, createSandboxLiabilityRefundIntent, postedRefundAllocationKey } from "./channel-refund-store";
 import { demoForChannelRequestCapability } from "./channel-payment-store";
 import { runEcsDemoRefundStep } from "./local-sandbox-refund-worker";
-import { prestartRefundAllocationKey } from "./prestart-refund-store";
+import { prestartRefundAllocationKey,supportCancellationRefundAllocationKey } from "./prestart-refund-store";
 
+// TODO(正式上线前): 移除测试退款适配及其装配，模拟成功不是渠道退款。
 type Options = Readonly<{ demo: DemoFinanceResource; capability: unknown }>;
 const ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const unavailable = () => new SecurityApiError(503, "EVIDENCE_UNAVAILABLE", "模拟退款记录暂不可用");
@@ -35,19 +36,25 @@ export async function allocateEcsDemoPostedRefund(pool: Pool, options: Options, 
   }); } catch (error) { if (completed) throw new SecurityApiError(503,'EVIDENCE_UNAVAILABLE','模拟退款申请结果未知，请查询原订单'); throw error; }
 }
 
-/** Allocate only an approved, bound prestart termination under its deterministic original key. */
-export async function allocateEcsDemoPrestartRefund(pool:Pool,options:Options,terminationId:string,requestId:string){
-  if(!ID.test(terminationId)||!ID.test(requestId)||demoForChannelRequestCapability(options.capability)!==options.demo)throw invalid();
+/** Both cancellation paths use their frozen original liability and the same controlled executor. */
+export async function allocateEcsDemoLiabilityRefund(pool:Pool,options:Options,kind:'PRESTART_TERMINATION'|'SUPPORT_CANCELLATION',id:string,requestId:string){
+  if(!ID.test(id)||!ID.test(requestId)||demoForChannelRequestCapability(options.capability)!==options.demo)throw invalid();
   let completed=false;
   try{return await withTransaction(pool,async c=>{
     await assertEcsTestDemoResource(c,options.demo);
-    const term=(await c.query<{order_id:string}>(`SELECT t.order_id FROM zzsh_order.prestart_termination t
+    const term=kind==='PRESTART_TERMINATION'?(await c.query<{order_id:string}>(`SELECT t.order_id FROM zzsh_order.prestart_termination t
       JOIN zzsh_order.rental_order o ON o.id=t.order_id AND o.status='CANCELLED'
       JOIN zzsh_order.payment_confirmation p ON p.id=o.paid_confirmation_id AND p.id=(t.payment_basis->>'paymentConfirmationId')
         AND p.order_id=o.id AND p.source='CONTROLLED' AND p.disposition='APPLIED'
-      WHERE t.id=$1 AND t.state='APPROVED' AND t.payment_basis->>'source'='CONTROLLED'`,[terminationId])).rows[0];
+      WHERE t.id=$1 AND t.state='APPROVED' AND t.payment_basis->>'source'='CONTROLLED'`,[id])).rows[0]
+     :(await c.query<{order_id:string}>(`SELECT t.order_id FROM zzsh_order.support_poststart_cancellation t
+      JOIN zzsh_order.rental_order o ON o.id=t.order_id AND o.status='CANCELLED'
+      JOIN zzsh_order.payment_confirmation p ON p.id=o.paid_confirmation_id AND p.id=t.payment_confirmation_id
+       AND p.order_id=o.id AND p.source='CONTROLLED' AND p.disposition='APPLIED'
+      WHERE t.id=$1 AND t.refund_cents>0`,[id])).rows[0];
     if(!term)throw unavailable();await assertEcsTestDemoOrderAdmission(c,options.demo,term.order_id);
-    const result=await createSandboxPrestartRefundIntent(c,{terminationId,idempotencyKey:prestartRefundAllocationKey(terminationId),requestId,capability:options.capability});
+    const result=await createSandboxLiabilityRefundIntent(c,{...(kind==='PRESTART_TERMINATION'?{terminationId:id}:{supportCancellationId:id}),
+      idempotencyKey:kind==='PRESTART_TERMINATION'?prestartRefundAllocationKey(id):supportCancellationRefundAllocationKey(id),requestId,capability:options.capability});
     await c.query('SET CONSTRAINTS ALL IMMEDIATE');completed=true;
     return {scope:demoFinanceScope(options.demo),outcome:result.kind,intentId:result.intentId,bankArrival:'UNKNOWN' as const};
   });}catch(error){if(completed)throw new SecurityApiError(503,'EVIDENCE_UNAVAILABLE','模拟退款申请结果未知，请查询原订单');throw error;}
@@ -79,7 +86,19 @@ export async function runEcsDemoRefundBatch(pool:Pool,options:Options,limit:numb
         AND NOT EXISTS(SELECT 1 FROM zzsh_order.channel_refund_intent i WHERE i.payment_confirmation_id=p.id)
       ORDER BY t.approved_at,t.id LIMIT $4`,[proof.digest,proof.registration.resource.databaseOid,proof.registration.resource.marker,limit])).rows;
   });
-  const prestartAllocations=[];for(const row of prestarts)prestartAllocations.push(await allocateEcsDemoPrestartRefund(pool,options,row.id,workerId));
+  const prestartAllocations=[];for(const row of prestarts)prestartAllocations.push(await allocateEcsDemoLiabilityRefund(pool,options,'PRESTART_TERMINATION',row.id,workerId));
+  const cancellations=await withTransaction(pool,async c=>{
+    await assertEcsTestDemoResource(c,options.demo);
+    if((await c.query(`SELECT to_regclass('zzsh_order.support_poststart_cancellation') IS NOT NULL AS ready`)).rows[0]?.ready!==true)return [];
+    return(await c.query<{id:string}>(`SELECT t.id FROM zzsh_order.support_poststart_cancellation t
+      JOIN zzsh_order.rental_order o ON o.id=t.order_id AND o.status='CANCELLED'
+      JOIN zzsh_order.payment_confirmation p ON p.id=o.paid_confirmation_id AND p.id=t.payment_confirmation_id
+       AND p.order_id=o.id AND p.source='CONTROLLED' AND p.disposition='APPLIED'
+      JOIN zzsh_order.distribution_order_admission a ON a.order_id=o.id AND a.approval_digest=$1 AND a.resource_oid=$2 AND a.resource_marker=$3
+      WHERE t.refund_cents>0 AND NOT EXISTS(SELECT 1 FROM zzsh_order.channel_refund_intent i WHERE i.payment_confirmation_id=p.id)
+      ORDER BY t.created_at,t.id LIMIT $4`,[proof.digest,proof.registration.resource.databaseOid,proof.registration.resource.marker,limit])).rows;
+  });
+  const cancellationAllocations=[];for(const row of cancellations)cancellationAllocations.push(await allocateEcsDemoLiabilityRefund(pool,options,'SUPPORT_CANCELLATION',row.id,workerId));
   const intents=await withTransaction(pool,async c=>{
     await assertEcsTestDemoResource(c,options.demo);
     return(await c.query<{id:string}>(`SELECT id FROM zzsh_order.channel_refund_intent WHERE payment_source='CONTROLLED' AND sandbox_registration_ref=$1
@@ -87,5 +106,6 @@ export async function runEcsDemoRefundBatch(pool:Pool,options:Options,limit:numb
       ORDER BY due_at,id LIMIT $2`,[proof.registration.reference,limit])).rows;
   });
   const outcomes=[];for(const row of intents)outcomes.push(await runEcsDemoRefundStep(pool,options,row.id,workerId));
-  return { scope:demoFinanceScope(options.demo), selected:postings.length, allocations, prestartSelected:prestarts.length, prestartAllocations, outcomes, bankArrival:'UNKNOWN' as const };
+  return { scope:demoFinanceScope(options.demo), selected:postings.length, allocations, prestartSelected:prestarts.length, prestartAllocations,
+    cancellationSelected:cancellations.length,cancellationAllocations,outcomes, bankArrival:'UNKNOWN' as const };
 }

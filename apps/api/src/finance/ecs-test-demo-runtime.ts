@@ -12,6 +12,7 @@ import type { WithdrawalBusinessPolicy } from "./withdrawal-business-policy";
 const assemblies = new WeakSet<object>();
 export type EcsTestDemoRuntime = NonNullable<ReturnType<typeof createEcsTestDemoRuntime>>;
 
+// TODO(正式上线前): 移除测试支付装配和专用入口；模拟结果不得作为汇聚或银行到账证据。
 /** Creates process-local capabilities only; enrollment and database installation are separate owner steps. */
 export function createEcsTestDemoRuntime(input: Parameters<typeof createEcsTestDemoResource>[0] & { appId: string; withdrawalPolicy?:WithdrawalBusinessPolicy }) {
   const demo = createEcsTestDemoResource(input); if (!demo) return undefined;

@@ -141,7 +141,7 @@ test("实际原生报价消费新绑定来源；改卡后原报价不能创建�
   const coverage = { knowledge: "KNOWN", origin: "NATIVE", cutoff: "2026-10-24T00:00:00.000000Z", sourceDigest: "1".repeat(64), coveredSetDigest: "2".repeat(64), coverageVersion: "1" };
   t.mock.method(wallet, "readPersonalWallet", async () => ({ ledgerRevision: "8", coverage, buckets: { available: { amountCents: "50000" } } }) as never);
   t.mock.method(recovery, "assertNoReferralRecoveryForWithdrawal", async () => {});
-  const original = f.client.query.bind(f.client);
+  const original = f.client.query.bind(f.client); let used = "0";
   (f.client as any).query = async (sql: string, values: unknown[] = []) => {
     if (sql.includes("pg_current_xact_id()")) return { rows: [{ db: f.options.database, actor: f.options.runtimeUser, xid: "100", isolation: "read committed" }] };
     if (sql.includes("G4 payout execution schema inventory") || sql.includes("G4 payout fixed guards")) return { rows: [{ ready: true }] };
@@ -149,7 +149,7 @@ test("实际原生报价消费新绑定来源；改卡后原报价不能创建�
     if (sql.startsWith("SELECT to_char(clock_timestamp()")) return { rows: [{ now: f.state.identityRow.now }] };
     if (sql.includes("SELECT ledger_revision::text AS revision")) return { rows: [{ revision: "8" }] };
     if (sql.includes("wallet_coverage c")) return { rows: [coverage] };
-    if (sql.includes("SELECT count(*)::text AS count")) return { rows: [{ count: "0" }] };
+    if (sql.includes("SELECT count(*)::text AS count")) return { rows: [{ count: used }] };
     return original(sql, values);
   };
   const body = { amountCents: "10000", destinationId: id, policyVersion: "unit_policy" };
@@ -162,6 +162,20 @@ test("实际原生报价消费新绑定来源；改卡后原报价不能创建�
     {userId:actor.userId,active:true,localAdmissionEligible:true,coverageKnown:true,availableCents:"50000",ledgerRevision:"8",now:at,
       destination:{id,userId:actor.userId,mode:"LOCAL_CONTROLLED",kind:"BANK_CARD",active:true},usage:{...localWithdrawalDayWindow(at),quotaCount:0}});
   assert.deepEqual([simulated.grossCents,simulated.netCents,simulated.feeCents],[first.grossCents,first.netCents,first.feeCents]);
+  for(const amountCents of ["200","199","50001","1000001","0"]){
+    const formalResult=await withTransaction(f.pool,c=>quoteNativeWithdrawalInTransaction(c,actor,{...body,amountCents},o)).then(value=>({ok:true,net:value.netCents,fee:value.feeCents}),error=>({ok:false,status:error.status}));
+    let testResult;try{const value=quoteControlledWithdrawal({amountCents,destinationId:id,policyVersion:local.version,expectedWalletVersion:"8"},local,
+      {userId:actor.userId,active:true,localAdmissionEligible:true,coverageKnown:true,availableCents:"50000",ledgerRevision:"8",now:at,
+        destination:{id,userId:actor.userId,mode:"LOCAL_CONTROLLED",kind:"BANK_CARD",active:true},usage:{...localWithdrawalDayWindow(at),quotaCount:0}});testResult={ok:true,net:value.netCents,fee:value.feeCents};}
+    catch(error){testResult={ok:false,status:(error as {status:number}).status};}
+    assert.deepEqual(testResult,formalResult,`amount ${amountCents}`);
+  }
+  used="2";
+  await assert.rejects(withTransaction(f.pool,c=>quoteNativeWithdrawalInTransaction(c,actor,body,o)),(error:any)=>error.status===409);
+  assert.throws(()=>quoteControlledWithdrawal({amountCents:body.amountCents,destinationId:id,policyVersion:local.version,expectedWalletVersion:"8"},local,
+    {userId:actor.userId,active:true,localAdmissionEligible:true,coverageKnown:true,availableCents:"50000",ledgerRevision:"8",now:at,
+      destination:{id,userId:actor.userId,mode:"LOCAL_CONTROLLED",kind:"BANK_CARD",active:true},usage:{...localWithdrawalDayWindow(at),quotaCount:2}}),(error:any)=>error.status===409);
+  used="0";
   await saveWithdrawalBankBinding(f.pool, actor, { ...input, cardNo: "0000000000000023", expectedRevision: "1" }, "unit_new_bank", f.options);
   const next = await withTransaction(f.pool, c => quoteNativeWithdrawalInTransaction(c, actor, body, o)); assert.equal(next.destination.mask, "**** **** 0023");
   assert.notEqual(next.expectedWalletVersion, first.expectedWalletVersion);

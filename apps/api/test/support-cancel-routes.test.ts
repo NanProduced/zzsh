@@ -89,3 +89,16 @@ test("领域提交后commit响应未知返回202原键恢复，不伪造成取�
   assert.equal(f.body().originalKeyRequired, true);
   assert.equal(f.body().bankArrival, "UNKNOWN");
 });
+
+test("开租后取消绑定当前管理员并冻结双方金额，身份漂移不得执行",async t=>{
+ const f=fixture(t),input={expectedOrderRevision:"1",reason:"双方协商取消",refundCents:"5000",ownerCents:"3000",expectedAdminId:"support_1"};
+ await assert.rejects(handleSupportCancelAdminRoute(f.request("POST","order_1",{...input,expectedAdminId:"other"}),f.response,f.options,"order_1",new URLSearchParams(),"POST"),(e:any)=>e.status===401);
+ assert.equal(f.seen.some(v=>v.startsWith("scope:")),false);
+ t.mock.method(domain,"supportCancelAfterOpening",async(_c:any,actor:any,payload:any)=>{
+  assert.equal(actor.userId,"support_1");assert.equal(payload.refundCents,"5000");assert.equal(payload.ownerCents,"3000");
+  return {status:200,body:{orderId:"order_1"}};
+ });
+ await handleSupportCancelAdminRoute(f.request("POST","order_1",input),f.response,f.options,"order_1",new URLSearchParams(),"POST");
+ assert(f.seen.includes("scope:"+JSON.stringify({principalId:"support_1",operation:"order.support_cancel_after_opening",resourceId:"order_1"})));
+ assert(f.seen.some(v=>v.includes('"expectedAdminId":"support_1"')));
+});

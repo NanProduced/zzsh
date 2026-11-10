@@ -12,7 +12,7 @@
 | 收款请求 | `payment_request` 持久保存原商户单号、稳定商户、金额及原请求映射；同订单重试取原请求，不换号绕过 UNKNOWN。 |
 | 渠道尝试/观察/证据 | 保留每次派发、查询、通知、验签与绑定判断；观察可追加，旧失败、冲突和 UNKNOWN 不覆盖。 |
 | 付款确认 | `payment_confirmation` 的 `APPLIED` 是本站唯一接纳；`REVIEW_REQUIRED` 是需要复核的原款，不是可重复消费的付款。 |
-| 结算与应退责任 | 正常过账、异常收款责任、未开租终止责任分别建模；无正常 posting 不代表无应退责任。 |
+| 结算与应退责任 | 正常过账、未开租取消和开租后客服特殊取消分别建模；无正常 posting 不代表无应退责任。 |
 | 退款意图/提现意图 | 冻结原款或原目标、政策、预算与幂等身份；意图建立不代表已经提交供应商。 |
 | 经济根/事件/分录 | 唯一来源、不可变事件及平衡分录决定本站账务；页面状态不创造余额。 |
 
@@ -43,8 +43,8 @@
 | basis | 原责任与命令边界 |
 | --- | --- |
 | `POSTING` | 从已完成订单的不可变结算 posting 取净应退责任；支持部分/累计分配，不能超过原款及剩余责任。正常结算即时到期，提前结算按 posting 保存的到期时点执行，不由客户端重启期限。 |
-| `REVIEW_CONFIRMATION` | 已核实的迟到/额外原款，经受权人员复核后全额原笔退；不造正常结算或分佣冲回。缺可信原款、错绑或争议继续复核。 |
-| `PRESTART_TERMINATION` | 已付未正式开租：租客或号主申请，合法客服核实未交付/使用、无争议；在原锁链内重核原款、无正式开租/过账/待决调整/资金分佣后，取消订单并记录全额应退责任。 |
+| `PRESTART_TERMINATION` | 已付未正式开租：租客或号主选择各自的取消原因，在原订单锁内校验身份、原付款和开租状态，直接取消并登记全额应退责任。历史已提交申请按原回执恢复。 |
+| `SUPPORT_CANCELLATION` | 已开租、尚未结算的新订单由有权限的客服填写退款、号主收益和原因；两项合计不超过原实付，其余为平台结算贡献，本单不产生分销。订单取消、资金分配和审计同事务写入，退款继续按原付款执行。 |
 
 未开租终止不伪造 `COMPLETED`、开租或正常 posting。冻结分佣依据不是资金计提；若已出现需要核对的真实资金佣金，拒绝自动终止并转复核。租客原订单押金包含在原付款及应退核算中；号主上架保证金是另一业务，独立真实收退不在本范围。
 
@@ -85,13 +85,14 @@
 | --- | --- |
 | `POST/GET /api/v1/orders/:id/channel-payment-requests` | 本人建收款请求/读本地支付动作及事实；旧 CONTROLLED 路由保持兼容，JOINPAY 旧客户端明确拒绝升级。 |
 | `POST /api/v1/orders/:id/channel-payment-requests/query` | 本人按原请求查单，不首派/换号；可信成功可推进唯一接纳。 |
-| `GET /api/v1/orders/:id/refunds` | 本人租客读取正常/异常责任及退款事实，不调用 Admin 命令 GET。 |
+| `GET /api/v1/orders/:id/refunds` | 本人租客读取正常退款责任及退款事实，不调用 Admin 命令 GET。 |
 | `GET /api/v1/orders/:id/prestart-termination`、`GET /api/v1/admin/orders/:id/prestart-termination` | 当事人或有订单范围的 Admin 本地读取；号主不获租客退款金额，Admin 金额按财务读权或合法审核资格裁剪。 |
-| `POST /api/v1/orders/:id/prestart-termination/requests` | 当事人申请，带当前版本、原因和幂等键。 |
-| `POST /api/v1/admin/orders/:id/prestart-termination/:termId/review` | `order.settlement.write` 与订单/game/team 范围；核准另需明确未使用无争议声明。 |
+| `POST /api/v1/orders/:id/prestart-termination/cancel` | 当事人在开租前选择对应角色的取消原因并直接取消；服务端核对版本、身份与原款，保留原幂等键。 |
+| `POST /api/v1/orders/:id/prestart-termination/requests` | 仅按原键恢复旧申请；无原申请时返回未提交，不新增申请。 |
+| `POST /api/v1/admin/orders/:id/prestart-termination/:termId/review` | 有订单和游戏范围权限的管理员处理已存在的历史申请；核准需明确未使用无争议声明。 |
 | `GET/POST /api/v1/admin/orders/:id/refunds` | 已授权结算操作者读取命令上下文/分配正常退款；`finance.read` 不单独授予该接口的命令权限。 |
-| `POST /api/v1/admin/orders/:id/refunds/abnormal` | 人工复核指定原 confirmation，只建本地全额原款责任/意图。 |
 | `POST /api/v1/admin/orders/:id/prestart-termination/:termId/refund-requests` | 按已核准原责任创建意图，不直接出网；返回 `NOT_SUBMITTED`。 |
+| `GET/POST /api/v1/admin/orders/:id/support-cancel` | 客服读取资格并取消订单；开租后提交订单版本、当前管理员身份、退款、号主收益和原因，以原键恢复。既有退款或分佣无法确认时交客服线下核对，不重复退款。 |
 | `GET/POST /api/v1/users/me/withdrawal-bank-binding`、`GET .../receipt` | 本人绑卡/读取/原键恢复，写入沿当前版本、幂等和审计。 |
 | `GET /api/v1/users/me/channel-withdrawals/options`、`POST .../quote`、`POST ...`、`GET .../:id`、`GET .../receipt` | 本人资格、报价、预留、详情及恢复；创建重核身份、政策、钱包版本、配额和目标。 |
 | `GET /api/v1/users/me/withdrawal-history` | 分来源读取历史/受控/原生提现，不能合并不同游标或补造旧目标。 |
@@ -170,6 +171,6 @@ v3 旧流水还返回 `historicalAmountSemantics`：`BALANCE_RECORD` 表示原�
 
 旧钱包期初与用于证明其资金责任的`HISTORICAL_EARNINGS_LOG` coverage，只准入同一主体、`legacy_mysql_restore`来源的同一受审截点。两类新写在同主体用户行锁内、业务写前互检；已有任一不一致截点不得通过追加相同截点覆盖来隐藏。独立的提现/分销历史coverage不参与此资金证明守卫，缺期初行不表示余额已证。原成功key重放与只读恢复不受新写守卫影响；既有不一致仍按原读取合同保持UNKNOWN，不改截点、删历史或另换key。
 
-0106/0107提供异常原款及未开租终止结构；0108以前向方式登记旧来源证明，测试与安装读取同一正式SQL。旧无proof输入/回执和观察不补字段或重算余额，旧basis的安全摘要返回NULL且沿原witness；新的sourceProof不能绕过缺结构/守卫的拒绝。干净链、正式前缀升级及手装资源的留置边界见[安装合同](database-navigation.md#旧资金来源证明安装合同)；已有对象不能盲跑新链或补journal冒充采用。
+未开租终止结构保留在迁移链中；已退役的异常原款退款不再创建或展示，迟到及重复付款的事实仍由支付记录体现，争议线下处理。0108以前向方式登记旧来源证明，测试与安装读取同一正式SQL。旧无proof输入/回执和观察不补字段或重算余额，旧basis的安全摘要返回NULL且沿原witness；新的sourceProof不能绕过缺结构/守卫的拒绝。干净链、正式前缀升级及手装资源的留置边界见[安装合同](database-navigation.md#旧资金来源证明安装合同)；已有对象不能盲跑新链或补journal冒充采用。
 
 目前已有完整领域与两端源码、离线及部分隔离受控PG证据，包括三类合成旧来源、原键恢复、runtime拒读与受控退款局部反例。正式新装/前缀升级、旧无proof既有数据、完整正式退款/提现矩阵、真实认证三端及真实迁移仍须分别验收。真实收款、退款、代付、回调和银行到账也须独立验收，公共技术账号仅收款签名验证不能覆盖退款/代付。未取得官方账单/全部流水/清算覆盖资料时，只能声称已核本地或逐单范围，不能声称期间全量对平。

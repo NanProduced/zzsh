@@ -112,6 +112,7 @@ export const ADMIN_FINANCE_LEDGER_SQL = `SELECT l.id,l.account_code,l.counterpar
   LEFT JOIN zzsh_order.finance_opening_basis b ON b.id=r.basis_id
   LEFT JOIN zzsh_order.rental_referral_earning re ON re.economic_root_id=r.id AND r.source_kind='NATIVE_RENTAL_REFERRAL'
   LEFT JOIN zzsh_order.settlement_posting p ON p.id=l.posting_id LEFT JOIN zzsh_order.rental_order o ON o.id=COALESCE(p.order_id,re.order_id)
+  WHERE r.source_kind IS DISTINCT FROM 'NATIVE_ABNORMAL_REFUND'
   ORDER BY l.id COLLATE "C" LIMIT $1`;
 export function adminFinanceLedgerSql(nativeDistribution:boolean,prestart=false){let sql=nativeDistribution?ADMIN_FINANCE_LEDGER_SQL:ADMIN_FINANCE_LEDGER_SQL
  .replace('COALESCE(p.order_id,re.order_id) AS order_id','p.order_id AS order_id')
@@ -127,6 +128,10 @@ export function adminFinanceLedgerSql(nativeDistribution:boolean,prestart=false)
   sql=sql.replace('r.basis_id,r.id AS economic_root_id',`pt.id AS prestart_termination_id,pt.payment_basis->>'paymentConfirmationId' AS prestart_confirmation_id,
     pt.payment_basis->>'amountCents' AS prestart_amount_cents,${utc('pt.approved_at')} AS prestart_approved_at,r.basis_id,r.id AS economic_root_id`);
  }
+ const currentOrder=prestart?(nativeDistribution?'COALESCE(p.order_id,re.order_id,pt.order_id)':'COALESCE(p.order_id,pt.order_id)')
+  :(nativeDistribution?'COALESCE(p.order_id,re.order_id)':'p.order_id');
+ const linkedOrder=`COALESCE(${currentOrder},CASE WHEN r.source_kind='NATIVE_SUPPORT_CANCELLATION' AND r.source_entity='support_poststart_cancellation' THEN l.details->>'orderId' END)`;
+ sql=sql.replace(`${currentOrder} AS order_id`,`${linkedOrder} AS order_id`).replace(`o.id=${currentOrder}`,`o.id=${linkedOrder}`);
  return sql;}
 const observationEvidenceSql="jsonb_build_object('snapshot',o.snapshot,'canonical',o.source_canonical,'legacyUserId',o.legacy_user_id)";
 export const ADMIN_FINANCE_OBSERVATION_SQL = `SELECT o.id,o.user_id AS subject_id,COALESCE(u.name,o.user_id) AS subject_name,o.source_kind,o.source_type,o.source_system,o.source_entity,o.source_id,o.source_digest,COALESCE(oa.basis_id,o.basis_id) AS basis_id,COALESCE(oa.included_in_opening,o.included_in_opening) AS included_in_opening,
@@ -243,8 +248,8 @@ async function appendUnpostedFinanceSources(client: PoolClient, ready: Raw, scop
     const orderId = scope.documentRef?.startsWith("ORDER:") ? scope.documentRef.slice(6) : null;
     const ids = wanted("REFUND_INTENT");
     const columns = `id,order_id,renter_user_id,merchant_identity_id,payment_source,refund_order_no,provider_refund_trx_no,state,amount_cents::text AS amount_cents,${utc("created_at")} AS at`;
-    if (orderId) add("REFUND_INTENT", (await client.query(`SELECT ${columns} FROM zzsh_order.channel_refund_intent WHERE order_id=$1 ORDER BY id COLLATE "C" LIMIT 65`, [orderId])).rows, "LOCAL_REFUND_READ_LIMIT");
-    else if (ids.length) add("REFUND_INTENT", (await client.query(`SELECT ${columns} FROM zzsh_order.channel_refund_intent WHERE id=ANY($1::text[]) ORDER BY id COLLATE "C"`, [ids])).rows, "LOCAL_REFUND_READ_LIMIT");
+    if (orderId) add("REFUND_INTENT", (await client.query(`SELECT ${columns} FROM zzsh_order.channel_refund_intent WHERE order_id=$1 AND basis_kind IN ('POSTING','PRESTART_TERMINATION') ORDER BY id COLLATE "C" LIMIT 65`, [orderId])).rows, "LOCAL_REFUND_READ_LIMIT");
+    else if (ids.length) add("REFUND_INTENT", (await client.query(`SELECT ${columns} FROM zzsh_order.channel_refund_intent WHERE id=ANY($1::text[]) AND basis_kind IN ('POSTING','PRESTART_TERMINATION') ORDER BY id COLLATE "C"`, [ids])).rows, "LOCAL_REFUND_READ_LIMIT");
   }
   if (ready.joinpay_withdrawals === true) {
     const ids = wanted("JOINPAY_WITHDRAWAL");

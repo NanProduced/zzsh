@@ -7,7 +7,7 @@ export type OrderRefundSummary = {
   coverage?: 'COMPLETE_WITHIN_LIMIT' | 'TRUNCATED' | null;
   truncated?: boolean;
   intents: Array<{ intentId: string; refundOrderNo: string; amount: { cents: string; currency: string }; localState: string;
-    budgetDisposition: string; requiresReview: boolean; bankArrival: 'UNKNOWN' }> | null;
+    budgetDisposition: string; requiresReview: boolean; bankArrival: 'UNKNOWN'; basisKind?: string }> | null;
   bankArrival: 'UNKNOWN';
 };
 
@@ -42,6 +42,7 @@ export function mergeOrderRefunds(observed: readonly OrderFinanceTransaction[], 
   if (summary?.integration !== 'INTEGRATED' || !summary.intents) return rows;
   const seen = new Set<string>();
   for (const item of summary.intents) {
+    if (item.basisKind && !['POSTING', 'PRESTART_TERMINATION'].includes(item.basisKind)) continue;
     const ref = `REFUND_INTENT:${item.intentId}`;
     const existing = byRef.get(ref);
     if (existing) {

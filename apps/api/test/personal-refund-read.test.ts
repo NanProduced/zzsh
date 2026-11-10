@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { PoolClient } from "pg";
 import { SecurityApiError } from "../src/auth/security-core";
-import { readPersonalNativeRefunds } from "../src/finance/personal-refund-read";
+import { projectPrestartRefundSummary, readPersonalNativeRefunds } from "../src/finance/personal-refund-read";
 import {sandboxFixture,sandboxClient} from './local-financial-sandbox-fixture';
 import type {LocalFinancialSandbox} from '../src/finance/local-financial-sandbox-resource';
 
@@ -19,6 +19,21 @@ const ROOT_ID = "native_refund_root_" + "c".repeat(20);
 const EVIDENCE_ID = "jre_" + "b".repeat(40);
 const INTENT_ID = "rfi_" + "a".repeat(40);
 
+test("prestart refund summary distinguishes simulated success, verified channel record and unknown results",()=>{
+ const intent={state:"SUCCEEDED",requiresReview:false,localWriteOff:"RECORDED",savedChannelEvidence:null};
+ const totals={originalCents:"334613",allocatedCents:"334613",consumedCents:"334613",releasedCents:"0",remainingCents:"0",totalsComplete:true};
+ const progress:any={integration:"INTEGRATED",truncated:false,totals,intents:[intent],bankArrival:"UNKNOWN",dataOrigin:"LOCAL_CONTROLLED"};
+ assert.deepEqual(projectPrestartRefundSummary("CONTROLLED","334613",progress),{state:"SUCCEEDED",amountCents:"334613",source:"SIMULATED",bankArrival:"UNKNOWN"});
+ assert.equal(projectPrestartRefundSummary("CONTROLLED","334613",{...progress,dataOrigin:undefined}).state,"UNKNOWN");
+ assert.equal(projectPrestartRefundSummary("JOINPAY","334613",progress).state,"UNKNOWN");
+ const channel={...progress,intents:[{...intent,savedChannelEvidence:{terminal:"SUCCEEDED"}}]};
+ assert.equal(projectPrestartRefundSummary("JOINPAY","334613",channel).state,"SUCCEEDED");
+ assert.equal(projectPrestartRefundSummary("JOINPAY","334613",{...channel,intents:[{...channel.intents[0],requiresReview:true}]}).state,"UNKNOWN");
+ assert.equal(projectPrestartRefundSummary("JOINPAY","334613",{...channel,intents:[{...intent,state:"PROCESSING",localWriteOff:"NOT_RECORDED"}]}).state,"PROCESSING");
+ assert.equal(projectPrestartRefundSummary("JOINPAY","334613",{...channel,totals:{...totals,allocatedCents:"0"},intents:[{...intent,state:"FAILED"}]}).state,"FAILED");
+ assert.equal(projectPrestartRefundSummary("JOINPAY","334613",{...channel,truncated:true}).state,"UNKNOWN");
+});
+
 type Query = { sql: string; values: unknown[] };
 type Result = { rows: Record<string, unknown>[]; rowCount?: number };
 type State = {
@@ -34,6 +49,10 @@ type State = {
   ledgerRows?: Record<string, unknown>[];
   localSandbox?:LocalFinancialSandbox;
   localComplete?:boolean;
+  prestartReady?:boolean;
+  supportCancelReady?:boolean;
+  supportCancelRows?:Record<string, unknown>[];
+  supportRefundRows?:Record<string, unknown>[];
 };
 
 function fake(state: State = {}) {
@@ -57,6 +76,11 @@ function fake(state: State = {}) {
     if (sql.startsWith("SELECT i.id,i.posting_id,i.order_id")) return { rows: state.intentRows ?? [] };
     if (sql.startsWith("SELECT e.id AS event_id,e.kind AS event_kind")) return { rows: state.liabilityRows ?? [] };
     if (sql.startsWith("SELECT e.id AS event_id")) return { rows: state.ledgerRows ?? [] };
+    if (sql.includes("has_table_privilege(current_user,to_regclass('zzsh_order.prestart_termination')")) return { rows: [{ready: state.prestartReady === true}] };
+    if (sql.includes("has_table_privilege(current_user,to_regclass('zzsh_order.support_poststart_cancellation')")) return { rows: [{ready: state.supportCancelReady === true}] };
+    if (sql.startsWith("SELECT p.id,p.order_id,p.renter_user_id")) return {rows:state.supportCancelRows ?? []};
+    if (sql.startsWith("SELECT to_regprocedure('zzsh_order.support_cancellation_refund_terminal_complete")) return {rows:[{ready:true}]};
+    if (sql.startsWith("SELECT i.id,i.order_id,i.renter_user_id")) return {rows:state.supportRefundRows ?? []};
     if(sql.startsWith('SELECT i.id,zzsh_order.local_controlled_refund_terminal_complete'))return{rows:state.localComplete?[{id:INTENT_ID,complete:true}]:[]};
     if(sandbox)return sandbox.query(sql,values);
     throw new Error("Unexpected SQL: " + sql);
@@ -116,6 +140,30 @@ const rejectStatus = (error: unknown, status: number) => error instanceof Securi
 const helperSql = (trace: Query[]) => trace.filter(entry => !entry.sql.startsWith('SELECT "suspended"')
   && !entry.sql.includes('"zzsh_iam"."user_identity_state"') && !entry.sql.startsWith('SELECT 1 FROM "zzsh_auth_user"."session"'));
 
+test("cancelled prestart order with unavailable refund source stays unknown", async () => {
+  const {result} = read({prestartReady:false, orderRows:[order({status:"CANCELLED", cancel_reason:"PRESTART_TERMINATED", paid_confirmation_id:"pc_1", posting_id:null})]});
+  const data = await result;
+  assert.deepEqual(data.prestartRefund,{state:"UNKNOWN",amountCents:null,source:"UNKNOWN",bankArrival:"UNKNOWN"});
+});
+
+test("开租后客服取消按本单责任显示部分退款，不伪造到账或跨用户记录", async () => {
+  const original = order({status:"CANCELLED",cancel_reason:"SUPPORT_AFTER_START_CANCELLED",paid_confirmation_id:"pc_1",posting_id:null});
+  const basis = {id:"sc_1",order_id:ORDER,renter_user_id:USER,owner_user_id:"owner_1",payment_confirmation_id:"pc_1",
+    source_digest:"b".repeat(64),refund_cents:"5000",source:"JOINPAY",disposition:"APPLIED",currency:"CNY",
+    merchant_scope_id:"merchant_1",merchant_order_no:"order_1",provider_transaction_id:"trx_1",complete:true};
+  const state = {supportCancelReady:true,supportCancelRows:[basis],orderRows:[original]};
+  const pending = await read(state).result;
+  assert.deepEqual(pending.cancellationRefund,{state:"PROCESSING",amountCents:"5000",source:"JOINPAY",bankArrival:"UNKNOWN"});
+  assert.equal(pending.prestartRefund,undefined);
+  const foreign = await read({...state,supportCancelRows:[{...basis,renter_user_id:"other"}]}).result;
+  assert.equal(foreign.cancellationRefund?.state,"UNKNOWN");
+  assert.equal(foreign.cancellationRefund?.amountCents,null);
+  const zero = await read({...state,supportCancelRows:[{...basis,refund_cents:"0"}]}).result;
+  assert.equal(zero.cancellationRefund,undefined);
+  const missing = await read({...state,supportCancelReady:false}).result;
+  assert.equal(missing.cancellationRefund?.state,"UNKNOWN");
+});
+
 test("本人正常读取：全部分摊、精确金额、本地记账与渠道事实分列", async () => {
   const { result, trace } = await read({ intentRows: [intent()] });
   const data = await result;
@@ -146,7 +194,7 @@ test("本人正常读取：全部分摊、精确金额、本地记账与渠道�
   assert(data.unknowns.includes("CHANNEL_REFUND_RECORD_NOT_CHECKED"));
   assert(data.unknowns.includes("BANK_ARRIVAL_UNKNOWN"));
   const statements = helperSql(trace);
-  assert.equal(statements.length, 5);
+  assert.equal(statements.length, 3);
   const preflight = statements.find(entry => entry.sql.startsWith("WITH req AS"))!;
   const orderQuery = statements.find(entry => entry.sql.startsWith("SELECT o.id"))!;
   const intentQuery = statements.find(entry => entry.sql.startsWith("SELECT i.id") && !entry.sql.includes("basis_kind='REVIEW_CONFIRMATION'"))!;
@@ -186,7 +234,7 @@ test("跨租户订单与其它租户意图都不暴露：404 / CONFLICT 且不�
   assert.equal(data.responsibility.allocatedCents, null);
   assert.equal(data.responsibility.totalsComplete, false);
   assert(!JSON.stringify(data).includes("54321"));
-  assert.equal(helperSql(trace).length, 5);
+  assert.equal(helperSql(trace).length, 3);
 });
 
 test("订单不存在返回404；认证失败先于任何证据读取", async () => {
@@ -489,222 +537,10 @@ test("异常订单状态/多过账/非法ID显式失败", async () => {
   assert(!legacy.trace.some(entry => entry.sql.includes("legacy_order")));
 });
 
-
-// C04B-02 abnormal REVIEW_CONFIRMATION local responsibility
-const ABN_ROOT = "native_abnormal_refund_liability_" + "d".repeat(40);
-const ABN_EVENT = ABN_ROOT + "_recognized";
-const ABN_PC = "pc_abn_01";
-function abnormalResponsibility(overrides: Record<string, unknown> = {}) {
-  return { confirmation_id: ABN_PC, order_id: ORDER, reason_code: "LATE_PAYMENT", original_cents: "5000", currency: "CNY",
-    merchant_scope_id: "merchant_1", provider_transaction_id: "trx_abn", merchant_order_no: "ORDER_NO_1",
-    joinpay_request_id: "payreq_1", joinpay_evidence_id: "jpe_1", joinpay_anchor_id: "paytrx_1", renter_user_id: USER,
-    request_channel: "JOINPAY", request_evidence_level: "JOINPAY_CANDIDATE", request_merchant: "merchant_1",
-    request_order_no: "ORDER_NO_1", request_amount_cents: "5000", request_currency: "CNY", wire_merchant_no: "999900000000001",
-    formal_admission_ref: "ref_1", anchor_channel: "JOINPAY", anchor_order: ORDER, anchor_request: "payreq_1",
-    anchor_merchant: "merchant_1", anchor_trx: "trx_abn", anchor_evidence_level: "JOINPAY_VERIFIED",
-    liability_root_id: ABN_ROOT, liability_root_kind: "NATIVE_ABNORMAL_REFUND", liability_root_type: "NATIVE",
-    liability_root_system: "zzsh", liability_root_entity: "joinpay_abnormal_refund_liability",
-    liability_root_source_id: ABN_PC, liability_root_subject: USER, liability_root_role: "RENTER",
-    liability_root_digest: "c".repeat(64), liability_root_policy: null, liability_root_basis: null,
-    liability_event_id: ABN_EVENT, liability_event_kind: "REFUND_LIABILITY_RECOGNIZED",
-    liability_event_root: ABN_ROOT, liability_event_subject: USER, intent_count: 1, submit_attempts: 0,
-    blocked_count: 1, blocked_at: PAST, blocked_reason: "ORIGINAL_ORDER_NO_AMBIGUOUS", ...overrides };
-}
-function abnormalIntent(overrides: Record<string, unknown> = {}) {
-  return intent({ posting_id: null, basis_kind: "REVIEW_CONFIRMATION", payment_confirmation_id: ABN_PC,
-    liability_root_id: ABN_ROOT, liability_event_id: ABN_EVENT, responsibility_version_hash: "c".repeat(64),
-    amount_cents: "5000", due_at: PAST, submit_attempts: 0, blocked_count: 1, blocked_at: PAST,
-    blocked_reason: "ORIGINAL_ORDER_NO_AMBIGUOUS", ...overrides });
-}
-function abnormalLiability(overrides: Record<string, unknown> = {}) {
-  return { event_id: ABN_EVENT, event_kind: "REFUND_LIABILITY_RECOGNIZED", event_root: ABN_ROOT, event_subject: USER,
-    root_id: ABN_ROOT, root_kind: "NATIVE_ABNORMAL_REFUND", root_type: "NATIVE", root_system: "zzsh",
-    root_entity: "joinpay_abnormal_refund_liability", root_source_id: ABN_PC, root_subject: USER,
-    root_role: "RENTER", root_digest: "c".repeat(64), root_policy: null, root_basis: null,
-    line1_debit: "5000", line1_credit: "0", line1_good: "1", line2_debit: "0", line2_credit: "5000",
-    line2_good: "1", total_lines: "2", ...overrides };
-}
-
-test("C04B-02 CANCELLED+异常责任可见：原款一份、阻断原因/时间/从未派发", async () => {
-  const cancelled = order({ status: "CANCELLED", posting_id: null, posting_currency: null, refund_cents: null, due_at: null });
-  const { result, trace } = await read({ orderRows: [cancelled], abnormalRows: [abnormalResponsibility()],
-    abnormalIntentRows: [abnormalIntent()], liabilityRows: [abnormalLiability()] });
-  const data = await result;
-  assert.equal(data.status, "AVAILABLE");
-  assert.equal(data.outcome, "REVIEW_REQUIRED");
-  assert.equal(data.responsibility.state, "NOT_POSTED");
-  assert.equal(data.abnormalResponsibilities.length, 1);
-  assert.equal(data.abnormalResponsibilities[0]!.originalCents, "5000");
-  assert.equal(data.abnormalResponsibilities[0]!.allocatedCents, "5000");
-  assert.equal(data.abnormalResponsibilities[0]!.remainingCents, "0");
-  assert.equal(data.abnormalResponsibilities[0]!.firstSubmit!.dispatch, "NEVER_DISPATCHED");
-  assert.equal(data.abnormalResponsibilities[0]!.firstSubmit!.blockedReason, "ORIGINAL_ORDER_NO_AMBIGUOUS");
-  assert.equal(data.abnormalResponsibilities[0]!.firstSubmit!.blockedAt, PAST);
-  assert.equal(data.intents.length, 1);
-  assert.equal(data.intents[0]!.basisKind, "REVIEW_CONFIRMATION");
-  assert.equal(data.intents[0]!.firstSubmit!.blockedAuditCount, 1);
-  assert.equal(data.responsibilityTotals.originalCents, "5000");
-  assert.equal(data.responsibilityTotals.totalsComplete, true);
-  assert.equal(data.localFundsEffect.writtenOffCents, "0");
-  assert.equal(data.actualChannelRefund.bankArrival, "UNKNOWN");
-  assert.equal(data.intents[0]!.channelFacts.bankArrival, "UNKNOWN");
-  assert.equal(helperSql(trace).some(entry => /INSERT|UPDATE |DELETE|FOR UPDATE|pg_advisory/.test(entry.sql)), false);
-});
-
-test("C04B-02 释放后新key只一份责任：allocated/released分列，不把两笔金额相加", async () => {
-  const released = abnormalIntent({ id: "rfi_released", state: "FAILED", budget_disposition: "RELEASED",
-    terminal_evidence_id: EVIDENCE_ID, terminal_root_id: null, terminal_event_id: null,
-    evidence_terminal: "FAILED_NO_EXECUTION", provider_refund_trx_no: null, completed_at: null,
-    evidence_trx_no: null, evidence_completed_at: null, terminal_evidence_level: "PROVIDER_RESPONSE",
-    blocked_at: null, blocked_count: 0, blocked_reason: null,
-    submit_attempts: 1, created_at: "2026-10-26T11:00:00.000000Z", updated_at: "2026-10-26T11:30:00.000000Z" });
-  const active = abnormalIntent({ id: "rfi_active", created_at: "2026-10-26T12:00:00.000000Z", updated_at: "2026-10-26T12:00:00.000000Z" });
-  const responsibility = abnormalResponsibility({ intent_count: 2, submit_attempts: 1, blocked_count: 0, blocked_at: null, blocked_reason: null });
-  const { result } = await read({ orderRows: [order({ status: "CANCELLED", posting_id: null, posting_currency: null, refund_cents: null, due_at: null })],
-    abnormalRows: [responsibility], abnormalIntentRows: [released, active], liabilityRows: [abnormalLiability()] });
-  const data = await result;
-  assert.equal(data.abnormalResponsibilities.length, 1);
-  assert.equal(data.abnormalResponsibilities[0]!.originalCents, "5000");
-  assert.equal(data.abnormalResponsibilities[0]!.allocatedCents, "5000");
-  assert.equal(data.abnormalResponsibilities[0]!.releasedCents, "5000");
-  assert.equal(data.abnormalResponsibilities[0]!.remainingCents, "0");
-  assert.equal(data.responsibilityTotals.originalCents, "5000");
-  assert.equal(data.intents.length, 2);
-});
-
-test("C04B-02 异常核销只认未分配收款负债两条分录，仍不推断渠道/银行成功", async () => {
-  const consumed = abnormalIntent({ state: "SUCCEEDED", budget_disposition: "CONSUMED", terminal_evidence_id: EVIDENCE_ID,
-    terminal_root_id: ROOT_ID, terminal_event_id: EVENT_ID, provider_refund_trx_no: "CHTRX001",
-    completed_at: "2026-10-26T12:00:00.000000Z", evidence_terminal: "SUCCEEDED", evidence_trx_no: "CHTRX001",
-    evidence_completed_at: "2026-10-26T12:00:00.000000Z", terminal_evidence_level: "PROVIDER_RESPONSE",
-    latest_event: "TERMINAL", submit_attempts: 1, blocked_count: 0, blocked_at: null, blocked_reason: null });
-  const ledgerRow = ledger("5000", { root_source_id: consumed.id, unallocated_debit: "0", unallocated_credit: "5000", unallocated_lines: "1" });
-  const { result } = await read({ orderRows: [order({ status: "CANCELLED", posting_id: null, posting_currency: null, refund_cents: null, due_at: null })],
-    abnormalRows: [abnormalResponsibility()], abnormalIntentRows: [consumed], liabilityRows: [abnormalLiability()], ledgerRows: [ledgerRow] });
-  const data = await result;
-  assert.equal(data.outcome, "FULLY_CONSUMED");
-  assert.equal(data.abnormalResponsibilities[0]!.consumedCents, "5000");
-  assert.equal(data.intents[0]!.localAccounting.writeOff!.amountCents, "5000");
-  assert.equal(data.intents[0]!.savedChannelEvidence!.trust, "SAVED_EVIDENCE_NOT_REVALIDATED");
-  assert.equal(data.actualChannelRefund.amountCents, null);
-  assert.equal(data.localFundsEffect.bankArrival, "UNKNOWN");
-});
-
-test("C04B-02 异常坏根/多分录/错绑进入CONFLICT，合计不伪报", async () => {
-  const { result } = await read({ orderRows: [order({ status: "CANCELLED", posting_id: null, posting_currency: null, refund_cents: null, due_at: null })],
-    abnormalRows: [abnormalResponsibility()], abnormalIntentRows: [abnormalIntent()],
-    liabilityRows: [abnormalLiability({ line2_good: "0", total_lines: "3" })] });
-  const data = await result;
-  assert.equal(data.outcome, "CONFLICT");
-  assert.ok(data.reasonCodes.includes("ABNORMAL_LIABILITY_MISMATCH"));
-  assert.equal(data.responsibilityTotals.totalsComplete, false);
-  assert.equal(data.responsibilityTotals.originalCents, null);
-  assert.equal(data.abnormalResponsibilities[0]!.totalsComplete, false);
-});
-
-test("C04B-02 正常POSTING与异常责任同单并列，金额按各自责任计一次", async () => {
-  const normal = intent();
-  const { result } = await read({ abnormalRows: [abnormalResponsibility({ blocked_count: 0, blocked_at: null, blocked_reason: null })],
-    abnormalIntentRows: [abnormalIntent({ blocked_count: 0, blocked_at: null, blocked_reason: null })],
-    liabilityRows: [abnormalLiability()], intentRows: [normal] });
-  const data = await result;
-  assert.equal(data.status, "AVAILABLE");
-  assert.equal(data.responsibility.state, "POSTED");
-  assert.equal(data.abnormalResponsibilities.length, 1);
-  assert.equal(data.intents.length, 2);
-  assert.equal(data.responsibilityTotals.originalCents, "15000");
-  assert.equal(data.responsibilityTotals.postingOriginalCents, "10000");
-  assert.equal(data.responsibilityTotals.abnormalOriginalCents, "5000");
-  assert.equal(data.outcome, "FULLY_ALLOCATED");
-});
-
-
-test("C04B-02 异常跨用户意图不进入金额/意图列表，显式CONFLICT", async () => {
-  const foreign = abnormalIntent({ renter_user_id: OTHER, amount_cents: "54321" });
-  const { result } = await read({ orderRows: [order({ status: "CANCELLED", posting_id: null, posting_currency: null, refund_cents: null, due_at: null })],
-    abnormalRows: [abnormalResponsibility()], abnormalIntentRows: [foreign], liabilityRows: [abnormalLiability()] });
-  const data = await result;
-  assert.equal(data.outcome, "CONFLICT");
-  assert.equal(data.intents.length, 0);
-  assert.equal(data.abnormalResponsibilities[0]!.intentIds.length, 0);
-  assert.equal(data.responsibilityTotals.totalsComplete, false);
-  assert(!JSON.stringify(data).includes("54321"));
-});
-
-test("C04B-02 异常责任超过50条显式TRUNCATED，不报告完整合计", async () => {
-  const rows = Array.from({ length: 51 }, (_, index) => abnormalResponsibility({
-    confirmation_id: "pc_abn_" + String(index).padStart(3, "0"), liability_root_id: null,
-    liability_event_id: null, intent_count: 0, submit_attempts: 0, blocked_count: 0,
-    blocked_at: null, blocked_reason: null }));
-  const { result } = await read({ orderRows: [order({ status: "CANCELLED", posting_id: null, posting_currency: null, refund_cents: null, due_at: null })],
-    abnormalRows: rows, abnormalIntentRows: [], liabilityRows: [] });
-  const data = await result;
-  assert.equal(data.outcome, "TRUNCATED");
-  assert.equal(data.responsibilitiesTruncated, true);
-  assert.equal(data.responsibilityTotals.totalsComplete, false);
-  assert.equal(data.responsibilityTotals.originalCents, null);
-  assert.equal(data.intents.length, 0);
-});
-
-// Master independent regression probes; SYNTHETIC_READER_COMPONENT only.
-const masterOrder = () => order({status:"CANCELLED",posting_id:null,posting_currency:null,refund_cents:null,due_at:null});
-const masterState = () => ({orderRows:[masterOrder()],abnormalRows:[abnormalResponsibility()],abnormalIntentRows:[abnormalIntent()],liabilityRows:[abnormalLiability()]});
-test("Master: PAID without posting retains established abnormal liability",async()=>{
- const state=masterState();state.orderRows=[order({status:"PAID",posting_id:null,posting_currency:null,refund_cents:null,due_at:null})];
- const data=await read(state).result;
- assert.equal(data.abnormalResponsibilities.length,1);
- assert.equal(data.responsibilityTotals.originalCents,"5000");
- assert.equal(data.outcome,"REVIEW_REQUIRED");
-});
-test("Master: combined partial allocation is not FULLY_ALLOCATED",async()=>{
- const data=await read({intentRows:[intent({amount_cents:"3000"})],
- abnormalRows:[abnormalResponsibility({blocked_count:0,blocked_at:null,blocked_reason:null})],
- abnormalIntentRows:[abnormalIntent({blocked_count:0,blocked_at:null,blocked_reason:null})],
- liabilityRows:[abnormalLiability()]}).result;
- assert.equal(data.responsibilityTotals.originalCents,"15000");
- assert.equal(data.responsibilityTotals.allocatedCents,"8000");
- assert.equal(data.outcome,"PARTIALLY_ALLOCATED");
-});
-test("Master: invalid terminal ledger also invalidates its per-receipt totals",async()=>{
- const current=abnormalIntent({state:"SUCCEEDED",budget_disposition:"CONSUMED",terminal_evidence_id:EVIDENCE_ID,
- terminal_root_id:ROOT_ID,terminal_event_id:EVENT_ID,provider_refund_trx_no:"CHTRX001",completed_at:"2026-10-26T12:00:00.000000Z",
- evidence_terminal:"SUCCEEDED",evidence_trx_no:"CHTRX001",evidence_completed_at:"2026-10-26T12:00:00.000000Z",
- terminal_evidence_level:"PROVIDER_RESPONSE",submit_attempts:1,blocked_count:0,blocked_at:null,blocked_reason:null});
- const data=await read({...masterState(),abnormalIntentRows:[current],ledgerRows:[]}).result;
- assert.equal(data.outcome,"CONFLICT");
- assert.equal(data.abnormalResponsibilities[0]!.totalsComplete,false);
- assert.equal(data.abnormalResponsibilities[0]!.state,"CONFLICT");
- assert.equal(data.abnormalResponsibilities[0]!.consumedCents,null);
-});
-test("Master: intent liability IDs must match the established receipt liability",async()=>{
- const data=await read({...masterState(),abnormalIntentRows:[abnormalIntent({liability_root_id:"other_root",liability_event_id:"other_event"})]}).result;
- assert.equal(data.outcome,"CONFLICT");
- assert.equal(data.responsibilityTotals.totalsComplete,false);
-});
-test("Master: mixed 50 normal plus one abnormal intent does not claim complete totals",async()=>{
- const normal=Array.from({length:50},(_,i)=>intent({id:"rfi_normal_"+i,amount_cents:"100"}));
- const data=await read({intentRows:normal,abnormalRows:[abnormalResponsibility({blocked_count:0,blocked_at:null,blocked_reason:null})],
- abnormalIntentRows:[abnormalIntent({blocked_count:0,blocked_at:null,blocked_reason:null})],liabilityRows:[abnormalLiability()]}).result;
- assert.equal(data.intents.length,50);assert.equal(data.intentsTruncated,true);
- assert.equal(data.responsibilityTotals.totalsComplete,false);
- assert.equal(data.responsibilityTotals.originalCents,null);
- assert.equal(data.localFundsEffect.writtenOffCents,null);
-});
-test("Master: unmatched established abnormal intent cannot disappear as no responsibility",async()=>{
- const data=await read({...masterState(),abnormalRows:[]}).result;
- assert.equal(data.outcome,"CONFLICT");
- assert.equal(data.responsibilityTotals.totalsComplete,false);
-});
-test("Master: malformed abnormal intent cannot retain a complete per-receipt budget",async()=>{
- const data=await read({...masterState(),abnormalIntentRows:[abnormalIntent({currency:"USD"})]}).result;
- assert.equal(data.outcome,"CONFLICT");
- assert.equal(data.abnormalResponsibilities[0]!.totalsComplete,false);
- assert.equal(data.abnormalResponsibilities[0]!.allocatedCents,null);
-});
-
-test("Master R1: preflight checks the anchor evidence column actually read by SQL",async()=>{
- const probe=await read({});
- await probe.result;
- const checked=JSON.parse(probe.trace.find(q=>q.sql.startsWith("WITH req AS"))!.values[0] as string) as {table:string;columns:string[]}[];
- assert(checked.find(q=>q.table==="zzsh_order.payment_channel_transaction")!.columns.includes("evidence_level"));
+test("订单退款读取不再查询或展示已退役的异常原款责任", async () => {
+  const {result,trace}=read({orderRows:[order({status:"PAID",posting_id:null})],abnormalRows:[{confirmation_id:"old_fixture"}]});
+  const data=await result;
+  assert.equal(data.status,"NOT_APPLICABLE");
+  assert.equal("abnormalResponsibilities" in data,false);
+  assert(trace.every(call=>!call.sql.includes("REVIEW_CONFIRMATION")));
 });
