@@ -7,7 +7,6 @@ import { recordAudit, SecurityApiError, withTransaction } from "../auth/security
 import { API_V1_ERROR_CODES, validateIdempotencyKey } from "../contracts/api-v1";
 import { conflict, forbidden, invalid, notFound } from "../supply/supply-util";
 import { createFormalRefundIntent, createNativeRefundIntent, createSandboxPrestartRefundIntent, type FormalRefundCreateInput } from "./channel-refund-store";
-import { createAbnormalFormalRefundIntent } from "./joinpay-abnormal-refund-store";
 import { createPrestartFormalRefundIntent } from "./prestart-refund-store";
 import { describeRefundProfile, type BoundRefundProfile, type FormalRefundAdmission } from "./joinpay-refund-profile";
 import {localRefundRegistration,type LocalSandboxRefundOptions} from './local-sandbox-refund-source';
@@ -101,46 +100,6 @@ export async function requestAdminNativeRefund(pool: Pool, execution: AdminNativ
       channel: { result: receipt.replayed ? "UNKNOWN" as const : "NOT_SUBMITTED" as const, bankArrival: "UNKNOWN" as const },...(local?{dataOrigin:'LOCAL_CONTROLLED' as const,formalRefund:false}:{}) };
     completed = true;
     return result;
-  }); } catch (error) { if (completed) throw new AdminRefundCommitUnknown(key); throw error; }
-}
-
-export type AdminAbnormalNativeRefundInput = Readonly<{
-  actor: AdminNativeRefundActor; orderId: string; confirmationId: string; idempotencyKey: unknown; requestId: string;reason?:string;
-}>;
-/** 已核实重复/迟到REVIEW原款的人工核准；只建原责任/意图，不出网、不生成渠道成功。 */
-export async function requestAdminAbnormalNativeRefund(pool: Pool, execution: AdminNativeRefundExecution, input: AdminAbnormalNativeRefundInput) {
-  if(localExecution(execution))throw new SecurityApiError(503,'EVIDENCE_UNAVAILABLE','Local sandbox does not admit abnormal formal refunds');
-  if (!ID.test(input.orderId) || !ID.test(input.confirmationId) || !ID.test(input.requestId)) throw invalid();
-  if(input.reason!==undefined&&(typeof input.reason!=='string'||input.reason.trim().length<3||Buffer.byteLength(input.reason)>600))throw invalid();
-  const key = validateIdempotencyKey(input.idempotencyKey);
-  let completed = false;
-  try { return await withTransaction(pool, async client => {
-    await authorizeAdminNativeRefund(client, input.actor, input.orderId);
-    const result = await createAbnormalFormalRefundIntent(client, { orderId: input.orderId, confirmationId: input.confirmationId,
-      idempotencyKey: key, requestId: input.requestId,
-      ...(execution?.admission === undefined ? {} : { admission: execution.admission }),
-      ...(execution?.initialProfile === undefined ? {} : { profile: execution.initialProfile }) });
-    if (result.kind === "REVIEW_REQUIRED") {
-      await recordAudit(client, { actorType: "admin", actorId: input.actor.userId, sessionId: input.actor.sessionId,
-        action: "order.refund.abnormal.review_required", objectType: "payment_confirmation", objectId: input.confirmationId,
-        outcome: "SUCCESS", requestId: input.requestId, reason: result.reason,
-        details: { confirmationId: input.confirmationId, orderId: input.orderId, channelResult: "NOT_SUBMITTED",reviewReason:input.reason?.trim()??null } });
-      completed = true;
-      return { contractVersion: "admin-abnormal-native-refund.v1" as const, replayed: false, outcome: "REVIEW_REQUIRED" as const,
-        reason: result.reason, confirmationId: input.confirmationId, intentId: null, state: "REVIEW_REQUIRED" as const,
-        amountCents: null, currency: null, responsibility: null, channel: { result: "NOT_SUBMITTED" as const, bankArrival: "UNKNOWN" as const } };
-    }
-    if (result.kind !== "REPLAYED") await recordAudit(client, { actorType: "admin", actorId: input.actor.userId, sessionId: input.actor.sessionId,
-      action: "order.refund.abnormal.requested", objectType: "channel_refund_intent", objectId: result.intentId, outcome: "SUCCESS",
-      requestId: input.requestId, details: { confirmationId: result.confirmationId, evidenceId: result.evidenceId, anchorId: result.anchorId,
-        amountCents: result.amountCents, currency: "CNY", reasonCode: result.reasonCode, channelResult: "NOT_SUBMITTED", reviewDecision: "APPROVED",reviewReason:input.reason?.trim()??null } });
-    completed = true;
-    return { contractVersion: "admin-abnormal-native-refund.v1" as const, replayed: result.kind === "REPLAYED", outcome: result.kind,
-      intentId: result.intentId, refundOrderNo: result.refundOrderNo, state: result.state, budgetDisposition: result.budgetDisposition,
-      amountCents: result.amountCents, currency: "CNY" as const,
-      responsibility: { confirmationId: result.confirmationId, evidenceId: result.evidenceId, anchorId: result.anchorId,
-        reasonCode: result.reasonCode, liabilityRootId: result.liabilityRootId, liabilityEventId: result.liabilityEventId },
-      channel: { result: result.kind === "REPLAYED" ? "UNKNOWN" as const : "NOT_SUBMITTED" as const, bankArrival: "UNKNOWN" as const } };
   }); } catch (error) { if (completed) throw new AdminRefundCommitUnknown(key); throw error; }
 }
 

@@ -1285,7 +1285,7 @@ export async function configureJoinpayFinancialPrivileges(pool: Pick<Pool, "quer
   const basisColumns=['basis_kind','liability_root_id','liability_event_id'];
   const basisCount=columns.filter(c=>c.name===refund[0]!.name&&basisColumns.includes(c.attname)).length;
   if(basisCount!==0&&basisCount!==3||hasPrestart&&basisCount!==3)throw new Error('Refund liability extension is partially deployed');
-  if(basisCount===3){refund[0]!.insert+=' '+basisColumns.join(' ');functions.push('zzsh_order.native_abnormal_refund_liability_complete(text)','zzsh_order.native_abnormal_refund_terminal_complete(text)');}
+  if(basisCount===3) refund[0]!.insert+=' '+basisColumns.join(' ');
   // This column belongs to the separately checked local group, not the formal provider's write surface.
   if (hasSandbox || hasDemoSandbox) refund[0]!.metadata += ' sandbox_registration_ref';
   if (hasDemoSandbox) refund[0]!.metadata += ' demo_terminal_evidence_id';

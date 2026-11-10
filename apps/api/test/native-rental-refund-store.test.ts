@@ -3,7 +3,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { Pool, PoolClient } from "pg";
 import { withTransaction } from "../src/auth/security-core";
-import { consumeNativeRentalRefundTerminal, planAbnormalNativeRentalRefundJournal, planLocalSandboxRentalRefundJournal, planNativeRentalRefundJournal } from "../src/finance/native-rental-refund-store";
+import { consumeNativeRentalRefundTerminal, planLocalSandboxRentalRefundJournal, planNativeRentalRefundJournal } from "../src/finance/native-rental-refund-store";
 
 const input = () => ({ intentId: "refund_synthetic_1", postingId: "posting_synthetic_1", paymentConfirmationId: "paid_synthetic_1",
   renterUserId: "renter_synthetic_1", refundOrderNo: "RF0123456789abcdef0123456789ab", amountCents: "15908", factsDigest: "a".repeat(64) });
@@ -33,18 +33,6 @@ test('模拟与正式退款对相同责任产生相同金额分录，来源仍�
   assert.equal(simulated.lines[0]!.details.dataOrigin,'LOCAL_CONTROLLED');
   assert.equal('dataOrigin' in formal.lines[0]!.details,false);
  }
-});
-
-test("异常REVIEW原款终态计划只核销未分配收款负债，不借正常posting清算", () => {
-  const p = planAbnormalNativeRentalRefundJournal({ intentId: "refund_synthetic_1", paymentConfirmationId: "paid_synthetic_1",
-    renterUserId: "renter_synthetic_1", refundOrderNo: "RF0123456789abcdef0123456789ab", amountCents: "15908", factsDigest: "a".repeat(64) });
-  assert.equal(p.evidenceLevel, "PLAN_ONLY");
-  assert.deepEqual(p.lines.map(l => [l.account, l.debit, l.credit, l.subject]), [
-    ["RENTER_REFUND_PAYABLE", "15908", "0", "renter_synthetic_1"], ["JOINPAY_UNALLOCATED_RECEIPT", "0", "15908", null],
-  ]);
-  assert.equal(p.lines.some(l => String(l.account) === "PAYOUT_CLEARING"), false);
-  assert.equal((p.lines[0]!.details as any).postingId, null);
-  assert.equal(p.lines.reduce((n, l) => n + BigInt(l.debit) - BigInt(l.credit), 0n), 0n);
 });
 
 test("最大合法分值用字符串与BigInt精确守恒", () => {

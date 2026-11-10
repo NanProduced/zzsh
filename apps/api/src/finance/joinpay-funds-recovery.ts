@@ -65,15 +65,12 @@ export async function recoverJoinpayRefundBatch(input: RefundOptions, signal?: A
       AND EXISTS(SELECT 1 FROM jsonb_to_recordset($3::jsonb) AS accepted(reference text,sha256 text)
         WHERE accepted.reference=i.initial_admission_ref AND accepted.sha256=i.initial_admission_sha256)
       AND (i.state<>'READY' OR i.lease_version>0 OR NOT i.requires_review)
+      AND i.basis_kind IN ('POSTING','PRESTART_TERMINATION')
       AND (i.lease_version>0 OR $8::boolean)
       AND (i.lease_until IS NULL OR i.lease_until<=clock_timestamp())
       AND (SELECT count(*) FROM zzsh_order.joinpay_refund_attempt counted WHERE counted.intent_id=i.id AND counted.operation='QUERY')<$7::integer
       AND NOT EXISTS(SELECT 1 FROM zzsh_order.joinpay_refund_attempt recent WHERE recent.intent_id=i.id
         AND recent.created_at>clock_timestamp()-make_interval(secs=>$5::integer))
-      AND (NOT (i.basis_kind='REVIEW_CONFIRMATION' AND i.state='READY') OR NOT EXISTS(
-        SELECT 1 FROM zzsh_iam.audit_event blocked WHERE blocked.action='order.refund.abnormal.first_submit.blocked'
-          AND blocked.object_type='channel_refund_intent' AND blocked.object_id=i.id AND blocked.outcome='FAILURE'
-          AND blocked.occurred_at>clock_timestamp()-make_interval(secs=>${ABNORMAL_BLOCK_RETRY_SECONDS})))
       AND (NOT(i.basis_kind='PRESTART_TERMINATION' AND i.state='READY') OR NOT EXISTS(
         SELECT 1 FROM zzsh_iam.audit_event blocked WHERE blocked.action='order.refund.prestart.first_submit.blocked'
           AND blocked.object_type='channel_refund_intent' AND blocked.object_id=i.id AND blocked.outcome='FAILURE'

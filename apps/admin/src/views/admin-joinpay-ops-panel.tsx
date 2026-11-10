@@ -60,7 +60,7 @@ const newKey = () => `idem_${(globalThis.crypto?.randomUUID?.() ?? `${Date.now()
 const cents = (v: string | null) => v == null ? "未知" : formatFundingCents(v);
 const refundStateText:Record<string,string>={READY:'待提交',SUBMITTING:'发送结果待核',UNKNOWN:'结果待核',PROCESSING:'处理中',REVIEW_REQUIRED:'待人工核对',SUCCEEDED:'本地记录成功',FAILED:'本地记录失败'};
 const skipText: Record<string, string> = { TERMINAL: "已有终态，无需补查", REVIEW_REQUIRED: "本地复核中，不自动重试", ACTIVE_LEASE: "已有查询进行中", NOT_DUE: "未到补查时间",
-  THROTTLED: "30秒内已查询，请稍后", BUDGET_EXHAUSTED: "补查次数已用尽，转人工核对", INELIGIBLE: "当前状态不可补查", ABNORMAL_BASIS_REVIEW: "异常原款依据待复核", NOT_ELIGIBLE: "当前不可补查", PENDING_ACCEPTANCE: "渠道成功待本地受理", OUTSIDE_QUERY_WINDOW: "已超出原补查窗口，转人工核对" };
+  THROTTLED: "30秒内已查询，请稍后", BUDGET_EXHAUSTED: "补查次数已用尽，转人工核对", INELIGIBLE: "当前状态不可补查", NOT_ELIGIBLE: "当前不可补查", PENDING_ACCEPTANCE: "渠道成功待本地受理", OUTSIDE_QUERY_WINDOW: "已超出原补查窗口，转人工核对" };
 export function queryOutcomeText(r: QueryResult | null, status?: number, expected?: QueryBinding): string {
   if (!validQueryResult(r, expected)) return "补查回执无法核定，结果未知；请重读本地记录";
   if (status === 202 || r.outcome.kind === "UNKNOWN") return "已提交查询，结果未知；请稍后刷新本地记录，不要重复发起退款";

@@ -4,7 +4,7 @@ import { BusinessUpdateNotices } from "@/components/content/platform-update-noti
 import Link from "next/link";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ArrowLeft, Check, CheckCircle2, CircleSlash, Clock3, Copy, Gamepad2, MessageCircle, RefreshCw, UserRound, WalletCards, XCircle } from "lucide-react";
-import { formatOrderMoney, formatOrderTime as timeText, orderApi, OrderRequestError, type Order, type OrderImProjection, type OrderParty, type OrderStatusFilter, type OrderSearchFilters, type PersonalAbnormalResponsibility, type PersonalRefundIntent, type PersonalRefundRead } from "@/lib/order-client";
+import { formatOrderMoney, formatOrderTime as timeText, orderApi, OrderRequestError, type Order, type OrderImProjection, type OrderParty, type OrderStatusFilter, type OrderSearchFilters, type PersonalRefundIntent, type PersonalRefundRead } from "@/lib/order-client";
 import { useUserSession } from "@/components/session/user-session-provider";
 import { useIdentityReset } from "@/components/session/identity-reset";
 import { requestSupportDialog } from "@/components/support/support-dialog-request";
@@ -411,23 +411,11 @@ const refundIntentStateLabel: Record<PersonalRefundIntent["state"], string> = {
   READY: "等待处理", SUBMITTING: "发送结果待核", UNKNOWN: "结果未记录", PROCESSING: "处理中",
   REVIEW_REQUIRED: "需要核对", SUCCEEDED: "退款结果待核对", FAILED: "申请处理失败", UNRECOGNIZED: "状态未记录",
 };
-const abnormalReasonLabel: Record<PersonalAbnormalResponsibility["reasonCode"], string> = { DUPLICATE_PAYMENT: "重复支付", LATE_PAYMENT: "支付时间异常", UNKNOWN_REASON: "其他付款" };
-const abnormalStateLabel: Record<PersonalAbnormalResponsibility["state"], string> = {
-  NO_INTENT: "待处理", READY: "待处理", PROCESSING: "处理中", UNKNOWN: "未记录", CONSUMED: "到账未记录", RELEASED: "未记录", REVIEW_REQUIRED: "需要核对", CONFLICT: "需要核对",
-};
 
 function refundMoney(cents: string | null): string {
   if (cents === null) return "未记录";
   const value = BigInt(cents);
   return `¥${(value / 100n).toLocaleString("zh-CN")}.${(value % 100n).toString().padStart(2, "0")}`;
-}
-
-function AbnormalResponsibilityCard({ item }: { item: PersonalAbnormalResponsibility }) {
-  return <li className="order-refund-intent order-refund-abnormal-item">
-    <div className="order-refund-intent-head"><strong>{abnormalReasonLabel[item.reasonCode]}</strong><span className="order-refund-state">{abnormalStateLabel[item.state]}</span></div>
-    <dl className="order-facts order-refund-intent-facts"><div><dt>相关金额</dt><dd>{item.totalsComplete ? refundMoney(item.originalCents) : "未记录"}</dd></div></dl>
-    {item.firstSubmit?.dispatch === "NEVER_DISPATCHED" && item.firstSubmit.blockedReason ? <p className="order-muted">暂时无法提交，请联系客服。</p> : null}
-  </li>;
 }
 
 function RefundIntentCard({ intent }: { intent: PersonalRefundIntent }) {
@@ -528,9 +516,9 @@ function OrderRefundSection({ order }: { order: Order }) {
   if (read.status === "NOT_APPLICABLE" && !read.prestartRefund) return null;
   const responsibility = read.responsibility;
   const prestart = read.prestartRefund;
-  const attentionRequired = prestart ? ["UNKNOWN", "FAILED"].includes(prestart.state) || Boolean(read.abnormalResponsibilities?.length)
+  const attentionRequired = prestart ? ["UNKNOWN", "FAILED"].includes(prestart.state)
     : ["UNKNOWN", "REVIEW_REQUIRED", "TRUNCATED", "CONFLICT"].includes(read.outcome);
-  const incomplete = read.responsibilitiesTruncated || read.intentsTruncated || !read.coverage.intentsComplete || Boolean(read.responsibilityTotals && !read.responsibilityTotals.totalsComplete) || responsibility.state === "POSTED" && !responsibility.totalsComplete;
+  const incomplete = read.intentsTruncated || !read.coverage.intentsComplete || responsibility.state === "POSTED" && !responsibility.totalsComplete;
   const simulated = read.outcome === "FULLY_CONSUMED" && !incomplete && read.intents.length > 0
     && read.intents.every(intent => intent.source === "LOCAL_CONTROLLED" && intent.state === "SUCCEEDED" && intent.budgetDisposition === "CONSUMED");
   const channelSucceeded = read.outcome === "FULLY_CONSUMED" && !incomplete && read.intents.length > 0
@@ -549,17 +537,13 @@ function OrderRefundSection({ order }: { order: Order }) {
     <details className="order-secondary-details order-refund-details" open={attentionRequired}>
       <summary><strong>{outcome.label}</strong><span>{outcome.note}</span></summary>
       <div className="order-refund-detail-content">
-        {incomplete && (!prestart || Boolean(read.abnormalResponsibilities?.length)) ? <p className="order-inline-notice" role="status">部分退款信息仍在核对，当前记录可能不完整。</p> : null}
+        {incomplete && !prestart ? <p className="order-inline-notice" role="status">部分退款信息仍在核对，当前记录可能不完整。</p> : null}
         {prestart?.amountCents ? <dl className="order-facts order-refund-amounts"><div><dt>{prestart.state === "SUCCEEDED" ? "退款金额" : "应退金额"}</dt><dd>{refundMoney(prestart.amountCents)}</dd></div></dl> : null}
         {responsibility.state === "POSTED" ? <dl className="order-facts order-refund-amounts">
           <div><dt>本次结算应退</dt><dd>{refundMoney(responsibility.originalCents)}</dd></div>
           {responsibility.dueAt ? <div><dt>退款到期时间</dt><dd>{timeText(responsibility.dueAt, { timeZoneName: false })}{responsibility.dueState === "DUE" ? "（已到期）" : responsibility.dueState === "NOT_DUE" ? "（未到期）" : "（状态未记录）"}</dd></div> : null}
         </dl> : null}
         {responsibility.state === "POSTED" && responsibility.dueAt ? <p className="order-muted">到期不代表退款已处理或到账。</p> : null}
-        {read.abnormalResponsibilities?.length ? <section className="order-refund-abnormal" aria-label="其他付款处理">
-          <div className="order-refund-intents-heading"><h3>其他付款处理</h3></div>
-          <ul className="order-refund-intents">{read.abnormalResponsibilities.map(item => <AbnormalResponsibilityCard key={item.confirmationId} item={item} />)}</ul>
-        </section> : null}
         {read.intents.length ? <section aria-label="退款申请记录"><div className="order-refund-intents-heading"><h3>退款申请</h3><span>{read.intentsTruncated || !read.coverage.intentsComplete ? "部分记录未记录" : `${read.returnedIntentCount} 笔`}</span></div><ul className="order-refund-intents">{read.intents.map(intent => <RefundIntentCard key={intent.intentId} intent={intent} />)}</ul></section> : null}
         <p className="order-muted">到账情况请以收款记录为准。</p>
       </div>

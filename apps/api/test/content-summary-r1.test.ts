@@ -35,21 +35,22 @@ test("C04B-02-R1 orders without refund readiness version their payment lifecycle
   assert.doesNotMatch(financeVersionSql({native_orders:false}),/FROM zzsh_order\.payment_confirmation/);
 });
 
-test("C04B-02-R1 refund intent scope includes original confirmation, attempts and blocked audit", () => {
+test("refund intent scope includes original confirmation and attempts", () => {
   const text = financeScopedVersionSql(ready, { mode: "document", documentRef: "REFUND_INTENT:rfi_1" })!.text;
   assert.match(text, /joinpay_refund_attempt/);
-  assert.match(text, /order\.refund\.abnormal\.first_submit\.blocked/);
+  assert.doesNotMatch(text, /order\.refund\.abnormal\.first_submit\.blocked/);
   assert.match(text, /FROM zzsh_order\.payment_confirmation/);
   assert.match(text, /intent_id=\$1/);
 });
 
-test("C04B-02-R1 order scope includes abnormal roots/events/confirmation without posting", () => {
+test("order scope includes normal refund roots and payment confirmation", () => {
   const text = financeScopedVersionSql(ready, { mode: "document", documentRef: "ORDER:order_1" })!.text;
-  assert.match(text, /NATIVE_ABNORMAL_REFUND/);
+  assert.match(text, /source_kind<>'NATIVE_ABNORMAL_REFUND'/);
   assert.match(text, /NATIVE_RENTAL_REFUND/);
+  assert.match(text, /basis_kind='PRESTART_TERMINATION'/);
   assert.match(text, /FROM zzsh_order\.payment_confirmation/);
   assert.match(text, /joinpay_refund_attempt/);
-  assert.match(text, /order\.refund\.abnormal\.first_submit\.blocked/);
+  assert.doesNotMatch(text, /order\.refund\.abnormal\.first_submit\.blocked/);
 });
 
 test("native order finance keeps a scoped version when legacy withdrawal links exist", () => {
@@ -71,7 +72,7 @@ test("C04B-02-R1 missing attempt/audit/confirmation readiness does not query new
   assert.doesNotMatch(globalSafe, /joinpay_refund_attempt/);
   const globalReady = financeVersionSql(ready);
   assert.match(globalReady, /joinpay_refund_attempt/);
-  assert.match(globalReady, /order\.refund\.abnormal\.first_submit\.blocked/);
+  assert.doesNotMatch(globalReady, /order\.refund\.abnormal\.first_submit\.blocked/);
 });
 
 test("Master R1: absent dependency readiness must stay closed",()=>{
@@ -89,7 +90,7 @@ test("Master R1: single refund and payment request track their no-posting ledger
   assert.doesNotMatch(text,/created_at FROM zzsh_order\.finance_event WHERE 1=0/);
   const start=text.indexOf("details,created_at FROM zzsh_order.settlement_ledger_entry WHERE");
   assert(start>=0);const ledger=text.slice(start,text.indexOf(") v)",start));
-  assert.match(ledger,/finance_event_id IN/);assert.match(ledger,/NATIVE_ABNORMAL_REFUND/);
+  assert.match(ledger,/finance_event_id IN/);assert.match(ledger,/NATIVE_RENTAL_REFUND/);
  }
 });
 test("Master R1: order token sees a review receipt before any refund intent exists",()=>{

@@ -269,7 +269,7 @@ export async function recordRefundTransportFailure(client: PoolClient, input: {
 }
 
 export type NativeRefundState = RefundIntentState | "PROCESSING" | "REVIEW_REQUIRED" | "SUCCEEDED" | "FAILED";
-export type RefundBasisKind = "POSTING" | "REVIEW_CONFIRMATION" | "PRESTART_TERMINATION";
+export type RefundBasisKind = "POSTING" | "PRESTART_TERMINATION";
 export type FormalRefundRow = Omit<RefundRow, "payment_source" | "state" | "posting_id"> & {
   payment_source: "JOINPAY"; state: NativeRefundState; posting_id: string | null; basis_kind: RefundBasisKind;
   evidence_level: string; budget_disposition: "ALLOCATED" | "CONSUMED" | "RELEASED";
@@ -290,7 +290,7 @@ export async function assertRefundResource(client: PoolClient, admission: Formal
 }
 export function formalRefundBinding(r: FormalRefundRow, admission: FormalRefundAdmission): RefundBinding {
   const a = readFormalRefundAdmission(admission), basisKind: RefundBasisKind = r.basis_kind ?? "POSTING";
-  if (!["POSTING","REVIEW_CONFIRMATION","PRESTART_TERMINATION"].includes(basisKind)
+  if (!["POSTING","PRESTART_TERMINATION"].includes(basisKind)
     || r.payment_source !== "JOINPAY" || r.evidence_level !== "JOINPAY_FORMAL" || r.currency !== "CNY" || r.merchant_identity_id !== a.merchantIdentityId
     || r.wire_merchant_no !== a.merchantNo || !r.initial_admission_canonical || createHash("sha256").update(r.initial_admission_canonical).digest("hex") !== r.initial_admission_sha256
     || basisKind === "POSTING" && r.posting_id === null
@@ -301,7 +301,6 @@ export function formalRefundBinding(r: FormalRefundRow, admission: FormalRefundA
     || initial.merchantIdentityId !== r.merchant_identity_id || initial.merchantNo !== r.wire_merchant_no || !Array.isArray(initial.acceptedProfiles)
     || !initial.acceptedProfiles.some((p: any) => p.operation === "SUBMIT" && p.profileId === r.initial_profile_id && p.profileSha256 === r.initial_profile_sha256 && p.keyVersionRef === r.initial_key_version_ref)) throw conflict("Original refund merchant binding differs");
   return Object.freeze({ intentId: r.id, postingId: r.posting_id, basisKind,
-    ...(basisKind === "REVIEW_CONFIRMATION" ? { abnormalConfirmationId: r.payment_confirmation_id } : {}),
     orderId: r.order_id, paymentConfirmationId: r.payment_confirmation_id, renterUserId: r.renter_user_id,
     merchantNo: r.wire_merchant_no, merchantIdentityId: r.merchant_identity_id, originalPaymentTrxNo: r.original_payment_trx_no, originalPaymentOrderNo: r.original_payment_order_no,
     responsibilityVersionHash: r.responsibility_version_hash, refundOrderNo: r.refund_order_no, amountCents: r.amount_cents, currency: "CNY",

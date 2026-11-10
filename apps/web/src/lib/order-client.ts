@@ -128,42 +128,7 @@ export type PersonalRefundObservation = {
   ageSeconds: number | null;
   trust: "LOCAL_OBSERVATION_NOT_REVALIDATED";
 };
-export type PersonalRefundBasis = "POSTING" | "REVIEW_CONFIRMATION";
-export type PersonalFirstSubmit = {
-  dispatch: "NEVER_DISPATCHED" | "DISPATCHED" | "UNKNOWN";
-  blockedReason: "ORIGINAL_ORDER_NO_AMBIGUOUS" | "ABNORMAL_BASIS_REVIEW" | null;
-  blockedAt: string | null;
-  blockedAuditCount: number | null;
-  trust: "LOCAL_AUDIT_AND_ATTEMPT";
-};
-export type PersonalAbnormalResponsibility = {
-  confirmationId: string;
-  reasonCode: "DUPLICATE_PAYMENT" | "LATE_PAYMENT" | "UNKNOWN_REASON";
-  originalCents: string | null;
-  currency: "CNY" | null;
-  liabilityRootId: string | null;
-  liabilityEventId: string | null;
-  intentIds: string[];
-  allocatedCents: string | null;
-  consumedCents: string | null;
-  releasedCents: string | null;
-  remainingCents: string | null;
-  totalsComplete: boolean;
-  state: "NO_INTENT" | "READY" | "PROCESSING" | "UNKNOWN" | "CONSUMED" | "RELEASED" | "REVIEW_REQUIRED" | "CONFLICT";
-  firstSubmit: PersonalFirstSubmit | null;
-  reasonCodes: string[];
-};
-export type PersonalResponsibilityTotals = {
-  originalCents: string | null;
-  allocatedCents: string | null;
-  consumedCents: string | null;
-  releasedCents: string | null;
-  remainingCents: string | null;
-  totalsComplete: boolean;
-  postingOriginalCents: string | null;
-  abnormalOriginalCents: string | null;
-  abnormalConfirmationCount: number;
-};
+export type PersonalRefundBasis = "POSTING";
 export type PersonalRefundIntent = {
   intentId: string;
   refundOrderNo: string | null;
@@ -171,7 +136,6 @@ export type PersonalRefundIntent = {
   evidenceLevel: string | null;
   basisKind?: PersonalRefundBasis;
   paymentConfirmationId?: string | null;
-  firstSubmit?: PersonalFirstSubmit | null;
   amount: { cents: string; currency: "CNY" } | null;
   state: "READY" | "SUBMITTING" | "UNKNOWN" | "PROCESSING" | "REVIEW_REQUIRED" | "SUCCEEDED" | "FAILED" | "UNRECOGNIZED";
   budgetDisposition: "ALLOCATED" | "CONSUMED" | "RELEASED" | "UNRECOGNIZED";
@@ -222,10 +186,6 @@ export type PersonalRefundRead = {
   intents: PersonalRefundIntent[];
   returnedIntentCount: number;
   intentsTruncated: boolean;
-  /** Additive C04B fields. Old C02 responses omit all three and stay readable. */
-  abnormalResponsibilities?: PersonalAbnormalResponsibility[];
-  responsibilitiesTruncated?: boolean;
-  responsibilityTotals?: PersonalResponsibilityTotals;
   actualChannelRefund: { amountCents: null; channelRefundTrxNo: null; completedAt: null; destination: null; bankArrival: "UNKNOWN"; reasonCodes: string[] };
   localFundsEffect: { basis: "LOCAL_REGISTERED_ACCOUNTING"; writtenOffCents: string | null; releasedCents: string | null; bankArrival: "UNKNOWN" } | null;
   reasonCodes: string[];
@@ -568,55 +528,6 @@ const refundStrings = (value: unknown): string[] => {
   if (!Array.isArray(value) || value.length > 100) throw invalidRefund();
   return value.map((item) => refundText(item, 160));
 };
-const refundFirstSubmit = (value: unknown): PersonalFirstSubmit | null => {
-  if (value === null) return null;
-  const v = refundRecord(value);
-  if (!["NEVER_DISPATCHED", "DISPATCHED", "UNKNOWN"].includes(String(v.dispatch))
-    || !(v.blockedReason === null || ["ORIGINAL_ORDER_NO_AMBIGUOUS", "ABNORMAL_BASIS_REVIEW"].includes(String(v.blockedReason)))
-    || (v.blockedAuditCount !== null && (!Number.isSafeInteger(v.blockedAuditCount) || (v.blockedAuditCount as number) < 0))
-    || v.trust !== "LOCAL_AUDIT_AND_ATTEMPT") throw invalidRefund();
-  return {
-    dispatch: v.dispatch as PersonalFirstSubmit["dispatch"],
-    blockedReason: v.blockedReason as PersonalFirstSubmit["blockedReason"],
-    blockedAt: refundTime(v.blockedAt),
-    blockedAuditCount: v.blockedAuditCount as number | null,
-    trust: "LOCAL_AUDIT_AND_ATTEMPT",
-  };
-};
-const refundAbnormalResponsibility = (value: unknown): PersonalAbnormalResponsibility => {
-  const v = refundRecord(value), originalCents = refundCents(v.originalCents);
-  if (!["DUPLICATE_PAYMENT", "LATE_PAYMENT", "UNKNOWN_REASON"].includes(String(v.reasonCode))
-    || !(v.currency === null || v.currency === "CNY") || (originalCents !== null && v.currency !== "CNY")
-    || !["NO_INTENT", "READY", "PROCESSING", "UNKNOWN", "CONSUMED", "RELEASED", "REVIEW_REQUIRED", "CONFLICT"].includes(String(v.state))
-    || typeof v.totalsComplete !== "boolean") throw invalidRefund();
-  const allocatedCents = refundCents(v.allocatedCents), consumedCents = refundCents(v.consumedCents);
-  const releasedCents = refundCents(v.releasedCents), remainingCents = refundCents(v.remainingCents);
-  if (v.state === "CONFLICT" && (v.totalsComplete || [allocatedCents, consumedCents, releasedCents, remainingCents].some((amount) => amount !== null))) throw invalidRefund();
-  if (v.totalsComplete && (originalCents === null || v.currency !== "CNY"
-    || [allocatedCents, consumedCents, releasedCents, remainingCents].some((amount) => amount === null))) throw invalidRefund();
-  return {
-    confirmationId: refundText(v.confirmationId, 180),
-    reasonCode: v.reasonCode as PersonalAbnormalResponsibility["reasonCode"],
-    originalCents, currency: v.currency as "CNY" | null,
-    liabilityRootId: refundNullableText(v.liabilityRootId, 180), liabilityEventId: refundNullableText(v.liabilityEventId, 180),
-    intentIds: refundStrings(v.intentIds),
-    allocatedCents, consumedCents, releasedCents, remainingCents, totalsComplete: v.totalsComplete,
-    state: v.state as PersonalAbnormalResponsibility["state"],
-    firstSubmit: v.firstSubmit === undefined ? null : refundFirstSubmit(v.firstSubmit),
-    reasonCodes: refundStrings(v.reasonCodes),
-  };
-};
-const refundResponsibilityTotals = (value: unknown): PersonalResponsibilityTotals => {
-  const v = refundRecord(value);
-  if (typeof v.totalsComplete !== "boolean" || !Number.isSafeInteger(v.abnormalConfirmationCount) || (v.abnormalConfirmationCount as number) < 0) throw invalidRefund();
-  return {
-    originalCents: refundCents(v.originalCents), allocatedCents: refundCents(v.allocatedCents),
-    consumedCents: refundCents(v.consumedCents), releasedCents: refundCents(v.releasedCents),
-    remainingCents: refundCents(v.remainingCents), totalsComplete: v.totalsComplete,
-    postingOriginalCents: refundCents(v.postingOriginalCents), abnormalOriginalCents: refundCents(v.abnormalOriginalCents),
-    abnormalConfirmationCount: v.abnormalConfirmationCount as number,
-  };
-};
 const refundObservation = (value: unknown): PersonalRefundObservation | null => {
   if (value === null) return null;
   const v = refundRecord(value);
@@ -643,10 +554,9 @@ const refundIntent = (value: unknown): PersonalRefundIntent => {
   if (evidence && (!["SUCCEEDED", "FAILED_NO_EXECUTION"].includes(String(evidence.terminal)) || evidence.trust !== "SAVED_EVIDENCE_NOT_REVALIDATED")) throw invalidRefund();
   if (writeOff && (writeOff.trust !== "LOCAL_LEDGER" || refundCents(writeOff.amountCents) === null)) throw invalidRefund();
   if (release && (release.ledgerEventId !== null || release.trust !== "LOCAL_INTENT_ONLY")) throw invalidRefund();
-  if (v.basisKind !== undefined && !["POSTING", "REVIEW_CONFIRMATION"].includes(String(v.basisKind))) throw invalidRefund();
+  if (v.basisKind !== undefined && v.basisKind !== "POSTING") throw invalidRefund();
   const basisKind = v.basisKind === undefined ? undefined : v.basisKind as PersonalRefundBasis;
   const paymentConfirmationId = v.paymentConfirmationId === undefined ? undefined : refundNullableText(v.paymentConfirmationId, 180);
-  const firstSubmit = v.firstSubmit === undefined ? undefined : refundFirstSubmit(v.firstSubmit);
   return {
     intentId: refundText(v.intentId, 180),
     refundOrderNo: v.refundOrderNo === null ? null : (() => { const text = refundText(v.refundOrderNo, 32); if (!/^RF[0-9a-f]{28}$/.test(text)) throw invalidRefund(); return text; })(),
@@ -654,7 +564,6 @@ const refundIntent = (value: unknown): PersonalRefundIntent => {
     evidenceLevel: refundNullableText(v.evidenceLevel, 64),
     ...(basisKind === undefined ? {} : { basisKind }),
     ...(paymentConfirmationId === undefined ? {} : { paymentConfirmationId }),
-    ...(firstSubmit === undefined ? {} : { firstSubmit }),
     amount: amount ? { cents: amount.cents as string, currency: "CNY" as const } : null,
     state: v.state as PersonalRefundIntent["state"],
     budgetDisposition: v.budgetDisposition as PersonalRefundIntent["budgetDisposition"],
@@ -689,38 +598,20 @@ export function parsePersonalRefunds(value: unknown, expectedUserId: string, exp
     || prestart.state !== "UNKNOWN" && (prestart.source === "UNKNOWN" || prestart.amountCents === null))) throw invalidRefund();
   const intents = Array.isArray(root.intents) ? root.intents.map(refundIntent) : (() => { throw invalidRefund(); })();
   const noResponsibilityTotals = ["allocatedCents", "consumedCents", "releasedCents", "remainingCents"].every((name) => responsibility[name] === null);
-  const hasAbnormalFields = ["abnormalResponsibilities", "responsibilitiesTruncated", "responsibilityTotals"].some((name) => root[name] !== undefined);
-  const abnormalResponsibilities = hasAbnormalFields
-    ? (Array.isArray(root.abnormalResponsibilities) ? root.abnormalResponsibilities.map(refundAbnormalResponsibility) : (() => { throw invalidRefund(); })())
-    : undefined;
-  if (abnormalResponsibilities && abnormalResponsibilities.length > 50) throw invalidRefund();
-  const responsibilitiesTruncated = hasAbnormalFields
-    ? (typeof root.responsibilitiesTruncated === "boolean" ? root.responsibilitiesTruncated : (() => { throw invalidRefund(); })())
-    : undefined;
-  const responsibilityTotals = hasAbnormalFields ? refundResponsibilityTotals(root.responsibilityTotals) : undefined;
-  if (responsibilitiesTruncated && responsibilityTotals && (responsibilityTotals.totalsComplete
-    || [responsibilityTotals.originalCents, responsibilityTotals.allocatedCents, responsibilityTotals.consumedCents, responsibilityTotals.releasedCents, responsibilityTotals.remainingCents].some((amount) => amount !== null))) throw invalidRefund();
-  if (responsibilityTotals && responsibilitiesTruncated !== true && responsibilityTotals.abnormalConfirmationCount !== abnormalResponsibilities!.length) throw invalidRefund();
   if (responsibility.state === "NOT_POSTED" && (responsibility.totalsComplete || responsibility.postingId !== null
     || responsibility.originalCents !== null || !noResponsibilityTotals)) throw invalidRefund();
-  if (responsibilityTotals?.totalsComplete && (
-    [responsibilityTotals.originalCents, responsibilityTotals.allocatedCents, responsibilityTotals.consumedCents, responsibilityTotals.releasedCents, responsibilityTotals.remainingCents].some((amount) => amount === null)
-    || responsibilitiesTruncated || root.intentsTruncated || !coverage.intentsComplete
-    || (responsibility.state === "POSTED" && !responsibility.totalsComplete)
-    || abnormalResponsibilities!.some((item) => item.state === "CONFLICT" || !item.totalsComplete))) throw invalidRefund();
-  const legacyProjection = !hasAbnormalFields;
   if (root.contractVersion !== "personal-native-refunds.v1" || root.subjectId !== expectedUserId || order.orderId !== expectedOrderId
     || !["AVAILABLE", "NOT_APPLICABLE"].includes(String(root.status)) || !refundOutcomes.includes(root.outcome as PersonalRefundOutcome)
     || coverage.scope !== "LOCAL_REGISTERED_ONLY" || coverage.intentLimit !== 50 || typeof coverage.intentsComplete !== "boolean" || coverage.channelRecordsChecked !== false
     || !refundTime(root.asOf) || !["POSTED", "NOT_POSTED"].includes(String(responsibility.state))
     || !["DUE", "NOT_DUE", "UNKNOWN"].includes(String(responsibility.dueState)) || typeof responsibility.totalsComplete !== "boolean"
     || typeof root.returnedIntentCount !== "number" || root.returnedIntentCount !== intents.length || intents.length > 50
-    || (legacyProjection && !coverage.intentsComplete && (!noResponsibilityTotals || responsibility.totalsComplete))
+    || (!coverage.intentsComplete && (!noResponsibilityTotals || responsibility.totalsComplete))
     || (root.status === "NOT_APPLICABLE" && responsibility.state !== "NOT_POSTED")
     || typeof root.intentsTruncated !== "boolean"
-    || (legacyProjection && root.intentsTruncated && (responsibility.totalsComplete || coverage.intentsComplete || !noResponsibilityTotals
+    || (root.intentsTruncated && (responsibility.totalsComplete || coverage.intentsComplete || !noResponsibilityTotals
       || funds !== null && (funds.writtenOffCents !== null || funds.releasedCents !== null)))
-    || (legacyProjection && root.outcome === "CONFLICT" && (responsibility.totalsComplete || !noResponsibilityTotals
+    || (root.outcome === "CONFLICT" && (responsibility.totalsComplete || !noResponsibilityTotals
       || funds !== null && (funds.writtenOffCents !== null || funds.releasedCents !== null)))
     || actual.amountCents !== null || actual.channelRefundTrxNo !== null || actual.completedAt !== null || actual.destination !== null || actual.bankArrival !== "UNKNOWN"
     || typeof order.displayNo !== "string" && order.displayNo !== null) throw invalidRefund();
@@ -742,7 +633,6 @@ export function parsePersonalRefunds(value: unknown, expectedUserId: string, exp
       dueAt: refundTime(responsibility.dueAt), dueState: responsibility.dueState as PersonalRefundRead["responsibility"]["dueState"],
     },
     intents, returnedIntentCount: intents.length, intentsTruncated: root.intentsTruncated,
-    ...(hasAbnormalFields ? { abnormalResponsibilities: abnormalResponsibilities!, responsibilitiesTruncated: responsibilitiesTruncated!, responsibilityTotals: responsibilityTotals! } : {}),
     actualChannelRefund: { amountCents: null, channelRefundTrxNo: null, completedAt: null, destination: null, bankArrival: "UNKNOWN", reasonCodes: refundStrings(actual.reasonCodes) },
     localFundsEffect: funds ? { basis: "LOCAL_REGISTERED_ACCOUNTING", writtenOffCents: refundCents(funds.writtenOffCents), releasedCents: refundCents(funds.releasedCents), bankArrival: "UNKNOWN" } : null,
     reasonCodes: refundStrings(root.reasonCodes), unknowns: refundStrings(root.unknowns),

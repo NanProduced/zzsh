@@ -59,14 +59,13 @@ test('领域完成后COMMIT响应未知返回202原键恢复；Origin/GET query�
  const cross=f.req();cross.headers.origin='https://other.invalid';await assert.rejects(handlePrestartTerminationRoute(cross,f.response,f.options,'user'),(e:any)=>e.status===403);
  await assert.rejects(handlePrestartTerminationRoute(f.req('user','order_1/prestart-termination?query=channel'),f.response,f.options,'user'),(e:any)=>e.status===400);
 });
-test('Admin异常/未开租退款独立POST，引用只随原对象传入；GET和额外金额拒绝',async t=>{
+test('异常原款入口已停用；未开租退款仍绑定原对象且拒绝额外金额',async t=>{
  const f=fixture(t);const calls:any[]=[];
- t.mock.method(refunds,'requestAdminAbnormalNativeRefund',async(_p:any,_e:any,v:any)=>{calls.push(v);return{outcome:'REVIEW_REQUIRED'} as any;});
  t.mock.method(refunds,'requestAdminPrestartNativeRefund',async(_p:any,_e:any,v:any)=>{calls.push(v);return{outcome:'ALLOCATED'} as any;});
- await handleAdminNativeRefundRoute(f.req('admin','order_1/refunds/abnormal','POST',{confirmationId:'pc_1',reason:'核实迟到原款'}),f.response,f.options,'/api/v1/admin/orders',{pool:{} as any});
- assert.equal(f.status(),200);assert.equal(calls[0].orderId,'order_1');assert.equal(calls[0].confirmationId,'pc_1');
+ assert.equal(await handleAdminNativeRefundRoute(f.req('admin','order_1/refunds/abnormal','POST',{confirmationId:'pc_1',reason:'核实迟到原款'}),f.response,f.options,'/api/v1/admin/orders',{pool:{} as any}),false);
+ assert.equal(calls.length,0);
  await handleAdminNativeRefundRoute(f.req('admin','order_1/prestart-termination/term_1/refund-requests','POST'),f.response,f.options,'/api/v1/admin/orders',{pool:{} as any});
- assert.equal(calls[1].terminationId,'term_1');assert.equal(calls[1].idempotencyKey,'original_1');
- await handleAdminNativeRefundRoute(f.req('admin','order_1/prestart-termination/term_1/refund-requests','POST',{amountCents:'1'}),f.response,f.options,'/api/v1/admin/orders',{pool:{} as any});assert.equal(f.status(),400);assert.equal(calls.length,2);
- await handleAdminNativeRefundRoute(f.req('admin','order_1/refunds/abnormal','GET'),f.response,f.options,'/api/v1/admin/orders',{pool:{} as any});assert.equal(f.status(),404);
+ assert.equal(calls[0].terminationId,'term_1');assert.equal(calls[0].idempotencyKey,'original_1');
+ await handleAdminNativeRefundRoute(f.req('admin','order_1/prestart-termination/term_1/refund-requests','POST',{amountCents:'1'}),f.response,f.options,'/api/v1/admin/orders',{pool:{} as any});assert.equal(f.status(),400);assert.equal(calls.length,1);
+ assert.equal(await handleAdminNativeRefundRoute(f.req('admin','order_1/refunds/abnormal','GET'),f.response,f.options,'/api/v1/admin/orders',{pool:{} as any}),false);
 });
