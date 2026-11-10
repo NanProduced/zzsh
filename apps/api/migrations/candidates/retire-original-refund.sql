@@ -12,4 +12,16 @@ ALTER TABLE zzsh_order.finance_economic_root
 COMMENT ON CONSTRAINT finance_root_retired_refund_excluded ON zzsh_order.finance_economic_root
   IS '不再生成已退役的异常原款退款责任';
 
+ALTER TABLE zzsh_order.settlement_ledger_entry
+  ADD CONSTRAINT settlement_retired_refund_excluded
+  CHECK (NOT COALESCE(details ? 'abnormalRefundLiabilityId', false)
+    AND account_code <> 'JOINPAY_UNALLOCATED_RECEIPT');
+COMMENT ON CONSTRAINT settlement_retired_refund_excluded ON zzsh_order.settlement_ledger_entry
+  IS '不再生成已退役的异常原款退款分录';
+
 DROP INDEX IF EXISTS zzsh_order.joinpay_abnormal_refund_key;
+DROP TRIGGER abnormal_refund_liability_root_guard ON zzsh_order.finance_economic_root;
+DROP TRIGGER abnormal_refund_liability_entry_guard ON zzsh_order.settlement_ledger_entry;
+DROP TRIGGER abnormal_refund_liability_entry_batch_guard ON zzsh_order.settlement_ledger_entry;
+DROP FUNCTION zzsh_order.guard_abnormal_refund_liability_root();
+DROP FUNCTION zzsh_order.guard_abnormal_refund_liability_entry();
