@@ -36,7 +36,7 @@ export async function readPrestartRefundProgress(client:PoolClient,terminationId
      ELSE zzsh_order.${liabilityFn}(i.id) END AS complete,
    EXISTS(SELECT 1 FROM zzsh_order.${controlled?'local_controlled_refund_operation':'joinpay_refund_attempt'} a WHERE a.intent_id=i.id${controlled?'':" AND a.operation='SUBMIT'"}) AS dispatched,
    (SELECT a.details->>'gateReason' FROM zzsh_iam.audit_event a WHERE a.object_type='channel_refund_intent' AND a.object_id=i.id
-     AND a.action='order.refund.prestart.first_submit.blocked' AND a.outcome='FAILURE' ORDER BY a.occurred_at DESC,a.id DESC LIMIT 1) AS blocked_reason,
+     AND a.action='${basisKind==='SUPPORT_CANCELLATION'?'order.refund.support_cancel.first_submit.blocked':'order.refund.prestart.first_submit.blocked'}' AND a.outcome='FAILURE' ORDER BY a.occurred_at DESC,a.id DESC LIMIT 1) AS blocked_reason,
    e.terminal AS saved_terminal,e.refund_transaction_no AS saved_trx,
    to_char(le.created_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS local_written_off_at,
    to_char(e.completed_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS saved_completed_at,

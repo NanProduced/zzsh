@@ -1,7 +1,7 @@
 import type { PoolClient } from "pg";
 import { SecurityApiError } from "../auth/security-core";
 
-type Requirement = { domain: "refunds" | "withdrawals" | "controlledWithdrawals"; table: string; columns: string[] };
+type Requirement = { domain: "refunds" | "controlledRefunds" | "withdrawals" | "controlledWithdrawals"; table: string; columns: string[] };
 const table = (domain: Requirement["domain"], name: string, columns: string): Requirement => ({ domain, table: `zzsh_order.${name}`, columns: columns.split(" ") });
 const common = "id source_kind source_type source_system source_entity source_id subject_user_id beneficiary_role basis_id policy_version source_digest";
 const ledger = "id posting_id finance_event_id line_no account_code debit_cents credit_cents counterparty_user_id source_payment_confirmation_id details";
@@ -16,16 +16,20 @@ const requirements: Requirement[] = [
   table("refunds", "payment_confirmation", "id order_id source disposition reason_code currency amount_cents merchant_scope_id provider_transaction_id merchant_order_no joinpay_request_id joinpay_evidence_id joinpay_anchor_id accepted_at"),
   table("refunds", "channel_refund_intent", "id posting_id order_id renter_user_id basis_kind payment_confirmation_id liability_root_id liability_event_id responsibility_version_hash payment_source evidence_level merchant_identity_id original_payment_trx_no original_payment_order_no amount_cents currency state budget_disposition requires_review due_at terminal_evidence_id terminal_root_id terminal_event_id created_at"),
   table("refunds", "prestart_termination", "id order_id payment_basis basis_digest requested_by_party state approved_at liability_root_id liability_event_id created_at"),
+  table("refunds", "support_poststart_cancellation", "id order_id payment_confirmation_id renter_user_id refund_cents source_digest root_id event_id created_at"),
   table("refunds", "legacy_order_duty", "id order_id kind source_record_id counterparty_user_id amount_cents currency status source source_status source_digest continuation_version_id admission_id maturity_at revision settled_by settled_ref_type settled_ref_id settled_ref_digest created_at"),
   table("refunds", "legacy_order_read_snapshot", "id original_order_no source_system source_entity legacy_id source_digest renter_user_id"),
   ...["joinpay_refund_evidence", "prestart_termination_decision", "rental_opening", "settlement_version", "settlement_intake", "rental_referral_earning"].map(name => table("refunds", name, "id")),
   table("refunds", "rental_opening_ack", "opening_id"),
+  table("controlledRefunds", "local_controlled_refund_operation", "id intent_id"),
+  table("controlledRefunds", "local_controlled_refund_evidence", "id intent_id"),
   table("controlledWithdrawals", "withdrawal_intent", "id user_id mode policy_version input_digest gross_cents net_cents fee_cents economic_root_id expected_ledger_revision state funds_disposition accepted_at"),
   table("withdrawals", "joinpay_withdrawal_intent", "id user_id merchant_order_no gross_cents funds_disposition state requires_review accepted_at"),
   ...["joinpay_payout_evidence", "joinpay_payout_attempt"].map(name => table("withdrawals", name, "id")),
 ];
 const functions = [
-  ...["native_refund_terminal_complete", "prestart_liability_complete", "prestart_payment_basis_valid", "support_cancel_payment_basis_valid", "native_prestart_refund_liability_complete", "native_prestart_refund_terminal_complete"].map(name => ({ domain: "refunds", name: `zzsh_order.${name}(${name.endsWith("basis_valid") ? "jsonb" : "text"})` })),
+  ...["native_refund_terminal_complete", "prestart_liability_complete", "prestart_payment_basis_valid", "support_cancel_payment_basis_valid", "native_prestart_refund_liability_complete", "native_prestart_refund_terminal_complete", "support_poststart_cancellation_complete", "support_cancellation_refund_terminal_complete"].map(name => ({ domain: "refunds", name: `zzsh_order.${name}(${name.endsWith("basis_valid") ? "jsonb" : "text"})` })),
+  { domain: "controlledRefunds", name: "zzsh_order.local_controlled_refund_terminal_complete(text)" },
   { domain: "controlledWithdrawals", name: "zzsh_order.withdrawal_expected_lines(text)" },
   ...["joinpay_withdrawal_expected_lines", "joinpay_withdrawal_complete"].map(name => ({ domain: "withdrawals", name: `zzsh_order.${name}(text)` })),
 ];
@@ -40,6 +44,7 @@ WITH required AS (SELECT x->>'domain' AS domain,x->>'table' AS tbl,ARRAY(SELECT 
  UNION ALL SELECT x->>'domain',COALESCE(has_function_privilege(current_user,to_regprocedure(x->>'name'),'EXECUTE'),false)
  FROM jsonb_array_elements($2::jsonb) x)
 SELECT COALESCE(bool_and(ready) FILTER(WHERE domain='refunds'),false) AS refunds,
+ COALESCE(bool_and(ready) FILTER(WHERE domain='controlledRefunds'),false) AS controlled_refunds,
  COALESCE(bool_and(ready) FILTER(WHERE domain='withdrawals'),false)
   AND (COALESCE(bool_and(ready) FILTER(WHERE domain='controlledWithdrawals'),false) OR production) AS withdrawals,
  production FROM checked CROSS JOIN (SELECT (EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid=to_regclass('zzsh_order.finance_economic_root')
@@ -68,11 +73,11 @@ SELECT count(*)::text AS count,COALESCE(sum(amount),0)::text AS amount,
   'documentRef',document_ref,'reasonCodes',reasons) ORDER BY CASE WHEN source='LEGACY_DUTY' THEN 1 ELSE 0 END,due_at NULLS LAST,id COLLATE "C") FROM preview),'[]'::jsonb) AS items,
  COALESCE((SELECT jsonb_agg(jsonb_build_object('source',source,'count',n::text,'unknownCount',unknown::text,'amountCents',amount::text) ORDER BY source)
   FROM (SELECT f.source,count(p.id) AS n,count(p.id) FILTER(WHERE p.amount IS NULL) AS unknown,COALESCE(sum(p.amount),0) AS amount
-   FROM (VALUES ${refund ? "('POSTING'),('PRESTART_TERMINATION'),('LEGACY_DUTY')" : includeControlled ? "('LOCAL_CONTROLLED'),('JOINPAY_FORMAL')" : "('JOINPAY_FORMAL')"}) f(source)
+   FROM (VALUES ${refund ? "('POSTING'),('PRESTART_TERMINATION'),('SUPPORT_CANCELLATION'),('LEGACY_DUTY')" : includeControlled ? "('LOCAL_CONTROLLED'),('JOINPAY_FORMAL')" : "('JOINPAY_FORMAL')"}) f(source)
    LEFT JOIN pending p ON p.source=f.source GROUP BY f.source) s),'[]'::jsonb) AS sources
 FROM pending`;
 
-const refundsSql = `/* finance obligation queues refund responsibilities and exact original writeoffs */
+const refundsSql = (includeControlled:boolean) => `/* finance obligation queues refund responsibilities and exact original writeoffs */
 WITH basis AS MATERIALIZED (
  SELECT 'POSTING'::text AS source,p.id AS basis_id,p.order_id,o.display_no AS number,o.renter_user_id AS subject,
   p.payment_confirmation_id,p.version_hash AS digest,p.id AS posting_id,NULL::text AS liability_root,NULL::text AS liability_event,
@@ -96,6 +101,13 @@ WITH basis AS MATERIALIZED (
  FROM zzsh_order.prestart_termination t LEFT JOIN zzsh_order.rental_order o ON o.id=t.order_id
  LEFT JOIN zzsh_order.payment_confirmation c ON c.id=t.payment_basis->>'paymentConfirmationId' AND c.order_id=t.order_id
  WHERE t.state='APPROVED' AND t.approved_at<=$1::timestamptz
+ UNION ALL
+ SELECT 'SUPPORT_CANCELLATION',s.id,s.order_id,o.display_no,o.renter_user_id,c.id,s.source_digest,NULL,s.root_id,s.event_id,
+  c.source,c.merchant_scope_id,c.provider_transaction_id,c.merchant_order_no,s.refund_cents,s.created_at,s.created_at,
+  COALESCE(zzsh_order.support_poststart_cancellation_complete(s.id),false)
+ FROM zzsh_order.support_poststart_cancellation s LEFT JOIN zzsh_order.rental_order o ON o.id=s.order_id
+ LEFT JOIN zzsh_order.payment_confirmation c ON c.id=s.payment_confirmation_id AND c.order_id=s.order_id
+ WHERE s.created_at<=$1::timestamptz AND s.refund_cents>0
 ), matched AS MATERIALIZED (
  SELECT b.*,i.id AS intent_id,i.amount_cents AS intent_amount,i.state,i.budget_disposition,i.requires_review,i.due_at AS intent_due_at,
   COALESCE(i.basis_kind=b.source AND i.order_id=b.order_id AND i.renter_user_id=b.subject AND i.payment_confirmation_id=b.payment_confirmation_id
@@ -106,10 +118,13 @@ WITH basis AS MATERIALIZED (
    AND i.due_at=b.due_at,false) AS bound,
   CASE WHEN i.state IN('SUCCEEDED','FAILED') AND i.payment_source='JOINPAY' AND i.evidence_level='JOINPAY_FORMAL' THEN
    CASE i.basis_kind WHEN 'POSTING' THEN zzsh_order.native_refund_terminal_complete(i.id)
-    WHEN 'PRESTART_TERMINATION' THEN zzsh_order.native_prestart_refund_terminal_complete(i.id) ELSE false END ELSE false END AS terminal_complete
+    WHEN 'PRESTART_TERMINATION' THEN zzsh_order.native_prestart_refund_terminal_complete(i.id)
+    WHEN 'SUPPORT_CANCELLATION' THEN zzsh_order.support_cancellation_refund_terminal_complete(i.id) ELSE false END
+   ${includeControlled ? "WHEN i.state IN('SUCCEEDED','FAILED') AND i.payment_source='CONTROLLED' AND i.evidence_level='CONTROLLED_TEST' THEN zzsh_order.local_controlled_refund_terminal_complete(i.id)" : ""}
+   ELSE false END AS terminal_complete
  FROM basis b LEFT JOIN zzsh_order.channel_refund_intent i ON i.created_at<=$1::timestamptz AND
   ((b.source='POSTING' AND i.posting_id=b.basis_id)
-   OR(b.source='PRESTART_TERMINATION' AND i.basis_kind='PRESTART_TERMINATION' AND i.payment_confirmation_id=b.payment_confirmation_id))
+   OR(b.source IN('PRESTART_TERMINATION','SUPPORT_CANCELLATION') AND i.basis_kind=b.source AND i.payment_confirmation_id=b.payment_confirmation_id))
 ), native AS (
  SELECT source||':'||basis_id AS id,source,max(order_id) AS order_id,max(number) AS number,
   min(due_at) AS due_at,max(original) AS recorded_amount,
@@ -232,9 +247,9 @@ function project(row: QueueRow | undefined, documentReadable: boolean, refund: b
 /** finance.read authorization and one consistent read-only snapshot belong to the caller; refs add no detail authority. */
 export async function readAdminFinanceObligationQueues(client: PoolClient, asOf: string, documentReadable: boolean) {
   if (!/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{6}Z$/.test(asOf) || !Number.isFinite(Date.parse(asOf))) throw unavailable();
-  const ready = (await client.query<{ refunds: boolean; withdrawals: boolean; production?: boolean }>(preflightSql, [JSON.stringify(requirements), JSON.stringify(functions)])).rows[0];
+  const ready = (await client.query<{ refunds: boolean; controlled_refunds?: boolean; withdrawals: boolean; production?: boolean }>(preflightSql, [JSON.stringify(requirements), JSON.stringify(functions)])).rows[0];
   return {
-    refunds: ready?.refunds === true ? project((await client.query<QueueRow>(refundsSql, [asOf])).rows[0], documentReadable, true) : notAvailable(),
+    refunds: ready?.refunds === true ? project((await client.query<QueueRow>(refundsSql(ready.controlled_refunds===true), [asOf])).rows[0], documentReadable, true) : notAvailable(),
     withdrawals: ready?.withdrawals === true ? project((await client.query<QueueRow>(withdrawalsSql(ready.production!==true), [asOf])).rows[0], documentReadable, false) : notAvailable(),
   };
 }

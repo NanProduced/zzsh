@@ -212,14 +212,14 @@ export async function readAdminChannelActivity(client: PoolClient, q: ActivityQu
     if (q.kind === 'ALL' || q.kind === 'REFUND') parts.push(`SELECT 'refund' AS family,a.id,${utc('a.created_at')} AS at
       FROM zzsh_order.joinpay_refund_attempt a JOIN zzsh_order.channel_refund_intent i ON i.id=a.intent_id
       LEFT JOIN zzsh_order.rental_order ord ON ord.id=i.order_id LEFT JOIN zzsh_auth_user."user" u ON u.id=i.renter_user_id
-      WHERE a.operation='SUBMIT' AND i.basis_kind IN ('POSTING','PRESTART_TERMINATION') AND a.created_at <= $2::timestamptz AND ${during('a.created_at')}
+      WHERE a.operation='SUBMIT' AND i.basis_kind IN ('POSTING','PRESTART_TERMINATION','SUPPORT_CANCELLATION') AND a.created_at <= $2::timestamptz AND ${during('a.created_at')}
       ${q.subjectUserId?`AND (i.renter_user_id=$12 OR (ord.owner_user_id=$12 AND ord.renter_user_id=i.renter_user_id AND ${orderVisible('ord')}))`:''} AND ${match(['i.refund_order_no','i.provider_refund_trx_no','i.original_payment_order_no',orderTerm('ord','ord.display_no')],exact)}`);
     if ((q.kind==='ALL'||q.kind==='REFUND') && demoState?.exists) parts.push(`SELECT 'demo_refund' AS family,a.id,${utc('a.created_at')} AS at
       FROM zzsh_order.local_controlled_refund_operation a JOIN zzsh_order.channel_refund_intent i ON i.id=a.intent_id AND i.payment_source='CONTROLLED'
       JOIN zzsh_order.rental_order ord ON ord.id=i.order_id AND ord.renter_user_id=i.renter_user_id
       JOIN zzsh_order.ecs_test_demo_finance_registration s ON s.reference=a.sandbox_registration_ref AND s.reference=i.sandbox_registration_ref
       LEFT JOIN zzsh_auth_user."user" u ON u.id=i.renter_user_id
-      WHERE i.basis_kind IN ('POSTING','PRESTART_TERMINATION') AND a.refund_order_no=i.refund_order_no AND a.original_payment_trx_no=i.original_payment_trx_no AND a.amount_cents=i.amount_cents
+      WHERE i.basis_kind IN ('POSTING','PRESTART_TERMINATION','SUPPORT_CANCELLATION') AND a.refund_order_no=i.refund_order_no AND a.original_payment_trx_no=i.original_payment_trx_no AND a.amount_cents=i.amount_cents
         AND a.final_digest=encode(sha256(convert_to(a.final_canonical,'UTF8')),'hex')
         AND s.registration_digest=encode(sha256(convert_to(s.canonical_registration,'UTF8')),'hex')
         AND s.canonical_registration::jsonb->>'schema' IN ('ecs-test-demo-finance.v1','local-demo-clone-finance.v1')

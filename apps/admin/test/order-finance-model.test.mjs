@@ -29,3 +29,8 @@ test('retired refund types from an older API are not rendered as normal refunds'
  const rows=mergeOrderRefunds([],summary([intent('old',{basisKind:'REVIEW_CONFIRMATION'}),intent('new',{basisKind:'POSTING'})]));
  assert.deepEqual(rows.map(row=>row.key),['REFUND_INTENT:new']);
 });
+
+test('support cancellation refund remains visible without duplicating its channel record',()=>{
+ const rows=mergeOrderRefunds([source('cancel')],summary([intent('cancel',{basisKind:'SUPPORT_CANCELLATION'})]));
+ assert.equal(rows.length,1);assert.equal(rows[0].amountCents,'1000');assert.equal(rows[0].source,'JOINPAY');assert.equal(rows[0].conflict,false);
+});

@@ -283,8 +283,8 @@ test('withdrawal lookup counts records without adding amounts and exact child nu
 test('global refund version excludes retired responsibility and retains normal refund attempts',()=>{
  const sql=financeVersionSql({refund_intents:true,refund_read_dependencies:true});
  assert.doesNotMatch(sql,/order\.refund\.abnormal\.first_submit\.blocked/);
- assert.match(sql,/basis_kind IN \('POSTING','PRESTART_TERMINATION'\)/);
- assert.match(sql,/basis_kind='PRESTART_TERMINATION'/);
+ assert.match(sql,/basis_kind IN \('POSTING','PRESTART_TERMINATION','SUPPORT_CANCELLATION'\)/);
+ assert.match(sql,/basis_kind IN \('PRESTART_TERMINATION','SUPPORT_CANCELLATION'\)/);
 });
 
 test('global narrow proof catches non-max CAS, first payment and complete capability identity',()=>{

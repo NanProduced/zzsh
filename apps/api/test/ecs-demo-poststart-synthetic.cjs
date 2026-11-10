@@ -78,6 +78,16 @@ async function main(){
   assert.equal((await readAccountOccupancyFacts(rc,`${tag}_account`)).state,'FREE');
   await rc.query('SET CONSTRAINTS ALL IMMEDIATE');await rc.query('COMMIT');
  }catch(e){await rc.query('ROLLBACK').catch(()=>{});throw e;}finally{rc.release();}
+ const asOf=async c=>(await c.query(`SELECT to_char(clock_timestamp() AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS at`)).rows[0].at;
+ const {readAdminFinanceObligationQueues}=require('../dist/src/finance/admin-finance-obligation-queues.js');
+ const before=await runtime.connect();
+ try{
+  await before.query('BEGIN READ ONLY');
+  const queue=await readAdminFinanceObligationQueues(before,await asOf(before),true);
+  const pending=queue.refunds.items.find(item=>item.documentRef===`ORDER:${orderId}`);
+  assert(pending);assert.equal(pending.source,'SUPPORT_CANCELLATION');assert.equal(pending.amountCents,'5000');
+  await before.query('ROLLBACK');
+ }finally{before.release();}
  const {runEcsDemoRefundBatch}=require('../dist/src/order/ecs-demo-refund-service.js');
  const outcome=await runEcsDemoRefundBatch(runtime,{demo,capability},10,`${tag}_worker`);
  assert.equal(outcome.cancellationSelected,1);assert.equal(outcome.cancellationAllocations[0].outcome,'ALLOCATED');
@@ -109,14 +119,25 @@ async function main(){
   const ledgerSql=require('../dist/src/finance/admin-finance-read.js').adminFinanceLedgerSql(true,true)
    .replace(/\s+ORDER BY l\.id COLLATE "C" LIMIT \$1\s*$/,' AND l.id=$1');
   const ledger=(await readClient.query(ledgerSql,[entries[0].id])).rows[0];assert.equal(ledger.order_id,orderId);
+  const queue=await readAdminFinanceObligationQueues(readClient,await asOf(readClient),true);
+  assert.equal(queue.refunds.items.some(item=>item.documentRef===`ORDER:${orderId}`),false);
+  const {parseActivityQuery,readAdminChannelActivity}=require('../dist/src/finance/admin-finance-activity.js');
+  const activity=await readAdminChannelActivity(readClient,parseActivityQuery(new URLSearchParams('kind=REFUND'),false),
+   {adminId,isBoss:true,orderRead:true,financeDocumentRead:true,resourceRead:true});
+  const related=activity.items.filter(item=>item.relatedNumber===`${tag.toUpperCase()}_ORDER`);
+  assert.equal(related.length,1);assert.equal(related[0].amountCents,'5000');
+  assert.equal(related[0].dataOrigin,'ECS_TEST_SIMULATED');assert.equal(related[0].bankArrival,'UNKNOWN');
   await readClient.query('ROLLBACK');
  }finally{readClient.release();}
  const probe=await admin.connect();
  try{
   await probe.query('BEGIN');
   await probe.query('ALTER TABLE zzsh_order.settlement_ledger_entry DISABLE TRIGGER support_poststart_entry_guard');
+  await probe.query('REVOKE SELECT ON zzsh_order.support_poststart_cancellation FROM zzsh_synth_runtime');
   await probe.query('SET LOCAL ROLE zzsh_synth_runtime');
   assert.equal(await require('../dist/src/order/support-cancel.js').supportPoststartSchemaReady(probe,true),false);
+  const incomplete=await require('../dist/src/finance/channel-finance-read.js').readAdminOrderRefundSummary(probe,{orderId,origin:'NATIVE',financeReadable:true});
+  assert.equal(incomplete.integration,'NOT_INTEGRATED');assert(incomplete.reasonCodes.includes('SUPPORT_CANCEL_REFUND_SCHEMA_UNAVAILABLE'));
  }finally{await probe.query('ROLLBACK').catch(()=>{});probe.release();}
  console.log('PASS: real synthetic-PG cancellation, simulated original refund, renter readback and demo ledger origin');
 }

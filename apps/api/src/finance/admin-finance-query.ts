@@ -99,11 +99,11 @@ function versionRelations(ready: FinanceVersionReady): { name: string; sql: stri
     { name: "payout_operation", sql: `SELECT id,final_evidence_digest FROM zzsh_order.controlled_payout_operation` });
   if (ready.payment_requests) relations.push({ name: "payment_request", sql: `SELECT id,order_id,channel,merchant_identity_id,platform_order_no,channel_order_no,state,amount_cents::text,currency,evidence_level,updated_at FROM zzsh_order.payment_request` });
   if (ready.refund_intents) {
-    relations.push({ name: "refund_intent", sql: `SELECT i.id,i.order_id,i.renter_user_id,i.posting_id,i.payment_confirmation_id,i.payment_source,i.state,i.budget_disposition,to_jsonb(i) AS doc FROM zzsh_order.channel_refund_intent i WHERE i.basis_kind IN ('POSTING','PRESTART_TERMINATION')` });
+    relations.push({ name: "refund_intent", sql: `SELECT i.id,i.order_id,i.renter_user_id,i.posting_id,i.payment_confirmation_id,i.payment_source,i.state,i.budget_disposition,to_jsonb(i) AS doc FROM zzsh_order.channel_refund_intent i WHERE i.basis_kind IN ('POSTING','PRESTART_TERMINATION','SUPPORT_CANCELLATION')` });
     if (ready.refund_read_dependencies === true) {
       relations.push(
         { name: "refund_confirmation", sql: `SELECT id,order_id,source,disposition,reason_code,currency,amount_cents::text,merchant_scope_id,provider_transaction_id,merchant_order_no,joinpay_request_id,joinpay_evidence_id,joinpay_anchor_id FROM zzsh_order.payment_confirmation WHERE source='JOINPAY'` },
-        { name: "refund_attempt", sql: `SELECT a.id,a.intent_id,a.operation,a.lease_version::text,a.created_at FROM zzsh_order.joinpay_refund_attempt a JOIN zzsh_order.channel_refund_intent i ON i.id=a.intent_id WHERE i.basis_kind='PRESTART_TERMINATION'` });
+        { name: "refund_attempt", sql: `SELECT a.id,a.intent_id,a.operation,a.lease_version::text,a.created_at FROM zzsh_order.joinpay_refund_attempt a JOIN zzsh_order.channel_refund_intent i ON i.id=a.intent_id WHERE i.basis_kind IN ('PRESTART_TERMINATION','SUPPORT_CANCELLATION')` });
     }
   }
   if (ready.joinpay_withdrawals) relations.push({ name: "joinpay_withdrawal", sql: `SELECT id,user_id,merchant_identity_id,merchant_order_no,platform_serial_no,state,funds_disposition,gross_cents::text,net_cents::text,fee_cents::text,provider_fee_cents::text,operation_version::text,destination_id,destination_revision FROM zzsh_order.joinpay_withdrawal_intent` });
@@ -199,7 +199,7 @@ export function financeScopedVersionSql(ready: FinanceVersionReady, scope: Finan
     : kind === "PAYMENT_REQUEST"
       ? "SELECT id FROM zzsh_order.channel_refund_intent WHERE order_id IN (SELECT order_id FROM zzsh_order.payment_request WHERE id=$1)"
       : orderRefundIntents;
-  const relatedRefundRoots = `SELECT id FROM zzsh_order.finance_economic_root WHERE source_kind='NATIVE_RENTAL_REFUND' AND source_id IN (${relatedRefundIntents}) UNION SELECT liability_root_id FROM zzsh_order.channel_refund_intent WHERE id IN (${relatedRefundIntents}) AND basis_kind='PRESTART_TERMINATION' AND liability_root_id IS NOT NULL`;
+  const relatedRefundRoots = `SELECT id FROM zzsh_order.finance_economic_root WHERE source_kind='NATIVE_RENTAL_REFUND' AND source_id IN (${relatedRefundIntents}) UNION SELECT liability_root_id FROM zzsh_order.channel_refund_intent WHERE id IN (${relatedRefundIntents}) AND basis_kind IN ('PRESTART_TERMINATION','SUPPORT_CANCELLATION') AND liability_root_id IS NOT NULL`;
   const relatedRefundEvents = `SELECT id FROM zzsh_order.finance_event WHERE economic_root_id IN (${relatedRefundRoots})`;
   const refundRootPart = ready.refund_intents === true ? ` OR id IN (${relatedRefundRoots})` : "";
   const refundEventPart = ready.refund_intents === true ? ` OR id IN (${relatedRefundEvents})` : "";
@@ -303,7 +303,7 @@ function exactFinanceSourceKeys(ready: FinanceVersionReady, scope: FinanceLoadSc
   const utcAt = (column: string) => `to_char(${column} AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`;
   const keys: string[] = [];
   if (wantsPayment) keys.push(`SELECT 'payment:'||p.id AS id,'PAYMENT_REQUEST:'||p.id AS ref,${utcAt("p.created_at")} AS at,2 AS priority FROM zzsh_order.payment_request p WHERE (p.channel_order_no=${number} OR p.platform_order_no=${number})${party("p.order_id")}${during("p.created_at")}`);
-  if (wantsRefund) keys.push(`SELECT 'refund:'||i.id,'REFUND_INTENT:'||i.id,${utcAt("i.created_at")},2 FROM zzsh_order.channel_refund_intent i WHERE i.basis_kind IN ('POSTING','PRESTART_TERMINATION') AND (i.refund_order_no=${number} OR i.provider_refund_trx_no=${number} OR i.original_payment_order_no=${number})${subjectParam ? ` AND i.renter_user_id=${subjectParam}` : ""}${during("i.created_at")}`);
+  if (wantsRefund) keys.push(`SELECT 'refund:'||i.id,'REFUND_INTENT:'||i.id,${utcAt("i.created_at")},2 FROM zzsh_order.channel_refund_intent i WHERE i.basis_kind IN ('POSTING','PRESTART_TERMINATION','SUPPORT_CANCELLATION') AND (i.refund_order_no=${number} OR i.provider_refund_trx_no=${number} OR i.original_payment_order_no=${number})${subjectParam ? ` AND i.renter_user_id=${subjectParam}` : ""}${during("i.created_at")}`);
   if (wantsWithdrawal) keys.push(`SELECT 'joinpay:'||w.id,'JOINPAY_WITHDRAWAL:'||w.id,${utcAt("w.accepted_at")},2 FROM zzsh_order.joinpay_withdrawal_intent w WHERE (w.merchant_order_no=${number} OR w.platform_serial_no=${number})${subjectParam ? ` AND w.user_id=${subjectParam}` : ""}${during("w.accepted_at")}`);
   return keys;
 }

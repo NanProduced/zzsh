@@ -367,7 +367,7 @@ export async function readAdminChannelPaymentEvidence(client: Client, scope: Cha
 
 export type ChannelRefundIntentEvidence = Readonly<{
   intentId: string; refundOrderNo: string; amount: ChannelMoney; localState: string; budgetDisposition: string;
-  requiresReview: boolean; basisKind: "POSTING" | "PRESTART_TERMINATION"; paymentConfirmationId: string | null;
+  requiresReview: boolean; basisKind: "POSTING" | "PRESTART_TERMINATION" | "SUPPORT_CANCELLATION"; paymentConfirmationId: string | null;
   liabilityRootId: string | null; liabilityEventId: string | null;
   localTerminal: Readonly<{ evidenceId: string | null; rootId: string | null; eventId: string | null }> | null;
   trustedActualCents: null; trustedRefundTrxNo: null; trustedCompletedAt: null; mayResubmit: false; bankArrival: "UNKNOWN";
@@ -482,6 +482,8 @@ export async function readAdminChannelRefundEvidence(client: Client, scope: Chan
   if (summary.integration === "INTEGRATED" && summary.intents) await assertRefundMerchants(client, data, input.orderId, summary.intents);
   const prestart=(summary as {prestartTermination?:{merchantIdentityId:string;refund:{integration:string;truncated:boolean}}}).prestartTermination;
   if(prestart)requireStoredMerchant(data,prestart.merchantIdentityId);
+  const support=(summary as {supportCancellation?:{merchantIdentityId:string}}).supportCancellation;
+  if(support)requireStoredMerchant(data,support.merchantIdentityId);
   const reasons: string[] = (summary.reasonCodes ?? []).filter((value): value is string => typeof value === "string" && CODE.test(value));
   const posting = await readSettlementPosting(client, input.orderId, reasons);
   const status: ChannelRefundEvidence["status"] = summary.integration === "INTEGRATED" ? "INTEGRATED"
@@ -510,7 +512,8 @@ export async function readAdminChannelRefundEvidence(client: Client, scope: Chan
       if (intent.evidenceId !== null && evidenceId === null || intent.rootId !== null && rootId === null
         || intent.eventId !== null && eventId === null) add(reasons, "LOCAL_TERMINAL_REFERENCE_UNREADABLE");
       const rawBasis = (intent as { basisKind?: unknown }).basisKind;
-      const basisKind = rawBasis === "PRESTART_TERMINATION" ? "PRESTART_TERMINATION" as const : "POSTING" as const;
+      if (rawBasis !== undefined && !["POSTING", "PRESTART_TERMINATION", "SUPPORT_CANCELLATION"].includes(String(rawBasis))) { valid = false; break; }
+      const basisKind = rawBasis === "PRESTART_TERMINATION" ? "PRESTART_TERMINATION" as const : rawBasis === "SUPPORT_CANCELLATION" ? "SUPPORT_CANCELLATION" as const : "POSTING" as const;
       const liabilityRootId = (intent as { liabilityRootId?: unknown }).liabilityRootId;
       const liabilityEventId = (intent as { liabilityEventId?: unknown }).liabilityEventId;
       mapped.push({ intentId, refundOrderNo, amount, localState: code(intent.localState) ?? "UNKNOWN",
@@ -841,7 +844,7 @@ export async function searchAdminChannelOriginals(client: Client, scope: Channel
         i.terminal_evidence_id,${utc("i.created_at")} AS recorded_at${subjectUserId ? ",scope_order.owner_user_id AS scope_owner_id,scope_order.renter_user_id AS scope_renter_id" : ""}
       FROM zzsh_order.channel_refund_intent i
       ${subjectUserId ? "JOIN zzsh_order.rental_order scope_order ON scope_order.id=i.order_id" : ""}
-      WHERE i.payment_source='JOINPAY' AND i.basis_kind IN ('POSTING','PRESTART_TERMINATION') AND i.merchant_identity_id=$1 AND (
+      WHERE i.payment_source='JOINPAY' AND i.basis_kind IN ('POSTING','PRESTART_TERMINATION','SUPPORT_CANCELLATION') AND i.merchant_identity_id=$1 AND (
         ($2::text IS NOT NULL AND i.refund_order_no=$2 AND ($3::text IS NULL OR i.provider_refund_trx_no=$3))
         OR ($2::text IS NOT NULL AND i.original_payment_order_no=$2 AND ($3::text IS NULL OR i.original_payment_trx_no=$3))
         OR ($2::text IS NULL AND $3::text IS NOT NULL AND (i.provider_refund_trx_no=$3 OR i.original_payment_trx_no=$3)))

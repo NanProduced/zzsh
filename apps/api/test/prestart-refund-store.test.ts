@@ -118,6 +118,7 @@ test('客服特殊取消只读取本单部分退款，错误责任类型不显�
   state:'SUCCEEDED',budget_disposition:'CONSUMED',local_written_off_at:'2026-10-28T01:00:00.000000Z',saved_terminal:'SUCCEEDED',saved_trx:'refund_trx',saved_completed_at:'2026-10-28T01:00:00.000000Z',saved_at:'2026-10-28T01:00:00.000000Z'};
  f.rows([row]);const result=await readPrestartRefundProgress(f.c,'cancel_1',basis,true,undefined,undefined,'SUPPORT_CANCELLATION');
  assert.equal(result.totals?.consumedCents,'5000');assert.equal(result.intents?.[0]?.state,'SUCCEEDED');assert.equal(result.bankArrival,'UNKNOWN');
+ assert(f.calls.some(call=>call.sql.includes('order.refund.support_cancel.first_submit.blocked')));
  f.rows([{...row,basis_kind:'PRESTART_TERMINATION'}]);
  const bad=await readPrestartRefundProgress(f.c,'cancel_1',basis,true,undefined,undefined,'SUPPORT_CANCELLATION');
  assert.equal(bad.integration,'UNAVAILABLE');assert.equal(bad.totals,null);

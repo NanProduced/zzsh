@@ -331,6 +331,25 @@ test("refund evidence separates responsibility, allocation, consumption and rele
   } finally { restore(); }
 });
 
+test("refund evidence keeps the support-cancellation basis and unknown bank arrival", async () => {
+  const intent={...refundIntent("rfi_1","RF1","100","ALLOCATED","PROCESSING"),basisKind:"SUPPORT_CANCELLATION"} as unknown as NonNullable<RefundSummary["intents"]>[number];
+  const restore=stub(refundRead,"readAdminOrderRefundSummary",async()=>refundSummary([intent]));
+  try {
+    const result=await readAdminChannelRefundEvidence(pool(refundClient({posting:[]})),scope(),{orderId:"ord_1",origin:"NATIVE"});
+    assert.equal(result.intents?.[0]?.basisKind,"SUPPORT_CANCELLATION");
+    assert.equal(result.intents?.[0]?.amount.cents,"100");assert.equal(result.bankArrival,"UNKNOWN");
+  } finally {restore();}
+});
+
+test("an unrecognized refund basis is not projected as a normal posting", async () => {
+  const intent={...refundIntent("rfi_1","RF1","100","ALLOCATED"),basisKind:"UNRECOGNIZED"} as unknown as NonNullable<RefundSummary["intents"]>[number];
+  const restore=stub(refundRead,"readAdminOrderRefundSummary",async()=>refundSummary([intent]));
+  try {
+    const result=await readAdminChannelRefundEvidence(pool(refundClient()),scope(),{orderId:"ord_1",origin:"NATIVE"});
+    assert.equal(result.intents,null);assert.ok(result.reasonCodes.includes("REFUND_INTENT_PROJECTION_INVALID"));
+  } finally {restore();}
+});
+
 
 test("truncated refund coverage exposes partial intents but no totals", async () => {
   const summary = { ...refundSummary([refundIntent("rfi_1", "RF1", "100", "CONSUMED")]), truncated: true } as unknown as RefundSummary;

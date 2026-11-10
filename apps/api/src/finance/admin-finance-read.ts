@@ -248,8 +248,8 @@ async function appendUnpostedFinanceSources(client: PoolClient, ready: Raw, scop
     const orderId = scope.documentRef?.startsWith("ORDER:") ? scope.documentRef.slice(6) : null;
     const ids = wanted("REFUND_INTENT");
     const columns = `id,order_id,renter_user_id,merchant_identity_id,payment_source,refund_order_no,provider_refund_trx_no,state,amount_cents::text AS amount_cents,${utc("created_at")} AS at`;
-    if (orderId) add("REFUND_INTENT", (await client.query(`SELECT ${columns} FROM zzsh_order.channel_refund_intent WHERE order_id=$1 AND basis_kind IN ('POSTING','PRESTART_TERMINATION') ORDER BY id COLLATE "C" LIMIT 65`, [orderId])).rows, "LOCAL_REFUND_READ_LIMIT");
-    else if (ids.length) add("REFUND_INTENT", (await client.query(`SELECT ${columns} FROM zzsh_order.channel_refund_intent WHERE id=ANY($1::text[]) AND basis_kind IN ('POSTING','PRESTART_TERMINATION') ORDER BY id COLLATE "C"`, [ids])).rows, "LOCAL_REFUND_READ_LIMIT");
+    if (orderId) add("REFUND_INTENT", (await client.query(`SELECT ${columns} FROM zzsh_order.channel_refund_intent WHERE order_id=$1 AND basis_kind IN ('POSTING','PRESTART_TERMINATION','SUPPORT_CANCELLATION') ORDER BY id COLLATE "C" LIMIT 65`, [orderId])).rows, "LOCAL_REFUND_READ_LIMIT");
+    else if (ids.length) add("REFUND_INTENT", (await client.query(`SELECT ${columns} FROM zzsh_order.channel_refund_intent WHERE id=ANY($1::text[]) AND basis_kind IN ('POSTING','PRESTART_TERMINATION','SUPPORT_CANCELLATION') ORDER BY id COLLATE "C"`, [ids])).rows, "LOCAL_REFUND_READ_LIMIT");
   }
   if (ready.joinpay_withdrawals === true) {
     const ids = wanted("JOINPAY_WITHDRAWAL");

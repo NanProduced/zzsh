@@ -42,7 +42,7 @@ export function mergeOrderRefunds(observed: readonly OrderFinanceTransaction[], 
   if (summary?.integration !== 'INTEGRATED' || !summary.intents) return rows;
   const seen = new Set<string>();
   for (const item of summary.intents) {
-    if (item.basisKind && !['POSTING', 'PRESTART_TERMINATION'].includes(item.basisKind)) continue;
+    if (item.basisKind && !['POSTING', 'PRESTART_TERMINATION', 'SUPPORT_CANCELLATION'].includes(item.basisKind)) continue;
     const ref = `REFUND_INTENT:${item.intentId}`;
     const existing = byRef.get(ref);
     if (existing) {

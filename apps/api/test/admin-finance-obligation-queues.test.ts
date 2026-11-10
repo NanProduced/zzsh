@@ -109,9 +109,9 @@ test("three set-based SELECTs reuse existing closure functions and original FK b
   for (const call of f.calls) assert.doesNotMatch(call.sql, /\b(?:INSERT|UPDATE|DELETE|TRUNCATE|CREATE|ALTER|FOR\s+UPDATE|pg_advisory)\b/i);
   assert.match(f.calls[0]!.sql, /has_table_privilege/); assert.match(f.calls[0]!.sql, /has_function_privilege/); assert.match(f.calls[0]!.sql, /NOT c.relrowsecurity/);
   const refunds = f.calls[1]!.sql, withdrawals = f.calls[2]!.sql;
-  for (const source of ["POSTING", "PRESTART_TERMINATION", "LEGACY_DUTY"]) assert.ok(refunds.includes(source));
+  for (const source of ["POSTING", "PRESTART_TERMINATION", "SUPPORT_CANCELLATION", "LEGACY_DUTY"]) assert.ok(refunds.includes(source));
   assert.doesNotMatch(refunds,/REVIEW_CONFIRMATION|native_abnormal_refund/);
-  for (const fn of ["native_refund_terminal_complete", "native_prestart_refund_terminal_complete", "prestart_liability_complete"]) assert.ok(refunds.includes(`zzsh_order.${fn}(`));
+  for (const fn of ["native_refund_terminal_complete", "native_prestart_refund_terminal_complete", "prestart_liability_complete", "support_cancellation_refund_terminal_complete"]) assert.ok(refunds.includes(`zzsh_order.${fn}(`));
   assert.match(refunds, /i\.posting_id IS NOT DISTINCT FROM b\.posting_id/); assert.match(refunds, /i\.original_payment_trx_no=b\.trx/);
   assert.match(refunds, /NULL::numeric AS amount/); assert.doesNotMatch(refunds, /BOOK_PAYABLE/);
   assert.match(refunds, /LEGACY_FINAL_CANONICAL_NOT_REVALIDATED/); assert.match(refunds, /CASE WHEN source='LEGACY_DUTY' THEN 1 ELSE 0 END/);

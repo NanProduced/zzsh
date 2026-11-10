@@ -5,8 +5,8 @@ assert(/^[1-9]\d*$/.test(process.env.POSTSTART_REFUND_SYNTH_OID||''));
 assert(/^[1-9]\d*$/.test(process.env.POSTSTART_REFUND_SYNTH_SYSTEM_ID||''));
 const port=Number(process.env.POSTSTART_REFUND_SYNTH_PORT);assert(Number.isInteger(port)&&port>1024&&port<65536);
 const database=process.env.POSTSTART_REFUND_SYNTH_DATABASE||'zzsh_synth_refund_schema';
-assert(['zzsh_synth_refund_schema','zzsh_synth_prod_refund_r2'].includes(database));
-const marker=database==='zzsh_synth_refund_schema'?'zzsh:synthetic:refund-schema-v1':'zzsh:synthetic:production-refund-v1';
+assert(['zzsh_synth_refund_schema','zzsh_synth_prod_refund_r2','zzsh_synth_prod_refund_r3','zzsh_ecs_test_synth_r3'].includes(database));
+const marker=database==='zzsh_synth_refund_schema'?'zzsh:synthetic:refund-schema-v1':database==='zzsh_ecs_test_synth_r3'?'zzsh:ecs-test:v1':'zzsh:synthetic:production-refund-v1';
 const pool=new Pool({host:'127.0.0.1',port,database,user:'postgres',max:3,statement_timeout:10000});
 const profiles=require('../dist/src/order/joinpay-refund-profile.js'),store=require('../dist/src/order/channel-refund-store.js');
 const original={assertFormalRefundProfile:profiles.assertFormalRefundProfile,describeRefundProfile:profiles.describeRefundProfile,
@@ -54,6 +54,15 @@ async function main(){
   const {readSupportCancellation}=require('../dist/src/order/support-cancel.js');
   const adminView=await readSupportCancellation(c,{userId:'post_admin',sessionId:'post_admin_session'},'post_order');
   assert.equal(adminView.poststartCancellation.refundState,'READY');assert.equal(adminView.poststartCancellation.refundCents,'5000');
+  const summary=await require('../dist/src/finance/channel-finance-read.js').readAdminOrderRefundSummary(c,
+   {orderId:'post_order',origin:'NATIVE',financeReadable:true});
+  assert.equal(summary.integration,'INTEGRATED');assert.equal(summary.intents.length,1);
+  assert.equal(summary.intents[0].basisKind,'SUPPORT_CANCELLATION');assert.equal(summary.intents[0].amount.cents,'5000');
+  assert.equal(summary.responsibilityBudget.originalCents,'5000');assert.equal(summary.responsibilityBudget.remainingCents,'0');
+  const asOf=(await c.query(`SELECT to_char(clock_timestamp() AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS at`)).rows[0].at;
+  const queue=await require('../dist/src/finance/admin-finance-obligation-queues.js').readAdminFinanceObligationQueues(c,asOf,true);
+  const pending=queue.refunds.items.find(item=>item.documentRef==='ORDER:post_order');
+  assert(pending);assert.equal(pending.source,'SUPPORT_CANCELLATION');assert.equal(pending.amountCents,'5000');
   console.log('PASS: support partial refund allocation, same-key replay and duplicate budget rejection on synthetic PG');
   await c.query('ROLLBACK');
   const contextMarker=seed.indexOf("SELECT set_config('zzsh.actor_type'");assert(contextMarker>0);
