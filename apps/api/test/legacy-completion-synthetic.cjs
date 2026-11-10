@@ -91,7 +91,7 @@ const pool=new Pool({host:'127.0.0.1',port:cancellation?55439:5432,database,user
    await c.query(`UPDATE zzsh_supply.rental_account SET current_version_id='synthetic-observation',legacy_hold='UNRESOLVED' WHERE id=$1`,[b.accountId]);
   }
   await c.query("SET LOCAL session_replication_role='origin'");
-  if(cancellation){assert.equal(await evidence.legacySupportCancellationReady(c),false);await c.query(fs.readFileSync('migrations/candidates/legacy-support-cancel.sql','utf8'));}
+  if(cancellation){assert.equal(await evidence.legacySupportCancellationReady(c),false);await c.query(fs.readFileSync('migrations/business/0191_legacy_support_cancel.sql','utf8'));}
   else {
    await c.query(fs.readFileSync('migrations/business/0168_legacy_payment_order_number_guard.sql','utf8'));
    await c.query(fs.readFileSync('migrations/business/0169_legacy_finance_duty_runtime.sql','utf8'));
