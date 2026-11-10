@@ -24,6 +24,8 @@ function setSourceReadiness(proof) {
   const accounts = proof.accountSnapshots, refunds = proof.refundParents;
   externalReadiness.accountSnapshots = { status: accounts.unavailable ? "REVIEW_REQUIRED" : "NO_REVIEW_IN_PREPARED_INPUT", ...accounts };
   externalReadiness.refundRelationships = { status: refunds.relationshipUnresolved || refunds.subjectIsolated ? "REVIEW_REQUIRED" : "NO_REVIEW_IN_CAPTURED_INPUT", ...refunds };
+  if (proof.unsupportedContinuations) externalReadiness.unsupportedContinuations = {
+    status: proof.unsupportedContinuations.total ? "REVIEW_REQUIRED" : "NO_REVIEW_IN_CAPTURED_INPUT", ...proof.unsupportedContinuations };
 }
 assert([execute, validate, inspect, resumeGrowth].filter(Boolean).length <= 1, "ONE_ROUND_ACTION_REQUIRED");
 if (!execute && !validate && !inspect && !resumeGrowth) {

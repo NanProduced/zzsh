@@ -4,6 +4,7 @@ import test from "node:test";
 import { assertSelectedScopeForWrite, planSelectedBusinessScope, selectedScopeDigest, selectedScopeFilter } from "./selected-business-scope.mjs";
 import { summarizePopulationScope } from "./local-source-scenarios.mjs";
 import { verifySelectedPopulationFiles } from "./verify-full-source-population.mjs";
+import { sourceContinuation } from './local-source-adapter.mjs';
 
 const account = (id, over = {}) => ({ id, status: "4", is_delete: "0", user_id: "u1", no: id, price_tenant: "100.00",
   extra_goods_total_price_tenant: "30.00", deposit_amount: "50.00", rental_days: "10", default_consume_type: "1", ...over });
@@ -61,11 +62,53 @@ test('account ownership, status and preserved rental snapshot are checked agains
   }
 });
 
+test('paid legacy states without continuation support stay visible for manual review',async()=>{
+  for(const status of ['2','6','7']){
+    const f=independentlyCheckedFixture();for(const row of f.rows['source-orders'])Object.assign(row,{order_status:'1',is_delete:'0'});
+    f.rows['source-orders'][0].order_status=status;
+    f.data.distributionOrders=[];
+    f.data.tradePolicy=[{id:'policy',type:'trade',name:'advanceOrderSetRatio',value:'70'},...Array.from({length:14},(_,i)=>({id:'p'+i,type:'expendConfig',name:'item'+i,value:String(i)}))];
+    for(const name of ['distributionOrders','tradePolicy']){f.rows['source-'+name]=f.data[name];f.source.files[name]={file:'source-'+name,rows:f.data[name].length};}
+    f.dataset.population=summarizePopulationScope(f.data,'SELECTED_BUSINESS_SCOPE',selectedScopeFilter(f.dataset.selectedScope),f.dataset.sourceReceiptSha256);
+    f.dataset.populationSha256=createHash('sha256').update(JSON.stringify(f.dataset.population)).digest('hex');f.dataset.sourceRef='source';
+    const counts={'2':0,'6':0,'7':0};counts[status]=1;
+    f.dataset.domains.continuations={unsupportedStatuses:counts,preparedEvidence:{commissionPolicy:'ACTIVE_OR_SETTLED_SOURCE_V1'}};
+    const proof=await verifySelectedPopulationFiles({datasetDir:'dataset',sourceDir:'source',...f});
+    assert.deepEqual(proof.unsupportedContinuations,{...counts,total:1});
+    counts[status]=0;
+    await assert.rejects(verifySelectedPopulationFiles({datasetDir:'dataset',sourceDir:'source',...f}),/SELECTED_SCOPE_CONTINUATION_STATUS_DRIFT/);
+  }
+});
+
+test('selected-scope preflight compares continuation fields and commissions before target access',async()=>{
+  const f=independentlyCheckedFixture();for(const row of f.rows['source-orders'])Object.assign(row,{order_status:'1',is_delete:'0'});
+  const order=f.rows['source-orders'][0];Object.assign(order,{order_status:'3',is_settle:'0',pay_money:'100.00',awm_bullet_price:'8.00'});
+  const account=f.rows['source-accounts'].find(row=>row.id===order.accounts_id);account.base_bot='50';
+  const payment=f.rows['source-pays'][0];Object.assign(payment,{pay_order_sn:'P1',pay_money:'100.00'});
+  const commission={id:'c1',order_id:order.id,order_type:'1',user_id:'u2',ratio:'20',level:'2',status:'2',earnings:'1.00',is_delete:'0'};
+  f.data.distributionOrders=[commission];f.data.tradePolicy=[{id:'policy',type:'trade',name:'advanceOrderSetRatio',value:'70'},
+    ...Array.from({length:14},(_,i)=>({id:'p'+i,type:'expendConfig',name:'item'+i,value:String(i)}))];
+  for(const name of ['distributionOrders','tradePolicy']){f.rows['source-'+name]=f.data[name];f.source.files[name]={file:'source-'+name,rows:f.data[name].length};}
+  f.dataset.population=summarizePopulationScope(f.data,'SELECTED_BUSINESS_SCOPE',selectedScopeFilter(f.dataset.selectedScope),f.dataset.sourceReceiptSha256);
+  f.dataset.populationSha256=createHash('sha256').update(JSON.stringify(f.dataset.population)).digest('hex');f.dataset.sourceRef='source';
+  const policy={advanceOrderSetRatio:'70',expend:Object.fromEntries(f.data.tradePolicy.slice(1).map(row=>[row.name,row.value]))};
+  const value=JSON.stringify(Object.fromEntries(Object.entries(commission).sort(([a],[b])=>a.localeCompare(b))));
+  const continuation={sourceId:order.id,source:sourceContinuation(order,account,[payment],[commission],policy),commissionEvidence:[{sourceRecordId:commission.id,canonical:value,
+    digest:createHash('sha256').update(value).digest('hex'),evidenceRef:'source:la_distribution_order:'+commission.id}]};
+  f.rows['target-continuations']=[continuation];f.dataset.files.continuations={file:'target-continuations',rows:1};
+  f.dataset.domains.continuations={unsupportedStatuses:{'2':0,'6':0,'7':0},preparedEvidence:{commissionPolicy:'ACTIVE_OR_SETTLED_SOURCE_V1'}};
+  await verifySelectedPopulationFiles({datasetDir:'dataset',sourceDir:'source',...f});
+  continuation.source.orderPrices.awm='99.00';
+  await assert.rejects(verifySelectedPopulationFiles({datasetDir:'dataset',sourceDir:'source',...f}),/CONTINUATION_SOURCE_FACT_CHANGED/);
+  continuation.source.orderPrices.awm='8.00';continuation.source.commissions=[];continuation.commissionEvidence=[];
+  await assert.rejects(verifySelectedPopulationFiles({datasetDir:'dataset',sourceDir:'source',...f}),/CONTINUATION_COMMISSION_SOURCE_SET_CHANGED/);
+});
+
 test('a retained user refund must reference a retained order before the migration starts',async()=>{
   const good=independentlyCheckedFixture();
   const proof=await verifySelectedPopulationFiles({datasetDir:'dataset',sourceDir:'source',...good});
   assert.deepEqual(proof.refundParents,{captured:1,retainedOrder:1,subjectIsolated:0,relationshipMatched:1,relationshipUnresolved:0});
-  for(const patch of [{order_id:'o2'}, {order_id:'missing'}, {order_type:'recharge'}, {user_id:'missing'}]){
+  for(const patch of [{order_id:'o2'}, {order_id:'missing'}, {order_id:null,order_sn:'order-o1'}, {order_type:'recharge'}, {user_id:'missing'}]){
     const f=independentlyCheckedFixture();Object.assign(f.rows['source-refunds'][0],patch);
     await assert.rejects(verifySelectedPopulationFiles({datasetDir:'dataset',sourceDir:'source',...f}),/SELECTED_SCOPE_REFUND_(PARENT_NOT_RETAINED|USER_NOT_CAPTURED|TYPE_NOT_SUPPORTED)/);
   }

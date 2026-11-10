@@ -4,7 +4,7 @@ import { join, resolve, dirname, basename } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import { createRequire } from "node:module";
-import { LEGACY_DATASET_PREPARATION_TOOLS, LEGACY_REFUND_RELATIONSHIP_POLICY, NEXT_CONTINUATION_POLICY, assertCapturedSourceOrigin, assertLegacyIdentityColumns, inspectLegacyListedPricingCapture, inspectLegacySkinDictionaryCapture, planLegacyIdentitySource, classifyLegacyRegistrationTime, sourceUserPlan, sourceContactPlanningRow, sourceAccountPlan, sourceOrderPlan, sourceFinanceObservation, sourceContinuation, sourceInvitationPlan, summarizeLegacyDashboardSources, readSourceRows as rows, sourceJsonLine } from "./local-source-adapter.mjs";
+import { LEGACY_DATASET_PREPARATION_TOOLS, LEGACY_REFUND_RELATIONSHIP_POLICY, NEXT_CONTINUATION_POLICY, NEXT_CONTINUATION_COMMISSION_POLICY, includeContinuationCommission, unsupportedLegacyContinuationStatus, assertCapturedSourceOrigin, assertLegacyIdentityColumns, inspectLegacyListedPricingCapture, inspectLegacySkinDictionaryCapture, planLegacyIdentitySource, classifyLegacyRegistrationTime, sourceUserPlan, sourceContactPlanningRow, sourceAccountPlan, sourceOrderPlan, sourceFinanceObservation, sourceContinuation, sourceInvitationPlan, summarizeLegacyDashboardSources, readSourceRows as rows, sourceJsonLine } from "./local-source-adapter.mjs";
 import { resolvePopulationMode, selectSourceScenarios, summarizePopulationScope } from "./local-source-scenarios.mjs";
 import { planSelectedBusinessScope, selectedScopeDigest, selectedScopeFilter } from "./selected-business-scope.mjs";
 const require = createRequire(import.meta.url), ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
@@ -68,7 +68,7 @@ function emit(name, row) { if (!handles.has(name)) {
 } const h = handles.get(name), bytes = Buffer.from(sourceJsonLine(row)); writeSync(h.fd, bytes); h.hash.update(bytes); fileMeta[name].rows++; fileMeta[name].bytes += bytes.length; }
 const report = { schema: "zzsh.local-legacy-dataset.v1", refundRelationshipPolicy: LEGACY_REFUND_RELATIONSHIP_POLICY, skinDictionaryEvidence: inspectLegacySkinDictionaryCapture(sourceReceipt), startedAt: new Date().toISOString(), source, sourceReceiptSha256: sha(receiptBytes), apiDist: api, toolFiles: Object.fromEntries(LEGACY_DATASET_PREPARATION_TOOLS.map(name => [name, sha(readFileSync(new URL(name, import.meta.url)))])), sourceCutoff: binding.restoreRecord.cutoff, capturedAt: sourceReceipt.finishedAt, sourceOrigin: { bindingSha256: bindingSha, dumpSha256: binding.restoreRecord.dumpSha256, cutoffMeaning: binding.restoreRecord.cutoffMeaning }, sourceRef: "local-frozen-source:" + sha(receiptBytes), domains: {}, quarantine: {}, dbConnections: 0, credentialReads: 0, writeAllowed: false, files: fileMeta };
 const isolate = (domain, sourceId, reason) => { const key = domain + ":" + reason; report.quarantine[key] = (report.quarantine[key] ?? 0) + 1; emit("quarantine", { domain, sourceId, reason }); };
-const users = new Map(), accounts = new Map(), accountRows = new Map(), games = new Map(), seenPhones = new Set(), pays = new Map(), refunds = new Map(), commissions = new Map();
+const users = new Map(), accounts = new Map(), accountRows = new Map(), games = new Map(), seenPhones = new Set(), pays = new Map(), refunds = new Map(), commissions = new Map(), continuationCommissions = new Map();
 const append = (map, key, row) => { if (!map.has(key))
     map.set(key, []); map.get(key).push(row); };
 const policy = { advanceOrderSetRatio: null, expend: {} };
@@ -137,9 +137,12 @@ try {
     for (const raw of sourceRows("refunds"))
         if (raw.order_type === 'order')
             append(refunds, raw.order_id, raw);
-    for (const raw of sourceRows("distributionOrders"))
-        if (raw.order_type === '1' && raw.status === '1' && raw.is_delete === '0')
-            append(commissions, raw.order_id, raw);
+    const continuationOrderIds = new Set(sourceRows("orders").filter(raw => raw.pay_is === '1' && raw.is_delete === '0'
+        && ['3','8','9'].includes(raw.order_status)).map(raw => raw.id));
+    for (const raw of sourceRows("distributionOrders")) {
+        if (raw.order_type === '1' && raw.status === '1' && raw.is_delete === '0') append(commissions, raw.order_id, raw);
+        if (continuationOrderIds.has(raw.order_id) && includeContinuationCommission(raw)) append(continuationCommissions, raw.order_id, raw);
+    }
     let sourceMoney = 0n, sourceEarnings = 0n, mappedMoney = 0n, mappedEarnings = 0n, readyInvalidBalances = 0;
     report.domains.users = { source: 0, ready: 0, isolated: 0 };
     report.identityProfiles = { schema: "zzsh.legacy-identity-profile-source.v1", verified: 0, ready: 0, invalid: 0 };
@@ -221,8 +224,8 @@ try {
         }
     }
     report.domains.orders = { source: 0, ready: 0, isolated: 0 };
-    report.domains.continuations = { source: 0, parameterComplete: 0, isolated: 0, preparedEvidence: {
-        policy: NEXT_CONTINUATION_POLICY, readyComplete: 0, readyIsolated: 0, readyUnprepared: 0, unreadyEmitted: 0, unreadyUnprepared: 0 } };
+    report.domains.continuations = { source: 0, parameterComplete: 0, isolated: 0, unsupportedStatuses: {'2':0,'6':0,'7':0}, preparedEvidence: {
+        policy: NEXT_CONTINUATION_POLICY, commissionPolicy: NEXT_CONTINUATION_COMMISSION_POLICY, readyComplete: 0, readyIsolated: 0, readyUnprepared: 0, unreadyEmitted: 0, unreadyUnprepared: 0 } };
     report.domains.liabilities = { source: 0, byClassification: {} };
     for (const raw of sourceRows("orders")) {
         report.domains.orders.source++;
@@ -242,13 +245,18 @@ try {
             report.domains.orders.isolated++;
             isolate("orders", raw.id, "SOURCE_ORDER_INVALID");
         }
+        const unsupported = unsupportedLegacyContinuationStatus(raw);
+        if (unsupported) {
+            report.domains.continuations.unsupportedStatuses[unsupported]++;
+            isolate('continuations', raw.id, 'SOURCE_STATUS_' + unsupported + '_MANUAL_REVIEW');
+        }
         if (raw.pay_is === '1' && raw.is_delete === '0' && ['3', '8', '9'].includes(raw.order_status)) {
             report.domains.continuations.source++;
             try {
-                const pending = commissions.get(raw.id) ?? [];
-                const sourceEvidence = sourceContinuation(raw, accountRows.get(raw.accounts_id), pays.get(raw.id) ?? [], pending, policy);
+                const commissionRows = continuationCommissions.get(raw.id) ?? [];
+                const sourceEvidence = sourceContinuation(raw, accountRows.get(raw.accounts_id), pays.get(raw.id) ?? [], commissionRows, policy);
                 const admission = modules.calc.admitLegacyEvidence(sourceEvidence);
-                const evidence = pending.map(c => { const canonical = modules.contentHash.canonicalize(c); return { sourceRecordId: c.id, canonical, digest: sha(canonical), evidenceRef: report.sourceRef + ':la_distribution_order:' + c.id }; });
+                const evidence = commissionRows.map(c => { const canonical = modules.contentHash.canonicalize(c); return { sourceRecordId: c.id, canonical, digest: sha(canonical), evidenceRef: report.sourceRef + ':la_distribution_order:' + c.id }; });
                 emit('continuations', { sourceId: raw.id, parentSourceDigest: p?.ready ? p.sourceDigest : null, source: sourceEvidence, commissionEvidence: evidence, admission: admission.admission, reasons: admission.reasons, targetParentReady: p?.ready === true });
                 const prepared = report.domains.continuations.preparedEvidence;
                 prepared[p?.ready ? admission.admission === 'PARAMETER_COMPLETE' ? 'readyComplete' : 'readyIsolated' : 'unreadyEmitted']++;

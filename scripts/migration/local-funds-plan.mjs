@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { createReadStream, readFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
-import { isExactLegacyRefundRelationship, LEGACY_REFUND_RELATIONSHIP_POLICY, readBoundSourceRows, sourceFinanceObservation } from "./local-source-adapter.mjs";
+import { assertContinuationCommissionCoverage, assertContinuationSourceCoverage, isExactLegacyRefundRelationship, LEGACY_REFUND_RELATIONSHIP_POLICY, NEXT_CONTINUATION_COMMISSION_POLICY, NEXT_CONTINUATION_POLICY, readBoundSourceRows, sourceFinanceObservation } from "./local-source-adapter.mjs";
 
 const sha = value => createHash("sha256").update(value).digest("hex");
 async function fileSha(file) { const h=createHash("sha256"); for await(const bytes of createReadStream(file)) h.update(bytes); return h.digest("hex"); }
@@ -104,19 +104,21 @@ export async function prepareLocalFundsPlan({manifest,domainFile,mod,fundsSource
   selected[domain].set(row.sourceId,row);
  }}
   const selectedCounts = {};
-  const source = {};
-  for(const domain of ["accounts","orders","earnings","withdraws","distributionOrders","pays","refunds"]){
+  const source = {}, continuationCommissionSource = [];
+  const verifyContinuation=manifest.domains?.continuations?.preparedEvidence?.policy===NEXT_CONTINUATION_POLICY;
+  for(const domain of ["accounts","orders","earnings","withdraws","distributionOrders","pays","refunds",...(verifyContinuation?['tradePolicy']:[])]){
   const file=receipt.files[domain];if(!file||file.file!==basename(file.file))throw Error("FUNDS_SOURCE_FILE_CHANGED:"+domain);
   source[domain]=[];
   for await(const row of readBoundSourceRows(join(manifest.source,file.file),file)){
-   const keep=domain==="accounts"||domain==="orders"?selected[domain].has(row.id):domain==="pays"?(row.order_type==="1"?selected.orders.has(row.order_id):row.order_type==="2"&&selected.accounts.has(row.order_id)):selected.users.has(row.user_id);
+   if(domain==='distributionOrders'&&selected.orders.has(row.order_id))continuationCommissionSource.push(row);
+   const keep=domain==='tradePolicy'?true:domain==="accounts"||domain==="orders"?selected[domain].has(row.id):domain==="pays"?(row.order_type==="1"?selected.orders.has(row.order_id):row.order_type==="2"&&selected.accounts.has(row.order_id)):selected.users.has(row.user_id);
    if(keep)source[domain].push(row);
   }
   const domainMeta = manifest.domains[domain] ?? {};
   // A domain marked as retained source-relation evidence keeps its full-source count, so the selected
   // count is not comparable to it; record it instead of asserting equality against a different scope.
   const retainedAsEvidence = String(domainMeta.disposition ?? "").startsWith("RETAINED_SOURCE_RELATION_EVIDENCE");
-  const expected = domainMeta.selected ?? domainMeta.source;
+  const expected = domain==='tradePolicy'?file.rows:domainMeta.selected ?? domainMeta.source;
   if (!retainedAsEvidence && source[domain].length !== expected) throw Error("FUNDS_SELECTED_DENOMINATOR_CHANGED:" + domain);
   selectedCounts[domain] = source[domain].length;
 }
@@ -236,7 +238,14 @@ if (fundsSource) {
  }
  const continuationRows=[];for await(const row of readBoundSourceRows(domainFile("continuations"),manifest.files.continuations))continuationRows.push(row);
  const pendingRows=[];for await(const row of readBoundSourceRows(domainFile("pending-commissions"),manifest.files["pending-commissions"]))pendingRows.push(row);
- if(pendingRows.length!==completedPending+continuationPending||continuationRows.reduce((n,r)=>n+r.source.commissions.length,0)!==continuationPending)throw Error("FUNDS_PENDING_COMMISSION_WRITER_SOURCE_GAP");
+ const continuationPolicy=manifest.domains?.continuations?.preparedEvidence;
+ if(verifyContinuation){
+  if(continuationPolicy.commissionPolicy!==NEXT_CONTINUATION_COMMISSION_POLICY)throw Error('CONTINUATION_COMMISSION_POLICY_UNPROVEN');
+  assertContinuationSourceCoverage(continuationRows,source);
+  assertContinuationCommissionCoverage(continuationRows,continuationCommissionSource,manifest.sourceRef);
+ }
+ const continuationPendingRows=continuationRows.reduce((n,r)=>n+r.source.commissions.filter(c=>c.status==='1').length,0);
+ if(pendingRows.length!==completedPending+continuationPending||continuationPendingRows!==continuationPending)throw Error("FUNDS_PENDING_COMMISSION_WRITER_SOURCE_GAP");
  const pendingCommissionCoverage={selected:pendingRows.length,completedDutyCandidates:completedPending,continuationEvidence:continuationPending,recordedAmountCents:pendingAmount.toString(),targetDuties:"TARGET_PARENT_AND_RECEIPT_CHECK_REQUIRED"};
  summary.guarantees={selected:0,planned:0,writer:0,policyExcluded:true,listingDeposit:listingDepositExclusion};
  for(const [domain,count]of Object.entries(summary))if(count.selected!==count.planned)throw Error("FUNDS_SOURCE_PLAN_MISMATCH:"+domain);

@@ -86,7 +86,7 @@ async function load({ failure, strict = true, reservation = {}, previous, recove
   }
   const manifest = path.join(ds, "manifest.json"), fundsReceipt = path.join(funds, "receipt.json");
   const population = populationMode ? { schema: "zzsh.local-population-scope.v1", mode: populationMode } : null;
-  const continuationFixture=continuationDomains===undefined && migrationProfile===NEXT_MIGRATION_PROFILE ? {source:0,parameterComplete:0,isolated:0,preparedEvidence:{policy:'PRESERVE_SOURCE_ADMISSION_V1',readyComplete:0,readyIsolated:0,readyUnprepared:0,unreadyEmitted:0,unreadyUnprepared:0}} : continuationDomains;
+  const continuationFixture=continuationDomains===undefined && migrationProfile===NEXT_MIGRATION_PROFILE ? {source:0,parameterComplete:0,isolated:0,unsupportedStatuses:{'2':0,'6':0,'7':0},preparedEvidence:{policy:'PRESERVE_SOURCE_ADMISSION_V1',commissionPolicy:'ACTIVE_OR_SETTLED_SOURCE_V1',readyComplete:0,readyIsolated:0,readyUnprepared:0,unreadyEmitted:0,unreadyUnprepared:0}} : continuationDomains;
   put(manifest, { status: "FULL_SOURCE_DATASET_PREPARED_TARGET_NOT_RUN", gameBindings: {}, files: fileEntries,
     ...(continuationFixture?{domains:{continuations:continuationFixture}}:{}),
     ...(identityProfiles && refundPolicy ? { refundRelationshipPolicy: LEGACY_REFUND_RELATIONSHIP_POLICY } : {}),
@@ -206,7 +206,7 @@ test('NEXT refuses the wrong population or incomplete continuation evidence befo
  assert.match(missing.error?.message??'',/NEXT_CONTINUATION_SOURCE_COVERAGE_UNPROVEN/);assert.deepEqual(missing.commands,[]);assert.equal(missing.directories.size,0);
  const source={legacyOrderId:'1',admission:'ISOLATED',reasons:['MISSING_BASE_BOT']};
  const row={sourceId:'1',parentSourceDigest:'a'.repeat(64),source,admission:'PARAMETER_COMPLETE',reasons:source.reasons,targetParentReady:true};
- const continuationDomains={source:1,parameterComplete:1,isolated:0,preparedEvidence:{policy:'PRESERVE_SOURCE_ADMISSION_V1',readyComplete:1,readyIsolated:0,readyUnprepared:0,unreadyEmitted:0,unreadyUnprepared:0}};
+ const continuationDomains={source:1,parameterComplete:1,isolated:0,unsupportedStatuses:{'2':0,'6':0,'7':0},preparedEvidence:{policy:'PRESERVE_SOURCE_ADMISSION_V1',commissionPolicy:'ACTIVE_OR_SETTLED_SOURCE_V1',readyComplete:1,readyIsolated:0,readyUnprepared:0,unreadyEmitted:0,unreadyUnprepared:0}};
  const altered=await load({...options,continuationRows:[row],continuationDomains});
  assert.match(altered.error?.message??'',/CONTINUATION_SOURCE_ADMISSION_MISMATCH/);assert.deepEqual(altered.commands,[]);assert.equal(altered.directories.size,0);
 });
@@ -1056,7 +1056,11 @@ test('next-profile completion requires checkpoint fence release and fenced readb
   const instance = { host:'127.0.0.1', port:55435, systemIdentifier:'12345' };
   Object.assign(data.expected.dataset,{population:{mode:'SELECTED_BUSINESS_SCOPE'},files:{continuations:{rows:1},'invitation-facts':{rows:0}},invitationFacts:{subjects:2,codes:2,selectedSubjects:2,packets:0,selectedPackets:0,financialEffects:false,policy:null}});
   Object.assign(data.expected.dataset.domains.users,{source:2,isolated:0});
-  Object.assign(data.expected.dataset.domains.continuations,{source:1,isolated:0,preparedEvidence:{policy:'PRESERVE_SOURCE_ADMISSION_V1',readyComplete:1,readyIsolated:0,readyUnprepared:0,unreadyEmitted:0,unreadyUnprepared:0}});
+  Object.assign(data.expected.dataset.domains.accounts,{source:2,isolated:0});
+  Object.assign(data.expected.dataset.domains.orders,{source:2,isolated:0});
+  Object.assign(data.expected.dataset.domains.continuations,{source:1,isolated:0,unsupportedStatuses:{'2':0,'6':0,'7':0},preparedEvidence:{policy:'PRESERVE_SOURCE_ADMISSION_V1',commissionPolicy:'ACTIVE_OR_SETTLED_SOURCE_V1',readyComplete:1,readyIsolated:0,readyUnprepared:0,unreadyEmitted:0,unreadyUnprepared:0}});
+  data.expected.dataset.domains.liabilities={source:2};
+  data.checkpoint.quarantine=[];data.checkpoint.fundsSupplement={pendingCommissionCoverage:{completedDutyCandidates:2}};
   data.checkpoint.phases.invitationFacts.nextIndex=0;data.checkpoint.phases.invitationCounts={complete:true,quarantined:0,nextIndex:0};
   data.readback.invitationFacts={childCountClosure:{status:'VERIFIED',packets:0,auditsMatched:0,subjects:2,matched:2,known:2,unknown:0}};
   data.expected.display.accountBaseRatio={scope:'ACCOUNT_AT_CAPTURE_NOT_ORDER_SNAPSHOT',known:2,unknown:0};
@@ -1074,6 +1078,20 @@ test('next-profile completion requires checkpoint fence release and fenced readb
   for (const name of ['prepare','readback']) Object.assign(data.growth[name], { readOnlyFence:'HELD_UNTIL_ROLLBACK', readOnlyMaintenanceUnlock:true, readOnlyMaintenanceClosed:true });
   Object.assign(data.growth.apply, { targetFence:'HELD_ACROSS_BATCHES', targetFenceReleased:true });
   const result = assessRoundEvidence(data); assert.equal(result.status, 'COMPLETE', result.issues.join(','));
+  for (const domain of ['liabilityDuties','completedCommissions']) {
+    const isolated=structuredClone(data);isolated.checkpoint.quarantine.push({domain,sourceId:'source-1',code:'REVIEW_REQUIRED'});
+    assert(assessRoundEvidence(isolated).issues.includes('ROUND_LEGACY_FINANCE_ASSEMBLY_REQUIRES_REVIEW'));
+  }
+  for (const domain of ['users','accounts','orders']) {
+    const isolated=structuredClone(data);isolated.expected.dataset.domains[domain].isolated=1;
+    assert(assessRoundEvidence(isolated).issues.includes('ROUND_SELECTED_BUSINESS_REQUIRES_REVIEW'));
+  }
+  const unsupported=structuredClone(data);unsupported.expected.dataset.domains.continuations.unsupportedStatuses['6']=1;
+  assert(assessRoundEvidence(unsupported).issues.includes('ROUND_LEGACY_CONTINUATION_MANUAL_REVIEW'));
+  for (const change of [d=>{delete d.checkpoint.quarantine;},d=>{d.expected.dataset.domains.liabilities.source++;},
+    d=>{d.checkpoint.fundsSupplement.pendingCommissionCoverage.completedDutyCandidates++;}]) {
+    const changed=structuredClone(data);change(changed);assert.equal(assessRoundEvidence(changed).status,'INCOMPLETE');
+  }
   for (const change of [d=>{delete d.checkpoint.targetFenceReleased;}, d=>{d.checkpoint.protectionRecorded=false;}]) {
     const changed=structuredClone(data); change(changed);
     assert(assessRoundEvidence(changed).issues.includes('ROUND_CHECKPOINT_UNCONFIRMED'));

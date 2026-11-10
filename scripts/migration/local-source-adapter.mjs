@@ -2,9 +2,91 @@ import { createHash } from "node:crypto";
 import { createReadStream, lstatSync } from "node:fs";
 import { basename, join } from "node:path";
 import { StringDecoder } from "node:string_decoder";
+import { isDeepStrictEqual } from "node:util";
 // NEXT preserves the original evidence even when the old order lacks calculation inputs.
 // A preserved ISOLATED record does not authorize settlement or prove a channel refund.
 export const NEXT_CONTINUATION_POLICY = 'PRESERVE_SOURCE_ADMISSION_V1';
+export const NEXT_CONTINUATION_COMMISSION_POLICY = 'ACTIVE_OR_SETTLED_SOURCE_V1';
+/** These paid legacy states have no automated continuation; keep the original status for staff. */
+export function unsupportedLegacyContinuationStatus(row) {
+  return row?.pay_is === '1' && row?.is_delete === '0' && ['2','6','7'].includes(row.order_status) ? row.order_status : null;
+}
+/** Deleted pending rows must not become payable; settled rows still block cancellation. */
+export function includeContinuationCommission(row) {
+  if (row?.order_type !== '1') return false;
+  if (!['0','1'].includes(row.is_delete)) throw new Error('CONTINUATION_COMMISSION_DELETE_STATE_UNKNOWN');
+  return row.is_delete === '0' || row.status === '2';
+}
+/** Compare every retained continuation commission with the independently read source row. */
+export function assertContinuationCommissionCoverage(continuations, sourceRows, sourceRef) {
+  if (!Array.isArray(continuations) || !Array.isArray(sourceRows) || typeof sourceRef !== 'string')
+    throw new Error('CONTINUATION_COMMISSION_SOURCE_UNAVAILABLE');
+  const orders = new Map(), expected = new Map(), sourceIds = new Set();
+  for (const row of continuations) {
+    if (typeof row?.sourceId !== 'string' || orders.has(row.sourceId) || row.source?.legacyOrderId !== row.sourceId)
+      throw new Error('CONTINUATION_COMMISSION_SOURCE_UNAVAILABLE');
+    orders.set(row.sourceId,row);
+  }
+  for (const raw of sourceRows) {
+    if (!orders.has(raw?.order_id) || !includeContinuationCommission(raw)) continue;
+    if (typeof raw.id !== 'string' || sourceIds.has(raw.id)) throw new Error('CONTINUATION_COMMISSION_SOURCE_DUPLICATE');
+    sourceIds.add(raw.id);
+    if (!expected.has(raw.order_id)) expected.set(raw.order_id,[]);
+    expected.get(raw.order_id).push(raw);
+  }
+  for (const [orderId,row] of orders) {
+    const original = expected.get(orderId) ?? [], commissions = row.source?.commissions, proofs = row.commissionEvidence;
+    if (!Array.isArray(commissions) || !Array.isArray(proofs) || commissions.length !== original.length || proofs.length !== original.length)
+      throw new Error('CONTINUATION_COMMISSION_SOURCE_SET_CHANGED');
+    const byId = new Map(commissions.map(item=>[item.id,item])), evidence = new Map(proofs.map(item=>[item.sourceRecordId,item]));
+    if (byId.size !== original.length || evidence.size !== original.length) throw new Error('CONTINUATION_COMMISSION_SOURCE_SET_CHANGED');
+    for (const raw of original) {
+      const projected = {id:raw.id,beneficiaryId:raw.user_id,ratio:raw.ratio,level:raw.level,status:raw.status,storedEarnings:raw.earnings};
+      const proof=evidence.get(raw.id),actual=byId.get(raw.id);let decoded;
+      try { decoded=JSON.parse(proof?.canonical); } catch { throw new Error('CONTINUATION_COMMISSION_SOURCE_FACT_CHANGED'); }
+      if (!actual || !isDeepStrictEqual(actual,projected) || !isDeepStrictEqual(decoded,raw)
+          || proof.digest !== createHash('sha256').update(proof.canonical).digest('hex') || proof.evidenceRef !== sourceRef+':la_distribution_order:'+raw.id)
+        throw new Error('CONTINUATION_COMMISSION_SOURCE_FACT_CHANGED');
+    }
+  }
+}
+/** Re-read order, account, payment and policy facts independently of the prepared continuation file. */
+export function assertContinuationSourceCoverage(continuations, sources) {
+  const {orders,accounts,pays,tradePolicy}=sources??{};
+  if (![continuations,orders,accounts,pays,tradePolicy].every(Array.isArray))
+    throw new Error('CONTINUATION_SOURCE_INPUTS_UNAVAILABLE');
+  const map=rows=>{const out=new Map();for(const row of rows){
+    if(typeof row?.id!=='string'||out.has(row.id))throw new Error('CONTINUATION_SOURCE_DUPLICATE');out.set(row.id,row);
+  }return out;};
+  map(orders);const accountMap=map(accounts),actual=map(continuations.map(row=>({...row,id:row.sourceId}))),paidByOrder=new Map();
+  for(const p of pays)if(p.order_type==='1'&&p.pay_is==='1'){
+    if(!paidByOrder.has(p.order_id))paidByOrder.set(p.order_id,[]);
+    paidByOrder.get(p.order_id).push({id:p.id,payOrderSn:p.pay_order_sn,payMoney:p.pay_money,orderId:p.order_id});
+  }
+  const expectedOrders=orders.filter(row=>row.pay_is==='1'&&row.is_delete==='0'&&['3','8','9'].includes(row.order_status));
+  if(expectedOrders.length!==actual.size||expectedOrders.some(row=>!actual.has(row.id)))throw new Error('CONTINUATION_SOURCE_ORDER_SET_CHANGED');
+  const policies=tradePolicy.filter(row=>row.type==='trade'&&row.name==='advanceOrderSetRatio');
+  const expend={};for(const row of tradePolicy.filter(item=>item.type==='expendConfig')){
+    if(Object.hasOwn(expend,row.name))throw new Error('CONTINUATION_SOURCE_POLICY_INVALID');expend[row.name]=row.value;
+  }
+  if(policies.length!==1||typeof policies[0].value!=='string'||Object.keys(expend).length!==14)throw new Error('CONTINUATION_SOURCE_POLICY_INVALID');
+  const fields={barrett:'barrett_bullet_price',bullet:'level6_bullet_price',awm:'awm_bullet_price',armor:'level6_armor_price',helmet:'level6_helmet_price',coffee:'coffee_price',card:'top_insure_card_price'};
+  const quantities={barrett:'barrett_bullet_num',bullet:'level6_bullet_num',awm:'awm_bullet_num',armor:'level6_armor_num',helmet:'level6_helmet_num',coffee:'coffee_num',card:'top_insure_card_num'};
+  const mapped=(row,columns)=>Object.fromEntries(Object.entries(columns).map(([key,column])=>[key,row?.[column]??null]));
+  for(const raw of expectedOrders){
+    const row=actual.get(raw.id),account=accountMap.get(raw.accounts_id);
+    if(!account||!row.source||!Array.isArray(row.source.commissions))throw new Error('CONTINUATION_SOURCE_ORDER_UNAVAILABLE');
+    const source={...row.source};delete source.commissions;
+    const expected={legacyOrderId:raw.id,orderStatus:raw.order_status,isSettle:raw.is_settle,renterId:raw.user_id,ownerId:raw.sale_user_id,accountId:account.id,
+      profitDot:raw.profit_dot??null,baseBot:account.base_bot??null,payMoney:raw.pay_money??null,goodsMoney:raw.goods_money??null,storedCommissionMoney:raw.commission_money??null,
+      depositAmount:raw.deposit_amount??null,detainMoney:raw.detain_money??null,returnOrderMoney:raw.return_order_money??null,saleEarnings:raw.sale_earnings??null,fullPayoutMoney:raw.full_payout_money??null,
+      isFullPayout:account.is_full_payout??null,isAdvanceSet:raw.is_advance_set??null,orderPrices:mapped(raw,fields),accountPrices:mapped(account,fields),
+      quantities:{expendHaff:raw.expend_haff??null,...mapped(raw,quantities)},
+      paidPay:paidByOrder.get(raw.id)??[],
+      policy:{advanceOrderSetRatio:policies[0].value,expend}};
+    if(!isDeepStrictEqual(source,expected))throw new Error('CONTINUATION_SOURCE_FACT_CHANGED');
+  }
+}
 /** Full capture is input evidence; NEXT writes only the owner's selected account/order population. */
 export function assertNextBusinessPopulation(population, isNext) {
   if (isNext !== true && isNext !== false) throw new Error('MIGRATION_PROFILE_FLAG_UNPROVEN');
@@ -32,7 +114,10 @@ export function expectedContinuationImports(manifest, isNext) {
   if (!isNext) return d?.parameterComplete;
   const s = d?.preparedEvidence;
   const fields = ['readyComplete', 'readyIsolated', 'readyUnprepared', 'unreadyEmitted', 'unreadyUnprepared'];
-  if (s?.policy !== NEXT_CONTINUATION_POLICY || !fields.every(k => Number.isSafeInteger(s[k]) && s[k] >= 0)
+  const unsupported = d?.unsupportedStatuses;
+  if (s?.policy !== NEXT_CONTINUATION_POLICY || s?.commissionPolicy !== NEXT_CONTINUATION_COMMISSION_POLICY
+      || !['2','6','7'].every(k => Number.isSafeInteger(unsupported?.[k]) && unsupported[k] >= 0)
+      || !fields.every(k => Number.isSafeInteger(s[k]) && s[k] >= 0)
       || s.readyUnprepared !== 0 || s.unreadyEmitted !== 0 || s.unreadyUnprepared !== 0 || !Number.isSafeInteger(d.source)
       || fields.reduce((n, k) => n + s[k], 0) !== d.source
       || !Number.isSafeInteger(d.parameterComplete) || !Number.isSafeInteger(d.isolated)

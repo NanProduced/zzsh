@@ -469,7 +469,24 @@ export function assessRoundEvidence({ input, inputSha256, actorProof, receipt, c
       orders: expected?.dataset?.domains?.orders?.ready, continuationEvidence: continuationExpected,
       accountDisplay: expected?.display?.rows, storedOpening: expected?.openings?.stats?.candidate, skinHoldings: checkpoint.skinHoldingsPreparation?.ready };
     for (const [name, count] of Object.entries(counts)) if (!Number.isSafeInteger(count) || checkpoint.phases?.[name]?.nextIndex !== count) issues.push("ROUND_PHASE_COUNT_DRIFT:" + name);
-    if (target.migrationProfile === NEXT_MIGRATION_PROFILE && checkpoint.phases?.continuationEvidence?.quarantined !== 0) issues.push('ROUND_CONTINUATION_IMPORT_INCOMPLETE');
+    if (target.migrationProfile === NEXT_MIGRATION_PROFILE) {
+      if (checkpoint.phases?.continuationEvidence?.quarantined !== 0) issues.push('ROUND_CONTINUATION_IMPORT_INCOMPLETE');
+      if (['users','accounts','orders'].some(name=>{
+        const domain=expected?.dataset?.domains?.[name];
+        return !Number.isSafeInteger(domain?.source) || !Number.isSafeInteger(domain?.ready)
+          || domain.isolated!==0 || domain.ready!==domain.source;
+      })) issues.push('ROUND_SELECTED_BUSINESS_REQUIRES_REVIEW');
+      const unsupported=expected?.dataset?.domains?.continuations?.unsupportedStatuses;
+      if (['2','6','7'].some(status=>!Number.isSafeInteger(unsupported?.[status])||unsupported[status]!==0))
+        issues.push('ROUND_LEGACY_CONTINUATION_MANUAL_REVIEW');
+      if (!Array.isArray(checkpoint.quarantine) || checkpoint.quarantine.some(row => ['liabilityDuties','completedCommissions'].includes(row?.domain)))
+        issues.push('ROUND_LEGACY_FINANCE_ASSEMBLY_REQUIRES_REVIEW');
+      const liabilities=expected?.dataset?.domains?.liabilities?.source;
+      const completedCommissions=checkpoint.fundsSupplement?.pendingCommissionCoverage?.completedDutyCandidates;
+      if (!Number.isSafeInteger(liabilities) || checkpoint.phases?.liabilityDuties?.nextIndex!==liabilities
+          || !Number.isSafeInteger(completedCommissions) || checkpoint.phases?.completedCommissions?.nextIndex!==completedCommissions)
+        issues.push('ROUND_LEGACY_FINANCE_SOURCE_COUNT_DRIFT');
+    }
     if (!Number.isSafeInteger(checkpoint.skinHoldingsPreparation?.isolated)
       || checkpoint.skinHoldingsPreparation.ready + checkpoint.skinHoldingsPreparation.isolated !== expected?.dataset?.domains?.accounts?.ready) issues.push("ROUND_HOLDINGS_DENOMINATOR_DRIFT");
   }

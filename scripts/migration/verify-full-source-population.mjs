@@ -4,7 +4,7 @@ import { existsSync, lstatSync, readFileSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
-import { isExactLegacyRefundRelationship, readVerifiedSourceRows } from './local-source-adapter.mjs';
+import { assertContinuationCommissionCoverage, assertContinuationSourceCoverage, isExactLegacyRefundRelationship, NEXT_CONTINUATION_COMMISSION_POLICY, readVerifiedSourceRows, unsupportedLegacyContinuationStatus } from './local-source-adapter.mjs';
 import { assertCapturedPopulation, directFullDomains, partitionSourceKeys, retainedFullDomains } from './full-source-scope.mjs';
 import { assertSelectedScopeForWrite } from './selected-business-scope.mjs';
 import { writePrivate } from '../local-auth.mjs';
@@ -47,6 +47,9 @@ export async function verifySelectedPopulationFiles({datasetDir,sourceDir,datase
   if(name!=='accounts'&&name!=='orders')assert(d.considered===d.captured&&d.excluded===0&&d.consideredIdsSha256===d.capturedIdsSha256,'SELECTED_SCOPE_NON_ORDER_DOMAIN_EXCLUDED');
  }
  const selected={accounts:new Set(scope.write.accounts),orders:new Set(scope.write.orders)};
+ const verifyContinuationStatus=dataset?.domains?.continuations?.preparedEvidence?.commissionPolicy===NEXT_CONTINUATION_COMMISSION_POLICY;
+ const unsupportedStatuses={'2':0,'6':0,'7':0};
+ const continuationSources={accounts:[],orders:[],pays:[],tradePolicy:[]},continuationCommissions=[];
  const users=new Set(),accounts=new Map(),orders=new Map(),paid=new Set();let missingPaidReference=false;
  for(const name of ['users','accounts','orders','pays']){
   assert(source.files?.[name]&&population.domains?.[name],'SELECTED_SCOPE_SOURCE_DOMAIN_MISSING');
@@ -62,8 +65,14 @@ export async function verifySelectedPopulationFiles({datasetDir,sourceDir,datase
     const source=selected.accounts.has(row.id)?Object.fromEntries(['user_id','no','status','is_delete','default_consume_type','price_tenant',
      'extra_goods_total_price_tenant','deposit_amount','rental_days'].map(field=>[field,row[field]])):undefined;
     accounts.set(row.id,{listed:row.status==='3'&&row.is_delete==='0',source});
+    if(verifyContinuationStatus&&selected.accounts.has(row.id))continuationSources.accounts.push(row);
    }else if(name==='orders'){
     assert(['accounts_id','pay_is','user_id','order_sn'].every(field=>Object.hasOwn(row,field)),'SELECTED_SCOPE_ORDER_FIELDS_MISSING');
+    if(verifyContinuationStatus){
+     assert(['order_status','is_delete'].every(field=>Object.hasOwn(row,field)),'SELECTED_SCOPE_CONTINUATION_FIELDS_MISSING');
+     const status=selected.orders.has(row.id)?unsupportedLegacyContinuationStatus(row):null;if(status)unsupportedStatuses[status]++;
+     if(selected.orders.has(row.id))continuationSources.orders.push(row);
+    }
     orders.set(row.id,{id:row.id,accountId:row.accounts_id,markedPaid:row.pay_is==='1',user_id:row.user_id,order_sn:row.order_sn});
    }else{
     assert(Object.hasOwn(row,'order_type')&&Object.hasOwn(row,'pay_is')&&Object.hasOwn(row,'order_id'),'SELECTED_SCOPE_PAYMENT_FIELDS_MISSING');
@@ -72,6 +81,7 @@ export async function verifySelectedPopulationFiles({datasetDir,sourceDir,datase
      if(typeof row.order_id!=='string'||!row.order_id)missingPaidReference=true;
      else paid.add(row.order_id);
     }
+    if(verifyContinuationStatus&&row.order_type==='1'&&selected.orders.has(row.order_id))continuationSources.pays.push(row);
    }
   });
   const d=population.domains[name];
@@ -140,7 +150,18 @@ export async function verifySelectedPopulationFiles({datasetDir,sourceDir,datase
   refundParents.retainedOrder++;
  });
  assert(refundParents.captured===source.files.refunds.rows&&population.domains.refunds.capturedIdsSha256===refundDigest.digest('hex'),'SELECTED_SCOPE_CAPTURE_DIGEST_MISMATCH');
- return {status:'SELECTED_SCOPE_SOURCE_AND_INPUT_VERIFIED_TARGET_NOT_RUN',...result,accountSnapshots,refundParents,sourceConnections:0,targetConnections:0,targetWrites:0};
+ if(verifyContinuationStatus){
+  assert.deepEqual(dataset.domains.continuations.unsupportedStatuses,unsupportedStatuses,'SELECTED_SCOPE_CONTINUATION_STATUS_DRIFT');
+  assert(source.files?.tradePolicy&&source.files?.distributionOrders,'SELECTED_SCOPE_CONTINUATION_SOURCES_MISSING');
+  await readRows(sourceDir,source.files.tradePolicy,row=>continuationSources.tradePolicy.push(row));
+  await readRows(sourceDir,source.files.distributionOrders,row=>{if(selected.orders.has(row.order_id))continuationCommissions.push(row);});
+  const continuations=[];
+  if(dataset.files?.continuations)await readRows(datasetDir,dataset.files.continuations,row=>continuations.push(row));
+  assertContinuationSourceCoverage(continuations,continuationSources);
+  assertContinuationCommissionCoverage(continuations,continuationCommissions,dataset.sourceRef);
+ }
+ return {status:'SELECTED_SCOPE_SOURCE_AND_INPUT_VERIFIED_TARGET_NOT_RUN',...result,accountSnapshots,refundParents,
+  ...(verifyContinuationStatus?{unsupportedContinuations:{...unsupportedStatuses,total:Object.values(unsupportedStatuses).reduce((a,b)=>a+b,0)}}:{}),sourceConnections:0,targetConnections:0,targetWrites:0};
 }
 export async function verifyPopulationFiles({datasetDir,sourceDir,dataset,source,readRows=checkedRows}){
  const expected=assertCapturedPopulation(dataset,source),keys={},ready={},isolated={},retained={};
