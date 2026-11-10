@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import test from 'node:test';
 import { assertInitialDatabaseReadback } from './install-round07-schema.mjs';
-import { assertInitialTailSeedProof } from './business-initial-tail-seeds.mjs';
+import { loadInitialTailSeedProof } from './business-initial-tail-seeds.mjs';
 
 test('production baseline and full tail reject changed seeds, extra rows and missing comments on isolated PostgreSQL',
   {skip:!process.env.ZZSH_SYNTH_INITIAL_TAIL_PORT},async()=>{
@@ -19,7 +19,9 @@ test('production baseline and full tail reject changed seeds, extra rows and mis
     const journalBytes=read('business/meta/_journal.json'),journal=JSON.parse(journalBytes);
     const proofKey=`initial/seed-contracts/${baseline.baseline}.json`;
     const hashes=Object.fromEntries(journal.entries.map(row=>[`business/${row.tag}.sql`,sha(read(`business/${row.tag}.sql`))]));hashes[proofKey]=sha(read(proofKey));
-    const expected={tables:assertInitialTailSeedProof(baseline,baselineBytes,journalBytes,hashes,JSON.parse(read(proofKey)))};
+    const expected=loadInitialTailSeedProof(migrations,baseline,baselineBytes,journalBytes,hashes);
+    const commentMigrations=journal.entries.filter(row=>row.tag.endsWith('_initial_tail_comments'));
+    assert.equal(commentMigrations.length,1);
     const {Client}=createRequire(import.meta.url)('pg'),client=new Client({host:'127.0.0.1',port:Number(port),database:'zzsh_test_initial_target',user:'postgres',connectionTimeoutMillis:3000});
     await client.connect();let begun=false;
     try{
@@ -31,7 +33,7 @@ test('production baseline and full tail reject changed seeds, extra rows and mis
       await client.query('BEGIN');begun=true;
       await client.query('COMMENT ON COLUMN zzsh_iam.im_support_presence.auth_session_id IS NULL');
       await assert.rejects(assertInitialDatabaseReadback(client,baseline,baselineProof,expected.tables),/SCHEMA_CHINESE_COMMENTS_INCOMPLETE/);
-      await client.query(read('candidates/initial-tail-comments.sql').toString('utf8'));
+      await client.query(read(`business/${commentMigrations[0].tag}.sql`).toString('utf8'));
       const good=await assertInitialDatabaseReadback(client,baseline,baselineProof,expected.tables);
       assert.equal(good.status,'INITIAL_SEEDS_AND_COMMENTS_VERIFIED');assert.equal(good.seedTables,expected.tables?Object.keys(expected.tables).length:0);
       await client.query('SAVEPOINT nonseed_tail');

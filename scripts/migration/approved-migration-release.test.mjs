@@ -5,7 +5,7 @@ import { basename, dirname, join, relative } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import test from 'node:test';
-import { assertApprovedMigrationRelease } from './install-round07-schema.mjs';
+import { assertApprovedMigrationRelease, assertCommittedApiBuild, committedApiBuild } from './install-round07-schema.mjs';
 
 const sha=value=>createHash('sha256').update(value).digest('hex');
 const parent=join(dirname(fileURLToPath(import.meta.url)),'../../tmp');
@@ -63,5 +63,25 @@ test('reviewed commit detects missing, changed, extra migration and mismatched i
   put(root,'scripts/migration/business-initial-tail-seeds.mjs','// changed\n');
   assert.throws(check,/SCHEMA_RELEASE_TOOLS_CHANGED/);
   assert.throws(()=>assertApprovedMigrationRelease(root,'HEAD',hashes(dir)),/SCHEMA_RELEASE_COMMIT_REQUIRED/);
+ }finally{clearFixture(root);}
+});
+
+test('schema installer rejects stale builds and API source outside the approved commit',()=>{
+ mkdirSync(parent,{recursive:true});const root=mkdtempSync(join(parent,'approved-release-test-'));
+ try{
+  git(root,['init','-q']);git(root,['config','core.autocrlf','false']);
+  put(root,'package.json','{"private":true}\n');put(root,'package-lock.json','{}\n');
+  put(root,'tsconfig.base.json','{"compilerOptions":{"target":"ES2022","module":"CommonJS","types":[],"sourceMap":true}}\n');
+  put(root,'apps/api/tsconfig.json','{"extends":"../../tsconfig.base.json","compilerOptions":{"rootDir":".","outDir":"dist"},"include":["src/**/*.ts"]}\n');
+  const source='export const value = 42;\n';put(root,'apps/api/src/example.ts',source);
+  git(root,['add','.']);git(root,['-c','user.name=ZZSH fixture','-c','user.email=fixture@example.invalid','-c','core.hooksPath=disabled-hooks','commit','--no-gpg-sign','-qm','fixture']);
+  const commit=git(root,['rev-parse','HEAD']),build=committedApiBuild(root,commit);
+  assert.deepEqual(Object.keys(build),['example.js']);
+  assert.doesNotThrow(()=>assertCommittedApiBuild(root,commit,build));
+  assert.throws(()=>assertCommittedApiBuild(root,commit,{'example.js':'a'.repeat(64)}),/SCHEMA_RELEASE_API_BUILD_CHANGED/);
+  put(root,'apps/api/src/example.ts','export const value = 43;\n');
+  assert.throws(()=>committedApiBuild(root,commit),/SCHEMA_RELEASE_API_SOURCE_CHANGED/);
+  put(root,'apps/api/src/example.ts',source);put(root,'apps/api/src/extra.ts','export const extra = true;\n');
+  assert.throws(()=>committedApiBuild(root,commit),/SCHEMA_RELEASE_API_SOURCE_UNTRACKED/);
  }finally{clearFixture(root);}
 });

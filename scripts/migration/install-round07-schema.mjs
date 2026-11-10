@@ -80,6 +80,45 @@ export function assertApprovedMigrationRelease(repo,commit,migrationHashes){
   assert.deepEqual(tracked,[...toolPaths].sort(),'SCHEMA_RELEASE_TOOLS_CHANGED');
   git(['diff','--quiet','--no-ext-diff',commit,'--',...toolPaths],'SCHEMA_RELEASE_TOOLS_CHANGED');
 }
+
+/** Re-emit the approved API source in memory so schema installation cannot use a stale build. */
+export function committedApiBuild(repo,commit){
+  assert(validCommit(commit),'SCHEMA_RELEASE_COMMIT_REQUIRED');
+  const git=(args,reason)=>{const result=spawnSync('git',args,{cwd:repo,encoding:'utf8',windowsHide:true,maxBuffer:16*1024*1024});
+    assert(result.status===0,reason);return result.stdout;};
+  const paths=['apps/api/src','apps/api/test','apps/api/tsconfig.json','tsconfig.base.json','package.json','package-lock.json','packages/content'];
+  const verifySource=()=>git(['diff','--quiet','--no-ext-diff',commit,'--',...paths],'SCHEMA_RELEASE_API_SOURCE_CHANGED');
+  verifySource();
+  const tracked=new Set(git(['ls-tree','-r','-z','--name-only',commit,'--',...paths],'SCHEMA_RELEASE_COMMIT_INVALID').split('\0').filter(Boolean));
+  for(const path of ['apps/api/tsconfig.json','tsconfig.base.json','package.json','package-lock.json'])
+    assert(tracked.has(path),'SCHEMA_RELEASE_API_SOURCE_INCOMPLETE');
+  const ts=createRequire(import.meta.url)('typescript'),apiRoot=join(repo,'apps/api'),configPath=join(apiRoot,'tsconfig.json');
+  const configured=ts.readConfigFile(configPath,ts.sys.readFile);
+  assert(!configured.error,'SCHEMA_RELEASE_API_CONFIG_INVALID');
+  const config=ts.parseJsonConfigFileContent(configured.config,ts.sys,apiRoot,undefined,configPath);
+  assert(config.errors.length===0&&config.fileNames.length>0&&!config.options.noEmit,'SCHEMA_RELEASE_API_CONFIG_INVALID');
+  for(const file of config.fileNames){
+    const name=relative(repo,file).replaceAll('\\','/');
+    assert(tracked.has(name),'SCHEMA_RELEASE_API_SOURCE_UNTRACKED');
+  }
+  const sourceOutput=join(apiRoot,'dist','src'),output={};
+  const program=ts.createProgram(config.fileNames,config.options);
+  assert(ts.getPreEmitDiagnostics(program).length===0,'SCHEMA_RELEASE_API_BUILD_FAILED');
+  const emitted=program.emit(undefined,(file,content,bom)=>{
+    const name=relative(sourceOutput,file);
+    if(!name.startsWith('..')&&!isAbsolute(name)&&name.endsWith('.js')){
+      const normalized=name.replaceAll('\\','/');
+      assert(!Object.hasOwn(output,normalized),'SCHEMA_RELEASE_API_BUILD_INVALID');
+      output[normalized]=sha((bom?'\uFEFF':'')+content);
+    }
+  });
+  assert(!emitted.emitSkipped&&Object.keys(output).length>0,'SCHEMA_RELEASE_API_BUILD_FAILED');
+  verifySource();
+  return output;
+}
+export function assertCommittedApiBuild(repo,commit,buildFiles){
+  assert.equal(canonical(committedApiBuild(repo,commit)),canonical(buildFiles),'SCHEMA_RELEASE_API_BUILD_CHANGED');
+}
 function sealedTailSeedProof(baselineName,migrationHashes){
   if(baselineName!==TEST_SERVER_BASELINE)return null;
   const migrations=join(root,'apps/api/migrations'),initial=join(migrations,'initial',baselineName);
@@ -230,7 +269,7 @@ async function main(){
     if(selected!==undefined)assert([LEGACY_BASELINE,TEST_SERVER_BASELINE].includes(selected),'SCHEMA_BASELINE_BINDING_INVALID');
     const tailSeed=registered.migrationProfile===NEXT_MIGRATION_PROFILE?sealedTailSeedProof(selected,sourceMigrations):null;
     const releaseCommit=option('--release-commit');
-    if(tailSeed)assertApprovedMigrationRelease(root,releaseCommit,sourceMigrations);
+    if(tailSeed){assertApprovedMigrationRelease(root,releaseCommit,sourceMigrations);assertCommittedApiBuild(root,releaseCommit,buildFiles);}
     const request={schema:'zzsh.round07-schema-install-request.v1',credentials,credentialsSha256:sha(readFileSync(credentials)),registrySha256:sha(readFileSync(registered.sourceFile)),registrationReceipt:{path:registrationPath,sha256:sha(registrationBytes)},datasetPath:dataset,datasetSha256,apiDist:api,buildFiles,migrationsDigest:sha(canonical(sourceMigrations)),
       ...(selected===undefined?{}:{initialBaseline:selected,initialBaselineManifestSha256:sourceMigrations[`initial/${selected}/manifest.json`]}),
       ...(tailSeed?{initialTailSeedProofSha256:tailSeed.sha256,schemaTools:schemaToolHashes(),releaseCommit}:{}),
@@ -255,7 +294,9 @@ async function main(){
   const sourceMigrations=files(join(root,'apps/api/migrations')),runtimeMigrations=files(resolve(api,'../../migrations'));
   assert(sha(canonical(sourceMigrations))===request.migrationsDigest&&canonical(sourceMigrations)===canonical(runtimeMigrations),'SCHEMA_MIGRATION_FILES_CHANGED');
   const initialBaseline=schemaInitialBaseline(request),initialManifestPath=join(root,'apps/api/migrations/initial',initialBaseline,'manifest.json');
-  if(registered.migrationProfile===NEXT_MIGRATION_PROFILE)assertApprovedMigrationRelease(root,request.releaseCommit,sourceMigrations);
+  if(registered.migrationProfile===NEXT_MIGRATION_PROFILE){
+    assertApprovedMigrationRelease(root,request.releaseCommit,sourceMigrations);assertCommittedApiBuild(root,request.releaseCommit,build);
+  }
   const initialManifestBytes=readFileSync(initialManifestPath),initialManifest=JSON.parse(initialManifestBytes);
   assert(initialManifest.baseline===initialBaseline&&initialManifest.profile==='PRODUCTION'
     &&sourceMigrations[`initial/${initialBaseline}/manifest.json`]===sha(initialManifestBytes)
