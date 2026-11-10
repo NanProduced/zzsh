@@ -159,14 +159,40 @@ test("closing context restores keyboard focus to its trigger", async (t) => {
   t.after(async () => { await act(async () => root.unmount()); rootNode.remove(); });
   await act(async () => { root.render(renderPreview()); });
   await settle();
-  const trigger = rootNode.querySelector('[data-action="toggle-product-context"]');
+  assert.equal(rootNode.querySelector('.support-conversation-heading [data-action="toggle-product-context"]'), null, "the chat header no longer duplicates the order-context entry");
+  const trigger = rootNode.querySelector('.support-composer [data-action="toggle-product-context"]');
+  assert.ok(trigger, "the composer keeps the order-context entry");
+  assert.equal(trigger.getAttribute("aria-label"), "关联订单");
   await act(async () => { trigger.click(); });
   await settle();
+  assert.ok(rootNode.querySelector('.support-context-panel'), "the composer entry still opens the context panel");
   const close = rootNode.querySelector('[data-action="close-product-context"]');
   await act(async () => { close.focus(); close.click(); });
   await settle();
   assert.equal(rootNode.querySelector('[data-action="close-product-context"]'), null);
   assert.equal(browser.document.activeElement === trigger, true, "focus returns to context trigger");
+});
+test("wheel over support chrome is contained while a scrollable message area keeps scrolling", async (t) => {
+  const rootNode = browser.document.createElement("div");
+  browser.document.body.appendChild(rootNode);
+  const root = createRoot(rootNode);
+  t.after(async () => { await act(async () => root.unmount()); rootNode.remove(); });
+  await act(async () => { root.render(renderPreview()); });
+  await settle();
+  const heading = rootNode.querySelector(".support-conversation-heading");
+  const chromeWheel = new browser.Event("wheel", { bubbles: true, cancelable: true });
+  heading.dispatchEvent(chromeWheel);
+  assert.equal(chromeWheel.defaultPrevented, true, "wheel over the chat header must not scroll the page");
+  const viewport = rootNode.querySelector(".support-message-viewport");
+  Object.defineProperty(viewport, "scrollHeight", { configurable: true, value: 800 });
+  Object.defineProperty(viewport, "clientHeight", { configurable: true, value: 300 });
+  const messageWheel = new browser.Event("wheel", { bubbles: true, cancelable: true });
+  viewport.dispatchEvent(messageWheel);
+  assert.equal(messageWheel.defaultPrevented, false, "a scrollable message viewport keeps native scrolling");
+  Object.defineProperty(viewport, "scrollHeight", { configurable: true, value: 100 });
+  const shortWheel = new browser.Event("wheel", { bubbles: true, cancelable: true });
+  viewport.dispatchEvent(shortWheel);
+  assert.equal(shortWheel.defaultPrevented, true, "a non-scrollable message viewport must not chain to the page");
 });
 test("projected image survives a later sender echo without the uploaded URL", () => {
   const rich = messageFromNim({
@@ -605,11 +631,11 @@ test("NIM team notifications use the shared decoder and neutral fallbacks", () =
   assert.equal(unknownMsg.text, "会话信息有变化");
   assert.equal(unknownMsg.notice?.kind, "UNKNOWN");
 
-  // A valid server-normalized field wins over re-decoding the raw attachment.
+  // A valid server-normalized kind wins over re-decoding the raw attachment; its text is client-derived.
   const serverMsg = messageFromNim({
     messageType: 5,
     attachment: { type: 0 },
-    systemNotice: { kind: "TEAM_DISMISSED", text: "会话已解散" },
+    systemNotice: { kind: "TEAM_DISMISSED", text: "任意服务端文案" },
     senderId: "system-1",
     createTime: 1005,
     messageClientId: "server-1",
@@ -618,7 +644,7 @@ test("NIM team notifications use the shared decoder and neutral fallbacks", () =
   assert.equal(serverMsg.text, "会话已解散");
   assert.equal(serverMsg.notice?.kind, "TEAM_DISMISSED");
 
-  // Unknown kinds or non-canonical text are not trusted; the raw attachment still decodes.
+  // Unknown kinds are rejected; the raw attachment still decodes. Server text is not trusted.
   const badKind = messageFromNim({
     messageType: 5,
     attachment: { type: 3 },
@@ -628,7 +654,7 @@ test("NIM team notifications use the shared decoder and neutral fallbacks", () =
     messageClientId: "bad-kind-1",
   }, "user-1");
   assert.equal(badKind?.notice?.kind, "TEAM_UPDATED");
-  const badText = messageFromNim({
+  const mismatchedText = messageFromNim({
     messageType: 5,
     attachment: { type: 1 },
     systemNotice: { kind: "MEMBER_JOINED", text: "伪造文案" },
@@ -636,7 +662,8 @@ test("NIM team notifications use the shared decoder and neutral fallbacks", () =
     createTime: 1007,
     messageClientId: "bad-text-1",
   }, "user-1");
-  assert.equal(badText?.notice?.kind, "MEMBER_LEFT");
+  assert.equal(mismatchedText?.notice?.kind, "MEMBER_JOINED");
+  assert.equal(mismatchedText?.text, "成员已加入会话");
 
   // A normal message must never borrow a system notice.
   const regularWithNotice = messageFromNim({
@@ -671,6 +698,70 @@ test("a Bot welcome keeps team lifecycle notices out of the user thread and dire
   assert.equal(page.host.querySelectorAll(".support-message-marker").length, 0, "Bot coverage hides team-created and member-joined notices");
   assert.match(page.rowsInDirectory()[0].textContent, /欢迎咨询/, "the directory uses the last non-system message");
   assert.doesNotMatch(page.rowsInDirectory()[0].textContent, /群聊已创建|成员已加入会话/);
+});
+
+test("service timeline speaks consultation language and hides team metadata churn", async (t) => {
+  const row = {
+    id: "round-service-notices", threadId: "thread-service-notices", roundId: "round-service-notices", roundSeq: 1, threadState: "ACTIVE",
+    type: "SERVICE", state: "ACTIVE", conversationId: "team-service-notices", messageScopeState: "READY", canSend: true,
+    assignedAdmin: { id: "staff-a", name: "客服 A" }, peerAccountId: "staff-a", updatedAt: "2026-10-30T00:02:00Z",
+  };
+  const message = (clientId, createTime, attachment) => ({
+    messageClientId: clientId, messageServerId: `srv-${clientId}`, conversationId: "team-service-notices",
+    senderId: "system", receiverId: "preview-user", createTime, messageType: 5, attachment,
+  });
+  const history = {
+    "team-service-notices": [
+      message("created", 1_700_000_001_000, { ope: 0 }),
+      message("left", 1_700_000_002_000, { type: 1 }),
+      message("updated", 1_700_000_003_000, { type: 3 }),
+    ],
+  };
+  const page = await mountThreadWorkspace(t, { rows: [row], history });
+  await page.until(() => page.host.querySelector('[data-message-id="srv-created"]'), "service created notice");
+  await page.until(() => page.host.querySelector('[data-message-id="srv-left"]'), "service left notice");
+  const markers = [...page.host.querySelectorAll(".support-message-marker")].map((marker) => marker.textContent).join("\n");
+  assert.match(markers, /咨询已开始/);
+  assert.match(markers, /本轮接待已结束/);
+  assert.doesNotMatch(markers, /群聊已创建|成员已加入会话|成员已离开会话|会话信息有变化|会话信息已更新/);
+  assert.equal(page.host.querySelectorAll(".support-message-marker").length, 2, "team metadata updates stay hidden");
+});
+
+test("service timeline renders member join as agent handoff", async (t) => {
+  const row = {
+    id: "round-service-join", threadId: "thread-service-join", roundId: "round-service-join", roundSeq: 1, threadState: "ACTIVE",
+    type: "SERVICE", state: "ACTIVE", conversationId: "team-service-join", messageScopeState: "READY", canSend: true,
+    assignedAdmin: { id: "staff-a", name: "客服 A" }, peerAccountId: "staff-a", updatedAt: "2026-10-30T00:02:00Z",
+  };
+  const history = {
+    "team-service-join": [{
+      messageClientId: "joined", messageServerId: "srv-joined", conversationId: "team-service-join",
+      senderId: "system", receiverId: "preview-user", createTime: 1_700_000_001_000, messageType: 5, attachment: { type: 0 },
+    }],
+  };
+  const page = await mountThreadWorkspace(t, { rows: [row], history });
+  await page.until(() => page.host.querySelector('[data-message-id="srv-joined"]'), "service joined notice");
+  assert.match(page.host.querySelector(".support-message-marker").textContent, /客服已接入/);
+  assert.doesNotMatch(page.host.querySelector(".support-message-marker").textContent, /成员已加入会话/);
+});
+
+test("complaint timeline starts with complaint wording", async (t) => {
+  const row = {
+    id: "round-complaint-notice", threadId: "thread-complaint-notice", roundId: "round-complaint-notice", roundSeq: 1, threadState: "ACTIVE",
+    type: "COMPLAINT", state: "ACTIVE", conversationId: "team-complaint-notice", messageScopeState: "READY", canSend: true,
+    assignedAdmin: null, peerAccountId: "staff-a", updatedAt: "2026-10-30T00:02:00Z",
+  };
+  const history = {
+    "team-complaint-notice": [{
+      messageClientId: "created", messageServerId: "srv-complaint-created", conversationId: "team-complaint-notice",
+      senderId: "system", receiverId: "preview-user", createTime: 1_700_000_001_000, messageType: 5, attachment: { ope: 0 },
+    }],
+  };
+  const page = await mountThreadWorkspace(t, { rows: [row], history, initialType: "COMPLAINT" });
+  await page.until(() => page.host.querySelector('[data-message-id="srv-complaint-created"]'), "complaint created notice");
+  const marker = page.host.querySelector(".support-message-marker");
+  assert.match(marker.textContent, /投诉已提交/);
+  assert.doesNotMatch(marker.textContent, /群聊已创建/);
 });
 
 test("OrderConversation 本单信息 action appends current order info to draft", async (t) => {

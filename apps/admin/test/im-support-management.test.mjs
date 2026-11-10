@@ -164,6 +164,7 @@ function baseFixture(overrides = {}) {
     messagePages: null,
     messageByConversation: null,
     rounds: null,
+    orderAccess: null,
     auditMessagesStatus: 200,
     takeoverStatus: 200,
     transferTargets: { targets: [{ adminUserId: "admin-b", displayName: "客服 B" }], transferReady: true },
@@ -220,7 +221,13 @@ globalThis.fetch = async (input, init = {}) => {
   }
   if (pathname.endsWith("/im/transfer-targets")) return json(fixture.transferTargets);
   if (pathname.endsWith("/transfer")) return json({ consultation: { ...(fixture.consultations[0] ?? activeConsultation), assignedAdmin: { id: "admin-b", name: "客服 B" } } });
-  if (pathname.endsWith("/im/message-access")) return json({ authorized: true });
+  if (pathname.includes("/im/message-access")) return json({ authorized: true });
+  const orderAccessMatch = /\/orders\/([^/]+)\/im$/.exec(pathname);
+  if (orderAccessMatch) {
+    const id = decodeURIComponent(orderAccessMatch[1] ?? "");
+    const value = fixture.orderAccess?.[id];
+    return value ? json(value) : failure(404);
+  }
   if (pathname.includes("/im/messages")) {
     const cid = url.searchParams.get("conversationId");
     if (fixture.messageByConversation && cid && cid in fixture.messageByConversation) {
@@ -491,9 +498,12 @@ test("patrol lists conversations and opens only a read-only shared transcript", 
   await waitFor(() => /请问订单什么时候发货/.test(rootNode.querySelector(".im-wb-mgmt-chat")?.textContent ?? ""));
   assert.equal(rootNode.querySelector(".im-wb-mgmt-chat textarea"), null, "patrol is read-only: no composer");
   assert.match(rootNode.querySelector(".im-wb-mgmt-chat").textContent, /只读巡视/);
-  assert.match(rootNode.querySelector(".im-wb-mgmt-chat").textContent, /成员已加入会话/, "system notices keep the existing rendering");
+  assert.match(rootNode.querySelector(".im-wb-mgmt-chat").textContent, /客服已接入/, "support notices use the workbench wording");
   assert.match(rootNode.querySelector(".im-wb-mgmt-chat").textContent, /开租确认/, "order stages keep a read-only summary");
   assert.ok(requests.some((request) => request.path.endsWith("/im/messages?conversationId=conv-c1&mode=patrol")), "messages are read through the audit route");
+  await settle();
+  assert.equal(rootNode.querySelector('[data-slot="conversation-map"]'), null, "zero rounds has no rail");
+  assert.equal(rootNode.querySelector(".im-wb-patrol-rounds"), null, "zero rounds has no top round bar");
 
   const takeover = rootNode.querySelector('[data-action="audit-takeover"]');
   assert.equal(takeover, null, "takeover button is removed per owner decision");
@@ -509,6 +519,8 @@ test("patrol lists conversations and opens only a read-only shared transcript", 
   await settle();
   assert.equal(rootNode.querySelector('[data-action="audit-takeover"]'), null);
   assert.match(rootNode.querySelector(".im-wb-mgmt-chat").textContent, /只读巡视/);
+  assert.match(rootNode.querySelector(".im-wb-chat-title").textContent, /整条订单群历史/);
+  assert.equal(rootNode.querySelector('[data-slot="conversation-map"]'), null, "order groups have no round rail");
   assert.ok(requests.some((request) => request.path.endsWith("/im/messages?conversationId=conv-o1&mode=patrol")), "order groups read through type=ORDER");
 });
 
@@ -555,92 +567,243 @@ const patrolMessage = (id, senderId, text, createTime, extra = {}) => ({
 });
 const msgNode = (rootNode, id) => rootNode.querySelector(`.im-wb-msg[data-message-id="${id}"]`);
 const roundsPage = (consultationId, rounds) => ({ contractVersion: "admin-consultation-rounds.v1", consultationId, rounds, nextCursor: null });
-const auditRound = (id, roundSeq, state, name, conversationId) => ({
+const auditRound = (id, roundSeq, state, name, conversationId, createdAt = "2026-10-29T01:00:00.000Z", closedAt = state === "CLOSED" ? new Date(Date.parse(createdAt) + 3_600_000).toISOString() : null) => ({
   id, roundSeq: String(roundSeq), state, assignedAdmin: name ? { name } : null, conversationId,
-  createdAt: "2026-10-29T01:00:00.000Z", updatedAt: "2026-10-29T02:00:00.000Z", lastMessageAt: null,
-  closedAt: state === "CLOSED" ? "2026-10-29T02:00:00.000Z" : null, transferCount: "0",
+  createdAt, updatedAt: "2026-10-29T02:00:00.000Z", lastMessageAt: null,
+  closedAt, transferCount: "0",
 });
-
-test("patrol switches rounds and reads the selected round's own conversation", async (t) => {
-  fixture = baseFixture({
-    conversations: { items: [patrolConversation("rounds", { roundSeq: 2, roundCount: 2, conversationId: "conv-latest" })], nextCursor: null },
-    rounds: { rounds: roundsPage("rounds", [
-      auditRound("rounds", 2, "ACTIVE", "客服 B", "conv-latest"),
-      auditRound("round-old", 1, "CLOSED", "客服 A", "conv-old"),
-    ]) },
-    messageByConversation: {
-      "conv-latest": { messages: [patrolMessage("latest", "user-1", "最近一轮消息", 2000, { conversationId: "conv-latest" })], nextCursor: null },
-      "conv-old": { messages: [patrolMessage("old", "user-1", "旧轮次消息", 1000, { conversationId: "conv-old" })], nextCursor: null },
-    },
+function spyPatrolScroll(t) {
+  const calls = [];
+  const proto = browser.HTMLElement.prototype;
+  const original = proto.scrollIntoView;
+  proto.scrollIntoView = function (options) { calls.push({ element: this, options }); };
+  t.after(() => {
+    if (original) proto.scrollIntoView = original;
+    else delete proto.scrollIntoView;
   });
-  const { rootNode } = await mountManagement(t);
-  await openPatrol(rootNode);
-  await waitFor(() => rootNode.querySelectorAll(".im-wb-mgmt-patrol-list .im-wb-row").length === 1);
-  await act(async () => rootNode.querySelector(".im-wb-mgmt-patrol-list .im-wb-row").click());
-  await waitFor(() => rootNode.querySelectorAll(".im-wb-patrol-rounds button").length === 2);
-  assert.ok(requests.some((request) => request.path.endsWith("/im/consultations/rounds/rounds?limit=20")), "rounds reuse the existing ledger endpoint");
-  const latest = [...rootNode.querySelectorAll(".im-wb-patrol-rounds button")].find((button) => button.textContent.includes("轮次 2"));
-  assert.equal(latest.dataset.active, "true", "the latest round opens by default");
-  assert.match(latest.textContent, /处理中/);
-  assert.match(latest.textContent, /客服 B/);
-  await waitFor(() => rootNode.textContent.includes("最近一轮消息"));
-  const older = [...rootNode.querySelectorAll(".im-wb-patrol-rounds button")].find((button) => button.textContent.includes("轮次 1"));
-  await clickNode(older);
-  await waitFor(() => rootNode.textContent.includes("旧轮次消息"));
-  assert.equal(older.dataset.active, "true");
-  assert.ok(requests.some((request) => request.path.endsWith("/im/messages?conversationId=conv-old&mode=patrol")), "the old round reads its own Team");
-  assert.doesNotMatch(rootNode.textContent, /最近一轮消息/, "the previous round transcript is cleared");
-});
-
-test("patrol shows a round without a conversation instead of borrowing the latest one", async (t) => {
-  fixture = baseFixture({
-    conversations: { items: [patrolConversation("rounds", { roundSeq: 2, roundCount: 2, conversationId: "conv-latest" })], nextCursor: null },
-    rounds: { rounds: roundsPage("rounds", [
-      auditRound("rounds", 2, "ACTIVE", "客服 B", "conv-latest"),
-      auditRound("round-old", 1, "CLOSED", "客服 A", null),
-    ]) },
-    messageByConversation: {
-      "conv-latest": { messages: [patrolMessage("latest", "user-1", "最近一轮消息", 2000, { conversationId: "conv-latest" })], nextCursor: null },
-    },
-  });
-  const { rootNode } = await mountManagement(t);
-  await openPatrol(rootNode);
-  await waitFor(() => rootNode.querySelectorAll(".im-wb-mgmt-patrol-list .im-wb-row").length === 1);
-  await act(async () => rootNode.querySelector(".im-wb-mgmt-patrol-list .im-wb-row").click());
-  await waitFor(() => rootNode.textContent.includes("最近一轮消息"));
-  const older = [...rootNode.querySelectorAll(".im-wb-patrol-rounds button")].find((button) => button.textContent.includes("轮次 1"));
-  const before = requests.length;
-  await clickNode(older);
-  await waitFor(() => /该轮无独立聊天记录\/历史不可用/.test(rootNode.textContent));
-  assert.equal(requests.slice(before).some((request) => request.path.includes("conversationId=conv-old")), false, "a null round sends no history request");
-  assert.doesNotMatch(rootNode.textContent, /最近一轮消息/, "the latest round is not reused as history");
-});
-
-test("patrol drops a late transcript after the round changes", async (t) => {
-  const pending = patrolDeferred();
-  fixture = baseFixture({
-    conversations: { items: [patrolConversation("rounds", { roundSeq: 2, roundCount: 2, conversationId: "conv-latest" })], nextCursor: null },
-    rounds: { rounds: roundsPage("rounds", [
-      auditRound("rounds", 2, "ACTIVE", "客服 B", "conv-latest"),
-      auditRound("round-old", 1, "CLOSED", "客服 A", "conv-old"),
-    ]) },
-    messageByConversation: {
-      "conv-latest": pending.promise,
-      "conv-old": { messages: [patrolMessage("old", "user-1", "旧轮次消息", 1000, { conversationId: "conv-old" })], nextCursor: null },
-    },
-  });
-  const { rootNode } = await mountManagement(t);
-  await openPatrol(rootNode);
-  await waitFor(() => rootNode.querySelectorAll(".im-wb-mgmt-patrol-list .im-wb-row").length === 1);
-  await act(async () => rootNode.querySelector(".im-wb-mgmt-patrol-list .im-wb-row").click());
-  await waitFor(() => rootNode.querySelectorAll(".im-wb-patrol-rounds button").length === 2);
-  const older = [...rootNode.querySelectorAll(".im-wb-patrol-rounds button")].find((button) => button.textContent.includes("轮次 1"));
-  await clickNode(older);
-  await waitFor(() => rootNode.textContent.includes("旧轮次消息"));
-  pending.resolve({ messages: [patrolMessage("late", "user-1", "迟到的最近轮次", 2000, { conversationId: "conv-latest" })], nextCursor: null });
+  return calls;
+}
+const mapTick = (rootNode, seq) => [...rootNode.querySelectorAll('[data-slot="conversation-map-tick"]')]
+  .find((tick) => (tick.getAttribute("aria-label") ?? "").startsWith(`第 ${seq} 轮 ·`));
+async function clickMapTick(rootNode, seq) {
+  const tick = mapTick(rootNode, seq);
+  assert.ok(tick, `round ${seq} map tick exists`);
+  await act(async () => tick.click());
   await settle();
-  assert.doesNotMatch(rootNode.textContent, /迟到的最近轮次/, "a late response cannot overwrite the new round");
-  assert.match(rootNode.textContent, /旧轮次消息/);
+}
+
+test("patrol loads the whole thread and round switches only jump within it", async (t) => {
+  const scrolls = spyPatrolScroll(t);
+  fixture = baseFixture({
+    conversations: { items: [patrolConversation("rounds", { roundSeq: 2, roundCount: 2, conversationId: "conv-thread" })], nextCursor: null },
+    rounds: { rounds: roundsPage("rounds", [
+      auditRound("rounds", 2, "ACTIVE", "客服 B", "conv-thread", "2026-10-29T02:00:00.000Z"),
+      auditRound("round-old", 1, "CLOSED", "客服 A", "conv-thread", "2026-10-29T01:00:00.000Z"),
+    ]) },
+    messageByConversation: {
+      "conv-thread": { messages: [
+        patrolMessage("round-notice", "system", "", Date.parse("2026-10-29T01:05:00.000Z"), { conversationId: "conv-thread", messageType: 5, attachment: { type: 0 } }),
+        patrolMessage("old", "user-1", "旧轮次消息", Date.parse("2026-10-29T01:30:00.000Z"), { conversationId: "conv-thread" }),
+        patrolMessage("latest", "user-1", "最近一轮消息", Date.parse("2026-10-29T02:30:00.000Z"), { conversationId: "conv-thread" }),
+      ], nextCursor: null },
+    },
+  });
+  const { rootNode } = await mountManagement(t);
+  await openPatrol(rootNode);
+  await waitFor(() => rootNode.querySelectorAll(".im-wb-mgmt-patrol-list .im-wb-row").length === 1);
+  await act(async () => rootNode.querySelector(".im-wb-mgmt-patrol-list .im-wb-row").click());
+  await waitFor(() => rootNode.querySelector('[data-slot="conversation-map"]'));
+  assert.ok(requests.some((request) => request.path.endsWith("/im/consultations/rounds/rounds?limit=20")), "rounds reuse the existing ledger endpoint");
+  await waitFor(() => rootNode.textContent.includes("旧轮次消息") && rootNode.textContent.includes("最近一轮消息"));
+  const header = rootNode.querySelector(".im-wb-chat-title span").textContent;
+  assert.match(header, /整条线程历史（共 2 轮）/, "the header keeps the whole-thread context");
+  assert.doesNotMatch(header, /最近第|正在查看第 2 轮历史/, "the round is not repeated as a second status");
+  assert.equal(rootNode.querySelector(".im-wb-patrol-rounds"), null, "there is no top filter-like round bar");
+  const map = rootNode.querySelector('[data-slot="conversation-map"]');
+  const stream = rootNode.querySelector(".im-wb-patrol-stream");
+  const viewportShell = stream.querySelector(".im-wb-stream-wrap");
+  assert.equal(map.parentElement, stream, "the assistant-ui map shares the message viewport container");
+  assert.equal(viewportShell.parentElement, stream, "the message viewport is the rail's sibling, not the chat section");
+  assert.ok(viewportShell.querySelector(".im-wb-mgmt-viewport"), "the rail container also holds the scrolling viewport");
+  assert.match(map.className, /justify-between/, "short threads spread across the rail instead of clustering");
+  const patrolCss = readFileSync(path.join(adminRoot, "src/views/im-support-patrol.css"), "utf8");
+  assert.match(patrolCss, /im-wb-chat>\.im-wb-patrol-stream\{[^}]*flex:1/, "the rail row takes the message-area height");
+  assert.match(patrolCss, /im-wb-patrol-stream>\.im-wb-stream-wrap\{[^}]*flex:1/, "the viewport fills the rest of the rail row");
+  assert.doesNotMatch(patrolCss, /im-wb-patrol-map\{[^}]*position:absolute/, "the map stays in the message-area flow, not the chat section");
+  assert.match(patrolCss, /im-wb-patrol-map\[data-slot="conversation-map"\]\{[^}]*justify-content:space-between/, "the rail spreads ticks with an explicit selector");
+  const ticks = [...rootNode.querySelectorAll('[data-slot="conversation-map-tick"]')];
+  assert.equal(ticks.length, 2, "one tick per loaded round");
+  assert.deepEqual(ticks.map((tick) => tick.getAttribute("aria-label")), [
+    "第 1 轮 · 已结束 · 客服 A",
+    "第 2 轮 · 处理中 · 客服 B",
+  ], "ticks run oldest to newest and name the assignee and state");
+  assert.equal(ticks[1].getAttribute("aria-current"), "true", "the newest round is active by default");
+  assert.equal(ticks[1].getAttribute("data-active"), "", "the component exposes its own active hook");
+  assert.equal(rootNode.querySelectorAll("[data-round-marker]").length, 0, "the message stream has no round separators");
+
+  const before = requests.filter((request) => request.path.includes("/im/messages")).length;
+  await clickMapTick(rootNode, 1);
+  assert.equal(requests.filter((request) => request.path.includes("/im/messages")).length, before, "switching rounds does not refetch history");
+  assert.match(rootNode.textContent, /最近一轮消息/, "the rest of the thread stays visible");
+  assert.equal(mapTick(rootNode, 1).getAttribute("aria-current"), "true", "the clicked tick becomes active");
+  await waitFor(() => msgNode(rootNode, "old")?.classList.contains("im-wb-patrol-round-target"), "the first ordinary message of the round is highlighted");
+  const scrollCall = scrolls.find((call) => call.element.dataset.messageId === "old" && call.options?.block === "center");
+  assert.ok(scrollCall, "the round bubble is scrolled into view");
+  assert.equal(scrollCall.element.classList.contains("im-wb-msg"), false, "the Item wrapper is the scroll target");
+  assert.ok(scrollCall.element.contains(msgNode(rootNode, "old")), "the highlighted bubble belongs to the scrolled item");
+  assert.equal(scrolls.some((call) => call.element.dataset.messageId === "round-notice"), false, "the notice is skipped as a jump target");
+});
+
+test("scrolling the transcript only moves the rail active tick", async (t) => {
+  const scrolls = spyPatrolScroll(t);
+  fixture = baseFixture({
+    conversations: { items: [patrolConversation("sync", { roundSeq: 2, roundCount: 2, conversationId: "conv-sync" })], nextCursor: null },
+    rounds: { sync: roundsPage("sync", [
+      auditRound("sync-2", 2, "ACTIVE", "客服 B", "conv-sync", "2026-10-29T02:00:00.000Z"),
+      auditRound("sync-1", 1, "CLOSED", "客服 A", "conv-sync", "2026-10-29T01:00:00.000Z"),
+    ]) },
+    messageByConversation: {
+      "conv-sync": { messages: [
+        patrolMessage("older", "user-1", "上一轮消息", Date.parse("2026-10-29T01:30:00.000Z"), { conversationId: "conv-sync" }),
+        patrolMessage("newer", "user-1", "最近一轮消息", Date.parse("2026-10-29T02:30:00.000Z"), { conversationId: "conv-sync" }),
+      ], nextCursor: null },
+    },
+  });
+  const { rootNode } = await mountManagement(t);
+  await openPatrol(rootNode);
+  await waitFor(() => rootNode.querySelectorAll(".im-wb-mgmt-patrol-list .im-wb-row").length === 1);
+  await act(async () => rootNode.querySelector(".im-wb-mgmt-patrol-list .im-wb-row").click());
+  await waitFor(() => rootNode.querySelectorAll('[data-slot="conversation-map-tick"]').length === 2);
+  assert.equal(mapTick(rootNode, 2).getAttribute("aria-current"), "true", "the newest round starts active");
+
+  const viewport = rootNode.querySelector(".im-wb-viewport");
+  const rectAt = (top, bottom) => ({ top, bottom, left: 0, right: 0, width: 0, height: bottom - top, x: 0, y: top, toJSON: () => ({}) });
+  Object.defineProperty(viewport, "getBoundingClientRect", { configurable: true, value: () => rectAt(100, 500) });
+  const setMessageRect = (id, top, bottom) => {
+    for (const node of rootNode.querySelectorAll(`[data-message-id="${id}"]`)) {
+      Object.defineProperty(node, "getBoundingClientRect", { configurable: true, value: () => rectAt(top, bottom) });
+    }
+  };
+  setMessageRect("older", 140, 180);
+  setMessageRect("newer", 600, 640);
+  await act(async () => viewport.dispatchEvent(new browser.Event("scroll", { bubbles: true })));
+  await waitFor(() => mapTick(rootNode, 1).getAttribute("aria-current") === "true", "the visible earlier round becomes active");
+  assert.equal(mapTick(rootNode, 2).getAttribute("aria-current"), null);
+
+  setMessageRect("older", -100, -60);
+  setMessageRect("newer", 200, 240);
+  await act(async () => viewport.dispatchEvent(new browser.Event("scroll", { bubbles: true })));
+  await waitFor(() => mapTick(rootNode, 2).getAttribute("aria-current") === "true", "scrolling back activates the newest round");
+  assert.equal(scrolls.length, 0, "scroll sync never triggers a jump");
+});
+
+test("round windows look back before the round row was created", async (t) => {
+  const scrolls = spyPatrolScroll(t);
+  const round1At = Date.parse("2026-11-10T01:39:10.000Z");
+  const round2At = Date.parse("2026-11-10T04:31:38.869Z");
+  const round3At = Date.parse("2026-11-10T06:49:48.966Z");
+  fixture = baseFixture({
+    conversations: { items: [patrolConversation("rounds-real", { roundSeq: 3, roundCount: 3, conversationId: "conv-real" })], nextCursor: null },
+    rounds: { "rounds-real": roundsPage("rounds-real", [
+      auditRound("round-3", 3, "ACTIVE", "客服 C", "conv-real", new Date(round3At).toISOString()),
+      auditRound("round-2", 2, "CLOSED", "客服 B", "conv-real", new Date(round2At).toISOString()),
+      auditRound("round-1", 1, "CLOSED", "客服 A", "conv-real", new Date(round1At).toISOString()),
+    ]) },
+    messageByConversation: {
+      "conv-real": { messages: [
+        patrolMessage("m1", "user-1", "123131", round1At - 1_300, { conversationId: "conv-real" }),
+        patrolMessage("m2", "admin-b", "", round2At - 1_117, { conversationId: "conv-real", card: { kind: "ORDER_OPENING", orderId: "o-1", cardId: "card-1" } }),
+        patrolMessage("m3", "user-1", "2321313", round3At - 1_312, { conversationId: "conv-real" }),
+      ], nextCursor: null },
+    },
+  });
+  const { rootNode } = await mountManagement(t);
+  await openPatrol(rootNode);
+  await waitFor(() => rootNode.querySelectorAll(".im-wb-mgmt-patrol-list .im-wb-row").length === 1);
+  await act(async () => rootNode.querySelector(".im-wb-mgmt-patrol-list .im-wb-row").click());
+  await waitFor(() => rootNode.querySelector('[data-slot="conversation-map"]'));
+  await waitFor(() => rootNode.textContent.includes("2321313"));
+  const hint = () => rootNode.querySelector('.im-wb-patrol-round-note[role="status"]')?.textContent ?? "";
+  const highlighted = (id) => msgNode(rootNode, id)?.classList.contains("im-wb-patrol-round-target") === true;
+  assert.equal(rootNode.querySelectorAll('[data-slot="conversation-map-tick"]').length, 3, "the rail lists all three rounds");
+
+  await clickMapTick(rootNode, 1);
+  await waitFor(() => highlighted("m1"), "round 1 locates its earlier trigger message");
+  assert.equal(hint(), "", "round 1 is an exact match, not a nearest fallback");
+
+  await clickMapTick(rootNode, 2);
+  await waitFor(() => highlighted("m2"), "round 2 locates the associated order card, not the next round's trigger");
+  assert.equal(highlighted("m3"), false, "the next round's trigger never crosses into round 2");
+  assert.equal(hint(), "", "round 2 is an exact match");
+
+  await clickMapTick(rootNode, 3);
+  await waitFor(() => highlighted("m3"), "round 3 locates its own trigger message");
+  assert.equal(highlighted("m2"), false);
+  assert.equal(hint(), "", "round 3 is an exact match");
+  assert.ok(scrolls.some((call) => call.element.dataset.messageId === "m2" && call.options?.block === "center"), "round 2 scrolled its own card");
+});
+
+test("patrol supplements distinct round Teams, merges and deduplicates them", async (t) => {
+  fixture = baseFixture({
+    conversations: { items: [patrolConversation("rounds", { roundSeq: 2, roundCount: 2, conversationId: "conv-latest" })], nextCursor: null },
+    rounds: { rounds: roundsPage("rounds", [
+      auditRound("rounds", 2, "ACTIVE", "客服 B", "conv-latest", "2026-10-29T02:00:00.000Z"),
+      auditRound("round-old", 1, "CLOSED", "客服 A", "conv-old", "2026-10-29T01:00:00.000Z"),
+    ]) },
+    messageByConversation: {
+      "conv-latest": { messages: [
+        patrolMessage("shared", "user-1", "跨轮重复消息", Date.parse("2026-10-29T02:30:00.000Z"), { conversationId: "conv-latest" }),
+        patrolMessage("latest", "user-1", "最近一轮消息", Date.parse("2026-10-29T02:40:00.000Z"), { conversationId: "conv-latest" }),
+      ], nextCursor: null },
+      "conv-old": { messages: [
+        patrolMessage("old", "user-1", "旧轮次消息", Date.parse("2026-10-29T01:30:00.000Z"), { conversationId: "conv-old" }),
+        patrolMessage("shared", "user-1", "跨轮重复消息", Date.parse("2026-10-29T02:30:00.000Z"), { conversationId: "conv-old" }),
+      ], nextCursor: null },
+    },
+  });
+  const { rootNode } = await mountManagement(t);
+  await openPatrol(rootNode);
+  await waitFor(() => rootNode.querySelectorAll(".im-wb-mgmt-patrol-list .im-wb-row").length === 1);
+  await act(async () => rootNode.querySelector(".im-wb-mgmt-patrol-list .im-wb-row").click());
+  await waitFor(() => rootNode.textContent.includes("旧轮次消息"));
+  assert.match(rootNode.textContent, /最近一轮消息/);
+  assert.equal(rootNode.querySelectorAll('.im-wb-msg[data-message-id="shared"]').length, 1, "the same message from both Teams renders once");
+  assert.ok(requests.some((request) => request.path.endsWith("/im/messages?conversationId=conv-latest&mode=patrol")));
+  assert.ok(requests.some((request) => request.path.endsWith("/im/messages?conversationId=conv-old&mode=patrol")), "a different round Team is read as a supplement");
+  assert.equal(rootNode.querySelectorAll('[data-slot="conversation-map-tick"]').length, 2, "merged Teams keep one tick per round");
+  await clickMapTick(rootNode, 1);
+  await waitFor(() => msgNode(rootNode, "old")?.classList.contains("im-wb-patrol-round-target"));
+});
+
+test("a round without its own conversation never blocks readable thread history", async (t) => {
+  const scrolls = spyPatrolScroll(t);
+  fixture = baseFixture({
+    conversations: { items: [patrolConversation("rounds", { roundSeq: 2, roundCount: 2, conversationId: "conv-latest" })], nextCursor: null },
+    rounds: { rounds: roundsPage("rounds", [
+      auditRound("rounds", 2, "ACTIVE", "客服 B", "conv-latest", "2026-10-29T02:00:00.000Z"),
+      auditRound("round-old", 1, "CLOSED", "客服 A", null, "2026-10-29T01:00:00.000Z"),
+    ]) },
+    messageByConversation: {
+      "conv-latest": { messages: [
+        patrolMessage("round-notice", "system", "", Date.parse("2026-10-29T01:30:00.000Z"), { conversationId: "conv-latest", messageType: 5, attachment: { type: 0 } }),
+        patrolMessage("latest", "user-1", "最近一轮消息", Date.parse("2026-10-29T02:30:00.000Z"), { conversationId: "conv-latest" }),
+      ], nextCursor: null },
+    },
+  });
+  const { rootNode } = await mountManagement(t);
+  await openPatrol(rootNode);
+  await waitFor(() => rootNode.querySelectorAll(".im-wb-mgmt-patrol-list .im-wb-row").length === 1);
+  await act(async () => rootNode.querySelector(".im-wb-mgmt-patrol-list .im-wb-row").click());
+  await waitFor(() => rootNode.textContent.includes("最近一轮消息"));
+  const before = requests.length;
+  await clickMapTick(rootNode, 1);
+  assert.doesNotMatch(rootNode.textContent, /该轮无独立聊天记录\/历史不可用/, "the whole thread is still readable");
+  assert.match(rootNode.textContent, /最近一轮消息/);
+  assert.match(rootNode.querySelector('.im-wb-patrol-round-note[role="status"]').textContent, /第 1 轮没有普通消息，已跳到最近一条/);
+  assert.equal(requests.slice(before).some((request) => request.path.includes("conversationId=conv-old")), false, "a null round sends no history request");
+  await waitFor(() => msgNode(rootNode, "latest")?.classList.contains("im-wb-patrol-round-target"));
+  assert.ok(scrolls.some((call) => call.element.dataset.messageId === "latest" && call.options?.block === "center"), "the nearest ordinary message is scrolled into view");
+  assert.equal(scrolls.some((call) => call.element.dataset.messageId === "round-notice"), false, "a notice-only window does not become the jump target");
 });
 
 test("assistant actor and session hosts remount without moving an UNKNOWN or late save into another scope", async t => {
@@ -816,13 +979,14 @@ test("patrol shows projected names, avatars and roles without provider accounts 
   assert.equal(requests.some((request) => request.method !== "GET"), false, "patrol stays read-only");
 });
 
-test("patrol collapses generic team notices and keeps order stages factual without money", async (t) => {
+test("patrol renders support notices as workbench lines and keeps order stages factual without money", async (t) => {
   const at = Date.parse("2026-10-29T02:00:00.000Z");
   fixture = baseFixture({ conversations: { items: [patrolConversation("notices", { conversationId: "conv-notices" })], nextCursor: null } });
   fixture.messages = {
     messages: [
       patrolMessage("n-1", "user-1", "你好", at, { sender: { displayName: "用户甲", avatar: null, role: "USER" } }),
       patrolMessage("n-2", "system", "", at + 1_000, { messageType: 5, attachment: { type: 0 } }),
+      patrolMessage("n-2b", "system", "", at + 1_500, { messageType: 5, attachment: { type: 0 } }),
       patrolMessage("n-3", "system", "", at + 2_000, { messageType: 5, attachment: { type: 3 } }),
       patrolMessage("n-4", "system", "", at + 2_500, { messageType: 5, attachment: { type: 0 }, revoked: true }),
       patrolMessage("card-1", "admin-b", "", at + 3_000, { messageType: 0, card: { kind: "ORDER_OPENING", orderId: "o-1", cardId: "card-1" } }),
@@ -835,19 +999,81 @@ test("patrol collapses generic team notices and keeps order stages factual witho
   await act(async () => rootNode.querySelector(".im-wb-mgmt-patrol-list .im-wb-row").click());
   await waitFor(() => msgNode(rootNode, "card-1"));
 
-  const notices = rootNode.querySelector(".im-wb-patrol-notices");
-  assert.ok(notices, "generic notices are grouped");
-  assert.equal(notices.open, false, "generic notices stay collapsed by default");
-  assert.match(notices.querySelector("summary").textContent, /平台系统通知 · 2 条/);
-  assert.match(notices.textContent, /成员已加入会话/);
-  assert.match(notices.textContent, /会话信息已更新/);
-  assert.equal(rootNode.querySelectorAll(".im-wb-sys").length, 0, "member changes are not promoted to full system rows");
+  assert.equal(rootNode.querySelector(".im-wb-patrol-notices"), null, "there is no collapsed notice block");
+  const notices = [...rootNode.querySelectorAll(".im-wb-sys")];
+  assert.equal(notices.length, 1, "consecutive identical notices collapse to one line");
+  assert.match(notices[0].textContent, /客服已接入/, "support notices use the workbench wording");
+  assert.doesNotMatch(rootNode.textContent, /会话信息已更新/, "TEAM_UPDATED is invisible in support threads");
   assert.match(msgNode(rootNode, "n-4").textContent, /消息已撤回/, "a revoked notice is not resurrected as a generic notice");
 
   const card = msgNode(rootNode, "card-1");
   assert.match(card.textContent, /开租确认/);
   assert.doesNotMatch(card.textContent, /[¥￥]|金额依据待核对|待核对/, "patrol does not invent money facts");
   assert.equal(card.querySelector("a[href*='/orders/']"), null, "patrol does not fabricate a full order card link");
+});
+
+test("patrol renders order stage cards parsed from attachment.raw without write controls", async (t) => {
+  const orderId = "order-7742";
+  const conversationId = "admin-b|2|team-1";
+  const raw = JSON.stringify({ schema: "zzsh.order-card", version: 1, kind: "ORDER_OPENING", orderId, cardId: "card-1" });
+  const conversation = {
+    id: orderId, type: "ORDER", title: "订单群 ZZ261110-000001", userName: "", adminUserId: "admin-b", adminName: "客服 B",
+    state: "ACTIVE", lastMessageAt: "2026-11-10T04:31:38.000Z", conversationId, displayNo: "ZZ261110-000001", gameName: "三角洲行动",
+  };
+  const message = {
+    messageClientId: "order-card-1", messageServerId: "order-card-1", conversationId, senderId: "bot", receiverId: "team-1",
+    createTime: Date.parse("2026-11-10T04:31:37.752Z"), messageType: 100, text: `【开租确认卡】${raw}`, attachment: { raw },
+  };
+  const access = {
+    orderId, displayNo: "ZZ261110-000001", orderStatus: "PAID", assignmentState: "ASSIGNED", teamState: "READY",
+    appId: "synthetic", teamId: "team-1", name: "满配六套", gameName: "三角洲行动", account: { id: "acc-1", title: "满配六套" },
+    viewerAccountId: "admin-b", conversationId, canRead: true, canSend: false,
+    members: [{ platformId: "admin-b", accountId: "admin-b", party: "STAFF", name: "客服 B", avatar: null }],
+    supportEscalation: { firstResponseAt: null, remindDueAt: null, addRound: 0, state: "NOT_STARTED", needsManualReview: false, noEligibleStaff: false },
+    openingState: "DRAFT", openingAcks: { renter: false, owner: false }, openingId: "opening-1", openingVersion: 1,
+  };
+  fixture = baseFixture({
+    conversations: { items: [conversation], nextCursor: null },
+    messageByConversation: { [conversationId]: { messages: [message], nextCursor: null } },
+    orderAccess: { [orderId]: access },
+  });
+  const { rootNode } = await mountManagement(t);
+  await openPatrol(rootNode);
+  await waitFor(() => rootNode.querySelectorAll(".im-wb-mgmt-patrol-list .im-wb-row").length === 1);
+  await act(async () => rootNode.querySelector(".im-wb-mgmt-patrol-list .im-wb-row").click());
+  await waitFor(() => rootNode.querySelector('.order-card[data-kind="ORDER_OPENING"]'), "the stage card is rich");
+  const card = rootNode.querySelector('.order-card[data-kind="ORDER_OPENING"]');
+  assert.equal(card.dataset.orderId, orderId);
+  assert.match(card.textContent, /ZZ261110-000001/);
+  assert.equal(card.querySelector(".order-card-confirm"), null, "patrol never offers a confirmation write");
+  assert.doesNotMatch(rootNode.textContent, /【开租确认卡】|\{"schema"|"version":1/, "raw custom-message text never renders");
+  assert.ok(requests.some((request) => request.path.endsWith(`/orders/${orderId}/im?operation=read`)), "the card reads the authorized order access");
+});
+
+test("an unavailable order access falls back to a readable card label", async (t) => {
+  const orderId = "order-7742";
+  const conversationId = "admin-b|2|team-1";
+  const raw = JSON.stringify({ schema: "zzsh.order-card", version: 1, kind: "ORDER_OPENING", orderId, cardId: "card-1" });
+  const conversation = {
+    id: orderId, type: "ORDER", title: "订单群", userName: "", adminUserId: "admin-b", adminName: "客服 B",
+    state: "ACTIVE", lastMessageAt: "2026-11-10T04:31:38.000Z", conversationId, displayNo: "ZZ261110-000001", gameName: "三角洲行动",
+  };
+  fixture = baseFixture({
+    conversations: { items: [conversation], nextCursor: null },
+    messageByConversation: {
+      [conversationId]: { messages: [{
+        messageClientId: "order-card-1", messageServerId: "order-card-1", conversationId, senderId: "bot", receiverId: "team-1",
+        createTime: Date.parse("2026-11-10T04:31:37.752Z"), messageType: 100, text: `【开租确认卡】${raw}`, attachment: { raw },
+      }], nextCursor: null },
+    },
+  });
+  const { rootNode } = await mountManagement(t);
+  await openPatrol(rootNode);
+  await waitFor(() => rootNode.querySelectorAll(".im-wb-mgmt-patrol-list .im-wb-row").length === 1);
+  await act(async () => rootNode.querySelector(".im-wb-mgmt-patrol-list .im-wb-row").click());
+  await waitFor(() => rootNode.textContent.includes("开租确认"));
+  assert.equal(rootNode.querySelector(".order-card"), null, "no rich card without access");
+  assert.doesNotMatch(rootNode.textContent, /【开租确认卡】|\{"schema"|"version":1/, "the fallback never prints raw JSON");
 });
 
 test("patrol renders reply quotes from the stored server extension", async (t) => {
@@ -1542,13 +1768,19 @@ test("audit parsing tolerates missing fields and builds documented query paths",
       { senderId: "u2", createTime: "bad" },
       { senderId: "u3", createTime: 200, card: { kind: "ORDER_OPENING", orderId: "o1", cardId: "c1" } },
       { senderId: "u4", createTime: 300, text: "quoted", serverExtension: JSON.stringify({ schema: "zzsh.message-reply", version: 1, messageId: "u1-100", senderId: "u1", text: "orig" }) },
+      {
+        senderId: "u5", createTime: 400, messageClientId: "m5", messageType: 100, text: "【开租确认卡】",
+        attachment: { raw: JSON.stringify({ schema: "zzsh.order-card", version: 1, kind: "ORDER_OPENING", orderId: "o2", cardId: "c2" }) },
+      },
     ],
   });
-  assert.equal(messages.messages.length, 3);
+  assert.equal(messages.messages.length, 4);
   assert.equal(messages.messages[0].messageClientId, "u1-100");
   assert.equal(messages.messages[1].card.kind, "ORDER_OPENING");
   assert.equal(messages.messages[2].reply?.messageId, "u1-100");
   assert.equal(messages.messages[2].reply?.text, "orig");
+  assert.equal(messages.messages[3].card?.kind, "ORDER_OPENING");
+  assert.equal(messages.messages[3].card?.orderId, "o2");
 });
 
 test("time filters use Beijing calendar boundaries", () => {

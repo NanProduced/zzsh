@@ -106,7 +106,7 @@ html.dark .support-message[data-self="true"] .support-message-bubble,html[data-t
 .support-attachment { display:flex; align-items:center; gap:6px; max-width:100%; padding:6px 8px; margin-bottom:8px; border:1px dashed var(--color-border-default); border-radius:6px; color:var(--color-text-secondary); font-size:11px; }
 .support-attachment > span { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .support-attachment button { margin-left:auto; border:0; color:var(--color-text-muted); background:transparent; font-size:16px; line-height:1; }
-.support-context-panel { position:absolute; inset:0 0 0 auto; z-index:5; width:min(300px,100%); overflow-y:auto; padding:16px; border-left:1px solid var(--color-border-subtle); background:var(--color-bg-surface); box-shadow:-10px 0 26px color-mix(in srgb,#000 14%,transparent); }
+.support-context-panel { position:absolute; inset:0 0 0 auto; z-index:5; width:min(300px,100%); overflow-y:auto; overscroll-behavior:contain; padding:16px; border-left:1px solid var(--color-border-subtle); background:var(--color-bg-surface); box-shadow:-10px 0 26px color-mix(in srgb,#000 14%,transparent); }
 .support-context-heading { display:flex; align-items:flex-start; justify-content:space-between; gap:10px; min-height:50px; padding-bottom:12px; border-bottom:1px solid var(--color-border-subtle); }
 .support-context-heading > div { display:grid; gap:3px; }
 .support-context-heading strong { font-size:13px; }
@@ -127,7 +127,7 @@ html.dark .support-message[data-self="true"] .support-message-bubble,html[data-t
 @media(max-width:760px) { .support-message-content { padding:18px 10px; } .support-conversation-item { min-height:64px; } }
 @media(max-width:520px) { .support-gate { margin-top:18px; padding:24px; } .support-workspace { margin-top:0; } .support-conversation-heading { padding-inline:13px; } .support-message-content { padding:18px 10px; } .support-message { max-width:90%; } .support-composer-wrap { padding-inline:10px; } .support-composer-status { display:none; } .support-composer-actions { justify-content:flex-end; } .support-facts-bar { padding-inline:10px; } }
 
-.support-dialog-content { position:fixed; z-index:101; inset:50% auto auto 50%; display:flex; flex-direction:column; width:min(660px,calc(100vw - 32px)); height:min(calc(100dvh - 48px),760px); overflow:hidden; transform:translate(-50%,-50%); border:1px solid var(--color-border-default); border-radius:16px; color:var(--color-text-primary); background:var(--color-bg-canvas); box-shadow:var(--shadow-lg); }
+.support-dialog-content { position:fixed; z-index:101; inset:50% auto auto 50%; display:flex; flex-direction:column; width:min(660px,calc(100vw - 32px)); height:min(calc(100dvh - 48px),760px); overflow:hidden; overscroll-behavior:contain; transform:translate(-50%,-50%); border:1px solid var(--color-border-default); border-radius:16px; color:var(--color-text-primary); background:var(--color-bg-canvas); box-shadow:var(--shadow-lg); }
 .support-dialog-content > .order-team-toolbar { flex:none; }
 .support-dialog-content > .support-pane,.support-dialog-content > .order-team-panel { flex:1; min-height:0; min-width:0; }
 .support-dialog-content > .order-team-panel,.support-dialog-content > .support-gate { overflow-y:auto; overscroll-behavior:contain; }
@@ -429,21 +429,17 @@ html.dark .support-kbd,html[data-theme="dark"] .support-kbd,:root:not([data-them
 /* Verified Orders Context Panel */
 .support-verified-orders { display:flex;flex-direction:column;gap:10px;margin-top:14px; }
 .support-verified-orders-hint { font-size:11px;color:var(--color-text-secondary);line-height:1.4; }
-.support-verified-orders-list { display:flex;flex-direction:column;gap:6px;max-height:320px;overflow-y:auto; }
+.support-verified-orders-list { display:flex;flex-direction:column;gap:6px;max-height:320px;overflow-y:auto;overscroll-behavior:contain; }
 .support-verified-order-item { display:flex;flex-direction:column;align-items:flex-start;gap:3px;padding:8px 10px;border-radius:6px;border:1px solid var(--color-border-subtle);background:var(--color-bg-surface);text-align:left;cursor:pointer;transition:border-color .15s ease,background .15s ease; }
 .support-verified-order-item:hover { border-color:var(--color-accent-brand);background:color-mix(in srgb,var(--color-accent-brand-muted) 50%,var(--color-bg-surface)); }
 .support-verified-order-item strong { font-size:12px;font-weight:500;color:var(--color-text-primary);width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap; }
 .support-verified-order-item span { font-size:11px;color:var(--color-text-muted); }
 
-/* Order Popover */
+/* Composer popover */
 .support-brand { display:flex;align-items:center;gap:10px; }
 .support-brand-text { display:flex;flex-direction:column;gap:2px; }
 .support-brand-text .support-connection-state { min-height:unset;padding:2px 8px;font-size:11px; }
-.support-order-popover-content { width:min(340px,calc(100vw - 32px));max-height:340px;overflow-y:auto;padding:12px;border:1px solid var(--color-border-default);border-radius:10px;background:var(--color-bg-surface);box-shadow:var(--shadow-lg);z-index:120; }
 .support-emoji-pop { width:auto;padding:0;border:1px solid var(--color-border-default);border-radius:10px;background:var(--color-bg-surface);box-shadow:var(--shadow-lg);z-index:120; }
-.support-order-popover-header { display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;padding-bottom:6px;border-bottom:1px solid var(--color-border-subtle); }
-.support-order-popover-header strong { font-size:12px;font-weight:600; }
-.support-order-popover-count { font-size:11px;color:var(--color-text-muted); }
 
 /* W4·窄屏：订单群面板把「返回会话/关闭」绝对定位压在群头右上，390px 下两个按钮合计超过给 header
    留的 125px，订单号与阶段 chip 会被压掉。窄屏改成文档流一行，两端对齐，不再遮内容。 */

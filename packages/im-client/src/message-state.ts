@@ -82,11 +82,46 @@ const IM_SYSTEM_NOTICE_TEXT: Record<ImSystemNoticeKind, string> = {
   UNKNOWN: "会话信息有变化",
 };
 
-const IM_SYSTEM_NOTICE_TEXTS = new Set(Object.values(IM_SYSTEM_NOTICE_TEXT));
+const IM_SYSTEM_NOTICE_TEXTS = new Set([
+  ...Object.values(IM_SYSTEM_NOTICE_TEXT),
+  // Support-scoped labels stay recognizable when the server projects them into previews.
+  "咨询已开始", "投诉已提交", "客服已接入", "本轮接待已结束", "咨询已结束", "投诉会话已结束", "会话状态有更新",
+]);
+
+/**
+ * Support conversations should not repeat group-chat jargon. Team metadata updates
+ * are invisible in the support product, so they return null and are not rendered.
+ */
+export type ImSystemNoticeScope = "SERVICE" | "COMPLAINT" | "ORDER";
+const SUPPORT_SYSTEM_NOTICE_TEXT: Record<"SERVICE" | "COMPLAINT", Record<ImSystemNoticeKind, string | null>> = {
+  SERVICE: {
+    TEAM_CREATED: "咨询已开始",
+    MEMBER_JOINED: "客服已接入",
+    MEMBER_LEFT: "本轮接待已结束",
+    TEAM_UPDATED: null,
+    TEAM_DISMISSED: "咨询已结束",
+    UNKNOWN: null,
+  },
+  COMPLAINT: {
+    TEAM_CREATED: "投诉已提交",
+    MEMBER_JOINED: "客服已接入",
+    MEMBER_LEFT: "本轮接待已结束",
+    TEAM_UPDATED: null,
+    TEAM_DISMISSED: "投诉会话已结束",
+    UNKNOWN: null,
+  },
+};
+
+export function imSystemNoticeLabel(kind: ImSystemNoticeKind, scope: ImSystemNoticeScope): string | null {
+  if (scope === "ORDER") return IM_SYSTEM_NOTICE_TEXT[kind];
+  return SUPPORT_SYSTEM_NOTICE_TEXT[scope][kind];
+}
+
 
 /**
  * V2 NIM 通知类型（V2NIMMessageNotificationType）；4xx 是超级群的同名镜像。
- * 成员与群变更必须按 type 归类，不能因为附件同时带 ope 就当成建群。
+ * 0–10 与 401–411 是已文档化的完整集合；新供应商类型落入 UNKNOWN，在咨询/投诉中隐藏，
+ * 需要展示时必须先在此映射，不能依赖兜底文案。
  */
 const IM_SYSTEM_NOTICE_KIND_BY_TYPE: Record<number, ImSystemNoticeKind> = {
   0: "MEMBER_JOINED",
