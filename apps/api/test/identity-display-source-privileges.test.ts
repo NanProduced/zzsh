@@ -22,6 +22,13 @@ test("applyRuntimePrivileges leaves the runtime role with only SELECT on user_id
   const rights = new Set(["SELECT", "INSERT"]); // state after replaying migrations on a fresh DB (default ACL ar)
   const touched: string[] = [];
   const pool = { query: async (sql: string, args: unknown[] = []) => {
+    if (sql.includes("guard_legacy_listing_capture_fact")) return { rows: [{ present: false, guard: false, triggers: 0 }] };
+    if (sql.includes("resume_native_refund_review")) return { rows: [{ present: false, function_present: false, function_ready: false, trigger_ready: false }] };
+    if (sql.includes("guard_settlement_refund_policy")) return { rows: [{ present: false, guard: false, posting_columns: 0 }] };
+    if (sql.includes("guard_opening_auto_confirm_policy")) return { rows: [{ policy: false, generation: false, reminder: false, guard: false, recovery_marker: false, opening_columns: 0 }] };
+    if (sql.includes("user_auth_throttle_event_id_seq")) return { rows: [{ event: false, captcha: false, sequence: false }] };
+    if (sql.includes("post_order_compensation(text)")) return { rows: [{ present: false, executor: false, verifier: false, triggers: 0, functions_safe: false, incident_index: false }] };
+    if (sql.includes("cancel_order_after_start(text,bigint,numeric,numeric,text)")) return { rows: [{ present: false, functions: 0, triggers: 0, executor_safe: false }] };
     if (sql.startsWith("SELECT name,to_regprocedure(name)")) return { rows: (args[0] as string[]).map(name => ({ name, present: false })) };
     if (sql.startsWith("SELECT name,to_regclass")) return { rows: (args[0] as string[]).map(name => ({ name, present: false })) };
     if (sql.includes("count(*)")) return { rows: [{ count: 0, ready: false }] };
