@@ -27,12 +27,16 @@ test('stable seed contract binds the independent reference and immutable 0174 ba
  assert.equal(tables['zzsh_order.opening_auto_confirm_policy'].sha256,initialSeedRowsDigest([opening]));
 });
 
-test('an added non-seed tail reuses the same contract without changing its reference',()=>{
+test('any added tail requires a reviewed target proof before initialization',()=>{
  const entry={idx:journal.entries.length,version:'7',when:journal.entries.at(-1).when+1,tag:String(journal.entries.length).padStart(4,'0')+'_unrelated_shape',breakpoints:true};
  const extended=Buffer.from(JSON.stringify({...journal,entries:[...journal.entries,entry]}));
  const next={...hashes,[`business/${entry.tag}.sql`]:'f'.repeat(64)};
- assert.deepEqual(assertInitialTailSeedProof(baseline,baselineProof,extended,next,proof),proof.tables);
- assert.deepEqual(loadInitialTailSeedProof(root,baseline,baselineProof,extended,next).tables,proof.tables);
+ assert.throws(()=>assertInitialTailSeedProof(baseline,baselineProof,extended,next,proof),/INITIAL_TAIL_TARGET_REVIEW_REQUIRED/);
+ assert.throws(()=>loadInitialTailSeedProof(root,baseline,baselineProof,extended,next),/INITIAL_TAIL_TARGET_REVIEW_REQUIRED/);
+ const chain=[...journal.entries,entry].map(item=>({tag:item.tag,when:item.when,sha256:next[`business/${item.tag}.sql`]}));
+ const reviewed={...proof,reviewedTarget:{method:'INITIAL_PLUS_TAIL_READBACK',sourceCount:chain.length,
+   through:entry.tag,sourceChainSha256:sha(JSON.stringify(chain))}};
+ assert.deepEqual(assertInitialTailSeedProof(baseline,baselineProof,extended,next,reviewed),proof.tables);
 });
 
 test('missing files, changed reference or baseline and malformed journal fail closed',()=>{
@@ -40,6 +44,11 @@ test('missing files, changed reference or baseline and malformed journal fail cl
  assert.throws(()=>assertInitialTailSeedProof(baseline,baselineProof,journalBytes,missing,proof),/INITIAL_TAIL_MIGRATION_MISSING/);
  const changed={...hashes,[`business/${proof.reference.through}.sql`]:'0'.repeat(64)};
  assert.throws(()=>assertInitialTailSeedProof(baseline,baselineProof,journalBytes,changed,proof),/INITIAL_TAIL_REFERENCE_MISMATCH/);
+ const changedTail={...hashes,[`business/${journal.entries.at(-1).tag}.sql`]:'0'.repeat(64)};
+ assert.throws(()=>assertInitialTailSeedProof(baseline,baselineProof,journalBytes,changedTail,proof),/INITIAL_TAIL_TARGET_REVIEW_REQUIRED/);
+ for(const changedTarget of [null,{...proof.reviewedTarget,sourceCount:proof.reviewedTarget.sourceCount-1},
+  {...proof.reviewedTarget,sourceChainSha256:'0'.repeat(64)},{...proof.reviewedTarget,through:proof.reference.through}])
+  assert.throws(()=>assertInitialTailSeedProof(baseline,baselineProof,journalBytes,hashes,{...proof,reviewedTarget:changedTarget}),/INITIAL_TAIL_TARGET_REVIEW_REQUIRED/);
  const reordered=structuredClone(journal);[reordered.entries[178],reordered.entries[179]]=[reordered.entries[179],reordered.entries[178]];
  assert.throws(()=>assertInitialTailSeedProof(baseline,baselineProof,Buffer.from(JSON.stringify(reordered)),hashes,proof),/INITIAL_TAIL_JOURNAL_INVALID/);
  assert.throws(()=>assertInitialTailSeedProof(baseline,Buffer.concat([baselineProof,Buffer.from(' ')]),journalBytes,hashes,proof),/INITIAL_BASELINE_SEED_PROOF_CHANGED/);

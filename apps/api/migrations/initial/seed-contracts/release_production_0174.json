@@ -9,7 +9,13 @@
     "sourceChainSha256": "567319880fc75d5db2588b4c43b3ea8f00edb8e32235f21eda65620db6c89f58",
     "through": "0188_poststart_support_cancel"
   },
-  "evidence": "独立参考库重放至0188；0174生产基线加尾链至0189的目标库与参考库种子内容一致，0189未独立重放。",
+  "reviewedTarget": {
+    "method": "INITIAL_PLUS_TAIL_READBACK",
+    "sourceCount": 195,
+    "sourceChainSha256": "d09daf3acc6eeae0ee8787f689ecdf2c84901436ac57b7d1cd3ed8920dd945f0",
+    "through": "0194_legacy_listed_policy_same_capture"
+  },
+  "evidence": "独立参考库重放至0188；0174生产基线加尾链至0194的隔离目标库与参考种子内容一致，0189–0194未独立重放完整旧链。",
   "tables": {
     "zzsh_iam.admin_permission": { "count": 89, "sha256": "0d985e26301fa485dd5db253c4ac3a26538e2284364bb56f00956e2a0b31369c" },
     "zzsh_iam.admin_role": { "count": 2, "sha256": "c3715dbd1ff7e15f7c371828c3ac10ac59c1eef4ed2e25603dda9afcc4226df9" },

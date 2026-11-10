@@ -37,6 +37,10 @@ export function assertInitialTailSeedProof(baseline,baselineProofBytes,journalBy
     &&reference.sourceCount>=baseline.sourceCount&&reference.sourceCount<=chain.length
     &&reference.sourceChainSha256===sha(JSON.stringify(chain.slice(0,reference.sourceCount)))
     &&reference.through===chain[reference.sourceCount-1]?.tag,'INITIAL_TAIL_REFERENCE_MISMATCH');
+  const target=proof.reviewedTarget;
+  assert(target?.method==='INITIAL_PLUS_TAIL_READBACK'&&target.sourceCount===chain.length
+    &&target.through===chain.at(-1)?.tag&&target.sourceChainSha256===sha(JSON.stringify(chain)),
+    'INITIAL_TAIL_TARGET_REVIEW_REQUIRED');
   const names=Object.keys(proof.tables??{}).sort(),expected=[...POST_TAIL_SEED_TABLES].sort();
   assert.deepEqual(names,expected,'INITIAL_TAIL_SEED_TABLES_MISMATCH');
   for(const name of names){const row=proof.tables[name];assert(Number.isSafeInteger(row?.count)&&row.count>=0&&digest(row.sha256),'INITIAL_TAIL_SEED_PROOF_INVALID');}
