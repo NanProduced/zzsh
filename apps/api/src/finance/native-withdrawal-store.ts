@@ -132,10 +132,15 @@ export async function assertNativePayoutExecutionReady(c:PoolClient){
  const expected=NATIVE_PAYOUT_EXECUTION_SCHEMA,tableNames=expected.tables.map(t=>t.name);
  const e={...expected,triggers:expected.triggers.map(t=>{
   const quals:Array<string|null>=[t.qual];
-  // These two shared ledger guards have exact forward versions for abnormal, prestart and sandbox refund branches.
+  // Shared guards grow only through known, installed finance migrations; compare the exact resulting predicate.
   if(t.table==="zzsh_order.settlement_ledger_entry"&&(t.name==="finance_entry_guard"||t.name==="finance_entry_batch_guard")&&t.qual!==null){
    const prefix=t.qual.slice(0,-1), formal=prefix+" AND (NOT (new.details ? 'abnormalRefundLiabilityId'::text)) AND (NOT (new.details ? 'prestartTerminationId'::text))";
-   quals.push(formal+")",formal+" AND (NOT (new.details ? 'localRefundIntentId'::text)))");
+   const sandbox=formal+" AND (NOT (new.details ? 'localRefundIntentId'::text)))";
+   const append=(value:string,key:string)=>value.slice(0,-1)+` AND (NOT (new.details ? '${key}'::text)))`;
+   const legacy=append(append(sandbox,"legacyRefundCaseId"),"legacyRefundIntentId");
+   const demo=legacy.replace("(NOT (new.details ? 'legacyRefundIntentId'::text))",
+    "((NOT (new.details ? 'legacyRefundIntentId'::text)) AND (NOT (new.details ? 'demoLegacyRefundId'::text)))");
+   quals.push(formal+")",sandbox,legacy,append(legacy,"compensationCaseId"),demo,append(demo,"compensationCaseId"));
   }
   return {...t,quals};
  })};
@@ -179,6 +184,11 @@ export async function assertNativePayoutExecutionReady(c:PoolClient){
    OR t.tgdeferrable IS DISTINCT FROM eg.deferred OR t.tginitdeferred IS DISTINCT FROM eg.deferred
    OR substring(pg_get_triggerdef(t.oid) FROM ' WHEN \\((.*)\\) EXECUTE FUNCTION ') IS DISTINCT FROM eg.quals->>(CASE
     WHEN jsonb_array_length(eg.quals)=1 THEN 0
+    WHEN to_regclass('zzsh_order.legacy_refund_case') IS NOT NULL AND to_regclass('zzsh_order.ecs_demo_legacy_refund') IS NOT NULL
+     AND to_regclass('zzsh_order.order_compensation_posting') IS NOT NULL THEN 6
+    WHEN to_regclass('zzsh_order.legacy_refund_case') IS NOT NULL AND to_regclass('zzsh_order.ecs_demo_legacy_refund') IS NOT NULL THEN 5
+    WHEN to_regclass('zzsh_order.legacy_refund_case') IS NOT NULL AND to_regclass('zzsh_order.order_compensation_posting') IS NOT NULL THEN 4
+    WHEN to_regclass('zzsh_order.legacy_refund_case') IS NOT NULL THEN 3
     WHEN to_regclass('zzsh_order.local_controlled_refund_evidence') IS NOT NULL THEN 2
     WHEN to_regclass('zzsh_order.prestart_termination') IS NOT NULL THEN 1 ELSE 0 END))
  AND NOT EXISTS(SELECT 1 FROM ek WHERE NOT EXISTS(SELECT 1 FROM pg_constraint q WHERE q.conrelid=to_regclass(ek."table") AND q.contype::text=ek.type AND q.convalidated

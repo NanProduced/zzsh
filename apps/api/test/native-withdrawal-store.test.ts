@@ -16,6 +16,10 @@ test("仅两条共享分录守卫接纳精确的正式历史版本，不接纳�
  const base=["intentId","earningId","guaranteeId","legacyDutyId","nativeRefundIntentId","joinpayWithdrawalIntentId"];
  const formal=[...base,"abnormalRefundLiabilityId","prestartTerminationId"];
  const qual=(names:string[])=>`((new.finance_event_id IS NOT NULL)${names.map(n=>` AND (NOT (new.details ? '${n}'::text))`).join("")})`;
+ const legacy=qual([...formal,"localRefundIntentId","legacyRefundCaseId","legacyRefundIntentId"]);
+ const demo=legacy.replace("(NOT (new.details ? 'legacyRefundIntentId'::text))",
+  "((NOT (new.details ? 'legacyRefundIntentId'::text)) AND (NOT (new.details ? 'demoLegacyRefundId'::text)))");
+ const compensation=(value:string)=>value.slice(0,-1)+" AND (NOT (new.details ? 'compensationCaseId'::text)))";
  const c={query:async(sql:string,args:string[])=>{
   if(sql.includes("G4 payout fixed guards")){
    assert.match(sql,/IS DISTINCT FROM eg\.quals->>\(CASE/);
@@ -26,7 +30,7 @@ test("仅两条共享分录守卫接纳精确的正式历史版本，不接纳�
    assert.deepEqual(extended.map(t=>t.name),["finance_entry_guard","finance_entry_batch_guard"]);
    for(const t of triggers){
     if(!extended.includes(t)){assert.deepEqual(t.quals,[t.qual]);continue;}
-    assert.deepEqual(t.quals,[qual(base),qual(formal),qual([...formal,"localRefundIntentId"])]);
+    assert.deepEqual(t.quals,[qual(base),qual(formal),qual([...formal,"localRefundIntentId"]),legacy,compensation(legacy),demo,compensation(demo)]);
     assert(!t.quals.includes(qual(formal.filter(n=>n!=="nativeRefundIntentId"))));
     assert(!t.quals.includes(qual([...formal,"unreviewedPayoutSource"])));
    }
