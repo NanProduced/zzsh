@@ -885,6 +885,14 @@ test("next target cannot be disguised as an old input profile or reservation",as
   assert.throws(()=>assertRoundBootstrap({target,bootstrapEvidence:{}},null,{runtime:{resource,actualResource:resource}}),/ROUND_BOOTSTRAP_TARGET_OR_EVIDENCE_MISMATCH:runtime-profile/);
 });
 
+test("next-round bootstrap never accepts old activated-admin receipts as first-deployment evidence",()=>{
+  const target={oid:'123',nonce:'a'.repeat(24),instance:{host:'127.0.0.1',port:55435,systemIdentifier:'12345'},
+    migrationProfile:'LOCAL_MIGRATION_NEXT_V1',bootstrapReservation:'ROUND07_BOOTSTRAP_RESERVED'};
+  const resource={...target,database:'zzsh_test_regression'};
+  assert.throws(()=>assertRoundBootstrap({target,bootstrapEvidence:{}},{id:'old_boss',sessionId:'old_session'},
+    {runtime:{resource,actualResource:resource},readback:{admins:{allActive:true,twoFactor:true}}}),/ROUND_NEXT_INITIALIZATION_CONTRACT_NOT_READY/);
+});
+
 test("receipt inspection rejects a new capture disguised as the old profile",async()=>{
   const result=await round({action:'inspect-receipt',inspectPreflight:true,v2Capture:true});
   assert.ifError(result.error);assert.equal(result.logs[0].status,'INCOMPLETE');assert.ok(result.logs[0].issues.includes('ROUND_SOURCE_RESTORE_PROOF_UNCONFIRMED'));

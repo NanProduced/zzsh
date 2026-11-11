@@ -219,6 +219,8 @@ export function assertNoWriteRetryLineage({ input, originalInput, originalReceip
 export function assertRoundBootstrap(input, actorProof, evidence) {
   const target = input.target, binding = input.bootstrapEvidence;
   assert(target.migrationProfile !== NEXT_MIGRATION_PROFILE || target.bootstrapReservation === "ROUND07_BOOTSTRAP_RESERVED", "ROUND_BOOTSTRAP_TARGET_OR_EVIDENCE_MISMATCH:schema");
+  // shortcut: old receipts require activated Boss accounts; replace this gate when the first-deployment contract is verified.
+  assert.notEqual(target.migrationProfile, NEXT_MIGRATION_PROFILE, "ROUND_NEXT_INITIALIZATION_CONTRACT_NOT_READY");
     const sameTarget = (value, database = true) => value && String(value.oid ?? value.resourceOid) === target.oid && value.nonce === target.nonce
     && (!database || value.database === "zzsh_test_regression")
     && (!target.instance || JSON.stringify(value.instance ?? null) === JSON.stringify(target.instance));
