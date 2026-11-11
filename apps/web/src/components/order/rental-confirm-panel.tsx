@@ -932,7 +932,7 @@ export function RentalConfirmPanel({
       </> : null}
       <PayoutTerms state={payout} accepted={payoutAccepted} locked onAccept={setPayoutAccepted} />
       <details className="rental-confirm-terms"><summary>费用与适用条款<ChevronDown size={16} aria-hidden="true" /></summary>
-        <p className="rental-confirm-disclosure"><ShieldCheck size={14} aria-hidden="true" />包赔条款：{disclosure ? disclosure.selected ? "已选择" : "未选择" : "本单适用旧版依据（未选择包赔）"}；结算按生效规则的号主侧毛额费率 8% 计算，承担方由结束场景决定（正常由号主、租客自愿提前由租客、号主原因原则上仍由号主）。费用不与押金、平台价差、提前补足混算；实际赔付由客服与运营按约定处理。</p>
+        <p className="rental-confirm-disclosure"><ShieldCheck size={14} aria-hidden="true" />包赔条款：{disclosure ? disclosure.selected ? "已选择" : "未选择" : "本单适用旧版依据（未选择包赔）"}；选择全额包赔时，服务费由号主承担，按结算时号主扣费前收入的 8% 计算。费用不与押金、平台价差、提前补足混算；实际赔付按约定处理。</p>
         {disclosure ? <p className="rental-confirm-terms-meta">披露版本 {disclosure.disclosureVersion} · 与本次确认凭据绑定</p> : null}
         {stage.agreement ? <>
           <button type="button" className="button quiet button--sm" aria-expanded={agreementOpen} onClick={() => setAgreementOpen((open) => !open)}>
