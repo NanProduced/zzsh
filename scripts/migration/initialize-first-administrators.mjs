@@ -135,11 +135,12 @@ async function execute(v,mode){
   const attempt=privatePath(v.attempt),preparedFile=privatePath(join(attempt,'prepared.json'));
   const prepared=pinned({path:preparedFile,sha256:v['prepared-sha']});
   assert(prepared.schema==='zzsh.first-admin-initialization.v1'&&/^initial-admin-[a-f0-9-]{36}$/.test(prepared.requestId??''),'FIRST_ADMIN_ATTEMPT_INVALID');
+  const claim=join(attempt,'claim.json'),resultFile=join(attempt,mode==='initialize'?'result.json':`readback-${randomUUID()}.json`);
+  if(mode==='initialize')assertFirstAdminUnclaimed(claim,resultFile);
   const accountsPath=privatePath(join(attempt,'initial-passwords.json'));
   const readAccounts=()=>{const bytes=readFileSync(accountsPath);assert.equal(sha(bytes),prepared.accountsSha256,'FIRST_ADMIN_PASSWORD_FILE_CHANGED');return JSON.parse(bytes);};
   const input=readAccounts(),bound=verifyRequest(prepared.refs,{source:true}),{request,receipt,registered,credentials,api,migrations,authorizationSeeds,scriptHashes}=bound;
   assert.deepEqual(prepared.target,request.target,'FIRST_ADMIN_TARGET_CHANGED');
-  const claim=join(attempt,'claim.json'),resultFile=join(attempt,mode==='initialize'?'result.json':`readback-${randomUUID()}.json`);
   const preclaimFile=mode==='initialize'?join(attempt,`preclaim-${randomUUID()}.json`):null;
   if(mode==='initialize')assertFirstAdminUnclaimed(claim,resultFile);
   else{

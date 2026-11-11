@@ -1,9 +1,10 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
+import {createHash} from 'node:crypto';
 import {spawnSync} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
 import {existsSync,mkdtempSync,readFileSync,rmdirSync,unlinkSync,writeFileSync} from 'node:fs';
-import {join} from 'node:path';
+import {join,resolve} from 'node:path';
 import {assertFirstAdminAuthorizationSeeds,assertFirstAdminSchemaBinding,assertFirstAdminUnclaimed} from './initialize-first-administrators.mjs';
 import {CANONICAL_AUTHORIZATION_TABLES,initialSeedRowsDigest} from './business-initial-seeds.mjs';
 
@@ -43,6 +44,32 @@ test('first administrator execution preserves an existing claim or result',()=>{
   writeFileSync(result,'COMMIT_UNKNOWN');assert.throws(()=>assertFirstAdminUnclaimed(claim,result),/FIRST_ADMIN_ORIGINAL_ATTEMPT_EXISTS/);
   assert.equal(readFileSync(result,'utf8'),'COMMIT_UNKNOWN');
  }finally{for(const path of [claim,result])if(existsSync(path))unlinkSync(path);rmdirSync(dir);}
+});
+
+const restricted=resolve('E:/zzsh-local-state/restricted');
+test('a claimed original attempt is rejected before credentials or source verification', {skip:!existsSync(restricted)},()=>{
+ const dir=mkdtempSync(join(restricted,'first-admin-claimed-test-')),prepared=join(dir,'prepared.json');
+ const bytes=JSON.stringify({schema:'zzsh.first-admin-initialization.v1',requestId:'initial-admin-01234567-89ab-cdef-0123-456789abcdef'});
+ const digest=createHash('sha256').update(bytes).digest('hex');writeFileSync(prepared,bytes);
+ try{
+  for(const name of ['claim.json','result.json']){
+   const existing=join(dir,name);writeFileSync(existing,'original attempt');
+   const run=spawnSync(process.execPath,[fileURLToPath(new URL('./initialize-first-administrators.mjs',import.meta.url)),
+    '--execute','--attempt',dir,'--prepared-sha',digest],{encoding:'utf8'});
+   assert.equal(run.status,1);assert.equal(JSON.parse(run.stderr).code,'FIRST_ADMIN_ORIGINAL_ATTEMPT_EXISTS');
+   const changed=spawnSync(process.execPath,[fileURLToPath(new URL('./initialize-first-administrators.mjs',import.meta.url)),
+    '--execute','--attempt',dir,'--prepared-sha','0'.repeat(64)],{encoding:'utf8'});
+   assert.equal(changed.status,1);assert.equal(JSON.parse(changed.stderr).outcome,'REVIEW_REQUIRED');
+   assert.notEqual(JSON.parse(changed.stderr).code,'FIRST_ADMIN_ORIGINAL_ATTEMPT_EXISTS');
+   if(name==='claim.json'){
+    const readback=spawnSync(process.execPath,[fileURLToPath(new URL('./initialize-first-administrators.mjs',import.meta.url)),
+     '--readback','--attempt',dir,'--prepared-sha',digest],{encoding:'utf8'});
+    assert.equal(readback.status,1);assert.notEqual(JSON.parse(readback.stderr).code,'FIRST_ADMIN_ORIGINAL_ATTEMPT_EXISTS');
+   }
+   assert.equal(readFileSync(existing,'utf8'),'original attempt');assert.equal(existsSync(join(dir,'initial-passwords.json')),false);
+   unlinkSync(existing);
+  }
+ }finally{for(const name of ['claim.json','result.json','prepared.json']){const path=join(dir,name);if(existsSync(path))unlinkSync(path);}rmdirSync(dir);}
 });
 
 test('first administrator authorization readback rejects changed role and permission seeds',async()=>{
