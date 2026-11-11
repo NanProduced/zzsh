@@ -227,6 +227,8 @@ test("actual-consumption settlement keeps the same posted growth facts and sourc
   const previous=mapAcceptedSettlementToGrowthFacts(snapshot);
   const actual=mapAcceptedSettlementToGrowthFacts({...snapshot,inputSnapshot:{...snapshot.inputSnapshot,schema:"settlement-version-v3"}});
   assert.deepEqual(actual,previous);
+  const fixed=mapAcceptedSettlementToGrowthFacts({...snapshot,inputSnapshot:{...snapshot.inputSnapshot,schema:"settlement-version-v4"}});
+  assert.deepEqual(fixed,previous);
 });
 
 test("a superseded or unposted version is never treated as growth input", () => {

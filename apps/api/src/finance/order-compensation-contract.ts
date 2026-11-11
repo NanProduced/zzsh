@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { canonicalize, normalizeQuote } from '../supply/content-hash';
+import { canonicalize, normalizePricingPolicy, normalizeQuote } from '../supply/content-hash';
 
 export const ORDER_COMPENSATION_OPERATION = 'order.compensation.grant';
 export const ORDER_COMPENSATION_TRIGGER = 'order.compensation.requested';
@@ -33,13 +33,20 @@ const obj = (value: unknown): value is Record<string, unknown> => !!value && typ
 export function nativeCompensationBasis(order: NativeBasis): { selected: boolean; sourceDigest: string } | null {
   try {
     const snapshot = order.quote, personal = snapshot.personal;
-    if (!token.test(order.paymentId) || !positiveCents.test(order.paidCents) || !obj(personal) || !['personal-quote-v2','personal-quote-v3','personal-quote-v4'].includes(String(personal.schema)) ||
+    if (!token.test(order.paymentId) || !positiveCents.test(order.paidCents) || !obj(personal) || !['personal-quote-v2','personal-quote-v3','personal-quote-v4','personal-quote-v5'].includes(String(personal.schema)) ||
       personal.ownerUserId !== order.ownerUserId || personal.userId !== order.renterUserId || personal.accountId !== order.accountId ||
       personal.listingVersionId !== order.listingVersionId || personal.listingHash !== order.contentHash || snapshot.listingHash !== order.contentHash ||
       !obj(personal.ruleRefs) || personal.ruleRefs.releaseId !== order.ruleReleaseId || !obj(personal.fullPayoutDeclaration) ||
       personal.fullPayoutDeclaration.schema !== 'full-payout-declaration-v1' || typeof personal.fullPayoutDeclaration.selected !== 'boolean') return null;
     const names = ['schemaVersion','currency','priceVersionId','ruleReleaseId','mode','lines','resourceTotal','ownerTotal','platformFullProfit','tenantDeposit','publisherBailRequirement','termSeconds','expiryDisclosures','unitAmountsInformational','roundingPolicy','pricingInputs',...(snapshot.schemaVersion === 3 ? ['quoteSource','legacyQuote'] : [])];
     const quote = normalizeQuote(Object.fromEntries(names.map(name => [name, snapshot[name]])));
+    if (personal.schema === 'personal-quote-v5') {
+      const policy = normalizePricingPolicy(personal.pricingPolicy);
+      const settlement = snapshot.settlementPricing;
+      if (quote.schemaVersion !== 4 || quote.ruleReleaseId !== order.ruleReleaseId || policy.pricingModel !== 'FIXED_FEE' || policy.priceVersionId !== quote.priceVersionId
+        || !obj(settlement) || settlement.schema !== 'settlement-pricing-v3' || settlement.priceVersionId !== quote.priceVersionId
+        || settlement.fixedFeeRate !== quote.pricingInputs.commissionRate) return null;
+    } else if (quote.schemaVersion === 4) return null;
     const signed = { ...personal, quote, ...(snapshot.settlementPricing === undefined ? {} : { settlementPricing: snapshot.settlementPricing }) };
     if (typeof snapshot.confirmationDigest !== 'string' || sha(signed) !== snapshot.confirmationDigest) return null;
     return { selected: personal.fullPayoutDeclaration.selected, sourceDigest: sha({ origin:'NATIVE',orderId:order.id,gameId:order.gameId,ownerUserId:order.ownerUserId,paymentId:order.paymentId,paidCents:order.paidCents,confirmationDigest:snapshot.confirmationDigest }) };

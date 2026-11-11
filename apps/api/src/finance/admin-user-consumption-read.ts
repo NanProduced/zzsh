@@ -56,7 +56,7 @@ export const ADMIN_USER_CONSUMPTION_SQL = `WITH source AS MATERIALIZED (
       OR a.disposition IS DISTINCT FROM 'APPLIED' OR a.paid_currency IS DISTINCT FROM 'CNY'
       OR a.currency IS DISTINCT FROM 'CNY' OR a.paid_cents IS DISTINCT FROM a.captured_cents
       THEN 'POSTING_BINDING_INVALID' END,
-    CASE WHEN COALESCE(a.input_snapshot->>'schema','') NOT IN ('settlement-version-v2','settlement-version-v3')
+    CASE WHEN COALESCE(a.input_snapshot->>'schema','') NOT IN ('settlement-version-v2','settlement-version-v3','settlement-version-v4')
       OR a.input_snapshot->>'orderId' IS DISTINCT FROM a.order_id
       OR a.input_snapshot->>'renterUserId' IS DISTINCT FROM a.renter_user_id
       OR a.input_snapshot->>'ownerUserId' IS DISTINCT FROM a.owner_user_id

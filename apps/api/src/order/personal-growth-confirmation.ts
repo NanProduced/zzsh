@@ -1,7 +1,7 @@
 import {createHash} from "node:crypto";
 import {SecurityApiError} from "../auth/security-core";
 import {chooseCompleteOffer,quoteToGrowthOfferPlan,type GrowthOfferPlan,type GrowthTier,type NormalGrowthTier,type OfferBinding} from "../auth/membership-growth";
-import {canonicalize,normalizeQuote,normalizeTime} from "../supply/content-hash";
+import {canonicalize,normalizePricingPolicy,normalizeQuote,normalizeTime} from "../supply/content-hash";
 import {yuanAmountObject} from "../supply/decimal";
 import {applyTotalDiscountToQuote} from "../auth/membership-total-discount";
 import type {InternalQuote} from "../supply/pricing";
@@ -45,9 +45,10 @@ export function selectPersonalGrowthOffer(known:GrowthConfirmationKnown,binding:
   return {quote,benefits,growth,...(selected.payableRatio===undefined?{}:{payableRatio:selected.payableRatio})};
 }
 
-/** Shared frozen-v4 consumer for settlement. It never reselects current benefits or recalculates an old order. */
+/** The frozen growth selection is shared by v4 and the separately price-bound v5. */
 export function frozenPersonalGrowthV4Valid(personal:Record<string,unknown>,expected:{userId:string;ownerUserId:string;accountId:string;listingVersionId:string;ruleReleaseId:string;listingHash:string},depositCents:string):boolean{
-  if(personal.schema!=="personal-quote-v4" || Object.hasOwn(personal,"membership") || personal.userId!==expected.userId || personal.ownerUserId!==expected.ownerUserId || personal.accountId!==expected.accountId || personal.listingVersionId!==expected.listingVersionId || personal.listingHash!==expected.listingHash)return false;
+  if((personal.schema!=="personal-quote-v4" && personal.schema!=="personal-quote-v5") || Object.hasOwn(personal,"membership") || personal.userId!==expected.userId || personal.ownerUserId!==expected.ownerUserId || personal.accountId!==expected.accountId || personal.listingVersionId!==expected.listingVersionId || personal.listingHash!==expected.listingHash)return false;
+  if(personal.schema==="personal-quote-v5")try{if(normalizePricingPolicy(personal.pricingPolicy).pricingModel!=="FIXED_FEE")return false;}catch{return false;}
   const g=personal.membershipGrowth as Record<string,unknown>|undefined,b=g?.binding as Record<string,unknown>|undefined;
   return !!g && g.schema==="membership-growth-v2" && typeof g.policyVersion==="string" && /^[1-9]\d{0,18}$/.test(g.policyVersion) && tiers.includes(g.effectiveTier as Exclude<GrowthTier,"UNKNOWN">)
     && g.policyTier===(g.effectiveTier==="BLACK_GOLD"?"DIAMOND":g.effectiveTier) && ["GROWTH","FRIEND","PRESTIGE"].includes(String(g.selectedSource)) && ["GROWTH","FRIEND","PRESTIGE"].includes(String(g.depositSource))

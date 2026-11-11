@@ -40,6 +40,9 @@ test("unknown metadata, stale asOf, wrong subject and synthetic candidate amount
 test("frozen v4 validation binds separate sources and cannot reclassify old v3 or a mismatched deposit",()=>{
  const s=selectPersonalGrowthOffer(known(),binding,asOf,quote()),expected={...binding,listingHash:"b".repeat(64)},personal={schema:"personal-quote-v4",...expected,membershipGrowth:s.growth};
  assert(frozenPersonalGrowthV4Valid(personal,expected,"0"));assert(!frozenPersonalGrowthV4Valid(personal,expected,"30000"));assert(!frozenPersonalGrowthV4Valid({...personal,schema:"personal-quote-v3"},expected,"0"));assert(!frozenPersonalGrowthV4Valid({...personal,membership:{tier:"STANDARD"}},expected,"0"));
+ const v5={...personal,schema:"personal-quote-v5",pricingPolicy:{schema:"pricing-policy-v1",pricingModel:"FIXED_FEE",scheduleId:"schedule-1",generation:"1",effectiveAt:"2026-10-01T00:00:00Z",priceVersionId:"price-1"}};
+ assert(frozenPersonalGrowthV4Valid(v5,expected,"0"));assert(!frozenPersonalGrowthV4Valid({...v5,pricingPolicy:{...v5.pricingPolicy,pricingModel:"SPREAD"}},expected,"0"));
+ assert(!frozenPersonalGrowthV4Valid({...v5,pricingPolicy:null},expected,"0"));
 });
 test("selected total discount is verified against the original quote before it is frozen",()=>{
  const base=quote("47","0"),discounted=applyTotalDiscountToQuote(base,"0.99");assert(discounted);

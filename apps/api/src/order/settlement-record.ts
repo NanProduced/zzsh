@@ -10,7 +10,7 @@ import { recordAudit, SecurityApiError, type AuditOutcome } from "../auth/securi
 import { assertActiveInTransaction, assertUserContextInTransaction } from "../auth/user-identity";
 import { lockDispatchGate } from "../im/support-dispatch";
 import { CUSTOMER_TIERS, type CustomerTier } from "../supply/delta-rental";
-import { canonicalize, normalizeQuote } from "../supply/content-hash";
+import { canonicalize, normalizePricingPolicy, normalizeQuote } from "../supply/content-hash";
 import { decimalToBigInt, divideToScale, formatDecimalExact, parseNonNegativeDecimal } from "../supply/decimal";
 import { payableCentsFor } from "../auth/membership-total-discount";
 import type { freezeSettlementPricing } from "./personal-confirmation";
@@ -234,7 +234,7 @@ type Basis = {
   fundingPolicyRef: string;
   fundingPolicyVersion: string | null;
   disclosureVersion: string | null;
-  personalQuoteSchema: "personal-quote-v1" | "personal-quote-v2" | "personal-quote-v3" | "personal-quote-v4";
+  personalQuoteSchema: "personal-quote-v1" | "personal-quote-v2" | "personal-quote-v3" | "personal-quote-v4" | "personal-quote-v5";
   listingVersionId: string;
   listingHash: string;
   fullPayoutSelected: boolean;
@@ -286,6 +286,12 @@ function frozenSettlementPricing(order:LockedOrder):ReturnType<typeof freezeSett
     }
   }
   const personal=order.quote.personal;
+  const personalDoc=personal&&typeof personal==="object"&&!Array.isArray(personal)?personal as Record<string,unknown>:null;
+  if (fixed) {
+    if (!personalDoc || personalDoc.schema !== "personal-quote-v5") throw new Error("fixed fee personal quote is invalid");
+    const policy=normalizePricingPolicy(personalDoc.pricingPolicy);
+    if(policy.pricingModel!=="FIXED_FEE" || policy.priceVersionId!==quote.priceVersionId)throw new Error("fixed fee policy binding mismatch");
+  } else if (personalDoc?.schema === "personal-quote-v5") throw new Error("fixed fee personal quote requires a fixed fee basis");
   if(!personal||typeof personal!=="object"||Array.isArray(personal)||typeof order.quote.confirmationDigest!=="string"
     ||createHash("sha256").update(canonicalize({...personal,quote,settlementPricing:basis})).digest("hex")!==order.quote.confirmationDigest)throw new Error("settlement pricing signature mismatch");
   return basis;
@@ -301,7 +307,7 @@ function basisOrReasons(order: LockedOrder, payment: { id: string; amountCents: 
   const membership = personal?.membership as Record<string, unknown> | undefined;
   const guarantee = personal?.guarantee as Record<string, unknown> | undefined;
   const ruleRefs = personal?.ruleRefs as Record<string, unknown> | undefined;
-  const growthV4=personal?.schema==='personal-quote-v4';
+  const growthV4=personal?.schema==='personal-quote-v4'||personal?.schema==='personal-quote-v5';
   if (!personal || !funding || !guarantee || !ruleRefs
     || personal.userId !== order.renterUserId || personal.listingHash !== order.contentHash
     || ruleRefs.releaseId !== order.ruleReleaseId || order.quote.ruleReleaseId !== order.ruleReleaseId
@@ -362,15 +368,15 @@ function basisOrReasons(order: LockedOrder, payment: { id: string; amountCents: 
     fullPayoutSelected = declaration.selected;
     fundingPolicyVersion = funding.fullPayoutPolicyVersion;
     disclosureVersion = funding.disclosureVersion;
-  } else if(personal.schema==='personal-quote-v4'){
+  } else if(personal.schema==='personal-quote-v4'||personal.schema==='personal-quote-v5'){
     const declaration=personal.fullPayoutDeclaration as Record<string,unknown>|undefined,growth=personal.membershipGrowth as Record<string,unknown>|undefined;
     if(!declaration||Object.keys(declaration).sort().join(',')!=='schema,selected'||declaration.schema!=='full-payout-declaration-v1'||typeof declaration.selected!=='boolean'
-      ||Object.keys(personal).sort().join(',')!=='accountId,fullPayoutDeclaration,funding,guarantee,listingHash,listingVersionId,membershipGrowth,ownerUserId,ruleRefs,schema,userId'
+      ||Object.keys(personal).sort().join(',')!==(personal.schema==='personal-quote-v5'?'accountId,fullPayoutDeclaration,funding,guarantee,listingHash,listingVersionId,membershipGrowth,ownerUserId,pricingPolicy,ruleRefs,schema,userId':'accountId,fullPayoutDeclaration,funding,guarantee,listingHash,listingVersionId,membershipGrowth,ownerUserId,ruleRefs,schema,userId')
       ||Object.keys(funding).sort().join(',')!=='baseDepositCents,disclosureVersion,fullPayoutPolicyRef,fullPayoutPolicyVersion,publisherBailRequirementCents,sourceRef,version'
       ||typeof funding.fullPayoutPolicyVersion!=='string'||!funding.fullPayoutPolicyVersion.trim()||typeof funding.disclosureVersion!=='string'||!funding.disclosureVersion.trim()
       ||!growth||Object.keys(growth).sort().join(',')!=='binding,depositBenefitVersion,depositCents,depositEntitlementId,depositSource,depositValidUntil,effectiveTier,entitlementIds,policyTier,policyVersion,pricePlanDigest,schema,selectedBenefitVersion,selectedEntitlementId,selectedSource,selectedValidUntil'
       ||!frozenPersonalGrowthV4Valid(personal,{userId:order.renterUserId,ownerUserId:order.ownerUserId,accountId:order.accountId,listingVersionId:order.listingVersionId,ruleReleaseId:order.ruleReleaseId,listingHash:order.contentHash},order.depositCents))return{reasons:['FULL_PAYOUT_UNKNOWN']};
-    personalQuoteSchema='personal-quote-v4';fullPayoutSelected=declaration.selected;fundingPolicyVersion=funding.fullPayoutPolicyVersion;disclosureVersion=funding.disclosureVersion;
+    personalQuoteSchema=personal.schema;fullPayoutSelected=declaration.selected;fundingPolicyVersion=funding.fullPayoutPolicyVersion;disclosureVersion=funding.disclosureVersion;
   } else {
     return { reasons: ["FULL_PAYOUT_UNKNOWN"] };
   }
@@ -552,7 +558,8 @@ function payloadFor(input: {
 }): Record<string, unknown> {
   const amounts = input.result.amounts;
   return {
-    schema: input.basis.settlementPricing||input.lines.some(line=>line.consumedQuantity!==undefined)?"settlement-version-v3":"settlement-version-v2",
+    schema: input.basis.settlementPricing?.schema==="settlement-pricing-v3" ? "settlement-version-v4"
+      : input.basis.settlementPricing||input.lines.some(line=>line.consumedQuantity!==undefined)?"settlement-version-v3":"settlement-version-v2",
     baseVersionId: input.base.versionId,
     baseVersionNo: input.base.versionNo,
     decisionDigest: input.base.decisionDigest,
@@ -606,6 +613,7 @@ function payloadFor(input: {
       renterRefund: amounts.renterRefund.amount,
       depositRefund: amounts.depositRefund.amount,
       platformContribution: amounts.platformContribution.amount,
+      ...(amounts.platformServiceFee && amounts.membershipDiscount ? { platformServiceFee: amounts.platformServiceFee.amount, membershipDiscount: amounts.membershipDiscount.amount } : {}),
     } : null,
     feeDeducted: false,
   };
@@ -926,7 +934,7 @@ async function view(client: PoolClient, order: LockedOrder): Promise<Command> {
 
 const CONFIRMATION_AMOUNT_FIELDS = [
   "haffConsumedBuyer", "haffConsumedOwner", "itemConsumedBuyer", "itemConsumedOwner", "unusedItemRefund", "unusedHaffRefund",
-  "earlyMakeup", "feeBase", "feeRate", "feeAmount", "feePayer", "ownerGross", "ownerNet", "renterCharge", "renterRefund", "depositRefund",
+  "earlyMakeup", "feeBase", "feeRate", "feeAmount", "feePayer", "ownerGross", "ownerNet", "renterCharge", "renterRefund", "depositRefund", "platformServiceFee", "membershipDiscount",
 ] as const;
 
 function pickFields(value: unknown, fields: readonly string[]): Record<string, unknown> {
@@ -1005,10 +1013,10 @@ function isolateSettlementParty(value: unknown, viewer: SettlementViewer): unkno
   const item = value as Record<string, unknown>;
   const withheld = new Set(viewer === "OWNER" ? [
     "capturedAmount", "capturedCents", "depositAmount", "haffConsumedBuyer", "itemConsumedBuyer", "unusedItemRefund", "unusedHaffRefund",
-    "renterCharge", "renterRefund", "depositRefund", "systemRenterRefund", "proposedRenterRefund", "systemRenterRefundCents", "postedRenterRefundCents", "refund",
+    "renterCharge", "renterRefund", "depositRefund", "systemRenterRefund", "proposedRenterRefund", "systemRenterRefundCents", "postedRenterRefundCents", "refund", "membershipDiscount",
   ] : [
     "haffConsumedOwner", "itemConsumedOwner", "ownerGross", "ownerNet", "systemOwnerNet", "proposedOwnerNet", "proposedOwnerGross", "proposedFullPayoutFee",
-    "systemOwnerNetCents", "postedOwnerNetCents", "owner",
+    "systemOwnerNetCents", "postedOwnerNetCents", "owner", "platformServiceFee",
   ]);
   if (item.feePayer !== viewer) for (const field of ["feeBase", "feeRate", "feeAmount"]) withheld.add(field);
   if ((item.amounts as Record<string, unknown> | null)?.feePayer !== viewer) withheld.add("compensationFeeCents");
@@ -1834,7 +1842,7 @@ async function postReadySettlement(
     const line = raw as { itemId?: unknown; remainingQuantity?: unknown; consumedQuantity?:unknown };
     if (typeof line.itemId !== "string" || typeof line.remainingQuantity !== "string") throw conflict("SETTLEMENT_SNAPSHOT_INVALID");
     if(line.consumedQuantity!==undefined){
-      if(snapshot.schema!=="settlement-version-v3"||typeof line.consumedQuantity!=="string")throw conflict("SETTLEMENT_SNAPSHOT_INVALID");
+      if(!["settlement-version-v3","settlement-version-v4"].includes(String(snapshot.schema))||typeof line.consumedQuantity!=="string")throw conflict("SETTLEMENT_SNAPSHOT_INVALID");
       remaining.push({itemId:line.itemId,quantity:line.consumedQuantity,quantityKind:"CONSUMED"});
     }else remaining.push({ itemId: line.itemId, quantity: line.remainingQuantity });
   }
@@ -1869,6 +1877,12 @@ async function postReadySettlement(
   for (const field of computedFields) {
     if (amountObject(computed[field]) !== amounts[field]) throw conflict("SETTLEMENT_SNAPSHOT_INVALID");
   }
+  if (snapshot.schema === "settlement-version-v4") {
+    if (bill.basis.settlementPricing?.schema !== "settlement-pricing-v3"
+      || !computed.platformServiceFee || !computed.membershipDiscount
+      || amountObject(computed.platformServiceFee) !== amounts.platformServiceFee
+      || amountObject(computed.membershipDiscount) !== amounts.membershipDiscount) throw conflict("SETTLEMENT_SNAPSHOT_INVALID");
+  } else if (bill.basis.settlementPricing?.schema === "settlement-pricing-v3") throw conflict("SETTLEMENT_SNAPSHOT_INVALID");
   if (computed.feeRate !== amounts.feeRate || computed.feePayer !== amounts.feePayer) throw conflict("SETTLEMENT_SNAPSHOT_INVALID");
 
   const captured = exactCents(snapshot.capturedAmount, "CAPTURED_AMOUNT");

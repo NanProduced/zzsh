@@ -116,7 +116,7 @@ test('fixed-fee settlement pricing freezes the original price and rate in the si
  assert.equal(basis.items.find(item=>item.itemId==='extra')!.buyerUnitAmount,'1.23');
  assert.throws(()=>freezeSettlementPricing(base.quote,'0.89',rows,'0.10'));
  const selected=applyTotalDiscountToQuote(base.quote,'0.90');assert(selected);
- const quote=selected.quote,personal={schema:'personal-quote-v5',userId:'renter'};
+ const quote=selected.quote,personal={schema:'personal-quote-v5',userId:'renter',pricingPolicy:{schema:'pricing-policy-v1',pricingModel:'FIXED_FEE',scheduleId:'schedule-1',generation:'1',effectiveAt:'2026-10-01T00:00:00Z',priceVersionId:'fixed-price'}};
  const signed=(settlementPricing:typeof basis)=>createHash('sha256').update(canonicalize({...personal,quote,settlementPricing})).digest('hex');
  const read=load(readFileSync(resolve(tree,path),'utf8'),'frozenSettlementPricing');
  const order={quote:{...quote,personal,settlementPricing:basis,confirmationDigest:signed(basis)}};
@@ -135,6 +135,15 @@ test('fixed-fee settlement pricing freezes the original price and rate in the si
   totalPayableRatio:basis.payableRatio,haff:toLine(haff),items:[toLine(item)]});
  assert.equal(settled.ok,true,settled.reasons.join(','));assert.equal(settled.amounts!.ownerNet.amount,'0.09');
  assert.equal(settled.amounts!.platformServiceFee?.amount,'0.01');assert.equal(settled.amounts!.membershipDiscount?.amount,'0.01');
+ const source=readFileSync(resolve(tree,path),'utf8'),build=load(source,'payloadFor'),project=load(source,'projectSettlementBody');
+ const payload=build({order:{id:'order',renterUserId:'renter',ownerUserId:'owner'},openingId:'opening',openingVersion:1,
+  basis:{settlementPricing:basis},lines:[toLine(haff),toLine(item)],kind:'SYSTEM',endReason:'NORMAL',early:false,result:settled,
+  proposedOwnerNet:null,proposedRenterRefund:null,reason:null,base:{versionId:null,versionNo:0,decisionDigest:'digest',intake:null}});
+ assert.equal(payload.schema,'settlement-version-v4');assert.equal(payload.amounts.platformServiceFee,'0.01');assert.equal(payload.amounts.membershipDiscount,'0.01');
+ const owner=project(payload,'OWNER'),renter=project(payload,'RENTER'),support=project(payload,'SUPPORT');
+ assert.equal(owner.amounts.platformServiceFee,'0.01');assert.equal(owner.amounts.membershipDiscount,undefined);
+ assert.equal(renter.amounts.platformServiceFee,undefined);assert.equal(renter.amounts.membershipDiscount,'0.01');
+ assert.equal(support.amounts.platformServiceFee,'0.01');assert.equal(support.amounts.membershipDiscount,'0.01');
  const changed=structuredClone(basis);changed.fixedFeeRate='0.2';
  assert.throws(()=>read({quote:{...quote,personal,settlementPricing:changed,confirmationDigest:signed(changed)}}));
  const changedHaff=structuredClone(basis);changedHaff.haff.buyerNumerator='999';

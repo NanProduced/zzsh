@@ -37,6 +37,7 @@ export type ContentRuleRefs = {
   agreementDigest: string;
 };
 
+export type PricingPolicyRef = { schema: "pricing-policy-v1"; pricingModel: "SPREAD" | "FIXED_FEE"; scheduleId: string; generation: string; effectiveAt: string; priceVersionId: string };
 export type ContentPayloadInput = {
   schemaVersion: 1 | 2 | 3 | 4;
   accountId: string;
@@ -44,7 +45,7 @@ export type ContentPayloadInput = {
   declaration: ContentDeclaration;
   ruleRefs: ContentRuleRefs;
   quoteValues: Record<string, unknown>;
-  pricingPolicy?: { schema: "pricing-policy-v1"; pricingModel: "SPREAD" | "FIXED_FEE"; scheduleId: string; generation: string; effectiveAt: string; priceVersionId: string };
+  pricingPolicy?: PricingPolicyRef;
   quoteSource?: "LEGACY_QUOTED";
   legacyQuote?: LegacyQuoteProvenance;
 };
@@ -89,6 +90,20 @@ export function normalizeTime(value: string | null): string | null {
   const utc = new Date(match[1]! + match[3]!);
   if (!Number.isFinite(utc.getTime()) || !Number.isFinite(local.getTime()) || local.toISOString().slice(0, 19) !== match[1]) throw new ContentHashError("Invalid time");
   return utc.toISOString().slice(0, 19) + "." + (match[2] ?? "").padEnd(6, "0") + "Z";
+}
+
+export function normalizePricingPolicy(value: unknown): PricingPolicyRef {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new ContentHashError("Invalid pricing policy reference");
+  const policy = value as PricingPolicyRef;
+  fields(policy, ["schema", "pricingModel", "scheduleId", "generation", "effectiveAt", "priceVersionId"]);
+  if (policy.schema !== "pricing-policy-v1" || !["SPREAD", "FIXED_FEE"].includes(policy.pricingModel)
+    || typeof policy.scheduleId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(policy.scheduleId)
+    || typeof policy.priceVersionId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(policy.priceVersionId)
+    || typeof policy.generation !== "string" || !/^[1-9]\d{0,18}$/.test(policy.generation)
+    || typeof policy.effectiveAt !== "string") throw new ContentHashError("Invalid pricing policy reference");
+  const effectiveAt = normalizeTime(policy.effectiveAt);
+  if (!effectiveAt) throw new ContentHashError("Invalid pricing policy reference");
+  return { ...policy, effectiveAt };
 }
 
 export function normalizeQuote(value: Record<string, unknown> | InternalQuote): InternalQuote {
@@ -273,15 +288,11 @@ export function normalizeContentPayload(input: ContentPayloadInput): ContentPayl
   if (input.schemaVersion !== 3 && (input.quoteSource !== undefined || input.legacyQuote !== undefined)) throw new ContentHashError("Legacy source requires content schema 3");
   let pricingPolicy: ContentPayloadInput["pricingPolicy"];
   if (input.pricingPolicy !== undefined) {
-    const policy = input.pricingPolicy;
-    fields(policy, ["schema", "pricingModel", "scheduleId", "generation", "effectiveAt", "priceVersionId"]);
-    if (policy.schema !== "pricing-policy-v1" || !["SPREAD", "FIXED_FEE"].includes(policy.pricingModel)
-      || (input.schemaVersion === 2 ? policy.pricingModel !== "SPREAD" : input.schemaVersion === 4 ? policy.pricingModel !== "FIXED_FEE" : true)
-      || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(policy.scheduleId) || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(policy.priceVersionId)
-      || !/^[1-9]\d{0,18}$/.test(policy.generation)) throw new ContentHashError("Invalid pricing policy reference");
-    const quote = normalizeQuote(input.quoteValues), effectiveAt = normalizeTime(policy.effectiveAt);
-    if (!effectiveAt || quote.priceVersionId !== policy.priceVersionId || quote.ruleReleaseId !== input.ruleRefs.releaseId) throw new ContentHashError("Pricing policy and listing quote disagree");
-    pricingPolicy = { ...policy, effectiveAt };
+    const policy = normalizePricingPolicy(input.pricingPolicy);
+    if (input.schemaVersion === 2 ? policy.pricingModel !== "SPREAD" : input.schemaVersion === 4 ? policy.pricingModel !== "FIXED_FEE" : true) throw new ContentHashError("Invalid pricing policy reference");
+    const quote = normalizeQuote(input.quoteValues);
+    if (quote.priceVersionId !== policy.priceVersionId || quote.ruleReleaseId !== input.ruleRefs.releaseId) throw new ContentHashError("Pricing policy and listing quote disagree");
+    pricingPolicy = policy;
   }
   if (input.schemaVersion === 2 || input.schemaVersion === 4) {
     const choice = normalizeRentalPricing(input.declaration.attributes.rentalPricing);

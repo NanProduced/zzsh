@@ -76,7 +76,7 @@ export type AcceptedSettlementSnapshot = {
   effectiveAtUtc: string;
   recordedAtUtc: string;
   inputSnapshot: {
-    schema: "settlement-version-v2" | "settlement-version-v3";
+    schema: "settlement-version-v2" | "settlement-version-v3" | "settlement-version-v4";
     renterUserId: string;
     ownerUserId: string;
     listingVersionId: string;
@@ -163,7 +163,7 @@ function legalMinimumBillingCents(snapshot: AcceptedSettlementSnapshot): string 
 
 export function mapAcceptedSettlementToGrowthFacts(snapshot: AcceptedSettlementSnapshot): ContributionMapping {
   const unmapped: ContributionMapping["unmapped"] = [];
-  if (snapshot.supersededAt !== null || snapshot.postingId === null || !["settlement-version-v2","settlement-version-v3"].includes(snapshot.inputSnapshot.schema)
+  if (snapshot.supersededAt !== null || snapshot.postingId === null || !["settlement-version-v2","settlement-version-v3","settlement-version-v4"].includes(snapshot.inputSnapshot.schema)
     || snapshot.inputSnapshot.renterUserId !== snapshot.renterUserId) {
     return { facts: [], unmapped: [{ code: "SNAPSHOT_INVALID", detail: "settlement version is not the accepted current posted snapshot" }] };
   }
