@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import {createHash,randomBytes,randomUUID} from 'node:crypto';
-import {closeSync,existsSync,fsyncSync,lstatSync,openSync,readFileSync,writeFileSync} from 'node:fs';
+import {closeSync,fsyncSync,lstatSync,mkdirSync,openSync,readFileSync,writeFileSync} from 'node:fs';
 import Module,{createRequire} from 'node:module';
 import {delimiter,dirname,isAbsolute,join,relative,resolve} from 'node:path';
 import {spawnSync} from 'node:child_process';
@@ -8,6 +8,7 @@ import {fileURLToPath,pathToFileURL} from 'node:url';
 import {parseArgs} from 'node:util';
 import {defaultStore,writePrivate} from '../local-auth.mjs';
 import {writeLoadCheckpoint} from './local-load-checkpoint.mjs';
+import {CANONICAL_AUTHORIZATION_TABLES,initialSeedRowsDigest} from './business-initial-seeds.mjs';
 import {isolatedDistributionBuild,privateDistributionPath} from './local-distribution-qualification-plan.mjs';
 import {assertApprovedMigrationRelease,assertCommittedApiBuild,assertR07RegistrationReceipt,files,validateR07SchemaRequest} from './install-round07-schema.mjs';
 import {FirstAdminTransactionError,readFirstAdministratorsSnapshot,writeFirstAdministrators} from './local-first-admin-transaction.mjs';
@@ -54,6 +55,18 @@ export function assertFirstAdminSchemaBinding(request,receipt){
   assert(hex(receipt.historySha256)&&hex(receipt.journalSha256),'FIRST_ADMIN_SCHEMA_HISTORY_REQUIRED');
 }
 
+/** Prove the installed role and permission seeds still match the sealed release. */
+export async function assertFirstAdminAuthorizationSeeds(client,proof,lockForWrite=false){
+  assert.equal(client.getTransactionStatus?.(),'T','FIRST_ADMIN_AUTHORIZATION_TRANSACTION_REQUIRED');
+  if(lockForWrite)await client.query('LOCK TABLE '+CANONICAL_AUTHORIZATION_TABLES.join(',')+' IN SHARE MODE');
+  for(const name of CANONICAL_AUTHORIZATION_TABLES){
+    const expected=proof?.[name];
+    assert(Number.isSafeInteger(expected?.count)&&expected.count>=0&&hex(expected.sha256),'FIRST_ADMIN_AUTHORIZATION_PROOF_INVALID');
+    const rows=(await client.query(`SELECT to_jsonb(t)-ARRAY['created_at','updated_at'] AS row FROM ${name} t`)).rows.map(item=>item.row);
+    assert(rows.length===expected.count&&initialSeedRowsDigest(rows)===expected.sha256,'FIRST_ADMIN_AUTHORIZATION_SEEDS_CHANGED');
+  }
+}
+
 function verifySource(request,receipt){
   const api=isolatedDistributionBuild(root,request.apiDist);noLinks(api);
   assert.deepEqual(files(api,['.js']),request.buildFiles,'FIRST_ADMIN_BUILD_CHANGED');
@@ -62,7 +75,10 @@ function verifySource(request,receipt){
   assertApprovedMigrationRelease(root,request.releaseCommit,migrations);
   assert.deepEqual(files(resolve(api,'../../migrations')),migrations,'FIRST_ADMIN_MIGRATIONS_CHANGED');
   assert.equal(sha(readFileSync(join(root,'apps/api/migrations/business/meta/_journal.json'))),receipt.journalSha256,'FIRST_ADMIN_JOURNAL_CHANGED');
-  const paths=['scripts/migration/initialize-first-administrators.mjs','scripts/migration/local-first-admin-transaction.mjs',
+  const proofBytes=readFileSync(join(root,'apps/api/migrations/initial/seed-contracts',request.initialBaseline+'.json'));
+  assert.equal(sha(proofBytes),request.initialTailSeedProofSha256,'FIRST_ADMIN_AUTHORIZATION_PROOF_CHANGED');
+  const authorizationSeeds=JSON.parse(proofBytes).tables;
+  const paths=['scripts/migration/initialize-first-administrators.mjs','scripts/migration/local-first-admin-transaction.mjs','scripts/migration/business-initial-seeds.mjs',
     'scripts/migration/install-round07-schema.mjs','scripts/migration/local-target-registry.mjs','scripts/migration/local-load-checkpoint.mjs',
     'scripts/migration/local-distribution-qualification-plan.mjs','scripts/local-auth.mjs'];
   const git=args=>spawnSync('git',args,{cwd:root,encoding:'utf8',windowsHide:true,maxBuffer:1024*1024});
@@ -70,7 +86,7 @@ function verifySource(request,receipt){
   const tracked=git(['ls-tree','-r','--name-only',request.releaseCommit,'--',...paths]);
   assert.equal(tracked.status,0,'FIRST_ADMIN_RELEASE_UNAVAILABLE');const names=new Set(tracked.stdout.split(/\r?\n/));
   assert(paths.every(path=>names.has(path)),'FIRST_ADMIN_SCRIPT_NOT_IN_RELEASE');
-  return{api,migrations,scriptHashes:Object.fromEntries(paths.map(path=>[path,sha(readFileSync(noLinks(join(root,path))))]))};
+  return{api,migrations,authorizationSeeds,scriptHashes:Object.fromEntries(paths.map(path=>[path,sha(readFileSync(noLinks(join(root,path))))]))};
 }
 function verifyRequest(refs,{source=false}={}){
   const request=pinned(refs.schemaRequest),receipt=pinned(refs.schemaReceipt);
@@ -92,7 +108,7 @@ async function prepare(v){
   const refs={schemaRequest:{path:privatePath(v['schema-request']),sha256:v['schema-request-sha']},
     schemaReceipt:{path:privatePath(v['schema-receipt']),sha256:v['schema-receipt-sha']}};
   const {request}=verifyRequest(refs,{source:true}),out=privatePath(v.out,true);
-  assert(!existsSync(out),'FIRST_ADMIN_ATTEMPT_EXISTS');
+  try{mkdirSync(out,{mode:0o700});}catch(error){if(error.code==='EEXIST')throw Error('FIRST_ADMIN_ATTEMPT_EXISTS');throw error;}
   const accountsFile=join(out,'initial-passwords.json');writePrivate(accountsFile,randomAccounts());syncFile(accountsFile);
   const prepared={schema:'zzsh.first-admin-initialization.v1',requestId:'initial-admin-'+randomUUID(),refs,target:request.target,
     accountsSha256:sha(readFileSync(accountsFile)),preparedAt:new Date().toISOString()};
@@ -106,7 +122,7 @@ async function execute(v,mode){
   assert(prepared.schema==='zzsh.first-admin-initialization.v1'&&/^initial-admin-[a-f0-9-]{36}$/.test(prepared.requestId??''),'FIRST_ADMIN_ATTEMPT_INVALID');
   const accountsPath=privatePath(join(attempt,'initial-passwords.json'));
   const readAccounts=()=>{const bytes=readFileSync(accountsPath);assert.equal(sha(bytes),prepared.accountsSha256,'FIRST_ADMIN_PASSWORD_FILE_CHANGED');return JSON.parse(bytes);};
-  const input=readAccounts(),bound=verifyRequest(prepared.refs,{source:true}),{request,receipt,registered,credentials,api,migrations,scriptHashes}=bound;
+  const input=readAccounts(),bound=verifyRequest(prepared.refs,{source:true}),{request,receipt,registered,credentials,api,migrations,authorizationSeeds,scriptHashes}=bound;
   assert.deepEqual(prepared.target,request.target,'FIRST_ADMIN_TARGET_CHANGED');
   const claim=join(attempt,'claim.json'),resultFile=join(attempt,mode==='initialize'?'result.json':`readback-${randomUUID()}.json`);
   if(mode==='initialize'){
@@ -141,6 +157,7 @@ async function execute(v,mode){
     const history=(await client.query('SELECT hash,created_at::text AS "createdAt" FROM zzsh_business_meta.migrations ORDER BY id')).rows;
     const {canonicalize}=require(join(api,'supply/content-hash.js'));
     assert.equal(sha(canonicalize(history)),receipt.historySha256,'FIRST_ADMIN_SCHEMA_HISTORY_CHANGED');
+    await assertFirstAdminAuthorizationSeeds(client,authorizationSeeds,mode==='initialize');
   }
   const fence=async client=>{assertLiveTarget(registered,(await client.query(targetIdentityQuery())).rows[0]);await acquireMigrationTransactionFence(client,registered,fenceEpoch);};
   let failure;

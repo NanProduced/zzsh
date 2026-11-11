@@ -2,7 +2,8 @@ import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {spawnSync} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
-import {assertFirstAdminSchemaBinding} from './initialize-first-administrators.mjs';
+import {assertFirstAdminAuthorizationSeeds,assertFirstAdminSchemaBinding} from './initialize-first-administrators.mjs';
+import {CANONICAL_AUTHORIZATION_TABLES,initialSeedRowsDigest} from './business-initial-seeds.mjs';
 
 function fixture(){
  const target={oid:'42',nonce:'a'.repeat(24),migrationRoleOid:'43',migrationProfile:'LOCAL_MIGRATION_NEXT_V1',
@@ -29,4 +30,25 @@ test('initial admin command without a mode only prints a no-connection plan',()=
  const run=spawnSync(process.execPath,[fileURLToPath(new URL('./initialize-first-administrators.mjs',import.meta.url))],{encoding:'utf8'});
  assert.equal(run.status,0);const result=JSON.parse(run.stdout);
  assert.equal(result.status,'PLAN_ONLY');assert.equal(result.connections,0);assert.equal(result.targetWrites,0);
+});
+
+test('first administrator authorization readback rejects changed role and permission seeds',async()=>{
+ const rows=Object.fromEntries(CANONICAL_AUTHORIZATION_TABLES.map((name,index)=>[name,[{id:index,code:name}]]));
+ const proof=Object.fromEntries(Object.entries(rows).map(([name,value])=>[name,{count:value.length,sha256:initialSeedRowsDigest(value)}]));
+ const calls=[];const client={getTransactionStatus:()=> 'T',query:async sql=>{
+  calls.push(sql);if(sql.startsWith('LOCK TABLE'))return {rows:[]};
+  const name=CANONICAL_AUTHORIZATION_TABLES.find(table=>sql.endsWith('FROM '+table+' t'));
+  assert(name);return {rows:rows[name].map(row=>({row}))};
+ }};
+ await assertFirstAdminAuthorizationSeeds(client,proof,true);
+ assert(calls[0].startsWith('LOCK TABLE '));assert.equal(calls.length,5);
+ calls.length=0;await assertFirstAdminAuthorizationSeeds(client,proof);assert(!calls.some(sql=>sql.startsWith('LOCK TABLE')));
+ for(const changed of [[],[{id:99,code:'extra'}],[...rows['zzsh_iam.admin_role_permission'],{id:99,code:'extra'}]]){
+  const original=rows['zzsh_iam.admin_role_permission'];rows['zzsh_iam.admin_role_permission']=changed;
+  await assert.rejects(assertFirstAdminAuthorizationSeeds(client,proof),/FIRST_ADMIN_AUTHORIZATION_SEEDS_CHANGED/);
+  rows['zzsh_iam.admin_role_permission']=original;
+ }
+ const incomplete={...proof};delete incomplete['zzsh_iam.admin_role'];
+ await assert.rejects(assertFirstAdminAuthorizationSeeds(client,incomplete),/FIRST_ADMIN_AUTHORIZATION_PROOF_INVALID/);
+ await assert.rejects(assertFirstAdminAuthorizationSeeds({...client,getTransactionStatus:()=> 'I'},proof),/FIRST_ADMIN_AUTHORIZATION_TRANSACTION_REQUIRED/);
 });
