@@ -44,6 +44,7 @@ export type ContentPayloadInput = {
   declaration: ContentDeclaration;
   ruleRefs: ContentRuleRefs;
   quoteValues: Record<string, unknown>;
+  pricingPolicy?: { schema: "pricing-policy-v1"; pricingModel: "SPREAD" | "FIXED_FEE"; scheduleId: string; generation: string; effectiveAt: string; priceVersionId: string };
   quoteSource?: "LEGACY_QUOTED";
   legacyQuote?: LegacyQuoteProvenance;
 };
@@ -264,12 +265,24 @@ export function canonicalize(value: unknown, depth = 0): string {
 }
 
 export function normalizeContentPayload(input: ContentPayloadInput): ContentPayloadInput {
-  fields(input, ["schemaVersion", "accountId", "gameId", "declaration", "ruleRefs", "quoteValues", "quoteSource", "legacyQuote"]);
+  fields(input, ["schemaVersion", "accountId", "gameId", "declaration", "ruleRefs", "quoteValues", "quoteSource", "legacyQuote", "pricingPolicy"]);
   fields(input.ruleRefs, ["releaseId", "priceVersionId", "termVersionId", "agreementVersionId", "agreementDigest", "catalogRevision"]);
   if (Object.values(input.ruleRefs).some((value) => typeof value !== "string")) throw new ContentHashError("Invalid rule reference");
   if (input.ruleRefs.catalogRevision !== undefined && !/^(0|[1-9]\d*)$/.test(input.ruleRefs.catalogRevision)) throw new ContentHashError("Invalid catalog revision");
   if (![1, 2, 3, 4].includes(input.schemaVersion) || input.quoteValues.schemaVersion !== input.schemaVersion) throw new ContentHashError("Invalid content schema");
   if (input.schemaVersion !== 3 && (input.quoteSource !== undefined || input.legacyQuote !== undefined)) throw new ContentHashError("Legacy source requires content schema 3");
+  let pricingPolicy: ContentPayloadInput["pricingPolicy"];
+  if (input.pricingPolicy !== undefined) {
+    const policy = input.pricingPolicy;
+    fields(policy, ["schema", "pricingModel", "scheduleId", "generation", "effectiveAt", "priceVersionId"]);
+    if (policy.schema !== "pricing-policy-v1" || !["SPREAD", "FIXED_FEE"].includes(policy.pricingModel)
+      || (input.schemaVersion === 2 ? policy.pricingModel !== "SPREAD" : input.schemaVersion === 4 ? policy.pricingModel !== "FIXED_FEE" : true)
+      || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(policy.scheduleId) || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(policy.priceVersionId)
+      || !/^[1-9]\d{0,18}$/.test(policy.generation)) throw new ContentHashError("Invalid pricing policy reference");
+    const quote = normalizeQuote(input.quoteValues), effectiveAt = normalizeTime(policy.effectiveAt);
+    if (!effectiveAt || quote.priceVersionId !== policy.priceVersionId || quote.ruleReleaseId !== input.ruleRefs.releaseId) throw new ContentHashError("Pricing policy and listing quote disagree");
+    pricingPolicy = { ...policy, effectiveAt };
+  }
   if (input.schemaVersion === 2 || input.schemaVersion === 4) {
     const choice = normalizeRentalPricing(input.declaration.attributes.rentalPricing);
     const quote = normalizeQuote(input.quoteValues);
@@ -283,6 +296,7 @@ export function normalizeContentPayload(input: ContentPayloadInput): ContentPayl
     declaration: normalizeDeclaration(input.declaration, input.schemaVersion),
     ruleRefs: input.ruleRefs,
     quoteValues: normalizeQuote(input.quoteValues) as unknown as Record<string, unknown>,
+    ...(pricingPolicy ? { pricingPolicy } : {}),
     ...(input.schemaVersion === 3 ? { quoteSource: input.quoteSource, legacyQuote: input.legacyQuote } : {}),
   };
 }

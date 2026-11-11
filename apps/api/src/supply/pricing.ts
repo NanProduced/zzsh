@@ -1,4 +1,4 @@
-import { normalizeQuote, type LegacyQuoteProvenance } from "./content-hash";
+import { computeContentHash, normalizeContentPayload, normalizeQuote, type ContentPayloadInput, type LegacyQuoteProvenance } from "./content-hash";
 import { legacyPriceInteger, quoteLegacyHaff } from "./legacy-listed-pricing";
 import { calculateFixedFee, FIXED_FEE_ALGORITHM } from "./fixed-fee";
 import {
@@ -20,6 +20,7 @@ import {
   DELTA_HAFF_RATIO_SCHEMA,
   DELTA_QUOTE_SCHEMA_VERSION,
   DELTA_ROUNDING_POLICY,
+  normalizeRentalPricing,
   projectDeltaQuote,
   resolveDeltaHaffContext,
   type DeltaHaffRule,
@@ -171,6 +172,10 @@ export function computeFixedUnitAmounts(line: PricingLineInput, mode: "SPREAD" |
 }
 
 export function computeDeltaQuote(input: QuoteInput): QuoteResult {
+  return computeDeltaQuoteInternal(input);
+}
+
+function computeDeltaQuoteInternal(input: QuoteInput, retainedFixedSelection?: ReturnType<typeof normalizeRentalPricing>): QuoteResult {
   const reasons = new Set<QuoteReasonCode>();
   const fail = (code: QuoteReasonCode): void => {
     reasons.add(code);
@@ -199,7 +204,7 @@ export function computeDeltaQuote(input: QuoteInput): QuoteResult {
   }
 
   const hasHaffLines = input.lines.some((line) => line.pricingKind === "HAFF_RATIO");
-  const deltaHaff = resolveDeltaHaffContext({ mode: input.mode, haffRule: input.haffRule, hasHaffLines, conditions: input.conditions, customerTier: input.customerTier });
+  const deltaHaff = resolveDeltaHaffContext({ mode: input.mode, haffRule: input.haffRule, hasHaffLines, conditions: input.conditions, customerTier: input.customerTier }, retainedFixedSelection);
   for (const reason of deltaHaff.reasonCodes) fail(reason);
   const { haffSchema, ownerDenominator, buyerDenominator, spreadDelta, conditions } = deltaHaff;
 
@@ -372,6 +377,43 @@ export function computeDeltaQuote(input: QuoteInput): QuoteResult {
       },
     }),
   };
+}
+
+/** The caller must supply the authenticated, published listing read from the database. */
+export function computePublishedFixedFeeQuote(input: QuoteInput, proof: { accountId: string; gameId: string; contentHash: string; payload: ContentPayloadInput }): QuoteResult {
+  const failed: QuoteResult = { quotable: false, reasonCodes: ["RULE_INPUT_MISSING"] };
+  try {
+    if (input.fixedFeeAlgorithm !== FIXED_FEE_ALGORITHM || !proof || !/^[a-f0-9]{64}$/.test(proof.contentHash)) return failed;
+    const payload = normalizeContentPayload(proof.payload);
+    if (payload.schemaVersion !== 4 || payload.accountId !== proof.accountId || payload.gameId !== proof.gameId
+      || computeContentHash(payload) !== proof.contentHash) return failed;
+    const original = normalizeQuote(payload.quoteValues);
+    if (!payload.pricingPolicy || payload.pricingPolicy.pricingModel !== "FIXED_FEE"
+      || original.priceVersionId !== payload.pricingPolicy.priceVersionId || original.ruleReleaseId !== payload.ruleRefs.releaseId) return failed;
+    const accepted = normalizeRentalPricing(payload.declaration.attributes.rentalPricing);
+    const selected = normalizeRentalPricing(input.conditions.rentalPricing);
+    if (accepted.rentalMode !== selected.rentalMode || accepted.ownerRatioB !== selected.ownerRatioB) return failed;
+    const conditions = original.pricingInputs.conditions;
+    if (!conditions || conditions.safeBoxCode !== input.conditions.safeBoxCode || conditions.vitLevel !== String(input.conditions.vitLevel)
+      || conditions.bearLevel !== String(input.conditions.bearLevel) || conditions.termOptionCode !== input.conditions.termOptionCode
+      || input.conditions.termOptionCode !== payload.declaration.termOptionCode) return failed;
+    const attrs = payload.declaration.attributes;
+    if (attrs.safe_box_code !== conditions.safeBoxCode || String(attrs.vit_level ?? attrs.vitLevel) !== conditions.vitLevel
+      || String(attrs.bear_level ?? attrs.bearLevel) !== conditions.bearLevel) return failed;
+    const originalLines = new Map(original.lines.map(line => [line.itemId, line]));
+    const inventory = new Map(payload.declaration.inventory.map(line => [line.itemId, line.quantity]));
+    if (originalLines.size !== original.lines.length || inventory.size !== original.lines.length || input.lines.length !== original.lines.length
+      || new Set(input.lines.map(line => line.itemId)).size !== input.lines.length
+      || input.lines.some(line => {
+        const frozen = originalLines.get(line.itemId);
+        return !frozen || inventory.get(line.itemId) !== frozen.quantity || line.quantity !== frozen.quantity
+          || line.unit !== frozen.unit || line.pricingKind !== frozen.pricingKind
+          || (line.pricingKind === "FIXED_UNIT" && line.unitQuantity !== frozen.unitQuantity);
+      })) return failed;
+    const result = computeDeltaQuoteInternal(input, accepted);
+    return result.quotable && (result.quote.termSeconds !== original.termSeconds
+      || JSON.stringify(result.quote.expiryDisclosures) !== JSON.stringify(original.expiryDisclosures)) ? failed : result;
+  } catch { return failed; }
 }
 
 export const computeQuote = computeDeltaQuote;
