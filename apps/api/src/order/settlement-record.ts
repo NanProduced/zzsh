@@ -17,6 +17,7 @@ import type { freezeSettlementPricing } from "./personal-confirmation";
 import { assertGameScope, conflict, forbidden, invalid, notFound } from "../supply/supply-util";
 import { centsToYuan, lockOrderPartiesInOrder, yuanToCents } from "./order";
 import { fullPayoutServiceFeeCents } from "../supply/full-payout-fee";
+import { fixedFeeAllowsPayableRatio } from "../supply/fixed-fee";
 import { readEarlySettlementDisclosure, recordDocumentAcceptance } from "../legal/legal-documents";
 import { assertSupportOrderAccess } from "./manual-close";
 import { openingConfirmStep, type OpeningConfirmParty } from "./opening-auto-confirm";
@@ -247,8 +248,10 @@ function frozenSettlementPricing(order:LockedOrder):ReturnType<typeof freezeSett
   if(raw===undefined)return null;
   if(!raw||typeof raw!=="object"||Array.isArray(raw))throw new Error("invalid settlement pricing");
   const basis=raw as ReturnType<typeof freezeSettlementPricing>;
-  if(Object.keys(basis).sort().join(",")!=="haff,items,payableRatio,priceVersionId,schema"||!["settlement-pricing-v1","settlement-pricing-v2"].includes(basis.schema)
+  const fixed=basis.schema==="settlement-pricing-v3";
+  if(Object.keys(basis).sort().join(",")!==(fixed?"fixedFeeRate,haff,items,payableRatio,priceVersionId,schema":"haff,items,payableRatio,priceVersionId,schema")||!["settlement-pricing-v1","settlement-pricing-v2","settlement-pricing-v3"].includes(basis.schema)
     ||(basis.schema==="settlement-pricing-v2"&&order.quote.mode!=="PERCENT")
+    ||(fixed&&(order.quote.mode!=="PERCENT"||order.quote.schemaVersion!==4))||(!fixed&&order.quote.schemaVersion===4)
     ||basis.priceVersionId!==order.quote.priceVersionId||typeof basis.payableRatio!=="string"||payableCentsFor(1n,basis.payableRatio)===null
     ||!basis.haff||typeof basis.haff!=="object"||Object.keys(basis.haff).sort().join(",")!=="buyerDenominator,buyerNumerator,itemId,openingQuantity"
     ||!Array.isArray(basis.items)||basis.items.length>63)throw new Error("invalid settlement pricing");
@@ -270,6 +273,18 @@ function frozenSettlementPricing(order:LockedOrder):ReturnType<typeof freezeSett
   parseNonNegativeDecimal(basis.haff.buyerNumerator,18,"haff numerator");
   const names=["schemaVersion","currency","priceVersionId","ruleReleaseId","mode","lines","resourceTotal","ownerTotal","platformFullProfit","tenantDeposit","publisherBailRequirement","termSeconds","expiryDisclosures","unitAmountsInformational","roundingPolicy","pricingInputs",...(order.quote.schemaVersion===3?["quoteSource","legacyQuote"]:[])];
   const quote=normalizeQuote(Object.fromEntries(names.map(name=>[name,order.quote[name]])));
+  if(fixed&&(typeof basis.fixedFeeRate!=="string"||quote.pricingInputs.commissionRate!==basis.fixedFeeRate||!fixedFeeAllowsPayableRatio(basis.fixedFeeRate,basis.payableRatio)))throw new Error("invalid fixed fee basis");
+  if(fixed){
+    const n=parseNonNegativeDecimal(basis.haff.buyerNumerator,18,"haff numerator"),d=parseNonNegativeDecimal(basis.haff.buyerDenominator,18,"haff denominator"),
+      ratio=parseNonNegativeDecimal(quote.pricingInputs.denominators!.buyer,8,"haff ratio"),quantity=parseNonNegativeDecimal(basis.haff.openingQuantity,0,"haff quantity");
+    if(n.value*10n**BigInt(d.scale)*1000000n*ratio.value!==quantity.value*100n*10n**BigInt(ratio.scale)*d.value*10n**BigInt(n.scale))throw new Error("fixed fee haff basis mismatch");
+    for(const line of quote.lines.filter(item=>item.pricingKind==="FIXED_UNIT")){
+      const item=basis.items.find(candidate=>candidate.itemId===line.itemId);
+      if(!item||item.unit!==line.unit||item.unitQuantity!==line.unitQuantity
+        ||decimalToBigInt(parseNonNegativeDecimal(item.buyerUnitAmount,8,"frozen buyer unit"),8)!==decimalToBigInt(parseNonNegativeDecimal(line.buyerUnitAmount.amount,8,"quoted buyer unit"),8)
+        ||decimalToBigInt(parseNonNegativeDecimal(item.ownerUnitAmount,8,"frozen owner unit"),8)!==decimalToBigInt(parseNonNegativeDecimal(item.buyerUnitAmount,8,"frozen buyer unit"),8))throw new Error("fixed fee item basis mismatch");
+    }
+  }
   const personal=order.quote.personal;
   if(!personal||typeof personal!=="object"||Array.isArray(personal)||typeof order.quote.confirmationDigest!=="string"
     ||createHash("sha256").update(canonicalize({...personal,quote,settlementPricing:basis})).digest("hex")!==order.quote.confirmationDigest)throw new Error("settlement pricing signature mismatch");
@@ -279,6 +294,8 @@ function frozenSettlementPricing(order:LockedOrder):ReturnType<typeof freezeSett
 function basisOrReasons(order: LockedOrder, payment: { id: string; amountCents: string; currency: string }, openingLines: LineQty[]): { basis: Basis } | { reasons: string[] } {
   let settlementPricing:ReturnType<typeof freezeSettlementPricing>|null;
   try{settlementPricing=frozenSettlementPricing(order);}catch{return {reasons:["SETTLEMENT_PRICING_INVALID"]};}
+  // shortcut: fixed-fee posting stays closed until the versioned database funding and ledger guards are installed.
+  if(settlementPricing?.schema==="settlement-pricing-v3")return {reasons:["FIXED_FEE_SETTLEMENT_NOT_ENABLED"]};
   const personal = order.quote.personal as Record<string, unknown> | undefined;
   const funding = personal?.funding as Record<string, unknown> | undefined;
   const membership = personal?.membership as Record<string, unknown> | undefined;

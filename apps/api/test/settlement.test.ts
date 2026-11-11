@@ -103,8 +103,151 @@ function money(
   key: Exclude<keyof NonNullable<ReturnType<typeof computeSettlement>["amounts"]>, "feePayer" | "feeRate">,
 ) {
   assert.ok(result.amounts, result.reasons.join(","));
-  return result.amounts![key].amount;
+  const amount = result.amounts![key];
+  assert.ok(amount, String(key));
+  return amount.amount;
 }
+
+function fixedFeeInput(): ComputeSettlementInput {
+  return {
+    ...baseInput({ remainingHaff: "0", remainingItems: "0", endReason: "NORMAL" }),
+    pricingMode: "FIXED_FEE_TOTAL_V1", fixedFeeRate: "0.10", totalPayableRatio: "0.95",
+    capturedAmount: "95.00", depositAmount: "0.00",
+    haff: { itemId: "haff", unit: "HAFF_BASE", pricingKind: "HAFF_RATIO", openingQuantity: HAFF, remainingQuantity: "0",
+      unitQuantity: "1000000", buyerUnitAmount: "0", ownerUnitAmount: "0", prepaidBuyerAmount: "57.00", prepaidOwnerAmount: "54.00",
+      exactRatio: { buyerNumerator: "57", buyerDenominator: "1", ownerNumerator: "54", ownerDenominator: "1" },
+      baseHaffBuyerRatio: { numerator: "60", denominator: "1" } },
+    items: [{ itemId: "kit", unit: "PIECE", pricingKind: "FIXED_UNIT", openingQuantity: "10", remainingQuantity: "0", unitQuantity: "1",
+      buyerUnitAmount: "3.8", ownerUnitAmount: "3.6", baseBuyerUnitAmount: "4", baseOwnerUnitAmount: "3.6",
+      prepaidBuyerAmount: "38.00", prepaidOwnerAmount: "36.00" }],
+  };
+}
+
+test("fixed-fee settlement charges platform and full-payout fees from the same gross resource amount", () => {
+  const input = fixedFeeInput(), before = structuredClone(input), result = computeSettlement(input);
+  assert.equal(result.ok, true, result.reasons.join(","));
+  assert.equal(money(result, "platformServiceFee"), "10.00");
+  assert.equal(money(result, "membershipDiscount"), "5.00");
+  assert.equal(money(result, "feeBase"), "100.00");
+  assert.equal(money(result, "feeAmount"), "8.00");
+  assert.equal(money(result, "ownerGross"), "100.00");
+  assert.equal(money(result, "ownerNet"), "82.00");
+  assert.equal(money(result, "renterCharge"), "95.00");
+  assert.equal(money(result, "renterRefund"), "0.00");
+  assert.equal(money(result, "platformContribution"), "13.00");
+  assert.deepEqual(input, before);
+});
+
+test("fixed-fee early makeup uses the undiscounted whole haff fee, not the discounted price difference", () => {
+  const input = fixedFeeInput();
+  input.endReason = "TENANT_VOLUNTARY_EARLY";
+  input.fullPayout = "NOT_SELECTED"; input.fullPayoutPolicyRef = null;
+  input.totalPayableRatio = "0.90"; input.capturedAmount = "90.00"; input.items = [];
+  input.haff = { ...input.haff, remainingQuantity: "70000000", prepaidBuyerAmount: "90.00", prepaidOwnerAmount: "90.00",
+    exactRatio: { buyerNumerator: "90", buyerDenominator: "1", ownerNumerator: "90", ownerDenominator: "1" },
+    baseHaffBuyerRatio: { numerator: "100", denominator: "1" } };
+  const result = computeSettlement(input);
+  assert.equal(result.ok, true, result.reasons.join(","));
+  assert.equal(money(result, "platformServiceFee"), "3.00");
+  assert.equal(money(result, "membershipDiscount"), "3.00");
+  assert.equal(money(result, "earlyMakeup"), "7.00");
+  assert.equal(money(result, "ownerNet"), "27.00");
+  assert.equal(money(result, "renterCharge"), "34.00");
+  assert.equal(money(result, "renterRefund"), "56.00");
+  assert.equal(money(result, "platformContribution"), "7.00");
+});
+
+test("fixed-fee early makeup rounds only after the full haff price, fee rate and ladder are multiplied", () => {
+  const input = fixedFeeInput();
+  input.endReason = "TENANT_VOLUNTARY_EARLY";
+  input.fullPayout = "NOT_SELECTED"; input.fullPayoutPolicyRef = null;
+  input.totalPayableRatio = "1"; input.capturedAmount = "100.05"; input.items = [];
+  input.haff = { ...input.haff, remainingQuantity: "50000000", prepaidBuyerAmount: "100.05", prepaidOwnerAmount: "90.04",
+    exactRatio: { buyerNumerator: "100.05", buyerDenominator: "1", ownerNumerator: "90.04", ownerDenominator: "1" },
+    baseHaffBuyerRatio: { numerator: "100.05", denominator: "1" } };
+  const result = computeSettlement(input);
+  assert.equal(result.ok, true, result.reasons.join(","));
+  assert.equal(money(result, "earlyMakeup"), "5.00");
+  assert.equal(money(result, "platformServiceFee"), "5.00");
+  assert.equal(money(result, "ownerNet"), "45.03");
+  assert.equal(money(result, "renterRefund"), "45.02");
+});
+
+test("fixed-fee excess consumption uses the frozen member rule and deposit, or stops when funds are insufficient", () => {
+  const input = fixedFeeInput();
+  input.items[0]!.remainingQuantity = null; input.items[0]!.consumedQuantity = "12";
+  input.depositAmount = "20.00"; input.capturedAmount = "115.00";
+  const result = computeSettlement(input);
+  assert.equal(result.ok, true, result.reasons.join(","));
+  assert.equal(money(result, "platformServiceFee"), "10.80");
+  assert.equal(money(result, "membershipDiscount"), "5.40");
+  assert.equal(money(result, "feeAmount"), "8.64");
+  assert.equal(money(result, "ownerNet"), "88.56");
+  assert.equal(money(result, "renterRefund"), "12.40");
+  assert.equal(money(result, "platformContribution"), "14.04");
+  const insufficient = computeSettlement({ ...input, depositAmount: "0.00", capturedAmount: "95.00" });
+  assert.equal(insufficient.ok, false); assert.ok(insufficient.reasons.includes("INSUFFICIENT_PREPAYMENT"));
+  assert.equal(insufficient.amounts, null);
+});
+
+test("fixed-fee settlement rejects discount deeper than the fee and a modified prepaid allocation", () => {
+  const incompatible = computeSettlement({ ...fixedFeeInput(), fixedFeeRate: "0.08", totalPayableRatio: "0.90" });
+  assert.equal(incompatible.ok, false); assert.ok(incompatible.reasons.includes("DISCOUNT_EXCEEDS_FIXED_FEE"));
+  const input = fixedFeeInput(); input.items[0]!.prepaidOwnerAmount = "35.99";
+  const changed = computeSettlement(input);
+  assert.equal(changed.ok, false); assert.ok(changed.reasons.includes("FIXED_FEE_PREPAID_MISMATCH"));
+});
+
+test("fixed-fee settlement conserves a one-cent whole-order fee across two five-cent lines", () => {
+  const input = fixedFeeInput();
+  input.fullPayout = "NOT_SELECTED"; input.fullPayoutPolicyRef = null;
+  input.totalPayableRatio = "1"; input.capturedAmount = "0.10";
+  input.haff = { ...input.haff, prepaidBuyerAmount: "0.05", prepaidOwnerAmount: "0.04",
+    exactRatio: { buyerNumerator: "0.05", buyerDenominator: "1", ownerNumerator: "0.04", ownerDenominator: "1" },
+    baseHaffBuyerRatio: { numerator: "0.05", denominator: "1" } };
+  input.items = [{ itemId: "kit", unit: "PIECE", pricingKind: "FIXED_UNIT", openingQuantity: "1", remainingQuantity: "0", unitQuantity: "1",
+    buyerUnitAmount: "0.05", ownerUnitAmount: "0.045", baseBuyerUnitAmount: "0.05", baseOwnerUnitAmount: "0.045",
+    prepaidBuyerAmount: "0.05", prepaidOwnerAmount: "0.05" }];
+  const result = computeSettlement(input);
+  assert.equal(result.ok, true, result.reasons.join(","));
+  assert.equal(money(result, "platformServiceFee"), "0.01");
+  assert.equal(money(result, "ownerNet"), "0.09");
+  assert.equal(money(result, "platformContribution"), "0.01");
+});
+
+test("fixed-fee member allocation validates frozen line totals without inventing an adjusted unit price", () => {
+  const input = fixedFeeInput();
+  input.fullPayout = "NOT_SELECTED"; input.fullPayoutPolicyRef = null;
+  input.totalPayableRatio = "0.90"; input.capturedAmount = "0.09";
+  input.haff = { ...input.haff, itemId: "zzz_haff", prepaidBuyerAmount: "0.05", prepaidOwnerAmount: "0.05",
+    exactRatio: { buyerNumerator: "0.05", buyerDenominator: "1", ownerNumerator: "0.05", ownerDenominator: "1" },
+    baseHaffBuyerRatio: { numerator: "0.05", denominator: "1" } };
+  input.items = [{ itemId: "aaa_kit", unit: "PIECE", pricingKind: "FIXED_UNIT", openingQuantity: "1", remainingQuantity: "0", unitQuantity: "1",
+    buyerUnitAmount: "0.05", ownerUnitAmount: "0.045", baseBuyerUnitAmount: "0.05", baseOwnerUnitAmount: "0.045",
+    prepaidBuyerAmount: "0.04", prepaidOwnerAmount: "0.04" }];
+  const result = computeSettlement(input);
+  assert.equal(result.ok, true, result.reasons.join(","));
+  assert.equal(money(result, "platformServiceFee"), "0.01");
+  assert.equal(money(result, "membershipDiscount"), "0.01");
+  assert.equal(money(result, "ownerNet"), "0.09");
+  assert.equal(money(result, "renterCharge"), "0.09");
+  assert.equal(money(result, "platformContribution"), "0.00");
+});
+
+test("fixed-fee settlement does not post negative owner income or accept an unbound rate", () => {
+  const input = fixedFeeInput();
+  input.fixedFeeRate = "0.95"; input.totalPayableRatio = "1"; input.capturedAmount = "100.00";
+  input.haff = { ...input.haff, prepaidBuyerAmount: "60.00", prepaidOwnerAmount: "3.00",
+    exactRatio: { buyerNumerator: "60", buyerDenominator: "1", ownerNumerator: "3", ownerDenominator: "1" } };
+  input.items[0]!.buyerUnitAmount = "4"; input.items[0]!.ownerUnitAmount = "0.2"; input.items[0]!.baseOwnerUnitAmount = "0.2";
+  input.items[0]!.prepaidBuyerAmount = "40.00"; input.items[0]!.prepaidOwnerAmount = "2.00";
+  const result = computeSettlement(input);
+  assert.equal(result.ok, false); assert.ok(result.reasons.includes("OWNER_INCOME_INSUFFICIENT")); assert.equal(result.amounts, null);
+  const missing = computeSettlement({ ...fixedFeeInput(), fixedFeeRate: undefined });
+  assert.equal(missing.ok, false); assert.ok(missing.reasons.includes("FIXED_FEE_POLICY_INVALID"));
+  const unexpected = computeSettlement({ ...baseInput({ remainingHaff: "0", remainingItems: "0", endReason: "NORMAL" }), fixedFeeRate: "0.1" });
+  assert.equal(unexpected.ok, false); assert.ok(unexpected.reasons.includes("FIXED_FEE_POLICY_INVALID"));
+});
 
 function turtleSettlement(): ComputeSettlementInput {
   const result = computeQuote({ priceVersionId: "fixture_turtle_price", mode: "SPREAD", customerTier: "STANDARD", roundingPolicy: "HALF_UP_CENT_V1", haffRule: compatRule("47"),

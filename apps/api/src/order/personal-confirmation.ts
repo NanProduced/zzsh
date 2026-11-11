@@ -10,6 +10,7 @@ import { canonicalize, computeContentHash, normalizeQuote } from "../supply/cont
 import { computeDeltaQuote, computeFixedUnitAmounts, projectDeltaQuote, type InternalQuote, type QuoteInput } from "../supply/pricing";
 import { normalizeRentalPricing } from "../supply/delta-rental";
 import { decimalToBigInt, divideToScale, formatDecimalExact, parseNonNegativeDecimal, yuanAmountObject } from "../supply/decimal";
+import { fixedFeeAllowsPayableRatio } from "../supply/fixed-fee";
 import { payableCentsFor } from "../auth/membership-total-discount";
 import { evaluatePricePreviewPublication, readListingPublication, evaluatePublication, type PublishingAccount, type ListingVersion, type SupplyGateReader } from "../supply/publishing";
 import { assertFullPayoutTermsAccepted, parseFullPayoutTermsAcceptance, type FullPayoutTerms } from "../supply/full-payout-terms";
@@ -110,8 +111,13 @@ type FrozenPriceLine = { item_id:string; pricing_kind:"HAFF_RATIO"|"FIXED_UNIT";
 export function freezeSettlementPricing(quote:InternalQuote,payableRatio:string,rows:readonly FrozenPriceLine[],commissionRate?:string|null) {
   if(payableCentsFor(1n,payableRatio)===null)throw new Error("Invalid settlement discount");
   const percent=quote.mode==="PERCENT";
+  const fixed=quote.schemaVersion===4;
   const rate=percent&&typeof commissionRate==="string"?parseNonNegativeDecimal(commissionRate,8,"commission rate"):null;
   if(percent&&(!rate||rate.value>=10n**BigInt(rate.scale)))throw new Error("Missing frozen commission rate");
+  if(fixed){
+    normalizeQuote(quote);
+    if(!rate||quote.pricingInputs.commissionRate!==formatDecimalExact(rate)||!fixedFeeAllowsPayableRatio(commissionRate!,payableRatio))throw new Error("Fixed fee policy does not match the quote");
+  }
   const haff=quote.lines.filter(line=>line.pricingKind==="HAFF_RATIO");
   const exact=haff.length===1?quote.pricingInputs.exactRatios.find(line=>line.itemId===haff[0]!.itemId):undefined;
   if(!exact || haff[0]!.quantity==="0")throw new Error("Missing frozen haff price");
@@ -129,7 +135,12 @@ export function freezeSettlementPricing(quote:InternalQuote,payableRatio:string,
     if(row.item_enabled===false&&!line)continue;
     if(material.has(row.item_id))throw new Error("Duplicate frozen item price");
     let owner:unknown=line?.ownerUnitAmount.amount??row.owner_unit_amount;
-    if(percent){
+    if(fixed){
+      if(row.unit_quantity===null||row.buyer_unit_amount===null||row.owner_unit_amount!==null)throw new Error("Missing frozen fixed-fee item price");
+      owner=row.buyer_unit_amount;
+      if(line&&(decimalToBigInt(parseNonNegativeDecimal(line.buyerUnitAmount.amount,8,"quoted buyer unit"),8)!==decimalToBigInt(parseNonNegativeDecimal(row.buyer_unit_amount,8,"frozen buyer unit"),8)
+        ||decimalToBigInt(parseNonNegativeDecimal(line.ownerUnitAmount.amount,8,"quoted owner unit"),8)!==decimalToBigInt(parseNonNegativeDecimal(row.buyer_unit_amount,8,"frozen buyer unit"),8)))throw new Error("Frozen fixed-fee item price mismatch");
+    } else if(percent){
       if(!rate||row.unit_quantity===null||row.buyer_unit_amount===null||row.owner_unit_amount!==null)throw new Error("Missing frozen percent item price");
       const calculated=computeFixedUnitAmounts({itemId:row.item_id,pricingKind:"FIXED_UNIT",quantity:"0",unitQuantity:row.unit_quantity,buyerUnitAmount:row.buyer_unit_amount},"PERCENT",rate);
       owner=formatDecimalExact(calculated.ownerUnit);
@@ -142,7 +153,8 @@ export function freezeSettlementPricing(quote:InternalQuote,payableRatio:string,
     add(line.itemId,null,line.unit,line.unitQuantity,line.buyerUnitAmount.amount,line.ownerUnitAmount.amount);
   }
   if(material.size>63)throw new Error("Too many settlement resources");
-  return {schema:percent?"settlement-pricing-v2" as const:"settlement-pricing-v1" as const,priceVersionId:quote.priceVersionId,payableRatio:formatDecimalExact(parseNonNegativeDecimal(payableRatio,8,"payable ratio")),
+  return {schema:fixed?"settlement-pricing-v3" as const:percent?"settlement-pricing-v2" as const:"settlement-pricing-v1" as const,
+    ...(fixed?{fixedFeeRate:formatDecimalExact(rate!)}:{}),priceVersionId:quote.priceVersionId,payableRatio:formatDecimalExact(parseNonNegativeDecimal(payableRatio,8,"payable ratio")),
     haff:{itemId:haff[0]!.itemId,openingQuantity:haff[0]!.quantity,buyerNumerator:exact.buyerNumerator,buyerDenominator:exact.buyerDenominator},
     items:[...material.values()].sort((a,b)=>a.itemId<b.itemId?-1:a.itemId>b.itemId?1:0)};
 }

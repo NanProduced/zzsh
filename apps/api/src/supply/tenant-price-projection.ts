@@ -7,7 +7,7 @@ import { legacyListedSourceRatio } from "./legacy-listed-quote";
 type PublicQuote = DeltaProjectedQuote;
 export type TenantPriceLine = Pick<PublicQuote["lines"][number], "itemId" | "quantity" | "unit" | "unitQuantity" | "buyerUnitAmount" | "buyerAmount">;
 export type TenantPriceQuote = {
-  schemaVersion: 1 | 2 | 3;
+  schemaVersion: 1 | 2 | 3 | 4;
   currency: "CNY";
   ruleReleaseId: string | null;
   lines: TenantPriceLine[];
@@ -34,7 +34,8 @@ export function publishedBaseRenterHaffRatioWanPerYuan(publishedQuote: unknown):
   if (compatibility && compatibility.customerTier !== "STANDARD") return null;
   if (quote.schemaVersion === 1 && inputs.haffRatioSchema !== "haff-ratio-v1"
     || quote.schemaVersion === 2 && (inputs.haffRatioSchema !== "haff-ratio-v2" || compatibility?.customerTier !== "STANDARD")
-    || quote.schemaVersion !== 1 && quote.schemaVersion !== 2 || typeof denominators.buyer !== "string") return null;
+    || quote.schemaVersion === 4 && (inputs.haffRatioSchema !== "haff-ratio-v3" || inputs.fixedFeeAlgorithm !== "FIXED_TOTAL_V1" || compatibility?.customerTier !== "STANDARD")
+    || quote.schemaVersion !== 1 && quote.schemaVersion !== 2 && quote.schemaVersion !== 4 || typeof denominators.buyer !== "string") return null;
   try {
     // pricing uses Q * 100 / (1,000,000 * D): D is already 万哈夫币/元.
     const ratio = parseNonNegativeDecimal(denominators.buyer, 8, "published buyer ratio");
@@ -68,7 +69,7 @@ export function projectTenantPriceQuote(quote: InternalQuote, publishedQuote: un
   let projected: PublicQuote;
   try { projected = projectDeltaQuote(quote, "public"); }
   catch { return unavailable(); }
-  if (![1, 2, 3].includes(projected.schemaVersion) || projected.currency !== "CNY" || !Array.isArray(projected.lines)
+  if (![1, 2, 3, 4].includes(projected.schemaVersion) || projected.currency !== "CNY" || !Array.isArray(projected.lines)
     || !Array.isArray(projected.expiryDisclosures) || typeof projected.unitAmountsInformational !== "boolean"
     || projected.ruleReleaseId !== null && typeof projected.ruleReleaseId !== "string") return unavailable();
   const lines = projected.lines.map((line): TenantPriceLine => {

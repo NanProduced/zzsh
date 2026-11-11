@@ -1,7 +1,9 @@
 import { normalizeQuote, type LegacyQuoteProvenance } from "./content-hash";
 import { legacyPriceInteger, quoteLegacyHaff } from "./legacy-listed-pricing";
+import { calculateFixedFee, FIXED_FEE_ALGORITHM } from "./fixed-fee";
 import {
   DecimalError,
+  decimalToBigInt,
   divideToScale,
   formatDecimalExact,
   formatScaledInteger,
@@ -14,6 +16,7 @@ import {
 import {
   calculateDeltaTermSeconds,
   DELTA_HAFF_BASE_PER_MILLION,
+  DELTA_HAFF_FIXED_SCHEMA,
   DELTA_HAFF_RATIO_SCHEMA,
   DELTA_QUOTE_SCHEMA_VERSION,
   DELTA_ROUNDING_POLICY,
@@ -58,6 +61,7 @@ export type QuoteInput = {
   mode: "SPREAD" | "PERCENT";
   roundingPolicy: string;
   commissionRate?: string;
+  fixedFeeAlgorithm?: typeof FIXED_FEE_ALGORITHM;
   haffRule?: HaffRatioRule;
   lines: readonly PricingLineInput[];
   conditions: DeltaHaffConditions;
@@ -100,7 +104,7 @@ export type QuoteExactRatio = {
 };
 
 export type InternalQuote = {
-  schemaVersion: 1 | 2 | 3;
+  schemaVersion: 1 | 2 | 3 | 4;
   quoteSource?: "LEGACY_QUOTED";
   legacyQuote?: LegacyQuoteProvenance;
   currency: "CNY";
@@ -124,6 +128,8 @@ export type InternalQuote = {
     denominators: { owner: string; buyer: string } | null;
     spreadDelta: string | null;
     commissionRate: string | null;
+    fixedFeeAlgorithm?: typeof FIXED_FEE_ALGORITHM;
+    fixedFeeGrossCents?: string;
     exactRatios: QuoteExactRatio[];
     roundingPolicy: string;
     depositPolicy: "CONFIGURED" | "UNCONFIGURED";
@@ -169,6 +175,10 @@ export function computeDeltaQuote(input: QuoteInput): QuoteResult {
   const fail = (code: QuoteReasonCode): void => {
     reasons.add(code);
   };
+  const fixedFee = input.fixedFeeAlgorithm === FIXED_FEE_ALGORITHM;
+  if ((input.fixedFeeAlgorithm !== undefined && !fixedFee)
+      || (fixedFee && (input.mode !== "PERCENT" || input.haffRule?.schema !== DELTA_HAFF_FIXED_SCHEMA))
+      || (!fixedFee && input.haffRule?.schema === DELTA_HAFF_FIXED_SCHEMA)) fail("RULE_INPUT_MISSING");
 
   if (input.roundingPolicy !== ROUNDING_POLICY) {
     return { quotable: false, reasonCodes: ["ROUNDING_POLICY_UNSUPPORTED"] };
@@ -296,6 +306,32 @@ export function computeDeltaQuote(input: QuoteInput): QuoteResult {
     return { quotable: false, reasonCodes: [...reasons].sort() };
   }
 
+  if (fixedFee) {
+    try {
+      const allocated = calculateFixedFee(quoteLines.map((line) => ({
+        itemId: line.itemId, grossCents: decimalToBigInt(parseNonNegativeDecimal(line.buyerAmount.amount, 2, "buyer amount"), 2),
+      })), input.commissionRate!);
+      const byItem = new Map(allocated.lines.map((line) => [line.itemId, line]));
+      for (let i = 0; i < quoteLines.length; i++) {
+        const line = quoteLines[i]!, part = byItem.get(line.itemId)!;
+        quoteLines[i] = { ...line, ownerUnitAmount: { ...line.buyerUnitAmount },
+          ownerAmount: yuanAmountObject(part.ownerCents), platformAmount: yuanAmountObject(part.feeCents) };
+      }
+      for (const ratio of exactRatios) {
+        const owner = byItem.get(ratio.itemId)!.ownerCents;
+        const numerator = parseNonNegativeDecimal(ratio.buyerNumerator, 18, "buyer numerator");
+        const denominator = parseNonNegativeDecimal(ratio.buyerDenominator, 18, "buyer denominator");
+        const buyerBelowRoundedOwner = numerator.value * 10n ** BigInt(denominator.scale) * 100n
+          < owner * denominator.value * 10n ** BigInt(numerator.scale);
+        ratio.ownerNumerator = buyerBelowRoundedOwner ? ratio.buyerNumerator : owner.toString();
+        ratio.ownerDenominator = buyerBelowRoundedOwner ? ratio.buyerDenominator : "100";
+      }
+      ownerTotalCents = allocated.grossCents - allocated.feeCents;
+    } catch {
+      return { quotable: false, reasonCodes: ["DEPENDENCY_UNAVAILABLE"] };
+    }
+  }
+
   const tenantDepositCents = centsOrNull(input.deposits?.tenantDepositCents, "tenant deposit");
   const publisherBailCents = centsOrNull(input.deposits?.publisherBailRequirementCents, "publisher bail");
   const depositConfigured = tenantDepositCents !== null && publisherBailCents !== null;
@@ -303,7 +339,7 @@ export function computeDeltaQuote(input: QuoteInput): QuoteResult {
   return {
     quotable: true,
     quote: normalizeQuote({
-      schemaVersion: deltaHaff.compatibility ? 2 : QUOTE_SCHEMA_VERSION,
+      schemaVersion: fixedFee ? 4 : deltaHaff.compatibility ? 2 : QUOTE_SCHEMA_VERSION,
       currency: "CNY",
       priceVersionId: input.priceVersionId,
       ruleReleaseId: null,
@@ -316,7 +352,7 @@ export function computeDeltaQuote(input: QuoteInput): QuoteResult {
       publisherBailRequirement: publisherBailCents === null ? null : yuanAmountObject(publisherBailCents),
       termSeconds,
       expiryDisclosures,
-      unitAmountsInformational: hasHaffLines,
+      unitAmountsInformational: hasHaffLines || fixedFee,
       roundingPolicy: ROUNDING_POLICY,
       pricingInputs: {
         ...(deltaHaff.compatibility ? { compatibility: deltaHaff.compatibility } : {}),
@@ -328,6 +364,7 @@ export function computeDeltaQuote(input: QuoteInput): QuoteResult {
             : null,
         spreadDelta: spreadDelta === null ? null : formatDecimalExact(spreadDelta),
         commissionRate: commissionRate === null ? null : formatDecimalExact(commissionRate),
+        ...(fixedFee ? { fixedFeeAlgorithm: FIXED_FEE_ALGORITHM, fixedFeeGrossCents: resourceTotalCents.toString() } : {}),
         exactRatios,
         roundingPolicy: ROUNDING_POLICY,
         depositPolicy: depositConfigured ? "CONFIGURED" : "UNCONFIGURED",

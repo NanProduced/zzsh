@@ -1,6 +1,7 @@
 import { ceilDiv, decimalToBigInt, divideToScale, formatScaledInteger, multiplyDecimal, parseNonNegativeDecimal, yuanAmountObject } from "../supply/decimal";
 import { normalizeQuote } from "../supply/content-hash";
 import type { InternalQuote, QuoteExactRatio, QuoteLine } from "../supply/pricing";
+import { fixedFeeAllowsPayableRatio } from "../supply/fixed-fee";
 
 /**
  * Owner rule (2026-10-19): membership and entitlement benefits discount the combined base total of
@@ -127,6 +128,11 @@ export type TotalDiscountQuoteResult = { quote: InternalQuote; baseCents: bigint
  * the exacter of `payable/100` and the original owner fraction, which still rounds to the allocated cents.
  */
 export function applyTotalDiscountToQuote(quote: InternalQuote, payableRatio: string): TotalDiscountQuoteResult | null {
+  if (quote.schemaVersion === 4) {
+    try {
+      if (!quote.pricingInputs.commissionRate || !fixedFeeAllowsPayableRatio(quote.pricingInputs.commissionRate, payableRatio)) return null;
+    } catch { return null; }
+  }
   const baseCents = centsOfAmount(quote.resourceTotal.amount);
   const ownerTotalCents = centsOfAmount(quote.ownerTotal.amount);
   const payableCents = payableCentsFor(baseCents, payableRatio);
@@ -167,6 +173,11 @@ export function applyTotalDiscountToQuote(quote: InternalQuote, payableRatio: st
         ? divideToScale({ value: payable * unitQuantity, scale: 0 }, { value: quantity * 100n, scale: 0 }, 8)
         : parseNonNegativeDecimal(line.ownerUnitAmount.amount, 8, "buyerUnit");
       nextLines.push({ ...line, buyerUnitAmount: { currency: "CNY", unit: "yuan", amount: formatScaledInteger(buyerUnitAmount.value, 8), scale: 8 }, buyerAmount: yuanAmountObject(payable), platformAmount });
+      continue;
+    }
+    if (quote.schemaVersion === 4) {
+      // Per-line totals are allocations; the published unit price remains the undiscounted basis.
+      nextLines.push({ ...line, buyerAmount: yuanAmountObject(payable), platformAmount });
       continue;
     }
     const quantity = decimalToBigInt(parseNonNegativeDecimal(line.quantity, 0, "quantity"), 0);

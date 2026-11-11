@@ -9,6 +9,7 @@ import {
 import { centsToYuan } from "./order";
 import type { QuoteAmount } from "../supply/pricing";
 import { allocateCombinedDiscount, payableCentsFor } from "../auth/membership-total-discount";
+import { calculateFixedFee, fixedFeeAllowsPayableRatio, type FixedFeeLine } from "../supply/fixed-fee";
 
 import { FULL_PAYOUT_FEE_ROUNDING_POLICY, fullPayoutServiceFeeCents } from '../supply/full-payout-fee';
 export { FULL_PAYOUT_RATE } from '../supply/full-payout-fee';
@@ -71,7 +72,8 @@ export type ComputeSettlementInput = {
   fullPayoutPolicyRef: string | null;
   /** Original order's frozen total-discount ratio. */
   totalPayableRatio?: string | null;
-  pricingMode?: "ACTUAL_TOTAL_DISCOUNT_V1";
+  pricingMode?: "ACTUAL_TOTAL_DISCOUNT_V1" | "FIXED_FEE_TOTAL_V1";
+  fixedFeeRate?: string;
   haff: SettlementInventoryLine;
   items: readonly SettlementInventoryLine[];
 };
@@ -104,6 +106,8 @@ export type SettlementComputation = {
     platformMakeup: QuoteAmount;
     platformFee: QuoteAmount;
     platformContribution: QuoteAmount;
+    platformServiceFee?: QuoteAmount;
+    membershipDiscount?: QuoteAmount;
   } | null;
   consumed: { haff: string; items: Array<{ itemId: string; consumed: string; remaining: string }> } | null;
 };
@@ -311,8 +315,25 @@ export function computeSettlement(input: ComputeSettlementInput): SettlementComp
   let unusedHaff = 0n;
   let exactHb = rat(0n);
   let F = rat(0n);
-  const totalPricing=input.pricingMode==="ACTUAL_TOTAL_DISCOUNT_V1";
-  if(input.pricingMode!==undefined&&!totalPricing)reasons.push("PRICING_MODE_INVALID");
+  const fixedPricing = input.pricingMode === "FIXED_FEE_TOTAL_V1";
+  const totalPricing = input.pricingMode === "ACTUAL_TOTAL_DISCOUNT_V1" || fixedPricing;
+  if (input.pricingMode !== undefined && !totalPricing) reasons.push("PRICING_MODE_INVALID");
+  let fixedRate: ReturnType<typeof parseNonNegativeDecimal> | null = null;
+  const fixedPrepaidLines: FixedFeeLine[] = [];
+  const fixedPrepaidBuyers = new Map<string, bigint>();
+  const fixedPrepaidOwners = new Map<string, bigint>();
+  if (fixedPricing) {
+    try {
+      if (typeof input.fixedFeeRate !== "string") throw new DecimalError("fixed fee rate is missing");
+      calculateFixedFee([], input.fixedFeeRate);
+      fixedRate = parseNonNegativeDecimal(input.fixedFeeRate, 8, "fixed fee rate");
+      if (typeof input.totalPayableRatio === "string" && !fixedFeeAllowsPayableRatio(input.fixedFeeRate, input.totalPayableRatio)) {
+        reasons.push("DISCOUNT_EXCEEDS_FIXED_FEE");
+      }
+    } catch {
+      reasons.push("FIXED_FEE_POLICY_INVALID");
+    }
+  } else if (input.fixedFeeRate !== undefined) reasons.push("FIXED_FEE_POLICY_INVALID");
   let haffBase=0n;
   const itemCharges: Array<{ itemId: string; buyerCents: bigint; ownerCents: bigint }> = [];
   const exact = input.haff ? parseExactRatio(input.haff.exactRatio, "HAFF", reasons) : null;
@@ -320,6 +341,10 @@ export function computeSettlement(input: ComputeSettlementInput): SettlementComp
     if (input.haff) {
       B = centsOf(input.haff.prepaidBuyerAmount, "haff.prepaidBuyer");
       O = centsOf(input.haff.prepaidOwnerAmount, "haff.prepaidOwner");
+      if (fixedPricing) {
+        fixedPrepaidBuyers.set(input.haff.itemId, B);
+        fixedPrepaidOwners.set(input.haff.itemId, O);
+      }
     }
   } catch {
     reasons.push("HAFF_AMOUNT_INVALID");
@@ -346,12 +371,18 @@ export function computeSettlement(input: ComputeSettlementInput): SettlementComp
         const price = yuanRatio(input.haff.baseHaffBuyerRatio.numerator, input.haff.baseHaffBuyerRatio.denominator, "haff.baseBuyer");
         if(price.n*exact.owner.d<exact.owner.n*price.d)reasons.push("HAFF_BASE_PRICE_INVALID");
         haffBase=rRoundCents(rat(q * price.n, Q * price.d));
+        if (fixedPricing) {
+          fixedPrepaidLines.push({ itemId: input.haff.itemId, grossCents: rRoundCents(price) });
+          if (fixedRate) F = rat(price.n * fixedRate.value, price.d * 10n ** BigInt(fixedRate.scale));
+        }
       } catch {
         reasons.push("HAFF_BASE_PRICE_MISSING");
       }
     } else if(q>Q)reasons.push("HAFF_EXCESS_PRICE_MISSING");
-    F = rsub(exact.buyer, exact.owner);
-    if (F.n * 5n * exact.buyer.d > exact.buyer.n * 2n * F.d && q * 10n < Q * 7n) reasons.push("HAFF_SPREAD_RATIO_UNSAFE");
+    if (!fixedPricing) {
+      F = rsub(exact.buyer, exact.owner);
+      if (F.n * 5n * exact.buyer.d > exact.buyer.n * 2n * F.d && q * 10n < Q * 7n) reasons.push("HAFF_SPREAD_RATIO_UNSAFE");
+    }
   }
 
   let Gb = 0n;
@@ -382,7 +413,13 @@ export function computeSettlement(input: ComputeSettlementInput): SettlementComp
       const opening = qtyOf(line.openingQuantity, `${prefix}.opening`);
       const expectedB = fixedCents(opening, line.buyerUnitAmount, line.unitQuantity, prefix);
       const expectedO = fixedCents(opening, exactOwner, line.unitQuantity, prefix, 16);
-      if (expectedB !== prepaidB || expectedO !== prepaidO) reasons.push(`${prefix}_PREPAID_MISMATCH`);
+      if (!fixedPricing && (expectedB !== prepaidB || expectedO !== prepaidO)) reasons.push(`${prefix}_PREPAID_MISMATCH`);
+      if (fixedPricing) {
+        if (typeof line.baseBuyerUnitAmount !== "string") reasons.push(`${prefix}_BASE_PRICE_MISSING`);
+        else fixedPrepaidLines.push({ itemId: line.itemId, grossCents: fixedCents(opening, line.baseBuyerUnitAmount, line.unitQuantity, prefix) });
+        fixedPrepaidBuyers.set(line.itemId, prepaidB);
+        fixedPrepaidOwners.set(line.itemId, prepaidO);
+      }
       const buyerUnit = parseNonNegativeDecimal(line.buyerUnitAmount, 8, `${prefix}.buyerUnit`);
       const ownerUnit = parseNonNegativeDecimal(line.ownerUnitAmount, 8, `${prefix}.ownerUnit`);
       if (decimalToBigInt(ownerUnit, 8) > decimalToBigInt(buyerUnit, 8)) reasons.push(`${prefix}_OWNER_EXCEEDS_BUYER`);
@@ -415,6 +452,34 @@ export function computeSettlement(input: ComputeSettlementInput): SettlementComp
       itemConsumed.push({ itemId: line.itemId, consumed: qty.consumed.toString(), remaining: qty.remaining.toString() });
     } catch {
       reasons.push(`${prefix}_AMOUNT_INVALID`);
+    }
+  }
+
+  let fixedServiceFee: bigint | null = null;
+  let fixedGross: bigint | null = null;
+  if (fixedPricing && fixedRate && typeof input.fixedFeeRate === "string" && input.haff) {
+    try {
+      const original = calculateFixedFee(fixedPrepaidLines, input.fixedFeeRate);
+      const originalPayable = typeof input.totalPayableRatio === "string" ? payableCentsFor(original.grossCents, input.totalPayableRatio) : null;
+      const originalBuyerLines = originalPayable === null ? null : allocateCombinedDiscount(original.lines.map((line) => ({
+        itemId: line.itemId, buyerCents: line.grossCents, ownerCents: line.ownerCents,
+      })), originalPayable);
+      if (fixedPrepaidLines.length !== items.length + 1 || originalPayable !== resourcePrepaid
+          || originalBuyerLines === null
+          || original.lines.some((line, index) => fixedPrepaidOwners.get(line.itemId) !== line.ownerCents
+            || fixedPrepaidBuyers.get(line.itemId) !== originalBuyerLines[index])) {
+        reasons.push("FIXED_FEE_PREPAID_MISMATCH");
+      }
+      const actual = calculateFixedFee([{ itemId: input.haff.itemId, grossCents: haffBase },
+        ...itemCharges.map((line) => ({ itemId: line.itemId, grossCents: line.buyerCents }))], input.fixedFeeRate);
+      if (itemCharges.length !== items.length) reasons.push("FIXED_FEE_BASE_INCOMPLETE");
+      fixedServiceFee = actual.feeCents;
+      fixedGross = actual.grossCents;
+      Ho = actual.lines[0]!.ownerCents;
+      Go = actual.lines.slice(1).reduce((sum, line) => sum + line.ownerCents, 0n);
+      for (let i = 0; i < itemCharges.length; i++) itemCharges[i]!.ownerCents = actual.lines[i + 1]!.ownerCents;
+    } catch {
+      reasons.push("FIXED_FEE_BASE_INVALID");
     }
   }
 
@@ -452,13 +517,14 @@ export function computeSettlement(input: ComputeSettlementInput): SettlementComp
   if (cancelledBeforeStart || input.fullPayout === "NOT_SELECTED") {
     fee = 0n;
   } else if (input.fullPayout === "SELECTED" && started && !reasons.includes("FULL_PAYOUT_POLICY_REF_MISSING")) {
-    feeBase = ownerConsumed;
+    feeBase = fixedPricing && fixedGross !== null ? fixedGross : ownerConsumed;
     feePayer = "OWNER";
     fee = fullPayoutServiceFeeCents(feeBase);
   }
 
-  const ownerGross = ownerConsumed;
-  const ownerNet = feePayer === "OWNER" ? ownerGross - fee : ownerGross;
+  const ownerGross = fixedPricing && fixedGross !== null ? fixedGross : ownerConsumed;
+  const ownerNet = feePayer === "OWNER" ? ownerConsumed - fee : ownerConsumed;
+  if (ownerNet < 0n) reasons.push("OWNER_INCOME_INSUFFICIENT");
   const renterCharge = renterHaffTotal + Gb;
   const renterRefund = captured - renterCharge;
   if (captured !== resourcePrepaid + deposit) reasons.push("CAPTURED_MISMATCH");
@@ -507,6 +573,9 @@ export function computeSettlement(input: ComputeSettlementInput): SettlementComp
       platformMakeup: yuan(makeupCents),
       platformFee: yuan(fee),
       platformContribution: yuan(platformContribution),
+      ...(fixedPricing && fixedServiceFee !== null && fixedGross !== null ? {
+        platformServiceFee: yuan(fixedServiceFee), membershipDiscount: yuan(fixedGross - Hb - Gb),
+      } : {}),
     },
   };
 }

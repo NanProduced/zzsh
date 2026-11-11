@@ -13,6 +13,8 @@ import {freezeSettlementPricing} from '../src/order/personal-confirmation';
 import {compatRule} from './pricing-compat-fixture';
 import {legacyPayload} from './legacy-listed-fixture';
 import {applyTotalDiscountToQuote} from '../src/auth/membership-total-discount';
+import {FIXED_FEE_ALGORITHM} from '../src/supply/fixed-fee';
+import {computeSettlement,SETTLEMENT_ROUNDING_POLICY,type SettlementInventoryLine} from '../src/order/settlement';
 const tree=execFileSync('git',['--no-optional-locks','rev-parse','--show-toplevel'],{cwd:process.cwd(),encoding:'utf8'}).trim(),path='apps/api/src/order/settlement-record.ts',requireHere=createRequire(resolve(__dirname,'../src/order/settlement-record.js'));
 // Exercise the real private frozen-basis function without adding test-only exports to the product module.
 function load(source:string,name='basisOrReasons'){const exports:Record<string,any>={};runInNewContext(transpileModule(source+'\nexport const offlineFrozenBasis = '+name+';\n',{compilerOptions:{module:ModuleKind.CommonJS,target:ScriptTarget.ES2022}}).outputText,{exports,require:requireHere});return exports.offlineFrozenBasis as (...args:any[])=>any;}
@@ -95,6 +97,50 @@ test('percent quotes freeze exact owner prices, including resources absent at op
  const actualBasis=current(actual.order,{id:'payment',amountCents:'5422497',currency:'CNY'},[{itemId:'haff',quantity:'100000000'},{itemId:'kit',quantity:'3000000'}]);
  assert(actualBasis.basis,JSON.stringify(actualBasis.reasons));
  assert.equal(actualBasis.basis.items[0].baseOwnerUnitAmount,'0.0133333267333333');
+});
+
+test('fixed-fee settlement pricing freezes the original price and rate in the signed order basis',()=>{
+ const {compatibility,...baseRule}=compatRule('2000');
+ const base=computeDeltaQuote({priceVersionId:'fixed-price',mode:'PERCENT',fixedFeeAlgorithm:FIXED_FEE_ALGORITHM,commissionRate:'0.10',customerTier:'STANDARD',roundingPolicy:'HALF_UP_CENT_V1',
+  haffRule:{...baseRule,schema:'haff-ratio-v3',fixedModes:compatibility!.modes},
+  conditions:{safeBoxCode:'box-a',vitLevel:6,bearLevel:6,termOptionCode:'daily-10m',rentalPricing:{rentalMode:'ordinary'}},
+  termOption:{code:'daily-10m',dailyConsumption:'10000000',durationRounding:'CEIL_DAY'},
+  lines:[{itemId:'zzz_haff',quantity:'1000000',unit:'HAFF_BASE',pricingKind:'HAFF_RATIO',customerTier:'STANDARD'},
+   {itemId:'aaa_item',quantity:'1',unit:'PIECE',pricingKind:'FIXED_UNIT',unitQuantity:'1',buyerUnitAmount:'0.05',customerTier:'STANDARD'}]});
+ assert(base.quotable);
+ const rows=[{item_id:'aaa_item',pricing_kind:'FIXED_UNIT' as const,unit_quantity:'1',buyer_unit_amount:'0.05',owner_unit_amount:null,item_unit:'PIECE',item_enabled:true},
+  {item_id:'extra',pricing_kind:'FIXED_UNIT' as const,unit_quantity:'1',buyer_unit_amount:'1.23',owner_unit_amount:null,item_unit:'PIECE',item_enabled:true}];
+ const basis=freezeSettlementPricing(base.quote,'0.90',rows,'0.10');
+ assert.equal(basis.schema,'settlement-pricing-v3');assert.equal(basis.fixedFeeRate,'0.1');
+ assert.equal(basis.items.find(item=>item.itemId==='aaa_item')!.ownerUnitAmount,'0.05');
+ assert.equal(basis.items.find(item=>item.itemId==='extra')!.buyerUnitAmount,'1.23');
+ assert.throws(()=>freezeSettlementPricing(base.quote,'0.89',rows,'0.10'));
+ const selected=applyTotalDiscountToQuote(base.quote,'0.90');assert(selected);
+ const quote=selected.quote,personal={schema:'personal-quote-v5',userId:'renter'};
+ const signed=(settlementPricing:typeof basis)=>createHash('sha256').update(canonicalize({...personal,quote,settlementPricing})).digest('hex');
+ const read=load(readFileSync(resolve(tree,path),'utf8'),'frozenSettlementPricing');
+ const order={quote:{...quote,personal,settlementPricing:basis,confirmationDigest:signed(basis)}};
+ assert.equal(read(order).schema,'settlement-pricing-v3');
+ const toLine=(line:typeof quote.lines[number]):SettlementInventoryLine=>{
+  const ratio=quote.pricingInputs.exactRatios.find(item=>item.itemId===line.itemId),item=basis.items.find(entry=>entry.itemId===line.itemId);
+  return {itemId:line.itemId,unit:line.unit,pricingKind:line.pricingKind,openingQuantity:line.quantity,remainingQuantity:'0',unitQuantity:line.unitQuantity,
+   buyerUnitAmount:line.buyerUnitAmount.amount,ownerUnitAmount:line.ownerUnitAmount.amount,prepaidBuyerAmount:line.buyerAmount.amount,prepaidOwnerAmount:line.ownerAmount.amount,
+   ...(ratio?{exactRatio:ratio,baseHaffBuyerRatio:{numerator:basis.haff.buyerNumerator,denominator:basis.haff.buyerDenominator}}:{}),
+   ...(item?{baseBuyerUnitAmount:item.buyerUnitAmount,baseOwnerUnitAmount:item.ownerUnitAmount}:{})};
+ };
+ const haff=quote.lines.find(line=>line.pricingKind==='HAFF_RATIO')!,item=quote.lines.find(line=>line.pricingKind==='FIXED_UNIT')!;
+ const settled=computeSettlement({orderId:'order',settlementVersionId:'settlement',openingVersionId:'opening',quoteDigest:'quote',paymentDigest:'payment',
+  roundingPolicy:SETTLEMENT_ROUNDING_POLICY,feePolicyVersion:'payout',renterUserId:'renter',ownerUserId:'owner',rentalStarted:true,endReason:'NORMAL',
+  depositAmount:'0.00',capturedAmount:'0.09',fullPayout:'NOT_SELECTED',fullPayoutPolicyRef:null,pricingMode:'FIXED_FEE_TOTAL_V1',fixedFeeRate:basis.fixedFeeRate,
+  totalPayableRatio:basis.payableRatio,haff:toLine(haff),items:[toLine(item)]});
+ assert.equal(settled.ok,true,settled.reasons.join(','));assert.equal(settled.amounts!.ownerNet.amount,'0.09');
+ assert.equal(settled.amounts!.platformServiceFee?.amount,'0.01');assert.equal(settled.amounts!.membershipDiscount?.amount,'0.01');
+ const changed=structuredClone(basis);changed.fixedFeeRate='0.2';
+ assert.throws(()=>read({quote:{...quote,personal,settlementPricing:changed,confirmationDigest:signed(changed)}}));
+ const changedHaff=structuredClone(basis);changedHaff.haff.buyerNumerator='999';
+ assert.throws(()=>read({quote:{...quote,personal,settlementPricing:changedHaff,confirmationDigest:signed(changedHaff)}}));
+ const changedUnit=structuredClone(basis);changedUnit.items.find(item=>item.itemId==='aaa_item')!.buyerUnitAmount='0.06';
+ assert.throws(()=>read({quote:{...quote,personal,settlementPricing:changedUnit,confirmationDigest:signed(changedUnit)}}));
 });
 
 test('actual-consumption inputs add only item types from the frozen order price list',()=>{

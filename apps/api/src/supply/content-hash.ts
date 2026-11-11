@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { decimalToBigInt, divideToScale, multiplyDecimal, parseNonNegativeDecimal, parseSignedDecimal, formatDecimalAtScale, formatScaledInteger } from "./decimal";
 import { CUSTOMER_TIERS, DeltaDeclarationError, normalizeDeltaAttributes, normalizeRentalPricing } from "./delta-rental";
 import { legacyPriceInteger, quoteLegacyHaff } from "./legacy-listed-pricing";
+import { calculateFixedFee, FIXED_FEE_ALGORITHM } from "./fixed-fee";
 import type { InternalQuote } from "./pricing";
 
 export class ContentHashError extends Error {}
@@ -37,7 +38,7 @@ export type ContentRuleRefs = {
 };
 
 export type ContentPayloadInput = {
-  schemaVersion: 1 | 2 | 3;
+  schemaVersion: 1 | 2 | 3 | 4;
   accountId: string;
   gameId: string;
   declaration: ContentDeclaration;
@@ -92,7 +93,7 @@ export function normalizeTime(value: string | null): string | null {
 export function normalizeQuote(value: Record<string, unknown> | InternalQuote): InternalQuote {
   const q = value as InternalQuote;
   fields(value, ["schemaVersion", "currency", "priceVersionId", "ruleReleaseId", "mode", "lines", "resourceTotal", "ownerTotal", "platformFullProfit", "tenantDeposit", "publisherBailRequirement", "termSeconds", "expiryDisclosures", "unitAmountsInformational", "roundingPolicy", "pricingInputs", ...(q.schemaVersion === 3 ? ["quoteSource", "legacyQuote"] : [])]);
-  if (![1, 2, 3].includes(q.schemaVersion) || q.currency !== "CNY" || !["SPREAD", "PERCENT"].includes(q.mode) || !Array.isArray(q.lines)) throw new ContentHashError("Invalid quote");
+  if (![1, 2, 3, 4].includes(q.schemaVersion) || q.currency !== "CNY" || !["SPREAD", "PERCENT"].includes(q.mode) || !Array.isArray(q.lines)) throw new ContentHashError("Invalid quote");
   if (q.schemaVersion === 3) {
     if (q.quoteSource !== "LEGACY_QUOTED" || !q.legacyQuote) throw new ContentHashError("Legacy quote source is missing");
     validateLegacyProvenance(q.legacyQuote);
@@ -108,8 +109,8 @@ export function normalizeQuote(value: Record<string, unknown> | InternalQuote): 
     return { ...l, quantity: integerText(l.quantity), unitQuantity: integerText(l.unitQuantity), buyerUnitAmount: amount(l.buyerUnitAmount, 8), ownerUnitAmount: amount(l.ownerUnitAmount, 8), buyerAmount: amount(l.buyerAmount, 2), ownerAmount: amount(l.ownerAmount, 2), platformAmount: amount(l.platformAmount, 2) };
   }), (l) => l.itemId);
   const p = q.pricingInputs;
-  if (q.schemaVersion === 1 && p.haffRatioSchema === "haff-ratio-v2") throw new ContentHashError("Compatibility quote requires schema 2");
-  fields(p, ["haffRatioSchema", "conditions", "denominators", "spreadDelta", "commissionRate", "exactRatios", "roundingPolicy", "depositPolicy", "reasonCodes", ...(q.schemaVersion !== 1 ? ["compatibility"] : [])]);
+  if (q.schemaVersion === 1 && ["haff-ratio-v2", "haff-ratio-v3"].includes(p.haffRatioSchema ?? "")) throw new ContentHashError("Compatibility quote requires a later schema");
+  fields(p, ["haffRatioSchema", "conditions", "denominators", "spreadDelta", "commissionRate", "exactRatios", "roundingPolicy", "depositPolicy", "reasonCodes", ...(q.schemaVersion !== 1 ? ["compatibility"] : []), ...(q.schemaVersion === 4 ? ["fixedFeeAlgorithm", "fixedFeeGrossCents"] : [])]);
   if (q.schemaVersion === 2) {
     const c = p.compatibility;
     if (!c || q.mode !== "SPREAD" || p.haffRatioSchema !== "haff-ratio-v2") throw new ContentHashError("Invalid compatibility quote");
@@ -124,6 +125,47 @@ export function normalizeQuote(value: Record<string, unknown> | InternalQuote): 
     fields(c, ["rentalMode", "customerTier", "ownerRatioB"]);
     if (!["ordinary", "custom", "fast"].includes(c.rentalMode) || c.customerTier !== "STANDARD") throw new ContentHashError("Invalid legacy quote inputs");
     legacyPriceInteger(c.ownerRatioB, false);
+  }
+  if (q.schemaVersion === 4) {
+    const c = p.compatibility;
+    if (!c || q.mode !== "PERCENT" || p.haffRatioSchema !== "haff-ratio-v3" || p.fixedFeeAlgorithm !== FIXED_FEE_ALGORITHM
+        || p.spreadDelta !== null || typeof p.commissionRate !== "string" || !p.denominators || q.unitAmountsInformational !== true
+        || typeof p.fixedFeeGrossCents !== "string" || !/^(0|[1-9]\d{0,23})$/.test(p.fixedFeeGrossCents))
+      throw new ContentHashError("Invalid fixed-fee quote");
+    fields(c, ["rentalMode", "customerTier", "baseRatioC", "ownerRatioB", "memberDelta"]);
+    if (!["ordinary", "custom", "fast"].includes(c.rentalMode) || c.customerTier !== "STANDARD"
+        || !("baseRatioC" in c) || !("memberDelta" in c) || decimalText(c.memberDelta) !== "0"
+        || decimalText(c.ownerRatioB) !== decimalText(p.denominators.buyer)
+        || decimalText(p.denominators.owner) !== decimalText(p.denominators.buyer)) throw new ContentHashError("Invalid fixed-fee inputs");
+    let allocation: ReturnType<typeof calculateFixedFee>;
+    try {
+      if (parseNonNegativeDecimal(c.baseRatioC, 8, "base ratio").value <= 0n
+          || parseNonNegativeDecimal(p.denominators.buyer, 8, "buyer ratio").value <= 0n) throw new Error();
+      const haff = lines.filter((line) => line.pricingKind === "HAFF_RATIO");
+      if (haff.length !== 1 || haff[0]!.unit !== "HAFF_BASE" || haff[0]!.unitQuantity !== "1000000") throw new Error();
+      allocation = calculateFixedFee(lines.map((line) => {
+        const quantity = parseNonNegativeDecimal(line.quantity, 0, "quantity");
+        const unitQuantity = parseNonNegativeDecimal(line.unitQuantity, 0, "unit quantity");
+        if (unitQuantity.value <= 0n) throw new Error();
+        if (line.pricingKind === "HAFF_RATIO") return { itemId: line.itemId,
+          grossCents: divideToScale({ value: quantity.value * 100n, scale: 0 },
+            multiplyDecimal({ value: 1000000n, scale: 0 }, parseNonNegativeDecimal(p.denominators!.buyer, 8, "buyer ratio")), 2).value };
+        if (line.pricingKind !== "FIXED_UNIT" || !["ROUND", "PIECE", "DAY"].includes(line.unit)) throw new Error();
+        return { itemId: line.itemId, grossCents: divideToScale(multiplyDecimal(quantity,
+          parseNonNegativeDecimal(line.buyerUnitAmount.amount, 8, "buyer unit")), unitQuantity, 2).value };
+      }), p.commissionRate);
+    } catch { throw new ContentHashError("Invalid fixed-fee rate or basis"); }
+    const cents = (v: string) => decimalToBigInt(parseNonNegativeDecimal(v, 2, "fixed quote amount"), 2);
+    const buyer = lines.reduce((sum, line) => sum + cents(line.buyerAmount.amount), 0n);
+    const owner = lines.reduce((sum, line) => sum + cents(line.ownerAmount.amount), 0n);
+    const platform = lines.reduce((sum, line) => sum + cents(line.platformAmount.amount), 0n);
+    if (buyer !== cents(q.resourceTotal.amount) || owner !== cents(q.ownerTotal.amount)
+        || platform !== cents(q.platformFullProfit.amount) || buyer !== owner + platform
+        || allocation.grossCents !== BigInt(p.fixedFeeGrossCents) || buyer > allocation.grossCents
+        || owner !== allocation.grossCents - allocation.feeCents
+        || allocation.lines.some((line, index) => line.ownerCents !== cents(lines[index]!.ownerAmount.amount))
+        || lines.some((line) => cents(line.buyerAmount.amount) !== cents(line.ownerAmount.amount) + cents(line.platformAmount.amount)))
+      throw new ContentHashError("Fixed-fee quote totals do not balance");
   }
   if (p.conditions) fields(p.conditions, ["safeBoxCode", "vitLevel", "bearLevel", "termOptionCode", "pricingOptionCode"]);
   if (p.denominators) fields(p.denominators, ["owner", "buyer"]);
@@ -156,7 +198,7 @@ function ensureUnique(values: readonly string[], label: string): void {
   }
 }
 
-export function normalizeDeclaration(declaration: ContentDeclaration, schemaVersion: 1 | 2 | 3 = 1): ContentDeclaration {
+export function normalizeDeclaration(declaration: ContentDeclaration, schemaVersion: 1 | 2 | 3 | 4 = 1): ContentDeclaration {
   fields(declaration, ["title", "description", "attributes", "inventory", "skins", "entitlements", "termOptionCode", "pricingOptionCode", "mediaBindings"]);
   for (const media of declaration.mediaBindings) { fields(media, ["assetId", "byteHash", "purpose", "position"]); if (!Number.isSafeInteger(media.position) || media.position < 0) throw new ContentHashError("Invalid position"); }
   ensureUnique(declaration.inventory.map((item) => item.itemId), "inventory");
@@ -165,7 +207,7 @@ export function normalizeDeclaration(declaration: ContentDeclaration, schemaVers
   ensureUnique(declaration.mediaBindings.map((item) => `${item.purpose}:${item.position}:${item.assetId}`), "mediaBindings");
   let attributes: Record<string, unknown>;
   try {
-    if (schemaVersion === 2 || schemaVersion === 3) {
+    if (schemaVersion === 2 || schemaVersion === 3 || schemaVersion === 4) {
       const { rentalPricing, ...existing } = declaration.attributes;
       attributes = { ...normalizeDeltaAttributes(existing), rentalPricing: normalizeRentalPricing(rentalPricing) };
     } else attributes = normalizeDeltaAttributes(declaration.attributes);
@@ -226,9 +268,9 @@ export function normalizeContentPayload(input: ContentPayloadInput): ContentPayl
   fields(input.ruleRefs, ["releaseId", "priceVersionId", "termVersionId", "agreementVersionId", "agreementDigest", "catalogRevision"]);
   if (Object.values(input.ruleRefs).some((value) => typeof value !== "string")) throw new ContentHashError("Invalid rule reference");
   if (input.ruleRefs.catalogRevision !== undefined && !/^(0|[1-9]\d*)$/.test(input.ruleRefs.catalogRevision)) throw new ContentHashError("Invalid catalog revision");
-  if (![1, 2, 3].includes(input.schemaVersion) || input.quoteValues.schemaVersion !== input.schemaVersion) throw new ContentHashError("Invalid content schema");
+  if (![1, 2, 3, 4].includes(input.schemaVersion) || input.quoteValues.schemaVersion !== input.schemaVersion) throw new ContentHashError("Invalid content schema");
   if (input.schemaVersion !== 3 && (input.quoteSource !== undefined || input.legacyQuote !== undefined)) throw new ContentHashError("Legacy source requires content schema 3");
-  if (input.schemaVersion === 2) {
+  if (input.schemaVersion === 2 || input.schemaVersion === 4) {
     const choice = normalizeRentalPricing(input.declaration.attributes.rentalPricing);
     const quote = normalizeQuote(input.quoteValues);
     if (quote.pricingInputs.compatibility?.customerTier !== "STANDARD" || choice.rentalMode !== quote.pricingInputs.compatibility.rentalMode || (choice.ownerRatioB !== undefined && choice.ownerRatioB !== decimalText(quote.pricingInputs.compatibility.ownerRatioB))) throw new ContentHashError("Declaration and quote pricing disagree");

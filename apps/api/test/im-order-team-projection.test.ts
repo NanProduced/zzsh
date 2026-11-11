@@ -7,6 +7,9 @@ import * as authSecurity from "../src/auth/auth-security";
 import * as userIdentity from "../src/auth/user-identity";
 import { buildYunxinIdentityMarker, deriveYunxinAccountId } from "../src/im/identity-lifecycle";
 import { projectFrozenInventory, projectOrderTerms, projectOrderTeamMembers, readOrderTeamAccess, terminalSendWindow, type OrderTeamActor, type OrderTeamMemberRow } from "../src/im/order-team-access";
+import { computeDeltaQuote } from "../src/supply/pricing";
+import { FIXED_FEE_ALGORITHM } from "../src/supply/fixed-fee";
+import { compatRule } from "./pricing-compat-fixture";
 
 test("order member avatars use managed paths and never resurrect legacy external images", () => {
   const base = { party: "BUYER", state: "JOINED", platform_subject_id: "user_1", identity_kind: "USER", realm: "user", account_id: "im_user_1", status: "READY", identity_marker: "fixture", name: "User" } as const;
@@ -291,6 +294,22 @@ const TERMS_QUOTE = {
 };
 const TERMS_NAMES = new Map([["item_haff", "哈夫币"], ["item_ammo", "巴雷特子弹"]]);
 const TERMS_ITEM_ROWS = [...TERMS_NAMES].map(([id, name]) => ({ id, name }));
+test("order terms accept a validated fixed-fee quote and reject a modified fee basis", () => {
+  const {compatibility,...rule}=compatRule("47");
+  const result=computeDeltaQuote({priceVersionId:"fixed-price",mode:"PERCENT",fixedFeeAlgorithm:FIXED_FEE_ALGORITHM,commissionRate:"0.1",customerTier:"STANDARD",
+    roundingPolicy:"HALF_UP_CENT_V1",haffRule:{...rule,schema:"haff-ratio-v3",fixedModes:compatibility!.modes},
+    conditions:{safeBoxCode:"box-a",vitLevel:6,bearLevel:6,termOptionCode:"daily-10m",rentalPricing:{rentalMode:"ordinary"}},
+    lines:[{itemId:"item_haff",quantity:"100000000",unit:"HAFF_BASE",pricingKind:"HAFF_RATIO",customerTier:"STANDARD"}],
+    termOption:{code:"daily-10m",dailyConsumption:"10000000",durationRounding:"CEIL_DAY"}});
+  assert(result.quotable);
+  const renter=projectOrderTerms(result.quote,TERMS_NAMES,"RENTER"),owner=projectOrderTerms(result.quote,TERMS_NAMES,"OWNER");
+  assert.equal(renter.basis,"QUOTE");assert.equal(owner.basis,"QUOTE");
+  assert.equal(JSON.stringify(renter).includes("ownerAmount"),false);
+  assert.equal(JSON.stringify(owner).includes("buyerAmount"),false);
+  const changed=structuredClone(result.quote);changed.pricingInputs.fixedFeeGrossCents="1";
+  assert.equal(projectOrderTerms(changed,TERMS_NAMES,"RENTER").basis,"UNKNOWN");
+  assert.deepEqual(projectOrderTerms(changed,TERMS_NAMES,"RENTER").lines,[]);
+});
 test("order terms recognize only the specifically marked legacy v3 source", () => {
   const legacy = { ...TERMS_QUOTE, schemaVersion: 3, quoteSource: "LEGACY_QUOTED", legacyQuote: { schema: "legacy-listed-quote-v1", sourceSystem: "legacy_mysql_restore", sourceEntity: "la_rental_accounts" } };
   assert.equal(projectOrderTerms(legacy, TERMS_NAMES, "RENTER").basis, "QUOTE");
