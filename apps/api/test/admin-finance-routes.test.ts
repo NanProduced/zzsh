@@ -304,6 +304,17 @@ test("lookup independently pages subject candidates after documents are exhauste
  const last=await request(env.options,"lookup",`period=0&q=candidate&page=3&snapshot=${encodeURIComponent(first.json.snapshot)}`);assert.equal(last.status,200);assert.equal(last.json.subjects.length,5);assert.equal(last.json.subjects[0].id,"candidate-40");assert.equal(last.json.hasMore,false);assert.deepEqual(last.json.documents,[]);
 });
 
+test("finance lookup matches usernames and display usernames without changing returned subject names",async t=>{
+ const subjects=[{id:'candidate-a',name:'甲',username:'synthetic-login',displayUsername:'别名甲'},
+  {id:'candidate-b',name:'乙',username:'other-login',displayUsername:'展示别名'}];
+ const fixture=new FinanceSqlFixture({subjects}),env=environment(undefined,fixture);t.after(()=>fixture.close());
+ for(const [query,id,name] of [['synthetic-login','candidate-a','甲'],['展示别名','candidate-b','乙']]){
+  const response=await request(env.options,'lookup','period=0&q='+encodeURIComponent(query!));
+  assert.equal(response.status,200);assert.equal(response.json.subjectCount,1);
+  assert.deepEqual(response.json.subjects,[{id,name}]);
+ }
+});
+
 test("lookup retains the 20000 matched-entry guard inside a selected document",async t=>{
  const ledger=Array.from({length:20001},(_,n)=>({id:"line-"+n,account_code:"WALLET_AVAILABLE",subject_id:"u1",subject_name:"用户一",delta:"1",at:"2026-10-03T00:00:00.000000Z",event_kind:"SETTLEMENT",basis_id:"one-large-document",order_id:"one-large-document"}));
  const fixture=new FinanceSqlFixture({ledger}),env=environment(undefined,fixture);t.after(()=>fixture.close());
@@ -367,7 +378,7 @@ test("source-content version invalidates additions, deletions and non-last off-p
   ["wallet-revision","INSERT INTO zzsh_order.wallet_revision VALUES('u1','1','2')"],
   ["wallet-coverage","INSERT INTO zzsh_order.wallet_coverage(user_id,basis_id,coverage_version) VALUES('u1','basis1','1')"],
   ["opening-basis","INSERT INTO zzsh_order.finance_opening_basis(id,source_digest,covered_set_digest,source_cutoff) VALUES('basis1','source','covered-set','cutoff')"],
-  ["economic-root","INSERT INTO zzsh_order.finance_economic_root(id,source_digest,policy_version) VALUES('root1','source','policy1')"],
+  ["economic-root","INSERT INTO zzsh_order.finance_economic_root(id,source_digest,policy_version,source_kind) VALUES('root1','source','policy1','LEGACY_OPENING')"],
   ["posting-version","INSERT INTO zzsh_order.settlement_posting(id,version_hash) VALUES('post1','changed-version')"],
   ["withdrawal-version","UPDATE zzsh_order.withdrawal_intent SET operation_version='2',state='PROCESSING' WHERE id='w1'"],
   ["provider-fact","INSERT INTO zzsh_order.withdrawal_provider_fact VALUES('fact1','source-evidence')"],
