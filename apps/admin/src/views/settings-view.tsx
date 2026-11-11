@@ -1,3 +1,5 @@
+import type { ReactNode } from "react";
+
 import {
   AlertCircleIcon,
   CheckIcon,
@@ -26,6 +28,8 @@ type SettingsViewProps = {
   urlTheme?: Theme | null;
   onExitPreview?: () => void;
   onOpenPath: (path: string, title?: string) => void;
+  /** 与侧栏就地编辑态等价的兜底面板，由设置页按当前账号权限装配。 */
+  navGroupPanel?: ReactNode;
 };
 
 export function SettingsView({
@@ -38,6 +42,7 @@ export function SettingsView({
   urlTheme = null,
   onExitPreview,
   onOpenPath,
+  navGroupPanel,
 }: SettingsViewProps) {
   const systemTheme = getSystemTheme();
   const systemIsDark = systemTheme === "dark";
@@ -358,6 +363,7 @@ export function SettingsView({
           </div>
         </div>
       </div>
+      {navGroupPanel}
     </div>
   );
 }

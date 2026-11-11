@@ -1,5 +1,6 @@
+import { useEffect, useState } from "react";
 import { managedProfileImage } from "@zzsh/ui/profile-image";
-import { ChevronsUpDownIcon, LogOutIcon, SettingsIcon, ShieldIcon } from "lucide-react";
+import { ChevronsUpDownIcon, LogOutIcon, SettingsIcon, ShieldIcon, SlidersHorizontalIcon } from "lucide-react";
 
 import { BrandLogo } from "../components/brand-logo";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
@@ -24,6 +25,8 @@ import type { SessionSnapshot } from "../api";
 import { BossCrest, useApprovalPendingCount } from "./boss-touches";
 
 import { workspaceMenuItems } from "./nav-config";
+import { orderNavGroups } from "./nav-group-order.ts";
+import { NavGroupEditor, useNavGroupOrder } from "./nav-group-order-panel.tsx";
 import { WorkspaceNavItem } from "./nav-item";
 import type { NavLocation } from "./nav-path";
 import type { NavPermission } from "./tab-model";
@@ -41,17 +44,36 @@ export function WorkspaceSidebar({
   onSignOut: () => void;
   refreshNonce?: number;
 }) {
-  const { state, isMobile } = useSidebar();
+  const { state, isMobile, setOpen, setOpenMobile } = useSidebar();
+  const [editing, setEditing] = useState(false);
   const showMark = !isMobile && state === "collapsed";
   const nav: NavPermission = { isBoss: snapshot.security.isBoss, permissions: snapshot.permissions };
   const canSeeApprovals = nav.isBoss
     || ["approval.request.read", "approval.request.approve", "approval.template.read", "approval.audit.read"].some((code) => nav.permissions.includes(code));
   const approvalPending = useApprovalPendingCount(canSeeApprovals, refreshNonce);
+  // 角标先挂到审批中心，再套用分组顺序，避免排序把待办数弄丢。
   const menuItems = workspaceMenuItems(nav).map((item) =>
     item.kind === "approvals" && approvalPending ? { ...item, badge: approvalPending } : item);
+  const orderController = useNavGroupOrder(snapshot.adminUserId, menuItems);
+  const orderedItems = orderNavGroups(menuItems, orderController.order);
   const name = snapshot.user.name || snapshot.user.displayUsername || snapshot.user.username || "管理员";
   const account = snapshot.user.displayUsername || snapshot.user.username || "";
   const initial = name.slice(0, 1).toUpperCase();
+
+  // 分组标题在折叠成分图标态时是隐藏的，编辑态必须有展开的侧栏才能落地。
+  useEffect(() => {
+    if (!editing) return;
+    if (isMobile) setOpenMobile(true);
+    else if (state === "collapsed") setOpen(true);
+  }, [editing, isMobile, state, setOpen, setOpenMobile]);
+
+  const toggleEditing = () => {
+    if (!editing) {
+      if (isMobile) setOpenMobile(true);
+      else setOpen(true);
+    }
+    setEditing(!editing);
+  };
 
   return (
     <Sidebar collapsible="icon">
@@ -70,11 +92,15 @@ export function WorkspaceSidebar({
         </button>
       </SidebarHeader>
       <SidebarContent>
-        <SidebarMenu className="mt-2 mb-2 gap-0.5 px-2">
-          {menuItems.map((item) => (
-            <WorkspaceNavItem key={`${item.label}-${item.path ?? "title"}`} item={item} location={location} onNavigate={onNavigate} />
-          ))}
-        </SidebarMenu>
+        {editing ? (
+          <NavGroupEditor controller={orderController} items={menuItems} onDone={() => setEditing(false)} />
+        ) : (
+          <SidebarMenu className="mt-2 mb-2 gap-0.5 px-2">
+            {orderedItems.map((item) => (
+              <WorkspaceNavItem key={`${item.label}-${item.path ?? "title"}`} item={item} location={location} onNavigate={onNavigate} />
+            ))}
+          </SidebarMenu>
+        )}
       </SidebarContent>
       <SidebarFooter className="border-t p-1">
         <SidebarMenu>
@@ -113,6 +139,10 @@ export function WorkspaceSidebar({
                 <DropdownMenuItem onClick={() => onNavigate("/settings")}>
                   <SettingsIcon />
                   <span>设置</span>
+                </DropdownMenuItem>
+                <DropdownMenuItem onClick={toggleEditing} aria-label={editing ? "完成侧栏编辑" : "自定义侧栏分组顺序"}>
+                  <SlidersHorizontalIcon />
+                  <span>{editing ? "完成侧栏编辑" : "自定义侧栏"}</span>
                 </DropdownMenuItem>
                 {/* 与侧栏「账号安全」入口同一地址：两个入口都指向 /settings?section=security，任一状态下只有一个入口点亮。 */}
                 <DropdownMenuItem onClick={() => onNavigate("/settings?section=security")}>

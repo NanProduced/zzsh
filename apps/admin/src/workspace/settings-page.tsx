@@ -13,6 +13,8 @@ import { readProfile, readSessions, readSecurityActivity, revokeOtherSessions, r
 import type { SessionSnapshot } from "../api";
 import { isLocalSettingsPreview } from "./settings-preview";
 import type { settingsPreviewData } from "./settings-preview-data";
+import { workspaceMenuItems } from "./nav-config.ts";
+import { NavGroupOrderPanel } from "./nav-group-order-panel.tsx";
 
 const SECTIONS = [
   { id: "appearance", label: "外观与偏好", icon: PaletteIcon },
@@ -67,7 +69,14 @@ export function SettingsWorkspace(props: Props) {
     onDirtyChange, onSessionRefresh: props.onRefresh,
   };
   let content;
-  if (section === "appearance") content = <SettingsView {...props} onOpenPath={(path, title) => onOpenPath(path === "/account" ? pathFor("security") : path, title)} />;
+  if (section === "appearance") content = <SettingsView
+    {...props}
+    navGroupPanel={<NavGroupOrderPanel
+      adminUserId={snapshot.adminUserId}
+      items={workspaceMenuItems({ isBoss: snapshot.security.isBoss, permissions: snapshot.permissions })}
+    />}
+    onOpenPath={(path, title) => onOpenPath(path === "/account" ? pathFor("security") : path, title)}
+  />;
   else if (section === "security") content = <SecuritySelfView
     adminUserId={snapshot.adminUserId}
     accountLabel={[snapshot.user.displayUsername ?? snapshot.user.username, snapshot.user.name].filter(Boolean).join(" · ")}

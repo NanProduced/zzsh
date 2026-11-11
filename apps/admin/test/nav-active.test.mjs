@@ -94,7 +94,8 @@ test("带 query 的入口只在对应分区点亮，旧入口与分区入口互�
 test("侧栏菜单保留全部既有入口与分组命名一致性", () => {
   const items = workspaceMenuItems(boss);
   const titles = items.filter((item) => item.isTitle).map((item) => item.label);
-  assert.deepEqual(titles, ["工作区", "客户服务", "会员运营", "分销", "系统与安全", "供给与目录", "供给与规则", "三角洲行动", "运营内容", "资金", "交易", "用户与会员", "审批与审计", "个人"]);
+  // 「会员与礼遇」已并入「用户与会员」，不再有只有一项的「会员运营」分组。
+  assert.deepEqual(titles, ["工作区", "客户服务", "分销", "系统与安全", "供给与目录", "供给与规则", "三角洲行动", "运营内容", "资金", "交易", "用户与会员", "审批与审计", "个人"]);
   for (const title of titles) {
     assert.equal(items.filter((item) => item.path).some((item) => item.label === title), false, `组名不得与组内入口同名：${title}`);
   }

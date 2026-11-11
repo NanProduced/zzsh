@@ -44,7 +44,35 @@ export type WorkspaceMenuItem = {
   items?: WorkspaceMenuItem[];
   /** 导航待办角标（如审批中心「待我处理」数量）；没有待办时不设置。 */
   badge?: number;
+  /** 分组标题的稳定标识，用于保存侧栏顺序；展示文案改动不会让已保存顺序失效。 */
+  groupId?: string;
 };
+
+/**
+ * 分组标题文案 → 固定标识。菜单本身仍是「标题项 + 跟随页面」的扁平数组，
+ * 排序由 nav-group-order.ts 按标题切片完成，页面搜索与权限派生逻辑都不受影响。
+ * 「工作区」固定最前、「个人」固定最后，两者不参与排序。
+ */
+export const NAV_GROUP_IDS: Record<string, string> = {
+  工作区: "workspace",
+  客户服务: "support",
+  分销: "distribution",
+  系统与安全: "system",
+  供给与目录: "supply",
+  供给与规则: "supply-rules",
+  三角洲行动: "delta",
+  运营内容: "content",
+  资金: "finance",
+  交易: "orders",
+  用户与会员: "users",
+  审批与审计: "audit",
+  个人: "personal",
+};
+
+export const NAV_FIXED_FIRST_GROUP_ID = "workspace";
+export const NAV_FIXED_LAST_GROUP_ID = "personal";
+/** 默认顺序即上方常量的声明顺序；新增分组只在此登记，即可自动落入默认位置。 */
+export const NAV_GROUP_DEFAULT_ORDER: readonly string[] = Object.values(NAV_GROUP_IDS);
 
 export function workspaceMenuItems(nav: NavPermission): WorkspaceMenuItem[] {
   const has = (code: string) => nav.permissions.includes(code);
@@ -70,9 +98,6 @@ export function workspaceMenuItems(nav: NavPermission): WorkspaceMenuItem[] {
 
   const membershipOps = nav.isBoss || ["membership.policy.draft", "membership.policy.publish", "membership.growth.read.summary"].some(has)
     || has("approval.request.create") && has("membership.entitlement.request");
-  if (membershipOps) {
-    items.push({ label: "会员运营", isTitle: true }, { label: "会员与礼遇", icon: CrownIcon, path: "/membership-growth", kind: "membership-growth" });
-  }
   const distribution: WorkspaceMenuItem[] = [];
   if (nav.isBoss || has("distribution.dashboard.read")) {
     distribution.push(
@@ -165,6 +190,8 @@ export function workspaceMenuItems(nav: NavPermission): WorkspaceMenuItem[] {
   const users: WorkspaceMenuItem[] = [];
   if (has("user.directory.read")) users.push({ label: "用户管理", icon: UsersRoundIcon, path: "/users", kind: "users" });
   if (has("profile.avatar.review") || has("profile.avatar.policy.manage") || nav.isBoss) users.push({ label: "头像审核", icon: ImageIcon, path: "/avatar-reviews", kind: "avatar-review" });
+  // 「会员与礼遇」并入「用户与会员」，不再单独占用一个只有一项的分组。
+  if (membershipOps) users.push({ label: "会员与礼遇", icon: CrownIcon, path: "/membership-growth", kind: "membership-growth" });
   if (users.length > 0) {
     items.push({ label: "用户与会员", isTitle: true }, ...users);
   }
@@ -181,7 +208,7 @@ export function workspaceMenuItems(nav: NavPermission): WorkspaceMenuItem[] {
   }
 
   items.push({ label: "个人", isTitle: true }, { label: "账号安全", icon: ShieldIcon, path: "/settings?section=security", kind: "settings" });
-  return items;
+  return items.map((item) => item.isTitle ? { ...item, groupId: NAV_GROUP_IDS[item.label] ?? item.label } : item);
 }
 
 export function titleForPath(pathname: string): string {
