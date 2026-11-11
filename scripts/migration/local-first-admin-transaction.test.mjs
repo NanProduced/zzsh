@@ -39,6 +39,12 @@ test('unknown commit and failed acknowledgement do not rollback or change the or
   assert.deepEqual(f.sql,['BEGIN','ROLLBACK']);
 });
 
+test('a bad result after COMMIT remains committed and requires readback',async()=>{
+  const f=fixture();f.args.initialize=async()=>null;
+  await assert.rejects(writeFirstAdministrators(f.args),e=>e instanceof FirstAdminTransactionError&&e.outcome==='COMMITTED_READBACK_REQUIRED');
+  assert.deepEqual(f.sql,['BEGIN','COMMIT']);assert.equal(f.states.at(-1),'COMMITTED_READBACK_REQUIRED');
+});
+
 test('readback is a separate read-only snapshot and preserves UNKNOWN',async()=>{
   const f=fixture({readResult:{knowledge:'UNKNOWN',accounts:null}});
   assert.deepEqual(await readFirstAdministratorsSnapshot(f.args),{knowledge:'UNKNOWN',accounts:null});

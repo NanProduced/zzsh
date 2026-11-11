@@ -67,7 +67,7 @@ export async function assertFirstAdminAuthorizationSeeds(client,proof,lockForWri
   }
 }
 
-function verifySource(request,receipt){
+function verifySource(request,receipt,extraPaths=[]){
   const api=isolatedDistributionBuild(root,request.apiDist);noLinks(api);
   assert.deepEqual(files(api,['.js']),request.buildFiles,'FIRST_ADMIN_BUILD_CHANGED');
   assertCommittedApiBuild(root,request.releaseCommit,request.buildFiles);
@@ -78,9 +78,9 @@ function verifySource(request,receipt){
   const proofBytes=readFileSync(join(root,'apps/api/migrations/initial/seed-contracts',request.initialBaseline+'.json'));
   assert.equal(sha(proofBytes),request.initialTailSeedProofSha256,'FIRST_ADMIN_AUTHORIZATION_PROOF_CHANGED');
   const authorizationSeeds=JSON.parse(proofBytes).tables;
-  const paths=['scripts/migration/initialize-first-administrators.mjs','scripts/migration/local-first-admin-transaction.mjs','scripts/migration/business-initial-seeds.mjs',
+  const paths=[...new Set(['scripts/migration/initialize-first-administrators.mjs','scripts/migration/local-first-admin-transaction.mjs','scripts/migration/local-initialization-transaction.mjs','scripts/migration/business-initial-seeds.mjs',
     'scripts/migration/install-round07-schema.mjs','scripts/migration/local-target-registry.mjs','scripts/migration/local-load-checkpoint.mjs',
-    'scripts/migration/local-distribution-qualification-plan.mjs','scripts/local-auth.mjs'];
+    'scripts/migration/local-distribution-qualification-plan.mjs','scripts/local-auth.mjs',...extraPaths])];
   const git=args=>spawnSync('git',args,{cwd:root,encoding:'utf8',windowsHide:true,maxBuffer:1024*1024});
   assert.equal(git(['diff','--quiet','--no-ext-diff',request.releaseCommit,'--',...paths]).status,0,'FIRST_ADMIN_SCRIPT_CHANGED');
   const tracked=git(['ls-tree','-r','--name-only',request.releaseCommit,'--',...paths]);
@@ -88,7 +88,7 @@ function verifySource(request,receipt){
   assert(paths.every(path=>names.has(path)),'FIRST_ADMIN_SCRIPT_NOT_IN_RELEASE');
   return{api,migrations,authorizationSeeds,scriptHashes:Object.fromEntries(paths.map(path=>[path,sha(readFileSync(noLinks(join(root,path))))]))};
 }
-function verifyRequest(refs,{source=false}={}){
+function verifyRequest(refs,{source=false,extraPaths=[]}={}){
   const request=pinned(refs.schemaRequest),receipt=pinned(refs.schemaReceipt);
   const {registered,credentials}=credentialsFor(request.target,request);
   assertFirstAdminSchemaBinding(request,receipt);
@@ -96,9 +96,11 @@ function verifyRequest(refs,{source=false}={}){
   const secret=readFileSync(secretPath(request.maintenanceSecret?.path));
   try{assert(hex(request.maintenanceSecret.sha256)&&sha(secret)===request.maintenanceSecret.sha256,'FIRST_ADMIN_MAINTENANCE_SECRET_CHANGED');}
   finally{secret.fill(0);}
-  const verifiedSource=source?verifySource(request,receipt):null;
+  const verifiedSource=source?verifySource(request,receipt,extraPaths):null;
   return{request,receipt,registered,credentials,...verifiedSource};
 }
+export {privatePath as firstDeploymentPrivatePath,pinned as firstDeploymentPinned,secretPath as firstDeploymentSecretPath,
+  noLinks as firstDeploymentNoLinks,verifyRequest as verifyFirstDeploymentRequest};
 function randomAccounts(){
   const account=name=>({name,password:randomBytes(18).toString('base64url')});
   return{bosses:[account('初始负责人一'),account('初始负责人二')],operations:[account('初始运营一'),account('初始运营二')]};
