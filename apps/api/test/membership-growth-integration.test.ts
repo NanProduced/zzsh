@@ -99,6 +99,9 @@ test("grant and replace validate recipients and lock one subject before checking
       const rule = compatRule(); rule.compatibility!.modes.fast = { enabled: false };
       const client = { async query(sql: string, args: unknown[] = []) {
         queries.push({ sql, args });
+        if (sql.includes("pg_advisory_xact_lock")) return { rows: [] };
+        if (sql.startsWith("SELECT to_char(clock_timestamp()")) return { rows: [{ at: "2026-10-18T00:00:00.000000Z" }] };
+        if (sql.includes("FROM zzsh_supply.pricing_policy_schedule")) return { rows: [] };
         if (sql.includes('FROM "zzsh_iam"."admin_security"')) return { rows: [{ status: "ACTIVE", isBoss: true, passwordChangeRequired: false }] };
         if (sql.includes("FROM zzsh_iam.membership_growth_policy WHERE id=$1")) return { rows: [{ id: "policy-approved", version: 1, policyPayload: policy, sourceRef: "synthetic-cost", ruleReleaseId: "release-1", priceVersionId: "price-v1" }] };
         if (sql.includes("FROM zzsh_supply.rule_release")) return { rows: [{ releaseId: "release-1", priceVersionId: "price-v1", status: "SEALED", mode: "SPREAD", haffRule: rule }] };
@@ -295,6 +298,9 @@ function draftApprovalFixture(policy: GrowthBenefitPolicy = { ...readerPolicy(),
   const inserted: Array<unknown[]> = [];
   const client = {
     query: async (sql: string, args: unknown[] = []) => {
+      if (sql.includes("pg_advisory_xact_lock")) return { rows: [] };
+      if (sql.startsWith("SELECT to_char(clock_timestamp()")) return { rows: [{ at: "2026-10-18T00:00:00.000000Z" }] };
+      if (sql.includes("FROM zzsh_supply.pricing_policy_schedule")) return { rows: [] };
       if (sql.includes('FROM "zzsh_iam"."admin_security"')) return { rows: [{ status: "ACTIVE", isBoss: true, passwordChangeRequired: false }] };
       if (sql.includes("FROM zzsh_supply.rule_release")) return { rows: [{ releaseId: "release-1", priceVersionId: "price-v1", status: "SEALED", mode: "SPREAD", haffRule: compatRule(), ...releasePatch }] };
       if (sql.includes("FROM zzsh_supply.price_line")) return { rows: [{ itemId: "item", unit: "PIECE" }] };

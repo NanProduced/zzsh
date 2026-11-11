@@ -11,6 +11,8 @@ import { canonicalize } from "../supply/content-hash";
 import { projectUnifiedMembershipPricing } from "./membership-unified-pricing";
 import { DELTA_HAFF_FIXED_SCHEMA } from "../supply/delta-rental";
 import { fixedFeeAllowsPayableRatio, parseFixedFeeRates, type FixedFeeRates } from "../supply/fixed-fee";
+import { lockFixedFeePolicyChange } from "./fixed-fee-policy-timeline";
+import { assertFixedFeeMembershipChange } from "../supply/pricing-policy-schedule";
 
 const OPERATION_CODES = new Set(["membership.benefit.policy.publish", "membership.entitlement.grant", "membership.entitlement.replace", "membership.entitlement.revoke"]);
 const ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
@@ -227,6 +229,7 @@ export const executeMembershipGrowthOperation: ApprovalOperationExecutor = async
   if (!effective) conflict("Administrator access is unavailable");
   if (input.operationCode === "membership.benefit.policy.publish") {
     checkBusinessPermission(effective, ADMIN_PERMISSION.membershipPolicyPublish);
+    await lockFixedFeePolicyChange(client);
     const draft = payload.policyDraftId ? await loadDraftPolicyForApproval(client, payload) : null;
     const policy = draft?.policyPayload ?? payloadRecord(payload.policy) as GrowthBenefitPolicy;
     const versionNo = draft?.version ?? payload.versionNo;
@@ -256,6 +259,8 @@ export const executeMembershipGrowthOperation: ApprovalOperationExecutor = async
       const range = entitlementRangeForMode(policy as GrowthBenefitPolicy, kind, mode);
       if (!range || isNotPriced(range) || range.priceVersionId !== priceVersionId) conflict("Entitlement range must bind to the sealed price version");
     }
+    const pricingEffectiveAt = typeof effectiveAtUtc === "string" ? effectiveAtUtc : new Date(effectiveAtUtc).toISOString();
+    await assertFixedFeeMembershipChange(client, { from: pricingEffectiveAt, benefit: { effectiveAt: pricingEffectiveAt, version: String(versionNo), policy: policy as GrowthBenefitPolicy } });
     const id = `growth_policy_${randomUUID().replaceAll("-", "")}`;
     await client.query(`INSERT INTO zzsh_iam.membership_growth_policy (id,version,status,effective_at,rule_release_id,price_version_id,source_ref,policy_schema,policy_payload,payload_hash,approval_request_id,approved_by_admin_id) VALUES ($1,$2,'APPROVED',$3,$4,$5,$6,$7,$8::jsonb,$9,$10,$11)`, [id, versionNo, effectiveAtUtc, ruleReleaseId, priceVersionId, sourceRef, "membership-growth-v1", JSON.stringify(policy), draft?.approvedPayloadHash ?? input.operationPayloadHash, input.requestId, actor.userId]);
     return { resultCode: "MEMBERSHIP_POLICY_PUBLISHED", resultDetail: id };
@@ -275,7 +280,11 @@ export const executeMembershipGrowthOperation: ApprovalOperationExecutor = async
   const scopeKey = text(payload, "scopeKey");
   const gameId = text(payload, "gameId");
   await assertGameScope(client, effective, actor.userId, gameId);
+  await lockFixedFeePolicyChange(client);
   const { candidate, policyId } = await validateMembershipEntitlementPayload(client, payload, input.requestedBy);
+  await assertFixedFeeMembershipChange(client, { from: candidate.startsAt, gameId,
+    entitlement: { startsAt: candidate.startsAt, endsAt: candidate.endsAt, pricing: candidate.pricing },
+    ...(input.operationCode === "membership.entitlement.replace" ? { excludeEntitlementId: text(payload, "replaceEntitlementId") } : {}) });
   await lockEntitlementRecipient(client, candidate, gameId, input.operationCode === "membership.entitlement.replace" ? text(payload, "replaceEntitlementId") : undefined);
   const replacement = input.operationCode === "membership.entitlement.replace" ? await lockReplacementEntitlement(client, payload, candidate, gameId) : null;
   const newId = await insertEntitlement(client, candidate, gameId, input, policyId);

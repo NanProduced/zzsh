@@ -1,4 +1,5 @@
 import { normalizeTime } from "../supply/content-hash";
+import type { PoolClient } from "pg";
 import { fixedFeeAllowsPayableRatio, parseFixedFeeRates, type FixedFeeRates } from "../supply/fixed-fee";
 import { entitlementPricingSummary, validateBenefitPolicy, type GrowthBenefitPolicy, type RentalMode } from "./membership-growth";
 
@@ -17,6 +18,11 @@ const sequence = (value: string) => {
   if (!/^[1-9]\d{0,18}$/.test(value)) throw new Error("invalid version");
   return BigInt(value);
 };
+
+/** Call in the write transaction before reading either side of a fee/benefit change. */
+export async function lockFixedFeePolicyChange(client: Pick<PoolClient, "query">): Promise<void> {
+  await client.query("SELECT pg_advisory_xact_lock(hashtextextended('zzsh:fixed-fee:policy-compatibility',0))");
+}
 
 /** Checks every effective price/policy interval; the caller must supply a complete, locked database snapshot. */
 export function validateFixedFeeTimeline(input: FixedFeeTimelineInput): FixedFeeTimelineResult {
