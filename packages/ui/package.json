@@ -15,6 +15,8 @@
     "./order-team.css": "./src/order-team.css",
     "./content-document": "./src/content-document.tsx",
     "./content-document.css": "./src/content-document.css",
+    "./plate-document": "./src/plate-document.tsx",
+    "./plate-document.css": "./src/plate-document.css",
     "./content-markdown": "./src/content-markdown.tsx",
     "./content-markdown.css": "./src/content-markdown.css",
     "./order-card": "./src/order-card.tsx",

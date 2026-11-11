@@ -1,0 +1,101 @@
+.plate-editor {
+  position: relative;
+  padding-left: 1.75rem;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--background);
+  color: var(--foreground);
+}
+.plate-editor-content {
+  min-height: 12rem;
+  padding: 0.9rem 1rem 0.9rem 0;
+  outline: none;
+  overflow-wrap: break-word;
+}
+.plate-editor-content:focus-visible {
+  outline: none;
+}
+.plate-editor[data-readonly="true"] {
+  padding-left: 1rem;
+  background: color-mix(in srgb, var(--muted) 40%, var(--background));
+}
+
+.plate-editor .plate-toggle {
+  position: relative;
+  padding-left: 1.4rem;
+}
+.plate-toggle-caret {
+  position: absolute;
+  left: 0;
+  top: 0.2em;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.1rem;
+  height: 1.1rem;
+  padding: 0;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--muted-foreground);
+  cursor: pointer;
+}
+.plate-toggle-caret:hover {
+  background: var(--muted);
+}
+.plate-toggle-caret svg {
+  transition: transform 120ms ease;
+}
+.plate-toggle[data-open="true"] > .plate-toggle-caret svg {
+  transform: rotate(90deg);
+}
+.plate-editor .plate-toggle > .plate-toggle-body > :first-child {
+  font-weight: 500;
+}
+
+.plate-editor-notice {
+  margin: 0.4rem 0 0.6rem;
+  padding: 0.35rem 0.6rem;
+  border-radius: 6px;
+  border: 1px solid color-mix(in srgb, var(--destructive) 40%, var(--border));
+  background: color-mix(in srgb, var(--destructive) 10%, var(--background));
+  color: var(--foreground);
+  font-size: 0.8rem;
+}
+
+.plate-editor-content,
+.plate-editor .plate-table-scroll {
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in srgb, var(--muted-foreground) 45%, transparent) transparent;
+}
+.plate-editor-content::-webkit-scrollbar,
+.plate-editor .plate-table-scroll::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+.plate-editor-content::-webkit-scrollbar-thumb,
+.plate-editor .plate-table-scroll::-webkit-scrollbar-thumb {
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--muted-foreground) 40%, transparent);
+}
+.plate-editor-content::-webkit-scrollbar-thumb:hover,
+.plate-editor .plate-table-scroll::-webkit-scrollbar-thumb:hover {
+  background: color-mix(in srgb, var(--muted-foreground) 65%, transparent);
+}
+
+.plate-editor:focus-within {
+  border-color: color-mix(in srgb, var(--admin-ring, var(--primary)) 45%, var(--border));
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--admin-ring, var(--primary)) 16%, transparent);
+}
+.plate-editor [data-slate-placeholder] {
+  color: var(--muted-foreground);
+  opacity: 0.75;
+}
+.plate-editor ::selection {
+  background: color-mix(in srgb, var(--admin-accent, var(--primary)) 28%, transparent);
+}
+@media (prefers-reduced-motion: reduce) {
+  .plate-toggle-caret svg {
+    transition: none;
+  }
+}

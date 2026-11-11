@@ -1,0 +1,13 @@
+export type PlatePreset = "help" | "update" | "notice" | "legal" | "internal";
+export type PlateNode = { type?: string; text?: string; children?: PlateNode[]; [key: string]: unknown };
+export type PlateDocumentEnvelope = { format: "plate"; schemaVersion: 1; preset: PlatePreset; value: PlateNode[] };
+export type PlateValidationError = { path: string; code: string; message: string };
+export declare const PRESETS: PlatePreset[];
+export declare const PALETTE: string[];
+export declare const BLOCK_TYPES: Record<PlatePreset, string[]>;
+export declare function marksFor(preset: PlatePreset): string[];
+export declare function validatePlateDocument(doc: unknown, options: { preset: PlatePreset; mode?: "draft" | "publish" }): { ok: boolean; errors: PlateValidationError[] };
+export declare function extractPlate(doc: PlateDocumentEnvelope): { plainText: string; toc: { id: string; text: string; level: 2 | 3 }[]; mediaIds: string[]; imageIds: string[]; commentIds: string[]; links: string[] };
+export declare function canonicalize(value: unknown, depth?: number): string;
+export declare function plateDigest(doc: PlateDocumentEnvelope): Promise<string>;
+export declare function toPlateEnvelope(value: unknown, preset: PlatePreset): PlateDocumentEnvelope;

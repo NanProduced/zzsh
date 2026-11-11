@@ -2,6 +2,9 @@
 @import "tw-animate-css";
 @custom-variant dark (&:is(.dark *));
 @import "./workspace/workspace.css";
+/* Plate shell semantic tokens (brand/destructive-foreground) must be visible to
+   the main utility compilation; plate-editor.tsx also imports this file. */
+@import "./components/plate/ui/plate-ui-tokens.css";
 @import "../../../assets/fonts/noto-sans-sc/fonts.css";
 
 @theme {

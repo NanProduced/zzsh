@@ -7,6 +7,9 @@ const apiProxy = process.env.ADMIN_API_PROXY ?? "http://127.0.0.1:3102";
 
 export default defineConfig({
   plugins: [react(), tailwindcss()],
+  define: {
+    "globalThis.__PLATE_TRIAL_ENABLED__": JSON.stringify(process.env.VITE_PLATE_TRIAL_ENABLED === "true"),
+  },
   optimizeDeps: {
     include: [
       "@zzsh/content",

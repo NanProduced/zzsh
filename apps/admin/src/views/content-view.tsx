@@ -27,8 +27,9 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogTitle } f
 import { ItemEditor, itemStateLabel } from "./content-item-editor";
 import { ContentMediaTab } from "./content-media-tab";
 import { LegalDocumentsPanel } from "./legal-documents-panel";
+import { PlateTrialTab } from "./plate-trial-tab";
 
-type ContentTab = "rules" | "pages" | "announcement" | "news" | "media" | "legal";
+type ContentTab = "rules" | "pages" | "announcement" | "news" | "media" | "legal" | "plate-trial";
 
 const TAB_META: Record<ContentTab, { label: string; icon: typeof BookOpen }> = {
   rules: { label: "规则与手册", icon: BookOpen },
@@ -37,6 +38,7 @@ const TAB_META: Record<ContentTab, { label: string; icon: typeof BookOpen }> = {
   news: { label: "资讯", icon: Newspaper },
   media: { label: "运营素材", icon: FolderOpen },
   legal: { label: "法律文书", icon: FileText },
+  "plate-trial": { label: "Plate 试用", icon: FileText },
 };
 
 const CONTENT_TABS = Object.keys(TAB_META) as ContentTab[];
@@ -102,6 +104,7 @@ export function ContentView({
     ...(canPlatformRead || canGameRead ? (["news"] as const) : []),
     ...(canPlatformRead ? (["media"] as const) : []),
     ...(canPlatformRead || canPlatformEdit || canPlatformPublish ? (["legal"] as const) : []),
+    ...(canPlatformEdit && globalThis.__PLATE_TRIAL_ENABLED__ === true ? (["plate-trial"] as const) : []),
   ];
   const [tab, setTab] = useState<ContentTab>(() => allowedContentTab(workspaceTab?.query.tab, availableTabs) ?? defaultContentTab(availableTabs));
   const [newsScope, setNewsScope] = useState<"platform" | "game">(
@@ -430,6 +433,7 @@ export function ContentView({
 
       {tab === "media" ? <><ContentStoragePanel /><ContentMediaTab canEdit={canPlatformEdit} canPublish={canPlatformPublish} refreshNonce={refreshNonce} onWriteLockChange={reportWriteLock} /></> : null}
       {tab === "legal" ? <LegalDocumentsPanel snapshot={snapshot} /> : null}
+      {tab === "plate-trial" ? <PlateTrialTab /> : null}
       <Dialog open={createOpen} onOpenChange={open => { if (!creating) setCreateOpen(open); }}><DialogContent><DialogTitle>新建{ITEM_NOUN[itemType]}</DialogTitle><DialogDescription>先创建草稿；保存并发布后进入平台动态。</DialogDescription><Field label={`新建${ITEM_NOUN[itemType]}标题（可留空后编辑）`}><Input value={createTitle} onChange={(event) => setCreateTitle(event.target.value)} maxLength={200} autoFocus disabled={!itemCanEdit || creating} /></Field><DialogFooter><Button type="button" variant="secondary" disabled={creating} onClick={() => setCreateOpen(false)}>取消</Button><Button type="button" loading={creating} disabled={!itemCanEdit || (itemScope === "game" && !gameId)} onClick={() => void createItem()}>创建草稿</Button></DialogFooter></DialogContent></Dialog>
       <Dialog open={tabIntent !== null} onOpenChange={open => { if (!open) setTabIntent(null); }}><DialogContent role="alertdialog"><DialogTitle>离开当前内容？</DialogTitle><DialogDescription>未保存修改将丢失。结果待核对的请求会保留，回到对应内容后继续核对。</DialogDescription><DialogFooter><Button type="button" variant="secondary" autoFocus onClick={() => setTabIntent(null)}>继续编辑</Button><Button type="button" variant="danger" onClick={() => { if (writeLockedRef.current) return; const action = tabIntent; setTabIntent(null); reportDirty(false); action?.(); }}>离开当前内容</Button></DialogFooter></DialogContent></Dialog>
     </div>

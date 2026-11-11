@@ -24,6 +24,10 @@
     "./updates": {
       "types": "./updates.d.ts",
       "default": "./updates.cjs"
+    },
+    "./plate": {
+      "types": "./plate-schema.d.mts",
+      "default": "./plate-schema.mjs"
     }
   },
   "dependencies": {

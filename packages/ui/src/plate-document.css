@@ -1,0 +1,36 @@
+.plate-document {
+  --plate-red: #b91c1c;
+  --plate-orange: #c2410c;
+  --plate-green: #15803d;
+  --plate-blue: #1d4ed8;
+  --plate-gray: #52525b;
+  line-height: 1.75;
+  overflow-wrap: break-word;
+}
+.plate-document > * + * { margin-top: 0.75em; }
+.plate-document h2 { font-size: 1.35em; font-weight: 600; margin-top: 1.5em; }
+.plate-document h3 { font-size: 1.15em; font-weight: 600; margin-top: 1.25em; }
+.plate-document h4 { font-size: 1em; font-weight: 600; margin-top: 1em; }
+.plate-document ul, .plate-document ol { padding-left: 1.5em; }
+.plate-document li[data-indent="2"] { margin-left: 1.25em; }
+.plate-document li[data-indent="3"] { margin-left: 2.5em; }
+.plate-document blockquote { border-left: 3px solid currentColor; padding-left: 0.9em; opacity: 0.85; }
+.plate-document pre { padding: 0.75em 0.9em; border-radius: 6px; background: color-mix(in srgb, currentColor 8%, transparent); overflow-x: auto; }
+.plate-document code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.9em; }
+.plate-document :not(pre) > code { padding: 0.1em 0.35em; border-radius: 4px; background: color-mix(in srgb, currentColor 10%, transparent); }
+.plate-document img { max-width: 100%; height: auto; border-radius: 6px; }
+.plate-image-missing { display: inline-block; padding: 0.35em 0.7em; border: 1px dashed currentColor; border-radius: 6px; opacity: 0.7; font-size: 0.9em; }
+.plate-table-scroll { overflow-x: auto; }
+.plate-document table { border-collapse: collapse; width: 100%; }
+.plate-document th, .plate-document td { border: 1px solid color-mix(in srgb, currentColor 30%, transparent); padding: 0.4em 0.65em; text-align: left; vertical-align: top; }
+.plate-document th { font-weight: 600; background: color-mix(in srgb, currentColor 6%, transparent); }
+.plate-callout { padding: 0.7em 0.9em; border-radius: 6px; border-left: 3px solid var(--plate-blue); background: color-mix(in srgb, var(--plate-blue) 8%, transparent); }
+.plate-callout[data-variant="warning"] { border-left-color: var(--plate-orange); background: color-mix(in srgb, var(--plate-orange) 10%, transparent); }
+.plate-toggle > summary { cursor: pointer; font-weight: 500; }
+.plate-comment { background: color-mix(in srgb, var(--plate-orange) 22%, transparent); border-radius: 2px; }
+.plate-todo { list-style: none; display: flex; gap: 0.5em; align-items: baseline; }
+.plate-todo-list { padding-left: 0.25em; }
+.plate-todo[data-checked="true"] { opacity: 0.65; text-decoration: line-through; }
+.plate-toc { padding: 0.6em 0.9em; border: 1px solid color-mix(in srgb, currentColor 20%, transparent); border-radius: 6px; font-size: 0.9em; }
+.plate-toc ul { padding-left: 1.1em; }
+.plate-toc li[data-level="3"] { margin-left: 1em; }

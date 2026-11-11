@@ -1,0 +1,20 @@
+/* Semantic tokens the Plate registry shell expects but admin styles.css does
+   not map yet. Values reference admin variables so both the dark default and
+   :root[data-theme="light"] / .workspace-root overrides stay in effect.
+   Imported by plate-editor.tsx; scoped to the Plate shell assembly. */
+@theme inline {
+  /* block-draggable drop line, block-selection overlay, editor selection area */
+  --color-brand: var(--admin-accent);
+  /* shadcn button destructive variant; admin has no --destructive-foreground,
+     near-white reads on the red destructive fill in both themes. */
+  --color-destructive-foreground: oklch(0.985 0 0);
+}
+
+/* Registry stand-in for the tailwind-scrollbar-hide plugin (not installed):
+   same effect, no new dependency. Used by floating-toolbar / combobox menus. */
+@utility scrollbar-hide {
+  scrollbar-width: none;
+  &::-webkit-scrollbar {
+    display: none;
+  }
+}
