@@ -18,6 +18,16 @@ test('legacy continuation BFF forwards the verified opening basis for the bound 
  }finally{globalThis.fetch=old;}
 });
 
+test('legacy order BFF preserves individual old payment attempts without claiming channel arrival',async()=>{
+ const old=globalThis.fetch, orderId='legacy_order_'+'a'.repeat(40),path=['legacy',orderId];
+ const legacyPaymentHistory={records:[{id:'1',amount:{amount:'555.00',currency:'CNY'},status:'RECORDED_PAID',method:'WECHAT',recordedAt:'2026-10-16T08:00:00Z',paidAt:'2026-10-16T08:01:00Z'}],incomplete:false,coverage:'MATCHED_RECORDS_ONLY',channelArrival:'UNKNOWN'};
+ globalThis.fetch=async(url)=>String(url).endsWith('/get-session')?Response.json({user:{id:'user_a'}}):Response.json({order:{id:orderId,legacyPaymentHistory}});
+ try{
+  const response=await GET(input(path,{headers:{'x-zzsh-expected-user-id':'user_a',cookie:'zzsh_user.session_token=fixture'}}),ctx(path));
+  assert.equal(response.status,200);assert.deepEqual((await response.json()).order.legacyPaymentHistory,legacyPaymentHistory);
+ }finally{globalThis.fetch=old;}
+});
+
 test('demo checkout BFF binds identity and original key, and never invents provider success',async()=>{
  const old=globalThis.fetch,calls=[];let subject='user_a',resultOrder='order_demo',scope='ECS_TEST_SIMULATED';
  globalThis.fetch=async(url,options)=>{calls.push({url:String(url),options});return String(url).endsWith('/get-session')

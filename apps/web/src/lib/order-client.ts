@@ -284,6 +284,7 @@ export type Order = {
   source?: { origin: "NATIVE" | "LEGACY"; statusLabel?: string };
   readOnly?: boolean;
   legacyAmounts?: LegacyOrder["legacyAmounts"];
+  legacyPaymentHistory?: LegacyOrder["legacyPaymentHistory"];
   payment?: LegacyOrder["payment"];
   paymentProvenance?: { source: "SIMULATED" | "JOINPAY" | "UNKNOWN"; channelArrival: "UNKNOWN" } | null;
   id: string;
@@ -331,7 +332,8 @@ export type LegacyOrder = {
   ownerIncomeSource?: { source: "LEGACY_ORDER_SNAPSHOT"; sourceLabel: string };
   payment: { state: "RECORDED_PAID" | "RECORDED_UNPAID" | "UNKNOWN"; recordedAt: string | null; recordedAmount: Money | null };
   legacyAmounts: { required: Money | null; paid: Money | null; deposit: Money | null; goods?: Money | null; items?: Money | null; refund: Money | null; refundChannelState: "NOT_RECORDED_BY_SOURCE" | "PENDING" | "UNKNOWN" } | null;
-  legacyRefundHistory?: { records: { id: string; amount: Money; status: "PROCESSING" | "SUCCEEDED" | "FAILED" | "UNKNOWN"; recordedAt: string | null }[]; incomplete: boolean; channelArrival: "UNKNOWN" };
+  legacyRefundHistory?: { records: { id: string; amount: Money; status: "PROCESSING" | "SUCCEEDED" | "FAILED" | "UNKNOWN"; recordedAt: string | null }[]; incomplete: boolean; coverage?: "MATCHED_RECORDS_ONLY"; channelArrival: "UNKNOWN" };
+  legacyPaymentHistory?: { records: { id: string; amount: Money; status: "RECORDED_PAID" | "RECORDED_UNPAID" | "UNKNOWN"; method: "WECHAT" | "ALIPAY" | "UNKNOWN"; recordedAt: string | null; paidAt: string | null }[]; incomplete: boolean; coverage: "MATCHED_RECORDS_ONLY"; channelArrival: "UNKNOWN" };
   account: { id: string | null; displayNo: string | null; readable: boolean };
   orderFacts?: LegacyOrderFacts;
   readOnly: true; paymentOpen: false; cancelOpen: false; continuationCount: 0; actions: never[];

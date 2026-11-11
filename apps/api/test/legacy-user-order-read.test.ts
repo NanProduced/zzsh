@@ -3,7 +3,7 @@ import { test } from "node:test";
 import { createRequire } from "node:module";
 import { join } from "node:path";
 import type { PoolClient } from "pg";
-import { getUserLegacyOrder, listUserLegacyOrders, parseLegacyUserOrderQuery, projectLegacyRefundHistory, projectUserLegacyOrder, legacyUserOrderFrom } from "../src/order/legacy-user-order-read";
+import { getUserLegacyOrder, listUserLegacyOrders, parseLegacyUserOrderQuery, projectLegacyPaymentHistory, projectLegacyRefundHistory, projectUserLegacyOrder, readLegacyPaymentHistory, legacyUserOrderFrom } from "../src/order/legacy-user-order-read";
 import { legacyOrderReadState } from "../src/order/legacy-order-read";
 import { canonicalize } from "../src/supply/content-hash";
 import { sha256Hex } from "../src/supply/supply-util";
@@ -30,9 +30,49 @@ function historicalRefund(id = "1", status = "1") {
   source_at:new Date(source.createdAt*1000).toISOString()};
 }
 
+function historicalPayment(id = "1", status = "1", way = "2") {
+ const order = { id:"36980",user_id:"29",order_sn:"20261016155949243636" },
+  original = { id,order_id:order.id,order_type:"1",pay_order_sn:"payment_"+id,pay_is:status,pay_way:way,pay_money:"555.00",pay_time:"1792137660",create_time:"1792137600" },
+  source = {kind:"paymentObservation",sourceId:Number(id),sourceUserId:29,amount:original.pay_money,sourceStatus:Number(status),createdAt:1792137600,
+   referenceType:"LEGACY_ORDER",referenceId:order.id,referenceSn:null,associationState:"SOURCE_VERIFIED",sourceOrderType:"1",
+   sourceNumber:original.pay_order_sn,sourcePaidAt:original.pay_time,channelArrival:"UNKNOWN",rawSource:{entity:"la_pay_order",canonical:canonicalize(original),digest:sha256Hex(canonicalize(original))}},
+  canonical=canonicalize(source);
+ return {legacy_id:order.id,legacy_renter_id:order.user_id,renter_user_id:"renter",observation_user_id:"renter",order_no:order.order_sn,
+  order_digest:sha256Hex(canonicalize(order)),order_snapshot:order,source_id:id,source_digest:sha256Hex(canonical),source_canonical:canonical,snapshot:source,
+  source_at:new Date(source.createdAt*1000).toISOString()};
+}
+
+test("legacy payment history preserves separate verified attempts without asserting channel receipt",()=>{
+ const first=historicalPayment(),second=historicalPayment("2","1","3"),unpaid=historicalPayment("3","0","9");
+ const result=projectLegacyPaymentHistory([first,second,unpaid],"renter");
+ assert.equal(result.incomplete,false);assert.equal(result.coverage,"MATCHED_RECORDS_ONLY");assert.equal(result.channelArrival,"UNKNOWN");
+ assert.deepEqual(result.records.map(record=>[record.amount.amount,record.status,record.method]),[
+  ["555.00","RECORDED_PAID","WECHAT"],["555.00","RECORDED_PAID","ALIPAY"],["555.00","RECORDED_UNPAID","UNKNOWN"]]);
+ assert.equal(result.records[2]!.paidAt,null);assert(!JSON.stringify(result).includes("rawSource"));assert(!JSON.stringify(result).includes("payment_1"));
+ for(const changed of [{...first,renter_user_id:"other"},{...first,observation_user_id:"other"},{...first,order_digest:"0".repeat(64)},
+  {...first,source_digest:"0".repeat(64)},{...first,order_no:"different"},{...first,source_at:"2026-01-01T00:00:00.000Z"}]) {
+  const rejected=projectLegacyPaymentHistory([changed],"renter");assert.equal(rejected.incomplete,true);assert.deepEqual(rejected.records,[]);
+ }
+ const mismatchedSource={...first.snapshot,referenceId:"999"},mismatchedCanonical=canonicalize(mismatchedSource);
+ const mismatched={...first,snapshot:mismatchedSource,source_canonical:mismatchedCanonical,source_digest:sha256Hex(mismatchedCanonical)};
+ assert.deepEqual(projectLegacyPaymentHistory([mismatched],"renter").records,[]);
+ const absent=projectLegacyPaymentHistory([{...first,source_id:null}],"renter");
+ assert.deepEqual(absent.records,[]);assert.equal(absent.coverage,"MATCHED_RECORDS_ONLY");
+ assert.equal(projectLegacyPaymentHistory(Array.from({length:51},()=>first),"renter").incomplete,true);
+});
+
+test("legacy payment detail reads are bounded and restricted to the authenticated renter and exact order",async()=>{
+ const calls:{sql:string;values:unknown[]}[]=[];
+ const client={query:async(sql:string,values:unknown[]=[])=>{calls.push({sql,values});return sql.includes("to_regclass")?{rows:[{ready:true}]}:{rows:[historicalPayment()]};}} as unknown as PoolClient;
+ const result=await readLegacyPaymentHistory(client,"renter","legacy_order_a");
+ assert.equal(result.records.length,1);assert.deepEqual(calls[1]!.values,["renter","legacy_order_a"]);
+ assert.match(calls[1]!.sql,/l\.renter_user_id=\$1/);assert.match(calls[1]!.sql,/x\.snapshot->>'referenceId'=l\.legacy_id/);
+ assert.match(calls[1]!.sql,/HISTORICAL_PAYMENT/);assert.match(calls[1]!.sql,/LIMIT 51/);
+});
+
 test("legacy refund history displays each verified source record without adding retries or exposing raw facts",()=>{
  const first=historicalRefund(),failed=historicalRefund("2","2"),result=projectLegacyRefundHistory([first,failed],"renter");
- assert.equal(result.incomplete,false);assert.equal(result.channelArrival,"UNKNOWN");
+ assert.equal(result.incomplete,false);assert.equal(result.coverage,"MATCHED_RECORDS_ONLY");assert.equal(result.channelArrival,"UNKNOWN");
  assert.deepEqual(result.records.map(record=>[record.amount.amount,record.status]),[["555.00","SUCCEEDED"],["555.00","FAILED"]]);
  assert(!JSON.stringify(result).includes("legacy_renter_id"));assert(!JSON.stringify(result).includes("rawSource"));
  for(const changed of [
