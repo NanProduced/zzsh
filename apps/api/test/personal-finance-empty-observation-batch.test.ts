@@ -10,7 +10,7 @@ const sha=(value:unknown)=>createHash('sha256').update(canonicalize(value)).dige
 function inputs():ObservationImportInput[]{return ['11','12'].flatMap(legacyUserId=>(['HISTORICAL_EARNINGS_LOG','HISTORICAL_PAYMENT'] as const).map(sourceKind=>({coverage:{userId:'fixture_'+legacyUserId,legacyUserId,sourceSystem:'legacy_mysql_restore',sourceKind,cutoff:'2026-10-01T00:00:00.000Z',inputSha256:'a'.repeat(64),identityDigest:'b'.repeat(64),sourceCount:0,imported:[],isolated:[]},observations:[]})));}
 const reviews=(rows:ObservationImportInput[]):ObservationImportReview[]=>rows.map(input=>({ref:'FIXTURE_EMPTY_REVIEW',attempt:'fixture_attempt',actor:{userId:actor.userId,sessionId:actor.sessionId},resource:{...resource},notBefore:'2026-10-16T05:00:00.000Z',expiresAt:'2026-10-16T06:00:00.000Z',inputSha256:input.coverage.inputSha256,cutoff:input.coverage.cutoff,bodyDigest:sha(input),userId:input.coverage.userId,sourceKind:input.coverage.sourceKind}));
 function fixture(){
- const state={now:'2026-10-16T05:30:00.000Z',badSource:false,badCutoff:false,failAudit:false,queries:[] as {sql:string;args:any[]}[],coverage:new Map<string,any>(),audit:new Map<string,any>(),receipts:new Map<string,any>(),before:null as any};
+ const state={now:'2026-10-16T05:30:00.000Z',badSource:false,badCutoff:false,failAudit:false,reverseRead:false,duplicateAudit:false,queries:[] as {sql:string;args:any[]}[],coverage:new Map<string,any>(),audit:new Map<string,any>(),receipts:new Map<string,any>(),before:null as any};
  const client:any={connectionParameters:{host:resource.host,port:resource.port,database:resource.database,user:resource.role},release(){},query:async(sql:string,args:any[]=[])=>{
   state.queries.push({sql,args});
   if(sql==='BEGIN')state.before=structuredClone({coverage:state.coverage,audit:state.audit,receipts:state.receipts});
@@ -24,8 +24,8 @@ function fixture(){
   if(sql.includes('finance empty subject locks'))return{rows:args[0].map((id:string)=>({id})),rowCount:args[0].length};
   if(sql.includes('finance empty exact source identities'))return{rows:state.badSource?[{user_id:'fixture_12'}]:[],rowCount:state.badSource?1:0};
   if(sql.includes('finance empty single cutoff'))return{rows:[{differs:state.badCutoff}],rowCount:1};
-  if(sql.includes('finance empty original receipts'))return{rows:args[1].flatMap((key:string)=>state.receipts.has(key)?[state.receipts.get(key)]:[])};
-  if(sql.includes('finance empty original coverage audit'))return{rows:args[0].flatMap((id:string)=>state.coverage.has(id)?[{...state.coverage.get(id),actual_count:'0',...state.audit.get(id)}]:[])};
+  if(sql.includes('finance empty original receipts')){const rows=args[1].flatMap((key:string)=>state.receipts.has(key)?[state.receipts.get(key)]:[]);return{rows:state.reverseRead?rows.reverse():rows};}
+  if(sql.includes('finance empty original coverage audit')){const rows=args[0].flatMap((id:string)=>state.coverage.has(id)?[{...state.coverage.get(id),actual_count:'0',...state.audit.get(id)}]:[]);if(state.duplicateAudit&&rows.length)rows.push({...rows[0]});return{rows:state.reverseRead?rows.reverse():rows};}
   if(sql.includes('finance empty coverage insert'))for(const row of JSON.parse(args[0]))state.coverage.set(row.id,row);
   if(sql.includes('finance empty original audit insert')){if(state.failAudit)throw Error('FIXTURE_AUDIT_FAILED');for(const row of JSON.parse(args[0]))state.audit.set(row.object_id,{actor_id:args[1],session_id:args[2],details:row.details});}
   if(sql.includes('finance empty original receipt insert'))for(const row of JSON.parse(args[0]))state.receipts.set(row.key,{key:row.key,request_fingerprint:row.fingerprint,response_status:200,response_body:row.body});
@@ -43,6 +43,19 @@ test('bounded empty batches retain individual original keys, immutable coverage 
  const firstReceipt=f.state.receipts.values().next().value!,originalFingerprint=firstReceipt.request_fingerprint;firstReceipt.request_fingerprint='f'.repeat(64);await assert.rejects(recoverReviewedEmptyFinanceObservationBatch(f.client,actor,rows,scope));assert.equal(f.state.receipts.size,4);firstReceipt.request_fingerprint=originalFingerprint;
  assert(!f.state.queries.some(q=>/\bINSERT INTO\b/.test(q.sql)&&/settlement_ledger_entry|finance_event|finance_opening_basis|wallet_coverage|withdrawal_intent/.test(q.sql)));
  assert(f.state.queries.some(q=>q.sql.includes('jsonb_populate_recordset(NULL::zzsh_order.personal_finance_observation_coverage')));
+});
+
+test('full empty batch recovery matches shuffled results and still rejects missing receipts or duplicate audits',async()=>{
+ const f=fixture(),sample=inputs()[0]!,rows=Array.from({length:400},(_,i)=>({...sample,coverage:{...sample.coverage,userId:'fixture_batch_'+i,legacyUserId:String(1000+i)}}));
+ const scope=await bindReviewedEmptyFinanceObservationBatch(f.client,actor,rows,reviews(rows));
+ assert.equal((await importReviewedEmptyFinanceObservationBatch(f.client,actor,rows,scope)).body.created,400);
+ f.state.reverseRead=true;
+ const recovered=await recoverReviewedEmptyFinanceObservationBatch(f.client,actor,rows,scope);
+ assert.equal(recovered.length,400);assert(recovered.every(row=>row.knowledge==='KNOWN'));
+ const [key,receipt]=f.state.receipts.entries().next().value!;f.state.receipts.delete(key);
+ await assert.rejects(recoverReviewedEmptyFinanceObservationBatch(f.client,actor,rows,scope));
+ f.state.receipts.set(key,receipt);f.state.duplicateAudit=true;
+ await assert.rejects(recoverReviewedEmptyFinanceObservationBatch(f.client,actor,rows,scope));
 });
 
 test('changed reviews, a foreign subject or an incompatible earnings cutoff fail before any empty coverage is written',async()=>{

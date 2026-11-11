@@ -170,10 +170,13 @@ async function emptyReceiptFacts(client:PoolClient,actor:Actor,plans:ReturnType<
  const scopeKey=JSON.stringify(['admin',actor.userId,operation,null]);
  const receipts=(await client.query(`/* finance empty original receipts */ SELECT key,request_fingerprint,response_status,response_body FROM zzsh_supply.idempotency_record WHERE scope_key=$1 AND key=ANY($2::text[])${lock?' FOR UPDATE':''}`,[scopeKey,plans.map(p=>p.plan.key)])).rows;
  const facts=(await client.query(`/* finance empty original coverage audit */ SELECT c.id,c.body_digest,c.source_canonical,(SELECT count(*)::text FROM zzsh_order.personal_finance_observation o WHERE o.user_id=c.user_id AND o.source_system=c.source_system AND o.source_kind=c.source_kind AND (o.source_event_at IS NULL OR o.source_event_at<=c.source_cutoff)) AS actual_count,a.actor_id,a.session_id,a.details FROM zzsh_order.personal_finance_observation_coverage c LEFT JOIN zzsh_iam.audit_event a ON a.object_id=c.id AND a.action='finance.history.imported' AND a.object_type='personal_finance_observation_coverage' AND a.actor_type='admin' AND a.outcome='SUCCESS' WHERE c.id=ANY($1::text[])`,[plans.map(p=>p.plan.coverage.id)])).rows;
+ const receiptsByKey=new Map<string,(typeof receipts)[number]>(),factsById=new Map<string,typeof facts>();
+ for(const row of receipts)if(!receiptsByKey.has(row.key))receiptsByKey.set(row.key,row);
+ for(const row of facts){const rows=factsById.get(row.id);if(rows)rows.push(row);else factsById.set(row.id,[row]);}
  return plans.map(({input,plan})=>{
-  const c=plan.coverage,receipt=receipts.find(row=>row.key===plan.key),body={coverageId:c.id,subjectId:c.userId,sourceKind:c.sourceKind,bodyDigest:plan.bodyDigest,importedCount:0,isolatedCount:0,financialEffect:'NONE'};
-  if(!receipt){if(facts.some(row=>row.id===c.id))throw conflict('Empty coverage exists without its original receipt');return{plan,input,body,knowledge:'UNKNOWN' as const};}
-  const original=facts.filter(row=>row.id===c.id),fact=original[0];
+  const c=plan.coverage,receipt=receiptsByKey.get(plan.key),original=factsById.get(c.id)??[],body={coverageId:c.id,subjectId:c.userId,sourceKind:c.sourceKind,bodyDigest:plan.bodyDigest,importedCount:0,isolatedCount:0,financialEffect:'NONE'};
+  if(!receipt){if(original.length)throw conflict('Empty coverage exists without its original receipt');return{plan,input,body,knowledge:'UNKNOWN' as const};}
+  const fact=original[0];
   if(receipt.request_fingerprint!==fingerprintRequest(operation,c.id,input)||receipt.response_status!==200||canonicalize(receipt.response_body)!==canonicalize(body)||original.length!==1||fact.actual_count!=='0'||fact.body_digest!==c.bodyDigest||fact.source_canonical!==c.canonical||fact.actor_id!==actor.userId||fact.session_id!==actor.sessionId||fact.details?.bodyDigest!==plan.bodyDigest||fact.details?.approvalRef!==r.ref||fact.details?.attempt!==r.attempt)throw conflict('Empty coverage original receipt, source or audit differs');
   return{plan,input,body,knowledge:'KNOWN' as const};
  });
