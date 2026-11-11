@@ -17,3 +17,72 @@ test('final cumulative referral pair cannot exceed its source after per-role rou
  const exact=prepareAccrualFromFrozenPayment(frozen,{...posting,compensationFeeCents:'4998'});assert.deepEqual(exact.items.map(i=>i.amountCents),['1','1']);assert.equal(exact.baseCents,'2');
  assert.throws(()=>prepareAccrualFromFrozenPayment(frozen,{...posting,compensationFeeCents:'4999'}),/exceeds source base/);
 });
+
+function fixedBasis(estimate='1',rate='0.1',payableRatio='0.95',mode='ordinary',minimum='1',percent='5'){
+ const config=structuredClone(cfg);config.minimumAccrualCents=minimum;config.levels[0]!.renterPercent=percent;config.levels[0]!.ownerPercent=percent;
+ return freezePaymentDistributionBasis({orderId:'o1',gameId:'delta',currency:'CNY',confirmationId:'p1',acceptedAt:'2026-10-04T03:00:00.000000Z',paymentDigest:h,
+  admissionId:'a1',admissionRevision:'1',origin:'NATIVE',accountMode:mode,estimate:{baseCents:estimate,sourceDigest:h},
+  policy:{versionId:'fixed-policy',config,digest:createHash('sha256').update(canonicalize(config)).digest('hex')},facts,
+  fixedFeePricing:{fixedFeeRate:rate,payableRatio}});
+}
+function fixedPosting():CompletedDistributionFacts{
+ return{...posting,capturedCents:'9500',ownerNetCents:'9000',renterRefundCents:'0',platformContributionCents:'500',compensationFeeCents:'0',
+  settlementVersionId:'settlement1',settlementVersionHash:'e'.repeat(64),fixedFeeEvidence:{orderId:'o1',confirmationId:'p1',postingId:'posting1',postingDigest:'d'.repeat(64),
+   settlementVersionId:'settlement1',settlementVersionHash:'e'.repeat(64),orderStatus:'COMPLETED',ownerGrossCents:'10000',serviceFeeCents:'1000',distributionDiscountCents:'500'}};
+}
+test('fixed-fee commission excludes coverage and early makeup, and uses the frozen minimum at actual completion',()=>{
+ const fixed=fixedBasis('1','0.1','0.95','ordinary','10');assert(fixed.roles.every(r=>r.status==='ELIGIBLE'&&r.estimatedCents==='0'));
+ const normal=prepareAccrualFromFrozenPayment(fixed,fixedPosting());assert.equal(normal.knowledge,'KNOWN');assert.equal(normal.baseCents,'500');assert.deepEqual(normal.items.map(i=>i.amountCents),['25','25']);
+ const early=fixedPosting();Object.assign(early,{classification:'EARLY',ownerNetCents:'2460',renterRefundCents:'5950',platformContributionCents:'1090',compensationFeeCents:'240'});
+ Object.assign(early.fixedFeeEvidence!,{ownerGrossCents:'3000',serviceFeeCents:'300',distributionDiscountCents:'150'});
+ const result=prepareAccrualFromFrozenPayment(fixedBasis(),early);assert.equal(result.knowledge,'KNOWN');assert.equal(result.baseCents,'150');assert.deepEqual(result.items.map(i=>i.amountCents),['8','8']);
+ const below=fixedPosting();Object.assign(below,{capturedCents:'95',ownerNetCents:'90',platformContributionCents:'5'});
+ Object.assign(below.fixedFeeEvidence!,{ownerGrossCents:'100',serviceFeeCents:'10',distributionDiscountCents:'5'});
+ const skipped=prepareAccrualFromFrozenPayment(fixed,below);assert.equal(skipped.knowledge,'KNOWN');assert.deepEqual(skipped.items,[]);
+});
+test('manual distribution discount rounds adjusted gross times frozen discount once without changing payment',()=>{
+ const fixed=fixedBasis('100','0.1','0.9'),f=fixedPosting();Object.assign(f,{calculationMode:'MANUAL',capturedCents:'100',ownerNetCents:'4',renterRefundCents:'0',platformContributionCents:'96'});
+ Object.assign(f.fixedFeeEvidence!,{ownerGrossCents:'5',serviceFeeCents:'1',distributionDiscountCents:'1'});
+ const result=prepareAccrualFromFrozenPayment(fixed,f);assert.equal(result.knowledge,'KNOWN');assert.equal(result.baseCents,'0');assert.deepEqual(result.items,[]);
+ f.fixedFeeEvidence!.distributionDiscountCents='0';const wrong=prepareAccrualFromFrozenPayment(fixed,f);assert.equal(wrong.knowledge,'UNKNOWN');assert.equal(wrong.baseCents,null);
+});
+test('fixed-fee commissions reject missing, unbound, cancelled, changed or contradictory final facts',()=>{
+ const fixed=fixedBasis();
+ for(const mutate of [
+  (f:CompletedDistributionFacts)=>{f.fixedFeeEvidence=null;},
+  (f:CompletedDistributionFacts)=>{f.fixedFeeEvidence!.orderStatus='CANCELLED';},
+  (f:CompletedDistributionFacts)=>{f.fixedFeeEvidence!.postingId='other';},
+  (f:CompletedDistributionFacts)=>{f.fixedFeeEvidence!.settlementVersionHash='f'.repeat(64);},
+  (f:CompletedDistributionFacts)=>{f.fixedFeeEvidence!.serviceFeeCents='1001';},
+  (f:CompletedDistributionFacts)=>{f.fixedFeeEvidence!.distributionDiscountCents='501';},
+  (f:CompletedDistributionFacts)=>{f.fixedFeeEvidence!.ownerGrossCents='9999';},
+  (f:CompletedDistributionFacts)=>{f.platformContributionCents='501';},
+  (f:CompletedDistributionFacts)=>{f.origin='UNKNOWN';},
+  (f:CompletedDistributionFacts)=>{f.settlementVersionId=undefined;},
+ ]){const f=fixedPosting();mutate(f);const result=prepareAccrualFromFrozenPayment(fixed,f);assert.equal(result.knowledge,'UNKNOWN');assert.equal(result.baseCents,null);assert.deepEqual(result.items,[]);}
+ const bad=fixedBasis('1','0.08','0.9'),result=prepareAccrualFromFrozenPayment(bad,fixedPosting());assert.equal(result.knowledge,'UNKNOWN');assert.equal(result.baseCents,null);
+ const fast=prepareAccrualFromFrozenPayment(fixedBasis('1','0.1','0.95','fast'),fixedPosting());assert.equal(fast.knowledge,'KNOWN');assert.deepEqual(fast.items,[]);
+});
+test('a fixed fast order cannot accrue even when its frozen roles contradict its mode',()=>{
+ const forged=fixedBasis('100','0.1','0.95','fast');forged.roles[0]!.status='ELIGIBLE';
+ const {digest,...body}=forged;const changed={...body,digest:createHash('sha256').update(canonicalize(body)).digest('hex')};
+ const result=prepareAccrualFromFrozenPayment(changed,fixedPosting());assert.equal(result.knowledge,'UNKNOWN');assert.deepEqual(result.items,[]);
+});
+test('an incomplete frozen eligible role cannot be silently treated as a below-minimum zero',()=>{
+ const frozen=fixedBasis('1');frozen.roles[0]!.ratio=null;
+ const {digest,...body}=frozen;const changed={...body,digest:createHash('sha256').update(canonicalize(body)).digest('hex')};
+ const result=prepareAccrualFromFrozenPayment(changed,fixedPosting());assert.equal(result.knowledge,'UNKNOWN');assert.deepEqual(result.items,[]);
+});
+test('fixed-fee roles cannot inherit the legacy estimate-time minimum skip',()=>{
+ const frozen=fixedBasis('1');frozen.roles[0]!.status='SKIPPED_BELOW_MIN';
+ const {digest,...body}=frozen;const changed={...body,digest:createHash('sha256').update(canonicalize(body)).digest('hex')};
+ const result=prepareAccrualFromFrozenPayment(changed,fixedPosting());assert.equal(result.knowledge,'UNKNOWN');assert.deepEqual(result.items,[]);
+});
+test('fixed-fee final per-role rounding cannot exceed the source base',()=>{
+ const f=fixedPosting();Object.assign(f,{capturedCents:'5',ownerNetCents:'4',renterRefundCents:'0',platformContributionCents:'1'});
+ Object.assign(f.fixedFeeEvidence!,{ownerGrossCents:'5',serviceFeeCents:'1',distributionDiscountCents:'0'});
+ const result=prepareAccrualFromFrozenPayment(fixedBasis('1','0.1','0.9','ordinary','1','50'),f);
+ assert.equal(result.knowledge,'UNKNOWN');assert.equal(result.reason,'ROUNDED_REFERRALS_EXCEED_BASE');assert.deepEqual(result.items,[]);
+ const below=prepareAccrualFromFrozenPayment(fixedBasis('1','0.1','0.9','ordinary','2','50'),f);
+ assert.equal(below.knowledge,'KNOWN');assert.equal(below.baseCents,'1');assert.deepEqual(below.items,[]);
+});
